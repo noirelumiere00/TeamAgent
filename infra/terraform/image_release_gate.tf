@@ -23,7 +23,7 @@ variable "image_release_evidence" {
 }
 
 variable "image_deployment_intent_id" {
-  description = "Ephemeral UUIDv4 generated only by plan_image_release.sh; never persist in tfvars."
+  description = "Ephemeral UUIDv4 generated only by terraform_runtime_guard.sh plan; never persist in tfvars."
   type        = string
   default     = ""
 
@@ -212,7 +212,7 @@ resource "terraform_data" "production_image_release_gate" {
           try(data.external.signed_image_release_gate[0].result.verified == "true", false)
         )
       )
-      error_message = "Production images require plan_image_release.sh, a unique deployment intent, release-repository digests, release.ready=true, an exact application VersionId contract, and fresh immutable KMS-signed active/rollback receipts."
+      error_message = "Production images require the composed terraform_runtime_guard.sh full saved-plan workflow, a unique deployment intent, release-repository digests, release.ready=true, an exact application VersionId contract, and fresh immutable KMS-signed active/rollback receipts."
     }
   }
 

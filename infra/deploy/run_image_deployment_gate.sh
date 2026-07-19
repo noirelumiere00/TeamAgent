@@ -5,7 +5,7 @@ umask 077
 
 REGION="ap-northeast-1"
 ACCOUNT_ID="718959508629"
-EXPECTED_CALLER_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-automation/teamagent-terraform-worker"
+EXPECTED_CALLER_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
 GATE_ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate"
 SESSION_NAME="teamagent-image-deployment-gate"
 EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-image-deployment-gate/$SESSION_NAME"

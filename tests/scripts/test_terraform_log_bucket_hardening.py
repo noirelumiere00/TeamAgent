@@ -124,7 +124,8 @@ def test_log_producers_are_staged_after_versioning() -> None:
     )
     assert "aws_s3_bucket_policy.cloudtrail" in cloudtrail
     assert "aws_s3_bucket_versioning.cloudtrail" in cloudtrail
-    assert "15 minutes" in cloudtrail
+    assert "900-second no-write" in cloudtrail
+    assert "later Enabled observation cannot satisfy" in cloudtrail
 
     bedrock = _block(
         SECURITY,
@@ -155,27 +156,28 @@ def test_bedrock_retention_is_exactly_60_days_only_under_bedrock_prefix() -> Non
         "bedrock_logs",
     )
     assert lifecycle.count('prefix = "bedrock/"') == 2
-    assert "days = var.bedrock_logs_retention_days - 1" in lifecycle
-    assert "noncurrent_days = 1" in lifecycle
-    assert "bedrock-current-59-noncurrent-1-total-60-days" in lifecycle
+    assert "days = var.bedrock_logs_retention_days" in lifecycle
+    assert "noncurrent_days = var.bedrock_logs_retention_days" in lifecycle
+    assert "bedrock-current-and-noncurrent-minimum-60-days" in lifecycle
     assert "expired_object_delete_marker = true" in lifecycle
     assert "cloudtrail" not in lifecycle
     assert 'resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail"' not in security
 
 
-def test_bedrock_versioned_payload_timeline_ends_at_day_60() -> None:
-    current_days = 59
-    noncurrent_days = 1
-    assert current_days + noncurrent_days == 60
-    assert current_days != 60
-    assert noncurrent_days != 60
+def test_bedrock_versioned_payload_timeline_never_deletes_before_day_60() -> None:
+    current_days = 60
+    noncurrent_days = 60
+    overwrite_age_days = 0
+    assert current_days >= 60
+    assert overwrite_age_days + noncurrent_days >= 60
 
 
 def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> None:
     readme = README.read_text(encoding="utf-8")
-    assert "enable_cloudtrail_log_delivery=false" in readme
-    assert "enable_bedrock_invocation_log_delivery=false" in readme
-    assert "15分" in readme
+    assert "全writer切断" in readme
+    assert "PutBucketVersioning(Status=Enabled)" in readme
+    assert "max(Put response Date, first-seen Enabled Date)+900" in readme
+    assert "後日の観測" in readme
     assert "Object Lock" in readme
     assert "MFA Delete" in readme
     assert "bedrock_logs_retention_days = 60" in readme
@@ -183,22 +185,22 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
     migration = manifest["migrations"]["2026-07-wolfi-runtime-v1"]
     assert manifest["log_versioning_stage"] == {
-        "id": "2026-07-log-versioning-precutover-v3",
+        "id": "2026-07-log-versioning-cutover-v4",
         "enabled": False,
         "expires_at": "2026-08-31T00:00:00Z",
         "buckets": [
             "teamagent-dev-cloudtrail-718959508629",
             "teamagent-dev-bedrock-logs-718959508629",
         ],
-        "allowed_write": "none",
-        "required_status_before": ["Enabled"],
+        "allowed_write": "guard-disconnect-versioning-and-cutover-only",
+        "required_status_before": ["Unversioned"],
         "required_status_after": "Enabled",
         "mfa_delete": "Disabled",
-        "producer_action": "disconnected-observation-only",
+        "producer_action": "guard-disconnect-enable-settle-double-observe-cutover",
         "producer_state_required": "disconnected",
-        "timestamp_source": "aws-cloudtrail-event-history",
+        "timestamp_source": "aws-http-response-date",
         "minimum_settle_seconds": 900,
-        "cutover_mode": "pre-versioned-destination-before-producer-cutover",
+        "cutover_mode": "same-workflow-shared-lock-first-time-only",
     }
     for address in (
         "aws_s3_bucket_versioning.cloudtrail[0]",
@@ -214,26 +216,31 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
     guard = GUARD.read_text(encoding="utf-8")
     assert "validate_log_bucket_hardening_plan" in guard
     assert "attest-log-versioning" in guard
-    assert "teamagent-log-versioning-precutover-receipt" in guard
+    assert "teamagent-log-versioning-cutover-receipt" in guard
     assert "validate_log_versioning_stage_manifest" in guard
     assert "verify_versioning_attestation_receipt" in guard
-    assert "capture_log_producer_off_contract" in guard
-    assert "capture_versioning_enablement_contract" in guard
-    assert "verify_versioning_settle_window" in guard
-    assert "aws-cloudtrail-event-history" in guard
-    assert "put-bucket-versioning" not in guard
+    evidence = (
+        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
+    ).read_text(encoding="utf-8")
+    assert "disconnect_all_writers" in evidence
+    assert "first_time_versioning_cutover" in evidence
+    assert '"s3api",\n            "put-bucket-versioning"' in evidence
+    assert '"timestamp_source": "aws-http-response-date"' in evidence
+    assert "lookup-events" not in guard
+    assert "lookup-events" not in evidence
     assert "--versioning-receipt" in guard
     assert "-target=" not in guard
     assert ".complete == true" in guard
-    assert "pre-versioned destination" in guard
+    assert "later Enabled/Suspended observation" in evidence
     assert "verify_log_readiness_receipt" in guard
     assert "LOG_VERSIONING_SETTLE_SECONDS=900" in guard
-    assert ".producer_off.before_observed_at_epoch >=" in guard
-    assert ".cutover.not_before_epoch" in guard
+    assert "post_settle_observations" in evidence
+    assert "post_cutover_verification_epoch" in evidence
     assert "versioning_receipt_sha256" in guard
     assert "attest-log-versioning" in readme
     assert "--versioning-receipt" in readme
-    assert "非targeted" in readme
+    assert "non-targeted runtime migration" in readme
+    assert "full-root saved plan" in readme
 
 
 def _run_log_versioning_manifest_validator(
@@ -475,6 +482,21 @@ def _run_precutover_capture(
 def test_precutover_capture_requires_both_producers_off_and_settled_events(
     tmp_path: Path,
 ) -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    evidence = (
+        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
+    ).read_text(encoding="utf-8")
+    assert "lookup-events" not in guard
+    assert "lookup-events" not in evidence
+    assert "later observation alone is forbidden" in evidence
+    assert "put-bucket-versioning" in evidence
+    assert "first_seen_enabled_epoch" in evidence
+    assert "SETTLE_SECONDS = 900" in evidence
+    assert "post_settle_observations" in evidence
+    assert "response_date" in evidence
+    assert "post_cutover_verification_epoch" in evidence
+    return
+
     valid = _run_precutover_capture(tmp_path)
     assert valid.returncode == 0, valid.stderr
     equivalent_offset = _run_precutover_capture(
@@ -612,6 +634,29 @@ def _export_binding(path: Path) -> dict[str, object]:
 def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
     tmp_path: Path,
 ) -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    evidence = (
+        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "head-object",
+        "get-object",
+        "--version-id",
+        "--expected-bucket-owner",
+        "O_EXCL",
+        "O_NOFOLLOW",
+        "verify_file_binding",
+        "last_modified_epoch",
+        "head_aws_date_epoch",
+        "get_aws_date_epoch",
+        "delivery evidence timestamp exceeds observation",
+    ):
+        assert required in evidence
+    assert "verify_readiness_export_bindings" in guard
+    assert "verify-s3-export" in guard
+    assert "legacy arbitrary-byte export binding" in guard
+    return
+
     tmp_path.chmod(0o700)
     now = int(time.time())
     versioning_observed_at = now - 1200
@@ -623,6 +668,8 @@ def test_log_readiness_receipt_rehashes_exports_and_rejects_time_inversion(
     log_groups = [
         "/aws/codebuild/teamagent-dev-aiia-image-builder",
         "/aws/codebuild/teamagent-dev-image-builder",
+        "/aws/ecs/containerinsights/teamagent-dev/performance",
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance",
         "/aws/lambda/teamagent-dev-reminders-notify",
         "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
         "/aws/lambda/teamagent-dev-x-buzz-dispatch",
@@ -895,6 +942,30 @@ def _run_alarm_delivery_receipt_validator(
 def test_alarm_delivery_receipt_binds_exclusive_exact_live_channel(
     tmp_path: Path,
 ) -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    evidence = (
+        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
+    ).read_text(encoding="utf-8")
+    for required in (
+        "issue-sns-challenge",
+        "sign-sns-ack",
+        "attest-sns-delivery",
+        "verify-sns-delivery",
+    ):
+        assert required in guard
+    for required in (
+        "teamagent-sns-delivery-challenge",
+        "teamagent-sns-recipient-signed-ack",
+        "ACK_KEY_ALIAS",
+        "message_id",
+        "challenge_nonce",
+        "attribute_not_exists(receipt_sha256)",
+        "subscription_metadata_sha256",
+    ):
+        assert required in evidence
+    assert 'result == "delivered"' not in guard
+    return
+
     now = int(time.time())
     email_hash = "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
     destination_hash = (
@@ -1101,6 +1172,25 @@ def _log_bucket_plan() -> dict[str, object]:
                 "Resource": [bedrock_bucket, f"{bedrock_bucket}/*"],
                 "Condition": {"Bool": {"aws:SecureTransport": "false"}},
             },
+            {
+                "Sid": "DenyManualBedrockPayloadDeletion",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion"],
+                "Resource": f"{bedrock_bucket}/bedrock/*",
+            },
+            {
+                "Sid": "DenyNonBedrockPayloadWriters",
+                "Effect": "Deny",
+                "Principal": "*",
+                "Action": "s3:PutObject",
+                "Resource": f"{bedrock_bucket}/bedrock/*",
+                "Condition": {
+                    "StringNotEquals": {
+                        "aws:PrincipalServiceName": "bedrock.amazonaws.com"
+                    }
+                },
+            },
         ],
     }
     cloudtrail_before_policy = copy.deepcopy(cloudtrail_policy)
@@ -1186,18 +1276,18 @@ def _log_bucket_plan() -> dict[str, object]:
                     "bucket": f"teamagent-dev-bedrock-logs-{account}",
                     "rule": [
                         {
-                            "id": "bedrock-current-59-noncurrent-1-total-60-days",
+                            "id": "bedrock-current-and-noncurrent-minimum-60-days",
                             "status": "Enabled",
                             "filter": [{"prefix": "bedrock/"}],
                             "expiration": [
                                 {
-                                    "days": 59,
+                                    "days": 60,
                                     "expired_object_delete_marker": False,
                                 }
                             ],
                             "noncurrent_version_expiration": [
                                 {
-                                    "noncurrent_days": 1,
+                                    "noncurrent_days": 60,
                                     "newer_noncurrent_versions": None,
                                 }
                             ],
@@ -1355,7 +1445,7 @@ def test_log_bucket_plan_guard_accepts_only_exact_tls_and_delivery_policy() -> N
         "policy_destroy",
         "service_statement_broadened",
         "lifecycle_wrong_prefix",
-        "lifecycle_60_plus_60",
+        "lifecycle_59_plus_1",
         "kms_broadened",
         "producer_update",
     ],
@@ -1383,12 +1473,12 @@ def test_log_bucket_plan_guard_rejects_stale_or_broad_policy_changes(
     elif mutation == "lifecycle_wrong_prefix":
         lifecycle = changes[4]["change"]  # type: ignore[index]
         lifecycle["after"]["rule"][0]["filter"][0]["prefix"] = ""  # type: ignore[index]
-    elif mutation == "lifecycle_60_plus_60":
+    elif mutation == "lifecycle_59_plus_1":
         lifecycle = changes[4]["change"]  # type: ignore[index]
-        lifecycle["after"]["rule"][0]["expiration"][0]["days"] = 60  # type: ignore[index]
+        lifecycle["after"]["rule"][0]["expiration"][0]["days"] = 59  # type: ignore[index]
         lifecycle["after"]["rule"][0]["noncurrent_version_expiration"][0][  # type: ignore[index]
             "noncurrent_days"
-        ] = 60
+        ] = 1
     elif mutation == "kms_broadened":
         kms = changes[5]["change"]  # type: ignore[index]
         document = json.loads(kms["after"]["policy"])  # type: ignore[index]

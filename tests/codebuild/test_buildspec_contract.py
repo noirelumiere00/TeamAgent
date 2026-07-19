@@ -230,20 +230,29 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
     }
 
 
-def test_terraform_embeds_all_verifier_and_contract_hashes() -> None:
+def test_retired_mutable_builder_has_only_fail_closed_embedded_buildspec() -> None:
     body = TERRAFORM.read_text(encoding="utf-8")
 
-    for path, placeholder in (
-        ("source_provenance.py", "__SOURCE_PROVENANCE_SHA256__"),
-        (
-            "teamagent_bundle_provenance.py",
-            "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",
-        ),
-        ("resolve_ecr_image.py", "__ECR_IMAGE_RESOLVER_SHA256__"),
-        ("verify_ecr_scan.py", "__ECR_SCAN_GATE_SHA256__"),
+    retired = body.split(
+        'resource "aws_codebuild_project" "image" {',
+        maxsplit=1,
+    )[1].split("\n}", maxsplit=1)[0]
+    assert 'type      = "NO_SOURCE"' in retired
+    assert (
+        'description  = "RETIRED - mutable source.zip release publishing is denied"'
+        in retired
+    )
+    assert "RETIRED: mutable source.zip image publishing is disabled" in retired
+    assert "exit 64" in retired
+    assert "docker " not in retired
+    assert "aws " not in retired
+    for placeholder in (
+        "__SOURCE_PROVENANCE_SHA256__",
+        "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",
+        "__ECR_IMAGE_RESOLVER_SHA256__",
+        "__ECR_SCAN_GATE_SHA256__",
     ):
-        assert path in body
-        assert placeholder in body
+        assert placeholder not in retired
     assert "mcp_release_contract_sha256" in body
     assert "teamagent_runtime_contract.json" in body
     assert "teamagent_core_media_release_contract.json" in body

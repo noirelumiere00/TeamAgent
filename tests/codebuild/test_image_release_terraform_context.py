@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "terraform" / "image_release_context.py"
 PLAN_SCRIPT = ROOT / "infra" / "terraform" / "plan_image_release.sh"
 APPLY_SCRIPT = ROOT / "infra" / "terraform" / "apply_image_release_plan.sh"
+COMPOSED_GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
 
 
 def _load_module() -> Any:
@@ -219,39 +220,36 @@ def test_raw_state_binding_preserves_count_for_each_and_module_addresses() -> No
 def test_launchers_reject_injected_terraform_environment_and_unsafe_plan_modes() -> None:
     plan_body = PLAN_SCRIPT.read_text(encoding="utf-8")
     apply_body = APPLY_SCRIPT.read_text(encoding="utf-8")
+    body = COMPOSED_GUARD.read_text(encoding="utf-8")
 
-    for body in (plan_body, apply_body):
-        assert "compgen -A variable TF_" in body
-        assert "pre-existing Terraform environment is forbidden" in body
-        assert "TF_WORKSPACE" not in body
-        assert "TF_DATA_DIR" not in body
-        assert "TF_CLI_ARGS" not in body
-        assert "export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true" in body
-        assert "compgen -A variable AWS_ENDPOINT_URL" in body
-        assert "unset endpoint_variable AWS_PROFILE AWS_DEFAULT_PROFILE" in body
-        assert 'AWS_DEFAULT_REGION="$EXPECTED_REGION"' in body
-        assert "AWS_CONFIG_FILE=/dev/null" in body
-        assert "AWS_SHARED_CREDENTIALS_FILE=/dev/null" in body
-        assert "teamagent-dev-terraform-automation/teamagent-terraform-worker" in body
-    for forbidden in (
-        "-target",
-        "-lock=false",
-        "-refresh=false",
-        "-refresh-only",
-        "-destroy",
-        "-generate-config-out",
-    ):
-        assert forbidden in plan_body
-    assert "image_release_context.py" in plan_body
-    assert "image_release_context.py" in apply_body
-    assert "acquire-deployment-lock" in apply_body
-    assert "validate-deployment-preflight" in apply_body
-    assert "terraform_apply_supervisor.py" in apply_body
+    for retired in (plan_body, apply_body):
+        assert "Retired:" in retired
+        assert "exit 64" in retired
+    assert "compgen -e | LC_ALL=C sort" in body
+    assert "Terraform CLIへ影響する環境変数を消去して拒否しました" in body
+    assert "TF_WORKSPACE|TF_DATA_DIR|TF_VAR_*" in body
+    assert "TF_CLI_ARGS|TF_CLI_ARGS_*" in body
+    assert "export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true" in body
+    assert "AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_*|AWS_PROFILE|AWS_DEFAULT_PROFILE" in body
+    assert 'AWS_DEFAULT_REGION="$REGION"' in body
+    assert "AWS_CONFIG_FILE=/dev/null" in body
+    assert "AWS_SHARED_CREDENTIALS_FILE=/dev/null" in body
+    assert "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker" in body
+    assert "TF_ARGS=(" in body
+    assert "-refresh=true" in body
+    assert "-lock-timeout=5m" in body
+    assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in body
+    assert 'terraform -chdir="$TF_DIR" "$@"' not in body
+    assert "-target=" not in body
+    assert "image_release_context.py" in body
+    assert "acquire-deployment-lock" in body
+    assert "validate-deployment-preflight" in body
+    assert "terraform_apply_supervisor.py" in body
     supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
         encoding="utf-8"
     )
     assert "heartbeat-deployment-lock" in supervisor
     assert "start_new_session=True" in supervisor
     assert "os.killpg" in supervisor
-    assert "release-deployment-lock" in apply_body
+    assert "release-deployment-lock" in body
     assert '"-lock-timeout=5m",' in supervisor

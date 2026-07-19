@@ -112,24 +112,14 @@ variable "lambda_timeout" {
 
 # ---------- 観測・アラーム閾値（Sprint 2 / 2.6）----------
 variable "alarm_email_endpoints" {
-  description = "canonical SNS topicの確認済み通知先メール。この環境では空またはapproved exact email s-komata@vectorinc.co.jp 1件だけ。"
+  description = "canonical SNS topicの確認済み通知先。UTF-8 byte列exact s-komata@vectorinc.co.jp 1件だけ。"
   type        = list(string)
-  default     = []
+  default     = ["s-komata@vectorinc.co.jp"]
   sensitive   = true
 
   validation {
-    condition = (
-      length(var.alarm_email_endpoints) <= 1 &&
-      length(distinct([
-        for endpoint in var.alarm_email_endpoints :
-        lower(trimspace(endpoint))
-      ])) == length(var.alarm_email_endpoints) &&
-      alltrue([
-        for endpoint in var.alarm_email_endpoints :
-        lower(trimspace(endpoint)) == "s-komata@vectorinc.co.jp"
-      ])
-    )
-    error_message = "alarm_email_endpointsは空またはapproved exact email s-komata@vectorinc.co.jp 1件だけを指定してください。"
+    condition     = var.alarm_email_endpoints == ["s-komata@vectorinc.co.jp"]
+    error_message = "alarm_email_endpointsはraw byte exact s-komata@vectorinc.co.jp 1件だけを指定してください（trim/lower不可）。"
   }
 }
 
@@ -200,7 +190,7 @@ variable "enable_bedrock_invocation_log_delivery" {
 }
 
 variable "bedrock_logs_retention_days" {
-  description = "Bedrock AI入出力ログのbedrock/ prefixに適用する合計保持日数。append-only objectを59日で非現行化し、1日後（合計60日）に完全削除する固定契約"
+  description = "Bedrock AI入出力ログのbedrock/ prefixに適用する最低保持日数。current/noncurrentのどのversionも生成後60日未満では削除しない固定契約"
   type        = number
   default     = 60
 

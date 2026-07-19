@@ -35,8 +35,8 @@ resource "aws_sns_topic" "alarms" {
 # for email confirmation. Creating one in the runtime migration could therefore
 # promote services while it is still PendingConfirmation. Delivery endpoints
 # are intentionally external to this state: the guard accepts an email only
-# after the live SNS API reports its confirmed ARN, hashes the normalized
-# endpoint, and matches that hash to the one approved alarm_email_endpoints
+# after the live SNS API reports its confirmed ARN, hashes the raw UTF-8
+# endpoint bytes, and matches that hash to the one approved alarm_email_endpoints
 # value. The full protocol/pending inventory must contain only that confirmed
 # email subscription; any canonical-topic Chatbot attachment is rejected.
 # No pending subscription is ever created by this rollout.

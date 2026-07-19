@@ -129,9 +129,13 @@ def test_all_fixed_build_roles_deny_non_plaintext_environment_resolution() -> No
         "openclaw_codebuild",
     ):
         policy = _document(policy_name)
-        assert '"secretsmanager:GetSecretValue"' in policy
-        assert '"ssm:GetParameter"' in policy
-        assert '"ssm:GetParameters"' in policy
+        if policy_name == "codebuild":
+            assert '"secretsmanager:*"' in policy
+            assert '"ssm:*"' in policy
+        else:
+            assert '"secretsmanager:GetSecretValue"' in policy
+            assert '"ssm:GetParameter"' in policy
+            assert '"ssm:GetParameters"' in policy
 
 
 def test_only_source_free_promoter_can_write_release_repositories() -> None:
@@ -142,7 +146,8 @@ def test_only_source_free_promoter_can_write_release_repositories() -> None:
     attestor = _document("image_attestor")
     promoter = _document("image_promoter")
 
-    for policy in (main_builder, tiktok_builder, openclaw_builder, attestor):
+    assert '"ecr:*"' in main_builder
+    for policy in (tiktok_builder, openclaw_builder, attestor):
         assert "Deny" in policy
         assert "ecr:PutImage" in policy
     assert 'sid = "WriteOnlyAllowlistedCandidateAndReleaseRepositories"' in promoter

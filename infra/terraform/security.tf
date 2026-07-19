@@ -178,10 +178,11 @@ resource "aws_cloudtrail" "main" {
     }
   }
 
-  # AWS documents that first-time S3 versioning enablement can take up to
-  # 15 minutes to propagate. For a new bucket, apply with
-  # enable_cloudtrail_log_delivery=false, wait 15 minutes without object
-  # PUT/DELETE, then enable delivery in a second reviewed rollout.
+  # First-time enablement is performed before this saved plan by the composed
+  # guard: every writer is disconnected, the guard records the exact AWS
+  # PutBucketVersioning response Date/request-id, proves a 900-second no-write
+  # window twice, rechecks it, and cuts both producers over under one shared
+  # lock. A later Enabled observation cannot satisfy this precondition.
   depends_on = [
     aws_s3_bucket_policy.cloudtrail,
     aws_s3_bucket_versioning.cloudtrail,
@@ -193,7 +194,6 @@ resource "aws_cloudtrail" "main" {
       error_message = "CloudTrail writer requires sync parity or a guard-verified producer-off pre-cutover receipt bound to the exact cutover."
     }
 
-    # The bootstrap flag must never be used as a pseudo-pause after adoption.
     # Pausing or retiring audit delivery requires a separate approved change.
     prevent_destroy = true
   }
@@ -208,8 +208,9 @@ resource "aws_accessanalyzer_analyzer" "account" {
 }
 
 # ---------- Bedrock invocation logging（S3 + KMS）----------
-# 注：bedrock:PutModelInvocationLoggingConfiguration はリージョン×アカウントで 1 設定のみ。
-# 既に手動で設定してある場合はこのリソースは作らずに enable_bedrock_invocation_logging=false にする。
+# 注：bedrock:PutModelInvocationLoggingConfiguration はリージョン×アカウントで1設定のみ。
+# 既存設定はguard-owned cutover receiptとstate ownershipを確認してadoptし、同じfull
+# saved plan以外のdirect/targeted経路では変更しない。
 resource "aws_s3_bucket" "bedrock_logs" {
   count         = var.enable_bedrock_invocation_logging ? 1 : 0
   bucket        = "${var.project_name}-${var.environment}-bedrock-logs-${data.aws_caller_identity.current.account_id}"
@@ -252,10 +253,11 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "bedrock_logs" {
   }
 }
 
-# Bedrock invocation payloads are retained only below bedrock/. Bedrock writes
-# unique append-only object keys: the current version becomes recoverable
-# noncurrent data after day 59 and is permanently deleted one day later, so
-# current + noncurrent recoverability ends at the approved day-60 boundary.
+# Bedrock invocation payloads are retained only below bedrock/. Current objects
+# expire at day 60. An overwrite can make a version noncurrent at any age, so
+# noncurrent expiry is also 60 days; no version can be permanently deleted less
+# than 60 days after it was created. The conservative overwrite case may retain
+# a version longer than 60 days, never shorter.
 # A second rule removes expired delete markers that no longer protect any
 # object version. No lifecycle is attached to the CloudTrail bucket: audit
 # logs remain without automatic deletion.
@@ -264,7 +266,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "bedrock_logs" {
   bucket = aws_s3_bucket.bedrock_logs[0].id
 
   rule {
-    id     = "bedrock-current-59-noncurrent-1-total-60-days"
+    id     = "bedrock-current-and-noncurrent-minimum-60-days"
     status = "Enabled"
 
     filter {
@@ -272,11 +274,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "bedrock_logs" {
     }
 
     expiration {
-      days = var.bedrock_logs_retention_days - 1
+      days = var.bedrock_logs_retention_days
     }
 
     noncurrent_version_expiration {
-      noncurrent_days = 1
+      noncurrent_days = var.bedrock_logs_retention_days
     }
   }
 
@@ -330,6 +332,28 @@ resource "aws_s3_bucket_policy" "bedrock_logs" {
         Condition = {
           Bool = {
             "aws:SecureTransport" = "false"
+          }
+        }
+      },
+      {
+        Sid       = "DenyManualBedrockPayloadDeletion"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "s3:DeleteObject",
+          "s3:DeleteObjectVersion",
+        ]
+        Resource = "${aws_s3_bucket.bedrock_logs[0].arn}/bedrock/*"
+      },
+      {
+        Sid       = "DenyNonBedrockPayloadWriters"
+        Effect    = "Deny"
+        Principal = "*"
+        Action    = "s3:PutObject"
+        Resource  = "${aws_s3_bucket.bedrock_logs[0].arn}/bedrock/*"
+        Condition = {
+          StringNotEquals = {
+            "aws:PrincipalServiceName" = "bedrock.amazonaws.com"
           }
         }
       },

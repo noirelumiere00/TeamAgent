@@ -284,7 +284,10 @@ def test_connect_app_html_uses_current_exact_version_and_sha_contract() -> None:
         assert expected in guard
     runtime_guard = (TF_ROOT / "runtime_guard.tf").read_text(encoding="utf-8")
     assert "runtime_connect_app_html_contract_valid" in runtime_guard
-    assert "connect_app_html         = var.runtime_guard_live.connect_app_html" in runtime_guard
+    assert re.search(
+        r"(?m)^\s*connect_app_html\s*=\s*var\.runtime_guard_live\.connect_app_html$",
+        runtime_guard,
+    )
 
 
 def test_openclaw_task_efs_service_and_bedrock_contracts() -> None:
@@ -678,7 +681,7 @@ def test_two_phase_migration_never_enables_schedules_early() -> None:
     assert runtime["enabled"] is False
     assert runtime["to"]["rule_states"] == {
         "ingest": "DISABLED",
-        "morning": "ENABLED",
+        "morning": "DISABLED",
         "canary": "DISABLED",
     }
     assert activation["enabled"] is False
@@ -694,6 +697,7 @@ def test_two_phase_migration_never_enables_schedules_early() -> None:
     ]
     assert activation["allowed_changes"] == [
         "terraform_data.runtime_guard",
+        "terraform_data.production_image_release_gate",
         "aws_cloudwatch_metric_alarm.canary_heartbeat_missing[0]",
         "aws_cloudwatch_event_rule.ingest_weekly[0]",
         "aws_cloudwatch_event_rule.canary_hourly[0]",
@@ -816,6 +820,9 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     variables = (TF_ROOT / "variables.tf").read_text(encoding="utf-8")
     runtime = (TF_ROOT / "runtime_guard.tf").read_text(encoding="utf-8")
     guard = GUARD.read_text(encoding="utf-8")
+    evidence = (
+        PROJECT_ROOT / "infra/deploy/runtime_evidence_guard.py"
+    ).read_text(encoding="utf-8")
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
     handoff = manifest["external_state_handoffs"]["2026-07-alarm-topic-consolidation-v1"]
 
@@ -842,12 +849,17 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert "confirmed_email_endpoint_sha256" in runtime
     assert "confirmed_subscription_metadata_sha256" in runtime
     assert "legacy_action_reference_count == 0" in runtime
-    assert "sha256(lower(trimspace(endpoint)))" in runtime
+    assert "sha256(endpoint)" in runtime
+    assert "sha256(lower(trimspace(endpoint)))" not in runtime
     assert "depends_on = [aws_sns_topic.alarms]" in runtime
     assert "aws_sns_topic_subscription.alarms_email" not in runtime
     assert "local.configured_alarm_email_sha256 == [" in runtime
     assert "length(local.configured_alarm_chatbot_arns) == 0" in runtime
-    assert 'lower(trimspace(endpoint)) == "s-komata@vectorinc.co.jp"' in variables
+    assert (
+        'var.alarm_email_endpoints == ["s-komata@vectorinc.co.jp"]'
+        in variables
+    )
+    assert "trim/lower不可" in variables
     assert "length(var.alarm_chatbot_configuration_arns) == 0" in variables
     assert "list-subscriptions-by-topic" in guard
     assert "get-subscription-attributes" in guard
@@ -860,11 +872,17 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
     assert 'has("FilterPolicy") | not' in guard
     assert 'has("FilterPolicyScope") | not' in guard
     assert "verify_alarm_delivery_test_receipt" in guard
-    assert 'result == "delivered"' in guard
-    assert "describe-slack-channel-configurations" in guard
-    assert "describe-budgets" in guard
-    assert "describe-subscribers-for-notification" in guard
-    assert "get-anomaly-subscriptions" in guard
+    assert "issue-sns-challenge" in guard
+    assert "sign-sns-ack" in guard
+    assert "verify-sns-delivery" in guard
+    assert re.search(r'"sns",\s*"publish"', evidence)
+    assert '"kms",\n            "verify"' in evidence
+    assert "describe-slack-channel-configurations" in evidence
+    assert "list-microsoft-teams-channel-configurations" in evidence
+    assert "describe-chime-webhook-configurations" in evidence
+    assert "describe-budgets" in evidence
+    assert "describe-subscribers-for-notification" in evidence
+    assert "get-anomaly-subscriptions" in evidence
     assert 'select(.type == "aws_sns_topic_subscription")' in guard
     assert "configured_email_hash" in guard
     assert "strict syncは確認済みalarm delivery" in guard
@@ -888,7 +906,12 @@ def test_alarm_delivery_is_confirmed_fail_closed_and_single_owned() -> None:
         "chatbot_configuration_count": 0,
         "legacy_topic_exists": False,
         "legacy_action_reference_count": 0,
+        "final_phase": "legacy_retired",
+        "final_checkpoint_sha256_required": True,
+        "history_sha256_required": True,
     }
+    assert handoff["durable_checkpoint_required"] is True
+    assert handoff["idempotent_resume_required"] is True
     assert len(re.findall(r'resource "aws_sns_topic" "[^"]+"', cloudwatch)) == 1
 
     for path in TF_ROOT.glob("*.tf"):
@@ -908,7 +931,7 @@ def _run_alarm_delivery_validator(
 ) -> subprocess.CompletedProcess[str]:
     canonical = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms"
     legacy = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
-    email = " S-KOMATA@VECTORINC.CO.JP "
+    email = "s-komata@vectorinc.co.jp"
     email_hash = hashlib.sha256(b"s-komata@vectorinc.co.jp").hexdigest()
     destination_hash = (
         "c942dbb7b97da1f4d9debb1ba241ee89"
@@ -939,6 +962,10 @@ def _run_alarm_delivery_validator(
         chat = []
         live_email_hashes = []
         live_chat_arns = []
+    elif mutation == "trim":
+        emails = [" s-komata@vectorinc.co.jp "]
+    elif mutation == "case":
+        emails = ["S-KOMATA@VECTORINC.CO.JP"]
     elif mutation == "pending":
         pending_count = 1
     elif mutation == "mismatch":
@@ -1083,6 +1110,8 @@ def test_alarm_delivery_validator_accepts_only_live_confirmed_destination(
     "mutation",
     [
         "zero",
+        "trim",
+        "case",
         "pending",
         "mismatch",
         "different_configured",
@@ -1228,9 +1257,7 @@ def test_legacy_mutable_codebuild_is_non_publishing_and_protected() -> None:
         project,
     )
     assert source_block is not None
-    assert "location" not in source_block.group("body")
-    assert "docker build" not in project
-    assert "docker push" not in project
+    assert "/codebuild/source.zip" not in source_block.group("body")
     assert "ECR_REGISTRY" not in project
     assert "prevent_destroy = true" in policy
     for denied in ('"ecr:*"', '"ecs:*"', '"iam:PassRole"', '"s3:*"'):

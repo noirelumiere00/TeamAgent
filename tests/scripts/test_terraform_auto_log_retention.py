@@ -1,4 +1,4 @@
-"""Auto-created CodeBuild/Lambda log groupの安全なin-place adoption契約。"""
+"""既存の通常運用log groupを安全にin-place adoptionする契約。"""
 
 from __future__ import annotations
 
@@ -27,30 +27,49 @@ LOG_GROUPS = {
         "codebuild_aiia_image_builder",
         "/aws/codebuild/${var.project_name}-${var.environment}-aiia-image-builder",
         "/aws/codebuild/teamagent-dev-aiia-image-builder",
+        0,
     ),
-    "aws_cloudwatch_log_group.codebuild_image_builder": (
+    "aws_cloudwatch_log_group.codebuild_image": (
         "codebuild.tf",
-        "codebuild_image_builder",
-        "/aws/codebuild/${local.retired_codebuild_project_name}",
+        "codebuild_image",
+        "/aws/codebuild/${local.main_codebuild_project_name}",
         "/aws/codebuild/teamagent-dev-image-builder",
+        0,
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_teamagent": (
+        "container_insights_retention.tf",
+        "ecs_containerinsights_teamagent",
+        "/aws/ecs/containerinsights/teamagent-dev/performance",
+        "/aws/ecs/containerinsights/teamagent-dev/performance",
+        1,
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_tiktok": (
+        "container_insights_retention.tf",
+        "ecs_containerinsights_tiktok",
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance",
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance",
+        1,
     ),
     "aws_cloudwatch_log_group.reminder_notify": (
         "reminders.tf",
         "reminder_notify",
         "/aws/lambda/${local.rem_name}-notify",
         "/aws/lambda/teamagent-dev-reminders-notify",
+        0,
     ),
     "aws_cloudwatch_log_group.tiktok_dispatch": (
         "tiktok_acquire.tf",
         "tiktok_dispatch",
         "/aws/lambda/${local.tk_name}-dispatch",
         "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
+        0,
     ),
     "aws_cloudwatch_log_group.x_dispatch": (
         "x_research.tf",
         "x_dispatch",
         "/aws/lambda/${local.xr_name}-dispatch",
         "/aws/lambda/teamagent-dev-x-buzz-dispatch",
+        0,
     ),
 }
 
@@ -94,15 +113,19 @@ def _hcl_block(path: Path, kind: str, name: str) -> str:
 )
 def test_existing_log_groups_are_adopted_without_recreation(
     address: str,
-    spec: tuple[str, str, str, str],
+    spec: tuple[str, str, str, str, int],
 ) -> None:
-    filename, resource, configured_name, import_id = spec
+    filename, resource, configured_name, import_id, _ = spec
     path = TF_ROOT / filename
     block = _hcl_block(path, 'resource "aws_cloudwatch_log_group"', resource)
     body = path.read_text(encoding="utf-8")
 
     assert f'name              = "{configured_name}"' in block
-    assert "retention_in_days = 30" in block
+    if filename == "codebuild.tf":
+        assert "retention_in_days = local.codebuild_log_retention_days" in block
+        assert "codebuild_log_retention_days  = 30" in body
+    else:
+        assert "retention_in_days = 30" in block
     assert "depends_on = [terraform_data.runtime_guard]" in block
     assert "prevent_destroy = true" in block
     assert re.search(r"ignore_changes\s*=\s*\[kms_key_id\]", block)
@@ -135,7 +158,7 @@ def test_migration_allowlist_guard_and_runbook_cover_exact_adoption_addresses() 
     guard = GUARD.read_text(encoding="utf-8")
     readme = (TF_ROOT / "README.md").read_text(encoding="utf-8")
 
-    for address, (_, _, _, import_id) in LOG_GROUPS.items():
+    for address, (_, _, _, import_id, _) in LOG_GROUPS.items():
         assert runtime_allowed.count(address) == 1
         assert address in guard
         assert address in readme
@@ -166,10 +189,10 @@ def _validator_filter() -> str:
 
 def _exact_plan() -> dict[str, object]:
     changes: list[dict[str, object]] = []
-    for address, (_, resource, _, import_id) in LOG_GROUPS.items():
+    for address, (_, resource, _, import_id, initial_retention) in LOG_GROUPS.items():
         before = {
             "name": import_id,
-            "retention_in_days": 0,
+            "retention_in_days": initial_retention,
             "kms_key_id": None,
             "log_group_class": "STANDARD",
             "skip_destroy": False,
@@ -276,6 +299,7 @@ def test_partial_import_migration_resumes_idempotently(
         "replace",
         "wrong_import",
         "wrong_before_retention",
+        "wrong_container_initial_retention",
         "wrong_after_retention",
         "kms_change",
         "name_change",
@@ -305,6 +329,14 @@ def test_retention_validator_rejects_non_exact_or_destructive_plan(
         change["importing"] = {"id": "/aws/codebuild/wrong"}
     elif mutation == "wrong_before_retention":
         change["before"]["retention_in_days"] = 30
+    elif mutation == "wrong_container_initial_retention":
+        target = next(
+            item
+            for item in changes
+            if item["address"]
+            == "aws_cloudwatch_log_group.ecs_containerinsights_teamagent"
+        )
+        target["change"]["before"]["retention_in_days"] = 0
     elif mutation == "wrong_after_retention":
         change["after"]["retention_in_days"] = 7
     elif mutation == "kms_change":

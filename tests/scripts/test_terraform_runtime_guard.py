@@ -1783,7 +1783,9 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     }
     assert set(data["state_contract"]["imports"]) == {
         "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
-        "aws_cloudwatch_log_group.codebuild_image_builder",
+        "aws_cloudwatch_log_group.codebuild_image",
+        "aws_cloudwatch_log_group.ecs_containerinsights_teamagent",
+        "aws_cloudwatch_log_group.ecs_containerinsights_tiktok",
         "aws_cloudwatch_log_group.reminder_notify",
         "aws_cloudwatch_log_group.tiktok_dispatch",
         "aws_cloudwatch_log_group.x_dispatch",

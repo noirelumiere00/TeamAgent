@@ -36,21 +36,50 @@ guard/receiptを「管理者にも強制できる安全境界」とは扱いま�
   build inputs `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf`
   です。guardはlatest objectをexact versionで再取得し、HTML bytesと埋込みprovenanceを
   照合するため、旧版や別publishへ暗黙に移行しません。
-- ingest-weeklyとcanary-hourlyは無効、morning-digestは有効のまま第1段階を行います。
-- alarm SNSには確認済み配送先がありません。approved exact email
-  `s-komata@vectorinc.co.jp`を指定しない限りplanは生成されません。AWS providerはemail確認を待てない
-  ため、このmigrationはsubscriptionを作りません。emailは先にcanonical topic上で確認を
-  完了し、正規化済み`s-komata@vectorinc.co.jp`のexact hashと一致してから指定します。
-  canonical topicの全protocolとPendingConfirmation/Deletedを含むsubscription inventoryを
-  hash化し、approved emailのconfirmed `email` protocol 1件だけを受理します。追加endpoint、
-  `email-json`、pending/deleted subscription、別email、canonical topicへ接続した
-  Amazon Q Developer in chat applications (AWS Chatbot) はruntime変更前に停止します。
-  approved destinationはtopic ARN、正規化email、confirmed/no-filter/raw-delivery-off、
-  Chatbot 0件を含む固定destination-state hashにも束縛します。confirmed subscriptionは
-  `GetSubscriptionAttributes`で再取得し、`PendingConfirmation=false`、email確認済み、
-  `FilterPolicy`/`FilterPolicyScope`なしを検証します。さらにunique test messageの実受信を
-  人が確認した短命`teamagent-alarm-delivery-test-receipt`が無い限りmigration planを
-  生成しません。receiptにはendpoint値を残さずhashだけを結合します。
+- 記録済みliveではingest-weekly/canary-hourlyが無効、morning-digestが有効です。ただし
+  first-time versioning workflowは全EventBridge rule、Scheduler schedule、Lambda event
+  source mappingを全page列挙して切断します。そのreceiptに続くruntime migrationの期待値は
+  ingest/morning/canaryすべて`DISABLED`です。activation成功までは再有効化しません。
+- alarm SNSはtfvarとSNS `Endpoint`のUTF-8 byte列がexact
+  `s-komata@vectorinc.co.jp`でなければ受理しません。trim、lowercase、Unicode正規化は
+  一切しません。canonical/legacy両topicの全protocolとPendingConfirmation/Deletedを含む
+  全page inventoryを取り、両topic合計でcanonical topic上のconfirmed `email` 1件だけを
+  受理します。追加endpoint、`email-json`、pending/deleted、別email、filter、raw delivery、
+  canonical/legacy topicを参照するAmazon Q Developer in chat applications
+  (AWS Chatbot Slack/Teams/Chime) はfail closedです。destination hashはraw email、
+  exact topic、confirmed/no-filter/raw-delivery-off、Chatbot 0件のcanonical objectから
+  再計算します。
+- `issue-alarm-challenge`はfresh 256-bit nonceをcanonical topicへ実publishし、SNS
+  `MessageId`、AWS response Date/request-id、exact subscription metadata、全publisher
+  inventoryをone-use ledgerへ束縛します。受信者は組織管理の
+  `teamagent-dev-alarm-recipient-ack-signer` SSO/MFA roleから、challengeのexact
+  MessageId/nonce/raw email/topicに加え、challenge全体とinventoryのcanonical hashをKMS
+  `SIGN_VERIFY` keyで署名します。automation側はKMS署名、key metadata、期限、
+  MessageId/nonce/challenge hash/inventory hash、未使用ledger row、再取得した全inventoryを
+  検証してから短命receiptを発行します。未ack、再利用、期限切れ、別message、
+  任意64-hex文字列は証跡になりません。
+
+`runtime_evidence.tf`が参照するrecipient KMS alias、SSO/MFA signer role、runtime automation
+roleとそのexact evidence policyは、このstateの外で独立にbootstrapする必須前提です。
+versioning/SNS evidenceがfull planより先に必要なため、同じplanでこれらの権限を自己作成する
+循環経路はありません。data sourceとpolicy-contract outputはidentityをpinするだけです。
+前提が無い、KMS keyが`SIGN_VERIFY`/`ECC_NIST_P256`/customer-managed/AWS_KMS originでない、
+またはautomation permissionが不足する場合はsource workflowがAWS API失敗で停止します。
+
+legacy alarm topicは一括切替しません。`advance-alarm-migration`は同じshared lockとDynamoDB
+ledgerの下で、次のdurable chainだけを受理します。
+
+1. 全publisherのexact dual-publish post-state。
+2. publisher 1件ごとのcanonical-only checkpoint。処理済み/未処理のmixed stateを前checkpoint
+   と照合し、各checkpointに元のexact topic stateへ戻す逆rollback planを保存する。
+3. 全publisher checkpoint完了後のfresh SNS challenge/KMS recipient ack。
+4. 全page inventoryでlegacy参照0を確認。
+5. canonical publisher集合を維持したlegacy topic退役。
+
+各phaseはpostcondition hash、前checkpoint hash、idempotency key、AWS観測時刻、exact
+publisher-topic mapを条件付きtransactionで保存します。途中失敗は既存ledger headから
+idempotentに再開し、phase skip、publisher集合差替え、時刻逆転、別message receiptを
+拒否します。legacy退役後だけは自動再作成せず、新しいreview済みmigrationを要求します。
 
 ## CloudTrail / Bedrock log bucket hardening
 
@@ -59,11 +88,14 @@ TLS未使用通信の明示Denyを追加します。Object LockとMFA Deleteは�
 CloudTrail監査ログにはlifecycleを設定せず、自動削除しません。
 
 Bedrock AI入出力ログは承認済みの `bedrock_logs_retention_days = 60` に固定します。
-lifecycleの対象は`bedrock/` prefixだけです。Bedrockが生成するappend-onlyの一意object
-keyは59日後にdelete markerで非現行化し、非現行versionを1日後、すなわち生成から合計
-60日の境界で完全削除します。現行60日＋非現行60日という120日保持にはしません。
-参照versionが無いexpired delete markerも削除します。他prefixやCloudTrail objectは
-このlifecycleの対象外で、CloudTrail監査ログには自動削除を設定しません。
+lifecycleの対象は`bedrock/` prefixだけで、current expirationと
+noncurrent-version expirationをそれぞれ60日以上に固定します。したがって同じkeyが
+生成直後にoverwriteされても、どのversionも生成後60日未満では削除されません。
+bucket policyは`bedrock.amazonaws.com`以外のpayload writerと手動
+`DeleteObject`/`DeleteObjectVersion`を拒否し、live evidenceはexact lifecycle/policyを
+再取得します。参照versionが無いexpired delete markerだけは削除します。他prefixや
+CloudTrail objectはこのlifecycleの対象外で、CloudTrail監査ログには自動削除を
+設定しません。
 
 Bedrockの実配信先は
 `bedrock/AWSLogs/<account>/BedrockModelInvocationLogs/*`へ固定し、
@@ -75,24 +107,36 @@ S3公式仕様では、bucketで初めてversioningを有効にした後は伝�
 その間のobject PUT/DELETEを避けます。
 https://docs.aws.amazon.com/AmazonS3/latest/userguide/manage-versioning-examples.html
 
-現liveはCloudTrail/Bedrock producerが既に配信中です。稼働中destinationをその場で
-UnversionedからEnabledへ変更するcommandも、稼働後の観測を過去のpre-cutover証跡として
-扱う経路も提供しません。新しいdestinationはproducerを向ける前にversioningを有効化し、
-AWS CloudTrail event historyの各`PutBucketVersioning(Status=Enabled)`時刻から900秒待って
-から、別のreview済みfull planでproducerをcutoverします。既存producerのdestroy/pauseを
-「待機」とみなす方式も禁止です。
+稼働後に`Enabled`を観測しただけのreceipt、古いCloudTrail event history、operator記録時刻は
+first-time authorizationになりません。`attest-log-versioning`はdisabled review manifest、
+exact automation session、固定AWS CLI v2 bytes/endpoint、Terraform backend lockと同じ
+shared workflow lockの下だけで、次を単一workflowとして実行します。
 
-1. 新destinationをproducer未接続の状態で作成・versioning有効化する。CloudTrail trailは
-   exact destinationへ設定済みでも`IsLogging=false`、Bedrock invocation loggingは未設定
-   でなければならない。
-2. `attest-log-versioning`はexact trusted automation roleと共有lockの下で、両bucketの
-   `Status=Enabled`、CloudTrailの削除lifecycle無し、全writer disconnected、CloudTrail event
-   history由来の独立したversioning-enabled時刻、900秒settle完了、bucket/versioning identity、
-   初期化済みbackend/state、将来のexact producer cutoverを原子的pre-cutover receiptへ束縛する。
-   Unversioned/Suspended、writer接続済み、時刻欠落、900秒未満なら書き換えずfail closedする。
-3. reviewed cutoverはそのreceiptの`cutover.not_before_epoch`後だけに行う。guarded runtime planは
-   producerをexact no-opに固定し、receiptへ束縛されたcutoverと現producerが一致しなければ停止する。
-4. cutover後のCloudTrail最新log+digest、Bedrock最新delivery、30日化する5 log groupのexport
+1. 全EventBridge bus/rule/target、Scheduler group/schedule、Lambda mappingを全page列挙し、
+   全rule/schedule/mappingを`DISABLED`にする。全8 ECS family
+   （openclaw/mcp/connect/ingest/morning/canary/TikTok/X）のRUNNING/PENDING taskを全pageで
+   0にし、writer serviceのdesired/running/pendingを0、`teamagent-dev-` queueの
+   visible/not-visible/delayedを0にする。CloudTrailは`StopLogging`、Bedrock loggingは
+   deleteして、各disconnect response Date/request-idとexact resource集合を記録する。
+2. producer-off最終観測後にbucket canonical owner ID、CreationDate、名前/ARN、
+   `Unversioned`/MFA Delete disabledを再取得する。`--expected-bucket-owner`付きで直前の
+   object-version集合をbaseline化してから、guard自身が両bucketへ
+   `PutBucketVersioning(Status=Enabled)`を行う。成功response、request-id、AWS HTTP
+   `Date`をauthorityとし、`errorCode`/`errorMessage`/`addendum`を含むresponseは拒否する。
+3. 各bucketの`max(Put response Date, first-seen Enabled Date)+900`まで全producerを
+   disconnectedのまま保ち、object-version集合がbaselineと同一であることを、AWS時刻が
+   単調増加する2回の独立観測と最終再確認で証明する。
+4. lockを再確認し、同じworkflow内でCloudTrailをexact trail/bucketへ再開し、Bedrockを
+   exact bucket/prefix/データ種別へcutoverする。cutover response Date/request-id、
+   producer-off契約、bucket identity、全timing、lock workflow IDをschema v4 receiptへ
+   canonical hashで束縛する。さらに同じshared lock下でone-use
+   `versioning-cutover#<workflow-id>` rowを条件付き保存・consistent-readし、action set、
+   bucket identity、cutover、workflow claimsを1年間のdurable ledgerへ拘束する。
+
+初期状態が両方exact `Unversioned`でない、1 controlでも未列挙/未切断、queue/taskが非0、
+時計が逆転、900秒未満、bucket identity/ownerが変化、lockが変化した場合はfail closedです。
+後日の観測でこのfirst-time receiptを新規作成する経路はありません。
+5. cutover後のCloudTrail最新log+digest、Bedrock最新delivery、30日化する7 log groupのexport
    manifestを、0600の`teamagent-log-readiness-evidence`へ具体的なkey/version/ETag/size/timestamp
    とともに記録する。各delivery/retention content hashは別々の0600 export fileのcanonical
    path/inode/sizeへ束縛し、delivery/retention timestampはevidence observation時刻以下にする。
@@ -103,34 +147,34 @@ bash ../deploy/terraform_runtime_guard.sh attest-log-versioning \
   --out "$ARTIFACT_DIR/log-versioning.json"
 ```
 
-このattestation commandはAWS bucket設定を書きません。`terraform plan -target`や部分applyは
-禁止です。pre-versioned destinationへの非targeted runtime migrationのfull-root planでTLS deny、
-Bedrock exact delivery policy/KMS、
-`bedrock/` 60日lifecycle、5 log groupのimport/30日retentionを収束させます。
-CloudTrailとBedrock producer resourceは`prevent_destroy`で保護し、plan validatorも両者を
-exact `no-op`に固定するため、versioning伝播待ちをproducerの停止で代替できません。
+このcommandはwriter切断、versioning有効化、CloudTrail/Bedrock cutoverというAWS writeを
+行います。現在はreview manifestが`enabled=false`なので実行できません。
+`terraform plan -target`や部分applyは禁止です。receipt後のnon-targeted runtime migration
+full-root saved planでTLS deny、Bedrock exact delivery policy/KMS、`bedrock/`の
+current/noncurrent各60日lifecycle、7 log groupのimport/30日retentionを収束させます。
 
 ```bash
 # cutover後、secure evidence/export artifactを確認して作るreceiptの必須binding:
 # versioning_receipt_sha256 = sha256(log-versioning.json)
 ```
 
-`enable_cloudtrail_log_delivery=false`と
-`enable_bedrock_invocation_log_delivery=false`は未採用の新規bootstrap前だけの入力です。
-採用済みproducerを擬似的にpauseする用途には使いません。適用は別途承認後だけです。
 現在はlog versioning attestation stageとruntime manifestがともに`enabled=false`で、
-pre-versioned cutover destinationも未承認です。attestation、migration plan、applyは
-いずれもfail closedし、全writeはNO-GOです。
+external KMS/SSO signer/automation permission prerequisitesも未確認です。attestation、
+migration plan、applyはいずれもfail closedし、production writeはNO-GOです。
 
-## Auto-created CodeBuild / Lambda log retention
+## Existing operational log retention
 
-次の既存log groupは削除・再作成せず、固定Terraform addressへimportして
+次の7つの既存log groupは削除・再作成せず、固定Terraform addressへimportして
 `retention_in_days = 30`だけをin-place更新します。
 
 - `/aws/codebuild/teamagent-dev-aiia-image-builder` →
   `aws_cloudwatch_log_group.codebuild_aiia_image_builder`
 - `/aws/codebuild/teamagent-dev-image-builder` →
-  `aws_cloudwatch_log_group.codebuild_image_builder`
+  `aws_cloudwatch_log_group.codebuild_image`
+- `/aws/ecs/containerinsights/teamagent-dev/performance` →
+  `aws_cloudwatch_log_group.ecs_containerinsights_teamagent`
+- `/aws/ecs/containerinsights/teamagent-dev-tiktok/performance` →
+  `aws_cloudwatch_log_group.ecs_containerinsights_tiktok`
 - `/aws/lambda/teamagent-dev-reminders-notify` →
   `aws_cloudwatch_log_group.reminder_notify`
 - `/aws/lambda/teamagent-dev-tiktok-acquire-dispatch` →
@@ -138,23 +182,30 @@ pre-versioned cutover destinationも未承認です。attestation、migration pl
 - `/aws/lambda/teamagent-dev-x-buzz-dispatch` →
   `aws_cloudwatch_log_group.x_dispatch`
 
-各resourceは`prevent_destroy`で保護し、`kms_key_id`をignoreするため、既存のKMS関連付けを
-追加・解除しません。migration guardはimport ID、現在のNever Expire、30日への更新、
-KMS不変、その他属性不変をexactに検証します。guardは`.terraform/terraform.tfstate`の
+Container Insightsの2 groupはliveで確認済みの現在値1日を初期値とし、CodeBuild/Lambdaの
+5 groupは現在のNever Expireを初期値とします。各resourceは`prevent_destroy`で保護し、
+`kms_key_id`をignoreするため、既存のKMS関連付けを追加・解除しません。migration guardは
+exact import ID、各初期retention、30日への更新、KMS不変、その他属性不変を検証します。
+guardは`.terraform/terraform.tfstate`の
 初期化済みbackend metadataを毎回再読取りし、credential/endpoint/workspace prefix等の
 注入が無いexact S3 bucket/key/region/DynamoDB lock/encrypt設定を正規化hashで束縛します。
 さらにdefault workspace、state lineage/serial、`data.` prefixとmodule/string/numeric
-indexを含む全address-set hash、5 addressのremote ID所有権をreceiptへ結合します。
+indexを含む全address-set hash、7 addressのremote ID所有権をreceiptへ結合します。
 runtime migrationでは未importの既存group→exact import+30日update、import済みNever
-Expire→30日update、既に30日→no-opを正規状態として扱うため、部分成功後も安全に再開できます。
+ExpireまたはContainer Insights 1日→30日update、既に30日→no-opを正規状態として扱うため、
+部分成功後も安全に再開できます。
 provider planの`tags=null`とprovider defaultを含む`tags_all`だけを受理します。
 別state/addressとのcollisionはapplyせず、state所有者を確認して専用の
 `moved`/state migrationを先にレビューしてください。
 
 この変更はlog groupを再作成しませんが、30日より古い既存eventはretention適用後に削除対象と
 なり、AWS公式仕様では通常最大72時間で削除されます。最古eventが30日以内であること、または
-30日超の履歴をexportしてchecksum付きで保全したこと（もしくは明示的な廃棄承認）をreview
-evidenceへ残すまではruntime migrationを有効化しません。
+30日超の履歴をexportしてchecksum付きで保全したことを、7 groupすべてについてreview
+evidenceへ残すまではruntime migrationを有効化しません。特に現在1日のContainer Insights
+2 groupも既存eventをexact S3 bucket/key/versionからfresh `O_NOFOLLOW|O_EXCL` fileへ取得し、
+canonical path/device/inode/nlink=1/size/timestamps/content hashとAWS metadataをreceiptへ
+拘束します。guardはsaved plan時とapply直前に同じversionを再取得・再hashし、差替え、
+hardlink、古いfile、別version、観測時刻を超えるdelivery/exportを拒否します。
 https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups-and-streams.html
 
 ## 必須入力
@@ -196,7 +247,8 @@ bash ../deploy/terraform_runtime_guard.sh plan \
   --preflight-receipt "$ARTIFACT_DIR/preflight.json" \
   --alarm-delivery-receipt "$ARTIFACT_DIR/alarm-delivery.json" \
   --versioning-receipt "$ARTIFACT_DIR/log-versioning.json" \
-  --log-readiness-receipt "$ARTIFACT_DIR/log-readiness.json"
+  --log-readiness-receipt "$ARTIFACT_DIR/log-readiness.json" \
+  --alarm-migration-receipt "$ARTIFACT_DIR/alarm-migration-final.json"
 
 bash ../deploy/terraform_runtime_guard.sh verify \
   --plan "$ARTIFACT_DIR/runtime.tfplan"
@@ -325,44 +377,20 @@ of this remediation.
    is a release-safety change and requires a fail-closed preview against every
    digest returned by the recursive signed-release graph validator.
 
-### Independently authorized embedded-contract update stage
+### Embedded-contract updates
 
-There is no bootstrap target file. A new `release.ready` value or any other
-changed embedded release-contract byte is installed through the guarded
-control-plane caller and role:
-
-```bash
-bash infra/terraform/update_image_release_controls.sh plan \
-  /secure/local/path/release-controls.tfplan
-terraform show /secure/local/path/release-controls.tfplan
-cat /secure/local/path/release-controls.tfplan.control-update.json
-bash infra/terraform/update_image_release_controls.sh apply \
-  /secure/local/path/release-controls.tfplan
-```
-
-The planner targets only the five contract-consuming CodeBuild projects. Its
-validator rejects create/delete/replace/import actions, runtime resources,
-unknown values, and every project-field mutation except the embedded buildspec
-and the main builder's two contract-hash environment values. It also requires
-every consumer to contain the exact current contract hash or bytes, and binds
-the saved plan, clean `origin/dev` control commit, contract hashes, changed
-contracts, and changed addresses in the companion authorization file.
-
-The dedicated caller can assume only the release-control updater role. That
-role can read/update the five fixed CodeBuild projects and read/write the one
-fixed Terraform state object under its existing lock; it is explicitly denied
-build starts and IAM, ECR, ECS, EventBridge, Scheduler, Lambda, and evidence
-mutation. This closes the contract activation cycle: trusted projects can
-receive a reviewed new contract before a candidate or release receipt under
-that contract exists, without granting a production deployment bypass. A
-partial update is fail-closed because mismatched builders/attestors reject the
-contract hash; create and review a fresh control plan to resume.
+The former control-only and image-only launchers are retired. Every embedded
+contract or production image change must be represented by an enabled,
+time-bounded entry in `terraform_runtime_migrations.json` and flow through
+`infra/deploy/terraform_runtime_guard.sh`. The guard creates one complete saved
+plan, binds it to the runtime and production-provenance gates, consumes one
+intent, and holds the shared deployment lock through supervised apply.
 
 ### Build, release authorization, and signed-digest deploy
 
 After contracts are ready, both connections are available, and the Terraform
 worker has provisioned the trusted
-`teamagent-dev-terraform-automation/teamagent-terraform-worker` session:
+`teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker` session:
 
 1. Run exactly one build-only launcher from clean remote HEAD:
    `build_teamagent_image.sh`, `build_openclaw_image.sh`, or
@@ -377,12 +405,19 @@ worker has provisioned the trusted
    repository `@sha256:<digest>` and set `image_release_evidence` to the exact
    receipt/signature keys and VersionIds. Do not set
    `image_deployment_intent_id`; the planner creates it.
-4. Store the plan outside the worktree and create it only with the guarded
-   planner:
+4. Add the reviewed change to the exact runtime migration manifest. Store the
+   plan outside the worktree and create it only with the composed guard:
 
    ```bash
-   bash infra/terraform/plan_image_release.sh \
-     /secure/local/path/image-release.tfplan
+   bash infra/deploy/terraform_runtime_guard.sh plan \
+     --var-file /secure/local/path/teamagent.tfvars \
+     --runtime-migration REVIEWED_MIGRATION_ID \
+     --preflight-receipt /secure/local/path/preflight.json \
+     --alarm-delivery-receipt /secure/local/path/alarm-delivery.json \
+     --versioning-receipt /secure/local/path/versioning.json \
+     --log-readiness-receipt /secure/local/path/log-readiness.json \
+     --alarm-migration-receipt /secure/local/path/alarm-migration-final.json \
+     --out /secure/local/path/image-release.tfplan
    terraform show /secure/local/path/image-release.tfplan
    ```
 
@@ -394,7 +429,6 @@ worker has provisioned the trusted
    `applyable=true`, then binds the exact S3 backend key, default workspace,
    state lineage/serial, state-address ownership hash, plan-address ownership
    hash, opaque plan hash, images, contracts, immutable receipt/signature
-   VersionIds, and per-receipt one-use claim IDs into the `PREPARED` intent.
    When the separately owned HMAC generation ledger is integrated, pass only
    its non-secret `{table_arn, generation, high_water_t0, stage}` snapshot in
    `image_release_shared_generation_ledger`. The exact snapshot hash is bound
@@ -404,8 +438,9 @@ worker has provisioned the trusted
 5. After review, apply exactly that saved plan:
 
    ```bash
-   bash infra/terraform/apply_image_release_plan.sh \
-     /secure/local/path/image-release.tfplan
+   bash infra/deploy/terraform_runtime_guard.sh apply \
+     --plan /secure/local/path/image-release.tfplan \
+     --out /secure/local/path/image-release.apply.json
    ```
 
    The apply launcher atomically acquires the shared, leased DynamoDB
@@ -452,9 +487,8 @@ that snapshot, an empty optional binding is not evidence that the HMAC
 preflight ran. The release gate must not be described as enforcing the
 separately owned live preflight on its own.
 
-The one-time provenance bootstrap target list above remains limited to
-non-runtime infrastructure and is not authorization to target a runtime
-resource.
+There is no one-time target-list exception. Runtime, provenance, retention,
+and evidence changes use one complete saved plan or remain fail closed.
 
 CodeBuild log groups, including the legacy `aiia-image-builder` group, are
 normal operational logs and use 30-day retention. AI input/output logs use the
@@ -489,7 +523,9 @@ bash ../deploy/terraform_runtime_guard.sh plan \
   --preflight-receipt "$ARTIFACT_DIR/activation-preflight.json" \
   --alarm-delivery-receipt "$ARTIFACT_DIR/alarm-delivery.json" \
   --versioning-receipt "$ARTIFACT_DIR/log-versioning.json" \
-  --log-readiness-receipt "$ARTIFACT_DIR/log-readiness.json"
+  --log-readiness-receipt "$ARTIFACT_DIR/log-readiness.json" \
+  --alarm-migration-receipt "$ARTIFACT_DIR/alarm-migration-final.json" \
+  --prior-apply-receipt "$ARTIFACT_DIR/runtime-apply.json"
 
 bash ../deploy/terraform_runtime_guard.sh verify \
   --plan "$ARTIFACT_DIR/activation.tfplan"
@@ -522,8 +558,9 @@ rolloutは次の順序を固定し、後段を先行させません。
    用途別secret/T0/table/address/import/lock契約を満たす。
 3. `/app`のexact VersionId/SHA/Vault manifest/build inputs provenanceを固定する。
 4. ingestの実行中taskが0であることと、morning/canaryを含むruntime interfaceを確定する。
-5. pre-versioned destinationへreview済みcutover後、exact attestationを実行し、追加900秒
-   待機後の配信・secure export evidenceを作る。
+5. disabled review manifestを承認した後、guard-owned first-time workflowで全writer切断、
+   versioning有効化、900秒無書込み二回観測、同一lock内cutoverを行い、その後の配信・
+   secure exact-version export evidenceを作る。
 6. 署名済みWolfi/core、OpenClaw、TikTok、x-buzzをFargate preflightし、runtime migrationを
    行う。
 7. service health、SNS実配送、ACL quarantine、canary成功後にactivationだけを行う。

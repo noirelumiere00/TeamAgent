@@ -8,56 +8,58 @@
 variable "runtime_guard_live" {
   description = "Guard scriptがlive/preflight/migration manifestから生成する一時照合値。tfvarsへ保存しない。"
   type = object({
-    project_name                          = string
-    environment                           = string
-    aws_region                            = string
-    account_id                            = string
-    mode                                  = string
-    migration_id                          = string
-    preflight_receipt_sha256              = string
-    versioning_pre_cutover_receipt_sha256 = string
-    log_cutover_contract_sha256           = string
-    live_openclaw_image                   = string
-    desired_openclaw_image                = string
-    live_mcp_image                        = string
-    desired_mcp_image                     = string
-    live_x_image                          = string
-    desired_x_image                       = string
-    live_tiktok_image                     = string
-    desired_tiktok_image                  = string
-    enable_connect_web                    = bool
-    enable_ingest_schedule                = bool
-    enable_morning_digest                 = bool
-    enable_canary_health                  = bool
-    enable_x_research                     = bool
-    enable_tiktok_acquire                 = bool
-    enable_scrape_tools                   = bool
-    enable_reminders                      = bool
-    enable_report_shorturl                = bool
-    enable_research_persist               = bool
-    enable_kaiwai_classify                = bool
-    use_calendar_event_tool               = bool
-    use_schedule_propose_tool             = bool
-    enable_progress_notify                = bool
-    use_entity_tags                       = bool
-    use_ailavault_deeplinks               = bool
-    use_payload_offload                   = bool
-    video_quota_enabled                   = bool
-    use_analysis_cache                    = bool
-    morning_digest_slack_unread           = bool
-    morning_digest_schedule_button        = bool
-    morning_digest_calendar_button        = bool
-    morning_digest_compact                = bool
-    morning_digest_reminders              = bool
-    shared_company_domains                = string
-    slack_team_id                         = string
-    ingest_rule_enabled                   = bool
-    morning_digest_rule_enabled           = bool
-    canary_rule_enabled                   = bool
-    tiktok_dispatch_static_environment    = map(string)
-    x_dispatch_static_environment         = map(string)
-    tiktok_dispatch_code_sha256           = string
-    x_dispatch_code_sha256                = string
+    project_name                            = string
+    environment                             = string
+    aws_region                              = string
+    account_id                              = string
+    mode                                    = string
+    migration_id                            = string
+    preflight_receipt_sha256                = string
+    versioning_pre_cutover_receipt_sha256   = string
+    log_cutover_contract_sha256             = string
+    required_migration_id                   = string
+    required_migration_apply_receipt_sha256 = string
+    live_openclaw_image                     = string
+    desired_openclaw_image                  = string
+    live_mcp_image                          = string
+    desired_mcp_image                       = string
+    live_x_image                            = string
+    desired_x_image                         = string
+    live_tiktok_image                       = string
+    desired_tiktok_image                    = string
+    enable_connect_web                      = bool
+    enable_ingest_schedule                  = bool
+    enable_morning_digest                   = bool
+    enable_canary_health                    = bool
+    enable_x_research                       = bool
+    enable_tiktok_acquire                   = bool
+    enable_scrape_tools                     = bool
+    enable_reminders                        = bool
+    enable_report_shorturl                  = bool
+    enable_research_persist                 = bool
+    enable_kaiwai_classify                  = bool
+    use_calendar_event_tool                 = bool
+    use_schedule_propose_tool               = bool
+    enable_progress_notify                  = bool
+    use_entity_tags                         = bool
+    use_ailavault_deeplinks                 = bool
+    use_payload_offload                     = bool
+    video_quota_enabled                     = bool
+    use_analysis_cache                      = bool
+    morning_digest_slack_unread             = bool
+    morning_digest_schedule_button          = bool
+    morning_digest_calendar_button          = bool
+    morning_digest_compact                  = bool
+    morning_digest_reminders                = bool
+    shared_company_domains                  = string
+    slack_team_id                           = string
+    ingest_rule_enabled                     = bool
+    morning_digest_rule_enabled             = bool
+    canary_rule_enabled                     = bool
+    tiktok_dispatch_static_environment      = map(string)
+    x_dispatch_static_environment           = map(string)
+    tiktok_dispatch_code_sha256             = string
+    x_dispatch_code_sha256                  = string
     monitoring = object({
       container_insights = string
     })
@@ -322,7 +324,7 @@ locals {
   approved_alarm_destination_state_sha256 = "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
   configured_alarm_email_sha256 = sort([
     for endpoint in var.alarm_email_endpoints :
-    sha256(lower(trimspace(endpoint)))
+    sha256(endpoint)
   ])
   configured_alarm_chatbot_arns = sort(var.alarm_chatbot_configuration_arns)
   alarm_delivery_configuration_valid = (
@@ -437,6 +439,8 @@ locals {
         var.runtime_guard_live.preflight_receipt_sha256 == "" &&
         var.runtime_guard_live.versioning_pre_cutover_receipt_sha256 == "" &&
         var.runtime_guard_live.log_cutover_contract_sha256 == "" &&
+        var.runtime_guard_live.required_migration_id == "" &&
+        var.runtime_guard_live.required_migration_apply_receipt_sha256 == "" &&
         var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
         var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
         var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
@@ -463,6 +467,9 @@ locals {
         (
           try(local.runtime_selected_migration.kind, "") == "runtime" ?
           (
+            try(local.runtime_selected_migration.requires_migration, null) == null &&
+            var.runtime_guard_live.required_migration_id == "" &&
+            var.runtime_guard_live.required_migration_apply_receipt_sha256 == "" &&
             try(local.runtime_selected_migration.to.openclaw_image, null) == var.runtime_guard_live.desired_openclaw_image &&
             try(local.runtime_selected_migration.to.mcp_image, null) == var.runtime_guard_live.desired_mcp_image &&
             try(local.runtime_selected_migration.to.x_buzz_image, null) == var.runtime_guard_live.desired_x_image &&
@@ -470,6 +477,12 @@ locals {
           ) :
           (
             try(local.runtime_selected_migration.kind, "") == "activation" &&
+            try(local.runtime_selected_migration.requires_migration, "") ==
+            var.runtime_guard_live.required_migration_id &&
+            can(regex(
+              "^[0-9a-f]{64}$",
+              var.runtime_guard_live.required_migration_apply_receipt_sha256,
+            )) &&
             var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
             var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
             var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
@@ -576,20 +589,22 @@ locals {
 
 resource "terraform_data" "runtime_guard" {
   input = var.runtime_guard_live == null ? null : {
-    mode                     = var.runtime_guard_live.mode
-    migration_id             = var.runtime_guard_live.migration_id
-    preflight_receipt_sha256 = var.runtime_guard_live.preflight_receipt_sha256
-    desired_openclaw_image   = var.runtime_guard_live.desired_openclaw_image
-    desired_mcp_image        = var.runtime_guard_live.desired_mcp_image
-    desired_x_image          = var.runtime_guard_live.desired_x_image
-    desired_tiktok_image     = var.runtime_guard_live.desired_tiktok_image
-    hmac_transition_epoch    = var.runtime_guard_live.hmac_transition_epoch
-    deployed_hmac            = var.runtime_guard_live.deployed_hmac
-    proposed_hmac            = local.hmac_proposed
-    monitoring               = var.runtime_guard_live.monitoring
-    alarm_delivery           = var.runtime_guard_live.alarm_delivery
-    api_gateway              = var.runtime_guard_live.api_gateway
-    connect_app_html         = var.runtime_guard_live.connect_app_html
+    mode                                    = var.runtime_guard_live.mode
+    migration_id                            = var.runtime_guard_live.migration_id
+    preflight_receipt_sha256                = var.runtime_guard_live.preflight_receipt_sha256
+    required_migration_id                   = var.runtime_guard_live.required_migration_id
+    required_migration_apply_receipt_sha256 = var.runtime_guard_live.required_migration_apply_receipt_sha256
+    desired_openclaw_image                  = var.runtime_guard_live.desired_openclaw_image
+    desired_mcp_image                       = var.runtime_guard_live.desired_mcp_image
+    desired_x_image                         = var.runtime_guard_live.desired_x_image
+    desired_tiktok_image                    = var.runtime_guard_live.desired_tiktok_image
+    hmac_transition_epoch                   = var.runtime_guard_live.hmac_transition_epoch
+    deployed_hmac                           = var.runtime_guard_live.deployed_hmac
+    proposed_hmac                           = local.hmac_proposed
+    monitoring                              = var.runtime_guard_live.monitoring
+    alarm_delivery                          = var.runtime_guard_live.alarm_delivery
+    api_gateway                             = var.runtime_guard_live.api_gateway
+    connect_app_html                        = var.runtime_guard_live.connect_app_html
   }
 
   # The canonical topic already exists. Confirmed delivery is live metadata,

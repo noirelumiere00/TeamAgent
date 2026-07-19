@@ -299,27 +299,36 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     planner = PLAN_LAUNCHER.read_text(encoding="utf-8")
     applier = APPLY_LAUNCHER.read_text(encoding="utf-8")
     runner = GATE_RUNNER.read_text(encoding="utf-8")
+    guard = (
+        ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+    ).read_text(encoding="utf-8")
 
-    assert "terraform plan \\" in planner
-    assert '-out="$plan_path"' in planner
-    assert "prepare-deployment-intent" in planner
-    assert "image_deployment_intent_id=$intent_id" in planner
-    assert "complete, locked, refresh-enabled full saved plans" in planner
-    assert "saved plans must be stored outside" in planner
-    assert 'python3 "$apply_supervisor" \\' in applier
+    for retired in (planner, applier):
+        assert "Retired:" in retired
+        assert "terraform_runtime_guard.sh" in retired
+        assert "exit 64" in retired
+        assert "terraform plan" not in retired
+        assert "terraform apply" not in retired
+    assert 'TF_ARGS=(' in guard
+    assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in guard
+    assert "-refresh=true" in guard
+    assert "-lock-timeout=5m" in guard
+    assert "-out=$STAGE_PLAN" in guard
+    assert "prepare_image_deployment_intent" in guard
+    assert "image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID" in guard
+    assert 'python3 "$APPLY_SUPERVISOR" \\' in guard
     supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
         encoding="utf-8"
     )
     assert '"apply",' in supervisor
     assert '"-lock=true",' in supervisor
-    assert "never retry this plan, intent, or receipts" in applier
-    assert "mark-deployment-intent-outcome" in applier
-    assert "saved plans must be stored outside" in applier
-    assert 'control_commit="$(git -C "$control_root" rev-parse HEAD)"' in applier
-    assert applier.count('--control-commit "$control_commit"') == 2
-    assert "terraform_apply_supervisor.py" in applier
-    assert "heartbeat-deployment-lock" not in applier
-    assert ("assumed-role/teamagent-dev-terraform-automation/teamagent-terraform-worker") in runner
+    assert "mark-deployment-intent-outcome" in guard
+    assert "terraform_apply_supervisor.py" in guard
+    assert "heartbeat-deployment-lock" in guard
+    assert (
+        "assumed-role/teamagent-dev-terraform-runtime-automation/"
+        "teamagent-terraform-worker"
+    ) in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
     assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner
     assert "acquire-deployment-lock" in runner
@@ -333,8 +342,8 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
             text=True,
             timeout=10,
         )
-        assert completed.returncode == 0, completed.stderr
-        assert "usage:" in completed.stdout
+        assert completed.returncode == 64
+        assert "retired launcher" in completed.stderr
 
 
 def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None:

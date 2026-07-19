@@ -208,7 +208,8 @@ def test_direct_ingest_task_definition_registration_is_retired() -> None:
     r = _run(str(REGISTER))
     assert r.returncode == 64
     assert "permanently disabled" in r.stderr
-    assert "plan_image_release.sh" in r.stderr
+    assert "terraform_runtime_guard.sh" in r.stderr
+    assert "plan_image_release.sh" not in r.stderr
     body = REGISTER.read_text(encoding="utf-8").lower()
     assert "register-task-definition" not in body
     assert "update-service" not in body
@@ -278,7 +279,8 @@ def test_terraform_guard_contract_strings() -> None:
     ):
         assert needle in body, f"Terraform guard契約が欠落: {needle}"
     assert "-auto-approve" not in body
-    assert 'terraform -chdir="$TF_DIR" apply' in body
+    assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in body
+    assert '"$APPLY_SUPERVISOR"' in body
     assert '"$TMP_ROOT/verify/plan.tfplan"' in body
     assert "--confirm-plan-sha" not in body
     assert "--target)" not in body

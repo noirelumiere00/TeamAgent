@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="14"
+GUARD_VERSION="16"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -27,6 +27,7 @@ EXPECTED_ALARM_EMAIL_SHA256="88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a52
 EXPECTED_ALARM_DESTINATION_STATE_SHA256="c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
 LOG_VERSIONING_SETTLE_SECONDS=900
 TRUSTED_AUTOMATION_ROLE_NAME="teamagent-dev-terraform-runtime-automation"
+TRUSTED_AUTOMATION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
 command -v realpath >/dev/null 2>&1 || {
   echo "★ realpath が必要です" >&2
   exit 1
@@ -41,18 +42,36 @@ TF_DIR="$REPO_ROOT/infra/terraform"
 GUARD_JQ_DIR="$REPO_ROOT/infra/deploy"
 GUARD_JQ="$GUARD_JQ_DIR/terraform_runtime_guard.jq"
 MIGRATION_FILE="$GUARD_JQ_DIR/terraform_runtime_migrations.json"
+EVIDENCE_HELPER="$GUARD_JQ_DIR/runtime_evidence_guard.py"
+IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
+RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
+IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
+APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 TMP_ROOT=""
+AWS_BIN=""
+AWS_BIN_SHA256=""
+AWS_BIN_IDENTITY=""
 
 usage() {
   cat <<'EOF'
 usage:
   terraform_runtime_guard.sh snapshot
   terraform_runtime_guard.sh attest-log-versioning --out RECEIPT
+  terraform_runtime_guard.sh attest-log-readiness \
+    --versioning-receipt FILE --spec FILE --artifact-dir DIR --out RECEIPT
+  terraform_runtime_guard.sh issue-alarm-challenge --out CHALLENGE
+  terraform_runtime_guard.sh sign-alarm-ack \
+    --challenge FILE --out RECIPIENT_ACK
+  terraform_runtime_guard.sh attest-alarm-delivery \
+    --challenge FILE --recipient-ack FILE --out RECEIPT
+  terraform_runtime_guard.sh advance-alarm-migration \
+    --phase PHASE [--publisher-id ID] [--delivery-receipt FILE] --out RECEIPT
   terraform_runtime_guard.sh preflight --migration ID --out RECEIPT
   terraform_runtime_guard.sh plan --var-file FILE --out PLAN \
     (--runtime-sync | --runtime-migration ID --preflight-receipt FILE \
     --alarm-delivery-receipt FILE --versioning-receipt FILE \
-    --log-readiness-receipt FILE) [--receipt FILE]
+    --log-readiness-receipt FILE --alarm-migration-receipt FILE \
+    [--prior-apply-receipt FILE]) [--receipt FILE]
   terraform_runtime_guard.sh verify --plan PLAN [--receipt FILE]
   terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] --out APPLY_RECEIPT
 
@@ -63,11 +82,15 @@ plan:
   --alarm-delivery-receipt FILE 実SNS配送を確認した短命・非機微receipt
   --versioning-receipt FILE producer-off/independent timestamp/900秒settle/cutoverを束縛する短命receipt
   --log-readiness-receipt FILE versioning 15分待機・配信・retention export証跡
+  --alarm-migration-receipt FILE publisher別checkpointからlegacy retireまでのdurable chain
+  --prior-apply-receipt FILE activationが要求する直前runtime migration成功apply receipt
   --receipt FILE           receipt 出力先（default: PLAN.runtime-guard.json）
 
 重要:
   - TeamAgent dev / account 718959508629 / ap-northeast-1 / 固定S3 backend専用。
-  - snapshot/verify/attest-log-versioningはAWS read-only。preflightは一時task/EFSを使う。
+  - snapshot/verifyはAWS read-only。attest-log-versioningはdisabled review
+    manifestと共有lockの下だけで全writer切断/versioning/cutoverを書き込む。
+  - preflightは一時task/EFSを使う。
   - applyはexact trusted automation role、共有DynamoDB lock、直前verify、保存planだけを必須にする。
   - runtime preflightはCosign+exact KMS keyで新core digestの署名とRekor証跡も検証する。
   - planはrefreshとTerraform state lockのみ行う。
@@ -89,6 +112,11 @@ assert_clean_terraform_environment() {
       TF_CLI_CONFIG_FILE|TF_REATTACH_PROVIDERS|TF_PLUGIN_CACHE_DIR|\
       TF_REGISTRY_CLIENT_TIMEOUT|TF_REGISTRY_DISCOVERY_RETRY|\
       TF_IN_AUTOMATION|TF_LOG|TF_LOG_*)
+        rejected+=("$name")
+        unset "$name"
+        ;;
+      AWS_ENDPOINT_URL|AWS_ENDPOINT_URL_*|AWS_PROFILE|AWS_DEFAULT_PROFILE|\
+      AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|AWS_CA_BUNDLE)
         rejected+=("$name")
         unset "$name"
         ;;
@@ -188,9 +216,19 @@ assert_guard_sources() {
   assert_regular_nonwritable "$SCRIPT_PATH"
   assert_regular_nonwritable "$GUARD_JQ"
   assert_regular_nonwritable "$MIGRATION_FILE"
+  assert_regular_nonwritable "$EVIDENCE_HELPER"
+  assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
+  assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
+  assert_regular_nonwritable "$IMAGE_CONTEXT_HELPER"
+  assert_regular_nonwritable "$APPLY_SUPERVISOR"
   assert_git_tracked_clean "$SCRIPT_PATH"
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
+  assert_git_tracked_clean "$EVIDENCE_HELPER"
+  assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
+  assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
+  assert_git_tracked_clean "$IMAGE_CONTEXT_HELPER"
+  assert_git_tracked_clean "$APPLY_SUPERVISOR"
 
   local path
   while IFS= read -r path; do
@@ -222,7 +260,14 @@ assert_guard_sources() {
 write_config_manifest() {
   local output="$1" path relative
   : > "$output"
-  for path in "$GUARD_JQ" "$MIGRATION_FILE"; do
+  for path in \
+    "$GUARD_JQ" \
+    "$MIGRATION_FILE" \
+    "$EVIDENCE_HELPER" \
+    "$IMAGE_GATE_RUNNER" \
+    "$RELEASE_EVIDENCE_HELPER" \
+    "$IMAGE_CONTEXT_HELPER" \
+    "$APPLY_SUPERVISOR"; do
     relative="${path#"$REPO_ROOT"/}"
     printf '%s  %s\n' "$(sha256_file "$path")" "$relative" >> "$output"
   done
@@ -305,29 +350,88 @@ sha256_text() {
   fi
 }
 
+aws_endpoint() {
+  case "$1" in
+    s3api) printf 'https://s3.%s.amazonaws.com\n' "$REGION" ;;
+    cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
+    budgets) printf 'https://budgets.amazonaws.com\n' ;;
+    ce) printf 'https://ce.us-east-1.amazonaws.com\n' ;;
+    *)
+      case "$1" in
+        sts|cloudtrail|bedrock|dynamodb|ecs|events|scheduler|lambda|\
+        logs|chatbot|sns|sqs|kms|autoscaling|codestar-notifications|rds)
+          printf 'https://%s.%s.amazonaws.com\n' "$1" "$REGION"
+          ;;
+        *) die "AWS service endpointがallowlist外です: $1" ;;
+      esac
+      ;;
+  esac
+}
+
+initialize_aws_trust() {
+  [ -z "$AWS_BIN" ] || return 0
+  need_cmd aws
+  local discovered
+  discovered="$(command -v aws)"
+  AWS_BIN="$(realpath "$discovered")"
+  [ -f "$AWS_BIN" ] && [ ! -L "$AWS_BIN" ] ||
+    die "AWS executableのcanonical regular pathを確認できません"
+  assert_regular_nonwritable "$AWS_BIN"
+  [ "$(stat -f '%l' "$AWS_BIN" 2>/dev/null || stat -c '%h' "$AWS_BIN")" = "1" ] ||
+    die "AWS executableはsingle-linkである必要があります"
+  AWS_BIN_SHA256="$(sha256_file "$AWS_BIN")"
+  AWS_BIN_IDENTITY="$(stat_identity "$AWS_BIN"):$(stat_size "$AWS_BIN")"
+  "$AWS_BIN" --version 2>&1 | grep -Eq '^aws-cli/2[.]' ||
+    die "review済みAWS CLI v2だけを使用できます"
+  export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+  export AWS_CONFIG_FILE=/dev/null
+  export AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  export AWS_DEFAULT_REGION="$REGION"
+  export AWS_REGION="$REGION"
+  export AWS_PAGER=""
+}
+
+assert_aws_trust_unchanged() {
+  initialize_aws_trust
+  [ "$(stat_identity "$AWS_BIN"):$(stat_size "$AWS_BIN")" = \
+    "$AWS_BIN_IDENTITY" ] ||
+    die "AWS executable identityがworkflow中に変化しました"
+  [ "$(sha256_file "$AWS_BIN")" = "$AWS_BIN_SHA256" ] ||
+    die "AWS executable bytesがworkflow中に変化しました"
+}
+
 aws_cli() {
-  AWS_PAGER="" aws --region "$REGION" "$@"
+  initialize_aws_trust
+  assert_aws_trust_unchanged
+  local service="$1"
+  shift
+  "$AWS_BIN" --region "$REGION" \
+    --endpoint-url "$(aws_endpoint "$service")" \
+    --no-cli-pager "$service" "$@"
 }
 
 aws_cost_cli() {
-  # AWS Budgets and Cost Explorer use the us-east-1 global billing endpoint.
-  AWS_PAGER="" aws --region us-east-1 "$@"
+  initialize_aws_trust
+  assert_aws_trust_unchanged
+  local service="$1"
+  shift
+  "$AWS_BIN" --region us-east-1 \
+    --endpoint-url "$(aws_endpoint "$service")" \
+    --no-cli-pager "$service" "$@"
 }
 
 assert_trusted_automation_identity() {
   local identity="$TMP_ROOT/trusted-automation-identity.json"
-  local expected_iam_arn expected_sts_prefix
-  expected_iam_arn="arn:aws:iam::${EXPECTED_ACCOUNT_ID}:role/${TRUSTED_AUTOMATION_ROLE_NAME}"
-  expected_sts_prefix="arn:aws:sts::${EXPECTED_ACCOUNT_ID}:assumed-role/${TRUSTED_AUTOMATION_ROLE_NAME}/"
   aws_cli sts get-caller-identity --output json > "$identity"
   jq -e \
     --arg account "$EXPECTED_ACCOUNT_ID" \
-    --arg iam "$expected_iam_arn" \
-    --arg sts_prefix "$expected_sts_prefix" '
+    --arg arn "$TRUSTED_AUTOMATION_ARN" '
     .Account == $account and
-    ((.Arn == $iam) or (.Arn | startswith($sts_prefix)))
+    .Arn == $arn and
+    (.UserId | type) == "string" and
+    (.UserId | length) > 0
   ' "$identity" >/dev/null ||
-    die "write-capable guard操作はexact trusted automation roleだけが実行できます"
+    die "write-capable guard操作はexact trusted automation sessionだけが実行できます"
 }
 
 capture_backend_identity() {
@@ -466,10 +570,22 @@ capture_state_contract() {
       id:"/aws/codebuild/teamagent-dev-aiia-image-builder"
     },
     {
-      address:"aws_cloudwatch_log_group.codebuild_image_builder",
+      address:"aws_cloudwatch_log_group.codebuild_image",
       type:"aws_cloudwatch_log_group",
-      name:"codebuild_image_builder",
+      name:"codebuild_image",
       id:"/aws/codebuild/teamagent-dev-image-builder"
+    },
+    {
+      address:"aws_cloudwatch_log_group.ecs_containerinsights_teamagent",
+      type:"aws_cloudwatch_log_group",
+      name:"ecs_containerinsights_teamagent",
+      id:"/aws/ecs/containerinsights/teamagent-dev/performance"
+    },
+    {
+      address:"aws_cloudwatch_log_group.ecs_containerinsights_tiktok",
+      type:"aws_cloudwatch_log_group",
+      name:"ecs_containerinsights_tiktok",
+      id:"/aws/ecs/containerinsights/teamagent-dev-tiktok/performance"
     },
     {
       address:"aws_cloudwatch_log_group.reminder_notify",
@@ -557,71 +673,8 @@ capture_state_contract() {
   ' > "$output" || die "state lineage/serial/address/import ownership契約を確定できません"
 }
 
-verify_alarm_delivery_test_receipt() {
-  local receipt="$1" snapshot="$2"
-  jq -e \
-    --arg account "$EXPECTED_ACCOUNT_ID" \
-    --arg region "$REGION" \
-    --arg destination_state_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" \
-    --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
-    --arg topic \
-      "arn:aws:sns:${REGION}:${EXPECTED_ACCOUNT_ID}:${PROJECT}-${ENVIRONMENT}-openclaw-alarms" \
-    --arg subscription_sha \
-      "$(jq -er '.alarm_delivery.confirmed_subscription_metadata_sha256' "$snapshot")" \
-    --argjson now "$(date +%s)" '
-    (keys | sort) == ([
-      "account_id",
-      "delivery_channel",
-      "delivery_evidence_sha256",
-      "destination_state_sha256",
-      "email_endpoint_sha256",
-      "expires_at_epoch",
-      "kind",
-      "observer_identity_sha256",
-      "region",
-      "result",
-      "schema_version",
-      "subscription_metadata_sha256",
-      "test_message_id_sha256",
-      "tested_at_epoch",
-      "topic_arn"
-    ] | sort) and
-    .kind == "teamagent-alarm-delivery-test-receipt" and
-    .schema_version == 2 and
-    .account_id == $account and .region == $region and
-    .topic_arn == $topic and
-    .subscription_metadata_sha256 == $subscription_sha and
-    .destination_state_sha256 == $destination_state_sha and
-    .delivery_channel == "email" and
-    .email_endpoint_sha256 == $email_sha and
-    .result == "delivered" and
-    (.observer_identity_sha256 | test("^[0-9a-f]{64}$")) and
-    (.test_message_id_sha256 | test("^[0-9a-f]{64}$")) and
-    (.delivery_evidence_sha256 | test("^[0-9a-f]{64}$")) and
-    (.tested_at_epoch | type) == "number" and
-    (.tested_at_epoch | floor) == .tested_at_epoch and
-    .tested_at_epoch <= $now and
-    .expires_at_epoch > $now and
-    (.expires_at_epoch - .tested_at_epoch) > 0 and
-    (.expires_at_epoch - .tested_at_epoch) <= 86400
-  ' "$receipt" >/dev/null ||
-    die "実配送を人が確認したfresh SNS delivery receiptが不正または期限切れです"
-  jq -e \
-    --arg expected_email "$EXPECTED_ALARM_EMAIL_SHA256" \
-    --arg destination_state_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" \
-    --slurpfile receipt "$receipt" '
-    .alarm_delivery.confirmed_email_endpoint_sha256 ==
-      [$expected_email] and
-    .alarm_delivery.subscription_inventory_count == 1 and
-    .alarm_delivery.pending_subscription_count == 0 and
-    .alarm_delivery.subscription_protocols == ["email"] and
-    .alarm_delivery.destination_state_sha256 == $destination_state_sha and
-    .alarm_delivery.destination_state_sha256 ==
-      $receipt[0].destination_state_sha256 and
-    .alarm_delivery.attached_chatbot_configuration_arns == [] and
-    .alarm_delivery_observation.attached_chatbot_configurations == []
-  ' "$snapshot" >/dev/null ||
-    die "SNS receiptとapproved emailだけのexclusive live destination stateが一致しません"
+verify_alarm_delivery_test_receipt_legacy_retired() {
+  die "retired: only fresh SNS challenge plus managed-KMS recipient acknowledgement is accepted"
 }
 
 capture_log_delivery_contract() {
@@ -821,90 +874,7 @@ write_log_cutover_contract() {
 }
 
 capture_bucket_versioning_enablement() {
-  local bucket="$1" output="$2"
-  local events="$TMP_ROOT/versioning-events-$RANDOM-$RANDOM.json"
-  local selected="$TMP_ROOT/versioning-event-selected-$RANDOM-$RANDOM.json"
-  local event_id event_id_sha event_sha
-  aws_cli cloudtrail lookup-events \
-    --lookup-attributes "AttributeKey=ResourceName,AttributeValue=${bucket}" \
-    --max-results 50 --output json > "$events"
-  jq -e -S \
-    --arg account "$EXPECTED_ACCOUNT_ID" \
-    --arg region "$REGION" \
-    --arg bucket "$bucket" \
-    --arg bucket_arn "arn:aws:s3:::${bucket}" '
-    def request_bucket($event):
-      ($event.requestParameters.bucketName //
-       $event.requestParameters.bucket //
-       "");
-    def request_status($event):
-      ($event.requestParameters.VersioningConfiguration.Status //
-       $event.requestParameters.versioningConfiguration.Status //
-       $event.requestParameters.versioningConfiguration.status //
-       "");
-    def event_epoch($value):
-      ($value | sub("\\+00:00$"; "Z") | fromdateiso8601);
-    if (
-      (.NextToken // "") == "" and
-      (.Events | type) == "array"
-    ) then
-      ([
-        .Events[] |
-        . as $outer |
-        (.CloudTrailEvent | fromjson) as $event |
-        select(
-          $outer.EventName == "PutBucketVersioning" and
-          $outer.EventSource == "s3.amazonaws.com" and
-          $event.eventName == "PutBucketVersioning" and
-          $event.eventSource == "s3.amazonaws.com" and
-          $event.awsRegion == $region and
-          $event.recipientAccountId == $account and
-          $event.eventID == $outer.EventId and
-          event_epoch($outer.EventTime) ==
-            event_epoch($event.eventTime) and
-          $event.eventType == "AwsApiCall" and
-          $event.managementEvent == true and
-          $event.readOnly == false and
-          request_bucket($event) == $bucket and
-          ([($outer.Resources // [])[].ResourceName] |
-            any(. == $bucket or . == $bucket_arn))
-        ) |
-        {
-          event_id:$event.eventID,
-          event_time:$event.eventTime,
-          enabled_at_epoch:event_epoch($event.eventTime),
-          status:request_status($event),
-          bucket_name:$bucket,
-          bucket_arn:$bucket_arn,
-          event_name:$event.eventName,
-          event_source:$event.eventSource,
-          aws_region:$event.awsRegion,
-          recipient_account_id:$event.recipientAccountId
-        }
-      ] | sort_by(.enabled_at_epoch, .event_id)) as $history |
-      if (
-        ($history | length) > 0 and
-        $history[-1].status == "Enabled"
-      ) then $history[-1]
-      else error("latest bucket versioning event is not Enabled")
-      end
-    else error("incomplete versioning event history")
-    end
-  ' "$events" > "$selected" ||
-    die "CloudTrail event historyからlatest Enabled PutBucketVersioningを確定できません: $bucket"
-  event_id="$(jq -er '.event_id' "$selected")"
-  event_id_sha="$(printf '%s' "$event_id" | sha256_text)"
-  event_sha="$(sha256_file "$selected")"
-  jq -e -S \
-    --arg event_id_sha "$event_id_sha" \
-    --arg event_sha "$event_sha" '
-    del(.event_id) + {
-      enablement_event_id_sha256:$event_id_sha,
-      enablement_event_sha256:$event_sha,
-      timestamp_source:"aws-cloudtrail-event-history"
-    }
-  ' "$selected" > "$output" ||
-    die "versioning enablement eventをhash束縛できません: $bucket"
+  die "retired: only the guard-owned PutBucketVersioning response Date is authoritative"
 }
 
 capture_versioning_enablement_contract() {
@@ -993,7 +963,8 @@ write_log_bucket_identity() {
   fi
 }
 
-verify_versioning_attestation_receipt() {
+verify_versioning_attestation_receipt_v2_retired() {
+  die "retired v2 receipt: only the guard-owned first-time schema v4 workflow is accepted"
   local receipt="$1" snapshot="$2" state_contract="$3"
   local config_manifest="$TMP_ROOT/versioning-config-manifest-$RANDOM.txt"
   local current_enablement="$TMP_ROOT/versioning-current-enablement-$RANDOM.json"
@@ -1043,9 +1014,9 @@ verify_versioning_attestation_receipt() {
       "state_contract",
       "versioning_enablement"
     ] | sort) and
-    .kind == "teamagent-log-versioning-precutover-receipt" and
+    .kind == "retired-teamagent-log-versioning-precutover-receipt" and
     .schema_version == 2 and
-    .stage_id == "2026-07-log-versioning-precutover-v3" and
+    .stage_id == "2026-07-log-versioning-cutover-v4" and
     .guard_version == $guard_version and
     .account_id == $account and .region == $region and
     .git_commit == $git_commit and
@@ -1118,7 +1089,7 @@ verify_versioning_attestation_receipt() {
       .event_name == "PutBucketVersioning" and
       .event_source == "s3.amazonaws.com" and
       .status == "Enabled" and
-      .timestamp_source == "aws-cloudtrail-event-history" and
+      .timestamp_source == "aws-http-response-date" and
       (.enabled_at_epoch | type) == "number" and
       (.enabled_at_epoch | floor) == .enabled_at_epoch and
       (.enablement_event_id_sha256 | test("^[0-9a-f]{64}$")) and
@@ -1252,47 +1223,18 @@ verify_versioning_attestation_receipt() {
 
 verify_bound_export_file() {
   local binding="$1" label="$2"
-  local requested path declared_inode declared_size declared_sha
-  local identity_before
-  requested="$(jq -er '
-    .export_file_path |
-    select(
-      type == "string" and
-      startswith("/") and
-      (test("[\u0000-\u001f\u007f]") | not)
-    )
-  ' "$binding")" ||
-    die "$label export file pathが不正です"
-  declared_inode="$(jq -er '
-    .export_file_inode |
-    select(type == "string" and test("^[1-9][0-9]*$"))
-  ' "$binding")" ||
-    die "$label export file inodeが不正です"
-  declared_size="$(jq -er '
-    .export_file_size_bytes |
-    select(type == "number" and floor == . and . > 0)
-  ' "$binding")" ||
-    die "$label export file sizeが不正です"
-  declared_sha="$(jq -er '
-    .content_sha256 |
-    select(type == "string" and test("^[0-9a-f]{64}$"))
-  ' "$binding")" ||
-    die "$label export content hashが不正です"
-  path="$(secure_existing_file "$requested" 600)"
-  [ "$path" = "$requested" ] ||
-    die "$label export fileはcanonical pathで指定してください"
-  identity_before="$(stat_identity "$path")"
-  [ "$(stat_inode "$path")" = "$declared_inode" ] ||
-    die "$label export file inodeがevidenceと一致しません"
-  [ "$(stat_size "$path")" = "$declared_size" ] ||
-    die "$label export file sizeがevidenceと一致しません"
-  [ "$(sha256_file "$path")" = "$declared_sha" ] ||
-    die "$label export file content hashがevidenceと一致しません"
-  [ "$(stat_identity "$path")" = "$identity_before" ] &&
-    [ "$(stat_inode "$path")" = "$declared_inode" ] &&
-    [ "$(stat_size "$path")" = "$declared_size" ] &&
-    [ "$(sha256_file "$path")" = "$declared_sha" ] ||
-    die "$label export fileが検証中に差替え・変更されました"
+  local verified="$TMP_ROOT/exact-export-verified-$RANDOM-$RANDOM.json"
+  if jq -e '
+    .kind == "teamagent-exact-s3-export" and
+    .schema_version == 1
+  ' "$binding" >/dev/null; then
+    run_evidence_helper verify-s3-export \
+      --binding "$binding" --fresh-dir "$TMP_ROOT" --output "$verified"
+    jq -e '.verified == true' "$verified" >/dev/null ||
+      die "$label exact S3 exportのplan/apply再取得検証に失敗しました"
+    return 0
+  fi
+  die "$label legacy arbitrary-byte export bindingは証跡として禁止されています"
 }
 
 verify_readiness_export_bindings() {
@@ -1320,16 +1262,16 @@ verify_readiness_export_bindings() {
       $retention[0].log_groups[] |
       {
         label:("retention " + .log_group),
-        value:.
+        value:.export
       }
     ])
   } |
   if (
-    (.bindings | length) == 8 and
-    ([.bindings[].value.export_file_path] | length) ==
-      ([.bindings[].value.export_file_path] | unique | length) and
-    ([.bindings[].value.export_file_inode] | length) ==
-      ([.bindings[].value.export_file_inode] | unique | length)
+    (.bindings | length) == 10 and
+    ([.bindings[].value.file.path] | length) ==
+      ([.bindings[].value.file.path] | unique | length) and
+    ([.bindings[].value.file.identity.inode] | length) ==
+      ([.bindings[].value.file.identity.inode] | unique | length)
   ) then .
   else error("non-unique export binding")
   end' > "$refs" ||
@@ -1352,9 +1294,14 @@ verify_log_readiness_receipt() {
   local versioning_sha observed_at evidence_path evidence_path_requested
   local evidence_identity retention_path retention_path_requested
   local retention_identity
+  local bedrock_retention_live="$TMP_ROOT/bedrock-retention-live-$RANDOM.json"
   versioning_sha="$(sha256_file "$versioning_receipt")"
-  observed_at="$(jq -er \
-    '.pre_cutover_observed_at_epoch' "$versioning_receipt")"
+  observed_at="$(jq -er '
+    [
+      .workflow.cutover.cloudtrail.response_date_epoch,
+      .workflow.cutover.bedrock.response_date_epoch
+    ] | max
+  ' "$versioning_receipt")"
   jq -e '
     .log_buckets.cloudtrail.versioning_status == "Enabled" and
     .log_buckets.cloudtrail.mfa_delete == "Disabled" and
@@ -1450,37 +1397,79 @@ verify_log_readiness_receipt() {
     --slurpfile retention "$retention_path" '
     def delivery($prefix; $observation):
       (keys | sort) == ([
-        "content_sha256",
-        "etag",
-        "export_file_inode",
-        "export_file_path",
-        "export_file_size_bytes",
-        "key",
-        "last_modified_epoch",
-        "size_bytes",
-        "version_id"
+        "account_id",
+        "file",
+        "fresh_nonce",
+        "fresh_nonce_sha256",
+        "kind",
+        "observed_at_epoch",
+        "region",
+        "s3",
+        "schema_version"
       ] | sort) and
-      (.key | type == "string" and startswith($prefix)) and
-      (.version_id |
+      .kind == "teamagent-exact-s3-export" and
+      .schema_version == 1 and
+      .account_id == $account and .region == $region and
+      (.s3.key | type == "string" and startswith($prefix)) and
+      (.s3.version_id |
         type == "string" and test("^[A-Za-z0-9._-]{1,1024}$")) and
-      (.etag | type == "string" and test("^[0-9a-f]{32}(-[0-9]+)?$")) and
-      (.content_sha256 | test("^[0-9a-f]{64}$")) and
-      (.export_file_path |
+      (.s3.etag | type == "string" and
+        test("^\"?[0-9a-fA-F]{32}(-[0-9]+)?\"?$")) and
+      (.s3.content_length | type) == "number" and
+      .s3.content_length > 0 and
+      (.s3.checksums | type) == "object" and
+      (.s3.head_request_id_sha256 | test("^[0-9a-f]{64}$")) and
+      (.s3.get_request_id_sha256 | test("^[0-9a-f]{64}$")) and
+      (.file.content_sha256 | test("^[0-9a-f]{64}$")) and
+      (.file.path |
         type == "string" and startswith("/") and
         (test("[\u0000-\u001f\u007f]") | not)) and
-      (.export_file_inode |
-        type == "string" and test("^[1-9][0-9]*$")) and
-      (.export_file_size_bytes | type) == "number" and
-      (.export_file_size_bytes | floor) == .export_file_size_bytes and
-      .export_file_size_bytes > 0 and
-      (.size_bytes | type) == "number" and
-      (.size_bytes | floor) == .size_bytes and .size_bytes > 0 and
-      .export_file_size_bytes == .size_bytes and
-      (.last_modified_epoch | type) == "number" and
-      (.last_modified_epoch | floor) == .last_modified_epoch and
-      .last_modified_epoch >= $pre_cutover_observed_at and
-      .last_modified_epoch <= $observation and
-      .last_modified_epoch <= $now;
+      (.file.acquisition_identity_before | keys | sort) ==
+        ([
+          "birthtime_ns",
+          "ctime_ns",
+          "device",
+          "inode",
+          "mode",
+          "mtime_ns",
+          "nlink",
+          "path",
+          "size",
+          "uid"
+        ] | sort) and
+      .file.acquisition_identity_before.path == .file.path and
+      .file.acquisition_identity_before.device ==
+        .file.identity.device and
+      .file.acquisition_identity_before.inode ==
+        .file.identity.inode and
+      .file.acquisition_identity_before.nlink == 1 and
+      .file.acquisition_identity_before.size == 0 and
+      .file.acquisition_identity_before.mode == 384 and
+      (.file.acquisition_identity_before.mtime_ns | type) == "number" and
+      (.file.acquisition_identity_before.ctime_ns | type) == "number" and
+      ((.file.acquisition_identity_before.birthtime_ns == null) or
+       ((.file.acquisition_identity_before.birthtime_ns | type) ==
+        "number")) and
+      (.file.identity.device | type) == "number" and
+      (.file.identity.inode | type) == "number" and
+      .file.identity.path == .file.path and
+      .file.identity.nlink == 1 and
+      .file.identity.mode == 384 and
+      (.file.identity.size | type) == "number" and
+      .file.identity.size == .s3.content_length and
+      (.file.identity.mtime_ns | type) == "number" and
+      (.file.identity.ctime_ns | type) == "number" and
+      ((.file.identity.birthtime_ns == null) or
+       ((.file.identity.birthtime_ns | type) == "number")) and
+      (.fresh_nonce | test("^[0-9a-f]{64}$")) and
+      (.fresh_nonce_sha256 | test("^[0-9a-f]{64}$")) and
+      (.observed_at_epoch | type) == "number" and
+      .observed_at_epoch <= $observation and
+      .s3.last_modified_epoch >= $pre_cutover_observed_at and
+      .s3.last_modified_epoch <= .observed_at_epoch and
+      .s3.head_aws_date_epoch <= .observed_at_epoch and
+      .s3.get_aws_date_epoch <= .observed_at_epoch and
+      .observed_at_epoch <= $now;
     .observed_at_epoch as $evidence_observed_at |
     (keys | sort) == ([
       "account_id",
@@ -1504,8 +1493,7 @@ verify_log_readiness_receipt() {
     (.observed_at_epoch | floor) == .observed_at_epoch and
     .observed_at_epoch >= .pre_cutover_observed_at_epoch and
     .observed_at_epoch <= $now and
-    .observed_at_epoch <= $receipt_created_at and
-    ($receipt_created_at - .observed_at_epoch) <= 900 and
+    .observed_at_epoch == $receipt_created_at and
     .retention_export_manifest_path == $retention_path and
     .retention_export_manifest_sha256 == $retention_sha and
     (.retention_export_manifest_inode |
@@ -1525,7 +1513,8 @@ verify_log_readiness_receipt() {
         "AWSLogs/" + $account + "/CloudTrail-Digest/";
         $evidence_observed_at
       )) and
-    (.bedrock | keys | sort) == ["bucket","latest_delivery"] and
+    (.bedrock | keys | sort) ==
+      ["bucket","latest_delivery","retention_live"] and
     .bedrock.bucket == $bedrock and
     (.bedrock.latest_delivery |
       delivery(
@@ -1533,6 +1522,23 @@ verify_log_readiness_receipt() {
         "/BedrockModelInvocationLogs/";
         $evidence_observed_at
       )) and
+    .bedrock.retention_live.kind ==
+      "teamagent-bedrock-retention-live-evidence" and
+    .bedrock.retention_live.schema_version == 1 and
+    (.bedrock.retention_live.contract_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .bedrock.retention_live.contract.bucket == $bedrock and
+    .bedrock.retention_live.contract.current_expiration_days == 60 and
+    .bedrock.retention_live.contract.noncurrent_expiration_days == 60 and
+    .bedrock.retention_live.contract.manual_delete_denied == true and
+    .bedrock.retention_live.contract.writer_service ==
+      "bedrock.amazonaws.com" and
+    (.bedrock.retention_live.contract.lifecycle_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.bedrock.retention_live.contract.policy_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .bedrock.retention_live.contract.observed_at_epoch <=
+      $evidence_observed_at and
     ($retention[0] | keys | sort) == ([
       "account_id",
       "created_at_epoch",
@@ -1550,36 +1556,27 @@ verify_log_readiness_receipt() {
     ($retention[0].created_at_epoch | floor) ==
       $retention[0].created_at_epoch and
     $retention[0].created_at_epoch >= $pre_cutover_observed_at and
-    $retention[0].created_at_epoch <= .observed_at_epoch and
+    $retention[0].created_at_epoch == .observed_at_epoch and
     ($retention[0].log_groups | type) == "array" and
     ($retention[0].log_groups | map(.log_group) | sort) == ([
       "/aws/codebuild/teamagent-dev-aiia-image-builder",
       "/aws/codebuild/teamagent-dev-image-builder",
+      "/aws/ecs/containerinsights/teamagent-dev/performance",
+      "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance",
       "/aws/lambda/teamagent-dev-reminders-notify",
       "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
       "/aws/lambda/teamagent-dev-x-buzz-dispatch"
     ] | sort) and
-    ($retention[0].log_groups | length) == 5 and
+    ($retention[0].log_groups | length) == 7 and
     all($retention[0].log_groups[];
       (keys | sort) ==
         ([
-          "content_sha256",
           "event_count",
-          "export_file_inode",
-          "export_file_path",
-          "export_file_size_bytes",
+          "export",
           "exported_through_epoch",
           "log_group"
         ] | sort) and
-      (.content_sha256 | test("^[0-9a-f]{64}$")) and
-      (.export_file_path |
-        type == "string" and startswith("/") and
-        (test("[\u0000-\u001f\u007f]") | not)) and
-      (.export_file_inode |
-        type == "string" and test("^[1-9][0-9]*$")) and
-      (.export_file_size_bytes | type) == "number" and
-      (.export_file_size_bytes | floor) == .export_file_size_bytes and
-      .export_file_size_bytes > 0 and
+      (.export | delivery("cloudwatch-logs-export/"; $evidence_observed_at)) and
       (.event_count | type) == "number" and
       (.event_count | floor) == .event_count and .event_count > 0 and
       (.exported_through_epoch | type) == "number" and
@@ -1590,6 +1587,16 @@ verify_log_readiness_receipt() {
     )
   ' "$evidence_path" >/dev/null ||
     die "log readiness evidence/retention exportの内容または時刻が不正です"
+  run_evidence_helper verify-bedrock-retention \
+    --output "$bedrock_retention_live"
+  jq -e --slurpfile evidence "$evidence_path" '
+    (.contract.observed_at_epoch >=
+      $evidence[0].bedrock.retention_live.contract.observed_at_epoch) and
+    (del(.contract.observed_at_epoch, .contract_sha256) ==
+      ($evidence[0].bedrock.retention_live |
+        del(.contract.observed_at_epoch, .contract_sha256)))
+  ' "$bedrock_retention_live" >/dev/null ||
+    die "Bedrock current/noncurrent minimum-60-day live contractが変化しました"
 
   verify_readiness_export_bindings "$evidence_path" "$retention_path"
   [ "$(sha256_file "$evidence_path")" = \
@@ -1609,6 +1616,388 @@ verify_log_readiness_receipt() {
       "$(jq -er '.retention_export_manifest_size_bytes' "$evidence_path")" ] ||
     die "検証中にretention export manifestが差替えられました"
   verify_readiness_export_bindings "$evidence_path" "$retention_path"
+}
+
+run_evidence_helper() {
+  initialize_aws_trust
+  need_cmd python3
+  assert_aws_trust_unchanged
+  python3 "$EVIDENCE_HELPER" --aws-bin "$AWS_BIN" "$@"
+  assert_aws_trust_unchanged
+}
+
+new_uuid_v4() {
+  need_cmd python3
+  python3 -c 'import uuid; print(uuid.uuid4())'
+}
+
+capture_image_release_context() {
+  local plan="$1" output="$2"
+  need_cmd python3
+  python3 "$IMAGE_CONTEXT_HELPER" capture \
+    --terraform-dir "$TF_DIR" \
+    --plan "$plan" \
+    --output "$output"
+  chmod 600 "$output"
+  jq -e . "$output" >/dev/null ||
+    die "production provenance Terraform context生成に失敗しました"
+}
+
+prepare_image_deployment_intent() {
+  local plan="$1" context="$2" output="$3"
+  bash "$IMAGE_GATE_RUNNER" prepare-deployment-intent \
+    --plan "$plan" \
+    --control-commit "$(git_commit)" \
+    --terraform-context "$context" > "$output"
+  chmod 600 "$output"
+  jq -e \
+    --arg plan_sha "$(sha256_file "$plan")" '
+    (.intent_id |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+    .plan_sha256 == $plan_sha and
+    (.authorization_expires_at | type) == "number"
+  ' "$output" >/dev/null ||
+    die "one-use production deployment intentのbindingが不正です"
+}
+
+capture_complete_runtime_inventory() {
+  local output="$1"
+  local raw="$TMP_ROOT/runtime-inventory-raw-$RANDOM.json"
+  run_evidence_helper inventory --output "$raw"
+  jq -e -S \
+    --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
+    --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" '
+    .kind == "teamagent-runtime-inventory" and
+    .schema_version == 1 and
+    .raw_endpoint_utf8_sha256 == $email_sha and
+    .destination_state_sha256 == $destination_sha and
+    (.subscription_metadata_sha256 | test("^[0-9a-f]{64}$")) and
+    .alarm_subscription_count == 1 and
+    .chatbot_configuration_count >= 0 and
+    (.publisher_coverage | type) == "array" and
+    (.source_pages_sha256 | test("^[0-9a-f]{64}$")) and
+    (.raw_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
+    (.publisher_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
+    (.publishers_sha256 | test("^[0-9a-f]{64}$")) and
+    (.inventory_sha256 | test("^[0-9a-f]{64}$")) |
+    {
+      inventory_sha256,
+      destination_state_sha256,
+      subscription_metadata_sha256,
+      raw_endpoint_utf8_sha256,
+      raw_reference_set_sha256,
+      publisher_reference_set_sha256,
+      publishers_sha256,
+      publisher_coverage,
+      topic_inventory,
+      alarm_subscription_count
+    }
+  ' "$raw" > "$output" ||
+    die "all-page runtime/SNS publisher inventoryがexact contractを満たしません"
+}
+
+verify_alarm_delivery_test_receipt() {
+  local receipt="$1" snapshot="$2"
+  local challenge="$TMP_ROOT/alarm-challenge-verify-$RANDOM.json"
+  local ack="$TMP_ROOT/alarm-recipient-ack-verify-$RANDOM.json"
+  local verified="$TMP_ROOT/alarm-delivery-live-verify-$RANDOM.json"
+  jq -e \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg region "$REGION" \
+    --arg topic \
+      "arn:aws:sns:${REGION}:${EXPECTED_ACCOUNT_ID}:${PROJECT}-${ENVIRONMENT}-openclaw-alarms" \
+    --arg raw_email "$EXPECTED_ALARM_EMAIL" \
+    --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
+    --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" \
+    --argjson now "$(date +%s)" '
+    .kind == "teamagent-alarm-delivery-test-receipt" and
+    .schema_version == 4 and
+    .account_id == $account and .region == $region and
+    .topic_arn == $topic and
+    .raw_email == $raw_email and
+    (.raw_email | explode) == ($raw_email | explode) and
+    .raw_email_utf8_sha256 == $email_sha and
+    .destination_state_sha256 == $destination_sha and
+    (.subscription_metadata_sha256 | test("^[0-9a-f]{64}$")) and
+    (.message_id_sha256 | test("^[0-9a-f]{64}$")) and
+    (.challenge_nonce_sha256 | test("^[0-9a-f]{64}$")) and
+    (.inventory_sha256 | test("^[0-9a-f]{64}$")) and
+    (.raw_reference_set_sha256 | test("^[0-9a-f]{64}$")) and
+    (.recipient_ack_claims_sha256 | test("^[0-9a-f]{64}$")) and
+    (.recipient_ack_signature_sha256 | test("^[0-9a-f]{64}$")) and
+    (.receipt_claims_sha256 | test("^[0-9a-f]{64}$")) and
+    ([.published_at_epoch,.received_at_epoch,.verified_at_epoch,
+      .observed_at_epoch,.ledger_ack_aws_date_epoch,
+      .final_observed_at_epoch] |
+      all((type == "number") and (floor == .) and . >= 0 and
+          . <= $now)) and
+    .published_at_epoch <= .received_at_epoch and
+    .received_at_epoch <= .verified_at_epoch and
+    .verified_at_epoch <= .observed_at_epoch and
+    .observed_at_epoch <= .ledger_ack_aws_date_epoch and
+    .ledger_ack_aws_date_epoch <= .final_observed_at_epoch and
+    .final_observed_at_epoch <= $now and
+    .expires_at_epoch > $now and
+    (.expires_at_epoch - .published_at_epoch) <= 3600 and
+    (.challenge | type) == "object" and
+    (.recipient_ack | type) == "object"
+  ' "$receipt" >/dev/null ||
+    die "fresh SNS challenge/managed KMS recipient ack receiptが不正です"
+  jq -e -S '.challenge' "$receipt" > "$challenge"
+  jq -e -S '.recipient_ack' "$receipt" > "$ack"
+  run_evidence_helper verify-sns-delivery \
+    --challenge "$challenge" --ack "$ack" --receipt "$receipt" \
+    --output "$verified"
+  jq -e '.verified == true' "$verified" >/dev/null ||
+    die "SNS challenge receiptの署名/inventory/one-use ledger再検証に失敗しました"
+  jq -e \
+    --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
+    --arg destination_sha "$EXPECTED_ALARM_DESTINATION_STATE_SHA256" \
+    --slurpfile receipt "$receipt" '
+    .alarm_delivery.confirmed_email_endpoint_sha256 == [$email_sha] and
+    .alarm_delivery.subscription_inventory_count == 1 and
+    .alarm_delivery.pending_subscription_count == 0 and
+    .alarm_delivery.subscription_protocols == ["email"] and
+    .alarm_delivery.destination_state_sha256 == $destination_sha and
+    .alarm_delivery.destination_state_sha256 ==
+      $receipt[0].destination_state_sha256 and
+    .alarm_delivery.attached_chatbot_configuration_arns == [] and
+    .alarm_delivery_observation.attached_chatbot_configurations == []
+  ' "$snapshot" >/dev/null ||
+    die "SNS receiptとraw approved emailだけのexclusive destinationが不一致です"
+}
+
+verify_alarm_migration_final_receipt() {
+  local receipt="$1"
+  local verified="$TMP_ROOT/alarm-migration-final-$RANDOM.json"
+  run_evidence_helper verify-alarm-migration-final \
+    --migration-id "2026-07-alarm-topic-consolidation-v1" \
+    --receipt "$receipt" --output "$verified"
+  jq -e \
+    --arg migration_id "2026-07-alarm-topic-consolidation-v1" '
+    .kind == "teamagent-alarm-migration-final-verification" and
+    .schema_version == 1 and
+    .migration_id == $migration_id and
+    .phase == "legacy_retired" and
+    (.checkpoint_sha256 | test("^[0-9a-f]{64}$")) and
+    (.history_sha256 | test("^[0-9a-f]{64}$")) and
+    (.inventory_sha256 | test("^[0-9a-f]{64}$")) and
+    (.verified_at_epoch | type) == "number" and
+    (.verified_at_epoch | floor) == .verified_at_epoch
+  ' "$verified" >/dev/null ||
+    die "alarm publisher migrationのdurable final checkpointを検証できません"
+}
+
+# Schema v4 can only be produced by the guard-owned first-time workflow:
+# Unversioned -> fresh
+# disconnect -> PutBucketVersioning -> 900-second no-write window -> two
+# observations -> final recheck -> producer cutover under one lock.
+verify_versioning_attestation_receipt() {
+  local receipt="$1" snapshot="$2" state_contract="$3"
+  local workflow="$TMP_ROOT/versioning-workflow-verify-$RANDOM.json"
+  local verified="$TMP_ROOT/versioning-workflow-live-$RANDOM.json"
+  jq -e \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg region "$REGION" \
+    --arg stage "2026-07-log-versioning-cutover-v4" \
+    --arg guard_version "$GUARD_VERSION" \
+    --arg git_commit "$(git_commit)" \
+    --arg guard_script_sha256 "$(sha256_file "$SCRIPT_PATH")" \
+    --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
+    --arg evidence_helper_sha256 "$(sha256_file "$EVIDENCE_HELPER")" \
+    --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
+    --argjson now "$(date +%s)" '
+    (keys | sort) == ([
+      "account_id",
+      "created_at_epoch",
+      "evidence_helper_sha256",
+      "expires_at_epoch",
+      "git_commit",
+      "guard_jq_sha256",
+      "guard_script_sha256",
+      "guard_version",
+      "kind",
+      "migration_manifest_sha256",
+      "region",
+      "schema_version",
+      "stage_id",
+      "state_contract_after",
+      "state_contract_before",
+      "state_ownership_after_sha256",
+      "state_ownership_before_sha256",
+      "workflow",
+      "workflow_sha256"
+    ] | sort) and
+    .kind == "teamagent-log-versioning-cutover-receipt" and
+    .schema_version == 4 and
+    .stage_id == $stage and
+    .guard_version == $guard_version and
+    .account_id == $account and .region == $region and
+    .git_commit == $git_commit and
+    .guard_script_sha256 == $guard_script_sha256 and
+    .guard_jq_sha256 == $guard_jq_sha256 and
+    .evidence_helper_sha256 == $evidence_helper_sha256 and
+    .migration_manifest_sha256 == $migration_manifest_sha256 and
+    .workflow_sha256 == .workflow.workflow_sha256 and
+    (.workflow_sha256 | test("^[0-9a-f]{64}$")) and
+    (.state_ownership_before_sha256 | test("^[0-9a-f]{64}$")) and
+    (.state_ownership_after_sha256 | test("^[0-9a-f]{64}$")) and
+    .state_contract_before == .state_contract_after and
+    .state_ownership_before_sha256 == .state_ownership_after_sha256 and
+    (.created_at_epoch | type) == "number" and
+    (.created_at_epoch | floor) == .created_at_epoch and
+    .created_at_epoch <= $now and
+    .expires_at_epoch > $now and
+    (.expires_at_epoch - .created_at_epoch) <= 86400
+  ' "$receipt" >/dev/null ||
+    die "first-time versioning/cutover receipt schemaまたはsource bindingが不正です"
+  jq -e -S '.workflow' "$receipt" > "$workflow" ||
+    die "versioning workflowをreceiptから抽出できません"
+  jq -e --slurpfile receipt "$receipt" '
+    .backend == $receipt[0].state_contract_after.backend and
+    .state.lineage == $receipt[0].state_contract_after.state.lineage and
+    .state.serial >= $receipt[0].state_contract_after.state.serial
+  ' "$state_contract" >/dev/null ||
+    die "versioning cutover後にbackend/workspace/lineageが変化またはstate serialが後退しました"
+  jq -e '
+    .log_buckets.cloudtrail.versioning_status == "Enabled" and
+    .log_buckets.cloudtrail.mfa_delete == "Disabled" and
+    .log_buckets.cloudtrail.lifecycle.deletion_rule_count == 0 and
+    .log_buckets.bedrock == {
+      versioning_status:"Enabled",
+      mfa_delete:"Disabled"
+    }
+  ' "$snapshot" >/dev/null ||
+    die "versioning/cutover receipt検証時のbucket/lifecycle状態が不正です"
+  run_evidence_helper verify-versioning-cutover \
+    --workflow "$workflow" --output "$verified"
+  jq -e '.verified == true' "$verified" >/dev/null ||
+    die "versioning/cutover live再検証に失敗しました"
+}
+
+run_first_time_versioning_cutover() {
+  local requested_out="$1"
+  local output stage workflow bedrock_config state_before state_after receipt
+  local runtime_lock_receipt runtime_lock_release workflow_id
+  output="$(secure_new_file "$requested_out")"
+  ensure_tmp
+  assert_trusted_automation_identity
+  local published="false"
+  local runtime_lock_acquired="false"
+  stage="$(mktemp -d \
+    "$(dirname "$output")/.teamagent-versioning-cutover.XXXXXX")"
+  chmod 700 "$stage"
+  runtime_lock_receipt="$stage/runtime-shared-lock.json"
+  runtime_lock_release="$stage/runtime-shared-lock-release.json"
+  workflow_id="$(new_uuid_v4)"
+  cleanup_first_time_versioning() {
+    local status=$?
+    set +e
+    release_deployment_lock
+    if [ "$runtime_lock_acquired" = "true" ] ||
+      [ -f "$runtime_lock_receipt" ]; then
+      rm -f "$runtime_lock_release"
+      run_evidence_helper release-runtime-lock \
+        --lock "$runtime_lock_receipt" --output "$runtime_lock_release"
+      runtime_lock_acquired="false"
+    fi
+    if [ "$published" != "true" ]; then
+      rm -f "$output"
+    fi
+    rm -rf "$stage" "$TMP_ROOT"
+    exit "$status"
+  }
+  trap 'cleanup_first_time_versioning' EXIT
+  run_evidence_helper acquire-runtime-lock \
+    --workflow-id "$workflow_id" --output "$runtime_lock_receipt"
+  runtime_lock_acquired="true"
+  acquire_deployment_lock
+
+  workflow="$stage/workflow.json"
+  bedrock_config="$stage/bedrock-config.json"
+  state_before="$stage/state-before.json"
+  state_after="$stage/state-after.json"
+  receipt="$stage/receipt.json"
+  jq -n -S \
+    --arg bucket "${PROJECT}-${ENVIRONMENT}-bedrock-logs-${EXPECTED_ACCOUNT_ID}" '{
+      textDataDeliveryEnabled:true,
+      embeddingDataDeliveryEnabled:true,
+      imageDataDeliveryEnabled:false,
+      videoDataDeliveryEnabled:false,
+      s3Config:{bucketName:$bucket,keyPrefix:"bedrock/"}
+    }' > "$bedrock_config"
+  chmod 600 "$bedrock_config"
+  capture_state_contract "$state_before"
+  run_evidence_helper first-time-versioning-cutover \
+    --lock-id "lock#teamagent/terraform.tfstate" \
+    --lock-receipt "$runtime_lock_receipt" \
+    --bedrock-config "$bedrock_config" \
+    --output "$workflow"
+  capture_state_contract "$state_after"
+  cmp -s "$state_before" "$state_after" ||
+    die "versioning/cutover workflow中にTerraform state ownershipが変化しました"
+  local created expires
+  created="$(jq -er '
+    [.cutover.cloudtrail.response_date_epoch,
+     .cutover.bedrock.response_date_epoch] | max
+  ' "$workflow")"
+  expires=$((created + 86400))
+  jq -n -S \
+    --arg kind "teamagent-log-versioning-cutover-receipt" \
+    --arg stage_id "2026-07-log-versioning-cutover-v4" \
+    --arg guard_version "$GUARD_VERSION" \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg region "$REGION" \
+    --arg git_commit "$(git_commit)" \
+    --arg guard_script_sha256 "$(sha256_file "$SCRIPT_PATH")" \
+    --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
+    --arg evidence_helper_sha256 "$(sha256_file "$EVIDENCE_HELPER")" \
+    --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
+    --arg workflow_sha256 "$(jq -er '.workflow_sha256' "$workflow")" \
+    --arg state_before_sha256 "$(sha256_file "$state_before")" \
+    --arg state_after_sha256 "$(sha256_file "$state_after")" \
+    --argjson created_at_epoch "$created" \
+    --argjson expires_at_epoch "$expires" \
+    --slurpfile workflow "$workflow" \
+    --slurpfile state_before "$state_before" \
+    --slurpfile state_after "$state_after" '{
+      kind:$kind,
+      schema_version:4,
+      stage_id:$stage_id,
+      guard_version:$guard_version,
+      account_id:$account,
+      region:$region,
+      git_commit:$git_commit,
+      guard_script_sha256:$guard_script_sha256,
+      guard_jq_sha256:$guard_jq_sha256,
+      evidence_helper_sha256:$evidence_helper_sha256,
+      migration_manifest_sha256:$migration_manifest_sha256,
+      created_at_epoch:$created_at_epoch,
+      expires_at_epoch:$expires_at_epoch,
+      workflow_sha256:$workflow_sha256,
+      workflow:$workflow[0],
+      state_ownership_before_sha256:$state_before_sha256,
+      state_ownership_after_sha256:$state_after_sha256,
+      state_contract_before:$state_before[0],
+      state_contract_after:$state_after[0]
+    }' > "$receipt"
+  chmod 600 "$receipt"
+  local receipt_identity
+  receipt_identity="$(stat_identity "$receipt")"
+  ln "$receipt" "$output" ||
+    die "versioning/cutover receipt出力pathを原子的に確保できません"
+  [ "$(stat_identity "$output")" = "$receipt_identity" ] ||
+    die "versioning/cutover receiptの原子的引渡しに失敗しました"
+  chmod 600 "$output"
+  published="true"
+  release_deployment_lock
+  run_evidence_helper release-runtime-lock \
+    --lock "$runtime_lock_receipt" --output "$runtime_lock_release"
+  runtime_lock_acquired="false"
+  trap - EXIT
+  rm -rf "$stage" "$TMP_ROOT"
+  TMP_ROOT=""
+  echo "✅ first-time versioning/no-write/cutover receipt: $output"
 }
 
 DEPLOYMENT_LOCK_ID="${PROJECT}/${ENVIRONMENT}/terraform-runtime-deployment"
@@ -1681,25 +2070,26 @@ validate_log_versioning_stage_manifest() {
       "timestamp_source"
     ] | sort) and
     .log_versioning_stage.id ==
-      "2026-07-log-versioning-precutover-v3" and
+      "2026-07-log-versioning-cutover-v4" and
     .log_versioning_stage.enabled == true and
     (.log_versioning_stage.expires_at | fromdateiso8601) > $now and
     .log_versioning_stage.buckets == [
       "teamagent-dev-cloudtrail-718959508629",
       "teamagent-dev-bedrock-logs-718959508629"
     ] and
-    .log_versioning_stage.allowed_write == "none" and
-    .log_versioning_stage.required_status_before == ["Enabled"] and
+    .log_versioning_stage.allowed_write ==
+      "guard-disconnect-versioning-and-cutover-only" and
+    .log_versioning_stage.required_status_before == ["Unversioned"] and
     .log_versioning_stage.required_status_after == "Enabled" and
     .log_versioning_stage.mfa_delete == "Disabled" and
     .log_versioning_stage.producer_action ==
-      "disconnected-observation-only" and
+      "guard-disconnect-enable-settle-double-observe-cutover" and
     .log_versioning_stage.producer_state_required == "disconnected" and
     .log_versioning_stage.timestamp_source ==
-      "aws-cloudtrail-event-history" and
+      "aws-http-response-date" and
     .log_versioning_stage.minimum_settle_seconds == 900 and
     .log_versioning_stage.cutover_mode ==
-      "pre-versioned-destination-before-producer-cutover"
+      "same-workflow-shared-lock-first-time-only"
   ' "$MIGRATION_FILE" >/dev/null ||
     die "log versioning stageはreview済みmanifestでenabledかつ期限内の場合だけ実行できます"
 }
@@ -1716,13 +2106,42 @@ migration_to_file() {
         "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
       legacy_owner: "external-teamagent-state",
       import_legacy_into_this_state: false,
+      ledger_table: "teamagent-dev-image-deployment-intents",
+      ledger_record_prefix:
+        "alarm-migration#2026-07-alarm-topic-consolidation-v1#",
+      durable_checkpoint_required: true,
+      idempotent_resume_required: true,
       ordered_phases: [
-        "configure canonical approved email destination",
-        "confirm delivery and verify canonical metadata",
-        "retarget every legacy alarm and budget publisher",
-        "retire legacy topic from its owning state",
-        "run strict sync, then activation migration"
+        "dual_publish",
+        "publisher_checkpoint",
+        "canonical_delivery_confirmed",
+        "legacy_reference_zero",
+        "legacy_retired"
       ],
+      phase_contracts: {
+        dual_publish:
+          "every inventoried publisher targets canonical and legacy",
+        publisher_checkpoint:
+          "one durable postcondition checkpoint per exact publisher",
+        canonical_delivery_confirmed:
+          "fresh SNS challenge and managed-KMS recipient acknowledgement after every publisher is canonical-only",
+        legacy_reference_zero:
+          "all-page publisher reference count for legacy is zero while canonical remains complete",
+        legacy_retired:
+          "legacy topic is absent and canonical publisher set remains complete"
+      },
+      rollback_contracts: {
+        dual_publish:
+          "retain legacy until canonical delivery is rechecked",
+        publisher_checkpoint:
+          "restore the exact publisher from its previous durable checkpoint",
+        canonical_delivery_confirmed:
+          "retain both target sets and issue a fresh challenge",
+        legacy_reference_zero:
+          "restore every publisher from durable per-publisher checkpoints",
+        legacy_retired:
+          "never recreate automatically; require a new reviewed migration"
+      },
       activation_requires: {
         confirmed_email_endpoint_sha256:
           "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6",
@@ -1733,7 +2152,10 @@ migration_to_file() {
           "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
         chatbot_configuration_count: 0,
         legacy_topic_exists: false,
-        legacy_action_reference_count: 0
+        legacy_action_reference_count: 0,
+        final_phase: "legacy_retired",
+        final_checkpoint_sha256_required: true,
+        history_sha256_required: true
       }
     } and
     (.migrations[$id] | type == "object") and
@@ -1741,6 +2163,9 @@ migration_to_file() {
     (.migrations[$id].expires_at | fromdateiso8601 > now) and
     (
       if .migrations[$id].kind == "runtime" then
+        .migrations[$id].requires_migration == null and
+        .migrations[$id].requires_versioning_stage ==
+          .log_versioning_stage.id and
         (.migrations[$id].from.images | keys | sort) == [
           "canary", "connect_web", "ingest", "mcp", "morning",
           "openclaw", "tiktok", "x_buzz"
@@ -1827,7 +2252,7 @@ migration_to_file() {
           "io.teamagent.runtime.readonly-rootfs-required": "true"
         } and
         .migrations[$id].to.rule_states == {
-          ingest: "DISABLED", morning: "ENABLED", canary: "DISABLED"
+          ingest: "DISABLED", morning: "DISABLED", canary: "DISABLED"
         } and
         .migrations[$id].from.active_task_counts == {
           ingest_active: 0
@@ -1934,6 +2359,8 @@ migration_to_file() {
             "retire-without-import-after-reference-count-zero"
         }
       elif .migrations[$id].kind == "activation" then
+        .migrations[$id].requires_migration ==
+          "2026-07-wolfi-runtime-v1" and
         (.migrations[$id].from.task_definition_arns.ingest |
           test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:[0-9]+$")) and
         (.migrations[$id].from.task_definition_arns.canary |
@@ -1959,7 +2386,7 @@ migration_to_file() {
         (.migrations[$id].required_preflight_profiles | sort) ==
           ["activation-canary", "activation-ingest-acl-quarantine"] and
         .migrations[$id].from.rule_states == {
-          ingest: "DISABLED", morning: "ENABLED", canary: "DISABLED"
+          ingest: "DISABLED", morning: "DISABLED", canary: "DISABLED"
         } and
         .migrations[$id].to.rule_states == {
           ingest: "ENABLED", morning: "ENABLED", canary: "ENABLED"
@@ -2351,7 +2778,9 @@ capture_cloudtrail_lifecycle_contract() {
   local configuration_present="true"
 
   if ! aws_cli s3api get-bucket-lifecycle-configuration \
-    --bucket "$bucket" --output json > "$raw" 2> "$error_file"; then
+    --bucket "$bucket" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+    --output json > "$raw" 2> "$error_file"; then
     grep -q "NoSuchLifecycleConfiguration" "$error_file" ||
       die "CloudTrail bucket lifecycleを観測できません"
     printf '%s\n' '{"Rules":[]}' > "$raw"
@@ -2412,8 +2841,10 @@ snapshot_live() {
     die "想定外のAWS accountです: $account_id"
 
   aws_cli s3api get-bucket-versioning --bucket "$cloudtrail_bucket" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --output json > "$dir/cloudtrail-versioning.json"
   aws_cli s3api get-bucket-versioning --bucket "$bedrock_logs_bucket" \
+    --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
     --output json > "$dir/bedrock-versioning.json"
   capture_cloudtrail_lifecycle_contract \
     "$cloudtrail_bucket" "$dir/cloudtrail-lifecycle-contract.json"
@@ -2585,7 +3016,7 @@ snapshot_live() {
   : > "$dir/subscription-inventory.jsonl"
   : > "$dir/confirmed-subscription-attributes.jsonl"
   local subscription_count subscription_index subscription_arn
-  local subscription_protocol subscription_endpoint normalized_endpoint
+  local subscription_protocol subscription_endpoint raw_endpoint
   local subscription_state endpoint_sha subscription_arn_sha
   subscription_count="$(jq -er '.Subscriptions | length' \
     "$dir/canonical-alarm-subscriptions.json")"
@@ -2600,17 +3031,13 @@ snapshot_live() {
     subscription_endpoint="$(jq -er --argjson index "$subscription_index" \
       '.Subscriptions[$index].Endpoint' \
       "$dir/canonical-alarm-subscriptions.json")"
-    case "$subscription_protocol" in
-      email|email-json)
-        normalized_endpoint="$(jq -nr --arg endpoint "$subscription_endpoint" '
-          $endpoint | gsub("^\\s+|\\s+$"; "") | ascii_downcase
-        ')"
-        ;;
-      *)
-        normalized_endpoint="$subscription_endpoint"
-        ;;
-    esac
-    endpoint_sha="$(printf '%s' "$normalized_endpoint" | sha256_text)"
+    # SNS endpoint bytes are an authorization input. No trim, case folding, or
+    # Unicode normalization is permitted.
+    raw_endpoint="$subscription_endpoint"
+    [ "$subscription_protocol" != "email" ] ||
+      [ "$raw_endpoint" = "$EXPECTED_ALARM_EMAIL" ] ||
+      die "SNS email endpointはapproved raw byte列とexact一致が必要です"
+    endpoint_sha="$(printf '%s' "$raw_endpoint" | sha256_text)"
     subscription_arn_sha="$(
       printf '%s' "$subscription_arn" | sha256_text
     )"
@@ -2991,8 +3418,10 @@ snapshot_live() {
     aws_cli lambda list-event-source-mappings --function-name "$dispatch_function" \
       --output json > "$dir/${dispatch_key}-mappings.json"
     jq -e --arg function_arn "$function_arn" '
+      ((.NextMarker // "") == "") and
       (.EventSourceMappings | length) == 1 and
-      .EventSourceMappings[0].State == "Enabled" and
+      (.EventSourceMappings[0].State == "Enabled" or
+       .EventSourceMappings[0].State == "Disabled") and
       .EventSourceMappings[0].FunctionArn == $function_arn and
       (.EventSourceMappings[0].EventSourceArn | startswith("arn:aws:sqs:"))
     ' "$dir/${dispatch_key}-mappings.json" >/dev/null ||
@@ -3402,8 +3831,8 @@ snapshot_live() {
       "s3://teamagent-dev-raw-files/codebuild/connect-web-app.html" and
     .dispatchers.tiktok.task_definition == .taskdefs.tiktok.arn and
     .dispatchers.x_buzz.task_definition == .taskdefs.x_buzz.arn and
-    .event_mappings.tiktok.critical.enabled == true and
-    .event_mappings.x_buzz.critical.enabled == true and
+    (.event_mappings.tiktok.critical.enabled | type) == "boolean" and
+    (.event_mappings.x_buzz.critical.enabled | type) == "boolean" and
     .event_mappings.tiktok.critical.function_arn == .dispatchers.tiktok.critical.function_arn and
     .event_mappings.x_buzz.critical.function_arn == .dispatchers.x_buzz.critical.function_arn
   ' "$output" >/dev/null || die "worker dispatcher/taskdef/event mappingのlive契約が不整合です"
@@ -3426,6 +3855,8 @@ core_from_snapshot() {
   local desired_canary_rule="${13:-}"
   local versioning_pre_cutover_receipt_sha256="${14:-}"
   local log_cutover_contract_sha256="${15:-}"
+  local required_migration_id="${16:-}"
+  local required_migration_apply_receipt_sha256="${17:-}"
   if [ -z "$desired_ingest_rule" ]; then
     desired_ingest_rule="$(jq -r '.rules.ingest.critical.state == "ENABLED"' "$snapshot")"
     desired_morning_rule="$(jq -r '.rules.morning.critical.state == "ENABLED"' "$snapshot")"
@@ -3454,6 +3885,9 @@ core_from_snapshot() {
     --arg versioning_pre_cutover_receipt_sha256 \
       "$versioning_pre_cutover_receipt_sha256" \
     --arg log_cutover_contract_sha256 "$log_cutover_contract_sha256" \
+    --arg required_migration_id "$required_migration_id" \
+    --arg required_migration_apply_receipt_sha256 \
+      "$required_migration_apply_receipt_sha256" \
     --argjson hmac_transition_epoch "$hmac_transition_epoch" \
     --argjson desired_ingest_rule "$desired_ingest_rule" \
     --argjson desired_morning_rule "$desired_morning_rule" \
@@ -3478,6 +3912,9 @@ core_from_snapshot() {
       versioning_pre_cutover_receipt_sha256:
         $versioning_pre_cutover_receipt_sha256,
       log_cutover_contract_sha256:$log_cutover_contract_sha256,
+      required_migration_id:$required_migration_id,
+      required_migration_apply_receipt_sha256:
+        $required_migration_apply_receipt_sha256,
       live_openclaw_image: $s.taskdefs.openclaw.image,
       desired_openclaw_image: $desired_openclaw_image,
       live_mcp_image: $s.taskdefs.mcp.image,
@@ -3827,9 +4264,24 @@ validate_common_plan_schema() {
     .variables.canary_rule_enabled.value == $expected_core[0].canary_rule_enabled and
     .variables.require_alarm_delivery.value == true and
     .variables.bedrock_logs_retention_days.value == 60 and
+    (.variables.image_deployment_intent_id.value |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
     .variables.runtime_guard_live.value == $expected_core[0]
   ' "$plan_json" >/dev/null ||
     die "plan JSON schema/check/image/rule/runtime guard bindingが不正です"
+  jq -e '
+    ([.resource_changes[] |
+      select(.address == "terraform_data.runtime_guard")] | length) == 1 and
+    ([.resource_changes[] |
+      select(.address == "terraform_data.production_image_release_gate")] |
+      length) == 1 and
+    ([.resource_changes[] |
+      select(.address == "terraform_data.production_image_release_gate")][0]
+      .change.actions) as $actions |
+    ($actions | index("create")) != null and
+    ($actions | all(. == "create" or . == "delete"))
+  ' "$plan_json" >/dev/null ||
+    die "runtime guardとone-use production provenance gateの複合planが不正です"
 }
 
 validate_manifest_change_allowlist() {
@@ -4508,7 +4960,7 @@ validate_auto_created_log_retention_plan() {
     def ownership($address):
       $ownership[0].imports[$address] //
         error("state ownership metadata missing");
-    def retention_adoption($address; $name):
+    def retention_adoption($address; $name; $initial_retention):
       change($address) as $log |
       ownership($address) as $state |
       $state.expected_id == $name and
@@ -4520,7 +4972,7 @@ validate_auto_created_log_retention_plan() {
         end
       ) and
       (
-        if $log.before.retention_in_days == 0 then
+        if $log.before.retention_in_days == $initial_retention then
           $log.actions == ["update"]
         elif $log.before.retention_in_days == 30 then
           $log.actions == ["no-op"]
@@ -4538,27 +4990,44 @@ validate_auto_created_log_retention_plan() {
     [
       [
         "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
-        "/aws/codebuild/teamagent-dev-aiia-image-builder"
+        "/aws/codebuild/teamagent-dev-aiia-image-builder",
+        0
       ],
       [
-        "aws_cloudwatch_log_group.codebuild_image_builder",
-        "/aws/codebuild/teamagent-dev-image-builder"
+        "aws_cloudwatch_log_group.codebuild_image",
+        "/aws/codebuild/teamagent-dev-image-builder",
+        0
+      ],
+      [
+        "aws_cloudwatch_log_group.ecs_containerinsights_teamagent",
+        "/aws/ecs/containerinsights/teamagent-dev/performance",
+        1
+      ],
+      [
+        "aws_cloudwatch_log_group.ecs_containerinsights_tiktok",
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance",
+        1
       ],
       [
         "aws_cloudwatch_log_group.reminder_notify",
-        "/aws/lambda/teamagent-dev-reminders-notify"
+        "/aws/lambda/teamagent-dev-reminders-notify",
+        0
       ],
       [
         "aws_cloudwatch_log_group.tiktok_dispatch",
-        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch",
+        0
       ],
       [
         "aws_cloudwatch_log_group.x_dispatch",
-        "/aws/lambda/teamagent-dev-x-buzz-dispatch"
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch",
+        0
       ]
-    ] | all(. as $spec | $plan | retention_adoption($spec[0]; $spec[1]))
+    ] |
+    all(. as $spec |
+      $plan | retention_adoption($spec[0]; $spec[1]; $spec[2]))
   ' "$plan_json" >/dev/null ||
-    die "auto-created CodeBuild/Lambda log groupはexact import・30日・KMS不変のin-place更新だけを許可します"
+    die "auto-created operational log groupはexact import・30日・KMS不変のin-place更新だけを許可します"
 }
 
 validate_runtime_monitoring_plan() {
@@ -4705,9 +5174,7 @@ validate_alarm_delivery_plan() {
   local configured_email="" configured_email_hash=""
   if [ "$(jq -er '.variables.alarm_email_endpoints.value | length' "$plan_json")" = "1" ]; then
     configured_email="$(jq -er '
-      .variables.alarm_email_endpoints.value[0] |
-      gsub("^\\s+|\\s+$"; "") |
-      ascii_downcase
+      .variables.alarm_email_endpoints.value[0]
     ' "$plan_json")"
     configured_email_hash="$(printf '%s' "$configured_email" | sha256_text)"
   fi
@@ -4872,9 +5339,14 @@ validate_log_bucket_hardening_plan() {
     ) and
     tls_deny($cloudtrail_document; $cloudtrail_bucket) and
     converges($bedrock_policy) and
-    ($bedrock_document.Statement | length) == 2 and
+    ($bedrock_document.Statement | length) == 4 and
     ($bedrock_document.Statement | map(.Sid) | sort) ==
-      (["AllowBedrockPut", "DenyInsecureTransport"] | sort) and
+      ([
+        "AllowBedrockPut",
+        "DenyInsecureTransport",
+        "DenyManualBedrockPayloadDeletion",
+        "DenyNonBedrockPayloadWriters"
+      ] | sort) and
     (
       statement($bedrock_document; "AllowBedrockPut") as $write |
       $write.Effect == "Allow" and
@@ -4890,6 +5362,24 @@ validate_log_bucket_hardening_plan() {
         ArnLike: {
           "aws:SourceArn":
             ("arn:aws:bedrock:" + $region + ":" + $account + ":*")
+        }
+      }
+    ) and
+    (
+      statement($bedrock_document; "DenyManualBedrockPayloadDeletion") as $deny |
+      $deny.Effect == "Deny" and $deny.Principal == "*" and
+      ($deny.Action | array | sort) ==
+        (["s3:DeleteObject","s3:DeleteObjectVersion"] | sort) and
+      ($deny.Resource | array) == [($bedrock_bucket + "/bedrock/*")]
+    ) and
+    (
+      statement($bedrock_document; "DenyNonBedrockPayloadWriters") as $deny |
+      $deny.Effect == "Deny" and $deny.Principal == "*" and
+      ($deny.Action | array) == ["s3:PutObject"] and
+      ($deny.Resource | array) == [($bedrock_bucket + "/bedrock/*")] and
+      $deny.Condition == {
+        StringNotEquals: {
+          "aws:PrincipalServiceName": "bedrock.amazonaws.com"
         }
       }
     ) and
@@ -4917,14 +5407,14 @@ validate_log_bucket_hardening_plan() {
     ($lifecycle.change.after.rule | length) == 2 and
     (
       [$lifecycle.change.after.rule[] |
-       select(.id == "bedrock-current-59-noncurrent-1-total-60-days")] |
+       select(.id == "bedrock-current-and-noncurrent-minimum-60-days")] |
       if length != 1 then false else .[0] |
         .status == "Enabled" and
         (.filter | length) == 1 and .filter[0].prefix == "bedrock/" and
-        (.expiration | length) == 1 and .expiration[0].days == 59 and
+        (.expiration | length) == 1 and .expiration[0].days == 60 and
         (.expiration[0].expired_object_delete_marker // false) == false and
         (.noncurrent_version_expiration | length) == 1 and
-        .noncurrent_version_expiration[0].noncurrent_days == 1 and
+        .noncurrent_version_expiration[0].noncurrent_days == 60 and
         (.noncurrent_version_expiration[0].newer_noncurrent_versions // null) == null
       end
     ) and
@@ -4975,7 +5465,7 @@ validate_log_bucket_hardening_plan() {
       test("^[0-9a-f]{64}$")) and
     .variables.bedrock_logs_retention_days.value == 60
   ' "$plan_json" >/dev/null ||
-    die "CloudTrail/Bedrock log bucketがversioning/TLS/合計60日/KMSとproducer no-op契約を満たしません"
+    die "CloudTrail/Bedrock log bucketがversioning/TLS/current・noncurrent各60日/KMSとproducer契約を満たしません"
 }
 
 validate_retired_builder_and_admin_noninterference_plan() {
@@ -5172,7 +5662,7 @@ validate_activation_plan() {
         ($change.change.after | del(.state)))
     ) and
     $morning.change.actions == ["no-op"] and
-    $morning.change.before.state == "ENABLED" and
+    $morning.change.before.state == "DISABLED" and
     $morning.change.before == $morning.change.after and
     $heartbeat.change.actions == ["create"] and
     $heartbeat.change.before == null and
@@ -5299,12 +5789,14 @@ validate_plan() {
     .variables.tiktok_acquire_image.value == $expected_core[0].desired_tiktok_image and
     .variables.require_alarm_delivery.value == true and
     .variables.bedrock_logs_retention_days.value == 60 and
+    (.variables.image_deployment_intent_id.value |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
     .variables.runtime_guard_live.value == $expected_core[0]
   ' "$plan_json" >/dev/null ||
     die "plan JSONのschema/action/check/runtime_guard束縛が不正です"
 
   local allowed_replacements
-  allowed_replacements='["aws_ecs_task_definition.openclaw[0]","aws_ecs_task_definition.mcp","aws_ecs_task_definition.connect_web[0]","aws_ecs_task_definition.ingest[0]","aws_ecs_task_definition.morning_digest[0]","aws_ecs_task_definition.canary[0]","aws_ecs_task_definition.tiktok_acquire[0]","aws_ecs_task_definition.x_buzz_worker[0]"]'
+  allowed_replacements='["terraform_data.production_image_release_gate","aws_ecs_task_definition.openclaw[0]","aws_ecs_task_definition.mcp","aws_ecs_task_definition.connect_web[0]","aws_ecs_task_definition.ingest[0]","aws_ecs_task_definition.morning_digest[0]","aws_ecs_task_definition.canary[0]","aws_ecs_task_definition.tiktok_acquire[0]","aws_ecs_task_definition.x_buzz_worker[0]"]'
   local destructive
   destructive="$(jq -r --argjson allowed "$allowed_replacements" '
     .resource_changes[]? |
@@ -5318,6 +5810,7 @@ validate_plan() {
 
   local allowed_runtime_changes unexpected_changes
     allowed_runtime_changes='[
+      "terraform_data.production_image_release_gate",
       "aws_ecs_task_definition.openclaw[0]",
       "aws_ecs_task_definition.mcp",
       "aws_ecs_task_definition.connect_web[0]",
@@ -6320,6 +6813,153 @@ verify_preflight_receipt() {
   ' "$receipt" >/dev/null || die "preflight receiptが期限・live・commit・hash・profile契約と不一致です"
 }
 
+verify_required_migration_apply_receipt() {
+  local receipt="$1" required_migration_id="$2" snapshot="$3"
+  local state_contract="$4"
+  local retention_live="$TMP_ROOT/prior-bedrock-retention-$RANDOM.json"
+  local runtime_inventory="$TMP_ROOT/prior-runtime-inventory-$RANDOM.json"
+  local embedded_retention="$TMP_ROOT/prior-bedrock-embedded-$RANDOM.json"
+  local embedded_lock="$TMP_ROOT/prior-shared-lock-embedded-$RANDOM.json"
+  local embedded_outcome="$TMP_ROOT/prior-outcome-embedded-$RANDOM.json"
+  run_evidence_helper verify-bedrock-retention --output "$retention_live"
+  capture_complete_runtime_inventory "$runtime_inventory"
+  jq -S -c '.bedrock_retention_live' "$receipt" > "$embedded_retention"
+  jq -S -c '.shared_deployment_lock_receipt' "$receipt" > "$embedded_lock"
+  jq -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
+  [ "$(sha256_file "$embedded_retention")" = \
+    "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_lock")" = \
+      "$(jq -er '.shared_deployment_lock_receipt_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_outcome")" = \
+      "$(jq -er '.provenance_outcome_receipt_sha256' "$receipt")" ] ||
+    die "prior apply receiptのembedded evidence hash bindingが不正です"
+  jq -e \
+    --arg version "$GUARD_VERSION" \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg region "$REGION" \
+    --arg git_commit "$(git_commit)" \
+    --arg required_migration_id "$required_migration_id" \
+    --arg receipt_sha "$(sha256_file "$receipt")" \
+    --arg state_sha "$(sha256_file "$state_contract")" \
+    --arg live_sha "$(sha256_file "$snapshot")" \
+    --arg inventory_sha "$(jq -er '.inventory_sha256' "$runtime_inventory")" \
+    --argjson now "$(date +%s)" \
+    --slurpfile state "$state_contract" \
+    --slurpfile live "$snapshot" \
+    --slurpfile retention "$retention_live" '
+    (keys | sort) == ([
+      "account_id",
+      "alarm_delivery_receipt_sha256",
+      "alarm_migration_receipt_sha256",
+      "applied_at_epoch",
+      "apply_attempt_id",
+      "bedrock_retention_live",
+      "bedrock_retention_live_sha256",
+      "git_commit",
+      "guard_version",
+      "image_deployment_intent_id",
+      "kind",
+      "log_readiness_receipt_sha256",
+      "migration_id",
+      "migration_kind",
+      "plan_sha256",
+      "post_live_contract",
+      "post_live_fingerprint_sha256",
+      "post_runtime_inventory_sha256",
+      "post_state_contract",
+      "post_state_contract_sha256",
+      "post_state_ownership_sha256",
+      "provenance_outcome",
+      "provenance_outcome_receipt",
+      "provenance_outcome_receipt_sha256",
+      "region",
+      "required_migration_id",
+      "schema_version",
+      "shared_deployment_lock_receipt",
+      "shared_deployment_lock_receipt_sha256",
+      "shared_deployment_lock_record_id",
+      "source_receipt_sha256",
+      "status",
+      "versioning_receipt_sha256"
+    ] | sort) and
+    .kind == "terraform-runtime-apply-receipt" and
+    .schema_version == 2 and
+    .guard_version == $version and
+    .account_id == $account and .region == $region and
+    .git_commit == $git_commit and
+    .status == "applied" and
+    .migration_kind == "runtime" and
+    .migration_id == $required_migration_id and
+    .required_migration_id == "" and
+    .provenance_outcome == "applied" and
+    (.image_deployment_intent_id |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+    (.apply_attempt_id |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+    (.source_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.plan_sha256 | test("^[0-9a-f]{64}$")) and
+    (.versioning_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.alarm_delivery_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.bedrock_retention_live_sha256 | test("^[0-9a-f]{64}$")) and
+    .bedrock_retention_live.kind ==
+      "teamagent-bedrock-retention-live-evidence" and
+    .bedrock_retention_live.schema_version == 1 and
+    (.bedrock_retention_live.contract.observed_at_epoch <=
+      $retention[0].contract.observed_at_epoch) and
+    ((.bedrock_retention_live |
+      del(.contract.observed_at_epoch, .contract_sha256)) ==
+      ($retention[0] |
+        del(.contract.observed_at_epoch, .contract_sha256))) and
+    .post_state_contract_sha256 == $state_sha and
+    .post_state_ownership_sha256 ==
+      $state[0].state.address_set_sha256 and
+    .post_state_contract == $state[0] and
+    .post_live_fingerprint_sha256 == $live_sha and
+    .post_live_contract == {
+      images: {
+        openclaw: $live[0].taskdefs.openclaw.image,
+        mcp: $live[0].taskdefs.mcp.image,
+        x_buzz: $live[0].taskdefs.x_buzz.image,
+        tiktok: $live[0].taskdefs.tiktok.image
+      },
+      rule_states: {
+        ingest: $live[0].rules.ingest.critical.state,
+        morning: $live[0].rules.morning.critical.state,
+        canary: $live[0].rules.canary.critical.state
+      }
+    } and
+    .post_runtime_inventory_sha256 == $inventory_sha and
+    (.shared_deployment_lock_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .shared_deployment_lock_receipt.record_id ==
+      "lock#teamagent/terraform.tfstate" and
+    .shared_deployment_lock_receipt.record_type ==
+      "teamagent.image-release-apply-lock" and
+    .shared_deployment_lock_receipt.state == "LOCKED" and
+    .shared_deployment_lock_receipt.intent_id ==
+      .image_deployment_intent_id and
+    .shared_deployment_lock_receipt.apply_attempt_id ==
+      .apply_attempt_id and
+    .shared_deployment_lock_receipt.plan_sha256 == .plan_sha256 and
+    (.provenance_outcome_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .provenance_outcome_receipt == {
+      intent_id:.image_deployment_intent_id,
+      plan_sha256:.plan_sha256,
+      state:"APPLIED"
+    } and
+    (.applied_at_epoch | type) == "number" and
+    (.applied_at_epoch | floor) == .applied_at_epoch and
+    .applied_at_epoch <= $now and
+    (.shared_deployment_lock_record_id ==
+      "lock#teamagent/terraform.tfstate") and
+    ($receipt_sha | test("^[0-9a-f]{64}$"))
+  ' "$receipt" >/dev/null ||
+    die "activation requires the exact successful runtime apply receipt/post-state/provenance chain"
+}
+
 verify_receipt() {
   local plan="$1"
   local receipt="$2"
@@ -6351,6 +6991,8 @@ verify_receipt() {
       "account_id",
       "alarm_delivery_receipt_path",
       "alarm_delivery_receipt_sha256",
+      "alarm_migration_receipt_path",
+      "alarm_migration_receipt_sha256",
       "config_manifest_sha256",
       "created_at_epoch",
       "environment",
@@ -6361,6 +7003,10 @@ verify_receipt() {
       "guard_version",
       "hmac_transition_epoch",
       "hmac_transition_sha256",
+      "image_deployment_intent_expires_at",
+      "image_deployment_intent_id",
+      "image_deployment_intent_receipt_sha256",
+      "image_release_context_sha256",
       "images",
       "kind",
       "live_fingerprint_sha256",
@@ -6374,10 +7020,13 @@ verify_receipt() {
       "plan_sha256",
       "preflight_receipt_path",
       "preflight_receipt_sha256",
+      "prior_apply_receipt_path",
+      "prior_apply_receipt_sha256",
       "project",
       "receipt_path",
       "region",
       "rule_states",
+      "runtime_inventory_sha256",
       "runtime_guard_sha256",
       "state_contract",
       "var_file",
@@ -6410,6 +7059,14 @@ verify_receipt() {
     .config_manifest_sha256 == $config_sha and
     .created_at_epoch <= $now and .expires_at_epoch > $now and
     (.expires_at_epoch - .created_at_epoch) <= 3600 and
+    (.image_deployment_intent_id |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+    (.image_deployment_intent_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.image_release_context_sha256 | test("^[0-9a-f]{64}$")) and
+    (.image_deployment_intent_expires_at | type) == "number" and
+    .image_deployment_intent_expires_at > $now and
+    (.runtime_inventory_sha256 | test("^[0-9a-f]{64}$")) and
     (.images.live | type == "object") and
     (.images.desired | type == "object") and
     (.rule_states.live | type == "object") and
@@ -6447,7 +7104,9 @@ verify_receipt() {
       test("^[0-9a-f]{64}$")) and
     (.state_contract.imports | keys | sort) == ([
       "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
-      "aws_cloudwatch_log_group.codebuild_image_builder",
+      "aws_cloudwatch_log_group.codebuild_image",
+      "aws_cloudwatch_log_group.ecs_containerinsights_teamagent",
+      "aws_cloudwatch_log_group.ecs_containerinsights_tiktok",
       "aws_cloudwatch_log_group.reminder_notify",
       "aws_cloudwatch_log_group.tiktok_dispatch",
       "aws_cloudwatch_log_group.x_dispatch"
@@ -6467,7 +7126,11 @@ verify_receipt() {
         .versioning_receipt_path == "" and
         .versioning_receipt_sha256 == "" and
         .log_readiness_receipt_path == "" and
-        .log_readiness_receipt_sha256 == ""
+        .log_readiness_receipt_sha256 == "" and
+        .alarm_migration_receipt_path == "" and
+        .alarm_migration_receipt_sha256 == "" and
+        .prior_apply_receipt_path == "" and
+        .prior_apply_receipt_sha256 == ""
       else
         (.migration_id | length) > 0 and
         (.migration_kind == "runtime" or .migration_kind == "activation") and
@@ -6480,13 +7143,27 @@ verify_receipt() {
         (.versioning_receipt_sha256 | test("^[0-9a-f]{64}$")) and
         (.log_readiness_receipt_path | type) == "string" and
         (.log_readiness_receipt_path | length) > 0 and
-        (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$"))
+        (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+        (.alarm_migration_receipt_path | type) == "string" and
+        (.alarm_migration_receipt_path | length) > 0 and
+        (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+        (
+          if .migration_kind == "activation" then
+            (.prior_apply_receipt_path | type) == "string" and
+            (.prior_apply_receipt_path | length) > 0 and
+            (.prior_apply_receipt_sha256 | test("^[0-9a-f]{64}$"))
+          else
+            .prior_apply_receipt_path == "" and
+            .prior_apply_receipt_sha256 == ""
+          end
+        )
       end
     )
   ' "$stage/receipt.json" >/dev/null || die "receipt schema/bindingが不正です"
 
   local bound_plan bound_receipt var_file preflight_receipt alarm_delivery_receipt
-  local versioning_receipt log_readiness_receipt
+  local versioning_receipt log_readiness_receipt alarm_migration_receipt
+  local prior_apply_receipt
   local versioning_cutover_contract_sha256=""
   local alarm_delivery_receipt_identity=""
   bound_plan="$(jq -er '.plan_path' "$stage/receipt.json")"
@@ -6524,7 +7201,7 @@ verify_receipt() {
       die "versioning receipt SHA256が不一致です"
     versioning_receipt_identity="$(stat_identity "$versioning_receipt")"
     versioning_cutover_contract_sha256="$(
-      jq -er '.cutover.contract_sha256' "$versioning_receipt"
+      jq -er '.workflow_sha256' "$versioning_receipt"
     )"
   fi
   log_readiness_receipt="$(jq -r '.log_readiness_receipt_path' \
@@ -6537,6 +7214,29 @@ verify_receipt() {
       "$(jq -er '.log_readiness_receipt_sha256' "$stage/receipt.json")" ] ||
       die "log readiness receipt SHA256が不一致です"
     log_readiness_receipt_identity="$(stat_identity "$log_readiness_receipt")"
+  fi
+  alarm_migration_receipt="$(jq -r '.alarm_migration_receipt_path' \
+    "$stage/receipt.json")"
+  local alarm_migration_receipt_identity=""
+  if [ -n "$alarm_migration_receipt" ]; then
+    alarm_migration_receipt="$(secure_existing_file \
+      "$alarm_migration_receipt" 600)"
+    [ "$(sha256_file "$alarm_migration_receipt")" = \
+      "$(jq -er '.alarm_migration_receipt_sha256' "$stage/receipt.json")" ] ||
+      die "alarm migration receipt SHA256が不一致です"
+    alarm_migration_receipt_identity="$(stat_identity \
+      "$alarm_migration_receipt")"
+  fi
+  prior_apply_receipt="$(jq -r '.prior_apply_receipt_path' \
+    "$stage/receipt.json")"
+  local prior_apply_receipt_identity=""
+  if [ -n "$prior_apply_receipt" ]; then
+    prior_apply_receipt="$(secure_existing_file \
+      "$prior_apply_receipt" 600)"
+    [ "$(sha256_file "$prior_apply_receipt")" = \
+      "$(jq -er '.prior_apply_receipt_sha256' "$stage/receipt.json")" ] ||
+      die "prior apply receipt SHA256が不一致です"
+    prior_apply_receipt_identity="$(stat_identity "$prior_apply_receipt")"
   fi
 
   local plan_sha_before var_sha_before plan_identity var_identity
@@ -6566,8 +7266,12 @@ verify_receipt() {
   ' "$stage/state-before.json" >/dev/null ||
     die "backend/workspace/state lineage/serial/address ownershipがreceiptから変化しました"
   snapshot_live "$stage/live-before.json"
+  capture_complete_runtime_inventory "$stage/inventory-before.json"
   [ "$(sha256_file "$stage/live-before.json")" = "$expected_live_sha" ] ||
     die "plan作成後にlive runtimeが変化しました"
+  [ "$(jq -er '.inventory_sha256' "$stage/inventory-before.json")" = \
+    "$(jq -er '.runtime_inventory_sha256' "$stage/receipt.json")" ] ||
+    die "plan作成後にall-page runtime/SNS publisher inventoryが変化しました"
   jq -e --slurpfile receipt "$stage/receipt.json" '
     {
       openclaw: .taskdefs.openclaw.image,
@@ -6596,6 +7300,9 @@ verify_receipt() {
       "$log_readiness_receipt" "$versioning_receipt" \
       "$stage/live-before.json"
   fi
+  if [ -n "$alarm_migration_receipt" ]; then
+    verify_alarm_migration_final_receipt "$alarm_migration_receipt"
+  fi
 
   local migration_file=""
   if [ "$mode" = "migration" ]; then
@@ -6606,6 +7313,12 @@ verify_receipt() {
       verify_preflight_receipt \
         "$preflight_receipt" "$migration_id" "$migration_file" \
         "$stage/live-before.json"
+    fi
+    if [ "$(jq -er '.kind' "$migration_file")" = "activation" ]; then
+      verify_required_migration_apply_receipt \
+        "$prior_apply_receipt" \
+        "$(jq -er '.requires_migration' "$migration_file")" \
+        "$stage/live-before.json" "$stage/state-before.json"
     fi
   fi
 
@@ -6621,7 +7334,13 @@ verify_receipt() {
     "$(jq -er '.rule_states.desired.morning' "$stage/receipt.json")" \
     "$(jq -er '.rule_states.desired.canary' "$stage/receipt.json")" \
     "$(jq -r '.versioning_receipt_sha256' "$stage/receipt.json")" \
-    "$versioning_cutover_contract_sha256"
+    "$versioning_cutover_contract_sha256" \
+    "$(
+      if [ -n "$prior_apply_receipt" ]; then
+        jq -er '.migration_id' "$prior_apply_receipt"
+      fi
+    )" \
+    "$(jq -r '.prior_apply_receipt_sha256' "$stage/receipt.json")"
   [ "$(sha256_file "$stage/core.json")" = "$(jq -er '.runtime_guard_sha256' "$stage/receipt.json")" ] ||
     die "runtime_guard_live束縛がreceiptと一致しません"
 
@@ -6644,15 +7363,27 @@ verify_receipt() {
     "$stage/plan.json" "$stage/live-before.json" "$stage/core.json" \
     "$(jq -er '.images.desired.mcp' "$stage/receipt.json")" \
     "$migration_file" "$stage/proposed-hmac.json" "$stage/state-before.json"
+  [ "$(jq -er '.variables.image_deployment_intent_id.value' \
+      "$stage/plan.json")" = \
+    "$(jq -er '.image_deployment_intent_id' "$stage/receipt.json")" ] ||
+    die "saved plan/receiptのone-use production intentが不一致です"
+  capture_image_release_context \
+    "$stage/plan.tfplan" "$stage/image-release-context.json"
+  [ "$(sha256_file "$stage/image-release-context.json")" = \
+    "$(jq -er '.image_release_context_sha256' "$stage/receipt.json")" ] ||
+    die "saved planのbackend/workspace/state ownership contextが変化しました"
   [ "$(sha256_file "$stage/plan.tfplan")" = "$plan_sha_before" ] || die "plan検証後のprivate copy改ざんを検出しました"
 
   snapshot_live "$stage/live-after.json"
   capture_state_contract "$stage/state-after.json"
+  capture_complete_runtime_inventory "$stage/inventory-after.json"
   [ "$(sha256_file "$stage/live-after.json")" = "$expected_live_sha" ] ||
     die "verify中にlive runtimeが変化しました"
   [ "$(sha256_file "$stage/state-after.json")" = \
     "$(sha256_file "$stage/state-before.json")" ] ||
     die "verify中にbackend/workspace/state lineage/serial/address ownershipが変化しました"
+  cmp -s "$stage/inventory-before.json" "$stage/inventory-after.json" ||
+    die "verify中にall-page runtime/SNS publisher inventoryが変化しました"
   [ "$(sha256_file "$plan")" = "$plan_sha_before" ] || die "verify中にplan pathが変化しました"
   [ "$(sha256_file "$receipt")" = "$receipt_sha_before" ] || die "verify中にreceipt pathが変化しました"
   [ "$(sha256_file "$var_file")" = "$var_sha_before" ] || die "verify中にvar-fileが変化しました"
@@ -6683,6 +7414,27 @@ verify_receipt() {
       "$log_readiness_receipt_identity" ] ||
       die "verify中にlog readiness receipt pathが差替えられました"
   fi
+  if [ -n "$alarm_migration_receipt" ]; then
+    [ "$(sha256_file "$alarm_migration_receipt")" = \
+      "$(jq -er '.alarm_migration_receipt_sha256' \
+        "$stage/receipt.json")" ] ||
+      die "verify中にalarm migration receiptが変化しました"
+    [ "$(stat_identity "$alarm_migration_receipt")" = \
+      "$alarm_migration_receipt_identity" ] ||
+      die "verify中にalarm migration receipt pathが差替えられました"
+  fi
+  if [ -n "$prior_apply_receipt" ]; then
+    [ "$(sha256_file "$prior_apply_receipt")" = \
+      "$(jq -er '.prior_apply_receipt_sha256' "$stage/receipt.json")" ] ||
+      die "verify中にprior apply receiptが変化しました"
+    [ "$(stat_identity "$prior_apply_receipt")" = \
+      "$prior_apply_receipt_identity" ] ||
+      die "verify中にprior apply receipt pathが差替えられました"
+    verify_required_migration_apply_receipt \
+      "$prior_apply_receipt" \
+      "$(jq -er '.requires_migration' "$migration_file")" \
+      "$stage/live-after.json" "$stage/state-after.json"
+  fi
   # Re-run the content validators against the final live/state observations.
   # apply invokes verify_receipt while holding the deployment lock, so these
   # are the final evidence/backend/lifecycle/SNS checks before Terraform uses
@@ -6700,6 +7452,9 @@ verify_receipt() {
     verify_log_readiness_receipt \
       "$log_readiness_receipt" "$versioning_receipt" \
       "$stage/live-after.json"
+  fi
+  if [ -n "$alarm_migration_receipt" ]; then
+    verify_alarm_migration_final_receipt "$alarm_migration_receipt"
   fi
 }
 
@@ -6749,209 +7504,327 @@ case "$COMMAND" in
     need_cmd jq
     need_cmd terraform
     validate_log_versioning_stage_manifest
-    VERSIONING_OUT="$(secure_new_file "$VERSIONING_OUT")"
+    run_first_time_versioning_cutover "$VERSIONING_OUT"
+    exit 0
+    ;;
+
+  issue-alarm-challenge)
+    CHALLENGE_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --out) CHALLENGE_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$CHALLENGE_OUT" ] ||
+      die "issue-alarm-challengeには --out が必須です"
+    CHALLENGE_OUT="$(secure_new_file "$CHALLENGE_OUT")"
     ensure_tmp
     assert_trusted_automation_identity
     acquire_deployment_lock
-
-    VERSIONING_PUBLISHED="false"
-    VERSIONING_STAGE="$(
-      mktemp -d \
-        "$(dirname "$VERSIONING_OUT")/.teamagent-log-versioning.XXXXXX"
-    )"
-    chmod 700 "$VERSIONING_STAGE"
-    cleanup_versioning_command() {
+    CHALLENGE_STAGE="$TMP_ROOT/alarm-challenge.json"
+    CHALLENGE_PUBLISHED="false"
+    cleanup_alarm_challenge() {
       local status=$?
       set +e
       release_deployment_lock
-      if [ "$VERSIONING_PUBLISHED" != "true" ]; then
-        rm -f "$VERSIONING_OUT"
+      if [ "$CHALLENGE_PUBLISHED" != "true" ]; then
+        rm -f "$CHALLENGE_OUT"
       fi
-      rm -rf "$VERSIONING_STAGE" "$TMP_ROOT"
+      rm -rf "$TMP_ROOT"
       exit "$status"
     }
-    trap 'cleanup_versioning_command' EXIT
-
-    capture_state_contract "$TMP_ROOT/versioning-state-before.json"
-    snapshot_live "$TMP_ROOT/versioning-live-before.json"
-    capture_log_producer_off_contract \
-      "$TMP_ROOT/versioning-producer-off-before.json"
-    capture_versioning_enablement_contract \
-      "$TMP_ROOT/versioning-enablement-before.json"
-    VERSIONING_BEFORE_OBSERVED_AT="$(date +%s)"
-    jq -e '
-      .log_buckets.cloudtrail.versioning_status == "Enabled" and
-      .log_buckets.cloudtrail.mfa_delete == "Disabled" and
-      .log_buckets.cloudtrail.lifecycle.deletion_rule_count == 0 and
-      .log_buckets.bedrock == {
-        versioning_status:"Enabled",
-        mfa_delete:"Disabled"
-      }
-    ' "$TMP_ROOT/versioning-live-before.json" >/dev/null ||
-      die "pre-versioned destinationだけをattestできます。Unversioned/Suspendedは拒否します"
-
-    # The shared lock is held across two complete observations. No versioning
-    # or producer write occurs; both writers must remain disconnected.
-    snapshot_live "$TMP_ROOT/versioning-live-after.json"
-    capture_state_contract "$TMP_ROOT/versioning-state-after.json"
-    capture_log_producer_off_contract \
-      "$TMP_ROOT/versioning-producer-off-after.json"
-    capture_versioning_enablement_contract \
-      "$TMP_ROOT/versioning-enablement-after.json"
-    VERSIONING_AFTER_OBSERVED_AT="$(date +%s)"
-    jq -e '
-      .log_buckets.cloudtrail.versioning_status == "Enabled" and
-      .log_buckets.cloudtrail.mfa_delete == "Disabled" and
-      .log_buckets.cloudtrail.lifecycle.deletion_rule_count == 0 and
-      .log_buckets.bedrock == {
-        versioning_status:"Enabled",
-        mfa_delete:"Disabled"
-      }
-    ' "$TMP_ROOT/versioning-live-after.json" >/dev/null ||
-      die "attestation後のversioning/lifecycle状態が不正です"
-    cmp -s \
-      "$TMP_ROOT/versioning-live-before.json" \
-      "$TMP_ROOT/versioning-live-after.json" ||
-      die "versioning attestation中にlive状態が変化しました"
-    cmp -s \
-      "$TMP_ROOT/versioning-state-before.json" \
-      "$TMP_ROOT/versioning-state-after.json" ||
-      die "versioning attestation中にTerraform state ownershipが変化しました"
-    cmp -s \
-      "$TMP_ROOT/versioning-producer-off-before.json" \
-      "$TMP_ROOT/versioning-producer-off-after.json" ||
-      die "versioning attestation中にproducer-off状態が変化しました"
-    cmp -s \
-      "$TMP_ROOT/versioning-enablement-before.json" \
-      "$TMP_ROOT/versioning-enablement-after.json" ||
-      die "versioning attestation中にenablement event historyが変化しました"
-    VERSIONING_CUTOVER_NOT_BEFORE="$(
-      verify_versioning_settle_window \
-        "$TMP_ROOT/versioning-enablement-after.json" \
-        "$VERSIONING_BEFORE_OBSERVED_AT"
-    )"
-
-    write_log_cutover_contract \
-      "$TMP_ROOT/versioning-producer-off-after.json" \
-      "$TMP_ROOT/versioning-cutover-contract.json"
-    write_log_bucket_identity \
-      "$TMP_ROOT/versioning-live-after.json" "cloudtrail" \
-      "$TMP_ROOT/versioning-cloudtrail-identity.json"
-    write_log_bucket_identity \
-      "$TMP_ROOT/versioning-live-after.json" "bedrock-logs" \
-      "$TMP_ROOT/versioning-bedrock-identity.json"
-
-    VERSIONING_CONFIG_MANIFEST="$TMP_ROOT/versioning-config-manifest.txt"
-    write_config_manifest "$VERSIONING_CONFIG_MANIFEST"
-    VERSIONING_NOW="$(date +%s)"
-    VERSIONING_EXPIRES=$((VERSIONING_NOW + 86400))
-    VERSIONING_STAGE_RECEIPT="$VERSIONING_STAGE/receipt.json"
-    jq -n -S \
-      --arg kind "teamagent-log-versioning-precutover-receipt" \
-      --arg stage_id "2026-07-log-versioning-precutover-v3" \
-      --arg guard_version "$GUARD_VERSION" \
-      --arg account_id "$EXPECTED_ACCOUNT_ID" \
-      --arg region "$REGION" \
-      --arg git_commit "$(git_commit)" \
-      --arg guard_script_sha256 "$(sha256_file "$SCRIPT_PATH")" \
-      --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
-      --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
-      --arg config_manifest_sha256 \
-        "$(sha256_file "$VERSIONING_CONFIG_MANIFEST")" \
-      --arg deployment_lock_id "$DEPLOYMENT_LOCK_ID" \
-      --arg cloudtrail_name \
-        "${PROJECT}-${ENVIRONMENT}-cloudtrail-${EXPECTED_ACCOUNT_ID}" \
-      --arg bedrock_name \
-        "${PROJECT}-${ENVIRONMENT}-bedrock-logs-${EXPECTED_ACCOUNT_ID}" \
-      --arg live_after_sha256 \
-        "$(sha256_file "$TMP_ROOT/versioning-live-after.json")" \
-      --arg producer_off_contract_sha256 "$(
-        jq -S -c . "$TMP_ROOT/versioning-producer-off-after.json" |
-          sha256_text
-      )" \
-      --arg cutover_contract_sha256 "$(
-        log_delivery_contract_sha256 \
-          "$TMP_ROOT/versioning-cutover-contract.json"
-      )" \
-      --arg cloudtrail_identity_sha256 \
-        "$(sha256_file "$TMP_ROOT/versioning-cloudtrail-identity.json")" \
-      --arg bedrock_identity_sha256 \
-        "$(sha256_file "$TMP_ROOT/versioning-bedrock-identity.json")" \
-      --argjson created_at_epoch "$VERSIONING_NOW" \
-      --argjson before_observed_at_epoch "$VERSIONING_BEFORE_OBSERVED_AT" \
-      --argjson after_observed_at_epoch "$VERSIONING_AFTER_OBSERVED_AT" \
-      --argjson cutover_not_before_epoch "$VERSIONING_CUTOVER_NOT_BEFORE" \
-      --argjson settle_window_seconds "$LOG_VERSIONING_SETTLE_SECONDS" \
-      --argjson expires_at_epoch "$VERSIONING_EXPIRES" \
-      --slurpfile before "$TMP_ROOT/versioning-live-before.json" \
-      --slurpfile after "$TMP_ROOT/versioning-live-after.json" \
-      --slurpfile producer_off \
-        "$TMP_ROOT/versioning-producer-off-after.json" \
-      --slurpfile versioning_enablement \
-        "$TMP_ROOT/versioning-enablement-after.json" \
-      --slurpfile state_contract "$TMP_ROOT/versioning-state-after.json" '{
-        kind:$kind,
-        schema_version:2,
-        stage_id:$stage_id,
-        guard_version:$guard_version,
-        account_id:$account_id,
-        region:$region,
-        git_commit:$git_commit,
-        guard_script_sha256:$guard_script_sha256,
-        guard_jq_sha256:$guard_jq_sha256,
-        migration_manifest_sha256:$migration_manifest_sha256,
-        config_manifest_sha256:$config_manifest_sha256,
-        deployment_lock_id:$deployment_lock_id,
-        created_at_epoch:$created_at_epoch,
-        pre_cutover_observed_at_epoch:$after_observed_at_epoch,
-        settle_window_seconds:$settle_window_seconds,
-        expires_at_epoch:$expires_at_epoch,
-        buckets:{
-          cloudtrail:{
-            name:$cloudtrail_name,
-            identity_sha256:$cloudtrail_identity_sha256,
-            before:$before[0].log_buckets.cloudtrail,
-            after:$after[0].log_buckets.cloudtrail
-          },
-          bedrock:{
-            name:$bedrock_name,
-            identity_sha256:$bedrock_identity_sha256,
-            before:$before[0].log_buckets.bedrock,
-            after:$after[0].log_buckets.bedrock
-          }
-        },
-        versioning_enablement:$versioning_enablement[0],
-        producer_off:{
-          before_observed_at_epoch:$before_observed_at_epoch,
-          after_observed_at_epoch:$after_observed_at_epoch,
-          contract_sha256:$producer_off_contract_sha256,
-          contract:$producer_off[0]
-        },
-        cutover:{
-          id:"2026-07-cloudtrail-bedrock-writer-cutover-v1",
-          not_before_epoch:$cutover_not_before_epoch,
-          cloudtrail_action:"start-logging",
-          bedrock_action:
-            "put-model-invocation-logging-configuration",
-          contract_sha256:$cutover_contract_sha256
-        },
-        live_after_sha256:$live_after_sha256,
-        state_contract:$state_contract[0]
-      }' > "$VERSIONING_STAGE_RECEIPT"
-    chmod 600 "$VERSIONING_STAGE_RECEIPT"
-    jq -e . "$VERSIONING_STAGE_RECEIPT" >/dev/null ||
-      die "versioning receipt生成に失敗しました"
-    VERSIONING_STAGE_IDENTITY="$(stat_identity "$VERSIONING_STAGE_RECEIPT")"
-    ln "$VERSIONING_STAGE_RECEIPT" "$VERSIONING_OUT" ||
-      die "versioning receipt出力pathを原子的に確保できません"
-    [ "$(stat_identity "$VERSIONING_OUT")" = \
-      "$VERSIONING_STAGE_IDENTITY" ] ||
-      die "versioning receiptの原子的引渡しに失敗しました"
-    chmod 600 "$VERSIONING_OUT"
-    VERSIONING_PUBLISHED="true"
+    trap 'cleanup_alarm_challenge' EXIT
+    run_evidence_helper issue-sns-challenge --output "$CHALLENGE_STAGE"
+    CHALLENGE_STAGE_IDENTITY="$(stat_identity "$CHALLENGE_STAGE")"
+    ln "$CHALLENGE_STAGE" "$CHALLENGE_OUT" ||
+      die "SNS challenge出力pathを原子的に確保できません"
+    [ "$(stat_identity "$CHALLENGE_OUT")" = "$CHALLENGE_STAGE_IDENTITY" ] ||
+      die "SNS challengeの原子的引渡しに失敗しました"
+    chmod 600 "$CHALLENGE_OUT"
+    CHALLENGE_PUBLISHED="true"
     release_deployment_lock
-    echo "✅ producer-disconnected pre-cutover receipt published: $VERSIONING_OUT"
-    echo "   independent Enabled timestamp + 900秒settleを確認済みです"
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ SNS challenge published; recipient KMS ack is now required: $CHALLENGE_OUT"
+    ;;
+
+  sign-alarm-ack)
+    CHALLENGE=""
+    ACK_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --challenge) CHALLENGE="${2:?--challenge に値が必要}"; shift 2 ;;
+        --out) ACK_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$CHALLENGE" ] && [ -n "$ACK_OUT" ] ||
+      die "sign-alarm-ackには --challenge と --out が必須です"
+    CHALLENGE="$(secure_existing_file "$CHALLENGE" 600)"
+    ACK_OUT="$(secure_new_file "$ACK_OUT")"
+    ensure_tmp
+    ACK_STAGE="$TMP_ROOT/recipient-ack.json"
+    run_evidence_helper sign-sns-ack \
+      --challenge "$CHALLENGE" --output "$ACK_STAGE"
+    ACK_STAGE_IDENTITY="$(stat_identity "$ACK_STAGE")"
+    ln "$ACK_STAGE" "$ACK_OUT" ||
+      die "recipient ack出力pathを原子的に確保できません"
+    [ "$(stat_identity "$ACK_OUT")" = "$ACK_STAGE_IDENTITY" ] ||
+      die "recipient ackの原子的引渡しに失敗しました"
+    chmod 600 "$ACK_OUT"
+    echo "✅ recipient acknowledgement signed by managed KMS: $ACK_OUT"
+    ;;
+
+  attest-alarm-delivery)
+    CHALLENGE=""
+    RECIPIENT_ACK=""
+    ALARM_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --challenge) CHALLENGE="${2:?--challenge に値が必要}"; shift 2 ;;
+        --recipient-ack) RECIPIENT_ACK="${2:?--recipient-ack に値が必要}"; shift 2 ;;
+        --out) ALARM_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$CHALLENGE" ] && [ -n "$RECIPIENT_ACK" ] &&
+      [ -n "$ALARM_OUT" ] ||
+      die "attest-alarm-deliveryにはchallenge/recipient-ack/outが必須です"
+    CHALLENGE="$(secure_existing_file "$CHALLENGE" 600)"
+    RECIPIENT_ACK="$(secure_existing_file "$RECIPIENT_ACK" 600)"
+    ALARM_OUT="$(secure_new_file "$ALARM_OUT")"
+    ensure_tmp
+    assert_trusted_automation_identity
+    acquire_deployment_lock
+    ALARM_STAGE="$TMP_ROOT/alarm-delivery-receipt.json"
+    ALARM_PUBLISHED="false"
+    cleanup_alarm_attestation() {
+      local status=$?
+      set +e
+      release_deployment_lock
+      if [ "$ALARM_PUBLISHED" != "true" ]; then
+        rm -f "$ALARM_OUT"
+      fi
+      rm -rf "$TMP_ROOT"
+      exit "$status"
+    }
+    trap 'cleanup_alarm_attestation' EXIT
+    run_evidence_helper attest-sns-delivery \
+      --challenge "$CHALLENGE" --ack "$RECIPIENT_ACK" \
+      --output "$ALARM_STAGE"
+    ALARM_STAGE_IDENTITY="$(stat_identity "$ALARM_STAGE")"
+    ln "$ALARM_STAGE" "$ALARM_OUT" ||
+      die "alarm delivery receipt出力pathを原子的に確保できません"
+    [ "$(stat_identity "$ALARM_OUT")" = "$ALARM_STAGE_IDENTITY" ] ||
+      die "alarm delivery receiptの原子的引渡しに失敗しました"
+    chmod 600 "$ALARM_OUT"
+    ALARM_PUBLISHED="true"
+    release_deployment_lock
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ exact email SNS delivery + managed KMS ack verified: $ALARM_OUT"
+    ;;
+
+  advance-alarm-migration)
+    ALARM_PHASE=""
+    ALARM_PUBLISHER_ID=""
+    ALARM_PHASE_DELIVERY_RECEIPT=""
+    ALARM_PHASE_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --phase) ALARM_PHASE="${2:?--phase に値が必要}"; shift 2 ;;
+        --publisher-id)
+          ALARM_PUBLISHER_ID="${2:?--publisher-id に値が必要}"
+          shift 2
+          ;;
+        --delivery-receipt)
+          ALARM_PHASE_DELIVERY_RECEIPT="${2:?--delivery-receipt に値が必要}"
+          shift 2
+          ;;
+        --out) ALARM_PHASE_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$ALARM_PHASE" ] && [ -n "$ALARM_PHASE_OUT" ] ||
+      die "advance-alarm-migrationには --phase と --out が必須です"
+    case "$ALARM_PHASE" in
+      dual_publish|legacy_reference_zero|legacy_retired)
+        [ -z "$ALARM_PUBLISHER_ID" ] &&
+          [ -z "$ALARM_PHASE_DELIVERY_RECEIPT" ] ||
+          die "$ALARM_PHASE はpublisher/delivery引数を受け付けません"
+        ;;
+      publisher_checkpoint)
+        [ -n "$ALARM_PUBLISHER_ID" ] &&
+          [ -z "$ALARM_PHASE_DELIVERY_RECEIPT" ] ||
+          die "publisher_checkpointにはpublisher-idだけが必須です"
+        ;;
+      canonical_delivery_confirmed)
+        [ -z "$ALARM_PUBLISHER_ID" ] &&
+          [ -n "$ALARM_PHASE_DELIVERY_RECEIPT" ] ||
+          die "canonical_delivery_confirmedにはdelivery receiptだけが必須です"
+        ;;
+      *) die "未知のalarm migration phaseです: $ALARM_PHASE" ;;
+    esac
+    if [ -n "$ALARM_PHASE_DELIVERY_RECEIPT" ]; then
+      ALARM_PHASE_DELIVERY_RECEIPT="$(
+        secure_existing_file "$ALARM_PHASE_DELIVERY_RECEIPT" 600
+      )"
+    fi
+    ALARM_PHASE_OUT="$(secure_new_file "$ALARM_PHASE_OUT")"
+    ensure_tmp
+    assert_trusted_automation_identity
+    ALARM_PHASE_STAGE="$TMP_ROOT/alarm-migration-phase.json"
+    ALARM_PHASE_LOCK="$TMP_ROOT/alarm-migration-lock.json"
+    ALARM_PHASE_LOCK_RELEASE="$TMP_ROOT/alarm-migration-lock-release.json"
+    ALARM_PHASE_PUBLISHED="false"
+    ALARM_PHASE_LOCK_ACQUIRED="false"
+    ALARM_PHASE_WORKFLOW_ID="$(new_uuid_v4)"
+    cleanup_alarm_migration_phase() {
+      local status=$?
+      set +e
+      release_deployment_lock
+      if [ "$ALARM_PHASE_LOCK_ACQUIRED" = "true" ] ||
+        [ -f "$ALARM_PHASE_LOCK" ]; then
+        rm -f "$ALARM_PHASE_LOCK_RELEASE"
+        run_evidence_helper release-runtime-lock \
+          --lock "$ALARM_PHASE_LOCK" \
+          --output "$ALARM_PHASE_LOCK_RELEASE"
+        ALARM_PHASE_LOCK_ACQUIRED="false"
+      fi
+      if [ "$ALARM_PHASE_PUBLISHED" != "true" ]; then
+        rm -f "$ALARM_PHASE_OUT"
+      fi
+      rm -rf "$TMP_ROOT"
+      exit "$status"
+    }
+    trap 'cleanup_alarm_migration_phase' EXIT
+    run_evidence_helper acquire-runtime-lock \
+      --workflow-id "$ALARM_PHASE_WORKFLOW_ID" \
+      --output "$ALARM_PHASE_LOCK"
+    ALARM_PHASE_LOCK_ACQUIRED="true"
+    acquire_deployment_lock
+    ALARM_PHASE_ARGS=(
+      advance-alarm-migration
+      --migration-id "2026-07-alarm-topic-consolidation-v1"
+      --phase "$ALARM_PHASE"
+      --publisher-id "$ALARM_PUBLISHER_ID"
+      --lock-receipt "$ALARM_PHASE_LOCK"
+      --output "$ALARM_PHASE_STAGE"
+    )
+    if [ -n "$ALARM_PHASE_DELIVERY_RECEIPT" ]; then
+      ALARM_PHASE_ARGS+=(
+        --delivery-receipt "$ALARM_PHASE_DELIVERY_RECEIPT"
+      )
+    fi
+    run_evidence_helper "${ALARM_PHASE_ARGS[@]}"
+    jq -e \
+      --arg phase "$ALARM_PHASE" \
+      --arg workflow "$ALARM_PHASE_WORKFLOW_ID" '
+      .kind == "teamagent-alarm-migration-phase-receipt" and
+      .schema_version == 1 and
+      .migration_id == "2026-07-alarm-topic-consolidation-v1" and
+      .phase == $phase and
+      .shared_lock_record_id == "lock#teamagent/terraform.tfstate" and
+      .shared_lock_workflow_id == $workflow and
+      (.shared_lock_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      (.checkpoint_sha256 | test("^[0-9a-f]{64}$")) and
+      (.history_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$ALARM_PHASE_STAGE" >/dev/null ||
+      die "alarm migration phase receiptがshared lock/ledgerと不一致です"
+    ALARM_PHASE_STAGE_IDENTITY="$(stat_identity "$ALARM_PHASE_STAGE")"
+    ln "$ALARM_PHASE_STAGE" "$ALARM_PHASE_OUT" ||
+      die "alarm migration phase receipt pathを原子的に確保できません"
+    [ "$(stat_identity "$ALARM_PHASE_OUT")" = \
+      "$ALARM_PHASE_STAGE_IDENTITY" ] ||
+      die "alarm migration phase receiptの原子的引渡しに失敗しました"
+    chmod 600 "$ALARM_PHASE_OUT"
+    ALARM_PHASE_PUBLISHED="true"
+    release_deployment_lock
+    run_evidence_helper release-runtime-lock \
+      --lock "$ALARM_PHASE_LOCK" --output "$ALARM_PHASE_LOCK_RELEASE"
+    ALARM_PHASE_LOCK_ACQUIRED="false"
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ alarm migration checkpoint: $ALARM_PHASE / $ALARM_PHASE_OUT"
+    ;;
+
+  attest-log-readiness)
+    VERSIONING_RECEIPT=""
+    READINESS_SPEC=""
+    ARTIFACT_DIR=""
+    READINESS_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --versioning-receipt) VERSIONING_RECEIPT="${2:?値が必要}"; shift 2 ;;
+        --spec) READINESS_SPEC="${2:?値が必要}"; shift 2 ;;
+        --artifact-dir) ARTIFACT_DIR="${2:?値が必要}"; shift 2 ;;
+        --out) READINESS_OUT="${2:?値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$VERSIONING_RECEIPT" ] && [ -n "$READINESS_SPEC" ] &&
+      [ -n "$ARTIFACT_DIR" ] && [ -n "$READINESS_OUT" ] ||
+      die "attest-log-readinessにはversioning/spec/artifact-dir/outが必須です"
+    VERSIONING_RECEIPT="$(secure_existing_file "$VERSIONING_RECEIPT" 600)"
+    READINESS_SPEC="$(secure_existing_file "$READINESS_SPEC" 600)"
+    ARTIFACT_DIR="$(secure_private_dir "$ARTIFACT_DIR")"
+    READINESS_OUT="$(secure_new_file "$READINESS_OUT")"
+    [ "$(dirname "$READINESS_OUT")" = "$ARTIFACT_DIR" ] ||
+      die "readiness receiptはartifact-dir直下に置いてください"
+    ensure_tmp
+    assert_trusted_automation_identity
+    acquire_deployment_lock
+    EXPORT_DIR="$ARTIFACT_DIR/exact-exports"
+    mkdir -m 700 "$EXPORT_DIR" ||
+      die "fresh exact export directoryを作成できません"
+    RETENTION_OUT="$ARTIFACT_DIR/retention-export-manifest.json"
+    EVIDENCE_OUT="$ARTIFACT_DIR/log-readiness-evidence.json"
+    for path in "$RETENTION_OUT" "$EVIDENCE_OUT"; do
+      [ ! -e "$path" ] && [ ! -L "$path" ] ||
+        die "readiness artifact出力先は未存在が必須です: $path"
+    done
+    READINESS_STAGE="$TMP_ROOT/readiness-receipt.json"
+    READINESS_PUBLISHED="false"
+    cleanup_log_readiness() {
+      local status=$?
+      set +e
+      release_deployment_lock
+      if [ "$READINESS_PUBLISHED" != "true" ]; then
+        rm -f "$READINESS_OUT" "$RETENTION_OUT" "$EVIDENCE_OUT"
+        rm -rf "$EXPORT_DIR"
+      fi
+      rm -rf "$TMP_ROOT"
+      exit "$status"
+    }
+    trap 'cleanup_log_readiness' EXIT
+    run_evidence_helper build-log-readiness \
+      --spec "$READINESS_SPEC" \
+      --versioning-receipt "$VERSIONING_RECEIPT" \
+      --export-dir "$EXPORT_DIR" \
+      --retention-output "$RETENTION_OUT" \
+      --evidence-output "$EVIDENCE_OUT" \
+      --receipt-output "$READINESS_STAGE"
+    READINESS_STAGE_IDENTITY="$(stat_identity "$READINESS_STAGE")"
+    ln "$READINESS_STAGE" "$READINESS_OUT" ||
+      die "log readiness receipt出力pathを原子的に確保できません"
+    [ "$(stat_identity "$READINESS_OUT")" = "$READINESS_STAGE_IDENTITY" ] ||
+      die "log readiness receiptの原子的引渡しに失敗しました"
+    chmod 600 "$READINESS_OUT"
+    READINESS_PUBLISHED="true"
+    release_deployment_lock
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ exact-version delivery/retention evidence fetched: $READINESS_OUT"
     ;;
 
   preflight)
@@ -7105,6 +7978,8 @@ case "$COMMAND" in
     ALARM_DELIVERY_RECEIPT=""
     VERSIONING_RECEIPT=""
     LOG_READINESS_RECEIPT=""
+    ALARM_MIGRATION_RECEIPT=""
+    PRIOR_APPLY_RECEIPT=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -7117,6 +7992,8 @@ case "$COMMAND" in
         --alarm-delivery-receipt) ALARM_DELIVERY_RECEIPT="${2:?--alarm-delivery-receipt に値が必要}"; shift 2 ;;
         --versioning-receipt) VERSIONING_RECEIPT="${2:?--versioning-receipt に値が必要}"; shift 2 ;;
         --log-readiness-receipt) LOG_READINESS_RECEIPT="${2:?--log-readiness-receipt に値が必要}"; shift 2 ;;
+        --alarm-migration-receipt) ALARM_MIGRATION_RECEIPT="${2:?--alarm-migration-receipt に値が必要}"; shift 2 ;;
+        --prior-apply-receipt) PRIOR_APPLY_RECEIPT="${2:?--prior-apply-receipt に値が必要}"; shift 2 ;;
         *) die "不明な引数: $1" ;;
       esac
     done
@@ -7137,11 +8014,16 @@ case "$COMMAND" in
     if [ -n "$MIGRATION_ID" ] && [ -z "$LOG_READINESS_RECEIPT" ]; then
       die "--runtime-migration には --log-readiness-receipt が必須です"
     fi
+    if [ -n "$MIGRATION_ID" ] && [ -z "$ALARM_MIGRATION_RECEIPT" ]; then
+      die "--runtime-migration には --alarm-migration-receipt が必須です"
+    fi
     if [ "$RUNTIME_SYNC" = "true" ] &&
        { [ -n "$PREFLIGHT_RECEIPT" ] ||
          [ -n "$ALARM_DELIVERY_RECEIPT" ] ||
          [ -n "$VERSIONING_RECEIPT" ] ||
-         [ -n "$LOG_READINESS_RECEIPT" ]; }; then
+         [ -n "$LOG_READINESS_RECEIPT" ] ||
+         [ -n "$ALARM_MIGRATION_RECEIPT" ] ||
+         [ -n "$PRIOR_APPLY_RECEIPT" ]; }; then
       die "--runtime-syncに外部receiptは指定できません"
     fi
     [ "$RUNTIME_SYNC" = "true" ] || [ -n "$MIGRATION_ID" ] ||
@@ -7169,6 +8051,16 @@ case "$COMMAND" in
         secure_existing_file "$LOG_READINESS_RECEIPT" 600
       )"
     fi
+    if [ -n "$ALARM_MIGRATION_RECEIPT" ]; then
+      ALARM_MIGRATION_RECEIPT="$(
+        secure_existing_file "$ALARM_MIGRATION_RECEIPT" 600
+      )"
+    fi
+    if [ -n "$PRIOR_APPLY_RECEIPT" ]; then
+      PRIOR_APPLY_RECEIPT="$(
+        secure_existing_file "$PRIOR_APPLY_RECEIPT" 600
+      )"
+    fi
     ALARM_DELIVERY_RECEIPT_SHA256=""
     ALARM_DELIVERY_RECEIPT_IDENTITY=""
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
@@ -7182,7 +8074,7 @@ case "$COMMAND" in
       VERSIONING_RECEIPT_SHA256="$(sha256_file "$VERSIONING_RECEIPT")"
       VERSIONING_RECEIPT_IDENTITY="$(stat_identity "$VERSIONING_RECEIPT")"
       LOG_CUTOVER_CONTRACT_SHA256="$(
-        jq -er '.cutover.contract_sha256' "$VERSIONING_RECEIPT"
+        jq -er '.workflow_sha256' "$VERSIONING_RECEIPT"
       )"
     fi
     LOG_READINESS_RECEIPT_SHA256=""
@@ -7190,6 +8082,22 @@ case "$COMMAND" in
     if [ -n "$LOG_READINESS_RECEIPT" ]; then
       LOG_READINESS_RECEIPT_SHA256="$(sha256_file "$LOG_READINESS_RECEIPT")"
       LOG_READINESS_RECEIPT_IDENTITY="$(stat_identity "$LOG_READINESS_RECEIPT")"
+    fi
+    ALARM_MIGRATION_RECEIPT_SHA256=""
+    ALARM_MIGRATION_RECEIPT_IDENTITY=""
+    if [ -n "$ALARM_MIGRATION_RECEIPT" ]; then
+      ALARM_MIGRATION_RECEIPT_SHA256="$(
+        sha256_file "$ALARM_MIGRATION_RECEIPT"
+      )"
+      ALARM_MIGRATION_RECEIPT_IDENTITY="$(
+        stat_identity "$ALARM_MIGRATION_RECEIPT"
+      )"
+    fi
+    PRIOR_APPLY_RECEIPT_SHA256=""
+    PRIOR_APPLY_RECEIPT_IDENTITY=""
+    if [ -n "$PRIOR_APPLY_RECEIPT" ]; then
+      PRIOR_APPLY_RECEIPT_SHA256="$(sha256_file "$PRIOR_APPLY_RECEIPT")"
+      PRIOR_APPLY_RECEIPT_IDENTITY="$(stat_identity "$PRIOR_APPLY_RECEIPT")"
     fi
     PLAN="$(secure_new_file "$PLAN")"
     RECEIPT="${RECEIPT:-${PLAN}.runtime-guard.json}"
@@ -7226,6 +8134,7 @@ case "$COMMAND" in
 
     capture_state_contract "$TMP_ROOT/state-before.json"
     snapshot_live "$TMP_ROOT/live-before.json"
+    capture_complete_runtime_inventory "$TMP_ROOT/inventory-before.json"
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
       verify_alarm_delivery_test_receipt \
         "$ALARM_DELIVERY_RECEIPT" "$TMP_ROOT/live-before.json"
@@ -7239,6 +8148,9 @@ case "$COMMAND" in
       verify_log_readiness_receipt \
         "$LOG_READINESS_RECEIPT" "$VERSIONING_RECEIPT" \
         "$TMP_ROOT/live-before.json"
+    fi
+    if [ -n "$ALARM_MIGRATION_RECEIPT" ]; then
+      verify_alarm_migration_final_receipt "$ALARM_MIGRATION_RECEIPT"
     fi
     LIVE_OPENCLAW_IMAGE="$(jq -er '.taskdefs.openclaw.image' "$TMP_ROOT/live-before.json")"
     LIVE_MCP_IMAGE="$(jq -er '.taskdefs.mcp.image' "$TMP_ROOT/live-before.json")"
@@ -7254,6 +8166,8 @@ case "$COMMAND" in
     MIGRATION_KIND=""
     MIGRATION_JSON=""
     PREFLIGHT_SHA256=""
+    REQUIRED_MIGRATION_ID=""
+    REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256=""
     DESIRED_OPENCLAW_IMAGE="$LIVE_OPENCLAW_IMAGE"
     DESIRED_MCP_IMAGE="$LIVE_MCP_IMAGE"
     DESIRED_X_IMAGE="$LIVE_X_IMAGE"
@@ -7262,6 +8176,7 @@ case "$COMMAND" in
     DESIRED_MORNING_RULE="$(jq -r '.morning == "ENABLED"' <<< "$LIVE_RULE_STATES")"
     DESIRED_CANARY_RULE="$(jq -r '.canary == "ENABLED"' <<< "$LIVE_RULE_STATES")"
     TRANSITION_EPOCH="$(date +%s)"
+    IMAGE_DEPLOYMENT_INTENT_ID="$(new_uuid_v4)"
 
     if [ -n "$MIGRATION_ID" ]; then
       MODE="migration"
@@ -7277,11 +8192,23 @@ case "$COMMAND" in
       DESIRED_MORNING_RULE="$(jq -r '.to.rule_states.morning == "ENABLED"' "$MIGRATION_JSON")"
       DESIRED_CANARY_RULE="$(jq -r '.to.rule_states.canary == "ENABLED"' "$MIGRATION_JSON")"
       if [ "$MIGRATION_KIND" = "runtime" ]; then
+        [ -z "$PRIOR_APPLY_RECEIPT" ] ||
+          die "runtime migrationはprior apply receiptを受け付けません"
+        jq -e '.requires_migration == null' "$MIGRATION_JSON" >/dev/null ||
+          die "runtime migrationのrequires_migration契約が不正です"
         DESIRED_OPENCLAW_IMAGE="$(jq -er '.to.openclaw_image' "$MIGRATION_JSON")"
         DESIRED_MCP_IMAGE="$(jq -er '.to.mcp_image' "$MIGRATION_JSON")"
         DESIRED_X_IMAGE="$(jq -er '.to.x_buzz_image' "$MIGRATION_JSON")"
         DESIRED_TIKTOK_IMAGE="$(jq -er '.to.tiktok_image' "$MIGRATION_JSON")"
-      elif [ "$MIGRATION_KIND" != "activation" ]; then
+      elif [ "$MIGRATION_KIND" = "activation" ]; then
+        [ -n "$PRIOR_APPLY_RECEIPT" ] ||
+          die "activationには --prior-apply-receipt が必須です"
+        REQUIRED_MIGRATION_ID="$(jq -er '.requires_migration' "$MIGRATION_JSON")"
+        verify_required_migration_apply_receipt \
+          "$PRIOR_APPLY_RECEIPT" "$REQUIRED_MIGRATION_ID" \
+          "$TMP_ROOT/live-before.json" "$TMP_ROOT/state-before.json"
+        REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256="$PRIOR_APPLY_RECEIPT_SHA256"
+      else
         die "未知のmigration kindです"
       fi
     fi
@@ -7291,7 +8218,9 @@ case "$COMMAND" in
       "$DESIRED_OPENCLAW_IMAGE" "$DESIRED_MCP_IMAGE" "$DESIRED_X_IMAGE" \
       "$DESIRED_TIKTOK_IMAGE" "$PREFLIGHT_SHA256" "$TRANSITION_EPOCH" \
       "$DESIRED_INGEST_RULE" "$DESIRED_MORNING_RULE" "$DESIRED_CANARY_RULE" \
-      "$VERSIONING_RECEIPT_SHA256" "$LOG_CUTOVER_CONTRACT_SHA256"
+      "$VERSIONING_RECEIPT_SHA256" "$LOG_CUTOVER_CONTRACT_SHA256" \
+      "$REQUIRED_MIGRATION_ID" \
+      "$REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256"
     CORE_JSON="$(jq -c . "$TMP_ROOT/core.json")"
     TF_ARGS=(
       plan
@@ -7309,6 +8238,7 @@ case "$COMMAND" in
       "-var=morning_digest_rule_enabled=$DESIRED_MORNING_RULE"
       "-var=canary_rule_enabled=$DESIRED_CANARY_RULE"
       "-var=require_alarm_delivery=true"
+      "-var=image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID"
     )
     terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"
     chmod 600 "$STAGE_PLAN"
@@ -7329,12 +8259,15 @@ case "$COMMAND" in
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
     snapshot_live "$TMP_ROOT/live-after.json"
     capture_state_contract "$TMP_ROOT/state-after.json"
+    capture_complete_runtime_inventory "$TMP_ROOT/inventory-after.json"
     BEFORE_SHA="$(sha256_file "$TMP_ROOT/live-before.json")"
     AFTER_SHA="$(sha256_file "$TMP_ROOT/live-after.json")"
     [ "$BEFORE_SHA" = "$AFTER_SHA" ] || die "plan 作成中に live runtime が変化しました。plan を再作成してください"
     [ "$(sha256_file "$TMP_ROOT/state-before.json")" = \
       "$(sha256_file "$TMP_ROOT/state-after.json")" ] ||
       die "plan作成中にbackend/workspace/state lineage/serial/address ownershipが変化しました"
+    cmp -s "$TMP_ROOT/inventory-before.json" "$TMP_ROOT/inventory-after.json" ||
+      die "plan作成中にall-page runtime/SNS publisher inventoryが変化しました"
     [ "$(sha256_file "$VAR_FILE")" = "$VAR_SHA" ] || die "plan作成中にvar-fileが変化しました"
     [ "$(stat_identity "$VAR_FILE")" = "$VAR_IDENTITY" ] || die "plan作成中にvar-file pathが差替えられました"
     [ "$(sha256_file "$STAGE_VAR")" = "$VAR_SHA" ] || die "private var-file copyが変化しました"
@@ -7362,6 +8295,26 @@ case "$COMMAND" in
         "$LOG_READINESS_RECEIPT_IDENTITY" ] ||
         die "plan作成中にlog readiness receipt pathが差替えられました"
     fi
+    if [ -n "$ALARM_MIGRATION_RECEIPT" ]; then
+      [ "$(sha256_file "$ALARM_MIGRATION_RECEIPT")" = \
+        "$ALARM_MIGRATION_RECEIPT_SHA256" ] ||
+        die "plan作成中にalarm migration receiptが変化しました"
+      [ "$(stat_identity "$ALARM_MIGRATION_RECEIPT")" = \
+        "$ALARM_MIGRATION_RECEIPT_IDENTITY" ] ||
+        die "plan作成中にalarm migration receipt pathが差替えられました"
+      verify_alarm_migration_final_receipt "$ALARM_MIGRATION_RECEIPT"
+    fi
+    if [ -n "$PRIOR_APPLY_RECEIPT" ]; then
+      [ "$(sha256_file "$PRIOR_APPLY_RECEIPT")" = \
+        "$PRIOR_APPLY_RECEIPT_SHA256" ] ||
+        die "plan作成中にprior apply receiptが変化しました"
+      [ "$(stat_identity "$PRIOR_APPLY_RECEIPT")" = \
+        "$PRIOR_APPLY_RECEIPT_IDENTITY" ] ||
+        die "plan作成中にprior apply receipt pathが差替えられました"
+      verify_required_migration_apply_receipt \
+        "$PRIOR_APPLY_RECEIPT" "$REQUIRED_MIGRATION_ID" \
+        "$TMP_ROOT/live-after.json" "$TMP_ROOT/state-after.json"
+    fi
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
       verify_alarm_delivery_test_receipt \
         "$ALARM_DELIVERY_RECEIPT" "$TMP_ROOT/live-after.json"
@@ -7376,6 +8329,14 @@ case "$COMMAND" in
         "$LOG_READINESS_RECEIPT" "$VERSIONING_RECEIPT" \
         "$TMP_ROOT/live-after.json"
     fi
+    capture_image_release_context \
+      "$STAGE_PLAN" "$TMP_ROOT/image-release-context.json"
+    prepare_image_deployment_intent \
+      "$STAGE_PLAN" "$TMP_ROOT/image-release-context.json" \
+      "$TMP_ROOT/image-deployment-intent.json"
+    [ "$(jq -er '.intent_id' "$TMP_ROOT/image-deployment-intent.json")" = \
+      "$IMAGE_DEPLOYMENT_INTENT_ID" ] ||
+      die "prepared production intentがsaved planのephemeral intentと不一致です"
 
     ACCOUNT_ID="$(jq -er '.account_id' "$TMP_ROOT/live-after.json")"
     CORE_SHA="$(sha256_file "$TMP_ROOT/core.json")"
@@ -7398,6 +8359,15 @@ case "$COMMAND" in
       --arg mode "$MODE" \
       --arg migration_id "$MIGRATION_ID" \
       --arg migration_kind "$MIGRATION_KIND" \
+      --arg image_deployment_intent_id "$IMAGE_DEPLOYMENT_INTENT_ID" \
+      --arg image_release_context_sha256 \
+        "$(sha256_file "$TMP_ROOT/image-release-context.json")" \
+      --arg image_deployment_intent_receipt_sha256 \
+        "$(sha256_file "$TMP_ROOT/image-deployment-intent.json")" \
+      --argjson image_deployment_intent_expires_at "$(
+        jq -er '.authorization_expires_at' \
+          "$TMP_ROOT/image-deployment-intent.json"
+      )" \
       --arg preflight_receipt_path "$PREFLIGHT_RECEIPT" \
       --arg preflight_receipt_sha256 "$PREFLIGHT_SHA256" \
       --arg alarm_delivery_receipt_path "$ALARM_DELIVERY_RECEIPT" \
@@ -7406,6 +8376,11 @@ case "$COMMAND" in
       --arg versioning_receipt_sha256 "$VERSIONING_RECEIPT_SHA256" \
       --arg log_readiness_receipt_path "$LOG_READINESS_RECEIPT" \
       --arg log_readiness_receipt_sha256 "$LOG_READINESS_RECEIPT_SHA256" \
+      --arg alarm_migration_receipt_path "$ALARM_MIGRATION_RECEIPT" \
+      --arg alarm_migration_receipt_sha256 \
+        "$ALARM_MIGRATION_RECEIPT_SHA256" \
+      --arg prior_apply_receipt_path "$PRIOR_APPLY_RECEIPT" \
+      --arg prior_apply_receipt_sha256 "$PRIOR_APPLY_RECEIPT_SHA256" \
       --argjson created_at_epoch "$NOW" \
       --argjson expires_at_epoch "$EXPIRES" \
       --arg git_commit "$(git_commit)" \
@@ -7431,6 +8406,9 @@ case "$COMMAND" in
       --arg var_file_sha256 "$VAR_SHA" \
       --arg plan_sha256 "$PLAN_SHA" \
       --arg live_fingerprint_sha256 "$AFTER_SHA" \
+      --arg runtime_inventory_sha256 "$(
+        jq -er '.inventory_sha256' "$TMP_ROOT/inventory-after.json"
+      )" \
       --arg runtime_guard_sha256 "$CORE_SHA" \
       --slurpfile state_contract "$TMP_ROOT/state-after.json" \
       '{
@@ -7443,6 +8421,12 @@ case "$COMMAND" in
         mode:$mode,
         migration_id:$migration_id,
         migration_kind:$migration_kind,
+        image_deployment_intent_id:$image_deployment_intent_id,
+        image_release_context_sha256:$image_release_context_sha256,
+        image_deployment_intent_receipt_sha256:
+          $image_deployment_intent_receipt_sha256,
+        image_deployment_intent_expires_at:
+          $image_deployment_intent_expires_at,
         preflight_receipt_path:$preflight_receipt_path,
         preflight_receipt_sha256:$preflight_receipt_sha256,
         alarm_delivery_receipt_path:$alarm_delivery_receipt_path,
@@ -7451,6 +8435,10 @@ case "$COMMAND" in
         versioning_receipt_sha256:$versioning_receipt_sha256,
         log_readiness_receipt_path:$log_readiness_receipt_path,
         log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
+        alarm_migration_receipt_path:$alarm_migration_receipt_path,
+        alarm_migration_receipt_sha256:$alarm_migration_receipt_sha256,
+        prior_apply_receipt_path:$prior_apply_receipt_path,
+        prior_apply_receipt_sha256:$prior_apply_receipt_sha256,
         created_at_epoch:$created_at_epoch,
         expires_at_epoch:$expires_at_epoch,
         git_commit:$git_commit,
@@ -7484,6 +8472,7 @@ case "$COMMAND" in
         var_file_sha256:$var_file_sha256,
         plan_sha256:$plan_sha256,
         live_fingerprint_sha256:$live_fingerprint_sha256,
+        runtime_inventory_sha256:$runtime_inventory_sha256,
         runtime_guard_sha256:$runtime_guard_sha256,
         state_contract:$state_contract[0]
       }' > "$STAGE_RECEIPT"
@@ -7571,11 +8560,56 @@ case "$COMMAND" in
       die "apply receiptもplanと同じprivate directoryに置いてください"
     ensure_tmp
     assert_trusted_automation_identity
-    acquire_deployment_lock
+    APPLY_ATTEMPT_ID="$(new_uuid_v4)"
+    GATE_PLAN="$PLAN"
+    GATE_LOCK_RECEIPT="$TMP_ROOT/provenance-shared-lock.json"
+    GATE_PREFLIGHT_RECEIPT="$TMP_ROOT/provenance-preflight.json"
+    GATE_OUTCOME_RECEIPT="$TMP_ROOT/provenance-outcome.json"
+    GATE_LOCK_ACQUIRED="false"
+    GATE_OUTCOME_RECORDED="false"
+    GATE_HEARTBEAT_PID=""
     APPLY_RECEIPT_PUBLISHED="false"
+    start_gate_heartbeat() {
+      local parent_pid="$$"
+      bash "$IMAGE_GATE_RUNNER" heartbeat-deployment-lock \
+        --plan "$GATE_PLAN" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID" >/dev/null
+      (
+        trap - EXIT
+        while sleep 30; do
+          bash "$IMAGE_GATE_RUNNER" heartbeat-deployment-lock \
+            --plan "$GATE_PLAN" \
+            --apply-attempt-id "$APPLY_ATTEMPT_ID" >/dev/null ||
+            {
+              kill -TERM "$parent_pid"
+              exit 75
+            }
+        done
+      ) &
+      GATE_HEARTBEAT_PID="$!"
+    }
+    stop_gate_heartbeat() {
+      [ -n "$GATE_HEARTBEAT_PID" ] || return 0
+      kill "$GATE_HEARTBEAT_PID" >/dev/null 2>&1 || true
+      wait "$GATE_HEARTBEAT_PID" >/dev/null 2>&1 || true
+      GATE_HEARTBEAT_PID=""
+    }
     cleanup_apply_command() {
       local status=$?
       set +e
+      stop_gate_heartbeat
+      if [ "$GATE_LOCK_ACQUIRED" = "true" ]; then
+        if [ "$GATE_OUTCOME_RECORDED" != "true" ]; then
+          bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
+            --plan "$GATE_PLAN" \
+            --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+            --outcome reconcile-required >/dev/null
+        fi
+        bash "$IMAGE_GATE_RUNNER" release-deployment-lock \
+          --plan "$GATE_PLAN" \
+          --apply-attempt-id "$APPLY_ATTEMPT_ID" >/dev/null
+        GATE_LOCK_ACQUIRED="false"
+      fi
       release_deployment_lock
       if [ "$APPLY_RECEIPT_PUBLISHED" != "true" ]; then
         rm -f "$APPLY_RECEIPT"
@@ -7585,41 +8619,290 @@ case "$COMMAND" in
     }
     trap 'cleanup_apply_command' EXIT
 
-    # The deployment lock remains held across the final live/state/alarm
-    # recheck and the saved-plan apply. verify_receipt stages immutable private
-    # copies, so the exact bytes it verifies are the bytes Terraform consumes.
+    # Atomically consume the one-use intent and acquire the same shared lock
+    # used by every image/Terraform apply before taking the backend workflow
+    # lock. A heartbeat covers the complete final verification window.
+    bash "$IMAGE_GATE_RUNNER" acquire-deployment-lock \
+      --plan "$PLAN" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --control-commit "$(git_commit)" > "$GATE_LOCK_RECEIPT"
+    jq -S -c . "$GATE_LOCK_RECEIPT" > "$GATE_LOCK_RECEIPT.canonical"
+    mv "$GATE_LOCK_RECEIPT.canonical" "$GATE_LOCK_RECEIPT"
+    chmod 600 "$GATE_LOCK_RECEIPT"
+    jq -e \
+      --arg attempt "$APPLY_ATTEMPT_ID" '
+      .record_id == "lock#teamagent/terraform.tfstate" and
+      .record_type == "teamagent.image-release-apply-lock" and
+      .state == "LOCKED" and
+      .apply_attempt_id == $attempt and
+      (.plan_sha256 | test("^[0-9a-f]{64}$")) and
+      (.terraform_context_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$GATE_LOCK_RECEIPT" >/dev/null ||
+      die "provenance shared lock receiptが不正です"
+    GATE_LOCK_ACQUIRED="true"
+    start_gate_heartbeat
+    acquire_deployment_lock
+
+    # The two locks remain held across final live/state/evidence rechecks and
+    # the exact private saved-plan apply.
     verify_receipt "$PLAN" "$RECEIPT"
-    terraform -chdir="$TF_DIR" apply \
-      -input=false -lock-timeout=5m "$TMP_ROOT/verify/plan.tfplan"
+    GATE_PLAN="$TMP_ROOT/verify/plan.tfplan"
+    bash "$IMAGE_GATE_RUNNER" validate-deployment-preflight \
+      --plan "$GATE_PLAN" \
+      --terraform-context "$TMP_ROOT/verify/image-release-context.json" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --control-commit "$(git_commit)" > "$GATE_PREFLIGHT_RECEIPT"
+    jq -S -c . "$GATE_PREFLIGHT_RECEIPT" \
+      > "$GATE_PREFLIGHT_RECEIPT.canonical"
+    mv "$GATE_PREFLIGHT_RECEIPT.canonical" "$GATE_PREFLIGHT_RECEIPT"
+    chmod 600 "$GATE_PREFLIGHT_RECEIPT"
+    jq -e \
+      --arg attempt "$APPLY_ATTEMPT_ID" \
+      --arg context_sha "$(
+        sha256_file "$TMP_ROOT/verify/image-release-context.json"
+      )" '
+      .record_id == "lock#teamagent/terraform.tfstate" and
+      .state == "LOCKED" and
+      .apply_attempt_id == $attempt and
+      .terraform_context_sha256 == $context_sha
+    ' "$GATE_PREFLIGHT_RECEIPT" >/dev/null ||
+      die "provenance apply preflightがsaved plan contextと不一致です"
+
+    stop_gate_heartbeat
+    export TEAMAGENT_SAVED_PLAN_PATH="$GATE_PLAN"
+    export TEAMAGENT_APPLY_ATTEMPT_ID="$APPLY_ATTEMPT_ID"
+    if ! (
+      cd "$TF_DIR"
+      python3 "$APPLY_SUPERVISOR" \
+        --terraform-bin "$(realpath "$(command -v terraform)")" \
+        --gate-runner "$IMAGE_GATE_RUNNER" \
+        --plan "$GATE_PLAN" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID"
+    ); then
+      die "supervised saved-plan apply failed; provenance reconciliation is required"
+    fi
+    unset TEAMAGENT_SAVED_PLAN_PATH TEAMAGENT_APPLY_ATTEMPT_ID
+    start_gate_heartbeat
 
     capture_state_contract "$TMP_ROOT/applied-state.json"
     snapshot_live "$TMP_ROOT/applied-live.json"
+    capture_complete_runtime_inventory "$TMP_ROOT/applied-inventory.json"
+    jq -e --slurpfile receipt "$TMP_ROOT/verify/receipt.json" '
+      {
+        openclaw:.taskdefs.openclaw.image,
+        mcp:.taskdefs.mcp.image,
+        x_buzz:.taskdefs.x_buzz.image,
+        tiktok:.taskdefs.tiktok.image
+      } == $receipt[0].images.desired and
+      {
+        ingest:(.rules.ingest.critical.state == "ENABLED"),
+        morning:(.rules.morning.critical.state == "ENABLED"),
+        canary:(.rules.canary.critical.state == "ENABLED")
+      } == $receipt[0].rule_states.desired
+    ' "$TMP_ROOT/applied-live.json" >/dev/null ||
+      die "apply後live runtimeがsaved planのexact desired stateと不一致です"
+    jq -e --slurpfile receipt "$TMP_ROOT/verify/receipt.json" '
+      .backend == $receipt[0].state_contract.backend and
+      .state.lineage == $receipt[0].state_contract.state.lineage and
+      .state.serial > $receipt[0].state_contract.state.serial
+    ' "$TMP_ROOT/applied-state.json" >/dev/null ||
+      die "apply後backend/workspace/lineage/serial契約が不正です"
+
+    APPLIED_ALARM_RECEIPT="$(
+      jq -r '.alarm_delivery_receipt_path' "$TMP_ROOT/verify/receipt.json"
+    )"
+    APPLIED_VERSIONING_RECEIPT="$(
+      jq -r '.versioning_receipt_path' "$TMP_ROOT/verify/receipt.json"
+    )"
+    APPLIED_READINESS_RECEIPT="$(
+      jq -r '.log_readiness_receipt_path' "$TMP_ROOT/verify/receipt.json"
+    )"
+    APPLIED_ALARM_MIGRATION_RECEIPT="$(
+      jq -r '.alarm_migration_receipt_path' "$TMP_ROOT/verify/receipt.json"
+    )"
+    if [ -n "$APPLIED_ALARM_RECEIPT" ]; then
+      verify_alarm_delivery_test_receipt \
+        "$APPLIED_ALARM_RECEIPT" "$TMP_ROOT/applied-live.json"
+    fi
+    if [ -n "$APPLIED_VERSIONING_RECEIPT" ]; then
+      verify_versioning_attestation_receipt \
+        "$APPLIED_VERSIONING_RECEIPT" "$TMP_ROOT/applied-live.json" \
+        "$TMP_ROOT/applied-state.json"
+    fi
+    if [ -n "$APPLIED_READINESS_RECEIPT" ]; then
+      verify_log_readiness_receipt \
+        "$APPLIED_READINESS_RECEIPT" "$APPLIED_VERSIONING_RECEIPT" \
+        "$TMP_ROOT/applied-live.json"
+    fi
+    if [ -n "$APPLIED_ALARM_MIGRATION_RECEIPT" ]; then
+      verify_alarm_migration_final_receipt \
+        "$APPLIED_ALARM_MIGRATION_RECEIPT"
+    fi
+    APPLIED_BEDROCK_RETENTION_SHA256=""
+    if [ "$(jq -er '.mode' "$TMP_ROOT/verify/receipt.json")" = "migration" ]; then
+      run_evidence_helper verify-bedrock-retention \
+        --output "$TMP_ROOT/applied-bedrock-retention.json"
+      APPLIED_BEDROCK_RETENTION_SHA256="$(
+        sha256_file "$TMP_ROOT/applied-bedrock-retention.json"
+      )"
+    else
+      jq -n 'null' > "$TMP_ROOT/applied-bedrock-retention.json"
+    fi
+
+    bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
+      --plan "$GATE_PLAN" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --outcome applied > "$GATE_OUTCOME_RECEIPT"
+    jq -S -c . "$GATE_OUTCOME_RECEIPT" \
+      > "$GATE_OUTCOME_RECEIPT.canonical"
+    mv "$GATE_OUTCOME_RECEIPT.canonical" "$GATE_OUTCOME_RECEIPT"
+    chmod 600 "$GATE_OUTCOME_RECEIPT"
+    jq -e \
+      --arg intent "$(
+        jq -er '.image_deployment_intent_id' "$TMP_ROOT/verify/receipt.json"
+      )" '
+      .intent_id == $intent and
+      .state == "APPLIED" and
+      (.plan_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$GATE_OUTCOME_RECEIPT" >/dev/null ||
+      die "provenance one-use intent outcomeをAPPLIEDで確認できません"
+    GATE_OUTCOME_RECORDED="true"
+
     APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
       --arg kind "terraform-runtime-apply-receipt" \
+      --argjson schema_version 2 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
       --arg git_commit "$(git_commit)" \
-      --arg deployment_lock_id "$DEPLOYMENT_LOCK_ID" \
+      --arg status "applied" \
+      --arg migration_kind "$(
+        jq -r '.migration_kind' "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg migration_id "$(
+        jq -r '.migration_id' "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg required_migration_id "$(
+        if [ -n "$(jq -r '.prior_apply_receipt_path' \
+          "$TMP_ROOT/verify/receipt.json")" ]; then
+          jq -r '.migration_id' "$(
+            jq -r '.prior_apply_receipt_path' \
+              "$TMP_ROOT/verify/receipt.json"
+          )"
+        fi
+      )" \
+      --arg provenance_outcome "applied" \
+      --arg image_deployment_intent_id "$(
+        jq -er '.image_deployment_intent_id' \
+          "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg apply_attempt_id "$APPLY_ATTEMPT_ID" \
       --arg source_receipt_sha256 "$(sha256_file "$RECEIPT")" \
       --arg plan_sha256 "$(sha256_file "$PLAN")" \
-      --arg live_fingerprint_sha256 "$(sha256_file "$TMP_ROOT/applied-live.json")" \
+      --arg versioning_receipt_sha256 "$(
+        jq -r '.versioning_receipt_sha256' "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg log_readiness_receipt_sha256 "$(
+        jq -r '.log_readiness_receipt_sha256' \
+          "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg alarm_delivery_receipt_sha256 "$(
+        jq -r '.alarm_delivery_receipt_sha256' \
+          "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg alarm_migration_receipt_sha256 "$(
+        jq -r '.alarm_migration_receipt_sha256' \
+          "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg bedrock_retention_live_sha256 \
+        "$APPLIED_BEDROCK_RETENTION_SHA256" \
+      --arg post_state_contract_sha256 "$(
+        sha256_file "$TMP_ROOT/applied-state.json"
+      )" \
+      --arg post_state_ownership_sha256 "$(
+        jq -er '.state.address_set_sha256' "$TMP_ROOT/applied-state.json"
+      )" \
+      --arg post_live_fingerprint_sha256 "$(
+        sha256_file "$TMP_ROOT/applied-live.json"
+      )" \
+      --arg post_runtime_inventory_sha256 "$(
+        jq -er '.inventory_sha256' "$TMP_ROOT/applied-inventory.json"
+      )" \
+      --arg shared_deployment_lock_record_id \
+        "lock#teamagent/terraform.tfstate" \
+      --arg shared_deployment_lock_receipt_sha256 "$(
+        sha256_file "$GATE_LOCK_RECEIPT"
+      )" \
+      --arg provenance_outcome_receipt_sha256 "$(
+        sha256_file "$GATE_OUTCOME_RECEIPT"
+      )" \
       --argjson applied_at_epoch "$(date +%s)" \
-      --slurpfile state_contract "$TMP_ROOT/applied-state.json" '{
+      --slurpfile state_contract "$TMP_ROOT/applied-state.json" \
+      --slurpfile live "$TMP_ROOT/applied-live.json" \
+      --slurpfile bedrock_retention \
+        "$TMP_ROOT/applied-bedrock-retention.json" \
+      --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
+      --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" '{
         kind:$kind,
+        schema_version:$schema_version,
         guard_version:$guard_version,
         account_id:$account_id,
         region:$region,
         git_commit:$git_commit,
-        deployment_lock_id:$deployment_lock_id,
+        status:$status,
+        migration_kind:$migration_kind,
+        migration_id:$migration_id,
+        required_migration_id:$required_migration_id,
+        provenance_outcome:$provenance_outcome,
+        image_deployment_intent_id:$image_deployment_intent_id,
+        apply_attempt_id:$apply_attempt_id,
         source_receipt_sha256:$source_receipt_sha256,
         plan_sha256:$plan_sha256,
-        live_fingerprint_sha256:$live_fingerprint_sha256,
-        applied_at_epoch:$applied_at_epoch,
-        state_contract:$state_contract[0]
+        versioning_receipt_sha256:$versioning_receipt_sha256,
+        log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
+        alarm_delivery_receipt_sha256:$alarm_delivery_receipt_sha256,
+        alarm_migration_receipt_sha256:$alarm_migration_receipt_sha256,
+        bedrock_retention_live_sha256:$bedrock_retention_live_sha256,
+        bedrock_retention_live:$bedrock_retention[0],
+        post_state_contract_sha256:$post_state_contract_sha256,
+        post_state_ownership_sha256:$post_state_ownership_sha256,
+        post_state_contract:$state_contract[0],
+        post_live_fingerprint_sha256:$post_live_fingerprint_sha256,
+        post_live_contract:{
+          images:{
+            openclaw:$live[0].taskdefs.openclaw.image,
+            mcp:$live[0].taskdefs.mcp.image,
+            x_buzz:$live[0].taskdefs.x_buzz.image,
+            tiktok:$live[0].taskdefs.tiktok.image
+          },
+          rule_states:{
+            ingest:$live[0].rules.ingest.critical.state,
+            morning:$live[0].rules.morning.critical.state,
+            canary:$live[0].rules.canary.critical.state
+          }
+        },
+        post_runtime_inventory_sha256:$post_runtime_inventory_sha256,
+        shared_deployment_lock_record_id:
+          $shared_deployment_lock_record_id,
+        shared_deployment_lock_receipt_sha256:
+          $shared_deployment_lock_receipt_sha256,
+        shared_deployment_lock_receipt:$shared_lock[0],
+        provenance_outcome_receipt_sha256:
+          $provenance_outcome_receipt_sha256,
+        provenance_outcome_receipt:$provenance_outcome[0],
+        applied_at_epoch:$applied_at_epoch
       }' > "$APPLY_STAGE"
     chmod 600 "$APPLY_STAGE"
+    jq -e '
+      .kind == "terraform-runtime-apply-receipt" and
+      .schema_version == 2 and
+      .status == "applied" and
+      .provenance_outcome == "applied" and
+      .shared_deployment_lock_record_id ==
+        "lock#teamagent/terraform.tfstate"
+    ' "$APPLY_STAGE" >/dev/null ||
+      die "apply receipt schema/provenance bindingの生成に失敗しました"
     APPLY_STAGE_IDENTITY="$(stat_identity "$APPLY_STAGE")"
     ln "$APPLY_STAGE" "$APPLY_RECEIPT" ||
       die "apply receipt出力pathを原子的に確保できません"
@@ -7627,6 +8910,11 @@ case "$COMMAND" in
       die "apply receiptの原子的引渡しに失敗しました"
     chmod 600 "$APPLY_RECEIPT"
     APPLY_RECEIPT_PUBLISHED="true"
+    stop_gate_heartbeat
+    bash "$IMAGE_GATE_RUNNER" release-deployment-lock \
+      --plan "$GATE_PLAN" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID"
+    GATE_LOCK_ACQUIRED="false"
     release_deployment_lock
     echo "✅ guarded apply completed: $APPLY_RECEIPT"
     ;;
