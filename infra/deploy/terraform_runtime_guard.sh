@@ -3046,7 +3046,7 @@ snapshot_live() {
     raw_endpoint="$subscription_endpoint"
     [ "$subscription_protocol" != "email" ] ||
       [ "$raw_endpoint" = "$EXPECTED_ALARM_EMAIL" ] ||
-      die "SNS email endpointはapproved raw byte列とexact一致が必要です"
+      die "alarm delivery SNS email endpointはapproved raw byte列とexact一致が必要です"
     endpoint_sha="$(printf '%s' "$raw_endpoint" | sha256_text)"
     subscription_arn_sha="$(
       printf '%s' "$subscription_arn" | sha256_text
