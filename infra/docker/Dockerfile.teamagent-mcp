@@ -58,7 +58,6 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
-    --mount=type=cache,id=teamagent-core-torch-arm64,target=/var/cache/teamagent,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
     set -eu; \
     if [ -f /run/secrets/teamagent_ca ]; then \
@@ -67,17 +66,10 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
       export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
       export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
     fi; \
+    torch_lock="url = \"$TORCH_ARM64_WHEEL_URL\", hash = \"sha256:$TORCH_ARM64_WHEEL_SHA256\""; \
+    test "$(grep -F -c "$torch_lock" uv.lock)" -eq 1; \
     uv sync --frozen --no-dev --no-editable --no-install-project \
-      --extra mcp --extra embeddings --no-install-package torch; \
-    wheel=/var/cache/teamagent/torch-${TORCH_VERSION}-cp314-cp314-manylinux_2_28_aarch64.whl; \
-    if [ ! -s "$wheel" ] || ! printf '%s  %s\n' \
-      "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
-      rm -f "$wheel"; \
-      TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL" TORCH_WHEEL="$wheel" \
-        python -c "import os, urllib.request; opener=urllib.request.build_opener(); opener.addheaders=[('User-Agent','teamagent-reproducible-build/1')]; urllib.request.install_opener(opener); urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
-    fi; \
-    printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
-    uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \
+      --extra mcp --extra embeddings; \
     test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
     rm -f /tmp/teamagent-build-ca.pem
 
@@ -92,7 +84,6 @@ COPY scripts/run_mcp_http_server.py \
 COPY infra/migrations/ ./infra/migrations/
 COPY data/ ./data/
 RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing=locked \
-    --mount=type=cache,id=teamagent-core-torch-arm64,target=/var/cache/teamagent,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
     set -eu; \
     if [ -f /run/secrets/teamagent_ca ]; then \
@@ -101,17 +92,9 @@ RUN --mount=type=cache,id=teamagent-core-uv-arm64,target=/root/.cache/uv,sharing
       export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
       export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
     fi; \
-    uv sync --frozen --no-dev --no-editable --extra mcp --extra embeddings \
-      --no-install-package torch; \
-    wheel=/var/cache/teamagent/torch-${TORCH_VERSION}-cp314-cp314-manylinux_2_28_aarch64.whl; \
-    if [ ! -s "$wheel" ] || ! printf '%s  %s\n' \
-      "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; then \
-      rm -f "$wheel"; \
-      TORCH_WHEEL_URL="$TORCH_ARM64_WHEEL_URL" TORCH_WHEEL="$wheel" \
-        python -c "import os, urllib.request; opener=urllib.request.build_opener(); opener.addheaders=[('User-Agent','teamagent-reproducible-build/1')]; urllib.request.install_opener(opener); urllib.request.urlretrieve(os.environ['TORCH_WHEEL_URL'], os.environ['TORCH_WHEEL'])"; \
-    fi; \
-    printf '%s  %s\n' "$TORCH_ARM64_WHEEL_SHA256" "$wheel" | sha256sum -c -; \
-    uv pip install --python /app/.venv/bin/python --no-deps "$wheel"; \
+    torch_lock="url = \"$TORCH_ARM64_WHEEL_URL\", hash = \"sha256:$TORCH_ARM64_WHEEL_SHA256\""; \
+    test "$(grep -F -c "$torch_lock" uv.lock)" -eq 1; \
+    uv sync --frozen --no-dev --no-editable --extra mcp --extra embeddings; \
     test "$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')" = "$TORCH_VERSION"; \
     rm -f /tmp/teamagent-build-ca.pem
 
