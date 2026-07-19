@@ -15,6 +15,7 @@ USER root
 
 COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.source.json5
 COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+COPY infra/openclaw/caller-identity-plugin /opt/teamagent/plugins/teamagent-caller-identity/
 
 # Convert the reviewed JSON5 source into immutable canonical JSON. Runtime
 # mutations happen only on a fresh copy under /tmp.
@@ -34,13 +35,14 @@ RUN set -eux; \
     tar -xzf /tmp/openclaw-bedrock.tgz --strip-components=1 -C /opt/teamagent/plugins/amazon-bedrock; \
     test "$(sha256sum /opt/teamagent/plugins/slack/npm-shrinkwrap.json | cut -d' ' -f1)" = "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c"; \
     test "$(sha256sum /opt/teamagent/plugins/amazon-bedrock/npm-shrinkwrap.json | cut -d' ' -f1)" = "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e"; \
-    node -e 'const fs=require("fs");const checks=[["/opt/teamagent/plugins/slack/package.json","@openclaw/slack"],["/opt/teamagent/plugins/amazon-bedrock/package.json","@openclaw/amazon-bedrock-provider"]];for(const [p,n] of checks){const x=JSON.parse(fs.readFileSync(p));if(x.name!==n||x.version!=="2026.7.1"||x.peerDependencies?.openclaw!==">=2026.7.1")throw new Error(`plugin contract mismatch: ${n}`)}'; \
+    node -e 'const fs=require("fs");const checks=[["/opt/teamagent/plugins/slack/package.json","@openclaw/slack","2026.7.1",true],["/opt/teamagent/plugins/amazon-bedrock/package.json","@openclaw/amazon-bedrock-provider","2026.7.1",true],["/opt/teamagent/plugins/teamagent-caller-identity/package.json","@teamagent/openclaw-caller-identity","1.0.0",false]];for(const [p,n,v,official] of checks){const x=JSON.parse(fs.readFileSync(p));if(x.name!==n||x.version!==v||(official&&x.peerDependencies?.openclaw!==">=2026.7.1"))throw new Error(`plugin contract mismatch: ${n}`)}'; \
     ln -s /app /opt/teamagent/plugins/slack/node_modules/openclaw; \
     ln -s /app /opt/teamagent/plugins/amazon-bedrock/node_modules/openclaw; \
     mkdir -p /tmp/teamagent-openclaw/config /tmp/teamagent-openclaw/state /tmp/teamagent-openclaw/home /opt/teamagent/state-seed; \
     cp /opt/teamagent/openclaw.template.json /tmp/teamagent-openclaw/config/openclaw.json; \
-    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/slack >/dev/null; \
-    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/amazon-bedrock >/dev/null; \
+    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json TEAMAGENT_CALLER_CLAIM_SECRET=build-placeholder-caller-claim-secret-32-bytes SLACK_TEAM_ID=T0123456789 node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/slack >/dev/null; \
+    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json TEAMAGENT_CALLER_CLAIM_SECRET=build-placeholder-caller-claim-secret-32-bytes SLACK_TEAM_ID=T0123456789 node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/amazon-bedrock >/dev/null; \
+    HOME=/tmp/teamagent-openclaw/home OPENCLAW_STATE_DIR=/tmp/teamagent-openclaw/state OPENCLAW_CONFIG_PATH=/tmp/teamagent-openclaw/config/openclaw.json TEAMAGENT_CALLER_CLAIM_SECRET=build-placeholder-caller-claim-secret-32-bytes SLACK_TEAM_ID=T0123456789 node /app/openclaw.mjs plugins install --link /opt/teamagent/plugins/teamagent-caller-identity >/dev/null; \
     cp /tmp/teamagent-openclaw/state/state/openclaw.sqlite /opt/teamagent/state-seed/openclaw.sqlite; \
     node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/opt/teamagent/state-seed/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
     rm -rf /tmp/teamagent-openclaw; \
@@ -69,6 +71,8 @@ RUN set -eux; \
       SLACK_APP_TOKEN=build-placeholder \
       OPENCLAW_GATEWAY_TOKEN=build-placeholder \
       TEAMAGENT_MCP_BEARER=build-placeholder \
+      TEAMAGENT_CALLER_CLAIM_SECRET=build-placeholder-caller-claim-secret-32-bytes \
+      SLACK_TEAM_ID=T0123456789 \
       node /app/openclaw.mjs plugins registry --refresh >/dev/null; \
     node -e 'const {DatabaseSync}=require("node:sqlite");const db=new DatabaseSync("/tmp/teamagent-openclaw/state/state/openclaw.sqlite");db.exec("DELETE FROM config_health_entries");db.close()'; \
     cp /tmp/teamagent-openclaw/state/state/openclaw.sqlite /opt/teamagent/state-seed/openclaw.sqlite; \

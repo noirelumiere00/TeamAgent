@@ -185,9 +185,14 @@ Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
 contains 28. This scope is not read-only: Gmail draft and Slack file-delivery
 operations are among the default tools.
 
-The four required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
-`OPENCLAW_GATEWAY_TOKEN`, and `TEAMAGENT_MCP_BEARER`. Bedrock uses only the ECS
-task role; static AWS credentials are forbidden.
+The five required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+`OPENCLAW_GATEWAY_TOKEN`, `TEAMAGENT_MCP_BEARER`, and the separate
+`TEAMAGENT_CALLER_CLAIM_SECRET`. Production also requires the exact
+`SLACK_TEAM_ID` and the MCP-only `TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE`; the
+workspace ID is not model-provided, and a conditional DynamoDB write makes each
+claim one-use across rolling ECS tasks. Both runtimes reject a caller-claim
+secret that equals the MCP bearer. Bedrock uses only the ECS task role; static
+AWS credentials are forbidden.
 
 See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
 media/bundle and post-apply rollback integrations are complete, an independent

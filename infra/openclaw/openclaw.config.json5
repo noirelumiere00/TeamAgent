@@ -3,8 +3,11 @@
 //
 // 設計意図（§A 一次ソース確認に基づく）:
 //  - tool を最小化し、exec/shell/fs/browser を構造的に塞ぐ → 2026-05-28 の exec/shell 系 CVE 群を無効化。
-//  - 営業データには触れず、唯一の能力は「Slack 受け」「Bedrock 推論」「teamagent MCP の読取系 tool」だけ。
-//  - per-user 認可は OpenClaw でなく MCP 境界内で行う（OpenClaw は単一信頼オペレータモデル）。
+//  - 営業データには直接触れず、能力は「Slack受け」「Bedrock推論」「review済みteamagent MCP tool」だけ。
+//  - MCP scopeには読取だけでなく、Gmail下書き保存、本人Calendar書込、Slackファイル配信、
+//    外部job/S3 report生成も含む。メール送信・招待送信・Drive書込は含まない。
+//  - per-user 認可は OpenClaw でなく MCP 境界内で行う。trusted Slack event由来の署名caller
+//    claimを内部pluginがtool実行直前に注入し、LLM申告user_id単体は認可に使わない。
 {
   // ── エージェント／ペルソナ ───────────────────────────────────────────────
   agents: {
@@ -33,20 +36,22 @@
     ],
   },
 
-  // ── 外部プラグイン（公式同版・image内のread-only固定パスのみ） ──────────
+  // ── プラグイン（公式同版2点 + repo-source-bound caller identity 1点） ───────
   // allow を明示して、バンドル済みでも不要なプラグインはロードしない。
-  // パスの実体・版・tarball/shrinkwrap hash は Dockerfile と plugins-lock.json で固定する。
+  // 公式2点のtarball/shrinkwrap hashはDockerfile+plugins-lock、internal pluginはsource treeで固定。
   plugins: {
-    allow: ["slack", "amazon-bedrock"],
+    allow: ["slack", "amazon-bedrock", "teamagent-caller-identity"],
     load: {
       paths: [
         "/opt/teamagent/plugins/slack",
         "/opt/teamagent/plugins/amazon-bedrock",
+        "/opt/teamagent/plugins/teamagent-caller-identity",
       ],
     },
     entries: {
       slack: { enabled: true },
       "amazon-bedrock": { enabled: true },
+      "teamagent-caller-identity": { enabled: true },
     },
   },
 
@@ -100,7 +105,7 @@
     fs: { workspaceOnly: true },
     // 危険な外部安全バイパスは一切使わない（既定 false のまま）。
     sandbox: {
-      // sandbox セッションでも MCP の読取 tool だけは見せる（bundle-mcp を許可）。
+      // sandbox セッションでもreview済みMCP scopeだけは見せる（bundle-mcpを許可）。
       tools: { alsoAllow: ["bundle-mcp"] },
     },
   },
@@ -131,8 +136,10 @@
         // 全ツール共通の上限（天井）＝通常の高速ツールには無影響。本数は MCP の
         // VIDEO_ALGO_MAX_VIDEOS と整合させること（10本の重い回は 300s に迫り得る＝将来は非同期化）。
         timeout: 300,
-        // §G: 会社共有の「ナレッジ系・読取」を露出。§L Phase1 で取得系(tiktok/動画)を追加。
-        // 本人OAuth依存(per-user)の mail_*/workspace_search は除外＝現行Botに残す（§G）。
+        // Effective scopeはinfra/openclaw/effective-tool-scope.jsonが副作用分類の正。
+        // 会社データ読取に加え、Gmail下書き保存(mail_reply/mail_draft/schedule_propose)、
+        // 本人Calendar書込(calendar_event・招待なし)、Slackファイル配信(knowledge_deliver)、
+        // 外部job/S3 report生成も含む。メール送信・招待送信・Drive書込は許可しない。
         // ※ tiktok_search/video_analysis/video_algorithm は MCPツール（factory: USE_VIDEO_TOOLS/
         //   USE_TIKTOK_TOOLS=1）として金庫内で実行＝OpenClaw自身は native exec/browser を使わない（§L）。
         //   これらを include する前に、MCPバックエンド側で当該 env flag を ON にすること。
@@ -187,7 +194,7 @@
             // USE_TIKTOK_COMMENT_TOOLS=1 が必要。
             "tiktok_comment_mining",
           ],
-          // per-user(本人OAuth)・重操作・確定系を明示除外（include 許可リストの二重防御）。
+          // 未レビューの重操作・確定系を明示除外（許可する副作用は上のincludeで個別列挙）。
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。

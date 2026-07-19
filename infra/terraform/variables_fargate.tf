@@ -124,9 +124,14 @@ variable "use_payload_offload" {
 }
 
 variable "slack_team_id" {
-  description = "自社 Slack workspace の team_id（T で始まる）。設定すると resolve_identity が他ワークスペースのユーザーを fail-closed で拒否する。空だと team 検証 skip（fail-open・起動後の初回解決で WARN ログ）。多人数運用では必ず設定（CLAUDE.md §5-C4）。"
+  description = "本番必須の自社Slack workspace team_id（T + 8文字以上の英大文字/数字）。OpenClaw署名claimとMCP resolverが同じexact IDを検証する。既定の空文字は未設定sentinelでplanをfail-closedにする。"
   type        = string
   default     = ""
+
+  validation {
+    condition     = can(regex("^T[A-Z0-9]{8,}$", var.slack_team_id))
+    error_message = "slack_team_id is required and must be a canonical Slack T ID."
+  }
 }
 
 variable "slack_dm_allowlist" {
@@ -184,6 +189,12 @@ variable "openclaw_gateway_token_secret_name" {
   description = "OpenClaw gateway 管理トークン（full operator scope相当）の Secrets Manager 名"
   type        = string
   default     = "teamagent/dev/openclaw/gateway-token"
+}
+
+variable "openclaw_caller_claim_secret_name" {
+  description = "OpenClaw→MCPのone-use caller identity claim専用HMAC鍵（bearerとは別、32-byte以上）のSecrets Manager名"
+  type        = string
+  default     = "teamagent/dev/openclaw/caller-claim-hmac"
 }
 
 # §M: スクレイプ/動画ツール（USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS）を有効化する“拡張版”の配線。

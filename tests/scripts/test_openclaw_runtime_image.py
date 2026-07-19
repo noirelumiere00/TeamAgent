@@ -12,12 +12,15 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
+FILESYSTEM_SBOM_GENERATOR = ROOT / "infra/openclaw/generate-filesystem-sbom.py"
 EXPECTED_CMD = [
     "/opt/teamagent/gateway-runtime.mjs",
     "gateway",
@@ -31,7 +34,9 @@ PLACEHOLDER_ENV = [
     "SLACK_BOT_TOKEN=xoxb-offline-contract",
     "SLACK_APP_TOKEN=xapp-offline-contract",
     "OPENCLAW_GATEWAY_TOKEN=offline-gateway-contract",
-    "TEAMAGENT_MCP_BEARER=offline-mcp-contract",
+    "TEAMAGENT_MCP_BEARER=offline-mcp-bearer-contract-is-32-bytes",
+    "TEAMAGENT_CALLER_CLAIM_SECRET=offline-caller-claim-secret-32-bytes",
+    "SLACK_TEAM_ID=T0123456789",
     "SLACK_DM_ALLOWLIST=*",
     "AWS_EC2_METADATA_DISABLED=true",
 ]
@@ -58,6 +63,151 @@ process.execve(
   ],
   process.env
 );
+"""
+CALLER_IDENTITY_PLUGIN_PROBE = r"""
+import {createHmac} from "node:crypto";
+import {readFileSync, readdirSync} from "node:fs";
+import {
+  canonicalRequestSha256,
+  createCallerIdentityPlugin
+} from "/opt/teamagent/plugins/teamagent-caller-identity/dist/index.js";
+
+function javascriptSources(directory) {
+  return readdirSync(directory)
+    .filter(name => name.endsWith(".js"))
+    .map(name => readFileSync(`${directory}/${name}`, "utf8"));
+}
+const installedSlackSources = javascriptSources(
+  "/opt/teamagent/plugins/slack/dist"
+);
+if (!installedSlackSources.some(source =>
+  source.includes('channel: "slack"') &&
+  source.includes("messageId: message.ts") &&
+  source.includes("id: senderId") &&
+  source.includes("id: message.channel") &&
+  source.includes("spaceId: ctx.teamId || void 0") &&
+  source.includes("routeSessionKey: sessionKey") &&
+  source.includes("threadId: directThreadRoutedToDmSession ? void 0")
+)) {
+  throw new Error("installed Slack ingress does not bind event identity/session");
+}
+const installedCoreSources = javascriptSources("/app/dist");
+if (!installedCoreSources.some(source =>
+  source.includes("function deriveInboundMessageHookContext") &&
+  source.includes("sessionKey: ctx.SessionKey") &&
+  source.includes("messageId: overrides?.messageId") &&
+  source.includes("senderId: ctx.SenderId") &&
+  source.includes("threadId: ctx.MessageThreadId") &&
+  source.includes("guildId: ctx.GroupSpace") &&
+  source.includes("function toPluginMessageReceivedEvent") &&
+  source.includes("function toPluginMessageContext")
+)) {
+  throw new Error("installed message_received hook schema changed");
+}
+if (!installedCoreSources.some(source =>
+  source.includes("async function runBeforeToolCallHook") &&
+  source.includes("hookResult?.params") &&
+  source.includes("before_tool_call hook failed")
+)) {
+  throw new Error("installed before_tool_call modifying/fail-closed contract changed");
+}
+if (!installedCoreSources.some(source =>
+  source.includes("runBeforeToolCallHook({") &&
+  source.includes("sessionKey: params.paramsForRun.sessionKey") &&
+  source.includes("runId: params.paramsForRun.runId") &&
+  source.includes("channelId: hookChannelId")
+)) {
+  throw new Error("installed before_tool_call request context binding changed");
+}
+
+const hooks = {};
+const nowSeconds = 1784424000;
+createCallerIdentityPlugin({
+  now: () => nowSeconds * 1000,
+  randomBytesFn: () => Buffer.alloc(16, 9)
+}).register({
+  on: (name, callback) => { hooks[name] = callback; },
+  logger: {warn: () => {}}
+});
+const trustedContext = {
+  channelId: "slack",
+  sessionKey: "agent:main:slack:channel:actual-image",
+  senderId: "U0123456789",
+  conversationId: "C0123456789"
+};
+hooks.message_received({
+  messageId: "1784424000.000001",
+  metadata: {
+    guildId: process.env.SLACK_TEAM_ID,
+    to: "C0123456789"
+  }
+}, trustedContext);
+const valid = hooks.before_tool_call({
+  toolName: "teamagent__search",
+  params: {
+    query: "actual image contract",
+    _user_context: {slack_user_id: "U0123456789"}
+  }
+}, trustedContext);
+if (valid?.block || !valid?.params?._user_context?.caller_claim) {
+  throw new Error("trusted Slack event was not signed");
+}
+const token = valid.params._user_context.caller_claim;
+const [payloadSegment, signatureSegment] = token.split(".");
+const payload = JSON.parse(Buffer.from(payloadSegment, "base64url").toString("utf8"));
+const expectedSignature = createHmac(
+  "sha256",
+  process.env.TEAMAGENT_CALLER_CLAIM_SECRET
+).update(payloadSegment, "ascii").digest("base64url");
+if (
+  signatureSegment !== expectedSignature ||
+  payload.sub !== "U0123456789" ||
+  payload.team !== process.env.SLACK_TEAM_ID ||
+  payload.channel !== "C0123456789" ||
+  payload.tool !== "search" ||
+  payload.aud !== "teamagent-mcp" ||
+  payload.iat !== nowSeconds ||
+  payload.exp !== nowSeconds + 60 ||
+  payload.arguments_sha256 !== canonicalRequestSha256(valid.params)
+) {
+  throw new Error("signed caller claim binding is invalid");
+}
+const mismatch = hooks.before_tool_call({
+  toolName: "teamagent__search",
+  params: {
+    query: "mismatch",
+    _user_context: {slack_user_id: "U9999999999"}
+  }
+}, trustedContext);
+const foreignContext = {
+  ...trustedContext,
+  sessionKey: "agent:main:slack:channel:foreign"
+};
+hooks.message_received({
+  messageId: "1784424000.000002",
+  metadata: {guildId: "T9999999999", to: "C0123456789"}
+}, foreignContext);
+const foreign = hooks.before_tool_call({
+  toolName: "teamagent__search",
+  params: {
+    query: "foreign",
+    _user_context: {slack_user_id: "U0123456789"}
+  }
+}, foreignContext);
+if (!mismatch?.block || !foreign?.block) {
+  throw new Error("adversarial caller was not blocked");
+}
+process.stdout.write(JSON.stringify({
+  actualImagePluginLoaded: true,
+  installedSlackTeamBindingVerified: true,
+  installedHookSchemaVerified: true,
+  installedBeforeToolFailClosedVerified: true,
+  trustedSlackEventSigned: true,
+  exactRequestBinding: true,
+  callerMismatchBlocked: true,
+  foreignTeamBlocked: true,
+  tokenDisclosedInEvidence: false
+}));
 """
 CONTROL_UI_HTTP_PROBE = r"""
 const crypto = require("node:crypto");
@@ -121,7 +271,8 @@ const secretValues = [
   process.env.SLACK_BOT_TOKEN,
   process.env.SLACK_APP_TOKEN,
   process.env.OPENCLAW_GATEWAY_TOKEN,
-  process.env.TEAMAGENT_MCP_BEARER
+  process.env.TEAMAGENT_MCP_BEARER,
+  process.env.TEAMAGENT_CALLER_CLAIM_SECRET
 ].filter(Boolean);
 const expectedHttpPaths = new Set();
 for (const asset of browser.controlUiServedAssets) {
@@ -518,7 +669,7 @@ def _gateway_lifecycle_contract(
         state = final_inspect["State"]
         final_logs = _run(["docker", "logs", container_id], check=False)
         log_output = final_logs.stdout + final_logs.stderr
-        secret_values = [assignment.split("=", 1)[1] for assignment in runtime_env[:4]]
+        secret_values = [assignment.split("=", 1)[1] for assignment in runtime_env[:5]]
         assert not any(value in log_output for value in secret_values)
         assert not any(
             marker in log_output
@@ -581,6 +732,47 @@ def _empty_slack_dm_allowlist_contract(image: str) -> dict[str, Any]:
     }
 
 
+def _invalid_caller_runtime_env_contract(
+    image: str,
+    *,
+    variable: str,
+    value: str,
+    expected_error: str,
+) -> dict[str, Any]:
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/arm64",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+    ]
+    for assignment in _runtime_env("*"):
+        name = assignment.split("=", 1)[0]
+        args.extend(["-e", f"{variable}={value}" if name == variable else assignment])
+    args.extend([image, "/nodejs/bin/node", "-e", "process.exit(0)"])
+    result = _run(args, check=False)
+    output = result.stdout + result.stderr
+    assert result.returncode == 78, output
+    assert '"event":"openclaw_entrypoint_error"' in output
+    assert '"event":"openclaw_runtime_ready"' not in output
+    assert expected_error in output
+    return {
+        "variable": variable,
+        "exitCode": result.returncode,
+        "rejectedBeforeRuntimeReady": True,
+        "logSha256": hashlib.sha256(output.encode()).hexdigest(),
+    }
+
+
 def _plugin_operation_contract(image: str) -> dict[str, Any]:
     result = _run(
         [
@@ -629,6 +821,140 @@ def _plugin_operation_contract(image: str) -> dict[str, Any]:
     return contract
 
 
+def _caller_identity_plugin_contract(image: str) -> dict[str, Any]:
+    result = _run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--platform",
+            "linux/arm64",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,size=64m",
+            "-e",
+            "TEAMAGENT_CALLER_CLAIM_SECRET=offline-caller-claim-secret-32-bytes",
+            "-e",
+            "SLACK_TEAM_ID=T0123456789",
+            "--entrypoint",
+            "/nodejs/bin/node",
+            image,
+            "--input-type=module",
+            "-e",
+            CALLER_IDENTITY_PLUGIN_PROBE,
+        ]
+    )
+    contract = json.loads(result.stdout)
+    assert contract == {
+        "actualImagePluginLoaded": True,
+        "installedSlackTeamBindingVerified": True,
+        "installedHookSchemaVerified": True,
+        "installedBeforeToolFailClosedVerified": True,
+        "trustedSlackEventSigned": True,
+        "exactRequestBinding": True,
+        "callerMismatchBlocked": True,
+        "foreignTeamBlocked": True,
+        "tokenDisclosedInEvidence": False,
+    }
+    return contract
+
+
+def _canonical_fs_fresh_export_contract(
+    image: str,
+    *,
+    image_id: str,
+) -> dict[str, Any]:
+    """Prove two fresh exports collapse to one canonical filesystem inventory.
+
+    Docker export tar bytes are deliberately neither hashed nor reported.  The
+    release claim is the normalized inventory document generated from each
+    export with one fixed subject.
+    """
+
+    root_ref = "pkg:oci/teamagent-openclaw@local"
+    trivy_document = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.6",
+        "serialNumber": "urn:uuid:00000000-0000-4000-8000-000000000001",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "container",
+                "name": "teamagent-openclaw",
+                "version": "local",
+                "bom-ref": root_ref,
+            }
+        },
+        "components": [],
+        "dependencies": [{"ref": root_ref, "dependsOn": []}],
+    }
+    inventory_hashes: list[str] = []
+    entry_counts: list[int] = []
+    with tempfile.TemporaryDirectory(prefix="openclaw-fs-repro-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        trivy = tmp / "trivy.cdx.json"
+        trivy.write_text(json.dumps(trivy_document, sort_keys=True) + "\n")
+        for iteration in range(2):
+            container_id = _run(
+                ["docker", "create", "--platform", "linux/arm64", image]
+            ).stdout.strip()
+            assert container_id
+            rootfs_tar = tmp / f"rootfs-{iteration}.tar"
+            try:
+                _run(["docker", "export", "--output", str(rootfs_tar), container_id])
+            finally:
+                _run(["docker", "rm", "-f", container_id], check=False)
+
+            inventory = tmp / f"inventory-{iteration}.json"
+            sbom = tmp / f"sbom-{iteration}.json"
+            equivalence = tmp / f"equivalence-{iteration}.json"
+            _run(
+                [
+                    sys.executable,
+                    str(FILESYSTEM_SBOM_GENERATOR),
+                    "--rootfs-tar",
+                    str(rootfs_tar),
+                    "--trivy-sbom",
+                    str(trivy),
+                    "--inventory-output",
+                    str(inventory),
+                    "--sbom-output",
+                    str(sbom),
+                    "--equivalence-output",
+                    str(equivalence),
+                    "--image-id",
+                    image_id,
+                    "--manifest-digest",
+                    image_id,
+                    "--config-digest",
+                    image_id,
+                ]
+            )
+            inventory_document = json.loads(inventory.read_text())
+            assert "rootfsTarSha256" not in inventory_document["subject"]
+            assert "RootfsTarSha256" not in sbom.read_text()
+            assert "rootfsTarSha256" not in equivalence.read_text()
+            inventory_hashes.append(hashlib.sha256(inventory.read_bytes()).hexdigest())
+            entry_counts.append(inventory_document["entryCount"])
+
+    assert len(set(inventory_hashes)) == 1
+    assert len(set(entry_counts)) == 1
+    assert entry_counts[0] > 0
+    return {
+        "freshExportCount": 2,
+        "canonicalInventorySha256": inventory_hashes[0],
+        "entryCount": entry_counts[0],
+        "canonicalInventoriesIdentical": True,
+        "rawExportTarDigestClaimed": False,
+    }
+
+
 def verify_runtime_image(image: str) -> dict[str, Any]:
     inspect = json.loads(_run(["docker", "image", "inspect", image]).stdout)[0]
     config = inspect["Config"]
@@ -643,6 +969,8 @@ def verify_runtime_image(image: str) -> dict[str, Any]:
         "SLACK_APP_TOKEN",
         "OPENCLAW_GATEWAY_TOKEN",
         "TEAMAGENT_MCP_BEARER",
+        "TEAMAGENT_CALLER_CLAIM_SECRET",
+        "SLACK_TEAM_ID",
     }
     assert not (forbidden_env & {entry.split("=", 1)[0] for entry in config.get("Env", [])})
 
@@ -951,6 +1279,7 @@ fs.writeFileSync(1, JSON.stringify({
     assert "public surface access blocked" in browser_bridge_contract["error"]
     assert "no bundled plugin manifest found for browser" in browser_bridge_contract["error"]
     plugin_operation_contract = _plugin_operation_contract(image)
+    caller_identity_plugin_contract = _caller_identity_plugin_contract(image)
     gateway_lifecycle = _gateway_lifecycle_contract(image)
     exact_user_gateway_lifecycle = _gateway_lifecycle_contract(
         image,
@@ -960,6 +1289,28 @@ fs.writeFileSync(1, JSON.stringify({
         verify_control_ui=False,
     )
     empty_slack_dm_allowlist = _empty_slack_dm_allowlist_contract(image)
+    empty_caller_claim_secret = _invalid_caller_runtime_env_contract(
+        image,
+        variable="TEAMAGENT_CALLER_CLAIM_SECRET",
+        value="",
+        expected_error="required runtime secret is missing: TEAMAGENT_CALLER_CLAIM_SECRET",
+    )
+    malformed_slack_team = _invalid_caller_runtime_env_contract(
+        image,
+        variable="SLACK_TEAM_ID",
+        value="T_BAD",
+        expected_error="SLACK_TEAM_ID is required and must be a canonical Slack T ID",
+    )
+    reused_bearer_as_caller_secret = _invalid_caller_runtime_env_contract(
+        image,
+        variable="TEAMAGENT_CALLER_CLAIM_SECRET",
+        value="offline-mcp-bearer-contract-is-32-bytes",
+        expected_error="must differ from TEAMAGENT_MCP_BEARER",
+    )
+    canonical_fs_fresh_exports = _canonical_fs_fresh_export_contract(
+        image,
+        image_id=inspect["Id"],
+    )
 
     return {
         "schemaVersion": 1,
@@ -985,6 +1336,12 @@ fs.writeFileSync(1, JSON.stringify({
             "pluginOperationModulesLoadWithStubbedProviders": (
                 plugin_operation_contract["passed"] is True
             ),
+            "callerIdentityPluginHookContract": all(
+                value is True
+                for key, value in caller_identity_plugin_contract.items()
+                if key != "tokenDisclosedInEvidence"
+            )
+            and caller_identity_plugin_contract["tokenDisclosedInEvidence"] is False,
             "gatewayIsPid1": gateway_lifecycle["pid1Children"] == "",
             "gatewayReady": gateway_lifecycle["ready"],
             "gatewaySigtermExitZero": gateway_lifecycle["exitCode"] == 0,
@@ -1003,6 +1360,22 @@ fs.writeFileSync(1, JSON.stringify({
                 empty_slack_dm_allowlist["exitCode"] == 78
                 and empty_slack_dm_allowlist["rejectedBeforeRuntimeReady"] is True
             ),
+            "callerClaimSecretEmptyFailsClosed": (
+                empty_caller_claim_secret["exitCode"] == 78
+                and empty_caller_claim_secret["rejectedBeforeRuntimeReady"] is True
+            ),
+            "slackTeamMalformedFailsClosed": (
+                malformed_slack_team["exitCode"] == 78
+                and malformed_slack_team["rejectedBeforeRuntimeReady"] is True
+            ),
+            "callerClaimSecretReuseFailsClosed": (
+                reused_bearer_as_caller_secret["exitCode"] == 78
+                and reused_bearer_as_caller_secret["rejectedBeforeRuntimeReady"] is True
+            ),
+            "canonicalFsFreshExportsReproduce": (
+                canonical_fs_fresh_exports["canonicalInventoriesIdentical"] is True
+                and canonical_fs_fresh_exports["rawExportTarDigestClaimed"] is False
+            ),
             "controlUiAssetClosureServed": (
                 gateway_lifecycle["controlUi"]["missingOrMismatchedAssets"] == 0
             ),
@@ -1017,9 +1390,14 @@ fs.writeFileSync(1, JSON.stringify({
         "process": process_contract,
         "browserBridge": browser_bridge_contract,
         "pluginOperations": plugin_operation_contract,
+        "callerIdentityPlugin": caller_identity_plugin_contract,
         "gatewayLifecycle": gateway_lifecycle,
         "exactUserGatewayLifecycle": exact_user_gateway_lifecycle,
         "emptySlackDmAllowlist": empty_slack_dm_allowlist,
+        "emptyCallerClaimSecret": empty_caller_claim_secret,
+        "malformedSlackTeam": malformed_slack_team,
+        "reusedBearerAsCallerSecret": reused_bearer_as_caller_secret,
+        "canonicalFsFreshExports": canonical_fs_fresh_exports,
     }
 
 

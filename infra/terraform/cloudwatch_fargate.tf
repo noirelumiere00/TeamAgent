@@ -227,7 +227,7 @@ resource "aws_cloudwatch_dashboard" "fargate" {
         properties = {
           title  = "MCP recent identity & errors"
           region = var.aws_region
-          query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, tool, reason, slack_user_id_audit | filter event in ['identity_company_shared','identity_spoof_rejected','mcp_tool_error'] | sort @timestamp desc | limit 50"
+          query  = "SOURCE '${aws_cloudwatch_log_group.mcp.name}' | fields @timestamp, event, tool, reason, source, domain | filter event in ['identity_resolved','caller_claim_rejected','identity_spoof_rejected','mcp_tool_error'] | sort @timestamp desc | limit 50"
         }
       },
     ]

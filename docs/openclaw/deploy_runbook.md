@@ -38,11 +38,11 @@ bash infra/openclaw/build-image.sh \
 (cd /tmp && sha256sum -c "openclaw-$SHORT-manifest.json.sha256")
 ```
 
-manifest は schema 4 で、次を満たす必要があります。
+manifest は schema 5 で、次を満たす必要があります。
 
 ```sh
 jq -e --arg commit "$COMMIT" --arg tree "$TREE" '
-  .schemaVersion == 4 and
+  .schemaVersion == 5 and
   .deploymentCredential == false and
   .source.commit == $commit and
   .source.tree == $tree and
@@ -68,6 +68,13 @@ jq -e --arg commit "$COMMIT" --arg tree "$TREE" '
 基準は Critical=0、High=0、Secrets=0 です。最新 live で観測された
 `CVE-2026-12087`、`13221`、`33845`、`34182`、`42010`、`55200`、
 `57433`、`6100` の8件が候補に存在しないことも必須です。
+
+統合 filesystem の唯一の digest claim は
+`image.rootfs.inventorySha256` です。これは path/type/mode/uid/gid/size/link
+target/content hash を正規化した `rootfs-inventory.json` を指し、同じ image
+からの fresh export 2回で同一になることを実像テストで確認します。Docker
+merged export tar の byte hash は tar metadata に依存して再現不能なので、
+manifest、SBOM、equivalence、evidence index の証拠 claim に含めません。
 
 この helper は registry credential、push、promotion、ECS/Terraform 操作を
 持ちません。出力 manifest も `deploymentCredential=false` です。
@@ -174,11 +181,26 @@ new intent、new plan で roll-forward または rollback します。
 - writable path は task-scoped `openclaw-tmp` を mount した `/tmp` のみ
 - capability drop `ALL`、`privileged=false`
 - image の canonical ENTRYPOINT/CMD を上書きしない
+- `SLACK_TEAM_ID`はcanonical `T...` exact IDをOpenClaw/MCP双方へ注入し、空・不正値を
+  Terraform validation、entrypoint、MCP起動時の三層で拒否
+- `TEAMAGENT_CALLER_CLAIM_SECRET`はMCP bearerとは別の32-byte以上のSecrets Manager値。
+  OpenClawとMCPだけに注入し、image/config/evidenceへ焼き込まない。誤ってbearerと同値を
+  格納した場合もOpenClaw/MCP双方が起動を拒否
+- MCPだけに`TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE`を注入し、専用DynamoDB tableへの
+  `dynamodb:PutItem`だけを許可する。`attribute_not_exists(nonce)`の条件付き書込みが
+  rolling task間も含むone-useの正準判定で、DynamoDB障害時はcaller認可をfail closed
 - `SLACK_DM_ALLOWLIST`は明示必須で、`"*"`または1〜100件の重複しない
   comma-separated Slack U IDだけを受理
 - `/readyz` health check
 - sidecar、追加 volume/mount、環境 retarget、role retarget を禁止
 - ECS deployment circuit breaker と rollback を有効化
+
+OpenClaw 2026.7.1の実runtime hook契約では、`message_received`のSlack event
+`user/team/channel/message/session/thread`を内部pluginが保持し、
+`before_tool_call`でexact tool・全引数hash・nonce・iat/exp・audienceへ署名します。
+MCPは申告`slack_user_id`との一致、署名、request binding、一回性を検証してから
+`users.info` resolverを呼びます。company-sharedもresolver成功、exact team、
+非guest/非strangerが必須で、欠落・未知・障害はfail closedです。
 
 Fargate は Docker `no-new-privileges` を強制できません。これは隠さず残余リスク
 として扱い、nonroot、read-only rootfs、capability drop、固定IAM/SGで補償します。

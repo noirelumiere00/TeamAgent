@@ -1,27 +1,27 @@
 #!/usr/bin/env python
-"""P0 敵対ハーネス: MCP 越しに身元詐称を投げ、会社共有モデルが詐称を無効化することを実証する。
+"""P0 negative harness: prove bearer-only caller spoofing is rejected by MCP.
 
-会社共有モデル(§G)では gateway が OC 申告の ``user_email`` / ``user_groups`` / ``user_role`` /
-``identity_verified`` を破棄し、固定の「会社メンバー」identity で実行する（``slack_user_id`` は監査のみ）。
-よって admin/別email/別groups/不正 slack_user_id をどう詰めても次が成り立つはず:
+The MCP bearer authenticates only the OpenClaw workload.  It cannot authorize a
+human caller.  Every direct request below intentionally lacks the one-use claim
+minted from a trusted Slack event and therefore must return
+``CALLER_IDENTITY_REJECTED`` before resolver, RLS, or a domain skill runs.
 
-  1. 全ての攻撃 vector の検索結果が **baseline（無害な会社identity）と同一**＝詐称が結果に一切影響しない。
-  2. **会社ドメイン外の doc（outsider needle）が、どの vector でも結果に現れない**（admin 詐称でも漏れない）。
-
-純ロジック（``check_*`` / ``ATTACK_PAYLOADS`` / ``build_user_context``）は外部I/O無しで単体テスト可能
-（tests/test_attack_mcp.py）。network 部（``_run``）は実DB＋live MCP（SSMトンネル/承認後）で実行する。
-事前に scripts/ingest_test_data.py で会社doc＋会社外doc(outsider needle 入り)を投入しておくこと。
+Valid-caller and tamper/replay/expiry/audience/guest/stranger paths are exercised
+through the real Node signer and Python verifier in
+``tests/test_mcp_gateway_caller_claim.py``.  A live positive test must enter
+through OpenClaw's Slack ingress; this script never receives the caller HMAC
+secret and cannot fabricate positive authorization evidence.
 
 Usage:
-    TEAMAGENT_MCP_BEARER=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
-      python scripts/attack_mcp.py --base-url http://127.0.0.1:8787 \
-      --query "P0HARNESS" --outsider-needle "OUTSIDER_ONLY_TOKEN"
+    TEAMAGENT_MCP_BEARER=... python scripts/attack_mcp.py \
+      --base-url http://127.0.0.1:8787 --query "P0HARNESS"
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -57,22 +57,17 @@ def build_user_context(slack_user_id: str, payload: dict[str, object]) -> dict[s
     return ctx
 
 
-def check_results_identical(vector: str, baseline_repr: str, spoofed_repr: str) -> Check:
-    """詐称 vector の結果が baseline と同一＝詐称が結果に影響していない。"""
-    ok = baseline_repr == spoofed_repr
-    detail = (
-        "identical to baseline"
-        if ok
-        else f"DIFFERS (base={len(baseline_repr)}b spoof={len(spoofed_repr)}b)"
-    )
-    return Check(f"{vector}:identical_to_baseline", ok, detail)
-
-
-def check_no_outsider(vector: str, result_repr: str, outsider_needle: str) -> Check:
-    """会社ドメイン外 doc の固有トークンが結果に現れない（admin 詐称でも漏れない）。"""
-    leaked = bool(outsider_needle) and outsider_needle in result_repr
+def check_caller_rejected(vector: str, result_repr: str) -> Check:
+    """Unsigned caller declarations must fail before returning domain data."""
+    try:
+        payload = json.loads(result_repr)
+    except json.JSONDecodeError:
+        return Check(f"{vector}:caller_rejected", False, "response is not JSON")
+    ok = payload.get("code") == "CALLER_IDENTITY_REJECTED"
     return Check(
-        f"{vector}:no_outsider_leak", not leaked, "leaked!" if leaked else "no outsider doc"
+        f"{vector}:caller_rejected",
+        ok,
+        "fail-closed" if ok else f"unexpected response keys={sorted(payload)}",
     )
 
 
@@ -121,9 +116,14 @@ def summarize(checks: list[Check]) -> bool:
 
 
 def _run(
-    *, base_url: str, bearer: str, path: str, query: str, outsider_needle: str, slack_user_id: str
+    *,
+    base_url: str,
+    bearer: str,
+    path: str,
+    query: str,
+    slack_user_id: str,
 ) -> list[Check]:
-    """network 実行部（実DB＋live MCP／単体テスト対象外）。重い依存は遅延 import。"""
+    """Send unsigned declarations and require uniform caller rejection."""
     import anyio
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
@@ -146,55 +146,7 @@ def _run(
         return out
 
     results = anyio.run(_call_all)
-    baseline = results["baseline"]
-    checks: list[Check] = [check_no_outsider("baseline", baseline, outsider_needle)]
-    for name in ATTACK_PAYLOADS:
-        if name == "baseline":
-            continue
-        checks.append(check_results_identical(name, baseline, results[name]))
-        checks.append(check_no_outsider(name, results[name], outsider_needle))
-    return checks
-
-
-def _run_ssrf(*, base_url: str, bearer: str, path: str, slack_user_id: str) -> list[Check]:
-    """network 実行部: video_analysis に SSRF URL を投げ、backend が拒否(isError)することを実証。
-
-    USE_VIDEO_TOOLS が ON の backend に対して実行する（単体テスト対象外）。重い依存は遅延 import。
-    """
-    import anyio
-    from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
-
-    async def _probe() -> list[Check]:
-        headers = {"Authorization": f"Bearer {bearer}"}
-        checks: list[Check] = []
-        async with streamablehttp_client(f"{base_url}{path}", headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                names = {t.name for t in (await session.list_tools()).tools}
-                if "video_analysis" not in names:
-                    return [
-                        Check(
-                            "ssrf:video_analysis:exposed",
-                            False,
-                            "tool未露出（USE_VIDEO_TOOLS=1 の backend で実行せよ）",
-                        )
-                    ]
-                ctx: dict[str, object] = {"slack_user_id": slack_user_id}
-                for key in ("imds", "localhost", "private_10", "substr_bypass", "nonallowed"):
-                    res = await session.call_tool(
-                        "video_analysis", {"url": SSRF_URL_PAYLOADS[key], "_user_context": ctx}
-                    )
-                    checks.append(
-                        Check(
-                            f"ssrf:video_analysis:{key}_rejected",
-                            bool(res.isError),
-                            "isError" if res.isError else "NOT rejected!",
-                        )
-                    )
-        return checks
-
-    return anyio.run(_probe)
+    return [check_caller_rejected(name, result) for name, result in results.items()]
 
 
 def main() -> int:
@@ -203,14 +155,14 @@ def main() -> int:
         "--mode",
         choices=["identity", "ssrf"],
         default="identity",
-        help="identity=身元詐称無効化 / ssrf=scrape系URLのSSRF拒否",
+        help="identity=bearer-only身元詐称拒否。ssrf live modeは廃止済み。",
     )
     ap.add_argument(
         "--base-url", default=os.environ.get("TEAMAGENT_MCP_BASE_URL", "http://127.0.0.1:8787")
     )
     ap.add_argument("--path", default=os.environ.get("TEAMAGENT_MCP_PATH", "/mcp"))
     ap.add_argument("--query", help="[identity] 会社doc・会社外doc 双方が候補に挙がる検索語")
-    ap.add_argument("--outsider-needle", help="[identity] 会社外 doc にのみ含まれる固有トークン")
+    ap.add_argument("--outsider-needle", help=argparse.SUPPRESS)
     ap.add_argument(
         "--slack-user-id", default="U0P0HARNESS", help="baseline の監査用 slack_user_id"
     )
@@ -221,22 +173,21 @@ def main() -> int:
         print("TEAMAGENT_MCP_BEARER 未設定（harness は bearer 必須）", file=sys.stderr)
         return 2
     if args.mode == "ssrf":
-        checks = _run_ssrf(
-            base_url=args.base_url.rstrip("/"),
-            bearer=bearer,
-            path=args.path,
-            slack_user_id=args.slack_user_id,
+        print(
+            "direct SSRF live mode is retired: unsigned direct MCP calls stop at caller "
+            "authorization; use tests/test_attack_mcp.py or signed Slack ingress",
+            file=sys.stderr,
         )
+        return 2
     else:
-        if not args.query or not args.outsider_needle:
-            print("identity モードは --query と --outsider-needle が必須", file=sys.stderr)
+        if not args.query:
+            print("identity モードは --query が必須", file=sys.stderr)
             return 2
         checks = _run(
             base_url=args.base_url.rstrip("/"),
             bearer=bearer,
             path=args.path,
             query=args.query,
-            outsider_needle=args.outsider_needle,
             slack_user_id=args.slack_user_id,
         )
     return 0 if summarize(checks) else 1

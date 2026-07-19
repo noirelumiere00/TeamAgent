@@ -52,6 +52,10 @@
         {
           "name": "SLACK_DM_ALLOWLIST",
           "value": "U0123456789"
+        },
+        {
+          "name": "SLACK_TEAM_ID",
+          "value": "T0123456789"
         }
       ],
       "secrets": [
@@ -70,6 +74,10 @@
         {
           "name": "OPENCLAW_GATEWAY_TOKEN",
           "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/gateway-token-AbCdEf"
+        },
+        {
+          "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-AbCdEf"
         }
       ],
       "logConfiguration": {

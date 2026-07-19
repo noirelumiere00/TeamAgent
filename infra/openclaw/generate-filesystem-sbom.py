@@ -162,9 +162,7 @@ def _fs_component(entry: dict[str, Any]) -> dict[str, Any]:
         "properties": properties,
     }
     if entry["contentSha256"] is not None:
-        component["hashes"] = [
-            {"alg": "SHA-256", "content": entry["contentSha256"]}
-        ]
+        component["hashes"] = [{"alg": "SHA-256", "content": entry["contentSha256"]}]
     return component
 
 
@@ -193,9 +191,7 @@ def _parse_component(component: dict[str, Any]) -> dict[str, Any]:
     }
     if not SHA256_RE.fullmatch(parsed["descriptorSha256"]):
         raise ValueError(f"invalid descriptor hash for {path}")
-    if parsed["contentSha256"] is not None and not SHA256_RE.fullmatch(
-        parsed["contentSha256"]
-    ):
+    if parsed["contentSha256"] is not None and not SHA256_RE.fullmatch(parsed["contentSha256"]):
         raise ValueError(f"invalid content hash for {path}")
     return parsed
 
@@ -213,14 +209,12 @@ def main() -> int:
     args = parser.parse_args()
 
     entries = _inventory(args.rootfs_tar)
-    rootfs_tar_sha256 = _sha256_file(args.rootfs_tar)
     inventory = {
         "schemaVersion": 1,
         "subject": {
             "imageId": args.image_id,
             "manifestDigest": args.manifest_digest,
             "configDigest": args.config_digest,
-            "rootfsTarSha256": rootfs_tar_sha256,
         },
         "entryCount": len(entries),
         "entries": entries,
@@ -254,10 +248,6 @@ def main() -> int:
                 "value": inventory_sha256,
             },
             {
-                "name": "io.teamagent.openclaw.wholeFilesystemRootfsTarSha256",
-                "value": rootfs_tar_sha256,
-            },
-            {
                 "name": "io.teamagent.openclaw.wholeFilesystemEntryCount",
                 "value": str(len(entries)),
             },
@@ -282,9 +272,7 @@ def main() -> int:
     if root_dependency is None:
         root_dependency = {"ref": root_ref, "dependsOn": []}
         dependencies.append(root_dependency)
-    root_dependency["dependsOn"] = sorted(
-        set(root_dependency.get("dependsOn", [])) | set(fs_refs)
-    )
+    root_dependency["dependsOn"] = sorted(set(root_dependency.get("dependsOn", [])) | set(fs_refs))
     sbom.setdefault("compositions", []).append(
         {
             "aggregate": "complete",

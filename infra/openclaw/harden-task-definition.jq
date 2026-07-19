@@ -14,6 +14,7 @@ def expected:
 def required_secret_names:
   [
     "TEAMAGENT_MCP_BEARER",
+    "TEAMAGENT_CALLER_CLAIM_SECRET",
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
     "OPENCLAW_GATEWAY_TOKEN"
@@ -23,6 +24,8 @@ def required_secret_patterns:
   {
     TEAMAGENT_MCP_BEARER:
       "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-[A-Za-z0-9]+$",
+    TEAMAGENT_CALLER_CLAIM_SECRET:
+      "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-[A-Za-z0-9]+$",
     SLACK_BOT_TOKEN:
       "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-[A-Za-z0-9]+$",
     SLACK_APP_TOKEN:
@@ -145,17 +148,21 @@ def assert_current_contract:
      then . else fail("/tmp is the only approved writable mount") end |
   assert_unique_names(($container.environment // []); "environment") |
   if (($container.environment // [] | map(.name) | sort) ==
-      ["AWS_REGION", "SLACK_DM_ALLOWLIST"])
-     then . else fail("environment must contain the fixed region and required Slack DM allowlist") end |
+      ["AWS_REGION", "SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID"])
+     then . else fail("environment must contain region, Slack team, and DM allowlist") end |
   if ($container.environment // []) |
        all(
          (.name == "AWS_REGION" and .value == $e.region) or
+         (
+           .name == "SLACK_TEAM_ID" and
+           (.value | test("^T[A-Z0-9]{8,}$"))
+         ) or
          (
            .name == "SLACK_DM_ALLOWLIST" and
            (.value | valid_slack_dm_allowlist)
          )
        )
-     then . else fail("SLACK_DM_ALLOWLIST must be \"*\" or 1-100 unique comma-separated Slack U IDs") end |
+     then . else fail("Slack team/DM environment contract is invalid") end |
   assert_unique_names(($container.secrets // []); "secrets") |
   if (($container.secrets // [] | map(.name) | sort) ==
       (required_secret_names | sort))

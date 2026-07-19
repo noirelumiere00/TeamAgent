@@ -314,7 +314,7 @@ jq -e \
    .[0].Os == "linux" and
    .[0].Config.User == "65532:65532" and
    .[0].Config.Volumes["/tmp"] == {} and
-   ([.[0].Config.Env[] | select(test("^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|OPENCLAW_GATEWAY_TOKEN|TEAMAGENT_MCP_BEARER)="))] | length) == 0 and
+   ([.[0].Config.Env[] | select(test("^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN|OPENCLAW_GATEWAY_TOKEN|TEAMAGENT_MCP_BEARER|TEAMAGENT_CALLER_CLAIM_SECRET|SLACK_TEAM_ID)="))] | length) == 0 and
    .[0].Config.Labels["org.opencontainers.image.source"] == $sourceUri and
    .[0].Config.Labels["org.opencontainers.image.revision"] == $commit and
    .[0].Config.Labels["io.teamagent.source.branch"] == $branch and
@@ -624,6 +624,8 @@ run_args=(--rm --network none --read-only --cap-drop ALL --security-opt no-new-p
   -e SLACK_APP_TOKEN=xapp-offline-smoke
   -e OPENCLAW_GATEWAY_TOKEN=offline-gateway-smoke
   -e TEAMAGENT_MCP_BEARER=offline-mcp-smoke
+  -e TEAMAGENT_CALLER_CLAIM_SECRET=offline-caller-claim-secret-32-bytes
+  -e SLACK_TEAM_ID=T0123456789
   -e 'SLACK_DM_ALLOWLIST=*'
   -e AWS_EC2_METADATA_DISABLED=true)
 
@@ -650,7 +652,8 @@ jq -e '
     "NODE_EXTRA_CA_CERTS","NODE_USE_ENV_PROXY","NO_PROXY","OPENCLAW_CONFIG_PATH",
     "OPENCLAW_GATEWAY_TOKEN","OPENCLAW_RUNTIME_DIR","OPENCLAW_STATE_DIR",
     "OPENCLAW_WORKSPACE_DIR","PATH","SLACK_APP_TOKEN","SLACK_BOT_TOKEN",
-    "SLACK_DM_ALLOWLIST","SSL_CERT_DIR","SSL_CERT_FILE","TEAMAGENT_MCP_BEARER",
+    "SLACK_DM_ALLOWLIST","SLACK_TEAM_ID","SSL_CERT_DIR","SSL_CERT_FILE",
+    "TEAMAGENT_CALLER_CLAIM_SECRET","TEAMAGENT_MCP_BEARER",
     "TMPDIR","XDG_CACHE_HOME","all_proxy","http_proxy","https_proxy","no_proxy"
   ];
   ([keys[] as $key | select((allowed | index($key)) == null) | $key] | length) == 0 and
@@ -698,8 +701,9 @@ docker run "${run_args[@]}" "$RUNTIME_REF" /app/openclaw.mjs plugins list --json
 jq -e --arg version "$OPENCLAW_VERSION" '
   ([.plugins[] | select(.id == "slack" and .version == $version and .status == "loaded" and (.channelIds | index("slack")) != null)] | length) == 1 and
   ([.plugins[] | select(.id == "amazon-bedrock" and .version == $version and .status == "loaded" and (.providerIds | index("amazon-bedrock")) != null)] | length) == 1 and
+  ([.plugins[] | select(.id == "teamagent-caller-identity" and .version == "1.0.0" and .status == "loaded")] | length) == 1 and
   ([.plugins[] | select(.id == "browser" and .status == "loaded")] | length) == 0' \
-  "$tmp_dir/plugins.json" >/dev/null || fail "Slack/Bedrock plugin compatibility smoke failed"
+  "$tmp_dir/plugins.json" >/dev/null || fail "reviewed plugin compatibility smoke failed"
 
 if docker run "${run_args[@]}" "$RUNTIME_REF" /app/openclaw.mjs browser --help \
   >"$tmp_dir/browser-help.log" 2>&1; then
@@ -720,6 +724,8 @@ gateway_args=(-d --network none --read-only --cap-drop ALL --security-opt no-new
   -e SLACK_APP_TOKEN=xapp-offline-smoke
   -e OPENCLAW_GATEWAY_TOKEN=offline-gateway-smoke
   -e TEAMAGENT_MCP_BEARER=offline-mcp-smoke
+  -e TEAMAGENT_CALLER_CLAIM_SECRET=offline-caller-claim-secret-32-bytes
+  -e SLACK_TEAM_ID=T0123456789
   -e 'SLACK_DM_ALLOWLIST=*'
   -e AWS_EC2_METADATA_DISABLED=true)
 # Network-none cannot exercise Slack authentication. Plugin loading is verified
@@ -764,7 +770,8 @@ if(children){
   process.exit(1);
 }' >/dev/null || fail "gateway PID 1 child-process contract failed"
 if grep -E 'spawn npm|Config observe anomaly|auto-enabled plugins|browser configured' "$tmp_dir/gateway.log" >/dev/null || \
-   grep -F -e xoxb-offline-smoke -e xapp-offline-smoke -e offline-gateway-smoke -e offline-mcp-smoke "$tmp_dir/gateway.log" >/dev/null; then
+   grep -F -e xoxb-offline-smoke -e xapp-offline-smoke -e offline-gateway-smoke -e offline-mcp-smoke \
+     -e offline-caller-claim-secret-32-bytes "$tmp_dir/gateway.log" >/dev/null; then
   tail -120 "$tmp_dir/gateway.log" >&2
   fail "gateway attempted package repair or enabled the browser plugin"
 fi
@@ -995,7 +1002,6 @@ jq -n \
 
 RUNTIME_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/runtime-inventory.json" | cut -d' ' -f1)
 ROOTFS_INVENTORY_SHA256=$(sha256sum "$EVIDENCE_DIR/rootfs-inventory.json" | cut -d' ' -f1)
-ROOTFS_TAR_SHA256=$(jq -er '.subject.rootfsTarSha256' "$EVIDENCE_DIR/rootfs-inventory.json")
 ROOTFS_ENTRY_COUNT=$(jq -er '.entryCount' "$EVIDENCE_DIR/rootfs-inventory.json")
 
 python3 "$REPO_ROOT/infra/openclaw/index-evidence.py" \
@@ -1016,7 +1022,6 @@ jq -n \
   --arg configDigest "$CONFIG_DIGEST" \
   --argjson rootfsDiffIds "$ROOTFS_DIFF_IDS" \
   --arg rootfsDiffIdsSha256 "$ROOTFS_DIFF_IDS_SHA256" \
-  --arg rootfsTarSha256 "$ROOTFS_TAR_SHA256" \
   --arg rootfsInventorySha256 "$ROOTFS_INVENTORY_SHA256" \
   --argjson rootfsEntryCount "$ROOTFS_ENTRY_COUNT" \
   --arg sourceCommit "$SOURCE_COMMIT" \
@@ -1045,7 +1050,7 @@ jq -n \
   --slurpfile operationSmoke "$EVIDENCE_DIR/plugin-operation-smoke.json" \
   --slurpfile liveVulnerabilityBaseline "$EVIDENCE_DIR/live-vulnerability-baseline.json" \
   '{
-    schemaVersion:4,
+    schemaVersion:5,
     createdAt:$createdAt,
     deploymentCredential:false,
     image:{
@@ -1057,7 +1062,6 @@ jq -n \
       rootfs:{
         diffIds:$rootfsDiffIds,
         diffIdsSha256:$rootfsDiffIdsSha256,
-        mergedExportTarSha256:$rootfsTarSha256,
         inventorySha256:$rootfsInventorySha256,
         entryCount:$rootfsEntryCount
       }
@@ -1225,10 +1229,11 @@ jq -e \
   --arg sourceTree "$SOURCE_TREE" \
   --arg releaseContractSha256 "$BUNDLE_CONTRACT_SHA256" \
   --arg evidenceIndexSha256 "$EVIDENCE_INDEX_SHA256" '
-  .schemaVersion == 4 and
+  .schemaVersion == 5 and
   .deploymentCredential == false and
   .image.imageId == $imageId and
   .image.manifestDigest == $manifestDigest and
+  (.image.rootfs | has("mergedExportTarSha256") | not) and
   .source.commit == $sourceCommit and
   .source.tree == $sourceTree and
   .source.releaseContractSha256 == $releaseContractSha256 and

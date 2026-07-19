@@ -5,7 +5,8 @@
 # ============================================================
 # 役割: OpenClaw外殻から MCP(streamable-http/bearer) でしか触れない「信頼境界の内側」。
 #   creds(Secrets/RDS/Bedrock) を持つのはこのコンテナだけ。scripts/run_mcp_http_server.py を起動。
-# 会社共有モデル(§G): TEAMAGENT_SHARED_COMPANY_DOMAINS 設定で会社メンバーidentity・本人識別不要。
+# 会社共有モデル(§G): 署名済みSlack event、exact workspace、member resolver成功後だけ
+# TEAMAGENT_SHARED_COMPANY_DOMAINS の共有groupを付与。欠落・未知・guest・障害はfail closed。
 # 秘密値は焼かない（ECS task の secrets valueFrom で注入）。
 #
 # build:  docker build -f infra/docker/Dockerfile.teamagent-mcp -t teamagent-mcp:local .

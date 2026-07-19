@@ -210,6 +210,11 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert '"/app/openclaw.mjs", ...expectedArgs' in gateway_runtime
     assert 'typeof process.execve !== "function"' in gateway_runtime
     assert "COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs" in dockerfile
+    assert (
+        "COPY infra/openclaw/caller-identity-plugin "
+        "/opt/teamagent/plugins/teamagent-caller-identity/"
+    ) in dockerfile
+    assert "@teamagent/openclaw-caller-identity" in dockerfile
     assert "node /tmp/prune-runtime.mjs" in dockerfile
     for forbidden_artifact in (
         '"@openclaw/browser-plugin"',
@@ -282,20 +287,27 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         "SLACK_APP_TOKEN",
         "OPENCLAW_GATEWAY_TOKEN",
         "TEAMAGENT_MCP_BEARER",
+        "TEAMAGENT_CALLER_CLAIM_SECRET",
     ):
         assert f"ARG {secret}" not in dockerfile
 
 
-def test_config_loads_only_reviewed_external_plugins_and_not_browser() -> None:
+def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     config = _load_reviewed_json5(CONFIG)
-    assert config["plugins"]["allow"] == ["slack", "amazon-bedrock"]
+    assert config["plugins"]["allow"] == [
+        "slack",
+        "amazon-bedrock",
+        "teamagent-caller-identity",
+    ]
     assert config["plugins"]["load"]["paths"] == [
         "/opt/teamagent/plugins/slack",
         "/opt/teamagent/plugins/amazon-bedrock",
+        "/opt/teamagent/plugins/teamagent-caller-identity",
     ]
     assert config["plugins"]["entries"] == {
         "slack": {"enabled": True},
         "amazon-bedrock": {"enabled": True},
+        "teamagent-caller-identity": {"enabled": True},
     }
     assert config["channels"]["slack"]["botToken"] == "${SLACK_BOT_TOKEN}"
     assert config["channels"]["slack"]["appToken"] == "${SLACK_APP_TOKEN}"
@@ -310,6 +322,13 @@ def test_config_loads_only_reviewed_external_plugins_and_not_browser() -> None:
     assert "browser" not in config["tools"]
 
 
+def test_internal_caller_identity_plugin_uses_installed_openclaw_schema() -> None:
+    package = json.loads((ROOT / "infra/openclaw/caller-identity-plugin/package.json").read_text())
+    assert package["openclaw"]["extensions"] == ["./dist/index.js"]
+    assert "runtimeExtensions" not in package["openclaw"]
+    assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.7.1"
+
+
 def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> None:
     entrypoint = ENTRYPOINT.read_text()
     assert not (ROOT / "infra/docker/openclaw-entrypoint.sh").exists()
@@ -320,6 +339,10 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     assert "process.getuid" in entrypoint
     assert "allowFromCount" in entrypoint
     assert "parseSlackDmAccess" in entrypoint
+    assert (
+        'runtimeSecrets.get("TEAMAGENT_CALLER_CLAIM_SECRET") ===\n'
+        '    runtimeSecrets.get("TEAMAGENT_MCP_BEARER")'
+    ) in entrypoint
     assert 'return { dmPolicy: "open", allowFrom: ["*"] }' in entrypoint
     assert 'return { dmPolicy: "allowlist", allowFrom: entries }' in entrypoint
     assert "config.channels.slack.dmPolicy = slackDmAccess.dmPolicy" in entrypoint
@@ -332,6 +355,7 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
         "SLACK_APP_TOKEN",
         "OPENCLAW_GATEWAY_TOKEN",
         "TEAMAGENT_MCP_BEARER",
+        "TEAMAGENT_CALLER_CLAIM_SECRET",
     }
     assert set(_js_string_array(entrypoint, "REQUIRED_SECRETS")) == required_secrets
     for secret in required_secrets:
@@ -459,7 +483,7 @@ def test_dedicated_builder_is_fail_closed_and_scans_child() -> None:
         "controlUiServedAssets",
         "preservedControlUiBrowserChunks",
         "fargateNoNewPrivilegesEnforced:false",
-        "schemaVersion:4",
+        "schemaVersion:5",
         "deploymentCredential:false",
         'status:"LOCAL_GATES_PASSED"',
         "registryPublished:false",
@@ -523,6 +547,9 @@ def test_docs_require_verified_runtime_and_provenance_path() -> None:
         "/readyz",
         "OPENCLAW_GATEWAY_TOKEN",
         "TEAMAGENT_MCP_BEARER",
+        "TEAMAGENT_CALLER_CLAIM_SECRET",
+        "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE",
+        "SLACK_TEAM_ID",
         "build-image.sh",
         "--evidence-dir",
         "Critical=0",
@@ -545,6 +572,9 @@ def test_docs_require_verified_runtime_and_provenance_path() -> None:
     assert 'slack_dm_allowlist = "*"' in runbook
     assert "dmPolicy=allowlist" in combined
     assert "invalid production sentinel" in readme
+    assert "merged export tar" in runbook
+    assert "inventorySha256" in runbook
+    assert "byte hash" in runbook
 
 
 def test_docs_do_not_recommend_direct_ecs_rollback_or_stale_sections() -> None:
@@ -559,6 +589,85 @@ def test_docs_do_not_recommend_direct_ecs_rollback_or_stale_sections() -> None:
     assert "docs/v3.2/data_model_v1.md" in adversarial
     assert "scripts/migrate.py" in adversarial
     assert "schema_migrations" in adversarial
+
+
+def test_all_current_openclaw_docs_reject_direct_desired_count_rollback() -> None:
+    docs = [
+        path
+        for path in (ROOT / "docs").rglob("*")
+        if path.is_file() and path.suffix.lower() in {".md", ".txt", ".html"}
+    ]
+    violations: list[str] = []
+    for path in docs:
+        text = path.read_text(errors="replace")
+        if "openclaw" not in text.lower():
+            continue
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            lowered = line.lower()
+            if re.search(r"desired[_ -]?count\s*[=:]\s*0|--desired-count\s+0", lowered):
+                violations.append(f"{path.relative_to(ROOT)}:{line_number}")
+    assert violations == []
+    for path in (
+        ROOT / "docs/v3.2/ops/risk_register.md",
+        ROOT / "docs/v3.2/spec_vs_current_full_matrix_2026-06-15.md",
+    ):
+        text = path.read_text()
+        for required in (
+            "durable previous task revision",
+            "ECS deployment circuit breaker",
+            "fresh signed rollback authorization",
+            "one-use full saved plan",
+        ):
+            assert required in text
+
+
+def test_effective_tool_scope_comments_name_real_side_effects() -> None:
+    config = CONFIG.read_text()
+    for required in (
+        "Gmail下書き保存",
+        "本人Calendar書込",
+        "Slackファイル配信",
+        "外部job/S3 report生成",
+        "メール送信・招待送信・Drive書込は許可しない",
+    ):
+        assert required in config
+    assert "MCP read only" not in config
+
+
+def test_identity_dashboard_tracks_signed_claim_boundary_events() -> None:
+    cloudwatch = CLOUDWATCH_FARGATE.read_text()
+    for event in (
+        "identity_resolved",
+        "caller_claim_rejected",
+        "identity_spoof_rejected",
+    ):
+        assert event in cloudwatch
+    assert "identity_company_shared" not in cloudwatch
+    assert "slack_user_id_audit" not in cloudwatch
+
+
+def test_mcp_image_contract_does_not_claim_company_shared_is_identity_free() -> None:
+    dockerfile = (ROOT / "infra/docker/Dockerfile.teamagent-mcp").read_text()
+    assert "本人識別不要" not in dockerfile
+    for required in ("署名済みSlack event", "member resolver成功", "fail closed"):
+        assert required in dockerfile
+
+
+def test_filesystem_evidence_uses_only_canonical_inventory_digest() -> None:
+    generator = (ROOT / "infra/openclaw/generate-filesystem-sbom.py").read_text()
+    helper = HELPER.read_text()
+    runbook = RUNBOOK.read_text()
+    for forbidden in (
+        "rootfsTarSha256",
+        "RootfsTarSha256",
+        "ROOTFS_TAR_SHA256",
+    ):
+        assert forbidden not in f"{generator}\n{helper}"
+    assert helper.count("mergedExportTarSha256") == 1
+    assert 'has("mergedExportTarSha256") | not' in helper
+    assert "rootfsInventorySha256" in helper
+    assert "wholeFilesystemInventorySha256" in generator
+    assert "唯一の digest claim" in runbook
 
 
 def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> None:
@@ -670,6 +779,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
     assert {entry["name"] for entry in container["environment"]} == {
         "AWS_REGION",
         "SLACK_DM_ALLOWLIST",
+        "SLACK_TEAM_ID",
     }
 
     wildcard = copy.deepcopy(current_task)
@@ -726,6 +836,22 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         if entry["name"] != "SLACK_DM_ALLOWLIST"
     ]
     adversarial.append(("missing Slack DM allowlist", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["environment"] = [
+        entry
+        for entry in mutated["containerDefinitions"][0]["environment"]
+        if entry["name"] != "SLACK_TEAM_ID"
+    ]
+    adversarial.append(("missing Slack team", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    next(
+        entry
+        for entry in mutated["containerDefinitions"][0]["environment"]
+        if entry["name"] == "SLACK_TEAM_ID"
+    )["value"] = "U0123456789"
+    adversarial.append(("invalid Slack team", mutated))
 
     for label, value in (
         ("empty Slack DM allowlist", ""),
@@ -825,7 +951,15 @@ def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     assert not re.search(r"^\s*dockerSecurityOptions\s*=", block, flags=re.MULTILINE)
     assert "linuxParameters.tmpfs" in block
     assert "サポートしない" in block
+    assert '{ name = "SLACK_TEAM_ID", value = var.slack_team_id }' in block
     assert '{ name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist }' in block
+    assert (
+        '{ name = "TEAMAGENT_CALLER_CLAIM_SECRET", '
+        "valueFrom = data.aws_secretsmanager_secret.caller_claim.arn }"
+    ) in block
+    assert 'variable "openclaw_caller_claim_secret_name"' in variables
+    assert "teamagent/dev/openclaw/caller-claim-hmac" in variables
+    assert 'can(regex("^T[A-Z0-9]{8,}$", var.slack_team_id))' in variables
     assert 'var.slack_dm_allowlist == "*"' in variables
     assert ('regex("^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$", var.slack_dm_allowlist)') in variables
     assert 'distinct(split(",", var.slack_dm_allowlist))' in variables
@@ -836,6 +970,43 @@ def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     assert "deployment_circuit_breaker" in service_block
     assert "enable   = true" in service_block
     assert "rollback = true" in service_block
+
+
+def test_mcp_caller_claim_replay_contract_is_cluster_wide_and_least_privilege() -> None:
+    source = FARGATE.read_text()
+    table_start = source.index('resource "aws_dynamodb_table" "mcp_caller_claim_nonces"')
+    table_end = source.index(
+        "# ============================================================\n# IAM", table_start
+    )
+    table = source[table_start:table_end]
+    assert 'hash_key     = "nonce"' in table
+    assert 'attribute_name = "expires_at"' in table
+    assert 'billing_mode = "PAY_PER_REQUEST"' in table
+    assert "server_side_encryption" in table
+    assert "point_in_time_recovery" in table
+    assert "deletion_protection_enabled = true" in table
+
+    policy_start = source.index('data "aws_iam_policy_document" "mcp_task"')
+    policy_end = source.index('resource "aws_iam_role" "mcp_task"', policy_start)
+    policy = source[policy_start:policy_end]
+    assert 'sid       = "ConsumeCallerClaimNonce"' in policy
+    assert 'actions   = ["dynamodb:PutItem"]' in policy
+    assert "aws_dynamodb_table.mcp_caller_claim_nonces.arn" in policy
+    for forbidden in ("dynamodb:GetItem", "dynamodb:DeleteItem", "dynamodb:Scan"):
+        assert forbidden not in policy
+
+    mcp_start = source.index('resource "aws_ecs_task_definition" "mcp"')
+    openclaw_start = source.index('resource "aws_ecs_task_definition" "openclaw"')
+    mcp_block = source[mcp_start:openclaw_start]
+    assert (
+        '{ name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", '
+        "value = aws_dynamodb_table.mcp_caller_claim_nonces.name }"
+    ) in mcp_block
+    openclaw_end = source.index(
+        "# ============================================================\n# Services",
+        openclaw_start,
+    )
+    assert "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE" not in source[openclaw_start:openclaw_end]
 
 
 def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
@@ -922,8 +1093,16 @@ def test_actual_image_test_is_executable_and_checks_kernel_and_payload() -> None
         "genericChildProcessPrimitives",
         "no bundled plugin manifest found for browser",
         "pluginOperationModulesLoadWithStubbedProviders",
+        "callerIdentityPluginHookContract",
+        "CALLER_IDENTITY_PLUGIN_PROBE",
+        "callerClaimSecretEmptyFailsClosed",
+        "slackTeamMalformedFailsClosed",
         "conversations.history",
         "ListFoundationModelsCommand",
+        "docker",
+        "export",
+        "canonicalFsFreshExportsReproduce",
+        "rawExportTarDigestClaimed",
         "actual-image-contract.json",
     ):
         assert required in source
@@ -941,8 +1120,9 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert "del(.entryPoint, .command, .dockerSecurityOptions)" in task_filter
     assert "expected exactly one container named openclaw; sidecars are forbidden" in task_filter
     assert "only the task-scoped empty openclaw-tmp volume is allowed" in task_filter
-    assert "required Slack DM allowlist" in task_filter
-    assert "1-100 unique comma-separated Slack U IDs" in task_filter
+    assert "Slack team/DM environment contract is invalid" in task_filter
+    assert "valid_slack_dm_allowlist" in task_filter
+    assert r"^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$" in task_filter
     assert "apply_openclaw.sh is permanently disabled" in deploy
     assert "plan_image_release.sh" in deploy
     assert "apply_image_release_plan.sh" in deploy
@@ -1168,6 +1348,9 @@ def test_whole_filesystem_sbom_and_evidence_index_are_exact(tmp_path: Path) -> N
         entry for entry in inventory_json["entries"] if entry["path"] == "app/index.js"
     )
     assert file_entry["contentSha256"] == hashlib.sha256(b"runtime\n").hexdigest()
+    assert "rootfsTarSha256" not in inventory_json["subject"]
+    assert "RootfsTarSha256" not in sbom.read_text()
+    assert "rootfsTarSha256" not in equivalence.read_text()
     assert equivalence_json["wholeFilesystemExactMatch"] is True
     assert equivalence_json["pathTypeModeOwnerSizeLinkContentMultisetExact"] is True
 
@@ -1227,3 +1410,66 @@ def test_whole_filesystem_sbom_and_evidence_index_are_exact(tmp_path: Path) -> N
     )
     assert rejected_index.returncode != 0
     assert "evidence symlink is forbidden" in rejected_index.stderr
+
+
+def test_canonical_filesystem_inventory_ignores_tar_metadata_and_order(
+    tmp_path: Path,
+) -> None:
+    payload = b"same-content\n"
+    tar_paths = [tmp_path / "export-a.tar", tmp_path / "export-b.tar"]
+    for iteration, tar_path in enumerate(tar_paths):
+        members: list[tuple[tarfile.TarInfo, io.BytesIO | None]] = []
+        directory = tarfile.TarInfo("app")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        directory.uid = 65532
+        directory.gid = 65532
+        directory.mtime = 100 + iteration
+        members.append((directory, None))
+        regular = tarfile.TarInfo("app/index.js")
+        regular.size = len(payload)
+        regular.mode = 0o444
+        regular.uid = 65532
+        regular.gid = 65532
+        regular.mtime = 200 + iteration
+        members.append((regular, io.BytesIO(payload)))
+        if iteration:
+            members.reverse()
+        with tarfile.open(tar_path, "w") as archive:
+            for member, stream in members:
+                archive.addfile(member, stream)
+
+    image_id = f"sha256:{'a' * 64}"
+    trivy = tmp_path / "trivy.json"
+    trivy.write_text(json.dumps(_minimal_trivy_sbom(image_id)))
+    inventory_hashes: list[str] = []
+    for iteration, tar_path in enumerate(tar_paths):
+        inventory = tmp_path / f"inventory-{iteration}.json"
+        generated = subprocess.run(
+            [
+                "python3",
+                str(FILESYSTEM_SBOM),
+                "--rootfs-tar",
+                str(tar_path),
+                "--trivy-sbom",
+                str(trivy),
+                "--inventory-output",
+                str(inventory),
+                "--sbom-output",
+                str(tmp_path / f"sbom-{iteration}.json"),
+                "--equivalence-output",
+                str(tmp_path / f"equivalence-{iteration}.json"),
+                "--image-id",
+                image_id,
+                "--manifest-digest",
+                f"sha256:{'b' * 64}",
+                "--config-digest",
+                f"sha256:{'c' * 64}",
+            ],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        assert generated.returncode == 0, generated.stderr
+        inventory_hashes.append(hashlib.sha256(inventory.read_bytes()).hexdigest())
+    assert inventory_hashes[0] == inventory_hashes[1]

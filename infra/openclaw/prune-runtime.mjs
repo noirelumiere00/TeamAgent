@@ -15,6 +15,7 @@ const SKILLS_ROOT = path.join(APP_ROOT, "skills");
 const PLUGIN_ROOTS = [
   path.join(TEAMAGENT_ROOT, "plugins", "slack"),
   path.join(TEAMAGENT_ROOT, "plugins", "amazon-bedrock"),
+  path.join(TEAMAGENT_ROOT, "plugins", "teamagent-caller-identity"),
 ];
 const REPORT_PATH = path.join(TEAMAGENT_ROOT, "runtime-prune-report.json");
 const forbiddenNames = new Set([
@@ -1293,7 +1294,7 @@ if (
     JSON.stringify(prePrunePluginOperationClosure.resolvedEdges)
 ) {
   throw new Error(
-    "Slack/Bedrock operation module closure changed during pruning",
+    "reviewed plugin operation module closure changed during pruning",
   );
 }
 

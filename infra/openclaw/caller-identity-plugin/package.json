@@ -1,0 +1,19 @@
+{
+  "name": "@teamagent/openclaw-caller-identity",
+  "version": "1.0.0",
+  "description": "Binds trusted Slack ingress identity to one-use TeamAgent MCP tool calls.",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  },
+  "files": [
+    "dist/**",
+    "openclaw.plugin.json",
+    "package.json"
+  ]
+}

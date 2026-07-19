@@ -14,6 +14,11 @@ RLS fail-closed・user_context 伝播・エラー隔離は ``teamagent.mcp_gatew
 
 環境変数:
 - ``TEAMAGENT_MCP_BEARER``   : 必須。これが無いと **fail-closed で起動拒否**（無認証公開を禁止）。
+- ``TEAMAGENT_CALLER_CLAIM_SECRET``: 必須。OpenClaw ingress とだけ共有する32-byte以上の
+  caller claim HMAC鍵。bearerとは別secretで、bearer単体のcaller偽造を防ぐ。
+- ``TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE``: 必須。ECSタスクを跨いでnonceを原子的に
+  one-use化するDynamoDB table。条件付き書込み障害時は認可をfail-closedにする。
+- ``SLACK_TEAM_ID``          : 必須。署名claimとSlack resolverの両方が照合する本番workspace ID。
 - ``TEAMAGENT_MCP_HOST``     : 既定 ``127.0.0.1``（loopback）。コンテナでは私設ネットワーク IF に限定して bind。
 - ``TEAMAGENT_MCP_PORT``     : 既定 ``8787``。
 - ``TEAMAGENT_MCP_PATH``     : 既定 ``/mcp``。OpenClaw 側 ``mcp.servers.teamagent.url`` と一致させる。
@@ -41,6 +46,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
 
+from teamagent.mcp_gateway.caller_claim import CallerClaimError, CallerClaimVerifier
 from teamagent.mcp_gateway.server import build_production_server
 
 logger = structlog.get_logger(__name__)
@@ -110,7 +116,14 @@ def main() -> None:
     bearer = os.environ.get("TEAMAGENT_MCP_BEARER")
     if not bearer:
         # fail-closed: 無認証の MCP エンドポイント公開は禁止。
-        logger.error("mcp_http_no_bearer", hint="set TEAMAGENT_MCP_BEARER")
+        logger.error("mcp_http_missing_runtime_contract", missing="TEAMAGENT_MCP_BEARER")
+        sys.exit(2)
+    try:
+        # build_production_server creates its own verifier and cluster-wide replay store.
+        # This early check produces an explicit startup error before binding a socket.
+        CallerClaimVerifier.from_env()
+    except CallerClaimError as error:
+        logger.error("mcp_http_missing_runtime_contract", reason=str(error))
         sys.exit(2)
 
     host = os.environ.get("TEAMAGENT_MCP_HOST", "127.0.0.1")

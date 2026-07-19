@@ -17,15 +17,28 @@ const REQUIRED_SECRETS = [
   "SLACK_APP_TOKEN",
   "OPENCLAW_GATEWAY_TOKEN",
   "TEAMAGENT_MCP_BEARER",
+  "TEAMAGENT_CALLER_CLAIM_SECRET",
 ];
+const OPENCLAW_VERSION = "2026.7.1";
 const REQUIRED_PLUGINS = new Map([
-  ["slack", ["/opt/teamagent/plugins/slack", "@openclaw/slack"]],
+  ["slack", ["/opt/teamagent/plugins/slack", "@openclaw/slack", OPENCLAW_VERSION]],
   [
     "amazon-bedrock",
-    ["/opt/teamagent/plugins/amazon-bedrock", "@openclaw/amazon-bedrock-provider"],
+    [
+      "/opt/teamagent/plugins/amazon-bedrock",
+      "@openclaw/amazon-bedrock-provider",
+      OPENCLAW_VERSION,
+    ],
+  ],
+  [
+    "teamagent-caller-identity",
+    [
+      "/opt/teamagent/plugins/teamagent-caller-identity",
+      "@teamagent/openclaw-caller-identity",
+      "1.0.0",
+    ],
   ],
 ]);
-const OPENCLAW_VERSION = "2026.7.1";
 const FIXED_PATH = "/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const PASSTHROUGH_ENV = [
   // ECS task-role credentials and container/task metadata.
@@ -88,6 +101,13 @@ function parseSlackDmAccess(value) {
     throw new Error("SLACK_DM_ALLOWLIST must not contain duplicate Slack U IDs");
   }
   return { dmPolicy: "allowlist", allowFrom: entries };
+}
+
+function parseSlackTeamId(value) {
+  if (typeof value !== "string" || !/^T[A-Z0-9]{8,}$/.test(value)) {
+    throw new Error("SLACK_TEAM_ID is required and must be a canonical Slack T ID");
+  }
+  return value;
 }
 
 function assertConfig(config) {
@@ -161,7 +181,7 @@ function buildChildEnvironment({
     AWS_DEFAULT_REGION: region,
   };
   copyDefined(process.env, childEnv, REQUIRED_SECRETS);
-  copyDefined(process.env, childEnv, ["SLACK_DM_ALLOWLIST"]);
+  copyDefined(process.env, childEnv, ["SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID"]);
   copyDefined(process.env, childEnv, PASSTHROUGH_ENV);
   return childEnv;
 }
@@ -176,11 +196,28 @@ async function rejectSymlink(path) {
 }
 
 async function prepareRuntime() {
+  const runtimeSecrets = new Map();
   for (const name of REQUIRED_SECRETS) {
     const value = process.env[name];
     if (!value || value.includes("${")) throw new Error(`required runtime secret is missing: ${name}`);
+    if (
+      name === "TEAMAGENT_CALLER_CLAIM_SECRET" &&
+      Buffer.byteLength(value, "utf8") < 32
+    ) {
+      throw new Error("TEAMAGENT_CALLER_CLAIM_SECRET must contain at least 32 bytes");
+    }
+    runtimeSecrets.set(name, value);
+  }
+  if (
+    runtimeSecrets.get("TEAMAGENT_CALLER_CLAIM_SECRET") ===
+    runtimeSecrets.get("TEAMAGENT_MCP_BEARER")
+  ) {
+    throw new Error(
+      "TEAMAGENT_CALLER_CLAIM_SECRET must differ from TEAMAGENT_MCP_BEARER",
+    );
   }
   const slackDmAccess = parseSlackDmAccess(process.env.SLACK_DM_ALLOWLIST);
+  parseSlackTeamId(process.env.SLACK_TEAM_ID);
 
   const runtimeRoot = resolve(process.env.OPENCLAW_RUNTIME_DIR || "/tmp/teamagent-openclaw");
   if (runtimeRoot !== "/tmp/teamagent-openclaw") {
@@ -234,9 +271,9 @@ async function prepareRuntime() {
   config.channels.slack.allowFrom = slackDmAccess.allowFrom;
   assertConfig(config);
 
-  for (const [id, [path, packageName]] of REQUIRED_PLUGINS) {
+  for (const [id, [path, packageName, expectedVersion]] of REQUIRED_PLUGINS) {
     const metadata = JSON.parse(await readFile(join(path, "package.json"), "utf8"));
-    if (metadata.name !== packageName || metadata.version !== OPENCLAW_VERSION) {
+    if (metadata.name !== packageName || metadata.version !== expectedVersion) {
       throw new Error(`plugin package mismatch: ${id}`);
     }
   }
