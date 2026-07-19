@@ -412,8 +412,8 @@ def _call(
     )(**kwargs)
 
 
-def _failure_target(body: str, now: int) -> tuple[str, int] | None:
-    """Return only a canonical, bounded, still-live envelope identity."""
+def _failure_target(body: str, now: int) -> dict[str, Any] | None:
+    """Return only a complete, digest-proven persisted-envelope identity."""
 
     try:
         value = json.loads(body)
@@ -428,16 +428,39 @@ def _failure_target(body: str, now: int) -> tuple[str, int] | None:
     job_id = value.get("job_id")
     created = value.get("created_at_epoch_s")
     deadline = value.get("deadline_epoch_s")
+    idempotency_key = value.get("idempotency_key")
+    payload_sha256 = value.get("payload_sha256")
+    audit_hash = value.get("audit_principal_hash")
     if (
         not isinstance(job_id, str)
         or not _JOB_ID.fullmatch(job_id)
         or type(created) is not int
         or type(deadline) is not int
         or not 1 <= deadline - created <= _MAX_JOB_BUDGET_SECONDS
+        or created > now + _MAX_CLOCK_SKEW_SECONDS
         or not now < deadline <= now + _MAX_JOB_BUDGET_SECONDS
+        or not isinstance(idempotency_key, str)
+        or not _SHA256.fullmatch(idempotency_key)
+        or not isinstance(payload_sha256, str)
+        or not _SHA256.fullmatch(payload_sha256)
+        or (audit_hash is not None and not _SHA256.fullmatch(str(audit_hash)))
     ):
         return None
-    return job_id, deadline
+    without_hash = dict(value)
+    without_hash.pop("payload_sha256")
+    if not hmac.compare_digest(
+        hashlib.sha256(_canonical(without_hash)).hexdigest(),
+        payload_sha256,
+    ):
+        return None
+    return {
+        "job_id": job_id,
+        "deadline_epoch_s": deadline,
+        "idempotency_key": idempotency_key,
+        "payload_sha256": payload_sha256,
+        "audit_principal_hash": audit_hash,
+        "request_json": body,
+    }
 
 
 def _validate_envelope(
@@ -504,11 +527,18 @@ def _validate_envelope(
 
 def _mark_failed(
     table: str,
-    job_id: str,
+    target: dict[str, Any],
     code: str,
     now: int,
-    deadline_epoch_s: int,
 ) -> None:
+    job_id = str(target["job_id"])
+    deadline_epoch_s = int(target["deadline_epoch_s"])
+    audit_hash = target["audit_principal_hash"]
+    audit_condition = (
+        "audit_principal_hash = :audit"
+        if audit_hash is not None
+        else "attribute_not_exists(audit_principal_hash)"
+    )
     detail = _canonical(
         {
             "schema_version": "1",
@@ -519,6 +549,19 @@ def _mark_failed(
             "error_code": code,
         }
     ).decode("utf-8")
+    values: dict[str, Any] = {
+        ":queued": {"S": "queued"},
+        ":failed": {"S": "failed"},
+        ":detail": {"S": detail},
+        ":now": {"N": str(now)},
+        ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
+        ":one": {"N": "1"},
+        ":request_json": {"S": target["request_json"]},
+        ":payload": {"S": target["payload_sha256"]},
+        ":idempotency": {"S": target["idempotency_key"]},
+    }
+    if audit_hash is not None:
+        values[":audit"] = {"S": audit_hash}
     try:
         _call(
             "dynamodb",
@@ -531,16 +574,13 @@ def _mark_failed(
                 "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup) "
                 "ADD #version :one"
             ),
-            ConditionExpression="#status = :queued",
+            ConditionExpression=(
+                "#status = :queued AND request_json = :request_json AND "
+                "payload_sha256 = :payload AND idempotency_key = :idempotency AND "
+                f"{audit_condition}"
+            ),
             ExpressionAttributeNames={"#status": "status", "#version": "version"},
-            ExpressionAttributeValues={
-                ":queued": {"S": "queued"},
-                ":failed": {"S": "failed"},
-                ":detail": {"S": detail},
-                ":now": {"N": str(now)},
-                ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
-                ":one": {"N": "1"},
-            },
+            ExpressionAttributeValues=values,
         )
     except Exception as exc:
         if not _conditional_failure(exc):
@@ -946,24 +986,23 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             raise
         except Exception:
             if failure_target is not None:
-                raw_job_id, raw_deadline = failure_target
                 _mark_failed(
                     table,
-                    raw_job_id,
+                    failure_target,
                     "MEDIA_DISPATCH_ENVELOPE_INVALID",
                     now,
-                    raw_deadline,
                 )
             raise
 
         deadline_epoch_s = int(spec["deadline_epoch_s"])
         if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
+            if failure_target is None:
+                raise RuntimeError("validated media envelope lost failure identity")
             _mark_failed(
                 table,
-                spec["job_id"],
+                failure_target,
                 "MEDIA_JOB_DEADLINE_EXCEEDED",
                 int(time.time()),
-                deadline_epoch_s,
             )
             raise TimeoutError("media envelope deadline exceeded before dispatch claim")
         owner = str(record.get("messageId") or getattr(context, "aws_request_id", "dispatch"))
@@ -971,12 +1010,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             continue
         try:
             if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
+                if failure_target is None:
+                    raise RuntimeError("validated media envelope lost failure identity")
                 _mark_failed(
                     table,
-                    spec["job_id"],
+                    failure_target,
                     "MEDIA_JOB_DEADLINE_EXCEEDED",
                     int(time.time()),
-                    deadline_epoch_s,
                 )
                 raise TimeoutError("media envelope deadline exceeded before task launch")
             response = _call(

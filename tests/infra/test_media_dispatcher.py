@@ -399,6 +399,32 @@ def test_operation_schema_error_fails_row_without_starting_or_orphaning_task(
     assert ecs.calls == []
     assert len(ddb.calls) == 1
     assert ddb.calls[0]["ExpressionAttributeValues"][":failed"] == {"S": "failed"}
+    assert "request_json = :request_json" in ddb.calls[0]["ConditionExpression"]
+    assert "payload_sha256 = :payload" in ddb.calls[0]["ConditionExpression"]
+    assert "idempotency_key = :idempotency" in ddb.calls[0]["ConditionExpression"]
+    assert ddb.calls[0]["ExpressionAttributeValues"][":request_json"] == {"S": body}
+
+
+def test_unproven_invalid_envelope_cannot_mutate_same_job_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    malformed = json.loads(_body())
+    malformed["operation"].pop("url")
+    body = module._canonical(malformed).decode()
+
+    with pytest.raises(ValueError, match="acquire operation keys"):
+        module.handler(
+            {"Records": [{"messageId": "unproven-invalid", "body": body}]},
+            types.SimpleNamespace(aws_request_id="request-1"),
+        )
+
+    assert ddb.calls == []
+    assert ecs.calls == []
 
 
 @pytest.mark.parametrize(
