@@ -80,6 +80,15 @@ changes. The rendered definition enforces:
 The canonical CMD uses `execve`, so the gateway is PID 1. Actual-image tests
 verify child exit-code propagation and clean SIGTERM exit 0.
 
+Slack DM access has one canonical production input, `SLACK_DM_ALLOWLIST`.
+The value `*` becomes exactly `dmPolicy=open` with `allowFrom=["*"]`.
+One to 100 unique, comma-separated Slack `U...` IDs become
+`dmPolicy=allowlist` with those exact IDs. Missing/empty values, whitespace,
+duplicates, mixed wildcard/IDs, and non-`U` identifiers fail in Terraform
+plan validation, the task-definition hardener, and the image entrypoint.
+The empty Terraform default is deliberately an invalid production sentinel,
+not permission to fall back to the baked template.
+
 Fargate cannot enforce Docker `no-new-privileges` or `linuxParameters.tmpfs`.
 Production therefore makes no such claim. Local Docker tests use
 `no-new-privileges`; production compensates with nonroot UID, capability drop,

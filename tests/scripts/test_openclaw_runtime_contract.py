@@ -26,6 +26,8 @@ README = ROOT / "infra/openclaw/README.md"
 RUNBOOK = ROOT / "docs/openclaw/deploy_runbook.md"
 TOOL_SCOPE = ROOT / "infra/openclaw/effective-tool-scope.json"
 FARGATE = ROOT / "infra/terraform/fargate.tf"
+FARGATE_VARIABLES = ROOT / "infra/terraform/variables_fargate.tf"
+FARGATE_OUTPUTS = ROOT / "infra/terraform/outputs_fargate.tf"
 TASK_FILTER = ROOT / "infra/openclaw/harden-task-definition.jq"
 DEPLOY_HELPER = ROOT / "infra/terraform/apply_openclaw.sh"
 ACTUAL_IMAGE_TEST = ROOT / "tests/scripts/test_openclaw_runtime_image.py"
@@ -39,6 +41,7 @@ CLOUDWATCH_FARGATE = ROOT / "infra/terraform/cloudwatch_fargate.tf"
 TASK_FIXTURE = ROOT / "tests/fixtures/openclaw/current-task-definition.json"
 ROLLOUT_FIXTURE = ROOT / "tests/fixtures/openclaw/rollout-gates-pass.json"
 STARTUP_LOG_FIXTURE = ROOT / "tests/fixtures/openclaw/startup-log-events.jsonl"
+ADVERSARIAL_RUNBOOK = ROOT / "docs/openclaw/adversarial_harness_runbook.md"
 
 
 def _strip_json5_comments(source: str) -> str:
@@ -296,6 +299,8 @@ def test_config_loads_only_reviewed_external_plugins_and_not_browser() -> None:
     }
     assert config["channels"]["slack"]["botToken"] == "${SLACK_BOT_TOKEN}"
     assert config["channels"]["slack"]["appToken"] == "${SLACK_APP_TOKEN}"
+    assert config["channels"]["slack"]["dmPolicy"] == "open"
+    assert config["channels"]["slack"]["allowFrom"] == ["*"]
     assert config["gateway"]["auth"]["token"] == "${OPENCLAW_GATEWAY_TOKEN}"
     assert config["gateway"]["bind"] == "loopback"
     assert config["gateway"]["terminal"] == {"enabled": False}
@@ -314,6 +319,14 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
     assert "await chmod(runtimeRoot, 0o700)" in entrypoint
     assert "process.getuid" in entrypoint
     assert "allowFromCount" in entrypoint
+    assert "parseSlackDmAccess" in entrypoint
+    assert 'return { dmPolicy: "open", allowFrom: ["*"] }' in entrypoint
+    assert 'return { dmPolicy: "allowlist", allowFrom: entries }' in entrypoint
+    assert "config.channels.slack.dmPolicy = slackDmAccess.dmPolicy" in entrypoint
+    assert "config.channels.slack.allowFrom = slackDmAccess.allowFrom" in entrypoint
+    assert "is required; use" in entrypoint
+    assert 'if (value === undefined || value === "")' in entrypoint
+    assert "if (injectedAllowlist !== null)" not in entrypoint
     required_secrets = {
         "SLACK_BOT_TOKEN",
         "SLACK_APP_TOKEN",
@@ -484,6 +497,12 @@ def test_legacy_compose_path_is_formally_decommissioned() -> None:
     assert "services: {}" in compose
     assert "intentionally decommissioned" in compose
     assert "build-image.sh" in compose
+    assert "local-validation-only helper" in compose
+    assert "never pushes" in compose
+    assert "trusted source-free promoter" in compose
+    assert "valid signed active receipt" in compose
+    assert "before any optional push" not in compose
+    assert "consumes the verified digest recorded by" not in compose
     for stale in (
         "2026" + ".6.1",
         "1000" + ":1000",
@@ -523,6 +542,23 @@ def test_docs_require_verified_runtime_and_provenance_path() -> None:
     assert "Fargate は Docker `no-new-privileges` を強制できません" in runbook
     assert "scope is not read-only" in readme
     assert "tools=会社ナレッジ4のみ" not in runbook
+    assert 'slack_dm_allowlist = "*"' in runbook
+    assert "dmPolicy=allowlist" in combined
+    assert "invalid production sentinel" in readme
+
+
+def test_docs_do_not_recommend_direct_ecs_rollback_or_stale_sections() -> None:
+    outputs = FARGATE_OUTPUTS.read_text()
+    adversarial = ADVERSARIAL_RUNBOOK.read_text()
+    assert "--desired-count 0" not in outputs
+    assert "direct ECS" in outputs
+    assert "durable previous task revision" in outputs
+    assert "saved-plan" in outputs
+    assert "§I" not in adversarial
+    assert "7. Post-apply functional gates" in adversarial
+    assert "docs/v3.2/data_model_v1.md" in adversarial
+    assert "scripts/migrate.py" in adversarial
+    assert "schema_migrations" in adversarial
 
 
 def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> None:
@@ -636,6 +672,16 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         "SLACK_DM_ALLOWLIST",
     }
 
+    wildcard = copy.deepcopy(current_task)
+    wildcard["containerDefinitions"][0]["environment"][1]["value"] = "*"
+    wildcard_rendered = _render_task(wildcard, image)
+    assert wildcard_rendered.returncode == 0, wildcard_rendered.stderr
+
+    exact_users = copy.deepcopy(current_task)
+    exact_users["containerDefinitions"][0]["environment"][1]["value"] = "U09CX1CCBLN,U0123456789"
+    users_rendered = _render_task(exact_users, image)
+    assert users_rendered.returncode == 0, users_rendered.stderr
+
     adversarial: list[tuple[str, dict[str, Any]]] = []
 
     mutated = copy.deepcopy(current_task)
@@ -672,6 +718,25 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
         {"name": "ECS_SERVICE", "value": "retargeted"}
     )
     adversarial.append(("environment retarget", mutated))
+
+    mutated = copy.deepcopy(current_task)
+    mutated["containerDefinitions"][0]["environment"] = [
+        entry
+        for entry in mutated["containerDefinitions"][0]["environment"]
+        if entry["name"] != "SLACK_DM_ALLOWLIST"
+    ]
+    adversarial.append(("missing Slack DM allowlist", mutated))
+
+    for label, value in (
+        ("empty Slack DM allowlist", ""),
+        ("whitespace Slack DM allowlist", " U09CX1CCBLN"),
+        ("mixed wildcard Slack DM allowlist", "*,U09CX1CCBLN"),
+        ("duplicate Slack DM allowlist", "U09CX1CCBLN,U09CX1CCBLN"),
+        ("non-U Slack DM allowlist", "W0123456789"),
+    ):
+        mutated = copy.deepcopy(current_task)
+        mutated["containerDefinitions"][0]["environment"][1]["value"] = value
+        adversarial.append((label, mutated))
 
     mutated = copy.deepcopy(current_task)
     mutated["containerDefinitions"][0]["secrets"].append(
@@ -735,6 +800,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
 
 def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     source = FARGATE.read_text()
+    variables = FARGATE_VARIABLES.read_text()
     start = source.index('resource "aws_ecs_task_definition" "openclaw"')
     end = source.index(
         "# ============================================================\n# Services",
@@ -759,6 +825,12 @@ def test_terraform_bootstrap_task_matches_cli_hardening_contract() -> None:
     assert not re.search(r"^\s*dockerSecurityOptions\s*=", block, flags=re.MULTILINE)
     assert "linuxParameters.tmpfs" in block
     assert "サポートしない" in block
+    assert '{ name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist }' in block
+    assert 'var.slack_dm_allowlist == "*"' in variables
+    assert ('regex("^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$", var.slack_dm_allowlist)') in variables
+    assert 'distinct(split(",", var.slack_dm_allowlist))' in variables
+    assert 'default     = ""' in variables
+    assert "明示値なしのplanをfail-closed" in variables
     service_start = source.index('resource "aws_ecs_service" "openclaw"')
     service_block = source[service_start:]
     assert "deployment_circuit_breaker" in service_block
@@ -869,7 +941,8 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert "del(.entryPoint, .command, .dockerSecurityOptions)" in task_filter
     assert "expected exactly one container named openclaw; sidecars are forbidden" in task_filter
     assert "only the task-scoped empty openclaw-tmp volume is allowed" in task_filter
-    assert "environment contains an unapproved name or value" in task_filter
+    assert "required Slack DM allowlist" in task_filter
+    assert "1-100 unique comma-separated Slack U IDs" in task_filter
     assert "apply_openclaw.sh is permanently disabled" in deploy
     assert "plan_image_release.sh" in deploy
     assert "apply_image_release_plan.sh" in deploy

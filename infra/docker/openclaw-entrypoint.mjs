@@ -61,21 +61,33 @@ function fail(message) {
   process.exit(78);
 }
 
-function parseAllowlist(value) {
-  if (value === undefined || value.trim() === "") return null;
-  const entries = value
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  if (entries.length === 0 || entries.length > 100) {
-    throw new Error("SLACK_DM_ALLOWLIST must contain between 1 and 100 entries");
+function parseSlackDmAccess(value) {
+  if (value === undefined || value === "") {
+    throw new Error(
+      'SLACK_DM_ALLOWLIST is required; use "*" or 1-100 comma-separated Slack U IDs',
+    );
   }
-  for (const entry of entries) {
-    if (entry !== "*" && !/^[UW][A-Z0-9]{8,}$/.test(entry)) {
-      throw new Error("SLACK_DM_ALLOWLIST contains an invalid Slack member ID");
-    }
+  if (value !== value.trim() || value.length > 2048) {
+    throw new Error("SLACK_DM_ALLOWLIST is not in canonical form");
   }
-  return [...new Set(entries)];
+  if (value === "*") {
+    return { dmPolicy: "open", allowFrom: ["*"] };
+  }
+
+  const entries = value.split(",");
+  if (
+    entries.length === 0 ||
+    entries.length > 100 ||
+    entries.some((entry) => !/^U[A-Z0-9]{8,}$/.test(entry))
+  ) {
+    throw new Error(
+      "SLACK_DM_ALLOWLIST must be 1-100 comma-separated Slack U IDs without spaces",
+    );
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error("SLACK_DM_ALLOWLIST must not contain duplicate Slack U IDs");
+  }
+  return { dmPolicy: "allowlist", allowFrom: entries };
 }
 
 function assertConfig(config) {
@@ -84,8 +96,26 @@ function assertConfig(config) {
   if (!slack || !Array.isArray(allowFrom) || allowFrom.length === 0) {
     throw new Error("channels.slack.allowFrom must be a non-empty array");
   }
-  if (slack.dmPolicy === "open" && !allowFrom.includes("*")) {
-    throw new Error('channels.slack.dmPolicy="open" requires allowFrom=["*"]');
+  if (
+    slack.dmPolicy === "open" &&
+    (allowFrom.length !== 1 || allowFrom[0] !== "*")
+  ) {
+    throw new Error('channels.slack.dmPolicy="open" requires exactly allowFrom=["*"]');
+  }
+  if (
+    slack.dmPolicy === "allowlist" &&
+    (allowFrom.length > 100 ||
+      allowFrom.some(
+        (entry) => typeof entry !== "string" || !/^U[A-Z0-9]{8,}$/.test(entry),
+      ) ||
+      new Set(allowFrom).size !== allowFrom.length)
+  ) {
+    throw new Error(
+      'channels.slack.dmPolicy="allowlist" requires unique Slack U IDs',
+    );
+  }
+  if (!["open", "allowlist"].includes(slack.dmPolicy)) {
+    throw new Error("channels.slack.dmPolicy must be open or allowlist");
   }
 
   const allowed = new Set(config?.plugins?.allow ?? []);
@@ -150,6 +180,7 @@ async function prepareRuntime() {
     const value = process.env[name];
     if (!value || value.includes("${")) throw new Error(`required runtime secret is missing: ${name}`);
   }
+  const slackDmAccess = parseSlackDmAccess(process.env.SLACK_DM_ALLOWLIST);
 
   const runtimeRoot = resolve(process.env.OPENCLAW_RUNTIME_DIR || "/tmp/teamagent-openclaw");
   if (runtimeRoot !== "/tmp/teamagent-openclaw") {
@@ -199,8 +230,8 @@ async function prepareRuntime() {
 
   const templatePath = "/opt/teamagent/openclaw.template.json";
   const config = JSON.parse(await readFile(templatePath, "utf8"));
-  const injectedAllowlist = parseAllowlist(process.env.SLACK_DM_ALLOWLIST);
-  if (injectedAllowlist !== null) config.channels.slack.allowFrom = injectedAllowlist;
+  config.channels.slack.dmPolicy = slackDmAccess.dmPolicy;
+  config.channels.slack.allowFrom = slackDmAccess.allowFrom;
   assertConfig(config);
 
   for (const [id, [path, packageName]] of REQUIRED_PLUGINS) {

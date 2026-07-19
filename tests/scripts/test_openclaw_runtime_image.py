@@ -315,6 +315,17 @@ def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProce
     )
 
 
+def _runtime_env(slack_dm_allowlist: str) -> list[str]:
+    return [
+        (
+            f"SLACK_DM_ALLOWLIST={slack_dm_allowlist}"
+            if assignment.startswith("SLACK_DM_ALLOWLIST=")
+            else assignment
+        )
+        for assignment in PLACEHOLDER_ENV
+    ]
+
+
 def _isolated_run_args(image: str) -> list[str]:
     args = [
         "docker",
@@ -338,7 +349,17 @@ def _isolated_run_args(image: str) -> list[str]:
     return args
 
 
-def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
+def _gateway_lifecycle_contract(
+    image: str,
+    *,
+    slack_dm_allowlist: str = "*",
+    expected_dm_policy: str = "open",
+    expected_allow_from: list[str] | None = None,
+    verify_control_ui: bool = True,
+) -> dict[str, Any]:
+    if expected_allow_from is None:
+        expected_allow_from = ["*"]
+    runtime_env = _runtime_env(slack_dm_allowlist)
     run_args = [
         "docker",
         "run",
@@ -355,7 +376,7 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         "--tmpfs",
         "/tmp:rw,noexec,nosuid,size=512m",
     ]
-    for assignment in PLACEHOLDER_ENV:
+    for assignment in runtime_env:
         run_args.extend(["-e", assignment])
     run_args.extend(
         [
@@ -417,34 +438,59 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         startup_output = startup_logs.stdout + startup_logs.stderr
         assert ready, startup_output
 
-        control_ui_result = _run(
+        dm_access_result = _run(
             [
                 "docker",
                 "exec",
                 container_id,
                 "/nodejs/bin/node",
                 "-e",
-                CONTROL_UI_HTTP_PROBE,
-            ],
-            check=False,
+                (
+                    "const fs=require('node:fs');"
+                    "const c=JSON.parse(fs.readFileSync("
+                    "process.env.OPENCLAW_CONFIG_PATH,'utf8'));"
+                    "process.stdout.write(JSON.stringify({"
+                    "dmPolicy:c.channels.slack.dmPolicy,"
+                    "allowFrom:c.channels.slack.allowFrom}));"
+                ),
+            ]
         )
-        assert control_ui_result.returncode == 0, (
-            control_ui_result.stdout + control_ui_result.stderr
-        )
-        control_ui = json.loads(control_ui_result.stdout)
-        assert control_ui["rootStatus"] == 200
-        assert control_ui["reachableModuleAssetCount"] == control_ui["reachableModuleCount"]
-        assert control_ui["servedAssetCount"] == control_ui["expectedServedAssetCount"]
-        assert len(control_ui["dynamicRegistrations"]) == 1
-        assert control_ui["dynamicRegistrations"][0]["path"] == ("/control-ui-config.json")
-        assert control_ui["dynamicRegistrations"][0]["unauthenticatedStatus"] == 401
-        assert control_ui["dynamicRegistrations"][0]["authenticatedStatus"] == 200
-        assert control_ui["dynamicRegistrations"][0]["terminalEnabled"] is False
-        assert len(control_ui["dynamicRegistrations"][0]["authenticatedSha256"]) == 64
-        assert len(control_ui["onDiskAssetInventorySha256"]) == 64
-        assert len(control_ui["servedAssetInventorySha256"]) == 64
-        assert control_ui["missingOrMismatchedAssets"] == 0
-        assert control_ui["runtimeSecretLeak"] is False
+        dm_access = json.loads(dm_access_result.stdout)
+        assert dm_access == {
+            "dmPolicy": expected_dm_policy,
+            "allowFrom": expected_allow_from,
+        }
+
+        control_ui: dict[str, Any] | None = None
+        if verify_control_ui:
+            control_ui_result = _run(
+                [
+                    "docker",
+                    "exec",
+                    container_id,
+                    "/nodejs/bin/node",
+                    "-e",
+                    CONTROL_UI_HTTP_PROBE,
+                ],
+                check=False,
+            )
+            assert control_ui_result.returncode == 0, (
+                control_ui_result.stdout + control_ui_result.stderr
+            )
+            control_ui = json.loads(control_ui_result.stdout)
+            assert control_ui["rootStatus"] == 200
+            assert control_ui["reachableModuleAssetCount"] == control_ui["reachableModuleCount"]
+            assert control_ui["servedAssetCount"] == control_ui["expectedServedAssetCount"]
+            assert len(control_ui["dynamicRegistrations"]) == 1
+            assert control_ui["dynamicRegistrations"][0]["path"] == ("/control-ui-config.json")
+            assert control_ui["dynamicRegistrations"][0]["unauthenticatedStatus"] == 401
+            assert control_ui["dynamicRegistrations"][0]["authenticatedStatus"] == 200
+            assert control_ui["dynamicRegistrations"][0]["terminalEnabled"] is False
+            assert len(control_ui["dynamicRegistrations"][0]["authenticatedSha256"]) == 64
+            assert len(control_ui["onDiskAssetInventorySha256"]) == 64
+            assert len(control_ui["servedAssetInventorySha256"]) == 64
+            assert control_ui["missingOrMismatchedAssets"] == 0
+            assert control_ui["runtimeSecretLeak"] is False
 
         children = _run(
             [
@@ -472,7 +518,7 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
         state = final_inspect["State"]
         final_logs = _run(["docker", "logs", container_id], check=False)
         log_output = final_logs.stdout + final_logs.stderr
-        secret_values = [assignment.split("=", 1)[1] for assignment in PLACEHOLDER_ENV[:4]]
+        secret_values = [assignment.split("=", 1)[1] for assignment in runtime_env[:4]]
         assert not any(value in log_output for value in secret_values)
         assert not any(
             marker in log_output
@@ -495,10 +541,44 @@ def _gateway_lifecycle_contract(image: str) -> dict[str, Any]:
             "oomKilled": state["OOMKilled"],
             "runtimeSecretLeak": False,
             "logSha256": hashlib.sha256(log_output.encode()).hexdigest(),
+            "dmAccess": dm_access,
             "controlUi": control_ui,
         }
     finally:
         _run(["docker", "rm", "-f", container_id], check=False)
+
+
+def _empty_slack_dm_allowlist_contract(image: str) -> dict[str, Any]:
+    args = [
+        "docker",
+        "run",
+        "--rm",
+        "--platform",
+        "linux/arm64",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=64m",
+    ]
+    for assignment in _runtime_env(""):
+        args.extend(["-e", assignment])
+    args.extend([image, "/nodejs/bin/node", "-e", "process.exit(0)"])
+    result = _run(args, check=False)
+    output = result.stdout + result.stderr
+    assert result.returncode == 78, output
+    assert '"event":"openclaw_entrypoint_error"' in output
+    assert "SLACK_DM_ALLOWLIST is required" in output
+    assert '"event":"openclaw_runtime_ready"' not in output
+    return {
+        "exitCode": result.returncode,
+        "rejectedBeforeRuntimeReady": True,
+        "logSha256": hashlib.sha256(output.encode()).hexdigest(),
+    }
 
 
 def _plugin_operation_contract(image: str) -> dict[str, Any]:
@@ -872,6 +952,14 @@ fs.writeFileSync(1, JSON.stringify({
     assert "no bundled plugin manifest found for browser" in browser_bridge_contract["error"]
     plugin_operation_contract = _plugin_operation_contract(image)
     gateway_lifecycle = _gateway_lifecycle_contract(image)
+    exact_user_gateway_lifecycle = _gateway_lifecycle_contract(
+        image,
+        slack_dm_allowlist="U09CX1CCBLN,U0123456789",
+        expected_dm_policy="allowlist",
+        expected_allow_from=["U09CX1CCBLN", "U0123456789"],
+        verify_control_ui=False,
+    )
+    empty_slack_dm_allowlist = _empty_slack_dm_allowlist_contract(image)
 
     return {
         "schemaVersion": 1,
@@ -901,6 +989,20 @@ fs.writeFileSync(1, JSON.stringify({
             "gatewayReady": gateway_lifecycle["ready"],
             "gatewaySigtermExitZero": gateway_lifecycle["exitCode"] == 0,
             "gatewayRuntimeSecretLeakAbsent": (gateway_lifecycle["runtimeSecretLeak"] is False),
+            "slackDmWildcardOpen": gateway_lifecycle["dmAccess"]
+            == {"dmPolicy": "open", "allowFrom": ["*"]},
+            "slackDmExactUserAllowlist": (
+                exact_user_gateway_lifecycle["ready"] is True
+                and exact_user_gateway_lifecycle["dmAccess"]
+                == {
+                    "dmPolicy": "allowlist",
+                    "allowFrom": ["U09CX1CCBLN", "U0123456789"],
+                }
+            ),
+            "slackDmEmptyFailsClosed": (
+                empty_slack_dm_allowlist["exitCode"] == 78
+                and empty_slack_dm_allowlist["rejectedBeforeRuntimeReady"] is True
+            ),
             "controlUiAssetClosureServed": (
                 gateway_lifecycle["controlUi"]["missingOrMismatchedAssets"] == 0
             ),
@@ -916,6 +1018,8 @@ fs.writeFileSync(1, JSON.stringify({
         "browserBridge": browser_bridge_contract,
         "pluginOperations": plugin_operation_contract,
         "gatewayLifecycle": gateway_lifecycle,
+        "exactUserGatewayLifecycle": exact_user_gateway_lifecycle,
+        "emptySlackDmAllowlist": empty_slack_dm_allowlist,
     }
 
 

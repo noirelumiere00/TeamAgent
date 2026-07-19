@@ -95,6 +95,15 @@ def assert_unique_names($entries; $label):
   else fail($label + " contains duplicate names")
   end;
 
+def valid_slack_dm_allowlist:
+  if type != "string" or length > 2048 then false
+  elif . == "*" then true
+  elif test("^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$") then
+    split(",") as $ids |
+    ($ids | length) == ($ids | unique | length)
+  else false
+  end;
+
 def assert_current_contract:
   expected as $e |
   exactly_one_openclaw as $container |
@@ -135,24 +144,18 @@ def assert_current_contract:
      ] | all(.sourceVolume == "openclaw-tmp" and .containerPath == "/tmp")
      then . else fail("/tmp is the only approved writable mount") end |
   assert_unique_names(($container.environment // []); "environment") |
-  if (($container.environment // [] | map(.name) | sort) == ["AWS_REGION"] or
-      ($container.environment // [] | map(.name) | sort) ==
-        ["AWS_REGION", "SLACK_DM_ALLOWLIST"])
-     then . else fail("environment must contain the fixed region and only the optional Slack allowlist") end |
+  if (($container.environment // [] | map(.name) | sort) ==
+      ["AWS_REGION", "SLACK_DM_ALLOWLIST"])
+     then . else fail("environment must contain the fixed region and required Slack DM allowlist") end |
   if ($container.environment // []) |
        all(
          (.name == "AWS_REGION" and .value == $e.region) or
          (
            .name == "SLACK_DM_ALLOWLIST" and
-           (.value | type) == "string" and
-           (.value | length) <= 2048 and
-           (
-             .value == "*" or
-             (.value | test("^[UW][A-Z0-9]{8,}(?:,[UW][A-Z0-9]{8,})*$"))
-           )
+           (.value | valid_slack_dm_allowlist)
          )
        )
-     then . else fail("environment contains an unapproved name or value") end |
+     then . else fail("SLACK_DM_ALLOWLIST must be \"*\" or 1-100 unique comma-separated Slack U IDs") end |
   assert_unique_names(($container.secrets // []); "secrets") |
   if (($container.secrets // [] | map(.name) | sort) ==
       (required_secret_names | sort))

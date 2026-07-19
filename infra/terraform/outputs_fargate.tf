@@ -1,15 +1,15 @@
 # ============================================================
-# Outputs — Fargate(OpenClaw/MCP) 運用参照（§I / N1）
+# Outputs — Fargate(OpenClaw/MCP) read-only運用照合
 # ============================================================
-# apply 後の `aws ecs` 操作・ロールバック・dashboard 参照のための名前を露出（ハードコード回避）。
+# service/log/dashboardの照合用。direct ECS mutationの案内には使用しない。
 
 output "ecs_cluster_name" {
-  description = "ECS クラスタ名（aws ecs update-service 等で使用）"
+  description = "ECSクラスタ名（read-only照合用。変更は正準saved-plan flowのみ）"
   value       = aws_ecs_cluster.main.name
 }
 
 output "ecs_service_openclaw" {
-  description = "OpenClaw 外殻サービス名（ロールバック: --desired-count 0）"
+  description = "OpenClawサービス名。rollbackはdurable previous task revision、ECS circuit breaker、fresh authorizationを使う正準saved-plan runbookに従い、direct ECS操作は行わない。"
   value       = "${var.project_name}-${var.environment}-openclaw"
 }
 

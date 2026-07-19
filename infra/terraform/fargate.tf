@@ -622,8 +622,9 @@ resource "aws_ecs_task_definition" "openclaw" {
     # command/entryPoint は上書きせず、検証済み image の canonical CMD/ENTRYPOINT を使う。
     environment = [
       { name = "AWS_REGION", value = var.aws_region },
-      # §U: DM 許可リスト（カンマ区切り Slack user_id）。entrypoint が起動時に allowFrom へ注入。
-      # メンバー追加は本 var を編集 + apply（task 再デプロイ）だけ＝image rebuild 不要・15名まで可動。
+      # 本番必須のDM契約。"*"はdmPolicy=open + allowFrom=["*"]、個別U ID群は
+      # dmPolicy=allowlist + exact allowFromへentrypointが同時変換する。空文字、空白、
+      # 重複、wildcard/ID混在はvariable validationでplanをfail-closedにする。
       { name = "SLACK_DM_ALLOWLIST", value = var.slack_dm_allowlist },
     ]
     secrets = [

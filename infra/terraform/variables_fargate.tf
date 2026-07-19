@@ -130,9 +130,21 @@ variable "slack_team_id" {
 }
 
 variable "slack_dm_allowlist" {
-  description = "DM を許可する Slack user_id（カンマ区切り）。openclaw entrypoint が起動時に allowFrom へ注入。メンバー追加は本値の編集 + apply のみ（image rebuild 不要・15名まで可動）。空なら焼込み値を使用。"
+  description = "本番で必須のSlack DM契約。\"*\"はdmPolicy=open+allowFrom=[\"*\"]、それ以外は1〜100件の重複しないSlack U IDを空白なしのカンマ区切りで指定しdmPolicy=allowlistにする。既定の空文字は安全な未設定sentinelであり、明示値なしのplanをfail-closedにする。"
   type        = string
   default     = ""
+
+  validation {
+    condition = (
+      var.slack_dm_allowlist == "*" ||
+      (
+        length(var.slack_dm_allowlist) <= 2048 &&
+        can(regex("^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$", var.slack_dm_allowlist)) &&
+        length(distinct(split(",", var.slack_dm_allowlist))) == length(split(",", var.slack_dm_allowlist))
+      )
+    )
+    error_message = "slack_dm_allowlist is required: use \"*\" or 1-100 unique comma-separated Slack U IDs with no spaces."
+  }
 }
 
 variable "openclaw_model_id" {

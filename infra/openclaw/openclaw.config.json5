@@ -66,22 +66,15 @@
       replyToModeByChatType: { channel: "all", group: "all", direct: "off" },
       // §T1: 受付リアクション（処理中が見える＝「無視された？」を防ぐ実運用の詰まり潰し）。
       ackReaction: "eyes",
-      // §T2→§T2b(2026-06-22): DM を "open" に変更（社内なら誰でも @AiLa にDMで「連携して」で
-      // セルフ利用可＝口コミ運用）。当初 allowlist にした理由は「社外ゲストに会社ナレッジを触れさせない」
-      // だったが、その懸念は **サーバ側 fail-closed で別途担保済**＝slack_client.resolve_identity が
-      // 外部ワークスペース/Slack Connect stranger/guest/bot/email欠落を None 拒否し、MCP 境界(server.py)が
-      // RLS を fail-closed 強制（ダウングレード不可）。よって open でも社外/ゲストにデータは届かない。
-      // 残る露出は「外部ゲストでも Haiku 会話レイヤーには応答し得る（データは出ない・コスト/存在のみ）」
-      // の一点で、これはユーザー判断で許容（2026-06-22）。
+      // 焼込みtemplateは全社内開放のschema-validな組（open + ["*"]）。ただし本番は
+      // SLACK_DM_ALLOWLISTの明示指定が必須で、entrypointは空/未設定を焼込み値へfallbackせずexit 78にする。
+      // envが"*"ならこの組を維持し、個別のU... ID群ならdmPolicyを"allowlist"へ切り替え、
+      // allowFromを指定順のexact IDsへ同時に置換する。wildcardとIDの混在は許可しない。
       dmPolicy: "open",
-      // ⚠️§T2b 訂正(2026-06-22)：当初「allowFrom は open 下では参照されない」と書いたが**誤り**。
-      // 実コード(@openclaw/slack)は `dmPolicy==="open" && allowFrom.includes("*")` の時のみ全通過し、
-      // "*" が無ければ open でも allowFrom 列挙者だけの allowlist として gating する。
-      // よって全社内開放には **allowFrom に "*" が必須**。本番は entrypoint が env `SLACK_DM_ALLOWLIST`
-      // （tfvars slack_dm_allowlist="*"）から allowFrom=["*"] を起動時に注入＝下の焼き込みを上書きする。
-      // ここを ["*"] にしておくのは env 未設定で再ビルドした時の退行防止（[]は全拒否なので不可）。
+      // OpenClaw 2026.7.1の実schemaはopenに["*"]、allowlistに非空allowFromを要求する。
+      // 実behaviorもallowlistでは一致IDだけを許可するため、entrypointの変換と同じ契約になる。
       allowFrom: [
-        "*", // 全社内開放（社外/ゲスト/bot はサーバ側 resolve_identity で fail-closed）
+        "*",
       ],
     },
   },

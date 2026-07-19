@@ -1,13 +1,14 @@
 # This Compose deployment path is intentionally decommissioned.
 #
-# The release runtime is valid only when it is built and verified by
-# infra/openclaw/build-image.sh from an exact clean Git HEAD. That helper binds
-# source provenance, produces a linux/arm64 image, exercises the hardened
-# runtime contract, generates a Trivy SBOM, and gates Critical/High
-# vulnerabilities and embedded secrets before any optional push.
+# This empty file is retained only to make the decommissioning explicit; it is
+# not a deployment or publication interface. infra/openclaw/build-image.sh is
+# a local-validation-only helper. It produces an unsigned local image and
+# evidence from an exact clean Git HEAD, never pushes, and never obtains or
+# represents production publication credentials.
 #
-# Do not add an upstream OpenClaw image, a local `build:`, or any publication
-# path here. Production deployment consumes the verified digest recorded by
-# the helper's manifest through the ECS runbook.
+# Do not add an upstream image, local `build:`, registry login/push, ECS
+# consumer, or other release path here. Production may consume only a release
+# repository digest produced by the trusted source-free promoter and bound by
+# a valid signed active receipt through the canonical one-time saved-plan flow.
 name: teamagent-openclaw-decommissioned
 services: {}

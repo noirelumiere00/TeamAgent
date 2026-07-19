@@ -117,7 +117,7 @@ Terraform を実行しません。
 ## 5. One-time full saved plan
 
 `terraform.tfvars` には release repository の digest と exact evidence
-VersionId を設定します。
+VersionId、および明示的なSlack DM契約を設定します。
 
 ```hcl
 openclaw_image = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<RELEASE_DIGEST>"
@@ -130,7 +130,19 @@ image_release_evidence = {
     signature_version_id = "<exact signature VersionId>"
   }
 }
+
+# 全DM送信者をOpenClawへ通す場合（後段のTeamAgent identity/RLS gateは別途必須）
+slack_dm_allowlist = "*"
+
+# または、DMをexact Slack user IDsだけに限定する場合
+# slack_dm_allowlist = "U09CX1CCBLN,U0123456789"
 ```
+
+`slack_dm_allowlist`の空文字既定値は「本番では明示指定が必須」を表す安全な
+sentinelです。空/未設定、空白、重複、`*`とIDの混在、U以外のIDはTerraform
+planで拒否します。`"*"`は`dmPolicy=open`かつ`allowFrom=["*"]`、個別U ID群は
+`dmPolicy=allowlist`かつ指定順のexact `allowFrom`へentrypointが同時変換します。
+task hardenerとentrypointも同じ契約を再検証し、不一致は起動前にfail-closedです。
 
 `image_deployment_intent_id` は手入力しません。plan は worktree 外へ作成し、
 全差分をレビューして同じ opaque saved plan を一度だけ apply します。
@@ -162,6 +174,8 @@ new intent、new plan で roll-forward または rollback します。
 - writable path は task-scoped `openclaw-tmp` を mount した `/tmp` のみ
 - capability drop `ALL`、`privileged=false`
 - image の canonical ENTRYPOINT/CMD を上書きしない
+- `SLACK_DM_ALLOWLIST`は明示必須で、`"*"`または1〜100件の重複しない
+  comma-separated Slack U IDだけを受理
 - `/readyz` health check
 - sidecar、追加 volume/mount、環境 retarget、role retarget を禁止
 - ECS deployment circuit breaker と rollback を有効化

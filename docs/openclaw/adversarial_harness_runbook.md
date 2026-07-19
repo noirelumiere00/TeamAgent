@@ -11,9 +11,13 @@ gateway は OC 申告の `user_email`/`user_groups`/`user_role`/`identity_verifi
 > **本 runbook が足すのは「実 pgvector＋live MCP での実走証明」だけ**（SSMトンネル/承認後）。
 
 ## 前提（gated）
-- §I deploy_runbook の手順で MCP backend が起動済（healthz green）。または PoC として
+- `docs/openclaw/deploy_runbook.md` の「7. Post-apply functional gates」に従い、
+  exact task revision上のMCP backendが起動済みでhealthz green。またはローカルPoCとして
   `TEAMAGENT_MCP_BEARER=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp uv run python scripts/run_mcp_http_server.py`。
-- 実RDS に `0010`/`0011` 適用済（§I 手順5）。`DATABASE_URL` は SSMトンネル経由（要承認）。
+- 実RDSへのmigrationは`docs/v3.2/data_model_v1.md`の「migration の運用」と
+  forward-only runner `scripts/migrate.py`に従う。`schema_migrations`で
+  `0010_rls_email_case_insensitive.sql`と`0011_backfill_company_acl_groups.sql`の
+  checksum付き適用を確認済みであること。`DATABASE_URL` は承認済みSSMトンネル経由。
 
 ## 手順1: fixture 投入（会社doc×2＋会社外doc×1）
 ```sh
