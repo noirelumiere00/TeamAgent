@@ -12,13 +12,21 @@ different, one-time control-plane workflow with a smaller authority:
    non-empty blocked reason. This local check runs before the first AWS call.
 2. The exact account root, using an MFA-authenticated temporary session,
    creates `seed-stack.yaml`. The stack owns one temporary IAM role and its
-   explicit-deny managed policy, and no production object.
+   explicit-deny managed policy, and no production object. A random nonce is
+   bound to the CloudFormation client request token, stack parameters, stack
+   tags, role tags, and the local invocation artifact. Cleanup requires that
+   exact ownership proof.
 3. Root assumes that role for one hour with a fixed external ID, session name,
    and source identity. The role has explicit denies for CodeBuild execution,
    ECR image writes/deletes, KMS signing, release-evidence object writes,
    long-lived IAM credentials, runtime mutation, debug sessions, and all role
    chaining.
-4. The role makes one saved Terraform plan against the existing **main**
+4. The wrappers first require a clean detached `HEAD` equal to both the local
+   `refs/remotes/origin/dev` and a fresh credential-free HTTPS lookup. They
+   independently fetch that commit, verify every tracked blob plus each
+   transitive child SHA-256, make the reviewed checkout read-only, and execute
+   from that checkout. Root credentials are restored only after this review.
+5. The role makes one saved Terraform plan against the existing **main**
    backend. Targets are fixed in `bootstrap_contract.json`; operator-supplied
    targets are impossible. Inherited Git/Terraform control variables and
    automatic tfvars are rejected. Terraform uses a new private data directory,
@@ -30,14 +38,20 @@ different, one-time control-plane workflow with a smaller authority:
    SHA-256 is recorded in the receipt. The fresh `origin/dev` lookup uses the
    fixed HTTPS URL with global/system Git config disabled and rejects local
    transport redirects.
-5. `provenance_iam_bootstrap.py` accepts only `create` and `no-op`. Updates,
+6. `provenance_iam_bootstrap.py` accepts only `create` and `no-op`. Updates,
    deletes, replacements, imports, moved resources, drift, incomplete plans,
-   runtime resources, and unknown dependencies fail closed.
-6. A consistent preflight rejects an already-burned ID before seed creation;
+   runtime resources, and unknown dependencies fail closed. Before apply, each
+   upsert-style create has an exact AWS absence/ownership probe; this includes
+   the `AIIAdev` inline policy, role/user inline policies, ECR lifecycle
+   policies, and S3 subresources.
+7. A consistent preflight rejects an already-burned ID before seed creation;
    a later conditional item in `teamagent-tflock` closes the race and burns
    the fixed bootstrap ID. The reviewed plan is applied once, then the
    before/after main-state lineage/serial/address sets are reconciled exactly.
-7. The seed trust policy is closed, its CloudFormation-owned inline boundary
+   Complete handoff claims and ownership documents are atomically persisted,
+   file-fsynced, and directory-fsynced before the ledger can become
+   `CONSUMED`.
+8. The seed trust policy is closed, its CloudFormation-owned inline boundary
    is replaced with a deny covering the issued-session window, the denial is
    proved with the issued session, the stack/role/policy are deleted, and a
    private receipt records the state handoff.
@@ -50,6 +64,7 @@ different, one-time control-plane workflow with a smaller authority:
 | Provenance IAM/KMS/S3/ECR/CodeBuild/CodeConnections | Main Terraform backend from birth | Main Terraform |
 | Deployment-intent table and gate role | Main Terraform backend from birth | Main Terraform |
 | Runtime automation role and recipient-ack key/signer | Main Terraform backend from birth | Main Terraform |
+| Runtime automation permissions boundary | Main Terraform backend from birth | Main Terraform; runtime identity cannot modify it |
 | One-use bootstrap ledger row | Durable audit row in existing backend lock table | Retained audit evidence |
 | Local plan/state/receipt files | Operator-owned `0700` directory, `0600` files | Operator audit archive |
 
@@ -68,8 +83,10 @@ serial and address set, not a copy between two state files.
   `APPLYING` responses are reconciled by the exact nonce and transitioned to
   `RECONCILE_REQUIRED`. A terminal `CONSUMED` row is observed but never
   rewritten. The tool does not retry or mint a second bootstrap.
-  Reconcile the exact main-state serial and AWS inventory under a separate
-  review before writing any recovery code.
+  Run only the reviewed `reconcile-retire` command against the original
+  artifact directory. It never calls `terraform apply` and never reapplies a
+  consumed plan; it reconciles current main-state ownership when needed and
+  idempotently retires only the nonce-owned seed.
 - A `PREPARED`, `APPLYING`, `RECONCILE_REQUIRED`, or `CONSUMED` row blocks a
   second invocation because creation uses
   `attribute_not_exists(LockID)`.

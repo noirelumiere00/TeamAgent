@@ -52,7 +52,10 @@ AWS_ENDPOINTS = {
     "codebuild": "https://codebuild.ap-northeast-1.amazonaws.com",
     "codeconnections": "https://codeconnections.ap-northeast-1.amazonaws.com",
     "dynamodb": "https://dynamodb.ap-northeast-1.amazonaws.com",
+    "ecr": "https://api.ecr.ap-northeast-1.amazonaws.com",
     "iam": "https://iam.amazonaws.com",
+    "kms": "https://kms.ap-northeast-1.amazonaws.com",
+    "logs": "https://logs.ap-northeast-1.amazonaws.com",
     "s3api": "https://s3.ap-northeast-1.amazonaws.com",
     "sts": "https://sts.ap-northeast-1.amazonaws.com",
 }
@@ -60,6 +63,187 @@ ALLOWED_DATA_SOURCE_TYPES = {
     "aws_caller_identity",
     "aws_iam_policy_document",
     "aws_iam_user",
+}
+INLINE_POLICY_OWNERSHIP = {
+    "aws_iam_role_policy.codebuild_launcher": (
+        "role",
+        "teamagent-dev-codebuild-launcher",
+        "teamagent-dev-codebuild-launcher",
+    ),
+    "aws_iam_user_policy.aiia_dev_no_direct_start_build": (
+        "user",
+        "AIIAdev",
+        "require-teamagent-codebuild-launcher-role",
+    ),
+    "aws_iam_user_policy.release_caller": (
+        "user",
+        "teamagent-release-caller",
+        "teamagent-release-caller",
+    ),
+    "aws_iam_role_policy.release_launcher": (
+        "role",
+        "teamagent-dev-release-launcher",
+        "teamagent-dev-release-launcher",
+    ),
+    "aws_iam_user_policy.release_control_update_caller": (
+        "user",
+        "teamagent-release-control-update-caller",
+        "teamagent-release-control-update-caller",
+    ),
+    "aws_iam_role_policy.release_control_updater": (
+        "role",
+        "teamagent-dev-release-control-updater",
+        "teamagent-dev-release-control-updater",
+    ),
+    "aws_iam_role_policy.tiktok_codebuild": (
+        "role",
+        "teamagent-dev-codebuild-tiktok-image",
+        "teamagent-dev-codebuild-tiktok-image",
+    ),
+    "aws_iam_user_policy.tiktok_build_caller": (
+        "user",
+        "teamagent-tiktok-build-caller",
+        "teamagent-tiktok-build-caller",
+    ),
+    "aws_iam_role_policy.tiktok_build_launcher": (
+        "role",
+        "teamagent-dev-tiktok-build-launcher",
+        "teamagent-dev-tiktok-build-launcher",
+    ),
+    "aws_iam_role_policy.image_deployment_gate": (
+        "role",
+        "teamagent-dev-image-deployment-gate",
+        "teamagent-dev-image-deployment-gate",
+    ),
+    "aws_iam_role_policy.mcp_source_publisher": (
+        "role",
+        "teamagent-dev-codebuild-mcp-source-publisher",
+        "teamagent-dev-codebuild-mcp-source-publisher",
+    ),
+    "aws_iam_role_policy.image_attestor": (
+        "role",
+        "teamagent-dev-codebuild-image-attestor",
+        "teamagent-dev-codebuild-image-attestor",
+    ),
+    "aws_iam_role_policy.image_promoter": (
+        "role",
+        "teamagent-dev-codebuild-image-promoter",
+        "teamagent-dev-codebuild-image-promoter",
+    ),
+    "aws_iam_role_policy.openclaw_codebuild": (
+        "role",
+        "teamagent-dev-codebuild-openclaw",
+        "teamagent-dev-codebuild-openclaw",
+    ),
+    "aws_iam_role_policy.openclaw_publisher": (
+        "role",
+        "teamagent-dev-openclaw-build-publisher",
+        "teamagent-dev-openclaw-build-publisher",
+    ),
+    "aws_iam_role_policy.alarm_recipient_ack_signer": (
+        "role",
+        "teamagent-dev-alarm-recipient-ack-signer",
+        "teamagent-dev-alarm-recipient-ack-signer",
+    ),
+    "aws_iam_role_policy.runtime_evidence_automation": (
+        "role",
+        "teamagent-dev-terraform-runtime-automation",
+        "teamagent-dev-terraform-runtime-automation-evidence",
+    ),
+    "aws_iam_role_policy.runtime_automation_control_plane": (
+        "role",
+        "teamagent-dev-terraform-runtime-automation",
+        "teamagent-dev-terraform-runtime-automation-control-plane",
+    ),
+}
+ECR_LIFECYCLE_OWNERSHIP = {
+    "aws_ecr_lifecycle_policy.openclaw_quarantine": "teamagent-openclaw-quarantine",
+    "aws_ecr_lifecycle_policy.openclaw_verified_candidates": (
+        "teamagent-openclaw-verified-candidates"
+    ),
+    "aws_ecr_lifecycle_policy.openclaw_media_quarantine": (
+        "teamagent-openclaw-media-quarantine"
+    ),
+    "aws_ecr_lifecycle_policy.openclaw_media_verified_candidates": (
+        "teamagent-openclaw-media-verified-candidates"
+    ),
+    "aws_ecr_lifecycle_policy.mcp_quarantine": "teamagent-mcp-quarantine",
+    "aws_ecr_lifecycle_policy.mcp_verified_candidates": (
+        "teamagent-mcp-verified-candidates"
+    ),
+    "aws_ecr_lifecycle_policy.mcp_media_quarantine": (
+        "teamagent-media-worker-quarantine"
+    ),
+    "aws_ecr_lifecycle_policy.mcp_media_verified_candidates": (
+        "teamagent-media-worker-verified-candidates"
+    ),
+    "aws_ecr_lifecycle_policy.tiktok_acquire_quarantine": (
+        "teamagent-dev-tiktok-acquire-quarantine"
+    ),
+    "aws_ecr_lifecycle_policy.tiktok_acquire_verified_candidates": (
+        "teamagent-dev-tiktok-acquire-verified-candidates"
+    ),
+}
+S3_UPSERT_OWNERSHIP = {
+    "aws_s3_bucket_public_access_block.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-public-access-block",
+    ),
+    "aws_s3_bucket_versioning.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-bucket-versioning",
+    ),
+    "aws_s3_bucket_server_side_encryption_configuration.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-bucket-encryption",
+    ),
+    "aws_s3_bucket_object_lock_configuration.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-object-lock-configuration",
+    ),
+    "aws_s3_bucket_lifecycle_configuration.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-bucket-lifecycle-configuration",
+    ),
+    "aws_s3_bucket_policy.image_release_evidence": (
+        "teamagent-dev-image-release-evidence",
+        "get-bucket-policy",
+    ),
+    "aws_s3_bucket_public_access_block.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-public-access-block",
+    ),
+    "aws_s3_bucket_versioning.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-bucket-versioning",
+    ),
+    "aws_s3_bucket_server_side_encryption_configuration.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-bucket-encryption",
+    ),
+    "aws_s3_bucket_object_lock_configuration.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-object-lock-configuration",
+    ),
+    "aws_s3_bucket_lifecycle_configuration.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-bucket-lifecycle-configuration",
+    ),
+    "aws_s3_bucket_policy.openclaw_build_evidence": (
+        "teamagent-dev-openclaw-build-evidence",
+        "get-bucket-policy",
+    ),
+}
+UPSERT_RESOURCE_TYPES = {
+    "aws_ecr_lifecycle_policy",
+    "aws_iam_role_policy",
+    "aws_iam_user_policy",
+    "aws_s3_bucket_lifecycle_configuration",
+    "aws_s3_bucket_object_lock_configuration",
+    "aws_s3_bucket_policy",
+    "aws_s3_bucket_public_access_block",
+    "aws_s3_bucket_server_side_encryption_configuration",
+    "aws_s3_bucket_versioning",
 }
 
 
@@ -662,6 +846,35 @@ def _secure_new_artifact_dir(path: Path) -> Path:
     return canonical
 
 
+def _secure_existing_artifact_dir(path: Path) -> Path:
+    try:
+        before = path.lstat()
+        canonical = path.resolve(strict=True)
+        after = canonical.stat()
+    except OSError as exc:
+        raise BootstrapError("artifact directory does not exist") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(after.st_mode)
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or after.st_uid != os.getuid()
+        or stat.S_IMODE(after.st_mode) != 0o700
+    ):
+        raise BootstrapError("artifact directory is not an owned canonical 0700 directory")
+    return canonical
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_private_json(path: Path, value: Any) -> None:
     if path.exists() or path.is_symlink():
         raise BootstrapError(f"refusing to overwrite artifact: {path}")
@@ -672,8 +885,10 @@ def _write_private_json(path: Path, value: Any) -> None:
             handle.write(canonical_bytes(value))
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
     except Exception:
         path.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
         raise
 
 
@@ -686,9 +901,71 @@ def _write_private_bytes(path: Path, value: bytes) -> None:
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
+        _fsync_directory(path.parent)
     except Exception:
         path.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
         raise
+
+
+def _persist_or_verify_private_json(path: Path, value: Any) -> str:
+    expected = canonical_bytes(value)
+    if path.exists() or path.is_symlink():
+        canonical = _secure_existing_file(path)
+        if canonical.read_bytes() != expected:
+            raise BootstrapError(f"durable artifact conflicts with reviewed claims: {path}")
+        _fsync_directory(path.parent)
+        return sha256_bytes(expected)
+
+    temporary = path.parent / f".{path.name}.{secrets.token_hex(16)}.tmp"
+    _write_private_bytes(temporary, expected)
+    try:
+        try:
+            # Publish only fully written, fsynced bytes. link(2) is an
+            # atomic create-if-absent operation and never replaces a hostile
+            # or concurrently published destination.
+            os.link(temporary, path, follow_symlinks=False)
+            _fsync_directory(path.parent)
+        except FileExistsError:
+            canonical = _secure_existing_file(path)
+            if canonical.read_bytes() != expected:
+                raise BootstrapError(
+                    f"durable artifact conflicts with reviewed claims: {path}"
+                )
+    finally:
+        temporary.unlink(missing_ok=True)
+        _fsync_directory(path.parent)
+    canonical = _secure_existing_file(path)
+    if canonical.read_bytes() != expected:
+        raise BootstrapError(f"durable artifact conflicts with reviewed claims: {path}")
+    _fsync_directory(path.parent)
+    return sha256_bytes(expected)
+
+
+def _persist_handoff_artifacts(
+    artifact_dir: Path,
+    *,
+    claims: Mapping[str, Any],
+    ownership: Mapping[str, Any],
+) -> tuple[str, str]:
+    claims_path = artifact_dir / "bootstrap-handoff-claims.json"
+    ownership_path = artifact_dir / "bootstrap-handoff-ownership.json"
+    claims_sha256 = _persist_or_verify_private_json(claims_path, claims)
+    ownership_sha256 = _persist_or_verify_private_json(ownership_path, ownership)
+    durable = {
+        "kind": "teamagent-provenance-bootstrap-durable-handoff",
+        "schema_version": 1,
+        "claims_file": claims_path.name,
+        "claims_sha256": claims_sha256,
+        "ownership_file": ownership_path.name,
+        "ownership_sha256": ownership_sha256,
+    }
+    _persist_or_verify_private_json(
+        artifact_dir / "bootstrap-handoff-durable.json",
+        durable,
+    )
+    _fsync_directory(artifact_dir)
+    return claims_sha256, ownership_sha256
 
 
 @dataclass(frozen=True)
@@ -1241,17 +1518,16 @@ def _validate_repository(
         raise BootstrapError("bootstrap requires a clean Git worktree")
     _assert_tracked_terraform_source(repo_root, runner, git_env)
     source_tree_sha256 = _materialized_head_tree_sha256(repo_root, runner, git_env)
-    branch = (
-        runner.run(
-            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=repo_root,
-            env=git_env,
-        )
-        .stdout.decode()
-        .strip()
+    symbolic = runner.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"],
+        cwd=repo_root,
+        env=git_env,
+        check=False,
     )
-    if branch != EXPECTED_BRANCH:
-        raise BootstrapError("bootstrap must run from local dev")
+    if symbolic.returncode == 0:
+        raise BootstrapError("bootstrap must run from a detached origin/dev commit")
+    if symbolic.returncode not in {1, 128}:
+        raise BootstrapError("bootstrap could not prove detached HEAD")
     origin = (
         runner.run(
             ["git", "config", "--get", "remote.origin.url"],
@@ -1274,6 +1550,22 @@ def _validate_repository(
     )
     if not SHA1_RE.fullmatch(commit):
         raise BootstrapError("bootstrap Git commit is not a full SHA-1")
+    tracking_commit = (
+        runner.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/dev^{commit}",
+            ],
+            cwd=repo_root,
+            env=git_env,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    if tracking_commit != commit:
+        raise BootstrapError("detached bootstrap commit is not exact local origin/dev")
     remote = (
         runner.run(
             [
@@ -1323,17 +1615,16 @@ def _assert_repository_unchanged(
     )
     if current != commit:
         raise BootstrapError("bootstrap Git commit changed after review")
-    branch = (
-        runner.run(
-            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-            cwd=repo_root,
-            env=git_env,
-        )
-        .stdout.decode()
-        .strip()
+    symbolic = runner.run(
+        ["git", "symbolic-ref", "--quiet", "HEAD"],
+        cwd=repo_root,
+        env=git_env,
+        check=False,
     )
-    if branch != EXPECTED_BRANCH:
-        raise BootstrapError("bootstrap branch changed after review")
+    if symbolic.returncode == 0:
+        raise BootstrapError("bootstrap detached HEAD changed after review")
+    if symbolic.returncode not in {1, 128}:
+        raise BootstrapError("bootstrap could not re-prove detached HEAD")
     origin = (
         runner.run(
             ["git", "config", "--get", "remote.origin.url"],
@@ -1345,6 +1636,22 @@ def _assert_repository_unchanged(
     )
     if origin != EXPECTED_ORIGIN:
         raise BootstrapError("bootstrap Git origin changed after review")
+    tracking_commit = (
+        runner.run(
+            [
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/remotes/origin/dev^{commit}",
+            ],
+            cwd=repo_root,
+            env=git_env,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    if tracking_commit != commit:
+        raise BootstrapError("bootstrap origin/dev changed after review")
     status = runner.run(
         [
             "git",
@@ -1485,6 +1792,152 @@ def _preflight_existing_objects(
         expected_arn = f"arn:aws:iam::{contract.account_id}:user/{user}"
         if _mapping(user_result.get("User"), label=f"{user}.User").get("Arn") != expected_arn:
             raise BootstrapError(f"IAM prerequisite identity mismatch: {user}")
+
+
+def _created_resource_addresses(plan_value: Any) -> tuple[str, ...]:
+    plan = _mapping(plan_value, label="Terraform plan")
+    raw_changes = plan.get("resource_changes")
+    if not isinstance(raw_changes, list):
+        raise BootstrapError("Terraform plan resource_changes must be an array")
+    created: list[str] = []
+    for raw_change in raw_changes:
+        change = _mapping(raw_change, label="Terraform resource change")
+        address = _string(change.get("address"), label="Terraform resource address")
+        detail = _mapping(change.get("change"), label=f"{address}.change")
+        if detail.get("actions") == ["create"]:
+            created.append(address)
+    return tuple(sorted(created))
+
+
+def _require_absence_error(
+    result: CommandResult,
+    *,
+    label: str,
+    markers: Sequence[str],
+) -> None:
+    if result.returncode == 0:
+        raise BootstrapError(f"unowned upsert-style AWS object already exists: {label}")
+    error = result.stderr.decode("utf-8", errors="replace")
+    if not any(marker in error for marker in markers):
+        raise BootstrapError(f"could not prove upsert-style AWS object absence: {label}")
+
+
+def _assert_upsert_create_ownership(
+    runner: CommandRunner,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    contract: BootstrapContract,
+    plan_value: Any,
+    before_addresses: set[str],
+) -> None:
+    """Prove every Put-style Terraform create cannot overwrite an AWS object."""
+
+    for address in _created_resource_addresses(plan_value):
+        base = normalize_address(address)
+        resource_type = base.split(".", 1)[0]
+        if resource_type not in UPSERT_RESOURCE_TYPES:
+            continue
+        if address in before_addresses or base in before_addresses:
+            # A direct main-state owner makes an upsert safe, although the
+            # create-only plan validator should normally classify it as no-op.
+            continue
+
+        inline = INLINE_POLICY_OWNERSHIP.get(base)
+        if inline is not None:
+            owner_type, owner_name, policy_name = inline
+            command = (
+                ["iam", "get-role-policy", "--role-name", owner_name]
+                if owner_type == "role"
+                else ["iam", "get-user-policy", "--user-name", owner_name]
+            )
+            result = _aws(
+                runner,
+                [*command, "--policy-name", policy_name, "--output", "json"],
+                cwd=cwd,
+                env=env,
+                region=contract.region,
+                check=False,
+            )
+            _require_absence_error(
+                result,
+                label=f"{owner_type}/{owner_name}/inline-policy/{policy_name}",
+                markers=("NoSuchEntity", "NoSuchEntityException"),
+            )
+            continue
+
+        repository = ECR_LIFECYCLE_OWNERSHIP.get(base)
+        if repository is not None:
+            result = _aws(
+                runner,
+                [
+                    "ecr",
+                    "get-lifecycle-policy",
+                    "--repository-name",
+                    repository,
+                    "--output",
+                    "json",
+                ],
+                cwd=cwd,
+                env=env,
+                region=contract.region,
+                check=False,
+            )
+            _require_absence_error(
+                result,
+                label=f"ecr/{repository}/lifecycle-policy",
+                markers=(
+                    "LifecyclePolicyNotFoundException",
+                    "RepositoryNotFoundException",
+                ),
+            )
+            continue
+
+        s3_probe = S3_UPSERT_OWNERSHIP.get(base)
+        if s3_probe is not None:
+            bucket, command = s3_probe
+            result = _aws(
+                runner,
+                [
+                    "s3api",
+                    command,
+                    "--bucket",
+                    bucket,
+                    "--expected-bucket-owner",
+                    contract.account_id,
+                    "--output",
+                    "json",
+                ],
+                cwd=cwd,
+                env=env,
+                region=contract.region,
+                check=False,
+            )
+            if command == "get-bucket-versioning" and result.returncode == 0:
+                versioning = _decode_json_result(
+                    result,
+                    label=f"S3 versioning absence {bucket}",
+                )
+                if set(versioning) <= {"ResponseMetadata"}:
+                    continue
+            _require_absence_error(
+                result,
+                label=f"s3/{bucket}/{command}",
+                markers=(
+                    "NoSuchBucket",
+                    "NoSuchBucketPolicy",
+                    "NoSuchConfiguration",
+                    "NoSuchLifecycleConfiguration",
+                    "NoSuchPublicAccessBlockConfiguration",
+                    "ObjectLockConfigurationNotFoundError",
+                    "ServerSideEncryptionConfigurationNotFoundError",
+                ),
+            )
+            continue
+
+        raise BootstrapError(
+            f"upsert-style create lacks an exact AWS ownership probe: {address}"
+        )
 
 
 def _terraform(
@@ -1656,14 +2109,14 @@ def _ledger_update(
     return response
 
 
-def _read_bootstrap_ledger_state(
+def _read_bootstrap_ledger_item(
     runner: CommandRunner,
     *,
     cwd: Path,
     env: Mapping[str, str],
     contract: BootstrapContract,
     nonce: str,
-) -> str | None:
+) -> Mapping[str, Any] | None:
     key = {"LockID": {"S": str(contract.backend["ledger_key"])}}
     result = _aws(
         runner,
@@ -1702,7 +2155,27 @@ def _read_bootstrap_ledger_state(
         "RECONCILE_REQUIRED",
     }:
         raise BootstrapError("bootstrap ledger returned an unknown state")
-    return str(state_name)
+    return item
+
+
+def _read_bootstrap_ledger_state(
+    runner: CommandRunner,
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    contract: BootstrapContract,
+    nonce: str,
+) -> str | None:
+    item = _read_bootstrap_ledger_item(
+        runner,
+        cwd=cwd,
+        env=env,
+        contract=contract,
+        nonce=nonce,
+    )
+    if item is None:
+        return None
+    return str(_mapping(item["State"], label="bootstrap ledger state")["S"])
 
 
 def _assert_bootstrap_ledger_absent(
@@ -1782,6 +2255,7 @@ def _create_seed_stack(
     root_env: Mapping[str, str],
     contract: BootstrapContract,
     external_id: str,
+    nonce: str,
     commit: str,
 ) -> str:
     template = contract.path.parent / "seed-stack.yaml"
@@ -1797,14 +2271,19 @@ def _create_seed_stack(
                 f"file://{template}",
                 "--parameters",
                 f"ParameterKey=BootstrapExternalId,ParameterValue={external_id}",
+                f"ParameterKey=BootstrapNonce,ParameterValue={nonce}",
                 f"ParameterKey=BootstrapCommit,ParameterValue={commit}",
+                "--client-request-token",
+                f"teamagent-bootstrap-{nonce}",
                 "--capabilities",
                 "CAPABILITY_NAMED_IAM",
                 "--on-failure",
                 "DELETE",
                 "--tags",
                 f"Key=BootstrapId,Value={contract.bootstrap_id}",
+                f"Key=BootstrapNonce,Value={nonce}",
                 f"Key=ControlCommit,Value={commit}",
+                "Key=ManagedBy,Value=TeamAgentBootstrap",
                 "--output",
                 "json",
             ],
@@ -1965,6 +2444,198 @@ def _assume_seed(
     return assumed, session_env
 
 
+def _exact_tag_map(value: Any, *, label: str) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise BootstrapError(f"{label} must be an array")
+    result: dict[str, str] = {}
+    for raw_tag in value:
+        tag = _mapping(raw_tag, label=f"{label} tag")
+        if set(tag) != {"Key", "Value"}:
+            raise BootstrapError(f"{label} tag shape differs")
+        key = _string(tag.get("Key"), label=f"{label} tag key")
+        tag_value = _string(tag.get("Value"), label=f"{label} tag value")
+        if key in result:
+            raise BootstrapError(f"{label} contains duplicate tag: {key}")
+        result[key] = tag_value
+    return result
+
+
+def _prove_seed_ownership(
+    runner: CommandRunner,
+    *,
+    repo_root: Path,
+    root_env: Mapping[str, str],
+    contract: BootstrapContract,
+    nonce: str,
+    commit: str,
+    expected_stack_id: str | None,
+) -> str:
+    response = _decode_json_result(
+        _aws(
+            runner,
+            [
+                "cloudformation",
+                "describe-stacks",
+                "--stack-name",
+                str(contract.seed["stack_name"]),
+                "--output",
+                "json",
+            ],
+            cwd=repo_root,
+            env=root_env,
+            region=contract.region,
+        ),
+        label="seed ownership stack",
+    )
+    stacks = response.get("Stacks")
+    if not isinstance(stacks, list) or len(stacks) != 1:
+        raise BootstrapError("seed ownership stack inventory is ambiguous")
+    stack = _mapping(stacks[0], label="seed ownership stack")
+    stack_id = _string(stack.get("StackId"), label="seed ownership StackId")
+    expected_prefix = (
+        f"arn:aws:cloudformation:{contract.region}:{contract.account_id}:"
+        f"stack/{contract.seed['stack_name']}/"
+    )
+    if (
+        not stack_id.startswith(expected_prefix)
+        or stack.get("StackName") != contract.seed["stack_name"]
+        or (expected_stack_id is not None and stack_id != expected_stack_id)
+    ):
+        raise BootstrapError("seed stack identity is not owned by this invocation")
+    stack_tags = _exact_tag_map(stack.get("Tags"), label="seed stack")
+    expected_stack_tags = {
+        "BootstrapId": contract.bootstrap_id,
+        "BootstrapNonce": nonce,
+        "ControlCommit": commit,
+        "ManagedBy": "TeamAgentBootstrap",
+    }
+    if any(stack_tags.get(key) != value for key, value in expected_stack_tags.items()):
+        raise BootstrapError("seed stack ownership tags do not match this invocation")
+
+    parameters = stack.get("Parameters")
+    if not isinstance(parameters, list):
+        raise BootstrapError("seed stack parameters are missing")
+    parameter_map: dict[str, str] = {}
+    for raw_parameter in parameters:
+        parameter = _mapping(raw_parameter, label="seed stack parameter")
+        key = _string(parameter.get("ParameterKey"), label="seed parameter key")
+        value = _string(parameter.get("ParameterValue"), label="seed parameter value")
+        if key in parameter_map:
+            raise BootstrapError(f"seed stack has duplicate parameter: {key}")
+        parameter_map[key] = value
+    if parameter_map.get("BootstrapNonce") != nonce or parameter_map.get(
+        "BootstrapCommit"
+    ) != commit:
+        raise BootstrapError("seed stack parameters do not match this invocation")
+
+    resource_response = _decode_json_result(
+        _aws(
+            runner,
+            [
+                "cloudformation",
+                "describe-stack-resources",
+                "--stack-name",
+                stack_id,
+                "--output",
+                "json",
+            ],
+            cwd=repo_root,
+            env=root_env,
+            region=contract.region,
+        ),
+        label="seed ownership resources",
+    )
+    resources = resource_response.get("StackResources")
+    if not isinstance(resources, list):
+        raise BootstrapError("seed ownership resource inventory is missing")
+    physical: dict[str, tuple[str, str]] = {}
+    for raw_resource in resources:
+        resource = _mapping(raw_resource, label="seed stack resource")
+        logical_id = _string(
+            resource.get("LogicalResourceId"),
+            label="seed resource logical id",
+        )
+        if logical_id in physical:
+            raise BootstrapError(f"seed stack resource is duplicated: {logical_id}")
+        physical[logical_id] = (
+            _string(resource.get("ResourceType"), label="seed resource type"),
+            _string(
+                resource.get("PhysicalResourceId"),
+                label="seed resource physical id",
+            ),
+        )
+    if physical != {
+        "BootstrapDenyPolicy": (
+            "AWS::IAM::ManagedPolicy",
+            str(contract.seed["deny_policy_arn"]),
+        ),
+        "BootstrapExecutorRole": (
+            "AWS::IAM::Role",
+            str(contract.seed["role_name"]),
+        ),
+    }:
+        raise BootstrapError("seed stack resources are not the exact reviewed pair")
+
+    role_response = _decode_json_result(
+        _aws(
+            runner,
+            [
+                "iam",
+                "get-role",
+                "--role-name",
+                str(contract.seed["role_name"]),
+                "--output",
+                "json",
+            ],
+            cwd=repo_root,
+            env=root_env,
+            region=contract.region,
+        ),
+        label="seed ownership role",
+    )
+    role = _mapping(role_response.get("Role"), label="seed ownership Role")
+    if role.get("Arn") != contract.seed["role_arn"]:
+        raise BootstrapError("seed role ARN is not exact")
+    role_tags = _exact_tag_map(role.get("Tags"), label="seed role")
+    expected_role_tags = {
+        "BootstrapCommit": commit,
+        "BootstrapId": contract.bootstrap_id,
+        "BootstrapNonce": nonce,
+        "ManagedBy": "CloudFormationTemporarySeed",
+        "Project": "TeamAgent",
+        "Purpose": "OneTimeProvenanceIamBootstrap",
+    }
+    if any(role_tags.get(key) != value for key, value in expected_role_tags.items()):
+        raise BootstrapError("seed role ownership tags do not match this invocation")
+
+    attached_response = _decode_json_result(
+        _aws(
+            runner,
+            [
+                "iam",
+                "list-attached-role-policies",
+                "--role-name",
+                str(contract.seed["role_name"]),
+                "--output",
+                "json",
+            ],
+            cwd=repo_root,
+            env=root_env,
+            region=contract.region,
+        ),
+        label="seed ownership attached policies",
+    )
+    attached = attached_response.get("AttachedPolicies")
+    if attached != [
+        {
+            "PolicyName": contract.seed["deny_policy_name"],
+            "PolicyArn": contract.seed["deny_policy_arn"],
+        }
+    ]:
+        raise BootstrapError("seed role has an unreviewed managed policy attachment")
+    return stack_id
+
+
 def _revoke_and_delete_seed(
     runner: CommandRunner,
     *,
@@ -1972,7 +2643,52 @@ def _revoke_and_delete_seed(
     root_env: Mapping[str, str],
     session_env: Mapping[str, str] | None,
     contract: BootstrapContract,
+    nonce: str,
+    commit: str,
+    expected_stack_id: str | None,
 ) -> dict[str, Any]:
+    stack_probe = _aws(
+        runner,
+        [
+            "cloudformation",
+            "describe-stacks",
+            "--stack-name",
+            str(contract.seed["stack_name"]),
+            "--output",
+            "json",
+        ],
+        cwd=repo_root,
+        env=root_env,
+        region=contract.region,
+        check=False,
+    )
+    if stack_probe.returncode != 0:
+        stack_error = stack_probe.stderr.decode("utf-8", errors="replace")
+        if "does not exist" not in stack_error:
+            raise BootstrapError("could not determine seed stack ownership before retirement")
+        _assert_seed_absent(
+            runner,
+            repo_root=repo_root,
+            root_env=root_env,
+            contract=contract,
+        )
+        return {
+            "already_absent": True,
+            "ownership_proved": True,
+            "stack_deleted": True,
+            "role_deleted": True,
+            "deny_policy_deleted": True,
+            "session_probe_denied": None,
+        }
+    owned_stack_id = _prove_seed_ownership(
+        runner,
+        repo_root=repo_root,
+        root_env=root_env,
+        contract=contract,
+        nonce=nonce,
+        commit=commit,
+        expected_stack_id=expected_stack_id,
+    )
     retired_trust = {
         "Version": "2012-10-17",
         "Statement": [
@@ -2082,7 +2798,7 @@ def _revoke_and_delete_seed(
             "cloudformation",
             "delete-stack",
             "--stack-name",
-            str(contract.seed["stack_name"]),
+            owned_stack_id,
         ],
         cwd=repo_root,
         env=root_env,
@@ -2095,7 +2811,7 @@ def _revoke_and_delete_seed(
             "wait",
             "stack-delete-complete",
             "--stack-name",
-            str(contract.seed["stack_name"]),
+            owned_stack_id,
         ],
         cwd=repo_root,
         env=root_env,
@@ -2138,6 +2854,8 @@ def _revoke_and_delete_seed(
             sessions_issued_through.isoformat().replace("+00:00", "Z")
         ),
         "trust_closed_before_revocation": True,
+        "ownership_proved": True,
+        "owned_stack_id": owned_stack_id,
         "session_probe_denied": session_revoked,
         "stack_deleted": True,
         "role_deleted": True,
@@ -2280,6 +2998,80 @@ def _connection_inventory(
     return sorted(selected, key=lambda item: item["name"])
 
 
+def _handoff_documents(
+    *,
+    contract: BootstrapContract,
+    nonce: str,
+    commit: str,
+    source_tree_sha256: str,
+    contract_sha256: str,
+    seed_template_sha256: str,
+    tfvars_sha256: str,
+    release_hashes: Mapping[str, str],
+    tool_versions: Mapping[str, str],
+    tool_evidence: Mapping[str, Mapping[str, Any]],
+    plan_sha256: str,
+    plan_validation: PlanValidation,
+    handoff: HandoffValidation,
+    before_state: Any,
+    after_state: Any,
+    connections: Sequence[Mapping[str, Any]],
+    seed_stack_id: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    before_addresses = state_addresses(before_state)
+    after_addresses = state_addresses(after_state)
+    claims = {
+        "kind": "teamagent-provenance-bootstrap-handoff-claims",
+        "schema_version": 1,
+        "bootstrap_id": contract.bootstrap_id,
+        "account_id": contract.account_id,
+        "region": contract.region,
+        "bootstrap_nonce": nonce,
+        "control_commit": commit,
+        "source_tree_sha256": source_tree_sha256,
+        "contract_sha256": contract_sha256,
+        "seed_template_sha256": seed_template_sha256,
+        "tfvars_sha256": tfvars_sha256,
+        "release_contract_sha256": dict(release_hashes),
+        "toolchain": {
+            "versions": dict(tool_versions),
+            "executables": dict(tool_evidence),
+        },
+        "plan_sha256": plan_sha256,
+        "created_addresses": list(plan_validation.created_addresses),
+        "no_op_addresses": list(plan_validation.no_op_addresses),
+        "required_main_state_addresses": sorted(contract.required_main_state),
+        "owned_main_state_addresses": sorted(after_addresses),
+        "main_state": {
+            "lineage": handoff.lineage,
+            "serial_before": handoff.before_serial,
+            "serial_after": handoff.after_serial,
+            "addresses_sha256_before": handoff.before_addresses_sha256,
+            "addresses_sha256_after": handoff.after_addresses_sha256,
+        },
+        "connections": list(connections),
+    }
+    ownership = {
+        "kind": "teamagent-provenance-bootstrap-main-state-ownership",
+        "schema_version": 1,
+        "bootstrap_id": contract.bootstrap_id,
+        "bootstrap_nonce": nonce,
+        "control_commit": commit,
+        "seed_stack_id": seed_stack_id,
+        "plan_sha256": plan_sha256,
+        "lineage": handoff.lineage,
+        "serial_before": handoff.before_serial,
+        "serial_after": handoff.after_serial,
+        "addresses_before": sorted(before_addresses),
+        "addresses_after": sorted(after_addresses),
+        "created_addresses": list(plan_validation.created_addresses),
+        "no_op_addresses": list(plan_validation.no_op_addresses),
+        "required_main_state_addresses": sorted(contract.required_main_state),
+        "bootstrap_state_owns_main_objects": False,
+    }
+    return claims, ownership
+
+
 def run_bootstrap(
     *,
     repo_root: Path,
@@ -2351,6 +3143,23 @@ def run_bootstrap(
 
     external_id = secrets.token_hex(32)
     nonce = secrets.token_hex(32)
+    invocation = {
+        "kind": "teamagent-provenance-bootstrap-invocation",
+        "schema_version": 1,
+        "bootstrap_id": contract.bootstrap_id,
+        "bootstrap_nonce": nonce,
+        "bootstrap_external_id": external_id,
+        "seed_client_request_token": f"teamagent-bootstrap-{nonce}",
+        "control_commit": commit,
+        "source_tree_sha256": source_tree_sha256,
+        "contract_sha256": immutable_inputs[contract.path],
+        "seed_template_sha256": immutable_inputs[contract.path.parent / "seed-stack.yaml"],
+        "tfvars_sha256": immutable_inputs[var_file],
+        "tfvars_path": str(var_file),
+        "release_contract_sha256": release_hashes,
+        "toolchain_versions": tool_versions,
+    }
+    _write_private_json(artifact_dir / "bootstrap-invocation.json", invocation)
     seed_created = False
     seed_absence_proved = False
     seed_stack_id: str | None = None
@@ -2393,7 +3202,19 @@ def run_bootstrap(
             root_env=base_env,
             contract=contract,
             external_id=external_id,
+            nonce=nonce,
             commit=commit,
+        )
+        _write_private_json(
+            artifact_dir / "bootstrap-seed-created.json",
+            {
+                "kind": "teamagent-provenance-bootstrap-seed",
+                "schema_version": 1,
+                "bootstrap_id": contract.bootstrap_id,
+                "bootstrap_nonce": nonce,
+                "control_commit": commit,
+                "stack_id": seed_stack_id,
+            },
         )
         _wait_for_seed_stack(
             runner,
@@ -2504,6 +3325,31 @@ def run_bootstrap(
             before_addresses=state_addresses(before_state),
             created_addresses=plan_validation.created_addresses,
         )
+        _assert_upsert_create_ownership(
+            runner,
+            cwd=repo_root,
+            env=session_env,
+            contract=contract,
+            plan_value=plan_value,
+            before_addresses=state_addresses(before_state),
+        )
+        _write_private_json(
+            artifact_dir / "bootstrap-reviewed-plan.json",
+            {
+                "kind": "teamagent-provenance-bootstrap-reviewed-plan",
+                "schema_version": 1,
+                "bootstrap_id": contract.bootstrap_id,
+                "bootstrap_nonce": nonce,
+                "control_commit": commit,
+                "plan_file": plan_path.name,
+                "plan_json_file": plan_json_path.name,
+                "plan_sha256": plan_sha,
+                "created_addresses": list(plan_validation.created_addresses),
+                "no_op_addresses": list(plan_validation.no_op_addresses),
+                "before_state_file": before_path.name,
+                "before_state_sha256": sha256_file(before_path),
+            },
+        )
 
         now = int(dt.datetime.now(dt.UTC).timestamp())
         ledger_item = _ledger_typed_item(
@@ -2603,36 +3449,34 @@ def run_bootstrap(
             contract=contract,
             after_addresses=after_addresses,
         )
-        claims = {
-            "kind": "teamagent-provenance-bootstrap-handoff-claims",
-            "schema_version": 1,
-            "bootstrap_id": contract.bootstrap_id,
-            "account_id": contract.account_id,
-            "region": contract.region,
-            "control_commit": commit,
-            "source_tree_sha256": source_tree_sha256,
-            "contract_sha256": immutable_inputs[contract.path],
-            "seed_template_sha256": immutable_inputs[contract.path.parent / "seed-stack.yaml"],
-            "tfvars_sha256": immutable_inputs[var_file],
-            "release_contract_sha256": release_hashes,
-            "toolchain": {
-                "versions": tool_versions,
-                "executables": (
-                    runner.tool_evidence() if isinstance(runner, CommandRunner) else {}
-                ),
-            },
-            "plan_sha256": plan_sha,
-            "created_addresses": list(plan_validation.created_addresses),
-            "main_state": {
-                "lineage": handoff.lineage,
-                "serial_before": handoff.before_serial,
-                "serial_after": handoff.after_serial,
-                "addresses_sha256_before": handoff.before_addresses_sha256,
-                "addresses_sha256_after": handoff.after_addresses_sha256,
-            },
-            "connections": connections,
-        }
-        claims_sha = sha256_bytes(canonical_bytes(claims))
+        claims, ownership = _handoff_documents(
+            contract=contract,
+            nonce=nonce,
+            commit=commit,
+            source_tree_sha256=source_tree_sha256,
+            contract_sha256=immutable_inputs[contract.path],
+            seed_template_sha256=immutable_inputs[
+                contract.path.parent / "seed-stack.yaml"
+            ],
+            tfvars_sha256=immutable_inputs[var_file],
+            release_hashes=release_hashes,
+            tool_versions=tool_versions,
+            tool_evidence=(
+                runner.tool_evidence() if isinstance(runner, CommandRunner) else {}
+            ),
+            plan_sha256=plan_sha,
+            plan_validation=plan_validation,
+            handoff=handoff,
+            before_state=before_state,
+            after_state=after_state,
+            connections=connections,
+            seed_stack_id=seed_stack_id,
+        )
+        claims_sha, ownership_sha = _persist_handoff_artifacts(
+            artifact_dir,
+            claims=claims,
+            ownership=ownership,
+        )
         consumed = _ledger_update(
             runner,
             cwd=repo_root,
@@ -2641,7 +3485,10 @@ def run_bootstrap(
             nonce=nonce,
             expected_state="APPLYING",
             next_state="CONSUMED",
-            extra_values={"HandoffClaimsSha256": claims_sha},
+            extra_values={
+                "HandoffClaimsSha256": claims_sha,
+                "HandoffOwnershipSha256": ownership_sha,
+            },
         )
         _write_private_json(artifact_dir / "bootstrap-ledger-consumed.json", consumed)
         ledger_state = "CONSUMED"
@@ -2652,6 +3499,9 @@ def run_bootstrap(
             root_env=base_env,
             session_env=session_env,
             contract=contract,
+            nonce=nonce,
+            commit=commit,
+            expected_stack_id=seed_stack_id,
         )
         seed_created = False
         seed_absence_proved = True
@@ -2661,6 +3511,7 @@ def run_bootstrap(
             "status": "SUCCEEDED",
             "claims": claims,
             "handoff_claims_sha256": claims_sha,
+            "handoff_ownership_sha256": ownership_sha,
             "ledger": {
                 "table": contract.backend["dynamodb_table"],
                 "key": contract.backend["ledger_key"],
@@ -2733,6 +3584,9 @@ def run_bootstrap(
                     root_env=base_env,
                     session_env=session_env,
                     contract=contract,
+                    nonce=nonce,
+                    commit=commit,
+                    expected_stack_id=seed_stack_id,
                 )
                 seed_created = False
                 seed_absence_proved = True
@@ -2771,6 +3625,479 @@ def run_bootstrap(
         except Exception:
             pass
         raise
+
+
+def _typed_string(item: Mapping[str, Any], name: str, *, label: str) -> str:
+    value = _mapping(item.get(name), label=f"{label}.{name}")
+    result = value.get("S")
+    if not isinstance(result, str) or not result:
+        raise BootstrapError(f"{label}.{name} is not a DynamoDB string")
+    return result
+
+
+def _seed_stack_id_from_artifacts(
+    artifact_dir: Path,
+    *,
+    contract: BootstrapContract,
+    nonce: str,
+    commit: str,
+) -> str | None:
+    path = artifact_dir / "bootstrap-seed-created.json"
+    if not path.exists():
+        return None
+    seed = _mapping(load_json(path, label="seed creation artifact"), label="seed artifact")
+    if (
+        seed.get("kind") != "teamagent-provenance-bootstrap-seed"
+        or seed.get("schema_version") != 1
+        or seed.get("bootstrap_id") != contract.bootstrap_id
+        or seed.get("bootstrap_nonce") != nonce
+        or seed.get("control_commit") != commit
+    ):
+        raise BootstrapError("seed creation artifact is not owned by this invocation")
+    return _string(seed.get("stack_id"), label="seed artifact stack_id")
+
+
+def _verify_consumed_handoff_artifacts(
+    artifact_dir: Path,
+    *,
+    ledger_item: Mapping[str, Any],
+) -> tuple[str, str]:
+    claims_path = _secure_existing_file(artifact_dir / "bootstrap-handoff-claims.json")
+    ownership_path = _secure_existing_file(
+        artifact_dir / "bootstrap-handoff-ownership.json"
+    )
+    claims_sha = sha256_file(claims_path)
+    ownership_sha = sha256_file(ownership_path)
+    if (
+        _typed_string(
+            ledger_item,
+            "HandoffClaimsSha256",
+            label="consumed bootstrap ledger",
+        )
+        != claims_sha
+        or _typed_string(
+            ledger_item,
+            "HandoffOwnershipSha256",
+            label="consumed bootstrap ledger",
+        )
+        != ownership_sha
+    ):
+        raise BootstrapError("consumed ledger does not match durable handoff artifacts")
+    return claims_sha, ownership_sha
+
+
+def _persist_reconcile_receipt(path: Path, value: Mapping[str, Any]) -> None:
+    if path.exists() and not path.is_symlink():
+        existing = _mapping(
+            load_json(path, label="reconcile/retire receipt"),
+            label="reconcile/retire receipt",
+        )
+        stable_keys = (
+            "kind",
+            "schema_version",
+            "bootstrap_id",
+            "bootstrap_nonce",
+            "control_commit",
+            "plan_reapplied",
+        )
+        if any(existing.get(key) != value.get(key) for key in stable_keys):
+            raise BootstrapError("existing reconcile/retire receipt belongs to another run")
+        return
+    _persist_or_verify_private_json(path, value)
+
+
+def reconcile_and_retire(
+    *,
+    repo_root: Path,
+    artifact_dir: Path,
+    contract_path: Path,
+    runner: CommandRunner | None = None,
+    process_env: Mapping[str, str] | None = None,
+) -> Path:
+    """Reconcile ownership and retire the seed without ever applying a plan."""
+
+    runner = runner or CommandRunner()
+    source_env = os.environ if process_env is None else process_env
+    _reject_influential_environment(source_env)
+    base_env = _clean_aws_environment(source_env)
+    repo_root = repo_root.resolve(strict=True)
+    expected_contract = (
+        repo_root / "infra" / "bootstrap" / "bootstrap_contract.json"
+    ).resolve(strict=True)
+    contract_path = contract_path.resolve(strict=True)
+    if contract_path != expected_contract:
+        raise BootstrapError("reconcile contract path is not the fixed repository control")
+    contract = load_contract(contract_path)
+    validate_release_contracts(repo_root, contract)
+    artifact_dir = _secure_existing_artifact_dir(artifact_dir)
+    invocation_path = _secure_existing_file(
+        artifact_dir / "bootstrap-invocation.json"
+    )
+    invocation = _mapping(
+        load_json(invocation_path, label="bootstrap invocation"),
+        label="bootstrap invocation",
+    )
+    nonce = _string(invocation.get("bootstrap_nonce"), label="bootstrap nonce")
+    commit = _string(invocation.get("control_commit"), label="control commit")
+    if (
+        invocation.get("kind") != "teamagent-provenance-bootstrap-invocation"
+        or invocation.get("schema_version") != 1
+        or invocation.get("bootstrap_id") != contract.bootstrap_id
+        or not SHA256_RE.fullmatch(nonce)
+        or not SHA1_RE.fullmatch(commit)
+        or invocation.get("contract_sha256") != sha256_file(contract.path)
+        or invocation.get("seed_template_sha256")
+        != sha256_file(contract.path.parent / "seed-stack.yaml")
+    ):
+        raise BootstrapError("bootstrap invocation artifact differs from reviewed controls")
+
+    current_commit, source_tree_sha256 = _validate_repository(repo_root, runner, base_env)
+    if (
+        current_commit != commit
+        or invocation.get("source_tree_sha256") != source_tree_sha256
+    ):
+        raise BootstrapError("reconcile repository differs from the bootstrap invocation")
+    _validate_local_toolchain(runner, cwd=repo_root, env=base_env)
+    base_env = _temporary_root_environment(base_env, region=contract.region)
+    _assert_identity(
+        runner,
+        cwd=repo_root,
+        env=base_env,
+        contract=contract,
+        expected_arn=f"arn:aws:iam::{contract.account_id}:root",
+        label="reconcile root caller",
+    )
+    ledger_item = _read_bootstrap_ledger_item(
+        runner,
+        cwd=repo_root,
+        env=base_env,
+        contract=contract,
+        nonce=nonce,
+    )
+    if ledger_item is None:
+        raise BootstrapError("reconcile cannot find the one-use bootstrap ledger")
+    state = _typed_string(ledger_item, "State", label="bootstrap ledger")
+    seed_stack_id = _seed_stack_id_from_artifacts(
+        artifact_dir,
+        contract=contract,
+        nonce=nonce,
+        commit=commit,
+    )
+    receipt_path = artifact_dir / "bootstrap-reconcile-retire.json"
+
+    if state == "CONSUMED":
+        claims_sha, ownership_sha = _verify_consumed_handoff_artifacts(
+            artifact_dir,
+            ledger_item=ledger_item,
+        )
+        retirement = _revoke_and_delete_seed(
+            runner,
+            repo_root=repo_root,
+            root_env=base_env,
+            session_env=None,
+            contract=contract,
+            nonce=nonce,
+            commit=commit,
+            expected_stack_id=seed_stack_id,
+        )
+        _persist_reconcile_receipt(
+            receipt_path,
+            {
+                "kind": "teamagent-provenance-bootstrap-reconcile-retire",
+                "schema_version": 1,
+                "status": "CONSUMED_RETIRED",
+                "bootstrap_id": contract.bootstrap_id,
+                "bootstrap_nonce": nonce,
+                "control_commit": commit,
+                "handoff_claims_sha256": claims_sha,
+                "handoff_ownership_sha256": ownership_sha,
+                "plan_reapplied": False,
+                "retirement": retirement,
+            },
+        )
+        return receipt_path
+
+    if state == "PREPARED":
+        _ledger_update(
+            runner,
+            cwd=repo_root,
+            env=base_env,
+            contract=contract,
+            nonce=nonce,
+            expected_state="PREPARED",
+            next_state="RECONCILE_REQUIRED",
+            extra_values={
+                "FailureSha256": sha256_bytes(
+                    b"reconcile-retire:apply-was-never-authorized"
+                )
+            },
+        )
+        retirement = _revoke_and_delete_seed(
+            runner,
+            repo_root=repo_root,
+            root_env=base_env,
+            session_env=None,
+            contract=contract,
+            nonce=nonce,
+            commit=commit,
+            expected_stack_id=seed_stack_id,
+        )
+        _persist_reconcile_receipt(
+            receipt_path,
+            {
+                "kind": "teamagent-provenance-bootstrap-reconcile-retire",
+                "schema_version": 1,
+                "status": "RETIRED_WITHOUT_APPLY",
+                "bootstrap_id": contract.bootstrap_id,
+                "bootstrap_nonce": nonce,
+                "control_commit": commit,
+                "ledger_state": "RECONCILE_REQUIRED",
+                "plan_reapplied": False,
+                "retirement": retirement,
+            },
+        )
+        return receipt_path
+
+    if state not in {"APPLYING", "RECONCILE_REQUIRED"}:
+        raise BootstrapError(f"bootstrap ledger has unsupported state: {state}")
+
+    reviewed_path = _secure_existing_file(
+        artifact_dir / "bootstrap-reviewed-plan.json"
+    )
+    reviewed = _mapping(
+        load_json(reviewed_path, label="reviewed plan artifact"),
+        label="reviewed plan artifact",
+    )
+    plan_sha = _string(reviewed.get("plan_sha256"), label="reviewed plan SHA-256")
+    plan_path = _secure_existing_file(
+        artifact_dir
+        / _string(reviewed.get("plan_file"), label="reviewed plan filename")
+    )
+    plan_json_path = _secure_existing_file(
+        artifact_dir
+        / _string(reviewed.get("plan_json_file"), label="reviewed plan JSON filename")
+    )
+    before_path = _secure_existing_file(
+        artifact_dir
+        / _string(reviewed.get("before_state_file"), label="before state filename")
+    )
+    if (
+        reviewed.get("kind") != "teamagent-provenance-bootstrap-reviewed-plan"
+        or reviewed.get("schema_version") != 1
+        or reviewed.get("bootstrap_id") != contract.bootstrap_id
+        or reviewed.get("bootstrap_nonce") != nonce
+        or reviewed.get("control_commit") != commit
+        or sha256_file(plan_path) != plan_sha
+        or sha256_file(before_path) != reviewed.get("before_state_sha256")
+    ):
+        raise BootstrapError("reviewed plan artifacts differ from the invocation")
+    plan_value = load_json(plan_json_path, label="reviewed bootstrap plan")
+    before_state = load_json(before_path, label="main state before bootstrap")
+    plan_validation = validate_plan(
+        plan_value,
+        before_state,
+        contract,
+        plan_sha256=plan_sha,
+    )
+    if (
+        list(plan_validation.created_addresses) != reviewed.get("created_addresses")
+        or list(plan_validation.no_op_addresses) != reviewed.get("no_op_addresses")
+    ):
+        raise BootstrapError("reviewed plan address claims differ")
+
+    terraform_data_dir = artifact_dir / "terraform-data"
+    base_env["TF_CLI_CONFIG_FILE"] = "/dev/null"
+    base_env["TF_DATA_DIR"] = str(terraform_data_dir)
+    base_env["TF_INPUT"] = "0"
+    base_env["TF_WORKSPACE"] = "default"
+    base_env["CHECKPOINT_DISABLE"] = "1"
+    terraform_dir = repo_root / "infra" / "terraform"
+    _terraform(
+        runner,
+        ["init", "-input=false", "-lockfile=readonly"],
+        terraform_dir=terraform_dir,
+        env=base_env,
+    )
+    state_result = _terraform(
+        runner,
+        ["state", "pull"],
+        terraform_dir=terraform_dir,
+        env=base_env,
+    )
+    reconciled_state_path = artifact_dir / "main-state-reconciled.json"
+    _persist_or_verify_private_json(
+        reconciled_state_path,
+        json.loads(state_result.stdout),
+    )
+    after_state = load_json(reconciled_state_path, label="reconciled main state")
+    try:
+        handoff = validate_handoff(before_state, after_state, plan_validation, contract)
+    except BootstrapError:
+        if state == "APPLYING":
+            _ledger_update(
+                runner,
+                cwd=repo_root,
+                env=base_env,
+                contract=contract,
+                nonce=nonce,
+                expected_state="APPLYING",
+                next_state="RECONCILE_REQUIRED",
+                extra_values={
+                    "FailureSha256": sha256_bytes(
+                        b"reconcile-retire:main-state-handoff-incomplete"
+                    )
+                },
+            )
+        retirement = _revoke_and_delete_seed(
+            runner,
+            repo_root=repo_root,
+            root_env=base_env,
+            session_env=None,
+            contract=contract,
+            nonce=nonce,
+            commit=commit,
+            expected_stack_id=seed_stack_id,
+        )
+        _persist_reconcile_receipt(
+            receipt_path,
+            {
+                "kind": "teamagent-provenance-bootstrap-reconcile-retire",
+                "schema_version": 1,
+                "status": "RECONCILE_REQUIRED_RETIRED",
+                "bootstrap_id": contract.bootstrap_id,
+                "bootstrap_nonce": nonce,
+                "control_commit": commit,
+                "ledger_state": "RECONCILE_REQUIRED",
+                "plan_reapplied": False,
+                "retirement": retirement,
+            },
+        )
+        return receipt_path
+
+    after_addresses = state_addresses(after_state)
+    connections = _connection_inventory(
+        runner,
+        repo_root=repo_root,
+        env=base_env,
+        contract=contract,
+        after_addresses=after_addresses,
+    )
+    release_hashes = _mapping(
+        invocation.get("release_contract_sha256"),
+        label="invocation release contract hashes",
+    )
+    tool_versions = _mapping(
+        invocation.get("toolchain_versions"),
+        label="invocation toolchain versions",
+    )
+    claims, ownership = _handoff_documents(
+        contract=contract,
+        nonce=nonce,
+        commit=commit,
+        source_tree_sha256=source_tree_sha256,
+        contract_sha256=_string(
+            invocation.get("contract_sha256"),
+            label="invocation contract SHA-256",
+        ),
+        seed_template_sha256=_string(
+            invocation.get("seed_template_sha256"),
+            label="invocation seed template SHA-256",
+        ),
+        tfvars_sha256=_string(
+            invocation.get("tfvars_sha256"),
+            label="invocation tfvars SHA-256",
+        ),
+        release_hashes={
+            _string(key, label="release contract path"): _string(
+                value,
+                label="release contract SHA-256",
+            )
+            for key, value in release_hashes.items()
+        },
+        tool_versions={
+            _string(key, label="toolchain name"): _string(
+                value,
+                label="toolchain version",
+            )
+            for key, value in tool_versions.items()
+        },
+        tool_evidence={},
+        plan_sha256=plan_sha,
+        plan_validation=plan_validation,
+        handoff=handoff,
+        before_state=before_state,
+        after_state=after_state,
+        connections=connections,
+        seed_stack_id=seed_stack_id,
+    )
+    claims_sha, ownership_sha = _persist_handoff_artifacts(
+        artifact_dir,
+        claims=claims,
+        ownership=ownership,
+    )
+    try:
+        consumed = _ledger_update(
+            runner,
+            cwd=repo_root,
+            env=base_env,
+            contract=contract,
+            nonce=nonce,
+            expected_state=state,
+            next_state="CONSUMED",
+            extra_values={
+                "HandoffClaimsSha256": claims_sha,
+                "HandoffOwnershipSha256": ownership_sha,
+            },
+        )
+    except Exception:
+        concurrent = _read_bootstrap_ledger_item(
+            runner,
+            cwd=repo_root,
+            env=base_env,
+            contract=contract,
+            nonce=nonce,
+        )
+        if concurrent is None or _typed_string(
+            concurrent,
+            "State",
+            label="concurrent bootstrap ledger",
+        ) != "CONSUMED":
+            raise
+        _verify_consumed_handoff_artifacts(
+            artifact_dir,
+            ledger_item=concurrent,
+        )
+    else:
+        _persist_or_verify_private_json(
+            artifact_dir / "bootstrap-ledger-consumed.json",
+            consumed,
+        )
+    retirement = _revoke_and_delete_seed(
+        runner,
+        repo_root=repo_root,
+        root_env=base_env,
+        session_env=None,
+        contract=contract,
+        nonce=nonce,
+        commit=commit,
+        expected_stack_id=seed_stack_id,
+    )
+    _persist_reconcile_receipt(
+        receipt_path,
+        {
+            "kind": "teamagent-provenance-bootstrap-reconcile-retire",
+            "schema_version": 1,
+            "status": "HANDOFF_RECONCILED_AND_RETIRED",
+            "bootstrap_id": contract.bootstrap_id,
+            "bootstrap_nonce": nonce,
+            "control_commit": commit,
+            "handoff_claims_sha256": claims_sha,
+            "handoff_ownership_sha256": ownership_sha,
+            "plan_reapplied": False,
+            "retirement": retirement,
+        },
+    )
+    return receipt_path
 
 
 def _default_contract_path() -> Path:
@@ -2850,6 +4177,16 @@ def _command_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_reconcile_retire(args: argparse.Namespace) -> int:
+    receipt = reconcile_and_retire(
+        repo_root=Path(args.repo_root).resolve(strict=True),
+        artifact_dir=Path(args.artifact_dir),
+        contract_path=Path(args.contract).resolve(strict=True),
+    )
+    print(f"bootstrap reconcile/retire receipt: {receipt}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.set_defaults(command=None)
@@ -2905,6 +4242,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--repo-root", default=str(_repo_root_from_script()))
     run_parser.add_argument("--contract", default=str(_default_contract_path()))
     run_parser.set_defaults(command=_command_run)
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile-retire",
+        help="reconcile a prior handoff and idempotently retire its exact seed",
+    )
+    reconcile_parser.add_argument("--artifact-dir", required=True)
+    reconcile_parser.add_argument("--repo-root", default=str(_repo_root_from_script()))
+    reconcile_parser.add_argument("--contract", default=str(_default_contract_path()))
+    reconcile_parser.set_defaults(command=_command_reconcile_retire)
     return parser
 
 

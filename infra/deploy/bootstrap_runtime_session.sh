@@ -57,17 +57,80 @@ case "$1" in
     ;;
 esac
 
-for tool in aws; do
+for tool in git python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
 
-for credential_name in \
-  AWS_ACCESS_KEY_ID \
-  AWS_SECRET_ACCESS_KEY \
-  AWS_SESSION_TOKEN; do
-  [ -n "${!credential_name:-}" ] ||
-    die "root must be supplied as an explicit temporary STS credential set"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)" \
+  || die "runtime session repository root cannot be resolved"
+SAVED_AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID-}"
+SAVED_AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY-}"
+SAVED_AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN-}"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
+unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
+unset CURL_CA_BUNDLE GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_ASKPASS
+unset GIT_CEILING_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG GIT_CONFIG_COUNT
+unset GIT_CONFIG_PARAMETERS GIT_DIR GIT_DISCOVERY_ACROSS_FILESYSTEM
+unset GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_PROXY_COMMAND GIT_REPLACE_REF_BASE
+unset GIT_SSH GIT_SSH_COMMAND GIT_SSL_CAINFO GIT_SSL_CAPATH GIT_SSL_NO_VERIFY
+unset GIT_WORK_TREE SSH_ASKPASS SSH_AUTH_SOCK SSL_CERT_DIR SSL_CERT_FILE
+unset BASH_ENV ENV CDPATH
+while IFS= read -r git_variable; do
+  unset "$git_variable"
+done < <(compgen -A variable GIT_CONFIG_KEY_)
+while IFS= read -r git_variable; do
+  unset "$git_variable"
+done < <(compgen -A variable GIT_CONFIG_VALUE_)
+unset git_variable
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_TERMINAL_PROMPT=0
+unset -f aws git python3 terraform 2>/dev/null || true
+
+PROVENANCE_HELPER="$REPO_ROOT/infra/bootstrap/wrapper_provenance.py"
+[ -f "$PROVENANCE_HELPER" ] || die "wrapper provenance helper is missing"
+HEAD_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})" \
+  || die "wrapper HEAD cannot be resolved"
+EXPECTED_HELPER_BLOB="$(
+  git -C "$REPO_ROOT" rev-parse "$HEAD_COMMIT:infra/bootstrap/wrapper_provenance.py"
+)" || die "wrapper provenance helper is not tracked"
+ACTUAL_HELPER_BLOB="$(
+  git -C "$REPO_ROOT" hash-object --no-filters -- "$PROVENANCE_HELPER"
+)" || die "wrapper provenance helper cannot be hashed"
+[ "$EXPECTED_HELPER_BLOB" = "$ACTUAL_HELPER_BLOB" ] \
+  || die "wrapper provenance helper differs from detached HEAD"
+unset EXPECTED_HELPER_BLOB ACTUAL_HELPER_BLOB
+
+REVIEW_TMP="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-runtime-review.XXXXXXXX")"
+chmod 700 "$REVIEW_TMP"
+cleanup() {
+  chmod -R u+w "$REVIEW_TMP" 2>/dev/null || true
+  rm -rf -- "$REVIEW_TMP"
+}
+trap cleanup EXIT
+REVIEW_ROOT="$REVIEW_TMP/checkout"
+python3 -I "$PROVENANCE_HELPER" \
+  --repo-root "$REPO_ROOT" \
+  --checkout-dir "$REVIEW_ROOT" \
+  --receipt "$REVIEW_TMP/provenance.json" \
+  --profile runtime-session \
+  || die "runtime session wrapper provenance validation failed"
+GUARD="$REVIEW_ROOT/infra/deploy/terraform_runtime_guard.sh"
+[ -f "$GUARD" ] || die "reviewed runtime guard is missing"
+
+for tool in aws; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
+[ -n "$SAVED_AWS_ACCESS_KEY_ID" ] \
+  && [ -n "$SAVED_AWS_SECRET_ACCESS_KEY" ] \
+  && [ -n "$SAVED_AWS_SESSION_TOKEN" ] \
+  || die "root must be supplied as an explicit temporary STS credential set"
+export AWS_ACCESS_KEY_ID="$SAVED_AWS_ACCESS_KEY_ID"
+export AWS_SECRET_ACCESS_KEY="$SAVED_AWS_SECRET_ACCESS_KEY"
+export AWS_SESSION_TOKEN="$SAVED_AWS_SESSION_TOKEN"
+unset SAVED_AWS_ACCESS_KEY_ID SAVED_AWS_SECRET_ACCESS_KEY SAVED_AWS_SESSION_TOKEN
 export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
 export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
 export AWS_REGION="$REGION" AWS_DEFAULT_REGION="$REGION"
@@ -135,5 +198,4 @@ unset pinned pinned_account pinned_arn extra
 # explicit child STS credential set across exec.
 unset AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-exec bash "$SCRIPT_DIR/terraform_runtime_guard.sh" "$@"
+bash "$GUARD" "$@"

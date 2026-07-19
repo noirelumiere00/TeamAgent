@@ -342,7 +342,9 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
         "assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
     ) in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
-    assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner
+    assert "arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate" not in runner
+    assert "sts assume-role" not in runner
+    assert "exec python3" in runner
     assert "acquire-deployment-lock" in runner
     assert "validate-deployment-preflight" in runner
 

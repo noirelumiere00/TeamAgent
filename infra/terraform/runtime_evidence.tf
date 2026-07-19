@@ -163,19 +163,109 @@ data "aws_iam_policy_document" "runtime_automation_assume" {
   }
 }
 
+data "aws_iam_policy_document" "runtime_automation_boundary" {
+  statement {
+    sid       = "AllowOnlyIdentityPolicyIntersection"
+    actions   = ["*"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyIamSelfEscalation"
+    effect = "Deny"
+    actions = [
+      "iam:AddRoleToInstanceProfile",
+      "iam:AttachGroupPolicy",
+      "iam:AttachRolePolicy",
+      "iam:AttachUserPolicy",
+      "iam:CreateAccessKey",
+      "iam:CreateGroup",
+      "iam:CreateInstanceProfile",
+      "iam:CreateLoginProfile",
+      "iam:CreatePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:CreateRole",
+      "iam:CreateServiceLinkedRole",
+      "iam:CreateServiceSpecificCredential",
+      "iam:CreateUser",
+      "iam:DeleteGroup",
+      "iam:DeleteGroupPolicy",
+      "iam:DeleteInstanceProfile",
+      "iam:DeleteLoginProfile",
+      "iam:DeletePolicy",
+      "iam:DeletePolicyVersion",
+      "iam:DeleteRole",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:DeleteRolePolicy",
+      "iam:DeleteServiceLinkedRole",
+      "iam:DeleteServiceSpecificCredential",
+      "iam:DeleteUser",
+      "iam:DeleteUserPermissionsBoundary",
+      "iam:DeleteUserPolicy",
+      "iam:DetachGroupPolicy",
+      "iam:DetachRolePolicy",
+      "iam:DetachUserPolicy",
+      "iam:PutGroupPolicy",
+      "iam:PutRolePermissionsBoundary",
+      "iam:PutRolePolicy",
+      "iam:PutUserPermissionsBoundary",
+      "iam:PutUserPolicy",
+      "iam:RemoveRoleFromInstanceProfile",
+      "iam:ResetServiceSpecificCredential",
+      "iam:SetDefaultPolicyVersion",
+      "iam:TagInstanceProfile",
+      "iam:TagPolicy",
+      "iam:TagRole",
+      "iam:TagUser",
+      "iam:UntagInstanceProfile",
+      "iam:UntagPolicy",
+      "iam:UntagRole",
+      "iam:UntagUser",
+      "iam:UpdateAccessKey",
+      "iam:UpdateAssumeRolePolicy",
+      "iam:UpdateGroup",
+      "iam:UpdateLoginProfile",
+      "iam:UpdateRole",
+      "iam:UpdateRoleDescription",
+      "iam:UpdateSAMLProvider",
+      "iam:UpdateSigningCertificate",
+      "iam:UpdateSSHPublicKey",
+      "iam:UpdateUser",
+      "iam:UploadSAMLProvider",
+      "iam:UploadServerCertificate",
+      "iam:UploadSigningCertificate",
+      "iam:UploadSSHPublicKey",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "DenyRoleChaining"
+    effect = "Deny"
+    actions = [
+      "sts:AssumeRole",
+      "sts:AssumeRoleWithSAML",
+      "sts:AssumeRoleWithWebIdentity",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "runtime_automation_boundary" {
+  name        = "${local.runtime_automation_role_name}-boundary"
+  description = "Immutable IAM self-escalation and role-chaining boundary"
+  policy      = data.aws_iam_policy_document.runtime_automation_boundary.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "aws_iam_role" "runtime_automation" {
   name                 = local.runtime_automation_role_name
   assume_role_policy   = data.aws_iam_policy_document.runtime_automation_assume.json
   max_session_duration = 10800
-}
-
-resource "aws_iam_role_policy_attachment" "runtime_automation_power_user" {
-  role       = aws_iam_role.runtime_automation.name
-  policy_arn = "arn:aws:iam::aws:policy/PowerUserAccess"
-
-  # Never expose PowerUserAccess before the inline provenance/build/seed
-  # denials are attached to this assumable role.
-  depends_on = [aws_iam_role_policy.runtime_automation_control_plane]
+  permissions_boundary = aws_iam_policy.runtime_automation_boundary.arn
 }
 
 data "aws_iam_policy_document" "alarm_recipient_ack_signer" {
@@ -211,10 +301,10 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
   statement {
     sid = "InventoryAllKnownRuntimeAndSnsPublishers"
     actions = [
-      "application-autoscaling:Describe*",
       "autoscaling:DescribeNotificationConfigurations",
+      "aws-portal:ViewBilling",
       "bedrock:GetModelInvocationLoggingConfiguration",
-      "budgets:Describe*",
+      "budgets:ViewBudget",
       "chatbot:DescribeChimeWebhookConfigurations",
       "chatbot:DescribeSlackChannelConfigurations",
       "chatbot:ListMicrosoftTeamsChannelConfigurations",
@@ -224,7 +314,6 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
       "codestar-notifications:DescribeNotificationRule",
       "codestar-notifications:ListNotificationRules",
       "ce:GetAnomalySubscriptions",
-      "ec2:Describe*",
       "ecs:DescribeServices",
       "ecs:ListTasks",
       "events:ListRules",
@@ -308,6 +397,72 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
       ]
     }
   }
+
+  # The runtime session executes the deployment-intent helper directly. It
+  # receives the helper's exact read/verify/ledger surface here instead of
+  # chaining into a second role.
+  statement {
+    sid = "ReadExactDeploymentGateEvidence"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectRetention",
+      "s3:GetObjectVersion",
+    ]
+    resources = [
+      "${aws_s3_bucket.image_release_evidence.arn}/release-receipts/*",
+    ]
+  }
+
+  statement {
+    sid       = "DecryptExactDeploymentGateEvidence"
+    actions   = ["kms:Decrypt", "kms:DescribeKey"]
+    resources = [aws_kms_key.image_release_evidence.arn]
+  }
+
+  statement {
+    sid       = "VerifyExactDeploymentGateEvidence"
+    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
+    resources = [aws_kms_key.image_attestor_signing.arn]
+  }
+
+  statement {
+    sid = "ReadExactDeploymentSubjectGraph"
+    actions = [
+      "ecr:BatchGetImage",
+      "ecr:GetLifecyclePolicy",
+    ]
+    resources = concat(
+      [
+        aws_ecr_repository.mcp.arn,
+        aws_ecr_repository.mcp_media.arn,
+        aws_ecr_repository.openclaw.arn,
+        aws_ecr_repository.openclaw_media.arn,
+      ],
+      local.tk_enabled == 1 ? [aws_ecr_repository.tiktok_acquire[0].arn] : [],
+    )
+  }
+
+  statement {
+    sid = "TransitionExactDeploymentIntentLedger"
+    actions = [
+      "dynamodb:DeleteItem",
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:TransactWriteItems",
+      "dynamodb:UpdateItem",
+    ]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "intent#*",
+        "lock#teamagent/terraform.tfstate",
+        "receipt#*",
+      ]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "runtime_evidence_automation" {
@@ -318,32 +473,9 @@ resource "aws_iam_role_policy" "runtime_evidence_automation" {
 
 data "aws_iam_policy_document" "runtime_automation_control_plane" {
   statement {
-    sid = "ReadIamMetadata"
+    sid = "ReadExactIamMetadata"
     actions = [
-      "iam:Get*",
-      "iam:List*",
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid = "ManageOnlyTeamAgentIam"
-    actions = [
-      "iam:AddRoleToInstanceProfile",
-      "iam:AttachRolePolicy",
-      "iam:CreateInstanceProfile",
-      "iam:CreatePolicy",
-      "iam:CreatePolicyVersion",
-      "iam:CreateRole",
-      "iam:CreateUser",
-      "iam:DeleteInstanceProfile",
-      "iam:DeletePolicy",
-      "iam:DeletePolicyVersion",
-      "iam:DeleteRole",
-      "iam:DeleteRolePolicy",
-      "iam:DeleteUser",
-      "iam:DeleteUserPolicy",
-      "iam:DetachRolePolicy",
+      "iam:GetInstanceProfile",
       "iam:GetPolicy",
       "iam:GetPolicyVersion",
       "iam:GetRole",
@@ -351,51 +483,382 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
       "iam:GetUser",
       "iam:GetUserPolicy",
       "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+      "iam:ListPolicyTags",
       "iam:ListPolicyVersions",
       "iam:ListRolePolicies",
-      "iam:ListRoles",
+      "iam:ListRoleTags",
       "iam:ListUserPolicies",
-      "iam:ListUsers",
-      "iam:PassRole",
-      "iam:PutRolePolicy",
-      "iam:PutUserPolicy",
-      "iam:RemoveRoleFromInstanceProfile",
-      "iam:TagInstanceProfile",
-      "iam:TagPolicy",
-      "iam:TagRole",
-      "iam:TagUser",
-      "iam:UntagInstanceProfile",
-      "iam:UntagPolicy",
-      "iam:UntagRole",
-      "iam:UntagUser",
-      "iam:UpdateAssumeRolePolicy",
-      "iam:UpdateRole",
-      "iam:UpdateRoleDescription",
-      "iam:UpdateUser",
+      "iam:ListUserTags",
     ]
-    resources = [
-      "arn:aws:iam::718959508629:instance-profile/teamagent-*",
-      "arn:aws:iam::718959508629:role/teamagent-*",
-      "arn:aws:iam::718959508629:user/AIIAdev",
-      "arn:aws:iam::718959508629:user/teamagent-*",
-      "arn:aws:iam::718959508629:policy/teamagent-*",
-    ]
+    resources = ["*"]
   }
 
   statement {
-    sid = "CreateOnlyRequiredAwsServiceLinkedRoles"
-    actions = [
-      "iam:CreateServiceLinkedRole",
-      "iam:GetServiceLinkedRoleDeletionStatus",
+    sid     = "PassOnlyExistingTeamAgentServiceRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      "arn:aws:iam::718959508629:role/teamagent-dev-bastion",
+      "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-canary-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-ingest-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-morning-digest-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-lambda-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-notify",
+      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-scheduler",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-dispatch",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-janitor",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-worker",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-dispatch",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
     ]
-    resources = ["*"]
+
     condition {
-      test     = "StringLike"
-      variable = "iam:AWSServiceName"
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
       values = [
-        "*.amazonaws.com",
+        "ec2.amazonaws.com",
+        "ecs-tasks.amazonaws.com",
+        "events.amazonaws.com",
+        "lambda.amazonaws.com",
+        "scheduler.amazonaws.com",
       ]
     }
+  }
+
+  statement {
+    sid = "ManageExactTerraformResourceTypes"
+    actions = [
+      "access-analyzer:CreateAnalyzer",
+      "access-analyzer:DeleteAnalyzer",
+      "access-analyzer:GetAnalyzer",
+      "access-analyzer:ListTagsForResource",
+      "access-analyzer:TagResource",
+      "access-analyzer:UntagResource",
+      "access-analyzer:UpdateAnalyzer",
+      "apigateway:DELETE",
+      "apigateway:GET",
+      "apigateway:PATCH",
+      "apigateway:POST",
+      "apigateway:PUT",
+      "bedrock:DeleteModelInvocationLoggingConfiguration",
+      "bedrock:GetModelInvocationLoggingConfiguration",
+      "bedrock:PutModelInvocationLoggingConfiguration",
+      "aws-portal:ModifyBilling",
+      "aws-portal:ViewBilling",
+      "budgets:ListTagsForResource",
+      "budgets:ModifyBudget",
+      "budgets:TagResource",
+      "budgets:UntagResource",
+      "budgets:ViewBudget",
+      "ce:CreateAnomalyMonitor",
+      "ce:CreateAnomalySubscription",
+      "ce:DeleteAnomalyMonitor",
+      "ce:DeleteAnomalySubscription",
+      "ce:GetAnomalyMonitors",
+      "ce:GetAnomalySubscriptions",
+      "ce:ListTagsForResource",
+      "ce:TagResource",
+      "ce:UntagResource",
+      "ce:UpdateAnomalyMonitor",
+      "ce:UpdateAnomalySubscription",
+      "cloudtrail:AddTags",
+      "cloudtrail:CreateTrail",
+      "cloudtrail:DeleteTrail",
+      "cloudtrail:GetEventSelectors",
+      "cloudtrail:GetTrail",
+      "cloudtrail:GetTrailStatus",
+      "cloudtrail:ListTags",
+      "cloudtrail:PutEventSelectors",
+      "cloudtrail:RemoveTags",
+      "cloudtrail:StartLogging",
+      "cloudtrail:StopLogging",
+      "cloudtrail:UpdateTrail",
+      "cloudwatch:DeleteAlarms",
+      "cloudwatch:DeleteDashboards",
+      "cloudwatch:DescribeAlarms",
+      "cloudwatch:GetDashboard",
+      "cloudwatch:ListDashboards",
+      "cloudwatch:ListTagsForResource",
+      "cloudwatch:PutDashboard",
+      "cloudwatch:PutMetricAlarm",
+      "cloudwatch:TagResource",
+      "cloudwatch:UntagResource",
+      "codebuild:BatchGetProjects",
+      "codebuild:CreateProject",
+      "codebuild:DeleteProject",
+      "codebuild:ListTagsForResource",
+      "codebuild:TagResource",
+      "codebuild:UntagResource",
+      "codebuild:UpdateProject",
+      "codeconnections:CreateConnection",
+      "codeconnections:DeleteConnection",
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+      "codeconnections:ListTagsForResource",
+      "codeconnections:TagResource",
+      "codeconnections:UntagResource",
+      "dynamodb:CreateTable",
+      "dynamodb:DeleteTable",
+      "dynamodb:DescribeContinuousBackups",
+      "dynamodb:DescribeTable",
+      "dynamodb:DescribeTimeToLive",
+      "dynamodb:ListTagsOfResource",
+      "dynamodb:TagResource",
+      "dynamodb:UntagResource",
+      "dynamodb:UpdateContinuousBackups",
+      "dynamodb:UpdateTable",
+      "dynamodb:UpdateTimeToLive",
+      "ec2:AssociateIamInstanceProfile",
+      "ec2:AuthorizeSecurityGroupEgress",
+      "ec2:AuthorizeSecurityGroupIngress",
+      "ec2:CreateSecurityGroup",
+      "ec2:CreateTags",
+      "ec2:CreateVpcEndpoint",
+      "ec2:DeleteSecurityGroup",
+      "ec2:DeleteTags",
+      "ec2:DeleteVpcEndpoints",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeIamInstanceProfileAssociations",
+      "ec2:DescribeImages",
+      "ec2:DescribeInstances",
+      "ec2:DescribeInstanceStatus",
+      "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribePrefixLists",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeSecurityGroupRules",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeTags",
+      "ec2:DescribeVpcAttribute",
+      "ec2:DescribeVpcEndpoints",
+      "ec2:DescribeVpcs",
+      "ec2:DisassociateIamInstanceProfile",
+      "ec2:ModifyInstanceAttribute",
+      "ec2:ModifyVpcEndpoint",
+      "ec2:ReplaceIamInstanceProfileAssociation",
+      "ec2:RevokeSecurityGroupEgress",
+      "ec2:RevokeSecurityGroupIngress",
+      "ec2:RunInstances",
+      "ec2:StartInstances",
+      "ec2:StopInstances",
+      "ec2:TerminateInstances",
+      "ecr:CreateRepository",
+      "ecr:DeleteLifecyclePolicy",
+      "ecr:DeleteRepository",
+      "ecr:DeleteRepositoryPolicy",
+      "ecr:DescribeRepositories",
+      "ecr:GetLifecyclePolicy",
+      "ecr:GetRepositoryPolicy",
+      "ecr:ListTagsForResource",
+      "ecr:PutImageScanningConfiguration",
+      "ecr:PutImageTagMutability",
+      "ecr:PutLifecyclePolicy",
+      "ecr:SetRepositoryPolicy",
+      "ecr:TagResource",
+      "ecr:UntagResource",
+      "ecs:CreateCluster",
+      "ecs:CreateService",
+      "ecs:DeleteCluster",
+      "ecs:DeleteService",
+      "ecs:DeregisterTaskDefinition",
+      "ecs:DescribeClusters",
+      "ecs:DescribeServices",
+      "ecs:DescribeTaskDefinition",
+      "ecs:ListTagsForResource",
+      "ecs:PutClusterCapacityProviders",
+      "ecs:RegisterTaskDefinition",
+      "ecs:TagResource",
+      "ecs:UntagResource",
+      "ecs:UpdateClusterSettings",
+      "ecs:UpdateService",
+      "elasticfilesystem:CreateAccessPoint",
+      "elasticfilesystem:CreateFileSystem",
+      "elasticfilesystem:CreateMountTarget",
+      "elasticfilesystem:DeleteAccessPoint",
+      "elasticfilesystem:DeleteFileSystem",
+      "elasticfilesystem:DeleteMountTarget",
+      "elasticfilesystem:DescribeAccessPoints",
+      "elasticfilesystem:DescribeFileSystems",
+      "elasticfilesystem:DescribeLifecycleConfiguration",
+      "elasticfilesystem:DescribeMountTargets",
+      "elasticfilesystem:DescribeMountTargetSecurityGroups",
+      "elasticfilesystem:DescribeTags",
+      "elasticfilesystem:ListTagsForResource",
+      "elasticfilesystem:ModifyMountTargetSecurityGroups",
+      "elasticfilesystem:PutLifecycleConfiguration",
+      "elasticfilesystem:TagResource",
+      "elasticfilesystem:UntagResource",
+      "elasticloadbalancing:AddTags",
+      "elasticloadbalancing:CreateTargetGroup",
+      "elasticloadbalancing:DeleteTargetGroup",
+      "elasticloadbalancing:DeregisterTargets",
+      "elasticloadbalancing:DescribeTags",
+      "elasticloadbalancing:DescribeTargetGroupAttributes",
+      "elasticloadbalancing:DescribeTargetGroups",
+      "elasticloadbalancing:DescribeTargetHealth",
+      "elasticloadbalancing:ModifyTargetGroup",
+      "elasticloadbalancing:ModifyTargetGroupAttributes",
+      "elasticloadbalancing:RegisterTargets",
+      "elasticloadbalancing:RemoveTags",
+      "events:DeleteRule",
+      "events:DescribeRule",
+      "events:DisableRule",
+      "events:EnableRule",
+      "events:ListTagsForResource",
+      "events:ListTargetsByRule",
+      "events:PutRule",
+      "events:PutTargets",
+      "events:RemoveTargets",
+      "events:TagResource",
+      "events:UntagResource",
+      "kms:CancelKeyDeletion",
+      "kms:CreateAlias",
+      "kms:CreateKey",
+      "kms:DeleteAlias",
+      "kms:DescribeKey",
+      "kms:EnableKeyRotation",
+      "kms:GetKeyPolicy",
+      "kms:GetKeyRotationStatus",
+      "kms:ListAliases",
+      "kms:ListResourceTags",
+      "kms:PutKeyPolicy",
+      "kms:ScheduleKeyDeletion",
+      "kms:TagResource",
+      "kms:UntagResource",
+      "kms:UpdateAlias",
+      "lambda:AddPermission",
+      "lambda:CreateFunction",
+      "lambda:DeleteFunction",
+      "lambda:GetFunction",
+      "lambda:GetFunctionCodeSigningConfig",
+      "lambda:GetFunctionConfiguration",
+      "lambda:GetPolicy",
+      "lambda:ListEventSourceMappings",
+      "lambda:ListFunctionEventInvokeConfigs",
+      "lambda:ListTags",
+      "lambda:ListVersionsByFunction",
+      "lambda:RemovePermission",
+      "lambda:TagResource",
+      "lambda:UntagResource",
+      "lambda:UpdateEventSourceMapping",
+      "lambda:UpdateFunctionCode",
+      "lambda:UpdateFunctionConfiguration",
+      "logs:CreateLogGroup",
+      "logs:DeleteLogGroup",
+      "logs:DeleteMetricFilter",
+      "logs:DeleteRetentionPolicy",
+      "logs:DescribeLogGroups",
+      "logs:DescribeMetricFilters",
+      "logs:ListTagsForResource",
+      "logs:PutMetricFilter",
+      "logs:PutRetentionPolicy",
+      "logs:TagResource",
+      "logs:UntagResource",
+      "rds:AddTagsToResource",
+      "rds:CreateDBInstance",
+      "rds:CreateDBParameterGroup",
+      "rds:CreateDBSubnetGroup",
+      "rds:DeleteDBInstance",
+      "rds:DeleteDBParameterGroup",
+      "rds:DeleteDBSubnetGroup",
+      "rds:DescribeDBInstances",
+      "rds:DescribeDBParameters",
+      "rds:DescribeDBParameterGroups",
+      "rds:DescribeDBSubnetGroups",
+      "rds:ListTagsForResource",
+      "rds:ModifyDBInstance",
+      "rds:ModifyDBParameterGroup",
+      "rds:ModifyDBSubnetGroup",
+      "rds:RemoveTagsFromResource",
+      "rds:ResetDBParameterGroup",
+      "s3:CreateBucket",
+      "s3:DeleteBucket",
+      "s3:DeleteBucketPolicy",
+      "s3:GetBucketAcl",
+      "s3:GetBucketLifecycleConfiguration",
+      "s3:GetBucketLocation",
+      "s3:GetBucketObjectLockConfiguration",
+      "s3:GetBucketPolicy",
+      "s3:GetBucketPublicAccessBlock",
+      "s3:GetBucketTagging",
+      "s3:GetBucketVersioning",
+      "s3:GetEncryptionConfiguration",
+      "s3:ListBucket",
+      "s3:PutBucketLifecycleConfiguration",
+      "s3:PutBucketObjectLockConfiguration",
+      "s3:PutBucketPolicy",
+      "s3:PutBucketPublicAccessBlock",
+      "s3:PutBucketTagging",
+      "s3:PutBucketVersioning",
+      "s3:PutEncryptionConfiguration",
+      "scheduler:CreateSchedule",
+      "scheduler:CreateScheduleGroup",
+      "scheduler:DeleteSchedule",
+      "scheduler:DeleteScheduleGroup",
+      "scheduler:GetSchedule",
+      "scheduler:GetScheduleGroup",
+      "scheduler:ListTagsForResource",
+      "scheduler:TagResource",
+      "scheduler:UntagResource",
+      "scheduler:UpdateSchedule",
+      "secretsmanager:CreateSecret",
+      "secretsmanager:DeleteResourcePolicy",
+      "secretsmanager:DeleteSecret",
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetResourcePolicy",
+      "secretsmanager:ListSecretVersionIds",
+      "secretsmanager:ListSecrets",
+      "secretsmanager:PutResourcePolicy",
+      "secretsmanager:PutSecretValue",
+      "secretsmanager:RestoreSecret",
+      "secretsmanager:TagResource",
+      "secretsmanager:UntagResource",
+      "secretsmanager:UpdateSecret",
+      "servicediscovery:CreatePrivateDnsNamespace",
+      "servicediscovery:CreateService",
+      "servicediscovery:DeleteNamespace",
+      "servicediscovery:DeleteService",
+      "servicediscovery:GetNamespace",
+      "servicediscovery:GetOperation",
+      "servicediscovery:GetService",
+      "servicediscovery:ListTagsForResource",
+      "servicediscovery:TagResource",
+      "servicediscovery:UntagResource",
+      "servicediscovery:UpdateService",
+      "sns:CreateTopic",
+      "sns:DeleteTopic",
+      "sns:GetTopicAttributes",
+      "sns:ListSubscriptionsByTopic",
+      "sns:ListTagsForResource",
+      "sns:SetTopicAttributes",
+      "sns:TagResource",
+      "sns:UntagResource",
+      "sqs:CreateQueue",
+      "sqs:DeleteQueue",
+      "sqs:GetQueueAttributes",
+      "sqs:GetQueueUrl",
+      "sqs:ListQueueTags",
+      "sqs:SetQueueAttributes",
+      "sqs:TagQueue",
+      "sqs:UntagQueue",
+      "sts:GetCallerIdentity",
+    ]
+    resources = ["*"]
   }
 
   statement {
@@ -474,12 +937,6 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
       "arn:aws:iam::718959508629:role/teamagent-production-provenance-bootstrap-v1",
       "arn:aws:iam::718959508629:policy/teamagent-production-provenance-bootstrap-deny-v1",
     ]
-  }
-
-  statement {
-    sid       = "AssumeOnlyImageDeploymentGate"
-    actions   = ["sts:AssumeRole"]
-    resources = [aws_iam_role.image_deployment_gate.arn]
   }
 
   statement {
@@ -573,7 +1030,9 @@ check "runtime_evidence_owned_preconditions" {
       aws_iam_role.alarm_recipient_ack_signer.arn ==
       "arn:aws:iam::718959508629:role/teamagent-dev-alarm-recipient-ack-signer" &&
       aws_iam_role.runtime_automation.arn ==
-      local.runtime_automation_role_arn
+      local.runtime_automation_role_arn &&
+      aws_iam_role.runtime_automation.permissions_boundary ==
+      aws_iam_policy.runtime_automation_boundary.arn
     )
     error_message = "Runtime evidence requires the exact main-state KMS signer and STS-only automation roles."
   }
@@ -589,6 +1048,10 @@ output "alarm_recipient_ack_signer_role_arn" {
 
 output "runtime_automation_role_arn" {
   value = aws_iam_role.runtime_automation.arn
+}
+
+output "runtime_automation_boundary_arn" {
+  value = aws_iam_policy.runtime_automation_boundary.arn
 }
 
 output "alarm_recipient_ack_signer_assume_policy_contract" {
