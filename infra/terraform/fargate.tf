@@ -869,12 +869,13 @@ resource "aws_ecs_task_definition" "openclaw" {
 # Services（desired=1・public subnet+egress・SGで inbound遮断）
 # ============================================================
 resource "aws_ecs_service" "mcp" {
-  count           = var.mcp_image == "" ? 0 : 1
-  name            = "${var.project_name}-${var.environment}-mcp"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = local.hmac_promoted_task_definition_arns.mcp
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  count                 = var.mcp_image == "" ? 0 : 1
+  name                  = "${var.project_name}-${var.environment}-mcp"
+  cluster               = aws_ecs_cluster.main.id
+  task_definition       = local.hmac_promoted_task_definition_arns.mcp
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
 
   availability_zone_rebalancing = "ENABLED"
 

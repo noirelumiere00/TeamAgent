@@ -4,7 +4,8 @@
 #
 # - snapshot: live の non-secret desired-state 値を HCL snippet として表示（read-only）
 # - preflight: candidate imageを実Fargateで検証し、短命なreceiptを発行する
-# - plan:     strict live同期または一度限りmigrationの検証済みplanだけを保存する
+# - review-plan: candidate migrationの全変更contractを副作用なしで抽出する
+# - plan:     strict live同期またはreview済みmigrationの検証済みplanだけを保存する
 # - verify:   plan/receipt/live/state が plan 作成時から不変か再確認（read-only）
 # - apply:    trusted automation roleと共有lockの下でverify済みplanだけを適用
 #
@@ -13,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="20"
+GUARD_VERSION="21"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -74,6 +75,11 @@ usage:
   terraform_runtime_guard.sh attest-media-cutover \
     --desired-image IMAGE --out RECEIPT
   terraform_runtime_guard.sh preflight --migration ID --out RECEIPT
+  terraform_runtime_guard.sh review-plan --var-file FILE --out REVIEWED_PLAN \
+    --runtime-migration ID --preflight-receipt FILE \
+    --alarm-delivery-receipt FILE --versioning-receipt FILE \
+    --log-readiness-receipt FILE --alarm-migration-receipt FILE \
+    [--prior-apply-receipt FILE]
   terraform_runtime_guard.sh plan --var-file FILE --out PLAN \
     (--runtime-sync | --runtime-migration ID --preflight-receipt FILE \
     --alarm-delivery-receipt FILE --versioning-receipt FILE \
@@ -92,6 +98,13 @@ plan:
   --alarm-migration-receipt FILE publisher別checkpointからlegacy retireまでのdurable chain
   --prior-apply-receipt FILE activationが要求する直前runtime migration成功apply receipt
   --receipt FILE           receipt 出力先（default: PLAN.runtime-guard.json）
+
+review-plan:
+  - migrationはenabled=false/reviewed_plan=nullのcandidateであること。
+  - reviewed_inputsの固定intent、同じpreflight/外部receipt、同じlive/stateから
+    exact reviewed_planを抽出する。DynamoDB intent作成やapply可能plan公開は行わない。
+  - 抽出結果だけをmigration.reviewed_planへcommitしenabled=trueにした後、
+    planを再実行するとexact contract一致が必須になる。
 
 重要:
   - TeamAgent dev / account 718959508629 / ap-northeast-1 / 固定S3 backend専用。
@@ -275,7 +288,7 @@ assert_guard_sources() {
 }
 
 write_config_manifest() {
-  local output="$1" path relative
+  local output="$1" migration_mode="${2:-include}" path relative
   : > "$output"
   for path in \
     "$GUARD_JQ" \
@@ -286,6 +299,10 @@ write_config_manifest() {
     "$RELEASE_EVIDENCE_HELPER" \
     "$IMAGE_CONTEXT_HELPER" \
     "$APPLY_SUPERVISOR"; do
+    if [ "$migration_mode" = "exclude" ] &&
+       [ "$path" = "$MIGRATION_FILE" ]; then
+      continue
+    fi
     relative="${path#"$REPO_ROOT"/}"
     printf '%s  %s\n' "$(sha256_file "$path")" "$relative" >> "$output"
   done
@@ -305,6 +322,55 @@ write_config_manifest() {
 git_commit() {
   git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit} 2>/dev/null ||
     die "Git commitを確認できません"
+}
+
+assert_guard_paths_clean() {
+  git -C "$REPO_ROOT" diff --quiet -- infra/deploy infra/terraform ||
+    die "guard/Terraformの未commit変更を拒否します"
+  git -C "$REPO_ROOT" diff --cached --quiet -- infra/deploy infra/terraform ||
+    die "guard/Terraformの未commit index変更を拒否します"
+  local untracked
+  untracked="$(
+    git -C "$REPO_ROOT" ls-files --others --exclude-standard -- \
+      infra/deploy infra/terraform
+  )"
+  [ -z "$untracked" ] ||
+    die "guard/Terraformの未追跡fileを拒否します:\n$untracked"
+}
+
+normalized_migration_manifest_sha256() {
+  local migration_id="$1"
+  jq -e -S -c --arg id "$migration_id" '
+    if (.migrations[$id] | type) == "object" then
+      del(
+        .migrations[$id].enabled,
+        .migrations[$id].reviewed_plan
+      )
+    else error("migration missing")
+    end
+  ' "$MIGRATION_FILE" | sha256_text
+}
+
+assert_review_commit_transition() {
+  local source_commit="$1" migration_id="$2"
+  local current_commit relative changed path
+  [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] ||
+    die "review source commitが不正です"
+  current_commit="$(git_commit)"
+  git -C "$REPO_ROOT" merge-base --is-ancestor \
+    "$source_commit" "$current_commit" ||
+    die "review source commitは現在HEADの祖先ではありません"
+  relative="${MIGRATION_FILE#"$REPO_ROOT"/}"
+  changed="$(
+    git -C "$REPO_ROOT" diff --name-only --no-renames \
+      "$source_commit" "$current_commit" --
+  )"
+  while IFS= read -r path; do
+    [ -z "$path" ] || [ "$path" = "$relative" ] ||
+      die "review後に許可外fileが変更されています: $path"
+  done <<< "$changed"
+  [ "$(normalized_migration_manifest_sha256 "$migration_id")" != "" ] ||
+    die "normalized migration contractを計算できません"
 }
 
 canonical_existing_dir() {
@@ -2129,8 +2195,12 @@ validate_log_versioning_stage_manifest() {
 }
 
 migration_to_file() {
-  local migration_id="$1" output="$2"
-  jq -e -S -c --arg id "$migration_id" '
+  local migration_id="$1" output="$2" review_phase="${3:-final}"
+  case "$review_phase" in
+    candidate|final|preflight) ;;
+    *) die "未知のmigration review phaseです: $review_phase" ;;
+  esac
+  jq -e -S -c --arg id "$migration_id" --arg review_phase "$review_phase" '
     .schema_version == 1 and
     .external_state_handoffs["2026-07-alarm-topic-consolidation-v1"] == {
       canonical_topic_arn:
@@ -2193,9 +2263,33 @@ migration_to_file() {
       }
     } and
     (.migrations[$id] | type == "object") and
-    .migrations[$id].enabled == true and
     (.migrations[$id].expires_at | fromdateiso8601 > now) and
-    (.migrations[$id].reviewed_plan | type == "object") and
+    (
+      if $review_phase == "candidate" then
+        .migrations[$id].enabled == false and
+        .migrations[$id].reviewed_plan == null
+      elif $review_phase == "final" then
+        .migrations[$id].enabled == true and
+        (.migrations[$id].reviewed_plan | type == "object")
+      else
+        (
+          (
+            .migrations[$id].enabled == false and
+            .migrations[$id].reviewed_plan == null
+          ) or
+          (
+            .migrations[$id].enabled == true and
+            (.migrations[$id].reviewed_plan | type == "object")
+          )
+        )
+      end
+    ) and
+    (.migrations[$id].reviewed_inputs | keys) ==
+      ["image_deployment_intent_id"] and
+    (.migrations[$id].reviewed_inputs.image_deployment_intent_id |
+      test(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      )) and
     (
       if .migrations[$id].kind == "runtime" then
         .migrations[$id].requires_migration == null and
@@ -2476,7 +2570,7 @@ migration_to_file() {
     ) and
     .migrations[$id]
   ' "$MIGRATION_FILE" > "$output" ||
-    die "migrationが未登録・disabled・期限切れ、またはdestination digestがexactではありません: $migration_id"
+    die "migrationが未登録・review phase不一致・期限切れ、またはdestination digestがexactではありません: $migration_id"
 }
 
 validate_migration_source() {
@@ -4377,15 +4471,29 @@ validate_common_plan_schema() {
 
 validate_manifest_change_allowlist() {
   local plan_json="$1" migration="$2"
+  local contract_mode="${3:-verify}" contract_output="${4:-}"
   local reviewed destructive
-  reviewed="$TMP_ROOT/exact-reviewed-plan-${RANDOM}.json"
-  jq -e -S '.reviewed_plan | select(type == "object")' \
-    "$migration" > "$reviewed" ||
-    die "migrationには全変更・driftのexact reviewed_planが必須です"
-  chmod 600 "$reviewed"
-  python3 "$PLAN_CONTRACT_HELPER" verify \
-    --plan "$plan_json" --reviewed "$reviewed" ||
-    die "migration planがexact reviewed_planと一致しません"
+  case "$contract_mode" in
+    extract)
+      [ -n "$contract_output" ] ||
+        die "review plan contractの出力先がありません"
+      python3 "$PLAN_CONTRACT_HELPER" extract \
+        --plan "$plan_json" > "$contract_output" ||
+        die "review plan contractを抽出できません"
+      chmod 600 "$contract_output"
+      ;;
+    verify)
+      reviewed="$TMP_ROOT/exact-reviewed-plan-${RANDOM}.json"
+      jq -e -S '.reviewed_plan | select(type == "object")' \
+        "$migration" > "$reviewed" ||
+        die "migrationには全変更・driftのexact reviewed_planが必須です"
+      chmod 600 "$reviewed"
+      python3 "$PLAN_CONTRACT_HELPER" verify \
+        --plan "$plan_json" --reviewed "$reviewed" ||
+        die "migration planがexact reviewed_planと一致しません"
+      ;;
+    *) die "未知のplan contract modeです: $contract_mode" ;;
+  esac
 
   destructive="$(jq -r --slurpfile migration "$migration" '
     .resource_changes[]? |
@@ -4735,15 +4843,18 @@ validate_runtime_links() {
            )))
         else
           $change.change.after.availability_zone_rebalancing == "ENABLED" and
+          $change.change.after.wait_for_steady_state == true and
           $change.change.after.deployment_circuit_breaker[0] ==
             {enable: true, rollback: true} and
           (($change.change.after | del(
              .task_definition, .deployment_circuit_breaker,
-             .availability_zone_rebalancing
+             .availability_zone_rebalancing,
+             .wait_for_steady_state
            )) ==
            ($change.change.before | del(
              .task_definition, .deployment_circuit_breaker,
-             .availability_zone_rebalancing
+             .availability_zone_rebalancing,
+             .wait_for_steady_state
            )))
         end
       )
@@ -5835,7 +5946,9 @@ validate_exact_runtime_iam_plan() {
 
 validate_activation_plan() {
   local plan_json="$1" snapshot="$2" migration="$3"
-  validate_manifest_change_allowlist "$plan_json" "$migration"
+  local contract_mode="${4:-verify}" contract_output="${5:-}"
+  validate_manifest_change_allowlist \
+    "$plan_json" "$migration" "$contract_mode" "$contract_output"
   jq -L "$GUARD_JQ_DIR" -e --slurpfile live "$snapshot" '
     include "terraform_runtime_guard";
     def change($address):
@@ -5880,7 +5993,9 @@ validate_activation_plan() {
 validate_runtime_migration_plan() {
   local plan_json="$1" snapshot="$2" core="$3" migration="$4" proposed_hmac="$5"
   local state_contract="$6"
-  validate_manifest_change_allowlist "$plan_json" "$migration"
+  local contract_mode="${7:-verify}" contract_output="${8:-}"
+  validate_manifest_change_allowlist \
+    "$plan_json" "$migration" "$contract_mode" "$contract_output"
   validate_runtime_task_contracts "$plan_json" "$snapshot" "$core"
   validate_planned_hmac_consumers "$plan_json" "$proposed_hmac"
   validate_runtime_links "$plan_json" "$snapshot"
@@ -5924,6 +6039,8 @@ validate_plan() {
   local migration="${5:-}"
   local proposed_hmac="${6:-}"
   local state_contract="${7:-}"
+  local contract_mode="${8:-verify}"
+  local contract_output="${9:-}"
 
   validate_common_plan_schema "$plan_json" "$core"
   validate_hmac_runtime_mutation_gates "$plan_json"
@@ -5934,10 +6051,12 @@ validate_plan() {
       runtime)
         validate_runtime_migration_plan \
           "$plan_json" "$snapshot" "$core" "$migration" "$proposed_hmac" \
-          "$state_contract"
+          "$state_contract" "$contract_mode" "$contract_output"
         ;;
       activation)
-        validate_activation_plan "$plan_json" "$snapshot" "$migration"
+        validate_activation_plan \
+          "$plan_json" "$snapshot" "$migration" \
+          "$contract_mode" "$contract_output"
         ;;
       *) die "未知のmigration kindです" ;;
     esac
@@ -6912,7 +7031,7 @@ run_activation_task() {
 write_preflight_receipt() {
   local migration_id="$1" migration="$2" snapshot="$3" profiles="$4" output="$5"
   local config_manifest="$TMP_ROOT/config-manifest.txt"
-  write_config_manifest "$config_manifest"
+  write_config_manifest "$config_manifest" exclude
   local now expires
   now="$(date +%s)"
   expires=$((now + 7200))
@@ -6928,6 +7047,9 @@ write_preflight_receipt() {
     --arg guard_script_sha256 "$(sha256_file "$SCRIPT_PATH")" \
     --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
     --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
+    --arg migration_contract_sha256 "$(
+      normalized_migration_manifest_sha256 "$migration_id"
+    )" \
     --arg config_manifest_sha256 "$(sha256_file "$config_manifest")" \
     --arg live_fingerprint_sha256 "$(sha256_file "$snapshot")" \
     --slurpfile migration "$migration" \
@@ -6945,6 +7067,7 @@ write_preflight_receipt() {
       guard_script_sha256:$guard_script_sha256,
       guard_jq_sha256:$guard_jq_sha256,
       migration_manifest_sha256:$migration_manifest_sha256,
+      migration_contract_sha256:$migration_contract_sha256,
       config_manifest_sha256:$config_manifest_sha256,
       live_fingerprint_sha256:$live_fingerprint_sha256,
       images:(
@@ -6966,17 +7089,23 @@ write_preflight_receipt() {
 verify_preflight_receipt() {
   local receipt="$1" migration_id="$2" migration="$3" snapshot="$4"
   local config_manifest="$TMP_ROOT/config-manifest-verify.txt"
-  write_config_manifest "$config_manifest"
+  local receipt_commit
+  write_config_manifest "$config_manifest" exclude
+  receipt_commit="$(
+    jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
+  )" || die "preflight receiptのsource commitが不正です"
+  assert_review_commit_transition "$receipt_commit" "$migration_id"
   jq -e \
     --arg version "$GUARD_VERSION" \
     --arg migration_id "$migration_id" \
     --arg migration_kind "$(jq -er '.kind' "$migration")" \
     --arg account "$EXPECTED_ACCOUNT_ID" \
     --arg region "$REGION" \
-    --arg git_commit "$(git_commit)" \
     --arg script_sha "$(sha256_file "$SCRIPT_PATH")" \
     --arg jq_sha "$(sha256_file "$GUARD_JQ")" \
-    --arg manifest_sha "$(sha256_file "$MIGRATION_FILE")" \
+    --arg migration_contract_sha "$(
+      normalized_migration_manifest_sha256 "$migration_id"
+    )" \
     --arg config_sha "$(sha256_file "$config_manifest")" \
     --arg live_sha "$(sha256_file "$snapshot")" \
     --argjson now "$(date +%s)" \
@@ -6986,10 +7115,11 @@ verify_preflight_receipt() {
     .migration_id == $migration_id and
     .migration_kind == $migration_kind and
     .account_id == $account and .region == $region and
-    .git_commit == $git_commit and
+    (.git_commit | test("^[0-9a-f]{40}$")) and
     .guard_script_sha256 == $script_sha and
     .guard_jq_sha256 == $jq_sha and
-    .migration_manifest_sha256 == $manifest_sha and
+    (.migration_manifest_sha256 | test("^[0-9a-f]{64}$")) and
+    .migration_contract_sha256 == $migration_contract_sha and
     .config_manifest_sha256 == $config_sha and
     .live_fingerprint_sha256 == $live_sha and
     .created_at_epoch <= $now and .expires_at_epoch > $now and
@@ -7026,12 +7156,14 @@ verify_preflight_receipt() {
       (.value.image | test("@sha256:[0-9a-f]{64}$")) and
       .value.image_digest == (.value.image | split("@")[1])
     ))
-  ' "$receipt" >/dev/null || die "preflight receiptが期限・live・commit・hash・profile契約と不一致です"
+  ' "$receipt" >/dev/null ||
+    die "preflight receiptが期限・live・review transition・hash・profile契約と不一致です"
 }
 
 verify_required_migration_apply_receipt() {
   local receipt="$1" required_migration_id="$2" snapshot="$3"
   local state_contract="$4"
+  local receipt_commit required_migration_contract_sha256
   local retention_live="$TMP_ROOT/prior-bedrock-retention-$RANDOM.json"
   local runtime_inventory="$TMP_ROOT/prior-runtime-inventory-$RANDOM.json"
   local embedded_retention="$TMP_ROOT/prior-bedrock-embedded-$RANDOM.json"
@@ -7039,6 +7171,13 @@ verify_required_migration_apply_receipt() {
   local embedded_outcome="$TMP_ROOT/prior-outcome-embedded-$RANDOM.json"
   local embedded_rollout="$TMP_ROOT/prior-openclaw-rollout-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
+  receipt_commit="$(
+    jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
+  )" || die "prior apply receiptのsource commitが不正です"
+  assert_review_commit_transition "$receipt_commit" "$required_migration_id"
+  required_migration_contract_sha256="$(
+    normalized_migration_manifest_sha256 "$required_migration_id"
+  )"
   run_evidence_helper verify-bedrock-retention --output "$retention_live"
   capture_complete_runtime_inventory "$runtime_inventory"
   jq -S -c '.bedrock_retention_live' "$receipt" > "$embedded_retention"
@@ -7067,8 +7206,9 @@ verify_required_migration_apply_receipt() {
     --arg version "$GUARD_VERSION" \
     --arg account "$EXPECTED_ACCOUNT_ID" \
     --arg region "$REGION" \
-    --arg git_commit "$(git_commit)" \
     --arg required_migration_id "$required_migration_id" \
+    --arg required_migration_contract_sha256 \
+      "$required_migration_contract_sha256" \
     --arg receipt_sha "$(sha256_file "$receipt")" \
     --arg state_sha "$(sha256_file "$state_contract")" \
     --arg live_sha "$(sha256_file "$snapshot")" \
@@ -7090,6 +7230,7 @@ verify_required_migration_apply_receipt() {
       "image_deployment_intent_id",
       "kind",
       "log_readiness_receipt_sha256",
+      "migration_contract_sha256",
       "migration_id",
       "migration_kind",
       "openclaw_rollout_result",
@@ -7115,13 +7256,15 @@ verify_required_migration_apply_receipt() {
       "versioning_receipt_sha256"
     ] | sort) and
     .kind == "terraform-runtime-apply-receipt" and
-    .schema_version == 3 and
+    .schema_version == 4 and
     .guard_version == $version and
     .account_id == $account and .region == $region and
-    .git_commit == $git_commit and
+    (.git_commit | test("^[0-9a-f]{40}$")) and
     .status == "applied" and
     .migration_kind == "runtime" and
     .migration_id == $required_migration_id and
+    .migration_contract_sha256 ==
+      $required_migration_contract_sha256 and
     .required_migration_id == "" and
     .provenance_outcome == "applied" and
     (.image_deployment_intent_id |
@@ -7337,6 +7480,7 @@ verify_receipt() {
       "log_readiness_receipt_sha256",
       "migration_id",
       "migration_kind",
+      "migration_contract_sha256",
       "migration_manifest_sha256",
       "mode",
       "plan_path",
@@ -7379,6 +7523,13 @@ verify_receipt() {
     .guard_script_sha256 == $script_sha and
     .guard_jq_sha256 == $jq_sha and
     .migration_manifest_sha256 == $manifest_sha and
+    (
+      if .mode == "migration" then
+        (.migration_contract_sha256 | test("^[0-9a-f]{64}$"))
+      else
+        .migration_contract_sha256 == ""
+      end
+    ) and
     .config_manifest_sha256 == $config_sha and
     .created_at_epoch <= $now and .expires_at_epoch > $now and
     (.expires_at_epoch - .created_at_epoch) <= 3600 and
@@ -7642,6 +7793,10 @@ verify_receipt() {
   if [ "$mode" = "migration" ]; then
     migration_file="$stage/migration.json"
     migration_to_file "$migration_id" "$migration_file"
+    [ "$(normalized_migration_manifest_sha256 "$migration_id")" = "$(
+      jq -er '.migration_contract_sha256' "$stage/receipt.json"
+    )" ] ||
+      die "migration normalized contractがplan receiptと一致しません"
     validate_migration_source "$stage/live-before.json" "$migration_file"
     if [ "$mode" = "migration" ]; then
       verify_preflight_receipt \
@@ -8296,9 +8451,10 @@ case "$COMMAND" in
     need_cmd jq
     PREFLIGHT_OUT="$(secure_new_file "$PREFLIGHT_OUT")"
     ensure_tmp
+    assert_guard_paths_clean
     assert_trusted_automation_identity
     snapshot_live "$TMP_ROOT/live-before.json"
-    migration_to_file "$MIGRATION_ID" "$TMP_ROOT/migration.json"
+    migration_to_file "$MIGRATION_ID" "$TMP_ROOT/migration.json" preflight
     validate_migration_source "$TMP_ROOT/live-before.json" "$TMP_ROOT/migration.json"
 
     PREFLIGHT_PUBLISHED="false"
@@ -8419,7 +8575,11 @@ case "$COMMAND" in
     echo "   migration: $MIGRATION_ID"
     ;;
 
-  plan)
+  review-plan|plan)
+    REVIEW_ONLY="false"
+    if [ "$COMMAND" = "review-plan" ]; then
+      REVIEW_ONLY="true"
+    fi
     VAR_FILE=""
     PLAN=""
     RECEIPT=""
@@ -8450,6 +8610,12 @@ case "$COMMAND" in
     done
     [ -n "$VAR_FILE" ] || die "plan には --var-file が必須です"
     [ -n "$PLAN" ] || die "plan には --out が必須です"
+    if [ "$REVIEW_ONLY" = "true" ] && [ -n "$RECEIPT" ]; then
+      die "review-planは--receiptを受け付けません"
+    fi
+    if [ "$REVIEW_ONLY" = "true" ] && [ "$RUNTIME_SYNC" = "true" ]; then
+      die "review-planは--runtime-migration専用です"
+    fi
     if [ "$RUNTIME_SYNC" = "true" ] && [ -n "$MIGRATION_ID" ]; then
       die "--runtime-sync と --runtime-migration は併用できません"
     fi
@@ -8551,15 +8717,19 @@ case "$COMMAND" in
       PRIOR_APPLY_RECEIPT_IDENTITY="$(stat_identity "$PRIOR_APPLY_RECEIPT")"
     fi
     PLAN="$(secure_new_file "$PLAN")"
-    RECEIPT="${RECEIPT:-${PLAN}.runtime-guard.json}"
-    RECEIPT="$(secure_new_file "$RECEIPT")"
-    [ "$(dirname "$PLAN")" = "$(dirname "$RECEIPT")" ] ||
-      die "planとreceiptは同じprivate directoryへ出力してください"
+    if [ "$REVIEW_ONLY" != "true" ]; then
+      RECEIPT="${RECEIPT:-${PLAN}.runtime-guard.json}"
+      RECEIPT="$(secure_new_file "$RECEIPT")"
+      [ "$(dirname "$PLAN")" = "$(dirname "$RECEIPT")" ] ||
+        die "planとreceiptは同じprivate directoryへ出力してください"
+    fi
     ensure_tmp
+    assert_guard_paths_clean
     STAGE="$(mktemp -d "$(dirname "$PLAN")/.teamagent-runtime-plan.XXXXXX")"
     chmod 700 "$STAGE"
     STAGE_PLAN="$STAGE/plan.tfplan"
     STAGE_RECEIPT="$STAGE/receipt.json"
+    STAGE_REVIEWED_PLAN="$STAGE/reviewed-plan.json"
     case "$VAR_FILE" in
       *.json) STAGE_VAR="$STAGE/terraform.tfvars.json" ;;
       *) STAGE_VAR="$STAGE/terraform.tfvars" ;;
@@ -8616,6 +8786,7 @@ case "$COMMAND" in
     MODE="sync"
     MIGRATION_KIND=""
     MIGRATION_JSON=""
+    MIGRATION_CONTRACT_SHA256=""
     PREFLIGHT_SHA256=""
     REQUIRED_MIGRATION_ID=""
     REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256=""
@@ -8632,12 +8803,23 @@ case "$COMMAND" in
     if [ -n "$MIGRATION_ID" ]; then
       MODE="migration"
       MIGRATION_JSON="$TMP_ROOT/migration.json"
-      migration_to_file "$MIGRATION_ID" "$MIGRATION_JSON"
+      if [ "$REVIEW_ONLY" = "true" ]; then
+        migration_to_file "$MIGRATION_ID" "$MIGRATION_JSON" candidate
+      else
+        migration_to_file "$MIGRATION_ID" "$MIGRATION_JSON" final
+      fi
+      MIGRATION_CONTRACT_SHA256="$(
+        normalized_migration_manifest_sha256 "$MIGRATION_ID"
+      )"
       validate_migration_source "$TMP_ROOT/live-before.json" "$MIGRATION_JSON"
       verify_preflight_receipt \
         "$PREFLIGHT_RECEIPT" "$MIGRATION_ID" "$MIGRATION_JSON" \
         "$TMP_ROOT/live-before.json"
       PREFLIGHT_SHA256="$(sha256_file "$PREFLIGHT_RECEIPT")"
+      TRANSITION_EPOCH="$(jq -er '.created_at_epoch' "$PREFLIGHT_RECEIPT")"
+      IMAGE_DEPLOYMENT_INTENT_ID="$(
+        jq -er '.reviewed_inputs.image_deployment_intent_id' "$MIGRATION_JSON"
+      )"
       MIGRATION_KIND="$(jq -er '.kind' "$MIGRATION_JSON")"
       DESIRED_INGEST_RULE="$(jq -r '.to.rule_states.ingest == "ENABLED"' "$MIGRATION_JSON")"
       DESIRED_MORNING_RULE="$(jq -r '.to.rule_states.morning == "ENABLED"' "$MIGRATION_JSON")"
@@ -8707,10 +8889,17 @@ case "$COMMAND" in
       "$TMP_ROOT/live-before.json" "$TMP_ROOT/proposed-hmac.json" "$MODE" \
       "$TRANSITION_EPOCH" "$TMP_ROOT/hmac-transition.json"
     validate_hmac_secret_metadata "$TMP_ROOT/proposed-hmac.json"
+    PLAN_CONTRACT_MODE="verify"
+    PLAN_CONTRACT_OUTPUT=""
+    if [ "$REVIEW_ONLY" = "true" ]; then
+      PLAN_CONTRACT_MODE="extract"
+      PLAN_CONTRACT_OUTPUT="$STAGE_REVIEWED_PLAN"
+    fi
     validate_plan \
       "$TMP_ROOT/plan.json" "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" \
       "$DESIRED_MCP_IMAGE" "$MIGRATION_JSON" "$TMP_ROOT/proposed-hmac.json" \
-      "$TMP_ROOT/state-before.json"
+      "$TMP_ROOT/state-before.json" "$PLAN_CONTRACT_MODE" \
+      "$PLAN_CONTRACT_OUTPUT"
     [ "$(sha256_file "$STAGE_PLAN")" = "$PLAN_SHA" ] || die "plan検証中の差替えを検出しました"
 
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
@@ -8788,6 +8977,27 @@ case "$COMMAND" in
         "$LOG_READINESS_RECEIPT" "$VERSIONING_RECEIPT" \
         "$TMP_ROOT/live-after.json"
     fi
+    if [ "$REVIEW_ONLY" = "true" ]; then
+      [ -s "$STAGE_REVIEWED_PLAN" ] ||
+        die "reviewed plan contractが生成されませんでした"
+      REVIEW_IDENTITY="$(stat_identity "$STAGE_REVIEWED_PLAN")"
+      ln "$STAGE_REVIEWED_PLAN" "$PLAN" ||
+        die "reviewed plan出力pathを原子的に確保できません"
+      PLAN_CREATED="true"
+      [ "$(stat_identity "$PLAN")" = "$REVIEW_IDENTITY" ] ||
+        die "reviewed plan出力pathの同一性を確認できません"
+      chmod 600 "$PLAN"
+      PUBLISHED="true"
+      trap - EXIT
+      rm -rf "$STAGE" "$TMP_ROOT"
+      TMP_ROOT=""
+      echo "✅ exact reviewed plan candidate: $PLAN"
+      echo "   migration: $MIGRATION_ID"
+      echo "   intent: $IMAGE_DEPLOYMENT_INTENT_ID"
+      echo "   このJSONだけをreviewed_planへcommitし、enabled=trueでfinal planを再生成してください"
+      exit 0
+    fi
+
     capture_image_release_context \
       "$STAGE_PLAN" "$TMP_ROOT/image-release-context.json"
     prepare_image_deployment_intent \
@@ -8846,6 +9056,7 @@ case "$COMMAND" in
       --arg guard_script_sha256 "$(sha256_file "$SCRIPT_PATH")" \
       --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
       --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
+      --arg migration_contract_sha256 "$MIGRATION_CONTRACT_SHA256" \
       --arg config_manifest_sha256 "$(sha256_file "$CONFIG_MANIFEST")" \
       --arg live_openclaw_image "$LIVE_OPENCLAW_IMAGE" \
       --arg live_mcp_image "$LIVE_MCP_IMAGE" \
@@ -8904,6 +9115,7 @@ case "$COMMAND" in
         guard_script_sha256:$guard_script_sha256,
         guard_jq_sha256:$guard_jq_sha256,
         migration_manifest_sha256:$migration_manifest_sha256,
+        migration_contract_sha256:$migration_contract_sha256,
         config_manifest_sha256:$config_manifest_sha256,
         images:{
           live:{
@@ -9499,7 +9711,7 @@ case "$COMMAND" in
     APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
       --arg kind "terraform-runtime-apply-receipt" \
-      --argjson schema_version 3 \
+      --argjson schema_version 4 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
@@ -9527,6 +9739,9 @@ case "$COMMAND" in
       )" \
       --arg apply_attempt_id "$APPLY_ATTEMPT_ID" \
       --arg source_receipt_sha256 "$(sha256_file "$RECEIPT")" \
+      --arg migration_contract_sha256 "$(
+        jq -r '.migration_contract_sha256' "$TMP_ROOT/verify/receipt.json"
+      )" \
       --arg plan_sha256 "$(sha256_file "$PLAN")" \
       --arg openclaw_rollout_result_sha256 "$(
         sha256_file "$OPENCLAW_ROLLOUT_RESULT"
@@ -9590,6 +9805,7 @@ case "$COMMAND" in
         image_deployment_intent_id:$image_deployment_intent_id,
         apply_attempt_id:$apply_attempt_id,
         source_receipt_sha256:$source_receipt_sha256,
+        migration_contract_sha256:$migration_contract_sha256,
         plan_sha256:$plan_sha256,
         openclaw_rollout_result_sha256:
           $openclaw_rollout_result_sha256,
@@ -9631,7 +9847,7 @@ case "$COMMAND" in
     chmod 600 "$APPLY_STAGE"
     jq -e '
       .kind == "terraform-runtime-apply-receipt" and
-      .schema_version == 3 and
+      .schema_version == 4 and
       .status == "applied" and
       .provenance_outcome == "applied" and
       .openclaw_rollout_result.passed == true and

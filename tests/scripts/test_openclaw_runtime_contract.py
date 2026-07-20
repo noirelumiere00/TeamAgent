@@ -1488,7 +1488,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
-    assert ".schema_version == 3" in apply_case
+    assert ".schema_version == 4" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
 
     evidence_tf = ROLLOUT_EVIDENCE_TF.read_text()

@@ -138,6 +138,52 @@ def _run_shell_guard(
     )
 
 
+def _run_shell_extract(
+    tmp_path: Path,
+    plan: dict[str, Any],
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    plan_path = tmp_path / "candidate-plan.json"
+    migration_path = tmp_path / "candidate-migration.json"
+    output_path = tmp_path / "reviewed-plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    migration_path.write_text(
+        json.dumps({"kind": "runtime", "reviewed_plan": None}),
+        encoding="utf-8",
+    )
+    function = re.search(
+        r"validate_manifest_change_allowlist\(\) \{.*?"
+        r"(?=\nvalidate_runtime_task_contracts\(\))",
+        _GUARD.read_text(encoding="utf-8"),
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    shell = "\n".join(
+        (
+            "set -euo pipefail",
+            f"TMP_ROOT={str(tmp_path)!r}",
+            f"PLAN_CONTRACT_HELPER={str(_SCRIPT)!r}",
+            'die() { echo "FATAL: $*" >&2; return 1; }',
+            function.group(0),
+            'validate_manifest_change_allowlist "$1" "$2" extract "$3"',
+        )
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            shell,
+            "validator",
+            str(plan_path),
+            str(migration_path),
+            str(output_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return result, output_path
+
+
 def test_exact_reviewed_contract_accepts_only_identical_mutations(
     tmp_path: Path,
 ) -> None:
@@ -246,3 +292,30 @@ def test_shell_migration_guard_still_rejects_pure_destroy(
 
     assert result.returncode == 1
     assert "pure destroy" in result.stderr
+
+
+def test_candidate_extract_then_final_verify_is_exact_and_reproducible(
+    tmp_path: Path,
+) -> None:
+    plan = _plan()
+
+    extracted, reviewed_path = _run_shell_extract(tmp_path, plan)
+    assert extracted.returncode == 0, extracted.stderr
+    reviewed = json.loads(reviewed_path.read_text(encoding="utf-8"))
+    assert reviewed == module.extract_contract(plan)
+
+    final = _run_shell_guard(tmp_path, plan, reviewed)
+    assert final.returncode == 0, final.stderr
+
+
+def test_runtime_guard_review_plan_is_side_effect_free_until_final_plan() -> None:
+    guard = _GUARD.read_text(encoding="utf-8")
+    branch = guard[guard.index("review-plan|plan)") : guard.index("\n  verify)")]
+
+    assert 'migration_to_file "$MIGRATION_ID" "$MIGRATION_JSON" candidate' in branch
+    assert 'PLAN_CONTRACT_MODE="extract"' in branch
+    assert ".reviewed_inputs.image_deployment_intent_id" in branch
+    assert ".created_at_epoch" in branch
+    review_exit = branch.index('echo "✅ exact reviewed plan candidate')
+    intent_write = branch.index("prepare_image_deployment_intent")
+    assert review_exit < intent_write

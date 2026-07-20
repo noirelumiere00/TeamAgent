@@ -569,7 +569,12 @@ def test_long_running_services_auto_rollback_and_rebalance(
             r"(?m)^\s*deployment_minimum_healthy_percent\s*=\s*0\s*$",
             block,
         )
-    elif name == "connect_web":
+    else:
+        assert re.search(
+            r"(?m)^\s*wait_for_steady_state\s*=\s*true\s*$",
+            block,
+        )
+    if name == "connect_web":
         assert "health_check_grace_period_seconds = 60" in block
 
 

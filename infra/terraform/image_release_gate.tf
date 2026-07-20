@@ -227,12 +227,14 @@ resource "terraform_data" "production_image_release_gate" {
     )
   }
 
-  # Every plan gets a distinct gate value. The trusted apply launcher replays
-  # this exact saved query and atomically consumes its intent and receipts in
-  # validate-deployment-preflight before terraform_apply_supervisor can start
-  # Terraform. This resource is only the plan-time dependency marker; an
-  # in-graph provisioner cannot order ahead of unrelated delete/replace actions.
-  triggers_replace = local.deployment_requested ? [plantimestamp()] : []
+  # The reviewed UUID is the one-use replacement trigger. A wall-clock
+  # plantimestamp would make an exact reviewed plan impossible to reproduce:
+  # the review plan and the final saved plan would differ even when every
+  # immutable input is unchanged. The trusted apply launcher still atomically
+  # consumes this intent and its receipts before Terraform can start.
+  triggers_replace = (
+    local.deployment_requested ? [var.image_deployment_intent_id] : []
+  )
 
   lifecycle {
     precondition {

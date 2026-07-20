@@ -224,7 +224,9 @@ https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups
 
 ## 必須入力
 
-第1段階を有効化するreview commitで、次を全てexact値で埋めます。
+第1段階のcandidate commitで、次を全てexact値で埋めます。この時点では
+`enabled=false`、`reviewed_plan=null`のままにし、固定UUIDの
+`reviewed_inputs.image_deployment_intent_id`も同じcommitへ含めます。
 
 1. connect/ingest/morning/canaryを含む全live task definition ARNと完全image digest。
 2. `0ff2ca8c…`（#255まで）とHMAC契約 `2de3b156…` の両方を含むWolfi coreの完全digest、
@@ -254,6 +256,20 @@ bash ../deploy/terraform_runtime_guard.sh preflight \
   --migration 2026-07-wolfi-runtime-v1 \
   --out "$ARTIFACT_DIR/preflight.json"
 
+bash ../deploy/terraform_runtime_guard.sh review-plan \
+  --var-file "$PWD/terraform.tfvars" \
+  --out "$ARTIFACT_DIR/runtime-reviewed-plan.json" \
+  --runtime-migration 2026-07-wolfi-runtime-v1 \
+  --preflight-receipt "$ARTIFACT_DIR/preflight.json" \
+  --alarm-delivery-receipt "$ARTIFACT_DIR/alarm-delivery.json" \
+  --versioning-receipt "$ARTIFACT_DIR/log-versioning.json" \
+  --log-readiness-receipt "$ARTIFACT_DIR/log-readiness.json" \
+  --alarm-migration-receipt "$ARTIFACT_DIR/alarm-migration-final.json"
+
+# runtime-reviewed-plan.jsonをそのままreviewed_planへ入れ、enabled=trueにする。
+# candidate commitから変更してよいpathはterraform_runtime_migrations.jsonだけ。
+# それ以外の入力・コード・Terraformを同時変更するとpreflight receiptは失効する。
+
 bash ../deploy/terraform_runtime_guard.sh plan \
   --var-file "$PWD/terraform.tfvars" \
   --out "$ARTIFACT_DIR/runtime.tfplan" \
@@ -272,6 +288,11 @@ bash ../deploy/terraform_runtime_guard.sh apply \
   --plan "$ARTIFACT_DIR/runtime.tfplan" \
   --out "$ARTIFACT_DIR/runtime-apply.json"
 ```
+
+`review-plan`はapply可能なplanやDynamoDB intentを公開せず、全resource change、
+drift、output、unknown、replace pathのhashを含むexact contractだけを出力します。
+final `plan`は同じ固定intent、同じpreflight時刻、同じreceipt、同じlive/stateから
+再生成したcontractの完全一致を要求します。Terraformのwall-clock値はplanへ入れません。
 
 preflightはcandidate task definitionを実際に登録し、fresh Fargate volume上でUID 10001の
 `/tmp` write、browser/cache/npx/yt-dlp、OpenClaw UID 65532と暗号化EFS writeを検証して
@@ -425,10 +446,13 @@ one-time bootstrap has provisioned the trusted
    promoter. It does not run Terraform.
 3. Set the applicable production image variable to the fixed release
    repository `@sha256:<digest>` and set `image_release_evidence` to the exact
-   receipt/signature keys and VersionIds. Do not set
-   `image_deployment_intent_id`; the planner creates it.
-4. Add the reviewed change to the exact runtime migration manifest. Store the
-   plan outside the worktree and create it only with the composed guard:
+   receipt/signature keys and VersionIds. Commit the one-use UUID under
+   `reviewed_inputs.image_deployment_intent_id`; the planner refuses a
+   caller-generated replacement at final-plan time.
+4. Add the candidate change to the exact runtime migration manifest, run
+   `review-plan`, then commit only its output as `reviewed_plan` together with
+   `enabled=true`. Store artifacts outside the worktree and create the final
+   saved plan only with the composed guard:
 
    ```bash
    bash infra/deploy/terraform_runtime_guard.sh plan \

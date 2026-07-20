@@ -41,7 +41,7 @@ case "$1" in
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-alarm-recipient-ack-signer/teamagent-alarm-recipient-ack"
     SESSION_SECONDS=3600
     ;;
-  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|attest-media-cutover|attest-log-readiness|preflight|plan|verify|apply)
+  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|attest-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
     SESSION_NAME="teamagent-terraform-worker"
     SOURCE_IDENTITY="teamagent-production-terraform"

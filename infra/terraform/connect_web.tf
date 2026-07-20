@@ -538,12 +538,13 @@ resource "aws_ecs_task_definition" "connect_web" {
 
 # --- ECS Service ---
 resource "aws_ecs_service" "connect_web" {
-  count           = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
-  name            = "${var.project_name}-${var.environment}-connect-web"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = local.hmac_promoted_task_definition_arns.connect_web
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  count                 = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
+  name                  = "${var.project_name}-${var.environment}-connect-web"
+  cluster               = aws_ecs_cluster.main.id
+  task_definition       = local.hmac_promoted_task_definition_arns.connect_web
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
 
   availability_zone_rebalancing = "ENABLED"
 

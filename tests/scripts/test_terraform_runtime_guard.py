@@ -459,6 +459,7 @@ def _service_tf(component: str) -> dict[str, Any]:
         "capacity_provider_strategy": [],
         "platform_version": "LATEST",
         "availability_zone_rebalancing": "ENABLED",
+        "wait_for_steady_state": False,
         "deployment_maximum_percent": 100 if component == "openclaw" else 200,
         "deployment_minimum_healthy_percent": 0 if component == "openclaw" else 100,
         "deployment_circuit_breaker": [
@@ -656,6 +657,8 @@ def _safe_plan() -> dict[str, Any]:
         before = _service_tf(component)
         after = copy.deepcopy(before)
         after["task_definition"] = None
+        if component in {"mcp", "connect_web"}:
+            after["wait_for_steady_state"] = True
         change = _change(address, "aws_ecs_service", ["update"], before, after)
         change["change"]["after_unknown"] = {"task_definition": True}
         changes.append(change)
@@ -1000,7 +1003,7 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     elif scenario == "service_force_deployment":
         service["change"]["after"]["force_new_deployment"] = True
     elif scenario == "service_wait":
-        service["change"]["after"]["wait_for_steady_state"] = True
+        service["change"]["after"]["wait_for_steady_state"] = False
     elif scenario == "service_triggers":
         service["change"]["after"]["triggers"] = {"unsafe": "change"}
     elif scenario == "service_connect":
@@ -2582,6 +2585,13 @@ def test_runtime_migrations_require_exact_reviewed_plan_before_enablement() -> N
     for migration in migrations["migrations"].values():
         assert migration["enabled"] is False
         assert migration["reviewed_plan"] is None
+        assert set(migration["reviewed_inputs"]) == {
+            "image_deployment_intent_id"
+        }
+        assert re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            migration["reviewed_inputs"]["image_deployment_intent_id"],
+        )
         assert "allowed_changes" not in migration
 
 

@@ -258,7 +258,8 @@ def test_saved_gate_query_is_consumed_before_terraform_apply_can_start() -> None
     guard = RUNTIME_GUARD.read_text(encoding="utf-8")
 
     assert "triggers_replace" in body
-    assert "plantimestamp()" in body
+    assert "[var.image_deployment_intent_id]" in body
+    assert "plantimestamp()" not in body
     assert 'provisioner "local-exec"' not in body
     assert "deployment_gate_query    = local.deployment_gate_query" in body
     assert "receipt_authorization_expires_at" in body

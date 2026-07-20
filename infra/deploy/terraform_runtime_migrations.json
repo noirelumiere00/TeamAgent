@@ -239,6 +239,9 @@
         "tiktok",
         "x_buzz"
       ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "15240b8f-0aeb-44aa-afa1-2d2f561ed730"
+      },
       "reviewed_plan": null
     },
     "2026-07-enable-ingest-canary-v1": {
@@ -341,6 +344,9 @@
         "activation-ingest-acl-quarantine",
         "activation-canary"
       ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "dc0db656-b306-41cd-9832-dc91a17eab69"
+      },
       "reviewed_plan": null
     }
   },
