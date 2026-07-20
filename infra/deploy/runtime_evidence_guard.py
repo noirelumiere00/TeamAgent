@@ -53,6 +53,13 @@ SETTLE_SECONDS = 900
 MEDIA_MAPPING_DISABLE_TIMEOUT_SECONDS = 120
 MEDIA_MAPPING_POLL_SECONDS = 5
 MEDIA_CUTOVER_LEDGER_PREFIX = "media-cutover#"
+MEDIA_ATTESTOR_ARN_PREFIX = (
+    "arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/"
+)
+MEDIA_ATTESTOR_ARN = (
+    f"{MEDIA_ATTESTOR_ARN_PREFIX}teamagent-media-cutover-attestor"
+)
+MEDIA_ATTESTOR_KEY_ALIAS = "alias/teamagent-dev-media-cutover-attestor"
 MEDIA_JOBS_QUEUE = "teamagent-dev-tiktok-acquire-jobs"
 MEDIA_JOBS_DLQ = "teamagent-dev-tiktok-acquire-dlq"
 MEDIA_DISPATCH_FUNCTION = "teamagent-dev-tiktok-acquire-dispatch"
@@ -6027,9 +6034,10 @@ def _media_image(value: str, *, legacy: bool) -> str:
     return value
 
 
-def _media_record_id(desired_image: str) -> str:
-    digest = sha256_bytes(desired_image.encode())
-    return f"{MEDIA_CUTOVER_LEDGER_PREFIX}{digest}"
+def _media_record_id(intent_id: str) -> str:
+    if not UUID4.fullmatch(intent_id):
+        raise ContractError("media deployment intent ID is not a lowercase UUIDv4")
+    return f"{MEDIA_CUTOVER_LEDGER_PREFIX}{intent_id}"
 
 
 def _media_http_source(
@@ -6288,6 +6296,33 @@ def _media_producer_state(
         services[0].get("taskDefinition"),
         "MCP producer task definition",
     )
+    service = services[0]
+    deployments = service.get("deployments")
+    desired_count = service.get("desiredCount")
+    running_count = service.get("runningCount")
+    pending_count = service.get("pendingCount")
+    if (
+        not isinstance(deployments, list)
+        or len(deployments) != 1
+        or not isinstance(deployments[0], Mapping)
+        or not isinstance(desired_count, int)
+        or isinstance(desired_count, bool)
+        or desired_count < 1
+        or running_count != desired_count
+        or pending_count != 0
+    ):
+        raise ContractError("MCP producer service is not at a unique steady deployment")
+    deployment = deployments[0]
+    if (
+        deployment.get("status") != "PRIMARY"
+        or deployment.get("rolloutState") != "COMPLETED"
+        or deployment.get("taskDefinition") != task_definition
+        or deployment.get("desiredCount") != desired_count
+        or deployment.get("runningCount") != desired_count
+        or deployment.get("pendingCount") != 0
+        or deployment.get("failedTasks", 0) != 0
+    ):
+        raise ContractError("MCP producer PRIMARY deployment is not completed and steady")
     task = _media_task_definition(
         aws,
         task_definition,
@@ -6316,11 +6351,103 @@ def _media_producer_state(
     flags = {name: matching[0][name] for name in ("USE_VIDEO_TOOLS", "USE_TIKTOK_TOOLS")}
     if any(value.lower() not in {"0", "false", "no", "off"} for value in flags.values()):
         raise ContractError("MCP media producers are not explicitly disabled")
+
+    service_tasks: dict[str, list[str]] = {}
+    for desired_status in ("RUNNING", "PENDING"):
+        pages = aws.pages(
+            "ecs",
+            "list-tasks",
+            (
+                "--cluster",
+                MCP_CLUSTER,
+                "--service-name",
+                MCP_SERVICE,
+                "--desired-status",
+                desired_status,
+            ),
+            token_field="nextToken",
+        )
+        task_arns: list[str] = []
+        for page_index, (task_response, task_http) in enumerate(pages):
+            _media_http_source(
+                sources,
+                service="ecs",
+                operation=f"list-service-tasks:{desired_status}",
+                response=task_response,
+                http=task_http,
+                page=page_index,
+            )
+            values = task_response.get("taskArns")
+            if not isinstance(values, list) or not all(
+                isinstance(value, str) for value in values
+            ):
+                raise ContractError("MCP service task page is malformed")
+            task_arns.extend(values)
+        if len(task_arns) != len(set(task_arns)):
+            raise ContractError("MCP service task inventory contains duplicates")
+        service_tasks[desired_status.lower()] = sorted(task_arns)
+    if service_tasks["pending"] or len(service_tasks["running"]) != desired_count:
+        raise ContractError("MCP active task inventory is not steady")
+
+    described_task_arns: list[str] = []
+    for batch_index, offset in enumerate(range(0, len(service_tasks["running"]), 100)):
+        batch = service_tasks["running"][offset : offset + 100]
+        described, described_http = aws.call(
+            "ecs",
+            "describe-tasks",
+            (
+                "--cluster",
+                MCP_CLUSTER,
+                "--tasks",
+                *batch,
+            ),
+        )
+        _media_http_source(
+            sources,
+            service="ecs",
+            operation="describe-service-tasks:RUNNING",
+            response=described,
+            http=described_http,
+            page=batch_index,
+        )
+        described_tasks = described.get("tasks")
+        if (
+            described.get("failures", []) != []
+            or not isinstance(described_tasks, list)
+            or len(described_tasks) != len(batch)
+            or not all(isinstance(item, Mapping) for item in described_tasks)
+        ):
+            raise ContractError("MCP active task description is incomplete")
+        for described_task in described_tasks:
+            task_arn = require_string(
+                described_task.get("taskArn"),
+                "MCP active task ARN",
+            )
+            if (
+                task_arn not in batch
+                or described_task.get("taskDefinitionArn") != task_definition
+                or described_task.get("group") != f"service:{MCP_SERVICE}"
+                or described_task.get("desiredStatus") != "RUNNING"
+                or described_task.get("lastStatus") != "RUNNING"
+            ):
+                raise ContractError("MCP active task is not on the unique PRIMARY deployment")
+            described_task_arns.append(task_arn)
+    if sorted(described_task_arns) != service_tasks["running"]:
+        raise ContractError("MCP active task descriptions do not cover the service")
     return {
         "cluster": MCP_CLUSTER,
         "service": MCP_SERVICE,
         "task_definition": task_definition,
         "flags": flags,
+        "deployment": {
+            "status": "PRIMARY",
+            "rollout_state": "COMPLETED",
+            "desired_count": desired_count,
+            "running_count": desired_count,
+            "pending_count": 0,
+            "failed_tasks": 0,
+        },
+        "tasks": service_tasks,
     }
 
 
@@ -6525,6 +6652,10 @@ def _media_disable_mapping(
 def _media_claims(
     *,
     desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+    attestation_nonce: str,
     identity: Mapping[str, Any],
     lock_receipt: Mapping[str, Any],
     initial_lock: Mapping[str, Any],
@@ -6533,15 +6664,22 @@ def _media_claims(
     first: Mapping[str, Any],
     second: Mapping[str, Any],
 ) -> dict[str, Any]:
+    if (
+        not UUID4.fullmatch(image_deployment_intent_id)
+        or not HEX64.fullmatch(migration_contract_sha256)
+        or not HEX64.fullmatch(reviewed_plan_sha256)
+        or not HEX64.fullmatch(attestation_nonce)
+    ):
+        raise ContractError("media cutover release binding is malformed")
     first_epoch = require_int(
         first.get("observed_at_epoch"),
         "media first observation",
     )
-    second_epoch = require_int(
-        second.get("observed_at_epoch"),
-        "media second observation",
+    second_earliest_epoch = require_int(
+        second.get("earliest_observed_at_epoch"),
+        "media second earliest observation",
     )
-    if second_epoch - first_epoch < SETTLE_SECONDS:
+    if second_earliest_epoch - first_epoch < SETTLE_SECONDS:
         raise ContractError("media cutover has not settled for 900 AWS seconds")
     if first.get("state_sha256") != second.get("state_sha256"):
         raise ContractError("media cutover state changed during the settle window")
@@ -6558,12 +6696,17 @@ def _media_claims(
     )
     return {
         "kind": "teamagent-media-envelope-cutover",
-        "schema_version": 1,
+        "schema_version": 2,
         "account_id": ACCOUNT_ID,
         "region": REGION,
-        "record_id": _media_record_id(desired_image),
+        "record_id": _media_record_id(image_deployment_intent_id),
+        "image_deployment_intent_id": image_deployment_intent_id,
+        "migration_contract_sha256": migration_contract_sha256,
+        "reviewed_plan_sha256": reviewed_plan_sha256,
+        "attestation_nonce": attestation_nonce,
         "desired_image": desired_image,
         "legacy_image": legacy_image,
+        "prepared_by_principal_arn": identity.get("Arn"),
         "caller_identity_sha256": canonical_sha256(identity),
         "shared_lock": {
             "record_id": SHARED_LOCK_RECORD_ID,
@@ -6580,10 +6723,201 @@ def _media_claims(
     }
 
 
+def _media_prepared_challenge(
+    aws: AwsCli,
+    *,
+    claims: Mapping[str, Any],
+    prepared_at_epoch: int,
+) -> dict[str, Any]:
+    challenge = {
+        "kind": "teamagent-media-envelope-cutover-challenge",
+        "schema_version": 2,
+        "claims": dict(claims),
+        "claims_sha256": canonical_sha256(claims),
+        "prepared_at_epoch": prepared_at_epoch,
+        "expires_at_epoch": prepared_at_epoch + 3600,
+        "aws_executable": asdict(aws.evidence),
+    }
+    challenge["challenge_sha256"] = canonical_sha256(challenge)
+    return challenge
+
+
+def _validate_media_prepared_challenge(
+    aws: AwsCli,
+    challenge: Mapping[str, Any],
+    *,
+    desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+    now_epoch: int,
+) -> dict[str, Any]:
+    require_keys(
+        challenge,
+        (
+            "kind",
+            "schema_version",
+            "claims",
+            "claims_sha256",
+            "prepared_at_epoch",
+            "expires_at_epoch",
+            "aws_executable",
+            "challenge_sha256",
+        ),
+        "media cutover challenge",
+    )
+    claims = challenge.get("claims")
+    if not isinstance(claims, dict):
+        raise ContractError("media cutover challenge claims are missing")
+    unhashed = dict(challenge)
+    del unhashed["challenge_sha256"]
+    prepared_at = require_int(
+        challenge.get("prepared_at_epoch"),
+        "media challenge preparation",
+    )
+    expires_at = require_int(
+        challenge.get("expires_at_epoch"),
+        "media challenge expiry",
+    )
+    _validate_media_claims(
+        claims,
+        desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+    )
+    second = claims.get("second_observation")
+    if not isinstance(second, Mapping):
+        raise ContractError("media challenge second observation is missing")
+    second_at = require_int(
+        second.get("observed_at_epoch"),
+        "media challenge second observation",
+    )
+    if (
+        challenge.get("kind") != "teamagent-media-envelope-cutover-challenge"
+        or challenge.get("schema_version") != 2
+        or challenge.get("claims_sha256") != canonical_sha256(claims)
+        or challenge.get("challenge_sha256") != canonical_sha256(unhashed)
+        or challenge.get("aws_executable") != asdict(aws.evidence)
+        or prepared_at < second_at
+        or expires_at != prepared_at + 3600
+        or now_epoch < prepared_at
+        or now_epoch >= expires_at
+    ):
+        raise ContractError("media cutover challenge binding/lifetime differs")
+    return claims
+
+
+def validate_media_attestor_key_metadata(metadata: Mapping[str, Any]) -> str:
+    key_arn = require_string(metadata.get("Arn"), "media attestor KMS key ARN")
+    if (
+        metadata.get("AWSAccountId") != ACCOUNT_ID
+        or not re.fullmatch(
+            rf"arn:aws:kms:{re.escape(REGION)}:{ACCOUNT_ID}:key/"
+            r"[0-9a-fA-F-]{36}",
+            key_arn,
+        )
+        or metadata.get("KeyUsage") != "SIGN_VERIFY"
+        or metadata.get("KeySpec") != "ECC_NIST_P256"
+        or metadata.get("KeyState") != "Enabled"
+        or metadata.get("Enabled") is not True
+        or metadata.get("KeyManager") != "CUSTOMER"
+        or metadata.get("Origin") != "AWS_KMS"
+        or metadata.get("MultiRegion", False) is not False
+        or metadata.get("SigningAlgorithms") != ["ECDSA_SHA_256"]
+    ):
+        raise ContractError("media attestor KMS key is not the exact signing contract")
+    return key_arn
+
+
+def _validated_media_attestor_key(
+    aws: AwsCli,
+) -> tuple[str, dict[str, Any], str, HttpEvidence]:
+    response, http = aws.call(
+        "kms",
+        "describe-key",
+        ("--key-id", MEDIA_ATTESTOR_KEY_ALIAS),
+    )
+    metadata = response.get("KeyMetadata")
+    if not isinstance(metadata, dict):
+        raise ContractError("media attestor KMS key metadata is missing")
+    key_arn = validate_media_attestor_key_metadata(metadata)
+    return key_arn, metadata, canonical_sha256(metadata), http
+
+
+def _media_signed_claims(
+    *,
+    prepared_claims: Mapping[str, Any],
+    challenge_sha256: str,
+    signer_arn: str,
+    attested_at_epoch: int,
+    expires_at_epoch: int,
+    attestor_observation: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        **dict(prepared_claims),
+        "prepared_claims_sha256": canonical_sha256(prepared_claims),
+        "prepared_challenge_sha256": challenge_sha256,
+        "attestor_principal_arn": signer_arn,
+        "attested_at_epoch": attested_at_epoch,
+        "expires_at_epoch": expires_at_epoch,
+        "attestor_observation": dict(attestor_observation),
+    }
+
+
+def _verify_media_signature(
+    aws: AwsCli,
+    *,
+    claims: Mapping[str, Any],
+    signature_base64: str,
+    expected_key_arn: str,
+) -> dict[str, Any]:
+    try:
+        signature = base64.b64decode(signature_base64, validate=True)
+    except ValueError as exc:
+        raise ContractError("media attestor signature is not canonical base64") from exc
+    with tempfile.TemporaryDirectory(prefix="teamagent-media-attestation.") as directory:
+        root = Path(directory)
+        message_path = root / "claims.json"
+        signature_path = root / "signature.bin"
+        message_path.write_bytes(canonical_bytes(claims))
+        signature_path.write_bytes(signature)
+        os.chmod(message_path, 0o600)
+        os.chmod(signature_path, 0o600)
+        response, http = aws.call(
+            "kms",
+            "verify",
+            (
+                "--key-id",
+                MEDIA_ATTESTOR_KEY_ALIAS,
+                "--message",
+                f"fileb://{message_path}",
+                "--message-type",
+                "RAW",
+                "--signature",
+                f"fileb://{signature_path}",
+                "--signing-algorithm",
+                "ECDSA_SHA_256",
+            ),
+        )
+    if (
+        response.get("SignatureValid") is not True
+        or response.get("KeyId") != expected_key_arn
+    ):
+        raise ContractError("media attestor KMS signature is invalid")
+    return {
+        "signature_sha256": sha256_bytes(signature),
+        "verified_at_epoch": http.date_epoch,
+        "verify_request_id_sha256": sha256_bytes(http.request_id.encode()),
+    }
+
+
 def _media_ledger_item(
     claims: Mapping[str, Any],
     *,
     recorded_at_epoch: int,
+    kms_key_arn: str,
+    signature_base64: str,
 ) -> dict[str, dict[str, str]]:
     first = claims.get("first_observation")
     second = claims.get("second_observation")
@@ -6591,9 +6925,15 @@ def _media_ledger_item(
         raise ContractError("media cutover claims omit observations")
     return {
         "record_id": _dynamodb_value(require_string(claims.get("record_id"), "media record ID")),
-        "record_type": _dynamodb_value("teamagent.media-envelope-cutover"),
-        "schema_version": _dynamodb_value(1),
+        "record_type": _dynamodb_value("teamagent.media-envelope-cutover-attestation"),
+        "schema_version": _dynamodb_value(2),
         "status": _dynamodb_value("READY"),
+        "image_deployment_intent_id": _dynamodb_value(
+            require_string(
+                claims.get("image_deployment_intent_id"),
+                "media deployment intent ID",
+            )
+        ),
         "desired_image": _dynamodb_value(
             require_string(claims.get("desired_image"), "media desired image")
         ),
@@ -6602,6 +6942,8 @@ def _media_ledger_item(
         ),
         "claims_sha256": _dynamodb_value(canonical_sha256(claims)),
         "claims_json": _dynamodb_value(canonical_bytes(claims).decode().rstrip("\n")),
+        "kms_key_arn": _dynamodb_value(kms_key_arn),
+        "signature_base64": _dynamodb_value(signature_base64),
         "first_observed_at_epoch": _dynamodb_value(
             require_int(first.get("observed_at_epoch"), "first observation")
         ),
@@ -6637,6 +6979,9 @@ def _validate_media_source(source: Mapping[str, Any], label: str) -> int:
         ("ecs", "describe-services:mcp"),
         ("ecs", "describe-task-definition:mcp"),
         ("ecs", "describe-task-definition:legacy-media"),
+        ("ecs", "list-service-tasks:RUNNING"),
+        ("ecs", "list-service-tasks:PENDING"),
+        ("ecs", "describe-service-tasks:RUNNING"),
         ("ecs", "list-tasks:RUNNING"),
         ("ecs", "list-tasks:PENDING"),
     }
@@ -6695,6 +7040,60 @@ def _validate_media_observation(
         or observed_at - earliest_at > 300
     ):
         raise ContractError(f"{label} hashes/timestamps differ")
+
+    identities: dict[tuple[str, str], list[int]] = {}
+    for source in sources:
+        identity = (
+            require_string(source.get("service"), f"{label} source service"),
+            require_string(source.get("operation"), f"{label} source operation"),
+        )
+        identities.setdefault(identity, []).append(
+            require_int(source.get("page"), f"{label} source page")
+        )
+    exact_once = {
+        ("sqs", f"get-queue-url:{MEDIA_JOBS_QUEUE}"),
+        ("sqs", f"get-queue-url:{MEDIA_JOBS_DLQ}"),
+        ("sqs", f"get-queue-attributes:{MEDIA_JOBS_QUEUE}"),
+        ("sqs", f"get-queue-attributes:{MEDIA_JOBS_DLQ}"),
+        ("lambda", "get-function-configuration:media-dispatch"),
+        ("ecs", "describe-services:mcp"),
+        ("ecs", "describe-task-definition:mcp"),
+        ("ecs", "describe-task-definition:legacy-media"),
+    }
+    paged = {
+        ("lambda", "list-event-source-mappings"),
+        ("ecs", "list-service-tasks:RUNNING"),
+        ("ecs", "list-service-tasks:PENDING"),
+        ("ecs", "list-tasks:RUNNING"),
+        ("ecs", "list-tasks:PENDING"),
+    }
+    for identity in exact_once:
+        if identities.get(identity) != [0]:
+            raise ContractError(f"{label} exact source multiplicity differs: {identity}")
+    for identity in paged:
+        pages = identities.get(identity)
+        if pages is None or pages != list(range(len(pages))):
+            raise ContractError(f"{label} paginated source coverage differs: {identity}")
+    producer = state.get("producer")
+    if not isinstance(producer, Mapping):
+        raise ContractError(f"{label} producer state is malformed")
+    producer_tasks = producer.get("tasks")
+    if not isinstance(producer_tasks, Mapping):
+        raise ContractError(f"{label} producer task state is malformed")
+    running = producer_tasks.get("running")
+    if not isinstance(running, list):
+        raise ContractError(f"{label} producer running tasks are malformed")
+    expected_describe_pages = list(range((len(running) + 99) // 100))
+    if identities.get(("ecs", "describe-service-tasks:RUNNING"), []) != (
+        expected_describe_pages
+    ):
+        raise ContractError(f"{label} active task description coverage differs")
+    if set(identities) != exact_once | paged | (
+        {("ecs", "describe-service-tasks:RUNNING")}
+        if expected_describe_pages
+        else set()
+    ):
+        raise ContractError(f"{label} source inventory is not exact")
     return state
 
 
@@ -6820,10 +7219,19 @@ def _validate_media_state_claim(
         raise ContractError("media mapping claim differs")
     require_keys(
         producer,
-        ("cluster", "service", "task_definition", "flags"),
+        (
+            "cluster",
+            "service",
+            "task_definition",
+            "flags",
+            "deployment",
+            "tasks",
+        ),
         "media producer claim",
     )
     flags = producer.get("flags")
+    deployment = producer.get("deployment")
+    producer_tasks = producer.get("tasks")
     if (
         producer.get("cluster") != MCP_CLUSTER
         or producer.get("service") != MCP_SERVICE
@@ -6838,6 +7246,34 @@ def _validate_media_state_claim(
             not isinstance(value, str)
             or value.lower() not in {"0", "false", "no", "off"}
             for value in flags.values()
+        )
+        or not isinstance(deployment, Mapping)
+        or deployment
+        != {
+            "status": "PRIMARY",
+            "rollout_state": "COMPLETED",
+            "desired_count": deployment.get("desired_count"),
+            "running_count": deployment.get("desired_count"),
+            "pending_count": 0,
+            "failed_tasks": 0,
+        }
+        or not isinstance(deployment.get("desired_count"), int)
+        or isinstance(deployment.get("desired_count"), bool)
+        or int(deployment["desired_count"]) < 1
+        or not isinstance(producer_tasks, Mapping)
+        or set(producer_tasks) != {"running", "pending"}
+        or producer_tasks.get("pending") != []
+        or not isinstance(producer_tasks.get("running"), list)
+        or len(producer_tasks["running"]) != deployment["desired_count"]
+        or len(producer_tasks["running"]) != len(set(producer_tasks["running"]))
+        or not all(
+            isinstance(task_arn, str)
+            and re.fullmatch(
+                rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task/"
+                rf"(?:{MCP_CLUSTER}/)?[0-9a-f]{{32}}",
+                task_arn,
+            )
+            for task_arn in producer_tasks["running"]
         )
     ):
         raise ContractError("media producer claim differs")
@@ -6948,6 +7384,9 @@ def _validate_media_claims(
     claims: Mapping[str, Any],
     *,
     desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
 ) -> tuple[int, int]:
     require_keys(
         claims,
@@ -6957,8 +7396,13 @@ def _validate_media_claims(
             "account_id",
             "region",
             "record_id",
+            "image_deployment_intent_id",
+            "migration_contract_sha256",
+            "reviewed_plan_sha256",
+            "attestation_nonce",
             "desired_image",
             "legacy_image",
+            "prepared_by_principal_arn",
             "caller_identity_sha256",
             "shared_lock",
             "mapping_uuid",
@@ -6976,11 +7420,18 @@ def _validate_media_claims(
     )
     if (
         claims.get("kind") != "teamagent-media-envelope-cutover"
-        or claims.get("schema_version") != 1
+        or claims.get("schema_version") != 2
         or claims.get("account_id") != ACCOUNT_ID
         or claims.get("region") != REGION
-        or claims.get("record_id") != _media_record_id(desired_image)
+        or claims.get("record_id") != _media_record_id(image_deployment_intent_id)
+        or claims.get("image_deployment_intent_id")
+        != image_deployment_intent_id
+        or claims.get("migration_contract_sha256")
+        != migration_contract_sha256
+        or claims.get("reviewed_plan_sha256") != reviewed_plan_sha256
+        or not HEX64.fullmatch(str(claims.get("attestation_nonce")))
         or claims.get("desired_image") != desired_image
+        or claims.get("prepared_by_principal_arn") != AUTOMATION_ARN
         or claims.get("settle_seconds") != SETTLE_SECONDS
         or not UUID4.fullmatch(mapping_uuid)
         or not HEX64.fullmatch(str(claims.get("caller_identity_sha256")))
@@ -7010,9 +7461,13 @@ def _validate_media_claims(
         second.get("observed_at_epoch"),
         "media second observation",
     )
+    second_earliest_epoch = require_int(
+        second.get("earliest_observed_at_epoch"),
+        "media second earliest observation",
+    )
     if (
         first.get("state_sha256") != second.get("state_sha256")
-        or second_epoch - first_epoch < SETTLE_SECONDS
+        or second_earliest_epoch - first_epoch < SETTLE_SECONDS
     ):
         raise ContractError("media cutover observations are not stably settled")
     shared_lock = claims.get("shared_lock")
@@ -7060,33 +7515,155 @@ def _validate_media_claims(
     return first_epoch, second_epoch
 
 
+def _media_prepared_claim_keys() -> set[str]:
+    return {
+        "kind",
+        "schema_version",
+        "account_id",
+        "region",
+        "record_id",
+        "image_deployment_intent_id",
+        "migration_contract_sha256",
+        "reviewed_plan_sha256",
+        "attestation_nonce",
+        "desired_image",
+        "legacy_image",
+        "prepared_by_principal_arn",
+        "caller_identity_sha256",
+        "shared_lock",
+        "mapping_uuid",
+        "disable_action",
+        "settle_seconds",
+        "first_observation",
+        "second_observation",
+    }
+
+
+def _validate_media_signed_claims(
+    claims: Mapping[str, Any],
+    *,
+    desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+) -> tuple[dict[str, Any], int, int]:
+    extra_keys = {
+        "prepared_claims_sha256",
+        "prepared_challenge_sha256",
+        "attestor_principal_arn",
+        "attested_at_epoch",
+        "expires_at_epoch",
+        "attestor_observation",
+    }
+    if set(claims) != _media_prepared_claim_keys() | extra_keys:
+        raise ContractError("media signed claims schema is not exact")
+    prepared = {key: claims[key] for key in _media_prepared_claim_keys()}
+    first_epoch, second_epoch = _validate_media_claims(
+        prepared,
+        desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+    )
+    attestor_observation = claims.get("attestor_observation")
+    second = prepared.get("second_observation")
+    if not isinstance(attestor_observation, Mapping) or not isinstance(second, Mapping):
+        raise ContractError("media attestor observation is missing")
+    attestor_state = _validate_media_observation(
+        attestor_observation,
+        "media attestor observation",
+    )
+    _validate_media_state_claim(
+        attestor_state,
+        legacy_image=require_string(
+            prepared.get("legacy_image"),
+            "media legacy image",
+        ),
+        mapping_uuid=require_string(
+            prepared.get("mapping_uuid"),
+            "media mapping UUID",
+        ),
+    )
+    attested_at = require_int(
+        claims.get("attested_at_epoch"),
+        "media attestation time",
+    )
+    expires_at = require_int(
+        claims.get("expires_at_epoch"),
+        "media attestation expiry",
+    )
+    attestor_observed_at = require_int(
+        attestor_observation.get("observed_at_epoch"),
+        "media attestor observation time",
+    )
+    if (
+        claims.get("prepared_claims_sha256") != canonical_sha256(prepared)
+        or not HEX64.fullmatch(str(claims.get("prepared_challenge_sha256")))
+        or claims.get("attestor_principal_arn") != MEDIA_ATTESTOR_ARN
+        or attestor_observation.get("state_sha256") != second.get("state_sha256")
+        or second_epoch > attested_at
+        or attested_at > attestor_observed_at
+        or not (attested_at < expires_at <= attested_at + 3600)
+    ):
+        raise ContractError("media signed claims binding/lifetime differs")
+    return prepared, first_epoch, second_epoch
+
+
 def _validate_media_ledger_item(
     item: Mapping[str, Any],
     *,
     desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+    expected_status: str = "READY",
+    apply_attempt_id: str = "",
+    plan_sha256: str = "",
 ) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
     expected_keys = {
         "record_id",
         "record_type",
         "schema_version",
         "status",
+        "image_deployment_intent_id",
         "desired_image",
         "legacy_image",
         "claims_sha256",
         "claims_json",
+        "kms_key_arn",
+        "signature_base64",
         "first_observed_at_epoch",
         "second_observed_at_epoch",
         "settle_seconds",
         "recorded_at_epoch",
         "audit_expires_at",
     }
+    if expected_status == "CONSUMED":
+        expected_keys.update(
+            {
+                "apply_attempt_id",
+                "plan_sha256",
+                "consumed_at_epoch",
+            }
+        )
+        if (
+            not UUID4.fullmatch(apply_attempt_id)
+            or not HEX64.fullmatch(plan_sha256)
+        ):
+            raise ContractError("consumed media authorization binding is malformed")
+    elif expected_status != "READY" or apply_attempt_id or plan_sha256:
+        raise ContractError("media ledger expected state is not approved")
     if set(item) != expected_keys:
         raise ContractError("media cutover ledger schema is not exact")
     if (
-        _ddb_scalar(item, "record_id") != _media_record_id(desired_image)
-        or _ddb_scalar(item, "record_type") != "teamagent.media-envelope-cutover"
-        or _ddb_scalar(item, "schema_version", "N") != "1"
-        or _ddb_scalar(item, "status") != "READY"
+        _ddb_scalar(item, "record_id")
+        != _media_record_id(image_deployment_intent_id)
+        or _ddb_scalar(item, "record_type")
+        != "teamagent.media-envelope-cutover-attestation"
+        or _ddb_scalar(item, "schema_version", "N") != "2"
+        or _ddb_scalar(item, "status") != expected_status
+        or _ddb_scalar(item, "image_deployment_intent_id")
+        != image_deployment_intent_id
         or _ddb_scalar(item, "desired_image") != desired_image
         or _ddb_scalar(item, "settle_seconds", "N") != str(SETTLE_SECONDS)
     ):
@@ -7097,9 +7674,24 @@ def _validate_media_ledger_item(
         raise ContractError("media cutover ledger claims are invalid") from exc
     if not isinstance(claims, dict):
         raise ContractError("media cutover ledger claims are not an object")
-    claims_first_epoch, claims_second_epoch = _validate_media_claims(
+    kms_key_arn = _ddb_scalar(item, "kms_key_arn")
+    signature_base64 = _ddb_scalar(item, "signature_base64")
+    if not re.fullmatch(
+        rf"arn:aws:kms:{re.escape(REGION)}:{ACCOUNT_ID}:key/"
+        r"[0-9a-fA-F-]{36}",
+        kms_key_arn,
+    ):
+        raise ContractError("media cutover ledger signing key is invalid")
+    try:
+        base64.b64decode(signature_base64, validate=True)
+    except ValueError as exc:
+        raise ContractError("media cutover ledger signature is invalid") from exc
+    _, claims_first_epoch, claims_second_epoch = _validate_media_signed_claims(
         claims,
         desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
     )
     numeric_values: dict[str, int] = {}
     for field in (
@@ -7112,37 +7704,73 @@ def _validate_media_ledger_item(
         if not re.fullmatch(r"0|[1-9][0-9]*", raw):
             raise ContractError(f"media cutover ledger {field} is not canonical")
         numeric_values[field] = int(raw)
+    if expected_status == "CONSUMED":
+        consumed_raw = _ddb_scalar(item, "consumed_at_epoch", "N")
+        if not re.fullmatch(r"0|[1-9][0-9]*", consumed_raw):
+            raise ContractError(
+                "media cutover ledger consumed_at_epoch is not canonical"
+            )
+        numeric_values["consumed_at_epoch"] = int(consumed_raw)
     first_epoch = numeric_values["first_observed_at_epoch"]
     second_epoch = numeric_values["second_observed_at_epoch"]
     recorded_at = numeric_values["recorded_at_epoch"]
     audit_expires = numeric_values["audit_expires_at"]
     if (
         canonical_sha256(claims) != _ddb_scalar(item, "claims_sha256")
-        or claims.get("record_id") != _media_record_id(desired_image)
+        or claims.get("record_id") != _media_record_id(image_deployment_intent_id)
         or claims.get("desired_image") != desired_image
         or not isinstance(claims.get("first_observation"), Mapping)
         or not isinstance(claims.get("second_observation"), Mapping)
         or claims_first_epoch != first_epoch
         or claims_second_epoch != second_epoch
-        or second_epoch - first_epoch < SETTLE_SECONDS
         or recorded_at < second_epoch
         or audit_expires != recorded_at + 31536000
     ):
         raise ContractError("media cutover ledger claims differ")
-    expected = _media_ledger_item(claims, recorded_at_epoch=recorded_at)
+    expected = _media_ledger_item(
+        claims,
+        recorded_at_epoch=recorded_at,
+        kms_key_arn=kms_key_arn,
+        signature_base64=signature_base64,
+    )
+    if expected_status == "CONSUMED":
+        if (
+            _ddb_scalar(item, "apply_attempt_id") != apply_attempt_id
+            or _ddb_scalar(item, "plan_sha256") != plan_sha256
+            or numeric_values["consumed_at_epoch"] < recorded_at
+        ):
+            raise ContractError("consumed media authorization differs")
+        expected = {
+            **expected,
+            "status": _dynamodb_value("CONSUMED"),
+            "apply_attempt_id": _dynamodb_value(apply_attempt_id),
+            "plan_sha256": _dynamodb_value(plan_sha256),
+            "consumed_at_epoch": _dynamodb_value(
+                numeric_values["consumed_at_epoch"]
+            ),
+        }
     if item != expected:
         raise ContractError("media cutover ledger item is not canonical")
     return claims, expected
 
 
-def attest_media_cutover(
+def prepare_media_cutover(
     aws: AwsCli,
     *,
     desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
     lock_receipt: Mapping[str, Any],
     sleeper: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any]:
     desired_image = _media_image(desired_image, legacy=False)
+    if (
+        not UUID4.fullmatch(image_deployment_intent_id)
+        or not HEX64.fullmatch(migration_contract_sha256)
+        or not HEX64.fullmatch(reviewed_plan_sha256)
+    ):
+        raise ContractError("media cutover challenge release binding is malformed")
     identity, identity_http = _caller_identity(aws)
     initial_lock = verify_runtime_workflow_lock(aws, lock_receipt)
     before = capture_media_cutover_state(
@@ -7188,6 +7816,10 @@ def attest_media_cutover(
         raise ContractError("media shared lock changed during attestation")
     claims = _media_claims(
         desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+        attestation_nonce=secrets.token_hex(32),
         identity=identity,
         lock_receipt=lock_receipt,
         initial_lock=initial_lock,
@@ -7196,11 +7828,113 @@ def attest_media_cutover(
         first=first,
         second=second,
     )
-    recorded_at = require_int(
-        second.get("observed_at_epoch"),
-        "media second observation",
+    prepared_at = require_int(
+        final_lock.get("verified_at_epoch"),
+        "media final lock observation",
     )
-    item = _media_ledger_item(claims, recorded_at_epoch=recorded_at)
+    if prepared_at < identity_http.date_epoch:
+        raise ContractError("media challenge preparation predates its caller")
+    return _media_prepared_challenge(
+        aws,
+        claims=claims,
+        prepared_at_epoch=prepared_at,
+    )
+
+
+def attest_media_cutover(
+    aws: AwsCli,
+    *,
+    challenge: Mapping[str, Any],
+    desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+) -> dict[str, Any]:
+    desired_image = _media_image(desired_image, legacy=False)
+    identity, identity_http = aws.call("sts", "get-caller-identity")
+    require_keys(identity, ("UserId", "Account", "Arn"), "media attestor identity")
+    signer_arn = require_string(identity.get("Arn"), "media attestor ARN")
+    if identity.get("Account") != ACCOUNT_ID or signer_arn != MEDIA_ATTESTOR_ARN:
+        raise ContractError("media signing requires the exact MFA attestor session")
+    prepared_claims = _validate_media_prepared_challenge(
+        aws,
+        challenge,
+        desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+        now_epoch=identity_http.date_epoch,
+    )
+    current = capture_media_cutover_state(
+        aws,
+        require_mapping_disabled=True,
+    )
+    second = prepared_claims.get("second_observation")
+    if (
+        not isinstance(second, Mapping)
+        or current.get("state_sha256") != second.get("state_sha256")
+    ):
+        raise ContractError("media runtime changed before independent attestation")
+    current_epoch = require_int(
+        current.get("observed_at_epoch"),
+        "media attestor observation",
+    )
+    challenge_expires = require_int(
+        challenge.get("expires_at_epoch"),
+        "media challenge expiry",
+    )
+    if current_epoch >= challenge_expires:
+        raise ContractError("media challenge expired during independent observation")
+    key_arn, _key_metadata, key_metadata_sha256, key_http = (
+        _validated_media_attestor_key(aws)
+    )
+    if key_http.date_epoch < current_epoch:
+        raise ContractError("media attestor KMS key observation is time-inverted")
+    signed_claims = _media_signed_claims(
+        prepared_claims=prepared_claims,
+        challenge_sha256=require_string(
+            challenge.get("challenge_sha256"),
+            "media challenge SHA-256",
+        ),
+        signer_arn=signer_arn,
+        attested_at_epoch=identity_http.date_epoch,
+        expires_at_epoch=challenge_expires,
+        attestor_observation=current,
+    )
+    with tempfile.TemporaryDirectory(prefix="teamagent-media-sign.") as directory:
+        claims_path = Path(directory) / "claims.json"
+        claims_path.write_bytes(canonical_bytes(signed_claims))
+        os.chmod(claims_path, 0o600)
+        signed, sign_http = aws.call(
+            "kms",
+            "sign",
+            (
+                "--key-id",
+                MEDIA_ATTESTOR_KEY_ALIAS,
+                "--message",
+                f"fileb://{claims_path}",
+                "--message-type",
+                "RAW",
+                "--signing-algorithm",
+                "ECDSA_SHA_256",
+            ),
+        )
+    if signed.get("KeyId") != key_arn or sign_http.date_epoch < key_http.date_epoch:
+        raise ContractError("media attestor KMS signing response is invalid")
+    signature_base64 = require_string(
+        signed.get("Signature"),
+        "media attestor KMS signature",
+    )
+    try:
+        base64.b64decode(signature_base64, validate=True)
+    except ValueError as exc:
+        raise ContractError("media attestor signature is not canonical base64") from exc
+    item = _media_ledger_item(
+        signed_claims,
+        recorded_at_epoch=current_epoch,
+        kms_key_arn=key_arn,
+        signature_base64=signature_base64,
+    )
     put_response, put_http = aws.call(
         "dynamodb",
         "put-item",
@@ -7224,7 +7958,7 @@ def attest_media_cutover(
                 {
                     "record_id": _dynamodb_value(
                         require_string(
-                            claims.get("record_id"),
+                            signed_claims.get("record_id"),
                             "media record ID",
                         )
                     )
@@ -7238,16 +7972,27 @@ def attest_media_cutover(
         raise ContractError("media cutover ledger was not durably confirmed")
     if not (
         identity_http.date_epoch
-        <= recorded_at
+        <= current_epoch
+        <= key_http.date_epoch
+        <= sign_http.date_epoch
         <= put_http.date_epoch
         <= confirmation_http.date_epoch
     ):
         raise ContractError("media cutover durable evidence is time-inverted")
     receipt = {
         "kind": "teamagent-media-envelope-cutover-receipt",
-        "schema_version": 1,
-        "claims": claims,
-        "claims_sha256": canonical_sha256(claims),
+        "schema_version": 2,
+        "challenge_sha256": challenge["challenge_sha256"],
+        "claims": signed_claims,
+        "claims_sha256": canonical_sha256(signed_claims),
+        "kms_key_arn": key_arn,
+        "kms_key_metadata_sha256": key_metadata_sha256,
+        "signature_base64": signature_base64,
+        "signature_sha256": sha256_bytes(
+            base64.b64decode(signature_base64, validate=True)
+        ),
+        "signed_at_epoch": sign_http.date_epoch,
+        "sign_request_id_sha256": sha256_bytes(sign_http.request_id.encode()),
         "ledger": {
             "table": SHARED_LEDGER_TABLE,
             "item_sha256": canonical_sha256(item),
@@ -7266,11 +8011,82 @@ def attest_media_cutover(
 def verify_media_cutover(
     aws: AwsCli,
     *,
+    receipt: Mapping[str, Any],
     desired_image: str,
+    image_deployment_intent_id: str,
+    migration_contract_sha256: str,
+    reviewed_plan_sha256: str,
+    expected_caller_arn: str = AUTOMATION_ARN,
+    expected_status: str = "READY",
+    apply_attempt_id: str = "",
+    plan_sha256: str = "",
 ) -> dict[str, Any]:
     desired_image = _media_image(desired_image, legacy=False)
-    identity, identity_http = _caller_identity(aws)
-    record_id = _media_record_id(desired_image)
+    require_keys(
+        receipt,
+        (
+            "kind",
+            "schema_version",
+            "challenge_sha256",
+            "claims",
+            "claims_sha256",
+            "kms_key_arn",
+            "kms_key_metadata_sha256",
+            "signature_base64",
+            "signature_sha256",
+            "signed_at_epoch",
+            "sign_request_id_sha256",
+            "ledger",
+            "receipt_sha256",
+        ),
+        "media cutover receipt",
+    )
+    unhashed_receipt = dict(receipt)
+    del unhashed_receipt["receipt_sha256"]
+    claims = receipt.get("claims")
+    ledger_receipt = receipt.get("ledger")
+    if not isinstance(claims, dict) or not isinstance(ledger_receipt, Mapping):
+        raise ContractError("media cutover receipt sections are malformed")
+    prepared_claims, _, claims_second_epoch = _validate_media_signed_claims(
+        claims,
+        desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+    )
+    if (
+        receipt.get("kind") != "teamagent-media-envelope-cutover-receipt"
+        or receipt.get("schema_version") != 2
+        or receipt.get("challenge_sha256")
+        != claims.get("prepared_challenge_sha256")
+        or receipt.get("claims_sha256") != canonical_sha256(claims)
+        or receipt.get("receipt_sha256") != canonical_sha256(unhashed_receipt)
+        or not HEX64.fullmatch(str(receipt.get("kms_key_metadata_sha256")))
+        or not HEX64.fullmatch(str(receipt.get("signature_sha256")))
+        or not HEX64.fullmatch(str(receipt.get("sign_request_id_sha256")))
+    ):
+        raise ContractError("media cutover receipt hash/binding differs")
+    signature_base64 = require_string(
+        receipt.get("signature_base64"),
+        "media cutover signature",
+    )
+    try:
+        signature = base64.b64decode(signature_base64, validate=True)
+    except ValueError as exc:
+        raise ContractError("media cutover receipt signature is invalid") from exc
+    if sha256_bytes(signature) != receipt.get("signature_sha256"):
+        raise ContractError("media cutover receipt signature hash differs")
+
+    if expected_caller_arn not in {AUTOMATION_ARN, MEDIA_ATTESTOR_ARN}:
+        raise ContractError("media verification caller contract is not approved")
+    identity, identity_http = aws.call("sts", "get-caller-identity")
+    require_keys(identity, ("UserId", "Account", "Arn"), "media verifier identity")
+    if (
+        identity.get("Account") != ACCOUNT_ID
+        or identity.get("Arn") != expected_caller_arn
+    ):
+        raise ContractError("media verification caller is not the expected session")
+    record_id = _media_record_id(image_deployment_intent_id)
     response, ledger_http = aws.call(
         "dynamodb",
         "get-item",
@@ -7288,15 +8104,81 @@ def verify_media_cutover(
     item = response.get("Item")
     if not isinstance(item, Mapping):
         raise ContractError("media cutover READY ledger is missing")
-    claims, expected_item = _validate_media_ledger_item(
+    ledger_claims, expected_item = _validate_media_ledger_item(
         item,
         desired_image=desired_image,
+        image_deployment_intent_id=image_deployment_intent_id,
+        migration_contract_sha256=migration_contract_sha256,
+        reviewed_plan_sha256=reviewed_plan_sha256,
+        expected_status=expected_status,
+        apply_attempt_id=apply_attempt_id,
+        plan_sha256=plan_sha256,
+    )
+    if (
+        ledger_claims != claims
+        or _ddb_scalar(expected_item, "kms_key_arn") != receipt.get("kms_key_arn")
+        or _ddb_scalar(expected_item, "signature_base64") != signature_base64
+    ):
+        raise ContractError("media cutover local receipt differs from durable READY row")
+    require_keys(
+        ledger_receipt,
+        (
+            "table",
+            "item_sha256",
+            "put_response_sha256",
+            "put_aws_date_epoch",
+            "put_request_id_sha256",
+            "confirmation_response_sha256",
+            "confirmed_at_epoch",
+            "confirmation_request_id_sha256",
+        ),
+        "media cutover ledger receipt",
+    )
+    original_ready_item = _media_ledger_item(
+        claims,
+        recorded_at_epoch=int(
+            _ddb_scalar(expected_item, "recorded_at_epoch", "N")
+        ),
+        kms_key_arn=require_string(
+            receipt.get("kms_key_arn"),
+            "media receipt KMS key ARN",
+        ),
+        signature_base64=signature_base64,
+    )
+    if (
+        ledger_receipt.get("table") != SHARED_LEDGER_TABLE
+        or ledger_receipt.get("item_sha256")
+        != canonical_sha256(original_ready_item)
+        or any(
+            not HEX64.fullmatch(str(ledger_receipt.get(field)))
+            for field in (
+                "put_response_sha256",
+                "put_request_id_sha256",
+                "confirmation_response_sha256",
+                "confirmation_request_id_sha256",
+            )
+        )
+    ):
+        raise ContractError("media cutover durable ledger receipt differs")
+    live_key_arn, _, live_key_metadata_sha256, key_http = (
+        _validated_media_attestor_key(aws)
+    )
+    if (
+        live_key_arn != receipt.get("kms_key_arn")
+        or live_key_metadata_sha256 != receipt.get("kms_key_metadata_sha256")
+    ):
+        raise ContractError("media cutover signing key changed after attestation")
+    signature_verification = _verify_media_signature(
+        aws,
+        claims=claims,
+        signature_base64=signature_base64,
+        expected_key_arn=live_key_arn,
     )
     current = capture_media_cutover_state(
         aws,
         require_mapping_disabled=True,
     )
-    second = claims.get("second_observation")
+    second = prepared_claims.get("second_observation")
     recorded_at = int(_ddb_scalar(expected_item, "recorded_at_epoch", "N"))
     current_epoch = require_int(
         current.get("observed_at_epoch"),
@@ -7310,27 +8192,53 @@ def verify_media_cutover(
             second.get("observed_at_epoch"),
             "media ledger observation",
         )
-        or canonical_sha256(identity) != claims.get("caller_identity_sha256")
+        or (
+            expected_caller_arn == AUTOMATION_ARN
+            and canonical_sha256(identity) != claims.get("caller_identity_sha256")
+        )
         or not (
             recorded_at
+            <= require_int(
+                ledger_receipt.get("put_aws_date_epoch"),
+                "media ledger put time",
+            )
+            <= require_int(
+                ledger_receipt.get("confirmed_at_epoch"),
+                "media ledger confirmation time",
+            )
             <= identity_http.date_epoch
             <= ledger_http.date_epoch
+            <= key_http.date_epoch
+            <= signature_verification["verified_at_epoch"]
             <= current_epoch
         )
+        or claims_second_epoch > recorded_at
+        or identity_http.date_epoch
+        >= require_int(claims.get("expires_at_epoch"), "media attestation expiry")
     ):
         raise ContractError("live media cutover state differs from READY ledger")
     verification = {
         "kind": "teamagent-media-envelope-cutover-verification",
-        "schema_version": 1,
+        "schema_version": 2,
         "account_id": ACCOUNT_ID,
         "region": REGION,
         "record_id": record_id,
+        "status": expected_status,
         "desired_image": desired_image,
         "claims_sha256": canonical_sha256(claims),
+        "signature_sha256": receipt["signature_sha256"],
+        "kms_key_arn": live_key_arn,
+        "image_deployment_intent_id": image_deployment_intent_id,
+        "migration_contract_sha256": migration_contract_sha256,
+        "reviewed_plan_sha256": reviewed_plan_sha256,
         "ledger_item_sha256": canonical_sha256(expected_item),
         "ledger_observed_at_epoch": ledger_http.date_epoch,
         "ledger_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
         "identity_observed_at_epoch": identity_http.date_epoch,
+        "kms_verified_at_epoch": signature_verification["verified_at_epoch"],
+        "kms_verify_request_id_sha256": signature_verification[
+            "verify_request_id_sha256"
+        ],
         "current_observation": current,
     }
     verification["verification_sha256"] = canonical_sha256(verification)
@@ -7431,13 +8339,35 @@ def _parser() -> argparse.ArgumentParser:
     alarm_final.add_argument("--receipt", required=True, type=Path)
     alarm_final.add_argument("--output", required=True, type=Path)
 
+    media_prepare = commands.add_parser("prepare-media-cutover")
+    media_prepare.add_argument("--desired-image", required=True)
+    media_prepare.add_argument("--image-deployment-intent-id", required=True)
+    media_prepare.add_argument("--migration-contract-sha256", required=True)
+    media_prepare.add_argument("--reviewed-plan-sha256", required=True)
+    media_prepare.add_argument("--lock-receipt", required=True, type=Path)
+    media_prepare.add_argument("--output", required=True, type=Path)
+
     media_attest = commands.add_parser("attest-media-cutover")
+    media_attest.add_argument("--challenge", required=True, type=Path)
     media_attest.add_argument("--desired-image", required=True)
-    media_attest.add_argument("--lock-receipt", required=True, type=Path)
+    media_attest.add_argument("--image-deployment-intent-id", required=True)
+    media_attest.add_argument("--migration-contract-sha256", required=True)
+    media_attest.add_argument("--reviewed-plan-sha256", required=True)
     media_attest.add_argument("--output", required=True, type=Path)
 
     media_verify = commands.add_parser("verify-media-cutover")
+    media_verify.add_argument("--receipt", required=True, type=Path)
     media_verify.add_argument("--desired-image", required=True)
+    media_verify.add_argument("--image-deployment-intent-id", required=True)
+    media_verify.add_argument("--migration-contract-sha256", required=True)
+    media_verify.add_argument("--reviewed-plan-sha256", required=True)
+    media_verify.add_argument(
+        "--expected-status",
+        choices=("READY", "CONSUMED"),
+        default="READY",
+    )
+    media_verify.add_argument("--apply-attempt-id", default="")
+    media_verify.add_argument("--plan-sha256", default="")
     media_verify.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -7549,16 +8479,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             migration_id=args.migration_id,
             phase_receipt=_load_json(args.receipt),
         )
+    elif args.command == "prepare-media-cutover":
+        result = prepare_media_cutover(
+            aws,
+            desired_image=args.desired_image,
+            image_deployment_intent_id=args.image_deployment_intent_id,
+            migration_contract_sha256=args.migration_contract_sha256,
+            reviewed_plan_sha256=args.reviewed_plan_sha256,
+            lock_receipt=_load_json(args.lock_receipt),
+        )
     elif args.command == "attest-media-cutover":
         result = attest_media_cutover(
             aws,
+            challenge=_load_json(args.challenge),
             desired_image=args.desired_image,
-            lock_receipt=_load_json(args.lock_receipt),
+            image_deployment_intent_id=args.image_deployment_intent_id,
+            migration_contract_sha256=args.migration_contract_sha256,
+            reviewed_plan_sha256=args.reviewed_plan_sha256,
         )
     elif args.command == "verify-media-cutover":
         result = verify_media_cutover(
             aws,
+            receipt=_load_json(args.receipt),
             desired_image=args.desired_image,
+            image_deployment_intent_id=args.image_deployment_intent_id,
+            migration_contract_sha256=args.migration_contract_sha256,
+            reviewed_plan_sha256=args.reviewed_plan_sha256,
+            expected_status=args.expected_status,
+            apply_attempt_id=args.apply_attempt_id,
+            plan_sha256=args.plan_sha256,
         )
     else:  # pragma: no cover
         raise AssertionError(args.command)

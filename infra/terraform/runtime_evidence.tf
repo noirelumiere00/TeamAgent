@@ -249,6 +249,93 @@ data "aws_iam_policy_document" "runtime_automation_boundary" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid    = "DenyAuthoritativeMediaLedgerMutation"
+    effect = "Deny"
+    actions = [
+      "dynamodb:BatchWriteItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:PartiQLDelete",
+      "dynamodb:PartiQLInsert",
+      "dynamodb:PartiQLUpdate",
+      "dynamodb:PutItem",
+      "dynamodb:TransactWriteItems",
+      "dynamodb:UpdateItem",
+    ]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAnyValue:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["media-cutover#*"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid    = "DenyAuthoritativeLedgerControlPlaneMutation"
+    effect = "Deny"
+    actions = [
+      "dynamodb:CreateTable",
+      "dynamodb:DeleteResourcePolicy",
+      "dynamodb:DeleteTable",
+      "dynamodb:ImportTable",
+      "dynamodb:PutResourcePolicy",
+      "dynamodb:RestoreTableFromBackup",
+      "dynamodb:RestoreTableToPointInTime",
+      "dynamodb:UpdateContinuousBackups",
+      "dynamodb:UpdateKinesisStreamingDestination",
+      "dynamodb:UpdateTable",
+      "dynamodb:UpdateTableReplicaAutoScaling",
+      "dynamodb:UpdateTimeToLive",
+    ]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+  }
+
+  statement {
+    sid    = "DenyMediaAttestorKeyMutationAndUse"
+    effect = "Deny"
+    actions = [
+      "kms:CancelKeyDeletion",
+      "kms:CreateGrant",
+      "kms:Decrypt",
+      "kms:DeleteImportedKeyMaterial",
+      "kms:DisableKey",
+      "kms:EnableKey",
+      "kms:ImportKeyMaterial",
+      "kms:PutKeyPolicy",
+      "kms:ReEncryptFrom",
+      "kms:ReEncryptTo",
+      "kms:ReplicateKey",
+      "kms:ScheduleKeyDeletion",
+      "kms:Sign",
+      "kms:TagResource",
+      "kms:UntagResource",
+      "kms:UpdateKeyDescription",
+      "kms:UpdatePrimaryRegion",
+    ]
+    resources = [aws_kms_key.media_cutover_attestor.arn]
+  }
+
+  statement {
+    sid    = "DenyMediaAttestorAliasMutation"
+    effect = "Deny"
+    actions = [
+      "kms:CreateAlias",
+      "kms:DeleteAlias",
+      "kms:UpdateAlias",
+    ]
+    resources = [
+      "arn:aws:kms:${var.aws_region}:718959508629:${local.media_cutover_attestor_key_alias}",
+      aws_kms_key.media_cutover_attestor.arn,
+    ]
+  }
 }
 
 resource "aws_iam_policy" "runtime_automation_boundary" {
@@ -1024,16 +1111,10 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
   }
 
   statement {
-    sid       = "DenyNonRolloutSigning"
-    effect    = "Deny"
-    actions   = ["kms:Sign"]
-    resources = ["*"]
-
-    condition {
-      test     = "ForAllValues:StringNotEquals"
-      variable = "kms:ResourceAliases"
-      values   = [local.openclaw_rollout_signing_alias]
-    }
+    sid           = "DenyNonRolloutSigning"
+    effect        = "Deny"
+    actions       = ["kms:Sign"]
+    not_resources = [aws_kms_key.openclaw_rollout_signing.arn]
   }
 
   statement {

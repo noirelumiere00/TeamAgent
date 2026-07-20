@@ -50,6 +50,7 @@ MAX_RELEASE_GRAPH_DIGESTS = 256
 DEPLOYMENT_INTENT_TABLE = "teamagent-dev-image-deployment-intents"
 DEPLOYMENT_LOCK_RECORD_ID = "lock#teamagent/terraform.tfstate"
 DEPLOYMENT_LOCK_LEASE_SECONDS = 300
+AWS_EXECUTABLE = "aws"
 ALLOWED_EXISTING_LOG_IMPORTS = {
     "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
         "/aws/codebuild/teamagent-dev-aiia-image-builder"
@@ -275,7 +276,11 @@ def _epoch_seconds(value: Any, *, label: str) -> str:
 
 def _dynamodb_transaction_token(apply_attempt_id: str, *, phase: str) -> str:
     attempt_id = _uuid4(apply_attempt_id, label="apply attempt ID")
-    if phase not in {"begin-apply", "consume-authorization"}:
+    if phase not in {
+        "begin-apply",
+        "begin-media-apply",
+        "consume-authorization",
+    }:
         raise EvidenceError("DynamoDB transaction phase is not allowlisted")
     return str(
         uuid.uuid5(
@@ -1312,8 +1317,18 @@ def _aws_environment() -> dict[str, str]:
     return environment
 
 
+def configure_aws_executable(path: Path) -> None:
+    """Pin AWS calls to a caller-validated absolute executable."""
+
+    global AWS_EXECUTABLE
+    resolved = path.resolve(strict=True)
+    if not resolved.is_absolute() or not resolved.is_file():
+        raise EvidenceError("AWS executable must be an absolute regular file")
+    AWS_EXECUTABLE = str(resolved)
+
+
 def _aws(*args: str, output: Path | None = None) -> str:
-    command = ["aws", *args]
+    command = [AWS_EXECUTABLE, *args]
     if output is not None:
         command.append(str(output))
     try:

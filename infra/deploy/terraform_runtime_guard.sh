@@ -14,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="21"
+GUARD_VERSION="22"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -29,6 +29,7 @@ EXPECTED_ALARM_DESTINATION_STATE_SHA256="c942dbb7b97da1f4d9debb1ba241ee89bf8c1d9
 LOG_VERSIONING_SETTLE_SECONDS=900
 TRUSTED_AUTOMATION_ROLE_NAME="teamagent-dev-terraform-runtime-automation"
 TRUSTED_AUTOMATION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+TRUSTED_MEDIA_ATTESTOR_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/teamagent-media-cutover-attestor"
 command -v realpath >/dev/null 2>&1 || {
   echo "★ realpath が必要です" >&2
   exit 1
@@ -44,6 +45,7 @@ GUARD_JQ_DIR="$REPO_ROOT/infra/deploy"
 GUARD_JQ="$GUARD_JQ_DIR/terraform_runtime_guard.jq"
 MIGRATION_FILE="$GUARD_JQ_DIR/terraform_runtime_migrations.json"
 EVIDENCE_HELPER="$GUARD_JQ_DIR/runtime_evidence_guard.py"
+MEDIA_APPLY_AUTHORIZER="$GUARD_JQ_DIR/media_cutover_apply_authorizer.py"
 PLAN_CONTRACT_HELPER="$GUARD_JQ_DIR/terraform_plan_contract.py"
 IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
@@ -72,8 +74,10 @@ usage:
     --challenge FILE --recipient-ack FILE --out RECEIPT
   terraform_runtime_guard.sh advance-alarm-migration \
     --phase PHASE [--publisher-id ID] [--delivery-receipt FILE] --out RECEIPT
+  terraform_runtime_guard.sh prepare-media-cutover \
+    --migration ID --out CHALLENGE
   terraform_runtime_guard.sh attest-media-cutover \
-    --desired-image IMAGE --out RECEIPT
+    --migration ID --challenge FILE --out RECEIPT
   terraform_runtime_guard.sh preflight --migration ID --out RECEIPT
   terraform_runtime_guard.sh review-plan --var-file FILE --out REVIEWED_PLAN \
     --runtime-migration ID --preflight-receipt FILE \
@@ -84,9 +88,14 @@ usage:
     (--runtime-sync | --runtime-migration ID --preflight-receipt FILE \
     --alarm-delivery-receipt FILE --versioning-receipt FILE \
     --log-readiness-receipt FILE --alarm-migration-receipt FILE \
-    [--prior-apply-receipt FILE]) [--receipt FILE]
+    [--prior-apply-receipt FILE]) [--media-cutover-receipt FILE] \
+    [--receipt FILE]
   terraform_runtime_guard.sh verify --plan PLAN [--receipt FILE]
-  terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] --out APPLY_RECEIPT
+  terraform_runtime_guard.sh authorize-media-apply --plan PLAN \
+    [--receipt FILE] --apply-attempt-id UUID --out AUTHORIZATION
+  terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] \
+    [--media-authorization FILE --apply-attempt-id UUID] \
+    --out APPLY_RECEIPT
 
 plan:
   --runtime-sync           主要5 runtimeとTikTok/x-buzz worker/dispatcherを完全照合
@@ -97,6 +106,7 @@ plan:
   --log-readiness-receipt FILE versioning 15分待機・配信・retention export証跡
   --alarm-migration-receipt FILE publisher別checkpointからlegacy retireまでのdurable chain
   --prior-apply-receipt FILE activationが要求する直前runtime migration成功apply receipt
+  --media-cutover-receipt FILE legacy→generic media切替の独立KMS署名済みreceipt
   --receipt FILE           receipt 出力先（default: PLAN.runtime-guard.json）
 
 review-plan:
@@ -112,6 +122,8 @@ review-plan:
     manifestと共有lockの下だけで全writer切断/versioning/cutoverを書き込む。
   - preflightは一時task/EFSを使う。
   - applyはexact trusted automation role、共有DynamoDB lock、直前verify、保存planだけを必須にする。
+  - legacy→generic media applyはMFA attestorが署名証跡・intent・lockを
+    1回のDynamoDB transactionで消費したauthorizationを必須にする。
   - runtime preflightはCosign+exact KMS keyで新core digestの署名とRekor証跡も検証する。
   - planはrefreshとTerraform state lockのみ行う。
   - 出力directoryは0700、var-fileは0600相当、出力plan/receiptは未存在が必須。
@@ -237,6 +249,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$GUARD_JQ"
   assert_regular_nonwritable "$MIGRATION_FILE"
   assert_regular_nonwritable "$EVIDENCE_HELPER"
+  assert_regular_nonwritable "$MEDIA_APPLY_AUTHORIZER"
   assert_regular_nonwritable "$PLAN_CONTRACT_HELPER"
   assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
@@ -250,6 +263,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
   assert_git_tracked_clean "$EVIDENCE_HELPER"
+  assert_git_tracked_clean "$MEDIA_APPLY_AUTHORIZER"
   assert_git_tracked_clean "$PLAN_CONTRACT_HELPER"
   assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
@@ -294,6 +308,7 @@ write_config_manifest() {
     "$GUARD_JQ" \
     "$MIGRATION_FILE" \
     "$EVIDENCE_HELPER" \
+    "$MEDIA_APPLY_AUTHORIZER" \
     "$PLAN_CONTRACT_HELPER" \
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
@@ -521,6 +536,20 @@ assert_trusted_automation_identity() {
     (.UserId | length) > 0
   ' "$identity" >/dev/null ||
     die "write-capable guard操作はexact trusted automation sessionだけが実行できます"
+}
+
+assert_trusted_media_attestor_identity() {
+  local identity="$TMP_ROOT/trusted-media-attestor-identity.json"
+  aws_cli sts get-caller-identity --output json > "$identity"
+  jq -e \
+    --arg account "$EXPECTED_ACCOUNT_ID" \
+    --arg arn "$TRUSTED_MEDIA_ATTESTOR_ARN" '
+    .Account == $account and
+    .Arn == $arn and
+    (.UserId | type) == "string" and
+    (.UserId | length) > 0
+  ' "$identity" >/dev/null ||
+    die "media署名・一回限りapply承認はexact MFA attestor sessionだけが実行できます"
 }
 
 capture_backend_identity() {
@@ -2573,6 +2602,49 @@ migration_to_file() {
     die "migrationが未登録・review phase不一致・期限切れ、またはdestination digestがexactではありません: $migration_id"
 }
 
+media_migration_binding_to_file() {
+  local migration_id="$1" output="$2" migration="$TMP_ROOT/media-migration.json"
+  migration_to_file "$migration_id" "$migration" final
+  jq -e '
+    .kind == "runtime" and
+    (.reviewed_plan | type) == "object" and
+    (.reviewed_inputs.image_deployment_intent_id |
+      test(
+        "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+      )) and
+    (.to.tiktok_image |
+      test(
+        "^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-media-worker@sha256:[0-9a-f]{64}$"
+      ))
+  ' "$migration" >/dev/null ||
+    die "media cutoverはreview済みruntime migrationのexact generic imageだけが対象です"
+  jq -n -S \
+    --arg migration_id "$migration_id" \
+    --arg desired_image "$(jq -er '.to.tiktok_image' "$migration")" \
+    --arg image_deployment_intent_id "$(
+      jq -er '.reviewed_inputs.image_deployment_intent_id' "$migration"
+    )" \
+    --arg migration_contract_sha256 "$(
+      normalized_migration_manifest_sha256 "$migration_id"
+    )" \
+    --arg reviewed_plan_sha256 "$(
+      jq -cS '.reviewed_plan' "$migration" | sha256_text
+    )" '
+    {
+      migration_id:$migration_id,
+      desired_image:$desired_image,
+      image_deployment_intent_id:$image_deployment_intent_id,
+      migration_contract_sha256:$migration_contract_sha256,
+      reviewed_plan_sha256:$reviewed_plan_sha256
+    }
+  ' > "$output"
+  jq -e '
+    (.migration_contract_sha256 | test("^[0-9a-f]{64}$")) and
+    (.reviewed_plan_sha256 | test("^[0-9a-f]{64}$"))
+  ' "$output" >/dev/null ||
+    die "media migration bindingを生成できません"
+}
+
 validate_migration_source() {
   local snapshot="$1" migration="$2"
   jq -e --slurpfile migration "$migration" '
@@ -3975,27 +4047,83 @@ snapshot_live() {
 # re-reads the exact live producer, queue, mapping, task and legacy image state
 # and rejects any drift from the READY ledger.
 validate_media_envelope_cutover_gate() {
-  local snapshot="$1" desired_image="$2"
+  local snapshot="$1" desired_image="$2" receipt="${3:-}"
+  local image_deployment_intent_id="${4:-}"
+  local migration_contract_sha256="${5:-}"
+  local reviewed_plan_sha256="${6:-}"
+  local expected_status="${7:-READY}"
+  local apply_attempt_id="${8:-}"
+  local plan_sha256="${9:-}"
   local live_image legacy_prefix generic_prefix verification
   live_image="$(jq -er '.taskdefs.tiktok.image' "$snapshot")"
   legacy_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${PROJECT}-${ENVIRONMENT}-tiktok-acquire@sha256:"
   generic_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker@sha256:"
-  [[ "$live_image" == "$legacy_prefix"* && "$desired_image" == "$generic_prefix"* ]] ||
+  if [[ "$live_image" != "$legacy_prefix"* ||
+        "$desired_image" != "$generic_prefix"* ]]; then
+    [ -z "$receipt" ] ||
+      die "legacy→generic以外のplanへmedia cutover receiptを混在できません"
     return 0
+  fi
+
+  [ -n "$receipt" ] &&
+    [[ "$image_deployment_intent_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] &&
+    [[ "$migration_contract_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$reviewed_plan_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+    die "legacy→generic media切替にはexact signed receipt/intent/review bindingが必須です"
+  case "$expected_status" in
+    READY)
+      [ -z "$apply_attempt_id" ] && [ -z "$plan_sha256" ] ||
+        die "READY media証跡へapply bindingを指定できません"
+      ;;
+    CONSUMED)
+      [[ "$apply_attempt_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] &&
+        [[ "$plan_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+        die "CONSUMED media証跡にはexact apply attempt/plan bindingが必須です"
+      ;;
+    *) die "media evidence statusはREADYまたはCONSUMEDだけが許可されます" ;;
+  esac
 
   verification="$TMP_ROOT/media-cutover-verification-${RANDOM}.json"
-  run_evidence_helper verify-media-cutover \
-    --desired-image "$desired_image" --output "$verification"
+  local verify_args=(
+    verify-media-cutover
+    --receipt "$receipt"
+    --desired-image "$desired_image"
+    --image-deployment-intent-id "$image_deployment_intent_id"
+    --migration-contract-sha256 "$migration_contract_sha256"
+    --reviewed-plan-sha256 "$reviewed_plan_sha256"
+    --expected-status "$expected_status"
+    --output "$verification"
+  )
+  if [ "$expected_status" = "CONSUMED" ]; then
+    verify_args+=(
+      --apply-attempt-id "$apply_attempt_id"
+      --plan-sha256 "$plan_sha256"
+    )
+  fi
+  run_evidence_helper "${verify_args[@]}"
   jq -e \
     --arg desired "$desired_image" \
-    --arg legacy "$live_image" '
+    --arg legacy "$live_image" \
+    --arg intent "$image_deployment_intent_id" \
+    --arg migration_sha "$migration_contract_sha256" \
+    --arg reviewed_sha "$reviewed_plan_sha256" \
+    --arg status "$expected_status" '
     .kind == "teamagent-media-envelope-cutover-verification" and
-    .schema_version == 1 and
+    .schema_version == 2 and
     .account_id == "718959508629" and
     .region == "ap-northeast-1" and
     .desired_image == $desired and
-    (.record_id | startswith("media-cutover#")) and
+    .record_id == ("media-cutover#" + $intent) and
+    .status == $status and
+    .image_deployment_intent_id == $intent and
+    .migration_contract_sha256 == $migration_sha and
+    .reviewed_plan_sha256 == $reviewed_sha and
     (.claims_sha256 | test("^[0-9a-f]{64}$")) and
+    (.signature_sha256 | test("^[0-9a-f]{64}$")) and
+    (.kms_key_arn |
+      test(
+        "^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-fA-F-]{36}$"
+      )) and
     (.ledger_item_sha256 | test("^[0-9a-f]{64}$")) and
     (.verification_sha256 | test("^[0-9a-f]{64}$")) and
     .current_observation.state.legacy_runtime.image == $legacy and
@@ -7340,6 +7468,7 @@ verify_required_migration_apply_receipt() {
   local embedded_outcome="$TMP_ROOT/prior-outcome-embedded-$RANDOM.json"
   local embedded_rollout="$TMP_ROOT/prior-openclaw-rollout-embedded-$RANDOM.json"
   local embedded_service_probe="$TMP_ROOT/prior-service-probe-embedded-$RANDOM.json"
+  local embedded_media_authorization="$TMP_ROOT/prior-media-authorization-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
   receipt_commit="$(
     jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
@@ -7355,6 +7484,8 @@ verify_required_migration_apply_receipt() {
   jq -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
   jq -S -c '.openclaw_rollout_result' "$receipt" > "$embedded_rollout"
   jq -S -c '.post_apply_service_probe' "$receipt" > "$embedded_service_probe"
+  jq -S -c '.media_apply_authorization' "$receipt" \
+    > "$embedded_media_authorization"
   [ "$(sha256_file "$embedded_retention")" = \
     "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_lock")" = \
@@ -7364,7 +7495,9 @@ verify_required_migration_apply_receipt() {
     [ "$(sha256_file "$embedded_rollout")" = \
       "$(jq -er '.openclaw_rollout_result_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_service_probe")" = \
-      "$(jq -er '.post_apply_service_probe_sha256' "$receipt")" ] ||
+      "$(jq -er '.post_apply_service_probe_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_media_authorization")" = \
+      "$(jq -er '.media_apply_authorization_sha256' "$receipt")" ] ||
     die "prior apply receiptのembedded evidence hash bindingが不正です"
   if [ "$(jq -er '.openclaw_rollout_result.required' "$receipt")" = "true" ]; then
     jq -S -c '.openclaw_rollout_result.persistedResult' "$receipt" \
@@ -7403,6 +7536,9 @@ verify_required_migration_apply_receipt() {
       "image_deployment_intent_id",
       "kind",
       "log_readiness_receipt_sha256",
+      "media_apply_authorization",
+      "media_apply_authorization_sha256",
+      "media_cutover_receipt_sha256",
       "migration_contract_sha256",
       "migration_id",
       "migration_kind",
@@ -7422,6 +7558,7 @@ verify_required_migration_apply_receipt() {
       "provenance_outcome_receipt_sha256",
       "region",
       "required_migration_id",
+      "reviewed_plan_sha256",
       "schema_version",
       "shared_deployment_lock_receipt",
       "shared_deployment_lock_receipt_sha256",
@@ -7431,7 +7568,7 @@ verify_required_migration_apply_receipt() {
       "versioning_receipt_sha256"
     ] | sort) and
     .kind == "terraform-runtime-apply-receipt" and
-    .schema_version == 5 and
+    .schema_version == 6 and
     .guard_version == $version and
     .account_id == $account and .region == $region and
     (.git_commit | test("^[0-9a-f]{40}$")) and
@@ -7440,6 +7577,20 @@ verify_required_migration_apply_receipt() {
     .migration_id == $required_migration_id and
     .migration_contract_sha256 ==
       $required_migration_contract_sha256 and
+    (.reviewed_plan_sha256 | test("^[0-9a-f]{64}$")) and
+    (.media_cutover_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.media_apply_authorization_sha256 | test("^[0-9a-f]{64}$")) and
+    .media_apply_authorization.kind ==
+      "teamagent-media-apply-authorization" and
+    .media_apply_authorization.state == "AUTHORIZED" and
+    .media_apply_authorization.image_deployment_intent_id ==
+      .image_deployment_intent_id and
+    .media_apply_authorization.apply_attempt_id == .apply_attempt_id and
+    .media_apply_authorization.plan_sha256 == .plan_sha256 and
+    .media_apply_authorization.migration_contract_sha256 ==
+      .migration_contract_sha256 and
+    .media_apply_authorization.reviewed_plan_sha256 ==
+      .reviewed_plan_sha256 and
     .required_migration_id == "" and
     .provenance_outcome == "applied" and
     (.image_deployment_intent_id |
@@ -7617,6 +7768,8 @@ verify_receipt() {
   local plan="$1"
   local receipt="$2"
   local receipt_plan_path="${3:-$plan}"
+  local expected_media_status="${4:-READY}"
+  local media_apply_attempt_id="${5:-}"
   ensure_tmp
 
   local stage="$TMP_ROOT/verify"
@@ -7666,6 +7819,8 @@ verify_receipt() {
       "live_fingerprint_sha256",
       "log_readiness_receipt_path",
       "log_readiness_receipt_sha256",
+      "media_cutover_receipt_path",
+      "media_cutover_receipt_sha256",
       "migration_id",
       "migration_kind",
       "migration_contract_sha256",
@@ -7678,6 +7833,7 @@ verify_receipt() {
       "prior_apply_receipt_path",
       "prior_apply_receipt_sha256",
       "project",
+      "reviewed_plan_sha256",
       "receipt_path",
       "region",
       "rule_states",
@@ -7713,9 +7869,11 @@ verify_receipt() {
     .migration_manifest_sha256 == $manifest_sha and
     (
       if .mode == "migration" then
-        (.migration_contract_sha256 | test("^[0-9a-f]{64}$"))
+        (.migration_contract_sha256 | test("^[0-9a-f]{64}$")) and
+        (.reviewed_plan_sha256 | test("^[0-9a-f]{64}$"))
       else
-        .migration_contract_sha256 == ""
+        .migration_contract_sha256 == "" and
+        .reviewed_plan_sha256 == ""
       end
     ) and
     .config_manifest_sha256 == $config_sha and
@@ -7792,7 +7950,9 @@ verify_receipt() {
         .alarm_migration_receipt_path == "" and
         .alarm_migration_receipt_sha256 == "" and
         .prior_apply_receipt_path == "" and
-        .prior_apply_receipt_sha256 == ""
+        .prior_apply_receipt_sha256 == "" and
+        .media_cutover_receipt_path == "" and
+        .media_cutover_receipt_sha256 == ""
       else
         (.migration_id | length) > 0 and
         (.migration_kind == "runtime" or .migration_kind == "activation") and
@@ -7810,6 +7970,18 @@ verify_receipt() {
         (.alarm_migration_receipt_path | length) > 0 and
         (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
         (
+          (
+            .media_cutover_receipt_path == "" and
+            .media_cutover_receipt_sha256 == ""
+          ) or
+          (
+            (.media_cutover_receipt_path | type) == "string" and
+            (.media_cutover_receipt_path | length) > 0 and
+            (.media_cutover_receipt_sha256 |
+              test("^[0-9a-f]{64}$"))
+          )
+        ) and
+        (
           if .migration_kind == "activation" then
             (.prior_apply_receipt_path | type) == "string" and
             (.prior_apply_receipt_path | length) > 0 and
@@ -7825,7 +7997,7 @@ verify_receipt() {
 
   local bound_plan bound_receipt var_file preflight_receipt alarm_delivery_receipt
   local versioning_receipt log_readiness_receipt alarm_migration_receipt
-  local prior_apply_receipt
+  local prior_apply_receipt media_cutover_receipt
   local versioning_cutover_contract_sha256=""
   local alarm_delivery_receipt_identity=""
   bound_plan="$(jq -er '.plan_path' "$stage/receipt.json")"
@@ -7901,6 +8073,19 @@ verify_receipt() {
       die "prior apply receipt SHA256が不一致です"
     prior_apply_receipt_identity="$(stat_identity "$prior_apply_receipt")"
   fi
+  media_cutover_receipt="$(jq -r '.media_cutover_receipt_path' \
+    "$stage/receipt.json")"
+  local media_cutover_receipt_identity=""
+  if [ -n "$media_cutover_receipt" ]; then
+    media_cutover_receipt="$(secure_existing_file \
+      "$media_cutover_receipt" 600)"
+    [ "$(sha256_file "$media_cutover_receipt")" = \
+      "$(jq -er '.media_cutover_receipt_sha256' "$stage/receipt.json")" ] ||
+      die "media cutover receipt SHA256が不一致です"
+    media_cutover_receipt_identity="$(
+      stat_identity "$media_cutover_receipt"
+    )"
+  fi
 
   local plan_sha_before var_sha_before plan_identity var_identity
   plan_identity="$(stat_identity "$plan")"
@@ -7956,9 +8141,19 @@ verify_receipt() {
     } == $receipt[0].rule_states.live
   ' "$stage/live-before.json" >/dev/null ||
     die "receiptのlive image/EventBridge state束縛が現在liveと一致しません"
+  local media_plan_sha256=""
+  if [ "$expected_media_status" = "CONSUMED" ]; then
+    media_plan_sha256="$plan_sha_before"
+  fi
   validate_media_envelope_cutover_gate \
     "$stage/live-before.json" \
-    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")"
+    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")" \
+    "$media_cutover_receipt" \
+    "$(jq -er '.image_deployment_intent_id' "$stage/receipt.json")" \
+    "$(jq -r '.migration_contract_sha256' "$stage/receipt.json")" \
+    "$(jq -r '.reviewed_plan_sha256' "$stage/receipt.json")" \
+    "$expected_media_status" "$media_apply_attempt_id" \
+    "$media_plan_sha256"
   if [ -n "$alarm_delivery_receipt" ]; then
     verify_alarm_delivery_test_receipt \
       "$alarm_delivery_receipt" "$stage/live-before.json"
@@ -7985,6 +8180,10 @@ verify_receipt() {
       jq -er '.migration_contract_sha256' "$stage/receipt.json"
     )" ] ||
       die "migration normalized contractがplan receiptと一致しません"
+    [ "$(jq -cS '.reviewed_plan' "$migration_file" | sha256_text)" = "$(
+      jq -er '.reviewed_plan_sha256' "$stage/receipt.json"
+    )" ] ||
+      die "reviewed plan hashがplan receiptと一致しません"
     validate_migration_source "$stage/live-before.json" "$migration_file"
     if [ "$mode" = "migration" ]; then
       verify_preflight_receipt \
@@ -8054,7 +8253,13 @@ verify_receipt() {
   snapshot_live "$stage/live-after.json"
   validate_media_envelope_cutover_gate \
     "$stage/live-after.json" \
-    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")"
+    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")" \
+    "$media_cutover_receipt" \
+    "$(jq -er '.image_deployment_intent_id' "$stage/receipt.json")" \
+    "$(jq -r '.migration_contract_sha256' "$stage/receipt.json")" \
+    "$(jq -r '.reviewed_plan_sha256' "$stage/receipt.json")" \
+    "$expected_media_status" "$media_apply_attempt_id" \
+    "$media_plan_sha256"
   capture_state_contract "$stage/state-after.json"
   capture_complete_runtime_inventory "$stage/inventory-after.json"
   [ "$(sha256_file "$stage/live-after.json")" = "$expected_live_sha" ] ||
@@ -8114,6 +8319,14 @@ verify_receipt() {
       "$prior_apply_receipt" \
       "$(jq -er '.requires_migration' "$migration_file")" \
       "$stage/live-after.json" "$stage/state-after.json"
+  fi
+  if [ -n "$media_cutover_receipt" ]; then
+    [ "$(sha256_file "$media_cutover_receipt")" = \
+      "$(jq -er '.media_cutover_receipt_sha256' "$stage/receipt.json")" ] ||
+      die "verify中にmedia cutover receiptが変化しました"
+    [ "$(stat_identity "$media_cutover_receipt")" = \
+      "$media_cutover_receipt_identity" ] ||
+      die "verify中にmedia cutover receipt pathが差替えられました"
   fi
   # Re-run the content validators against the final live/state observations.
   # apply invokes verify_receipt while holding the deployment lock, so these
@@ -8436,36 +8649,39 @@ case "$COMMAND" in
     echo "✅ alarm migration checkpoint: $ALARM_PHASE / $ALARM_PHASE_OUT"
     ;;
 
-  attest-media-cutover)
-    MEDIA_CUTOVER_IMAGE=""
-    MEDIA_CUTOVER_OUT=""
+  prepare-media-cutover)
+    MEDIA_MIGRATION_ID=""
+    MEDIA_CHALLENGE_OUT=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
-        --desired-image)
-          MEDIA_CUTOVER_IMAGE="${2:?--desired-image に値が必要}"
+        --migration)
+          MEDIA_MIGRATION_ID="${2:?--migration に値が必要}"
           shift 2
           ;;
-        --out) MEDIA_CUTOVER_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        --out)
+          MEDIA_CHALLENGE_OUT="${2:?--out に値が必要}"
+          shift 2
+          ;;
         *) die "不明な引数: $1" ;;
       esac
     done
-    [ -n "$MEDIA_CUTOVER_IMAGE" ] && [ -n "$MEDIA_CUTOVER_OUT" ] ||
-      die "attest-media-cutoverには --desired-image と --out が必須です"
-    [[ "$MEDIA_CUTOVER_IMAGE" =~ ^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-media-worker@sha256:[0-9a-f]{64}$ ]] ||
-      die "media cutover desired imageはapproved repositoryのexact digestが必要です"
-    MEDIA_CUTOVER_OUT="$(secure_new_file "$MEDIA_CUTOVER_OUT")"
+    [ -n "$MEDIA_MIGRATION_ID" ] && [ -n "$MEDIA_CHALLENGE_OUT" ] ||
+      die "prepare-media-cutoverには --migration と --out が必須です"
+    MEDIA_CHALLENGE_OUT="$(secure_new_file "$MEDIA_CHALLENGE_OUT")"
     need_cmd aws
     need_cmd jq
     ensure_tmp
     assert_trusted_automation_identity
-    MEDIA_CUTOVER_STAGE="$TMP_ROOT/media-cutover-receipt.json"
+    MEDIA_BINDING="$TMP_ROOT/media-migration-binding.json"
+    media_migration_binding_to_file "$MEDIA_MIGRATION_ID" "$MEDIA_BINDING"
+    MEDIA_CHALLENGE_STAGE="$TMP_ROOT/media-cutover-challenge.json"
     MEDIA_CUTOVER_LOCK="$TMP_ROOT/media-cutover-runtime-lock.json"
     MEDIA_CUTOVER_LOCK_RELEASE="$TMP_ROOT/media-cutover-runtime-lock-release.json"
-    MEDIA_CUTOVER_PUBLISHED="false"
+    MEDIA_CHALLENGE_PUBLISHED="false"
     MEDIA_CUTOVER_LOCK_ACQUIRED="false"
     MEDIA_CUTOVER_WORKFLOW_ID="$(new_uuid_v4)"
-    cleanup_media_cutover() {
+    cleanup_media_cutover_prepare() {
       local status=$?
       set +e
       release_deployment_lock
@@ -8477,68 +8693,96 @@ case "$COMMAND" in
           --output "$MEDIA_CUTOVER_LOCK_RELEASE"
         MEDIA_CUTOVER_LOCK_ACQUIRED="false"
       fi
-      if [ "$MEDIA_CUTOVER_PUBLISHED" != "true" ]; then
-        rm -f "$MEDIA_CUTOVER_OUT"
+      if [ "$MEDIA_CHALLENGE_PUBLISHED" != "true" ]; then
+        rm -f "$MEDIA_CHALLENGE_OUT"
       fi
       rm -rf "$TMP_ROOT"
       exit "$status"
     }
-    trap 'cleanup_media_cutover' EXIT
+    trap 'cleanup_media_cutover_prepare' EXIT
     run_evidence_helper acquire-runtime-lock \
       --workflow-id "$MEDIA_CUTOVER_WORKFLOW_ID" \
       --output "$MEDIA_CUTOVER_LOCK"
     MEDIA_CUTOVER_LOCK_ACQUIRED="true"
     acquire_deployment_lock
-    run_evidence_helper attest-media-cutover \
-      --desired-image "$MEDIA_CUTOVER_IMAGE" \
+    run_evidence_helper prepare-media-cutover \
+      --desired-image "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --image-deployment-intent-id "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --migration-contract-sha256 "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --reviewed-plan-sha256 "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
       --lock-receipt "$MEDIA_CUTOVER_LOCK" \
-      --output "$MEDIA_CUTOVER_STAGE"
+      --output "$MEDIA_CHALLENGE_STAGE"
     jq -e \
-      --arg desired "$MEDIA_CUTOVER_IMAGE" \
+      --arg desired "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --arg intent "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --arg migration_sha "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --arg reviewed_sha "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
       --arg workflow "$MEDIA_CUTOVER_WORKFLOW_ID" '
       (keys | sort) == ([
+        "aws_executable",
+        "challenge_sha256",
         "claims",
         "claims_sha256",
+        "expires_at_epoch",
         "kind",
-        "ledger",
-        "receipt_sha256",
+        "prepared_at_epoch",
         "schema_version"
       ] | sort) and
-      .kind == "teamagent-media-envelope-cutover-receipt" and
-      .schema_version == 1 and
+      .kind == "teamagent-media-envelope-cutover-challenge" and
+      .schema_version == 2 and
       .claims.kind == "teamagent-media-envelope-cutover" and
-      .claims.schema_version == 1 and
+      .claims.schema_version == 2 and
       .claims.account_id == "718959508629" and
       .claims.region == "ap-northeast-1" and
+      .claims.record_id == ("media-cutover#" + $intent) and
+      .claims.image_deployment_intent_id == $intent and
+      .claims.migration_contract_sha256 == $migration_sha and
+      .claims.reviewed_plan_sha256 == $reviewed_sha and
       .claims.desired_image == $desired and
-      (.claims.record_id | startswith("media-cutover#")) and
+      (.claims.attestation_nonce | test("^[0-9a-f]{64}$")) and
       .claims.shared_lock.workflow_id == $workflow and
       .claims.settle_seconds == 900 and
-      (.claims.second_observation.observed_at_epoch -
-        .claims.first_observation.observed_at_epoch) >= 900 and
+      (
+        .claims.second_observation.earliest_observed_at_epoch -
+        .claims.first_observation.observed_at_epoch
+      ) >= 900 and
       .claims.first_observation.state_sha256 ==
         .claims.second_observation.state_sha256 and
       .claims.first_observation.state.event_source_mapping.state ==
         "Disabled" and
       .claims.second_observation.state.event_source_mapping.state ==
         "Disabled" and
-      .claims.second_observation.state.tasks == {pending:[],running:[]} and
+      .claims.second_observation.state.tasks == {
+        pending:[],
+        running:[]
+      } and
       (.claims_sha256 | test("^[0-9a-f]{64}$")) and
-      (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
-      .ledger.table == "teamagent-dev-image-deployment-intents" and
-      (.ledger.item_sha256 | test("^[0-9a-f]{64}$")) and
-      (.ledger.put_request_id_sha256 | test("^[0-9a-f]{64}$")) and
-      (.ledger.confirmation_request_id_sha256 | test("^[0-9a-f]{64}$"))
-    ' "$MEDIA_CUTOVER_STAGE" >/dev/null ||
-      die "media cutover receiptが900秒/shared lock/durable ledger契約と不一致です"
-    MEDIA_CUTOVER_STAGE_IDENTITY="$(stat_identity "$MEDIA_CUTOVER_STAGE")"
-    ln "$MEDIA_CUTOVER_STAGE" "$MEDIA_CUTOVER_OUT" ||
-      die "media cutover receipt pathを原子的に確保できません"
-    [ "$(stat_identity "$MEDIA_CUTOVER_OUT")" = \
-      "$MEDIA_CUTOVER_STAGE_IDENTITY" ] ||
-      die "media cutover receiptの原子的引渡しに失敗しました"
-    chmod 600 "$MEDIA_CUTOVER_OUT"
-    MEDIA_CUTOVER_PUBLISHED="true"
+      (.challenge_sha256 | test("^[0-9a-f]{64}$")) and
+      .expires_at_epoch == (.prepared_at_epoch + 3600)
+    ' "$MEDIA_CHALLENGE_STAGE" >/dev/null ||
+      die "media cutover challengeがrelease binding/900秒/shared lock契約と不一致です"
+    MEDIA_CHALLENGE_STAGE_IDENTITY="$(
+      stat_identity "$MEDIA_CHALLENGE_STAGE"
+    )"
+    ln "$MEDIA_CHALLENGE_STAGE" "$MEDIA_CHALLENGE_OUT" ||
+      die "media cutover challenge pathを原子的に確保できません"
+    [ "$(stat_identity "$MEDIA_CHALLENGE_OUT")" = \
+      "$MEDIA_CHALLENGE_STAGE_IDENTITY" ] ||
+      die "media cutover challengeの原子的引渡しに失敗しました"
+    chmod 600 "$MEDIA_CHALLENGE_OUT"
+    MEDIA_CHALLENGE_PUBLISHED="true"
     release_deployment_lock
     run_evidence_helper release-runtime-lock \
       --lock "$MEDIA_CUTOVER_LOCK" \
@@ -8547,7 +8791,125 @@ case "$COMMAND" in
     trap - EXIT
     rm -rf "$TMP_ROOT"
     TMP_ROOT=""
-    echo "✅ media envelope cutover attested for 900 AWS seconds: $MEDIA_CUTOVER_OUT"
+    echo "✅ media cutover challenge prepared: $MEDIA_CHALLENGE_OUT"
+    ;;
+
+  attest-media-cutover)
+    MEDIA_MIGRATION_ID=""
+    MEDIA_CHALLENGE=""
+    MEDIA_CUTOVER_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --migration)
+          MEDIA_MIGRATION_ID="${2:?--migration に値が必要}"
+          shift 2
+          ;;
+        --challenge)
+          MEDIA_CHALLENGE="${2:?--challenge に値が必要}"
+          shift 2
+          ;;
+        --out)
+          MEDIA_CUTOVER_OUT="${2:?--out に値が必要}"
+          shift 2
+          ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$MEDIA_MIGRATION_ID" ] && [ -n "$MEDIA_CHALLENGE" ] &&
+      [ -n "$MEDIA_CUTOVER_OUT" ] ||
+      die "attest-media-cutoverには --migration、--challenge、--out が必須です"
+    MEDIA_CHALLENGE="$(secure_existing_file "$MEDIA_CHALLENGE" 600)"
+    MEDIA_CUTOVER_OUT="$(secure_new_file "$MEDIA_CUTOVER_OUT")"
+    need_cmd aws
+    need_cmd jq
+    ensure_tmp
+    assert_trusted_media_attestor_identity
+    MEDIA_BINDING="$TMP_ROOT/media-migration-binding.json"
+    media_migration_binding_to_file "$MEDIA_MIGRATION_ID" "$MEDIA_BINDING"
+    MEDIA_CHALLENGE_SHA256="$(sha256_file "$MEDIA_CHALLENGE")"
+    MEDIA_CHALLENGE_IDENTITY="$(stat_identity "$MEDIA_CHALLENGE")"
+    MEDIA_CUTOVER_STAGE="$TMP_ROOT/media-cutover-receipt.json"
+    run_evidence_helper attest-media-cutover \
+      --challenge "$MEDIA_CHALLENGE" \
+      --desired-image "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --image-deployment-intent-id "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --migration-contract-sha256 "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --reviewed-plan-sha256 "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
+      --output "$MEDIA_CUTOVER_STAGE"
+    [ "$(sha256_file "$MEDIA_CHALLENGE")" = "$MEDIA_CHALLENGE_SHA256" ] &&
+      [ "$(stat_identity "$MEDIA_CHALLENGE")" = \
+        "$MEDIA_CHALLENGE_IDENTITY" ] ||
+      die "independent attestation中にchallengeが差替えられました"
+    jq -e \
+      --arg desired "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --arg intent "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --arg migration_sha "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --arg reviewed_sha "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
+      --arg attestor "$TRUSTED_MEDIA_ATTESTOR_ARN" '
+      (keys | sort) == ([
+        "challenge_sha256",
+        "claims",
+        "claims_sha256",
+        "kind",
+        "kms_key_arn",
+        "kms_key_metadata_sha256",
+        "ledger",
+        "receipt_sha256",
+        "schema_version",
+        "sign_request_id_sha256",
+        "signature_base64",
+        "signature_sha256",
+        "signed_at_epoch"
+      ] | sort) and
+      .kind == "teamagent-media-envelope-cutover-receipt" and
+      .schema_version == 2 and
+      .claims.kind == "teamagent-media-envelope-cutover" and
+      .claims.schema_version == 2 and
+      .claims.record_id == ("media-cutover#" + $intent) and
+      .claims.image_deployment_intent_id == $intent and
+      .claims.migration_contract_sha256 == $migration_sha and
+      .claims.reviewed_plan_sha256 == $reviewed_sha and
+      .claims.desired_image == $desired and
+      .claims.attestor_principal_arn == $attestor and
+      (.claims.attestation_nonce | test("^[0-9a-f]{64}$")) and
+      (.claims_sha256 | test("^[0-9a-f]{64}$")) and
+      (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      (.signature_base64 | test("^[A-Za-z0-9+/]+={0,2}$")) and
+      (.signature_sha256 | test("^[0-9a-f]{64}$")) and
+      (.kms_key_arn |
+        test(
+          "^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-fA-F-]{36}$"
+        )) and
+      .ledger.table == "teamagent-dev-image-deployment-intents" and
+      (.ledger.item_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ledger.put_request_id_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ledger.confirmation_request_id_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$MEDIA_CUTOVER_STAGE" >/dev/null ||
+      die "independent signed media receiptがintent/plan/KMS/ledger契約と不一致です"
+    MEDIA_CUTOVER_STAGE_IDENTITY="$(stat_identity "$MEDIA_CUTOVER_STAGE")"
+    ln "$MEDIA_CUTOVER_STAGE" "$MEDIA_CUTOVER_OUT" ||
+      die "media cutover receipt pathを原子的に確保できません"
+    [ "$(stat_identity "$MEDIA_CUTOVER_OUT")" = \
+      "$MEDIA_CUTOVER_STAGE_IDENTITY" ] ||
+      die "media cutover receiptの原子的引渡しに失敗しました"
+    chmod 600 "$MEDIA_CUTOVER_OUT"
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ media cutover independently signed: $MEDIA_CUTOVER_OUT"
     ;;
 
   attest-log-readiness)
@@ -8779,6 +9141,7 @@ case "$COMMAND" in
     LOG_READINESS_RECEIPT=""
     ALARM_MIGRATION_RECEIPT=""
     PRIOR_APPLY_RECEIPT=""
+    MEDIA_CUTOVER_RECEIPT=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -8793,6 +9156,7 @@ case "$COMMAND" in
         --log-readiness-receipt) LOG_READINESS_RECEIPT="${2:?--log-readiness-receipt に値が必要}"; shift 2 ;;
         --alarm-migration-receipt) ALARM_MIGRATION_RECEIPT="${2:?--alarm-migration-receipt に値が必要}"; shift 2 ;;
         --prior-apply-receipt) PRIOR_APPLY_RECEIPT="${2:?--prior-apply-receipt に値が必要}"; shift 2 ;;
+        --media-cutover-receipt) MEDIA_CUTOVER_RECEIPT="${2:?--media-cutover-receipt に値が必要}"; shift 2 ;;
         *) die "不明な引数: $1" ;;
       esac
     done
@@ -8800,6 +9164,10 @@ case "$COMMAND" in
     [ -n "$PLAN" ] || die "plan には --out が必須です"
     if [ "$REVIEW_ONLY" = "true" ] && [ -n "$RECEIPT" ]; then
       die "review-planは--receiptを受け付けません"
+    fi
+    if [ "$REVIEW_ONLY" = "true" ] &&
+       [ -n "$MEDIA_CUTOVER_RECEIPT" ]; then
+      die "review-planはmedia cutover receiptを受け付けません"
     fi
     if [ "$REVIEW_ONLY" = "true" ] && [ "$RUNTIME_SYNC" = "true" ]; then
       die "review-planは--runtime-migration専用です"
@@ -8828,7 +9196,8 @@ case "$COMMAND" in
          [ -n "$VERSIONING_RECEIPT" ] ||
          [ -n "$LOG_READINESS_RECEIPT" ] ||
          [ -n "$ALARM_MIGRATION_RECEIPT" ] ||
-         [ -n "$PRIOR_APPLY_RECEIPT" ]; }; then
+         [ -n "$PRIOR_APPLY_RECEIPT" ] ||
+         [ -n "$MEDIA_CUTOVER_RECEIPT" ]; }; then
       die "--runtime-syncに外部receiptは指定できません"
     fi
     [ "$RUNTIME_SYNC" = "true" ] || [ -n "$MIGRATION_ID" ] ||
@@ -8864,6 +9233,11 @@ case "$COMMAND" in
     if [ -n "$PRIOR_APPLY_RECEIPT" ]; then
       PRIOR_APPLY_RECEIPT="$(
         secure_existing_file "$PRIOR_APPLY_RECEIPT" 600
+      )"
+    fi
+    if [ -n "$MEDIA_CUTOVER_RECEIPT" ]; then
+      MEDIA_CUTOVER_RECEIPT="$(
+        secure_existing_file "$MEDIA_CUTOVER_RECEIPT" 600
       )"
     fi
     ALARM_DELIVERY_RECEIPT_SHA256=""
@@ -8903,6 +9277,16 @@ case "$COMMAND" in
     if [ -n "$PRIOR_APPLY_RECEIPT" ]; then
       PRIOR_APPLY_RECEIPT_SHA256="$(sha256_file "$PRIOR_APPLY_RECEIPT")"
       PRIOR_APPLY_RECEIPT_IDENTITY="$(stat_identity "$PRIOR_APPLY_RECEIPT")"
+    fi
+    MEDIA_CUTOVER_RECEIPT_SHA256=""
+    MEDIA_CUTOVER_RECEIPT_IDENTITY=""
+    if [ -n "$MEDIA_CUTOVER_RECEIPT" ]; then
+      MEDIA_CUTOVER_RECEIPT_SHA256="$(
+        sha256_file "$MEDIA_CUTOVER_RECEIPT"
+      )"
+      MEDIA_CUTOVER_RECEIPT_IDENTITY="$(
+        stat_identity "$MEDIA_CUTOVER_RECEIPT"
+      )"
     fi
     PLAN="$(secure_new_file "$PLAN")"
     if [ "$REVIEW_ONLY" != "true" ]; then
@@ -8975,6 +9359,7 @@ case "$COMMAND" in
     MIGRATION_KIND=""
     MIGRATION_JSON=""
     MIGRATION_CONTRACT_SHA256=""
+    REVIEWED_PLAN_SHA256=""
     PREFLIGHT_SHA256=""
     REQUIRED_MIGRATION_ID=""
     REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256=""
@@ -8999,6 +9384,13 @@ case "$COMMAND" in
       MIGRATION_CONTRACT_SHA256="$(
         normalized_migration_manifest_sha256 "$MIGRATION_ID"
       )"
+      if [ "$REVIEW_ONLY" != "true" ]; then
+        REVIEWED_PLAN_SHA256="$(
+          jq -cS '.reviewed_plan' "$MIGRATION_JSON" | sha256_text
+        )"
+        [[ "$REVIEWED_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
+          die "reviewed plan SHA256を計算できません"
+      fi
       validate_migration_source "$TMP_ROOT/live-before.json" "$MIGRATION_JSON"
       verify_preflight_receipt \
         "$PREFLIGHT_RECEIPT" "$MIGRATION_ID" "$MIGRATION_JSON" \
@@ -9034,8 +9426,12 @@ case "$COMMAND" in
       fi
     fi
 
-    validate_media_envelope_cutover_gate \
-      "$TMP_ROOT/live-before.json" "$DESIRED_TIKTOK_IMAGE"
+    if [ "$REVIEW_ONLY" != "true" ]; then
+      validate_media_envelope_cutover_gate \
+        "$TMP_ROOT/live-before.json" "$DESIRED_TIKTOK_IMAGE" \
+        "$MEDIA_CUTOVER_RECEIPT" "$IMAGE_DEPLOYMENT_INTENT_ID" \
+        "$MIGRATION_CONTRACT_SHA256" "$REVIEWED_PLAN_SHA256"
+    fi
 
     core_from_snapshot \
       "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" "$MODE" "$MIGRATION_ID" \
@@ -9092,8 +9488,12 @@ case "$COMMAND" in
 
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
     snapshot_live "$TMP_ROOT/live-after.json"
-    validate_media_envelope_cutover_gate \
-      "$TMP_ROOT/live-after.json" "$DESIRED_TIKTOK_IMAGE"
+    if [ "$REVIEW_ONLY" != "true" ]; then
+      validate_media_envelope_cutover_gate \
+        "$TMP_ROOT/live-after.json" "$DESIRED_TIKTOK_IMAGE" \
+        "$MEDIA_CUTOVER_RECEIPT" "$IMAGE_DEPLOYMENT_INTENT_ID" \
+        "$MIGRATION_CONTRACT_SHA256" "$REVIEWED_PLAN_SHA256"
+    fi
     capture_state_contract "$TMP_ROOT/state-after.json"
     capture_complete_runtime_inventory "$TMP_ROOT/inventory-after.json"
     BEFORE_SHA="$(sha256_file "$TMP_ROOT/live-before.json")"
@@ -9150,6 +9550,14 @@ case "$COMMAND" in
       verify_required_migration_apply_receipt \
         "$PRIOR_APPLY_RECEIPT" "$REQUIRED_MIGRATION_ID" \
         "$TMP_ROOT/live-after.json" "$TMP_ROOT/state-after.json"
+    fi
+    if [ -n "$MEDIA_CUTOVER_RECEIPT" ]; then
+      [ "$(sha256_file "$MEDIA_CUTOVER_RECEIPT")" = \
+        "$MEDIA_CUTOVER_RECEIPT_SHA256" ] ||
+        die "plan作成中にmedia cutover receiptが変化しました"
+      [ "$(stat_identity "$MEDIA_CUTOVER_RECEIPT")" = \
+        "$MEDIA_CUTOVER_RECEIPT_IDENTITY" ] ||
+        die "plan作成中にmedia cutover receipt pathが差替えられました"
     fi
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
       verify_alarm_delivery_test_receipt \
@@ -9238,6 +9646,9 @@ case "$COMMAND" in
         "$ALARM_MIGRATION_RECEIPT_SHA256" \
       --arg prior_apply_receipt_path "$PRIOR_APPLY_RECEIPT" \
       --arg prior_apply_receipt_sha256 "$PRIOR_APPLY_RECEIPT_SHA256" \
+      --arg media_cutover_receipt_path "$MEDIA_CUTOVER_RECEIPT" \
+      --arg media_cutover_receipt_sha256 \
+        "$MEDIA_CUTOVER_RECEIPT_SHA256" \
       --argjson created_at_epoch "$NOW" \
       --argjson expires_at_epoch "$EXPIRES" \
       --arg git_commit "$(git_commit)" \
@@ -9245,6 +9656,7 @@ case "$COMMAND" in
       --arg guard_jq_sha256 "$(sha256_file "$GUARD_JQ")" \
       --arg migration_manifest_sha256 "$(sha256_file "$MIGRATION_FILE")" \
       --arg migration_contract_sha256 "$MIGRATION_CONTRACT_SHA256" \
+      --arg reviewed_plan_sha256 "$REVIEWED_PLAN_SHA256" \
       --arg config_manifest_sha256 "$(sha256_file "$CONFIG_MANIFEST")" \
       --arg live_openclaw_image "$LIVE_OPENCLAW_IMAGE" \
       --arg live_mcp_image "$LIVE_MCP_IMAGE" \
@@ -9297,6 +9709,8 @@ case "$COMMAND" in
         alarm_migration_receipt_sha256:$alarm_migration_receipt_sha256,
         prior_apply_receipt_path:$prior_apply_receipt_path,
         prior_apply_receipt_sha256:$prior_apply_receipt_sha256,
+        media_cutover_receipt_path:$media_cutover_receipt_path,
+        media_cutover_receipt_sha256:$media_cutover_receipt_sha256,
         created_at_epoch:$created_at_epoch,
         expires_at_epoch:$expires_at_epoch,
         git_commit:$git_commit,
@@ -9304,6 +9718,7 @@ case "$COMMAND" in
         guard_jq_sha256:$guard_jq_sha256,
         migration_manifest_sha256:$migration_manifest_sha256,
         migration_contract_sha256:$migration_contract_sha256,
+        reviewed_plan_sha256:$reviewed_plan_sha256,
         config_manifest_sha256:$config_manifest_sha256,
         images:{
           live:{
@@ -9363,6 +9778,198 @@ case "$COMMAND" in
     echo "   plan sha256: $PLAN_SHA"
     ;;
 
+  authorize-media-apply)
+    PLAN=""
+    RECEIPT=""
+    APPLY_ATTEMPT_ID=""
+    MEDIA_AUTHORIZATION=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --plan) PLAN="${2:?--plan に値が必要}"; shift 2 ;;
+        --receipt) RECEIPT="${2:?--receipt に値が必要}"; shift 2 ;;
+        --apply-attempt-id)
+          APPLY_ATTEMPT_ID="${2:?--apply-attempt-id に値が必要}"
+          shift 2
+          ;;
+        --out)
+          MEDIA_AUTHORIZATION="${2:?--out に値が必要}"
+          shift 2
+          ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$PLAN" ] && [ -n "$APPLY_ATTEMPT_ID" ] &&
+      [ -n "$MEDIA_AUTHORIZATION" ] ||
+      die "authorize-media-applyには --plan、--apply-attempt-id、--out が必須です"
+    [[ "$APPLY_ATTEMPT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] ||
+      die "apply attempt IDはUUIDv4が必要です"
+    PLAN="$(secure_existing_file "$PLAN" 600)"
+    RECEIPT="${RECEIPT:-${PLAN}.runtime-guard.json}"
+    RECEIPT="$(secure_existing_file "$RECEIPT" 600)"
+    MEDIA_AUTHORIZATION="$(secure_new_file "$MEDIA_AUTHORIZATION")"
+    need_cmd aws
+    need_cmd jq
+    need_cmd python3
+    ensure_tmp
+    assert_trusted_media_attestor_identity
+    PLAN_SHA256="$(sha256_file "$PLAN")"
+    PLAN_IDENTITY="$(stat_identity "$PLAN")"
+    RECEIPT_SHA256="$(sha256_file "$RECEIPT")"
+    RECEIPT_IDENTITY="$(stat_identity "$RECEIPT")"
+    jq -e \
+      --arg version "$GUARD_VERSION" \
+      --arg commit "$(git_commit)" \
+      --arg plan "$PLAN" \
+      --arg receipt "$RECEIPT" \
+      --arg plan_sha "$PLAN_SHA256" \
+      --argjson now "$(date +%s)" '
+      .kind == "terraform-runtime-plan-receipt" and
+      .guard_version == $version and
+      .git_commit == $commit and
+      .mode == "migration" and
+      .migration_kind == "runtime" and
+      .plan_path == $plan and
+      .receipt_path == $receipt and
+      .plan_sha256 == $plan_sha and
+      (.created_at_epoch | type) == "number" and
+      .created_at_epoch <= $now and
+      (.expires_at_epoch | type) == "number" and
+      .expires_at_epoch > $now and
+      .image_deployment_intent_expires_at > $now and
+      (.media_cutover_receipt_path | type) == "string" and
+      (.media_cutover_receipt_path | length) > 0 and
+      (.media_cutover_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      (.migration_contract_sha256 | test("^[0-9a-f]{64}$")) and
+      (.reviewed_plan_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$RECEIPT" >/dev/null ||
+      die "media apply authorizationのplan receipt契約が不正です"
+    MEDIA_CUTOVER_RECEIPT="$(
+      jq -er '.media_cutover_receipt_path' "$RECEIPT"
+    )"
+    MEDIA_CUTOVER_RECEIPT="$(
+      secure_existing_file "$MEDIA_CUTOVER_RECEIPT" 600
+    )"
+    [ "$(sha256_file "$MEDIA_CUTOVER_RECEIPT")" = "$(
+      jq -er '.media_cutover_receipt_sha256' "$RECEIPT"
+    )" ] ||
+      die "media apply authorizationのsigned receipt SHA256が不一致です"
+    MEDIA_CUTOVER_RECEIPT_SHA256="$(sha256_file "$MEDIA_CUTOVER_RECEIPT")"
+    MEDIA_CUTOVER_RECEIPT_IDENTITY="$(
+      stat_identity "$MEDIA_CUTOVER_RECEIPT"
+    )"
+    MEDIA_BINDING="$TMP_ROOT/media-authorization-binding.json"
+    media_migration_binding_to_file "$(
+      jq -er '.migration_id' "$RECEIPT"
+    )" "$MEDIA_BINDING"
+    jq -e \
+      --slurpfile binding "$MEDIA_BINDING" '
+      .image_deployment_intent_id ==
+        $binding[0].image_deployment_intent_id and
+      .migration_contract_sha256 ==
+        $binding[0].migration_contract_sha256 and
+      .reviewed_plan_sha256 ==
+        $binding[0].reviewed_plan_sha256 and
+      .images.desired.tiktok == $binding[0].desired_image
+    ' "$RECEIPT" >/dev/null ||
+      die "plan receiptとreview済みmedia migration bindingが不一致です"
+    initialize_aws_trust
+    assert_aws_trust_unchanged
+    python3 "$MEDIA_APPLY_AUTHORIZER" \
+      --aws-bin "$AWS_BIN" \
+      --plan "$PLAN" \
+      --media-receipt "$MEDIA_CUTOVER_RECEIPT" \
+      --desired-image "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --image-deployment-intent-id "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --migration-contract-sha256 "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --reviewed-plan-sha256 "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --control-commit "$(git_commit)" \
+      --output "$MEDIA_AUTHORIZATION"
+    assert_aws_trust_unchanged
+    chmod 600 "$MEDIA_AUTHORIZATION"
+    jq -e \
+      --arg attempt "$APPLY_ATTEMPT_ID" \
+      --arg plan "$PLAN_SHA256" \
+      --arg commit "$(git_commit)" \
+      --arg intent "$(
+        jq -er '.image_deployment_intent_id' "$MEDIA_BINDING"
+      )" \
+      --arg desired "$(jq -er '.desired_image' "$MEDIA_BINDING")" \
+      --arg migration_sha "$(
+        jq -er '.migration_contract_sha256' "$MEDIA_BINDING"
+      )" \
+      --arg reviewed_sha "$(
+        jq -er '.reviewed_plan_sha256' "$MEDIA_BINDING"
+      )" \
+      --arg media_claims "$(
+        jq -er '.claims_sha256' "$MEDIA_CUTOVER_RECEIPT"
+      )" \
+      --arg signature_sha "$(
+        jq -er '.signature_sha256' "$MEDIA_CUTOVER_RECEIPT"
+      )" \
+      --arg kms_key "$(
+        jq -er '.kms_key_arn' "$MEDIA_CUTOVER_RECEIPT"
+      )" '
+      (keys | sort) == ([
+        "apply_attempt_id",
+        "authorization_sha256",
+        "authorized_at_epoch",
+        "claims_sha256",
+        "control_commit",
+        "image_deployment_intent_id",
+        "kind",
+        "kms_key_arn",
+        "lock_lease_expires_at",
+        "migration_contract_sha256",
+        "plan_sha256",
+        "record_id",
+        "reviewed_plan_sha256",
+        "schema_version",
+        "signature_sha256",
+        "state"
+      ] | sort) and
+      .kind == "teamagent-media-apply-authorization" and
+      .schema_version == 1 and
+      .state == "AUTHORIZED" and
+      .record_id == ("media-cutover#" + $intent) and
+      .image_deployment_intent_id == $intent and
+      .apply_attempt_id == $attempt and
+      .plan_sha256 == $plan and
+      .claims_sha256 == $media_claims and
+      .signature_sha256 == $signature_sha and
+      .kms_key_arn == $kms_key and
+      .migration_contract_sha256 == $migration_sha and
+      .reviewed_plan_sha256 == $reviewed_sha and
+      .control_commit == $commit and
+      (.authorized_at_epoch | type) == "number" and
+      .lock_lease_expires_at > .authorized_at_epoch and
+      (.authorization_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$MEDIA_AUTHORIZATION" >/dev/null ||
+      die "media apply authorization receiptがatomic bindingと不一致です"
+    [ "$(jq -cS 'del(.authorization_sha256)' \
+      "$MEDIA_AUTHORIZATION" | sha256_text)" = "$(
+        jq -er '.authorization_sha256' "$MEDIA_AUTHORIZATION"
+      )" ] ||
+      die "media apply authorization receipt hashが不正です"
+    [ "$(sha256_file "$PLAN")" = "$PLAN_SHA256" ] &&
+      [ "$(stat_identity "$PLAN")" = "$PLAN_IDENTITY" ] &&
+      [ "$(sha256_file "$RECEIPT")" = "$RECEIPT_SHA256" ] &&
+      [ "$(stat_identity "$RECEIPT")" = "$RECEIPT_IDENTITY" ] &&
+      [ "$(sha256_file "$MEDIA_CUTOVER_RECEIPT")" = \
+        "$MEDIA_CUTOVER_RECEIPT_SHA256" ] &&
+      [ "$(stat_identity "$MEDIA_CUTOVER_RECEIPT")" = \
+        "$MEDIA_CUTOVER_RECEIPT_IDENTITY" ] ||
+      die "media apply authorization中に入力が差替えられました"
+    echo "✅ atomic one-use media apply authorized: $MEDIA_AUTHORIZATION"
+    ;;
+
   verify)
     PLAN=""
     RECEIPT=""
@@ -9394,11 +10001,21 @@ case "$COMMAND" in
     PLAN=""
     RECEIPT=""
     APPLY_RECEIPT=""
+    MEDIA_AUTHORIZATION=""
+    REQUESTED_APPLY_ATTEMPT_ID=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
         --plan) PLAN="${2:?--plan に値が必要}"; shift 2 ;;
         --receipt) RECEIPT="${2:?--receipt に値が必要}"; shift 2 ;;
+        --media-authorization)
+          MEDIA_AUTHORIZATION="${2:?--media-authorization に値が必要}"
+          shift 2
+          ;;
+        --apply-attempt-id)
+          REQUESTED_APPLY_ATTEMPT_ID="${2:?--apply-attempt-id に値が必要}"
+          shift 2
+          ;;
         --out) APPLY_RECEIPT="${2:?--out に値が必要}"; shift 2 ;;
         *) die "不明な引数: $1" ;;
       esac
@@ -9415,6 +10032,62 @@ case "$COMMAND" in
     RECEIPT="$(secure_existing_file "$RECEIPT" 600)"
     [ "$(dirname "$PLAN")" = "$(dirname "$RECEIPT")" ] ||
       die "planとreceiptは同じprivate directoryにある必要があります"
+    MEDIA_APPLY_REQUIRED="$(
+      jq -er '(.media_cutover_receipt_path // "") != ""' "$RECEIPT"
+    )" ||
+      die "plan receiptのmedia apply契約を判定できません"
+    MEDIA_AUTHORIZATION_SHA256=""
+    MEDIA_AUTHORIZATION_IDENTITY=""
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      [ -n "$MEDIA_AUTHORIZATION" ] &&
+        [ -n "$REQUESTED_APPLY_ATTEMPT_ID" ] ||
+        die "legacy→generic applyにはmedia authorizationと同じapply attempt IDが必須です"
+      [[ "$REQUESTED_APPLY_ATTEMPT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] ||
+        die "media apply attempt IDはUUIDv4が必要です"
+      MEDIA_AUTHORIZATION="$(
+        secure_existing_file "$MEDIA_AUTHORIZATION" 600
+      )"
+      MEDIA_AUTHORIZATION_SHA256="$(sha256_file "$MEDIA_AUTHORIZATION")"
+      MEDIA_AUTHORIZATION_IDENTITY="$(stat_identity "$MEDIA_AUTHORIZATION")"
+      jq -e \
+        --arg attempt "$REQUESTED_APPLY_ATTEMPT_ID" \
+        --arg plan "$(sha256_file "$PLAN")" \
+        --arg intent "$(jq -er \
+          '.image_deployment_intent_id' "$RECEIPT")" \
+        --arg migration_sha "$(jq -er \
+          '.migration_contract_sha256' "$RECEIPT")" \
+        --arg reviewed_sha "$(jq -er \
+          '.reviewed_plan_sha256' "$RECEIPT")" \
+        --arg commit "$(git_commit)" '
+        .kind == "teamagent-media-apply-authorization" and
+        .schema_version == 1 and
+        .state == "AUTHORIZED" and
+        .record_id == ("media-cutover#" + $intent) and
+        .image_deployment_intent_id == $intent and
+        .apply_attempt_id == $attempt and
+        .plan_sha256 == $plan and
+        .migration_contract_sha256 == $migration_sha and
+        .reviewed_plan_sha256 == $reviewed_sha and
+        .control_commit == $commit and
+        (.claims_sha256 | test("^[0-9a-f]{64}$")) and
+        (.signature_sha256 | test("^[0-9a-f]{64}$")) and
+        (.kms_key_arn |
+          test(
+            "^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-fA-F-]{36}$"
+          )) and
+        (.authorization_sha256 | test("^[0-9a-f]{64}$"))
+      ' "$MEDIA_AUTHORIZATION" >/dev/null ||
+        die "media authorizationがplan/intent/attemptと不一致です"
+      [ "$(jq -cS 'del(.authorization_sha256)' \
+        "$MEDIA_AUTHORIZATION" | sha256_text)" = "$(
+          jq -er '.authorization_sha256' "$MEDIA_AUTHORIZATION"
+        )" ] ||
+        die "media authorization hashが不正です"
+    else
+      [ -z "$MEDIA_AUTHORIZATION" ] &&
+        [ -z "$REQUESTED_APPLY_ATTEMPT_ID" ] ||
+        die "media切替を含まないapplyへmedia authorizationを指定できません"
+    fi
     APPLY_RECEIPT="$(secure_new_file "$APPLY_RECEIPT")"
     [ "$(dirname "$PLAN")" = "$(dirname "$APPLY_RECEIPT")" ] ||
       die "apply receiptもplanと同じprivate directoryに置いてください"
@@ -9435,12 +10108,21 @@ case "$COMMAND" in
       die "staged saved planのdigestが一致しません"
     STAGED_PLAN_IDENTITY="$(stat_identity "$STAGED_PLAN")"
     PLAN="$STAGED_PLAN"
-    APPLY_ATTEMPT_ID="$(new_uuid_v4)"
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      APPLY_ATTEMPT_ID="$REQUESTED_APPLY_ATTEMPT_ID"
+      MEDIA_EXPECTED_STATUS="CONSUMED"
+    else
+      APPLY_ATTEMPT_ID="$(new_uuid_v4)"
+      MEDIA_EXPECTED_STATUS="READY"
+    fi
     GATE_PLAN="$PLAN"
     GATE_LOCK_RECEIPT="$TMP_ROOT/provenance-shared-lock.json"
     GATE_PREFLIGHT_RECEIPT="$TMP_ROOT/provenance-preflight.json"
     GATE_OUTCOME_RECEIPT="$TMP_ROOT/provenance-outcome.json"
     GATE_LOCK_ACQUIRED="false"
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      GATE_LOCK_ACQUIRED="true"
+    fi
     GATE_OUTCOME_RECORDED="false"
     GATE_HEARTBEAT_PID=""
     APPLY_RECEIPT_PUBLISHED="false"
@@ -9545,13 +10227,20 @@ case "$COMMAND" in
     }
     trap 'cleanup_apply_command' EXIT
 
-    # Atomically consume the one-use intent and acquire the same shared lock
-    # used by every image/Terraform apply before taking the backend workflow
-    # lock. A heartbeat covers the complete final verification window.
-    bash "$IMAGE_GATE_RUNNER" acquire-deployment-lock \
-      --plan "$PLAN" \
-      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
-      --control-commit "$(git_commit)" > "$GATE_LOCK_RECEIPT"
+    # Ordinary applies atomically consume the intent and acquire the shared
+    # lock here. A media cutover has already consumed READY evidence and moved
+    # the same intent/lock to this exact attempt in the independent attestor's
+    # single DynamoDB transaction, so only an exact heartbeat is accepted.
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      bash "$IMAGE_GATE_RUNNER" heartbeat-deployment-lock \
+        --plan "$PLAN" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID" > "$GATE_LOCK_RECEIPT"
+    else
+      bash "$IMAGE_GATE_RUNNER" acquire-deployment-lock \
+        --plan "$PLAN" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+        --control-commit "$(git_commit)" > "$GATE_LOCK_RECEIPT"
+    fi
     jq -S -c . "$GATE_LOCK_RECEIPT" > "$GATE_LOCK_RECEIPT.canonical"
     mv "$GATE_LOCK_RECEIPT.canonical" "$GATE_LOCK_RECEIPT"
     chmod 600 "$GATE_LOCK_RECEIPT"
@@ -9571,12 +10260,37 @@ case "$COMMAND" in
 
     # The two locks remain held across final live/state/evidence rechecks and
     # the exact private saved-plan apply.
-    verify_receipt "$GATE_PLAN" "$RECEIPT" "$ORIGINAL_PLAN"
+    verify_receipt \
+      "$GATE_PLAN" "$RECEIPT" "$ORIGINAL_PLAN" \
+      "$MEDIA_EXPECTED_STATUS" "$(
+        if [ "$MEDIA_EXPECTED_STATUS" = "CONSUMED" ]; then
+          printf '%s' "$APPLY_ATTEMPT_ID"
+        fi
+      )"
     GATE_PLAN="$TMP_ROOT/verify/plan.tfplan"
     [ "$(sha256_file "$GATE_PLAN")" = "$STAGED_PLAN_SHA256" ] ||
       die "verify pathのsaved plan digestがstaged planと一致しません"
     [ "$(stat_identity "$GATE_PLAN")" = "$STAGED_PLAN_IDENTITY" ] ||
       die "verify pathがstaged planと同一inodeではありません"
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      [ "$(sha256_file "$MEDIA_AUTHORIZATION")" = \
+        "$MEDIA_AUTHORIZATION_SHA256" ] &&
+        [ "$(stat_identity "$MEDIA_AUTHORIZATION")" = \
+          "$MEDIA_AUTHORIZATION_IDENTITY" ] ||
+        die "final verify中にmedia authorizationが差替えられました"
+      jq -e \
+        --slurpfile media "$(
+          jq -er '.media_cutover_receipt_path' \
+            "$TMP_ROOT/verify/receipt.json"
+        )" \
+        --arg plan "$STAGED_PLAN_SHA256" '
+        .plan_sha256 == $plan and
+        .claims_sha256 == $media[0].claims_sha256 and
+        .signature_sha256 == $media[0].signature_sha256 and
+        .kms_key_arn == $media[0].kms_key_arn
+      ' "$MEDIA_AUTHORIZATION" >/dev/null ||
+        die "media authorizationとverified signed receiptが不一致です"
+    fi
     bash "$IMAGE_GATE_RUNNER" validate-deployment-preflight \
       --plan "$GATE_PLAN" \
       --terraform-context "$TMP_ROOT/verify/image-release-context.json" \
@@ -9908,10 +10622,25 @@ case "$COMMAND" in
       die "provenance one-use intent outcomeをAPPLIEDで確認できません"
     GATE_OUTCOME_RECORDED="true"
 
+    MEDIA_AUTHORIZATION_FOR_RECEIPT="$TMP_ROOT/media-authorization.json"
+    if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
+      [ "$(sha256_file "$MEDIA_AUTHORIZATION")" = \
+        "$MEDIA_AUTHORIZATION_SHA256" ] &&
+        [ "$(stat_identity "$MEDIA_AUTHORIZATION")" = \
+          "$MEDIA_AUTHORIZATION_IDENTITY" ] ||
+        die "apply完了前にmedia authorizationが差替えられました"
+      cp "$MEDIA_AUTHORIZATION" "$MEDIA_AUTHORIZATION_FOR_RECEIPT"
+      [ "$(sha256_file "$MEDIA_AUTHORIZATION_FOR_RECEIPT")" = \
+        "$MEDIA_AUTHORIZATION_SHA256" ] ||
+        die "apply receipt用media authorization copyが不一致です"
+    else
+      jq -n 'null' > "$MEDIA_AUTHORIZATION_FOR_RECEIPT"
+    fi
+    chmod 600 "$MEDIA_AUTHORIZATION_FOR_RECEIPT"
     APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
       --arg kind "terraform-runtime-apply-receipt" \
-      --argjson schema_version 5 \
+      --argjson schema_version 6 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
@@ -9942,6 +10671,14 @@ case "$COMMAND" in
       --arg migration_contract_sha256 "$(
         jq -r '.migration_contract_sha256' "$TMP_ROOT/verify/receipt.json"
       )" \
+      --arg reviewed_plan_sha256 "$(
+        jq -r '.reviewed_plan_sha256' "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg media_cutover_receipt_sha256 "$(
+        jq -r '.media_cutover_receipt_sha256' \
+          "$TMP_ROOT/verify/receipt.json"
+      )" \
+      --arg media_apply_authorization_sha256 "$MEDIA_AUTHORIZATION_SHA256" \
       --arg plan_sha256 "$(sha256_file "$PLAN")" \
       --arg openclaw_rollout_result_sha256 "$(
         sha256_file "$OPENCLAW_ROLLOUT_RESULT"
@@ -9993,6 +10730,8 @@ case "$COMMAND" in
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
       --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" \
+      --slurpfile media_authorization \
+        "$MEDIA_AUTHORIZATION_FOR_RECEIPT" \
       --slurpfile post_apply_service_probe \
         "$POST_APPLY_SERVICE_PROBE_RESULT" \
       --slurpfile openclaw_rollout "$OPENCLAW_ROLLOUT_RESULT" '{
@@ -10011,6 +10750,11 @@ case "$COMMAND" in
         apply_attempt_id:$apply_attempt_id,
         source_receipt_sha256:$source_receipt_sha256,
         migration_contract_sha256:$migration_contract_sha256,
+        reviewed_plan_sha256:$reviewed_plan_sha256,
+        media_cutover_receipt_sha256:$media_cutover_receipt_sha256,
+        media_apply_authorization_sha256:
+          $media_apply_authorization_sha256,
+        media_apply_authorization:$media_authorization[0],
         plan_sha256:$plan_sha256,
         openclaw_rollout_result_sha256:
           $openclaw_rollout_result_sha256,
@@ -10055,7 +10799,7 @@ case "$COMMAND" in
     chmod 600 "$APPLY_STAGE"
     jq -e '
       .kind == "terraform-runtime-apply-receipt" and
-      .schema_version == 5 and
+      .schema_version == 6 and
       .status == "applied" and
       .provenance_outcome == "applied" and
       .openclaw_rollout_result.passed == true and
@@ -10065,6 +10809,23 @@ case "$COMMAND" in
       (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
       .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
       (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
+      (
+        if .media_cutover_receipt_sha256 == "" then
+          .media_apply_authorization_sha256 == "" and
+          .media_apply_authorization == null
+        else
+          (.media_cutover_receipt_sha256 |
+            test("^[0-9a-f]{64}$")) and
+          (.media_apply_authorization_sha256 |
+            test("^[0-9a-f]{64}$")) and
+          .media_apply_authorization.kind ==
+            "teamagent-media-apply-authorization" and
+          .media_apply_authorization.state == "AUTHORIZED" and
+          .media_apply_authorization.apply_attempt_id ==
+            .apply_attempt_id and
+          .media_apply_authorization.plan_sha256 == .plan_sha256
+        end
+      ) and
       .shared_deployment_lock_record_id ==
         "lock#teamagent/terraform.tfstate"
     ' "$APPLY_STAGE" >/dev/null ||

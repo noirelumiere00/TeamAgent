@@ -38,22 +38,6 @@ resource "aws_kms_alias" "media_cutover_attestor" {
 
 data "aws_iam_policy_document" "media_cutover_attestor_assume" {
   statement {
-    sid     = "ExistingOrganizationRecipientRole"
-    actions = ["sts:AssumeRole"]
-
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
-    }
-
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values   = [local.alarm_recipient_identity_role_arn]
-    }
-  }
-
-  statement {
     sid = "ExactRootMfaMediaCutoverSession"
     actions = [
       "sts:AssumeRole",
@@ -113,8 +97,13 @@ data "aws_iam_policy_document" "media_cutover_attestor" {
   }
 
   statement {
-    sid       = "SignOnlyMediaCutoverClaims"
-    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Sign"]
+    sid = "SignOnlyMediaCutoverClaims"
+    actions = [
+      "kms:DescribeKey",
+      "kms:GetPublicKey",
+      "kms:Sign",
+      "kms:Verify",
+    ]
     resources = [aws_kms_key.media_cutover_attestor.arn]
   }
 
@@ -130,6 +119,31 @@ data "aws_iam_policy_document" "media_cutover_attestor" {
       test     = "ForAllValues:StringLike"
       variable = "dynamodb:LeadingKeys"
       values   = ["media-cutover#*"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid = "AtomicallyAuthorizeOneMediaApply"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:TransactWriteItems",
+    ]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "intent#*",
+        "lock#teamagent/terraform.tfstate",
+        "media-cutover#*",
+      ]
     }
 
     condition {
@@ -182,7 +196,6 @@ data "aws_iam_policy_document" "media_cutover_attestor" {
     actions = [
       "dynamodb:BatchWriteItem",
       "dynamodb:DeleteItem",
-      "dynamodb:TransactWriteItems",
       "dynamodb:UpdateItem",
     ]
     resources = [aws_dynamodb_table.image_deployment_intents.arn]

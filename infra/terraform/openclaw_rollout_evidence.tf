@@ -248,13 +248,7 @@ data "aws_iam_policy_document" "runtime_automation_openclaw_rollout" {
       "kms:Encrypt",
       "kms:GenerateDataKey",
     ]
-    resources = ["arn:aws:kms:ap-northeast-1:718959508629:key/*"]
-
-    condition {
-      test     = "ForAnyValue:StringEquals"
-      variable = "kms:ResourceAliases"
-      values   = [local.openclaw_rollout_evidence_alias]
-    }
+    resources = [aws_kms_key.openclaw_rollout_evidence.arn]
   }
 
   statement {
@@ -265,13 +259,7 @@ data "aws_iam_policy_document" "runtime_automation_openclaw_rollout" {
       "kms:Sign",
       "kms:Verify",
     ]
-    resources = ["arn:aws:kms:ap-northeast-1:718959508629:key/*"]
-
-    condition {
-      test     = "ForAnyValue:StringEquals"
-      variable = "kms:ResourceAliases"
-      values   = [local.openclaw_rollout_signing_alias]
-    }
+    resources = [aws_kms_key.openclaw_rollout_signing.arn]
   }
 
   statement {

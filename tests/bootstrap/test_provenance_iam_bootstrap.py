@@ -1632,6 +1632,8 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
     assert 'ROOT_ARN="arn:aws:iam::718959508629:root"' in runtime
     assert "sign-alarm-ack)" in runtime
     assert "teamagent-dev-alarm-recipient-ack-signer" in runtime
+    assert "teamagent-dev-media-cutover-attestor" in runtime
+    assert "teamagent-production-media-cutover-attestor" in runtime
     assert "--profile runtime-session" in runtime
     assert runtime.index("unset AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE") < runtime.index(
         'bash "$GUARD" "$@"'
@@ -1642,9 +1644,12 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
         "issue-alarm-challenge",
         "attest-alarm-delivery",
         "advance-alarm-migration",
+        "prepare-media-cutover",
         "attest-media-cutover",
+        "authorize-media-apply",
         "attest-log-readiness",
         "preflight",
+        "review-plan",
         "plan",
         "verify",
         "apply",

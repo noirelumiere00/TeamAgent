@@ -2333,14 +2333,28 @@ def _run_media_cutover_gate(
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
     tmp_root = tmp_path / "guard-tmp"
     tmp_root.mkdir()
+    intent_id = "11111111-1111-4111-8111-111111111111"
+    migration_sha = "6" * 64
+    reviewed_plan_sha = "7" * 64
+    receipt_path = tmp_path / "media-cutover-receipt.json"
+    receipt_path.write_text("{}\n", encoding="utf-8")
     verification = {
         "kind": "teamagent-media-envelope-cutover-verification",
-        "schema_version": 1,
+        "schema_version": 2,
         "account_id": ACCOUNT,
         "region": REGION,
-        "record_id": f"media-cutover#{'1' * 64}",
+        "record_id": f"media-cutover#{intent_id}",
+        "status": "READY",
         "desired_image": MEDIA_WORKER_IMAGE,
+        "image_deployment_intent_id": intent_id,
+        "migration_contract_sha256": migration_sha,
+        "reviewed_plan_sha256": reviewed_plan_sha,
         "claims_sha256": "2" * 64,
+        "signature_sha256": "8" * 64,
+        "kms_key_arn": (
+            f"arn:aws:kms:{REGION}:{ACCOUNT}:key/"
+            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        ),
         "ledger_item_sha256": "3" * 64,
         "verification_sha256": "4" * 64,
         "current_observation": {
@@ -2384,24 +2398,42 @@ def _run_media_cutover_gate(
 run_evidence_helper() {
   [ "$1" = "verify-media-cutover" ] || return 98
   shift
-  local desired="" output=""
+  local desired="" output="" receipt="" intent="" migration_sha=""
+  local reviewed_sha="" status=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --receipt) receipt="$2"; shift 2 ;;
       --desired-image) desired="$2"; shift 2 ;;
+      --image-deployment-intent-id) intent="$2"; shift 2 ;;
+      --migration-contract-sha256) migration_sha="$2"; shift 2 ;;
+      --reviewed-plan-sha256) reviewed_sha="$2"; shift 2 ;;
+      --expected-status) status="$2"; shift 2 ;;
       --output) output="$2"; shift 2 ;;
       *) return 97 ;;
     esac
   done
+  [ "$receipt" = "$EXPECTED_RECEIPT" ] || return 95
   [ "$desired" = "$EXPECTED_DESIRED_IMAGE" ] || return 96
+  [ "$intent" = "$EXPECTED_INTENT" ] || return 94
+  [ "$migration_sha" = "$EXPECTED_MIGRATION_SHA" ] || return 93
+  [ "$reviewed_sha" = "$EXPECTED_REVIEWED_SHA" ] || return 92
+  [ "$status" = "READY" ] || return 91
   cp "$MEDIA_VERIFICATION" "$output"
 }
 """,
             function.group(0),
-            'validate_media_envelope_cutover_gate "$1" "$2"',
+            (
+                'validate_media_envelope_cutover_gate "$1" "$2" "$3" '
+                '"$4" "$5" "$6"'
+            ),
         )
     )
     environment = os.environ.copy()
     environment["EXPECTED_DESIRED_IMAGE"] = MEDIA_WORKER_IMAGE
+    environment["EXPECTED_RECEIPT"] = str(receipt_path)
+    environment["EXPECTED_INTENT"] = intent_id
+    environment["EXPECTED_MIGRATION_SHA"] = migration_sha
+    environment["EXPECTED_REVIEWED_SHA"] = reviewed_plan_sha
     environment["MEDIA_VERIFICATION"] = str(verification_path)
     return subprocess.run(
         [
@@ -2411,6 +2443,10 @@ run_evidence_helper() {
             "validator",
             str(snapshot_path),
             MEDIA_WORKER_IMAGE,
+            str(receipt_path),
+            intent_id,
+            migration_sha,
+            reviewed_plan_sha,
         ],
         capture_output=True,
         text=True,
