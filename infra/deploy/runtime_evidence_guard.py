@@ -33,20 +33,14 @@ from typing import Any
 ACCOUNT_ID = "718959508629"
 REGION = "ap-northeast-1"
 APPROVED_EMAIL = "s-komata@vectorinc.co.jp"
-CANONICAL_TOPIC = (
-    "arn:aws:sns:ap-northeast-1:718959508629:"
-    "teamagent-dev-openclaw-alarms"
-)
-LEGACY_TOPIC = (
-    "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
-)
+CANONICAL_TOPIC = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms"
+LEGACY_TOPIC = "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms"
 AUTOMATION_ARN = (
     "arn:aws:sts::718959508629:assumed-role/"
     "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
 )
 ACK_SIGNER_ARN_PREFIX = (
-    "arn:aws:sts::718959508629:assumed-role/"
-    "teamagent-dev-alarm-recipient-ack-signer/"
+    "arn:aws:sts::718959508629:assumed-role/teamagent-dev-alarm-recipient-ack-signer/"
 )
 ACK_KEY_ALIAS = "alias/teamagent-dev-alarm-recipient-ack"
 SHARED_LEDGER_TABLE = "teamagent-dev-image-deployment-intents"
@@ -56,6 +50,16 @@ SHARED_LOCK_RECORD_ID = "lock#teamagent/terraform.tfstate"
 VERSIONING_LEDGER_RECORD_PREFIX = "versioning-cutover#"
 RUNTIME_LOCK_LEASE_SECONDS = 7200
 SETTLE_SECONDS = 900
+MEDIA_MAPPING_DISABLE_TIMEOUT_SECONDS = 120
+MEDIA_MAPPING_POLL_SECONDS = 5
+MEDIA_CUTOVER_LEDGER_PREFIX = "media-cutover#"
+MEDIA_JOBS_QUEUE = "teamagent-dev-tiktok-acquire-jobs"
+MEDIA_JOBS_DLQ = "teamagent-dev-tiktok-acquire-dlq"
+MEDIA_DISPATCH_FUNCTION = "teamagent-dev-tiktok-acquire-dispatch"
+MEDIA_CLUSTER = "teamagent-dev-tiktok"
+MEDIA_FAMILY = "teamagent-dev-tiktok-acquire"
+MCP_CLUSTER = "teamagent-dev"
+MCP_SERVICE = "teamagent-dev-mcp"
 
 ENDPOINTS = {
     "autoscaling": f"https://autoscaling.{REGION}.amazonaws.com",
@@ -64,9 +68,7 @@ ENDPOINTS = {
     "chatbot": f"https://chatbot.{REGION}.amazonaws.com",
     "cloudtrail": f"https://cloudtrail.{REGION}.amazonaws.com",
     "cloudwatch": f"https://monitoring.{REGION}.amazonaws.com",
-    "codestar-notifications": (
-        f"https://codestar-notifications.{REGION}.amazonaws.com"
-    ),
+    "codestar-notifications": (f"https://codestar-notifications.{REGION}.amazonaws.com"),
     "ce": "https://ce.us-east-1.amazonaws.com",
     "dynamodb": f"https://dynamodb.{REGION}.amazonaws.com",
     "ecs": f"https://ecs.{REGION}.amazonaws.com",
@@ -94,9 +96,7 @@ WRITER_FAMILIES = (
 )
 WRITER_FAMILY_CLUSTERS = {
     family: (
-        "teamagent-dev-tiktok"
-        if family == "teamagent-dev-tiktok-acquire"
-        else "teamagent-dev"
+        "teamagent-dev-tiktok" if family == "teamagent-dev-tiktok-acquire" else "teamagent-dev"
     )
     for family in WRITER_FAMILIES
 }
@@ -124,9 +124,7 @@ KNOWN_SNS_PUBLISHER_TYPES = (
 )
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
-UUID4 = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-)
+UUID4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 VERSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,1024}$")
 ETAG = re.compile(r'^"?[0-9a-fA-F]{32}(?:-[0-9]+)?"?$')
 
@@ -259,9 +257,7 @@ class FileIdentity:
             mtime_ns=info.st_mtime_ns,
             ctime_ns=info.st_ctime_ns,
             birthtime_ns=(
-                int(info.st_birthtime * 1_000_000_000)
-                if hasattr(info, "st_birthtime")
-                else None
+                int(info.st_birthtime * 1_000_000_000) if hasattr(info, "st_birthtime") else None
             ),
         )
 
@@ -555,15 +551,10 @@ class AwsCli:
         )
         if completed.returncode:
             raise ContractError(
-                f"AWS {service} {operation} failed with exit "
-                f"{completed.returncode}"
+                f"AWS {service} {operation} failed with exit {completed.returncode}"
             )
         try:
-            response = (
-                json.loads(completed.stdout)
-                if completed.stdout.strip()
-                else {}
-            )
+            response = json.loads(completed.stdout) if completed.stdout.strip() else {}
         except json.JSONDecodeError as exc:
             raise ContractError(f"AWS {service} {operation} returned non-JSON") from exc
         if not isinstance(response, dict):
@@ -595,9 +586,7 @@ class AwsCli:
             if next_token in (None, ""):
                 return pages
             if not isinstance(next_token, str) or next_token in seen:
-                raise ContractError(
-                    f"AWS {service} {operation} pagination token is invalid"
-                )
+                raise ContractError(f"AWS {service} {operation} pagination token is invalid")
             seen.add(next_token)
             token = next_token
 
@@ -610,9 +599,7 @@ def _items(
     collected: list[dict[str, Any]] = []
     for page, _ in pages:
         value = page.get(field)
-        if not isinstance(value, list) or not all(
-            isinstance(item, dict) for item in value
-        ):
+        if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
             raise ContractError(f"{label} page has an invalid {field}")
         collected.extend(value)
     return collected
@@ -696,14 +683,10 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
 
     canonical_subscriptions = subscriptions[CANONICAL_TOPIC]
     all_subscriptions = [
-        (topic_arn, item)
-        for topic_arn, items in subscriptions.items()
-        for item in items
+        (topic_arn, item) for topic_arn, items in subscriptions.items() for item in items
     ]
     if len(canonical_subscriptions) != 1 or len(all_subscriptions) != 1:
-        raise ContractError(
-            "alarm topics must have exactly one subscription in total"
-        )
+        raise ContractError("alarm topics must have exactly one subscription in total")
     if all_subscriptions[0][0] != CANONICAL_TOPIC:
         raise ContractError("the sole alarm subscription must use the canonical topic")
     subscription = canonical_subscriptions[0]
@@ -788,9 +771,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         aws.pages("cloudwatch", "describe-alarms", ()),
     )
     metric_alarms = _items(alarm_pages, "MetricAlarms", "CloudWatch alarms")
-    composite_alarms = _items(
-        alarm_pages, "CompositeAlarms", "CloudWatch composite alarms"
-    )
+    composite_alarms = _items(alarm_pages, "CompositeAlarms", "CloudWatch composite alarms")
     coverage.update({"cloudwatch.metric-alarm", "cloudwatch.composite-alarm"})
     for alarm in metric_alarms:
         raw_documents.append(
@@ -814,16 +795,12 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "account",
         aws.pages("logs", "describe-metric-filters", ()),
     )
-    metric_filters = _items(
-        log_filter_pages, "metricFilters", "CloudWatch Logs metric filters"
-    )
+    metric_filters = _items(log_filter_pages, "metricFilters", "CloudWatch Logs metric filters")
     for metric_filter in metric_filters:
         raw_documents.append(
             (
                 "cloudwatch.log-metric-filter",
-                require_string(
-                    metric_filter.get("filterName"), "log metric filter name"
-                ),
+                require_string(metric_filter.get("filterName"), "log metric filter name"),
                 metric_filter,
             )
         )
@@ -849,9 +826,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 ("--account-id", ACCOUNT_ID, "--budget-name", budget_name),
             ),
         )
-        notifications = _items(
-            notification_pages, "Notifications", "Budget notifications"
-        )
+        notifications = _items(notification_pages, "Notifications", "Budget notifications")
         for notification_index, notification in enumerate(notifications):
             notification_input = {
                 key: notification[key]
@@ -900,17 +875,11 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "account",
         aws.pages("events", "list-event-buses", ()),
     )
-    event_buses = _items(
-        event_bus_pages, "EventBuses", "EventBridge event buses"
-    )
+    event_buses = _items(event_bus_pages, "EventBuses", "EventBridge event buses")
     event_bus_names = [
-        require_string(bus.get("Name"), "EventBridge event bus name")
-        for bus in event_buses
+        require_string(bus.get("Name"), "EventBridge event bus name") for bus in event_buses
     ]
-    if (
-        "default" not in event_bus_names
-        or len(event_bus_names) != len(set(event_bus_names))
-    ):
+    if "default" not in event_bus_names or len(event_bus_names) != len(set(event_bus_names)):
         raise ContractError("EventBridge event-bus inventory is incomplete")
     event_rules: list[dict[str, Any]] = []
     event_targets: list[dict[str, Any]] = []
@@ -943,9 +912,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                     ),
                 ),
             )
-            event_targets.extend(
-                _items(target_pages, "Targets", "EventBridge targets")
-            )
+            event_targets.extend(_items(target_pages, "Targets", "EventBridge targets"))
         event_rules.extend(bus_rules)
     coverage.add("eventbridge.target")
 
@@ -954,16 +921,13 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "account",
         aws.pages("scheduler", "list-schedule-groups", ()),
     )
-    schedule_groups = _items(
-        schedule_group_pages, "ScheduleGroups", "Scheduler schedule groups"
-    )
+    schedule_groups = _items(schedule_group_pages, "ScheduleGroups", "Scheduler schedule groups")
     schedule_group_names = [
         require_string(group.get("Name"), "Scheduler schedule group name")
         for group in schedule_groups
     ]
-    if (
-        "default" not in schedule_group_names
-        or len(schedule_group_names) != len(set(schedule_group_names))
+    if "default" not in schedule_group_names or len(schedule_group_names) != len(
+        set(schedule_group_names)
     ):
         raise ContractError("Scheduler schedule-group inventory is incomplete")
     schedules: list[dict[str, Any]] = []
@@ -978,14 +942,10 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 ("--group-name", schedule_group_name),
             ),
         )
-        group_schedules = _items(
-            schedule_pages, "Schedules", "Scheduler schedules"
-        )
+        group_schedules = _items(schedule_pages, "Schedules", "Scheduler schedules")
         for schedule in group_schedules:
             name = require_string(schedule.get("Name"), "schedule name")
-            group = require_string(
-                schedule.get("GroupName"), "schedule group"
-            )
+            group = require_string(schedule.get("GroupName"), "schedule group")
             if group != schedule_group_name:
                 raise ContractError("Scheduler schedule belongs to another group")
             detail, http = aws.call(
@@ -993,10 +953,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 "get-schedule",
                 ("--name", name, "--group-name", group),
             )
-            if (
-                detail.get("Name") != name
-                or detail.get("GroupName") != group
-            ):
+            if detail.get("Name") != name or detail.get("GroupName") != group:
                 raise ContractError("Scheduler schedule detail identity differs")
             collect("scheduler.target", f"{group}/{name}", [(detail, http)])
             schedule_details.append(detail)
@@ -1037,27 +994,17 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 token_argument="--marker",
             ),
         )
-        invoke_configs.extend(
-            _items(pages, "FunctionEventInvokeConfigs", "Lambda invoke configs")
-        )
-        for invoke_config in _items(
-            pages, "FunctionEventInvokeConfigs", "Lambda invoke configs"
-        ):
+        invoke_configs.extend(_items(pages, "FunctionEventInvokeConfigs", "Lambda invoke configs"))
+        for invoke_config in _items(pages, "FunctionEventInvokeConfigs", "Lambda invoke configs"):
             destination_config = invoke_config.get("DestinationConfig", {})
             if not isinstance(destination_config, Mapping):
                 raise ContractError("Lambda destination config is malformed")
             on_success = destination_config.get("OnSuccess", {})
             on_failure = destination_config.get("OnFailure", {})
-            if not isinstance(on_success, Mapping) or not isinstance(
-                on_failure, Mapping
-            ):
+            if not isinstance(on_success, Mapping) or not isinstance(on_failure, Mapping):
                 raise ContractError("Lambda invoke destination is malformed")
-            raw_documents.append(
-                ("lambda.on-success", name, dict(on_success))
-            )
-            raw_documents.append(
-                ("lambda.on-failure", name, dict(on_failure))
-            )
+            raw_documents.append(("lambda.on-success", name, dict(on_success)))
+            raw_documents.append(("lambda.on-failure", name, dict(on_failure)))
     coverage.update(
         {
             "lambda.dead-letter",
@@ -1077,9 +1024,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
             token_argument="--marker",
         ),
     )
-    mappings = _items(
-        mapping_pages, "EventSourceMappings", "Lambda event source mappings"
-    )
+    mappings = _items(mapping_pages, "EventSourceMappings", "Lambda event source mappings")
 
     bucket_pages = collect(
         "s3.bucket",
@@ -1252,9 +1197,7 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "destination": destination_state,
         "subscription_metadata": subscription_metadata,
         "topic_inventory": sorted(
-            topic_arn
-            for topic_arn in topic_arns
-            if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
+            topic_arn for topic_arn in topic_arns if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
         ),
         "alarm_subscription_count": len(all_subscriptions),
         "publisher_coverage": publisher_coverage,
@@ -1270,23 +1213,17 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
         "legacy_topic_arn": LEGACY_TOPIC,
         "raw_endpoint_utf8_sha256": sha256_bytes(raw_endpoint.encode()),
         "subscription_metadata": subscription_metadata,
-        "subscription_metadata_sha256": canonical_sha256(
-            subscription_metadata
-        ),
+        "subscription_metadata_sha256": canonical_sha256(subscription_metadata),
         "destination_state": destination_state,
         "destination_state_sha256": canonical_sha256(destination_state),
         "raw_reference_set": references,
         "raw_reference_set_sha256": canonical_sha256(references),
         "publisher_reference_set": publisher_references,
-        "publisher_reference_set_sha256": canonical_sha256(
-            publisher_references
-        ),
+        "publisher_reference_set_sha256": canonical_sha256(publisher_references),
         "publishers": publishers,
         "publishers_sha256": canonical_sha256(publishers),
         "topic_inventory": sorted(
-            topic_arn
-            for topic_arn in topic_arns
-            if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
+            topic_arn for topic_arn in topic_arns if topic_arn in {CANONICAL_TOPIC, LEGACY_TOPIC}
         ),
         "alarm_subscription_count": len(all_subscriptions),
         "source_pages": raw_sources,
@@ -1405,20 +1342,14 @@ def validate_inventory_contract(contract: Mapping[str, Any]) -> None:
     references = contract.get("references")
     publisher_references = contract.get("publisher_references")
     publishers = contract.get("publishers")
-    if not all(
-        isinstance(value, list)
-        for value in (references, publisher_references, publishers)
-    ):
+    if not all(isinstance(value, list) for value in (references, publisher_references, publishers)):
         raise ContractError("runtime inventory reference sets are missing")
     reference_keys = ("source_type", "source_id", "json_pointer", "topic_arn")
     for reference in references:
         if (
             not isinstance(reference, Mapping)
             or set(reference) != set(reference_keys)
-            or any(
-                not isinstance(reference.get(key), str)
-                for key in reference_keys
-            )
+            or any(not isinstance(reference.get(key), str) for key in reference_keys)
             or not str(reference["topic_arn"]).startswith("arn:aws:sns:")
         ):
             raise ContractError("runtime inventory raw SNS reference is malformed")
@@ -1484,20 +1415,13 @@ def validate_inventory_contract(contract: Mapping[str, Any]) -> None:
             ),
             "runtime inventory page evidence",
         )
-        source_type = require_string(
-            source.get("source_type"), "inventory page source type"
-        )
-        source_id = require_string(
-            source.get("source_id"), "inventory page source id"
-        )
+        source_type = require_string(source.get("source_type"), "inventory page source type")
+        source_id = require_string(source.get("source_id"), "inventory page source id")
         page = require_int(source.get("page"), "inventory page number")
         if (
             not HEX64.fullmatch(str(source.get("response_sha256", "")))
             or not HEX64.fullmatch(str(source.get("request_id_sha256", "")))
-            or require_int(
-                source.get("aws_date_epoch"), "inventory page AWS Date", minimum=1
-            )
-            < 1
+            or require_int(source.get("aws_date_epoch"), "inventory page AWS Date", minimum=1) < 1
         ):
             raise ContractError("runtime inventory page evidence hash/time is invalid")
         sort_key = (source_type, source_id, page)
@@ -1514,8 +1438,7 @@ def assert_writer_inventory_disabled(inventory: Mapping[str, Any]) -> None:
     schedules = inventory.get("scheduler_schedules")
     mappings = inventory.get("lambda_event_source_mappings")
     if not isinstance(rules, list) or not all(
-        isinstance(rule, Mapping) and rule.get("State") == "DISABLED"
-        for rule in rules
+        isinstance(rule, Mapping) and rule.get("State") == "DISABLED" for rule in rules
     ):
         raise ContractError("every EventBridge rule must be DISABLED")
     if not isinstance(schedules, list) or not all(
@@ -1524,8 +1447,7 @@ def assert_writer_inventory_disabled(inventory: Mapping[str, Any]) -> None:
     ):
         raise ContractError("every Scheduler schedule must be DISABLED")
     if not isinstance(mappings, list) or not all(
-        isinstance(mapping, Mapping) and mapping.get("State") == "Disabled"
-        for mapping in mappings
+        isinstance(mapping, Mapping) and mapping.get("State") == "Disabled" for mapping in mappings
     ):
         raise ContractError("every Lambda event source mapping must be Disabled")
 
@@ -1538,9 +1460,7 @@ def _caller_identity(aws: AwsCli) -> tuple[dict[str, Any], HttpEvidence]:
     return identity, http
 
 
-def _bucket_identity(
-    aws: AwsCli, bucket_name: str
-) -> tuple[dict[str, Any], HttpEvidence]:
+def _bucket_identity(aws: AwsCli, bucket_name: str) -> tuple[dict[str, Any], HttpEvidence]:
     pages = aws.pages(
         "s3api",
         "list-buckets",
@@ -1565,9 +1485,7 @@ def _bucket_identity(
     matches = [bucket for bucket in buckets if bucket.get("Name") == bucket_name]
     if len(matches) != 1:
         raise ContractError(f"bucket identity is not unique: {bucket_name}")
-    creation_date = require_string(
-        matches[0].get("CreationDate"), "bucket CreationDate"
-    )
+    creation_date = require_string(matches[0].get("CreationDate"), "bucket CreationDate")
     parse_iso_epoch(creation_date, "bucket CreationDate")
     return (
         {
@@ -1639,9 +1557,7 @@ def _object_versions_hash(aws: AwsCli, bucket: str) -> tuple[str, int]:
     return canonical_sha256(entries), observed_at
 
 
-def _list_family_tasks(
-    aws: AwsCli, family: str, desired_status: str
-) -> tuple[list[str], int]:
+def _list_family_tasks(aws: AwsCli, family: str, desired_status: str) -> tuple[list[str], int]:
     try:
         cluster = WRITER_FAMILY_CLUSTERS[family]
     except KeyError as exc:
@@ -1663,9 +1579,7 @@ def _list_family_tasks(
     tasks: list[str] = []
     for page, _ in pages:
         values = page.get("taskArns")
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) for value in values
-        ):
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ContractError("ECS task page is malformed")
         tasks.extend(values)
     if len(tasks) != len(set(tasks)):
@@ -1715,15 +1629,9 @@ def _describe_writer_services(
     for failure in failures:
         if not isinstance(failure, Mapping):
             raise ContractError("ECS service failure entry is malformed")
-        service_arn = require_string(
-            failure.get("arn"), "missing ECS service ARN"
-        )
+        service_arn = require_string(failure.get("arn"), "missing ECS service ARN")
         name = service_arn.rsplit("/", 1)[-1]
-        if (
-            name not in WRITER_SERVICES
-            or name in accounted
-            or failure.get("reason") != "MISSING"
-        ):
+        if name not in WRITER_SERVICES or name in accounted or failure.get("reason") != "MISSING":
             raise ContractError("ECS service inventory has an unknown failure")
         states[name] = {
             "status": "MISSING",
@@ -1754,19 +1662,14 @@ def _queue_depths(
     queue_urls: list[str] = []
     for page, _ in list_pages:
         values = page.get("QueueUrls", [])
-        if not isinstance(values, list) or not all(
-            isinstance(value, str) for value in values
-        ):
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
             raise ContractError("SQS queue URL inventory is malformed")
         queue_urls.extend(values)
     if len(queue_urls) != len(set(queue_urls)):
         raise ContractError("SQS queue inventory contains duplicates")
     observed_times = [http.date_epoch for _, http in list_pages]
     for queue_url in sorted(queue_urls):
-        expected_prefix = (
-            f"https://sqs.{REGION}.amazonaws.com/"
-            f"{ACCOUNT_ID}/{QUEUE_NAME_PREFIX}"
-        )
+        expected_prefix = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/{QUEUE_NAME_PREFIX}"
         if not queue_url.startswith(expected_prefix):
             raise ContractError("SQS queue URL differs from fixed account/region")
         queue_name = queue_url.rsplit("/", 1)[-1]
@@ -1815,9 +1718,7 @@ def _cloudtrail_identity_contract(
     trail = response.get("Trail")
     expected_name = "teamagent-dev-trail"
     expected_bucket = f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
-    expected_arn = (
-        f"arn:aws:cloudtrail:{REGION}:{ACCOUNT_ID}:trail/{expected_name}"
-    )
+    expected_arn = f"arn:aws:cloudtrail:{REGION}:{ACCOUNT_ID}:trail/{expected_name}"
     if (
         not isinstance(trail, Mapping)
         or trail.get("Name") != expected_name
@@ -1858,15 +1759,11 @@ def _cloudtrail_identity_contract(
 def _log_producer_state(
     aws: AwsCli,
 ) -> tuple[dict[str, Any], int]:
-    trail, trail_http = aws.call(
-        "cloudtrail", "get-trail", ("--name", "teamagent-dev-trail")
-    )
+    trail, trail_http = aws.call("cloudtrail", "get-trail", ("--name", "teamagent-dev-trail"))
     status, status_http = aws.call(
         "cloudtrail", "get-trail-status", ("--name", "teamagent-dev-trail")
     )
-    bedrock, bedrock_http = aws.call(
-        "bedrock", "get-model-invocation-logging-configuration"
-    )
+    bedrock, bedrock_http = aws.call("bedrock", "get-model-invocation-logging-configuration")
     trail_identity = _cloudtrail_identity_contract(trail)
     if not isinstance(status.get("IsLogging"), bool):
         raise ContractError("CloudTrail producer identity/state is not exact")
@@ -1905,17 +1802,13 @@ def capture_quiescence(
     inventory = collect_inventory(aws)
     assert_writer_inventory_disabled(inventory)
     family_counts: dict[str, dict[str, int | str]] = {}
-    source_times = [
-        source["aws_date_epoch"] for source in inventory["source_pages"]
-    ]
+    source_times = [source["aws_date_epoch"] for source in inventory["source_pages"]]
     for family in WRITER_FAMILIES:
         running, running_at = _list_family_tasks(aws, family, "RUNNING")
         pending, pending_at = _list_family_tasks(aws, family, "PENDING")
         source_times.extend((running_at, pending_at))
         if running or pending:
-            raise ContractError(
-                f"ECS family {family} still has RUNNING/PENDING tasks"
-            )
+            raise ContractError(f"ECS family {family} still has RUNNING/PENDING tasks")
         family_counts[family] = {
             "cluster": WRITER_FAMILY_CLUSTERS[family],
             "running": 0,
@@ -1923,9 +1816,7 @@ def capture_quiescence(
         }
     service_states, services_at = _describe_writer_services(aws)
     if any(
-        state["desired"] != 0
-        or state["running"] != 0
-        or state["pending"] != 0
+        state["desired"] != 0 or state["running"] != 0 or state["pending"] != 0
         for state in service_states.values()
     ):
         raise ContractError("every ECS writer service must be fully scaled to zero")
@@ -2030,9 +1921,7 @@ def disconnect_all_writers(
     rules = inventory["eventbridge_rules"]
     for rule in rules:
         name = require_string(rule.get("Name"), "EventBridge rule name")
-        event_bus = require_string(
-            rule.get("EventBusName"), "EventBridge event bus name"
-        )
+        event_bus = require_string(rule.get("EventBusName"), "EventBridge event bus name")
         arguments = [
             "--name",
             name,
@@ -2075,15 +1964,11 @@ def disconnect_all_writers(
         if set(schedule) - allowed - response_only:
             raise ContractError("Scheduler schedule contains an unknown field")
         update = {
-            key: value
-            for key, value in schedule.items()
-            if key in allowed and value is not None
+            key: value for key, value in schedule.items() if key in allowed and value is not None
         }
         update["State"] = "DISABLED"
         name = require_string(update.get("Name"), "Scheduler schedule name")
-        group = require_string(
-            update.get("GroupName", "default"), "Scheduler schedule group"
-        )
+        group = require_string(update.get("GroupName", "default"), "Scheduler schedule group")
         update["GroupName"] = group
         with tempfile.NamedTemporaryFile(
             mode="wb", prefix="teamagent-schedule.", delete=False
@@ -2153,8 +2038,7 @@ def disconnect_all_writers(
 
     if not actions:
         raise ContractError(
-            "later observation alone is forbidden; no fresh writer disconnect "
-            "action was produced"
+            "later observation alone is forbidden; no fresh writer disconnect action was produced"
         )
     actions.sort(key=lambda action: (action["kind"], action["resource_id"]))
     action_requirements = [
@@ -2165,10 +2049,7 @@ def disconnect_all_writers(
         for action in actions
     ]
     if len(action_requirements) != len(
-        {
-            (requirement["kind"], requirement["resource_id"])
-            for requirement in action_requirements
-        }
+        {(requirement["kind"], requirement["resource_id"]) for requirement in action_requirements}
     ):
         raise ContractError("writer disconnect action set is not exact/unique")
     disconnect_event_epoch = max(action["aws_date_epoch"] for action in actions)
@@ -2193,9 +2074,7 @@ def disconnect_all_writers(
     }
 
 
-def _versioning_status(
-    aws: AwsCli, bucket: str
-) -> tuple[dict[str, Any], HttpEvidence]:
+def _versioning_status(aws: AwsCli, bucket: str) -> tuple[dict[str, Any], HttpEvidence]:
     response, http = aws.call(
         "s3api",
         "get-bucket-versioning",
@@ -2219,14 +2098,9 @@ def _versioning_ledger_item(
     disconnect = workflow_claims.get("producer_disconnect")
     buckets = workflow_claims.get("buckets_before")
     cutover = workflow_claims.get("cutover")
-    if not all(
-        isinstance(value, Mapping)
-        for value in (shared_lock, disconnect, buckets, cutover)
-    ):
+    if not all(isinstance(value, Mapping) for value in (shared_lock, disconnect, buckets, cutover)):
         raise ContractError("versioning ledger claims are incomplete")
-    workflow_id = require_string(
-        shared_lock.get("workflow_id"), "versioning workflow ID"
-    )
+    workflow_id = require_string(shared_lock.get("workflow_id"), "versioning workflow ID")
     record_id = f"{VERSIONING_LEDGER_RECORD_PREFIX}{workflow_id}"
     bucket_identities = {
         label: value.get("identity")
@@ -2237,24 +2111,18 @@ def _versioning_ledger_item(
         raise ContractError("versioning ledger bucket identities are incomplete")
     return {
         "record_id": _dynamodb_value(record_id),
-        "record_type": _dynamodb_value(
-            "teamagent.first-time-versioning-cutover"
-        ),
+        "record_type": _dynamodb_value("teamagent.first-time-versioning-cutover"),
         "schema_version": _dynamodb_value(1),
         "status": _dynamodb_value("COMPLETED"),
         "workflow_id": _dynamodb_value(workflow_id),
-        "workflow_claims_sha256": _dynamodb_value(
-            canonical_sha256(workflow_claims)
-        ),
+        "workflow_claims_sha256": _dynamodb_value(canonical_sha256(workflow_claims)),
         "action_set_sha256": _dynamodb_value(
             require_string(
                 disconnect.get("action_set_sha256"),
                 "versioning disconnect action-set hash",
             )
         ),
-        "bucket_identity_sha256": _dynamodb_value(
-            canonical_sha256(bucket_identities)
-        ),
+        "bucket_identity_sha256": _dynamodb_value(canonical_sha256(bucket_identities)),
         "cutover_sha256": _dynamodb_value(canonical_sha256(cutover)),
         "recorded_at_epoch": _dynamodb_value(recorded_at_epoch),
         "audit_expires_at": _dynamodb_value(recorded_at_epoch + 31536000),
@@ -2285,9 +2153,7 @@ def first_time_versioning_cutover(
         bucket_identity, bucket_http = _bucket_identity(aws, bucket)
         versioning, versioning_http = _versioning_status(aws, bucket)
         if versioning["status"] != "Unversioned":
-            raise ContractError(
-                "first-time workflow rejects later Enabled/Suspended observation"
-            )
+            raise ContractError("first-time workflow rejects later Enabled/Suspended observation")
         before[label] = {
             "identity": bucket_identity,
             "identity_observed_at_epoch": bucket_http.date_epoch,
@@ -2308,16 +2174,17 @@ def first_time_versioning_cutover(
             raise ContractError("bucket was versioned before the guard-owned enablement")
         object_hash, object_observed = _object_versions_hash(aws, bucket)
         quiescence_observed = quiescence_before["contract"]["observed_at_epoch"]
-        if min(
-            identity_after_http.date_epoch,
-            versioning_after_http.date_epoch,
-            object_observed,
-        ) < quiescence_observed:
+        if (
+            min(
+                identity_after_http.date_epoch,
+                versioning_after_http.date_epoch,
+                object_observed,
+            )
+            < quiescence_observed
+        ):
             raise ContractError("no-write baseline predates producer quiescence")
         baseline_hashes[label] = object_hash
-        before[label]["post_quiescence_identity_observed_at_epoch"] = (
-            identity_after_http.date_epoch
-        )
+        before[label]["post_quiescence_identity_observed_at_epoch"] = identity_after_http.date_epoch
         before[label]["post_quiescence_versioning_observed_at_epoch"] = (
             versioning_after_http.date_epoch
         )
@@ -2386,9 +2253,7 @@ def first_time_versioning_cutover(
                 raise ContractError("bucket write occurred during the settle window")
             object_hashes[label] = object_hash
             versioning_state[label] = status
-            observed_at = max(
-                observed_at, status_http.date_epoch, object_observed
-            )
+            observed_at = max(observed_at, status_http.date_epoch, object_observed)
         if observed_at < not_before:
             raise ContractError("post-settle observation occurred too early")
         observations.append(
@@ -2463,8 +2328,7 @@ def first_time_versioning_cutover(
                 rollback_errors.append(str(exc))
         if rollback_errors:
             raise ContractError(
-                "producer rollback could not be confirmed: "
-                + "; ".join(rollback_errors)
+                "producer rollback could not be confirmed: " + "; ".join(rollback_errors)
             )
 
     try:
@@ -2499,10 +2363,13 @@ def first_time_versioning_cutover(
     if post_cutover_lock["workflow_id"] != initial_lock["workflow_id"]:
         rollback_cutover_producers()
         raise ContractError("shared workflow lock changed during cutover")
-    if max(
-        cloudtrail_http.date_epoch,
-        bedrock_http.date_epoch,
-    ) > post_cutover_lock["verified_at_epoch"]:
+    if (
+        max(
+            cloudtrail_http.date_epoch,
+            bedrock_http.date_epoch,
+        )
+        > post_cutover_lock["verified_at_epoch"]
+    ):
         rollback_cutover_producers()
         raise ContractError("producer cutover exceeds its shared-lock observation")
 
@@ -2510,22 +2377,16 @@ def first_time_versioning_cutover(
         "cloudtrail": {
             "action": "StartLogging",
             "response_sha256": canonical_sha256(cloudtrail_response),
-            "request_id_sha256": sha256_bytes(
-                cloudtrail_http.request_id.encode()
-            ),
+            "request_id_sha256": sha256_bytes(cloudtrail_http.request_id.encode()),
             "response_date_epoch": cloudtrail_http.date_epoch,
         },
         "bedrock": {
             "action": "PutModelInvocationLoggingConfiguration",
             "response_sha256": canonical_sha256(bedrock_response),
-            "request_id_sha256": sha256_bytes(
-                bedrock_http.request_id.encode()
-            ),
+            "request_id_sha256": sha256_bytes(bedrock_http.request_id.encode()),
             "response_date_epoch": bedrock_http.date_epoch,
             "configuration": bedrock_configuration,
-            "configuration_sha256": canonical_sha256(
-                bedrock_configuration
-            ),
+            "configuration_sha256": canonical_sha256(bedrock_configuration),
         },
     }
     workflow_claims = {
@@ -2541,12 +2402,8 @@ def first_time_versioning_cutover(
             "lease_expires_at": initial_lock["lease_expires_at"],
             "lock_receipt_sha256": canonical_sha256(lock_receipt),
             "initial_verification_epoch": initial_lock["verified_at_epoch"],
-            "pre_cutover_verification_epoch": pre_cutover_lock[
-                "verified_at_epoch"
-            ],
-            "post_cutover_verification_epoch": post_cutover_lock[
-                "verified_at_epoch"
-            ],
+            "pre_cutover_verification_epoch": pre_cutover_lock["verified_at_epoch"],
+            "post_cutover_verification_epoch": post_cutover_lock["verified_at_epoch"],
         },
         "aws_executable": asdict(aws.evidence),
         "endpoints": ENDPOINTS,
@@ -2558,9 +2415,7 @@ def first_time_versioning_cutover(
             "actions": disconnect["actions"],
             "action_set_sha256": disconnect["action_set_sha256"],
             "action_requirements": disconnect["action_requirements"],
-            "action_requirements_sha256": disconnect[
-                "action_requirements_sha256"
-            ],
+            "action_requirements_sha256": disconnect["action_requirements_sha256"],
             "quiescence": quiescence_before["contract"],
             "quiescence_sha256": quiescence_before["contract_sha256"],
         },
@@ -2672,9 +2527,7 @@ def first_time_versioning_cutover(
         "put_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
         "put_aws_date_epoch": ledger_http.date_epoch,
         "confirmation_response_sha256": canonical_sha256(ledger_confirmation),
-        "confirmation_request_id_sha256": sha256_bytes(
-            confirmation_http.request_id.encode()
-        ),
+        "confirmation_request_id_sha256": sha256_bytes(confirmation_http.request_id.encode()),
         "confirmed_at_epoch": confirmation_http.date_epoch,
         "final_observed_at_epoch": final_identity_http.date_epoch,
         "final_observation_request_id_sha256": sha256_bytes(
@@ -2757,12 +2610,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         or not HEX64.fullmatch(str(shared_lock.get("lock_receipt_sha256", "")))
     ):
         raise ContractError("versioning shared-lock binding is invalid")
-    lock_acquired = require_int(
-        shared_lock.get("acquired_at_epoch"), "shared lock acquisition"
-    )
-    lock_expires = require_int(
-        shared_lock.get("lease_expires_at"), "shared lock expiry"
-    )
+    lock_acquired = require_int(shared_lock.get("acquired_at_epoch"), "shared lock acquisition")
+    lock_expires = require_int(shared_lock.get("lease_expires_at"), "shared lock expiry")
     lock_initial = require_int(
         shared_lock.get("initial_verification_epoch"),
         "initial shared lock verification",
@@ -2775,13 +2624,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         shared_lock.get("post_cutover_verification_epoch"),
         "post-cutover shared lock verification",
     )
-    if not (
-        lock_acquired
-        <= lock_initial
-        <= lock_pre_cutover
-        <= lock_post_cutover
-        < lock_expires
-    ):
+    if not (lock_acquired <= lock_initial <= lock_pre_cutover <= lock_post_cutover < lock_expires):
         raise ContractError("versioning shared-lock timing is invalid")
     durable_ledger = workflow.get("durable_ledger")
     if not isinstance(durable_ledger, Mapping):
@@ -2810,9 +2653,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
     workflow_claims = dict(workflow)
     del workflow_claims["durable_ledger"]
     del workflow_claims["workflow_sha256"]
-    workflow_id = require_string(
-        shared_lock.get("workflow_id"), "versioning workflow ID"
-    )
+    workflow_id = require_string(shared_lock.get("workflow_id"), "versioning workflow ID")
     recorded_at = require_int(
         durable_ledger.get("recorded_at_epoch"),
         "versioning ledger record time",
@@ -2842,14 +2683,10 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         recorded_at_epoch=recorded_at,
     )
     if (
-        durable_ledger.get("record_id")
-        != f"{VERSIONING_LEDGER_RECORD_PREFIX}{workflow_id}"
-        or durable_ledger.get("record_type")
-        != "teamagent.first-time-versioning-cutover"
-        or durable_ledger.get("workflow_claims_sha256")
-        != canonical_sha256(workflow_claims)
-        or durable_ledger.get("item_sha256")
-        != canonical_sha256(expected_ledger_item)
+        durable_ledger.get("record_id") != f"{VERSIONING_LEDGER_RECORD_PREFIX}{workflow_id}"
+        or durable_ledger.get("record_type") != "teamagent.first-time-versioning-cutover"
+        or durable_ledger.get("workflow_claims_sha256") != canonical_sha256(workflow_claims)
+        or durable_ledger.get("item_sha256") != canonical_sha256(expected_ledger_item)
         or audit_expires_at != recorded_at + 31536000
         or not (
             lock_post_cutover
@@ -2873,9 +2710,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
     ):
         if not HEX64.fullmatch(str(durable_ledger.get(field, ""))):
             raise ContractError(f"versioning durable ledger {field} is invalid")
-    if workflow.get("caller_identity_sha256") != canonical_sha256(
-        workflow.get("caller_identity")
-    ):
+    if workflow.get("caller_identity_sha256") != canonical_sha256(workflow.get("caller_identity")):
         raise ContractError("caller identity hash is invalid")
     caller_identity = workflow.get("caller_identity")
     executable = workflow.get("aws_executable")
@@ -2885,14 +2720,11 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         or caller_identity.get("Account") != ACCOUNT_ID
         or caller_identity.get("Arn") != AUTOMATION_ARN
         or not isinstance(executable, Mapping)
-        or set(executable)
-        != {"path", "device", "inode", "size", "sha256", "version"}
+        or set(executable) != {"path", "device", "inode", "size", "sha256", "version"}
         or not str(executable.get("path", "")).startswith("/")
         or require_int(executable.get("device"), "SNS AWS executable device") < 0
-        or require_int(executable.get("inode"), "SNS AWS executable inode", minimum=1)
-        < 1
-        or require_int(executable.get("size"), "SNS AWS executable size", minimum=1)
-        < 1
+        or require_int(executable.get("inode"), "SNS AWS executable inode", minimum=1) < 1
+        or require_int(executable.get("size"), "SNS AWS executable size", minimum=1) < 1
         or not HEX64.fullmatch(str(executable.get("sha256", "")))
         or not str(executable.get("version", "")).startswith("aws-cli/2.")
     ):
@@ -2908,9 +2740,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         "bedrock",
     }:
         raise ContractError("versioning workflow bucket set is not exact")
-    if (
-        set(baseline) != {"cloudtrail", "bedrock"}
-        or not all(HEX64.fullmatch(str(value)) for value in baseline.values())
+    if set(baseline) != {"cloudtrail", "bedrock"} or not all(
+        HEX64.fullmatch(str(value)) for value in baseline.values()
     ):
         raise ContractError("versioning no-write baseline is invalid")
     if not isinstance(observations, list) or len(observations) != 2:
@@ -2932,13 +2763,14 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         ),
         "producer disconnect",
     )
-    disconnect_epoch = require_int(
-        disconnect.get("event_time_epoch"), "disconnect event time"
-    )
-    if require_int(
-        workflow.get("caller_identity_observed_at_epoch"),
-        "caller identity observation",
-    ) > disconnect_epoch:
+    disconnect_epoch = require_int(disconnect.get("event_time_epoch"), "disconnect event time")
+    if (
+        require_int(
+            workflow.get("caller_identity_observed_at_epoch"),
+            "caller identity observation",
+        )
+        > disconnect_epoch
+    ):
         raise ContractError("caller observation exceeds producer disconnect")
     actions = disconnect.get("actions")
     action_requirements = disconnect.get("action_requirements")
@@ -2950,12 +2782,10 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         or disconnect.get("action_set_sha256") != canonical_sha256(actions)
         or not isinstance(action_requirements, list)
         or not all(
-            isinstance(requirement, Mapping)
-            and set(requirement) == {"kind", "resource_id"}
+            isinstance(requirement, Mapping) and set(requirement) == {"kind", "resource_id"}
             for requirement in action_requirements
         )
-        or disconnect.get("action_requirements_sha256")
-        != canonical_sha256(action_requirements)
+        or disconnect.get("action_requirements_sha256") != canonical_sha256(action_requirements)
         or action_requirements
         != [
             {
@@ -2998,29 +2828,21 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         )
         if (
             action["kind"] not in allowed_action_kinds
-            or not require_string(
-                action["resource_id"], "producer disconnect resource"
-            )
+            or not require_string(action["resource_id"], "producer disconnect resource")
             or not HEX64.fullmatch(str(action["response_sha256"]))
             or not HEX64.fullmatch(str(action["request_id_sha256"]))
-            or require_int(
-                action["aws_date_epoch"], "producer disconnect AWS Date"
-            )
+            or require_int(action["aws_date_epoch"], "producer disconnect AWS Date")
             > disconnect_epoch
         ):
             raise ContractError("producer disconnect action is invalid")
     if disconnect_epoch != max(
-        require_int(action["aws_date_epoch"], "producer disconnect AWS Date")
-        for action in actions
+        require_int(action["aws_date_epoch"], "producer disconnect AWS Date") for action in actions
     ):
         raise ContractError("producer disconnect event time is not authoritative")
     action_kinds = [requirement["kind"] for requirement in action_requirements]
     if (
         action_kinds.count("cloudtrail.StopLogging") != 1
-        or action_kinds.count(
-            "bedrock.DeleteModelInvocationLoggingConfiguration"
-        )
-        != 1
+        or action_kinds.count("bedrock.DeleteModelInvocationLoggingConfiguration") != 1
     ):
         raise ContractError("producer disconnect action coverage is incomplete")
     require_keys(
@@ -3046,17 +2868,13 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         or quiescence["lambda_mappings_all_disabled"] is not True
         or not HEX64.fullmatch(str(quiescence["inventory_sha256"]))
         or not HEX64.fullmatch(str(quiescence["raw_reference_set_sha256"]))
-        or require_int(
-            quiescence["observed_at_epoch"], "quiescence observation"
-        )
-        < disconnect_epoch
+        or require_int(quiescence["observed_at_epoch"], "quiescence observation") < disconnect_epoch
     ):
         raise ContractError("producer quiescence state/timing is invalid")
     writer_controls = quiescence.get("writer_controls")
     if (
         not isinstance(writer_controls, Mapping)
-        or set(writer_controls)
-        != {"eventbridge", "scheduler", "lambda_mappings"}
+        or set(writer_controls) != {"eventbridge", "scheduler", "lambda_mappings"}
         or any(
             not isinstance(values, list)
             or not all(isinstance(value, str) and value for value in values)
@@ -3075,10 +2893,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         }
         for family in WRITER_FAMILIES
     }
-    if (
-        not isinstance(family_states, Mapping)
-        or family_states != expected_family_states
-    ):
+    if not isinstance(family_states, Mapping) or family_states != expected_family_states:
         raise ContractError("producer ECS family quiescence is incomplete")
     service_states = quiescence.get("ecs_services")
     if (
@@ -3119,48 +2934,33 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         ),
     }
     actual_action_pairs = {
-        (requirement["kind"], requirement["resource_id"])
-        for requirement in action_requirements
+        (requirement["kind"], requirement["resource_id"]) for requirement in action_requirements
     }
-    if (
-        not required_action_pairs.issubset(actual_action_pairs)
-        or any(
-            pair not in required_action_pairs and pair[0] != "ecs.StopTask"
-            for pair in actual_action_pairs
-        )
+    if not required_action_pairs.issubset(actual_action_pairs) or any(
+        pair not in required_action_pairs and pair[0] != "ecs.StopTask"
+        for pair in actual_action_pairs
     ):
         raise ContractError("writer disconnect actions do not cover every control")
     queues = quiescence.get("queues")
-    if (
-        not isinstance(queues, Mapping)
-        or any(
-            not isinstance(state, Mapping)
-            or set(state)
-            != {
-                "ApproximateNumberOfMessages",
-                "ApproximateNumberOfMessagesNotVisible",
-                "ApproximateNumberOfMessagesDelayed",
-            }
-            or any(value != 0 for value in state.values())
-            for state in queues.values()
-        )
+    if not isinstance(queues, Mapping) or any(
+        not isinstance(state, Mapping)
+        or set(state)
+        != {
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+            "ApproximateNumberOfMessagesDelayed",
+        }
+        or any(value != 0 for value in state.values())
+        for state in queues.values()
     ):
         raise ContractError("producer queue/in-flight quiescence is incomplete")
     log_producers = quiescence.get("log_producers")
     cloudtrail_producer = (
-        log_producers.get("cloudtrail")
-        if isinstance(log_producers, Mapping)
-        else None
+        log_producers.get("cloudtrail") if isinstance(log_producers, Mapping) else None
     )
-    bedrock_producer = (
-        log_producers.get("bedrock")
-        if isinstance(log_producers, Mapping)
-        else None
-    )
+    bedrock_producer = log_producers.get("bedrock") if isinstance(log_producers, Mapping) else None
     cloudtrail_identity = (
-        cloudtrail_producer.get("identity")
-        if isinstance(cloudtrail_producer, Mapping)
-        else None
+        cloudtrail_producer.get("identity") if isinstance(cloudtrail_producer, Mapping) else None
     )
     if (
         not isinstance(log_producers, Mapping)
@@ -3176,10 +2976,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             "trail_response_sha256",
             "status_response_sha256",
         }
-        or cloudtrail_producer.get("trail_name")
-        != "teamagent-dev-trail"
-        or cloudtrail_producer.get("bucket")
-        != f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
+        or cloudtrail_producer.get("trail_name") != "teamagent-dev-trail"
+        or cloudtrail_producer.get("bucket") != f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
         or not isinstance(cloudtrail_identity, Mapping)
         or set(cloudtrail_identity)
         != {
@@ -3195,13 +2993,9 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         }
         or cloudtrail_identity.get("trail_name") != "teamagent-dev-trail"
         or cloudtrail_identity.get("trail_arn")
-        != (
-            f"arn:aws:cloudtrail:{REGION}:{ACCOUNT_ID}:trail/"
-            "teamagent-dev-trail"
-        )
+        != (f"arn:aws:cloudtrail:{REGION}:{ACCOUNT_ID}:trail/teamagent-dev-trail")
         or cloudtrail_identity.get("home_region") != REGION
-        or cloudtrail_identity.get("bucket")
-        != f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
+        or cloudtrail_identity.get("bucket") != f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
         or cloudtrail_identity.get("is_multi_region") is not True
         or cloudtrail_identity.get("include_global_service_events") is not True
         or cloudtrail_identity.get("log_file_validation_enabled") is not True
@@ -3214,16 +3008,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             str(cloudtrail_identity.get("kms_key_arn", "")),
         )
         or cloudtrail_producer.get("is_logging") is not False
-        or not HEX64.fullmatch(
-            str(
-                cloudtrail_producer.get("trail_response_sha256", "")
-            )
-        )
-        or not HEX64.fullmatch(
-            str(
-                cloudtrail_producer.get("status_response_sha256", "")
-            )
-        )
+        or not HEX64.fullmatch(str(cloudtrail_producer.get("trail_response_sha256", "")))
+        or not HEX64.fullmatch(str(cloudtrail_producer.get("status_response_sha256", "")))
         or bedrock_producer
         != {
             "configured": False,
@@ -3250,13 +3036,11 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
                 "post_quiescence_versioning_observed_at_epoch",
                 "object_versions_observed_at_epoch",
             }
-            or
-            bucket_before.get("versioning")
+            or bucket_before.get("versioning")
             != {"status": "Unversioned", "mfa_delete": "Disabled"}
             or not isinstance(expected_identity, Mapping)
             or expected_identity.get("name") != expected_bucket
-            or expected_identity.get("arn")
-            != f"arn:aws:s3:::{expected_bucket}"
+            or expected_identity.get("arn") != f"arn:aws:s3:::{expected_bucket}"
             or not expected_identity.get("owner_canonical_id")
             or not expected_identity.get("creation_date")
         ):
@@ -3269,13 +3053,14 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             "identity_observed_at_epoch",
             "versioning_observed_at_epoch",
         ):
-            if require_int(
-                bucket_before[observation_field],
-                f"{label} {observation_field}",
-            ) > disconnect_epoch:
-                raise ContractError(
-                    "bucket pre-versioning observation exceeds disconnect event"
+            if (
+                require_int(
+                    bucket_before[observation_field],
+                    f"{label} {observation_field}",
                 )
+                > disconnect_epoch
+            ):
+                raise ContractError("bucket pre-versioning observation exceeds disconnect event")
         post_identity_observed_at = require_int(
             bucket_before["post_quiescence_identity_observed_at_epoch"],
             f"{label} post-quiescence identity observation",
@@ -3292,12 +3077,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             quiescence["observed_at_epoch"], "quiescence observation"
         )
         if not (
-            quiescence_observed_at
-            <= post_identity_observed_at
-            <= baseline_observed_at
-            and quiescence_observed_at
-            <= post_versioning_observed_at
-            <= baseline_observed_at
+            quiescence_observed_at <= post_identity_observed_at <= baseline_observed_at
+            and quiescence_observed_at <= post_versioning_observed_at <= baseline_observed_at
         ):
             raise ContractError("bucket no-write baseline predates quiescence")
         enablement = enablements[label]
@@ -3330,9 +3111,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         ):
             raise ContractError("versioning enablement response is not authoritative")
         _, response_date_epoch = parse_aws_date(enablement["response_date"])
-        event_epoch = require_int(
-            enablement["event_time_epoch"], "versioning event time"
-        )
+        event_epoch = require_int(enablement["event_time_epoch"], "versioning event time")
         first_seen_epoch = require_int(
             enablement["first_seen_enabled_epoch"],
             "versioning first-seen time",
@@ -3386,9 +3165,7 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             ),
             "versioning observation",
         )
-        observed_at = require_int(
-            observation.get("observed_at_epoch"), "observation time"
-        )
+        observed_at = require_int(observation.get("observed_at_epoch"), "observation time")
         observation_quiescence = observation.get("quiescence")
         if (
             observation.get("sequence") != sequence
@@ -3397,17 +3174,11 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
                 if sequence == 1
                 else observed_at <= previous_observation
             )
-            or not HEX64.fullmatch(
-                str(observation.get("quiescence_sha256", ""))
-            )
+            or not HEX64.fullmatch(str(observation.get("quiescence_sha256", "")))
             or not isinstance(observation_quiescence, Mapping)
-            or observation.get("quiescence_sha256")
-            != canonical_sha256(observation_quiescence)
-            or not HEX64.fullmatch(
-                str(observation_quiescence.get("inventory_sha256", ""))
-            )
-            or stable_quiescence_state(observation_quiescence)
-            != initial_stable_quiescence
+            or observation.get("quiescence_sha256") != canonical_sha256(observation_quiescence)
+            or not HEX64.fullmatch(str(observation_quiescence.get("inventory_sha256", "")))
+            or stable_quiescence_state(observation_quiescence) != initial_stable_quiescence
             or require_int(
                 observation_quiescence.get("observed_at_epoch"),
                 "post-settle quiescence observation",
@@ -3449,11 +3220,8 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
         or not HEX64.fullmatch(str(final.get("quiescence_sha256", "")))
         or not isinstance(final_quiescence, Mapping)
         or final.get("quiescence_sha256") != canonical_sha256(final_quiescence)
-        or not HEX64.fullmatch(
-            str(final_quiescence.get("inventory_sha256", ""))
-        )
-        or stable_quiescence_state(final_quiescence)
-        != initial_stable_quiescence
+        or not HEX64.fullmatch(str(final_quiescence.get("inventory_sha256", "")))
+        or stable_quiescence_state(final_quiescence) != initial_stable_quiescence
         or require_int(
             final_quiescence.get("observed_at_epoch"),
             "final quiescence observation",
@@ -3491,30 +3259,18 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             "configuration",
             "configuration_sha256",
         }
-        or
-        cutover["cloudtrail"].get("action") != "StartLogging"
-        or cutover["bedrock"].get("action")
-        != "PutModelInvocationLoggingConfiguration"
+        or cutover["cloudtrail"].get("action") != "StartLogging"
+        or cutover["bedrock"].get("action") != "PutModelInvocationLoggingConfiguration"
     ):
         raise ContractError("cutover actions are not exact")
     for producer in cutover.values():
-        response_epoch = require_int(
-            producer.get("response_date_epoch"), "cutover response date"
-        )
-        if not (
-            max(final_epoch, lock_pre_cutover)
-            <= response_epoch
-            <= lock_post_cutover
-        ):
-            raise ContractError(
-                "cutover response is outside final shared-lock observations"
-            )
+        response_epoch = require_int(producer.get("response_date_epoch"), "cutover response date")
+        if not (max(final_epoch, lock_pre_cutover) <= response_epoch <= lock_post_cutover):
+            raise ContractError("cutover response is outside final shared-lock observations")
         for hash_field in ("request_id_sha256", "response_sha256"):
             if not HEX64.fullmatch(str(producer.get(hash_field, ""))):
                 raise ContractError(f"cutover {hash_field} is invalid")
-    if not HEX64.fullmatch(
-        str(cutover["bedrock"].get("configuration_sha256", ""))
-    ):
+    if not HEX64.fullmatch(str(cutover["bedrock"].get("configuration_sha256", ""))):
         raise ContractError("Bedrock cutover configuration hash is invalid")
     expected_bedrock_configuration = {
         "textDataDeliveryEnabled": True,
@@ -3526,18 +3282,13 @@ def validate_versioning_workflow(workflow: Mapping[str, Any]) -> None:
             "keyPrefix": "bedrock/",
         },
     }
-    if (
-        cutover["bedrock"].get("configuration")
-        != expected_bedrock_configuration
-        or cutover["bedrock"].get("configuration_sha256")
-        != canonical_sha256(expected_bedrock_configuration)
-    ):
+    if cutover["bedrock"].get("configuration") != expected_bedrock_configuration or cutover[
+        "bedrock"
+    ].get("configuration_sha256") != canonical_sha256(expected_bedrock_configuration):
         raise ContractError("Bedrock cutover configuration binding is invalid")
 
 
-def verify_versioning_cutover_live(
-    aws: AwsCli, workflow: Mapping[str, Any]
-) -> dict[str, Any]:
+def verify_versioning_cutover_live(aws: AwsCli, workflow: Mapping[str, Any]) -> dict[str, Any]:
     validate_versioning_workflow(workflow)
     if workflow.get("aws_executable") != asdict(aws.evidence):
         raise ContractError("AWS executable differs from the cutover receipt")
@@ -3560,11 +3311,7 @@ def verify_versioning_cutover_live(
             SHARED_LEDGER_TABLE,
             "--key",
             json.dumps(
-                {
-                    "record_id": _dynamodb_value(
-                        str(durable_ledger["record_id"])
-                    )
-                },
+                {"record_id": _dynamodb_value(str(durable_ledger["record_id"]))},
                 separators=(",", ":"),
             ),
             "--consistent-read",
@@ -3587,27 +3334,19 @@ def verify_versioning_cutover_live(
         status, _ = _versioning_status(aws, bucket)
         if status != {"status": "Enabled", "mfa_delete": "Disabled"}:
             raise ContractError("versioning is no longer Enabled")
-    quiescence = capture_quiescence(
-        aws, require_log_producers_off=False
-    )
-    trail, trail_http = aws.call(
-        "cloudtrail", "get-trail", ("--name", "teamagent-dev-trail")
-    )
+    quiescence = capture_quiescence(aws, require_log_producers_off=False)
+    trail, trail_http = aws.call("cloudtrail", "get-trail", ("--name", "teamagent-dev-trail"))
     trail_status, status_http = aws.call(
         "cloudtrail", "get-trail-status", ("--name", "teamagent-dev-trail")
     )
-    bedrock, bedrock_http = aws.call(
-        "bedrock", "get-model-invocation-logging-configuration"
-    )
+    bedrock, bedrock_http = aws.call("bedrock", "get-model-invocation-logging-configuration")
     expected_cloudtrail_bucket = f"teamagent-dev-cloudtrail-{ACCOUNT_ID}"
     expected_bedrock_bucket = f"teamagent-dev-bedrock-logs-{ACCOUNT_ID}"
     trail_identity = _cloudtrail_identity_contract(trail)
     bedrock_contract = bedrock.get("loggingConfig")
     if (
         trail_identity
-        != workflow["producer_disconnect"]["quiescence"]["log_producers"][
-            "cloudtrail"
-        ]["identity"]
+        != workflow["producer_disconnect"]["quiescence"]["log_producers"]["cloudtrail"]["identity"]
         or trail_identity.get("bucket") != expected_cloudtrail_bucket
         or trail_status.get("IsLogging") is not True
         or not isinstance(bedrock_contract, Mapping)
@@ -3632,9 +3371,7 @@ def verify_versioning_cutover_live(
         "observed_at_epoch": observed_at,
         "quiescence_sha256": quiescence["contract_sha256"],
         "caller_identity_sha256": canonical_sha256(identity),
-        "ledger_request_id_sha256": sha256_bytes(
-            ledger_http.request_id.encode()
-        ),
+        "ledger_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
     }
 
 
@@ -3673,9 +3410,7 @@ def verify_bedrock_retention_live(aws: AwsCli) -> dict[str, Any]:
         key=lambda rule: rule["ID"],
     )
     if normalized_rules != expected_rules:
-        raise ContractError(
-            "Bedrock lifecycle is not exact current=60/noncurrent=60"
-        )
+        raise ContractError("Bedrock lifecycle is not exact current=60/noncurrent=60")
 
     policy_response, policy_http = aws.call(
         "s3api",
@@ -3704,11 +3439,7 @@ def verify_bedrock_retention_live(aws: AwsCli) -> dict[str, Any]:
         delete_deny is None
         or delete_deny.get("Effect") != "Deny"
         or delete_deny.get("Principal") != "*"
-        or set(
-            delete_deny.get("Action")
-            if isinstance(delete_deny.get("Action"), list)
-            else []
-        )
+        or set(delete_deny.get("Action") if isinstance(delete_deny.get("Action"), list) else [])
         != {"s3:DeleteObject", "s3:DeleteObjectVersion"}
         or delete_deny.get("Resource") != f"arn:aws:s3:::{bucket}/bedrock/*"
     ):
@@ -3720,11 +3451,7 @@ def verify_bedrock_retention_live(aws: AwsCli) -> dict[str, Any]:
         or writer_deny.get("Action") != "s3:PutObject"
         or writer_deny.get("Resource") != f"arn:aws:s3:::{bucket}/bedrock/*"
         or writer_deny.get("Condition")
-        != {
-            "StringNotEquals": {
-                "aws:PrincipalServiceName": "bedrock.amazonaws.com"
-            }
-        }
+        != {"StringNotEquals": {"aws:PrincipalServiceName": "bedrock.amazonaws.com"}}
     ):
         raise ContractError("AI I/O writer identity is not restricted to Bedrock")
     observed_at = max(lifecycle_http.date_epoch, policy_http.date_epoch)
@@ -3797,13 +3524,10 @@ def fetch_exact_s3_export(
         "ChecksumSHA256",
     )
     head_checksums = {
-        name: value
-        for name in checksum_names
-        if (value := head.get(name)) is not None
+        name: value for name in checksum_names if (value := head.get(name)) is not None
     }
     if not head_checksums or any(
-        not isinstance(value, str)
-        or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value)
+        not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value)
         for value in head_checksums.values()
     ):
         raise ContractError("S3 object has no valid AWS checksum metadata")
@@ -3857,11 +3581,14 @@ def fetch_exact_s3_export(
     effective_observation_epoch = observation_http.date_epoch
     if effective_observation_epoch < observation_epoch:
         raise ContractError("fresh S3 observation predates its required lower bound")
-    if max(
-        last_modified_epoch,
-        head_http.date_epoch,
-        get_http.date_epoch,
-    ) > effective_observation_epoch:
+    if (
+        max(
+            last_modified_epoch,
+            head_http.date_epoch,
+            get_http.date_epoch,
+        )
+        > effective_observation_epoch
+    ):
         raise ContractError("S3 delivery evidence timestamp exceeds observation")
     nonce = secrets.token_hex(32)
     return {
@@ -3923,9 +3650,8 @@ def verify_exact_s3_export(
     ):
         raise ContractError("exact S3 export identity is invalid")
     nonce = require_string(binding["fresh_nonce"], "fresh export nonce")
-    if (
-        not re.fullmatch(r"[0-9a-f]{64}", nonce)
-        or binding["fresh_nonce_sha256"] != sha256_bytes(nonce.encode())
+    if not re.fullmatch(r"[0-9a-f]{64}", nonce) or binding["fresh_nonce_sha256"] != sha256_bytes(
+        nonce.encode()
     ):
         raise ContractError("fresh export nonce binding is invalid")
     observed_at = require_int(binding["observed_at_epoch"], "export observation")
@@ -3971,24 +3697,14 @@ def verify_exact_s3_export(
             }
         )
         or any(
-            not isinstance(value, str)
-            or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value)
+            not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value)
             for value in checksums.values()
         )
-        or not VERSION_ID.fullmatch(
-            require_string(s3.get("version_id"), "S3 VersionId")
-        )
+        or not VERSION_ID.fullmatch(require_string(s3.get("version_id"), "S3 VersionId"))
         or not ETAG.fullmatch(require_string(s3.get("etag"), "S3 ETag"))
-        or not HEX64.fullmatch(
-            str(s3.get("head_request_id_sha256", ""))
-        )
-        or not HEX64.fullmatch(
-            str(s3.get("get_request_id_sha256", ""))
-        )
-        or require_int(
-            s3.get("content_length"), "S3 ContentLength", minimum=1
-        )
-        < 1
+        or not HEX64.fullmatch(str(s3.get("head_request_id_sha256", "")))
+        or not HEX64.fullmatch(str(s3.get("get_request_id_sha256", "")))
+        or require_int(s3.get("content_length"), "S3 ContentLength", minimum=1) < 1
     ):
         raise ContractError("exact S3 object metadata is invalid")
     local_verification = verify_file_binding(file_binding)
@@ -4092,12 +3808,8 @@ def build_log_readiness(
     del identity
     initial_observed_at = observation_http.date_epoch
     cutover_epoch = max(
-        versioning_receipt["workflow"]["cutover"]["cloudtrail"][
-            "response_date_epoch"
-        ],
-        versioning_receipt["workflow"]["cutover"]["bedrock"][
-            "response_date_epoch"
-        ],
+        versioning_receipt["workflow"]["cutover"]["cloudtrail"]["response_date_epoch"],
+        versioning_receipt["workflow"]["cutover"]["bedrock"]["response_date_epoch"],
     )
     if initial_observed_at < cutover_epoch:
         raise ContractError("readiness observation predates producer cutover")
@@ -4105,13 +3817,9 @@ def build_log_readiness(
     cloudtrail_spec = spec["cloudtrail"]
     bedrock_spec = spec["bedrock"]
     retention_spec = spec["retention"]
-    if not isinstance(cloudtrail_spec, Mapping) or not isinstance(
-        bedrock_spec, Mapping
-    ):
+    if not isinstance(cloudtrail_spec, Mapping) or not isinstance(bedrock_spec, Mapping):
         raise ContractError("delivery spec is malformed")
-    require_keys(
-        cloudtrail_spec, ("latest_log", "latest_digest"), "CloudTrail delivery spec"
-    )
+    require_keys(cloudtrail_spec, ("latest_log", "latest_digest"), "CloudTrail delivery spec")
     require_keys(bedrock_spec, ("latest_delivery",), "Bedrock delivery spec")
     if not isinstance(retention_spec, list):
         raise ContractError("retention export spec must be an array")
@@ -4182,9 +3890,7 @@ def build_log_readiness(
             raise ContractError("retention log group set is not exact/unique")
         observed_groups.add(group)
         event_count = require_int(row["event_count"], "retention event count", minimum=1)
-        exported_through = require_int(
-            row["exported_through_epoch"], "retention exported-through"
-        )
+        exported_through = require_int(row["exported_through_epoch"], "retention exported-through")
         if exported_through > initial_observed_at:
             raise ContractError("retention delivery timestamp exceeds observation")
         export = fetch(
@@ -4211,10 +3917,7 @@ def build_log_readiness(
         latest_log["observed_at_epoch"],
         latest_digest["observed_at_epoch"],
         latest_bedrock["observed_at_epoch"],
-        *[
-            row["export"]["observed_at_epoch"]
-            for row in retention_rows
-        ],
+        *[row["export"]["observed_at_epoch"] for row in retention_rows],
         bedrock_retention["contract"]["observed_at_epoch"],
     ]
     if any(timestamp > observed_at for timestamp in export_observations):
@@ -4238,9 +3941,7 @@ def build_log_readiness(
         "pre_cutover_observed_at_epoch": cutover_epoch,
         "observed_at_epoch": observed_at,
         "retention_export_manifest_path": str(retention_path),
-        "retention_export_manifest_inode": str(
-            retention_binding["identity"]["inode"]
-        ),
+        "retention_export_manifest_inode": str(retention_binding["identity"]["inode"]),
         "retention_export_manifest_size_bytes": retention_binding["identity"]["size"],
         "retention_export_manifest_sha256": retention_binding["content_sha256"],
         "cloudtrail": {
@@ -4302,9 +4003,7 @@ def _ack_claims(ack: Mapping[str, Any]) -> dict[str, Any]:
         or claims["recipient_email"].encode() != APPROVED_EMAIL.encode()
         or not HEX64.fullmatch(str(claims["challenge_sha256"]))
         or not HEX64.fullmatch(str(claims["inventory_sha256"]))
-        or not str(claims["signer_principal_arn"]).startswith(
-            ACK_SIGNER_ARN_PREFIX
-        )
+        or not str(claims["signer_principal_arn"]).startswith(ACK_SIGNER_ARN_PREFIX)
     ):
         raise ContractError("recipient ack identity/destination is not exact")
     require_int(claims["received_at_epoch"], "ack received_at_epoch")
@@ -4354,9 +4053,7 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
     challenge_id = require_string(challenge["challenge_id"], "challenge ID")
     message_id = require_string(challenge["message_id"], "SNS MessageId")
     nonce = require_string(challenge["challenge_nonce"], "challenge nonce")
-    expected_hash = require_string(
-        challenge["challenge_sha256"], "challenge SHA-256"
-    )
+    expected_hash = require_string(challenge["challenge_sha256"], "challenge SHA-256")
     unhashed = dict(challenge)
     del unhashed["challenge_sha256"]
     if (
@@ -4366,11 +4063,9 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
         or not UUID4.fullmatch(challenge_id)
         or challenge["ledger_record_id"] != f"sns-challenge#{challenge_id}"
         or not re.fullmatch(r"[0-9a-fA-F-]{36}", message_id)
-        or challenge["message_id_sha256"]
-        != sha256_bytes(message_id.encode())
+        or challenge["message_id_sha256"] != sha256_bytes(message_id.encode())
         or not HEX64.fullmatch(nonce)
-        or challenge["challenge_nonce_sha256"]
-        != sha256_bytes(nonce.encode())
+        or challenge["challenge_nonce_sha256"] != sha256_bytes(nonce.encode())
         or not HEX64.fullmatch(expected_hash)
         or canonical_sha256(unhashed) != expected_hash
     ):
@@ -4379,8 +4074,7 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
     caller_identity = challenge.get("caller_identity")
     if (
         not isinstance(executable, Mapping)
-        or set(executable)
-        != {"path", "device", "inode", "size", "sha256", "version"}
+        or set(executable) != {"path", "device", "inode", "size", "sha256", "version"}
         or not str(executable.get("path", "")).startswith("/")
         or not HEX64.fullmatch(str(executable.get("sha256", "")))
         or not str(executable.get("version", "")).startswith("aws-cli/2.")
@@ -4389,8 +4083,7 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
         or set(caller_identity) != {"UserId", "Account", "Arn"}
         or caller_identity.get("Account") != ACCOUNT_ID
         or caller_identity.get("Arn") != AUTOMATION_ARN
-        or challenge.get("caller_identity_sha256")
-        != canonical_sha256(caller_identity)
+        or challenge.get("caller_identity_sha256") != canonical_sha256(caller_identity)
     ):
         raise ContractError("SNS challenge executable/caller trust is invalid")
     inventory_contract = challenge.get("inventory_contract")
@@ -4398,8 +4091,7 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
         raise ContractError("SNS challenge inventory contract is missing")
     validate_inventory_contract(inventory_contract)
     if (
-        challenge.get("inventory_sha256")
-        != canonical_sha256(inventory_contract)
+        challenge.get("inventory_sha256") != canonical_sha256(inventory_contract)
         or challenge.get("destination_state_sha256")
         != canonical_sha256(inventory_contract["destination"])
         or challenge.get("subscription_metadata_sha256")
@@ -4431,29 +4123,18 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
     key_metadata = challenge.get("ack_kms_key_metadata")
     if not isinstance(key_metadata, Mapping):
         raise ContractError("SNS challenge KMS key metadata is missing")
-    if (
-        validate_ack_key_metadata(key_metadata)
-        != challenge.get("ack_kms_key_arn")
-        or canonical_sha256(key_metadata)
-        != challenge.get("ack_kms_key_metadata_sha256")
-    ):
+    if validate_ack_key_metadata(key_metadata) != challenge.get(
+        "ack_kms_key_arn"
+    ) or canonical_sha256(key_metadata) != challenge.get("ack_kms_key_metadata_sha256"):
         raise ContractError("SNS challenge KMS key metadata binding is invalid")
-    published_at = require_int(
-        challenge["published_at_epoch"], "challenge publication time"
-    )
-    ledger_at = require_int(
-        challenge["ledger_aws_date_epoch"], "challenge ledger time"
-    )
-    observed_at = require_int(
-        challenge["observed_at_epoch"], "challenge observation time"
-    )
+    published_at = require_int(challenge["published_at_epoch"], "challenge publication time")
+    ledger_at = require_int(challenge["ledger_aws_date_epoch"], "challenge ledger time")
+    observed_at = require_int(challenge["observed_at_epoch"], "challenge observation time")
     caller_observed_at = require_int(
         challenge["caller_identity_observed_at_epoch"],
         "challenge caller observation time",
     )
-    expires_at = require_int(
-        challenge["expires_at_epoch"], "challenge expiry"
-    )
+    expires_at = require_int(challenge["expires_at_epoch"], "challenge expiry")
     if not (
         caller_observed_at <= published_at <= ledger_at <= observed_at
         and published_at < expires_at <= published_at + 3600
@@ -4461,8 +4142,7 @@ def validate_sns_challenge(challenge: Mapping[str, Any]) -> None:
         raise ContractError("SNS challenge lifetime is invalid")
     source_pages = inventory_contract["source_pages"]
     if any(
-        require_int(source["aws_date_epoch"], "inventory page AWS Date")
-        > published_at
+        require_int(source["aws_date_epoch"], "inventory page AWS Date") > published_at
         for source in source_pages
     ):
         raise ContractError("SNS destination inventory was observed after publication")
@@ -4491,9 +4171,7 @@ def verify_recipient_ack(
         "recipient signed acknowledgement",
     )
     claims = _ack_claims(ack)
-    signer_suffix = str(claims["signer_principal_arn"])[
-        len(ACK_SIGNER_ARN_PREFIX) :
-    ]
+    signer_suffix = str(claims["signer_principal_arn"])[len(ACK_SIGNER_ARN_PREFIX) :]
     if (
         ack["kind"] != "teamagent-sns-recipient-signed-ack"
         or ack["schema_version"] != 1
@@ -4509,12 +4187,8 @@ def verify_recipient_ack(
         or claims["inventory_sha256"] != challenge["inventory_sha256"]
     ):
         raise ContractError("recipient ack belongs to another SNS challenge")
-    published_at = require_int(
-        challenge["published_at_epoch"], "challenge published_at_epoch"
-    )
-    challenge_expires = require_int(
-        challenge["expires_at_epoch"], "challenge expires_at_epoch"
-    )
+    published_at = require_int(challenge["published_at_epoch"], "challenge published_at_epoch")
+    challenge_expires = require_int(challenge["expires_at_epoch"], "challenge expires_at_epoch")
     received_at = require_int(claims["received_at_epoch"], "ack received_at_epoch")
     ack_expires = require_int(claims["expires_at_epoch"], "ack expires_at_epoch")
     signed_at = require_int(ack["signed_at_epoch"], "ack signed_at_epoch")
@@ -4545,8 +4219,7 @@ def verify_recipient_ack(
         key_arn != challenge.get("ack_kms_key_arn")
         or live_key_arn != key_arn
         or live_key_metadata != challenge.get("ack_kms_key_metadata")
-        or live_key_metadata_sha256
-        != challenge.get("ack_kms_key_metadata_sha256")
+        or live_key_metadata_sha256 != challenge.get("ack_kms_key_metadata_sha256")
         or key_http.date_epoch > now_epoch
     ):
         raise ContractError("ack KMS key differs from the published challenge")
@@ -4621,9 +4294,7 @@ def validate_ack_key_metadata(metadata: Mapping[str, Any]) -> str:
 def _validated_ack_key(
     aws: AwsCli,
 ) -> tuple[str, dict[str, Any], str, HttpEvidence]:
-    response, http = aws.call(
-        "kms", "describe-key", ("--key-id", ACK_KEY_ALIAS)
-    )
+    response, http = aws.call("kms", "describe-key", ("--key-id", ACK_KEY_ALIAS))
     metadata = response.get("KeyMetadata")
     if not isinstance(metadata, dict):
         raise ContractError("recipient KMS key metadata is missing")
@@ -4693,9 +4364,7 @@ def issue_sns_challenge(aws: AwsCli) -> dict[str, Any]:
     )
     final_identity, final_http = _caller_identity(aws)
     del final_identity
-    inventory_times = [
-        source["aws_date_epoch"] for source in inventory["source_pages"]
-    ]
+    inventory_times = [source["aws_date_epoch"] for source in inventory["source_pages"]]
     if (
         max(
             [
@@ -4721,16 +4390,12 @@ def issue_sns_challenge(aws: AwsCli) -> dict[str, Any]:
         "challenge_nonce_sha256": sha256_bytes(nonce.encode()),
         "published_at_epoch": publish_http.date_epoch,
         "expires_at_epoch": expires_at,
-        "publish_request_id_sha256": sha256_bytes(
-            publish_http.request_id.encode()
-        ),
+        "publish_request_id_sha256": sha256_bytes(publish_http.request_id.encode()),
         "ledger_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
         "ledger_response_sha256": canonical_sha256(ledger_response),
         "ledger_aws_date_epoch": ledger_http.date_epoch,
         "observed_at_epoch": final_http.date_epoch,
-        "observation_request_id_sha256": sha256_bytes(
-            final_http.request_id.encode()
-        ),
+        "observation_request_id_sha256": sha256_bytes(final_http.request_id.encode()),
         "aws_executable": asdict(aws.evidence),
         "endpoints": ENDPOINTS,
         "caller_identity": initial_identity,
@@ -4739,16 +4404,12 @@ def issue_sns_challenge(aws: AwsCli) -> dict[str, Any]:
         "inventory_contract": inventory["inventory_contract"],
         "inventory_sha256": inventory["inventory_sha256"],
         "destination_state_sha256": inventory["destination_state_sha256"],
-        "subscription_metadata_sha256": inventory[
-            "subscription_metadata_sha256"
-        ],
+        "subscription_metadata_sha256": inventory["subscription_metadata_sha256"],
         "raw_reference_set_sha256": inventory["raw_reference_set_sha256"],
         "ack_kms_key_arn": ack_key_arn,
         "ack_kms_key_metadata": ack_key_metadata,
         "ack_kms_key_metadata_sha256": ack_key_metadata_sha256,
-        "ack_kms_key_request_id_sha256": sha256_bytes(
-            ack_key_http.request_id.encode()
-        ),
+        "ack_kms_key_request_id_sha256": sha256_bytes(ack_key_http.request_id.encode()),
     }
     challenge["challenge_sha256"] = canonical_sha256(challenge)
     return challenge
@@ -4764,9 +4425,7 @@ def sign_recipient_ack(
     validate_sns_challenge(challenge)
     identity, identity_http = aws.call("sts", "get-caller-identity")
     signer_arn = require_string(identity.get("Arn"), "ack signer ARN")
-    if identity.get("Account") != ACCOUNT_ID or not signer_arn.startswith(
-        ACK_SIGNER_ARN_PREFIX
-    ):
+    if identity.get("Account") != ACCOUNT_ID or not signer_arn.startswith(ACK_SIGNER_ARN_PREFIX):
         raise ContractError("ack signing requires the exact managed recipient role")
     now = identity_http.date_epoch
     if now >= require_int(challenge.get("expires_at_epoch"), "challenge expiry"):
@@ -4776,12 +4435,8 @@ def sign_recipient_ack(
         "schema_version": 1,
         "topic_arn": CANONICAL_TOPIC,
         "message_id": require_string(challenge.get("message_id"), "SNS MessageId"),
-        "challenge_nonce": require_string(
-            challenge.get("challenge_nonce"), "challenge nonce"
-        ),
-        "challenge_sha256": require_string(
-            challenge.get("challenge_sha256"), "challenge SHA-256"
-        ),
+        "challenge_nonce": require_string(challenge.get("challenge_nonce"), "challenge nonce"),
+        "challenge_sha256": require_string(challenge.get("challenge_sha256"), "challenge SHA-256"),
         "inventory_sha256": require_string(
             challenge.get("inventory_sha256"), "challenge inventory SHA-256"
         ),
@@ -4793,14 +4448,11 @@ def sign_recipient_ack(
         ),
         "signer_principal_arn": signer_arn,
     }
-    key_arn, key_metadata, key_metadata_sha256, key_http = _validated_ack_key(
-        aws
-    )
+    key_arn, key_metadata, key_metadata_sha256, key_http = _validated_ack_key(aws)
     if (
         key_arn != challenge.get("ack_kms_key_arn")
         or key_metadata != challenge.get("ack_kms_key_metadata")
-        or key_metadata_sha256
-        != challenge.get("ack_kms_key_metadata_sha256")
+        or key_metadata_sha256 != challenge.get("ack_kms_key_metadata_sha256")
         or key_http.date_epoch < identity_http.date_epoch
     ):
         raise ContractError("recipient KMS key changed after challenge publication")
@@ -4862,12 +4514,10 @@ def attest_sns_delivery(
     inventory = collect_inventory(aws)
     if (
         inventory["inventory_sha256"] != challenge.get("inventory_sha256")
-        or inventory["destination_state_sha256"]
-        != challenge.get("destination_state_sha256")
+        or inventory["destination_state_sha256"] != challenge.get("destination_state_sha256")
         or inventory["subscription_metadata_sha256"]
         != challenge.get("subscription_metadata_sha256")
-        or inventory["raw_reference_set_sha256"]
-        != challenge.get("raw_reference_set_sha256")
+        or inventory["raw_reference_set_sha256"] != challenge.get("raw_reference_set_sha256")
     ):
         raise ContractError("SNS inventory changed after challenge publication")
     observation_response, observation_http = aws.call("sts", "get-caller-identity")
@@ -4905,17 +4555,13 @@ def attest_sns_delivery(
         ),
         "inventory_sha256": inventory["inventory_sha256"],
         "destination_state_sha256": inventory["destination_state_sha256"],
-        "subscription_metadata_sha256": inventory[
-            "subscription_metadata_sha256"
-        ],
+        "subscription_metadata_sha256": inventory["subscription_metadata_sha256"],
         "raw_reference_set_sha256": inventory["raw_reference_set_sha256"],
         "recipient_ack_claims_sha256": verification["claims_sha256"],
         "recipient_ack_signature_sha256": verification["signature_sha256"],
         "recipient_ack_kms_key_arn": verification["kms_key_arn"],
         "recipient_ack_signer_principal_arn": claims["signer_principal_arn"],
-        "observation_request_id_sha256": sha256_bytes(
-            observation_http.request_id.encode()
-        ),
+        "observation_request_id_sha256": sha256_bytes(observation_http.request_id.encode()),
         "ledger_record_id": challenge["ledger_record_id"],
         "challenge": dict(challenge),
         "recipient_ack": dict(ack),
@@ -4956,17 +4602,18 @@ def attest_sns_delivery(
             "ALL_NEW",
         ),
     )
-    receipt_base["ledger_ack_request_id_sha256"] = sha256_bytes(
-        ledger_http.request_id.encode()
-    )
+    receipt_base["ledger_ack_request_id_sha256"] = sha256_bytes(ledger_http.request_id.encode())
     receipt_base["ledger_ack_response_sha256"] = canonical_sha256(ledger_response)
     final_identity, final_http = _caller_identity(aws)
     if final_identity != now_identity:
         raise ContractError("caller identity changed after SNS ledger acknowledgement")
-    if max(
-        observation_http.date_epoch,
-        ledger_http.date_epoch,
-    ) > final_http.date_epoch:
+    if (
+        max(
+            observation_http.date_epoch,
+            ledger_http.date_epoch,
+        )
+        > final_http.date_epoch
+    ):
         raise ContractError("SNS acknowledgement evidence exceeds final observation")
     receipt_base["ledger_ack_aws_date_epoch"] = ledger_http.date_epoch
     receipt_base["final_observed_at_epoch"] = final_http.date_epoch
@@ -5039,8 +4686,7 @@ def verify_sns_delivery_receipt(
     ):
         del receipt_claims[field]
     if (
-        receipt["receipt_claims_sha256"]
-        != canonical_sha256(receipt_claims)
+        receipt["receipt_claims_sha256"] != canonical_sha256(receipt_claims)
         or receipt["challenge"] != challenge
         or receipt["recipient_ack"] != ack
     ):
@@ -5066,8 +4712,7 @@ def verify_sns_delivery_receipt(
     claims = _ack_claims(ack)
     if (
         receipt.get("kind") != "teamagent-alarm-delivery-test-receipt"
-        or
-        receipt.get("schema_version") != 4
+        or receipt.get("schema_version") != 4
         or receipt.get("account_id") != ACCOUNT_ID
         or receipt.get("region") != REGION
         or receipt.get("topic_arn") != CANONICAL_TOPIC
@@ -5075,33 +4720,21 @@ def verify_sns_delivery_receipt(
         or not isinstance(receipt.get("raw_email"), str)
         or str(receipt["raw_email"]).encode() != APPROVED_EMAIL.encode()
         or receipt.get("message_id") != challenge.get("message_id")
-        or receipt.get("message_id_sha256")
-        != challenge.get("message_id_sha256")
+        or receipt.get("message_id_sha256") != challenge.get("message_id_sha256")
         or receipt.get("challenge_id") != challenge.get("challenge_id")
         or receipt.get("challenge_sha256") != challenge.get("challenge_sha256")
-        or receipt.get("challenge_nonce_sha256")
-        != challenge.get("challenge_nonce_sha256")
-        or receipt.get("ledger_record_id")
-        != challenge.get("ledger_record_id")
-        or receipt.get("published_at_epoch")
-        != challenge.get("published_at_epoch")
-        or receipt.get("received_at_epoch")
-        != claims.get("received_at_epoch")
+        or receipt.get("challenge_nonce_sha256") != challenge.get("challenge_nonce_sha256")
+        or receipt.get("ledger_record_id") != challenge.get("ledger_record_id")
+        or receipt.get("published_at_epoch") != challenge.get("published_at_epoch")
+        or receipt.get("received_at_epoch") != claims.get("received_at_epoch")
         or receipt.get("inventory_sha256") != inventory["inventory_sha256"]
-        or receipt.get("destination_state_sha256")
-        != inventory["destination_state_sha256"]
-        or receipt.get("subscription_metadata_sha256")
-        != inventory["subscription_metadata_sha256"]
-        or receipt.get("raw_reference_set_sha256")
-        != inventory["raw_reference_set_sha256"]
-        or receipt.get("recipient_ack_claims_sha256")
-        != verification["claims_sha256"]
-        or receipt.get("recipient_ack_signature_sha256")
-        != verification["signature_sha256"]
-        or receipt.get("recipient_ack_kms_key_arn")
-        != verification["kms_key_arn"]
-        or receipt.get("recipient_ack_signer_principal_arn")
-        != claims.get("signer_principal_arn")
+        or receipt.get("destination_state_sha256") != inventory["destination_state_sha256"]
+        or receipt.get("subscription_metadata_sha256") != inventory["subscription_metadata_sha256"]
+        or receipt.get("raw_reference_set_sha256") != inventory["raw_reference_set_sha256"]
+        or receipt.get("recipient_ack_claims_sha256") != verification["claims_sha256"]
+        or receipt.get("recipient_ack_signature_sha256") != verification["signature_sha256"]
+        or receipt.get("recipient_ack_kms_key_arn") != verification["kms_key_arn"]
+        or receipt.get("recipient_ack_signer_principal_arn") != claims.get("signer_principal_arn")
     ):
         raise ContractError("SNS delivery receipt binding is not exact")
     expires_at = require_int(receipt.get("expires_at_epoch"), "receipt expiry")
@@ -5129,8 +4762,7 @@ def verify_sns_delivery_receipt(
         <= ledger_ack_at
         <= final_observed_at
         < expires_at
-        and expires_at
-        == min(challenge["expires_at_epoch"], claims["expires_at_epoch"])
+        and expires_at == min(challenge["expires_at_epoch"], claims["expires_at_epoch"])
         and now_http.date_epoch < expires_at
         and final_observed_at <= now_http.date_epoch
     ):
@@ -5152,13 +4784,10 @@ def verify_sns_delivery_receipt(
         raise ContractError("SNS challenge ledger item is absent")
     if (
         item.get("status") != _dynamodb_value("ACKNOWLEDGED")
-        or item.get("message_id")
-        != _dynamodb_value(str(receipt["message_id"]))
+        or item.get("message_id") != _dynamodb_value(str(receipt["message_id"]))
         or item.get("topic_arn") != _dynamodb_value(CANONICAL_TOPIC)
-        or item.get("nonce_sha256")
-        != _dynamodb_value(str(receipt["challenge_nonce_sha256"]))
-        or item.get("inventory_sha256")
-        != _dynamodb_value(str(receipt["inventory_sha256"]))
+        or item.get("nonce_sha256") != _dynamodb_value(str(receipt["challenge_nonce_sha256"]))
+        or item.get("inventory_sha256") != _dynamodb_value(str(receipt["inventory_sha256"]))
         or item.get("expires_at_epoch")
         != _dynamodb_value(
             require_int(
@@ -5166,8 +4795,7 @@ def verify_sns_delivery_receipt(
                 "challenge expiry",
             )
         )
-        or item.get("receipt_sha256")
-        != _dynamodb_value(str(receipt["receipt_claims_sha256"]))
+        or item.get("receipt_sha256") != _dynamodb_value(str(receipt["receipt_claims_sha256"]))
     ):
         raise ContractError("SNS challenge was reused, replaced, or not acknowledged")
     return {
@@ -5244,10 +4872,7 @@ def validate_alarm_migration_checkpoint(
             not isinstance(delivery_receipt_sha256, str)
             or not HEX64.fullmatch(delivery_receipt_sha256)
         )
-    ) or (
-        checkpoint["phase"] != "canonical_delivery_confirmed"
-        and delivery_receipt_sha256 != ""
-    ):
+    ) or (checkpoint["phase"] != "canonical_delivery_confirmed" and delivery_receipt_sha256 != ""):
         raise ContractError("checkpoint delivery receipt hash is in the wrong phase")
     if not isinstance(checkpoint["rollback_plan"], Mapping):
         raise ContractError("checkpoint rollback plan is missing")
@@ -5255,8 +4880,7 @@ def validate_alarm_migration_checkpoint(
         not isinstance(checkpoint["postcondition"], Mapping)
         or checkpoint["postcondition_receipt_sha256"]
         != canonical_sha256(checkpoint["postcondition"])
-        or checkpoint["inventory_sha256"]
-        != checkpoint["postcondition"].get("inventory_sha256")
+        or checkpoint["inventory_sha256"] != checkpoint["postcondition"].get("inventory_sha256")
     ):
         raise ContractError("checkpoint postcondition hash binding is invalid")
     postcondition = checkpoint["postcondition"]
@@ -5306,12 +4930,9 @@ def validate_alarm_migration_checkpoint(
             or not isinstance(state.get("topic_arns"), list)
             or state["topic_arns"] != sorted(state["topic_arns"])
             or len(state["topic_arns"]) != len(set(state["topic_arns"]))
-            or not set(state["topic_arns"]).issubset(
-                {CANONICAL_TOPIC, LEGACY_TOPIC}
-            )
+            or not set(state["topic_arns"]).issubset({CANONICAL_TOPIC, LEGACY_TOPIC})
             or not state["topic_arns"]
-            or publisher_id
-            != f"{state['source_type']}:{state['source_id']}"
+            or publisher_id != f"{state['source_type']}:{state['source_id']}"
         ):
             raise ContractError("alarm publisher topic state is invalid")
     calculated_legacy = sorted(
@@ -5328,14 +4949,9 @@ def validate_alarm_migration_checkpoint(
         legacy_ids != calculated_legacy
         or canonical_ids != calculated_canonical
         or postcondition.get("legacy_publisher_count") != len(calculated_legacy)
-        or postcondition.get("canonical_publisher_count")
-        != len(calculated_canonical)
-        or not HEX64.fullmatch(
-            str(postcondition.get("publisher_reference_set_sha256", ""))
-        )
-        or not HEX64.fullmatch(
-            str(postcondition.get("publishers_sha256", ""))
-        )
+        or postcondition.get("canonical_publisher_count") != len(calculated_canonical)
+        or not HEX64.fullmatch(str(postcondition.get("publisher_reference_set_sha256", "")))
+        or not HEX64.fullmatch(str(postcondition.get("publishers_sha256", "")))
     ):
         raise ContractError("alarm publisher postcondition counts/hashes differ")
     delivery_verification = postcondition.get("delivery_verification")
@@ -5343,8 +4959,7 @@ def validate_alarm_migration_checkpoint(
         checkpoint["phase"] == "canonical_delivery_confirmed"
         and not isinstance(delivery_verification, Mapping)
     ) or (
-        checkpoint["phase"] != "canonical_delivery_confirmed"
-        and delivery_verification is not None
+        checkpoint["phase"] != "canonical_delivery_confirmed" and delivery_verification is not None
     ):
         raise ContractError("alarm delivery postcondition is in the wrong phase")
     if isinstance(delivery_verification, Mapping):
@@ -5360,11 +4975,8 @@ def validate_alarm_migration_checkpoint(
         )
         if (
             delivery_verification.get("verified") is not True
-            or delivery_verification.get("inventory_sha256")
-            != checkpoint["inventory_sha256"]
-            or not HEX64.fullmatch(
-                str(delivery_verification.get("ledger_request_id_sha256", ""))
-            )
+            or delivery_verification.get("inventory_sha256") != checkpoint["inventory_sha256"]
+            or not HEX64.fullmatch(str(delivery_verification.get("ledger_request_id_sha256", "")))
             or require_int(
                 delivery_verification.get("verified_at_epoch"),
                 "alarm delivery verification time",
@@ -5379,17 +4991,13 @@ def validate_alarm_migration_checkpoint(
             "phase": checkpoint["phase"],
             "publisher_id": checkpoint["publisher_id"],
             "inventory_sha256": checkpoint["inventory_sha256"],
-            "postcondition_sha256": checkpoint[
-                "postcondition_receipt_sha256"
-            ],
+            "postcondition_sha256": checkpoint["postcondition_receipt_sha256"],
             "delivery_receipt_sha256": delivery_receipt_sha256,
         }
     )
     if checkpoint["idempotency_key"] != expected_idempotency_key:
         raise ContractError("alarm checkpoint idempotency binding is invalid")
-    if (
-        checkpoint["phase"] == "publisher_checkpoint"
-    ) != bool(checkpoint["publisher_id"]):
+    if (checkpoint["phase"] == "publisher_checkpoint") != bool(checkpoint["publisher_id"]):
         raise ContractError("alarm publisher checkpoint id is invalid")
     rollback_plan = checkpoint["rollback_plan"]
     require_keys(
@@ -5456,9 +5064,7 @@ def validate_alarm_migration_checkpoint(
         ):
             raise ContractError("publisher rollback source checkpoint is missing")
         expected_rollback_state = {
-            checkpoint["publisher_id"]: previous_state[
-                checkpoint["publisher_id"]
-            ]
+            checkpoint["publisher_id"]: previous_state[checkpoint["publisher_id"]]
         }
     elif checkpoint["phase"] in {
         "canonical_delivery_confirmed",
@@ -5481,12 +5087,9 @@ def validate_alarm_migration_checkpoint(
     current_phase = checkpoint["phase"]
     if (
         checkpoint["sequence"]
-        != require_int(previous.get("sequence"), "previous checkpoint sequence")
-        + 1
+        != require_int(previous.get("sequence"), "previous checkpoint sequence") + 1
         or checkpoint["migration_id"] != previous.get("migration_id")
-        or require_int(
-            checkpoint["created_at_epoch"], "checkpoint creation time"
-        )
+        or require_int(checkpoint["created_at_epoch"], "checkpoint creation time")
         < require_int(
             previous.get("created_at_epoch"),
             "previous checkpoint creation time",
@@ -5527,20 +5130,14 @@ def _runtime_lock_item(
 ) -> dict[str, dict[str, str]]:
     return {
         "record_id": _dynamodb_value(SHARED_LOCK_RECORD_ID),
-        "record_type": _dynamodb_value(
-            "teamagent.runtime-evidence-workflow-lock"
-        ),
+        "record_type": _dynamodb_value("teamagent.runtime-evidence-workflow-lock"),
         "schema_version": _dynamodb_value(1),
         "state": _dynamodb_value("LOCKED"),
         "workflow_id": _dynamodb_value(workflow_id),
         "owner_token": _dynamodb_value(owner_token),
         "acquired_at_epoch": _dynamodb_value(acquired_at_epoch),
-        "lease_expires_at": _dynamodb_value(
-            acquired_at_epoch + RUNTIME_LOCK_LEASE_SECONDS
-        ),
-        "audit_expires_at": _dynamodb_value(
-            acquired_at_epoch + 31536000
-        ),
+        "lease_expires_at": _dynamodb_value(acquired_at_epoch + RUNTIME_LOCK_LEASE_SECONDS),
+        "audit_expires_at": _dynamodb_value(acquired_at_epoch + 31536000),
     }
 
 
@@ -5583,10 +5180,7 @@ def _validate_runtime_workflow_lock_item(
         raise ContractError("shared runtime workflow lock ownership differs")
     lease = int(_ddb_scalar(item, "lease_expires_at", "N"))
     audit = int(_ddb_scalar(item, "audit_expires_at", "N"))
-    if (
-        lease != acquired_at_epoch + RUNTIME_LOCK_LEASE_SECONDS
-        or audit <= lease
-    ):
+    if lease != acquired_at_epoch + RUNTIME_LOCK_LEASE_SECONDS or audit <= lease:
         raise ContractError("shared runtime workflow lock timing differs")
     return lease, audit
 
@@ -5648,9 +5242,7 @@ def acquire_runtime_workflow_lock(
         "put_response_sha256": canonical_sha256(response),
         "put_request_id_sha256": sha256_bytes(put_http.request_id.encode()),
         "confirmed_at_epoch": confirm_http.date_epoch,
-        "confirm_request_id_sha256": sha256_bytes(
-            confirm_http.request_id.encode()
-        ),
+        "confirm_request_id_sha256": sha256_bytes(confirm_http.request_id.encode()),
     }
 
 
@@ -5686,8 +5278,7 @@ def verify_runtime_workflow_lock(
         or receipt["account_id"] != ACCOUNT_ID
         or receipt["region"] != REGION
         or receipt["record_id"] != SHARED_LOCK_RECORD_ID
-        or receipt["record_type"]
-        != "teamagent.runtime-evidence-workflow-lock"
+        or receipt["record_type"] != "teamagent.runtime-evidence-workflow-lock"
         or not UUID4.fullmatch(workflow_id)
         or not HEX64.fullmatch(owner_token)
     ):
@@ -5699,13 +5290,9 @@ def verify_runtime_workflow_lock(
     ):
         if not HEX64.fullmatch(str(receipt[field])):
             raise ContractError(f"runtime shared-lock {field} is invalid")
-    acquired_at = require_int(
-        receipt["acquired_at_epoch"], "runtime lock acquisition"
-    )
+    acquired_at = require_int(receipt["acquired_at_epoch"], "runtime lock acquisition")
     lease = require_int(receipt["lease_expires_at"], "runtime lock lease")
-    confirmed_at = require_int(
-        receipt["confirmed_at_epoch"], "runtime lock confirmation"
-    )
+    confirmed_at = require_int(receipt["confirmed_at_epoch"], "runtime lock confirmation")
     item, get_http = _read_runtime_workflow_lock(aws)
     if item is None:
         raise ContractError("shared runtime workflow lock is absent")
@@ -5716,15 +5303,8 @@ def verify_runtime_workflow_lock(
         acquired_at_epoch=acquired_at,
     )
     _, observation_http = _caller_identity(aws)
-    if (
-        live_lease != lease
-        or not (
-            acquired_at
-            <= confirmed_at
-            <= get_http.date_epoch
-            <= observation_http.date_epoch
-            < lease
-        )
+    if live_lease != lease or not (
+        acquired_at <= confirmed_at <= get_http.date_epoch <= observation_http.date_epoch < lease
     ):
         raise ContractError("shared runtime workflow lock is stale or time-inverted")
     return {
@@ -5764,12 +5344,8 @@ def release_runtime_workflow_lock(
             "--expression-attribute-values",
             json.dumps(
                 {
-                    ":record_type": _dynamodb_value(
-                        "teamagent.runtime-evidence-workflow-lock"
-                    ),
-                    ":workflow": _dynamodb_value(
-                        str(receipt["workflow_id"])
-                    ),
+                    ":record_type": _dynamodb_value("teamagent.runtime-evidence-workflow-lock"),
+                    ":workflow": _dynamodb_value(str(receipt["workflow_id"])),
                     ":owner": _dynamodb_value(str(receipt["owner_token"])),
                     ":locked": _dynamodb_value("LOCKED"),
                 },
@@ -5780,9 +5356,7 @@ def release_runtime_workflow_lock(
     remaining, confirm_http = _read_runtime_workflow_lock(aws)
     if remaining is not None:
         raise ContractError("shared runtime workflow lock release was not confirmed")
-    if max(
-        verified["verified_at_epoch"], delete_http.date_epoch
-    ) > confirm_http.date_epoch:
+    if max(verified["verified_at_epoch"], delete_http.date_epoch) > confirm_http.date_epoch:
         raise ContractError("shared lock release timestamp is time-inverted")
     return {
         "kind": "teamagent-runtime-workflow-lock-release",
@@ -5790,16 +5364,12 @@ def release_runtime_workflow_lock(
         "record_id": SHARED_LOCK_RECORD_ID,
         "workflow_id": receipt["workflow_id"],
         "delete_response_sha256": canonical_sha256(response),
-        "delete_request_id_sha256": sha256_bytes(
-            delete_http.request_id.encode()
-        ),
+        "delete_request_id_sha256": sha256_bytes(delete_http.request_id.encode()),
         "released_at_epoch": confirm_http.date_epoch,
     }
 
 
-def _alarm_migration_history(
-    aws: AwsCli, migration_id: str
-) -> list[dict[str, Any]]:
+def _alarm_migration_history(aws: AwsCli, migration_id: str) -> list[dict[str, Any]]:
     head_record_id = f"alarm-migration#{migration_id}#head"
     head_response, _ = aws.call(
         "dynamodb",
@@ -5880,9 +5450,7 @@ def _alarm_migration_history(
             raise ContractError("alarm migration checkpoint JSON is invalid") from exc
         if not isinstance(checkpoint, dict):
             raise ContractError("alarm migration checkpoint is not an object")
-        if canonical_sha256(checkpoint) != _ddb_scalar(
-            item, "checkpoint_sha256"
-        ):
+        if canonical_sha256(checkpoint) != _ddb_scalar(item, "checkpoint_sha256"):
             raise ContractError("alarm migration ledger checkpoint hash differs")
         checkpoints.append(checkpoint)
     previous: Mapping[str, Any] | None = None
@@ -5892,11 +5460,9 @@ def _alarm_migration_history(
         validate_alarm_migration_checkpoint(checkpoint, previous=previous)
         previous = checkpoint
     final = checkpoints[-1]
-    if (
-        _ddb_scalar(head, "phase") != final["phase"]
-        or _ddb_scalar(head, "checkpoint_sha256")
-        != canonical_sha256(final)
-    ):
+    if _ddb_scalar(head, "phase") != final["phase"] or _ddb_scalar(
+        head, "checkpoint_sha256"
+    ) != canonical_sha256(final):
         raise ContractError("alarm migration ledger head does not bind the final checkpoint")
     return checkpoints
 
@@ -5919,21 +5485,16 @@ def _alarm_phase_postcondition(
         for publisher in publishers
     }
     legacy_publishers = [
-        publisher
-        for publisher in publishers
-        if LEGACY_TOPIC in publisher.get("topic_arns", [])
+        publisher for publisher in publishers if LEGACY_TOPIC in publisher.get("topic_arns", [])
     ]
     canonical_publishers = [
-        publisher
-        for publisher in publishers
-        if CANONICAL_TOPIC in publisher.get("topic_arns", [])
+        publisher for publisher in publishers if CANONICAL_TOPIC in publisher.get("topic_arns", [])
     ]
 
     delivery_verification: Mapping[str, Any] | None = None
     if phase == "dual_publish":
         if not publishers or any(
-            set(publisher.get("topic_arns", []))
-            != {CANONICAL_TOPIC, LEGACY_TOPIC}
+            set(publisher.get("topic_arns", [])) != {CANONICAL_TOPIC, LEGACY_TOPIC}
             for publisher in publishers
         ):
             raise ContractError(
@@ -5941,9 +5502,7 @@ def _alarm_phase_postcondition(
             )
     elif phase == "publisher_checkpoint":
         publisher = publisher_by_id.get(publisher_id)
-        if publisher is None or set(publisher.get("topic_arns", [])) != {
-            CANONICAL_TOPIC
-        }:
+        if publisher is None or set(publisher.get("topic_arns", [])) != {CANONICAL_TOPIC}:
             raise ContractError(
                 "publisher checkpoint requires the selected publisher's "
                 "exact canonical-only post-state"
@@ -5962,12 +5521,10 @@ def _alarm_phase_postcondition(
             receipt=delivery_receipt,
         )
         if not publishers or any(
-            set(publisher.get("topic_arns", [])) != {CANONICAL_TOPIC}
-            for publisher in publishers
+            set(publisher.get("topic_arns", [])) != {CANONICAL_TOPIC} for publisher in publishers
         ):
             raise ContractError(
-                "canonical delivery requires every checkpointed publisher "
-                "to be canonical-only"
+                "canonical delivery requires every checkpointed publisher to be canonical-only"
             )
     elif phase == "legacy_reference_zero":
         if legacy_publishers:
@@ -5988,9 +5545,7 @@ def _alarm_phase_postcondition(
         "phase": phase,
         "publisher_id": publisher_id,
         "inventory_sha256": inventory["inventory_sha256"],
-        "publisher_reference_set_sha256": inventory[
-            "publisher_reference_set_sha256"
-        ],
+        "publisher_reference_set_sha256": inventory["publisher_reference_set_sha256"],
         "publishers_sha256": inventory["publishers_sha256"],
         "publisher_ids": sorted(publisher_by_id),
         "publisher_topic_state": {
@@ -5998,9 +5553,7 @@ def _alarm_phase_postcondition(
                 "source_type": require_string(
                     publisher.get("source_type"), "publisher source type"
                 ),
-                "source_id": require_string(
-                    publisher.get("source_id"), "publisher source id"
-                ),
+                "source_id": require_string(publisher.get("source_id"), "publisher source id"),
                 "topic_arns": sorted(
                     require_string(topic_arn, "publisher topic ARN")
                     for topic_arn in publisher.get("topic_arns", [])
@@ -6046,11 +5599,7 @@ def advance_alarm_migration(
     _caller_identity(aws)
     history = _alarm_migration_history(aws, migration_id)
     previous = history[-1] if history else None
-    first_postcondition = (
-        history[0].get("postcondition")
-        if history
-        else None
-    )
+    first_postcondition = history[0].get("postcondition") if history else None
     if history and not isinstance(first_postcondition, Mapping):
         raise ContractError("initial dual-publish checkpoint is malformed")
     checkpointed_publishers = {
@@ -6060,9 +5609,7 @@ def advance_alarm_migration(
     }
     if phase == "publisher_checkpoint":
         expected_publishers = set(
-            first_postcondition.get("publisher_ids", [])
-            if first_postcondition is not None
-            else []
+            first_postcondition.get("publisher_ids", []) if first_postcondition is not None else []
         )
         if publisher_id not in expected_publishers:
             raise ContractError(
@@ -6070,14 +5617,10 @@ def advance_alarm_migration(
             )
     if phase == "canonical_delivery_confirmed":
         expected_publishers = set(
-            first_postcondition.get("publisher_ids", [])
-            if first_postcondition is not None
-            else []
+            first_postcondition.get("publisher_ids", []) if first_postcondition is not None else []
         )
         if not expected_publishers or checkpointed_publishers != expected_publishers:
-            raise ContractError(
-                "canonical delivery requires one durable checkpoint per publisher"
-            )
+            raise ContractError("canonical delivery requires one durable checkpoint per publisher")
     inventory = collect_inventory(aws)
     current_publishers = {
         require_string(publisher.get("publisher_id"), "publisher id"): set(
@@ -6110,13 +5653,8 @@ def advance_alarm_migration(
             "canonical_delivery_confirmed",
             "legacy_reference_zero",
             "legacy_retired",
-        } and any(
-            topics != {CANONICAL_TOPIC}
-            for topics in current_publishers.values()
-        ):
-            raise ContractError(
-                "post-checkpoint alarm publishers are not all canonical-only"
-            )
+        } and any(topics != {CANONICAL_TOPIC} for topics in current_publishers.values()):
+            raise ContractError("post-checkpoint alarm publishers are not all canonical-only")
     postcondition = _alarm_phase_postcondition(
         aws,
         phase=phase,
@@ -6124,11 +5662,7 @@ def advance_alarm_migration(
         inventory=inventory,
         delivery_receipt=delivery_receipt,
     )
-    delivery_sha = (
-        canonical_sha256(delivery_receipt)
-        if delivery_receipt is not None
-        else ""
-    )
+    delivery_sha = canonical_sha256(delivery_receipt) if delivery_receipt is not None else ""
     idempotency_key = canonical_sha256(
         {
             "migration_id": migration_id,
@@ -6142,16 +5676,12 @@ def advance_alarm_migration(
     for checkpoint in history:
         if checkpoint["idempotency_key"] == idempotency_key:
             if checkpoint != history[-1]:
-                raise ContractError(
-                    "cannot resume an alarm phase after a later checkpoint"
-                )
+                raise ContractError("cannot resume an alarm phase after a later checkpoint")
             _, resumed_http = _caller_identity(aws)
             resumed_lock = verify_runtime_workflow_lock(aws, lock_receipt)
             if (
-                resumed_lock["workflow_id"]
-                != initial_lock["workflow_id"]
-                or resumed_http.date_epoch
-                > resumed_lock["verified_at_epoch"]
+                resumed_lock["workflow_id"] != initial_lock["workflow_id"]
+                or resumed_http.date_epoch > resumed_lock["verified_at_epoch"]
             ):
                 raise ContractError("alarm resume shared-lock observation is invalid")
             if checkpoint["created_at_epoch"] > resumed_http.date_epoch:
@@ -6173,16 +5703,11 @@ def advance_alarm_migration(
                 "shared_lock_receipt_sha256": canonical_sha256(lock_receipt),
                 "observed_at_epoch": resumed_lock["verified_at_epoch"],
             }
-    if (
-        phase == "publisher_checkpoint"
-        and publisher_id in checkpointed_publishers
-    ):
+    if phase == "publisher_checkpoint" and publisher_id in checkpointed_publishers:
         raise ContractError("publisher already has a different durable checkpoint")
 
     _, observed_http = _caller_identity(aws)
-    source_times = [
-        source["aws_date_epoch"] for source in inventory["source_pages"]
-    ]
+    source_times = [source["aws_date_epoch"] for source in inventory["source_pages"]]
     if source_times and max(source_times) > observed_http.date_epoch:
         raise ContractError("alarm inventory timestamp exceeds observation")
     current_topic_state = postcondition["publisher_topic_state"]
@@ -6195,9 +5720,7 @@ def advance_alarm_migration(
         for current_id, state in sorted(current_topic_state.items())
     }
     previous_topic_state = (
-        previous["postcondition"]["publisher_topic_state"]
-        if previous is not None
-        else {}
+        previous["postcondition"]["publisher_topic_state"] if previous is not None else {}
     )
     if phase == "dual_publish":
         rollback_plan = {
@@ -6209,9 +5732,7 @@ def advance_alarm_migration(
         rollback_plan = {
             "mode": "restore-exact-publisher-checkpoint",
             "automatic": True,
-            "publisher_topic_state": {
-                publisher_id: previous_topic_state[publisher_id]
-            },
+            "publisher_topic_state": {publisher_id: previous_topic_state[publisher_id]},
         }
     elif phase in {
         "canonical_delivery_confirmed",
@@ -6241,16 +5762,12 @@ def advance_alarm_migration(
         "postcondition": postcondition,
         "postcondition_receipt_sha256": canonical_sha256(postcondition),
         "rollback_plan": rollback_plan,
-        "previous_checkpoint_sha256": (
-            canonical_sha256(previous) if previous is not None else ""
-        ),
+        "previous_checkpoint_sha256": (canonical_sha256(previous) if previous is not None else ""),
         "created_at_epoch": observed_http.date_epoch,
     }
     validate_alarm_migration_checkpoint(checkpoint, previous=previous)
     checkpoint_sha = canonical_sha256(checkpoint)
-    record_id = (
-        f"alarm-migration#{migration_id}#{checkpoint['sequence']:020d}"
-    )
+    record_id = f"alarm-migration#{migration_id}#{checkpoint['sequence']:020d}"
     item = {
         "record_id": _dynamodb_value(record_id),
         "migration_id": _dynamodb_value(migration_id),
@@ -6259,9 +5776,7 @@ def advance_alarm_migration(
         "publisher_id": _dynamodb_value(publisher_id),
         "idempotency_key": _dynamodb_value(idempotency_key),
         "checkpoint_sha256": _dynamodb_value(checkpoint_sha),
-        "checkpoint_json": _dynamodb_value(
-            canonical_bytes(checkpoint).decode().rstrip("\n")
-        ),
+        "checkpoint_json": _dynamodb_value(canonical_bytes(checkpoint).decode().rstrip("\n")),
         "created_at_epoch": _dynamodb_value(observed_http.date_epoch),
     }
     head_record_id = f"alarm-migration#{migration_id}#head"
@@ -6289,8 +5804,7 @@ def advance_alarm_migration(
                 "TableName": MIGRATION_LEDGER_TABLE,
                 "Key": {"record_id": _dynamodb_value(head_record_id)},
                 "UpdateExpression": (
-                    "SET #sequence = :next, phase = :phase, "
-                    "checkpoint_sha256 = :checkpoint"
+                    "SET #sequence = :next, phase = :phase, checkpoint_sha256 = :checkpoint"
                 ),
                 "ConditionExpression": head_condition,
                 "ExpressionAttributeNames": head_names,
@@ -6309,26 +5823,24 @@ def advance_alarm_migration(
         ),
     )
     persisted_history = _alarm_migration_history(aws, migration_id)
-    if (
-        len(persisted_history) != checkpoint["sequence"]
-        or persisted_history[-1] != checkpoint
-    ):
+    if len(persisted_history) != checkpoint["sequence"] or persisted_history[-1] != checkpoint:
         raise ContractError("alarm migration checkpoint was not durably confirmed")
     _, final_http = _caller_identity(aws)
     final_lock = verify_runtime_workflow_lock(aws, lock_receipt)
     if final_lock["workflow_id"] != initial_lock["workflow_id"]:
         raise ContractError("alarm migration shared lock changed")
-    source_times = [
-        source["aws_date_epoch"] for source in inventory["source_pages"]
-    ]
-    if max(
-        [
-            observed_http.date_epoch,
-            ledger_http.date_epoch,
-            final_http.date_epoch,
-            *source_times,
-        ]
-    ) > final_lock["verified_at_epoch"]:
+    source_times = [source["aws_date_epoch"] for source in inventory["source_pages"]]
+    if (
+        max(
+            [
+                observed_http.date_epoch,
+                ledger_http.date_epoch,
+                final_http.date_epoch,
+                *source_times,
+            ]
+        )
+        > final_lock["verified_at_epoch"]
+    ):
         raise ContractError("alarm checkpoint evidence exceeds final observation")
     return {
         "kind": "teamagent-alarm-migration-phase-receipt",
@@ -6340,9 +5852,7 @@ def advance_alarm_migration(
         "checkpoint_sha256": checkpoint_sha,
         "postcondition": postcondition,
         "history_sha256": canonical_sha256(persisted_history),
-        "ledger_request_id_sha256": sha256_bytes(
-            ledger_http.request_id.encode()
-        ),
+        "ledger_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
         "ledger_response_sha256": canonical_sha256(response),
         "shared_lock_record_id": SHARED_LOCK_RECORD_ID,
         "shared_lock_workflow_id": initial_lock["workflow_id"],
@@ -6381,18 +5891,13 @@ def verify_alarm_migration_final(
         "alarm migration phase receipt",
     )
     if (
-        phase_receipt["kind"]
-        != "teamagent-alarm-migration-phase-receipt"
+        phase_receipt["kind"] != "teamagent-alarm-migration-phase-receipt"
         or phase_receipt["schema_version"] != 1
         or phase_receipt["migration_id"] != migration_id
         or phase_receipt["phase"] != "legacy_retired"
         or phase_receipt["shared_lock_record_id"] != SHARED_LOCK_RECORD_ID
-        or not UUID4.fullmatch(
-            str(phase_receipt["shared_lock_workflow_id"])
-        )
-        or not HEX64.fullmatch(
-            str(phase_receipt["shared_lock_receipt_sha256"])
-        )
+        or not UUID4.fullmatch(str(phase_receipt["shared_lock_workflow_id"]))
+        or not HEX64.fullmatch(str(phase_receipt["shared_lock_receipt_sha256"]))
         or not isinstance(phase_receipt["resumed"], bool)
         or not isinstance(phase_receipt["checkpoint"], Mapping)
         or not isinstance(phase_receipt["postcondition"], Mapping)
@@ -6411,8 +5916,7 @@ def verify_alarm_migration_final(
         raise ContractError("alarm migration ledger is not at legacy_retired")
     if (
         phase_receipt["checkpoint"] != history[-1]
-        or phase_receipt["checkpoint_sha256"]
-        != canonical_sha256(history[-1])
+        or phase_receipt["checkpoint_sha256"] != canonical_sha256(history[-1])
         or phase_receipt["history_sha256"] != canonical_sha256(history)
         or phase_receipt["postcondition"] != history[-1]["postcondition"]
     ):
@@ -6427,13 +5931,11 @@ def verify_alarm_migration_final(
     ):
         raise ContractError("initial alarm publisher set is invalid")
     publisher_checkpoints = [
-        checkpoint
-        for checkpoint in history
-        if checkpoint["phase"] == "publisher_checkpoint"
+        checkpoint for checkpoint in history if checkpoint["phase"] == "publisher_checkpoint"
     ]
-    if sorted(
-        checkpoint["publisher_id"] for checkpoint in publisher_checkpoints
-    ) != sorted(expected_publishers):
+    if sorted(checkpoint["publisher_id"] for checkpoint in publisher_checkpoints) != sorted(
+        expected_publishers
+    ):
         raise ContractError("alarm publisher checkpoint coverage is incomplete")
     canonical_checkpoints = [
         checkpoint
@@ -6442,9 +5944,7 @@ def verify_alarm_migration_final(
     ]
     if len(canonical_checkpoints) != 1:
         raise ContractError("canonical delivery checkpoint is not unique")
-    delivery = canonical_checkpoints[0]["postcondition"].get(
-        "delivery_verification"
-    )
+    delivery = canonical_checkpoints[0]["postcondition"].get("delivery_verification")
     if not isinstance(delivery, Mapping) or delivery.get("verified") is not True:
         raise ContractError("canonical delivery checkpoint lacks real SNS evidence")
     if [checkpoint["phase"] for checkpoint in history[-3:]] != [
@@ -6469,16 +5969,17 @@ def verify_alarm_migration_final(
         phase_receipt["observed_at_epoch"],
         "alarm phase receipt observation",
     )
-    source_times = [
-        source["aws_date_epoch"] for source in inventory["source_pages"]
-    ]
-    if max(
-        [
-            receipt_observed,
-            history[-1]["created_at_epoch"],
-            *source_times,
-        ]
-    ) > observation_http.date_epoch:
+    source_times = [source["aws_date_epoch"] for source in inventory["source_pages"]]
+    if (
+        max(
+            [
+                receipt_observed,
+                history[-1]["created_at_epoch"],
+                *source_times,
+            ]
+        )
+        > observation_http.date_epoch
+    ):
         raise ContractError("final alarm migration evidence is time-inverted")
     return {
         "kind": "teamagent-alarm-migration-final-verification",
@@ -6512,6 +6013,1328 @@ def _write_new_json(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _media_image(value: str, *, legacy: bool) -> str:
+    repository = "teamagent-dev-tiktok-acquire" if legacy else "teamagent-media-worker"
+    pattern = (
+        rf"^{ACCOUNT_ID}\.dkr\.ecr\.{REGION}\.amazonaws\.com/"
+        rf"{repository}@sha256:[0-9a-f]{{64}}$"
+    )
+    if not re.fullmatch(pattern, value):
+        kind = "legacy" if legacy else "desired"
+        raise ContractError(f"media {kind} image is not an exact approved digest")
+    return value
+
+
+def _media_record_id(desired_image: str) -> str:
+    digest = sha256_bytes(desired_image.encode())
+    return f"{MEDIA_CUTOVER_LEDGER_PREFIX}{digest}"
+
+
+def _media_http_source(
+    sources: list[dict[str, Any]],
+    *,
+    service: str,
+    operation: str,
+    response: Mapping[str, Any],
+    http: HttpEvidence,
+    page: int = 0,
+) -> None:
+    sources.append(
+        {
+            "service": service,
+            "operation": operation,
+            "page": page,
+            "response_sha256": canonical_sha256(response),
+            "aws_date_epoch": http.date_epoch,
+            "request_id_sha256": sha256_bytes(http.request_id.encode()),
+        }
+    )
+
+
+def _media_queue_state(
+    aws: AwsCli,
+    name: str,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    response, http = aws.call(
+        "sqs",
+        "get-queue-url",
+        (
+            "--queue-name",
+            name,
+            "--queue-owner-aws-account-id",
+            ACCOUNT_ID,
+        ),
+    )
+    _media_http_source(
+        sources,
+        service="sqs",
+        operation=f"get-queue-url:{name}",
+        response=response,
+        http=http,
+    )
+    require_keys(response, ("QueueUrl",), f"{name} queue URL")
+    queue_url = require_string(response.get("QueueUrl"), f"{name} queue URL")
+    expected_url = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/{name}"
+    if queue_url != expected_url:
+        raise ContractError(f"{name} queue URL is not exact")
+    attributes_response, attributes_http = aws.call(
+        "sqs",
+        "get-queue-attributes",
+        (
+            "--queue-url",
+            queue_url,
+            "--attribute-names",
+            "All",
+        ),
+    )
+    _media_http_source(
+        sources,
+        service="sqs",
+        operation=f"get-queue-attributes:{name}",
+        response=attributes_response,
+        http=attributes_http,
+    )
+    require_keys(
+        attributes_response,
+        ("Attributes",),
+        f"{name} queue attributes response",
+    )
+    attributes = attributes_response.get("Attributes")
+    if not isinstance(attributes, Mapping):
+        raise ContractError(f"{name} queue attributes are malformed")
+    expected_arn = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{name}"
+    counts = {
+        key: attributes.get(key)
+        for key in (
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+            "ApproximateNumberOfMessagesDelayed",
+        )
+    }
+    if (
+        attributes.get("QueueArn") != expected_arn
+        or set(counts.values()) != {"0"}
+        or attributes.get("MessageRetentionPeriod") != "1209600"
+        or attributes.get("SqsManagedSseEnabled") != "true"
+    ):
+        raise ContractError(f"{name} queue is not exact and empty")
+    normalized: dict[str, Any] = {
+        "name": name,
+        "arn": expected_arn,
+        "url": queue_url,
+        "counts": counts,
+        "message_retention_seconds": 1209600,
+        "sqs_managed_sse": True,
+    }
+    if name == MEDIA_JOBS_QUEUE:
+        redrive_raw = attributes.get("RedrivePolicy")
+        if not isinstance(redrive_raw, str):
+            raise ContractError("media jobs queue redrive policy is missing")
+        try:
+            redrive = json.loads(redrive_raw)
+        except json.JSONDecodeError as exc:
+            raise ContractError("media jobs queue redrive policy is invalid") from exc
+        expected_dlq = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{MEDIA_JOBS_DLQ}"
+        if (
+            redrive
+            != {
+                "deadLetterTargetArn": expected_dlq,
+                "maxReceiveCount": "5",
+            }
+            or attributes.get("VisibilityTimeout") != "180"
+        ):
+            raise ContractError("media jobs queue 180/5 contract differs")
+        normalized["visibility_timeout_seconds"] = 180
+        normalized["redrive"] = {
+            "dead_letter_target_arn": expected_dlq,
+            "max_receive_count": 5,
+        }
+    return normalized
+
+
+def _media_mapping_state(
+    aws: AwsCli,
+    queue_arn: str,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    pages = aws.pages(
+        "lambda",
+        "list-event-source-mappings",
+        (
+            "--function-name",
+            MEDIA_DISPATCH_FUNCTION,
+            "--event-source-arn",
+            queue_arn,
+        ),
+        token_field="NextMarker",
+        token_argument="--marker",
+    )
+    mappings: list[dict[str, Any]] = []
+    for page_index, (response, http) in enumerate(pages):
+        _media_http_source(
+            sources,
+            service="lambda",
+            operation="list-event-source-mappings",
+            response=response,
+            http=http,
+            page=page_index,
+        )
+        values = response.get("EventSourceMappings")
+        if not isinstance(values, list) or not all(isinstance(value, dict) for value in values):
+            raise ContractError("media event source mapping page is malformed")
+        mappings.extend(values)
+    if len(mappings) != 1:
+        raise ContractError("media event source mapping is not unique")
+    mapping = mappings[0]
+    uuid_value = require_string(mapping.get("UUID"), "media mapping UUID")
+    expected_function = f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:function:{MEDIA_DISPATCH_FUNCTION}"
+    state = require_string(mapping.get("State"), "media mapping state")
+    response_types = mapping.get("FunctionResponseTypes", [])
+    if (
+        not UUID4.fullmatch(uuid_value)
+        or mapping.get("EventSourceArn") != queue_arn
+        or mapping.get("FunctionArn") != expected_function
+        or state
+        not in {
+            "Enabled",
+            "Enabling",
+            "Disabled",
+            "Disabling",
+            "Updating",
+        }
+        or mapping.get("BatchSize") != 1
+        or response_types
+        not in (
+            [],
+            ["ReportBatchItemFailures"],
+        )
+    ):
+        raise ContractError("media event source mapping contract differs")
+    return {
+        "uuid": uuid_value,
+        "event_source_arn": queue_arn,
+        "function_arn": expected_function,
+        "state": state,
+        "batch_size": 1,
+        "function_response_types": response_types,
+    }
+
+
+def _media_task_definition(
+    aws: AwsCli,
+    task_definition: str,
+    sources: list[dict[str, Any]],
+    *,
+    operation: str,
+) -> dict[str, Any]:
+    response, http = aws.call(
+        "ecs",
+        "describe-task-definition",
+        ("--task-definition", task_definition),
+    )
+    _media_http_source(
+        sources,
+        service="ecs",
+        operation=operation,
+        response=response,
+        http=http,
+    )
+    definition = response.get("taskDefinition")
+    if not isinstance(definition, Mapping):
+        raise ContractError("ECS task definition response is malformed")
+    containers = definition.get("containerDefinitions")
+    if not isinstance(containers, list) or not all(
+        isinstance(container, Mapping) for container in containers
+    ):
+        raise ContractError("ECS task definition containers are malformed")
+    return {"definition": definition, "containers": containers}
+
+
+def _media_producer_state(
+    aws: AwsCli,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    response, http = aws.call(
+        "ecs",
+        "describe-services",
+        (
+            "--cluster",
+            MCP_CLUSTER,
+            "--services",
+            MCP_SERVICE,
+        ),
+    )
+    _media_http_source(
+        sources,
+        service="ecs",
+        operation="describe-services:mcp",
+        response=response,
+        http=http,
+    )
+    services = response.get("services")
+    failures = response.get("failures", [])
+    if (
+        not isinstance(services, list)
+        or len(services) != 1
+        or failures != []
+        or not isinstance(services[0], Mapping)
+        or services[0].get("serviceName") != MCP_SERVICE
+    ):
+        raise ContractError("MCP producer service is not exact")
+    task_definition = require_string(
+        services[0].get("taskDefinition"),
+        "MCP producer task definition",
+    )
+    task = _media_task_definition(
+        aws,
+        task_definition,
+        sources,
+        operation="describe-task-definition:mcp",
+    )
+    matching: list[dict[str, str]] = []
+    for container in task["containers"]:
+        environment = container.get("environment")
+        if not isinstance(environment, list):
+            continue
+        values: dict[str, str] = {}
+        for item in environment:
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("name"), str)
+                or not isinstance(item.get("value"), str)
+                or item["name"] in values
+            ):
+                raise ContractError("MCP producer environment is malformed")
+            values[item["name"]] = item["value"]
+        if {"USE_VIDEO_TOOLS", "USE_TIKTOK_TOOLS"}.issubset(values):
+            matching.append(values)
+    if len(matching) != 1:
+        raise ContractError("MCP producer flags are not uniquely bound")
+    flags = {name: matching[0][name] for name in ("USE_VIDEO_TOOLS", "USE_TIKTOK_TOOLS")}
+    if any(value.lower() not in {"0", "false", "no", "off"} for value in flags.values()):
+        raise ContractError("MCP media producers are not explicitly disabled")
+    return {
+        "cluster": MCP_CLUSTER,
+        "service": MCP_SERVICE,
+        "task_definition": task_definition,
+        "flags": flags,
+    }
+
+
+def _media_legacy_runtime(
+    aws: AwsCli,
+    sources: list[dict[str, Any]],
+) -> dict[str, Any]:
+    response, http = aws.call(
+        "lambda",
+        "get-function-configuration",
+        ("--function-name", MEDIA_DISPATCH_FUNCTION),
+    )
+    _media_http_source(
+        sources,
+        service="lambda",
+        operation="get-function-configuration:media-dispatch",
+        response=response,
+        http=http,
+    )
+    environment = response.get("Environment")
+    variables = environment.get("Variables") if isinstance(environment, Mapping) else None
+    if not isinstance(variables, Mapping):
+        raise ContractError("media dispatcher environment is malformed")
+    task_definition = require_string(
+        variables.get("TASKDEF_ARN"),
+        "media dispatcher task definition",
+    )
+    if not re.fullmatch(
+        rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/"
+        rf"{MEDIA_FAMILY}:[1-9][0-9]*",
+        task_definition,
+    ):
+        raise ContractError("media dispatcher task definition is not exact")
+    task = _media_task_definition(
+        aws,
+        task_definition,
+        sources,
+        operation="describe-task-definition:legacy-media",
+    )
+    images = [
+        container.get("image")
+        for container in task["containers"]
+        if container.get("name") == "acquire"
+    ]
+    if len(images) != 1 or not isinstance(images[0], str):
+        raise ContractError("legacy media container is not unique")
+    return {
+        "task_definition": task_definition,
+        "image": _media_image(images[0], legacy=True),
+    }
+
+
+def _media_task_state(
+    aws: AwsCli,
+    sources: list[dict[str, Any]],
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for desired_status in ("RUNNING", "PENDING"):
+        pages = aws.pages(
+            "ecs",
+            "list-tasks",
+            (
+                "--cluster",
+                MEDIA_CLUSTER,
+                "--family",
+                MEDIA_FAMILY,
+                "--desired-status",
+                desired_status,
+            ),
+            token_field="nextToken",
+        )
+        task_arns: list[str] = []
+        for page_index, (response, http) in enumerate(pages):
+            _media_http_source(
+                sources,
+                service="ecs",
+                operation=f"list-tasks:{desired_status}",
+                response=response,
+                http=http,
+                page=page_index,
+            )
+            values = response.get("taskArns")
+            if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                raise ContractError("media task inventory is malformed")
+            task_arns.extend(values)
+        if task_arns:
+            raise ContractError(f"legacy media {desired_status} tasks are not zero")
+        result[desired_status.lower()] = task_arns
+    return result
+
+
+def capture_media_cutover_state(
+    aws: AwsCli,
+    *,
+    require_mapping_disabled: bool,
+) -> dict[str, Any]:
+    sources: list[dict[str, Any]] = []
+    dlq = _media_queue_state(aws, MEDIA_JOBS_DLQ, sources)
+    queue = _media_queue_state(aws, MEDIA_JOBS_QUEUE, sources)
+    mapping = _media_mapping_state(aws, str(queue["arn"]), sources)
+    if require_mapping_disabled and mapping["state"] != "Disabled":
+        raise ContractError("media event source mapping is not Disabled")
+    state = {
+        "queues": {
+            "jobs": queue,
+            "dlq": dlq,
+        },
+        "event_source_mapping": mapping,
+        "producer": _media_producer_state(aws, sources),
+        "legacy_runtime": _media_legacy_runtime(aws, sources),
+        "tasks": _media_task_state(aws, sources),
+    }
+    epochs = [source["aws_date_epoch"] for source in sources]
+    if not epochs or max(epochs) - min(epochs) > 300:
+        raise ContractError("media cutover observation is not temporally coherent")
+    return {
+        "state": state,
+        "state_sha256": canonical_sha256(state),
+        "observed_at_epoch": max(epochs),
+        "earliest_observed_at_epoch": min(epochs),
+        "sources": sources,
+        "sources_sha256": canonical_sha256(sources),
+    }
+
+
+def _media_disable_mapping(
+    aws: AwsCli,
+    mapping: Mapping[str, Any],
+    *,
+    sleeper: Callable[[float], None],
+) -> dict[str, Any]:
+    state = mapping.get("state")
+    if state == "Disabled":
+        return {
+            "action": "already-disabled",
+            "uuid": mapping.get("uuid"),
+            "settled_state": "Disabled",
+        }
+    if state != "Enabled":
+        raise ContractError("media mapping is in an unstable transition")
+    response, http = aws.call(
+        "lambda",
+        "update-event-source-mapping",
+        (
+            "--uuid",
+            require_string(mapping.get("uuid"), "media mapping UUID"),
+            "--no-enabled",
+        ),
+    )
+    if response.get("UUID") != mapping.get("uuid") or response.get("State") not in {
+        "Disabling",
+        "Disabled",
+        "Updating",
+    }:
+        raise ContractError("media mapping disable response is invalid")
+    queue_arn = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{MEDIA_JOBS_QUEUE}"
+    observations: list[dict[str, Any]] = []
+    attempts = 1 + (
+        MEDIA_MAPPING_DISABLE_TIMEOUT_SECONDS // MEDIA_MAPPING_POLL_SECONDS
+    )
+    settled_at_epoch: int | None = None
+    for attempt in range(attempts):
+        sources: list[dict[str, Any]] = []
+        observed = _media_mapping_state(aws, queue_arn, sources)
+        if observed.get("uuid") != mapping.get("uuid"):
+            raise ContractError("media mapping identity changed while disabling")
+        observed_state = observed.get("state")
+        if observed_state not in {"Enabled", "Disabling", "Disabled", "Updating"}:
+            raise ContractError("media mapping left the disabling transition")
+        observation = {
+            "attempt": attempt + 1,
+            "state": observed_state,
+            "sources": sources,
+            "sources_sha256": canonical_sha256(sources),
+        }
+        observations.append(observation)
+        if observed_state == "Disabled":
+            settled_at_epoch = max(
+                require_int(source.get("aws_date_epoch"), "media mapping AWS date")
+                for source in sources
+            )
+            break
+        if attempt + 1 < attempts:
+            sleeper(MEDIA_MAPPING_POLL_SECONDS)
+    if settled_at_epoch is None:
+        raise ContractError("media mapping did not become Disabled within 120 seconds")
+    if settled_at_epoch - http.date_epoch > MEDIA_MAPPING_DISABLE_TIMEOUT_SECONDS:
+        raise ContractError("media mapping disable exceeded the 120-second AWS window")
+    return {
+        "action": "UpdateEventSourceMapping",
+        "uuid": mapping.get("uuid"),
+        "response_sha256": canonical_sha256(response),
+        "aws_date_epoch": http.date_epoch,
+        "request_id_sha256": sha256_bytes(http.request_id.encode()),
+        "settled_state": "Disabled",
+        "settled_at_epoch": settled_at_epoch,
+        "observations": observations,
+        "observations_sha256": canonical_sha256(observations),
+    }
+
+
+def _media_claims(
+    *,
+    desired_image: str,
+    identity: Mapping[str, Any],
+    lock_receipt: Mapping[str, Any],
+    initial_lock: Mapping[str, Any],
+    final_lock: Mapping[str, Any],
+    disable_action: Mapping[str, Any],
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> dict[str, Any]:
+    first_epoch = require_int(
+        first.get("observed_at_epoch"),
+        "media first observation",
+    )
+    second_epoch = require_int(
+        second.get("observed_at_epoch"),
+        "media second observation",
+    )
+    if second_epoch - first_epoch < SETTLE_SECONDS:
+        raise ContractError("media cutover has not settled for 900 AWS seconds")
+    if first.get("state_sha256") != second.get("state_sha256"):
+        raise ContractError("media cutover state changed during the settle window")
+    first_state = first.get("state")
+    if not isinstance(first_state, Mapping):
+        raise ContractError("media first observation state is malformed")
+    legacy = first_state.get("legacy_runtime")
+    mapping = first_state.get("event_source_mapping")
+    if not isinstance(legacy, Mapping) or not isinstance(mapping, Mapping):
+        raise ContractError("media cutover identity is incomplete")
+    legacy_image = _media_image(
+        require_string(legacy.get("image"), "media legacy image"),
+        legacy=True,
+    )
+    return {
+        "kind": "teamagent-media-envelope-cutover",
+        "schema_version": 1,
+        "account_id": ACCOUNT_ID,
+        "region": REGION,
+        "record_id": _media_record_id(desired_image),
+        "desired_image": desired_image,
+        "legacy_image": legacy_image,
+        "caller_identity_sha256": canonical_sha256(identity),
+        "shared_lock": {
+            "record_id": SHARED_LOCK_RECORD_ID,
+            "workflow_id": initial_lock.get("workflow_id"),
+            "lock_receipt_sha256": canonical_sha256(lock_receipt),
+            "initial_verified_at_epoch": initial_lock.get("verified_at_epoch"),
+            "final_verified_at_epoch": final_lock.get("verified_at_epoch"),
+        },
+        "mapping_uuid": mapping.get("uuid"),
+        "disable_action": dict(disable_action),
+        "settle_seconds": SETTLE_SECONDS,
+        "first_observation": dict(first),
+        "second_observation": dict(second),
+    }
+
+
+def _media_ledger_item(
+    claims: Mapping[str, Any],
+    *,
+    recorded_at_epoch: int,
+) -> dict[str, dict[str, str]]:
+    first = claims.get("first_observation")
+    second = claims.get("second_observation")
+    if not isinstance(first, Mapping) or not isinstance(second, Mapping):
+        raise ContractError("media cutover claims omit observations")
+    return {
+        "record_id": _dynamodb_value(require_string(claims.get("record_id"), "media record ID")),
+        "record_type": _dynamodb_value("teamagent.media-envelope-cutover"),
+        "schema_version": _dynamodb_value(1),
+        "status": _dynamodb_value("READY"),
+        "desired_image": _dynamodb_value(
+            require_string(claims.get("desired_image"), "media desired image")
+        ),
+        "legacy_image": _dynamodb_value(
+            require_string(claims.get("legacy_image"), "media legacy image")
+        ),
+        "claims_sha256": _dynamodb_value(canonical_sha256(claims)),
+        "claims_json": _dynamodb_value(canonical_bytes(claims).decode().rstrip("\n")),
+        "first_observed_at_epoch": _dynamodb_value(
+            require_int(first.get("observed_at_epoch"), "first observation")
+        ),
+        "second_observed_at_epoch": _dynamodb_value(
+            require_int(second.get("observed_at_epoch"), "second observation")
+        ),
+        "settle_seconds": _dynamodb_value(SETTLE_SECONDS),
+        "recorded_at_epoch": _dynamodb_value(recorded_at_epoch),
+        "audit_expires_at": _dynamodb_value(recorded_at_epoch + 31536000),
+    }
+
+
+def _validate_media_source(source: Mapping[str, Any], label: str) -> int:
+    require_keys(
+        source,
+        (
+            "service",
+            "operation",
+            "page",
+            "response_sha256",
+            "aws_date_epoch",
+            "request_id_sha256",
+        ),
+        label,
+    )
+    allowed_operations = {
+        ("sqs", f"get-queue-url:{MEDIA_JOBS_QUEUE}"),
+        ("sqs", f"get-queue-url:{MEDIA_JOBS_DLQ}"),
+        ("sqs", f"get-queue-attributes:{MEDIA_JOBS_QUEUE}"),
+        ("sqs", f"get-queue-attributes:{MEDIA_JOBS_DLQ}"),
+        ("lambda", "list-event-source-mappings"),
+        ("lambda", "get-function-configuration:media-dispatch"),
+        ("ecs", "describe-services:mcp"),
+        ("ecs", "describe-task-definition:mcp"),
+        ("ecs", "describe-task-definition:legacy-media"),
+        ("ecs", "list-tasks:RUNNING"),
+        ("ecs", "list-tasks:PENDING"),
+    }
+    identity = (
+        require_string(source.get("service"), f"{label} service"),
+        require_string(source.get("operation"), f"{label} operation"),
+    )
+    if identity not in allowed_operations:
+        raise ContractError(f"{label} operation is not approved")
+    require_int(source.get("page"), f"{label} page")
+    for field in ("response_sha256", "request_id_sha256"):
+        if not HEX64.fullmatch(str(source.get(field))):
+            raise ContractError(f"{label} {field} is invalid")
+    return require_int(source.get("aws_date_epoch"), f"{label} AWS date")
+
+
+def _validate_media_observation(
+    observation: Mapping[str, Any],
+    label: str,
+) -> Mapping[str, Any]:
+    require_keys(
+        observation,
+        (
+            "state",
+            "state_sha256",
+            "observed_at_epoch",
+            "earliest_observed_at_epoch",
+            "sources",
+            "sources_sha256",
+        ),
+        label,
+    )
+    state = observation.get("state")
+    sources = observation.get("sources")
+    if not isinstance(state, Mapping) or not isinstance(sources, list) or not sources:
+        raise ContractError(f"{label} state/sources are malformed")
+    if not all(isinstance(source, Mapping) for source in sources):
+        raise ContractError(f"{label} source is malformed")
+    epochs = [
+        _validate_media_source(source, f"{label} source {index}")
+        for index, source in enumerate(sources)
+    ]
+    observed_at = require_int(
+        observation.get("observed_at_epoch"),
+        f"{label} observation time",
+    )
+    earliest_at = require_int(
+        observation.get("earliest_observed_at_epoch"),
+        f"{label} earliest observation time",
+    )
+    if (
+        canonical_sha256(state) != observation.get("state_sha256")
+        or canonical_sha256(sources) != observation.get("sources_sha256")
+        or observed_at != max(epochs)
+        or earliest_at != min(epochs)
+        or observed_at - earliest_at > 300
+    ):
+        raise ContractError(f"{label} hashes/timestamps differ")
+    return state
+
+
+def _validate_media_queue_claim(
+    queue: Mapping[str, Any],
+    *,
+    name: str,
+    jobs: bool,
+) -> None:
+    expected_keys = {
+        "name",
+        "arn",
+        "url",
+        "counts",
+        "message_retention_seconds",
+        "sqs_managed_sse",
+    }
+    if jobs:
+        expected_keys.update(
+            {
+                "visibility_timeout_seconds",
+                "redrive",
+            }
+        )
+    require_keys(queue, expected_keys, f"{name} queue claim")
+    expected_arn = f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{name}"
+    expected_url = f"https://sqs.{REGION}.amazonaws.com/{ACCOUNT_ID}/{name}"
+    if (
+        queue.get("name") != name
+        or queue.get("arn") != expected_arn
+        or queue.get("url") != expected_url
+        or queue.get("counts")
+        != {
+            "ApproximateNumberOfMessages": "0",
+            "ApproximateNumberOfMessagesNotVisible": "0",
+            "ApproximateNumberOfMessagesDelayed": "0",
+        }
+        or queue.get("message_retention_seconds") != 1209600
+        or queue.get("sqs_managed_sse") is not True
+    ):
+        raise ContractError(f"{name} queue claim differs")
+    if jobs and (
+        queue.get("visibility_timeout_seconds") != 180
+        or queue.get("redrive")
+        != {
+            "dead_letter_target_arn": (
+                f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{MEDIA_JOBS_DLQ}"
+            ),
+            "max_receive_count": 5,
+        }
+    ):
+        raise ContractError("media jobs queue claim differs")
+
+
+def _validate_media_state_claim(
+    state: Mapping[str, Any],
+    *,
+    legacy_image: str,
+    mapping_uuid: str,
+) -> None:
+    require_keys(
+        state,
+        (
+            "queues",
+            "event_source_mapping",
+            "producer",
+            "legacy_runtime",
+            "tasks",
+        ),
+        "media cutover state",
+    )
+    queues = state.get("queues")
+    mapping = state.get("event_source_mapping")
+    producer = state.get("producer")
+    legacy = state.get("legacy_runtime")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (
+            queues,
+            mapping,
+            producer,
+            legacy,
+        )
+    ):
+        raise ContractError("media cutover state sections are malformed")
+    assert isinstance(queues, Mapping)
+    assert isinstance(mapping, Mapping)
+    assert isinstance(producer, Mapping)
+    assert isinstance(legacy, Mapping)
+    require_keys(queues, ("jobs", "dlq"), "media queue claims")
+    jobs = queues.get("jobs")
+    dlq = queues.get("dlq")
+    if not isinstance(jobs, Mapping) or not isinstance(dlq, Mapping):
+        raise ContractError("media queue claims are malformed")
+    _validate_media_queue_claim(jobs, name=MEDIA_JOBS_QUEUE, jobs=True)
+    _validate_media_queue_claim(dlq, name=MEDIA_JOBS_DLQ, jobs=False)
+    require_keys(
+        mapping,
+        (
+            "uuid",
+            "event_source_arn",
+            "function_arn",
+            "state",
+            "batch_size",
+            "function_response_types",
+        ),
+        "media mapping claim",
+    )
+    if (
+        mapping.get("uuid") != mapping_uuid
+        or mapping.get("event_source_arn")
+        != f"arn:aws:sqs:{REGION}:{ACCOUNT_ID}:{MEDIA_JOBS_QUEUE}"
+        or mapping.get("function_arn")
+        != (
+            f"arn:aws:lambda:{REGION}:{ACCOUNT_ID}:"
+            f"function:{MEDIA_DISPATCH_FUNCTION}"
+        )
+        or mapping.get("state") != "Disabled"
+        or mapping.get("batch_size") != 1
+        or mapping.get("function_response_types")
+        not in ([], ["ReportBatchItemFailures"])
+    ):
+        raise ContractError("media mapping claim differs")
+    require_keys(
+        producer,
+        ("cluster", "service", "task_definition", "flags"),
+        "media producer claim",
+    )
+    flags = producer.get("flags")
+    if (
+        producer.get("cluster") != MCP_CLUSTER
+        or producer.get("service") != MCP_SERVICE
+        or not re.fullmatch(
+            rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/"
+            rf"{MCP_SERVICE}:[1-9][0-9]*",
+            str(producer.get("task_definition")),
+        )
+        or not isinstance(flags, Mapping)
+        or set(flags) != {"USE_VIDEO_TOOLS", "USE_TIKTOK_TOOLS"}
+        or any(
+            not isinstance(value, str)
+            or value.lower() not in {"0", "false", "no", "off"}
+            for value in flags.values()
+        )
+    ):
+        raise ContractError("media producer claim differs")
+    require_keys(
+        legacy,
+        ("task_definition", "image"),
+        "legacy media runtime claim",
+    )
+    if (
+        not re.fullmatch(
+            rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/"
+            rf"{MEDIA_FAMILY}:[1-9][0-9]*",
+            str(legacy.get("task_definition")),
+        )
+        or legacy.get("image") != legacy_image
+    ):
+        raise ContractError("legacy media runtime claim differs")
+    if state.get("tasks") != {"running": [], "pending": []}:
+        raise ContractError("legacy media task claim differs")
+
+
+def _validate_media_disable_action(
+    action: Mapping[str, Any],
+    *,
+    mapping_uuid: str,
+    first_observed_at: int,
+) -> None:
+    action_name = action.get("action")
+    if action_name == "already-disabled":
+        require_keys(
+            action,
+            ("action", "uuid", "settled_state"),
+            "media disable action",
+        )
+        if (
+            action.get("uuid") != mapping_uuid
+            or action.get("settled_state") != "Disabled"
+        ):
+            raise ContractError("media disable action identity differs")
+        return
+    require_keys(
+        action,
+        (
+            "action",
+            "uuid",
+            "response_sha256",
+            "aws_date_epoch",
+            "request_id_sha256",
+            "settled_state",
+            "settled_at_epoch",
+            "observations",
+            "observations_sha256",
+        ),
+        "media disable action",
+    )
+    if (
+        action_name != "UpdateEventSourceMapping"
+        or action.get("uuid") != mapping_uuid
+        or action.get("settled_state") != "Disabled"
+        or not HEX64.fullmatch(str(action.get("response_sha256")))
+        or not HEX64.fullmatch(str(action.get("request_id_sha256")))
+    ):
+        raise ContractError("media disable action identity differs")
+    started_at = require_int(action.get("aws_date_epoch"), "media disable start")
+    settled_at = require_int(action.get("settled_at_epoch"), "media disable settle")
+    observations = action.get("observations")
+    if not isinstance(observations, list) or not observations:
+        raise ContractError("media disable observations are malformed")
+    if canonical_sha256(observations) != action.get("observations_sha256"):
+        raise ContractError("media disable observations hash differs")
+    for index, observation in enumerate(observations):
+        if not isinstance(observation, Mapping):
+            raise ContractError("media disable observation is malformed")
+        require_keys(
+            observation,
+            ("attempt", "state", "sources", "sources_sha256"),
+            f"media disable observation {index}",
+        )
+        sources = observation.get("sources")
+        if (
+            observation.get("attempt") != index + 1
+            or observation.get("state")
+            not in {"Enabled", "Updating", "Disabling", "Disabled"}
+            or not isinstance(sources, list)
+            or len(sources) != 1
+            or not isinstance(sources[0], Mapping)
+            or canonical_sha256(sources) != observation.get("sources_sha256")
+        ):
+            raise ContractError("media disable observation differs")
+        _validate_media_source(
+            sources[0],
+            f"media disable observation {index} source",
+        )
+    if (
+        observations[-1].get("state") != "Disabled"
+        or any(
+            observation.get("state") == "Disabled"
+            for observation in observations[:-1]
+        )
+        or settled_at < started_at
+        or settled_at - started_at > MEDIA_MAPPING_DISABLE_TIMEOUT_SECONDS
+        or settled_at > first_observed_at
+    ):
+        raise ContractError("media disable timing/state differs")
+
+
+def _validate_media_claims(
+    claims: Mapping[str, Any],
+    *,
+    desired_image: str,
+) -> tuple[int, int]:
+    require_keys(
+        claims,
+        (
+            "kind",
+            "schema_version",
+            "account_id",
+            "region",
+            "record_id",
+            "desired_image",
+            "legacy_image",
+            "caller_identity_sha256",
+            "shared_lock",
+            "mapping_uuid",
+            "disable_action",
+            "settle_seconds",
+            "first_observation",
+            "second_observation",
+        ),
+        "media cutover claims",
+    )
+    mapping_uuid = require_string(claims.get("mapping_uuid"), "media mapping UUID")
+    legacy_image = _media_image(
+        require_string(claims.get("legacy_image"), "media legacy image"),
+        legacy=True,
+    )
+    if (
+        claims.get("kind") != "teamagent-media-envelope-cutover"
+        or claims.get("schema_version") != 1
+        or claims.get("account_id") != ACCOUNT_ID
+        or claims.get("region") != REGION
+        or claims.get("record_id") != _media_record_id(desired_image)
+        or claims.get("desired_image") != desired_image
+        or claims.get("settle_seconds") != SETTLE_SECONDS
+        or not UUID4.fullmatch(mapping_uuid)
+        or not HEX64.fullmatch(str(claims.get("caller_identity_sha256")))
+    ):
+        raise ContractError("media cutover claims identity differs")
+    first = claims.get("first_observation")
+    second = claims.get("second_observation")
+    if not isinstance(first, Mapping) or not isinstance(second, Mapping):
+        raise ContractError("media cutover observations are malformed")
+    first_state = _validate_media_observation(first, "media first observation")
+    second_state = _validate_media_observation(second, "media second observation")
+    _validate_media_state_claim(
+        first_state,
+        legacy_image=legacy_image,
+        mapping_uuid=mapping_uuid,
+    )
+    _validate_media_state_claim(
+        second_state,
+        legacy_image=legacy_image,
+        mapping_uuid=mapping_uuid,
+    )
+    first_epoch = require_int(
+        first.get("observed_at_epoch"),
+        "media first observation",
+    )
+    second_epoch = require_int(
+        second.get("observed_at_epoch"),
+        "media second observation",
+    )
+    if (
+        first.get("state_sha256") != second.get("state_sha256")
+        or second_epoch - first_epoch < SETTLE_SECONDS
+    ):
+        raise ContractError("media cutover observations are not stably settled")
+    shared_lock = claims.get("shared_lock")
+    if not isinstance(shared_lock, Mapping):
+        raise ContractError("media cutover shared lock is malformed")
+    require_keys(
+        shared_lock,
+        (
+            "record_id",
+            "workflow_id",
+            "lock_receipt_sha256",
+            "initial_verified_at_epoch",
+            "final_verified_at_epoch",
+        ),
+        "media cutover shared lock",
+    )
+    workflow_id = require_string(
+        shared_lock.get("workflow_id"),
+        "media cutover workflow ID",
+    )
+    initial_lock_epoch = require_int(
+        shared_lock.get("initial_verified_at_epoch"),
+        "media initial lock verification",
+    )
+    final_lock_epoch = require_int(
+        shared_lock.get("final_verified_at_epoch"),
+        "media final lock verification",
+    )
+    if (
+        shared_lock.get("record_id") != SHARED_LOCK_RECORD_ID
+        or not UUID4.fullmatch(workflow_id)
+        or not HEX64.fullmatch(str(shared_lock.get("lock_receipt_sha256")))
+        or initial_lock_epoch > first_epoch
+        or final_lock_epoch < second_epoch
+    ):
+        raise ContractError("media cutover shared lock differs")
+    disable_action = claims.get("disable_action")
+    if not isinstance(disable_action, Mapping):
+        raise ContractError("media disable action is malformed")
+    _validate_media_disable_action(
+        disable_action,
+        mapping_uuid=mapping_uuid,
+        first_observed_at=first_epoch,
+    )
+    return first_epoch, second_epoch
+
+
+def _validate_media_ledger_item(
+    item: Mapping[str, Any],
+    *,
+    desired_image: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, str]]]:
+    expected_keys = {
+        "record_id",
+        "record_type",
+        "schema_version",
+        "status",
+        "desired_image",
+        "legacy_image",
+        "claims_sha256",
+        "claims_json",
+        "first_observed_at_epoch",
+        "second_observed_at_epoch",
+        "settle_seconds",
+        "recorded_at_epoch",
+        "audit_expires_at",
+    }
+    if set(item) != expected_keys:
+        raise ContractError("media cutover ledger schema is not exact")
+    if (
+        _ddb_scalar(item, "record_id") != _media_record_id(desired_image)
+        or _ddb_scalar(item, "record_type") != "teamagent.media-envelope-cutover"
+        or _ddb_scalar(item, "schema_version", "N") != "1"
+        or _ddb_scalar(item, "status") != "READY"
+        or _ddb_scalar(item, "desired_image") != desired_image
+        or _ddb_scalar(item, "settle_seconds", "N") != str(SETTLE_SECONDS)
+    ):
+        raise ContractError("media cutover ledger identity is invalid")
+    try:
+        claims = json.loads(_ddb_scalar(item, "claims_json"))
+    except json.JSONDecodeError as exc:
+        raise ContractError("media cutover ledger claims are invalid") from exc
+    if not isinstance(claims, dict):
+        raise ContractError("media cutover ledger claims are not an object")
+    claims_first_epoch, claims_second_epoch = _validate_media_claims(
+        claims,
+        desired_image=desired_image,
+    )
+    numeric_values: dict[str, int] = {}
+    for field in (
+        "first_observed_at_epoch",
+        "second_observed_at_epoch",
+        "recorded_at_epoch",
+        "audit_expires_at",
+    ):
+        raw = _ddb_scalar(item, field, "N")
+        if not re.fullmatch(r"0|[1-9][0-9]*", raw):
+            raise ContractError(f"media cutover ledger {field} is not canonical")
+        numeric_values[field] = int(raw)
+    first_epoch = numeric_values["first_observed_at_epoch"]
+    second_epoch = numeric_values["second_observed_at_epoch"]
+    recorded_at = numeric_values["recorded_at_epoch"]
+    audit_expires = numeric_values["audit_expires_at"]
+    if (
+        canonical_sha256(claims) != _ddb_scalar(item, "claims_sha256")
+        or claims.get("record_id") != _media_record_id(desired_image)
+        or claims.get("desired_image") != desired_image
+        or not isinstance(claims.get("first_observation"), Mapping)
+        or not isinstance(claims.get("second_observation"), Mapping)
+        or claims_first_epoch != first_epoch
+        or claims_second_epoch != second_epoch
+        or second_epoch - first_epoch < SETTLE_SECONDS
+        or recorded_at < second_epoch
+        or audit_expires != recorded_at + 31536000
+    ):
+        raise ContractError("media cutover ledger claims differ")
+    expected = _media_ledger_item(claims, recorded_at_epoch=recorded_at)
+    if item != expected:
+        raise ContractError("media cutover ledger item is not canonical")
+    return claims, expected
+
+
+def attest_media_cutover(
+    aws: AwsCli,
+    *,
+    desired_image: str,
+    lock_receipt: Mapping[str, Any],
+    sleeper: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    desired_image = _media_image(desired_image, legacy=False)
+    identity, identity_http = _caller_identity(aws)
+    initial_lock = verify_runtime_workflow_lock(aws, lock_receipt)
+    before = capture_media_cutover_state(
+        aws,
+        require_mapping_disabled=False,
+    )
+    state = before.get("state")
+    mapping = state.get("event_source_mapping") if isinstance(state, Mapping) else None
+    if not isinstance(mapping, Mapping):
+        raise ContractError("media mapping precondition is missing")
+    disable_action = _media_disable_mapping(
+        aws,
+        mapping,
+        sleeper=sleeper,
+    )
+    first = capture_media_cutover_state(
+        aws,
+        require_mapping_disabled=True,
+    )
+    first_epoch = require_int(
+        first.get("observed_at_epoch"),
+        "media first observation",
+    )
+    lease_expires = require_int(
+        initial_lock.get("lease_expires_at"),
+        "media shared lock expiry",
+    )
+    if lease_expires <= first_epoch + SETTLE_SECONDS + 60:
+        raise ContractError("media shared lock cannot cover the settle window")
+    sleeper(SETTLE_SECONDS)
+    second = capture_media_cutover_state(
+        aws,
+        require_mapping_disabled=True,
+    )
+    final_lock = verify_runtime_workflow_lock(aws, lock_receipt)
+    if final_lock.get("workflow_id") != initial_lock.get("workflow_id") or require_int(
+        final_lock.get("verified_at_epoch"),
+        "media final lock observation",
+    ) < require_int(
+        second.get("observed_at_epoch"),
+        "media second observation",
+    ):
+        raise ContractError("media shared lock changed during attestation")
+    claims = _media_claims(
+        desired_image=desired_image,
+        identity=identity,
+        lock_receipt=lock_receipt,
+        initial_lock=initial_lock,
+        final_lock=final_lock,
+        disable_action=disable_action,
+        first=first,
+        second=second,
+    )
+    recorded_at = require_int(
+        second.get("observed_at_epoch"),
+        "media second observation",
+    )
+    item = _media_ledger_item(claims, recorded_at_epoch=recorded_at)
+    put_response, put_http = aws.call(
+        "dynamodb",
+        "put-item",
+        (
+            "--table-name",
+            SHARED_LEDGER_TABLE,
+            "--item",
+            json.dumps(item, separators=(",", ":")),
+            "--condition-expression",
+            "attribute_not_exists(record_id)",
+        ),
+    )
+    confirmation, confirmation_http = aws.call(
+        "dynamodb",
+        "get-item",
+        (
+            "--table-name",
+            SHARED_LEDGER_TABLE,
+            "--key",
+            json.dumps(
+                {
+                    "record_id": _dynamodb_value(
+                        require_string(
+                            claims.get("record_id"),
+                            "media record ID",
+                        )
+                    )
+                },
+                separators=(",", ":"),
+            ),
+            "--consistent-read",
+        ),
+    )
+    if confirmation.get("Item") != item:
+        raise ContractError("media cutover ledger was not durably confirmed")
+    if not (
+        identity_http.date_epoch
+        <= recorded_at
+        <= put_http.date_epoch
+        <= confirmation_http.date_epoch
+    ):
+        raise ContractError("media cutover durable evidence is time-inverted")
+    receipt = {
+        "kind": "teamagent-media-envelope-cutover-receipt",
+        "schema_version": 1,
+        "claims": claims,
+        "claims_sha256": canonical_sha256(claims),
+        "ledger": {
+            "table": SHARED_LEDGER_TABLE,
+            "item_sha256": canonical_sha256(item),
+            "put_response_sha256": canonical_sha256(put_response),
+            "put_aws_date_epoch": put_http.date_epoch,
+            "put_request_id_sha256": sha256_bytes(put_http.request_id.encode()),
+            "confirmation_response_sha256": canonical_sha256(confirmation),
+            "confirmed_at_epoch": confirmation_http.date_epoch,
+            "confirmation_request_id_sha256": sha256_bytes(confirmation_http.request_id.encode()),
+        },
+    }
+    receipt["receipt_sha256"] = canonical_sha256(receipt)
+    return receipt
+
+
+def verify_media_cutover(
+    aws: AwsCli,
+    *,
+    desired_image: str,
+) -> dict[str, Any]:
+    desired_image = _media_image(desired_image, legacy=False)
+    identity, identity_http = _caller_identity(aws)
+    record_id = _media_record_id(desired_image)
+    response, ledger_http = aws.call(
+        "dynamodb",
+        "get-item",
+        (
+            "--table-name",
+            SHARED_LEDGER_TABLE,
+            "--key",
+            json.dumps(
+                {"record_id": _dynamodb_value(record_id)},
+                separators=(",", ":"),
+            ),
+            "--consistent-read",
+        ),
+    )
+    item = response.get("Item")
+    if not isinstance(item, Mapping):
+        raise ContractError("media cutover READY ledger is missing")
+    claims, expected_item = _validate_media_ledger_item(
+        item,
+        desired_image=desired_image,
+    )
+    current = capture_media_cutover_state(
+        aws,
+        require_mapping_disabled=True,
+    )
+    second = claims.get("second_observation")
+    recorded_at = int(_ddb_scalar(expected_item, "recorded_at_epoch", "N"))
+    current_epoch = require_int(
+        current.get("observed_at_epoch"),
+        "media current observation",
+    )
+    if (
+        not isinstance(second, Mapping)
+        or current.get("state_sha256") != second.get("state_sha256")
+        or current_epoch
+        < require_int(
+            second.get("observed_at_epoch"),
+            "media ledger observation",
+        )
+        or canonical_sha256(identity) != claims.get("caller_identity_sha256")
+        or not (
+            recorded_at
+            <= identity_http.date_epoch
+            <= ledger_http.date_epoch
+            <= current_epoch
+        )
+    ):
+        raise ContractError("live media cutover state differs from READY ledger")
+    verification = {
+        "kind": "teamagent-media-envelope-cutover-verification",
+        "schema_version": 1,
+        "account_id": ACCOUNT_ID,
+        "region": REGION,
+        "record_id": record_id,
+        "desired_image": desired_image,
+        "claims_sha256": canonical_sha256(claims),
+        "ledger_item_sha256": canonical_sha256(expected_item),
+        "ledger_observed_at_epoch": ledger_http.date_epoch,
+        "ledger_request_id_sha256": sha256_bytes(ledger_http.request_id.encode()),
+        "identity_observed_at_epoch": identity_http.date_epoch,
+        "current_observation": current,
+    }
+    verification["verification_sha256"] = canonical_sha256(verification)
+    return verification
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -6607,6 +7430,15 @@ def _parser() -> argparse.ArgumentParser:
     alarm_final.add_argument("--migration-id", required=True)
     alarm_final.add_argument("--receipt", required=True, type=Path)
     alarm_final.add_argument("--output", required=True, type=Path)
+
+    media_attest = commands.add_parser("attest-media-cutover")
+    media_attest.add_argument("--desired-image", required=True)
+    media_attest.add_argument("--lock-receipt", required=True, type=Path)
+    media_attest.add_argument("--output", required=True, type=Path)
+
+    media_verify = commands.add_parser("verify-media-cutover")
+    media_verify.add_argument("--desired-image", required=True)
+    media_verify.add_argument("--output", required=True, type=Path)
     return parser
 
 
@@ -6660,9 +7492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             aws,
             spec=_load_json(args.spec),
             versioning_receipt=_load_json(args.versioning_receipt),
-            versioning_receipt_sha256=sha256_bytes(
-                args.versioning_receipt.read_bytes()
-            ),
+            versioning_receipt_sha256=sha256_bytes(args.versioning_receipt.read_bytes()),
             export_directory=args.export_dir.resolve(strict=True),
             retention_path=args.retention_output,
             evidence_path=args.evidence_output,
@@ -6709,9 +7539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             phase=args.phase,
             publisher_id=args.publisher_id,
             delivery_receipt=(
-                _load_json(args.delivery_receipt)
-                if args.delivery_receipt is not None
-                else None
+                _load_json(args.delivery_receipt) if args.delivery_receipt is not None else None
             ),
             lock_receipt=_load_json(args.lock_receipt),
         )
@@ -6720,6 +7548,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             aws,
             migration_id=args.migration_id,
             phase_receipt=_load_json(args.receipt),
+        )
+    elif args.command == "attest-media-cutover":
+        result = attest_media_cutover(
+            aws,
+            desired_image=args.desired_image,
+            lock_receipt=_load_json(args.lock_receipt),
+        )
+    elif args.command == "verify-media-cutover":
+        result = verify_media_cutover(
+            aws,
+            desired_image=args.desired_image,
         )
     else:  # pragma: no cover
         raise AssertionError(args.command)

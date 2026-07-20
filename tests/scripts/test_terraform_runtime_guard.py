@@ -2326,20 +2326,43 @@ def _run_media_cutover_gate(
     snapshot = {
         "taskdefs": {
             "tiktok": {"image": LEGACY_TIKTOK_IMAGE},
-            "mcp": {
-                "env": {
-                    "USE_VIDEO_TOOLS": "0",
-                    "USE_TIKTOK_TOOLS": "false",
-                }
-            },
         }
     }
-    if scenario == "submission-enabled":
-        snapshot["taskdefs"]["mcp"]["env"]["USE_TIKTOK_TOOLS"] = "1"
     snapshot_path = tmp_path / "cutover-snapshot.json"
     snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
     tmp_root = tmp_path / "guard-tmp"
     tmp_root.mkdir()
+    verification = {
+        "kind": "teamagent-media-envelope-cutover-verification",
+        "schema_version": 1,
+        "account_id": ACCOUNT,
+        "region": REGION,
+        "record_id": f"media-cutover#{'1' * 64}",
+        "desired_image": MEDIA_WORKER_IMAGE,
+        "claims_sha256": "2" * 64,
+        "ledger_item_sha256": "3" * 64,
+        "verification_sha256": "4" * 64,
+        "current_observation": {
+            "state_sha256": "5" * 64,
+            "state": {
+                "legacy_runtime": {"image": LEGACY_TIKTOK_IMAGE},
+                "event_source_mapping": {"state": "Disabled"},
+                "tasks": {"pending": [], "running": []},
+            },
+        },
+    }
+    if scenario == "mapping-enabled":
+        verification["current_observation"]["state"]["event_source_mapping"][
+            "state"
+        ] = "Enabled"
+    elif scenario == "legacy-mismatch":
+        verification["current_observation"]["state"]["legacy_runtime"][
+            "image"
+        ] = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'0' * 64}"
+    elif scenario == "invalid-hash":
+        verification["claims_sha256"] = "not-a-hash"
+    verification_path = tmp_path / "verification.json"
+    verification_path.write_text(json.dumps(verification), encoding="utf-8")
 
     guard = GUARD.read_text(encoding="utf-8")
     function = re.search(
@@ -2359,34 +2382,19 @@ def _run_media_cutover_gate(
             "ENVIRONMENT=dev",
             'die() { echo "★ $*" >&2; return 1; }',
             """
-aws_cli() {
-  local service="$1" operation="$2"
-  shift 2
-  case "$service:$operation" in
-    sqs:get-queue-url)
-      local name=""
-      while [ "$#" -gt 0 ]; do
-        if [ "$1" = "--queue-name" ]; then name="$2"; break; fi
-        shift
-      done
-      printf '{"QueueUrl":"https://sqs.ap-northeast-1.amazonaws.com/718959508629/%s"}\\n' "$name"
-      ;;
-    sqs:get-queue-attributes)
-      if [ "${CUTOVER_SCENARIO:-safe}" = "nonempty-queue" ]; then
-        printf '%s\\n' '{"Attributes":{"ApproximateNumberOfMessages":"1","ApproximateNumberOfMessagesDelayed":"0","ApproximateNumberOfMessagesNotVisible":"0"}}'
-      else
-        printf '%s\\n' '{"Attributes":{"ApproximateNumberOfMessages":"0","ApproximateNumberOfMessagesDelayed":"0","ApproximateNumberOfMessagesNotVisible":"0"}}'
-      fi
-      ;;
-    ecs:list-tasks)
-      if [ "${CUTOVER_SCENARIO:-safe}" = "active-task" ]; then
-        printf '%s\\n' '{"taskArns":["arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/active"]}'
-      else
-        printf '%s\\n' '{"taskArns":[]}'
-      fi
-      ;;
-    *) return 99 ;;
-  esac
+run_evidence_helper() {
+  [ "$1" = "verify-media-cutover" ] || return 98
+  shift
+  local desired="" output=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --desired-image) desired="$2"; shift 2 ;;
+      --output) output="$2"; shift 2 ;;
+      *) return 97 ;;
+    esac
+  done
+  [ "$desired" = "$EXPECTED_DESIRED_IMAGE" ] || return 96
+  cp "$MEDIA_VERIFICATION" "$output"
 }
 """,
             function.group(0),
@@ -2394,7 +2402,8 @@ aws_cli() {
         )
     )
     environment = os.environ.copy()
-    environment["CUTOVER_SCENARIO"] = scenario
+    environment["EXPECTED_DESIRED_IMAGE"] = MEDIA_WORKER_IMAGE
+    environment["MEDIA_VERIFICATION"] = str(verification_path)
     return subprocess.run(
         [
             "bash",
@@ -2411,7 +2420,7 @@ aws_cli() {
     )
 
 
-def test_media_cutover_gate_requires_stopped_submission_empty_queues_and_zero_tasks(
+def test_media_cutover_gate_requires_durable_exact_live_verification(
     tmp_path: Path,
 ) -> None:
     result = _run_media_cutover_gate(tmp_path)
@@ -2421,12 +2430,12 @@ def test_media_cutover_gate_requires_stopped_submission_empty_queues_and_zero_ta
 @pytest.mark.parametrize(
     ("scenario", "message"),
     [
-        ("submission-enabled", "明示停止"),
-        ("nonempty-queue", "完全空"),
-        ("active-task", "task zero"),
+        ("mapping-enabled", "900秒証跡"),
+        ("legacy-mismatch", "900秒証跡"),
+        ("invalid-hash", "900秒証跡"),
     ],
 )
-def test_media_cutover_gate_fails_closed(
+def test_media_cutover_gate_rejects_tampered_or_drifted_evidence(
     tmp_path: Path,
     scenario: str,
     message: str,

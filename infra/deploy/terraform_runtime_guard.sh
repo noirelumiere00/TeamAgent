@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="19"
+GUARD_VERSION="20"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -71,6 +71,8 @@ usage:
     --challenge FILE --recipient-ack FILE --out RECEIPT
   terraform_runtime_guard.sh advance-alarm-migration \
     --phase PHASE [--publisher-id ID] [--delivery-receipt FILE] --out RECEIPT
+  terraform_runtime_guard.sh attest-media-cutover \
+    --desired-image IMAGE --out RECEIPT
   terraform_runtime_guard.sh preflight --migration ID --out RECEIPT
   terraform_runtime_guard.sh plan --var-file FILE --out PLAN \
     (--runtime-sync | --runtime-migration ID --preflight-receipt FILE \
@@ -3874,74 +3876,40 @@ snapshot_live() {
 }
 
 # A legacy-envelope task and a generic-envelope task intentionally retain the
-# same physical queue/table/family.  The in-place image cutover is therefore
-# safe only after producers are disabled, both queues are drained, and the
-# shared family has no active legacy task.
+# same physical queue/table/family.  The in-place image cutover therefore
+# requires the durable 900-second AWS-time attestation.  The evidence helper
+# re-reads the exact live producer, queue, mapping, task and legacy image state
+# and rejects any drift from the READY ledger.
 validate_media_envelope_cutover_gate() {
   local snapshot="$1" desired_image="$2"
-  local live_image legacy_prefix generic_prefix
+  local live_image legacy_prefix generic_prefix verification
   live_image="$(jq -er '.taskdefs.tiktok.image' "$snapshot")"
   legacy_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${PROJECT}-${ENVIRONMENT}-tiktok-acquire@sha256:"
   generic_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker@sha256:"
   [[ "$live_image" == "$legacy_prefix"* && "$desired_image" == "$generic_prefix"* ]] ||
     return 0
 
-  jq -e '
-    def explicitly_disabled:
-      type == "string" and
-      ((ascii_downcase) as $value |
-        $value == "0" or $value == "false" or $value == "no" or
-        $value == "off");
-    (.taskdefs.mcp.env | has("USE_VIDEO_TOOLS")) and
-    (.taskdefs.mcp.env | has("USE_TIKTOK_TOOLS")) and
-    (.taskdefs.mcp.env.USE_VIDEO_TOOLS | explicitly_disabled) and
-    (.taskdefs.mcp.env.USE_TIKTOK_TOOLS | explicitly_disabled)
-  ' "$snapshot" >/dev/null ||
-    die "legacy→generic media切替前にUSE_VIDEO_TOOLS/USE_TIKTOK_TOOLSを明示停止してください"
-
-  local queue_name queue_url queue_output
-  for queue_name in \
-    "${PROJECT}-${ENVIRONMENT}-tiktok-acquire-jobs" \
-    "${PROJECT}-${ENVIRONMENT}-tiktok-acquire-dlq"; do
-    queue_output="$TMP_ROOT/media-cutover-queue-${RANDOM}.json"
-    aws_cli sqs get-queue-url \
-      --queue-name "$queue_name" \
-      --queue-owner-aws-account-id "$EXPECTED_ACCOUNT_ID" \
-      --output json > "$queue_output"
-    queue_url="$(jq -er '.QueueUrl | select(type == "string" and length > 0)' \
-      "$queue_output")" || die "media切替queue URLを取得できません: $queue_name"
-    aws_cli sqs get-queue-attributes \
-      --queue-url "$queue_url" \
-      --attribute-names \
-        ApproximateNumberOfMessages \
-        ApproximateNumberOfMessagesNotVisible \
-        ApproximateNumberOfMessagesDelayed \
-      --output json > "$queue_output"
-    jq -e '
-      .Attributes == {
-        ApproximateNumberOfMessages: "0",
-        ApproximateNumberOfMessagesDelayed: "0",
-        ApproximateNumberOfMessagesNotVisible: "0"
-      }
-    ' "$queue_output" >/dev/null ||
-      die "legacy→generic media切替にはqueue/DLQのvisible/in-flight/delayed完全空が必要です: $queue_name"
-  done
-
-  local desired_status tasks_output
-  for desired_status in RUNNING PENDING; do
-    tasks_output="$TMP_ROOT/media-cutover-tasks-${desired_status}-${RANDOM}.json"
-    aws_cli ecs list-tasks \
-      --cluster "${PROJECT}-${ENVIRONMENT}-tiktok" \
-      --family "${PROJECT}-${ENVIRONMENT}-tiktok-acquire" \
-      --desired-status "$desired_status" \
-      --output json > "$tasks_output"
-    jq -e '
-      (.taskArns | type) == "array" and
-      (.taskArns | length) == 0 and
-      ((.nextToken // "") == "")
-    ' "$tasks_output" >/dev/null ||
-      die "legacy→generic media切替には旧familyのRUNNING/PENDING task zeroが必要です"
-  done
+  verification="$TMP_ROOT/media-cutover-verification-${RANDOM}.json"
+  run_evidence_helper verify-media-cutover \
+    --desired-image "$desired_image" --output "$verification"
+  jq -e \
+    --arg desired "$desired_image" \
+    --arg legacy "$live_image" '
+    .kind == "teamagent-media-envelope-cutover-verification" and
+    .schema_version == 1 and
+    .account_id == "718959508629" and
+    .region == "ap-northeast-1" and
+    .desired_image == $desired and
+    (.record_id | startswith("media-cutover#")) and
+    (.claims_sha256 | test("^[0-9a-f]{64}$")) and
+    (.ledger_item_sha256 | test("^[0-9a-f]{64}$")) and
+    (.verification_sha256 | test("^[0-9a-f]{64}$")) and
+    .current_observation.state.legacy_runtime.image == $legacy and
+    .current_observation.state.event_source_mapping.state == "Disabled" and
+    .current_observation.state.tasks == {pending:[],running:[]} and
+    (.current_observation.state_sha256 | test("^[0-9a-f]{64}$"))
+  ' "$verification" >/dev/null ||
+    die "legacy→generic media切替のdurable 900秒証跡が不正です"
 }
 
 # Terraform precondition へ渡す、live 由来の non-secret object。
@@ -7649,6 +7617,9 @@ verify_receipt() {
     } == $receipt[0].rule_states.live
   ' "$stage/live-before.json" >/dev/null ||
     die "receiptのlive image/EventBridge state束縛が現在liveと一致しません"
+  validate_media_envelope_cutover_gate \
+    "$stage/live-before.json" \
+    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")"
   if [ -n "$alarm_delivery_receipt" ]; then
     verify_alarm_delivery_test_receipt \
       "$alarm_delivery_receipt" "$stage/live-before.json"
@@ -7738,6 +7709,9 @@ verify_receipt() {
   [ "$(sha256_file "$stage/plan.tfplan")" = "$plan_sha_before" ] || die "plan検証後のprivate copy改ざんを検出しました"
 
   snapshot_live "$stage/live-after.json"
+  validate_media_envelope_cutover_gate \
+    "$stage/live-after.json" \
+    "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")"
   capture_state_contract "$stage/state-after.json"
   capture_complete_runtime_inventory "$stage/inventory-after.json"
   [ "$(sha256_file "$stage/live-after.json")" = "$expected_live_sha" ] ||
@@ -8117,6 +8091,120 @@ case "$COMMAND" in
     rm -rf "$TMP_ROOT"
     TMP_ROOT=""
     echo "✅ alarm migration checkpoint: $ALARM_PHASE / $ALARM_PHASE_OUT"
+    ;;
+
+  attest-media-cutover)
+    MEDIA_CUTOVER_IMAGE=""
+    MEDIA_CUTOVER_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -h|--help) usage; exit 0 ;;
+        --desired-image)
+          MEDIA_CUTOVER_IMAGE="${2:?--desired-image に値が必要}"
+          shift 2
+          ;;
+        --out) MEDIA_CUTOVER_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "不明な引数: $1" ;;
+      esac
+    done
+    [ -n "$MEDIA_CUTOVER_IMAGE" ] && [ -n "$MEDIA_CUTOVER_OUT" ] ||
+      die "attest-media-cutoverには --desired-image と --out が必須です"
+    [[ "$MEDIA_CUTOVER_IMAGE" =~ ^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-media-worker@sha256:[0-9a-f]{64}$ ]] ||
+      die "media cutover desired imageはapproved repositoryのexact digestが必要です"
+    MEDIA_CUTOVER_OUT="$(secure_new_file "$MEDIA_CUTOVER_OUT")"
+    need_cmd aws
+    need_cmd jq
+    ensure_tmp
+    assert_trusted_automation_identity
+    MEDIA_CUTOVER_STAGE="$TMP_ROOT/media-cutover-receipt.json"
+    MEDIA_CUTOVER_LOCK="$TMP_ROOT/media-cutover-runtime-lock.json"
+    MEDIA_CUTOVER_LOCK_RELEASE="$TMP_ROOT/media-cutover-runtime-lock-release.json"
+    MEDIA_CUTOVER_PUBLISHED="false"
+    MEDIA_CUTOVER_LOCK_ACQUIRED="false"
+    MEDIA_CUTOVER_WORKFLOW_ID="$(new_uuid_v4)"
+    cleanup_media_cutover() {
+      local status=$?
+      set +e
+      release_deployment_lock
+      if [ "$MEDIA_CUTOVER_LOCK_ACQUIRED" = "true" ] ||
+        [ -f "$MEDIA_CUTOVER_LOCK" ]; then
+        rm -f "$MEDIA_CUTOVER_LOCK_RELEASE"
+        run_evidence_helper release-runtime-lock \
+          --lock "$MEDIA_CUTOVER_LOCK" \
+          --output "$MEDIA_CUTOVER_LOCK_RELEASE"
+        MEDIA_CUTOVER_LOCK_ACQUIRED="false"
+      fi
+      if [ "$MEDIA_CUTOVER_PUBLISHED" != "true" ]; then
+        rm -f "$MEDIA_CUTOVER_OUT"
+      fi
+      rm -rf "$TMP_ROOT"
+      exit "$status"
+    }
+    trap 'cleanup_media_cutover' EXIT
+    run_evidence_helper acquire-runtime-lock \
+      --workflow-id "$MEDIA_CUTOVER_WORKFLOW_ID" \
+      --output "$MEDIA_CUTOVER_LOCK"
+    MEDIA_CUTOVER_LOCK_ACQUIRED="true"
+    acquire_deployment_lock
+    run_evidence_helper attest-media-cutover \
+      --desired-image "$MEDIA_CUTOVER_IMAGE" \
+      --lock-receipt "$MEDIA_CUTOVER_LOCK" \
+      --output "$MEDIA_CUTOVER_STAGE"
+    jq -e \
+      --arg desired "$MEDIA_CUTOVER_IMAGE" \
+      --arg workflow "$MEDIA_CUTOVER_WORKFLOW_ID" '
+      (keys | sort) == ([
+        "claims",
+        "claims_sha256",
+        "kind",
+        "ledger",
+        "receipt_sha256",
+        "schema_version"
+      ] | sort) and
+      .kind == "teamagent-media-envelope-cutover-receipt" and
+      .schema_version == 1 and
+      .claims.kind == "teamagent-media-envelope-cutover" and
+      .claims.schema_version == 1 and
+      .claims.account_id == "718959508629" and
+      .claims.region == "ap-northeast-1" and
+      .claims.desired_image == $desired and
+      (.claims.record_id | startswith("media-cutover#")) and
+      .claims.shared_lock.workflow_id == $workflow and
+      .claims.settle_seconds == 900 and
+      (.claims.second_observation.observed_at_epoch -
+        .claims.first_observation.observed_at_epoch) >= 900 and
+      .claims.first_observation.state_sha256 ==
+        .claims.second_observation.state_sha256 and
+      .claims.first_observation.state.event_source_mapping.state ==
+        "Disabled" and
+      .claims.second_observation.state.event_source_mapping.state ==
+        "Disabled" and
+      .claims.second_observation.state.tasks == {pending:[],running:[]} and
+      (.claims_sha256 | test("^[0-9a-f]{64}$")) and
+      (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      .ledger.table == "teamagent-dev-image-deployment-intents" and
+      (.ledger.item_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ledger.put_request_id_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ledger.confirmation_request_id_sha256 | test("^[0-9a-f]{64}$"))
+    ' "$MEDIA_CUTOVER_STAGE" >/dev/null ||
+      die "media cutover receiptが900秒/shared lock/durable ledger契約と不一致です"
+    MEDIA_CUTOVER_STAGE_IDENTITY="$(stat_identity "$MEDIA_CUTOVER_STAGE")"
+    ln "$MEDIA_CUTOVER_STAGE" "$MEDIA_CUTOVER_OUT" ||
+      die "media cutover receipt pathを原子的に確保できません"
+    [ "$(stat_identity "$MEDIA_CUTOVER_OUT")" = \
+      "$MEDIA_CUTOVER_STAGE_IDENTITY" ] ||
+      die "media cutover receiptの原子的引渡しに失敗しました"
+    chmod 600 "$MEDIA_CUTOVER_OUT"
+    MEDIA_CUTOVER_PUBLISHED="true"
+    release_deployment_lock
+    run_evidence_helper release-runtime-lock \
+      --lock "$MEDIA_CUTOVER_LOCK" \
+      --output "$MEDIA_CUTOVER_LOCK_RELEASE"
+    MEDIA_CUTOVER_LOCK_ACQUIRED="false"
+    trap - EXIT
+    rm -rf "$TMP_ROOT"
+    TMP_ROOT=""
+    echo "✅ media envelope cutover attested for 900 AWS seconds: $MEDIA_CUTOVER_OUT"
     ;;
 
   attest-log-readiness)

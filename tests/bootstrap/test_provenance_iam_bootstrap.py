@@ -1639,6 +1639,7 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
         "issue-alarm-challenge",
         "attest-alarm-delivery",
         "advance-alarm-migration",
+        "attest-media-cutover",
         "attest-log-readiness",
         "preflight",
         "plan",

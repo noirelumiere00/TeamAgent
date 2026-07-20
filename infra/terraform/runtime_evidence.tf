@@ -392,6 +392,7 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
       values = [
         "alarm-migration#*",
         "lock#teamagent/terraform.tfstate",
+        "media-cutover#*",
         "sns-challenge#*",
         "versioning-cutover#*",
       ]
