@@ -8,12 +8,7 @@ from typing import Any
 
 import pytest
 
-_SCRIPT = (
-    Path(__file__).parents[2]
-    / "infra"
-    / "deploy"
-    / "runtime_evidence_guard.py"
-)
+_SCRIPT = Path(__file__).parents[2] / "infra" / "deploy" / "runtime_evidence_guard.py"
 _SPEC = importlib.util.spec_from_file_location("_media_cutover_evidence", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 module = importlib.util.module_from_spec(_SPEC)
@@ -21,21 +16,16 @@ sys.modules[_SPEC.name] = module
 _SPEC.loader.exec_module(module)
 
 _DESIRED_IMAGE = (
-    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-    f"teamagent-media-worker@sha256:{'d' * 64}"
+    f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:{'d' * 64}"
 )
 _LEGACY_IMAGE = (
     "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
     f"teamagent-dev-tiktok-acquire@sha256:{'a' * 64}"
 )
 _MAPPING_UUID = "01234567-89ab-4cde-8fab-0123456789ab"
-_MCP_TASK = (
-    "arn:aws:ecs:ap-northeast-1:718959508629:"
-    "task-definition/teamagent-dev-mcp:55"
-)
+_MCP_TASK = "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:55"
 _MEDIA_TASK = (
-    "arn:aws:ecs:ap-northeast-1:718959508629:"
-    "task-definition/teamagent-dev-tiktok-acquire:6"
+    "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:6"
 )
 
 
@@ -83,21 +73,16 @@ class FakeAws:
             name = self._argument(arguments, "--queue-name")
             response = {
                 "QueueUrl": (
-                    f"https://sqs.{module.REGION}.amazonaws.com/"
-                    f"{module.ACCOUNT_ID}/{name}"
+                    f"https://sqs.{module.REGION}.amazonaws.com/{module.ACCOUNT_ID}/{name}"
                 )
             }
         elif service == "sqs" and operation == "get-queue-attributes":
             queue_url = self._argument(arguments, "--queue-url")
             name = queue_url.rsplit("/", 1)[1]
             attributes = {
-                "QueueArn": (
-                    f"arn:aws:sqs:{module.REGION}:{module.ACCOUNT_ID}:{name}"
-                ),
+                "QueueArn": (f"arn:aws:sqs:{module.REGION}:{module.ACCOUNT_ID}:{name}"),
                 "ApproximateNumberOfMessages": (
-                    self.visible_messages
-                    if name == module.MEDIA_JOBS_QUEUE
-                    else "0"
+                    self.visible_messages if name == module.MEDIA_JOBS_QUEUE else "0"
                 ),
                 "ApproximateNumberOfMessagesNotVisible": "0",
                 "ApproximateNumberOfMessagesDelayed": "0",
@@ -217,11 +202,7 @@ class FakeAws:
         elif service == "ecs" and operation == "list-tasks":
             desired = self._argument(arguments, "--desired-status")
             response = {
-                "taskArns": (
-                    self.running_tasks
-                    if desired == "RUNNING"
-                    else self.pending_tasks
-                )
+                "taskArns": (self.running_tasks if desired == "RUNNING" else self.pending_tasks)
             }
         else:
             raise AssertionError((service, operation, arguments))
@@ -330,8 +311,7 @@ def test_attestation_rejects_any_nonquiescent_or_nonexact_state(
             if (
                 service == "sqs"
                 and operation == "get-queue-attributes"
-                and "RedrivePolicy"
-                in response.get("Attributes", {})
+                and "RedrivePolicy" in response.get("Attributes", {})
             ):
                 response["Attributes"]["VisibilityTimeout"] = "900"
             return response, http
@@ -478,12 +458,8 @@ def test_read_only_verification_rejects_rehashed_adversarial_claims(
         mutation(claims)
         for observation_name in ("first_observation", "second_observation"):
             observation = claims[observation_name]
-            observation["state_sha256"] = module.canonical_sha256(
-                observation["state"]
-            )
-            observation["sources_sha256"] = module.canonical_sha256(
-                observation["sources"]
-            )
+            observation["state_sha256"] = module.canonical_sha256(observation["state"])
+            observation["sources_sha256"] = module.canonical_sha256(observation["sources"])
 
     _replace_ledger_claims(aws, mutate_and_rehash)
 
@@ -507,9 +483,7 @@ def test_ecs_task_inventory_uses_the_real_lowercase_pagination_token(
     ) -> list[tuple[dict[str, Any], Any]]:
         if service == "ecs" and operation == "list-tasks":
             assert kwargs.get("token_field") == "nextToken"
-            observed_statuses.append(
-                arguments[arguments.index("--desired-status") + 1]
-            )
+            observed_statuses.append(arguments[arguments.index("--desired-status") + 1])
         return original(service, operation, arguments, **kwargs)
 
     monkeypatch.setattr(aws, "pages", pages)

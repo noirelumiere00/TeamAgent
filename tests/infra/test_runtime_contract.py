@@ -66,9 +66,7 @@ def test_media_tool_is_roleless_and_receives_only_bounded_http_capabilities() ->
         "rds-db:*",
         "secretsmanager:*",
         "ssm:*",
-    } <= set(
-        boundary["forbidden_actions"]
-    )
+    } <= set(boundary["forbidden_actions"])
     assert {"database", "slack", "oauth", "mcp-bearer", "vertex", "e5"} == set(
         boundary["forbidden_secret_domains"]
     )

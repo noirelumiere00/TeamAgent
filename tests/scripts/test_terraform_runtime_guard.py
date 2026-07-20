@@ -2352,13 +2352,11 @@ def _run_media_cutover_gate(
         },
     }
     if scenario == "mapping-enabled":
-        verification["current_observation"]["state"]["event_source_mapping"][
-            "state"
-        ] = "Enabled"
+        verification["current_observation"]["state"]["event_source_mapping"]["state"] = "Enabled"
     elif scenario == "legacy-mismatch":
-        verification["current_observation"]["state"]["legacy_runtime"][
-            "image"
-        ] = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'0' * 64}"
+        verification["current_observation"]["state"]["legacy_runtime"]["image"] = (
+            f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'0' * 64}"
+        )
     elif scenario == "invalid-hash":
         verification["claims_sha256"] = "not-a-hash"
     verification_path = tmp_path / "verification.json"
