@@ -376,6 +376,30 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
   }
 
   statement {
+    sid       = "VerifyOnlyMediaCutoverAttestorKey"
+    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
+    resources = [aws_kms_key.media_cutover_attestor.arn]
+  }
+
+  statement {
+    sid       = "ReadOnlyAuthoritativeMediaCutoverLedger"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["media-cutover#*"]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+  }
+
+  statement {
     sid = "ConditionalRuntimeEvidenceLedger"
     actions = [
       "dynamodb:GetItem",
@@ -392,7 +416,6 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
       values = [
         "alarm-migration#*",
         "lock#teamagent/terraform.tfstate",
-        "media-cutover#*",
         "sns-challenge#*",
         "versioning-cutover#*",
       ]

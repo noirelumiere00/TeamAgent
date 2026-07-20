@@ -385,6 +385,7 @@ Resources:
                   - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-openclaw-build-evidence
                   - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-openclaw-build-publisher
                   - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-alarm-recipient-ack
+                  - arn:aws:kms:ap-northeast-1:718959508629:alias/teamagent-dev-media-cutover-attestor
               - Sid: KAT
                 Effect: Allow
                 Action: kms:CreateAlias
@@ -472,6 +473,7 @@ Resources:
                   - arn:aws:iam::718959508629:role/teamagent-dev-codebuild-openclaw
                   - arn:aws:iam::718959508629:role/teamagent-dev-openclaw-build-publisher
                   - arn:aws:iam::718959508629:role/teamagent-dev-alarm-recipient-ack-signer
+                  - arn:aws:iam::718959508629:role/teamagent-dev-media-cutover-attestor
                   - arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation
                   - arn:aws:iam::718959508629:user/teamagent-release-caller
                   - arn:aws:iam::718959508629:user/teamagent-release-control-update-caller

@@ -22,6 +22,9 @@ CONTRACT_PATH = ROOT / "infra" / "bootstrap" / "bootstrap_contract.json"
 SEED_PATH = ROOT / "infra" / "bootstrap" / "seed-stack.yaml"
 CODEBUILD_TF = ROOT / "infra" / "terraform" / "codebuild.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
+MEDIA_CUTOVER_ATTESTOR_TF = (
+    ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
+)
 BUILD_TEAMAGENT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
 BUILD_OPENCLAW = ROOT / "infra" / "deploy" / "build_openclaw_image.sh"
 BUILD_TIKTOK = ROOT / "infra" / "deploy" / "build_tiktok_image.sh"
@@ -1496,7 +1499,7 @@ def test_wrong_provider_connection_name_is_not_hidden_by_inventory_filter() -> N
 def test_bootstrap_targets_resolve_to_main_terraform_resources() -> None:
     contract = _contract()
     declarations: set[str] = set()
-    for path in (CODEBUILD_TF, RUNTIME_EVIDENCE_TF):
+    for path in (CODEBUILD_TF, RUNTIME_EVIDENCE_TF, MEDIA_CUTOVER_ATTESTOR_TF):
         declarations.update(
             f"{resource_type}.{name}"
             for resource_type, name in re.findall(

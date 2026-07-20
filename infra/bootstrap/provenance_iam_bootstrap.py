@@ -145,6 +145,11 @@ INLINE_POLICY_OWNERSHIP = {
         "teamagent-dev-alarm-recipient-ack-signer",
         "teamagent-dev-alarm-recipient-ack-signer",
     ),
+    "aws_iam_role_policy.media_cutover_attestor": (
+        "role",
+        "teamagent-dev-media-cutover-attestor",
+        "teamagent-dev-media-cutover-attestor",
+    ),
     "aws_iam_role_policy.runtime_evidence_automation": (
         "role",
         "teamagent-dev-terraform-runtime-automation",
