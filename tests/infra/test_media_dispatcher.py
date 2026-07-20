@@ -525,6 +525,7 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
     control = json.loads(control_json)
     assert environment["MEDIA_CONTROL_SHA256"] == hashlib.sha256(control_json).hexdigest()
     assert control["capability_secret"] not in module._canonical(call["overrides"]).decode()
+    assert control["capability_secret"] not in json.dumps(ddb.calls)
     assert control["outputs"][0]["post"]["fields"]["x-amz-checksum-algorithm"] == "SHA256"
     post_call = next(kwargs for name, kwargs in s3.calls if name == "generate_presigned_post")
     assert ["starts-with", "$x-amz-checksum-sha256", ""] in post_call["Conditions"]
@@ -854,6 +855,54 @@ def test_terminal_duplicate_does_not_launch_or_mutate_result(
     assert result == {"started": [], "batchItemFailures": []}
     assert ecs.calls == []
     assert ddb.calls == []
+
+
+def test_running_unconfirmed_retry_reuses_exact_attempt_and_ecs_client_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body()
+    ddb = _Dynamo()
+    _seed_running(ddb, body)
+    ecs = _Ecs()
+    s3 = _S3()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+
+    result = module.handler(
+        {"Records": [{"messageId": "retry", "body": body}]},
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result["started"] == ["arn:aws:ecs:region:account:task/media/1"]
+    assert ecs.calls[0]["clientToken"] == "e" * 64
+    environment = {
+        item["name"]: item["value"]
+        for item in ecs.calls[0]["overrides"]["containerOverrides"][0]["environment"]
+    }
+    assert environment["MEDIA_ATTEMPT_ID"] == _ATTEMPT_ID
+    assert environment["MEDIA_ATTEMPT_VERSION"] == "1"
+    assert not any(name == "put_object" for name, _kwargs in s3.calls)
+
+
+def test_running_confirmed_duplicate_never_launches_second_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _body()
+    ddb = _Dynamo()
+    _seed_running(ddb, body, task_arn="arn:aws:ecs:region:account:task/media/1")
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+
+    result = module.handler(
+        {"Records": [{"messageId": "duplicate", "body": body}]},
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result == {"started": [], "batchItemFailures": []}
+    assert ecs.calls == []
 
 
 def test_deadline_exhaustion_after_dispatch_claim_is_terminal(

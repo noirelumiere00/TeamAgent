@@ -78,6 +78,8 @@ def _assert_content_boundary() -> None:
         "weasyprint",
         "pptx",
         "teamagent.media.operations",
+        "teamagent.media.tool_contracts",
+        "teamagent.media.tool_worker",
         "teamagent.media.worker",
     )
     assert all(importlib.util.find_spec(module) is None for module in forbidden_modules)
