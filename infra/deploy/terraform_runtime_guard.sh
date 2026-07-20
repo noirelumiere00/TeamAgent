@@ -13,7 +13,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="18"
+GUARD_VERSION="19"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -43,6 +43,7 @@ GUARD_JQ_DIR="$REPO_ROOT/infra/deploy"
 GUARD_JQ="$GUARD_JQ_DIR/terraform_runtime_guard.jq"
 MIGRATION_FILE="$GUARD_JQ_DIR/terraform_runtime_migrations.json"
 EVIDENCE_HELPER="$GUARD_JQ_DIR/runtime_evidence_guard.py"
+PLAN_CONTRACT_HELPER="$GUARD_JQ_DIR/terraform_plan_contract.py"
 IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
 IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
@@ -221,6 +222,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$GUARD_JQ"
   assert_regular_nonwritable "$MIGRATION_FILE"
   assert_regular_nonwritable "$EVIDENCE_HELPER"
+  assert_regular_nonwritable "$PLAN_CONTRACT_HELPER"
   assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
   assert_regular_nonwritable "$IMAGE_CONTEXT_HELPER"
@@ -233,6 +235,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$GUARD_JQ"
   assert_git_tracked_clean "$MIGRATION_FILE"
   assert_git_tracked_clean "$EVIDENCE_HELPER"
+  assert_git_tracked_clean "$PLAN_CONTRACT_HELPER"
   assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
   assert_git_tracked_clean "$IMAGE_CONTEXT_HELPER"
@@ -276,6 +279,7 @@ write_config_manifest() {
     "$GUARD_JQ" \
     "$MIGRATION_FILE" \
     "$EVIDENCE_HELPER" \
+    "$PLAN_CONTRACT_HELPER" \
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
     "$IMAGE_CONTEXT_HELPER" \
@@ -2189,6 +2193,7 @@ migration_to_file() {
     (.migrations[$id] | type == "object") and
     .migrations[$id].enabled == true and
     (.migrations[$id].expires_at | fromdateiso8601 > now) and
+    (.migrations[$id].reviewed_plan | type == "object") and
     (
       if .migrations[$id].kind == "runtime" then
         .migrations[$id].requires_migration == null and
@@ -4404,27 +4409,15 @@ validate_common_plan_schema() {
 
 validate_manifest_change_allowlist() {
   local plan_json="$1" migration="$2"
-  local unexpected destructive
-  unexpected="$(jq -r --slurpfile migration "$migration" '
-    (
-      ($migration[0].allowed_changes // []) +
-      (if $migration[0].kind == "runtime" then [
-        "aws_s3_bucket_lifecycle_configuration.media_jobs[0]",
-        "aws_cloudwatch_event_rule.media_task_stopped[0]",
-        "aws_cloudwatch_event_target.media_task_stopped[0]",
-        "aws_lambda_permission.media_task_stopped[0]",
-        "aws_iam_role_policy.tiktok_exec_secrets[0]"
-      ] else [] end)
-      | unique
-    ) as $allowed |
-    .resource_changes[]? |
-    select(.mode == "managed" and .change.actions != ["no-op"]) |
-    .address as $address |
-    select(($allowed | index($address)) == null) |
-    "\(.change.actions | join("/")) \(.address)"
-  ' "$plan_json")"
-  [ -z "$unexpected" ] ||
-    die "migration exact allowlist外の変更を検出しました:\n$unexpected"
+  local reviewed destructive
+  reviewed="$TMP_ROOT/exact-reviewed-plan-${RANDOM}.json"
+  jq -e -S '.reviewed_plan | select(type == "object")' \
+    "$migration" > "$reviewed" ||
+    die "migrationには全変更・driftのexact reviewed_planが必須です"
+  chmod 600 "$reviewed"
+  python3 "$PLAN_CONTRACT_HELPER" verify \
+    --plan "$plan_json" --reviewed "$reviewed" ||
+    die "migration planがexact reviewed_planと一致しません"
 
   destructive="$(jq -r --slurpfile migration "$migration" '
     .resource_changes[]? |
@@ -4441,26 +4434,6 @@ validate_manifest_change_allowlist() {
   ' "$plan_json")"
   [ -z "$destructive" ] ||
     die "delete-first/pure destroyはmigrationでも禁止です:\n$destructive"
-
-  unexpected="$(jq -r --slurpfile migration "$migration" '
-    (
-      ($migration[0].allowed_changes // []) +
-      (if $migration[0].kind == "runtime" then [
-        "aws_s3_bucket_lifecycle_configuration.media_jobs[0]",
-        "aws_cloudwatch_event_rule.media_task_stopped[0]",
-        "aws_cloudwatch_event_target.media_task_stopped[0]",
-        "aws_lambda_permission.media_task_stopped[0]",
-        "aws_iam_role_policy.tiktok_exec_secrets[0]"
-      ] else [] end)
-      | unique
-    ) as $allowed |
-    .resource_drift[]? |
-    .address as $address |
-    select(($allowed | index($address)) == null) |
-    "\(.change.actions | join("/")) \(.address)"
-  ' "$plan_json")"
-  [ -z "$unexpected" ] ||
-    die "migration allowlist外resourceのdriftを検出しました:\n$unexpected"
 }
 
 validate_runtime_task_contracts() {
@@ -5961,9 +5934,9 @@ validate_runtime_migration_plan() {
     changed("aws_sqs_queue.tiktok_jobs[0]") as $tiktok |
     changed("aws_sqs_queue.x_jobs[0]") as $x |
     changed("aws_lambda_event_source_mapping.tiktok_dispatch[0]") as $tiktok_mapping |
-    $tiktok.visibility_timeout_seconds == 900 and
+    $tiktok.visibility_timeout_seconds == 180 and
     $tiktok.message_retention_seconds == 1209600 and
-    ($tiktok.redrive_policy | fromjson | .maxReceiveCount) == 24 and
+    ($tiktok.redrive_policy | fromjson | .maxReceiveCount) == 5 and
     $x.message_retention_seconds == 1209600 and
     ($x.redrive_policy | fromjson | .maxReceiveCount) == 24 and
     $tiktok_mapping.batch_size == 1 and

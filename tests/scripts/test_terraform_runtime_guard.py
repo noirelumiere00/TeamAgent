@@ -602,6 +602,7 @@ def _change(
         "mode": "managed",
         "type": resource_type,
         "name": address.split(".", 1)[1].split("[")[0],
+        "provider_name": "registry.terraform.io/hashicorp/aws",
         "change": {
             "actions": actions,
             "before": before,
@@ -2565,26 +2566,16 @@ def test_exact_hmac_runtime_gate_set_is_accepted_by_sync_guard(tmp_path: Path) -
     )
 
 
-def test_runtime_migration_exactly_allowlists_hmac_gate_addresses() -> None:
+def test_runtime_migrations_require_exact_reviewed_plan_before_enablement() -> None:
     migrations = json.loads(
         (PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_migrations.json").read_text(
             encoding="utf-8"
         )
     )
-    allowed = set(migrations["migrations"]["2026-07-wolfi-runtime-v1"]["allowed_changes"])
-    expected = {
-        *HMAC_LIVE_GATE_ADDRESSES.values(),
-        *(address for addresses in HMAC_SERVICE_GATE_ADDRESSES.values() for address in addresses),
-        *HMAC_MORNING_GATE_ADDRESSES,
-    }
-
-    assert expected <= allowed
-    assert not any(
-        address.startswith("terraform_data.hmac_")
-        and address not in expected
-        and "worker" not in address
-        for address in allowed
-    )
+    for migration in migrations["migrations"].values():
+        assert migration["enabled"] is False
+        assert migration["reviewed_plan"] is None
+        assert "allowed_changes" not in migration
 
 
 def test_hmac_runtime_sync_rejects_missing_morning_post_gate(tmp_path: Path) -> None:
