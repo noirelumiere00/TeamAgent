@@ -1508,19 +1508,17 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "post_apply_service_probe_sha256" in apply_case
     assert "ecs_service_saga_receipt_sha256" in apply_case
     cleanup = apply_case[
-        apply_case.index("cleanup_apply_command()")
-        : apply_case.index("trap 'cleanup_apply_command' EXIT")
+        apply_case.index("cleanup_apply_command()") : apply_case.index(
+            "trap 'cleanup_apply_command' EXIT"
+        )
     ]
     ecs_restore = cleanup.index('python3 "$ECS_SERVICE_APPLY_SAGA" finish')
     heartbeat_stop = cleanup.index("stop_gate_heartbeat")
-    lock_cleanup = cleanup.index(
-        'bash "$IMAGE_GATE_RUNNER" release-deployment-lock'
-    )
+    lock_cleanup = cleanup.index('bash "$IMAGE_GATE_RUNNER" release-deployment-lock')
     assert ecs_restore < heartbeat_stop < lock_cleanup
 
     probe = guard[
-        guard.index("run_post_apply_service_probe()")
-        : guard.index("\nwrite_preflight_receipt()")
+        guard.index("run_post_apply_service_probe()") : guard.index("\nwrite_preflight_receipt()")
     ]
     for expected in (
         "http://teamagent-mcp.teamagent.internal:8787/healthz",
@@ -1556,9 +1554,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert '"kms:ResourceAliases"' not in evidence_tf
     assert '"arn:aws:kms:ap-northeast-1:718959508629:key/*"' not in evidence_tf
     assert "exact_rollout_kms_alias_scope" not in guard
-    assert "not_resources = [aws_kms_key.openclaw_rollout_signing.arn]" in (
-        runtime_evidence_tf
-    )
+    assert "not_resources = [aws_kms_key.openclaw_rollout_signing.arn]" in (runtime_evidence_tf)
 
 
 def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:

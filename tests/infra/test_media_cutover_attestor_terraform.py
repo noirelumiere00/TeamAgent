@@ -2,9 +2,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-ATTESTOR = (ROOT / "infra/terraform/media_cutover_attestor.tf").read_text(
-    encoding="utf-8"
-)
+ATTESTOR = (ROOT / "infra/terraform/media_cutover_attestor.tf").read_text(encoding="utf-8")
 RUNTIME = (ROOT / "infra/terraform/runtime_evidence.tf").read_text(encoding="utf-8")
 
 
@@ -113,9 +111,7 @@ def test_runtime_boundary_cannot_take_over_media_signing_key() -> None:
 
 
 def test_openclaw_kms_permissions_are_exact_key_arns() -> None:
-    rollout = (ROOT / "infra/terraform/openclaw_rollout_evidence.tf").read_text(
-        encoding="utf-8"
-    )
+    rollout = (ROOT / "infra/terraform/openclaw_rollout_evidence.tf").read_text(encoding="utf-8")
     encryption = _statement(rollout, "UseOnlyOpenClawRolloutEncryptionKey")
     signing = _statement(rollout, "SignAndVerifyOnlyOpenClawRolloutResults")
     assert "aws_kms_key.openclaw_rollout_evidence.arn" in encryption

@@ -2351,10 +2351,7 @@ def _run_media_cutover_gate(
         "reviewed_plan_sha256": reviewed_plan_sha,
         "claims_sha256": "2" * 64,
         "signature_sha256": "8" * 64,
-        "kms_key_arn": (
-            f"arn:aws:kms:{REGION}:{ACCOUNT}:key/"
-            "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-        ),
+        "kms_key_arn": (f"arn:aws:kms:{REGION}:{ACCOUNT}:key/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
         "ledger_item_sha256": "3" * 64,
         "verification_sha256": "4" * 64,
         "current_observation": {
@@ -2422,10 +2419,7 @@ run_evidence_helper() {
 }
 """,
             function.group(0),
-            (
-                'validate_media_envelope_cutover_gate "$1" "$2" "$3" '
-                '"$4" "$5" "$6"'
-            ),
+            ('validate_media_envelope_cutover_gate "$1" "$2" "$3" "$4" "$5" "$6"'),
         )
     )
     environment = os.environ.copy()
@@ -2619,9 +2613,7 @@ def test_runtime_migrations_require_exact_reviewed_plan_before_enablement() -> N
     for migration in migrations["migrations"].values():
         assert migration["enabled"] is False
         assert migration["reviewed_plan"] is None
-        assert set(migration["reviewed_inputs"]) == {
-            "image_deployment_intent_id"
-        }
+        assert set(migration["reviewed_inputs"]) == {"image_deployment_intent_id"}
         assert re.fullmatch(
             r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
             migration["reviewed_inputs"]["image_deployment_intent_id"],

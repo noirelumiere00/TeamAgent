@@ -22,9 +22,7 @@ CONTRACT_PATH = ROOT / "infra" / "bootstrap" / "bootstrap_contract.json"
 SEED_PATH = ROOT / "infra" / "bootstrap" / "seed-stack.yaml"
 CODEBUILD_TF = ROOT / "infra" / "terraform" / "codebuild.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
-MEDIA_CUTOVER_ATTESTOR_TF = (
-    ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
-)
+MEDIA_CUTOVER_ATTESTOR_TF = ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
 BUILD_TEAMAGENT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
 BUILD_OPENCLAW = ROOT / "infra" / "deploy" / "build_openclaw_image.sh"
 BUILD_TIKTOK = ROOT / "infra" / "deploy" / "build_tiktok_image.sh"

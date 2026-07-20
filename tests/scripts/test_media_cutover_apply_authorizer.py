@@ -9,12 +9,7 @@ from typing import Any
 
 import pytest
 
-_SCRIPT = (
-    Path(__file__).parents[2]
-    / "infra"
-    / "deploy"
-    / "media_cutover_apply_authorizer.py"
-)
+_SCRIPT = Path(__file__).parents[2] / "infra" / "deploy" / "media_cutover_apply_authorizer.py"
 _SPEC = importlib.util.spec_from_file_location("_media_cutover_authorizer", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 module = importlib.util.module_from_spec(_SPEC)
@@ -31,13 +26,9 @@ _SHARED_SHA = "e" * 64
 _MIGRATION_SHA = "f" * 64
 _REVIEWED_SHA = "1" * 64
 _SIGNATURE_SHA = "2" * 64
-_KEY_ARN = (
-    "arn:aws:kms:ap-northeast-1:718959508629:key/"
-    "11111111-2222-4333-8444-555555555555"
-)
+_KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-2222-4333-8444-555555555555"
 _IMAGE = (
-    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-    f"teamagent-media-worker@sha256:{'3' * 64}"
+    f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:{'3' * 64}"
 )
 _COMMIT = "4" * 40
 
@@ -185,9 +176,7 @@ def test_authorization_consumes_media_intent_and_lock_atomically(
     media_update = transaction[2]["Update"]
     assert ":ready" in media_update["ExpressionAttributeValues"]
     assert ":consumed" in media_update["ExpressionAttributeValues"]
-    assert "attribute_not_exists(apply_attempt_id)" in media_update[
-        "ConditionExpression"
-    ]
+    assert "attribute_not_exists(apply_attempt_id)" in media_update["ConditionExpression"]
     assert state[f"media-cutover#{_INTENT}"]["status"] == "CONSUMED"
 
 
@@ -251,9 +240,7 @@ def test_other_intent_is_rejected_before_any_write(
             plan_path=Path("/private/plan.tfplan"),
             media_receipt={"claims": {"expires_at_epoch": 3_000}},
             desired_image=_IMAGE,
-            image_deployment_intent_id=(
-                "00000000-0000-4000-8000-000000000000"
-            ),
+            image_deployment_intent_id=("00000000-0000-4000-8000-000000000000"),
             migration_contract_sha256=_MIGRATION_SHA,
             reviewed_plan_sha256=_REVIEWED_SHA,
             apply_attempt_id=_ATTEMPT,

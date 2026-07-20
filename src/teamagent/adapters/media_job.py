@@ -918,4 +918,6 @@ class MediaJobClient:
             artifact_ttl_s=self.artifact_ttl_seconds(),
             job_id=job_id,
         )
+
+
 __all__ = ["MediaJobClient", "MediaJobError"]

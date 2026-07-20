@@ -20,8 +20,7 @@ sys.modules[_SPEC.name] = module
 _SPEC.loader.exec_module(module)
 
 _DESIRED_IMAGE = (
-    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-    f"teamagent-media-worker@sha256:{'d' * 64}"
+    f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:{'d' * 64}"
 )
 _LEGACY_IMAGE = (
     "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
@@ -33,21 +32,15 @@ _OTHER_INTENT_ID = "87654321-4321-4cba-8fed-cba987654321"
 _MIGRATION_SHA256 = "b" * 64
 _REVIEWED_PLAN_SHA256 = "c" * 64
 _MCP_TASK_DEFINITION = (
-    "arn:aws:ecs:ap-northeast-1:718959508629:"
-    "task-definition/teamagent-dev-mcp:55"
+    "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:55"
 )
-_MCP_TASK = (
-    "arn:aws:ecs:ap-northeast-1:718959508629:"
-    f"task/{module.MCP_CLUSTER}/{'1' * 32}"
-)
+_MCP_TASK = f"arn:aws:ecs:ap-northeast-1:718959508629:task/{module.MCP_CLUSTER}/{'1' * 32}"
 _MEDIA_TASK = (
-    "arn:aws:ecs:ap-northeast-1:718959508629:"
-    "task-definition/teamagent-dev-tiktok-acquire:6"
+    "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:6"
 )
-_MEDIA_KEY_ARN = (
-    "arn:aws:kms:ap-northeast-1:718959508629:key/"
-    "11111111-2222-4333-8444-555555555555"
-)
+_MEDIA_KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-2222-4333-8444-555555555555"
+
+
 class FakeAws:
     def __init__(self) -> None:
         self.now = 1_000
@@ -105,17 +98,14 @@ class FakeAws:
             name = self._argument(arguments, "--queue-name")
             response = {
                 "QueueUrl": (
-                    f"https://sqs.{module.REGION}.amazonaws.com/"
-                    f"{module.ACCOUNT_ID}/{name}"
+                    f"https://sqs.{module.REGION}.amazonaws.com/{module.ACCOUNT_ID}/{name}"
                 )
             }
         elif service == "sqs" and operation == "get-queue-attributes":
             queue_url = self._argument(arguments, "--queue-url")
             name = queue_url.rsplit("/", 1)[1]
             attributes = {
-                "QueueArn": (
-                    f"arn:aws:sqs:{module.REGION}:{module.ACCOUNT_ID}:{name}"
-                ),
+                "QueueArn": (f"arn:aws:sqs:{module.REGION}:{module.ACCOUNT_ID}:{name}"),
                 "ApproximateNumberOfMessages": (
                     self.visible_messages if name == module.MEDIA_JOBS_QUEUE else "0"
                 ),
@@ -159,8 +149,7 @@ class FakeAws:
                         "desiredCount": 1,
                         "runningCount": 1,
                         "pendingCount": 0,
-                        "deployments": [copy.deepcopy(deployment)]
-                        * self.deployments,
+                        "deployments": [copy.deepcopy(deployment)] * self.deployments,
                     }
                 ],
                 "failures": [],
@@ -299,9 +288,7 @@ class FakeAws:
                 )
             else:
                 values = (
-                    self.legacy_running_tasks
-                    if desired == "RUNNING"
-                    else self.legacy_pending_tasks
+                    self.legacy_running_tasks if desired == "RUNNING" else self.legacy_pending_tasks
                 )
             response = {"taskArns": list(values)}
         else:  # pragma: no cover - fixture assertion
@@ -493,12 +480,8 @@ def test_signer_rejects_tampered_nonce_intent_plan_and_source_inventory(
         mutation(tampered)
         for observation_name in ("first_observation", "second_observation"):
             observation = tampered["claims"][observation_name]
-            observation["state_sha256"] = module.canonical_sha256(
-                observation["state"]
-            )
-            observation["sources_sha256"] = module.canonical_sha256(
-                observation["sources"]
-            )
+            observation["state_sha256"] = module.canonical_sha256(observation["state"])
+            observation["sources_sha256"] = module.canonical_sha256(observation["sources"])
         _rehash_challenge(tampered)
         aws.now = tampered["prepared_at_epoch"]
         aws.identity_arn = module.MEDIA_ATTESTOR_ARN
@@ -611,9 +594,7 @@ def test_verifier_rejects_rehashed_ledger_claims_without_valid_signature(
     assert aws.item is not None
     claims = json.loads(aws.item["claims_json"]["S"])
     claims["reviewed_plan_sha256"] = "f" * 64
-    aws.item["claims_json"] = {
-        "S": module.canonical_bytes(claims).decode().rstrip("\n")
-    }
+    aws.item["claims_json"] = {"S": module.canonical_bytes(claims).decode().rstrip("\n")}
     aws.item["claims_sha256"] = {"S": module.canonical_sha256(claims)}
 
     with pytest.raises(module.ContractError):
@@ -628,9 +609,7 @@ def test_nonce_tamper_is_rejected_by_the_managed_signature(
     assert aws.item is not None
     claims = copy.deepcopy(receipt["claims"])
     claims["attestation_nonce"] = "f" * 64
-    prepared = {
-        key: claims[key] for key in module._media_prepared_claim_keys()
-    }
+    prepared = {key: claims[key] for key in module._media_prepared_claim_keys()}
     claims["prepared_claims_sha256"] = module.canonical_sha256(prepared)
     recorded_at = int(aws.item["recorded_at_epoch"]["N"])
     aws.item = module._media_ledger_item(
@@ -690,9 +669,7 @@ def test_challenge_binds_the_pinned_aws_executable(lock_verifier: None) -> None:
     challenge = _prepare(aws)
     assert challenge["aws_executable"] == asdict(aws.evidence)
     aws.identity_arn = module.MEDIA_ATTESTOR_ARN
-    aws.evidence = module.ExecutableEvidence(
-        **{**asdict(aws.evidence), "sha256": "0" * 64}
-    )
+    aws.evidence = module.ExecutableEvidence(**{**asdict(aws.evidence), "sha256": "0" * 64})
     with pytest.raises(module.ContractError):
         module.attest_media_cutover(
             aws,
