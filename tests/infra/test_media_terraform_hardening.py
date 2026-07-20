@@ -99,6 +99,19 @@ def test_execution_role_can_only_fetch_control_env_not_job_data() -> None:
     assert "media-jobs/*/attempts/*" not in policy
 
 
+def test_bucket_policy_caps_presigned_attempt_uploads_at_fifteen_minutes() -> None:
+    policy = _block(
+        'data "aws_iam_policy_document"',
+        "media_jobs_bucket",
+    )
+
+    assert 'sid     = "DenyStaleMediaUploadCapabilities"' in policy
+    assert 'actions = ["s3:PutObject"]' in policy
+    assert "media-jobs/*/attempts/*" in policy
+    assert 'variable = "s3:signatureAge"' in policy
+    assert 'values   = ["900000"]' in policy
+
+
 def test_stopped_recovery_has_delivery_and_invocation_failure_sinks() -> None:
     target = _block('resource "aws_cloudwatch_event_target"', "media_task_stopped")
     invoke = _block(

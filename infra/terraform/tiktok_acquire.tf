@@ -357,6 +357,23 @@ data "aws_iam_policy_document" "media_jobs_bucket" {
       values   = ["false"]
     }
   }
+  statement {
+    sid     = "DenyStaleMediaUploadCapabilities"
+    effect  = "Deny"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/attempts/*",
+    ]
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    condition {
+      test     = "NumericGreaterThan"
+      variable = "s3:signatureAge"
+      values   = ["900000"]
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "media_jobs" {
