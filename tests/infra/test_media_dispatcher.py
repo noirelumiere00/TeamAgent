@@ -536,6 +536,42 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
     assert ["starts-with", "$x-amz-checksum-sha256", ""] in post_call["Conditions"]
 
 
+def test_dispatcher_presigns_immutable_input_with_checksum_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    s3 = _S3()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    request = make_job_request(
+        operation=ProxyOperation(kind="proxy", source=_staged_ref("video.mp4")),
+        output_bucket="teamagent-media",
+        request_fingerprint="dispatch-checksummed-input",
+        job_id="mj_0123456789abcdef01234567",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    body = request.to_json_bytes().decode()
+    _seed_queued(ddb, body, s3)
+
+    result = module.handler(
+        {"Records": [{"messageId": "message-1", "body": body}]},
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result["batchItemFailures"] == []
+    get_call = next(kwargs for name, kwargs in s3.calls if name == "generate_presigned_url")
+    assert get_call["operation"] == "get_object"
+    assert get_call["Params"] == {
+        "Bucket": "teamagent-media",
+        "Key": request.operation.source.key,
+        "VersionId": request.operation.source.version_id,
+        "ChecksumMode": "ENABLED",
+    }
+
+
 def _large_body() -> str:
     job_id = "mj_0123456789abcdef01234567"
 

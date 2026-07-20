@@ -869,6 +869,7 @@ def _build_control(
                 "Bucket": ref["bucket"],
                 "Key": ref["key"],
                 "VersionId": ref["version_id"],
+                "ChecksumMode": "ENABLED",
             },
             ExpiresIn=expires_s,
         )
