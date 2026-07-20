@@ -622,8 +622,8 @@ data "aws_iam_policy_document" "tiktok_dispatch_policy" {
     }
   }
   statement {
-    sid       = "MarkDispatchFailure"
-    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    sid       = "OwnAuthoritativeMediaLedger"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
@@ -992,7 +992,7 @@ resource "aws_lambda_permission" "media_janitor" {
   source_arn    = aws_cloudwatch_event_rule.media_janitor[0].arn
 }
 
-# ---------- IAM: OC/AiLa(MCP)ロールに付ける権限(SQS送信/Dynamo参照/S3署名) ----------
+# ---------- IAM: OC/AiLa(MCP)ロールに付ける最小権限 ----------
 # ★RunTask/PassRoleは絶対に含めない(権限分離=敵対レビューhigh対応)
 data "aws_iam_policy_document" "tiktok_mcp_policy" {
   count = local.tk_enabled
@@ -1002,17 +1002,20 @@ data "aws_iam_policy_document" "tiktok_mcp_policy" {
     resources = [aws_sqs_queue.tiktok_jobs[0].arn]
   }
   statement {
-    sid       = "DynamoJobs"
-    actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    sid       = "ReadMediaJobStatus"
+    actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
   }
   statement {
-    sid = "S3JobArtifactsRead"
+    sid = "ReadMediaInputsAndFinalArtifacts"
     actions = [
       "s3:GetObject",
       "s3:GetObjectVersion",
     ]
-    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*"]
+    resources = [
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/input/*",
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/attempts/*/*/output/*",
+    ]
   }
   statement {
     sid = "S3JobInputsWrite"

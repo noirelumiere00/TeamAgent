@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
 import hmac
 import http.client
@@ -10,13 +11,15 @@ import json
 import logging
 import os
 import re
+import resource
 import secrets
 import signal
 import ssl
 import stat
+import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from pathlib import Path
 from types import FrameType
@@ -62,6 +65,11 @@ _FORBIDDEN_ENVIRONMENT = {
     "MEDIA_JOB_BUCKET",
     "MEDIA_JOBS_TABLE",
 }
+_CAPABILITY_ENVIRONMENT = {
+    "MEDIA_CONTROL_SHA256",
+    "MEDIA_CONTROL_ZLIB_B64",
+}
+_PR_SET_DUMPABLE = 4
 
 
 class ToolTransportError(RuntimeError):
@@ -70,6 +78,36 @@ class ToolTransportError(RuntimeError):
 
 class _ToolTerminatedError(RuntimeError):
     pass
+
+
+def _set_process_non_dumpable() -> None:
+    """Disable core dumps and ptrace access before decoding any capability."""
+
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if not sys.platform.startswith("linux"):
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [
+        ctypes.c_int,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    prctl.restype = ctypes.c_int
+    if prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0) != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, "failed to make media worker non-dumpable")
+
+
+def _scrub_capability_environment(environ: Mapping[str, str]) -> None:
+    """Remove the compressed URLs/secrets before any operation can spawn."""
+
+    if not isinstance(environ, MutableMapping):
+        return
+    for name in _CAPABILITY_ENVIRONMENT:
+        environ.pop(name, None)
 
 
 def _checksum_sha256_b64(hex_digest: str) -> str:
@@ -537,6 +575,7 @@ def run_tool(
     clock: Callable[[], float] = time.time,
 ) -> MediaJobResult:
     _assert_identity_environment(control, environ)
+    _scrub_capability_environment(environ)
     request = control.request
     request.assert_dispatchable(now_epoch_s=int(clock()))
     execution_deadline = request.deadline_epoch_s - _TERMINAL_RESERVE_SECONDS
@@ -623,11 +662,16 @@ def run_tool(
 def main() -> int:
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
     try:
+        # PR_SET_DUMPABLE is inherited by the ordinary child executables this
+        # worker launches, while their environment is separately allowlisted.
+        _set_process_non_dumpable()
         control = parse_control_from_env(os.environ)
         result = run_tool(control)
     except Exception:
         logger.exception("roleless media tool rejected its capability envelope")
         return 2
+    finally:
+        _scrub_capability_environment(os.environ)
     return 0 if result.status == "done" else 1
 
 

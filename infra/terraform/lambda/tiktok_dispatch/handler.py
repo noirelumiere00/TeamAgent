@@ -33,6 +33,7 @@ _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 _MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
 _TASK_START_MINIMUM_BUDGET_SECONDS = 90.0
 _TERMINAL_WRITE_RESERVE_SECONDS = 15.0
 _PRESIGN_SAFETY_SECONDS = 10
@@ -672,6 +673,100 @@ def _assert_owned_row(
         or (require_request and _ddb_string(item, "request_json") != _canonical(spec).decode())
     ):
         raise RuntimeError("media dispatch row ownership mismatch")
+
+
+def _ensure_queued_row(
+    table: str,
+    spec: dict[str, Any],
+    *,
+    now: int,
+    max_artifact_ttl_s: int,
+) -> dict[str, Any]:
+    """Create the authoritative job row or recover its original retry envelope."""
+
+    deadline_epoch_s = int(spec["deadline_epoch_s"])
+    request_json = _canonical(spec).decode("utf-8")
+    cleanup_at = int(spec["created_at_epoch_s"]) + int(spec["artifact_ttl_s"])
+    # A synchronous reader is bounded by the request deadline.  Keep the hard
+    # deletion fence beyond that bound so the untrusted caller never needs
+    # DynamoDB write authority merely to protect an in-flight download.
+    hard_cleanup_at = max(cleanup_at, deadline_epoch_s + 60)
+    queued_detail = _canonical(
+        {
+            "schema_version": "1",
+            "job_id": spec["job_id"],
+            "status": "queued",
+            "artifacts": [],
+            "metadata": {},
+            "error_code": None,
+        }
+    ).decode("utf-8")
+    item: dict[str, Any] = {
+        "job_id": {"S": spec["job_id"]},
+        "idempotency_key": {"S": spec["idempotency_key"]},
+        "payload_sha256": {"S": spec["payload_sha256"]},
+        "request_json": {"S": request_json},
+        "status": {"S": "queued"},
+        "version": {"N": "0"},
+        "active_consumers": {"N": "0"},
+        "consumer_guard_until": {"N": str(deadline_epoch_s + 60)},
+        "created_at": {"N": str(spec["created_at_epoch_s"])},
+        "deadline": {"N": str(deadline_epoch_s)},
+        "output_prefix": {"S": spec["output_prefix"]},
+        "cleanup_at": {"N": str(cleanup_at)},
+        "hard_cleanup_at": {"N": str(hard_cleanup_at)},
+        "cleanup_status": {"S": "pending"},
+        "ttl": {"N": str(hard_cleanup_at + _DDB_RETENTION_GRACE_SECONDS)},
+        "detail": {"S": queued_detail},
+    }
+    if spec["audit_principal_hash"] is not None:
+        item["audit_principal_hash"] = {"S": spec["audit_principal_hash"]}
+    try:
+        _call(
+            "dynamodb",
+            "put_item",
+            deadline_epoch_s,
+            TableName=table,
+            Item=item,
+            ConditionExpression="attribute_not_exists(job_id)",
+        )
+        return spec
+    except Exception as exc:
+        if not _conditional_failure(exc):
+            raise
+
+    existing = _call(
+        "dynamodb",
+        "get_item",
+        deadline_epoch_s,
+        TableName=table,
+        Key={"job_id": {"S": spec["job_id"]}},
+        ConsistentRead=True,
+    ).get("Item", {})
+    if (
+        _ddb_string(existing, "idempotency_key") != spec["idempotency_key"]
+        or not hmac.compare_digest(
+            _ddb_string(existing, "audit_principal_hash"),
+            str(spec["audit_principal_hash"] or ""),
+        )
+    ):
+        raise RuntimeError("media dispatcher idempotency ownership conflict")
+    persisted_json = _ddb_string(existing, "request_json")
+    persisted = _validate_envelope(
+        persisted_json,
+        expected_bucket=spec["output_bucket"],
+        now=now,
+        max_artifact_ttl_s=max_artifact_ttl_s,
+    )
+    if (
+        persisted["job_id"] != spec["job_id"]
+        or persisted["idempotency_key"] != spec["idempotency_key"]
+        or persisted["output_prefix"] != spec["output_prefix"]
+        or persisted["operation"] != spec["operation"]
+    ):
+        raise RuntimeError("media dispatcher persisted envelope conflicts with retry")
+    _assert_owned_row(existing, persisted)
+    return persisted
 
 
 def _assert_exact_input_response(ref: dict[str, Any], response: dict[str, Any]) -> None:
@@ -2089,6 +2184,15 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                     now,
                 )
             raise
+        spec = _ensure_queued_row(
+            table,
+            spec,
+            now=now,
+            max_artifact_ttl_s=max_artifact_ttl_s,
+        )
+        failure_target = _failure_target(_canonical(spec).decode("utf-8"), now)
+        if failure_target is None:
+            raise RuntimeError("validated media envelope lost failure identity")
         deadline_epoch_s = int(spec["deadline_epoch_s"])
         if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
             if failure_target is None:

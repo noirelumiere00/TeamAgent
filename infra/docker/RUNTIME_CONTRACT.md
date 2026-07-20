@@ -86,11 +86,13 @@ Coreは汎用media adapterを介して次を同期的に submit / poll / downloa
 - `proxy` / `frame` / `thumbnail`
 - `slides` / `proposal_pptx` / `pdf`
 
-SQS body相当のenvelopeはPydantic strict/frozen/extra-forbid、最大128 KiBである。ECS
-`RunTask` overrideにはenvelopeを複製せず、`MEDIA_JOB_ID`と
-`MEDIA_JOB_PAYLOAD_SHA256`だけを渡す。workerはDynamoDBのconsistent readでcanonical
-`request_json`を取得・再検証する。overrideはAWS API上限の8192文字以下をコードとテストで
-強制する。入力は
+SQS body相当のenvelopeはPydantic strict/frozen/extra-forbid、最大128 KiBである。Coreは
+canonical envelopeをSQSへ送るだけで、authoritative job rowを作成・更新しない。trusted
+dispatcherが初回deliveryで条件付き作成し、重複・遅延retryでは同じsemantic rowに保存済みの
+exact envelopeを再検証して再利用する。CoreのDynamoDB権限はconsistent `GetItem`だけである。
+ECS `RunTask` overrideにはenvelopeやcapability secretを複製せず、job/attempt identity hashと
+VersionId固定private control `.env` ARNだけを渡す。overrideはAWS API上限の8192文字以下を
+コードとテストで強制する。入力は
 S3 referenceだけを許し、bucket/key/content type/size/SHA-256を必須とする。deadlineは最大15分、
 outputは最大128 MiBとする。idempotency keyはoperationとcaller fingerprintから作るretry-stable
 semantic SHA-256であり、timestamp/deadlineを含むcanonical envelope SHA-256とは分離する。
@@ -102,21 +104,23 @@ URL取得はcore/dispatcher/Python/Node共通の
 `youtube.com`, `youtu.be`, `tiktok.com`, `instagram.com`, `instagr.am`
 HTTPS allowlistとpublic-DNS/redirect SSRF guardを通す。
 
-S3 input/outputはSSE-S3またはSSE-KMS、artifact TTLは5分以上6時間以下とする。S3 `Expires`
+S3 input/outputはSSE-S3またはSSE-KMS、artifact TTLは5分以上30日以下、本番設定は30日とする。S3 `Expires`
 metadataやDynamoDB TTLは削除の保証ではないため、削除主体にはしない。
 
-- workerはowner/version-fenced leaseを取得し、artifactを
-  `media-jobs/<job-id>/attempts/<version>/`へ書く。失敗時に削除できるのは自分のattemptだけで、
-  cleanup失敗を成功として記録しない。
-- 同じSQS envelopeの重複、lease中の別worker、およびterminal rowはidempotentに扱う。
+- dispatcherはowner/version-fenced attemptを取得し、roleless workerへVersionId固定GETと
+  exact output slot固定POSTだけを渡す。workerはDynamoDB/S3 API権限を持たず、成果物と
+  secret-bound completionだけをpresigned capability経由で書く。finalizerが全version/checksumを
+  再検証してからterminal rowを条件付き更新する。
+- 同じSQS envelopeの重複、dispatch lease中の別delivery、およびterminal rowはidempotentに扱う。
   terminal rowをfailedへ戻したり、別attemptのartifactを削除したりしない。
-- coreの同期callerはconsumer guardを取得してpoll/downloadし、finallyでguardを解放する。
-  deterministic job IDを共有する別callerがいるため、coreはrowや共有prefixを直接削除しない。
+- dispatcherはhard cleanupをrequest deadlineより後に固定する。Coreはconsumer guardを含む
+  ledger writeを一切行わず、rowや共有prefixも直接削除しない。CoreのS3 readはjob inputと
+  `attempts/<version>/<attempt-id>/output/`だけで、controlと`_COMPLETION.json`は読めない。
 - scheduled janitorは期限到来rowをcleanup owner/versionで条件付きclaimし、正確なjob prefixを
-  全削除できた後だけ同じowner/version条件でrowを削除する。通常cleanupはactive consumerと
-  consumer guardを尊重し、宣言済みhard cleanup deadlineでは滞留jobを回収する。S3または
+  全削除できた後だけ同じowner/version条件でrowを削除する。宣言済みhard cleanup deadlineでは
+  滞留jobを回収する。S3または
   DynamoDBの削除失敗はinvocation失敗としてretryさせる。
-- bucket lifecycle 1日は障害時のbackstopだけであり、janitorによる宣言window内削除の代替では
+- bucket lifecycle 30日は障害時のbackstopだけであり、janitorによる宣言window内削除の代替では
   ない。DynamoDB TTLも同じくbackstopである。
 
 VSEO report/slides/PPTXはrequest単位directoryに置き、upload/response後に

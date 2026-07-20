@@ -76,9 +76,17 @@ def test_artifacts_are_version_bound_and_core_writes_only_job_inputs() -> None:
     assert 'status = "Enabled"' in versioning
     assert 'sid = "S3JobInputsWrite"' in core_policy
     assert "media-jobs/*/input/*" in core_policy
-    assert 'sid = "S3JobArtifactsRead"' in core_policy
+    assert 'sid = "ReadMediaInputsAndFinalArtifacts"' in core_policy
     assert '"s3:GetObjectVersion"' in core_policy
+    assert "media-jobs/*/attempts/*/*/output/*" in core_policy
+    assert "media-jobs/*/control/*" not in core_policy
+    assert "_COMPLETION.json" not in core_policy
+    assert 'actions   = ["dynamodb:GetItem"]' in core_policy
+    assert "dynamodb:PutItem" not in core_policy
+    assert "dynamodb:UpdateItem" not in core_policy
     assert 'sid = "IssueAndVerifyExactMediaCapabilities"' in dispatcher_policy
+    assert 'sid       = "OwnAuthoritativeMediaLedger"' in dispatcher_policy
+    assert "dynamodb:PutItem" in dispatcher_policy
     assert "media-jobs/*/attempts/*" in dispatcher_policy
     assert "task_role_arn" not in task
     assert 'resource "aws_iam_role" "tiktok_task"' not in MEDIA_TF

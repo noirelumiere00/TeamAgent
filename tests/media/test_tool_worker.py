@@ -437,8 +437,13 @@ def test_run_tool_uploads_artifact_then_canonical_secret_bound_completion(
 ) -> None:
     control = _control()
     monkeypatch.setattr(tool_worker, "_signal_scope", _no_signal)
+    environment = _identity_environment(control)
+    environment["MEDIA_CONTROL_ZLIB_B64"] = "compressed-secret-capability"
+    environment["MEDIA_CONTROL_SHA256"] = "f" * 64
 
     def execute(*_args: Any, **kwargs: Any) -> OperationOutput:
+        assert "MEDIA_CONTROL_ZLIB_B64" not in environment
+        assert "MEDIA_CONTROL_SHA256" not in environment
         workdir = kwargs["workdir"]
         assert isinstance(workdir, Path)
         artifact = workdir / "media"
@@ -476,7 +481,7 @@ def test_run_tool_uploads_artifact_then_canonical_secret_bound_completion(
 
     result = tool_worker.run_tool(
         control,
-        environ=_identity_environment(control),
+        environ=environment,
         temp_root=tmp_path,
         clock=lambda: 1_001,
     )
@@ -486,6 +491,38 @@ def test_run_tool_uploads_artifact_then_canonical_secret_bound_completion(
     assert completion["capability_secret"] == _SECRET
     assert completion["attempt_id"] == _ATTEMPT_ID
     assert completion["result"] == result.model_dump(mode="json")
+
+
+def test_main_hardens_before_decoding_and_always_scrubs_capability_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _control()
+    events: list[str] = []
+    monkeypatch.setenv("MEDIA_CONTROL_ZLIB_B64", "compressed-secret-capability")
+    monkeypatch.setenv("MEDIA_CONTROL_SHA256", "f" * 64)
+
+    def harden() -> None:
+        events.append("harden")
+
+    def parse(environment: object) -> ToolControl:
+        assert events == ["harden"]
+        assert environment is os.environ
+        events.append("parse")
+        return control
+
+    def run(parsed: ToolControl) -> object:
+        assert parsed is control
+        events.append("run")
+        return type("Result", (), {"status": "done"})()
+
+    monkeypatch.setattr(tool_worker, "_set_process_non_dumpable", harden)
+    monkeypatch.setattr(tool_worker, "parse_control_from_env", parse)
+    monkeypatch.setattr(tool_worker, "run_tool", run)
+
+    assert tool_worker.main() == 0
+    assert events == ["harden", "parse", "run"]
+    assert "MEDIA_CONTROL_ZLIB_B64" not in os.environ
+    assert "MEDIA_CONTROL_SHA256" not in os.environ
 
 
 def test_run_tool_converts_operation_and_slot_failures_to_completion(

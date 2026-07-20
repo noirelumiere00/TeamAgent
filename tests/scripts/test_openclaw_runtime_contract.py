@@ -1498,12 +1498,25 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "openclaw_rollout_signing_key_arn" in apply_case
     heartbeat_restart = apply_case.rfind("start_gate_heartbeat", 0, rollout_call)
     assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
+    ecs_begin = apply_case.index('python3 "$ECS_SERVICE_APPLY_SAGA" begin')
+    assert ecs_begin < apply_case.index('"$APPLY_SUPERVISOR"')
+    assert apply_case.index('rm -f "$STAGED_PLAN"') < ecs_begin
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
     assert ".schema_version == 6" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
     assert "post_apply_service_probe_sha256" in apply_case
     assert "ecs_service_saga_receipt_sha256" in apply_case
+    cleanup = apply_case[
+        apply_case.index("cleanup_apply_command()")
+        : apply_case.index("trap 'cleanup_apply_command' EXIT")
+    ]
+    ecs_restore = cleanup.index('python3 "$ECS_SERVICE_APPLY_SAGA" finish')
+    heartbeat_stop = cleanup.index("stop_gate_heartbeat")
+    lock_cleanup = cleanup.index(
+        'bash "$IMAGE_GATE_RUNNER" release-deployment-lock'
+    )
+    assert ecs_restore < heartbeat_stop < lock_cleanup
 
     probe = guard[
         guard.index("run_post_apply_service_probe()")

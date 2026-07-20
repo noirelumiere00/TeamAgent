@@ -362,10 +362,11 @@ def test_worker_runtime_and_iam_hardening_contracts() -> None:
     tiktok_mcp_policy = tiktok.split('data "aws_iam_policy_document" "tiktok_mcp_policy"', 1)[
         1
     ].split('resource "aws_iam_role_policy" "tiktok_mcp_policy"', 1)[0]
-    assert (
-        'actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]'
-        in tiktok_mcp_policy
-    )
+    assert 'actions   = ["dynamodb:GetItem"]' in tiktok_mcp_policy
+    assert "dynamodb:PutItem" not in tiktok_mcp_policy
+    assert "dynamodb:UpdateItem" not in tiktok_mcp_policy
+    assert "media-jobs/*/attempts/*/*/output/*" in tiktok_mcp_policy
+    assert "media-jobs/*/control/*" not in tiktok_mcp_policy
 
     x_worker_policy = x_buzz.split('data "aws_iam_policy_document" "x_buzz_task_app"', 1)[1].split(
         'resource "aws_iam_role_policy" "x_buzz_task_app"', 1

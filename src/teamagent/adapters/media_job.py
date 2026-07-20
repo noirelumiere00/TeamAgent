@@ -10,16 +10,12 @@ import math
 import os
 import re
 import time
-import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-import structlog
-
 from teamagent.media.contracts import (
     ARTIFACT_RETENTION_SECONDS,
-    DDB_RETENTION_GRACE_SECONDS,
     MAX_DEADLINE_SECONDS,
     MAX_INPUT_BYTES,
     MAX_PRESIGNED_URL_SECONDS,
@@ -39,15 +35,12 @@ from teamagent.media.contracts import (
     TikTokClientConfig,
     artifact_manifest_sha256,
     make_job_request,
-    parse_job_request,
 )
 from teamagent.media.deadline import (
     DeadlineBudget,
     MediaDeadlineExceededError,
     botocore_config,
 )
-
-logger = structlog.get_logger(__name__)
 
 _SYNC_TIMEOUT_DEFAULT_S = 180
 _SYNC_TIMEOUT_MAX_S = 15 * 60
@@ -66,7 +59,7 @@ class MediaJobError(RuntimeError):
 
 
 class MediaJobClient:
-    """Coreが持つSQS/DynamoDB/S3権限だけで同期UXを維持する。"""
+    """SQS送信・DynamoDB参照・限定S3権限だけで同期UXを維持する。"""
 
     def __init__(
         self,
@@ -182,36 +175,6 @@ class MediaJobClient:
         return {"ServerSideEncryption": "AES256"}
 
     @staticmethod
-    def _persisted_request(
-        item: dict[str, Any],
-        submitted: MediaJobRequest,
-    ) -> MediaJobRequest:
-        """Recover the original timestamp envelope for a semantic retry."""
-
-        if item.get("idempotency_key", {}).get("S") != submitted.idempotency_key:
-            raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT")
-        raw = item.get("request_json", {}).get("S", "")
-        if not raw:
-            if item.get("payload_sha256", {}).get("S") == submitted.payload_sha256:
-                return submitted
-            raise MediaJobError("MEDIA_JOB_ENVELOPE_MISSING")
-        try:
-            persisted = parse_job_request(raw)
-        except MediaJobError:
-            raise
-        except Exception as exc:
-            raise MediaJobError("MEDIA_JOB_ENVELOPE_INVALID") from exc
-        if (
-            persisted.job_id != submitted.job_id
-            or persisted.idempotency_key != submitted.idempotency_key
-            or persisted.output_bucket != submitted.output_bucket
-            or persisted.output_prefix != submitted.output_prefix
-            or item.get("payload_sha256", {}).get("S") != persisted.payload_sha256
-        ):
-            raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT")
-        return persisted
-
-    @staticmethod
     def _assert_audit_owner(
         item: dict[str, Any],
         expected_audit_principal_hash: str | None,
@@ -277,147 +240,13 @@ class MediaJobClient:
         return ref
 
     def submit(self, request: MediaJobRequest) -> str:
-        """Create/reuse a semantic row and enqueue its original timestamp envelope."""
+        """Send one canonical intent; the trusted dispatcher owns all ledger writes."""
 
         self._assert_configured()
         self._remaining(request.deadline_epoch_s)
         if request.output_bucket != self._bucket:
             raise MediaJobError("MEDIA_JOB_BUCKET_MISMATCH")
-        queued_request = request
-        body = queued_request.to_json_bytes().decode("utf-8")
-        queued = MediaJobResult(job_id=request.job_id, status="queued")
-        try:
-            self._remaining(request.deadline_epoch_s)
-            self._call(
-                "dynamodb",
-                request.deadline_epoch_s,
-                "put_item",
-                TableName=self._table,
-                Item={
-                    "job_id": {"S": request.job_id},
-                    "idempotency_key": {"S": request.idempotency_key},
-                    "payload_sha256": {"S": request.payload_sha256},
-                    "request_json": {"S": body},
-                    "status": {"S": "queued"},
-                    "version": {"N": "0"},
-                    "active_consumers": {"N": "0"},
-                    "created_at": {"N": str(request.created_at_epoch_s)},
-                    "deadline": {"N": str(request.deadline_epoch_s)},
-                    "output_prefix": {"S": request.output_prefix},
-                    "cleanup_at": {"N": str(request.created_at_epoch_s + request.artifact_ttl_s)},
-                    "hard_cleanup_at": {
-                        "N": str(request.created_at_epoch_s + request.artifact_ttl_s)
-                    },
-                    "cleanup_status": {"S": "pending"},
-                    "ttl": {
-                        "N": str(
-                            request.created_at_epoch_s
-                            + request.artifact_ttl_s
-                            + DDB_RETENTION_GRACE_SECONDS
-                        )
-                    },
-                    "detail": {
-                        "S": json.dumps(
-                            queued.model_dump(mode="json"),
-                            separators=(",", ":"),
-                        )
-                    },
-                    **(
-                        {"audit_principal_hash": {"S": request.audit_principal_hash}}
-                        if request.audit_principal_hash
-                        else {}
-                    ),
-                },
-                ConditionExpression="attribute_not_exists(job_id)",
-            )
-        except MediaJobError:
-            raise
-        except Exception as exc:
-            if not _is_conditional_conflict(exc):
-                raise MediaJobError("MEDIA_JOB_STATE_CREATE_FAILED") from exc
-            existing = self._call(
-                "dynamodb",
-                request.deadline_epoch_s,
-                "get_item",
-                TableName=self._table,
-                Key={"job_id": {"S": request.job_id}},
-                ConsistentRead=True,
-            ).get("Item", {})
-            if existing.get("idempotency_key", {}).get("S") != request.idempotency_key:
-                raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
-            self._assert_audit_owner(existing, request.audit_principal_hash)
-            queued_request = self._persisted_request(existing, request)
-            body = queued_request.to_json_bytes().decode("utf-8")
-            if existing.get("message_sent_at", {}).get("N"):
-                return request.job_id
-            if existing.get("status", {}).get("S") in {"running", "done", "failed"}:
-                return request.job_id
-
-        submit_owner = f"submit-{uuid.uuid4().hex}"
-        claim_deadline = self._monotonic() + min(
-            35.0,
-            self._remaining(queued_request.deadline_epoch_s),
-        )
-        while True:
-            self._remaining(queued_request.deadline_epoch_s)
-            now = int(self._clock())
-            try:
-                self._call(
-                    "dynamodb",
-                    queued_request.deadline_epoch_s,
-                    "update_item",
-                    TableName=self._table,
-                    Key={"job_id": {"S": request.job_id}},
-                    UpdateExpression="SET submit_owner = :owner, submit_lease_expires_at = :lease",
-                    ConditionExpression=(
-                        "#status = :queued AND idempotency_key = :idempotency AND "
-                        "payload_sha256 = :payload AND attribute_not_exists(message_sent_at) AND "
-                        "(attribute_not_exists(submit_owner) OR submit_lease_expires_at < :now)"
-                    ),
-                    ExpressionAttributeNames={"#status": "status"},
-                    ExpressionAttributeValues={
-                        ":queued": {"S": "queued"},
-                        ":idempotency": {"S": queued_request.idempotency_key},
-                        ":payload": {"S": queued_request.payload_sha256},
-                        ":owner": {"S": submit_owner},
-                        ":now": {"N": str(now)},
-                        ":lease": {"N": str(now + 30)},
-                    },
-                )
-                break
-            except Exception as exc:
-                if not _is_conditional_conflict(exc):
-                    raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_FAILED") from exc
-                existing = self._call(
-                    "dynamodb",
-                    queued_request.deadline_epoch_s,
-                    "get_item",
-                    TableName=self._table,
-                    Key={"job_id": {"S": request.job_id}},
-                    ConsistentRead=True,
-                ).get("Item", {})
-                if existing.get("idempotency_key", {}).get("S") != queued_request.idempotency_key:
-                    raise MediaJobError("MEDIA_JOB_IDEMPOTENCY_CONFLICT") from exc
-                self._assert_audit_owner(existing, queued_request.audit_principal_hash)
-                if existing.get("message_sent_at", {}).get("N") or existing.get("status", {}).get(
-                    "S"
-                ) in {"running", "done", "failed"}:
-                    return request.job_id
-                queued_request = self._persisted_request(existing, queued_request)
-                body = queued_request.to_json_bytes().decode("utf-8")
-                if self._monotonic() >= claim_deadline:
-                    raise MediaJobError("MEDIA_JOB_ENQUEUE_CLAIM_TIMEOUT") from exc
-                lease_expires_at = int(
-                    existing.get("submit_lease_expires_at", {}).get("N", str(now + 1))
-                )
-                self._sleeper(
-                    min(
-                        1.0,
-                        max(0.1, lease_expires_at - now),
-                        self._remaining(queued_request.deadline_epoch_s),
-                    )
-                )
-
+        body = request.to_json_bytes().decode("utf-8")
         arguments: dict[str, Any] = {
             "QueueUrl": self._queue_url,
             "MessageBody": body,
@@ -425,72 +254,26 @@ class MediaJobClient:
                 "schema_version": {"DataType": "String", "StringValue": "1"},
                 "payload_sha256": {
                     "DataType": "String",
-                    "StringValue": queued_request.payload_sha256,
+                    "StringValue": request.payload_sha256,
                 },
             },
         }
         if self._queue_url.endswith(".fifo"):
-            arguments["MessageDeduplicationId"] = queued_request.idempotency_key
+            arguments["MessageDeduplicationId"] = request.idempotency_key
             arguments["MessageGroupId"] = "teamagent-media"
         try:
-            self._remaining(queued_request.deadline_epoch_s)
+            self._remaining(request.deadline_epoch_s)
             self._call(
                 "sqs",
-                queued_request.deadline_epoch_s,
+                request.deadline_epoch_s,
                 "send_message",
                 **arguments,
             )
         except MediaJobError:
-            try:
-                self._call(
-                    "dynamodb",
-                    queued_request.deadline_epoch_s,
-                    "update_item",
-                    TableName=self._table,
-                    Key={"job_id": {"S": request.job_id}},
-                    UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
-                    ConditionExpression="submit_owner = :owner",
-                    ExpressionAttributeValues={":owner": {"S": submit_owner}},
-                )
-            except Exception:
-                logger.exception("failed to release expired media submit lease")
             raise
         except Exception as exc:
-            try:
-                self._call(
-                    "dynamodb",
-                    queued_request.deadline_epoch_s,
-                    "update_item",
-                    TableName=self._table,
-                    Key={"job_id": {"S": request.job_id}},
-                    UpdateExpression="REMOVE submit_owner, submit_lease_expires_at",
-                    ConditionExpression="submit_owner = :owner",
-                    ExpressionAttributeValues={":owner": {"S": submit_owner}},
-                )
-            except Exception as release_exc:
-                raise MediaJobError("MEDIA_JOB_SUBMIT_AND_RELEASE_FAILED") from release_exc
             raise MediaJobError("MEDIA_JOB_SUBMIT_FAILED") from exc
-        try:
-            self._call(
-                "dynamodb",
-                queued_request.deadline_epoch_s,
-                "update_item",
-                TableName=self._table,
-                Key={"job_id": {"S": request.job_id}},
-                UpdateExpression=(
-                    "SET message_sent_at = :now REMOVE submit_owner, submit_lease_expires_at"
-                ),
-                ConditionExpression="submit_owner = :owner",
-                ExpressionAttributeValues={
-                    ":owner": {"S": submit_owner},
-                    ":now": {"N": str(int(self._clock()))},
-                },
-            )
-        except MediaJobError:
-            raise
-        except Exception as exc:
-            raise MediaJobError("MEDIA_JOB_ENQUEUE_CONFIRM_FAILED") from exc
-        self._remaining(queued_request.deadline_epoch_s)
+        self._remaining(request.deadline_epoch_s)
         return request.job_id
 
     def get_result(
@@ -709,86 +492,20 @@ class MediaJobClient:
             raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
 
     def cleanup_job(self, job_id: str, *, deadline_epoch_s: int) -> None:
-        """Register pre-submit staged bytes for deterministic janitor cleanup."""
+        """Validate abandoned input scope; the bucket lifecycle owns final cleanup."""
 
         if not _JOB_ID_RE.fullmatch(job_id):
             raise MediaJobError("MEDIA_JOB_CLEANUP_SCOPE_INVALID")
-        now = int(self._clock())
-        result = MediaJobResult(
-            job_id=job_id,
-            status="failed",
-            error_code="MEDIA_REQUEST_BUILD_FAILED",
-        )
-        try:
-            self._call(
-                "dynamodb",
-                deadline_epoch_s,
-                "put_item",
-                TableName=self._table,
-                Item={
-                    "job_id": {"S": job_id},
-                    "status": {"S": "failed"},
-                    "version": {"N": "0"},
-                    "active_consumers": {"N": "0"},
-                    "output_prefix": {"S": f"media-jobs/{job_id}/"},
-                    "cleanup_at": {"N": str(now)},
-                    "hard_cleanup_at": {"N": str(now)},
-                    "cleanup_status": {"S": "pending"},
-                    "ttl": {"N": str(now + DDB_RETENTION_GRACE_SECONDS)},
-                    "detail": {
-                        "S": json.dumps(
-                            result.model_dump(mode="json"),
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                        )
-                    },
-                },
-                ConditionExpression="attribute_not_exists(job_id)",
-            )
-        except Exception as exc:
-            if not _is_conditional_conflict(exc):
-                raise MediaJobError("MEDIA_JOB_CLEANUP_REGISTRATION_FAILED") from exc
+        self._remaining(deadline_epoch_s)
 
     def _acquire_consumer(self, request: MediaJobRequest, *, timeout_s: int) -> None:
-        now = int(self._clock())
-        execution_deadline_epoch_s = request.deadline_epoch_s - _CONSUMER_RELEASE_RESERVE_SECONDS
-        try:
-            self._call(
-                "dynamodb",
-                execution_deadline_epoch_s,
-                "update_item",
-                TableName=self._table,
-                Key={"job_id": {"S": request.job_id}},
-                UpdateExpression=("SET consumer_guard_until = :guard ADD active_consumers :one"),
-                ConditionExpression=(
-                    "idempotency_key = :idempotency AND attribute_not_exists(cleanup_owner)"
-                ),
-                ExpressionAttributeValues={
-                    ":idempotency": {"S": request.idempotency_key},
-                    ":guard": {"N": str(now + timeout_s + 60)},
-                    ":one": {"N": "1"},
-                },
-            )
-        except Exception as exc:
-            raise MediaJobError("MEDIA_JOB_CONSUMER_ACQUIRE_FAILED") from exc
+        del timeout_s
+        if request.output_prefix != f"media-jobs/{request.job_id}/":
+            raise MediaJobError("MEDIA_JOB_CONSUMER_SCOPE_INVALID")
 
     def _release_consumer(self, request: MediaJobRequest) -> None:
-        try:
-            self._call(
-                "dynamodb",
-                request.deadline_epoch_s,
-                "update_item",
-                TableName=self._table,
-                Key={"job_id": {"S": request.job_id}},
-                UpdateExpression="ADD active_consumers :minus_one",
-                ConditionExpression="active_consumers >= :one",
-                ExpressionAttributeValues={
-                    ":minus_one": {"N": "-1"},
-                    ":one": {"N": "1"},
-                },
-            )
-        except Exception as exc:
-            raise MediaJobError("MEDIA_JOB_CONSUMER_RELEASE_FAILED") from exc
+        if request.output_prefix != f"media-jobs/{request.job_id}/":
+            raise MediaJobError("MEDIA_JOB_CONSUMER_SCOPE_INVALID")
 
     def _run_staged(
         self,
@@ -823,7 +540,7 @@ class MediaJobClient:
         *,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> tuple[Mapping[str, bytes], Mapping[str, Any]]:
-        """submit→consumer lease→bounded poll→integrity-checked download."""
+        """submit→bounded poll→integrity-checked download."""
 
         execution_deadline_epoch_s = request.deadline_epoch_s - _CONSUMER_RELEASE_RESERVE_SECONDS
         remaining = self._remaining(
@@ -1201,14 +918,4 @@ class MediaJobClient:
             artifact_ttl_s=self.artifact_ttl_seconds(),
             job_id=job_id,
         )
-
-
-def _is_conditional_conflict(exc: Exception) -> bool:
-    response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return False
-    error = response.get("Error", {})
-    return isinstance(error, dict) and error.get("Code") == "ConditionalCheckFailedException"
-
-
 __all__ = ["MediaJobClient", "MediaJobError"]

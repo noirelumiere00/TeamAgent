@@ -51,9 +51,17 @@ class _EcsServiceError(RuntimeError):
 class _Dynamo:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.put_calls: list[dict[str, Any]] = []
         self.item: dict[str, Any] = {}
         self.reject_claim = False
         self.reject_stopped = False
+
+    def put_item(self, **kwargs: Any) -> dict[str, Any]:
+        self.put_calls.append(kwargs)
+        if self.item:
+            raise _ConditionalFailureError
+        self.item = kwargs["Item"]
+        return {}
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -478,6 +486,7 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
         "started": ["arn:aws:ecs:region:account:task/media/1"],
         "batchItemFailures": [],
     }
+    assert len(ddb.put_calls) == 1
     assert len(ecs.calls) == 1
     call = ecs.calls[0]
     assert call["count"] == 1
@@ -534,6 +543,80 @@ def test_dispatcher_passes_only_bounded_persisted_envelope_pointer(
     assert control["outputs"][0]["post"]["fields"]["x-amz-checksum-algorithm"] == "SHA256"
     post_call = next(kwargs for name, kwargs in s3.calls if name == "generate_presigned_post")
     assert ["starts-with", "$x-amz-checksum-sha256", ""] in post_call["Conditions"]
+
+
+def test_dispatcher_creates_authoritative_row_before_claiming_first_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+    body = _body()
+
+    result = module.handler(
+        {"Records": [{"messageId": "first-delivery", "body": body}]},
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result["started"] == ["arn:aws:ecs:region:account:task/media/1"]
+    assert len(ddb.put_calls) == 1
+    created = ddb.put_calls[0]["Item"]
+    spec = json.loads(body)
+    assert created["request_json"] == {"S": body}
+    assert created["idempotency_key"] == {"S": spec["idempotency_key"]}
+    assert created["status"] == {"S": "queued"}
+    assert int(created["hard_cleanup_at"]["N"]) > spec["deadline_epoch_s"]
+    assert int(created["consumer_guard_until"]["N"]) > spec["deadline_epoch_s"]
+
+
+def test_dispatcher_retry_uses_original_persisted_timestamp_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = AcquireOperation(
+        kind="acquire",
+        url="https://www.youtube.com/watch?v=BaW_jenozKc",
+    )
+    original = make_job_request(
+        operation=operation,
+        output_bucket="teamagent-media",
+        request_fingerprint="dispatch-semantic-retry",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    retry = make_job_request(
+        operation=operation,
+        output_bucket="teamagent-media",
+        request_fingerprint="dispatch-semantic-retry",
+        now_epoch_s=1_060,
+        timeout_s=300,
+    )
+    assert original.idempotency_key == retry.idempotency_key
+    assert original.payload_sha256 != retry.payload_sha256
+
+    ddb = _Dynamo()
+    ecs = _Ecs()
+    _seed_queued(ddb, original.to_json_bytes().decode())
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_061)
+
+    result = module.handler(
+        {
+            "Records": [
+                {
+                    "messageId": "semantic-retry",
+                    "body": retry.to_json_bytes().decode(),
+                }
+            ]
+        },
+        types.SimpleNamespace(aws_request_id="request-1"),
+    )
+
+    assert result["started"] == ["arn:aws:ecs:region:account:task/media/1"]
+    tags = {item["key"]: item["value"] for item in ecs.calls[0]["tags"]}
+    assert tags["teamagent-payload-sha256"] == original.payload_sha256
 
 
 def test_dispatcher_presigns_immutable_input_with_checksum_response(

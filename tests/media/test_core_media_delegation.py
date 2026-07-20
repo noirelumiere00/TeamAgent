@@ -104,9 +104,21 @@ def test_iac_injects_complete_media_service_contract_atomically() -> None:
     assert "local.media_enabled == 1" in fargate
     assert "role   = aws_iam_role.mcp_task.name" in media
     assert 'actions   = ["sqs:SendMessage"]' in media
-    assert 'actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]' in media
-    assert 'sid = "S3JobArtifactsRead"' in media
+    mcp_policy = media.split(
+        'data "aws_iam_policy_document" "tiktok_mcp_policy"',
+        1,
+    )[1].split(
+        'resource "aws_iam_role_policy" "tiktok_mcp_policy"',
+        1,
+    )[0]
+    assert 'actions   = ["dynamodb:GetItem"]' in mcp_policy
+    assert "dynamodb:PutItem" not in mcp_policy
+    assert "dynamodb:UpdateItem" not in mcp_policy
+    assert 'sid = "ReadMediaInputsAndFinalArtifacts"' in media
     assert '"s3:GetObjectVersion"' in media
+    assert "media-jobs/*/attempts/*/*/output/*" in mcp_policy
+    assert "media-jobs/*/control/*" not in mcp_policy
+    assert "_COMPLETION.json" not in mcp_policy
     assert 'sid = "S3JobInputsWrite"' in media
     assert "media-jobs/*/input/*" in media
     assert "MEDIA_ARTIFACT_TTL_SECONDS = tostring(var.media_artifact_ttl_seconds)" in media

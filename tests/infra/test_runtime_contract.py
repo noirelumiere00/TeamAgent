@@ -161,14 +161,19 @@ def test_scan_gate_is_exact_zero_without_suppressions() -> None:
 
 def test_media_cleanup_window_is_machine_readable_and_fenced() -> None:
     jobs = CONTRACT["media_jobs"]
-    assert jobs["schema_version"] == "1"
+    assert jobs["schema_version"] == "2"
     assert jobs["maximum_envelope_bytes"] == 128 * 1024
     assert jobs["minimum_artifact_ttl_seconds"] == 300
-    assert jobs["maximum_artifact_ttl_seconds"] == 21600
+    assert jobs["maximum_artifact_ttl_seconds"] == 30 * 24 * 60 * 60
+    assert jobs["configured_artifact_ttl_seconds"] == 30 * 24 * 60 * 60
+    assert jobs["ledger_write_owner"] == "trusted-dispatcher-finalizer-and-janitor-only"
+    assert jobs["mcp_ledger_access"] == "consistent-read-only"
+    assert jobs["mcp_s3_read_scope"] == "job-inputs-and-attempt-output-subtrees-only"
+    assert jobs["worker_aws_authority"] == "none-presigned-capabilities-only"
     assert jobs["authoritative_cleanup"] == "owner-version-fenced-scheduled-janitor"
-    assert jobs["lifecycle_backstop_days"] == 1
-    assert jobs["worker_failure_cleanup_scope"] == "owned-attempt-only"
+    assert jobs["lifecycle_backstop_days"] == 30
     assert jobs["synchronous_consumer_deletes_shared_state"] is False
+    assert jobs["synchronous_consumer_ledger_writes"] is False
 
 
 def test_acquire_url_allowlist_is_identical_in_core_dispatcher_python_and_node(

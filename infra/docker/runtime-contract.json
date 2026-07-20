@@ -64,10 +64,10 @@
     }
   },
   "media_jobs": {
-    "schema_version": "1",
+    "schema_version": "2",
     "maximum_envelope_bytes": 131072,
     "maximum_ecs_override_characters": 8192,
-    "ecs_payload_transport": "dynamodb-job-id-and-payload-sha256-pointer",
+    "ecs_payload_transport": "identity-overrides-plus-versioned-private-control-environment",
     "idempotency_identity": "semantic-request-sha256-excluding-envelope-timestamps",
     "deadline_budget": "single-absolute-epoch-propagated-with-remaining-time",
     "maximum_deadline_seconds": 900,
@@ -79,11 +79,16 @@
       "instagr.am"
     ],
     "minimum_artifact_ttl_seconds": 300,
-    "maximum_artifact_ttl_seconds": 21600,
+    "maximum_artifact_ttl_seconds": 2592000,
+    "configured_artifact_ttl_seconds": 2592000,
+    "ledger_write_owner": "trusted-dispatcher-finalizer-and-janitor-only",
+    "mcp_ledger_access": "consistent-read-only",
+    "mcp_s3_read_scope": "job-inputs-and-attempt-output-subtrees-only",
+    "worker_aws_authority": "none-presigned-capabilities-only",
     "authoritative_cleanup": "owner-version-fenced-scheduled-janitor",
-    "lifecycle_backstop_days": 1,
-    "worker_failure_cleanup_scope": "owned-attempt-only",
-    "synchronous_consumer_deletes_shared_state": false
+    "lifecycle_backstop_days": 30,
+    "synchronous_consumer_deletes_shared_state": false,
+    "synchronous_consumer_ledger_writes": false
   },
   "tasks": {
     "teamagent-mcp-core": {

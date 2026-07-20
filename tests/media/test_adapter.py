@@ -365,7 +365,7 @@ def test_done_result_rejects_content_addressed_artifact_outside_job_attempt_pref
         )
 
 
-def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplicate_send() -> None:
+def test_submit_sends_canonical_intent_without_mutating_authoritative_ledger() -> None:
     request = _request()
     queue = _Queue()
     ddb = _SubmitDynamo(request)
@@ -383,8 +383,9 @@ def test_concurrent_identical_submit_waits_for_owner_confirmation_without_duplic
     )
 
     assert client.submit(request) == request.job_id
-    assert ddb.claim_calls == 2
-    assert queue.messages == []
+    assert ddb.claim_calls == 0
+    assert len(queue.messages) == 1
+    assert queue.messages[0]["MessageBody"] == request.to_json_bytes().decode()
 
 
 class _RecoverableDynamo:
@@ -416,7 +417,7 @@ class _RecoverableDynamo:
         raise AssertionError(f"unexpected update: {expression}")
 
 
-def test_delayed_semantic_retry_enqueues_original_timestamp_envelope() -> None:
+def test_delayed_semantic_retry_reuses_stable_queue_deduplication_identity() -> None:
     operation = AcquireOperation(
         kind="acquire",
         url="https://www.youtube.com/watch?v=BaW_jenozKc",
@@ -452,9 +453,9 @@ def test_delayed_semantic_retry_enqueues_original_timestamp_envelope() -> None:
     assert client.submit(delayed) == original.job_id
     assert len(queue.messages) == 1
     sent = queue.messages[0]
-    assert sent["MessageBody"] == original.to_json_bytes().decode()
+    assert sent["MessageBody"] == delayed.to_json_bytes().decode()
     assert sent["MessageDeduplicationId"] == original.idempotency_key
-    assert sent["MessageAttributes"]["payload_sha256"]["StringValue"] == (original.payload_sha256)
+    assert sent["MessageAttributes"]["payload_sha256"]["StringValue"] == delayed.payload_sha256
 
 
 class _GuardClient(MediaJobClient):
