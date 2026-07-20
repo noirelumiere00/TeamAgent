@@ -7037,6 +7037,166 @@ run_activation_task() {
   fi
 }
 
+POST_APPLY_TASKS=""
+
+cleanup_post_apply_tasks() {
+  set +e
+  local item cluster task
+  for item in $POST_APPLY_TASKS; do
+    cluster="${item%%|*}"
+    task="${item#*|}"
+    aws_cli ecs stop-task --cluster "$cluster" --task "$task" \
+      --reason "TeamAgent post-apply probe cleanup" >/dev/null 2>&1
+  done
+  set -e
+}
+
+run_post_apply_service_probe() {
+  local snapshot="$1" core="$2" apply_attempt_id="$3" output="$4"
+  local task_definition image network response task_arn task_result
+  local probe_code overrides log_stream logs result attempt
+  task_definition="$(jq -er '.taskdefs.canary.arn' "$snapshot")"
+  image="$(jq -er '.taskdefs.canary.image' "$snapshot")"
+  network="$(jq -c '{
+    awsvpcConfiguration:{
+      subnets:.targets.canary.critical.ecs_target.network_configuration.subnets,
+      securityGroups:
+        .targets.canary.critical.ecs_target.network_configuration.security_groups,
+      assignPublicIp:
+        (if .targets.canary.critical.ecs_target.network_configuration.assign_public_ip
+         then "ENABLED" else "DISABLED" end)
+    }
+  }' "$snapshot")"
+  probe_code='import json
+import os
+import urllib.request
+
+def fetch(url):
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return response.status, response.read()
+
+mcp_status, _ = fetch("http://teamagent-mcp.teamagent.internal:8787/healthz")
+connect_status, connect_raw = fetch(
+    "http://connect-web.teamagent.internal:8788/healthz"
+)
+connect = json.loads(connect_raw)
+checks = {
+    "mcp_http_200": mcp_status == 200,
+    "connect_http_200": connect_status == 200,
+    "connect_contract_ok": connect.get("ok") is True,
+    "connect_version_id": (
+        connect.get("app_html_s3_version_id")
+        == os.environ["EXPECTED_APP_VERSION_ID"]
+    ),
+    "connect_sha256": (
+        connect.get("app_html_sha256") == os.environ["EXPECTED_APP_SHA256"]
+    ),
+    "connect_manifest_sha256": (
+        connect.get("app_html_manifest_sha256")
+        == os.environ["EXPECTED_APP_MANIFEST_SHA256"]
+    ),
+    "connect_build_inputs_sha256": (
+        connect.get("app_html_build_inputs_sha256")
+        == os.environ["EXPECTED_APP_BUILD_INPUTS_SHA256"]
+    ),
+}
+print(json.dumps({
+    "kind": "teamagent-post-apply-service-probe",
+    "schema_version": 1,
+    "apply_attempt_id": os.environ["APPLY_ATTEMPT_ID"],
+    "checks": checks,
+}, sort_keys=True, separators=(",", ":")), flush=True)
+raise SystemExit(0 if all(checks.values()) else 23)
+'
+  overrides="$(jq -n -c \
+    --arg code "$probe_code" \
+    --arg attempt "$apply_attempt_id" \
+    --arg version_id "$(jq -er '.connect_app_html.version_id' "$core")" \
+    --arg sha256 "$(jq -er '.connect_app_html.sha256' "$core")" \
+    --arg manifest "$(
+      jq -er '.connect_app_html.vault_manifest_sha256' "$core"
+    )" \
+    --arg build_inputs "$(
+      jq -er '.connect_app_html.build_inputs_sha256' "$core"
+    )" '{
+    containerOverrides:[{
+      name:"canary",
+      command:["/app/.venv/bin/python","-c",$code],
+      environment:[
+        {name:"APPLY_ATTEMPT_ID",value:$attempt},
+        {name:"EXPECTED_APP_VERSION_ID",value:$version_id},
+        {name:"EXPECTED_APP_SHA256",value:$sha256},
+        {name:"EXPECTED_APP_MANIFEST_SHA256",value:$manifest},
+        {name:"EXPECTED_APP_BUILD_INPUTS_SHA256",value:$build_inputs}
+      ]
+    }]
+  }')"
+  response="$TMP_ROOT/post-apply-service-probe-run.json"
+  aws_cli ecs run-task --cluster "${PROJECT}-${ENVIRONMENT}" \
+    --task-definition "$task_definition" --launch-type FARGATE --count 1 \
+    --network-configuration "$network" --overrides "$overrides" \
+    --output json > "$response"
+  jq -e '(.failures | length) == 0 and (.tasks | length) == 1' \
+    "$response" >/dev/null ||
+    die "post-apply service probe RunTaskが拒否されました"
+  task_arn="$(jq -er '.tasks[0].taskArn' "$response")"
+  POST_APPLY_TASKS="$POST_APPLY_TASKS ${PROJECT}-${ENVIRONMENT}|${task_arn}"
+  task_result="$TMP_ROOT/post-apply-service-probe-task.json"
+  wait_task_and_record \
+    "${PROJECT}-${ENVIRONMENT}" "$task_arn" "$image" "$task_result"
+  log_stream="$(jq -er '.log_stream_name | select(length > 0)' "$task_result")" ||
+    die "post-apply service probeのlog streamを取得できません"
+  logs="$TMP_ROOT/post-apply-service-probe-logs.json"
+  result="$TMP_ROOT/post-apply-service-probe-result.json"
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    aws_cli logs get-log-events \
+      --log-group-name "/${PROJECT}/${ENVIRONMENT}/canary-health" \
+      --log-stream-name "$log_stream" --start-from-head \
+      --output json > "$logs"
+    if jq -e --arg attempt "$apply_attempt_id" '
+      [
+        .events[].message |
+        (fromjson? // empty) |
+        select(
+          .kind == "teamagent-post-apply-service-probe" and
+          .schema_version == 1 and
+          .apply_attempt_id == $attempt and
+          (.checks | type) == "object" and
+          ([.checks[]] | length) == 7 and
+          ([.checks[]] | all(. == true))
+        )
+      ] |
+      if length == 1 then .[0] else empty end
+    ' "$logs" > "$result"; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 5
+  done
+  [ "$attempt" -lt 60 ] ||
+    die "post-apply MCP/connect-web exact probe証跡を5分以内に確認できません"
+  jq -n -S \
+    --arg kind "teamagent-post-apply-service-probe-receipt" \
+    --argjson schema_version 1 \
+    --arg apply_attempt_id "$apply_attempt_id" \
+    --arg task_definition "$task_definition" \
+    --arg image "$image" \
+    --arg log_stream_name "$log_stream" \
+    --slurpfile task "$task_result" \
+    --slurpfile result "$result" '{
+      kind:$kind,
+      schema_version:$schema_version,
+      apply_attempt_id:$apply_attempt_id,
+      task_definition:$task_definition,
+      image:$image,
+      log_stream_name:$log_stream_name,
+      task:$task[0],
+      result:$result[0]
+    }' > "$output"
+  chmod 600 "$output"
+}
+
 write_preflight_receipt() {
   local migration_id="$1" migration="$2" snapshot="$3" profiles="$4" output="$5"
   local config_manifest="$TMP_ROOT/config-manifest.txt"
@@ -7179,6 +7339,7 @@ verify_required_migration_apply_receipt() {
   local embedded_lock="$TMP_ROOT/prior-shared-lock-embedded-$RANDOM.json"
   local embedded_outcome="$TMP_ROOT/prior-outcome-embedded-$RANDOM.json"
   local embedded_rollout="$TMP_ROOT/prior-openclaw-rollout-embedded-$RANDOM.json"
+  local embedded_service_probe="$TMP_ROOT/prior-service-probe-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
   receipt_commit="$(
     jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
@@ -7193,6 +7354,7 @@ verify_required_migration_apply_receipt() {
   jq -S -c '.shared_deployment_lock_receipt' "$receipt" > "$embedded_lock"
   jq -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
   jq -S -c '.openclaw_rollout_result' "$receipt" > "$embedded_rollout"
+  jq -S -c '.post_apply_service_probe' "$receipt" > "$embedded_service_probe"
   [ "$(sha256_file "$embedded_retention")" = \
     "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_lock")" = \
@@ -7200,7 +7362,9 @@ verify_required_migration_apply_receipt() {
     [ "$(sha256_file "$embedded_outcome")" = \
       "$(jq -er '.provenance_outcome_receipt_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_rollout")" = \
-      "$(jq -er '.openclaw_rollout_result_sha256' "$receipt")" ] ||
+      "$(jq -er '.openclaw_rollout_result_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_service_probe")" = \
+      "$(jq -er '.post_apply_service_probe_sha256' "$receipt")" ] ||
     die "prior apply receiptのembedded evidence hash bindingが不正です"
   if [ "$(jq -er '.openclaw_rollout_result.required' "$receipt")" = "true" ]; then
     jq -S -c '.openclaw_rollout_result.persistedResult' "$receipt" \
@@ -7248,6 +7412,8 @@ verify_required_migration_apply_receipt() {
       "post_live_contract",
       "post_live_fingerprint_sha256",
       "post_runtime_inventory_sha256",
+      "post_apply_service_probe",
+      "post_apply_service_probe_sha256",
       "post_state_contract",
       "post_state_contract_sha256",
       "post_state_ownership_sha256",
@@ -7265,7 +7431,7 @@ verify_required_migration_apply_receipt() {
       "versioning_receipt_sha256"
     ] | sort) and
     .kind == "terraform-runtime-apply-receipt" and
-    .schema_version == 4 and
+    .schema_version == 5 and
     .guard_version == $version and
     .account_id == $account and .region == $region and
     (.git_commit | test("^[0-9a-f]{40}$")) and
@@ -7290,6 +7456,19 @@ verify_required_migration_apply_receipt() {
     .openclaw_rollout_result.schemaVersion == 2 and
     .openclaw_rollout_result.passed == true and
     .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
+    (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
+    .post_apply_service_probe.kind ==
+      "teamagent-post-apply-service-probe-receipt" and
+    .post_apply_service_probe.schema_version == 1 and
+    .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
+    .post_apply_service_probe.image == $live[0].taskdefs.canary.image and
+    .post_apply_service_probe.image == $live[0].taskdefs.mcp.image and
+    .post_apply_service_probe.task.exit_code == 0 and
+    .post_apply_service_probe.result.kind ==
+      "teamagent-post-apply-service-probe" and
+    .post_apply_service_probe.result.apply_attempt_id == .apply_attempt_id and
+    ([.post_apply_service_probe.result.checks[]] | length) == 7 and
+    ([.post_apply_service_probe.result.checks[]] | all(. == true)) and
     .openclaw_rollout_result.newTaskDefinitionArn ==
       $live[0].taskdefs.openclaw.arn and
     (
@@ -9273,6 +9452,7 @@ case "$COMMAND" in
     OPENCLAW_NEW_TASK_DEFINITION="AUTO"
     OPENCLAW_ROLLOUT_RESULT="$TMP_ROOT/openclaw-rollout-result.json"
     OPENCLAW_ROLLBACK_RESULT="$TMP_ROOT/openclaw-rollback-result.json"
+    POST_APPLY_SERVICE_PROBE_RESULT="$TMP_ROOT/post-apply-service-probe.json"
     OPENCLAW_EVIDENCE_KMS_KEY_ARN=""
     OPENCLAW_SIGNING_KMS_KEY_ARN=""
     start_gate_heartbeat() {
@@ -9322,6 +9502,7 @@ case "$COMMAND" in
           openclaw_restore_failed="true"
         fi
       fi
+      cleanup_post_apply_tasks
       stop_gate_heartbeat
       if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
         [ "$EVENTBRIDGE_SAGA_FINISHED" != "true" ]; then
@@ -9480,6 +9661,12 @@ case "$COMMAND" in
         x_buzz:.taskdefs.x_buzz.image,
         tiktok:.taskdefs.tiktok.image
       } == $receipt[0].images.desired and
+      ([
+        .taskdefs.connect_web.image,
+        .taskdefs.ingest.image,
+        .taskdefs.morning.image,
+        .taskdefs.canary.image
+      ] | all(. == $receipt[0].images.desired.mcp)) and
       {
         ingest:(.rules.ingest.critical.state == "ENABLED"),
         morning:(.rules.morning.critical.state == "ENABLED"),
@@ -9534,6 +9721,10 @@ case "$COMMAND" in
     else
       jq -n 'null' > "$TMP_ROOT/applied-bedrock-retention.json"
     fi
+
+    run_post_apply_service_probe \
+      "$TMP_ROOT/applied-live.json" "$TMP_ROOT/verify/core.json" \
+      "$APPLY_ATTEMPT_ID" "$POST_APPLY_SERVICE_PROBE_RESULT"
 
     OPENCLAW_NEW_TASK_DEFINITION="$(
       jq -er '.taskdefs.openclaw.arn' "$TMP_ROOT/applied-live.json"
@@ -9720,7 +9911,7 @@ case "$COMMAND" in
     APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
       --arg kind "terraform-runtime-apply-receipt" \
-      --argjson schema_version 4 \
+      --argjson schema_version 5 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
@@ -9754,6 +9945,9 @@ case "$COMMAND" in
       --arg plan_sha256 "$(sha256_file "$PLAN")" \
       --arg openclaw_rollout_result_sha256 "$(
         sha256_file "$OPENCLAW_ROLLOUT_RESULT"
+      )" \
+      --arg post_apply_service_probe_sha256 "$(
+        sha256_file "$POST_APPLY_SERVICE_PROBE_RESULT"
       )" \
       --arg versioning_receipt_sha256 "$(
         jq -r '.versioning_receipt_sha256' "$TMP_ROOT/verify/receipt.json"
@@ -9799,6 +9993,8 @@ case "$COMMAND" in
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
       --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" \
+      --slurpfile post_apply_service_probe \
+        "$POST_APPLY_SERVICE_PROBE_RESULT" \
       --slurpfile openclaw_rollout "$OPENCLAW_ROLLOUT_RESULT" '{
         kind:$kind,
         schema_version:$schema_version,
@@ -9819,6 +10015,9 @@ case "$COMMAND" in
         openclaw_rollout_result_sha256:
           $openclaw_rollout_result_sha256,
         openclaw_rollout_result:$openclaw_rollout[0],
+        post_apply_service_probe_sha256:
+          $post_apply_service_probe_sha256,
+        post_apply_service_probe:$post_apply_service_probe[0],
         versioning_receipt_sha256:$versioning_receipt_sha256,
         log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
         alarm_delivery_receipt_sha256:$alarm_delivery_receipt_sha256,
@@ -9856,10 +10055,14 @@ case "$COMMAND" in
     chmod 600 "$APPLY_STAGE"
     jq -e '
       .kind == "terraform-runtime-apply-receipt" and
-      .schema_version == 4 and
+      .schema_version == 5 and
       .status == "applied" and
       .provenance_outcome == "applied" and
       .openclaw_rollout_result.passed == true and
+      .post_apply_service_probe.kind ==
+        "teamagent-post-apply-service-probe-receipt" and
+      .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
+      (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
       .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
       (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
       .shared_deployment_lock_record_id ==

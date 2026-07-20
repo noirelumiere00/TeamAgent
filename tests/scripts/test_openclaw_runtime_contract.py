@@ -1464,6 +1464,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         'if ! node "$OPENCLAW_ROLLOUT_GATE"',
         revision_gate,
     )
+    service_probe = apply_case.index("run_post_apply_service_probe")
     eventbridge_applied = apply_case.index(
         'python3 "$EVENTBRIDGE_APPLY_SAGA" finish',
         rollout_call,
@@ -1476,7 +1477,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         'bash "$IMAGE_GATE_RUNNER" release-deployment-lock',
         intent_applied,
     )
-    assert rollout_call < eventbridge_applied < intent_applied < lock_release
+    assert service_probe < rollout_call < eventbridge_applied < intent_applied < lock_release
     assert apply_case.index("--restore-and-verify") < revision_gate < rollout_call
     assert apply_case.index('OPENCLAW_POST_APPLY_STARTED="true"') < rollout_call
     assert 'OPENCLAW_ROLLOUT_REQUIRED="$(' in apply_case
@@ -1488,8 +1489,26 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
-    assert ".schema_version == 4" in apply_case
+    assert ".schema_version == 5" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
+    assert "post_apply_service_probe_sha256" in apply_case
+
+    probe = guard[
+        guard.index("run_post_apply_service_probe()")
+        : guard.index("\nwrite_preflight_receipt()")
+    ]
+    for expected in (
+        "http://teamagent-mcp.teamagent.internal:8787/healthz",
+        "http://connect-web.teamagent.internal:8788/healthz",
+        "EXPECTED_APP_VERSION_ID",
+        "EXPECTED_APP_SHA256",
+        "EXPECTED_APP_MANIFEST_SHA256",
+        "EXPECTED_APP_BUILD_INPUTS_SHA256",
+        "wait_task_and_record",
+        "get-log-events",
+        "all(. == true)",
+    ):
+        assert expected in probe
 
     evidence_tf = ROLLOUT_EVIDENCE_TF.read_text()
     runtime_evidence_tf = RUNTIME_EVIDENCE_TF.read_text()
