@@ -4820,8 +4820,10 @@ validate_runtime_links() {
       --slurpfile live "$snapshot" '
       include "terraform_runtime_guard";
       .resource_changes[] | select(.address == $address) as $change |
-      ($change.change.before | guard_service_from_tf) ==
-        $live[0].services[$component].critical and
+      ($change.change.before | guard_service_from_tf |
+        del(.wait_for_steady_state)) ==
+        ($live[0].services[$component].critical |
+          del(.wait_for_steady_state)) and
       (
         if $component == "openclaw" then
           $change.change.after.deployment_maximum_percent == 100 and
@@ -6304,7 +6306,14 @@ validate_plan() {
           [$change.change.after_unknown // {} | paths(. == true)] == [["task_definition"]])) and
         $reference != null and
         ($change.change.before.task_definition == $live[0].services[$component].task_definition) and
-        (($change.change.before | guard_service_from_tf) == $live[0].services[$component].critical) and
+        (
+          $component == "openclaw" or
+          $change.change.after.wait_for_steady_state == true
+        ) and
+        (($change.change.before | guard_service_from_tf |
+          del(.wait_for_steady_state)) ==
+          ($live[0].services[$component].critical |
+            del(.wait_for_steady_state))) and
         (($change.change.before | del(.task_definition)) ==
           ($change.change.after | del(.task_definition)))
       ' "$plan_json" >/dev/null ||
