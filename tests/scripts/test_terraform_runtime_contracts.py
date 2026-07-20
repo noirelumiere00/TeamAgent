@@ -387,14 +387,21 @@ def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"][
         "2026-07-wolfi-runtime-v1"
     ]
-    assert {
+    required_iam_addresses = {
         "aws_iam_role_policy.worker_app",
         "aws_iam_role_policy.lambda_app",
         "aws_iam_role_policy.mcp_task",
         "aws_iam_role_policy.connect_web_task[0]",
         "aws_iam_role_policy.ingest_task[0]",
         "aws_iam_role_policy.morning_digest_task[0]",
-    }.issubset(manifest["allowed_changes"])
+    }
+    assert "allowed_changes" not in manifest
+    if manifest["enabled"]:
+        assert required_iam_addresses.issubset(
+            {row["address"] for row in manifest["reviewed_plan"]["resource_changes"]}
+        )
+    else:
+        assert manifest["reviewed_plan"] is None
 
     guard = GUARD.read_text(encoding="utf-8")
     assert "validate_exact_runtime_iam_plan" in guard
@@ -705,13 +712,20 @@ def test_two_phase_migration_never_enables_schedules_early() -> None:
         "activation-ingest-acl-quarantine",
         "activation-canary",
     ]
-    assert activation["allowed_changes"] == [
+    expected_activation_addresses = {
         "terraform_data.runtime_guard",
         "terraform_data.production_image_release_gate",
         "aws_cloudwatch_metric_alarm.canary_heartbeat_missing[0]",
         "aws_cloudwatch_event_rule.ingest_weekly[0]",
         "aws_cloudwatch_event_rule.canary_hourly[0]",
-    ]
+    }
+    assert "allowed_changes" not in activation
+    if activation["enabled"]:
+        assert {
+            row["address"] for row in activation["reviewed_plan"]["resource_changes"]
+        } == expected_activation_addresses
+    else:
+        assert activation["reviewed_plan"] is None
 
 
 def test_production_path_monitoring_is_complete_and_protected() -> None:
@@ -1223,11 +1237,15 @@ def test_ci_contract_forbids_direct_terraform_mutation_scripts() -> None:
     migration = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"][
         "2026-07-wolfi-runtime-v1"
     ]
-    assert "aws_iam_policy.runtime_direct_mutation_deny" not in migration["allowed_changes"]
-    assert (
-        "aws_iam_user_policy_attachment.runtime_direct_mutation_deny"
-        not in migration["allowed_changes"]
+    assert "allowed_changes" not in migration
+    reviewed_plan = migration["reviewed_plan"]
+    reviewed_addresses = (
+        {row["address"] for row in reviewed_plan["resource_changes"]}
+        if reviewed_plan is not None
+        else set()
     )
+    assert "aws_iam_policy.runtime_direct_mutation_deny" not in reviewed_addresses
+    assert "aws_iam_user_policy_attachment.runtime_direct_mutation_deny" not in reviewed_addresses
 
     for expected in (
         "validate_dispatcher_migration_plan",
