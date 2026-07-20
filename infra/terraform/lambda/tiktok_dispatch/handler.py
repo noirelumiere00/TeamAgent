@@ -42,9 +42,7 @@ _MAX_COMPLETION_BYTES = 128 * 1024
 _S3_STREAM_CHUNK_BYTES = 1024 * 1024
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_ATTEMPT_ID = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-)
+_ATTEMPT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 _ARTIFACT_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 _S3_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _S3_KEY = re.compile(r"^[A-Za-z0-9!_.*'()/+=:@-]+$")
@@ -80,6 +78,14 @@ _REQUIRED_KEYS = {
     "output_prefix",
     "operation",
     "payload_sha256",
+}
+_DEFINITIVE_RUN_TASK_REJECTION_CODES = {
+    "AccessDeniedException",
+    "ClientException",
+    "ClusterNotFoundException",
+    "InvalidParameterException",
+    "PlatformTaskDefinitionIncompatibilityException",
+    "UnsupportedFeatureException",
 }
 
 
@@ -384,6 +390,20 @@ def _conditional_failure(exc: Exception) -> bool:
     response = getattr(exc, "response", {})
     code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
     return code == "ConditionalCheckFailedException"
+
+
+def _definitive_run_task_rejection(exc: Exception) -> bool:
+    """Return true only when ECS explicitly says no task was accepted.
+
+    Transport errors, throttling, service errors, and idempotency conflicts are
+    deliberately ambiguous: ECS may have accepted the request before the
+    caller lost the response.  Those attempts must retain the running fence so
+    an SQS retry can reuse the persisted ``clientToken``.
+    """
+
+    response = getattr(exc, "response", {})
+    code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+    return code in _DEFINITIVE_RUN_TASK_REJECTION_CODES
 
 
 def _remaining(deadline_epoch_s: int) -> float:
@@ -744,10 +764,13 @@ def _required_output_names(spec: dict[str, Any]) -> set[str]:
         if spec["operation"]["artifact_mode"] == "full":
             names.update({"config.json", "manifest.json"})
         return names
-    return {slot["name"] for slot in _operation_output_slots(
-        spec,
-        {"attempt_version": 1, "attempt_id": "00000000-0000-4000-8000-000000000000"},
-    )}
+    return {
+        slot["name"]
+        for slot in _operation_output_slots(
+            spec,
+            {"attempt_version": 1, "attempt_id": "00000000-0000-4000-8000-000000000000"},
+        )
+    }
 
 
 def _allowed_content_types(spec: dict[str, Any], name: str) -> set[str]:
@@ -940,8 +963,7 @@ def _resume_attempt(item: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any
         or not _SHA256.fullmatch(attempt["dispatch_client_token"])
         or not attempt["control_version_id"]
         or attempt["control_version_id"] == "null"
-        or attempt["control_key"]
-        != f"{spec['output_prefix']}control/{attempt['attempt_id']}.env"
+        or attempt["control_key"] != f"{spec['output_prefix']}control/{attempt['attempt_id']}.env"
         or attempt["completion_key"]
         != (
             f"{spec['output_prefix']}attempts/{attempt['attempt_version']}/"
@@ -1343,11 +1365,7 @@ def _stopped_identity(
         "teamagent-attempt-version": str(values["attempt_version"]),
         "teamagent-capability-sha256": values["capability_sha256"],
         "teamagent-control-sha256": values["control_sha256"],
-        **(
-            {"teamagent-audit-principal-hash": audit_hash}
-            if audit_hash is not None
-            else {}
-        ),
+        **({"teamagent-audit-principal-hash": audit_hash} if audit_hash is not None else {}),
     }
     for key, expected in tag_contract.items():
         if key in tags and tags[key] != expected:
@@ -1595,9 +1613,7 @@ def _validate_completion_result(
         return result, None
     if exit_code != 0 or error_code is not None or not artifacts:
         raise ValueError("media done result disagrees with task exit")
-    slots = {
-        slot["name"]: slot for slot in _operation_output_slots(spec, attempt)
-    }
+    slots = {slot["name"]: slot for slot in _operation_output_slots(spec, attempt)}
     names: set[str] = set()
     keys: set[str] = set()
     for raw in artifacts:
@@ -1835,8 +1851,7 @@ def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
         )
         or (
             identity["control_arn"] is not None
-            and identity["control_arn"]
-            != f"arn:aws:s3:::{bucket}/{attempt['control_key']}"
+            and identity["control_arn"] != f"arn:aws:s3:::{bucket}/{attempt['control_key']}"
         )
         or _ddb_string(item, "dispatched_task_arn") not in {"", task_arn}
     ):
@@ -1993,15 +2008,43 @@ def _confirm_task(
             Key={"job_id": {"S": spec["job_id"]}},
             ConsistentRead=True,
         ).get("Item", {})
-        if (
-            _ddb_string(item, "status") in {"done", "failed"}
-            or (
-                _ddb_string(item, "dispatched_task_arn") == task_arn
-                and _ddb_string(item, "attempt_id") == attempt["attempt_id"]
-            )
+        if _ddb_string(item, "status") in {"done", "failed"} or (
+            _ddb_string(item, "dispatched_task_arn") == task_arn
+            and _ddb_string(item, "attempt_id") == attempt["attempt_id"]
         ):
             return
         raise RuntimeError("media task confirmation lost exact attempt fence") from exc
+
+
+def _commit_unlaunched_failure(
+    *,
+    table: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    deadline_epoch_s: int,
+) -> None:
+    """Best-effort terminal write after a definitive pre-launch rejection."""
+
+    try:
+        failure = _failure_result(
+            spec,
+            code="MEDIA_DISPATCH_START_FAILED",
+            diagnostics={},
+        )
+        _commit_terminal(
+            table=table,
+            spec=spec,
+            attempt=attempt,
+            result=failure,
+            manifest_sha256=None,
+            task_arn=None,
+            now=int(time.time()),
+            deadline_epoch_s=deadline_epoch_s,
+        )
+    except Exception:
+        # Preserve the original dispatch exception.  A later retry/finalizer
+        # still has the exact attempt fence and can reconcile it.
+        pass
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -2070,9 +2113,15 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             raise TimeoutError("media envelope deadline exceeded before task launch") from exc
         if attempt is None:
             continue
+        if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
+            _commit_unlaunched_failure(
+                table=table,
+                spec=spec,
+                attempt=attempt,
+                deadline_epoch_s=deadline_epoch_s,
+            )
+            raise TimeoutError("media envelope deadline exceeded before task launch")
         try:
-            if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
-                raise TimeoutError("media envelope deadline exceeded before task launch")
             response = _call(
                 "ecs",
                 "run_task",
@@ -2102,39 +2151,39 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                     bucket=bucket,
                 ),
             )
-            failures = response.get("failures", [])
-            tasks = response.get("tasks", [])
-            if failures or len(tasks) != 1:
-                raise RuntimeError(f"run_task did not start exactly one task: {failures}")
-            task_arn = str(tasks[0].get("taskArn") or "")
-            if not task_arn.startswith("arn:") or ":task/" not in task_arn:
-                raise RuntimeError("run_task returned an invalid task ARN")
-            _confirm_task(
-                table=table,
-                spec=spec,
-                attempt=attempt,
-                task_arn=task_arn,
-                now=int(time.time()),
-            )
-            started.append(task_arn)
-        except Exception:
-            try:
-                failure = _failure_result(
-                    spec,
-                    code="MEDIA_DISPATCH_START_FAILED",
-                    diagnostics={},
-                )
-                _commit_terminal(
+        except Exception as exc:
+            if _definitive_run_task_rejection(exc):
+                _commit_unlaunched_failure(
                     table=table,
                     spec=spec,
                     attempt=attempt,
-                    result=failure,
-                    manifest_sha256=None,
-                    task_arn=None,
-                    now=int(time.time()),
                     deadline_epoch_s=deadline_epoch_s,
                 )
-            except Exception:
-                pass
+            # An unclassified SDK/transport error is ambiguous.  Do not mark
+            # the row failed: SQS must retry the same persisted client token.
             raise
+        failures = response.get("failures", [])
+        tasks = response.get("tasks", [])
+        if failures or len(tasks) != 1:
+            if not tasks:
+                _commit_unlaunched_failure(
+                    table=table,
+                    spec=spec,
+                    attempt=attempt,
+                    deadline_epoch_s=deadline_epoch_s,
+                )
+            raise RuntimeError(f"run_task did not start exactly one task: {failures}")
+        task_arn = str(tasks[0].get("taskArn") or "")
+        if not task_arn.startswith("arn:") or ":task/" not in task_arn:
+            # A task object exists, so malformed confirmation is still
+            # ambiguous.  Leave the fence running for STOPPED/retry recovery.
+            raise RuntimeError("run_task returned an invalid task ARN")
+        _confirm_task(
+            table=table,
+            spec=spec,
+            attempt=attempt,
+            task_arn=task_arn,
+            now=int(time.time()),
+        )
+        started.append(task_arn)
     return {"started": started, "batchItemFailures": []}

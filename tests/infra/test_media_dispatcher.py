@@ -42,6 +42,12 @@ class _ConditionalFailureError(RuntimeError):
         self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
 
 
+class _EcsServiceError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
 class _Dynamo:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -52,8 +58,10 @@ class _Dynamo:
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         condition = kwargs.get("ConditionExpression", "")
-        if "#status = :queued" in condition and "#version = :previous" in condition and (
-            self.reject_claim
+        if (
+            "#status = :queued" in condition
+            and "#version = :previous" in condition
+            and (self.reject_claim)
         ):
             raise _ConditionalFailureError
         if "capability_sha256 = :capability" in condition and self.reject_stopped:
@@ -65,15 +73,23 @@ class _Dynamo:
 
 
 class _Ecs:
-    def __init__(self, response: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        response: dict[str, Any] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
         self.response = response or {
             "tasks": [{"taskArn": "arn:aws:ecs:region:account:task/media/1"}],
             "failures": [],
         }
+        self.error = error
         self.calls: list[dict[str, Any]] = []
 
     def run_task(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
         return self.response
 
 
@@ -372,17 +388,10 @@ def _seed_running(ddb: _Dynamo, body: str, *, task_arn: str = "") -> None:
             "control_version_id": {"S": "control-version-1"},
             "control_sha256": {"S": _CONTROL_SHA256},
             "completion_key": {
-                "S": (
-                    f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/"
-                    "_COMPLETION.json"
-                )
+                "S": (f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/_COMPLETION.json")
             },
             "dispatch_client_token": {"S": "e" * 64},
-            **(
-                {"dispatched_task_arn": {"S": task_arn}}
-                if task_arn
-                else {}
-            ),
+            **({"dispatched_task_arn": {"S": task_arn}} if task_arn else {}),
         }
     )
 
@@ -395,9 +404,7 @@ def _add_done_completion(s3: _S3, body: str) -> tuple[str, str]:
         "attempt-version": "1",
         "capability-sha256": _CAPABILITY_SHA256,
     }
-    artifact_key = (
-        f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/output/media"
-    )
+    artifact_key = f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/output/media"
     ref = s3.add_output(
         key=artifact_key,
         version_id="artifact-version-1",
@@ -427,9 +434,7 @@ def _add_done_completion(s3: _S3, body: str) -> tuple[str, str]:
         sort_keys=True,
         separators=(",", ":"),
     ).encode()
-    completion_key = (
-        f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/_COMPLETION.json"
-    )
+    completion_key = f"{spec['output_prefix']}attempts/1/{_ATTEMPT_ID}/_COMPLETION.json"
     s3.add_output(
         key=completion_key,
         version_id="completion-version-1",
@@ -610,9 +615,9 @@ def test_dispatcher_carries_audit_owner_in_task_tag_and_stopped_event_override(
     module.handler(
         {
             "Records": [
-                    {
-                        "messageId": "message-audit",
-                        "body": body,
+                {
+                    "messageId": "message-audit",
+                    "body": body,
                 }
             ]
         },
@@ -905,6 +910,58 @@ def test_running_confirmed_duplicate_never_launches_second_task(
     assert ecs.calls == []
 
 
+def test_ambiguous_run_task_error_preserves_attempt_for_same_token_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    s3 = _S3()
+    body = _body()
+    _seed_queued(ddb, body, s3)
+    ecs = _Ecs(error=RuntimeError("read timeout after request write"))
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+
+    with pytest.raises(RuntimeError, match="read timeout"):
+        module.handler(
+            {"Records": [{"messageId": "ambiguous", "body": body}]},
+            types.SimpleNamespace(aws_request_id="request-1"),
+        )
+
+    assert len(ecs.calls) == 1
+    assert not any(
+        call.get("ExpressionAttributeValues", {}).get(":status") == {"S": "failed"}
+        for call in ddb.calls
+    )
+    assert not any(name == "delete_object" for name, _kwargs in s3.calls)
+
+
+def test_definitive_run_task_rejection_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ddb = _Dynamo()
+    s3 = _S3()
+    body = _body()
+    _seed_queued(ddb, body, s3)
+    ecs = _Ecs(error=_EcsServiceError("ClientException"))
+    module = _load_handler(monkeypatch, ddb=ddb, ecs=ecs, s3=s3)
+    _configure(monkeypatch)
+    monkeypatch.setattr(module.time, "time", lambda: 1_001)
+
+    with pytest.raises(_EcsServiceError):
+        module.handler(
+            {"Records": [{"messageId": "rejected", "body": body}]},
+            types.SimpleNamespace(aws_request_id="request-1"),
+        )
+
+    terminal = [
+        call
+        for call in ddb.calls
+        if call.get("ExpressionAttributeValues", {}).get(":status") == {"S": "failed"}
+    ]
+    assert len(terminal) == 1
+
+
 def test_deadline_exhaustion_after_dispatch_claim_is_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -980,7 +1037,7 @@ def test_expired_envelope_causes_no_post_deadline_network_call(
     assert ecs.calls == []
 
 
-def test_dispatcher_rejects_non_exact_task_count_and_releases_lease(
+def test_dispatcher_rejects_non_exact_task_count_without_falsely_terminalizing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ddb = _Dynamo()
@@ -1006,10 +1063,11 @@ def test_dispatcher_rejects_non_exact_task_count_and_releases_lease(
             types.SimpleNamespace(aws_request_id="request-1"),
         )
 
-    assert any(
+    assert not any(
         value.get("ExpressionAttributeValues", {}).get(":status") == {"S": "failed"}
         for value in ddb.calls
     )
+    assert not any(name == "delete_object" for name, _kwargs in s3.calls)
 
 
 def test_ecs_stopped_reconciler_terminalizes_owned_queued_or_running_job(
@@ -1032,10 +1090,7 @@ def test_ecs_stopped_reconciler_terminalizes_owned_queued_or_running_job(
         timeout_s=900,
         audit_principal_hash=audit_hash,
     )
-    task_arn = (
-        "arn:aws:ecs:ap-northeast-1:718959508629:"
-        "task/teamagent-dev-tiktok/0123456789abcdef"
-    )
+    task_arn = "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/0123456789abcdef"
     _seed_running(ddb, request.to_json_bytes().decode(), task_arn=task_arn)
 
     event = _stopped_event(
@@ -1068,10 +1123,7 @@ def test_ecs_stopped_finalizer_commits_only_exact_s3_checked_completion(
     body = _body()
     ddb = _Dynamo()
     s3 = _S3()
-    task_arn = (
-        "arn:aws:ecs:ap-northeast-1:718959508629:"
-        "task/teamagent-dev-tiktok/0123456789abcdef"
-    )
+    task_arn = "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/0123456789abcdef"
     _seed_running(ddb, body, task_arn=task_arn)
     artifact_key, completion_key = _add_done_completion(s3, body)
     module = _load_handler(monkeypatch, ddb=ddb, ecs=_Ecs(), s3=s3)
@@ -1094,11 +1146,7 @@ def test_ecs_stopped_finalizer_commits_only_exact_s3_checked_completion(
     assert update["ExpressionAttributeValues"][":manifest"]["S"] == (
         module._artifact_manifest_sha256(detail["artifacts"])
     )
-    list_keys = [
-        kwargs["Prefix"]
-        for name, kwargs in s3.calls
-        if name == "list_object_versions"
-    ]
+    list_keys = [kwargs["Prefix"] for name, kwargs in s3.calls if name == "list_object_versions"]
     assert completion_key in list_keys
     assert artifact_key in list_keys
     head = next(
@@ -1116,15 +1164,12 @@ def test_ecs_stopped_finalizer_fails_closed_on_artifact_checksum_mismatch(
     body = _body()
     ddb = _Dynamo()
     s3 = _S3()
-    task_arn = (
-        "arn:aws:ecs:ap-northeast-1:718959508629:"
-        "task/teamagent-dev-tiktok/0123456789abcdef"
-    )
+    task_arn = "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev-tiktok/0123456789abcdef"
     _seed_running(ddb, body, task_arn=task_arn)
     artifact_key, _completion_key = _add_done_completion(s3, body)
-    s3.objects[(artifact_key, "artifact-version-1")]["ChecksumSHA256"] = (
-        base64.b64encode(b"\x00" * 32).decode()
-    )
+    s3.objects[(artifact_key, "artifact-version-1")]["ChecksumSHA256"] = base64.b64encode(
+        b"\x00" * 32
+    ).decode()
     module = _load_handler(monkeypatch, ddb=ddb, ecs=_Ecs(), s3=s3)
     _configure_stopped(monkeypatch)
     monkeypatch.setattr(module.time, "time", lambda: 1_100)
