@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -471,9 +472,15 @@ def test_begin_reads_manual_pagination_and_persists_exact_canonical_baseline() -
     cli = _FakeCli()
     saga = _saga(cli)
 
-    saga.begin()
+    receipt = saga.begin()
 
     assert cli.item is not None
+    assert receipt["kind"] == "teamagent-ecs-service-apply-saga-receipt"
+    assert receipt["stage"] == "APPLYING"
+    assert receipt["record_id"] == f"ecs-service-apply#{ATTEMPT}"
+    assert receipt["plan_sha256"] == PLAN_SHA256
+    assert receipt["apply_attempt_id"] == ATTEMPT
+    assert re.fullmatch(r"[0-9a-f]{64}", receipt["receipt_sha256"])
     assert cli.item["record_id"] == {"S": f"ecs-service-apply#{ATTEMPT}"}
     assert cli.item["plan_sha256"] == {"S": PLAN_SHA256}
     assert cli.item["apply_attempt_id"] == {"S": ATTEMPT}
@@ -581,10 +588,21 @@ def test_applied_requires_both_exact_planned_task_definitions_and_stability() ->
         saga.finish(outcome="applied")
     cli.services[CONNECT_SERVICE_ARN]["pendingCount"] = 0
 
-    saga.finish(outcome="applied")
+    receipt = saga.finish(outcome="applied")
 
     assert cli.item["stage"] == {"S": "APPLIED"}
-    saga.finish(outcome="applied")
+    assert receipt["stage"] == "APPLIED"
+    assert saga.finish(outcome="applied") == receipt
+
+
+def test_begin_requires_exact_completed_single_primary_deployment() -> None:
+    cli = _FakeCli()
+    cli.services[MCP_SERVICE_ARN]["deployments"][0]["rolloutState"] = "IN_PROGRESS"
+
+    with pytest.raises(SAGA.SagaError, match="not exactly stable"):
+        _saga(cli).begin()
+
+    assert cli.item is None
 
 
 def test_applied_resolves_unknown_planned_arns_by_exact_task_artifact() -> None:
@@ -739,7 +757,8 @@ def test_private_saved_plan_is_held_and_remeasured_by_descriptor(
     path.chmod(0o600)
     observed_descriptors: list[int] = []
 
-    def show(descriptor: int) -> dict[str, Any]:
+    def show(descriptor: int, *, terraform_bin: Path) -> dict[str, Any]:
+        assert terraform_bin == Path("/trusted/terraform")
         observed_descriptors.append(descriptor)
         assert os.read(descriptor, len(payload)) == payload
         os.lseek(descriptor, 0, os.SEEK_SET)
@@ -751,6 +770,7 @@ def test_private_saved_plan_is_held_and_remeasured_by_descriptor(
         SAGA._load_saved_plan(
             path,
             expected_sha256=hashlib.sha256(payload).hexdigest(),
+            terraform_bin=Path("/trusted/terraform"),
         )
         == _plan()
     )
@@ -761,11 +781,13 @@ def test_private_saved_plan_is_held_and_remeasured_by_descriptor(
         SAGA._load_saved_plan(
             path,
             expected_sha256=hashlib.sha256(payload).hexdigest(),
+            terraform_bin=Path("/trusted/terraform"),
         )
 
 
 def test_aws_cli_pins_endpoint_scrubs_ambient_authority_and_never_uses_shell(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("AWS_ENDPOINT_URL_ECS", "http://attacker.invalid")
     monkeypatch.setenv("AWS_PROFILE", "attacker")
@@ -782,13 +804,16 @@ def test_aws_cli_pins_endpoint_scrubs_ambient_authority_and_never_uses_shell(
         return subprocess.CompletedProcess(command, 0, "{}", "")
 
     monkeypatch.setattr(SAGA.subprocess, "run", run)
+    aws_bin = tmp_path / "aws"
+    aws_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    aws_bin.chmod(0o500)
 
-    assert SAGA._SubprocessAwsCli().json("ecs", "list-services") == {}
+    assert SAGA._SubprocessAwsCli(aws_bin).json("ecs", "list-services") == {}
 
     command = observed["command"]
     kwargs = observed["kwargs"]
     assert command[:7] == [
-        "aws",
+        str(aws_bin.resolve()),
         "--region",
         "ap-northeast-1",
         "--endpoint-url",

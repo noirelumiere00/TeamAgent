@@ -502,6 +502,7 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
       variable = "dynamodb:LeadingKeys"
       values = [
         "alarm-migration#*",
+        "ecs-service-apply#*",
         "lock#teamagent/terraform.tfstate",
         "sns-challenge#*",
         "versioning-cutover#*",

@@ -14,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="22"
+GUARD_VERSION="23"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -53,6 +53,7 @@ IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
 APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
 EVENTBRIDGE_APPLY_SAGA="$TF_DIR/eventbridge_apply_saga.py"
+ECS_SERVICE_APPLY_SAGA="$TF_DIR/ecs_service_apply_saga.py"
 HMAC_PLAN_HELPER="$REPO_ROOT/scripts/terraform_hmac_payload.py"
 OPENCLAW_ROLLOUT_GATE="$REPO_ROOT/infra/openclaw/run-live-rollout-gates.mjs"
 TMP_ROOT=""
@@ -257,6 +258,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$APPLY_SUPERVISOR"
   assert_regular_nonwritable "$PLAN_STAGER"
   assert_regular_nonwritable "$EVENTBRIDGE_APPLY_SAGA"
+  assert_regular_nonwritable "$ECS_SERVICE_APPLY_SAGA"
   assert_regular_nonwritable "$HMAC_PLAN_HELPER"
   assert_regular_nonwritable "$OPENCLAW_ROLLOUT_GATE"
   assert_git_tracked_clean "$SCRIPT_PATH"
@@ -271,6 +273,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$APPLY_SUPERVISOR"
   assert_git_tracked_clean "$PLAN_STAGER"
   assert_git_tracked_clean "$EVENTBRIDGE_APPLY_SAGA"
+  assert_git_tracked_clean "$ECS_SERVICE_APPLY_SAGA"
   assert_git_tracked_clean "$HMAC_PLAN_HELPER"
   assert_git_tracked_clean "$OPENCLAW_ROLLOUT_GATE"
 
@@ -313,7 +316,8 @@ write_config_manifest() {
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
     "$IMAGE_CONTEXT_HELPER" \
-    "$APPLY_SUPERVISOR"; do
+    "$APPLY_SUPERVISOR" \
+    "$ECS_SERVICE_APPLY_SAGA"; do
     if [ "$migration_mode" = "exclude" ] &&
        [ "$path" = "$MIGRATION_FILE" ]; then
       continue
@@ -4134,6 +4138,42 @@ validate_media_envelope_cutover_gate() {
     die "legacy→generic media切替のdurable 900秒証跡が不正です"
 }
 
+validate_ecs_service_saga_receipt() {
+  local receipt="$1" expected_stage="$2"
+  jq -e \
+    --arg stage "$expected_stage" \
+    --arg attempt "$APPLY_ATTEMPT_ID" \
+    --arg plan "$STAGED_PLAN_SHA256" '
+    (keys | sort) == ([
+      "apply_attempt_id",
+      "baseline_sha256",
+      "kind",
+      "ledger_item_sha256",
+      "plan_sha256",
+      "planned_sha256",
+      "receipt_sha256",
+      "record_id",
+      "schema_version",
+      "stage"
+    ] | sort) and
+    .kind == "teamagent-ecs-service-apply-saga-receipt" and
+    .schema_version == 1 and
+    .record_id == ("ecs-service-apply#" + $attempt) and
+    .stage == $stage and
+    .plan_sha256 == $plan and
+    .apply_attempt_id == $attempt and
+    (.baseline_sha256 | test("^[0-9a-f]{64}$")) and
+    (.planned_sha256 | test("^[0-9a-f]{64}$")) and
+    (.ledger_item_sha256 | test("^[0-9a-f]{64}$")) and
+    (.receipt_sha256 | test("^[0-9a-f]{64}$"))
+  ' "$receipt" >/dev/null ||
+    die "durable ECS service saga receiptがplan/attempt/stageと不一致です"
+  [ "$(jq -j -cS 'del(.receipt_sha256)' "$receipt" | sha256_text)" = "$(
+    jq -er '.receipt_sha256' "$receipt"
+  )" ] ||
+    die "durable ECS service saga receipt hashが不正です"
+}
+
 # Terraform precondition へ渡す、live 由来の non-secret object。
 core_from_snapshot() {
   local snapshot="$1"
@@ -5978,23 +6018,6 @@ validate_exact_runtime_iam_plan() {
         "^arn:aws:kms:" + $region + ":" + $account +
         ":key/(mrk-)?[0-9a-f-]{32,64}$"
       );
-    def exact_rollout_kms_alias_scope:
-      (resources == [
-        "arn:aws:kms:" + $region + ":" + $account + ":key/*"
-      ]) and
-      (
-        (
-          (.Condition["ForAnyValue:StringEquals"]["kms:ResourceAliases"] //
-            []) | array
-        ) as $aliases |
-        ($aliases | length) == 1 and
-        (
-          $aliases[0] ==
-            "alias/teamagent-dev-openclaw-rollout-evidence" or
-          $aliases[0] ==
-            "alias/teamagent-dev-openclaw-rollout-signing"
-        )
-      );
     def approved_bedrock_arns:
       [
         "arn:aws:bedrock:ap-northeast-1:" + $account +
@@ -6062,10 +6085,7 @@ validate_exact_runtime_iam_plan() {
            resources | length > 0 and all(. as $arn |
              ($approved | index($arn)) != null))) and
         ((allows_action_prefix("kms:") | not) or
-          (
-            (resources | length > 0 and all(exact_kms_key_arn)) or
-            exact_rollout_kms_alias_scope
-          )) and
+          (resources | length > 0 and all(exact_kms_key_arn))) and
         ((allows_action_prefix("iam:PassRole") | not) or
           exact_pass_service)
       )
@@ -7469,6 +7489,7 @@ verify_required_migration_apply_receipt() {
   local embedded_rollout="$TMP_ROOT/prior-openclaw-rollout-embedded-$RANDOM.json"
   local embedded_service_probe="$TMP_ROOT/prior-service-probe-embedded-$RANDOM.json"
   local embedded_media_authorization="$TMP_ROOT/prior-media-authorization-embedded-$RANDOM.json"
+  local embedded_ecs_saga="$TMP_ROOT/prior-ecs-saga-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
   receipt_commit="$(
     jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
@@ -7486,6 +7507,7 @@ verify_required_migration_apply_receipt() {
   jq -S -c '.post_apply_service_probe' "$receipt" > "$embedded_service_probe"
   jq -S -c '.media_apply_authorization' "$receipt" \
     > "$embedded_media_authorization"
+  jq -S -c '.ecs_service_saga_receipt' "$receipt" > "$embedded_ecs_saga"
   [ "$(sha256_file "$embedded_retention")" = \
     "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_lock")" = \
@@ -7497,7 +7519,9 @@ verify_required_migration_apply_receipt() {
     [ "$(sha256_file "$embedded_service_probe")" = \
       "$(jq -er '.post_apply_service_probe_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_media_authorization")" = \
-      "$(jq -er '.media_apply_authorization_sha256' "$receipt")" ] ||
+      "$(jq -er '.media_apply_authorization_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_ecs_saga")" = \
+      "$(jq -er '.ecs_service_saga_receipt_sha256' "$receipt")" ] ||
     die "prior apply receiptのembedded evidence hash bindingが不正です"
   if [ "$(jq -er '.openclaw_rollout_result.required' "$receipt")" = "true" ]; then
     jq -S -c '.openclaw_rollout_result.persistedResult' "$receipt" \
@@ -7531,6 +7555,8 @@ verify_required_migration_apply_receipt() {
       "apply_attempt_id",
       "bedrock_retention_live",
       "bedrock_retention_live_sha256",
+      "ecs_service_saga_receipt",
+      "ecs_service_saga_receipt_sha256",
       "git_commit",
       "guard_version",
       "image_deployment_intent_id",
@@ -7603,6 +7629,12 @@ verify_required_migration_apply_receipt() {
     (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
     (.alarm_delivery_receipt_sha256 | test("^[0-9a-f]{64}$")) and
     (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.ecs_service_saga_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    .ecs_service_saga_receipt.kind ==
+      "teamagent-ecs-service-apply-saga-receipt" and
+    .ecs_service_saga_receipt.stage == "APPLIED" and
+    .ecs_service_saga_receipt.apply_attempt_id == .apply_attempt_id and
+    .ecs_service_saga_receipt.plan_sha256 == .plan_sha256 and
     (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
     .openclaw_rollout_result.schemaVersion == 2 and
     .openclaw_rollout_result.passed == true and
@@ -10093,6 +10125,10 @@ case "$COMMAND" in
       die "apply receiptもplanと同じprivate directoryに置いてください"
     ensure_tmp
     assert_trusted_automation_identity
+    TERRAFORM_BIN="$(realpath "$(command -v terraform)")"
+    assert_regular_nonwritable "$TERRAFORM_BIN"
+    [[ "$("$TERRAFORM_BIN" version | head -n 1)" =~ ^Terraform[[:space:]]v1[.] ]] ||
+      die "review済みTerraform v1だけを使用できます"
     ORIGINAL_PLAN="$PLAN"
     STAGED_PLAN="$TMP_ROOT/staged-plan.tfplan"
     STAGE_RESULT="$(
@@ -10128,6 +10164,11 @@ case "$COMMAND" in
     APPLY_RECEIPT_PUBLISHED="false"
     EVENTBRIDGE_SAGA_STARTED="false"
     EVENTBRIDGE_SAGA_FINISHED="false"
+    ECS_SERVICE_SAGA_STARTED="false"
+    ECS_SERVICE_SAGA_FINISHED="false"
+    ECS_SERVICE_SAGA_BEGIN_RECEIPT="$TMP_ROOT/ecs-service-saga-begin.json"
+    ECS_SERVICE_SAGA_FINISH_RECEIPT="$TMP_ROOT/ecs-service-saga-finish.json"
+    ECS_SERVICE_SAGA_RESTORE_RECEIPT="$TMP_ROOT/ecs-service-saga-restore.json"
     OPENCLAW_POST_APPLY_STARTED="false"
     OPENCLAW_ROLLOUT_REQUIRED="false"
     OPENCLAW_PREVIOUS_TASK_DEFINITION=""
@@ -10165,6 +10206,7 @@ case "$COMMAND" in
     cleanup_apply_command() {
       local status=$?
       local saga_restore_failed="false"
+      local ecs_restore_failed="false"
       local openclaw_restore_failed="false"
       set +e
       if [ "$OPENCLAW_POST_APPLY_STARTED" = "true" ] &&
@@ -10185,7 +10227,20 @@ case "$COMMAND" in
         fi
       fi
       cleanup_post_apply_tasks
-      stop_gate_heartbeat
+      if [ "$ECS_SERVICE_SAGA_STARTED" = "true" ] &&
+        [ "$ECS_SERVICE_SAGA_FINISHED" != "true" ]; then
+        if python3 "$ECS_SERVICE_APPLY_SAGA" finish \
+          --aws-bin "$AWS_BIN" \
+          --terraform-bin "$TERRAFORM_BIN" \
+          --plan "$GATE_PLAN" \
+          --plan-sha256 "$STAGED_PLAN_SHA256" \
+          --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+          --outcome failed > "$ECS_SERVICE_SAGA_RESTORE_RECEIPT"; then
+          ECS_SERVICE_SAGA_FINISHED="true"
+        else
+          ecs_restore_failed="true"
+        fi
+      fi
       if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
         [ "$EVENTBRIDGE_SAGA_FINISHED" != "true" ]; then
         if python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
@@ -10198,6 +10253,7 @@ case "$COMMAND" in
           saga_restore_failed="true"
         fi
       fi
+      stop_gate_heartbeat
       if [ "$GATE_LOCK_ACQUIRED" = "true" ]; then
         if [ "$GATE_OUTCOME_RECORDED" != "true" ]; then
           bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
@@ -10222,6 +10278,10 @@ case "$COMMAND" in
       if [ "$openclaw_restore_failed" = "true" ]; then
         echo "FATAL: durable previous OpenClaw revision restoration requires reconciliation" >&2
         exit 71
+      fi
+      if [ "$ecs_restore_failed" = "true" ]; then
+        echo "FATAL: durable MCP/connect-web baseline restoration requires reconciliation" >&2
+        exit 72
       fi
       exit "$status"
     }
@@ -10272,6 +10332,9 @@ case "$COMMAND" in
       die "verify pathのsaved plan digestがstaged planと一致しません"
     [ "$(stat_identity "$GATE_PLAN")" = "$STAGED_PLAN_IDENTITY" ] ||
       die "verify pathがstaged planと同一inodeではありません"
+    rm -f "$STAGED_PLAN"
+    [ ! -e "$STAGED_PLAN" ] && [ ! -L "$STAGED_PLAN" ] ||
+      die "saved planの余分なhard linkを除去できません"
     if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
       [ "$(sha256_file "$MEDIA_AUTHORIZATION")" = \
         "$MEDIA_AUTHORIZATION_SHA256" ] &&
@@ -10336,6 +10399,19 @@ case "$COMMAND" in
     )" ||
       die "saved planからOpenClaw rollout要否を一意に確定できません"
 
+    python3 "$ECS_SERVICE_APPLY_SAGA" begin \
+      --aws-bin "$AWS_BIN" \
+      --terraform-bin "$TERRAFORM_BIN" \
+      --plan "$GATE_PLAN" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      > "$ECS_SERVICE_SAGA_BEGIN_RECEIPT" ||
+      die "MCP/connect-web ECS rollback baselineをdurableに固定できません"
+    chmod 600 "$ECS_SERVICE_SAGA_BEGIN_RECEIPT"
+    validate_ecs_service_saga_receipt \
+      "$ECS_SERVICE_SAGA_BEGIN_RECEIPT" "APPLYING"
+    ECS_SERVICE_SAGA_STARTED="true"
+
     python3 "$EVENTBRIDGE_APPLY_SAGA" begin \
       --plan "$GATE_PLAN" \
       --plan-sha256 "$STAGED_PLAN_SHA256" \
@@ -10352,7 +10428,7 @@ case "$COMMAND" in
     if ! (
       cd "$TF_DIR"
       python3 "$APPLY_SUPERVISOR" \
-        --terraform-bin "$(realpath "$(command -v terraform)")" \
+        --terraform-bin "$TERRAFORM_BIN" \
         --gate-runner "$IMAGE_GATE_RUNNER" \
         --plan "$GATE_PLAN" \
         --plan-sha256 "$STAGED_PLAN_SHA256" \
@@ -10603,6 +10679,28 @@ case "$COMMAND" in
       die "EventBridge apply completionをdurableに確認できません"
     EVENTBRIDGE_SAGA_FINISHED="true"
 
+    python3 "$ECS_SERVICE_APPLY_SAGA" finish \
+      --aws-bin "$AWS_BIN" \
+      --terraform-bin "$TERRAFORM_BIN" \
+      --plan "$GATE_PLAN" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --outcome applied > "$ECS_SERVICE_SAGA_FINISH_RECEIPT" ||
+      die "MCP/connect-web ECS steady stateをdurableに確認できません"
+    chmod 600 "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+    validate_ecs_service_saga_receipt \
+      "$ECS_SERVICE_SAGA_FINISH_RECEIPT" "APPLIED"
+    [ "$(jq -er '.baseline_sha256' \
+      "$ECS_SERVICE_SAGA_BEGIN_RECEIPT")" = "$(
+        jq -er '.baseline_sha256' "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+      )" ] &&
+      [ "$(jq -er '.planned_sha256' \
+        "$ECS_SERVICE_SAGA_BEGIN_RECEIPT")" = "$(
+          jq -er '.planned_sha256' "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+        )" ] ||
+      die "ECS sagaのbegin/finish bindingが不一致です"
+    ECS_SERVICE_SAGA_FINISHED="true"
+
     bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
       --plan "$GATE_PLAN" \
       --apply-attempt-id "$APPLY_ATTEMPT_ID" \
@@ -10686,6 +10784,9 @@ case "$COMMAND" in
       --arg post_apply_service_probe_sha256 "$(
         sha256_file "$POST_APPLY_SERVICE_PROBE_RESULT"
       )" \
+      --arg ecs_service_saga_receipt_sha256 "$(
+        sha256_file "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+      )" \
       --arg versioning_receipt_sha256 "$(
         jq -r '.versioning_receipt_sha256' "$TMP_ROOT/verify/receipt.json"
       )" \
@@ -10734,6 +10835,8 @@ case "$COMMAND" in
         "$MEDIA_AUTHORIZATION_FOR_RECEIPT" \
       --slurpfile post_apply_service_probe \
         "$POST_APPLY_SERVICE_PROBE_RESULT" \
+      --slurpfile ecs_service_saga \
+        "$ECS_SERVICE_SAGA_FINISH_RECEIPT" \
       --slurpfile openclaw_rollout "$OPENCLAW_ROLLOUT_RESULT" '{
         kind:$kind,
         schema_version:$schema_version,
@@ -10762,6 +10865,9 @@ case "$COMMAND" in
         post_apply_service_probe_sha256:
           $post_apply_service_probe_sha256,
         post_apply_service_probe:$post_apply_service_probe[0],
+        ecs_service_saga_receipt_sha256:
+          $ecs_service_saga_receipt_sha256,
+        ecs_service_saga_receipt:$ecs_service_saga[0],
         versioning_receipt_sha256:$versioning_receipt_sha256,
         log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
         alarm_delivery_receipt_sha256:$alarm_delivery_receipt_sha256,
@@ -10807,6 +10913,12 @@ case "$COMMAND" in
         "teamagent-post-apply-service-probe-receipt" and
       .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
       (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ecs_service_saga_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      .ecs_service_saga_receipt.kind ==
+        "teamagent-ecs-service-apply-saga-receipt" and
+      .ecs_service_saga_receipt.stage == "APPLIED" and
+      .ecs_service_saga_receipt.apply_attempt_id == .apply_attempt_id and
+      .ecs_service_saga_receipt.plan_sha256 == .plan_sha256 and
       .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
       (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
       (

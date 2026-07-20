@@ -1469,15 +1469,26 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         'python3 "$EVENTBRIDGE_APPLY_SAGA" finish',
         rollout_call,
     )
+    ecs_applied = apply_case.index(
+        'python3 "$ECS_SERVICE_APPLY_SAGA" finish',
+        eventbridge_applied,
+    )
     intent_applied = apply_case.index(
         'bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome',
-        eventbridge_applied,
+        ecs_applied,
     )
     lock_release = apply_case.index(
         'bash "$IMAGE_GATE_RUNNER" release-deployment-lock',
         intent_applied,
     )
-    assert service_probe < rollout_call < eventbridge_applied < intent_applied < lock_release
+    assert (
+        service_probe
+        < rollout_call
+        < eventbridge_applied
+        < ecs_applied
+        < intent_applied
+        < lock_release
+    )
     assert apply_case.index("--restore-and-verify") < revision_gate < rollout_call
     assert apply_case.index('OPENCLAW_POST_APPLY_STARTED="true"') < rollout_call
     assert 'OPENCLAW_ROLLOUT_REQUIRED="$(' in apply_case
@@ -1489,9 +1500,10 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
-    assert ".schema_version == 5" in apply_case
+    assert ".schema_version == 6" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
     assert "post_apply_service_probe_sha256" in apply_case
+    assert "ecs_service_saga_receipt_sha256" in apply_case
 
     probe = guard[
         guard.index("run_post_apply_service_probe()")
@@ -1523,15 +1535,17 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         '"s3:PutObjectRetention"',
         '"kms:Sign"',
         '"kms:Verify"',
-        '"kms:ResourceAliases"',
         '"dynamodb:TransactWriteItems"',
     ):
         assert required in evidence_tf
-    assert evidence_tf.count('test     = "ForAnyValue:StringEquals"') == 2
-    assert evidence_tf.count('"arn:aws:kms:ap-northeast-1:718959508629:key/*"') == 2
-    assert "exact_rollout_kms_alias_scope" in guard
-    assert 'test     = "ForAllValues:StringNotEquals"' in runtime_evidence_tf
-    assert "local.openclaw_rollout_signing_alias" in runtime_evidence_tf
+    assert "aws_kms_key.openclaw_rollout_evidence.arn" in evidence_tf
+    assert "aws_kms_key.openclaw_rollout_signing.arn" in evidence_tf
+    assert '"kms:ResourceAliases"' not in evidence_tf
+    assert '"arn:aws:kms:ap-northeast-1:718959508629:key/*"' not in evidence_tf
+    assert "exact_rollout_kms_alias_scope" not in guard
+    assert "not_resources = [aws_kms_key.openclaw_rollout_signing.arn]" in (
+        runtime_evidence_tf
+    )
 
 
 def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:

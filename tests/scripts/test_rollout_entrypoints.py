@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
         ROOT / "scripts" / "measure_worker_release.py",
         ROOT / "scripts" / "check_hmac_runtime_state.py",
         ROOT / "infra" / "terraform" / "eventbridge_apply_saga.py",
+        ROOT / "infra" / "terraform" / "ecs_service_apply_saga.py",
     ),
 )
 def test_rollout_entrypoint_resolves_repository_imports_without_editable_install(

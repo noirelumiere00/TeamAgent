@@ -257,6 +257,9 @@ def _terraform_environment() -> dict[str, str]:
 
 
 class _SubprocessAwsCli:
+    def __init__(self, aws_bin: Path) -> None:
+        self.aws_bin = _trusted_executable(aws_bin, label="AWS CLI")
+
     def _command(
         self,
         service: str,
@@ -267,7 +270,7 @@ class _SubprocessAwsCli:
         if endpoint is None:
             raise SagaError("AWS service is outside the saga endpoint allowlist")
         return [
-            "aws",
+            str(self.aws_bin),
             "--region",
             _REGION,
             "--endpoint-url",
@@ -363,14 +366,34 @@ def _descriptor_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _terraform_show_descriptor(descriptor: int) -> dict[str, Any]:
+def _trusted_executable(path: Path, *, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as exc:
+        raise SagaError(f"{label} executable is unavailable") from exc
+    if (
+        not resolved.is_absolute()
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_mode & 0o022
+        or not metadata.st_mode & stat.S_IXUSR
+    ):
+        raise SagaError(f"{label} executable is not a trusted regular file")
+    return resolved
+
+
+def _terraform_show_descriptor(
+    descriptor: int,
+    *,
+    terraform_bin: Path,
+) -> dict[str, Any]:
     descriptor_root = Path("/proc/self/fd")
     if not descriptor_root.is_dir():
         descriptor_root = Path("/dev/fd")
     descriptor_path = descriptor_root / str(descriptor)
     try:
         completed = subprocess.run(
-            ["terraform", "show", "-json", str(descriptor_path)],
+            [str(terraform_bin), "show", "-json", str(descriptor_path)],
             check=True,
             capture_output=True,
             text=True,
@@ -385,7 +408,12 @@ def _terraform_show_descriptor(descriptor: int) -> dict[str, Any]:
     return _json_object(completed.stdout, label="terraform show")
 
 
-def _load_saved_plan(path: Path, *, expected_sha256: str) -> dict[str, Any]:
+def _load_saved_plan(
+    path: Path,
+    *,
+    expected_sha256: str,
+    terraform_bin: Path,
+) -> dict[str, Any]:
     flags = os.O_RDONLY
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC
@@ -408,7 +436,10 @@ def _load_saved_plan(path: Path, *, expected_sha256: str) -> dict[str, Any]:
             raise SagaError("saved plan is not one bounded private regular file")
         if not hmac.compare_digest(_descriptor_digest(descriptor), expected_sha256):
             raise SagaError("saved plan digest differs")
-        plan = _terraform_show_descriptor(descriptor)
+        plan = _terraform_show_descriptor(
+            descriptor,
+            terraform_bin=terraform_bin,
+        )
         after = os.fstat(descriptor)
         if _descriptor_identity(after) != _descriptor_identity(before) or not hmac.compare_digest(
             _descriptor_digest(descriptor), expected_sha256
@@ -695,7 +726,7 @@ def _canonical_service(raw: object, *, spec: ServiceSpec) -> dict[str, Any]:
         expected_family=spec.task_family,
     )
     desired_count = raw.get("desiredCount")
-    if type(desired_count) is not int or not 0 <= desired_count <= 100_000:
+    if type(desired_count) is not int or desired_count != 1:
         raise SagaError("ECS desired count is invalid")
     return {
         "taskDefinition": task_definition,
@@ -800,7 +831,7 @@ def _assert_stable(
             or type(deployments[0]) is not dict
             or deployments[0].get("status") != "PRIMARY"
             or deployments[0].get("taskDefinition") != state.get("taskDefinition")
-            or deployments[0].get("rolloutState") not in {None, "COMPLETED"}
+            or deployments[0].get("rolloutState") != "COMPLETED"
             or deployments[0].get("desiredCount") != desired
             or deployments[0].get("runningCount") != desired
             or deployments[0].get("pendingCount") != 0
@@ -918,6 +949,22 @@ class EcsServiceApplySaga:
         ):
             raise SagaError("durable ECS planned binding differs")
 
+    def _receipt(self, item: Mapping[str, Any]) -> dict[str, Any]:
+        self._validate_item(item)
+        receipt = {
+            "kind": "teamagent-ecs-service-apply-saga-receipt",
+            "schema_version": _SCHEMA_VERSION,
+            "record_id": self.record_id,
+            "stage": _ddb_string(item, "stage"),
+            "plan_sha256": self.plan_sha256,
+            "apply_attempt_id": self.apply_attempt_id,
+            "baseline_sha256": _ddb_string(item, "baseline_sha256"),
+            "planned_sha256": _ddb_string(item, "planned_sha256"),
+            "ledger_item_sha256": _digest(item),
+        }
+        receipt["receipt_sha256"] = _digest(receipt)
+        return receipt
+
     def _baseline_from_item(self, item: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         baseline_json = _ddb_string(item, "baseline_json")
         try:
@@ -937,7 +984,7 @@ class EcsServiceApplySaga:
             }:
                 raise SagaError("durable ECS rollback baseline is invalid")
             desired = value.get("desiredCount")
-            if type(desired) is not int or not 0 <= desired <= 100_000:
+            if type(desired) is not int or desired != 1:
                 raise SagaError("durable ECS rollback baseline desired count is invalid")
             baseline[key] = {
                 "taskDefinition": _validate_task_definition(
@@ -961,8 +1008,9 @@ class EcsServiceApplySaga:
             raise SagaError("durable ECS rollback baseline digest differs")
         return baseline
 
-    def begin(self) -> None:
-        baseline, _raw = _read_services(self.cli)
+    def begin(self) -> dict[str, Any]:
+        baseline, raw = _read_services(self.cli)
+        _assert_stable(raw, baseline)
         baseline_json = _canonical_bytes(baseline).decode("utf-8")
         planned_json = _canonical_bytes(self.plan.binding).decode("utf-8")
         item = _ddb_item(
@@ -1000,6 +1048,13 @@ class EcsServiceApplySaga:
             # A begin is deliberately one-shot. Even an ambiguous successful Put must be
             # reconciled through finish; replaying begin could capture a post-apply baseline.
             raise SagaError("durable ECS saga already exists or could not begin") from exc
+        confirmed = self._read()
+        if confirmed is None:
+            raise SagaError("durable ECS saga baseline was not confirmed")
+        receipt = self._receipt(confirmed)
+        if receipt["stage"] != "APPLYING":
+            raise SagaError("durable ECS saga baseline stage is invalid")
+        return receipt
 
     def _verify_planned(
         self,
@@ -1105,7 +1160,12 @@ class EcsServiceApplySaga:
             raise SagaError("ECS exact rollback baseline could not be verified")
         _assert_stable(raw_restored, baseline)
 
-    def _transition(self, item: Mapping[str, Any], *, desired: str) -> None:
+    def _transition(
+        self,
+        item: Mapping[str, Any],
+        *,
+        desired: str,
+    ) -> dict[str, Any]:
         values = _ddb_item(
             {
                 ":applying": "APPLYING",
@@ -1153,15 +1213,16 @@ class EcsServiceApplySaga:
             self._validate_item(confirmed)
             if _ddb_string(confirmed, "stage") != desired:
                 raise SagaError("durable ECS saga completion CAS failed") from exc
-            return
+            return confirmed
         confirmed = self._read()
         if confirmed is None:
             raise SagaError("durable ECS saga completion was not persisted")
         self._validate_item(confirmed)
         if _ddb_string(confirmed, "stage") != desired:
             raise SagaError("durable ECS saga completion was not persisted")
+        return confirmed
 
-    def finish(self, *, outcome: str) -> None:
+    def finish(self, *, outcome: str) -> dict[str, Any]:
         desired = {"applied": "APPLIED", "failed": "RESTORED"}.get(outcome)
         if desired is None:
             raise SagaError("ECS saga outcome is invalid")
@@ -1171,7 +1232,7 @@ class EcsServiceApplySaga:
         self._validate_item(item)
         stage = _ddb_string(item, "stage")
         if stage == desired:
-            return
+            return self._receipt(item)
         if stage != "APPLYING":
             raise SagaError("durable ECS saga stage is not reconcilable")
         baseline = self._baseline_from_item(item)
@@ -1181,12 +1242,14 @@ class EcsServiceApplySaga:
             live, raw_live = _read_services(self.cli)
             self._verify_planned(live, raw_live)
             _assert_stable(raw_live, live)
-        self._transition(item, desired=desired)
+        return self._receipt(self._transition(item, desired=desired))
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("begin", "finish"))
+    parser.add_argument("--aws-bin", type=Path, required=True)
+    parser.add_argument("--terraform-bin", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--plan-sha256", required=True)
     parser.add_argument("--apply-attempt-id", required=True)
@@ -1208,25 +1271,31 @@ def main(
             raise SagaError("ECS saga identity is invalid")
         if (args.action == "begin") != (args.outcome is None):
             raise SagaError("begin rejects outcomes and finish requires one")
+        aws_bin = _trusted_executable(args.aws_bin, label="AWS CLI")
+        terraform_bin = _trusted_executable(
+            args.terraform_bin,
+            label="Terraform",
+        )
         saved_plan = _load_saved_plan(
             args.plan,
             expected_sha256=args.plan_sha256,
+            terraform_bin=terraform_bin,
         )
         saga = EcsServiceApplySaga(
             plan=_analyze_plan(saved_plan),
             plan_sha256=args.plan_sha256,
             apply_attempt_id=args.apply_attempt_id,
-            cli=cli or _SubprocessAwsCli(),
+            cli=cli or _SubprocessAwsCli(aws_bin),
         )
         if args.action == "begin":
-            saga.begin()
+            result = saga.begin()
         else:
             assert args.outcome is not None
-            saga.finish(outcome=args.outcome)
+            result = saga.finish(outcome=args.outcome)
     except Exception:
         print('{"code":"ecs_service_apply_saga_failed","ok":false}')
         return 2
-    print('{"code":"ok","ok":true}')
+    print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     return 0
 
 

@@ -68,6 +68,9 @@ def test_runtime_automation_cannot_mint_media_evidence() -> None:
 
 
 def test_runtime_boundary_denies_media_ledger_and_table_takeover() -> None:
+    runtime_ledger = _statement(RUNTIME, "ConditionalRuntimeEvidenceLedger")
+    assert '"ecs-service-apply#*"' in runtime_ledger
+
     media = _statement(RUNTIME, "DenyAuthoritativeMediaLedgerMutation")
     for action in (
         "dynamodb:PutItem",

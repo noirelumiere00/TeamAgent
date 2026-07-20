@@ -284,6 +284,7 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
         encoding="utf-8"
     )
     assert "EVENTBRIDGE_APPLY_SAGA" in runtime_guard
+    assert "ECS_SERVICE_APPLY_SAGA" in runtime_guard
     assert "--outcome failed" in runtime_guard
     assert "--outcome applied" in runtime_guard
 
