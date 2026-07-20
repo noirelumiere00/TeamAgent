@@ -459,7 +459,7 @@ def _service_tf(component: str) -> dict[str, Any]:
         "capacity_provider_strategy": [],
         "platform_version": "LATEST",
         "availability_zone_rebalancing": "ENABLED",
-        "wait_for_steady_state": False,
+        "wait_for_steady_state": component in {"mcp", "connect_web"},
         "deployment_maximum_percent": 100 if component == "openclaw" else 200,
         "deployment_minimum_healthy_percent": 0 if component == "openclaw" else 100,
         "deployment_circuit_breaker": [
@@ -657,8 +657,6 @@ def _safe_plan() -> dict[str, Any]:
         before = _service_tf(component)
         after = copy.deepcopy(before)
         after["task_definition"] = None
-        if component in {"mcp", "connect_web"}:
-            after["wait_for_steady_state"] = True
         change = _change(address, "aws_ecs_service", ["update"], before, after)
         change["change"]["after_unknown"] = {"task_definition": True}
         changes.append(change)
