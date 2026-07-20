@@ -17,7 +17,7 @@ PACKAGE = ROOT / "tools/tiktok_scraper/package.json"
 PACKAGE_LOCK = ROOT / "tools/tiktok_scraper/package-lock.json"
 SCRAPER = ROOT / "tools/tiktok_scraper/search.mjs"
 DNS_PINNED_PROXY = ROOT / "tools/tiktok_scraper/dns_pinned_proxy.mjs"
-WORKER = ROOT / "src/teamagent/media/worker.py"
+TOOL_WORKER = ROOT / "src/teamagent/media/tool_worker.py"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
 CHROMIUM_BASE_DIGEST = "ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04"
@@ -135,20 +135,48 @@ def test_ytdlp_sources_are_hash_verified_then_secret_bearing_extractors_are_remo
 def test_media_image_copies_only_worker_media_code_and_no_core_secrets_stack() -> None:
     assert "FROM scratch AS final" in TEXT
     assert "COPY --from=runtime-packages / /" in TEXT
-    assert "COPY --chown=10001:10001 src/teamagent/media/" in TEXT
+    for source in (
+        "__init__.py",
+        "contracts.py",
+        "deadline.py",
+        "operations.py",
+        "render_child.py",
+        "security.py",
+        "tool_contracts.py",
+        "tool_worker.py",
+        "url_policy.py",
+    ):
+        assert f"src/teamagent/media/{source}" in TEXT
+    assert "  src/teamagent/media/worker.py \\" not in TEXT
+    assert "src/teamagent/media/ /app/src/teamagent/media/" not in TEXT
     assert "COPY src/" not in TEXT
     assert "test ! -e /app/src/teamagent/mcp_gateway" in TEXT
+    assert "test ! -e /app/src/teamagent/media/worker.py" in TEXT
     assert "test ! -e /app/.hf-cache" in TEXT
-    assert "psycopg" in TEXT and "slack_sdk" in TEXT and "google_auth_oauthlib" in TEXT
+    for blocked in (
+        "boto3",
+        "botocore",
+        "s3transfer",
+        "psycopg",
+        "slack_sdk",
+        "google_auth_oauthlib",
+    ):
+        assert blocked in TEXT
     assert "assert all(u.find_spec(name) is None for name in blocked)" in TEXT
     assert "MCP_BEARER" not in TEXT
     assert "VERTEX" not in TEXT
-    worker = WORKER.read_text(encoding="utf-8")
-    assert "self._session.client(" in worker
-    assert '"s3"' in worker
-    assert '"dynamodb"' in worker
-    for forbidden_client in ('client("rds"', 'client("sqs"', 'client("secretsmanager"'):
-        assert forbidden_client not in worker
+    worker = TOOL_WORKER.read_text(encoding="utf-8")
+    assert "import boto" not in worker
+    assert ".client(" not in worker
+    assert "generate_presigned" not in worker
+    runtime_group = (
+        (ROOT / "pyproject.toml")
+        .read_text(encoding="utf-8")
+        .split("media-runtime = [", 1)[1]
+        .split("]", 1)[0]
+    )
+    for forbidden_package in ("boto3", "botocore", "s3transfer"):
+        assert forbidden_package not in runtime_group
 
 
 def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
@@ -159,7 +187,7 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     assert "HOME=/tmp/teamagent/home" in TEXT
     assert "TMPDIR=/tmp/teamagent/tmp" in TEXT
     assert "TEAMAGENT_RUNTIME_KIND=media-worker" in TEXT
-    assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.worker"]' in TEXT
+    assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.tool_worker"]' in TEXT
     assert "--no-sandbox" not in SCRAPER.read_text(encoding="utf-8")
     assert "chromium_sandbox=True" in (ROOT / "src/teamagent/media/render_child.py").read_text(
         encoding="utf-8"
@@ -250,11 +278,14 @@ def test_media_dockerignore_is_deny_by_default() -> None:
     for allowed in (
         "!pyproject.toml",
         "!uv.lock",
-        "!src/teamagent/media/**",
+        "!src/teamagent/media/tool_worker.py",
+        "!src/teamagent/media/tool_contracts.py",
         "!tools/tiktok_scraper/package-lock.json",
         "!infra/docker/media-apk.lock",
     ):
         assert allowed in text
+    assert "!src/teamagent/media/**" not in text
+    assert "!src/teamagent/media/worker.py" not in text
     for blocked in ("**/.env", "**/*.pem", "**/*.key", "**/*.tfstate", "**/node_modules/"):
         assert blocked in text
 

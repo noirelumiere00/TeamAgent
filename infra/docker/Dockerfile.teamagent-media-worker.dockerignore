@@ -4,7 +4,15 @@
 !src/
 !src/teamagent/
 !src/teamagent/media/
-!src/teamagent/media/**
+!src/teamagent/media/__init__.py
+!src/teamagent/media/contracts.py
+!src/teamagent/media/deadline.py
+!src/teamagent/media/operations.py
+!src/teamagent/media/render_child.py
+!src/teamagent/media/security.py
+!src/teamagent/media/tool_contracts.py
+!src/teamagent/media/tool_worker.py
+!src/teamagent/media/url_policy.py
 !tools/
 !tools/tiktok_scraper/
 !tools/tiktok_scraper/package.json
