@@ -397,6 +397,12 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
         "versioning-cutover#*",
       ]
     }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
   }
 
   # The runtime session executes the deployment-intent helper directly. It
@@ -462,6 +468,12 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
         "lock#teamagent/terraform.tfstate",
         "receipt#*",
       ]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
     }
   }
 }

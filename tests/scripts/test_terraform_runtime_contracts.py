@@ -1298,6 +1298,13 @@ def test_provider_lock_is_git_receipted_and_has_official_cross_platform_hashes()
     assert tracked.returncode == 0, tracked.stderr
 
 
+def test_runtime_ledger_leading_key_allows_require_key_presence() -> None:
+    evidence = (TF_ROOT / "runtime_evidence.tf").read_text(encoding="utf-8")
+    assert evidence.count('variable = "dynamodb:LeadingKeys"') == 5
+    assert evidence.count('test     = "Null"') >= 2
+    assert evidence.count('values   = ["false"]') >= 2
+
+
 def test_quarantine_codebuild_is_active_but_cannot_publish_a_release() -> None:
     path = TF_ROOT / "codebuild.tf"
     body = path.read_text(encoding="utf-8")
