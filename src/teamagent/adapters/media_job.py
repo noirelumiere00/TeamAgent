@@ -53,6 +53,7 @@ _SYNC_TIMEOUT_DEFAULT_S = 180
 _SYNC_TIMEOUT_MAX_S = 15 * 60
 _ARTIFACT_TTL_DEFAULT_S = ARTIFACT_RETENTION_SECONDS
 _CONSUMER_RELEASE_RESERVE_SECONDS = 15
+_CREDENTIAL_EXPIRY_SAFETY_SECONDS = 60
 _JOB_ID_RE = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 
 
@@ -132,12 +133,20 @@ class MediaJobClient:
         return boto3.session.Session()
 
     def _client(self, service: str, deadline_epoch_s: float) -> Any:
+        return self._client_from_session(self._session(), service, deadline_epoch_s)
+
+    def _client_from_session(
+        self,
+        session: Any,
+        service: str,
+        deadline_epoch_s: float,
+    ) -> Any:
         budget = DeadlineBudget(deadline_epoch_s, clock=self._clock)
         try:
             config = botocore_config(budget)
         except MediaDeadlineExceededError as exc:
             raise MediaJobError("MEDIA_JOB_DEADLINE_EXCEEDED") from exc
-        return self._session().client(service, region_name=self._region, config=config)
+        return session.client(service, region_name=self._region, config=config)
 
     def _call(
         self,
@@ -242,7 +251,7 @@ class MediaJobClient:
         digest = hashlib.sha256(body).hexdigest()
         key = f"media-jobs/{job_id}/input/{name}"
         expires = datetime.fromtimestamp(int(self._clock()) + resolved_ttl_s, tz=UTC)
-        self._call(
+        put_response = self._call(
             "s3",
             deadline_epoch_s,
             "put_object",
@@ -256,13 +265,16 @@ class MediaJobClient:
             Tagging=f"teamagent-ttl-epoch={int(expires.timestamp())}",
             **self._sse_args(),
         )
-        return S3ObjectRef(
+        ref = S3ObjectRef(
             bucket=self._bucket,
             key=key,
+            version_id=str(put_response.get("VersionId") or ""),
             sha256=digest,
             size=len(body),
             content_type=content_type,
         )
+        self._verify_artifact_ref(ref, deadline_epoch_s=deadline_epoch_s)
+        return ref
 
     def submit(self, request: MediaJobRequest) -> str:
         """Create/reuse a semantic row and enqueue its original timestamp envelope."""
@@ -579,13 +591,34 @@ class MediaJobClient:
             "get_object",
             Bucket=ref.bucket,
             Key=ref.key,
+            VersionId=ref.version_id,
+            ChecksumMode="ENABLED",
         )
-        if response.get("ServerSideEncryption") not in ("AES256", "aws:kms"):
-            raise MediaJobError("MEDIA_ARTIFACT_NOT_ENCRYPTED")
+        self._assert_exact_artifact_response(ref, response)
         body = bytes(response["Body"].read(ref.size + 1))
         if len(body) != ref.size or hashlib.sha256(body).hexdigest() != ref.sha256:
             raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
         return body
+
+    @staticmethod
+    def _assert_exact_artifact_response(
+        ref: S3ObjectRef,
+        response: dict[str, Any],
+    ) -> None:
+        metadata = response.get("Metadata")
+        if (
+            response.get("VersionId") != ref.version_id
+            or response.get("ServerSideEncryption") not in ("AES256", "aws:kms")
+            or response.get("ContentLength") != ref.size
+            or response.get("ContentType") != ref.content_type
+            or not hmac.compare_digest(
+                str(response.get("ChecksumSHA256") or ""),
+                _checksum_sha256_b64(ref.sha256),
+            )
+            or not isinstance(metadata, dict)
+            or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256)
+        ):
+            raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
 
     def _verify_artifact_ref(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> None:
         if ref.bucket != self._bucket:
@@ -597,24 +630,14 @@ class MediaJobClient:
                 "head_object",
                 Bucket=ref.bucket,
                 Key=ref.key,
+                VersionId=ref.version_id,
                 ChecksumMode="ENABLED",
             )
         except MediaJobError:
             raise
         except Exception as exc:
             raise MediaJobError("MEDIA_ARTIFACT_HEAD_FAILED") from exc
-        metadata = response.get("Metadata")
-        if (
-            response.get("ServerSideEncryption") not in ("AES256", "aws:kms")
-            or response.get("ContentLength") != ref.size
-            or not hmac.compare_digest(
-                str(response.get("ChecksumSHA256") or ""),
-                _checksum_sha256_b64(ref.sha256),
-            )
-            or not isinstance(metadata, dict)
-            or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256)
-        ):
-            raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
+        self._assert_exact_artifact_response(ref, response)
 
     def presign_get(
         self,
@@ -623,7 +646,7 @@ class MediaJobClient:
         deadline_epoch_s: int,
         expires_s: int,
     ) -> str:
-        """Create a verified URL compatible with the seven-day SigV4 ceiling."""
+        """Create a short URL bounded by the signing credential's lifetime."""
 
         self._assert_configured()
         if ref.bucket != self._bucket:
@@ -633,10 +656,36 @@ class MediaJobClient:
         self._verify_artifact_ref(ref, deadline_epoch_s=deadline_epoch_s)
         self._remaining(deadline_epoch_s)
         try:
-            url = self._client("s3", deadline_epoch_s).generate_presigned_url(
+            session = self._session()
+            credentials = session.get_credentials()
+            if credentials is None:
+                raise MediaJobError("MEDIA_ARTIFACT_SIGNING_CREDENTIALS_MISSING")
+            frozen = credentials.get_frozen_credentials()
+            if not frozen.access_key or not frozen.secret_key:
+                raise MediaJobError("MEDIA_ARTIFACT_SIGNING_CREDENTIALS_MISSING")
+            effective_expires_s = expires_s
+            credential_expiry = getattr(credentials, "_expiry_time", None)
+            if credential_expiry is not None:
+                remaining_credentials_s = int(
+                    credential_expiry.timestamp()
+                    - self._clock()
+                    - _CREDENTIAL_EXPIRY_SAFETY_SECONDS
+                )
+                if remaining_credentials_s < 1:
+                    raise MediaJobError("MEDIA_ARTIFACT_SIGNING_CREDENTIALS_EXPIRING")
+                effective_expires_s = min(effective_expires_s, remaining_credentials_s)
+            url = self._client_from_session(
+                session,
+                "s3",
+                deadline_epoch_s,
+            ).generate_presigned_url(
                 "get_object",
-                Params={"Bucket": ref.bucket, "Key": ref.key},
-                ExpiresIn=expires_s,
+                Params={
+                    "Bucket": ref.bucket,
+                    "Key": ref.key,
+                    "VersionId": ref.version_id,
+                },
+                ExpiresIn=effective_expires_s,
             )
         except MediaJobError:
             raise

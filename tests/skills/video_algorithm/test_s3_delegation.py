@@ -1,19 +1,19 @@
-"""video_algorithm の取得委譲（tiktok_acquire S3 出力読み）の単体テスト。
-
-boto3/S3 に触れず、TikTokS3Source の posts/download マッピングと、
-VideoAlgorithmSkill._posts_to_metas の写像を検証する。
-"""
+"""Owner-bound TikTok acquisition delegation tests."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+from typing import Any
 
 import pytest
 
 from teamagent.adapters.tiktok_s3_source import TikTokS3Source
+from teamagent.media.contracts import MediaArtifact, MediaJobResult, S3ObjectRef
 from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
 
-_PREFIX = "tiktok-acquire/tk_test/"
+_JOB_ID = "tk_0123456789ab"
+_AUDIT_HASH = "a" * 64
 _URL = "https://www.tiktok.com/@u/video/1"
 _POST = {
     "id": "p0001",
@@ -32,80 +32,135 @@ _POST = {
 }
 
 
-class _FakeBody:
-    def __init__(self, b: bytes) -> None:
-        self._b = b
-
-    def read(self) -> bytes:
-        return self._b
-
-
-class _FakeS3:
-    def __init__(self, objs: dict[str, bytes]) -> None:
-        self._objs = objs
-
-    def get_object(self, Bucket: str, Key: str) -> dict[str, object]:  # noqa: N803
-        if Key not in self._objs:
-            raise KeyError("NoSuchKey")
-        return {"Body": _FakeBody(self._objs[Key])}
+def _ref(name: str, body: bytes, content_type: str) -> S3ObjectRef:
+    return S3ObjectRef(
+        bucket="teamagent-media-test",
+        key=f"media-jobs/{_JOB_ID}/attempts/1/attempt/output/{name}",
+        version_id=f"version-{name.replace('/', '-')}",
+        sha256=hashlib.sha256(body).hexdigest(),
+        size=len(body),
+        content_type=content_type,
+    )
 
 
-def _fake_src() -> TikTokS3Source:
-    objs = {
-        f"{_PREFIX}posts.normalized.json": json.dumps({"posts": [_POST]}).encode(),
-        f"{_PREFIX}videos/manifest.json": json.dumps(
+class _FakeMediaClient:
+    def __init__(self) -> None:
+        posts = json.dumps({"posts": [_POST]}).encode()
+        manifest = json.dumps(
             {
                 "items": [
                     {
                         "pid": "p0001",
                         "tiktok_url": _URL,
                         "downloaded": True,
-                        "video_path": "videos/p0001.mp4",
-                        "thumb_path": "thumbs/p0001.jpg",
                     }
                 ]
             }
-        ).encode(),
-        f"{_PREFIX}videos/p0001.mp4": b"FAKE_MP4_BYTES" * 100,
-    }
-    src = TikTokS3Source(_PREFIX, bucket="teamagent-media-test")
-    src._s3 = lambda: _FakeS3(objs)  # type: ignore[method-assign]
-    return src
+        ).encode()
+        video = b"FAKE_MP4_BYTES" * 100
+        self.refs = {
+            "posts.json": _ref("posts.normalized.json", posts, "application/json"),
+            "manifest.json": _ref("videos/manifest.json", manifest, "application/json"),
+            "video-p0001": _ref("videos/p0001.mp4", video, "video/mp4"),
+        }
+        self.bodies = {
+            ref.version_id: body
+            for ref, body in (
+                (self.refs["posts.json"], posts),
+                (self.refs["manifest.json"], manifest),
+                (self.refs["video-p0001"], video),
+            )
+        }
+        self.owner_reads: list[tuple[str, str | None]] = []
+        self.downloaded_versions: list[str] = []
+
+    def get_result(
+        self,
+        job_id: str,
+        *,
+        deadline_epoch_s: int,
+        expected_audit_principal_hash: str | None = None,
+    ) -> MediaJobResult:
+        assert deadline_epoch_s == 130
+        self.owner_reads.append((job_id, expected_audit_principal_hash))
+        return MediaJobResult(
+            job_id=job_id,
+            status="done",
+            artifacts=tuple(
+                MediaArtifact(name=name, object=ref) for name, ref in self.refs.items()
+            ),
+        )
+
+    def download(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> bytes:
+        assert deadline_epoch_s == 130
+        self.downloaded_versions.append(ref.version_id)
+        return self.bodies[ref.version_id]
 
 
-def test_s3_source_posts_and_download() -> None:
-    src = _fake_src()
-    posts = src.posts()
+def _fake_src() -> tuple[TikTokS3Source, _FakeMediaClient]:
+    client = _FakeMediaClient()
+    source = TikTokS3Source(
+        _JOB_ID,
+        audit_principal_hash=_AUDIT_HASH,
+        client=client,  # type: ignore[arg-type]
+        clock=lambda: 100,
+    )
+    return source, client
+
+
+def test_s3_source_binds_owner_and_exact_artifact_versions() -> None:
+    source, client = _fake_src()
+    posts = source.posts()
     assert len(posts) == 1 and posts[0]["saves"] == 50
-    data, mime = src.download(_URL)
+    data, mime = source.download(_URL)
     assert mime == "video/mp4" and len(data) > 1000
-    # 未保存/不明URLは例外（スキル側で cover-only へ縮退）
+    assert client.owner_reads == [(_JOB_ID, _AUDIT_HASH)]
+    assert client.downloaded_versions == [
+        client.refs["posts.json"].version_id,
+        client.refs["manifest.json"].version_id,
+        client.refs["video-p0001"].version_id,
+    ]
     with pytest.raises(FileNotFoundError):
-        src.download("https://www.tiktok.com/@x/video/999")
+        source.download("https://www.tiktok.com/@x/video/999")
+
+
+def test_s3_source_rejects_unscoped_job_or_owner() -> None:
+    client = _FakeMediaClient()
+    with pytest.raises(ValueError, match="job ID"):
+        TikTokS3Source(
+            "media-jobs/arbitrary-prefix",
+            audit_principal_hash=_AUDIT_HASH,
+            client=client,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="audit principal"):
+        TikTokS3Source(
+            _JOB_ID,
+            audit_principal_hash="attacker-selected",
+            client=client,  # type: ignore[arg-type]
+        )
 
 
 def test_posts_to_metas_mapping() -> None:
     skill = VideoAlgorithmSkill()
     metas = skill._posts_to_metas([_POST])
     assert len(metas) == 1
-    m = metas[0]
-    assert m.rank == 1
-    assert m.url == _URL
-    assert m.author == "u"  # account_id 優先
-    assert m.follower_count == 100
-    assert m.collect_count == 50  # saves
-    assert m.play_count == 1000
-    assert abs(m.engagement_rate - 6.5) < 1e-9  # eg_rate は百分率ポイント
-    assert abs(m.save_rate() - 5.0) < 1e-9  # 50/1000*100
+    meta = metas[0]
+    assert meta.rank == 1
+    assert meta.url == _URL
+    assert meta.author == "u"
+    assert meta.follower_count == 100
+    assert meta.collect_count == 50
+    assert meta.play_count == 1000
+    assert abs(meta.engagement_rate - 6.5) < 1e-9
+    assert abs(meta.save_rate() - 5.0) < 1e-9
 
 
 def test_search_uses_s3_searcher_override() -> None:
-    # _search に searcher override を渡すと、それが使われる（self._searcher 非依存）
     skill = VideoAlgorithmSkill()
     sentinel = skill._posts_to_metas([_POST])
 
-    def fake_searcher(q: str, n: int, rid: str) -> list:
+    def fake_searcher(query: str, count: int, request_id: str) -> list[Any]:
+        del query, count, request_id
         return sentinel
 
-    out = skill._search("q", 5, "req", searcher=fake_searcher)
-    assert out is sentinel
+    assert skill._search("q", 5, "req", searcher=fake_searcher) is sentinel

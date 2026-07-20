@@ -81,10 +81,13 @@ class _S3:
         self.metadata_overrides: dict[str, dict[str, str]] = {}
         self.tag_overrides: dict[str, dict[str, str]] = {}
 
-    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+    def list_object_versions(self, **kwargs: Any) -> dict[str, Any]:
         self.lists.append(kwargs)
         return {
-            "Contents": [{"Key": key} for key in self.keys],
+            "Versions": [
+                {"Key": key, "VersionId": f"version-{index}"}
+                for index, key in enumerate(self.keys, 1)
+            ],
             "IsTruncated": False,
         }
 
@@ -101,6 +104,7 @@ class _S3:
         key = str(kwargs["Key"])
         job_id, version, attempt_id, finalized = self._attempt_parts(key)
         return {
+            "VersionId": kwargs["VersionId"],
             "Metadata": self.metadata_overrides.get(
                 key,
                 {
@@ -109,7 +113,7 @@ class _S3:
                     "lease-version": version,
                     "finalized": str(finalized).lower(),
                 },
-            )
+            ),
         }
 
     def get_object_tagging(self, **kwargs: Any) -> dict[str, Any]:
@@ -265,7 +269,12 @@ def test_expired_lease_reclaims_only_unfinalized_attempt_uuid(
         "reclaimed_attempt_objects": 1,
     }
     assert len(s3.deletes) == 1
-    assert s3.deletes[0]["Delete"]["Objects"] == [{"Key": f"{prefix}/{orphan}/output/media"}]
+    assert s3.deletes[0]["Delete"]["Objects"] == [
+        {
+            "Key": f"{prefix}/{orphan}/output/media",
+            "VersionId": "version-3",
+        }
+    ]
     assert (
         "MEDIA_JOB_STALE_TERMINALIZED" in ddb.claims[0]["ExpressionAttributeValues"][":detail"]["S"]
     )

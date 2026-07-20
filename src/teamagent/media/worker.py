@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import signal
+import stat
 import tempfile
 import time
 import uuid
@@ -57,6 +58,7 @@ _TERMINAL_RESERVE_SECONDS = 15.0
 _PROCESS_TERMINATION_GRACE_SECONDS = 0.5
 _PROCESS_REAP_POLL_SECONDS = 0.01
 _PROCESS_TRACKER_LOCK_TIMEOUT_SECONDS = 0.05
+_S3_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 def _checksum_sha256_b64(hex_digest: str) -> str:
@@ -517,33 +519,80 @@ class AwsWorkerBackend:
     def _attempt_prefix(request: MediaJobRequest, lease: WorkerLease) -> str:
         return f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/"
 
+    @staticmethod
+    def _assert_exact_object_response(
+        ref: S3ObjectRef,
+        response: dict[str, Any],
+    ) -> None:
+        metadata = response.get("Metadata")
+        if (
+            response.get("VersionId") != ref.version_id
+            or response.get("ServerSideEncryption") not in ("AES256", "aws:kms")
+            or response.get("ContentLength") != ref.size
+            or response.get("ContentType") != ref.content_type
+            or not hmac.compare_digest(
+                str(response.get("ChecksumSHA256") or ""),
+                _checksum_sha256_b64(ref.sha256),
+            )
+            or not isinstance(metadata, dict)
+            or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256)
+        ):
+            raise ValueError("S3 object version metadata does not match immutable reference")
+
+    @staticmethod
+    def _assert_unchanged_regular_file(before: os.stat_result, after: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or before.st_dev != after.st_dev
+            or before.st_ino != after.st_ino
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+            or after.st_nlink != 1
+        ):
+            raise ValueError("artifact file changed during upload")
+
     def _delete_exact_attempt_key(
         self,
         request: MediaJobRequest,
         lease: WorkerLease,
         key: str,
+        version_id: str,
     ) -> None:
-        """Delete only an object demonstrably written by this attempt UUID."""
+        """Delete only an exact version demonstrably written by this attempt UUID."""
 
         prefix = self._attempt_prefix(request, lease)
         if not key.startswith(prefix):
             raise ValueError("refusing to delete object outside exact attempt prefix")
         try:
-            response = self._call("s3", "head_object", Bucket=self._bucket, Key=key)
+            response = self._call(
+                "s3",
+                "head_object",
+                Bucket=self._bucket,
+                Key=key,
+                VersionId=version_id,
+            )
         except Exception as exc:
             error = getattr(exc, "response", {})
             code = error.get("Error", {}).get("Code") if isinstance(error, dict) else None
-            if code in {"404", "NoSuchKey", "NotFound"}:
+            if code in {"404", "NoSuchKey", "NoSuchVersion", "NotFound"}:
                 return
             raise
         metadata = response.get("Metadata", {})
         if (
-            metadata.get("job-id") != request.job_id
+            response.get("VersionId") != version_id
+            or metadata.get("job-id") != request.job_id
             or metadata.get("attempt-id") != lease.attempt_id
             or metadata.get("lease-version") != str(lease.version)
         ):
             raise RuntimeError("refusing to delete object without exact attempt metadata")
-        self._call("s3", "delete_object", Bucket=self._bucket, Key=key)
+        self._call(
+            "s3",
+            "delete_object",
+            Bucket=self._bucket,
+            Key=key,
+            VersionId=version_id,
+        )
 
     def _delete_attempt_without_fence(
         self,
@@ -553,21 +602,41 @@ class AwsWorkerBackend:
         """Reclaim this attempt's objects without reacquiring a lost lease."""
 
         prefix = self._attempt_prefix(request, lease)
-        continuation: str | None = None
+        key_marker: str | None = None
+        version_id_marker: str | None = None
         while True:
             arguments: dict[str, Any] = {
                 "Bucket": self._bucket,
                 "Prefix": prefix,
                 "MaxKeys": 1000,
             }
-            if continuation:
-                arguments["ContinuationToken"] = continuation
-            response = self._call("s3", "list_objects_v2", **arguments)
-            for item in response.get("Contents", []):
-                self._delete_exact_attempt_key(request, lease, str(item["Key"]))
+            if key_marker:
+                arguments["KeyMarker"] = key_marker
+            if version_id_marker:
+                arguments["VersionIdMarker"] = version_id_marker
+            response = self._call("s3", "list_object_versions", **arguments)
+            for item in response.get("Versions", []):
+                self._delete_exact_attempt_key(
+                    request,
+                    lease,
+                    str(item["Key"]),
+                    str(item["VersionId"]),
+                )
+            for item in response.get("DeleteMarkers", []):
+                key = str(item["Key"])
+                if not key.startswith(prefix):
+                    raise ValueError("refusing to delete marker outside exact attempt prefix")
+                self._call(
+                    "s3",
+                    "delete_object",
+                    Bucket=self._bucket,
+                    Key=key,
+                    VersionId=str(item["VersionId"]),
+                )
             if not response.get("IsTruncated"):
                 return
-            continuation = str(response["NextContinuationToken"])
+            key_marker = str(response["NextKeyMarker"])
+            version_id_marker = str(response["NextVersionIdMarker"])
 
     def _put_finalize_marker(
         self,
@@ -588,6 +657,7 @@ class AwsWorkerBackend:
                     {
                         "name": artifact.name,
                         "key": artifact.object.key,
+                        "version_id": artifact.object.version_id,
                         "sha256": artifact.object.sha256,
                         "size": artifact.object.size,
                         "content_type": artifact.object.content_type,
@@ -607,7 +677,7 @@ class AwsWorkerBackend:
             int(self._clock()) + request.artifact_ttl_s,
             tz=UTC,
         )
-        self._call(
+        put_response = self._call(
             "s3",
             "put_object",
             Bucket=self._bucket,
@@ -631,6 +701,24 @@ class AwsWorkerBackend:
             ),
             **self._sse_args(),
         )
+        marker_version_id = str(put_response.get("VersionId") or "")
+        marker_ref = S3ObjectRef(
+            bucket=self._bucket,
+            key=marker_key,
+            version_id=marker_version_id,
+            sha256=marker_digest,
+            size=len(marker),
+            content_type="application/json",
+        )
+        marker_head = self._call(
+            "s3",
+            "head_object",
+            Bucket=self._bucket,
+            Key=marker_key,
+            VersionId=marker_ref.version_id,
+            ChecksumMode="ENABLED",
+        )
+        self._assert_exact_object_response(marker_ref, marker_head)
         try:
             self._assert_lease_fence(request, lease)
         except Exception:
@@ -649,15 +737,67 @@ class AwsWorkerBackend:
         self.assert_request_scope(request)
         if ref.size > MAX_INPUT_BYTES:
             raise ValueError("input size exceeds worker bound")
-        response = self._call("s3", "get_object", Bucket=ref.bucket, Key=ref.key)
-        if response.get("ServerSideEncryption") not in ("AES256", "aws:kms"):
-            raise ValueError("input object is not server-side encrypted")
-        body = response["Body"].read(ref.size + 1)
-        if len(body) != ref.size or hashlib.sha256(body).hexdigest() != ref.sha256:
-            raise ValueError("input object size/hash mismatch")
+        head = self._call(
+            "s3",
+            "head_object",
+            Bucket=ref.bucket,
+            Key=ref.key,
+            VersionId=ref.version_id,
+            ChecksumMode="ENABLED",
+        )
+        self._assert_exact_object_response(ref, head)
+        response = self._call(
+            "s3",
+            "get_object",
+            Bucket=ref.bucket,
+            Key=ref.key,
+            VersionId=ref.version_id,
+            ChecksumMode="ENABLED",
+        )
+        self._assert_exact_object_response(ref, response)
         destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        destination.write_bytes(body)
-        destination.chmod(0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(destination, flags, 0o600)
+        body = response["Body"]
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("destination is not a private regular file")
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = body.read(_S3_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                if not isinstance(chunk, bytes):
+                    chunk = bytes(chunk)
+                total += len(chunk)
+                if total > ref.size:
+                    raise ValueError("input object exceeds declared size")
+                digest.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(fd, view)
+                    view = view[written:]
+            if total != ref.size or not hmac.compare_digest(digest.hexdigest(), ref.sha256):
+                raise ValueError("input object size/hash mismatch")
+            os.fsync(fd)
+            path_info = os.stat(destination, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(path_info.st_mode)
+                or path_info.st_dev != info.st_dev
+                or path_info.st_ino != info.st_ino
+            ):
+                raise ValueError("destination path changed while streaming input")
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        finally:
+            os.close(fd)
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
         return destination
 
     def upload_artifact(
@@ -667,10 +807,6 @@ class AwsWorkerBackend:
         artifact: ProducedArtifact,
     ) -> S3ObjectRef:
         self._renew_lease(request, lease)
-        body = artifact.path.read_bytes()
-        if not body or len(body) > MAX_OUTPUT_BYTES:
-            raise ValueError("output artifact size is invalid")
-        digest = hashlib.sha256(body).hexdigest()
         relative_key = artifact.relative_key or f"output/{artifact.name}"
         if relative_key.startswith("/") or ".." in relative_key.split("/") or "\\" in relative_key:
             raise ValueError("artifact relative key is unsafe")
@@ -679,42 +815,82 @@ class AwsWorkerBackend:
             int(self._clock()) + request.artifact_ttl_s,
             tz=UTC,
         )
-        self._call(
-            "s3",
-            "put_object",
-            Bucket=self._bucket,
-            Key=key,
-            Body=body,
-            ContentType=artifact.content_type,
-            ChecksumSHA256=_checksum_sha256_b64(digest),
-            Expires=expires_at,
-            Metadata={
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(artifact.path, flags)
+        version_id: str | None = None
+        try:
+            before = os.fstat(fd)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_size < 1
+                or before.st_size > MAX_OUTPUT_BYTES
+            ):
+                raise ValueError("output artifact file is invalid")
+            digest_state = hashlib.sha256()
+            while True:
+                chunk = os.read(fd, _S3_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest_state.update(chunk)
+            after_hash = os.fstat(fd)
+            self._assert_unchanged_regular_file(before, after_hash)
+            digest = digest_state.hexdigest()
+            os.lseek(fd, 0, os.SEEK_SET)
+            metadata = {
                 "sha256": digest,
                 "schema-version": request.schema_version,
                 "job-id": request.job_id,
                 "attempt-id": lease.attempt_id,
                 "lease-version": str(lease.version),
                 "finalized": "false",
-            },
-            Tagging=(
-                f"teamagent-ttl-epoch={int(expires_at.timestamp())}"
-                f"&teamagent-attempt-id={lease.attempt_id}"
-                "&teamagent-finalized=false"
-            ),
-            **self._sse_args(),
-        )
-        try:
+            }
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                put_response = self._call(
+                    "s3",
+                    "put_object",
+                    Bucket=self._bucket,
+                    Key=key,
+                    Body=stream,
+                    ContentLength=before.st_size,
+                    ContentType=artifact.content_type,
+                    ChecksumSHA256=_checksum_sha256_b64(digest),
+                    Expires=expires_at,
+                    Metadata=metadata,
+                    Tagging=(
+                        f"teamagent-ttl-epoch={int(expires_at.timestamp())}"
+                        f"&teamagent-attempt-id={lease.attempt_id}"
+                        "&teamagent-finalized=false"
+                    ),
+                    **self._sse_args(),
+                )
+            self._assert_unchanged_regular_file(before, os.fstat(fd))
+            version_id = str(put_response.get("VersionId") or "")
+            ref = S3ObjectRef(
+                bucket=self._bucket,
+                key=key,
+                version_id=version_id,
+                sha256=digest,
+                size=before.st_size,
+                content_type=artifact.content_type,
+            )
+            head = self._call(
+                "s3",
+                "head_object",
+                Bucket=self._bucket,
+                Key=key,
+                VersionId=ref.version_id,
+                ChecksumMode="ENABLED",
+            )
+            self._assert_exact_object_response(ref, head)
             self._assert_lease_fence(request, lease)
+            return ref
         except Exception:
-            self._delete_exact_attempt_key(request, lease, key)
+            if version_id:
+                self._delete_exact_attempt_key(request, lease, key, version_id)
             raise
-        return S3ObjectRef(
-            bucket=self._bucket,
-            key=key,
-            sha256=digest,
-            size=len(body),
-            content_type=artifact.content_type,
-        )
+        finally:
+            os.close(fd)
 
     def store_result(
         self,
@@ -869,31 +1045,6 @@ class AwsWorkerBackend:
 
     def cleanup_attempt(self, request: MediaJobRequest, lease: WorkerLease) -> None:
         self._delete_attempt_without_fence(request, lease)
-
-    def _delete_prefix(self, prefix: str) -> None:
-        continuation: str | None = None
-        while True:
-            arguments: dict[str, Any] = {
-                "Bucket": self._bucket,
-                "Prefix": prefix,
-                "MaxKeys": 1000,
-            }
-            if continuation:
-                arguments["ContinuationToken"] = continuation
-            response = self._call("s3", "list_objects_v2", **arguments)
-            keys = [{"Key": item["Key"]} for item in response.get("Contents", [])]
-            if keys:
-                deleted = self._call(
-                    "s3",
-                    "delete_objects",
-                    Bucket=self._bucket,
-                    Delete={"Objects": keys, "Quiet": True},
-                )
-                if deleted.get("Errors"):
-                    raise RuntimeError("S3 reported media cleanup errors")
-            if not response.get("IsTruncated"):
-                return
-            continuation = str(response["NextContinuationToken"])
 
 
 def _operation_refs(request: MediaJobRequest) -> tuple[S3ObjectRef, ...]:

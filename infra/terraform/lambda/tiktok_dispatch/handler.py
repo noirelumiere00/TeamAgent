@@ -91,11 +91,17 @@ def _bounded_string(value: Any, *, minimum: int, maximum: int, name: str) -> str
 def _validate_s3_ref(value: Any) -> dict[str, Any]:
     ref = _exact_keys(
         value,
-        {"bucket", "key", "sha256", "size", "content_type"},
+        {"bucket", "key", "version_id", "sha256", "size", "content_type"},
         "S3 reference",
     )
     bucket = _bounded_string(ref["bucket"], minimum=3, maximum=63, name="S3 bucket")
     key = _bounded_string(ref["key"], minimum=1, maximum=1024, name="S3 key")
+    version_id = _bounded_string(
+        ref["version_id"],
+        minimum=1,
+        maximum=1024,
+        name="S3 version ID",
+    )
     content_type = _bounded_string(
         ref["content_type"],
         minimum=1,
@@ -112,6 +118,8 @@ def _validate_s3_ref(value: Any) -> dict[str, Any]:
         raise ValueError("S3 key is invalid")
     if not _SHA256.fullmatch(str(ref["sha256"])):
         raise ValueError("S3 digest is invalid")
+    if version_id == "null" or not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", version_id):
+        raise ValueError("S3 version ID is invalid")
     _bounded_int(ref["size"], minimum=0, maximum=_MAX_INPUT_BYTES, name="S3 size")
     if "\r" in content_type or "\n" in content_type:
         raise ValueError("S3 content type is invalid")

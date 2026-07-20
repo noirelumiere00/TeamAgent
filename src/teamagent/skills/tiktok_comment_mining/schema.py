@@ -43,7 +43,7 @@ class CommentMiningInput(BaseModel):
     classify: bool = Field(default=True, description="Bedrockでの反応分類を行うか")
     client_name: str | None = Field(default=None, description="クライアント名（文脈補助・任意）")
     # 第二弾フック: tiktok_acquire の include.comments 実装後に
-    # acquire_s3_prefix 入力を追加してバルク読み込みに対応する。
+    # acquire_job_id 入力を追加してowner-boundバルク読み込みに対応する。
 
 
 class CommentMiningOutput(BaseModel):

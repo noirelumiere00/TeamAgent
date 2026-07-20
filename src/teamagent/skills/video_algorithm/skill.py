@@ -567,21 +567,28 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # 深掘り分析の予備候補も兼ねる（DL/分析失敗を後続候補でバックフィル）。天井は _MAX_POOL。
         board_target = min(max(input.board_size, target + self._overfetch_buffer), _MAX_POOL)
 
-        # 取得段の委譲: acquire_s3_prefix があれば tiktok_acquire 成果物(S3)から読む(スクレイプ無)。
+        # 取得段の委譲: caller-owned job_id から immutable 成果物を読む(スクレイプ無)。
         # per-call override はローカルで組み立て self へ保存しない(共有インスタンス安全)。
         call_searcher: Searcher | None = None
         call_downloader: Downloader | None = None
-        if input.acquire_s3_prefix:
-            from teamagent.adapters.tiktok_s3_source import TikTokS3Source
+        if input.acquire_job_id:
+            from teamagent.adapters.tiktok_s3_source import (
+                TikTokS3Source,
+                media_audit_principal_hash,
+            )
 
-            _src = TikTokS3Source(input.acquire_s3_prefix)
+            requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
+            _src = TikTokS3Source(
+                input.acquire_job_id,
+                audit_principal_hash=media_audit_principal_hash(requested_by),
+            )
 
             def _s3_search(q: str, n: int, rid: str) -> list[VideoMeta]:
                 return self._posts_to_metas(_src.posts(n))
 
             call_searcher = _s3_search
             call_downloader = _src.download
-            log.info("video_algorithm_s3_source", prefix=input.acquire_s3_prefix[:60])
+            log.info("video_algorithm_s3_source", job_id=input.acquire_job_id)
 
         pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
         if not pool:

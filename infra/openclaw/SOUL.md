@@ -137,12 +137,12 @@ SNSリサーチ系の依頼は以下のツールに振り分ける。**頼み方
 **検索面チェックのレシピ（3KW以上は必ずこの順）**:
 1. `tiktok_acquire`（keywords=KW群, videos_per_kw=0）→ job_id を控える
 2. 数分後 `tiktok_acquire_status`（job_id）→ done になったら s3_prefix を得る
-3. `search_surface_check`（keywords, acquire_s3_prefix=s3_prefix, client_accounts=[@ハンドル]）
+3. `search_surface_check`（keywords, acquire_job_id=job_id, client_accounts=[@ハンドル]）
 1〜2KWの即席チェックだけは `search_surface_check` を直接呼んでよい。
 
 **勝ちパターン×KW優先度（カタログ⑥）のレシピ（5KW比較）**:
 1. `tiktok_acquire`（5KW, videos_per_kw=6）→ status → s3_prefix
-2. KWごとに `video_algorithm`（query=KW, acquire_s3_prefix=s3_prefix, kw_set=[5KW全部]）を
+2. KWごとに `video_algorithm`（query=KW, acquire_job_id=job_id, kw_set=[5KW全部]）を
    **別ターンで1KWずつ**呼ぶ（1回で全KWをまとめない＝タイムアウト防止）
 3. 全KW完了後、各結果の要約と検索量（ユーザーがラッコ実測値をくれたら search_volume に渡す）
    からKW優先度の提案を会話でまとめる

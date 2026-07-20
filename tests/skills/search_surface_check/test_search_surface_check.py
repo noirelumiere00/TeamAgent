@@ -10,6 +10,8 @@ from teamagent.skills.base import SkillContext
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 
+_JOB_ID = "tk_0123456789ab"
+
 
 def _ctx() -> SkillContext:
     return SkillContext(
@@ -109,13 +111,13 @@ def test_s3_path_with_ig_and_client_marking() -> None:
         apify=apify,  # type: ignore[arg-type]
         bedrock=_FakeBedrock(),
         publisher=_publisher,
-        tiktok_source_factory=lambda prefix: _FakeSource(_s3_posts()),
+        tiktok_source_factory=lambda job_id, audit_hash: _FakeSource(_s3_posts()),
     )
     out = skill.run(
         SearchSurfaceCheckInput(
             keywords=["セブン"],
             client_accounts=["@seven_official"],
-            acquire_s3_prefix="tiktok-acquire/tk_x/",
+            acquire_job_id=_JOB_ID,
         ),
         _ctx(),
     )
@@ -135,7 +137,7 @@ def test_s3_path_with_ig_and_client_marking() -> None:
     assert "在圏" in out.slack_summary
 
 
-def test_many_keywords_without_acquire_prefix_guides_to_acquire() -> None:
+def test_many_keywords_without_acquire_job_guides_to_acquire() -> None:
     skill = SearchSurfaceCheckSkill(
         apify=_FakeApify(), bedrock=_FakeBedrock(), publisher=_publisher
     )  # type: ignore[arg-type]
@@ -173,10 +175,10 @@ def test_ig_failure_degrades_with_warning() -> None:
         apify=_FakeApify(fail=True),  # type: ignore[arg-type]
         bedrock=_FakeBedrock(),
         publisher=_publisher,
-        tiktok_source_factory=lambda prefix: _FakeSource(_s3_posts()),
+        tiktok_source_factory=lambda job_id, audit_hash: _FakeSource(_s3_posts()),
     )
     out = skill.run(
-        SearchSurfaceCheckInput(keywords=["セブン"], acquire_s3_prefix="tiktok-acquire/x/"),
+        SearchSurfaceCheckInput(keywords=["セブン"], acquire_job_id=_JOB_ID),
         _ctx(),
     )
     assert any("IG面" in w for w in out.warnings)
@@ -197,12 +199,10 @@ def test_ig_surface_env_default(monkeypatch: Any) -> None:
         apify=apify,  # type: ignore[arg-type]
         bedrock=_FakeBedrock(),
         publisher=_publisher,
-        tiktok_source_factory=lambda prefix: _FakeSource([]),
+        tiktok_source_factory=lambda job_id, audit_hash: _FakeSource([]),
     )
     skill.run(
-        SearchSurfaceCheckInput(
-            keywords=["セブン"], platforms=["instagram"], acquire_s3_prefix=None
-        ),
+        SearchSurfaceCheckInput(keywords=["セブン"], platforms=["instagram"], acquire_job_id=None),
         _ctx(),
     )
     assert apify.calls == [("セブン", "hashtag")]  # 検証ゲートの切替は env 一発

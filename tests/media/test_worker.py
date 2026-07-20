@@ -35,6 +35,7 @@ def _request() -> MediaJobRequest:
     source = S3ObjectRef(
         bucket="teamagent-media-test",
         key=f"media-jobs/{job_id}/input/source.bin",
+        version_id="version-1",
         sha256=hashlib.sha256(b"source").hexdigest(),
         size=6,
         content_type="video/mp4",
@@ -138,6 +139,7 @@ class _Backend:
                 f"{request.output_prefix}attempts/{lease.version}/"
                 f"{lease.attempt_id}/output/{artifact.name}"
             ),
+            version_id="version-1",
             sha256=hashlib.sha256(body).hexdigest(),
             size=len(body),
             content_type=artifact.content_type,
@@ -300,6 +302,7 @@ def test_worker_never_calls_backend_after_absolute_deadline(
     artifact = S3ObjectRef(
         bucket=request.output_bucket,
         key=f"{request.output_prefix}attempts/1/output/thumbnail",
+        version_id="version-1",
         sha256=hashlib.sha256(b"jpeg").hexdigest(),
         size=4,
         content_type="image/jpeg",
@@ -458,21 +461,46 @@ class _AttemptS3:
     def __init__(self) -> None:
         self.objects: dict[str, dict[str, object]] = {}
         self.puts: list[dict[str, object]] = []
+        self.deletes: list[dict[str, object]] = []
 
     def put_object(self, **kwargs: object) -> dict[str, object]:
         self.puts.append(kwargs)
         key = str(kwargs["Key"])
+        body_arg = kwargs["Body"]
+        body = body_arg.read() if hasattr(body_arg, "read") else body_arg
+        assert isinstance(body, bytes)
+        version_id = f"version-{len(self.puts)}"
         self.objects[key] = {
-            "Body": kwargs["Body"],
+            "Body": body,
             "Metadata": kwargs["Metadata"],
+            "VersionId": version_id,
+            "ContentType": kwargs["ContentType"],
+            "ChecksumSHA256": kwargs["ChecksumSHA256"],
+            "ServerSideEncryption": kwargs["ServerSideEncryption"],
         }
-        return {}
+        return {"VersionId": version_id}
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
-        return {"Metadata": self.objects[str(kwargs["Key"])]["Metadata"]}
+        item = self.objects[str(kwargs["Key"])]
+        assert kwargs["VersionId"] == item["VersionId"]
+        body = item["Body"]
+        assert isinstance(body, bytes)
+        return {
+            "Metadata": item["Metadata"],
+            "VersionId": item["VersionId"],
+            "ContentLength": len(body),
+            "ContentType": item["ContentType"],
+            "ChecksumSHA256": item["ChecksumSHA256"],
+            "ServerSideEncryption": item["ServerSideEncryption"],
+        }
 
     def delete_object(self, **kwargs: object) -> dict[str, object]:
-        self.objects.pop(str(kwargs["Key"]), None)
+        self.deletes.append(kwargs)
+        key = str(kwargs["Key"])
+        item = self.objects.get(key)
+        if item is not None:
+            assert kwargs["VersionId"] == item["VersionId"]
+            self.objects.pop(key)
         return {}
 
 
@@ -486,6 +514,7 @@ def test_lease_loss_after_s3_put_removes_only_exact_attempt_orphan(
     backend._bucket = request.output_bucket
     backend._table = "jobs"
     backend._kms_key_id = ""
+    backend._artifact_ttl_cap_s = request.artifact_ttl_s
     backend._clock = lambda: 101.0
     backend._deadline_epoch_s = request.deadline_epoch_s
     backend._ddb = _LeaseLossDynamo()
@@ -503,6 +532,137 @@ def test_lease_loss_after_s3_put_removes_only_exact_attempt_orphan(
     assert backend._s3.puts[0]["ChecksumSHA256"] == base64.b64encode(
         hashlib.sha256(b"jpeg").digest()
     ).decode("ascii")
+    assert not isinstance(backend._s3.puts[0]["Body"], bytes)
+    assert backend._s3.deletes == [
+        {
+            "Bucket": request.output_bucket,
+            "Key": (
+                f"{request.output_prefix}attempts/{lease.version}/"
+                f"{lease.attempt_id}/output/thumbnail"
+            ),
+            "VersionId": "version-1",
+        }
+    ]
+
+
+class _BoundedBody:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+        self._offset = 0
+        self.read_sizes: list[int] = []
+        self.closed = False
+
+    def read(self, size: int) -> bytes:
+        assert 0 < size <= 1024 * 1024
+        self.read_sizes.append(size)
+        chunk = self._body[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _InputS3:
+    def __init__(self, ref: S3ObjectRef, body: bytes) -> None:
+        self.ref = ref
+        self.body = _BoundedBody(body)
+        self.head_calls: list[dict[str, object]] = []
+        self.get_calls: list[dict[str, object]] = []
+
+    def _response(self) -> dict[str, object]:
+        return {
+            "VersionId": self.ref.version_id,
+            "ContentLength": self.ref.size,
+            "ContentType": self.ref.content_type,
+            "ChecksumSHA256": base64.b64encode(bytes.fromhex(self.ref.sha256)).decode("ascii"),
+            "ServerSideEncryption": "AES256",
+            "Metadata": {"sha256": self.ref.sha256},
+        }
+
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        self.head_calls.append(kwargs)
+        return self._response()
+
+    def get_object(self, **kwargs: object) -> dict[str, object]:
+        self.get_calls.append(kwargs)
+        return {**self._response(), "Body": self.body}
+
+
+def _input_backend(request: MediaJobRequest, s3: object) -> AwsWorkerBackend:
+    backend = object.__new__(AwsWorkerBackend)
+    backend._bucket = request.output_bucket
+    backend._table = "jobs"
+    backend._kms_key_id = ""
+    backend._artifact_ttl_cap_s = request.artifact_ttl_s
+    backend._clock = lambda: 101.0
+    backend._deadline_epoch_s = request.deadline_epoch_s
+    backend._ddb = _StoreDynamo()
+    backend._s3 = s3
+    return backend
+
+
+def test_load_object_streams_only_the_exact_s3_version(tmp_path: Path) -> None:
+    request = _request()
+    assert isinstance(request.operation, ThumbnailOperation)
+    ref = request.operation.source
+    assert ref is not None
+    s3 = _InputS3(ref, b"source")
+    backend = _input_backend(request, s3)
+    lease = WorkerLease(owner="worker-a", version=1, attempt_id="attempt-1")
+    destination = tmp_path / "source.bin"
+
+    assert backend.load_object(request, lease, ref, destination) == destination
+
+    assert destination.read_bytes() == b"source"
+    exact = {
+        "Bucket": ref.bucket,
+        "Key": ref.key,
+        "VersionId": ref.version_id,
+        "ChecksumMode": "ENABLED",
+    }
+    assert s3.head_calls == [exact]
+    assert s3.get_calls == [exact]
+    assert s3.body.read_sizes
+    assert s3.body.closed
+
+
+def test_load_object_refuses_symlink_destination_without_touching_target(tmp_path: Path) -> None:
+    request = _request()
+    assert isinstance(request.operation, ThumbnailOperation)
+    ref = request.operation.source
+    assert ref is not None
+    target = tmp_path / "target.bin"
+    target.write_bytes(b"keep")
+    destination = tmp_path / "source.bin"
+    destination.symlink_to(target)
+    backend = _input_backend(request, _InputS3(ref, b"source"))
+    lease = WorkerLease(owner="worker-a", version=1, attempt_id="attempt-1")
+
+    with pytest.raises(OSError):
+        backend.load_object(request, lease, ref, destination)
+
+    assert target.read_bytes() == b"keep"
+
+
+def test_upload_artifact_refuses_symlink_source(tmp_path: Path) -> None:
+    request = _request()
+    target = tmp_path / "real.jpg"
+    target.write_bytes(b"jpeg")
+    source = tmp_path / "link.jpg"
+    source.symlink_to(target)
+    s3 = _AttemptS3()
+    backend = _input_backend(request, s3)
+    lease = WorkerLease(owner="worker-a", version=1, attempt_id="attempt-1")
+
+    with pytest.raises(OSError):
+        backend.upload_artifact(
+            request,
+            lease,
+            ProducedArtifact("thumbnail", source, "image/jpeg"),
+        )
+
+    assert s3.puts == []
 
 
 class _StoreDynamo:
@@ -522,6 +682,7 @@ def test_done_write_persists_independent_manifest_and_thirty_day_retention() -> 
         key=(
             f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/output/thumbnail"
         ),
+        version_id="version-1",
         sha256=hashlib.sha256(b"jpeg").hexdigest(),
         size=4,
         content_type="image/jpeg",
@@ -611,26 +772,52 @@ class _FinalizeS3:
         self.list_calls = 0
 
     def put_object(self, **kwargs: object) -> dict[str, object]:
+        body_arg = kwargs["Body"]
+        body = body_arg.read() if hasattr(body_arg, "read") else body_arg
+        assert isinstance(body, bytes)
+        version_id = f"version-{len(self.objects) + 1}"
         self.objects[str(kwargs["Key"])] = {
-            "Body": kwargs["Body"],
+            "Body": body,
             "Metadata": kwargs["Metadata"],
+            "VersionId": version_id,
+            "ContentType": kwargs["ContentType"],
+            "ChecksumSHA256": kwargs["ChecksumSHA256"],
+            "ServerSideEncryption": kwargs["ServerSideEncryption"],
         }
-        return {}
+        return {"VersionId": version_id}
 
-    def list_objects_v2(self, **kwargs: object) -> dict[str, object]:
+    def list_object_versions(self, **kwargs: object) -> dict[str, object]:
         self.list_calls += 1
         prefix = str(kwargs["Prefix"])
         return {
-            "Contents": [{"Key": key} for key in sorted(self.objects) if key.startswith(prefix)]
+            "Versions": [
+                {"Key": key, "VersionId": value["VersionId"]}
+                for key, value in sorted(self.objects.items())
+                if key.startswith(prefix)
+            ]
         }
 
     def head_object(self, **kwargs: object) -> dict[str, object]:
-        return {"Metadata": self.objects[str(kwargs["Key"])]["Metadata"]}
+        item = self.objects[str(kwargs["Key"])]
+        assert kwargs["VersionId"] == item["VersionId"]
+        body = item["Body"]
+        assert isinstance(body, bytes)
+        return {
+            "Metadata": item["Metadata"],
+            "VersionId": item["VersionId"],
+            "ContentLength": len(body),
+            "ContentType": item["ContentType"],
+            "ChecksumSHA256": item["ChecksumSHA256"],
+            "ServerSideEncryption": item["ServerSideEncryption"],
+        }
 
     def delete_object(self, **kwargs: object) -> dict[str, object]:
         key = str(kwargs["Key"])
         self.deleted.append(key)
-        self.objects.pop(key, None)
+        item = self.objects.get(key)
+        if item is not None:
+            assert kwargs["VersionId"] == item["VersionId"]
+            self.objects.pop(key)
         return {}
 
 
@@ -645,6 +832,7 @@ def _terminal_timeout_backend(
         key=(
             f"{request.output_prefix}attempts/{lease.version}/{lease.attempt_id}/output/thumbnail"
         ),
+        version_id="version-1",
         sha256=hashlib.sha256(b"jpeg").hexdigest(),
         size=4,
         content_type="image/jpeg",
@@ -662,7 +850,12 @@ def _terminal_timeout_backend(
     s3 = _FinalizeS3()
     s3.objects[artifact.key] = {
         "Body": b"jpeg",
+        "VersionId": artifact.version_id,
+        "ContentType": artifact.content_type,
+        "ChecksumSHA256": base64.b64encode(hashlib.sha256(b"jpeg").digest()).decode("ascii"),
+        "ServerSideEncryption": "AES256",
         "Metadata": {
+            "sha256": artifact.sha256,
             "job-id": request.job_id,
             "attempt-id": lease.attempt_id,
             "lease-version": str(lease.version),

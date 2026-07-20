@@ -14,6 +14,7 @@ from typing import ClassVar
 import structlog
 from pydantic import BaseModel
 
+from teamagent.adapters.tiktok_s3_source import media_audit_principal_hash
 from teamagent.adapters.tiktok_task_store import TikTokTaskStore, new_job_id
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.tiktok_acquire.schema import (
@@ -28,7 +29,7 @@ logger = structlog.get_logger(__name__)
 
 def _audit_principal_hash(ctx: SkillContext) -> str:
     requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
-    return hashlib.sha256(str(requested_by).encode("utf-8")).hexdigest()
+    return media_audit_principal_hash(requested_by)
 
 
 def _build_client_config(input: TikTokAcquireInput) -> dict[str, object]:

@@ -22,6 +22,7 @@ def _ref(name: str, body: bytes) -> S3ObjectRef:
     return S3ObjectRef(
         bucket=_BUCKET,
         key=f"media-jobs/{_JOB_ID}/output/{name}",
+        version_id="version-1",
         sha256=hashlib.sha256(body).hexdigest(),
         size=len(body),
         content_type="application/json" if name.endswith(".json") else "video/mp4",
@@ -64,7 +65,7 @@ class _FakeMediaClient:
         deadline_epoch_s: int,
         expires_s: int,
     ) -> str:
-        assert expires_s == 604800
+        assert expires_s == 600
         self.presign_deadlines.append(deadline_epoch_s)
         return f"https://s3.example.invalid/{ref.key}"
 

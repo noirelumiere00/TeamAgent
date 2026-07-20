@@ -33,7 +33,7 @@ MAX_JOB_BUDGET_SECONDS = 15 * 60
 MAX_DEADLINE_SECONDS = MAX_JOB_BUDGET_SECONDS
 MAX_CLOCK_SKEW_SECONDS = 30
 ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
-MAX_PRESIGNED_URL_SECONDS = 7 * 24 * 60 * 60
+MAX_PRESIGNED_URL_SECONDS = 15 * 60
 DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
 TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = MAX_JOB_BUDGET_SECONDS - 30
 _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
@@ -51,6 +51,14 @@ S3Bucket = Annotated[
     ),
 ]
 S3Key = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
+S3VersionId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=1024,
+        pattern=r"^[A-Za-z0-9._~+/=-]+$",
+    ),
+]
 
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9!_.*'()/+=:@-]+$")
 
@@ -64,6 +72,7 @@ class S3ObjectRef(_StrictModel):
 
     bucket: S3Bucket
     key: S3Key
+    version_id: S3VersionId
     sha256: Sha256
     size: int = Field(ge=0, le=MAX_INPUT_BYTES)
     content_type: str = Field(min_length=1, max_length=128)
@@ -76,6 +85,13 @@ class S3ObjectRef(_StrictModel):
         parts = value.split("/")
         if any(part in ("", ".", "..") for part in parts):
             raise ValueError("S3 key must not contain empty or traversal segments")
+        return value
+
+    @field_validator("version_id")
+    @classmethod
+    def _immutable_version(cls, value: str) -> str:
+        if value == "null":
+            raise ValueError("S3 reference requires a non-null immutable version")
         return value
 
 
@@ -406,6 +422,7 @@ def artifact_manifest_sha256(artifacts: tuple[MediaArtifact, ...]) -> str:
                 "name": artifact.name,
                 "bucket": artifact.object.bucket,
                 "key": artifact.object.key,
+                "version_id": artifact.object.version_id,
                 "sha256": artifact.object.sha256,
                 "size": artifact.object.size,
                 "content_type": artifact.object.content_type,

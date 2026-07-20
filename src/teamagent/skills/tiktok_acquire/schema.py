@@ -74,7 +74,10 @@ class TikTokAcquireStatusOutput(BaseModel):
     progress: dict[str, Any] | None = None
     counts: dict[str, Any] | None = None
     s3_prefix: str | None = None
-    posts_json_url: str | None = Field(default=None, description="posts.normalized.json の署名URL")
+    posts_json_url: str | None = Field(
+        default=None,
+        description="posts.normalized.json の短期署名URL（status再照会で再発行）",
+    )
     config_json_url: str | None = None
     manifest_url: str | None = Field(default=None, description="videos/manifest.json の署名URL")
     videos: list[dict[str, Any]] = Field(

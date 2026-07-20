@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -33,6 +34,7 @@ def _ref(job_id: str, body: bytes = b"artifact") -> S3ObjectRef:
     return S3ObjectRef(
         bucket=_BUCKET,
         key=f"media-jobs/{job_id}/output/artifact",
+        version_id="version-1",
         sha256=hashlib.sha256(body).hexdigest(),
         size=len(body),
         content_type="application/octet-stream",
@@ -187,11 +189,37 @@ class _SubmitClient(MediaJobClient):
 
 
 class _Session:
-    def __init__(self, *, queue: Any, ddb: Any, s3: Any) -> None:
+    def __init__(
+        self,
+        *,
+        queue: Any,
+        ddb: Any,
+        s3: Any,
+        credential_expiry_epoch_s: int = 1_000_000,
+    ) -> None:
         self.clients = {"sqs": queue, "dynamodb": ddb, "s3": s3}
+        self.credentials = type(
+            "Credentials",
+            (),
+            {
+                "_expiry_time": datetime.fromtimestamp(credential_expiry_epoch_s, tz=UTC),
+                "get_frozen_credentials": lambda self: type(
+                    "Frozen",
+                    (),
+                    {
+                        "access_key": "AKIATEST",
+                        "secret_key": "secret",
+                        "token": "token",
+                    },
+                )(),
+            },
+        )()
 
     def client(self, service: str, **_kwargs: Any) -> Any:
         return self.clients[service]
+
+    def get_credentials(self) -> Any:
+        return self.credentials
 
 
 class _ResultDynamo:
@@ -211,6 +239,7 @@ def _done_item(
     ref = S3ObjectRef(
         bucket=_BUCKET,
         key=(artifact_key or f"media-jobs/{job_id}/attempts/1/attempt-1/output/artifact"),
+        version_id="version-1",
         sha256=hashlib.sha256(b"artifact").hexdigest(),
         size=len(b"artifact"),
         content_type="application/octet-stream",
@@ -449,6 +478,7 @@ class _GuardClient(MediaJobClient):
         return S3ObjectRef(
             bucket=_BUCKET,
             key=f"media-jobs/{job_id}/input/staged-{self.staged}.bin",
+            version_id=f"version-{self.staged}",
             sha256=hashlib.sha256(body).hexdigest(),
             size=len(body),
             content_type="application/octet-stream",
@@ -580,8 +610,10 @@ class _PresignS3:
         self.head_calls.append(kwargs)
         return {
             "ContentLength": 8,
+            "ContentType": "application/octet-stream",
             "ChecksumSHA256": self.checksum,
             "ServerSideEncryption": "AES256",
+            "VersionId": "version-1",
             "Metadata": {
                 "sha256": hashlib.sha256(b"artifact").hexdigest(),
             },
@@ -596,7 +628,7 @@ class _PresignS3:
         return self.url
 
 
-def test_presign_get_is_integrity_checked_seven_day_compatible_and_deadline_bounded() -> None:
+def test_presign_get_is_integrity_checked_short_lived_and_deadline_bounded() -> None:
     s3 = _PresignS3()
     client = MediaJobClient(
         session=_Session(queue=object(), ddb=object(), s3=s3),
@@ -614,18 +646,25 @@ def test_presign_get_is_integrity_checked_seven_day_compatible_and_deadline_boun
     assert s3.calls == [
         (
             "get_object",
-            {"Bucket": _BUCKET, "Key": ref.key},
+            {"Bucket": _BUCKET, "Key": ref.key, "VersionId": ref.version_id},
             300,
         )
     ]
-    assert s3.head_calls == [{"Bucket": _BUCKET, "Key": ref.key, "ChecksumMode": "ENABLED"}]
+    assert s3.head_calls == [
+        {
+            "Bucket": _BUCKET,
+            "Key": ref.key,
+            "VersionId": ref.version_id,
+            "ChecksumMode": "ENABLED",
+        }
+    ]
 
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_PRESIGN_EXPIRY_INVALID"):
-        client.presign_get(ref, deadline_epoch_s=130, expires_s=604801)
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=901)
 
     s3.checksum = base64.b64encode(hashlib.sha256(b"tampered").digest()).decode("ascii")
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_INTEGRITY_FAILED"):
-        client.presign_get(ref, deadline_epoch_s=130, expires_s=604800)
+        client.presign_get(ref, deadline_epoch_s=130, expires_s=900)
 
     expired = MediaJobClient(
         session=_Session(queue=object(), ddb=object(), s3=s3),
@@ -637,6 +676,27 @@ def test_presign_get_is_integrity_checked_seven_day_compatible_and_deadline_boun
     with pytest.raises(MediaJobError, match="MEDIA_JOB_DEADLINE_EXCEEDED"):
         expired.presign_get(ref, deadline_epoch_s=130, expires_s=300)
     assert len(s3.calls) == 1
+
+
+def test_presign_get_is_clamped_before_ecs_credential_expiry() -> None:
+    s3 = _PresignS3()
+    client = MediaJobClient(
+        session=_Session(
+            queue=object(),
+            ddb=object(),
+            s3=s3,
+            credential_expiry_epoch_s=250,
+        ),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+    ref = _ref("mj_0123456789abcdef01234567")
+
+    client.presign_get(ref, deadline_epoch_s=130, expires_s=300)
+
+    assert s3.calls[-1][2] == 90
 
 
 def test_artifact_ttl_contract_is_bounded_and_environment_driven(

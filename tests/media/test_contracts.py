@@ -29,6 +29,7 @@ def _ref() -> S3ObjectRef:
     return S3ObjectRef(
         bucket="teamagent-media-test",
         key="media-jobs/mj_0123456789abcdef01234567/input/source.bin",
+        version_id="version-1",
         sha256="a" * 64,
         size=4,
         content_type="video/mp4",
@@ -148,6 +149,7 @@ def test_job_contract_rejects_extra_fields_traversal_and_unbounded_deadline() ->
         S3ObjectRef(
             bucket="teamagent-media-test",
             key="media-jobs/x/input/../secret",
+            version_id="version-1",
             sha256="b" * 64,
             size=1,
             content_type="text/plain",

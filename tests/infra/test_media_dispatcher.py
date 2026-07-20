@@ -107,6 +107,7 @@ def _staged_ref(name: str) -> S3ObjectRef:
     return S3ObjectRef(
         bucket="teamagent-media",
         key=f"media-jobs/mj_0123456789abcdef01234567/input/{name}",
+        version_id="version-1",
         sha256="0" * 64,
         size=1,
         content_type="application/octet-stream",
@@ -278,6 +279,7 @@ def _large_body() -> str:
         return S3ObjectRef(
             bucket="teamagent-media",
             key=f"media-jobs/{job_id}/input/{index:02d}-{'a' * 900}",
+            version_id=f"version-{index}",
             sha256=f"{index:064x}",
             size=1,
             content_type="application/octet-stream",

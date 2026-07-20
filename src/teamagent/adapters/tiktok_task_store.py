@@ -27,7 +27,7 @@ from teamagent.media.contracts import (
 
 logger = structlog.get_logger(__name__)
 
-_PRESIGN_S = 7 * 24 * 60 * 60
+_PRESIGN_S = 10 * 60
 _DEADLINE_S = 15 * 60
 _STATUS_DEADLINE_S = 30
 
@@ -177,7 +177,7 @@ class TikTokTaskStore:
         *,
         deadline_epoch_s: int,
     ) -> dict[str, Any]:
-        """Presign verified, worker-produced artifacts for seven days."""
+        """Re-sign verified, worker-produced artifacts for ten minutes."""
 
         artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
         prefix = str(result.metadata.get("s3_prefix") or f"media-jobs/{result.job_id}/")

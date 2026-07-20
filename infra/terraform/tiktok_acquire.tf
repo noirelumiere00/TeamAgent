@@ -461,7 +461,7 @@ data "aws_iam_policy_document" "tiktok_task_app" {
   }
   statement {
     sid       = "S3ListOnlyMediaJobs"
-    actions   = ["s3:ListBucket"]
+    actions   = ["s3:ListBucketVersions"]
     resources = [aws_s3_bucket.media_jobs[0].arn]
     condition {
       test     = "StringLike"
@@ -911,7 +911,7 @@ data "aws_iam_policy_document" "media_janitor" {
   }
   statement {
     sid       = "S3ListMediaJobs"
-    actions   = ["s3:ListBucket"]
+    actions   = ["s3:ListBucketVersions"]
     resources = [aws_s3_bucket.media_jobs[0].arn]
     condition {
       test     = "StringLike"
@@ -921,7 +921,11 @@ data "aws_iam_policy_document" "media_janitor" {
   }
   statement {
     sid       = "S3DeleteMediaJobs"
-    actions   = ["s3:DeleteObject", "s3:GetObject", "s3:GetObjectTagging"]
+    actions = [
+      "s3:DeleteObjectVersion",
+      "s3:GetObjectVersion",
+      "s3:GetObjectVersionTagging",
+    ]
     resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*"]
   }
   statement {

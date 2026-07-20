@@ -274,19 +274,26 @@ def _delete_unfinalized_attempts(
     expected_job_id = output_prefix.removeprefix("media-jobs/").removesuffix("/")
     if not _JOB_ID.fullmatch(expected_job_id) or output_prefix != f"media-jobs/{expected_job_id}/":
         raise RuntimeError("media janitor output prefix is invalid")
-    attempts: dict[str, list[tuple[str, re.Match[str]]]] = {}
-    continuation: str | None = None
+    attempts: dict[str, list[tuple[str, str, re.Match[str], bool]]] = {}
+    key_marker: str | None = None
+    version_id_marker: str | None = None
     while True:
         arguments: dict[str, Any] = {
             "Bucket": bucket,
             "Prefix": f"{output_prefix}attempts/",
             "MaxKeys": 1000,
         }
-        if continuation:
-            arguments["ContinuationToken"] = continuation
-        response = s3.list_objects_v2(**arguments)
-        for value in response.get("Contents", []):
+        if key_marker:
+            arguments["KeyMarker"] = key_marker
+        if version_id_marker:
+            arguments["VersionIdMarker"] = version_id_marker
+        response = s3.list_object_versions(**arguments)
+        entries = [(value, False) for value in response.get("Versions", [])] + [
+            (value, True) for value in response.get("DeleteMarkers", [])
+        ]
+        for value, delete_marker in entries:
             key = str(value["Key"])
+            version_id = str(value["VersionId"])
             match = _ATTEMPT_KEY.match(key)
             if match is None or not key.startswith(output_prefix):
                 raise RuntimeError("media janitor attempt key is invalid")
@@ -294,26 +301,33 @@ def _delete_unfinalized_attempts(
                 raise RuntimeError("media janitor attempt job metadata is invalid")
             attempt_id = match.group("attempt_id")
             if attempt_id != finalized_attempt_id:
-                attempts.setdefault(attempt_id, []).append((key, match))
+                attempts.setdefault(attempt_id, []).append((key, version_id, match, delete_marker))
         if not response.get("IsTruncated"):
             break
-        continuation = str(response["NextContinuationToken"])
+        key_marker = str(response["NextKeyMarker"])
+        version_id_marker = str(response["NextVersionIdMarker"])
     deleted = 0
     for values in attempts.values():
-        keys: list[str] = []
-        for key, match in values:
-            metadata = s3.head_object(Bucket=bucket, Key=key).get("Metadata", {})
+        versions: list[dict[str, str]] = []
+        for key, version_id, match, delete_marker in values:
+            if delete_marker:
+                versions.append({"Key": key, "VersionId": version_id})
+                continue
+            head = s3.head_object(Bucket=bucket, Key=key, VersionId=version_id)
+            metadata = head.get("Metadata", {})
             tags = {
                 str(tag.get("Key", "")): str(tag.get("Value", ""))
-                for tag in s3.get_object_tagging(Bucket=bucket, Key=key).get(
-                    "TagSet",
-                    [],
-                )
+                for tag in s3.get_object_tagging(
+                    Bucket=bucket,
+                    Key=key,
+                    VersionId=version_id,
+                ).get("TagSet", [])
             }
             marker = match.group("relative_key") == "_FINALIZED.json"
             expected_finalized = "true" if marker else "false"
             if (
-                metadata.get("job-id") != expected_job_id
+                head.get("VersionId") != version_id
+                or metadata.get("job-id") != expected_job_id
                 or metadata.get("attempt-id") != match.group("attempt_id")
                 or metadata.get("lease-version") != match.group("lease_version")
                 or metadata.get("finalized") != expected_finalized
@@ -323,30 +337,36 @@ def _delete_unfinalized_attempts(
                 raise RuntimeError(
                     "media janitor refuses object without exact attempt metadata and tags"
                 )
-            keys.append(key)
+            versions.append({"Key": key, "VersionId": version_id})
         result = s3.delete_objects(
             Bucket=bucket,
-            Delete={"Objects": [{"Key": key} for key in keys], "Quiet": True},
+            Delete={"Objects": versions, "Quiet": True},
         )
         if result.get("Errors"):
             raise RuntimeError("S3 reported media janitor delete errors")
-        deleted += len(keys)
+        deleted += len(versions)
     return deleted
 
 
 def _delete_prefix(bucket: str, prefix: str) -> int:
     deleted_count = 0
-    continuation: str | None = None
+    key_marker: str | None = None
+    version_id_marker: str | None = None
     while True:
         arguments: dict[str, Any] = {
             "Bucket": bucket,
             "Prefix": prefix,
             "MaxKeys": 1000,
         }
-        if continuation:
-            arguments["ContinuationToken"] = continuation
-        response = s3.list_objects_v2(**arguments)
-        objects = [{"Key": value["Key"]} for value in response.get("Contents", [])]
+        if key_marker:
+            arguments["KeyMarker"] = key_marker
+        if version_id_marker:
+            arguments["VersionIdMarker"] = version_id_marker
+        response = s3.list_object_versions(**arguments)
+        objects = [
+            {"Key": value["Key"], "VersionId": value["VersionId"]}
+            for value in response.get("Versions", []) + response.get("DeleteMarkers", [])
+        ]
         if objects:
             result = s3.delete_objects(
                 Bucket=bucket,
@@ -357,7 +377,8 @@ def _delete_prefix(bucket: str, prefix: str) -> int:
             deleted_count += len(objects)
         if not response.get("IsTruncated"):
             return deleted_count
-        continuation = str(response["NextContinuationToken"])
+        key_marker = str(response["NextKeyMarker"])
+        version_id_marker = str(response["NextVersionIdMarker"])
 
 
 def handler(_event: dict[str, Any], context: Any) -> dict[str, int]:
