@@ -154,12 +154,21 @@ def test_lambda_creation_waits_for_adopted_log_groups() -> None:
 
 def test_migration_allowlist_guard_and_runbook_cover_exact_adoption_addresses() -> None:
     migrations = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
-    runtime_allowed = migrations["2026-07-wolfi-runtime-v1"]["allowed_changes"]
+    migration = migrations["2026-07-wolfi-runtime-v1"]
+    assert "allowed_changes" not in migration
+    if migration["enabled"]:
+        reviewed_addresses = {
+            row["address"] for row in migration["reviewed_plan"]["resource_changes"]
+        }
+    else:
+        assert migration["reviewed_plan"] is None
+        reviewed_addresses = set()
     guard = GUARD.read_text(encoding="utf-8")
     readme = (TF_ROOT / "README.md").read_text(encoding="utf-8")
 
     for address, (_, _, _, import_id, _) in LOG_GROUPS.items():
-        assert runtime_allowed.count(address) == 1
+        if migration["enabled"]:
+            assert address in reviewed_addresses
         assert address in guard
         assert address in readme
         assert import_id in guard

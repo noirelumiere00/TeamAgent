@@ -138,8 +138,12 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
             assert path in safe_launchers, f"unapproved StartBuild path: {path}"
         if "source.zip" in body:
             assert path == composed_guard
-            assert "retired - mutable source.zip release publishing is denied" in body
-            assert 'type == "no_source"' in body
+            assert "validate_quarantine_builder_and_admin_noninterference_plan" in body
+            assert '$project.change.after.source[0].type == "s3"' in body
+            assert (
+                "$project.change.after.source[0].location ==\n"
+                '      "teamagent-dev-raw-files/codebuild/source.zip"'
+            ) in body
 
 
 def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> None:

@@ -210,7 +210,14 @@ def test_first_enablement_wait_and_exact_guard_allowlist_are_documented() -> Non
         "aws_s3_bucket_policy.bedrock_logs[0]",
         "aws_kms_key.logs",
     ):
-        assert migration["allowed_changes"].count(address) == 1
+        assert "allowed_changes" not in migration
+        if migration["enabled"]:
+            reviewed_addresses = {
+                row["address"] for row in migration["reviewed_plan"]["resource_changes"]
+            }
+            assert address in reviewed_addresses
+        else:
+            assert migration["reviewed_plan"] is None
     assert "2026-07-log-bucket-hardening-v1" not in manifest["migrations"]
 
     guard = GUARD.read_text(encoding="utf-8")

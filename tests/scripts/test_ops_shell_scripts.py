@@ -351,12 +351,13 @@ def test_worker_runtime_and_iam_hardening_contracts() -> None:
     ):
         assert needle in shared
 
-    tiktok_task_policy = tiktok.split('data "aws_iam_policy_document" "tiktok_task_app"', 1)[
-        1
-    ].split('resource "aws_iam_role_policy" "tiktok_task_app"', 1)[0]
-    assert 'actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]' in (tiktok_task_policy)
-    assert "dynamodb:PutItem" not in tiktok_task_policy
-    assert "logs:PutLogEvents" not in tiktok_task_policy
+    tiktok_task = tiktok.split(
+        'resource "aws_ecs_task_definition" "tiktok_acquire"',
+        1,
+    )[1].split("# ---------- SQS → trusted dispatcher", 1)[0]
+    assert "task_role_arn" not in tiktok_task
+    assert 'data "aws_iam_policy_document" "tiktok_task_app"' not in tiktok
+    assert 'resource "aws_iam_role_policy" "tiktok_task_app"' not in tiktok
 
     tiktok_mcp_policy = tiktok.split('data "aws_iam_policy_document" "tiktok_mcp_policy"', 1)[
         1

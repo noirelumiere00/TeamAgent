@@ -75,11 +75,11 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
     ):
         project_body = _resource(body, "aws_codebuild_project", project)
         assert f"group_name = {log_group}" in project_body
-    retired = _resource(body, "aws_codebuild_project", "image")
-    assert "cloudwatch_logs {" in retired
-    assert 'status = "DISABLED"' in retired
-    assert "group_name" not in retired
-    assert "stream_name" not in retired
+    quarantine_builder = _resource(body, "aws_codebuild_project", "image")
+    assert "cloudwatch_logs {" in quarantine_builder
+    assert "group_name = aws_cloudwatch_log_group.codebuild_image.name" in quarantine_builder
+    assert 'status = "DISABLED"' not in quarantine_builder
+    assert "stream_name" not in quarantine_builder
     assert '"logs:CreateLogGroup"' not in body
 
 
