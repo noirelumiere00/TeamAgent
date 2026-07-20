@@ -1,9 +1,10 @@
 # ============================================================
 # generic media jobs — one-shot isolated media worker (A′ topology)
 # ============================================================
-# Core→SQS (SendMessage only)→Lambda dispatcher (RunTask/PassRole)
-#   →one-shot Fargate media image→dedicated S3/DynamoDB. ECS overrideには
-#   envelope本体を載せず、DynamoDB上のjob ID/payload digest pointerだけを渡す。
+# Core→SQS (SendMessage only)→trusted Lambda dispatcher/finalizer
+#   →task-roleなしone-shot Fargate media tool→presigned S3 capabilities。
+# ECS overrideにはidentity hashとprivate S3 .env ARNだけを載せ、AWS資格情報・
+# DynamoDB・bucket権限はtool containerへ一切渡さない。
 # Legacy ``enable_tiktok_acquire`` and image input remain aliases so an existing
 # deployment can migrate without silently disabling the TikTok route.
 # ------------------------------------------------------------
@@ -397,7 +398,7 @@ resource "aws_security_group" "tiktok_tasks" {
   }
 }
 
-# ---------- IAM: 実行ロール(ECRプル/Secrets/ログ) ----------
+# ---------- IAM: 実行ロール(ECR pull/logs + immutable control env only) ----------
 data "aws_iam_policy_document" "tiktok_exec_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -420,70 +421,28 @@ resource "aws_iam_role_policy_attachment" "tiktok_exec_managed" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# ---------- IAM: タスクロール(S3 prefix / Dynamo更新) ----------
-data "aws_iam_policy_document" "tiktok_task_assume" {
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
-}
-
-resource "aws_iam_role" "tiktok_task" {
-  count              = local.tk_enabled
-  name               = "${local.tk_name}-task"
-  assume_role_policy = data.aws_iam_policy_document.tiktok_task_assume.json
-}
-
-data "aws_iam_policy_document" "tiktok_task_app" {
+data "aws_iam_policy_document" "tiktok_exec_control" {
   count = local.tk_enabled
   statement {
-    sid = "S3ReadJobInputs"
-    actions = [
-      "s3:GetObject",
-      "s3:GetObjectVersion",
-    ]
-    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/input/*"]
-  }
-  statement {
-    sid = "S3ManageOwnedAttempts"
-    actions = [
-      "s3:PutObject",
-      "s3:PutObjectTagging",
-      "s3:GetObject",
-      "s3:GetObjectVersion",
-      "s3:DeleteObject",
-      "s3:DeleteObjectVersion",
-    ]
-    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/attempts/*"]
-  }
-  statement {
-    sid       = "S3ListOnlyMediaJobs"
-    actions   = ["s3:ListBucketVersions"]
+    sid       = "LocateDispatcherControlBucket"
+    actions   = ["s3:GetBucketLocation"]
     resources = [aws_s3_bucket.media_jobs[0].arn]
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values   = ["media-jobs/*"]
-    }
   }
   statement {
-    sid       = "DynamoStatus"
-    actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
-    resources = [aws_dynamodb_table.tiktok_jobs[0].arn]
+    sid       = "ReadDispatcherControlEnvironment"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/control/*.env"]
   }
 }
 
-resource "aws_iam_role_policy" "tiktok_task_app" {
+resource "aws_iam_role_policy" "tiktok_exec_control" {
   count  = local.tk_enabled
-  name   = "${local.tk_name}-task-app"
-  role   = aws_iam_role.tiktok_task[0].id
-  policy = data.aws_iam_policy_document.tiktok_task_app[0].json
+  name   = "${local.tk_name}-exec-control"
+  role   = aws_iam_role.tiktok_exec[0].id
+  policy = data.aws_iam_policy_document.tiktok_exec_control[0].json
 }
 
-# ---------- Generic ECS media worker Task Definition (arm64) ----------
+# ---------- Roleless generic ECS media tool Task Definition (arm64) ----------
 # Keep the existing Terraform address, family, and physical container name so
 # the generic worker is an in-place, reviewable runtime migration.
 resource "aws_ecs_task_definition" "tiktok_acquire" {
@@ -494,7 +453,6 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
   cpu                      = var.tiktok_task_cpu
   memory                   = var.tiktok_task_memory
   execution_role_arn       = aws_iam_role.tiktok_exec[0].arn
-  task_role_arn            = aws_iam_role.tiktok_task[0].arn
   skip_destroy             = true
 
   depends_on = [
@@ -538,14 +496,10 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
       essential   = true
       stopTimeout = 30
       environment = [
-        { name = "AWS_REGION", value = var.aws_region },
         { name = "HOME", value = "/tmp/home" },
         { name = "TMPDIR", value = "/tmp" },
         { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
         { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
-        { name = "MEDIA_JOB_BUCKET", value = aws_s3_bucket.media_jobs[0].bucket },
-        { name = "MEDIA_JOBS_TABLE", value = aws_dynamodb_table.tiktok_jobs[0].name },
-        { name = "MEDIA_ARTIFACT_TTL_SECONDS", value = tostring(var.media_artifact_ttl_seconds) },
         { name = "MEDIA_BLOCKED_VPC_CIDRS", value = data.aws_vpc.default.cidr_block },
       ]
       secrets = []
@@ -561,10 +515,10 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
   ])
 }
 
-# ---------- SQS → Lambda dispatcher → ECS RunTask (★RunTask/PassRoleはここだけ) ----------
+# ---------- SQS → trusted dispatcher/finalizer → roleless ECS tool ----------
 # EventBridge Pipes のECS動的override注入は壊れやすいため、前例(lambda_iam.tf)準拠の
-# 薄いLambdaでSQSをデキューし、strict canonical envelopeを検証してから
-# ecs.run_taskには8192文字制限内のjob ID/payload digest pointerだけを渡す。
+# Lambdaでstrict canonical envelopeを検証し、VersionId固定GETとslot固定POSTを発行。
+# toolはS3/Dynamo権限を持たず、STOPPED後にLambdaがchecksumとattempt fenceを確定する。
 data "archive_file" "tiktok_dispatch" {
   count            = local.tk_enabled
   type             = "zip"
@@ -619,11 +573,35 @@ data "aws_iam_policy_document" "tiktok_dispatch_policy" {
   statement {
     sid       = "PassRole"
     actions   = ["iam:PassRole"]
-    resources = [aws_iam_role.tiktok_exec[0].arn, aws_iam_role.tiktok_task[0].arn]
+    resources = [aws_iam_role.tiktok_exec[0].arn]
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
       values   = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+  statement {
+    sid = "IssueAndVerifyExactMediaCapabilities"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+      "s3:DeleteObjectVersion",
+    ]
+    resources = [
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/input/*",
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/control/*",
+      "${aws_s3_bucket.media_jobs[0].arn}/media-jobs/*/attempts/*",
+    ]
+  }
+  statement {
+    sid       = "ListExactMediaVersions"
+    actions   = ["s3:ListBucketVersions"]
+    resources = [aws_s3_bucket.media_jobs[0].arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["media-jobs/*"]
     }
   }
   statement {
@@ -660,6 +638,7 @@ resource "aws_lambda_function" "tiktok_dispatch" {
   filename                       = data.archive_file.tiktok_dispatch[0].output_path
   source_code_hash               = data.archive_file.tiktok_dispatch[0].output_base64sha256
   timeout                        = 30
+  memory_size                    = 512
   reserved_concurrent_executions = 2
 
   depends_on = [
@@ -920,7 +899,7 @@ data "aws_iam_policy_document" "media_janitor" {
     }
   }
   statement {
-    sid       = "S3DeleteMediaJobs"
+    sid = "S3DeleteMediaJobs"
     actions = [
       "s3:DeleteObjectVersion",
       "s3:GetObjectVersion",

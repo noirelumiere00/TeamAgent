@@ -1,19 +1,23 @@
-"""Dispatch one strict generic media envelope to one Fargate task.
+"""Dispatch and finalize one strict roleless Fargate media attempt.
 
-The Lambda validates the canonical SQS envelope but passes only its bounded
-DynamoDB pointer to ECS.  A short DynamoDB dispatch lease prevents duplicate
-SQS deliveries from silently launching unbounded tasks; worker-side lease
-fencing remains authoritative for the actual job transition.
+The trusted Lambda owns DynamoDB and S3 authority.  It validates the canonical
+SQS envelope, emits exact VersionId-bound GET and checksum-enforcing POST
+capabilities, then starts a task with no task role.  On ECS STOPPED it verifies
+the exact attempt, completion, object versions, checksums, sizes, types, and
+metadata before one fenced terminal DynamoDB transition.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
 import os
 import re
 import time
+import uuid
+import zlib
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -29,10 +33,19 @@ _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 _MAX_ARTIFACT_RETENTION_SECONDS = 30 * 24 * 60 * 60
-_TASK_START_MINIMUM_BUDGET_SECONDS = 30.0
+_TASK_START_MINIMUM_BUDGET_SECONDS = 90.0
 _TERMINAL_WRITE_RESERVE_SECONDS = 15.0
+_PRESIGN_SAFETY_SECONDS = 10
+_MAX_PRESIGN_SECONDS = 15 * 60
+_MAX_CONTROL_BYTES = 768 * 1024
+_MAX_COMPLETION_BYTES = 128 * 1024
+_S3_STREAM_CHUNK_BYTES = 1024 * 1024
 _JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_ATTEMPT_ID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+_ARTIFACT_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 _S3_BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _S3_KEY = re.compile(r"^[A-Za-z0-9!_.*'()/+=:@-]+$")
 _SIMPLE_SELECTOR = re.compile(r"[.#][A-Za-z][A-Za-z0-9_-]{0,78}")
@@ -392,13 +405,16 @@ def _client(
     if remaining <= 0:
         raise TimeoutError("media envelope terminal budget reserve reached")
     phase_timeout = max(0.001, min(10.0, remaining / 2.0))
+    config_arguments: dict[str, Any] = {
+        "connect_timeout": phase_timeout,
+        "read_timeout": phase_timeout,
+        "retries": {"mode": "standard", "total_max_attempts": 1},
+    }
+    if service == "s3":
+        config_arguments["signature_version"] = "s3v4"
     return boto3.client(
         service,
-        config=Config(
-            connect_timeout=phase_timeout,
-            read_timeout=phase_timeout,
-            retries={"mode": "standard", "total_max_attempts": 1},
-        ),
+        config=Config(**config_arguments),
     )
 
 
@@ -595,20 +611,479 @@ def _mark_failed(
             raise
 
 
-def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> bool:
-    deadline_epoch_s = int(spec["deadline_epoch_s"])
-    audit_hash = spec["audit_principal_hash"]
-    audit_condition = (
+def _checksum_sha256_b64(hex_digest: str) -> str:
+    return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
+
+
+def _ddb_string(item: dict[str, Any], name: str) -> str:
+    value = item.get(name, {})
+    return value.get("S", "") if isinstance(value, dict) else ""
+
+
+def _ddb_int(item: dict[str, Any], name: str) -> int:
+    value = item.get(name, {})
+    raw = value.get("N", "") if isinstance(value, dict) else ""
+    if not isinstance(raw, str) or not re.fullmatch(r"(?:0|[1-9][0-9]*)", raw):
+        raise ValueError(f"media job {name} is invalid")
+    return int(raw)
+
+
+def _audit_condition(audit_hash: str | None) -> str:
+    return (
         "audit_principal_hash = :audit"
         if audit_hash is not None
         else "attribute_not_exists(audit_principal_hash)"
     )
+
+
+def _assert_owned_row(
+    item: dict[str, Any],
+    spec: dict[str, Any],
+    *,
+    require_request: bool = True,
+) -> None:
+    if (
+        _ddb_string(item, "idempotency_key") != spec["idempotency_key"]
+        or _ddb_string(item, "payload_sha256") != spec["payload_sha256"]
+        or not hmac.compare_digest(
+            _ddb_string(item, "audit_principal_hash"),
+            str(spec["audit_principal_hash"] or ""),
+        )
+        or (require_request and _ddb_string(item, "request_json") != _canonical(spec).decode())
+    ):
+        raise RuntimeError("media dispatch row ownership mismatch")
+
+
+def _assert_exact_input_response(ref: dict[str, Any], response: dict[str, Any]) -> None:
+    metadata = response.get("Metadata")
+    if (
+        response.get("VersionId") != ref["version_id"]
+        or response.get("ServerSideEncryption") not in {"AES256", "aws:kms"}
+        or response.get("ContentLength") != ref["size"]
+        or response.get("ContentType") != ref["content_type"]
+        or not isinstance(metadata, dict)
+        or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref["sha256"])
+        or not hmac.compare_digest(
+            str(response.get("ChecksumSHA256") or ""),
+            _checksum_sha256_b64(ref["sha256"]),
+        )
+    ):
+        raise ValueError("media input object does not match immutable reference")
+
+
+def _presign_expiry(deadline_epoch_s: int) -> int:
+    remaining = int(_remaining(deadline_epoch_s)) - _PRESIGN_SAFETY_SECONDS
+    if remaining < 1:
+        raise TimeoutError("media presigned capability budget exhausted")
+    return min(_MAX_PRESIGN_SECONDS, remaining)
+
+
+def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> list[dict[str, Any]]:
+    operation = spec["operation"]
+    kind = operation["kind"]
+    prefix = (
+        f"{spec['output_prefix']}attempts/{attempt['attempt_version']}/"
+        f"{attempt['attempt_id']}/output/"
+    )
+    slots: list[tuple[str, str, int]] = []
+    if kind == "acquire":
+        slots.append(("media", "media", int(operation["max_bytes"])))
+    elif kind == "tiktok_acquire":
+        slots.append(("posts.json", "posts.normalized.json", 16 * 1024 * 1024))
+        if operation["artifact_mode"] == "full":
+            slots.extend(
+                (
+                    ("config.json", "config.json", 256 * 1024),
+                    ("manifest.json", "videos/manifest.json", 16 * 1024 * 1024),
+                )
+            )
+            for keyword_index in range(len(operation["keywords"])):
+                for rank in range(1, int(operation["n_per_kw"]) + 1):
+                    pid = f"p{keyword_index + 1:02d}{rank:03d}"
+                    slots.append((f"thumb-{pid}", f"thumbs/{pid}.jpg", 8 * 1024 * 1024))
+                    slots.append(
+                        (
+                            f"video-{pid}",
+                            f"videos/{pid}.mp4",
+                            int(operation["max_video_bytes"]),
+                        )
+                    )
+    elif kind == "proxy":
+        slots.append(("proxy", "proxy", int(operation["limit_bytes"])))
+    elif kind == "frame":
+        for index in range(len(operation["timecodes"])):
+            slots.append((f"frame-{index:02d}", f"frame-{index:02d}.jpg", 8 * 1024 * 1024))
+        slots.append(("frames.json", "frames.json", 1024 * 1024))
+    elif kind == "thumbnail":
+        slots.extend(
+            (
+                ("thumbnail", "thumbnail.jpg", 8 * 1024 * 1024),
+                ("thumbnail.json", "thumbnail.json", 256 * 1024),
+            )
+        )
+    elif kind == "slides":
+        slots.append(("slides.pptx", "slides.pptx", _MAX_OUTPUT_BYTES))
+    elif kind == "proposal_pptx":
+        slots.append(("proposal.pptx", "proposal.pptx", _MAX_OUTPUT_BYTES))
+    elif kind == "pdf":
+        slots.append(("document.pdf", "document.pdf", _MAX_OUTPUT_BYTES))
+    else:
+        raise ValueError("media operation is invalid")
+    if len(slots) > 512 or len({name for name, _key, _size in slots}) != len(slots):
+        raise ValueError("media output slot set is invalid")
+    return [
+        {"name": name, "key": f"{prefix}{relative}", "max_bytes": maximum}
+        for name, relative, maximum in slots
+    ]
+
+
+def _required_output_names(spec: dict[str, Any]) -> set[str]:
+    kind = spec["operation"]["kind"]
+    if kind == "tiktok_acquire":
+        names = {"posts.json"}
+        if spec["operation"]["artifact_mode"] == "full":
+            names.update({"config.json", "manifest.json"})
+        return names
+    return {slot["name"] for slot in _operation_output_slots(
+        spec,
+        {"attempt_version": 1, "attempt_id": "00000000-0000-4000-8000-000000000000"},
+    )}
+
+
+def _allowed_content_types(spec: dict[str, Any], name: str) -> set[str]:
+    operation = spec["operation"]
+    kind = operation["kind"]
+    if kind == "acquire" and name == "media":
+        return {
+            "video/mp4",
+            "video/webm",
+            "video/quicktime",
+            "video/x-matroska",
+            "application/octet-stream",
+        }
+    if kind == "proxy" and name == "proxy":
+        return {operation["source"]["content_type"], "video/mp4"}
+    if name.startswith("frame-") or name.startswith("thumb-") or name == "thumbnail":
+        return {"image/jpeg"}
+    if name.endswith(".json"):
+        return {"application/json"}
+    if name.endswith(".pptx"):
+        return {"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
+    if name == "document.pdf":
+        return {"application/pdf"}
+    raise ValueError("media artifact content type has no approved contract")
+
+
+def _fixed_object_metadata(spec: dict[str, Any], attempt: dict[str, Any]) -> dict[str, str]:
+    return {
+        "job-id": spec["job_id"],
+        "attempt-id": attempt["attempt_id"],
+        "attempt-version": str(attempt["attempt_version"]),
+        "capability-sha256": attempt["capability_sha256"],
+    }
+
+
+def _presigned_post(
+    s3: Any,
+    *,
+    bucket: str,
+    key: str,
+    metadata: dict[str, str],
+    expires_s: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    fields = {
+        "x-amz-server-side-encryption": "AES256",
+        "x-amz-checksum-algorithm": "SHA256",
+        **{f"x-amz-meta-{name}": value for name, value in metadata.items()},
+    }
+    conditions: list[Any] = [
+        {"x-amz-server-side-encryption": "AES256"},
+        {"x-amz-checksum-algorithm": "SHA256"},
+        *({f"x-amz-meta-{name}": value} for name, value in metadata.items()),
+        ["starts-with", "$x-amz-checksum-sha256", ""],
+        ["starts-with", "$Content-Type", ""],
+        ["content-length-range", 1, max_bytes + 64 * 1024],
+    ]
+    post = s3.generate_presigned_post(
+        Bucket=bucket,
+        Key=key,
+        Fields=fields,
+        Conditions=conditions,
+        ExpiresIn=expires_s,
+    )
+    if (
+        not isinstance(post, dict)
+        or set(post) != {"url", "fields"}
+        or not isinstance(post["url"], str)
+        or not post["url"].startswith("https://")
+        or not isinstance(post["fields"], dict)
+    ):
+        raise RuntimeError("media output presign failed")
+    return post
+
+
+def _build_control(
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    deadline_epoch_s: int,
+) -> tuple[bytes, list[dict[str, Any]], str, str]:
+    s3 = _client("s3", deadline_epoch_s, reserve_seconds=_TERMINAL_WRITE_RESERVE_SECONDS)
+    expires_s = _presign_expiry(deadline_epoch_s)
+    inputs: list[dict[str, Any]] = []
+    for ref in _operation_s3_refs(spec["operation"]):
+        response = s3.head_object(
+            Bucket=ref["bucket"],
+            Key=ref["key"],
+            VersionId=ref["version_id"],
+            ChecksumMode="ENABLED",
+        )
+        _assert_exact_input_response(ref, response)
+        url = s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": ref["bucket"],
+                "Key": ref["key"],
+                "VersionId": ref["version_id"],
+            },
+            ExpiresIn=expires_s,
+        )
+        if not isinstance(url, str) or not url.startswith("https://"):
+            raise RuntimeError("media input presign failed")
+        inputs.append({"ref": ref, "get_url": url})
+    slots = _operation_output_slots(spec, attempt)
+    metadata = _fixed_object_metadata(spec, attempt)
+    outputs = [
+        {
+            **slot,
+            "post": _presigned_post(
+                s3,
+                bucket=spec["output_bucket"],
+                key=slot["key"],
+                metadata=metadata,
+                expires_s=expires_s,
+                max_bytes=slot["max_bytes"],
+            ),
+        }
+        for slot in slots
+    ]
+    completion_key = (
+        f"{spec['output_prefix']}attempts/{attempt['attempt_version']}/"
+        f"{attempt['attempt_id']}/_COMPLETION.json"
+    )
+    control = {
+        "schema_version": "1",
+        "request": spec,
+        "attempt_id": attempt["attempt_id"],
+        "attempt_version": attempt["attempt_version"],
+        "capability_secret": attempt["capability_secret"],
+        "inputs": inputs,
+        "outputs": outputs,
+        "completion": {
+            "key": completion_key,
+            "max_bytes": _MAX_COMPLETION_BYTES,
+            "post": _presigned_post(
+                s3,
+                bucket=spec["output_bucket"],
+                key=completion_key,
+                metadata=metadata,
+                expires_s=expires_s,
+                max_bytes=_MAX_COMPLETION_BYTES,
+            ),
+        },
+    }
+    encoded = _canonical(control)
+    if len(encoded) > _MAX_CONTROL_BYTES:
+        raise ValueError("media capability control exceeds bounded size")
+    control_sha256 = hashlib.sha256(encoded).hexdigest()
+    compressed = base64.b64encode(zlib.compress(encoded, level=9))
+    environment_file = b"MEDIA_CONTROL_ZLIB_B64=" + compressed + b"\n"
+    if len(environment_file) > _MAX_CONTROL_BYTES:
+        raise ValueError("media capability environment exceeds bounded size")
+    return environment_file, slots, completion_key, control_sha256
+
+
+def _delete_exact_version(
+    *,
+    bucket: str,
+    key: str,
+    version_id: str,
+    deadline_epoch_s: int,
+) -> None:
+    _call(
+        "s3",
+        "delete_object",
+        deadline_epoch_s,
+        Bucket=bucket,
+        Key=key,
+        VersionId=version_id,
+    )
+
+
+def _resume_attempt(item: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
+    attempt: dict[str, Any] = {
+        "attempt_id": _ddb_string(item, "attempt_id"),
+        "attempt_version": _ddb_int(item, "version"),
+        "capability_sha256": _ddb_string(item, "capability_sha256"),
+        "control_key": _ddb_string(item, "control_key"),
+        "control_version_id": _ddb_string(item, "control_version_id"),
+        "control_sha256": _ddb_string(item, "control_sha256"),
+        "completion_key": _ddb_string(item, "completion_key"),
+        "dispatch_client_token": _ddb_string(item, "dispatch_client_token"),
+    }
+    if (
+        not _ATTEMPT_ID.fullmatch(attempt["attempt_id"])
+        or attempt["attempt_version"] < 1
+        or not _SHA256.fullmatch(attempt["capability_sha256"])
+        or not _SHA256.fullmatch(attempt["control_sha256"])
+        or not _SHA256.fullmatch(attempt["dispatch_client_token"])
+        or not attempt["control_version_id"]
+        or attempt["control_version_id"] == "null"
+        or attempt["control_key"]
+        != f"{spec['output_prefix']}control/{attempt['attempt_id']}.env"
+        or attempt["completion_key"]
+        != (
+            f"{spec['output_prefix']}attempts/{attempt['attempt_version']}/"
+            f"{attempt['attempt_id']}/_COMPLETION.json"
+        )
+    ):
+        raise RuntimeError("media persisted dispatch capability is invalid")
+    return attempt
+
+
+def _prepare_attempt(
+    table: str,
+    bucket: str,
+    spec: dict[str, Any],
+    owner: str,
+    now: int,
+) -> dict[str, Any] | None:
+    deadline_epoch_s = int(spec["deadline_epoch_s"])
+    item = _call(
+        "dynamodb",
+        "get_item",
+        deadline_epoch_s,
+        TableName=table,
+        Key={"job_id": {"S": spec["job_id"]}},
+        ConsistentRead=True,
+    ).get("Item", {})
+    _assert_owned_row(item, spec)
+    status = _ddb_string(item, "status")
+    if status in {"done", "failed"}:
+        return None
+    if status == "running":
+        if _ddb_string(item, "dispatched_task_arn"):
+            return None
+        return _resume_attempt(item, spec)
+    if status != "queued":
+        raise RuntimeError("media job row has invalid status")
+    previous_version = _ddb_int(item, "version")
+    attempt_id = str(uuid.uuid4())
+    attempt_version = previous_version + 1
+    capability_secret = os.urandom(32).hex()
+    capability_sha256 = hashlib.sha256(capability_secret.encode("ascii")).hexdigest()
+    client_token = hashlib.sha256(
+        f"{spec['job_id']}:{attempt_version}:{attempt_id}".encode("ascii")
+    ).hexdigest()
+    attempt: dict[str, Any] = {
+        "attempt_id": attempt_id,
+        "attempt_version": attempt_version,
+        "capability_secret": capability_secret,
+        "capability_sha256": capability_sha256,
+        "dispatch_client_token": client_token,
+    }
+    environment_file, _slots, completion_key, control_sha256 = _build_control(
+        spec,
+        attempt,
+        deadline_epoch_s=deadline_epoch_s,
+    )
+    control_object_sha256 = hashlib.sha256(environment_file).hexdigest()
+    control_key = f"{spec['output_prefix']}control/{attempt_id}.env"
+    put_response = _call(
+        "s3",
+        "put_object",
+        deadline_epoch_s,
+        reserve_seconds=_TERMINAL_WRITE_RESERVE_SECONDS,
+        Bucket=bucket,
+        Key=control_key,
+        Body=environment_file,
+        ContentType="text/plain",
+        ServerSideEncryption="AES256",
+        ChecksumSHA256=_checksum_sha256_b64(control_object_sha256),
+        Metadata={
+            "job-id": spec["job_id"],
+            "attempt-id": attempt_id,
+            "control-sha256": control_sha256,
+        },
+        IfNoneMatch="*",
+    )
+    control_version_id = str(put_response.get("VersionId") or "")
+    if not control_version_id or control_version_id == "null":
+        raise RuntimeError("media control object is not version-bound")
+    try:
+        control_head = _call(
+            "s3",
+            "head_object",
+            deadline_epoch_s,
+            reserve_seconds=_TERMINAL_WRITE_RESERVE_SECONDS,
+            Bucket=bucket,
+            Key=control_key,
+            VersionId=control_version_id,
+            ChecksumMode="ENABLED",
+        )
+        if (
+            control_head.get("VersionId") != control_version_id
+            or control_head.get("ServerSideEncryption") != "AES256"
+            or control_head.get("ContentLength") != len(environment_file)
+            or control_head.get("ContentType") != "text/plain"
+            or not hmac.compare_digest(
+                str(control_head.get("ChecksumSHA256") or ""),
+                _checksum_sha256_b64(control_object_sha256),
+            )
+            or not isinstance(control_head.get("Metadata"), dict)
+            or control_head["Metadata"].get("job-id") != spec["job_id"]
+            or control_head["Metadata"].get("attempt-id") != attempt_id
+            or control_head["Metadata"].get("control-sha256") != control_sha256
+        ):
+            raise RuntimeError("media control object integrity verification failed")
+    except Exception:
+        try:
+            _delete_exact_version(
+                bucket=bucket,
+                key=control_key,
+                version_id=control_version_id,
+                deadline_epoch_s=deadline_epoch_s,
+            )
+        except Exception:
+            pass
+        raise
+    attempt.update(
+        {
+            "control_key": control_key,
+            "control_version_id": control_version_id,
+            "control_sha256": control_sha256,
+            "completion_key": completion_key,
+        }
+    )
+    audit_hash = spec["audit_principal_hash"]
     values: dict[str, Any] = {
         ":queued": {"S": "queued"},
+        ":running": {"S": "running"},
         ":payload": {"S": spec["payload_sha256"]},
+        ":previous": {"N": str(previous_version)},
+        ":version": {"N": str(attempt_version)},
+        ":attempt": {"S": attempt_id},
+        ":capability": {"S": capability_sha256},
         ":owner": {"S": owner},
+        ":lease": {"N": str(spec["deadline_epoch_s"] + 60)},
+        ":dispatch_lease": {"N": str(now + 120)},
         ":now": {"N": str(now)},
-        ":lease": {"N": str(now + 120)},
+        ":control_key": {"S": control_key},
+        ":control_version": {"S": control_version_id},
+        ":control_sha": {"S": control_sha256},
+        ":completion_key": {"S": completion_key},
+        ":client_token": {"S": client_token},
     }
     if audit_hash is not None:
         values[":audit"] = {"S": audit_hash}
@@ -620,73 +1095,51 @@ def _claim_dispatch(table: str, spec: dict[str, Any], owner: str, now: int) -> b
             TableName=table,
             Key={"job_id": {"S": spec["job_id"]}},
             UpdateExpression=(
-                "SET dispatch_owner = :owner, dispatch_lease_expires_at = :lease, "
-                "dispatch_started_at = :now"
+                "SET #status = :running, #version = :version, attempt_id = :attempt, "
+                "capability_sha256 = :capability, lease_owner = :owner, "
+                "lease_expires_at = :lease, dispatch_owner = :owner, "
+                "dispatch_lease_expires_at = :dispatch_lease, dispatch_started_at = :now, "
+                "updated_at = :now, control_key = :control_key, "
+                "control_version_id = :control_version, control_sha256 = :control_sha, "
+                "completion_key = :completion_key, dispatch_client_token = :client_token "
+                "REMOVE dispatched_task_arn, dispatched_at"
             ),
             ConditionExpression=(
-                f"#status = :queued AND payload_sha256 = :payload AND {audit_condition} AND "
-                "(attribute_not_exists(dispatched_task_arn)) AND "
-                "(attribute_not_exists(dispatch_owner) OR dispatch_lease_expires_at < :now)"
+                "#status = :queued AND #version = :previous AND "
+                "payload_sha256 = :payload AND "
+                f"{_audit_condition(audit_hash)} AND "
+                "attribute_not_exists(dispatched_task_arn)"
             ),
-            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
             ExpressionAttributeValues=values,
         )
-        return True
-    except Exception as exc:
-        if not _conditional_failure(exc):
-            raise
-        item = _call(
-            "dynamodb",
-            "get_item",
-            deadline_epoch_s,
-            TableName=table,
-            Key={"job_id": {"S": spec["job_id"]}},
-            ConsistentRead=True,
-        ).get("Item", {})
-        if item.get("payload_sha256", {}).get("S", "") != spec[
-            "payload_sha256"
-        ] or not hmac.compare_digest(
-            item.get("audit_principal_hash", {}).get("S", ""),
-            str(audit_hash or ""),
-        ):
-            raise RuntimeError("media dispatch row ownership mismatch") from exc
-        if item.get("dispatched_task_arn", {}).get("S"):
-            return False
-        status = item.get("status", {}).get("S")
-        if status in {"running", "done", "failed"}:
-            return False
-        raise RuntimeError("media dispatch lease is already held") from exc
+    except Exception:
+        try:
+            _delete_exact_version(
+                bucket=bucket,
+                key=control_key,
+                version_id=control_version_id,
+                deadline_epoch_s=deadline_epoch_s,
+            )
+        except Exception:
+            pass
+        raise
+    attempt.pop("capability_secret")
+    return attempt
 
 
-def _release_dispatch(
-    table: str,
-    job_id: str,
-    owner: str,
-    deadline_epoch_s: int,
-) -> None:
-    _call(
-        "dynamodb",
-        "update_item",
-        deadline_epoch_s,
-        TableName=table,
-        Key={"job_id": {"S": job_id}},
-        UpdateExpression="REMOVE dispatch_owner, dispatch_lease_expires_at",
-        ConditionExpression="dispatch_owner = :owner",
-        ExpressionAttributeValues={":owner": {"S": owner}},
-    )
-
-
-def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
+def _task_identity_environment(
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+) -> list[dict[str, str]]:
     environment = [
         {"name": "MEDIA_JOB_ID", "value": spec["job_id"]},
-        {
-            "name": "MEDIA_JOB_PAYLOAD_SHA256",
-            "value": spec["payload_sha256"],
-        },
-        {
-            "name": "MEDIA_JOB_DEADLINE_EPOCH_S",
-            "value": str(spec["deadline_epoch_s"]),
-        },
+        {"name": "MEDIA_JOB_PAYLOAD_SHA256", "value": spec["payload_sha256"]},
+        {"name": "MEDIA_JOB_DEADLINE_EPOCH_S", "value": str(spec["deadline_epoch_s"])},
+        {"name": "MEDIA_ATTEMPT_ID", "value": attempt["attempt_id"]},
+        {"name": "MEDIA_ATTEMPT_VERSION", "value": str(attempt["attempt_version"])},
+        {"name": "MEDIA_CAPABILITY_SHA256", "value": attempt["capability_sha256"]},
+        {"name": "MEDIA_CONTROL_SHA256", "value": attempt["control_sha256"]},
     ]
     if spec["audit_principal_hash"] is not None:
         environment.append(
@@ -695,11 +1148,27 @@ def _task_overrides(container: str, spec: dict[str, Any]) -> dict[str, Any]:
                 "value": spec["audit_principal_hash"],
             }
         )
+    return environment
+
+
+def _task_overrides(
+    container: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    bucket: str,
+) -> dict[str, Any]:
     overrides = {
         "containerOverrides": [
             {
                 "name": container,
-                "environment": environment,
+                "environment": _task_identity_environment(spec, attempt),
+                "environmentFiles": [
+                    {
+                        "type": "s3",
+                        "value": f"arn:aws:s3:::{bucket}/{attempt['control_key']}",
+                    }
+                ],
             }
         ]
     }
@@ -785,36 +1254,105 @@ def _override_values(detail: dict[str, Any], expected_container: str) -> dict[st
     return values
 
 
+def _override_environment_file(
+    detail: dict[str, Any],
+    expected_container: str,
+) -> str | None:
+    overrides = detail.get("overrides")
+    if not isinstance(overrides, dict):
+        raise ValueError("ECS STOPPED overrides are invalid")
+    containers = overrides.get("containerOverrides")
+    if not isinstance(containers, list):
+        raise ValueError("ECS STOPPED overrides are invalid")
+    matches = [
+        value
+        for value in containers
+        if isinstance(value, dict) and value.get("name") == expected_container
+    ]
+    if len(matches) != 1:
+        raise ValueError("ECS STOPPED container override is invalid")
+    files = matches[0].get("environmentFiles")
+    # ECS accepts environmentFiles in RunTask overrides, but the documented
+    # EventBridge task-state shape does not promise that field.  When AWS
+    # includes it, bind it exactly; otherwise the DDB attempt and the seven
+    # explicit identity hashes remain authoritative.
+    if files is None:
+        return None
+    if (
+        not isinstance(files, list)
+        or len(files) != 1
+        or not isinstance(files[0], dict)
+        or set(files[0]) != {"type", "value"}
+        or files[0].get("type") != "s3"
+        or not isinstance(files[0].get("value"), str)
+    ):
+        raise ValueError("ECS STOPPED environment file is invalid")
+    value = files[0]["value"]
+    if not isinstance(value, str):
+        raise ValueError("ECS STOPPED environment file is invalid")
+    return value
+
+
 def _stopped_identity(
     detail: dict[str, Any],
     *,
     expected_container: str,
-) -> tuple[str, str, str | None]:
+) -> dict[str, Any]:
     tags = _tag_values(detail)
     overrides = _override_values(detail, expected_container)
-    tagged_job_id = tags.get("teamagent-job-id")
-    tagged_payload = tags.get("teamagent-payload-sha256")
-    overridden_job_id = overrides.get("MEDIA_JOB_ID")
-    overridden_payload = overrides.get("MEDIA_JOB_PAYLOAD_SHA256")
-    overridden_audit = overrides.get("MEDIA_JOB_AUDIT_PRINCIPAL_HASH")
-    if tagged_job_id is not None and overridden_job_id != tagged_job_id:
-        raise ValueError("ECS STOPPED job identity disagrees with task tags")
-    if tagged_payload is not None and overridden_payload != tagged_payload:
-        raise ValueError("ECS STOPPED payload identity disagrees with task tags")
+    values: dict[str, Any] = {
+        "job_id": overrides.get("MEDIA_JOB_ID"),
+        "payload_sha256": overrides.get("MEDIA_JOB_PAYLOAD_SHA256"),
+        "deadline_epoch_s": overrides.get("MEDIA_JOB_DEADLINE_EPOCH_S"),
+        "attempt_id": overrides.get("MEDIA_ATTEMPT_ID"),
+        "attempt_version": overrides.get("MEDIA_ATTEMPT_VERSION"),
+        "capability_sha256": overrides.get("MEDIA_CAPABILITY_SHA256"),
+        "control_sha256": overrides.get("MEDIA_CONTROL_SHA256"),
+        "audit_principal_hash": overrides.get("MEDIA_JOB_AUDIT_PRINCIPAL_HASH"),
+        "control_arn": _override_environment_file(detail, expected_container),
+    }
     if (
-        overridden_job_id is None
-        or not _JOB_ID.fullmatch(overridden_job_id)
-        or overridden_payload is None
-        or not _SHA256.fullmatch(overridden_payload)
-        or detail.get("startedBy") != overridden_job_id
+        not isinstance(values["job_id"], str)
+        or not _JOB_ID.fullmatch(values["job_id"])
+        or not isinstance(values["payload_sha256"], str)
+        or not _SHA256.fullmatch(values["payload_sha256"])
+        or not isinstance(values["attempt_id"], str)
+        or not _ATTEMPT_ID.fullmatch(values["attempt_id"])
+        or not isinstance(values["capability_sha256"], str)
+        or not _SHA256.fullmatch(values["capability_sha256"])
+        or not isinstance(values["control_sha256"], str)
+        or not _SHA256.fullmatch(values["control_sha256"])
+        or not isinstance(values["deadline_epoch_s"], str)
+        or not re.fullmatch(r"[1-9][0-9]{0,11}", values["deadline_epoch_s"])
+        or not isinstance(values["attempt_version"], str)
+        or not re.fullmatch(r"[1-9][0-9]{0,11}", values["attempt_version"])
+        or detail.get("startedBy") != values["job_id"]
     ):
         raise ValueError("ECS STOPPED task identity is invalid")
-    tagged_audit = tags.get("teamagent-audit-principal-hash")
-    if tagged_audit is not None and tagged_audit != overridden_audit:
-        raise ValueError("ECS STOPPED audit identity disagrees with task tags")
-    if overridden_audit is not None and not _SHA256.fullmatch(overridden_audit):
+    values["deadline_epoch_s"] = int(values["deadline_epoch_s"])
+    values["attempt_version"] = int(values["attempt_version"])
+    audit_hash = values["audit_principal_hash"]
+    if audit_hash is not None and (
+        not isinstance(audit_hash, str) or not _SHA256.fullmatch(audit_hash)
+    ):
         raise ValueError("ECS STOPPED audit identity is invalid")
-    return overridden_job_id, overridden_payload, overridden_audit
+    tag_contract = {
+        "teamagent-job-id": values["job_id"],
+        "teamagent-payload-sha256": values["payload_sha256"],
+        "teamagent-attempt-id": values["attempt_id"],
+        "teamagent-attempt-version": str(values["attempt_version"]),
+        "teamagent-capability-sha256": values["capability_sha256"],
+        "teamagent-control-sha256": values["control_sha256"],
+        **(
+            {"teamagent-audit-principal-hash": audit_hash}
+            if audit_hash is not None
+            else {}
+        ),
+    }
+    for key, expected in tag_contract.items():
+        if key in tags and tags[key] != expected:
+            raise ValueError("ECS STOPPED identity disagrees with task tags")
+    return values
 
 
 def _stopped_diagnostics(detail: dict[str, Any]) -> dict[str, Any]:
@@ -846,6 +1384,393 @@ def _stopped_diagnostics(detail: dict[str, Any]) -> dict[str, Any]:
     return diagnostics
 
 
+def _task_exit_code(detail: dict[str, Any], expected_container: str) -> int | None:
+    containers = detail.get("containers")
+    if not isinstance(containers, list):
+        return None
+    matches = [
+        value
+        for value in containers
+        if isinstance(value, dict) and value.get("name") == expected_container
+    ]
+    if len(matches) != 1:
+        return None
+    exit_code = matches[0].get("exitCode")
+    if type(exit_code) is not int:
+        return None
+    return exit_code
+
+
+def _single_object_version(
+    s3: Any,
+    *,
+    bucket: str,
+    key: str,
+) -> str | None:
+    response = s3.list_object_versions(Bucket=bucket, Prefix=key, MaxKeys=1000)
+    if response.get("IsTruncated"):
+        raise ValueError("media output key has too many versions")
+    versions = [
+        value
+        for value in response.get("Versions", [])
+        if isinstance(value, dict) and value.get("Key") == key
+    ]
+    markers = [
+        value
+        for value in response.get("DeleteMarkers", [])
+        if isinstance(value, dict) and value.get("Key") == key
+    ]
+    if not versions and not markers:
+        return None
+    if len(versions) != 1 or markers:
+        raise ValueError("media output key is not a single immutable version")
+    version_id = str(versions[0].get("VersionId") or "")
+    if not version_id or version_id == "null":
+        raise ValueError("media output version is invalid")
+    return version_id
+
+
+def _read_bounded_body(response: dict[str, Any], maximum: int) -> bytes:
+    body = response.get("Body")
+    if body is None or not hasattr(body, "read"):
+        raise ValueError("media S3 response body is invalid")
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = body.read(min(_S3_STREAM_CHUNK_BYTES, maximum + 1 - total))
+            if not chunk:
+                break
+            if not isinstance(chunk, bytes):
+                raise ValueError("media S3 response body is invalid")
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError("media S3 response exceeds bounded size")
+            chunks.append(chunk)
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            close()
+    return b"".join(chunks)
+
+
+def _assert_attempt_metadata(
+    metadata: Any,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+) -> None:
+    expected = _fixed_object_metadata(spec, attempt)
+    if not isinstance(metadata, dict) or any(
+        not hmac.compare_digest(str(metadata.get(key) or ""), value)
+        for key, value in expected.items()
+    ):
+        raise ValueError("media output attempt metadata is invalid")
+
+
+def _load_completion(
+    s3: Any,
+    *,
+    bucket: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+) -> dict[str, Any] | None:
+    key = attempt["completion_key"]
+    version_id = _single_object_version(s3, bucket=bucket, key=key)
+    if version_id is None:
+        return None
+    response = s3.get_object(
+        Bucket=bucket,
+        Key=key,
+        VersionId=version_id,
+        ChecksumMode="ENABLED",
+    )
+    length = response.get("ContentLength")
+    checksum = str(response.get("ChecksumSHA256") or "")
+    if (
+        response.get("VersionId") != version_id
+        or response.get("ServerSideEncryption") != "AES256"
+        or response.get("ContentType") != "application/json"
+        or type(length) is not int
+        or not 1 <= length <= _MAX_COMPLETION_BYTES
+        or not checksum
+    ):
+        raise ValueError("media completion object headers are invalid")
+    _assert_attempt_metadata(response.get("Metadata"), spec, attempt)
+    encoded = _read_bounded_body(response, _MAX_COMPLETION_BYTES)
+    if len(encoded) != length or not hmac.compare_digest(
+        _checksum_sha256_b64(hashlib.sha256(encoded).hexdigest()),
+        checksum,
+    ):
+        raise ValueError("media completion object checksum is invalid")
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("media completion JSON is invalid") from exc
+    if not isinstance(value, dict) or _canonical(value) != encoded:
+        raise ValueError("media completion JSON is not canonical")
+    value["_completion_version_id"] = version_id
+    return value
+
+
+def _artifact_manifest_sha256(artifacts: list[dict[str, Any]]) -> str:
+    rows = sorted(
+        (
+            {
+                "name": artifact["name"],
+                "bucket": artifact["object"]["bucket"],
+                "key": artifact["object"]["key"],
+                "version_id": artifact["object"]["version_id"],
+                "sha256": artifact["object"]["sha256"],
+                "size": artifact["object"]["size"],
+                "content_type": artifact["object"]["content_type"],
+            }
+            for artifact in artifacts
+        ),
+        key=lambda row: (row["name"], row["key"]),
+    )
+    return hashlib.sha256(_canonical(rows)).hexdigest()
+
+
+def _validate_completion_result(
+    completion: dict[str, Any],
+    *,
+    s3: Any,
+    bucket: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    exit_code: int | None,
+) -> tuple[dict[str, Any], str | None]:
+    completion_version = completion.pop("_completion_version_id", None)
+    if (
+        set(completion)
+        != {
+            "schema_version",
+            "job_id",
+            "payload_sha256",
+            "attempt_id",
+            "attempt_version",
+            "capability_secret",
+            "result",
+        }
+        or completion["schema_version"] != "1"
+        or completion["job_id"] != spec["job_id"]
+        or completion["payload_sha256"] != spec["payload_sha256"]
+        or completion["attempt_id"] != attempt["attempt_id"]
+        or completion["attempt_version"] != attempt["attempt_version"]
+        or not isinstance(completion["capability_secret"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", completion["capability_secret"])
+        or not hmac.compare_digest(
+            hashlib.sha256(completion["capability_secret"].encode("ascii")).hexdigest(),
+            attempt["capability_sha256"],
+        )
+        or not isinstance(completion_version, str)
+    ):
+        raise ValueError("media completion identity is invalid")
+    result = _exact_keys(
+        completion["result"],
+        {"schema_version", "job_id", "status", "artifacts", "metadata", "error_code"},
+        "media result",
+    )
+    if result["schema_version"] != "1" or result["job_id"] != spec["job_id"]:
+        raise ValueError("media result identity is invalid")
+    status = result["status"]
+    artifacts = result["artifacts"]
+    metadata = result["metadata"]
+    error_code = result["error_code"]
+    if (
+        status not in {"done", "failed"}
+        or not isinstance(artifacts, list)
+        or len(artifacts) > 512
+        or not isinstance(metadata, dict)
+        or len(_canonical(metadata)) > 32 * 1024
+    ):
+        raise ValueError("media result shape is invalid")
+    if status == "failed":
+        if (
+            artifacts
+            or not isinstance(error_code, str)
+            or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", error_code)
+        ):
+            raise ValueError("media failed result is invalid")
+        return result, None
+    if exit_code != 0 or error_code is not None or not artifacts:
+        raise ValueError("media done result disagrees with task exit")
+    slots = {
+        slot["name"]: slot for slot in _operation_output_slots(spec, attempt)
+    }
+    names: set[str] = set()
+    keys: set[str] = set()
+    for raw in artifacts:
+        artifact = _exact_keys(raw, {"name", "object"}, "media artifact")
+        name = artifact["name"]
+        if (
+            not isinstance(name, str)
+            or not _ARTIFACT_NAME.fullmatch(name)
+            or name in names
+            or name not in slots
+        ):
+            raise ValueError("media artifact name is invalid")
+        ref = _validate_s3_ref(artifact["object"])
+        slot = slots[name]
+        if (
+            ref["bucket"] != bucket
+            or ref["key"] != slot["key"]
+            or ref["key"] in keys
+            or not 1 <= ref["size"] <= slot["max_bytes"]
+            or ref["content_type"] not in _allowed_content_types(spec, name)
+        ):
+            raise ValueError("media artifact is outside its exact output slot")
+        version_id = _single_object_version(s3, bucket=bucket, key=ref["key"])
+        if version_id != ref["version_id"]:
+            raise ValueError("media artifact version is not exact")
+        response = s3.head_object(
+            Bucket=bucket,
+            Key=ref["key"],
+            VersionId=ref["version_id"],
+            ChecksumMode="ENABLED",
+        )
+        if (
+            response.get("VersionId") != ref["version_id"]
+            or response.get("ServerSideEncryption") != "AES256"
+            or response.get("ContentLength") != ref["size"]
+            or response.get("ContentType") != ref["content_type"]
+            or not hmac.compare_digest(
+                str(response.get("ChecksumSHA256") or ""),
+                _checksum_sha256_b64(ref["sha256"]),
+            )
+        ):
+            raise ValueError("media artifact headers do not match completion")
+        _assert_attempt_metadata(response.get("Metadata"), spec, attempt)
+        names.add(name)
+        keys.add(ref["key"])
+    if not _required_output_names(spec).issubset(names):
+        raise ValueError("media result is missing required output slots")
+    return result, _artifact_manifest_sha256(artifacts)
+
+
+def _failure_result(
+    spec: dict[str, Any],
+    *,
+    code: str,
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "1",
+        "job_id": spec["job_id"],
+        "status": "failed",
+        "artifacts": [],
+        "metadata": {"reconciler": "ecs-stopped", "ecs": diagnostics},
+        "error_code": code,
+    }
+
+
+def _commit_terminal(
+    *,
+    table: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    result: dict[str, Any],
+    manifest_sha256: str | None,
+    task_arn: str | None,
+    now: int,
+    deadline_epoch_s: int,
+) -> bool:
+    status = result["status"]
+    audit_hash = spec["audit_principal_hash"]
+    values: dict[str, Any] = {
+        ":running": {"S": "running"},
+        ":status": {"S": status},
+        ":payload": {"S": spec["payload_sha256"]},
+        ":attempt": {"S": attempt["attempt_id"]},
+        ":version": {"N": str(attempt["attempt_version"])},
+        ":capability": {"S": attempt["capability_sha256"]},
+        ":control_sha": {"S": attempt["control_sha256"]},
+        ":detail": {"S": _canonical(result).decode("utf-8")},
+        ":now": {"N": str(now)},
+        ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
+        ":one": {"N": "1"},
+    }
+    if audit_hash is not None:
+        values[":audit"] = {"S": audit_hash}
+    task_condition: str
+    task_set = ""
+    if task_arn is None:
+        task_condition = "attribute_not_exists(dispatched_task_arn)"
+    else:
+        values[":task"] = {"S": task_arn}
+        task_condition = (
+            "(attribute_not_exists(dispatched_task_arn) OR dispatched_task_arn = :task)"
+        )
+        task_set = ", dispatched_task_arn = :task"
+    manifest_set = ""
+    manifest_remove = ", artifact_manifest_sha256"
+    if manifest_sha256 is not None:
+        values[":manifest"] = {"S": manifest_sha256}
+        manifest_set = ", artifact_manifest_sha256 = :manifest"
+        manifest_remove = ""
+    try:
+        _call(
+            "dynamodb",
+            "update_item",
+            deadline_epoch_s,
+            TableName=table,
+            Key={"job_id": {"S": spec["job_id"]}},
+            UpdateExpression=(
+                "SET #status = :status, detail = :detail, updated_at = :now, "
+                "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup)"
+                f"{task_set}{manifest_set} "
+                "REMOVE dispatch_owner, dispatch_lease_expires_at, lease_owner, "
+                f"lease_expires_at{manifest_remove} ADD #version :one"
+            ),
+            ConditionExpression=(
+                "#status = :running AND #version = :version AND "
+                "payload_sha256 = :payload AND attempt_id = :attempt AND "
+                "capability_sha256 = :capability AND control_sha256 = :control_sha AND "
+                f"{task_condition} AND {_audit_condition(audit_hash)}"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
+            ExpressionAttributeValues=values,
+        )
+        return True
+    except Exception as exc:
+        if not _conditional_failure(exc):
+            raise
+        item = _call(
+            "dynamodb",
+            "get_item",
+            deadline_epoch_s,
+            TableName=table,
+            Key={"job_id": {"S": spec["job_id"]}},
+            ConsistentRead=True,
+        ).get("Item", {})
+        _assert_owned_row(item, spec)
+        if _ddb_string(item, "status") in {"done", "failed"}:
+            return False
+        raise RuntimeError("media terminal transition lost exact attempt fence") from exc
+
+
+def _load_persisted_spec(
+    item: dict[str, Any],
+    *,
+    bucket: str,
+    max_artifact_ttl_s: int,
+) -> dict[str, Any]:
+    raw = _ddb_string(item, "request_json")
+    try:
+        candidate = json.loads(raw)
+        created = int(candidate["created_at_epoch_s"])
+        deadline = int(candidate["deadline_epoch_s"])
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("persisted media request is invalid") from exc
+    validation_now = max(created, deadline - 1)
+    return _validate_envelope(
+        raw,
+        expected_bucket=bucket,
+        now=validation_now,
+        max_artifact_ttl_s=max_artifact_ttl_s,
+    )
+
+
 def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if event.get("source") != "aws.ecs" or event.get("detail-type") != "ECS Task State Change":
         raise ValueError("ECS STOPPED event identity is invalid")
@@ -855,7 +1780,9 @@ def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
     cluster = os.environ["CLUSTER_ARN"]
     taskdef = os.environ["TASKDEF_ARN"]
     table = os.environ["JOBS_TABLE"]
+    bucket = os.environ["JOB_BUCKET"]
     container = os.environ.get("CONTAINER", "media-worker")
+    max_artifact_ttl_s = int(os.environ["MEDIA_ARTIFACT_TTL_SECONDS"])
     if detail.get("clusterArn") != cluster:
         raise ValueError("ECS STOPPED cluster is outside reconciler scope")
     if _task_definition_family_arn(detail.get("taskDefinitionArn")) != (
@@ -870,61 +1797,187 @@ def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
     )
     if not task_arn.startswith("arn:") or ":task/" not in task_arn:
         raise ValueError("ECS task ARN is invalid")
-    job_id, payload_hash, audit_hash = _stopped_identity(
-        detail,
-        expected_container=container,
-    )
-    now = int(time.time())
+    identity = _stopped_identity(detail, expected_container=container)
     deadline = _event_deadline(context)
-    audit_condition = (
-        "audit_principal_hash = :audit"
-        if audit_hash is not None
-        else "attribute_not_exists(audit_principal_hash)"
-    )
-    diagnostics = _stopped_diagnostics(detail)
-    result_detail = _canonical(
-        {
-            "schema_version": "1",
-            "job_id": job_id,
-            "status": "failed",
-            "artifacts": [],
-            "metadata": {
-                "reconciler": "ecs-stopped",
-                "ecs": diagnostics,
-            },
-            "error_code": "MEDIA_ECS_TASK_STOPPED",
+    item = _call(
+        "dynamodb",
+        "get_item",
+        deadline,
+        TableName=table,
+        Key={"job_id": {"S": identity["job_id"]}},
+        ConsistentRead=True,
+    ).get("Item", {})
+    status = _ddb_string(item, "status")
+    if status in {"done", "failed"}:
+        return {
+            "reconciled": False,
+            "job_id": identity["job_id"],
+            "status": status,
         }
-    ).decode("utf-8")
-    values: dict[str, Any] = {
-        ":queued": {"S": "queued"},
-        ":running": {"S": "running"},
-        ":failed": {"S": "failed"},
-        ":task": {"S": task_arn},
-        ":payload": {"S": payload_hash},
-        ":detail": {"S": result_detail},
-        ":now": {"N": str(now)},
-        ":cleanup": {"N": str(now + _MAX_ARTIFACT_RETENTION_SECONDS)},
-        ":one": {"N": "1"},
+    spec = _load_persisted_spec(
+        item,
+        bucket=bucket,
+        max_artifact_ttl_s=max_artifact_ttl_s,
+    )
+    _assert_owned_row(item, spec)
+    attempt = _resume_attempt(item, spec)
+    if (
+        status != "running"
+        or identity["payload_sha256"] != spec["payload_sha256"]
+        or identity["deadline_epoch_s"] != spec["deadline_epoch_s"]
+        or identity["attempt_id"] != attempt["attempt_id"]
+        or identity["attempt_version"] != attempt["attempt_version"]
+        or identity["capability_sha256"] != attempt["capability_sha256"]
+        or identity["control_sha256"] != attempt["control_sha256"]
+        or not hmac.compare_digest(
+            str(identity["audit_principal_hash"] or ""),
+            str(spec["audit_principal_hash"] or ""),
+        )
+        or (
+            identity["control_arn"] is not None
+            and identity["control_arn"]
+            != f"arn:aws:s3:::{bucket}/{attempt['control_key']}"
+        )
+        or _ddb_string(item, "dispatched_task_arn") not in {"", task_arn}
+    ):
+        raise RuntimeError("ECS STOPPED row ownership mismatch")
+    s3 = _client("s3", deadline)
+    exit_code = _task_exit_code(detail, container)
+    diagnostics = _stopped_diagnostics(detail)
+    completion: dict[str, Any] | None = None
+    completion_version_id: str | None = None
+    result: dict[str, Any]
+    manifest_sha256: str | None = None
+    try:
+        completion = _load_completion(
+            s3,
+            bucket=bucket,
+            spec=spec,
+            attempt=attempt,
+        )
+        if completion is None:
+            result = _failure_result(
+                spec,
+                code="MEDIA_ECS_TASK_STOPPED",
+                diagnostics=diagnostics,
+            )
+        else:
+            raw_completion_version = completion.get("_completion_version_id")
+            if isinstance(raw_completion_version, str):
+                completion_version_id = raw_completion_version
+            result, manifest_sha256 = _validate_completion_result(
+                completion,
+                s3=s3,
+                bucket=bucket,
+                spec=spec,
+                attempt=attempt,
+                exit_code=exit_code,
+            )
+            if result["status"] == "failed":
+                manifest_sha256 = None
+    except ValueError:
+        result = _failure_result(
+            spec,
+            code="MEDIA_COMPLETION_INVALID",
+            diagnostics=diagnostics,
+        )
+        manifest_sha256 = None
+    now = int(time.time())
+    changed = _commit_terminal(
+        table=table,
+        spec=spec,
+        attempt=attempt,
+        result=result,
+        manifest_sha256=manifest_sha256,
+        task_arn=task_arn,
+        now=now,
+        deadline_epoch_s=deadline,
+    )
+    if changed:
+        if completion_version_id is not None:
+            try:
+                _delete_exact_version(
+                    bucket=bucket,
+                    key=attempt["completion_key"],
+                    version_id=completion_version_id,
+                    deadline_epoch_s=deadline,
+                )
+            except Exception:
+                pass
+        try:
+            _delete_exact_version(
+                bucket=bucket,
+                key=attempt["control_key"],
+                version_id=attempt["control_version_id"],
+                deadline_epoch_s=deadline,
+            )
+        except Exception:
+            # The secret is bounded by the presigned expiry and the lifecycle
+            # janitor; terminal state must not be rolled back by cleanup failure.
+            pass
+    return {
+        "reconciled": changed,
+        "job_id": spec["job_id"],
+        "status": result["status"],
     }
-    if audit_hash is not None:
-        values[":audit"] = {"S": audit_hash}
+
+
+def _attempt_tags(spec: dict[str, Any], attempt: dict[str, Any]) -> list[dict[str, str]]:
+    tags = [
+        {"key": "teamagent-job-id", "value": spec["job_id"]},
+        {"key": "teamagent-payload-sha256", "value": spec["payload_sha256"]},
+        {"key": "teamagent-attempt-id", "value": attempt["attempt_id"]},
+        {"key": "teamagent-attempt-version", "value": str(attempt["attempt_version"])},
+        {"key": "teamagent-capability-sha256", "value": attempt["capability_sha256"]},
+        {"key": "teamagent-control-sha256", "value": attempt["control_sha256"]},
+    ]
+    if spec["audit_principal_hash"] is not None:
+        tags.append(
+            {
+                "key": "teamagent-audit-principal-hash",
+                "value": spec["audit_principal_hash"],
+            }
+        )
+    return tags
+
+
+def _confirm_task(
+    *,
+    table: str,
+    spec: dict[str, Any],
+    attempt: dict[str, Any],
+    task_arn: str,
+    now: int,
+) -> None:
+    values: dict[str, Any] = {
+        ":running": {"S": "running"},
+        ":task": {"S": task_arn},
+        ":now": {"N": str(now)},
+        ":attempt": {"S": attempt["attempt_id"]},
+        ":version": {"N": str(attempt["attempt_version"])},
+        ":payload": {"S": spec["payload_sha256"]},
+        ":capability": {"S": attempt["capability_sha256"]},
+    }
+    if spec["audit_principal_hash"] is not None:
+        values[":audit"] = {"S": spec["audit_principal_hash"]}
     try:
         _call(
             "dynamodb",
             "update_item",
-            deadline,
+            int(spec["deadline_epoch_s"]),
             TableName=table,
-            Key={"job_id": {"S": job_id}},
+            Key={"job_id": {"S": spec["job_id"]}},
             UpdateExpression=(
-                "SET #status = :failed, detail = :detail, updated_at = :now, "
-                "cleanup_at = if_not_exists(hard_cleanup_at, :cleanup) "
-                "REMOVE dispatch_owner, dispatch_lease_expires_at "
-                "ADD #version :one"
+                "SET dispatched_task_arn = :task, dispatched_at = :now "
+                "REMOVE dispatch_owner, dispatch_lease_expires_at"
             ),
             ConditionExpression=(
-                "(#status = :queued OR #status = :running) AND "
-                "dispatched_task_arn = :task AND payload_sha256 = :payload AND "
-                f"{audit_condition}"
+                "#status = :running AND #version = :version AND "
+                "attempt_id = :attempt AND payload_sha256 = :payload AND "
+                "capability_sha256 = :capability AND "
+                "(attribute_not_exists(dispatched_task_arn) OR "
+                "dispatched_task_arn = :task) AND "
+                f"{_audit_condition(spec['audit_principal_hash'])}"
             ),
             ExpressionAttributeNames={"#status": "status", "#version": "version"},
             ExpressionAttributeValues=values,
@@ -935,27 +1988,20 @@ def _reconcile_stopped(event: dict[str, Any], context: Any) -> dict[str, Any]:
         item = _call(
             "dynamodb",
             "get_item",
-            deadline,
+            int(spec["deadline_epoch_s"]),
             TableName=table,
-            Key={"job_id": {"S": job_id}},
+            Key={"job_id": {"S": spec["job_id"]}},
             ConsistentRead=True,
         ).get("Item", {})
-        status = item.get("status", {}).get("S")
-        if status in {"done", "failed"}:
-            return {"reconciled": False, "job_id": job_id, "status": status}
         if (
-            item.get("dispatched_task_arn", {}).get("S") != task_arn
-            or item.get("payload_sha256", {}).get("S") != payload_hash
-            or not hmac.compare_digest(
-                item.get("audit_principal_hash", {}).get("S", ""),
-                audit_hash or "",
+            _ddb_string(item, "status") in {"done", "failed"}
+            or (
+                _ddb_string(item, "dispatched_task_arn") == task_arn
+                and _ddb_string(item, "attempt_id") == attempt["attempt_id"]
             )
         ):
-            raise RuntimeError("ECS STOPPED row ownership mismatch") from exc
-        # The dispatch confirmation may race the STOPPED event. Raising keeps
-        # the EventBridge delivery retryable until that write is observable.
-        raise RuntimeError("ECS STOPPED transition raced job state") from exc
-    return {"reconciled": True, "job_id": job_id, "status": "failed"}
+            return
+        raise RuntimeError("media task confirmation lost exact attempt fence") from exc
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -976,7 +2022,7 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     if not 300 <= max_artifact_ttl_s <= _MAX_ARTIFACT_RETENTION_SECONDS:
         raise RuntimeError("MEDIA_ARTIFACT_TTL_SECONDS is invalid")
 
-    started: list[str | None] = []
+    started: list[str] = []
     for record in event.get("Records", []):
         body = record.get("body", "")
         now = int(time.time())
@@ -989,8 +2035,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 max_artifact_ttl_s=max_artifact_ttl_s,
             )
         except TimeoutError:
-            # The immutable deadline is already exhausted. No synthetic
-            # deadline and no post-deadline network call are permitted.
             raise
         except Exception:
             if failure_target is not None:
@@ -1001,7 +2045,6 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                     now,
                 )
             raise
-
         deadline_epoch_s = int(spec["deadline_epoch_s"])
         if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
             if failure_target is None:
@@ -1014,18 +2057,21 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             )
             raise TimeoutError("media envelope deadline exceeded before dispatch claim")
         owner = str(record.get("messageId") or getattr(context, "aws_request_id", "dispatch"))
-        if not _claim_dispatch(table, spec, owner, now):
-            continue
         try:
-            if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
-                if failure_target is None:
-                    raise RuntimeError("validated media envelope lost failure identity")
+            attempt = _prepare_attempt(table, bucket, spec, owner, now)
+        except TimeoutError as exc:
+            if failure_target is not None and _remaining(deadline_epoch_s) > 0:
                 _mark_failed(
                     table,
                     failure_target,
                     "MEDIA_JOB_DEADLINE_EXCEEDED",
                     int(time.time()),
                 )
+            raise TimeoutError("media envelope deadline exceeded before task launch") from exc
+        if attempt is None:
+            continue
+        try:
+            if _remaining(deadline_epoch_s) <= _TASK_START_MINIMUM_BUDGET_SECONDS:
                 raise TimeoutError("media envelope deadline exceeded before task launch")
             response = _call(
                 "ecs",
@@ -1035,26 +2081,13 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                 cluster=cluster,
                 taskDefinition=taskdef,
                 launchType="FARGATE",
-                clientToken=spec["idempotency_key"],
+                platformVersion="1.4.0",
+                clientToken=attempt["dispatch_client_token"],
                 startedBy=spec["job_id"],
                 count=1,
-                tags=[
-                    {"key": "teamagent-job-id", "value": spec["job_id"]},
-                    {
-                        "key": "teamagent-payload-sha256",
-                        "value": spec["payload_sha256"],
-                    },
-                    *(
-                        [
-                            {
-                                "key": "teamagent-audit-principal-hash",
-                                "value": spec["audit_principal_hash"],
-                            }
-                        ]
-                        if spec["audit_principal_hash"] is not None
-                        else []
-                    ),
-                ],
+                enableExecuteCommand=False,
+                propagateTags="TASK_DEFINITION",
+                tags=_attempt_tags(spec, attempt),
                 networkConfiguration={
                     "awsvpcConfiguration": {
                         "subnets": subnets,
@@ -1062,46 +2095,46 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
                         "assignPublicIp": "ENABLED",
                     }
                 },
-                overrides=_task_overrides(container, spec),
+                overrides=_task_overrides(
+                    container,
+                    spec,
+                    attempt,
+                    bucket=bucket,
+                ),
             )
             failures = response.get("failures", [])
             tasks = response.get("tasks", [])
             if failures or len(tasks) != 1:
                 raise RuntimeError(f"run_task did not start exactly one task: {failures}")
-            task_arn = tasks[0]["taskArn"]
-            confirmation_values: dict[str, Any] = {
-                ":task": {"S": task_arn},
-                ":now": {"N": str(now)},
-                ":owner": {"S": owner},
-                ":payload": {"S": spec["payload_sha256"]},
-            }
-            if spec["audit_principal_hash"] is not None:
-                confirmation_values[":audit"] = {"S": spec["audit_principal_hash"]}
-                confirmation_audit_condition = "audit_principal_hash = :audit"
-            else:
-                confirmation_audit_condition = "attribute_not_exists(audit_principal_hash)"
-            _call(
-                "dynamodb",
-                "update_item",
-                deadline_epoch_s,
-                TableName=table,
-                Key={"job_id": {"S": spec["job_id"]}},
-                UpdateExpression=(
-                    "SET dispatched_task_arn = :task, dispatched_at = :now "
-                    "REMOVE dispatch_owner, dispatch_lease_expires_at"
-                ),
-                ConditionExpression=(
-                    "dispatch_owner = :owner AND payload_sha256 = :payload AND "
-                    f"{confirmation_audit_condition}"
-                ),
-                ExpressionAttributeValues=confirmation_values,
+            task_arn = str(tasks[0].get("taskArn") or "")
+            if not task_arn.startswith("arn:") or ":task/" not in task_arn:
+                raise RuntimeError("run_task returned an invalid task ARN")
+            _confirm_task(
+                table=table,
+                spec=spec,
+                attempt=attempt,
+                task_arn=task_arn,
+                now=int(time.time()),
             )
             started.append(task_arn)
         except Exception:
             try:
-                _release_dispatch(table, spec["job_id"], owner, deadline_epoch_s)
-            except TimeoutError:
-                # No network call is permitted after the immutable deadline.
+                failure = _failure_result(
+                    spec,
+                    code="MEDIA_DISPATCH_START_FAILED",
+                    diagnostics={},
+                )
+                _commit_terminal(
+                    table=table,
+                    spec=spec,
+                    attempt=attempt,
+                    result=failure,
+                    manifest_sha256=None,
+                    task_arn=None,
+                    now=int(time.time()),
+                    deadline_epoch_s=deadline_epoch_s,
+                )
+            except Exception:
                 pass
             raise
     return {"started": started, "batchItemFailures": []}

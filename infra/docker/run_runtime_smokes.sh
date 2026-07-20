@@ -182,7 +182,7 @@ run_one_shot \
 run_one_shot \
   media-composition media-composition media 4096 2 \
   /app/.venv/bin/python \
-  '["-m","teamagent.media.worker"]'
+  '["-m","teamagent.media.tool_worker"]'
 run_one_shot \
   media media-smoke media 4096 0 \
   /app/.venv/bin/python \

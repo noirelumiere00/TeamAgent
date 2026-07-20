@@ -10,7 +10,7 @@
 | task / image | 含めるもの | 含めないもの |
 |---|---|---|
 | `teamagent-mcp-core` | Python 3.14、TeamAgent core、E5、MCP、DB/AWS client、health、`app.html` | Node/Bun/npm、Playwright/Chromium、ffmpeg、yt-dlp、media worker実装 |
-| `teamagent-media-worker` | Python/Node 24、Python/JS Playwright、Chromium、ffmpeg、sanitized yt-dlp、fonts、media contract/operation/worker、TikTok scraper | E5、DB/Slack/OAuth、MCP、Vertex/Anthropic secret、core app |
+| `teamagent-media-worker` | Python/Node 24、Python/JS Playwright、Chromium、ffmpeg、sanitized yt-dlp、fonts、roleless media tool contract/operation/worker、TikTok scraper | boto3/botocore、AWS task role、E5、DB/Slack/OAuth、MCP、Vertex/Anthropic secret、core app |
 
 両方とも `linux/arm64` の独立image・独立taskとし、同一task definitionへ再結合しない。
 media workerは1 process / 1 strict jobで終了する。
@@ -174,11 +174,13 @@ Fargateはcustom seccomp profileを受け付けないため、このprofileをIa
 主張しない。Fargate上でnamespace sandboxが実際に成立することはdeploy前の別gateで必須とし、
 未確認中はfail closedとする。`--no-sandbox` とseccomp unconfinedは禁止する。
 
-Media task roleが直接使用するAWS clientはS3とDynamoDBだけである。必要actionとconditional KMS
-actionは `runtime-contract.json` に列挙した。`bedrock:*`, `rds:*`, `rds-db:*`,
-`secretsmanager:*`, `ssm:*` は付与しない。DB/Slack/OAuth/MCP bearer/Vertex/E5 secretを
-environment、secret injection、sidecarのいずれでも渡さない。queue dispatchやtask起動権限は
-dispatcher側roleに置き、worker roleへ混ぜない。
+Media tool taskは `task_role_arn` を持たず、boto3/botocoreもimageへ含めない。trusted
+dispatcher/finalizer LambdaだけがDynamoDB・S3・RunTaskを所有し、toolへ渡すAWS transportは
+VersionId固定presigned GETと、exact key・content-length・SSE・attempt metadata・SHA-256
+checksumをpolicyで固定した最大15分のpresigned POSTだけである。ECS execution roleはECR pull、
+CloudWatch Logs、private control `.env` の取得だけに使い、その資格情報はcontainerへ露出しない。
+DB/Slack/OAuth/MCP bearer/Vertex/E5 secretもenvironment、secret injection、sidecarの
+いずれでも渡さない。STOPPED後のterminal writeはLambdaが全artifactを検証して条件付きで行う。
 
 ## Build, scan, SBOM and provenance gates
 

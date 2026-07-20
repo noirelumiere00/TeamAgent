@@ -67,19 +67,36 @@ def test_artifacts_are_version_bound_and_core_writes_only_job_inputs() -> None:
         'data "aws_iam_policy_document"',
         "tiktok_mcp_policy",
     )
-    worker_policy = _block(
+    dispatcher_policy = _block(
         'data "aws_iam_policy_document"',
-        "tiktok_task_app",
+        "tiktok_dispatch_policy",
     )
+    task = _block('resource "aws_ecs_task_definition"', "tiktok_acquire")
 
     assert 'status = "Enabled"' in versioning
     assert 'sid = "S3JobInputsWrite"' in core_policy
     assert "media-jobs/*/input/*" in core_policy
     assert 'sid = "S3JobArtifactsRead"' in core_policy
     assert '"s3:GetObjectVersion"' in core_policy
-    assert 'sid = "S3ReadJobInputs"' in worker_policy
-    assert 'sid = "S3ManageOwnedAttempts"' in worker_policy
-    assert "media-jobs/*/attempts/*" in worker_policy
+    assert 'sid = "IssueAndVerifyExactMediaCapabilities"' in dispatcher_policy
+    assert "media-jobs/*/attempts/*" in dispatcher_policy
+    assert "task_role_arn" not in task
+    assert 'resource "aws_iam_role" "tiktok_task"' not in MEDIA_TF
+    assert "MEDIA_JOBS_TABLE" not in task
+    assert "MEDIA_JOB_BUCKET" not in task
+
+
+def test_execution_role_can_only_fetch_control_env_not_job_data() -> None:
+    policy = _block(
+        'data "aws_iam_policy_document"',
+        "tiktok_exec_control",
+    )
+
+    assert 'actions   = ["s3:GetBucketLocation"]' in policy
+    assert 'actions   = ["s3:GetObject"]' in policy
+    assert "media-jobs/*/control/*.env" in policy
+    assert "media-jobs/*/input/*" not in policy
+    assert "media-jobs/*/attempts/*" not in policy
 
 
 def test_stopped_recovery_has_delivery_and_invocation_failure_sinks() -> None:

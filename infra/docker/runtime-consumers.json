@@ -100,7 +100,7 @@
       "entry_point": [
         "/app/.venv/bin/python",
         "-m",
-        "teamagent.media.worker"
+        "teamagent.media.tool_worker"
       ],
       "command": [],
       "health_check": null,

@@ -197,7 +197,9 @@
         "ffmpeg",
         "sanitized-yt-dlp",
         "fonts",
-        "teamagent-media-only"
+        "teamagent-media-only",
+        "roleless-tool-worker",
+        "checksum-enforcing-presigned-post"
       ],
       "yt_dlp_sanitization": {
         "version": "2026.6.9",
@@ -223,6 +225,8 @@
         "sanitized_source_tree_sha256": "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b"
       },
       "forbidden_python_modules": [
+        "boto3",
+        "botocore",
         "psycopg",
         "sqlalchemy",
         "slack_sdk",
@@ -231,6 +235,13 @@
         "sentence_transformers"
       ],
       "forbidden_environment": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "MEDIA_JOB_BUCKET",
+        "MEDIA_JOBS_TABLE",
         "DATABASE_URL",
         "SLACK_BOT_TOKEN",
         "TEAMAGENT_MCP_BEARER",
@@ -239,25 +250,22 @@
         "VERTEX_CREDENTIALS",
         "ANTHROPIC_API_KEY"
       ],
-      "worker_role": {
-        "aws_clients": [
-          "s3",
-          "dynamodb"
+      "roleless_capability_boundary": {
+        "task_role_arn_required_absent": true,
+        "aws_sdk_modules_required_absent": [
+          "boto3",
+          "botocore"
         ],
-        "required_actions": [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket",
-          "dynamodb:UpdateItem",
-          "dynamodb:GetItem"
+        "allowed_aws_transport": [
+          "version-bound-presigned-get",
+          "slot-bound-checksum-enforcing-presigned-post"
         ],
-        "conditional_kms_actions": [
-          "kms:Decrypt",
-          "kms:Encrypt",
-          "kms:GenerateDataKey"
-        ],
+        "maximum_capability_seconds": 900,
+        "completion_owner": "trusted-dispatcher-finalizer-lambda",
+        "execution_role_visible_to_container": false,
         "forbidden_actions": [
+          "s3:*",
+          "dynamodb:*",
           "bedrock:*",
           "rds:*",
           "rds-db:*",

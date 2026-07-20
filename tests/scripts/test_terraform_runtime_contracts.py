@@ -95,11 +95,12 @@ def test_main_media_and_x_writable_cache_contracts_are_exact() -> None:
     )
     for value in (
         "image       = local.media_worker_image",
-        'name = "MEDIA_JOB_BUCKET"',
-        'name = "MEDIA_JOBS_TABLE"',
         "stopTimeout = 30",
     ):
         assert value in media
+    assert "task_role_arn" not in media
+    assert 'name = "MEDIA_JOB_BUCKET"' not in media
+    assert 'name = "MEDIA_JOBS_TABLE"' not in media
     assert re.search(r"(?m)^\s*command\s*=", media) is None
 
     x_buzz = _block(

@@ -46,25 +46,39 @@ def test_contract_has_independent_arm64_runtime_tasks() -> None:
     assert media["fargate_no_new_privileges_claimed"] is False
 
 
-def test_media_worker_role_explicitly_excludes_core_authority_and_secrets() -> None:
+def test_media_tool_is_roleless_and_receives_only_bounded_http_capabilities() -> None:
     media = CONTRACT["tasks"]["teamagent-media-worker"]
-    role = media["worker_role"]
-    assert role["aws_clients"] == ["s3", "dynamodb"]
-    assert set(role["required_actions"]) == {
-        "s3:GetObject",
-        "s3:PutObject",
-        "s3:DeleteObject",
-        "s3:ListBucket",
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem",
-    }
-    assert {"bedrock:*", "rds:*", "rds-db:*", "secretsmanager:*", "ssm:*"} <= set(
-        role["forbidden_actions"]
+    boundary = media["roleless_capability_boundary"]
+    assert boundary["task_role_arn_required_absent"] is True
+    assert boundary["aws_sdk_modules_required_absent"] == ["boto3", "botocore"]
+    assert boundary["allowed_aws_transport"] == [
+        "version-bound-presigned-get",
+        "slot-bound-checksum-enforcing-presigned-post",
+    ]
+    assert boundary["maximum_capability_seconds"] == 900
+    assert boundary["completion_owner"] == "trusted-dispatcher-finalizer-lambda"
+    assert boundary["execution_role_visible_to_container"] is False
+    assert {
+        "s3:*",
+        "dynamodb:*",
+        "bedrock:*",
+        "rds:*",
+        "rds-db:*",
+        "secretsmanager:*",
+        "ssm:*",
+    } <= set(
+        boundary["forbidden_actions"]
     )
     assert {"database", "slack", "oauth", "mcp-bearer", "vertex", "e5"} == set(
-        role["forbidden_secret_domains"]
+        boundary["forbidden_secret_domains"]
     )
     assert {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "MEDIA_JOB_BUCKET",
+        "MEDIA_JOBS_TABLE",
         "DATABASE_URL",
         "SLACK_BOT_TOKEN",
         "TEAMAGENT_MCP_BEARER",
@@ -530,7 +544,7 @@ def test_every_declared_consumer_composes_hardened_task_and_exact_command() -> N
     assert 'cpu_architecture        = "ARM64"' in block
     assert 'name = "runtime-tmp"' in block
     assert re.search(r"^\s*command\s*=", block, re.MULTILINE) is None
-    assert media["entry_point"] == [python, "-m", "teamagent.media.worker"]
+    assert media["entry_point"] == [python, "-m", "teamagent.media.tool_worker"]
 
 
 def test_shared_fargate_runtime_contract_is_complete_and_compatible() -> None:

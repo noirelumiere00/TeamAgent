@@ -31,7 +31,7 @@ conditional one-use ledger row, revokes the seed session, and deletes the seed
 stack. It never calls a build or release launcher.
 
 `reconcile-retire` is idempotent. It validates durable handoff artifacts and
-live main-state ownership, never executes `terraform apply`, never reapplies a
+live main-state ownership, never executes an infrastructure apply, never reapplies a
 consumed plan, and retires only the nonce-owned seed stack.
 EOF
 }
