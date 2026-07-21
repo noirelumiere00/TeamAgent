@@ -90,9 +90,15 @@ def _feedback_rate_limited(user_email: str) -> bool:
 
 
 def _feedback_insert_sql(columns: list[str]) -> str:
-    """search_feedback 用の INSERT SQL を列名から組み立てる。"""
+    """search_feedback 用の INSERT SQL を列名から組み立てる。
+
+    columns は呼び出し側の固定ホワイトリスト（user_email/query/target_type/doc_id/
+    chunk_id/rating/note/score/search_session_id/answer_id）のみで、外部入力は含まない。
+    値はすべて %s プレースホルダでパラメータ化する（列名の埋め込みのみ・SQLi 面なし）。
+    """
     placeholders = ", ".join("%s" for _ in columns)
-    return f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})"
+    # nosec B608: 列名は上記固定ホワイトリスト由来で外部入力なし・値は %s パラメータ化。
+    return f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})"  # nosec B608
 
 
 def _execute_feedback_insert(
