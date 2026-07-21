@@ -19,8 +19,10 @@ import logging
 import os
 import re
 import threading
+import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -451,6 +453,15 @@ def _envflag(name: str, default: str = "false") -> bool:
     skills/search/skill._envflag と同流儀（末尾改行や ``"1 "`` でも ON 判定）。
     """
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _search_warmup_enabled() -> bool:
+    """検索 warmup の opt-out を読む（未設定は有効）。
+
+    task definition で明示的に止める必要がある場合だけ、よく使う false 値を受け付ける。
+    それ以外の値は、未設定時と同じく warmup 有効として後方互換を保つ。
+    """
+    return os.environ.get("SEARCH_WARMUP", "").strip().lower() not in ("0", "false", "off")
 
 
 def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
@@ -3090,7 +3101,19 @@ def create_app(
     """
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
     slack_redirect = slack_redirect_uri or os.environ.get("SLACK_OAUTH_REDIRECT_URI", "")
-    app = FastAPI(title="TeamAgent Connect", docs_url=None, redoc_url=None, openapi_url=None)
+
+    @asynccontextmanager
+    async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
+        _start_search_warmup()
+        yield
+
+    app = FastAPI(
+        title="TeamAgent Connect",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=_lifespan,
+    )
     app.add_middleware(_SecurityHeadersMiddleware)
 
     search_cfg = search_config or _load_search_config()
@@ -3169,6 +3192,56 @@ def create_app(
                         skill = _build_search_skill()
                     search_state["skill"] = skill
         return skill
+
+    def _run_search_warmup() -> None:
+        """モデル初期化と最初の推論を先払いする（失敗しても検索経路を妨げない）。"""
+        started_at = time.perf_counter()
+        logger.info("search_warmup_started")
+        try:
+            # 必ず通常の lazy-singleton 経路を通す。初回検索と競合しても Lock により二重ロード
+            # されず、失敗時は state に書かれないため後続検索で再試行できる。
+            skill = _get_search_skill()
+            embedder = getattr(skill, "embedder", None)
+            embed = getattr(embedder, "embed", None)
+            if callable(embed):
+                embed("ウォームアップ")
+        except Exception as exc:
+            # warmup は可用性を上げるための最適化であり、起動・healthz・通常検索を失敗させない。
+            # 例外文は PII を含みうるため短く切り詰める。
+            logger.warning(
+                "search_warmup_failed",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+        else:
+            logger.info(
+                "search_warmup_ok",
+                latency_ms=round((time.perf_counter() - started_at) * 1000),
+            )
+
+    def _start_search_warmup() -> None:
+        """startup を待たせず、daemon thread へ検索モデルの warmup を委譲する。"""
+        if not _search_warmup_enabled():
+            return
+        try:
+            thread = threading.Thread(
+                target=_run_search_warmup,
+                name="search-warmup",
+                daemon=True,
+            )
+            app.state.search_warmup_thread = thread
+            thread.start()
+        except Exception as exc:
+            # スレッド生成/起動失敗も warmup の失敗として扱い、アプリの startup を止めない。
+            logger.warning(
+                "search_warmup_failed",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+
+    # 新しい Starlette では add_event_handler/on_event 系が削除されたため、lifespan で
+    # startup 時の warmup を登録する。_lifespan はクロージャの遅延束縛でここを参照する。
+    app.state.search_warmup_thread = None
 
     def _save_feedback(row: dict[str, Any]) -> None:
         """search_feedback に 1 行 INSERT する（store 注入時はそれを使う）。"""
