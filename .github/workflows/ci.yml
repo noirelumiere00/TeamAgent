@@ -47,6 +47,11 @@ jobs:
           cache: "pip"
           cache-dependency-path: "pyproject.toml"
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.14.4
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -218,7 +223,7 @@ jobs:
           unset TF_PLUGIN_CACHE_DIR
           rm -rf .terraform
           terraform init -backend=false -input=false -lockfile=readonly
-          required_providers="$(terraform providers | grep -Eo 'registry\.terraform\.io/hashicorp/[a-z0-9_-]+' | sort -u | wc -l)"
+          required_providers="$(grep -Ec '^provider "registry\.terraform\.io/hashicorp/[a-z0-9_-]+"' .terraform.lock.hcl)"
           test "$required_providers" -gt 0
           test "$(find provider-mirror -type f -name '*_linux_amd64.zip' | wc -l)" -eq "$required_providers"
           test "$(find provider-mirror -type f -name '*_linux_arm64.zip' | wc -l)" -eq "$required_providers"
