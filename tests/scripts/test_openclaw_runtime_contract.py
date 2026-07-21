@@ -1079,7 +1079,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     scope = json.loads(TOOL_SCOPE.read_text())
     included = config["mcp"]["servers"]["teamagent"]["toolFilter"]["include"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
-    assert scope["schemaVersion"] == 1
+    assert scope["schemaVersion"] == 2
     assert len(inventory_names) == len(set(inventory_names)) == 28
     assert set(inventory_names) == set(included)
     assert scope["nativeTools"]["profile"] == config["tools"]["profile"]
@@ -1108,6 +1108,21 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "oauth_connect",
         "knowledge_deliver",
     }
+    activation_by_name = {tool["name"]: tool["enabledBy"] for tool in scope["tools"]}
+    assert activation_by_name["search"] == {"kind": "always"}
+    assert activation_by_name["video_analysis"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_VIDEO_TOOLS"],
+    }
+    assert activation_by_name["tiktok_search"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_TIKTOK_TOOLS"],
+    }
+    assert activation_by_name["x_voice_search"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_X_RESEARCH_TOOLS"],
+    }
+    assert activation_by_name["video_approval"] == {"kind": "never"}
     effects = {tool["effect"] for tool in scope["tools"]}
     assert "gmail-draft-write-no-send" in effects
     assert "calendar-write-no-invite" in effects
@@ -1140,6 +1155,122 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "USE_KNOWLEDGE_SEARCH_URL_TOOL",
     ):
         assert unwired_gate not in fargate
+
+
+def _derive_rollout_expected_tools(
+    tmp_path: Path,
+    environment: dict[str, str],
+    actual_names: list[str],
+) -> subprocess.CompletedProcess[str]:
+    script = """
+import { pathToFileURL } from "node:url";
+const [gatePath, canaryPath, environmentJson, actualJson] = process.argv.slice(2);
+const { readExpectedToolNames } = await import(pathToFileURL(gatePath).href);
+const { assertExactToolNames } = await import(pathToFileURL(canaryPath).href);
+const expected = readExpectedToolNames({
+  taskDefinition: {
+    taskDefinitionArn: "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:42",
+    family: "teamagent-dev-mcp",
+    status: "ACTIVE",
+    containerDefinitions: [{
+      name: "teamagent-mcp",
+      environment: Object.entries(JSON.parse(environmentJson)).map(([name, value]) => ({name, value}))
+    }]
+  }
+});
+assertExactToolNames(expected, JSON.parse(actualJson).sort());
+process.stdout.write(JSON.stringify(expected));
+"""
+    runner = tmp_path / "rollout-tool-derivation.mjs"
+    runner.write_text(script)
+    return subprocess.run(
+        [
+            "node",
+            str(runner),
+            str(ROLLOUT_GATE),
+            str(ROLLOUT_TASK_CANARY),
+            json.dumps(environment),
+            json.dumps(actual_names),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
+def test_rollout_canary_derives_exact_tools_from_mcp_gate_environment(
+    tmp_path: Path,
+) -> None:
+    default_environment = {
+        "USE_MAIL_SUMMARY_TOOL": "true",
+        "USE_FOLLOWUP_TOOL": "true",
+        "USE_MAIL_LINK_TOOL": "true",
+        "USE_MAIL_REPLY_TOOL": "true",
+        "USE_MAIL_DRAFT_TOOL": "true",
+        "USE_MORNING_DIGEST_TOOL": "true",
+        "USE_OAUTH_CONNECT_TOOL": "true",
+        "USE_KNOWLEDGE_DELIVER": "true",
+        "USE_VIDEO_TOOLS": "false",
+        "USE_TIKTOK_TOOLS": "false",
+        "USE_TIKTOK_ACQUIRE": "0",
+        "USE_X_RESEARCH_TOOLS": "0",
+        "USE_SEARCH_SURFACE_TOOL": "0",
+        "USE_TIKTOK_COMMENT_TOOLS": "0",
+    }
+    default_expected = [
+        "clientkarte",
+        "knowledge_deliver",
+        "mail_draft",
+        "mail_followup",
+        "mail_reply",
+        "mail_summary",
+        "mail_to_internal_context",
+        "morning_digest",
+        "oauth_connect",
+        "proposal_draft",
+        "proposal_review",
+        "search",
+    ]
+    baseline = _derive_rollout_expected_tools(
+        tmp_path,
+        default_environment,
+        default_expected,
+    )
+    assert baseline.returncode == 0, baseline.stderr
+    assert json.loads(baseline.stdout) == default_expected
+
+    x_research_environment = {
+        **default_environment,
+        "USE_X_RESEARCH_TOOLS": "1",
+        "USE_SEARCH_SURFACE_TOOL": "1",
+        "USE_TIKTOK_COMMENT_TOOLS": "1",
+    }
+    x_research_expected = sorted(
+        [
+            *default_expected,
+            "x_voice_search",
+            "x_needs_mining",
+            "x_buzz_measure",
+            "x_buzz_measure_status",
+            "search_surface_check",
+            "tiktok_comment_mining",
+        ]
+    )
+    expanded = _derive_rollout_expected_tools(
+        tmp_path,
+        x_research_environment,
+        x_research_expected,
+    )
+    assert expanded.returncode == 0, expanded.stderr
+    assert json.loads(expanded.stdout) == x_research_expected
+
+    unknown_actual = _derive_rollout_expected_tools(
+        tmp_path,
+        x_research_environment,
+        [*x_research_expected, "unreviewed_tool"],
+    )
+    assert unknown_actual.returncode != 0
+    assert "MCP tools/list differs from reviewed scope" in unknown_actual.stderr
 
 
 def test_openclaw_manifest_documentation_matches_schema_five() -> None:
@@ -1414,6 +1545,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "ECS task-role credential endpoint is unavailable",
         'method: "tools/list"',
         "expectedToolNames",
+        "expected-tool-names-json",
         "toolNamesSha256",
         "static AWS credential variables reached the rollout task",
     ):
@@ -1451,8 +1583,11 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "teamagent-dev-openclaw-rollout-evidence",
         "alias/teamagent-dev-openclaw-rollout-evidence",
         "alias/teamagent-dev-openclaw-rollout-signing",
+        "deriveExpectedToolNames",
+        "--mcp-task-definition",
     ):
         assert required in rollout
+    assert "names.length !== 12" not in rollout
     assert "process.env.ECS_SERVICE" not in rollout
     assert "process.env.ECS_CLUSTER" not in rollout
     assert "process.env.CANARY_SECRET" not in rollout
@@ -1496,6 +1631,8 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "planned OpenClaw candidateがdistinct live revision" in apply_case
     assert "openclaw_rollout_evidence_key_arn" in apply_case
     assert "openclaw_rollout_signing_key_arn" in apply_case
+    assert "MCP_NEW_TASK_DEFINITION" in apply_case
+    assert '--mcp-task-definition "$MCP_NEW_TASK_DEFINITION"' in apply_case
     heartbeat_restart = apply_case.rfind("start_gate_heartbeat", 0, rollout_call)
     assert apply_case.index('"$APPLY_SUPERVISOR"') < heartbeat_restart < rollout_call
     ecs_begin = apply_case.index('python3 "$ECS_SERVICE_APPLY_SAGA" begin')
@@ -1557,6 +1694,10 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert '"arn:aws:kms:ap-northeast-1:718959508629:key/*"' not in evidence_tf
     assert "exact_rollout_kms_alias_scope" not in guard
     assert "not_resources = [aws_kms_key.openclaw_rollout_signing.arn]" in (runtime_evidence_tf)
+    runbook = RUNBOOK.read_text()
+    assert "teamagent/dev/openclaw/rollout-canary" in runbook
+    assert "aws secretsmanager create-secret" in runbook
+    assert "xoxp-" in runbook
 
 
 def _minimal_trivy_sbom(image_id: str) -> dict[str, Any]:

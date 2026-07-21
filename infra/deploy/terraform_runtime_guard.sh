@@ -10339,6 +10339,7 @@ case "$COMMAND" in
     OPENCLAW_ROLLOUT_REQUIRED="false"
     OPENCLAW_PREVIOUS_TASK_DEFINITION=""
     OPENCLAW_NEW_TASK_DEFINITION="AUTO"
+    MCP_NEW_TASK_DEFINITION=""
     OPENCLAW_ROLLOUT_RESULT="$TMP_ROOT/openclaw-rollout-result.json"
     OPENCLAW_ROLLBACK_RESULT="$TMP_ROOT/openclaw-rollback-result.json"
     POST_APPLY_SERVICE_PROBE_RESULT="$TMP_ROOT/post-apply-service-probe.json"
@@ -10759,6 +10760,11 @@ case "$COMMAND" in
     )"
     [[ "$OPENCLAW_NEW_TASK_DEFINITION" =~ ^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:[1-9][0-9]*$ ]] ||
       die "apply後のOpenClaw task revisionが不正です"
+    MCP_NEW_TASK_DEFINITION="$(
+      jq -er '.taskdefs.mcp.arn' "$TMP_ROOT/applied-live.json"
+    )"
+    [[ "$MCP_NEW_TASK_DEFINITION" =~ ^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:[1-9][0-9]*$ ]] ||
+      die "apply後のMCP task revisionが不正です"
     if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then
       [ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" = \
         "$OPENCLAW_NEW_TASK_DEFINITION" ] ||
@@ -10809,6 +10815,7 @@ case "$COMMAND" in
           "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" \
         --evidence-signing-kms-key-arn \
           "$OPENCLAW_SIGNING_KMS_KEY_ARN" \
+        --mcp-task-definition "$MCP_NEW_TASK_DEFINITION" \
         --output "$OPENCLAW_ROLLOUT_RESULT"; then
         die "OpenClaw post-apply gate failed; cleanup must verify the previous revision"
       fi

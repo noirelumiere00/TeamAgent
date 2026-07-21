@@ -7,6 +7,8 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 const REGION = "ap-northeast-1";
 const MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
@@ -90,6 +92,51 @@ async function mcpNotification({ method, params, bearer, sessionId }) {
   }
 }
 
+export function assertExactToolNames(expectedToolNames, actualNames) {
+  if (
+    !Array.isArray(expectedToolNames) ||
+    expectedToolNames.length === 0 ||
+    expectedToolNames.some((name) => typeof name !== "string") ||
+    expectedToolNames.length !== new Set(expectedToolNames).size ||
+    JSON.stringify([...expectedToolNames].sort()) !==
+      JSON.stringify(expectedToolNames) ||
+    !Array.isArray(actualNames) ||
+    actualNames.some((name) => typeof name !== "string") ||
+    actualNames.length !== new Set(actualNames).size ||
+    JSON.stringify([...actualNames].sort()) !== JSON.stringify(actualNames) ||
+    JSON.stringify(actualNames) !== JSON.stringify(expectedToolNames)
+  ) {
+    throw new Error(
+      `MCP tools/list differs from reviewed scope: ${JSON.stringify({
+        expectedToolNames,
+        actualNames,
+      })}`,
+    );
+  }
+  return true;
+}
+
+export function validateExpectedToolNames(scope, expectedToolNames) {
+  const reviewedToolNames = scope?.tools?.map((tool) => tool?.name).sort();
+  if (
+    scope?.schemaVersion !== 2 ||
+    !Array.isArray(reviewedToolNames) ||
+    reviewedToolNames.length === 0 ||
+    reviewedToolNames.some((name) => typeof name !== "string") ||
+    reviewedToolNames.length !== new Set(reviewedToolNames).size ||
+    !Array.isArray(expectedToolNames) ||
+    expectedToolNames.length === 0 ||
+    expectedToolNames.some((name) => typeof name !== "string") ||
+    expectedToolNames.length !== new Set(expectedToolNames).size ||
+    JSON.stringify([...expectedToolNames].sort()) !==
+      JSON.stringify(expectedToolNames) ||
+    expectedToolNames.some((name) => !reviewedToolNames.includes(name))
+  ) {
+    throw new Error("reviewed MCP tool scope or derived expected tools are invalid");
+  }
+  return reviewedToolNames;
+}
+
 async function verifyMcp(expectedToolNames, bearer) {
   const initialized = await mcpRequest({
     id: 1,
@@ -120,18 +167,7 @@ async function verifyMcp(expectedToolNames, bearer) {
   const tools = listed.payload.result?.tools;
   if (!Array.isArray(tools)) throw new Error("MCP tools/list result is not an array");
   const actualNames = tools.map((tool) => tool?.name).sort();
-  if (
-    actualNames.some((name) => typeof name !== "string") ||
-    actualNames.length !== new Set(actualNames).size ||
-    JSON.stringify(actualNames) !== JSON.stringify(expectedToolNames)
-  ) {
-    throw new Error(
-      `MCP tools/list differs from reviewed scope: ${JSON.stringify({
-        expectedToolNames,
-        actualNames,
-      })}`,
-    );
-  }
+  assertExactToolNames(expectedToolNames, actualNames);
   return {
     protocolVersion: initialized.payload.result?.protocolVersion,
     toolCount: actualNames.length,
@@ -195,27 +231,27 @@ async function verifyBedrock(modelId) {
 }
 
 async function run() {
-  if (process.argv.length !== 4 || process.argv[2] !== "--receipt-id") {
-    throw new Error("usage: rollout-task-canary.mjs --receipt-id <id>");
+  if (
+    process.argv.length !== 6 ||
+    process.argv[2] !== "--receipt-id" ||
+    process.argv[4] !== "--expected-tool-names-json"
+  ) {
+    throw new Error(
+      "usage: rollout-task-canary.mjs --receipt-id <id> --expected-tool-names-json <json>",
+    );
   }
   const receiptId = process.argv[3];
   if (!TOKEN_PATTERN.test(receiptId)) throw new Error("invalid rollout receipt id");
   if (!CONFIG_PATH) throw new Error("OPENCLAW_CONFIG_PATH is unavailable");
   const scope = JSON.parse(fs.readFileSync(TOOL_SCOPE_PATH, "utf8"));
   const config = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
-  const expectedToolNames = scope.tools
-    .filter((tool) => tool.defaultEnabledByTerraform === true)
-    .map((tool) => tool.name)
-    .sort();
+  const expectedToolNames = JSON.parse(process.argv[5]);
   const configuredToolNames =
     config.mcp?.servers?.teamagent?.toolFilter?.include?.toSorted();
-  const reviewedToolNames = scope.tools.map((tool) => tool.name).sort();
+  const reviewedToolNames = validateExpectedToolNames(scope, expectedToolNames);
   const configuredNativeDeny = config.tools?.deny?.toSorted();
   const reviewedNativeDeny = scope.nativeTools?.deny?.toSorted();
   if (
-    scope.schemaVersion !== 1 ||
-    expectedToolNames.length === 0 ||
-    expectedToolNames.length !== new Set(expectedToolNames).size ||
     JSON.stringify(configuredToolNames) !== JSON.stringify(reviewedToolNames) ||
     scope.nativeTools?.profile !== "minimal" ||
     config.tools?.profile !== scope.nativeTools.profile ||
@@ -255,6 +291,12 @@ async function run() {
   );
 }
 
-run().catch((error) =>
-  fail(error instanceof Error ? error.message : String(error)),
-);
+const isMain =
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+
+if (isMain) {
+  run().catch((error) =>
+    fail(error instanceof Error ? error.message : String(error)),
+  );
+}

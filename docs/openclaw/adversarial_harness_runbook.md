@@ -41,8 +41,8 @@ TEAMAGENT_MCP_BEARER=... TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
 ```
 期待: healthz=200 / bearer無=401 / `tools/list` 200。direct MCPの`search`は署名claimを
 生成できないため、ここでは成功条件にしない。`tools/list` は
-`infra/openclaw/effective-tool-scope.json` のうち現在の Terraform gate が有効な集合と一致し、
-余分・不足がないこと（「会社ナレッジ4のみ」という旧前提は廃止）。OpenClaw rollout の
+`infra/openclaw/effective-tool-scope.json` のうち deployed MCP task definition の `USE_*`
+環境 gate が有効にした集合と完全一致し、余分・不足がないこと（「会社ナレッジ4のみ」という旧前提は廃止）。OpenClaw rollout の
 one-off canary も同じ exact tools/list を検査するが、本ハーネスの RLS 攻撃検証を代替しない。
 
 ## 手順3: bearer-only 敵対ハーネス（全件早期拒否）
