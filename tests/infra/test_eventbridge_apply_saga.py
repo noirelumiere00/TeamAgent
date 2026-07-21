@@ -40,15 +40,15 @@ def _response(**values: object) -> dict[str, object]:
     }
 
 
-def _rule() -> dict[str, object]:
+def _rule(name: str = "teamagent-dev-morning-digest-weekday") -> dict[str, object]:
     return {
-        "Arn": ("arn:aws:events:ap-northeast-1:123456789012:rule/teamagent-dev-morning-digest"),
+        "Arn": f"arn:aws:events:ap-northeast-1:123456789012:rule/{name}",
         "CreatedBy": "123456789012",
         "Description": "reviewed schedule",
         "EventBusName": "default",
         "EventPattern": None,
         "ManagedBy": None,
-        "Name": "teamagent-dev-morning-digest",
+        "Name": name,
         "RoleArn": None,
         "ScheduleExpression": "cron(0 22 * * ? *)",
         "State": "DISABLED",
@@ -86,32 +86,55 @@ def _target(target_id: str, revision: int) -> dict[str, object]:
 
 class _Events:
     def __init__(self) -> None:
-        self.rule = _rule()
-        self.targets = [_target("morning", 44), _target("audit", 43)]
+        self.rules = {key: _rule(spec[2]) for key, spec in SAGA._RULE_SPECS.items()}
+        self.targets_by_rule = {
+            "canary": [],
+            "ingest": [],
+            "morning": [_target("morning", 44), _target("audit", 43)],
+        }
         self.fail_put_targets_once = False
 
-    def describe_rule(self, **_kwargs: object) -> dict[str, object]:
-        return _response(**copy.deepcopy(self.rule))
+    def _key(self, name: object) -> str:
+        return next(key for key, rule in self.rules.items() if rule["Name"] == name)
 
-    def list_targets_by_rule(self, **_kwargs: object) -> dict[str, object]:
-        return _response(Targets=copy.deepcopy(self.targets))
+    @property
+    def rule(self) -> dict[str, object]:
+        return self.rules["morning"]
+
+    @property
+    def targets(self) -> list[dict[str, object]]:
+        return self.targets_by_rule["morning"]
+
+    @targets.setter
+    def targets(self, value: list[dict[str, object]]) -> None:
+        self.targets_by_rule["morning"] = value
+
+    def describe_rule(self, **kwargs: object) -> dict[str, object]:
+        return _response(**copy.deepcopy(self.rules[self._key(kwargs["Name"])]))
+
+    def list_targets_by_rule(self, **kwargs: object) -> dict[str, object]:
+        return _response(Targets=copy.deepcopy(self.targets_by_rule[self._key(kwargs["Rule"])]))
 
     def put_rule(self, **kwargs: object) -> dict[str, object]:
+        rule = self.rules[self._key(kwargs["Name"])]
         for name in (
             "Description",
             "EventPattern",
             "RoleArn",
             "ScheduleExpression",
         ):
-            self.rule[name] = kwargs.get(name)
-        self.rule["State"] = kwargs["State"]
-        self.rule["Name"] = kwargs["Name"]
-        self.rule["EventBusName"] = kwargs["EventBusName"]
-        return _response(RuleArn=self.rule["Arn"])
+            rule[name] = kwargs.get(name)
+        rule["State"] = kwargs["State"]
+        rule["Name"] = kwargs["Name"]
+        rule["EventBusName"] = kwargs["EventBusName"]
+        return _response(RuleArn=rule["Arn"])
 
     def remove_targets(self, **kwargs: object) -> dict[str, object]:
         removed = set(kwargs["Ids"])  # type: ignore[arg-type]
-        self.targets = [target for target in self.targets if str(target["Id"]) not in removed]
+        key = self._key(kwargs["Rule"])
+        self.targets_by_rule[key] = [
+            target for target in self.targets_by_rule[key] if str(target["Id"]) not in removed
+        ]
         return _response(FailedEntryCount=0, FailedEntries=[])
 
     def put_targets(self, **kwargs: object) -> dict[str, object]:
@@ -121,9 +144,12 @@ class _Events:
                 FailedEntryCount=1,
                 FailedEntries=[{"ErrorCode": "InternalException"}],
             )
+        key = self._key(kwargs["Rule"])
         for replacement in copy.deepcopy(kwargs["Targets"]):  # type: ignore[union-attr]
-            self.targets = [target for target in self.targets if target["Id"] != replacement["Id"]]
-            self.targets.append(replacement)
+            self.targets_by_rule[key] = [
+                target for target in self.targets_by_rule[key] if target["Id"] != replacement["Id"]
+            ]
+            self.targets_by_rule[key].append(replacement)
         return _response(FailedEntryCount=0, FailedEntries=[])
 
 
@@ -136,8 +162,7 @@ class _Ddb:
         active = [
             item
             for record, item in self.items.items()
-            if record.startswith("EVENTBRIDGE_APPLY#")
-            and not record.startswith("EVENTBRIDGE_APPLY_AUDIT#")
+            if record.startswith("ecs-service-apply#eventbridge#active#")
         ]
         assert len(active) <= 1
         return active[0] if active else None
@@ -145,14 +170,14 @@ class _Ddb:
     def get_item(self, **kwargs: object) -> dict[str, object]:
         key = kwargs["Key"]
         assert isinstance(key, dict)
-        record = str(key["record"]["S"])
+        record = str(key["record_id"]["S"])
         item = self.items.get(record)
         return {"Item": copy.deepcopy(item)} if item is not None else {}
 
     def put_item(self, **kwargs: object) -> dict[str, object]:
         item = copy.deepcopy(kwargs["Item"])
         assert isinstance(item, dict)
-        record = str(item["record"]["S"])
+        record = str(item["record_id"]["S"])
         assert record not in self.items
         self.items[record] = item
         return {}
@@ -160,7 +185,7 @@ class _Ddb:
     def update_item(self, **kwargs: object) -> dict[str, object]:
         key = kwargs["Key"]
         assert isinstance(key, dict)
-        record = str(key["record"]["S"])
+        record = str(key["record_id"]["S"])
         item = self.items[record]
         values = kwargs["ExpressionAttributeValues"]
         item["stage"] = copy.deepcopy(values[":desired"])  # type: ignore[index]
@@ -174,8 +199,8 @@ class _Ddb:
         assert len(transaction) == 2
         audit = copy.deepcopy(transaction[0]["Put"]["Item"])
         current = copy.deepcopy(transaction[1]["Put"]["Item"])
-        audit_record = str(audit["record"]["S"])
-        current_record = str(current["record"]["S"])
+        audit_record = str(audit["record_id"]["S"])
+        current_record = str(current["record_id"]["S"])
         assert audit_record not in self.items
         assert current_record in self.items
         self.items[audit_record] = audit
@@ -191,6 +216,21 @@ class _Clients:
     def client(self, service_name: str, *, region_name: str) -> object:
         assert region_name == "ap-northeast-1"
         return {"events": self.events, "dynamodb": self.ddb}[service_name]
+
+
+def _rule_plans(*, target_mutates: bool) -> tuple[Any, ...]:
+    target_after = _target("morning", 45) if target_mutates else None
+    return tuple(
+        SAGA.RulePlan(
+            key=key,
+            address=spec[0],
+            before=SAGA._canonical_rule_configuration(_rule(spec[2])),
+            after=SAGA._canonical_rule_configuration(_rule(spec[2])),
+            target_policy="promoted" if key == "morning" and target_mutates else "unchanged",
+            target_after=target_after if key == "morning" and target_mutates else None,
+        )
+        for key, spec in sorted(SAGA._RULE_SPECS.items())
+    )
 
 
 def _saga(
@@ -211,7 +251,7 @@ def _saga(
         rotation_epoch="hmac-2026-07",
         morning_digest=SimpleNamespace(
             expected_rule=SAGA._canonical_event_rule(_rule()),
-            rule="teamagent-dev-morning-digest",
+            rule="teamagent-dev-morning-digest-weekday",
             target_id="morning",
             cluster="arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev",
             rollback_target_digest="f" * 64,
@@ -223,6 +263,7 @@ def _saga(
         plan_sha256=plan_sha256,
         apply_attempt_id=attempt,
         clients=clients,
+        rule_plans=_rule_plans(target_mutates=target_mutates),
         gate_mode=gate_mode,
         target_mutates=target_mutates,
     )
@@ -286,7 +327,7 @@ def test_new_attempt_recovers_and_archives_interrupted_active_saga(
     assert clients.ddb.item is not None
     assert clients.ddb.item["stage"] == {"S": "applying"}
     assert clients.ddb.item["apply_attempt_id"] == {"S": SECOND_ATTEMPT}
-    audit_record = "EVENTBRIDGE_APPLY_AUDIT#hmac-2026-07#" + ATTEMPT
+    audit_record = "ecs-service-apply#eventbridge#audit#hmac-2026-07#" + ATTEMPT
     assert clients.ddb.items[audit_record]["stage"] == {"S": "restored"}
 
 
