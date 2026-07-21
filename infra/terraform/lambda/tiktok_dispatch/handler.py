@@ -19,7 +19,7 @@ import time
 import uuid
 import zlib
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
