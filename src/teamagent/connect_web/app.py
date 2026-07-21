@@ -3757,7 +3757,12 @@ def create_app(
             }
             for h in out.hits
         ]
-        return JSONResponse({"answer": out.answer, "hits": hits})
+        response: dict[str, Any] = {"answer": out.answer, "hits": hits}
+        # 要約評価の突合キー。要約を返した場合にだけ本文から決定論的に生成し、fast path
+        # （include_answer=False）および空要約の既存レスポンス形は変更しない。
+        if include_answer and out.answer:
+            response["answer_id"] = hashlib.sha256(out.answer.encode("utf-8")).hexdigest()[:16]
+        return JSONResponse(response)
 
     @app.post("/api/v1/feedback")
     async def api_feedback(request: Request) -> JSONResponse:

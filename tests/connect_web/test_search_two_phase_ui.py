@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -98,6 +99,7 @@ def test_api_search_passes_include_answer_false() -> None:
     assert sk.calls[0][0].include_answer is False
     body = r.json()
     assert body["answer"] == ""
+    assert "answer_id" not in body
     assert len(body["hits"]) == 1  # hits は fast path でも通常どおり
 
 
@@ -121,6 +123,21 @@ def test_api_search_include_answer_true_explicit() -> None:
     assert r.status_code == 200
     assert sk.calls[0][0].include_answer is True
     assert r.json()["answer"] == "要約"
+
+
+def test_api_search_returns_deterministic_answer_id_for_nonempty_answer() -> None:
+    """要約を返すレスポンスには、本文由来の 16 桁 hex 突合キーを付与する。"""
+    client, _ = _build()
+
+    first = client.post("/api/v1/search", json={"query": "保存率"}, cookies=_auth_cookie())
+    second = client.post("/api/v1/search", json={"query": "別の検索語"}, cookies=_auth_cookie())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    expected = hashlib.sha256("要約".encode()).hexdigest()[:16]
+    assert first.json()["answer_id"] == expected
+    assert second.json()["answer_id"] == expected
+    assert len(expected) == 16
 
 
 # ---------------- /search: JS マーカー（文字列レベルの最小検証） ----------------
