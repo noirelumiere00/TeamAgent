@@ -3424,23 +3424,29 @@ def create_app(
                 values.append(value)
         with pg.connection(app_role=app_role, user_email=row["user_email"]) as conn:
             with conn.cursor() as cur:
+                # cur.execute は overloaded 署名のため、明示型の薄いラッパ経由で
+                # _execute_feedback_insert（Callable[[str, list[Any]], None] 期待）へ渡す。
+                def _run(sql: str, params: list[Any]) -> None:
+                    cur.execute(sql, params)
+
+                def _rollback_to_savepoint() -> None:
+                    cur.execute("ROLLBACK TO SAVEPOINT feedback_save")
+
                 if len(columns) > 7:
                     # PostgreSQL は UndefinedColumn 後のtransactionを中断するため、旧列への
                     # 再試行前に savepoint まで戻す。0022適用済みならそのまま release するだけ。
                     cur.execute("SAVEPOINT feedback_save")
                     try:
                         _execute_feedback_insert(
-                            cur.execute,
+                            _run,
                             columns,
                             values,
-                            prepare_legacy_retry=lambda: cur.execute(
-                                "ROLLBACK TO SAVEPOINT feedback_save"
-                            ),
+                            prepare_legacy_retry=_rollback_to_savepoint,
                         )
                     finally:
                         cur.execute("RELEASE SAVEPOINT feedback_save")
                 else:
-                    _execute_feedback_insert(cur.execute, columns, values)
+                    _execute_feedback_insert(_run, columns, values)
             conn.commit()
 
     def _list_graph_docs(email: str, *, with_embeddings: bool = False) -> list[dict[str, Any]]:
