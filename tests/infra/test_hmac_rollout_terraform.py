@@ -286,7 +286,11 @@ def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() ->
     assert "EVENTBRIDGE_APPLY_SAGA" in runtime_guard
     assert "ECS_SERVICE_APPLY_SAGA" in runtime_guard
     assert "--outcome failed" in runtime_guard
-    assert "--outcome applied" in runtime_guard
+    finalizer = (ROOT / "infra" / "deploy" / "deployment_apply_finalizer.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_ecs_transaction_items" in finalizer
+    assert "SET #stage = :applied" in finalizer
 
     assert "TEAMAGENT_HMAC_DEPLOY_FROM_TERRAFORM" in worker
     assert "HMAC_WORKER_EXPECTED_HASHES" in worker
