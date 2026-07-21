@@ -6438,7 +6438,7 @@ validate_plan() {
           [["arn"], ["arn_without_revision"], ["enable_fault_injection"],
            ["id"], ["revision"], ["volume", 0, "configure_at_launch"]]) | length == 0)
       ' "$plan_json" >/dev/null ||
-        die "$address は期待container $expected_name・候補image・unknown allowlistを満たしません"
+        die "$address は期待container ${expected_name}・候補image・unknown allowlistを満たしません"
 
       local parity_diff
       parity_diff="$(jq -r --arg address "$address" --arg component "$component" \

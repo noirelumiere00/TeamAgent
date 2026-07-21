@@ -34,7 +34,7 @@ else
     if [ "$ACCT" = "$ACCOUNT_EXPECTED" ]; then
       ok "aws-identity (account=$ACCT)"
     else
-      ng "aws-identity" "account=$ACCT ≠ 期待 $ACCOUNT_EXPECTED（プロファイル違い？）"
+      ng "aws-identity" "account=$ACCT ≠ 期待 ${ACCOUNT_EXPECTED}（プロファイル違い？）"
     fi
     CREDS=1
   else
