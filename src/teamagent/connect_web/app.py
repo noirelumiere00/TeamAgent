@@ -643,6 +643,25 @@ _SEARCH_STYLE = (
     ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #34425f;"
     "color:#c5d0e6;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
     ".answer .aretry:hover{background:#2c3a58}"
+    ".rate4{margin-top:14px;border-top:1px solid #2b3a5e;padding-top:12px;white-space:normal}"
+    ".rate4Question{font-size:13px;color:#c5d0e6;margin-bottom:8px}"
+    ".rate4Choices{display:flex;flex-wrap:wrap;gap:6px}"
+    ".rate4Choice{background:var(--bg-hover);border:1px solid #34425f;color:#c5d0e6;"
+    "border-radius:8px;padding:5px 9px;font-size:13px;cursor:pointer}"
+    ".rate4Choice:hover{background:#2c3a58}.rate4Choice.selected{background:#2a5;border-color:#53c77b;color:#fff}"
+    ".rate4Status{min-height:1.5em;margin-top:8px;color:var(--muted);font-size:12px}"
+    ".rate4Status.error{color:#ffaaaa}.rate4Retry{margin-left:8px;background:none;border:0;color:var(--accent);"
+    "font-size:12px;cursor:pointer;text-decoration:underline}"
+    ".rate4Note{max-height:0;opacity:0;overflow:hidden;transition:max-height .2s ease,"
+    "opacity .2s ease}"
+    ".rate4Note.open{max-height:180px;opacity:1;margin-top:10px}"
+    ".rate4Note textarea{box-sizing:border-box;width:100%;min-height:68px;resize:vertical;"
+    "background:var(--bg-elev);border:1px solid #34425f;border-radius:8px;color:var(--text);"
+    "padding:8px;font:inherit;font-size:12px}"
+    ".rate4Note button{margin-top:6px;background:var(--bg-hover);border:1px solid #34425f;"
+    "color:#c5d0e6;"
+    "border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}"
+    ".rate4Help{margin-top:8px;color:var(--muted);font-size:11px}"
 )
 
 
@@ -763,6 +782,105 @@ function fbButtons(target,doc_id,chunk_id){
     };
     wrap.appendChild(b);
   }
+  return wrap;
+}
+// AI要約向けの4段階評価。検索世代とは切り離し、生成時の値だけをクロージャに保持する。
+function rate4Bar(query,sessionId,answerId){
+  const wrap=document.createElement('div');wrap.className='rate4';
+  let currentScore=null;
+  let lastSentScore=null;
+  let lastSentNote=null;
+  let pendingPayload=null;
+  let pendingKind=null;
+  let pendingWasUpdate=false;
+  let hasChosenScore=false;
+  let requestNumber=0;
+  const question=document.createElement('div');question.className='rate4Question';
+  question.textContent='この回答は期待に合いましたか？';wrap.appendChild(question);
+  const choices=document.createElement('div');choices.className='rate4Choices';
+  wrap.appendChild(choices);
+  const status=document.createElement('div');status.className='rate4Status';
+  status.setAttribute('aria-live','polite');
+  wrap.appendChild(status);
+  const retry=document.createElement('button');retry.type='button';retry.className='rate4Retry';
+  retry.textContent='再試行';retry.hidden=true;status.appendChild(retry);
+  const noteBox=document.createElement('div');noteBox.className='rate4Note';
+  const note=document.createElement('textarea');note.maxLength=500;
+  note.placeholder='欲しかった資料の種類・足りなかった観点など。クライアント名・個人名を書いたり資料本文を貼ったりしないでください';
+  noteBox.appendChild(note);
+  const noteSend=document.createElement('button');noteSend.type='button';
+  noteSend.textContent='コメントを送る';
+  noteBox.appendChild(noteSend);wrap.appendChild(noteBox);
+  const help=document.createElement('div');help.className='rate4Help';
+  help.textContent='評価は検索の改善にだけ使います';wrap.appendChild(help);
+  const buttons=[];
+  function currentNote(){const value=note.value.trim();return value||null;}
+  function payloadFor(score,noteValue){
+    return {query:query,target_type:'answer',doc_id:null,chunk_id:null,score:score,note:noteValue,
+      search_session_id:sessionId,answer_id:answerId};
+  }
+  function select(score){
+    currentScore=score;
+    for(const item of buttons)item.button.classList.toggle('selected',item.score===score);
+    noteBox.classList.add('open');
+  }
+  function showError(message){
+    status.className='rate4Status error';status.textContent=message;
+    status.appendChild(retry);retry.hidden=false;
+  }
+  async function postRate4(payload,kind,silent,wasUpdate=false){
+    pendingPayload=payload;pendingKind=kind;pendingWasUpdate=wasUpdate;
+    const thisRequest=++requestNumber;
+    if(!silent){status.className='rate4Status';status.textContent='送信中…';status.appendChild(retry);retry.hidden=true;}
+    try{
+      const response=await fetch('/api/v1/feedback',{
+        method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)});
+      if(response.status===401){
+        if(!silent&&thisRequest===requestNumber)showError('セッションが切れました。再ログインしてください');
+        return false;
+      }
+      if(!response.ok)throw new Error('http '+response.status);
+      if(thisRequest!==requestNumber)return true;
+      const wasRated=lastSentScore!==null;
+      lastSentScore=payload.score;lastSentNote=payload.note;pendingPayload=null;pendingKind=null;
+      if(!silent){
+        status.className='rate4Status';
+        status.textContent=kind==='score'&&!wasRated&&!wasUpdate?'評価を送信しました（あとから変更できます）':'評価を更新しました';
+        status.appendChild(retry);retry.hidden=true;
+      }
+      return true;
+    }catch(error){
+      if(!silent&&thisRequest===requestNumber)showError('送信できませんでした');
+      return false;
+    }
+  }
+  retry.onclick=function(){
+    if(pendingPayload)postRate4(pendingPayload,pendingKind,false,pendingWasUpdate);
+  };
+  for(const item of [[4,'◎ 期待どおり'],[3,'○ おおむね'],[2,'△ 物足りない'],[1,'× 見当違い']]){
+    const button=document.createElement('button');button.type='button';
+    button.className='rate4Choice';
+    button.textContent=item[1];
+    const score=item[0];
+    button.onclick=function(){
+      if(score===currentScore)return;
+      const wasUpdate=hasChosenScore;hasChosenScore=true;
+      select(score);postRate4(payloadFor(score,currentNote()),'score',false,wasUpdate);
+    };
+    buttons.push({button:button,score:score});choices.appendChild(button);
+  }
+  noteSend.onclick=function(){
+    if(currentScore===null)return;
+    postRate4(payloadFor(currentScore,currentNote()),'note',false);
+  };
+  // 呼び出し側が要約カードを除去する直前に実行するための best-effort の退避処理。
+  wrap.rate4Teardown=function(){
+    const value=currentNote();
+    if(currentScore!==null&&value!==null&&value!==lastSentNote){
+      postRate4(payloadFor(currentScore,value),'note',true);
+    }
+  };
   return wrap;
 }
 function renderError(){
