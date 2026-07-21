@@ -352,7 +352,7 @@ chmod 0600 "$STAGING_RELEASE/hmac.env" "$STAGING_RELEASE/teamagent.env.base"
 source "$STAGING_RELEASE/hmac.env"
 [[ "$TEAMAGENT_HMAC_ARTIFACT_SHA256" == "$ARTIFACT_DIGEST" ]] || exit 1
 tar tzf "$STAGING_RELEASE/app.tar.gz" \
-  | awk 'BEGIN { ok=1 } /(^|\\/)\\.\\.($|\\/)|^\\// { ok=0 } END { exit !ok }'
+  | awk 'BEGIN { ok=1 } /(^|\/)\.\.($|\/)|^\// { ok=0 } END { exit !ok }'
 tar xzf "$STAGING_RELEASE/app.tar.gz" --no-same-owner --no-same-permissions \
   -C "$STAGING_RELEASE/app"
 for required in \
