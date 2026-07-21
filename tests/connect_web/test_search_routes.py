@@ -438,13 +438,66 @@ def test_api_feedback_uses_legacy_seven_column_insert_without_new_values(
     ]
 
 
+def test_feedback_insert_retries_legacy_columns_after_undefined_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0022未適用DBでも、新列を落として従来評価の保存を続ける。"""
+    from psycopg.errors import UndefinedColumn
+
+    columns = [
+        "user_email",
+        "query",
+        "target_type",
+        "doc_id",
+        "chunk_id",
+        "rating",
+        "note",
+        "score",
+        "search_session_id",
+        "answer_id",
+    ]
+    values: list[Any] = [_EMAIL, "x", "answer", None, None, 1, None, 4, "session-1", "abc"]
+    executed: list[tuple[str, list[Any]]] = []
+    recovered: list[bool] = []
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **kwargs: Any) -> None:
+            warnings.append((event, kwargs))
+
+    def execute(sql: str, params: list[Any]) -> None:
+        executed.append((sql, params))
+        if len(executed) == 1:
+            raise UndefinedColumn('column "score" does not exist')
+
+    monkeypatch.setattr(connect_app, "logger", FakeLogger())
+    connect_app._execute_feedback_insert(
+        execute, columns, values, prepare_legacy_retry=lambda: recovered.append(True)
+    )
+
+    assert [sql for sql, _ in executed] == [
+        "INSERT INTO search_feedback (user_email, query, target_type, doc_id, chunk_id, rating, note, "
+        "score, search_session_id, answer_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO search_feedback (user_email, query, target_type, doc_id, chunk_id, rating, note) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+    ]
+    assert executed[1][1] == [_EMAIL, "x", "answer", None, None, 1, None]
+    assert recovered == [True]
+    assert warnings == [
+        (
+            "feedback_save_legacy_fallback",
+            {"dropped_columns": ["score", "search_session_id", "answer_id"]},
+        )
+    ]
+
+
 def test_api_feedback_rate_limit_recovers_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
     now = [1000.0]
     monkeypatch.setattr(connect_app.time, "monotonic", lambda: now[0])
     connect_app._feedback_rate_windows.clear()
     try:
         client, _, st = _build()
-        payload = {"query": "x", "target_type": "answer", "rating": 1}
+        payload = {"query": "x", "target_type": "answer", "score": 4}
         for _ in range(30):
             assert (
                 client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code
@@ -461,5 +514,24 @@ def test_api_feedback_rate_limit_recovers_after_window(monkeypatch: pytest.Monke
             client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code == 200
         )
         assert len(st.rows) == 31
+    finally:
+        connect_app._feedback_rate_windows.clear()
+
+
+def test_api_feedback_legacy_rating_is_not_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(connect_app.time, "monotonic", lambda: now[0])
+    connect_app._feedback_rate_windows.clear()
+    try:
+        client, _, st = _build()
+        payload = {"query": "x", "target_type": "answer", "rating": 1}
+        for _ in range(31):
+            assert (
+                client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code
+                == 200
+            )
+
+        assert len(st.rows) == 31
+        assert connect_app._feedback_rate_windows == {}
     finally:
         connect_app._feedback_rate_windows.clear()

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -110,7 +111,7 @@ def summarize_ratings(rows: Iterable[Mapping[str, Any]]) -> RatingSummary:
 
 
 def _markdown_cell(value: Any) -> str:
-    return str(value or "").replace("|", "\\|").replace("\n", "<br>")
+    return html.escape(str(value or "").replace("\r", "")).replace("|", "\\|").replace("\n", "<br>")
 
 
 def _user_labels(user_counts: Mapping[str, int], with_emails: bool) -> dict[str, str]:
@@ -124,6 +125,7 @@ def render_markdown(summary: RatingSummary, days: int, *, with_emails: bool = Fa
     labels = _user_labels(summary.user_counts, with_emails)
     active_users = len(summary.user_counts)
     weekly_count = len(summary.rows)
+    weekly_equivalent_count = weekly_count / days * 7
     low_ratings = sorted(
         (row for row in summary.rows if int(row["score"]) <= 2),
         key=lambda row: (int(row["score"]), *_row_key(row)),
@@ -158,6 +160,15 @@ def render_markdown(summary: RatingSummary, days: int, *, with_emails: bool = Fa
     if not low_ratings:
         lines.append("| 該当なし | - | - |")
 
+    weekly_judgement = (
+        f"- 週間件数: {weekly_count} / 閾値 10 → {'満たす' if weekly_count >= 10 else '未達'}"
+        if days == 7
+        else (
+            f"- 週間換算件数: {weekly_equivalent_count:g} "
+            f"(直近 {days} 日の入力 {weekly_count} 件、--days {days} のため週間閾値は換算) "
+            f"/ 閾値 10 → {'満たす' if weekly_equivalent_count >= 10 else '未達'}"
+        )
+    )
     lines.extend(
         [
             "",
@@ -180,7 +191,7 @@ def render_markdown(summary: RatingSummary, days: int, *, with_emails: bool = Fa
             "## 形骸化判定",
             "",
             f"- 入力者数: {active_users} / 閾値 5 → {'満たす' if active_users >= 5 else '未達'}",
-            f"- 週間件数: {weekly_count} / 閾値 10 → {'満たす' if weekly_count >= 10 else '未達'}",
+            weekly_judgement,
             "",
             "## per-user 送信件数",
             "",

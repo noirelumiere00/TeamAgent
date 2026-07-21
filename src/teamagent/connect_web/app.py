@@ -29,6 +29,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from psycopg.errors import UndefinedColumn
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -86,6 +87,42 @@ def _feedback_rate_limited(user_email: str) -> bool:
             detail=str(exc)[:200],
         )
     return False
+
+
+def _feedback_insert_sql(columns: list[str]) -> str:
+    """search_feedback 用の INSERT SQL を列名から組み立てる。"""
+    placeholders = ", ".join("%s" for _ in columns)
+    return f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})"
+
+
+def _execute_feedback_insert(
+    execute: Callable[[str, list[Any]], None],
+    columns: list[str],
+    values: list[Any],
+    *,
+    prepare_legacy_retry: Callable[[], None] | None = None,
+) -> None:
+    """評価INSERTを実行し、未適用の0022列だけは旧スキーマへ退避する。"""
+    try:
+        execute(_feedback_insert_sql(columns), values)
+    except UndefinedColumn:
+        legacy_columns = [
+            "user_email",
+            "query",
+            "target_type",
+            "doc_id",
+            "chunk_id",
+            "rating",
+            "note",
+        ]
+        dropped_columns = [column for column in columns if column not in legacy_columns]
+        if not dropped_columns:
+            raise
+        legacy_values = [values[columns.index(column)] for column in legacy_columns]
+        if prepare_legacy_retry is not None:
+            prepare_legacy_retry()
+        logger.warning("feedback_save_legacy_fallback", dropped_columns=dropped_columns)
+        execute(_feedback_insert_sql(legacy_columns), legacy_values)
 
 
 # Every route carries the same browser-facing baseline.  The application serves a large,
@@ -774,12 +811,19 @@ function fbButtons(target,doc_id,chunk_id,sessionId){
   for(const r of [['👍',1,'on'],['👎',-1,'off']]){
     const b=document.createElement('button');b.type='button';b.textContent=r[0];
     b.onclick=async()=>{
-      await fetch('/api/v1/feedback',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({query:lastQuery,target_type:target,
-          doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null,
-          search_session_id:sessionId})});
-      b.classList.add(r[2]);b.disabled=true;
+      b.disabled=true;
+      try{
+        const resp=await fetch('/api/v1/feedback',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({query:lastQuery,target_type:target,
+            doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null,
+            search_session_id:sessionId})});
+        if(!resp.ok)throw new Error('http '+resp.status);
+        b.classList.add(r[2]);
+      }catch(e){
+        b.classList.remove(r[2]);b.disabled=false;
+        b.title='評価を送信できませんでした';
+      }
     };
     wrap.appendChild(b);
   }
@@ -1067,7 +1111,7 @@ async function search(){
   if(currentSearch)currentSearch.abort();
   const ctl=new AbortController();currentSearch=ctl;
   const gen=++searchGen;
-  lastQuery=query;renderFilters();setSearching(true);renderSkeleton();
+  lastQuery=query;renderFilters();setSearching(true);/*ANSWER_RATING_TEARDOWN*/renderSkeleton();
   const body=buildBody(query);
   // 二段レスポンス（#1）: (a) hits 即描画（include_answer:false）と (b) AI要約
   // （include_answer:true）を並行フェッチ。ctl/gen を共有し、連打時は 2 本とも中止。
@@ -1083,7 +1127,6 @@ async function search(){
   }
   if(gen!==searchGen)return;
   setSearching(false);
-  /*ANSWER_RATING_TEARDOWN*/
   results.textContent='';
   const answerCard=renderAnswerPending(sessionId);
   results.appendChild(answerCard);
@@ -3379,13 +3422,25 @@ def create_app(
             if value is not None:
                 columns.append(column)
                 values.append(value)
-        placeholders = ", ".join("%s" for _ in columns)
         with pg.connection(app_role=app_role, user_email=row["user_email"]) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})",
-                    values,
-                )
+                if len(columns) > 7:
+                    # PostgreSQL は UndefinedColumn 後のtransactionを中断するため、旧列への
+                    # 再試行前に savepoint まで戻す。0022適用済みならそのまま release するだけ。
+                    cur.execute("SAVEPOINT feedback_save")
+                    try:
+                        _execute_feedback_insert(
+                            cur.execute,
+                            columns,
+                            values,
+                            prepare_legacy_retry=lambda: cur.execute(
+                                "ROLLBACK TO SAVEPOINT feedback_save"
+                            ),
+                        )
+                    finally:
+                        cur.execute("RELEASE SAVEPOINT feedback_save")
+                else:
+                    _execute_feedback_insert(cur.execute, columns, values)
             conn.commit()
 
     def _list_graph_docs(email: str, *, with_embeddings: bool = False) -> list[dict[str, Any]]:
@@ -3975,7 +4030,7 @@ def create_app(
                 answer_id = None
         row["answer_id"] = answer_id
         row["score"] = score
-        if _feedback_rate_limited(email):
+        if score is not None and _feedback_rate_limited(email):
             return JSONResponse({"error": "rate_limited"}, status_code=429)
         try:
             _save_feedback(row)

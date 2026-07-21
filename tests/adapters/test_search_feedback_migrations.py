@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 MIGRATIONS_DIR = PROJECT_ROOT / "infra" / "migrations"
 MIG_0015 = MIGRATIONS_DIR / "0015_search_feedback.sql"
@@ -61,7 +63,7 @@ def test_0022_documents_rollback_sql() -> None:
 
 def test_no_migration_from_0022_regrants_search_feedback_read_or_mutation() -> None:
     """0022 以降で app ロールの INSERT-only 契約を再び緩めない。"""
-    forbidden_privileges = r"(?:SELECT|UPDATE|DELETE)"
+    forbidden_privileges = r"(?:ALL(?:\s+PRIVILEGES)?|SELECT|UPDATE|DELETE)"
     grant_pattern = re.compile(
         rf"\bGRANT\s+(?=[^;]*\b{forbidden_privileges}\b)[^;]*"
         r"\bON\s+search_feedback\b[^;]*\bTO\s+teamagent_app\b",
@@ -76,3 +78,20 @@ def test_no_migration_from_0022_regrants_search_feedback_read_or_mutation() -> N
     ]
 
     assert offenders == [], f"search_feedback の INSERT-only 契約を緩めています: {offenders}"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "GRANT ALL ON search_feedback TO teamagent_app;",
+        "GRANT ALL PRIVILEGES ON search_feedback TO teamagent_app;",
+    ],
+)
+def test_forbidden_grant_pattern_catches_all_privileges(statement: str) -> None:
+    grant_pattern = re.compile(
+        r"\bGRANT\s+(?=[^;]*\b(?:ALL(?:\s+PRIVILEGES)?|SELECT|UPDATE|DELETE)\b)[^;]*"
+        r"\bON\s+search_feedback\b[^;]*\bTO\s+teamagent_app\b",
+        re.IGNORECASE,
+    )
+
+    assert grant_pattern.search(statement)

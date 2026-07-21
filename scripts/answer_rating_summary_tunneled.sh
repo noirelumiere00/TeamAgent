@@ -12,12 +12,12 @@ SECRET="arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/
 
 echo "== DB 接続文字列を取得し localhost:${LOCAL_PORT} へ書換（PW非表示）=="
 RAW="$(aws secretsmanager get-secret-value --secret-id "$SECRET" --region "$REGION" --query SecretString --output text)"
-DB_URL="$(python3 - "$RAW" "$RDS" "$LOCAL_PORT" <<'PY'
+DB_URL="$(printf '%s' "$RAW" | python3 -c '
 import json
 import re
 import sys
 
-raw, rds, local_port = sys.argv[1], sys.argv[2], sys.argv[3]
+raw, rds, local_port = sys.stdin.read(), sys.argv[1], sys.argv[2]
 url = None
 try:
     value = json.loads(raw)
@@ -31,7 +31,7 @@ except Exception:
 if url is None:
     url = raw.strip()
 print(re.sub(r"@[^/@]+/", f"@localhost:{local_port}/", url))
-PY
+' "$RDS" "$LOCAL_PORT"
 )"
 echo "   OK（接続先 user/dbname は秘匿）"
 
@@ -40,7 +40,13 @@ aws ssm start-session --target "$BASTION" --region "$REGION" \
   --document-name AWS-StartPortForwardingSessionToRemoteHost \
   --parameters "host=$RDS,portNumber=5432,localPortNumber=$LOCAL_PORT" >/tmp/ssm_answer_rating_pf.log 2>&1 &
 SSM_PID=$!
-trap 'kill "$SSM_PID" 2>/dev/null || true' EXIT
+cleanup() {
+  # aws CLI が起動した session-manager-plugin も先に止め、トンネルを残さない。
+  pkill -TERM -P "$SSM_PID" 2>/dev/null || true
+  kill "$SSM_PID" 2>/dev/null || true
+  wait "$SSM_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 sleep 10
 echo "   tunnel up (pid=$SSM_PID)"
 

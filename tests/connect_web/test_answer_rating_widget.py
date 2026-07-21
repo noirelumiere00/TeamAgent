@@ -50,6 +50,8 @@ def test_answer_rating_widget_is_not_wired_to_answer_card_by_default(
     assert html.count("rate4Bar(") == 1
     assert "rate4Teardown" in html
     assert "/*ANSWER_RATING_" not in html
+    pending = html.split("function renderAnswerPending(sessionId){", 1)[1].split("return a;", 1)[0]
+    assert "fbButtons('answer',null,null,sessionId)" in pending
 
 
 def test_answer_rating_widget_is_wired_only_when_enabled(
@@ -65,6 +67,10 @@ def test_answer_rating_widget_is_wired_only_when_enabled(
     assert "rate4Bar(query,sessionId,data.answer_id||null)" in html
     assert "oldRate4.rate4Teardown()" in html
     assert "try{oldRate4.rate4Teardown();}catch(e){}" in html
+    search_body = html.split("async function search(){", 1)[1].split(
+        "const body=buildBody(query);", 1
+    )[0]
+    assert search_body.index("oldRate4.rate4Teardown()") < search_body.index("renderSkeleton();")
 
 
 def test_search_session_id_is_created_and_sent_for_chunk_feedback() -> None:
@@ -84,3 +90,11 @@ def test_answer_rating_widget_payload_always_contains_score_and_note() -> None:
     assert "postRate4(payloadFor(score,currentNote()),'score',false,wasUpdate)" in html
     assert "postRate4(payloadFor(currentScore,currentNote()),'note',false)" in html
     assert "postRate4(payloadFor(currentScore,value),'note',true)" in html
+
+
+def test_legacy_feedback_buttons_only_confirm_successful_responses() -> None:
+    html = _search_html()
+
+    assert "const resp=await fetch('/api/v1/feedback'" in html
+    assert "if(!resp.ok)throw new Error('http '+resp.status);" in html
+    assert "b.classList.remove(r[2]);b.disabled=false;" in html

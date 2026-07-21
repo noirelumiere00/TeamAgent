@@ -134,3 +134,28 @@ def test_render_inactivity_judgement_below_and_at_thresholds() -> None:
     assert "週間件数: 1 / 閾値 10 → 未達" in below
     assert "入力者数: 5 / 閾値 5 → 満たす" in at_threshold
     assert "週間件数: 10 / 閾値 10 → 満たす" in at_threshold
+
+
+def test_markdown_cells_escape_html_without_changing_markdown_links() -> None:
+    rendered = summary_script._markdown_cell("<img onerror=alert(1)>\r\n[text](url)")
+
+    assert "&lt;img onerror=alert(1)&gt;" in rendered
+    assert "\r" not in rendered
+    assert "<br>[text](url)" in rendered
+
+
+def test_inactivity_judgement_normalizes_count_for_non_week_period() -> None:
+    rows = [
+        _row(
+            row_id,
+            email=f"user{row_id % 5}@example.test",
+            session_id=f"session-{row_id}",
+            answer_id=f"answer-{row_id}",
+        )
+        for row_id in range(20)
+    ]
+
+    rendered = summary_script.render_markdown(summary_script.summarize_ratings(rows), 14)
+
+    assert "週間換算件数: 10 (直近 14 日の入力 20 件、--days 14 のため週間閾値は換算)" in rendered
+    assert "/ 閾値 10 → 満たす" in rendered
