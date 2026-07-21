@@ -195,6 +195,35 @@ direct `update-service` ではなく、署名済み release と同じ guarded sa
 
 詳細は `infra/terraform/README.md` を参照してください。
 
+### 5.3 Post-apply canary secret
+
+post-apply gate は固定 secret `teamagent/dev/openclaw/rollout-canary` を読み、専用
+canary channel へ一時メッセージを投稿して OpenClaw の exact mention/reply を検証します。
+secret が未作成のままでは rollout gate は fail closed になるため、初回の guarded apply
+より前に作成します。値そのものを tfvars、image、git、CloudWatch evidence に書いてはいけません。
+
+`userToken` は、この用途専用 Slack app を OAuth で workspace にインストールした際に
+**canary を実行する人の OAuth & Permissions 画面から取得する user token (`xoxp-...`)**です。
+最小 scope は、専用の public channel なら `chat:write` と `channels:history` です。private
+channel を使う場合は `channels:history` の代わりに `groups:history` を付与し、token の user を
+当該 channel の member にします。`botUserId` は OpenClaw Bot の `U...` ID、`channelId` は
+専用 channel の `C...`（private channel なら `G...`）IDです。canary は自分が投稿した
+メッセージだけを削除するため、広い管理・ユーザー検索 scope は不要です。
+
+実値を含む JSON を安全な一時ファイルにだけ用意してから、次の形で投入します（`REPLACE_*` は
+実値に置換するが、shell history やリポジトリには保存しない）。
+
+```sh
+aws secretsmanager create-secret \
+  --region ap-northeast-1 \
+  --name teamagent/dev/openclaw/rollout-canary \
+  --secret-string '{"userToken":"xoxp-REPLACE_WITH_OAUTH_USER_TOKEN","channelId":"C_REPLACE_WITH_CANARY_CHANNEL_ID","botUserId":"U_REPLACE_WITH_OPENCLAW_BOT_ID"}'
+```
+
+secret の JSON object は `userToken`、`channelId`、`botUserId` の3 key だけでなければなりません。
+既存 secret の rotation は承認済みの Secrets Manager 更新手順で行い、direct ECS update での
+回避はしません。
+
 ## 6. Runtime/Fargate contract
 
 本番 task definition は次を同時に満たします。
@@ -247,7 +276,8 @@ apply receipt に束縛します。revision が変わる場合は次をすべて
   candidate revision であることを再確認
 - 同一network/task revisionの one-off canary exit 0
 - ECS task-role credential による Bedrock `Converse`
-- MCP `tools/list` が既定12件かつ reviewed 28件の範囲内
+- MCP の deployed `teamagent-mcp` task definition にある `USE_*` 環境 gate から
+  `effective-tool-scope.json` の期待集合を導出し、`tools/list` と完全一致（余分・不足とも拒否）
 - Slack Socket Mode の exact mention/reply と candidate task log stream の相関
 - apply attempt、old/new revision、exact automation role、one-use rollback
   authorization を束縛した rollout result
