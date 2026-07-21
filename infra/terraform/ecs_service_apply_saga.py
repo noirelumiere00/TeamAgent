@@ -929,7 +929,7 @@ class EcsServiceApplySaga:
         self.cli = cli
         self.record_id = f"{_RECORD_PREFIX}{apply_attempt_id}"
 
-    def _read(self) -> dict[str, Any] | None:
+    def _read(self, record_id: str | None = None) -> dict[str, Any] | None:
         response = self.cli.json(
             "dynamodb",
             "get-item",
@@ -938,7 +938,7 @@ class EcsServiceApplySaga:
                 _TABLE_NAME,
                 "--key",
                 json.dumps(
-                    _ddb_item({"record_id": self.record_id}),
+                    _ddb_item({"record_id": record_id or self.record_id}),
                     separators=(",", ":"),
                     sort_keys=True,
                 ),
@@ -962,7 +962,7 @@ class EcsServiceApplySaga:
             or _ddb_number(item, "schema_version") != _SCHEMA_VERSION
             or _ddb_string(item, "plan_sha256") != self.plan_sha256
             or _ddb_string(item, "apply_attempt_id") != self.apply_attempt_id
-            or _ddb_string(item, "stage") not in {"APPLYING", "APPLIED", "RESTORED"}
+            or _ddb_string(item, "stage") not in _LEDGER_STAGES
         ):
             raise SagaError("durable ECS saga identity differs")
         planned_json = _canonical_bytes(self.plan.binding).decode("utf-8")
@@ -975,13 +975,50 @@ class EcsServiceApplySaga:
         ):
             raise SagaError("durable ECS planned binding differs")
 
+    def _read_required(self) -> dict[str, Any]:
+        item = self._read()
+        if item is None:
+            raise SagaError("durable ECS saga does not exist")
+        self._validate_item(item)
+        return item
+
+    def _validate_active_item(self, item: Mapping[str, Any], *, stage: str | None = None) -> None:
+        expected_stage = stage or _ddb_string(item, "stage")
+        if (
+            frozenset(item) != _ACTIVE_RECORD_FIELDS
+            or _ddb_string(item, "record_id") != _ACTIVE_RECORD_ID
+            or _ddb_string(item, "record_type") != _ACTIVE_RECORD_TYPE
+            or _ddb_number(item, "schema_version") != _SCHEMA_VERSION
+            or _ddb_string(item, "scope_id") != _SCOPE_ID
+            or _ddb_string(item, "stage") != expected_stage
+            or expected_stage not in _LEDGER_STAGES
+            or _ddb_string(item, "attempt_record_id") != self.record_id
+            or _ddb_string(item, "plan_sha256") != self.plan_sha256
+            or _ddb_string(item, "apply_attempt_id") != self.apply_attempt_id
+        ):
+            raise SagaError("durable ECS active pointer identity differs")
+        attempt = self._read_required()
+        for name in ("baseline_sha256", "planned_sha256"):
+            if _ddb_string(item, name) != _ddb_string(attempt, name):
+                raise SagaError("durable ECS active pointer binding differs")
+
+    def _active(self, *, stage: str | None = None) -> dict[str, Any]:
+        item = self._read(_ACTIVE_RECORD_ID)
+        if item is None:
+            raise SagaError("durable ECS active pointer does not exist")
+        self._validate_active_item(item, stage=stage)
+        return item
+
     def _receipt(self, item: Mapping[str, Any]) -> dict[str, Any]:
         self._validate_item(item)
+        stage = _ddb_string(item, "stage")
+        if stage not in _RECEIPT_STAGES:
+            raise SagaError("durable ECS saga receipt stage is invalid")
         receipt = {
             "kind": "teamagent-ecs-service-apply-saga-receipt",
             "schema_version": _SCHEMA_VERSION,
             "record_id": self.record_id,
-            "stage": _ddb_string(item, "stage"),
+            "stage": stage,
             "plan_sha256": self.plan_sha256,
             "apply_attempt_id": self.apply_attempt_id,
             "baseline_sha256": _ddb_string(item, "baseline_sha256"),
@@ -1055,19 +1092,53 @@ class EcsServiceApplySaga:
         )
         if len(_canonical_bytes(item)) > _MAX_RECORD_BYTES:
             raise SagaError("durable ECS saga record exceeds its bound")
+        active = _ddb_item(
+            {
+                "apply_attempt_id": self.apply_attempt_id,
+                "attempt_record_id": self.record_id,
+                "baseline_sha256": _digest(baseline),
+                "plan_sha256": self.plan_sha256,
+                "planned_sha256": _digest(self.plan.binding),
+                "record_id": _ACTIVE_RECORD_ID,
+                "record_type": _ACTIVE_RECORD_TYPE,
+                "schema_version": _SCHEMA_VERSION,
+                "scope_id": _SCOPE_ID,
+                "stage": "APPLYING",
+            }
+        )
         try:
             self.cli.run(
                 "dynamodb",
-                "put-item",
+                "transact-write-items",
                 [
-                    "--table-name",
-                    _TABLE_NAME,
-                    "--item",
-                    json.dumps(item, separators=(",", ":"), sort_keys=True),
-                    "--condition-expression",
-                    "attribute_not_exists(record_id)",
-                    "--return-consumed-capacity",
-                    "NONE",
+                    "--transact-items",
+                    json.dumps(
+                        [
+                            {
+                                "Put": {
+                                    "TableName": _TABLE_NAME,
+                                    "Item": item,
+                                    "ConditionExpression": "attribute_not_exists(record_id)",
+                                }
+                            },
+                            {
+                                "Put": {
+                                    "TableName": _TABLE_NAME,
+                                    "Item": active,
+                                    "ConditionExpression": (
+                                        "attribute_not_exists(record_id) OR "
+                                        "#stage = :applied OR #stage = :restored"
+                                    ),
+                                    "ExpressionAttributeNames": {"#stage": "stage"},
+                                    "ExpressionAttributeValues": _ddb_item(
+                                        {":applied": "APPLIED", ":restored": "RESTORED"}
+                                    ),
+                                }
+                            },
+                        ],
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
                 ],
             )
         except Exception as exc:
@@ -1077,9 +1148,25 @@ class EcsServiceApplySaga:
         confirmed = self._read()
         if confirmed is None:
             raise SagaError("durable ECS saga baseline was not confirmed")
+        self._active(stage="APPLYING")
         receipt = self._receipt(confirmed)
         if receipt["stage"] != "APPLYING":
             raise SagaError("durable ECS saga baseline stage is invalid")
+        return receipt
+
+    def verify(self) -> dict[str, Any]:
+        item = self._read_required()
+        if _ddb_string(item, "stage") != "APPLYING":
+            raise SagaError("durable ECS saga is not the exact applying attempt")
+        self._active(stage="APPLYING")
+        live, raw_live = _read_services(self.cli)
+        self._verify_planned(live, raw_live)
+        _assert_stable(raw_live, live)
+        receipt = self._receipt(item)
+        receipt["stage"] = "VERIFIED_APPLIED"
+        receipt["receipt_sha256"] = _digest(
+            {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+        )
         return receipt
 
     def _verify_planned(
@@ -1202,34 +1289,63 @@ class EcsServiceApplySaga:
                 ":planned": _ddb_string(item, "planned_sha256"),
             }
         )
+        self._active(stage="APPLYING")
+        active_values = _ddb_item(
+            {
+                ":active": "APPLYING",
+                ":attempt": self.apply_attempt_id,
+                ":attempt_record": self.record_id,
+                ":baseline": _ddb_string(item, "baseline_sha256"),
+                ":desired": desired,
+                ":plan": self.plan_sha256,
+                ":planned": _ddb_string(item, "planned_sha256"),
+                ":scope": _SCOPE_ID,
+            }
+        )
         try:
             self.cli.run(
                 "dynamodb",
-                "update-item",
+                "transact-write-items",
                 [
-                    "--table-name",
-                    _TABLE_NAME,
-                    "--key",
+                    "--transact-items",
                     json.dumps(
-                        _ddb_item({"record_id": self.record_id}),
+                        [
+                            {
+                                "Update": {
+                                    "TableName": _TABLE_NAME,
+                                    "Key": _ddb_item({"record_id": self.record_id}),
+                                    "UpdateExpression": "SET #stage = :desired",
+                                    "ConditionExpression": (
+                                        "#stage = :applying AND plan_sha256 = :plan"
+                                        " AND apply_attempt_id = :attempt"
+                                        " AND baseline_sha256 = :baseline"
+                                        " AND planned_sha256 = :planned"
+                                    ),
+                                    "ExpressionAttributeNames": {"#stage": "stage"},
+                                    "ExpressionAttributeValues": values,
+                                }
+                            },
+                            {
+                                "Update": {
+                                    "TableName": _TABLE_NAME,
+                                    "Key": _ddb_item({"record_id": _ACTIVE_RECORD_ID}),
+                                    "UpdateExpression": "SET #stage = :desired",
+                                    "ConditionExpression": (
+                                        "#stage = :active AND scope_id = :scope"
+                                        " AND attempt_record_id = :attempt_record"
+                                        " AND plan_sha256 = :plan"
+                                        " AND apply_attempt_id = :attempt"
+                                        " AND baseline_sha256 = :baseline"
+                                        " AND planned_sha256 = :planned"
+                                    ),
+                                    "ExpressionAttributeNames": {"#stage": "stage"},
+                                    "ExpressionAttributeValues": active_values,
+                                }
+                            },
+                        ],
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
-                    "--update-expression",
-                    "SET #stage = :desired",
-                    "--condition-expression",
-                    (
-                        "#stage = :applying AND plan_sha256 = :plan"
-                        " AND apply_attempt_id = :attempt"
-                        " AND baseline_sha256 = :baseline"
-                        " AND planned_sha256 = :planned"
-                    ),
-                    "--expression-attribute-names",
-                    '{"#stage":"stage"}',
-                    "--expression-attribute-values",
-                    json.dumps(values, separators=(",", ":"), sort_keys=True),
-                    "--return-values",
-                    "NONE",
                 ],
             )
         except Exception as exc:
@@ -1239,6 +1355,10 @@ class EcsServiceApplySaga:
             self._validate_item(confirmed)
             if _ddb_string(confirmed, "stage") != desired:
                 raise SagaError("durable ECS saga completion CAS failed") from exc
+            try:
+                self._active(stage=desired)
+            except SagaError:
+                raise SagaError("durable ECS saga completion CAS failed") from exc
             return confirmed
         confirmed = self._read()
         if confirmed is None:
@@ -1246,6 +1366,7 @@ class EcsServiceApplySaga:
         self._validate_item(confirmed)
         if _ddb_string(confirmed, "stage") != desired:
             raise SagaError("durable ECS saga completion was not persisted")
+        self._active(stage=desired)
         return confirmed
 
     def finish(self, *, outcome: str) -> dict[str, Any]:
@@ -1273,7 +1394,7 @@ class EcsServiceApplySaga:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("begin", "finish"))
+    parser.add_argument("action", choices=("begin", "finish", "verify"))
     parser.add_argument("--aws-bin", type=Path, required=True)
     parser.add_argument("--terraform-bin", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
@@ -1295,8 +1416,10 @@ def main(
             or _UUID_RE.fullmatch(args.apply_attempt_id) is None
         ):
             raise SagaError("ECS saga identity is invalid")
-        if (args.action == "begin") != (args.outcome is None):
-            raise SagaError("begin rejects outcomes and finish requires one")
+        if args.action == "finish" and args.outcome is None:
+            raise SagaError("finish requires an outcome")
+        if args.action != "finish" and args.outcome is not None:
+            raise SagaError(f"{args.action} rejects outcomes")
         aws_bin = _trusted_executable(args.aws_bin, label="AWS CLI")
         terraform_bin = _trusted_executable(
             args.terraform_bin,
@@ -1315,9 +1438,11 @@ def main(
         )
         if args.action == "begin":
             result = saga.begin()
-        else:
+        elif args.action == "finish":
             assert args.outcome is not None
             result = saga.finish(outcome=args.outcome)
+        else:
+            result = saga.verify()
     except Exception:
         print('{"code":"ecs_service_apply_saga_failed","ok":false}')
         return 2

@@ -17,6 +17,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "terraform" / "ecs_service_apply_saga.py"
+FINALIZER_PATH = ROOT / "infra" / "deploy" / "deployment_apply_finalizer.py"
 ATTEMPT = "12345678-1234-4123-8123-123456789abc"
 PLAN_SHA256 = "a" * 64
 CLUSTER_ARN = "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev"
@@ -47,6 +48,21 @@ def _load_module() -> Any:
 
 
 SAGA = _load_module()
+
+
+def _load_finalizer() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "deployment_apply_finalizer_for_ecs_integration",
+        FINALIZER_PATH,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+FINALIZER = _load_finalizer()
 
 
 def _resource(
@@ -289,11 +305,23 @@ class _FakeCli:
             },
             "page-2": {"serviceArns": [CONNECT_SERVICE_ARN]},
         }
-        self.item: dict[str, Any] | None = None
+        self.items: dict[str, dict[str, Any]] = {}
         self.task_definitions: dict[str, dict[str, Any]] = {}
         self.calls: list[tuple[str, str, tuple[str, ...]]] = []
         self.wait_count = 0
         self.fail_wait_once = False
+
+    @property
+    def item(self) -> dict[str, Any] | None:
+        return self.items.get(f"ecs-service-apply#{ATTEMPT}")
+
+    @item.setter
+    def item(self, value: dict[str, Any] | None) -> None:
+        record_id = f"ecs-service-apply#{ATTEMPT}"
+        if value is None:
+            self.items.pop(record_id, None)
+        else:
+            self.items[record_id] = value
 
     def json(
         self,
@@ -348,7 +376,9 @@ class _FakeCli:
             task_definition = _argument(arguments, "--task-definition")
             return copy.deepcopy(self.task_definitions[task_definition])
         if (service, operation) == ("dynamodb", "get-item"):
-            return {"Item": copy.deepcopy(self.item)} if self.item is not None else {}
+            record_id = json.loads(_argument(arguments, "--key"))["record_id"]["S"]
+            item = self.items.get(record_id)
+            return {"Item": copy.deepcopy(item)} if item is not None else {}
         raise AssertionError((service, operation, arguments))
 
     def run(
@@ -360,29 +390,44 @@ class _FakeCli:
         timeout_seconds: float = 120,
     ) -> None:
         self.calls.append((service, operation, tuple(arguments)))
-        if (service, operation) == ("dynamodb", "put-item"):
-            assert timeout_seconds == 120
-            assert _argument(arguments, "--condition-expression") == (
-                "attribute_not_exists(record_id)"
-            )
-            if self.item is not None:
-                raise SAGA.SagaError("ConditionalCheckFailedException")
-            self.item = json.loads(_argument(arguments, "--item"))
-            return
-        if (service, operation) == ("dynamodb", "update-item"):
-            assert self.item is not None
-            values = json.loads(_argument(arguments, "--expression-attribute-values"))
-            if self.item["stage"] != values[":applying"]:
-                raise SAGA.SagaError("ConditionalCheckFailedException")
-            for item_name, value_name in (
-                ("plan_sha256", ":plan"),
-                ("apply_attempt_id", ":attempt"),
-                ("baseline_sha256", ":baseline"),
-                ("planned_sha256", ":planned"),
-            ):
-                if self.item[item_name] != values[value_name]:
+        if (service, operation) == ("dynamodb", "transact-write-items"):
+            transaction = json.loads(_argument(arguments, "--transact-items"))
+            staged = copy.deepcopy(self.items)
+            for request in transaction:
+                if "Put" in request:
+                    put = request["Put"]
+                    item = put["Item"]
+                    record_id = item["record_id"]["S"]
+                    current = staged.get(record_id)
+                    if current is not None and (
+                        put["ConditionExpression"] == "attribute_not_exists(record_id)"
+                        or current["stage"]["S"] not in {"APPLIED", "RESTORED"}
+                    ):
+                        raise SAGA.SagaError("ConditionalCheckFailedException")
+                    staged[record_id] = copy.deepcopy(item)
+                    continue
+                update = request["Update"]
+                record_id = update["Key"]["record_id"]["S"]
+                current = staged.get(record_id)
+                values = update["ExpressionAttributeValues"]
+                expected_stage = values.get(":applying") or values[":active"]
+                if current is None or current["stage"] != expected_stage:
                     raise SAGA.SagaError("ConditionalCheckFailedException")
-            self.item["stage"] = copy.deepcopy(values[":desired"])
+                for item_name, value_name in (
+                    ("plan_sha256", ":plan"),
+                    ("apply_attempt_id", ":attempt"),
+                    ("baseline_sha256", ":baseline"),
+                    ("planned_sha256", ":planned"),
+                ):
+                    if current[item_name] != values[value_name]:
+                        raise SAGA.SagaError("ConditionalCheckFailedException")
+                if (
+                    "attempt_record_id" in current
+                    and current["attempt_record_id"] != values[":attempt_record"]
+                ):
+                    raise SAGA.SagaError("ConditionalCheckFailedException")
+                current["stage"] = copy.deepcopy(values[":desired"])
+            self.items = staged
             return
         if (service, operation) == ("ecs", "wait services-stable"):
             assert timeout_seconds == 900
@@ -392,6 +437,90 @@ class _FakeCli:
                 raise SAGA.SagaError("waiter failed")
             return
         raise AssertionError((service, operation, arguments))
+
+
+class _FinalizerLedger:
+    """Finalizer adapter over the same fake DynamoDB records used by the ECS saga."""
+
+    def __init__(self, cli: _FakeCli) -> None:
+        self.items = cli.items
+
+    def seed(self, item: dict[str, Any]) -> None:
+        self.items[item["record_id"]["S"]] = copy.deepcopy(item)
+
+    def get_item(
+        self,
+        *,
+        table_name: str,
+        key: dict[str, dict[str, str]],
+    ) -> dict[str, Any] | None:
+        assert table_name == FINALIZER._IMAGE_LEDGER_TABLE
+        item = self.items.get(key["record_id"]["S"])
+        return copy.deepcopy(item) if item is not None else None
+
+    def transact_write(
+        self,
+        *,
+        items: Sequence[dict[str, Any]],
+        client_request_token: str,
+    ) -> None:
+        assert client_request_token == FINALIZER._client_request_token(ATTEMPT)
+        staged = copy.deepcopy(self.items)
+        for operation in items:
+            if "Put" in operation:
+                request = operation["Put"]
+                record_id = request["Item"]["record_id"]["S"]
+                assert record_id not in staged
+                staged[record_id] = copy.deepcopy(request["Item"])
+            elif "Delete" in operation:
+                record_id = operation["Delete"]["Key"]["record_id"]["S"]
+                assert record_id in staged
+                del staged[record_id]
+            else:
+                request = operation["Update"]
+                record_id = request["Key"]["record_id"]["S"]
+                current = staged[record_id]
+                values = request["ExpressionAttributeValues"]
+                if current["record_type"]["S"] == FINALIZER._EVENTBRIDGE_ACTIVE_RECORD_TYPE:
+                    current["stage"] = copy.deepcopy(values[":complete"])
+                    current["finished_at"] = copy.deepcopy(values[":finished"])
+                    current["revision"] = {"N": str(int(current["revision"]["N"]) + 1)}
+                elif record_id.startswith("intent#"):
+                    current["state"] = copy.deepcopy(values[":applied"])
+                    current["outcome_recorded_at"] = copy.deepcopy(values[":recorded"])
+                else:
+                    current["stage"] = copy.deepcopy(values[":applied"])
+        self.items.clear()
+        self.items.update(staged)
+
+
+def _finalizer_draft(intent_id: str) -> dict[str, Any]:
+    return {
+        "kind": "terraform-runtime-apply-receipt-draft",
+        "schema_version": 7,
+        "guard_version": "24",
+        "account_id": "718959508629",
+        "region": "ap-northeast-1",
+        "git_commit": "d" * 40,
+        "status": "verified_pending_finalization",
+        "migration_kind": "runtime",
+        "migration_id": "test-migration",
+        "required_migration_id": "",
+        "provenance_outcome": "pending",
+        "image_deployment_intent_id": intent_id,
+        "apply_attempt_id": ATTEMPT,
+        "source_receipt_sha256": "1" * 64,
+        "migration_contract_sha256": "2" * 64,
+        "reviewed_plan_sha256": "3" * 64,
+        "plan_sha256": PLAN_SHA256,
+        "openclaw_rollout_result_sha256": "4" * 64,
+        "post_apply_service_probe_sha256": "5" * 64,
+        "post_state_contract_sha256": "6" * 64,
+        "post_live_fingerprint_sha256": "7" * 64,
+        "post_runtime_inventory_sha256": "8" * 64,
+        "shared_deployment_lock_record_id": FINALIZER._LOCK_RECORD_ID,
+        "shared_deployment_lock_receipt_sha256": "9" * 64,
+    }
 
 
 def _saga(
@@ -593,6 +722,178 @@ def test_applied_requires_both_exact_planned_task_definitions_and_stability() ->
     assert cli.item["stage"] == {"S": "APPLIED"}
     assert receipt["stage"] == "APPLIED"
     assert saga.finish(outcome="applied") == receipt
+
+
+def test_verify_emits_finalizer_bound_receipt_and_active_pointer() -> None:
+    cli = _FakeCli()
+    saga = _saga(cli)
+    saga.begin()
+    _set_live_task(cli, service_arn=MCP_SERVICE_ARN, task_definition=NEW_MCP_TASK)
+    _set_live_task(
+        cli,
+        service_arn=CONNECT_SERVICE_ARN,
+        task_definition=NEW_CONNECT_TASK,
+    )
+
+    receipt = saga.verify()
+
+    active = cli.items[SAGA._ACTIVE_RECORD_ID]
+    assert receipt["stage"] == "VERIFIED_APPLIED"
+    assert receipt["ledger_item_sha256"] == SAGA._digest(cli.item)
+    assert active == SAGA._ddb_item(
+        {
+            "record_id": SAGA._ACTIVE_RECORD_ID,
+            "record_type": SAGA._ACTIVE_RECORD_TYPE,
+            "schema_version": 1,
+            "scope_id": SAGA._SCOPE_ID,
+            "stage": "APPLYING",
+            "apply_attempt_id": ATTEMPT,
+            "attempt_record_id": f"ecs-service-apply#{ATTEMPT}",
+            "plan_sha256": PLAN_SHA256,
+            "baseline_sha256": cli.item["baseline_sha256"]["S"],
+            "planned_sha256": cli.item["planned_sha256"]["S"],
+        }
+    )
+
+
+def test_guard_verify_contract_produces_records_the_finalizer_commits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Exercise the guard's verify action through its real ECS producer and consumer."""
+    parsed = SAGA._parser().parse_args(
+        [
+            "verify",
+            "--aws-bin",
+            "/trusted/aws",
+            "--terraform-bin",
+            "/trusted/terraform",
+            "--plan",
+            "/trusted/saved.tfplan",
+            "--plan-sha256",
+            PLAN_SHA256,
+            "--apply-attempt-id",
+            ATTEMPT,
+        ]
+    )
+    assert parsed.action == "verify"
+    assert parsed.outcome is None
+
+    cli = _FakeCli()
+    saga = _saga(cli)
+    saga.begin()
+    _set_live_task(cli, service_arn=MCP_SERVICE_ARN, task_definition=NEW_MCP_TASK)
+    _set_live_task(
+        cli,
+        service_arn=CONNECT_SERVICE_ARN,
+        task_definition=NEW_CONNECT_TASK,
+    )
+    monkeypatch.setattr(SAGA, "_trusted_executable", lambda path, **_kwargs: path)
+    monkeypatch.setattr(SAGA, "_load_saved_plan", lambda *_args, **_kwargs: _plan())
+    assert (
+        SAGA.main(
+            [
+                "verify",
+                "--aws-bin",
+                "/trusted/aws",
+                "--terraform-bin",
+                "/trusted/terraform",
+                "--plan",
+                "/trusted/saved.tfplan",
+                "--plan-sha256",
+                PLAN_SHA256,
+                "--apply-attempt-id",
+                ATTEMPT,
+            ],
+            cli=cli,
+        )
+        == 0
+    )
+    ecs_verification = json.loads(capsys.readouterr().out)
+
+    ledger = _FinalizerLedger(cli)
+    intent_id = "11111111-1111-4111-8111-111111111111"
+    verified_at = 1_784_500_000
+    eventbridge_id = f"{FINALIZER._EVENTBRIDGE_RECORD_PREFIX}hmac-2026-07"
+    eventbridge = FINALIZER._ddb_item(
+        {
+            "record_id": eventbridge_id,
+            "record_type": FINALIZER._EVENTBRIDGE_ACTIVE_RECORD_TYPE,
+            "schema_version": 2,
+            "stage": "applying",
+            "revision": 1,
+            "rotation_epoch": "hmac-2026-07",
+            "plan_sha256": PLAN_SHA256,
+            "apply_attempt_id": ATTEMPT,
+            "baseline_json": '{"schema_version":2,"rules":{}}',
+            "baseline_sha256": "b" * 64,
+            "planned_json": '{"schema_version":2,"rules":{}}',
+            "planned_sha256": "c" * 64,
+            "started_at": verified_at - 1,
+        }
+    )
+    eventbridge_verification = {
+        "kind": "teamagent-eventbridge-apply-saga-receipt",
+        "schema_version": 2,
+        "record_id": eventbridge_id,
+        "rotation_epoch": "hmac-2026-07",
+        "stage": "verified_applied",
+        "plan_sha256": PLAN_SHA256,
+        "apply_attempt_id": ATTEMPT,
+        "baseline_sha256": "b" * 64,
+        "planned_sha256": "c" * 64,
+        "ledger_item_sha256": FINALIZER._digest(eventbridge),
+        "verified_at": verified_at,
+    }
+    eventbridge_verification["receipt_sha256"] = FINALIZER._digest(eventbridge_verification)
+    ledger.seed(eventbridge)
+    ledger.seed(
+        FINALIZER._ddb_item(
+            {
+                "record_id": f"intent#{intent_id}",
+                "record_type": "teamagent.image-deployment-intent",
+                "schema_version": 1,
+                "intent_id": intent_id,
+                "state": "CONSUMED",
+                "plan_sha256": PLAN_SHA256,
+                "apply_attempt_id": ATTEMPT,
+                "audit_expires_at": verified_at + 7_776_000,
+            }
+        )
+    )
+    ledger.seed(
+        FINALIZER._ddb_item(
+            {
+                "record_id": FINALIZER._LOCK_RECORD_ID,
+                "record_type": "teamagent.image-release-apply-lock",
+                "schema_version": 1,
+                "state": "LOCKED",
+                "intent_id": intent_id,
+                "plan_sha256": PLAN_SHA256,
+                "apply_attempt_id": ATTEMPT,
+                "lease_expires_at": verified_at + 300,
+            }
+        )
+    )
+
+    output = tmp_path / "apply.json"
+    result = FINALIZER.ApplyFinalizer(
+        client=ledger,
+        intent_id=intent_id,
+        plan_sha256=PLAN_SHA256,
+        apply_attempt_id=ATTEMPT,
+    ).commit(
+        draft_raw=_finalizer_draft(intent_id),
+        eventbridge_raw=eventbridge_verification,
+        ecs_raw=ecs_verification,
+        output=output,
+    )
+
+    assert result["state"] == "COMMITTED"
+    assert cli.items[f"ecs-service-apply#{ATTEMPT}"]["stage"] == {"S": "APPLIED"}
+    assert cli.items[SAGA._ACTIVE_RECORD_ID]["stage"] == {"S": "APPLIED"}
+    assert json.loads(output.read_text(encoding="utf-8"))["status"] == "applied"
 
 
 def test_begin_requires_exact_completed_single_primary_deployment() -> None:
