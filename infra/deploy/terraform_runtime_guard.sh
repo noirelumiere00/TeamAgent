@@ -175,23 +175,23 @@ ensure_tmp() {
 }
 
 stat_uid() {
-  stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1"
+  stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"
 }
 
 stat_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 stat_identity() {
-  stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1"
+  stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1"
 }
 
 stat_inode() {
-  stat -f '%i' "$1" 2>/dev/null || stat -c '%i' "$1"
+  stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"
 }
 
 stat_size() {
-  stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1"
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1"
 }
 
 assert_owned() {
@@ -493,7 +493,7 @@ initialize_aws_trust() {
   [ -f "$AWS_BIN" ] && [ ! -L "$AWS_BIN" ] ||
     die "AWS executableのcanonical regular pathを確認できません"
   assert_regular_nonwritable "$AWS_BIN"
-  [ "$(stat -f '%l' "$AWS_BIN" 2>/dev/null || stat -c '%h' "$AWS_BIN")" = "1" ] ||
+  [ "$(stat -c '%h' "$AWS_BIN" 2>/dev/null || stat -f '%l' "$AWS_BIN")" = "1" ] ||
     die "AWS executableはsingle-linkである必要があります"
   AWS_BIN_SHA256="$(sha256_file "$AWS_BIN")"
   AWS_BIN_IDENTITY="$(stat_identity "$AWS_BIN"):$(stat_size "$AWS_BIN")"
