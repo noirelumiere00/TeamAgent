@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "authority": {
     "openclawAllowlist": "infra/openclaw/openclaw.config.json5:mcp.servers.teamagent.toolFilter",
     "backendRegistration": "src/teamagent/orchestrator/factory.py:build_production_tools",
@@ -42,169 +42,197 @@
       "name": "search",
       "effect": "company-data-read",
       "terraformGate": "always",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "always" }
     },
     {
       "name": "clientkarte",
       "effect": "company-data-read-analysis",
       "terraformGate": "always",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "always" }
     },
     {
       "name": "proposal_draft",
       "effect": "company-data-read-generated-content",
       "terraformGate": "always",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "always" }
     },
     {
       "name": "proposal_review",
       "effect": "company-data-read-analysis",
       "terraformGate": "always",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "always" }
     },
     {
       "name": "tiktok_search",
       "effect": "external-read-scrape",
       "terraformGate": "enable_scrape_tools",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_TOOLS"] }
     },
     {
       "name": "video_analysis",
       "effect": "external-read-analysis",
       "terraformGate": "enable_scrape_tools",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_VIDEO_TOOLS"] }
     },
     {
       "name": "video_algorithm",
       "effect": "external-read-analysis-report-write",
       "terraformGate": "enable_scrape_tools",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_VIDEO_TOOLS"] }
     },
     {
       "name": "video_approval",
       "effect": "drive-read-analysis",
       "terraformGate": "not-wired-in-authoritative-task",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "never" }
     },
     {
       "name": "operation_log",
       "effect": "slack-read-generated-content",
       "terraformGate": "not-wired-in-authoritative-task",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "never" }
     },
     {
       "name": "mail_summary",
       "effect": "gmail-read",
       "terraformGate": "USE_MAIL_SUMMARY_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MAIL_SUMMARY_TOOL"] }
     },
     {
       "name": "mail_followup",
       "effect": "gmail-read-analysis",
       "terraformGate": "USE_FOLLOWUP_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_FOLLOWUP_TOOL"] }
     },
     {
       "name": "mail_to_internal_context",
       "effect": "gmail-read-company-data-read",
       "terraformGate": "USE_MAIL_LINK_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MAIL_LINK_TOOL"] }
     },
     {
       "name": "mail_reply",
       "effect": "gmail-draft-write-no-send",
       "terraformGate": "USE_MAIL_REPLY_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MAIL_REPLY_TOOL"] }
     },
     {
       "name": "mail_draft",
       "effect": "gmail-draft-write-no-send",
       "terraformGate": "USE_MAIL_DRAFT_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MAIL_DRAFT_TOOL"] }
     },
     {
       "name": "calendar_event",
       "effect": "calendar-write-no-invite",
       "terraformGate": "use_calendar_event_tool",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_CALENDAR_EVENT_TOOL"] }
     },
     {
       "name": "schedule_propose",
       "effect": "gmail-draft-write-calendar-tentative-write-no-send",
       "terraformGate": "use_schedule_propose_tool",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_SCHEDULE_PROPOSE_TOOL"] }
     },
     {
       "name": "morning_digest",
       "effect": "gmail-calendar-slack-read-analysis",
       "terraformGate": "USE_MORNING_DIGEST_TOOL=true; DRAFT_ON_DEMAND_ONLY=true on the mention-capable MCP runtime",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_MORNING_DIGEST_TOOL"] }
     },
     {
       "name": "oauth_connect",
       "effect": "oauth-url-generation-no-token-write",
       "terraformGate": "USE_OAUTH_CONNECT_TOOL=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_OAUTH_CONNECT_TOOL"] }
     },
     {
       "name": "knowledge_deliver",
       "effect": "drive-read-slack-file-delivery",
       "terraformGate": "USE_KNOWLEDGE_DELIVER=true",
-      "defaultEnabledByTerraform": true
+      "defaultEnabledByTerraform": true,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_KNOWLEDGE_DELIVER"] }
     },
     {
       "name": "knowledge_search_url",
       "effect": "url-generation",
       "terraformGate": "not-wired-in-authoritative-task",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "never" }
     },
     {
       "name": "tiktok_acquire",
       "effect": "external-job-submit-s3-write",
       "terraformGate": "enable_tiktok_acquire",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_ACQUIRE"] }
     },
     {
       "name": "tiktok_acquire_status",
       "effect": "job-status-read",
       "terraformGate": "enable_tiktok_acquire",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_ACQUIRE"] }
     },
     {
       "name": "x_voice_search",
       "effect": "external-read-scrape",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "x_needs_mining",
       "effect": "external-read-analysis",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "x_buzz_measure",
       "effect": "external-job-submit-s3-write",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "x_buzz_measure_status",
       "effect": "job-status-read",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "search_surface_check",
       "effect": "external-read-analysis",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_SEARCH_SURFACE_TOOL"] }
     },
     {
       "name": "tiktok_comment_mining",
       "effect": "external-read-scrape-analysis",
       "terraformGate": "enable_x_research",
-      "defaultEnabledByTerraform": false
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_COMMENT_TOOLS"] }
     }
   ]
 }

@@ -17,6 +17,8 @@ const CLUSTER = "teamagent-dev";
 const SERVICE = "teamagent-dev-openclaw";
 const FAMILY = "teamagent-dev-openclaw";
 const CONTAINER = "openclaw";
+const MCP_FAMILY = "teamagent-dev-mcp";
+const MCP_CONTAINER = "teamagent-mcp";
 const LOG_GROUP = "/teamagent/dev/openclaw";
 const CANARY_SECRET = "teamagent/dev/openclaw/rollout-canary";
 const BEDROCK_MODEL =
@@ -36,6 +38,8 @@ const RESULT_PREFIX = "rollout-results";
 const RETENTION_DAYS = 3650;
 const TASK_ARN_PATTERN =
   /^arn:aws:ecs:ap-northeast-1:718959508629:task-definition\/teamagent-dev-openclaw:[1-9][0-9]*$/u;
+const MCP_TASK_ARN_PATTERN =
+  /^arn:aws:ecs:ap-northeast-1:718959508629:task-definition\/teamagent-dev-mcp:[1-9][0-9]*$/u;
 const RUNNING_TASK_ARN_PATTERN =
   /^arn:aws:ecs:ap-northeast-1:718959508629:task\/teamagent-dev\/[0-9a-f]{32}$/u;
 const UUID_PATTERN =
@@ -926,20 +930,109 @@ function fetchSlackLogCorrelation({ token, slack, runningInventory }) {
   );
 }
 
-function readExpectedToolNames() {
-  const scope = checkedJsonFile(TOOL_SCOPE_PATH);
-  const names = scope.tools
-    .filter((tool) => tool.defaultEnabledByTerraform === true)
-    .map((tool) => tool.name)
-    .sort();
+function isEnabledEnvironmentValue(value) {
+  return value === "1" || value === "true";
+}
+
+export function deriveExpectedToolNames(scope, environment) {
   if (
-    scope.schemaVersion !== 1 ||
-    names.length !== 12 ||
-    names.length !== new Set(names).size
+    scope?.schemaVersion !== 2 ||
+    !Array.isArray(scope.tools) ||
+    !environment ||
+    typeof environment !== "object" ||
+    Array.isArray(environment)
   ) {
-    throw new Error("reviewed default MCP tool scope is invalid");
+    throw new Error("reviewed MCP tool scope or task environment is invalid");
   }
-  return names;
+  const reviewedNames = new Set();
+  const names = [];
+  for (const tool of scope.tools) {
+    const activation = tool?.enabledBy;
+    if (
+      typeof tool?.name !== "string" ||
+      tool.name.length === 0 ||
+      reviewedNames.has(tool.name) ||
+      !activation ||
+      typeof activation !== "object" ||
+      Array.isArray(activation)
+    ) {
+      throw new Error("reviewed MCP tool scope contains an invalid tool entry");
+    }
+    reviewedNames.add(tool.name);
+    if (
+      activation.kind === "always" &&
+      Object.keys(activation).length === 1
+    ) {
+      names.push(tool.name);
+      continue;
+    }
+    if (
+      activation.kind === "never" &&
+      Object.keys(activation).length === 1
+    ) {
+      continue;
+    }
+    if (
+      activation.kind === "envAllTrue" &&
+      Object.keys(activation).length === 2 &&
+      Array.isArray(activation.names) &&
+      activation.names.length > 0 &&
+      activation.names.every(
+        (name) =>
+          typeof name === "string" && /^[A-Z][A-Z0-9_]*$/u.test(name),
+      ) &&
+      activation.names.length === new Set(activation.names).size
+    ) {
+      if (
+        activation.names.every((name) =>
+          isEnabledEnvironmentValue(environment[name]),
+        )
+      ) {
+        names.push(tool.name);
+      }
+      continue;
+    }
+    throw new Error("reviewed MCP tool scope contains an invalid activation rule");
+  }
+  if (reviewedNames.size === 0 || names.length === 0) {
+    throw new Error("derived MCP expected tool set is empty");
+  }
+  return names.sort();
+}
+
+export function readExpectedToolNames(
+  mcpTaskDefinition,
+  expectedTaskDefinitionArn,
+) {
+  const scope = checkedJsonFile(TOOL_SCOPE_PATH);
+  const task = mcpTaskDefinition?.taskDefinition;
+  const containers = task?.containerDefinitions?.filter(
+    (container) => container?.name === MCP_CONTAINER,
+  );
+  if (
+    task?.taskDefinitionArn === undefined ||
+    !MCP_TASK_ARN_PATTERN.test(task.taskDefinitionArn) ||
+    (expectedTaskDefinitionArn !== undefined &&
+      task.taskDefinitionArn !== expectedTaskDefinitionArn) ||
+    task.family !== MCP_FAMILY ||
+    task.status !== "ACTIVE" ||
+    containers?.length !== 1 ||
+    !Array.isArray(containers[0].environment)
+  ) {
+    throw new Error("candidate MCP task definition is invalid");
+  }
+  const environment = {};
+  for (const entry of containers[0].environment) {
+    if (
+      typeof entry?.name !== "string" ||
+      typeof entry?.value !== "string" ||
+      Object.hasOwn(environment, entry.name)
+    ) {
+      throw new Error("candidate MCP task definition environment is invalid");
+    }
+    environment[entry.name] = entry.value;
+  }
+  return deriveExpectedToolNames(scope, environment);
 }
 
 function fetchTaskCanaryEvent(task, receiptId, expectedToolNames) {
@@ -1583,6 +1676,7 @@ function contextFromArguments(values, { allowAutoCandidate = false } = {}) {
     "--evidence-encryption-kms-key-arn",
   );
   const signingKmsKeyArn = values.get("--evidence-signing-kms-key-arn");
+  const mcpTaskDefinition = values.get("--mcp-task-definition");
   if (
     !TASK_ARN_PATTERN.test(previousTaskDefinition || "") ||
     (!TASK_ARN_PATTERN.test(newTaskDefinition || "") &&
@@ -1590,7 +1684,8 @@ function contextFromArguments(values, { allowAutoCandidate = false } = {}) {
     (!allowAutoCandidate &&
       (!KMS_ARN_PATTERN.test(encryptionKmsKeyArn || "") ||
         !KMS_ARN_PATTERN.test(signingKmsKeyArn || "") ||
-        encryptionKmsKeyArn === signingKmsKeyArn))
+        encryptionKmsKeyArn === signingKmsKeyArn)) ||
+    (!allowAutoCandidate && !MCP_TASK_ARN_PATTERN.test(mcpTaskDefinition || ""))
   ) {
     throw new Error("rollout task definition arguments are invalid");
   }
@@ -1609,6 +1704,7 @@ function contextFromArguments(values, { allowAutoCandidate = false } = {}) {
       encryption: encryptionKmsKeyArn,
       signing: signingKmsKeyArn,
     },
+    mcpTaskDefinition,
   };
 }
 
@@ -1621,6 +1717,7 @@ async function runLive(args) {
     "--plan-sha256",
     "--evidence-encryption-kms-key-arn",
     "--evidence-signing-kms-key-arn",
+    "--mcp-task-definition",
     "--output",
   ];
   const values = parseExactArguments(args, allowed);
@@ -1656,7 +1753,13 @@ async function runLive(args) {
       context.newTaskDefinition,
       stable.desiredCount,
     );
-    const expectedToolNames = readExpectedToolNames();
+    const expectedToolNames = readExpectedToolNames(
+      awsJson("ecs", "describe-task-definition", [
+        "--task-definition",
+        context.mcpTaskDefinition,
+      ]),
+      context.mcpTaskDefinition,
+    );
     const receiptId = context.intentId;
     const overrides = {
       containerOverrides: [
@@ -1666,6 +1769,8 @@ async function runLive(args) {
             "/opt/teamagent/rollout-task-canary.mjs",
             "--receipt-id",
             receiptId,
+            "--expected-tool-names-json",
+            JSON.stringify(expectedToolNames),
           ],
         },
       ],
