@@ -5,6 +5,7 @@ import importlib.util
 import os
 import signal
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,25 @@ def _load_module() -> Any:
 
 
 SUPERVISOR = _load_module()
+
+_SAVED_PLAN_ENVIRONMENT_KEYS = (
+    "TEAMAGENT_SAVED_PLAN_PATH",
+    "TEAMAGENT_SAVED_PLAN_SHA256",
+    "TEAMAGENT_SAVED_PLAN_IDENTITY",
+)
+
+
+@pytest.fixture(autouse=True)
+def restore_saved_plan_environment() -> Iterator[None]:
+    saved = {key: os.environ.get(key) for key in _SAVED_PLAN_ENVIRONMENT_KEYS}
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _pid_exists(pid: int) -> bool:
@@ -137,6 +157,8 @@ def test_leader_exit_drains_a_surviving_process_group_child_before_returning(
 
 
 def test_successful_heartbeat_preserves_the_terraform_exit_status() -> None:
+    assert all(key not in os.environ for key in _SAVED_PLAN_ENVIRONMENT_KEYS)
+
     status = SUPERVISOR.run_supervised(
         [sys.executable, "-c", "import time; time.sleep(0.1); raise SystemExit(7)"],
         [sys.executable, "-c", "raise SystemExit(0)"],
