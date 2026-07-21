@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
+from teamagent.connect_web import app as connect_app
 from teamagent.connect_web.app import create_app
 from teamagent.dashboard.auth import make_session
 from teamagent.dashboard.config import DashboardConfig
@@ -301,3 +303,235 @@ def test_api_feedback_rejects_bad_target_type() -> None:
     )
     assert r.status_code == 400
     assert st.rows == []
+
+
+@pytest.mark.parametrize(
+    ("score", "expected_rating", "client_rating"),
+    [(4, 1, -1), (3, 1, -1), (2, -1, 1), (1, -1, 1)],
+)
+def test_api_feedback_score_derives_rating_over_client_rating(
+    score: int, expected_rating: int, client_rating: int
+) -> None:
+    client, _, st = _build()
+    r = client.post(
+        "/api/v1/feedback",
+        json={
+            "query": "要約の評価",
+            "target_type": "answer",
+            "rating": client_rating,
+            "score": score,
+        },
+        cookies=_auth_cookie(),
+    )
+
+    assert r.status_code == 200
+    assert st.rows[0]["score"] == score
+    assert st.rows[0]["rating"] == expected_rating
+
+
+@pytest.mark.parametrize("score", [0, 5, "a"])
+def test_api_feedback_rejects_bad_score(score: int | str) -> None:
+    client, _, st = _build()
+    r = client.post(
+        "/api/v1/feedback",
+        json={"query": "x", "target_type": "answer", "score": score},
+        cookies=_auth_cookie(),
+    )
+
+    assert r.status_code == 400
+    assert r.json() == {"error": "bad_score"}
+    assert st.rows == []
+
+
+def test_api_feedback_rejects_score_for_chunk() -> None:
+    client, _, st = _build()
+    r = client.post(
+        "/api/v1/feedback",
+        json={"query": "x", "target_type": "chunk", "score": 4},
+        cookies=_auth_cookie(),
+    )
+
+    assert r.status_code == 400
+    assert r.json() == {"error": "bad_score_target"}
+    assert st.rows == []
+
+
+def test_api_feedback_score_sanitizes_optional_ids_and_caps_text() -> None:
+    client, _, st = _build()
+    r = client.post(
+        "/api/v1/feedback",
+        json={
+            "query": "要約の評価",
+            "target_type": "answer",
+            "score": 4,
+            "search_session_id": "!" + "a" * 64,
+            "answer_id": "not-hex",
+            "note": "n" * 600,
+            "doc_id": "d" * 600,
+        },
+        cookies=_auth_cookie(),
+    )
+
+    assert r.status_code == 200
+    row = st.rows[0]
+    assert row["search_session_id"] is None
+    assert row["answer_id"] is None
+    assert row["note"] == "n" * 500
+    assert row["doc_id"] == "d" * 512
+
+
+def test_api_feedback_uses_legacy_seven_column_insert_without_new_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[tuple[str, list[Any]]] = []
+
+    class FakeCursor:
+        def __enter__(self) -> FakeCursor:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def execute(self, sql: str, values: list[Any]) -> None:
+            executed.append((sql, values))
+
+    class FakeConnection:
+        def __enter__(self) -> FakeConnection:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def commit(self) -> None:
+            return None
+
+    class FakePg:
+        def connection(self, **kwargs: Any) -> FakeConnection:
+            assert kwargs == {"app_role": "teamagent_app", "user_email": _EMAIL}
+            return FakeConnection()
+
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    monkeypatch.setattr(PgVectorClient, "from_env", lambda: FakePg())
+    app = create_app(
+        search_skill_factory=_FakeSearchSkill,
+        search_config=_config(),
+        search_verifier=_verifier_ok,
+    )
+    client = TestClient(app)
+    r = client.post(
+        "/api/v1/feedback",
+        json={"query": "x", "target_type": "answer", "rating": 1},
+        cookies=_auth_cookie(),
+    )
+
+    assert r.status_code == 200
+    assert executed == [
+        (
+            "INSERT INTO search_feedback (user_email, query, target_type, doc_id, chunk_id, rating, note) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            [_EMAIL, "x", "answer", None, None, 1, None],
+        )
+    ]
+
+
+def test_feedback_insert_retries_legacy_columns_after_undefined_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """0022未適用DBでも、新列を落として従来評価の保存を続ける。"""
+    from psycopg.errors import UndefinedColumn
+
+    columns = [
+        "user_email",
+        "query",
+        "target_type",
+        "doc_id",
+        "chunk_id",
+        "rating",
+        "note",
+        "score",
+        "search_session_id",
+        "answer_id",
+    ]
+    values: list[Any] = [_EMAIL, "x", "answer", None, None, 1, None, 4, "session-1", "abc"]
+    executed: list[tuple[str, list[Any]]] = []
+    recovered: list[bool] = []
+    warnings: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeLogger:
+        def warning(self, event: str, **kwargs: Any) -> None:
+            warnings.append((event, kwargs))
+
+    def execute(sql: str, params: list[Any]) -> None:
+        executed.append((sql, params))
+        if len(executed) == 1:
+            raise UndefinedColumn('column "score" does not exist')
+
+    monkeypatch.setattr(connect_app, "logger", FakeLogger())
+    connect_app._execute_feedback_insert(
+        execute, columns, values, prepare_legacy_retry=lambda: recovered.append(True)
+    )
+
+    assert [sql for sql, _ in executed] == [
+        "INSERT INTO search_feedback (user_email, query, target_type, doc_id, chunk_id, rating, note, "
+        "score, search_session_id, answer_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        "INSERT INTO search_feedback (user_email, query, target_type, doc_id, chunk_id, rating, note) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+    ]
+    assert executed[1][1] == [_EMAIL, "x", "answer", None, None, 1, None]
+    assert recovered == [True]
+    assert warnings == [
+        (
+            "feedback_save_legacy_fallback",
+            {"dropped_columns": ["score", "search_session_id", "answer_id"]},
+        )
+    ]
+
+
+def test_api_feedback_rate_limit_recovers_after_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(connect_app.time, "monotonic", lambda: now[0])
+    connect_app._feedback_rate_windows.clear()
+    try:
+        client, _, st = _build()
+        payload = {"query": "x", "target_type": "answer", "score": 4}
+        for _ in range(30):
+            assert (
+                client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code
+                == 200
+            )
+
+        limited = client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie())
+        assert limited.status_code == 429
+        assert limited.json() == {"error": "rate_limited"}
+        assert len(st.rows) == 30
+
+        now[0] += 60
+        assert (
+            client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code == 200
+        )
+        assert len(st.rows) == 31
+    finally:
+        connect_app._feedback_rate_windows.clear()
+
+
+def test_api_feedback_legacy_rating_is_not_rate_limited(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(connect_app.time, "monotonic", lambda: now[0])
+    connect_app._feedback_rate_windows.clear()
+    try:
+        client, _, st = _build()
+        payload = {"query": "x", "target_type": "answer", "rating": 1}
+        for _ in range(31):
+            assert (
+                client.post("/api/v1/feedback", json=payload, cookies=_auth_cookie()).status_code
+                == 200
+            )
+
+        assert len(st.rows) == 31
+        assert connect_app._feedback_rate_windows == {}
+    finally:
+        connect_app._feedback_rate_windows.clear()

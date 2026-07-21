@@ -23,6 +23,12 @@ variable "enable_connect_web" {
   default     = false
 }
 
+variable "connect_answer_rating" {
+  description = "既定OFFで AI 要約の4段階評価UIを非表示にする機能フラグ"
+  type        = bool
+  default     = false
+}
+
 variable "fargate_connect_cpu" {
   description = "connect-web タスク CPU (uvicorn FastAPI のみ＝軽量)"
   type        = number
@@ -254,10 +260,14 @@ data "aws_iam_policy_document" "connect_web_task" {
   }
   # P4 資料検索 Web UI: Cohere Rerank（USE_COHERE_RERANK 有効時の関連度並べ替え）。
   # bedrock:Rerank は InvokeModel とは別アクションなので明示付与が必要（fargate.tf の MCP と同型）。
+  # ★resources 必須 "*": bedrock:Rerank はリソースレベル制限に非対応のアクションで、
+  #   foundation-model ARN に絞ると AccessDeniedException で全拒否になる（2026-07-21 本番実測。
+  #   connect-web/mcp とも rerank が silent fallback していた根因）。モデルの限定は
+  #   アプリ設定（cohere.rerank-v3-5 固定）と InvokeModel 側の資源制限で担保する。
   statement {
     sid       = "BedrockRerankForSearch"
     actions   = ["bedrock:Rerank"]
-    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/cohere.rerank-v3-5:0"]
+    resources = ["*"]
   }
   # レポート短縮リンク(/r)が presigned を再生成するため、署名プリンシパル(=connect-web task role)に
   # 当該 prefix の GetObject が必要（無いとブラウザ取得時 403）。vseo-reports/=x_research 等、
@@ -424,6 +434,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "CONNECT_WEB_HOST", value = "0.0.0.0" },
       { name = "CONNECT_WEB_PORT", value = "8788" },
+      { name = "CONNECT_ANSWER_RATING", value = var.connect_answer_rating ? "true" : "false" },
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
@@ -453,11 +464,11 @@ resource "aws_ecs_task_definition" "connect_web" {
       # フラグ。USE_NEW_SCHEMA を入れ忘れると factory が既定 false → RLS 未適用の旧
       # proposals_chunks を引いてしまい RLS スコープが no-op になる（セキュリティ上必須）。
       { name = "USE_NEW_SCHEMA", value = "true" },
-      # live パリティ（2026-07-11 反対尋問レビューで検出）: /search の Cohere 再ランクは live rev39 で
-      # 明示 OFF（mcp 側=true とは別判断。/search は SEARCH_MIN_RELEVANCE=0.0 で全件表示＋UI 側で
-      # relevance 判断させる設計のため、rerank コスト/レイテンシを掛けない）。true に戻すと apply で
-      # 検索順位が変動し Bedrock 呼び出しが増える。
-      { name = "USE_COHERE_RERANK", value = "false" },
+      # Cohere Rerank v3.5（2026-07-21 ON 化・td:55 で先行適用済み）。gold set 50 件の実測で
+      # Top1 hit 0.36→0.58 / MRR 0.44→0.61 と明確改善（+約0.1円/検索・レイテンシ不変）。
+      # ※旧コメントの「OFF」は rerank 権限が foundation-model ARN 限定で AccessDenied 全拒否
+      #   だったため silent fallback していた時期の判断。IAM を Resource "*" に是正して有効化。
+      { name = "USE_COHERE_RERANK", value = "true" },
       { name = "USE_CLIENT_BOOST", value = "true" },
       # 「資料の被り」対策（L1）: 営業資料はテンプレページ（表紙/会社紹介/料金）を使い回すため、
       # 検索結果でテンプレチャンクが複数資料から重複ヒット＆同一資料が結果を独占する。

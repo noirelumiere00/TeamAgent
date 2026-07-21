@@ -20,7 +20,8 @@ import logging
 import os
 import re
 import threading
-from collections import Counter
+import time
+from collections import Counter, deque
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
@@ -29,6 +30,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from psycopg.errors import UndefinedColumn
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -53,6 +55,81 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+_FEEDBACK_RATE_LIMIT = 30
+_FEEDBACK_RATE_WINDOW_S = 60.0
+_feedback_rate_windows: dict[str, deque[float]] = {}
+_feedback_rate_lock = threading.Lock()
+
+
+def _feedback_rate_limited(user_email: str) -> bool:
+    """評価送信がプロセス内スライディングウィンドウの上限を超えたかを返す。
+
+    プロセス再起動でリセットされる仕様（暴走クライアントの行増殖抑止が目的で、
+    厳密なレート制限は非ゴール）。リミッタ内部の失敗は fail-open とし、
+    評価の保存経路を止めない。
+    """
+    try:
+        now = time.monotonic()
+        with _feedback_rate_lock:
+            window = _feedback_rate_windows.setdefault(user_email, deque())
+            cutoff = now - _FEEDBACK_RATE_WINDOW_S
+            while window and window[0] <= cutoff:
+                window.popleft()
+            if len(window) >= _FEEDBACK_RATE_LIMIT:
+                return True
+            window.append(now)
+    except Exception as exc:
+        logger.warning(
+            "feedback_rate_limit_failed",
+            user_email=user_email,
+            error=type(exc).__name__,
+            detail=str(exc)[:200],
+        )
+    return False
+
+
+def _feedback_insert_sql(columns: list[str]) -> str:
+    """search_feedback 用の INSERT SQL を列名から組み立てる。
+
+    columns は呼び出し側の固定ホワイトリスト（user_email/query/target_type/doc_id/
+    chunk_id/rating/note/score/search_session_id/answer_id）のみで、外部入力は含まない。
+    値はすべて %s プレースホルダでパラメータ化する（列名の埋め込みのみ・SQLi 面なし）。
+    """
+    placeholders = ", ".join("%s" for _ in columns)
+    # nosec B608: 列名は上記固定ホワイトリスト由来で外部入力なし・値は %s パラメータ化。
+    return f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})"  # nosec B608
+
+
+def _execute_feedback_insert(
+    execute: Callable[[str, list[Any]], None],
+    columns: list[str],
+    values: list[Any],
+    *,
+    prepare_legacy_retry: Callable[[], None] | None = None,
+) -> None:
+    """評価INSERTを実行し、未適用の0022列だけは旧スキーマへ退避する。"""
+    try:
+        execute(_feedback_insert_sql(columns), values)
+    except UndefinedColumn:
+        legacy_columns = [
+            "user_email",
+            "query",
+            "target_type",
+            "doc_id",
+            "chunk_id",
+            "rating",
+            "note",
+        ]
+        dropped_columns = [column for column in columns if column not in legacy_columns]
+        if not dropped_columns:
+            raise
+        legacy_values = [values[columns.index(column)] for column in legacy_columns]
+        if prepare_legacy_retry is not None:
+            prepare_legacy_retry()
+        logger.warning("feedback_save_legacy_fallback", dropped_columns=dropped_columns)
+        execute(_feedback_insert_sql(legacy_columns), legacy_values)
 
 
 # Every route carries the same browser-facing baseline.  The application serves a large,
@@ -662,6 +739,25 @@ _SEARCH_STYLE = (
     ".answer .aretry{margin-left:8px;background:var(--bg-hover);border:1px solid #34425f;"
     "color:#c5d0e6;border-radius:8px;padding:2px 10px;font-size:12px;cursor:pointer}"
     ".answer .aretry:hover{background:#2c3a58}"
+    ".rate4{margin-top:14px;border-top:1px solid #2b3a5e;padding-top:12px;white-space:normal}"
+    ".rate4Question{font-size:13px;color:#c5d0e6;margin-bottom:8px}"
+    ".rate4Choices{display:flex;flex-wrap:wrap;gap:6px}"
+    ".rate4Choice{background:var(--bg-hover);border:1px solid #34425f;color:#c5d0e6;"
+    "border-radius:8px;padding:5px 9px;font-size:13px;cursor:pointer}"
+    ".rate4Choice:hover{background:#2c3a58}.rate4Choice.selected{background:#2a5;border-color:#53c77b;color:#fff}"
+    ".rate4Status{min-height:1.5em;margin-top:8px;color:var(--muted);font-size:12px}"
+    ".rate4Status.error{color:#ffaaaa}.rate4Retry{margin-left:8px;background:none;border:0;color:var(--accent);"
+    "font-size:12px;cursor:pointer;text-decoration:underline}"
+    ".rate4Note{max-height:0;opacity:0;overflow:hidden;transition:max-height .2s ease,"
+    "opacity .2s ease}"
+    ".rate4Note.open{max-height:180px;opacity:1;margin-top:10px}"
+    ".rate4Note textarea{box-sizing:border-box;width:100%;min-height:68px;resize:vertical;"
+    "background:var(--bg-elev);border:1px solid #34425f;border-radius:8px;color:var(--text);"
+    "padding:8px;font:inherit;font-size:12px}"
+    ".rate4Note button{margin-top:6px;background:var(--bg-hover);border:1px solid #34425f;"
+    "color:#c5d0e6;"
+    "border-radius:8px;padding:4px 10px;font-size:12px;cursor:pointer}"
+    ".rate4Help{margin-top:8px;color:var(--muted);font-size:11px}"
 )
 
 
@@ -769,19 +865,126 @@ function renderFilters(){
   x.onclick=()=>{activeIndustry=null;search();};
   f.appendChild(x);filters.appendChild(f);
 }
-function fbButtons(target,doc_id,chunk_id){
+function fbButtons(target,doc_id,chunk_id,sessionId){
   const wrap=document.createElement('div');wrap.className='fb';
   for(const r of [['👍',1,'on'],['👎',-1,'off']]){
     const b=document.createElement('button');b.type='button';b.textContent=r[0];
     b.onclick=async()=>{
-      await fetch('/api/v1/feedback',{
-        method:'POST',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({query:lastQuery,target_type:target,
-          doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null})});
-      b.classList.add(r[2]);b.disabled=true;
+      b.disabled=true;
+      try{
+        const resp=await fetch('/api/v1/feedback',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({query:lastQuery,target_type:target,
+            doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null,
+            search_session_id:sessionId})});
+        if(!resp.ok)throw new Error('http '+resp.status);
+        b.classList.add(r[2]);
+      }catch(e){
+        b.classList.remove(r[2]);b.disabled=false;
+        b.title='評価を送信できませんでした';
+      }
     };
     wrap.appendChild(b);
   }
+  return wrap;
+}
+// AI要約向けの4段階評価。検索世代とは切り離し、生成時の値だけをクロージャに保持する。
+function rate4Bar(query,sessionId,answerId){
+  const wrap=document.createElement('div');wrap.className='rate4';
+  let currentScore=null;
+  let lastSentScore=null;
+  let lastSentNote=null;
+  let pendingPayload=null;
+  let pendingKind=null;
+  let pendingWasUpdate=false;
+  let hasChosenScore=false;
+  let requestNumber=0;
+  const question=document.createElement('div');question.className='rate4Question';
+  question.textContent='この回答は期待に合いましたか？';wrap.appendChild(question);
+  const choices=document.createElement('div');choices.className='rate4Choices';
+  wrap.appendChild(choices);
+  const status=document.createElement('div');status.className='rate4Status';
+  status.setAttribute('aria-live','polite');
+  wrap.appendChild(status);
+  const retry=document.createElement('button');retry.type='button';retry.className='rate4Retry';
+  retry.textContent='再試行';retry.hidden=true;status.appendChild(retry);
+  const noteBox=document.createElement('div');noteBox.className='rate4Note';
+  const note=document.createElement('textarea');note.maxLength=500;
+  note.placeholder='欲しかった資料の種類・足りなかった観点など。クライアント名・個人名を書いたり資料本文を貼ったりしないでください';
+  noteBox.appendChild(note);
+  const noteSend=document.createElement('button');noteSend.type='button';
+  noteSend.textContent='コメントを送る';
+  noteBox.appendChild(noteSend);wrap.appendChild(noteBox);
+  const help=document.createElement('div');help.className='rate4Help';
+  help.textContent='評価は検索の改善にだけ使います';wrap.appendChild(help);
+  const buttons=[];
+  function currentNote(){const value=note.value.trim();return value||null;}
+  function payloadFor(score,noteValue){
+    return {query:query,target_type:'answer',doc_id:null,chunk_id:null,score:score,note:noteValue,
+      search_session_id:sessionId,answer_id:answerId};
+  }
+  function select(score){
+    currentScore=score;
+    for(const item of buttons)item.button.classList.toggle('selected',item.score===score);
+    noteBox.classList.add('open');
+  }
+  function showError(message){
+    status.className='rate4Status error';status.textContent=message;
+    status.appendChild(retry);retry.hidden=false;
+  }
+  async function postRate4(payload,kind,silent,wasUpdate=false){
+    pendingPayload=payload;pendingKind=kind;pendingWasUpdate=wasUpdate;
+    const thisRequest=++requestNumber;
+    if(!silent){status.className='rate4Status';status.textContent='送信中…';status.appendChild(retry);retry.hidden=true;}
+    try{
+      const response=await fetch('/api/v1/feedback',{
+        method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)});
+      if(response.status===401){
+        if(!silent&&thisRequest===requestNumber)showError('セッションが切れました。再ログインしてください');
+        return false;
+      }
+      if(!response.ok)throw new Error('http '+response.status);
+      if(thisRequest!==requestNumber)return true;
+      const wasRated=lastSentScore!==null;
+      lastSentScore=payload.score;lastSentNote=payload.note;pendingPayload=null;pendingKind=null;
+      if(!silent){
+        status.className='rate4Status';
+        status.textContent=kind==='score'&&!wasRated&&!wasUpdate?'評価を送信しました（あとから変更できます）':'評価を更新しました';
+        status.appendChild(retry);retry.hidden=true;
+      }
+      return true;
+    }catch(error){
+      if(!silent&&thisRequest===requestNumber)showError('送信できませんでした');
+      return false;
+    }
+  }
+  retry.onclick=function(){
+    if(pendingPayload)postRate4(pendingPayload,pendingKind,false,pendingWasUpdate);
+  };
+  for(const item of [[4,'◎ 期待どおり'],[3,'○ おおむね'],[2,'△ 物足りない'],[1,'× 見当違い']]){
+    const button=document.createElement('button');button.type='button';
+    button.className='rate4Choice';
+    button.textContent=item[1];
+    const score=item[0];
+    button.onclick=function(){
+      if(score===currentScore)return;
+      const wasUpdate=hasChosenScore;hasChosenScore=true;
+      select(score);postRate4(payloadFor(score,currentNote()),'score',false,wasUpdate);
+    };
+    buttons.push({button:button,score:score});choices.appendChild(button);
+  }
+  noteSend.onclick=function(){
+    if(currentScore===null)return;
+    postRate4(payloadFor(currentScore,currentNote()),'note',false);
+  };
+  // 呼び出し側が要約カードを除去する直前に実行するための best-effort の退避処理。
+  wrap.rate4Teardown=function(){
+    const value=currentNote();
+    if(currentScore!==null&&value!==null&&value!==lastSentNote){
+      postRate4(payloadFor(currentScore,value),'note',true);
+    }
+  };
   return wrap;
 }
 function renderError(){
@@ -930,21 +1133,21 @@ async function fetchSearch(body,withAnswer,ctl){
   return resp.json();
 }
 // AI要約カード（プレースホルダ状態）。(b) 到着で .abody だけ差し替える。
-function renderAnswerPending(){
+function renderAnswerPending(sessionId){
   const a=document.createElement('div');a.className='answer';
   const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
   const b=document.createElement('div');b.className='abody pending';
   b.textContent='AI要約を生成中…';a.appendChild(b);
-  a.appendChild(fbButtons('answer',null,null));
+  /*ANSWER_RATING_PENDING*/
   return a;
 }
 // (b) answer フェッチの結果を要約カードへ差し込む。(b) の hits は使わない
 // （(a) の描画を維持＝ちらつき防止）。失敗時は再試行ボタンで (b) だけ再実行。
-function attachAnswer(card,promise,body,ctl,gen){
+function attachAnswer(card,promise,body,ctl,gen,query,sessionId){
   const el=card.querySelector('.abody');
   promise.then(function(data){
     if(gen!==searchGen)return;
-    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;}
+    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;/*ANSWER_RATING_ATTACH*/}
     else{card.remove();}
   }).catch(function(e){
     if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
@@ -956,17 +1159,18 @@ function attachAnswer(card,promise,body,ctl,gen){
     rb.onclick=function(){
       if(gen!==searchGen)return;
       el.classList.add('pending');el.textContent='AI要約を生成中…';
-      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen);
+      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen,query,sessionId);
     };
     el.appendChild(rb);
   });
 }
 async function search(){
+  const sessionId=crypto.randomUUID();
   const query=q.value.trim();if(!query)return;
   if(currentSearch)currentSearch.abort();
   const ctl=new AbortController();currentSearch=ctl;
   const gen=++searchGen;
-  lastQuery=query;renderFilters();setSearching(true);renderSkeleton();
+  lastQuery=query;renderFilters();setSearching(true);/*ANSWER_RATING_TEARDOWN*/renderSkeleton();
   const body=buildBody(query);
   // 二段レスポンス（#1）: (a) hits 即描画（include_answer:false）と (b) AI要約
   // （include_answer:true）を並行フェッチ。ctl/gen を共有し、連打時は 2 本とも中止。
@@ -983,9 +1187,9 @@ async function search(){
   if(gen!==searchGen)return;
   setSearching(false);
   results.textContent='';
-  const answerCard=renderAnswerPending();
+  const answerCard=renderAnswerPending(sessionId);
   results.appendChild(answerCard);
-  attachAnswer(answerCard,answerPromise,body,ctl,gen);
+  attachAnswer(answerCard,answerPromise,body,ctl,gen,query,sessionId);
   const terms=hlTerms(query);
   const hits=data.hits||[];
   if(!hits.length){renderEmpty(query);return;}
@@ -1031,7 +1235,7 @@ async function search(){
     const sc=document.createElement('span');sc.className='score';
     const sv=(typeof h.score==='number'?h.score.toFixed(3):h.score);
     sc.textContent='score '+sv;meta.appendChild(sc);
-    meta.appendChild(fbButtons('chunk',h.doc_id||null,h.chunk_id||null));
+    meta.appendChild(fbButtons('chunk',h.doc_id||null,h.chunk_id||null,sessionId));
     card.appendChild(meta);results.appendChild(card);
   }
 }
@@ -1046,6 +1250,34 @@ window.populateClientList=populateClientList;
 // 既に __facets が用意済（graph 先読み）なら即時充填も試みる（フック取りこぼし保険）。
 populateClientList();
 """
+
+
+def _render_search_js(*, answer_rating_enabled: bool) -> str:
+    """サーバサイドフラグが ON のときだけ評価UIの配線コードを JS に差し込む。
+
+    OFF 時は従来どおり answer 用 👍/👎 を pending カードへ出す（機能同一）。
+    フラグ値はクライアントへ env として露出せず、生成 JS の形でのみ反映される。
+    """
+    if answer_rating_enabled:
+        pending = ""
+        attach = (
+            "if(!card.querySelector('.rate4')){"
+            "card.appendChild(rate4Bar(query,sessionId,data.answer_id||null));}"
+        )
+        teardown = (
+            "const oldRate4=results.querySelector('.rate4');"
+            "if(oldRate4&&typeof oldRate4.rate4Teardown==='function'){"
+            "try{oldRate4.rate4Teardown();}catch(e){}}"
+        )
+    else:
+        pending = "a.appendChild(fbButtons('answer',null,null,sessionId));"
+        attach = ""
+        teardown = ""
+    return (
+        _SEARCH_JS.replace("/*ANSWER_RATING_PENDING*/", pending)
+        .replace("/*ANSWER_RATING_ATTACH*/", attach)
+        .replace("/*ANSWER_RATING_TEARDOWN*/", teardown)
+    )
 
 
 _GRAPH_STYLE = (
@@ -2763,6 +2995,7 @@ def _shell_page(email: str, *, mode: str) -> str:
     graph_active = " active" if boot == "graph" else ""
     list_hidden = " hidden" if boot == "graph" else ""
     graph_hidden = "" if boot == "graph" else " hidden"
+    search_js = _render_search_js(answer_rating_enabled=_envflag("CONNECT_ANSWER_RATING"))
     # リボン用インライン SVG グリフ（CDN 不要＝社内プロキシ下でも動く）。
     icon_list = (
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -2827,7 +3060,7 @@ def _shell_page(email: str, *, mode: str) -> str:
     scripts = (
         # __shellMode を先に立て、_GRAPH_JS の自動起動を抑止（シェルから遅延起動する）。
         "<script>window.__shellMode=true;</script>"
-        "<script>" + _SEARCH_JS + "</script>"
+        "<script>" + search_js + "</script>"
         "<script>" + _GRAPH_JS + "</script>"
         "<script>" + _SHELL_JS + "</script>"
         # 上級機能（パワー機能）はシェル/エンジンの後に乗せる（IIFE で隔離）。
@@ -3233,24 +3466,46 @@ def create_app(
         from teamagent.adapters.pgvector_client import PgVectorClient
 
         pg = PgVectorClient.from_env()
+        columns = ["user_email", "query", "target_type", "doc_id", "chunk_id", "rating", "note"]
+        values = [
+            row["user_email"],
+            row["query"],
+            row["target_type"],
+            row.get("doc_id"),
+            row.get("chunk_id"),
+            row["rating"],
+            row.get("note"),
+        ]
+        for column in ("score", "search_session_id", "answer_id"):
+            value = row.get(column)
+            if value is not None:
+                columns.append(column)
+                values.append(value)
         with pg.connection(app_role=app_role, user_email=row["user_email"]) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO search_feedback
-                      (user_email, query, target_type, doc_id, chunk_id, rating, note)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        row["user_email"],
-                        row["query"],
-                        row["target_type"],
-                        row.get("doc_id"),
-                        row.get("chunk_id"),
-                        row["rating"],
-                        row.get("note"),
-                    ),
-                )
+                # cur.execute は overloaded 署名のため、明示型の薄いラッパ経由で
+                # _execute_feedback_insert（Callable[[str, list[Any]], None] 期待）へ渡す。
+                def _run(sql: str, params: list[Any]) -> None:
+                    cur.execute(sql, params)
+
+                def _rollback_to_savepoint() -> None:
+                    cur.execute("ROLLBACK TO SAVEPOINT feedback_save")
+
+                if len(columns) > 7:
+                    # PostgreSQL は UndefinedColumn 後のtransactionを中断するため、旧列への
+                    # 再試行前に savepoint まで戻す。0022適用済みならそのまま release するだけ。
+                    cur.execute("SAVEPOINT feedback_save")
+                    try:
+                        _execute_feedback_insert(
+                            _run,
+                            columns,
+                            values,
+                            prepare_legacy_retry=_rollback_to_savepoint,
+                        )
+                    finally:
+                        cur.execute("RELEASE SAVEPOINT feedback_save")
+                else:
+                    _execute_feedback_insert(_run, columns, values)
             conn.commit()
 
     def _list_graph_docs(email: str, *, with_embeddings: bool = False) -> list[dict[str, Any]]:
@@ -3773,7 +4028,12 @@ def create_app(
             }
             for h in out.hits
         ]
-        return JSONResponse({"answer": out.answer, "hits": hits})
+        response: dict[str, Any] = {"answer": out.answer, "hits": hits}
+        # 要約評価の突合キー。要約を返した場合にだけ本文から決定論的に生成し、fast path
+        # （include_answer=False）および空要約の既存レスポンス形は変更しない。
+        if include_answer and out.answer:
+            response["answer_id"] = hashlib.sha256(out.answer.encode("utf-8")).hexdigest()[:16]
+        return JSONResponse(response)
 
     @app.post("/api/v1/feedback")
     async def api_feedback(request: Request) -> JSONResponse:
@@ -3788,12 +4048,24 @@ def create_app(
         target_type = str(payload.get("target_type", ""))
         if target_type not in ("answer", "chunk"):
             return JSONResponse({"error": "bad_target_type"}, status_code=400)
-        try:
-            rating = int(payload.get("rating"))
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "bad_rating"}, status_code=400)
-        if rating not in (-1, 1):
-            return JSONResponse({"error": "bad_rating"}, status_code=400)
+        score: int | None = None
+        if "score" in payload:
+            try:
+                score = int(payload["score"])
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "bad_score"}, status_code=400)
+            if score not in (1, 2, 3, 4):
+                return JSONResponse({"error": "bad_score"}, status_code=400)
+            if target_type != "answer":
+                return JSONResponse({"error": "bad_score_target"}, status_code=400)
+            rating = 1 if score >= 3 else -1
+        else:
+            try:
+                rating = int(payload.get("rating"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "bad_rating"}, status_code=400)
+            if rating not in (-1, 1):
+                return JSONResponse({"error": "bad_rating"}, status_code=400)
         query = str(payload.get("query", ""))[:1000]
         chunk_raw = payload.get("chunk_id")
         try:
@@ -3806,11 +4078,26 @@ def create_app(
             "user_email": email,
             "query": query,
             "target_type": target_type,
-            "doc_id": str(doc_id) if doc_id is not None else None,
+            "doc_id": str(doc_id)[:512] if doc_id is not None else None,
             "chunk_id": chunk_id,
             "rating": rating,
             "note": str(note)[:500] if note is not None else None,
         }
+        search_session_id = payload.get("search_session_id")
+        if search_session_id is not None:
+            search_session_id = str(search_session_id)[:64]
+            if not re.fullmatch(r"[A-Za-z0-9-]+", search_session_id):
+                search_session_id = None
+        row["search_session_id"] = search_session_id
+        answer_id = payload.get("answer_id")
+        if answer_id is not None:
+            answer_id = str(answer_id)[:32]
+            if not re.fullmatch(r"[0-9A-Fa-f]+", answer_id):
+                answer_id = None
+        row["answer_id"] = answer_id
+        row["score"] = score
+        if score is not None and _feedback_rate_limited(email):
+            return JSONResponse({"error": "rate_limited"}, status_code=429)
         try:
             _save_feedback(row)
         except Exception as exc:
