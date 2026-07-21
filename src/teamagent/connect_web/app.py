@@ -19,7 +19,8 @@ import logging
 import os
 import re
 import threading
-from collections import Counter
+import time
+from collections import Counter, deque
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
@@ -52,6 +53,39 @@ from teamagent.dashboard.auth import (
 from teamagent.dashboard.config import DashboardConfig
 
 logger = structlog.get_logger(__name__)
+
+
+_FEEDBACK_RATE_LIMIT = 30
+_FEEDBACK_RATE_WINDOW_S = 60.0
+_feedback_rate_windows: dict[str, deque[float]] = {}
+_feedback_rate_lock = threading.Lock()
+
+
+def _feedback_rate_limited(user_email: str) -> bool:
+    """評価送信がプロセス内スライディングウィンドウの上限を超えたかを返す。
+
+    プロセス再起動でリセットされる仕様（暴走クライアントの行増殖抑止が目的で、
+    厳密なレート制限は非ゴール）。リミッタ内部の失敗は fail-open とし、
+    評価の保存経路を止めない。
+    """
+    try:
+        now = time.monotonic()
+        with _feedback_rate_lock:
+            window = _feedback_rate_windows.setdefault(user_email, deque())
+            cutoff = now - _FEEDBACK_RATE_WINDOW_S
+            while window and window[0] <= cutoff:
+                window.popleft()
+            if len(window) >= _FEEDBACK_RATE_LIMIT:
+                return True
+            window.append(now)
+    except Exception as exc:
+        logger.warning(
+            "feedback_rate_limit_failed",
+            user_email=user_email,
+            error=type(exc).__name__,
+            detail=str(exc)[:200],
+        )
+    return False
 
 
 # Every route carries the same browser-facing baseline.  The application serves a large,
@@ -3180,23 +3214,27 @@ def create_app(
         from teamagent.adapters.pgvector_client import PgVectorClient
 
         pg = PgVectorClient.from_env()
+        columns = ["user_email", "query", "target_type", "doc_id", "chunk_id", "rating", "note"]
+        values = [
+            row["user_email"],
+            row["query"],
+            row["target_type"],
+            row.get("doc_id"),
+            row.get("chunk_id"),
+            row["rating"],
+            row.get("note"),
+        ]
+        for column in ("score", "search_session_id", "answer_id"):
+            value = row.get(column)
+            if value is not None:
+                columns.append(column)
+                values.append(value)
+        placeholders = ", ".join("%s" for _ in columns)
         with pg.connection(app_role=app_role, user_email=row["user_email"]) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO search_feedback
-                      (user_email, query, target_type, doc_id, chunk_id, rating, note)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        row["user_email"],
-                        row["query"],
-                        row["target_type"],
-                        row.get("doc_id"),
-                        row.get("chunk_id"),
-                        row["rating"],
-                        row.get("note"),
-                    ),
+                    f"INSERT INTO search_feedback ({', '.join(columns)}) VALUES ({placeholders})",
+                    values,
                 )
             conn.commit()
 
@@ -3734,12 +3772,24 @@ def create_app(
         target_type = str(payload.get("target_type", ""))
         if target_type not in ("answer", "chunk"):
             return JSONResponse({"error": "bad_target_type"}, status_code=400)
-        try:
-            rating = int(payload.get("rating"))
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "bad_rating"}, status_code=400)
-        if rating not in (-1, 1):
-            return JSONResponse({"error": "bad_rating"}, status_code=400)
+        score: int | None = None
+        if "score" in payload:
+            try:
+                score = int(payload["score"])
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "bad_score"}, status_code=400)
+            if score not in (1, 2, 3, 4):
+                return JSONResponse({"error": "bad_score"}, status_code=400)
+            if target_type != "answer":
+                return JSONResponse({"error": "bad_score_target"}, status_code=400)
+            rating = 1 if score >= 3 else -1
+        else:
+            try:
+                rating = int(payload.get("rating"))
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "bad_rating"}, status_code=400)
+            if rating not in (-1, 1):
+                return JSONResponse({"error": "bad_rating"}, status_code=400)
         query = str(payload.get("query", ""))[:1000]
         chunk_raw = payload.get("chunk_id")
         try:
@@ -3752,11 +3802,26 @@ def create_app(
             "user_email": email,
             "query": query,
             "target_type": target_type,
-            "doc_id": str(doc_id) if doc_id is not None else None,
+            "doc_id": str(doc_id)[:512] if doc_id is not None else None,
             "chunk_id": chunk_id,
             "rating": rating,
             "note": str(note)[:500] if note is not None else None,
         }
+        search_session_id = payload.get("search_session_id")
+        if search_session_id is not None:
+            search_session_id = str(search_session_id)[:64]
+            if not re.fullmatch(r"[A-Za-z0-9-]+", search_session_id):
+                search_session_id = None
+        row["search_session_id"] = search_session_id
+        answer_id = payload.get("answer_id")
+        if answer_id is not None:
+            answer_id = str(answer_id)[:32]
+            if not re.fullmatch(r"[0-9A-Fa-f]+", answer_id):
+                answer_id = None
+        row["answer_id"] = answer_id
+        row["score"] = score
+        if _feedback_rate_limited(email):
+            return JSONResponse({"error": "rate_limited"}, status_code=429)
         try:
             _save_feedback(row)
         except Exception as exc:
