@@ -58,12 +58,23 @@ def test_terraform_ci_proves_authoritative_lock_and_cache_free_offline_mirror() 
     offline_init = terraform_job.index(
         "terraform init -backend=false -input=false -lockfile=readonly"
     )
-    provider_inventory = terraform_job.index('required_providers="$(terraform providers')
+    provider_inventory = terraform_job.index(
+        'required_providers="$(grep -Ec \'^provider "registry\\.terraform\\.io/hashicorp/[a-z0-9_-]+"\' .terraform.lock.hcl)"'
+    )
     validate = terraform_job.index("terraform validate")
     assert mirror < offline_init < provider_inventory < validate
     assert "rm -rf .terraform provider-mirror" in terraform_job
     assert "rm -rf .terraform\n" in terraform_job
     assert terraform_job.count("find provider-mirror -type f") == 2
+    assert 'test "$required_providers" -gt 0' in terraform_job
+    assert (
+        "test \"$(find provider-mirror -type f -name '*_linux_amd64.zip' | wc -l)\" "
+        '-eq "$required_providers"'
+    ) in terraform_job
+    assert (
+        "test \"$(find provider-mirror -type f -name '*_linux_arm64.zip' | wc -l)\" "
+        '-eq "$required_providers"'
+    ) in terraform_job
     assert "${{ github.workspace }}/infra/terraform/ci.terraformrc" in terraform_job
 
     cli_config = (ROOT / "infra" / "terraform" / "ci.terraformrc").read_text()

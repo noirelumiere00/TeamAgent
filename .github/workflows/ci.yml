@@ -51,6 +51,7 @@ jobs:
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: 1.14.4
+          terraform_wrapper: false
 
       - name: Install dependencies
         run: |
@@ -112,6 +113,9 @@ jobs:
 
       - name: Mypy (strict)
         run: mypy src/teamagent
+
+      - name: Install TikTok scraper Node dependencies
+        run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
 
       - name: Pytest
         run: pytest tests/ -q --cov=teamagent --cov-report=term-missing
