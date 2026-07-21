@@ -769,7 +769,7 @@ function renderFilters(){
   x.onclick=()=>{activeIndustry=null;search();};
   f.appendChild(x);filters.appendChild(f);
 }
-function fbButtons(target,doc_id,chunk_id){
+function fbButtons(target,doc_id,chunk_id,sessionId){
   const wrap=document.createElement('div');wrap.className='fb';
   for(const r of [['👍',1,'on'],['👎',-1,'off']]){
     const b=document.createElement('button');b.type='button';b.textContent=r[0];
@@ -777,7 +777,8 @@ function fbButtons(target,doc_id,chunk_id){
       await fetch('/api/v1/feedback',{
         method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({query:lastQuery,target_type:target,
-          doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null})});
+          doc_id:doc_id,chunk_id:chunk_id,rating:r[1],note:null,
+          search_session_id:sessionId})});
       b.classList.add(r[2]);b.disabled=true;
     };
     wrap.appendChild(b);
@@ -1029,21 +1030,21 @@ async function fetchSearch(body,withAnswer,ctl){
   return resp.json();
 }
 // AI要約カード（プレースホルダ状態）。(b) 到着で .abody だけ差し替える。
-function renderAnswerPending(){
+function renderAnswerPending(sessionId){
   const a=document.createElement('div');a.className='answer';
   const h=document.createElement('h2');h.textContent='AI 要約';a.appendChild(h);
   const b=document.createElement('div');b.className='abody pending';
   b.textContent='AI要約を生成中…';a.appendChild(b);
-  a.appendChild(fbButtons('answer',null,null));
+  /*ANSWER_RATING_PENDING*/
   return a;
 }
 // (b) answer フェッチの結果を要約カードへ差し込む。(b) の hits は使わない
 // （(a) の描画を維持＝ちらつき防止）。失敗時は再試行ボタンで (b) だけ再実行。
-function attachAnswer(card,promise,body,ctl,gen){
+function attachAnswer(card,promise,body,ctl,gen,query,sessionId){
   const el=card.querySelector('.abody');
   promise.then(function(data){
     if(gen!==searchGen)return;
-    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;}
+    if(data&&data.answer){el.classList.remove('pending');el.textContent=data.answer;/*ANSWER_RATING_ATTACH*/}
     else{card.remove();}
   }).catch(function(e){
     if(e&&(e.name==='AbortError'||e.name==='UnauthorizedError'))return;
@@ -1055,12 +1056,13 @@ function attachAnswer(card,promise,body,ctl,gen){
     rb.onclick=function(){
       if(gen!==searchGen)return;
       el.classList.add('pending');el.textContent='AI要約を生成中…';
-      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen);
+      attachAnswer(card,fetchSearch(body,true,ctl),body,ctl,gen,query,sessionId);
     };
     el.appendChild(rb);
   });
 }
 async function search(){
+  const sessionId=crypto.randomUUID();
   const query=q.value.trim();if(!query)return;
   if(currentSearch)currentSearch.abort();
   const ctl=new AbortController();currentSearch=ctl;
@@ -1081,10 +1083,11 @@ async function search(){
   }
   if(gen!==searchGen)return;
   setSearching(false);
+  /*ANSWER_RATING_TEARDOWN*/
   results.textContent='';
-  const answerCard=renderAnswerPending();
+  const answerCard=renderAnswerPending(sessionId);
   results.appendChild(answerCard);
-  attachAnswer(answerCard,answerPromise,body,ctl,gen);
+  attachAnswer(answerCard,answerPromise,body,ctl,gen,query,sessionId);
   const terms=hlTerms(query);
   const hits=data.hits||[];
   if(!hits.length){renderEmpty(query);return;}
@@ -1130,7 +1133,7 @@ async function search(){
     const sc=document.createElement('span');sc.className='score';
     const sv=(typeof h.score==='number'?h.score.toFixed(3):h.score);
     sc.textContent='score '+sv;meta.appendChild(sc);
-    meta.appendChild(fbButtons('chunk',h.doc_id||null,h.chunk_id||null));
+    meta.appendChild(fbButtons('chunk',h.doc_id||null,h.chunk_id||null,sessionId));
     card.appendChild(meta);results.appendChild(card);
   }
 }
@@ -1145,6 +1148,34 @@ window.populateClientList=populateClientList;
 // 既に __facets が用意済（graph 先読み）なら即時充填も試みる（フック取りこぼし保険）。
 populateClientList();
 """
+
+
+def _render_search_js(*, answer_rating_enabled: bool) -> str:
+    """サーバサイドフラグが ON のときだけ評価UIの配線コードを JS に差し込む。
+
+    OFF 時は従来どおり answer 用 👍/👎 を pending カードへ出す（機能同一）。
+    フラグ値はクライアントへ env として露出せず、生成 JS の形でのみ反映される。
+    """
+    if answer_rating_enabled:
+        pending = ""
+        attach = (
+            "if(!card.querySelector('.rate4')){"
+            "card.appendChild(rate4Bar(query,sessionId,data.answer_id||null));}"
+        )
+        teardown = (
+            "const oldRate4=results.querySelector('.rate4');"
+            "if(oldRate4&&typeof oldRate4.rate4Teardown==='function'){"
+            "try{oldRate4.rate4Teardown();}catch(e){}}"
+        )
+    else:
+        pending = "a.appendChild(fbButtons('answer',null,null,sessionId));"
+        attach = ""
+        teardown = ""
+    return (
+        _SEARCH_JS.replace("/*ANSWER_RATING_PENDING*/", pending)
+        .replace("/*ANSWER_RATING_ATTACH*/", attach)
+        .replace("/*ANSWER_RATING_TEARDOWN*/", teardown)
+    )
 
 
 _GRAPH_STYLE = (
@@ -2862,6 +2893,7 @@ def _shell_page(email: str, *, mode: str) -> str:
     graph_active = " active" if boot == "graph" else ""
     list_hidden = " hidden" if boot == "graph" else ""
     graph_hidden = "" if boot == "graph" else " hidden"
+    search_js = _render_search_js(answer_rating_enabled=_envflag("CONNECT_ANSWER_RATING"))
     # リボン用インライン SVG グリフ（CDN 不要＝社内プロキシ下でも動く）。
     icon_list = (
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -2926,7 +2958,7 @@ def _shell_page(email: str, *, mode: str) -> str:
     scripts = (
         # __shellMode を先に立て、_GRAPH_JS の自動起動を抑止（シェルから遅延起動する）。
         "<script>window.__shellMode=true;</script>"
-        "<script>" + _SEARCH_JS + "</script>"
+        "<script>" + search_js + "</script>"
         "<script>" + _GRAPH_JS + "</script>"
         "<script>" + _SHELL_JS + "</script>"
         # 上級機能（パワー機能）はシェル/エンジンの後に乗せる（IIFE で隔離）。

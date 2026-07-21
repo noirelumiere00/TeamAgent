@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.connect_web.test_search_routes import _auth_cookie, _build
 
 
@@ -37,13 +39,41 @@ def test_answer_rating_widget_has_required_ui_markers() -> None:
     assert "credentials:'same-origin'" in html
 
 
-def test_answer_rating_widget_is_defined_but_not_wired_to_answer_card() -> None:
-    """T4a は rate4Bar 本体のみで、attachAnswer 等からはまだ呼び出さない。"""
+def test_answer_rating_widget_is_not_wired_to_answer_card_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既定OFFでは rate4Bar 本体だけを出し、従来の answer 👍/👎 を維持する。"""
+    monkeypatch.delenv("CONNECT_ANSWER_RATING", raising=False)
     html = _search_html()
 
     assert "function rate4Bar(query,sessionId,answerId){" in html
     assert html.count("rate4Bar(") == 1
     assert "rate4Teardown" in html
+    assert "/*ANSWER_RATING_" not in html
+
+
+def test_answer_rating_widget_is_wired_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ON 時だけ pending の answer 👍/👎 を外し、成功した要約へ評価UIを付ける。"""
+    monkeypatch.setenv("CONNECT_ANSWER_RATING", " yes ")
+    html = _search_html()
+
+    pending = html.split("function renderAnswerPending(sessionId){", 1)[1].split("return a;", 1)[0]
+    assert "fbButtons('answer'" not in pending
+    assert "if(!card.querySelector('.rate4')){" in html
+    assert "rate4Bar(query,sessionId,data.answer_id||null)" in html
+    assert "oldRate4.rate4Teardown()" in html
+    assert "try{oldRate4.rate4Teardown();}catch(e){}" in html
+
+
+def test_search_session_id_is_created_and_sent_for_chunk_feedback() -> None:
+    """各検索に UUID を採番し、既存 chunk 👍/👎 payload にも含める。"""
+    html = _search_html()
+
+    assert "const sessionId=crypto.randomUUID();" in html
+    assert "search_session_id:sessionId" in html
+    assert "fbButtons('chunk',h.doc_id||null,h.chunk_id||null,sessionId)" in html
 
 
 def test_answer_rating_widget_payload_always_contains_score_and_note() -> None:

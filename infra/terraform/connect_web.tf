@@ -23,6 +23,12 @@ variable "enable_connect_web" {
   default     = false
 }
 
+variable "connect_answer_rating" {
+  description = "既定OFFで AI 要約の4段階評価UIを非表示にする機能フラグ"
+  type        = bool
+  default     = false
+}
+
 variable "fargate_connect_cpu" {
   description = "connect-web タスク CPU (uvicorn FastAPI のみ＝軽量)"
   type        = number
@@ -402,6 +408,7 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
       { name = "CONNECT_WEB_HOST", value = "0.0.0.0" },
       { name = "CONNECT_WEB_PORT", value = "8788" },
+      { name = "CONNECT_ANSWER_RATING", value = var.connect_answer_rating ? "true" : "false" },
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
