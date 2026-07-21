@@ -113,7 +113,9 @@ def _install_fakes(
         transactions.append(payload)
         if fail_transaction:
             raise module.release.EvidenceError("conditional transaction failed")
-        assert len(payload) == 3
+        # The atomic transaction must persist the one-use authorization ledger
+        # alongside the lock, intent transition, and media consumption.
+        assert len(payload) == 4
         assert state[f"intent#{_INTENT}"]["state"] == "PREPARED"
         assert state[f"media-cutover#{_INTENT}"]["status"] == "READY"
         lock = module.release._decode_ddb_item(payload[0]["Put"]["Item"])
@@ -133,13 +135,19 @@ def _install_fakes(
                 "consumed_at_epoch": 2_000,
             }
         )
+        authorization = module.release._decode_ddb_item(payload[3]["Put"]["Item"])
+        state[str(authorization["record_id"])] = authorization
         return "{}"
 
     monkeypatch.setattr(module.release, "_aws", transact)
     return transactions
 
 
-def _authorize(state: dict[str, dict[str, str | int]]) -> dict[str, Any]:
+def _authorize(
+    state: dict[str, dict[str, str | int]],
+    *,
+    apply_attempt_id: str = _ATTEMPT,
+) -> dict[str, Any]:
     return module.authorize_media_apply(
         object(),
         plan_path=Path("/private/plan.tfplan"),
@@ -151,7 +159,7 @@ def _authorize(state: dict[str, dict[str, str | int]]) -> dict[str, Any]:
         image_deployment_intent_id=_INTENT,
         migration_contract_sha256=_MIGRATION_SHA,
         reviewed_plan_sha256=_REVIEWED_SHA,
-        apply_attempt_id=_ATTEMPT,
+        apply_attempt_id=apply_attempt_id,
         control_commit=_COMMIT,
     )
 
@@ -173,10 +181,16 @@ def test_authorization_consumes_media_intent_and_lock_atomically(
     assert set(transaction[0]) == {"Put"}
     assert set(transaction[1]) == {"Update"}
     assert set(transaction[2]) == {"Update"}
+    assert set(transaction[3]) == {"Put"}
     media_update = transaction[2]["Update"]
     assert ":ready" in media_update["ExpressionAttributeValues"]
     assert ":consumed" in media_update["ExpressionAttributeValues"]
     assert "attribute_not_exists(apply_attempt_id)" in media_update["ConditionExpression"]
+    authorization_put = transaction[3]["Put"]
+    assert authorization_put["ConditionExpression"] == "attribute_not_exists(record_id)"
+    assert module.release._decode_ddb_item(authorization_put["Item"])[
+        "record_id"
+    ] == module._authorization_record_id(_INTENT)
     assert state[f"media-cutover#{_INTENT}"]["status"] == "CONSUMED"
 
 
@@ -199,8 +213,11 @@ def test_consumed_media_cannot_authorize_a_second_attempt(
     _install_fakes(monkeypatch, state)
     _authorize(state)
 
-    with pytest.raises(module.AuthorizationError, match="READY"):
-        _authorize(state)
+    with pytest.raises(module.AuthorizationError, match="exact apply"):
+        _authorize(
+            state,
+            apply_attempt_id="87654321-4321-4cba-8fed-cba987654322",
+        )
 
 
 @pytest.mark.parametrize(
