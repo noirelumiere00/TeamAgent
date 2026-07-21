@@ -19,7 +19,7 @@ import time
 import uuid
 import zlib
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import boto3
 from botocore.config import Config
@@ -393,6 +393,12 @@ def _conditional_failure(exc: Exception) -> bool:
     return code == "ConditionalCheckFailedException"
 
 
+def _precondition_failure(exc: Exception) -> bool:
+    response = getattr(exc, "response", {})
+    code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+    return code in {"PreconditionFailed", "412"}
+
+
 def _definitive_run_task_rejection(exc: Exception) -> bool:
     """Return true only when ECS explicitly says no task was accepted.
 
@@ -570,6 +576,30 @@ def _validate_envelope(
     return spec
 
 
+def _validate_persisted_envelope(
+    body: str,
+    *,
+    expected_bucket: str,
+    max_artifact_ttl_s: int,
+) -> dict[str, Any]:
+    """Validate an immutable envelope without treating its age as corruption."""
+
+    try:
+        candidate = json.loads(body)
+        created = candidate["created_at_epoch_s"]
+        deadline = candidate["deadline_epoch_s"]
+    except (TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("persisted media request is invalid") from exc
+    if type(created) is not int or type(deadline) is not int:
+        raise ValueError("persisted media request timing is invalid")
+    return _validate_envelope(
+        body,
+        expected_bucket=expected_bucket,
+        now=max(created, deadline - 1),
+        max_artifact_ttl_s=max_artifact_ttl_s,
+    )
+
+
 def _mark_failed(
     table: str,
     target: dict[str, Any],
@@ -673,6 +703,197 @@ def _assert_owned_row(
         or (require_request and _ddb_string(item, "request_json") != _canonical(spec).decode())
     ):
         raise RuntimeError("media dispatch row ownership mismatch")
+
+
+def _expired_failure_detail(spec: dict[str, Any]) -> str:
+    return _canonical(
+        {
+            "schema_version": "1",
+            "job_id": spec["job_id"],
+            "status": "failed",
+            "artifacts": [],
+            "metadata": {"dispatcher": True, "reconciler": "expired-delivery"},
+            "error_code": "MEDIA_JOB_DEADLINE_EXCEEDED",
+        }
+    ).decode("utf-8")
+
+
+def _put_expired_terminal_row(
+    table: str,
+    spec: dict[str, Any],
+    *,
+    now: int,
+    invocation_deadline: int,
+) -> bool:
+    cleanup_at = max(
+        now,
+        int(spec["created_at_epoch_s"]) + int(spec["artifact_ttl_s"]),
+    )
+    hard_cleanup_at = max(cleanup_at, now + 60)
+    item: dict[str, Any] = {
+        "job_id": {"S": spec["job_id"]},
+        "idempotency_key": {"S": spec["idempotency_key"]},
+        "payload_sha256": {"S": spec["payload_sha256"]},
+        "request_json": {"S": _canonical(spec).decode("utf-8")},
+        "status": {"S": "failed"},
+        "version": {"N": "1"},
+        "active_consumers": {"N": "0"},
+        "consumer_guard_until": {"N": str(now)},
+        "created_at": {"N": str(spec["created_at_epoch_s"])},
+        "deadline": {"N": str(spec["deadline_epoch_s"])},
+        "output_prefix": {"S": spec["output_prefix"]},
+        "cleanup_at": {"N": str(cleanup_at)},
+        "hard_cleanup_at": {"N": str(hard_cleanup_at)},
+        "cleanup_status": {"S": "pending"},
+        "ttl": {"N": str(hard_cleanup_at + _DDB_RETENTION_GRACE_SECONDS)},
+        "detail": {"S": _expired_failure_detail(spec)},
+        "updated_at": {"N": str(now)},
+    }
+    if spec["audit_principal_hash"] is not None:
+        item["audit_principal_hash"] = {"S": spec["audit_principal_hash"]}
+    try:
+        _call(
+            "dynamodb",
+            "put_item",
+            invocation_deadline,
+            TableName=table,
+            Item=item,
+            ConditionExpression="attribute_not_exists(job_id)",
+        )
+        return True
+    except Exception as exc:
+        if _conditional_failure(exc):
+            return False
+        raise
+
+
+def _terminalize_expired_row(
+    table: str,
+    spec: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    now: int,
+    invocation_deadline: int,
+) -> None:
+    _assert_owned_row(item, spec)
+    status = _ddb_string(item, "status")
+    if status in {"done", "failed"}:
+        return
+    if status not in {"queued", "running"}:
+        raise RuntimeError("expired media job row has invalid status")
+    version = _ddb_int(item, "version")
+    row_deadline = _ddb_int(item, "deadline")
+    if row_deadline != spec["deadline_epoch_s"]:
+        raise RuntimeError("expired media job deadline ownership mismatch")
+    values: dict[str, Any] = {
+        ":status": {"S": status},
+        ":failed": {"S": "failed"},
+        ":version": {"N": str(version)},
+        ":deadline": {"N": str(row_deadline)},
+        ":request_json": {"S": _canonical(spec).decode("utf-8")},
+        ":payload": {"S": spec["payload_sha256"]},
+        ":idempotency": {"S": spec["idempotency_key"]},
+        ":detail": {"S": _expired_failure_detail(spec)},
+        ":now": {"N": str(now)},
+        ":cleanup": {"N": str(now)},
+        ":pending": {"S": "pending"},
+        ":one": {"N": "1"},
+    }
+    if spec["audit_principal_hash"] is not None:
+        values[":audit"] = {"S": spec["audit_principal_hash"]}
+    try:
+        _call(
+            "dynamodb",
+            "update_item",
+            invocation_deadline,
+            TableName=table,
+            Key={"job_id": {"S": spec["job_id"]}},
+            UpdateExpression=(
+                "SET #status = :failed, detail = :detail, updated_at = :now, "
+                "cleanup_at = if_not_exists(cleanup_at, :cleanup), "
+                "cleanup_status = :pending "
+                "REMOVE dispatch_owner, dispatch_lease_expires_at, lease_owner, "
+                "lease_expires_at, attempt_id ADD #version :one"
+            ),
+            ConditionExpression=(
+                "#status = :status AND #version = :version AND deadline = :deadline AND "
+                "request_json = :request_json AND payload_sha256 = :payload AND "
+                "idempotency_key = :idempotency AND "
+                f"{_audit_condition(spec['audit_principal_hash'])}"
+            ),
+            ExpressionAttributeNames={"#status": "status", "#version": "version"},
+            ExpressionAttributeValues=values,
+        )
+        return
+    except Exception as exc:
+        if not _conditional_failure(exc):
+            raise
+    current = _call(
+        "dynamodb",
+        "get_item",
+        invocation_deadline,
+        TableName=table,
+        Key={"job_id": {"S": spec["job_id"]}},
+        ConsistentRead=True,
+    ).get("Item", {})
+    _assert_owned_row(current, spec)
+    if (
+        _ddb_int(current, "deadline") == spec["deadline_epoch_s"]
+        and _ddb_string(current, "status") in {"done", "failed"}
+    ):
+        return
+    raise RuntimeError("expired media job terminal transition lost exact row fence")
+
+
+def _ack_expired_delivery(
+    table: str,
+    bucket: str,
+    body: str,
+    *,
+    now: int,
+    invocation_deadline: int,
+    max_artifact_ttl_s: int,
+) -> None:
+    """Acknowledge only a digest-proven expired request with durable state."""
+
+    spec = _validate_persisted_envelope(
+        body,
+        expected_bucket=bucket,
+        max_artifact_ttl_s=max_artifact_ttl_s,
+    )
+    item = _call(
+        "dynamodb",
+        "get_item",
+        invocation_deadline,
+        TableName=table,
+        Key={"job_id": {"S": spec["job_id"]}},
+        ConsistentRead=True,
+    ).get("Item", {})
+    if not item and _put_expired_terminal_row(
+        table,
+        spec,
+        now=now,
+        invocation_deadline=invocation_deadline,
+    ):
+        return
+    if not item:
+        item = _call(
+            "dynamodb",
+            "get_item",
+            invocation_deadline,
+            TableName=table,
+            Key={"job_id": {"S": spec["job_id"]}},
+            ConsistentRead=True,
+        ).get("Item", {})
+    if not item:
+        raise RuntimeError("expired media job authoritative row is missing")
+    _terminalize_expired_row(
+        table,
+        spec,
+        item,
+        now=now,
+        invocation_deadline=invocation_deadline,
+    )
 
 
 def _ensure_queued_row(

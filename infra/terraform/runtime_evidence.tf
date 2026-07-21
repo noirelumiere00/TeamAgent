@@ -516,6 +516,33 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
     }
   }
 
+  statement {
+    sid = "AtomicallyFinalizeExactDeployment"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:TransactWriteItems",
+    ]
+    resources = [aws_dynamodb_table.image_deployment_intents.arn]
+
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values = [
+        "apply-finalization#*",
+        "apply-finalization-chunk#*",
+        "ecs-service-apply#*",
+        "intent#*",
+        "lock#teamagent/terraform.tfstate",
+      ]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+  }
+
   # The runtime session executes the deployment-intent helper directly. It
   # receives the helper's exact read/verify/ledger surface here instead of
   # chaining into a second role.

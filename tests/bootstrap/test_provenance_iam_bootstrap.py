@@ -1699,9 +1699,14 @@ def test_wrappers_verify_fresh_detached_transitive_checkout_before_sts() -> None
     } <= set(WRAPPER_PROVENANCE.PROFILE_CHILDREN["provenance-session"])
     assert {
         "infra/deploy/bootstrap_runtime_session.sh",
+        "infra/deploy/deployment_apply_finalizer.py",
+        "infra/deploy/media_cutover_apply_authorizer.py",
         "infra/deploy/terraform_runtime_guard.sh",
+        "infra/deploy/terraform_plan_contract.py",
         "infra/deploy/run_image_deployment_gate.sh",
         "infra/codebuild/release_evidence.py",
+        "infra/terraform/ecs_service_apply_saga.py",
+        "infra/terraform/eventbridge_apply_saga.py",
     } <= set(WRAPPER_PROVENANCE.PROFILE_CHILDREN["runtime-session"])
 
 

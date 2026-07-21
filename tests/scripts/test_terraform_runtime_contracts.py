@@ -1219,7 +1219,9 @@ def test_ci_contract_forbids_direct_terraform_mutation_scripts() -> None:
     assert 'verify_receipt "$PLAN" "$RECEIPT"' in guard
     assert '"$TMP_ROOT/verify/plan.tfplan"' in guard
     assert "terraform-runtime-apply-receipt" in guard
-    assert 'ln "$APPLY_STAGE" "$APPLY_RECEIPT"' in guard
+    assert 'python3 "$DEPLOYMENT_APPLY_FINALIZER" commit' in guard
+    assert "--eventbridge-verification" in guard
+    assert "--ecs-verification" in guard
     assert "-auto-approve" not in guard
     for retired in ("apply_openclaw.sh", "apply_resilience.sh"):
         body = (TF_ROOT / retired).read_text(encoding="utf-8")
@@ -1300,9 +1302,17 @@ def test_provider_lock_is_git_receipted_and_has_official_cross_platform_hashes()
 
 def test_runtime_ledger_leading_key_allows_require_key_presence() -> None:
     evidence = (TF_ROOT / "runtime_evidence.tf").read_text(encoding="utf-8")
-    assert evidence.count('variable = "dynamodb:LeadingKeys"') == 5
-    assert evidence.count('test     = "Null"') >= 2
-    assert evidence.count('values   = ["false"]') >= 2
+    null_checks = evidence.count('test     = "Null"')
+    assert null_checks >= 5
+    assert evidence.count('values   = ["false"]') == null_checks
+    assert evidence.count('variable = "dynamodb:LeadingKeys"') > null_checks
+    for expected in (
+        'sid = "AtomicallyFinalizeExactDeployment"',
+        '"apply-finalization#*"',
+        '"apply-finalization-chunk#*"',
+        '"ecs-service-apply#*"',
+    ):
+        assert expected in evidence
 
 
 def test_quarantine_codebuild_is_active_but_cannot_publish_a_release() -> None:

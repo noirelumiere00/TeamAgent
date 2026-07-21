@@ -1465,29 +1465,29 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         revision_gate,
     )
     service_probe = apply_case.index("run_post_apply_service_probe")
-    eventbridge_applied = apply_case.index(
-        'python3 "$EVENTBRIDGE_APPLY_SAGA" finish',
+    eventbridge_verified = apply_case.index(
+        'python3 "$EVENTBRIDGE_APPLY_SAGA" verify',
         rollout_call,
     )
-    ecs_applied = apply_case.index(
-        'python3 "$ECS_SERVICE_APPLY_SAGA" finish',
-        eventbridge_applied,
+    ecs_verified = apply_case.index(
+        'python3 "$ECS_SERVICE_APPLY_SAGA" verify',
+        eventbridge_verified,
     )
-    intent_applied = apply_case.index(
-        'bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome',
-        ecs_applied,
+    heartbeat_stop_before_finalize = apply_case.index(
+        "stop_gate_heartbeat",
+        ecs_verified,
     )
-    lock_release = apply_case.index(
-        'bash "$IMAGE_GATE_RUNNER" release-deployment-lock',
-        intent_applied,
+    composite_finalize = apply_case.index(
+        'python3 "$DEPLOYMENT_APPLY_FINALIZER" commit',
+        heartbeat_stop_before_finalize,
     )
     assert (
         service_probe
         < rollout_call
-        < eventbridge_applied
-        < ecs_applied
-        < intent_applied
-        < lock_release
+        < eventbridge_verified
+        < ecs_verified
+        < heartbeat_stop_before_finalize
+        < composite_finalize
     )
     assert apply_case.index("--restore-and-verify") < revision_gate < rollout_call
     assert apply_case.index('OPENCLAW_POST_APPLY_STARTED="true"') < rollout_call
@@ -1503,19 +1503,21 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert apply_case.index('rm -f "$STAGED_PLAN"') < ecs_begin
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
-    assert ".schema_version == 6" in apply_case
+    assert ".schema_version == 7" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
     assert "post_apply_service_probe_sha256" in apply_case
     assert "ecs_service_saga_receipt_sha256" in apply_case
+    assert "deployment_finalization_receipt_sha256" in apply_case
+    assert "eventbridge_apply_saga_verification_receipt" in apply_case
     cleanup = apply_case[
         apply_case.index("cleanup_apply_command()") : apply_case.index(
             "trap 'cleanup_apply_command' EXIT"
         )
     ]
+    recovery_probe = cleanup.index("recover_committed_finalization")
     ecs_restore = cleanup.index('python3 "$ECS_SERVICE_APPLY_SAGA" finish')
-    heartbeat_stop = cleanup.index("stop_gate_heartbeat")
     lock_cleanup = cleanup.index('bash "$IMAGE_GATE_RUNNER" release-deployment-lock')
-    assert ecs_restore < heartbeat_stop < lock_cleanup
+    assert recovery_probe < ecs_restore < lock_cleanup
 
     probe = guard[
         guard.index("run_post_apply_service_probe()") : guard.index("\nwrite_preflight_receipt()")

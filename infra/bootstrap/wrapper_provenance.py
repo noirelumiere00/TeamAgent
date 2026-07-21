@@ -86,13 +86,17 @@ PROFILE_CHILDREN = {
         "infra/bootstrap/wrapper_provenance.py",
         "infra/codebuild/release_evidence.py",
         "infra/deploy/bootstrap_runtime_session.sh",
+        "infra/deploy/deployment_apply_finalizer.py",
+        "infra/deploy/media_cutover_apply_authorizer.py",
         "infra/deploy/run_image_deployment_gate.sh",
         "infra/deploy/runtime_evidence_guard.py",
+        "infra/deploy/terraform_plan_contract.py",
         "infra/deploy/terraform_runtime_guard.jq",
         "infra/deploy/terraform_runtime_guard.sh",
         "infra/deploy/terraform_runtime_migrations.json",
         "infra/openclaw/effective-tool-scope.json",
         "infra/openclaw/run-live-rollout-gates.mjs",
+        "infra/terraform/ecs_service_apply_saga.py",
         "infra/terraform/eventbridge_apply_saga.py",
         "infra/terraform/image_release_context.py",
         "infra/terraform/stage_saved_plan.py",
@@ -134,19 +138,16 @@ def _git_env(source: dict[str, str]) -> dict[str, str]:
     present = sorted(name for name in CREDENTIAL_ENV if source.get(name))
     if present:
         raise ProvenanceError(
-            "wrapper provenance must run without credential selectors: "
-            + ", ".join(present)
+            "wrapper provenance must run without credential selectors: " + ", ".join(present)
         )
     influential = sorted(
         name
         for name in source
-        if name in INFLUENTIAL_GIT_ENV
-        or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
+        if name in INFLUENTIAL_GIT_ENV or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))
     )
     if influential:
         raise ProvenanceError(
-            "wrapper provenance rejects influential Git environment: "
-            + ", ".join(influential)
+            "wrapper provenance rejects influential Git environment: " + ", ".join(influential)
         )
     result = dict(source)
     result.update(
@@ -194,8 +195,7 @@ def _assert_safe_config(repo_root: Path, env: dict[str, str]) -> None:
     ]
     if unsafe:
         raise ProvenanceError(
-            "local Git configuration can redirect provenance: "
-            + ", ".join(sorted(set(unsafe)))
+            "local Git configuration can redirect provenance: " + ", ".join(sorted(set(unsafe)))
         )
 
 
@@ -335,24 +335,28 @@ def prepare(
     )
     if not SHA1_RE.fullmatch(commit) or tracking_commit != commit:
         raise ProvenanceError("detached HEAD is not the exact local origin/dev commit")
-    remote_lines = _run(
-        [
-            "git",
-            "-c",
-            "credential.helper=",
-            "-c",
-            "http.followRedirects=false",
-            "-c",
-            "http.sslVerify=true",
-            "ls-remote",
-            "--exit-code",
-            "--heads",
-            EXPECTED_REMOTE,
-            EXPECTED_REF,
-        ],
-        cwd=repo_root,
-        env=env,
-    ).stdout.decode("utf-8").splitlines()
+    remote_lines = (
+        _run(
+            [
+                "git",
+                "-c",
+                "credential.helper=",
+                "-c",
+                "http.followRedirects=false",
+                "-c",
+                "http.sslVerify=true",
+                "ls-remote",
+                "--exit-code",
+                "--heads",
+                EXPECTED_REMOTE,
+                EXPECTED_REF,
+            ],
+            cwd=repo_root,
+            env=env,
+        )
+        .stdout.decode("utf-8")
+        .splitlines()
+    )
     exact = [line.split() for line in remote_lines if line.split()[1:] == [EXPECTED_REF]]
     if len(exact) != 1 or exact[0][0] != commit:
         raise ProvenanceError("detached HEAD is not the fresh protected origin/dev commit")
@@ -362,9 +366,7 @@ def prepare(
         env=env,
         verify_worktree=True,
     )
-    missing_children = [
-        child for child in PROFILE_CHILDREN[profile] if child not in source_hashes
-    ]
+    missing_children = [child for child in PROFILE_CHILDREN[profile] if child not in source_hashes]
     if missing_children:
         raise ProvenanceError(
             "transitive wrapper child is not tracked: " + ", ".join(missing_children)
@@ -378,9 +380,7 @@ def prepare(
         or parent_stat.st_uid != os.getuid()
         or stat.S_IMODE(parent_stat.st_mode) != 0o700
     ):
-        raise ProvenanceError(
-            "reviewed checkout and receipt require the same owned 0700 parent"
-        )
+        raise ProvenanceError("reviewed checkout and receipt require the same owned 0700 parent")
     if receipt_path.exists() or receipt_path.is_symlink():
         raise ProvenanceError("wrapper provenance receipt path must not exist")
     if checkout_dir.exists() or checkout_dir.is_symlink():
@@ -447,12 +447,9 @@ def prepare(
         env=env,
         verify_worktree=True,
     )
-    child_hashes = {
-        child: reviewed_hashes[child] for child in PROFILE_CHILDREN[profile]
-    }
-    if (
-        reviewed_tree_sha256 != tree_sha256
-        or any(child_hashes[child] != source_hashes[child] for child in child_hashes)
+    child_hashes = {child: reviewed_hashes[child] for child in PROFILE_CHILDREN[profile]}
+    if reviewed_tree_sha256 != tree_sha256 or any(
+        child_hashes[child] != source_hashes[child] for child in child_hashes
     ):
         raise ProvenanceError("transitive child hashes changed in reviewed checkout")
 
@@ -470,8 +467,7 @@ def prepare(
         "detached": True,
     }
     data = (
-        json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
+        json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
     descriptor = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "wb") as handle:

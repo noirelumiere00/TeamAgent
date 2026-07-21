@@ -34,6 +34,9 @@ _CLUSTER_ARN = f"arn:aws:ecs:{_REGION}:{_ACCOUNT_ID}:cluster/{_CLUSTER_NAME}"
 _TABLE_NAME = "teamagent-dev-image-deployment-intents"
 _RECORD_PREFIX = "ecs-service-apply#"
 _RECORD_TYPE = "teamagent.ecs-service-apply-saga"
+_ACTIVE_RECORD_ID = f"{_RECORD_PREFIX}active#teamagent-dev-mcp-connect-web"
+_ACTIVE_RECORD_TYPE = "teamagent.ecs-service-apply-saga-active"
+_SCOPE_ID = "teamagent-dev-mcp-connect-web"
 _SCHEMA_VERSION = 1
 _MAX_PLAN_BYTES = 4 * 1024 * 1024 * 1024
 _MAX_RECORD_BYTES = 350_000
@@ -879,6 +882,29 @@ _RECORD_FIELDS = frozenset(
         "record_type",
         "schema_version",
         "stage",
+    }
+)
+_ACTIVE_RECORD_FIELDS = frozenset(
+    {
+        "apply_attempt_id",
+        "attempt_record_id",
+        "baseline_sha256",
+        "plan_sha256",
+        "planned_sha256",
+        "record_id",
+        "record_type",
+        "schema_version",
+        "scope_id",
+        "stage",
+    }
+)
+_LEDGER_STAGES = frozenset({"APPLYING", "APPLIED", "RESTORED"})
+_RECEIPT_STAGES = frozenset(
+    {
+        "APPLYING",
+        "VERIFIED_APPLIED",
+        "APPLIED",
+        "RESTORED",
     }
 )
 

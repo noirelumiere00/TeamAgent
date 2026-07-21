@@ -14,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="23"
+GUARD_VERSION="24"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -46,6 +46,7 @@ GUARD_JQ="$GUARD_JQ_DIR/terraform_runtime_guard.jq"
 MIGRATION_FILE="$GUARD_JQ_DIR/terraform_runtime_migrations.json"
 EVIDENCE_HELPER="$GUARD_JQ_DIR/runtime_evidence_guard.py"
 MEDIA_APPLY_AUTHORIZER="$GUARD_JQ_DIR/media_cutover_apply_authorizer.py"
+DEPLOYMENT_APPLY_FINALIZER="$GUARD_JQ_DIR/deployment_apply_finalizer.py"
 PLAN_CONTRACT_HELPER="$GUARD_JQ_DIR/terraform_plan_contract.py"
 IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
@@ -251,6 +252,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$MIGRATION_FILE"
   assert_regular_nonwritable "$EVIDENCE_HELPER"
   assert_regular_nonwritable "$MEDIA_APPLY_AUTHORIZER"
+  assert_regular_nonwritable "$DEPLOYMENT_APPLY_FINALIZER"
   assert_regular_nonwritable "$PLAN_CONTRACT_HELPER"
   assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
@@ -266,6 +268,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$MIGRATION_FILE"
   assert_git_tracked_clean "$EVIDENCE_HELPER"
   assert_git_tracked_clean "$MEDIA_APPLY_AUTHORIZER"
+  assert_git_tracked_clean "$DEPLOYMENT_APPLY_FINALIZER"
   assert_git_tracked_clean "$PLAN_CONTRACT_HELPER"
   assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
@@ -312,12 +315,17 @@ write_config_manifest() {
     "$MIGRATION_FILE" \
     "$EVIDENCE_HELPER" \
     "$MEDIA_APPLY_AUTHORIZER" \
+    "$DEPLOYMENT_APPLY_FINALIZER" \
     "$PLAN_CONTRACT_HELPER" \
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
     "$IMAGE_CONTEXT_HELPER" \
     "$APPLY_SUPERVISOR" \
-    "$ECS_SERVICE_APPLY_SAGA"; do
+    "$PLAN_STAGER" \
+    "$EVENTBRIDGE_APPLY_SAGA" \
+    "$ECS_SERVICE_APPLY_SAGA" \
+    "$HMAC_PLAN_HELPER" \
+    "$OPENCLAW_ROLLOUT_GATE"; do
     if [ "$migration_mode" = "exclude" ] &&
        [ "$path" = "$MIGRATION_FILE" ]; then
       continue
@@ -4174,6 +4182,47 @@ validate_ecs_service_saga_receipt() {
     die "durable ECS service saga receipt hashが不正です"
 }
 
+validate_eventbridge_saga_receipt() {
+  local receipt="$1" expected_stage="$2"
+  jq -e \
+    --arg stage "$expected_stage" \
+    --arg attempt "$APPLY_ATTEMPT_ID" \
+    --arg plan "$STAGED_PLAN_SHA256" '
+    (keys | sort) == ([
+      "apply_attempt_id",
+      "baseline_sha256",
+      "kind",
+      "ledger_item_sha256",
+      "plan_sha256",
+      "planned_sha256",
+      "receipt_sha256",
+      "record_id",
+      "rotation_epoch",
+      "schema_version",
+      "stage",
+      "verified_at"
+    ] | sort) and
+    .kind == "teamagent-eventbridge-apply-saga-receipt" and
+    .schema_version == 2 and
+    .record_id ==
+      ("ecs-service-apply#eventbridge#active#" + .rotation_epoch) and
+    (.rotation_epoch | type == "string" and length > 0) and
+    .stage == $stage and
+    .plan_sha256 == $plan and
+    .apply_attempt_id == $attempt and
+    (.baseline_sha256 | test("^[0-9a-f]{64}$")) and
+    (.planned_sha256 | test("^[0-9a-f]{64}$")) and
+    (.ledger_item_sha256 | test("^[0-9a-f]{64}$")) and
+    (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
+    (.verified_at | type == "number" and floor == . and . > 0)
+  ' "$receipt" >/dev/null ||
+    die "durable EventBridge saga receiptがplan/attempt/stageと不一致です"
+  [ "$(jq -j -cS 'del(.receipt_sha256)' "$receipt" | sha256_text)" = "$(
+    jq -er '.receipt_sha256' "$receipt"
+  )" ] ||
+    die "durable EventBridge saga receipt hashが不正です"
+}
+
 # Terraform precondition へ渡す、live 由来の non-secret object。
 core_from_snapshot() {
   local snapshot="$1"
@@ -7490,6 +7539,9 @@ verify_required_migration_apply_receipt() {
   local embedded_service_probe="$TMP_ROOT/prior-service-probe-embedded-$RANDOM.json"
   local embedded_media_authorization="$TMP_ROOT/prior-media-authorization-embedded-$RANDOM.json"
   local embedded_ecs_saga="$TMP_ROOT/prior-ecs-saga-embedded-$RANDOM.json"
+  local embedded_ecs_saga_verification="$TMP_ROOT/prior-ecs-saga-verification-embedded-$RANDOM.json"
+  local embedded_eventbridge_verification="$TMP_ROOT/prior-eventbridge-verification-embedded-$RANDOM.json"
+  local embedded_finalization="$TMP_ROOT/prior-deployment-finalization-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
   receipt_commit="$(
     jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
@@ -7502,12 +7554,18 @@ verify_required_migration_apply_receipt() {
   capture_complete_runtime_inventory "$runtime_inventory"
   jq -S -c '.bedrock_retention_live' "$receipt" > "$embedded_retention"
   jq -S -c '.shared_deployment_lock_receipt' "$receipt" > "$embedded_lock"
-  jq -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
+  jq -j -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
   jq -S -c '.openclaw_rollout_result' "$receipt" > "$embedded_rollout"
   jq -S -c '.post_apply_service_probe' "$receipt" > "$embedded_service_probe"
   jq -S -c '.media_apply_authorization' "$receipt" \
     > "$embedded_media_authorization"
-  jq -S -c '.ecs_service_saga_receipt' "$receipt" > "$embedded_ecs_saga"
+  jq -j -S -c '.ecs_service_saga_receipt' "$receipt" > "$embedded_ecs_saga"
+  jq -j -S -c '.ecs_service_saga_verification_receipt' "$receipt" \
+    > "$embedded_ecs_saga_verification"
+  jq -j -S -c '.eventbridge_apply_saga_verification_receipt' "$receipt" \
+    > "$embedded_eventbridge_verification"
+  jq -j -S -c '.deployment_finalization_receipt' "$receipt" \
+    > "$embedded_finalization"
   [ "$(sha256_file "$embedded_retention")" = \
     "$(jq -er '.bedrock_retention_live_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_lock")" = \
@@ -7521,7 +7579,13 @@ verify_required_migration_apply_receipt() {
     [ "$(sha256_file "$embedded_media_authorization")" = \
       "$(jq -er '.media_apply_authorization_sha256' "$receipt")" ] &&
     [ "$(sha256_file "$embedded_ecs_saga")" = \
-      "$(jq -er '.ecs_service_saga_receipt_sha256' "$receipt")" ] ||
+      "$(jq -er '.ecs_service_saga_receipt_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_ecs_saga_verification")" = \
+      "$(jq -er '.ecs_service_saga_verification_receipt_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_eventbridge_verification")" = \
+      "$(jq -er '.eventbridge_apply_saga_verification_receipt_sha256' "$receipt")" ] &&
+    [ "$(sha256_file "$embedded_finalization")" = \
+      "$(jq -er '.deployment_finalization_receipt_sha256' "$receipt")" ] ||
     die "prior apply receiptのembedded evidence hash bindingが不正です"
   if [ "$(jq -er '.openclaw_rollout_result.required' "$receipt")" = "true" ]; then
     jq -S -c '.openclaw_rollout_result.persistedResult' "$receipt" \
@@ -7555,8 +7619,14 @@ verify_required_migration_apply_receipt() {
       "apply_attempt_id",
       "bedrock_retention_live",
       "bedrock_retention_live_sha256",
+      "deployment_finalization_receipt",
+      "deployment_finalization_receipt_sha256",
       "ecs_service_saga_receipt",
       "ecs_service_saga_receipt_sha256",
+      "ecs_service_saga_verification_receipt",
+      "ecs_service_saga_verification_receipt_sha256",
+      "eventbridge_apply_saga_verification_receipt",
+      "eventbridge_apply_saga_verification_receipt_sha256",
       "git_commit",
       "guard_version",
       "image_deployment_intent_id",
@@ -7594,7 +7664,7 @@ verify_required_migration_apply_receipt() {
       "versioning_receipt_sha256"
     ] | sort) and
     .kind == "terraform-runtime-apply-receipt" and
-    .schema_version == 6 and
+    .schema_version == 7 and
     .guard_version == $version and
     .account_id == $account and .region == $region and
     (.git_commit | test("^[0-9a-f]{40}$")) and
@@ -7635,6 +7705,62 @@ verify_required_migration_apply_receipt() {
     .ecs_service_saga_receipt.stage == "APPLIED" and
     .ecs_service_saga_receipt.apply_attempt_id == .apply_attempt_id and
     .ecs_service_saga_receipt.plan_sha256 == .plan_sha256 and
+    (.ecs_service_saga_verification_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .ecs_service_saga_verification_receipt.kind ==
+      "teamagent-ecs-service-apply-saga-receipt" and
+    .ecs_service_saga_verification_receipt.stage ==
+      "VERIFIED_APPLIED" and
+    .ecs_service_saga_verification_receipt.apply_attempt_id ==
+      .apply_attempt_id and
+    .ecs_service_saga_verification_receipt.plan_sha256 ==
+      .plan_sha256 and
+    (.eventbridge_apply_saga_verification_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .eventbridge_apply_saga_verification_receipt.kind ==
+      "teamagent-eventbridge-apply-saga-receipt" and
+    .eventbridge_apply_saga_verification_receipt.stage ==
+      "verified_applied" and
+    .eventbridge_apply_saga_verification_receipt.apply_attempt_id ==
+      .apply_attempt_id and
+    .eventbridge_apply_saga_verification_receipt.plan_sha256 ==
+      .plan_sha256 and
+    (.deployment_finalization_receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .deployment_finalization_receipt.kind ==
+      "teamagent-deployment-apply-finalization-receipt" and
+    .deployment_finalization_receipt.state == "APPLIED" and
+    .deployment_finalization_receipt.record_id ==
+      ("apply-finalization#" + .image_deployment_intent_id) and
+    .deployment_finalization_receipt.intent_id ==
+      .image_deployment_intent_id and
+    .deployment_finalization_receipt.apply_attempt_id ==
+      .apply_attempt_id and
+    .deployment_finalization_receipt.plan_sha256 == .plan_sha256 and
+    .deployment_finalization_receipt.ecs_attempt_record_id ==
+      .ecs_service_saga_receipt.record_id and
+    .deployment_finalization_receipt.ecs_active_record_id ==
+      "ecs-service-apply#active#teamagent-dev-mcp-connect-web" and
+    .deployment_finalization_receipt.eventbridge_record_id ==
+      .eventbridge_apply_saga_verification_receipt.record_id and
+    .deployment_finalization_receipt.ecs_verification_receipt_sha256 ==
+      .ecs_service_saga_verification_receipt.receipt_sha256 and
+    .deployment_finalization_receipt.eventbridge_verification_receipt_sha256 ==
+      .eventbridge_apply_saga_verification_receipt.receipt_sha256 and
+    (.deployment_finalization_receipt.apply_receipt_draft_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.deployment_finalization_receipt.ecs_attempt_terminal_ledger_item_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.deployment_finalization_receipt.ecs_active_terminal_ledger_item_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.deployment_finalization_receipt.eventbridge_terminal_ledger_item_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    (.deployment_finalization_receipt.receipt_sha256 |
+      test("^[0-9a-f]{64}$")) and
+    .deployment_finalization_receipt.applied_at_epoch ==
+      .eventbridge_apply_saga_verification_receipt.verified_at and
+    .applied_at_epoch ==
+      .deployment_finalization_receipt.applied_at_epoch and
     (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
     .openclaw_rollout_result.schemaVersion == 2 and
     .openclaw_rollout_result.passed == true and
@@ -10144,6 +10270,43 @@ case "$COMMAND" in
       die "staged saved planのdigestが一致しません"
     STAGED_PLAN_IDENTITY="$(stat_identity "$STAGED_PLAN")"
     PLAN="$STAGED_PLAN"
+    RECOVERY_INTENT_ID="$(
+      jq -er '.image_deployment_intent_id' "$RECEIPT"
+    )" || die "plan receiptのdeployment intent IDが不正です"
+    RECOVERY_RESULT="$TMP_ROOT/deployment-finalization-recovery.json"
+    RECOVERY_ERROR="$TMP_ROOT/deployment-finalization-recovery.err"
+    if python3 "$DEPLOYMENT_APPLY_FINALIZER" recover \
+      --aws-bin "$AWS_BIN" \
+      --intent-id "$RECOVERY_INTENT_ID" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --out "$APPLY_RECEIPT" > "$RECOVERY_RESULT" 2> "$RECOVERY_ERROR"; then
+      jq -e \
+        --arg intent "$RECOVERY_INTENT_ID" \
+        --arg plan "$STAGED_PLAN_SHA256" '
+        .ok == true and
+        .state == "RECOVERED" and
+        .intent_id == $intent and
+        .plan_sha256 == $plan and
+        (.apply_attempt_id |
+          test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+        (.apply_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+        (.deployment_finalization_receipt_sha256 |
+          test("^[0-9a-f]{64}$"))
+      ' "$RECOVERY_RESULT" >/dev/null ||
+        die "recovered apply receiptのfinalization bindingが不正です"
+      [ "$(sha256_file "$APPLY_RECEIPT")" = "$(
+        jq -er '.apply_receipt_sha256' "$RECOVERY_RESULT"
+      )" ] ||
+        die "recovered apply receiptのdigestが不一致です"
+      echo "✅ previously committed guarded apply receipt recovered: $APPLY_RECEIPT"
+      exit 0
+    else
+      RECOVERY_STATUS=$?
+      [ "$RECOVERY_STATUS" -eq 3 ] ||
+        die "durable apply finalizationが破損または照合不能です"
+      [ ! -e "$APPLY_RECEIPT" ] && [ ! -L "$APPLY_RECEIPT" ] ||
+        die "未確定recoveryがapply receipt pathを変更しました"
+    fi
     if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
       APPLY_ATTEMPT_ID="$REQUESTED_APPLY_ATTEMPT_ID"
       MEDIA_EXPECTED_STATUS="CONSUMED"
@@ -10154,7 +10317,6 @@ case "$COMMAND" in
     GATE_PLAN="$PLAN"
     GATE_LOCK_RECEIPT="$TMP_ROOT/provenance-shared-lock.json"
     GATE_PREFLIGHT_RECEIPT="$TMP_ROOT/provenance-preflight.json"
-    GATE_OUTCOME_RECEIPT="$TMP_ROOT/provenance-outcome.json"
     GATE_LOCK_ACQUIRED="false"
     if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
       GATE_LOCK_ACQUIRED="true"
@@ -10162,13 +10324,17 @@ case "$COMMAND" in
     GATE_OUTCOME_RECORDED="false"
     GATE_HEARTBEAT_PID=""
     APPLY_RECEIPT_PUBLISHED="false"
+    COMPOSITE_FINALIZED="false"
     EVENTBRIDGE_SAGA_STARTED="false"
     EVENTBRIDGE_SAGA_FINISHED="false"
     ECS_SERVICE_SAGA_STARTED="false"
     ECS_SERVICE_SAGA_FINISHED="false"
     ECS_SERVICE_SAGA_BEGIN_RECEIPT="$TMP_ROOT/ecs-service-saga-begin.json"
-    ECS_SERVICE_SAGA_FINISH_RECEIPT="$TMP_ROOT/ecs-service-saga-finish.json"
+    ECS_SERVICE_SAGA_VERIFY_RECEIPT="$TMP_ROOT/ecs-service-saga-verify.json"
     ECS_SERVICE_SAGA_RESTORE_RECEIPT="$TMP_ROOT/ecs-service-saga-restore.json"
+    EVENTBRIDGE_SAGA_VERIFY_RECEIPT="$TMP_ROOT/eventbridge-saga-verify.json"
+    APPLY_DRAFT="$TMP_ROOT/apply-receipt-draft.json"
+    FINALIZATION_RESULT="$TMP_ROOT/deployment-finalization-result.json"
     OPENCLAW_POST_APPLY_STARTED="false"
     OPENCLAW_ROLLOUT_REQUIRED="false"
     OPENCLAW_PREVIOUS_TASK_DEFINITION=""
@@ -10203,12 +10369,82 @@ case "$COMMAND" in
       wait "$GATE_HEARTBEAT_PID" >/dev/null 2>&1 || true
       GATE_HEARTBEAT_PID=""
     }
+    recover_committed_finalization() {
+      local recovery_out="$APPLY_RECEIPT"
+      local recovery_result="$TMP_ROOT/cleanup-finalization-recovery.json"
+      local recovery_error="$TMP_ROOT/cleanup-finalization-recovery.err"
+      local existing_output="false"
+      if [ -e "$APPLY_RECEIPT" ] || [ -L "$APPLY_RECEIPT" ]; then
+        [ ! -L "$APPLY_RECEIPT" ] && [ -f "$APPLY_RECEIPT" ] ||
+          return 2
+        recovery_out="$TMP_ROOT/cleanup-recovered-apply-receipt.json"
+        existing_output="true"
+      fi
+      python3 "$DEPLOYMENT_APPLY_FINALIZER" recover \
+        --aws-bin "$AWS_BIN" \
+        --intent-id "$RECOVERY_INTENT_ID" \
+        --plan-sha256 "$STAGED_PLAN_SHA256" \
+        --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+        --out "$recovery_out" > "$recovery_result" 2> "$recovery_error"
+      local recovery_status=$?
+      [ "$recovery_status" -eq 0 ] || return "$recovery_status"
+      jq -e \
+        --arg intent "$RECOVERY_INTENT_ID" \
+        --arg plan "$STAGED_PLAN_SHA256" \
+        --arg attempt "$APPLY_ATTEMPT_ID" '
+        .ok == true and
+        .state == "RECOVERED" and
+        .intent_id == $intent and
+        .plan_sha256 == $plan and
+        .apply_attempt_id == $attempt and
+        (.apply_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+        (.deployment_finalization_receipt_sha256 |
+          test("^[0-9a-f]{64}$"))
+      ' "$recovery_result" >/dev/null || return 2
+      [ "$(sha256_file "$recovery_out")" = "$(
+        jq -er '.apply_receipt_sha256' "$recovery_result"
+      )" ] || return 2
+      if [ "$existing_output" = "true" ]; then
+        [ "$(sha256_file "$APPLY_RECEIPT")" = "$(
+          sha256_file "$recovery_out"
+        )" ] || return 2
+        rm -f "$recovery_out"
+      fi
+      APPLY_RECEIPT_PUBLISHED="true"
+      COMPOSITE_FINALIZED="true"
+      EVENTBRIDGE_SAGA_FINISHED="true"
+      ECS_SERVICE_SAGA_FINISHED="true"
+      GATE_OUTCOME_RECORDED="true"
+      GATE_LOCK_ACQUIRED="false"
+      return 0
+    }
     cleanup_apply_command() {
       local status=$?
       local saga_restore_failed="false"
       local ecs_restore_failed="false"
       local openclaw_restore_failed="false"
+      local composite_recovery_failed="false"
       set +e
+      if [ "$COMPOSITE_FINALIZED" != "true" ] &&
+        { [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] ||
+          [ "$ECS_SERVICE_SAGA_STARTED" = "true" ]; }; then
+        recover_committed_finalization
+        case "$?" in
+          0)
+            status=0
+            echo "✅ committed guarded apply receipt recovered: $APPLY_RECEIPT"
+            ;;
+          3) ;;
+          *) composite_recovery_failed="true" ;;
+        esac
+      fi
+      if [ "$composite_recovery_failed" = "true" ]; then
+        stop_gate_heartbeat
+        release_deployment_lock
+        rm -rf "$TMP_ROOT"
+        echo "FATAL: committed deployment finalization requires reconciliation" >&2
+        exit 73
+      fi
       if [ "$OPENCLAW_POST_APPLY_STARTED" = "true" ] &&
         [ "$GATE_OUTCOME_RECORDED" != "true" ] &&
         [ "$GATE_LOCK_ACQUIRED" = "true" ] &&
@@ -10244,6 +10480,7 @@ case "$COMMAND" in
       if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
         [ "$EVENTBRIDGE_SAGA_FINISHED" != "true" ]; then
         if python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
+          --terraform-bin "$TERRAFORM_BIN" \
           --plan "$GATE_PLAN" \
           --plan-sha256 "$STAGED_PLAN_SHA256" \
           --apply-attempt-id "$APPLY_ATTEMPT_ID" \
@@ -10413,6 +10650,7 @@ case "$COMMAND" in
     ECS_SERVICE_SAGA_STARTED="true"
 
     python3 "$EVENTBRIDGE_APPLY_SAGA" begin \
+      --terraform-bin "$TERRAFORM_BIN" \
       --plan "$GATE_PLAN" \
       --plan-sha256 "$STAGED_PLAN_SHA256" \
       --apply-attempt-id "$APPLY_ATTEMPT_ID" >/dev/null ||
@@ -10671,54 +10909,37 @@ case "$COMMAND" in
     mv "$OPENCLAW_ROLLOUT_RESULT.canonical" "$OPENCLAW_ROLLOUT_RESULT"
     chmod 600 "$OPENCLAW_ROLLOUT_RESULT"
 
-    python3 "$EVENTBRIDGE_APPLY_SAGA" finish \
+    python3 "$EVENTBRIDGE_APPLY_SAGA" verify \
+      --terraform-bin "$TERRAFORM_BIN" \
       --plan "$GATE_PLAN" \
       --plan-sha256 "$STAGED_PLAN_SHA256" \
       --apply-attempt-id "$APPLY_ATTEMPT_ID" \
-      --outcome applied >/dev/null ||
-      die "EventBridge apply completionをdurableに確認できません"
-    EVENTBRIDGE_SAGA_FINISHED="true"
+      > "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT" ||
+      die "EventBridge 3 rule apply結果を非破壊検証できません"
+    chmod 600 "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT"
+    validate_eventbridge_saga_receipt \
+      "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT" "verified_applied"
 
-    python3 "$ECS_SERVICE_APPLY_SAGA" finish \
+    python3 "$ECS_SERVICE_APPLY_SAGA" verify \
       --aws-bin "$AWS_BIN" \
       --terraform-bin "$TERRAFORM_BIN" \
       --plan "$GATE_PLAN" \
       --plan-sha256 "$STAGED_PLAN_SHA256" \
       --apply-attempt-id "$APPLY_ATTEMPT_ID" \
-      --outcome applied > "$ECS_SERVICE_SAGA_FINISH_RECEIPT" ||
-      die "MCP/connect-web ECS steady stateをdurableに確認できません"
-    chmod 600 "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+      > "$ECS_SERVICE_SAGA_VERIFY_RECEIPT" ||
+      die "MCP/connect-web ECS steady stateを非破壊検証できません"
+    chmod 600 "$ECS_SERVICE_SAGA_VERIFY_RECEIPT"
     validate_ecs_service_saga_receipt \
-      "$ECS_SERVICE_SAGA_FINISH_RECEIPT" "APPLIED"
+      "$ECS_SERVICE_SAGA_VERIFY_RECEIPT" "VERIFIED_APPLIED"
     [ "$(jq -er '.baseline_sha256' \
       "$ECS_SERVICE_SAGA_BEGIN_RECEIPT")" = "$(
-        jq -er '.baseline_sha256' "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+        jq -er '.baseline_sha256' "$ECS_SERVICE_SAGA_VERIFY_RECEIPT"
       )" ] &&
       [ "$(jq -er '.planned_sha256' \
         "$ECS_SERVICE_SAGA_BEGIN_RECEIPT")" = "$(
-          jq -er '.planned_sha256' "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
+          jq -er '.planned_sha256' "$ECS_SERVICE_SAGA_VERIFY_RECEIPT"
         )" ] ||
-      die "ECS sagaのbegin/finish bindingが不一致です"
-    ECS_SERVICE_SAGA_FINISHED="true"
-
-    bash "$IMAGE_GATE_RUNNER" mark-deployment-intent-outcome \
-      --plan "$GATE_PLAN" \
-      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
-      --outcome applied > "$GATE_OUTCOME_RECEIPT"
-    jq -S -c . "$GATE_OUTCOME_RECEIPT" \
-      > "$GATE_OUTCOME_RECEIPT.canonical"
-    mv "$GATE_OUTCOME_RECEIPT.canonical" "$GATE_OUTCOME_RECEIPT"
-    chmod 600 "$GATE_OUTCOME_RECEIPT"
-    jq -e \
-      --arg intent "$(
-        jq -er '.image_deployment_intent_id' "$TMP_ROOT/verify/receipt.json"
-      )" '
-      .intent_id == $intent and
-      .state == "APPLIED" and
-      (.plan_sha256 | test("^[0-9a-f]{64}$"))
-    ' "$GATE_OUTCOME_RECEIPT" >/dev/null ||
-      die "provenance one-use intent outcomeをAPPLIEDで確認できません"
-    GATE_OUTCOME_RECORDED="true"
+      die "ECS sagaのbegin/verify bindingが不一致です"
 
     MEDIA_AUTHORIZATION_FOR_RECEIPT="$TMP_ROOT/media-authorization.json"
     if [ "$MEDIA_APPLY_REQUIRED" = "true" ]; then
@@ -10735,15 +10956,14 @@ case "$COMMAND" in
       jq -n 'null' > "$MEDIA_AUTHORIZATION_FOR_RECEIPT"
     fi
     chmod 600 "$MEDIA_AUTHORIZATION_FOR_RECEIPT"
-    APPLY_STAGE="$TMP_ROOT/apply-receipt.json"
     jq -n -S \
-      --arg kind "terraform-runtime-apply-receipt" \
-      --argjson schema_version 6 \
+      --arg kind "terraform-runtime-apply-receipt-draft" \
+      --argjson schema_version 7 \
       --arg guard_version "$GUARD_VERSION" \
       --arg account_id "$EXPECTED_ACCOUNT_ID" \
       --arg region "$REGION" \
       --arg git_commit "$(git_commit)" \
-      --arg status "applied" \
+      --arg status "verified_pending_finalization" \
       --arg migration_kind "$(
         jq -r '.migration_kind' "$TMP_ROOT/verify/receipt.json"
       )" \
@@ -10759,7 +10979,7 @@ case "$COMMAND" in
           )"
         fi
       )" \
-      --arg provenance_outcome "applied" \
+      --arg provenance_outcome "pending" \
       --arg image_deployment_intent_id "$(
         jq -er '.image_deployment_intent_id' \
           "$TMP_ROOT/verify/receipt.json"
@@ -10783,9 +11003,6 @@ case "$COMMAND" in
       )" \
       --arg post_apply_service_probe_sha256 "$(
         sha256_file "$POST_APPLY_SERVICE_PROBE_RESULT"
-      )" \
-      --arg ecs_service_saga_receipt_sha256 "$(
-        sha256_file "$ECS_SERVICE_SAGA_FINISH_RECEIPT"
       )" \
       --arg versioning_receipt_sha256 "$(
         jq -r '.versioning_receipt_sha256' "$TMP_ROOT/verify/receipt.json"
@@ -10821,22 +11038,15 @@ case "$COMMAND" in
       --arg shared_deployment_lock_receipt_sha256 "$(
         sha256_file "$GATE_LOCK_RECEIPT"
       )" \
-      --arg provenance_outcome_receipt_sha256 "$(
-        sha256_file "$GATE_OUTCOME_RECEIPT"
-      )" \
-      --argjson applied_at_epoch "$(date +%s)" \
       --slurpfile state_contract "$TMP_ROOT/applied-state.json" \
       --slurpfile live "$TMP_ROOT/applied-live.json" \
       --slurpfile bedrock_retention \
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
-      --slurpfile provenance_outcome "$GATE_OUTCOME_RECEIPT" \
       --slurpfile media_authorization \
         "$MEDIA_AUTHORIZATION_FOR_RECEIPT" \
       --slurpfile post_apply_service_probe \
         "$POST_APPLY_SERVICE_PROBE_RESULT" \
-      --slurpfile ecs_service_saga \
-        "$ECS_SERVICE_SAGA_FINISH_RECEIPT" \
       --slurpfile openclaw_rollout "$OPENCLAW_ROLLOUT_RESULT" '{
         kind:$kind,
         schema_version:$schema_version,
@@ -10865,9 +11075,6 @@ case "$COMMAND" in
         post_apply_service_probe_sha256:
           $post_apply_service_probe_sha256,
         post_apply_service_probe:$post_apply_service_probe[0],
-        ecs_service_saga_receipt_sha256:
-          $ecs_service_saga_receipt_sha256,
-        ecs_service_saga_receipt:$ecs_service_saga[0],
         versioning_receipt_sha256:$versioning_receipt_sha256,
         log_readiness_receipt_sha256:$log_readiness_receipt_sha256,
         alarm_delivery_receipt_sha256:$alarm_delivery_receipt_sha256,
@@ -10896,29 +11103,19 @@ case "$COMMAND" in
           $shared_deployment_lock_record_id,
         shared_deployment_lock_receipt_sha256:
           $shared_deployment_lock_receipt_sha256,
-        shared_deployment_lock_receipt:$shared_lock[0],
-        provenance_outcome_receipt_sha256:
-          $provenance_outcome_receipt_sha256,
-        provenance_outcome_receipt:$provenance_outcome[0],
-        applied_at_epoch:$applied_at_epoch
-      }' > "$APPLY_STAGE"
-    chmod 600 "$APPLY_STAGE"
+        shared_deployment_lock_receipt:$shared_lock[0]
+      }' > "$APPLY_DRAFT"
+    chmod 600 "$APPLY_DRAFT"
     jq -e '
-      .kind == "terraform-runtime-apply-receipt" and
-      .schema_version == 6 and
-      .status == "applied" and
-      .provenance_outcome == "applied" and
+      .kind == "terraform-runtime-apply-receipt-draft" and
+      .schema_version == 7 and
+      .status == "verified_pending_finalization" and
+      .provenance_outcome == "pending" and
       .openclaw_rollout_result.passed == true and
       .post_apply_service_probe.kind ==
         "teamagent-post-apply-service-probe-receipt" and
       .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
       (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
-      (.ecs_service_saga_receipt_sha256 | test("^[0-9a-f]{64}$")) and
-      .ecs_service_saga_receipt.kind ==
-        "teamagent-ecs-service-apply-saga-receipt" and
-      .ecs_service_saga_receipt.stage == "APPLIED" and
-      .ecs_service_saga_receipt.apply_attempt_id == .apply_attempt_id and
-      .ecs_service_saga_receipt.plan_sha256 == .plan_sha256 and
       .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
       (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
       (
@@ -10940,19 +11137,80 @@ case "$COMMAND" in
       ) and
       .shared_deployment_lock_record_id ==
         "lock#teamagent/terraform.tfstate"
-    ' "$APPLY_STAGE" >/dev/null ||
-      die "apply receipt schema/provenance bindingの生成に失敗しました"
-    APPLY_STAGE_IDENTITY="$(stat_identity "$APPLY_STAGE")"
-    ln "$APPLY_STAGE" "$APPLY_RECEIPT" ||
-      die "apply receipt出力pathを原子的に確保できません"
-    [ "$(stat_identity "$APPLY_RECEIPT")" = "$APPLY_STAGE_IDENTITY" ] ||
-      die "apply receiptの原子的引渡しに失敗しました"
-    chmod 600 "$APPLY_RECEIPT"
-    APPLY_RECEIPT_PUBLISHED="true"
+    ' "$APPLY_DRAFT" >/dev/null ||
+      die "apply receipt draft schema/provenance bindingの生成に失敗しました"
     stop_gate_heartbeat
-    bash "$IMAGE_GATE_RUNNER" release-deployment-lock \
-      --plan "$GATE_PLAN" \
-      --apply-attempt-id "$APPLY_ATTEMPT_ID"
+    python3 "$DEPLOYMENT_APPLY_FINALIZER" commit \
+      --aws-bin "$AWS_BIN" \
+      --intent-id "$RECOVERY_INTENT_ID" \
+      --plan-sha256 "$STAGED_PLAN_SHA256" \
+      --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+      --draft "$APPLY_DRAFT" \
+      --eventbridge-verification "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT" \
+      --ecs-verification "$ECS_SERVICE_SAGA_VERIFY_RECEIPT" \
+      --out "$APPLY_RECEIPT" > "$FINALIZATION_RESULT" ||
+      die "deployment ledgersとapply receiptを原子的に確定できません"
+    jq -e \
+      --arg intent "$RECOVERY_INTENT_ID" \
+      --arg plan "$STAGED_PLAN_SHA256" \
+      --arg attempt "$APPLY_ATTEMPT_ID" '
+      .ok == true and
+      (.state == "COMMITTED" or
+       .state == "RECOVERED" or
+       .state == "RECOVERED_AFTER_AMBIGUOUS_COMMIT") and
+      .intent_id == $intent and
+      .plan_sha256 == $plan and
+      .apply_attempt_id == $attempt and
+      (.apply_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      (.deployment_finalization_receipt_sha256 |
+        test("^[0-9a-f]{64}$"))
+    ' "$FINALIZATION_RESULT" >/dev/null ||
+      die "deployment finalization resultがplan/intent/attemptと不一致です"
+    [ "$(sha256_file "$APPLY_RECEIPT")" = "$(
+      jq -er '.apply_receipt_sha256' "$FINALIZATION_RESULT"
+    )" ] ||
+      die "finalized apply receipt digestが不一致です"
+    jq -e \
+      --arg intent "$RECOVERY_INTENT_ID" \
+      --arg plan "$STAGED_PLAN_SHA256" \
+      --arg attempt "$APPLY_ATTEMPT_ID" '
+      .kind == "terraform-runtime-apply-receipt" and
+      .schema_version == 7 and
+      .status == "applied" and
+      .provenance_outcome == "applied" and
+      .image_deployment_intent_id == $intent and
+      .plan_sha256 == $plan and
+      .apply_attempt_id == $attempt and
+      .provenance_outcome_receipt == {
+        intent_id:$intent,
+        plan_sha256:$plan,
+        state:"APPLIED"
+      } and
+      (.provenance_outcome_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      (.ecs_service_saga_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+      .ecs_service_saga_receipt.stage == "APPLIED" and
+      .ecs_service_saga_receipt.apply_attempt_id == $attempt and
+      (.ecs_service_saga_verification_receipt_sha256 |
+        test("^[0-9a-f]{64}$")) and
+      .ecs_service_saga_verification_receipt.stage ==
+        "VERIFIED_APPLIED" and
+      (.eventbridge_apply_saga_verification_receipt_sha256 |
+        test("^[0-9a-f]{64}$")) and
+      .eventbridge_apply_saga_verification_receipt.stage ==
+        "verified_applied" and
+      .deployment_finalization_receipt.state == "APPLIED" and
+      .deployment_finalization_receipt.intent_id == $intent and
+      .deployment_finalization_receipt.plan_sha256 == $plan and
+      .deployment_finalization_receipt.apply_attempt_id == $attempt and
+      (.deployment_finalization_receipt_sha256 |
+        test("^[0-9a-f]{64}$"))
+    ' "$APPLY_RECEIPT" >/dev/null ||
+      die "finalized apply receipt schema/provenance bindingが不正です"
+    APPLY_RECEIPT_PUBLISHED="true"
+    COMPOSITE_FINALIZED="true"
+    EVENTBRIDGE_SAGA_FINISHED="true"
+    ECS_SERVICE_SAGA_FINISHED="true"
+    GATE_OUTCOME_RECORDED="true"
     GATE_LOCK_ACQUIRED="false"
     release_deployment_lock
     echo "✅ guarded apply completed: $APPLY_RECEIPT"
