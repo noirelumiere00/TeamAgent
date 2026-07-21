@@ -279,10 +279,13 @@ data "aws_iam_policy_document" "mcp_task" {
   }
   # §知識ベース: Cohere Rerank（検索の真の関連度で並べ替え＝業界/客の違いを区別）。
   # bedrock:Rerank は InvokeModel とは別アクションなので明示付与が必要。
+  # ★resources 必須 "*": bedrock:Rerank はリソースレベル制限に非対応で、foundation-model ARN に
+  #   絞ると AccessDeniedException で全拒否になる（2026-07-21 本番実測。Slack AiLa の rerank も
+  #   これで silent fallback していた）。モデル限定はアプリ設定側で担保する。
   statement {
     sid       = "BedrockRerank"
     actions   = ["bedrock:Rerank"]
-    resources = ["arn:aws:bedrock:${var.aws_region}::foundation-model/cohere.rerank-v3-5:0"]
+    resources = ["*"]
   }
 }
 
