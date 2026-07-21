@@ -150,7 +150,7 @@ def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
         'test "$(stat -c %a /tmp)" = 1777',
         'printf writable > "$path/.teamagent-write-probe"',
         'python -c "import sys; assert sys.version_info[:2] == (3, 14)"',
-        '/app/.venv/bin/python -c "import playwright, teamagent.media.worker, yt_dlp"',
+        '/app/.venv/bin/python -c "import playwright, teamagent.media.tool_worker, yt_dlp"',
         "command -v node",
         "command -v yt-dlp",
         "command -v chromium-browser",
@@ -174,6 +174,29 @@ def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
     ):
         assert runtime_probe in body
     assert 'PREFLIGHT_EFS_ROLE_NAME="${PROJECT}-${ENVIRONMENT}-efs-preflight-$$"' not in body
+
+
+def test_tiktok_preflight_import_matches_media_image_contract() -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    media_dockerfile = (
+        PROJECT_ROOT / "infra" / "docker" / "Dockerfile.teamagent-media-worker"
+    ).read_text(encoding="utf-8")
+    media_dockerignore = (
+        PROJECT_ROOT / "infra" / "docker" / "Dockerfile.teamagent-media-worker.dockerignore"
+    ).read_text(encoding="utf-8")
+    core_smoke = (PROJECT_ROOT / "infra" / "docker" / "smoke_core.py").read_text(encoding="utf-8")
+
+    expected_import = "import playwright, teamagent.media.tool_worker, yt_dlp"
+    assert expected_import in guard
+    assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.tool_worker"]' in (
+        media_dockerfile
+    )
+    assert "import teamagent.media.contracts, teamagent.media.operations, " in media_dockerfile
+    assert "teamagent.media.tool_contracts, teamagent.media.tool_worker" in media_dockerfile
+    assert "test ! -e /app/src/teamagent/media/worker.py" in media_dockerfile
+    assert "!src/teamagent/media/tool_worker.py" in media_dockerignore
+    assert "!src/teamagent/media/worker.py" not in media_dockerignore
+    assert '"teamagent.media.worker",' in core_smoke
 
 
 def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None:

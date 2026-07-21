@@ -6827,7 +6827,7 @@ run_registered_preflight_task() {
         done
         printf ok > /tmp/teamagent-preflight
         /app/.venv/bin/python -c "import sys; assert sys.version_info[:2] == (3, 14)"
-        /app/.venv/bin/python -c "import playwright, teamagent.media.worker, yt_dlp"
+        /app/.venv/bin/python -c "import playwright, teamagent.media.tool_worker, yt_dlp"
         command -v node
         command -v yt-dlp
         command -v chromium-browser
