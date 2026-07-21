@@ -1,10 +1,10 @@
 # ============================================================
 # CodeBuild: TeamAgent MCP candidateを **AWS内（社内proxy外）でbuild・scan gate**
 # ============================================================
-# go-live 実測: 社内proxy が PyTorch CDN(download.pytorch.org) の大容量DLを遮断し、
-# ローカル docker build で torch(CPU) が取得できない。CodeBuild は AWS 内で走るため
-# proxy を経由せず CDN に直結＝slim な CPU イメージを確実にビルドできる（再利用可能なCI基盤）。
-# arm64 ネイティブ（ARM_CONTAINER）でビルドし qemu 不要。source は raw_files S3 の zip。
+# The existing project is adopted in place as a quarantine-only builder. It
+# cannot write release repositories; independent source publication, attestation,
+# promotion, release authorization, and the composed Terraform guard remain
+# separate authorization boundaries.
 
 data "aws_caller_identity" "cb" {}
 
@@ -41,7 +41,7 @@ locals {
     "${var.project_name}-${var.environment}-image-deployment-intents"
   )
   terraform_automation_role_arn = (
-    "arn:aws:iam::718959508629:role/teamagent-dev-terraform-automation"
+    "arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
   )
   openclaw_contract_sha256 = filesha256(
     "${path.module}/../codebuild/openclaw_bundle_contract.json"
@@ -98,6 +98,7 @@ locals {
   ]
   source_publisher_environment_names = [
     "EXPECTED_COMMIT",
+    "EXPECTED_BASE_OID",
     "SOURCE_MANIFEST_CONTRACT_SHA256",
     "RELEASE_CONTRACT_SHA256",
   ]
@@ -212,6 +213,37 @@ check "fixed_codebuild_account_and_region" {
 resource "aws_cloudwatch_log_group" "codebuild_image" {
   name              = "/aws/codebuild/${local.main_codebuild_project_name}"
   retention_in_days = local.codebuild_log_retention_days
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_image
+  id = "/aws/codebuild/teamagent-dev-image-builder"
+}
+
+# Historical production log group with a distinct name. Manage retention only;
+# do not recreate or destroy the existing evidence-bearing group.
+resource "aws_cloudwatch_log_group" "codebuild_aiia_image_builder" {
+  name              = "/aws/codebuild/${var.project_name}-${var.environment}-aiia-image-builder"
+  retention_in_days = local.codebuild_log_retention_days
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [kms_key_id]
+  }
+}
+
+import {
+  to = aws_cloudwatch_log_group.codebuild_aiia_image_builder
+  id = "/aws/codebuild/teamagent-dev-aiia-image-builder"
 }
 
 resource "aws_cloudwatch_log_group" "codebuild_tiktok_image" {
@@ -271,6 +303,10 @@ data "aws_iam_policy_document" "main_codebuild_assume" {
 resource "aws_iam_role" "codebuild" {
   name               = "${var.project_name}-${var.environment}-codebuild-image"
   assume_role_policy = data.aws_iam_policy_document.main_codebuild_assume.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 data "aws_iam_policy_document" "codebuild" {
@@ -284,7 +320,7 @@ data "aws_iam_policy_document" "codebuild" {
   statement {
     sid       = "EcrAuth"
     actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"] # GetAuthorizationToken はリソース指定不可（AWS仕様）
+    resources = ["*"]
   }
   statement {
     sid = "EcrMcpQuarantineWrite"
@@ -339,7 +375,9 @@ data "aws_iam_policy_document" "codebuild" {
     resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
       "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
+      "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
     ]
   }
   statement {
@@ -370,6 +408,10 @@ resource "aws_iam_role_policy" "codebuild" {
   name   = "${var.project_name}-${var.environment}-codebuild-image"
   role   = aws_iam_role.codebuild.id
   policy = data.aws_iam_policy_document.codebuild.json
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 locals {
@@ -420,7 +462,8 @@ locals {
   )
 }
 
-# --- CodeBuild プロジェクト（arm64・docker・versioned S3 source） ---
+# Native ARM64 quarantine-only builder. The exact versioned source archive and
+# signed declaration are supplied per build by the independent publisher.
 resource "aws_codebuild_project" "image" {
   name         = local.main_codebuild_project_name
   description  = "Build and vulnerability-gate TeamAgent MCP candidate images inside AWS"
@@ -429,15 +472,10 @@ resource "aws_codebuild_project" "image" {
   artifacts { type = "NO_ARTIFACTS" }
 
   environment {
-    compute_type    = "BUILD_GENERAL1_LARGE"                           # torch/sentence-transformers ビルドに余裕
-    image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0" # arm64 ネイティブ
+    compute_type    = "BUILD_GENERAL1_LARGE"
+    image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
     type            = "ARM_CONTAINER"
-    privileged_mode = true # docker ビルドに必須
-
-    # Commit, branch, both application contracts, and both provenance hashes
-    # have no project defaults. In particular, no OCI provenance label can
-    # silently resolve to a placeholder.
-    # build_teamagent_image.sh binds all provenance inputs per build.
+    privileged_mode = true
   }
 
   source {
@@ -451,10 +489,20 @@ resource "aws_codebuild_project" "image" {
       group_name = aws_cloudwatch_log_group.codebuild_image.name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.codebuild,
+    terraform_data.runtime_guard,
+  ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 output "codebuild_project" {
-  value = aws_codebuild_project.image.name
+  description = "Native ARM64 quarantine-only MCP builder project name."
+  value       = aws_codebuild_project.image.name
 }
 
 # ============================================================
@@ -473,6 +521,37 @@ data "aws_iam_policy_document" "codebuild_launcher_assume" {
       identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-build-launcher"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "codebuild_launcher" {
@@ -483,9 +562,20 @@ resource "aws_iam_role" "codebuild_launcher" {
 
 data "aws_iam_policy_document" "codebuild_launcher" {
   statement {
-    sid       = "ReadVersionedBuildInputs"
-    actions   = ["s3:GetObject", "s3:GetObjectVersion"]
-    resources = ["arn:aws:s3:::teamagent-dev-raw-files/codebuild/connect-web-app.html"]
+    sid = "RequireAvailableTeamAgentCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
+  statement {
+    sid     = "ReadVersionedBuildInputs"
+    actions = ["s3:GetObject", "s3:GetObjectVersion"]
+    resources = [
+      "arn:aws:s3:::teamagent-dev-raw-files/codebuild/connect-web-app.html",
+      "arn:aws:s3:::teamagent-dev-raw-files/codebuild/baked-fallback/connect-web-app.html",
+    ]
   }
   statement {
     sid       = "CheckBuildInputVersioning"
@@ -726,6 +816,37 @@ data "aws_iam_policy_document" "release_launcher_assume" {
     principals {
       type        = "AWS"
       identifiers = [aws_iam_user.release_caller.arn]
+    }
+  }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-release-authorization"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-release"]
     }
   }
 }
@@ -1330,6 +1451,37 @@ data "aws_iam_policy_document" "tiktok_build_launcher_assume" {
       identifiers = [aws_iam_user.tiktok_build_caller[0].arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["teamagent-tiktok-build"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-tiktok-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "tiktok_build_launcher" {
@@ -1371,6 +1523,15 @@ resource "aws_iam_user_policy" "tiktok_build_caller" {
 
 data "aws_iam_policy_document" "tiktok_build_launcher" {
   count = local.tk_enabled
+
+  statement {
+    sid = "RequireAvailableTikTokCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
 
   statement {
     sid = "CheckImmutableTikTokEvidenceBucket"
@@ -2025,14 +2186,20 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_codestarconnections_connection.openclaw_codebuild.arn]
   }
   statement {
-    sid = "ReadPinnedAppAndPublishExactSource"
+    sid = "ReadPinnedAppInputs"
     actions = [
       "s3:GetObject",
       "s3:GetObjectVersion",
-      "s3:PutObject",
     ]
     resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/connect-web-app.html",
+      "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
+    ]
+  }
+  statement {
+    sid     = "PublishExactSource"
+    actions = ["s3:PutObject"]
+    resources = [
       "${aws_s3_bucket.raw_files.arn}/codebuild/source.zip",
     ]
   }
@@ -2042,7 +2209,7 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_s3_bucket.raw_files.arn]
   }
   statement {
-    sid = "PublishImmutableSourceDeclarations"
+    sid = "PublishImmutableSourceAndContextEvidence"
     actions = [
       "s3:GetObject",
       "s3:GetObjectRetention",
@@ -2052,6 +2219,7 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     ]
     resources = [
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
     ]
   }
   statement {
@@ -3101,6 +3269,37 @@ data "aws_iam_policy_document" "openclaw_publisher_assume" {
       identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
   }
+
+  statement {
+    actions = [
+      "sts:AssumeRole",
+      "sts:SetSourceIdentity",
+    ]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:PrincipalArn"
+      values   = ["arn:aws:iam::718959508629:root"]
+    }
+    condition {
+      test     = "Bool"
+      variable = "aws:MultiFactorAuthPresent"
+      values   = ["true"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:RoleSessionName"
+      values   = ["openclaw-build-publisher"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "sts:SourceIdentity"
+      values   = ["teamagent-production-openclaw-build"]
+    }
+  }
 }
 
 resource "aws_iam_role" "openclaw_publisher" {
@@ -3110,6 +3309,14 @@ resource "aws_iam_role" "openclaw_publisher" {
 }
 
 data "aws_iam_policy_document" "openclaw_publisher" {
+  statement {
+    sid = "RequireAvailableOpenClawCodeConnection"
+    actions = [
+      "codeconnections:GetConnection",
+      "codeconnections:ListConnections",
+    ]
+    resources = ["*"]
+  }
   statement {
     sid = "PublishAndReadImmutableEvidence"
     actions = [

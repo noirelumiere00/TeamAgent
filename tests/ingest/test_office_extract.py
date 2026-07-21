@@ -106,6 +106,18 @@ def _build_sample_pptx() -> bytes:
     return buf.getvalue()
 
 
+def _replace_zip_member(data: bytes, member: str, body: bytes) -> bytes:
+    source = BytesIO(data)
+    destination = BytesIO()
+    with (
+        zipfile.ZipFile(source) as incoming,
+        zipfile.ZipFile(destination, "w", compression=zipfile.ZIP_DEFLATED) as outgoing,
+    ):
+        for info in incoming.infolist():
+            outgoing.writestr(info, body if info.filename == member else incoming.read(info))
+    return destination.getvalue()
+
+
 def test_extract_pptx_pages_returns_per_slide_text() -> None:
     pages = extract_pptx_pages(_build_sample_pptx())
     assert len(pages) == 2
@@ -126,6 +138,49 @@ def test_extract_pptx_pages_skips_empty_slides() -> None:
     buf = BytesIO()
     prs.save(buf)
     assert extract_pptx_pages(buf.getvalue()) == []
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    (
+        b'<!DOCTYPE p:presentation [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>',
+        b'<!ENTITY expansion "blocked">',
+    ),
+)
+def test_pptx_xml_rejects_dtd_and_entity_declarations(declaration: bytes) -> None:
+    malicious = _replace_zip_member(
+        _build_sample_pptx(),
+        "ppt/presentation.xml",
+        declaration + b"<p:presentation/>",
+    )
+
+    with pytest.raises(zipfile.BadZipFile, match=r"DTD/entity|invalid OOXML"):
+        extract_pptx_pages(malicious)
+
+
+def test_pptx_xml_part_size_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "teamagent.ingest.office_extract.MAX_OFFICE_XML_MEMBER_BYTES",
+        64,
+    )
+
+    with pytest.raises(zipfile.BadZipFile, match="size limit"):
+        extract_pptx_pages(_build_sample_pptx())
+
+
+def test_ooxml_total_uncompressed_size_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = _build_sample_pptx()
+    monkeypatch.setattr(
+        "teamagent.ingest.office_extract.MAX_OFFICE_TOTAL_UNCOMPRESSED_BYTES",
+        1,
+    )
+
+    with pytest.raises(OfficePayloadError) as raised:
+        extract_office_pages(data, mime_type=PPTX_MIME)
+
+    assert raised.value.category == "unsafe_archive"
 
 
 # -----------------------------------------------------------

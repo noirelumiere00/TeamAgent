@@ -14,6 +14,13 @@ from teamagent.skills.proposal_deck.schema import ProposalDeckInput
 from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
 
 
+@pytest.fixture(autouse=True)
+def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These renderer integration tests intentionally exercise local media deps."""
+
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+
+
 def _full_composer_json() -> str:
     """全 95 placeholder を文字数規則どおり埋めた ComposerOutput の JSON。"""
     placeholders: dict[int, str] = {}
@@ -121,6 +128,84 @@ def test_exhausted_repair_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         skill.run(_input(template, tmp_path / "out", max_repair=1), ctx=SkillContext())
     assert bedrock.converse.call_count == 2
+
+
+def test_default_request_directory_is_removed_by_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(_full_composer_json())
+    skill = ProposalDeckSkill(bedrock=bedrock)
+
+    def fake_render(
+        _composer: ComposerOutput,
+        _template: Path,
+        out_path: Path,
+        *,
+        request_id: str,
+    ) -> Path:
+        assert request_id == "cleanup-request"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"pptx")
+        return out_path
+
+    monkeypatch.setattr(skill, "_render_pptx", fake_render)
+    out = skill.run(
+        ProposalDeckInput(
+            product_name="ACME",
+            goal="認知",
+            target_persona="20代",
+            template_path=str(template),
+        ),
+        ctx=SkillContext(request_id="cleanup-request"),
+    )
+    request_dir = Path(out.pptx_path).parent
+    assert request_dir.name.startswith("teamagent-deck-cleanup-request-")
+    assert Path(out.pptx_path).is_file()
+
+    skill.cleanup_output(out)
+
+    assert not request_dir.exists()
+    assert skill._temporary_output_dirs == set()
+
+
+def test_default_request_directory_is_removed_when_render_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(_full_composer_json())
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    request_dir: Path | None = None
+
+    def fail_render(
+        _composer: ComposerOutput,
+        _template: Path,
+        out_path: Path,
+        *,
+        request_id: str,
+    ) -> Path:
+        nonlocal request_dir
+        del request_id
+        request_dir = out_path.parent
+        raise RuntimeError("render failed")
+
+    monkeypatch.setattr(skill, "_render_pptx", fail_render)
+    with pytest.raises(RuntimeError, match="render failed"):
+        skill.run(
+            ProposalDeckInput(
+                product_name="ACME",
+                goal="認知",
+                target_persona="20代",
+                template_path=str(template),
+            ),
+            ctx=SkillContext(request_id="failed-request"),
+        )
+
+    assert request_dir is not None
+    assert not request_dir.exists()
+    assert skill._temporary_output_dirs == set()
 
 
 def test_publish_disabled_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

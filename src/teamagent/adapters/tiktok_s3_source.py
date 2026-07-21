@@ -1,80 +1,117 @@
-"""tiktok_acquire の S3 出力を読む取得ソース（Adapter層）。
+"""Owner-bound reader for immutable TikTok acquisition artifacts.
 
-video_algorithm 等の「取得段」を、bot プロセス内スクレイプから tiktok_acquire(隔離Fargate)
-の成果物読み出しへ差し替えるためのアダプタ。取得=隔離サービス / 分析=既存スキル の責務分界。
-
-S3 prefix 配下（tiktok_acquire が書く）:
-  posts.normalized.json   … 指標メタ（rank_display順）
-  videos/manifest.json    … pid↔mp4↔tiktok_url の索引
-  videos/<pid>.mp4        … 動画本体（上位N本のみ）
-  thumbs/<pid>.jpg        … サムネ
-
-VideoMeta には依存しない（呼び出し側スキルが dict→VideoMeta を写像する）。
-boto3 は遅延import・失敗は例外を上げる（スキル側が cover-only へ縮退）。
+Downstream skills accept a job ID, never an arbitrary S3 prefix.  The job row is
+read with the caller-derived audit principal hash, and every artifact download
+uses the exact S3 VersionId recorded in the fenced result manifest.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
+import re
+import time
 from typing import Any
 
 import structlog
 
+from teamagent.adapters.media_job import MediaJobClient, MediaJobError
+from teamagent.media.contracts import S3ObjectRef
+
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_BUCKET = "teamagent-dev-raw-files"
+_JOB_ID = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
+_READ_DEADLINE_SECONDS = 30
+
+
+def media_audit_principal_hash(requested_by: object) -> str:
+    """Return the single audit-owner representation shared by media skills."""
+
+    return hashlib.sha256(str(requested_by or "unknown").encode("utf-8")).hexdigest()
 
 
 class TikTokS3Source:
-    """1つの取得ジョブの S3 prefix を、posts(メタ) と videos(本体) として読む。"""
+    """Read one caller-owned acquisition job through its immutable result."""
 
     def __init__(
-        self, prefix: str, *, bucket: str | None = None, region: str | None = None
+        self,
+        job_id: str,
+        *,
+        audit_principal_hash: str,
+        client: MediaJobClient | None = None,
+        clock: Any = time.time,
     ) -> None:
-        self._prefix = prefix if prefix.endswith("/") else prefix + "/"
-        self._bucket = bucket or os.environ.get("TIKTOK_S3_BUCKET") or _DEFAULT_BUCKET
-        self._region = region or os.environ.get("AWS_REGION") or "ap-northeast-1"
+        if not _JOB_ID.fullmatch(job_id):
+            raise ValueError("TikTok acquisition job ID is invalid")
+        if not re.fullmatch(r"[0-9a-f]{64}", audit_principal_hash):
+            raise ValueError("TikTok acquisition audit principal is invalid")
+        self._job_id = job_id
+        self._audit_principal_hash = audit_principal_hash
+        self._client = client or MediaJobClient()
+        self._clock = clock
         self._posts: list[dict[str, Any]] | None = None
-        self._url_to_pid: dict[str, str] | None = None
+        self._url_to_ref: dict[str, S3ObjectRef] | None = None
 
-    def _s3(self) -> Any:
-        import boto3
-
-        return boto3.session.Session().client("s3", region_name=self._region)
-
-    def _get_json(self, s3: Any, key: str) -> Any:
-        obj = s3.get_object(Bucket=self._bucket, Key=f"{self._prefix}{key}")
-        return json.loads(obj["Body"].read().decode("utf-8"))
+    def _download_json(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> Any:
+        raw = self._client.download(ref, deadline_epoch_s=deadline_epoch_s)
+        if len(raw) > ref.size:
+            raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
+        return json.loads(raw.decode("utf-8"))
 
     def _ensure_loaded(self) -> None:
         if self._posts is not None:
             return
-        s3 = self._s3()
-        data = self._get_json(s3, "posts.normalized.json")
-        self._posts = list(data.get("posts", []))
-        url_to_pid: dict[str, str] = {}
-        try:
-            manifest = self._get_json(s3, "videos/manifest.json")
-            for it in manifest.get("items", []):
-                if it.get("tiktok_url") and it.get("downloaded"):
-                    url_to_pid[it["tiktok_url"]] = it["pid"]
-        except Exception as e:
-            logger.info("tiktok_s3_manifest_skipped", error=type(e).__name__)
-        self._url_to_pid = url_to_pid
+        deadline_epoch_s = int(self._clock()) + _READ_DEADLINE_SECONDS
+        result = self._client.get_result(
+            self._job_id,
+            deadline_epoch_s=deadline_epoch_s,
+            expected_audit_principal_hash=self._audit_principal_hash,
+        )
+        if result is None or result.status != "done":
+            raise MediaJobError("MEDIA_TIKTOK_ACQUIRE_RESULT_NOT_READY")
+        artifacts = {artifact.name: artifact.object for artifact in result.artifacts}
+        posts_ref = artifacts.get("posts.json")
+        if posts_ref is None:
+            raise MediaJobError("MEDIA_TIKTOK_POSTS_ARTIFACT_MISSING")
+        data = self._download_json(posts_ref, deadline_epoch_s=deadline_epoch_s)
+        if not isinstance(data, dict) or not isinstance(data.get("posts"), list):
+            raise MediaJobError("MEDIA_TIKTOK_POSTS_ARTIFACT_INVALID")
+        self._posts = [item for item in data["posts"] if isinstance(item, dict)]
+
+        url_to_ref: dict[str, S3ObjectRef] = {}
+        manifest_ref = artifacts.get("manifest.json")
+        if manifest_ref is not None:
+            try:
+                manifest = self._download_json(manifest_ref, deadline_epoch_s=deadline_epoch_s)
+                items = manifest.get("items", []) if isinstance(manifest, dict) else []
+                for item in items:
+                    if not isinstance(item, dict) or not item.get("downloaded"):
+                        continue
+                    pid = str(item.get("pid") or "")
+                    url = str(item.get("tiktok_url") or "")
+                    video_ref = artifacts.get(f"video-{pid}")
+                    if url and video_ref is not None:
+                        url_to_ref[url] = video_ref
+            except Exception as exc:
+                logger.info("tiktok_s3_manifest_skipped", error=type(exc).__name__)
+        self._url_to_ref = url_to_ref
 
     def posts(self, n: int | None = None) -> list[dict[str, Any]]:
-        """posts.normalized.json の items（rank_display順）。n で上位切り出し。"""
+        """Return immutable normalized posts in display-rank order."""
+
         self._ensure_loaded()
         posts = self._posts or []
         return posts[:n] if n else posts
 
     def download(self, url: str) -> tuple[bytes, str]:
-        """tiktok_url から該当 videos/<pid>.mp4 を S3 から取得。未保存/失敗は例外。"""
+        """Download the exact VersionId mapped to a manifest-owned TikTok URL."""
+
         self._ensure_loaded()
-        pid = (self._url_to_pid or {}).get(url)
-        if not pid:
-            raise FileNotFoundError(f"no downloaded video for url in manifest: {url[:60]}")
-        s3 = self._s3()
-        obj = s3.get_object(Bucket=self._bucket, Key=f"{self._prefix}videos/{pid}.mp4")
-        return obj["Body"].read(), "video/mp4"
+        ref = (self._url_to_ref or {}).get(url)
+        if ref is None:
+            raise FileNotFoundError(f"no downloaded video for URL in owned manifest: {url[:60]}")
+        deadline_epoch_s = int(self._clock()) + _READ_DEADLINE_SECONDS
+        return self._client.download(ref, deadline_epoch_s=deadline_epoch_s), ref.content_type
+
+
+__all__ = ["TikTokS3Source", "media_audit_principal_hash"]

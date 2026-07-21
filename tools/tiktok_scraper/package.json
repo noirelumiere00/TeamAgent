@@ -4,9 +4,15 @@
   "private": true,
   "type": "module",
   "description": "TikTok 検索スクレイパ (Puppeteer 実ブラウザ + 内部API傍受)。TeamAgent tiktok_search Skill から subprocess で呼ばれる。",
-  "bin": { "tiktok-search": "./search.mjs" },
-  "dependencies": {
-    "puppeteer-core": "^23.0.0"
+  "bin": {
+    "tiktok-search": "./search.mjs"
   },
-  "engines": { "node": ">=20" }
+  "dependencies": {
+    "ipaddr.js": "2.2.0",
+    "playwright-core": "1.60.0",
+    "puppeteer-core": "25.3.0"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
 }

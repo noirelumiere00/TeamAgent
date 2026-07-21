@@ -41,6 +41,9 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
     assert 'var.environment == "dev"' in body
     expected = {
         "codebuild_image": "/aws/codebuild/${local.main_codebuild_project_name}",
+        "codebuild_aiia_image_builder": (
+            "/aws/codebuild/${var.project_name}-${var.environment}-aiia-image-builder"
+        ),
         "codebuild_tiktok_image": ("/aws/codebuild/${local.tiktok_codebuild_project_name}"),
         "codebuild_openclaw_provenance": (
             "/aws/codebuild/${local.openclaw_codebuild_project_name}"
@@ -58,7 +61,6 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
         assert "retention_in_days = local.codebuild_log_retention_days" in resource
 
     for project, log_group in (
-        ("image", "aws_cloudwatch_log_group.codebuild_image.name"),
         ("tiktok_image", "aws_cloudwatch_log_group.codebuild_tiktok_image[0].name"),
         (
             "openclaw_provenance",
@@ -73,6 +75,11 @@ def test_all_codebuild_log_groups_have_explicit_thirty_day_retention() -> None:
     ):
         project_body = _resource(body, "aws_codebuild_project", project)
         assert f"group_name = {log_group}" in project_body
+    quarantine_builder = _resource(body, "aws_codebuild_project", "image")
+    assert "cloudwatch_logs {" in quarantine_builder
+    assert "group_name = aws_cloudwatch_log_group.codebuild_image.name" in quarantine_builder
+    assert 'status = "DISABLED"' not in quarantine_builder
+    assert "stream_name" not in quarantine_builder
     assert '"logs:CreateLogGroup"' not in body
 
 

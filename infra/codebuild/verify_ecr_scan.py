@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed CRITICAL/HIGH gate for TeamAgent ECR scan findings.
+"""Fail-closed all-severity gate for TeamAgent ECR scan findings.
 
 An exception is valid only when CVE, severity, package, and installed version
 all match.  Expired, duplicate, malformed, or stale exceptions fail the build;
@@ -19,9 +19,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
-GATED_SEVERITIES = frozenset({"CRITICAL", "HIGH"})
 KNOWN_SEVERITIES = frozenset({"INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL", "UNDEFINED"})
+SCHEMA_VERSION = 1
+GATED_SEVERITIES = KNOWN_SEVERITIES
 _CVE_RE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -135,7 +135,7 @@ def load_exceptions(path: Path, *, today: date) -> dict[FindingKey, ExceptionRec
             if not _CVE_RE.fullmatch(cve):
                 raise GateError(f"{label}.cve is not a canonical CVE ID")
             if severity not in GATED_SEVERITIES:
-                raise GateError(f"{label}.severity must be CRITICAL or HIGH")
+                raise GateError(f"{label}.severity is not a supported gated severity")
             try:
                 expires_on = date.fromisoformat(expires_text)
             except ValueError as exc:
@@ -362,7 +362,7 @@ def _parser() -> argparse.ArgumentParser:
     policy.add_argument(
         "--deny-all",
         action="store_true",
-        help="Reject every CRITICAL/HIGH finding; no exception registry is loaded",
+        help="Reject every vulnerability finding; no exception registry is loaded",
     )
     parser.add_argument("--expected-image-digest", required=True)
     parser.add_argument("--expected-repository", required=True)
@@ -389,11 +389,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"FATAL ECR vulnerability gate failed: {exc}", file=sys.stderr)
         return 1
     if args.deny_all:
-        print("ECR vulnerability gate passed: 0 CRITICAL/HIGH findings; exceptions disabled")
+        print("ECR vulnerability gate passed: 0 findings at every severity; exceptions disabled")
     else:
         print(
             "ECR vulnerability gate passed: "
-            f"{len(findings)} CRITICAL/HIGH finding(s), all exactly excepted; 0 stale"
+            f"{len(findings)} finding(s), all exactly excepted; 0 stale"
         )
     return 0
 

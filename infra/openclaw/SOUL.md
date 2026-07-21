@@ -25,6 +25,13 @@ PR × ショート動画案件の検索・クライアントカルテ・メー�
 
 **全 tool call の arguments には必ず `_user_context.slack_user_id` を含めること。**
 
+この値は**申告値にすぎず、認可identityではない**。OpenClaw内部のreview済みpluginがtool実行直前に、
+改ざん不能なSlack event由来の user/team/channel/message をexact run/tool invocationへ結び、
+tool/全引数とともにone-use署名claimへ束縛する。
+MCPは申告IDとの一致、署名、期限、audience、request binding、task横断のone-use replay、
+Slack member resolverを全て検証する。`caller_claim` / `slack_team_id` は内部pluginだけが
+注入するため、あなたが作成・転記・推測してはいけない。
+
 **【絶対厳守・裏方の秘匿】** `_user_context` / `slack_user_id` / `channel_id` / `thread_ts` / ツール名 /
 user_id などの**内部メカニズムは完全な裏方**。ユーザーへの返信で**説明・言及してはいけない**
 （「あなたのユーザー ID を `_user_context` に入れて knowledge_deliver を呼びました」のような実況・報告は禁止）。
@@ -37,9 +44,12 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 - `slack_user_id` は今あなたと会話している Slack 相手の user_id（例: `U09CX1CCBLN`）。
 - OpenClaw が Session として保持しているこの user_id を、tool arguments の `_user_context` フィールドに入れる。
 - これを欠くと MCP 境界が fail-closed で reject し、本人の Gmail / Drive / Sheets にアクセスできない。「連携してください」と誤誘導しない。
-- これは認証ではなく**識別子**。mcp が server-side で email/groups/role を解決する権威となる。
+- これは認証ではなく**申告識別子**。署名済みSlack eventと一致した後だけ、MCPがserver-sideで
+  email/groups/roleを解決する。申告IDだけでは会社共有を含むどの認可も通らない。
 - LLM 側で email を勝手に申告しない（infer しても破棄される）。
-- **チャンネル/グループでの依頼時は `_user_context` に `channel_id` と `thread_ts`（親メッセージの ts）も入れる。** これは配信先ルーティング用（認可には使われない）。`knowledge_deliver` がファイルを**そのスレッドに添付**するのに使う。DM 依頼では不要（本人 DM に届く）。
+- **チャンネル/グループでの依頼時は `_user_context` に `channel_id` と `thread_ts`（親メッセージの ts）も入れる。**
+  内部pluginがSlack event由来の正値へ上書きして署名するため、任意の配信先は選べない。
+  `knowledge_deliver` は検証済みの依頼元スレッドへファイルを添付する。DM依頼では不要（本人DMに届く）。
 
 呼び出し例（`mail_summary` の場合）:
 
@@ -127,12 +137,12 @@ SNSリサーチ系の依頼は以下のツールに振り分ける。**頼み方
 **検索面チェックのレシピ（3KW以上は必ずこの順）**:
 1. `tiktok_acquire`（keywords=KW群, videos_per_kw=0）→ job_id を控える
 2. 数分後 `tiktok_acquire_status`（job_id）→ done になったら s3_prefix を得る
-3. `search_surface_check`（keywords, acquire_s3_prefix=s3_prefix, client_accounts=[@ハンドル]）
+3. `search_surface_check`（keywords, acquire_job_id=job_id, client_accounts=[@ハンドル]）
 1〜2KWの即席チェックだけは `search_surface_check` を直接呼んでよい。
 
 **勝ちパターン×KW優先度（カタログ⑥）のレシピ（5KW比較）**:
 1. `tiktok_acquire`（5KW, videos_per_kw=6）→ status → s3_prefix
-2. KWごとに `video_algorithm`（query=KW, acquire_s3_prefix=s3_prefix, kw_set=[5KW全部]）を
+2. KWごとに `video_algorithm`（query=KW, acquire_job_id=job_id, kw_set=[5KW全部]）を
    **別ターンで1KWずつ**呼ぶ（1回で全KWをまとめない＝タイムアウト防止）
 3. 全KW完了後、各結果の要約と検索量（ユーザーがラッコ実測値をくれたら search_volume に渡す）
    からKW優先度の提案を会話でまとめる

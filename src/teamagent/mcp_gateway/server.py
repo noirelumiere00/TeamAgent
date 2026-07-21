@@ -5,9 +5,13 @@ tool として叩くための境界。RLS 行権限・per-user OAuth・fail-clos
 （＝境界の内側 Python）で死守し、外殻はここを越えて RDS/Secrets/Google に直接触れない。
 
 セキュリティ不変条件（WS-C 強化版）:
-- **STRICT モード（resolver 注入＝本番）**：外殻は ``_user_context.slack_user_id`` のみ渡す。
-  email/groups/role はサーバ側で Slack から解決し、**外殻申告の email/groups/role は一切採らない**。
-  slack_user_id 欠落・解決不能・resolver 例外は require_rls 下で fail-closed（ダウングレード不可）。
+- **STRICT モード（resolver 注入＝本番）**：OpenClaw の ingress plugin が Slack event の
+  user/team/channel と tool/全引数を one-use HMAC claim に束縛する。LLM が申告した
+  ``_user_context.slack_user_id`` 単体は認可 identity として一切採らない。
+- MCP は署名・audience・iat/exp・request hash・nonce replay・申告ID一致を検証後にだけ
+  Slack resolver を呼ぶ。email/groups/role はサーバ側で解決し、外殻申告は全破棄する。
+- claim 欠落/改ざん/replay、Slack ID 不一致、team 不一致、resolver 障害/未知/guest/stranger は
+  会社共有を含む全本番モードで fail-closed（ダウングレード不可）。
 - ``user_role`` は常にサーバ導出の ``"member"``＝MCP 越しの admin 昇格は構造的に不可能。
 - **LEGACY モード（resolver 未注入）**：単体テスト/PoC 専用。本番エントリポイントは resolver 必須で
   起動（``build_slack_identity_resolver`` が None なら起動拒否）。legacy でも role は member 強制。
@@ -36,6 +40,12 @@ from teamagent.identity import (
     company_member_metadata,
     no_access_metadata,
     shared_company_domains_from_env,
+)
+from teamagent.mcp_gateway.caller_claim import (
+    CALLER_CLAIM_FIELD,
+    CallerClaimError,
+    CallerClaimVerifier,
+    VerifiedCallerClaim,
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import SkillContext
@@ -71,13 +81,24 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
     props[USER_CONTEXT_KEY] = {
         "type": "object",
         "description": (
-            "RLS 用の呼び出し元コンテキスト。本番(STRICT)では slack_user_id のみ有効＝サーバ側で"
-            "身元解決され権威となる（user_email/user_groups/user_role の外殻申告は無視）。"
+            "RLS 用の呼び出し元コンテキスト。本番では trusted OpenClaw ingress plugin が"
+            "Slack event由来値とone-use署名claimを注入する。LLM申告値単体は認可に使わない。"
         ),
         "properties": {
             "slack_user_id": {
                 "type": "string",
-                "description": "Slack user_id。本番はこれだけでサーバが email/groups を解決。",
+                "description": "Slack user_id申告値。署名claimのevent userと一致した時だけ有効。",
+            },
+            "slack_team_id": {
+                "type": "string",
+                "description": "trusted pluginが注入するSlack workspace team_id。",
+            },
+            CALLER_CLAIM_FIELD: {
+                "type": "string",
+                "description": (
+                    "trusted pluginがtool実行直前に注入するone-use署名claim。"
+                    "モデルや利用者が作成してはならない。"
+                ),
             },
             # 後方互換（LEGACY=テスト/PoC のみ有効。STRICT では破棄される）。
             "user_email": {"type": "string"},
@@ -197,6 +218,7 @@ def _err(message: str, **extra: Any) -> list[TextContent]:
 async def _resolve_metadata(
     raw: dict[str, Any],
     *,
+    verified_caller: VerifiedCallerClaim | None,
     require_rls: bool,
     identity_resolver: IdentityResolver | None,
     allowed_domains: frozenset[str] | None,
@@ -205,66 +227,73 @@ async def _resolve_metadata(
 ) -> tuple[dict[str, Any], list[TextContent] | None]:
     """RLS メタを決める。返り値 ``(metadata, fail_response)``。fail_response 非 None なら即返す。
 
-    COMPANY_SHARED（会社共有・§G）：全員が会社ナレッジを読む。本人IDは認可に使わず監査のみ。
-    STRICT（resolver 有）：slack_user_id をサーバ側解決し、外殻申告は破棄。
+    COMPANY_SHARED（会社共有・§G）：署名済み本人を解決できた会社memberだけが共有群を使う。
+    STRICT（resolver 有）：署名済みevent userをサーバ側解決し、外殻申告は破棄。
     LEGACY（resolver 無）：テスト/PoC 専用。user_email を使うが role は member 強制。
     """
-    slack_user_id = raw.get("slack_user_id")
+    slack_user_id = verified_caller.slack_user_id if verified_caller else None
     # 配信先ルーティング hint（identity ではない＝認可/RLS には一切使わない）。
     # knowledge_deliver が「聞かれたチャンネル/スレッドに添付」するのに使う。無ければ DM 配信。
-    channel_id = raw.get("channel_id")
-    thread_ts = raw.get("thread_ts")
+    channel_id = verified_caller.channel_id if verified_caller else raw.get("channel_id")
+    thread_ts = verified_caller.thread_ts if verified_caller else raw.get("thread_ts")
 
     if company_shared_groups is not None:
-        # 会社共有モード: 全員が同じ会社ナレッジを見る。OC 申告の email/groups/role は破棄、
-        # slack_user_id は「誰が聞いたか」の監査用途。
+        # 会社共有モードも「Slack event署名 + exact team + member resolver成功」が必須。
+        # 共有groupは会社memberであることを検証した後だけ付与する。
         if raw.get("user_email") or raw.get("user_groups") or raw.get("user_role"):
             logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
-        meta = company_member_metadata(company_shared_groups)
-        audit_uid = slack_user_id if isinstance(slack_user_id, str) and slack_user_id else None
-        # §U: per-user OAuth tool（mail_*/morning_digest）用に本人 user_email も server-side で
-        # 解決して載せる（会社共有グループは維持＝search 等は従来どおり全社可視）。OAuth token は
-        # Slack 会社メールを key に保存される（make_connect_links/connect 開始時の state）ため、
-        # ここで slack_user_id → 会社メール を解決すれば mail tool が token を引ける。
-        # 解決失敗（resolver 無/Slack 不達/非メンバ）は user_email=None のまま＝search は company
-        # groups で動き続け（可用性維持）、mail は skill 側で fail-closed（本人未解決で拒否）。
-        if identity_resolver is not None and audit_uid:
-            try:
-                identity = await identity_resolver(audit_uid)
-            except Exception:
-                logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
-                identity = None
-            resolved = (
-                build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
+        if verified_caller is None or identity_resolver is None or not slack_user_id:
+            logger.warning("identity_spoof_rejected", tool=tool, reason="missing_verified_caller")
+            return {}, _err(
+                "Caller authorization failed.",
+                code="CALLER_IDENTITY_REJECTED",
             )
-            if resolved and resolved.get("user_email"):
-                meta = {
-                    **meta,
-                    "user_email": resolved["user_email"],
-                    # 会社共有グループ + 本人ドメイングループをマージ（重複除去）。
-                    "user_groups": sorted(set(meta["user_groups"]) | set(resolved["user_groups"])),
-                    "identity_verified": True,
-                }
-                logger.info(
-                    "identity_resolved",
-                    tool=tool,
-                    source="company_shared+resolver",
-                    domain=_domain_of(resolved["user_email"]),
-                )
-        if meta.get("user_email") is None:
-            logger.info("identity_company_shared", tool=tool, slack_user_id_audit=audit_uid)
+        try:
+            identity = await identity_resolver(slack_user_id)
+        except Exception:
+            logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
+            return {}, _err(
+                "Caller authorization failed.",
+                code="CALLER_IDENTITY_REJECTED",
+            )
+        resolved = (
+            build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
+        )
+        if not resolved or not resolved.get("user_email"):
+            logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
+            return {}, _err(
+                "Caller authorization failed.",
+                code="CALLER_IDENTITY_REJECTED",
+            )
+        company_meta = company_member_metadata(company_shared_groups)
+        meta = {
+            **company_meta,
+            "user_email": resolved["user_email"],
+            "user_groups": sorted(set(company_meta["user_groups"]) | set(resolved["user_groups"])),
+            "identity_verified": True,
+        }
+        logger.info(
+            "identity_resolved",
+            tool=tool,
+            source="company_shared+signed_claim+resolver",
+            domain=_domain_of(resolved["user_email"]),
+        )
         return {**meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
 
     if identity_resolver is not None:
         # 外殻が email/groups/role を申告してきたら破棄して警告（攻撃 or バグの早期検知）。
         if raw.get("user_email") or raw.get("user_groups") or raw.get("user_role"):
             logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
-        if not slack_user_id or not isinstance(slack_user_id, str):
+        if verified_caller is None or not slack_user_id:
             if require_rls:
-                logger.warning("identity_spoof_rejected", tool=tool, reason="missing_slack_user_id")
+                logger.warning(
+                    "identity_spoof_rejected",
+                    tool=tool,
+                    reason="missing_verified_caller",
+                )
                 return {}, _err(
-                    "RLS required: _user_context.slack_user_id is missing. Caller MUST retry "
-                    'with arguments including _user_context: {"slack_user_id": "<requester id>"}.'
+                    "Caller authorization failed.",
+                    code="CALLER_IDENTITY_REJECTED",
                 )
             return no_access_metadata(), None
         try:
@@ -279,8 +308,8 @@ async def _resolve_metadata(
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
                 return {}, _err(
-                    "RLS required: identity could not be resolved from "
-                    "_user_context.slack_user_id. Verify it and /teamagent connect completion."
+                    "Caller authorization failed.",
+                    code="CALLER_IDENTITY_REJECTED",
                 )
             return no_access_metadata(), None
         logger.info(
@@ -311,6 +340,39 @@ async def _resolve_metadata(
     return meta, None
 
 
+async def _verify_caller(
+    arguments: dict[str, Any],
+    *,
+    tool: str,
+    identity_resolver: IdentityResolver | None,
+    company_shared_groups: frozenset[str] | None,
+    caller_claim_verifier: CallerClaimVerifier | None,
+) -> tuple[VerifiedCallerClaim | None, list[TextContent] | None]:
+    """Verify the signed ingress identity before any resolver or company access."""
+
+    protected = identity_resolver is not None or company_shared_groups is not None
+    if not protected:
+        return None, None
+    if caller_claim_verifier is None:
+        logger.error("caller_claim_verifier_missing", tool=tool)
+        return None, _err(
+            "Caller authorization is unavailable.",
+            code="CALLER_IDENTITY_CONFIGURATION_ERROR",
+        )
+    try:
+        return await caller_claim_verifier.verify(tool=tool, arguments=arguments), None
+    except CallerClaimError as error:
+        logger.warning(
+            "caller_claim_rejected",
+            tool=tool,
+            reason=str(error),
+        )
+        return None, _err(
+            "Caller authorization failed.",
+            code="CALLER_IDENTITY_REJECTED",
+        )
+
+
 async def dispatch_tool(
     by_name: dict[str, ToolSpec],
     name: str,
@@ -320,6 +382,7 @@ async def dispatch_tool(
     identity_resolver: IdentityResolver | None = None,
     allowed_domains: frozenset[str] | None = None,
     company_shared_groups: frozenset[str] | None = None,
+    caller_claim_verifier: CallerClaimVerifier | None = None,
 ) -> list[TextContent]:
     """1 tool 呼び出しを実行する（身元解決 → 入力検証 → 同期 skill を thread 実行）。
 
@@ -329,9 +392,22 @@ async def dispatch_tool(
     if spec is None:
         return _err(f"unknown tool: {name}")
 
-    raw = arguments.get(USER_CONTEXT_KEY) or {}
+    raw_value = arguments.get(USER_CONTEXT_KEY)
+    raw = {} if raw_value is None else raw_value
+    if not isinstance(raw, dict):
+        return _err("invalid input: _user_context must be an object")
+    verified_caller, caller_fail = await _verify_caller(
+        arguments,
+        tool=name,
+        identity_resolver=identity_resolver,
+        company_shared_groups=company_shared_groups,
+        caller_claim_verifier=caller_claim_verifier,
+    )
+    if caller_fail is not None:
+        return caller_fail
     metadata, fail = await _resolve_metadata(
         raw,
+        verified_caller=verified_caller,
         require_rls=require_rls,
         identity_resolver=identity_resolver,
         allowed_domains=allowed_domains,
@@ -357,9 +433,10 @@ async def dispatch_tool(
 
     _progress = await send_progress(name, raw, request_id=ctx.request_id)
     _started = time.perf_counter()
+    skill = spec.instantiate()
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
-        output = await asyncio.to_thread(spec.instantiate().run, skill_input, ctx)
+        output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except Exception as e:
         logger.warning(
@@ -369,7 +446,10 @@ async def dispatch_tool(
     finally:
         await clear_progress(_progress, request_id=ctx.request_id)
 
-    data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    try:
+        data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
+    finally:
+        skill.cleanup_output(output)
     # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
     # 本番主経路（AiLa→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
     # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
@@ -406,6 +486,7 @@ async def dispatch_run_agent(
     identity_resolver: IdentityResolver | None = None,
     allowed_domains: frozenset[str] | None = None,
     company_shared_groups: frozenset[str] | None = None,
+    caller_claim_verifier: CallerClaimVerifier | None = None,
     max_turns: int = 8,
     cost_cap_usd: float = 0.5,
     tool_timeout_s: float = 90.0,
@@ -414,11 +495,24 @@ async def dispatch_run_agent(
 
     身元解決は dispatch_tool と同じ境界（_resolve_metadata）を通す。L1 tool（specs）を
     そのまま SDK に渡す（run_agent 自身は specs に含まれないので再帰しない）。
-    Bedrock/Node CLI を要するライブ実行。例外は構造化エラーで返す（外殻ループを落とさない）。
+    Bedrock を要するライブ実行。例外は構造化エラーで返す（外殻ループを落とさない）。
     """
-    raw = arguments.get(USER_CONTEXT_KEY) or {}
+    raw_value = arguments.get(USER_CONTEXT_KEY)
+    raw = {} if raw_value is None else raw_value
+    if not isinstance(raw, dict):
+        return _err("invalid input: _user_context must be an object")
+    verified_caller, caller_fail = await _verify_caller(
+        arguments,
+        tool=RUN_AGENT_TOOL_NAME,
+        identity_resolver=identity_resolver,
+        company_shared_groups=company_shared_groups,
+        caller_claim_verifier=caller_claim_verifier,
+    )
+    if caller_fail is not None:
+        return caller_fail
     metadata, fail = await _resolve_metadata(
         raw,
+        verified_caller=verified_caller,
         require_rls=require_rls,
         identity_resolver=identity_resolver,
         allowed_domains=allowed_domains,
@@ -435,9 +529,8 @@ async def dispatch_run_agent(
     user_email = metadata.get("user_email")
     request_id = f"run-agent-{uuid.uuid4().hex[:12]}"
     try:
-        # 遅延 import: claude_agent_sdk(Node CLI) は重く本番ライブ専用。MCP モジュール import を
-        # 軽く保つため呼び出し時に import する。SDK 未導入環境の ImportError も握って構造化エラー化
-        # する（dispatch の「例外で外殻ループを落とさない」契約を import 失敗でも守る）。
+        # 遅延 import: Bedrock orchestration は本番ライブ専用。MCP モジュール import を
+        # 軽く保ち、依存初期化エラーも構造化して外殻ループを落とさない。
         from teamagent.orchestrator.agent_config import (
             build_orchestrator_system_prompt,
             orchestrator_model_from_env,
@@ -452,8 +545,8 @@ async def dispatch_run_agent(
             system_prompt=build_orchestrator_system_prompt(),
             user_id=user_email,
             ctx_metadata=metadata,
-            # user_email があれば fail-closed で RLS 強制。
-            # 会社共有モードは email 無＝groups で認可済なので require_rls=False。
+            # 本番のSTRICT/会社共有は署名済みSlack memberをresolverでemailへ解決済み。
+            # LEGACYテストだけがemail無しになり得る。
             require_rls=bool(user_email),
             max_turns=max_turns,
             cost_cap_usd=cost_cap_usd,
@@ -514,12 +607,19 @@ def build_server(
     identity_resolver: IdentityResolver | None = None,
     allowed_domains: frozenset[str] | None = None,
     company_shared_groups: frozenset[str] | None = None,
+    caller_claim_verifier: CallerClaimVerifier | None = None,
 ) -> Server:
     """TeamAgent MCP サーバを構築する（specs 省略時は本番ツールを遅延構築）。"""
     if specs is None:
         from teamagent.orchestrator.factory import build_production_tools
 
         specs = build_production_tools()
+    if company_shared_groups is not None and identity_resolver is None:
+        raise RuntimeError("company-shared mode requires the Slack identity resolver")
+    if (
+        identity_resolver is not None or company_shared_groups is not None
+    ) and caller_claim_verifier is None:
+        raise RuntimeError("signed caller claim verifier is required for Slack identity")
     by_name = {s.name: s for s in specs}
     enable_orchestrator = _envflag("USE_AGENT_ORCHESTRATOR")
     server: Server = Server("teamagent")
@@ -539,6 +639,7 @@ def build_server(
                 identity_resolver=identity_resolver,
                 allowed_domains=allowed_domains,
                 company_shared_groups=company_shared_groups,
+                caller_claim_verifier=caller_claim_verifier,
             )
         return await dispatch_tool(
             by_name,
@@ -548,6 +649,7 @@ def build_server(
             identity_resolver=identity_resolver,
             allowed_domains=allowed_domains,
             company_shared_groups=company_shared_groups,
+            caller_claim_verifier=caller_claim_verifier,
         )
 
     return server
@@ -562,20 +664,23 @@ def build_production_server() -> Server:
     search 等は会社共有グループで全社可視のまま、mail_*/morning_digest は resolver が解決した
     本人 user_email で per-user OAuth token を引ける（_resolve_metadata の company_shared 参照）。
     """
+    caller_claim_verifier = CallerClaimVerifier.from_env()
+    resolver = build_slack_identity_resolver()
+    if resolver is None:
+        raise RuntimeError("SLACK_BOT_TOKEN is required for caller identity resolution")
     company = company_shared_groups_from_env()
     if company is not None:
         return build_server(
             company_shared_groups=company,
-            identity_resolver=build_slack_identity_resolver(),
+            identity_resolver=resolver,
             allowed_domains=allowed_domains_from_env(),
+            caller_claim_verifier=caller_claim_verifier,
         )
-    resolver = build_slack_identity_resolver()
-    if resolver is None:
-        raise RuntimeError(
-            "TEAMAGENT_SHARED_COMPANY_DOMAINS も SLACK_BOT_TOKEN も未設定です。"
-            "会社共有モードか本人解決 resolver のいずれかが必須です（fail-closed）"
-        )
-    return build_server(identity_resolver=resolver, allowed_domains=allowed_domains_from_env())
+    return build_server(
+        identity_resolver=resolver,
+        allowed_domains=allowed_domains_from_env(),
+        caller_claim_verifier=caller_claim_verifier,
+    )
 
 
 async def _amain() -> None:

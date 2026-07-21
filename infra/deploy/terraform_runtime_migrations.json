@@ -1,0 +1,414 @@
+{
+  "schema_version": 1,
+  "log_versioning_stage": {
+    "id": "2026-07-log-versioning-cutover-v4",
+    "enabled": false,
+    "expires_at": "2026-08-31T00:00:00Z",
+    "buckets": [
+      "teamagent-dev-cloudtrail-718959508629",
+      "teamagent-dev-bedrock-logs-718959508629"
+    ],
+    "allowed_write": "guard-disconnect-versioning-and-cutover-only",
+    "required_status_before": [
+      "Unversioned"
+    ],
+    "required_status_after": "Enabled",
+    "mfa_delete": "Disabled",
+    "producer_action": "guard-disconnect-enable-settle-double-observe-cutover",
+    "producer_state_required": "disconnected",
+    "timestamp_source": "aws-http-response-date",
+    "minimum_settle_seconds": 900,
+    "cutover_mode": "same-workflow-shared-lock-first-time-only"
+  },
+  "migrations": {
+    "2026-07-wolfi-runtime-v1": {
+      "kind": "runtime",
+      "enabled": false,
+      "expires_at": "2026-08-31T00:00:00Z",
+      "requires_migration": null,
+      "requires_versioning_stage": "2026-07-log-versioning-cutover-v4",
+      "description": "One-time divergent-live-to-signed-Wolfi runtime migration. Before enabling, copy every exact live task definition/image into from, then fill the signed destination core digest, source commit, KMS key, and other destination digests in the reviewed rollout commit. Keep ingest/canary disabled until the second migration.",
+      "from": {
+        "task_definition_arns": {
+          "openclaw": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:25",
+          "mcp": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:55",
+          "connect_web": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:53",
+          "ingest": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:42",
+          "morning": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:44",
+          "canary": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:14",
+          "tiktok": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:6",
+          "x_buzz": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "images": {
+          "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:9cde4c829335ba5196186df0460db29eb6dbe31d3f212d095f6367d1b98be8af",
+          "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5",
+          "connect_web": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144",
+          "ingest": "",
+          "morning": "",
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5",
+          "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+          "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-dev-tiktok-acquire@sha256:aa2fbb0b46689ec1ad09c7f884b3691851bd16fd002847f5e77080b08510f724"
+        },
+        "dispatcher_code_sha256": {
+          "tiktok": "tyeLrVlOUf1aedsMRg32O2BncL52omgSmicP3l5JsH8=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "event_mapping_function_response_types": {
+          "tiktok": [],
+          "x_buzz": []
+        },
+        "active_task_counts": {
+          "ingest_active": 0
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+        },
+        "api_gateway": {
+          "api_id": "esk97z9grh",
+          "name": "teamagent-connectweb-api",
+          "protocol_type": "HTTP",
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "stage_name": "$default",
+            "auto_deploy": true,
+            "access_log_enabled": false,
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "canonical_topic_exists": true,
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "subscription_inventory_sha256": "",
+          "confirmed_subscription_metadata_sha256": "",
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_topic_exists": true,
+          "legacy_action_reference_count": null
+        }
+      },
+      "to": {
+        "openclaw_image": "",
+        "mcp_image": "",
+        "x_buzz_image": "",
+        "tiktok_image": "",
+        "dispatcher_code_sha256": {
+          "tiktok": "",
+          "x_buzz": ""
+        },
+        "main_source_commit": "",
+        "main_signature": {
+          "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
+          "required_hmac_contract_commit": "2de3b15632bb2d671a4836d5cf3f252dd9b25727",
+          "kms_key_arn": "",
+          "annotation_name": "org.opencontainers.image.revision",
+          "rekor_transparency_log_required": true
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+        },
+        "required_contract_labels": {
+          "main": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "tiktok": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "openclaw": {
+            "io.teamagent.runtime.architecture": "linux/arm64",
+            "io.teamagent.runtime.readonly-rootfs-required": "true"
+          }
+        },
+        "rule_states": {
+          "ingest": "DISABLED",
+          "morning": "DISABLED",
+          "canary": "DISABLED"
+        },
+        "api_gateway": {
+          "disable_execute_api_endpoint": true,
+          "default_stage": {
+            "access_log_enabled": true,
+            "access_log_destination_arn": "arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/apigateway/teamagent-dev-connect-web",
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          },
+          "openclaw": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_maximum_percent": 100,
+            "deployment_minimum_healthy_percent": 0,
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "enabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "require_alarm_delivery": true,
+          "minimum_configured_destinations": 1,
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_owner_action": "retire-without-import-after-reference-count-zero"
+        }
+      },
+      "required_preflight_profiles": [
+        "main",
+        "openclaw",
+        "tiktok",
+        "x_buzz"
+      ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "15240b8f-0aeb-44aa-afa1-2d2f561ed730"
+      },
+      "reviewed_plan": null
+    },
+    "2026-07-enable-ingest-canary-v1": {
+      "kind": "activation",
+      "enabled": false,
+      "expires_at": "2026-08-31T00:00:00Z",
+      "description": "Second phase only. Fill exact post-runtime task definition ARNs/images and enable after the ACL quarantine and exact canary tasks pass.",
+      "requires_migration": "2026-07-wolfi-runtime-v1",
+      "from": {
+        "task_definition_arns": {
+          "ingest": "",
+          "canary": ""
+        },
+        "images": {
+          "ingest": "",
+          "canary": ""
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
+          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
+          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+        },
+        "rule_states": {
+          "ingest": "DISABLED",
+          "morning": "DISABLED",
+          "canary": "DISABLED"
+        },
+        "api_gateway": {
+          "disable_execute_api_endpoint": true,
+          "default_stage": {
+            "access_log_enabled": true,
+            "access_log_destination_arn": "arn:aws:logs:ap-northeast-1:718959508629:log-group:/aws/apigateway/teamagent-dev-connect-web",
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          },
+          "openclaw": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_maximum_percent": 100,
+            "deployment_minimum_healthy_percent": 0,
+            "deployment_circuit_breaker": {
+              "enable": true,
+              "rollback": true
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "enabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_topic_exists": false,
+          "legacy_action_reference_count": 0
+        }
+      },
+      "to": {
+        "rule_states": {
+          "ingest": "ENABLED",
+          "morning": "ENABLED",
+          "canary": "ENABLED"
+        }
+      },
+      "required_preflight_profiles": [
+        "activation-ingest-acl-quarantine",
+        "activation-canary"
+      ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "dc0db656-b306-41cd-9832-dc91a17eab69"
+      },
+      "reviewed_plan": null
+    }
+  },
+  "external_state_handoffs": {
+    "2026-07-alarm-topic-consolidation-v1": {
+      "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+      "canonical_owner": "aws_sns_topic.alarms",
+      "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+      "legacy_owner": "external-teamagent-state",
+      "import_legacy_into_this_state": false,
+      "ledger_table": "teamagent-dev-image-deployment-intents",
+      "ledger_record_prefix": "alarm-migration#2026-07-alarm-topic-consolidation-v1#",
+      "durable_checkpoint_required": true,
+      "idempotent_resume_required": true,
+      "ordered_phases": [
+        "dual_publish",
+        "publisher_checkpoint",
+        "canonical_delivery_confirmed",
+        "legacy_reference_zero",
+        "legacy_retired"
+      ],
+      "phase_contracts": {
+        "dual_publish": "every inventoried publisher targets canonical and legacy",
+        "publisher_checkpoint": "move one exact publisher from dual-publish to canonical-only and durably checkpoint the mixed post-state",
+        "canonical_delivery_confirmed": "fresh SNS challenge and managed-KMS recipient acknowledgement after every publisher is canonical-only",
+        "legacy_reference_zero": "all-page publisher reference count for legacy is zero while canonical remains complete",
+        "legacy_retired": "legacy topic is absent and canonical publisher set remains complete"
+      },
+      "rollback_contracts": {
+        "dual_publish": "retain legacy until canonical delivery is rechecked",
+        "publisher_checkpoint": "restore the exact publisher from its previous durable checkpoint",
+        "canonical_delivery_confirmed": "retain both target sets and issue a fresh challenge",
+        "legacy_reference_zero": "restore every publisher from durable per-publisher checkpoints",
+        "legacy_retired": "never recreate automatically; require a new reviewed migration"
+      },
+      "activation_requires": {
+        "confirmed_email_endpoint_sha256": "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6",
+        "subscription_inventory_count": 1,
+        "pending_subscription_count": 0,
+        "subscription_protocol": "email",
+        "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+        "chatbot_configuration_count": 0,
+        "legacy_topic_exists": false,
+        "legacy_action_reference_count": 0,
+        "final_phase": "legacy_retired",
+        "final_checkpoint_sha256_required": true,
+        "history_sha256_required": true
+      }
+    }
+  },
+  "retirements": {
+    "2026-07-openclaw-image-only-cli": {
+      "status": "retired",
+      "path": "infra/terraform/apply_openclaw.sh",
+      "replacement": "infra/deploy/terraform_runtime_guard.sh",
+      "reason": "Image-only ECS registration bypassed the atomic UID/read-only/EFS/health/deployment/IAM contract."
+    },
+    "2026-07-targeted-resilience-cli": {
+      "status": "retired",
+      "path": "infra/terraform/apply_resilience.sh",
+      "replacement": "infra/deploy/terraform_runtime_guard.sh",
+      "reason": "Targeted plans can hide count-gated runtime destruction and drift outside the target graph."
+    }
+  }
+}

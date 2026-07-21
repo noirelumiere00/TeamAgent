@@ -166,7 +166,7 @@ data "aws_iam_policy_document" "lambda_app" {
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
     ]
-    resources = ["*"] # 実運用ではモデル ARN を限定
+    resources = local.lambda_bedrock_resources
   }
 
   statement {
@@ -175,9 +175,7 @@ data "aws_iam_policy_document" "lambda_app" {
       "secretsmanager:GetSecretValue",
       "secretsmanager:DescribeSecret",
     ]
-    resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:*:secret:${var.project_name}/${var.environment}/*",
-    ]
+    resources = [data.aws_secretsmanager_secret.database_url.arn]
   }
 
   statement {

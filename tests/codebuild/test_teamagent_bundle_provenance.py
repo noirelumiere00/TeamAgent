@@ -67,6 +67,79 @@ def test_current_contract_and_latest_record_preserve_all_four_production_anchors
         PROVENANCE.require_release_ready(contract)
 
 
+def test_current_release_blockers_are_exactly_observable_in_checked_in_inputs() -> None:
+    contract = PROVENANCE.load_contract(CONTRACT_PATH)
+
+    assert contract["release"]["ready"] is False
+    assert contract["app_html"]["baked_fallback"] == {
+        "key": "codebuild/baked-fallback/connect-web-app.html",
+        "s3_version_id": "SK9M.FDQAqiuh6gw2BmqSXQ4ARlPI4ur",
+        "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb",
+    }
+    assert (
+        "signed final-HEAD C0/H0 runtime evidence has not been supplied"
+        in (contract["release"]["blocked_reason"])
+    )
+    for subject in contract["subjects"]:
+        dockerfile = (ROOT / subject["dockerfile"]).read_text(encoding="utf-8")
+        assert "ARG GIT_COMMIT\n" in dockerfile
+        assert "ARG GIT_BRANCH\n" in dockerfile
+        assert "ARG GIT_COMMIT=" not in dockerfile
+        assert "ARG GIT_BRANCH=" not in dockerfile
+
+
+def test_release_contract_is_satisfiable_when_all_declared_gates_are_proven(
+    tmp_path: Path,
+) -> None:
+    contract = copy.deepcopy(PROVENANCE.load_contract(CONTRACT_PATH))
+    contract["release"] = {"ready": True, "blocked_reason": ""}
+    contract["app_html"]["baked_fallback"]["s3_version_id"] = "fallback-version-1"
+    runtime_bytes = b'{"schema_version":1}\n'
+    contract["source_runtime_contract"]["sha256"] = hashlib.sha256(runtime_bytes).hexdigest()
+    fallback_bytes = b"approved baked fallback"
+    contract["app_html"]["baked_fallback"]["sha256"] = hashlib.sha256(fallback_bytes).hexdigest()
+
+    contract_path = tmp_path / "contract.json"
+    _write_json(contract_path, contract)
+    runtime_path = tmp_path / "infra" / "codebuild" / "teamagent_runtime_contract.json"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_bytes(runtime_bytes)
+    fallback_path = tmp_path / "external-baked-app.html"
+    fallback_path.write_bytes(fallback_bytes)
+    deploy_log = tmp_path / "infra" / "deploy_log.md"
+    deploy_log.parent.mkdir(parents=True, exist_ok=True)
+    deploy_log.write_text(
+        _deploy_log({"schema_version": 1, **contract["app_html"]["production"]}),
+        encoding="utf-8",
+    )
+
+    for subject in contract["subjects"]:
+        arguments = [f"ARG {argument}" for argument in subject["required_build_args"]]
+        labels = [
+            (
+                f'{label}="{binding}"'
+                if binding == subject["runtime_kind"]
+                else f'{label}="${{{binding}}}"'
+            )
+            for label, binding in subject["required_label_bindings"].items()
+        ]
+        dockerfile = tmp_path / subject["dockerfile"]
+        dockerfile.parent.mkdir(parents=True, exist_ok=True)
+        dockerfile.write_text(
+            "\n".join([*arguments, "FROM scratch", f"LABEL {' '.join(labels)}"]) + "\n",
+            encoding="utf-8",
+        )
+
+    PROVENANCE.verify_source_interface(
+        tmp_path,
+        contract_path,
+        deploy_log,
+        fallback_path,
+    )
+
+    PROVENANCE.require_release_ready(contract)
+
+
 def test_malformed_newest_production_entry_cannot_fall_back_to_an_older_record(
     tmp_path: Path,
 ) -> None:

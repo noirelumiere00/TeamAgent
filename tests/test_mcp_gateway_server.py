@@ -84,11 +84,28 @@ def test_list_tools_includes_user_context() -> None:
     assert "q" in props  # 元スキーマ保持
     assert USER_CONTEXT_KEY in props  # RLS コンテキスト口を付与
     assert "user_email" in props[USER_CONTEXT_KEY]["properties"]
+    assert "slack_team_id" in props[USER_CONTEXT_KEY]["properties"]
+    assert "caller_claim" in props[USER_CONTEXT_KEY]["properties"]
 
 
 async def test_fail_closed_without_user_email() -> None:
     out = _parse(await dispatch_tool(_BY_NAME, "echo", {"q": "hi"}, require_rls=True))
     assert "RLS required" in out["error"]
+
+
+@pytest.mark.parametrize("invalid_context", [[], "", False, 0])
+async def test_user_context_must_be_an_object_even_when_falsy(
+    invalid_context: object,
+) -> None:
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: invalid_context},
+            require_rls=True,
+        )
+    )
+    assert "_user_context must be an object" in out["error"]
 
 
 async def test_rls_context_propagates_with_user_email() -> None:

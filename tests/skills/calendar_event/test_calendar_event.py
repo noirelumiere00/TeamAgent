@@ -6,15 +6,21 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, InsertedEvent
+from teamagent.hmac_keyring import HMAC_MAX_ROLLOUT_OVERLAP_S
 from teamagent.skills.base import SkillContext
 from teamagent.skills.calendar_event.schema import CalendarEventInput
 from teamagent.skills.calendar_event.skill import CalendarEventSkill
+from teamagent.skills.morning_digest.draft_token import _owner_hash
 from teamagent.skills.morning_digest.event_token import (
     decode_event_token,
     encode_event_token,
@@ -23,21 +29,67 @@ from teamagent.skills.morning_digest.event_token import (
 
 ME = "me@vectorinc.co.jp"
 _CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+_MAIL_SECRET = "calendar-action-test-secret-" + "m" * 32
+_MAIL_NEXT_SECRET = "calendar-action-next-secret-" + "n" * 32
+_LEGACY_DATABASE_URL = (
+    "postgresql://teamagent:legacy-db-password@db.internal:5432/teamagent?sslmode=require"
+)
+_ROTATION_NOW = 2_000_000_000
+_MAIL_TTL_S = 60 * 60 * 24
 
 
 @pytest.fixture(autouse=True)
 def _hmac_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    for name in (
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+        "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+        "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
+        "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+        "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
+        "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
+        "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+        "MAIL_ACTION_HMAC_PREVIOUS_SECRET_VALID_UNTIL",
+        "MAIL_ACTION_TTL_S",
+        "REPORT_LINK_HMAC_SECRET",
+        "DATABASE_URL",
+        "SLACK_BOT_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
 
 
 def _token(**kw: Any) -> str:
-    return encode_event_token(
+    token = encode_event_token(
         start_iso=kw.get("start", "2026-07-15T14:00:00+09:00"),
         end_iso=kw.get("end", "2026-07-15T15:00:00+09:00"),
         title=kw.get("title", "◯◯様 定例"),
         owner_email=kw.get("owner", ME),
         now=kw.get("now"),
+        ttl_s=kw.get("ttl_s"),
     )
+    assert token is not None
+    return token
+
+
+def _legacy_event_token(*, expires: int) -> str:
+    payload = {
+        "s": "2026-07-15T14:00:00+09:00",
+        "n": "2026-07-15T15:00:00+09:00",
+        "l": "legacy meeting",
+        "o": _owner_hash(ME),
+        "e": expires,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+    signature = hmac.new(
+        _LEGACY_DATABASE_URL.encode(),
+        raw,
+        hashlib.sha256,
+    ).digest()[:16]
+
+    def encode(value: bytes) -> str:
+        return base64.urlsafe_b64encode(value).decode().rstrip("=")
+
+    return f"{encode(raw)}.{encode(signature)}"
 
 
 # ── event_token 単体 ────────────────────────────────────────────────────────
@@ -62,11 +114,85 @@ def test_token_rejects_other_owner_and_tamper_and_expiry() -> None:
     assert decode_event_token(old, ME) is None
 
 
+def test_event_token_expiry_is_exclusive_and_ttl_is_bounded() -> None:
+    token = _token(now=1000, ttl_s=60)
+    assert decode_event_token(token, ME, now=1059) is not None
+    assert decode_event_token(token, ME, now=1060) is None
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+            now=1000,
+            ttl_s=60 * 60 * 24 + 1,
+        )
+        is None
+    )
+
+
+def test_invalid_configured_mail_ttl_suppresses_event_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAIL_ACTION_TTL_S", " 3600")
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+            ttl_s=60,
+        )
+        is None
+    )
+
+
 def test_token_fail_closed_without_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     t = _token()
     monkeypatch.delenv("MAIL_ACTION_HMAC_SECRET", raising=False)
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     assert decode_event_token(t, ME) is None
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00",
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="meeting",
+            owner_email=ME,
+        )
+        is None
+    )
+
+
+def test_event_token_accepts_previous_only_during_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old = _token(now=_ROTATION_NOW)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_NEXT_SECRET)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _MAIL_SECRET)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    assert decode_event_token(old, ME, now=_ROTATION_NOW) is not None
+
+    new = _token(now=_ROTATION_NOW)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET")
+    monkeypatch.delenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT")
+    assert decode_event_token(new, ME, now=_ROTATION_NOW) is None
+
+
+def test_legacy_database_event_token_survives_only_the_bounded_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cutover = _ROTATION_NOW + HMAC_MAX_ROLLOUT_OVERLAP_S
+    expires = cutover - 1 + _MAIL_TTL_S
+    legacy = _legacy_event_token(expires=expires)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_SECRET", _LEGACY_DATABASE_URL)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT", str(_ROTATION_NOW))
+    monkeypatch.setenv("MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY", "1")
+
+    payload = decode_event_token(legacy, ME, now=expires - 1)
+    assert payload is not None
+    assert payload.title == "legacy meeting"
+    assert decode_event_token(legacy, ME, now=expires) is None
 
 
 def test_stable_event_id_is_base32hex_and_deterministic() -> None:
@@ -204,7 +330,7 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     from teamagent.skills.morning_digest.schema import MorningDigestInput
     from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     future = (
         (_dt.datetime.now(_dt.timezone(_dt.timedelta(hours=9))) + _dt.timedelta(days=2))
         .replace(minute=0, second=0, microsecond=0)
@@ -276,6 +402,29 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     assert item.event_token  # To 本人×日時確定 → token 発行
     p = decode_event_token(item.event_token, ME)
     assert p is not None and p.start_iso == future
+
+    def _event_token_boom(**kw: Any) -> str:
+        raise RuntimeError("event token helper failed")
+
+    monkeypatch.setattr(
+        "teamagent.skills.morning_digest.skill.encode_event_token", _event_token_boom
+    )
+    contained = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r-token-exception", metadata={"user_email": ME}),
+    ).mail_digest[0]
+    assert contained.event_token == ""  # digest survives and the unsafe action is omitted
+
+    # 現Terraformのように DB URL が主鍵へ誤配線されても、呼出元は action token/button を出さない。
+    legacy_db = "postgresql://teamagent:do-not-sign@db.internal:5432/teamagent"
+    monkeypatch.setenv("DATABASE_URL", legacy_db)
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", legacy_db)
+    invalid = skill.run(
+        MorningDigestInput(max_drafts=0),
+        SkillContext(request_id="r-invalid-key", metadata={"user_email": ME}),
+    ).mail_digest[0]
+    assert invalid.draft_token == ""
+    assert invalid.event_token == ""
 
 
 def test_meeting_iso_rejects_date_only_and_past() -> None:

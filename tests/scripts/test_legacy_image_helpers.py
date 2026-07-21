@@ -130,17 +130,25 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
         for path in ROOT.rglob("*.sh")
         if ".git" not in path.parts and ".venv" not in path.parts
     )
+    composed_guard = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
 
     for path in shell_files:
         body = path.read_text(encoding="utf-8").lower()
         if "start-build" in body:
             assert path in safe_launchers, f"unapproved StartBuild path: {path}"
         if "source.zip" in body:
-            pytest.fail(f"shell launchers must not create source.zip: {path}")
+            assert path == composed_guard
+            assert "validate_quarantine_builder_and_admin_noninterference_plan" in body
+            assert '$project.change.after.source[0].type == "s3"' in body
+            assert (
+                "$project.change.after.source[0].location ==\n"
+                '      "teamagent-dev-raw-files/codebuild/source.zip"'
+            ) in body
 
 
 def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> None:
     guarded_terraform_launchers = {
+        ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh",
         ROOT / "infra" / "terraform" / "plan_image_release.sh",
         ROOT / "infra" / "terraform" / "apply_image_release_plan.sh",
         ROOT / "infra" / "terraform" / "update_image_release_controls.sh",
@@ -152,7 +160,10 @@ def test_no_shell_can_bypass_terraform_for_image_task_definition_changes() -> No
     )
     for path in shell_files:
         body = path.read_text(encoding="utf-8").lower()
-        assert "register-task-definition" not in body, path
+        if "register-task-definition" in body:
+            assert path == ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+            assert "deregister-task-definition" in body
+            assert "cleanup_preflight_tasks" in body
         assert not ("update-service" in body and "--task-definition" in body), path
         if path not in guarded_terraform_launchers and (
             "terraform apply" in body or "terraform plan" in body

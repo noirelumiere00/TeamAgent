@@ -8,12 +8,14 @@ env:
     - MCP_CORE_ARM64_DIGEST
     - MCP_MEDIA_TAG_DIGEST
     - MCP_MEDIA_ARM64_DIGEST
+    - BUILD_CONTEXT_SHA256
 phases:
   pre_build:
     commands:
       - |
         set -euo pipefail
         umask 077
+        export PYTHONDONTWRITEBYTECODE=1
         export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
         unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_ECR
         while IFS= read -r endpoint_variable; do
@@ -96,6 +98,10 @@ phases:
           || { echo "FATAL: baked fallback VersionId differs from the release contract"; exit 1; }
         [ "$(jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT")" = "$BAKED_APP_HTML_SHA256" ] \
           || { echo "FATAL: baked fallback SHA-256 differs from the release contract"; exit 1; }
+        BAKED_APP_HTML_KEY="$(jq -er '.app_html.baked_fallback.key' "$RELEASE_CONTRACT")"
+        [ "$BAKED_APP_HTML_KEY" = "codebuild/baked-fallback/connect-web-app.html" ] \
+          || { echo "FATAL: baked fallback key differs from the fixed release location"; exit 1; }
+        readonly BAKED_APP_HTML_KEY
         python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT"
 
         mapfile -t production_record < <(
@@ -234,7 +240,7 @@ phases:
           aws s3api get-object \
             --region "$EXPECTED_REGION" \
             --bucket teamagent-dev-raw-files \
-            --key codebuild/connect-web-app.html \
+            --key "$BAKED_APP_HTML_KEY" \
             --version-id "$BAKED_APP_HTML_VERSION_ID" \
             --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
             --query VersionId \
@@ -245,22 +251,114 @@ phases:
           || { echo "FATAL: baked fallback VersionId mismatch"; exit 1; }
         [ "$(sha256sum /tmp/baked-connect-web-app.html | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] \
           || { echo "FATAL: baked fallback SHA-256 mismatch"; exit 1; }
-        mkdir -p src/teamagent/connect_web/static
-        install -m 0644 /tmp/baked-connect-web-app.html \
-          src/teamagent/connect_web/static/app.html
-        [ "$(sha256sum src/teamagent/connect_web/static/app.html | awk '{print $1}')" = "$BAKED_APP_HTML_SHA256" ] \
-          || { echo "FATAL: baked fallback SHA-256 mismatch"; exit 1; }
         [ "$APP_HTML_SHA256" != "$BAKED_APP_HTML_SHA256" ] \
           || { echo "FATAL: live app was substituted for the distinct baked fallback"; exit 1; }
         python3 "$BUNDLE_PROVENANCE" verify-source-interface \
           --repo-root "$CODEBUILD_SRC_DIR" \
           --contract "$RELEASE_CONTRACT" \
-          --deploy-log "$DEPLOY_LOG"
+          --deploy-log "$DEPLOY_LOG" \
+          --baked-fallback /tmp/baked-connect-web-app.html
         python3 infra/codebuild/source_provenance.py assert-release-ready \
           --contract infra/codebuild/teamagent_runtime_contract.json
         python3 infra/codebuild/source_provenance.py verify-dockerfile-contract \
           --contract infra/codebuild/teamagent_runtime_contract.json \
           --dockerfile infra/docker/Dockerfile.teamagent-mcp
+        SIGNED_BUILD_CONTEXT_SHA256="$(
+          jq -er '.build_context.canonical_tar_sha256' /tmp/source-declaration.json
+        )"
+        SIGNED_BUILD_CONTEXT_KEY="$(
+          jq -er '.build_context.key' /tmp/source-declaration.json
+        )"
+        SIGNED_BUILD_CONTEXT_VERSION_ID="$(
+          jq -er '.build_context.version_id' /tmp/source-declaration.json
+        )"
+        [[ "$SIGNED_BUILD_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+          || { echo "FATAL: signed canonical context digest is invalid"; exit 1; }
+        [ "$SIGNED_BUILD_CONTEXT_KEY" = \
+          "source-contexts/mcp/$GIT_COMMIT/$SIGNED_BUILD_CONTEXT_SHA256/$(jq -er '.publisher.build_id' /tmp/source-declaration.json).tar" ] \
+          || { echo "FATAL: signed canonical context key is invalid"; exit 1; }
+        case "$SIGNED_BUILD_CONTEXT_VERSION_ID" in
+          ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+            echo "FATAL: signed canonical context VersionId is invalid"
+            exit 1
+            ;;
+        esac
+        BUILD_CONTEXT_TAR=/tmp/teamagent-canonical-build-context.tar
+        aws s3api head-object \
+          --region "$EXPECTED_REGION" \
+          --bucket "$EVIDENCE_BUCKET" \
+          --key "$SIGNED_BUILD_CONTEXT_KEY" \
+          --version-id "$SIGNED_BUILD_CONTEXT_VERSION_ID" \
+          --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+          --output json >/tmp/build-context-head.json
+        jq -e \
+          --arg version "$SIGNED_BUILD_CONTEXT_VERSION_ID" \
+          --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+            .VersionId == $version and
+            .ObjectLockMode == "COMPLIANCE" and
+            .ServerSideEncryption == "aws:kms" and
+            .SSEKMSKeyId == $kms
+          ' /tmp/build-context-head.json >/dev/null \
+          || { echo "FATAL: canonical context is not immutable KMS evidence"; exit 1; }
+        python3 - /tmp/build-context-head.json <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: invalid build-context retention") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: build-context retention has expired")
+        PY
+        DOWNLOADED_CONTEXT_VERSION="$(
+          aws s3api get-object \
+            --region "$EXPECTED_REGION" \
+            --bucket "$EVIDENCE_BUCKET" \
+            --key "$SIGNED_BUILD_CONTEXT_KEY" \
+            --version-id "$SIGNED_BUILD_CONTEXT_VERSION_ID" \
+            --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+            --query VersionId \
+            --output text \
+            "$BUILD_CONTEXT_TAR"
+        )"
+        [ "$DOWNLOADED_CONTEXT_VERSION" = "$SIGNED_BUILD_CONTEXT_VERSION_ID" ] \
+          || { echo "FATAL: canonical context VersionId mismatch"; exit 1; }
+        BUILD_CONTEXT_SHA256="$(
+          sha256sum "$BUILD_CONTEXT_TAR" | awk '{print $1}'
+        )"
+        [ "$BUILD_CONTEXT_SHA256" = "$SIGNED_BUILD_CONTEXT_SHA256" ] \
+          || { echo "FATAL: canonical context differs from signed source evidence"; exit 1; }
+        [ "$(
+          python3 infra/docker/canonical_build_context.py \
+            verify "$BUILD_CONTEXT_TAR" --no-symlinks
+        )" = "$BUILD_CONTEXT_SHA256" ] \
+          || { echo "FATAL: retained canonical context contract mismatch"; exit 1; }
+        CONTEXT_VERIFY_DIR=/tmp/teamagent-canonical-context
+        mkdir "$CONTEXT_VERIFY_DIR"
+        tar -x -f "$BUILD_CONTEXT_TAR" -C "$CONTEXT_VERIFY_DIR"
+        [ "$(sha256sum "$CONTEXT_VERIFY_DIR/.teamagent-source-manifest.json" | awk '{print $1}')" = \
+          "$(jq -er '.source.manifest_sha256' /tmp/source-declaration.json)" ] \
+          || { echo "FATAL: canonical context manifest mismatch"; exit 1; }
+        [ "$(sha256sum "$CONTEXT_VERIFY_DIR/src/teamagent/connect_web/static/app.html" | awk '{print $1}')" = \
+          "$BAKED_APP_HTML_SHA256" ] \
+          || { echo "FATAL: canonical context baked fallback mismatch"; exit 1; }
+        rm "$CONTEXT_VERIFY_DIR/src/teamagent/connect_web/static/app.html"
+        rmdir "$CONTEXT_VERIFY_DIR/src/teamagent/connect_web/static"
+        python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" verify-source \
+          --source-root "$CONTEXT_VERIFY_DIR" \
+          --manifest "$CONTEXT_VERIFY_DIR/.teamagent-source-manifest.json" \
+          --expected-commit "$GIT_COMMIT" \
+          --expected-branch "$GIT_BRANCH" \
+          --expected-with-scrape-tools true \
+          --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
+          --expected-app-html-sha256 "$APP_HTML_SHA256" \
+          --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
+        readonly BUILD_CONTEXT_TAR BUILD_CONTEXT_SHA256 CONTEXT_VERIFY_DIR
+        export BUILD_CONTEXT_SHA256
 
         aws ecr get-login-password --region "$EXPECTED_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
@@ -288,10 +386,11 @@ phases:
         done
         docker buildx build \
           --platform linux/arm64 \
-          --file infra/docker/Dockerfile.teamagent-mcp \
+          --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-mcp" \
           --target final \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
           --build-arg "WITH_SCRAPE_TOOLS=true" \
           --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
           --build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
@@ -308,13 +407,14 @@ phases:
           --metadata-file /tmp/core-build-metadata.json \
           --tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG" \
           --push \
-          .
+          - <"$BUILD_CONTEXT_TAR"
         docker buildx build \
           --platform linux/arm64 \
-          --file infra/docker/Dockerfile.teamagent-media-worker \
+          --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker" \
           --target final \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
+          --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
           --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
           --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
           --provenance=mode=max \
@@ -322,7 +422,9 @@ phases:
           --metadata-file /tmp/media-build-metadata.json \
           --tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG" \
           --push \
-          .
+          - <"$BUILD_CONTEXT_TAR"
+        [ "$(sha256sum "$BUILD_CONTEXT_TAR" | awk '{print $1}')" = "$BUILD_CONTEXT_SHA256" ] \
+          || { echo "FATAL: canonical context changed during dual build"; exit 1; }
   post_build:
     commands:
       - |

@@ -1,32 +1,28 @@
-"""方式B（Agent SDK）の 6-bis コストログ可否をオフライン検証.
+"""Python Anthropic Bedrock client の 6-bis コストログをオフライン検証.
 
-ライブ実行（Node CLI + Bedrock）抜きで、「SDK が返す per-call usage から 6-bis の
-cost/token を取り出せる」ことを **SDK の実メッセージ型 `AssistantMessage` で** 確認する。
-これが通れば、②採用の最大の懸念（呼び出し毎コストログ）は解消＝採用根拠が立つ。
+ライブ Bedrock 抜きで、per-call usage から 6-bis の cost/token を取り出せることを確認する。
 """
 
 from __future__ import annotations
 
-from claude_agent_sdk import AssistantMessage
+from anthropic.types import Usage
 
 from teamagent.orchestrator.sdk_runner import Price, usage_to_record
 
 
-def test_assistant_message_carries_per_call_usage_and_maps_to_6bis() -> None:
-    # SDK の実型。per-turn(=呼び出し毎)の usage を持つことをこの構築自体が示す.
-    msg = AssistantMessage(
-        content=[],
-        model="jp.anthropic.claude-sonnet-4-6",
-        usage={
-            "input_tokens": 1000,
-            "output_tokens": 200,
-            "cache_read_input_tokens": 500,
-            "cache_creation_input_tokens": 100,
-        },
+def test_anthropic_usage_carries_per_call_usage_and_maps_to_6bis() -> None:
+    usage = Usage(
+        input_tokens=1000,
+        output_tokens=200,
+        cache_read_input_tokens=500,
+        cache_creation_input_tokens=100,
     )
-    assert msg.usage is not None
 
-    rec = usage_to_record(msg.usage, model=msg.model, request_id="req-xyz")
+    rec = usage_to_record(
+        usage.model_dump(exclude_none=True),
+        model="jp.anthropic.claude-sonnet-4-6",
+        request_id="req-xyz",
+    )
     # 6-bis が要求する粒度の全フィールドが取れる
     assert rec.request_id == "req-xyz"
     assert rec.model == "jp.anthropic.claude-sonnet-4-6"

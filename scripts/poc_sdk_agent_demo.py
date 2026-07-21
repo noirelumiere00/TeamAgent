@@ -1,12 +1,10 @@
-"""方式B PoC ライブデモ: Agent SDK on Bedrock で適応シナリオ①〜⑥を実Claudeで回す.
+"""Python Anthropic Bedrock clientで適応シナリオ①〜⑥を実Claudeで回す。
 
 前提（揃って初めて動く）:
-  export CLAUDE_CODE_USE_BEDROCK=1
   export AWS_REGION=us-east-1            # or ap-northeast-1
   export AWS_ACCESS_KEY_ID=... / AWS_SECRET_ACCESS_KEY=...  (or SSO/Role)
   export TEAMAGENT_BEDROCK_MODEL="us.anthropic.claude-sonnet-4-6"   # inference profile ID
   # SSL: 会社プロキシなら SSL_CERT_FILE=~/.hermes/ca_bundle.pem
-  # Node 24 系（SDK が同梱CLIを spawn）
 
 実行:
   cd ~/Documents/teamagent-orchestrator-poc
@@ -77,8 +75,6 @@ async def _main() -> int:
 
     # --- preflight: 前提が未設定なら、SDKを呼ぶ前に分かりやすく即中止 ---
     missing: list[str] = []
-    if os.environ.get("CLAUDE_CODE_USE_BEDROCK") != "1":
-        missing.append("CLAUDE_CODE_USE_BEDROCK=1")
     if not os.environ.get("AWS_REGION"):
         missing.append("AWS_REGION（例: us-east-1）")
     if not _aws_creds_active():
@@ -89,7 +85,6 @@ async def _main() -> int:
             print(f"   - {m}")
         print(
             "\n例:\n"
-            "  export CLAUDE_CODE_USE_BEDROCK=1\n"
             "  export AWS_REGION=us-east-1\n"
             "  export TEAMAGENT_BEDROCK_MODEL=us.anthropic.claude-sonnet-4-6\n"
             "  export SSL_CERT_FILE=~/.hermes/ca_bundle.pem\n"

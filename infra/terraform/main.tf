@@ -10,12 +10,9 @@
 #   - CloudWatch Logs
 #   - IAM Role（Lambda 用）
 #
-# 利用例:
-#   cp terraform.tfvars.example terraform.tfvars
-#   # 編集
-#   terraform init
-#   terraform plan
-#   terraform apply
+# 操作入口:
+#   infra/deploy/terraform_runtime_guard.sh
+# plain terraform plan/apply と旧image-only deploy scriptは禁止。詳細はREADME参照。
 # ============================================================
 
 terraform {
@@ -28,11 +25,15 @@ terraform {
     }
     archive = {
       source  = "hashicorp/archive"
-      version = "~> 2.4"
+      version = "= 2.8.0"
     }
     external = {
       source  = "hashicorp/external"
       version = "~> 2.3"
+    }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.7"
     }
   }
 
@@ -47,7 +48,8 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = ["718959508629"]
 
   default_tags {
     tags = {

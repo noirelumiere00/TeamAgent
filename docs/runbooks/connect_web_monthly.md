@@ -2,6 +2,8 @@
 
 作成: 2026-07-10（入れ込み v2）。対象: Drive/Slack の営業ナレッジを pgvector に取り込み、
 No-AI 静的 HTML（/app）として 16 名へ配信する月次サイクルの全手順＋フォルダ再編の移行手順。
+production releaseは必ず `infra/terraform/README.md` の単一guarded
+full saved-plan workflowに従う。
 
 > **公開範囲の契約**: 静的 `/app` は per-user ACL 表示ではなく、
 > `--shared-group` で指定した会社共有集合のミラー。`owner_email` だけ、
@@ -126,8 +128,9 @@ bash infra/deploy/publish_app_html.sh stage \
 - exact `origin/dev` から final core+media を build/attest し、両 subject が同じ app
   provenance digest を持つこと、ECR C0/H0、署名済み SBOM/provenance と recursive
   referrer graph を確認する
-- fresh active receipt を発行し、script が表示した 4 変数を含む新しい full saved plan を
-  `plan_image_release.sh` で作る。レビュー後 `apply_image_release_plan.sh` で一度だけ apply
+- fresh active receipt を発行し、script が表示した 4 変数を含むreview済みmigrationを
+  `terraform_runtime_guard.sh plan` でfull saved planにする。レビュー後、同guardの
+  `apply` で一度だけ適用する
 - apply 後に `/healthz` の `app_html_contract_ok=true`、`app_html_source=s3`、
   full `app_html_sha256`、`app_html_s3_version_id`、manifest、build_inputs が plan と一致する
   ことを確認し、ブラウザで `/app` のフッタ更新日を目視する
@@ -148,9 +151,9 @@ bash infra/deploy/publish_app_html.sh stage \
    receipt/signature VersionIds を tfvars の `mcp_image` /
    `image_release_evidence.mcp` に設定し、worktree 外の full saved plan を一度だけ apply:
    ```bash
-   bash infra/terraform/plan_image_release.sh /secure/local/path/connect-ingest-release.tfplan
+   bash infra/deploy/terraform_runtime_guard.sh plan --help
    terraform show /secure/local/path/connect-ingest-release.tfplan
-   bash infra/terraform/apply_image_release_plan.sh /secure/local/path/connect-ingest-release.tfplan
+   bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/local/path/connect-ingest-release.tfplan --out /secure/local/path/connect-ingest-release.apply.json
    ```
    同じ `mcp_image` を使う connect-web と ingest task definition はどちらも
    production release gate に直接依存する。tag、direct ECS registration、

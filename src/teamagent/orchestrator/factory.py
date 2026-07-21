@@ -289,7 +289,7 @@ def build_production_tools() -> list[ToolSpec]:
 
     # メール×社内ナレッジ横断ツール（read-only・per-user OAuth）。**既定 OFF**
     # （USE_MAIL_LINK_TOOL=1）。本番 Slack Bot へは intent.py + slack_bot.py 経由で届くため、
-    # ここはオーケストレータ（Agent SDK）用の並行配線（dark）に過ぎない。token_store を必ず渡す。
+    # ここはBedrockオーケストレータ用の並行配線（dark）に過ぎない。token_store を必ず渡す。
     if _envflag("USE_MAIL_LINK_TOOL"):
         from teamagent.skills.mail_to_internal_context.skill import MailToInternalContextSkill
 

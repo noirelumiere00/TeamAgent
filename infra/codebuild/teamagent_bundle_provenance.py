@@ -113,9 +113,7 @@ def _exact_keys(value: Mapping[str, Any], expected: set[str], *, label: str) -> 
     missing = sorted(expected - value.keys())
     unknown = sorted(value.keys() - expected)
     if missing or unknown:
-        raise ProvenanceError(
-            f"{label} schema mismatch: missing={missing}, unknown={unknown}"
-        )
+        raise ProvenanceError(f"{label} schema mismatch: missing={missing}, unknown={unknown}")
 
 
 def _text(value: Any, *, label: str, maximum: int = 4096) -> str:
@@ -138,8 +136,7 @@ def _version_id(value: Any, *, label: str) -> str:
 
 def _canonical_bytes(value: Any) -> bytes:
     return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
 
 
@@ -157,8 +154,7 @@ def latest_production_record(deploy_log: Path) -> dict[str, Any]:
         (
             item.split("\n---\n", maxsplit=1)[0]
             for item in sections[1:]
-            if "/app" in item.partition("\n")[0]
-            and "本番" in item.partition("\n")[0]
+            if "/app" in item.partition("\n")[0] and "本番" in item.partition("\n")[0]
         ),
         None,
     )
@@ -247,7 +243,15 @@ def load_contract(path: Path) -> dict[str, Any]:
     for key in PRODUCTION_KEYS - {"app_html_s3_version_id"}:
         _sha256(production[key], label=f"contract {key}")
     fallback = _mapping(app_html["baked_fallback"], label="contract baked fallback")
-    _exact_keys(fallback, {"s3_version_id", "sha256"}, label="contract baked fallback")
+    _exact_keys(
+        fallback,
+        {"key", "s3_version_id", "sha256"},
+        label="contract baked fallback",
+    )
+    if fallback["key"] != "codebuild/baked-fallback/connect-web-app.html":
+        raise ProvenanceError("baked fallback S3 key is not fixed")
+    if fallback["key"] == app_html["key"]:
+        raise ProvenanceError("baked fallback must not share the live application key")
     _sha256(fallback["sha256"], label="baked fallback SHA-256")
     if fallback["s3_version_id"] is not None:
         _version_id(fallback["s3_version_id"], label="baked fallback VersionId")
@@ -395,9 +399,7 @@ def application_provenance_sha256(
 
 def _subject(contract: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     matches = [
-        item
-        for item in contract["subjects"]
-        if isinstance(item, dict) and item.get("name") == name
+        item for item in contract["subjects"] if isinstance(item, dict) and item.get("name") == name
     ]
     if len(matches) != 1:
         raise ProvenanceError("contract subject is missing or ambiguous")
@@ -448,9 +450,7 @@ def verify_source_interface(
         _mapping(contract["app_html"], label="contract.app_html")["baked_fallback"],
         label="contract fallback",
     )
-    fallback_path = baked_fallback_path or (
-        repo_root / "src/teamagent/connect_web/static/app.html"
-    )
+    fallback_path = baked_fallback_path or (repo_root / "src/teamagent/connect_web/static/app.html")
     try:
         fallback_sha256 = hashlib.sha256(fallback_path.read_bytes()).hexdigest()
     except OSError as exc:
@@ -505,9 +505,7 @@ def verify_source_interface(
                     rf"[\"']?(?:\s|$)"
                 )
             if re.search(expected, labels) is None:
-                raise ProvenanceError(
-                    f"{name} Dockerfile lacks label binding {label_name}"
-                )
+                raise ProvenanceError(f"{name} Dockerfile lacks label binding {label_name}")
 
 
 def verify_oci_config(
@@ -586,14 +584,10 @@ def verify_oci_config(
         }
         expected.update({label: values[key] for label, key in APP_LABELS.items()})
     expected_teamagent_labels = {
-        label_name
-        for label_name in expected
-        if label_name.startswith("io.teamagent.")
+        label_name for label_name in expected if label_name.startswith("io.teamagent.")
     }
     actual_teamagent_labels = {
-        label_name
-        for label_name in labels
-        if label_name.startswith("io.teamagent.")
+        label_name for label_name in labels if label_name.startswith("io.teamagent.")
     }
     allowed_teamagent_labels = set(expected_teamagent_labels)
     if subject_name == "core" and runtime_contract_path is not None:
@@ -618,10 +612,9 @@ def verify_oci_config(
             if not isinstance(label_name, str) or not LABEL_RE.fullmatch(label_name):
                 raise ProvenanceError("runtime contract OCI label is invalid")
             allowed_teamagent_labels.add(label_name)
-    if (
-        not expected_teamagent_labels.issubset(actual_teamagent_labels)
-        or not actual_teamagent_labels.issubset(allowed_teamagent_labels)
-    ):
+    if not expected_teamagent_labels.issubset(
+        actual_teamagent_labels
+    ) or not actual_teamagent_labels.issubset(allowed_teamagent_labels):
         missing = sorted(expected_teamagent_labels - actual_teamagent_labels)
         unknown = sorted(actual_teamagent_labels - allowed_teamagent_labels)
         raise ProvenanceError(

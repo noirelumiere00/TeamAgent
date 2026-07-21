@@ -1,0 +1,10 @@
+/repo/tests/fixtures/openclaw/current-task-definition.json:generic-api-key:28
+tests/fixtures/openclaw/current-task-definition.json:generic-api-key:28
+/repo/tests/fixtures/openclaw/rollout-gates-pass.json:generic-api-key:144
+tests/fixtures/openclaw/rollout-gates-pass.json:generic-api-key:144
+/repo/tests/fixtures/openclaw/rollout-gates-pass.json:generic-api-key:151
+tests/fixtures/openclaw/rollout-gates-pass.json:generic-api-key:151
+/repo/tests/scripts/test_terraform_hmac_payload.py:generic-api-key:96
+tests/scripts/test_terraform_hmac_payload.py:generic-api-key:96
+/repo/tests/scripts/test_terraform_hmac_payload.py:generic-api-key:161
+tests/scripts/test_terraform_hmac_payload.py:generic-api-key:161

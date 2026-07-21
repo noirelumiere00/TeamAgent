@@ -108,8 +108,8 @@ def _commit() -> int:
         )
         print(f"upserted {key}: owner={owner} acl_groups={acl_groups}")
     print(
-        "\n次: TEAMAGENT_MCP_BEARER=... python scripts/attack_mcp.py "
-        f"--query {QUERY_MARKER} --outsider-needle {OUTSIDER_TOKEN}"
+        "\n次: docs/openclaw/adversarial_harness_runbook.md の署名済みSlack ingress手順を実行 "
+        f"(query={QUERY_MARKER}, outsider needle={OUTSIDER_TOKEN})"
     )
     return 0
 

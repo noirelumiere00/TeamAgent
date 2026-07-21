@@ -49,7 +49,7 @@ phases:
         BUNDLE_CONTRACT_SHA256="$(python3 "$PROVENANCE" contract-sha256 --contract "$BUNDLE_CONTRACT")"
         [ "$BUNDLE_CONTRACT_SHA256" = "__OPENCLAW_BUNDLE_CONTRACT_SHA256__" ] || { echo "FATAL: bundle contract hash mismatch"; exit 1; }
         python3 "$PROVENANCE" assert-release-ready --contract "$BUNDLE_CONTRACT"
-        [ -x infra/openclaw/build-image.sh ] || { echo "FATAL: OpenClaw bundle builder interface is missing"; exit 1; }
+        [ -x infra/openclaw/build-bundle.sh ] || { echo "FATAL: OpenClaw bundle builder interface is missing"; exit 1; }
         python3 "$PROVENANCE" create-source-manifest \
           --repo-root "$CODEBUILD_SRC_DIR" \
           --commit "$SOURCE_COMMIT" \
@@ -156,7 +156,7 @@ phases:
         SOURCE_COMMIT="${CODEBUILD_RESOLVED_SOURCE_VERSION:?resolved source commit is missing}"
         BUNDLE_CONTRACT_SHA256="$(python3 infra/codebuild/openclaw_provenance.py contract-sha256 --contract infra/codebuild/openclaw_bundle_contract.json)"
         REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
-        bash infra/openclaw/build-image.sh \
+        bash infra/openclaw/build-bundle.sh \
           --bundle-contract infra/codebuild/openclaw_bundle_contract.json \
           --core-image "$REGISTRY/teamagent-openclaw-quarantine:candidate-${SOURCE_COMMIT}-core" \
           --media-image "$REGISTRY/teamagent-openclaw-media-quarantine:candidate-${SOURCE_COMMIT}-media" \

@@ -1,83 +1,203 @@
-# infra/openclaw — OpenClaw 外殻の隔離デプロイ雛形（WS-B）
+# OpenClaw release boundary
 
-TeamAgent を OpenClaw＋Claude(Bedrock) の自律型エージェントへ移行するための、
-**自律外殻(OpenClaw)を安全に隔離して動かす**ためのテンプレ一式。すべて雛形であり、
-実デプロイ（EC2 配置・IAM 適用・トンネル）はゲート①（Node 本番持込）承認＋本人操作で別途行う。
-ECS production image は `infra/terraform/README.md` の署名済み release digest＋
-one-time full saved-plan flow だけを使う。targeted apply や direct task-definition 登録は禁止。
+This directory defines the reviewed TeamAgent OpenClaw core runtime and its
+fail-closed integration with the repository's canonical provenance and
+one-time Terraform release gate. The only locally supported runtime is
+OpenClaw `2026.7.1` on a single `linux/arm64` manifest, rebuilt onto the
+digest-pinned distroless Node 24 base and run as UID/GID `65532`.
 
-> 関連プラン: `~/.claude/plans/mossy-snacking-locket.md`（§A 一次ソース確認結果・§C 本雛形）。
+The production bundle contract remains `release.ready=false`. The separate
+media subject, exact two-subject receipt emitter, signed final-HEAD registry
+evidence, independent review, and real post-apply rollout/rollback evidence
+are not complete. A local PASS is therefore not production authorization.
 
-## 0. 不変条件（破ってはいけない）
+## Runtime contract
 
-1. **営業データ非接触**：`openclaw-gateway` は RDS/Secrets/KMS への IAM 権限もネットワーク到達も持たない。
-   creds を持つのは `teamagent-mcp` バックエンドだけ。
-2. **per-user 認可は MCP 境界内**：OpenClaw は単一信頼オペレータモデル（per-user 認可をしない／
-   `sessionKey` は認可でない／共有 secret は full operator scope）。RLS・本人 OAuth は Python 側で 100% 死守。
-3. **MCP は streamable-http**（私設網 `mcpnet`・bearer・内部のみ）。stdio は使わない
-   （親=OpenClaw が子として MCP を同居起動し creds/network 隔離を壊すため）。
-4. **秘密値はコミットしない**：設定にも `.env` にも“値”を書かず、Secrets Manager から注入する。
+The final image has no shell, package manager, browser executable, Playwright,
+Codex CLI, `jiti`, TypeScript/tsx compiler, Vite/Vitest, build compiler, or
+test/fixture/type/source-map payload. `prune-runtime.mjs` computes the package
+and module closures before deleting packages or rewriting package metadata.
+It then proves the same Slack and Bedrock operation closure still exists and
+the representative operations execute with provider calls stubbed under
+`--network none`.
 
-## 1. WS-B-B1 一次ソース確認サマリ（2026-06-09・`gh`/公式GitHub/docs 直確認）
+The upstream bundles contain two optional compiler paths even when production
+configuration does not use them. The pruner verifies the exact reviewed
+upstream functions and replaces only these branches with deterministic
+fail-closed facades:
 
-| 項目 | 結論 |
-|---|---|
-| 実体/ライセンス | `openclaw/openclaw`（377k★）・**MIT**（OpenClaw Foundation）。旧名 Moltbot/Clawdbot |
-| ランタイム | **TypeScript/Node**（Node 22.19+ 必須・24 推奨）＝ゲート①不可避 |
-| 版pin | 最新 stable **2026.6.1**。min-safe **≥2026.5.26**（2026-05-28 の GHSA 30+件: Critical2/High多数を充足） |
-| 信頼モデル | **単一信頼オペレータ**（敵対的マルチテナント境界ではない）→ 認可は MCP 内側 |
-| 既定の危うさ | host exec 既定 **YOLO**(`security=full`/`ask=off`) → 本テンプレで `tools.exec.mode:"deny"` に封じる |
-| Bedrock | `amazon-bedrock`/`bedrock-converse-stream`/**`auth:aws-sdk`（APIキー不要）**。region 未指定で us-east-1 に落ちる → 東京を明示 |
-| MCP | `mcp.servers.<名>`、`streamable-http` 対応。`toolFilter`＋`tools.profile`＋sandbox `alsoAllow` の三層で露出制御 |
+- the `jiti/static` extension source-transform loader;
+- the TypeScript Code Mode compiler loader, with advertised Code Mode
+  languages reduced to JavaScript.
 
-## 2. ファイル一覧
+The generic OpenClaw CLI remains because configuration and plugin inspection
+are operationally required. Browser-named shared chunks also remain when core
+or Control UI modules import them. In particular,
+`browser-bridges-*.js` retains generic `child_process.spawn` primitives. This
+is not reported as zero reachable browser-named payload. The runtime contract
+instead proves that:
 
-| ファイル | 役割 |
-|---|---|
-| `docker-compose.yml` | 隔離 gateway（digest pin・read_only・cap_drop ALL・no-new-privileges・loopback・資源上限）＋ creds 保持の `teamagent-mcp`。私設網 `mcpnet`(internal) で接続 |
-| `openclaw.config.json5` | tool 最小化（exec deny / fs workspaceOnly / browser 既定厳格）・MCP(http,bearer,読取系のみ)・Bedrock(aws-sdk,東京,discovery 無効)。**§D: 外側=Haiku4.5＋prompt caching(`cacheRetention:"long"`)＋`session.dmScope:"per-channel-peer"`(多人数の会話分離)** |
-| `iam/openclaw-role.policy.json` | 外殻ロール: `bedrock:InvokeModel(+Stream)` のみ Allow / Secrets・KMS・RDS は明示 Deny |
-| `iam/mcp-backend-role.policy.json` | バックエンドロール: 対象 Secret・KMS decrypt・RDS connect・L2 Bedrock |
-| `SOUL.md` / `HEARTBEAT.md` | ペルソナ / （P2 用）プロアクティブ・チェックリスト（P1 は heartbeat 無効） |
-| `firewall/DOCKER-USER.after.rules` | 公開ポートの ingress 許可（内部網のみ）＋ egress は SG/プロキシで別途 |
-| `.env.example` | 注入する**変数名のみ**（値は持たない） |
+- browser plugin and CLI registrations, browser implementation chunks,
+  Playwright, Chrome MCP, CDP control code, and browser executables are absent;
+- the retained browser bridge public facade cannot find or load a browser
+  plugin and fails closed;
+- `openclaw browser --help` is unavailable while generic CLI help still works.
 
-## 3. デプロイ手順（ゲート①承認後・本人が実行）
+The retained `/opt/teamagent/runtime-prune-report.json` contains hashes and
+closure edges for independent inspection.
+
+## Control UI closure
+
+Every regular file under `dist/control-ui` is included, not only the 81 ESM
+modules. The current closure contains 142 files, including root HTML,
+`sw.js`, CSS, webmanifest, provider SVGs, icons, and images. For each file the
+report records the on-disk hash/size and the expected HTTP hash/size.
+
+The gateway deterministically adds
+`data-openclaw-terminal-enabled="false"` to the served root HTML. Both the
+source and transformed representations are hashed. The actual-image test
+fetches all 142 paths, re-hashes all 142 on-disk files, checks static
+references, and authenticates `/control-ui-config.json`; an unauthenticated
+bootstrap request must return 401. Operator terminal support is explicitly
+disabled in `openclaw.config.json5`.
+
+## Fargate contract
+
+The Terraform task definition is authoritative. `harden-task-definition.jq`
+is its adversarially tested offline parity mirror: it accepts only the fixed
+production family, roles, service provenance, one `openclaw` container, one
+task-scoped `tmp` volume mounted at `/tmp`, and the exact encrypted EFS access
+point mounted at `/tmp/teamagent-openclaw/state`. It rejects sidecars,
+additional volumes or mounts, writable paths outside those two exact mounts,
+task/container field additions, environment retargeting, role changes, and
+image repository changes. The rendered definition enforces:
+
+- `readonlyRootFilesystem=true`;
+- `user=65532:65532`, `privileged=false`, init process, capability drop `ALL`;
+- 120-second graceful stop, canonical image ENTRYPOINT/CMD and `/readyz` health check;
+- only the five fixed Secrets Manager bindings and reviewed environment keys.
+
+The canonical CMD uses `execve`, so the gateway is PID 1. Actual-image tests
+verify child exit-code propagation and clean SIGTERM exit 0.
+
+Slack DM access has one canonical production input, `SLACK_DM_ALLOWLIST`.
+The value `*` becomes exactly `dmPolicy=open` with `allowFrom=["*"]`.
+One to 100 unique, comma-separated Slack `U...` IDs become
+`dmPolicy=allowlist` with those exact IDs. Missing/empty values, whitespace,
+duplicates, mixed wildcard/IDs, and non-`U` identifiers fail in Terraform
+plan validation, the task-definition hardener, and the image entrypoint.
+The empty Terraform default is deliberately an invalid production sentinel,
+not permission to fall back to the baked template.
+
+Fargate cannot enforce Docker `no-new-privileges` or `linuxParameters.tmpfs`.
+Production therefore makes no such claim. Local Docker tests use
+`no-new-privileges`; production compensates with nonroot UID, capability drop,
+read-only rootfs, fixed IAM/network policy, and a task-scoped ephemeral `/tmp`
+volume. This remains a documented risk.
+
+## Local build and evidence
+
+`build-image.sh` builds and verifies locally; it never pushes. It requires a
+clean attached Git commit and the Buildx/Trivy versions pinned in
+`plugins-lock.json`.
 
 ```sh
-# (a) 版pin の digest を再確認・更新（タグ再ポイントに惑わされないため必ず digest で固定）
-TOK=$(curl -s "https://ghcr.io/token?scope=repository:openclaw/openclaw:pull&service=ghcr.io" \
-  | sed -E 's/.*"token":"([^"]+)".*/\1/')
-curl -s -o /dev/null -D - -H "Authorization: Bearer $TOK" \
-  -H "Accept: application/vnd.oci.image.index.v1+json" \
-  https://ghcr.io/v2/openclaw/openclaw/manifests/2026.6.1 | grep -i docker-content-digest
-# → docker-compose.yml の image: の @sha256:... を一致させる
-# 2026-06-09 時点: sha256:b12f76a7947e4cdd328bf3ea1045d41a5494b33852c911e9bc4fdd03dde469d5
-
-# (b) Bedrock の推論プロファイル ID を確認（モデル ID を openclaw.config.json5 に合わせる）
-aws bedrock list-inference-profiles --region ap-northeast-1
-
-# (c) シークレットを“環境へ注入”（値はコミットしない）。EC2 はインスタンスロール、ローカル検証は --env-file 等。
-#     openclaw-role / mcp-backend-role の最小 IAM を各サービスへ付与。
-
-# (d) 起動
-docker compose -f infra/openclaw/docker-compose.yml up -d
+COMMIT=$(git rev-parse HEAD)
+SHORT=${COMMIT:0:12}
+bash infra/openclaw/build-image.sh \
+  --image "teamagent-openclaw:git-$SHORT" \
+  --manifest "/tmp/openclaw-$SHORT-manifest.json" \
+  --evidence-dir "/tmp/openclaw-$SHORT-evidence"
 ```
 
-## 4. 受け入れ確認（疎通・越権ゼロ）
+The schema-5 output is explicitly `deploymentCredential=false` and
+`promotion.status=LOCAL_GATES_PASSED`. It binds:
 
-- `teamagent-mcp`: `GET /healthz` が 200。`/mcp` は **bearer 無し→401**（fail-closed）。
-- OpenClaw → MCP: 読取系 tool だけが見える（`toolFilter`）。write/draft/proposal_deck は不可視。
-- **RLS 越権ゼロ**: 2 ユーザーで相互の専有データを要求 → 他人の行は 0。`_user_context.user_email` 無しは MCP 側で fail-closed。
-- 外殻が RDS/Secrets に到達不可（疎通テストで証明）。exec/shell tool は呼べない（`mode:"deny"`）。
+- the exact Git commit, tree, deterministic archive hash, and active blocked
+  bundle-contract hash;
+- the exact single ARM64 image/config/rootfs subject;
+- exact BuildKit material set, with extra or missing material rejected;
+- runtime inventory and actual-image contract;
+- all Control UI source/HTTP assets and dynamic bootstrap result;
+- exact Slack/Bedrock operation closures and offline operation smoke;
+- Trivy Critical=0, High=0, Secrets=0;
+- the absence of all eight findings observed in the latest live C8/H22 image:
+  `CVE-2026-12087`, `CVE-2026-13221`, `CVE-2026-33845`,
+  `CVE-2026-34182`, `CVE-2026-42010`, `CVE-2026-55200`,
+  `CVE-2026-57433`, and `CVE-2026-6100`;
+- a CycloneDX SBOM augmented with every merged-rootfs filesystem object and an
+  exact path/type/mode/UID/GID/size/link/content equivalence check;
+- the exact physical npm package instance path/name/version multiset and `bom-ref`
+  integrity;
+- a hash index of every evidence file.
 
-## 5. ロールバック
+The local manifest and adjacent checksum are evidence only. Neither is a
+signature, release receipt, or deployment credential.
 
-`USE_OPENCLAW_FRONTEND` フラグ OFF →（OpenClaw が Slack ingress を持つ間は現行 Bot 停止のため）
-現行 Socket Mode Bot を起動で 1 分復帰。MCP バックエンドは捨てない（現行 Bot からも将来叩ける）。
+## Trusted source and promotion integration
 
-## 6. 次にやること（P0→P1）
+The dedicated OpenClaw project uses a full 40-character `dev` SHA from the
+fixed GitHub CodeConnection. Before any repository build interface executes,
+the embedded buildspec independently fetches `origin/dev` and verifies a
+KMS-signed source manifest. That manifest binds the commit object, exact tree,
+executable inventory, and bundle-contract hash to immutable S3 VersionIds
+under COMPLIANCE Object Lock.
 
-- `scripts/run_mcp_http_server.py`（本リポジトリ）= この compose の `teamagent-mcp` が起動する HTTP MCP。
-- WS-C: `user_email` を OpenClaw でなく **Slack token から MCP 側で解決**（なりすまし防止）。
-- P0 隔離 PoC: 営業データ非接触の環境で「RLS-through-MCP 漏洩ゼロ／インジェクション越権ゼロ／Bedrock(IAM)疎通」を実証。
+The build role can write only the two quarantine repositories. It cannot
+write/sign source evidence, candidate or release repositories, or deployment
+resources. The source-free attestor owns actual-image verification and signed
+SPDX/in-toto/image evidence. The source-free promoter alone can copy exact
+subjects and referrers through verified-candidate to release repositories.
+
+`build-bundle.sh` is the canonical core/media interface and deliberately
+stops before Docker or registry work while `release.ready=false`. The local
+core-only verifier remains `build-image.sh`.
+
+## Deployment and rollout
+
+Direct task-definition registration and the legacy `apply_openclaw.sh` path
+are permanently disabled. Production image changes require:
+
+1. a verified-candidate receipt and immutable signature VersionIds;
+2. guarded active/rollback release authorization;
+3. a fixed release repository `@sha256` plus exact
+   `image_release_evidence.openclaw`;
+4. one full saved plan created by `plan_image_release.sh`;
+5. one-time application of that exact plan by
+   `apply_image_release_plan.sh`.
+
+The planner and apply supervisor bind clean exact `origin/dev`, backend,
+workspace, state lineage/serial and ownership, contract hash, complete signed
+release graph, one-time intent, and receipt claims. A started plan is never
+retried; an ambiguous failure requires reconciliation and fresh authorization.
+See `infra/terraform/README.md`.
+
+The canonical Terraform runtime guard now runs
+`run-live-rollout-gates.mjs` under the same deployment locks and before it
+records `APPLIED`. For a distinct OpenClaw task revision, it checks service
+stability, enumerates every running task before and after the Slack canary,
+runs an isolated task-role Bedrock/MCP canary, correlates the exact Slack reply
+to a candidate task log stream, and verifies a fixed-VersionId,
+COMPLIANCE-locked, SSE-KMS result signed by the fixed asymmetric KMS key. A
+one-use rollback authorization binds the apply attempt and old/new revisions;
+any post-apply gate failure restores and verifies the durable previous
+revision before either lock is released.
+
+The effective MCP authority is `effective-tool-scope.json`. The default
+Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
+contains 28. This scope is not read-only: Gmail draft and Slack file-delivery
+operations are among the default tools.
+
+The five required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,
+`OPENCLAW_GATEWAY_TOKEN`, `TEAMAGENT_MCP_BEARER`, and the separate
+`TEAMAGENT_CALLER_CLAIM_SECRET`. Production also requires the exact
+`SLACK_TEAM_ID` and the MCP-only `TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE`; the
+workspace ID is not model-provided, and a conditional DynamoDB write makes each
+claim one-use across rolling ECS tasks. Both runtimes reject a caller-claim
+secret that equals the MCP bearer. Bedrock uses only the ECS task role; static
+AWS credentials are forbidden.
+
+See `docs/openclaw/deploy_runbook.md`. Production remains NO-GO until the
+media/bundle integration is complete, an independent review approves the
+final commit, and real signed rollout and forced-rollback
+CodeBuild/ECR/Fargate/Slack/Bedrock/tools-list evidence passes.

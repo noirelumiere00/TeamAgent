@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1
+ARG ALPINE_ARM64_DIGEST=sha256:1e983da7edf22344bf53800c5c99008cfb62492ca38c815781ebca2145fe373e
+FROM public.ecr.aws/docker/library/alpine:edge@${ALPINE_ARM64_DIGEST}
+
+ARG ALPINE_ARM64_DIGEST
+ARG ALPINE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
+ARG ALPINE_COMPAT_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.23/main
+ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
+ARG FFMPEG_PACKAGE_VERSION=8.1.2-r0
+ARG LIBFLAC_PACKAGE_VERSION=1.4.3-r2
+ARG NODE_PACKAGE_VERSION=24.18.0-r0
+ARG PYTHON_PACKAGE_VERSION=3.14.5-r2
+ARG FONT_LIBERATION_PACKAGE_VERSION=2.1.5-r2
+ARG FONT_NOTO_PACKAGE_VERSION=2026.07.01-r0
+ARG FONT_NOTO_CJK_PACKAGE_VERSION=0_git20220127-r1
+ARG FONT_NOTO_EMOJI_PACKAGE_VERSION=2.051-r0
+
+RUN --mount=type=secret,id=teamagent_ca,required=false \
+    --mount=type=cache,id=teamagent-alpine-edge-apk-arm64-v2,target=/var/cache/apk,sharing=locked \
+    set -eu; \
+    cp /etc/ssl/certs/ca-certificates.crt /tmp/build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then cat /run/secrets/teamagent_ca >> /tmp/build-ca.pem; fi; \
+    printf '%s/main\n%s/community\n%s\n' \
+      "$ALPINE_REPOSITORY" "$ALPINE_REPOSITORY" "$ALPINE_COMPAT_REPOSITORY" \
+      > /tmp/repositories; \
+    SSL_CERT_FILE=/tmp/build-ca.pem apk \
+      --cache-dir /var/cache/apk \
+      --cache-max-age 1440 \
+      --repositories-file /tmp/repositories \
+      add \
+      "chromium=$CHROMIUM_PACKAGE_VERSION" \
+      "ffmpeg=$FFMPEG_PACKAGE_VERSION" \
+      "font-liberation=$FONT_LIBERATION_PACKAGE_VERSION" \
+      "font-noto=$FONT_NOTO_PACKAGE_VERSION" \
+      "font-noto-cjk=$FONT_NOTO_CJK_PACKAGE_VERSION" \
+      "font-noto-emoji=$FONT_NOTO_EMOJI_PACKAGE_VERSION" \
+      "libflac=$LIBFLAC_PACKAGE_VERSION" \
+      "nodejs=$NODE_PACKAGE_VERSION" \
+      "python3=$PYTHON_PACKAGE_VERSION"; \
+    install -d -m 0755 /usr/share/teamagent/provenance; \
+    cp /tmp/repositories /usr/share/teamagent/provenance/apk-repositories.txt; \
+    apk info -vv | LC_ALL=C sort > /usr/share/teamagent/provenance/apk-installed.txt; \
+    apk info -L chromium > /usr/share/teamagent/provenance/chromium-files.txt; \
+    sha256sum /usr/bin/python3 /usr/bin/node /usr/bin/ffmpeg \
+      > /usr/share/teamagent/provenance/runtime-binaries.sha256; \
+    rm -f /tmp/build-ca.pem /tmp/repositories; \
+    addgroup -g 10001 teamagent; \
+    adduser -D -H -h /tmp/teamagent/home -u 10001 -G teamagent teamagent; \
+    install -d -m 1777 /tmp; \
+    install -d -o 10001 -g 10001 -m 0700 \
+      /tmp/teamagent /tmp/teamagent/home /tmp/teamagent/cache \
+      /tmp/teamagent/config /tmp/teamagent/data /tmp/teamagent/state \
+      /tmp/teamagent/tmp
+
+ENV HOME=/tmp/teamagent/home \
+    TMPDIR=/tmp/teamagent/tmp \
+    XDG_CACHE_HOME=/tmp/teamagent/cache \
+    XDG_CONFIG_HOME=/tmp/teamagent/config \
+    XDG_DATA_HOME=/tmp/teamagent/data \
+    XDG_STATE_HOME=/tmp/teamagent/state
+
+USER 10001:10001

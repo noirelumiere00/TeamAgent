@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from teamagent.adapters.apify_client import ApifyError
 from teamagent.adapters.tiktok_scraper import TikTokComment, TikTokCommentResult, TikTokScrapeError
 from teamagent.skills.base import SkillContext
@@ -12,6 +14,16 @@ from teamagent.skills.tiktok_comment_mining.schema import CommentMiningInput
 from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
 
 _URL = "https://www.tiktok.com/@mayo/video/1"
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep URL-guard unit tests independent from the host DNS environment."""
+
+    monkeypatch.setattr(
+        "teamagent.adapters.url_guard._default_resolve",
+        lambda _host: ["8.8.8.8"],
+    )
 
 
 def _ctx() -> SkillContext:

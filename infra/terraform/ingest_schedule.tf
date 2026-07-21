@@ -109,7 +109,7 @@ data "aws_iam_policy_document" "ingest_task" {
   statement {
     sid       = "KmsDecryptForOauthTokens"
     actions   = ["kms:Decrypt"]
-    resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
+    resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
   }
   statement {
     sid = "BedrockInvokeForEmbedding"
@@ -174,20 +174,33 @@ resource "aws_ecs_task_definition" "ingest" {
   memory                   = var.fargate_ingest_memory
   execution_role_arn       = aws_iam_role.ecs_execution_ingest[0].arn
   task_role_arn            = aws_iam_role.ingest_task[0].arn
-  depends_on               = [terraform_data.production_image_release_gate]
+  skip_destroy             = true
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+  ]
+
+  volume {
+    name = "runtime-tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "ingest"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "scripts/run_ingest_fargate.py"]
+    command   = [local.teamagent_python, "/app/scripts/run_ingest_fargate.py"]
     environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       { name = "INGEST_SOURCES", value = var.ingest_sources },
       { name = "INGEST_OWNER_EMAIL", value = var.ingest_owner_email },
       # §G 会社共有: これが無いと pipeline._company_acl_groups() が [] を返し、取込 document の
@@ -238,7 +251,11 @@ resource "aws_ecs_task_definition" "ingest" {
       }
     }
     # Scheduled Task なので long-running ではない・healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # --- EventBridge → ECS RunTask の IAM role ---
@@ -278,6 +295,11 @@ data "aws_iam_policy_document" "events_ingest_run_task" {
       aws_iam_role.ecs_execution_ingest[0].arn,
       aws_iam_role.ingest_task[0].arn,
     ]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 
@@ -301,6 +323,12 @@ resource "aws_cloudwatch_event_rule" "ingest_weekly" {
   description         = "週次 ingest（Slack/Drive/Sheets → pgvector）の Fargate 起動トリガ"
   schedule_expression = var.ingest_schedule_expression
   state               = var.ingest_rule_enabled ? "ENABLED" : "DISABLED"
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_cloudwatch_event_target" "ingest_run_task" {
@@ -308,6 +336,8 @@ resource "aws_cloudwatch_event_target" "ingest_run_task" {
   rule     = aws_cloudwatch_event_rule.ingest_weekly[0].name
   arn      = aws_ecs_cluster.main.arn
   role_arn = aws_iam_role.events_ingest_invoke[0].arn
+
+  depends_on = [terraform_data.runtime_guard]
 
   ecs_target {
     task_definition_arn = aws_ecs_task_definition.ingest[0].arn
@@ -326,6 +356,10 @@ resource "aws_cloudwatch_event_target" "ingest_run_task" {
   retry_policy {
     maximum_event_age_in_seconds = 3600
     maximum_retry_attempts       = 1
+  }
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 

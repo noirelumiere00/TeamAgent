@@ -49,13 +49,42 @@ resource "aws_iam_role_policy_attachment" "worker_ssm" {
 }
 
 data "aws_iam_policy_document" "worker_app" {
-  # dev 配下の Secrets（Google OAuth / Slack / DB 等）を読む
+  # worker が実際に読む secret だけを full ARN で列挙する。
   statement {
     sid     = "ReadDevSecrets"
     actions = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
-    resources = [
-      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/*",
+    resources = distinct(concat(
+      [
+        aws_secretsmanager_secret.db_password.arn,
+        data.aws_secretsmanager_secret.slack_bot.arn,
+        data.aws_secretsmanager_secret.slack_app.arn,
+      ],
+      var.enable_connect_web ? [
+        data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
+        data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
+      ] : [],
+      var.enable_ingest_schedule ? [
+        data.aws_secretsmanager_secret.google_oauth[0].arn,
+      ] : [],
+      var.enable_scrape_tools ? [
+        data.aws_secretsmanager_secret.vertex_sa[0].arn,
+      ] : [],
+      local.hmac_secret_iam_arns,
+    ))
+  }
+  statement {
+    sid = "HmacStateRuntimeAndReadiness"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:TransactWriteItems",
     ]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
   }
   # レポート/生ファイル用 S3（report_publish.py の署名付きURL発行先）
   statement {
@@ -69,13 +98,8 @@ data "aws_iam_policy_document" "worker_app" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
-    resources = [
-      "arn:aws:bedrock:*::foundation-model/*",
-      "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/*",
-    ]
+    resources = local.bedrock_resources
   }
   # アプリログ（任意・CloudWatch agent 用）
   statement {
@@ -144,59 +168,18 @@ resource "aws_instance" "worker" {
     http_endpoint = "enabled"
   }
 
-  # 依存の事前インストール（コード/Chrome本体/secrets はデプロイ段階で投入）
+  # Runtime packages, browser binaries, application code, environment, and units are installed
+  # only by the signed, saved-plan-bound atomic release flow. User data deliberately cannot
+  # recreate the former mutable latest-object/unpinned-install bypass.
   user_data = <<-EOF
     #!/bin/bash
-    set -x
-    exec > /var/log/teamagent-bootstrap.log 2>&1
-    # システム依存
-    dnf install -y python3.11 python3.11-pip git tar gzip xz gcc nodejs npm \
-      nss nspr atk at-spi2-atk cups-libs libdrm mesa-libgbm libxkbcommon \
-      libXcomposite libXdamage libXrandr libXScrnSaver libXtst pango cairo \
-      alsa-lib gtk3 liberation-fonts || true
-    # ffmpeg（AL2023 標準repoに無いので arm64 static）
-    cd /tmp
-    curl -fsSL -o ff.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz || true
-    tar xf ff.tar.xz || true
-    cp ffmpeg-*-static/ffmpeg ffmpeg-*-static/ffprobe /usr/local/bin/ 2>/dev/null || true
-    # アプリ配置先
-    mkdir -p /opt/teamagent/app
-    # デプロイスクリプト（Phase2 で S3 から tarball を取得して起動）
-    cat > /opt/teamagent/deploy.sh <<'DEP'
-    #!/bin/bash
     set -euo pipefail
-    BUCKET="${aws_s3_bucket.raw_files.id}"
-    cd /opt/teamagent
-    aws s3 cp "s3://$BUCKET/deploy/teamagent-bot.tar.gz" /tmp/app.tar.gz
-    aws s3 cp "s3://$BUCKET/deploy/teamagent.env.base" /opt/teamagent/teamagent.env.base
-    rm -rf /opt/teamagent/app && mkdir -p /opt/teamagent/app
-    tar xzf /tmp/app.tar.gz -C /opt/teamagent/app
-    cd /opt/teamagent/app
-    python3.11 -m venv .venv
-    ./.venv/bin/pip install -U pip
-    ./.venv/bin/pip install -e . || ./.venv/bin/pip install -r requirements.txt || true
-    npx --yes @puppeteer/browsers install chrome@stable --path /opt/teamagent/chrome || true
-    systemctl restart teamagent-bot || true
-    DEP
-    chmod +x /opt/teamagent/deploy.sh
-    # systemd ユニット（コード投入後に enable/start）
-    cat > /etc/systemd/system/teamagent-bot.service <<'SVC'
-    [Unit]
-    Description=TeamAgent Slack Bot (Socket Mode)
-    After=network-online.target
-    Wants=network-online.target
-    [Service]
-    Type=simple
-    WorkingDirectory=/opt/teamagent/app
-    ExecStart=/bin/bash -lc 'set -a; source /opt/teamagent/teamagent.env.base; source scripts/load_secrets.sh; set +a; exec ./.venv/bin/python -m teamagent.runtime.slack_bot'
-    Restart=always
-    RestartSec=5
-    Environment=PYTHONUNBUFFERED=1
-    [Install]
-    WantedBy=multi-user.target
-    SVC
-    systemctl daemon-reload
-    echo "bootstrap-done"
+    umask 077
+    exec > /var/log/teamagent-bootstrap.log 2>&1
+    install -d -m 0755 /opt/teamagent /opt/teamagent/releases
+    install -d -m 0700 /opt/teamagent/release-transactions
+    rm -f /opt/teamagent/deploy.sh
+    echo "immutable-release-bootstrap-ready"
   EOF
 
   user_data_replace_on_change = false
@@ -213,6 +196,14 @@ resource "aws_instance" "worker" {
   # AMI ドリフトを無視し、更新は意図的な taint＋再デプロイで行う。
   lifecycle {
     ignore_changes = [ami]
+
+    precondition {
+      condition = (
+        local.mail_action_hmac_transition_valid
+        && local.report_link_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for the legacy worker; targeted apply is blocked."
+    }
   }
 }
 

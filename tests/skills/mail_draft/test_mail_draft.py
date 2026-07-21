@@ -16,6 +16,7 @@ from teamagent.skills.mail_draft.skill import MailDraftSkill
 from teamagent.skills.morning_digest.draft_token import encode_draft_token
 
 OWNER = "s-komata@vectorinc.co.jp"
+_MAIL_SECRET = "mail-draft-test-secret-" + "m" * 32
 
 
 class _FakeMorning:
@@ -43,7 +44,7 @@ def _patch_morning(monkeypatch: Any, result: dict[str, Any]) -> None:
 
 
 def test_valid_token_creates_draft(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     _patch_morning(monkeypatch, {"created": True, "error": None, "cost_usd": 0.01})
     token = encode_draft_token("thr_1", OWNER)
     out = MailDraftSkill().run(MailDraftInput(draft_token=token), _ctx())
@@ -54,7 +55,7 @@ def test_valid_token_creates_draft(monkeypatch: Any) -> None:
 
 
 def test_invalid_token_is_expired(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     out = MailDraftSkill().run(MailDraftInput(draft_token="garbage.token"), _ctx())
     assert out.created is False
     assert out.error == "expired"
@@ -62,7 +63,7 @@ def test_invalid_token_is_expired(monkeypatch: Any) -> None:
 
 def test_token_owner_mismatch_rejected(monkeypatch: Any) -> None:
     # 別人の所有トークンを本人が押しても decode が None（fail-closed）。
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     token = encode_draft_token("thr_1", "someone-else@vectorinc.co.jp")
     out = MailDraftSkill().run(MailDraftInput(draft_token=token), _ctx(OWNER))
     assert out.error == "expired"
@@ -74,7 +75,7 @@ def test_requires_user_email() -> None:
 
 
 def test_quota_exceeded(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     _patch_morning(monkeypatch, {"created": True, "error": None})
     skill = MailDraftSkill()
     token = encode_draft_token("thr_q", OWNER)
@@ -86,7 +87,7 @@ def test_quota_exceeded(monkeypatch: Any) -> None:
 
 
 def test_error_mapping_not_connected(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     _patch_morning(monkeypatch, {"created": False, "error": "not_connected"})
     token = encode_draft_token("thr_2", OWNER)
     out = MailDraftSkill().run(MailDraftInput(draft_token=token), _ctx())
@@ -95,7 +96,7 @@ def test_error_mapping_not_connected(monkeypatch: Any) -> None:
 
 
 def test_already_has_draft(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "test-secret")
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", _MAIL_SECRET)
     _patch_morning(monkeypatch, {"created": False, "already": True})
     token = encode_draft_token("thr_3", OWNER)
     out = MailDraftSkill().run(MailDraftInput(draft_token=token), _ctx())

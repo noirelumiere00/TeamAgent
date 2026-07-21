@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.13"]
+        python-version: ["3.11", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -47,6 +47,12 @@ jobs:
           cache: "pip"
           cache-dependency-path: "pyproject.toml"
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.14.4
+          terraform_wrapper: false
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -55,9 +61,10 @@ jobs:
           pip install \
             pydantic structlog psycopg pgvector \
             boto3 slack-sdk slack-bolt aiohttp httpx \
+            anthropic \
+            'mcp>=1.28.1,<2' \
             fastapi uvicorn \
             'sentry-sdk[asyncio]>=2.18.0' \
-            claude-agent-sdk==0.2.87 \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
             'fonttools[woff]>=4.63.0' \
             google-auth google-api-python-client google-auth-oauthlib \
@@ -106,6 +113,9 @@ jobs:
 
       - name: Mypy (strict)
         run: mypy src/teamagent
+
+      - name: Install TikTok scraper Node dependencies
+        run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
 
       - name: Pytest
         run: pytest tests/ -q --cov=teamagent --cov-report=term-missing
@@ -171,6 +181,57 @@ jobs:
           exit-code: "1"
           trivyignores: .trivyignore.yaml
           skip-setup-trivy: true # fs スキャン step で導入済みの trivy を再利用（PATH 引き継ぎ）
+
+  terraform:
+    name: terraform lock + offline validate
+    runs-on: ubuntu-latest
+    env:
+      TF_IN_AUTOMATION: "1"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.14.4
+
+      - name: Verify authoritative multi-platform provider lock
+        working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: /dev/null
+        run: |
+          unset TF_PLUGIN_CACHE_DIR
+          terraform providers lock \
+            -platform=darwin_arm64 \
+            -platform=linux_amd64 \
+            -platform=linux_arm64
+          git diff --exit-code -- .terraform.lock.hcl
+
+      - name: Build exact provider mirror without plugin cache
+        working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: /dev/null
+        run: |
+          unset TF_PLUGIN_CACHE_DIR
+          rm -rf .terraform provider-mirror
+          terraform providers mirror \
+            -platform=linux_amd64 \
+            -platform=linux_arm64 \
+            provider-mirror
+
+      - name: Reinitialize from offline mirror and validate
+        working-directory: infra/terraform
+        env:
+          TF_CLI_CONFIG_FILE: ${{ github.workspace }}/infra/terraform/ci.terraformrc
+        run: |
+          unset TF_PLUGIN_CACHE_DIR
+          rm -rf .terraform
+          terraform init -backend=false -input=false -lockfile=readonly
+          required_providers="$(grep -Ec '^provider "registry\.terraform\.io/hashicorp/[a-z0-9_-]+"' .terraform.lock.hcl)"
+          test "$required_providers" -gt 0
+          test "$(find provider-mirror -type f -name '*_linux_amd64.zip' | wc -l)" -eq "$required_providers"
+          test "$(find provider-mirror -type f -name '*_linux_arm64.zip' | wc -l)" -eq "$required_providers"
+          terraform validate
 
   # 本番デプロイ前提のテスト（main マージ後のみ）
   smoke-test:

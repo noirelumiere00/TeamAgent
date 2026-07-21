@@ -26,6 +26,9 @@ from typing import Any
 
 import structlog
 
+from teamagent.hmac_durable_state import require_runtime_startup
+from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
+
 logger = structlog.get_logger(__name__)
 
 
@@ -113,8 +116,9 @@ _GMAIL_DRAFTS_URL = "https://mail.google.com/mail/u/0/#drafts"
 _GMAIL_INBOX_URL = "https://mail.google.com/mail/u/0/#inbox"
 _CALENDAR_URL = "https://calendar.google.com/"
 
-# ボタン押下（block_actions）を worker(Socket Mode) が受ける action_id。slack_bot.py の
-# @app.action と一致させること。value は HMAC 署名トークン（生 thread_id は載せない＝G3）。
+# ボタン押下（block_actions）を固定 OpenClaw Slack adapter が署名検証し、caller identity
+# plugin の同名 interactive namespace へ渡す action_id。value は HMAC 署名トークン
+# （生 thread_id は載せない＝G3）。
 _ACTION_MAIL_DRAFT = "mail_draft"
 # 📅 カレンダー登録ボタン（v0.3 Task3）。value は event_token（HMAC署名・日時/タイトル入り）。
 _ACTION_CALENDAR_EVENT = "calendar_event"
@@ -257,7 +261,7 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
     has_draft = bool(getattr(m, "has_draft", False))
     draft_token = getattr(m, "draft_token", "")
     if not has_draft and draft_token:
-        # 下書き未作成（オンデマンド/生成失敗）時のみ。押下→worker が block_actions で生成。
+        # 下書き未作成時のみ。押下 identity/value は plugin が heartbeat run へ one-use 束縛する。
         btns.append(
             {
                 "type": "button",
@@ -859,6 +863,7 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
 
 
 def main() -> int:
+    require_runtime_startup((("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),))
     users = _resolve_target_users()
     if not users:
         print("[run_morning_digest_fargate] no target users (env+RDS empty)", flush=True)

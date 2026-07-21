@@ -265,6 +265,12 @@ phases:
               --expected-vault-manifest-sha256 "$MCP_VAULT_MANIFEST_SHA256" \
               --expected-build-inputs-sha256 "$MCP_BUILD_INPUTS_SHA256" \
               --expected-contract-sha256 "$CONTRACT_SHA256"
+            MCP_BUILD_CONTEXT_SHA256="$(
+              jq -er '.build_context.canonical_tar_sha256' \
+                /tmp/signed-source-statement.json
+            )"
+            [[ "$MCP_BUILD_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+              || { echo "FATAL: signed MCP build context digest is invalid"; exit 1; }
             ;;
           openclaw)
             python3 /tmp/openclaw_provenance.py validate-signed-source-manifest \
@@ -443,6 +449,12 @@ phases:
             RELEASE_REPOSITORY="$(jq -er '.release_repository' <<<"$SUBJECT")"
             DIGEST="$(jq -er '.digest' <<<"$SUBJECT")"
             SUBJECT_FILE="/tmp/subject-$SUBJECT_INDEX.json"
+            CONTEXT_ARGUMENTS=()
+            if [ "$PIPELINE" = "mcp" ]; then
+              CONTEXT_ARGUMENTS=(
+                --build-context-sha256 "$MCP_BUILD_CONTEXT_SHA256"
+              )
+            fi
             /tmp/verify_actual_image.sh \
               --pipeline "$PIPELINE" \
               --channel "$PROMOTION_CHANNEL" \
@@ -455,6 +467,7 @@ phases:
               --contract-sha256 "$CONTRACT_SHA256" \
               --image-digest "$DIGEST" \
               --signing-key-arn "$SIGNING_KEY_ARN" \
+              "${CONTEXT_ARGUMENTS[@]}" \
               --output "$SUBJECT_FILE"
             SUBJECT_FILES+=(--subject "$SUBJECT_FILE")
             SUBJECT_INDEX=$((SUBJECT_INDEX + 1))

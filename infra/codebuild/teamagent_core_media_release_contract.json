@@ -3,7 +3,7 @@
   "kind": "teamagent.core-media-release-contract",
   "release": {
     "ready": false,
-    "blocked_reason": "NO-GO until the core branch adds the final media Dockerfile, removes unknown provenance defaults, implements both runtime and RELEASE_CONTRACT_SHA256/APP_PROVENANCE_SHA256 ARG/label interfaces, supplies C0/H0 runtime evidence, and records the immutable S3 VersionId whose bytes hash to the approved 716ac25a... baked fallback."
+    "blocked_reason": "NO-GO: signed final-HEAD C0/H0 runtime evidence has not been supplied. Keep release.ready=false until the exact automated build, scan, signature, rollout, and forced-rollback gates pass."
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
@@ -19,7 +19,8 @@
       "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
     },
     "baked_fallback": {
-      "s3_version_id": null,
+      "key": "codebuild/baked-fallback/connect-web-app.html",
+      "s3_version_id": "SK9M.FDQAqiuh6gw2BmqSXQ4ARlPI4ur",
       "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
     }
   },
@@ -42,12 +43,14 @@
         "APP_PROVENANCE_SHA256",
         "BAKED_APP_HTML_SHA256",
         "BAKED_APP_HTML_VERSION_ID",
+        "BUILD_CONTEXT_SHA256",
         "GIT_BRANCH",
         "GIT_COMMIT",
         "RELEASE_CONTRACT_SHA256"
       ],
       "required_label_bindings": {
         "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.context-sha256": "BUILD_CONTEXT_SHA256",
         "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
         "io.teamagent.contract.app-html-build-inputs-sha256": "APP_HTML_BUILD_INPUTS_SHA256",
         "io.teamagent.contract.app-html-manifest-sha256": "APP_HTML_MANIFEST_SHA256",
@@ -82,12 +85,14 @@
       },
       "required_build_args": [
         "APP_PROVENANCE_SHA256",
+        "BUILD_CONTEXT_SHA256",
         "GIT_BRANCH",
         "GIT_COMMIT",
         "RELEASE_CONTRACT_SHA256"
       ],
       "required_label_bindings": {
         "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
+        "io.teamagent.build.context-sha256": "BUILD_CONTEXT_SHA256",
         "io.teamagent.build.release-contract-sha256": "RELEASE_CONTRACT_SHA256",
         "io.teamagent.runtime.kind": "media-worker",
         "org.opencontainers.image.ref.name": "GIT_BRANCH",

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "openclaw": {
+    "version": "2026.7.1",
+    "releaseTag": "v2026.7.1",
+    "releaseCommit": "2d2ddc43d0dcf71f31283d780f9fe9ff4cc04fe4",
+    "imageIndexDigest": "sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c",
+    "linuxArm64Digest": "sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707",
+    "nodeVersion": "24.16.0"
+  },
+  "runtime": {
+    "image": "gcr.io/distroless/nodejs24-debian13",
+    "tag": "nonroot",
+    "imageIndexDigest": "sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212",
+    "linuxArm64Digest": "sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3",
+    "nodeVersion": "24.18.0",
+    "uid": 65532,
+    "gid": 65532
+  },
+  "tooling": {
+    "dockerfileFrontend": {
+      "image": "docker/dockerfile",
+      "tag": "1.7",
+      "digest": "sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    },
+    "sbomGenerator": {
+      "image": "docker.io/docker/buildkit-syft-scanner",
+      "tag": "stable-1",
+      "imageIndexDigest": "sha256:79e7b013cbec16bbb436f312819a49a4a57752b2270c1a9332ae1a10fcc82a68",
+      "linuxArm64Digest": "sha256:860305b3d1667c35142f11f6e9485e322c1c6173702a0831dc68739a34847f2d"
+    },
+    "buildx": {
+      "version": "0.33.0",
+      "linuxArm64BinarySha256": "204dc28447d3bb48f42ed1ce5747e0885cd57e306506a39029311becdb1ef786"
+    },
+    "trivy": {
+      "version": "0.72.0",
+      "linuxArm64ArchiveSha256": "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
+    }
+  },
+  "plugins": [
+    {
+      "id": "slack",
+      "package": "@openclaw/slack",
+      "version": "2026.7.1",
+      "archive": "slack-2026.7.1.tgz",
+      "tarball": "https://registry.npmjs.org/@openclaw/slack/-/slack-2026.7.1.tgz",
+      "integrity": "sha512-dwVGEVCmoTQrOIeZaSCIOPg8pT7hB883QQEXdp9EZUDzTGuvSc+KxH2iERSOV/59hROQctYdcobGn/vdB1H4XA==",
+      "sha256": "d6ae8745867d812560e917707e633c8b66b36f7270124a8cca9602c6dc98ef46",
+      "shrinkwrapSha256": "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c"
+    },
+    {
+      "id": "amazon-bedrock",
+      "package": "@openclaw/amazon-bedrock-provider",
+      "version": "2026.7.1",
+      "archive": "amazon-bedrock-provider-2026.7.1.tgz",
+      "tarball": "https://registry.npmjs.org/@openclaw/amazon-bedrock-provider/-/amazon-bedrock-provider-2026.7.1.tgz",
+      "integrity": "sha512-Y7x24MlFCATCVI6C043ikZ/HC8iTvZ3vDd18bhYwlsXUphGRtcOzQALgOQDhd9nYV1s8konjG0CoyB5v+RA9hw==",
+      "sha256": "4b34630d0a0f715fc9e9cf17166a701c16318abf4b8d04eac1be6455bc917691",
+      "shrinkwrapSha256": "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e"
+    }
+  ]
+}

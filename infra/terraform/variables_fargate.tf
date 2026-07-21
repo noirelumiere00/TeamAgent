@@ -4,15 +4,29 @@
 # 値は terraform.tfvars / 環境で上書き。秘密「値」はここに書かない（secret 名のみ）。
 
 variable "openclaw_image" {
-  description = "OpenClaw外殻イメージ（ECR・digest pin推奨。例: <url>@sha256:...）。空ならservice未作成相当"
+  description = "Guarded saved-plan flowでのみ変更できるOpenClaw release repositoryのdigest URI。空値によるmanaged service/task削除は禁止"
   type        = string
-  default     = ""
+
+  validation {
+    condition = can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$",
+      var.openclaw_image,
+    ))
+    error_message = "openclaw_image must be a nonempty fixed release-repository digest; decommissioning requires a separately reviewed destructive workflow."
+  }
 }
 
 variable "mcp_image" {
-  description = "TeamAgent-MCP バックエンドイメージ（ECR・digest pin推奨）"
+  description = "TeamAgent-MCP release repositoryの必須digest URI。空値によるmanaged service/task削除は禁止"
   type        = string
-  default     = ""
+
+  validation {
+    condition = can(regex(
+      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
+      var.mcp_image,
+    ))
+    error_message = "mcp_image must be a nonempty fixed release-repository digest; decommissioning requires a separately reviewed destructive workflow."
+  }
 }
 
 variable "fargate_mcp_cpu" {
@@ -49,6 +63,11 @@ variable "mcp_model_id" {
   description = "mcp（スキル/オーケストレーター）の Bedrock モデル ID。コスト方針(2026-06-29)により Haiku 4.5 既定・live rev40 と同値。var.bedrock_model_id を流用しない（あちらは Lambda 用で tfvars が Sonnet を指定しており、共有すると apply で mcp が Sonnet 化する＝2026-07-11 反対尋問レビューで検出）。"
   type        = string
   default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  validation {
+    condition     = var.mcp_model_id == "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+    error_message = "MCPは監査済みJP Claude Haiku 4.5 inference profileだけを使用できます。"
+  }
 }
 
 variable "use_calendar_event_tool" {
@@ -124,15 +143,32 @@ variable "use_payload_offload" {
 }
 
 variable "slack_team_id" {
-  description = "自社 Slack workspace の team_id（T で始まる）。設定すると resolve_identity が他ワークスペースのユーザーを fail-closed で拒否する。空だと team 検証 skip（fail-open・起動後の初回解決で WARN ログ）。多人数運用では必ず設定（CLAUDE.md §5-C4）。"
+  description = "本番必須の自社Slack workspace team_id（T + 8文字以上の英大文字/数字）。OpenClaw署名claimとMCP resolverが同じexact IDを検証する。既定の空文字は未設定sentinelでplanをfail-closedにする。"
   type        = string
   default     = ""
+
+  validation {
+    condition     = can(regex("^T[A-Z0-9]{8,}$", var.slack_team_id))
+    error_message = "slack_team_id is required and must be a canonical Slack T ID."
+  }
 }
 
 variable "slack_dm_allowlist" {
-  description = "DM を許可する Slack user_id（カンマ区切り）。openclaw entrypoint が起動時に allowFrom へ注入。メンバー追加は本値の編集 + apply のみ（image rebuild 不要・15名まで可動）。空なら焼込み値を使用。"
+  description = "本番で必須のSlack DM契約。\"*\"はdmPolicy=open+allowFrom=[\"*\"]、それ以外は1〜100件の重複しないSlack U IDを空白なしのカンマ区切りで指定しdmPolicy=allowlistにする。既定の空文字は安全な未設定sentinelであり、明示値なしのplanをfail-closedにする。"
   type        = string
   default     = ""
+
+  validation {
+    condition = (
+      var.slack_dm_allowlist == "*" ||
+      (
+        length(var.slack_dm_allowlist) <= 2048 &&
+        can(regex("^U[A-Z0-9]{8,}(,U[A-Z0-9]{8,}){0,99}$", var.slack_dm_allowlist)) &&
+        length(distinct(split(",", var.slack_dm_allowlist))) == length(split(",", var.slack_dm_allowlist))
+      )
+    )
+    error_message = "slack_dm_allowlist is required: use \"*\" or 1-100 unique comma-separated Slack U IDs with no spaces."
+  }
 }
 
 variable "openclaw_model_id" {
@@ -141,6 +177,11 @@ variable "openclaw_model_id" {
   description = "OpenClaw外側モデル（Haiku4.5・東京推論プロファイル実ID）。権威=openclaw.config.json5"
   type        = string
   default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  validation {
+    condition     = var.openclaw_model_id == "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+    error_message = "OpenClawは監査済みJP Claude Haiku 4.5 inference profileだけを使用できます。"
+  }
 }
 
 # ---------- 秘密値の secret 名（本人が Secrets Manager に作成。値は注入のみ） ----------
@@ -172,6 +213,12 @@ variable "openclaw_gateway_token_secret_name" {
   description = "OpenClaw gateway 管理トークン（full operator scope相当）の Secrets Manager 名"
   type        = string
   default     = "teamagent/dev/openclaw/gateway-token"
+}
+
+variable "openclaw_caller_claim_secret_name" {
+  description = "OpenClaw→MCPのone-use caller identity claim専用HMAC鍵（bearerとは別、32-byte以上）のSecrets Manager名"
+  type        = string
+  default     = "teamagent/dev/openclaw/caller-claim-hmac"
 }
 
 # §M: スクレイプ/動画ツール（USE_VIDEO_TOOLS/USE_TIKTOK_TOOLS）を有効化する“拡張版”の配線。

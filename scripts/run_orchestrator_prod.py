@@ -1,12 +1,12 @@
-"""Phase 1 ライブ: 実 `search` Skill を SDK オーケストレーターで回す（本番依存あり）.
+"""Phase 1 ライブ: 実 `search` Skill をPython Bedrockオーケストレーターで回す。
 
 fixture でなく **本物の SearchSkill**（pgvector(RDS) + Bedrock + LocalE5Embedder）をツール化して、
 適応ループを実データで動かす。Phase 1 の最初のマイルストーン。
 
 前提（揃って初めて動く）:
-  - full env: 実 Skill の依存が入った venv（boto3/psycopg/sentence-transformers 等 + claude-agent-sdk==0.2.87）
+  - full env: 実 Skill の依存が入った venv（anthropic/boto3/psycopg/sentence-transformers 等）
   - SSM トンネル稼働（RDS → localhost:15432）。`set -a; source .env.production; set +a` + `source scripts/load_secrets.sh`
-  - Bedrock: CLAUDE_CODE_USE_BEDROCK=1 / AWS資格情報（unset AWS_PROFILE で default） / AWS_REGION / TEAMAGENT_BEDROCK_MODEL
+  - Bedrock: AWS資格情報（unset AWS_PROFILE で default） / AWS_REGION / TEAMAGENT_BEDROCK_MODEL
   - 会社プロキシ: SSL_CERT_FILE=~/.hermes/ca_bundle.pem / HF: HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 実行:
@@ -34,8 +34,6 @@ from teamagent.orchestrator.sdk_runner import run_sdk_agent  # noqa: E402
 
 def _preflight() -> list[str]:
     missing: list[str] = []
-    if os.environ.get("CLAUDE_CODE_USE_BEDROCK") != "1":
-        missing.append("CLAUDE_CODE_USE_BEDROCK=1")
     if not os.environ.get("AWS_REGION"):
         missing.append("AWS_REGION")
     if not os.environ.get("DATABASE_URL"):

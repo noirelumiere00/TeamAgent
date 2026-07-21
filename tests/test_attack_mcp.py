@@ -1,4 +1,4 @@
-"""scripts/attack_mcp.py の純ロジック（check_* / build_user_context / ATTACK_PAYLOADS）を検証する。
+"""scripts/attack_mcp.py の純ロジックを検証する。
 
 network 部（_run）は実DB＋live MCP のため対象外。重い依存(anyio/mcp)は attack_mcp 側で遅延 import。
 """
@@ -39,26 +39,20 @@ def test_build_user_context_payload_overrides() -> None:
     assert ctx2["slack_user_id"] == "evil"
 
 
-def test_results_identical_pass_and_fail() -> None:
-    assert _atk.check_results_identical("admin_role", "RESULT", "RESULT").ok is True
-    bad = _atk.check_results_identical("admin_role", "RESULT", "RESULT+leak")
-    assert bad.ok is False
-    assert "DIFFERS" in bad.detail
-
-
-def test_no_outsider_pass_and_fail() -> None:
-    assert _atk.check_no_outsider("admin_role", "company docs only", "OUTSIDER_TOK").ok is True
-    leaked = _atk.check_no_outsider("admin_role", "...OUTSIDER_TOK...", "OUTSIDER_TOK")
-    assert leaked.ok is False
-    assert "leaked" in leaked.detail
-    # 空 needle は誤検知しない
-    assert _atk.check_no_outsider("admin_role", "anything", "").ok is True
+def test_caller_rejection_check_pass_and_fail() -> None:
+    good = '{"error":"Caller authorization failed.","code":"CALLER_IDENTITY_REJECTED"}'
+    assert _atk.check_caller_rejected("admin_role", good).ok is True
+    assert _atk.check_caller_rejected("admin_role", '{"hits":[]}').ok is False
+    assert _atk.check_caller_rejected("admin_role", "not-json").ok is False
 
 
 def test_summarize_false_if_any_fail() -> None:
     checks = [
-        _atk.check_no_outsider("baseline", "ok", "TOK"),
-        _atk.check_results_identical("admin_role", "a", "b"),
+        _atk.check_caller_rejected(
+            "baseline",
+            '{"error":"Caller authorization failed.","code":"CALLER_IDENTITY_REJECTED"}',
+        ),
+        _atk.check_caller_rejected("admin_role", '{"hits":[]}'),
     ]
     assert _atk.summarize(checks) is False
 

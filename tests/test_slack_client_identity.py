@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import teamagent.adapters.slack_client as slack_client_module
 from teamagent.adapters.slack_client import SlackClient
 
 
@@ -31,18 +33,23 @@ def _client(user: dict[str, Any] | None) -> tuple[SlackClient, _FakeWebClient]:
 
 
 _MEMBER = {
-    "team_id": "T123",
+    "team_id": "T0123456789",
     "profile": {"email": "Taro@VectorInc.CO.JP", "real_name": "Taro"},
 }
 
 
+@pytest.fixture(autouse=True)
+def _production_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SLACK_TEAM_ID", "T0123456789")
+
+
 async def test_resolve_identity_member_normalizes_email() -> None:
     client, fake = _client(_MEMBER)
-    ident = await client.resolve_identity("U12345")
+    ident = await client.resolve_identity("U0123456789")
     assert ident is not None
     assert ident.email == "taro@vectorinc.co.jp"  # 正規化済み
     assert ident.is_member is True
-    assert ident.slack_user_id == "U12345"
+    assert ident.slack_user_id == "U0123456789"
     assert fake.calls == 1
 
 
@@ -53,27 +60,30 @@ async def test_resolve_identity_member_normalizes_email() -> None:
 async def test_resolve_identity_rejects_guest_bot_deleted(flag: str) -> None:
     user = {**_MEMBER, flag: True}
     client, _ = _client(user)
-    assert await client.resolve_identity("U12345") is None
+    assert await client.resolve_identity("U0123456789") is None
 
 
 async def test_resolve_identity_rejects_foreign_team(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SLACK_TEAM_ID", "T_OWN")
-    client, _ = _client({**_MEMBER, "team_id": "T_OTHER"})
-    assert await client.resolve_identity("U12345") is None
+    monkeypatch.setenv("SLACK_TEAM_ID", "T0123456789")
+    client, _ = _client({**_MEMBER, "team_id": "T9876543210"})
+    assert await client.resolve_identity("U0123456789") is None
 
 
 async def test_resolve_identity_accepts_matching_team(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SLACK_TEAM_ID", "T_OWN")
-    client, _ = _client({**_MEMBER, "team_id": "T_OWN"})
-    assert (await client.resolve_identity("U12345")) is not None
+    monkeypatch.setenv("SLACK_TEAM_ID", "T0123456789")
+    client, _ = _client({**_MEMBER, "team_id": "T0123456789"})
+    assert (await client.resolve_identity("U0123456789")) is not None
 
 
 async def test_resolve_identity_rejects_missing_email() -> None:
-    client, _ = _client({"team_id": "T123", "profile": {"real_name": "NoEmail"}})
-    assert await client.resolve_identity("U12345") is None
+    client, _ = _client({"team_id": "T0123456789", "profile": {"real_name": "NoEmail"}})
+    assert await client.resolve_identity("U0123456789") is None
 
 
-@pytest.mark.parametrize("bad", ["", "unknown", "x", "u12345", "12345", None])
+@pytest.mark.parametrize(
+    "bad",
+    ["", "unknown", "x", "u0123456789", "W0123456789", "U12345", "12345", None],
+)
 async def test_resolve_identity_rejects_bad_user_id(bad: str | None) -> None:
     client, fake = _client(_MEMBER)
     assert await client.resolve_identity(bad) is None
@@ -82,29 +92,46 @@ async def test_resolve_identity_rejects_bad_user_id(bad: str | None) -> None:
 
 async def test_resolve_identity_caches() -> None:
     client, fake = _client(_MEMBER)
-    a = await client.resolve_identity("U12345")
-    b = await client.resolve_identity("U12345")
+    a = await client.resolve_identity("U0123456789")
+    b = await client.resolve_identity("U0123456789")
     assert a == b
     assert fake.calls == 1  # 2回目はキャッシュ命中
 
 
-async def test_resolve_user_email_returns_email() -> None:
-    client, _ = _client(_MEMBER)
-    assert await client.resolve_user_email("U12345") == "taro@vectorinc.co.jp"
-    client2, _ = _client({**_MEMBER, "is_restricted": True})
-    assert await client2.resolve_user_email("U12345") is None
-
-
-async def test_team_check_skipped_when_env_unset_warns_once(
+async def test_resolve_identity_revalidates_after_claim_lifetime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """SLACK_TEAM_ID 未設定は team 検証 skip（fail-open・仕様として明文化）＋WARN は1回だけ。
+    ticks = iter((100.0, 161.0))
+    monkeypatch.setattr(
+        slack_client_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
+    client, fake = _client(_MEMBER)
+    assert await client.resolve_identity("U0123456789") is not None
+    assert await client.resolve_identity("U0123456789") is not None
+    assert fake.calls == 2
 
-    多人数運用では tfvars の slack_team_id を必ず設定すること（CLAUDE.md §5-C5）。
-    """
+
+async def test_resolve_user_email_returns_email() -> None:
+    client, _ = _client(_MEMBER)
+    assert await client.resolve_user_email("U0123456789") == "taro@vectorinc.co.jp"
+    client2, _ = _client({**_MEMBER, "is_restricted": True})
+    assert await client2.resolve_user_email("U0123456789") is None
+
+
+async def test_team_check_rejects_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SLACK_TEAM_ID 欠落は foreign team と同様に fail-closed。"""
     monkeypatch.delenv("SLACK_TEAM_ID", raising=False)
-    client, _ = _client({**_MEMBER, "team_id": "T_FOREIGN"})
-    assert not client._team_check_warned
-    ident = await client.resolve_identity("U12345")
-    assert ident is not None  # 未設定＝他 team でも通る（fail-open。他ガードは別途有効）
-    assert client._team_check_warned  # 警告済みフラグが立つ（2回目以降は出さない）
+    client, _ = _client(_MEMBER)
+    assert await client.resolve_identity("U0123456789") is None
+
+
+async def test_team_check_rejects_malformed_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SLACK_TEAM_ID", "T_BAD")
+    client, _ = _client({**_MEMBER, "team_id": "T_BAD"})
+    assert await client.resolve_identity("U0123456789") is None

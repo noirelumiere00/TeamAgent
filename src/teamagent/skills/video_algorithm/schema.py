@@ -480,10 +480,12 @@ class VideoAlgorithmInput(BaseModel):
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
     outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
-    # 取得段の委譲(任意): tiktok_acquire が書いた S3 prefix を渡すと、bot内スクレイプの代わりに
-    # その成果物(posts.normalized.json / videos/<pid>.mp4)から読む。未指定=従来どおり実スクレイプ。
-    # OC は tiktok_acquire→status で得た s3_prefix を渡す(取得=隔離 / 分析=既存)。
-    acquire_s3_prefix: str | None = None
+    # 取得段の委譲(任意): tiktok_acquire が返した job_id を渡す。実行者本人の監査hashと
+    # DynamoDB結果を照合し、記録済みのimmutable S3 VersionIdだけを読む。
+    acquire_job_id: str | None = Field(
+        default=None,
+        pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$",
+    )
     # カタログ⑥(勝ちパターン×検索ボリューム掛け合わせ)用の任意コンテキスト。
     # search_volume はユーザー/ラッコ手動実測の月間検索量（サーバ側の自動取得はしない＝
     # rakko_scraper はログイン済み .userdata セッション前提のため）。

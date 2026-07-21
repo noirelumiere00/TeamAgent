@@ -202,14 +202,14 @@ data "aws_iam_policy_document" "ecs_execution_connect_web_secrets" {
   statement {
     sid     = "ReadConnectWebSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
+    resources = concat([
       data.aws_secretsmanager_secret.connect_oauth_state[0].arn,
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
       data.aws_secretsmanager_secret.connect_slack_client_id[0].arn,
       data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn,
       data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn,
       data.aws_secretsmanager_secret.database_url.arn,
-    ]
+    ], local.hmac_report_secret_iam_arns)
   }
 }
 
@@ -227,6 +227,16 @@ resource "aws_iam_role_policy" "ecs_execution_connect_web_secrets" {
 data "aws_iam_policy_document" "connect_web_task" {
   count = var.enable_connect_web ? 1 : 0
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid     = "KmsEncryptDecryptOauthTokens"
     actions = ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"]
     resources = [
@@ -239,8 +249,6 @@ data "aws_iam_policy_document" "connect_web_task" {
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
     resources = local.bedrock_resources
   }
@@ -380,23 +388,37 @@ resource "aws_ecs_task_definition" "connect_web" {
   memory                   = var.fargate_connect_memory
   execution_role_arn       = aws_iam_role.ecs_execution_connect_web[0].arn
   task_role_arn            = aws_iam_role.connect_web_task[0].arn
-  depends_on               = [terraform_data.production_image_release_gate]
+  skip_destroy             = true
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["connect_web"],
+  ]
+
+  volume {
+    name = "runtime-tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "connect-web"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "-m", "teamagent.connect_web"]
+    command   = [local.teamagent_python, "-m", "teamagent.connect_web"]
     portMappings = [
       { containerPort = 8788, protocol = "tcp" },
     ]
-    environment = [
+    environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       # レポート短縮リンク(/r)が presigned を再生成する対象バケット。decode_report_token の
       # bucket allowlist にも使う（mcp 側 VSEO_REPORT_BUCKET と同一値＝トークンの bucket と一致）。
       { name = "VSEO_REPORT_BUCKET", value = aws_s3_bucket.raw_files.id },
@@ -470,19 +492,15 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "USE_QUERY_PLANNER", value = "false" },
       # ナレッジフィルタ UI（種別/期間などの絞り込み）。
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
-    ]
-    secrets = [
+    ], local.report_link_hmac_environment, local.connect_web_hmac_runtime_environment)
+    secrets = concat([
       { name = "OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_oauth_state[0].arn },
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
       { name = "CONNECT_SLACK_CLIENT_ID", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_id[0].arn },
       { name = "CONNECT_SLACK_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_slack_client_secret[0].arn },
       { name = "SLACK_OAUTH_STATE_SECRET", valueFrom = data.aws_secretsmanager_secret.slack_oauth_state_secret[0].arn },
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-      # live パリティ（2026-07-11 監査）: メールアクションリンクの HMAC 検証鍵。morning-digest が署名し
-      # connect-web が検証する対の鍵で、剥がれると ✏️/📅 等のアクション URL が全て検証不能になる。
-      # live は database-url の secret 文字列を鍵として共用している（rev39 実機と同値・意図的な既存設計）。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ]
+    ], local.report_link_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -492,23 +510,48 @@ resource "aws_ecs_task_definition" "connect_web" {
       }
     }
     healthCheck = {
-      command     = ["CMD-SHELL", "curl -fsS http://127.0.0.1:8788/healthz || exit 1"]
+      command     = ["CMD", local.teamagent_python, "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()"]
       interval    = 30
       timeout     = 5
       retries     = 5
       startPeriod = 30
     }
-  }])
+  })])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+
+    precondition {
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.connect_web)
+        || local.report_link_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for connect-web; direct/targeted task-definition apply is blocked."
+    }
+  }
 }
 
 # --- ECS Service ---
 resource "aws_ecs_service" "connect_web" {
-  count           = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
-  name            = "${var.project_name}-${var.environment}-connect-web"
-  cluster         = aws_ecs_cluster.main.id
-  task_definition = aws_ecs_task_definition.connect_web[0].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  count                 = var.enable_connect_web && var.mcp_image != "" ? 1 : 0
+  name                  = "${var.project_name}-${var.environment}-connect-web"
+  cluster               = aws_ecs_cluster.main.id
+  task_definition       = local.hmac_promoted_task_definition_arns.connect_web
+  desired_count         = 1
+  launch_type           = "FARGATE"
+  wait_for_steady_state = true
+
+  availability_zone_rebalancing = "ENABLED"
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   network_configuration {
     subnets          = data.aws_subnets.default.ids
@@ -532,7 +575,26 @@ resource "aws_ecs_service" "connect_web" {
 
   depends_on = [
     aws_lb_target_group.connect_web_fargate,
+    terraform_data.runtime_guard,
+    terraform_data.hmac_connect_web_pre_update,
   ]
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+
+    precondition {
+      condition = (
+        var.hmac_gate_mode != "rollback"
+        || local.hmac_live_gate_enabled.connect_web
+      )
+      error_message = "Exact rollback control, manifest, and live promotion gate are required before changing the connect-web service."
+    }
+  }
 }
 
 # ---------- Outputs ----------

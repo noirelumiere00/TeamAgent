@@ -14,20 +14,32 @@ locals {
   metric_namespace = "${var.project_name}/${var.environment}"
 }
 
-# ---------- SNS Topic（メール通知）----------
-# go-live実測: "${project}-${env}-alarms" は本番repo(~/Documents/TeamAgent)のstateが同名で
-# 既保有＝CreateTopicがタグ差で400。両stateの同一リソース取り合いを避け、openclaw側は別名にする。
+# ---------- SNS Topic（canonical alarm delivery）----------
+# teamagent-dev-alarms は別state所有のlegacy topic。このstateへimportせず、
+# runtime migrationで参照ゼロ化された後に元の所有stateから明示退役する。
+# このstateが一意に所有するopenclaw-alarmsをcanonicalとして維持する。
 resource "aws_sns_topic" "alarms" {
   name = "${var.project_name}-${var.environment}-openclaw-alarms"
+
+  lifecycle {
+    prevent_destroy = true
+
+    precondition {
+      condition     = local.runtime_guard_verified
+      error_message = local.runtime_guard_error
+    }
+  }
 }
 
-resource "aws_sns_topic_subscription" "alarms_email" {
-  for_each = toset(var.alarm_email_endpoints)
-
-  topic_arn = aws_sns_topic.alarms.arn
-  protocol  = "email"
-  endpoint  = each.value
-}
+# The AWS provider only partially supports email subscriptions and cannot wait
+# for email confirmation. Creating one in the runtime migration could therefore
+# promote services while it is still PendingConfirmation. Delivery endpoints
+# are intentionally external to this state: the guard accepts an email only
+# after the live SNS API reports its confirmed ARN, hashes the raw UTF-8
+# endpoint bytes, and matches that hash to the one approved alarm_email_endpoints
+# value. The full protocol/pending inventory must contain only that confirmed
+# email subscription; any canonical-topic Chatbot attachment is rejected.
+# No pending subscription is ever created by this rollout.
 
 # ---------- メトリクスフィルタ ----------
 # 1) コスト：各 Bedrock 呼び出しの cost_usd を集計

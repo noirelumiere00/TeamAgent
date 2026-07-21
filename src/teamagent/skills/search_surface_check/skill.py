@@ -71,7 +71,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         "面の勢力図（ニュース/グルメ/一般/公式/インフルエンサーの割合）とクライアント動画の"
         "在圏判定つきの媒体比較レポート(HTML署名URL)を作る。"
         "TikTok面は3KW以上なら必ず先に tiktok_acquire(videos_per_kw=0) を実行し、"
-        "acquire_s3_prefix を渡すこと（1〜2KWの即席チェックのみ直接取得可）。"
+        "acquire_job_id を渡すこと（1〜2KWの即席チェックのみ直接取得可）。"
         "動画の中身分析は video_algorithm、X(Twitter)の声集めは x_voice_search。"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckInput
@@ -88,7 +88,8 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         self._apify = apify
         self._bedrock = bedrock
         self._publisher = publisher
-        self._tiktok_source_factory = tiktok_source_factory  # callable(prefix) -> TikTokS3Source
+        # callable(job_id, caller_audit_hash) -> TikTokS3Source
+        self._tiktok_source_factory = tiktok_source_factory
         self._tiktok_search_fn = tiktok_search_fn  # 直スクレイプ経路（テスト注入用）
 
     # ---- 依存の遅延生成 -------------------------------------------------------
@@ -131,15 +132,19 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     # ---- TikTok面 --------------------------------------------------------------
 
     def _tiktok_from_s3(
-        self, prefix: str, keywords: list[str], max_per_kw: int
+        self,
+        job_id: str,
+        audit_principal_hash: str,
+        keywords: list[str],
+        max_per_kw: int,
     ) -> dict[str, list[SurfacePost]]:
         """acquire 成果物（rank_display順・再ソート禁止）から KW ごとの面を組む。"""
         if self._tiktok_source_factory is not None:
-            source = self._tiktok_source_factory(prefix)
+            source = self._tiktok_source_factory(job_id, audit_principal_hash)
         else:
             from teamagent.adapters.tiktok_s3_source import TikTokS3Source
 
-            source = TikTokS3Source(prefix)
+            source = TikTokS3Source(job_id, audit_principal_hash=audit_principal_hash)
         by_kw: dict[str, list[SurfacePost]] = {kw: [] for kw in keywords}
         for p in source.posts():
             kw = str(p.get("kw", ""))
@@ -340,6 +345,9 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     def run(self, input: SearchSurfaceCheckInput, ctx: SkillContext) -> SearchSurfaceCheckOutput:
         log = ctx.bind_logger(self.name)
         user = str(ctx.metadata.get("user_email") or ctx.user_id or "")
+        from teamagent.adapters.tiktok_s3_source import media_audit_principal_hash
+
+        audit_hash = media_audit_principal_hash(user)
         if not rollout_allowed(_ALLOWLIST_ENV, user):
             return SearchSurfaceCheckOutput(
                 keywords=input.keywords, slack_summary=ROLLOUT_DENIED_MESSAGE
@@ -352,7 +360,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         want_ig = "instagram" in input.platforms
         if (
             want_tiktok
-            and input.acquire_s3_prefix is None
+            and input.acquire_job_id is None
             and len(input.keywords) > MAX_DIRECT_KEYWORDS
         ):
             return SearchSurfaceCheckOutput(
@@ -360,7 +368,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 slack_summary=(
                     f"{len(input.keywords)}KWのTikTok面チェックは、先に "
                     f"tiktok_acquire(keywords={input.keywords}, videos_per_kw=0) を実行し、"
-                    "完了後に acquire_s3_prefix を渡してください"
+                    "完了後に acquire_job_id を渡してください"
                     f"（直接取得は{MAX_DIRECT_KEYWORDS}KWまで）。"
                 ),
             )
@@ -371,9 +379,12 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         try:
             if want_tiktok:
                 try:
-                    if input.acquire_s3_prefix:
+                    if input.acquire_job_id:
                         tiktok_by_kw = self._tiktok_from_s3(
-                            input.acquire_s3_prefix, input.keywords, input.max_posts_per_kw
+                            input.acquire_job_id,
+                            audit_hash,
+                            input.keywords,
+                            input.max_posts_per_kw,
                         )
                     else:
                         tiktok_by_kw = self._tiktok_direct(

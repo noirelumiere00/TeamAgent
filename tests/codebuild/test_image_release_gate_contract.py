@@ -19,6 +19,9 @@ PROMOTER = ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml"
 GATE_RUNNER = ROOT / "infra" / "deploy" / "run_image_deployment_gate.sh"
 PLAN_LAUNCHER = ROOT / "infra" / "terraform" / "plan_image_release.sh"
 APPLY_LAUNCHER = ROOT / "infra" / "terraform" / "apply_image_release_plan.sh"
+RUNTIME_GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+FARGATE_VARIABLES = ROOT / "infra" / "terraform" / "variables_fargate.tf"
+RELEASE_CONTEXT = ROOT / "infra" / "terraform" / "image_release_context.py"
 BOOTSTRAP_TARGETS = ROOT / "infra" / "terraform" / "codebuild_provenance_bootstrap_targets.txt"
 
 
@@ -241,24 +244,35 @@ def test_terraform_uses_a_hard_precondition_not_a_warning_only_check() -> None:
     assert "local.deployment_references_are_digest_only" in body
     assert "local.deployment_contracts_are_ready" in body
     assert "local.deployment_evidence_is_complete" in body
-    assert "tiktok   = var.enable_tiktok_acquire" in body
+    assert 'tiktok = ""' in body
+    assert "tiktok   = false" in body
     assert "!local.deployment_pipeline_enabled[pipeline]" in body
     assert "signed_image_release_gate[0].result.verified" in body
+    assert "release_channels_json" in body
+    assert "release_channels" in body
 
 
-def test_gate_is_replaced_and_consumed_before_any_task_definition_apply() -> None:
+def test_saved_gate_query_is_consumed_before_terraform_apply_can_start() -> None:
     body = GATE.read_text(encoding="utf-8")
+    evidence = EVIDENCE.read_text(encoding="utf-8")
+    guard = RUNTIME_GUARD.read_text(encoding="utf-8")
 
     assert "triggers_replace" in body
-    assert "plantimestamp()" in body
-    assert 'provisioner "local-exec"' in body
-    assert "consume-deployment-intent" in body
-    assert "TEAMAGENT_SAVED_PLAN_PATH" in body
-    assert "TEAMAGENT_APPLY_ATTEMPT_ID" in body
-    assert "TEAMAGENT_DEPLOYMENT_GATE_QUERY" in body
+    assert "[var.image_deployment_intent_id]" in body
+    assert "plantimestamp()" not in body
+    assert 'provisioner "local-exec"' not in body
+    assert "deployment_gate_query    = local.deployment_gate_query" in body
+    assert "receipt_authorization_expires_at" in body
     assert "deployment_context_sha256" in body
     assert "receipt_claims_sha256" in body
     assert "deployment_intent_id" in body
+    assert "_verified_receipt_claims_for_saved_plan" in evidence
+    assert "_consume_applying_deployment_intent" in evidence
+    assert evidence.index("_verified_receipt_claims_for_saved_plan(") < evidence.index(
+        "_consume_applying_deployment_intent(",
+        evidence.index("def validate_deployment_preflight"),
+    )
+    assert guard.index("validate-deployment-preflight") < guard.index('python3 "$APPLY_SUPERVISOR"')
 
 
 def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
@@ -275,11 +289,14 @@ def test_every_discovered_ecs_task_definition_depends_on_release_gate() -> None:
             address = f"{relative}:aws_ecs_task_definition.{match.group(1)}"
             block = _hcl_block(body, match.start(2))
             assert "container_definitions" in block, address
-            assert re.search(
-                r"depends_on\s*=\s*\[\s*"
-                r"terraform_data\.production_image_release_gate\s*\]",
-                block,
-            ), f"{address} can bypass the production image release gate"
+            dependencies = re.search(r"depends_on\s*=\s*\[(.*?)\]", block, re.DOTALL)
+            assert dependencies, f"{address} has no explicit release-gate dependency"
+            assert "terraform_data.production_image_release_gate" in dependencies.group(1), (
+                f"{address} can bypass the production image release gate"
+            )
+            assert "terraform_data.runtime_guard" in dependencies.group(1), (
+                f"{address} can bypass the runtime guard"
+            )
             discovered[address] = block
 
     assert set(discovered) == {
@@ -298,29 +315,37 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
     planner = PLAN_LAUNCHER.read_text(encoding="utf-8")
     applier = APPLY_LAUNCHER.read_text(encoding="utf-8")
     runner = GATE_RUNNER.read_text(encoding="utf-8")
+    guard = (ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh").read_text(encoding="utf-8")
 
-    assert "terraform plan \\" in planner
-    assert '-out="$plan_path"' in planner
-    assert "prepare-deployment-intent" in planner
-    assert "image_deployment_intent_id=$intent_id" in planner
-    assert "complete, locked, refresh-enabled full saved plans" in planner
-    assert "saved plans must be stored outside" in planner
-    assert 'python3 "$apply_supervisor" \\' in applier
+    for retired in (planner, applier):
+        assert "Retired:" in retired
+        assert "terraform_runtime_guard.sh" in retired
+        assert "exit 64" in retired
+        assert "terraform plan" not in retired
+        assert "terraform apply" not in retired
+    assert "TF_ARGS=(" in guard
+    assert 'terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"' in guard
+    assert "-refresh=true" in guard
+    assert "-lock-timeout=5m" in guard
+    assert "-out=$STAGE_PLAN" in guard
+    assert "prepare_image_deployment_intent" in guard
+    assert "image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID" in guard
+    assert 'python3 "$APPLY_SUPERVISOR" \\' in guard
     supervisor = (ROOT / "infra" / "terraform" / "terraform_apply_supervisor.py").read_text(
         encoding="utf-8"
     )
     assert '"apply",' in supervisor
     assert '"-lock=true",' in supervisor
-    assert "never retry this plan, intent, or receipts" in applier
-    assert "mark-deployment-intent-outcome" in applier
-    assert "saved plans must be stored outside" in applier
-    assert 'control_commit="$(git -C "$control_root" rev-parse HEAD)"' in applier
-    assert applier.count('--control-commit "$control_commit"') == 2
-    assert "terraform_apply_supervisor.py" in applier
-    assert "heartbeat-deployment-lock" not in applier
-    assert ("assumed-role/teamagent-dev-terraform-automation/teamagent-terraform-worker") in runner
+    assert "mark-deployment-intent-outcome" in guard
+    assert "terraform_apply_supervisor.py" in guard
+    assert "heartbeat-deployment-lock" in guard
+    assert (
+        "assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+    ) in runner
     assert "arn:aws:iam::718959508629:user/AIIAdev" not in runner
-    assert ("arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate") in runner
+    assert "arn:aws:iam::718959508629:role/teamagent-dev-image-deployment-gate" not in runner
+    assert "sts assume-role" not in runner
+    assert "exec python3" in runner
     assert "acquire-deployment-lock" in runner
     assert "validate-deployment-preflight" in runner
 
@@ -332,8 +357,35 @@ def test_saved_plan_launchers_enforce_one_external_plan_and_no_target() -> None:
             text=True,
             timeout=10,
         )
-        assert completed.returncode == 0, completed.stderr
-        assert "usage:" in completed.stdout
+        assert completed.returncode == 64
+        assert "retired launcher" in completed.stderr
+
+
+def test_empty_runtime_images_and_ungated_destructive_plans_fail_closed() -> None:
+    variables = FARGATE_VARIABLES.read_text(encoding="utf-8")
+    context = RELEASE_CONTEXT.read_text(encoding="utf-8")
+    evidence = EVIDENCE.read_text(encoding="utf-8")
+
+    for variable_name, repository in (
+        ("mcp_image", "teamagent-mcp@sha256:"),
+        ("openclaw_image", "teamagent-openclaw@sha256:"),
+    ):
+        start = variables.index(f'variable "{variable_name}"')
+        block = _hcl_block(variables, variables.index("{", start))
+        assert 'default     = ""' not in block
+        assert repository in block
+        assert "nonempty fixed release-repository digest" in block
+
+    assert "CONTEXT_SCHEMA = 2" in context
+    assert '"delete_change_count"' in context
+    assert '"replace_change_count"' in context
+    assert '"transition_sha256"' in context
+    assert "nonempty release digest" in context
+    assert "_saved_plan_transition_classification" in evidence
+    assert "_require_destructive_rollback_channels" in evidence
+    assert "image-empty destructive state is forbidden" in evidence
+    assert "requires a fresh rollback receipt" in evidence
+    assert "unscoped destructive transition" in evidence
 
 
 def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None:
@@ -364,7 +416,12 @@ def test_deployment_intents_use_a_durable_protected_conditional_ledger() -> None
     assert "release receipt has already authorized a deployment" in evidence
     assert "saved Terraform plan will not run the apply-time gate" in evidence
     assert "saved Terraform plan is incomplete" in evidence
-    assert "image release saved plans cannot contain imports" in evidence
+    assert "ALLOWED_EXISTING_LOG_IMPORTS" in evidence
+    assert "/aws/ecs/containerinsights/teamagent-dev/performance" in evidence
+    assert "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance" in evidence
+    assert 'not in (["no-op"], ["update"])' in evidence
+    assert "image release saved plan import is outside the exact " in evidence
+    assert "existing-log allowlist" in evidence
     assert "DEPLOYMENT_LOCK_RECORD_ID" in evidence
     assert "lease_expires_at > :now_epoch" in evidence
 
@@ -379,7 +436,7 @@ def test_release_intent_binds_the_hmac_workers_nonsecret_ledger_snapshot() -> No
         assert field in gate
     assert "ap-northeast-1:718959508629:table/" in gate
     assert "shared_generation_ledger_json" in gate
-    assert "shared_generation_ledger  =" in gate
+    assert "shared_generation_ledger =" in gate
     assert "shared_ledger_sha256" in evidence
     assert evidence.count('"shared_ledger_sha256"') >= 5
     assert "_validate_shared_generation_ledger_binding" in evidence
@@ -537,40 +594,8 @@ def test_lifecycle_never_expires_a_production_release_evidence_graph() -> None:
     assert "must not have an ECR lifecycle policy" in evidence
 
 
-def test_ready_false_bootstrap_scope_cannot_target_runtime_or_the_deploy_gate() -> None:
-    targets = {
-        line
-        for line in BOOTSTRAP_TARGETS.read_text(encoding="utf-8").splitlines()
-        if line and not line.startswith("#")
-    }
-
-    assert "aws_codebuild_project.image_attestor" in targets
-    assert "aws_codebuild_project.image_promoter" in targets
-    assert "aws_ecr_repository.mcp_quarantine" in targets
-    assert "aws_ecr_repository.mcp_verified_candidates" in targets
-    assert "aws_iam_policy.deny_quarantine_runtime_pull" in targets
-    assert "terraform_data.production_image_release_gate" not in targets
-    assert not any(
-        token in target
-        for target in targets
-        for token in (
-            "aws_ecs_",
-            "aws_cloudwatch_event_",
-            "aws_scheduler_",
-            "task_definition",
-        )
-    )
-    declared = set()
-    for path in (
-        ROOT / "infra" / "terraform" / "codebuild.tf",
-        ROOT / "infra" / "terraform" / "ecr.tf",
-    ):
-        declared.update(
-            f"{resource_type}.{name}"
-            for resource_type, name in re.findall(
-                r'^resource "([^"]+)" "([^"]+)"',
-                path.read_text(encoding="utf-8"),
-                re.MULTILINE,
-            )
-        )
-    assert targets == declared
+def test_ready_false_bootstrap_has_no_target_bypass() -> None:
+    assert not BOOTSTRAP_TARGETS.exists()
+    readme = (ROOT / "infra" / "terraform" / "README.md").read_text(encoding="utf-8")
+    assert "codebuild_provenance_bootstrap_targets.txt" not in readme
+    assert 'target_args+=("-target=$address")' not in readme

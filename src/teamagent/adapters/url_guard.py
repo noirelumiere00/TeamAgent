@@ -1,7 +1,7 @@
 """SSRF 中央バリデータ（スクレイプ/動画ツール用）。
 
 OpenClaw 等 金庫外の頭脳がツール越しに渡す URL を、ネットワーク I/O に届く直前で
-**1 か所**検証する。許可ドメインの厳密末尾一致＋内部/メタデータ IP 拒否＋http(s) 限定で、
+**1 か所**検証する。許可ドメインの厳密末尾一致＋全解決先 ``is_global``＋canonical HTTPS で、
 SSRF（社内サービス・クラウドメタデータ 169.254.169.254・localhost・file:// 等への到達）を
 構造的に塞ぐ。
 
@@ -9,9 +9,8 @@ SSRF（社内サービス・クラウドメタデータ 169.254.169.254・localh
 スクレイプ系ツール（USE_VIDEO_TOOLS / USE_TIKTOK_TOOLS）でのみ実行され、P1 薄殻
 （4 ナレッジツール）では import すらされない＝既定 OFF への影響は無い。
 
-既知の残存リスク（P2 検討・記録のみ）: DNS rebinding（検証時の解決と yt-dlp/Node の実接続が
-別タイミングのため TOCTOU 余地が残る）。allowlist＋内部IP拒否＋社内 company_shared＋読取専用で
-実害を限定する判断。完全対処（pinned-connect）は費用対効果が見合わないため P2 へ。
+実接続を行うmedia worker側では、Pythonの各 ``getaddrinfo`` とNodeの各browser requestでも
+全解決先を再検査する。ここはskill層の早期拒否とlocal-runtime用の同一ポリシーを担う。
 """
 
 from __future__ import annotations
@@ -24,12 +23,12 @@ from urllib.parse import urlparse
 
 import structlog
 
+from teamagent.media.url_policy import ACQUIRE_HOST_SUFFIXES
+
 logger = structlog.get_logger(__name__)
 
 # 既定は保守的（スクレイプ対象の公開プラットフォームのみ）。env SCRAPE_ALLOWED_DOMAINS で上書き。
-_DEFAULT_ALLOWED: frozenset[str] = frozenset(
-    {"youtube.com", "youtu.be", "tiktok.com", "instagram.com", "instagr.am"}
-)
+_DEFAULT_ALLOWED: frozenset[str] = frozenset(ACQUIRE_HOST_SUFFIXES)
 
 _MAX_URL_LEN = 2048
 
@@ -63,10 +62,14 @@ def _host_matches(host: str, allowed: frozenset[str]) -> bool:
 
 
 def _ip_is_blocked(ip_s: str) -> bool:
-    """IP 文字列が内部/メタデータ/予約レンジなら True（ValueError は呼び出し側が処理）。"""
-    ip = ipaddress.ip_address(ip_s)
+    """``is_global`` でないIPをすべて拒否する（IPv4-mapped IPv6も正規化）。"""
+
+    ip = ipaddress.ip_address(ip_s.split("%", 1)[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
     return bool(
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local  # 169.254.0.0/16・fe80::/10（AWS IMDS を含む）
         or ip.is_reserved
@@ -108,13 +111,15 @@ def validate_scrape_url(
 ) -> str:
     """スクレイプ対象 URL を SSRF allowlist で検証し、通れば正規化 URL を返す。
 
-    ``check_dns=True``（既定・**実ネットワーク I/O 直前の adapter backstop 用**）は DNS 解決先の
-    内部IPまで検査。``check_dns=False``（skill 層の早期拒否用）はスキーム/host/ドメイン allowlist
+    ``check_dns=True``（既定・**実ネットワーク I/O 直前の adapter backstop 用**）は DNS の全解決先が
+    globalであることを検査。``check_dns=False``（skill 層の早期拒否用）はscheme/authority/domain
+    allowlist
     の安価な検査のみ＝非ネットワークで決定的（IPリテラル・非許可ドメインはここで弾かれ、許可ドメイン
     が内部IPに解決する稀ケースだけ adapter backstop に委ねる）。
 
     Raises:
-        UrlGuardError: 空 / 長すぎ / 非http(s) / host無し / 非許可ドメイン / (check_dns時)内部IP。
+        UrlGuardError: 空 / 長すぎ / 非HTTPS / 非canonical authority / host無し /
+            非許可ドメイン / (check_dns時)非global IP。
     """
     if not url or not url.strip():
         raise UrlGuardError("URL_EMPTY: URL が空です")
@@ -122,11 +127,17 @@ def validate_scrape_url(
     if len(cleaned) > _MAX_URL_LEN:
         raise UrlGuardError("URL_TOO_LONG: URL が長すぎます")
     parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https"):
-        raise UrlGuardError("URL_SCHEME_BLOCKED: http(s) のURLのみ許可されます")
+    if parsed.scheme != "https":
+        raise UrlGuardError("URL_SCHEME_BLOCKED: HTTPS URLのみ許可されます")
     host = parsed.hostname  # urllib が user:pass@ / :port / [IPv6] を厳密分離
     if not host:
         raise UrlGuardError("URL_NO_HOST: ホスト名がありません")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise UrlGuardError("URL_AUTHORITY_BLOCKED: URL authorityが不正です") from exc
+    if parsed.username or parsed.password or port not in (None, 443):
+        raise UrlGuardError("URL_AUTHORITY_BLOCKED: canonical HTTPS authorityのみ許可されます")
     allowed = allowed_domains_from_env()
     if not _host_matches(host, allowed):
         logger.warning("url_guard_domain_blocked", request_id=request_id, host=host)

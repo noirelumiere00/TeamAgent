@@ -3,7 +3,7 @@
 この抽象を差し替えることで、同じ適応ループを以下で動かせる:
 - MockDecider: スクリプト化（オフライン・決定的）。ループ機構と適応分岐の検証用。
 - (将来) BedrockToolDecider: bedrock_client に converse_with_tools() を足して実装（方式A）。
-- (将来) SDK 経由: Claude Agent SDK on Bedrock にループ自体を委ねる（方式B）。
+- Python Anthropic Bedrock clientによるbounded tool loop（方式B）。
 
 方式A/B の比較は docs/poc/agent_orchestrator_poc_design.md を参照。
 """

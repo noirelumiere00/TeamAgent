@@ -125,13 +125,13 @@ data "aws_iam_policy_document" "ecs_execution_morning_digest_secrets" {
   statement {
     sid     = "ReadMorningDigestSecrets"
     actions = ["secretsmanager:GetSecretValue"]
-    resources = [
+    resources = concat([
       data.aws_secretsmanager_secret.database_url.arn,
       data.aws_secretsmanager_secret.slack_bot.arn,
       data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
       # per-user token refresh 用の connect(web 型)クライアント secret（CONNECT_GOOGLE_CLIENT_SECRET）。
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
-    ]
+    ], local.hmac_mail_secret_iam_arns)
   }
 }
 
@@ -148,17 +148,25 @@ resource "aws_iam_role_policy" "ecs_execution_morning_digest_secrets" {
 data "aws_iam_policy_document" "morning_digest_task" {
   count = var.enable_morning_digest ? 1 : 0
   statement {
+    sid       = "HmacStateRuntime"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.hmac_state.arn]
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = [local.hmac_state_scope]
+    }
+  }
+  statement {
     sid       = "KmsDecryptForOauthTokens"
     actions   = ["kms:Decrypt"]
-    resources = ["arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"]
+    resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
   }
   statement {
     sid = "BedrockInvokeForTriageAndDraft"
     actions = [
       "bedrock:InvokeModel",
       "bedrock:InvokeModelWithResponseStream",
-      "bedrock:Converse",
-      "bedrock:ConverseStream",
     ]
     resources = local.bedrock_resources
   }
@@ -215,20 +223,34 @@ resource "aws_ecs_task_definition" "morning_digest" {
   memory                   = var.fargate_morning_digest_memory
   execution_role_arn       = aws_iam_role.ecs_execution_morning_digest[0].arn
   task_role_arn            = aws_iam_role.morning_digest_task[0].arn
-  depends_on               = [terraform_data.production_image_release_gate]
+  skip_destroy             = true
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.production_image_release_gate,
+    terraform_data.hmac_live_task_gate["morning_digest"],
+  ]
+
+  volume {
+    name = "runtime-tmp"
+  }
 
   runtime_platform {
     operating_system_family = "LINUX"
     cpu_architecture        = "ARM64"
   }
 
-  container_definitions = jsonencode([{
+  container_definitions = jsonencode([merge(local.teamagent_runtime_container, {
     name      = "morning-digest"
     image     = var.mcp_image
     essential = true
-    command   = ["python", "scripts/run_morning_digest_fargate.py"]
-    environment = [
+    command   = [local.teamagent_python, "/app/scripts/run_morning_digest_fargate.py"]
+    environment = concat([
       { name = "AWS_REGION", value = var.aws_region },
+      { name = "HOME", value = "/tmp/home" },
+      { name = "TMPDIR", value = "/tmp" },
+      { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },
+      { name = "PYTHONPYCACHEPREFIX", value = "/tmp/.pycache" },
       { name = "STRUCTLOG_FORMAT", value = "json" },
       { name = "MORNING_DIGEST_USERS", value = var.morning_digest_users },
       { name = "MORNING_DIGEST_EXCLUDE", value = var.morning_digest_exclude },
@@ -262,8 +284,8 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
       { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
       { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
-    ]
-    secrets = [
+    ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
+    secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
       { name = "SLACK_BOT_TOKEN", valueFrom = data.aws_secretsmanager_secret.slack_bot.arn },
       { name = "GOOGLE_OAUTH_JSON", valueFrom = data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn },
@@ -273,11 +295,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
-      # live パリティ（2026-07-11 監査）: ✏️/📅 等メールアクションリンクの HMAC 署名鍵。connect-web 側の
-      # 検証鍵と同一 secret（live は database-url の文字列を鍵として共用・rev32 実機と同値）。
-      # 剥がれると生成する全アクション URL が検証不能になり、ボタン機能有効化時に沈黙する地雷になる。
-      { name = "MAIL_ACTION_HMAC_SECRET", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
-    ]
+    ], local.mail_action_hmac_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -287,7 +305,19 @@ resource "aws_ecs_task_definition" "morning_digest" {
       }
     }
     # Scheduled Task なので healthCheck 不要（exit code が成否を語る）
-  }])
+  })])
+
+  lifecycle {
+    create_before_destroy = true
+
+    precondition {
+      condition = (
+        (var.hmac_gate_mode == "rollback" && local.hmac_live_gate_enabled.morning_digest)
+        || local.mail_action_hmac_transition_valid
+      )
+      error_message = "HMAC rollout preflight failed for morning-digest; direct/targeted task-definition apply is blocked."
+    }
+  }
 }
 
 # --- EventBridge → ECS RunTask の IAM role ---
@@ -329,6 +359,11 @@ data "aws_iam_policy_document" "events_morning_digest_run_task" {
       aws_iam_role.ecs_execution_morning_digest[0].arn,
       aws_iam_role.morning_digest_task[0].arn,
     ]
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 }
 
@@ -347,7 +382,7 @@ variable "morning_digest_compact" {
 }
 
 variable "morning_digest_rule_enabled" {
-  description = "朝ダイジェストの EventBridge ルールを ENABLED にするか。live は手動 DISABLED 運用のため既定 false（2026-07-11 監査: state 未指定だと provider 既定 ENABLED になり、apply のたびに手動 DISABLE が勝手に巻き戻る）。ロールアウト時はこの変数を true にして apply で点灯する（CLI enable-rule は次回 apply で戻るため使わない）。"
+  description = "朝ダイジェストの EventBridge ルールを ENABLED にするか。2026-07-17 live は ENABLED。既定値には依存せずruntime guardがlive/manifestのexact stateを注入し、CLI変更や無関係applyによる反転を拒否する。"
   type        = bool
   default     = false
 }
@@ -358,22 +393,39 @@ resource "aws_cloudwatch_event_rule" "morning_digest_weekday" {
   description         = "平日朝 9:30 JST の morning_digest Fargate 起動トリガ"
   schedule_expression = var.morning_digest_schedule_expression
   state               = var.morning_digest_rule_enabled ? "ENABLED" : "DISABLED"
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
-  count    = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
-  rule     = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
-  arn      = aws_ecs_cluster.main.arn
-  role_arn = aws_iam_role.events_morning_digest_invoke[0].arn
+  count     = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
+  rule      = aws_cloudwatch_event_rule.morning_digest_weekday[0].name
+  target_id = "morning"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.events_morning_digest_invoke[0].arn
+  input     = jsonencode({})
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.hmac_morning_digest_pre_update,
+  ]
 
   ecs_target {
-    task_definition_arn = aws_ecs_task_definition.morning_digest[0].arn
-    task_count          = 1
-    launch_type         = "FARGATE"
-    platform_version    = "LATEST"
+    task_definition_arn = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_task_definition_arns.morning_digest
+      : aws_ecs_task_definition.morning_digest[0].arn
+    )
+    task_count       = 1
+    launch_type      = "FARGATE"
+    platform_version = "LATEST"
 
     network_configuration {
-      subnets          = data.aws_subnets.default.ids
+      subnets          = sort(data.aws_subnets.default.ids)
       security_groups  = [aws_security_group.morning_digest[0].id]
       assign_public_ip = true
     }
@@ -383,12 +435,16 @@ resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
     maximum_event_age_in_seconds = 3600
     maximum_retry_attempts       = 1
   }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # ---------- Outputs ----------
 output "morning_digest_task_definition_arn" {
   description = "morning_digest Scheduled Task の TaskDefinition ARN（手動 run-task 検証用）"
-  value       = var.enable_morning_digest && var.mcp_image != "" ? aws_ecs_task_definition.morning_digest[0].arn : ""
+  value       = var.enable_morning_digest && var.mcp_image != "" ? local.hmac_promoted_task_definition_arns.morning_digest : ""
 }
 
 output "morning_digest_log_group" {

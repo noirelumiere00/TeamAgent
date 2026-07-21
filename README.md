@@ -66,13 +66,14 @@ pytest tests/
 
 ### 3. 本番デプロイ
 
-[infra/terraform/](infra/terraform/) に AWS Terraform 雛形あり。
+[infra/terraform/](infra/terraform/) は TeamAgent dev の既存 remote state 専用です。
+plain `terraform plan/apply` は使用せず、通常変更は
+`infra/deploy/terraform_runtime_guard.sh` を通します。provenance/IAM control planeの
+初回循環だけは、MFA付きroot→1時間STS、create-only main-state handoff、seed退役を行う
+[one-time bootstrap runbook](docs/runbooks/provenance_iam_bootstrap.md) に従います。
 
 ```bash
-cd infra/terraform
-terraform init
-terraform plan
-terraform apply
+bash infra/deploy/bootstrap_provenance_iam.sh validate-contract
 ```
 
 ## アーキテクチャ概要

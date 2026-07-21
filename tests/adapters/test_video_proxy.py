@@ -8,6 +8,15 @@ from teamagent.adapters import video_proxy
 from teamagent.adapters.video_proxy import VideoProxyError, ensure_under_limit
 
 
+@pytest.fixture(autouse=True)
+def _explicit_local_media_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These unit tests intentionally exercise the mocked local ffmpeg path."""
+
+    for name in ("MEDIA_TASK_QUEUE", "MEDIA_JOBS_TABLE", "MEDIA_JOB_BUCKET"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+
+
 def test_passthrough_when_under_limit() -> None:
     data = b"small"
     out, mime = ensure_under_limit(data, "video/mp4", limit_mb=18)

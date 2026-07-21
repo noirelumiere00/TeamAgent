@@ -11,8 +11,12 @@ LAUNCHER_SESSION_NAME="teamagent-build-launcher"
 EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-codebuild-launcher/teamagent-build-launcher"
 EXPECTED_BRANCH="dev"
 EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"
+EXPECTED_REMOTE_URL="https://github.com/noirelumiere00/TeamAgent.git"
+EXPECTED_HEAD_REF="refs/heads/dev"
+EXPECTED_BASE_REF="refs/heads/main"
 APP_BUCKET="teamagent-dev-raw-files"
 APP_KEY="codebuild/connect-web-app.html"
+BAKED_APP_KEY="codebuild/baked-fallback/connect-web-app.html"
 EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
 SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"
 IMAGE_PROJECT="teamagent-dev-image-builder"
@@ -20,6 +24,7 @@ ATTESTOR_PROJECT="teamagent-dev-image-attestor"
 PROMOTER_PROJECT="teamagent-dev-image-promoter"
 VERIFIED_CANDIDATE_REPOSITORY="teamagent-mcp-verified-candidates"
 MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-media-worker-verified-candidates"
+SOURCE_CONNECTION_NAME="teamagent-dev-openclaw-codebuild"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
 
@@ -69,13 +74,6 @@ unset AWS_ENDPOINT_VARIABLE
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" \
   || die "launcher is not inside a Git worktree"
-SOURCE_MANIFEST_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_runtime_contract.json"
-RELEASE_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
-PROVENANCE="$REPO_ROOT/infra/codebuild/source_provenance.py"
-BUNDLE_PROVENANCE="$REPO_ROOT/infra/codebuild/teamagent_bundle_provenance.py"
-[ -f "$SOURCE_MANIFEST_CONTRACT" ] && [ -f "$RELEASE_CONTRACT" ] \
-  && [ -f "$PROVENANCE" ] && [ -f "$BUNDLE_PROVENANCE" ] \
-  || die "trusted local contract helpers are missing"
 [ -z "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] \
   || die "Git worktree is dirty"
 BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)" \
@@ -83,13 +81,64 @@ BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD)" \
 [ "$BRANCH" = "$EXPECTED_BRANCH" ] || die "builds must run from local dev"
 [ "$(git -C "$REPO_ROOT" config --get remote.origin.url)" = "$EXPECTED_ORIGIN_URL" ] \
   || die "unexpected Git origin"
-git -C "$REPO_ROOT" fetch --quiet --no-tags origin \
-  "refs/heads/dev:refs/remotes/origin/dev" \
-  || die "could not refresh origin/dev"
 COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})"
-REMOTE_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify refs/remotes/origin/dev^{commit})"
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "HEAD is not a full SHA"
-[ "$COMMIT" = "$REMOTE_COMMIT" ] || die "local dev HEAD must exactly equal remote origin/dev"
+REMOTE_HEADS="$(
+  git ls-remote --exit-code --heads "$EXPECTED_REMOTE_URL" \
+    "$EXPECTED_HEAD_REF" "$EXPECTED_BASE_REF"
+)" || die "could not refresh protected remote identities"
+REMOTE_COMMIT="$(
+  awk -v ref="$EXPECTED_HEAD_REF" \
+    '$2 == ref {count++; oid=$1} END {if (count == 1) print oid}' \
+    <<<"$REMOTE_HEADS"
+)"
+REMOTE_BASE_OID="$(
+  awk -v ref="$EXPECTED_BASE_REF" \
+    '$2 == ref {count++; oid=$1} END {if (count == 1) print oid}' \
+    <<<"$REMOTE_HEADS"
+)"
+[[ "$REMOTE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+  && [[ "$REMOTE_BASE_OID" =~ ^[0-9a-f]{40}$ ]] \
+  || die "protected remote head/base lookup was missing or ambiguous"
+[ "$COMMIT" = "$REMOTE_COMMIT" ] \
+  || die "local dev HEAD must exactly equal the fresh protected remote head"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-build-launcher.XXXXXXXX")"
+cleanup() {
+  rm -rf -- "$TMP_DIR"
+}
+trap cleanup EXIT
+REVIEW_REPOSITORY="$TMP_DIR/review-repository"
+REVIEW_CHECKOUT="$TMP_DIR/review-checkout"
+git init --bare --quiet "$REVIEW_REPOSITORY"
+git -C "$REVIEW_REPOSITORY" fetch --quiet --no-tags "$EXPECTED_REMOTE_URL" \
+  "$EXPECTED_HEAD_REF:refs/remotes/verified/dev" \
+  "$EXPECTED_BASE_REF:refs/remotes/verified/main" \
+  || die "could not fetch protected remote objects"
+git -C "$REVIEW_REPOSITORY" worktree add --quiet --detach \
+  "$REVIEW_CHECKOUT" "$REMOTE_COMMIT" \
+  || die "could not create detached reviewed checkout"
+[ "$(git -C "$REVIEW_CHECKOUT" rev-parse HEAD^{commit})" = "$REMOTE_COMMIT" ] \
+  || die "detached reviewed checkout mismatch"
+MERGE_BASE_OID="$(
+  git -C "$REVIEW_CHECKOUT" merge-base "$REMOTE_BASE_OID" "$REMOTE_COMMIT"
+)"
+[ "$MERGE_BASE_OID" = "$REMOTE_BASE_OID" ] \
+  || die "protected main is not the reviewed merge-base"
+git -C "$REVIEW_CHECKOUT" archive --format=tar "$REMOTE_COMMIT" \
+  >"$TMP_DIR/reviewed-source.tar"
+[ "$(git -C "$REVIEW_CHECKOUT" rev-parse "$REMOTE_COMMIT^{tree}")" = "$(
+  git -C "$REVIEW_CHECKOUT" rev-parse HEAD^{tree}
+)" ] || die "detached reviewed source tree mismatch"
+[ -s "$TMP_DIR/reviewed-source.tar" ] || die "detached reviewed archive is empty"
+[ -z "$(git -C "$REVIEW_CHECKOUT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] \
+  || die "detached reviewed checkout changed"
+SOURCE_MANIFEST_CONTRACT="$REVIEW_CHECKOUT/infra/codebuild/teamagent_runtime_contract.json"
+RELEASE_CONTRACT="$REVIEW_CHECKOUT/infra/codebuild/teamagent_core_media_release_contract.json"
+PROVENANCE="$REVIEW_CHECKOUT/infra/codebuild/source_provenance.py"
+BUNDLE_PROVENANCE="$REVIEW_CHECKOUT/infra/codebuild/teamagent_bundle_provenance.py"
+[ -f "$SOURCE_MANIFEST_CONTRACT" ] && [ -f "$RELEASE_CONTRACT" ] \
+  && [ -f "$PROVENANCE" ] && [ -f "$BUNDLE_PROVENANCE" ] \
+  || die "trusted detached contract helpers are missing"
 SOURCE_MANIFEST_CONTRACT_SHA256="$(
   python3 "$PROVENANCE" contract-sha256 --contract "$SOURCE_MANIFEST_CONTRACT"
 )"
@@ -100,7 +149,7 @@ python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT"
   || die "TeamAgent core/media release contract is not approved for release"
 mapfile -t PRODUCTION_APP_RECORD < <(
   python3 "$BUNDLE_PROVENANCE" production-record \
-    --deploy-log "$REPO_ROOT/infra/deploy_log.md" \
+    --deploy-log "$REVIEW_CHECKOUT/infra/deploy_log.md" \
     --format lines
 )
 [ "${#PRODUCTION_APP_RECORD[@]}" -eq 4 ] || die "production app record is incomplete"
@@ -114,10 +163,12 @@ BAKED_APP_HTML_VERSION_ID="$(
 BAKED_APP_HTML_SHA256="$(
   jq -er '.app_html.baked_fallback.sha256' "$RELEASE_CONTRACT"
 )"
+[ "$(jq -er '.app_html.baked_fallback.key' "$RELEASE_CONTRACT")" = "$BAKED_APP_KEY" ] \
+  || die "release contract baked fallback key differs from the fixed location"
 APP_PROVENANCE_SHA256="$(
   python3 "$BUNDLE_PROVENANCE" app-provenance-sha256 \
     --contract "$RELEASE_CONTRACT" \
-    --deploy-log "$REPO_ROOT/infra/deploy_log.md"
+    --deploy-log "$REVIEW_CHECKOUT/infra/deploy_log.md"
 )"
 
 identity() {
@@ -127,32 +178,41 @@ INITIAL_IDENTITY="$(identity)"
 [[ "$INITIAL_IDENTITY" != *$'\n'* && "$INITIAL_IDENTITY" != *$'\r'* ]] \
   || die "malformed initial AWS identity"
 IFS=$'\t' read -r INITIAL_ACCOUNT INITIAL_ARN EXTRA <<<"$INITIAL_IDENTITY"
-[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] \
-  && [ "$INITIAL_ARN" = "$EXPECTED_CALLER_ARN" ] \
-  || die "launcher must start as the exact dedicated caller in account $ACCOUNT_ID"
+[ -z "${EXTRA:-}" ] && [ "$INITIAL_ACCOUNT" = "$ACCOUNT_ID" ] ||
+  die "launcher must start in account $ACCOUNT_ID"
+PREASSUMED_LAUNCHER="false"
+if [ "$INITIAL_ARN" = "$EXPECTED_SESSION_ARN" ]; then
+  PREASSUMED_LAUNCHER="true"
+elif [ "$INITIAL_ARN" != "$EXPECTED_CALLER_ARN" ]; then
+  die "launcher must start as the dedicated caller or exact pinned STS launcher session"
+fi
 unset INITIAL_IDENTITY INITIAL_ACCOUNT INITIAL_ARN EXTRA
 
-SESSION_CREDENTIALS="$(
-  AWS_PAGER="" aws sts assume-role \
-    --region "$REGION" \
-    --role-arn "$LAUNCHER_ROLE_ARN" \
-    --role-session-name "$LAUNCHER_SESSION_NAME" \
-    --duration-seconds 10800 \
-    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
-    --output text
-)" || die "could not assume the dedicated launcher role"
-[[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
-  || die "malformed launcher credentials"
-IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
-  <<<"$SESSION_CREDENTIALS"
-[ -z "${EXTRA:-}" ] || die "malformed launcher credentials"
-for credential in "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" "$EXPIRATION"; do
-  [ -n "$credential" ] && [ "$credential" != "None" ] || die "incomplete launcher credentials"
-done
-export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
-export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
-unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXPIRATION EXTRA credential
+if [ "$PREASSUMED_LAUNCHER" = "false" ]; then
+  SESSION_CREDENTIALS="$(
+    AWS_PAGER="" aws sts assume-role \
+      --region "$REGION" \
+      --role-arn "$LAUNCHER_ROLE_ARN" \
+      --role-session-name "$LAUNCHER_SESSION_NAME" \
+      --duration-seconds 10800 \
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
+      --output text
+  )" || die "could not assume the dedicated launcher role"
+  [[ "$SESSION_CREDENTIALS" != *$'\n'* && "$SESSION_CREDENTIALS" != *$'\r'* ]] \
+    || die "malformed launcher credentials"
+  IFS=$'\t' read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN EXPIRATION EXTRA \
+    <<<"$SESSION_CREDENTIALS"
+  [ -z "${EXTRA:-}" ] || die "malformed launcher credentials"
+  for credential in "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" "$EXPIRATION"; do
+    [ -n "$credential" ] && [ "$credential" != "None" ] ||
+      die "incomplete launcher credentials"
+  done
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
+  export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null
+  unset AWS_PROFILE AWS_DEFAULT_PROFILE SESSION_CREDENTIALS EXPIRATION EXTRA credential
+fi
+unset PREASSUMED_LAUNCHER
 SESSION_IDENTITY="$(identity)"
 IFS=$'\t' read -r SESSION_ACCOUNT SESSION_ARN EXTRA <<<"$SESSION_IDENTITY"
 [ -z "${EXTRA:-}" ] && [ "$SESSION_ACCOUNT" = "$ACCOUNT_ID" ] \
@@ -160,11 +220,52 @@ IFS=$'\t' read -r SESSION_ACCOUNT SESSION_ARN EXTRA <<<"$SESSION_IDENTITY"
   || die "unexpected pinned launcher session"
 unset SESSION_IDENTITY SESSION_ACCOUNT SESSION_ARN EXTRA
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-build-launcher.XXXXXXXX")"
-cleanup() {
-  rm -rf -- "$TMP_DIR"
+assert_source_connection_available() {
+  local inventory="$TMP_DIR/codeconnections.json"
+  local exact="$TMP_DIR/codeconnection.json"
+  local connection_arn
+  AWS_PAGER="" aws codeconnections list-connections \
+    --region "$REGION" \
+    --max-results 100 \
+    --output json >"$inventory"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg account "$ACCOUNT_ID" '
+    (.NextToken // "") == "" and
+    ([.Connections[]? |
+      select(.ConnectionName == $name)] | length) == 1 and
+    ([.Connections[]? | select(.ConnectionName == $name)][0] |
+      .ProviderType == "GitHub" and
+      .OwnerAccountId == $account)
+  ' "$inventory" >/dev/null ||
+    die "the exact TeamAgent GitHub CodeConnection is missing or ambiguous"
+  connection_arn="$(
+    jq -er --arg name "$SOURCE_CONNECTION_NAME" '
+      .Connections[] | select(.ConnectionName == $name) | .ConnectionArn
+    ' "$inventory"
+  )"
+  [[ "$connection_arn" =~ ^arn:aws:(codeconnections|codestar-connections):ap-northeast-1:718959508629:connection/[0-9a-f-]+$ ]] \
+    || die "the TeamAgent CodeConnection ARN is outside the fixed account"
+  AWS_PAGER="" aws codeconnections get-connection \
+    --region "$REGION" \
+    --connection-arn "$connection_arn" \
+    --output json >"$exact"
+  jq -e \
+    --arg name "$SOURCE_CONNECTION_NAME" \
+    --arg arn "$connection_arn" \
+    --arg account "$ACCOUNT_ID" '
+    .Connection == {
+      ConnectionName:$name,
+      ConnectionArn:$arn,
+      ProviderType:"GitHub",
+      OwnerAccountId:$account,
+      ConnectionStatus:"AVAILABLE"
+    }
+  ' "$exact" >/dev/null ||
+    die "the TeamAgent GitHub CodeConnection is not AVAILABLE"
 }
-trap cleanup EXIT
+
+assert_source_connection_available
 
 DOWNLOADED_APP_VERSION="$(
   AWS_PAGER="" aws s3api get-object \
@@ -184,7 +285,7 @@ DOWNLOADED_FALLBACK_VERSION="$(
   AWS_PAGER="" aws s3api get-object \
     --region "$REGION" \
     --bucket "$APP_BUCKET" \
-    --key "$APP_KEY" \
+    --key "$BAKED_APP_KEY" \
     --version-id "$BAKED_APP_HTML_VERSION_ID" \
     --expected-bucket-owner "$ACCOUNT_ID" \
     --query VersionId \
@@ -282,6 +383,7 @@ exported_build_value() {
 PUBLISHER_ENV="$TMP_DIR/publisher-env.json"
 environment_json "$PUBLISHER_ENV" \
   "EXPECTED_COMMIT=$COMMIT" \
+  "EXPECTED_BASE_OID=$REMOTE_BASE_OID" \
   "SOURCE_MANIFEST_CONTRACT_SHA256=$SOURCE_MANIFEST_CONTRACT_SHA256" \
   "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256"
 PUBLISHER_BUILD_ID="$(start_build "$SOURCE_PUBLISHER_PROJECT" "$PUBLISHER_ENV" "$COMMIT")"

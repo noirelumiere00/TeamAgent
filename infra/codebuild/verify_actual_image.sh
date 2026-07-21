@@ -15,6 +15,7 @@ RELEASE_REPOSITORY=""
 COMMIT=""
 CONTRACT=""
 CONTRACT_SHA256=""
+BUILD_CONTEXT_SHA256=""
 IMAGE_DIGEST=""
 SIGNING_KEY_ARN=""
 OUTPUT=""
@@ -39,6 +40,7 @@ while [ "$#" -gt 0 ]; do
     --commit) value "$@"; COMMIT="$2"; shift 2 ;;
     --contract) value "$@"; CONTRACT="$2"; shift 2 ;;
     --contract-sha256) value "$@"; CONTRACT_SHA256="$2"; shift 2 ;;
+    --build-context-sha256) value "$@"; BUILD_CONTEXT_SHA256="$2"; shift 2 ;;
     --image-digest) value "$@"; IMAGE_DIGEST="$2"; shift 2 ;;
     --signing-key-arn) value "$@"; SIGNING_KEY_ARN="$2"; shift 2 ;;
     --output) value "$@"; OUTPUT="$2"; shift 2 ;;
@@ -63,6 +65,12 @@ case "$PIPELINE:$SUBJECT_NAME:$QUARANTINE_REPOSITORY:$CANDIDATE_REPOSITORY:$RELE
 esac
 [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "commit must be a full lowercase SHA"
 [[ "$CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "invalid contract SHA-256"
+if [ "$PIPELINE" = "mcp" ]; then
+  [[ "$BUILD_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "MCP canonical build context SHA-256 is required"
+elif [ -n "$BUILD_CONTEXT_SHA256" ]; then
+  die "build context SHA-256 is only accepted for the MCP pipeline"
+fi
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
 [[ "$SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] \
   || die "signing key is outside the fixed account and region"
@@ -214,6 +222,7 @@ done <"$BINARY_EXPECTED"
 
 trivy image \
   --scanners vuln,secret \
+  --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
   --format json \
   --output "$TRIVY_REPORT" \
   "$IMAGE"
@@ -231,7 +240,14 @@ if report.get("ArtifactType") not in {"container_image", "image"}:
 results = report.get("Results")
 if not isinstance(results, list) or not results:
     raise SystemExit("FATAL: Trivy report has no scan results")
-critical = high = secrets = 0
+counts = {
+    "UNKNOWN": 0,
+    "LOW": 0,
+    "MEDIUM": 0,
+    "HIGH": 0,
+    "CRITICAL": 0,
+}
+secrets = 0
 for result in results:
     if not isinstance(result, dict):
         raise SystemExit("FATAL: malformed Trivy result")
@@ -239,19 +255,14 @@ for result in results:
     discovered_secrets = result.get("Secrets") or []
     if not isinstance(vulnerabilities, list) or not isinstance(discovered_secrets, list):
         raise SystemExit("FATAL: malformed Trivy findings")
-    critical += sum(
-        1 for item in vulnerabilities
-        if isinstance(item, dict) and item.get("Severity") == "CRITICAL"
-    )
-    high += sum(
-        1 for item in vulnerabilities
-        if isinstance(item, dict) and item.get("Severity") == "HIGH"
-    )
+    for item in vulnerabilities:
+        if not isinstance(item, dict) or item.get("Severity") not in counts:
+            raise SystemExit("FATAL: actual-image scan has unsupported severity")
+        counts[item["Severity"]] += 1
     secrets += len(discovered_secrets)
-if (critical, high, secrets) != (0, 0, 0):
+if any(counts.values()) or secrets:
     raise SystemExit(
-        f"FATAL: actual-image gate failed: "
-        f"CRITICAL={critical}, HIGH={high}, secrets={secrets}"
+        f"FATAL: actual-image gate failed: severities={counts}, secrets={secrets}"
     )
 PY
 syft "$IMAGE" --output spdx-json="$SBOM"
@@ -380,6 +391,12 @@ cosign verify --experimental-oci11 --key "$KMS_URI" --output json \
 cosign verify --experimental-oci11 --key "$KMS_URI" --output json \
   "$REGISTRY/$QUARANTINE_REPOSITORY@$PROVENANCE_DIGEST" >"$PROVENANCE_SIGNATURE_VERIFICATION"
 
+EVIDENCE_CONTEXT_ARGUMENTS=()
+if [ -n "$BUILD_CONTEXT_SHA256" ]; then
+  EVIDENCE_CONTEXT_ARGUMENTS=(
+    --build-context-sha256 "$BUILD_CONTEXT_SHA256"
+  )
+fi
 python3 "$EVIDENCE_HELPER" \
   --pipeline "$PIPELINE" \
   --channel "$PROMOTION_CHANNEL" \
@@ -390,6 +407,7 @@ python3 "$EVIDENCE_HELPER" \
   --commit "$COMMIT" \
   --contract "$CONTRACT" \
   --contract-sha256 "$CONTRACT_SHA256" \
+  "${EVIDENCE_CONTEXT_ARGUMENTS[@]}" \
   --digest "$IMAGE_DIGEST" \
   --media-type "$MEDIA_TYPE" \
   --config-digest "$CONFIG_DIGEST" \

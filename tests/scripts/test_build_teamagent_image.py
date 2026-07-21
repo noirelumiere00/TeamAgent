@@ -50,12 +50,14 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     dirty = body.index("status --porcelain=v1 --untracked-files=all")
     branch = body.index('BRANCH="$(git')
     origin = body.index("config --get remote.origin.url")
-    fetch = body.index('git -C "$REPO_ROOT" fetch')
-    equal = body.index("local dev HEAD must exactly equal remote origin/dev")
+    remote = body.index("git ls-remote --exit-code --heads")
+    equal = body.index("local dev HEAD must exactly equal the fresh protected remote head")
+    detached = body.index("worktree add --quiet --detach")
     first_aws = body.index("aws sts get-caller-identity")
-    assert dirty < branch < origin < fetch < equal < first_aws
+    assert dirty < branch < origin < remote < equal < detached < first_aws
     assert 'EXPECTED_BRANCH="dev"' in body
     assert 'EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"' in body
+    assert 'EXPECTED_BASE_REF="refs/heads/main"' in body
     assert "assert-release-ready" in body
 
 
@@ -87,6 +89,7 @@ def test_launcher_ignores_endpoint_overrides_and_uses_only_fixed_resources() -> 
         'ACCOUNT_ID="718959508629"',
         'APP_BUCKET="teamagent-dev-raw-files"',
         'APP_KEY="codebuild/connect-web-app.html"',
+        'BAKED_APP_KEY="codebuild/baked-fallback/connect-web-app.html"',
         'SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"',
         'IMAGE_PROJECT="teamagent-dev-image-builder"',
         'ATTESTOR_PROJECT="teamagent-dev-image-attestor"',
@@ -117,6 +120,7 @@ def test_launcher_binds_current_canonical_app_and_signed_source_versions() -> No
         assert marker in body
     assert '--version-id "$APP_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
+    assert '--key "$BAKED_APP_KEY"' in body
     assert '--expected-bucket-owner "$ACCOUNT_ID"' in body
     for name in (
         "SOURCE_ARCHIVE_VERSION_ID",

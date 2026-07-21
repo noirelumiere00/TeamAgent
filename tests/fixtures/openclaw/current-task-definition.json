@@ -1,0 +1,132 @@
+{
+  "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:53",
+  "family": "teamagent-dev-openclaw",
+  "taskRoleArn": "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+  "executionRoleArn": "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "placementConstraints": [],
+  "volumes": [
+    {
+      "name": "tmp"
+    },
+    {
+      "name": "state",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-0123456789abcdef0",
+        "rootDirectory": "/",
+        "transitEncryption": "ENABLED",
+        "authorizationConfig": {
+          "accessPointId": "fsap-0123456789abcdef0",
+          "iam": "ENABLED"
+        }
+      }
+    }
+  ],
+  "containerDefinitions": [
+    {
+      "name": "openclaw",
+      "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "essential": true,
+      "readonlyRootFilesystem": false,
+      "user": "0",
+      "privileged": true,
+      "entryPoint": [
+        "node"
+      ],
+      "command": [
+        "dist/index.js",
+        "gateway"
+      ],
+      "dockerSecurityOptions": [
+        "no-new-privileges"
+      ],
+      "linuxParameters": {
+        "capabilities": {
+          "add": [
+            "SYS_ADMIN"
+          ]
+        }
+      },
+      "environment": [
+        {
+          "name": "AWS_REGION",
+          "value": "ap-northeast-1"
+        },
+        {
+          "name": "TMPDIR",
+          "value": "/tmp"
+        },
+        {
+          "name": "SLACK_DM_ALLOWLIST",
+          "value": "U0123456789"
+        },
+        {
+          "name": "SLACK_TEAM_ID",
+          "value": "T0123456789"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TEAMAGENT_MCP_BEARER",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/mcp/bearer-AbCdEf"
+        },
+        {
+          "name": "SLACK_BOT_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-bot-token-AbCdEf"
+        },
+        {
+          "name": "SLACK_APP_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/slack-app-token-AbCdEf"
+        },
+        {
+          "name": "OPENCLAW_GATEWAY_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/gateway-token-AbCdEf"
+        },
+        {
+          "name": "TEAMAGENT_CALLER_CLAIM_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/openclaw/caller-claim-hmac-AbCdEf"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/teamagent/dev/openclaw",
+          "awslogs-region": "ap-northeast-1",
+          "awslogs-stream-prefix": "openclaw"
+        }
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "tmp",
+          "containerPath": "/tmp",
+          "readOnly": false
+        },
+        {
+          "sourceVolume": "state",
+          "containerPath": "/tmp/teamagent-openclaw/state",
+          "readOnly": false
+        }
+      ],
+      "stopTimeout": 30,
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "false"
+        ],
+        "interval": 60,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 0
+      }
+    }
+  ]
+}

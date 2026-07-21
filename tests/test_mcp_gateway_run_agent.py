@@ -1,6 +1,6 @@
 """Batch C2: L2 オーケストレーター(run_agent) MCP tool の gating / dispatch を検証する。
 
-実 SDK(Bedrock + Node CLI)は呼ばず、run_sdk_agent を monkeypatch して
+実Bedrockは呼ばず、run_sdk_agent を monkeypatch して
 gating(USE_AGENT_ORCHESTRATOR)・RLS fail-closed・入力検証・正常系の payload を固定する。
 """
 
@@ -13,6 +13,7 @@ from typing import Any, ClassVar
 import pytest
 from pydantic import BaseModel
 
+from teamagent.identity import ResolvedIdentity
 from teamagent.mcp_gateway import server as srv
 from teamagent.mcp_gateway.server import (
     RUN_AGENT_TOOL_NAME,
@@ -22,6 +23,11 @@ from teamagent.mcp_gateway.server import (
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
+from tests.caller_claim_testkit import (
+    TEST_SLACK_USER_ID,
+    make_verifier,
+    sign_arguments,
+)
 
 
 class _EchoInput(BaseModel):
@@ -144,21 +150,37 @@ async def test_dispatch_run_agent_rejects_empty_goal(monkeypatch: pytest.MonkeyP
     assert "invalid input" in out["error"]
 
 
-async def test_dispatch_run_agent_company_shared_no_email(monkeypatch: pytest.MonkeyPatch) -> None:
-    """会社共有モードでは user_email 無しでも実行（groups で認可・require_rls=False を SDK へ）。"""
+async def test_dispatch_run_agent_company_shared_verified_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """会社共有も署名済み・resolver済みの同一workspace memberだけ実行する。"""
     fake = _fake_sdk()
     monkeypatch.setattr("teamagent.orchestrator.sdk_runner.run_sdk_agent", fake)
+
+    async def resolver(slack_user_id: str) -> ResolvedIdentity | None:
+        if slack_user_id != TEST_SLACK_USER_ID:
+            return None
+        return ResolvedIdentity(
+            slack_user_id=slack_user_id,
+            email="taro@vectorinc.co.jp",
+        )
+
     out = _parse(
         await dispatch_run_agent(
             _SPECS,
-            {"goal": "全社ナレッジから調べて", USER_CONTEXT_KEY: {"slack_user_id": "U1"}},
+            sign_arguments(
+                RUN_AGENT_TOOL_NAME,
+                {"goal": "全社ナレッジから調べて"},
+            ),
             require_rls=True,
             company_shared_groups=frozenset({"vectorinc.co.jp"}),
+            identity_resolver=resolver,
+            caller_claim_verifier=make_verifier(),
         )
     )
     assert out["stopped_reason"] == "final"
-    # 会社共有は email 不在 → SDK へは require_rls=False（groups で認可済）
-    assert fake.recorder["require_rls"] is False
+    assert fake.recorder["require_rls"] is True
+    assert fake.recorder["ctx_metadata"]["identity_verified"] is True
     assert "vectorinc.co.jp" in fake.recorder["ctx_metadata"].get("user_groups", [])
 
 

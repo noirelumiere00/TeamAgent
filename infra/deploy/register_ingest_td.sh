@@ -2,7 +2,7 @@
 # Retired: direct ingest task-definition registration bypassed release evidence.
 set -euo pipefail
 
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'EOF'
 usage: register_ingest_td.sh
 
@@ -17,7 +17,8 @@ cat >&2 <<'EOF'
 FATAL: register_ingest_td.sh is permanently disabled.
 
 The ingest task definition is Terraform-owned and depends on the production
-release gate. Use authorize_image_release.sh, plan_image_release.sh, and
-apply_image_release_plan.sh as documented in infra/terraform/README.md.
+release gate. Use authorize_image_release.sh and the single composed
+terraform_runtime_guard.sh plan/apply workflow documented in
+infra/terraform/README.md.
 EOF
 exit 64

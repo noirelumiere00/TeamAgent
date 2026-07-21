@@ -1,0 +1,19 @@
+{
+  "name": "@teamagent/openclaw-caller-identity",
+  "version": "1.0.0",
+  "description": "Binds exact Slack messages, agent runs, and one-use TeamAgent MCP tool invocations.",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  },
+  "files": [
+    "dist/**",
+    "openclaw.plugin.json",
+    "package.json"
+  ]
+}

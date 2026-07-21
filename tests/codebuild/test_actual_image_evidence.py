@@ -37,6 +37,7 @@ DIGEST = "sha256:" + "2" * 64
 SBOM_DIGEST = "sha256:" + "4" * 64
 PROVENANCE_DIGEST = "sha256:" + "5" * 64
 CONTRACT_SHA256 = "6" * 64
+BUILD_CONTEXT_SHA256 = "8" * 64
 KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-1234-1234-123456789abc"
 REGISTRY = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
 QUARANTINE = "teamagent-dev-tiktok-acquire-quarantine"
@@ -53,6 +54,7 @@ def _fixture(
     tmp_path: Path,
     *,
     critical: int = 0,
+    low: int = 0,
     media_type: str = "application/vnd.oci.image.manifest.v1+json",
     architecture: str = "arm64",
     truncated_referrers: bool = False,
@@ -83,7 +85,7 @@ def _fixture(
 
     vulnerabilities = [
         {"Severity": "CRITICAL", "VulnerabilityID": f"CVE-{index}"} for index in range(critical)
-    ]
+    ] + [{"Severity": "LOW", "VulnerabilityID": f"CVE-LOW-{index}"} for index in range(low)]
     trivy = tmp_path / "trivy.json"
     _write_json(
         trivy,
@@ -122,6 +124,7 @@ def _fixture(
             "predicate": {
                 "sourceCommit": COMMIT,
                 "contractSha256": CONTRACT_SHA256,
+                "buildContextSha256": BUILD_CONTEXT_SHA256,
             },
         },
     )
@@ -252,12 +255,14 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
     labels = config["config"]["Labels"]
     labels.pop("io.teamagent.build.contract-sha256")
     labels["io.teamagent.build.release-contract-sha256"] = CONTRACT_SHA256
+    labels["io.teamagent.build.context-sha256"] = BUILD_CONTEXT_SHA256
     _write_json(args.config, config)
     args.config_digest = "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
 
     trivy = json.loads(args.trivy_report.read_text(encoding="utf-8"))
     trivy["ArtifactName"] = f"{REGISTRY}/{args.quarantine_repository}@{args.digest}"
     _write_json(args.trivy_report, trivy)
+    args.build_context_sha256 = BUILD_CONTEXT_SHA256
     return args
 
 
@@ -269,6 +274,9 @@ def test_actual_image_subject_binds_digest_platform_labels_binaries_and_signed_r
     assert subject["digest"] == DIGEST
     assert subject["platform"] == {"os": "linux", "architecture": "arm64"}
     assert subject["scan"]["actual_image"] == f"{REGISTRY}/{QUARANTINE}@{DIGEST}"
+    assert subject["scan"]["unknown"] == 0
+    assert subject["scan"]["low"] == 0
+    assert subject["scan"]["medium"] == 0
     assert subject["scan"]["critical"] == 0
     assert subject["scan"]["high"] == 0
     assert subject["scan"]["secrets"] == 0
@@ -346,6 +354,7 @@ def test_actual_image_subject_rejects_semantically_equal_config_with_different_b
     ("overrides", "message"),
     [
         ({"critical": 1}, "actual-image gate failed"),
+        ({"low": 1}, "actual-image gate failed"),
         (
             {"media_type": "application/vnd.oci.image.index.v1+json"},
             "index or unsupported",
@@ -380,7 +389,7 @@ def test_actual_image_verifier_scans_before_signing_and_never_accepts_indexes() 
     sign = body.index("cosign sign --yes")
     assert scan < scan_gate < guard < sign
     assert "--scanners vuln,secret" in body
-    assert "--severity" not in body
+    assert "--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL" in body
     assert '"$IMAGE"' in body
     assert "application/vnd.oci.image.index.v1+json" not in body
     assert body.count("aws ecr list-image-referrers") == body.count("--max-results 50")

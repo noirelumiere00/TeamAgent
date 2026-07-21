@@ -1,157 +1,289 @@
-# OpenClaw 前面 P1 パイロット — デプロイ Runbook（§I / M2-M5）
+# OpenClaw trusted release and deployment Runbook
 
-OpenClaw 外殻 ＋ TeamAgent-MCP 境界（会社共有モデル §G）を **ECS Fargate** に出し、専用Slackチャネル・
-少数(2-3名)・**読取のみ**で実稼働させるまでの本人手順。production image は
-**署名済み release digest＋one-time full saved plan** 以外では変更しない。
-全コードは authoring 済（dev/PR#118）。本書は **apply＝本人操作**の手順だけを示す。
+本書と `infra/terraform/README.md` が OpenClaw 本番変更の正準手順です。
+`infra/codebuild/openclaw_bundle_contract.json` は現在
+`release.ready=false` であり、OpenClaw の build、promotion、Terraform image
+変更は意図的に fail closed です。ローカル検証に合格しても本番デプロイ資格には
+なりません。
 
-> 関連: プラン `~/.claude/plans/mossy-snacking-locket.md` §A/§C/§D/§G/§H/§I。IaC=`infra/terraform/{fargate,ecr,vpc_endpoints,cloudwatch_fargate,outputs_fargate}.tf`、
-> イメージ=`infra/docker/Dockerfile.{teamagent-mcp,openclaw}`、smoke=`scripts/smoke_mcp.py`。
+禁止経路は、ローカル `docker push`、mutable tag、direct ECR copy/tag、
+direct ECS task-definition registration/update、`terraform -target`、
+旧 `apply_openclaw.sh`、S3 metadata や隣接 checksum だけを根拠にした公開です。
 
-## 0. 前提（gated）
-- [ ] **ゲート①承認**：OpenClaw(Node コンテナ)を本番 AWS に持ち込む承認。
-- [ ] **Bedrock モデル確認**：`aws bedrock list-inference-profiles --region ap-northeast-1` で
-      Haiku4.5 の推論プロファイル ID を確定（`variables_fargate.tf:openclaw_model_id` / `openclaw.config.json5` の `★deploy時要確認` を実値へ）。
-- [ ] リージョン=`ap-northeast-1`、account=`718959508629`、tfstate=既存 S3 backend（`main.tf:32-38`）。
-- [ ] **P1 範囲＝会社ナレッジ4ツール（search/clientkarte/proposal_draft/proposal_review）読取のみ**。スクレイプ/動画ツールは**既定 OFF**＝有効化は P1 安定後に §9（別承認）。
+## 1. 現在の判定
 
-## 1. Secrets 作成（値は本人が投入・コミット禁止）
-Secrets Manager に 5 つ作成（名前は `variables_fargate.tf` の default に合わせる）:
+- OpenClaw core runtime: ローカル検証可能
+- OpenClaw media subject: 未統合
+- exact core/media bundle receipt: 未実装
+- signed final-HEAD registry evidence: 未取得
+- guarded post-apply functional rollback gate: 実装済み、独立レビュー・実環境証跡待ち
+- production: **NO-GO**
+
+上記の不足が解消され、独立レビュー後に contract を別変更で
+`release.ready=true` にするまでは AWS build も Terraform image plan も停止します。
+
+## 2. 最終HEADのローカル ARM64 検証
+
+clean で attached な reviewed commit からだけ実行します。
+
 ```sh
-R=ap-northeast-1
-aws secretsmanager create-secret --region $R --name teamagent/dev/mcp/bearer            --secret-string "$(openssl rand -hex 32)"
-aws secretsmanager create-secret --region $R --name teamagent/dev/database-url           --secret-string "postgresql://USER:PASS@HOST:5432/teamagent?sslmode=require"
-aws secretsmanager create-secret --region $R --name teamagent/dev/openclaw/slack-bot-token --secret-string "xoxb-..."   # 手順4で取得
-aws secretsmanager create-secret --region $R --name teamagent/dev/openclaw/slack-app-token --secret-string "xapp-..."   # 手順4で取得
-aws secretsmanager create-secret --region $R --name teamagent/dev/openclaw/gateway-token   --secret-string "$(openssl rand -hex 32)"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+COMMIT=$(git rev-parse HEAD)
+TREE=$(git rev-parse HEAD^{tree})
+SHORT=${COMMIT:0:12}
+bash infra/openclaw/build-image.sh \
+  --image "teamagent-openclaw:git-$SHORT" \
+  --manifest "/tmp/openclaw-$SHORT-manifest.json" \
+  --evidence-dir "/tmp/openclaw-$SHORT-evidence"
+(cd /tmp && sha256sum -c "openclaw-$SHORT-manifest.json.sha256")
 ```
-- `teamagent/dev/mcp/bearer` と `gateway-token` は新規ランダム。`database-url` は既存 RDS（password は `teamagent/dev/*` の DB secret 参照可）。
-- ⚠️ `fargate.tf` は **secret 実在を前提**（`data.aws_secretsmanager_secret`）＝この手順を terraform plan より先に。
 
-## 2. イメージ build・検証・release authorization（2つ）
+manifest は schema 5 で、次を満たす必要があります。
+
 ```sh
-# clean な remote dev HEAD から quarantine build→actual-image gate→candidate receipt
-bash infra/deploy/build_teamagent_image.sh
-bash infra/deploy/build_openclaw_image.sh
+jq -e --arg commit "$COMMIT" --arg tree "$TREE" '
+  .schemaVersion == 5 and
+  .deploymentCredential == false and
+  .source.commit == $commit and
+  .source.tree == $tree and
+  (.source.archiveSha256 | test("^[0-9a-f]{64}$")) and
+  (.source.releaseContractSha256 | test("^[0-9a-f]{64}$")) and
+  .promotion.status == "LOCAL_GATES_PASSED" and
+  .promotion.registryPublished == false and
+  .promotion.canonicalTagPublished == false and
+  .runtime.platform == "linux/arm64" and
+  .runtime.actualImageContractPassed == true and
+  .runtime.controlUiFullAssetClosureValidated == true and
+  .materials.exactSetMatch == true and
+  .sbom.wholeFilesystemExactMatch == true and
+  .sbom.physicalNpmMultisetExactMatch == true and
+  .scan.exactSingleLinuxArm64Subject == true and
+  .scan.critical == 0 and
+  .scan.high == 0 and
+  .scan.secrets == 0 and
+  .scan.allKnownLiveFindingsAbsent == true
+' "/tmp/openclaw-$SHORT-manifest.json"
+```
 
-# 各 launcher が返した candidate receipt の exact key/VersionId を使い、
-# pipeline=mcp と pipeline=openclaw をそれぞれ active（rollback 時は rollback）承認
+基準は Critical=0、High=0、Secrets=0 です。最新 live で観測された
+`CVE-2026-12087`、`13221`、`33845`、`34182`、`42010`、`55200`、
+`57433`、`6100` の8件が候補に存在しないことも必須です。
+
+統合 filesystem の唯一の digest claim は
+`image.rootfs.inventorySha256` です。これは path/type/mode/uid/gid/size/link
+target/content hash を正規化した `rootfs-inventory.json` を指し、同じ image
+からの fresh export 2回で同一になることを実像テストで確認します。Docker
+merged export tar の byte hash は tar metadata に依存して再現不能なので、
+manifest、SBOM、equivalence、evidence index の証拠 claim に含めません。
+
+この helper は registry credential、push、promotion、ECS/Terraform 操作を
+持ちません。出力 manifest も `deploymentCredential=false` です。
+
+## 3. 署名済み build と promotion
+
+contract が独立承認で active になった後だけ、次の固定経路を使用します。
+
+1. publisher が exact remote `dev` の full 40-character commit、Git tree、
+   commit object、実行ファイル一覧、contract hash を source manifest に束縛する。
+2. source manifest と署名を KMS、S3 VersionId、COMPLIANCE Object Lock で固定する。
+3. 専用 OpenClaw CodeBuild が source を再取得して署名と exact `origin/dev`
+   を確認する。
+4. `infra/openclaw/build-bundle.sh` が core/media の2 subject を quarantine
+   repository だけへ出力する。
+5. source-free attestor が actual single `linux/arm64` image、OCI labels、
+   installed binary probes、Trivy、SPDX SBOM、in-toto provenance、署名と
+   referrer set を検証する。
+6. source-free promoter が exact subject と referrer を
+   verified-candidate、承認後に release repository へ immutable copy する。
+
+build role は candidate/release repository、publisher evidence、deployment
+resource を変更できません。publisher/launcher も ECS、EventBridge、
+task definition、service を変更できません。
+
+通常の build-only launcher は次です。現在は `release.ready=false` で AWS call
+より前に停止することが正しい動作です。
+
+```sh
+bash infra/deploy/build_openclaw_image.sh
+```
+
+## 4. Release authorization
+
+actual-image evidence と独立レビューが揃った後、exact candidate receipt key と
+manifest/signature の S3 VersionId を使って active または rollback authorization
+を作ります。
+
+```sh
 bash infra/deploy/authorize_image_release.sh --help
 ```
 
-ECR/provenance 基盤をまだ導入していない場合だけ、
-`infra/terraform/README.md` の one-time provenance bootstrap を先に完了する。
-ローカル `docker build/push`、mutable tag、candidate/quarantine digest はデプロイ証拠にならない。
+candidate receipt、signature、release digest のいずれかが曖昧、期限切れ、
+mutable、別contract、別source、別platformなら停止します。authorization は
+Terraform を実行しません。
 
-## 3. Terraform apply（one-time full saved plan）
-`infra/terraform/terraform.tfvars`（git管理外）に:
+## 5. One-time full saved plan
+
+`terraform.tfvars` には release repository の digest と exact evidence
+VersionId、および明示的なSlack DM契約を設定します。
+
 ```hcl
-mcp_image              = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:<MCP_RELEASE_DIGEST>"
-openclaw_image         = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<OPENCLAW_RELEASE_DIGEST>"
+openclaw_image = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<RELEASE_DIGEST>"
 image_release_evidence = {
-  mcp      = { # authorize_image_release.sh が返した exact key/VersionIds }
-  openclaw = { # authorize_image_release.sh が返した exact key/VersionIds }
+  openclaw = {
+    bucket               = "teamagent-dev-image-release-evidence"
+    key                  = "<exact receipt key>"
+    version_id           = "<exact receipt VersionId>"
+    signature_key        = "<exact signature key>"
+    signature_version_id = "<exact signature VersionId>"
+  }
 }
 shared_company_domains = "vectorinc.co.jp"        # §G 会社共有ドメイン
 openclaw_model_id      = "jp.anthropic.claude-haiku-4-5"   # 手順0で確定した値
 enable_vpc_endpoints   = true
-alarm_email_endpoints  = ["you@vectorinc.co.jp"]
+alarm_email_endpoints  = ["s-komata@vectorinc.co.jp"]
+
+# 全DM送信者をOpenClawへ通す場合（後段のTeamAgent identity/RLS gateは別途必須）
+slack_dm_allowlist = "*"
+
+# または、DMをexact Slack user IDsだけに限定する場合
+# slack_dm_allowlist = "U09CX1CCBLN,U0123456789"
 ```
-`image_deployment_intent_id` は設定しない。worktree 外の saved plan を作成・レビューし、
-その同じ plan を一度だけ apply:
+
+`slack_dm_allowlist`の空文字既定値は「本番では明示指定が必須」を表す安全な
+sentinelです。空/未設定、空白、重複、`*`とIDの混在、U以外のIDはTerraform
+planで拒否します。`"*"`は`dmPolicy=open`かつ`allowFrom=["*"]`、個別U ID群は
+`dmPolicy=allowlist`かつ指定順のexact `allowFrom`へentrypointが同時変換します。
+task hardenerとentrypointも同じ契約を再検証し、不一致は起動前にfail-closedです。
+
+`image_deployment_intent_id` は手入力しません。plan は worktree 外へ作成し、
+全差分をレビューして同じ opaque saved plan を一度だけ apply します。
+
 ```sh
-bash infra/terraform/plan_image_release.sh /secure/local/path/openclaw-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh plan --help
 terraform show /secure/local/path/openclaw-release.tfplan
-bash infra/terraform/apply_image_release_plan.sh /secure/local/path/openclaw-release.tfplan
+bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/local/path/openclaw-release.tfplan --out /secure/local/path/openclaw-release.apply.json
 ```
-- plan は全差分をレビュー（特に IAM Deny / SG / secrets data source 解決）。
-- `-target`、direct ECS task-definition registration、失敗後の同 plan 再実行は禁止。
-- apply 失敗時は状態を reconcile し、fresh receipt＋new intent＋new plan で roll-forward/rollback。
-- 検証: **OpenClaw タスクロールで `secretsmanager:GetSecretValue` が拒否**されることを IAM Policy Simulator で確認。
 
-## 4. 新 Slack アプリ（OpenClaw 専用・Socket Mode）
-- Slack で **新規アプリ**を作成（既存 Bot とは別＝Socket Mode 二重接続回避）。**専用チャネル**を1つ用意。
-- スコープ: `app_mentions:read`/`chat:write`/`channels:history`(+DM 要件) など。**Socket Mode 有効**で `connections:write`。
-- 取得した `xoxb-`/`xapp-` を手順1の secret（`slack-bot-token`/`slack-app-token`）に `put-secret-value` で投入。
-- service を再デプロイ（`aws ecs update-service --force-new-deployment`）してトークンを反映。
+`terraform_runtime_guard.sh` は clean exact `origin/dev`、固定 automation role、
+backend/workspace/state lineage/serial、resource ownership、contract、
+receipt/signature VersionId、release graph、one-time intent と receipt claims を
+再検証します。plan の apply attempt を開始した後は、成功・失敗にかかわらず
+同じ plan を再実行しません。曖昧な失敗は reconcile し、fresh receipt、
+new intent、new plan で roll-forward または rollback します。旧
+`infra/terraform/apply_image_release_plan.sh` は廃止済みで、迂回経路として
+使用しません。
 
-## 5. DB マイグレーション（SSM トンネル・要承認）
-SSM トンネルで RDS へ接続し、未適用分を流す（**会社共有モデルの前提**）:
-```sh
-# 既存踏み台/worker 経由 SSM port forward → psql で
-psql "$DATABASE_URL" -f infra/migrations/0010_rls_email_case_insensitive.sql
-# 0011 は <COMPANY_DOMAIN> を実値へ置換してから
-sed 's/<COMPANY_DOMAIN>/vectorinc.co.jp/g' infra/migrations/0011_backfill_company_acl_groups.sql | psql "$DATABASE_URL"
-```
-- **RLS 実走検証（M1/P0）**: 2 ユーザ相当で「会社ドメイン doc は見える / 会社外は0 / `user_role=admin` 詐称は無効」を確認（`scripts/smoke_mcp.py --full` か手動 SQL）。
+### 5.1 通常運用logの30日adoption
 
-### 5.5 OpenClaw 起動ログ確認（§O・config 妥当性の実機確認）
-CloudWatch `/teamagent/dev`（stream prefix `openclaw`）で以下を確認:
-- **Slack connected**（channels.slack=Socket Mode が確立。出なければ token/scope/`channels.slack` 設定を疑う）
-- **gateway listening**（loopback:18789。ECS healthCheck はこれを叩く）
-- **MCP teamagent 接続**（streamable-http 8787。`tools/list` が toolFilter どおりか）
-- **モデル解決**（`amazon-bedrock/jp.anthropic.claude-haiku-4-5-v1:0`。unknown model なら §0 の list-inference-profiles 値とズレ）
-- `discovery` キー位置の警告が出ていないか（出たら plugins.entries 配下へ移動を検討・起動は止めない）
-- ⚠️ **既知制限（P1 許容・記録）**: 会話メモリ（~/.openclaw/memory/SQLite）は **タスク再起動で消える**（volume は ephemeral）。
-  スレッド文脈は Slack 側にも残るため P1 は許容。P2 で EFS マウント or stateless 設計を判断。
+runtime migrationには、既存のContainer Insights
+`/aws/ecs/containerinsights/teamagent-dev/performance` と
+`/aws/ecs/containerinsights/teamagent-dev-tiktok/performance`（live初期値はいずれも1日）を
+含む7 log groupのin-place import/adoptionが必要です。各groupの既存eventをexact
+S3 bucket/key/versionからfresh fileへ取得したretention export receiptを作り、
+`terraform_runtime_guard.sh plan`へ渡します。receiptはcanonical path/device/inode/
+nlink=1/size/timestamps/hash、AWS metadata、delivery時刻を拘束し、saved plan時とapply直前に
+guardが再取得・再hashします。7 groupの1件でも欠落、別version、差替え、時刻逆転なら中断し、
+log groupを削除・再作成したりdirect retention変更で迂回しません。
 
-## 6. 起動確認 & smoke
-```sh
-# タスクが RUNNING / healthz green を確認
-aws ecs describe-services --cluster $(terraform -chdir=infra/terraform output -raw ecs_cluster_name) \
-  --services $(terraform -chdir=infra/terraform output -raw ecs_service_mcp) --query 'services[0].deployments'
-# MCP へ（SSM トンネルで 8787 を localhost へ転送して）smoke
-TEAMAGENT_MCP_BEARER=<bearer値> TEAMAGENT_SHARED_COMPANY_DOMAINS=vectorinc.co.jp \
-  uv run python scripts/smoke_mcp.py --base-url http://127.0.0.1:8787 --full
-# 期待: healthz=200 / bearer無=401 / tools=会社ナレッジ4のみ / (--full) search=会社ドメインdocのみ
-```
-- Slack 専用チャネルで実ユーザが「検索/カルテ/提案」を投げ、**他人に返答が混ざらない**（`dmScope:per-channel-peer`）ことを 2 人同時で確認。
+### 5.2 Slack prerequisites
 
-## 7. ロールバック（~1分・可逆）
-OpenClaw は**専用 Slack アプリ/チャネル**・現行 Bot は**既存チャネル**で物理分離。ロールバック＝**OpenClaw を止めるだけ**（現行 Bot は無停止）:
-```sh
-aws ecs update-service --cluster <cluster> --service <ecs_service_openclaw> --desired-count 0
-```
-- `USE_OPENCLAW_FRONTEND` の**コード実装は不要**（物理分離のため運用ロールバックで足る）。MCP バックエンドは残してよい（現行 Bot からは使わない／将来の入口）。
+OpenClaw は既存 Bot と分離した専用 Slack アプリ、Socket Mode、専用チャネルを
+使用します。必要 scope、exact team ID、`xoxb-`/`xapp-` secret、DM allowlist は
+事前にレビューし、値をログ、image、evidence、tfvarsへ書き出しません。反映は
+direct `update-service` ではなく、署名済み release と同じ guarded saved-plan
+だけで行います。
 
-## 8. パイロット運用ゲート（→P2 判断）
-- 専用ch・2-3名・読取のみで**1週間**。`teamagent-dev-openclaw-pilot` ダッシュボードで監視。
-- 合格: **同時4で p95≤15s／エラー<1%／RLS越権0（会社外/admin不可）／コスト許容／無事故**＋ OpenClaw 単一GWの同時実行上限・月運用工数を記録。
+詳細は `infra/terraform/README.md` を参照してください。
 
-## 9. （拡張版・任意）スクレイプ/動画ツール有効化（§L/§M/§N・別承認）
-P1 の4ナレッジツールに加え、**TikTok検索・動画分析・VSEOアルゴリズム分析**を OpenClaw に出す“拡張版”。
-**既定 OFF**（`enable_scrape_tools=false`／P1 薄殻には一切影響しない）。有効化は P1 安定後・別判断で。
-前提＝**§N の SSRF 硬化（`adapters/url_guard.py`）が入っていること**（読取専用・HITL不要）。
+## 6. Runtime/Fargate contract
 
-```sh
-R=ap-northeast-1
-# (a) Gemini 認証 secret（variables_fargate.tf:gemini_secret_name と一致。Vertex 利用なら task role + GOOGLE_CLOUD_PROJECT）
-aws secretsmanager create-secret --region $R --name teamagent/dev/gemini-api-key --secret-string "AI..."
-# (b) WITH_SCRAPE_TOOLS は production contract の固定入力。guarded MCP launcher で
-#     quarantine build→attest→candidate→active receipt を作る
-bash infra/deploy/build_teamagent_image.sh
-bash infra/deploy/authorize_image_release.sh --help
-# (c) terraform.tfvars に enable_scrape_tools=true、新 release @sha256、exact receipt
-#     VersionIds を設定し、§3 と同じ new full saved-plan flow を一度だけ実行
-bash infra/terraform/plan_image_release.sh /secure/local/path/mcp-scrape-release.tfplan
-terraform show /secure/local/path/mcp-scrape-release.tfplan
-bash infra/terraform/apply_image_release_plan.sh /secure/local/path/mcp-scrape-release.tfplan
-# (d) 任意: 許可ドメインを絞る（未設定なら url_guard の保守的既定 youtube/youtu.be/tiktok/instagram）
-#     task env SCRAPE_ALLOWED_DOMAINS="youtube.com,youtu.be,tiktok.com,instagram.com"
-```
-- (e) OpenClaw `openclaw.json` の `toolFilter.include` に `tiktok_search`/`video_analysis`/`video_algorithm` を追加（既にテンプレ記載・コメント参照）。
-- **検証**:
-  ```sh
-  # 3ツールが露出していること
-  TEAMAGENT_MCP_BEARER=<bearer> uv run python scripts/smoke_mcp.py --base-url http://127.0.0.1:8787 --expect-scrape
-  # video_analysis が SSRF URL(IMDS/localhost/private/非許可) を拒否すること
-  TEAMAGENT_MCP_BEARER=<bearer> uv run python scripts/attack_mcp.py --base-url http://127.0.0.1:8787 --mode ssrf
-  ```
-- **残存リスク（記録・P2検討）**:
-  - **DNS rebinding**：検証時の解決と yt-dlp/Node の実接続が別タイミング＝TOCTOU 余地。allowlist＋内部IP拒否＋社内＋読取専用で実害を限定。完全対処（pinned-connect）は P2。
-  - **Gemini の $ ハードキャップ無し**：1リクエスト費用は max_videos 上限（≤10/≤30）×単価で**算術的に有界**。動的キャップ実装は重く、**CloudWatch コストアラート（M4）で監視**する方針。
-  - **video_algorithm の同期処理（DL+Gemini+presigned）が OpenClaw 既定 60s timeout に収まるか**を P1 拡張時に監視（超過なら max_videos を下げる）。
+本番 task definition は次を同時に満たします。
 
-## コスト目安（パイロット）
-- Fargate 2 task（小）＋ ECR ＋ CloudWatch ＋ VPC endpoints(任意 ~$7/月×6) ＋ Bedrock(Haiku外側+cache)。詳細は §9。
-- 拡張版(§9)有効時は Gemini 従量＋動画DL帯域が加算（VSEO分析 1回 ≈ $0.x・max_videos に比例）。
+- exact release repository `@sha256`、ARM64 Fargate
+- UID/GID `65532:65532`
+- read-only root filesystem
+- writable path は task-scoped `openclaw-tmp` を mount した `/tmp` のみ
+- capability drop `ALL`、`privileged=false`
+- image の canonical ENTRYPOINT/CMD を上書きしない
+- `SLACK_TEAM_ID`はcanonical `T...` exact IDをOpenClaw/MCP双方へ注入し、空・不正値を
+  Terraform validation、entrypoint、MCP起動時の三層で拒否
+- `TEAMAGENT_CALLER_CLAIM_SECRET`はMCP bearerとは別の32-byte以上のSecrets Manager値。
+  OpenClawとMCPだけに注入し、image/config/evidenceへ焼き込まない。誤ってbearerと同値を
+  格納した場合もOpenClaw/MCP双方が起動を拒否
+- MCPだけに`TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE`を注入し、専用DynamoDB tableへの
+  `dynamodb:PutItem`だけを許可する。`attribute_not_exists(nonce)`の条件付き書込みが
+  rolling task間も含むone-useの正準判定で、DynamoDB障害時はcaller認可をfail closed
+- `SLACK_DM_ALLOWLIST`は明示必須で、`"*"`または1〜100件の重複しない
+  comma-separated Slack U IDだけを受理
+- `/readyz` health check
+- sidecar、追加 volume/mount、環境 retarget、role retarget を禁止
+- ECS deployment circuit breaker と rollback を有効化
+
+OpenClaw 2026.7.1の実runtime hook契約では、`inbound_claim`/`message_received`のSlack event
+`user/team/channel/message/session/thread/runId`を内部pluginがexact bindingとして保持し、
+authoritative agent contextでも同じrunを照合します。runIdの無い互換hookは一意なfresh
+eventだけをrunへ束縛します。`before_tool_call`ではhost側の`runId`/`toolCallId`一致と
+一回性を検証し、exact tool・全引数hash・nonce・iat/exp・audienceへ署名します。
+同一sessionへ別userのeventが並行到着してもlatest値は使いません。
+MCPは申告`slack_user_id`との一致、署名、request binding、一回性を検証してから
+`users.info` resolverを呼びます。company-sharedもresolver成功、exact team、
+非guest/非strangerが必須で、欠落・未知・障害はfail closedです。
+OpenClaw nativeの`message`、filesystem read/write/edit、全session toolは明示denyし、
+署名resolver+nonceを通る`bundle-mcp`だけを追加許可します。
+
+Fargate は Docker `no-new-privileges` を強制できません。これは隠さず残余リスク
+として扱い、nonroot、read-only rootfs、capability drop、固定IAM/SGで補償します。
+
+## 7. Post-apply functional gates
+
+canonical `terraform_runtime_guard.sh apply` は、同じ shared deployment lock と
+backend workflow lock を保持したまま、intent を `APPLIED` にする前に
+`run-live-rollout-gates.mjs` を実行します。old/new revision は異なる必要があり、
+OpenClaw revision が変わらない apply では gate を明示的に skip した結果を
+apply receipt に束縛します。revision が変わる場合は次をすべて自動実行します。
+
+- ECS `services-stable`
+- Slack canary の前後で running service task を全件列挙し、全taskが exact
+  candidate revision であることを再確認
+- 同一network/task revisionの one-off canary exit 0
+- ECS task-role credential による Bedrock `Converse`
+- MCP `tools/list` が既定12件かつ reviewed 28件の範囲内
+- Slack Socket Mode の exact mention/reply と candidate task log stream の相関
+- apply attempt、old/new revision、exact automation role、one-use rollback
+  authorization を束縛した rollout result
+- fixed KMS asymmetric signature と fixed S3 VersionId、SSE-KMS、
+  COMPLIANCE Object Lock、downloaded hash/signature の再検証
+
+post-apply のどの確認が失敗しても、intent を `APPLIED` にする前に one-use
+rollback authorization を消費し、durable previous task definition を検証して
+service と全 running task の復旧を確認します。guard cleanup も同じ lock 内で
+idempotent に復旧を再試行します。
+
+この実装だけでは production evidence ではありません。Terraform resource の
+実環境適用、独立レビュー、実際の signed S3 result と forced-failure rollback
+receipt が揃うまで contract は closed のままです。手動実行を production evidence
+として代用しません。
+
+## 8. Alarms and operational checks
+
+- `openclaw_config_invariant_violation` と `openclaw_entrypoint_error` は
+  `OpenClawStartupFailure` に集約する。
+- log group、metric filter、alarm、SNS subscription を plan で確認する。
+- startup failure、ECS circuit-breaker rollback、task exit、Slack/Bedrock/MCP
+  gate失敗を監視する。
+- OpenClaw の通常運用ログ保持は30日。AI入出力ログは60日。audit は別方針で
+  自動削除しない。
+
+## 9. Production GO条件
+
+次のすべてが揃うまで production は **NO-GO** です。
+
+- media subject と exact core/media receipt emitter が実装・レビュー済み
+- `release.ready=true` の別変更が全CI・独立レビュー済み
+- final `origin/dev` の signed source、actual-image C0/H0/S0、SBOM、
+  provenance、signature、immutable receipt が揃う
+- full saved plan と live state が一致する
+- post-apply functional rollback gate が one-time apply と統合済み
+- 実環境の CodeBuild/ECR/ECS/Slack/Bedrock/MCP/CloudWatch 検証が全緑
+
+ローカル合格、merge、CI全緑のいずれも単独では production GO ではありません。

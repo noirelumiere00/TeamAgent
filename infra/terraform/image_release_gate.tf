@@ -23,7 +23,7 @@ variable "image_release_evidence" {
 }
 
 variable "image_deployment_intent_id" {
-  description = "Ephemeral UUIDv4 generated only by plan_image_release.sh; never persist in tfvars."
+  description = "Ephemeral UUIDv4 generated only by terraform_runtime_guard.sh plan; never persist in tfvars."
   type        = string
   default     = ""
 
@@ -82,12 +82,15 @@ locals {
   deployment_images = {
     mcp      = var.mcp_image
     openclaw = var.openclaw_image
-    tiktok   = var.enable_tiktok_acquire ? var.tiktok_acquire_image : ""
+    # The generic media worker is a second subject of the signed MCP
+    # core+media receipt. The legacy standalone TikTok release pipeline no
+    # longer authorizes any production task definition.
+    tiktok = ""
   }
   deployment_pipeline_enabled = {
-    mcp      = var.mcp_image != ""
+    mcp      = var.mcp_image != "" || local.media_worker_enabled
     openclaw = var.openclaw_image != ""
-    tiktok   = var.enable_tiktok_acquire
+    tiktok   = false
   }
   deployment_contract_sha256 = {
     mcp      = filesha256("${path.module}/../codebuild/teamagent_core_media_release_contract.json")
@@ -110,6 +113,19 @@ locals {
     openclaw = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$"
     tiktok   = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
   }
+  deployment_mcp_media_image = (
+    local.media_worker_enabled ? local.media_worker_image : ""
+  )
+  deployment_mcp_media_reference_is_safe = (
+    !local.media_worker_enabled ||
+    (
+      var.mcp_image != "" &&
+      can(regex(
+        "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
+        local.deployment_mcp_media_image,
+      ))
+    )
+  )
   deployment_requested = anytrue(values(local.deployment_pipeline_enabled))
   deployment_intent_is_valid = (
     !local.deployment_requested ||
@@ -154,10 +170,12 @@ locals {
     local.deployment_references_are_digest_only &&
     local.deployment_contracts_are_ready &&
     local.deployment_evidence_is_complete &&
+    local.deployment_mcp_media_reference_is_safe &&
     local.deployment_intent_is_valid
   )
   deployment_gate_query = {
     images_json         = jsonencode(local.deployment_images)
+    mcp_media_image     = local.deployment_mcp_media_image
     evidence_json       = jsonencode(var.image_release_evidence)
     contracts_json      = jsonencode(local.deployment_contract_sha256)
     contract_ready_json = jsonencode(local.deployment_contract_ready)
@@ -194,14 +212,29 @@ resource "terraform_data" "production_image_release_gate" {
     deployment_context_sha256 = try(data.external.signed_image_release_gate[0].result.deployment_context_sha256, "")
     receipt_claims_sha256     = try(data.external.signed_image_release_gate[0].result.receipt_claims_sha256, "")
     requested_images          = local.deployment_images
-    application_provenance    = local.deployment_application_provenance
-    shared_generation_ledger  = local.deployment_shared_generation_ledger
+    requested_media_image     = local.deployment_mcp_media_image
+    release_channels = try(
+      jsondecode(data.external.signed_image_release_gate[0].result.release_channels_json),
+      {},
+    )
+    application_provenance   = local.deployment_application_provenance
+    shared_generation_ledger = local.deployment_shared_generation_ledger
+    hmac_release_bindings    = local.hmac_release_intent_bindings
+    deployment_gate_query    = local.deployment_gate_query
+    receipt_authorization_expires_at = try(
+      data.external.signed_image_release_gate[0].result.receipt_authorization_expires_at,
+      "",
+    )
   }
 
-  # Every plan gets a new apply-time gate action. This prevents an old gate
-  # instance in Terraform state from making a targeted task-definition apply a
-  # no-op dependency.
-  triggers_replace = local.deployment_requested ? [plantimestamp()] : []
+  # The reviewed UUID is the one-use replacement trigger. A wall-clock
+  # plantimestamp would make an exact reviewed plan impossible to reproduce:
+  # the review plan and the final saved plan would differ even when every
+  # immutable input is unchanged. The trusted apply launcher still atomically
+  # consumes this intent and its receipts before Terraform can start.
+  triggers_replace = (
+    local.deployment_requested ? [var.image_deployment_intent_id] : []
+  )
 
   lifecycle {
     precondition {
@@ -212,27 +245,7 @@ resource "terraform_data" "production_image_release_gate" {
           try(data.external.signed_image_release_gate[0].result.verified == "true", false)
         )
       )
-      error_message = "Production images require plan_image_release.sh, a unique deployment intent, release-repository digests, release.ready=true, an exact application VersionId contract, and fresh immutable KMS-signed active/rollback receipts."
+      error_message = "Production images require the composed terraform_runtime_guard.sh full saved-plan workflow, a unique deployment intent, release-repository digests, release.ready=true, an exact application VersionId contract, and fresh immutable KMS-signed active/rollback receipts."
     }
-  }
-
-  provisioner "local-exec" {
-    command = <<-EOT
-      set -euo pipefail
-      if ${local.deployment_requested}; then
-        test -n "$TEAMAGENT_SAVED_PLAN_PATH"
-        test -f "$TEAMAGENT_SAVED_PLAN_PATH"
-        test -n "$TEAMAGENT_APPLY_ATTEMPT_ID"
-        bash "${path.module}/../deploy/run_image_deployment_gate.sh" \
-          consume-deployment-intent \
-          --plan "$TEAMAGENT_SAVED_PLAN_PATH" \
-          --apply-attempt-id "$TEAMAGENT_APPLY_ATTEMPT_ID"
-      fi
-    EOT
-
-    environment = {
-      TEAMAGENT_DEPLOYMENT_GATE_QUERY = jsonencode(local.deployment_gate_query)
-    }
-    interpreter = ["/bin/bash", "-c"]
   }
 }

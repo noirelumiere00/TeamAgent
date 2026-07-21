@@ -28,11 +28,12 @@ class SearchSurfaceCheckInput(BaseModel):
     client_accounts: list[str] = Field(
         default_factory=list, description="クライアントのアカウント（@handle。TikTok/IG両方可）"
     )
-    acquire_s3_prefix: str | None = Field(
+    acquire_job_id: str | None = Field(
         default=None,
+        pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$",
         description=(
-            "tiktok_acquire 成果物の s3_prefix。3KW以上のTikTok面はこの経路が必須"
-            "（先に tiktok_acquire(videos_per_kw=0) を実行して渡す）"
+            "tiktok_acquire が返した job_id。3KW以上のTikTok面はこの経路が必須"
+            "（本人所有ジョブのimmutable成果物だけを読む）"
         ),
     )
     max_posts_per_kw: int = Field(default=30, ge=5, le=50)

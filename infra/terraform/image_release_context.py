@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 CONTEXT_KIND = "teamagent.image-release-terraform-context"
-CONTEXT_SCHEMA = 1
+CONTEXT_SCHEMA = 2
 EXPECTED_BACKEND = {
     "type": "s3",
     "bucket": "teamagent-tfstate-718959508629",
@@ -25,8 +25,50 @@ EXPECTED_BACKEND = {
     "encrypt": True,
 }
 EXPECTED_WORKSPACE = "default"
+ALLOWED_EXISTING_LOG_IMPORTS = {
+    "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
+        "/aws/codebuild/teamagent-dev-aiia-image-builder"
+    ),
+    "aws_cloudwatch_log_group.codebuild_image": (
+        "/aws/codebuild/teamagent-dev-image-builder"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_teamagent": (
+        "/aws/ecs/containerinsights/teamagent-dev/performance"
+    ),
+    "aws_cloudwatch_log_group.ecs_containerinsights_tiktok": (
+        "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance"
+    ),
+    "aws_cloudwatch_log_group.reminder_notify": (
+        "/aws/lambda/teamagent-dev-reminders-notify"
+    ),
+    "aws_cloudwatch_log_group.tiktok_dispatch": (
+        "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
+    ),
+    "aws_cloudwatch_log_group.x_dispatch": (
+        "/aws/lambda/teamagent-dev-x-buzz-dispatch"
+    ),
+}
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
+RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
+RUNTIME_IMAGE_PATTERNS = {
+    "mcp_image": re.compile(
+        r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+        r"teamagent-mcp@sha256:[0-9a-f]{64}$"
+    ),
+    "openclaw_image": re.compile(
+        r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+        r"teamagent-openclaw@sha256:[0-9a-f]{64}$"
+    ),
+    "media_worker_image": re.compile(
+        r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+        r"teamagent-media-worker@sha256:[0-9a-f]{64}$"
+    ),
+    "tiktok_acquire_image": re.compile(
+        r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+        r"teamagent-media-worker@sha256:[0-9a-f]{64}$"
+    ),
+}
 
 
 class ContextError(ValueError):
@@ -64,8 +106,7 @@ def _mapping(value: Any, *, label: str) -> Mapping[str, Any]:
 
 def _canonical_bytes(value: Any) -> bytes:
     return (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        + "\n"
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
     ).encode()
 
 
@@ -100,6 +141,84 @@ def _configuration_addresses(module: Mapping[str, Any], prefix: str = "") -> set
 
 def _configuration_address(address: str) -> str:
     return INSTANCE_SELECTOR_RE.sub("", address)
+
+
+def _plan_variable(plan: Mapping[str, Any], name: str) -> Any:
+    variables = _mapping(plan.get("variables"), label="Terraform plan variables")
+    variable = _mapping(
+        variables.get(name),
+        label=f"Terraform plan variable {name}",
+    )
+    if set(variable) != {"value"}:
+        raise ContextError(f"Terraform plan variable schema is invalid: {name}")
+    return variable["value"]
+
+
+def _runtime_image_binding(plan: Mapping[str, Any]) -> dict[str, str]:
+    images: dict[str, str] = {}
+    for variable_name in ("mcp_image", "openclaw_image"):
+        value = _plan_variable(plan, variable_name)
+        if (
+            not isinstance(value, str)
+            or not RUNTIME_IMAGE_PATTERNS[variable_name].fullmatch(value)
+        ):
+            raise ContextError(
+                f"Terraform saved plan requires a nonempty release digest: {variable_name}"
+            )
+        images[variable_name] = value
+    enable_media = _plan_variable(plan, "enable_media_worker")
+    enable_tiktok_alias = _plan_variable(plan, "enable_tiktok_acquire")
+    if not isinstance(enable_media, bool) or not isinstance(enable_tiktok_alias, bool):
+        raise ContextError("Terraform plan media enable variables are invalid")
+    if enable_media or enable_tiktok_alias:
+        media_image = _plan_variable(plan, "media_worker_image")
+        tiktok_alias_image = _plan_variable(plan, "tiktok_acquire_image")
+        if not isinstance(media_image, str) or not isinstance(tiktok_alias_image, str):
+            raise ContextError("Terraform plan media image variables are invalid")
+        for variable_name, value in (
+            ("media_worker_image", media_image),
+            ("tiktok_acquire_image", tiktok_alias_image),
+        ):
+            if value and not RUNTIME_IMAGE_PATTERNS[variable_name].fullmatch(value):
+                raise ContextError(
+                    "Terraform saved plan requires the generic media release digest: "
+                    f"{variable_name}"
+                )
+        if media_image and tiktok_alias_image and media_image != tiktok_alias_image:
+            raise ContextError("Terraform saved plan media image aliases disagree")
+        effective_media_image = media_image or tiktok_alias_image
+        if not effective_media_image:
+            raise ContextError(
+                "Terraform saved plan requires a nonempty release digest: media_worker_image"
+            )
+        images["media_worker_image"] = effective_media_image
+    return images
+
+
+def _transition_binding(ownership: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    deletes: list[dict[str, Any]] = []
+    replacements: list[dict[str, Any]] = []
+    for item in ownership:
+        if item["address"] == RELEASE_GATE_ADDRESS:
+            continue
+        actions = item["actions"]
+        transition = {
+            "address": item["address"],
+            "actions": actions,
+        }
+        if "delete" in actions and "create" not in actions:
+            deletes.append(transition)
+        elif "delete" in actions and "create" in actions:
+            replacements.append(transition)
+    value = {
+        "delete": deletes,
+        "replace": replacements,
+    }
+    return {
+        "delete_change_count": len(deletes),
+        "replace_change_count": len(replacements),
+        "transition_sha256": hashlib.sha256(_canonical_bytes(value)).hexdigest(),
+    }
 
 
 def _raw_state_addresses(state: Mapping[str, Any]) -> list[str]:
@@ -144,9 +263,7 @@ def _raw_state_addresses(state: Mapping[str, Any]) -> list[str]:
                 address = base
             elif isinstance(index_key, str):
                 address = (
-                    f"{base}["
-                    f"{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}"
-                    "]"
+                    f"{base}[{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}]"
                 )
             elif isinstance(index_key, int) and not isinstance(index_key, bool):
                 if index_key < 0:
@@ -177,9 +294,7 @@ def _state_binding(state: Mapping[str, Any]) -> dict[str, Any]:
         "lineage": lineage,
         "serial": serial,
         "managed_address_count": len(addresses),
-        "managed_addresses_sha256": hashlib.sha256(
-            _canonical_bytes(addresses)
-        ).hexdigest(),
+        "managed_addresses_sha256": hashlib.sha256(_canonical_bytes(addresses)).hexdigest(),
         "_addresses": addresses,
     }
 
@@ -217,6 +332,7 @@ def build_context(
     if plan.get("applyable") is not True:
         raise ContextError("Terraform saved plan is not applyable")
 
+    runtime_images = _runtime_image_binding(plan)
     state_binding = _state_binding(state)
     state_addresses = set(state_binding.pop("_addresses"))
     configuration = _mapping(
@@ -244,30 +360,50 @@ def build_context(
             label=f"Terraform resource change {address}",
         )
         importing = details.get("importing")
+        import_id = ""
         if importing is not None and importing is not False:
-            raise ContextError("image release plans cannot contain import operations")
+            import_contract = _mapping(
+                importing,
+                label=f"Terraform import operation {address}",
+            )
+            expected_import_id = ALLOWED_EXISTING_LOG_IMPORTS.get(address)
+            if (
+                set(import_contract) != {"id"}
+                or import_contract.get("id") != expected_import_id
+            ):
+                raise ContextError(
+                    "Terraform import is outside the exact existing-log allowlist"
+                )
+            import_id = str(expected_import_id)
         actions = details.get("actions")
         if (
             not isinstance(actions, list)
             or not actions
             or any(
-                action not in {"no-op", "create", "read", "update", "delete"}
-                for action in actions
+                action not in {"no-op", "create", "read", "update", "delete"} for action in actions
             )
         ):
             raise ContextError(f"Terraform actions are invalid for {address}")
+        if import_id and actions not in (["no-op"], ["update"]):
+            raise ContextError(
+                f"Terraform existing-log import action is destructive: {address}"
+            )
         in_state = address in state_addresses
         in_configuration = (
             address in configuration_addresses
             or _configuration_address(address) in configuration_addresses
         )
-        if not in_state and "create" not in actions:
+        if import_id and in_state:
+            raise ContextError(
+                f"Terraform import address is already owned by the bound state: {address}"
+            )
+        if not in_state and "create" not in actions and not import_id:
             raise ContextError(
                 f"Terraform change is not owned by the bound state: {address}"
             )
-        if "create" in actions and not in_configuration:
+        if ("create" in actions or import_id) and not in_configuration:
             raise ContextError(
-                f"Terraform create is not owned by the reviewed configuration: {address}"
+                f"Terraform create/import is not owned by the reviewed configuration: {address}"
             )
         ownership.append(
             {
@@ -275,6 +411,7 @@ def build_context(
                 "actions": actions,
                 "state_owned": in_state,
                 "configuration_owned": in_configuration,
+                "import_id": import_id,
             }
         )
     ownership.sort(key=lambda item: item["address"])
@@ -285,11 +422,12 @@ def build_context(
     gate_changes = [
         item
         for item in ownership
-        if item["address"] == "terraform_data.production_image_release_gate"
+        if item["address"] == RELEASE_GATE_ADDRESS
     ]
     if len(gate_changes) != 1 or "create" not in gate_changes[0]["actions"]:
         raise ContextError("Terraform saved plan will not run the production release gate")
 
+    transition = _transition_binding(ownership)
     return {
         "schema_version": CONTEXT_SCHEMA,
         "kind": CONTEXT_KIND,
@@ -304,6 +442,10 @@ def build_context(
             "address_ownership_sha256": hashlib.sha256(
                 _canonical_bytes(ownership)
             ).hexdigest(),
+            "runtime_images_sha256": hashlib.sha256(
+                _canonical_bytes(runtime_images)
+            ).hexdigest(),
+            **transition,
         },
     }
 
@@ -353,6 +495,10 @@ def validate_context(value: Any) -> dict[str, Any]:
         "errored",
         "managed_change_count",
         "address_ownership_sha256",
+        "runtime_images_sha256",
+        "delete_change_count",
+        "replace_change_count",
+        "transition_sha256",
     }:
         raise ContextError("Terraform context plan schema mismatch")
     if (
@@ -361,11 +507,27 @@ def validate_context(value: Any) -> dict[str, Any]:
         or plan["errored"] is not False
         or not isinstance(plan["managed_change_count"], int)
         or plan["managed_change_count"] <= 0
+        or not isinstance(plan["delete_change_count"], int)
+        or isinstance(plan["delete_change_count"], bool)
+        or plan["delete_change_count"] < 0
+        or not isinstance(plan["replace_change_count"], int)
+        or isinstance(plan["replace_change_count"], bool)
+        or plan["replace_change_count"] < 0
+        or plan["delete_change_count"] + plan["replace_change_count"]
+        > plan["managed_change_count"]
     ):
         raise ContextError("Terraform context plan markers are invalid")
     _sha256(
         plan["address_ownership_sha256"],
         label="Terraform context address ownership hash",
+    )
+    _sha256(
+        plan["runtime_images_sha256"],
+        label="Terraform context runtime image hash",
+    )
+    _sha256(
+        plan["transition_sha256"],
+        label="Terraform context transition hash",
     )
     return dict(context)
 
