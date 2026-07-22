@@ -39,8 +39,9 @@ different, one-time control-plane workflow with a smaller authority:
    fixed HTTPS URL with global/system Git config disabled and rejects local
    transport redirects.
 6. `provenance_iam_bootstrap.py` accepts only `create` and `no-op`. Updates,
-   deletes, replacements, imports, moved resources, drift, incomplete plans,
-   runtime resources, and unknown dependencies fail closed. Before apply, each
+   deletes, replacements, imports, moved resources, drift, deferred changes,
+   plans not marked by Terraform as fixed-target (`complete=false`), runtime
+   resources, and unknown dependencies fail closed. Before apply, each
    upsert-style create has an exact AWS absence/ownership probe; this includes
    the `AIIAdev` inline policy, role/user inline policies, ECR lifecycle
    policies, and S3 subresources.

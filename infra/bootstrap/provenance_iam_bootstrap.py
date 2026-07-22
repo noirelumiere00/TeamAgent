@@ -637,8 +637,8 @@ def validate_plan(
         raise BootstrapError("Terraform plan format/tool version is not reviewed")
     if plan.get("errored") is not False:
         raise BootstrapError("Terraform bootstrap plan is errored or omits errored=false")
-    if plan.get("complete") is not True:
-        raise BootstrapError("Terraform bootstrap plan is incomplete")
+    if plan.get("complete") is not False:
+        raise BootstrapError("Terraform bootstrap plan is not a fixed-target plan")
     if plan.get("applyable") is not True:
         raise BootstrapError("Terraform bootstrap plan is not applyable")
     if plan.get("resource_drift") not in (None, []):
@@ -655,7 +655,9 @@ def validate_plan(
     checks = plan.get("checks", [])
     if not isinstance(checks, list) or _contains_failed_check(checks):
         raise BootstrapError("Terraform bootstrap plan contains a failed check")
-    output_changes = plan.get("output_changes", {})
+    if "output_changes" not in plan:
+        raise BootstrapError("Terraform plan omits required output_changes")
+    output_changes = plan["output_changes"]
     if not isinstance(output_changes, dict):
         raise BootstrapError("Terraform plan output_changes must be an object")
     for name, raw_output_change in output_changes.items():
