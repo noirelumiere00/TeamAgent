@@ -126,7 +126,17 @@
     "aws_iam_policy.runtime_automation_boundary",
     "aws_iam_role.runtime_automation",
     "aws_iam_role_policy.runtime_evidence_automation",
-    "aws_iam_role_policy.runtime_automation_control_plane"
+    "aws_iam_role_policy.runtime_automation_control_plane",
+    "aws_ecr_lifecycle_policy.openclaw_quarantine",
+    "aws_ecr_lifecycle_policy.openclaw_verified_candidates",
+    "aws_ecr_lifecycle_policy.openclaw_media_quarantine",
+    "aws_ecr_lifecycle_policy.openclaw_media_verified_candidates",
+    "aws_ecr_lifecycle_policy.mcp_quarantine",
+    "aws_ecr_lifecycle_policy.mcp_verified_candidates",
+    "aws_ecr_lifecycle_policy.mcp_media_quarantine",
+    "aws_ecr_lifecycle_policy.mcp_media_verified_candidates",
+    "aws_ecr_lifecycle_policy.tiktok_acquire_quarantine",
+    "aws_ecr_lifecycle_policy.tiktok_acquire_verified_candidates"
   ],
   "create_allowed_dependency_addresses": [
     "aws_ecr_repository.openclaw",
@@ -144,22 +154,10 @@
     "aws_ecr_repository.tiktok_acquire",
     "aws_ecr_repository.tiktok_acquire_quarantine",
     "aws_ecr_repository.tiktok_acquire_verified_candidates",
-    "aws_ecr_lifecycle_policy.openclaw_quarantine",
-    "aws_ecr_lifecycle_policy.openclaw_verified_candidates",
-    "aws_ecr_lifecycle_policy.openclaw_media_quarantine",
-    "aws_ecr_lifecycle_policy.openclaw_media_verified_candidates",
-    "aws_ecr_lifecycle_policy.mcp_quarantine",
-    "aws_ecr_lifecycle_policy.mcp_verified_candidates",
-    "aws_ecr_lifecycle_policy.mcp_media_quarantine",
-    "aws_ecr_lifecycle_policy.mcp_media_verified_candidates",
-    "aws_ecr_lifecycle_policy.tiktok_acquire_quarantine",
-    "aws_ecr_lifecycle_policy.tiktok_acquire_verified_candidates"
+    "aws_kms_key.openclaw_rollout_signing"
   ],
   "existing_dependency_addresses": [
-    "aws_s3_bucket.raw_files",
-    "aws_codebuild_project.image",
-    "aws_iam_role.codebuild",
-    "aws_cloudwatch_log_group.codebuild_image"
+    "aws_s3_bucket.raw_files"
   ],
   "required_main_state_addresses": [
     "aws_iam_role.codebuild_launcher",
@@ -180,7 +178,8 @@
     "aws_iam_role.runtime_automation",
     "aws_iam_role_policy.runtime_evidence_automation",
     "aws_iam_role_policy.runtime_automation_control_plane",
-    "aws_codestarconnections_connection.openclaw_codebuild"
+    "aws_codestarconnections_connection.openclaw_codebuild",
+    "aws_kms_key.openclaw_rollout_signing"
   ],
   "allowed_output_names": [
     "alarm_recipient_ack_key_arn",
@@ -211,7 +210,25 @@
     "openclaw_codebuild_project",
     "openclaw_codebuild_connection_arn",
     "openclaw_publisher_role_arn",
-    "openclaw_evidence_bucket"
+    "openclaw_evidence_bucket",
+    "ecr_openclaw_url",
+    "ecr_openclaw_quarantine_url",
+    "ecr_openclaw_verified_candidates_url",
+    "ecr_openclaw_media_url",
+    "ecr_openclaw_media_quarantine_url",
+    "ecr_openclaw_media_verified_candidates_url",
+    "ecr_mcp_url",
+    "ecr_mcp_quarantine_url",
+    "ecr_mcp_verified_candidates_url",
+    "ecr_mcp_media_url",
+    "ecr_mcp_media_quarantine_url",
+    "ecr_mcp_media_verified_candidates_url",
+    "ecr_tiktok_acquire_quarantine_url",
+    "ecr_tiktok_acquire_verified_candidates_url",
+    "tiktok_acquire_ecr_url",
+    "media_worker_ecr_url",
+    "s3_raw_bucket",
+    "openclaw_rollout_signing_key_arn"
   ],
   "forbidden_change_type_prefixes": [
     "aws_ecs_",

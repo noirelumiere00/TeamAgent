@@ -1110,7 +1110,7 @@ data "aws_iam_policy_document" "release_control_updater" {
     actions = ["codebuild:BatchGetProjects", "codebuild:UpdateProject"]
     resources = concat(
       [
-        aws_codebuild_project.image.arn,
+        local.launcher_project_arn,
         aws_codebuild_project.mcp_source_publisher.arn,
         aws_codebuild_project.image_attestor.arn,
         aws_codebuild_project.openclaw_provenance.arn,
@@ -2389,7 +2389,7 @@ data "aws_iam_policy_document" "image_attestor" {
     ]
     resources = concat(
       [
-        aws_codebuild_project.image.arn,
+        local.launcher_project_arn,
         aws_codebuild_project.openclaw_provenance.arn,
       ],
       local.tk_enabled == 1 ? [aws_codebuild_project.tiktok_image[0].arn] : [],

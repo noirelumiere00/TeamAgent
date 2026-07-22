@@ -22,6 +22,7 @@ WRAPPER_PROVENANCE_PATH = ROOT / "infra" / "bootstrap" / "wrapper_provenance.py"
 CONTRACT_PATH = ROOT / "infra" / "bootstrap" / "bootstrap_contract.json"
 SEED_PATH = ROOT / "infra" / "bootstrap" / "seed-stack.yaml"
 CODEBUILD_TF = ROOT / "infra" / "terraform" / "codebuild.tf"
+ECR_TF = ROOT / "infra" / "terraform" / "ecr.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
 MEDIA_CUTOVER_ATTESTOR_TF = ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
 BUILD_TEAMAGENT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
@@ -49,6 +50,61 @@ WRAPPER_SPEC.loader.exec_module(WRAPPER_PROVENANCE)
 
 PLAN_SHA = "a" * 64
 LINEAGE = str(uuid.UUID("11111111-2222-4333-8444-555555555555"))
+PREEXISTING_ALLOWED_OUTPUT_NAMES = frozenset(
+    {
+        "alarm_recipient_ack_key_arn",
+        "alarm_recipient_ack_signer_role_arn",
+        "runtime_automation_role_arn",
+        "alarm_recipient_ack_signer_assume_policy_contract",
+        "alarm_recipient_ack_signer_policy_contract",
+        "media_cutover_attestor_key_arn",
+        "media_cutover_attestor_role_arn",
+        "media_cutover_attestor_assume_policy_contract",
+        "media_cutover_attestor_policy_contract",
+        "runtime_evidence_automation_policy_contract",
+        "runtime_automation_boundary_arn",
+        "codebuild_launcher_role_arn",
+        "release_caller_arn",
+        "release_launcher_role_arn",
+        "release_control_update_caller_arn",
+        "release_control_updater_role_arn",
+        "tiktok_codebuild_project",
+        "tiktok_codebuild_connection_arn",
+        "tiktok_build_caller_arn",
+        "tiktok_build_launcher_role_arn",
+        "image_deployment_gate_role_arn",
+        "image_deployment_intent_table",
+        "mcp_source_publisher_project",
+        "image_attestor_project",
+        "image_promoter_project",
+        "openclaw_codebuild_project",
+        "openclaw_codebuild_connection_arn",
+        "openclaw_publisher_role_arn",
+        "openclaw_evidence_bucket",
+    }
+)
+TARGET_DERIVED_OUTPUT_NAMES = frozenset(
+    {
+        "ecr_openclaw_url",
+        "ecr_openclaw_quarantine_url",
+        "ecr_openclaw_verified_candidates_url",
+        "ecr_openclaw_media_url",
+        "ecr_openclaw_media_quarantine_url",
+        "ecr_openclaw_media_verified_candidates_url",
+        "ecr_mcp_url",
+        "ecr_mcp_quarantine_url",
+        "ecr_mcp_verified_candidates_url",
+        "ecr_mcp_media_url",
+        "ecr_mcp_media_quarantine_url",
+        "ecr_mcp_media_verified_candidates_url",
+        "ecr_tiktok_acquire_quarantine_url",
+        "ecr_tiktok_acquire_verified_candidates_url",
+        "tiktok_acquire_ecr_url",
+        "media_worker_ecr_url",
+        "s3_raw_bucket",
+        "openclaw_rollout_signing_key_arn",
+    }
+)
 
 
 def _contract() -> Any:
@@ -126,6 +182,29 @@ def _change(address: str, actions: list[str], *, importing: bool = False) -> dic
     }
 
 
+def _output_change(actions: list[str]) -> dict[str, Any]:
+    if actions == ["create"]:
+        before, after = None, "created"
+    elif actions == ["update"]:
+        before, after = "before", "after"
+    else:
+        before = after = "unchanged"
+    return {
+        "actions": actions,
+        "before": before,
+        "after": after,
+        "after_unknown": False,
+        "before_sensitive": False,
+        "after_sensitive": False,
+    }
+
+
+def _state_output(value: Any) -> dict[str, Any]:
+    return {"value": value, "type": "string"}
+
+
+# NOTE: This is a synthetic plan derived from the contract; the real Terraform 1.12.2
+# golden fixture awaits the AWS-mutation-free saved-plan rehearsal (design §4.5).
 def _valid_plan(
     *,
     created: list[str] | None = None,
@@ -139,9 +218,11 @@ def _valid_plan(
         "format_version": "1.2",
         "terraform_version": "1.12.2",
         "errored": False,
-        "complete": True,
+        "complete": False,
         "applyable": True,
         "resource_drift": [],
+        "deferred_changes": [],
+        "output_changes": {},
         "resource_changes": [
             *[_change(address, ["create"]) for address in created],
             *[_change(address, ["no-op"]) for address in no_op],
@@ -232,7 +313,46 @@ def test_plan_rejects_update_delete_and_replacement(actions: list[str]) -> None:
         BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
 
 
-def test_plan_rejects_import_move_drift_and_partial_plan() -> None:
+def test_openclaw_rollout_signing_key_create_and_no_op_are_accepted() -> None:
+    contract = _contract()
+    address = "aws_kms_key.openclaw_rollout_signing"
+
+    create_plan, create_before, _ = _valid_plan()
+    create_validation = BOOTSTRAP.validate_plan(
+        create_plan,
+        create_before,
+        contract,
+        plan_sha256=PLAN_SHA,
+    )
+    assert address in create_validation.created_addresses
+
+    no_op_plan, no_op_before, _ = _valid_plan(
+        created=sorted(contract.required_main_state - {address}),
+        no_op=[address],
+    )
+    no_op_validation = BOOTSTRAP.validate_plan(
+        no_op_plan,
+        no_op_before,
+        contract,
+        plan_sha256=PLAN_SHA,
+    )
+    assert no_op_validation.no_op_addresses == (address,)
+
+
+@pytest.mark.parametrize("actions", [["update"], ["delete"]])
+def test_openclaw_rollout_signing_key_update_and_delete_are_rejected(
+    actions: list[str],
+) -> None:
+    contract = _contract()
+    address = "aws_kms_key.openclaw_rollout_signing"
+    plan, before, _ = _valid_plan()
+    key_change = next(change for change in plan["resource_changes"] if change["address"] == address)
+    key_change["change"]["actions"] = actions
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="create/no-op only"):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+def test_plan_rejects_import_move_and_drift() -> None:
     contract = _contract()
     plan, before, _ = _valid_plan()
     plan["resource_changes"][0]["change"]["importing"] = {"id": "existing"}
@@ -247,11 +367,6 @@ def test_plan_rejects_import_move_drift_and_partial_plan() -> None:
     plan, before, _ = _valid_plan()
     plan["resource_drift"] = [_change("aws_iam_role.codebuild_launcher", ["update"])]
     with pytest.raises(BOOTSTRAP.BootstrapError, match="resource drift"):
-        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
-
-    plan, before, _ = _valid_plan()
-    plan["complete"] = False
-    with pytest.raises(BOOTSTRAP.BootstrapError, match="incomplete"):
         BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
 
 
@@ -273,26 +388,105 @@ def test_plan_rejects_failed_checks_duplicate_addresses_and_other_providers() ->
         BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
 
 
-def test_plan_and_handoff_reject_unreviewed_output_changes() -> None:
+def test_builtin_terraform_data_provider_is_rejected_at_provider_boundary() -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
+    runtime_guard = _change("terraform_data.runtime_guard", ["no-op"])
+    runtime_guard["provider_name"] = "terraform.io/builtin/terraform"
+    plan["resource_changes"].append(runtime_guard)
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="provider is outside"):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+def test_terraform_data_type_is_rejected_at_forbidden_type_boundary() -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
+    plan["resource_changes"].append(_change("terraform_data.runtime_guard", ["create"]))
+    with pytest.raises(
+        BOOTSTRAP.BootstrapError,
+        match="runtime/guard resource reached bootstrap plan",
+    ):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+@pytest.mark.parametrize("complete", [True, None], ids=["complete", "missing"])
+def test_plan_requires_complete_false_for_fixed_targets(complete: bool | None) -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
+    if complete is None:
+        plan.pop("complete")
+    else:
+        plan["complete"] = complete
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="fixed-target"):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+def test_plan_rejects_deferred_changes() -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
+    plan["deferred_changes"] = [{"reason": "deferred prerequisite"}]
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="deferred changes"):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+def test_target_derived_output_contract_is_exact() -> None:
+    contract = _contract()
+    assert len(TARGET_DERIVED_OUTPUT_NAMES) == 18
+    assert contract.allowed_outputs == (
+        PREEXISTING_ALLOWED_OUTPUT_NAMES | TARGET_DERIVED_OUTPUT_NAMES
+    )
+
+
+@pytest.mark.parametrize(
+    "actions",
+    [["create"], ["no-op"], ["update"]],
+    ids=["create", "no-op", "update"],
+)
+def test_target_derived_output_changes_and_handoff_are_accepted(
+    actions: list[str],
+) -> None:
     contract = _contract()
     plan, before, created = _valid_plan()
-    plan["output_changes"] = {
-        "database_password": {
-            "actions": ["create"],
-            "before": None,
-            "after": "secret",
-            "after_unknown": False,
-            "before_sensitive": False,
-            "after_sensitive": True,
+    plan["output_changes"] = {name: _output_change(actions) for name in TARGET_DERIVED_OUTPUT_NAMES}
+    if actions != ["create"]:
+        before["outputs"] = {
+            name: _state_output(change["before"]) for name, change in plan["output_changes"].items()
         }
+
+    checked = BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+    after = _state(created, serial=11)
+    after["outputs"] = {
+        name: _state_output(change["after"]) for name, change in plan["output_changes"].items()
     }
+    BOOTSTRAP.validate_handoff(before, after, checked, contract)
+
+
+@pytest.mark.parametrize("actions", [["create"], ["update"]], ids=["create", "update"])
+def test_plan_rejects_unreviewed_output_changes(actions: list[str]) -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
+    plan["output_changes"] = {"database_password": _output_change(actions)}
     with pytest.raises(BOOTSTRAP.BootstrapError, match="output change"):
         BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
 
+
+def test_plan_rejects_missing_output_changes() -> None:
+    contract = _contract()
+    plan, before, _ = _valid_plan()
     plan.pop("output_changes")
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="output_changes"):
+        BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+
+
+@pytest.mark.parametrize("change", ["create", "update"])
+def test_handoff_rejects_unreviewed_output_changes(change: str) -> None:
+    contract = _contract()
+    plan, before, created = _valid_plan()
     checked = BOOTSTRAP.validate_plan(plan, before, contract, plan_sha256=PLAN_SHA)
+    if change == "update":
+        before["outputs"]["database_password"] = _state_output("before")
     after = _state(created, serial=11)
-    after["outputs"]["database_password"] = {"value": "secret", "type": "string"}
+    after["outputs"]["database_password"] = _state_output("after")
     with pytest.raises(BOOTSTRAP.BootstrapError, match="output allowlist"):
         BOOTSTRAP.validate_handoff(before, after, checked, contract)
 
@@ -389,7 +583,7 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     assert "arn:aws:iam::aws:policy/PowerUserAccess" not in body
     assert "Sid: ExactBootstrapInventory" in body
     inventory = body.split("- Sid: ExactBootstrapInventory", maxsplit=1)[1].split(
-        "- Sid: S",
+        "- Sid: ReadExactTerraformBuckets",
         maxsplit=1,
     )[0]
     inventory_actions = set(
@@ -433,7 +627,6 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
         "logs:DescribeLogGroups",
         "logs:ListTagsForResource",
         "s3:GetBucketAcl",
-        "s3:GetBucketLifecycleConfiguration",
         "s3:GetBucketLocation",
         "s3:GetBucketObjectLockConfiguration",
         "s3:GetBucketPolicy",
@@ -444,6 +637,38 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
         "s3:GetObject",
         "s3:ListBucket",
         "sts:GetCallerIdentity",
+    }
+    assert "s3:GetBucketLifecycleConfiguration" not in body
+    bucket_reads = body.split(
+        "- Sid: ReadExactTerraformBuckets",
+        maxsplit=1,
+    )[1].split("- Sid: S", maxsplit=1)[0]
+    assert "Effect: Allow" in bucket_reads
+    assert set(
+        re.findall(
+            r"^\s+- (s3:[A-Za-z0-9]+)\s*$",
+            bucket_reads,
+            flags=re.MULTILINE,
+        )
+    ) == {
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketCORS",
+        "s3:GetBucketLogging",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketWebsite",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+    }
+    assert set(
+        re.findall(
+            r"^\s+- (arn:aws:s3:::[^\s]+)\s*$",
+            bucket_reads,
+            flags=re.MULTILINE,
+        )
+    ) == {
+        "arn:aws:s3:::teamagent-dev-raw-files",
+        "arn:aws:s3:::teamagent-dev-image-release-evidence",
+        "arn:aws:s3:::teamagent-dev-openclaw-build-evidence",
     }
     assert "iam:CreateAccessKey" in body
     assert "codebuild:StartBuild" in body
@@ -1533,7 +1758,12 @@ def test_wrong_provider_connection_name_is_not_hidden_by_inventory_filter() -> N
 def test_bootstrap_targets_resolve_to_main_terraform_resources() -> None:
     contract = _contract()
     declarations: set[str] = set()
-    for path in (CODEBUILD_TF, RUNTIME_EVIDENCE_TF, MEDIA_CUTOVER_ATTESTOR_TF):
+    for path in (
+        CODEBUILD_TF,
+        ECR_TF,
+        RUNTIME_EVIDENCE_TF,
+        MEDIA_CUTOVER_ATTESTOR_TF,
+    ):
         declarations.update(
             f"{resource_type}.{name}"
             for resource_type, name in re.findall(
