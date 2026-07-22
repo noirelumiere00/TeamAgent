@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import concurrent.futures
 import importlib.util
 import inspect
@@ -508,9 +509,12 @@ def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
         "TF_VAR_environment",
         "TF_REATTACH_PROVIDERS",
         "GIT_CONFIG_COUNT",
+        "GIT_CURL_VERBOSE",
         "GIT_DIR",
         "GIT_SSH_COMMAND",
         "GIT_SSL_NO_VERIFY",
+        "GIT_TRACE",
+        "GIT_TRACE_CURL",
         "PYTHONPATH",
     ],
 )
@@ -531,7 +535,39 @@ def test_git_environment_discards_global_and_system_transport_configuration() ->
     assert checked["GIT_CONFIG_GLOBAL"] == "/dev/null"
     assert checked["GIT_CONFIG_NOSYSTEM"] == "1"
     assert checked["GIT_NO_REPLACE_OBJECTS"] == "1"
+    assert checked["GIT_TERMINAL_PROMPT"] == "0"
     assert "AWS_ACCESS_KEY_ID" not in checked
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_bootstrap_http_auth_args_are_empty_without_token(token: str | None) -> None:
+    env = {} if token is None else {BOOTSTRAP.BOOTSTRAP_GIT_TOKEN_ENV: token}
+    assert BOOTSTRAP._http_auth_args(env) == []
+
+
+def test_bootstrap_http_auth_args_use_host_limited_basic_auth() -> None:
+    token = "read-only-token"
+    basic = base64.b64encode(b"x-access-token:" + token.encode()).decode()
+
+    assert BOOTSTRAP._http_auth_args({BOOTSTRAP.BOOTSTRAP_GIT_TOKEN_ENV: token}) == [
+        "-c",
+        "http.https://github.com/.extraHeader=Authorization: Basic " + basic,
+    ]
+
+
+def test_bootstrap_http_auth_args_strip_surrounding_whitespace() -> None:
+    token = "read-only-token"
+    basic = base64.b64encode(b"x-access-token:" + token.encode()).decode()
+
+    assert BOOTSTRAP._http_auth_args({BOOTSTRAP.BOOTSTRAP_GIT_TOKEN_ENV: f"  {token}  "}) == [
+        "-c",
+        "http.https://github.com/.extraHeader=Authorization: Basic " + basic,
+    ]
+
+
+def test_bootstrap_http_auth_args_reject_control_characters() -> None:
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="control characters"):
+        BOOTSTRAP._http_auth_args({BOOTSTRAP.BOOTSTRAP_GIT_TOKEN_ENV: "read-only\ntoken"})
 
 
 def test_command_runner_pins_executable_bytes(tmp_path: Path) -> None:
@@ -1718,7 +1754,13 @@ def test_wrappers_verify_fresh_detached_transitive_checkout_before_sts() -> None
         {"GIT_DIR": "/tmp/hostile.git"},
         {"GIT_CONFIG_COUNT": "1"},
         {"GIT_CONFIG_KEY_0": "url.file:///tmp/.insteadOf"},
+        {"GIT_CURL_VERBOSE": "1"},
         {"GIT_SSL_NO_VERIFY": "1"},
+        {"GIT_TRACE": "1"},
+        {"GIT_TRACE_CURL": "1"},
+        {"GIT_TRACE_CURL_NO_DATA": "1"},
+        {"GIT_TRACE_PACKET": "1"},
+        {"GIT_TRACE_REDACT": "1"},
         {"SSH_AUTH_SOCK": "/tmp/agent.sock"},
     ],
 )
@@ -1731,6 +1773,43 @@ def test_wrapper_provenance_rejects_credentials_and_git_redirects(
                 "PATH": os.environ["PATH"],
                 **environment,
             }
+        )
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_wrapper_http_auth_args_are_empty_without_token(token: str | None) -> None:
+    env = {} if token is None else {WRAPPER_PROVENANCE.BOOTSTRAP_GIT_TOKEN_ENV: token}
+    assert WRAPPER_PROVENANCE._http_auth_args(env) == []
+
+
+def test_wrapper_http_auth_args_use_host_limited_basic_auth() -> None:
+    token = "read-only-token"
+    basic = base64.b64encode(b"x-access-token:" + token.encode()).decode()
+
+    assert WRAPPER_PROVENANCE._http_auth_args(
+        {WRAPPER_PROVENANCE.BOOTSTRAP_GIT_TOKEN_ENV: token}
+    ) == [
+        "-c",
+        "http.https://github.com/.extraHeader=Authorization: Basic " + basic,
+    ]
+
+
+def test_wrapper_http_auth_args_strip_surrounding_whitespace() -> None:
+    token = "read-only-token"
+    basic = base64.b64encode(b"x-access-token:" + token.encode()).decode()
+
+    assert WRAPPER_PROVENANCE._http_auth_args(
+        {WRAPPER_PROVENANCE.BOOTSTRAP_GIT_TOKEN_ENV: f"  {token}  "}
+    ) == [
+        "-c",
+        "http.https://github.com/.extraHeader=Authorization: Basic " + basic,
+    ]
+
+
+def test_wrapper_http_auth_args_reject_control_characters() -> None:
+    with pytest.raises(WRAPPER_PROVENANCE.ProvenanceError, match="control characters"):
+        WRAPPER_PROVENANCE._http_auth_args(
+            {WRAPPER_PROVENANCE.BOOTSTRAP_GIT_TOKEN_ENV: "read-only\ntoken"}
         )
 
 

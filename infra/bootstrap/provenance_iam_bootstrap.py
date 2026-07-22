@@ -23,6 +23,7 @@ pure contract, plan, and state validators with bounded fixtures.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import json
@@ -42,6 +43,7 @@ from typing import Any
 
 EXPECTED_ORIGIN = "git@github.com:noirelumiere00/TeamAgent.git"
 EXPECTED_REMOTE_LOOKUP = "https://github.com/noirelumiere00/TeamAgent.git"
+BOOTSTRAP_GIT_TOKEN_ENV = "TEAMAGENT_BOOTSTRAP_GIT_TOKEN"
 EXPECTED_BRANCH = "dev"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1063,6 +1065,7 @@ class CommandRunner:
             command_arguments,
             cwd=cwd,
             env=dict(env),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             check=False,
         )
@@ -1083,6 +1086,7 @@ def _reject_influential_environment(source: Mapping[str, str]) -> None:
     exact = {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_COMMON_DIR",
+        "GIT_CURL_VERBOSE",
         "GIT_DIR",
         "GIT_EXEC_PATH",
         "GIT_INDEX_FILE",
@@ -1117,6 +1121,7 @@ def _reject_influential_environment(source: Mapping[str, str]) -> None:
     prefixes = (
         "DYLD_",
         "GIT_CONFIG_",
+        "GIT_TRACE",
         "TF_CLI_ARGS_",
         "TF_LOG",
         "TF_VAR_",
@@ -1293,7 +1298,22 @@ def _git_environment(env: Mapping[str, str]) -> dict[str, str]:
     result["GIT_CONFIG_GLOBAL"] = "/dev/null"
     result["GIT_CONFIG_NOSYSTEM"] = "1"
     result["GIT_NO_REPLACE_OBJECTS"] = "1"
+    result["GIT_TERMINAL_PROMPT"] = "0"
     return result
+
+
+def _http_auth_args(env: Mapping[str, str]) -> list[str]:
+    """Explicit read-only token for credential-free HTTPS verification of a
+    PRIVATE origin. Empty when no token -> public-repo behaviour unchanged.
+    Token rides argv only (never persisted). GitHub git-over-HTTPS requires
+    HTTP Basic (base64("x-access-token:"+token)); Bearer is rejected."""
+    token = env.get(BOOTSTRAP_GIT_TOKEN_ENV, "").strip()
+    if not token:
+        return []
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in token):
+        raise BootstrapError("bootstrap Git token contains control characters")
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.https://github.com/.extraHeader=Authorization: Basic {basic}"]
 
 
 def _assert_safe_local_git_transport(
@@ -1571,6 +1591,7 @@ def _validate_repository(
     )
     if tracking_commit != commit:
         raise BootstrapError("detached bootstrap commit is not exact local origin/dev")
+    auth_args = _http_auth_args(git_env)
     remote = (
         runner.run(
             [
@@ -1581,6 +1602,7 @@ def _validate_repository(
                 "http.followRedirects=false",
                 "-c",
                 "http.sslVerify=true",
+                *auth_args,
                 "ls-remote",
                 "--exit-code",
                 "--heads",

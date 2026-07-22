@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ EXPECTED_ORIGIN = "git@github.com:noirelumiere00/TeamAgent.git"
 EXPECTED_REMOTE = "https://github.com/noirelumiere00/TeamAgent.git"
 EXPECTED_REF = "refs/heads/dev"
 EXPECTED_TRACKING_REF = "refs/remotes/origin/dev"
+BOOTSTRAP_GIT_TOKEN_ENV = "TEAMAGENT_BOOTSTRAP_GIT_TOKEN"
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
 CREDENTIAL_ENV = {
     "AWS_ACCESS_KEY_ID",
@@ -49,6 +51,12 @@ INFLUENTIAL_GIT_ENV = {
     "GIT_SSL_CAINFO",
     "GIT_SSL_CAPATH",
     "GIT_SSL_NO_VERIFY",
+    "GIT_TRACE",
+    "GIT_TRACE_CURL",
+    "GIT_TRACE_CURL_NO_DATA",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_REDACT",
+    "GIT_CURL_VERBOSE",
     "GIT_WORK_TREE",
     "SSH_ASKPASS",
     "SSH_AUTH_SOCK",
@@ -159,6 +167,20 @@ def _git_env(source: dict[str, str]) -> dict[str, str]:
         }
     )
     return result
+
+
+def _http_auth_args(env: dict[str, str]) -> list[str]:
+    """Explicit read-only token for credential-free HTTPS verification of a
+    PRIVATE origin. Empty when no token -> public-repo behaviour unchanged.
+    Token rides argv only (never persisted). GitHub git-over-HTTPS requires
+    HTTP Basic (base64("x-access-token:"+token)); Bearer is rejected."""
+    token = env.get(BOOTSTRAP_GIT_TOKEN_ENV, "").strip()
+    if not token:
+        return []
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in token):
+        raise ProvenanceError("bootstrap Git token contains control characters")
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return ["-c", f"http.https://github.com/.extraHeader=Authorization: Basic {basic}"]
 
 
 def _decode_line(value: bytes, *, label: str) -> str:
@@ -335,6 +357,7 @@ def prepare(
     )
     if not SHA1_RE.fullmatch(commit) or tracking_commit != commit:
         raise ProvenanceError("detached HEAD is not the exact local origin/dev commit")
+    auth_args = _http_auth_args(env)
     remote_lines = (
         _run(
             [
@@ -345,6 +368,7 @@ def prepare(
                 "http.followRedirects=false",
                 "-c",
                 "http.sslVerify=true",
+                *auth_args,
                 "ls-remote",
                 "--exit-code",
                 "--heads",
@@ -407,6 +431,13 @@ def prepare(
             "git",
             "-C",
             str(bare),
+            "-c",
+            "credential.helper=",
+            "-c",
+            "http.followRedirects=false",
+            "-c",
+            "http.sslVerify=true",
+            *auth_args,
             "fetch",
             "--quiet",
             "--no-tags",
@@ -463,7 +494,7 @@ def prepare(
         "commit": commit,
         "source_tree_sha256": tree_sha256,
         "transitive_child_sha256": child_hashes,
-        "credential_free": True,
+        "credential_free": not auth_args,
         "detached": True,
     }
     data = (
