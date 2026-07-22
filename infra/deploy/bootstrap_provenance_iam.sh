@@ -124,6 +124,11 @@ HELPER="$REVIEW_ROOT/infra/bootstrap/provenance_iam_bootstrap.py"
 CONTRACT="$REVIEW_ROOT/infra/bootstrap/bootstrap_contract.json"
 [ -f "$HELPER" ] && [ -f "$CONTRACT" ] || die "reviewed bootstrap controls are incomplete"
 
+# wrapper above needed GIT_CONFIG_GLOBAL/NOSYSTEM for credential-free Git provenance.
+# run/reconcile-retire control-plane rejects inherited GIT_CONFIG_* and derives its own,
+# so scrub them before dispatch (validate-contract does no Git ops).
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+
 restore_root_credentials() {
   [ -n "$SAVED_AWS_ACCESS_KEY_ID" ] \
     && [ -n "$SAVED_AWS_SECRET_ACCESS_KEY" ] \
