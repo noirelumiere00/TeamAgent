@@ -76,10 +76,15 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_role_policy.openclaw_publisher
     aws_iam_role_policy.release_control_updater
     aws_iam_role_policy.release_launcher
-    aws_iam_role_policy.runtime_automation_control_plane
     aws_iam_role_policy.runtime_evidence_automation
     aws_iam_role_policy.tiktok_build_launcher
     aws_iam_role_policy.tiktok_codebuild
+    aws_iam_policy.runtime_automation_control_plane_manage_a
+    aws_iam_policy.runtime_automation_control_plane_manage_b
+    aws_iam_policy.runtime_automation_control_plane_core
+    aws_iam_role_policy_attachment.runtime_automation_control_plane_manage_a
+    aws_iam_role_policy_attachment.runtime_automation_control_plane_manage_b
+    aws_iam_role_policy_attachment.runtime_automation_control_plane_core
     aws_iam_user.release_caller
     aws_iam_user.release_control_update_caller
     aws_iam_user.tiktok_build_caller
@@ -153,7 +158,9 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.release_launcher_assume
     data.aws_iam_policy_document.runtime_automation_assume
     data.aws_iam_policy_document.runtime_automation_boundary
-    data.aws_iam_policy_document.runtime_automation_control_plane
+    data.aws_iam_policy_document.runtime_automation_control_plane_manage_a
+    data.aws_iam_policy_document.runtime_automation_control_plane_manage_b
+    data.aws_iam_policy_document.runtime_automation_control_plane_core
     data.aws_iam_policy_document.runtime_evidence_automation
     data.aws_iam_policy_document.tiktok_build_caller
     data.aws_iam_policy_document.tiktok_build_launcher
@@ -285,8 +292,8 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
-    assert len(EXPECTED_POST_CUT_MANAGED) == 107
-    assert len(EXPECTED_POST_CUT_DATA) == 37
+    assert len(EXPECTED_POST_CUT_MANAGED) == 112
+    assert len(EXPECTED_POST_CUT_DATA) == 39
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
 
@@ -295,7 +302,7 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     dependencies = set(cast(list[str], contract["create_allowed_dependency_addresses"]))
     existing = set(cast(list[str], contract["existing_dependency_addresses"]))
     forbidden_prefixes = set(cast(list[str], contract["forbidden_change_type_prefixes"]))
-    assert len(targets) == 90
+    assert len(targets) == 95
     assert len(dependencies) == 16
     assert existing == {"aws_s3_bucket.raw_files"}
     assert targets.isdisjoint(dependencies)

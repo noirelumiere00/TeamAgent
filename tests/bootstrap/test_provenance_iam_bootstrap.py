@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -257,10 +258,7 @@ def test_contract_is_strict_and_current_release_contracts_are_blocked() -> None:
     hashes = BOOTSTRAP.validate_release_contracts(ROOT, contract)
     assert set(hashes) == set(contract.release_contracts)
     assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values())
-    assert (
-        contract.bootstrap_principal_arn
-        == "arn:aws:iam::718959508629:user/AIIAdev"
-    )
+    assert contract.bootstrap_principal_arn == "arn:aws:iam::718959508629:user/AIIAdev"
     assert re.fullmatch(
         r"arn:aws:iam::718959508629:user/[\w+=,.@-]+",
         contract.bootstrap_principal_arn,
@@ -766,8 +764,55 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     assert "ReadConnectionInventory" in body
     assert "codeconnections:ProviderType: GitHub" in body
     assert "kms:EnableKeyRotation" in body
-    assert "Sid: CreateImmutableRuntimeBoundary" in body
-    assert "teamagent-dev-terraform-runtime-automation-boundary" in body
+    managed_policy_creation = body.split(
+        "- Sid: CreateExactRuntimeManagedPolicies",
+        maxsplit=1,
+    )[1].split("- Sid: AttachExactRuntimeControlPlanePolicies", maxsplit=1)[0]
+    assert set(
+        re.findall(
+            r"^\s+- (iam:[A-Za-z0-9]+)\s*$",
+            managed_policy_creation,
+            flags=re.MULTILINE,
+        )
+    ) == {"iam:CreatePolicy", "iam:TagPolicy"}
+    assert set(
+        re.findall(
+            r"^\s+- (arn:aws:iam::718959508629:policy/[^\s]+)\s*$",
+            managed_policy_creation,
+            flags=re.MULTILINE,
+        )
+    ) == {
+        "arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-boundary",
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-manage-a",
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-manage-b",
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-core",
+    }
+    attachment = body.split(
+        "- Sid: AttachExactRuntimeControlPlanePolicies",
+        maxsplit=1,
+    )[1].split("- Sid: BI", maxsplit=1)[0]
+    assert "Action: iam:AttachRolePolicy" in attachment
+    assert (
+        "Resource: arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
+    ) in attachment
+    assert "iam:PolicyARN:" in attachment
+    assert set(
+        re.findall(
+            r"^\s+- (arn:aws:iam::718959508629:policy/[^\s]+)\s*$",
+            attachment,
+            flags=re.MULTILINE,
+        )
+    ) == {
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-manage-a",
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-manage-b",
+        "arn:aws:iam::718959508629:policy/"
+        "teamagent-dev-terraform-runtime-automation-control-plane-core",
+    }
     assert "BootstrapNonce" in body
 
 
@@ -788,9 +833,7 @@ def test_bootstrap_ca_bundle_accepts_absolute_regular_file(tmp_path: Path) -> No
 
 def test_bootstrap_ca_bundle_rejects_relative_path() -> None:
     with pytest.raises(BOOTSTRAP.BootstrapError, match="absolute"):
-        BOOTSTRAP._bootstrap_ca_bundle(
-            {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: "ca_bundle.pem"}
-        )
+        BOOTSTRAP._bootstrap_ca_bundle({BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: "ca_bundle.pem"})
 
 
 def test_bootstrap_ca_bundle_rejects_missing_file(tmp_path: Path) -> None:
@@ -804,9 +847,7 @@ def test_bootstrap_ca_bundle_rejects_control_characters(tmp_path: Path) -> None:
     invalid_path = f"{tmp_path}/ca\n_bundle.pem"
 
     with pytest.raises(BOOTSTRAP.BootstrapError, match="control characters"):
-        BOOTSTRAP._bootstrap_ca_bundle(
-            {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: invalid_path}
-        )
+        BOOTSTRAP._bootstrap_ca_bundle({BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: invalid_path})
 
 
 def test_temporary_principal_environment_uses_only_explicit_ca_bundle(
@@ -1408,9 +1449,7 @@ def test_seed_retirement_closes_trust_before_revoking_sessions_and_deleting() ->
     assert trust_index < revoke_index < delete_index
     assert '"Sid":"RetiredBootstrapRole"' in flattened[trust_index]
     trust_call = runner.calls[trust_index]
-    trust_document = json.loads(
-        trust_call[trust_call.index("--policy-document") + 1]
-    )
+    trust_document = json.loads(trust_call[trust_call.index("--policy-document") + 1])
     assert trust_document["Statement"][0]["Action"] == [
         "sts:AssumeRole",
         "sts:SetSourceIdentity",
@@ -1871,6 +1910,7 @@ def test_consumed_reconcile_is_idempotent_and_never_touches_terraform(
         "_validate_local_toolchain",
         lambda *args, **kwargs: {},
     )
+
     def assert_identity(*args: Any, **kwargs: Any) -> None:
         del args
         identity_checks.append(kwargs)
@@ -2191,7 +2231,27 @@ def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None
     assert 'resource "aws_iam_role" "alarm_recipient_ack_signer"' in body
     assert 'resource "aws_iam_role" "runtime_automation"' in body
     assert 'resource "aws_iam_role_policy" "runtime_evidence_automation"' in body
-    assert 'resource "aws_iam_role_policy" "runtime_automation_control_plane"' in body
+    assert 'resource "aws_iam_role_policy" "runtime_automation_control_plane"' not in body
+    for suffix in ("manage_a", "manage_b", "core"):
+        policy_name_suffix = suffix.replace("_", "-")
+        assert (f'resource "aws_iam_policy" "runtime_automation_control_plane_{suffix}"') in body
+        assert (
+            f'name   = "${{local.runtime_automation_role_name}}-control-plane-{policy_name_suffix}"'
+        ) in body
+        assert (
+            f"policy = data.aws_iam_policy_document.runtime_automation_control_plane_{suffix}.json"
+        ) in body
+        assert (
+            f"length(data.aws_iam_policy_document."
+            f"runtime_automation_control_plane_{suffix}.json) < 6144"
+        ) in body
+        assert (
+            f'resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_{suffix}"'
+        ) in body
+        assert (
+            f"policy_arn = aws_iam_policy.runtime_automation_control_plane_{suffix}.arn"
+        ) in body
+    assert body.count("role       = aws_iam_role.runtime_automation.name") == 3
     assert 'resource "aws_iam_policy" "runtime_automation_boundary"' in body
     assert 'resource "aws_iam_role_policy_attachment" "runtime_automation_power_user"' not in body
     assert "arn:aws:iam::aws:policy/PowerUserAccess" not in body
@@ -2262,17 +2322,54 @@ def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None
     assert "budgets:Describe*" not in evidence_policy
     assert "ec2:Describe*" not in evidence_policy
 
-    control_policy = body.split(
-        'data "aws_iam_policy_document" "runtime_automation_control_plane"',
+    manage_a = body.split(
+        'data "aws_iam_policy_document" "runtime_automation_control_plane_manage_a"',
         maxsplit=1,
     )[1].split(
-        'resource "aws_iam_role_policy" "runtime_automation_control_plane"',
+        'data "aws_iam_policy_document" "runtime_automation_control_plane_manage_b"',
         maxsplit=1,
     )[0]
-    control_allows = control_policy.split(
-        'sid    = "DenyBootstrapAuditMutation"',
+    manage_b = body.split(
+        'data "aws_iam_policy_document" "runtime_automation_control_plane_manage_b"',
+        maxsplit=1,
+    )[1].split(
+        'data "aws_iam_policy_document" "runtime_automation_control_plane_core"',
         maxsplit=1,
     )[0]
+    core = body.split(
+        'data "aws_iam_policy_document" "runtime_automation_control_plane_core"',
+        maxsplit=1,
+    )[1].split(
+        'resource "aws_iam_policy" "runtime_automation_control_plane_manage_a"',
+        maxsplit=1,
+    )[0]
+    action_pattern = re.compile(
+        r'^\s+"([a-z0-9-]+:[^"]+)",?\s*$',
+        flags=re.MULTILINE,
+    )
+    manage_a_actions = action_pattern.findall(manage_a)
+    manage_b_actions = action_pattern.findall(manage_b)
+    assert len(manage_a_actions) == 160
+    assert len(manage_b_actions) == 154
+    assert manage_a_actions[-1] == "elasticfilesystem:UntagResource"
+    assert manage_b_actions[0] == "elasticloadbalancing:AddTags"
+    assert not set(manage_a_actions).intersection(manage_b_actions)
+    assert (
+        hashlib.sha256("\n".join((*manage_a_actions, *manage_b_actions)).encode()).hexdigest()
+        == "f419e9d150d024ac278755aedd3d6269e46b487db11b20df9b3ea739f711e6dc"
+    )
+    assert manage_a.count('sid = "ManageExactTerraformResourceTypes"') == 1
+    assert manage_b.count('sid = "ManageExactTerraformResourceTypes"') == 1
+    assert 'sid = "ManageExactTerraformResourceTypes"' not in core
+    assert core.count("statement {") == 13
+    control_allows = (
+        manage_a
+        + manage_b
+        + core.split(
+            'sid    = "DenyBootstrapAuditMutation"',
+            maxsplit=1,
+        )[0]
+    )
     assert not re.search(r'"(?:iam|sts):[^"]*\*"', control_allows)
     assert '"iam:PassRole"' in control_allows
     assert '"sts:GetCallerIdentity"' in control_allows

@@ -447,12 +447,26 @@ Resources:
                   - ecr:PutLifecyclePolicy
                   - ecr:TagResource
                 Resource: arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-*
-              - Sid: CreateImmutableRuntimeBoundary
+              - Sid: CreateExactRuntimeManagedPolicies
                 Effect: Allow
                 Action:
                   - iam:CreatePolicy
                   - iam:TagPolicy
-                Resource: arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-boundary
+                Resource:
+                  - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-boundary
+                  - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-manage-a
+                  - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-manage-b
+                  - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-core
+              - Sid: AttachExactRuntimeControlPlanePolicies
+                Effect: Allow
+                Action: iam:AttachRolePolicy
+                Resource: arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation
+                Condition:
+                  ArnEquals:
+                    iam:PolicyARN:
+                      - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-manage-a
+                      - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-manage-b
+                      - arn:aws:iam::718959508629:policy/teamagent-dev-terraform-runtime-automation-control-plane-core
               - Sid: BI
                 Effect: Allow
                 Action:
