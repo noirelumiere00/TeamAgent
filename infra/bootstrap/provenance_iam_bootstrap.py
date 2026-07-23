@@ -5,8 +5,9 @@ The normal runtime guard intentionally requires the deployment-intent control
 plane before it will produce a saved plan.  This program is the narrowly scoped
 first-install path for that control plane:
 
-* root may create and assume only a temporary CloudFormation-owned seed role
-  with a stack-owned explicit-deny policy;
+* the bootstrap principal (IAM admin user) may create and assume only a
+  temporary CloudFormation-owned seed role with a stack-owned explicit-deny
+  policy;
 * the seed role is denied build, release, image, evidence-object, credential,
   and runtime mutation;
 * one fixed Terraform target set is planned into the existing main backend;
@@ -337,6 +338,7 @@ class BootstrapContract:
     path: Path
     account_id: str
     region: str
+    bootstrap_principal_arn: str
     bootstrap_id: str
     seed: Mapping[str, Any]
     backend: Mapping[str, Any]
@@ -359,6 +361,7 @@ def load_contract(path: Path) -> BootstrapContract:
             "bootstrap_id",
             "account_id",
             "region",
+            "bootstrap_principal_arn",
             "seed",
             "backend",
             "release_contracts",
@@ -382,6 +385,17 @@ def load_contract(path: Path) -> BootstrapContract:
     region = _string(raw["region"], label="region")
     if region != "ap-northeast-1":
         raise BootstrapError("bootstrap region is not the fixed TeamAgent region")
+    bootstrap_principal_arn = _string(
+        raw["bootstrap_principal_arn"],
+        label="bootstrap_principal_arn",
+    )
+    bootstrap_principal_pattern = re.compile(
+        rf"^arn:aws:iam::{re.escape(account_id)}:user/[\w+=,.@-]+$"
+    )
+    if bootstrap_principal_pattern.fullmatch(bootstrap_principal_arn) is None:
+        raise BootstrapError(
+            "bootstrap_principal_arn must be an IAM user ARN in the bootstrap account"
+        )
     bootstrap_id = _string(raw["bootstrap_id"], label="bootstrap_id")
     seed = _mapping(raw["seed"], label="seed")
     _exact_keys(
@@ -479,6 +493,7 @@ def load_contract(path: Path) -> BootstrapContract:
         path=path,
         account_id=account_id,
         region=region,
+        bootstrap_principal_arn=bootstrap_principal_arn,
         bootstrap_id=bootstrap_id,
         seed=seed,
         backend=backend,
@@ -1182,12 +1197,12 @@ def _bootstrap_ca_bundle(env: Mapping[str, str]) -> str | None:
     return str(path)
 
 
-def _temporary_root_environment(
+def _temporary_principal_environment(
     source: Mapping[str, str],
     *,
     region: str,
 ) -> dict[str, str]:
-    """Require explicit temporary credentials before any root AWS mutation."""
+    """Require temporary credentials before bootstrap-principal AWS mutation."""
 
     result = _clean_aws_environment(source)
     for name in (
@@ -1198,7 +1213,7 @@ def _temporary_root_environment(
         value = result.get(name)
         if not isinstance(value, str) or not value or value.strip() != value:
             raise BootstrapError(
-                "bootstrap root credentials must be an explicit temporary STS session"
+                "bootstrap principal credentials must be an explicit temporary STS session"
             )
     result["AWS_REGION"] = region
     result["AWS_DEFAULT_REGION"] = region
@@ -1320,9 +1335,9 @@ def _assert_identity(
 
 
 def _git_environment(env: Mapping[str, str]) -> dict[str, str]:
-    # Git/SSH does not need AWS credentials. Never expose a root or seed
-    # session to repository hooks, credential helpers, SSH configuration, or a
-    # remote.
+    # Git/SSH does not need AWS credentials. Never expose a bootstrap-principal
+    # or seed session to repository hooks, credential helpers, SSH
+    # configuration, or a remote.
     result = dict(env)
     for name in (
         "AWS_ACCESS_KEY_ID",
@@ -2318,7 +2333,7 @@ def _create_seed_stack(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     contract: BootstrapContract,
     external_id: str,
     nonce: str,
@@ -2354,7 +2369,7 @@ def _create_seed_stack(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed stack creation",
@@ -2378,7 +2393,7 @@ def _wait_for_seed_stack(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     contract: BootstrapContract,
 ) -> None:
     _aws(
@@ -2391,7 +2406,7 @@ def _wait_for_seed_stack(
             str(contract.seed["stack_name"]),
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
     )
 
@@ -2400,14 +2415,14 @@ def _assert_seed_absent(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     contract: BootstrapContract,
 ) -> None:
     role = _aws(
         runner,
         ["iam", "get-role", "--role-name", str(contract.seed["role_name"])],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -2426,7 +2441,7 @@ def _assert_seed_absent(
             str(contract.seed["deny_policy_arn"]),
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -2447,7 +2462,7 @@ def _assert_seed_absent(
             "json",
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -2462,7 +2477,7 @@ def _assume_seed(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     contract: BootstrapContract,
     external_id: str,
 ) -> tuple[Mapping[str, Any], dict[str, str]]:
@@ -2486,7 +2501,7 @@ def _assume_seed(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed AssumeRole",
@@ -2498,7 +2513,11 @@ def _assume_seed(
     expiration = credentials.get("Expiration")
     if not isinstance(expiration, str) or not expiration.endswith("Z"):
         raise BootstrapError("STS seed session expiration is malformed")
-    session_env = _session_environment(root_env, credentials, region=contract.region)
+    session_env = _session_environment(
+        principal_env,
+        credentials,
+        region=contract.region,
+    )
     _assert_identity(
         runner,
         cwd=repo_root,
@@ -2530,7 +2549,7 @@ def _prove_seed_ownership(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     contract: BootstrapContract,
     nonce: str,
     commit: str,
@@ -2548,7 +2567,7 @@ def _prove_seed_ownership(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed ownership stack",
@@ -2606,7 +2625,7 @@ def _prove_seed_ownership(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed ownership resources",
@@ -2654,7 +2673,7 @@ def _prove_seed_ownership(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed ownership role",
@@ -2686,7 +2705,7 @@ def _prove_seed_ownership(
                 "json",
             ],
             cwd=repo_root,
-            env=root_env,
+            env=principal_env,
             region=contract.region,
         ),
         label="seed ownership attached policies",
@@ -2706,7 +2725,7 @@ def _revoke_and_delete_seed(
     runner: CommandRunner,
     *,
     repo_root: Path,
-    root_env: Mapping[str, str],
+    principal_env: Mapping[str, str],
     session_env: Mapping[str, str] | None,
     contract: BootstrapContract,
     nonce: str,
@@ -2724,7 +2743,7 @@ def _revoke_and_delete_seed(
             "json",
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -2735,7 +2754,7 @@ def _revoke_and_delete_seed(
         _assert_seed_absent(
             runner,
             repo_root=repo_root,
-            root_env=root_env,
+            principal_env=principal_env,
             contract=contract,
         )
         return {
@@ -2749,7 +2768,7 @@ def _revoke_and_delete_seed(
     owned_stack_id = _prove_seed_ownership(
         runner,
         repo_root=repo_root,
-        root_env=root_env,
+        principal_env=principal_env,
         contract=contract,
         nonce=nonce,
         commit=commit,
@@ -2783,7 +2802,7 @@ def _revoke_and_delete_seed(
             json.dumps(retired_trust, separators=(",", ":")),
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
     )
     trust_closed_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
@@ -2824,7 +2843,7 @@ def _revoke_and_delete_seed(
             json.dumps(revoke_policy, separators=(",", ":")),
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
     )
     session_revoked = None
@@ -2867,7 +2886,7 @@ def _revoke_and_delete_seed(
             owned_stack_id,
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
     )
     _aws(
@@ -2880,14 +2899,14 @@ def _revoke_and_delete_seed(
             owned_stack_id,
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
     )
     role_probe = _aws(
         runner,
         ["iam", "get-role", "--role-name", str(contract.seed["role_name"])],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -2905,7 +2924,7 @@ def _revoke_and_delete_seed(
             str(contract.seed["deny_policy_arn"]),
         ],
         cwd=repo_root,
-        env=root_env,
+        env=principal_env,
         region=contract.region,
         check=False,
     )
@@ -3196,15 +3215,15 @@ def run_bootstrap(
         var_file: sha256_file(var_file),
         **{repo_root / relative: digest for relative, digest in release_hashes.items()},
     }
-    base_env = _temporary_root_environment(base_env, region=contract.region)
-    root_arn = f"arn:aws:iam::{contract.account_id}:root"
-    root_identity = _assert_identity(
+    base_env = _temporary_principal_environment(base_env, region=contract.region)
+    principal_arn = contract.bootstrap_principal_arn
+    principal_identity = _assert_identity(
         runner,
         cwd=repo_root,
         env=base_env,
         contract=contract,
-        expected_arn=root_arn,
-        label="initial root caller",
+        expected_arn=principal_arn,
+        label="initial bootstrap principal caller",
     )
 
     external_id = secrets.token_hex(32)
@@ -3238,7 +3257,7 @@ def run_bootstrap(
         _assert_seed_absent(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             contract=contract,
         )
         seed_absence_proved = True
@@ -3265,7 +3284,7 @@ def run_bootstrap(
         seed_stack_id = _create_seed_stack(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             contract=contract,
             external_id=external_id,
             nonce=nonce,
@@ -3285,13 +3304,13 @@ def run_bootstrap(
         _wait_for_seed_stack(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             contract=contract,
         )
         assumed, session_env = _assume_seed(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             contract=contract,
             external_id=external_id,
         )
@@ -3562,7 +3581,7 @@ def run_bootstrap(
         retirement = _revoke_and_delete_seed(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             session_env=session_env,
             contract=contract,
             nonce=nonce,
@@ -3583,9 +3602,11 @@ def run_bootstrap(
                 "key": contract.backend["ledger_key"],
                 "terminal_state": ledger_state,
             },
-            "root": {
-                "arn": root_identity["Arn"],
-                "user_id_sha256": sha256_bytes(str(root_identity["UserId"]).encode()),
+            "principal": {
+                "arn": principal_identity["Arn"],
+                "user_id_sha256": sha256_bytes(
+                    str(principal_identity["UserId"]).encode()
+                ),
                 "mutating_workflow_actions": [
                     "cloudformation:CreateStack",
                     "sts:AssumeRole",
@@ -3647,7 +3668,7 @@ def run_bootstrap(
                 _revoke_and_delete_seed(
                     runner,
                     repo_root=repo_root,
-                    root_env=base_env,
+                    principal_env=base_env,
                     session_env=session_env,
                     contract=contract,
                     nonce=nonce,
@@ -3824,14 +3845,15 @@ def reconcile_and_retire(
     ):
         raise BootstrapError("reconcile repository differs from the bootstrap invocation")
     _validate_local_toolchain(runner, cwd=repo_root, env=base_env)
-    base_env = _temporary_root_environment(base_env, region=contract.region)
+    base_env = _temporary_principal_environment(base_env, region=contract.region)
+    principal_arn = contract.bootstrap_principal_arn
     _assert_identity(
         runner,
         cwd=repo_root,
         env=base_env,
         contract=contract,
-        expected_arn=f"arn:aws:iam::{contract.account_id}:root",
-        label="reconcile root caller",
+        expected_arn=principal_arn,
+        label="reconcile bootstrap principal caller",
     )
     ledger_item = _read_bootstrap_ledger_item(
         runner,
@@ -3859,7 +3881,7 @@ def reconcile_and_retire(
         retirement = _revoke_and_delete_seed(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             session_env=None,
             contract=contract,
             nonce=nonce,
@@ -3901,7 +3923,7 @@ def reconcile_and_retire(
         retirement = _revoke_and_delete_seed(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             session_env=None,
             contract=contract,
             nonce=nonce,
@@ -4017,7 +4039,7 @@ def reconcile_and_retire(
         retirement = _revoke_and_delete_seed(
             runner,
             repo_root=repo_root,
-            root_env=base_env,
+            principal_env=base_env,
             session_env=None,
             contract=contract,
             nonce=nonce,
@@ -4141,7 +4163,7 @@ def reconcile_and_retire(
     retirement = _revoke_and_delete_seed(
         runner,
         repo_root=repo_root,
-        root_env=base_env,
+        principal_env=base_env,
         session_env=None,
         contract=contract,
         nonce=nonce,

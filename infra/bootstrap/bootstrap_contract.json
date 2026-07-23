@@ -3,6 +3,7 @@
   "bootstrap_id": "teamagent-production-provenance-iam-v1",
   "account_id": "718959508629",
   "region": "ap-northeast-1",
+  "bootstrap_principal_arn": "arn:aws:iam::718959508629:user/AIIAdev",
   "seed": {
     "stack_name": "teamagent-production-provenance-bootstrap-v1",
     "role_name": "teamagent-production-provenance-bootstrap-v1",

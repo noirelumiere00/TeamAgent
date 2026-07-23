@@ -257,12 +257,77 @@ def test_contract_is_strict_and_current_release_contracts_are_blocked() -> None:
     hashes = BOOTSTRAP.validate_release_contracts(ROOT, contract)
     assert set(hashes) == set(contract.release_contracts)
     assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values())
+    assert (
+        contract.bootstrap_principal_arn
+        == "arn:aws:iam::718959508629:user/AIIAdev"
+    )
+    assert re.fullmatch(
+        r"arn:aws:iam::718959508629:user/[\w+=,.@-]+",
+        contract.bootstrap_principal_arn,
+    )
     assert contract.backend["key"] == "teamagent/terraform.tfstate"
     assert contract.seed["max_session_seconds"] == 3600
     assert (
         contract.seed["inline_policy_name"] == "teamagent-production-provenance-bootstrap-boundary"
     )
     assert contract.required_main_state <= contract.create_allowed
+
+
+def test_contract_requires_bootstrap_principal_arn(tmp_path: Path) -> None:
+    raw = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    del raw["bootstrap_principal_arn"]
+    path = tmp_path / "bootstrap_contract.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="bootstrap_principal_arn"):
+        BOOTSTRAP.load_contract(path)
+
+
+@pytest.mark.parametrize(
+    "bootstrap_principal_arn",
+    [
+        None,
+        "",
+        "arn:aws:iam::718959508629:root",
+        "arn:aws:iam::718959508629:role/AIIAdev",
+        "arn:aws:iam::111122223333:user/AIIAdev",
+        "arn:aws:iam::718959508629:user/",
+        "arn:aws:iam::718959508629:user/*",
+        "arn:aws:iam::718959508629:user/AIIA dev",
+        "arn:aws:iam::718959508629:user/div/Bob",
+        "arn:aws:iam::718959508629:user/AIIAdev#garbage",
+    ],
+)
+def test_contract_rejects_invalid_bootstrap_principal_arn(
+    tmp_path: Path,
+    bootstrap_principal_arn: Any,
+) -> None:
+    raw = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    raw["bootstrap_principal_arn"] = bootstrap_principal_arn
+    path = tmp_path / "bootstrap_contract.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="bootstrap_principal_arn"):
+        BOOTSTRAP.load_contract(path)
+
+
+def test_run_requires_contract_bootstrap_principal_as_initial_identity() -> None:
+    source = inspect.getsource(BOOTSTRAP.run_bootstrap)
+    initial_identity_check = source.split(
+        "principal_identity = _assert_identity(",
+        maxsplit=1,
+    )[1].split("external_id =", maxsplit=1)[0]
+    success_receipt = source.split(
+        '"kind": "teamagent-provenance-iam-bootstrap-receipt"',
+        maxsplit=1,
+    )[1].split('"seed": {', maxsplit=1)[0]
+
+    assert "principal_arn = contract.bootstrap_principal_arn" in source
+    assert "expected_arn=principal_arn" in initial_identity_check
+    assert 'label="initial bootstrap principal caller"' in initial_identity_check
+    assert "initial root caller" not in source
+    assert '"principal": {' in success_receipt
+    assert '"root": {' not in success_receipt
 
 
 def test_release_ready_true_blocks_before_any_aws_or_command_runner(tmp_path: Path) -> None:
@@ -567,6 +632,13 @@ def test_handoff_rejects_removal_extra_addition_lineage_and_seed_leak() -> None:
 
 def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     body = SEED_PATH.read_text(encoding="utf-8")
+    bootstrap_principal_arn = _contract().bootstrap_principal_arn
+    trust_sid = "ExactIamAdminPrincipalMfaBootstrapSession"
+    assert f"Sid: {trust_sid}" in body
+    trust = body.split(
+        f"- Sid: {trust_sid}",
+        maxsplit=1,
+    )[1].split("ManagedPolicyArns:", maxsplit=1)[0]
     assert body.count("Type: AWS::IAM::Role") == 1
     assert body.count("Type: AWS::IAM::ManagedPolicy") == 1
     assert "teamagent-production-provenance-bootstrap-deny-v1" in body
@@ -575,10 +647,16 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     assert "AWS::IAM::User" not in body
     assert "AWS::CodeBuild::Project" not in body
     assert "AWS::DynamoDB::Table" not in body
-    assert "aws:MultiFactorAuthPresent" in body
-    assert "sts:ExternalId" in body
-    assert "sts:RoleSessionName: teamagent-provenance-bootstrap" in body
-    assert "sts:SourceIdentity: teamagent-production-provenance-bootstrap" in body
+    assert f"AWS: {bootstrap_principal_arn}" in trust
+    assert f"aws:PrincipalArn: {bootstrap_principal_arn}" in trust
+    assert trust.count(bootstrap_principal_arn) == 2
+    assert "arn:aws:iam::718959508629:root" not in trust
+    assert "- sts:AssumeRole" in trust
+    assert "- sts:SetSourceIdentity" in trust
+    assert 'aws:MultiFactorAuthPresent: "true"' in trust
+    assert "sts:ExternalId: !Ref BootstrapExternalId" in trust
+    assert "sts:RoleSessionName: teamagent-provenance-bootstrap" in trust
+    assert "sts:SourceIdentity: teamagent-production-provenance-bootstrap" in trust
     assert "arn:aws:iam::aws:policy/ReadOnlyAccess" not in body
     assert "arn:aws:iam::aws:policy/PowerUserAccess" not in body
     assert "Sid: ExactBootstrapInventory" in body
@@ -730,7 +808,9 @@ def test_bootstrap_ca_bundle_rejects_control_characters(tmp_path: Path) -> None:
         )
 
 
-def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> None:
+def test_temporary_principal_environment_uses_only_explicit_ca_bundle(
+    tmp_path: Path,
+) -> None:
     ambient_bundle = tmp_path / "ambient.pem"
     ambient_bundle.write_text("ambient CA bundle\n", encoding="utf-8")
     explicit_bundle = tmp_path / "explicit.pem"
@@ -744,7 +824,7 @@ def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path)
         BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(explicit_bundle),
     }
 
-    checked = BOOTSTRAP._temporary_root_environment(
+    checked = BOOTSTRAP._temporary_principal_environment(
         source,
         region="ap-northeast-1",
     )
@@ -752,7 +832,7 @@ def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path)
     assert checked["SSL_CERT_FILE"] == str(explicit_bundle)
 
     source.pop(BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV)
-    checked_without_explicit_bundle = BOOTSTRAP._temporary_root_environment(
+    checked_without_explicit_bundle = BOOTSTRAP._temporary_principal_environment(
         source,
         region="ap-northeast-1",
     )
@@ -794,7 +874,7 @@ def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> Non
     assert "SSL_CERT_FILE" not in checked_without_explicit_bundle
 
 
-def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
+def test_principal_credentials_must_be_an_explicit_temporary_session() -> None:
     source = {
         "PATH": os.environ["PATH"],
         "AWS_ACCESS_KEY_ID": "temporary-access",
@@ -803,7 +883,7 @@ def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
         "AWS_PROFILE": "must-not-be-used",
         "AWS_DEFAULT_PROFILE": "must-not-be-used",
     }
-    checked = BOOTSTRAP._temporary_root_environment(
+    checked = BOOTSTRAP._temporary_principal_environment(
         source,
         region="ap-northeast-1",
     )
@@ -821,7 +901,7 @@ def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
         invalid = dict(source)
         invalid.pop(missing)
         with pytest.raises(BOOTSTRAP.BootstrapError, match="temporary STS"):
-            BOOTSTRAP._temporary_root_environment(
+            BOOTSTRAP._temporary_principal_environment(
                 invalid,
                 region="ap-northeast-1",
             )
@@ -1162,7 +1242,7 @@ def test_seed_creation_records_the_exact_cloudformation_stack_id() -> None:
         BOOTSTRAP._create_seed_stack(
             Runner(),
             repo_root=ROOT,
-            root_env={"PATH": os.environ["PATH"]},
+            principal_env={"PATH": os.environ["PATH"]},
             contract=contract,
             external_id="a" * 64,
             nonce="c" * 64,
@@ -1177,7 +1257,7 @@ def test_seed_retirement_closes_trust_before_revoking_sessions_and_deleting() ->
     result = BOOTSTRAP._revoke_and_delete_seed(
         runner,
         repo_root=ROOT,
-        root_env={"PATH": os.environ["PATH"]},
+        principal_env={"PATH": os.environ["PATH"]},
         session_env={"PATH": os.environ["PATH"]},
         contract=_contract(),
         nonce=runner.nonce,
@@ -1221,7 +1301,7 @@ def test_hostile_seed_ownership_aborts_before_every_retirement_write() -> None:
         BOOTSTRAP._revoke_and_delete_seed(
             runner,
             repo_root=ROOT,
-            root_env={"PATH": os.environ["PATH"]},
+            principal_env={"PATH": os.environ["PATH"]},
             session_env=None,
             contract=_contract(),
             nonce=runner.nonce,
@@ -1639,6 +1719,7 @@ def test_consumed_reconcile_is_idempotent_and_never_touches_terraform(
     }
     terraform_calls: list[list[str]] = []
     retirements: list[str] = []
+    identity_checks: list[dict[str, Any]] = []
 
     monkeypatch.setattr(BOOTSTRAP, "validate_release_contracts", lambda *args: {})
     monkeypatch.setattr(
@@ -1651,11 +1732,11 @@ def test_consumed_reconcile_is_idempotent_and_never_touches_terraform(
         "_validate_local_toolchain",
         lambda *args, **kwargs: {},
     )
-    monkeypatch.setattr(
-        BOOTSTRAP,
-        "_assert_identity",
-        lambda *args, **kwargs: None,
-    )
+    def assert_identity(*args: Any, **kwargs: Any) -> None:
+        del args
+        identity_checks.append(kwargs)
+
+    monkeypatch.setattr(BOOTSTRAP, "_assert_identity", assert_identity)
     monkeypatch.setattr(
         BOOTSTRAP,
         "_read_bootstrap_ledger_item",
@@ -1704,6 +1785,14 @@ def test_consumed_reconcile_is_idempotent_and_never_touches_terraform(
         assert receipt["plan_reapplied"] is False
     assert terraform_calls == []
     assert retirements == ["retired", "retired"]
+    assert [check["expected_arn"] for check in identity_checks] == [
+        contract.bootstrap_principal_arn,
+        contract.bootstrap_principal_arn,
+    ]
+    assert [check["label"] for check in identity_checks] == [
+        "reconcile bootstrap principal caller",
+        "reconcile bootstrap principal caller",
+    ]
 
 
 def test_reconcile_rejects_unknown_ledger_state_before_terraform_or_retirement(
