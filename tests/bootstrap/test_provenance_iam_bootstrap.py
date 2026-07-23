@@ -1253,52 +1253,54 @@ def test_seed_creation_records_the_exact_cloudformation_stack_id() -> None:
     )
 
 
+class _SeedAssumeRunner:
+    def __init__(self, contract: Any, expiration: Any) -> None:
+        self.contract = contract
+        self.expiration = expiration
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        arguments: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        check: bool = True,
+    ) -> Any:
+        del cwd, env, check
+        call = list(arguments)
+        self.calls.append(call)
+        if "assume-role" in call:
+            payload = {
+                "Credentials": {
+                    "AccessKeyId": "ASIAEXAMPLE",
+                    "SecretAccessKey": "secret",
+                    "SessionToken": "token",
+                    "Expiration": self.expiration,
+                },
+                "AssumedRoleUser": {
+                    "AssumedRoleId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
+                    "Arn": self.contract.seed["session_arn"],
+                },
+            }
+        else:
+            assert "get-caller-identity" in call
+            payload = {
+                "Account": self.contract.account_id,
+                "Arn": self.contract.seed["session_arn"],
+                "UserId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
+            }
+        return BOOTSTRAP.CommandResult(
+            stdout=json.dumps(payload).encode(),
+            stderr=b"",
+            returncode=0,
+        )
+
+
 def test_seed_assume_role_omits_source_identity() -> None:
     contract = _contract()
     external_id = "a" * 64
-
-    class Runner:
-        def __init__(self) -> None:
-            self.calls: list[list[str]] = []
-
-        def run(
-            self,
-            arguments: list[str],
-            *,
-            cwd: Path,
-            env: dict[str, str],
-            check: bool = True,
-        ) -> Any:
-            del cwd, env, check
-            call = list(arguments)
-            self.calls.append(call)
-            if "assume-role" in call:
-                payload = {
-                    "Credentials": {
-                        "AccessKeyId": "ASIAEXAMPLE",
-                        "SecretAccessKey": "secret",
-                        "SessionToken": "token",
-                        "Expiration": "2099-01-01T00:00:00Z",
-                    },
-                    "AssumedRoleUser": {
-                        "AssumedRoleId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
-                        "Arn": contract.seed["session_arn"],
-                    },
-                }
-            else:
-                assert "get-caller-identity" in call
-                payload = {
-                    "Account": contract.account_id,
-                    "Arn": contract.seed["session_arn"],
-                    "UserId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
-                }
-            return BOOTSTRAP.CommandResult(
-                stdout=json.dumps(payload).encode(),
-                stderr=b"",
-                returncode=0,
-            )
-
-    runner = Runner()
+    runner = _SeedAssumeRunner(contract, "2099-01-01T00:00:00+00:00")
     BOOTSTRAP._assume_seed(
         runner,
         repo_root=ROOT,
@@ -1324,6 +1326,61 @@ def test_seed_assume_role_omits_source_identity() -> None:
         "json",
     ]
     assert "--source-identity" not in assume_call
+
+
+@pytest.mark.parametrize(
+    "expiration",
+    [
+        "2099-01-01T00:00:00+00:00",
+        "2099-01-01T00:00:00Z",
+    ],
+    ids=["aws-cli-offset", "zulu"],
+)
+def test_seed_assume_role_accepts_iso8601_expiration(expiration: str) -> None:
+    contract = _contract()
+    runner = _SeedAssumeRunner(contract, expiration)
+
+    assumed, session_env = BOOTSTRAP._assume_seed(
+        runner,
+        repo_root=ROOT,
+        principal_env={"PATH": os.environ["PATH"]},
+        contract=contract,
+        external_id="a" * 64,
+    )
+
+    assert assumed["Credentials"]["Expiration"] == expiration
+    assert session_env["AWS_ACCESS_KEY_ID"] == "ASIAEXAMPLE"
+    assert "get-caller-identity" in runner.calls[-1]
+
+
+@pytest.mark.parametrize(
+    "expiration",
+    [
+        None,
+        123,
+        "",
+        "not-a-timestamp",
+    ],
+    ids=["none", "non-string", "empty", "unparseable"],
+)
+def test_seed_assume_role_rejects_malformed_expiration(expiration: Any) -> None:
+    contract = _contract()
+    runner = _SeedAssumeRunner(contract, expiration)
+
+    with pytest.raises(
+        BOOTSTRAP.BootstrapError,
+        match=r"^STS seed session expiration is malformed$",
+    ):
+        BOOTSTRAP._assume_seed(
+            runner,
+            repo_root=ROOT,
+            principal_env={"PATH": os.environ["PATH"]},
+            contract=contract,
+            external_id="a" * 64,
+        )
+
+    assert len(runner.calls) == 1
+    assert "assume-role" in runner.calls[0]
 
 
 def test_seed_retirement_closes_trust_before_revoking_sessions_and_deleting() -> None:
