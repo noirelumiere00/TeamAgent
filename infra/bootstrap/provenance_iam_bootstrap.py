@@ -44,6 +44,7 @@ from typing import Any
 EXPECTED_ORIGIN = "git@github.com:noirelumiere00/TeamAgent.git"
 EXPECTED_REMOTE_LOOKUP = "https://github.com/noirelumiere00/TeamAgent.git"
 BOOTSTRAP_GIT_TOKEN_ENV = "TEAMAGENT_BOOTSTRAP_GIT_TOKEN"
+BOOTSTRAP_AWS_CA_BUNDLE_ENV = "TEAMAGENT_BOOTSTRAP_AWS_CA_BUNDLE"
 EXPECTED_BRANCH = "dev"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA1_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -1167,6 +1168,20 @@ def _clean_aws_environment(source: Mapping[str, str]) -> dict[str, str]:
     return result
 
 
+def _bootstrap_ca_bundle(env: Mapping[str, str]) -> str | None:
+    raw = env.get(BOOTSTRAP_AWS_CA_BUNDLE_ENV, "").strip()
+    if not raw:
+        return None
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        raise BootstrapError("bootstrap AWS CA bundle path contains control characters")
+    path = Path(raw)
+    if not path.is_absolute():
+        raise BootstrapError("bootstrap AWS CA bundle path must be absolute")
+    if not path.is_file():
+        raise BootstrapError("bootstrap AWS CA bundle path must be an existing regular file")
+    return str(path)
+
+
 def _temporary_root_environment(
     source: Mapping[str, str],
     *,
@@ -1191,6 +1206,9 @@ def _temporary_root_environment(
     result["AWS_SHARED_CREDENTIALS_FILE"] = "/dev/null"
     result.pop("AWS_PROFILE", None)
     result.pop("AWS_DEFAULT_PROFILE", None)
+    ca_bundle = _bootstrap_ca_bundle(source)
+    if ca_bundle is not None:
+        result["AWS_CA_BUNDLE"] = ca_bundle
     return result
 
 
@@ -1217,6 +1235,9 @@ def _session_environment(
     result["AWS_SHARED_CREDENTIALS_FILE"] = "/dev/null"
     result.pop("AWS_PROFILE", None)
     result.pop("AWS_DEFAULT_PROFILE", None)
+    ca_bundle = _bootstrap_ca_bundle(base)
+    if ca_bundle is not None:
+        result["AWS_CA_BUNDLE"] = ca_bundle
     return result
 
 

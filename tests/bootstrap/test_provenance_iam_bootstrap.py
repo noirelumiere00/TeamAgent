@@ -692,6 +692,102 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     assert "BootstrapNonce" in body
 
 
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_bootstrap_ca_bundle_is_optional(raw: str | None) -> None:
+    env = {} if raw is None else {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: raw}
+    assert BOOTSTRAP._bootstrap_ca_bundle(env) is None
+
+
+def test_bootstrap_ca_bundle_accepts_absolute_regular_file(tmp_path: Path) -> None:
+    ca_bundle = tmp_path / "ca_bundle.pem"
+    ca_bundle.write_text("test CA bundle\n", encoding="utf-8")
+
+    assert BOOTSTRAP._bootstrap_ca_bundle(
+        {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(ca_bundle)}
+    ) == str(ca_bundle)
+
+
+def test_bootstrap_ca_bundle_rejects_relative_path() -> None:
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="absolute"):
+        BOOTSTRAP._bootstrap_ca_bundle(
+            {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: "ca_bundle.pem"}
+        )
+
+
+def test_bootstrap_ca_bundle_rejects_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="regular file"):
+        BOOTSTRAP._bootstrap_ca_bundle(
+            {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(tmp_path / "missing.pem")}
+        )
+
+
+def test_bootstrap_ca_bundle_rejects_control_characters(tmp_path: Path) -> None:
+    invalid_path = f"{tmp_path}/ca\n_bundle.pem"
+
+    with pytest.raises(BOOTSTRAP.BootstrapError, match="control characters"):
+        BOOTSTRAP._bootstrap_ca_bundle(
+            {BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: invalid_path}
+        )
+
+
+def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> None:
+    ambient_bundle = tmp_path / "ambient.pem"
+    ambient_bundle.write_text("ambient CA bundle\n", encoding="utf-8")
+    explicit_bundle = tmp_path / "explicit.pem"
+    explicit_bundle.write_text("explicit CA bundle\n", encoding="utf-8")
+    source = {
+        "AWS_ACCESS_KEY_ID": "temporary-access",
+        "AWS_SECRET_ACCESS_KEY": "temporary-secret",
+        "AWS_SESSION_TOKEN": "temporary-session",
+        "AWS_CA_BUNDLE": str(ambient_bundle),
+        BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(explicit_bundle),
+    }
+
+    checked = BOOTSTRAP._temporary_root_environment(
+        source,
+        region="ap-northeast-1",
+    )
+    assert checked["AWS_CA_BUNDLE"] == str(explicit_bundle)
+
+    source.pop(BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV)
+    checked_without_explicit_bundle = BOOTSTRAP._temporary_root_environment(
+        source,
+        region="ap-northeast-1",
+    )
+    assert "AWS_CA_BUNDLE" not in checked_without_explicit_bundle
+
+
+def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> None:
+    ambient_bundle = tmp_path / "ambient.pem"
+    ambient_bundle.write_text("ambient CA bundle\n", encoding="utf-8")
+    explicit_bundle = tmp_path / "explicit.pem"
+    explicit_bundle.write_text("explicit CA bundle\n", encoding="utf-8")
+    base = {
+        "AWS_CA_BUNDLE": str(ambient_bundle),
+        BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(explicit_bundle),
+    }
+    credentials = {
+        "AccessKeyId": "seed-access",
+        "SecretAccessKey": "seed-secret",
+        "SessionToken": "seed-session",
+    }
+
+    checked = BOOTSTRAP._session_environment(
+        base,
+        credentials,
+        region="ap-northeast-1",
+    )
+    assert checked["AWS_CA_BUNDLE"] == str(explicit_bundle)
+
+    base.pop(BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV)
+    checked_without_explicit_bundle = BOOTSTRAP._session_environment(
+        base,
+        credentials,
+        region="ap-northeast-1",
+    )
+    assert "AWS_CA_BUNDLE" not in checked_without_explicit_bundle
+
+
 def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
     source = {
         "PATH": os.environ["PATH"],
