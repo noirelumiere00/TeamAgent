@@ -2242,8 +2242,8 @@ def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None
             f"policy = data.aws_iam_policy_document.runtime_automation_control_plane_{suffix}.json"
         ) in body
         assert (
-            f"length(data.aws_iam_policy_document."
-            f"runtime_automation_control_plane_{suffix}.json) < 6144"
+            f"length(replace(data.aws_iam_policy_document."
+            f'runtime_automation_control_plane_{suffix}.json, "/\\\\s/", "")) < 6144'
         ) in body
         assert (
             f'resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_{suffix}"'
