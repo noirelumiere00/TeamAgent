@@ -1,9 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  One-time TeamAgent provenance/IAM bootstrap seed. This stack owns only the
-  temporary executor role and its explicit-deny managed policy, and both must
-  be deleted after the create-only main-state handoff. It cannot start builds,
-  publish evidence, write images, or mutate runtime services.
+  One-time TeamAgent provenance/IAM bootstrap seed for the IAM admin principal
+  MFA session. This stack owns only the temporary executor role and its
+  explicit-deny managed policy, and both must be deleted after the create-only
+  main-state handoff. It cannot start builds, publish evidence, write images,
+  or mutate runtime services.
 
 Parameters:
   BootstrapExternalId:
@@ -159,16 +160,16 @@ Resources:
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Sid: ExactRootMfaBootstrapSession
+          - Sid: ExactIamAdminPrincipalMfaBootstrapSession
             Effect: Allow
             Principal:
-              AWS: arn:aws:iam::718959508629:root
+              AWS: arn:aws:iam::718959508629:user/AIIAdev
             Action:
               - sts:AssumeRole
               - sts:SetSourceIdentity
             Condition:
               ArnEquals:
-                aws:PrincipalArn: arn:aws:iam::718959508629:root
+                aws:PrincipalArn: arn:aws:iam::718959508629:user/AIIAdev
               Bool:
                 aws:MultiFactorAuthPresent: "true"
               StringEquals:

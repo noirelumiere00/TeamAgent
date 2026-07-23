@@ -10,22 +10,24 @@ different, one-time control-plane workflow with a smaller authority:
 
 1. All three release contracts must be exactly `release.ready=false`, with a
    non-empty blocked reason. This local check runs before the first AWS call.
-2. The exact account root, using an MFA-authenticated temporary session,
-   creates `seed-stack.yaml`. The stack owns one temporary IAM role and its
+2. The configured bootstrap principal (an IAM administrator user such as
+   `AIIAdev`), using an MFA-authenticated temporary session, creates
+   `seed-stack.yaml`. The stack owns one temporary IAM role and its
    explicit-deny managed policy, and no production object. A random nonce is
    bound to the CloudFormation client request token, stack parameters, stack
    tags, role tags, and the local invocation artifact. Cleanup requires that
    exact ownership proof.
-3. Root assumes that role for one hour with a fixed external ID, session name,
-   and source identity. The role has explicit denies for CodeBuild execution,
-   ECR image writes/deletes, KMS signing, release-evidence object writes,
-   long-lived IAM credentials, runtime mutation, debug sessions, and all role
-   chaining.
+3. The bootstrap principal assumes that role for one hour with a fixed external
+   ID, session name, and source identity. The role has explicit denies for
+   CodeBuild execution, ECR image writes/deletes, KMS signing, release-evidence
+   object writes, long-lived IAM credentials, runtime mutation, debug sessions,
+   and all role chaining.
 4. The wrappers first require a clean detached `HEAD` equal to both the local
    `refs/remotes/origin/dev` and a fresh credential-free HTTPS lookup. They
    independently fetch that commit, verify every tracked blob plus each
    transitive child SHA-256, make the reviewed checkout read-only, and execute
-   from that checkout. Root credentials are restored only after this review.
+   from that checkout. Bootstrap-principal credentials are restored only after
+   this review.
 5. The role makes one saved Terraform plan against the existing **main**
    backend. Targets are fixed in `bootstrap_contract.json`; operator-supplied
    targets are impossible. Inherited Git/Terraform control variables and
@@ -84,10 +86,11 @@ serial and address set, not a copy between two state files.
   `APPLYING` responses are reconciled by the exact nonce and transitioned to
   `RECONCILE_REQUIRED`. A terminal `CONSUMED` row is observed but never
   rewritten. The tool does not retry or mint a second bootstrap.
-  Run only the reviewed `reconcile-retire` command against the original
-  artifact directory. It never calls `terraform apply` and never reapplies a
-  consumed plan; it reconciles current main-state ownership when needed and
-  idempotently retires only the nonce-owned seed.
+  Using an MFA-authenticated temporary session for the configured bootstrap
+  principal, run only the reviewed `reconcile-retire` command against the
+  original artifact directory. It never calls `terraform apply` and never
+  reapplies a consumed plan; it reconciles current main-state ownership when
+  needed and idempotently retires only the nonce-owned seed.
 - A `PREPARED`, `APPLYING`, `RECONCILE_REQUIRED`, or `CONSUMED` row blocks a
   second invocation because creation uses
   `attribute_not_exists(LockID)`.
