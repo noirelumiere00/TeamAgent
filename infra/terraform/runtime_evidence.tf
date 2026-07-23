@@ -622,75 +622,7 @@ resource "aws_iam_role_policy" "runtime_evidence_automation" {
   policy = data.aws_iam_policy_document.runtime_evidence_automation.json
 }
 
-data "aws_iam_policy_document" "runtime_automation_control_plane" {
-  statement {
-    sid = "ReadExactIamMetadata"
-    actions = [
-      "iam:GetInstanceProfile",
-      "iam:GetPolicy",
-      "iam:GetPolicyVersion",
-      "iam:GetRole",
-      "iam:GetRolePolicy",
-      "iam:GetUser",
-      "iam:GetUserPolicy",
-      "iam:ListAttachedRolePolicies",
-      "iam:ListInstanceProfilesForRole",
-      "iam:ListPolicyTags",
-      "iam:ListPolicyVersions",
-      "iam:ListRolePolicies",
-      "iam:ListRoleTags",
-      "iam:ListUserPolicies",
-      "iam:ListUserTags",
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid     = "PassOnlyExistingTeamAgentServiceRoles"
-    actions = ["iam:PassRole"]
-    resources = [
-      "arn:aws:iam::718959508629:role/teamagent-dev-bastion",
-      "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
-      "arn:aws:iam::718959508629:role/teamagent-dev-events-canary-invoke",
-      "arn:aws:iam::718959508629:role/teamagent-dev-events-ingest-invoke",
-      "arn:aws:iam::718959508629:role/teamagent-dev-events-morning-digest-invoke",
-      "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-lambda-exec",
-      "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-notify",
-      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-scheduler",
-      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-dispatch",
-      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
-      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-janitor",
-      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-task",
-      "arn:aws:iam::718959508629:role/teamagent-dev-worker",
-      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-dispatch",
-      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
-      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
-    ]
-
-    condition {
-      test     = "StringEquals"
-      variable = "iam:PassedToService"
-      values = [
-        "ec2.amazonaws.com",
-        "ecs-tasks.amazonaws.com",
-        "events.amazonaws.com",
-        "lambda.amazonaws.com",
-        "scheduler.amazonaws.com",
-      ]
-    }
-  }
-
+data "aws_iam_policy_document" "runtime_automation_control_plane_manage_a" {
   statement {
     sid = "ManageExactTerraformResourceTypes"
     actions = [
@@ -854,6 +786,15 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
       "elasticfilesystem:PutLifecycleConfiguration",
       "elasticfilesystem:TagResource",
       "elasticfilesystem:UntagResource",
+    ]
+    resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "runtime_automation_control_plane_manage_b" {
+  statement {
+    sid = "ManageExactTerraformResourceTypes"
+    actions = [
       "elasticloadbalancing:AddTags",
       "elasticloadbalancing:CreateTargetGroup",
       "elasticloadbalancing:DeleteTargetGroup",
@@ -1011,6 +952,76 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
     ]
     resources = ["*"]
   }
+}
+
+data "aws_iam_policy_document" "runtime_automation_control_plane_core" {
+  statement {
+    sid = "ReadExactIamMetadata"
+    actions = [
+      "iam:GetInstanceProfile",
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:GetRole",
+      "iam:GetRolePolicy",
+      "iam:GetUser",
+      "iam:GetUserPolicy",
+      "iam:ListAttachedRolePolicies",
+      "iam:ListInstanceProfilesForRole",
+      "iam:ListPolicyTags",
+      "iam:ListPolicyVersions",
+      "iam:ListRolePolicies",
+      "iam:ListRoleTags",
+      "iam:ListUserPolicies",
+      "iam:ListUserTags",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid     = "PassOnlyExistingTeamAgentServiceRoles"
+    actions = ["iam:PassRole"]
+    resources = [
+      "arn:aws:iam::718959508629:role/teamagent-dev-bastion",
+      "arn:aws:iam::718959508629:role/teamagent-dev-canary-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-connect-web-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-canary",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-connect-web",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-ingest",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-mcp",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-morning-digest",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ecs-exec-openclaw",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-canary-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-ingest-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-events-morning-digest-invoke",
+      "arn:aws:iam::718959508629:role/teamagent-dev-ingest-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-lambda-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-mcp-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-morning-digest-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-openclaw-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-notify",
+      "arn:aws:iam::718959508629:role/teamagent-dev-reminder-scheduler",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-dispatch",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-janitor",
+      "arn:aws:iam::718959508629:role/teamagent-dev-tiktok-acquire-task",
+      "arn:aws:iam::718959508629:role/teamagent-dev-worker",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-dispatch",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-exec",
+      "arn:aws:iam::718959508629:role/teamagent-dev-x-buzz-task",
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values = [
+        "ec2.amazonaws.com",
+        "ecs-tasks.amazonaws.com",
+        "events.amazonaws.com",
+        "lambda.amazonaws.com",
+        "scheduler.amazonaws.com",
+      ]
+    }
+  }
 
   statement {
     sid = "UseExactTerraformBackend"
@@ -1161,10 +1172,55 @@ data "aws_iam_policy_document" "runtime_automation_control_plane" {
   }
 }
 
-resource "aws_iam_role_policy" "runtime_automation_control_plane" {
-  name   = "${local.runtime_automation_role_name}-control-plane"
-  role   = aws_iam_role.runtime_automation.id
-  policy = data.aws_iam_policy_document.runtime_automation_control_plane.json
+resource "aws_iam_policy" "runtime_automation_control_plane_manage_a" {
+  name   = "${local.runtime_automation_role_name}-control-plane-manage-a"
+  policy = data.aws_iam_policy_document.runtime_automation_control_plane_manage_a.json
+
+  lifecycle {
+    precondition {
+      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_manage_a.json) < 6144
+      error_message = "Runtime automation control-plane manage-a policy must remain below 6,144 characters."
+    }
+  }
+}
+
+resource "aws_iam_policy" "runtime_automation_control_plane_manage_b" {
+  name   = "${local.runtime_automation_role_name}-control-plane-manage-b"
+  policy = data.aws_iam_policy_document.runtime_automation_control_plane_manage_b.json
+
+  lifecycle {
+    precondition {
+      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_manage_b.json) < 6144
+      error_message = "Runtime automation control-plane manage-b policy must remain below 6,144 characters."
+    }
+  }
+}
+
+resource "aws_iam_policy" "runtime_automation_control_plane_core" {
+  name   = "${local.runtime_automation_role_name}-control-plane-core"
+  policy = data.aws_iam_policy_document.runtime_automation_control_plane_core.json
+
+  lifecycle {
+    precondition {
+      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_core.json) < 6144
+      error_message = "Runtime automation control-plane core policy must remain below 6,144 characters."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_manage_a" {
+  role       = aws_iam_role.runtime_automation.name
+  policy_arn = aws_iam_policy.runtime_automation_control_plane_manage_a.arn
+}
+
+resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_manage_b" {
+  role       = aws_iam_role.runtime_automation.name
+  policy_arn = aws_iam_policy.runtime_automation_control_plane_manage_b.arn
+}
+
+resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_core" {
+  role       = aws_iam_role.runtime_automation.name
+  policy_arn = aws_iam_policy.runtime_automation_control_plane_core.arn
 }
 
 check "runtime_evidence_owned_preconditions" {

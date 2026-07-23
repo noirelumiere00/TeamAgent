@@ -159,11 +159,6 @@ INLINE_POLICY_OWNERSHIP = {
         "teamagent-dev-terraform-runtime-automation",
         "teamagent-dev-terraform-runtime-automation-evidence",
     ),
-    "aws_iam_role_policy.runtime_automation_control_plane": (
-        "role",
-        "teamagent-dev-terraform-runtime-automation",
-        "teamagent-dev-terraform-runtime-automation-control-plane",
-    ),
 }
 ECR_LIFECYCLE_OWNERSHIP = {
     "aws_ecr_lifecycle_policy.openclaw_quarantine": "teamagent-openclaw-quarantine",
