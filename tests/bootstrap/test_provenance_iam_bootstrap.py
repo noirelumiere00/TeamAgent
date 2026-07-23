@@ -1455,6 +1455,58 @@ def test_concurrent_same_handoff_publish_is_idempotent(
     assert not list(artifact_dir.glob(".*.tmp"))
 
 
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        pytest.param(b"", {}, id="empty"),
+        pytest.param(
+            b'{"Item":{"LockID":{"S":"bootstrap#example"}}}',
+            {"Item": {"LockID": {"S": "bootstrap#example"}}},
+            id="item",
+        ),
+        pytest.param(b"{}", {}, id="empty-object"),
+    ],
+)
+def test_decode_optional_item_result_accepts_empty_or_json_object(
+    stdout: bytes,
+    expected: dict[str, Any],
+) -> None:
+    result = BOOTSTRAP.CommandResult(stdout=stdout, stderr=b"", returncode=0)
+    assert BOOTSTRAP._decode_optional_item_result(result, label="get-item") == expected
+
+
+def test_decode_optional_item_result_rejects_non_json_output() -> None:
+    result = BOOTSTRAP.CommandResult(stdout=b"not-json", stderr=b"", returncode=0)
+    with pytest.raises(
+        BOOTSTRAP.BootstrapError,
+        match="get-item command returned invalid JSON",
+    ):
+        BOOTSTRAP._decode_optional_item_result(result, label="get-item")
+
+
+class _StaticGetItemRunner:
+    def __init__(self, stdout: bytes) -> None:
+        self.stdout = stdout
+        self.calls: list[list[str]] = []
+
+    def run(
+        self,
+        arguments: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str],
+        check: bool = True,
+    ) -> Any:
+        del cwd, env, check
+        assert "get-item" in arguments
+        self.calls.append(list(arguments))
+        return BOOTSTRAP.CommandResult(
+            stdout=self.stdout,
+            stderr=b"",
+            returncode=0,
+        )
+
+
 class _LedgerRunner:
     def __init__(self, state: str) -> None:
         self.state = state
@@ -1725,6 +1777,32 @@ def test_reconcile_rejects_unknown_ledger_state_before_terraform_or_retirement(
                 "AWS_SESSION_TOKEN": "temporary-session",
             },
         )
+
+
+def test_empty_get_item_response_means_bootstrap_ledger_is_absent() -> None:
+    runner = _StaticGetItemRunner(b"")
+    assert (
+        BOOTSTRAP._read_bootstrap_ledger_item(
+            runner,
+            cwd=ROOT,
+            env={"PATH": os.environ["PATH"]},
+            contract=_contract(),
+            nonce="b" * 64,
+        )
+        is None
+    )
+    assert len(runner.calls) == 1
+
+
+def test_empty_get_item_response_passes_one_use_ledger_preflight() -> None:
+    runner = _StaticGetItemRunner(b"")
+    BOOTSTRAP._assert_bootstrap_ledger_absent(
+        runner,
+        cwd=ROOT,
+        env={"PATH": os.environ["PATH"]},
+        contract=_contract(),
+    )
+    assert len(runner.calls) == 1
 
 
 def test_existing_one_use_ledger_blocks_before_seed_creation() -> None:

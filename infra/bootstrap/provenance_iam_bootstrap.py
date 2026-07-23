@@ -1251,6 +1251,17 @@ def _decode_json_result(result: CommandResult, *, label: str) -> Mapping[str, An
         raise BootstrapError(f"{label} command returned invalid JSON") from exc
 
 
+def _decode_optional_item_result(
+    result: CommandResult,
+    *,
+    label: str,
+) -> Mapping[str, Any]:
+    """Decode get-item JSON, treating empty stdout as an absent item."""
+    if not result.stdout.strip():
+        return {}
+    return _decode_json_result(result, label=label)
+
+
 def _aws(
     runner: CommandRunner,
     arguments: Sequence[str],
@@ -2185,7 +2196,7 @@ def _read_bootstrap_ledger_item(
         env=env,
         region=contract.region,
     )
-    response = _decode_json_result(result, label="bootstrap ledger read")
+    response = _decode_optional_item_result(result, label="bootstrap ledger read")
     raw_item = response.get("Item")
     if raw_item is None:
         return None
@@ -2253,7 +2264,10 @@ def _assert_bootstrap_ledger_absent(
         env=env,
         region=contract.region,
     )
-    response = _decode_json_result(result, label="one-use bootstrap ledger preflight")
+    response = _decode_optional_item_result(
+        result,
+        label="one-use bootstrap ledger preflight",
+    )
     if response.get("Item") is not None:
         _mapping(response["Item"], label="existing one-use bootstrap ledger item")
         raise BootstrapError("one-use bootstrap ledger already exists")
