@@ -1006,7 +1006,7 @@ resource "aws_iam_user_policy" "release_caller" {
   policy = data.aws_iam_policy_document.release_caller.json
 }
 
-data "aws_iam_policy_document" "release_launcher" {
+data "aws_iam_policy_document" "release_launcher_a" {
   statement {
     sid = "ReadImmutableVerifiedCandidateLocator"
     actions = [
@@ -1017,16 +1017,6 @@ data "aws_iam_policy_document" "release_launcher" {
     resources = [
       "${aws_s3_bucket.image_release_evidence.arn}/release-receipts/*",
     ]
-  }
-  statement {
-    sid       = "DecryptReleaseLocator"
-    actions   = ["kms:Decrypt", "kms:DescribeKey"]
-    resources = [aws_kms_key.image_release_evidence.arn]
-  }
-  statement {
-    sid       = "VerifyAttestorReleaseLocator"
-    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
-    resources = [aws_kms_key.image_attestor_signing.arn]
   }
   statement {
     sid = "ReadCandidateAndReleaseDigest"
@@ -1051,31 +1041,6 @@ data "aws_iam_policy_document" "release_launcher" {
         aws_ecr_repository.tiktok_acquire[0].arn,
       ] : [],
     )
-  }
-  statement {
-    sid       = "StartFreshActiveOrRollbackAttestor"
-    actions   = ["codebuild:StartBuild"]
-    resources = [aws_codebuild_project.image_attestor.arn]
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = local.release_attestor_environment_names
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
-      values   = ["mcp", "openclaw", "tiktok"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
-      values   = ["active", "rollback"]
-    }
   }
   statement {
     sid       = "StartFreshActiveOrRollbackPromoter"
@@ -1111,7 +1076,77 @@ data "aws_iam_policy_document" "release_launcher" {
     ]
   }
   dynamic "statement" {
-    for_each = local.launcher_denied_override_condition_keys
+    for_each = local.launcher_denied_override_condition_keys_manage_a
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+data "aws_iam_policy_document" "release_launcher_b" {
+  statement {
+    sid       = "DecryptReleaseLocator"
+    actions   = ["kms:Decrypt", "kms:DescribeKey"]
+    resources = [aws_kms_key.image_release_evidence.arn]
+  }
+  statement {
+    sid       = "VerifyAttestorReleaseLocator"
+    actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
+    resources = [aws_kms_key.image_attestor_signing.arn]
+  }
+  statement {
+    sid       = "StartFreshActiveOrRollbackAttestor"
+    actions   = ["codebuild:StartBuild"]
+    resources = [aws_codebuild_project.image_attestor.arn]
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = local.release_attestor_environment_names
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
+      values   = ["mcp", "openclaw", "tiktok"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
+      values   = ["active", "rollback"]
+    }
+  }
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_b
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_guardrails
     content {
       effect  = "Deny"
       actions = ["codebuild:StartBuild"]
@@ -1155,10 +1190,38 @@ data "aws_iam_policy_document" "release_launcher" {
   }
 }
 
-resource "aws_iam_role_policy" "release_launcher" {
-  name   = local.release_launcher_role_name
-  role   = aws_iam_role.release_launcher.id
-  policy = data.aws_iam_policy_document.release_launcher.json
+resource "aws_iam_policy" "release_launcher_a" {
+  name   = "${local.release_launcher_role_name}-a"
+  policy = data.aws_iam_policy_document.release_launcher_a.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.release_launcher_a.json, "/\\s/", "")) < 6144
+      error_message = "Release launcher a policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "release_launcher_b" {
+  name   = "${local.release_launcher_role_name}-b"
+  policy = data.aws_iam_policy_document.release_launcher_b.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.release_launcher_b.json, "/\\s/", "")) < 6144
+      error_message = "Release launcher b policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "release_launcher_a" {
+  role       = aws_iam_role.release_launcher.name
+  policy_arn = aws_iam_policy.release_launcher_a.arn
+}
+
+resource "aws_iam_role_policy_attachment" "release_launcher_b" {
+  role       = aws_iam_role.release_launcher.name
+  policy_arn = aws_iam_policy.release_launcher_b.arn
 }
 
 output "release_caller_arn" {
@@ -1672,7 +1735,7 @@ resource "aws_iam_user_policy" "tiktok_build_caller" {
   policy = data.aws_iam_policy_document.tiktok_build_caller[0].json
 }
 
-data "aws_iam_policy_document" "tiktok_build_launcher" {
+data "aws_iam_policy_document" "tiktok_build_launcher_core" {
   count = local.tk_enabled
 
   statement {
@@ -1815,8 +1878,52 @@ data "aws_iam_policy_document" "tiktok_build_launcher" {
       aws_ecr_repository.tiktok_acquire_verified_candidates[0].arn,
     ]
   }
+}
+
+data "aws_iam_policy_document" "tiktok_build_launcher_manage_a" {
+  count = local.tk_enabled
+
   dynamic "statement" {
-    for_each = local.launcher_denied_override_condition_keys
+    for_each = local.launcher_denied_override_condition_keys_manage_a
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.tiktok_image[0].arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+data "aws_iam_policy_document" "tiktok_build_launcher_manage_b" {
+  count = local.tk_enabled
+
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_b
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.tiktok_image[0].arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_guardrails
     content {
       effect  = "Deny"
       actions = ["codebuild:StartBuild"]
@@ -1866,11 +1973,61 @@ data "aws_iam_policy_document" "tiktok_build_launcher" {
   }
 }
 
-resource "aws_iam_role_policy" "tiktok_build_launcher" {
+resource "aws_iam_policy" "tiktok_build_launcher_core" {
   count  = local.tk_enabled
-  name   = local.tiktok_launcher_role_name
-  role   = aws_iam_role.tiktok_build_launcher[0].id
-  policy = data.aws_iam_policy_document.tiktok_build_launcher[0].json
+  name   = "${local.tiktok_launcher_role_name}-core"
+  policy = data.aws_iam_policy_document.tiktok_build_launcher_core[0].json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.tiktok_build_launcher_core[0].json, "/\\s/", "")) < 6144
+      error_message = "TikTok build launcher core policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "tiktok_build_launcher_manage_a" {
+  count  = local.tk_enabled
+  name   = "${local.tiktok_launcher_role_name}-manage-a"
+  policy = data.aws_iam_policy_document.tiktok_build_launcher_manage_a[0].json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.tiktok_build_launcher_manage_a[0].json, "/\\s/", "")) < 6144
+      error_message = "TikTok build launcher manage-a policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "tiktok_build_launcher_manage_b" {
+  count  = local.tk_enabled
+  name   = "${local.tiktok_launcher_role_name}-manage-b"
+  policy = data.aws_iam_policy_document.tiktok_build_launcher_manage_b[0].json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.tiktok_build_launcher_manage_b[0].json, "/\\s/", "")) < 6144
+      error_message = "TikTok build launcher manage-b policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "tiktok_build_launcher_core" {
+  count      = local.tk_enabled
+  role       = aws_iam_role.tiktok_build_launcher[0].name
+  policy_arn = aws_iam_policy.tiktok_build_launcher_core[0].arn
+}
+
+resource "aws_iam_role_policy_attachment" "tiktok_build_launcher_manage_a" {
+  count      = local.tk_enabled
+  role       = aws_iam_role.tiktok_build_launcher[0].name
+  policy_arn = aws_iam_policy.tiktok_build_launcher_manage_a[0].arn
+}
+
+resource "aws_iam_role_policy_attachment" "tiktok_build_launcher_manage_b" {
+  count      = local.tk_enabled
+  role       = aws_iam_role.tiktok_build_launcher[0].name
+  policy_arn = aws_iam_policy.tiktok_build_launcher_manage_b[0].arn
 }
 
 output "tiktok_build_caller_arn" {
@@ -3543,7 +3700,7 @@ resource "aws_iam_role" "openclaw_publisher" {
   max_session_duration = 10800
 }
 
-data "aws_iam_policy_document" "openclaw_publisher" {
+data "aws_iam_policy_document" "openclaw_publisher_core" {
   statement {
     sid = "RequireAvailableOpenClawCodeConnection"
     actions = [
@@ -3662,34 +3819,6 @@ data "aws_iam_policy_document" "openclaw_publisher" {
     ]
   }
   statement {
-    sid       = "DenyAnyStartBuildEnvironmentOverride"
-    effect    = "Deny"
-    actions   = ["codebuild:StartBuild"]
-    resources = [aws_codebuild_project.openclaw_provenance.arn]
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-  }
-  dynamic "statement" {
-    for_each = local.launcher_denied_override_condition_keys
-    content {
-      effect  = "Deny"
-      actions = ["codebuild:StartBuild"]
-      resources = [
-        aws_codebuild_project.openclaw_provenance.arn,
-        aws_codebuild_project.image_attestor.arn,
-        aws_codebuild_project.image_promoter.arn,
-      ]
-      condition {
-        test     = "Null"
-        variable = statement.value
-        values   = ["false"]
-      }
-    }
-  }
-  statement {
     sid    = "DenyOpenClawAlternateBuildEntryPoints"
     effect = "Deny"
     actions = [
@@ -3721,12 +3850,125 @@ data "aws_iam_policy_document" "openclaw_publisher" {
     ]
     resources = ["*"]
   }
+  statement {
+    sid       = "DenyAnyStartBuildEnvironmentOverride"
+    effect    = "Deny"
+    actions   = ["codebuild:StartBuild"]
+    resources = [aws_codebuild_project.openclaw_provenance.arn]
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+  }
 }
 
-resource "aws_iam_role_policy" "openclaw_publisher" {
-  name   = local.openclaw_launcher_role_name
-  role   = aws_iam_role.openclaw_publisher.id
-  policy = data.aws_iam_policy_document.openclaw_publisher.json
+data "aws_iam_policy_document" "openclaw_publisher_manage_a" {
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_a
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.openclaw_provenance.arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+data "aws_iam_policy_document" "openclaw_publisher_manage_b" {
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_b
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.openclaw_provenance.arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_guardrails
+    content {
+      effect  = "Deny"
+      actions = ["codebuild:StartBuild"]
+      resources = [
+        aws_codebuild_project.openclaw_provenance.arn,
+        aws_codebuild_project.image_attestor.arn,
+        aws_codebuild_project.image_promoter.arn,
+      ]
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+resource "aws_iam_policy" "openclaw_publisher_core" {
+  name   = "${local.openclaw_launcher_role_name}-core"
+  policy = data.aws_iam_policy_document.openclaw_publisher_core.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.openclaw_publisher_core.json, "/\\s/", "")) < 6144
+      error_message = "OpenClaw publisher core policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "openclaw_publisher_manage_a" {
+  name   = "${local.openclaw_launcher_role_name}-manage-a"
+  policy = data.aws_iam_policy_document.openclaw_publisher_manage_a.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.openclaw_publisher_manage_a.json, "/\\s/", "")) < 6144
+      error_message = "OpenClaw publisher manage-a policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "openclaw_publisher_manage_b" {
+  name   = "${local.openclaw_launcher_role_name}-manage-b"
+  policy = data.aws_iam_policy_document.openclaw_publisher_manage_b.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.openclaw_publisher_manage_b.json, "/\\s/", "")) < 6144
+      error_message = "OpenClaw publisher manage-b policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "openclaw_publisher_core" {
+  role       = aws_iam_role.openclaw_publisher.name
+  policy_arn = aws_iam_policy.openclaw_publisher_core.arn
+}
+
+resource "aws_iam_role_policy_attachment" "openclaw_publisher_manage_a" {
+  role       = aws_iam_role.openclaw_publisher.name
+  policy_arn = aws_iam_policy.openclaw_publisher_manage_a.arn
+}
+
+resource "aws_iam_role_policy_attachment" "openclaw_publisher_manage_b" {
+  role       = aws_iam_role.openclaw_publisher.name
+  policy_arn = aws_iam_policy.openclaw_publisher_manage_b.arn
 }
 
 output "openclaw_codebuild_project" {
