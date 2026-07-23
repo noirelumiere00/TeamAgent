@@ -1209,6 +1209,7 @@ def _temporary_root_environment(
     ca_bundle = _bootstrap_ca_bundle(source)
     if ca_bundle is not None:
         result["AWS_CA_BUNDLE"] = ca_bundle
+        result["SSL_CERT_FILE"] = ca_bundle
     return result
 
 
@@ -1238,6 +1239,7 @@ def _session_environment(
     ca_bundle = _bootstrap_ca_bundle(base)
     if ca_bundle is not None:
         result["AWS_CA_BUNDLE"] = ca_bundle
+        result["SSL_CERT_FILE"] = ca_bundle
     return result
 
 
