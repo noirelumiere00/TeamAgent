@@ -1178,8 +1178,8 @@ resource "aws_iam_policy" "runtime_automation_control_plane_manage_a" {
 
   lifecycle {
     precondition {
-      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_manage_a.json) < 6144
-      error_message = "Runtime automation control-plane manage-a policy must remain below 6,144 characters."
+      condition     = length(replace(data.aws_iam_policy_document.runtime_automation_control_plane_manage_a.json, "/\\s/", "")) < 6144
+      error_message = "Runtime automation control-plane manage-a policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
     }
   }
 }
@@ -1190,8 +1190,8 @@ resource "aws_iam_policy" "runtime_automation_control_plane_manage_b" {
 
   lifecycle {
     precondition {
-      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_manage_b.json) < 6144
-      error_message = "Runtime automation control-plane manage-b policy must remain below 6,144 characters."
+      condition     = length(replace(data.aws_iam_policy_document.runtime_automation_control_plane_manage_b.json, "/\\s/", "")) < 6144
+      error_message = "Runtime automation control-plane manage-b policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
     }
   }
 }
@@ -1202,8 +1202,8 @@ resource "aws_iam_policy" "runtime_automation_control_plane_core" {
 
   lifecycle {
     precondition {
-      condition     = length(data.aws_iam_policy_document.runtime_automation_control_plane_core.json) < 6144
-      error_message = "Runtime automation control-plane core policy must remain below 6,144 characters."
+      condition     = length(replace(data.aws_iam_policy_document.runtime_automation_control_plane_core.json, "/\\s/", "")) < 6144
+      error_message = "Runtime automation control-plane core policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
     }
   }
 }
