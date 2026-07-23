@@ -18,7 +18,7 @@ different, one-time control-plane workflow with a smaller authority:
    tags, role tags, and the local invocation artifact. Cleanup requires that
    exact ownership proof.
 3. The bootstrap principal assumes that role for one hour with a fixed external
-   ID, session name, and source identity. The role has explicit denies for
+   ID and session name. The role has explicit denies for
    CodeBuild execution, ECR image writes/deletes, KMS signing, release-evidence
    object writes, long-lived IAM credentials, runtime mutation, debug sessions,
    and all role chaining.
