@@ -740,6 +740,7 @@ def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path)
         "AWS_SECRET_ACCESS_KEY": "temporary-secret",
         "AWS_SESSION_TOKEN": "temporary-session",
         "AWS_CA_BUNDLE": str(ambient_bundle),
+        "SSL_CERT_FILE": str(ambient_bundle),
         BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(explicit_bundle),
     }
 
@@ -748,6 +749,7 @@ def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path)
         region="ap-northeast-1",
     )
     assert checked["AWS_CA_BUNDLE"] == str(explicit_bundle)
+    assert checked["SSL_CERT_FILE"] == str(explicit_bundle)
 
     source.pop(BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV)
     checked_without_explicit_bundle = BOOTSTRAP._temporary_root_environment(
@@ -755,6 +757,7 @@ def test_temporary_root_environment_uses_only_explicit_ca_bundle(tmp_path: Path)
         region="ap-northeast-1",
     )
     assert "AWS_CA_BUNDLE" not in checked_without_explicit_bundle
+    assert "SSL_CERT_FILE" not in checked_without_explicit_bundle
 
 
 def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> None:
@@ -764,6 +767,7 @@ def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> Non
     explicit_bundle.write_text("explicit CA bundle\n", encoding="utf-8")
     base = {
         "AWS_CA_BUNDLE": str(ambient_bundle),
+        "SSL_CERT_FILE": str(ambient_bundle),
         BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV: str(explicit_bundle),
     }
     credentials = {
@@ -778,6 +782,7 @@ def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> Non
         region="ap-northeast-1",
     )
     assert checked["AWS_CA_BUNDLE"] == str(explicit_bundle)
+    assert checked["SSL_CERT_FILE"] == str(explicit_bundle)
 
     base.pop(BOOTSTRAP.BOOTSTRAP_AWS_CA_BUNDLE_ENV)
     checked_without_explicit_bundle = BOOTSTRAP._session_environment(
@@ -786,6 +791,7 @@ def test_session_environment_uses_only_explicit_ca_bundle(tmp_path: Path) -> Non
         region="ap-northeast-1",
     )
     assert "AWS_CA_BUNDLE" not in checked_without_explicit_bundle
+    assert "SSL_CERT_FILE" not in checked_without_explicit_bundle
 
 
 def test_root_credentials_must_be_an_explicit_temporary_session() -> None:
