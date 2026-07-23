@@ -2508,8 +2508,12 @@ def _assume_seed(
     if assumed_user.get("Arn") != contract.seed["session_arn"]:
         raise BootstrapError("STS returned an unexpected seed session ARN")
     expiration = credentials.get("Expiration")
-    if not isinstance(expiration, str) or not expiration.endswith("Z"):
+    if not isinstance(expiration, str):
         raise BootstrapError("STS seed session expiration is malformed")
+    try:
+        dt.datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise BootstrapError("STS seed session expiration is malformed") from exc
     session_env = _session_environment(
         principal_env,
         credentials,
