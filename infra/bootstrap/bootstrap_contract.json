@@ -13,7 +13,6 @@
     "inline_policy_name": "teamagent-production-provenance-bootstrap-boundary",
     "session_name": "teamagent-provenance-bootstrap",
     "session_arn": "arn:aws:sts::718959508629:assumed-role/teamagent-production-provenance-bootstrap-v1/teamagent-provenance-bootstrap",
-    "source_identity": "teamagent-production-provenance-bootstrap",
     "max_session_seconds": 3600
   },
   "backend": {

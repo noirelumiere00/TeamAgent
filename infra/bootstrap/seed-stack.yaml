@@ -166,7 +166,6 @@ Resources:
               AWS: arn:aws:iam::718959508629:user/AIIAdev
             Action:
               - sts:AssumeRole
-              - sts:SetSourceIdentity
             Condition:
               ArnEquals:
                 aws:PrincipalArn: arn:aws:iam::718959508629:user/AIIAdev
@@ -175,7 +174,6 @@ Resources:
               StringEquals:
                 sts:ExternalId: !Ref BootstrapExternalId
                 sts:RoleSessionName: teamagent-provenance-bootstrap
-                sts:SourceIdentity: teamagent-production-provenance-bootstrap
       ManagedPolicyArns:
         - !Ref BootstrapDenyPolicy
       Policies:

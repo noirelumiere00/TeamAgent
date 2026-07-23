@@ -267,6 +267,7 @@ def test_contract_is_strict_and_current_release_contracts_are_blocked() -> None:
     )
     assert contract.backend["key"] == "teamagent/terraform.tfstate"
     assert contract.seed["max_session_seconds"] == 3600
+    assert "source_identity" not in contract.seed
     assert (
         contract.seed["inline_policy_name"] == "teamagent-production-provenance-bootstrap-boundary"
     )
@@ -652,11 +653,11 @@ def test_seed_is_temporary_mfa_sts_only_and_denies_dangerous_paths() -> None:
     assert trust.count(bootstrap_principal_arn) == 2
     assert "arn:aws:iam::718959508629:root" not in trust
     assert "- sts:AssumeRole" in trust
-    assert "- sts:SetSourceIdentity" in trust
+    assert "- sts:SetSourceIdentity" not in trust
     assert 'aws:MultiFactorAuthPresent: "true"' in trust
     assert "sts:ExternalId: !Ref BootstrapExternalId" in trust
     assert "sts:RoleSessionName: teamagent-provenance-bootstrap" in trust
-    assert "sts:SourceIdentity: teamagent-production-provenance-bootstrap" in trust
+    assert "sts:SourceIdentity: teamagent-production-provenance-bootstrap" not in trust
     assert "arn:aws:iam::aws:policy/ReadOnlyAccess" not in body
     assert "arn:aws:iam::aws:policy/PowerUserAccess" not in body
     assert "Sid: ExactBootstrapInventory" in body
@@ -1252,6 +1253,79 @@ def test_seed_creation_records_the_exact_cloudformation_stack_id() -> None:
     )
 
 
+def test_seed_assume_role_omits_source_identity() -> None:
+    contract = _contract()
+    external_id = "a" * 64
+
+    class Runner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def run(
+            self,
+            arguments: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            check: bool = True,
+        ) -> Any:
+            del cwd, env, check
+            call = list(arguments)
+            self.calls.append(call)
+            if "assume-role" in call:
+                payload = {
+                    "Credentials": {
+                        "AccessKeyId": "ASIAEXAMPLE",
+                        "SecretAccessKey": "secret",
+                        "SessionToken": "token",
+                        "Expiration": "2099-01-01T00:00:00Z",
+                    },
+                    "AssumedRoleUser": {
+                        "AssumedRoleId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
+                        "Arn": contract.seed["session_arn"],
+                    },
+                }
+            else:
+                assert "get-caller-identity" in call
+                payload = {
+                    "Account": contract.account_id,
+                    "Arn": contract.seed["session_arn"],
+                    "UserId": "AROAEXAMPLE:teamagent-provenance-bootstrap",
+                }
+            return BOOTSTRAP.CommandResult(
+                stdout=json.dumps(payload).encode(),
+                stderr=b"",
+                returncode=0,
+            )
+
+    runner = Runner()
+    BOOTSTRAP._assume_seed(
+        runner,
+        repo_root=ROOT,
+        principal_env={"PATH": os.environ["PATH"]},
+        contract=contract,
+        external_id=external_id,
+    )
+
+    assume_call = runner.calls[0]
+    sts_index = assume_call.index("sts")
+    assert assume_call[sts_index:] == [
+        "sts",
+        "assume-role",
+        "--role-arn",
+        contract.seed["role_arn"],
+        "--role-session-name",
+        contract.seed["session_name"],
+        "--external-id",
+        external_id,
+        "--duration-seconds",
+        str(contract.seed["max_session_seconds"]),
+        "--output",
+        "json",
+    ]
+    assert "--source-identity" not in assume_call
+
+
 def test_seed_retirement_closes_trust_before_revoking_sessions_and_deleting() -> None:
     runner = _RetirementRunner()
     result = BOOTSTRAP._revoke_and_delete_seed(
@@ -1276,6 +1350,14 @@ def test_seed_retirement_closes_trust_before_revoking_sessions_and_deleting() ->
     )
     assert trust_index < revoke_index < delete_index
     assert '"Sid":"RetiredBootstrapRole"' in flattened[trust_index]
+    trust_call = runner.calls[trust_index]
+    trust_document = json.loads(
+        trust_call[trust_call.index("--policy-document") + 1]
+    )
+    assert trust_document["Statement"][0]["Action"] == [
+        "sts:AssumeRole",
+        "sts:SetSourceIdentity",
+    ]
     revoke_call = runner.calls[revoke_index]
     assert revoke_call[revoke_call.index("--policy-name") + 1] == (
         "teamagent-production-provenance-bootstrap-boundary"
