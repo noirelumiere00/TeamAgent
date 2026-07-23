@@ -29,8 +29,23 @@ locals {
   image_attestor_project_name = "${var.project_name}-${var.environment}-image-attestor"
   image_promoter_project_name = "${var.project_name}-${var.environment}-image-promoter"
   release_evidence_bucket     = "${var.project_name}-${var.environment}-image-release-evidence"
-  tiktok_launcher_role_name   = "${var.project_name}-${var.environment}-tiktok-build-launcher"
-  release_launcher_role_name  = "${var.project_name}-${var.environment}-release-launcher"
+  tiktok_image_buildspec_s3_key = (
+    "codebuild-buildspecs/${local.tiktok_codebuild_project_name}.yml"
+  )
+  mcp_source_publisher_buildspec_s3_key = (
+    "codebuild-buildspecs/${local.mcp_source_publisher_project_name}.yml"
+  )
+  image_attestor_buildspec_s3_key = (
+    "codebuild-buildspecs/${local.image_attestor_project_name}.yml"
+  )
+  image_promoter_buildspec_s3_key = (
+    "codebuild-buildspecs/${local.image_promoter_project_name}.yml"
+  )
+  # A fixed horizon avoids perpetual S3 object updates from timestamp()-based
+  # retention while satisfying the evidence bucket's explicit COMPLIANCE lock.
+  codebuild_buildspec_retain_until_date = "2099-12-31T23:59:59Z"
+  tiktok_launcher_role_name             = "${var.project_name}-${var.environment}-tiktok-build-launcher"
+  release_launcher_role_name            = "${var.project_name}-${var.environment}-release-launcher"
   release_control_updater_role_name = (
     "${var.project_name}-${var.environment}-release-control-updater"
   )
@@ -165,7 +180,7 @@ locals {
   # CodeBuild publishes no condition keys for debugSessionEnabled or timeout
   # overrides. Debug channels are denied below; timeout is not an authorization
   # boundary and cannot change the pinned source/buildspec/role/image/gates.
-  launcher_denied_override_condition_keys = toset([
+  launcher_denied_override_condition_keys_manage_a = toset([
     "codebuild:source",
     "codebuild:source.buildspec",
     "codebuild:source.buildStatusConfig.context",
@@ -178,6 +193,8 @@ locals {
     "codebuild:artifacts",
     "codebuild:secondaryArtifacts",
     "codebuild:environment.image",
+  ])
+  launcher_denied_override_condition_keys_manage_b = toset([
     "codebuild:environment.type",
     "codebuild:environment.computeType",
     "codebuild:environment.computeConfiguration",
@@ -190,8 +207,15 @@ locals {
     "codebuild:cache",
     "codebuild:serviceRole",
     "codebuild:encryptionKey",
+  ])
+  launcher_denied_override_condition_keys_guardrails = toset([
     "codebuild:autoRetryLimit",
   ])
+  launcher_denied_override_condition_keys = setunion(
+    local.launcher_denied_override_condition_keys_manage_a,
+    local.launcher_denied_override_condition_keys_manage_b,
+    local.launcher_denied_override_condition_keys_guardrails,
+  )
 }
 
 check "fixed_codebuild_account_and_region" {
@@ -560,7 +584,7 @@ resource "aws_iam_role" "codebuild_launcher" {
   max_session_duration = 10800
 }
 
-data "aws_iam_policy_document" "codebuild_launcher" {
+data "aws_iam_policy_document" "codebuild_launcher_core" {
   statement {
     sid = "RequireAvailableTeamAgentCodeConnection"
     actions = [
@@ -697,6 +721,41 @@ data "aws_iam_policy_document" "codebuild_launcher" {
       values   = ["verified-candidate"]
     }
   }
+}
+
+data "aws_iam_policy_document" "codebuild_launcher_manage_a" {
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_a
+    content {
+      effect    = "Deny"
+      actions   = ["codebuild:StartBuild"]
+      resources = local.launcher_all_project_arns
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+data "aws_iam_policy_document" "codebuild_launcher_manage_b" {
+  dynamic "statement" {
+    for_each = local.launcher_denied_override_condition_keys_manage_b
+    content {
+      effect    = "Deny"
+      actions   = ["codebuild:StartBuild"]
+      resources = local.launcher_all_project_arns
+      condition {
+        test     = "Null"
+        variable = statement.value
+        values   = ["false"]
+      }
+    }
+  }
+}
+
+data "aws_iam_policy_document" "codebuild_launcher_guardrails" {
   statement {
     sid     = "ReadVerifiedMcpBundleDigests"
     actions = ["ecr:DescribeImages"]
@@ -706,7 +765,7 @@ data "aws_iam_policy_document" "codebuild_launcher" {
     ]
   }
   dynamic "statement" {
-    for_each = local.launcher_denied_override_condition_keys
+    for_each = local.launcher_denied_override_condition_keys_guardrails
     content {
       effect    = "Deny"
       actions   = ["codebuild:StartBuild"]
@@ -771,10 +830,72 @@ data "aws_iam_policy_document" "codebuild_launcher" {
   }
 }
 
-resource "aws_iam_role_policy" "codebuild_launcher" {
-  name   = "teamagent-dev-codebuild-launcher"
-  role   = aws_iam_role.codebuild_launcher.id
-  policy = data.aws_iam_policy_document.codebuild_launcher.json
+resource "aws_iam_policy" "codebuild_launcher_core" {
+  name   = "${local.launcher_role_name}-core"
+  policy = data.aws_iam_policy_document.codebuild_launcher_core.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.codebuild_launcher_core.json, "/\\s/", "")) < 6144
+      error_message = "CodeBuild launcher core policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "codebuild_launcher_manage_a" {
+  name   = "${local.launcher_role_name}-manage-a"
+  policy = data.aws_iam_policy_document.codebuild_launcher_manage_a.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.codebuild_launcher_manage_a.json, "/\\s/", "")) < 6144
+      error_message = "CodeBuild launcher manage-a policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "codebuild_launcher_manage_b" {
+  name   = "${local.launcher_role_name}-manage-b"
+  policy = data.aws_iam_policy_document.codebuild_launcher_manage_b.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.codebuild_launcher_manage_b.json, "/\\s/", "")) < 6144
+      error_message = "CodeBuild launcher manage-b policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_policy" "codebuild_launcher_guardrails" {
+  name   = "${local.launcher_role_name}-guardrails"
+  policy = data.aws_iam_policy_document.codebuild_launcher_guardrails.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.codebuild_launcher_guardrails.json, "/\\s/", "")) < 6144
+      error_message = "CodeBuild launcher guardrails policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_launcher_core" {
+  role       = aws_iam_role.codebuild_launcher.name
+  policy_arn = aws_iam_policy.codebuild_launcher_core.arn
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_launcher_manage_a" {
+  role       = aws_iam_role.codebuild_launcher.name
+  policy_arn = aws_iam_policy.codebuild_launcher_manage_a.arn
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_launcher_manage_b" {
+  role       = aws_iam_role.codebuild_launcher.name
+  policy_arn = aws_iam_policy.codebuild_launcher_manage_b.arn
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_launcher_guardrails" {
+  role       = aws_iam_role.codebuild_launcher.name
+  policy_arn = aws_iam_policy.codebuild_launcher_guardrails.arn
 }
 
 data "aws_iam_policy_document" "aiia_dev_no_direct_start_build" {
@@ -1267,6 +1388,11 @@ data "aws_iam_policy_document" "tiktok_codebuild" {
     resources = [aws_codestarconnections_connection.tiktok_codebuild[0].arn]
   }
   statement {
+    sid       = "ReadExternalBuildspec"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.tiktok_image_buildspec_s3_key}"]
+  }
+  statement {
     sid = "TiktokEcrQuarantineWrite"
     actions = [
       "ecr:BatchCheckLayerAvailability",
@@ -1383,6 +1509,26 @@ locals {
   )
 }
 
+resource "aws_s3_object" "tiktok_image_buildspec" {
+  count = local.tk_enabled
+
+  bucket                        = aws_s3_bucket.image_release_evidence.id
+  key                           = local.tiktok_image_buildspec_s3_key
+  content                       = local.tiktok_image_buildspec
+  content_type                  = "text/yaml"
+  source_hash                   = sha256(local.tiktok_image_buildspec)
+  server_side_encryption        = "aws:kms"
+  kms_key_id                    = aws_kms_key.image_release_evidence.arn
+  bucket_key_enabled            = true
+  object_lock_mode              = "COMPLIANCE"
+  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
+
+  depends_on = [
+    aws_s3_bucket_object_lock_configuration.image_release_evidence,
+    aws_s3_bucket_policy.image_release_evidence,
+  ]
+}
+
 resource "aws_codebuild_project" "tiktok_image" {
   count        = local.tk_enabled
   name         = local.tiktok_codebuild_project_name
@@ -1410,7 +1556,7 @@ resource "aws_codebuild_project" "tiktok_image" {
     location            = "https://github.com/noirelumiere00/tiktok-data-service.git"
     git_clone_depth     = 0
     report_build_status = false
-    buildspec           = local.tiktok_image_buildspec
+    buildspec           = "${aws_s3_bucket.image_release_evidence.arn}/${local.tiktok_image_buildspec_s3_key}"
     auth {
       type     = "CODECONNECTIONS"
       resource = aws_codestarconnections_connection.tiktok_codebuild[0].arn
@@ -1422,6 +1568,11 @@ resource "aws_codebuild_project" "tiktok_image" {
       group_name = aws_cloudwatch_log_group.codebuild_tiktok_image[0].name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.tiktok_codebuild,
+    aws_s3_object.tiktok_image_buildspec,
+  ]
 }
 
 output "tiktok_codebuild_project" {
@@ -2186,6 +2337,11 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_codestarconnections_connection.openclaw_codebuild.arn]
   }
   statement {
+    sid       = "ReadExternalBuildspec"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.mcp_source_publisher_buildspec_s3_key}"]
+  }
+  statement {
     sid = "ReadPinnedAppInputs"
     actions = [
       "s3:GetObject",
@@ -2299,6 +2455,11 @@ data "aws_iam_policy_document" "image_attestor" {
     sid       = "EcrAuth"
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
+  }
+  statement {
+    sid       = "ReadExternalBuildspec"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.image_attestor_buildspec_s3_key}"]
   }
   statement {
     sid = "ReadWriteOnlyQuarantineEvidence"
@@ -2513,6 +2674,11 @@ data "aws_iam_policy_document" "image_promoter" {
     sid       = "EcrAuth"
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
+  }
+  statement {
+    sid       = "ReadExternalBuildspec"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.image_promoter_buildspec_s3_key}"]
   }
   statement {
     sid = "ReadOnlyQuarantineAndCandidateSubjects"
@@ -2750,6 +2916,60 @@ locals {
   )
 }
 
+resource "aws_s3_object" "mcp_source_publisher_buildspec" {
+  bucket                        = aws_s3_bucket.image_release_evidence.id
+  key                           = local.mcp_source_publisher_buildspec_s3_key
+  content                       = local.mcp_source_publisher_buildspec
+  content_type                  = "text/yaml"
+  source_hash                   = sha256(local.mcp_source_publisher_buildspec)
+  server_side_encryption        = "aws:kms"
+  kms_key_id                    = aws_kms_key.image_release_evidence.arn
+  bucket_key_enabled            = true
+  object_lock_mode              = "COMPLIANCE"
+  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
+
+  depends_on = [
+    aws_s3_bucket_object_lock_configuration.image_release_evidence,
+    aws_s3_bucket_policy.image_release_evidence,
+  ]
+}
+
+resource "aws_s3_object" "image_attestor_buildspec" {
+  bucket                        = aws_s3_bucket.image_release_evidence.id
+  key                           = local.image_attestor_buildspec_s3_key
+  content                       = local.image_attestor_buildspec
+  content_type                  = "text/yaml"
+  source_hash                   = sha256(local.image_attestor_buildspec)
+  server_side_encryption        = "aws:kms"
+  kms_key_id                    = aws_kms_key.image_release_evidence.arn
+  bucket_key_enabled            = true
+  object_lock_mode              = "COMPLIANCE"
+  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
+
+  depends_on = [
+    aws_s3_bucket_object_lock_configuration.image_release_evidence,
+    aws_s3_bucket_policy.image_release_evidence,
+  ]
+}
+
+resource "aws_s3_object" "image_promoter_buildspec" {
+  bucket                        = aws_s3_bucket.image_release_evidence.id
+  key                           = local.image_promoter_buildspec_s3_key
+  content                       = local.image_promoter_buildspec
+  content_type                  = "text/yaml"
+  source_hash                   = sha256(local.image_promoter_buildspec)
+  server_side_encryption        = "aws:kms"
+  kms_key_id                    = aws_kms_key.image_release_evidence.arn
+  bucket_key_enabled            = true
+  object_lock_mode              = "COMPLIANCE"
+  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
+
+  depends_on = [
+    aws_s3_bucket_object_lock_configuration.image_release_evidence,
+    aws_s3_bucket_policy.image_release_evidence,
+  ]
+}
+
 resource "aws_codebuild_project" "mcp_source_publisher" {
   name           = local.mcp_source_publisher_project_name
   description    = "Independently validate origin/dev and publish a signed versioned MCP source"
@@ -2770,7 +2990,7 @@ resource "aws_codebuild_project" "mcp_source_publisher" {
     location            = "https://github.com/noirelumiere00/TeamAgent.git"
     git_clone_depth     = 0
     report_build_status = false
-    buildspec           = local.mcp_source_publisher_buildspec
+    buildspec           = "${aws_s3_bucket.image_release_evidence.arn}/${local.mcp_source_publisher_buildspec_s3_key}"
     auth {
       type     = "CODECONNECTIONS"
       resource = aws_codestarconnections_connection.openclaw_codebuild.arn
@@ -2782,6 +3002,11 @@ resource "aws_codebuild_project" "mcp_source_publisher" {
       group_name = aws_cloudwatch_log_group.codebuild_mcp_source_publisher.name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.mcp_source_publisher,
+    aws_s3_object.mcp_source_publisher_buildspec,
+  ]
 }
 
 resource "aws_codebuild_project" "image_attestor" {
@@ -2801,7 +3026,7 @@ resource "aws_codebuild_project" "image_attestor" {
 
   source {
     type      = "NO_SOURCE"
-    buildspec = local.image_attestor_buildspec
+    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/${local.image_attestor_buildspec_s3_key}"
   }
 
   logs_config {
@@ -2809,6 +3034,11 @@ resource "aws_codebuild_project" "image_attestor" {
       group_name = aws_cloudwatch_log_group.codebuild_image_attestor.name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.image_attestor,
+    aws_s3_object.image_attestor_buildspec,
+  ]
 }
 
 resource "aws_codebuild_project" "image_promoter" {
@@ -2828,7 +3058,7 @@ resource "aws_codebuild_project" "image_promoter" {
 
   source {
     type      = "NO_SOURCE"
-    buildspec = local.image_promoter_buildspec
+    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/${local.image_promoter_buildspec_s3_key}"
   }
 
   logs_config {
@@ -2836,6 +3066,11 @@ resource "aws_codebuild_project" "image_promoter" {
       group_name = aws_cloudwatch_log_group.codebuild_image_promoter.name
     }
   }
+
+  depends_on = [
+    aws_iam_role_policy.image_promoter,
+    aws_s3_object.image_promoter_buildspec,
+  ]
 }
 
 output "mcp_source_publisher_project" {
