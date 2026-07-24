@@ -1,8 +1,9 @@
 """mail_followup Skill 本体（要返信トリアージ・メタデータのみ・読み取り専用）。
 
-本人の受信箱から、指定クライアントについて「相手から最後に来たまま動いていない」メールを
-新しい順／放置日数つきで列挙する。**本文を一切読まない**（format='metadata'）純メタデータ
-処理なので、LLM 不使用＝コスト0・プロンプトインジェクション面ゼロ・PII 最小。
+本人の受信箱から、指定クライアントについて「相手から最後に来たまま動いていない」スレッドを
+新しい順／放置日数つきで列挙する。thread_id で重複排除し、スレッド末尾が本人の返信なら除外。
+**本文を一切読まない**（format='metadata'）純メタデータ処理なので、LLM 不使用＝コスト0・
+プロンプトインジェクション面ゼロ・PII 最小。
 
 ⚠️ 死守ライン（mail_constraints と同じ G1-G7。本 Skill は本文を読まないので G6 は N/A）:
   G1 本人受信箱限定: ctx.metadata.user_email→TokenStore。LLM/呼出側に受信箱を選ばせない。
@@ -13,9 +14,9 @@
   G6 N/A（本文を読まず LLM に渡さないため、インジェクション面が存在しない）。
   G7 監査ログ: who(masked)/when/件数のみ。件名・本文・PII は出さない。
 
-⚠️ 正直ラベリング（重要）: gmail.readonly のみ・スレッド全文 API ラッパー未実装のため、
-「本人が既に返信済みか」は判定できない。よって本 Skill は **「相手から最後に来たメール
-（返信済みかは未判定）」** として返す。「未返信」と断定しない（誤検知＝信頼喪失を避ける）。
+⚠️ 正直ラベリング（重要）: gmail.readonly の users.threads.get(format='metadata') で
+スレッド末尾を確認し、本人の返信が最後のスレッドは候補から除外する。本文取得・下書き作成・
+ラベル変更は行わず、OAuth スコープも gmail.readonly から拡大しない。
 
 3 層分離: 本ファイルは Skill 層。googleapiclient / boto3 は触らず adapters/ 経由。
 """
@@ -44,8 +45,8 @@ logger = structlog.get_logger(__name__)
 _MS_PER_DAY = 86_400_000
 
 _HONEST_NOTE = (
-    "※ これは「相手から最後に来たメール」です。あなたが既に返信済みかは現時点では判定して"
-    "いません（gmail.readonly のみ・スレッド精査は今後対応）。"
+    "※ スレッドの最新メッセージをメタデータで確認し、あなたの返信が最後のものは除外して"
+    "います（gmail.readonly のみ・本文は読みません）。"
 )
 
 
@@ -56,7 +57,8 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
     name: ClassVar[str] = "mail_followup"
     description: ClassVar[str] = (
         "本人の受信箱から、指定クライアントについて『相手から最後に来たまま動いていない』"
-        "メールを放置日数つきで列挙する。本文は読まず件名・相手はマスク。返信済みかは未判定。"
+        "メールスレッドを放置日数つきで列挙する。本文は読まず件名・相手はマスク。"
+        "スレッド末尾が本人の返信なら候補から除外する。"
         "本人が /teamagent connect で連携済みの時のみ使える（未連携は不可）。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
@@ -104,25 +106,58 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         # G5: クエリ限定（client + 期間 + 受信のみ。自分の送信は除外）。
         query = self._build_query(input)
         refs, _ = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
-        log.info("mail_followup_scan", scanned=len(refs))  # 本文・件名なし
+        # Gmail quota が 10 units/threads.get のため、API 呼び出しより先にスレッド重複を除く。
+        unique_refs = _dedupe_refs_by_thread(refs)
+        log.info(
+            "mail_followup_scan",
+            scanned=len(refs),
+            unique_threads=len(unique_refs),
+        )  # 本文・件名なし
 
         now_ms = self._now_ms if self._now_ms is not None else int(time.time() * 1000)
         items: list[FollowupItem] = []
-        for ref in refs:
-            # format='metadata' = ヘッダのみ取得。本文 payload は読まない（G6 構造的）。
-            msg = gmail.get_message(ref.id, ctx.request_id, format="metadata")
-            counterpart = _first_counterpart(msg.headers, requester)
-            idle_days = _idle_days(msg.internal_date_ms, now_ms)
+        for ref in unique_refs:
+            thread_id = str(getattr(ref, "thread_id", "") or "")
+            if not thread_id:
+                # list_messages は thread_id を返す契約。欠損時は末尾を判定できないため除外する。
+                continue
+            # users.threads.get は gmail.readonly 域内。format='metadata' のみを使い、
+            # 本文取得・書き込み・OAuth スコープ拡大は行わない（G4/G6）。
+            thread = gmail.get_thread(
+                thread_id,
+                ctx.request_id,
+                format="metadata",
+            )
+            # threads.get に下書きが混ざっても「返信済み」とは扱わず、最後の送受信だけを見る。
+            thread = [
+                msg
+                for msg in thread
+                if "DRAFT"
+                not in {
+                    str(label).strip().upper() for label in (getattr(msg, "label_ids", ()) or ())
+                }
+            ]
+            if not thread:
+                continue
+            thread = sorted(
+                thread,
+                key=lambda msg: int(getattr(msg, "internal_date_ms", 0) or 0),
+            )
+            anchor = thread[-1]
+            if _is_from_requester(anchor, requester):
+                continue
+            counterpart = _first_counterpart(anchor.headers, requester)
+            idle_days = _idle_days(anchor.internal_date_ms, now_ms)
             if input.idle_days is not None and idle_days < input.idle_days:
                 continue
-            subject = str(scrub_value(msg.headers.get("Subject", "")))[:80]
+            subject = str(scrub_value(anchor.headers.get("Subject", "")))[:80]
             items.append(
                 FollowupItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=subject,
                     idle_days=idle_days,
-                    occurred_at=_iso_or_none(msg.internal_date_ms),
-                    evidence_ref=_hash_id(ref.id),
+                    occurred_at=_iso_or_none(anchor.internal_date_ms),
+                    evidence_ref=_hash_id(anchor.id),
                 )
             )
 
@@ -200,6 +235,45 @@ def _first_counterpart(headers: dict[str, str], requester: str) -> str | None:
             if email.strip().lower() != req:
                 return email
     return None
+
+
+def _is_from_requester(msg: object, requester: str) -> bool:
+    """スレッド末尾が本人の送信済み返信なら True。
+
+    Gmail の SENT ラベルを第一根拠にすることで send-as alias にも対応する。テスト fake や
+    ラベル欠損時は From を本人 email と照合する。DRAFT は未送信なので返信済みに数えない。
+    """
+    labels = {
+        str(label).strip().upper()
+        for label in (getattr(msg, "label_ids", ()) or ())
+        if str(label).strip()
+    }
+    if "DRAFT" in labels:
+        return False
+    if "SENT" in labels:
+        return True
+
+    req = requester.strip().lower()
+    headers = getattr(msg, "headers", {}) or {}
+    if not req or not isinstance(headers, dict):
+        return False
+    return any(
+        email.strip().lower() == req
+        for email in extract_thread_participants({"From": str(headers.get("From", ""))})
+    )
+
+
+def _dedupe_refs_by_thread(refs: list[object]) -> list[object]:
+    """list_messages の newest-first 順を保ち、thread_id ごとに最初の ref だけを残す。"""
+    seen: set[str] = set()
+    unique: list[object] = []
+    for ref in refs:
+        thread_id = str(getattr(ref, "thread_id", "") or "")
+        if not thread_id or thread_id in seen:
+            continue
+        seen.add(thread_id)
+        unique.append(ref)
+    return unique
 
 
 def _idle_days(internal_date_ms: int | None, now_ms: int) -> int:

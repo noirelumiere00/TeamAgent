@@ -74,8 +74,8 @@ adapter denylist（`users.messages.send`/`users.drafts.send`/delete/trash 等）
 - ※ 結果は**あなたにだけ**表示されます（チャンネルには出ません）。
 
 ## 6. 既知の制限
-- `mail_followup` の「未返信」は未判定（`users.threads.get` 未実装のため「相手から最後に来た
-  メール」として返す）。スレッド精査ラッパー追加で精度向上予定。
+- `mail_followup` は候補を `thread_id` で重複排除した後、`users.threads.get(format=metadata)`
+  の末尾を精査し、自分の返信（SENT または本人 From）が最後のスレッドを除外する。本文は取得しない。
 - 社内ナレッジは定期取り込みスナップショット（直近の会話は未反映の場合あり・注記表示）。
 - 返信ドラフトは最新の受信1通を対象（特定メール指定 `target_message_id` は将来対応）。
 
