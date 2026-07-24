@@ -2,6 +2,8 @@
 # Terraform embeds verify_ecr_scan.py at the placeholder below. The project has
 # no usable default source version; callers must pin a full main-branch commit.
 version: 0.2
+env:
+  git-credential-helper: yes
 phases:
   install:
     commands:

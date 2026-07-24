@@ -1,6 +1,8 @@
 # Fixed, dedicated OpenClaw core/media buildspec. Terraform embeds these bytes;
 # StartBuild buildspec and environment overrides are denied by IAM.
 version: 0.2
+env:
+  git-credential-helper: yes
 
 phases:
   pre_build:
