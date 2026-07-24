@@ -21,6 +21,8 @@ READY_CONTRACT_PATH = (
 )
 APP_HTML_VERSION_ID = "app-version-fixture"
 APP_HTML_SHA256 = hashlib.sha256(b"versioned app fixture\n").hexdigest()
+COMMIT = "1" * 40
+OTHER_COMMIT = "2" * 40
 
 
 def _load_module() -> object:
@@ -230,6 +232,57 @@ def test_ready_contract_requires_exact_core_evidence_and_receipt_subject() -> No
         provenance.RUNTIME_RECEIPT_B64_ARG,
         provenance.RUNTIME_RECEIPT_SHA256_ARG,
     }
+
+
+def test_runtime_release_ready_cli_binds_approval_to_expected_commit(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        provenance.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(READY_CONTRACT_PATH),
+                "--expected-commit",
+                COMMIT,
+            ]
+        )
+        == 0
+    )
+    assert (
+        provenance.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(READY_CONTRACT_PATH),
+                "--expected-commit",
+                OTHER_COMMIT,
+            ]
+        )
+        == 1
+    )
+    assert (
+        "approval source_commit does not bind the expected build commit"
+        in capsys.readouterr().err
+    )
+
+
+def test_runtime_release_ready_cli_keeps_blocked_contract_fail_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        provenance.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(ACTIVE_CONTRACT_PATH),
+                "--expected-commit",
+                COMMIT,
+            ]
+        )
+        == 1
+    )
+    assert "release is blocked" in capsys.readouterr().err
 
 
 def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:

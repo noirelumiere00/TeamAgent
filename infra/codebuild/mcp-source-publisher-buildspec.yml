@@ -95,9 +95,11 @@ phases:
           --runtime-contract \
             "$PUBLISHER_CHECKOUT/infra/codebuild/teamagent_runtime_contract.json" \
           --contract /tmp/teamagent_core_media_release_contract.json \
-          --repo-root "$PUBLISHER_CHECKOUT"
+          --repo-root "$PUBLISHER_CHECKOUT" \
+          --expected-commit "$EXPECTED_COMMIT"
         python3 /tmp/teamagent_bundle_provenance.py assert-release-ready \
-          --contract /tmp/teamagent_core_media_release_contract.json
+          --contract /tmp/teamagent_core_media_release_contract.json \
+          --expected-commit "$EXPECTED_COMMIT"
         mapfile -t PRODUCTION_APP_RECORD < <(
           python3 /tmp/teamagent_bundle_provenance.py production-record \
             --deploy-log "$PUBLISHER_CHECKOUT/infra/deploy_log.md" \
@@ -232,6 +234,7 @@ phases:
           --repo-root "$EXTRACTED" \
           --contract "$EXTRACTED/infra/codebuild/teamagent_core_media_release_contract.json" \
           --deploy-log "$EXTRACTED/infra/deploy_log.md" \
+          --expected-commit "$EXPECTED_COMMIT" \
           --baked-fallback "$BAKED_APP_HTML"
         mkdir -p "$EXTRACTED/src/teamagent/connect_web/static"
         install -m 0644 "$BAKED_APP_HTML" \

@@ -120,7 +120,8 @@ python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
   --runtime-contract "$RUNTIME_CONTRACT" \
   --contract \
     "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
-  --repo-root "$TRACKED_SOURCE_DIR"
+  --repo-root "$TRACKED_SOURCE_DIR" \
+  --expected-commit "$HEAD"
 RUNTIME_BUILD_ARGUMENTS="$EVIDENCE_DIR/runtime-build-arguments.txt"
 python3 "$TRACKED_SOURCE_DIR/infra/codebuild/source_provenance.py" \
   docker-build-arguments \

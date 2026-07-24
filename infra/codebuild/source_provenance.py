@@ -558,6 +558,25 @@ def require_release_ready(contract: dict[str, Any], *, label: str = "runtime con
         raise ProvenanceError(f"{label} release evidence bindings are invalid: {mismatches}")
 
 
+def require_release_ready_for_commit(
+    contract: dict[str, Any],
+    expected_commit: str,
+    *,
+    label: str = "runtime contract",
+) -> None:
+    require_release_ready(contract, label=label)
+    if not isinstance(expected_commit, str) or not _SHA1_RE.fullmatch(expected_commit):
+        raise ProvenanceError("expected commit must be a full lowercase SHA-1")
+    approval_record = contract["approval_record"]
+    if (
+        approval_record is None
+        or approval_record["source_commit"] != expected_commit
+    ):
+        raise ProvenanceError(
+            f"{label} approval source_commit does not bind the expected build commit"
+        )
+
+
 def load_runtime_contract(path: Path) -> dict[str, Any]:
     return validate_runtime_contract(_load_json(path, label="runtime contract"))
 
@@ -1498,6 +1517,7 @@ def _parser() -> argparse.ArgumentParser:
 
     release_ready = subparsers.add_parser("assert-release-ready")
     release_ready.add_argument("--contract", type=Path, required=True)
+    release_ready.add_argument("--expected-commit", required=True)
 
     build_arguments = subparsers.add_parser("docker-build-arguments")
     build_arguments.add_argument("--contract", type=Path, required=True)
@@ -1556,7 +1576,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "contract-sha256":
             print(runtime_contract_sha256(args.contract))
         elif args.command == "assert-release-ready":
-            require_release_ready(load_runtime_contract(args.contract))
+            require_release_ready_for_commit(
+                load_runtime_contract(args.contract),
+                args.expected_commit,
+            )
             print("runtime contract release evidence is complete")
         elif args.command == "docker-build-arguments":
             contract = verify_runtime_contract_digest(

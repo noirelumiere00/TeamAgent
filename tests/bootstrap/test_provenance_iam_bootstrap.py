@@ -2628,6 +2628,8 @@ def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -
     assert 'ROOT_ARN="arn:aws:iam::718959508629:root"' in wrapper
     assert 'git -C "$SCRIPT_DIR" rev-parse' not in wrapper
     assert 'python3 -I "$CONTRACT_HELPER"' in wrapper
+    assert '--expected-commit "$CONTRACT_EXPECTED_COMMIT"' in wrapper
+    assert "MCP receipt key does not bind one full source commit" in wrapper
     assert "--source-identity" in wrapper
     assert "--duration-seconds 10800" in wrapper
     assert "release requires exactly one --pipeline" in wrapper

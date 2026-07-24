@@ -61,6 +61,27 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
         'teamagent_core_media_release_contract.json"'
     ) in body
     assert '--repo-root "$CONTEXT_VERIFY_DIR"' in body
+    assert (
+        'python3 "$BUNDLE_PROVENANCE" assert-release-ready \\\n'
+        '          --contract "$RELEASE_CONTRACT" \\\n'
+        '          --expected-commit "$GIT_COMMIT"'
+    ) in body
+    assert (
+        'python3 "$BUNDLE_PROVENANCE" verify-source-interface \\\n'
+        '          --repo-root "$CODEBUILD_SRC_DIR" \\\n'
+        '          --contract "$RELEASE_CONTRACT" \\\n'
+        '          --deploy-log "$DEPLOY_LOG" \\\n'
+        '          --expected-commit "$GIT_COMMIT"'
+    ) in body
+    assert (
+        "python3 infra/codebuild/source_provenance.py assert-release-ready \\\n"
+        "          --contract infra/codebuild/teamagent_runtime_contract.json \\\n"
+        '          --expected-commit "$GIT_COMMIT"'
+    ) in body
+    assert (
+        '--repo-root "$CONTEXT_VERIFY_DIR" \\\n'
+        '          --expected-commit "$GIT_COMMIT"'
+    ) in body
     for required in (
         '--expected-commit "$GIT_COMMIT"',
         '--expected-branch "$GIT_BRANCH"',
@@ -303,7 +324,23 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
         'teamagent_runtime_contract.json"'
     ) in body
     assert '--contract /tmp/teamagent_core_media_release_contract.json' in body
-    assert '--repo-root "$PUBLISHER_CHECKOUT"' in body
+    assert (
+        '--repo-root "$PUBLISHER_CHECKOUT" \\\n'
+        '          --expected-commit "$EXPECTED_COMMIT"'
+    ) in body
+    assert (
+        "teamagent_bundle_provenance.py assert-release-ready \\\n"
+        "          --contract /tmp/teamagent_core_media_release_contract.json \\\n"
+        '          --expected-commit "$EXPECTED_COMMIT"'
+    ) in body
+    assert (
+        "teamagent_bundle_provenance.py verify-source-interface \\\n"
+        '          --repo-root "$EXTRACTED" \\\n'
+        '          --contract "$EXTRACTED/infra/codebuild/'
+        'teamagent_core_media_release_contract.json" \\\n'
+        '          --deploy-log "$EXTRACTED/infra/deploy_log.md" \\\n'
+        '          --expected-commit "$EXPECTED_COMMIT"'
+    ) in body
     assert '--version-id "$APP_HTML_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
     assert '--baked-fallback "$BAKED_APP_HTML"' in body

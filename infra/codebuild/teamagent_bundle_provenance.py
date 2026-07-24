@@ -714,6 +714,23 @@ def require_release_ready(contract: Mapping[str, Any]) -> None:
         raise ProvenanceError(f"release is blocked: {release['blocked_reason']}")
 
 
+def require_release_ready_for_commit(
+    contract: Mapping[str, Any],
+    expected_commit: str,
+) -> None:
+    require_release_ready(contract)
+    if not isinstance(expected_commit, str) or not SHA1_RE.fullmatch(expected_commit):
+        raise ProvenanceError("expected commit must be a full lowercase Git SHA")
+    approval_record = contract["approval_record"]
+    if (
+        approval_record is None
+        or approval_record["source_commit"] != expected_commit
+    ):
+        raise ProvenanceError(
+            "approval source_commit does not bind the expected build commit"
+        )
+
+
 def verify_production_record(
     contract: Mapping[str, Any],
     deploy_log: Path,
@@ -1076,7 +1093,10 @@ def validate_contract_pair(
     runtime_contract_path: Path,
     contract_path: Path,
     repo_root: Path,
+    expected_commit: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(expected_commit, str) or not SHA1_RE.fullmatch(expected_commit):
+        raise ProvenanceError("expected commit must be a full lowercase Git SHA")
     contract = load_contract(contract_path)
     runtime_contract = _load_runtime_contract(runtime_contract_path)
     try:
@@ -1185,12 +1205,13 @@ def validate_contract_pair(
                 "outer approval observations do not match the paired contract evidence"
             )
         inner_approval = runtime_contract["approval_record"]
-        if (
-            inner_approval is not None
-            and inner_approval["source_commit"] != outer_approval["source_commit"]
+        if outer_release["ready"] and (
+            inner_approval is None
+            or inner_approval["source_commit"] != expected_commit
+            or outer_approval["source_commit"] != expected_commit
         ):
             raise ProvenanceError(
-                "inner and outer approvals do not bind the same source commit"
+                "approval source_commit does not bind the expected build commit"
             )
     return contract, runtime_contract
 
@@ -1199,6 +1220,7 @@ def verify_source_interface(
     repo_root: Path,
     contract_path: Path,
     deploy_log: Path,
+    expected_commit: str,
     baked_fallback_path: Path | None = None,
 ) -> None:
     contract = load_contract(contract_path)
@@ -1208,7 +1230,12 @@ def verify_source_interface(
         label="contract source runtime contract",
     )
     runtime_path = repo_root / runtime["path"]
-    validate_contract_pair(runtime_path, contract_path, repo_root)
+    validate_contract_pair(
+        runtime_path,
+        contract_path,
+        repo_root,
+        expected_commit,
+    )
 
     fallback = _mapping(
         _mapping(contract["app_html"], label="contract.app_html")["baked_fallback"],
@@ -1385,6 +1412,7 @@ def _parser() -> argparse.ArgumentParser:
     contract_hash.add_argument("--contract", type=Path, required=True)
     ready = commands.add_parser("assert-release-ready")
     ready.add_argument("--contract", type=Path, required=True)
+    ready.add_argument("--expected-commit", required=True)
     app_hash = commands.add_parser("app-provenance-sha256")
     app_hash.add_argument("--contract", type=Path, required=True)
     app_hash.add_argument("--deploy-log", type=Path, required=True)
@@ -1392,11 +1420,13 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--repo-root", type=Path, required=True)
     source.add_argument("--contract", type=Path, required=True)
     source.add_argument("--deploy-log", type=Path, required=True)
+    source.add_argument("--expected-commit", required=True)
     source.add_argument("--baked-fallback", type=Path)
     pair = commands.add_parser("validate-contract-pair")
     pair.add_argument("--runtime-contract", type=Path, required=True)
     pair.add_argument("--contract", type=Path, required=True)
     pair.add_argument("--repo-root", type=Path, required=True)
+    pair.add_argument("--expected-commit", required=True)
     oci = commands.add_parser("verify-oci-config")
     oci.add_argument("--config", type=Path, required=True)
     oci.add_argument("--subject", choices=("core", "media"), required=True)
@@ -1430,7 +1460,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "contract-sha256":
             print(contract_sha256(args.contract))
         elif args.command == "assert-release-ready":
-            require_release_ready(load_contract(args.contract))
+            require_release_ready_for_commit(
+                load_contract(args.contract),
+                args.expected_commit,
+            )
         elif args.command == "app-provenance-sha256":
             contract = load_contract(args.contract)
             record = verify_production_record(contract, args.deploy_log)
@@ -1440,6 +1473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.repo_root,
                 args.contract,
                 args.deploy_log,
+                args.expected_commit,
                 args.baked_fallback,
             )
         elif args.command == "validate-contract-pair":
@@ -1447,6 +1481,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.runtime_contract,
                 args.contract,
                 args.repo_root,
+                args.expected_commit,
             )
         elif args.command == "verify-oci-config":
             verify_oci_config(

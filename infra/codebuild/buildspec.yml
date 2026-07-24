@@ -102,7 +102,9 @@ phases:
         [ "$BAKED_APP_HTML_KEY" = "codebuild/baked-fallback/connect-web-app.html" ] \
           || { echo "FATAL: baked fallback key differs from the fixed release location"; exit 1; }
         readonly BAKED_APP_HTML_KEY
-        python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT"
+        python3 "$BUNDLE_PROVENANCE" assert-release-ready \
+          --contract "$RELEASE_CONTRACT" \
+          --expected-commit "$GIT_COMMIT"
 
         mapfile -t production_record < <(
           python3 "$BUNDLE_PROVENANCE" production-record \
@@ -257,9 +259,11 @@ phases:
           --repo-root "$CODEBUILD_SRC_DIR" \
           --contract "$RELEASE_CONTRACT" \
           --deploy-log "$DEPLOY_LOG" \
+          --expected-commit "$GIT_COMMIT" \
           --baked-fallback /tmp/baked-connect-web-app.html
         python3 infra/codebuild/source_provenance.py assert-release-ready \
-          --contract infra/codebuild/teamagent_runtime_contract.json
+          --contract infra/codebuild/teamagent_runtime_contract.json \
+          --expected-commit "$GIT_COMMIT"
         python3 infra/codebuild/source_provenance.py verify-dockerfile-contract \
           --contract infra/codebuild/teamagent_runtime_contract.json \
           --dockerfile infra/docker/Dockerfile.teamagent-mcp
@@ -363,7 +367,8 @@ phases:
             "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
           --contract \
             "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
-          --repo-root "$CONTEXT_VERIFY_DIR"
+          --repo-root "$CONTEXT_VERIFY_DIR" \
+          --expected-commit "$GIT_COMMIT"
         readonly BUILD_CONTEXT_TAR BUILD_CONTEXT_SHA256 CONTEXT_VERIFY_DIR
         export BUILD_CONTEXT_SHA256
 

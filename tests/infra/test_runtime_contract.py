@@ -295,6 +295,7 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert "canonical_build_context.py" in BUILD
     assert 'python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py"' in BUILD
     assert "validate-contract-pair" in BUILD
+    assert '--expected-commit "$HEAD"' in BUILD
     assert (
         'python3 "$TRACKED_SOURCE_DIR/infra/codebuild/source_provenance.py" \\\n'
         "  docker-build-arguments"

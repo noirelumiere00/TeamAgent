@@ -59,6 +59,7 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     assert 'EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"' in body
     assert 'EXPECTED_BASE_REF="refs/heads/main"' in body
     assert "assert-release-ready" in body
+    assert '--expected-commit "$REMOTE_COMMIT"' in body
 
 
 def test_launcher_assumes_exact_role_once_and_pins_temporary_session() -> None:

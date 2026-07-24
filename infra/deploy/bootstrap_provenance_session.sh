@@ -41,6 +41,8 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)" \
   || die "session wrapper repository root cannot be resolved"
 
 PIPELINE=""
+CONTRACT_EXPECTED_COMMIT=""
+RELEASE_RECEIPT_KEY=""
 case "$MODE" in
   teamagent)
     CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
@@ -71,6 +73,7 @@ case "$MODE" in
     ;;
   release)
     pipeline_count=0
+    receipt_key_count=0
     index=1
     while [ "$index" -le "$#" ]; do
       argument="${!index}"
@@ -82,15 +85,28 @@ case "$MODE" in
         index=$((index + 2))
         continue
       fi
+      if [ "$argument" = "--receipt-key" ]; then
+        value_index=$((index + 1))
+        [ "$value_index" -le "$#" ] || die "--receipt-key requires a value"
+        RELEASE_RECEIPT_KEY="${!value_index}"
+        receipt_key_count=$((receipt_key_count + 1))
+        index=$((index + 2))
+        continue
+      fi
       index=$((index + 1))
     done
     [ "$pipeline_count" -eq 1 ] ||
       die "release requires exactly one --pipeline"
-    unset pipeline_count index argument value_index
+    [ "$receipt_key_count" -eq 1 ] ||
+      die "release requires exactly one --receipt-key"
+    unset pipeline_count receipt_key_count index argument value_index
     case "$PIPELINE" in
       mcp)
         CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
         CONTRACT_HELPER="$REPO_ROOT/infra/codebuild/teamagent_bundle_provenance.py"
+        [[ "$RELEASE_RECEIPT_KEY" =~ ^release-receipts/mcp/([0-9a-f]{40})/[0-9a-f]{64}\.json$ ]] \
+          || die "MCP receipt key does not bind one full source commit"
+        CONTRACT_EXPECTED_COMMIT="${BASH_REMATCH[1]}"
         ;;
       openclaw)
         CONTRACT="$REPO_ROOT/infra/codebuild/openclaw_bundle_contract.json"
@@ -167,6 +183,9 @@ PROVENANCE_HELPER="$REPO_ROOT/infra/bootstrap/wrapper_provenance.py"
 [ -f "$PROVENANCE_HELPER" ] || die "wrapper provenance helper is missing"
 HEAD_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})" \
   || die "wrapper HEAD cannot be resolved"
+if [ "$MODE" = "teamagent" ]; then
+  CONTRACT_EXPECTED_COMMIT="$HEAD_COMMIT"
+fi
 EXPECTED_HELPER_BLOB="$(
   git -C "$REPO_ROOT" rev-parse "$HEAD_COMMIT:infra/bootstrap/wrapper_provenance.py"
 )" || die "wrapper provenance helper is not tracked"
@@ -201,8 +220,15 @@ fi
 # This check deliberately precedes command discovery for aws and every AWS
 # invocation. A blocked contract cannot even mint a launcher session.
 if [ -n "$CONTRACT_HELPER" ]; then
-  python3 -I "$CONTRACT_HELPER" assert-release-ready --contract "$CONTRACT" ||
-    die "selected release contract is not ready"
+  if [ -n "$CONTRACT_EXPECTED_COMMIT" ]; then
+    python3 -I "$CONTRACT_HELPER" assert-release-ready \
+      --contract "$CONTRACT" \
+      --expected-commit "$CONTRACT_EXPECTED_COMMIT" ||
+      die "selected release contract is not ready"
+  else
+    python3 -I "$CONTRACT_HELPER" assert-release-ready --contract "$CONTRACT" ||
+      die "selected release contract is not ready"
+  fi
 else
   python3 -I - "$CONTRACT" <<'PY'
 import json

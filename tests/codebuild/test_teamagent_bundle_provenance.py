@@ -20,6 +20,7 @@ CORE_DOCKERFILE = Path("infra/docker/Dockerfile.teamagent-mcp")
 MEDIA_DOCKERFILE = Path("infra/docker/Dockerfile.teamagent-media-worker")
 BUILD_CONTEXT_SHA256 = "a" * 64
 COMMIT = "1" * 40
+OTHER_COMMIT = "2" * 40
 
 
 def _load_module() -> Any:
@@ -220,6 +221,7 @@ def test_current_contract_pair_and_latest_record_are_valid() -> None:
         RUNTIME_CONTRACT_PATH,
         CONTRACT_PATH,
         ROOT,
+        OTHER_COMMIT,
     )
     record = PROVENANCE.verify_production_record(contract, DEPLOY_LOG)
 
@@ -263,9 +265,120 @@ def test_release_contract_is_satisfiable_after_both_approvals(
         runtime_path,
         contract_path,
         tmp_path,
+        COMMIT,
     )
     PROVENANCE.require_release_ready(contract)
     assert runtime["release"]["ready"] is True
+
+
+@pytest.mark.parametrize(
+    ("inner_commit", "outer_commit"),
+    [
+        pytest.param(OTHER_COMMIT, COMMIT, id="inner-mismatch"),
+        pytest.param(COMMIT, OTHER_COMMIT, id="outer-mismatch"),
+        pytest.param(OTHER_COMMIT, OTHER_COMMIT, id="matching-stale-approvals"),
+    ],
+)
+def test_pair_rejects_approval_commit_not_bound_to_expected_build(
+    tmp_path: Path,
+    inner_commit: str,
+    outer_commit: str,
+) -> None:
+    runtime_path, contract_path = _copy_pair(tmp_path)
+    _activate_pair(runtime_path, contract_path)
+
+    runtime = _read_json(runtime_path)
+    runtime["approval_record"]["source_commit"] = inner_commit
+    _write_json(runtime_path, runtime)
+    _sync_outer_pin(runtime_path, contract_path)
+
+    contract = _read_json(contract_path)
+    contract["approval_record"]["source_commit"] = outer_commit
+    _write_json(contract_path, contract)
+
+    with pytest.raises(
+        PROVENANCE.ProvenanceError,
+        match="approval source_commit does not bind the expected build commit",
+    ):
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
+
+
+def test_pair_validates_expected_commit_before_reading_contracts(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.json"
+
+    with pytest.raises(
+        PROVENANCE.ProvenanceError,
+        match="expected commit must be a full lowercase Git SHA",
+    ):
+        PROVENANCE.validate_contract_pair(
+            missing,
+            missing,
+            tmp_path,
+            "not-a-commit",
+        )
+
+
+def test_outer_release_ready_cli_binds_approval_to_expected_commit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_path, contract_path = _copy_pair(tmp_path)
+    _activate_pair(runtime_path, contract_path)
+
+    assert (
+        PROVENANCE.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(contract_path),
+                "--expected-commit",
+                COMMIT,
+            ]
+        )
+        == 0
+    )
+    assert (
+        PROVENANCE.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(contract_path),
+                "--expected-commit",
+                OTHER_COMMIT,
+            ]
+        )
+        == 2
+    )
+    assert (
+        "approval source_commit does not bind the expected build commit"
+        in capsys.readouterr().err
+    )
+    assert runtime_path.exists()
+
+
+def test_outer_release_ready_cli_keeps_blocked_contract_fail_closed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert (
+        PROVENANCE.main(
+            [
+                "assert-release-ready",
+                "--contract",
+                str(CONTRACT_PATH),
+                "--expected-commit",
+                COMMIT,
+            ]
+        )
+        == 2
+    )
+    assert "release is blocked" in capsys.readouterr().err
 
 
 def test_malformed_newest_production_entry_cannot_fall_back_to_an_older_record(
@@ -290,7 +403,12 @@ def test_pair_rejects_stale_outer_runtime_pin(tmp_path: Path) -> None:
     _write_json(contract_path, contract)
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="inner raw bytes"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_core_and_media_python_value_exchange(tmp_path: Path) -> None:
@@ -313,7 +431,12 @@ def test_pair_rejects_core_and_media_python_value_exchange(tmp_path: Path) -> No
     _write_json(contract_path, contract)
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="core Python probe path/value"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_contract_rejects_duplicate_subject_key_probe_identity(tmp_path: Path) -> None:
@@ -357,7 +480,12 @@ def test_pair_rejects_final_chromium_env_old_path(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="does not implement"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 @pytest.mark.parametrize("legacy_argument", ["NODE_IMAGE_DIGEST", "WOLFI_PYTHON_VERSION"])
@@ -374,7 +502,12 @@ def test_pair_rejects_legacy_argument_reintroduction(
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="reintroduces legacy ARG"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_mutable_external_image(tmp_path: Path) -> None:
@@ -386,7 +519,12 @@ def test_pair_rejects_mutable_external_image(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="not digest pinned"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_mutable_external_copy_image(tmp_path: Path) -> None:
@@ -400,7 +538,12 @@ def test_pair_rejects_mutable_external_copy_image(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="not digest pinned"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 @pytest.mark.parametrize("reference", ["final", "4", "99"])
@@ -417,7 +560,12 @@ def test_pair_rejects_self_or_invalid_numeric_copy_stage(
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="not digest pinned"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_unknown_teamagent_dockerfile_label(tmp_path: Path) -> None:
@@ -430,7 +578,12 @@ def test_pair_rejects_unknown_teamagent_dockerfile_label(tmp_path: Path) -> None
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match=r"unknown=.*unreviewed"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_missing_media_package_assertion(tmp_path: Path) -> None:
@@ -445,7 +598,12 @@ def test_pair_rejects_missing_media_package_assertion(tmp_path: Path) -> None:
     _write_json(contract_path, contract)
 
     with pytest.raises(PROVENANCE.ProvenanceError, match=r"unknown=.*package-version"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_source_assertion_default_drift(tmp_path: Path) -> None:
@@ -460,7 +618,12 @@ def test_pair_rejects_source_assertion_default_drift(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="does not fix"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_pair_rejects_missing_core_receipt_arg(tmp_path: Path) -> None:
@@ -474,7 +637,12 @@ def test_pair_rejects_missing_core_receipt_arg(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="builder/final"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 def test_ready_and_approval_relationship_is_fail_closed(tmp_path: Path) -> None:
@@ -510,7 +678,12 @@ def test_outer_ready_cannot_precede_inner_ready(tmp_path: Path) -> None:
     _sync_outer_pin(runtime_path, contract_path)
 
     with pytest.raises(PROVENANCE.ProvenanceError, match="inner release is blocked"):
-        PROVENANCE.validate_contract_pair(runtime_path, contract_path, tmp_path)
+        PROVENANCE.validate_contract_pair(
+            runtime_path,
+            contract_path,
+            tmp_path,
+            COMMIT,
+        )
 
 
 @pytest.mark.parametrize("subject_name", ["core", "media"])

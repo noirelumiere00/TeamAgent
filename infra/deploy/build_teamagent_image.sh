@@ -145,7 +145,9 @@ SOURCE_MANIFEST_CONTRACT_SHA256="$(
 RELEASE_CONTRACT_SHA256="$(
   python3 "$BUNDLE_PROVENANCE" contract-sha256 --contract "$RELEASE_CONTRACT"
 )"
-python3 "$BUNDLE_PROVENANCE" assert-release-ready --contract "$RELEASE_CONTRACT" \
+python3 "$BUNDLE_PROVENANCE" assert-release-ready \
+  --contract "$RELEASE_CONTRACT" \
+  --expected-commit "$REMOTE_COMMIT" \
   || die "TeamAgent core/media release contract is not approved for release"
 mapfile -t PRODUCTION_APP_RECORD < <(
   python3 "$BUNDLE_PROVENANCE" production-record \
