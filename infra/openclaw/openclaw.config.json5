@@ -162,9 +162,13 @@
             "search", "clientkarte", "proposal_draft", "proposal_review",
             "tiktok_search", "video_analysis", "video_algorithm",
             // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
-            //   MCP側に USE_VIDEO_APPROVAL=1 が必要（factory 登録済）。video_analysis(外部競合分析)と棲み分け。
+            //   現在は scope enabledBy=never。解禁4点セットは (1) tf task env 配線、
+            //   (2) scope enabledBy 更新、(3) contract test 更新、(4) OCイメージ再ビルド。
+            //   MCP側の USE_VIDEO_APPROVAL=1 だけでは解禁しない。video_analysis(外部競合分析)と棲み分け。
             "video_approval",
             // operation_log: Slackスレッド営業会話→CRM転記用構造化（USE_OPERATION_LOG_TOOLS=1 で MCP側に出る）。
+            //   現在は scope enabledBy=never。解禁時は tf task env + scope enabledBy +
+            //   contract test + OCイメージ再ビルドの4点を同じ変更単位で揃える。
             "operation_log",
             // §U-PartA-Step A: メール機能（readonly 3つ）を mention 経由で公開（@AiLa メール要約・要返信トリアージ・社内資料横断）。
             // per-user OAuth(本人受信箱)で動作・DLPマスク後 Bedrock 要約（mail_summary/skill.py の G1-G7 死守）。
@@ -193,7 +197,9 @@
             "knowledge_deliver",
             // knowledge_search_url: @AiLa「検索ページ教えて」で資料検索 Web UI（connect-web の
             // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
-            // 「未公開」を返し壊れたリンクは出さない）。USE_KNOWLEDGE_SEARCH_URL_TOOL=1 が必要。
+            // 「未公開」を返し壊れたリンクは出さない）。現在は scope enabledBy=never。
+            // 解禁4点セット: tf task env / scope enabledBy / contract test / OCイメージ再ビルド。
+            // USE_KNOWLEDGE_SEARCH_URL_TOOL=1 の単独設定では解禁しない。
             "knowledge_search_url",
             // tiktok_acquire: TikTok取得の非同期ジョブ（SQS→使い捨てFargate）。search_surface_check
             // と video_algorithm の取得段。USE_TIKTOK_ACQUIRE=1 + tiktok_acquire.tf apply が必要。
@@ -213,9 +219,14 @@
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
-          // mail_constraints は運用外（factory 既定 OFF）なので明示 exclude。
+          // 台帳外6本（SkillRegistryには実在）を明示 exclude:
+          // chitchat / recommend / proposal_campaign / mail_constraints / workspace_search /
+          // proposal_deck。前3本も暗黙の include 非掲載にせず、棚卸し対象としてここに残す。
           // *reply* / *write* ワイルドカードは Step C で外し、include の明示許可リスト（mail_reply）に置き換え。
-          exclude: ["mail_constraints", "workspace_search", "proposal_deck", "*confirm*"],
+          exclude: [
+            "chitchat", "recommend", "proposal_campaign",
+            "mail_constraints", "workspace_search", "proposal_deck", "*confirm*",
+          ],
         },
       },
     },

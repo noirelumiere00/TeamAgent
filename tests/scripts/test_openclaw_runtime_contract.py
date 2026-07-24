@@ -1078,10 +1078,20 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     config = _load_reviewed_json5(CONFIG)
     scope = json.loads(TOOL_SCOPE.read_text())
     included = config["mcp"]["servers"]["teamagent"]["toolFilter"]["include"]
+    excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
     assert len(inventory_names) == len(set(inventory_names)) == 28
     assert set(inventory_names) == set(included)
+    assert {
+        "chitchat",
+        "recommend",
+        "proposal_campaign",
+        "mail_constraints",
+        "workspace_search",
+        "proposal_deck",
+    } <= set(excluded)
+    assert not set(included) & set(excluded)
     assert scope["nativeTools"]["profile"] == config["tools"]["profile"]
     assert scope["nativeTools"]["alsoAllow"] == config["tools"]["alsoAllow"]
     assert set(scope["nativeTools"]["deny"]) == set(config["tools"]["deny"])
@@ -1127,6 +1137,17 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert "gmail-draft-write-no-send" in effects
     assert "calendar-write-no-invite" in effects
     assert "external-job-submit-s3-write" in effects
+    tools_by_name = {tool["name"]: tool for tool in scope["tools"]}
+    assert tools_by_name["x_voice_search"]["effect"] == "external-read-scrape-analysis-report-write"
+    assert tools_by_name["x_needs_mining"]["effect"] == "external-read-analysis-report-write"
+    assert tools_by_name["search_surface_check"]["effect"] == "external-read-analysis-report-write"
+    assert (
+        tools_by_name["x_buzz_measure_status"]["effect"]
+        == "job-status-read-lazy-analysis-report-write-cache-write"
+    )
+    media_worker_gate = "enable_media_worker || enable_tiktok_acquire (deprecated alias)"
+    assert tools_by_name["tiktok_acquire"]["terraformGate"] == media_worker_gate
+    assert tools_by_name["tiktok_acquire_status"]["terraformGate"] == media_worker_gate
     fargate = FARGATE.read_text()
     terraform = "\n".join(
         path.read_text() for path in sorted((ROOT / "infra/terraform").glob("*.tf"))
@@ -1142,12 +1163,28 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "USE_KNOWLEDGE_DELIVER",
         "enable_scrape_tools",
         "enable_tiktok_acquire",
+        "enable_media_worker",
         "enable_x_research",
     ):
         assert gate in terraform
+    assert (
+        "media_worker_enabled = var.enable_media_worker || var.enable_tiktok_acquire" in terraform
+    )
+    assert "media_enabled        = local.media_worker_enabled ? 1 : 0" in terraform
+    assert "local.media_enabled == 1 ? [" in fargate
+    assert '{ name = "USE_TIKTOK_ACQUIRE", value = "1" }' in fargate
     mcp_start = fargate.index('resource "aws_ecs_task_definition" "mcp"')
     openclaw_start = fargate.index('resource "aws_ecs_task_definition" "openclaw"')
     mcp_block = fargate[mcp_start:openclaw_start]
+    media_gate_start = mcp_block.index("local.media_enabled == 1 ? [")
+    media_gate_end = mcp_block.index(
+        "] : [], var.enable_x_research ? [",
+        media_gate_start,
+    )
+    media_gate_block = mcp_block[media_gate_start:media_gate_end]
+    tiktok_env = '{ name = "USE_TIKTOK_ACQUIRE", value = "1" }'
+    assert media_gate_block.count(tiktok_env) == 1
+    assert mcp_block.count(tiktok_env) == 1
     assert '{ name = "DRAFT_ON_DEMAND_ONLY", value = "true" }' in mcp_block
     for unwired_gate in (
         "USE_VIDEO_APPROVAL",
