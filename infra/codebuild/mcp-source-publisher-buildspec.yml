@@ -1,6 +1,7 @@
 # Independent trusted publisher for the MCP S3 source archive.
 version: 0.2
 env:
+  git-credential-helper: yes
   exported-variables:
     - PUBLISHED_SOURCE_VERSION_ID
     - SOURCE_DECLARATION_KEY
