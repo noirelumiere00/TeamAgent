@@ -35,6 +35,7 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
     verify_declaration_position = body.index("release_evidence.py verify-source-declaration")
     verify_source_position = body.index("source_provenance.py verify-source")
     interface_position = body.index('"$BUNDLE_PROVENANCE" verify-source-interface')
+    pair_position = body.index("validate-contract-pair")
     first_build_position = body.index("docker buildx build")
     second_build_position = body.index(
         "docker buildx build",
@@ -46,9 +47,20 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
         < verify_declaration_position
         < verify_source_position
         < interface_position
+        < pair_position
         < first_build_position
         < second_build_position
     )
+    assert (
+        '--runtime-contract \\\n'
+        '            "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json"'
+    ) in body
+    assert (
+        '--contract \\\n'
+        '            "$CONTEXT_VERIFY_DIR/infra/codebuild/'
+        'teamagent_core_media_release_contract.json"'
+    ) in body
+    assert '--repo-root "$CONTEXT_VERIFY_DIR"' in body
     for required in (
         '--expected-commit "$GIT_COMMIT"',
         '--expected-branch "$GIT_BRANCH"',
@@ -74,21 +86,75 @@ def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
     assert body.count("--provenance=mode=max") == 2
     assert body.count("--sbom=true") == 2
     assert body.count("--push") == 2
+    runtime_arguments = {
+        "RUNTIME_CONTRACT_SHA256",
+        "RUNTIME_RECEIPT_B64",
+        "RUNTIME_RECEIPT_SHA256",
+    }
     for subject in contract["subjects"]:
         for argument in subject["required_build_args"]:
+            if subject["name"] == "core" and argument in runtime_arguments:
+                continue
             assert f'--build-arg "{argument}=' in body
+    assert (
+        'python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" \\\n'
+        "          docker-build-arguments"
+    ) in body
+    assert (
+        '--contract "$CONTEXT_VERIFY_DIR/infra/codebuild/'
+        'teamagent_runtime_contract.json"'
+    ) in body
+    for argument in runtime_arguments:
+        assert f"\n          {argument}" in body
+    core_build = body.index("docker buildx build")
+    media_build = body.index("docker buildx build", core_build + 1)
+    runtime_expansion = body.index('"${DOCKER_RUNTIME_BUILD_ARGS[@]}"')
+    assert core_build < runtime_expansion < media_build
+    assert body.count('"${DOCKER_RUNTIME_BUILD_ARGS[@]}"') == 1
+    assert '--build-arg "WITH_SCRAPE_TOOLS=true"' not in body
     assert '--tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG"' in body
     assert '--tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG"' in body
 
 
-def test_active_debian_candidate_is_explicitly_blocked_without_mutable_placeholders() -> None:
+def test_post_build_uses_bundle_context_binding_and_core_receipt_verifier() -> None:
+    body = BUILDSPEC.read_text(encoding="utf-8")
+
+    bundle_start = body.index("teamagent_bundle_provenance.py verify-oci-config")
+    bundle_end = body.index('if [ "$subject" = "core" ]', bundle_start)
+    bundle_call = body[bundle_start:bundle_end]
+    assert "--runtime-contract infra/codebuild/teamagent_runtime_contract.json" in bundle_call
+    assert '--expected-build-context-sha256 "$BUILD_CONTEXT_SHA256"' in bundle_call
+
+    receipt_start = body.index("source_provenance.py verify-oci-revision", bundle_end)
+    receipt_end = body.index("\n          fi", receipt_start)
+    receipt_call = body[receipt_start:receipt_end]
+    assert '--expected-commit "$GIT_COMMIT"' in receipt_call
+    assert "--contract infra/codebuild/teamagent_runtime_contract.json" in receipt_call
+    assert (
+        '--expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"'
+        in receipt_call
+    )
+    for legacy_argument in (
+        "--expected-with-scrape-tools",
+        "--expected-app-html-version-id",
+        "--expected-app-html-sha256",
+    ):
+        assert legacy_argument not in receipt_call
+
+
+def test_active_schema_alignment_is_explicitly_blocked_after_six_measurements() -> None:
     contract = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
 
     assert contract["release"]["ready"] is False
-    assert "CRITICAL=4/HIGH=49" in contract["release"]["blocked_reason"]
-    assert "Boyle" in contract["release"]["blocked_reason"]
+    assert "schema alignment" in contract["release"]["blocked_reason"]
+    assert "ready=trueを禁止" in contract["release"]["blocked_reason"]
+    assert "実測6値は取得済み" in contract["release"]["blocked_reason"]
+    assert "2026-07-24計測" in contract["release"]["blocked_reason"]
+    assert contract["approval_record"] is None
     serialized = json.dumps(contract)
-    assert "latest-dev" not in serialized
+    assert all(
+        entry["value"] != "latest-dev" for entry in contract["receipt"]["entries"]
+    )
     assert "playwright" not in serialized.lower()
     assert "archive_sha256" not in serialized
     with pytest.raises(PROVENANCE.ProvenanceError, match="release is blocked"):
@@ -213,6 +279,31 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
     assert "--object-lock-mode COMPLIANCE" in body
     assert "aws kms sign" in body
     assert "teamagent_bundle_provenance.py production-record" in body
+    embedded_contract_hash = body.index(
+        "embedded release contract hash mismatch"
+    )
+    checkout_contract_hash = body.index(
+        "source commit release contract differs from trusted contract"
+    )
+    checkout_verifier_hash = body.index(
+        "source commit bundle verifier differs from trusted bytes"
+    )
+    pair = body.index("teamagent_bundle_provenance.py validate-contract-pair")
+    ready = body.index("teamagent_bundle_provenance.py assert-release-ready")
+    assert (
+        embedded_contract_hash
+        < checkout_contract_hash
+        < checkout_verifier_hash
+        < pair
+        < ready
+    )
+    assert (
+        '--runtime-contract \\\n'
+        '            "$PUBLISHER_CHECKOUT/infra/codebuild/'
+        'teamagent_runtime_contract.json"'
+    ) in body
+    assert '--contract /tmp/teamagent_core_media_release_contract.json' in body
+    assert '--repo-root "$PUBLISHER_CHECKOUT"' in body
     assert '--version-id "$APP_HTML_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
     assert '--baked-fallback "$BAKED_APP_HTML"' in body

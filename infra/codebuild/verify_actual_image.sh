@@ -16,6 +16,8 @@ COMMIT=""
 CONTRACT=""
 CONTRACT_SHA256=""
 BUILD_CONTEXT_SHA256=""
+RUNTIME_CONTRACT=""
+EXPECTED_RUNTIME_CONTRACT_SHA256=""
 IMAGE_DIGEST=""
 SIGNING_KEY_ARN=""
 OUTPUT=""
@@ -41,6 +43,7 @@ while [ "$#" -gt 0 ]; do
     --contract) value "$@"; CONTRACT="$2"; shift 2 ;;
     --contract-sha256) value "$@"; CONTRACT_SHA256="$2"; shift 2 ;;
     --build-context-sha256) value "$@"; BUILD_CONTEXT_SHA256="$2"; shift 2 ;;
+    --runtime-contract) value "$@"; RUNTIME_CONTRACT="$2"; shift 2 ;;
     --image-digest) value "$@"; IMAGE_DIGEST="$2"; shift 2 ;;
     --signing-key-arn) value "$@"; SIGNING_KEY_ARN="$2"; shift 2 ;;
     --output) value "$@"; OUTPUT="$2"; shift 2 ;;
@@ -68,8 +71,10 @@ esac
 if [ "$PIPELINE" = "mcp" ]; then
   [[ "$BUILD_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || die "MCP canonical build context SHA-256 is required"
-elif [ -n "$BUILD_CONTEXT_SHA256" ]; then
-  die "build context SHA-256 is only accepted for the MCP pipeline"
+  [ -n "$RUNTIME_CONTRACT" ] || die "MCP inner runtime contract is required"
+  [ -f "$RUNTIME_CONTRACT" ] || die "MCP inner runtime contract is missing"
+elif [ -n "$BUILD_CONTEXT_SHA256" ] || [ -n "$RUNTIME_CONTRACT" ]; then
+  die "build context SHA-256 and runtime contract are only accepted for the MCP pipeline"
 fi
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
 [[ "$SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] \
@@ -77,6 +82,17 @@ fi
 [ -f "$CONTRACT" ] || die "contract is missing"
 [ "$(sha256sum "$CONTRACT" | awk '{print $1}')" = "$CONTRACT_SHA256" ] \
   || die "contract bytes do not match the expected SHA-256"
+if [ "$PIPELINE" = "mcp" ]; then
+  EXPECTED_RUNTIME_CONTRACT_SHA256="$(
+    jq -er '
+      .source_runtime_contract.sha256 |
+      select(test("^[0-9a-f]{64}$"))
+    ' "$CONTRACT"
+  )" || die "outer contract does not contain a valid inner runtime contract pin"
+  [ "$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')" = \
+    "$EXPECTED_RUNTIME_CONTRACT_SHA256" ] \
+    || die "inner runtime contract bytes do not match the outer contract pin"
+fi
 
 for tool in aws cosign curl docker jq oras python3 sha256sum syft trivy; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
@@ -266,11 +282,22 @@ if any(counts.values()) or secrets:
     )
 PY
 syft "$IMAGE" --output spdx-json="$SBOM"
-python3 - "$PIPELINE" "$SUBJECT_NAME" "$COMMIT" "$CONTRACT_SHA256" "$IMAGE_DIGEST" "$PROVENANCE" <<'PY'
+python3 - "$PIPELINE" "$SUBJECT_NAME" "$COMMIT" "$CONTRACT_SHA256" \
+  "$BUILD_CONTEXT_SHA256" "$EXPECTED_RUNTIME_CONTRACT_SHA256" \
+  "$IMAGE_DIGEST" "$PROVENANCE" <<'PY'
 import json
 import sys
 
-pipeline, subject_name, commit, contract_sha256, image_digest, output = sys.argv[1:]
+(
+    pipeline,
+    subject_name,
+    commit,
+    contract_sha256,
+    build_context_sha256,
+    runtime_contract_sha256,
+    image_digest,
+    output,
+) = sys.argv[1:]
 repository = {
     "mcp": "https://github.com/noirelumiere00/TeamAgent",
     "openclaw": "https://github.com/noirelumiere00/TeamAgent",
@@ -308,6 +335,13 @@ value = {
         },
     },
 }
+if pipeline == "mcp":
+    value["predicate"]["buildDefinition"]["externalParameters"][
+        "buildContextSha256"
+    ] = build_context_sha256
+    value["predicate"]["buildDefinition"]["externalParameters"][
+        "runtimeContractSha256"
+    ] = runtime_contract_sha256
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(value, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
@@ -395,6 +429,7 @@ EVIDENCE_CONTEXT_ARGUMENTS=()
 if [ -n "$BUILD_CONTEXT_SHA256" ]; then
   EVIDENCE_CONTEXT_ARGUMENTS=(
     --build-context-sha256 "$BUILD_CONTEXT_SHA256"
+    --runtime-contract "$RUNTIME_CONTRACT"
   )
 fi
 python3 "$EVIDENCE_HELPER" \

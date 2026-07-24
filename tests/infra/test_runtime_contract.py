@@ -294,6 +294,18 @@ def test_local_evidence_build_cannot_push_and_requires_exact_clean_head() -> Non
     assert 'git -C "$REPO_ROOT" archive --format=tar "$HEAD"' in BUILD
     assert "canonical_build_context.py" in BUILD
     assert 'python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py"' in BUILD
+    assert "validate-contract-pair" in BUILD
+    assert (
+        'python3 "$TRACKED_SOURCE_DIR/infra/codebuild/source_provenance.py" \\\n'
+        "  docker-build-arguments"
+    ) in BUILD
+    assert '--expected-contract-sha256 "$EXPECTED_RUNTIME_CONTRACT_SHA256"' in BUILD
+    for argument in (
+        "RUNTIME_CONTRACT_SHA256",
+        "RUNTIME_RECEIPT_B64",
+        "RUNTIME_RECEIPT_SHA256",
+    ):
+        assert f'--build-arg "{argument}=${argument}"' in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-mcp" in BUILD
     assert "--file infra/docker/Dockerfile.teamagent-media-worker" in BUILD
     assert BUILD.count('- <"$EVIDENCE_DIR/build-context.tar"') == 2

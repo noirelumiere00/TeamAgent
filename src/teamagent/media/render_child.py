@@ -56,7 +56,7 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     from pptx import Presentation
     from pptx.util import Emu, Inches
 
-    chromium = os.environ.get("CHROMIUM_PATH", "/usr/bin/chromium-browser")
+    chromium = os.environ.get("CHROMIUM_PATH", "/usr/lib/chromium/chromium")
     images: list[bytes] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(

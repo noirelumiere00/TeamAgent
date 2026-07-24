@@ -45,6 +45,9 @@ ARG APP_HTML_SHA256
 ARG APP_HTML_VERSION_ID
 ARG APP_HTML_MANIFEST_SHA256
 ARG APP_HTML_BUILD_INPUTS_SHA256
+ARG RUNTIME_CONTRACT_SHA256
+ARG RUNTIME_RECEIPT_B64
+ARG RUNTIME_RECEIPT_SHA256
 
 COPY --from=uv /uv /usr/bin/uv
 RUN set -eu; \
@@ -52,6 +55,24 @@ RUN set -eu; \
     printf '%s  %s\n' "$UV_BINARY_SHA256" /usr/bin/uv | sha256sum -c -; \
     test "$(python --version)" = "Python ${PYTHON_VERSION}"; \
     printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3.14 | sha256sum -c -
+
+COPY infra/codebuild/teamagent_runtime_contract.json /tmp/teamagent_runtime_contract.json
+RUN python -c "import base64, hashlib, json, os, pathlib; \
+raw = pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes(); \
+assert hashlib.sha256(raw).hexdigest() == os.environ['RUNTIME_CONTRACT_SHA256']; \
+contract = json.loads(raw); \
+entries = contract['receipt']['entries']; \
+expected_values = {entry['key']: entry['value'] for entry in entries}; \
+expected_receipt = {'schema_version': contract['receipt']['schema_version'], 'subject': contract['receipt']['subject'], 'values': expected_values}; \
+encoded = os.environ['RUNTIME_RECEIPT_B64']; \
+receipt = base64.b64decode(encoded, validate=True); \
+assert base64.b64encode(receipt).decode('ascii') == encoded; \
+assert hashlib.sha256(receipt).hexdigest() == os.environ['RUNTIME_RECEIPT_SHA256']; \
+assert receipt == json.dumps(expected_receipt, sort_keys=True, separators=(',', ':')).encode('utf-8'); \
+parsed_receipt = json.loads(receipt); \
+assert parsed_receipt['subject'] == 'core'; \
+assert parsed_receipt['values'] == expected_values; \
+assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -196,6 +217,9 @@ ARG PYTHON_BINARY_SHA256
 ARG E5_MODEL_REVISION
 ARG TORCH_VERSION
 ARG TORCH_ARM64_WHEEL_SHA256
+ARG RUNTIME_CONTRACT_SHA256
+ARG RUNTIME_RECEIPT_B64
+ARG RUNTIME_RECEIPT_SHA256
 
 COPY --from=builder /runtime-etc/passwd /etc/passwd
 COPY --from=builder /runtime-etc/group /etc/group
@@ -230,6 +254,9 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.ref.name="$GIT_BRANCH" \
       io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
       io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.runtime-contract-sha256="$RUNTIME_CONTRACT_SHA256" \
+      io.teamagent.build.runtime-receipt="$RUNTIME_RECEIPT_B64" \
+      io.teamagent.build.runtime-receipt-sha256="$RUNTIME_RECEIPT_SHA256" \
       io.teamagent.build.app-provenance-sha256="$APP_PROVENANCE_SHA256" \
       io.teamagent.runtime.kind="core" \
       io.teamagent.runtime.uid="10001" \

@@ -12,6 +12,8 @@
 !scripts/ingest_sources.py
 !scripts/run_morning_digest_fargate.py
 !infra/
+!infra/codebuild/
+!infra/codebuild/teamagent_runtime_contract.json
 !infra/migrations/
 !infra/migrations/**
 !data/

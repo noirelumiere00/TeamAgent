@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -32,9 +33,10 @@ APP_HTML_BUCKET = "teamagent-dev-raw-files"
 APP_HTML_KEY = "codebuild/connect-web-app.html"
 SCHEMA_VERSION = 3
 RUNTIME_CONTRACT_PATH = "infra/codebuild/teamagent_runtime_contract.json"
-RUNTIME_CONTRACT_SCHEMA_VERSION = 3
-RUNTIME_RECEIPT_SCHEMA_VERSION = 1
+RUNTIME_CONTRACT_SCHEMA_VERSION = 4
+RUNTIME_RECEIPT_SCHEMA_VERSION = 2
 TEAMAGENT_LABEL_PREFIX = "io.teamagent.build."
+RUNTIME_ENTRY_LABEL_PREFIX = "io.teamagent.contract."
 SCRAPE_TOOLS_LABEL = "io.teamagent.build.with-scrape-tools"
 APP_HTML_SHA256_LABEL = "io.teamagent.build.app-html-sha256"
 APP_HTML_VERSION_ID_LABEL = "io.teamagent.build.app-html-version-id"
@@ -81,6 +83,10 @@ _RECEIPT_KEY_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _COMPONENT_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _BUILD_ARG_RE = re.compile(r"[A-Z][A-Z0-9_]{1,127}")
 _OCI_LABEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,254}")
+_RFC3339_UTC_RE = re.compile(
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z"
+)
 _SUPPORTED_IMAGE_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -200,12 +206,115 @@ def _validate_contract_value(value: Any, kind: Any, *, label: str) -> str:
     return value
 
 
+def _validate_rfc3339_utc(value: Any, *, label: str) -> str:
+    value = _required_contract_text(value, label=label)
+    if not _RFC3339_UTC_RE.fullmatch(value):
+        raise ProvenanceError(f"{label} must be an RFC3339 UTC timestamp at second precision")
+    try:
+        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ProvenanceError(f"{label} is not a valid UTC timestamp") from exc
+    return value
+
+
+def _validate_approval_record(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProvenanceError(f"{label} must be an object")
+    _require_exact_keys(
+        value,
+        {
+            "approved_at_utc",
+            "approved_by",
+            "source_commit",
+            "observations",
+            "decision",
+        },
+        label=label,
+    )
+    approved_at_utc = _validate_rfc3339_utc(
+        value["approved_at_utc"],
+        label=f"{label}.approved_at_utc",
+    )
+    approved_by = _required_contract_text(
+        value["approved_by"],
+        label=f"{label}.approved_by",
+    )
+    source_commit = _required_contract_text(
+        value["source_commit"],
+        label=f"{label}.source_commit",
+    )
+    if not _SHA1_RE.fullmatch(source_commit):
+        raise ProvenanceError(f"{label}.source_commit must be a full lowercase Git SHA-1")
+    decision = _required_contract_text(
+        value["decision"],
+        label=f"{label}.decision",
+        minimum=len("APPROVED: "),
+    )
+    if not decision.startswith("APPROVED: "):
+        raise ProvenanceError(f"{label}.decision must begin with 'APPROVED: '")
+
+    observations = value["observations"]
+    if not isinstance(observations, list) or not observations:
+        raise ProvenanceError(f"{label}.observations must be a non-empty array")
+    if len(observations) > 64:
+        raise ProvenanceError(f"{label}.observations exceeds the 64-entry limit")
+    normalized_observations: list[dict[str, str]] = []
+    seen_keys: set[str] = set()
+    for index, observation in enumerate(observations):
+        observation_label = f"{label}.observations[{index}]"
+        if not isinstance(observation, dict):
+            raise ProvenanceError(f"{observation_label} must be an object")
+        _require_exact_keys(
+            observation,
+            {"key", "value", "observed_at_utc", "source"},
+            label=observation_label,
+        )
+        key = _required_contract_text(
+            observation["key"],
+            label=f"{observation_label}.key",
+        )
+        if not _RECEIPT_KEY_RE.fullmatch(key):
+            raise ProvenanceError(f"{observation_label}.key is not canonical")
+        if key in seen_keys:
+            raise ProvenanceError(f"duplicate {label} observation key: {key}")
+        seen_keys.add(key)
+        normalized_observations.append(
+            {
+                "key": key,
+                "value": _required_contract_text(
+                    observation["value"],
+                    label=f"{observation_label}.value",
+                ),
+                "observed_at_utc": _validate_rfc3339_utc(
+                    observation["observed_at_utc"],
+                    label=f"{observation_label}.observed_at_utc",
+                ),
+                "source": _required_contract_text(
+                    observation["source"],
+                    label=f"{observation_label}.source",
+                ),
+            }
+        )
+
+    return {
+        "approved_at_utc": approved_at_utc,
+        "approved_by": approved_by,
+        "source_commit": source_commit,
+        "observations": normalized_observations,
+        "decision": decision,
+    }
+
+
 def validate_runtime_contract(value: Any, *, label: str = "runtime contract") -> dict[str, Any]:
     """Validate the generic, exact runtime receipt and its Docker/OCI bindings."""
 
     if not isinstance(value, dict):
         raise ProvenanceError(f"{label} must be a JSON object")
-    _require_exact_keys(value, {"schema_version", "release", "receipt"}, label=label)
+    _require_exact_keys(
+        value,
+        {"schema_version", "release", "approval_record", "receipt"},
+        label=label,
+    )
     if value["schema_version"] != RUNTIME_CONTRACT_SCHEMA_VERSION:
         raise ProvenanceError(f"unsupported {label} schema: {value['schema_version']!r}")
 
@@ -216,7 +325,11 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
     if not isinstance(receipt, dict):
         raise ProvenanceError(f"{label} receipt must be an object")
     _require_exact_keys(release, {"ready", "blocked_reason"}, label=f"{label} release")
-    _require_exact_keys(receipt, {"schema_version", "entries"}, label=f"{label} receipt")
+    _require_exact_keys(
+        receipt,
+        {"schema_version", "subject", "entries"},
+        label=f"{label} receipt",
+    )
     if not isinstance(release["ready"], bool):
         raise ProvenanceError(f"{label} release.ready must be a boolean")
     blocked_reason = release["blocked_reason"]
@@ -230,8 +343,20 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
             label=f"{label} release.blocked_reason",
             minimum=20,
         )
+    approval_record = value["approval_record"]
+    if release["ready"]:
+        normalized_approval_record: dict[str, Any] | None = _validate_approval_record(
+            approval_record,
+            label=f"{label} approval_record",
+        )
+    else:
+        if approval_record is not None:
+            raise ProvenanceError(f"{label} blocked release approval_record must be null")
+        normalized_approval_record = None
     if receipt["schema_version"] != RUNTIME_RECEIPT_SCHEMA_VERSION:
         raise ProvenanceError(f"unsupported {label} receipt schema: {receipt['schema_version']!r}")
+    if receipt["subject"] != "core":
+        raise ProvenanceError(f"{label} receipt.subject must be 'core'")
     entries = receipt["entries"]
     if not isinstance(entries, list) or not entries:
         raise ProvenanceError(f"{label} receipt.entries must be a non-empty array")
@@ -287,9 +412,11 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
         if build_arg in _RESERVED_RUNTIME_BUILD_ARGS:
             raise ProvenanceError(f"{entry_label}.build_arg is reserved: {build_arg}")
         if not _OCI_LABEL_RE.fullmatch(oci_label) or not oci_label.startswith(
-            TEAMAGENT_LABEL_PREFIX
+            RUNTIME_ENTRY_LABEL_PREFIX
         ):
-            raise ProvenanceError(f"{entry_label}.oci_label is not a TeamAgent OCI label")
+            raise ProvenanceError(
+                f"{entry_label}.oci_label must use {RUNTIME_ENTRY_LABEL_PREFIX}"
+            )
         if oci_label in _RESERVED_TEAMAGENT_LABELS:
             raise ProvenanceError(f"{entry_label}.oci_label is reserved: {oci_label}")
         uses = raw_entry["dockerfile_uses"]
@@ -337,8 +464,10 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
     normalized = {
         "schema_version": RUNTIME_CONTRACT_SCHEMA_VERSION,
         "release": {"ready": release["ready"], "blocked_reason": blocked_reason},
+        "approval_record": normalized_approval_record,
         "receipt": {
             "schema_version": RUNTIME_RECEIPT_SCHEMA_VERSION,
+            "subject": "core",
             "entries": normalized_entries,
         },
     }
@@ -348,36 +477,66 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
 
 
 def require_release_ready(contract: dict[str, Any], *, label: str = "runtime contract") -> None:
-    """Require complete Wolfi-era evidence before a release candidate can be built."""
+    """Require the complete core-only evidence map before a release can be built."""
 
     release = contract["release"]
     if not release["ready"]:
         raise ProvenanceError(f"{label} release is blocked: {release['blocked_reason']}")
     entries_by_key = {entry["key"]: entry for entry in contract["receipt"]["entries"]}
     required = {
-        "base.builder.arm64.digest": ("builder-base", "base_image_digest", "NODE_IMAGE_DIGEST"),
-        "base.runtime.arm64.digest": (
-            "runtime-base",
+        "artifact.torch.arm64-wheel.sha256": (
+            "torch",
+            "artifact_sha256",
+            "TORCH_ARM64_WHEEL_SHA256",
+        ),
+        "base.builder.arm64.digest": (
+            "python-builder",
             "base_image_digest",
-            "WOLFI_RUNTIME_IMAGE_DIGEST",
+            "PYTHON_BUILDER_ARM64_DIGEST",
         ),
-        "binary.chromium.sha256": ("chromium", "binary_sha256", "CHROMIUM_BINARY_SHA256"),
-        "binary.ffmpeg.sha256": ("ffmpeg", "binary_sha256", "FFMPEG_BINARY_SHA256"),
-        "binary.node.sha256": ("node", "binary_sha256", "NODE_BINARY_SHA256"),
-        "binary.python.sha256": ("python", "binary_sha256", "PYTHON_BINARY_SHA256"),
+        "base.runtime.arm64.digest": (
+            "python-runtime",
+            "base_image_digest",
+            "PYTHON_RUNTIME_ARM64_DIGEST",
+        ),
+        "base.uv.arm64.digest": (
+            "uv",
+            "base_image_digest",
+            "UV_ARM64_DIGEST",
+        ),
+        "binary.python.sha256": (
+            "python",
+            "binary_sha256",
+            "PYTHON_BINARY_SHA256",
+        ),
+        "binary.uv.sha256": (
+            "uv",
+            "binary_sha256",
+            "UV_BINARY_SHA256",
+        ),
+        "component.python.version": (
+            "python",
+            "component_version",
+            "PYTHON_VERSION",
+        ),
+        "component.torch.version": (
+            "torch",
+            "component_version",
+            "TORCH_VERSION",
+        ),
+        "component.uv.version": (
+            "uv",
+            "component_version",
+            "UV_VERSION",
+        ),
         "model.e5.revision": ("e5", "model_revision", "E5_MODEL_REVISION"),
-        "package.chromium.version": (
-            "chromium",
-            "package_version",
-            "WOLFI_CHROMIUM_VERSION",
-        ),
-        "package.ffmpeg.version": ("ffmpeg", "package_version", "WOLFI_FFMPEG_VERSION"),
-        "package.node.version": ("node", "package_version", "WOLFI_NODE_VERSION"),
-        "package.python.version": ("python", "package_version", "WOLFI_PYTHON_VERSION"),
     }
-    missing = sorted(set(required) - entries_by_key.keys())
-    if missing:
-        raise ProvenanceError(f"{label} release evidence is incomplete: {missing}")
+    missing = sorted(set(required) - set(entries_by_key))
+    unknown = sorted(set(entries_by_key) - set(required))
+    if missing or unknown:
+        raise ProvenanceError(
+            f"{label} release evidence key set is invalid: missing={missing}; unknown={unknown}"
+        )
     mismatches = {
         key: {
             "expected": expected,
@@ -423,6 +582,7 @@ def runtime_receipt_bytes(contract: dict[str, Any]) -> bytes:
     validated = validate_runtime_contract(contract)
     payload = {
         "schema_version": RUNTIME_RECEIPT_SCHEMA_VERSION,
+        "subject": validated["receipt"]["subject"],
         "values": {entry["key"]: entry["value"] for entry in validated["receipt"]["entries"]},
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -573,18 +733,11 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
         if entry["value_kind"] == "sha256_digest":
             digest_arguments.add(build_arg)
 
-    for build_arg in (
+    receipt_arguments = (
         RUNTIME_CONTRACT_SHA256_ARG,
         RUNTIME_RECEIPT_B64_ARG,
         RUNTIME_RECEIPT_SHA256_ARG,
-    ):
-        declarations = re.findall(
-            rf"^ARG\s+{build_arg}(?:=(.*))?$",
-            effective_dockerfile,
-            re.MULTILINE,
-        )
-        if declarations != [""]:
-            raise ProvenanceError(f"Dockerfile is missing receipt ARG {build_arg}")
+    )
     receipt_bindings = {
         RUNTIME_CONTRACT_SHA256_LABEL: RUNTIME_CONTRACT_SHA256_ARG,
         RUNTIME_RECEIPT_LABEL: RUNTIME_RECEIPT_B64_ARG,
@@ -597,16 +750,61 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
             label_instructions,
         ):
             raise ProvenanceError(f"Dockerfile is missing receipt label {label_name}")
-    for proof in (
-        "base64.b64decode",
-        "hashlib.sha256(receipt).hexdigest()",
-        "RUNTIME_RECEIPT_SHA256",
-    ):
+    receipt_proofs = {
+        "inner runtime contract COPY": (
+            f"COPY {RUNTIME_CONTRACT_PATH} /tmp/teamagent_runtime_contract.json"
+        ),
+        "inner contract raw bytes": (
+            "pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes()"
+        ),
+        "inner contract JSON": "contract = json.loads(raw)",
+        "inner contract raw SHA-256": (
+            "assert hashlib.sha256(raw).hexdigest() == "
+            "os.environ['RUNTIME_CONTRACT_SHA256']"
+        ),
+        "inner receipt entries": "entries = contract['receipt']['entries']",
+        "strict receipt base64 decode": "base64.b64decode(encoded, validate=True)",
+        "canonical receipt base64": (
+            "assert base64.b64encode(receipt).decode('ascii') == encoded"
+        ),
+        "receipt bytes SHA-256": (
+            "assert hashlib.sha256(receipt).hexdigest() == "
+            "os.environ['RUNTIME_RECEIPT_SHA256']"
+        ),
+        "contract values": (
+            "{entry['key']: entry['value'] for entry in entries}"
+        ),
+        "receipt subject binding": (
+            "'subject': contract['receipt']['subject']"
+        ),
+        "canonical receipt bytes": (
+            "assert receipt == json.dumps(expected_receipt, sort_keys=True, "
+            "separators=(',', ':')).encode('utf-8')"
+        ),
+        "core receipt subject": "assert parsed_receipt['subject'] == 'core'",
+        "exact receipt values": "assert parsed_receipt['values'] == expected_values",
+        "receipt entry ARG values": (
+            "assert all(os.environ[entry['build_arg']] == entry['value'] "
+            "for entry in entries)"
+        ),
+    }
+    for proof_name, proof in receipt_proofs.items():
         if proof not in effective_dockerfile:
-            raise ProvenanceError(f"Dockerfile is missing runtime receipt proof: {proof}")
+            raise ProvenanceError(
+                f"Dockerfile is missing runtime receipt proof ({proof_name}): {proof}"
+            )
 
     declared_stages: set[str] = set()
     declared_stage_count = 0
+    current_stage: str | None = None
+    receipt_arg_declarations: dict[str, list[tuple[str | None, str | None]]] = {
+        build_arg: [] for build_arg in receipt_arguments
+    }
+    receipt_label_stages: dict[str, list[str | None]] = {
+        label_name: [] for label_name in receipt_bindings
+    }
+    inner_contract_copy_stages: list[str | None] = []
+    receipt_proof_runs: list[tuple[str | None, str]] = []
     for instruction in instructions:
         reference: str | None = None
         stage_alias: str | None = None
@@ -631,11 +829,41 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
             )
             if copy_match is not None:
                 reference = copy_match.group(1)
+            if (
+                instruction_arguments
+                == f"{RUNTIME_CONTRACT_PATH} /tmp/teamagent_runtime_contract.json"
+            ):
+                inner_contract_copy_stages.append(current_stage)
+        elif instruction_name == "ARG":
+            argument_match = re.fullmatch(
+                r"([A-Z][A-Z0-9_]*)(?:=(.*))?",
+                instruction_arguments,
+            )
+            if argument_match is None:
+                raise ProvenanceError("Dockerfile contains an unsupported ARG instruction")
+            argument_name, default = argument_match.groups()
+            if argument_name in receipt_arg_declarations:
+                receipt_arg_declarations[argument_name].append((current_stage, default))
+        elif instruction_name == "LABEL":
+            for label_name in receipt_label_stages:
+                if re.search(rf"\b{re.escape(label_name)}=", instruction_arguments):
+                    receipt_label_stages[label_name].append(current_stage)
+        elif instruction_name == "RUN" and (
+            "pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes()"
+            in instruction_arguments
+        ):
+            receipt_proof_runs.append((current_stage, instruction_arguments))
 
         if reference is not None:
             numeric_stage = re.fullmatch(r"0|[1-9][0-9]*", reference)
-            local_stage = reference in declared_stages or (
-                numeric_stage is not None and int(reference) < declared_stage_count
+            numeric_stage_limit = declared_stage_count
+            if instruction_name != "FROM":
+                numeric_stage_limit -= 1
+            named_local_stage = reference in declared_stages and (
+                instruction_name == "FROM" or reference != current_stage
+            )
+            local_stage = named_local_stage or (
+                numeric_stage is not None and int(reference) < numeric_stage_limit
             )
             literal_digest = re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", reference)
             argument_digest = re.fullmatch(
@@ -653,8 +881,42 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
                 )
         if instruction_name == "FROM":
             declared_stage_count += 1
+            current_stage = stage_alias
         if stage_alias is not None:
             declared_stages.add(stage_alias)
+
+    expected_receipt_arg_declarations = [("builder", None), ("final", None)]
+    for build_arg, declarations in receipt_arg_declarations.items():
+        if declarations != expected_receipt_arg_declarations:
+            raise ProvenanceError(
+                "Dockerfile receipt ARG must be declared exactly once without a default "
+                f"in builder and final stages: {build_arg}; actual={declarations}"
+            )
+    if inner_contract_copy_stages != ["builder"]:
+        raise ProvenanceError(
+            "Dockerfile must COPY the inner runtime contract exactly once in builder: "
+            f"actual={inner_contract_copy_stages}"
+        )
+    if len(receipt_proof_runs) != 1 or receipt_proof_runs[0][0] != "builder":
+        raise ProvenanceError(
+            "Dockerfile must verify the runtime receipt exactly once in builder: "
+            f"actual={[stage for stage, _instruction in receipt_proof_runs]}"
+        )
+    receipt_proof_run = receipt_proof_runs[0][1]
+    for proof_name, proof in receipt_proofs.items():
+        if proof_name == "inner runtime contract COPY":
+            continue
+        if proof not in receipt_proof_run:
+            raise ProvenanceError(
+                "Dockerfile runtime receipt proof must be atomic in one builder RUN "
+                f"({proof_name})"
+            )
+    for label_name, stages in receipt_label_stages.items():
+        if stages != ["final"]:
+            raise ProvenanceError(
+                f"Dockerfile receipt label must be declared exactly once in final: "
+                f"{label_name}; actual={stages}"
+            )
 
 
 def _decode_ls_tree(raw: bytes) -> tuple[int, list[str]]:
@@ -1112,24 +1374,17 @@ def verify_oci_revision(
     config_path: Path,
     expected_config_digest: str,
     expected_commit: str,
-    expected_with_scrape_tools: str,
-    expected_app_html_version_id: str,
-    expected_app_html_sha256: str,
     runtime_contract_path: Path,
     expected_runtime_contract_sha256: str,
     expected_os: str = "linux",
     expected_architecture: str = "arm64",
 ) -> None:
-    """Verify downloaded OCI config bytes and all provenance labels."""
+    """Verify OCI identity and the exact core runtime contract receipt."""
 
     if not _SHA256_DIGEST_RE.fullmatch(expected_config_digest):
         raise ProvenanceError("expected OCI config digest is invalid")
     if not _SHA1_RE.fullmatch(expected_commit):
         raise ProvenanceError("expected OCI revision must be a full lowercase SHA-1")
-    if expected_with_scrape_tools not in {"true", "false"}:
-        raise ProvenanceError("expected OCI scrape-tools label must be 'true' or 'false'")
-    _validate_s3_version_id(expected_app_html_version_id, label="expected OCI app HTML VersionId")
-    _validate_sha256(expected_app_html_sha256, label="expected OCI app HTML SHA-256")
     contract = verify_runtime_contract_digest(
         runtime_contract_path,
         expected_runtime_contract_sha256,
@@ -1171,42 +1426,7 @@ def verify_oci_revision(
         raise ProvenanceError(
             f"OCI revision mismatch: expected={expected_commit}, actual={revision!r}"
         )
-    scrape_tools = labels.get(SCRAPE_TOOLS_LABEL)
-    if scrape_tools != expected_with_scrape_tools:
-        raise ProvenanceError(
-            f"OCI {SCRAPE_TOOLS_LABEL} mismatch: "
-            f"expected={expected_with_scrape_tools!r}, actual={scrape_tools!r}"
-        )
-    app_html_version_id = labels.get(APP_HTML_VERSION_ID_LABEL)
-    if app_html_version_id != expected_app_html_version_id:
-        raise ProvenanceError(
-            f"OCI {APP_HTML_VERSION_ID_LABEL} mismatch: "
-            f"expected={expected_app_html_version_id!r}, actual={app_html_version_id!r}"
-        )
-    app_html_sha256 = labels.get(APP_HTML_SHA256_LABEL)
-    if app_html_sha256 != expected_app_html_sha256:
-        raise ProvenanceError(
-            f"OCI {APP_HTML_SHA256_LABEL} mismatch: "
-            f"expected={expected_app_html_sha256!r}, actual={app_html_sha256!r}"
-        )
-    expected_teamagent_labels = {
-        SCRAPE_TOOLS_LABEL: expected_with_scrape_tools,
-        APP_HTML_VERSION_ID_LABEL: expected_app_html_version_id,
-        APP_HTML_SHA256_LABEL: expected_app_html_sha256,
-        **expected_runtime_labels,
-    }
-    actual_teamagent_label_names = {
-        label_name
-        for label_name in labels
-        if isinstance(label_name, str) and label_name.startswith(TEAMAGENT_LABEL_PREFIX)
-    }
-    if actual_teamagent_label_names != set(expected_teamagent_labels):
-        missing = sorted(set(expected_teamagent_labels) - actual_teamagent_label_names)
-        unknown = sorted(actual_teamagent_label_names - set(expected_teamagent_labels))
-        raise ProvenanceError(
-            f"OCI TeamAgent label allowlist mismatch: missing={missing}; unknown={unknown}"
-        )
-    for label_name, expected_value in expected_teamagent_labels.items():
+    for label_name, expected_value in expected_runtime_labels.items():
         actual_value = labels.get(label_name)
         if actual_value != expected_value:
             raise ProvenanceError(
@@ -1220,19 +1440,27 @@ def verify_oci_revision(
         receipt_bytes = base64.b64decode(encoded_receipt, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise ProvenanceError("OCI runtime receipt is not canonical base64") from exc
+    if base64.b64encode(receipt_bytes).decode("ascii") != encoded_receipt:
+        raise ProvenanceError("OCI runtime receipt is not canonical base64")
     receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
     if receipt_sha256 != labels[RUNTIME_RECEIPT_SHA256_LABEL]:
         raise ProvenanceError("OCI runtime receipt bytes do not match its SHA-256 label")
-    receipt = _loads_strict(receipt_bytes.decode("utf-8"), label="OCI runtime receipt")
+    try:
+        decoded_receipt = receipt_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProvenanceError("OCI runtime receipt is not UTF-8") from exc
+    receipt = _loads_strict(decoded_receipt, label="OCI runtime receipt")
     if not isinstance(receipt, dict):
         raise ProvenanceError("OCI runtime receipt must be an object")
     _require_exact_keys(
         receipt,
-        {"schema_version", "values"},
+        {"schema_version", "subject", "values"},
         label="OCI runtime receipt",
     )
     if receipt["schema_version"] != RUNTIME_RECEIPT_SCHEMA_VERSION:
         raise ProvenanceError("OCI runtime receipt schema is unsupported")
+    if receipt["subject"] != "core":
+        raise ProvenanceError("OCI runtime receipt subject must be 'core'")
     values = receipt["values"]
     if not isinstance(values, dict):
         raise ProvenanceError("OCI runtime receipt values must be an object")
@@ -1294,9 +1522,6 @@ def _parser() -> argparse.ArgumentParser:
     revision.add_argument("--config", type=Path, required=True)
     revision.add_argument("--expected-config-digest", required=True)
     revision.add_argument("--expected-commit", required=True)
-    revision.add_argument("--expected-with-scrape-tools", choices=("true", "false"), required=True)
-    revision.add_argument("--expected-app-html-version-id", required=True)
-    revision.add_argument("--expected-app-html-sha256", required=True)
     revision.add_argument("--contract", type=Path, required=True)
     revision.add_argument("--expected-runtime-contract-sha256", required=True)
     return parser
@@ -1366,9 +1591,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.config,
                 args.expected_config_digest,
                 args.expected_commit,
-                args.expected_with_scrape_tools,
-                args.expected_app_html_version_id,
-                args.expected_app_html_sha256,
                 args.contract,
                 args.expected_runtime_contract_sha256,
             )

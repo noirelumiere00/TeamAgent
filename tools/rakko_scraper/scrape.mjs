@@ -81,6 +81,7 @@ function findChrome() {
     }
   }
   const candidates = [
+    "/usr/lib/chromium/chromium",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
     "/usr/bin/google-chrome-stable",

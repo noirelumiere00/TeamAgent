@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -13,15 +14,24 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 CONTRACT_KIND = "teamagent.core-media-release-contract"
+CONTRACT_SCHEMA_VERSION = 2
+RUNTIME_CONTRACT_SCHEMA_VERSION = 4
+RUNTIME_RECEIPT_SCHEMA_VERSION = 2
 PROVENANCE_RECORD_RE = re.compile(
     r"^<!-- PRODUCTION_APP_PROVENANCE=(\{.+\}) -->$",
     re.MULTILINE,
 )
 SHA1_RE = re.compile(r"[0-9a-f]{40}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 S3_VERSION_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
 LABEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,254}")
 ARG_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+CONTRACT_KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+RFC3339_UTC_RE = re.compile(
+    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
+    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]+)?Z"
+)
 PRODUCTION_KEYS = {
     "app_html_s3_version_id",
     "app_html_sha256",
@@ -48,15 +58,6 @@ EXPECTED_SUBJECTS = {
         },
     },
 }
-APP_LABELS = {
-    "io.teamagent.contract.app-html-source": "app_html_source",
-    "io.teamagent.contract.baked-app-html-sha256": "baked_fallback_sha256",
-    "io.teamagent.contract.baked-app-html-version-id": "baked_fallback_version_id",
-    "io.teamagent.contract.app-html-version-id": "app_html_s3_version_id",
-    "io.teamagent.contract.app-html-sha256": "app_html_sha256",
-    "io.teamagent.contract.app-html-manifest-sha256": "vault_manifest_sha256",
-    "io.teamagent.contract.app-html-build-inputs-sha256": "build_inputs_sha256",
-}
 UNTRUSTED_PLACEHOLDER_VALUES = {
     "",
     "n/a",
@@ -66,13 +67,39 @@ UNTRUSTED_PLACEHOLDER_VALUES = {
     "tbd",
     "unknown",
 }
-CORE_RUNTIME_LABELS = {
-    "io.teamagent.build.app-html-sha256",
-    "io.teamagent.build.app-html-version-id",
-    "io.teamagent.build.runtime-contract-sha256",
-    "io.teamagent.build.runtime-receipt",
-    "io.teamagent.build.runtime-receipt-sha256",
-    "io.teamagent.build.with-scrape-tools",
+COMMON_STATIC_TEAMAGENT_LABELS = {
+    "io.teamagent.runtime.uid": "10001",
+    "io.teamagent.runtime.gid": "10001",
+    "io.teamagent.runtime.volume": "/tmp",
+    "io.teamagent.runtime.contract": "fargate-readonly-v1",
+}
+CORE_RECEIPT_LABEL_BINDINGS = {
+    "io.teamagent.build.runtime-contract-sha256": "RUNTIME_CONTRACT_SHA256",
+    "io.teamagent.build.runtime-receipt": "RUNTIME_RECEIPT_B64",
+    "io.teamagent.build.runtime-receipt-sha256": "RUNTIME_RECEIPT_SHA256",
+}
+EXPECTED_PROBE_PATHS = {
+    "core": {
+        "app.baked-fallback.sha256": "/app/src/teamagent/connect_web/static/app.html",
+        "binary.python.sha256": "/usr/bin/python3.14",
+    },
+    "media": {
+        "binary.chromium.sha256": "/usr/lib/chromium/chromium",
+        "binary.ffmpeg.sha256": "/usr/bin/ffmpeg",
+        "binary.node.sha256": "/usr/bin/node",
+        "binary.python.sha256": "/usr/bin/python3",
+    },
+}
+APPROVAL_OBSERVATION_KEYS = {
+    "core.base.builder.arm64.digest",
+    "core.binary.python.sha256",
+    "media.binary.chromium.sha256",
+    "media.binary.ffmpeg.sha256",
+    "media.binary.node.sha256",
+    "media.binary.python.sha256",
+}
+FORBIDDEN_LEGACY_ARGUMENTS = {
+    "NODE_IMAGE_DIGEST",
 }
 
 
@@ -126,6 +153,76 @@ def _sha256(value: Any, *, label: str) -> str:
     if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
         raise ProvenanceError(f"{label} must be a lowercase SHA-256")
     return value
+
+
+def _digest(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not DIGEST_RE.fullmatch(value):
+        raise ProvenanceError(f"{label} must be a sha256 digest")
+    return value
+
+
+def _timestamp(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not RFC3339_UTC_RE.fullmatch(value):
+        raise ProvenanceError(f"{label} must be an RFC3339 UTC timestamp")
+    return value
+
+
+def _approval_record(
+    value: Any,
+    *,
+    ready: bool,
+    label: str,
+) -> Mapping[str, Any] | None:
+    if not ready:
+        if value is not None:
+            raise ProvenanceError(f"{label} must be null while release.ready is false")
+        return None
+    record = _mapping(value, label=label)
+    _exact_keys(
+        record,
+        {
+            "approved_at_utc",
+            "approved_by",
+            "source_commit",
+            "observations",
+            "decision",
+        },
+        label=label,
+    )
+    _timestamp(record["approved_at_utc"], label=f"{label}.approved_at_utc")
+    _text(record["approved_by"], label=f"{label}.approved_by")
+    if not isinstance(record["source_commit"], str) or not SHA1_RE.fullmatch(
+        record["source_commit"]
+    ):
+        raise ProvenanceError(f"{label}.source_commit must be a full lowercase Git SHA")
+    decision = _text(record["decision"], label=f"{label}.decision", maximum=16384)
+    if not decision.startswith("APPROVED:"):
+        raise ProvenanceError(f"{label}.decision must start with APPROVED:")
+    observations = record["observations"]
+    if not isinstance(observations, list) or not observations:
+        raise ProvenanceError(f"{label}.observations must be a non-empty array")
+    previous_key = ""
+    for index, raw_observation in enumerate(observations):
+        observation_label = f"{label}.observations[{index}]"
+        observation = _mapping(raw_observation, label=observation_label)
+        _exact_keys(
+            observation,
+            {"key", "value", "observed_at_utc", "source"},
+            label=observation_label,
+        )
+        key = _text(observation["key"], label=f"{observation_label}.key")
+        if not CONTRACT_KEY_RE.fullmatch(key) or key <= previous_key:
+            raise ProvenanceError(
+                f"{label}.observations keys must be canonical, unique, and sorted"
+            )
+        previous_key = key
+        _text(observation["value"], label=f"{observation_label}.value", maximum=16384)
+        _timestamp(
+            observation["observed_at_utc"],
+            label=f"{observation_label}.observed_at_utc",
+        )
+        _text(observation["source"], label=f"{observation_label}.source", maximum=16384)
+    return record
 
 
 def _version_id(value: Any, *, label: str) -> str:
@@ -190,13 +287,17 @@ def load_contract(path: Path) -> dict[str, Any]:
             "schema_version",
             "kind",
             "release",
+            "approval_record",
             "source_runtime_contract",
             "app_html",
             "subjects",
         },
         label="contract",
     )
-    if contract["schema_version"] != 1 or contract["kind"] != CONTRACT_KIND:
+    if (
+        contract["schema_version"] != CONTRACT_SCHEMA_VERSION
+        or contract["kind"] != CONTRACT_KIND
+    ):
         raise ProvenanceError("core/media release contract kind or schema mismatch")
 
     release = _mapping(contract["release"], label="contract.release")
@@ -209,6 +310,11 @@ def load_contract(path: Path) -> dict[str, Any]:
         raise ProvenanceError(
             "ready contracts need an empty blocked_reason; blocked contracts need a reason"
         )
+    approval_record = _approval_record(
+        contract["approval_record"],
+        ready=release["ready"],
+        label="contract.approval_record",
+    )
 
     runtime_contract = _mapping(
         contract["source_runtime_contract"],
@@ -273,6 +379,7 @@ def load_contract(path: Path) -> dict[str, Any]:
                 "repositories",
                 "required_build_args",
                 "required_label_bindings",
+                "source_assertions",
                 "binary_probes",
             },
             label=f"contract.subjects[{index}]",
@@ -314,25 +421,283 @@ def load_contract(path: Path) -> dict[str, Any]:
                 not isinstance(binding, str) or binding not in arguments
             ):
                 raise ProvenanceError(f"{name} label binding is not a build arg")
+        assertions = subject["source_assertions"]
+        if not isinstance(assertions, list):
+            raise ProvenanceError(f"{name} source assertions must be an array")
+        previous_key = ""
+        assertion_labels: set[str] = set()
+        for assertion_index, raw_assertion in enumerate(assertions):
+            assertion_label = f"{name} source assertion[{assertion_index}]"
+            assertion = _mapping(raw_assertion, label=assertion_label)
+            _exact_keys(
+                assertion,
+                {"key", "value", "build_arg", "oci_label", "dockerfile_uses"},
+                label=assertion_label,
+            )
+            key = _text(assertion["key"], label=f"{assertion_label} key")
+            if not CONTRACT_KEY_RE.fullmatch(key) or key <= previous_key:
+                raise ProvenanceError(
+                    f"{name} source assertion keys must be canonical, unique, and sorted"
+                )
+            previous_key = key
+            _text(
+                assertion["value"],
+                label=f"{assertion_label} value",
+                maximum=16384,
+            )
+            build_arg = assertion["build_arg"]
+            if not isinstance(build_arg, str) or not ARG_RE.fullmatch(build_arg):
+                raise ProvenanceError(f"{assertion_label} build_arg is invalid")
+            oci_label = assertion["oci_label"]
+            if (
+                not isinstance(oci_label, str)
+                or not LABEL_RE.fullmatch(oci_label)
+                or not oci_label.startswith("io.teamagent.contract.")
+                or oci_label in assertion_labels
+                or oci_label in bindings
+            ):
+                raise ProvenanceError(
+                    f"{name} source assertion OCI label is invalid or duplicate"
+                )
+            assertion_labels.add(oci_label)
+            uses = assertion["dockerfile_uses"]
+            if (
+                not isinstance(uses, list)
+                or not uses
+                or len(uses) != len(set(uses))
+            ):
+                raise ProvenanceError(
+                    f"{name} source assertion dockerfile_uses must be non-empty and unique"
+                )
+            for use in uses:
+                _text(use, label=f"{assertion_label} Dockerfile use", maximum=16384)
         probes = subject["binary_probes"]
         if not isinstance(probes, list) or not probes:
             raise ProvenanceError(f"{name} binary probes are empty")
-        previous_path = ""
-        for probe in probes:
-            value = _mapping(probe, label=f"{name} binary probe")
-            _exact_keys(value, {"path", "sha256"}, label=f"{name} binary probe")
+        previous_key = ""
+        probe_keys: set[tuple[str, str]] = set()
+        probe_paths: set[str] = set()
+        for probe_index, probe in enumerate(probes):
+            probe_label = f"{name} binary probe[{probe_index}]"
+            value = _mapping(probe, label=probe_label)
+            _exact_keys(value, {"key", "path", "sha256"}, label=probe_label)
+            key = _text(value["key"], label=f"{probe_label} key")
+            identity = (name, key)
+            if (
+                not CONTRACT_KEY_RE.fullmatch(key)
+                or key <= previous_key
+                or identity in probe_keys
+            ):
+                raise ProvenanceError(
+                    f"{name} binary probe (subject, key) identities must be unique and sorted"
+                )
+            previous_key = key
+            probe_keys.add(identity)
             path_value = _text(value["path"], label=f"{name} binary probe path")
             if (
                 not path_value.startswith("/")
                 or ".." in PurePosixPath(path_value).parts
-                or path_value <= previous_path
+                or path_value in probe_paths
             ):
-                raise ProvenanceError(f"{name} binary probe paths are unsafe or unsorted")
-            previous_path = path_value
+                raise ProvenanceError(f"{name} binary probe paths are unsafe or duplicate")
+            probe_paths.add(path_value)
             _sha256(value["sha256"], label=f"{name} binary probe SHA-256")
+        expected_probe_paths = EXPECTED_PROBE_PATHS[name]
+        actual_probe_paths = {
+            probe["key"]: probe["path"]
+            for probe in probes
+            if isinstance(probe, dict)
+        }
+        if actual_probe_paths != expected_probe_paths:
+            raise ProvenanceError(
+                f"{name} binary probe key/path interface does not match the allowlist"
+            )
     if seen != set(EXPECTED_SUBJECTS):
         raise ProvenanceError("contract subject set is incomplete")
+    if approval_record is not None:
+        observation_keys = {
+            observation["key"] for observation in approval_record["observations"]
+        }
+        if observation_keys != APPROVAL_OBSERVATION_KEYS:
+            raise ProvenanceError(
+                "contract.approval_record observations do not cover the exact 5+1 evidence set"
+            )
     return dict(contract)
+
+
+def _load_runtime_contract(path: Path) -> dict[str, Any]:
+    contract = _mapping(_load(path, label="runtime contract"), label="runtime contract")
+    _exact_keys(
+        contract,
+        {"schema_version", "release", "approval_record", "receipt"},
+        label="runtime contract",
+    )
+    if contract["schema_version"] != RUNTIME_CONTRACT_SCHEMA_VERSION:
+        raise ProvenanceError("runtime contract schema is unsupported")
+    release = _mapping(contract["release"], label="runtime contract.release")
+    _exact_keys(release, {"ready", "blocked_reason"}, label="runtime contract.release")
+    if not isinstance(release["ready"], bool):
+        raise ProvenanceError("runtime contract.release.ready must be boolean")
+    if not isinstance(release["blocked_reason"], str):
+        raise ProvenanceError("runtime contract.release.blocked_reason must be text")
+    if release["ready"] == bool(release["blocked_reason"]):
+        raise ProvenanceError(
+            "ready runtime contracts need an empty blocked_reason; "
+            "blocked runtime contracts need a reason"
+        )
+    _approval_record(
+        contract["approval_record"],
+        ready=release["ready"],
+        label="runtime contract.approval_record",
+    )
+    receipt = _mapping(contract["receipt"], label="runtime contract.receipt")
+    _exact_keys(
+        receipt,
+        {"schema_version", "subject", "entries"},
+        label="runtime contract.receipt",
+    )
+    if (
+        receipt["schema_version"] != RUNTIME_RECEIPT_SCHEMA_VERSION
+        or receipt["subject"] != "core"
+    ):
+        raise ProvenanceError("runtime receipt schema or subject is unsupported")
+    entries = receipt["entries"]
+    if not isinstance(entries, list) or not entries:
+        raise ProvenanceError("runtime contract receipt entries are missing")
+    previous_key = ""
+    seen_args: set[str] = set()
+    seen_labels: set[str] = set()
+    for index, raw_entry in enumerate(entries):
+        entry_label = f"runtime contract.receipt.entries[{index}]"
+        entry = _mapping(raw_entry, label=entry_label)
+        _exact_keys(
+            entry,
+            {
+                "key",
+                "component",
+                "evidence",
+                "value_kind",
+                "value",
+                "build_arg",
+                "oci_label",
+                "dockerfile_uses",
+            },
+            label=entry_label,
+        )
+        key = _text(entry["key"], label=f"{entry_label}.key")
+        if not CONTRACT_KEY_RE.fullmatch(key) or key <= previous_key:
+            raise ProvenanceError(
+                "runtime contract receipt keys must be canonical, unique, and sorted"
+            )
+        previous_key = key
+        for field in ("component", "evidence", "value_kind"):
+            _text(entry[field], label=f"{entry_label}.{field}")
+        value = _text(entry["value"], label=f"{entry_label}.value", maximum=16384)
+        value_kind = entry["value_kind"]
+        if value_kind == "sha256":
+            _sha256(value, label=f"{entry_label}.value")
+        elif value_kind == "sha256_digest":
+            _digest(value, label=f"{entry_label}.value")
+        elif value_kind == "git_sha1":
+            if not SHA1_RE.fullmatch(value):
+                raise ProvenanceError(f"{entry_label}.value must be a lowercase Git SHA")
+        build_arg = entry["build_arg"]
+        if (
+            not isinstance(build_arg, str)
+            or not ARG_RE.fullmatch(build_arg)
+            or build_arg in seen_args
+        ):
+            raise ProvenanceError(f"{entry_label}.build_arg is invalid or duplicate")
+        seen_args.add(build_arg)
+        oci_label = entry["oci_label"]
+        if (
+            not isinstance(oci_label, str)
+            or not LABEL_RE.fullmatch(oci_label)
+            or not oci_label.startswith("io.teamagent.contract.")
+            or oci_label in seen_labels
+        ):
+            raise ProvenanceError(f"{entry_label}.oci_label is invalid or duplicate")
+        seen_labels.add(oci_label)
+        uses = entry["dockerfile_uses"]
+        if (
+            not isinstance(uses, list)
+            or not uses
+            or len(uses) != len(set(uses))
+        ):
+            raise ProvenanceError(
+                f"{entry_label}.dockerfile_uses must be non-empty and unique"
+            )
+        for use in uses:
+            _text(use, label=f"{entry_label} Dockerfile use", maximum=16384)
+    return dict(contract)
+
+
+def _runtime_receipt_bytes(contract: Mapping[str, Any]) -> bytes:
+    receipt = _mapping(contract["receipt"], label="runtime contract.receipt")
+    entries = receipt["entries"]
+    return json.dumps(
+        {
+            "schema_version": RUNTIME_RECEIPT_SCHEMA_VERSION,
+            "subject": "core",
+            "values": {entry["key"]: entry["value"] for entry in entries},
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _runtime_expected_labels(
+    contract: Mapping[str, Any],
+    contract_sha256_value: str,
+) -> dict[str, str]:
+    receipt = _runtime_receipt_bytes(contract)
+    entries = _mapping(contract["receipt"], label="runtime contract.receipt")["entries"]
+    return {
+        **{entry["oci_label"]: entry["value"] for entry in entries},
+        "io.teamagent.build.runtime-contract-sha256": contract_sha256_value,
+        "io.teamagent.build.runtime-receipt": base64.b64encode(receipt).decode("ascii"),
+        "io.teamagent.build.runtime-receipt-sha256": hashlib.sha256(receipt).hexdigest(),
+    }
+
+
+def _entry_assertion(entry: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "key": entry["key"],
+        "value": entry["value"],
+        "build_arg": entry["build_arg"],
+        "oci_label": entry["oci_label"],
+        "dockerfile_uses": entry["dockerfile_uses"],
+        "_inner_runtime": True,
+    }
+
+
+def _source_assertions(
+    contract: Mapping[str, Any],
+    runtime_contract: Mapping[str, Any],
+    subject_name: str,
+) -> list[Mapping[str, Any]]:
+    subject = _subject(contract, subject_name)
+    assertions = [dict(assertion) for assertion in subject["source_assertions"]]
+    if subject_name == "core":
+        entries = _mapping(
+            runtime_contract["receipt"],
+            label="runtime contract.receipt",
+        )["entries"]
+        assertions.extend(_entry_assertion(entry) for entry in entries)
+    labels: set[str] = set()
+    keys: set[str] = set()
+    for assertion in assertions:
+        if assertion["key"] in keys:
+            raise ProvenanceError(
+                f"{subject_name} source assertion key is ambiguous across contracts"
+            )
+        if assertion["oci_label"] in labels:
+            raise ProvenanceError(
+                f"{subject_name} source assertion label is ambiguous across contracts"
+            )
+        keys.add(assertion["key"])
+        labels.add(assertion["oci_label"])
+    return assertions
 
 
 def contract_sha256(path: Path) -> str:
@@ -426,6 +791,410 @@ def _dockerfile_instructions(body: str) -> list[str]:
     return instructions
 
 
+def _instruction_parts(instruction: str) -> tuple[str, str]:
+    match = re.fullmatch(r"([A-Za-z]+)(?:[ \t]+(.*))?", instruction)
+    if match is None:
+        raise ProvenanceError("Dockerfile contains a malformed instruction")
+    return match.group(1).upper(), match.group(2) or ""
+
+
+def _verify_external_image_pins(
+    instructions: Sequence[str],
+    *,
+    subject_name: str,
+    digest_arguments: Mapping[str, str],
+) -> None:
+    before_first_from = True
+    global_arguments: dict[str, str] = {}
+    declared_stages: set[str] = set()
+    declared_stage_count = 0
+    current_stage: str | None = None
+    for instruction in instructions:
+        instruction_name, instruction_arguments = _instruction_parts(instruction)
+        if instruction_name == "ARG":
+            argument_match = re.fullmatch(
+                r"([A-Z][A-Z0-9_]*)(?:=(.*))?",
+                instruction_arguments,
+            )
+            if argument_match is None:
+                raise ProvenanceError(f"{subject_name} Dockerfile contains malformed ARG")
+            argument, default = argument_match.groups()
+            if argument in FORBIDDEN_LEGACY_ARGUMENTS or argument.startswith("WOLFI_"):
+                raise ProvenanceError(
+                    f"{subject_name} Dockerfile reintroduces legacy ARG {argument}"
+                )
+            if before_first_from and default is not None:
+                existing = global_arguments.get(argument)
+                if existing is not None and existing != default:
+                    raise ProvenanceError(
+                        f"{subject_name} Dockerfile has conflicting global ARG {argument}"
+                    )
+                global_arguments[argument] = default
+
+        reference: str | None = None
+        stage_alias: str | None = None
+        allow_scratch = False
+        if instruction_name == "FROM":
+            before_first_from = False
+            from_match = re.fullmatch(
+                r"(?:--platform=\S+[ \t]+)?(\S+)"
+                r"(?:[ \t]+AS[ \t]+([A-Za-z0-9_.-]+))?",
+                instruction_arguments,
+                re.IGNORECASE,
+            )
+            if from_match is None:
+                raise ProvenanceError(
+                    f"{subject_name} Dockerfile contains an unsupported FROM instruction"
+                )
+            reference, stage_alias = from_match.groups()
+            allow_scratch = True
+        elif instruction_name == "COPY":
+            copy_match = re.search(
+                r"(?:^|\s)--from=(\S+)(?:\s|$)",
+                instruction_arguments,
+                re.IGNORECASE,
+            )
+            if copy_match is not None:
+                reference = copy_match.group(1)
+
+        if reference is not None:
+            numeric_stage = re.fullmatch(r"0|[1-9][0-9]*", reference)
+            numeric_stage_limit = declared_stage_count
+            if instruction_name != "FROM":
+                numeric_stage_limit -= 1
+            named_local_stage = reference in declared_stages and (
+                instruction_name == "FROM" or reference != current_stage
+            )
+            local_stage = named_local_stage or (
+                numeric_stage is not None and int(reference) < numeric_stage_limit
+            )
+            literal_digest = re.fullmatch(r"\S+@sha256:[0-9a-f]{64}", reference)
+            argument_digest = re.fullmatch(
+                r"\S+@\$\{([A-Z][A-Z0-9_]*)\}",
+                reference,
+            )
+            fixed_argument_digest = (
+                argument_digest is not None
+                and digest_arguments.get(argument_digest.group(1))
+                == global_arguments.get(argument_digest.group(1))
+                and DIGEST_RE.fullmatch(digest_arguments.get(argument_digest.group(1), ""))
+                is not None
+            )
+            if not (
+                local_stage
+                or (allow_scratch and reference == "scratch")
+                or literal_digest is not None
+                or fixed_argument_digest
+            ):
+                raise ProvenanceError(
+                    f"{subject_name} Dockerfile external image is not digest pinned: {reference}"
+                )
+        if instruction_name == "FROM":
+            declared_stage_count += 1
+            current_stage = stage_alias
+        if stage_alias is not None:
+            declared_stages.add(stage_alias)
+
+
+def _verify_dockerfile_contract(
+    dockerfile_path: Path,
+    *,
+    subject_name: str,
+    subject: Mapping[str, Any],
+    assertions: Sequence[Mapping[str, Any]],
+) -> None:
+    try:
+        body = dockerfile_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProvenanceError(f"{subject_name} Dockerfile is missing") from exc
+    effective_lines = [
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    ]
+    effective_dockerfile = "\n".join(effective_lines)
+    instructions = _dockerfile_instructions(body)
+    label_instructions = "\n".join(
+        instruction
+        for instruction in instructions
+        if _instruction_parts(instruction)[0] == "LABEL"
+    )
+
+    required_arguments = subject["required_build_args"]
+    for argument in required_arguments:
+        declarations = re.findall(
+            rf"^[ \t]*ARG[ \t]+{re.escape(argument)}(?:=(.*))?$",
+            effective_dockerfile,
+            re.MULTILINE,
+        )
+        if not declarations:
+            raise ProvenanceError(
+                f"{subject_name} Dockerfile lacks required ARG {argument}"
+            )
+    for argument in (
+        "GIT_COMMIT",
+        "GIT_BRANCH",
+        "BUILD_CONTEXT_SHA256",
+        "RELEASE_CONTRACT_SHA256",
+        "APP_PROVENANCE_SHA256",
+    ):
+        declarations = re.findall(
+            rf"^[ \t]*ARG[ \t]+{argument}(?:=(.*))?$",
+            effective_dockerfile,
+            re.MULTILINE,
+        )
+        if declarations != [""]:
+            raise ProvenanceError(
+                f"{subject_name} Dockerfile must declare {argument} once without a default"
+            )
+    if subject_name == "core":
+        for label_name, argument in CORE_RECEIPT_LABEL_BINDINGS.items():
+            declarations = re.findall(
+                rf"^[ \t]*ARG[ \t]+{argument}(?:=(.*))?$",
+                effective_dockerfile,
+                re.MULTILINE,
+            )
+            if declarations != ["", ""]:
+                raise ProvenanceError(
+                    f"core Dockerfile must declare {argument} in builder/final "
+                    "without defaults"
+                )
+            variable = rf"(?:\${argument}|\$\{{{argument}\}})"
+            if re.search(
+                rf"\b{re.escape(label_name)}="
+                rf"(?:\"{variable}\"|{variable})(?:\s|$)",
+                label_instructions,
+            ) is None:
+                raise ProvenanceError(
+                    f"core Dockerfile lacks receipt label binding {label_name}"
+                )
+
+    assertion_values_by_arg: dict[str, str] = {}
+    digest_arguments: dict[str, str] = {}
+    for assertion in assertions:
+        build_arg = assertion["build_arg"]
+        value = assertion["value"]
+        existing = assertion_values_by_arg.get(build_arg)
+        if existing is not None and existing != value:
+            raise ProvenanceError(
+                f"{subject_name} source assertions disagree on ARG {build_arg}"
+            )
+        assertion_values_by_arg[build_arg] = value
+        declarations = re.findall(
+            rf"^[ \t]*ARG[ \t]+{re.escape(build_arg)}(?:=(.*))?$",
+            effective_dockerfile,
+            re.MULTILINE,
+        )
+        if value not in declarations or any(
+            declaration not in {"", value} for declaration in declarations
+        ):
+            raise ProvenanceError(
+                f"{subject_name} Dockerfile does not fix {build_arg} to its contract value"
+            )
+        variable_forms = (f"${build_arg}", f"${{{build_arg}}}")
+        if (
+            not assertion.get("_inner_runtime")
+            and not any(
+                variable in required_use
+                for required_use in assertion["dockerfile_uses"]
+                for variable in variable_forms
+            )
+        ):
+            raise ProvenanceError(
+                f"{subject_name} source assertion uses do not reference {build_arg}"
+            )
+        for required_use in assertion["dockerfile_uses"]:
+            if required_use not in effective_dockerfile:
+                raise ProvenanceError(
+                    f"{subject_name} Dockerfile does not implement {build_arg} use: "
+                    f"{required_use!r}"
+                )
+            if any(
+                required_use in label_instruction
+                for label_instruction in label_instructions.splitlines()
+            ):
+                raise ProvenanceError(
+                    f"{subject_name} source assertion use for {build_arg} may not be a LABEL"
+                )
+        variable = rf"(?:\${build_arg}|\$\{{{build_arg}\}})"
+        if re.search(
+            rf"\b{re.escape(assertion['oci_label'])}="
+            rf"(?:\"{variable}\"|{variable})(?:\s|$)",
+            label_instructions,
+        ) is None:
+            raise ProvenanceError(
+                f"{subject_name} Dockerfile does not bind "
+                f"{assertion['oci_label']} to {build_arg}"
+            )
+        if DIGEST_RE.fullmatch(value):
+            digest_arguments[build_arg] = value
+
+    for label_name, binding in subject["required_label_bindings"].items():
+        if binding == subject["runtime_kind"]:
+            expected = (
+                rf"\b{re.escape(label_name)}=[\"']?{re.escape(binding)}[\"']?(?:\s|$)"
+            )
+        else:
+            expected = (
+                rf"\b{re.escape(label_name)}=[\"']?"
+                rf"(?:\${re.escape(binding)}|\$\{{{re.escape(binding)}\}})"
+                rf"[\"']?(?:\s|$)"
+            )
+        if re.search(expected, label_instructions) is None:
+            raise ProvenanceError(
+                f"{subject_name} Dockerfile lacks label binding {label_name}"
+            )
+
+    expected_teamagent_labels = {
+        *COMMON_STATIC_TEAMAGENT_LABELS,
+        *(
+            label_name
+            for label_name in subject["required_label_bindings"]
+            if label_name.startswith("io.teamagent.")
+        ),
+        *(assertion["oci_label"] for assertion in assertions),
+    }
+    if subject_name == "core":
+        expected_teamagent_labels.update(CORE_RECEIPT_LABEL_BINDINGS)
+    actual_teamagent_labels = set(
+        re.findall(r"\b(io\.teamagent\.[a-z0-9.-]+)=", label_instructions)
+    )
+    if actual_teamagent_labels != expected_teamagent_labels:
+        missing = sorted(expected_teamagent_labels - actual_teamagent_labels)
+        unknown = sorted(actual_teamagent_labels - expected_teamagent_labels)
+        raise ProvenanceError(
+            f"{subject_name} Dockerfile TeamAgent label set mismatch: "
+            f"missing={missing}, unknown={unknown}"
+        )
+
+    _verify_external_image_pins(
+        instructions,
+        subject_name=subject_name,
+        digest_arguments=digest_arguments,
+    )
+
+
+def validate_contract_pair(
+    runtime_contract_path: Path,
+    contract_path: Path,
+    repo_root: Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    contract = load_contract(contract_path)
+    runtime_contract = _load_runtime_contract(runtime_contract_path)
+    try:
+        runtime_bytes = runtime_contract_path.read_bytes()
+    except OSError as exc:
+        raise ProvenanceError("cannot read runtime contract bytes") from exc
+    runtime_pin = _mapping(
+        contract["source_runtime_contract"],
+        label="contract.source_runtime_contract",
+    )
+    actual_runtime_sha256 = hashlib.sha256(runtime_bytes).hexdigest()
+    if actual_runtime_sha256 != runtime_pin["sha256"]:
+        raise ProvenanceError(
+            "outer source runtime contract SHA-256 does not match inner raw bytes"
+        )
+    expected_runtime_path = (repo_root / runtime_pin["path"]).resolve()
+    if runtime_contract_path.resolve() != expected_runtime_path:
+        raise ProvenanceError(
+            "runtime contract argument does not resolve to the outer pinned source path"
+        )
+
+    outer_release = _mapping(contract["release"], label="contract.release")
+    inner_release = _mapping(
+        runtime_contract["release"],
+        label="runtime contract.release",
+    )
+    if outer_release["ready"] and not inner_release["ready"]:
+        raise ProvenanceError("outer release cannot be ready while inner release is blocked")
+
+    inner_entries = {
+        entry["key"]: entry
+        for entry in _mapping(
+            runtime_contract["receipt"],
+            label="runtime contract.receipt",
+        )["entries"]
+    }
+    core_python = inner_entries.get("binary.python.sha256")
+    core_builder = inner_entries.get("base.builder.arm64.digest")
+    if core_python is None or core_builder is None:
+        raise ProvenanceError(
+            "inner runtime contract lacks core Python or builder-base evidence"
+        )
+    core_probes = {
+        probe["key"]: probe for probe in _subject(contract, "core")["binary_probes"]
+    }
+    core_python_probe = core_probes["binary.python.sha256"]
+    if (
+        core_python_probe["path"] != "/usr/bin/python3.14"
+        or core_python_probe["sha256"] != core_python["value"]
+    ):
+        raise ProvenanceError(
+            "core Python probe path/value does not match the inner runtime contract"
+        )
+
+    for subject_name in ("core", "media"):
+        subject = _subject(contract, subject_name)
+        assertions = _source_assertions(contract, runtime_contract, subject_name)
+        assertions_by_key = {assertion["key"]: assertion for assertion in assertions}
+        for probe in subject["binary_probes"]:
+            if not probe["key"].startswith("binary."):
+                continue
+            assertion = assertions_by_key.get(probe["key"])
+            if assertion is None:
+                raise ProvenanceError(
+                    f"{subject_name} binary probe lacks a matching source assertion: "
+                    f"{probe['key']}"
+                )
+            if assertion["value"] != probe["sha256"]:
+                raise ProvenanceError(
+                    f"{subject_name} binary probe value differs from source assertion: "
+                    f"{probe['key']}"
+                )
+            if not any(probe["path"] in use for use in assertion["dockerfile_uses"]):
+                raise ProvenanceError(
+                    f"{subject_name} binary assertion does not prove its canonical path: "
+                    f"{probe['key']}"
+                )
+        dockerfile_path = repo_root / subject["dockerfile"]
+        _verify_dockerfile_contract(
+            dockerfile_path,
+            subject_name=subject_name,
+            subject=subject,
+            assertions=assertions,
+        )
+
+    outer_approval = contract["approval_record"]
+    if outer_approval is not None:
+        media_probes = {
+            probe["key"]: probe for probe in _subject(contract, "media")["binary_probes"]
+        }
+        expected_observations = {
+            "core.base.builder.arm64.digest": core_builder["value"],
+            "core.binary.python.sha256": core_python["value"],
+            **{
+                f"media.{key}": probe["sha256"]
+                for key, probe in media_probes.items()
+                if key.startswith("binary.")
+            },
+        }
+        actual_observations = {
+            observation["key"]: observation["value"]
+            for observation in outer_approval["observations"]
+        }
+        if actual_observations != expected_observations:
+            raise ProvenanceError(
+                "outer approval observations do not match the paired contract evidence"
+            )
+        inner_approval = runtime_contract["approval_record"]
+        if (
+            inner_approval is not None
+            and inner_approval["source_commit"] != outer_approval["source_commit"]
+        ):
+            raise ProvenanceError(
+                "inner and outer approvals do not bind the same source commit"
+            )
+    return contract, runtime_contract
+
+
 def verify_source_interface(
     repo_root: Path,
     contract_path: Path,
@@ -439,12 +1208,7 @@ def verify_source_interface(
         label="contract source runtime contract",
     )
     runtime_path = repo_root / runtime["path"]
-    try:
-        runtime_sha256 = hashlib.sha256(runtime_path.read_bytes()).hexdigest()
-    except OSError as exc:
-        raise ProvenanceError("source runtime contract is missing") from exc
-    if runtime_sha256 != runtime["sha256"]:
-        raise ProvenanceError("source runtime contract SHA-256 mismatch")
+    validate_contract_pair(runtime_path, contract_path, repo_root)
 
     fallback = _mapping(
         _mapping(contract["app_html"], label="contract.app_html")["baked_fallback"],
@@ -458,55 +1222,6 @@ def verify_source_interface(
     if fallback_sha256 != fallback["sha256"]:
         raise ProvenanceError("baked fallback app.html SHA-256 mismatch")
 
-    for name in ("core", "media"):
-        subject = _subject(contract, name)
-        dockerfile_path = repo_root / subject["dockerfile"]
-        try:
-            body = dockerfile_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise ProvenanceError(f"{name} Dockerfile is missing") from exc
-        instructions = _dockerfile_instructions(body)
-        arg_instructions = [
-            instruction for instruction in instructions if instruction.upper().startswith("ARG ")
-        ]
-        labels = " ".join(
-            instruction for instruction in instructions if instruction.upper().startswith("LABEL ")
-        )
-        for arg in subject["required_build_args"]:
-            declarations = [
-                instruction
-                for instruction in arg_instructions
-                if re.fullmatch(rf"ARG\s+{re.escape(arg)}(?:=.*)?", instruction)
-            ]
-            if not declarations:
-                raise ProvenanceError(f"{name} Dockerfile lacks ARG {arg}")
-        for provenance_arg in (
-            "GIT_COMMIT",
-            "GIT_BRANCH",
-            "RELEASE_CONTRACT_SHA256",
-            "APP_PROVENANCE_SHA256",
-        ):
-            declarations = [
-                instruction
-                for instruction in arg_instructions
-                if re.fullmatch(rf"ARG\s+{provenance_arg}(?:=.*)?", instruction)
-            ]
-            if declarations != [f"ARG {provenance_arg}"]:
-                raise ProvenanceError(
-                    f"{name} Dockerfile must declare {provenance_arg} without a default"
-                )
-        for label_name, binding in subject["required_label_bindings"].items():
-            if binding == subject["runtime_kind"]:
-                expected = rf"\b{re.escape(label_name)}=[\"']?{re.escape(binding)}[\"']?(?:\s|$)"
-            else:
-                expected = (
-                    rf"\b{re.escape(label_name)}=[\"']?"
-                    rf"(?:\${re.escape(binding)}|\$\{{{re.escape(binding)}\}})"
-                    rf"[\"']?(?:\s|$)"
-                )
-            if re.search(expected, labels) is None:
-                raise ProvenanceError(f"{name} Dockerfile lacks label binding {label_name}")
-
 
 def verify_oci_config(
     config_path: Path,
@@ -517,6 +1232,7 @@ def verify_oci_config(
     contract_path: Path,
     expected_contract_sha256: str,
     runtime_contract_path: Path | None = None,
+    expected_build_context_sha256: str | None = None,
 ) -> dict[str, str]:
     if not SHA1_RE.fullmatch(commit):
         raise ProvenanceError("expected commit must be a full lowercase Git SHA")
@@ -535,6 +1251,22 @@ def verify_oci_config(
     )
     record = {"schema_version": 1, **dict(production)}
     subject = _subject(contract, subject_name)
+    if runtime_contract_path is None:
+        raise ProvenanceError("runtime contract is required for the core/media OCI interface")
+    runtime_contract = _load_runtime_contract(runtime_contract_path)
+    try:
+        runtime_contract_bytes = runtime_contract_path.read_bytes()
+    except OSError as exc:
+        raise ProvenanceError("cannot read runtime contract bytes") from exc
+    runtime_contract_sha256 = hashlib.sha256(runtime_contract_bytes).hexdigest()
+    runtime_pin = _mapping(
+        contract["source_runtime_contract"],
+        label="contract.source_runtime_contract",
+    )
+    if runtime_contract_sha256 != runtime_pin["sha256"]:
+        raise ProvenanceError(
+            "outer source runtime contract SHA-256 does not match inner raw bytes"
+        )
     try:
         config_bytes = config_path.read_bytes()
     except OSError as exc:
@@ -561,62 +1293,71 @@ def verify_oci_config(
     for label_name, value in labels.items():
         if value.strip().lower() in UNTRUSTED_PLACEHOLDER_VALUES:
             raise ProvenanceError(f"OCI label {label_name} uses an untrusted placeholder")
-    expected = {
-        "org.opencontainers.image.revision": commit,
-        "org.opencontainers.image.ref.name": "dev",
-        "io.teamagent.runtime.kind": subject["runtime_kind"],
-        "io.teamagent.build.release-contract-sha256": expected_contract_sha256,
-        "io.teamagent.build.app-provenance-sha256": application_provenance_sha256(
-            contract,
-            record,
-        ),
+    if expected_build_context_sha256 is None:
+        raise ProvenanceError("expected build context SHA-256 is required")
+    _sha256(
+        expected_build_context_sha256,
+        label="expected build context SHA-256",
+    )
+    app_html = _mapping(contract["app_html"], label="contract.app_html")
+    fallback = _mapping(app_html["baked_fallback"], label="contract fallback")
+    build_argument_values: dict[str, str] = {
+        "GIT_COMMIT": commit,
+        "GIT_BRANCH": "dev",
+        "BUILD_CONTEXT_SHA256": expected_build_context_sha256,
+        "RELEASE_CONTRACT_SHA256": expected_contract_sha256,
+        "APP_PROVENANCE_SHA256": application_provenance_sha256(contract, record),
+        "APP_HTML_SOURCE": "s3",
+        "APP_HTML_SHA256": record["app_html_sha256"],
+        "APP_HTML_VERSION_ID": record["app_html_s3_version_id"],
+        "APP_HTML_MANIFEST_SHA256": record["vault_manifest_sha256"],
+        "APP_HTML_BUILD_INPUTS_SHA256": record["build_inputs_sha256"],
+        "BAKED_APP_HTML_SHA256": fallback["sha256"],
     }
+    if fallback["s3_version_id"] is not None:
+        build_argument_values["BAKED_APP_HTML_VERSION_ID"] = fallback["s3_version_id"]
+
+    expected: dict[str, str] = dict(COMMON_STATIC_TEAMAGENT_LABELS)
+    for label_name, binding in subject["required_label_bindings"].items():
+        if binding == subject["runtime_kind"]:
+            expected[label_name] = subject["runtime_kind"]
+            continue
+        expected_value = build_argument_values.get(binding)
+        if expected_value is None:
+            raise ProvenanceError(
+                f"{subject_name} OCI label binding cannot be resolved: {label_name}"
+            )
+        expected[label_name] = expected_value
+    for assertion in subject["source_assertions"]:
+        if assertion["oci_label"] in expected:
+            raise ProvenanceError(
+                f"{subject_name} OCI label is ambiguously declared: "
+                f"{assertion['oci_label']}"
+            )
+        expected[assertion["oci_label"]] = assertion["value"]
     if subject_name == "core":
-        fallback = _mapping(
-            _mapping(contract["app_html"], label="contract.app_html")["baked_fallback"],
-            label="contract fallback",
+        runtime_labels = _runtime_expected_labels(
+            runtime_contract,
+            runtime_contract_sha256,
         )
-        values = {
-            **record,
-            "app_html_source": "s3",
-            "baked_fallback_sha256": fallback["sha256"],
-            "baked_fallback_version_id": fallback["s3_version_id"],
-        }
-        expected.update({label: values[key] for label, key in APP_LABELS.items()})
+        overlap = expected.keys() & runtime_labels.keys()
+        if overlap:
+            raise ProvenanceError(
+                f"core OCI labels are ambiguous across contracts: {sorted(overlap)}"
+            )
+        expected.update(runtime_labels)
+
+    expected["org.opencontainers.image.revision"] = commit
+    expected["org.opencontainers.image.ref.name"] = "dev"
     expected_teamagent_labels = {
         label_name for label_name in expected if label_name.startswith("io.teamagent.")
     }
     actual_teamagent_labels = {
         label_name for label_name in labels if label_name.startswith("io.teamagent.")
     }
-    allowed_teamagent_labels = set(expected_teamagent_labels)
-    if subject_name == "core" and runtime_contract_path is not None:
-        runtime_contract = _mapping(
-            _load(runtime_contract_path, label="runtime contract"),
-            label="runtime contract",
-        )
-        receipt = _mapping(
-            runtime_contract.get("receipt"),
-            label="runtime contract receipt",
-        )
-        entries = receipt.get("entries")
-        if not isinstance(entries, list) or not entries:
-            raise ProvenanceError("runtime contract receipt entries are missing")
-        allowed_teamagent_labels.update(CORE_RUNTIME_LABELS)
-        for index, raw_entry in enumerate(entries):
-            entry = _mapping(
-                raw_entry,
-                label=f"runtime contract receipt entry[{index}]",
-            )
-            label_name = entry.get("oci_label")
-            if not isinstance(label_name, str) or not LABEL_RE.fullmatch(label_name):
-                raise ProvenanceError("runtime contract OCI label is invalid")
-            allowed_teamagent_labels.add(label_name)
-    if not expected_teamagent_labels.issubset(
-        actual_teamagent_labels
-    ) or not actual_teamagent_labels.issubset(allowed_teamagent_labels):
+    if actual_teamagent_labels != expected_teamagent_labels:
         missing = sorted(expected_teamagent_labels - actual_teamagent_labels)
-        unknown = sorted(actual_teamagent_labels - allowed_teamagent_labels)
+        unknown = sorted(actual_teamagent_labels - expected_teamagent_labels)
         raise ProvenanceError(
             f"OCI TeamAgent label allowlist mismatch: missing={missing}, unknown={unknown}"
         )
@@ -628,7 +1369,10 @@ def verify_oci_config(
 
 def binary_probes(contract: Mapping[str, Any], subject_name: str) -> list[Mapping[str, str]]:
     subject = _subject(contract, subject_name)
-    return [dict(probe) for probe in subject["binary_probes"]]
+    return sorted(
+        (dict(probe) for probe in subject["binary_probes"]),
+        key=lambda probe: probe["path"],
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -649,6 +1393,10 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--contract", type=Path, required=True)
     source.add_argument("--deploy-log", type=Path, required=True)
     source.add_argument("--baked-fallback", type=Path)
+    pair = commands.add_parser("validate-contract-pair")
+    pair.add_argument("--runtime-contract", type=Path, required=True)
+    pair.add_argument("--contract", type=Path, required=True)
+    pair.add_argument("--repo-root", type=Path, required=True)
     oci = commands.add_parser("verify-oci-config")
     oci.add_argument("--config", type=Path, required=True)
     oci.add_argument("--subject", choices=("core", "media"), required=True)
@@ -656,7 +1404,8 @@ def _parser() -> argparse.ArgumentParser:
     oci.add_argument("--expected-config-digest", required=True)
     oci.add_argument("--contract", type=Path, required=True)
     oci.add_argument("--expected-contract-sha256", required=True)
-    oci.add_argument("--runtime-contract", type=Path)
+    oci.add_argument("--runtime-contract", type=Path, required=True)
+    oci.add_argument("--expected-build-context-sha256", required=True)
     probes = commands.add_parser("binary-probes")
     probes.add_argument("--contract", type=Path, required=True)
     probes.add_argument("--subject", choices=("core", "media"), required=True)
@@ -693,6 +1442,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.deploy_log,
                 args.baked_fallback,
             )
+        elif args.command == "validate-contract-pair":
+            validate_contract_pair(
+                args.runtime_contract,
+                args.contract,
+                args.repo_root,
+            )
         elif args.command == "verify-oci-config":
             verify_oci_config(
                 args.config,
@@ -702,6 +1457,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contract_path=args.contract,
                 expected_contract_sha256=args.expected_contract_sha256,
                 runtime_contract_path=args.runtime_contract,
+                expected_build_context_sha256=args.expected_build_context_sha256,
             )
         elif args.command == "binary-probes":
             for probe in binary_probes(load_contract(args.contract), args.subject):

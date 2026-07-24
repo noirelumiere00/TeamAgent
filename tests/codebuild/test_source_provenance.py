@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -106,22 +107,38 @@ def _synthetic_dockerfile(contract: dict[str, object]) -> str:
             'io.teamagent.build.runtime-receipt-sha256="${RUNTIME_RECEIPT_SHA256}"',
         ]
     )
-    label_instruction = "LABEL " + " \\\n+      ".join(labels)
+    label_instruction = "LABEL " + " \\\n      ".join(labels)
     return f"""{fixed_args}
-FROM cgr.dev/chainguard/python@${{NODE_IMAGE_DIGEST}} AS builder
-FROM cgr.dev/chainguard/wolfi-base@${{WOLFI_RUNTIME_IMAGE_DIGEST}} AS runtime
+FROM ghcr.io/astral-sh/uv@${{UV_ARM64_DIGEST}} AS uv
+FROM cgr.dev/chainguard/python@${{PYTHON_BUILDER_ARM64_DIGEST}} AS builder
+{redeclared_args}
+ARG RUNTIME_CONTRACT_SHA256
+ARG RUNTIME_RECEIPT_B64
+ARG RUNTIME_RECEIPT_SHA256
+COPY infra/codebuild/teamagent_runtime_contract.json /tmp/teamagent_runtime_contract.json
+{uses}
+RUN python -c "import base64, hashlib, json, os, pathlib; \\
+raw = pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes(); \\
+assert hashlib.sha256(raw).hexdigest() == os.environ['RUNTIME_CONTRACT_SHA256']; \\
+contract = json.loads(raw); \\
+entries = contract['receipt']['entries']; \\
+expected_values = {{entry['key']: entry['value'] for entry in entries}}; \\
+expected_receipt = {{'schema_version': contract['receipt']['schema_version'], 'subject': contract['receipt']['subject'], 'values': expected_values}}; \\
+encoded = os.environ['RUNTIME_RECEIPT_B64']; \\
+receipt = base64.b64decode(encoded, validate=True); \\
+assert base64.b64encode(receipt).decode('ascii') == encoded; \\
+assert hashlib.sha256(receipt).hexdigest() == os.environ['RUNTIME_RECEIPT_SHA256']; \\
+assert receipt == json.dumps(expected_receipt, sort_keys=True, separators=(',', ':')).encode('utf-8'); \\
+parsed_receipt = json.loads(receipt); \\
+assert parsed_receipt['subject'] == 'core'; \\
+assert parsed_receipt['values'] == expected_values; \\
+assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
+FROM cgr.dev/chainguard/python@${{PYTHON_RUNTIME_ARM64_DIGEST}} AS final
 {redeclared_args}
 ARG RUNTIME_CONTRACT_SHA256
 ARG RUNTIME_RECEIPT_B64
 ARG RUNTIME_RECEIPT_SHA256
 COPY --from=builder /opt/app /opt/app
-{uses}
-RUN python3 - <<'PY'
-import base64
-import hashlib
-receipt = base64.b64decode(RUNTIME_RECEIPT_B64)
-assert hashlib.sha256(receipt).hexdigest() == RUNTIME_RECEIPT_SHA256
-PY
 {label_instruction}
 """
 
@@ -130,16 +147,12 @@ def _oci_fixture(
     tmp_path: Path,
     commit: str,
     *,
-    profile: str = "true",
     mutate_labels: dict[str, str] | None = None,
 ) -> tuple[Path, str, Path, str]:
     contract = _ready_contract()
     contract_sha256 = hashlib.sha256(READY_CONTRACT_PATH.read_bytes()).hexdigest()
     labels = {
         "org.opencontainers.image.revision": commit,
-        provenance.SCRAPE_TOOLS_LABEL: profile,
-        provenance.APP_HTML_VERSION_ID_LABEL: APP_HTML_VERSION_ID,
-        provenance.APP_HTML_SHA256_LABEL: APP_HTML_SHA256,
         **provenance.runtime_expected_labels(contract, contract_sha256),
     }
     labels.update(mutate_labels or {})
@@ -173,22 +186,34 @@ def _oci_fixture(
     return config_path, config_digest, response_path, image_digest
 
 
-def test_active_wolfi_contract_is_fail_closed_until_missing_evidence_lands() -> None:
+def test_active_core_contract_is_schema_aligned_but_release_remains_fail_closed() -> None:
     contract = provenance.load_runtime_contract(ACTIVE_CONTRACT_PATH)
 
     assert contract["release"]["ready"] is False
-    with pytest.raises(
-        provenance.ProvenanceError,
-        match=r"Debian 13.*CRITICAL=4/HIGH=49",
-    ):
+    assert contract["approval_record"] is None
+    assert contract["receipt"]["subject"] == "core"
+    assert {entry["key"] for entry in contract["receipt"]["entries"]} == {
+        "artifact.torch.arm64-wheel.sha256",
+        "base.builder.arm64.digest",
+        "base.runtime.arm64.digest",
+        "base.uv.arm64.digest",
+        "binary.python.sha256",
+        "binary.uv.sha256",
+        "component.python.version",
+        "component.torch.version",
+        "component.uv.version",
+        "model.e5.revision",
+    }
+    with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
         provenance.require_release_ready(contract)
     assert all(
-        "playwright" not in entry["key"] and "archive" not in entry["key"]
+        not entry["build_arg"].startswith("WOLFI_")
+        and entry["build_arg"] != "NODE_IMAGE_DIGEST"
         for entry in contract["receipt"]["entries"]
     )
 
 
-def test_ready_contract_requires_exact_wolfi_evidence_and_node_image_digest_binding() -> None:
+def test_ready_contract_requires_exact_core_evidence_and_receipt_subject() -> None:
     contract = provenance.load_runtime_contract(READY_CONTRACT_PATH)
     provenance.require_release_ready(contract)
     arguments = provenance.runtime_build_arguments(
@@ -196,7 +221,10 @@ def test_ready_contract_requires_exact_wolfi_evidence_and_node_image_digest_bind
         provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
     )
 
-    assert arguments["NODE_IMAGE_DIGEST"].startswith("sha256:")
+    assert arguments["PYTHON_BUILDER_ARM64_DIGEST"].startswith("sha256:")
+    receipt = json.loads(provenance.runtime_receipt_bytes(contract))
+    assert receipt["schema_version"] == 2
+    assert receipt["subject"] == "core"
     assert set(arguments) == {entry["build_arg"] for entry in contract["receipt"]["entries"]} | {
         provenance.RUNTIME_CONTRACT_SHA256_ARG,
         provenance.RUNTIME_RECEIPT_B64_ARG,
@@ -215,11 +243,114 @@ def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
         provenance.validate_runtime_contract(contract)
 
     contract = _ready_contract()
-    contract["receipt"]["entries"][0]["build_arg"] = "MUTABLE_BUILDER_TAG"
-    contract["receipt"]["entries"][0]["dockerfile_uses"] = [
+    builder_entry = next(
+        entry
+        for entry in contract["receipt"]["entries"]
+        if entry["key"] == "base.builder.arm64.digest"
+    )
+    builder_entry["build_arg"] = "MUTABLE_BUILDER_TAG"
+    builder_entry["dockerfile_uses"] = [
         "cgr.dev/chainguard/python@${MUTABLE_BUILDER_TAG}"
     ]
     with pytest.raises(provenance.ProvenanceError, match="bindings are invalid"):
+        provenance.validate_runtime_contract(contract)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda contract: contract.update(schema_version=3), "unsupported runtime contract schema"),
+        (
+            lambda contract: contract["receipt"].update(schema_version=1),
+            "receipt schema",
+        ),
+        (
+            lambda contract: contract["receipt"].update(subject="media"),
+            r"receipt\.subject must be 'core'",
+        ),
+        (
+            lambda contract: contract.update(approval_record=None),
+            "approval_record must be an object",
+        ),
+        (
+            lambda contract: contract["approval_record"].update(source_commit="A" * 40),
+            "full lowercase Git SHA-1",
+        ),
+        (
+            lambda contract: contract["approval_record"].update(
+                approved_at_utc="2026-07-24T00:00:00+00:00"
+            ),
+            "RFC3339 UTC",
+        ),
+        (
+            lambda contract: contract["approval_record"].update(decision="looks good"),
+            "must begin with 'APPROVED: '",
+        ),
+        (
+            lambda contract: contract["approval_record"].update(unexpected="value"),
+            "schema mismatch",
+        ),
+        (
+            lambda contract: contract["approval_record"]["observations"].append(
+                dict(contract["approval_record"]["observations"][0])
+            ),
+            "duplicate runtime contract approval_record observation key",
+        ),
+    ],
+)
+def test_runtime_contract_schema_and_approval_record_are_strict(
+    mutation: object,
+    message: str,
+) -> None:
+    contract = _ready_contract()
+    mutation(contract)
+
+    with pytest.raises(provenance.ProvenanceError, match=message):
+        provenance.validate_runtime_contract(contract)
+
+
+def test_blocked_contract_rejects_an_approval_record() -> None:
+    contract = _ready_contract()
+    contract["release"] = {
+        "ready": False,
+        "blocked_reason": "Schema alignment is complete, but release approval remains intentionally blocked.",
+    }
+
+    with pytest.raises(provenance.ProvenanceError, match="approval_record must be null"):
+        provenance.validate_runtime_contract(contract)
+
+
+@pytest.mark.parametrize(
+    ("key", "replacement_arg"),
+    [
+        ("base.builder.arm64.digest", "NODE_IMAGE_DIGEST"),
+        ("base.runtime.arm64.digest", "WOLFI_RUNTIME_IMAGE_DIGEST"),
+    ],
+)
+def test_ready_contract_rejects_legacy_wolfi_or_node_digest_bindings(
+    key: str,
+    replacement_arg: str,
+) -> None:
+    contract = _ready_contract()
+    entry = next(item for item in contract["receipt"]["entries"] if item["key"] == key)
+    entry["dockerfile_uses"] = [
+        use.replace(entry["build_arg"], replacement_arg)
+        for use in entry["dockerfile_uses"]
+    ]
+    entry["build_arg"] = replacement_arg
+
+    with pytest.raises(provenance.ProvenanceError, match="bindings are invalid"):
+        provenance.validate_runtime_contract(contract)
+
+
+def test_runtime_entry_rejects_legacy_build_label_namespace() -> None:
+    contract = _ready_contract()
+    contract["receipt"]["entries"][0]["oci_label"] = "io.teamagent.build.legacy-entry"
+
+    with pytest.raises(
+        provenance.ProvenanceError,
+        match=r"must use io\.teamagent\.contract\.",
+    ):
         provenance.validate_runtime_contract(contract)
 
 
@@ -257,7 +388,7 @@ def test_dockerfile_contract_rejects_forward_stage_alias_as_unpinned_external(
     dockerfile.write_text(
         "FROM future AS premature\n"
         + _synthetic_dockerfile(_ready_contract())
-        + "\nFROM cgr.dev/chainguard/python@${NODE_IMAGE_DIGEST} AS future\n",
+        + "\nFROM cgr.dev/chainguard/python@${PYTHON_BUILDER_ARM64_DIGEST} AS future\n",
         encoding="utf-8",
     )
 
@@ -328,34 +459,36 @@ def test_dockerfile_contract_rejects_invalid_numeric_copy_stages(
         provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
 
 
-def test_checked_in_dockerfile_must_implement_active_contract_before_activation() -> None:
-    """Turn the cross-branch schema into a hard merge gate once it is activated."""
-
+def test_checked_in_dockerfile_implements_active_contract_while_release_is_blocked() -> None:
     contract = provenance.load_runtime_contract(ACTIVE_CONTRACT_PATH)
-    checked_in_dockerfile = TEAMAGENT_DOCKERFILE.read_text(encoding="utf-8")
-    assert checked_in_dockerfile
-    if not contract["release"]["ready"]:
-        with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
-            provenance.require_release_ready(contract)
-        return
-
+    assert contract["release"]["ready"] is False
+    with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
+        provenance.require_release_ready(contract)
     provenance.verify_dockerfile_contract(ACTIVE_CONTRACT_PATH, TEAMAGENT_DOCKERFILE)
 
 
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        (lambda body: body.replace("@${NODE_IMAGE_DIGEST}", ":latest-dev", 1), "not digest pinned"),
         (
             lambda body: body.replace(
-                'io.teamagent.build.binary-node-sha256="${NODE_BINARY_SHA256}"',
-                'io.teamagent.build.binary-node-sha256="wrong"',
+                "@${PYTHON_BUILDER_ARM64_DIGEST}",
+                ":latest-dev",
+                1,
+            ),
+            "not digest pinned",
+        ),
+        (
+            lambda body: body.replace(
+                'io.teamagent.contract.python-binary-sha256="${PYTHON_BINARY_SHA256}"',
+                'io.teamagent.contract.python-binary-sha256="wrong"',
             ),
             "does not bind",
         ),
         (
             lambda body: body.replace(
-                'echo "${PYTHON_BINARY_SHA256}  /usr/bin/python3.14" | sha256sum -c -',
+                "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" "
+                "/usr/bin/python3.14 | sha256sum -c -",
                 "true",
             ),
             "does not implement",
@@ -369,6 +502,67 @@ def test_dockerfile_contract_rejects_mutable_or_incomplete_implementation(
 ) -> None:
     dockerfile = tmp_path / "Dockerfile"
     dockerfile.write_text(mutation(_synthetic_dockerfile(_ready_contract())), encoding="utf-8")
+
+    with pytest.raises(provenance.ProvenanceError, match=message):
+        provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda body: body.replace("ARG RUNTIME_RECEIPT_B64\n", "", 1),
+            "receipt ARG must be declared exactly once",
+        ),
+        (
+            lambda body: body.replace(
+                "ARG RUNTIME_RECEIPT_SHA256\n",
+                "ARG RUNTIME_RECEIPT_SHA256=0\n",
+                1,
+            ),
+            "without a default",
+        ),
+        (
+            lambda body: body.replace(
+                "hashlib.sha256(raw).hexdigest() == "
+                "os.environ['RUNTIME_CONTRACT_SHA256']",
+                "True",
+            ),
+            "inner contract raw SHA-256",
+        ),
+        (
+            lambda body: body.replace(
+                "base64.b64encode(receipt).decode('ascii') == encoded",
+                "True",
+            ),
+            "canonical receipt base64",
+        ),
+        (
+            lambda body: body.replace(
+                "parsed_receipt['subject'] == 'core'",
+                "True",
+            ),
+            "core receipt subject",
+        ),
+        (
+            lambda body: body.replace(
+                'io.teamagent.build.runtime-receipt="${RUNTIME_RECEIPT_B64}"',
+                "",
+            ),
+            "missing receipt label",
+        ),
+    ],
+)
+def test_dockerfile_contract_rejects_missing_or_weakened_receipt_proof(
+    tmp_path: Path,
+    mutation: object,
+    message: str,
+) -> None:
+    dockerfile = tmp_path / "Dockerfile"
+    original = _synthetic_dockerfile(_ready_contract())
+    mutated = mutation(original)
+    assert mutated != original
+    dockerfile.write_text(mutated, encoding="utf-8")
 
     with pytest.raises(provenance.ProvenanceError, match=message):
         provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
@@ -450,9 +644,6 @@ def test_remote_oci_exact_runtime_receipt_and_labels_are_digest_bound(tmp_path: 
         config,
         config_digest,
         commit,
-        "true",
-        APP_HTML_VERSION_ID,
-        APP_HTML_SHA256,
         READY_CONTRACT_PATH,
         provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
     )
@@ -461,13 +652,21 @@ def test_remote_oci_exact_runtime_receipt_and_labels_are_digest_bound(tmp_path: 
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
-        ({provenance.SCRAPE_TOOLS_LABEL: "false"}, "with-scrape-tools mismatch"),
-        ({provenance.APP_HTML_SHA256_LABEL: "f" * 64}, "app-html-sha256 mismatch"),
-        ({"io.teamagent.build.unexpected": "attacker"}, "allowlist mismatch"),
-        ({"io.teamagent.build.binary-node-sha256": "0" * 64}, "binary-node-sha256 mismatch"),
+        (
+            {provenance.RUNTIME_CONTRACT_SHA256_LABEL: "f" * 64},
+            "runtime-contract-sha256 mismatch",
+        ),
+        (
+            {provenance.RUNTIME_RECEIPT_SHA256_LABEL: "0" * 64},
+            "runtime-receipt-sha256 mismatch",
+        ),
+        (
+            {"io.teamagent.contract.python-binary-sha256": "0" * 64},
+            "python-binary-sha256 mismatch",
+        ),
     ],
 )
-def test_remote_oci_hostile_or_stale_labels_fail_closed(
+def test_remote_oci_stale_core_receipt_labels_fail_closed(
     tmp_path: Path,
     mutate: dict[str, str],
     message: str,
@@ -484,9 +683,103 @@ def test_remote_oci_hostile_or_stale_labels_fail_closed(
             config,
             config_digest,
             commit,
-            "true",
-            APP_HTML_VERSION_ID,
-            APP_HTML_SHA256,
+            READY_CONTRACT_PATH,
+            provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
+        )
+
+
+def test_remote_oci_unknown_teamagent_label_is_owned_by_bundle_verifier(
+    tmp_path: Path,
+) -> None:
+    commit = "d" * 40
+    config, config_digest, _response, _image_digest = _oci_fixture(
+        tmp_path,
+        commit,
+        mutate_labels={"io.teamagent.build.bundle-owned": "checked-elsewhere"},
+    )
+
+    provenance.verify_oci_revision(
+        config,
+        config_digest,
+        commit,
+        READY_CONTRACT_PATH,
+        provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
+    )
+
+
+def test_remote_oci_receipt_rejects_noncanonical_base64(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_expected_labels = provenance.runtime_expected_labels
+
+    def noncanonical_expected_labels(
+        contract: dict[str, object],
+        contract_sha256: str,
+    ) -> dict[str, str]:
+        labels = original_expected_labels(contract, contract_sha256)
+        encoded = labels[provenance.RUNTIME_RECEIPT_LABEL]
+        assert encoded.endswith("Q==")
+        labels[provenance.RUNTIME_RECEIPT_LABEL] = encoded[:-3] + "R=="
+        return labels
+
+    monkeypatch.setattr(
+        provenance,
+        "runtime_expected_labels",
+        noncanonical_expected_labels,
+    )
+    commit = "e" * 40
+    config, config_digest, _response, _image_digest = _oci_fixture(tmp_path, commit)
+
+    with pytest.raises(provenance.ProvenanceError, match="not canonical base64"):
+        provenance.verify_oci_revision(
+            config,
+            config_digest,
+            commit,
+            READY_CONTRACT_PATH,
+            provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
+        )
+
+
+def test_remote_oci_receipt_rejects_non_core_subject(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_expected_labels = provenance.runtime_expected_labels
+
+    def media_subject_expected_labels(
+        contract: dict[str, object],
+        contract_sha256: str,
+    ) -> dict[str, str]:
+        labels = original_expected_labels(contract, contract_sha256)
+        receipt = json.loads(
+            base64.b64decode(labels[provenance.RUNTIME_RECEIPT_LABEL], validate=True)
+        )
+        receipt["subject"] = "media"
+        receipt_bytes = json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        labels[provenance.RUNTIME_RECEIPT_LABEL] = base64.b64encode(receipt_bytes).decode()
+        labels[provenance.RUNTIME_RECEIPT_SHA256_LABEL] = hashlib.sha256(
+            receipt_bytes
+        ).hexdigest()
+        return labels
+
+    monkeypatch.setattr(
+        provenance,
+        "runtime_expected_labels",
+        media_subject_expected_labels,
+    )
+    commit = "f" * 40
+    config, config_digest, _response, _image_digest = _oci_fixture(tmp_path, commit)
+
+    with pytest.raises(provenance.ProvenanceError, match="subject must be 'core'"):
+        provenance.verify_oci_revision(
+            config,
+            config_digest,
+            commit,
             READY_CONTRACT_PATH,
             provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
         )
@@ -502,9 +795,6 @@ def test_remote_oci_config_bytes_cannot_change_after_digest_resolution(tmp_path:
             config,
             config_digest,
             commit,
-            "true",
-            APP_HTML_VERSION_ID,
-            APP_HTML_SHA256,
             READY_CONTRACT_PATH,
             provenance.runtime_contract_sha256(READY_CONTRACT_PATH),
         )

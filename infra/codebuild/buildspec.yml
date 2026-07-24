@@ -357,6 +357,13 @@ phases:
           --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
           --expected-app-html-sha256 "$APP_HTML_SHA256" \
           --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
+        python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
+          validate-contract-pair \
+          --runtime-contract \
+            "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
+          --contract \
+            "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
+          --repo-root "$CONTEXT_VERIFY_DIR"
         readonly BUILD_CONTEXT_TAR BUILD_CONTEXT_SHA256 CONTEXT_VERIFY_DIR
         export BUILD_CONTEXT_SHA256
 
@@ -370,14 +377,24 @@ phases:
         set -euo pipefail
         CORE_TAG="candidate-$GIT_COMMIT-core"
         MEDIA_TAG="candidate-$GIT_COMMIT-media"
-        python3 infra/codebuild/source_provenance.py docker-build-arguments \
-          --contract infra/codebuild/teamagent_runtime_contract.json \
+        python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" \
+          docker-build-arguments \
+          --contract "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
           --expected-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256" \
           >/tmp/teamagent-runtime-build-arguments
         mapfile -t RUNTIME_BUILD_ARGUMENTS \
           </tmp/teamagent-runtime-build-arguments
         [ "${#RUNTIME_BUILD_ARGUMENTS[@]}" -gt 3 ] \
           || { echo "FATAL: runtime build arguments are incomplete"; exit 1; }
+        for required_runtime_argument in \
+          RUNTIME_CONTRACT_SHA256 \
+          RUNTIME_RECEIPT_B64 \
+          RUNTIME_RECEIPT_SHA256; do
+          [ "$(awk -F= -v name="$required_runtime_argument" \
+            '$1 == name { count++ } END { print count + 0 }' \
+            /tmp/teamagent-runtime-build-arguments)" -eq 1 ] \
+            || { echo "FATAL: missing or duplicate runtime receipt argument"; exit 1; }
+        done
         DOCKER_RUNTIME_BUILD_ARGS=()
         for runtime_argument in "${RUNTIME_BUILD_ARGUMENTS[@]}"; do
           [[ "$runtime_argument" =~ ^[A-Z][A-Z0-9_]+=.+$ ]] \
@@ -391,7 +408,6 @@ phases:
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
           --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
-          --build-arg "WITH_SCRAPE_TOOLS=true" \
           --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
           --build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
           --build-arg "APP_HTML_SOURCE=s3" \
@@ -510,15 +526,13 @@ phases:
             --expected-config-digest "$config_digest" \
             --contract "$RELEASE_CONTRACT" \
             --expected-contract-sha256 "$RELEASE_CONTRACT_SHA256" \
-            --runtime-contract infra/codebuild/teamagent_runtime_contract.json
+            --runtime-contract infra/codebuild/teamagent_runtime_contract.json \
+            --expected-build-context-sha256 "$BUILD_CONTEXT_SHA256"
           if [ "$subject" = "core" ]; then
             python3 infra/codebuild/source_provenance.py verify-oci-revision \
               --config "/tmp/$subject-oci-config.json" \
               --expected-config-digest "$config_digest" \
               --expected-commit "$GIT_COMMIT" \
-              --expected-with-scrape-tools true \
-              --expected-app-html-version-id "$APP_HTML_VERSION_ID" \
-              --expected-app-html-sha256 "$APP_HTML_SHA256" \
               --contract infra/codebuild/teamagent_runtime_contract.json \
               --expected-runtime-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256"
           fi

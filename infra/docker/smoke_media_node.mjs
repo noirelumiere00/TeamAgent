@@ -14,7 +14,7 @@ assert(destination, "screenshot destination is required");
 
 let blockedRequests = 0;
 const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium-browser",
+  executablePath: process.env.CHROMIUM_PATH || "/usr/lib/chromium/chromium",
   headless: true,
   chromiumSandbox: true,
   args: ["--disable-gpu", "--disable-dev-shm-usage", "--disable-setuid-sandbox"],

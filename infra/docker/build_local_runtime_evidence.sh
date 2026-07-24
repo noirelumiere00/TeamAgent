@@ -107,9 +107,43 @@ BUILD_CONTEXT_SHA256=$(
 test "$(sha256sum "$EVIDENCE_DIR/build-context.tar" | cut -d' ' -f1)" = \
   "$BUILD_CONTEXT_SHA256"
 SOURCE_DOCKER_DIR="$TRACKED_SOURCE_DIR/infra/docker"
+RUNTIME_CONTRACT="$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_runtime_contract.json"
+EXPECTED_RUNTIME_CONTRACT_SHA256=$(
+  sha256sum "$RUNTIME_CONTRACT" | cut -d' ' -f1
+)
 RELEASE_CONTRACT_SHA256=$(
   sha256sum "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
     | cut -d' ' -f1
+)
+python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
+  validate-contract-pair \
+  --runtime-contract "$RUNTIME_CONTRACT" \
+  --contract \
+    "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
+  --repo-root "$TRACKED_SOURCE_DIR"
+RUNTIME_BUILD_ARGUMENTS="$EVIDENCE_DIR/runtime-build-arguments.txt"
+python3 "$TRACKED_SOURCE_DIR/infra/codebuild/source_provenance.py" \
+  docker-build-arguments \
+  --contract "$RUNTIME_CONTRACT" \
+  --expected-contract-sha256 "$EXPECTED_RUNTIME_CONTRACT_SHA256" \
+  >"$RUNTIME_BUILD_ARGUMENTS"
+for runtime_receipt_argument in \
+  RUNTIME_CONTRACT_SHA256 \
+  RUNTIME_RECEIPT_B64 \
+  RUNTIME_RECEIPT_SHA256; do
+  test "$(awk -F= -v name="$runtime_receipt_argument" \
+    '$1 == name { count++ } END { print count + 0 }' \
+    "$RUNTIME_BUILD_ARGUMENTS")" -eq 1
+done
+RUNTIME_CONTRACT_SHA256=$(
+  sed -n 's/^RUNTIME_CONTRACT_SHA256=//p' "$RUNTIME_BUILD_ARGUMENTS"
+)
+test "$RUNTIME_CONTRACT_SHA256" = "$EXPECTED_RUNTIME_CONTRACT_SHA256"
+RUNTIME_RECEIPT_B64=$(
+  sed -n 's/^RUNTIME_RECEIPT_B64=//p' "$RUNTIME_BUILD_ARGUMENTS"
+)
+RUNTIME_RECEIPT_SHA256=$(
+  sed -n 's/^RUNTIME_RECEIPT_SHA256=//p' "$RUNTIME_BUILD_ARGUMENTS"
 )
 APP_PROVENANCE_SHA256=$(
   python3 "$TRACKED_SOURCE_DIR/infra/codebuild/teamagent_bundle_provenance.py" \
@@ -131,6 +165,9 @@ docker buildx build \
   --build-arg "GIT_COMMIT=$HEAD" \
   --build-arg "GIT_BRANCH=$BRANCH" \
   --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
+  --build-arg "RUNTIME_CONTRACT_SHA256=$RUNTIME_CONTRACT_SHA256" \
+  --build-arg "RUNTIME_RECEIPT_B64=$RUNTIME_RECEIPT_B64" \
+  --build-arg "RUNTIME_RECEIPT_SHA256=$RUNTIME_RECEIPT_SHA256" \
   --build-arg "BAKED_APP_HTML_SHA256=$BAKED_APP_HTML_SHA256" \
   --build-arg "BAKED_APP_HTML_VERSION_ID=$BAKED_APP_HTML_VERSION_ID" \
   --build-arg "APP_HTML_SOURCE=$APP_HTML_SOURCE" \

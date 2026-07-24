@@ -1,70 +1,73 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
+  "approval_record": {
+    "approved_at_utc": "2026-07-24T00:00:00Z",
+    "approved_by": "test-approval-authority",
+    "source_commit": "1111111111111111111111111111111111111111",
+    "observations": [
+      {
+        "key": "core.binary.python.sha256",
+        "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "observed_at_utc": "2026-07-24T00:00:00Z",
+        "source": "fixture://core-python"
+      }
+    ],
+    "decision": "APPROVED: synthetic source provenance fixture."
+  },
   "release": {
     "ready": true,
     "blocked_reason": ""
   },
   "receipt": {
-    "schema_version": 1,
+    "schema_version": 2,
+    "subject": "core",
     "entries": [
       {
+        "key": "artifact.torch.arm64-wheel.sha256",
+        "component": "torch",
+        "evidence": "artifact_sha256",
+        "value_kind": "sha256",
+        "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "build_arg": "TORCH_ARM64_WHEEL_SHA256",
+        "oci_label": "io.teamagent.contract.torch-arm64-wheel-sha256",
+        "dockerfile_uses": [
+          "hash = \\\"sha256:$TORCH_ARM64_WHEEL_SHA256\\\""
+        ]
+      },
+      {
         "key": "base.builder.arm64.digest",
-        "component": "builder-base",
+        "component": "python-builder",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "build_arg": "NODE_IMAGE_DIGEST",
-        "oci_label": "io.teamagent.build.base-builder-arm64-digest",
+        "value": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "build_arg": "PYTHON_BUILDER_ARM64_DIGEST",
+        "oci_label": "io.teamagent.contract.python-builder-arm64-digest",
         "dockerfile_uses": [
-          "cgr.dev/chainguard/python@${NODE_IMAGE_DIGEST}"
+          "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}"
         ]
       },
       {
         "key": "base.runtime.arm64.digest",
-        "component": "runtime-base",
+        "component": "python-runtime",
         "evidence": "base_image_digest",
         "value_kind": "sha256_digest",
-        "value": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "build_arg": "WOLFI_RUNTIME_IMAGE_DIGEST",
-        "oci_label": "io.teamagent.build.base-runtime-arm64-digest",
+        "value": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "build_arg": "PYTHON_RUNTIME_ARM64_DIGEST",
+        "oci_label": "io.teamagent.contract.python-runtime-arm64-digest",
         "dockerfile_uses": [
-          "cgr.dev/chainguard/wolfi-base@${WOLFI_RUNTIME_IMAGE_DIGEST}"
+          "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}"
         ]
       },
       {
-        "key": "binary.chromium.sha256",
-        "component": "chromium",
-        "evidence": "binary_sha256",
-        "value_kind": "sha256",
-        "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "build_arg": "CHROMIUM_BINARY_SHA256",
-        "oci_label": "io.teamagent.build.binary-chromium-sha256",
+        "key": "base.uv.arm64.digest",
+        "component": "uv",
+        "evidence": "base_image_digest",
+        "value_kind": "sha256_digest",
+        "value": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "build_arg": "UV_ARM64_DIGEST",
+        "oci_label": "io.teamagent.contract.uv-arm64-digest",
         "dockerfile_uses": [
-          "echo \"${CHROMIUM_BINARY_SHA256}  /usr/bin/chromium\" | sha256sum -c -"
-        ]
-      },
-      {
-        "key": "binary.ffmpeg.sha256",
-        "component": "ffmpeg",
-        "evidence": "binary_sha256",
-        "value_kind": "sha256",
-        "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        "build_arg": "FFMPEG_BINARY_SHA256",
-        "oci_label": "io.teamagent.build.binary-ffmpeg-sha256",
-        "dockerfile_uses": [
-          "echo \"${FFMPEG_BINARY_SHA256}  /usr/bin/ffmpeg\" | sha256sum -c -"
-        ]
-      },
-      {
-        "key": "binary.node.sha256",
-        "component": "node",
-        "evidence": "binary_sha256",
-        "value_kind": "sha256",
-        "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-        "build_arg": "NODE_BINARY_SHA256",
-        "oci_label": "io.teamagent.build.binary-node-sha256",
-        "dockerfile_uses": [
-          "echo \"${NODE_BINARY_SHA256}  /usr/bin/node\" | sha256sum -c -"
+          "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}"
         ]
       },
       {
@@ -74,9 +77,57 @@
         "value_kind": "sha256",
         "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "build_arg": "PYTHON_BINARY_SHA256",
-        "oci_label": "io.teamagent.build.binary-python-sha256",
+        "oci_label": "io.teamagent.contract.python-binary-sha256",
         "dockerfile_uses": [
-          "echo \"${PYTHON_BINARY_SHA256}  /usr/bin/python3.14\" | sha256sum -c -"
+          "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" /usr/bin/python3.14 | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "binary.uv.sha256",
+        "component": "uv",
+        "evidence": "binary_sha256",
+        "value_kind": "sha256",
+        "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "build_arg": "UV_BINARY_SHA256",
+        "oci_label": "io.teamagent.contract.uv-binary-sha256",
+        "dockerfile_uses": [
+          "printf '%s  %s\\n' \"$UV_BINARY_SHA256\" /usr/bin/uv | sha256sum -c -"
+        ]
+      },
+      {
+        "key": "component.python.version",
+        "component": "python",
+        "evidence": "component_version",
+        "value_kind": "version",
+        "value": "3.14.6",
+        "build_arg": "PYTHON_VERSION",
+        "oci_label": "io.teamagent.contract.python-version",
+        "dockerfile_uses": [
+          "test \"$(python --version)\" = \"Python ${PYTHON_VERSION}\""
+        ]
+      },
+      {
+        "key": "component.torch.version",
+        "component": "torch",
+        "evidence": "component_version",
+        "value_kind": "package_version",
+        "value": "2.13.0+cpu",
+        "build_arg": "TORCH_VERSION",
+        "oci_label": "io.teamagent.contract.torch-version",
+        "dockerfile_uses": [
+          "test \"$(/app/.venv/bin/python -c 'import torch; print(torch.__version__)')\" = \"$TORCH_VERSION\""
+        ]
+      },
+      {
+        "key": "component.uv.version",
+        "component": "uv",
+        "evidence": "component_version",
+        "value_kind": "version",
+        "value": "0.11.29",
+        "build_arg": "UV_VERSION",
+        "oci_label": "io.teamagent.contract.uv-version",
+        "dockerfile_uses": [
+          "test \"$(uv --version)\" = \"uv ${UV_VERSION} (aarch64-unknown-linux-musl)\""
         ]
       },
       {
@@ -86,58 +137,10 @@
         "value_kind": "git_sha1",
         "value": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3",
         "build_arg": "E5_MODEL_REVISION",
-        "oci_label": "io.teamagent.build.e5-model-revision",
+        "oci_label": "io.teamagent.contract.e5-model-revision",
         "dockerfile_uses": [
           "revision=os.environ['TEAMAGENT_E5_MODEL_REVISION']",
-          "printf '%s' \"$E5_MODEL_REVISION\" > \"$MODEL_CACHE/refs/main\""
-        ]
-      },
-      {
-        "key": "package.chromium.version",
-        "component": "chromium",
-        "evidence": "package_version",
-        "value_kind": "package_version",
-        "value": "149.0.7827.53-r0",
-        "build_arg": "WOLFI_CHROMIUM_VERSION",
-        "oci_label": "io.teamagent.build.package-chromium-version",
-        "dockerfile_uses": [
-          "chromium=${WOLFI_CHROMIUM_VERSION}"
-        ]
-      },
-      {
-        "key": "package.ffmpeg.version",
-        "component": "ffmpeg",
-        "evidence": "package_version",
-        "value_kind": "package_version",
-        "value": "8.1.2-r2",
-        "build_arg": "WOLFI_FFMPEG_VERSION",
-        "oci_label": "io.teamagent.build.package-ffmpeg-version",
-        "dockerfile_uses": [
-          "ffmpeg-8.1=${WOLFI_FFMPEG_VERSION}"
-        ]
-      },
-      {
-        "key": "package.node.version",
-        "component": "node",
-        "evidence": "package_version",
-        "value_kind": "package_version",
-        "value": "24.18.0-r2",
-        "build_arg": "WOLFI_NODE_VERSION",
-        "oci_label": "io.teamagent.build.package-node-version",
-        "dockerfile_uses": [
-          "nodejs-24=${WOLFI_NODE_VERSION}"
-        ]
-      },
-      {
-        "key": "package.python.version",
-        "component": "python",
-        "evidence": "package_version",
-        "value_kind": "package_version",
-        "value": "3.14.6-r3",
-        "build_arg": "WOLFI_PYTHON_VERSION",
-        "oci_label": "io.teamagent.build.package-python-version",
-        "dockerfile_uses": [
-          "python-3.14=${WOLFI_PYTHON_VERSION}"
+          "printf '%s' \"$E5_MODEL_REVISION\" > \"$model_cache/refs/main\""
         ]
       }
     ]

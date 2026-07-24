@@ -1381,3 +1381,98 @@ def test_quarantine_codebuild_is_active_but_cannot_publish_a_release() -> None:
     assert '"iam:PassRole"' not in policy_document
     guard = GUARD.read_text(encoding="utf-8")
     assert "validate_quarantine_builder_and_admin_noninterference_plan" in guard
+
+
+def test_teamagent_codebuild_contract_wiring_follows_checked_in_bytes() -> None:
+    path = TF_ROOT / "codebuild.tf"
+    body = path.read_text(encoding="utf-8")
+    attestor_template = (
+        PROJECT_ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml"
+    ).read_text(encoding="utf-8")
+    runtime_contract = (
+        PROJECT_ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json"
+    )
+    release_contract = (
+        PROJECT_ROOT
+        / "infra"
+        / "codebuild"
+        / "teamagent_core_media_release_contract.json"
+    )
+
+    assert re.search(
+        r'(?m)^\s*runtime_contract_sha256\s*=\s*filesha256\('
+        r'"\${path\.module}/\.\./codebuild/teamagent_runtime_contract\.json"\)$',
+        body,
+    )
+    assert re.search(
+        r'(?m)^\s*mcp_release_contract_path\s*=\s*'
+        r'"\${path\.module}/\.\./codebuild/'
+        r'teamagent_core_media_release_contract\.json"$',
+        body,
+    )
+    assert re.search(
+        r"(?m)^\s*mcp_release_contract_sha256\s*=\s*"
+        r"filesha256\(local\.mcp_release_contract_path\)$",
+        body,
+    )
+
+    attestor_wiring = body.split(
+        "image_attestor_buildspec_1 = replace(",
+        maxsplit=1,
+    )[1].split(
+        "image_promoter_buildspec_1 = replace(",
+        maxsplit=1,
+    )[0]
+    assert attestor_template.count("__MCP_RUNTIME_CONTRACT_BASE64__") == 1
+    for placeholder, filename in (
+        ("__ACTUAL_IMAGE_EVIDENCE_BASE64__", "actual_image_evidence.py"),
+        ("__SOURCE_PROVENANCE_BASE64__", "source_provenance.py"),
+        (
+            "__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__",
+            "teamagent_bundle_provenance.py",
+        ),
+        ("__VERIFY_ACTUAL_IMAGE_BASE64__", "verify_actual_image.sh"),
+        (
+            "__MCP_RUNTIME_CONTRACT_BASE64__",
+            "teamagent_runtime_contract.json",
+        ),
+        (
+            "__MCP_CONTRACT_BASE64__",
+            "teamagent_core_media_release_contract.json",
+        ),
+    ):
+        assert re.search(
+            rf'"{re.escape(placeholder)}",\s*'
+            rf'filebase64\("\${{path\.module}}/\.\./codebuild/'
+            rf'{re.escape(filename)}"\)',
+            attestor_wiring,
+        )
+    assert attestor_wiring.index("__MCP_RUNTIME_CONTRACT_BASE64__") < (
+        attestor_wiring.index("__MCP_CONTRACT_BASE64__")
+    )
+
+    launcher_core = body.split(
+        'data "aws_iam_policy_document" "codebuild_launcher_core" {',
+        maxsplit=1,
+    )[1].split(
+        'resource "aws_iam_policy" "codebuild_launcher_core" {',
+        maxsplit=1,
+    )[0]
+    for environment_name, local_name in (
+        ("SOURCE_MANIFEST_CONTRACT_SHA256", "runtime_contract_sha256"),
+        ("RELEASE_CONTRACT_SHA256", "mcp_release_contract_sha256"),
+    ):
+        assert re.search(
+            rf'environment\.environmentVariables/{environment_name}\.value"\s*'
+            rf"values\s*=\s*\[local\.{local_name}\]",
+            launcher_core,
+        )
+        assert re.search(
+            rf"(?m)^\s*{environment_name}\s*=\s*local\.{local_name}$",
+            body,
+        )
+
+    runtime_sha256 = hashlib.sha256(runtime_contract.read_bytes()).hexdigest()
+    release_sha256 = hashlib.sha256(release_contract.read_bytes()).hexdigest()
+    assert runtime_sha256 not in launcher_core
+    assert release_sha256 not in launcher_core

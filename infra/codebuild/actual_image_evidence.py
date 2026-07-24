@@ -24,6 +24,12 @@ from release_evidence import (
     canonical_bytes,
     validate_release_receipt,
 )
+from source_provenance import (
+    ProvenanceError as RuntimeProvenanceError,
+)
+from source_provenance import load_runtime_contract
+from source_provenance import require_release_ready as require_runtime_release_ready
+from source_provenance import verify_oci_revision as verify_core_runtime_oci_revision
 from teamagent_bundle_provenance import (
     ProvenanceError as BundleProvenanceError,
 )
@@ -339,21 +345,49 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         if isinstance(key, str) and isinstance(value, str)
     }
     requested_build_context_sha256 = getattr(args, "build_context_sha256", "")
+    requested_runtime_contract = getattr(args, "runtime_contract", None)
     if normalized_labels.get("org.opencontainers.image.revision") != args.commit:
         raise EvidenceError("OCI revision does not match the full commit")
     if args.pipeline == "mcp":
+        if requested_runtime_contract is None:
+            raise EvidenceError("runtime contract is required for the MCP pipeline")
         build_context_sha256 = _sha256(
             requested_build_context_sha256,
             label="canonical build context SHA-256",
         )
         if normalized_labels.get("io.teamagent.build.context-sha256") != build_context_sha256:
             raise EvidenceError("OCI context label does not match signed source evidence")
-    elif requested_build_context_sha256:
-        raise EvidenceError("build context digest is only valid for the MCP pipeline")
+    elif requested_build_context_sha256 or requested_runtime_contract is not None:
+        raise EvidenceError(
+            "build context digest and runtime contract are only valid for the MCP pipeline"
+        )
     contract_label = PIPELINES[args.pipeline]["contract_label"]
     if normalized_labels.get(contract_label) != contract_sha256:
         raise EvidenceError("OCI contract label does not match the signed contract")
     if args.pipeline == "mcp":
+        runtime_contract_path = Path(requested_runtime_contract)
+        runtime_contract_sha256 = _sha256_file(
+            runtime_contract_path,
+            label="MCP runtime contract",
+        )
+        try:
+            require_runtime_release_ready(
+                load_runtime_contract(runtime_contract_path),
+                label="MCP runtime contract",
+            )
+        except RuntimeProvenanceError as exc:
+            raise EvidenceError(f"MCP runtime contract mismatch: {exc}") from exc
+        if args.name == "core":
+            try:
+                verify_core_runtime_oci_revision(
+                    args.config,
+                    config_digest,
+                    args.commit,
+                    runtime_contract_path,
+                    runtime_contract_sha256,
+                )
+            except RuntimeProvenanceError as exc:
+                raise EvidenceError(f"MCP core runtime receipt mismatch: {exc}") from exc
         try:
             verify_teamagent_oci_config(
                 args.config,
@@ -362,6 +396,8 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
                 expected_config_digest=config_digest,
                 contract_path=args.contract,
                 expected_contract_sha256=contract_sha256,
+                runtime_contract_path=runtime_contract_path,
+                expected_build_context_sha256=build_context_sha256,
             )
         except BundleProvenanceError as exc:
             raise EvidenceError(f"MCP OCI core/media interface mismatch: {exc}") from exc
@@ -391,8 +427,11 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         provenance, contract_sha256
     ):
         raise EvidenceError("provenance does not bind the full commit and contract hash")
-    if args.pipeline == "mcp" and not _contains_exact(provenance, requested_build_context_sha256):
-        raise EvidenceError("provenance does not bind the canonical build context")
+    if args.pipeline == "mcp":
+        if not _contains_exact(provenance, requested_build_context_sha256):
+            raise EvidenceError("provenance does not bind the canonical build context")
+        if not _contains_exact(provenance, runtime_contract_sha256):
+            raise EvidenceError("provenance does not bind the inner runtime contract")
     provenance_subjects = provenance.get("subject")
     if not isinstance(provenance_subjects, list) or not any(
         isinstance(subject, dict)
@@ -590,6 +629,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--commit", required=True)
     parser.add_argument("--contract-sha256", required=True)
     parser.add_argument("--build-context-sha256", default="")
+    parser.add_argument("--runtime-contract", type=Path)
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--digest", required=True)
     parser.add_argument("--media-type", required=True)

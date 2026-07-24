@@ -55,6 +55,45 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert "teamagent-core-torch-arm64" not in TEXT
 
 
+def test_core_runtime_receipt_is_verified_in_builder_and_bound_in_final() -> None:
+    builder = _stage("builder", "final")
+    final = _stage("final")
+    receipt_args = (
+        "RUNTIME_CONTRACT_SHA256",
+        "RUNTIME_RECEIPT_B64",
+        "RUNTIME_RECEIPT_SHA256",
+    )
+    for name in receipt_args:
+        assert len(re.findall(rf"^ARG {name}$", builder, re.MULTILINE)) == 1
+        assert len(re.findall(rf"^ARG {name}$", final, re.MULTILINE)) == 1
+        assert not re.search(rf"^ARG {name}=", TEXT, re.MULTILINE)
+
+    assert (
+        "COPY infra/codebuild/teamagent_runtime_contract.json "
+        "/tmp/teamagent_runtime_contract.json"
+    ) in builder
+    for proof in (
+        "pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes()",
+        "hashlib.sha256(raw).hexdigest() == os.environ['RUNTIME_CONTRACT_SHA256']",
+        "base64.b64decode(encoded, validate=True)",
+        "base64.b64encode(receipt).decode('ascii') == encoded",
+        "hashlib.sha256(receipt).hexdigest() == os.environ['RUNTIME_RECEIPT_SHA256']",
+        "json.dumps(expected_receipt, sort_keys=True, separators=(',', ':'))",
+        "parsed_receipt['subject'] == 'core'",
+        "parsed_receipt['values'] == expected_values",
+        "os.environ[entry['build_arg']] == entry['value']",
+    ):
+        assert proof in builder
+
+    expected_labels = {
+        "io.teamagent.build.runtime-contract-sha256": "RUNTIME_CONTRACT_SHA256",
+        "io.teamagent.build.runtime-receipt": "RUNTIME_RECEIPT_B64",
+        "io.teamagent.build.runtime-receipt-sha256": "RUNTIME_RECEIPT_SHA256",
+    }
+    for label, name in expected_labels.items():
+        assert f'{label}="${name}"' in final
+
+
 def test_core_contains_e5_mcp_db_aws_but_no_media_or_js_runtime() -> None:
     builder = _stage("builder", "final")
     assert "--extra mcp --extra embeddings" in builder
@@ -142,6 +181,7 @@ def test_core_dockerignore_is_deny_by_default_and_excludes_sensitive_state() -> 
         "!scripts/run_ingest_fargate.py",
         "!scripts/ingest_sources.py",
         "!scripts/run_morning_digest_fargate.py",
+        "!infra/codebuild/teamagent_runtime_contract.json",
     ):
         assert allowed in text
     assert "!scripts/**" not in text

@@ -1,13 +1,14 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "kind": "teamagent.core-media-release-contract",
+  "approval_record": null,
   "release": {
     "ready": false,
     "blocked_reason": "NO-GO: signed final-HEAD C0/H0 runtime evidence has not been supplied. Keep release.ready=false until the exact automated build, scan, signature, rollout, and forced-rollback gates pass."
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "08627a063419d1a07578c5dc36b91db2dce98b48d78f14c20e6754f30acde946"
+    "sha256": "2b2087426b8ff31ec36d43fdb3f18ff31c6ceca8f0a32838e544636f00ea0c24"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -46,7 +47,10 @@
         "BUILD_CONTEXT_SHA256",
         "GIT_BRANCH",
         "GIT_COMMIT",
-        "RELEASE_CONTRACT_SHA256"
+        "RELEASE_CONTRACT_SHA256",
+        "RUNTIME_CONTRACT_SHA256",
+        "RUNTIME_RECEIPT_B64",
+        "RUNTIME_RECEIPT_SHA256"
       ],
       "required_label_bindings": {
         "io.teamagent.build.app-provenance-sha256": "APP_PROVENANCE_SHA256",
@@ -65,14 +69,17 @@
       },
       "binary_probes": [
         {
+          "key": "app.baked-fallback.sha256",
           "path": "/app/src/teamagent/connect_web/static/app.html",
           "sha256": "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"
         },
         {
+          "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
           "sha256": "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
         }
-      ]
+      ],
+      "source_assertions": []
     },
     {
       "name": "media",
@@ -100,20 +107,306 @@
       },
       "binary_probes": [
         {
+          "key": "binary.chromium.sha256",
+          "path": "/usr/lib/chromium/chromium",
+          "sha256": "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
+        },
+        {
+          "key": "binary.ffmpeg.sha256",
           "path": "/usr/bin/ffmpeg",
           "sha256": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
         },
         {
+          "key": "binary.node.sha256",
           "path": "/usr/bin/node",
           "sha256": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1"
         },
         {
+          "key": "binary.python.sha256",
           "path": "/usr/bin/python3",
           "sha256": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
+        }
+      ],
+      "source_assertions": [
+        {
+          "key": "artifact.apk-lock.sha256",
+          "value": "d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8",
+          "build_arg": "MEDIA_APK_LOCK_SHA256",
+          "oci_label": "io.teamagent.contract.apk-lock-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$MEDIA_APK_LOCK_SHA256\" /tmp/media-apk.lock | sha256sum -c -"
+          ]
         },
         {
-          "path": "/usr/lib/chromium/chromium",
-          "sha256": "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79"
+          "key": "artifact.dns-pinned-proxy.sha256",
+          "value": "d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a",
+          "build_arg": "TIKTOK_DNS_PINNED_PROXY_SHA256",
+          "oci_label": "io.teamagent.contract.dns-pinned-proxy-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$TIKTOK_DNS_PINNED_PROXY_SHA256\" /app/tools/tiktok_scraper/dns_pinned_proxy.mjs | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.playwright-core.npm-integrity",
+          "value": "sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==",
+          "build_arg": "PLAYWRIGHT_CORE_NPM_INTEGRITY",
+          "oci_label": "io.teamagent.contract.playwright-core-npm-integrity",
+          "dockerfile_uses": [
+            "playwright_integrity=\"\\\"integrity\\\": \\\"$PLAYWRIGHT_CORE_NPM_INTEGRITY\\\"\""
+          ]
+        },
+        {
+          "key": "artifact.playwright-python-wheel.sha256",
+          "value": "43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353",
+          "build_arg": "PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256",
+          "oci_label": "io.teamagent.contract.playwright-python-wheel-sha256",
+          "dockerfile_uses": [
+            "\"$PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256\" \"$wheel\" | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.tiktok-package-json.sha256",
+          "value": "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
+          "build_arg": "TIKTOK_PACKAGE_JSON_SHA256",
+          "oci_label": "io.teamagent.contract.tiktok-package-json-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$TIKTOK_PACKAGE_JSON_SHA256\" /deps/package.json | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.tiktok-package-lock.sha256",
+          "value": "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
+          "build_arg": "TIKTOK_PACKAGE_LOCK_SHA256",
+          "oci_label": "io.teamagent.contract.tiktok-package-lock-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$TIKTOK_PACKAGE_LOCK_SHA256\" /deps/package-lock.json | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.tiktok-scraper.sha256",
+          "value": "0350b1b6af44b7879429581965b7c701cdcc42da566431304723db701c76aef6",
+          "build_arg": "TIKTOK_SCRAPER_SHA256",
+          "oci_label": "io.teamagent.contract.tiktok-scraper-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$TIKTOK_SCRAPER_SHA256\" /app/tools/tiktok_scraper/search.mjs | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.yt-dlp-removed-extractor-set.sha256",
+          "value": "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
+          "build_arg": "YTDLP_REMOVED_EXTRACTOR_SET_SHA256",
+          "oci_label": "io.teamagent.contract.yt-dlp-removed-extractor-set-sha256",
+          "dockerfile_uses": [
+            "['removed_extractor_set_sha256'])\")\" = \"$YTDLP_REMOVED_EXTRACTOR_SET_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.yt-dlp-sanitized-tree.sha256",
+          "value": "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b",
+          "build_arg": "YTDLP_SANITIZED_TREE_SHA256",
+          "oci_label": "io.teamagent.contract.yt-dlp-sanitized-tree-sha256",
+          "dockerfile_uses": [
+            "['sanitized_source_tree_sha256'])\")\" = \"$YTDLP_SANITIZED_TREE_SHA256\""
+          ]
+        },
+        {
+          "key": "artifact.yt-dlp-sanitizer.sha256",
+          "value": "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db",
+          "build_arg": "YTDLP_SANITIZER_SHA256",
+          "oci_label": "io.teamagent.contract.yt-dlp-sanitizer-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$YTDLP_SANITIZER_SHA256\" /tmp/sanitize_ytdlp.py | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "artifact.yt-dlp-sdist.sha256",
+          "value": "d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86",
+          "build_arg": "YTDLP_SDIST_SHA256",
+          "oci_label": "io.teamagent.contract.yt-dlp-sdist-sha256",
+          "dockerfile_uses": [
+            "ytdlp_sdist=\"yt_dlp-${YTDLP_VERSION}.tar.gz\\\", hash = \\\"sha256:$YTDLP_SDIST_SHA256\\\"\""
+          ]
+        },
+        {
+          "key": "artifact.yt-dlp-wheel.sha256",
+          "value": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
+          "build_arg": "YTDLP_WHEEL_SHA256",
+          "oci_label": "io.teamagent.contract.yt-dlp-wheel-sha256",
+          "dockerfile_uses": [
+            "ytdlp_wheel=\"yt_dlp-${YTDLP_VERSION}-py3-none-any.whl\\\", hash = \\\"sha256:$YTDLP_WHEEL_SHA256\\\"\""
+          ]
+        },
+        {
+          "key": "base.chromium.arm64.digest",
+          "value": "sha256:ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04",
+          "build_arg": "CHROMIUM_BASE_ARM64_DIGEST",
+          "oci_label": "io.teamagent.contract.chromium-base-arm64-digest",
+          "dockerfile_uses": [
+            "akorn/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST}"
+          ]
+        },
+        {
+          "key": "base.node-builder.arm64.digest",
+          "value": "sha256:eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d",
+          "build_arg": "NODE_BUILDER_ARM64_DIGEST",
+          "oci_label": "io.teamagent.contract.node-builder-arm64-digest",
+          "dockerfile_uses": [
+            "public.ecr.aws/docker/library/node:24-alpine@${NODE_BUILDER_ARM64_DIGEST}"
+          ]
+        },
+        {
+          "key": "base.uv.arm64.digest",
+          "value": "sha256:9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4",
+          "build_arg": "UV_ARM64_DIGEST",
+          "oci_label": "io.teamagent.contract.uv-arm64-digest",
+          "dockerfile_uses": [
+            "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}"
+          ]
+        },
+        {
+          "key": "binary.chromium.sha256",
+          "value": "13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79",
+          "build_arg": "CHROMIUM_BINARY_SHA256",
+          "oci_label": "io.teamagent.contract.chromium-binary-sha256",
+          "dockerfile_uses": [
+            "CHROMIUM_PATH=/usr/lib/chromium/chromium",
+            "printf '%s  %s\\n' \"$CHROMIUM_BINARY_SHA256\" /usr/lib/chromium/chromium | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "binary.ffmpeg.sha256",
+          "value": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba",
+          "build_arg": "FFMPEG_BINARY_SHA256",
+          "oci_label": "io.teamagent.contract.ffmpeg-binary-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$FFMPEG_BINARY_SHA256\" /usr/bin/ffmpeg | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "binary.node.sha256",
+          "value": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1",
+          "build_arg": "NODE_BINARY_SHA256",
+          "oci_label": "io.teamagent.contract.node-binary-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$NODE_BINARY_SHA256\" /usr/bin/node | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "binary.python.sha256",
+          "value": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4",
+          "build_arg": "PYTHON_BINARY_SHA256",
+          "oci_label": "io.teamagent.contract.python-binary-sha256",
+          "dockerfile_uses": [
+            "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" /usr/bin/python3 | sha256sum -c -"
+          ]
+        },
+        {
+          "key": "component.chromium.version",
+          "value": "150.0.7871.114",
+          "build_arg": "CHROMIUM_VERSION",
+          "oci_label": "io.teamagent.contract.chromium-version",
+          "dockerfile_uses": [
+            "/usr/lib/chromium/chromium --version | grep -F \"Chromium $CHROMIUM_VERSION \""
+          ]
+        },
+        {
+          "key": "component.ffmpeg.version",
+          "value": "8.1.2",
+          "build_arg": "FFMPEG_VERSION",
+          "oci_label": "io.teamagent.contract.ffmpeg-version",
+          "dockerfile_uses": [
+            "ffmpeg -version | head -1 | grep -F \"ffmpeg version $FFMPEG_VERSION\""
+          ]
+        },
+        {
+          "key": "component.ipaddr-js.version",
+          "value": "2.2.0",
+          "build_arg": "IPADDR_JS_VERSION",
+          "oci_label": "io.teamagent.contract.ipaddr-js-version",
+          "dockerfile_uses": [
+            "test \"$(node -p \"require('ipaddr.js/package.json').version\")\" = \"$IPADDR_JS_VERSION\""
+          ]
+        },
+        {
+          "key": "component.node.version",
+          "value": "24.18.0",
+          "build_arg": "NODE_VERSION",
+          "oci_label": "io.teamagent.contract.node-version",
+          "dockerfile_uses": [
+            "test \"$(node --version)\" = \"v$NODE_VERSION\""
+          ]
+        },
+        {
+          "key": "component.playwright-js.version",
+          "value": "1.60.0",
+          "build_arg": "PLAYWRIGHT_VERSION",
+          "oci_label": "io.teamagent.contract.playwright-js-version",
+          "dockerfile_uses": [
+            "test \"$(node -p \"require('/app/tools/tiktok_scraper/node_modules/playwright-core/package.json').version\")\" = \"$PLAYWRIGHT_VERSION\""
+          ]
+        },
+        {
+          "key": "component.playwright-python.version",
+          "value": "1.60.0",
+          "build_arg": "PLAYWRIGHT_VERSION",
+          "oci_label": "io.teamagent.contract.playwright-python-version",
+          "dockerfile_uses": [
+            "test \"$(/app/.venv/bin/python -c \"import importlib.metadata as m; print(m.version('playwright'))\")\" = \"$PLAYWRIGHT_VERSION\""
+          ]
+        },
+        {
+          "key": "component.python.version",
+          "value": "3.14.5",
+          "build_arg": "PYTHON_VERSION",
+          "oci_label": "io.teamagent.contract.python-version",
+          "dockerfile_uses": [
+            "test \"$(python3 --version)\" = \"Python $PYTHON_VERSION\""
+          ]
+        },
+        {
+          "key": "component.yt-dlp.version",
+          "value": "2026.6.9",
+          "build_arg": "YTDLP_VERSION",
+          "oci_label": "io.teamagent.contract.yt-dlp-version",
+          "dockerfile_uses": [
+            "test \"$(/app/.venv/bin/python -c \"import importlib.metadata as m; print(m.version('yt-dlp'))\")\" = \"$YTDLP_VERSION\""
+          ]
+        },
+        {
+          "key": "package.chromium.version",
+          "value": "150.0.7871.114-r0",
+          "build_arg": "CHROMIUM_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.chromium-package-version",
+          "dockerfile_uses": [
+            "test \"$(apk info -v chromium)\" = \"chromium-$CHROMIUM_PACKAGE_VERSION\""
+          ]
+        },
+        {
+          "key": "package.ffmpeg.version",
+          "value": "8.1.2-r0",
+          "build_arg": "FFMPEG_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.ffmpeg-package-version",
+          "dockerfile_uses": [
+            "\"ffmpeg=$FFMPEG_PACKAGE_VERSION\""
+          ]
+        },
+        {
+          "key": "package.node.version",
+          "value": "24.18.0-r0",
+          "build_arg": "NODE_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.node-package-version",
+          "dockerfile_uses": [
+            "\"nodejs=$NODE_PACKAGE_VERSION\""
+          ]
+        },
+        {
+          "key": "package.python.version",
+          "value": "3.14.5-r2",
+          "build_arg": "PYTHON_PACKAGE_VERSION",
+          "oci_label": "io.teamagent.contract.python-package-version",
+          "dockerfile_uses": [
+            "\"python3=$PYTHON_PACKAGE_VERSION\""
+          ]
         }
       ]
     }

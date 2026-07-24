@@ -3012,46 +3012,51 @@ locals {
   )
   image_attestor_buildspec_7 = replace(
     local.image_attestor_buildspec_6,
-    "__MCP_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
+    "__MCP_RUNTIME_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
   )
   image_attestor_buildspec_8 = replace(
     local.image_attestor_buildspec_7,
-    "__TIKTOK_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/tiktok_release_contract.json"),
+    "__MCP_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
   )
   image_attestor_buildspec_9 = replace(
     local.image_attestor_buildspec_8,
-    "__OPENCLAW_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/openclaw_bundle_contract.json"),
+    "__TIKTOK_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/tiktok_release_contract.json"),
   )
   image_attestor_buildspec_10 = replace(
     local.image_attestor_buildspec_9,
-    "__ATTESTOR_SIGNING_KEY_ARN__",
-    aws_kms_key.image_attestor_signing.arn,
+    "__OPENCLAW_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/openclaw_bundle_contract.json"),
   )
   image_attestor_buildspec_11 = replace(
     local.image_attestor_buildspec_10,
-    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
-    aws_kms_key.mcp_source_publisher_signing.arn,
+    "__ATTESTOR_SIGNING_KEY_ARN__",
+    aws_kms_key.image_attestor_signing.arn,
   )
   image_attestor_buildspec_12 = replace(
     local.image_attestor_buildspec_11,
-    "__TIKTOK_SOURCE_SIGNING_KEY_ARN__",
-    aws_kms_key.tiktok_source_publisher_signing.arn,
+    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
+    aws_kms_key.mcp_source_publisher_signing.arn,
   )
   image_attestor_buildspec_13 = replace(
     local.image_attestor_buildspec_12,
-    "__OPENCLAW_SIGNING_KMS_KEY_ARN__",
-    aws_kms_key.openclaw_publisher_signing.arn,
+    "__TIKTOK_SOURCE_SIGNING_KEY_ARN__",
+    aws_kms_key.tiktok_source_publisher_signing.arn,
   )
   image_attestor_buildspec_14 = replace(
     local.image_attestor_buildspec_13,
+    "__OPENCLAW_SIGNING_KMS_KEY_ARN__",
+    aws_kms_key.openclaw_publisher_signing.arn,
+  )
+  image_attestor_buildspec_15 = replace(
+    local.image_attestor_buildspec_14,
     "__OPENCLAW_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.openclaw_evidence.arn,
   )
   image_attestor_buildspec = replace(
-    local.image_attestor_buildspec_14,
+    local.image_attestor_buildspec_15,
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )

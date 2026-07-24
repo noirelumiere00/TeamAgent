@@ -2203,7 +2203,7 @@ def test_wrong_provider_connection_name_is_not_hidden_by_inventory_filter() -> N
         )
 
 
-def test_bootstrap_targets_resolve_to_main_terraform_resources() -> None:
+def test_bootstrap_targets_fail_closed_until_split_policy_migration() -> None:
     contract = _contract()
     declarations: set[str] = set()
     for path in (
@@ -2220,7 +2220,42 @@ def test_bootstrap_targets_resolve_to_main_terraform_resources() -> None:
                 flags=re.MULTILINE,
             )
         )
-    assert set(contract.targets) <= declarations
+    # Stage 3 must migrate the one-time bootstrap contract and seed authority
+    # together.  Until then, the removed inline-policy targets keep bootstrap
+    # fail-closed while the replacement managed policies remain fully declared.
+    assert set(contract.targets) - declarations == {
+        "aws_iam_role_policy.codebuild_launcher",
+        "aws_iam_role_policy.openclaw_publisher",
+        "aws_iam_role_policy.release_launcher",
+        "aws_iam_role_policy.tiktok_build_launcher",
+    }
+    split_policy_declarations = {
+        "aws_iam_policy.codebuild_launcher_core",
+        "aws_iam_policy.codebuild_launcher_guardrails",
+        "aws_iam_policy.codebuild_launcher_manage_a",
+        "aws_iam_policy.codebuild_launcher_manage_b",
+        "aws_iam_policy.openclaw_publisher_core",
+        "aws_iam_policy.openclaw_publisher_manage_a",
+        "aws_iam_policy.openclaw_publisher_manage_b",
+        "aws_iam_policy.release_launcher_a",
+        "aws_iam_policy.release_launcher_b",
+        "aws_iam_policy.tiktok_build_launcher_core",
+        "aws_iam_policy.tiktok_build_launcher_manage_a",
+        "aws_iam_policy.tiktok_build_launcher_manage_b",
+        "aws_iam_role_policy_attachment.codebuild_launcher_core",
+        "aws_iam_role_policy_attachment.codebuild_launcher_guardrails",
+        "aws_iam_role_policy_attachment.codebuild_launcher_manage_a",
+        "aws_iam_role_policy_attachment.codebuild_launcher_manage_b",
+        "aws_iam_role_policy_attachment.openclaw_publisher_core",
+        "aws_iam_role_policy_attachment.openclaw_publisher_manage_a",
+        "aws_iam_role_policy_attachment.openclaw_publisher_manage_b",
+        "aws_iam_role_policy_attachment.release_launcher_a",
+        "aws_iam_role_policy_attachment.release_launcher_b",
+        "aws_iam_role_policy_attachment.tiktok_build_launcher_core",
+        "aws_iam_role_policy_attachment.tiktok_build_launcher_manage_a",
+        "aws_iam_role_policy_attachment.tiktok_build_launcher_manage_b",
+    }
+    assert split_policy_declarations <= declarations
     assert "aws_codebuild_project.image" not in contract.targets
     assert "terraform_data.runtime_guard" not in contract.targets
 
@@ -2242,8 +2277,8 @@ def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None
             f"policy = data.aws_iam_policy_document.runtime_automation_control_plane_{suffix}.json"
         ) in body
         assert (
-            f"length(data.aws_iam_policy_document."
-            f"runtime_automation_control_plane_{suffix}.json) < 6144"
+            f"length(replace(data.aws_iam_policy_document."
+            f'runtime_automation_control_plane_{suffix}.json, "/\\\\s/", "")) < 6144'
         ) in body
         assert (
             f'resource "aws_iam_role_policy_attachment" "runtime_automation_control_plane_{suffix}"'

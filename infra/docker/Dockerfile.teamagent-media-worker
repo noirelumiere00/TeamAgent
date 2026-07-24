@@ -17,6 +17,7 @@ ARG NPM_BINARY_SHA256=8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403
 ARG PLAYWRIGHT_VERSION=1.60.0
 ARG PUPPETEER_VERSION=25.3.0
 ARG IPADDR_JS_VERSION=2.2.0
+ARG PLAYWRIGHT_CORE_NPM_INTEGRITY=sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
 
@@ -32,6 +33,8 @@ RUN --mount=type=cache,id=teamagent-media-npm-arm64,target=/root/.npm,sharing=lo
     set -eu; \
     printf '%s  %s\n' "$TIKTOK_PACKAGE_JSON_SHA256" /deps/package.json | sha256sum -c -; \
     printf '%s  %s\n' "$TIKTOK_PACKAGE_LOCK_SHA256" /deps/package-lock.json | sha256sum -c -; \
+    playwright_integrity="\"integrity\": \"$PLAYWRIGHT_CORE_NPM_INTEGRITY\""; \
+    test "$(grep -F -c "$playwright_integrity" /deps/package-lock.json)" -eq 1; \
     if [ -f /run/secrets/teamagent_ca ]; then \
       cat /etc/ssl/certs/ca-certificates.crt /run/secrets/teamagent_ca \
         > /tmp/teamagent-build-ca.pem; \
@@ -97,10 +100,11 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64,target=/var/cache/apk,sharin
       "libflac=$LIBFLAC_PACKAGE_VERSION" \
       "nodejs=$NODE_PACKAGE_VERSION" \
       "python3=$PYTHON_PACKAGE_VERSION"; \
+    test "$(apk info -v chromium)" = "chromium-$CHROMIUM_PACKAGE_VERSION"; \
     test "$(python3 --version)" = "Python $PYTHON_VERSION"; \
     test "$(node --version)" = "v$NODE_VERSION"; \
     ffmpeg -version | head -1 | grep -F "ffmpeg version $FFMPEG_VERSION"; \
-    chromium-browser --version | grep -F "Chromium $CHROMIUM_VERSION "; \
+    /usr/lib/chromium/chromium --version | grep -F "Chromium $CHROMIUM_VERSION "; \
     printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3 | sha256sum -c -; \
     printf '%s  %s\n' "$NODE_BINARY_SHA256" /usr/bin/node | sha256sum -c -; \
     printf '%s  %s\n' "$FFMPEG_BINARY_SHA256" /usr/bin/ffmpeg | sha256sum -c -; \
@@ -129,6 +133,8 @@ ARG PLAYWRIGHT_VERSION=1.60.0
 ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_URL=https://files.pythonhosted.org/packages/84/c2/1528d267d4442bd2c6b8eaeab819dd52c2030bf80e89293f0ba1f687473b/playwright-1.60.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ARG PLAYWRIGHT_PYTHON_ARM64_WHEEL_SHA256=43e66564125ee31b07a58cefb21e256d62d67d8d1713e6858df7a3019d8ed353
 ARG YTDLP_VERSION=2026.6.9
+ARG YTDLP_WHEEL_SHA256=442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4
+ARG YTDLP_SDIST_SHA256=d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86
 ARG YTDLP_SHAHID_SOURCE_SHA256=f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd
 ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
 ARG YTDLP_SANITIZED_TREE_SHA256=638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b
@@ -154,6 +160,10 @@ RUN --mount=type=cache,id=teamagent-media-uv-arm64,target=/root/.cache/uv,sharin
     fi; \
     export SSL_CERT_FILE=/tmp/teamagent-build-ca.pem; \
     export REQUESTS_CA_BUNDLE=/tmp/teamagent-build-ca.pem; \
+    ytdlp_wheel="yt_dlp-${YTDLP_VERSION}-py3-none-any.whl\", hash = \"sha256:$YTDLP_WHEEL_SHA256\""; \
+    ytdlp_sdist="yt_dlp-${YTDLP_VERSION}.tar.gz\", hash = \"sha256:$YTDLP_SDIST_SHA256\""; \
+    test "$(grep -F -c "$ytdlp_wheel" uv.lock)" -eq 1; \
+    test "$(grep -F -c "$ytdlp_sdist" uv.lock)" -eq 1; \
     uv sync --frozen --only-group media-runtime --no-install-project \
       --no-install-package playwright; \
     rm -f /tmp/teamagent-build-ca.pem
@@ -254,7 +264,7 @@ ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e
 ARG MEDIA_APK_LOCK_SHA256=d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
-ARG TIKTOK_SCRAPER_SHA256=fc18fa1e815bf5879f3ed18c98784ceaec1fed9030724e31d9c742229b2b92d7
+ARG TIKTOK_SCRAPER_SHA256=0350b1b6af44b7879429581965b7c701cdcc42da566431304723db701c76aef6
 ARG TIKTOK_DNS_PINNED_PROXY_SHA256=d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a
 
 COPY infra/docker/media-apk.lock /tmp/media-apk.lock
@@ -324,7 +334,7 @@ ENV USER=teamagent \
     PATH=/app/.venv/bin:/usr/bin:/bin \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    CHROMIUM_PATH=/usr/bin/chromium-browser \
+    CHROMIUM_PATH=/usr/lib/chromium/chromium \
     TIKTOK_NODE_BIN=/usr/bin/node \
     TIKTOK_SCRAPER_PATH=/app/tools/tiktok_scraper/search.mjs \
     AWS_REGION=ap-northeast-1

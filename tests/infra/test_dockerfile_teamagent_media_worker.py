@@ -17,6 +17,9 @@ PACKAGE = ROOT / "tools/tiktok_scraper/package.json"
 PACKAGE_LOCK = ROOT / "tools/tiktok_scraper/package-lock.json"
 SCRAPER = ROOT / "tools/tiktok_scraper/search.mjs"
 DNS_PINNED_PROXY = ROOT / "tools/tiktok_scraper/dns_pinned_proxy.mjs"
+RAKKO_SCRAPER = ROOT / "tools/rakko_scraper/scrape.mjs"
+RENDER_CHILD = ROOT / "src/teamagent/media/render_child.py"
+SMOKE_MEDIA_NODE = ROOT / "infra/docker/smoke_media_node.mjs"
 TOOL_WORKER = ROOT / "src/teamagent/media/tool_worker.py"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
@@ -24,6 +27,7 @@ CHROMIUM_BASE_DIGEST = "ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8
 NODE_BUILDER_DIGEST = "eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 APK_LOCK_SHA256 = "d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8"
+CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
 def _sha256(path: Path) -> str:
@@ -63,9 +67,27 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         assert f"ARG {name}={value}" in TEXT
     for package in ("ffmpeg", "font-liberation", "font-noto", "font-noto-cjk", "font-noto-emoji"):
         assert f'"{package}=$' in TEXT
+    assert 'test "$(apk info -v chromium)" = "chromium-$CHROMIUM_PACKAGE_VERSION"' in TEXT
     assert "apk list --installed" in TEXT
     assert "test -s /lib/apk/db/installed" in TEXT
     assert "rm -rf /lib/apk" not in TEXT
+    assert "/usr/lib/chromium/chromium --version" in TEXT
+    assert "chromium-browser --version" not in TEXT
+
+
+def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
+    assert f"CHROMIUM_PATH={CHROMIUM_PATH}" in TEXT
+    assert (
+        f'os.environ.get("CHROMIUM_PATH", "{CHROMIUM_PATH}")'
+        in RENDER_CHILD.read_text(encoding="utf-8")
+    )
+    assert (
+        f'process.env.CHROMIUM_PATH || "{CHROMIUM_PATH}"'
+        in SMOKE_MEDIA_NODE.read_text(encoding="utf-8")
+    )
+    for scraper in (SCRAPER, RAKKO_SCRAPER):
+        scraper_text = scraper.read_text(encoding="utf-8")
+        assert f'const candidates = [\n    "{CHROMIUM_PATH}",' in scraper_text
 
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
@@ -91,6 +113,8 @@ def test_python_and_js_playwright_are_same_exact_version_and_hashed() -> None:
         "sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu"
         "+4qtD36qKc/Hn56StUW57IA=="
     ) in TEXT
+    assert TEXT.count("ARG PLAYWRIGHT_CORE_NPM_INTEGRITY=") == 2
+    assert 'grep -F -c "$playwright_integrity" /deps/package-lock.json' in TEXT
     package = json.loads(PACKAGE.read_text(encoding="utf-8"))
     assert package["dependencies"]["playwright-core"] == "1.60.0"
     assert package["dependencies"]["puppeteer-core"] == "25.3.0"
@@ -110,6 +134,10 @@ def test_ytdlp_sources_are_hash_verified_then_secret_bearing_extractors_are_remo
         "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b",
     ):
         assert digest in TEXT
+    assert TEXT.count("ARG YTDLP_WHEEL_SHA256=") == 2
+    assert TEXT.count("ARG YTDLP_SDIST_SHA256=") == 2
+    assert 'grep -F -c "$ytdlp_wheel" uv.lock' in TEXT
+    assert 'grep -F -c "$ytdlp_sdist" uv.lock' in TEXT
     sanitizer = SANITIZER.read_text(encoding="utf-8")
     for name in (
         "adultswim",
@@ -263,7 +291,7 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
         PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
-        SCRAPER: "fc18fa1e815bf5879f3ed18c98784ceaec1fed9030724e31d9c742229b2b92d7",
+        SCRAPER: "0350b1b6af44b7879429581965b7c701cdcc42da566431304723db701c76aef6",
         DNS_PINNED_PROXY: ("d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a"),
     }
     for path, digest in expected.items():

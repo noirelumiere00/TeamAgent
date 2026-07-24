@@ -113,6 +113,17 @@ phases:
             SOURCE_SIGNATURE_ALGORITHM="RSASSA_PSS_SHA_256"
             CONTRACT="/tmp/teamagent_core_media_release_contract.json"
             printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode >"$CONTRACT"
+            MCP_RUNTIME_CONTRACT="/tmp/teamagent_runtime_contract.json"
+            printf '%s' '__MCP_RUNTIME_CONTRACT_BASE64__' | base64 --decode >"$MCP_RUNTIME_CONTRACT"
+            MCP_RUNTIME_CONTRACT_SHA256="$(
+              jq -er '
+                .source_runtime_contract.sha256 |
+                select(test("^[0-9a-f]{64}$"))
+              ' "$CONTRACT"
+            )"
+            [ "$(sha256sum "$MCP_RUNTIME_CONTRACT" | awk '{print $1}')" = \
+              "$MCP_RUNTIME_CONTRACT_SHA256" ] \
+              || { echo "FATAL: embedded inner runtime contract does not match the outer pin"; exit 1; }
             MCP_APP_HTML_VERSION_ID="$(
               jq -er '.app_html.production.app_html_s3_version_id' "$CONTRACT"
             )"
@@ -453,6 +464,7 @@ phases:
             if [ "$PIPELINE" = "mcp" ]; then
               CONTEXT_ARGUMENTS=(
                 --build-context-sha256 "$MCP_BUILD_CONTEXT_SHA256"
+                --runtime-contract "$MCP_RUNTIME_CONTRACT"
               )
             fi
             /tmp/verify_actual_image.sh \

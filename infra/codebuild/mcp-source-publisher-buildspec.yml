@@ -91,6 +91,11 @@ phases:
         [ "$(git -C "$PUBLISHER_CHECKOUT" show "$EXPECTED_COMMIT:infra/codebuild/teamagent_runtime_contract.json" | sha256sum | awk '{print $1}')" = "$SOURCE_MANIFEST_CONTRACT_SHA256" ] || { echo "FATAL: source commit manifest contract differs from trusted contract"; exit 1; }
         [ "$(git -C "$PUBLISHER_CHECKOUT" show "$EXPECTED_COMMIT:infra/codebuild/teamagent_core_media_release_contract.json" | sha256sum | awk '{print $1}')" = "$RELEASE_CONTRACT_SHA256" ] || { echo "FATAL: source commit release contract differs from trusted contract"; exit 1; }
         [ "$(git -C "$PUBLISHER_CHECKOUT" show "$EXPECTED_COMMIT:infra/codebuild/teamagent_bundle_provenance.py" | sha256sum | awk '{print $1}')" = "$(sha256sum /tmp/teamagent_bundle_provenance.py | awk '{print $1}')" ] || { echo "FATAL: source commit bundle verifier differs from trusted bytes"; exit 1; }
+        python3 /tmp/teamagent_bundle_provenance.py validate-contract-pair \
+          --runtime-contract \
+            "$PUBLISHER_CHECKOUT/infra/codebuild/teamagent_runtime_contract.json" \
+          --contract /tmp/teamagent_core_media_release_contract.json \
+          --repo-root "$PUBLISHER_CHECKOUT"
         python3 /tmp/teamagent_bundle_provenance.py assert-release-ready \
           --contract /tmp/teamagent_core_media_release_contract.json
         mapfile -t PRODUCTION_APP_RECORD < <(
