@@ -931,8 +931,9 @@ class PgVectorClient:
 
         client_name 部分一致 (「日本ガイシ」で「NGK（日本ガイシ）」も拾う) の営業 FB を
         modified_at 昇順で返す。各 FB の構造化メタ (deal_phase / bant_score /
-        positive_reaction / negative_reaction / next_action / proposed_menu) を
-        metadata に詰めて返し、Skill 側で温度感推移の合成に使う。
+        positive_reaction / negative_reaction / client_reaction / next_action /
+        proposed_menu / shared_memo) を metadata に詰めて返し、Skill 側で温度感推移の
+        合成に使う。
 
         client_name は placeholder 化され SQL injection から保護される。
         """
@@ -952,8 +953,10 @@ class PgVectorClient:
                 d.metadata->>'channel_type' AS channel_type,
                 d.metadata->>'positive_reaction' AS positive_reaction,
                 d.metadata->>'negative_reaction' AS negative_reaction,
+                d.metadata->>'client_reaction' AS client_reaction,
                 d.metadata->>'next_action' AS next_action,
-                d.metadata->>'proposed_menu' AS proposed_menu
+                d.metadata->>'proposed_menu' AS proposed_menu,
+                d.metadata->>'shared_memo' AS shared_memo
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE d.metadata->>'is_sales_fb' = 'true'
@@ -983,8 +986,10 @@ class PgVectorClient:
                 "channel_type",
                 "positive_reaction",
                 "negative_reaction",
+                "client_reaction",
                 "next_action",
                 "proposed_menu",
+                "shared_memo",
             ):
                 if r.get(k):
                     meta[k] = r[k]
@@ -1042,8 +1047,10 @@ class PgVectorClient:
                 d.metadata->>'channel_type' AS channel_type,
                 d.metadata->>'positive_reaction' AS positive_reaction,
                 d.metadata->>'negative_reaction' AS negative_reaction,
+                d.metadata->>'client_reaction' AS client_reaction,
                 d.metadata->>'next_action' AS next_action,
-                d.metadata->>'proposed_menu' AS proposed_menu
+                d.metadata->>'proposed_menu' AS proposed_menu,
+                d.metadata->>'shared_memo' AS shared_memo
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE d.metadata->>'is_sales_fb' = 'true'
@@ -1073,8 +1080,10 @@ class PgVectorClient:
                 "channel_type",
                 "positive_reaction",
                 "negative_reaction",
+                "client_reaction",
                 "next_action",
                 "proposed_menu",
+                "shared_memo",
             ):
                 if r.get(k):
                     meta[k] = r[k]
