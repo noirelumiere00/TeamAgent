@@ -1333,7 +1333,16 @@ class SkillDispatcher:
                 "🔎 分析する検索キーワードを指定してください。例: `@TeamAgent VSEO分析 新宿 ランチ`"
             )
         skill = self.get_video_algorithm_skill()
-        ctx = SkillContext(request_id=request_id, user_id=user_id)
+        ctx_metadata: dict[str, Any] = {}
+        # 既定 OFF 時は resolver/API 呼出しも含め完全 no-op。quota ON の旧 Socket Mode 経路でも
+        # MCP と同じ本人 email を注入し、空 email による計量迂回を許さない。
+        from teamagent.adapters.quota_store import VideoQuotaStore
+
+        if VideoQuotaStore.enabled():
+            user_email = await self._resolve_user_email(user_id)
+            if user_email:
+                ctx_metadata["user_email"] = user_email
+        ctx = SkillContext(request_id=request_id, user_id=user_id, metadata=ctx_metadata)
         from teamagent.skills.video_algorithm.schema import (
             VideoAlgorithmInput,
             VideoAlgorithmOutput,
@@ -1353,6 +1362,19 @@ class SkillDispatcher:
                 return _tiktok_error_reply(str(e))
             if "GEMINI" in str(e):
                 return "🔎 動画分析は Gemini の認証設定後に有効化されます（Vertex/APIキー）。"
+            if "VIDEO_ALGORITHM_IN_PROGRESS" in str(e):
+                return "🔎 同じ条件の動画分析がまだ処理中です。完了通知を待ってください。"
+            if "VIDEO_QUOTA_IDENTITY_REQUIRED" in str(e):
+                return "🔎 利用者を確認できないため動画分析を開始できませんでした。"
+            if "VIDEO_QUOTA_EXCEEDED" in str(e):
+                return str(e).split(":", 1)[-1].strip()
+            if "VIDEO_ALGORITHM_CACHE_UNAVAILABLE" in str(e):
+                return "🔎 二重課金防止を確認できないため、動画分析を開始しませんでした。"
+            if "VIDEO_ALGORITHM_LEASE_LOST" in str(e):
+                return (
+                    "🔎 二重実行を避けるため動画分析を中止しました。"
+                    "時間を置いて再実行してください。"
+                )
             raise
 
         try:

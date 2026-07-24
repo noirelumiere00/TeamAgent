@@ -16,12 +16,21 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, ClassVar
+from threading import Event, Lock, Thread
+from typing import Any, ClassVar, Literal
 
 import structlog
 from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.gemini_client import GeminiClient
+from teamagent.adapters.video_algorithm_cache import (
+    CachedVideoAlgorithmResult,
+    VideoAlgorithmCacheLease,
+    VideoAlgorithmCacheLeaseHeldError,
+    VideoAlgorithmCacheLeaseLostError,
+    VideoAlgorithmCacheLeaseUnavailableError,
+    VideoAlgorithmResultCache,
+)
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.video_algorithm.analysis import cross_analyze
@@ -47,6 +56,88 @@ Proxy = Callable[[bytes, str], tuple[bytes, str]]
 _MAX_FIELD_RESETS = 8  # 寛容パース: 最大何フィールドまで default に戻して動画を救済するか
 _OVERFETCH_BUFFER = 4  # over-fetch: 目標+この本数を検索し DL/分析失敗を後続候補でバックフィル
 _MAX_POOL = 30  # 検索の絶対上限（スクレイパ実証済み。レート制限/遮断を踏み抜かない）
+
+
+class _LeaseHeartbeat:
+    """長時間のGemini処理中もS3 leaseを更新し、ownership喪失を課金境界へ伝える。"""
+
+    def __init__(
+        self,
+        cache: VideoAlgorithmResultCache,
+        lease: VideoAlgorithmCacheLease,
+        request_id: str,
+    ) -> None:
+        self._cache = cache
+        self._lease = lease
+        self._request_id = request_id
+        self._stop = Event()
+        self._lost: VideoAlgorithmCacheLeaseLostError | None = None
+        self._unavailable: VideoAlgorithmCacheLeaseUnavailableError | None = None
+        # background heartbeat と課金境界の同期renewが同じETagで競合しないよう直列化する。
+        self._renew_lock = Lock()
+        self._thread = Thread(
+            target=self._run,
+            name=f"video-algorithm-lease-{request_id[:24]}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        interval = self._cache.lease_heartbeat_seconds
+        while not self._stop.wait(interval):
+            with self._renew_lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self._cache.renew_lease(self._lease, request_id=self._request_id)
+                except VideoAlgorithmCacheLeaseLostError as error:
+                    self._lost = error
+                    return
+                except VideoAlgorithmCacheLeaseUnavailableError as error:
+                    # 一過性障害ではowner喪失と断定せず、最小TTL 301秒に対して最大5秒で再試行。
+                    self._unavailable = error
+                    interval = self._cache.lease_retry_seconds
+                else:
+                    self._unavailable = None
+                    interval = self._cache.lease_heartbeat_seconds
+
+    def assert_owned(self) -> None:
+        """課金前後の境界で同期renewし、transient heartbeat失敗から回復確認する。"""
+
+        with self._renew_lock:
+            if self._lost is not None:
+                raise RuntimeError(
+                    "VIDEO_ALGORITHM_LEASE_LOST: 処理中リースの所有権を失ったため、"
+                    "追加の課金処理を中止しました"
+                ) from self._lost
+            last_unavailable: VideoAlgorithmCacheLeaseUnavailableError | None = None
+            for attempt in range(3):
+                try:
+                    self._cache.renew_lease(self._lease, request_id=self._request_id)
+                except VideoAlgorithmCacheLeaseLostError as error:
+                    self._lost = error
+                    raise RuntimeError(
+                        "VIDEO_ALGORITHM_LEASE_LOST: 処理中リースの所有権を失ったため、"
+                        "追加の課金処理を中止しました"
+                    ) from error
+                except VideoAlgorithmCacheLeaseUnavailableError as error:
+                    self._unavailable = error
+                    last_unavailable = error
+                    if attempt < 2 and self._stop.wait(self._cache.lease_retry_seconds):
+                        break
+                else:
+                    self._unavailable = None
+                    return
+            raise RuntimeError(
+                "VIDEO_ALGORITHM_CACHE_UNAVAILABLE: 処理中リースを確認できないため、"
+                "追加の課金処理を中止しました"
+            ) from last_unavailable
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
 
 
 def _default_report_dir() -> str:
@@ -178,6 +269,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         max_workers: int = 3,
         overfetch_buffer: int = _OVERFETCH_BUFFER,
         publisher: Callable[..., str | None] | None = None,
+        result_cache: VideoAlgorithmResultCache | None = None,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
@@ -188,12 +280,48 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self._max_workers = max_workers
         self._overfetch_buffer = overfetch_buffer
         self._publisher = publisher
+        self._result_cache = result_cache
 
     # --- 依存の遅延解決（テスト差し替え可） ---
     def _client(self) -> GeminiClient:
         if self._gemini is None:
             self._gemini = GeminiClient.from_env()
         return self._gemini
+
+    def _configured_model_id(self) -> str:
+        """キャッシュキー用の実行予定 model id（認証クライアント生成前に確定）。"""
+
+        model_id = getattr(self._gemini, "model_id", None)
+        if isinstance(model_id, str) and model_id.strip():
+            return model_id.strip()
+        return os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+    @staticmethod
+    def _consume_quota_or_raise(ctx: SkillContext, count: int) -> None:
+        """Gemini 分析を開始する batch 本数を事前消費する（既定OFFなら完全 no-op）。
+
+        事後消費では並行リクエストが上限をすり抜けるため、失敗試行も含めて開始前に確保する。
+        取得失敗後の cover-only 縮退も同じ「分析試行」1本として数える。
+        """
+
+        from teamagent.adapters.quota_store import VideoQuotaStore
+
+        if count <= 0 or not VideoQuotaStore.enabled():
+            return
+        email = str(ctx.metadata.get("user_email", "") or "").strip().lower()
+        if not email:
+            # quota ON なのに主体不明を allowed no-op にするとコスト上限を迂回できる。
+            # そのため、quota が有効な場合だけ fail-closed にする。
+            raise RuntimeError(
+                "VIDEO_QUOTA_IDENTITY_REQUIRED: 動画分析クォータの利用者メールを解決できません"
+            )
+        result = VideoQuotaStore().try_consume(email, count, request_id=ctx.request_id)
+        if not result.allowed:
+            raise RuntimeError(
+                f"VIDEO_QUOTA_EXCEEDED: 今月の動画分析上限（{result.limit}本）に達しました"
+                f"（使用 {result.used}本）。リセットは来月1日（JST）です。"
+                "お急ぎの場合は管理者に上限引き上げを依頼してください。"
+            )
 
     def _posts_to_metas(self, posts: list[dict[str, Any]]) -> list[VideoMeta]:
         """tiktok_acquire の posts.normalized.json item を VideoMeta へ写像（S3委譲経路）。"""
@@ -562,6 +690,231 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             board_size=input.board_size,
         )
 
+        # 300s timeout 後の同一依頼再発話を課金ゼロで返す。キャッシュヒットはクォータも消費しない。
+        result_cache = self._result_cache
+        if result_cache is None and VideoAlgorithmResultCache.enabled():
+            result_cache = VideoAlgorithmResultCache()
+        cache_key: str | None = None
+        if result_cache is not None:
+            requested_by = str(ctx.metadata.get("user_email") or ctx.user_id or "unknown")
+            cache_key = result_cache.cache_key(
+                query=input.query,
+                max_videos=input.max_videos,
+                prompt_version=self._prompt_version,
+                model_id=self._configured_model_id(),
+                board_size=input.board_size,
+                outputs=input.outputs,
+                kw_set=input.kw_set,
+                client_name=input.client_name,
+                acquire_job_id=input.acquire_job_id,
+                search_volume=input.search_volume,
+                requester=requested_by,
+            )
+            cached = self._read_cached_output(result_cache, cache_key, ctx)
+            if cached is not None and self._cache_has_requested_artifacts(
+                cached[0], cached[1], input
+            ):
+                return self._reuse_cached_output(
+                    cached,
+                    input=input,
+                    ctx=ctx,
+                    result_cache=result_cache,
+                    cache_key=cache_key,
+                    lease=None,
+                )
+
+        lease: VideoAlgorithmCacheLease | None = None
+        if result_cache is not None and cache_key is not None:
+            try:
+                lease = result_cache.acquire_lease(cache_key, request_id=ctx.request_id)
+            except VideoAlgorithmCacheLeaseHeldError as error:
+                # acquire 直前に元実行が core を commit した race を一度だけ再確認する。
+                cached = self._read_cached_output(result_cache, cache_key, ctx)
+                if cached is not None and self._cache_has_requested_artifacts(
+                    cached[0], cached[1], input
+                ):
+                    return self._reuse_cached_output(
+                        cached,
+                        input=input,
+                        ctx=ctx,
+                        result_cache=result_cache,
+                        cache_key=cache_key,
+                        lease=None,
+                    )
+                raise RuntimeError(
+                    "VIDEO_ALGORITHM_IN_PROGRESS: 同じ条件の動画分析がまだ処理中です。"
+                    "元の処理が完了するまで再実行しないでください。"
+                ) from error
+            if lease is None:
+                # cacheを有効にした実行は、排他状態が不明なまま課金処理へfail-openしない。
+                raise RuntimeError(
+                    "VIDEO_ALGORITHM_CACHE_UNAVAILABLE: 二重課金防止リースを確立できないため、"
+                    "動画分析を開始しませんでした"
+                )
+
+        heartbeat: _LeaseHeartbeat | None = None
+        if result_cache is not None and lease is not None:
+            heartbeat = _LeaseHeartbeat(result_cache, lease, ctx.request_id)
+            heartbeat.start()
+        try:
+            if result_cache is not None and cache_key is not None and lease is not None:
+                # miss→lease 取得の間に完了した結果を再利用し、不要な再分析を避ける。
+                cached = self._read_cached_output(result_cache, cache_key, ctx)
+                if cached is not None:
+                    return self._reuse_cached_output(
+                        cached,
+                        input=input,
+                        ctx=ctx,
+                        result_cache=result_cache,
+                        cache_key=cache_key,
+                        lease=lease,
+                        assert_lease_owned=(
+                            heartbeat.assert_owned if heartbeat is not None else None
+                        ),
+                    )
+            return self._run_uncached(
+                input,
+                ctx,
+                result_cache=result_cache,
+                cache_key=cache_key,
+                lease=lease,
+                assert_lease_owned=heartbeat.assert_owned if heartbeat is not None else None,
+            )
+        except VideoAlgorithmCacheLeaseLostError as error:
+            raise RuntimeError(
+                "VIDEO_ALGORITHM_LEASE_LOST: 処理中リースの所有権を失ったため、"
+                "追加の課金処理を中止しました"
+            ) from error
+        except VideoAlgorithmCacheLeaseUnavailableError as error:
+            raise RuntimeError(
+                "VIDEO_ALGORITHM_CACHE_UNAVAILABLE: 処理中リースを確認できないため、"
+                "追加の課金処理を中止しました"
+            ) from error
+        finally:
+            if heartbeat is not None:
+                heartbeat.close()
+            if result_cache is not None and lease is not None:
+                result_cache.release_lease(lease, request_id=ctx.request_id)
+
+    def _read_cached_output(
+        self,
+        result_cache: VideoAlgorithmResultCache,
+        cache_key: str,
+        ctx: SkillContext,
+    ) -> tuple[VideoAlgorithmOutput, CachedVideoAlgorithmResult] | None:
+        payload = result_cache.get(cache_key, request_id=ctx.request_id)
+        if payload is None:
+            return None
+        try:
+            return VideoAlgorithmOutput.model_validate(payload.output), payload
+        except ValidationError:
+            ctx.bind_logger(self.name).warning("video_algorithm_cache_validation_failed")
+            return None
+
+    def _cache_has_requested_artifacts(
+        self,
+        out: VideoAlgorithmOutput,
+        payload: CachedVideoAlgorithmResult,
+        input: VideoAlgorithmInput,
+    ) -> bool:
+        if payload.stage != "complete":
+            return False
+        # 発行先が無いローカル/テスト環境では None が正しい完了状態。
+        if self._publisher is None and not os.environ.get("VSEO_REPORT_BUCKET"):
+            return True
+        required = {
+            "report": out.report_url,
+            "slides": out.slides_url,
+            "pptx": out.pptx_url,
+        }
+        return all(required[kind] for kind in input.outputs)
+
+    @staticmethod
+    def _put_cached_result(
+        result_cache: VideoAlgorithmResultCache,
+        cache_key: str,
+        *,
+        output: dict[str, Any],
+        stage: Literal["paid_core", "complete"],
+        lease: VideoAlgorithmCacheLease,
+        request_id: str,
+        assert_lease_owned: Callable[[], None] | None,
+        failure_message: str,
+    ) -> None:
+        """lease保持中の一過性result I/Oを再試行し、課金済みcoreの取りこぼしを防ぐ。"""
+
+        for attempt in range(3):
+            try:
+                # heartbeatのlock下で同期renewするため、background CASとの自己競合も避ける。
+                if assert_lease_owned is not None:
+                    assert_lease_owned()
+                else:
+                    result_cache.assert_lease_owned(lease, request_id=request_id)
+                committed = result_cache.put(
+                    cache_key,
+                    output=output,
+                    stage=stage,
+                    lease=lease,
+                    request_id=request_id,
+                )
+            except VideoAlgorithmCacheLeaseUnavailableError:
+                if attempt < 2:
+                    continue
+                raise
+            if not committed:
+                raise RuntimeError(failure_message)
+            return
+        raise AssertionError("unreachable")
+
+    def _reuse_cached_output(
+        self,
+        cached: tuple[VideoAlgorithmOutput, CachedVideoAlgorithmResult],
+        *,
+        input: VideoAlgorithmInput,
+        ctx: SkillContext,
+        result_cache: VideoAlgorithmResultCache,
+        cache_key: str,
+        lease: VideoAlgorithmCacheLease | None,
+        assert_lease_owned: Callable[[], None] | None = None,
+    ) -> VideoAlgorithmOutput:
+        out, payload = cached
+        if not self._cache_has_requested_artifacts(out, payload, input):
+            if lease is None:
+                raise RuntimeError("VIDEO_ALGORITHM_IN_PROGRESS: 成果物を別リクエストが生成中です")
+            return self._finalize_cached_output(
+                out,
+                input=input,
+                ctx=ctx,
+                result_cache=result_cache,
+                cache_key=cache_key,
+                lease=lease,
+                assert_lease_owned=assert_lease_owned,
+            )
+        backfilled = sum(
+            1 for video in out.videos if video.analysis and video.meta.rank > input.max_videos
+        )
+        out.total_cost_usd = 0.0
+        out.slack_summary = self._slack_summary(out, backfilled)
+        ctx.bind_logger(self.name).info(
+            "video_algorithm_cache_return",
+            requested=input.max_videos,
+            board_size=input.board_size,
+            stage=payload.stage,
+        )
+        return out
+
+    def _run_uncached(
+        self,
+        input: VideoAlgorithmInput,
+        ctx: SkillContext,
+        *,
+        result_cache: VideoAlgorithmResultCache | None,
+        cache_key: str | None,
+        lease: VideoAlgorithmCacheLease | None,
+        assert_lease_owned: Callable[[], None] | None,
+    ) -> VideoAlgorithmOutput:
+        log = ctx.bind_logger(self.name)
+
         target = input.max_videos  # 深掘り分析（DL+Gemini）する本数。重い。
         # 取得（スクレイプ）= 上位ボード board_size 本。メタのみ＝軽い。
         # 深掘り分析の予備候補も兼ねる（DL/分析失敗を後続候補でバックフィル）。天井は _MAX_POOL。
@@ -592,10 +945,24 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
         pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
         if not pool:
-            return VideoAlgorithmOutput(
+            empty = VideoAlgorithmOutput(
                 query=input.query,
                 slack_summary=f"🔎 「{input.query}」の検索結果を取得できませんでした。",
             )
+            if result_cache is not None and cache_key is not None and lease is not None:
+                self._put_cached_result(
+                    result_cache,
+                    cache_key,
+                    output=empty.model_dump(mode="json"),
+                    stage="complete",
+                    lease=lease,
+                    request_id=ctx.request_id,
+                    assert_lease_owned=assert_lease_owned,
+                    failure_message=(
+                        "VIDEO_ALGORITHM_CACHE_COMMIT_FAILED: 空の分析結果を保存できませんでした"
+                    ),
+                )
+            return empty
 
         system = load_prompt("video_algorithm", self._prompt_version, "system")
         # 上位から波状に分析し、成功が target 本に達するか候補が尽きるまで（再検索はしない）
@@ -605,6 +972,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             need = target - sum(1 for v in results if v.analysis)
             batch = pool[attempted : attempted + need]
             attempted += len(batch)
+            # 事前 consume: DL/Gemini/parse の失敗もコスト試行として数え、上限の並行すり抜けを防ぐ。
+            # バックフィル batch もここを通るため、実際に開始した分析本数が台帳へ乗る。
+            if assert_lease_owned is not None:
+                assert_lease_owned()
+            self._consume_quota_or_raise(ctx, len(batch))
             workers = max(1, min(self._max_workers, len(batch)))
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 results.extend(
@@ -636,6 +1008,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         if sum(1 for v in analyzed if v.analysis) >= 2:
             from teamagent.skills.video_algorithm.synthesis import synthesize
 
+            if assert_lease_owned is not None:
+                assert_lease_owned()
             syn, syn_cost = synthesize(
                 self._client(),
                 analyzed,
@@ -658,6 +1032,22 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             search_volume=input.search_volume,
             kw_set=list(input.kw_set or []),
         )
+        if result_cache is not None and cache_key is not None and lease is not None:
+            # Gemini/横断 synthesis の課金済み core を成果物生成より先に commit する。
+            # report/slides/pptx が失敗しても retry はこの core から再生成し、再分析しない。
+            self._put_cached_result(
+                result_cache,
+                cache_key,
+                output=out.model_dump(mode="json"),
+                stage="paid_core",
+                lease=lease,
+                request_id=ctx.request_id,
+                assert_lease_owned=assert_lease_owned,
+                failure_message=(
+                    "VIDEO_ALGORITHM_CACHE_COMMIT_FAILED: 課金済み分析結果を保存できないため、"
+                    "成果物生成を中止しました"
+                ),
+            )
         report_dir = self._report_dir or _request_report_dir(ctx.request_id)
         # TEAMAGENT_VSEO_REPORT_DIR is a base directory, not a persistence opt-out:
         # _request_report_dir() still created a uniquely owned child beneath it.
@@ -668,6 +1058,22 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             if out.report_html_path:
                 # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
                 out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
+            if result_cache is not None and cache_key is not None and lease is not None:
+                # 後続slides/pptxだけが失敗しても、発行済みの高品質report URLは
+                # coreへcheckpointし、sanitized結果から再生成しない。
+                self._put_cached_result(
+                    result_cache,
+                    cache_key,
+                    output=out.model_dump(mode="json"),
+                    stage="paid_core",
+                    lease=lease,
+                    request_id=ctx.request_id,
+                    assert_lease_owned=assert_lease_owned,
+                    failure_message=(
+                        "VIDEO_ALGORITHM_CACHE_COMMIT_FAILED: "
+                        "report checkpointを保存できませんでした"
+                    ),
+                )
             if "slides" in input.outputs or "pptx" in input.outputs:
                 self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
             out.slack_summary = self._slack_summary(out, backfilled)
@@ -686,12 +1092,89 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 cost_usd=total_cost,
                 report=out.report_html_path,
             )
+            if result_cache is not None and cache_key is not None and lease is not None:
+                self._put_cached_result(
+                    result_cache,
+                    cache_key,
+                    output=out.model_dump(mode="json"),
+                    stage="complete",
+                    lease=lease,
+                    request_id=ctx.request_id,
+                    assert_lease_owned=assert_lease_owned,
+                    failure_message=(
+                        "VIDEO_ALGORITHM_CACHE_COMMIT_FAILED: 完了結果を保存できませんでした"
+                    ),
+                )
             handed_off = True
             return out
         finally:
             # Successful output is retained only until the runtime serializes or
             # uploads it and invokes cleanup_output().  Any exception before
             # handoff removes the complete request directory here.
+            if owns_request_dir and not handed_off and os.path.exists(report_dir):
+                shutil.rmtree(report_dir)
+
+    def _finalize_cached_output(
+        self,
+        out: VideoAlgorithmOutput,
+        *,
+        input: VideoAlgorithmInput,
+        ctx: SkillContext,
+        result_cache: VideoAlgorithmResultCache,
+        cache_key: str,
+        lease: VideoAlgorithmCacheLease,
+        assert_lease_owned: Callable[[], None] | None,
+    ) -> VideoAlgorithmOutput:
+        """課金済み core から成果物だけを再生成する（Gemini/quota は呼ばない）。"""
+
+        backfilled = sum(
+            1 for video in out.videos if video.analysis and video.meta.rank > input.max_videos
+        )
+        original_cost = out.total_cost_usd
+        report_dir = self._report_dir or _request_report_dir(ctx.request_id)
+        owns_request_dir = self._report_dir is None
+        handed_off = False
+        try:
+            if out.report_url is None:
+                out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
+                if out.report_html_path:
+                    out.report_url = self._publish(
+                        out.report_html_path,
+                        ctx.request_id,
+                        input.query,
+                    )
+            else:
+                # paid_core checkpoint済みの元レポートを優先し、sanitized coreから劣化再生成しない。
+                out.report_html_path = None
+            if "slides" in input.outputs or "pptx" in input.outputs:
+                self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
+            out.slack_summary = self._slack_summary(out, backfilled)
+            if out.report_html_path is None and owns_request_dir and os.path.exists(report_dir):
+                shutil.rmtree(report_dir)
+            # 保存する cost は元分析の実績。返却値だけを 0 にし、今回の再利用が無課金と示す。
+            out.total_cost_usd = original_cost
+            self._put_cached_result(
+                result_cache,
+                cache_key,
+                output=out.model_dump(mode="json"),
+                stage="complete",
+                lease=lease,
+                request_id=ctx.request_id,
+                assert_lease_owned=assert_lease_owned,
+                failure_message=(
+                    "VIDEO_ALGORITHM_CACHE_COMMIT_FAILED: 再生成した成果物を保存できませんでした"
+                ),
+            )
+            out.total_cost_usd = 0.0
+            out.slack_summary = self._slack_summary(out, backfilled)
+            ctx.bind_logger(self.name).info(
+                "video_algorithm_cache_artifacts_regenerated",
+                requested=input.max_videos,
+                board_size=input.board_size,
+            )
+            handed_off = True
+            return out
+        finally:
             if owns_request_dir and not handed_off and os.path.exists(report_dir):
                 shutil.rmtree(report_dir)
 
