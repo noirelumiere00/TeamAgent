@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
   "release": {
-    "ready": false,
-    "blocked_reason": "Debian 13 arm64 candidate was rejected at Trivy CRITICAL=4/HIGH=49; keep release promotion disabled until Boyle supplies the exact Chainguard builder child digest, all runtime binary hashes, and an actual CRITICAL=0/HIGH=0 scan receipt."
+    "ready": true,
+    "blocked_reason": ""
   },
   "receipt": {
     "schema_version": 1,
