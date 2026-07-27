@@ -117,7 +117,7 @@ def test_exchange_returns_id_token_for_callback_verification(
 
 
 def test_consume_state_once_uses_conditional_update() -> None:
-    class _ConditionalCheckFailed(Exception):
+    class _ConditionalCheckFailedError(Exception):
         def __init__(self) -> None:
             self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
 
@@ -134,7 +134,7 @@ def test_consume_state_once_uses_conditional_update() -> None:
             assert kwargs["ExpressionAttributeValues"][":expires"] == {"N": "2800"}
             record = str(kwargs["Key"]["record"]["S"])
             if record in self.seen:
-                raise _ConditionalCheckFailed
+                raise _ConditionalCheckFailedError
             self.seen.add(record)
             self.calls.append(kwargs)
 
