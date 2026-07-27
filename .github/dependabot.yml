@@ -6,6 +6,12 @@ updates:
   # GitHub Actions の workflow 依存を週次で更新
   - package-ecosystem: "github-actions"
     directory: "/"
+    # 開発は dev で行い、main は「本番に出した状態」を表すブランチとして運用する。
+    # target-branch を省くと既定ブランチ（main）宛に PR が立ち、(1) 実開発ブランチに
+    # 届かないので効果がなく (2) dev↔main に本来無い衝突を作り (3) dev 側の
+    # 「外部 action は 40 桁 SHA 固定」契約テストを通らないタグ参照が main 経由で
+    # 混入する。2026-07-27 に #285/#286/#134 で実害を確認したため明示する。
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -27,6 +33,10 @@ updates:
   # Python パッケージ（pyproject.toml）を週次で更新
   - package-ecosystem: "pip"
     directory: "/"
+    # 上と同じ理由。加えて pip 側は main の pyproject が dev と大きく乖離しており、
+    # main 宛の bump は uv.lock が追随しないまま pyproject だけ動く（本番は
+    # `uv sync --frozen` なので効果ゼロ）という失敗の仕方をする。
+    target-branch: "dev"
     schedule:
       interval: "weekly"
       day: "monday"
