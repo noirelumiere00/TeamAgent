@@ -148,6 +148,13 @@ case "$MODE" in
     LAUNCHER="$SCRIPT_DIR/build_tiktok_image.sh"
     ;;
   release)
+    # Retired on 2026-07-27. This wrapper requires the caller to start as the
+    # account root (see the root assertion before assume-role), but AWS refuses
+    # AssumeRole for root principals and the organization SCP additionally
+    # forbids sts:SetSourceIdentity, which this path passed. The release
+    # launcher now trusts the IAM administrator directly, so run the launcher
+    # itself instead of routing through this wrapper.
+    die "release mode is retired; run infra/deploy/authorize_image_release.sh directly as the IAM administrator"
     pipeline_count=0
     receipt_key_count=0
     index=1

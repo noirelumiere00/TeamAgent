@@ -942,27 +942,22 @@ resource "aws_iam_user" "release_caller" {
 }
 
 data "aws_iam_policy_document" "release_launcher_assume" {
+  # The IAM administrator is the only live release principal. Measured on
+  # 2026-07-27: the release-caller user has no access keys and the root branch
+  # is refused by the organization SCP that forbids sts:SetSourceIdentity, so
+  # neither of the previous identifiers could actually start a release. This
+  # mirrors codebuild_launcher_assume, which already trusts the same user for
+  # the build lane and therefore needs no SetSourceIdentity.
+  # MFA and the exact session name stay required. The retired root branch also
+  # demanded sts:SetSourceIdentity, which the organization SCP refuses, so that
+  # condition is dropped while every other guard is kept: the operator reaches
+  # this role through an MFA session token, and the launcher pins the resulting
+  # session ARN.
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "AWS"
-      identifiers = [aws_iam_user.release_caller.arn]
-    }
-  }
-
-  statement {
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
-    }
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
+      identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
     condition {
       test     = "Bool"
@@ -974,11 +969,6 @@ data "aws_iam_policy_document" "release_launcher_assume" {
       variable = "sts:RoleSessionName"
       values   = ["teamagent-release-authorization"]
     }
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = ["teamagent-production-release"]
-    }
   }
 }
 
@@ -989,10 +979,16 @@ resource "aws_iam_role" "release_launcher" {
 }
 
 data "aws_iam_policy_document" "release_caller" {
+  # Retired boundary. This user never had access keys issued, so it could not
+  # authorize a release; the administrator branch in release_launcher_assume
+  # replaces it. The user resource is kept (deleting an IAM user is not worth
+  # the churn) but every path is denied so it cannot be revived by handing it
+  # a credential later.
   statement {
-    sid       = "AssumeOnlyGuardedReleaseLauncher"
+    sid       = "DenyRetiredReleaseCallerAssume"
+    effect    = "Deny"
     actions   = ["sts:AssumeRole"]
-    resources = [aws_iam_role.release_launcher.arn]
+    resources = ["*"]
   }
   statement {
     sid    = "DenyDirectBuildEntryPoints"

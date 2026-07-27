@@ -2624,7 +2624,22 @@ def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -
     assert terraform.count('identifiers = ["arn:aws:iam::718959508629:root"]') >= 4
     assert terraform.count('variable = "aws:MultiFactorAuthPresent"') >= 4
     assert terraform.count('variable = "sts:RoleSessionName"') >= 4
-    assert terraform.count('variable = "sts:SourceIdentity"') >= 4
+    # Three launcher roles still gate their root branch on sts:SourceIdentity.
+    # The release launcher no longer can: the organization SCP forbids
+    # sts:SetSourceIdentity, so that branch was unusable. It is guarded by the
+    # administrator principal plus MFA and an exact session name instead, which
+    # the next assertions pin.
+    assert terraform.count('variable = "sts:SourceIdentity"') >= 3
+    release_trust = terraform[
+        terraform.index('data "aws_iam_policy_document" "release_launcher_assume"') : terraform.index(
+            'resource "aws_iam_role" "release_launcher"'
+        )
+    ]
+    assert "identifiers = [data.aws_iam_user.aiia_dev.arn]" in release_trust
+    assert 'variable = "aws:MultiFactorAuthPresent"' in release_trust
+    assert 'variable = "sts:RoleSessionName"' in release_trust
+    assert "arn:aws:iam::718959508629:root" not in release_trust
+    assert "release_caller" not in release_trust
     assert 'ROOT_ARN="arn:aws:iam::718959508629:root"' in wrapper
     assert 'git -C "$SCRIPT_DIR" rev-parse' not in wrapper
     assert 'python3 -I "$CONTRACT_HELPER"' in wrapper
@@ -2689,5 +2704,9 @@ def test_launcher_policies_allow_read_only_connection_preflight() -> None:
 def test_authorize_remains_blocked_before_aws_when_release_is_not_ready() -> None:
     body = AUTHORIZE.read_text(encoding="utf-8")
     assert body.index("release.ready is false") < body.index("aws sts get-caller-identity")
-    assert 'EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/teamagent-release-caller"' in body
+    # The release caller is the IAM administrator. release-caller was retired
+    # because it never had access keys, and the root branch it shared is
+    # refused by the organization SCP that forbids sts:SetSourceIdentity.
+    assert 'EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/AIIAdev"' in body
+    assert "user/teamagent-release-caller" not in body
     assert "arn:aws:iam::718959508629:root" not in body

@@ -5,7 +5,10 @@ umask 077
 
 REGION="ap-northeast-1"
 ACCOUNT_ID="718959508629"
-EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/teamagent-release-caller"
+# The IAM administrator is the live release principal. release-caller was
+# retired on 2026-07-27: it never had access keys, and the root branch it used
+# to share is refused by the organization SCP forbidding sts:SetSourceIdentity.
+EXPECTED_CALLER_ARN="arn:aws:iam::718959508629:user/AIIAdev"
 LAUNCHER_ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-release-launcher"
 SESSION_NAME="teamagent-release-authorization"
 EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-release-launcher/teamagent-release-authorization"
