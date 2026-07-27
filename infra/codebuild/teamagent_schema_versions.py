@@ -26,7 +26,7 @@ SCHEMA_VERSIONS: Final = TeamAgentSchemaVersions(
     mcp_source_declaration=5,
     mcp_release_receipt=3,
     external_approval=1,
-    image_deployment_intent=2,
+    image_deployment_intent=1,
 )
 
 ATOMIC_RELEASE_SCHEMA_TUPLE: Final[tuple[int, int, int, int]] = (

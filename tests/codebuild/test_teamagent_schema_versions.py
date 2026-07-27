@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,7 @@ def test_schema_version_tuple_is_complete_and_exact() -> None:
         "image_deployment_intent",
     )
     assert len(VERSIONS.SCHEMA_VERSIONS) == 6
-    assert tuple(VERSIONS.SCHEMA_VERSIONS) == (5, 3, 5, 3, 1, 2)
+    assert tuple(VERSIONS.SCHEMA_VERSIONS) == (5, 3, 5, 3, 1, 1)
     assert all(type(version) is int for version in VERSIONS.SCHEMA_VERSIONS)
 
 
@@ -88,6 +89,26 @@ def test_live_release_chain_consumers_use_the_atomic_version_authority() -> None
     assert source.SCHEMA_VERSION == 3  # The unrelated source-manifest schema stays v3.
 
 
+def test_deployment_intent_schema_uses_the_authority_without_a_literal() -> None:
+    evidence = _load_consumer("release_evidence")
+    source = (CODEBUILD / "release_evidence.py").read_text(encoding="utf-8")
+
+    assert (
+        evidence.DEPLOYMENT_INTENT_SCHEMA
+        == VERSIONS.SCHEMA_VERSIONS.image_deployment_intent
+        == 1
+    )
+    assert (
+        "DEPLOYMENT_INTENT_SCHEMA = SCHEMA_VERSIONS.image_deployment_intent"
+        in source
+    )
+    assert re.search(
+        r"^DEPLOYMENT_INTENT_SCHEMA\s*=\s*\d+\s*$",
+        source,
+        re.MULTILINE,
+    ) is None
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -115,7 +136,7 @@ def test_atomic_release_schema_tuple_rejects_wrong_length(candidate: tuple[int, 
     [
         [5, 3, 5, 3],
         "5,3,5,3",
-        VERSIONS.TeamAgentSchemaVersions(5, 3, 5, 3, 1, 2),
+        VERSIONS.TeamAgentSchemaVersions(5, 3, 5, 3, 1, 1),
     ],
 )
 def test_atomic_release_schema_tuple_rejects_non_builtin_tuple(candidate: object) -> None:

@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "consumers": [
+    {
+      "consumer_id": "mcp",
+      "terraform_task_definition_address": "aws_ecs_task_definition.mcp",
+      "ecs_family": "teamagent-dev-mcp",
+      "container_name": "teamagent-mcp",
+      "activator": {
+        "type": "ecs_service",
+        "identity": "teamagent-dev-mcp"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "connect_web",
+      "terraform_task_definition_address": "aws_ecs_task_definition.connect_web[0]",
+      "ecs_family": "teamagent-dev-connect-web",
+      "container_name": "connect-web",
+      "activator": {
+        "type": "ecs_service",
+        "identity": "teamagent-dev-connect-web"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "openclaw",
+      "terraform_task_definition_address": "aws_ecs_task_definition.openclaw[0]",
+      "ecs_family": "teamagent-dev-openclaw",
+      "container_name": "openclaw",
+      "activator": {
+        "type": "ecs_service",
+        "identity": "teamagent-dev-openclaw"
+      },
+      "release_repository": "teamagent-openclaw",
+      "receipt": {
+        "pipeline": "openclaw",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "canary",
+      "terraform_task_definition_address": "aws_ecs_task_definition.canary[0]",
+      "ecs_family": "teamagent-dev-canary",
+      "container_name": "canary",
+      "activator": {
+        "type": "eventbridge_rule_ecs_target",
+        "identity": "teamagent-dev-canary-hourly"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "ingest",
+      "terraform_task_definition_address": "aws_ecs_task_definition.ingest[0]",
+      "ecs_family": "teamagent-dev-ingest",
+      "container_name": "ingest",
+      "activator": {
+        "type": "eventbridge_rule_ecs_target",
+        "identity": "teamagent-dev-ingest-weekly"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "morning_digest",
+      "terraform_task_definition_address": "aws_ecs_task_definition.morning_digest[0]",
+      "ecs_family": "teamagent-dev-morning-digest",
+      "container_name": "morning-digest",
+      "activator": {
+        "type": "eventbridge_rule_ecs_target",
+        "identity": "teamagent-dev-morning-digest-weekday"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "x_buzz_worker",
+      "terraform_task_definition_address": "aws_ecs_task_definition.x_buzz_worker[0]",
+      "ecs_family": "teamagent-dev-x-buzz-worker",
+      "container_name": "worker",
+      "activator": {
+        "type": "lambda_taskdef_arn_environment",
+        "identity": "teamagent-dev-x-buzz-dispatch"
+      },
+      "release_repository": "teamagent-mcp",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "core"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    },
+    {
+      "consumer_id": "tiktok_acquire",
+      "terraform_task_definition_address": "aws_ecs_task_definition.tiktok_acquire[0]",
+      "ecs_family": "teamagent-dev-tiktok-acquire",
+      "container_name": "acquire",
+      "activator": {
+        "type": "lambda_taskdef_arn_environment",
+        "identity": "teamagent-dev-tiktok-acquire-dispatch"
+      },
+      "release_repository": "teamagent-media-worker",
+      "receipt": {
+        "pipeline": "mcp",
+        "subject": "media"
+      },
+      "provisional": false,
+      "provisional_reason": null
+    }
+  ]
+}
