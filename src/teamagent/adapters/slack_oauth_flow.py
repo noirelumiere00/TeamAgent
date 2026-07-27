@@ -4,11 +4,9 @@
 と「authorization code → user token(xoxp) 交換」を提供する。取得した xoxp は
 「本人としての検索・履歴読取」に使い、ワークスペース共有の bot token(xoxb) とは別経路にする。
 
-state 設計（Google 版との違い・意図的）:
-    google_oauth_flow.make_state は HMAC(email) の決定論署名で、同一 email なら常に同値・
-    nonce 無し・TTL 無し＝CSRF リプレイに弱い（レッドチーム既知）。本モジュールはこれを踏襲せず、
-    per-request nonce ＋ 発行時刻を含めて HMAC 署名し、verify で TTL 検証する（stateless・課金0）。
-    ※厳密なワンタイム化（サーバ側 nonce 消費）は後続 PR に切り出す。
+state 設計:
+    per-request nonce ＋ 発行時刻を含めて HMAC 署名し、verify で30分の TTL を検証する
+    （stateless・課金0）。Google 側も同じ署名形式を使い、callback でワンタイム消費する。
 
 - state 署名/検証は stdlib のみ（テスト可・課金0）。
 - 実 code 交換は `slack_sdk` の WebClient を遅延 import（Slack app 側 scope 設定完了後）。
@@ -43,9 +41,8 @@ _AUTHORIZE_URI = "https://slack.com/oauth/v2/authorize"
 
 # state の署名鍵は Google の OAUTH_STATE_SECRET と分離する（署名ドメインを分ける）。
 _STATE_SECRET_ENV = "SLACK_OAUTH_STATE_SECRET"
-# state のデフォルト有効期限（秒）。xoxp は本人なりすまし級のため短めに（漏洩窓を縮小）。
-# ※厳密なワンタイム化（サーバ側 nonce 消費）は後続 PR。それまでは短 TTL で残リスクを抑える。
-_DEFAULT_STATE_TTL_S = 180
+# state のデフォルト有効期限（秒）。Google 同意後に Slack を開く正当な操作時間を確保する。
+_DEFAULT_STATE_TTL_S = 1800
 # payload 区切り。email/nonce/数値/hex いずれにも出現しない文字を使う。
 _SEP = "|"
 
