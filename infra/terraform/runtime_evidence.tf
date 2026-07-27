@@ -336,6 +336,97 @@ data "aws_iam_policy_document" "runtime_automation_boundary" {
       aws_kms_key.media_cutover_attestor.arn,
     ]
   }
+
+  # Approval signing is an independent human authority.  The runtime role has
+  # broad KMS control-plane permissions for ordinary Terraform resources, so
+  # this key needs the same explicit permissions-boundary protection as the
+  # media attestor rather than relying on its identity-policy allowlist.
+  statement {
+    sid    = "DenyApprovalKms"
+    effect = "Deny"
+    actions = [
+      "kms:CancelKeyDeletion",
+      "kms:CreateAlias",
+      "kms:CreateGrant",
+      "kms:DeleteAlias",
+      "kms:DeleteImportedKeyMaterial",
+      "kms:DisableKey",
+      "kms:EnableKey",
+      "kms:ImportKeyMaterial",
+      "kms:PutKeyPolicy",
+      "kms:ReplicateKey",
+      "kms:ScheduleKeyDeletion",
+      "kms:Sign",
+      "kms:TagResource",
+      "kms:UntagResource",
+      "kms:Update*",
+      "kms:UpdateAlias",
+    ]
+    resources = [
+      "arn:aws:kms:${var.aws_region}:${local.expected_build_account_id}:${local.approval_signing_key_alias}",
+      aws_kms_key.approval_signing.arn,
+    ]
+  }
+
+  statement {
+    sid    = "DenyApprovalIam"
+    effect = "Deny"
+    actions = [
+      "iam:AttachRolePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:Delete*",
+      "iam:DetachRolePolicy",
+      "iam:PutRole*",
+      "iam:SetDefaultPolicyVersion",
+      "iam:Tag*",
+      "iam:Untag*",
+      "iam:Update*",
+    ]
+    resources = local.approval_runtime_iam_protected_arns
+  }
+
+  statement {
+    sid    = "DenyApprovalObjects"
+    effect = "Deny"
+    actions = [
+      "s3:DeleteObject*",
+      "s3:PutObject*",
+      "s3:RestoreObject",
+    ]
+    resources = [
+      "${aws_s3_bucket.image_release_evidence.arn}/${local.approval_evidence_prefix}/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/${local.approval_publisher_buildspec_s3_key}",
+    ]
+  }
+
+  # Identity-policy object denies already stop writes, but preserving these
+  # bucket controls prevents runtime from weakening the future-object contract.
+  statement {
+    sid    = "DenyApprovalBucketControls"
+    effect = "Deny"
+    actions = [
+      "s3:DeleteBucketPolicy",
+      "s3:PutBucketLifecycleConfiguration",
+      "s3:PutBucketObjectLockConfiguration",
+      "s3:PutBucketPolicy",
+      "s3:PutBucketVersioning",
+      "s3:PutEncryptionConfiguration",
+    ]
+    resources = [aws_s3_bucket.image_release_evidence.arn]
+  }
+
+  # Updating the project could point the exact signing role at an attacker
+  # supplied inline buildspec even when the locked S3 object is immutable.
+  statement {
+    sid    = "DenyApprovalProject"
+    effect = "Deny"
+    actions = [
+      "codebuild:DeleteProject",
+      "codebuild:UpdateProject",
+    ]
+    resources = [local.approval_publisher_project_arn]
+  }
+
 }
 
 resource "aws_iam_policy" "runtime_automation_boundary" {
@@ -345,6 +436,11 @@ resource "aws_iam_policy" "runtime_automation_boundary" {
 
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.runtime_automation_boundary.json, "/\\s/", "")) < 6144
+      error_message = "Runtime automation boundary must remain below 6,144 non-whitespace characters."
+    }
   }
 }
 
