@@ -7,6 +7,17 @@ ROOT = Path(__file__).resolve().parents[2]
 TERRAFORM = ROOT / "infra" / "terraform" / "codebuild.tf"
 README = ROOT / "infra" / "terraform" / "README.md"
 
+CODEBUILD_LAUNCHER_POLICY_DOCUMENTS = (
+    "codebuild_launcher_core",
+    "codebuild_launcher_manage_a",
+    "codebuild_launcher_manage_b",
+    "codebuild_launcher_guardrails",
+)
+RELEASE_LAUNCHER_POLICY_DOCUMENTS = (
+    "release_launcher_a",
+    "release_launcher_b",
+)
+
 
 def _body() -> str:
     return TERRAFORM.read_text(encoding="utf-8")
@@ -31,6 +42,25 @@ def _document(name: str) -> str:
     return _balanced_block_after(_body(), marker)
 
 
+def _managed_policy(role_name: str, document_names: tuple[str, ...]) -> str:
+    body = _body()
+    documents = []
+    for name in document_names:
+        documents.append(_document(name))
+
+        managed_policy = _balanced_block_after(body, f'resource "aws_iam_policy" "{name}"')
+        assert f"policy = data.aws_iam_policy_document.{name}.json" in managed_policy
+
+        attachment = _balanced_block_after(
+            body,
+            f'resource "aws_iam_role_policy_attachment" "{name}"',
+        )
+        assert f"role       = aws_iam_role.{role_name}.name" in attachment
+        assert f"policy_arn = aws_iam_policy.{name}.arn" in attachment
+
+    return "\n".join(documents)
+
+
 def _statement(document: str, sid: str) -> str:
     for match in re.finditer(r"\bstatement\s*\{", document):
         statement = _balanced_block_after(document[match.start() :], match.group(0))
@@ -53,7 +83,7 @@ def _effect(statement: str) -> str:
 
 def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
 
     assert 'user_name = "AIIAdev"' in body
     assert "identifiers = [data.aws_iam_user.aiia_dev.arn]" in body
@@ -93,7 +123,7 @@ def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied(
 
 def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
 
     for name in (
         "GIT_COMMIT",
@@ -143,7 +173,7 @@ def test_source_publisher_can_read_both_app_inputs_but_only_write_source_zip() -
 
 def test_official_dangerous_override_condition_keys_are_explicit_denies() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
 
     keys = {
         "codebuild:source",
@@ -168,8 +198,18 @@ def test_official_dangerous_override_condition_keys_are_explicit_denies() -> Non
         assert f'"{key}"' in body
     assert '"codebuild:timeoutInMinutes"' not in body
     assert '"codebuild:queuedTimeoutInMinutes"' not in body
-    assert "for_each = local.launcher_denied_override_condition_keys" in policy
-    assert 'test     = "Null"' in policy
+    for key_set in (
+        "launcher_denied_override_condition_keys_manage_a",
+        "launcher_denied_override_condition_keys_manage_b",
+        "launcher_denied_override_condition_keys_guardrails",
+    ):
+        deny = _balanced_block_after(policy, f"for_each = local.{key_set}")
+        assert 'effect    = "Deny"' in deny
+        assert 'actions   = ["codebuild:StartBuild"]' in deny
+        assert "resources = local.launcher_all_project_arns" in deny
+        assert 'test     = "Null"' in deny
+        assert "variable = statement.value" in deny
+        assert 'values   = ["false"]' in deny
     assert '"ssmmessages:*"' in policy
 
 
@@ -336,7 +376,7 @@ def test_every_codebuild_service_trust_pins_source_account_and_project_arn() -> 
 
 def test_release_launcher_accepts_candidate_locator_fields_only_for_active_or_rollback() -> None:
     body = _body()
-    policy = _document("release_launcher")
+    policy = _managed_policy("release_launcher", RELEASE_LAUNCHER_POLICY_DOCUMENTS)
 
     for name in (
         "CANDIDATE_RECEIPT_KEY",
