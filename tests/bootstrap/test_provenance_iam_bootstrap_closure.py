@@ -355,11 +355,8 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     assert dependencies.isdisjoint(existing)
     assert INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS <= targets
     assert (
-        (targets - INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS)
-        | dependencies
-        | existing
-        == EXPECTED_POST_CUT_MANAGED
-    )
+        targets - INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS
+    ) | dependencies | existing == EXPECTED_POST_CUT_MANAGED
     assert "terraform_data" in forbidden_prefixes
 
 

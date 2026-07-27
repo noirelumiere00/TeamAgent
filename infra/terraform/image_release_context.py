@@ -14,8 +14,26 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+CODEBUILD_DIR = Path(__file__).resolve().parents[1] / "codebuild"
+if str(CODEBUILD_DIR) not in sys.path:
+    sys.path.insert(0, str(CODEBUILD_DIR))
+
+from image_deployment_consumers import (  # noqa: E402
+    ConsumerRegistryError,
+    consumer_registry_sha256,
+    load_consumer_registry,
+)
+
 CONTEXT_KIND = "teamagent.image-release-terraform-context"
-CONTEXT_SCHEMA = 2
+CONTEXT_SCHEMA = 3
+CONSUMER_MANIFEST_SCHEMA = 1
+CONSUMER_MANIFEST_VARIABLE = "image_deployment_consumer_manifest"
+RECEIPT_CATALOG_VARIABLE = "image_release_receipt_catalog"
+CONSUMER_RECEIPT_BINDINGS_VARIABLE = "image_release_consumer_receipt_bindings"
+RELEASE_MODE_RECEIPT_REQUIRED = "receipt-required"
+RELEASE_MODE_NO_IMAGE_TRANSITION = "no-image-transition"
+NO_IMAGE_TRANSITION_MAX_INTENT_SECONDS = 60 * 60
+ECR_REGISTRY = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
 EXPECTED_BACKEND = {
     "type": "s3",
     "bucket": "teamagent-tfstate-718959508629",
@@ -50,6 +68,10 @@ ALLOWED_EXISTING_LOG_IMPORTS = {
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
+TASK_DEFINITION_ARN_RE = re.compile(
+    r"arn:aws:ecs:ap-northeast-1:718959508629:"
+    r"task-definition/([a-z0-9][a-z0-9_-]*):([1-9][0-9]*)"
+)
 RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
 RUNTIME_IMAGE_PATTERNS = {
     "mcp_image": re.compile(
@@ -116,6 +138,297 @@ def _sha256(value: Any, *, label: str) -> str:
     return value
 
 
+def _exact_keys(
+    value: Any,
+    expected: set[str],
+    *,
+    label: str,
+) -> Mapping[str, Any]:
+    item = _mapping(value, label=label)
+    if set(item) != expected:
+        raise ContextError(f"{label} schema mismatch")
+    return item
+
+
+def _task_definition_arn(
+    value: Any,
+    *,
+    family: str,
+    label: str,
+    planned_address: str | None = None,
+) -> str:
+    if planned_address is not None and value == planned_address:
+        return planned_address
+    if not isinstance(value, str):
+        raise ContextError(f"{label} must be a task definition ARN")
+    match = TASK_DEFINITION_ARN_RE.fullmatch(value)
+    if match is None or match.group(1) != family:
+        raise ContextError(f"{label} does not match the registry family")
+    return value
+
+
+def _consumer_snapshot(
+    value: Any,
+    *,
+    consumer: Mapping[str, Any],
+    label: str,
+    allow_planned_pointer: bool = False,
+) -> dict[str, Any]:
+    snapshot = _exact_keys(
+        value,
+        {"image", "task_definition_arn", "activation"},
+        label=label,
+    )
+    repository = consumer["release_repository"]
+    image = snapshot["image"]
+    if (
+        not isinstance(image, str)
+        or re.fullmatch(
+            rf"{re.escape(ECR_REGISTRY)}/{re.escape(repository)}"
+            r"@sha256:[0-9a-f]{64}",
+            image,
+        )
+        is None
+    ):
+        raise ContextError(f"{label}.image is not the registry repository digest")
+    task_definition_arn = _task_definition_arn(
+        snapshot["task_definition_arn"],
+        family=consumer["ecs_family"],
+        label=f"{label}.task_definition_arn",
+        planned_address=(
+            consumer["terraform_task_definition_address"]
+            if allow_planned_pointer
+            else None
+        ),
+    )
+    activator = consumer["activator"]
+    activator_type = activator["type"]
+    activation = _mapping(snapshot["activation"], label=f"{label}.activation")
+    if activator_type == "ecs_service":
+        _exact_keys(
+            activation,
+            {"desired_count", "task_definition_arn"},
+            label=f"{label}.activation",
+        )
+        desired_count = activation["desired_count"]
+        if (
+            not isinstance(desired_count, int)
+            or isinstance(desired_count, bool)
+            or desired_count < 0
+        ):
+            raise ContextError(f"{label}.activation.desired_count is invalid")
+        normalized_activation: dict[str, Any] = {
+            "desired_count": desired_count,
+            "task_definition_arn": _task_definition_arn(
+                activation["task_definition_arn"],
+                family=consumer["ecs_family"],
+                label=f"{label}.activation.task_definition_arn",
+                planned_address=(
+                    consumer["terraform_task_definition_address"]
+                    if allow_planned_pointer
+                    else None
+                ),
+            ),
+        }
+    elif activator_type == "eventbridge_rule_ecs_target":
+        _exact_keys(
+            activation,
+            {"state", "task_definition_arn"},
+            label=f"{label}.activation",
+        )
+        state = activation["state"]
+        if state not in {
+            "DISABLED",
+            "ENABLED",
+            "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
+        }:
+            raise ContextError(f"{label}.activation.state is invalid")
+        normalized_activation = {
+            "state": state,
+            "task_definition_arn": _task_definition_arn(
+                activation["task_definition_arn"],
+                family=consumer["ecs_family"],
+                label=f"{label}.activation.task_definition_arn",
+                planned_address=(
+                    consumer["terraform_task_definition_address"]
+                    if allow_planned_pointer
+                    else None
+                ),
+            ),
+        }
+    elif activator_type == "lambda_taskdef_arn_environment":
+        _exact_keys(
+            activation,
+            {"event_source_mapping_enabled", "task_definition_arn"},
+            label=f"{label}.activation",
+        )
+        mapping_enabled = activation["event_source_mapping_enabled"]
+        if not isinstance(mapping_enabled, bool):
+            raise ContextError(
+                f"{label}.activation.event_source_mapping_enabled is invalid"
+            )
+        normalized_activation = {
+            "event_source_mapping_enabled": mapping_enabled,
+            "task_definition_arn": _task_definition_arn(
+                activation["task_definition_arn"],
+                family=consumer["ecs_family"],
+                label=f"{label}.activation.task_definition_arn",
+                planned_address=(
+                    consumer["terraform_task_definition_address"]
+                    if allow_planned_pointer
+                    else None
+                ),
+            ),
+        }
+    else:
+        raise ContextError(f"{label}.activation type is unsupported")
+    if normalized_activation["task_definition_arn"] != task_definition_arn:
+        raise ContextError(f"{label} activation edge points at another task definition")
+    return {
+        "image": image,
+        "task_definition_arn": task_definition_arn,
+        "activation": normalized_activation,
+    }
+
+
+def _activation_execution_state(
+    snapshot: Mapping[str, Any],
+    *,
+    activator_type: str,
+) -> Any:
+    activation = _mapping(snapshot["activation"], label="consumer activation")
+    if activator_type == "ecs_service":
+        return activation["desired_count"]
+    if activator_type == "eventbridge_rule_ecs_target":
+        return activation["state"]
+    return activation["event_source_mapping_enabled"]
+
+
+def derive_consumer_manifest_mode(value: Any) -> str:
+    """Derive the release mode solely from a validated eight-consumer comparison."""
+
+    manifest = _mapping(value, label="image deployment consumer manifest")
+    consumers = manifest.get("consumers")
+    if not isinstance(consumers, list) or len(consumers) != 8:
+        raise ContextError("consumer manifest must contain exactly eight consumers")
+    no_image_transition = True
+    for index, raw_consumer in enumerate(consumers):
+        consumer = _mapping(
+            raw_consumer,
+            label=f"consumer manifest consumers[{index}]",
+        )
+        live = _mapping(consumer.get("live"), label="consumer live snapshot")
+        before = _mapping(consumer.get("before"), label="consumer before snapshot")
+        after = _mapping(consumer.get("after"), label="consumer after snapshot")
+        activator = _mapping(consumer.get("activator"), label="consumer activator")
+        if not (
+            live.get("image") == before.get("image") == after.get("image")
+            and live.get("task_definition_arn")
+            == before.get("task_definition_arn")
+            and _activation_execution_state(
+                live,
+                activator_type=str(activator.get("type")),
+            )
+            == _activation_execution_state(
+                before,
+                activator_type=str(activator.get("type")),
+            )
+            == _activation_execution_state(
+                after,
+                activator_type=str(activator.get("type")),
+            )
+        ):
+            no_image_transition = False
+            break
+    return (
+        RELEASE_MODE_NO_IMAGE_TRANSITION
+        if no_image_transition
+        else RELEASE_MODE_RECEIPT_REQUIRED
+    )
+
+
+def validate_consumer_manifest(value: Any) -> dict[str, Any]:
+    """Validate the complete registry-owned consumer comparison and derive its mode."""
+
+    manifest = _exact_keys(
+        value,
+        {"schema_version", "registry_sha256", "mode", "consumers"},
+        label="image deployment consumer manifest",
+    )
+    if manifest["schema_version"] != CONSUMER_MANIFEST_SCHEMA:
+        raise ContextError("consumer manifest schema version is unsupported")
+    try:
+        registry = load_consumer_registry()
+        expected_registry_sha256 = consumer_registry_sha256()
+    except ConsumerRegistryError as exc:
+        raise ContextError("code-owned consumer registry is invalid") from exc
+    if manifest["registry_sha256"] != expected_registry_sha256:
+        raise ContextError("consumer manifest registry hash does not match code")
+    consumers = manifest["consumers"]
+    registry_consumers = registry["consumers"]
+    if (
+        not isinstance(consumers, list)
+        or len(consumers) != len(registry_consumers)
+        or len(consumers) != 8
+    ):
+        raise ContextError("consumer manifest must contain exactly eight consumers")
+    normalized_consumers: list[dict[str, Any]] = []
+    identity_keys = {
+        "consumer_id",
+        "terraform_task_definition_address",
+        "ecs_family",
+        "container_name",
+        "activator",
+        "release_repository",
+        "receipt",
+    }
+    for index, (raw_consumer, registry_consumer) in enumerate(
+        zip(consumers, registry_consumers, strict=True)
+    ):
+        label = f"consumer manifest consumers[{index}]"
+        consumer = _exact_keys(
+            raw_consumer,
+            identity_keys | {"live", "before", "after"},
+            label=label,
+        )
+        if {key: consumer[key] for key in identity_keys} != {
+            key: registry_consumer[key] for key in identity_keys
+        }:
+            raise ContextError(f"{label} identity does not match the code-owned registry")
+        normalized = {
+            key: json.loads(json.dumps(registry_consumer[key]))
+            for key in identity_keys
+        }
+        normalized["live"] = _consumer_snapshot(
+            consumer["live"],
+            consumer=registry_consumer,
+            label=f"{label}.live",
+        )
+        normalized["before"] = _consumer_snapshot(
+            consumer["before"],
+            consumer=registry_consumer,
+            label=f"{label}.before",
+        )
+        normalized["after"] = _consumer_snapshot(
+            consumer["after"],
+            consumer=registry_consumer,
+            label=f"{label}.after",
+            allow_planned_pointer=True,
+        )
+        normalized_consumers.append(normalized)
+    normalized_manifest = {
+        "schema_version": CONSUMER_MANIFEST_SCHEMA,
+        "registry_sha256": expected_registry_sha256,
+        "mode": manifest["mode"],
+        "consumers": normalized_consumers,
+    }
+    derived_mode = derive_consumer_manifest_mode(normalized_manifest)
+    if manifest["mode"] != derived_mode:
+        raise ContextError("consumer manifest mode does not match the derived comparison")
+    normalized_manifest["mode"] = derived_mode
+    return normalized_manifest
+
+
 def _configuration_addresses(module: Mapping[str, Any], prefix: str = "") -> set[str]:
     result: set[str] = set()
     resources = module.get("resources", [])
@@ -137,6 +450,100 @@ def _configuration_addresses(module: Mapping[str, Any], prefix: str = "") -> set
         child = _mapping(call.get("module"), label=f"Terraform module call {name}.module")
         result.update(_configuration_addresses(child, f"{prefix}module.{name}."))
     return result
+
+
+def _configuration_resources(
+    module: Mapping[str, Any],
+    prefix: str = "",
+) -> dict[str, Mapping[str, Any]]:
+    result: dict[str, Mapping[str, Any]] = {}
+    resources = module.get("resources", [])
+    if not isinstance(resources, list):
+        raise ContextError("Terraform configuration resources are malformed")
+    for raw_resource in resources:
+        resource = _mapping(raw_resource, label="Terraform configuration resource")
+        address = resource.get("address")
+        if not isinstance(address, str) or not address:
+            raise ContextError("Terraform configuration resource address is invalid")
+        full_address = f"{prefix}{address}"
+        if full_address in result:
+            raise ContextError("Terraform configuration resource address is duplicated")
+        result[full_address] = resource
+    module_calls = module.get("module_calls", {})
+    if not isinstance(module_calls, dict):
+        raise ContextError("Terraform configuration module calls are malformed")
+    for name, raw_call in module_calls.items():
+        if not isinstance(name, str) or not name:
+            raise ContextError("Terraform module call name is invalid")
+        call = _mapping(raw_call, label=f"Terraform module call {name}")
+        child = _mapping(call.get("module"), label=f"Terraform module call {name}.module")
+        result.update(_configuration_resources(child, f"{prefix}module.{name}."))
+    return result
+
+
+def _expression_references(value: Any) -> list[str]:
+    references: list[str] = []
+    if isinstance(value, dict):
+        raw_references = value.get("references")
+        if isinstance(raw_references, list):
+            references.extend(
+                reference
+                for reference in raw_references
+                if isinstance(reference, str)
+            )
+        for nested in value.values():
+            references.extend(_expression_references(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            references.extend(_expression_references(nested))
+    return references
+
+
+def _require_planned_pointer_reference(
+    *,
+    configuration_resources: Mapping[str, Mapping[str, Any]],
+    pointer_resource_address: str,
+    task_definition_address: str,
+    activator_type: str,
+    label: str,
+) -> None:
+    configuration_address = _configuration_address(pointer_resource_address)
+    configuration = configuration_resources.get(configuration_address)
+    if configuration is None:
+        raise ContextError(f"{label} pointer configuration is absent")
+    expressions = _mapping(
+        configuration.get("expressions"),
+        label=f"{label} pointer expressions",
+    )
+    expression_name = {
+        "ecs_service": "task_definition",
+        "eventbridge_rule_ecs_target": "ecs_target",
+        "lambda_taskdef_arn_environment": "environment",
+    }[activator_type]
+    pointer_expression = expressions.get(expression_name)
+    if pointer_expression is None:
+        raise ContextError(f"{label} planned pointer expression is absent")
+    references = _expression_references(pointer_expression)
+    task_references = [
+        match.group(0)
+        for reference in references
+        for match in re.finditer(
+            r"aws_ecs_task_definition\.[a-zA-Z0-9_-]+(?:\[[0-9]+\])?",
+            reference,
+        )
+    ]
+    base_task_definition_address = _configuration_address(task_definition_address)
+    if not task_references or any(
+        (
+            reference != task_definition_address
+            if "[" in reference
+            else reference != base_task_definition_address
+        )
+        for reference in task_references
+    ):
+        raise ContextError(
+            f"{label} planned pointer does not reference only its consumer task definition"
+        )
 
 
 def _configuration_address(address: str) -> str:
@@ -277,6 +684,749 @@ def _raw_state_addresses(state: Mapping[str, Any]) -> list[str]:
     return sorted(addresses)
 
 
+def _state_resource_instances(
+    state: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    raw_resources = state.get("resources")
+    if not isinstance(raw_resources, list):
+        raise ContextError("Terraform state resources are malformed")
+    result: dict[str, dict[str, Any]] = {}
+    for index, raw_resource in enumerate(raw_resources):
+        resource = _mapping(
+            raw_resource,
+            label=f"Terraform state resource[{index}]",
+        )
+        if resource.get("mode", "managed") != "managed":
+            continue
+        resource_type = resource.get("type")
+        name = resource.get("name")
+        module = resource.get("module")
+        if (
+            not isinstance(resource_type, str)
+            or not resource_type
+            or not isinstance(name, str)
+            or not name
+            or (module is not None and (not isinstance(module, str) or not module))
+        ):
+            raise ContextError("Terraform state resource identity is invalid")
+        base = f"{resource_type}.{name}"
+        if module is not None:
+            base = f"{module}.{base}"
+        instances = resource.get("instances")
+        if not isinstance(instances, list) or not instances:
+            raise ContextError(f"Terraform state resource has no instances: {base}")
+        for raw_instance in instances:
+            instance = _mapping(
+                raw_instance,
+                label=f"Terraform state resource instance {base}",
+            )
+            index_key = instance.get("index_key")
+            if index_key is None:
+                address = base
+            elif isinstance(index_key, str):
+                address = (
+                    f"{base}["
+                    f"{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}"
+                    "]"
+                )
+            elif isinstance(index_key, int) and not isinstance(index_key, bool):
+                if index_key < 0:
+                    raise ContextError("Terraform state instance index is negative")
+                address = f"{base}[{index_key}]"
+            else:
+                raise ContextError("Terraform state instance index is invalid")
+            if address in result:
+                raise ContextError(f"Terraform state address is duplicated: {address}")
+            result[address] = {
+                "type": resource_type,
+                "attributes": _mapping(
+                    instance.get("attributes"),
+                    label=f"Terraform state resource attributes {address}",
+                ),
+            }
+    return result
+
+
+def _container_binding(
+    attributes: Mapping[str, Any],
+    *,
+    family: str,
+    container_name: str,
+    label: str,
+    planned_address: str | None = None,
+) -> dict[str, str]:
+    if attributes.get("family") != family:
+        raise ContextError(f"{label} family does not match the consumer registry")
+    encoded = attributes.get("container_definitions")
+    if not isinstance(encoded, str):
+        raise ContextError(f"{label} container definitions are unknown")
+    try:
+        containers = _loads(encoded, label=f"{label} container definitions")
+    except ContextError:
+        raise
+    if not isinstance(containers, list):
+        raise ContextError(f"{label} container definitions must be an array")
+    matches = [
+        container
+        for container in containers
+        if isinstance(container, dict) and container.get("name") == container_name
+    ]
+    if len(matches) != 1:
+        raise ContextError(f"{label} named container is missing or ambiguous")
+    image = matches[0].get("image")
+    if not isinstance(image, str):
+        raise ContextError(f"{label} named container image is unknown")
+    arn = attributes.get("arn")
+    if not isinstance(arn, str):
+        arn = attributes.get("id")
+    if not isinstance(arn, str) and planned_address is not None:
+        arn = planned_address
+    return {
+        "image": image,
+        "task_definition_arn": _task_definition_arn(
+            arn,
+            family=family,
+            label=f"{label} ARN",
+            planned_address=planned_address,
+        ),
+    }
+
+
+def _managed_plan_changes(
+    plan: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    raw_changes = plan.get("resource_changes")
+    if not isinstance(raw_changes, list):
+        raise ContextError("Terraform saved plan lacks resource changes")
+    result: dict[str, Mapping[str, Any]] = {}
+    for index, raw_change in enumerate(raw_changes):
+        change = _mapping(raw_change, label=f"Terraform resource change[{index}]")
+        if change.get("mode", "managed") != "managed":
+            continue
+        address = change.get("address")
+        if not isinstance(address, str) or not address:
+            raise ContextError("Terraform managed resource change address is invalid")
+        if address in result:
+            raise ContextError("Terraform saved plan has duplicate managed addresses")
+        result[address] = _mapping(
+            change.get("change"),
+            label=f"Terraform resource change {address}",
+        )
+    return result
+
+
+def _matches_resource_type(address: str, resource_type: str) -> bool:
+    return re.search(
+        rf"(?:^|\.){re.escape(resource_type)}\.[a-zA-Z0-9_-]+(?:\[|$)",
+        address,
+    ) is not None
+
+
+def _identity_matches(value: Any, identity: str) -> bool:
+    return isinstance(value, str) and (
+        value == identity
+        or value.endswith(f":{identity}")
+        or value.endswith(f"/{identity}")
+    )
+
+
+def _find_state_resource(
+    resources: Mapping[str, Mapping[str, Any]],
+    *,
+    resource_type: str,
+    identity_field: str,
+    identity: str,
+    label: str,
+) -> tuple[str, Mapping[str, Any]]:
+    matches = [
+        (address, _mapping(record["attributes"], label=f"{label} attributes"))
+        for address, record in resources.items()
+        if record["type"] == resource_type
+        and _identity_matches(
+            _mapping(record["attributes"], label=f"{label} attributes").get(
+                identity_field
+            ),
+            identity,
+        )
+    ]
+    if len(matches) != 1:
+        raise ContextError(f"{label} is missing or ambiguous in Terraform state")
+    return matches[0]
+
+
+def _find_plan_change(
+    changes: Mapping[str, Mapping[str, Any]],
+    *,
+    resource_type: str,
+    identity_field: str,
+    identity: str,
+    state_address: str,
+    label: str,
+) -> Mapping[str, Any]:
+    matches: list[tuple[str, Mapping[str, Any]]] = []
+    for address, details in changes.items():
+        if not _matches_resource_type(address, resource_type):
+            continue
+        identities: list[Any] = []
+        for phase in ("before", "after"):
+            phase_value = details.get(phase)
+            if isinstance(phase_value, dict):
+                identities.append(phase_value.get(identity_field))
+        if any(_identity_matches(value, identity) for value in identities):
+            matches.append((address, details))
+    if len(matches) != 1 or matches[0][0] != state_address:
+        raise ContextError(f"{label} is missing or remapped in the complete plan")
+    return matches[0][1]
+
+
+def _task_definition_from_environment(
+    value: Any,
+    *,
+    label: str,
+    planned_address: str | None = None,
+) -> str:
+    if planned_address is not None and value in (None, []):
+        return planned_address
+    if not isinstance(value, list) or len(value) != 1:
+        raise ContextError(f"{label} environment is malformed")
+    environment = _mapping(value[0], label=f"{label} environment block")
+    variables = _mapping(
+        environment.get("variables"),
+        label=f"{label} environment variables",
+    )
+    task_definition_arn = variables.get("TASKDEF_ARN")
+    if task_definition_arn is None and planned_address is not None:
+        return planned_address
+    if not isinstance(task_definition_arn, str):
+        raise ContextError(f"{label} TASKDEF_ARN is unknown")
+    return task_definition_arn
+
+
+def _event_target_task_definition(
+    value: Any,
+    *,
+    label: str,
+    planned_address: str | None = None,
+) -> str:
+    if planned_address is not None and value in (None, []):
+        return planned_address
+    if not isinstance(value, list) or len(value) != 1:
+        raise ContextError(f"{label} ECS target is malformed")
+    target = _mapping(value[0], label=f"{label} ECS target")
+    task_definition_arn = target.get("task_definition_arn")
+    if task_definition_arn is None and planned_address is not None:
+        return planned_address
+    if not isinstance(task_definition_arn, str):
+        raise ContextError(f"{label} task definition ARN is unknown")
+    return task_definition_arn
+
+
+def _activation_phase(
+    *,
+    activator_type: str,
+    family: str,
+    primary: Mapping[str, Any],
+    secondary: Mapping[str, Any] | None,
+    label: str,
+    planned_address: str | None = None,
+) -> dict[str, Any]:
+    if activator_type == "ecs_service":
+        desired_count = primary.get("desired_count")
+        task_definition_arn = primary.get("task_definition")
+        if task_definition_arn is None and planned_address is not None:
+            task_definition_arn = planned_address
+        if (
+            not isinstance(desired_count, int)
+            or isinstance(desired_count, bool)
+            or desired_count < 0
+        ):
+            raise ContextError(f"{label} desired count is invalid")
+        return {
+            "desired_count": desired_count,
+            "task_definition_arn": _task_definition_arn(
+                task_definition_arn,
+                family=family,
+                label=f"{label} task definition ARN",
+                planned_address=planned_address,
+            ),
+        }
+    if activator_type == "eventbridge_rule_ecs_target":
+        if secondary is None:
+            raise ContextError(f"{label} EventBridge target is absent")
+        state = primary.get("state")
+        if state not in {
+            "DISABLED",
+            "ENABLED",
+            "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
+        }:
+            raise ContextError(f"{label} rule state is invalid")
+        return {
+            "state": state,
+            "task_definition_arn": _task_definition_arn(
+                _event_target_task_definition(
+                    secondary.get("ecs_target"),
+                    label=label,
+                    planned_address=planned_address,
+                ),
+                family=family,
+                label=f"{label} task definition ARN",
+                planned_address=planned_address,
+            ),
+        }
+    if secondary is None:
+        raise ContextError(f"{label} event source mapping is absent")
+    mapping_enabled = secondary.get("enabled")
+    if not isinstance(mapping_enabled, bool):
+        raise ContextError(f"{label} event source mapping state is invalid")
+    return {
+        "event_source_mapping_enabled": mapping_enabled,
+        "task_definition_arn": _task_definition_arn(
+            _task_definition_from_environment(
+                primary.get("environment"),
+                label=label,
+                planned_address=planned_address,
+            ),
+            family=family,
+            label=f"{label} task definition ARN",
+            planned_address=planned_address,
+        ),
+    }
+
+
+def _consumer_activation_binding(
+    *,
+    consumer: Mapping[str, Any],
+    state_resources: Mapping[str, Mapping[str, Any]],
+    plan_changes: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], str]:
+    consumer_id = str(consumer["consumer_id"])
+    family = str(consumer["ecs_family"])
+    activator = _mapping(consumer["activator"], label=f"{consumer_id} activator")
+    activator_type = str(activator["type"])
+    identity = str(activator["identity"])
+    if activator_type == "ecs_service":
+        primary_type = "aws_ecs_service"
+        primary_field = "name"
+        secondary_type = None
+        secondary_field = None
+    elif activator_type == "eventbridge_rule_ecs_target":
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        secondary_type = "aws_cloudwatch_event_target"
+        secondary_field = "rule"
+    else:
+        primary_type = "aws_lambda_function"
+        primary_field = "function_name"
+        secondary_type = "aws_lambda_event_source_mapping"
+        secondary_field = "function_name"
+    primary_address, primary_live = _find_state_resource(
+        state_resources,
+        resource_type=primary_type,
+        identity_field=primary_field,
+        identity=identity,
+        label=f"{consumer_id} activation resource",
+    )
+    primary_change = _find_plan_change(
+        plan_changes,
+        resource_type=primary_type,
+        identity_field=primary_field,
+        identity=identity,
+        state_address=primary_address,
+        label=f"{consumer_id} activation resource",
+    )
+    secondary_live: Mapping[str, Any] | None = None
+    secondary_change: Mapping[str, Any] | None = None
+    secondary_address: str | None = None
+    if secondary_type is not None and secondary_field is not None:
+        secondary_address, secondary_live = _find_state_resource(
+            state_resources,
+            resource_type=secondary_type,
+            identity_field=secondary_field,
+            identity=identity,
+            label=f"{consumer_id} activation edge",
+        )
+        secondary_change = _find_plan_change(
+            plan_changes,
+            resource_type=secondary_type,
+            identity_field=secondary_field,
+            identity=identity,
+            state_address=secondary_address,
+            label=f"{consumer_id} activation edge",
+        )
+    phases: dict[str, dict[str, Any]] = {
+        "live": _activation_phase(
+            activator_type=activator_type,
+            family=family,
+            primary=primary_live,
+            secondary=secondary_live,
+            label=f"{consumer_id} live activation",
+        )
+    }
+    for phase in ("before", "after"):
+        primary_phase = _mapping(
+            primary_change.get(phase),
+            label=f"{consumer_id} plan {phase} activation",
+        )
+        secondary_phase = (
+            None
+            if secondary_change is None
+            else _mapping(
+                secondary_change.get(phase),
+                label=f"{consumer_id} plan {phase} activation edge",
+            )
+        )
+        phases[phase] = _activation_phase(
+            activator_type=activator_type,
+            family=family,
+            primary=primary_phase,
+            secondary=secondary_phase,
+            label=f"{consumer_id} plan {phase} activation",
+            planned_address=(
+                str(consumer["terraform_task_definition_address"])
+                if phase == "after"
+                else None
+            ),
+        )
+    pointer_resource_address = (
+        primary_address
+        if activator_type in {"ecs_service", "lambda_taskdef_arn_environment"}
+        else secondary_address
+    )
+    if pointer_resource_address is None:
+        raise ContextError(f"{consumer_id} activation pointer resource is absent")
+    return phases, pointer_resource_address
+
+
+def _consumer_state_activation(
+    *,
+    consumer: Mapping[str, Any],
+    state_resources: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    consumer_id = str(consumer["consumer_id"])
+    activator = _mapping(consumer["activator"], label=f"{consumer_id} activator")
+    activator_type = str(activator["type"])
+    identity = str(activator["identity"])
+    if activator_type == "ecs_service":
+        primary_type = "aws_ecs_service"
+        primary_field = "name"
+        secondary_type = None
+        secondary_field = None
+    elif activator_type == "eventbridge_rule_ecs_target":
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        secondary_type = "aws_cloudwatch_event_target"
+        secondary_field = "rule"
+    else:
+        primary_type = "aws_lambda_function"
+        primary_field = "function_name"
+        secondary_type = "aws_lambda_event_source_mapping"
+        secondary_field = "function_name"
+    _, primary = _find_state_resource(
+        state_resources,
+        resource_type=primary_type,
+        identity_field=primary_field,
+        identity=identity,
+        label=f"{consumer_id} activation resource",
+    )
+    secondary: Mapping[str, Any] | None = None
+    if secondary_type is not None and secondary_field is not None:
+        _, secondary = _find_state_resource(
+            state_resources,
+            resource_type=secondary_type,
+            identity_field=secondary_field,
+            identity=identity,
+            label=f"{consumer_id} activation edge",
+        )
+    return _activation_phase(
+        activator_type=activator_type,
+        family=str(consumer["ecs_family"]),
+        primary=primary,
+        secondary=secondary,
+        label=f"{consumer_id} state activation",
+    )
+
+
+def validate_consumer_activation_state(
+    manifest: Any,
+    state: Mapping[str, Any],
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """Match all eight live state activation edges to a validated manifest phase."""
+
+    if phase not in {"live", "after"}:
+        raise ContextError("consumer activation state phase must be live or after")
+    validated_manifest = validate_consumer_manifest(manifest)
+    _state_binding(state)
+    state_resources = _state_resource_instances(state)
+    edges: list[dict[str, Any]] = []
+    for consumer in validated_manifest["consumers"]:
+        consumer_id = str(consumer["consumer_id"])
+        address = str(consumer["terraform_task_definition_address"])
+        state_resource = state_resources.get(address)
+        if state_resource is None or state_resource["type"] != "aws_ecs_task_definition":
+            raise ContextError(
+                f"consumer task definition is absent from state: {consumer_id}"
+            )
+        task_definition = _container_binding(
+            _mapping(
+                state_resource["attributes"],
+                label=f"{consumer_id} state task definition",
+            ),
+            family=str(consumer["ecs_family"]),
+            container_name=str(consumer["container_name"]),
+            label=f"{consumer_id} state task definition",
+        )
+        expected = _mapping(
+            consumer[phase],
+            label=f"{consumer_id} {phase} manifest snapshot",
+        )
+        planned_pointer = expected["task_definition_arn"] == address
+        expected_task_definition_arn = (
+            task_definition["task_definition_arn"]
+            if planned_pointer
+            else expected["task_definition_arn"]
+        )
+        if task_definition != {
+            "image": expected["image"],
+            "task_definition_arn": expected_task_definition_arn,
+        }:
+            raise ContextError(
+                f"{consumer_id} state task definition differs from manifest {phase}"
+            )
+        expected_activation = dict(
+            _mapping(
+                expected["activation"],
+                label=f"{consumer_id} {phase} manifest activation",
+            )
+        )
+        if planned_pointer:
+            expected_activation["task_definition_arn"] = task_definition[
+                "task_definition_arn"
+            ]
+        activation = _consumer_state_activation(
+            consumer=consumer,
+            state_resources=state_resources,
+        )
+        if activation != expected_activation:
+            raise ContextError(
+                f"{consumer_id} state activation edge differs from manifest {phase}"
+            )
+        edges.append(
+            {
+                "consumer_id": consumer_id,
+                "image": task_definition["image"],
+                "task_definition_arn": task_definition["task_definition_arn"],
+                "activation": activation,
+            }
+        )
+    return {
+        "phase": phase,
+        "registry_sha256": validated_manifest["registry_sha256"],
+        "consumer_count": len(edges),
+        "activation_edges_sha256": hashlib.sha256(
+            _canonical_bytes(edges)
+        ).hexdigest(),
+    }
+
+
+def _manifest_plan_binding(
+    *,
+    manifest: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    state_resources = _state_resource_instances(state)
+    plan_changes = _managed_plan_changes(plan)
+    configuration = _mapping(
+        plan.get("configuration"),
+        label="Terraform plan configuration",
+    )
+    configuration_root = _mapping(
+        configuration.get("root_module"),
+        label="Terraform plan configuration root",
+    )
+    configuration_resources = _configuration_resources(configuration_root)
+    comparison: list[dict[str, Any]] = []
+    for raw_consumer in manifest["consumers"]:
+        consumer = _mapping(raw_consumer, label="consumer manifest entry")
+        consumer_id = str(consumer["consumer_id"])
+        address = str(consumer["terraform_task_definition_address"])
+        state_resource = state_resources.get(address)
+        if state_resource is None or state_resource["type"] != "aws_ecs_task_definition":
+            raise ContextError(
+                f"consumer live task definition is absent from state: {consumer_id}"
+            )
+        live = _container_binding(
+            _mapping(
+                state_resource["attributes"],
+                label=f"{consumer_id} live task definition",
+            ),
+            family=str(consumer["ecs_family"]),
+            container_name=str(consumer["container_name"]),
+            label=f"{consumer_id} live task definition",
+        )
+        if live != {
+            "image": consumer["live"]["image"],
+            "task_definition_arn": consumer["live"]["task_definition_arn"],
+        }:
+            raise ContextError(
+                f"{consumer_id} live task definition differs from the manifest"
+            )
+        task_change = plan_changes.get(address)
+        if task_change is None:
+            raise ContextError(
+                f"consumer task definition is absent from the complete plan: {consumer_id}"
+            )
+        before_attributes = _mapping(
+            task_change.get("before"),
+            label=f"{consumer_id} plan before task definition",
+        )
+        after_attributes = _mapping(
+            task_change.get("after"),
+            label=f"{consumer_id} plan after task definition",
+        )
+        actions = task_change.get("actions")
+        if not isinstance(actions, list):
+            raise ContextError(f"{consumer_id} task definition actions are invalid")
+        before = _container_binding(
+            before_attributes,
+            family=str(consumer["ecs_family"]),
+            container_name=str(consumer["container_name"]),
+            label=f"{consumer_id} plan before task definition",
+        )
+        after = _container_binding(
+            after_attributes,
+            family=str(consumer["ecs_family"]),
+            container_name=str(consumer["container_name"]),
+            label=f"{consumer_id} plan after task definition",
+            planned_address=(
+                address
+                if consumer["after"]["task_definition_arn"] == address
+                else None
+            ),
+        )
+        if before != {
+            "image": consumer["before"]["image"],
+            "task_definition_arn": consumer["before"]["task_definition_arn"],
+        }:
+            raise ContextError(
+                f"{consumer_id} plan before task definition differs from the manifest"
+            )
+        if after != {
+            "image": consumer["after"]["image"],
+            "task_definition_arn": consumer["after"]["task_definition_arn"],
+        }:
+            raise ContextError(
+                f"{consumer_id} plan after task definition differs from the manifest"
+            )
+        pointer_changed = (
+            consumer["after"]["task_definition_arn"]
+            != consumer["before"]["task_definition_arn"]
+        )
+        if pointer_changed and (
+            "create" not in actions
+            or any(action not in {"create", "delete"} for action in actions)
+        ):
+            raise ContextError(
+                f"{consumer_id} after pointer is not its scheduled task definition"
+            )
+        activation, pointer_resource_address = _consumer_activation_binding(
+            consumer=consumer,
+            state_resources=state_resources,
+            plan_changes=plan_changes,
+        )
+        for phase in ("live", "before", "after"):
+            if activation[phase] != consumer[phase]["activation"]:
+                raise ContextError(
+                    f"{consumer_id} {phase} activation edge differs from the manifest"
+                )
+        if pointer_changed:
+            if (
+                manifest["mode"] == RELEASE_MODE_NO_IMAGE_TRANSITION
+                and consumer["after"]["image"] != consumer["before"]["image"]
+            ):
+                raise ContextError(
+                    f"{consumer_id} no-image planned task definition changes its image"
+                )
+            _require_planned_pointer_reference(
+                configuration_resources=configuration_resources,
+                pointer_resource_address=pointer_resource_address,
+                task_definition_address=address,
+                activator_type=str(consumer["activator"]["type"]),
+                label=consumer_id,
+            )
+        comparison.append(
+            {
+                "consumer_id": consumer_id,
+                "task_definition_address": address,
+                "actions": actions,
+                "live": live,
+                "before": before,
+                "after": after,
+                "activation": activation,
+            }
+        )
+    return {
+        "consumer_count": len(comparison),
+        "consumer_comparison_sha256": hashlib.sha256(
+            _canonical_bytes(comparison)
+        ).hexdigest(),
+    }
+
+
+def _release_evidence_plan_binding(
+    *,
+    manifest: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> dict[str, str]:
+    receipt_catalog = dict(
+        _mapping(
+            _plan_variable(plan, RECEIPT_CATALOG_VARIABLE),
+            label="Terraform receipt catalog variable",
+        )
+    )
+    consumer_bindings = dict(
+        _mapping(
+            _plan_variable(plan, CONSUMER_RECEIPT_BINDINGS_VARIABLE),
+            label="Terraform consumer receipt bindings variable",
+        )
+    )
+    gate_change = _managed_plan_changes(plan).get(RELEASE_GATE_ADDRESS)
+    if gate_change is None:
+        raise ContextError("Terraform saved plan lacks the release gate change")
+    gate_after = _mapping(
+        gate_change.get("after"),
+        label="Terraform release gate plan after",
+    )
+    gate_input = _mapping(
+        gate_after.get("input"),
+        label="Terraform release gate plan input",
+    )
+    release_channels = dict(
+        _mapping(
+            gate_input.get("release_channels"),
+            label="Terraform release gate channels",
+        )
+    )
+    if manifest["mode"] == RELEASE_MODE_NO_IMAGE_TRANSITION and (
+        receipt_catalog or consumer_bindings or release_channels
+    ):
+        raise ContextError(
+            "no-image-transition requires empty receipt catalog, bindings, and channels"
+        )
+    value = {
+        "receipt_catalog": receipt_catalog,
+        "consumer_receipt_bindings": consumer_bindings,
+        "release_channels": release_channels,
+    }
+    return {
+        "release_evidence_binding_sha256": hashlib.sha256(
+            _canonical_bytes(value)
+        ).hexdigest()
+    }
+
+
 def _state_binding(state: Mapping[str, Any]) -> dict[str, Any]:
     if state.get("version") != 4:
         raise ContextError("Terraform state version is not supported")
@@ -333,6 +1483,9 @@ def build_context(
         raise ContextError("Terraform saved plan is not applyable")
 
     runtime_images = _runtime_image_binding(plan)
+    consumer_manifest = validate_consumer_manifest(
+        _plan_variable(plan, CONSUMER_MANIFEST_VARIABLE)
+    )
     state_binding = _state_binding(state)
     state_addresses = set(state_binding.pop("_addresses"))
     configuration = _mapping(
@@ -427,6 +1580,15 @@ def build_context(
     if len(gate_changes) != 1 or "create" not in gate_changes[0]["actions"]:
         raise ContextError("Terraform saved plan will not run the production release gate")
 
+    consumer_binding = _manifest_plan_binding(
+        manifest=consumer_manifest,
+        plan=plan,
+        state=state,
+    )
+    release_evidence_binding = _release_evidence_plan_binding(
+        manifest=consumer_manifest,
+        plan=plan,
+    )
     transition = _transition_binding(ownership)
     return {
         "schema_version": CONTEXT_SCHEMA,
@@ -434,6 +1596,7 @@ def build_context(
         "backend": _backend_binding(backend_metadata),
         "workspace": workspace,
         "state": state_binding,
+        "consumer_manifest": consumer_manifest,
         "plan": {
             "complete": True,
             "applyable": True,
@@ -445,6 +1608,11 @@ def build_context(
             "runtime_images_sha256": hashlib.sha256(
                 _canonical_bytes(runtime_images)
             ).hexdigest(),
+            "consumer_manifest_sha256": hashlib.sha256(
+                _canonical_bytes(consumer_manifest)
+            ).hexdigest(),
+            **consumer_binding,
+            **release_evidence_binding,
             **transition,
         },
     }
@@ -452,7 +1620,15 @@ def build_context(
 
 def validate_context(value: Any) -> dict[str, Any]:
     context = _mapping(value, label="Terraform image release context")
-    expected_keys = {"schema_version", "kind", "backend", "workspace", "state", "plan"}
+    expected_keys = {
+        "schema_version",
+        "kind",
+        "backend",
+        "workspace",
+        "state",
+        "consumer_manifest",
+        "plan",
+    }
     if set(context) != expected_keys:
         raise ContextError("Terraform image release context schema mismatch")
     if (
@@ -496,6 +1672,10 @@ def validate_context(value: Any) -> dict[str, Any]:
         "managed_change_count",
         "address_ownership_sha256",
         "runtime_images_sha256",
+        "consumer_manifest_sha256",
+        "consumer_count",
+        "consumer_comparison_sha256",
+        "release_evidence_binding_sha256",
         "delete_change_count",
         "replace_change_count",
         "transition_sha256",
@@ -515,8 +1695,14 @@ def validate_context(value: Any) -> dict[str, Any]:
         or plan["replace_change_count"] < 0
         or plan["delete_change_count"] + plan["replace_change_count"]
         > plan["managed_change_count"]
+        or plan["consumer_count"] != 8
     ):
         raise ContextError("Terraform context plan markers are invalid")
+    consumer_manifest = validate_consumer_manifest(context["consumer_manifest"])
+    if hashlib.sha256(_canonical_bytes(consumer_manifest)).hexdigest() != plan[
+        "consumer_manifest_sha256"
+    ]:
+        raise ContextError("Terraform context consumer manifest hash mismatch")
     _sha256(
         plan["address_ownership_sha256"],
         label="Terraform context address ownership hash",
@@ -524,6 +1710,18 @@ def validate_context(value: Any) -> dict[str, Any]:
     _sha256(
         plan["runtime_images_sha256"],
         label="Terraform context runtime image hash",
+    )
+    _sha256(
+        plan["consumer_manifest_sha256"],
+        label="Terraform context consumer manifest hash",
+    )
+    _sha256(
+        plan["consumer_comparison_sha256"],
+        label="Terraform context consumer comparison hash",
+    )
+    _sha256(
+        plan["release_evidence_binding_sha256"],
+        label="Terraform context release evidence binding hash",
     )
     _sha256(
         plan["transition_sha256"],
@@ -585,6 +1783,14 @@ def _parser() -> argparse.ArgumentParser:
     capture_command.add_argument("--output", type=Path, required=True)
     validate_command = commands.add_parser("validate")
     validate_command.add_argument("--context", type=Path, required=True)
+    activation_command = commands.add_parser("validate-activation-state")
+    activation_command.add_argument("--manifest", type=Path, required=True)
+    activation_command.add_argument("--state", type=Path, required=True)
+    activation_command.add_argument(
+        "--phase",
+        choices=("live", "after"),
+        required=True,
+    )
     hash_command = commands.add_parser("sha256")
     hash_command.add_argument("--context", type=Path, required=True)
     return parser
@@ -598,6 +1804,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output.write_bytes(_canonical_bytes(value))
         elif args.command == "validate":
             validate_context(_load(args.context, label="Terraform context"))
+        elif args.command == "validate-activation-state":
+            result = validate_consumer_activation_state(
+                _load(args.manifest, label="consumer manifest"),
+                _mapping(
+                    _load(args.state, label="Terraform state"),
+                    label="Terraform state",
+                ),
+                phase=args.phase,
+            )
+            sys.stdout.buffer.write(_canonical_bytes(result))
         else:
             print(context_sha256(_load(args.context, label="Terraform context")))
     except ContextError as exc:

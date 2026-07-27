@@ -142,9 +142,7 @@ _FAMILY_EXPRESSIONS = {
     '"${var.project_name}-${var.environment}-openclaw"': "teamagent-dev-openclaw",
     '"${var.project_name}-${var.environment}-canary"': "teamagent-dev-canary",
     '"${var.project_name}-${var.environment}-ingest"': "teamagent-dev-ingest",
-    '"${var.project_name}-${var.environment}-morning-digest"': (
-        "teamagent-dev-morning-digest"
-    ),
+    '"${var.project_name}-${var.environment}-morning-digest"': ("teamagent-dev-morning-digest"),
     '"${local.xr_name}-worker"': "teamagent-dev-x-buzz-worker",
     "local.tk_name": "teamagent-dev-tiktok-acquire",
 }
@@ -220,10 +218,7 @@ def _terraform_task_definitions() -> dict[str, str]:
 
 def _reverse_key_order(value: Any) -> Any:
     if type(value) is dict:
-        return {
-            key: _reverse_key_order(value[key])
-            for key in reversed(list(value))
-        }
+        return {key: _reverse_key_order(value[key]) for key in reversed(list(value))}
     if type(value) is list:
         return [_reverse_key_order(item) for item in value]
     return value
@@ -255,9 +250,7 @@ def test_registry_is_the_exact_eight_consumer_contract() -> None:
     assert observed == EXPECTED_CONSUMERS
     # No consumer is provisional: x_buzz was the last one, and its live task
     # definition was read on 2026-07-27 (container "worker" on teamagent-mcp).
-    assert not {
-        entry["consumer_id"] for entry in REGISTRY["consumers"] if entry["provisional"]
-    }
+    assert not {entry["consumer_id"] for entry in REGISTRY["consumers"] if entry["provisional"]}
     assert CONSUMERS.validate_consumer_registry(REGISTRY) == REGISTRY
 
 
@@ -272,9 +265,7 @@ def test_registry_rejects_unknown_missing_and_duplicate_json_keys() -> None:
     with pytest.raises(CONSUMERS.ConsumerRegistryError, match="keys must be exact"):
         CONSUMERS.validate_consumer_registry(missing)
 
-    raw_duplicate = (
-        b'{"schema_version":1,"schema_version":1,"consumers":[]}'
-    )
+    raw_duplicate = b'{"schema_version":1,"schema_version":1,"consumers":[]}'
     with pytest.raises(CONSUMERS.ConsumerRegistryError, match="duplicate JSON key"):
         CONSUMERS.parse_consumer_registry(raw_duplicate)
 
@@ -309,8 +300,7 @@ def test_consumer_registry_sha256_is_canonical_and_key_order_independent() -> No
 def test_registry_closes_over_every_terraform_ecs_task_definition() -> None:
     task_definitions = _terraform_task_definitions()
     registry_by_address = {
-        entry["terraform_task_definition_address"]: entry
-        for entry in REGISTRY["consumers"]
+        entry["terraform_task_definition_address"]: entry for entry in REGISTRY["consumers"]
     }
 
     assert set(registry_by_address) == set(task_definitions)

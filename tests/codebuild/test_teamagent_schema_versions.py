@@ -94,19 +94,17 @@ def test_deployment_intent_schema_uses_the_authority_without_a_literal() -> None
     source = (CODEBUILD / "release_evidence.py").read_text(encoding="utf-8")
 
     assert (
-        evidence.DEPLOYMENT_INTENT_SCHEMA
-        == VERSIONS.SCHEMA_VERSIONS.image_deployment_intent
-        == 1
+        evidence.DEPLOYMENT_INTENT_SCHEMA == VERSIONS.SCHEMA_VERSIONS.image_deployment_intent == 1
     )
+    assert "DEPLOYMENT_INTENT_SCHEMA = SCHEMA_VERSIONS.image_deployment_intent" in source
     assert (
-        "DEPLOYMENT_INTENT_SCHEMA = SCHEMA_VERSIONS.image_deployment_intent"
-        in source
+        re.search(
+            r"^DEPLOYMENT_INTENT_SCHEMA\s*=\s*\d+\s*$",
+            source,
+            re.MULTILINE,
+        )
+        is None
     )
-    assert re.search(
-        r"^DEPLOYMENT_INTENT_SCHEMA\s*=\s*\d+\s*$",
-        source,
-        re.MULTILINE,
-    ) is None
 
 
 @pytest.mark.parametrize(

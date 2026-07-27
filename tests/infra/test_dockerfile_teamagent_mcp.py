@@ -69,8 +69,7 @@ def test_core_runtime_receipt_is_verified_in_builder_and_bound_in_final() -> Non
         assert not re.search(rf"^ARG {name}=", TEXT, re.MULTILINE)
 
     assert (
-        "COPY infra/codebuild/teamagent_runtime_contract.json "
-        "/tmp/teamagent_runtime_contract.json"
+        "COPY infra/codebuild/teamagent_runtime_contract.json /tmp/teamagent_runtime_contract.json"
     ) in builder
     for proof in (
         "pathlib.Path('/tmp/teamagent_runtime_contract.json').read_bytes()",

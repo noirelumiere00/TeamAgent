@@ -77,13 +77,11 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
 
 def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
     assert f"CHROMIUM_PATH={CHROMIUM_PATH}" in TEXT
-    assert (
-        f'os.environ.get("CHROMIUM_PATH", "{CHROMIUM_PATH}")'
-        in RENDER_CHILD.read_text(encoding="utf-8")
+    assert f'os.environ.get("CHROMIUM_PATH", "{CHROMIUM_PATH}")' in RENDER_CHILD.read_text(
+        encoding="utf-8"
     )
-    assert (
-        f'process.env.CHROMIUM_PATH || "{CHROMIUM_PATH}"'
-        in SMOKE_MEDIA_NODE.read_text(encoding="utf-8")
+    assert f'process.env.CHROMIUM_PATH || "{CHROMIUM_PATH}"' in SMOKE_MEDIA_NODE.read_text(
+        encoding="utf-8"
     )
     for scraper in (SCRAPER, RAKKO_SCRAPER):
         scraper_text = scraper.read_text(encoding="utf-8")

@@ -62,9 +62,7 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     assert "assert-release-ready" not in body
     assert "assert-approved-release" in body
     assert '--expected-commit "$REMOTE_COMMIT"' in body
-    assert body.index("assert-contract-ready") < body.index(
-        "aws sts get-caller-identity"
-    )
+    assert body.index("assert-contract-ready") < body.index("aws sts get-caller-identity")
     assert body.index("assert-approved-release") < body.index(
         'start_build "$SOURCE_PUBLISHER_PROJECT"'
     )

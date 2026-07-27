@@ -2632,9 +2632,9 @@ def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -
     # the next assertions pin.
     assert terraform.count('variable = "sts:SourceIdentity"') >= 3
     release_trust = terraform[
-        terraform.index('data "aws_iam_policy_document" "release_launcher_assume"') : terraform.index(
-            'resource "aws_iam_role" "release_launcher"'
-        )
+        terraform.index(
+            'data "aws_iam_policy_document" "release_launcher_assume"'
+        ) : terraform.index('resource "aws_iam_role" "release_launcher"')
     ]
     assert "identifiers = [data.aws_iam_user.aiia_dev.arn]" in release_trust
     assert 'variable = "aws:MultiFactorAuthPresent"' in release_trust
@@ -2667,11 +2667,7 @@ def test_builds_gate_contract_before_aws_and_connection_before_writes(
     launcher: Path,
 ) -> None:
     body = launcher.read_text(encoding="utf-8")
-    ready_token = (
-        "assert-contract-ready"
-        if launcher == BUILD_TEAMAGENT
-        else "assert-release-ready"
-    )
+    ready_token = "assert-contract-ready" if launcher == BUILD_TEAMAGENT else "assert-release-ready"
     ready = body.index(ready_token)
     identity = body.index("aws sts get-caller-identity")
     connection = body.index("assert_source_connection_available")

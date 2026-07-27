@@ -1389,23 +1389,18 @@ def test_teamagent_codebuild_contract_wiring_follows_checked_in_bytes() -> None:
     attestor_template = (
         PROJECT_ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml"
     ).read_text(encoding="utf-8")
-    runtime_contract = (
-        PROJECT_ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json"
-    )
+    runtime_contract = PROJECT_ROOT / "infra" / "codebuild" / "teamagent_runtime_contract.json"
     release_contract = (
-        PROJECT_ROOT
-        / "infra"
-        / "codebuild"
-        / "teamagent_core_media_release_contract.json"
+        PROJECT_ROOT / "infra" / "codebuild" / "teamagent_core_media_release_contract.json"
     )
 
     assert re.search(
-        r'(?m)^\s*runtime_contract_sha256\s*=\s*filesha256\('
+        r"(?m)^\s*runtime_contract_sha256\s*=\s*filesha256\("
         r'"\${path\.module}/\.\./codebuild/teamagent_runtime_contract\.json"\)$',
         body,
     )
     assert re.search(
-        r'(?m)^\s*mcp_release_contract_path\s*=\s*'
+        r"(?m)^\s*mcp_release_contract_path\s*=\s*"
         r'"\${path\.module}/\.\./codebuild/'
         r'teamagent_core_media_release_contract\.json"$',
         body,

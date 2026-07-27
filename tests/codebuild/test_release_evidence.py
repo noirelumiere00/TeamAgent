@@ -18,12 +18,14 @@ MODULE_PATH = ROOT / "infra" / "codebuild" / "release_evidence.py"
 AUTHORIZE_LAUNCHER = ROOT / "infra" / "deploy" / "authorize_image_release.sh"
 CODEBUILD = MODULE_PATH.parent
 
+# release_evidence resolves the registry at call time via __import__, so the
+# directory has to stay importable even though the tests load it explicitly.
 if str(CODEBUILD) not in sys.path:
     sys.path.insert(0, str(CODEBUILD))
 
 
-def _load_module() -> Any:
-    spec = importlib.util.spec_from_file_location("release_evidence_under_test", MODULE_PATH)
+def _load_module(name: str, path: Path) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -31,7 +33,10 @@ def _load_module() -> Any:
     return module
 
 
-EVIDENCE = _load_module()
+# Registered under its real name so the module under test and these tests share
+# one registry object rather than two copies that could drift apart.
+CONSUMERS = _load_module("image_deployment_consumers", CODEBUILD / "image_deployment_consumers.py")
+EVIDENCE = _load_module("release_evidence_under_test", MODULE_PATH)
 COMMIT = "1" * 40
 CONTRACT_SHA256 = "6" * 64
 BUILD_CONTEXT_SHA256 = "7" * 64
@@ -309,6 +314,136 @@ APPLICATION_BINDING = hashlib.sha256(
         }
     )
 ).hexdigest()
+
+
+def _consumer_snapshot(
+    image: str,
+    execution: int | str | bool,
+    *,
+    activator_type: str,
+    task_definition_arn: str,
+) -> dict[str, Any]:
+    """Shape one live/before/after row the way its activator reports execution.
+
+    Kept out of the per-consumer loop so the activator never leaks in from a
+    later iteration -- a closure here would make every consumer describe the
+    last one, and the manifest comparison would still look green.
+    """
+    if activator_type == "ecs_service":
+        activation = {
+            "desired_count": execution,
+            "task_definition_arn": task_definition_arn,
+        }
+    elif activator_type == "eventbridge_rule_ecs_target":
+        activation = {
+            "state": execution,
+            "task_definition_arn": task_definition_arn,
+        }
+    else:
+        activation = {
+            "event_source_mapping_enabled": execution,
+            "task_definition_arn": task_definition_arn,
+        }
+    return {
+        "image": image,
+        "task_definition_arn": task_definition_arn,
+        "activation": activation,
+    }
+
+
+def _consumer_manifest(
+    *,
+    image_changes: Mapping[str, tuple[str, str]] | None = None,
+    activation_changes: Mapping[str, tuple[int | str | bool, int | str | bool]] | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    image_changes = image_changes or {}
+    activation_changes = activation_changes or {}
+    rows: list[dict[str, Any]] = []
+    for consumer in CONSUMERS.load_consumer_registry()["consumers"]:
+        consumer_id = consumer["consumer_id"]
+        repository = consumer["release_repository"]
+        default_digest = {
+            "teamagent-mcp": CORE_DIGEST,
+            "teamagent-openclaw": _digest("openclaw-image"),
+            "teamagent-media-worker": MEDIA_DIGEST,
+        }[repository]
+        default_image = f"{EVIDENCE.REGISTRY}/{repository}@{default_digest}"
+        before_image, after_image = image_changes.get(
+            consumer_id,
+            (default_image, default_image),
+        )
+        activator_type = consumer["activator"]["type"]
+        default_execution: int | str | bool
+        if activator_type == "ecs_service":
+            default_execution = 1
+        elif activator_type == "eventbridge_rule_ecs_target":
+            default_execution = "ENABLED" if consumer_id == "morning_digest" else "DISABLED"
+        else:
+            default_execution = True
+        before_execution, after_execution = activation_changes.get(
+            consumer_id,
+            (default_execution, default_execution),
+        )
+        task_definition_arn = (
+            f"arn:aws:ecs:{EVIDENCE.REGION}:{EVIDENCE.ACCOUNT_ID}:"
+            f"task-definition/{consumer['ecs_family']}:1"
+        )
+
+        rows.append(
+            {
+                "consumer_id": consumer_id,
+                "terraform_task_definition_address": consumer["terraform_task_definition_address"],
+                "ecs_family": consumer["ecs_family"],
+                "container_name": consumer["container_name"],
+                "activator": copy.deepcopy(consumer["activator"]),
+                "release_repository": repository,
+                "receipt": copy.deepcopy(consumer["receipt"]),
+                "live": _consumer_snapshot(
+                    before_image,
+                    before_execution,
+                    activator_type=activator_type,
+                    task_definition_arn=task_definition_arn,
+                ),
+                "before": _consumer_snapshot(
+                    before_image,
+                    before_execution,
+                    activator_type=activator_type,
+                    task_definition_arn=task_definition_arn,
+                ),
+                "after": _consumer_snapshot(
+                    after_image,
+                    after_execution,
+                    activator_type=activator_type,
+                    task_definition_arn=task_definition_arn,
+                ),
+            }
+        )
+    derived_mode = (
+        "receipt-required" if image_changes or activation_changes else "no-image-transition"
+    )
+    return {
+        "schema_version": 1,
+        "registry_sha256": CONSUMERS.consumer_registry_sha256(),
+        "mode": mode or derived_mode,
+        "consumers": rows,
+    }
+
+
+def _receipt_locator(
+    claim_id: str,
+    *,
+    pipeline: str = "mcp",
+    version_suffix: str = "1",
+) -> dict[str, str]:
+    key = f"release-receipts/{pipeline}/{COMMIT}/{claim_id}.json"
+    return {
+        "bucket": EVIDENCE.EVIDENCE_BUCKET,
+        "key": key,
+        "version_id": f"receipt-version-{version_suffix}",
+        "signature_key": f"{key}.sig",
+        "signature_version_id": f"signature-version-{version_suffix}",
+    }
 
 
 def _signature(subject_digest: str, marker: str) -> dict[str, Any]:
@@ -694,9 +829,7 @@ def test_mcp_receipt_v3_requires_approval_while_non_mcp_v2_remains_legacy() -> N
 
 def test_mcp_receipt_rejects_image_approval_label_drift() -> None:
     receipt = _receipt()
-    receipt["subjects"][0]["labels"][
-        "io.teamagent.build.release-approval-sha256"
-    ] = "f" * 64
+    receipt["subjects"][0]["labels"]["io.teamagent.build.release-approval-sha256"] = "f" * 64
 
     with pytest.raises(EVIDENCE.EvidenceError, match="approval label"):
         EVIDENCE.validate_release_receipt(
@@ -1248,7 +1381,7 @@ def test_deploy_accepts_only_signed_active_or_rollback_digest_reference() -> Non
     image = f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}"
     EVIDENCE.validate_deploy_reference(
         active,
-        pipeline="mcp",
+        consumer_id="mcp",
         image=image,
         contract_sha256=CONTRACT_SHA256,
         now=NOW,
@@ -1256,7 +1389,7 @@ def test_deploy_accepts_only_signed_active_or_rollback_digest_reference() -> Non
     with pytest.raises(EVIDENCE.EvidenceError, match="channel"):
         EVIDENCE.validate_deploy_reference(
             _receipt(),
-            pipeline="mcp",
+            consumer_id="mcp",
             image=image,
             contract_sha256=CONTRACT_SHA256,
             now=NOW,
@@ -1264,8 +1397,21 @@ def test_deploy_accepts_only_signed_active_or_rollback_digest_reference() -> Non
     with pytest.raises(EVIDENCE.EvidenceError, match="does not match"):
         EVIDENCE.validate_deploy_reference(
             active,
-            pipeline="mcp",
+            consumer_id="mcp",
             image=image.replace(DIGEST, "sha256:" + "f" * 64),
+            contract_sha256=CONTRACT_SHA256,
+            now=NOW,
+        )
+
+
+def test_deploy_reference_requires_the_registry_expected_subject() -> None:
+    receipt = _receipt(channel="active")
+    other_receipt_subject_uri = f"{EVIDENCE.REGISTRY}/teamagent-media-worker@{MEDIA_DIGEST}"
+    with pytest.raises(EVIDENCE.EvidenceError, match="code-owned registry"):
+        EVIDENCE.validate_deploy_reference(
+            receipt,
+            consumer_id="mcp",
+            image=other_receipt_subject_uri,
             contract_sha256=CONTRACT_SHA256,
             now=NOW,
         )
@@ -1307,6 +1453,8 @@ def _terraform_query(
     promoted: bool = True,
     exact_signatures: bool = True,
     lifecycle_policy_present: bool = False,
+    consumer_manifest: Mapping[str, Any] | None = None,
+    consumer_id: str = "mcp",
 ) -> dict[str, str]:
     receipt_bytes = EVIDENCE.canonical_bytes(receipt)
     receipt_sha256 = hashlib.sha256(receipt_bytes).hexdigest()
@@ -1431,16 +1579,26 @@ def _terraform_query(
     selected_image = image or (
         f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}"
     )
+    manifest = (
+        dict(consumer_manifest)
+        if consumer_manifest is not None
+        else (
+            _consumer_manifest(
+                image_changes={
+                    "mcp": (
+                        f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('previous-core-image')}",
+                        selected_image,
+                    )
+                }
+            )
+        )
+    )
     return EVIDENCE._terraform_gate(
         {
-            "images_json": json.dumps({"mcp": selected_image, "openclaw": "", "tiktok": ""}),
-            "mcp_media_image": (
-                "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                f"teamagent-media-worker@{MEDIA_DIGEST}"
-            ),
-            "evidence_json": json.dumps(
+            "consumer_manifest_json": json.dumps(manifest),
+            "receipt_catalog_json": json.dumps(
                 {
-                    "mcp": {
+                    receipt_sha256: {
                         "bucket": "teamagent-dev-image-release-evidence",
                         "key": key,
                         "version_id": receipt_version,
@@ -1449,14 +1607,14 @@ def _terraform_query(
                     }
                 }
             ),
+            "consumer_receipt_bindings_json": json.dumps({consumer_id: receipt_sha256}),
             "contracts_json": json.dumps(
                 {
                     "mcp": CONTRACT_SHA256,
                     "openclaw": "a" * 64,
-                    "tiktok": "b" * 64,
                 }
             ),
-            "contract_ready_json": json.dumps({"mcp": True, "openclaw": False, "tiktok": False}),
+            "contract_ready_json": json.dumps({"mcp": True, "openclaw": False}),
             "application_json": json.dumps({"mcp": APPLICATION}),
             "shared_generation_ledger_json": json.dumps({}),
             "signing_key_arn": KEY_ARN,
@@ -1495,6 +1653,24 @@ def test_terraform_gate_verifies_exact_immutable_signed_active_digest(
     assert json.loads(result["release_channels_json"]) == {"mcp": "active"}
     assert len(result["deployment_context_sha256"]) == 64
     assert len(result["receipt_claims_sha256"]) == 64
+
+
+def test_terraform_gate_requires_active_receipt_when_execution_increases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt(channel="rollback")
+    now = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    receipt["issued_at"] = (now - dt.timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    receipt["expires_at"] = (now + dt.timedelta(minutes=25)).isoformat().replace("+00:00", "Z")
+    manifest = _consumer_manifest(activation_changes={"canary": ("DISABLED", "ENABLED")})
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="fresh active receipt"):
+        _terraform_query(
+            receipt,
+            monkeypatch,
+            consumer_manifest=manifest,
+            consumer_id="canary",
+        )
 
 
 def test_terraform_gate_rejects_receipt_before_release_promotion_completes(
@@ -1584,12 +1760,24 @@ def test_terraform_gate_rejects_non_receipted_release_signature_referrers(
     [
         (None, False, COMMIT, None, "KMS signature is invalid"),
         (None, True, "f" * 40, None, "commit does not match"),
+        # A tag never reaches the receipt comparison any more: the consumer
+        # manifest only accepts digest URIs, so it is refused one layer earlier.
         (
             None,
             True,
             COMMIT,
             ("718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp:latest"),
-            "does not match signed release evidence",
+            "consumer manifest is invalid",
+        ),
+        # Keep the receipt comparison itself exercised through the gate: a
+        # well-formed digest in the right repository that the signed receipt
+        # never covers must still be refused.
+        (
+            None,
+            True,
+            COMMIT,
+            ("718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:" + "b" * 64),
+            "does not match its registry-fixed receipt subject",
         ),
         ("stale", True, COMMIT, None, "stale"),
     ],
@@ -1650,26 +1838,62 @@ def test_terraform_gate_rejects_unsigned_wrong_commit_tag_and_old_receipt(
 
 
 def _saved_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
-    images = {
-        "mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}"),
-        "openclaw": "",
-        "tiktok": "",
-    }
+    claim_id = "a" * 64
+    manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('previous-core')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{DIGEST}",
+            )
+        }
+    )
     return {
-        "images_json": json.dumps(images, sort_keys=True, separators=(",", ":")),
-        "evidence_json": "{}",
-        "contracts_json": "{}",
-        "contract_ready_json": "{}",
+        "consumer_manifest_json": json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "receipt_catalog_json": json.dumps(
+            {claim_id: _receipt_locator(claim_id)},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "consumer_receipt_bindings_json": json.dumps(
+            {"mcp": claim_id},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "contracts_json": json.dumps(
+            {"mcp": CONTRACT_SHA256, "openclaw": "a" * 64},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "contract_ready_json": json.dumps(
+            {"mcp": True, "openclaw": False},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
         "application_json": json.dumps(
             {"mcp": APPLICATION},
             sort_keys=True,
             separators=(",", ":"),
         ),
         "shared_generation_ledger_json": "{}",
-        "mcp_media_image": (
-            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-            f"teamagent-media-worker@{MEDIA_DIGEST}"
-        ),
+        "signing_key_arn": KEY_ARN,
+        "encryption_key_arn": KEY_ARN,
+        "deployment_intent_id": intent_id,
+    }
+
+
+def _no_image_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
+    return {
+        "consumer_manifest_json": json.dumps(_consumer_manifest()),
+        "receipt_catalog_json": "{}",
+        "consumer_receipt_bindings_json": "{}",
+        "contracts_json": json.dumps({"mcp": CONTRACT_SHA256, "openclaw": "a" * 64}),
+        "contract_ready_json": json.dumps({"mcp": False, "openclaw": False}),
+        "application_json": "{}",
+        "shared_generation_ledger_json": "{}",
         "signing_key_arn": KEY_ARN,
         "encryption_key_arn": KEY_ARN,
         "deployment_intent_id": intent_id,
@@ -1683,6 +1907,21 @@ DEFAULT_GATE_QUERY_JSON = json.dumps(
     sort_keys=True,
     separators=(",", ":"),
 )
+DEFAULT_CONSUMER_MANIFEST = json.loads(DEFAULT_GATE_QUERY["consumer_manifest_json"])
+DEFAULT_RECEIPT_CATALOG = json.loads(DEFAULT_GATE_QUERY["receipt_catalog_json"])
+DEFAULT_CONSUMER_RECEIPT_BINDINGS = json.loads(DEFAULT_GATE_QUERY["consumer_receipt_bindings_json"])
+DEFAULT_CONSUMER_MANIFEST_SHA256 = hashlib.sha256(
+    EVIDENCE.canonical_bytes(DEFAULT_CONSUMER_MANIFEST)
+).hexdigest()
+DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256 = hashlib.sha256(
+    EVIDENCE.canonical_bytes(
+        {
+            "receipt_catalog": DEFAULT_RECEIPT_CATALOG,
+            "consumer_receipt_bindings": DEFAULT_CONSUMER_RECEIPT_BINDINGS,
+            "release_channels": {"mcp": "active"},
+        }
+    )
+).hexdigest()
 RECEIPT_AUTHORIZATION_EXPIRES_AT = str(int((NOW + dt.timedelta(minutes=25)).timestamp()))
 
 
@@ -1698,6 +1937,9 @@ def _gate_metadata_fields(
             separators=(",", ":"),
         ),
         "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
+        "deployment_mode": "receipt-required",
+        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
     }
 
 
@@ -1708,6 +1950,10 @@ def _plan_json(
     claims_sha256: str = "b" * 64,
     actions: list[str] | None = None,
 ) -> dict[str, Any]:
+    query = _saved_gate_query(intent_id=intent_id)
+    consumer_manifest = json.loads(query["consumer_manifest_json"])
+    receipt_catalog = json.loads(query["receipt_catalog_json"])
+    consumer_receipt_bindings = json.loads(query["consumer_receipt_bindings_json"])
     return {
         "complete": True,
         "applyable": True,
@@ -1725,28 +1971,20 @@ def _plan_json(
                                 "deployment_intent_id": intent_id,
                                 "deployment_context_sha256": context_sha256,
                                 "receipt_claims_sha256": claims_sha256,
-                                "requested_images": {
-                                    "mcp": (
-                                        "718959508629.dkr.ecr.ap-northeast-1."
-                                        f"amazonaws.com/teamagent-mcp@{DIGEST}"
-                                    ),
-                                    "openclaw": "",
-                                    "tiktok": "",
-                                },
-                                "requested_media_image": (
-                                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                                    f"teamagent-media-worker@{MEDIA_DIGEST}"
-                                ),
+                                "consumer_manifest": consumer_manifest,
+                                "receipt_catalog": receipt_catalog,
+                                "consumer_receipt_bindings": (consumer_receipt_bindings),
                                 "release_channels": {"mcp": "active"},
                                 "application_provenance": {
                                     "mcp": APPLICATION,
                                 },
                                 "shared_generation_ledger": {},
                                 "hmac_release_bindings": {},
-                                "deployment_gate_query": _saved_gate_query(intent_id=intent_id),
+                                "deployment_gate_query": query,
                                 "receipt_authorization_expires_at": (
                                     RECEIPT_AUTHORIZATION_EXPIRES_AT
                                 ),
+                                "deployment_mode": "receipt-required",
                             }
                         },
                     }
@@ -1786,6 +2024,9 @@ def test_saved_plan_metadata_binds_intent_context_claims_and_plan_hash(
         "gate_query_sha256": DEFAULT_GATE_QUERY_SHA256,
         "gate_query_json": DEFAULT_GATE_QUERY_JSON,
         "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
+        "deployment_mode": "receipt-required",
+        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
     }
 
     allowed_import = _plan_json()
@@ -1949,6 +2190,11 @@ def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
     gate_input = media_rollforward["planned_values"]["root_module"]["resources"][0]["values"][
         "input"
     ]
+    tiktok_image = next(
+        consumer["after"]["image"]
+        for consumer in gate_input["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "tiktok_acquire"
+    )
     media_rollforward["resource_changes"].append(
         {
             "address": "aws_ecs_task_definition.tiktok_acquire[0]",
@@ -1960,7 +2206,7 @@ def test_saved_plan_binds_generic_media_task_replacement_to_mcp_media_receipt(
                         [
                             {
                                 "name": "acquire",
-                                "image": gate_input["requested_media_image"],
+                                "image": tiktok_image,
                             }
                         ]
                     )
@@ -1993,15 +2239,12 @@ def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
     plan.write_bytes(b"opaque saved terraform plan")
     image_empty = _plan_json()
     gate_input = image_empty["planned_values"]["root_module"]["resources"][0]["values"]["input"]
-    gate_input["requested_images"] = {
-        "mcp": "",
-        "openclaw": (
-            f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@{DIGEST}"
-        ),
-        "tiktok": "",
-    }
-    gate_input["requested_media_image"] = ""
-    gate_input["release_channels"] = {"openclaw": "rollback"}
+    mcp_consumer = next(
+        consumer
+        for consumer in gate_input["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "mcp"
+    )
+    mcp_consumer["after"]["image"] = ""
     image_empty["resource_changes"].append(
         {
             "address": "aws_ecs_service.mcp[0]",
@@ -2009,13 +2252,12 @@ def test_saved_plan_rejects_image_empty_or_unscoped_destructive_state(
             "change": {"actions": ["delete"]},
         }
     )
-    gate_input["deployment_gate_query"]["images_json"] = json.dumps(
-        gate_input["requested_images"],
+    gate_input["deployment_gate_query"]["consumer_manifest_json"] = json.dumps(
+        gate_input["consumer_manifest"],
         sort_keys=True,
         separators=(",", ":"),
     )
-    gate_input["deployment_gate_query"]["mcp_media_image"] = ""
-    with pytest.raises(EVIDENCE.EvidenceError, match="image-empty"):
+    with pytest.raises(EVIDENCE.EvidenceError, match="consumer manifest"):
         EVIDENCE.deployment_plan_metadata(plan, plan_json=image_empty)
 
     unscoped = _plan_json()
@@ -2047,33 +2289,32 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
     }
     assert EVIDENCE._validate_shared_generation_ledger_binding(binding) == binding
 
-    images = {"mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}")}
-    evidence = {
-        "mcp": {
-            "bucket": "teamagent-dev-image-release-evidence",
-            "key": f"release-receipts/mcp/{COMMIT}/{'a' * 64}.json",
-            "version_id": "receipt-version-1",
-            "signature_key": (f"release-receipts/mcp/{COMMIT}/{'a' * 64}.json.sig"),
-            "signature_version_id": "signature-version-1",
+    claim_id = "a" * 64
+    manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('previous-core')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{DIGEST}",
+            )
         }
-    }
+    )
     first, _, _ = EVIDENCE._deployment_binding(
-        images=images,
-        evidence=evidence,
+        consumer_manifest=manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={"mcp": claim_id},
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=binding,
-        mcp_media_image="",
         release_channels={"mcp": "active"},
         intent_id=INTENT_ID,
     )
     second, _, _ = EVIDENCE._deployment_binding(
-        images=images,
-        evidence=evidence,
+        consumer_manifest=manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={"mcp": claim_id},
         contracts={"mcp": CONTRACT_SHA256},
         application={"mcp": APPLICATION},
         shared_generation_ledger=dict(binding, generation=43),
-        mcp_media_image="",
         release_channels={"mcp": "active"},
         intent_id=INTENT_ID,
     )
@@ -2110,37 +2351,33 @@ def test_shared_generation_ledger_metadata_is_exact_non_secret_and_context_bound
 
 
 def test_receipt_claim_identity_survives_reuploaded_s3_versions() -> None:
-    images = {"mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{DIGEST}")}
     receipt_sha256 = "a" * 64
-    key = f"release-receipts/mcp/{COMMIT}/{receipt_sha256}.json"
-    first_reference = {
-        "bucket": EVIDENCE.EVIDENCE_BUCKET,
-        "key": key,
-        "version_id": "receipt-version-1",
-        "signature_key": f"{key}.sig",
-        "signature_version_id": "signature-version-1",
-    }
-    second_reference = {
-        **first_reference,
-        "version_id": "receipt-version-2",
-        "signature_version_id": "signature-version-2",
-    }
+    first_reference = _receipt_locator(receipt_sha256, version_suffix="1")
+    second_reference = _receipt_locator(receipt_sha256, version_suffix="2")
+    manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('previous-core')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{DIGEST}",
+            )
+        }
+    )
     binding_arguments = {
-        "images": images,
+        "consumer_manifest": manifest,
+        "consumer_receipt_bindings": {"mcp": receipt_sha256},
         "contracts": {"mcp": CONTRACT_SHA256},
         "application": {"mcp": APPLICATION},
         "shared_generation_ledger": {},
-        "mcp_media_image": "",
         "release_channels": {"mcp": "active"},
         "intent_id": INTENT_ID,
     }
 
     first_context, first_claims, first_claims_sha256 = EVIDENCE._deployment_binding(
-        evidence={"mcp": first_reference},
+        receipt_catalog={receipt_sha256: first_reference},
         **binding_arguments,
     )
     second_context, second_claims, second_claims_sha256 = EVIDENCE._deployment_binding(
-        evidence={"mcp": second_reference},
+        receipt_catalog={receipt_sha256: second_reference},
         **binding_arguments,
     )
 
@@ -2149,159 +2386,198 @@ def test_receipt_claim_identity_survives_reuploaded_s3_versions() -> None:
     assert first_claims_sha256 == second_claims_sha256
 
 
-def test_multi_pipeline_claims_are_canonical_from_plan_binding_through_atomic_consume(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    claim_by_pipeline = {
-        "mcp": "f" * 64,
-        "tiktok": "0" * 64,
-    }
-    canonical_claims = sorted(claim_by_pipeline.values())
-
-    def reference(pipeline: str) -> dict[str, str]:
-        key = f"release-receipts/{pipeline}/{COMMIT}/{claim_by_pipeline[pipeline]}.json"
-        return {
-            "bucket": EVIDENCE.EVIDENCE_BUCKET,
-            "key": key,
-            "version_id": f"{pipeline}-receipt-version",
-            "signature_key": f"{key}.sig",
-            "signature_version_id": f"{pipeline}-signature-version",
+def test_consumer_bindings_fail_closed_for_missing_extra_unknown_and_unused_claims() -> None:
+    claim_id = "a" * 64
+    unused_claim_id = "b" * 64
+    manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('previous-core')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            )
         }
-
-    images = {
-        "mcp": (f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@{CORE_DIGEST}"),
-        "tiktok": (
-            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-            f"teamagent-dev-tiktok-acquire@{_digest('tiktok-image')}"
-        ),
-    }
-    evidence = {pipeline: reference(pipeline) for pipeline in claim_by_pipeline}
-    contracts = {
-        "mcp": CONTRACT_SHA256,
-        "tiktok": "7" * 64,
-    }
-    application = {"mcp": APPLICATION}
-    context_sha256, _, _ = EVIDENCE._deployment_binding(
-        images=images,
-        evidence=evidence,
-        contracts=contracts,
-        application=application,
-        shared_generation_ledger={},
-        mcp_media_image=(
-            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-            f"teamagent-media-worker@{MEDIA_DIGEST}"
-        ),
-        release_channels={"mcp": "active", "tiktok": "active"},
-        intent_id=INTENT_ID,
     )
-    claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes(canonical_claims)).hexdigest()
-    metadata = {
-        "intent_id": INTENT_ID,
-        "plan_sha256": "d" * 64,
-        "deployment_context_sha256": context_sha256,
-        "receipt_claims_sha256": claims_sha256,
-        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
-        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
-        **_gate_metadata_fields(),
-    }
-    query = {
-        "images_json": json.dumps(images),
-        "mcp_media_image": (
-            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-            f"teamagent-media-worker@{MEDIA_DIGEST}"
-        ),
-        "evidence_json": json.dumps(evidence),
-        "contracts_json": json.dumps(contracts),
-        "contract_ready_json": json.dumps({"mcp": True, "tiktok": True}),
-        "application_json": json.dumps(application),
-        "shared_generation_ledger_json": json.dumps({}),
-        "signing_key_arn": KEY_ARN,
-        "encryption_key_arn": KEY_ARN,
-        "deployment_intent_id": INTENT_ID,
-    }
-    metadata.update(_gate_metadata_fields(query))
-    store: dict[str, dict[str, str | int]] = {
-        f"intent#{INTENT_ID}": _applying_intent(
-            intent_id=INTENT_ID,
-            plan_sha256=metadata["plan_sha256"],
-            context_sha256=context_sha256,
-            claims_sha256=claims_sha256,
-            apply_attempt_id=ATTEMPT_ID,
-            gate_query_sha256=metadata["gate_query_sha256"],
-        ),
-        EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: _apply_lock(
-            metadata,
-            apply_attempt_id=ATTEMPT_ID,
-        ),
-    }
-    consumed_claims: list[str] = []
+    valid_catalog = {claim_id: _receipt_locator(claim_id)}
 
-    def fake_get(record_id: str) -> dict[str, str | int] | None:
-        item = store.get(record_id)
-        return copy.deepcopy(item) if item is not None else None
-
-    def fake_transact(
-        *,
-        applying: dict[str, str | int],
-        metadata: dict[str, str],
-        receipt_claim_ids: list[str],
-        apply_attempt_id: str,
-        now: dt.datetime,
-    ) -> None:
-        consumed_claims.extend(receipt_claim_ids)
-        intent = store[str(applying["record_id"])]
-        consumed_at = now.isoformat().replace("+00:00", "Z")
-        intent.update(
-            {
-                "state": "CONSUMED",
-                "apply_attempt_id": apply_attempt_id,
-                "consumed_at": consumed_at,
-            }
+    with pytest.raises(EVIDENCE.EvidenceError, match="exactly match"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=manifest,
+            receipt_catalog=valid_catalog,
+            consumer_receipt_bindings={},
         )
-        for claim_id in receipt_claim_ids:
-            store[f"receipt#{claim_id}"] = {
-                "record_id": f"receipt#{claim_id}",
-                "record_type": "teamagent.release-receipt-claim",
-                "schema_version": EVIDENCE.DEPLOYMENT_INTENT_SCHEMA,
-                "receipt_claim_id": claim_id,
-                "intent_id": metadata["intent_id"],
-                "plan_sha256": metadata["plan_sha256"],
-                "deployment_context_sha256": metadata["deployment_context_sha256"],
-                "receipt_claims_sha256": metadata["receipt_claims_sha256"],
-                "gate_query_sha256": metadata["gate_query_sha256"],
-                "terraform_context_sha256": applying["terraform_context_sha256"],
-                "apply_attempt_id": apply_attempt_id,
-                "consumed_at": consumed_at,
-                "audit_expires_at": applying["audit_expires_at"],
-            }
+    with pytest.raises(EVIDENCE.EvidenceError, match="exactly match"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=manifest,
+            receipt_catalog=valid_catalog,
+            consumer_receipt_bindings={
+                "mcp": claim_id,
+                "connect_web": claim_id,
+            },
+        )
+    with pytest.raises(EVIDENCE.EvidenceError, match="exactly the claims"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=manifest,
+            receipt_catalog={},
+            consumer_receipt_bindings={"mcp": claim_id},
+        )
+    with pytest.raises(EVIDENCE.EvidenceError, match="exactly the claims"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=manifest,
+            receipt_catalog={
+                **valid_catalog,
+                unused_claim_id: _receipt_locator(unused_claim_id),
+            },
+            consumer_receipt_bindings={"mcp": claim_id},
+        )
 
-    monkeypatch.setattr(
-        EVIDENCE,
-        "deployment_plan_metadata",
-        lambda *args, **kwargs: metadata,
-    )
-    monkeypatch.setattr(
-        EVIDENCE,
-        "_terraform_gate",
-        lambda gate_query, *, now: {
-            "deployment_context_sha256": context_sha256,
-            "receipt_claims_sha256": claims_sha256,
-            "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
-            "release_channels_json": json.dumps({"mcp": "active", "tiktok": "active"}),
-        },
-    )
-    monkeypatch.setattr(EVIDENCE, "_dynamodb_get", fake_get)
-    monkeypatch.setattr(EVIDENCE, "_dynamodb_transact_consume", fake_transact)
 
-    consumed = EVIDENCE.consume_deployment_intent(
-        Path("unused.tfplan"),
-        query=query,
-        apply_attempt_id=ATTEMPT_ID,
+def test_no_image_transition_is_derived_and_is_the_only_empty_claim_variant() -> None:
+    result = EVIDENCE._terraform_gate(
+        _no_image_gate_query(),
         now=NOW,
     )
 
-    assert consumed["state"] == "CONSUMED"
-    assert consumed_claims == canonical_claims
+    assert result["deployment_mode"] == "no-image-transition"
+    assert json.loads(result["release_channels_json"]) == {}
+    assert (
+        result["receipt_claims_sha256"] == hashlib.sha256(EVIDENCE.canonical_bytes([])).hexdigest()
+    )
+    assert result["receipt_authorization_expires_at"] == str(
+        int((NOW + dt.timedelta(hours=1)).timestamp())
+    )
+
+    enable_manifest = _consumer_manifest(
+        activation_changes={"canary": ("DISABLED", "ENABLED")},
+        mode="no-image-transition",
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="consumer manifest"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=enable_manifest,
+            receipt_catalog={},
+            consumer_receipt_bindings={},
+        )
+
+
+def test_no_image_apply_revalidation_cannot_extend_or_reuse_the_saved_expiry() -> None:
+    query = _no_image_gate_query()
+    verified = EVIDENCE._terraform_gate(query, now=NOW)
+    metadata: dict[str, Any] = {
+        "intent_id": INTENT_ID,
+        "gate_query_sha256": hashlib.sha256(EVIDENCE.canonical_bytes(query)).hexdigest(),
+        "receipt_authorization_expires_at": int((NOW + dt.timedelta(minutes=30)).timestamp()),
+        "deployment_mode": "no-image-transition",
+        "deployment_context_sha256": verified["deployment_context_sha256"],
+        "receipt_claims_sha256": verified["receipt_claims_sha256"],
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+    }
+    assert (
+        EVIDENCE._verified_receipt_claims_for_saved_plan(
+            metadata=metadata,
+            query=query,
+            now=NOW,
+        )
+        == []
+    )
+
+    stale = dict(
+        metadata,
+        receipt_authorization_expires_at=int(NOW.timestamp()),
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="apply-time evidence"):
+        EVIDENCE._verified_receipt_claims_for_saved_plan(
+            metadata=stale,
+            query=query,
+            now=NOW,
+        )
+    overlong = dict(
+        metadata,
+        receipt_authorization_expires_at=int(
+            (
+                NOW + dt.timedelta(seconds=EVIDENCE.MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS + 1)
+            ).timestamp()
+        ),
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="apply-time evidence"):
+        EVIDENCE._verified_receipt_claims_for_saved_plan(
+            metadata=overlong,
+            query=query,
+            now=NOW,
+        )
+
+
+def test_shared_consumer_claim_is_unique_and_different_digests_require_distinct_claims() -> None:
+    claim_id = "c" * 64
+    shared_manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-mcp')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            ),
+            "connect_web": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-connect')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            ),
+        }
+    )
+    _, claim_ids, claims_sha256 = EVIDENCE._deployment_binding(
+        consumer_manifest=shared_manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={
+            "mcp": claim_id,
+            "connect_web": claim_id,
+        },
+        contracts={"mcp": CONTRACT_SHA256},
+        application={"mcp": APPLICATION},
+        shared_generation_ledger={},
+        release_channels={"mcp": "active", "connect_web": "active"},
+        intent_id=INTENT_ID,
+    )
+    assert claim_ids == [claim_id]
+    assert claims_sha256 == hashlib.sha256(EVIDENCE.canonical_bytes([claim_id])).hexdigest()
+    assert EVIDENCE._canonical_receipt_claim_ids(["f" * 64, claim_id, "f" * 64]) == [
+        claim_id,
+        "f" * 64,
+    ]
+
+    split_manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-mcp')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            ),
+            "connect_web": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-connect')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('other-core')}",
+            ),
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="different digests"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=split_manifest,
+            receipt_catalog={claim_id: _receipt_locator(claim_id)},
+            consumer_receipt_bindings={
+                "mcp": claim_id,
+                "connect_web": claim_id,
+            },
+        )
+
+    second_claim_id = "d" * 64
+    _, _, _, split_bindings, split_claim_ids = EVIDENCE._deployment_receipt_inputs(
+        consumer_manifest=split_manifest,
+        receipt_catalog={
+            claim_id: _receipt_locator(claim_id),
+            second_claim_id: _receipt_locator(second_claim_id),
+        },
+        consumer_receipt_bindings={
+            "mcp": claim_id,
+            "connect_web": second_claim_id,
+        },
+    )
+    assert split_bindings == {
+        "mcp": claim_id,
+        "connect_web": second_claim_id,
+    }
+    assert split_claim_ids == sorted([claim_id, second_claim_id])
 
 
 def _prepared_intent(
@@ -2331,6 +2607,11 @@ def _prepared_intent(
         "plan_addresses_sha256": "f" * 64,
         "runtime_images_sha256": "9" * 64,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "consumer_count": 8,
+        "consumer_comparison_sha256": "1" * 64,
+        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+        "deployment_mode": "receipt-required",
         "control_commit": COMMIT,
         "prepared_at": "2026-07-17T06:00:00Z",
         "authorization_expires_at": int(RECEIPT_AUTHORIZATION_EXPIRES_AT),
@@ -2387,6 +2668,11 @@ def _terraform_context() -> dict[str, str | int]:
         "plan_addresses_sha256": "f" * 64,
         "runtime_images_sha256": "9" * 64,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "consumer_count": 8,
+        "consumer_comparison_sha256": "1" * 64,
+        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+        "deployment_mode": "receipt-required",
     }
 
 
@@ -2932,6 +3218,61 @@ def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(
         ATTEMPT_ID,
         phase="begin-apply",
     )
+
+
+def test_duplicate_consumer_bindings_reach_dynamodb_as_one_distinct_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claim_id = "c" * 64
+    claims_sha256 = hashlib.sha256(EVIDENCE.canonical_bytes([claim_id])).hexdigest()
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": "e" * 64,
+        "receipt_claims_sha256": claims_sha256,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
+    }
+    applying = _applying_intent(
+        intent_id=INTENT_ID,
+        plan_sha256=metadata["plan_sha256"],
+        context_sha256=metadata["deployment_context_sha256"],
+        claims_sha256=claims_sha256,
+        apply_attempt_id=ATTEMPT_ID,
+    )
+    lock = _apply_lock(metadata, apply_attempt_id=ATTEMPT_ID)
+    seen_claims: list[str] = []
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_get",
+        lambda record_id: copy.deepcopy(
+            applying
+            if record_id == f"intent#{INTENT_ID}"
+            else lock
+            if record_id == EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID
+            else None
+        ),
+    )
+
+    def capture_distinct_claims(**kwargs: Any) -> None:
+        seen_claims.extend(kwargs["receipt_claim_ids"])
+        raise RuntimeError("stop after canonical claim capture")
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_transact_consume",
+        capture_distinct_claims,
+    )
+    with pytest.raises(RuntimeError, match="canonical claim capture"):
+        EVIDENCE._consume_applying_deployment_intent(
+            metadata=metadata,
+            receipt_claim_ids=[claim_id, claim_id],
+            apply_attempt_id=ATTEMPT_ID,
+            now=NOW,
+        )
+    assert seen_claims == [claim_id]
 
 
 def test_unlisted_referrer_is_part_of_protected_lifecycle_graph(

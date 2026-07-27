@@ -22,6 +22,7 @@ APPLY_LAUNCHER = ROOT / "infra" / "terraform" / "apply_image_release_plan.sh"
 RUNTIME_GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
 FARGATE_VARIABLES = ROOT / "infra" / "terraform" / "variables_fargate.tf"
 RELEASE_CONTEXT = ROOT / "infra" / "terraform" / "image_release_context.py"
+CONSUMER_REGISTRY = ROOT / "infra" / "codebuild" / "image_deployment_consumers.json"
 BOOTSTRAP_TARGETS = ROOT / "infra" / "terraform" / "codebuild_provenance_bootstrap_targets.txt"
 
 
@@ -241,15 +242,63 @@ def test_terraform_uses_a_hard_precondition_not_a_warning_only_check() -> None:
     assert "lifecycle {" in body
     assert "precondition {" in body
     assert 'check "production_images_require_signed_digest_release_evidence"' not in body
-    assert "local.deployment_references_are_digest_only" in body
+    assert 'variable "image_release_receipt_catalog"' in body
+    assert 'variable "image_release_consumer_receipt_bindings"' in body
+    assert 'variable "image_deployment_consumer_manifest"' in body
+    assert "image_deployment_consumers.json" in body
+    assert "local.deployment_consumer_registry_sha256" in body
+    assert "length(local.deployment_consumer_registry.consumers) == 8" in body
+    assert "local.deployment_manifest_registry_is_exact" in body
+    assert "local.deployment_manifest_after_images_are_exact" in body
+    assert "local.deployment_binding_consumers_are_exact" in body
+    assert "local.deployment_catalog_bindings_are_exact" in body
     assert "local.deployment_contracts_are_ready" in body
-    assert "local.deployment_evidence_is_complete" in body
-    assert 'tiktok = ""' in body
-    assert "tiktok   = false" in body
-    assert "!local.deployment_pipeline_enabled[pipeline]" in body
     assert "signed_image_release_gate[0].result.verified" in body
+    assert "signed_image_release_gate[0].result.deployment_mode" in body
+    assert "var.image_deployment_consumer_manifest.mode" in body
+    assert "consumer_manifest_json" in body
+    assert "receipt_catalog_json" in body
+    assert "consumer_receipt_bindings_json" in body
     assert "release_channels_json" in body
     assert "release_channels" in body
+    assert 'variable "image_release_evidence"' not in body
+    assert "evidence_json" not in body
+    assert "tiktok_release_contract.json" not in body
+
+
+def test_consumer_receipt_claims_are_exact_and_shared_only_as_distinct_claims() -> None:
+    gate = GATE.read_text(encoding="utf-8")
+    evidence = EVIDENCE.read_text(encoding="utf-8")
+    registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
+
+    assert registry["schema_version"] == 1
+    assert len(registry["consumers"]) == 8
+    assert len({item["consumer_id"] for item in registry["consumers"]}) == 8
+    assert {item["receipt"]["pipeline"] for item in registry["consumers"]} == {"mcp", "openclaw"}
+    tiktok = next(item for item in registry["consumers"] if item["consumer_id"] == "tiktok_acquire")
+    assert tiktok["receipt"] == {"pipeline": "mcp", "subject": "media"}
+    assert tiktok["release_repository"] == "teamagent-media-worker"
+
+    assert "deployment_bound_claim_ids = toset(" in gate
+    assert "values(var.image_release_consumer_receipt_bindings)" in gate
+    assert "deployment_receipt_required_consumer_ids" in gate
+    assert "consumer.before.image != consumer.after.image" in gate
+    assert "consumer.before.activation.desired_count !=" in gate
+    assert "consumer.before.activation.state != consumer.after.activation.state" in gate
+    assert "sorted(set(normalized))" in evidence
+    assert "deployment receipt claims contain a duplicate" not in evidence
+    assert "consumer receipt bindings do not exactly match receipt-requiring consumers" in evidence
+    assert "receipt catalog must contain exactly the claims used by consumer bindings" in evidence
+    assert "consumers moving to different digests require different receipt claims" in evidence
+    assert "no-image-transition forbids receipts and consumer bindings" in evidence
+    assert "no-image-transition contains release evidence" in evidence
+    assert "receipt-required manifest contains no receipt-requiring change" in evidence
+    assert "execution increase requires a fresh active receipt" in evidence
+    assert "MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS = 3600" in evidence
+    assert '"deployment_mode": mode' in evidence
+    assert '"aws_ecs_task_definition.tiktok_acquire": "tiktok_acquire"' in evidence
+    context = RELEASE_CONTEXT.read_text(encoding="utf-8")
+    assert "consumer manifest mode does not match the derived comparison" in context
 
 
 def test_saved_gate_query_is_consumed_before_terraform_apply_can_start() -> None:
@@ -376,7 +425,10 @@ def test_empty_runtime_images_and_ungated_destructive_plans_fail_closed() -> Non
         assert repository in block
         assert "nonempty fixed release-repository digest" in block
 
-    assert "CONTEXT_SCHEMA = 2" in context
+    assert "CONTEXT_SCHEMA = 3" in context
+    assert "CONSUMER_MANIFEST_SCHEMA = 1" in context
+    assert "derive_consumer_manifest_mode" in context
+    assert "no-image-transition" in context
     assert '"delete_change_count"' in context
     assert '"replace_change_count"' in context
     assert '"transition_sha256"' in context
@@ -451,18 +503,27 @@ def test_release_intent_binds_the_hmac_workers_nonsecret_ledger_snapshot() -> No
 def test_every_deployable_pipeline_accepts_only_a_fixed_release_repo_digest() -> None:
     body = GATE.read_text(encoding="utf-8")
     evidence = EVIDENCE.read_text(encoding="utf-8")
+    registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
 
-    for repository in (
-        "teamagent-mcp@sha256:",
-        "teamagent-openclaw@sha256:",
-        "teamagent-dev-tiktok-acquire@sha256:",
-    ):
-        assert repository.replace(".", r"\.") in body or repository in body
+    assert {consumer["release_repository"] for consumer in registry["consumers"]} == {
+        "teamagent-mcp",
+        "teamagent-openclaw",
+        "teamagent-media-worker",
+    }
+    assert {consumer["receipt"]["pipeline"] for consumer in registry["consumers"]} == {
+        "mcp",
+        "openclaw",
+    }
+    assert "consumer.release_repository" in body
+    assert "deployment_manifest_after_images_are_exact" in body
     assert "verified-candidates@sha256" not in body
     assert "quarantine@sha256" not in body
-    assert "image_release_evidence" in body
+    assert "image_release_receipt_catalog" in body
+    assert "image_release_consumer_receipt_bindings" in body
     assert "release.ready" in body
     assert "filesha256" in body
+    assert "tiktok_release_contract.json" not in body
+    assert "teamagent-dev-tiktok-acquire@sha256:" not in body
     assert '"terraform-gate"' in body
     assert "signing_key_arn" in body
     assert "encryption_key_arn" in body

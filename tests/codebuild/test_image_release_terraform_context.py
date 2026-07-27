@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,189 @@ def _load_module() -> Any:
 
 
 CONTEXT = _load_module()
+REGISTRY = CONTEXT.load_consumer_registry()
+
+
+def _task_arn(consumer: dict[str, Any], revision: int = 1) -> str:
+    return (
+        "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/"
+        f"{consumer['ecs_family']}:{revision}"
+    )
+
+
+def _image(consumer: dict[str, Any], index: int) -> str:
+    return (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"{consumer['release_repository']}@sha256:{format(index + 1, 'x') * 64}"
+    )
+
+
+def _task_attributes(consumer: dict[str, Any], index: int) -> dict[str, Any]:
+    return {
+        "arn": _task_arn(consumer),
+        "id": _task_arn(consumer),
+        "family": consumer["ecs_family"],
+        "container_definitions": json.dumps(
+            [
+                {
+                    "name": consumer["container_name"],
+                    "image": _image(consumer, index),
+                }
+            ],
+            separators=(",", ":"),
+        ),
+    }
+
+
+def _state_resource(
+    address: str,
+    resource_type: str,
+    attributes: dict[str, Any],
+) -> dict[str, Any]:
+    base = re.sub(r"\[0\]$", "", address)
+    _, name = base.split(".", 1)
+    instance: dict[str, Any] = {
+        "schema_version": 1,
+        "attributes": attributes,
+    }
+    if address.endswith("[0]"):
+        instance["index_key"] = 0
+    return {
+        "mode": "managed",
+        "type": resource_type,
+        "name": name,
+        "instances": [instance],
+    }
+
+
+def _consumer_activation(
+    consumer: dict[str, Any],
+) -> tuple[list[tuple[str, str, dict[str, Any]]], dict[str, Any], str]:
+    consumer_id = consumer["consumer_id"]
+    activator = consumer["activator"]
+    task_arn = _task_arn(consumer)
+    if activator["type"] == "ecs_service":
+        address = f"aws_ecs_service.{consumer_id}" + (
+            "[0]" if consumer_id in {"connect_web", "openclaw"} else ""
+        )
+        attributes = {
+            "name": activator["identity"],
+            "desired_count": 1,
+            "task_definition": task_arn,
+        }
+        return (
+            [(address, "aws_ecs_service", attributes)],
+            {"desired_count": 1, "task_definition_arn": task_arn},
+            address,
+        )
+    if activator["type"] == "eventbridge_rule_ecs_target":
+        suffix = {
+            "canary": "canary_hourly",
+            "ingest": "ingest_weekly",
+            "morning_digest": "morning_digest_weekday",
+        }[consumer_id]
+        rule_address = f"aws_cloudwatch_event_rule.{suffix}[0]"
+        target_address = f"aws_cloudwatch_event_target.{suffix}[0]"
+        state = "ENABLED" if consumer_id == "morning_digest" else "DISABLED"
+        return (
+            [
+                (
+                    rule_address,
+                    "aws_cloudwatch_event_rule",
+                    {"name": activator["identity"], "state": state},
+                ),
+                (
+                    target_address,
+                    "aws_cloudwatch_event_target",
+                    {
+                        "rule": activator["identity"],
+                        "ecs_target": [{"task_definition_arn": task_arn}],
+                    },
+                ),
+            ],
+            {"state": state, "task_definition_arn": task_arn},
+            target_address,
+        )
+    suffix = "x_dispatch" if consumer_id == "x_buzz_worker" else "tiktok_dispatch"
+    function_address = f"aws_lambda_function.{suffix}[0]"
+    mapping_address = f"aws_lambda_event_source_mapping.{suffix}[0]"
+    return (
+        [
+            (
+                function_address,
+                "aws_lambda_function",
+                {
+                    "function_name": activator["identity"],
+                    "environment": [{"variables": {"TASKDEF_ARN": task_arn}}],
+                },
+            ),
+            (
+                mapping_address,
+                "aws_lambda_event_source_mapping",
+                {"function_name": activator["identity"], "enabled": True},
+            ),
+        ],
+        {
+            "event_source_mapping_enabled": True,
+            "task_definition_arn": task_arn,
+        },
+        function_address,
+    )
+
+
+def _consumer_manifest() -> dict[str, Any]:
+    consumers: list[dict[str, Any]] = []
+    for index, consumer in enumerate(REGISTRY["consumers"]):
+        _, activation, _ = _consumer_activation(consumer)
+        snapshot = {
+            "image": _image(consumer, index),
+            "task_definition_arn": _task_arn(consumer),
+            "activation": activation,
+        }
+        consumers.append(
+            {
+                **{
+                    key: consumer[key]
+                    for key in (
+                        "consumer_id",
+                        "terraform_task_definition_address",
+                        "ecs_family",
+                        "container_name",
+                        "activator",
+                        "release_repository",
+                        "receipt",
+                    )
+                },
+                "live": json.loads(json.dumps(snapshot)),
+                "before": json.loads(json.dumps(snapshot)),
+                "after": json.loads(json.dumps(snapshot)),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "registry_sha256": CONTEXT.consumer_registry_sha256(),
+        "mode": "no-image-transition",
+        "consumers": consumers,
+    }
+
+
+def _manifest_consumer(plan: dict[str, Any], consumer_id: str) -> dict[str, Any]:
+    manifest = plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    return next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == consumer_id
+    )
+
+
+def _resource_change(plan: dict[str, Any], address: str) -> dict[str, Any]:
+    return next(change for change in plan["resource_changes"] if change["address"] == address)
+
+
+def _configuration_resource(plan: dict[str, Any], address: str) -> dict[str, Any]:
+    return next(
+        resource
+        for resource in plan["configuration"]["root_module"]["resources"]
+        if resource["address"] == address
+    )
 
 
 def _backend() -> dict[str, Any]:
@@ -45,29 +230,95 @@ def _backend() -> dict[str, Any]:
 
 
 def _state() -> dict[str, Any]:
+    resources = [
+        {
+            "mode": "managed",
+            "type": "terraform_data",
+            "name": "production_image_release_gate",
+            "instances": [{"schema_version": 0, "attributes": {}}],
+        }
+    ]
+    for index, consumer in enumerate(REGISTRY["consumers"]):
+        resources.append(
+            _state_resource(
+                consumer["terraform_task_definition_address"],
+                "aws_ecs_task_definition",
+                _task_attributes(consumer, index),
+            )
+        )
+    for consumer in REGISTRY["consumers"]:
+        activation_resources, _, _ = _consumer_activation(consumer)
+        resources.extend(
+            _state_resource(address, resource_type, attributes)
+            for address, resource_type, attributes in activation_resources
+        )
     return {
         "version": 4,
         "terraform_version": "1.12.2",
         "serial": 1234,
         "lineage": "11111111-1111-4111-8111-111111111111",
-        "resources": [
-            {
-                "mode": "managed",
-                "type": "terraform_data",
-                "name": "production_image_release_gate",
-                "instances": [{"schema_version": 0, "attributes": {}}],
-            },
-            {
-                "mode": "managed",
-                "type": "aws_ecs_task_definition",
-                "name": "mcp",
-                "instances": [{"schema_version": 1, "attributes": {}}],
-            },
-        ],
+        "resources": resources,
     }
 
 
 def _plan() -> dict[str, Any]:
+    manifest = _consumer_manifest()
+    resources: list[dict[str, Any]] = [{"address": "terraform_data.production_image_release_gate"}]
+    changes: list[dict[str, Any]] = [
+        {
+            "address": "terraform_data.production_image_release_gate",
+            "mode": "managed",
+            "change": {
+                "actions": ["delete", "create"],
+                "before": {},
+                "after": {"input": {"release_channels": {}}},
+            },
+        }
+    ]
+    for index, consumer in enumerate(REGISTRY["consumers"]):
+        address = consumer["terraform_task_definition_address"]
+        configuration_address = re.sub(r"\[0\]$", "", address)
+        resources.append({"address": configuration_address})
+        attributes = _task_attributes(consumer, index)
+        changes.append(
+            {
+                "address": address,
+                "mode": "managed",
+                "change": {
+                    "actions": ["no-op"],
+                    "before": json.loads(json.dumps(attributes)),
+                    "after": json.loads(json.dumps(attributes)),
+                },
+            }
+        )
+    for consumer in REGISTRY["consumers"]:
+        activation_resources, _, pointer_address = _consumer_activation(consumer)
+        for address, _, attributes in activation_resources:
+            configuration_address = re.sub(r"\[0\]$", "", address)
+            configuration: dict[str, Any] = {"address": configuration_address}
+            if address == pointer_address:
+                expression_name = {
+                    "ecs_service": "task_definition",
+                    "eventbridge_rule_ecs_target": "ecs_target",
+                    "lambda_taskdef_arn_environment": "environment",
+                }[consumer["activator"]["type"]]
+                configuration["expressions"] = {
+                    expression_name: {
+                        "references": [f"{consumer['terraform_task_definition_address']}.arn"]
+                    }
+                }
+            resources.append(configuration)
+            changes.append(
+                {
+                    "address": address,
+                    "mode": "managed",
+                    "change": {
+                        "actions": ["no-op"],
+                        "before": json.loads(json.dumps(attributes)),
+                        "after": json.loads(json.dumps(attributes)),
+                    },
+                }
+            )
     return {
         "complete": True,
         "applyable": True,
@@ -89,27 +340,16 @@ def _plan() -> dict[str, Any]:
             "tiktok_acquire_image": {"value": ""},
             "enable_media_worker": {"value": False},
             "enable_tiktok_acquire": {"value": False},
+            "image_deployment_consumer_manifest": {"value": manifest},
+            "image_release_receipt_catalog": {"value": {}},
+            "image_release_consumer_receipt_bindings": {"value": {}},
         },
         "configuration": {
             "root_module": {
-                "resources": [
-                    {"address": "terraform_data.production_image_release_gate"},
-                    {"address": "aws_ecs_task_definition.mcp"},
-                ],
+                "resources": resources,
             }
         },
-        "resource_changes": [
-            {
-                "address": "terraform_data.production_image_release_gate",
-                "mode": "managed",
-                "change": {"actions": ["delete", "create"]},
-            },
-            {
-                "address": "aws_ecs_task_definition.mcp",
-                "mode": "managed",
-                "change": {"actions": ["update"]},
-            },
-        ],
+        "resource_changes": changes,
     }
 
 
@@ -125,14 +365,19 @@ def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> Non
     assert value["workspace"] == "default"
     assert value["state"]["lineage"] == _state()["lineage"]
     assert value["state"]["serial"] == 1234
-    assert value["state"]["managed_address_count"] == 2
+    assert value["state"]["managed_address_count"] == 22
+    assert value["consumer_manifest"]["mode"] == "no-image-transition"
     assert value["plan"] == {
         "complete": True,
         "applyable": True,
         "errored": False,
-        "managed_change_count": 2,
+        "managed_change_count": 22,
         "address_ownership_sha256": value["plan"]["address_ownership_sha256"],
         "runtime_images_sha256": value["plan"]["runtime_images_sha256"],
+        "consumer_manifest_sha256": value["plan"]["consumer_manifest_sha256"],
+        "consumer_count": 8,
+        "consumer_comparison_sha256": value["plan"]["consumer_comparison_sha256"],
+        "release_evidence_binding_sha256": value["plan"]["release_evidence_binding_sha256"],
         "delete_change_count": 0,
         "replace_change_count": 0,
         "transition_sha256": value["plan"]["transition_sha256"],
@@ -163,7 +408,7 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
         workspace="default",
     )
 
-    assert value["plan"]["managed_change_count"] == 3
+    assert value["plan"]["managed_change_count"] == 23
     assert len(value["plan"]["address_ownership_sha256"]) == 64
 
     wrong_id = _plan()
@@ -350,9 +595,23 @@ def test_context_rejects_nondefault_workspace_and_unowned_address() -> None:
 
 
 def test_raw_state_binding_preserves_count_for_each_and_module_addresses() -> None:
-    state = _state()
-    state["resources"].extend(
-        [
+    state = {
+        "version": 4,
+        "serial": 1,
+        "lineage": "11111111-1111-4111-8111-111111111111",
+        "resources": [
+            {
+                "mode": "managed",
+                "type": "terraform_data",
+                "name": "production_image_release_gate",
+                "instances": [{"schema_version": 0, "attributes": {}}],
+            },
+            {
+                "mode": "managed",
+                "type": "aws_ecs_task_definition",
+                "name": "mcp",
+                "instances": [{"schema_version": 1, "attributes": {}}],
+            },
             {
                 "module": 'module.workers["media"]',
                 "mode": "managed",
@@ -369,8 +628,8 @@ def test_raw_state_binding_preserves_count_for_each_and_module_addresses() -> No
                 "name": "current",
                 "instances": [{"schema_version": 0, "attributes": {}}],
             },
-        ]
-    )
+        ],
+    }
 
     binding = CONTEXT._state_binding(state)
 
@@ -381,6 +640,185 @@ def test_raw_state_binding_preserves_count_for_each_and_module_addresses() -> No
         'module.workers["media"].aws_ecs_task_definition.worker[0]',
         "terraform_data.production_image_release_gate",
     ]
+
+
+def test_consumer_manifest_derives_no_image_transition_from_exact_eight() -> None:
+    manifest = CONTEXT.validate_consumer_manifest(_consumer_manifest())
+
+    assert manifest["mode"] == "no-image-transition"
+    assert len(manifest["consumers"]) == 8
+    assert manifest["registry_sha256"] == CONTEXT.consumer_registry_sha256()
+
+    missing = _consumer_manifest()
+    missing["consumers"].pop()
+    with pytest.raises(CONTEXT.ContextError, match="exactly eight"):
+        CONTEXT.validate_consumer_manifest(missing)
+
+    wrong_hash = _consumer_manifest()
+    wrong_hash["registry_sha256"] = "0" * 64
+    with pytest.raises(CONTEXT.ContextError, match="registry hash"):
+        CONTEXT.validate_consumer_manifest(wrong_hash)
+
+
+def test_activation_enable_requires_receipt_mode_and_rejects_mode_downgrade() -> None:
+    plan = _plan()
+    canary = _manifest_consumer(plan, "canary")
+    canary["after"]["activation"]["state"] = "ENABLED"
+    plan["variables"]["image_deployment_consumer_manifest"]["value"]["mode"] = "receipt-required"
+    rule = _resource_change(
+        plan,
+        "aws_cloudwatch_event_rule.canary_hourly[0]",
+    )
+    rule["change"]["actions"] = ["update"]
+    rule["change"]["after"]["state"] = "ENABLED"
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert value["consumer_manifest"]["mode"] == "receipt-required"
+
+    downgraded = plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    downgraded["mode"] = "no-image-transition"
+    with pytest.raises(CONTEXT.ContextError, match="derived comparison"):
+        CONTEXT.validate_consumer_manifest(downgraded)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda manifest: manifest["consumers"][0].update(release_repository="hostile"),
+        lambda manifest: manifest["consumers"][0]["after"].update(image=None),
+        lambda manifest: manifest["consumers"][0]["before"].update(
+            image=(
+                f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'f' * 64}"
+            )
+        ),
+    ],
+)
+def test_consumer_manifest_rejects_repository_unknown_and_live_before_drift(
+    mutation: Any,
+) -> None:
+    manifest = _consumer_manifest()
+    mutation(manifest)
+
+    with pytest.raises(CONTEXT.ContextError):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+
+@pytest.mark.parametrize("binding", ["catalog", "consumer", "channel"])
+def test_no_image_transition_rejects_receipt_or_channel_mixing(
+    binding: str,
+) -> None:
+    plan = _plan()
+    if binding == "catalog":
+        plan["variables"]["image_release_receipt_catalog"]["value"] = {"a" * 64: {"key": "unused"}}
+    elif binding == "consumer":
+        plan["variables"]["image_release_consumer_receipt_bindings"]["value"] = {"mcp": "a" * 64}
+    else:
+        _resource_change(
+            plan,
+            "terraform_data.production_image_release_gate",
+        )["change"]["after"]["input"]["release_channels"] = {"mcp": "active"}
+
+    with pytest.raises(CONTEXT.ContextError, match="requires empty"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_no_image_transition_accepts_only_its_scheduled_task_pointer() -> None:
+    plan = _plan()
+    mcp = _manifest_consumer(plan, "mcp")
+    address = mcp["terraform_task_definition_address"]
+    mcp["after"]["task_definition_arn"] = address
+    mcp["after"]["activation"]["task_definition_arn"] = address
+    task = _resource_change(plan, address)
+    task["change"]["actions"] = ["delete", "create"]
+    task["change"]["after"]["arn"] = None
+    task["change"]["after"]["id"] = None
+    service = _resource_change(plan, "aws_ecs_service.mcp")
+    service["change"]["actions"] = ["update"]
+    service["change"]["after"]["task_definition"] = None
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert value["consumer_manifest"]["mode"] == "no-image-transition"
+    assert value["consumer_manifest"]["consumers"][0]["after"]["task_definition_arn"] == address
+
+    _configuration_resource(plan, "aws_ecs_service.mcp")["expressions"]["task_definition"][
+        "references"
+    ] = ["aws_ecs_task_definition.openclaw[0].arn"]
+    with pytest.raises(CONTEXT.ContextError, match="does not reference only"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_public_activation_state_validator_rechecks_all_eight_after_apply() -> None:
+    manifest = _consumer_manifest()
+    live = CONTEXT.validate_consumer_activation_state(
+        manifest,
+        _state(),
+        phase="live",
+    )
+    after = CONTEXT.validate_consumer_activation_state(
+        manifest,
+        _state(),
+        phase="after",
+    )
+
+    assert live["consumer_count"] == after["consumer_count"] == 8
+    assert live["activation_edges_sha256"] == after["activation_edges_sha256"]
+
+    planned = _consumer_manifest()
+    planned_mcp = next(
+        consumer for consumer in planned["consumers"] if consumer["consumer_id"] == "mcp"
+    )
+    planned_address = planned_mcp["terraform_task_definition_address"]
+    planned_mcp["after"]["task_definition_arn"] = planned_address
+    planned_mcp["after"]["activation"]["task_definition_arn"] = planned_address
+    resolved = CONTEXT.validate_consumer_activation_state(
+        planned,
+        _state(),
+        phase="after",
+    )
+    assert resolved["consumer_count"] == 8
+
+    drifted_state = _state()
+    canary_rule = next(
+        resource
+        for resource in drifted_state["resources"]
+        if resource["type"] == "aws_cloudwatch_event_rule" and resource["name"] == "canary_hourly"
+    )
+    canary_rule["instances"][0]["attributes"]["state"] = "ENABLED"
+    with pytest.raises(CONTEXT.ContextError, match="activation edge differs"):
+        CONTEXT.validate_consumer_activation_state(
+            manifest,
+            drifted_state,
+            phase="after",
+        )
+
+    with pytest.raises(CONTEXT.ContextError, match="phase"):
+        CONTEXT.validate_consumer_activation_state(
+            manifest,
+            _state(),
+            phase="before",
+        )
 
 
 def test_launchers_reject_injected_terraform_environment_and_unsafe_plan_modes() -> None:

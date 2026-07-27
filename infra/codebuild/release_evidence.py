@@ -181,16 +181,16 @@ HMAC_RUNTIME_GATE_ADDRESSES = frozenset(
 )
 IMAGE_MANAGED_ECS_PIPELINES = {
     "aws_ecs_task_definition.mcp": "mcp",
-    "aws_ecs_task_definition.canary": "mcp",
-    "aws_ecs_task_definition.connect_web": "mcp",
-    "aws_ecs_task_definition.ingest": "mcp",
-    "aws_ecs_task_definition.morning_digest": "mcp",
-    "aws_ecs_task_definition.x_buzz_worker": "mcp",
+    "aws_ecs_task_definition.canary": "canary",
+    "aws_ecs_task_definition.connect_web": "connect_web",
+    "aws_ecs_task_definition.ingest": "ingest",
+    "aws_ecs_task_definition.morning_digest": "morning_digest",
+    "aws_ecs_task_definition.x_buzz_worker": "x_buzz_worker",
     "aws_ecs_service.mcp": "mcp",
-    "aws_ecs_service.connect_web": "mcp",
+    "aws_ecs_service.connect_web": "connect_web",
     "aws_ecs_task_definition.openclaw": "openclaw",
     "aws_ecs_service.openclaw": "openclaw",
-    "aws_ecs_task_definition.tiktok_acquire": "tiktok",
+    "aws_ecs_task_definition.tiktok_acquire": "tiktok_acquire",
 }
 
 _SHA1_RE = re.compile(r"[0-9a-f]{40}")
@@ -1394,28 +1394,77 @@ def authorize_release_receipt(
     return value
 
 
+def _release_coordinates_for_consumer(consumer_id: str) -> dict[str, str]:
+    """Resolve deployment coordinates only through the code-owned registry."""
+
+    try:
+        registry_module = __import__("image_deployment_consumers")
+        coordinates = registry_module.release_coordinates_for_consumer(consumer_id)
+    except (AttributeError, ImportError, OSError, ValueError) as exc:
+        raise EvidenceError("code-owned image consumer registry is invalid") from exc
+    if (
+        not isinstance(coordinates, dict)
+        or set(coordinates) != {"pipeline", "subject", "repository"}
+        or any(not isinstance(value, str) or not value for value in coordinates.values())
+    ):
+        raise EvidenceError("code-owned image consumer coordinates are invalid")
+    return dict(coordinates)
+
+
+def _validate_consumer_deploy_reference(
+    validated_receipt: Mapping[str, Any],
+    *,
+    consumer_id: str,
+    image: str,
+) -> None:
+    coordinates = _release_coordinates_for_consumer(consumer_id)
+    expected_subject = coordinates["subject"]
+    expected_repository = coordinates["repository"]
+    image_match = re.fullmatch(
+        rf"{re.escape(REGISTRY)}/{re.escape(expected_repository)}@"
+        r"(sha256:[0-9a-f]{64})",
+        _string(image, label=f"{consumer_id} deployment image"),
+    )
+    if image_match is None:
+        raise EvidenceError(
+            f"{consumer_id} image repository does not match the code-owned registry"
+        )
+    matches = [
+        subject
+        for subject in validated_receipt["subjects"]
+        if (
+            subject["name"] == expected_subject
+            and subject["release_repository"] == expected_repository
+            and subject["digest"] == image_match.group(1)
+        )
+    ]
+    if len(matches) != 1:
+        raise EvidenceError(
+            f"{consumer_id} image does not match its registry-fixed receipt subject"
+        )
+
+
 def validate_deploy_reference(
     receipt: Mapping[str, Any],
     *,
-    pipeline: str,
+    consumer_id: str,
     image: str,
     contract_sha256: str,
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
+    coordinates = _release_coordinates_for_consumer(consumer_id)
     validated = validate_release_receipt(
         receipt,
-        expected_pipeline=pipeline,
+        expected_pipeline=coordinates["pipeline"],
         expected_contract_sha256=contract_sha256,
         allowed_channels={"active", "rollback"},
         now=now,
     )
-    matches = [
-        subject
-        for subject in validated["subjects"]
-        if image == f"{REGISTRY}/{subject['release_repository']}@{subject['digest']}"
-    ]
-    if len(matches) != 1:
-        raise EvidenceError(f"{pipeline} image does not match signed release evidence")
+    _validate_consumer_deploy_reference(
+        validated,
+        consumer_id=consumer_id,
+        image=image,
+    )
     return validated
 
 
@@ -2132,7 +2181,7 @@ def _parse_terraform_gate_query(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
-    str,
+    dict[str, Any],
     str,
     str,
     str,
@@ -2140,9 +2189,9 @@ def _parse_terraform_gate_query(
     _exact_keys(
         query,
         {
-            "images_json",
-            "mcp_media_image",
-            "evidence_json",
+            "consumer_manifest_json",
+            "receipt_catalog_json",
+            "consumer_receipt_bindings_json",
             "contracts_json",
             "contract_ready_json",
             "application_json",
@@ -2154,24 +2203,61 @@ def _parse_terraform_gate_query(
         label="Terraform gate query",
     )
     try:
-        images = json.loads(_string(query["images_json"], label="images_json"))
-        evidence = json.loads(_string(query["evidence_json"], label="evidence_json"))
-        contracts = json.loads(_string(query["contracts_json"], label="contracts_json"))
-        ready = json.loads(_string(query["contract_ready_json"], label="contract_ready_json"))
-        application = json.loads(_string(query["application_json"], label="application_json"))
+        # These three carry one entry per consumer, so the 2048-byte default is far
+        # too small: the exact-8 manifest measures ~13KB and a catalog holding a
+        # distinct claim per consumer measures ~4KB. The bounds stay explicit and
+        # finite -- they cap untrusted gate input, they are not a correctness knob.
+        consumer_manifest = json.loads(
+            _string(
+                query["consumer_manifest_json"],
+                label="consumer_manifest_json",
+                maximum=65536,
+            ),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        receipt_catalog = json.loads(
+            _string(
+                query["receipt_catalog_json"],
+                label="receipt_catalog_json",
+                maximum=16384,
+            ),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        consumer_receipt_bindings = json.loads(
+            _string(
+                query["consumer_receipt_bindings_json"],
+                label="consumer_receipt_bindings_json",
+                maximum=4096,
+            ),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        contracts = json.loads(
+            _string(query["contracts_json"], label="contracts_json"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        ready = json.loads(
+            _string(query["contract_ready_json"], label="contract_ready_json"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        application = json.loads(
+            _string(query["application_json"], label="application_json"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
         shared_generation_ledger = json.loads(
             _string(
                 query["shared_generation_ledger_json"],
                 label="shared_generation_ledger_json",
-            )
+            ),
+            object_pairs_hook=_reject_duplicate_keys,
         )
     except json.JSONDecodeError as exc:
         raise EvidenceError("Terraform gate query contains invalid JSON") from exc
     if not all(
         isinstance(item, dict)
         for item in (
-            images,
-            evidence,
+            consumer_manifest,
+            receipt_catalog,
+            consumer_receipt_bindings,
             contracts,
             ready,
             application,
@@ -2179,79 +2265,281 @@ def _parse_terraform_gate_query(
         )
     ):
         raise EvidenceError("Terraform gate query maps are invalid")
+    normalized_consumer_manifest = _validate_gate_consumer_manifest(consumer_manifest)
     normalized_shared_generation_ledger = _validate_shared_generation_ledger_binding(
         shared_generation_ledger
     )
-    mcp_media_image = query["mcp_media_image"]
-    if not isinstance(mcp_media_image, str):
-        raise EvidenceError("mcp_media_image must be a string")
-    if (
-        mcp_media_image
-        and re.fullmatch(
-            rf"{re.escape(REGISTRY)}/teamagent-media-worker@sha256:[0-9a-f]{{64}}",
-            mcp_media_image,
-        )
-        is None
-    ):
-        raise EvidenceError("MCP media image is not a digest-only release reference")
     signing_key_arn = _string(query["signing_key_arn"], label="signing key ARN")
     encryption_key_arn = _string(query["encryption_key_arn"], label="encryption key ARN")
     intent_id = _uuid4(query["deployment_intent_id"], label="deployment intent ID")
     if not _KEY_ARN_RE.fullmatch(signing_key_arn) or not _KEY_ARN_RE.fullmatch(encryption_key_arn):
         raise EvidenceError("Terraform gate KMS key is outside the fixed account")
     return (
-        images,
-        evidence,
+        normalized_consumer_manifest,
+        receipt_catalog,
+        consumer_receipt_bindings,
         contracts,
         ready,
         application,
         normalized_shared_generation_ledger,
-        mcp_media_image,
         signing_key_arn,
         encryption_key_arn,
         intent_id,
     )
 
 
-def _canonical_receipt_claim_ids(claim_ids: Sequence[Any]) -> list[str]:
+def _validate_gate_consumer_manifest(value: Any) -> dict[str, Any]:
+    """Validate the full L/B/A manifest with the trusted Terraform helper."""
+
+    helper_path = Path(__file__).resolve().parents[1] / "terraform" / (
+        "image_release_context.py"
+    )
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "teamagent_image_release_context_manifest",
+            helper_path,
+        )
+        if spec is None or spec.loader is None:
+            raise OSError("could not load consumer manifest helper")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        validated = helper.validate_consumer_manifest(value)
+    except (
+        AttributeError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
+        raise EvidenceError("Terraform image consumer manifest is invalid") from exc
+    if not isinstance(validated, dict):
+        raise EvidenceError("Terraform image consumer manifest is invalid")
+    return dict(validated)
+
+
+def _consumer_manifest_rows(
+    manifest: Mapping[str, Any],
+) -> dict[str, Mapping[str, Any]]:
+    consumers = manifest.get("consumers")
+    if not isinstance(consumers, list):
+        raise EvidenceError("consumer manifest consumers must be a list")
+    result: dict[str, Mapping[str, Any]] = {}
+    for index, raw_consumer in enumerate(consumers):
+        consumer = _mapping(
+            raw_consumer,
+            label=f"consumer manifest consumers[{index}]",
+        )
+        consumer_id = _string(
+            consumer.get("consumer_id"),
+            label=f"consumer manifest consumers[{index}].consumer_id",
+        )
+        if consumer_id in result:
+            raise EvidenceError("consumer manifest contains a duplicate consumer")
+        result[consumer_id] = consumer
+    if len(result) != 8:
+        raise EvidenceError("consumer manifest must contain exactly eight consumers")
+    return result
+
+
+def _consumer_execution_state(
+    consumer: Mapping[str, Any],
+    *,
+    snapshot: str,
+) -> int | str | bool:
+    activator = _mapping(
+        consumer.get("activator"),
+        label=f"{consumer.get('consumer_id')} activator",
+    )
+    state = _mapping(
+        _mapping(
+            consumer.get(snapshot),
+            label=f"{consumer.get('consumer_id')} {snapshot} snapshot",
+        ).get("activation"),
+        label=f"{consumer.get('consumer_id')} {snapshot} activation",
+    )
+    activator_type = activator.get("type")
+    if activator_type == "ecs_service":
+        desired_count = state.get("desired_count")
+        if (
+            not isinstance(desired_count, int)
+            or isinstance(desired_count, bool)
+            or desired_count < 0
+        ):
+            raise EvidenceError("consumer ECS desired count is invalid")
+        return desired_count
+    if activator_type == "eventbridge_rule_ecs_target":
+        rule_state = state.get("state")
+        if rule_state not in {
+            "ENABLED",
+            "DISABLED",
+            "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
+        }:
+            raise EvidenceError("consumer EventBridge rule state is invalid")
+        return rule_state
+    if activator_type == "lambda_taskdef_arn_environment":
+        mapping_enabled = state.get("event_source_mapping_enabled")
+        if not isinstance(mapping_enabled, bool):
+            raise EvidenceError("consumer event source mapping state is invalid")
+        return mapping_enabled
+    raise EvidenceError("consumer activator type is not allowlisted")
+
+
+def _consumer_is_executable(consumer: Mapping[str, Any], *, snapshot: str) -> bool:
+    state = _consumer_execution_state(consumer, snapshot=snapshot)
+    activator = _mapping(
+        consumer.get("activator"),
+        label=f"{consumer.get('consumer_id')} activator",
+    )
+    if activator.get("type") == "ecs_service":
+        return isinstance(state, int) and not isinstance(state, bool) and state > 0
+    if activator.get("type") == "eventbridge_rule_ecs_target":
+        return state != "DISABLED"
+    return state is True
+
+
+def _consumer_execution_increased(consumer: Mapping[str, Any]) -> bool:
+    before = _consumer_execution_state(consumer, snapshot="before")
+    after = _consumer_execution_state(consumer, snapshot="after")
+    activator = _mapping(
+        consumer.get("activator"),
+        label=f"{consumer.get('consumer_id')} activator",
+    )
+    if activator.get("type") == "ecs_service":
+        return (
+            isinstance(before, int)
+            and not isinstance(before, bool)
+            and isinstance(after, int)
+            and not isinstance(after, bool)
+            and after > before
+        )
+    if activator.get("type") == "eventbridge_rule_ecs_target":
+        return (
+            before == "DISABLED" and after != "DISABLED"
+        ) or (
+            before == "ENABLED"
+            and after == "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
+        )
+    return (
+        not _consumer_is_executable(consumer, snapshot="before")
+        and _consumer_is_executable(consumer, snapshot="after")
+    )
+
+
+def _consumer_target_digest(
+    consumer_id: str,
+    consumer: Mapping[str, Any],
+) -> str:
+    coordinates = _release_coordinates_for_consumer(consumer_id)
+    after = _mapping(
+        consumer.get("after"),
+        label=f"{consumer_id} after snapshot",
+    )
+    image = _string(after.get("image"), label=f"{consumer_id} after image")
+    match = re.fullmatch(
+        rf"{re.escape(REGISTRY)}/{re.escape(coordinates['repository'])}@"
+        r"(sha256:[0-9a-f]{64})",
+        image,
+    )
+    if match is None:
+        raise EvidenceError(
+            f"{consumer_id} after image does not match the code-owned repository"
+        )
+    return match.group(1)
+
+
+def _receipt_required_consumers(
+    manifest: Mapping[str, Any],
+) -> tuple[dict[str, Mapping[str, Any]], set[str]]:
+    consumers = _consumer_manifest_rows(manifest)
+    required: set[str] = set()
+    for consumer_id, consumer in consumers.items():
+        before = _mapping(
+            consumer.get("before"),
+            label=f"{consumer_id} before snapshot",
+        )
+        after = _mapping(
+            consumer.get("after"),
+            label=f"{consumer_id} after snapshot",
+        )
+        before_image = _string(before.get("image"), label=f"{consumer_id} before image")
+        after_image = _string(after.get("image"), label=f"{consumer_id} after image")
+        if (
+            before_image != after_image
+            or _consumer_execution_state(consumer, snapshot="before")
+            != _consumer_execution_state(consumer, snapshot="after")
+        ):
+            required.add(consumer_id)
+    mode = manifest.get("mode")
+    if mode == "no-image-transition":
+        if required:
+            raise EvidenceError(
+                "no-image-transition manifest contains a receipt-requiring change"
+            )
+    elif mode == "receipt-required":
+        if not required:
+            raise EvidenceError(
+                "receipt-required manifest contains no receipt-requiring change"
+            )
+    else:
+        raise EvidenceError("consumer manifest deployment mode is invalid")
+    return consumers, required
+
+
+def _canonical_receipt_claim_ids(
+    claim_ids: Sequence[Any],
+    *,
+    allow_empty: bool = False,
+) -> list[str]:
     normalized = [_sha256(claim_id, label="release receipt claim ID") for claim_id in claim_ids]
     canonical = sorted(set(normalized))
-    if not canonical:
+    if not canonical and not allow_empty:
         raise EvidenceError("deployment receipt claims are empty")
-    if len(canonical) != len(normalized):
-        raise EvidenceError("deployment receipt claims contain a duplicate")
     return canonical
 
 
-def _deployment_binding(
+def _deployment_receipt_inputs(
     *,
-    images: Mapping[str, Any],
-    evidence: Mapping[str, Any],
-    contracts: Mapping[str, Any],
-    application: Mapping[str, Any],
-    shared_generation_ledger: Mapping[str, Any],
-    mcp_media_image: str,
-    release_channels: Mapping[str, Any],
-    intent_id: str,
-) -> tuple[str, list[str], str]:
-    selected = {name: image for name, image in images.items() if image}
-    normalized_channels: dict[str, str] = {}
-    if set(release_channels) != set(selected):
-        raise EvidenceError("deployment release channels do not match selected images")
-    for pipeline in sorted(selected):
-        channel = _string(
-            release_channels.get(pipeline),
-            label=f"{pipeline} deployment release channel",
+    consumer_manifest: Mapping[str, Any],
+    receipt_catalog: Mapping[str, Any],
+    consumer_receipt_bindings: Mapping[str, Any],
+) -> tuple[
+    str,
+    dict[str, Mapping[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, str],
+    list[str],
+]:
+    manifest = _validate_gate_consumer_manifest(consumer_manifest)
+    consumers, required = _receipt_required_consumers(manifest)
+    mode = _string(manifest.get("mode"), label="deployment mode")
+
+    normalized_bindings: dict[str, str] = {}
+    for consumer_id, raw_claim_id in consumer_receipt_bindings.items():
+        if not isinstance(consumer_id, str):
+            raise EvidenceError("consumer receipt binding key is invalid")
+        normalized_bindings[consumer_id] = _sha256(
+            raw_claim_id,
+            label=f"{consumer_id} receipt claim ID",
         )
-        if channel not in {"active", "rollback"}:
-            raise EvidenceError("deployment release channel is not allowlisted")
-        normalized_channels[pipeline] = channel
-    references: dict[str, Mapping[str, Any]] = {}
-    claim_ids: list[str] = []
-    for pipeline in sorted(selected):
+    if set(normalized_bindings) != required:
+        raise EvidenceError(
+            "consumer receipt bindings do not exactly match receipt-requiring consumers"
+        )
+
+    claim_ids = _canonical_receipt_claim_ids(
+        list(normalized_bindings.values()),
+        allow_empty=mode == "no-image-transition",
+    )
+    if set(receipt_catalog) != set(claim_ids):
+        raise EvidenceError(
+            "receipt catalog must contain exactly the claims used by consumer bindings"
+        )
+
+    references: dict[str, dict[str, Any]] = {}
+    for claim_id in claim_ids:
         reference = _mapping(
-            evidence.get(pipeline),
-            label=f"{pipeline} deployment evidence reference",
+            receipt_catalog.get(claim_id),
+            label=f"release receipt catalog[{claim_id}]",
         )
         _exact_keys(
             reference,
@@ -2262,48 +2550,113 @@ def _deployment_binding(
                 "signature_key",
                 "signature_version_id",
             },
-            label=f"{pipeline} deployment evidence reference",
+            label=f"release receipt catalog[{claim_id}]",
         )
-        if pipeline not in PIPELINES:
-            raise EvidenceError("deployment receipt claim pipeline is not allowlisted")
         if reference["bucket"] != EVIDENCE_BUCKET:
             raise EvidenceError("deployment receipt claim bucket is not fixed")
+        bound_consumers = sorted(
+            consumer_id
+            for consumer_id, bound_claim_id in normalized_bindings.items()
+            if bound_claim_id == claim_id
+        )
+        expected_pipelines = {
+            _release_coordinates_for_consumer(consumer_id)["pipeline"]
+            for consumer_id in bound_consumers
+        }
+        if len(expected_pipelines) != 1:
+            raise EvidenceError(
+                "one receipt claim cannot bind consumers from different pipelines"
+            )
+        pipeline = next(iter(expected_pipelines))
         receipt_key = _string(
             reference["key"],
-            label=f"{pipeline} deployment receipt key",
+            label=f"release receipt catalog[{claim_id}].key",
         )
         receipt_key_match = re.fullmatch(
             rf"release-receipts/{re.escape(pipeline)}/"
-            r"[0-9a-f]{40}/([0-9a-f]{64})\.json",
+            rf"[0-9a-f]{{40}}/({re.escape(claim_id)})\.json",
             receipt_key,
         )
-        if receipt_key_match is None or reference["signature_key"] != f"{receipt_key}.sig":
+        if (
+            receipt_key_match is None
+            or reference["signature_key"] != f"{receipt_key}.sig"
+        ):
             raise EvidenceError("deployment receipt claim key is not content-addressed")
         _version_id(
             reference["version_id"],
-            label=f"{pipeline} deployment receipt VersionId",
+            label=f"release receipt catalog[{claim_id}] VersionId",
         )
         _version_id(
             reference["signature_version_id"],
-            label=f"{pipeline} deployment receipt signature VersionId",
+            label=f"release receipt catalog[{claim_id}] signature VersionId",
         )
-        references[pipeline] = reference
-        # The immutable reference remains in the deployment context, but the
-        # one-use claim is the signed receipt bytes. Re-uploading identical
-        # receipt/signature bytes as new S3 versions must not mint a new use.
-        claim_ids.append(receipt_key_match.group(1))
-    claim_ids = _canonical_receipt_claim_ids(claim_ids)
+        target_digests = {
+            _consumer_target_digest(consumer_id, consumers[consumer_id])
+            for consumer_id in bound_consumers
+        }
+        if len(target_digests) != 1:
+            raise EvidenceError(
+                "consumers moving to different digests require different receipt claims"
+            )
+        references[claim_id] = dict(reference)
+
+    if mode == "no-image-transition" and (
+        receipt_catalog or consumer_receipt_bindings
+    ):
+        raise EvidenceError("no-image-transition forbids receipts and consumer bindings")
+    return mode, consumers, references, normalized_bindings, claim_ids
+
+
+def _deployment_binding(
+    *,
+    consumer_manifest: Mapping[str, Any],
+    receipt_catalog: Mapping[str, Any],
+    consumer_receipt_bindings: Mapping[str, Any],
+    contracts: Mapping[str, Any],
+    application: Mapping[str, Any],
+    shared_generation_ledger: Mapping[str, Any],
+    release_channels: Mapping[str, Any],
+    intent_id: str,
+) -> tuple[str, list[str], str]:
+    (
+        mode,
+        _consumers,
+        references,
+        normalized_bindings,
+        claim_ids,
+    ) = _deployment_receipt_inputs(
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
+    )
+    normalized_channels: dict[str, str] = {}
+    if set(release_channels) != set(normalized_bindings):
+        raise EvidenceError(
+            "deployment release channels do not match consumer receipt bindings"
+        )
+    for consumer_id in sorted(normalized_bindings):
+        channel = _string(
+            release_channels.get(consumer_id),
+            label=f"{consumer_id} deployment release channel",
+        )
+        if channel not in {"active", "rollback"}:
+            raise EvidenceError("deployment release channel is not allowlisted")
+        normalized_channels[consumer_id] = channel
     context = {
         "schema_version": DEPLOYMENT_INTENT_SCHEMA,
         "intent_id": intent_id,
-        "images": {name: selected[name] for name in sorted(selected)},
-        "mcp_media_image": mcp_media_image,
-        "evidence": {name: dict(references[name]) for name in sorted(references)},
-        "contracts": {name: contracts[name] for name in sorted(selected)},
-        "release_channels": normalized_channels,
-        "application": {
-            name: application[name] for name in sorted(selected) if name in application
+        "mode": mode,
+        "consumer_manifest": dict(consumer_manifest),
+        "receipt_catalog": {
+            claim_id: dict(references[claim_id]) for claim_id in sorted(references)
         },
+        "consumer_receipt_bindings": {
+            consumer_id: normalized_bindings[consumer_id]
+            for consumer_id in sorted(normalized_bindings)
+        },
+        "contracts": {name: contracts[name] for name in sorted(contracts)},
+        "release_channels": normalized_channels,
+        "application": {name: application[name] for name in sorted(application)},
         "shared_generation_ledger": dict(shared_generation_ledger),
     }
     context_sha256 = hashlib.sha256(canonical_bytes(context)).hexdigest()
@@ -2317,62 +2670,62 @@ def _terraform_gate(
     now: dt.datetime | None = None,
 ) -> dict[str, str]:
     (
-        images,
-        evidence,
+        consumer_manifest,
+        receipt_catalog,
+        consumer_receipt_bindings,
         contracts,
         ready,
         application,
         shared_generation_ledger,
-        mcp_media_image,
         signing_key_arn,
         encryption_key_arn,
         intent_id,
     ) = _parse_terraform_gate_query(query)
-
-    selected = {name: image for name, image in images.items() if image}
-    if not selected:
-        raise EvidenceError("Terraform release gate requires at least one image")
-    if set(selected) - PIPELINES.keys():
-        raise EvidenceError("Terraform selected an unknown image pipeline")
+    (
+        mode,
+        consumers,
+        references,
+        normalized_bindings,
+        claim_ids,
+    ) = _deployment_receipt_inputs(
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
+    )
     if set(application) - {"mcp"}:
         raise EvidenceError("Terraform supplied an unknown application binding")
-    if "mcp" in selected and "mcp" not in application:
+    required_pipelines = {
+        _release_coordinates_for_consumer(consumer_id)["pipeline"]
+        for consumer_id in normalized_bindings
+    }
+    if "mcp" in required_pipelines and "mcp" not in application:
         raise EvidenceError("Terraform omitted the MCP application binding")
-    if mcp_media_image and "mcp" not in selected:
-        raise EvidenceError("MCP media image requires the MCP core release bundle")
 
     current = _utc_now(now)
-    verified: list[str] = []
+    verified_consumers: list[str] = []
     release_channels: dict[str, str] = {}
     receipt_expirations: list[dt.datetime] = []
     with tempfile.TemporaryDirectory(prefix="teamagent-release-gate.") as temporary:
         root = Path(temporary)
-        for pipeline, image in sorted(selected.items()):
+        for claim_id in claim_ids:
+            bound_consumers = sorted(
+                consumer_id
+                for consumer_id, bound_claim_id in normalized_bindings.items()
+                if bound_claim_id == claim_id
+            )
+            pipeline = _release_coordinates_for_consumer(bound_consumers[0])["pipeline"]
             if ready.get(pipeline) is not True:
                 raise EvidenceError(f"{pipeline} release.ready is false")
             contract_sha256 = _sha256(
                 contracts.get(pipeline),
                 label=f"{pipeline} contract SHA-256",
             )
-            reference = _mapping(evidence.get(pipeline), label=f"{pipeline} evidence reference")
-            _exact_keys(
-                reference,
-                {
-                    "bucket",
-                    "key",
-                    "version_id",
-                    "signature_key",
-                    "signature_version_id",
-                },
-                label=f"{pipeline} evidence reference",
-            )
-            if reference["bucket"] != EVIDENCE_BUCKET:
-                raise EvidenceError("release evidence bucket is not fixed")
+            reference = references[claim_id]
             key = _string(reference["key"], label="release evidence key")
             signature_key = _string(reference["signature_key"], label="release signature key")
             expected_key_pattern = re.compile(
                 rf"release-receipts/{re.escape(pipeline)}/"
-                r"([0-9a-f]{40})/([0-9a-f]{64})\.json"
+                rf"([0-9a-f]{{40}})/({re.escape(claim_id)})\.json"
             )
             key_match = expected_key_pattern.fullmatch(key)
             if key_match is None or signature_key != f"{key}.sig" or ".." in key:
@@ -2382,8 +2735,8 @@ def _terraform_gate(
                 reference["signature_version_id"],
                 label="release signature VersionId",
             )
-            receipt_path = root / f"{pipeline}.json"
-            signature_path = root / f"{pipeline}.sig"
+            receipt_path = root / f"{claim_id}.json"
+            signature_path = root / f"{claim_id}.sig"
             for object_key, object_version, destination, label in (
                 (key, version_id, receipt_path, "receipt"),
                 (
@@ -2450,9 +2803,9 @@ def _terraform_gate(
                     raise EvidenceError(f"{label} download VersionId mismatch")
 
             assert key_match is not None
-            if hashlib.sha256(receipt_path.read_bytes()).hexdigest() != key_match.group(2):
+            if hashlib.sha256(receipt_path.read_bytes()).hexdigest() != claim_id:
                 raise EvidenceError("release receipt bytes do not match the content key")
-            digest_path = root / f"{pipeline}.sha256"
+            digest_path = root / f"{claim_id}.sha256"
             digest_path.write_bytes(hashlib.sha256(receipt_path.read_bytes()).digest())
             verify_raw = _aws(
                 "kms",
@@ -2485,73 +2838,82 @@ def _terraform_gate(
                 or receipt["build"].get("source_commit") != key_match.group(1)
             ):
                 raise EvidenceError("release receipt commit does not match its content key")
-            validated_receipt = validate_deploy_reference(
+            validated_receipt = validate_release_receipt(
                 receipt,
-                pipeline=pipeline,
-                image=_string(image, label=f"{pipeline} image"),
-                contract_sha256=contract_sha256,
+                expected_pipeline=pipeline,
+                expected_contract_sha256=contract_sha256,
+                allowed_channels={"active", "rollback"},
                 now=current,
             )
+            verified_channel = _string(
+                validated_receipt.get("channel"),
+                label=f"{claim_id} verified release channel",
+            )
+            for consumer_id in bound_consumers:
+                after = _mapping(
+                    consumers[consumer_id].get("after"),
+                    label=f"{consumer_id} after snapshot",
+                )
+                _validate_consumer_deploy_reference(
+                    validated_receipt,
+                    consumer_id=consumer_id,
+                    image=_string(
+                        after.get("image"),
+                        label=f"{consumer_id} after image",
+                    ),
+                )
+                if (
+                    _consumer_execution_increased(consumers[consumer_id])
+                    and verified_channel != "active"
+                ):
+                    raise EvidenceError(
+                        f"{consumer_id} execution increase requires a fresh active receipt"
+                    )
+                release_channels[consumer_id] = verified_channel
+                verified_consumers.append(consumer_id)
             receipt_expirations.append(
                 _timestamp(
                     validated_receipt["expires_at"],
-                    label=f"{pipeline} deployment receipt expires_at",
+                    label=f"{claim_id} deployment receipt expires_at",
                 )
             )
-            release_channels[pipeline] = _string(
-                validated_receipt.get("channel"),
-                label=f"{pipeline} verified release channel",
-            )
             if pipeline == "mcp":
-                core_matches = [
-                    subject
-                    for subject in validated_receipt["subjects"]
-                    if (
-                        subject["name"] == "core"
-                        and image
-                        == f"{REGISTRY}/{subject['release_repository']}@{subject['digest']}"
-                    )
-                ]
-                if len(core_matches) != 1:
-                    raise EvidenceError("MCP core image does not match the core receipt subject")
-                if mcp_media_image:
-                    media_matches = [
-                        subject
-                        for subject in validated_receipt["subjects"]
-                        if (
-                            subject["name"] == "media"
-                            and mcp_media_image
-                            == (f"{REGISTRY}/{subject['release_repository']}@{subject['digest']}")
-                        )
-                    ]
-                    if len(media_matches) != 1:
-                        raise EvidenceError(
-                            "MCP media image does not match the media receipt subject"
-                        )
                 _validate_mcp_deployment_application(
                     validated_receipt,
                     application.get("mcp"),
                 )
             _validate_promoted_release(validated_receipt)
-            verified.append(pipeline)
+    if mode == "no-image-transition":
+        if release_channels or receipt_expirations or claim_ids:
+            raise EvidenceError("no-image-transition contains release evidence")
+        authorization_expires_at = int(
+            (
+                current
+                + dt.timedelta(seconds=MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS)
+            ).timestamp()
+        )
+    else:
+        if not receipt_expirations:
+            raise EvidenceError("receipt-required deployment lacks fresh evidence")
+        authorization_expires_at = int(min(receipt_expirations).timestamp())
     context_sha256, _, claims_sha256 = _deployment_binding(
-        images=images,
-        evidence=evidence,
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
-        mcp_media_image=mcp_media_image,
         release_channels=release_channels,
         intent_id=intent_id,
     )
     return {
         "verified": "true",
-        "verified_pipelines": ",".join(verified),
+        "verified_consumers": ",".join(sorted(verified_consumers)),
+        "verified_pipelines": ",".join(sorted(required_pipelines)),
+        "deployment_mode": mode,
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
-        "receipt_authorization_expires_at": str(
-            int(min(receipt_expirations).timestamp())
-        ),
+        "receipt_authorization_expires_at": str(authorization_expires_at),
         "release_channels_json": json.dumps(
             release_channels,
             sort_keys=True,
@@ -2669,7 +3031,7 @@ def _saved_plan_transition_classification(
 def _is_digest_preserving_task_replacement(
     transition: Mapping[str, Any],
     *,
-    requested_images: Mapping[str, Any],
+    consumer_images: Mapping[str, Any],
 ) -> bool:
     address = _string(
         transition.get("address"),
@@ -2679,7 +3041,7 @@ def _is_digest_preserving_task_replacement(
     if not base_address.startswith("aws_ecs_task_definition."):
         return False
     pipeline = IMAGE_MANAGED_ECS_PIPELINES.get(base_address)
-    image = requested_images.get(pipeline) if pipeline else None
+    image = consumer_images.get(pipeline) if pipeline else None
     after = transition.get("after")
     if not isinstance(image, str) or not image or not isinstance(after, dict):
         return False
@@ -2710,7 +3072,7 @@ def _require_destructive_rollback_channels(
     *,
     deletes: Sequence[Mapping[str, Any]],
     replacements: Sequence[Mapping[str, Any]],
-    requested_images: Mapping[str, Any],
+    consumer_images: Mapping[str, Any],
     release_channels: Mapping[str, Any],
 ) -> None:
     destructive = list(deletes)
@@ -2719,7 +3081,7 @@ def _require_destructive_rollback_channels(
         for transition in replacements
         if not _is_digest_preserving_task_replacement(
             transition,
-            requested_images=requested_images,
+            consumer_images=consumer_images,
         )
         and not _is_exact_hmac_gate_replacement(transition)
     )
@@ -2734,7 +3096,7 @@ def _require_destructive_rollback_channels(
             raise EvidenceError(
                 "saved image release plan contains an unscoped destructive transition"
             )
-        image = requested_images.get(pipeline)
+        image = consumer_images.get(pipeline)
         if not isinstance(image, str) or not image:
             raise EvidenceError(
                 f"{pipeline} image-empty destructive state is forbidden"
@@ -2826,50 +3188,72 @@ def deployment_plan_metadata(
             "deployment_intent_id",
             "deployment_context_sha256",
             "receipt_claims_sha256",
-            "requested_images",
-            "requested_media_image",
+            "consumer_manifest",
+            "receipt_catalog",
+            "consumer_receipt_bindings",
             "release_channels",
             "application_provenance",
             "shared_generation_ledger",
             "hmac_release_bindings",
             "deployment_gate_query",
             "receipt_authorization_expires_at",
+            "deployment_mode",
         },
         label="saved Terraform release gate input",
     )
-    requested_images = _mapping(
-        gate_input["requested_images"],
-        label="saved Terraform requested images",
+    consumer_manifest = _validate_gate_consumer_manifest(
+        gate_input["consumer_manifest"]
     )
-    requested_media_image = gate_input["requested_media_image"]
-    if not isinstance(requested_media_image, str):
-        raise EvidenceError("saved Terraform requested media image is malformed")
-    if not (
-        any(isinstance(image, str) and image for image in requested_images.values())
-        or requested_media_image
-    ):
-        raise EvidenceError("saved Terraform plan has no requested production image")
-    selected_images = {
-        pipeline: image
-        for pipeline, image in requested_images.items()
-        if isinstance(image, str) and image
-    }
+    manifest_consumers, required_consumers = _receipt_required_consumers(
+        consumer_manifest
+    )
+    receipt_catalog = _mapping(
+        gate_input["receipt_catalog"],
+        label="saved Terraform receipt catalog",
+    )
+    consumer_receipt_bindings = _mapping(
+        gate_input["consumer_receipt_bindings"],
+        label="saved Terraform consumer receipt bindings",
+    )
+    (
+        bound_mode,
+        _bound_consumers,
+        _bound_references,
+        normalized_consumer_receipt_bindings,
+        _bound_claim_ids,
+    ) = _deployment_receipt_inputs(
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
+    )
+    if normalized_consumer_receipt_bindings != dict(consumer_receipt_bindings):
+        raise EvidenceError("saved Terraform consumer receipt bindings are noncanonical")
     release_channels = _mapping(
         gate_input["release_channels"],
         label="saved Terraform release channels",
     )
-    if set(release_channels) != set(selected_images) or any(
+    if set(release_channels) != required_consumers or any(
         channel not in {"active", "rollback"}
         for channel in release_channels.values()
     ):
         raise EvidenceError(
-            "saved Terraform release channels do not match requested images"
+            "saved Terraform release channels do not match receipt-requiring consumers"
         )
+    deployment_mode = _string(
+        gate_input["deployment_mode"],
+        label="saved Terraform deployment mode",
+    )
+    if deployment_mode != consumer_manifest["mode"] or deployment_mode != bound_mode:
+        raise EvidenceError("saved Terraform deployment mode is not manifest-derived")
     application_provenance = _mapping(
         gate_input["application_provenance"],
         label="saved Terraform application provenance",
     )
-    if requested_images.get("mcp") and "mcp" not in application_provenance:
+    required_pipelines = {
+        _release_coordinates_for_consumer(consumer_id)["pipeline"]
+        for consumer_id in required_consumers
+    }
+    if "mcp" in required_pipelines and "mcp" not in application_provenance:
         raise EvidenceError("saved Terraform plan lacks the MCP application binding")
     shared_generation_ledger = _validate_shared_generation_ledger_binding(
         gate_input["shared_generation_ledger"]
@@ -2885,22 +3269,24 @@ def deployment_plan_metadata(
         )
     )
     (
-        query_images,
-        _query_evidence,
+        query_consumer_manifest,
+        query_receipt_catalog,
+        query_consumer_receipt_bindings,
         _query_contracts,
         _query_ready,
         query_application,
         query_shared_generation_ledger,
-        query_mcp_media_image,
         _query_signing_key_arn,
         _query_encryption_key_arn,
         query_intent_id,
     ) = _parse_terraform_gate_query(deployment_gate_query)
     if (
-        query_images != dict(requested_images)
+        query_consumer_manifest != consumer_manifest
+        or query_receipt_catalog != dict(receipt_catalog)
+        or query_consumer_receipt_bindings
+        != dict(consumer_receipt_bindings)
         or query_application != dict(application_provenance)
         or query_shared_generation_ledger != shared_generation_ledger
-        or query_mcp_media_image != requested_media_image
     ):
         raise EvidenceError(
             "saved Terraform gate query does not match the planned deployment inputs"
@@ -2915,20 +3301,21 @@ def deployment_plan_metadata(
         destructive_deletes,
         planned_replacements,
     ) = _saved_plan_transition_classification(changes_for_import_check)
-    transition_images = dict(requested_images)
-    transition_channels = dict(release_channels)
-    if requested_media_image:
-        if not requested_images.get("mcp"):
-            raise EvidenceError(
-                "saved Terraform media image requires the signed MCP release channel"
-            )
-        transition_images["tiktok"] = requested_media_image
-        transition_channels["tiktok"] = release_channels.get("mcp")
+    transition_images = {
+        consumer_id: _string(
+            _mapping(
+                consumer.get("after"),
+                label=f"{consumer_id} after snapshot",
+            ).get("image"),
+            label=f"{consumer_id} after image",
+        )
+        for consumer_id, consumer in manifest_consumers.items()
+    }
     _require_destructive_rollback_channels(
         deletes=destructive_deletes,
         replacements=planned_replacements,
-        requested_images=transition_images,
-        release_channels=transition_channels,
+        consumer_images=transition_images,
+        release_channels=release_channels,
     )
     changes = changes_for_import_check
     gate_changes = [
@@ -2991,6 +3378,21 @@ def deployment_plan_metadata(
             separators=(",", ":"),
         ),
         "receipt_authorization_expires_at": receipt_authorization_expires_at,
+        "deployment_mode": deployment_mode,
+        "consumer_manifest_sha256": hashlib.sha256(
+            canonical_bytes(consumer_manifest)
+        ).hexdigest(),
+        "release_evidence_binding_sha256": hashlib.sha256(
+            canonical_bytes(
+                {
+                    "receipt_catalog": dict(receipt_catalog),
+                    "consumer_receipt_bindings": dict(
+                        consumer_receipt_bindings
+                    ),
+                    "release_channels": dict(release_channels),
+                }
+            )
+        ).hexdigest(),
     }
 
 
@@ -3022,6 +3424,9 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
         raise EvidenceError("Terraform runtime context is invalid") from exc
     state = _mapping(validated["state"], label="Terraform runtime context state")
     plan = _mapping(validated["plan"], label="Terraform runtime context plan")
+    consumer_manifest = _validate_gate_consumer_manifest(
+        validated["consumer_manifest"]
+    )
     backend = _mapping(
         validated["backend"],
         label="Terraform runtime context backend",
@@ -3037,6 +3442,9 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
     serial = state["serial"]
     if not isinstance(serial, int) or isinstance(serial, bool):
         raise EvidenceError("Terraform runtime context state serial is invalid")
+    manifest_sha256 = hashlib.sha256(canonical_bytes(consumer_manifest)).hexdigest()
+    if plan["consumer_count"] != 8 or plan["consumer_manifest_sha256"] != manifest_sha256:
+        raise EvidenceError("Terraform context consumer manifest binding is invalid")
     return {
         "terraform_context_sha256": _sha256(
             context_sha256,
@@ -3063,6 +3471,20 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
         "plan_transition_sha256": _sha256(
             plan["transition_sha256"],
             label="Terraform plan transition SHA-256",
+        ),
+        "consumer_manifest_sha256": manifest_sha256,
+        "consumer_count": 8,
+        "consumer_comparison_sha256": _sha256(
+            plan["consumer_comparison_sha256"],
+            label="Terraform consumer comparison SHA-256",
+        ),
+        "release_evidence_binding_sha256": _sha256(
+            plan["release_evidence_binding_sha256"],
+            label="Terraform release evidence binding SHA-256",
+        ),
+        "deployment_mode": _string(
+            consumer_manifest["mode"],
+            label="Terraform context deployment mode",
         ),
     }
 
@@ -3429,13 +3851,13 @@ def _verified_receipt_claims_for_saved_plan(
 ) -> list[str]:
     verified = _terraform_gate(query, now=now)
     (
-        images,
-        evidence,
+        consumer_manifest,
+        receipt_catalog,
+        consumer_receipt_bindings,
         contracts,
         _,
         application,
         shared_generation_ledger,
-        mcp_media_image,
         _,
         _,
         intent_id,
@@ -3445,12 +3867,12 @@ def _verified_receipt_claims_for_saved_plan(
         object_pairs_hook=_reject_duplicate_keys,
     )
     context_sha256, receipt_claim_ids, claims_sha256 = _deployment_binding(
-        images=images,
-        evidence=evidence,
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
         contracts=contracts,
         application=application,
         shared_generation_ledger=shared_generation_ledger,
-        mcp_media_image=mcp_media_image,
         release_channels=_mapping(
             release_channels,
             label="apply-time verified release channels",
@@ -3462,10 +3884,20 @@ def _verified_receipt_claims_for_saved_plan(
         verified["receipt_authorization_expires_at"],
         label="apply-time receipt authorization expiry",
     )
+    saved_receipt_expires_at = int(metadata["receipt_authorization_expires_at"])
+    if verified["deployment_mode"] == "receipt-required":
+        authorization_matches = receipt_expires_at == saved_receipt_expires_at
+    else:
+        now_epoch = int(now.timestamp())
+        authorization_matches = (
+            now_epoch < saved_receipt_expires_at
+            <= now_epoch + MAX_DEPLOYMENT_INTENT_LIFETIME_SECONDS
+        )
     if (
         intent_id != metadata["intent_id"]
         or query_sha256 != metadata["gate_query_sha256"]
-        or receipt_expires_at != metadata["receipt_authorization_expires_at"]
+        or not authorization_matches
+        or verified["deployment_mode"] != metadata["deployment_mode"]
         or verified["deployment_context_sha256"] != context_sha256
         or verified["receipt_claims_sha256"] != claims_sha256
         or context_sha256 != metadata["deployment_context_sha256"]
@@ -3672,9 +4104,14 @@ def prepare_deployment_intent(
     if (
         metadata["plan_transition_sha256"]
         != terraform_context["plan_transition_sha256"]
+        or metadata["consumer_manifest_sha256"]
+        != terraform_context["consumer_manifest_sha256"]
+        or metadata["release_evidence_binding_sha256"]
+        != terraform_context["release_evidence_binding_sha256"]
+        or metadata["deployment_mode"] != terraform_context["deployment_mode"]
     ):
         raise EvidenceError(
-            "Terraform runtime context transition classification differs from the saved plan"
+            "Terraform runtime context consumer manifest differs from the saved plan"
         )
     current = _utc_now(now)
     receipt_expires_at = int(metadata["receipt_authorization_expires_at"])
@@ -3733,6 +4170,11 @@ def _deployment_intent_base_keys() -> set[str]:
         "plan_addresses_sha256",
         "runtime_images_sha256",
         "plan_transition_sha256",
+        "consumer_manifest_sha256",
+        "consumer_count",
+        "consumer_comparison_sha256",
+        "release_evidence_binding_sha256",
+        "deployment_mode",
         "control_commit",
         "prepared_at",
         "authorization_expires_at",
@@ -3767,6 +4209,11 @@ def _validate_deployment_intent_binding(
         or item["gate_query_sha256"] != metadata["gate_query_sha256"]
         or item["plan_transition_sha256"]
         != metadata["plan_transition_sha256"]
+        or item["consumer_manifest_sha256"]
+        != metadata["consumer_manifest_sha256"]
+        or item["release_evidence_binding_sha256"]
+        != metadata["release_evidence_binding_sha256"]
+        or item["deployment_mode"] != metadata["deployment_mode"]
     ):
         raise EvidenceError("deployment intent does not bind this saved plan")
     for context_hash_name in (
@@ -3776,9 +4223,19 @@ def _validate_deployment_intent_binding(
         "plan_addresses_sha256",
         "runtime_images_sha256",
         "plan_transition_sha256",
+        "consumer_manifest_sha256",
+        "consumer_comparison_sha256",
+        "release_evidence_binding_sha256",
         "gate_query_sha256",
     ):
         _sha256(item[context_hash_name], label=f"deployment {context_hash_name}")
+    if item["deployment_mode"] not in {
+        "receipt-required",
+        "no-image-transition",
+    }:
+        raise EvidenceError("deployment intent mode is invalid")
+    if item["consumer_count"] != 8:
+        raise EvidenceError("deployment intent consumer count is invalid")
     _string(item["state_lineage"], label="deployment Terraform state lineage")
     if (
         not isinstance(item["state_serial"], int)
@@ -4050,7 +4507,15 @@ def _consume_applying_deployment_intent(
     attempt_id = _uuid4(apply_attempt_id, label="apply attempt ID")
     if attempt_id == metadata["intent_id"]:
         raise EvidenceError("apply attempt ID must differ from deployment intent ID")
-    normalized_claims = _canonical_receipt_claim_ids(receipt_claim_ids)
+    deployment_mode = metadata.get("deployment_mode")
+    if deployment_mode not in {"receipt-required", "no-image-transition"}:
+        raise EvidenceError("deployment intent mode is invalid")
+    normalized_claims = _canonical_receipt_claim_ids(
+        receipt_claim_ids,
+        allow_empty=deployment_mode == "no-image-transition",
+    )
+    if deployment_mode == "no-image-transition" and normalized_claims:
+        raise EvidenceError("no-image-transition deployment cannot consume receipt claims")
     claims_sha256 = hashlib.sha256(canonical_bytes(normalized_claims)).hexdigest()
     current = _utc_now(now)
     record_id = f"intent#{metadata['intent_id']}"

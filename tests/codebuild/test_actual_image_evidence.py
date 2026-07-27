@@ -274,19 +274,13 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
         {
             "payload": {
                 "bucket": "teamagent-dev-image-release-evidence",
-                "key": (
-                    f"approval-records/mcp/{COMMIT}/"
-                    f"{approval_payload_sha256}.json"
-                ),
+                "key": (f"approval-records/mcp/{COMMIT}/{approval_payload_sha256}.json"),
                 "version_id": "approval-payload-version",
                 "sha256": approval_payload_sha256,
             },
             "signature": {
                 "bucket": "teamagent-dev-image-release-evidence",
-                "key": (
-                    f"approval-records/mcp/{COMMIT}/"
-                    f"{approval_payload_sha256}.json.sig"
-                ),
+                "key": (f"approval-records/mcp/{COMMIT}/{approval_payload_sha256}.json.sig"),
                 "version_id": "approval-signature-version",
                 "sha256": "b" * 64,
             },
@@ -299,9 +293,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
 
     contract = BUNDLE_PROVENANCE.load_contract(args.contract)
     runtime_contract = BUNDLE_PROVENANCE._load_runtime_contract(args.runtime_contract)
-    subject = next(
-        value for value in contract["subjects"] if value["name"] == subject_name
-    )
+    subject = next(value for value in contract["subjects"] if value["name"] == subject_name)
     production = contract["app_html"]["production"]
     record = {"schema_version": 1, **production}
     fallback = contract["app_html"]["baked_fallback"]
@@ -330,10 +322,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
             else build_arguments[binding]
         )
     labels.update(
-        {
-            assertion["oci_label"]: assertion["value"]
-            for assertion in subject["source_assertions"]
-        }
+        {assertion["oci_label"]: assertion["value"] for assertion in subject["source_assertions"]}
     )
     labels["io.teamagent.build.release-approval-sha256"] = approval_payload_sha256
     if subject_name == "core":
@@ -378,9 +367,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
         for referrer in subject_referrers["referrers"]
         if referrer["artifactType"] == "application/vnd.in-toto+json"
     )
-    provenance_referrer["annotations"][
-        "io.teamagent.build.payload-sha256"
-    ] = provenance_sha256
+    provenance_referrer["annotations"]["io.teamagent.build.payload-sha256"] = provenance_sha256
     _write_json(args.subject_referrers, subject_referrers)
     args.build_context_sha256 = BUILD_CONTEXT_SHA256
     return args
@@ -420,14 +407,8 @@ def test_mcp_subject_verification_binds_exact_manifest_config_digest(
 
     assert subject["name"] == subject_name
     assert subject["labels"]["io.teamagent.build.context-sha256"] == BUILD_CONTEXT_SHA256
-    assert (
-        subject["labels"]["io.teamagent.build.release-contract-sha256"]
-        == args.contract_sha256
-    )
-    assert (
-        subject["labels"]["io.teamagent.build.release-approval-sha256"]
-        == "a" * 64
-    )
+    assert subject["labels"]["io.teamagent.build.release-contract-sha256"] == args.contract_sha256
+    assert subject["labels"]["io.teamagent.build.release-approval-sha256"] == "a" * 64
 
 
 @pytest.mark.parametrize(
@@ -441,30 +422,22 @@ def test_mcp_subject_rejects_external_approval_binding_drift(
     args = _mcp_fixture(tmp_path, subject_name="media")
     if mutation == "label":
         config = json.loads(args.config.read_text(encoding="utf-8"))
-        config["config"]["Labels"][
-            "io.teamagent.build.release-approval-sha256"
-        ] = "0" * 64
+        config["config"]["Labels"]["io.teamagent.build.release-approval-sha256"] = "0" * 64
         _write_json(args.config, config)
-        args.config_digest = (
-            "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
-        )
+        args.config_digest = "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
         expected = "OCI approval label"
     else:
         provenance = json.loads(args.provenance.read_text(encoding="utf-8"))
         provenance["predicate"]["releaseApprovalSha256"] = "0" * 64
         _write_json(args.provenance, provenance)
         provenance_sha256 = hashlib.sha256(args.provenance.read_bytes()).hexdigest()
-        referrers = json.loads(
-            args.subject_referrers.read_text(encoding="utf-8")
-        )
+        referrers = json.loads(args.subject_referrers.read_text(encoding="utf-8"))
         referrer = next(
             item
             for item in referrers["referrers"]
             if item["artifactType"] == "application/vnd.in-toto+json"
         )
-        referrer["annotations"][
-            "io.teamagent.build.payload-sha256"
-        ] = provenance_sha256
+        referrer["annotations"]["io.teamagent.build.payload-sha256"] = provenance_sha256
         _write_json(args.subject_referrers, referrers)
         expected = "provenance does not bind the external approval"
 
@@ -493,9 +466,7 @@ def test_mcp_subject_rejects_blocked_outer_contract(tmp_path: Path) -> None:
     _write_json(args.contract, contract)
     args.contract_sha256 = hashlib.sha256(args.contract.read_bytes()).hexdigest()
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    config["config"]["Labels"][
-        "io.teamagent.build.release-contract-sha256"
-    ] = args.contract_sha256
+    config["config"]["Labels"]["io.teamagent.build.release-contract-sha256"] = args.contract_sha256
     _write_json(args.config, config)
     args.config_digest = "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
 
@@ -552,9 +523,7 @@ def test_mcp_core_subject_rejects_aggregate_runtime_receipt_drift(
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        labels["io.teamagent.build.runtime-receipt"] = base64.b64encode(
-            receipt_bytes
-        ).decode()
+        labels["io.teamagent.build.runtime-receipt"] = base64.b64encode(receipt_bytes).decode()
         labels["io.teamagent.build.runtime-receipt-sha256"] = hashlib.sha256(
             receipt_bytes
         ).hexdigest()
