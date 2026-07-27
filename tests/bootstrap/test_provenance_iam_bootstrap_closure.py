@@ -77,18 +77,14 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_role_policy.alarm_recipient_ack_signer
     aws_iam_role_policy.approval_caller
     aws_iam_role_policy.approval_publisher
-    aws_iam_role_policy.codebuild_launcher
     aws_iam_role_policy.image_attestor
     aws_iam_role_policy.image_deployment_gate
     aws_iam_role_policy.image_promoter
     aws_iam_role_policy.mcp_source_publisher
     aws_iam_role_policy.media_cutover_attestor
     aws_iam_role_policy.openclaw_codebuild
-    aws_iam_role_policy.openclaw_publisher
     aws_iam_role_policy.release_control_updater
-    aws_iam_role_policy.release_launcher
     aws_iam_role_policy.runtime_evidence_automation
-    aws_iam_role_policy.tiktok_build_launcher
     aws_iam_role_policy.tiktok_codebuild
     aws_iam_policy.runtime_automation_control_plane_manage_a
     aws_iam_policy.runtime_automation_control_plane_manage_b
@@ -149,6 +145,10 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_s3_bucket_versioning.image_release_evidence
     aws_s3_bucket_versioning.openclaw_build_evidence
     aws_s3_object.approval_publisher_buildspec
+    aws_s3_object.image_attestor_buildspec
+    aws_s3_object.image_promoter_buildspec
+    aws_s3_object.mcp_source_publisher_buildspec
+    aws_s3_object.tiktok_image_buildspec
     """.split()
 )
 
@@ -165,7 +165,6 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.approval_publisher
     data.aws_iam_policy_document.approval_publisher_assume
     data.aws_iam_policy_document.approval_reader
-    data.aws_iam_policy_document.codebuild_launcher
     data.aws_iam_policy_document.codebuild_launcher_assume
     data.aws_iam_policy_document.image_attestor
     data.aws_iam_policy_document.image_attestor_assume
@@ -182,13 +181,11 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.openclaw_build_evidence_bucket
     data.aws_iam_policy_document.openclaw_codebuild
     data.aws_iam_policy_document.openclaw_codebuild_assume
-    data.aws_iam_policy_document.openclaw_publisher
     data.aws_iam_policy_document.openclaw_publisher_assume
     data.aws_iam_policy_document.release_caller
     data.aws_iam_policy_document.release_control_update_caller
     data.aws_iam_policy_document.release_control_updater
     data.aws_iam_policy_document.release_control_updater_assume
-    data.aws_iam_policy_document.release_launcher
     data.aws_iam_policy_document.release_launcher_assume
     data.aws_iam_policy_document.runtime_automation_assume
     data.aws_iam_policy_document.runtime_automation_boundary
@@ -197,12 +194,20 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.runtime_automation_control_plane_core
     data.aws_iam_policy_document.runtime_evidence_automation
     data.aws_iam_policy_document.tiktok_build_caller
-    data.aws_iam_policy_document.tiktok_build_launcher
     data.aws_iam_policy_document.tiktok_build_launcher_assume
     data.aws_iam_policy_document.tiktok_codebuild
     data.aws_iam_policy_document.tiktok_codebuild_assume
     data.aws_iam_user.aiia_dev
     """.split()
+)
+
+INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS = frozenset(
+    {
+        "aws_iam_role_policy.codebuild_launcher",
+        "aws_iam_role_policy.openclaw_publisher",
+        "aws_iam_role_policy.release_launcher",
+        "aws_iam_role_policy.tiktok_build_launcher",
+    }
 )
 
 ECR_LIFECYCLE_TARGETS = (
@@ -309,7 +314,10 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
             edges[address].update(expand_local(local_dependency))
 
     contract = _contract()
-    closure = set(cast(list[str], contract["terraform_targets"]))
+    targets = set(cast(list[str], contract["terraform_targets"]))
+    undeclared_targets = targets - set(edges)
+    assert undeclared_targets == INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS
+    closure = targets - undeclared_targets
     frontier = list(closure)
     while frontier:
         current = frontier.pop()
@@ -327,7 +335,7 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
     assert len(EXPECTED_POST_CUT_MANAGED) == 137
-    assert len(EXPECTED_POST_CUT_DATA) == 48
+    assert len(EXPECTED_POST_CUT_DATA) == 44
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
 
@@ -337,12 +345,21 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     existing = set(cast(list[str], contract["existing_dependency_addresses"]))
     forbidden_prefixes = set(cast(list[str], contract["forbidden_change_type_prefixes"]))
     assert len(targets) == 119
-    assert len(dependencies) == 16
-    assert existing == {"aws_s3_bucket.raw_files"}
+    assert len(dependencies) == 20
+    assert existing == {
+        "aws_iam_role.codebuild",
+        "aws_s3_bucket.raw_files",
+    }
     assert targets.isdisjoint(dependencies)
     assert targets.isdisjoint(existing)
     assert dependencies.isdisjoint(existing)
-    assert targets | dependencies | existing == EXPECTED_POST_CUT_MANAGED
+    assert INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS <= targets
+    assert (
+        (targets - INTENTIONALLY_UNDECLARED_INLINE_POLICY_TARGETS)
+        | dependencies
+        | existing
+        == EXPECTED_POST_CUT_MANAGED
+    )
     assert "terraform_data" in forbidden_prefixes
 
 

@@ -183,9 +183,14 @@
     "aws_ecr_repository.tiktok_acquire",
     "aws_ecr_repository.tiktok_acquire_quarantine",
     "aws_ecr_repository.tiktok_acquire_verified_candidates",
-    "aws_kms_key.openclaw_rollout_signing"
+    "aws_kms_key.openclaw_rollout_signing",
+    "aws_s3_object.mcp_source_publisher_buildspec",
+    "aws_s3_object.image_attestor_buildspec",
+    "aws_s3_object.image_promoter_buildspec",
+    "aws_s3_object.tiktok_image_buildspec"
   ],
   "existing_dependency_addresses": [
+    "aws_iam_role.codebuild",
     "aws_s3_bucket.raw_files"
   ],
   "required_main_state_addresses": [

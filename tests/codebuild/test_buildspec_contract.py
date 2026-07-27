@@ -422,7 +422,17 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
     assert "aws s3 cp" not in body
     assert "aws s3api copy-object" not in body
     for get_object in body.split("aws s3api get-object")[1:]:
-        assert "--version-id" in get_object.split(")", maxsplit=1)[0]
+        call = get_object.split(")", maxsplit=1)[0]
+        if "MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY" in call:
+            # CodeBuild cannot reference a buildspec by VersionId: a
+            # "?versionId=" suffix is read as part of the key and the fetch
+            # fails with NoSuchKey (measured 2026-07-27). This one fetch is
+            # pinned by a content-addressed key plus a SHA-256 comparison,
+            # which binds the exact bytes rather than the exact version.
+            assert "$MCP_SOURCE_PUBLISHER_BUILDSPEC_SHA256" in body
+            assert 'case "$MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY" in' in body
+            continue
+        assert "--version-id" in call
 
     contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
     assert contract["app_html"]["production"] == {

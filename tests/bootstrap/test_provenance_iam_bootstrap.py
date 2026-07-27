@@ -26,6 +26,7 @@ CODEBUILD_TF = ROOT / "infra" / "terraform" / "codebuild.tf"
 ECR_TF = ROOT / "infra" / "terraform" / "ecr.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
 MEDIA_CUTOVER_ATTESTOR_TF = ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
+MCP_APPROVAL_TF = ROOT / "infra" / "terraform" / "mcp_approval.tf"
 BUILD_TEAMAGENT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
 BUILD_OPENCLAW = ROOT / "infra" / "deploy" / "build_openclaw_image.sh"
 BUILD_TIKTOK = ROOT / "infra" / "deploy" / "build_tiktok_image.sh"
@@ -2211,6 +2212,7 @@ def test_bootstrap_targets_fail_closed_until_split_policy_migration() -> None:
         ECR_TF,
         RUNTIME_EVIDENCE_TF,
         MEDIA_CUTOVER_ATTESTOR_TF,
+        MCP_APPROVAL_TF,
     ):
         declarations.update(
             f"{resource_type}.{name}"
@@ -2220,9 +2222,8 @@ def test_bootstrap_targets_fail_closed_until_split_policy_migration() -> None:
                 flags=re.MULTILINE,
             )
         )
-    # Stage 3 must migrate the one-time bootstrap contract and seed authority
-    # together.  Until then, the removed inline-policy targets keep bootstrap
-    # fail-closed while the replacement managed policies remain fully declared.
+    # The one-time contract remains intentionally fail-closed until its seed
+    # authority and all four removed inline-policy targets migrate together.
     assert set(contract.targets) - declarations == {
         "aws_iam_role_policy.codebuild_launcher",
         "aws_iam_role_policy.openclaw_publisher",

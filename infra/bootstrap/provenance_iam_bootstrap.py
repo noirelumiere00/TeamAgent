@@ -69,6 +69,16 @@ ALLOWED_DATA_SOURCE_TYPES = {
     "aws_iam_user",
 }
 INLINE_POLICY_OWNERSHIP = {
+    "aws_iam_role_policy.approval_caller": (
+        "role",
+        "teamagent-dev-approval-caller",
+        "teamagent-dev-approval-caller",
+    ),
+    "aws_iam_role_policy.approval_publisher": (
+        "role",
+        "teamagent-dev-codebuild-approval-publisher",
+        "teamagent-dev-codebuild-approval-publisher",
+    ),
     "aws_iam_role_policy.codebuild_launcher": (
         "role",
         "teamagent-dev-codebuild-launcher",
