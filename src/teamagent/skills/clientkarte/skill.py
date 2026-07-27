@@ -31,6 +31,11 @@ _DEFAULT_EVENT_SUMMARY_MAX_CHARS = 160
 _DEFAULT_SYNTHESIS_BODY_MAX_CHARS = 200
 _TRUNCATION_MARKER = "…"
 _SENTENCE_BOUNDARY_RE = re.compile(r"(?:[。！？!?]+[」』）】”’\"']*|[.]+(?=\s|$)|\n+)")
+# A boundary cut this far below the cap loses more than it saves, so fall back to
+# the character cut. Sales feedback arriving as "列名: 値" lines makes every
+# newline a boundary, and the last one inside the cap can sit right before the
+# free-text body (measured: a 160-char excerpt collapsing to 58).
+_MIN_BOUNDARY_YIELD_RATIO = 0.6
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -61,10 +66,18 @@ def _truncate_at_sentence_boundary(text: str, max_chars: int) -> str:
     capped = cleaned[:max_chars]
     matches = list(_SENTENCE_BOUNDARY_RE.finditer(capped))
     if matches:
-        clipped = capped[: matches[-1].end()].rstrip()
-        if len(clipped) + len(_TRUNCATION_MARKER) <= max_chars:
-            return f"{clipped}{_TRUNCATION_MARKER}"
-        return clipped
+        last = matches[-1]
+        clipped = capped[: last.end()].rstrip()
+        # A real sentence end is always a legitimate stop, however early it is.
+        # A line break is not: sales feedback arriving as "列名: 値" lines makes
+        # every newline a boundary, and the last one inside the cap can sit right
+        # before the free-text body and drop it (measured: 160 chars to 58).
+        line_break_only = "\n" in last.group()
+        yields_enough = len(clipped) >= int(max_chars * _MIN_BOUNDARY_YIELD_RATIO)
+        if not line_break_only or yields_enough:
+            if len(clipped) + len(_TRUNCATION_MARKER) <= max_chars:
+                return f"{clipped}{_TRUNCATION_MARKER}"
+            return clipped
 
     budget = max_chars - len(_TRUNCATION_MARKER)
     return f"{cleaned[:budget].rstrip()}{_TRUNCATION_MARKER}"

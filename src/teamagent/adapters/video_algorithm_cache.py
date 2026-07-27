@@ -120,7 +120,15 @@ class VideoAlgorithmResultCache:
 
     @staticmethod
     def enabled() -> bool:
-        return os.environ.get("ANALYSIS_CACHE_ENABLED", "").strip().lower() in {
+        """Opt in explicitly; sharing ANALYSIS_CACHE_ENABLED left no way out.
+
+        The live tfvars set use_analysis_cache=true, so reusing that flag would
+        activate the lease machinery on the next image rebuild with no switch of
+        its own — turning it off would need a terraform apply and would also
+        disable the older, fail-open analysis cache. A dedicated flag that
+        defaults to off keeps the two independent.
+        """
+        return os.environ.get("VIDEO_ALGORITHM_RESULT_CACHE_ENABLED", "").strip().lower() in {
             "1",
             "true",
             "yes",
@@ -307,7 +315,15 @@ class VideoAlgorithmResultCache:
                 existing = client.get_object(Bucket=self._bucket, Key=object_key)
             except Exception as error:
                 code = self._error_code(error)
-                if code not in {"NoSuchKey", "404"} and type(error).__name__ != "NoSuchKey":
+                # A missing key surfaces as 403 AccessDenied rather than 404 because
+                # the task role has no s3:ListBucket on this prefix — the same reason
+                # analysis_cache documents. Re-raising it aborted every cold key here,
+                # which sits after the paid Gemini call and before the report is
+                # written: the run was billed and produced nothing.
+                if (
+                    code not in {"NoSuchKey", "404", "AccessDenied", "NoSuchBucket"}
+                    and type(error).__name__ != "NoSuchKey"
+                ):
                     raise
             else:
                 etag = str(existing.get("ETag") or "")

@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -859,6 +860,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 )
             except VideoAlgorithmCacheLeaseUnavailableError:
                 if attempt < 2:
+                    # Wait between attempts. Retrying within milliseconds hits the
+                    # same transient condition three times and discards a run that
+                    # has already been billed.
+                    time.sleep(result_cache.lease_retry_seconds)
                     continue
                 raise
             if not committed:

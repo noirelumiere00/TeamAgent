@@ -154,6 +154,45 @@ def test_result_roundtrip_has_mandatory_ttl_and_drops_local_path() -> None:
     assert cache.get(key, request_id="r3") is None
 
 
+class _AccessDeniedOnMissS3(_FakeS3):
+    """Reproduces production: a missing key answers 403 AccessDenied, not 404.
+
+    The task role has no s3:ListBucket on this prefix, so S3 hides the
+    difference between "absent" and "forbidden". The other fake raises a class
+    literally named NoSuchKey, which matched a `type(e).__name__` escape hatch
+    and let a cold-key regression pass unnoticed.
+    """
+
+    def get_object(self, Bucket: str, Key: str) -> Any:  # noqa: N803 - boto3 naming
+        if Key not in self.store:
+            raise type(
+                "ClientError",
+                (Exception,),
+                {"response": {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}},
+            )()
+        return super().get_object(Bucket=Bucket, Key=Key)
+
+
+def test_cold_key_put_survives_access_denied_probe() -> None:
+    """A first write must not abort: it happens after the paid Gemini call."""
+    s3 = _AccessDeniedOnMissS3()
+    cache = VideoAlgorithmResultCache(bucket="b", client=s3, ttl_seconds=60)
+    key = _key()
+    lease = cache.acquire_lease(key, request_id="lease")
+    assert lease is not None
+
+    stored = cache.put(
+        key,
+        output={"query": "新宿 ランチ"},
+        stage="paid_core",
+        lease=lease,
+        request_id="r1",
+    )
+
+    assert stored is True
+    assert f"analysis-cache/video-algorithm/{key}.json" in s3.store
+
+
 def test_missing_ttl_is_never_a_hit() -> None:
     s3 = _FakeS3()
     cache = VideoAlgorithmResultCache(
