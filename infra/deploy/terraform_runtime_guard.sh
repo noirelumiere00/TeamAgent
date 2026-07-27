@@ -7843,10 +7843,18 @@ verify_required_migration_apply_receipt() {
         (.openclaw_rollout_result.immutableEvidence.signatureVersionId |
           test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
           . != "null" and . != "None") and
-        .openclaw_rollout_result.immutableEvidence.resultObjectLockMode ==
-          "COMPLIANCE" and
-        .openclaw_rollout_result.immutableEvidence.signatureObjectLockMode ==
-          "COMPLIANCE" and
+        (
+          .openclaw_rollout_result.immutableEvidence.resultObjectLockMode ==
+            "COMPLIANCE" or
+          .openclaw_rollout_result.immutableEvidence.resultObjectLockMode ==
+            "GOVERNANCE"
+        ) and
+        (
+          .openclaw_rollout_result.immutableEvidence.signatureObjectLockMode ==
+            "COMPLIANCE" or
+          .openclaw_rollout_result.immutableEvidence.signatureObjectLockMode ==
+            "GOVERNANCE"
+        ) and
         .openclaw_rollout_result.immutableEvidence.signatureValid == true and
         .openclaw_rollout_result.immutableEvidence.encryptionKmsAlias ==
           "alias/teamagent-dev-openclaw-rollout-evidence" and
@@ -10889,8 +10897,14 @@ case "$COMMAND" in
         (.immutableEvidence.signatureVersionId |
           test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
           . != "null" and . != "None") and
-        .immutableEvidence.resultObjectLockMode == "COMPLIANCE" and
-        .immutableEvidence.signatureObjectLockMode == "COMPLIANCE" and
+        (
+          .immutableEvidence.resultObjectLockMode == "COMPLIANCE" or
+          .immutableEvidence.resultObjectLockMode == "GOVERNANCE"
+        ) and
+        (
+          .immutableEvidence.signatureObjectLockMode == "COMPLIANCE" or
+          .immutableEvidence.signatureObjectLockMode == "GOVERNANCE"
+        ) and
         .immutableEvidence.encryptionKmsAlias ==
           "alias/teamagent-dev-openclaw-rollout-evidence" and
         .immutableEvidence.encryptionKmsKeyArn == $encryption_kms and

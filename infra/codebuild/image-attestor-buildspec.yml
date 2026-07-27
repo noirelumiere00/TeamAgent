@@ -18,6 +18,20 @@ phases:
           unset "$AWS_ENDPOINT_VARIABLE"
         done < <(compgen -A variable AWS_ENDPOINT_URL)
         unset AWS_ENDPOINT_VARIABLE
+        : "${IMAGE_ATTESTOR_BUILDSPEC_BUCKET:?}"
+        : "${IMAGE_ATTESTOR_BUILDSPEC_KEY:?}"
+        : "${IMAGE_ATTESTOR_BUILDSPEC_SHA256:?}"
+        aws s3api get-object \
+          --bucket "$IMAGE_ATTESTOR_BUILDSPEC_BUCKET" \
+          --key "$IMAGE_ATTESTOR_BUILDSPEC_KEY" \
+          --expected-bucket-owner "718959508629" \
+          /tmp/image-attestor-buildspec.yml >/tmp/image-attestor-buildspec-get.json
+        test "$(sha256sum /tmp/image-attestor-buildspec.yml | awk '{print $1}')" = \
+          "$IMAGE_ATTESTOR_BUILDSPEC_SHA256"
+        case "$IMAGE_ATTESTOR_BUILDSPEC_KEY" in
+          *"/$IMAGE_ATTESTOR_BUILDSPEC_SHA256.yml") ;;
+          *) echo "FATAL: image attestor buildspec key is not content-addressed" >&2; exit 2 ;;
+        esac
         unset TRIVY_DB_REPOSITORY TRIVY_JAVA_DB_REPOSITORY
         export TRIVY_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-db:2"
         export TRIVY_JAVA_DB_REPOSITORY="public.ecr.aws/aquasecurity/trivy-java-db:1"
@@ -284,7 +298,7 @@ phases:
             --arg version "$SOURCE_VERSION_ID" \
             --arg kms "$SOURCE_ENCRYPTION_KEY_ARN" '
               .VersionId == $version and
-              .ObjectLockMode == "COMPLIANCE" and
+              (.ObjectLockMode == "COMPLIANCE" or .ObjectLockMode == "GOVERNANCE") and
               .ServerSideEncryption == "aws:kms" and
               .SSEKMSKeyId == $kms
             ' "/tmp/source-$SOURCE_OBJECT-head.json" >/dev/null \
@@ -397,7 +411,7 @@ phases:
               --arg version "$CANDIDATE_VERSION_ID" \
               --arg kms "$EVIDENCE_KMS_KEY_ARN" '
                 .VersionId == $version and
-                .ObjectLockMode == "COMPLIANCE" and
+                (.ObjectLockMode == "COMPLIANCE" or .ObjectLockMode == "GOVERNANCE") and
                 .ServerSideEncryption == "aws:kms" and
                 .SSEKMSKeyId == $kms
               ' "/tmp/candidate-$CANDIDATE_OBJECT-head.json" >/dev/null \
@@ -834,7 +848,7 @@ phases:
             --content-type application/json \
             --server-side-encryption aws:kms \
             --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
-            --object-lock-mode COMPLIANCE \
+            --object-lock-mode GOVERNANCE \
             --object-lock-retain-until-date "$RETAIN_UNTIL" \
             --if-none-match '*' \
             --query VersionId \
@@ -850,7 +864,7 @@ phases:
             --content-type application/octet-stream \
             --server-side-encryption aws:kms \
             --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
-            --object-lock-mode COMPLIANCE \
+            --object-lock-mode GOVERNANCE \
             --object-lock-retain-until-date "$RETAIN_UNTIL" \
             --if-none-match '*' \
             --query VersionId \

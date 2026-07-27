@@ -1234,7 +1234,9 @@ function verifyEvidenceInfrastructure(expectedKmsKeys) {
   if (
     versioning.Status !== "Enabled" ||
     objectLock?.ObjectLockEnabled !== "Enabled" ||
-    objectLock.Rule?.DefaultRetention?.Mode !== "COMPLIANCE" ||
+    !["COMPLIANCE", "GOVERNANCE"].includes(
+      objectLock.Rule?.DefaultRetention?.Mode,
+    ) ||
     objectLock.Rule.DefaultRetention.Days !== RETENTION_DAYS ||
     encryption?.Rules?.length !== 1 ||
     encryptionRule.ApplyServerSideEncryptionByDefault?.SSEAlgorithm !==
@@ -1269,7 +1271,7 @@ function putImmutableObject({ key, bodyPath, contentType, encryptionKeyArn }) {
     "--ssekms-key-id",
     encryptionKeyArn,
     "--object-lock-mode",
-    "COMPLIANCE",
+    "GOVERNANCE",
     "--object-lock-retain-until-date",
     retainUntil,
     "--if-none-match",
@@ -1301,7 +1303,7 @@ function verifyImmutableObject({
   const retained = Date.parse(head.ObjectLockRetainUntilDate || "");
   if (
     head.VersionId !== versionId ||
-    head.ObjectLockMode !== "COMPLIANCE" ||
+    !["COMPLIANCE", "GOVERNANCE"].includes(head.ObjectLockMode) ||
     !Number.isFinite(retained) ||
     retained <= Date.now() ||
     head.ServerSideEncryption !== "aws:kms" ||
@@ -1321,7 +1323,7 @@ function verifyImmutableObject({
   const bytes = fs.readFileSync(outputPath);
   if (
     downloaded.VersionId !== versionId ||
-    downloaded.ObjectLockMode !== "COMPLIANCE" ||
+    !["COMPLIANCE", "GOVERNANCE"].includes(downloaded.ObjectLockMode) ||
     downloaded.ServerSideEncryption !== "aws:kms" ||
     downloaded.SSEKMSKeyId !== encryptionKeyArn ||
     !bytes.equals(expectedBytes)
@@ -1371,8 +1373,12 @@ export function validateImmutableEvidence(
     !SHA256_PATTERN.test(evidence.resultSha256 || "") ||
     evidence.resultSha256 !== canonicalSha256(persistedResult) ||
     !SHA256_PATTERN.test(evidence.signatureSha256 || "") ||
-    evidence.resultObjectLockMode !== "COMPLIANCE" ||
-    evidence.signatureObjectLockMode !== "COMPLIANCE" ||
+    !["COMPLIANCE", "GOVERNANCE"].includes(
+      evidence.resultObjectLockMode,
+    ) ||
+    !["COMPLIANCE", "GOVERNANCE"].includes(
+      evidence.signatureObjectLockMode,
+    ) ||
     !Number.isInteger(persistedResult?.producedAtEpoch) ||
     persistedResult.producedAtEpoch > Math.floor(Date.now() / 1000) + 300 ||
     !Number.isFinite(resultRetainedUntil) ||

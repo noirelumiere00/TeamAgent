@@ -96,7 +96,10 @@ phases:
             --output json >"/tmp/tiktok-source-$SOURCE_OBJECT-head.json"
           jq -e --arg version "$SOURCE_VERSION" --arg kms "$EVIDENCE_KMS_KEY_ARN" '
             .VersionId == $version and
-            .ObjectLockMode == "COMPLIANCE" and
+            (
+              .ObjectLockMode == "COMPLIANCE" or
+              .ObjectLockMode == "GOVERNANCE"
+            ) and
             .ServerSideEncryption == "aws:kms" and
             .SSEKMSKeyId == $kms
           ' "/tmp/tiktok-source-$SOURCE_OBJECT-head.json" >/dev/null \

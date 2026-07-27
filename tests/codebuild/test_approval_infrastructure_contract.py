@@ -778,7 +778,7 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert "source_hash                   = local.approval_publisher_buildspec_sha256" in obj
     assert 'server_side_encryption        = "aws:kms"' in obj
     assert "kms_key_id                    = aws_kms_key.image_release_evidence.arn" in obj
-    assert 'object_lock_mode              = "COMPLIANCE"' in obj
+    assert 'object_lock_mode              = "GOVERNANCE"' in obj
     assert "object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date" in obj
     assert re.search(r"(?m)^\s*prevent_destroy\s*=\s*true\s*$", obj)
 
@@ -794,7 +794,7 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
         "canonical_json_bytes",
         "RSASSA_PSS_SHA_256",
         "--message-type DIGEST",
-        "--object-lock-mode COMPLIANCE",
+        "--object-lock-mode GOVERNANCE",
         "--object-lock-retain-until-date",
         "--server-side-encryption aws:kms",
         "--if-none-match '*'",
@@ -814,7 +814,7 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
             "--server-side-encryption aws:kms",
             '--ssekms-key-id "$EVIDENCE_KMS_KEY_ARN"',
             "--bucket-key-enabled",
-            "--object-lock-mode COMPLIANCE",
+            "--object-lock-mode GOVERNANCE",
             '--object-lock-retain-until-date "$retain_until"',
             "--if-none-match '*'",
             '--expected-bucket-owner "${local.expected_build_account_id}"',

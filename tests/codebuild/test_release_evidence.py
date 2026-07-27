@@ -221,7 +221,7 @@ def _install_approval_aws_fake(
             return json.dumps(
                 {
                     "VersionId": ("wrong-version" if wrong_head_version else expected_version),
-                    "ObjectLockMode": ("GOVERNANCE" if non_compliance else "COMPLIANCE"),
+                    "ObjectLockMode": ("NONE" if non_compliance else "GOVERNANCE"),
                     "ObjectLockRetainUntilDate": (
                         signature_retention_until
                         if object_key.endswith(".sig") and signature_retention_until is not None
@@ -1323,7 +1323,7 @@ def _terraform_query(
             return json.dumps(
                 {
                     "VersionId": version,
-                    "ObjectLockMode": "COMPLIANCE",
+                    "ObjectLockMode": "GOVERNANCE",
                     "ObjectLockRetainUntilDate": retained,
                     "ServerSideEncryption": "aws:kms",
                     "SSEKMSKeyId": encryption_key_arn,

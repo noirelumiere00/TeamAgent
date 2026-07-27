@@ -33,16 +33,16 @@ locals {
     "codebuild-buildspecs/${local.tiktok_codebuild_project_name}.yml"
   )
   mcp_source_publisher_buildspec_s3_key = (
-    "codebuild-buildspecs/${local.mcp_source_publisher_project_name}.yml"
+    "codebuild-buildspecs/${local.mcp_source_publisher_project_name}/${local.mcp_source_publisher_buildspec_sha256}.yml"
   )
   image_attestor_buildspec_s3_key = (
-    "codebuild-buildspecs/${local.image_attestor_project_name}.yml"
+    "codebuild-buildspecs/${local.image_attestor_project_name}/${local.image_attestor_buildspec_sha256}.yml"
   )
   image_promoter_buildspec_s3_key = (
-    "codebuild-buildspecs/${local.image_promoter_project_name}.yml"
+    "codebuild-buildspecs/${local.image_promoter_project_name}/${local.image_promoter_buildspec_sha256}.yml"
   )
   # A fixed horizon avoids perpetual S3 object updates from timestamp()-based
-  # retention while satisfying the evidence bucket's explicit COMPLIANCE lock.
+  # retention while satisfying the evidence bucket's explicit GOVERNANCE lock.
   codebuild_buildspec_retain_until_date = "2099-12-31T23:59:59Z"
   tiktok_launcher_role_name             = "${var.project_name}-${var.environment}-tiktok-build-launcher"
   release_launcher_role_name            = "${var.project_name}-${var.environment}-release-launcher"
@@ -1589,7 +1589,7 @@ resource "aws_s3_object" "tiktok_image_buildspec" {
   server_side_encryption        = "aws:kms"
   kms_key_id                    = aws_kms_key.image_release_evidence.arn
   bucket_key_enabled            = true
-  object_lock_mode              = "COMPLIANCE"
+  object_lock_mode              = "GOVERNANCE"
   object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
 
   depends_on = [
@@ -2155,7 +2155,7 @@ resource "aws_s3_bucket_object_lock_configuration" "image_release_evidence" {
 
   rule {
     default_retention {
-      mode = "COMPLIANCE"
+      mode = "GOVERNANCE"
       days = 3650
     }
   }
@@ -2167,14 +2167,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "image_release_evidence" {
   depends_on = [aws_s3_bucket_object_lock_configuration.image_release_evidence]
 
   rule {
-    id     = "retain-audit-evidence"
+    id     = "remove-expired-delete-markers"
     status = "Enabled"
     filter {}
     expiration {
-      days = 365
-    }
-    noncurrent_version_expiration {
-      noncurrent_days = 365
+      expired_object_delete_marker = true
     }
   }
 }
@@ -2229,7 +2226,7 @@ data "aws_iam_policy_document" "image_release_evidence_bucket" {
     }
   }
   statement {
-    sid       = "DenyEvidenceWithoutComplianceLock"
+    sid       = "DenyEvidenceWithoutGovernanceLock"
     effect    = "Deny"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.image_release_evidence.arn}/*"]
@@ -2240,7 +2237,7 @@ data "aws_iam_policy_document" "image_release_evidence_bucket" {
     condition {
       test     = "StringNotEquals"
       variable = "s3:object-lock-mode"
-      values   = ["COMPLIANCE"]
+      values   = ["GOVERNANCE"]
     }
   }
   statement {
@@ -2500,6 +2497,19 @@ data "aws_iam_policy_document" "mcp_source_publisher" {
     resources = [aws_codestarconnections_connection.openclaw_codebuild.arn]
   }
   statement {
+    # GATE5 measured that CodeBuild's S3 buildspec retrieval needs ListBucket.
+    # Keep this bucket-level permission separate from buildspec object reads.
+    sid       = "ListOnlyLockedMcpSourcePublisherBuildspec"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.image_release_evidence.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values   = [local.mcp_source_publisher_buildspec_s3_key]
+    }
+  }
+  statement {
     sid       = "ReadExternalBuildspec"
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.mcp_source_publisher_buildspec_s3_key}"]
@@ -2618,6 +2628,19 @@ data "aws_iam_policy_document" "image_attestor" {
     sid       = "EcrAuth"
     actions   = ["ecr:GetAuthorizationToken"]
     resources = ["*"]
+  }
+  statement {
+    # GATE5 measured that CodeBuild's S3 buildspec retrieval needs ListBucket.
+    # Keep this bucket-level permission separate from buildspec object reads.
+    sid       = "ListOnlyLockedImageAttestorBuildspec"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.image_release_evidence.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values   = [local.image_attestor_buildspec_s3_key]
+    }
   }
   statement {
     sid       = "ReadExternalBuildspec"
@@ -2839,6 +2862,19 @@ data "aws_iam_policy_document" "image_promoter" {
     resources = ["*"]
   }
   statement {
+    # GATE5 measured that CodeBuild's S3 buildspec retrieval needs ListBucket.
+    # Keep this bucket-level permission separate from buildspec object reads.
+    sid       = "ListOnlyLockedImagePromoterBuildspec"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.image_release_evidence.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:prefix"
+      values   = [local.image_promoter_buildspec_s3_key]
+    }
+  }
+  statement {
     sid       = "ReadExternalBuildspec"
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.image_release_evidence.arn}/${local.image_promoter_buildspec_s3_key}"]
@@ -2991,6 +3027,9 @@ locals {
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
+  mcp_source_publisher_buildspec_sha256 = sha256(
+    local.mcp_source_publisher_buildspec
+  )
 
   image_attestor_buildspec_1 = replace(
     file("${path.module}/../codebuild/image-attestor-buildspec.yml"),
@@ -3086,6 +3125,9 @@ locals {
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
+  image_attestor_buildspec_sha256 = sha256(
+    local.image_attestor_buildspec
+  )
 
   image_promoter_buildspec_1 = replace(
     file("${path.module}/../codebuild/image-promoter-buildspec.yml"),
@@ -3132,6 +3174,9 @@ locals {
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
+  image_promoter_buildspec_sha256 = sha256(
+    local.image_promoter_buildspec
+  )
 }
 
 resource "aws_s3_object" "mcp_source_publisher_buildspec" {
@@ -3139,17 +3184,21 @@ resource "aws_s3_object" "mcp_source_publisher_buildspec" {
   key                           = local.mcp_source_publisher_buildspec_s3_key
   content                       = local.mcp_source_publisher_buildspec
   content_type                  = "text/yaml"
-  source_hash                   = sha256(local.mcp_source_publisher_buildspec)
+  source_hash                   = local.mcp_source_publisher_buildspec_sha256
   server_side_encryption        = "aws:kms"
   kms_key_id                    = aws_kms_key.image_release_evidence.arn
   bucket_key_enabled            = true
-  object_lock_mode              = "COMPLIANCE"
+  object_lock_mode              = "GOVERNANCE"
   object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
 
   depends_on = [
     aws_s3_bucket_object_lock_configuration.image_release_evidence,
     aws_s3_bucket_policy.image_release_evidence,
   ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_s3_object" "image_attestor_buildspec" {
@@ -3157,17 +3206,21 @@ resource "aws_s3_object" "image_attestor_buildspec" {
   key                           = local.image_attestor_buildspec_s3_key
   content                       = local.image_attestor_buildspec
   content_type                  = "text/yaml"
-  source_hash                   = sha256(local.image_attestor_buildspec)
+  source_hash                   = local.image_attestor_buildspec_sha256
   server_side_encryption        = "aws:kms"
   kms_key_id                    = aws_kms_key.image_release_evidence.arn
   bucket_key_enabled            = true
-  object_lock_mode              = "COMPLIANCE"
+  object_lock_mode              = "GOVERNANCE"
   object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
 
   depends_on = [
     aws_s3_bucket_object_lock_configuration.image_release_evidence,
     aws_s3_bucket_policy.image_release_evidence,
   ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_s3_object" "image_promoter_buildspec" {
@@ -3175,17 +3228,21 @@ resource "aws_s3_object" "image_promoter_buildspec" {
   key                           = local.image_promoter_buildspec_s3_key
   content                       = local.image_promoter_buildspec
   content_type                  = "text/yaml"
-  source_hash                   = sha256(local.image_promoter_buildspec)
+  source_hash                   = local.image_promoter_buildspec_sha256
   server_side_encryption        = "aws:kms"
   kms_key_id                    = aws_kms_key.image_release_evidence.arn
   bucket_key_enabled            = true
-  object_lock_mode              = "COMPLIANCE"
+  object_lock_mode              = "GOVERNANCE"
   object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
 
   depends_on = [
     aws_s3_bucket_object_lock_configuration.image_release_evidence,
     aws_s3_bucket_policy.image_release_evidence,
   ]
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_codebuild_project" "mcp_source_publisher" {
@@ -3201,6 +3258,21 @@ resource "aws_codebuild_project" "mcp_source_publisher" {
     image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
     type            = "ARM_CONTAINER"
     privileged_mode = false
+
+    environment_variable {
+      name  = "MCP_SOURCE_PUBLISHER_BUILDSPEC_BUCKET"
+      value = aws_s3_bucket.image_release_evidence.id
+    }
+
+    environment_variable {
+      name  = "MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY"
+      value = local.mcp_source_publisher_buildspec_s3_key
+    }
+
+    environment_variable {
+      name  = "MCP_SOURCE_PUBLISHER_BUILDSPEC_SHA256"
+      value = local.mcp_source_publisher_buildspec_sha256
+    }
   }
 
   source {
@@ -3240,6 +3312,21 @@ resource "aws_codebuild_project" "image_attestor" {
     image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
     type            = "ARM_CONTAINER"
     privileged_mode = true
+
+    environment_variable {
+      name  = "IMAGE_ATTESTOR_BUILDSPEC_BUCKET"
+      value = aws_s3_bucket.image_release_evidence.id
+    }
+
+    environment_variable {
+      name  = "IMAGE_ATTESTOR_BUILDSPEC_KEY"
+      value = local.image_attestor_buildspec_s3_key
+    }
+
+    environment_variable {
+      name  = "IMAGE_ATTESTOR_BUILDSPEC_SHA256"
+      value = local.image_attestor_buildspec_sha256
+    }
   }
 
   source {
@@ -3272,6 +3359,21 @@ resource "aws_codebuild_project" "image_promoter" {
     image           = "aws/codebuild/amazonlinux-aarch64-standard:3.0"
     type            = "ARM_CONTAINER"
     privileged_mode = false
+
+    environment_variable {
+      name  = "IMAGE_PROMOTER_BUILDSPEC_BUCKET"
+      value = aws_s3_bucket.image_release_evidence.id
+    }
+
+    environment_variable {
+      name  = "IMAGE_PROMOTER_BUILDSPEC_KEY"
+      value = local.image_promoter_buildspec_s3_key
+    }
+
+    environment_variable {
+      name  = "IMAGE_PROMOTER_BUILDSPEC_SHA256"
+      value = local.image_promoter_buildspec_sha256
+    }
   }
 
   source {
@@ -3382,7 +3484,7 @@ resource "aws_s3_bucket_object_lock_configuration" "openclaw_build_evidence" {
 
   rule {
     default_retention {
-      mode = "COMPLIANCE"
+      mode = "GOVERNANCE"
       days = 3650
     }
   }
@@ -3456,7 +3558,7 @@ data "aws_iam_policy_document" "openclaw_build_evidence_bucket" {
     }
   }
   statement {
-    sid       = "DenyEvidenceWithoutComplianceLock"
+    sid       = "DenyEvidenceWithoutGovernanceLock"
     effect    = "Deny"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.openclaw_build_evidence.arn}/*"]
@@ -3467,7 +3569,7 @@ data "aws_iam_policy_document" "openclaw_build_evidence_bucket" {
     condition {
       test     = "StringNotEquals"
       variable = "s3:object-lock-mode"
-      values   = ["COMPLIANCE"]
+      values   = ["GOVERNANCE"]
     }
   }
   statement {

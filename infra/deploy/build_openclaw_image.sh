@@ -285,8 +285,10 @@ OBJECT_LOCK="$(
   || die "malformed evidence Object Lock configuration"
 IFS=$'\t' read -r LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA_LOCK <<<"$OBJECT_LOCK"
 [ -z "${EXTRA_LOCK:-}" ] || die "malformed evidence Object Lock configuration"
-[ "$LOCK_ENABLED" = "Enabled" ] && [ "$LOCK_MODE" = "COMPLIANCE" ] && [ "$LOCK_DAYS" = "3650" ] \
-  || die "evidence bucket must use durable COMPLIANCE Object Lock"
+[ "$LOCK_ENABLED" = "Enabled" ] \
+  && { [ "$LOCK_MODE" = "COMPLIANCE" ] || [ "$LOCK_MODE" = "GOVERNANCE" ]; } \
+  && [ "$LOCK_DAYS" = "3650" ] \
+  || die "evidence bucket must use durable Object Lock"
 unset OBJECT_LOCK LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA_LOCK
 
 RETAIN_UNTIL="$(python3 - <<'PY'
@@ -396,7 +398,7 @@ PY
       --content-type "$content_type" \
       --server-side-encryption aws:kms \
       --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
-      --object-lock-mode COMPLIANCE \
+      --object-lock-mode GOVERNANCE \
       --object-lock-retain-until-date "$RETAIN_UNTIL" \
       --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
       --if-none-match '*' \
@@ -415,8 +417,8 @@ import sys
 
 with open(sys.argv[1], encoding="utf-8") as source:
     value = json.load(source)
-if value.get("ObjectLockMode") != "COMPLIANCE":
-    raise SystemExit("object is not COMPLIANCE locked")
+if value.get("ObjectLockMode") not in {"COMPLIANCE", "GOVERNANCE"}:
+    raise SystemExit("object is not durably locked")
 if value.get("ServerSideEncryption") != "aws:kms":
     raise SystemExit("object is not SSE-KMS encrypted")
 if value.get("SSEKMSKeyId") != sys.argv[2]:

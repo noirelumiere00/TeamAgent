@@ -329,7 +329,8 @@ def test_promoter_reverifies_signed_source_before_external_approval_and_ecr() ->
     login = body.index("aws ecr get-login-password", approval)
     assert receipt < source_head < source_signature < source_binding < approval < login
     assert "--version-id \"$source_version\"" in body
-    assert ".ObjectLockMode == \"COMPLIANCE\"" in body
+    assert '.ObjectLockMode == "COMPLIANCE"' in body
+    assert '.ObjectLockMode == "GOVERNANCE"' in body
     assert ".SSEKMSKeyId == $kms" in body
 
 
@@ -367,7 +368,7 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
         'SOURCE_DECLARATION_KEY="source-declarations/mcp/$EXPECTED_COMMIT/$SOURCE_SHA256/$PUBLISHED_SOURCE_VERSION_ID.json"'
         in body
     )
-    assert "--object-lock-mode COMPLIANCE" in body
+    assert "--object-lock-mode GOVERNANCE" in body
     assert "aws kms sign" in body
     assert "teamagent_bundle_provenance.py production-record" in body
     embedded_contract_hash = body.index(

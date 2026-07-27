@@ -1722,7 +1722,7 @@ def _download_approval_object(
     )
     if (
         head.get("VersionId") != locator["version_id"]
-        or head.get("ObjectLockMode") != "COMPLIANCE"
+        or head.get("ObjectLockMode") not in {"COMPLIANCE", "GOVERNANCE"}
         or head.get("ServerSideEncryption") != "aws:kms"
         or head.get("SSEKMSKeyId") != approval_encryption_key_arn
     ):
@@ -2415,7 +2415,8 @@ def _terraform_gate(
                     raise EvidenceError(f"invalid {label} object metadata") from exc
                 if (
                     head.get("VersionId") != object_version
-                    or head.get("ObjectLockMode") != "COMPLIANCE"
+                    or head.get("ObjectLockMode")
+                    not in {"COMPLIANCE", "GOVERNANCE"}
                     or head.get("ServerSideEncryption") != "aws:kms"
                     or head.get("SSEKMSKeyId") != encryption_key_arn
                 ):

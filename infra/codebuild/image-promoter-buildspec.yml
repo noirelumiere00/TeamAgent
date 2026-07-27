@@ -6,6 +6,26 @@ phases:
       - |
         set -euo pipefail
         umask 077
+        export AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true
+        unset AWS_ENDPOINT_URL AWS_ENDPOINT_URL_STS AWS_ENDPOINT_URL_ECR AWS_ENDPOINT_URL_S3 AWS_ENDPOINT_URL_KMS
+        while IFS= read -r AWS_ENDPOINT_VARIABLE; do
+          unset "$AWS_ENDPOINT_VARIABLE"
+        done < <(compgen -A variable AWS_ENDPOINT_URL)
+        unset AWS_ENDPOINT_VARIABLE
+        : "${IMAGE_PROMOTER_BUILDSPEC_BUCKET:?}"
+        : "${IMAGE_PROMOTER_BUILDSPEC_KEY:?}"
+        : "${IMAGE_PROMOTER_BUILDSPEC_SHA256:?}"
+        aws s3api get-object \
+          --bucket "$IMAGE_PROMOTER_BUILDSPEC_BUCKET" \
+          --key "$IMAGE_PROMOTER_BUILDSPEC_KEY" \
+          --expected-bucket-owner "718959508629" \
+          /tmp/image-promoter-buildspec.yml >/tmp/image-promoter-buildspec-get.json
+        test "$(sha256sum /tmp/image-promoter-buildspec.yml | awk '{print $1}')" = \
+          "$IMAGE_PROMOTER_BUILDSPEC_SHA256"
+        case "$IMAGE_PROMOTER_BUILDSPEC_KEY" in
+          *"/$IMAGE_PROMOTER_BUILDSPEC_SHA256.yml") ;;
+          *) echo "FATAL: image promoter buildspec key is not content-addressed" >&2; exit 2 ;;
+        esac
         ORAS_VERSION="1.3.3"
         ORAS_ARCHIVE="oras_${ORAS_VERSION}_linux_arm64.tar.gz"
         ORAS_SHA256="ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca"
@@ -165,7 +185,7 @@ phases:
             --arg version "$VERSION_ID" \
             --arg kms "$EVIDENCE_KMS_KEY_ARN" '
               .VersionId == $version and
-              .ObjectLockMode == "COMPLIANCE" and
+              (.ObjectLockMode == "COMPLIANCE" or .ObjectLockMode == "GOVERNANCE") and
               .ServerSideEncryption == "aws:kms" and
               .SSEKMSKeyId == $kms
             ' "/tmp/$object-head.json" >/dev/null \
@@ -292,7 +312,7 @@ phases:
               --arg version "$source_version" \
               --arg kms "$EVIDENCE_KMS_KEY_ARN" '
                 .VersionId == $version and
-                .ObjectLockMode == "COMPLIANCE" and
+                (.ObjectLockMode == "COMPLIANCE" or .ObjectLockMode == "GOVERNANCE") and
                 .ServerSideEncryption == "aws:kms" and
                 .SSEKMSKeyId == $kms
               ' "/tmp/source-$source_object-head.json" >/dev/null \

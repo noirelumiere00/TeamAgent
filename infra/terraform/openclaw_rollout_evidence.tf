@@ -95,7 +95,7 @@ resource "aws_s3_bucket_object_lock_configuration" "openclaw_rollout_evidence" {
 
   rule {
     default_retention {
-      mode = "COMPLIANCE"
+      mode = "GOVERNANCE"
       days = 3650
     }
   }
@@ -154,7 +154,7 @@ data "aws_iam_policy_document" "openclaw_rollout_evidence_bucket" {
   }
 
   statement {
-    sid       = "DenyRolloutResultWithoutComplianceLock"
+    sid       = "DenyRolloutResultWithoutGovernanceLock"
     effect    = "Deny"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.openclaw_rollout_evidence.arn}/rollout-results/*"]
@@ -165,7 +165,7 @@ data "aws_iam_policy_document" "openclaw_rollout_evidence_bucket" {
     condition {
       test     = "StringNotEquals"
       variable = "s3:object-lock-mode"
-      values   = ["COMPLIANCE"]
+      values   = ["GOVERNANCE"]
     }
   }
 

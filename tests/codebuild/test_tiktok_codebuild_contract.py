@@ -143,7 +143,7 @@ def test_tiktok_launcher_signs_source_assumes_once_and_never_deploys() -> None:
     assert "get-object-lock-configuration" in body
     assert "aws kms sign" in body and "aws kms verify" in body
     assert "--if-none-match '*'" in body
-    assert "--object-lock-mode COMPLIANCE" in body
+    assert "--object-lock-mode GOVERNANCE" in body
     assert "date -u -d" not in body
     assert "base64 --decode" not in body
     assert "teamagent-dev-tiktok-acquire-verified-candidates" in body

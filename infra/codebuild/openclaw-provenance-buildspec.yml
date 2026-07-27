@@ -82,8 +82,8 @@ phases:
         for path in sys.argv[2:]:
             with open(path, encoding="utf-8") as handle:
                 value = json.load(handle)
-            if value.get("ObjectLockMode") != "COMPLIANCE":
-                raise SystemExit(f"FATAL: {path} is not COMPLIANCE locked")
+            if value.get("ObjectLockMode") not in {"COMPLIANCE", "GOVERNANCE"}:
+                raise SystemExit(f"FATAL: {path} is not durably locked")
             if value.get("ServerSideEncryption") != "aws:kms":
                 raise SystemExit(f"FATAL: {path} is not SSE-KMS encrypted")
             if value.get("SSEKMSKeyId") != expected_kms_key:

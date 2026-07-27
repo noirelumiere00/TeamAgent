@@ -190,7 +190,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
         "release_evidence_prefix": "release-evidence",
         "signing_kms_key_alias": "alias/teamagent-dev-openclaw-build-publisher",
         "encryption_kms_key_alias": "alias/teamagent-dev-openclaw-build-evidence",
-        "object_lock_mode": "COMPLIANCE",
+        "object_lock_mode": "GOVERNANCE",
         "retention_days": 3650,
     }
     if evidence != expected_evidence:

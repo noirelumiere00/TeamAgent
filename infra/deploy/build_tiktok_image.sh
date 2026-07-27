@@ -253,9 +253,9 @@ OBJECT_LOCK="$(
 IFS=$'\t' read -r LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA <<<"$OBJECT_LOCK"
 [ -z "${EXTRA:-}" ] \
   && [ "$LOCK_ENABLED" = "Enabled" ] \
-  && [ "$LOCK_MODE" = "COMPLIANCE" ] \
+  && { [ "$LOCK_MODE" = "COMPLIANCE" ] || [ "$LOCK_MODE" = "GOVERNANCE" ]; } \
   && [ "$LOCK_DAYS" = "3650" ] \
-  || die "TikTok evidence bucket must use durable COMPLIANCE Object Lock"
+  || die "TikTok evidence bucket must use durable Object Lock"
 unset OBJECT_LOCK LOCK_ENABLED LOCK_MODE LOCK_DAYS EXTRA
 SOURCE_MANIFEST="$TMP_DIR/tiktok-source-manifest.json"
 SOURCE_SIGNATURE="$TMP_DIR/tiktok-source-manifest.sig"
@@ -325,7 +325,7 @@ PY
       --content-type "$content_type" \
       --server-side-encryption aws:kms \
       --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
-      --object-lock-mode COMPLIANCE \
+      --object-lock-mode GOVERNANCE \
       --object-lock-retain-until-date "$retain_until" \
       --if-none-match '*' \
       --query VersionId \

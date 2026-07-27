@@ -212,7 +212,10 @@ phases:
             --output json >"/tmp/source-$source_object-head.json"
           jq -e --arg version "$object_version" --arg kms "$EVIDENCE_KMS_KEY_ARN" '
             .VersionId == $version and
-            .ObjectLockMode == "COMPLIANCE" and
+            (
+              .ObjectLockMode == "COMPLIANCE" or
+              .ObjectLockMode == "GOVERNANCE"
+            ) and
             .ServerSideEncryption == "aws:kms" and
             .SSEKMSKeyId == $kms
           ' "/tmp/source-$source_object-head.json" >/dev/null \
@@ -382,7 +385,10 @@ phases:
           --arg version "$SIGNED_BUILD_CONTEXT_VERSION_ID" \
           --arg kms "$EVIDENCE_KMS_KEY_ARN" '
             .VersionId == $version and
-            .ObjectLockMode == "COMPLIANCE" and
+            (
+              .ObjectLockMode == "COMPLIANCE" or
+              .ObjectLockMode == "GOVERNANCE"
+            ) and
             .ServerSideEncryption == "aws:kms" and
             .SSEKMSKeyId == $kms
           ' /tmp/build-context-head.json >/dev/null \

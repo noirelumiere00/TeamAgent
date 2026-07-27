@@ -21,6 +21,20 @@ phases:
           unset "$AWS_ENDPOINT_VARIABLE"
         done < <(compgen -A variable AWS_ENDPOINT_URL)
         unset AWS_ENDPOINT_VARIABLE
+        : "${MCP_SOURCE_PUBLISHER_BUILDSPEC_BUCKET:?}"
+        : "${MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY:?}"
+        : "${MCP_SOURCE_PUBLISHER_BUILDSPEC_SHA256:?}"
+        aws s3api get-object \
+          --bucket "$MCP_SOURCE_PUBLISHER_BUILDSPEC_BUCKET" \
+          --key "$MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY" \
+          --expected-bucket-owner "718959508629" \
+          /tmp/mcp-source-publisher-buildspec.yml >/tmp/mcp-source-publisher-buildspec-get.json
+        test "$(sha256sum /tmp/mcp-source-publisher-buildspec.yml | awk '{print $1}')" = \
+          "$MCP_SOURCE_PUBLISHER_BUILDSPEC_SHA256"
+        case "$MCP_SOURCE_PUBLISHER_BUILDSPEC_KEY" in
+          *"/$MCP_SOURCE_PUBLISHER_BUILDSPEC_SHA256.yml") ;;
+          *) echo "FATAL: MCP source publisher buildspec key is not content-addressed" >&2; exit 2 ;;
+        esac
         EXPECTED_ACCOUNT_ID="718959508629"
         EXPECTED_REGION="ap-northeast-1"
         EXPECTED_REPOSITORY="https://github.com/noirelumiere00/TeamAgent.git"
@@ -371,7 +385,7 @@ phases:
             --content-type application/x-tar \
             --server-side-encryption aws:kms \
             --ssekms-key-id "__RELEASE_EVIDENCE_KMS_KEY_ARN__" \
-            --object-lock-mode COMPLIANCE \
+            --object-lock-mode GOVERNANCE \
             --object-lock-retain-until-date "$BUILD_CONTEXT_RETAIN_UNTIL" \
             --if-none-match '*' \
             --query VersionId \
@@ -435,7 +449,7 @@ phases:
             --content-type application/json \
             --server-side-encryption aws:kms \
             --ssekms-key-id "__RELEASE_EVIDENCE_KMS_KEY_ARN__" \
-            --object-lock-mode COMPLIANCE \
+            --object-lock-mode GOVERNANCE \
             --object-lock-retain-until-date "$RETAIN_UNTIL" \
             --if-none-match '*' \
             --query VersionId \
@@ -451,7 +465,7 @@ phases:
             --content-type application/octet-stream \
             --server-side-encryption aws:kms \
             --ssekms-key-id "__RELEASE_EVIDENCE_KMS_KEY_ARN__" \
-            --object-lock-mode COMPLIANCE \
+            --object-lock-mode GOVERNANCE \
             --object-lock-retain-until-date "$RETAIN_UNTIL" \
             --if-none-match '*' \
             --query VersionId \

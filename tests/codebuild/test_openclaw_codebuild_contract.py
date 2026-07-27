@@ -169,7 +169,7 @@ def test_immutable_openclaw_evidence_bucket_and_runtime_pull_denies_are_explicit
     assert "object_lock_enabled = true" in terraform
     assert 'status = "Enabled"' in terraform
     assert 'sse_algorithm     = "aws:kms"' in terraform
-    assert 'mode = "COMPLIANCE"' in terraform
+    assert 'mode = "GOVERNANCE"' in terraform
     assert "days = 3650" in terraform
     assert "prevent_destroy = true" in terraform
     for repository in (
@@ -193,6 +193,6 @@ def test_safe_launcher_assumes_once_pins_dev_and_never_deploys() -> None:
     assert '--source-version "$COMMIT"' in first_start
     assert "environment-variables-override" not in first_start
     assert "--if-none-match '*'" in body
-    assert "--object-lock-mode COMPLIANCE" in body
+    assert "--object-lock-mode GOVERNANCE" in body
     assert "source-manifests/$COMMIT/$SOURCE_MANIFEST_SHA256.json" in body
     assert not any(command in body for command in ("aws ecs ", "aws events ", "put-targets"))

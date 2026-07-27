@@ -1509,8 +1509,8 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     changed["immutableEvidence"]["resultVersionId"] = "null"
     mutations.append(("unversioned S3 result", changed))
     changed = copy.deepcopy(fixture)
-    changed["immutableEvidence"]["resultObjectLockMode"] = "GOVERNANCE"
-    mutations.append(("weaker Object Lock mode", changed))
+    changed["immutableEvidence"]["resultObjectLockMode"] = "NONE"
+    mutations.append(("invalid Object Lock mode", changed))
     changed = copy.deepcopy(fixture)
     changed["immutableEvidence"]["signatureObjectLockRetainUntil"] = "2026-07-19T00:00:01Z"
     mutations.append(("short signature retention", changed))
@@ -1676,7 +1676,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     runtime_evidence_tf = RUNTIME_EVIDENCE_TF.read_text()
     for required in (
         "object_lock_enabled = true",
-        'mode = "COMPLIANCE"',
+        'mode = "GOVERNANCE"',
         "days = 3650",
         'key_usage                = "SIGN_VERIFY"',
         'customer_master_key_spec = "RSA_3072"',

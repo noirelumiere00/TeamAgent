@@ -12,11 +12,13 @@ CODEBUILD_TF = TF_ROOT / "codebuild.tf"
 
 EXPECTED_POST_CUT_MANAGED = frozenset(
     """
+    aws_cloudwatch_log_group.codebuild_approval_publisher
     aws_cloudwatch_log_group.codebuild_image_attestor
     aws_cloudwatch_log_group.codebuild_image_promoter
     aws_cloudwatch_log_group.codebuild_mcp_source_publisher
     aws_cloudwatch_log_group.codebuild_openclaw_provenance
     aws_cloudwatch_log_group.codebuild_tiktok_image
+    aws_codebuild_project.approval_publisher
     aws_codebuild_project.image_attestor
     aws_codebuild_project.image_promoter
     aws_codebuild_project.mcp_source_publisher
@@ -50,8 +52,15 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_ecr_repository.tiktok_acquire
     aws_ecr_repository.tiktok_acquire_quarantine
     aws_ecr_repository.tiktok_acquire_verified_candidates
+    aws_iam_policy.approval_caller_override_a
+    aws_iam_policy.approval_caller_override_b
+    aws_iam_policy.approval_caller_override_c
+    aws_iam_policy.approval_reader
     aws_iam_policy.runtime_automation_boundary
     aws_iam_role.alarm_recipient_ack_signer
+    aws_iam_role.approval_caller
+    aws_iam_role.approval_publisher
+    aws_iam_role.codebuild
     aws_iam_role.codebuild_launcher
     aws_iam_role.image_attestor
     aws_iam_role.image_deployment_gate
@@ -66,6 +75,8 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_role.tiktok_build_launcher
     aws_iam_role.tiktok_codebuild
     aws_iam_role_policy.alarm_recipient_ack_signer
+    aws_iam_role_policy.approval_caller
+    aws_iam_role_policy.approval_publisher
     aws_iam_role_policy.codebuild_launcher
     aws_iam_role_policy.image_attestor
     aws_iam_role_policy.image_deployment_gate
@@ -82,6 +93,17 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_policy.runtime_automation_control_plane_manage_a
     aws_iam_policy.runtime_automation_control_plane_manage_b
     aws_iam_policy.runtime_automation_control_plane_core
+    aws_iam_role_policy_attachment.approval_caller_override_a
+    aws_iam_role_policy_attachment.approval_caller_override_b
+    aws_iam_role_policy_attachment.approval_caller_override_c
+    aws_iam_role_policy_attachment.approval_reader_attestor
+    aws_iam_role_policy_attachment.approval_reader_build_launcher
+    aws_iam_role_policy_attachment.approval_reader_deployment_gate
+    aws_iam_role_policy_attachment.approval_reader_main_builder
+    aws_iam_role_policy_attachment.approval_reader_promoter
+    aws_iam_role_policy_attachment.approval_reader_release_launcher
+    aws_iam_role_policy_attachment.approval_reader_runtime_automation
+    aws_iam_role_policy_attachment.approval_reader_source_publisher
     aws_iam_role_policy_attachment.runtime_automation_control_plane_manage_a
     aws_iam_role_policy_attachment.runtime_automation_control_plane_manage_b
     aws_iam_role_policy_attachment.runtime_automation_control_plane_core
@@ -93,6 +115,7 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_user_policy.release_control_update_caller
     aws_iam_user_policy.tiktok_build_caller
     aws_kms_alias.alarm_recipient_ack
+    aws_kms_alias.approval_signing
     aws_kms_alias.image_attestor_signing
     aws_kms_alias.image_release_evidence
     aws_kms_alias.mcp_source_publisher_signing
@@ -101,6 +124,7 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_kms_alias.openclaw_publisher_signing
     aws_kms_alias.tiktok_source_publisher_signing
     aws_kms_key.alarm_recipient_ack
+    aws_kms_key.approval_signing
     aws_kms_key.image_attestor_signing
     aws_kms_key.image_release_evidence
     aws_kms_key.mcp_source_publisher_signing
@@ -124,6 +148,7 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_s3_bucket_server_side_encryption_configuration.openclaw_build_evidence
     aws_s3_bucket_versioning.image_release_evidence
     aws_s3_bucket_versioning.openclaw_build_evidence
+    aws_s3_object.approval_publisher_buildspec
     """.split()
 )
 
@@ -132,6 +157,14 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.aiia_dev_no_direct_start_build
     data.aws_iam_policy_document.alarm_recipient_ack_signer
     data.aws_iam_policy_document.alarm_recipient_ack_signer_assume
+    data.aws_iam_policy_document.approval_caller
+    data.aws_iam_policy_document.approval_caller_assume
+    data.aws_iam_policy_document.approval_caller_override_a
+    data.aws_iam_policy_document.approval_caller_override_b
+    data.aws_iam_policy_document.approval_caller_override_c
+    data.aws_iam_policy_document.approval_publisher
+    data.aws_iam_policy_document.approval_publisher_assume
+    data.aws_iam_policy_document.approval_reader
     data.aws_iam_policy_document.codebuild_launcher
     data.aws_iam_policy_document.codebuild_launcher_assume
     data.aws_iam_policy_document.image_attestor
@@ -141,6 +174,7 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.image_promoter
     data.aws_iam_policy_document.image_promoter_assume
     data.aws_iam_policy_document.image_release_evidence_bucket
+    data.aws_iam_policy_document.main_codebuild_assume
     data.aws_iam_policy_document.mcp_source_publisher
     data.aws_iam_policy_document.mcp_source_publisher_assume
     data.aws_iam_policy_document.media_cutover_attestor
@@ -292,8 +326,8 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
-    assert len(EXPECTED_POST_CUT_MANAGED) == 112
-    assert len(EXPECTED_POST_CUT_DATA) == 39
+    assert len(EXPECTED_POST_CUT_MANAGED) == 137
+    assert len(EXPECTED_POST_CUT_DATA) == 48
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
 
@@ -302,7 +336,7 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     dependencies = set(cast(list[str], contract["create_allowed_dependency_addresses"]))
     existing = set(cast(list[str], contract["existing_dependency_addresses"]))
     forbidden_prefixes = set(cast(list[str], contract["forbidden_change_type_prefixes"]))
-    assert len(targets) == 95
+    assert len(targets) == 119
     assert len(dependencies) == 16
     assert existing == {"aws_s3_bucket.raw_files"}
     assert targets.isdisjoint(dependencies)

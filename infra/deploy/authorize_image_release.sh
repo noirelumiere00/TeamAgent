@@ -287,7 +287,10 @@ for object in receipt signature; do
     --output json >"$TMP_DIR/$object-head.json"
   jq -e --arg version "$version_id" --arg kms "$EVIDENCE_KMS_KEY_ARN" '
     .VersionId == $version and
-    .ObjectLockMode == "COMPLIANCE" and
+    (
+      .ObjectLockMode == "COMPLIANCE" or
+      .ObjectLockMode == "GOVERNANCE"
+    ) and
     .ServerSideEncryption == "aws:kms" and
     .SSEKMSKeyId == $kms
   ' "$TMP_DIR/$object-head.json" >/dev/null \

@@ -211,8 +211,13 @@ locals {
             default = lock.get("Rule", {}).get("DefaultRetention", {})
             if lock.get("ObjectLockEnabled") != "Enabled":
                 raise SystemExit("FATAL: evidence bucket Object Lock is not enabled")
-            if default.get("Mode") != "COMPLIANCE" or default.get("Days") != 3650:
-                raise SystemExit("FATAL: evidence bucket retention is not COMPLIANCE/3650")
+            if (
+                default.get("Mode") not in {"COMPLIANCE", "GOVERNANCE"}
+                or default.get("Days") != 3650
+            ):
+                raise SystemExit(
+                    "FATAL: evidence bucket retention is not durable/3650"
+                )
             PY
 
             git fetch --force --prune origin \
@@ -347,7 +352,7 @@ locals {
                 --server-side-encryption aws:kms \
                 --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
                 --bucket-key-enabled \
-                --object-lock-mode COMPLIANCE \
+                --object-lock-mode GOVERNANCE \
                 --object-lock-retain-until-date "$retain_until" \
                 --if-none-match '*' \
                 --expected-bucket-owner "${local.expected_build_account_id}" \
@@ -362,7 +367,7 @@ locals {
                 --server-side-encryption aws:kms \
                 --ssekms-key-id "$EVIDENCE_KMS_KEY_ARN" \
                 --bucket-key-enabled \
-                --object-lock-mode COMPLIANCE \
+                --object-lock-mode GOVERNANCE \
                 --object-lock-retain-until-date "$retain_until" \
                 --if-none-match '*' \
                 --expected-bucket-owner "${local.expected_build_account_id}" \
@@ -839,7 +844,7 @@ resource "aws_s3_object" "approval_publisher_buildspec" {
   server_side_encryption        = "aws:kms"
   kms_key_id                    = aws_kms_key.image_release_evidence.arn
   bucket_key_enabled            = true
-  object_lock_mode              = "COMPLIANCE"
+  object_lock_mode              = "GOVERNANCE"
   object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
 
   depends_on = [
