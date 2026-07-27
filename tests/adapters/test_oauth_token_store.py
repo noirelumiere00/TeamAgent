@@ -18,9 +18,14 @@ from teamagent.adapters.oauth_token_store import (
 
 
 def test_token_repr_hides_secret() -> None:
-    t = OAuthToken(refresh_token="super-secret-refresh", scopes=("gmail.readonly",))
+    t = OAuthToken(
+        refresh_token="super-secret-refresh",
+        scopes=("gmail.readonly",),
+        id_token="super-secret-id-token",
+    )
     r = repr(t)
     assert "super-secret-refresh" not in r  # 誤ログ防止（G8）
+    assert "super-secret-id-token" not in r
     assert "***" in r
     assert "gmail.readonly" in r
 

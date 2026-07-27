@@ -34,7 +34,12 @@ from psycopg.errors import UndefinedColumn
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from teamagent.adapters.google_oauth_flow import OAuthConsentFlow, verify_state
+from teamagent.adapters.google_auth import connect_client_id_secret
+from teamagent.adapters.google_oauth_flow import (
+    OAuthConsentFlow,
+    consume_state_once,
+    verify_state,
+)
 from teamagent.adapters.oauth_token_store import (
     OAuthToken,
     SlackOAuthToken,
@@ -50,6 +55,7 @@ from teamagent.dashboard.auth import (
     Verifier,
     authenticate_id_token,
     make_session,
+    verify_google_id_token,
     verify_session,
 )
 from teamagent.dashboard.config import DashboardConfig
@@ -3340,6 +3346,22 @@ def _karte_payload(
     return {"client": client, "header": header, "timeline": timeline_out, "documents": docs_out}
 
 
+def _put_verified_oauth_token(
+    store: Any,
+    user_email: str,
+    token: OAuthToken,
+    *,
+    identity_verified: bool,
+) -> None:
+    """ID token 照合済みの callback だけを TokenStore.put へ通す最終ガード。"""
+    if not identity_verified:
+        raise PermissionError("Google OAuth account identity is not verified")
+    store.put(
+        user_email,
+        OAuthToken(refresh_token=token.refresh_token, scopes=token.scopes),
+    )
+
+
 def create_app(
     *,
     redirect_uri: str | None = None,
@@ -3347,6 +3369,8 @@ def create_app(
     app_role: str = "teamagent_app",
     exchange_fn: Callable[[str], OAuthToken] | None = None,
     store: Any | None = None,
+    google_state_consumer: Callable[[str], bool] | None = None,
+    oauth_id_token_verifier: Verifier | None = None,
     slack_redirect_uri: str | None = None,
     slack_exchange_fn: Callable[[str], SlackOAuthToken] | None = None,
     slack_store: Any | None = None,
@@ -3368,6 +3392,10 @@ def create_app(
       - client_karte_provider: (email, client) -> {"timeline": SearchHit list（古い順）,
         "documents": dict list} を返す callable（テストで実 DB を排除・graph_docs_provider
         と同列）。本番未指定時は RLS 接続で pgvector から実取得。
+
+    Google per-user 連携:
+      - google_state_consumer: 署名・TTL検証済みstateのワンタイム消費（テストでDDBを排除）。
+      - oauth_id_token_verifier: 同意アカウントのGoogle id_token検証器（テストで通信を排除）。
 
     Slack per-user 連携（/slack/oauth/callback・Google 版と対称）:
       - slack_redirect_uri: Slack 認可の redirect_uri（未指定時 env SLACK_OAUTH_REDIRECT_URI）。
@@ -3405,6 +3433,11 @@ def create_app(
         if exchange_fn is not None:
             return exchange_fn(code)
         return OAuthConsentFlow(redirect_uri=redirect).exchange(code)
+
+    def _consume_google_state(state: str) -> bool:
+        if google_state_consumer is not None:
+            return google_state_consumer(state)
+        return consume_state_once(state)
 
     def _get_store() -> Any:
         if store is not None:
@@ -3628,7 +3661,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で /teamagent connect をお試しください。",
+                    "もう一度 Slack で AiLa に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3638,7 +3671,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で /teamagent connect をやり直してください。",
+                    "リンクが壊れています。Slack で AiLa に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3648,16 +3681,119 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で /teamagent connect をやり直してください。",
+                    "リンクが古いか不正です。Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=400,
+            )
+        try:
+            state_consumed = _consume_google_state(state)
+        except Exception as exc:
+            logger.warning(
+                "connect_callback_state_consume_failed",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            state_consumed = False
+        if not state_consumed:
+            logger.warning("connect_callback_reused_state", user_email=email)
+            return HTMLResponse(
+                _page(
+                    "検証に失敗しました",
+                    "リンクが古いか使用済みです。Slack で AiLa に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
             )
         try:
             token = _exchange(code)
-            _get_store().put(email, token)
         except Exception as exc:
             # トークン/本文は出さない。診断用に例外の型と短い説明のみ。
+            logger.warning(
+                "connect_callback_exchange_failed",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return HTMLResponse(
+                _page(
+                    "連携に失敗しました",
+                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+        id_token = token.id_token
+        if not id_token:
+            logger.warning("connect_callback_id_token_missing", user_email=email)
+            return HTMLResponse(
+                _page(
+                    "Googleアカウントを確認できませんでした",
+                    f"{email} でログインし直してください。"
+                    "Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        client_id, _ = connect_client_id_secret()
+        if not client_id:
+            logger.warning("connect_callback_client_id_missing", user_email=email)
+            return HTMLResponse(
+                _page(
+                    "連携に失敗しました",
+                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+        try:
+            claims = verify_google_id_token(
+                id_token,
+                client_id,
+                verifier=oauth_id_token_verifier,
+            )
+        except Exception as exc:
+            logger.warning(
+                "connect_callback_id_token_invalid",
+                user_email=email,
+                error=type(exc).__name__,
+            )
+            return HTMLResponse(
+                _page(
+                    "Googleアカウントを確認できませんでした",
+                    f"{email} でログインし直してください。"
+                    "Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        consented_email = claims.get("email")
+        email_verified = claims.get("email_verified")
+        identity_verified = (
+            isinstance(consented_email, str)
+            and consented_email == email
+            and (email_verified is True or str(email_verified).lower() == "true")
+        )
+        if not identity_verified:
+            logger.warning("connect_callback_account_mismatch", user_email=email)
+            return HTMLResponse(
+                _page(
+                    "Googleアカウントが一致しません",
+                    f"別のアカウントで許可されました。{email} でログインし直してください。"
+                    "Slack で AiLa に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        try:
+            _put_verified_oauth_token(
+                _get_store(),
+                email,
+                token,
+                identity_verified=identity_verified,
+            )
+        except Exception as exc:
             logger.warning(
                 "connect_callback_store_failed",
                 user_email=email,
@@ -3667,7 +3803,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で /teamagent connect をやり直してください。",
+                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3691,7 +3827,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で /teamagent connect をお試しください。",
+                    "もう一度 Slack で AiLa に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3701,7 +3837,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で /teamagent connect をやり直してください。",
+                    "リンクが壊れています。Slack で AiLa に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3711,7 +3847,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で /teamagent connect をやり直してください。",
+                    "リンクが古いか不正です。Slack で AiLa に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3729,7 +3865,7 @@ def create_app(
                 return HTMLResponse(
                     _page(
                         "対象ワークスペースが違います",
-                        "所属ワークスペースの Slack で /teamagent connect をお試しください。",
+                        "所属ワークスペースの Slack で AiLa に「連携」と話しかけてください。",
                         accent="#f9667a",
                     ),
                     status_code=403,
@@ -3745,7 +3881,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で /teamagent connect をやり直してください。",
+                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,

@@ -22,14 +22,20 @@ from typing import Any, Protocol, runtime_checkable
 class OAuthToken:
     """1ユーザー分の OAuth リフレッシュトークン（＋認可済みスコープ）。
 
-    repr で refresh_token を伏せる（誤ってログ/例外に出るのを防ぐ・G8）。
+    id_token は callback で同意アカウントを照合する交換時だけ保持し、TokenStore は永続化しない。
+    repr では両 token を伏せる（誤ってログ/例外に出るのを防ぐ・G8）。
     """
 
     refresh_token: str
     scopes: tuple[str, ...] = ()
+    id_token: str | None = None
 
     def __repr__(self) -> str:
-        return f"OAuthToken(refresh_token=***, scopes={self.scopes!r})"
+        id_token = "***" if self.id_token else None
+        return (
+            f"OAuthToken(refresh_token=***, scopes={self.scopes!r}, "
+            f"id_token={id_token})"
+        )
 
 
 @dataclass(frozen=True, repr=False)

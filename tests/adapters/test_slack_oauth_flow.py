@@ -59,6 +59,12 @@ def test_verify_state_expired() -> None:
     assert verify_state(state, secret=_SECRET, now=1000 + 599, max_age_s=600) == "a@x.com"  # 有効
 
 
+def test_default_state_ttl_is_1800_seconds() -> None:
+    state = make_state("a@x.com", secret=_SECRET, now=1000)
+    assert verify_state(state, secret=_SECRET, now=2800) == "a@x.com"
+    assert verify_state(state, secret=_SECRET, now=2801) is None
+
+
 def test_verify_state_rejects_future_issued() -> None:
     """発行時刻が未来すぎる（時計ズレ 60s 超）state は拒否。"""
     state = make_state("a@x.com", secret=_SECRET, now=5000)
