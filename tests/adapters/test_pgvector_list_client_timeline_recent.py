@@ -5,7 +5,7 @@
   修正版として、modified_at DESC NULLS LAST（同日内 chunk_idx DESC）+ LIMIT で
   【最新 N 件】を取得する
 - 取得後に Python 側で反転し、既存契約どおり【古い順】（timeline[-1]＝最新）で返す
-- 射影列は list_client_timeline と同一（deal_phase / bant_score / occurred_at 等）
+- 射影列は list_client_timeline と同一（client_reaction / shared_memo を含む）
 - client_name は placeholder bind（SQL injection 安全）・空白のみは SQL を発行せず []
 """
 
@@ -40,8 +40,10 @@ def _fb_row(occurred_at: str, chunk_id: int, **over: Any) -> dict[str, Any]:
         "channel_type": None,
         "positive_reaction": None,
         "negative_reaction": None,
+        "client_reaction": None,
         "next_action": None,
         "proposed_menu": None,
+        "shared_memo": None,
     }
     row.update(over)
     return row
@@ -68,8 +70,10 @@ def test_projects_same_columns_as_list_client_timeline() -> None:
         "d.metadata->>'deal_phase' AS deal_phase",
         "d.metadata->>'bant_score' AS bant_score",
         "d.metadata->>'channel_type' AS channel_type",
+        "d.metadata->>'client_reaction' AS client_reaction",
         "d.metadata->>'next_action' AS next_action",
         "d.metadata->>'proposed_menu' AS proposed_menu",
+        "d.metadata->>'shared_memo' AS shared_memo",
     ):
         assert col in sql
     assert "d.metadata->>'is_sales_fb' = 'true'" in sql
@@ -89,7 +93,14 @@ def test_reverses_desc_rows_to_oldest_first() -> None:
     """DB からは新しい順で届くが、返り値は古い順（timeline[-1]＝最新の契約）。"""
     client = PgVectorClient(dsn="postgresql://stub")
     rows = [
-        _fb_row("2026-06-15", 3, deal_phase="提案", bant_score="B（前向き）"),
+        _fb_row(
+            "2026-06-15",
+            3,
+            deal_phase="提案",
+            bant_score="B（前向き）",
+            client_reaction="前向きだが予算を懸念",
+            shared_memo="決裁者同席で次回提案",
+        ),
         _fb_row("2026-06-01", 2, deal_phase="ヒアリング"),
         _fb_row("2026-05-01", 1, deal_phase="初回接触"),
     ]
@@ -103,6 +114,8 @@ def test_reverses_desc_rows_to_oldest_first() -> None:
     latest = hits[-1]
     assert latest.metadata["deal_phase"] == "提案"
     assert latest.metadata["bant_score"] == "B（前向き）"
+    assert latest.metadata["client_reaction"] == "前向きだが予算を懸念"
+    assert latest.metadata["shared_memo"] == "決裁者同席で次回提案"
     assert latest.metadata["is_sales_fb"] is True
     assert latest.metadata["source_type"] == "slack"
 

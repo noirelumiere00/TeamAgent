@@ -181,27 +181,27 @@
     {
       "name": "tiktok_acquire",
       "effect": "external-job-submit-s3-write",
-      "terraformGate": "enable_tiktok_acquire",
+      "terraformGate": "enable_media_worker || enable_tiktok_acquire (deprecated alias)",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_ACQUIRE"] }
     },
     {
       "name": "tiktok_acquire_status",
       "effect": "job-status-read",
-      "terraformGate": "enable_tiktok_acquire",
+      "terraformGate": "enable_media_worker || enable_tiktok_acquire (deprecated alias)",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_ACQUIRE"] }
     },
     {
       "name": "x_voice_search",
-      "effect": "external-read-scrape",
+      "effect": "external-read-scrape-analysis-report-write",
       "terraformGate": "enable_x_research",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "x_needs_mining",
-      "effect": "external-read-analysis",
+      "effect": "external-read-analysis-report-write",
       "terraformGate": "enable_x_research",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
@@ -215,14 +215,14 @@
     },
     {
       "name": "x_buzz_measure_status",
-      "effect": "job-status-read",
+      "effect": "job-status-read-lazy-analysis-report-write-cache-write",
       "terraformGate": "enable_x_research",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_X_RESEARCH_TOOLS"] }
     },
     {
       "name": "search_surface_check",
-      "effect": "external-read-analysis",
+      "effect": "external-read-analysis-report-write",
       "terraformGate": "enable_x_research",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SEARCH_SURFACE_TOOL"] }
