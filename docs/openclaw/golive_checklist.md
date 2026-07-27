@@ -51,7 +51,9 @@
 ## Terraform deployment
 
 - [ ] `openclaw_image` は固定 release repository の `@sha256`
-- [ ] `image_release_evidence.openclaw` は exact immutable VersionId
+- [ ] launcher が生成した `image_deployment_consumer_manifest` /
+      `image_release_receipt_catalog` / `image_release_consumer_receipt_bindings`
+      は exact consumer と immutable VersionId を束縛
 - [ ] `terraform_runtime_guard.sh plan` が worktree外に full saved planを作成
 - [ ] planに `-target`、import、destroy、refresh-only、未知値、意図しない
       IAM/SG/schedule/image差分がない

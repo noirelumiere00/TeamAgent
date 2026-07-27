@@ -123,20 +123,14 @@ Terraform を実行しません。
 
 ## 5. One-time full saved plan
 
-`terraform.tfvars` には release repository の digest と exact evidence
-VersionId、および明示的なSlack DM契約を設定します。
+launcher に exact consumer manifest と `--terraform-gate-vars-out` を渡し、
+生成された `image_deployment_consumer_manifest` /
+`image_release_receipt_catalog` / `image_release_consumer_receipt_bindings`
+の3値を、release repository の digest と明示的なSlack DM契約を含む
+owner-only JSON var-fileへ統合します。
 
 ```hcl
 openclaw_image = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:<RELEASE_DIGEST>"
-image_release_evidence = {
-  openclaw = {
-    bucket               = "teamagent-dev-image-release-evidence"
-    key                  = "<exact receipt key>"
-    version_id           = "<exact receipt VersionId>"
-    signature_key        = "<exact signature key>"
-    signature_version_id = "<exact signature VersionId>"
-  }
-}
 shared_company_domains = "vectorinc.co.jp"        # §G 会社共有ドメイン
 openclaw_model_id      = "jp.anthropic.claude-haiku-4-5"   # 手順0で確定した値
 enable_vpc_endpoints   = true

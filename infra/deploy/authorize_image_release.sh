@@ -35,6 +35,8 @@ APPROVAL_SIGNATURE_BUCKET=""
 APPROVAL_SIGNATURE_KEY=""
 APPROVAL_SIGNATURE_VERSION_ID=""
 APPROVAL_SIGNATURE_SHA256=""
+CONSUMER_MANIFEST=""
+TERRAFORM_GATE_VARS_OUT=""
 
 die() {
   echo "FATAL: $*" >&2
@@ -49,6 +51,8 @@ usage: authorize_image_release.sh \
   --receipt-key KEY \
   --receipt-version-id VERSION \
   --receipt-signature-version-id VERSION \
+  [--consumer-manifest FILE \
+   --terraform-gate-vars-out FILE] \
   [--approval-payload-bucket BUCKET \
    --approval-payload-key KEY \
    --approval-payload-version-id VERSION_ID \
@@ -63,7 +67,9 @@ The source-free attestor rechecks the signed source plus the exact immutable
 verified-candidate digest/referrers/signatures, then the source-free promoter
 creates the active/rollback tag. It never depends on an expired quarantine copy.
 This command does not run Terraform or update ECS, EventBridge, task definitions,
-or services.
+or services. For mcp/openclaw it writes a new owner-only Terraform JSON var-file
+containing image_deployment_consumer_manifest, image_release_receipt_catalog,
+and image_release_consumer_receipt_bindings.
 EOF
 }
 
@@ -82,6 +88,8 @@ while [ "$#" -gt 0 ]; do
       LOCATOR_SIGNATURE_VERSION="$2"
       shift 2
       ;;
+    --consumer-manifest) value "$@"; CONSUMER_MANIFEST="$2"; shift 2 ;;
+    --terraform-gate-vars-out) value "$@"; TERRAFORM_GATE_VARS_OUT="$2"; shift 2 ;;
     --approval-payload-bucket) value "$@"; APPROVAL_PAYLOAD_BUCKET="$2"; shift 2 ;;
     --approval-payload-key) value "$@"; APPROVAL_PAYLOAD_KEY="$2"; shift 2 ;;
     --approval-payload-version-id) value "$@"; APPROVAL_PAYLOAD_VERSION_ID="$2"; shift 2 ;;
@@ -98,6 +106,21 @@ while [ "$#" -gt 0 ]; do
 done
 case "$PIPELINE" in mcp|tiktok|openclaw) ;; *) die "pipeline is not allowlisted" ;; esac
 case "$CHANNEL" in active|rollback) ;; *) die "channel must be active or rollback" ;; esac
+if [ "$PIPELINE" = "tiktok" ]; then
+  [ -z "$CONSUMER_MANIFEST$TERRAFORM_GATE_VARS_OUT" ] \
+    || die "tiktok has no deployment consumer in the code-owned registry"
+else
+  [ -n "$CONSUMER_MANIFEST" ] \
+    || die "--consumer-manifest is required for deployable pipelines"
+  [ -n "$TERRAFORM_GATE_VARS_OUT" ] \
+    || die "--terraform-gate-vars-out is required for deployable pipelines"
+  [ -f "$CONSUMER_MANIFEST" ] && [ ! -L "$CONSUMER_MANIFEST" ] \
+    || die "consumer manifest must be a regular non-symlink file"
+  [ ! -e "$TERRAFORM_GATE_VARS_OUT" ] \
+    || die "Terraform gate var-file output already exists"
+  [ -d "$(dirname -- "$TERRAFORM_GATE_VARS_OUT")" ] \
+    || die "Terraform gate var-file output directory does not exist"
+fi
 if [ "$PIPELINE" = "mcp" ]; then
   for required in \
     APPROVAL_PAYLOAD_BUCKET APPROVAL_PAYLOAD_KEY APPROVAL_PAYLOAD_VERSION_ID \
@@ -158,6 +181,7 @@ git -C "$CONTROL_ROOT" fetch --quiet --no-tags origin \
 [ "$(git -C "$CONTROL_ROOT" rev-parse HEAD)" = "$(git -C "$CONTROL_ROOT" rev-parse refs/remotes/origin/dev)" ] \
   || die "local dev HEAD must exactly equal origin/dev"
 EVIDENCE_HELPER="$CONTROL_ROOT/infra/codebuild/release_evidence.py"
+CONTEXT_HELPER="$CONTROL_ROOT/infra/terraform/image_release_context.py"
 case "$PIPELINE" in
   mcp)
     CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
@@ -167,7 +191,13 @@ case "$PIPELINE" in
   tiktok) CONTRACT="$CONTROL_ROOT/infra/codebuild/tiktok_release_contract.json" ;;
   openclaw) CONTRACT="$CONTROL_ROOT/infra/codebuild/openclaw_bundle_contract.json" ;;
 esac
-[ -f "$EVIDENCE_HELPER" ] && [ -f "$CONTRACT" ] || die "trusted release controls are missing"
+[ -f "$EVIDENCE_HELPER" ] && [ -f "$CONTEXT_HELPER" ] && [ -f "$CONTRACT" ] \
+  || die "trusted release controls are missing"
+if [ "$PIPELINE" != "tiktok" ]; then
+  python3 "$CONTEXT_HELPER" validate-consumer-manifest \
+    --manifest "$CONSUMER_MANIFEST" >/dev/null \
+    || die "consumer manifest is invalid"
+fi
 CONTRACT_SHA256="$(sha256sum "$CONTRACT" | awk '{print $1}')"
 if [ "$PIPELINE" = "mcp" ]; then
   [ -f "$RUNTIME_CONTRACT" ] && [ -f "$BUNDLE_PROVENANCE" ] \
@@ -562,6 +592,149 @@ while IFS= read -r subject; do
     || die "release digest differs from the signed verified candidate"
 done < <(jq -c '.subjects[]' "$TMP_DIR/locator.json")
 
+if [ "$PIPELINE" != "tiktok" ]; then
+  if ! python3 - \
+    "$CONTEXT_HELPER" \
+    "$CONSUMER_MANIFEST" \
+    "$TMP_DIR/locator.json" \
+    "$PIPELINE" \
+    "$EVIDENCE_BUCKET" \
+    "$NEW_RECEIPT_KEY" \
+    "$NEW_RECEIPT_VERSION" \
+    "$NEW_SIGNATURE_KEY" \
+    "$NEW_SIGNATURE_VERSION" \
+    "$TERRAFORM_GATE_VARS_OUT" <<'PY'
+import importlib.util
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+(
+    helper_path,
+    manifest_path,
+    locator_path,
+    pipeline,
+    evidence_bucket,
+    receipt_key,
+    receipt_version,
+    signature_key,
+    signature_version,
+    output_path,
+) = sys.argv[1:]
+
+spec = importlib.util.spec_from_file_location("image_release_context", helper_path)
+if spec is None or spec.loader is None:
+    raise SystemExit("consumer manifest validator is unavailable")
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+
+with open(manifest_path, encoding="utf-8") as handle:
+    manifest = helper.validate_consumer_manifest(json.load(handle))
+with open(locator_path, encoding="utf-8") as handle:
+    locator = json.load(handle)
+
+if manifest["mode"] != "receipt-required":
+    raise SystemExit("release authorization requires a receipt-required consumer manifest")
+
+claim_match = re.fullmatch(
+    rf"release-receipts/{re.escape(pipeline)}/[0-9a-f]{{40}}/([0-9a-f]{{64}})\.json",
+    receipt_key,
+)
+if claim_match is None or signature_key != f"{receipt_key}.sig":
+    raise SystemExit("issued receipt locator is not canonical")
+claim_id = claim_match.group(1)
+
+subjects = {}
+for raw_subject in locator.get("subjects", []):
+    if not isinstance(raw_subject, dict):
+        raise SystemExit("candidate receipt subjects are malformed")
+    key = (raw_subject.get("name"), raw_subject.get("release_repository"))
+    digest = raw_subject.get("digest")
+    if (
+        not all(isinstance(value, str) and value for value in key)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None
+        or key in subjects
+    ):
+        raise SystemExit("candidate receipt subjects are not unique and canonical")
+    subjects[key] = digest
+
+bindings = {}
+for consumer in manifest["consumers"]:
+    before = consumer["before"]
+    after = consumer["after"]
+    before_absent = before == {"absent": True}
+    after_absent = after == {"absent": True}
+    if after_absent:
+        if not before_absent:
+            raise SystemExit(
+                "consumer disabling is outside the image release workflow"
+            )
+        continue
+    activator_type = consumer["activator"]["type"]
+    receipt_required = (
+        before_absent
+        or before["image"] != after["image"]
+        or before["task_definition_arn"] != after["task_definition_arn"]
+        or before["task_definition"] != after["task_definition"]
+        or (
+            not before_absent
+            and helper._activation_execution_state(
+                before,
+                activator_type=activator_type,
+            )
+            != helper._activation_execution_state(
+                after,
+                activator_type=activator_type,
+            )
+        )
+    )
+    if not receipt_required:
+        continue
+    receipt = consumer["receipt"]
+    if receipt["pipeline"] != pipeline:
+        raise SystemExit("consumer manifest changes more than the authorized pipeline")
+    subject_key = (receipt["subject"], consumer["release_repository"])
+    digest = subjects.get(subject_key)
+    if digest is None:
+        raise SystemExit("consumer has no matching signed receipt subject")
+    expected_image = (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"{consumer['release_repository']}@{digest}"
+    )
+    if after["image"] != expected_image:
+        raise SystemExit("consumer target image differs from the signed receipt subject")
+    bindings[consumer["consumer_id"]] = claim_id
+
+if not bindings:
+    raise SystemExit("receipt-required manifest has no receipt-requiring consumer")
+
+variables = {
+    "image_deployment_consumer_manifest": manifest,
+    "image_release_consumer_receipt_bindings": bindings,
+    "image_release_receipt_catalog": {
+        claim_id: {
+            "bucket": evidence_bucket,
+            "key": receipt_key,
+            "signature_key": signature_key,
+            "signature_version_id": signature_version,
+            "version_id": receipt_version,
+        }
+    },
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+descriptor = os.open(Path(output_path), flags, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    json.dump(variables, handle, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+  then
+    die "could not generate exact Terraform image release gate variables"
+  fi
+fi
+
 echo "Guarded release authorization completed (no deployment performed):"
 echo "  pipeline=$PIPELINE"
 echo "  channel=$CHANNEL"
@@ -570,7 +743,11 @@ echo "  receipt_key=$NEW_RECEIPT_KEY"
 echo "  receipt_version_id=$NEW_RECEIPT_VERSION"
 echo "  receipt_signature_key=$NEW_SIGNATURE_KEY"
 echo "  receipt_signature_version_id=$NEW_SIGNATURE_VERSION"
-echo "Set these exact image_release_evidence values and the release @sha256, then use:"
+if [ "$PIPELINE" != "tiktok" ]; then
+  echo "  terraform_gate_vars=$TERRAFORM_GATE_VARS_OUT"
+  echo "Use the generated image_deployment_consumer_manifest, image_release_receipt_catalog,"
+  echo "and image_release_consumer_receipt_bindings in the guarded saved-plan workflow:"
+fi
 echo "  bash infra/deploy/terraform_runtime_guard.sh plan --var-file /secure/local/path/terraform.tfvars --out /secure/local/path/image-release.tfplan --runtime-migration MIGRATION_ID [required receipts]"
 echo "  bash infra/deploy/terraform_runtime_guard.sh apply --plan /secure/local/path/image-release.tfplan --out /secure/local/path/image-release.apply.json"
 echo "The saved plan, deployment intent, and exact receipt versions authorize at most one deployment."

@@ -271,6 +271,21 @@ def test_release_authorizer_contract_mapping_matches_the_evidence_pipeline_map()
         assert f'CONTRACT="$CONTROL_ROOT/{definition["contract_path"]}"' in body
 
 
+def test_release_authorizer_generates_the_current_consumer_gate_variables() -> None:
+    body = AUTHORIZE_LAUNCHER.read_text(encoding="utf-8")
+
+    assert "--consumer-manifest" in body
+    assert "--terraform-gate-vars-out" in body
+    assert "validate-consumer-manifest" in body
+    for variable in (
+        "image_deployment_consumer_manifest",
+        "image_release_receipt_catalog",
+        "image_release_consumer_receipt_bindings",
+    ):
+        assert variable in body
+    assert "image_release_evidence" not in body
+
+
 def _hex(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 
@@ -320,7 +335,7 @@ def _consumer_snapshot(
     image: str,
     execution: int | str | bool,
     *,
-    activator_type: str,
+    consumer: Mapping[str, Any],
     task_definition_arn: str,
 ) -> dict[str, Any]:
     """Shape one live/before/after row the way its activator reports execution.
@@ -329,6 +344,7 @@ def _consumer_snapshot(
     later iteration -- a closure here would make every consumer describe the
     last one, and the manifest comparison would still look green.
     """
+    activator_type = consumer["activator"]["type"]
     if activator_type == "ecs_service":
         activation = {
             "desired_count": execution,
@@ -347,6 +363,44 @@ def _consumer_snapshot(
     return {
         "image": image,
         "task_definition_arn": task_definition_arn,
+        "task_definition": {
+            "container_definitions": [
+                {
+                    "name": consumer["container_name"],
+                    "image": image,
+                    "command": ["python", "-m", "worker"],
+                    "entryPoint": [],
+                    "environment": [
+                        {"name": "A_FIRST", "value": "first"},
+                        {"name": "Z_LAST", "value": "last"},
+                    ],
+                    "secrets": [],
+                    "user": "1000",
+                    "privileged": False,
+                    "readonlyRootFilesystem": True,
+                    "linuxParameters": {"initProcessEnabled": True},
+                    "mountPoints": [],
+                    "logConfiguration": {
+                        "logDriver": "awslogs",
+                        "options": {
+                            "awslogs-region": EVIDENCE.REGION,
+                            "awslogs-stream-prefix": consumer["consumer_id"],
+                        },
+                    },
+                }
+            ],
+            "task_role_arn": (
+                f"arn:aws:iam::{EVIDENCE.ACCOUNT_ID}:role/teamagent-{consumer['ecs_family']}-task"
+            ),
+            "execution_role_arn": (
+                f"arn:aws:iam::{EVIDENCE.ACCOUNT_ID}:role/"
+                f"teamagent-{consumer['ecs_family']}-execution"
+            ),
+            "network_mode": "awsvpc",
+            "cpu": "256",
+            "memory": "512",
+            "volumes": [],
+        },
         "activation": activation,
     }
 
@@ -402,19 +456,19 @@ def _consumer_manifest(
                 "live": _consumer_snapshot(
                     before_image,
                     before_execution,
-                    activator_type=activator_type,
+                    consumer=consumer,
                     task_definition_arn=task_definition_arn,
                 ),
                 "before": _consumer_snapshot(
                     before_image,
                     before_execution,
-                    activator_type=activator_type,
+                    consumer=consumer,
                     task_definition_arn=task_definition_arn,
                 ),
                 "after": _consumer_snapshot(
                     after_image,
                     after_execution,
-                    activator_type=activator_type,
+                    consumer=consumer,
                     task_definition_arn=task_definition_arn,
                 ),
             }
@@ -1608,13 +1662,8 @@ def _terraform_query(
                 }
             ),
             "consumer_receipt_bindings_json": json.dumps({consumer_id: receipt_sha256}),
-            "contracts_json": json.dumps(
-                {
-                    "mcp": CONTRACT_SHA256,
-                    "openclaw": "a" * 64,
-                }
-            ),
-            "contract_ready_json": json.dumps({"mcp": True, "openclaw": False}),
+            "contracts_json": json.dumps({"mcp": CONTRACT_SHA256}),
+            "contract_ready_json": json.dumps({"mcp": True}),
             "application_json": json.dumps({"mcp": APPLICATION}),
             "shared_generation_ledger_json": json.dumps({}),
             "signing_key_arn": KEY_ARN,
@@ -1864,12 +1913,12 @@ def _saved_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
             separators=(",", ":"),
         ),
         "contracts_json": json.dumps(
-            {"mcp": CONTRACT_SHA256, "openclaw": "a" * 64},
+            {"mcp": CONTRACT_SHA256},
             sort_keys=True,
             separators=(",", ":"),
         ),
         "contract_ready_json": json.dumps(
-            {"mcp": True, "openclaw": False},
+            {"mcp": True},
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -1891,8 +1940,8 @@ def _no_image_gate_query(*, intent_id: str = INTENT_ID) -> dict[str, str]:
         "receipt_catalog_json": "{}",
         "consumer_receipt_bindings_json": "{}",
         "contracts_json": json.dumps({"mcp": CONTRACT_SHA256, "openclaw": "a" * 64}),
-        "contract_ready_json": json.dumps({"mcp": False, "openclaw": False}),
-        "application_json": "{}",
+        "contract_ready_json": json.dumps({"mcp": True, "openclaw": True}),
+        "application_json": json.dumps({"mcp": APPLICATION}),
         "shared_generation_ledger_json": "{}",
         "signing_key_arn": KEY_ARN,
         "encryption_key_arn": KEY_ARN,
@@ -1907,7 +1956,9 @@ DEFAULT_GATE_QUERY_JSON = json.dumps(
     sort_keys=True,
     separators=(",", ":"),
 )
-DEFAULT_CONSUMER_MANIFEST = json.loads(DEFAULT_GATE_QUERY["consumer_manifest_json"])
+DEFAULT_CONSUMER_MANIFEST = EVIDENCE._validate_gate_consumer_manifest(
+    json.loads(DEFAULT_GATE_QUERY["consumer_manifest_json"])
+)
 DEFAULT_RECEIPT_CATALOG = json.loads(DEFAULT_GATE_QUERY["receipt_catalog_json"])
 DEFAULT_CONSUMER_RECEIPT_BINDINGS = json.loads(DEFAULT_GATE_QUERY["consumer_receipt_bindings_json"])
 DEFAULT_CONSUMER_MANIFEST_SHA256 = hashlib.sha256(
@@ -1927,8 +1978,27 @@ RECEIPT_AUTHORIZATION_EXPIRES_AT = str(int((NOW + dt.timedelta(minutes=25)).time
 
 def _gate_metadata_fields(
     query: dict[str, str] | None = None,
+    *,
+    release_channels: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    selected = query or DEFAULT_GATE_QUERY
+    selected = query if query is not None else DEFAULT_GATE_QUERY
+    (
+        consumer_manifest,
+        receipt_catalog,
+        consumer_receipt_bindings,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+        _,
+    ) = EVIDENCE._parse_terraform_gate_query(selected)
+    selected_release_channels = dict(
+        release_channels
+        if release_channels is not None
+        else {consumer_id: "active" for consumer_id in consumer_receipt_bindings}
+    )
     return {
         "gate_query_sha256": hashlib.sha256(EVIDENCE.canonical_bytes(selected)).hexdigest(),
         "gate_query_json": json.dumps(
@@ -1937,9 +2007,19 @@ def _gate_metadata_fields(
             separators=(",", ":"),
         ),
         "receipt_authorization_expires_at": (RECEIPT_AUTHORIZATION_EXPIRES_AT),
-        "deployment_mode": "receipt-required",
-        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
-        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+        "deployment_mode": consumer_manifest["mode"],
+        "consumer_manifest_sha256": hashlib.sha256(
+            EVIDENCE.canonical_bytes(consumer_manifest)
+        ).hexdigest(),
+        "release_evidence_binding_sha256": hashlib.sha256(
+            EVIDENCE.canonical_bytes(
+                {
+                    "receipt_catalog": receipt_catalog,
+                    "consumer_receipt_bindings": consumer_receipt_bindings,
+                    "release_channels": selected_release_channels,
+                }
+            )
+        ).hexdigest(),
     }
 
 
@@ -2431,6 +2511,48 @@ def test_consumer_bindings_fail_closed_for_missing_extra_unknown_and_unused_clai
         )
 
 
+def test_task_definition_change_requires_a_consumer_receipt_binding() -> None:
+    claim_id = "c" * 64
+    manifest = _consumer_manifest(mode="receipt-required")
+    mcp = next(consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == "mcp")
+    mcp["after"]["task_definition"]["container_definitions"][0]["command"] = [
+        "/bin/sh",
+        "-c",
+        "exit 1",
+    ]
+
+    mode, _, _, bindings, claim_ids = EVIDENCE._deployment_receipt_inputs(
+        consumer_manifest=manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={"mcp": claim_id},
+    )
+
+    assert mode == "receipt-required"
+    assert bindings == {"mcp": claim_id}
+    assert claim_ids == [claim_id]
+
+
+def test_disabled_consumer_enablement_requires_a_receipt_binding() -> None:
+    claim_id = "c" * 64
+    manifest = _consumer_manifest(mode="receipt-required")
+    canary = next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == "canary"
+    )
+    canary["live"] = {"absent": True}
+    canary["before"] = {"absent": True}
+
+    mode, _, _, bindings, claim_ids = EVIDENCE._deployment_receipt_inputs(
+        consumer_manifest=manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={"canary": claim_id},
+    )
+
+    assert mode == "receipt-required"
+    assert bindings == {"canary": claim_id}
+    assert claim_ids == [claim_id]
+    assert EVIDENCE._consumer_execution_increased(canary) is True
+
+
 def test_no_image_transition_is_derived_and_is_the_only_empty_claim_variant() -> None:
     result = EVIDENCE._terraform_gate(
         _no_image_gate_query(),
@@ -2456,6 +2578,90 @@ def test_no_image_transition_is_derived_and_is_the_only_empty_claim_variant() ->
             receipt_catalog={},
             consumer_receipt_bindings={},
         )
+
+
+def test_no_image_transition_rejects_false_ready_with_empty_bindings() -> None:
+    query = _no_image_gate_query()
+    assert json.loads(query["consumer_receipt_bindings_json"]) == {}
+    query["contract_ready_json"] = json.dumps(
+        {"mcp": False, "openclaw": True},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(EVIDENCE.EvidenceError, match=r"mcp release\.ready is false"):
+        EVIDENCE._terraform_gate(query, now=NOW)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "contracts_json",
+            json.dumps({"mcp": CONTRACT_SHA256}),
+            "contracts do not exactly match",
+        ),
+        (
+            "contracts_json",
+            json.dumps({"mcp": "invalid", "openclaw": "a" * 64}),
+            "mcp contract SHA-256",
+        ),
+        (
+            "application_json",
+            "{}",
+            "application provenance does not exactly match",
+        ),
+        (
+            "application_json",
+            json.dumps({"mcp": APPLICATION, "openclaw": APPLICATION}),
+            "application provenance does not exactly match",
+        ),
+        (
+            "application_json",
+            json.dumps(
+                {
+                    "mcp": {
+                        **APPLICATION,
+                        "sha256": "invalid",
+                    }
+                }
+            ),
+            "MCP deployment app SHA-256",
+        ),
+    ],
+)
+def test_no_image_transition_validates_contract_and_application_without_claims(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    query = _no_image_gate_query()
+    query[field] = value
+
+    with pytest.raises(EVIDENCE.EvidenceError, match=message):
+        EVIDENCE._terraform_gate(query, now=NOW)
+
+
+def test_no_image_transition_ignores_a_disabled_only_pipeline() -> None:
+    query = _no_image_gate_query()
+    manifest = _consumer_manifest(mode="no-image-transition")
+    openclaw = next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == "openclaw"
+    )
+    for phase in ("live", "before", "after"):
+        openclaw[phase] = {"absent": True}
+    query["consumer_manifest_json"] = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    query["contracts_json"] = json.dumps({"mcp": CONTRACT_SHA256})
+    query["contract_ready_json"] = json.dumps({"mcp": True})
+
+    result = EVIDENCE._terraform_gate(query, now=NOW)
+
+    assert result["verified_pipelines"] == "mcp"
+    assert result["deployment_mode"] == "no-image-transition"
 
 
 def test_no_image_apply_revalidation_cannot_extend_or_reuse_the_saved_expiry() -> None:
@@ -2505,7 +2711,7 @@ def test_no_image_apply_revalidation_cannot_extend_or_reuse_the_saved_expiry() -
         )
 
 
-def test_shared_consumer_claim_is_unique_and_different_digests_require_distinct_claims() -> None:
+def test_shared_consumer_claim_is_unique_per_subject_and_repository() -> None:
     claim_id = "c" * 64
     shared_manifest = _consumer_manifest(
         image_changes={
@@ -2539,6 +2745,54 @@ def test_shared_consumer_claim_is_unique_and_different_digests_require_distinct_
         "f" * 64,
     ]
 
+    multi_subject_manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-mcp')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            ),
+            "tiktok_acquire": (
+                (f"{EVIDENCE.REGISTRY}/teamagent-media-worker@{_digest('old-media')}"),
+                (f"{EVIDENCE.REGISTRY}/teamagent-media-worker@{MEDIA_DIGEST}"),
+            ),
+        }
+    )
+    _, _, _, multi_subject_bindings, multi_subject_claim_ids = EVIDENCE._deployment_receipt_inputs(
+        consumer_manifest=multi_subject_manifest,
+        receipt_catalog={claim_id: _receipt_locator(claim_id)},
+        consumer_receipt_bindings={
+            "mcp": claim_id,
+            "tiktok_acquire": claim_id,
+        },
+    )
+    assert multi_subject_bindings == {
+        "mcp": claim_id,
+        "tiktok_acquire": claim_id,
+    }
+    assert multi_subject_claim_ids == [claim_id]
+
+    cross_pipeline_manifest = _consumer_manifest(
+        image_changes={
+            "mcp": (
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{_digest('old-mcp')}",
+                f"{EVIDENCE.REGISTRY}/teamagent-mcp@{CORE_DIGEST}",
+            ),
+            "openclaw": (
+                (f"{EVIDENCE.REGISTRY}/teamagent-openclaw@{_digest('old-openclaw')}"),
+                (f"{EVIDENCE.REGISTRY}/teamagent-openclaw@{_digest('new-openclaw')}"),
+            ),
+        }
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="different pipelines"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=cross_pipeline_manifest,
+            receipt_catalog={claim_id: _receipt_locator(claim_id)},
+            consumer_receipt_bindings={
+                "mcp": claim_id,
+                "openclaw": claim_id,
+            },
+        )
+
     split_manifest = _consumer_manifest(
         image_changes={
             "mcp": (
@@ -2562,22 +2816,18 @@ def test_shared_consumer_claim_is_unique_and_different_digests_require_distinct_
         )
 
     second_claim_id = "d" * 64
-    _, _, _, split_bindings, split_claim_ids = EVIDENCE._deployment_receipt_inputs(
-        consumer_manifest=split_manifest,
-        receipt_catalog={
-            claim_id: _receipt_locator(claim_id),
-            second_claim_id: _receipt_locator(second_claim_id),
-        },
-        consumer_receipt_bindings={
-            "mcp": claim_id,
-            "connect_web": second_claim_id,
-        },
-    )
-    assert split_bindings == {
-        "mcp": claim_id,
-        "connect_web": second_claim_id,
-    }
-    assert split_claim_ids == sorted([claim_id, second_claim_id])
+    with pytest.raises(EVIDENCE.EvidenceError, match="different digests"):
+        EVIDENCE._deployment_receipt_inputs(
+            consumer_manifest=split_manifest,
+            receipt_catalog={
+                claim_id: _receipt_locator(claim_id),
+                second_claim_id: _receipt_locator(second_claim_id),
+            },
+            consumer_receipt_bindings={
+                "mcp": claim_id,
+                "connect_web": second_claim_id,
+            },
+        )
 
 
 def _prepared_intent(
@@ -2587,6 +2837,11 @@ def _prepared_intent(
     context_sha256: str,
     claims_sha256: str,
     gate_query_sha256: str = DEFAULT_GATE_QUERY_SHA256,
+    shared_ledger_sha256: str = EMPTY_SHARED_LEDGER_SHA256,
+    consumer_manifest_sha256: str = DEFAULT_CONSUMER_MANIFEST_SHA256,
+    release_evidence_binding_sha256: str = (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+    deployment_mode: str = "receipt-required",
+    receipt_authorization_expires_at: str = RECEIPT_AUTHORIZATION_EXPIRES_AT,
 ) -> dict[str, str | int]:
     return {
         "record_id": f"intent#{intent_id}",
@@ -2597,7 +2852,7 @@ def _prepared_intent(
         "plan_sha256": plan_sha256,
         "deployment_context_sha256": context_sha256,
         "receipt_claims_sha256": claims_sha256,
-        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "shared_ledger_sha256": shared_ledger_sha256,
         "gate_query_sha256": gate_query_sha256,
         "terraform_context_sha256": "c" * 64,
         "backend_workspace_sha256": "d" * 64,
@@ -2607,14 +2862,14 @@ def _prepared_intent(
         "plan_addresses_sha256": "f" * 64,
         "runtime_images_sha256": "9" * 64,
         "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
-        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "consumer_manifest_sha256": consumer_manifest_sha256,
         "consumer_count": 8,
         "consumer_comparison_sha256": "1" * 64,
-        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
-        "deployment_mode": "receipt-required",
+        "release_evidence_binding_sha256": release_evidence_binding_sha256,
+        "deployment_mode": deployment_mode,
         "control_commit": COMMIT,
         "prepared_at": "2026-07-17T06:00:00Z",
-        "authorization_expires_at": int(RECEIPT_AUTHORIZATION_EXPIRES_AT),
+        "authorization_expires_at": int(receipt_authorization_expires_at),
         "audit_expires_at": int((NOW + dt.timedelta(days=90)).timestamp()),
     }
 
@@ -2640,6 +2895,11 @@ def _applying_intent(
     claims_sha256: str,
     apply_attempt_id: str,
     gate_query_sha256: str = DEFAULT_GATE_QUERY_SHA256,
+    shared_ledger_sha256: str = EMPTY_SHARED_LEDGER_SHA256,
+    consumer_manifest_sha256: str = DEFAULT_CONSUMER_MANIFEST_SHA256,
+    release_evidence_binding_sha256: str = (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+    deployment_mode: str = "receipt-required",
+    receipt_authorization_expires_at: str = RECEIPT_AUTHORIZATION_EXPIRES_AT,
 ) -> dict[str, str | int]:
     intent = _prepared_intent(
         intent_id=intent_id,
@@ -2647,6 +2907,11 @@ def _applying_intent(
         context_sha256=context_sha256,
         claims_sha256=claims_sha256,
         gate_query_sha256=gate_query_sha256,
+        shared_ledger_sha256=shared_ledger_sha256,
+        consumer_manifest_sha256=consumer_manifest_sha256,
+        release_evidence_binding_sha256=release_evidence_binding_sha256,
+        deployment_mode=deployment_mode,
+        receipt_authorization_expires_at=receipt_authorization_expires_at,
     )
     intent.update(
         {
@@ -2674,6 +2939,167 @@ def _terraform_context() -> dict[str, str | int]:
         "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
         "deployment_mode": "receipt-required",
     }
+
+
+def _terraform_context_document() -> dict[str, Any]:
+    return {
+        "schema_version": 3,
+        "kind": "teamagent.image-release-terraform-context",
+        "backend": {
+            "type": "s3",
+            "bucket": "teamagent-tfstate-718959508629",
+            "key": "teamagent/terraform.tfstate",
+            "region": "ap-northeast-1",
+            "dynamodb_table": "teamagent-tflock",
+            "encrypt": True,
+        },
+        "workspace": "default",
+        "state": {
+            "lineage": "11111111-1111-4111-8111-111111111111",
+            "serial": 1234,
+            "managed_address_count": 22,
+            "managed_addresses_sha256": "e" * 64,
+        },
+        "consumer_manifest": copy.deepcopy(DEFAULT_CONSUMER_MANIFEST),
+        "plan": {
+            "complete": True,
+            "applyable": True,
+            "errored": False,
+            "managed_change_count": 22,
+            "address_ownership_sha256": "f" * 64,
+            "runtime_images_sha256": "9" * 64,
+            "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+            "consumer_count": 8,
+            "consumer_comparison_sha256": "1" * 64,
+            "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+            "delete_change_count": 0,
+            "replace_change_count": 0,
+            "transition_sha256": EMPTY_TRANSITION_SHA256,
+        },
+    }
+
+
+def test_terraform_context_metadata_validates_and_summarizes_exact_context(
+    tmp_path: Path,
+) -> None:
+    context = _terraform_context_document()
+    context_path = tmp_path / "terraform-context.json"
+    context_path.write_text(
+        json.dumps(context, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    metadata = EVIDENCE.terraform_context_metadata(context_path)
+
+    assert metadata == {
+        "terraform_context_sha256": hashlib.sha256(EVIDENCE.canonical_bytes(context)).hexdigest(),
+        "backend_workspace_sha256": hashlib.sha256(
+            EVIDENCE.canonical_bytes(
+                {
+                    "backend": context["backend"],
+                    "workspace": context["workspace"],
+                }
+            )
+        ).hexdigest(),
+        "state_lineage": "11111111-1111-4111-8111-111111111111",
+        "state_serial": 1234,
+        "state_addresses_sha256": "e" * 64,
+        "plan_addresses_sha256": "f" * 64,
+        "runtime_images_sha256": "9" * 64,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        "consumer_manifest_sha256": DEFAULT_CONSUMER_MANIFEST_SHA256,
+        "consumer_count": 8,
+        "consumer_comparison_sha256": "1" * 64,
+        "release_evidence_binding_sha256": (DEFAULT_RELEASE_EVIDENCE_BINDING_SHA256),
+        "deployment_mode": "receipt-required",
+    }
+
+    invalid = copy.deepcopy(context)
+    invalid["plan"]["consumer_manifest_sha256"] = "0" * 64
+    context_path.write_text(
+        json.dumps(invalid, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        EVIDENCE.EvidenceError,
+        match="Terraform runtime context is invalid",
+    ):
+        EVIDENCE.terraform_context_metadata(context_path)
+
+
+def test_prepare_deployment_intent_binds_context_and_persists_prepared_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = {
+        "intent_id": INTENT_ID,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": "a" * 64,
+        "receipt_claims_sha256": "b" * 64,
+        "shared_ledger_sha256": EMPTY_SHARED_LEDGER_SHA256,
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **_gate_metadata_fields(),
+    }
+    terraform_context = _terraform_context()
+    persisted: list[dict[str, str | int]] = []
+
+    def plan_metadata(
+        plan_path: Path,
+        *,
+        plan_json: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert plan_path == Path("release.tfplan")
+        assert plan_json == {"saved": "plan"}
+        return copy.deepcopy(metadata)
+
+    def context_metadata(context_path: Path) -> dict[str, str | int]:
+        assert context_path == Path("terraform-context.json")
+        return copy.deepcopy(terraform_context)
+
+    monkeypatch.setattr(EVIDENCE, "deployment_plan_metadata", plan_metadata)
+    monkeypatch.setattr(EVIDENCE, "terraform_context_metadata", context_metadata)
+    monkeypatch.setattr(
+        EVIDENCE,
+        "_dynamodb_put_prepared_intent",
+        lambda item: persisted.append(copy.deepcopy(item)),
+    )
+
+    prepared = EVIDENCE.prepare_deployment_intent(
+        Path("release.tfplan"),
+        control_commit=COMMIT,
+        terraform_context_path=Path("terraform-context.json"),
+        now=NOW,
+        plan_json={"saved": "plan"},
+    )
+
+    assert prepared == _prepared_intent(
+        intent_id=INTENT_ID,
+        plan_sha256="d" * 64,
+        context_sha256="a" * 64,
+        claims_sha256="b" * 64,
+    )
+    assert persisted == [prepared]
+
+    mismatched_context = dict(
+        terraform_context,
+        consumer_manifest_sha256="0" * 64,
+    )
+    monkeypatch.setattr(
+        EVIDENCE,
+        "terraform_context_metadata",
+        lambda _: mismatched_context,
+    )
+    with pytest.raises(
+        EVIDENCE.EvidenceError,
+        match="consumer manifest differs from the saved plan",
+    ):
+        EVIDENCE.prepare_deployment_intent(
+            Path("release.tfplan"),
+            control_commit=COMMIT,
+            terraform_context_path=Path("terraform-context.json"),
+            now=NOW,
+            plan_json={"saved": "plan"},
+        )
+    assert persisted == [prepared]
 
 
 def test_preflight_revalidates_and_consumes_before_returning(
@@ -3146,6 +3572,156 @@ def test_apply_time_revalidates_receipt_before_consuming_intent(
             query={},
             apply_attempt_id=ATTEMPT_ID,
         )
+
+
+def test_consume_deployment_intent_revalidates_and_consumes_successfully(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    query = copy.deepcopy(DEFAULT_GATE_QUERY)
+    (
+        consumer_manifest,
+        receipt_catalog,
+        consumer_receipt_bindings,
+        contracts,
+        _,
+        application,
+        shared_generation_ledger,
+        _,
+        _,
+        intent_id,
+    ) = EVIDENCE._parse_terraform_gate_query(query)
+    release_channels = {"mcp": "active"}
+    context_sha256, canonical_claims, claims_sha256 = EVIDENCE._deployment_binding(
+        consumer_manifest=consumer_manifest,
+        receipt_catalog=receipt_catalog,
+        consumer_receipt_bindings=consumer_receipt_bindings,
+        contracts=contracts,
+        application=application,
+        shared_generation_ledger=shared_generation_ledger,
+        release_channels=release_channels,
+        intent_id=intent_id,
+    )
+    gate_metadata = _gate_metadata_fields(
+        query,
+        release_channels=release_channels,
+    )
+    metadata = {
+        "intent_id": intent_id,
+        "plan_sha256": "d" * 64,
+        "deployment_context_sha256": context_sha256,
+        "receipt_claims_sha256": claims_sha256,
+        "shared_ledger_sha256": hashlib.sha256(
+            EVIDENCE.canonical_bytes(shared_generation_ledger)
+        ).hexdigest(),
+        "plan_transition_sha256": EMPTY_TRANSITION_SHA256,
+        **gate_metadata,
+    }
+    store: dict[str, dict[str, str | int]] = {
+        f"intent#{intent_id}": _applying_intent(
+            intent_id=intent_id,
+            plan_sha256=metadata["plan_sha256"],
+            context_sha256=context_sha256,
+            claims_sha256=claims_sha256,
+            apply_attempt_id=ATTEMPT_ID,
+            gate_query_sha256=metadata["gate_query_sha256"],
+            shared_ledger_sha256=metadata["shared_ledger_sha256"],
+            consumer_manifest_sha256=metadata["consumer_manifest_sha256"],
+            release_evidence_binding_sha256=metadata["release_evidence_binding_sha256"],
+            deployment_mode=metadata["deployment_mode"],
+            receipt_authorization_expires_at=metadata["receipt_authorization_expires_at"],
+        ),
+        EVIDENCE.DEPLOYMENT_LOCK_RECORD_ID: _apply_lock(
+            metadata,
+            apply_attempt_id=ATTEMPT_ID,
+        ),
+    }
+    consumed_claims: list[str] = []
+
+    def fake_get(record_id: str) -> dict[str, str | int] | None:
+        item = store.get(record_id)
+        return copy.deepcopy(item) if item is not None else None
+
+    def fake_gate(
+        gate_query: Mapping[str, Any],
+        *,
+        now: dt.datetime | None = None,
+    ) -> dict[str, str]:
+        assert gate_query == query
+        assert now == NOW
+        return {
+            "deployment_mode": metadata["deployment_mode"],
+            "deployment_context_sha256": context_sha256,
+            "receipt_claims_sha256": claims_sha256,
+            "receipt_authorization_expires_at": metadata["receipt_authorization_expires_at"],
+            "release_channels_json": json.dumps(
+                release_channels,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+
+    def fake_transact(
+        *,
+        applying: Mapping[str, str | int],
+        metadata: Mapping[str, str],
+        receipt_claim_ids: list[str],
+        apply_attempt_id: str,
+        now: dt.datetime,
+    ) -> None:
+        consumed_claims.extend(receipt_claim_ids)
+        consumed_at = now.isoformat().replace("+00:00", "Z")
+        intent = store[str(applying["record_id"])]
+        intent.update(
+            {
+                "state": "CONSUMED",
+                "apply_attempt_id": apply_attempt_id,
+                "consumed_at": consumed_at,
+            }
+        )
+        for claim_id in receipt_claim_ids:
+            store[f"receipt#{claim_id}"] = {
+                "record_id": f"receipt#{claim_id}",
+                "record_type": "teamagent.release-receipt-claim",
+                "schema_version": EVIDENCE.DEPLOYMENT_INTENT_SCHEMA,
+                "receipt_claim_id": claim_id,
+                "intent_id": metadata["intent_id"],
+                "plan_sha256": metadata["plan_sha256"],
+                "deployment_context_sha256": metadata["deployment_context_sha256"],
+                "receipt_claims_sha256": metadata["receipt_claims_sha256"],
+                "gate_query_sha256": metadata["gate_query_sha256"],
+                "terraform_context_sha256": applying["terraform_context_sha256"],
+                "apply_attempt_id": apply_attempt_id,
+                "consumed_at": consumed_at,
+                "audit_expires_at": applying["audit_expires_at"],
+            }
+
+    monkeypatch.setattr(
+        EVIDENCE,
+        "deployment_plan_metadata",
+        lambda *args, **kwargs: copy.deepcopy(metadata),
+    )
+    monkeypatch.setattr(EVIDENCE, "_terraform_gate", fake_gate)
+    monkeypatch.setattr(EVIDENCE, "_dynamodb_get", fake_get)
+    monkeypatch.setattr(EVIDENCE, "_dynamodb_transact_consume", fake_transact)
+
+    consumed = EVIDENCE.consume_deployment_intent(
+        Path("unused.tfplan"),
+        query=query,
+        apply_attempt_id=ATTEMPT_ID,
+        now=NOW,
+    )
+
+    assert consumed["state"] == "CONSUMED"
+    assert consumed["apply_attempt_id"] == ATTEMPT_ID
+    assert consumed_claims == canonical_claims
+    assert (
+        sorted(
+            record_id.removeprefix("receipt#")
+            for record_id in store
+            if record_id.startswith("receipt#")
+        )
+        == canonical_claims
+    )
 
 
 def test_receipt_consumption_uses_one_conditional_dynamodb_transaction(

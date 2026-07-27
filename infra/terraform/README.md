@@ -443,10 +443,15 @@ one-time bootstrap has provisioned the trusted
    both S3 VersionIds before the signed 30-day candidate window expires. It
    rechecks the candidate manifest/referrers and all cosign signatures, issues
    a fresh short-lived active/rollback receipt, and invokes the source-free
-   promoter. It does not run Terraform.
+   promoter. Pass the exact reviewed consumer manifest with
+   `--consumer-manifest` and a new path with `--terraform-gate-vars-out`; the
+   launcher writes an owner-only JSON var-file containing the exact
+   `image_deployment_consumer_manifest`, `image_release_receipt_catalog`, and
+   `image_release_consumer_receipt_bindings`. It does not run Terraform.
 3. Set the applicable production image variable to the fixed release
-   repository `@sha256:<digest>` and set `image_release_evidence` to the exact
-   receipt/signature keys and VersionIds. Commit the one-use UUID under
+   repository `@sha256:<digest>` and merge only those three generated
+   top-level values into the owner-only complete JSON var-file supplied to the
+   guard. Commit the one-use UUID under
    `reviewed_inputs.image_deployment_intent_id`; the planner refuses a
    caller-generated replacement at final-plan time.
 4. Add the candidate change to the exact runtime migration manifest, run

@@ -266,6 +266,127 @@ def test_terraform_uses_a_hard_precondition_not_a_warning_only_check() -> None:
     assert "tiktok_release_contract.json" not in body
 
 
+def test_empty_receipt_bindings_cannot_vacuously_approve_an_unready_release() -> None:
+    gate = GATE.read_text(encoding="utf-8")
+    locals_start = gate.index("locals {")
+    locals_block = _hcl_block(gate, gate.index("{", locals_start))
+    application_start = gate.index("deployment_application_provenance = {")
+    application_block = _hcl_block(
+        gate,
+        gate.index("{", application_start),
+    )
+
+    assert "deployment_release_consumer_ids = toset(" in locals_block
+    assert 'var.image_deployment_consumer_manifest.mode == "no-image-transition"' in locals_block
+    assert "for consumer_id in local.deployment_release_consumer_ids" in locals_block
+    assert "deployment_bound_pipelines" not in locals_block
+    assert "length(local.deployment_release_pipelines) > 0" not in locals_block
+    assert "local.deployment_contract_ready[pipeline] == true" in locals_block
+    assert "if contains(local.deployment_release_pipelines, pipeline)" in locals_block
+    assert "local.deployment_release_pipelines" in application_block
+    assert "deployment_binding_consumer_ids" not in application_block
+    assert (
+        "contracts_json                 = jsonencode(local.deployment_contract_bindings)"
+    ) in gate
+    assert (
+        "contract_ready_json            = jsonencode(local.deployment_contract_ready_bindings)"
+    ) in gate
+    assert (
+        "empty receipt bindings and no-image-transition mode do not waive this requirement"
+    ) in gate
+
+
+def test_malformed_consumer_manifest_cannot_fall_back_to_no_required_receipts() -> None:
+    gate = GATE.read_text(encoding="utf-8")
+    resource_start = gate.index('resource "terraform_data" "production_image_release_gate"')
+    resource_block = _hcl_block(gate, gate.index("{", resource_start))
+    lifecycle_start = resource_block.index("lifecycle {")
+    lifecycle_block = _hcl_block(
+        resource_block,
+        resource_block.index("{", lifecycle_start),
+    )
+    manifest_precondition_start = lifecycle_block.index("precondition {")
+    manifest_precondition = _hcl_block(
+        lifecycle_block,
+        lifecycle_block.index("{", manifest_precondition_start),
+    )
+    signed_gate_start = gate.index('data "external" "signed_image_release_gate"')
+    signed_gate_block = _hcl_block(gate, gate.index("{", signed_gate_start))
+
+    assert "deployment_manifest_structure_is_exact" in gate
+    assert "deployment_manifest_consumers = try(" not in gate
+    assert "deployment_receipt_required_consumer_ids = toset(try(" not in gate
+    assert "local.deployment_manifest_presence_is_exact ? [" in gate
+    assert (
+        "deployment_manifest_presence_is_exact = (\n"
+        "    local.deployment_manifest_structure_is_exact &&"
+    ) in gate
+    assert (
+        "!local.deployment_requested ||\n"
+        "        (\n"
+        "          local.deployment_manifest_structure_is_exact &&\n"
+        "          local.deployment_manifest_presence_is_exact\n"
+        "        )"
+    ) in manifest_precondition
+    assert (
+        "deployment_gate_preconditions = (\n"
+        "    local.deployment_manifest_structure_is_exact &&\n"
+        "    local.deployment_manifest_presence_is_exact &&"
+    ) in gate
+    assert (
+        "count = local.deployment_requested && local.deployment_gate_preconditions ? 1 : 0"
+    ) in signed_gate_block
+    assert (
+        "Production image deployment consumer manifest is malformed or does not exactly match"
+    ) in manifest_precondition
+
+
+def test_disabled_consumers_do_not_permanently_block_the_release_gate() -> None:
+    gate = GATE.read_text(encoding="utf-8")
+
+    expected_enable_bindings = (
+        'connect_web    = var.enable_connect_web && var.mcp_image != ""',
+        'canary         = var.enable_canary_health && var.mcp_image != ""',
+        'ingest         = var.enable_ingest_schedule && var.mcp_image != ""',
+        'morning_digest = var.enable_morning_digest && var.mcp_image != ""',
+        'x_buzz_worker  = var.enable_x_research && var.x_buzz_image != ""',
+        ('tiktok_acquire = local.media_worker_enabled && local.media_worker_image != ""'),
+    )
+    for binding in expected_enable_bindings:
+        assert binding in gate
+    assert 'sort(keys(consumer[phase])) == ["absent"]' in gate
+    assert "deployment_manifest_presence_is_exact" in gate
+    assert "consumer.live.absent == true" in gate
+    assert "consumer.before.absent == true" in gate
+    assert "consumer.after.absent == true" in gate
+    assert "!can(consumer.before.image)" in gate
+    assert ("!local.deployment_consumer_enabled[consumer.consumer_id] ? true : try(") in gate
+    assert gate.count("if local.deployment_consumer_enabled[consumer.consumer_id] && (") >= 2
+    assert "consumer.before.task_definition_arn !=" in gate
+    assert "consumer.before.activation.desired_count !=" in gate
+    assert "consumer.before.activation.state !=" in gate
+    assert "consumer.before.activation.event_source_mapping_enabled !=" in gate
+
+
+def test_terraform_uses_the_python_canonical_consumer_registry_digest() -> None:
+    gate = GATE.read_text(encoding="utf-8")
+    context = RELEASE_CONTEXT.read_text(encoding="utf-8")
+    registry_data_start = gate.index('data "external" "deployment_consumer_registry_sha256"')
+    registry_data_block = _hcl_block(
+        gate,
+        gate.index("{", registry_data_start),
+    )
+
+    assert '"${path.module}/image_release_context.py"' in registry_data_block
+    assert '"registry-sha256"' in registry_data_block
+    assert "data.external.deployment_consumer_registry_sha256.result.sha256" in gate
+    assert "jsonencode(local.deployment_consumer_registry)" not in gate
+    assert 'commands.add_parser("registry-sha256")' in context
+    assert 'elif args.command == "registry-sha256":' in context
+    assert "registry_sha256 = consumer_registry_sha256()" in context
+    assert '_canonical_bytes({"sha256": registry_sha256})' in context
+
+
 def test_consumer_receipt_claims_are_exact_and_shared_only_as_distinct_claims() -> None:
     gate = GATE.read_text(encoding="utf-8")
     evidence = EVIDENCE.read_text(encoding="utf-8")
@@ -289,7 +410,7 @@ def test_consumer_receipt_claims_are_exact_and_shared_only_as_distinct_claims() 
     assert "deployment receipt claims contain a duplicate" not in evidence
     assert "consumer receipt bindings do not exactly match receipt-requiring consumers" in evidence
     assert "receipt catalog must contain exactly the claims used by consumer bindings" in evidence
-    assert "consumers moving to different digests require different receipt claims" in evidence
+    assert "one subject and release repository cannot target different digests" in evidence
     assert "no-image-transition forbids receipts and consumer bindings" in evidence
     assert "no-image-transition contains release evidence" in evidence
     assert "receipt-required manifest contains no receipt-requiring change" in evidence
@@ -660,3 +781,133 @@ def test_ready_false_bootstrap_has_no_target_bypass() -> None:
     readme = (ROOT / "infra" / "terraform" / "README.md").read_text(encoding="utf-8")
     assert "codebuild_provenance_bootstrap_targets.txt" not in readme
     assert 'target_args+=("-target=$address")' not in readme
+
+
+def test_task_definition_body_is_part_of_the_change_comparison() -> None:
+    """A digest can stay put while the container body changes underneath it.
+
+    The adversarial review reproduced exactly that: identical images plus a new
+    command, environment, secrets and task role, classified as
+    no-image-transition and waved through with zero AWS calls. Both consumer
+    derivations therefore have to diff the task definition body, not only the
+    image string, and both have to say so here so that a later simplification
+    cannot quietly restore the hole.
+    """
+    gate = GATE.read_text(encoding="utf-8")
+
+    body_comparison = (
+        "jsonencode(consumer.before.task_definition) !=\n"
+        "          jsonencode(consumer.after.task_definition)"
+    )
+    assert gate.count(body_comparison) == 2, (
+        "both deployment_receipt_required_consumer_ids and "
+        "deployment_affected_consumer_ids must diff the task definition body"
+    )
+
+    for local_name in (
+        "deployment_receipt_required_consumer_ids",
+        "deployment_affected_consumer_ids",
+    ):
+        derivation = _hcl_block(gate, gate.index("(", gate.index(f"{local_name} = toset")))
+        assert body_comparison in derivation, f"{local_name} ignores the task definition body"
+
+    # The manifest schema has to carry the body for the comparison to mean
+    # anything, and it is the activator-shaped keys that make it exact.
+    for key in (
+        "container_definitions",
+        "task_role_arn",
+        "execution_role_arn",
+        "network_mode",
+        "volumes",
+    ):
+        assert f'"{key}",' in gate, f"consumer snapshot schema omits {key}"
+
+
+def test_release_ready_is_required_by_the_precondition_not_hardcoded_true() -> None:
+    """`alltrue([])` is true, so an empty binding set must not waive readiness.
+
+    The precondition has to reference the computed local. Replacing it with a
+    literal `true` was the mutation that survived the first pass.
+    """
+    gate = GATE.read_text(encoding="utf-8")
+
+    assert "deployment_contracts_are_ready = " in gate
+    ready_preconditions = [
+        block
+        for block in gate.split("precondition {")[1:]
+        if "local.deployment_contracts_are_ready" in block
+    ]
+    assert len(ready_preconditions) == 1, (
+        "exactly one precondition must require local.deployment_contracts_are_ready"
+    )
+    guard = ready_preconditions[0]
+    assert "!local.deployment_requested ||" in guard
+    assert "no-image-transition mode do not waive this requirement" in guard
+
+    # The malformed-manifest and verifier preconditions are what make the
+    # "nobody needs a receipt" fallbacks unreachable during a real apply.
+    assert "local.deployment_manifest_structure_is_exact &&" in gate
+    assert "local.deployment_manifest_presence_is_exact" in gate
+    assert (
+        "count = local.deployment_requested && local.deployment_gate_preconditions ? 1 : 0" in gate
+    )
+
+
+def test_no_fail_open_try_defaults_in_the_consumer_derivations() -> None:
+    """`try(x, [])` and `try(x, {})` collapse to "nothing is required".
+
+    Every `try` in this file must default to the blocking side: `false` for a
+    predicate, `true` for "assume this consumer changed", or an empty string for
+    a value that a separate precondition then rejects.
+    """
+    # Scope to the derivation locals. The `terraform_data` input block below them
+    # defaults to "" / {} on purpose: those fields only exist when the verifier
+    # data source exists, and a separate precondition already demands
+    # verified == "true" before an apply can proceed.
+    full = GATE.read_text(encoding="utf-8")
+    gate = full[: full.index('resource "terraform_data" "production_image_release_gate"')]
+    offenders = []
+    for index, _ in enumerate(gate.split("try(")[1:]):
+        opening = _nth_try_paren(gate, index)
+        inner = _paren_block(gate, opening)
+        segments, depth, current = [], 0, ""
+        for character in inner:
+            if character in "([{":
+                depth += 1
+            elif character in ")]}":
+                depth -= 1
+            if character == "," and depth == 0:
+                segments.append(current)
+                current = ""
+            else:
+                current += character
+        segments.append(current)
+        stripped = [segment.strip() for segment in segments if segment.strip()]
+        default = stripped[-1] if stripped else ""
+        if default in {"[]", "{}"}:
+            offenders.append(default)
+    assert not offenders, f"fail-open try() defaults in the derivations: {offenders}"
+
+    # The one {} default that does exist is the verifier-sourced release channels,
+    # and it must stay behind the verified=="true" precondition.
+    assert full.count("      {},\n    )") == 1
+    assert 'data.external.signed_image_release_gate[0].result.verified == "true"' in full
+
+
+def _nth_try_paren(body: str, index: int) -> int:
+    offset = -1
+    for _ in range(index + 1):
+        offset = body.index("try(", offset + 1)
+    return body.index("(", offset)
+
+
+def _paren_block(body: str, opening: int) -> str:
+    depth = 0
+    for offset in range(opening, len(body)):
+        if body[offset] == "(":
+            depth += 1
+        elif body[offset] == ")":
+            depth -= 1
+            if depth == 0:
+                return body[opening + 1 : offset]
+    raise AssertionError("unterminated parenthesis")

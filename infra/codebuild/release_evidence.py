@@ -1469,7 +1469,7 @@ def validate_deploy_reference(
 
 
 def _validate_mcp_deployment_application(
-    receipt: Mapping[str, Any],
+    receipt: Mapping[str, Any] | None,
     value: Any,
 ) -> str:
     application = _mapping(value, label="MCP deployment application provenance")
@@ -1528,6 +1528,8 @@ def _validate_mcp_deployment_application(
         },
     }
     binding = hashlib.sha256(canonical_bytes(payload)).hexdigest()
+    if receipt is None:
+        return binding
     subject_bindings = {
         subject["labels"].get("io.teamagent.build.app-provenance-sha256")
         for subject in receipt["subjects"]
@@ -2345,16 +2347,19 @@ def _consumer_execution_state(
     consumer: Mapping[str, Any],
     *,
     snapshot: str,
-) -> int | str | bool:
+) -> int | str | bool | None:
     activator = _mapping(
         consumer.get("activator"),
         label=f"{consumer.get('consumer_id')} activator",
     )
+    snapshot_value = _mapping(
+        consumer.get(snapshot),
+        label=f"{consumer.get('consumer_id')} {snapshot} snapshot",
+    )
+    if snapshot_value == {"absent": True}:
+        return None
     state = _mapping(
-        _mapping(
-            consumer.get(snapshot),
-            label=f"{consumer.get('consumer_id')} {snapshot} snapshot",
-        ).get("activation"),
+        snapshot_value.get("activation"),
         label=f"{consumer.get('consumer_id')} {snapshot} activation",
     )
     activator_type = activator.get("type")
@@ -2386,6 +2391,8 @@ def _consumer_execution_state(
 
 def _consumer_is_executable(consumer: Mapping[str, Any], *, snapshot: str) -> bool:
     state = _consumer_execution_state(consumer, snapshot=snapshot)
+    if state is None:
+        return False
     activator = _mapping(
         consumer.get("activator"),
         label=f"{consumer.get('consumer_id')} activator",
@@ -2400,6 +2407,10 @@ def _consumer_is_executable(consumer: Mapping[str, Any], *, snapshot: str) -> bo
 def _consumer_execution_increased(consumer: Mapping[str, Any]) -> bool:
     before = _consumer_execution_state(consumer, snapshot="before")
     after = _consumer_execution_state(consumer, snapshot="after")
+    if after is None:
+        return False
+    if before is None:
+        return True
     activator = _mapping(
         consumer.get("activator"),
         label=f"{consumer.get('consumer_id')} activator",
@@ -2461,10 +2472,24 @@ def _receipt_required_consumers(
             consumer.get("after"),
             label=f"{consumer_id} after snapshot",
         )
+        before_absent = before == {"absent": True}
+        after_absent = after == {"absent": True}
+        if after_absent:
+            if not before_absent:
+                raise EvidenceError(
+                    f"{consumer_id} disabling is outside the image release workflow"
+                )
+            continue
+        if before_absent:
+            required.add(consumer_id)
+            continue
         before_image = _string(before.get("image"), label=f"{consumer_id} before image")
         after_image = _string(after.get("image"), label=f"{consumer_id} after image")
         if (
             before_image != after_image
+            or before.get("task_definition_arn")
+            != after.get("task_definition_arn")
+            or before.get("task_definition") != after.get("task_definition")
             or _consumer_execution_state(consumer, snapshot="before")
             != _consumer_execution_state(consumer, snapshot="after")
         ):
@@ -2535,6 +2560,24 @@ def _deployment_receipt_inputs(
             "receipt catalog must contain exactly the claims used by consumer bindings"
         )
 
+    target_digests: dict[tuple[str, str], str] = {}
+    for consumer_id in sorted(normalized_bindings):
+        coordinates = _release_coordinates_for_consumer(consumer_id)
+        subject_repository = (
+            coordinates["subject"],
+            coordinates["repository"],
+        )
+        target_digest = _consumer_target_digest(
+            consumer_id,
+            consumers[consumer_id],
+        )
+        existing_digest = target_digests.get(subject_repository)
+        if existing_digest is not None and existing_digest != target_digest:
+            raise EvidenceError(
+                "one subject and release repository cannot target different digests"
+            )
+        target_digests[subject_repository] = target_digest
+
     references: dict[str, dict[str, Any]] = {}
     for claim_id in claim_ids:
         reference = _mapping(
@@ -2590,14 +2633,6 @@ def _deployment_receipt_inputs(
             reference["signature_version_id"],
             label=f"release receipt catalog[{claim_id}] signature VersionId",
         )
-        target_digests = {
-            _consumer_target_digest(consumer_id, consumers[consumer_id])
-            for consumer_id in bound_consumers
-        }
-        if len(target_digests) != 1:
-            raise EvidenceError(
-                "consumers moving to different digests require different receipt claims"
-            )
         references[claim_id] = dict(reference)
 
     if mode == "no-image-transition" and (
@@ -2692,14 +2727,68 @@ def _terraform_gate(
         receipt_catalog=receipt_catalog,
         consumer_receipt_bindings=consumer_receipt_bindings,
     )
-    if set(application) - {"mcp"}:
-        raise EvidenceError("Terraform supplied an unknown application binding")
+    if mode == "receipt-required":
+        relevant_consumers: set[str] = set()
+        for consumer_id, consumer in consumers.items():
+            before = _mapping(
+                consumer.get("before"),
+                label=f"{consumer_id} before snapshot",
+            )
+            after = _mapping(
+                consumer.get("after"),
+                label=f"{consumer_id} after snapshot",
+            )
+            if after == {"absent": True}:
+                continue
+            if (
+                before == {"absent": True}
+                or before.get("image") != after.get("image")
+                or before.get("task_definition_arn")
+                != after.get("task_definition_arn")
+                or before.get("task_definition") != after.get("task_definition")
+                or before.get("activation") != after.get("activation")
+            ):
+                relevant_consumers.add(consumer_id)
+    else:
+        relevant_consumers = {
+            consumer_id
+            for consumer_id, consumer in consumers.items()
+            if _mapping(
+                consumer.get("after"),
+                label=f"{consumer_id} after snapshot",
+            )
+            != {"absent": True}
+        }
     required_pipelines = {
         _release_coordinates_for_consumer(consumer_id)["pipeline"]
-        for consumer_id in normalized_bindings
+        for consumer_id in relevant_consumers
     }
-    if "mcp" in required_pipelines and "mcp" not in application:
-        raise EvidenceError("Terraform omitted the MCP application binding")
+    if set(contracts) != required_pipelines:
+        raise EvidenceError(
+            "Terraform contracts do not exactly match required pipelines"
+        )
+    if set(ready) != required_pipelines:
+        raise EvidenceError(
+            "Terraform contract readiness does not exactly match required pipelines"
+        )
+    for pipeline in sorted(required_pipelines):
+        _sha256(
+            contracts[pipeline],
+            label=f"{pipeline} contract SHA-256",
+        )
+        if ready[pipeline] is not True:
+            raise EvidenceError(f"{pipeline} release.ready is false")
+
+    required_application_pipelines = (
+        {"mcp"} if "mcp" in required_pipelines else set()
+    )
+    if set(application) != required_application_pipelines:
+        raise EvidenceError(
+            "Terraform application provenance does not exactly match "
+            "required pipelines"
+        )
+    if "mcp" in required_application_pipelines:
+        _validate_mcp_deployment_application(None, application["mcp"])
 
     current = _utc_now(now)
     verified_consumers: list[str] = []
@@ -2714,10 +2803,8 @@ def _terraform_gate(
                 if bound_claim_id == claim_id
             )
             pipeline = _release_coordinates_for_consumer(bound_consumers[0])["pipeline"]
-            if ready.get(pipeline) is not True:
-                raise EvidenceError(f"{pipeline} release.ready is false")
             contract_sha256 = _sha256(
-                contracts.get(pipeline),
+                contracts[pipeline],
                 label=f"{pipeline} contract SHA-256",
             )
             reference = references[claim_id]
@@ -3301,16 +3388,18 @@ def deployment_plan_metadata(
         destructive_deletes,
         planned_replacements,
     ) = _saved_plan_transition_classification(changes_for_import_check)
-    transition_images = {
-        consumer_id: _string(
-            _mapping(
-                consumer.get("after"),
-                label=f"{consumer_id} after snapshot",
-            ).get("image"),
+    transition_images: dict[str, str] = {}
+    for consumer_id, consumer in manifest_consumers.items():
+        after = _mapping(
+            consumer.get("after"),
+            label=f"{consumer_id} after snapshot",
+        )
+        if after == {"absent": True}:
+            continue
+        transition_images[consumer_id] = _string(
+            after.get("image"),
             label=f"{consumer_id} after image",
         )
-        for consumer_id, consumer in manifest_consumers.items()
-    }
     _require_destructive_rollback_channels(
         deletes=destructive_deletes,
         replacements=planned_replacements,
@@ -3413,12 +3502,22 @@ def terraform_context_metadata(context_path: Path) -> dict[str, str | int]:
             context_path.read_text(encoding="utf-8"),
             object_pairs_hook=_reject_duplicate_keys,
         )
-        validated = helper.validate_context(value)
-        context_sha256 = helper.context_sha256(validated)
     except (
         OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
+        ValueError,
+    ) as exc:
+        raise EvidenceError("Terraform runtime context is invalid") from exc
+    try:
+        validated = helper.validate_context(value)
+        context_sha256 = helper.context_sha256(validated)
+    except (
+        AttributeError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        helper.ContextError,
         ValueError,
     ) as exc:
         raise EvidenceError("Terraform runtime context is invalid") from exc
@@ -3880,9 +3979,14 @@ def _verified_receipt_claims_for_saved_plan(
         intent_id=intent_id,
     )
     query_sha256 = hashlib.sha256(canonical_bytes(query)).hexdigest()
-    receipt_expires_at = _epoch_seconds(
-        verified["receipt_authorization_expires_at"],
-        label="apply-time receipt authorization expiry",
+    # _epoch_seconds validates the canonical form and hands back the string, so it
+    # has to be widened before meeting the saved integer -- "1784269500" never
+    # equals 1784269500, and that silently failed every receipt-required apply.
+    receipt_expires_at = int(
+        _epoch_seconds(
+            verified["receipt_authorization_expires_at"],
+            label="apply-time receipt authorization expiry",
+        )
     )
     saved_receipt_expires_at = int(metadata["receipt_authorization_expires_at"])
     if verified["deployment_mode"] == "receipt-required":

@@ -128,7 +128,7 @@ bash infra/deploy/publish_app_html.sh stage \
 - exact `origin/dev` から final core+media を build/attest し、両 subject が同じ app
   provenance digest を持つこと、ECR C0/H0、署名済み SBOM/provenance と recursive
   referrer graph を確認する
-- fresh active receipt を発行し、script が表示した 4 変数を含むreview済みmigrationを
+- fresh active receipt を発行し、script が生成した3つのgate変数を含むreview済みmigrationを
   `terraform_runtime_guard.sh plan` でfull saved planにする。レビュー後、同guardの
   `apply` で一度だけ適用する
 - apply 後に `/healthz` の `app_html_contract_ok=true`、`app_html_source=s3`、
@@ -147,9 +147,12 @@ bash infra/deploy/publish_app_html.sh stage \
    `bash infra/deploy/build_teamagent_image.sh`
 4. launcher が返した candidate receipt を
    `bash infra/deploy/authorize_image_release.sh --help` の exact
-   key/VersionIds で active 承認する。release repository の `@sha256` と
-   receipt/signature VersionIds を tfvars の `mcp_image` /
-   `image_release_evidence.mcp` に設定し、worktree 外の full saved plan を一度だけ apply:
+   key/VersionIds で active 承認する。exact consumer manifest と
+   `--terraform-gate-vars-out` を渡し、生成された
+   `image_deployment_consumer_manifest` / `image_release_receipt_catalog` /
+   `image_release_consumer_receipt_bindings` の3値と release repository の
+   `@sha256` を owner-only JSON var-file に統合して、worktree 外の full saved
+   plan を一度だけ apply:
    ```bash
    bash infra/deploy/terraform_runtime_guard.sh plan --help
    terraform show /secure/local/path/connect-ingest-release.tfplan

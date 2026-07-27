@@ -160,8 +160,9 @@ are permanently disabled. Production image changes require:
 
 1. a verified-candidate receipt and immutable signature VersionIds;
 2. guarded active/rollback release authorization;
-3. a fixed release repository `@sha256` plus exact
-   `image_release_evidence.openclaw`;
+3. a fixed release repository `@sha256` plus the exact generated
+   `image_deployment_consumer_manifest`, `image_release_receipt_catalog`, and
+   `image_release_consumer_receipt_bindings`;
 4. one full saved plan created by `plan_image_release.sh`;
 5. one-time application of that exact plan by
    `apply_image_release_plan.sh`.

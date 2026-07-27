@@ -134,18 +134,36 @@ variable "image_release_shared_generation_ledger" {
   }
 }
 
+data "external" "deployment_consumer_registry_sha256" {
+  program = [
+    "python3",
+    "${path.module}/image_release_context.py",
+    "registry-sha256",
+  ]
+}
+
 locals {
   deployment_consumer_registry = jsondecode(
     file("${path.module}/../codebuild/image_deployment_consumers.json")
   )
-  deployment_consumer_registry_sha256 = sha256(
-    "${jsonencode(local.deployment_consumer_registry)}\n"
-  )
+  # The Python release-chain canonicalizer is authoritative. Terraform must
+  # consume that digest instead of independently approximating canonical JSON.
+  deployment_consumer_registry_sha256 = data.external.deployment_consumer_registry_sha256.result.sha256
   deployment_consumer_registry_by_id = {
     for consumer in local.deployment_consumer_registry.consumers :
     consumer.consumer_id => consumer
   }
   deployment_consumer_ids = toset(keys(local.deployment_consumer_registry_by_id))
+  deployment_consumer_enabled = {
+    mcp            = var.mcp_image != ""
+    connect_web    = var.enable_connect_web && var.mcp_image != ""
+    openclaw       = var.openclaw_image != ""
+    canary         = var.enable_canary_health && var.mcp_image != ""
+    ingest         = var.enable_ingest_schedule && var.mcp_image != ""
+    morning_digest = var.enable_morning_digest && var.mcp_image != ""
+    x_buzz_worker  = var.enable_x_research && var.x_buzz_image != ""
+    tiktok_acquire = local.media_worker_enabled && local.media_worker_image != ""
+  }
   deployment_expected_consumer_images = {
     mcp            = var.mcp_image
     connect_web    = var.mcp_image
@@ -168,22 +186,40 @@ locals {
       file("${path.module}/../codebuild/openclaw_bundle_contract.json")
     ).release.ready
   }
-  deployment_manifest_consumers = try(
-    var.image_deployment_consumer_manifest.consumers,
-    [],
+  deployment_manifest_root_is_valid = (
+    var.image_deployment_consumer_manifest != null &&
+    try(
+      sort(keys(var.image_deployment_consumer_manifest)) == sort([
+        "schema_version",
+        "registry_sha256",
+        "mode",
+        "consumers",
+      ]) &&
+      var.image_deployment_consumer_manifest.schema_version == 1 &&
+      can(regex(
+        "^[0-9a-f]{64}$",
+        var.image_deployment_consumer_manifest.registry_sha256,
+      )) &&
+      contains(
+        ["receipt-required", "no-image-transition"],
+        var.image_deployment_consumer_manifest.mode,
+      ) &&
+      length(var.image_deployment_consumer_manifest.consumers) == 8,
+      false,
+    )
   )
   deployment_manifest_registry_is_exact = (
-    var.image_deployment_consumer_manifest != null &&
+    local.deployment_manifest_root_is_valid &&
     try(
       var.image_deployment_consumer_manifest.schema_version == 1 &&
       var.image_deployment_consumer_manifest.registry_sha256 ==
       local.deployment_consumer_registry_sha256 &&
       length(local.deployment_consumer_registry.consumers) == 8 &&
-      length(local.deployment_manifest_consumers) == 8 &&
+      length(var.image_deployment_consumer_manifest.consumers) == 8 &&
       alltrue([
         for index, registry_consumer in local.deployment_consumer_registry.consumers :
         try(
-          sort(keys(local.deployment_manifest_consumers[index])) == sort([
+          sort(keys(var.image_deployment_consumer_manifest.consumers[index])) == sort([
             "consumer_id",
             "terraform_task_definition_address",
             "ecs_family",
@@ -195,19 +231,19 @@ locals {
             "before",
             "after",
           ]) &&
-          local.deployment_manifest_consumers[index].consumer_id ==
+          var.image_deployment_consumer_manifest.consumers[index].consumer_id ==
           registry_consumer.consumer_id &&
-          local.deployment_manifest_consumers[index].terraform_task_definition_address ==
+          var.image_deployment_consumer_manifest.consumers[index].terraform_task_definition_address ==
           registry_consumer.terraform_task_definition_address &&
-          local.deployment_manifest_consumers[index].ecs_family ==
+          var.image_deployment_consumer_manifest.consumers[index].ecs_family ==
           registry_consumer.ecs_family &&
-          local.deployment_manifest_consumers[index].container_name ==
+          var.image_deployment_consumer_manifest.consumers[index].container_name ==
           registry_consumer.container_name &&
-          local.deployment_manifest_consumers[index].activator ==
+          var.image_deployment_consumer_manifest.consumers[index].activator ==
           registry_consumer.activator &&
-          local.deployment_manifest_consumers[index].release_repository ==
+          var.image_deployment_consumer_manifest.consumers[index].release_repository ==
           registry_consumer.release_repository &&
-          local.deployment_manifest_consumers[index].receipt ==
+          var.image_deployment_consumer_manifest.consumers[index].receipt ==
           registry_consumer.receipt,
           false,
         )
@@ -215,11 +251,80 @@ locals {
       false,
     )
   )
-  deployment_manifest_after_images_are_exact = (
+  deployment_manifest_structure_is_exact = (
     local.deployment_manifest_registry_is_exact &&
-    alltrue([
-      for consumer in local.deployment_manifest_consumers :
-      try(
+    try(
+      alltrue([
+        for consumer in var.image_deployment_consumer_manifest.consumers :
+        alltrue([
+          for phase in ["live", "before", "after"] :
+          (
+            try(
+              sort(keys(consumer[phase])) == ["absent"] &&
+              consumer[phase].absent == true,
+              false,
+            ) ||
+            try(
+              sort(keys(consumer[phase])) == sort([
+                "image",
+                "task_definition_arn",
+                "task_definition",
+                "activation",
+              ]) &&
+              sort(keys(consumer[phase].task_definition)) == sort([
+                "container_definitions",
+                "task_role_arn",
+                "execution_role_arn",
+                "network_mode",
+                "cpu",
+                "memory",
+                "volumes",
+              ]) &&
+              (
+                consumer.activator.type == "ecs_service" ?
+                sort(keys(consumer[phase].activation)) == sort([
+                  "desired_count",
+                  "task_definition_arn",
+                ]) :
+                consumer.activator.type == "eventbridge_rule_ecs_target" ?
+                sort(keys(consumer[phase].activation)) == sort([
+                  "state",
+                  "task_definition_arn",
+                ]) :
+                sort(keys(consumer[phase].activation)) == sort([
+                  "event_source_mapping_enabled",
+                  "task_definition_arn",
+                ])
+              ),
+              false,
+            )
+          )
+        ])
+      ]),
+      false,
+    )
+  )
+  deployment_manifest_presence_is_exact = (
+    local.deployment_manifest_structure_is_exact &&
+    try(
+      alltrue([
+        for consumer in var.image_deployment_consumer_manifest.consumers :
+        local.deployment_consumer_enabled[consumer.consumer_id] ?
+        !try(consumer.after.absent, false) :
+        try(
+          consumer.live.absent == true &&
+          consumer.before.absent == true &&
+          consumer.after.absent == true,
+          false,
+        )
+      ]),
+      false,
+    )
+  )
+  deployment_manifest_after_images_are_exact = (
+    local.deployment_manifest_presence_is_exact ? alltrue([
+      for consumer in var.image_deployment_consumer_manifest.consumers :
+      !local.deployment_consumer_enabled[consumer.consumer_id] ? true : try(
         consumer.after.image ==
         local.deployment_expected_consumer_images[consumer.consumer_id] &&
         length(split("@sha256:", consumer.after.image)) == 2 &&
@@ -231,24 +336,53 @@ locals {
         )),
         false,
       )
-    ])
+    ]) : false
   )
-  deployment_receipt_required_consumer_ids = toset(try([
-    for consumer in local.deployment_manifest_consumers :
-    consumer.consumer_id
-    if (
-      consumer.before.image != consumer.after.image ||
-      (
-        consumer.activator.type == "ecs_service" ?
-        consumer.before.activation.desired_count !=
-        consumer.after.activation.desired_count :
-        consumer.activator.type == "eventbridge_rule_ecs_target" ?
-        consumer.before.activation.state != consumer.after.activation.state :
-        consumer.before.activation.event_source_mapping_enabled !=
-        consumer.after.activation.event_source_mapping_enabled
+  deployment_receipt_required_consumer_ids = toset(
+    local.deployment_manifest_presence_is_exact ? [
+      for consumer in var.image_deployment_consumer_manifest.consumers :
+      consumer.consumer_id
+      if local.deployment_consumer_enabled[consumer.consumer_id] && (
+        !can(consumer.before.image) ||
+        try(
+          consumer.before.image != consumer.after.image ||
+          consumer.before.task_definition_arn !=
+          consumer.after.task_definition_arn ||
+          jsonencode(consumer.before.task_definition) !=
+          jsonencode(consumer.after.task_definition) ||
+          (
+            consumer.activator.type == "ecs_service" ?
+            consumer.before.activation.desired_count !=
+            consumer.after.activation.desired_count :
+            consumer.activator.type == "eventbridge_rule_ecs_target" ?
+            consumer.before.activation.state != consumer.after.activation.state :
+            consumer.before.activation.event_source_mapping_enabled !=
+            consumer.after.activation.event_source_mapping_enabled
+          ),
+          true,
+        )
       )
-    )
-  ], []))
+    ] : []
+  )
+  deployment_affected_consumer_ids = toset(
+    local.deployment_manifest_presence_is_exact ? [
+      for consumer in var.image_deployment_consumer_manifest.consumers :
+      consumer.consumer_id
+      if local.deployment_consumer_enabled[consumer.consumer_id] && (
+        !can(consumer.before.image) ||
+        try(
+          consumer.before.image != consumer.after.image ||
+          consumer.before.task_definition_arn !=
+          consumer.after.task_definition_arn ||
+          jsonencode(consumer.before.task_definition) !=
+          jsonencode(consumer.after.task_definition) ||
+          jsonencode(consumer.before.activation) !=
+          jsonencode(consumer.after.activation),
+          true,
+        )
+      )
+    ] : []
+  )
   deployment_binding_consumer_ids = toset(
     keys(var.image_release_consumer_receipt_bindings)
   )
@@ -282,17 +416,36 @@ locals {
       local.deployment_catalog_claim_ids,
     )) == 0
   )
-  deployment_bound_pipelines = toset(compact([
-    for consumer_id in local.deployment_binding_consumer_ids :
-    try(
-      local.deployment_consumer_registry_by_id[consumer_id].receipt.pipeline,
-      "",
-    )
-  ]))
-  deployment_contracts_are_ready = alltrue([
-    for pipeline in local.deployment_bound_pipelines :
-    try(local.deployment_contract_ready[pipeline] == true, false)
+  deployment_release_consumer_ids = toset(
+    local.deployment_manifest_presence_is_exact ? [
+      for consumer in var.image_deployment_consumer_manifest.consumers :
+      consumer.consumer_id
+      if local.deployment_consumer_enabled[consumer.consumer_id] && (
+        var.image_deployment_consumer_manifest.mode == "no-image-transition" ||
+        contains(local.deployment_affected_consumer_ids, consumer.consumer_id)
+      )
+    ] : []
+  )
+  deployment_release_pipelines = toset([
+    for consumer_id in local.deployment_release_consumer_ids :
+    local.deployment_consumer_registry_by_id[consumer_id].receipt.pipeline
   ])
+  deployment_contract_bindings = {
+    for pipeline, contract_sha256 in local.deployment_contract_sha256 :
+    pipeline => contract_sha256
+    if contains(local.deployment_release_pipelines, pipeline)
+  }
+  deployment_contract_ready_bindings = {
+    for pipeline, ready in local.deployment_contract_ready :
+    pipeline => ready
+    if contains(local.deployment_release_pipelines, pipeline)
+  }
+  deployment_contracts_are_ready = (
+    alltrue([
+      for pipeline in local.deployment_release_pipelines :
+      local.deployment_contract_ready[pipeline] == true
+    ])
+  )
   deployment_requested = (
     var.image_deployment_consumer_manifest != null ||
     length(var.image_release_receipt_catalog) != 0 ||
@@ -324,7 +477,7 @@ locals {
   deployment_application_provenance = {
     for pipeline, provenance in local.deployment_mcp_application_provenance :
     pipeline => provenance
-    if contains(local.deployment_bound_pipelines, pipeline)
+    if contains(local.deployment_release_pipelines, pipeline)
   }
   # jsondecode preserves the generation number while allowing an empty object
   # until the separately owned HMAC ledger stack is integrated.
@@ -334,7 +487,8 @@ locals {
     : jsonencode(var.image_release_shared_generation_ledger)
   )
   deployment_gate_preconditions = (
-    local.deployment_manifest_registry_is_exact &&
+    local.deployment_manifest_structure_is_exact &&
+    local.deployment_manifest_presence_is_exact &&
     local.deployment_manifest_after_images_are_exact &&
     local.deployment_binding_consumers_are_exact &&
     local.deployment_catalog_bindings_are_exact &&
@@ -345,8 +499,8 @@ locals {
     consumer_manifest_json         = jsonencode(var.image_deployment_consumer_manifest)
     receipt_catalog_json           = jsonencode(var.image_release_receipt_catalog)
     consumer_receipt_bindings_json = jsonencode(var.image_release_consumer_receipt_bindings)
-    contracts_json                 = jsonencode(local.deployment_contract_sha256)
-    contract_ready_json            = jsonencode(local.deployment_contract_ready)
+    contracts_json                 = jsonencode(local.deployment_contract_bindings)
+    contract_ready_json            = jsonencode(local.deployment_contract_ready_bindings)
     application_json               = jsonencode(local.deployment_application_provenance)
     shared_generation_ledger_json  = jsonencode(
       local.deployment_shared_generation_ledger
@@ -411,6 +565,25 @@ resource "terraform_data" "production_image_release_gate" {
   )
 
   lifecycle {
+    precondition {
+      condition = (
+        !local.deployment_requested ||
+        (
+          local.deployment_manifest_structure_is_exact &&
+          local.deployment_manifest_presence_is_exact
+        )
+      )
+      error_message = "Production image deployment consumer manifest is malformed or does not exactly match the code-owned registry and snapshot schema."
+    }
+
+    precondition {
+      condition = (
+        !local.deployment_requested ||
+        local.deployment_contracts_are_ready
+      )
+      error_message = "Every pipeline affected by a production consumer change must have release.ready=true; empty receipt bindings and no-image-transition mode do not waive this requirement."
+    }
+
     precondition {
       condition = (
         !local.deployment_requested ||
