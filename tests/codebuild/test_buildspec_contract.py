@@ -31,8 +31,9 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
     body = BUILDSPEC.read_text(encoding="utf-8")
 
     hash_position = body.index("__SOURCE_PROVENANCE_SHA256__")
-    ready_position = body.index('"$BUNDLE_PROVENANCE" assert-release-ready')
+    ready_position = body.index('"$BUNDLE_PROVENANCE" assert-contract-ready')
     verify_declaration_position = body.index("release_evidence.py verify-source-declaration")
+    approval_position = body.index("release_evidence.py assert-approved-release")
     verify_source_position = body.index("source_provenance.py verify-source")
     interface_position = body.index('"$BUNDLE_PROVENANCE" verify-source-interface')
     pair_position = body.index("validate-contract-pair")
@@ -45,6 +46,7 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
         hash_position
         < ready_position
         < verify_declaration_position
+        < approval_position
         < verify_source_position
         < interface_position
         < pair_position
@@ -62,26 +64,25 @@ def test_source_and_core_media_contract_gates_run_before_both_final_builds() -> 
     ) in body
     assert '--repo-root "$CONTEXT_VERIFY_DIR"' in body
     assert (
-        'python3 "$BUNDLE_PROVENANCE" assert-release-ready \\\n'
-        '          --contract "$RELEASE_CONTRACT" \\\n'
-        '          --expected-commit "$GIT_COMMIT"'
+        'python3 "$BUNDLE_PROVENANCE" assert-contract-ready \\\n'
+        '          --contract "$RELEASE_CONTRACT"'
     ) in body
     assert (
         'python3 "$BUNDLE_PROVENANCE" verify-source-interface \\\n'
         '          --repo-root "$CODEBUILD_SRC_DIR" \\\n'
         '          --contract "$RELEASE_CONTRACT" \\\n'
-        '          --deploy-log "$DEPLOY_LOG" \\\n'
-        '          --expected-commit "$GIT_COMMIT"'
+        '          --deploy-log "$DEPLOY_LOG"'
     ) in body
     assert (
-        "python3 infra/codebuild/source_provenance.py assert-release-ready \\\n"
-        "          --contract infra/codebuild/teamagent_runtime_contract.json \\\n"
-        '          --expected-commit "$GIT_COMMIT"'
+        "python3 infra/codebuild/source_provenance.py assert-contract-ready \\\n"
+        "          --contract infra/codebuild/teamagent_runtime_contract.json"
     ) in body
     assert (
-        '--repo-root "$CONTEXT_VERIFY_DIR" \\\n'
-        '          --expected-commit "$GIT_COMMIT"'
+        '--repo-root "$CONTEXT_VERIFY_DIR"'
     ) in body
+    assert "assert-release-ready" not in body
+    assert "--approval-locators-json" in body
+    assert "mcp: {" in body
     for required in (
         '--expected-commit "$GIT_COMMIT"',
         '--expected-branch "$GIT_BRANCH"',
@@ -135,6 +136,19 @@ def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
     assert '--build-arg "WITH_SCRAPE_TOOLS=true"' not in body
     assert '--tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG"' in body
     assert '--tag "$MEDIA_QUARANTINE_REPOSITORY:$MEDIA_TAG"' in body
+    assert body.count(
+        '--build-arg "RELEASE_APPROVAL_SHA256=$RELEASE_APPROVAL_SHA256"'
+    ) == 2
+    for dockerfile in (
+        ROOT / "infra" / "docker" / "Dockerfile.teamagent-mcp",
+        ROOT / "infra" / "docker" / "Dockerfile.teamagent-media-worker",
+    ):
+        dockerfile_body = dockerfile.read_text(encoding="utf-8")
+        assert "ARG RELEASE_APPROVAL_SHA256" in dockerfile_body
+        assert (
+            'io.teamagent.build.release-approval-sha256="$RELEASE_APPROVAL_SHA256"'
+            in dockerfile_body
+        )
 
 
 def test_post_build_uses_bundle_context_binding_and_core_receipt_verifier() -> None:
@@ -145,6 +159,10 @@ def test_post_build_uses_bundle_context_binding_and_core_receipt_verifier() -> N
     bundle_call = body[bundle_start:bundle_end]
     assert "--runtime-contract infra/codebuild/teamagent_runtime_contract.json" in bundle_call
     assert '--expected-build-context-sha256 "$BUILD_CONTEXT_SHA256"' in bundle_call
+    assert (
+        '--expected-release-approval-sha256 "$RELEASE_APPROVAL_SHA256"'
+        in bundle_call
+    )
 
     receipt_start = body.index("source_provenance.py verify-oci-revision", bundle_end)
     receipt_end = body.index("\n          fi", receipt_start)
@@ -171,7 +189,7 @@ def test_active_schema_alignment_is_explicitly_blocked_after_six_measurements() 
     assert "ready=trueを禁止" in contract["release"]["blocked_reason"]
     assert "実測6値は取得済み" in contract["release"]["blocked_reason"]
     assert "2026-07-24計測" in contract["release"]["blocked_reason"]
-    assert contract["approval_record"] is None
+    assert "approval_record" not in contract
     serialized = json.dumps(contract)
     assert all(
         entry["value"] != "latest-dev" for entry in contract["receipt"]["entries"]
@@ -263,6 +281,58 @@ def test_both_builds_stop_at_quarantine_and_source_free_projects_own_promotion()
     assert "oras cp --recursive" in promoter
 
 
+@pytest.mark.parametrize(
+    ("path", "write_marker"),
+    (
+        ("mcp-source-publisher-buildspec.yml", "aws s3api put-object"),
+        ("buildspec.yml", "docker buildx build"),
+        ("image-attestor-buildspec.yml", "/tmp/verify_actual_image.sh"),
+        ("image-promoter-buildspec.yml", "aws ecr get-login-password"),
+    ),
+)
+def test_mcp_buildspecs_separate_static_ready_from_external_approval(
+    path: str,
+    write_marker: str,
+) -> None:
+    body = (ROOT / "infra" / "codebuild" / path).read_text(encoding="utf-8")
+
+    static_ready = body.index("assert-contract-ready")
+    approved = body.index("assert-approved-release")
+    write = body.index(write_marker, approved)
+    assert static_ready < approved < write
+    assert "--approval-locators-json" in body
+    assert "mcp: {" in body
+    for name in (
+        "APPROVAL_PAYLOAD_BUCKET",
+        "APPROVAL_PAYLOAD_KEY",
+        "APPROVAL_PAYLOAD_VERSION_ID",
+        "APPROVAL_PAYLOAD_SHA256",
+        "APPROVAL_SIGNATURE_BUCKET",
+        "APPROVAL_SIGNATURE_KEY",
+        "APPROVAL_SIGNATURE_VERSION_ID",
+        "APPROVAL_SIGNATURE_SHA256",
+        "APPROVAL_SIGNING_KEY_ARN",
+    ):
+        assert name in body
+
+
+def test_promoter_reverifies_signed_source_before_external_approval_and_ecr() -> None:
+    body = (
+        ROOT / "infra" / "codebuild" / "image-promoter-buildspec.yml"
+    ).read_text(encoding="utf-8")
+
+    receipt = body.index("verify-release-receipt")
+    source_head = body.index("source-$source_object-head.json", receipt)
+    source_signature = body.index("source-declaration-kms-verify.json", source_head)
+    source_binding = body.index("verify-source-approval-binding", source_signature)
+    approval = body.index("assert-approved-release", source_binding)
+    login = body.index("aws ecr get-login-password", approval)
+    assert receipt < source_head < source_signature < source_binding < approval < login
+    assert "--version-id \"$source_version\"" in body
+    assert ".ObjectLockMode == \"COMPLIANCE\"" in body
+    assert ".SSEKMSKeyId == $kms" in body
+
+
 def test_registry_and_s3_destinations_ignore_hostile_overrides() -> None:
     body = BUILDSPEC.read_text(encoding="utf-8")
 
@@ -310,13 +380,15 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
         "source commit bundle verifier differs from trusted bytes"
     )
     pair = body.index("teamagent_bundle_provenance.py validate-contract-pair")
-    ready = body.index("teamagent_bundle_provenance.py assert-release-ready")
+    ready = body.index("teamagent_bundle_provenance.py assert-contract-ready")
+    approval = body.index("release_evidence.py assert-approved-release")
     assert (
         embedded_contract_hash
         < checkout_contract_hash
         < checkout_verifier_hash
         < pair
         < ready
+        < approval
     )
     assert (
         '--runtime-contract \\\n'
@@ -325,22 +397,21 @@ def test_independent_publisher_pins_origin_dev_versioned_source_and_current_app(
     ) in body
     assert '--contract /tmp/teamagent_core_media_release_contract.json' in body
     assert (
-        '--repo-root "$PUBLISHER_CHECKOUT" \\\n'
-        '          --expected-commit "$EXPECTED_COMMIT"'
+        '--repo-root "$PUBLISHER_CHECKOUT"'
     ) in body
     assert (
-        "teamagent_bundle_provenance.py assert-release-ready \\\n"
-        "          --contract /tmp/teamagent_core_media_release_contract.json \\\n"
-        '          --expected-commit "$EXPECTED_COMMIT"'
+        "teamagent_bundle_provenance.py assert-contract-ready \\\n"
+        "          --contract /tmp/teamagent_core_media_release_contract.json"
     ) in body
     assert (
         "teamagent_bundle_provenance.py verify-source-interface \\\n"
         '          --repo-root "$EXTRACTED" \\\n'
         '          --contract "$EXTRACTED/infra/codebuild/'
         'teamagent_core_media_release_contract.json" \\\n'
-        '          --deploy-log "$EXTRACTED/infra/deploy_log.md" \\\n'
-        '          --expected-commit "$EXPECTED_COMMIT"'
+        '          --deploy-log "$EXTRACTED/infra/deploy_log.md"'
     ) in body
+    assert "assert-release-ready" not in body
+    assert "--approval-evidence-json" in body
     assert '--version-id "$APP_HTML_VERSION_ID"' in body
     assert '--version-id "$BAKED_APP_HTML_VERSION_ID"' in body
     assert '--baked-fallback "$BAKED_APP_HTML"' in body
@@ -368,6 +439,14 @@ def test_terraform_embeds_all_verifier_and_contract_hashes() -> None:
 
     for path, placeholder in (
         ("source_provenance.py", "__SOURCE_PROVENANCE_SHA256__"),
+        (
+            "teamagent_schema_versions.py",
+            "__TEAMAGENT_SCHEMA_VERSIONS_SHA256__",
+        ),
+        (
+            "teamagent_release_approval.py",
+            "__TEAMAGENT_RELEASE_APPROVAL_SHA256__",
+        ),
         (
             "teamagent_bundle_provenance.py",
             "__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__",

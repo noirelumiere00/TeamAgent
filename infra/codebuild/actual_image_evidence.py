@@ -19,9 +19,10 @@ from release_evidence import (
     REFERRER_ARTIFACT_TYPES,
     REGION,
     REGISTRY,
-    RELEASE_RECEIPT_SCHEMA,
     EvidenceError,
     canonical_bytes,
+    release_receipt_schema_for_pipeline,
+    validate_approval_evidence,
     validate_release_receipt,
 )
 from source_provenance import (
@@ -33,6 +34,8 @@ from source_provenance import verify_oci_revision as verify_core_runtime_oci_rev
 from teamagent_bundle_provenance import (
     ProvenanceError as BundleProvenanceError,
 )
+from teamagent_bundle_provenance import load_contract as load_bundle_contract
+from teamagent_bundle_provenance import require_release_ready as require_bundle_release_ready
 from teamagent_bundle_provenance import (
     verify_oci_config as verify_teamagent_oci_config,
 )
@@ -346,9 +349,29 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
     }
     requested_build_context_sha256 = getattr(args, "build_context_sha256", "")
     requested_runtime_contract = getattr(args, "runtime_contract", None)
+    approval_evidence_json = getattr(args, "approval_evidence_json", "")
+    normalized_approval_evidence: dict[str, Any] | None = None
+    if args.pipeline == "mcp":
+        if not isinstance(approval_evidence_json, str) or not approval_evidence_json:
+            raise EvidenceError("approval evidence is required for the MCP pipeline")
+        try:
+            raw_approval_evidence = json.loads(
+                approval_evidence_json,
+                object_pairs_hook=_reject_duplicate_keys,
+            )
+        except json.JSONDecodeError as exc:
+            raise EvidenceError("approval evidence is not valid JSON") from exc
+        normalized_approval_evidence = validate_approval_evidence(
+            raw_approval_evidence,
+            pipeline="mcp",
+            expected_commit=args.commit,
+        )
+    elif approval_evidence_json:
+        raise EvidenceError("approval evidence is only valid for the MCP pipeline")
     if normalized_labels.get("org.opencontainers.image.revision") != args.commit:
         raise EvidenceError("OCI revision does not match the full commit")
     if args.pipeline == "mcp":
+        assert normalized_approval_evidence is not None
         if requested_runtime_contract is None:
             raise EvidenceError("runtime contract is required for the MCP pipeline")
         build_context_sha256 = _sha256(
@@ -357,6 +380,15 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         )
         if normalized_labels.get("io.teamagent.build.context-sha256") != build_context_sha256:
             raise EvidenceError("OCI context label does not match signed source evidence")
+        if (
+            normalized_labels.get(
+                "io.teamagent.build.release-approval-sha256"
+            )
+            != normalized_approval_evidence["approval_payload_sha256"]
+        ):
+            raise EvidenceError(
+                "OCI approval label does not match the verified external approval"
+            )
     elif requested_build_context_sha256 or requested_runtime_contract is not None:
         raise EvidenceError(
             "build context digest and runtime contract are only valid for the MCP pipeline"
@@ -370,6 +402,10 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
             runtime_contract_path,
             label="MCP runtime contract",
         )
+        try:
+            require_bundle_release_ready(load_bundle_contract(args.contract))
+        except BundleProvenanceError as exc:
+            raise EvidenceError(f"MCP outer contract mismatch: {exc}") from exc
         try:
             require_runtime_release_ready(
                 load_runtime_contract(runtime_contract_path),
@@ -398,6 +434,9 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
                 expected_contract_sha256=contract_sha256,
                 runtime_contract_path=runtime_contract_path,
                 expected_build_context_sha256=build_context_sha256,
+                expected_release_approval_sha256=normalized_approval_evidence[
+                    "approval_payload_sha256"
+                ],
             )
         except BundleProvenanceError as exc:
             raise EvidenceError(f"MCP OCI core/media interface mismatch: {exc}") from exc
@@ -432,6 +471,12 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
             raise EvidenceError("provenance does not bind the canonical build context")
         if not _contains_exact(provenance, runtime_contract_sha256):
             raise EvidenceError("provenance does not bind the inner runtime contract")
+        assert normalized_approval_evidence is not None
+        if not _contains_exact(
+            provenance,
+            normalized_approval_evidence["approval_payload_sha256"],
+        ):
+            raise EvidenceError("provenance does not bind the external approval")
     provenance_subjects = provenance.get("subject")
     if not isinstance(provenance_subjects, list) or not any(
         isinstance(subject, dict)
@@ -569,7 +614,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
     }[args.pipeline]
     placeholder_source_key = f"{placeholder_source_prefix}{'0' * 64}.json"
     placeholder_receipt = {
-        "schema_version": RELEASE_RECEIPT_SCHEMA,
+        "schema_version": release_receipt_schema_for_pipeline(args.pipeline),
         "kind": "teamagent.release-receipt",
         "pipeline": args.pipeline,
         "channel": args.channel,
@@ -602,6 +647,9 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         },
         "subjects": [subject],
     }
+    if args.pipeline == "mcp":
+        assert normalized_approval_evidence is not None
+        placeholder_receipt["approval_evidence"] = normalized_approval_evidence
     if subject_count == 1:
         validate_release_receipt(
             placeholder_receipt,
@@ -630,6 +678,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--contract-sha256", required=True)
     parser.add_argument("--build-context-sha256", default="")
     parser.add_argument("--runtime-contract", type=Path)
+    parser.add_argument("--approval-evidence-json", default="")
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--digest", required=True)
     parser.add_argument("--media-type", required=True)

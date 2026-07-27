@@ -206,6 +206,7 @@ ARG APP_HTML_VERSION_ID
 ARG APP_HTML_MANIFEST_SHA256
 ARG APP_HTML_BUILD_INPUTS_SHA256
 ARG RELEASE_CONTRACT_SHA256
+ARG RELEASE_APPROVAL_SHA256
 ARG APP_PROVENANCE_SHA256
 ARG PYTHON_BUILDER_ARM64_DIGEST
 ARG PYTHON_RUNTIME_ARM64_DIGEST
@@ -254,6 +255,7 @@ LABEL org.opencontainers.image.revision="$GIT_COMMIT" \
       org.opencontainers.image.ref.name="$GIT_BRANCH" \
       io.teamagent.build.context-sha256="$BUILD_CONTEXT_SHA256" \
       io.teamagent.build.release-contract-sha256="$RELEASE_CONTRACT_SHA256" \
+      io.teamagent.build.release-approval-sha256="$RELEASE_APPROVAL_SHA256" \
       io.teamagent.build.runtime-contract-sha256="$RUNTIME_CONTRACT_SHA256" \
       io.teamagent.build.runtime-receipt="$RUNTIME_RECEIPT_B64" \
       io.teamagent.build.runtime-receipt-sha256="$RUNTIME_RECEIPT_SHA256" \

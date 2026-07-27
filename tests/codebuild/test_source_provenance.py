@@ -22,7 +22,6 @@ READY_CONTRACT_PATH = (
 APP_HTML_VERSION_ID = "app-version-fixture"
 APP_HTML_SHA256 = hashlib.sha256(b"versioned app fixture\n").hexdigest()
 COMMIT = "1" * 40
-OTHER_COMMIT = "2" * 40
 
 
 def _load_module() -> object:
@@ -191,8 +190,9 @@ def _oci_fixture(
 def test_active_core_contract_is_schema_aligned_but_release_remains_fail_closed() -> None:
     contract = provenance.load_runtime_contract(ACTIVE_CONTRACT_PATH)
 
+    assert contract["schema_version"] == provenance.RUNTIME_CONTRACT_SCHEMA_VERSION == 5
     assert contract["release"]["ready"] is False
-    assert contract["approval_record"] is None
+    assert "approval_record" not in contract
     assert contract["receipt"]["subject"] == "core"
     assert {entry["key"] for entry in contract["receipt"]["entries"]} == {
         "artifact.torch.arm64-wheel.sha256",
@@ -209,8 +209,7 @@ def test_active_core_contract_is_schema_aligned_but_release_remains_fail_closed(
     with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
         provenance.require_release_ready(contract)
     assert all(
-        not entry["build_arg"].startswith("WOLFI_")
-        and entry["build_arg"] != "NODE_IMAGE_DIGEST"
+        not entry["build_arg"].startswith("WOLFI_") and entry["build_arg"] != "NODE_IMAGE_DIGEST"
         for entry in contract["receipt"]["entries"]
     )
 
@@ -234,50 +233,46 @@ def test_ready_contract_requires_exact_core_evidence_and_receipt_subject() -> No
     }
 
 
-def test_runtime_release_ready_cli_binds_approval_to_expected_commit(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_runtime_contract_ready_cli_validates_static_completion() -> None:
     assert (
         provenance.main(
             [
-                "assert-release-ready",
+                "assert-contract-ready",
                 "--contract",
                 str(READY_CONTRACT_PATH),
-                "--expected-commit",
-                COMMIT,
             ]
         )
         == 0
     )
-    assert (
-        provenance.main(
-            [
-                "assert-release-ready",
-                "--contract",
-                str(READY_CONTRACT_PATH),
-                "--expected-commit",
-                OTHER_COMMIT,
-            ]
-        )
-        == 1
-    )
-    assert (
-        "approval source_commit does not bind the expected build commit"
-        in capsys.readouterr().err
-    )
 
 
-def test_runtime_release_ready_cli_keeps_blocked_contract_fail_closed(
+def test_runtime_contract_ready_cli_loads_shared_version_authority_in_isolated_mode() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(MODULE_PATH),
+            "assert-contract-ready",
+            "--contract",
+            str(READY_CONTRACT_PATH),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_runtime_contract_ready_cli_keeps_blocked_contract_fail_closed(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert (
         provenance.main(
             [
-                "assert-release-ready",
+                "assert-contract-ready",
                 "--contract",
                 str(ACTIVE_CONTRACT_PATH),
-                "--expected-commit",
-                COMMIT,
             ]
         )
         == 1
@@ -302,9 +297,7 @@ def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
         if entry["key"] == "base.builder.arm64.digest"
     )
     builder_entry["build_arg"] = "MUTABLE_BUILDER_TAG"
-    builder_entry["dockerfile_uses"] = [
-        "cgr.dev/chainguard/python@${MUTABLE_BUILDER_TAG}"
-    ]
+    builder_entry["dockerfile_uses"] = ["cgr.dev/chainguard/python@${MUTABLE_BUILDER_TAG}"]
     with pytest.raises(provenance.ProvenanceError, match="bindings are invalid"):
         provenance.validate_runtime_contract(contract)
 
@@ -312,7 +305,7 @@ def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        (lambda contract: contract.update(schema_version=3), "unsupported runtime contract schema"),
+        (lambda contract: contract.update(schema_version=4), "unsupported runtime contract schema"),
         (
             lambda contract: contract["receipt"].update(schema_version=1),
             "receipt schema",
@@ -321,37 +314,9 @@ def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
             lambda contract: contract["receipt"].update(subject="media"),
             r"receipt\.subject must be 'core'",
         ),
-        (
-            lambda contract: contract.update(approval_record=None),
-            "approval_record must be an object",
-        ),
-        (
-            lambda contract: contract["approval_record"].update(source_commit="A" * 40),
-            "full lowercase Git SHA-1",
-        ),
-        (
-            lambda contract: contract["approval_record"].update(
-                approved_at_utc="2026-07-24T00:00:00+00:00"
-            ),
-            "RFC3339 UTC",
-        ),
-        (
-            lambda contract: contract["approval_record"].update(decision="looks good"),
-            "must begin with 'APPROVED: '",
-        ),
-        (
-            lambda contract: contract["approval_record"].update(unexpected="value"),
-            "schema mismatch",
-        ),
-        (
-            lambda contract: contract["approval_record"]["observations"].append(
-                dict(contract["approval_record"]["observations"][0])
-            ),
-            "duplicate runtime contract approval_record observation key",
-        ),
     ],
 )
-def test_runtime_contract_schema_and_approval_record_are_strict(
+def test_runtime_contract_schema_is_strict(
     mutation: object,
     message: str,
 ) -> None:
@@ -362,14 +327,34 @@ def test_runtime_contract_schema_and_approval_record_are_strict(
         provenance.validate_runtime_contract(contract)
 
 
-def test_blocked_contract_rejects_an_approval_record() -> None:
+@pytest.mark.parametrize("ready", [False, True], ids=["blocked", "ready"])
+@pytest.mark.parametrize(
+    "approval_record",
+    [
+        None,
+        {
+            "approved_at_utc": "2026-07-24T00:00:00Z",
+            "source_commit": COMMIT,
+        },
+    ],
+    ids=["null", "object"],
+)
+def test_contract_rejects_residual_approval_record_key(
+    ready: bool,
+    approval_record: object,
+) -> None:
     contract = _ready_contract()
-    contract["release"] = {
-        "ready": False,
-        "blocked_reason": "Schema alignment is complete, but release approval remains intentionally blocked.",
-    }
+    if not ready:
+        contract["release"] = {
+            "ready": False,
+            "blocked_reason": (
+                "Schema alignment is complete, but external release approval "
+                "remains intentionally blocked."
+            ),
+        }
+    contract["approval_record"] = approval_record
 
-    with pytest.raises(provenance.ProvenanceError, match="approval_record must be null"):
+    with pytest.raises(provenance.ProvenanceError, match="approval_record"):
         provenance.validate_runtime_contract(contract)
 
 
@@ -387,8 +372,7 @@ def test_ready_contract_rejects_legacy_wolfi_or_node_digest_bindings(
     contract = _ready_contract()
     entry = next(item for item in contract["receipt"]["entries"] if item["key"] == key)
     entry["dockerfile_uses"] = [
-        use.replace(entry["build_arg"], replacement_arg)
-        for use in entry["dockerfile_uses"]
+        use.replace(entry["build_arg"], replacement_arg) for use in entry["dockerfile_uses"]
     ]
     entry["build_arg"] = replacement_arg
 
@@ -540,8 +524,7 @@ def test_checked_in_dockerfile_implements_active_contract_while_release_is_block
         ),
         (
             lambda body: body.replace(
-                "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" "
-                "/usr/bin/python3.14 | sha256sum -c -",
+                "printf '%s  %s\\n' \"$PYTHON_BINARY_SHA256\" /usr/bin/python3.14 | sha256sum -c -",
                 "true",
             ),
             "does not implement",
@@ -577,8 +560,7 @@ def test_dockerfile_contract_rejects_mutable_or_incomplete_implementation(
         ),
         (
             lambda body: body.replace(
-                "hashlib.sha256(raw).hexdigest() == "
-                "os.environ['RUNTIME_CONTRACT_SHA256']",
+                "hashlib.sha256(raw).hexdigest() == os.environ['RUNTIME_CONTRACT_SHA256']",
                 "True",
             ),
             "inner contract raw SHA-256",
@@ -815,9 +797,7 @@ def test_remote_oci_receipt_rejects_non_core_subject(
             separators=(",", ":"),
         ).encode()
         labels[provenance.RUNTIME_RECEIPT_LABEL] = base64.b64encode(receipt_bytes).decode()
-        labels[provenance.RUNTIME_RECEIPT_SHA256_LABEL] = hashlib.sha256(
-            receipt_bytes
-        ).hexdigest()
+        labels[provenance.RUNTIME_RECEIPT_SHA256_LABEL] = hashlib.sha256(receipt_bytes).hexdigest()
         return labels
 
     monkeypatch.setattr(

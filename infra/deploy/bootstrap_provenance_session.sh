@@ -36,6 +36,82 @@ EOF
 MODE="$1"
 shift
 
+APPROVAL_PAYLOAD_BUCKET=""
+APPROVAL_PAYLOAD_KEY=""
+APPROVAL_PAYLOAD_VERSION_ID=""
+APPROVAL_PAYLOAD_SHA256=""
+APPROVAL_SIGNATURE_BUCKET=""
+APPROVAL_SIGNATURE_KEY=""
+APPROVAL_SIGNATURE_VERSION_ID=""
+APPROVAL_SIGNATURE_SHA256=""
+approval_payload_bucket_count=0
+approval_payload_key_count=0
+approval_payload_version_id_count=0
+approval_payload_sha256_count=0
+approval_signature_bucket_count=0
+approval_signature_key_count=0
+approval_signature_version_id_count=0
+approval_signature_sha256_count=0
+index=1
+while [ "$index" -le "$#" ]; do
+  argument="${!index}"
+  value_index=$((index + 1))
+  case "$argument" in
+    --approval-payload-bucket)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_PAYLOAD_BUCKET="${!value_index}"
+      approval_payload_bucket_count=$((approval_payload_bucket_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-payload-key)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_PAYLOAD_KEY="${!value_index}"
+      approval_payload_key_count=$((approval_payload_key_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-payload-version-id)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_PAYLOAD_VERSION_ID="${!value_index}"
+      approval_payload_version_id_count=$((approval_payload_version_id_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-payload-sha256)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_PAYLOAD_SHA256="${!value_index}"
+      approval_payload_sha256_count=$((approval_payload_sha256_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-signature-bucket)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_SIGNATURE_BUCKET="${!value_index}"
+      approval_signature_bucket_count=$((approval_signature_bucket_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-signature-key)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_SIGNATURE_KEY="${!value_index}"
+      approval_signature_key_count=$((approval_signature_key_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-signature-version-id)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_SIGNATURE_VERSION_ID="${!value_index}"
+      approval_signature_version_id_count=$((approval_signature_version_id_count + 1))
+      index=$((index + 2))
+      ;;
+    --approval-signature-sha256)
+      [ "$value_index" -le "$#" ] || die "$argument requires a value"
+      APPROVAL_SIGNATURE_SHA256="${!value_index}"
+      approval_signature_sha256_count=$((approval_signature_sha256_count + 1))
+      index=$((index + 2))
+      ;;
+    *)
+      index=$((index + 1))
+      ;;
+  esac
+done
+unset index argument value_index
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)" \
   || die "session wrapper repository root cannot be resolved"
@@ -136,6 +212,49 @@ case "$MODE" in
     ;;
 esac
 
+APPROVAL_REQUIRED="false"
+if [ "$MODE" = "teamagent" ] \
+  || { [ "$MODE" = "release" ] && [ "$PIPELINE" = "mcp" ]; }; then
+  APPROVAL_REQUIRED="true"
+fi
+for approval_count_name in \
+  approval_payload_bucket_count \
+  approval_payload_key_count \
+  approval_payload_version_id_count \
+  approval_payload_sha256_count \
+  approval_signature_bucket_count \
+  approval_signature_key_count \
+  approval_signature_version_id_count \
+  approval_signature_sha256_count; do
+  if [ "$APPROVAL_REQUIRED" = "true" ]; then
+    [ "${!approval_count_name}" -eq 1 ] \
+      || die "MCP provenance requires each approval locator argument exactly once"
+  else
+    [ "${!approval_count_name}" -eq 0 ] \
+      || die "approval locator arguments are only accepted for TeamAgent MCP"
+  fi
+done
+unset approval_count_name
+if [ "$APPROVAL_REQUIRED" = "true" ]; then
+  [ "$APPROVAL_PAYLOAD_BUCKET" = "teamagent-dev-image-release-evidence" ] \
+    && [ "$APPROVAL_SIGNATURE_BUCKET" = "teamagent-dev-image-release-evidence" ] \
+    || die "approval buckets are not allowlisted"
+  [[ "$APPROVAL_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$APPROVAL_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "approval hashes must be lowercase SHA-256 values"
+  [ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+    || die "approval signature key mismatch"
+  for approval_version in \
+    "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+    case "$approval_version" in
+      ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+        die "invalid approval VersionId"
+        ;;
+    esac
+  done
+  unset approval_version
+fi
+
 for tool in git python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
@@ -186,6 +305,13 @@ HEAD_COMMIT="$(git -C "$REPO_ROOT" rev-parse --verify HEAD^{commit})" \
 if [ "$MODE" = "teamagent" ]; then
   CONTRACT_EXPECTED_COMMIT="$HEAD_COMMIT"
 fi
+if [ "$APPROVAL_REQUIRED" = "true" ]; then
+  [[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$CONTRACT_EXPECTED_COMMIT/[0-9a-f]{64}\.json$ ]] \
+    || die "approval payload key does not bind the reviewed source commit"
+  [ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+    "approval-records/mcp/$CONTRACT_EXPECTED_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+    || die "approval payload key/hash mismatch"
+fi
 EXPECTED_HELPER_BLOB="$(
   git -C "$REPO_ROOT" rev-parse "$HEAD_COMMIT:infra/bootstrap/wrapper_provenance.py"
 )" || die "wrapper provenance helper is not tracked"
@@ -219,7 +345,11 @@ fi
 
 # This check deliberately precedes command discovery for aws and every AWS
 # invocation. A blocked contract cannot even mint a launcher session.
-if [ -n "$CONTRACT_HELPER" ]; then
+if [ "$APPROVAL_REQUIRED" = "true" ]; then
+  python3 -I "$CONTRACT_HELPER" assert-contract-ready \
+    --contract "$CONTRACT" ||
+    die "selected MCP release contract is not statically ready"
+elif [ -n "$CONTRACT_HELPER" ]; then
   if [ -n "$CONTRACT_EXPECTED_COMMIT" ]; then
     python3 -I "$CONTRACT_HELPER" assert-release-ready \
       --contract "$CONTRACT" \

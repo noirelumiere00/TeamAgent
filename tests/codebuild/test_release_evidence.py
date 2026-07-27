@@ -5,8 +5,9 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
-import re
+import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "codebuild" / "release_evidence.py"
 AUTHORIZE_LAUNCHER = ROOT / "infra" / "deploy" / "authorize_image_release.sh"
+CODEBUILD = MODULE_PATH.parent
+
+if str(CODEBUILD) not in sys.path:
+    sys.path.insert(0, str(CODEBUILD))
 
 
 def _load_module() -> Any:
@@ -31,6 +36,12 @@ COMMIT = "1" * 40
 CONTRACT_SHA256 = "6" * 64
 BUILD_CONTEXT_SHA256 = "7" * 64
 KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/12345678-1234-1234-1234-123456789abc"
+APPROVAL_KEY_ARN = (
+    "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-1111-4111-8111-111111111111"
+)
+APPROVAL_ENCRYPTION_KEY_ARN = (
+    "arn:aws:kms:ap-northeast-1:718959508629:key/22222222-2222-4222-8222-222222222222"
+)
 NOW = dt.datetime(2026, 7, 17, 6, 0, tzinfo=dt.UTC)
 APP_HTML_VERSION_ID = "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
 APP_HTML_SHA256 = "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
@@ -44,21 +55,215 @@ EMPTY_SHARED_LEDGER_SHA256 = hashlib.sha256(EVIDENCE.canonical_bytes({})).hexdig
 EMPTY_TRANSITION_SHA256 = hashlib.sha256(
     EVIDENCE.canonical_bytes({"delete": [], "replace": []})
 ).hexdigest()
+APPROVAL_PAYLOAD_SHA256 = "8" * 64
+APPROVAL_SIGNATURE_SHA256 = "9" * 64
+FORCED_GATE_SHA256 = "a" * 64
+
+
+def _approval_evidence(*, commit: str = COMMIT) -> dict[str, Any]:
+    key = f"approval-records/mcp/{commit}/{APPROVAL_PAYLOAD_SHA256}.json"
+    return {
+        "payload": {
+            "bucket": EVIDENCE.EVIDENCE_BUCKET,
+            "key": key,
+            "version_id": "approval-payload-version-1",
+            "sha256": APPROVAL_PAYLOAD_SHA256,
+        },
+        "signature": {
+            "bucket": EVIDENCE.EVIDENCE_BUCKET,
+            "key": f"{key}.sig",
+            "version_id": "approval-signature-version-1",
+            "sha256": APPROVAL_SIGNATURE_SHA256,
+        },
+        "approval_payload_sha256": APPROVAL_PAYLOAD_SHA256,
+        "forced_gate_sha256": FORCED_GATE_SHA256,
+    }
+
+
+APPROVAL_OBSERVATIONS = {
+    "core.base.builder.arm64.digest": f"sha256:{'1' * 64}",
+    "core.binary.python.sha256": "2" * 64,
+    "media.binary.chromium.sha256": "3" * 64,
+    "media.binary.ffmpeg.sha256": "4" * 64,
+    "media.binary.node.sha256": "5" * 64,
+    "media.binary.python.sha256": "6" * 64,
+}
+
+
+def _external_approval_payload(
+    *,
+    commit: str,
+    tree_oid: str,
+    inner_sha256: str,
+    outer_sha256: str,
+    expires_at: str = "2026-07-17T07:00:00Z",
+    state: str = "PASSED",
+    observations: Mapping[str, str] = APPROVAL_OBSERVATIONS,
+) -> dict[str, Any]:
+    if state == "PASSED":
+        forced_gate = {
+            "gate_version": 1,
+            "state": state,
+            "drill_manifest": {
+                "payload": {
+                    "bucket": EVIDENCE.EVIDENCE_BUCKET,
+                    "key": "forced-rollback/manifests/drill-1.json",
+                    "version_id": "drill-payload-version-1",
+                    "sha256": "b" * 64,
+                },
+                "signature": {
+                    "key": "forced-rollback/manifests/drill-1.json.sig",
+                    "version_id": "drill-signature-version-1",
+                    "sha256": "c" * 64,
+                },
+                "kms_key_arn": KEY_ARN,
+                "signing_algorithm": "RSASSA_PSS_SHA_256",
+            },
+        }
+    else:
+        forced_gate = {
+            "gate_version": 1,
+            "state": state,
+            "provisional_campaign": {
+                "campaign_id": "initial-cutover-r1-r2",
+                "phase": "R1",
+                "payload_version_id": "campaign-payload-version-1",
+                "payload_sha256": "d" * 64,
+                "signature_version_id": "campaign-signature-version-1",
+                "kms_key_arn": KEY_ARN,
+                "expires_at_utc": "2026-07-17T06:30:00Z",
+            },
+        }
+    return {
+        "schema_version": 1,
+        "kind": "teamagent.core-media-release-approval",
+        "approval_id": "11111111-1111-4111-8111-111111111111",
+        "pipeline": "mcp",
+        "environment": "dev",
+        "approved_at_utc": "2026-07-17T05:00:00Z",
+        "expires_at_utc": expires_at,
+        "approved_by": EVIDENCE.APPROVAL_APPROVED_BY_ARN,
+        "source_commit": commit,
+        "source_tree_oid": tree_oid,
+        "contracts": {
+            "inner": {"schema_version": 5, "raw_sha256": inner_sha256},
+            "outer": {"schema_version": 3, "raw_sha256": outer_sha256},
+        },
+        "observations": [
+            {
+                "key": key,
+                "value": value,
+                "observed_at_utc": "2026-07-17T04:00:00Z",
+                "source": f"contract://immutable/{key}",
+            }
+            for key, value in observations.items()
+        ],
+        "decision": "APPROVED: exact release evidence matched",
+        "gates": {"forced_rollback_evidence": forced_gate},
+        "approval_authority": {
+            "publisher_project_arn": EVIDENCE.APPROVAL_PUBLISHER_PROJECT_ARN,
+            "publisher_build_id": (
+                "teamagent-dev-approval-publisher:11111111-1111-4111-8111-111111111111"
+            ),
+            "kms_key_arn": APPROVAL_KEY_ARN,
+        },
+    }
+
+
+def _install_approval_aws_fake(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    payload: dict[str, Any],
+    expected_locator_commit: str,
+    wrong_head_version: bool = False,
+    non_compliance: bool = False,
+    tamper_payload: bool = False,
+    noncanonical_payload: bool = False,
+    tamper_signature: bool = False,
+    signature_valid: bool = True,
+    retention_until: str = "2036-07-18T00:00:00+00:00",
+    signature_retention_until: str | None = None,
+    mock_observations: bool = True,
+) -> tuple[dict[str, Any], bytes]:
+    canonical_payload_bytes = EVIDENCE.approval_canonical_json_bytes(payload)
+    payload_bytes = (
+        (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
+        if noncanonical_payload
+        else canonical_payload_bytes
+    )
+    signature_bytes = b"test-approval-signature"
+    payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+    signature_sha256 = hashlib.sha256(signature_bytes).hexdigest()
+    payload_key = f"approval-records/mcp/{expected_locator_commit}/{payload_sha256}.json"
+    payload_version = "approval-payload-version-1"
+    signature_version = "approval-signature-version-1"
+    locators = {
+        "mcp": {
+            "payload": {
+                "bucket": EVIDENCE.EVIDENCE_BUCKET,
+                "key": payload_key,
+                "version_id": payload_version,
+                "sha256": payload_sha256,
+            },
+            "signature": {
+                "bucket": EVIDENCE.EVIDENCE_BUCKET,
+                "key": f"{payload_key}.sig",
+                "version_id": signature_version,
+                "sha256": signature_sha256,
+            },
+        }
+    }
+
+    def fake_aws(*arguments: str, output: Path | None = None) -> str:
+        if arguments[:2] == ("s3api", "head-object"):
+            object_key = arguments[arguments.index("--key") + 1]
+            expected_version = signature_version if object_key.endswith(".sig") else payload_version
+            return json.dumps(
+                {
+                    "VersionId": ("wrong-version" if wrong_head_version else expected_version),
+                    "ObjectLockMode": ("GOVERNANCE" if non_compliance else "COMPLIANCE"),
+                    "ObjectLockRetainUntilDate": (
+                        signature_retention_until
+                        if object_key.endswith(".sig") and signature_retention_until is not None
+                        else retention_until
+                    ),
+                    "ServerSideEncryption": "aws:kms",
+                    "SSEKMSKeyId": APPROVAL_ENCRYPTION_KEY_ARN,
+                }
+            )
+        if arguments[:2] == ("s3api", "get-object"):
+            assert output is not None
+            object_key = arguments[arguments.index("--key") + 1]
+            if object_key.endswith(".sig"):
+                output.write_bytes(signature_bytes + (b"-tampered" if tamper_signature else b""))
+                return signature_version
+            output.write_bytes(payload_bytes + (b" " if tamper_payload else b""))
+            return payload_version
+        if arguments[:2] == ("kms", "verify"):
+            digest_path = Path(arguments[arguments.index("--message") + 1].removeprefix("fileb://"))
+            signature_path = Path(
+                arguments[arguments.index("--signature") + 1].removeprefix("fileb://")
+            )
+            assert digest_path.read_bytes() == hashlib.sha256(payload_bytes).digest()
+            assert signature_path.read_bytes() == signature_bytes
+            return json.dumps({"SignatureValid": signature_valid})
+        raise AssertionError(f"unexpected AWS fake call: {arguments[:2]}")
+
+    monkeypatch.setattr(EVIDENCE, "_aws", fake_aws)
+    if mock_observations:
+        monkeypatch.setattr(
+            EVIDENCE,
+            "_approval_observation_values",
+            lambda *_: dict(APPROVAL_OBSERVATIONS),
+        )
+    return locators, payload_bytes
 
 
 def test_release_authorizer_contract_mapping_matches_the_evidence_pipeline_map() -> None:
     body = AUTHORIZE_LAUNCHER.read_text(encoding="utf-8")
-    launcher_mapping = dict(
-        re.findall(
-            r'^\s*(mcp|tiktok|openclaw)\) CONTRACT="\$CONTROL_ROOT/([^"]+)" ;;$',
-            body,
-            re.MULTILINE,
-        )
-    )
-
-    assert launcher_mapping == {
-        pipeline: definition["contract_path"] for pipeline, definition in EVIDENCE.PIPELINES.items()
-    }
+    assert set(EVIDENCE.PIPELINES) == {"mcp", "tiktok", "openclaw"}
+    for definition in EVIDENCE.PIPELINES.values():
+        assert f'CONTRACT="$CONTROL_ROOT/{definition["contract_path"]}"' in body
 
 
 def _hex(label: str) -> str:
@@ -149,6 +354,7 @@ def _subject(name: str, *, channel: str) -> dict[str, Any]:
         "io.teamagent.build.release-contract-sha256": CONTRACT_SHA256,
         "io.teamagent.build.app-provenance-sha256": APPLICATION_BINDING,
         "io.teamagent.build.context-sha256": BUILD_CONTEXT_SHA256,
+        "io.teamagent.build.release-approval-sha256": APPROVAL_PAYLOAD_SHA256,
     }
     if name == "core":
         labels.update(
@@ -234,6 +440,7 @@ def _receipt(*, channel: str = "verified-candidate") -> dict[str, Any]:
             "signature_key": (f"source-declarations/mcp/{COMMIT}/{'7' * 64}.json.sig"),
             "signature_version_id": "source-signature-version-1",
         },
+        "approval_evidence": _approval_evidence(),
         "subjects": [
             _subject("core", channel=channel),
             _subject("media", channel=channel),
@@ -241,10 +448,37 @@ def _receipt(*, channel: str = "verified-candidate") -> dict[str, Any]:
     }
 
 
-def test_source_declaration_binds_independent_project_source_version_commit_and_app() -> None:
+def _legacy_tiktok_receipt() -> dict[str, Any]:
+    receipt = _receipt()
+    receipt["schema_version"] = 2
+    receipt["pipeline"] = "tiktok"
+    del receipt["approval_evidence"]
+    receipt["build"]["project_arn"] = (
+        "arn:aws:codebuild:ap-northeast-1:718959508629:project/teamagent-dev-tiktok-image-builder"
+    )
+    receipt["contract"]["path"] = "infra/codebuild/tiktok_release_contract.json"
+    source_key = f"source-manifests/tiktok/{COMMIT}/{'7' * 64}.json"
+    receipt["source_evidence"]["key"] = source_key
+    receipt["source_evidence"]["signature_key"] = f"{source_key}.sig"
+    subject = receipt["subjects"][0]
+    subject["name"] = "tiktok"
+    subject["quarantine_repository"] = "teamagent-dev-tiktok-acquire-quarantine"
+    subject["candidate_repository"] = "teamagent-dev-tiktok-acquire-verified-candidates"
+    subject["release_repository"] = "teamagent-dev-tiktok-acquire"
+    subject["candidate_tag"] = COMMIT
+    subject["release_tag"] = f"verified-{COMMIT}"
+    subject["labels"]["io.teamagent.build.contract-sha256"] = CONTRACT_SHA256
+    subject["scan"]["actual_image"] = (
+        f"{EVIDENCE.REGISTRY}/teamagent-dev-tiktok-acquire-quarantine@{subject['digest']}"
+    )
+    receipt["subjects"] = [subject]
+    return receipt
+
+
+def _source_declaration() -> dict[str, Any]:
     publisher_build_id = "teamagent-dev-mcp-source-publisher:1234"
     context_key = f"source-contexts/mcp/{COMMIT}/{'4' * 64}/{publisher_build_id}.tar"
-    declaration = EVIDENCE.source_declaration(
+    return EVIDENCE.source_declaration(
         project_arn=(
             "arn:aws:codebuild:ap-northeast-1:718959508629:"
             "project/teamagent-dev-mcp-source-publisher"
@@ -266,7 +500,12 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
         vault_manifest_sha256=VAULT_MANIFEST_SHA256,
         build_inputs_sha256=BUILD_INPUTS_SHA256,
         contract_sha256=CONTRACT_SHA256,
+        approval_evidence=_approval_evidence(),
     )
+
+
+def test_source_declaration_binds_independent_project_source_version_commit_and_app() -> None:
+    declaration = _source_declaration()
 
     EVIDENCE.validate_source_declaration(
         declaration,
@@ -334,6 +573,49 @@ def test_source_declaration_binds_independent_project_source_version_commit_and_
             )
 
 
+def test_source_declaration_v5_requires_exact_approval_evidence() -> None:
+    declaration = _source_declaration()
+    assert declaration["schema_version"] == 5
+
+    old = copy.deepcopy(declaration)
+    old["schema_version"] = 4
+    with pytest.raises(EVIDENCE.EvidenceError, match="unsupported source declaration schema"):
+        EVIDENCE.validate_source_declaration(old)
+
+    missing = copy.deepcopy(declaration)
+    del missing["approval_evidence"]
+    with pytest.raises(EVIDENCE.EvidenceError, match="schema mismatch"):
+        EVIDENCE.validate_source_declaration(missing)
+
+    inconsistent = copy.deepcopy(declaration)
+    inconsistent["approval_evidence"]["approval_payload_sha256"] = "f" * 64
+    with pytest.raises(EVIDENCE.EvidenceError, match="inconsistent"):
+        EVIDENCE.validate_source_declaration(inconsistent)
+
+
+def test_source_approval_binding_returns_tree_and_rejects_locator_substitution() -> None:
+    declaration = _source_declaration()
+    assert (
+        EVIDENCE.verify_source_approval_binding(
+            declaration,
+            expected_commit=COMMIT,
+            expected_contract_sha256=CONTRACT_SHA256,
+            expected_approval_evidence=_approval_evidence(),
+        )
+        == "5" * 40
+    )
+
+    substituted = _approval_evidence()
+    substituted["signature"]["sha256"] = "f" * 64
+    with pytest.raises(EVIDENCE.EvidenceError, match="approval evidence mismatch"):
+        EVIDENCE.verify_source_approval_binding(
+            declaration,
+            expected_commit=COMMIT,
+            expected_contract_sha256=CONTRACT_SHA256,
+            expected_approval_evidence=substituted,
+        )
+
+
 def test_mcp_app_anchors_are_loaded_from_the_embedded_release_contract() -> None:
     helper = MODULE_PATH.read_text(encoding="utf-8")
     attestor = (ROOT / "infra" / "codebuild" / "image-attestor-buildspec.yml").read_text(
@@ -367,6 +649,427 @@ def test_verified_receipt_requires_exact_actual_image_evidence() -> None:
         allowed_channels={"verified-candidate"},
         now=NOW,
     )
+
+
+def test_mcp_receipt_v3_requires_approval_while_non_mcp_v2_remains_legacy() -> None:
+    receipt = _receipt()
+    assert receipt["schema_version"] == 3
+    EVIDENCE.validate_release_receipt(
+        receipt,
+        expected_pipeline="mcp",
+        expected_commit=COMMIT,
+        expected_contract_sha256=CONTRACT_SHA256,
+        allowed_channels={"verified-candidate"},
+        now=NOW,
+    )
+
+    old_mcp = copy.deepcopy(receipt)
+    old_mcp["schema_version"] = 2
+    with pytest.raises(EVIDENCE.EvidenceError, match="unsupported release receipt schema"):
+        EVIDENCE.validate_release_receipt(old_mcp, now=NOW)
+
+    missing = copy.deepcopy(receipt)
+    del missing["approval_evidence"]
+    with pytest.raises(EVIDENCE.EvidenceError, match="schema mismatch"):
+        EVIDENCE.validate_release_receipt(missing, now=NOW)
+
+    legacy = _legacy_tiktok_receipt()
+    EVIDENCE.validate_release_receipt(
+        legacy,
+        expected_pipeline="tiktok",
+        expected_commit=COMMIT,
+        expected_contract_sha256=CONTRACT_SHA256,
+        allowed_channels={"verified-candidate"},
+        now=NOW,
+    )
+    assert EVIDENCE.release_receipt_schema_for_pipeline("mcp") == 3
+    assert EVIDENCE.release_receipt_schema_for_pipeline("tiktok") == 2
+    assert EVIDENCE.release_receipt_schema_for_pipeline("openclaw") == 2
+
+    legacy_with_approval = copy.deepcopy(legacy)
+    legacy_with_approval["approval_evidence"] = _approval_evidence()
+    with pytest.raises(EVIDENCE.EvidenceError, match="schema mismatch"):
+        EVIDENCE.validate_release_receipt(legacy_with_approval, now=NOW)
+
+
+def test_mcp_receipt_rejects_image_approval_label_drift() -> None:
+    receipt = _receipt()
+    receipt["subjects"][0]["labels"][
+        "io.teamagent.build.release-approval-sha256"
+    ] = "f" * 64
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="approval label"):
+        EVIDENCE.validate_release_receipt(
+            receipt,
+            expected_pipeline="mcp",
+            expected_commit=COMMIT,
+            expected_contract_sha256=CONTRACT_SHA256,
+            allowed_channels={"verified-candidate"},
+            now=NOW,
+        )
+
+
+def _approval_contract_paths(tmp_path: Path) -> tuple[Path, Path, str, str]:
+    runtime_contract = tmp_path / "teamagent_runtime_contract.json"
+    contract = tmp_path / "teamagent_core_media_release_contract.json"
+    runtime_contract.write_bytes(b'{"test":"inner-v5"}\n')
+    contract.write_bytes(b'{"test":"outer-v3"}\n')
+    return (
+        runtime_contract,
+        contract,
+        hashlib.sha256(runtime_contract.read_bytes()).hexdigest(),
+        hashlib.sha256(contract.read_bytes()).hexdigest(),
+    )
+
+
+def test_assert_approved_release_fetches_and_verifies_exact_immutable_objects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    tree_oid = "2" * 40
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid=tree_oid,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+    )
+    locators, payload_bytes = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+    )
+
+    evidence = EVIDENCE.assert_approved_release(
+        operation="build",
+        approval_locators=locators,
+        approval_signing_key_arn=APPROVAL_KEY_ARN,
+        approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+        expected_commit=COMMIT,
+        expected_tree_oid=tree_oid,
+        expected_inner_sha256=inner_sha256,
+        expected_outer_sha256=outer_sha256,
+        expected_pipeline="mcp",
+        expected_environment="dev",
+        runtime_contract_path=runtime_contract,
+        contract_path=contract,
+        now=NOW,
+    )
+
+    assert evidence["payload"] == locators["mcp"]["payload"]
+    assert evidence["signature"] == locators["mcp"]["signature"]
+    assert evidence["approval_payload_sha256"] == hashlib.sha256(payload_bytes).hexdigest()
+    assert (
+        evidence["forced_gate_sha256"]
+        == hashlib.sha256(
+            EVIDENCE.approval_canonical_json_bytes(payload["gates"]["forced_rollback_evidence"])
+        ).hexdigest()
+    )
+
+
+def test_assert_approved_release_cli_prints_canonical_approval_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    tree_oid = "2" * 40
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid=tree_oid,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+    )
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+    )
+
+    result = EVIDENCE.main(
+        [
+            "assert-approved-release",
+            "--operation",
+            "build",
+            "--approval-locators-json",
+            json.dumps(locators),
+            "--approval-signing-key-arn",
+            APPROVAL_KEY_ARN,
+            "--approval-encryption-key-arn",
+            APPROVAL_ENCRYPTION_KEY_ARN,
+            "--expected-commit",
+            COMMIT,
+            "--expected-tree-oid",
+            tree_oid,
+            "--expected-inner-sha256",
+            inner_sha256,
+            "--expected-outer-sha256",
+            outer_sha256,
+            "--expected-pipeline",
+            "mcp",
+            "--expected-environment",
+            "dev",
+            "--runtime-contract",
+            str(runtime_contract),
+            "--contract",
+            str(contract),
+            "--now",
+            "2026-07-17T06:00:00Z",
+        ]
+    )
+
+    assert result == 0
+    output = capsys.readouterr().out
+    assert output == (
+        json.dumps(
+            json.loads(output),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    assert json.loads(output)["payload"] == locators["mcp"]["payload"]
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing", "approval locators schema mismatch"),
+        ("expired", "approval is expired"),
+        ("tampered", "raw SHA-256 mismatch"),
+        ("noncanonical", "bytes are not canonical"),
+        ("wrong-version", "not immutable exact approval evidence"),
+        ("wrong-key", "approval_authority mismatch"),
+        ("non-compliance", "not immutable exact approval evidence"),
+        ("retention-short", "shorter than 3650 days"),
+        ("retention-mismatch", "retention differ"),
+        ("signature-tampered", "raw SHA-256 mismatch"),
+        ("signature-invalid", "KMS signature is invalid"),
+    ],
+)
+def test_assert_approved_release_fails_closed(
+    case: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    tree_oid = "2" * 40
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid=tree_oid,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+        expires_at=("2026-07-17T05:30:00Z" if case == "expired" else "2026-07-17T07:00:00Z"),
+    )
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+        wrong_head_version=case == "wrong-version",
+        non_compliance=case == "non-compliance",
+        tamper_payload=case == "tampered",
+        noncanonical_payload=case == "noncanonical",
+        tamper_signature=case == "signature-tampered",
+        signature_valid=case != "signature-invalid",
+        retention_until=(
+            "2026-08-01T00:00:00+00:00"
+            if case == "retention-short"
+            else "2036-07-18T00:00:00+00:00"
+        ),
+        signature_retention_until=(
+            "2036-07-19T00:00:00+00:00" if case == "retention-mismatch" else None
+        ),
+    )
+    signing_key_arn = (
+        "arn:aws:kms:ap-northeast-1:718959508629:key/33333333-3333-4333-8333-333333333333"
+        if case == "wrong-key"
+        else APPROVAL_KEY_ARN
+    )
+
+    with pytest.raises(EVIDENCE.EvidenceError, match=message):
+        EVIDENCE.assert_approved_release(
+            operation="build",
+            approval_locators={} if case == "missing" else locators,
+            approval_signing_key_arn=signing_key_arn,
+            approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+            expected_commit=COMMIT,
+            expected_tree_oid=tree_oid,
+            expected_inner_sha256=inner_sha256,
+            expected_outer_sha256=outer_sha256,
+            expected_pipeline="mcp",
+            expected_environment="dev",
+            runtime_contract_path=runtime_contract,
+            contract_path=contract,
+            now=NOW,
+        )
+
+
+def test_drill_operation_requires_provisional_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid="2" * 40,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+    )
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="forced rollback state mismatch"):
+        EVIDENCE.assert_approved_release(
+            operation="drill",
+            approval_locators=locators,
+            approval_signing_key_arn=APPROVAL_KEY_ARN,
+            approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+            expected_commit=COMMIT,
+            expected_tree_oid="2" * 40,
+            expected_inner_sha256=inner_sha256,
+            expected_outer_sha256=outer_sha256,
+            expected_pipeline="mcp",
+            expected_environment="dev",
+            runtime_contract_path=runtime_contract,
+            contract_path=contract,
+            now=NOW,
+        )
+
+
+def test_real_git_commit_tree_external_approval_and_fake_transport_e2e(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    codebuild = repository / "infra" / "codebuild"
+    codebuild.mkdir(parents=True)
+    runtime_contract = codebuild / "teamagent_runtime_contract.json"
+    contract = codebuild / "teamagent_core_media_release_contract.json"
+    runtime_contract.write_bytes((CODEBUILD / "teamagent_runtime_contract.json").read_bytes())
+    contract.write_bytes((CODEBUILD / "teamagent_core_media_release_contract.json").read_bytes())
+    (repository / "README.md").write_text("release fixture\n", encoding="utf-8")
+
+    def git(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "release-evidence@example.invalid")
+    git("config", "user.name", "Release Evidence Fixture")
+    git("add", ".")
+    git("commit", "-q", "-m", "contract v5 v3")
+    commit = git("rev-parse", "HEAD")
+    tree_oid = git("rev-parse", f"{commit}^{{tree}}")
+    inner_sha256 = hashlib.sha256(
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "show",
+                f"{commit}:infra/codebuild/teamagent_runtime_contract.json",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+    ).hexdigest()
+    outer_sha256 = hashlib.sha256(
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repository),
+                "show",
+                f"{commit}:infra/codebuild/teamagent_core_media_release_contract.json",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+    ).hexdigest()
+    payload = _external_approval_payload(
+        commit=commit,
+        tree_oid=tree_oid,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+        observations=EVIDENCE._approval_observation_values(
+            runtime_contract,
+            contract,
+        ),
+    )
+    raw_payload = EVIDENCE.approval_canonical_json_bytes(payload)
+    external_approval = tmp_path / "external-approval.json"
+    external_approval.write_bytes(raw_payload)
+    assert repository not in external_approval.parents
+    assert git("rev-parse", "HEAD") == commit
+    assert git("rev-parse", "HEAD^{tree}") == tree_oid
+    assert (
+        "external-approval.json"
+        not in git(
+            "ls-tree",
+            "-r",
+            "--name-only",
+            commit,
+        ).splitlines()
+    )
+
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=commit,
+        mock_observations=False,
+    )
+    result = EVIDENCE.assert_approved_release(
+        operation="build",
+        approval_locators=locators,
+        approval_signing_key_arn=APPROVAL_KEY_ARN,
+        approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+        expected_commit=commit,
+        expected_tree_oid=tree_oid,
+        expected_inner_sha256=inner_sha256,
+        expected_outer_sha256=outer_sha256,
+        expected_pipeline="mcp",
+        expected_environment="dev",
+        runtime_contract_path=runtime_contract,
+        contract_path=contract,
+        now=NOW,
+    )
+    assert result["approval_payload_sha256"] == hashlib.sha256(raw_payload).hexdigest()
+
+    (repository / "README.md").write_text("unrelated second commit\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-q", "-m", "unrelated code change")
+    second_commit = git("rev-parse", "HEAD")
+    second_tree_oid = git("rev-parse", "HEAD^{tree}")
+    second_locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=second_commit,
+        mock_observations=False,
+    )
+    with pytest.raises(EVIDENCE.EvidenceError, match="source_commit mismatch"):
+        EVIDENCE.assert_approved_release(
+            operation="build",
+            approval_locators=second_locators,
+            approval_signing_key_arn=APPROVAL_KEY_ARN,
+            approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+            expected_commit=second_commit,
+            expected_tree_oid=second_tree_oid,
+            expected_inner_sha256=inner_sha256,
+            expected_outer_sha256=outer_sha256,
+            expected_pipeline="mcp",
+            expected_environment="dev",
+            runtime_contract_path=runtime_contract,
+            contract_path=contract,
+            now=NOW,
+        )
 
 
 def test_verified_candidate_locator_remains_re_attestable_after_thirty_days() -> None:

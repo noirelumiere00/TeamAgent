@@ -456,31 +456,41 @@ locals {
   )
   image_builder_buildspec_4 = replace(
     local.image_builder_buildspec_3,
-    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
-    aws_kms_key.mcp_source_publisher_signing.arn,
+    "__TEAMAGENT_SCHEMA_VERSIONS_SHA256__",
+    filesha256("${path.module}/../codebuild/teamagent_schema_versions.py"),
   )
   image_builder_buildspec_5 = replace(
     local.image_builder_buildspec_4,
-    "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
-    aws_kms_key.image_release_evidence.arn,
+    "__TEAMAGENT_RELEASE_APPROVAL_SHA256__",
+    filesha256("${path.module}/../codebuild/teamagent_release_approval.py"),
   )
   image_builder_buildspec_6 = replace(
     local.image_builder_buildspec_5,
-    "__ECR_IMAGE_RESOLVER_SHA256__",
-    filesha256("${path.module}/../codebuild/resolve_ecr_image.py"),
+    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
+    aws_kms_key.mcp_source_publisher_signing.arn,
   )
   image_builder_buildspec_7 = replace(
     local.image_builder_buildspec_6,
-    "__ECR_SCAN_GATE_SHA256__",
-    filesha256("${path.module}/../codebuild/verify_ecr_scan.py"),
+    "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
+    aws_kms_key.image_release_evidence.arn,
   )
   image_builder_buildspec_8 = replace(
     local.image_builder_buildspec_7,
+    "__ECR_IMAGE_RESOLVER_SHA256__",
+    filesha256("${path.module}/../codebuild/resolve_ecr_image.py"),
+  )
+  image_builder_buildspec_9 = replace(
+    local.image_builder_buildspec_8,
+    "__ECR_SCAN_GATE_SHA256__",
+    filesha256("${path.module}/../codebuild/verify_ecr_scan.py"),
+  )
+  image_builder_buildspec_10 = replace(
+    local.image_builder_buildspec_9,
     "__MCP_RELEASE_CONTRACT_SHA256__",
     local.mcp_release_contract_sha256,
   )
   image_builder_buildspec = replace(
-    local.image_builder_buildspec_8,
+    local.image_builder_buildspec_10,
     "__SOURCE_MANIFEST_CONTRACT_SHA256__",
     local.runtime_contract_sha256,
   )
@@ -2957,21 +2967,31 @@ locals {
   )
   mcp_source_publisher_buildspec_4 = replace(
     local.mcp_source_publisher_buildspec_3,
-    "__SOURCE_MANIFEST_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+    "__TEAMAGENT_SCHEMA_VERSIONS_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_schema_versions.py"),
   )
   mcp_source_publisher_buildspec_5 = replace(
     local.mcp_source_publisher_buildspec_4,
-    "__MCP_RELEASE_CONTRACT_BASE64__",
-    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
+    "__TEAMAGENT_RELEASE_APPROVAL_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_release_approval.py"),
   )
   mcp_source_publisher_buildspec_6 = replace(
     local.mcp_source_publisher_buildspec_5,
+    "__SOURCE_MANIFEST_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+  )
+  mcp_source_publisher_buildspec_7 = replace(
+    local.mcp_source_publisher_buildspec_6,
+    "__MCP_RELEASE_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
+  )
+  mcp_source_publisher_buildspec_8 = replace(
+    local.mcp_source_publisher_buildspec_7,
     "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
     aws_kms_key.mcp_source_publisher_signing.arn,
   )
   mcp_source_publisher_buildspec = replace(
-    local.mcp_source_publisher_buildspec_6,
+    local.mcp_source_publisher_buildspec_8,
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
@@ -2983,80 +3003,90 @@ locals {
   )
   image_attestor_buildspec_2 = replace(
     local.image_attestor_buildspec_1,
+    "__TEAMAGENT_SCHEMA_VERSIONS_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_schema_versions.py"),
+  )
+  image_attestor_buildspec_3 = replace(
+    local.image_attestor_buildspec_2,
+    "__TEAMAGENT_RELEASE_APPROVAL_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_release_approval.py"),
+  )
+  image_attestor_buildspec_4 = replace(
+    local.image_attestor_buildspec_3,
     "__ACTUAL_IMAGE_EVIDENCE_BASE64__",
     filebase64("${path.module}/../codebuild/actual_image_evidence.py"),
   )
-  image_attestor_buildspec_3 = replace(
+  image_attestor_buildspec_5 = replace(
     replace(
-      local.image_attestor_buildspec_2,
+      local.image_attestor_buildspec_4,
       "__SOURCE_PROVENANCE_BASE64__",
       filebase64("${path.module}/../codebuild/source_provenance.py"),
     ),
     "__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__",
     filebase64("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
   )
-  image_attestor_buildspec_4 = replace(
-    local.image_attestor_buildspec_3,
+  image_attestor_buildspec_6 = replace(
+    local.image_attestor_buildspec_5,
     "__OPENCLAW_PROVENANCE_BASE64__",
     filebase64("${path.module}/../codebuild/openclaw_provenance.py"),
   )
-  image_attestor_buildspec_5 = replace(
-    local.image_attestor_buildspec_4,
+  image_attestor_buildspec_7 = replace(
+    local.image_attestor_buildspec_6,
     "__TIKTOK_SOURCE_PROVENANCE_BASE64__",
     filebase64("${path.module}/../codebuild/tiktok_source_provenance.py"),
   )
-  image_attestor_buildspec_6 = replace(
-    local.image_attestor_buildspec_5,
+  image_attestor_buildspec_8 = replace(
+    local.image_attestor_buildspec_7,
     "__VERIFY_ACTUAL_IMAGE_BASE64__",
     filebase64("${path.module}/../codebuild/verify_actual_image.sh"),
   )
-  image_attestor_buildspec_7 = replace(
-    local.image_attestor_buildspec_6,
+  image_attestor_buildspec_9 = replace(
+    local.image_attestor_buildspec_8,
     "__MCP_RUNTIME_CONTRACT_BASE64__",
     filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
   )
-  image_attestor_buildspec_8 = replace(
-    local.image_attestor_buildspec_7,
+  image_attestor_buildspec_10 = replace(
+    local.image_attestor_buildspec_9,
     "__MCP_CONTRACT_BASE64__",
     filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
   )
-  image_attestor_buildspec_9 = replace(
-    local.image_attestor_buildspec_8,
+  image_attestor_buildspec_11 = replace(
+    local.image_attestor_buildspec_10,
     "__TIKTOK_CONTRACT_BASE64__",
     filebase64("${path.module}/../codebuild/tiktok_release_contract.json"),
   )
-  image_attestor_buildspec_10 = replace(
-    local.image_attestor_buildspec_9,
+  image_attestor_buildspec_12 = replace(
+    local.image_attestor_buildspec_11,
     "__OPENCLAW_CONTRACT_BASE64__",
     filebase64("${path.module}/../codebuild/openclaw_bundle_contract.json"),
   )
-  image_attestor_buildspec_11 = replace(
-    local.image_attestor_buildspec_10,
+  image_attestor_buildspec_13 = replace(
+    local.image_attestor_buildspec_12,
     "__ATTESTOR_SIGNING_KEY_ARN__",
     aws_kms_key.image_attestor_signing.arn,
   )
-  image_attestor_buildspec_12 = replace(
-    local.image_attestor_buildspec_11,
+  image_attestor_buildspec_14 = replace(
+    local.image_attestor_buildspec_13,
     "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
     aws_kms_key.mcp_source_publisher_signing.arn,
   )
-  image_attestor_buildspec_13 = replace(
-    local.image_attestor_buildspec_12,
+  image_attestor_buildspec_15 = replace(
+    local.image_attestor_buildspec_14,
     "__TIKTOK_SOURCE_SIGNING_KEY_ARN__",
     aws_kms_key.tiktok_source_publisher_signing.arn,
   )
-  image_attestor_buildspec_14 = replace(
-    local.image_attestor_buildspec_13,
+  image_attestor_buildspec_16 = replace(
+    local.image_attestor_buildspec_15,
     "__OPENCLAW_SIGNING_KMS_KEY_ARN__",
     aws_kms_key.openclaw_publisher_signing.arn,
   )
-  image_attestor_buildspec_15 = replace(
-    local.image_attestor_buildspec_14,
+  image_attestor_buildspec_17 = replace(
+    local.image_attestor_buildspec_16,
     "__OPENCLAW_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.openclaw_evidence.arn,
   )
   image_attestor_buildspec = replace(
-    local.image_attestor_buildspec_15,
+    local.image_attestor_buildspec_17,
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )
@@ -3068,11 +3098,41 @@ locals {
   )
   image_promoter_buildspec_2 = replace(
     local.image_promoter_buildspec_1,
+    "__TEAMAGENT_SCHEMA_VERSIONS_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_schema_versions.py"),
+  )
+  image_promoter_buildspec_3 = replace(
+    local.image_promoter_buildspec_2,
+    "__TEAMAGENT_RELEASE_APPROVAL_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_release_approval.py"),
+  )
+  image_promoter_buildspec_4 = replace(
+    local.image_promoter_buildspec_3,
+    "__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_bundle_provenance.py"),
+  )
+  image_promoter_buildspec_5 = replace(
+    local.image_promoter_buildspec_4,
+    "__MCP_RUNTIME_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_runtime_contract.json"),
+  )
+  image_promoter_buildspec_6 = replace(
+    local.image_promoter_buildspec_5,
+    "__MCP_CONTRACT_BASE64__",
+    filebase64("${path.module}/../codebuild/teamagent_core_media_release_contract.json"),
+  )
+  image_promoter_buildspec_7 = replace(
+    local.image_promoter_buildspec_6,
+    "__SOURCE_PUBLISHER_SIGNING_KEY_ARN__",
+    aws_kms_key.mcp_source_publisher_signing.arn,
+  )
+  image_promoter_buildspec_8 = replace(
+    local.image_promoter_buildspec_7,
     "__ATTESTOR_SIGNING_KEY_ARN__",
     aws_kms_key.image_attestor_signing.arn,
   )
   image_promoter_buildspec = replace(
-    local.image_promoter_buildspec_2,
+    local.image_promoter_buildspec_8,
     "__RELEASE_EVIDENCE_KMS_KEY_ARN__",
     aws_kms_key.image_release_evidence.arn,
   )

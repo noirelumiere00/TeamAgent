@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "codebuild" / "teamagent_schema_versions.py"
+CODEBUILD = MODULE_PATH.parent
+INNER_CONTRACT = CODEBUILD / "teamagent_runtime_contract.json"
+OUTER_CONTRACT = CODEBUILD / "teamagent_core_media_release_contract.json"
+
+if str(CODEBUILD) not in sys.path:
+    sys.path.insert(0, str(CODEBUILD))
 
 
 def _load_module() -> Any:
@@ -24,6 +31,19 @@ def _load_module() -> Any:
 
 
 VERSIONS = _load_module()
+
+
+def _load_consumer(name: str) -> Any:
+    path = CODEBUILD / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(
+        f"{name}_schema_version_integration_under_test",
+        path,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_schema_version_tuple_is_complete_and_exact() -> None:
@@ -46,6 +66,26 @@ def test_atomic_release_schema_tuple_matches_the_authority() -> None:
 
     assert VERSIONS.ATOMIC_RELEASE_SCHEMA_TUPLE == expected == (5, 3, 5, 3)
     assert VERSIONS.validate_atomic_release_schema_tuple(expected) is expected
+
+
+def test_live_release_chain_consumers_use_the_atomic_version_authority() -> None:
+    source = _load_consumer("source_provenance")
+    bundle = _load_consumer("teamagent_bundle_provenance")
+    evidence = _load_consumer("release_evidence")
+    inner = json.loads(INNER_CONTRACT.read_text(encoding="utf-8"))
+    outer = json.loads(OUTER_CONTRACT.read_text(encoding="utf-8"))
+
+    observed = (
+        inner["schema_version"],
+        outer["schema_version"],
+        evidence.SOURCE_DECLARATION_SCHEMA,
+        evidence.RELEASE_RECEIPT_SCHEMA,
+    )
+    assert observed == VERSIONS.ATOMIC_RELEASE_SCHEMA_TUPLE
+    assert source.RUNTIME_CONTRACT_SCHEMA_VERSION == inner["schema_version"]
+    assert bundle.RUNTIME_CONTRACT_SCHEMA_VERSION == inner["schema_version"]
+    assert bundle.CONTRACT_SCHEMA_VERSION == outer["schema_version"]
+    assert source.SCHEMA_VERSION == 3  # The unrelated source-manifest schema stays v3.
 
 
 @pytest.mark.parametrize(

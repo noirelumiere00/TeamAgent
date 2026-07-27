@@ -2633,6 +2633,10 @@ def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -
     assert "--source-identity" in wrapper
     assert "--duration-seconds 10800" in wrapper
     assert "release requires exactly one --pipeline" in wrapper
+    assert "MCP provenance requires each approval locator argument exactly once" in wrapper
+    assert "assert-contract-ready" in wrapper
+    assert "s3api " not in wrapper
+    assert "kms " not in wrapper
     assert "codebuild start-build" not in wrapper
     assert "ecr put-image" not in wrapper
     for launcher in (BUILD_TEAMAGENT, BUILD_OPENCLAW, BUILD_TIKTOK, AUTHORIZE):
@@ -2647,7 +2651,12 @@ def test_builds_gate_contract_before_aws_and_connection_before_writes(
     launcher: Path,
 ) -> None:
     body = launcher.read_text(encoding="utf-8")
-    ready = body.index("assert-release-ready")
+    ready_token = (
+        "assert-contract-ready"
+        if launcher == BUILD_TEAMAGENT
+        else "assert-release-ready"
+    )
+    ready = body.index(ready_token)
     identity = body.index("aws sts get-caller-identity")
     connection = body.index("assert_source_connection_available")
     first_evidence_write_candidates = [

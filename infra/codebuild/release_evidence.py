@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Validate signed source declarations and image release receipts.
 
-This module is intentionally dependency-free so the same bytes can be embedded
-in the fixed CodeBuild attestor/promoter projects and used by Terraform's
-plan-time release gate.  KMS verification is performed by the caller; this
-module validates the exact, signed payload after that cryptographic check.
+The fixed CodeBuild projects embed this file together with its trusted sibling
+schema and approval validators.  It is also used by Terraform's plan-time
+release gate.
 """
 
 from __future__ import annotations
@@ -25,6 +24,24 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+_TRUSTED_HELPER_DIRECTORY = Path(__file__).resolve().parent
+if str(_TRUSTED_HELPER_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(_TRUSTED_HELPER_DIRECTORY))
+
+from teamagent_release_approval import (  # noqa: E402
+    APPROVAL_PIPELINES,
+    FORCED_ROLLBACK_PASSED,
+    FORCED_ROLLBACK_PROVISIONAL,
+    validate_approval_payload,
+)
+from teamagent_release_approval import (  # noqa: E402
+    ProvenanceError as ApprovalProvenanceError,
+)
+from teamagent_release_approval import (  # noqa: E402
+    canonical_json_bytes as approval_canonical_json_bytes,
+)
+from teamagent_schema_versions import SCHEMA_VERSIONS  # noqa: E402
+
 ACCOUNT_ID = "718959508629"
 REGION = "ap-northeast-1"
 REGISTRY = f"{ACCOUNT_ID}.dkr.ecr.{REGION}.amazonaws.com"
@@ -37,9 +54,23 @@ SOURCE_BRANCH = "dev"
 SOURCE_DECLARATION_KIND = "teamagent.source-declaration"
 RELEASE_RECEIPT_KIND = "teamagent.release-receipt"
 DEPLOYMENT_INTENT_KIND = "teamagent.image-deployment-intent"
-SOURCE_DECLARATION_SCHEMA = 4
-RELEASE_RECEIPT_SCHEMA = 2
+SOURCE_DECLARATION_SCHEMA = SCHEMA_VERSIONS.mcp_source_declaration
+RELEASE_RECEIPT_SCHEMA = SCHEMA_VERSIONS.mcp_release_receipt
+LEGACY_NON_MCP_RELEASE_RECEIPT_SCHEMA = 2
 DEPLOYMENT_INTENT_SCHEMA = 1
+APPROVAL_EVIDENCE_PREFIX = "approval-records"
+APPROVAL_PUBLISHER_PROJECT_NAME = "teamagent-dev-approval-publisher"
+APPROVAL_PUBLISHER_PROJECT_ARN = (
+    f"arn:aws:codebuild:{REGION}:{ACCOUNT_ID}:project/{APPROVAL_PUBLISHER_PROJECT_NAME}"
+)
+APPROVAL_APPROVED_BY_ARN = f"arn:aws:iam::{ACCOUNT_ID}:role/teamagent-dev-approval-caller"
+APPROVAL_OPERATION_STATES = {
+    "build": FORCED_ROLLBACK_PASSED,
+    "authorize": FORCED_ROLLBACK_PASSED,
+    "terraform-plan": FORCED_ROLLBACK_PASSED,
+    "terraform-apply": FORCED_ROLLBACK_PASSED,
+    "drill": FORCED_ROLLBACK_PROVISIONAL,
+}
 MAX_RELEASE_RECEIPT_LIFETIME_SECONDS = 3600
 # Verified candidates are durable rollback inputs, not short-lived deployment
 # authorizations. Active/rollback receipts remain limited to one hour.
@@ -387,6 +418,132 @@ def _zero(value: Any, *, label: str) -> int:
     return value
 
 
+def _json_object_argument(value: str, *, label: str) -> Mapping[str, Any]:
+    try:
+        parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
+        raise EvidenceError(f"{label} is not valid JSON") from exc
+    return _mapping(parsed, label=label)
+
+
+def release_receipt_schema_for_pipeline(pipeline: str) -> int:
+    """Return the receipt schema without changing non-MCP release contracts."""
+
+    pipeline = _string(pipeline, label="release receipt pipeline")
+    if pipeline not in PIPELINES:
+        raise EvidenceError("release receipt pipeline is not allowlisted")
+    if pipeline == "mcp":
+        return RELEASE_RECEIPT_SCHEMA
+    return LEGACY_NON_MCP_RELEASE_RECEIPT_SCHEMA
+
+
+def _validate_approval_locator_pair(
+    value: Any,
+    *,
+    pipeline: str,
+    expected_commit: str,
+    label: str,
+) -> dict[str, dict[str, str]]:
+    locator = _mapping(value, label=label)
+    _exact_keys(locator, {"payload", "signature"}, label=label)
+    payload = _mapping(locator["payload"], label=f"{label}.payload")
+    signature = _mapping(locator["signature"], label=f"{label}.signature")
+    locator_keys = {"bucket", "key", "version_id", "sha256"}
+    _exact_keys(payload, locator_keys, label=f"{label}.payload")
+    _exact_keys(signature, locator_keys, label=f"{label}.signature")
+
+    if pipeline not in APPROVAL_PIPELINES:
+        raise EvidenceError("approval pipeline is not allowlisted")
+    commit = _sha1(expected_commit, label="approval expected commit")
+    payload_sha256 = _sha256(
+        payload["sha256"],
+        label=f"{label}.payload.sha256",
+    )
+    signature_sha256 = _sha256(
+        signature["sha256"],
+        label=f"{label}.signature.sha256",
+    )
+    expected_payload_key = f"{APPROVAL_EVIDENCE_PREFIX}/{pipeline}/{commit}/{payload_sha256}.json"
+    if payload["bucket"] != EVIDENCE_BUCKET or signature["bucket"] != EVIDENCE_BUCKET:
+        raise EvidenceError(f"{label} bucket is not fixed")
+    payload_key = _string(payload["key"], label=f"{label}.payload.key")
+    signature_key = _string(signature["key"], label=f"{label}.signature.key")
+    if (
+        payload_key != expected_payload_key
+        or signature_key != f"{expected_payload_key}.sig"
+        or ".." in payload_key
+        or payload_key.startswith("/")
+    ):
+        raise EvidenceError(f"{label} key is not content-addressed")
+    payload_version_id = _version_id(
+        payload["version_id"],
+        label=f"{label}.payload.version_id",
+    )
+    signature_version_id = _version_id(
+        signature["version_id"],
+        label=f"{label}.signature.version_id",
+    )
+    return {
+        "payload": {
+            "bucket": EVIDENCE_BUCKET,
+            "key": payload_key,
+            "version_id": payload_version_id,
+            "sha256": payload_sha256,
+        },
+        "signature": {
+            "bucket": EVIDENCE_BUCKET,
+            "key": signature_key,
+            "version_id": signature_version_id,
+            "sha256": signature_sha256,
+        },
+    }
+
+
+def validate_approval_evidence(
+    value: Any,
+    *,
+    pipeline: str,
+    expected_commit: str,
+) -> dict[str, Any]:
+    """Validate the signed approval locator and its two propagated hashes."""
+
+    evidence = _mapping(value, label="approval evidence")
+    _exact_keys(
+        evidence,
+        {
+            "payload",
+            "signature",
+            "approval_payload_sha256",
+            "forced_gate_sha256",
+        },
+        label="approval evidence",
+    )
+    locator = _validate_approval_locator_pair(
+        {
+            "payload": evidence["payload"],
+            "signature": evidence["signature"],
+        },
+        pipeline=pipeline,
+        expected_commit=expected_commit,
+        label="approval evidence",
+    )
+    approval_payload_sha256 = _sha256(
+        evidence["approval_payload_sha256"],
+        label="approval evidence payload SHA-256",
+    )
+    if approval_payload_sha256 != locator["payload"]["sha256"]:
+        raise EvidenceError("approval evidence payload SHA-256 is inconsistent")
+    forced_gate_sha256 = _sha256(
+        evidence["forced_gate_sha256"],
+        label="approval evidence forced gate SHA-256",
+    )
+    return {
+        **locator,
+        "approval_payload_sha256": approval_payload_sha256,
+        "forced_gate_sha256": forced_gate_sha256,
+    }
+
+
 def validate_source_declaration(
     value: Any,
     *,
@@ -414,6 +571,7 @@ def validate_source_declaration(
             "app_html",
             "application_provenance",
             "contract",
+            "approval_evidence",
         },
         label="source declaration",
     )
@@ -544,6 +702,11 @@ def validate_source_declaration(
     if contract["path"] != PIPELINES["mcp"]["contract_path"]:
         raise EvidenceError("source contract path is not allowlisted")
     contract_sha256 = _sha256(contract["sha256"], label="source contract SHA-256")
+    validate_approval_evidence(
+        declaration["approval_evidence"],
+        pipeline="mcp",
+        expected_commit=commit,
+    )
 
     expected_values = (
         (expected_commit, commit, "source commit"),
@@ -603,7 +766,13 @@ def source_declaration(
     vault_manifest_sha256: str,
     build_inputs_sha256: str,
     contract_sha256: str,
+    approval_evidence: Mapping[str, Any],
 ) -> dict[str, Any]:
+    normalized_approval_evidence = validate_approval_evidence(
+        approval_evidence,
+        pipeline="mcp",
+        expected_commit=commit,
+    )
     value = {
         "schema_version": SOURCE_DECLARATION_SCHEMA,
         "kind": SOURCE_DECLARATION_KIND,
@@ -651,9 +820,42 @@ def source_declaration(
             "path": PIPELINES["mcp"]["contract_path"],
             "sha256": contract_sha256,
         },
+        "approval_evidence": normalized_approval_evidence,
     }
     validate_source_declaration(value)
     return value
+
+
+def verify_source_approval_binding(
+    value: Any,
+    *,
+    expected_commit: str,
+    expected_contract_sha256: str,
+    expected_approval_evidence: Mapping[str, Any],
+) -> str:
+    """Validate a declaration and return its approval-bound source tree OID."""
+
+    declaration = validate_source_declaration(
+        value,
+        expected_commit=expected_commit,
+        expected_contract_sha256=expected_contract_sha256,
+    )
+    expected = validate_approval_evidence(
+        expected_approval_evidence,
+        pipeline="mcp",
+        expected_commit=expected_commit,
+    )
+    actual = validate_approval_evidence(
+        declaration["approval_evidence"],
+        pipeline="mcp",
+        expected_commit=expected_commit,
+    )
+    if actual != expected:
+        raise EvidenceError("source declaration approval evidence mismatch")
+    return _sha1(
+        declaration["build_context"]["source_tree_oid"],
+        label="source declaration tree OID",
+    )
 
 
 def _expected_tag(channel: str, commit: str, subject: str, subject_count: int) -> str:
@@ -742,29 +944,32 @@ def validate_release_receipt(
     now: dt.datetime | None = None,
 ) -> dict[str, Any]:
     receipt = _mapping(value, label="release receipt")
+    pipeline = _string(receipt.get("pipeline"), label="pipeline")
+    if pipeline not in PIPELINES:
+        raise EvidenceError("release receipt pipeline is not allowlisted")
+    expected_top_level_keys = {
+        "schema_version",
+        "kind",
+        "pipeline",
+        "channel",
+        "issued_at",
+        "expires_at",
+        "build",
+        "contract",
+        "source_evidence",
+        "subjects",
+    }
+    if pipeline == "mcp":
+        expected_top_level_keys.add("approval_evidence")
     _exact_keys(
         receipt,
-        {
-            "schema_version",
-            "kind",
-            "pipeline",
-            "channel",
-            "issued_at",
-            "expires_at",
-            "build",
-            "contract",
-            "source_evidence",
-            "subjects",
-        },
+        expected_top_level_keys,
         label="release receipt",
     )
-    if receipt["schema_version"] != RELEASE_RECEIPT_SCHEMA:
+    if receipt["schema_version"] != release_receipt_schema_for_pipeline(pipeline):
         raise EvidenceError("unsupported release receipt schema")
     if receipt["kind"] != RELEASE_RECEIPT_KIND:
         raise EvidenceError("release receipt kind mismatch")
-    pipeline = _string(receipt["pipeline"], label="pipeline")
-    if pipeline not in PIPELINES:
-        raise EvidenceError("release receipt pipeline is not allowlisted")
     if expected_pipeline is not None and pipeline != expected_pipeline:
         raise EvidenceError("release receipt pipeline mismatch")
     channel = _string(receipt["channel"], label="release channel")
@@ -806,6 +1011,13 @@ def validate_release_receipt(
     commit = _sha1(build["source_commit"], label="release source commit")
     if expected_commit is not None and commit != expected_commit:
         raise EvidenceError("release source commit mismatch")
+    normalized_approval_evidence: dict[str, Any] | None = None
+    if pipeline == "mcp":
+        normalized_approval_evidence = validate_approval_evidence(
+            receipt["approval_evidence"],
+            pipeline=pipeline,
+            expected_commit=commit,
+        )
 
     contract = _mapping(receipt["contract"], label="release contract")
     _exact_keys(contract, {"path", "sha256", "release_ready"}, label="release contract")
@@ -936,6 +1148,7 @@ def validate_release_receipt(
         if labels.get(contract_label) != contract_sha256:
             raise EvidenceError(f"{label} OCI contract hash does not match the receipt")
         if pipeline == "mcp":
+            assert normalized_approval_evidence is not None
             expected_runtime_kind = {
                 "core": "core",
                 "media": "media-worker",
@@ -955,6 +1168,13 @@ def validate_release_receipt(
                 label=f"{label} canonical build context binding",
             )
             mcp_context_bindings.add(context_binding)
+            if (
+                labels.get("io.teamagent.build.release-approval-sha256")
+                != normalized_approval_evidence["approval_payload_sha256"]
+            ):
+                raise EvidenceError(
+                    f"{label} release approval label does not match the receipt"
+                )
             if name == "core":
                 _version_id(
                     labels.get("io.teamagent.contract.baked-app-html-version-id"),
@@ -1073,9 +1293,22 @@ def release_receipt(
     source_signature_key: str,
     source_signature_version: str,
     subjects: list[Mapping[str, Any]],
+    approval_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if pipeline == "mcp":
+        if approval_evidence is None:
+            raise EvidenceError("MCP release receipt approval evidence is required")
+        normalized_approval_evidence = validate_approval_evidence(
+            approval_evidence,
+            pipeline=pipeline,
+            expected_commit=commit,
+        )
+    else:
+        if approval_evidence is not None:
+            raise EvidenceError("legacy non-MCP release receipt forbids approval evidence")
+        normalized_approval_evidence = None
     value = {
-        "schema_version": RELEASE_RECEIPT_SCHEMA,
+        "schema_version": release_receipt_schema_for_pipeline(pipeline),
         "kind": RELEASE_RECEIPT_KIND,
         "pipeline": pipeline,
         "channel": channel,
@@ -1101,6 +1334,8 @@ def release_receipt(
         },
         "subjects": [dict(subject) for subject in subjects],
     }
+    if normalized_approval_evidence is not None:
+        value["approval_evidence"] = normalized_approval_evidence
     validate_release_receipt(
         value,
         expected_pipeline=pipeline,
@@ -1350,6 +1585,335 @@ def _aws_json(label: str, *args: str) -> Mapping[str, Any]:
     except json.JSONDecodeError as exc:
         raise EvidenceError(f"invalid {label} response") from exc
     return _mapping(value, label=label)
+
+
+def _approval_observation_values(
+    runtime_contract_path: Path,
+    contract_path: Path,
+) -> dict[str, str]:
+    try:
+        from teamagent_bundle_provenance import (
+            ProvenanceError as BundleProvenanceError,
+        )
+        from teamagent_bundle_provenance import approval_observation_values
+    except ImportError as exc:
+        raise EvidenceError("cannot derive approval observations from the contracts") from exc
+    try:
+        return approval_observation_values(runtime_contract_path, contract_path)
+    except (OSError, BundleProvenanceError) as exc:
+        raise EvidenceError("cannot derive approval observations from the contracts") from exc
+
+
+def _approval_publisher_build_id(payload: bytes) -> str:
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EvidenceError("approval payload is not valid UTF-8 JSON") from exc
+    approval = _mapping(value, label="approval payload")
+    authority = _mapping(
+        approval.get("approval_authority"),
+        label="approval payload authority",
+    )
+    build_id = _string(
+        authority.get("publisher_build_id"),
+        label="approval publisher build ID",
+        maximum=512,
+    )
+    if not _BUILD_ID_RE.fullmatch(build_id) or not build_id.startswith(
+        f"{APPROVAL_PUBLISHER_PROJECT_NAME}:"
+    ):
+        raise EvidenceError("approval publisher build ID is not from the fixed project")
+    return build_id
+
+
+def _reject_nonfinite_approval_json(value: str) -> None:
+    raise EvidenceError(f"non-finite approval JSON number is forbidden: {value}")
+
+
+def _canonical_approval_payload(payload: bytes) -> Mapping[str, Any]:
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite_approval_json,
+        )
+    except EvidenceError:
+        raise
+    except (RecursionError, UnicodeDecodeError, ValueError) as exc:
+        raise EvidenceError("approval payload is not valid JSON") from exc
+    approval = _mapping(value, label="approval payload")
+    try:
+        canonical = approval_canonical_json_bytes(approval)
+    except ApprovalProvenanceError as exc:
+        raise EvidenceError("approval payload cannot be canonicalized") from exc
+    if payload != canonical:
+        raise EvidenceError("approval payload bytes are not canonical")
+    return approval
+
+
+def validate_approved_release_for_operation(
+    payload: bytes,
+    *,
+    operation: str,
+    approval_signing_key_arn: str,
+    expected_commit: str,
+    expected_tree_oid: str,
+    expected_inner_sha256: str,
+    expected_outer_sha256: str,
+    expected_pipeline: str,
+    expected_environment: str,
+    expected_observations: Mapping[str, str],
+    now: dt.datetime,
+) -> dict[str, Any]:
+    """Pure operation policy hook for the future Terraform release gate."""
+
+    state = APPROVAL_OPERATION_STATES.get(operation)
+    if state is None:
+        raise EvidenceError("approval operation is not allowlisted")
+    publisher_build_id = _approval_publisher_build_id(payload)
+    expected = {
+        "commit": expected_commit,
+        "tree_oid": expected_tree_oid,
+        "inner_sha": expected_inner_sha256,
+        "outer_sha": expected_outer_sha256,
+        "observations": dict(expected_observations),
+        "pipeline": expected_pipeline,
+        "environment": expected_environment,
+        "approved_by": APPROVAL_APPROVED_BY_ARN,
+        "authority": {
+            "publisher_project_arn": APPROVAL_PUBLISHER_PROJECT_ARN,
+            "publisher_build_id": publisher_build_id,
+            "kms_key_arn": approval_signing_key_arn,
+        },
+        "forced_rollback_state": state,
+    }
+    try:
+        return validate_approval_payload(payload, expected, now=now)
+    except ApprovalProvenanceError as exc:
+        raise EvidenceError(f"approval payload validation failed: {exc}") from exc
+
+
+def _download_approval_object(
+    locator: Mapping[str, str],
+    *,
+    destination: Path,
+    label: str,
+    approval_encryption_key_arn: str,
+) -> dt.datetime:
+    head = _aws_json(
+        f"{label} object metadata",
+        "s3api",
+        "head-object",
+        "--region",
+        REGION,
+        "--bucket",
+        locator["bucket"],
+        "--key",
+        locator["key"],
+        "--version-id",
+        locator["version_id"],
+        "--expected-bucket-owner",
+        ACCOUNT_ID,
+        "--output",
+        "json",
+    )
+    if (
+        head.get("VersionId") != locator["version_id"]
+        or head.get("ObjectLockMode") != "COMPLIANCE"
+        or head.get("ServerSideEncryption") != "aws:kms"
+        or head.get("SSEKMSKeyId") != approval_encryption_key_arn
+    ):
+        raise EvidenceError(f"{label} object is not immutable exact approval evidence")
+    retained_until = _metadata_timestamp(
+        head.get("ObjectLockRetainUntilDate", ""),
+        label=f"{label} retention",
+    )
+    response_version = _aws(
+        "s3api",
+        "get-object",
+        "--region",
+        REGION,
+        "--bucket",
+        locator["bucket"],
+        "--key",
+        locator["key"],
+        "--version-id",
+        locator["version_id"],
+        "--expected-bucket-owner",
+        ACCOUNT_ID,
+        "--query",
+        "VersionId",
+        "--output",
+        "text",
+        output=destination,
+    ).strip()
+    if response_version != locator["version_id"]:
+        raise EvidenceError(f"{label} download VersionId mismatch")
+    try:
+        raw_sha256 = hashlib.sha256(destination.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise EvidenceError(f"cannot read downloaded {label}") from exc
+    if raw_sha256 != locator["sha256"]:
+        raise EvidenceError(f"{label} raw SHA-256 mismatch")
+    return retained_until
+
+
+def assert_approved_release(
+    *,
+    operation: str,
+    approval_locators: Mapping[str, Any],
+    approval_signing_key_arn: str,
+    approval_encryption_key_arn: str,
+    expected_commit: str,
+    expected_tree_oid: str,
+    expected_inner_sha256: str,
+    expected_outer_sha256: str,
+    expected_pipeline: str,
+    expected_environment: str,
+    runtime_contract_path: Path,
+    contract_path: Path,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Fetch and fully verify one immutable external release approval."""
+
+    current = now or dt.datetime.now(dt.UTC).replace(microsecond=0)
+    if current.tzinfo is None or current.utcoffset() != dt.timedelta(0):
+        raise EvidenceError("approval verification time must be UTC")
+    if current.microsecond:
+        current = current.replace(microsecond=0)
+    signing_key_arn = _string(
+        approval_signing_key_arn,
+        label="approval signing key ARN",
+    )
+    encryption_key_arn = _string(
+        approval_encryption_key_arn,
+        label="approval encryption key ARN",
+    )
+    if not _KEY_ARN_RE.fullmatch(signing_key_arn) or not _KEY_ARN_RE.fullmatch(encryption_key_arn):
+        raise EvidenceError("approval KMS key is outside the fixed account and region")
+    if expected_pipeline not in APPROVAL_PIPELINES:
+        raise EvidenceError("approval expected pipeline is not allowlisted")
+    locators = _mapping(approval_locators, label="approval locators")
+    _exact_keys(locators, {expected_pipeline}, label="approval locators")
+    locator = _validate_approval_locator_pair(
+        locators[expected_pipeline],
+        pipeline=expected_pipeline,
+        expected_commit=expected_commit,
+        label=f"{expected_pipeline} approval locator",
+    )
+
+    try:
+        inner_raw = runtime_contract_path.read_bytes()
+        outer_raw = contract_path.read_bytes()
+    except OSError as exc:
+        raise EvidenceError("cannot read approval-bound contracts") from exc
+    if hashlib.sha256(inner_raw).hexdigest() != _sha256(
+        expected_inner_sha256,
+        label="expected inner contract SHA-256",
+    ):
+        raise EvidenceError("actual inner contract raw SHA-256 mismatch")
+    if hashlib.sha256(outer_raw).hexdigest() != _sha256(
+        expected_outer_sha256,
+        label="expected outer contract SHA-256",
+    ):
+        raise EvidenceError("actual outer contract raw SHA-256 mismatch")
+    observations = _approval_observation_values(
+        runtime_contract_path,
+        contract_path,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="teamagent-release-approval.") as temporary:
+        root = Path(temporary)
+        payload_path = root / "approval.json"
+        signature_path = root / "approval.sig"
+        payload_retention = _download_approval_object(
+            locator["payload"],
+            destination=payload_path,
+            label="approval payload",
+            approval_encryption_key_arn=encryption_key_arn,
+        )
+        signature_retention = _download_approval_object(
+            locator["signature"],
+            destination=signature_path,
+            label="approval signature",
+            approval_encryption_key_arn=encryption_key_arn,
+        )
+        if payload_retention != signature_retention:
+            raise EvidenceError("approval payload and signature retention differ")
+        try:
+            payload = payload_path.read_bytes()
+        except OSError as exc:
+            raise EvidenceError("cannot read approval payload") from exc
+        canonical_payload = _canonical_approval_payload(payload)
+        approved_at = _timestamp(
+            canonical_payload.get("approved_at_utc"),
+            label="approval approved_at_utc",
+        )
+        minimum_retention = approved_at + dt.timedelta(days=3650)
+        if payload_retention < minimum_retention:
+            raise EvidenceError("approval retention is shorter than 3650 days")
+        digest_path = root / "approval.sha256"
+        digest_path.write_bytes(hashlib.sha256(payload).digest())
+        verify_response = _aws_json(
+            "approval KMS verification",
+            "kms",
+            "verify",
+            "--region",
+            REGION,
+            "--key-id",
+            signing_key_arn,
+            "--message-type",
+            "DIGEST",
+            "--message",
+            f"fileb://{digest_path}",
+            "--signature",
+            f"fileb://{signature_path}",
+            "--signing-algorithm",
+            "RSASSA_PSS_SHA_256",
+            "--output",
+            "json",
+        )
+        if verify_response.get("SignatureValid") is not True:
+            raise EvidenceError("approval KMS signature is invalid")
+        validated = validate_approved_release_for_operation(
+            payload,
+            operation=operation,
+            approval_signing_key_arn=signing_key_arn,
+            expected_commit=expected_commit,
+            expected_tree_oid=expected_tree_oid,
+            expected_inner_sha256=expected_inner_sha256,
+            expected_outer_sha256=expected_outer_sha256,
+            expected_pipeline=expected_pipeline,
+            expected_environment=expected_environment,
+            expected_observations=observations,
+            now=current,
+        )
+    approval_expires_at = _timestamp(
+        validated["expires_at_utc"],
+        label="approval expires_at_utc",
+    )
+    if payload_retention <= approval_expires_at:
+        raise EvidenceError("approval retention does not outlive the approval")
+    approval_payload_sha256 = hashlib.sha256(payload).hexdigest()
+    if approval_payload_sha256 != locator["payload"]["sha256"]:
+        raise EvidenceError("approval payload SHA-256 does not match its locator")
+    forced_gate_sha256 = hashlib.sha256(
+        approval_canonical_json_bytes(
+            validated["gates"]["forced_rollback_evidence"],
+        )
+    ).hexdigest()
+    return validate_approval_evidence(
+        {
+            **locator,
+            "approval_payload_sha256": approval_payload_sha256,
+            "forced_gate_sha256": forced_gate_sha256,
+        },
+        pipeline=expected_pipeline,
+        expected_commit=expected_commit,
+    )
 
 
 def _assert_no_release_lifecycle_policy(repository: str, *, label: str) -> None:
@@ -3711,6 +4275,7 @@ def _parser() -> argparse.ArgumentParser:
     source.add_argument("--vault-manifest-sha256", required=True)
     source.add_argument("--build-inputs-sha256", required=True)
     source.add_argument("--contract-sha256", required=True)
+    source.add_argument("--approval-evidence-json", required=True)
     source.add_argument("--output", type=Path, required=True)
 
     verify_source = commands.add_parser("verify-source-declaration")
@@ -3725,6 +4290,15 @@ def _parser() -> argparse.ArgumentParser:
     verify_source.add_argument("--expected-build-context-sha256")
     verify_source.add_argument("--expected-build-context-version")
     verify_source.add_argument("--expected-remote-base-oid")
+
+    verify_source_approval = commands.add_parser("verify-source-approval-binding")
+    verify_source_approval.add_argument("--declaration", type=Path, required=True)
+    verify_source_approval.add_argument("--expected-commit", required=True)
+    verify_source_approval.add_argument("--expected-contract-sha256", required=True)
+    verify_source_approval.add_argument(
+        "--expected-approval-evidence-json",
+        required=True,
+    )
 
     receipt = commands.add_parser("verify-release-receipt")
     receipt.add_argument("--receipt", type=Path, required=True)
@@ -3765,6 +4339,7 @@ def _parser() -> argparse.ArgumentParser:
     create_receipt.add_argument("--source-signature-key", required=True)
     create_receipt.add_argument("--source-signature-version", required=True)
     create_receipt.add_argument("--subject", action="append", type=Path, required=True)
+    create_receipt.add_argument("--approval-evidence-json")
     create_receipt.add_argument("--output", type=Path, required=True)
 
     authorize_receipt = commands.add_parser("authorize-release-receipt")
@@ -3819,6 +4394,37 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
 
+    approval = commands.add_parser("assert-approved-release")
+    approval.add_argument(
+        "--operation",
+        choices=sorted(APPROVAL_OPERATION_STATES),
+        required=True,
+    )
+    approval.add_argument("--approval-locators-json", required=True)
+    approval.add_argument("--approval-signing-key-arn", required=True)
+    approval.add_argument("--approval-encryption-key-arn", required=True)
+    approval.add_argument("--expected-commit", required=True)
+    approval.add_argument("--expected-tree-oid", required=True)
+    approval.add_argument("--expected-inner-sha256", required=True)
+    approval.add_argument("--expected-outer-sha256", required=True)
+    approval.add_argument(
+        "--expected-pipeline",
+        choices=sorted(APPROVAL_PIPELINES),
+        required=True,
+    )
+    approval.add_argument("--expected-environment", required=True)
+    approval.add_argument(
+        "--runtime-contract",
+        type=Path,
+        default=Path("infra/codebuild/teamagent_runtime_contract.json"),
+    )
+    approval.add_argument(
+        "--contract",
+        type=Path,
+        default=Path("infra/codebuild/teamagent_core_media_release_contract.json"),
+    )
+    approval.add_argument("--now")
+
     commands.add_parser("terraform-gate")
     return parser
 
@@ -3846,6 +4452,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 vault_manifest_sha256=args.vault_manifest_sha256,
                 build_inputs_sha256=args.build_inputs_sha256,
                 contract_sha256=args.contract_sha256,
+                approval_evidence=_json_object_argument(
+                    args.approval_evidence_json,
+                    label="approval evidence JSON",
+                ),
             )
             _write_json(args.output, value)
         elif args.command == "verify-source-declaration":
@@ -3862,6 +4472,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_build_context_version=args.expected_build_context_version,
                 expected_remote_base_oid=args.expected_remote_base_oid,
             )
+        elif args.command == "verify-source-approval-binding":
+            tree_oid = verify_source_approval_binding(
+                load_json(args.declaration, label="source declaration"),
+                expected_commit=args.expected_commit,
+                expected_contract_sha256=args.expected_contract_sha256,
+                expected_approval_evidence=_json_object_argument(
+                    args.expected_approval_evidence_json,
+                    label="expected approval evidence JSON",
+                ),
+            )
+            print(tree_oid)
         elif args.command == "verify-release-receipt":
             now = _timestamp(args.now, label="now") if args.now else None
             validate_release_receipt(
@@ -3902,6 +4523,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 source_signature_key=args.source_signature_key,
                 source_signature_version=args.source_signature_version,
                 subjects=subjects,
+                approval_evidence=(
+                    _json_object_argument(
+                        args.approval_evidence_json,
+                        label="approval evidence JSON",
+                    )
+                    if args.approval_evidence_json is not None
+                    else None
+                ),
             )
             _write_json(args.output, value)
         elif args.command == "authorize-release-receipt":
@@ -3992,6 +4621,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "plan_sha256": recorded["plan_sha256"],
                     },
                     sort_keys=True,
+                )
+            )
+        elif args.command == "assert-approved-release":
+            approval_now = _timestamp(args.now, label="now") if args.now else None
+            approval_evidence = assert_approved_release(
+                operation=args.operation,
+                approval_locators=_json_object_argument(
+                    args.approval_locators_json,
+                    label="approval locators JSON",
+                ),
+                approval_signing_key_arn=args.approval_signing_key_arn,
+                approval_encryption_key_arn=args.approval_encryption_key_arn,
+                expected_commit=args.expected_commit,
+                expected_tree_oid=args.expected_tree_oid,
+                expected_inner_sha256=args.expected_inner_sha256,
+                expected_outer_sha256=args.expected_outer_sha256,
+                expected_pipeline=args.expected_pipeline,
+                expected_environment=args.expected_environment,
+                runtime_contract_path=args.runtime_contract,
+                contract_path=args.contract,
+                now=approval_now,
+            )
+            print(
+                json.dumps(
+                    approval_evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
                 )
             )
         elif args.command == "terraform-gate":

@@ -257,25 +257,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
     args.pipeline = "mcp"
     args.name = subject_name
     runtime_contract = json.loads(MCP_RUNTIME_CONTRACT.read_text(encoding="utf-8"))
-    runtime_entries = {
-        entry["key"]: entry["value"]
-        for entry in runtime_contract["receipt"]["entries"]
-    }
     runtime_contract["release"] = {"ready": True, "blocked_reason": ""}
-    runtime_contract["approval_record"] = {
-        "approved_at_utc": "2026-07-24T00:00:00Z",
-        "approved_by": "test-approval-authority",
-        "source_commit": COMMIT,
-        "observations": [
-            {
-                "key": "core.binary.python.sha256",
-                "value": runtime_entries["binary.python.sha256"],
-                "observed_at_utc": "2026-07-24T00:00:00Z",
-                "source": "fixture://actual-image/core-python",
-            }
-        ],
-        "decision": "APPROVED: synthetic actual-image fixture evidence matched.",
-    }
     args.runtime_contract = tmp_path / "runtime-contract.json"
     _write_json(args.runtime_contract, runtime_contract)
 
@@ -283,9 +265,37 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
     contract["source_runtime_contract"]["sha256"] = hashlib.sha256(
         args.runtime_contract.read_bytes()
     ).hexdigest()
+    contract["release"] = {"ready": True, "blocked_reason": ""}
     args.contract = tmp_path / "contract.json"
     _write_json(args.contract, contract)
     args.contract_sha256 = hashlib.sha256(args.contract.read_bytes()).hexdigest()
+    approval_payload_sha256 = "a" * 64
+    args.approval_evidence_json = json.dumps(
+        {
+            "payload": {
+                "bucket": "teamagent-dev-image-release-evidence",
+                "key": (
+                    f"approval-records/mcp/{COMMIT}/"
+                    f"{approval_payload_sha256}.json"
+                ),
+                "version_id": "approval-payload-version",
+                "sha256": approval_payload_sha256,
+            },
+            "signature": {
+                "bucket": "teamagent-dev-image-release-evidence",
+                "key": (
+                    f"approval-records/mcp/{COMMIT}/"
+                    f"{approval_payload_sha256}.json.sig"
+                ),
+                "version_id": "approval-signature-version",
+                "sha256": "b" * 64,
+            },
+            "approval_payload_sha256": approval_payload_sha256,
+            "forced_gate_sha256": "c" * 64,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
     contract = BUNDLE_PROVENANCE.load_contract(args.contract)
     runtime_contract = BUNDLE_PROVENANCE._load_runtime_contract(args.runtime_contract)
@@ -325,6 +335,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
             for assertion in subject["source_assertions"]
         }
     )
+    labels["io.teamagent.build.release-approval-sha256"] = approval_payload_sha256
     if subject_name == "core":
         labels.update(
             BUNDLE_PROVENANCE._runtime_expected_labels(
@@ -358,6 +369,7 @@ def _mcp_fixture(tmp_path: Path, *, subject_name: str) -> argparse.Namespace:
     provenance["predicate"]["runtimeContractSha256"] = hashlib.sha256(
         args.runtime_contract.read_bytes()
     ).hexdigest()
+    provenance["predicate"]["releaseApprovalSha256"] = approval_payload_sha256
     _write_json(args.provenance, provenance)
     provenance_sha256 = hashlib.sha256(args.provenance.read_bytes()).hexdigest()
     subject_referrers = json.loads(args.subject_referrers.read_text(encoding="utf-8"))
@@ -412,6 +424,52 @@ def test_mcp_subject_verification_binds_exact_manifest_config_digest(
         subject["labels"]["io.teamagent.build.release-contract-sha256"]
         == args.contract_sha256
     )
+    assert (
+        subject["labels"]["io.teamagent.build.release-approval-sha256"]
+        == "a" * 64
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["label", "provenance"],
+)
+def test_mcp_subject_rejects_external_approval_binding_drift(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    args = _mcp_fixture(tmp_path, subject_name="media")
+    if mutation == "label":
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        config["config"]["Labels"][
+            "io.teamagent.build.release-approval-sha256"
+        ] = "0" * 64
+        _write_json(args.config, config)
+        args.config_digest = (
+            "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
+        )
+        expected = "OCI approval label"
+    else:
+        provenance = json.loads(args.provenance.read_text(encoding="utf-8"))
+        provenance["predicate"]["releaseApprovalSha256"] = "0" * 64
+        _write_json(args.provenance, provenance)
+        provenance_sha256 = hashlib.sha256(args.provenance.read_bytes()).hexdigest()
+        referrers = json.loads(
+            args.subject_referrers.read_text(encoding="utf-8")
+        )
+        referrer = next(
+            item
+            for item in referrers["referrers"]
+            if item["artifactType"] == "application/vnd.in-toto+json"
+        )
+        referrer["annotations"][
+            "io.teamagent.build.payload-sha256"
+        ] = provenance_sha256
+        _write_json(args.subject_referrers, referrers)
+        expected = "provenance does not bind the external approval"
+
+    with pytest.raises(EVIDENCE.EvidenceError, match=expected):
+        EVIDENCE.create_subject(args)
 
 
 def test_mcp_subject_rejects_missing_inner_runtime_contract(tmp_path: Path) -> None:
@@ -422,6 +480,26 @@ def test_mcp_subject_rejects_missing_inner_runtime_contract(tmp_path: Path) -> N
         EVIDENCE.EvidenceError,
         match="runtime contract is required for the MCP pipeline",
     ):
+        EVIDENCE.create_subject(args)
+
+
+def test_mcp_subject_rejects_blocked_outer_contract(tmp_path: Path) -> None:
+    args = _mcp_fixture(tmp_path, subject_name="core")
+    contract = json.loads(args.contract.read_text(encoding="utf-8"))
+    contract["release"] = {
+        "ready": False,
+        "blocked_reason": "test keeps the outer contract statically blocked",
+    }
+    _write_json(args.contract, contract)
+    args.contract_sha256 = hashlib.sha256(args.contract.read_bytes()).hexdigest()
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    config["config"]["Labels"][
+        "io.teamagent.build.release-contract-sha256"
+    ] = args.contract_sha256
+    _write_json(args.config, config)
+    args.config_digest = "sha256:" + hashlib.sha256(args.config.read_bytes()).hexdigest()
+
+    with pytest.raises(EVIDENCE.EvidenceError, match="MCP outer contract mismatch"):
         EVIDENCE.create_subject(args)
 
 

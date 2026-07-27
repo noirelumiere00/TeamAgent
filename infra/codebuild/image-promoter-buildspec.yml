@@ -33,10 +33,11 @@ phases:
         EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
         EVIDENCE_KMS_KEY_ARN="__RELEASE_EVIDENCE_KMS_KEY_ARN__"
         SIGNING_KEY_ARN="__ATTESTOR_SIGNING_KEY_ARN__"
+        SOURCE_SIGNING_KEY_ARN="__SOURCE_PUBLISHER_SIGNING_KEY_ARN__"
         REGISTRY="718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
         export AWS_DEFAULT_REGION="$EXPECTED_REGION" AWS_REGION="$EXPECTED_REGION"
         readonly EXPECTED_ACCOUNT_ID EXPECTED_REGION EVIDENCE_BUCKET
-        readonly EVIDENCE_KMS_KEY_ARN SIGNING_KEY_ARN REGISTRY
+        readonly EVIDENCE_KMS_KEY_ARN SIGNING_KEY_ARN SOURCE_SIGNING_KEY_ARN REGISTRY
         [ "$(uname -m)" = "aarch64" ] || { echo "FATAL: promoter must be native arm64"; exit 1; }
         [ "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_ACCOUNT_ID" ] || { echo "FATAL: wrong AWS account"; exit 1; }
         : "${PIPELINE:?PIPELINE is required}"
@@ -47,7 +48,6 @@ phases:
         : "${RECEIPT_VERSION_ID:?RECEIPT_VERSION_ID is required}"
         : "${RECEIPT_SIGNATURE_KEY:?RECEIPT_SIGNATURE_KEY is required}"
         : "${RECEIPT_SIGNATURE_VERSION_ID:?RECEIPT_SIGNATURE_VERSION_ID is required}"
-        case "$PIPELINE" in mcp|tiktok|openclaw) ;; *) echo "FATAL: pipeline is not allowlisted"; exit 1 ;; esac
         case "$PROMOTION_CHANNEL" in verified-candidate|active|rollback) ;; *) echo "FATAL: promotion channel is not allowlisted"; exit 1 ;; esac
         [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: source commit must be a full SHA"; exit 1; }
         [[ "$CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid contract SHA-256"; exit 1; }
@@ -55,7 +55,92 @@ phases:
         [[ "$RECEIPT_KEY" == "$EXPECTED_PREFIX"*".json" ]] || { echo "FATAL: receipt key is outside the content-addressed prefix"; exit 1; }
         [ "$RECEIPT_SIGNATURE_KEY" = "$RECEIPT_KEY.sig" ] || { echo "FATAL: receipt signature key mismatch"; exit 1; }
         case "$RECEIPT_VERSION_ID:$RECEIPT_SIGNATURE_VERSION_ID" in *None*|*null*|*[!A-Za-z0-9._~+/=:-]*) echo "FATAL: invalid evidence VersionId"; exit 1 ;; esac
+        printf '%s' '__TEAMAGENT_SCHEMA_VERSIONS_BASE64__' | base64 --decode > /tmp/teamagent_schema_versions.py
+        printf '%s' '__TEAMAGENT_RELEASE_APPROVAL_BASE64__' | base64 --decode > /tmp/teamagent_release_approval.py
         printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
+        printf '%s' '__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__' | base64 --decode > /tmp/teamagent_bundle_provenance.py
+        case "$PIPELINE" in
+          mcp)
+            : "${APPROVAL_PAYLOAD_BUCKET:?APPROVAL_PAYLOAD_BUCKET is required for MCP}"
+            : "${APPROVAL_PAYLOAD_KEY:?APPROVAL_PAYLOAD_KEY is required for MCP}"
+            : "${APPROVAL_PAYLOAD_VERSION_ID:?APPROVAL_PAYLOAD_VERSION_ID is required for MCP}"
+            : "${APPROVAL_PAYLOAD_SHA256:?APPROVAL_PAYLOAD_SHA256 is required for MCP}"
+            : "${APPROVAL_SIGNATURE_BUCKET:?APPROVAL_SIGNATURE_BUCKET is required for MCP}"
+            : "${APPROVAL_SIGNATURE_KEY:?APPROVAL_SIGNATURE_KEY is required for MCP}"
+            : "${APPROVAL_SIGNATURE_VERSION_ID:?APPROVAL_SIGNATURE_VERSION_ID is required for MCP}"
+            : "${APPROVAL_SIGNATURE_SHA256:?APPROVAL_SIGNATURE_SHA256 is required for MCP}"
+            : "${APPROVAL_SIGNING_KEY_ARN:?APPROVAL_SIGNING_KEY_ARN is required for MCP}"
+            MCP_CONTRACT="/tmp/teamagent_core_media_release_contract.json"
+            MCP_RUNTIME_CONTRACT="/tmp/teamagent_runtime_contract.json"
+            printf '%s' '__MCP_CONTRACT_BASE64__' | base64 --decode >"$MCP_CONTRACT"
+            printf '%s' '__MCP_RUNTIME_CONTRACT_BASE64__' | base64 --decode >"$MCP_RUNTIME_CONTRACT"
+            [ "$(sha256sum "$MCP_CONTRACT" | awk '{print $1}')" = "$CONTRACT_SHA256" ] \
+              || { echo "FATAL: embedded MCP contract hash mismatch"; exit 1; }
+            MCP_RUNTIME_CONTRACT_SHA256="$(
+              jq -er '.source_runtime_contract.sha256' "$MCP_CONTRACT"
+            )"
+            [[ "$MCP_RUNTIME_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+              && [ "$(sha256sum "$MCP_RUNTIME_CONTRACT" | awk '{print $1}')" = \
+                "$MCP_RUNTIME_CONTRACT_SHA256" ] \
+              || { echo "FATAL: embedded MCP inner contract pin mismatch"; exit 1; }
+            python3 /tmp/teamagent_bundle_provenance.py assert-contract-ready \
+              --contract "$MCP_CONTRACT"
+            [ "$APPROVAL_PAYLOAD_BUCKET" = "$EVIDENCE_BUCKET" ] \
+              && [ "$APPROVAL_SIGNATURE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+              || { echo "FATAL: approval bucket is not allowlisted"; exit 1; }
+            [[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$SOURCE_COMMIT/[0-9a-f]{64}\.json$ ]] \
+              || { echo "FATAL: approval payload key does not bind the source commit"; exit 1; }
+            [ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+              || { echo "FATAL: approval signature key mismatch"; exit 1; }
+            [ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+              "approval-records/mcp/$SOURCE_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+              || { echo "FATAL: approval payload key/hash mismatch"; exit 1; }
+            for approval_digest in \
+              "$APPROVAL_PAYLOAD_SHA256" "$APPROVAL_SIGNATURE_SHA256"; do
+              [[ "$approval_digest" =~ ^[0-9a-f]{64}$ ]] \
+                || { echo "FATAL: invalid approval SHA-256"; exit 1; }
+            done
+            for approval_version in \
+              "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+              case "$approval_version" in
+                ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+                  echo "FATAL: invalid approval VersionId"
+                  exit 1
+                  ;;
+              esac
+            done
+            [[ "$APPROVAL_SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+              || { echo "FATAL: approval signing key is outside the fixed account"; exit 1; }
+            APPROVAL_LOCATORS_JSON="$(
+              jq -cn \
+                --arg payload_bucket "$APPROVAL_PAYLOAD_BUCKET" \
+                --arg payload_key "$APPROVAL_PAYLOAD_KEY" \
+                --arg payload_version_id "$APPROVAL_PAYLOAD_VERSION_ID" \
+                --arg payload_sha256 "$APPROVAL_PAYLOAD_SHA256" \
+                --arg signature_bucket "$APPROVAL_SIGNATURE_BUCKET" \
+                --arg signature_key "$APPROVAL_SIGNATURE_KEY" \
+                --arg signature_version_id "$APPROVAL_SIGNATURE_VERSION_ID" \
+                --arg signature_sha256 "$APPROVAL_SIGNATURE_SHA256" '{
+                  mcp: {
+                    payload: {
+                      bucket: $payload_bucket,
+                      key: $payload_key,
+                      version_id: $payload_version_id,
+                      sha256: $payload_sha256
+                    },
+                    signature: {
+                      bucket: $signature_bucket,
+                      key: $signature_key,
+                      version_id: $signature_version_id,
+                      sha256: $signature_sha256
+                    }
+                  }
+                }'
+            )"
+            ;;
+          tiktok|openclaw) ;;
+          *) echo "FATAL: pipeline is not allowlisted"; exit 1 ;;
+        esac
         for object in receipt signature; do
           case "$object" in
             receipt)
@@ -140,6 +225,163 @@ phases:
           --expected-commit "$SOURCE_COMMIT" \
           --expected-contract-sha256 "$CONTRACT_SHA256" \
           --allowed-channel "$PROMOTION_CHANNEL"
+        if [ "$PIPELINE" = "mcp" ]; then
+          RECEIPT_APPROVAL_EVIDENCE_JSON="$(
+            jq -ec '.approval_evidence' /tmp/release-receipt.json
+          )"
+          jq -e \
+            --argjson locators "$APPROVAL_LOCATORS_JSON" '
+              .approval_evidence.payload == $locators.mcp.payload and
+              .approval_evidence.signature == $locators.mcp.signature
+            ' /tmp/release-receipt.json >/dev/null \
+            || { echo "FATAL: receipt approval locator differs from the requested locator"; exit 1; }
+          SOURCE_EVIDENCE_BUCKET="$(
+            jq -er '.source_evidence.bucket' /tmp/release-receipt.json
+          )"
+          SOURCE_EVIDENCE_KEY="$(
+            jq -er '.source_evidence.key' /tmp/release-receipt.json
+          )"
+          SOURCE_EVIDENCE_VERSION_ID="$(
+            jq -er '.source_evidence.version_id' /tmp/release-receipt.json
+          )"
+          SOURCE_EVIDENCE_SHA256="$(
+            jq -er '.source_evidence.sha256' /tmp/release-receipt.json
+          )"
+          SOURCE_EVIDENCE_SIGNATURE_KEY="$(
+            jq -er '.source_evidence.signature_key' /tmp/release-receipt.json
+          )"
+          SOURCE_EVIDENCE_SIGNATURE_VERSION_ID="$(
+            jq -er '.source_evidence.signature_version_id' /tmp/release-receipt.json
+          )"
+          [ "$SOURCE_EVIDENCE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+            || { echo "FATAL: MCP source evidence bucket is not allowlisted"; exit 1; }
+          [[ "$SOURCE_EVIDENCE_KEY" == \
+            "source-declarations/mcp/$SOURCE_COMMIT/"*".json" ]] \
+            || { echo "FATAL: MCP source declaration key is outside the commit prefix"; exit 1; }
+          [ "$SOURCE_EVIDENCE_SIGNATURE_KEY" = "$SOURCE_EVIDENCE_KEY.sig" ] \
+            || { echo "FATAL: MCP source declaration signature key mismatch"; exit 1; }
+          [[ "$SOURCE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "FATAL: invalid MCP source declaration SHA-256"; exit 1; }
+          case "$SOURCE_EVIDENCE_VERSION_ID:$SOURCE_EVIDENCE_SIGNATURE_VERSION_ID" in
+            ""|None*|null*|*:|*[!A-Za-z0-9._~+/=:-]*)
+              echo "FATAL: invalid MCP source declaration VersionId"
+              exit 1
+              ;;
+          esac
+          for source_object in declaration signature; do
+            case "$source_object" in
+              declaration)
+                source_key="$SOURCE_EVIDENCE_KEY"
+                source_version="$SOURCE_EVIDENCE_VERSION_ID"
+                source_destination="/tmp/signed-source-declaration.json"
+                ;;
+              signature)
+                source_key="$SOURCE_EVIDENCE_SIGNATURE_KEY"
+                source_version="$SOURCE_EVIDENCE_SIGNATURE_VERSION_ID"
+                source_destination="/tmp/signed-source-declaration.sig"
+                ;;
+            esac
+            aws s3api head-object \
+              --region "$EXPECTED_REGION" \
+              --bucket "$EVIDENCE_BUCKET" \
+              --key "$source_key" \
+              --version-id "$source_version" \
+              --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+              --output json >"/tmp/source-$source_object-head.json"
+            jq -e \
+              --arg version "$source_version" \
+              --arg kms "$EVIDENCE_KMS_KEY_ARN" '
+                .VersionId == $version and
+                .ObjectLockMode == "COMPLIANCE" and
+                .ServerSideEncryption == "aws:kms" and
+                .SSEKMSKeyId == $kms
+              ' "/tmp/source-$source_object-head.json" >/dev/null \
+              || { echo "FATAL: source $source_object is not exact immutable evidence"; exit 1; }
+            python3 - "/tmp/source-$source_object-head.json" <<'PY'
+        import datetime
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as handle:
+            retained = json.load(handle).get("ObjectLockRetainUntilDate", "")
+        try:
+            timestamp = datetime.datetime.fromisoformat(retained.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SystemExit("FATAL: source declaration retention timestamp is invalid") from exc
+        if timestamp <= datetime.datetime.now(datetime.UTC):
+            raise SystemExit("FATAL: source declaration immutable retention has expired")
+        PY
+            downloaded_source_version="$(
+              aws s3api get-object \
+                --region "$EXPECTED_REGION" \
+                --bucket "$EVIDENCE_BUCKET" \
+                --key "$source_key" \
+                --version-id "$source_version" \
+                --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
+                --query VersionId \
+                --output text \
+                "$source_destination"
+            )"
+            [ "$downloaded_source_version" = "$source_version" ] \
+              || { echo "FATAL: source $source_object VersionId mismatch"; exit 1; }
+          done
+          [ "$(sha256sum /tmp/signed-source-declaration.json | awk '{print $1}')" = \
+            "$SOURCE_EVIDENCE_SHA256" ] \
+            || { echo "FATAL: signed source declaration SHA-256 mismatch"; exit 1; }
+          python3 - \
+            /tmp/signed-source-declaration.json \
+            /tmp/signed-source-declaration.sha256 <<'PY'
+        import hashlib
+        import sys
+
+        with open(sys.argv[1], "rb") as source:
+            digest = hashlib.sha256(source.read()).digest()
+        with open(sys.argv[2], "wb") as output:
+            output.write(digest)
+        PY
+          aws kms verify \
+            --region "$EXPECTED_REGION" \
+            --key-id "$SOURCE_SIGNING_KEY_ARN" \
+            --message-type DIGEST \
+            --message fileb:///tmp/signed-source-declaration.sha256 \
+            --signature fileb:///tmp/signed-source-declaration.sig \
+            --signing-algorithm RSASSA_PSS_SHA_256 \
+            --output json > /tmp/source-declaration-kms-verify.json
+          [ "$(jq -er '.SignatureValid' /tmp/source-declaration-kms-verify.json)" = "true" ] \
+            || { echo "FATAL: source declaration signature is invalid"; exit 1; }
+          EXPECTED_TREE_OID="$(
+            python3 /tmp/release_evidence.py verify-source-approval-binding \
+              --declaration /tmp/signed-source-declaration.json \
+              --expected-commit "$SOURCE_COMMIT" \
+              --expected-contract-sha256 "$CONTRACT_SHA256" \
+              --expected-approval-evidence-json "$RECEIPT_APPROVAL_EVIDENCE_JSON"
+          )"
+          [[ "$EXPECTED_TREE_OID" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "FATAL: signed source tree is invalid"; exit 1; }
+          if [ "$PROMOTION_CHANNEL" = "verified-candidate" ]; then
+            APPROVAL_OPERATION="build"
+          else
+            APPROVAL_OPERATION="authorize"
+          fi
+          APPROVAL_EVIDENCE_JSON="$(
+            python3 /tmp/release_evidence.py assert-approved-release \
+              --operation "$APPROVAL_OPERATION" \
+              --approval-locators-json "$APPROVAL_LOCATORS_JSON" \
+              --approval-signing-key-arn "$APPROVAL_SIGNING_KEY_ARN" \
+              --approval-encryption-key-arn "$EVIDENCE_KMS_KEY_ARN" \
+              --expected-commit "$SOURCE_COMMIT" \
+              --expected-tree-oid "$EXPECTED_TREE_OID" \
+              --expected-inner-sha256 "$MCP_RUNTIME_CONTRACT_SHA256" \
+              --expected-outer-sha256 "$CONTRACT_SHA256" \
+              --expected-pipeline mcp \
+              --expected-environment dev \
+              --runtime-contract "$MCP_RUNTIME_CONTRACT" \
+              --contract "$MCP_CONTRACT"
+          )"
+          jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+            '.approval_evidence == $expected' /tmp/release-receipt.json >/dev/null \
+            || { echo "FATAL: receipt approval binding mismatch"; exit 1; }
+        fi
         [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] || { echo "FATAL: promoter preconditions failed"; exit 1; }
         aws ecr get-login-password --region "$EXPECTED_REGION" \
           | oras login --username AWS --password-stdin "$REGISTRY" >/dev/null

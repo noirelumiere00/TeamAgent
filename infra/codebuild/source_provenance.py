@@ -23,9 +23,14 @@ import stat
 import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+_TRUSTED_HELPER_DIRECTORY = str(Path(__file__).resolve().parent)
+if _TRUSTED_HELPER_DIRECTORY not in sys.path:
+    sys.path.insert(0, _TRUSTED_HELPER_DIRECTORY)
+
+from teamagent_schema_versions import SCHEMA_VERSIONS  # noqa: E402
 
 MANIFEST_NAME = ".teamagent-source-manifest.json"
 SOURCE_KEY = "codebuild/source.zip"
@@ -33,7 +38,7 @@ APP_HTML_BUCKET = "teamagent-dev-raw-files"
 APP_HTML_KEY = "codebuild/connect-web-app.html"
 SCHEMA_VERSION = 3
 RUNTIME_CONTRACT_PATH = "infra/codebuild/teamagent_runtime_contract.json"
-RUNTIME_CONTRACT_SCHEMA_VERSION = 4
+RUNTIME_CONTRACT_SCHEMA_VERSION = SCHEMA_VERSIONS.inner_runtime_contract
 RUNTIME_RECEIPT_SCHEMA_VERSION = 2
 TEAMAGENT_LABEL_PREFIX = "io.teamagent.build."
 RUNTIME_ENTRY_LABEL_PREFIX = "io.teamagent.contract."
@@ -83,10 +88,6 @@ _RECEIPT_KEY_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _COMPONENT_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*")
 _BUILD_ARG_RE = re.compile(r"[A-Z][A-Z0-9_]{1,127}")
 _OCI_LABEL_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,254}")
-_RFC3339_UTC_RE = re.compile(
-    r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])"
-    r"T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z"
-)
 _SUPPORTED_IMAGE_MEDIA_TYPES = {
     "application/vnd.docker.distribution.manifest.v2+json",
     "application/vnd.oci.image.manifest.v1+json",
@@ -206,105 +207,6 @@ def _validate_contract_value(value: Any, kind: Any, *, label: str) -> str:
     return value
 
 
-def _validate_rfc3339_utc(value: Any, *, label: str) -> str:
-    value = _required_contract_text(value, label=label)
-    if not _RFC3339_UTC_RE.fullmatch(value):
-        raise ProvenanceError(f"{label} must be an RFC3339 UTC timestamp at second precision")
-    try:
-        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
-    except ValueError as exc:
-        raise ProvenanceError(f"{label} is not a valid UTC timestamp") from exc
-    return value
-
-
-def _validate_approval_record(value: Any, *, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ProvenanceError(f"{label} must be an object")
-    _require_exact_keys(
-        value,
-        {
-            "approved_at_utc",
-            "approved_by",
-            "source_commit",
-            "observations",
-            "decision",
-        },
-        label=label,
-    )
-    approved_at_utc = _validate_rfc3339_utc(
-        value["approved_at_utc"],
-        label=f"{label}.approved_at_utc",
-    )
-    approved_by = _required_contract_text(
-        value["approved_by"],
-        label=f"{label}.approved_by",
-    )
-    source_commit = _required_contract_text(
-        value["source_commit"],
-        label=f"{label}.source_commit",
-    )
-    if not _SHA1_RE.fullmatch(source_commit):
-        raise ProvenanceError(f"{label}.source_commit must be a full lowercase Git SHA-1")
-    decision = _required_contract_text(
-        value["decision"],
-        label=f"{label}.decision",
-        minimum=len("APPROVED: "),
-    )
-    if not decision.startswith("APPROVED: "):
-        raise ProvenanceError(f"{label}.decision must begin with 'APPROVED: '")
-
-    observations = value["observations"]
-    if not isinstance(observations, list) or not observations:
-        raise ProvenanceError(f"{label}.observations must be a non-empty array")
-    if len(observations) > 64:
-        raise ProvenanceError(f"{label}.observations exceeds the 64-entry limit")
-    normalized_observations: list[dict[str, str]] = []
-    seen_keys: set[str] = set()
-    for index, observation in enumerate(observations):
-        observation_label = f"{label}.observations[{index}]"
-        if not isinstance(observation, dict):
-            raise ProvenanceError(f"{observation_label} must be an object")
-        _require_exact_keys(
-            observation,
-            {"key", "value", "observed_at_utc", "source"},
-            label=observation_label,
-        )
-        key = _required_contract_text(
-            observation["key"],
-            label=f"{observation_label}.key",
-        )
-        if not _RECEIPT_KEY_RE.fullmatch(key):
-            raise ProvenanceError(f"{observation_label}.key is not canonical")
-        if key in seen_keys:
-            raise ProvenanceError(f"duplicate {label} observation key: {key}")
-        seen_keys.add(key)
-        normalized_observations.append(
-            {
-                "key": key,
-                "value": _required_contract_text(
-                    observation["value"],
-                    label=f"{observation_label}.value",
-                ),
-                "observed_at_utc": _validate_rfc3339_utc(
-                    observation["observed_at_utc"],
-                    label=f"{observation_label}.observed_at_utc",
-                ),
-                "source": _required_contract_text(
-                    observation["source"],
-                    label=f"{observation_label}.source",
-                ),
-            }
-        )
-
-    return {
-        "approved_at_utc": approved_at_utc,
-        "approved_by": approved_by,
-        "source_commit": source_commit,
-        "observations": normalized_observations,
-        "decision": decision,
-    }
-
-
 def validate_runtime_contract(value: Any, *, label: str = "runtime contract") -> dict[str, Any]:
     """Validate the generic, exact runtime receipt and its Docker/OCI bindings."""
 
@@ -312,7 +214,7 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
         raise ProvenanceError(f"{label} must be a JSON object")
     _require_exact_keys(
         value,
-        {"schema_version", "release", "approval_record", "receipt"},
+        {"schema_version", "release", "receipt"},
         label=label,
     )
     if value["schema_version"] != RUNTIME_CONTRACT_SCHEMA_VERSION:
@@ -343,16 +245,6 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
             label=f"{label} release.blocked_reason",
             minimum=20,
         )
-    approval_record = value["approval_record"]
-    if release["ready"]:
-        normalized_approval_record: dict[str, Any] | None = _validate_approval_record(
-            approval_record,
-            label=f"{label} approval_record",
-        )
-    else:
-        if approval_record is not None:
-            raise ProvenanceError(f"{label} blocked release approval_record must be null")
-        normalized_approval_record = None
     if receipt["schema_version"] != RUNTIME_RECEIPT_SCHEMA_VERSION:
         raise ProvenanceError(f"unsupported {label} receipt schema: {receipt['schema_version']!r}")
     if receipt["subject"] != "core":
@@ -414,9 +306,7 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
         if not _OCI_LABEL_RE.fullmatch(oci_label) or not oci_label.startswith(
             RUNTIME_ENTRY_LABEL_PREFIX
         ):
-            raise ProvenanceError(
-                f"{entry_label}.oci_label must use {RUNTIME_ENTRY_LABEL_PREFIX}"
-            )
+            raise ProvenanceError(f"{entry_label}.oci_label must use {RUNTIME_ENTRY_LABEL_PREFIX}")
         if oci_label in _RESERVED_TEAMAGENT_LABELS:
             raise ProvenanceError(f"{entry_label}.oci_label is reserved: {oci_label}")
         uses = raw_entry["dockerfile_uses"]
@@ -464,7 +354,6 @@ def validate_runtime_contract(value: Any, *, label: str = "runtime contract") ->
     normalized = {
         "schema_version": RUNTIME_CONTRACT_SCHEMA_VERSION,
         "release": {"ready": release["ready"], "blocked_reason": blocked_reason},
-        "approval_record": normalized_approval_record,
         "receipt": {
             "schema_version": RUNTIME_RECEIPT_SCHEMA_VERSION,
             "subject": "core",
@@ -556,25 +445,6 @@ def require_release_ready(contract: dict[str, Any], *, label: str = "runtime con
     }
     if mismatches:
         raise ProvenanceError(f"{label} release evidence bindings are invalid: {mismatches}")
-
-
-def require_release_ready_for_commit(
-    contract: dict[str, Any],
-    expected_commit: str,
-    *,
-    label: str = "runtime contract",
-) -> None:
-    require_release_ready(contract, label=label)
-    if not isinstance(expected_commit, str) or not _SHA1_RE.fullmatch(expected_commit):
-        raise ProvenanceError("expected commit must be a full lowercase SHA-1")
-    approval_record = contract["approval_record"]
-    if (
-        approval_record is None
-        or approval_record["source_commit"] != expected_commit
-    ):
-        raise ProvenanceError(
-            f"{label} approval source_commit does not bind the expected build commit"
-        )
 
 
 def load_runtime_contract(path: Path) -> dict[str, Any]:
@@ -778,24 +648,16 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
         ),
         "inner contract JSON": "contract = json.loads(raw)",
         "inner contract raw SHA-256": (
-            "assert hashlib.sha256(raw).hexdigest() == "
-            "os.environ['RUNTIME_CONTRACT_SHA256']"
+            "assert hashlib.sha256(raw).hexdigest() == os.environ['RUNTIME_CONTRACT_SHA256']"
         ),
         "inner receipt entries": "entries = contract['receipt']['entries']",
         "strict receipt base64 decode": "base64.b64decode(encoded, validate=True)",
-        "canonical receipt base64": (
-            "assert base64.b64encode(receipt).decode('ascii') == encoded"
-        ),
+        "canonical receipt base64": ("assert base64.b64encode(receipt).decode('ascii') == encoded"),
         "receipt bytes SHA-256": (
-            "assert hashlib.sha256(receipt).hexdigest() == "
-            "os.environ['RUNTIME_RECEIPT_SHA256']"
+            "assert hashlib.sha256(receipt).hexdigest() == os.environ['RUNTIME_RECEIPT_SHA256']"
         ),
-        "contract values": (
-            "{entry['key']: entry['value'] for entry in entries}"
-        ),
-        "receipt subject binding": (
-            "'subject': contract['receipt']['subject']"
-        ),
+        "contract values": ("{entry['key']: entry['value'] for entry in entries}"),
+        "receipt subject binding": ("'subject': contract['receipt']['subject']"),
         "canonical receipt bytes": (
             "assert receipt == json.dumps(expected_receipt, sort_keys=True, "
             "separators=(',', ':')).encode('utf-8')"
@@ -803,8 +665,7 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
         "core receipt subject": "assert parsed_receipt['subject'] == 'core'",
         "exact receipt values": "assert parsed_receipt['values'] == expected_values",
         "receipt entry ARG values": (
-            "assert all(os.environ[entry['build_arg']] == entry['value'] "
-            "for entry in entries)"
+            "assert all(os.environ[entry['build_arg']] == entry['value'] for entry in entries)"
         ),
     }
     for proof_name, proof in receipt_proofs.items():
@@ -927,8 +788,7 @@ def verify_dockerfile_contract(contract_path: Path, dockerfile_path: Path) -> No
             continue
         if proof not in receipt_proof_run:
             raise ProvenanceError(
-                "Dockerfile runtime receipt proof must be atomic in one builder RUN "
-                f"({proof_name})"
+                f"Dockerfile runtime receipt proof must be atomic in one builder RUN ({proof_name})"
             )
     for label_name, stages in receipt_label_stages.items():
         if stages != ["final"]:
@@ -1515,9 +1375,8 @@ def _parser() -> argparse.ArgumentParser:
     contract_sha256 = subparsers.add_parser("contract-sha256")
     contract_sha256.add_argument("--contract", type=Path, required=True)
 
-    release_ready = subparsers.add_parser("assert-release-ready")
-    release_ready.add_argument("--contract", type=Path, required=True)
-    release_ready.add_argument("--expected-commit", required=True)
+    contract_ready = subparsers.add_parser("assert-contract-ready")
+    contract_ready.add_argument("--contract", type=Path, required=True)
 
     build_arguments = subparsers.add_parser("docker-build-arguments")
     build_arguments.add_argument("--contract", type=Path, required=True)
@@ -1575,12 +1434,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"source provenance verified: {args.expected_commit} ({args.expected_branch})")
         elif args.command == "contract-sha256":
             print(runtime_contract_sha256(args.contract))
-        elif args.command == "assert-release-ready":
-            require_release_ready_for_commit(
-                load_runtime_contract(args.contract),
-                args.expected_commit,
-            )
-            print("runtime contract release evidence is complete")
+        elif args.command == "assert-contract-ready":
+            require_release_ready(load_runtime_contract(args.contract))
+            print("runtime contract static evidence is complete")
         elif args.command == "docker-build-arguments":
             contract = verify_runtime_contract_digest(
                 args.contract,

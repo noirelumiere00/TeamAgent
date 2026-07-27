@@ -18,6 +18,8 @@ APP_BUCKET="teamagent-dev-raw-files"
 APP_KEY="codebuild/connect-web-app.html"
 BAKED_APP_KEY="codebuild/baked-fallback/connect-web-app.html"
 EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
+EVIDENCE_KMS_ALIAS="alias/teamagent-dev-image-release-evidence"
+APPROVAL_SIGNING_KEY_ALIAS="alias/teamagent-dev-mcp-approval"
 SOURCE_PUBLISHER_PROJECT="teamagent-dev-mcp-source-publisher"
 IMAGE_PROJECT="teamagent-dev-image-builder"
 ATTESTOR_PROJECT="teamagent-dev-image-attestor"
@@ -27,6 +29,14 @@ MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-media-worker-verified-candidates"
 SOURCE_CONNECTION_NAME="teamagent-dev-openclaw-codebuild"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
+APPROVAL_PAYLOAD_BUCKET=""
+APPROVAL_PAYLOAD_KEY=""
+APPROVAL_PAYLOAD_VERSION_ID=""
+APPROVAL_PAYLOAD_SHA256=""
+APPROVAL_SIGNATURE_BUCKET=""
+APPROVAL_SIGNATURE_KEY=""
+APPROVAL_SIGNATURE_VERSION_ID=""
+APPROVAL_SIGNATURE_SHA256=""
 
 die() {
   echo "FATAL: $*" >&2
@@ -35,7 +45,16 @@ die() {
 
 usage() {
   cat <<'EOF'
-usage: build_teamagent_image.sh [--poll-seconds N] [--timeout-seconds N]
+usage: build_teamagent_image.sh
+  --approval-payload-bucket BUCKET
+  --approval-payload-key KEY
+  --approval-payload-version-id VERSION_ID
+  --approval-payload-sha256 SHA256
+  --approval-signature-bucket BUCKET
+  --approval-signature-key KEY
+  --approval-signature-version-id VERSION_ID
+  --approval-signature-sha256 SHA256
+  [--poll-seconds N] [--timeout-seconds N]
 
 Builds, attests, and publishes the exact current origin/dev commit to the
 isolated verified-candidate repository. It does not
@@ -51,6 +70,14 @@ require_value() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --approval-payload-bucket) require_value "$@"; APPROVAL_PAYLOAD_BUCKET="$2"; shift 2 ;;
+    --approval-payload-key) require_value "$@"; APPROVAL_PAYLOAD_KEY="$2"; shift 2 ;;
+    --approval-payload-version-id) require_value "$@"; APPROVAL_PAYLOAD_VERSION_ID="$2"; shift 2 ;;
+    --approval-payload-sha256) require_value "$@"; APPROVAL_PAYLOAD_SHA256="$2"; shift 2 ;;
+    --approval-signature-bucket) require_value "$@"; APPROVAL_SIGNATURE_BUCKET="$2"; shift 2 ;;
+    --approval-signature-key) require_value "$@"; APPROVAL_SIGNATURE_KEY="$2"; shift 2 ;;
+    --approval-signature-version-id) require_value "$@"; APPROVAL_SIGNATURE_VERSION_ID="$2"; shift 2 ;;
+    --approval-signature-sha256) require_value "$@"; APPROVAL_SIGNATURE_SHA256="$2"; shift 2 ;;
     --poll-seconds) require_value "$@"; POLL_SECONDS="$2"; shift 2 ;;
     --timeout-seconds) require_value "$@"; TIMEOUT_SECONDS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -60,6 +87,29 @@ done
 [[ "$POLL_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "poll interval must be positive"
 [[ "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || die "timeout must be positive"
 [ "$TIMEOUT_SECONDS" -ge "$POLL_SECONDS" ] || die "timeout is shorter than polling"
+for required in \
+  APPROVAL_PAYLOAD_BUCKET APPROVAL_PAYLOAD_KEY APPROVAL_PAYLOAD_VERSION_ID \
+  APPROVAL_PAYLOAD_SHA256 APPROVAL_SIGNATURE_BUCKET APPROVAL_SIGNATURE_KEY \
+  APPROVAL_SIGNATURE_VERSION_ID APPROVAL_SIGNATURE_SHA256; do
+  [ -n "${!required}" ] || die "$required is required"
+done
+[ "$APPROVAL_PAYLOAD_BUCKET" = "$EVIDENCE_BUCKET" ] \
+  && [ "$APPROVAL_SIGNATURE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+  || die "approval buckets are not allowlisted"
+[[ "$APPROVAL_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  && [[ "$APPROVAL_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || die "approval hashes must be lowercase SHA-256 values"
+[ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+  || die "approval signature key mismatch"
+for approval_version in \
+  "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+  case "$approval_version" in
+    ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+      die "invalid approval VersionId"
+      ;;
+  esac
+done
+unset approval_version
 for tool in aws git jq python3 sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
@@ -102,6 +152,11 @@ REMOTE_BASE_OID="$(
   || die "protected remote head/base lookup was missing or ambiguous"
 [ "$COMMIT" = "$REMOTE_COMMIT" ] \
   || die "local dev HEAD must exactly equal the fresh protected remote head"
+[[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$REMOTE_COMMIT/[0-9a-f]{64}\.json$ ]] \
+  || die "approval payload key does not bind protected dev HEAD"
+[ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+  "approval-records/mcp/$REMOTE_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+  || die "approval payload key/hash mismatch"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/teamagent-build-launcher.XXXXXXXX")"
 cleanup() {
   rm -rf -- "$TMP_DIR"
@@ -129,6 +184,9 @@ git -C "$REVIEW_CHECKOUT" archive --format=tar "$REMOTE_COMMIT" \
 [ "$(git -C "$REVIEW_CHECKOUT" rev-parse "$REMOTE_COMMIT^{tree}")" = "$(
   git -C "$REVIEW_CHECKOUT" rev-parse HEAD^{tree}
 )" ] || die "detached reviewed source tree mismatch"
+EXPECTED_TREE_OID="$(git -C "$REVIEW_CHECKOUT" rev-parse HEAD^{tree})"
+[[ "$EXPECTED_TREE_OID" =~ ^[0-9a-f]{40}$ ]] \
+  || die "detached reviewed source tree is invalid"
 [ -s "$TMP_DIR/reviewed-source.tar" ] || die "detached reviewed archive is empty"
 [ -z "$(git -C "$REVIEW_CHECKOUT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)" ] \
   || die "detached reviewed checkout changed"
@@ -136,8 +194,10 @@ SOURCE_MANIFEST_CONTRACT="$REVIEW_CHECKOUT/infra/codebuild/teamagent_runtime_con
 RELEASE_CONTRACT="$REVIEW_CHECKOUT/infra/codebuild/teamagent_core_media_release_contract.json"
 PROVENANCE="$REVIEW_CHECKOUT/infra/codebuild/source_provenance.py"
 BUNDLE_PROVENANCE="$REVIEW_CHECKOUT/infra/codebuild/teamagent_bundle_provenance.py"
+RELEASE_EVIDENCE="$REVIEW_CHECKOUT/infra/codebuild/release_evidence.py"
 [ -f "$SOURCE_MANIFEST_CONTRACT" ] && [ -f "$RELEASE_CONTRACT" ] \
   && [ -f "$PROVENANCE" ] && [ -f "$BUNDLE_PROVENANCE" ] \
+  && [ -f "$RELEASE_EVIDENCE" ] \
   || die "trusted detached contract helpers are missing"
 SOURCE_MANIFEST_CONTRACT_SHA256="$(
   python3 "$PROVENANCE" contract-sha256 --contract "$SOURCE_MANIFEST_CONTRACT"
@@ -145,10 +205,9 @@ SOURCE_MANIFEST_CONTRACT_SHA256="$(
 RELEASE_CONTRACT_SHA256="$(
   python3 "$BUNDLE_PROVENANCE" contract-sha256 --contract "$RELEASE_CONTRACT"
 )"
-python3 "$BUNDLE_PROVENANCE" assert-release-ready \
+python3 "$BUNDLE_PROVENANCE" assert-contract-ready \
   --contract "$RELEASE_CONTRACT" \
-  --expected-commit "$REMOTE_COMMIT" \
-  || die "TeamAgent core/media release contract is not approved for release"
+  || die "TeamAgent core/media release contract is not statically ready"
 mapfile -t PRODUCTION_APP_RECORD < <(
   python3 "$BUNDLE_PROVENANCE" production-record \
     --deploy-log "$REVIEW_CHECKOUT/infra/deploy_log.md" \
@@ -221,6 +280,68 @@ IFS=$'\t' read -r SESSION_ACCOUNT SESSION_ARN EXTRA <<<"$SESSION_IDENTITY"
   && [ "$SESSION_ARN" = "$EXPECTED_SESSION_ARN" ] \
   || die "unexpected pinned launcher session"
 unset SESSION_IDENTITY SESSION_ACCOUNT SESSION_ARN EXTRA
+
+EVIDENCE_KMS_KEY_ARN="$(
+  AWS_PAGER="" aws kms describe-key \
+    --region "$REGION" \
+    --key-id "$EVIDENCE_KMS_ALIAS" \
+    --query KeyMetadata.Arn \
+    --output text
+)" || die "could not resolve the fixed release-evidence KMS key"
+APPROVAL_SIGNING_KEY_ARN="$(
+  AWS_PAGER="" aws kms describe-key \
+    --region "$REGION" \
+    --key-id "$APPROVAL_SIGNING_KEY_ALIAS" \
+    --query KeyMetadata.Arn \
+    --output text
+)" || die "could not resolve the fixed MCP approval signing key"
+[[ "$EVIDENCE_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+  || die "release-evidence KMS key is outside the fixed account"
+[[ "$APPROVAL_SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+  || die "approval signing key is outside the fixed account"
+APPROVAL_LOCATORS_JSON="$(
+  jq -cn \
+    --arg payload_bucket "$APPROVAL_PAYLOAD_BUCKET" \
+    --arg payload_key "$APPROVAL_PAYLOAD_KEY" \
+    --arg payload_version_id "$APPROVAL_PAYLOAD_VERSION_ID" \
+    --arg payload_sha256 "$APPROVAL_PAYLOAD_SHA256" \
+    --arg signature_bucket "$APPROVAL_SIGNATURE_BUCKET" \
+    --arg signature_key "$APPROVAL_SIGNATURE_KEY" \
+    --arg signature_version_id "$APPROVAL_SIGNATURE_VERSION_ID" \
+    --arg signature_sha256 "$APPROVAL_SIGNATURE_SHA256" '{
+      mcp: {
+        payload: {
+          bucket: $payload_bucket,
+          key: $payload_key,
+          version_id: $payload_version_id,
+          sha256: $payload_sha256
+        },
+        signature: {
+          bucket: $signature_bucket,
+          key: $signature_key,
+          version_id: $signature_version_id,
+          sha256: $signature_sha256
+        }
+      }
+    }'
+)"
+APPROVAL_EVIDENCE_JSON="$(
+  python3 "$RELEASE_EVIDENCE" assert-approved-release \
+    --operation build \
+    --approval-locators-json "$APPROVAL_LOCATORS_JSON" \
+    --approval-signing-key-arn "$APPROVAL_SIGNING_KEY_ARN" \
+    --approval-encryption-key-arn "$EVIDENCE_KMS_KEY_ARN" \
+    --expected-commit "$REMOTE_COMMIT" \
+    --expected-tree-oid "$EXPECTED_TREE_OID" \
+    --expected-inner-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256" \
+    --expected-outer-sha256 "$RELEASE_CONTRACT_SHA256" \
+    --expected-pipeline mcp \
+    --expected-environment dev \
+    --runtime-contract "$SOURCE_MANIFEST_CONTRACT" \
+    --contract "$RELEASE_CONTRACT"
+)" || die "MCP build approval is missing, invalid, or expired"
+jq -e 'type == "object"' <<<"$APPROVAL_EVIDENCE_JSON" >/dev/null \
+  || die "MCP approval evidence output is invalid"
 
 assert_source_connection_available() {
   local inventory="$TMP_DIR/codeconnections.json"
@@ -387,7 +508,16 @@ environment_json "$PUBLISHER_ENV" \
   "EXPECTED_COMMIT=$COMMIT" \
   "EXPECTED_BASE_OID=$REMOTE_BASE_OID" \
   "SOURCE_MANIFEST_CONTRACT_SHA256=$SOURCE_MANIFEST_CONTRACT_SHA256" \
-  "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256"
+  "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+  "APPROVAL_PAYLOAD_BUCKET=$APPROVAL_PAYLOAD_BUCKET" \
+  "APPROVAL_PAYLOAD_KEY=$APPROVAL_PAYLOAD_KEY" \
+  "APPROVAL_PAYLOAD_VERSION_ID=$APPROVAL_PAYLOAD_VERSION_ID" \
+  "APPROVAL_PAYLOAD_SHA256=$APPROVAL_PAYLOAD_SHA256" \
+  "APPROVAL_SIGNATURE_BUCKET=$APPROVAL_SIGNATURE_BUCKET" \
+  "APPROVAL_SIGNATURE_KEY=$APPROVAL_SIGNATURE_KEY" \
+  "APPROVAL_SIGNATURE_VERSION_ID=$APPROVAL_SIGNATURE_VERSION_ID" \
+  "APPROVAL_SIGNATURE_SHA256=$APPROVAL_SIGNATURE_SHA256" \
+  "APPROVAL_SIGNING_KEY_ARN=$APPROVAL_SIGNING_KEY_ARN"
 PUBLISHER_BUILD_ID="$(start_build "$SOURCE_PUBLISHER_PROJECT" "$PUBLISHER_ENV" "$COMMIT")"
 [[ "$PUBLISHER_BUILD_ID" == "$SOURCE_PUBLISHER_PROJECT:"* ]] || die "invalid publisher build ID"
 wait_build "$PUBLISHER_BUILD_ID" "$COMMIT"
@@ -421,7 +551,16 @@ environment_json "$IMAGE_ENV" \
   "SOURCE_DECLARATION_VERSION_ID=$DECLARATION_VERSION" \
   "SOURCE_DECLARATION_SHA256=$DECLARATION_SHA256" \
   "SOURCE_DECLARATION_SIGNATURE_KEY=$DECLARATION_SIGNATURE_KEY" \
-  "SOURCE_DECLARATION_SIGNATURE_VERSION_ID=$DECLARATION_SIGNATURE_VERSION"
+  "SOURCE_DECLARATION_SIGNATURE_VERSION_ID=$DECLARATION_SIGNATURE_VERSION" \
+  "APPROVAL_PAYLOAD_BUCKET=$APPROVAL_PAYLOAD_BUCKET" \
+  "APPROVAL_PAYLOAD_KEY=$APPROVAL_PAYLOAD_KEY" \
+  "APPROVAL_PAYLOAD_VERSION_ID=$APPROVAL_PAYLOAD_VERSION_ID" \
+  "APPROVAL_PAYLOAD_SHA256=$APPROVAL_PAYLOAD_SHA256" \
+  "APPROVAL_SIGNATURE_BUCKET=$APPROVAL_SIGNATURE_BUCKET" \
+  "APPROVAL_SIGNATURE_KEY=$APPROVAL_SIGNATURE_KEY" \
+  "APPROVAL_SIGNATURE_VERSION_ID=$APPROVAL_SIGNATURE_VERSION_ID" \
+  "APPROVAL_SIGNATURE_SHA256=$APPROVAL_SIGNATURE_SHA256" \
+  "APPROVAL_SIGNING_KEY_ARN=$APPROVAL_SIGNING_KEY_ARN"
 IMAGE_BUILD_ID="$(start_build "$IMAGE_PROJECT" "$IMAGE_ENV" "$SOURCE_VERSION_ID")"
 [[ "$IMAGE_BUILD_ID" == "$IMAGE_PROJECT:"* ]] || die "invalid image build ID"
 wait_build "$IMAGE_BUILD_ID" "$SOURCE_VERSION_ID"
@@ -467,7 +606,16 @@ environment_json "$ATTESTOR_ENV" \
   "SOURCE_EVIDENCE_SIGNATURE_KEY=$DECLARATION_SIGNATURE_KEY" \
   "SOURCE_EVIDENCE_SIGNATURE_VERSION_ID=$DECLARATION_SIGNATURE_VERSION" \
   "BUILD_ID=$IMAGE_BUILD_ID" \
-  "SUBJECTS_JSON=$SUBJECTS_JSON"
+  "SUBJECTS_JSON=$SUBJECTS_JSON" \
+  "APPROVAL_PAYLOAD_BUCKET=$APPROVAL_PAYLOAD_BUCKET" \
+  "APPROVAL_PAYLOAD_KEY=$APPROVAL_PAYLOAD_KEY" \
+  "APPROVAL_PAYLOAD_VERSION_ID=$APPROVAL_PAYLOAD_VERSION_ID" \
+  "APPROVAL_PAYLOAD_SHA256=$APPROVAL_PAYLOAD_SHA256" \
+  "APPROVAL_SIGNATURE_BUCKET=$APPROVAL_SIGNATURE_BUCKET" \
+  "APPROVAL_SIGNATURE_KEY=$APPROVAL_SIGNATURE_KEY" \
+  "APPROVAL_SIGNATURE_VERSION_ID=$APPROVAL_SIGNATURE_VERSION_ID" \
+  "APPROVAL_SIGNATURE_SHA256=$APPROVAL_SIGNATURE_SHA256" \
+  "APPROVAL_SIGNING_KEY_ARN=$APPROVAL_SIGNING_KEY_ARN"
 ATTESTOR_BUILD_ID="$(start_build "$ATTESTOR_PROJECT" "$ATTESTOR_ENV")"
 [[ "$ATTESTOR_BUILD_ID" == "$ATTESTOR_PROJECT:"* ]] || die "invalid attestor build ID"
 wait_build "$ATTESTOR_BUILD_ID"
@@ -489,7 +637,16 @@ environment_json "$PROMOTER_ENV" \
   "RECEIPT_KEY=$RECEIPT_KEY" \
   "RECEIPT_VERSION_ID=$RECEIPT_VERSION" \
   "RECEIPT_SIGNATURE_KEY=$RECEIPT_SIGNATURE_KEY" \
-  "RECEIPT_SIGNATURE_VERSION_ID=$RECEIPT_SIGNATURE_VERSION"
+  "RECEIPT_SIGNATURE_VERSION_ID=$RECEIPT_SIGNATURE_VERSION" \
+  "APPROVAL_PAYLOAD_BUCKET=$APPROVAL_PAYLOAD_BUCKET" \
+  "APPROVAL_PAYLOAD_KEY=$APPROVAL_PAYLOAD_KEY" \
+  "APPROVAL_PAYLOAD_VERSION_ID=$APPROVAL_PAYLOAD_VERSION_ID" \
+  "APPROVAL_PAYLOAD_SHA256=$APPROVAL_PAYLOAD_SHA256" \
+  "APPROVAL_SIGNATURE_BUCKET=$APPROVAL_SIGNATURE_BUCKET" \
+  "APPROVAL_SIGNATURE_KEY=$APPROVAL_SIGNATURE_KEY" \
+  "APPROVAL_SIGNATURE_VERSION_ID=$APPROVAL_SIGNATURE_VERSION_ID" \
+  "APPROVAL_SIGNATURE_SHA256=$APPROVAL_SIGNATURE_SHA256" \
+  "APPROVAL_SIGNING_KEY_ARN=$APPROVAL_SIGNING_KEY_ARN"
 PROMOTER_BUILD_ID="$(start_build "$PROMOTER_PROJECT" "$PROMOTER_ENV")"
 [[ "$PROMOTER_BUILD_ID" == "$PROMOTER_PROJECT:"* ]] || die "invalid promoter build ID"
 wait_build "$PROMOTER_BUILD_ID"

@@ -58,8 +58,16 @@ def test_launcher_requires_clean_local_dev_equal_to_exact_remote_head() -> None:
     assert 'EXPECTED_BRANCH="dev"' in body
     assert 'EXPECTED_ORIGIN_URL="git@github.com:noirelumiere00/TeamAgent.git"' in body
     assert 'EXPECTED_BASE_REF="refs/heads/main"' in body
-    assert "assert-release-ready" in body
+    assert "assert-contract-ready" in body
+    assert "assert-release-ready" not in body
+    assert "assert-approved-release" in body
     assert '--expected-commit "$REMOTE_COMMIT"' in body
+    assert body.index("assert-contract-ready") < body.index(
+        "aws sts get-caller-identity"
+    )
+    assert body.index("assert-approved-release") < body.index(
+        'start_build "$SOURCE_PUBLISHER_PROJECT"'
+    )
 
 
 def test_launcher_assumes_exact_role_once_and_pins_temporary_session() -> None:
@@ -132,6 +140,26 @@ def test_launcher_binds_current_canonical_app_and_signed_source_versions() -> No
         "SOURCE_DECLARATION_SIGNATURE_VERSION_ID",
     ):
         assert f'"{name}=' in body
+    for name in (
+        "APPROVAL_PAYLOAD_BUCKET",
+        "APPROVAL_PAYLOAD_KEY",
+        "APPROVAL_PAYLOAD_VERSION_ID",
+        "APPROVAL_PAYLOAD_SHA256",
+        "APPROVAL_SIGNATURE_BUCKET",
+        "APPROVAL_SIGNATURE_KEY",
+        "APPROVAL_SIGNATURE_VERSION_ID",
+        "APPROVAL_SIGNATURE_SHA256",
+        "APPROVAL_SIGNING_KEY_ARN",
+    ):
+        assert body.count(f'"{name}=') == 4
+    assert "mcp: {" in body
+
+
+def test_launcher_without_approval_fails_before_any_build_or_aws_call() -> None:
+    result = _run()
+
+    assert result.returncode != 0
+    assert "APPROVAL_PAYLOAD_BUCKET is required" in result.stderr
 
 
 def test_launcher_orders_publisher_builder_attestor_then_candidate_promoter() -> None:

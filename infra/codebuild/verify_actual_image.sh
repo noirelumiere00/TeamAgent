@@ -18,6 +18,7 @@ CONTRACT_SHA256=""
 BUILD_CONTEXT_SHA256=""
 RUNTIME_CONTRACT=""
 EXPECTED_RUNTIME_CONTRACT_SHA256=""
+APPROVAL_EVIDENCE_JSON=""
 IMAGE_DIGEST=""
 SIGNING_KEY_ARN=""
 OUTPUT=""
@@ -44,6 +45,7 @@ while [ "$#" -gt 0 ]; do
     --contract-sha256) value "$@"; CONTRACT_SHA256="$2"; shift 2 ;;
     --build-context-sha256) value "$@"; BUILD_CONTEXT_SHA256="$2"; shift 2 ;;
     --runtime-contract) value "$@"; RUNTIME_CONTRACT="$2"; shift 2 ;;
+    --approval-evidence-json) value "$@"; APPROVAL_EVIDENCE_JSON="$2"; shift 2 ;;
     --image-digest) value "$@"; IMAGE_DIGEST="$2"; shift 2 ;;
     --signing-key-arn) value "$@"; SIGNING_KEY_ARN="$2"; shift 2 ;;
     --output) value "$@"; OUTPUT="$2"; shift 2 ;;
@@ -73,8 +75,17 @@ if [ "$PIPELINE" = "mcp" ]; then
     || die "MCP canonical build context SHA-256 is required"
   [ -n "$RUNTIME_CONTRACT" ] || die "MCP inner runtime contract is required"
   [ -f "$RUNTIME_CONTRACT" ] || die "MCP inner runtime contract is missing"
-elif [ -n "$BUILD_CONTEXT_SHA256" ] || [ -n "$RUNTIME_CONTRACT" ]; then
-  die "build context SHA-256 and runtime contract are only accepted for the MCP pipeline"
+  [ -n "$APPROVAL_EVIDENCE_JSON" ] || die "MCP approval evidence JSON is required"
+  jq -e 'type == "object"' <<<"$APPROVAL_EVIDENCE_JSON" >/dev/null \
+    || die "MCP approval evidence JSON is invalid"
+  RELEASE_APPROVAL_SHA256="$(
+    jq -er '.approval_payload_sha256 | select(test("^[0-9a-f]{64}$"))' \
+      <<<"$APPROVAL_EVIDENCE_JSON"
+  )" || die "MCP approval evidence lacks a valid payload hash"
+elif [ -n "$BUILD_CONTEXT_SHA256" ] \
+  || [ -n "$RUNTIME_CONTRACT" ] \
+  || [ -n "$APPROVAL_EVIDENCE_JSON" ]; then
+  die "MCP-only evidence arguments were provided for another pipeline"
 fi
 [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || die "invalid image digest"
 [[ "$SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] \
@@ -284,7 +295,7 @@ PY
 syft "$IMAGE" --output spdx-json="$SBOM"
 python3 - "$PIPELINE" "$SUBJECT_NAME" "$COMMIT" "$CONTRACT_SHA256" \
   "$BUILD_CONTEXT_SHA256" "$EXPECTED_RUNTIME_CONTRACT_SHA256" \
-  "$IMAGE_DIGEST" "$PROVENANCE" <<'PY'
+  "${RELEASE_APPROVAL_SHA256-}" "$IMAGE_DIGEST" "$PROVENANCE" <<'PY'
 import json
 import sys
 
@@ -295,6 +306,7 @@ import sys
     contract_sha256,
     build_context_sha256,
     runtime_contract_sha256,
+    release_approval_sha256,
     image_digest,
     output,
 ) = sys.argv[1:]
@@ -342,6 +354,9 @@ if pipeline == "mcp":
     value["predicate"]["buildDefinition"]["externalParameters"][
         "runtimeContractSha256"
     ] = runtime_contract_sha256
+    value["predicate"]["buildDefinition"]["externalParameters"][
+        "releaseApprovalSha256"
+    ] = release_approval_sha256
 with open(output, "w", encoding="utf-8") as handle:
     json.dump(value, handle, sort_keys=True, separators=(",", ":"))
     handle.write("\n")
@@ -430,6 +445,7 @@ if [ -n "$BUILD_CONTEXT_SHA256" ]; then
   EVIDENCE_CONTEXT_ARGUMENTS=(
     --build-context-sha256 "$BUILD_CONTEXT_SHA256"
     --runtime-contract "$RUNTIME_CONTRACT"
+    --approval-evidence-json "$APPROVAL_EVIDENCE_JSON"
   )
 fi
 python3 "$EVIDENCE_HELPER" \

@@ -53,6 +53,8 @@ phases:
         printf '%s  %s\n' '__SOURCE_PROVENANCE_SHA256__' infra/codebuild/source_provenance.py | sha256sum -c -
         printf '%s  %s\n' '__RELEASE_EVIDENCE_SHA256__' infra/codebuild/release_evidence.py | sha256sum -c -
         printf '%s  %s\n' '__TEAMAGENT_BUNDLE_PROVENANCE_SHA256__' "$BUNDLE_PROVENANCE" | sha256sum -c -
+        printf '%s  %s\n' '__TEAMAGENT_SCHEMA_VERSIONS_SHA256__' infra/codebuild/teamagent_schema_versions.py | sha256sum -c -
+        printf '%s  %s\n' '__TEAMAGENT_RELEASE_APPROVAL_SHA256__' infra/codebuild/teamagent_release_approval.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_IMAGE_RESOLVER_SHA256__' infra/codebuild/resolve_ecr_image.py | sha256sum -c -
         printf '%s  %s\n' '__ECR_SCAN_GATE_SHA256__' infra/codebuild/verify_ecr_scan.py | sha256sum -c -
 
@@ -73,6 +75,15 @@ phases:
         : "${SOURCE_DECLARATION_SIGNATURE_KEY:?SOURCE_DECLARATION_SIGNATURE_KEY must be explicitly provided}"
         : "${SOURCE_DECLARATION_SIGNATURE_VERSION_ID:?SOURCE_DECLARATION_SIGNATURE_VERSION_ID must be explicitly provided}"
         : "${SOURCE_ARCHIVE_VERSION_ID:?SOURCE_ARCHIVE_VERSION_ID must be explicitly provided}"
+        : "${APPROVAL_PAYLOAD_BUCKET:?APPROVAL_PAYLOAD_BUCKET must be explicitly provided}"
+        : "${APPROVAL_PAYLOAD_KEY:?APPROVAL_PAYLOAD_KEY must be explicitly provided}"
+        : "${APPROVAL_PAYLOAD_VERSION_ID:?APPROVAL_PAYLOAD_VERSION_ID must be explicitly provided}"
+        : "${APPROVAL_PAYLOAD_SHA256:?APPROVAL_PAYLOAD_SHA256 must be explicitly provided}"
+        : "${APPROVAL_SIGNATURE_BUCKET:?APPROVAL_SIGNATURE_BUCKET must be explicitly provided}"
+        : "${APPROVAL_SIGNATURE_KEY:?APPROVAL_SIGNATURE_KEY must be explicitly provided}"
+        : "${APPROVAL_SIGNATURE_VERSION_ID:?APPROVAL_SIGNATURE_VERSION_ID must be explicitly provided}"
+        : "${APPROVAL_SIGNATURE_SHA256:?APPROVAL_SIGNATURE_SHA256 must be explicitly provided}"
+        : "${APPROVAL_SIGNING_KEY_ARN:?APPROVAL_SIGNING_KEY_ARN must be explicitly provided}"
         [[ "$GIT_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: invalid GIT_COMMIT"; exit 1; }
         [ "$GIT_BRANCH" = "dev" ] || { echo "FATAL: GIT_BRANCH must be dev"; exit 1; }
         for digest in \
@@ -88,6 +99,57 @@ phases:
             exit 1
             ;;
         esac
+        [ "$APPROVAL_PAYLOAD_BUCKET" = "$EVIDENCE_BUCKET" ] \
+          && [ "$APPROVAL_SIGNATURE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+          || { echo "FATAL: approval bucket is not allowlisted"; exit 1; }
+        [[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$GIT_COMMIT/[0-9a-f]{64}\.json$ ]] \
+          || { echo "FATAL: approval payload key does not bind GIT_COMMIT"; exit 1; }
+        [ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+          || { echo "FATAL: approval signature key mismatch"; exit 1; }
+        [ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+          "approval-records/mcp/$GIT_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+          || { echo "FATAL: approval payload key/hash mismatch"; exit 1; }
+        for approval_digest in "$APPROVAL_PAYLOAD_SHA256" "$APPROVAL_SIGNATURE_SHA256"; do
+          [[ "$approval_digest" =~ ^[0-9a-f]{64}$ ]] \
+            || { echo "FATAL: invalid approval SHA-256"; exit 1; }
+        done
+        for approval_version in \
+          "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+          case "$approval_version" in
+            ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+              echo "FATAL: invalid approval VersionId"
+              exit 1
+              ;;
+          esac
+        done
+        [[ "$APPROVAL_SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+          || { echo "FATAL: approval signing key is outside the fixed account"; exit 1; }
+        APPROVAL_LOCATORS_JSON="$(
+          jq -cn \
+            --arg payload_bucket "$APPROVAL_PAYLOAD_BUCKET" \
+            --arg payload_key "$APPROVAL_PAYLOAD_KEY" \
+            --arg payload_version_id "$APPROVAL_PAYLOAD_VERSION_ID" \
+            --arg payload_sha256 "$APPROVAL_PAYLOAD_SHA256" \
+            --arg signature_bucket "$APPROVAL_SIGNATURE_BUCKET" \
+            --arg signature_key "$APPROVAL_SIGNATURE_KEY" \
+            --arg signature_version_id "$APPROVAL_SIGNATURE_VERSION_ID" \
+            --arg signature_sha256 "$APPROVAL_SIGNATURE_SHA256" '{
+              mcp: {
+                payload: {
+                  bucket: $payload_bucket,
+                  key: $payload_key,
+                  version_id: $payload_version_id,
+                  sha256: $payload_sha256
+                },
+                signature: {
+                  bucket: $signature_bucket,
+                  key: $signature_key,
+                  version_id: $signature_version_id,
+                  sha256: $signature_sha256
+                }
+              }
+            }'
+        )"
         [ "$RELEASE_CONTRACT_SHA256" = "$EXPECTED_RELEASE_CONTRACT_SHA256" ] \
           || { echo "FATAL: release contract hash differs from the embedded project"; exit 1; }
         [ "$SOURCE_MANIFEST_CONTRACT_SHA256" = "$EXPECTED_SOURCE_MANIFEST_CONTRACT_SHA256" ] \
@@ -102,9 +164,8 @@ phases:
         [ "$BAKED_APP_HTML_KEY" = "codebuild/baked-fallback/connect-web-app.html" ] \
           || { echo "FATAL: baked fallback key differs from the fixed release location"; exit 1; }
         readonly BAKED_APP_HTML_KEY
-        python3 "$BUNDLE_PROVENANCE" assert-release-ready \
-          --contract "$RELEASE_CONTRACT" \
-          --expected-commit "$GIT_COMMIT"
+        python3 "$BUNDLE_PROVENANCE" assert-contract-ready \
+          --contract "$RELEASE_CONTRACT"
 
         mapfile -t production_record < <(
           python3 "$BUNDLE_PROVENANCE" production-record \
@@ -214,6 +275,32 @@ phases:
           --expected-vault-manifest-sha256 "$VAULT_MANIFEST_SHA256" \
           --expected-build-inputs-sha256 "$BUILD_INPUTS_SHA256" \
           --expected-contract-sha256 "$RELEASE_CONTRACT_SHA256"
+        python3 infra/codebuild/source_provenance.py assert-contract-ready \
+          --contract infra/codebuild/teamagent_runtime_contract.json
+        EXPECTED_TREE_OID="$(
+          jq -er '.build_context.source_tree_oid' /tmp/source-declaration.json
+        )"
+        [[ "$EXPECTED_TREE_OID" =~ ^[0-9a-f]{40}$ ]] \
+          || { echo "FATAL: signed source tree is invalid"; exit 1; }
+        APPROVAL_EVIDENCE_JSON="$(
+          python3 infra/codebuild/release_evidence.py assert-approved-release \
+            --operation build \
+            --approval-locators-json "$APPROVAL_LOCATORS_JSON" \
+            --approval-signing-key-arn "$APPROVAL_SIGNING_KEY_ARN" \
+            --approval-encryption-key-arn "$EVIDENCE_KMS_KEY_ARN" \
+            --expected-commit "$GIT_COMMIT" \
+            --expected-tree-oid "$EXPECTED_TREE_OID" \
+            --expected-inner-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256" \
+            --expected-outer-sha256 "$RELEASE_CONTRACT_SHA256" \
+            --expected-pipeline mcp \
+            --expected-environment dev \
+            --runtime-contract infra/codebuild/teamagent_runtime_contract.json \
+            --contract "$RELEASE_CONTRACT"
+        )"
+        jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+          '.approval_evidence == $expected' /tmp/source-declaration.json >/dev/null \
+          || { echo "FATAL: signed source declaration approval binding mismatch"; exit 1; }
+        export APPROVAL_EVIDENCE_JSON
         python3 infra/codebuild/source_provenance.py verify-source \
           --source-root "$CODEBUILD_SRC_DIR" \
           --manifest "$CODEBUILD_SRC_DIR/.teamagent-source-manifest.json" \
@@ -259,11 +346,7 @@ phases:
           --repo-root "$CODEBUILD_SRC_DIR" \
           --contract "$RELEASE_CONTRACT" \
           --deploy-log "$DEPLOY_LOG" \
-          --expected-commit "$GIT_COMMIT" \
           --baked-fallback /tmp/baked-connect-web-app.html
-        python3 infra/codebuild/source_provenance.py assert-release-ready \
-          --contract infra/codebuild/teamagent_runtime_contract.json \
-          --expected-commit "$GIT_COMMIT"
         python3 infra/codebuild/source_provenance.py verify-dockerfile-contract \
           --contract infra/codebuild/teamagent_runtime_contract.json \
           --dockerfile infra/docker/Dockerfile.teamagent-mcp
@@ -367,8 +450,7 @@ phases:
             "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
           --contract \
             "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_core_media_release_contract.json" \
-          --repo-root "$CONTEXT_VERIFY_DIR" \
-          --expected-commit "$GIT_COMMIT"
+          --repo-root "$CONTEXT_VERIFY_DIR"
         readonly BUILD_CONTEXT_TAR BUILD_CONTEXT_SHA256 CONTEXT_VERIFY_DIR
         export BUILD_CONTEXT_SHA256
 
@@ -382,6 +464,13 @@ phases:
         set -euo pipefail
         CORE_TAG="candidate-$GIT_COMMIT-core"
         MEDIA_TAG="candidate-$GIT_COMMIT-media"
+        RELEASE_APPROVAL_SHA256="$(
+          jq -er '.approval_payload_sha256' <<<"$APPROVAL_EVIDENCE_JSON"
+        )"
+        [[ "$RELEASE_APPROVAL_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+          && [ "$RELEASE_APPROVAL_SHA256" = "$APPROVAL_PAYLOAD_SHA256" ] \
+          || { echo "FATAL: approval evidence payload hash mismatch"; exit 1; }
+        readonly RELEASE_APPROVAL_SHA256
         python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" \
           docker-build-arguments \
           --contract "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
@@ -421,6 +510,7 @@ phases:
           --build-arg "APP_HTML_MANIFEST_SHA256=$VAULT_MANIFEST_SHA256" \
           --build-arg "APP_HTML_BUILD_INPUTS_SHA256=$BUILD_INPUTS_SHA256" \
           --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+          --build-arg "RELEASE_APPROVAL_SHA256=$RELEASE_APPROVAL_SHA256" \
           --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
           "${DOCKER_RUNTIME_BUILD_ARGS[@]}" \
           --provenance=mode=max \
@@ -437,6 +527,7 @@ phases:
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
           --build-arg "BUILD_CONTEXT_SHA256=$BUILD_CONTEXT_SHA256" \
           --build-arg "RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256" \
+          --build-arg "RELEASE_APPROVAL_SHA256=$RELEASE_APPROVAL_SHA256" \
           --build-arg "APP_PROVENANCE_SHA256=$APP_PROVENANCE_SHA256" \
           --provenance=mode=max \
           --sbom=true \
@@ -531,6 +622,7 @@ phases:
             --expected-config-digest "$config_digest" \
             --contract "$RELEASE_CONTRACT" \
             --expected-contract-sha256 "$RELEASE_CONTRACT_SHA256" \
+            --expected-release-approval-sha256 "$RELEASE_APPROVAL_SHA256" \
             --runtime-contract infra/codebuild/teamagent_runtime_contract.json \
             --expected-build-context-sha256 "$BUILD_CONTEXT_SHA256"
           if [ "$subject" = "core" ]; then

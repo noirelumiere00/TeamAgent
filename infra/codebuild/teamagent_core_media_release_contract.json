@@ -1,14 +1,13 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "kind": "teamagent.core-media-release-contract",
-  "approval_record": null,
   "release": {
     "ready": false,
     "blocked_reason": "NO-GO: signed final-HEAD C0/H0 runtime evidence has not been supplied. Keep release.ready=false until the exact automated build, scan, signature, rollout, and forced-rollback gates pass."
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "2b2087426b8ff31ec36d43fdb3f18ff31c6ceca8f0a32838e544636f00ea0c24"
+    "sha256": "2b7ac58f09b377c3f8421bb84ef46037858f5f699ad374038c38564e11acf73a"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",

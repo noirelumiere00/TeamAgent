@@ -96,6 +96,8 @@ phases:
         [[ "$SOURCE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: invalid source evidence SHA-256"; exit 1; }
         case "$SOURCE_EVIDENCE_VERSION_ID:$SOURCE_EVIDENCE_SIGNATURE_VERSION_ID" in ""|None*|null*|*:|*[!A-Za-z0-9._~+/=:-]*) echo "FATAL: invalid source evidence VersionId"; exit 1 ;; esac
         printf '%s' '__RELEASE_EVIDENCE_BASE64__' | base64 --decode > /tmp/release_evidence.py
+        printf '%s' '__TEAMAGENT_SCHEMA_VERSIONS_BASE64__' | base64 --decode > /tmp/teamagent_schema_versions.py
+        printf '%s' '__TEAMAGENT_RELEASE_APPROVAL_BASE64__' | base64 --decode > /tmp/teamagent_release_approval.py
         printf '%s' '__ACTUAL_IMAGE_EVIDENCE_BASE64__' | base64 --decode > /tmp/actual_image_evidence.py
         printf '%s' '__SOURCE_PROVENANCE_BASE64__' | base64 --decode > /tmp/source_provenance.py
         printf '%s' '__TEAMAGENT_BUNDLE_PROVENANCE_BASE64__' | base64 --decode > /tmp/teamagent_bundle_provenance.py
@@ -105,6 +107,15 @@ phases:
         chmod 0755 /tmp/verify_actual_image.sh
         case "$PIPELINE" in
           mcp)
+            : "${APPROVAL_PAYLOAD_BUCKET:?APPROVAL_PAYLOAD_BUCKET is required for MCP}"
+            : "${APPROVAL_PAYLOAD_KEY:?APPROVAL_PAYLOAD_KEY is required for MCP}"
+            : "${APPROVAL_PAYLOAD_VERSION_ID:?APPROVAL_PAYLOAD_VERSION_ID is required for MCP}"
+            : "${APPROVAL_PAYLOAD_SHA256:?APPROVAL_PAYLOAD_SHA256 is required for MCP}"
+            : "${APPROVAL_SIGNATURE_BUCKET:?APPROVAL_SIGNATURE_BUCKET is required for MCP}"
+            : "${APPROVAL_SIGNATURE_KEY:?APPROVAL_SIGNATURE_KEY is required for MCP}"
+            : "${APPROVAL_SIGNATURE_VERSION_ID:?APPROVAL_SIGNATURE_VERSION_ID is required for MCP}"
+            : "${APPROVAL_SIGNATURE_SHA256:?APPROVAL_SIGNATURE_SHA256 is required for MCP}"
+            : "${APPROVAL_SIGNING_KEY_ARN:?APPROVAL_SIGNING_KEY_ARN is required for MCP}"
             EXPECTED_BUILD_PROJECT="teamagent-dev-image-builder"
             EXPECTED_SOURCE_BUCKET="teamagent-dev-image-release-evidence"
             EXPECTED_SOURCE_PREFIX="source-declarations/mcp/$SOURCE_COMMIT/"
@@ -135,6 +146,58 @@ phases:
             )"
             MCP_BUILD_INPUTS_SHA256="$(
               jq -er '.app_html.production.build_inputs_sha256' "$CONTRACT"
+            )"
+            [ "$APPROVAL_PAYLOAD_BUCKET" = "$EVIDENCE_BUCKET" ] \
+              && [ "$APPROVAL_SIGNATURE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+              || { echo "FATAL: approval bucket is not allowlisted"; exit 1; }
+            [[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$SOURCE_COMMIT/[0-9a-f]{64}\.json$ ]] \
+              || { echo "FATAL: approval payload key does not bind the source commit"; exit 1; }
+            [ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+              || { echo "FATAL: approval signature key mismatch"; exit 1; }
+            [ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+              "approval-records/mcp/$SOURCE_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+              || { echo "FATAL: approval payload key/hash mismatch"; exit 1; }
+            for approval_digest in \
+              "$APPROVAL_PAYLOAD_SHA256" "$APPROVAL_SIGNATURE_SHA256"; do
+              [[ "$approval_digest" =~ ^[0-9a-f]{64}$ ]] \
+                || { echo "FATAL: invalid approval SHA-256"; exit 1; }
+            done
+            for approval_version in \
+              "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+              case "$approval_version" in
+                ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+                  echo "FATAL: invalid approval VersionId"
+                  exit 1
+                  ;;
+              esac
+            done
+            [[ "$APPROVAL_SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+              || { echo "FATAL: approval signing key is outside the fixed account"; exit 1; }
+            APPROVAL_LOCATORS_JSON="$(
+              jq -cn \
+                --arg payload_bucket "$APPROVAL_PAYLOAD_BUCKET" \
+                --arg payload_key "$APPROVAL_PAYLOAD_KEY" \
+                --arg payload_version_id "$APPROVAL_PAYLOAD_VERSION_ID" \
+                --arg payload_sha256 "$APPROVAL_PAYLOAD_SHA256" \
+                --arg signature_bucket "$APPROVAL_SIGNATURE_BUCKET" \
+                --arg signature_key "$APPROVAL_SIGNATURE_KEY" \
+                --arg signature_version_id "$APPROVAL_SIGNATURE_VERSION_ID" \
+                --arg signature_sha256 "$APPROVAL_SIGNATURE_SHA256" '{
+                  mcp: {
+                    payload: {
+                      bucket: $payload_bucket,
+                      key: $payload_key,
+                      version_id: $payload_version_id,
+                      sha256: $payload_sha256
+                    },
+                    signature: {
+                      bucket: $signature_bucket,
+                      key: $signature_key,
+                      version_id: $signature_version_id,
+                      sha256: $signature_sha256
+                    }
+                  }
+                }'
             )"
             ;;
           tiktok)
@@ -174,8 +237,13 @@ phases:
         [[ "$SOURCE_EVIDENCE_KEY" == "$EXPECTED_SOURCE_PREFIX"*".json" ]] || { echo "FATAL: source evidence key is not commit/content addressed"; exit 1; }
         [ "$SOURCE_EVIDENCE_SIGNATURE_KEY" = "$SOURCE_EVIDENCE_KEY.sig" ] || { echo "FATAL: source evidence signature key mismatch"; exit 1; }
         [ "$(sha256sum "$CONTRACT" | awk '{print $1}')" = "$CONTRACT_SHA256" ] || { echo "FATAL: contract hash mismatch"; exit 1; }
-        jq -e '.release.ready == true and .release.blocked_reason == ""' "$CONTRACT" >/dev/null \
-          || { echo "FATAL: release.ready is false"; exit 1; }
+        if [ "$PIPELINE" = "mcp" ]; then
+          python3 /tmp/teamagent_bundle_provenance.py assert-contract-ready \
+            --contract "$CONTRACT"
+        else
+          jq -e '.release.ready == true and .release.blocked_reason == ""' "$CONTRACT" >/dev/null \
+            || { echo "FATAL: release.ready is false"; exit 1; }
+        fi
         [[ "$BUILD_ID" == "$EXPECTED_BUILD_PROJECT:"* ]] || { echo "FATAL: build ID is not from the allowlisted project"; exit 1; }
         aws codebuild batch-get-builds \
           --ids "$BUILD_ID" \
@@ -282,6 +350,12 @@ phases:
             )"
             [[ "$MCP_BUILD_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
               || { echo "FATAL: signed MCP build context digest is invalid"; exit 1; }
+            EXPECTED_TREE_OID="$(
+              jq -er '.build_context.source_tree_oid' \
+                /tmp/signed-source-statement.json
+            )"
+            [[ "$EXPECTED_TREE_OID" =~ ^[0-9a-f]{40}$ ]] \
+              || { echo "FATAL: signed MCP source tree is invalid"; exit 1; }
             ;;
           openclaw)
             python3 /tmp/openclaw_provenance.py validate-signed-source-manifest \
@@ -411,6 +485,39 @@ phases:
             ' /tmp/verified-candidate-receipt.json >/dev/null \
             || { echo "FATAL: candidate receipt differs from the requested authorization"; exit 1; }
         fi
+        if [ "$PIPELINE" = "mcp" ]; then
+          if [ "$PROMOTION_CHANNEL" = "verified-candidate" ]; then
+            APPROVAL_OPERATION="build"
+          else
+            APPROVAL_OPERATION="authorize"
+          fi
+          APPROVAL_EVIDENCE_JSON="$(
+            python3 /tmp/release_evidence.py assert-approved-release \
+              --operation "$APPROVAL_OPERATION" \
+              --approval-locators-json "$APPROVAL_LOCATORS_JSON" \
+              --approval-signing-key-arn "$APPROVAL_SIGNING_KEY_ARN" \
+              --approval-encryption-key-arn "$EVIDENCE_KMS_KEY_ARN" \
+              --expected-commit "$SOURCE_COMMIT" \
+              --expected-tree-oid "$EXPECTED_TREE_OID" \
+              --expected-inner-sha256 "$MCP_RUNTIME_CONTRACT_SHA256" \
+              --expected-outer-sha256 "$CONTRACT_SHA256" \
+              --expected-pipeline mcp \
+              --expected-environment dev \
+              --runtime-contract "$MCP_RUNTIME_CONTRACT" \
+              --contract "$CONTRACT"
+          )"
+          jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+            '.approval_evidence == $expected' \
+            /tmp/signed-source-statement.json >/dev/null \
+            || { echo "FATAL: signed source declaration approval binding mismatch"; exit 1; }
+          if [ "$PROMOTION_CHANNEL" != "verified-candidate" ]; then
+            jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+              '.approval_evidence == $expected' \
+              /tmp/verified-candidate-receipt.json >/dev/null \
+              || { echo "FATAL: candidate receipt approval binding mismatch"; exit 1; }
+          fi
+          export APPROVAL_EVIDENCE_JSON EXPECTED_TREE_OID
+        fi
         jq -e --arg pipeline "$PIPELINE" '
           type == "array" and length >= 1 and length <= 2 and
           all(.[];
@@ -465,6 +572,7 @@ phases:
               CONTEXT_ARGUMENTS=(
                 --build-context-sha256 "$MCP_BUILD_CONTEXT_SHA256"
                 --runtime-contract "$MCP_RUNTIME_CONTRACT"
+                --approval-evidence-json "$APPROVAL_EVIDENCE_JSON"
               )
             fi
             /tmp/verify_actual_image.sh \
@@ -486,6 +594,12 @@ phases:
           done < <(jq -c '.[]' <<<"$SUBJECTS_JSON")
           [ "$SUBJECT_INDEX" -gt 0 ] || { echo "FATAL: no quarantine subjects were verified"; exit 1; }
           BUILD_PROJECT_ARN="arn:aws:codebuild:ap-northeast-1:718959508629:project/$EXPECTED_BUILD_PROJECT"
+          APPROVAL_RECEIPT_ARGUMENTS=()
+          if [ "$PIPELINE" = "mcp" ]; then
+            APPROVAL_RECEIPT_ARGUMENTS=(
+              --approval-evidence-json "$APPROVAL_EVIDENCE_JSON"
+            )
+          fi
           python3 /tmp/release_evidence.py create-release-receipt \
             --pipeline "$PIPELINE" \
             --channel "$PROMOTION_CHANNEL" \
@@ -502,6 +616,7 @@ phases:
             --source-sha256 "$SOURCE_EVIDENCE_SHA256" \
             --source-signature-key "$SOURCE_EVIDENCE_SIGNATURE_KEY" \
             --source-signature-version "$SOURCE_EVIDENCE_SIGNATURE_VERSION_ID" \
+            "${APPROVAL_RECEIPT_ARGUMENTS[@]}" \
             "${SUBJECT_FILES[@]}" \
             --output /tmp/release-receipt.json
         else
@@ -668,6 +783,11 @@ phases:
             --issued-at "$ISSUED_AT" \
             --expires-at "$EXPIRES_AT" \
             --output /tmp/release-receipt.json
+        fi
+        if [ "$PIPELINE" = "mcp" ]; then
+          jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+            '.approval_evidence == $expected' /tmp/release-receipt.json >/dev/null \
+            || { echo "FATAL: generated receipt approval binding mismatch"; exit 1; }
         fi
   post_build:
     commands:

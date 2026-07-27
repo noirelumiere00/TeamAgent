@@ -1,19 +1,5 @@
 {
-  "schema_version": 4,
-  "approval_record": {
-    "approved_at_utc": "2026-07-24T00:00:00Z",
-    "approved_by": "test-approval-authority",
-    "source_commit": "1111111111111111111111111111111111111111",
-    "observations": [
-      {
-        "key": "core.binary.python.sha256",
-        "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-        "observed_at_utc": "2026-07-24T00:00:00Z",
-        "source": "fixture://core-python"
-      }
-    ],
-    "decision": "APPROVED: synthetic source provenance fixture."
-  },
+  "schema_version": 5,
   "release": {
     "ready": true,
     "blocked_reason": ""

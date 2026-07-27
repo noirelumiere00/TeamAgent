@@ -13,6 +13,7 @@ EXPECTED_CONTROL_BRANCH="dev"
 EXPECTED_CONTROL_ORIGIN="git@github.com:noirelumiere00/TeamAgent.git"
 EVIDENCE_BUCKET="teamagent-dev-image-release-evidence"
 EVIDENCE_KMS_ALIAS="alias/teamagent-dev-image-release-evidence"
+APPROVAL_SIGNING_KEY_ALIAS="alias/teamagent-dev-mcp-approval"
 ATTESTOR_SIGNING_KEY_ALIAS="alias/teamagent-dev-image-attestor"
 ATTESTOR_PROJECT="teamagent-dev-image-attestor"
 PROMOTER_PROJECT="teamagent-dev-image-promoter"
@@ -23,6 +24,14 @@ LOCATOR_VERSION=""
 LOCATOR_SIGNATURE_VERSION=""
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
+APPROVAL_PAYLOAD_BUCKET=""
+APPROVAL_PAYLOAD_KEY=""
+APPROVAL_PAYLOAD_VERSION_ID=""
+APPROVAL_PAYLOAD_SHA256=""
+APPROVAL_SIGNATURE_BUCKET=""
+APPROVAL_SIGNATURE_KEY=""
+APPROVAL_SIGNATURE_VERSION_ID=""
+APPROVAL_SIGNATURE_SHA256=""
 
 die() {
   echo "FATAL: $*" >&2
@@ -36,7 +45,15 @@ usage: authorize_image_release.sh \
   --channel active|rollback \
   --receipt-key KEY \
   --receipt-version-id VERSION \
-  --receipt-signature-version-id VERSION
+  --receipt-signature-version-id VERSION \
+  [--approval-payload-bucket BUCKET \
+   --approval-payload-key KEY \
+   --approval-payload-version-id VERSION_ID \
+   --approval-payload-sha256 SHA256 \
+   --approval-signature-bucket BUCKET \
+   --approval-signature-key KEY \
+   --approval-signature-version-id VERSION_ID \
+   --approval-signature-sha256 SHA256]
 
 The input receipt is an unexpired signed locator for a previously verified candidate.
 The source-free attestor rechecks the signed source plus the exact immutable
@@ -62,6 +79,14 @@ while [ "$#" -gt 0 ]; do
       LOCATOR_SIGNATURE_VERSION="$2"
       shift 2
       ;;
+    --approval-payload-bucket) value "$@"; APPROVAL_PAYLOAD_BUCKET="$2"; shift 2 ;;
+    --approval-payload-key) value "$@"; APPROVAL_PAYLOAD_KEY="$2"; shift 2 ;;
+    --approval-payload-version-id) value "$@"; APPROVAL_PAYLOAD_VERSION_ID="$2"; shift 2 ;;
+    --approval-payload-sha256) value "$@"; APPROVAL_PAYLOAD_SHA256="$2"; shift 2 ;;
+    --approval-signature-bucket) value "$@"; APPROVAL_SIGNATURE_BUCKET="$2"; shift 2 ;;
+    --approval-signature-key) value "$@"; APPROVAL_SIGNATURE_KEY="$2"; shift 2 ;;
+    --approval-signature-version-id) value "$@"; APPROVAL_SIGNATURE_VERSION_ID="$2"; shift 2 ;;
+    --approval-signature-sha256) value "$@"; APPROVAL_SIGNATURE_SHA256="$2"; shift 2 ;;
     --poll-seconds) value "$@"; POLL_SECONDS="$2"; shift 2 ;;
     --timeout-seconds) value "$@"; TIMEOUT_SECONDS="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -70,6 +95,33 @@ while [ "$#" -gt 0 ]; do
 done
 case "$PIPELINE" in mcp|tiktok|openclaw) ;; *) die "pipeline is not allowlisted" ;; esac
 case "$CHANNEL" in active|rollback) ;; *) die "channel must be active or rollback" ;; esac
+if [ "$PIPELINE" = "mcp" ]; then
+  for required in \
+    APPROVAL_PAYLOAD_BUCKET APPROVAL_PAYLOAD_KEY APPROVAL_PAYLOAD_VERSION_ID \
+    APPROVAL_PAYLOAD_SHA256 APPROVAL_SIGNATURE_BUCKET APPROVAL_SIGNATURE_KEY \
+    APPROVAL_SIGNATURE_VERSION_ID APPROVAL_SIGNATURE_SHA256; do
+    [ -n "${!required}" ] || die "$required is required for the MCP pipeline"
+  done
+  [ "$APPROVAL_PAYLOAD_BUCKET" = "$EVIDENCE_BUCKET" ] \
+    && [ "$APPROVAL_SIGNATURE_BUCKET" = "$EVIDENCE_BUCKET" ] \
+    || die "approval buckets are not allowlisted"
+  [[ "$APPROVAL_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    && [[ "$APPROVAL_SIGNATURE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "approval hashes must be lowercase SHA-256 values"
+  [ "$APPROVAL_SIGNATURE_KEY" = "$APPROVAL_PAYLOAD_KEY.sig" ] \
+    || die "approval signature key mismatch"
+  for approval_version in \
+    "$APPROVAL_PAYLOAD_VERSION_ID" "$APPROVAL_SIGNATURE_VERSION_ID"; do
+    case "$approval_version" in
+      ""|None|null|*[!A-Za-z0-9._~+/=-]*)
+        die "invalid approval VersionId"
+        ;;
+    esac
+  done
+  unset approval_version
+elif [ -n "$APPROVAL_PAYLOAD_BUCKET$APPROVAL_PAYLOAD_KEY$APPROVAL_PAYLOAD_VERSION_ID$APPROVAL_PAYLOAD_SHA256$APPROVAL_SIGNATURE_BUCKET$APPROVAL_SIGNATURE_KEY$APPROVAL_SIGNATURE_VERSION_ID$APPROVAL_SIGNATURE_SHA256" ]; then
+  die "approval locator arguments are only accepted for the MCP pipeline"
+fi
 [[ "$LOCATOR_KEY" =~ ^release-receipts/$PIPELINE/[0-9a-f]{40}/[0-9a-f]{64}\.json$ ]] \
   || die "receipt key is not content addressed for the selected pipeline"
 for version in "$LOCATOR_VERSION" "$LOCATOR_SIGNATURE_VERSION"; do
@@ -104,13 +156,30 @@ git -C "$CONTROL_ROOT" fetch --quiet --no-tags origin \
   || die "local dev HEAD must exactly equal origin/dev"
 EVIDENCE_HELPER="$CONTROL_ROOT/infra/codebuild/release_evidence.py"
 case "$PIPELINE" in
-  mcp) CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_core_media_release_contract.json" ;;
+  mcp)
+    CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_core_media_release_contract.json"
+    RUNTIME_CONTRACT="$CONTROL_ROOT/infra/codebuild/teamagent_runtime_contract.json"
+    BUNDLE_PROVENANCE="$CONTROL_ROOT/infra/codebuild/teamagent_bundle_provenance.py"
+    ;;
   tiktok) CONTRACT="$CONTROL_ROOT/infra/codebuild/tiktok_release_contract.json" ;;
   openclaw) CONTRACT="$CONTROL_ROOT/infra/codebuild/openclaw_bundle_contract.json" ;;
 esac
 [ -f "$EVIDENCE_HELPER" ] && [ -f "$CONTRACT" ] || die "trusted release controls are missing"
 CONTRACT_SHA256="$(sha256sum "$CONTRACT" | awk '{print $1}')"
-python3 - "$CONTRACT" <<'PY'
+if [ "$PIPELINE" = "mcp" ]; then
+  [ -f "$RUNTIME_CONTRACT" ] && [ -f "$BUNDLE_PROVENANCE" ] \
+    || die "trusted MCP contract helpers are missing"
+  python3 "$BUNDLE_PROVENANCE" assert-contract-ready \
+    --contract "$CONTRACT" \
+    || die "MCP contract is not statically ready"
+  RUNTIME_CONTRACT_SHA256="$(
+    jq -er '.source_runtime_contract.sha256' "$CONTRACT"
+  )"
+  [ "$(sha256sum "$RUNTIME_CONTRACT" | awk '{print $1}')" = \
+    "$RUNTIME_CONTRACT_SHA256" ] \
+    || die "MCP inner contract does not match the outer pin"
+else
+  python3 - "$CONTRACT" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as handle:
@@ -118,6 +187,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 if contract.get("release") != {"ready": True, "blocked_reason": ""}:
     raise SystemExit("FATAL: release.ready is false")
 PY
+fi
 
 identity() {
   AWS_PAGER="" aws sts get-caller-identity --query '[Account,Arn]' --output text
@@ -177,10 +247,23 @@ ATTESTOR_SIGNING_KEY_ARN="$(
   AWS_PAGER="" aws kms describe-key --region "$REGION" --key-id "$ATTESTOR_SIGNING_KEY_ALIAS" \
     --query KeyMetadata.Arn --output text
 )"
+if [ "$PIPELINE" = "mcp" ]; then
+  APPROVAL_SIGNING_KEY_ARN="$(
+    AWS_PAGER="" aws kms describe-key \
+      --region "$REGION" \
+      --key-id "$APPROVAL_SIGNING_KEY_ALIAS" \
+      --query KeyMetadata.Arn \
+      --output text
+  )" || die "could not resolve the fixed MCP approval signing key"
+fi
 for item in "$EVIDENCE_KMS_KEY_ARN" "$ATTESTOR_SIGNING_KEY_ARN"; do
   [[ "$item" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] \
     || die "release KMS key is outside the fixed account"
 done
+if [ "$PIPELINE" = "mcp" ]; then
+  [[ "$APPROVAL_SIGNING_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9A-Za-z-]+$ ]] \
+    || die "approval signing key is outside the fixed account"
+fi
 LOCATOR_SIGNATURE_KEY="$LOCATOR_KEY.sig"
 for object in receipt signature; do
   if [ "$object" = "receipt" ]; then
@@ -270,6 +353,74 @@ SOURCE_VERSION="$(jq -er '.source_evidence.version_id' "$TMP_DIR/locator.json")"
 SOURCE_SHA256="$(jq -er '.source_evidence.sha256' "$TMP_DIR/locator.json")"
 SOURCE_SIGNATURE_KEY="$(jq -er '.source_evidence.signature_key' "$TMP_DIR/locator.json")"
 SOURCE_SIGNATURE_VERSION="$(jq -er '.source_evidence.signature_version_id' "$TMP_DIR/locator.json")"
+APPROVAL_ENVIRONMENT=()
+if [ "$PIPELINE" = "mcp" ]; then
+  [[ "$APPROVAL_PAYLOAD_KEY" =~ ^approval-records/mcp/$SOURCE_COMMIT/[0-9a-f]{64}\.json$ ]] \
+    || die "approval payload key does not bind the candidate source commit"
+  [ "${APPROVAL_PAYLOAD_KEY%.json}" = \
+    "approval-records/mcp/$SOURCE_COMMIT/$APPROVAL_PAYLOAD_SHA256" ] \
+    || die "approval payload key/hash mismatch"
+  git -C "$CONTROL_ROOT" cat-file -e "$SOURCE_COMMIT^{commit}" 2>/dev/null \
+    || die "candidate source commit is not present in the reviewed TeamAgent history"
+  EXPECTED_TREE_OID="$(git -C "$CONTROL_ROOT" rev-parse "$SOURCE_COMMIT^{tree}")"
+  [[ "$EXPECTED_TREE_OID" =~ ^[0-9a-f]{40}$ ]] \
+    || die "candidate source tree is invalid"
+  APPROVAL_LOCATORS_JSON="$(
+    jq -cn \
+      --arg payload_bucket "$APPROVAL_PAYLOAD_BUCKET" \
+      --arg payload_key "$APPROVAL_PAYLOAD_KEY" \
+      --arg payload_version_id "$APPROVAL_PAYLOAD_VERSION_ID" \
+      --arg payload_sha256 "$APPROVAL_PAYLOAD_SHA256" \
+      --arg signature_bucket "$APPROVAL_SIGNATURE_BUCKET" \
+      --arg signature_key "$APPROVAL_SIGNATURE_KEY" \
+      --arg signature_version_id "$APPROVAL_SIGNATURE_VERSION_ID" \
+      --arg signature_sha256 "$APPROVAL_SIGNATURE_SHA256" '{
+        mcp: {
+          payload: {
+            bucket: $payload_bucket,
+            key: $payload_key,
+            version_id: $payload_version_id,
+            sha256: $payload_sha256
+          },
+          signature: {
+            bucket: $signature_bucket,
+            key: $signature_key,
+            version_id: $signature_version_id,
+            sha256: $signature_sha256
+          }
+        }
+      }'
+  )"
+  APPROVAL_EVIDENCE_JSON="$(
+    python3 "$EVIDENCE_HELPER" assert-approved-release \
+      --operation authorize \
+      --approval-locators-json "$APPROVAL_LOCATORS_JSON" \
+      --approval-signing-key-arn "$APPROVAL_SIGNING_KEY_ARN" \
+      --approval-encryption-key-arn "$EVIDENCE_KMS_KEY_ARN" \
+      --expected-commit "$SOURCE_COMMIT" \
+      --expected-tree-oid "$EXPECTED_TREE_OID" \
+      --expected-inner-sha256 "$RUNTIME_CONTRACT_SHA256" \
+      --expected-outer-sha256 "$CONTRACT_SHA256" \
+      --expected-pipeline mcp \
+      --expected-environment dev \
+      --runtime-contract "$RUNTIME_CONTRACT" \
+      --contract "$CONTRACT"
+  )" || die "MCP release authorization is missing, invalid, or expired"
+  jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
+    '.approval_evidence == $expected' "$TMP_DIR/locator.json" >/dev/null \
+    || die "candidate receipt approval binding mismatch"
+  APPROVAL_ENVIRONMENT=(
+    "APPROVAL_PAYLOAD_BUCKET=$APPROVAL_PAYLOAD_BUCKET"
+    "APPROVAL_PAYLOAD_KEY=$APPROVAL_PAYLOAD_KEY"
+    "APPROVAL_PAYLOAD_VERSION_ID=$APPROVAL_PAYLOAD_VERSION_ID"
+    "APPROVAL_PAYLOAD_SHA256=$APPROVAL_PAYLOAD_SHA256"
+    "APPROVAL_SIGNATURE_BUCKET=$APPROVAL_SIGNATURE_BUCKET"
+    "APPROVAL_SIGNATURE_KEY=$APPROVAL_SIGNATURE_KEY"
+    "APPROVAL_SIGNATURE_VERSION_ID=$APPROVAL_SIGNATURE_VERSION_ID"
+    "APPROVAL_SIGNATURE_SHA256=$APPROVAL_SIGNATURE_SHA256"
+    "APPROVAL_SIGNING_KEY_ARN=$APPROVAL_SIGNING_KEY_ARN"
+  )
+fi
 SUBJECTS_JSON="$(
   jq -c '[.subjects[] | {
     name,
@@ -357,7 +508,8 @@ environment_json "$ATTESTOR_ENV" \
   "CANDIDATE_RECEIPT_KEY=$LOCATOR_KEY" \
   "CANDIDATE_RECEIPT_VERSION_ID=$LOCATOR_VERSION" \
   "CANDIDATE_RECEIPT_SIGNATURE_KEY=$LOCATOR_SIGNATURE_KEY" \
-  "CANDIDATE_RECEIPT_SIGNATURE_VERSION_ID=$LOCATOR_SIGNATURE_VERSION"
+  "CANDIDATE_RECEIPT_SIGNATURE_VERSION_ID=$LOCATOR_SIGNATURE_VERSION" \
+  "${APPROVAL_ENVIRONMENT[@]}"
 ATTESTOR_BUILD_ID="$(start_build "$ATTESTOR_PROJECT" "$ATTESTOR_ENV")"
 [[ "$ATTESTOR_BUILD_ID" == "$ATTESTOR_PROJECT:"* ]] || die "invalid attestor build ID"
 wait_build "$ATTESTOR_BUILD_ID"
@@ -375,7 +527,8 @@ environment_json "$PROMOTER_ENV" \
   "RECEIPT_KEY=$NEW_RECEIPT_KEY" \
   "RECEIPT_VERSION_ID=$NEW_RECEIPT_VERSION" \
   "RECEIPT_SIGNATURE_KEY=$NEW_SIGNATURE_KEY" \
-  "RECEIPT_SIGNATURE_VERSION_ID=$NEW_SIGNATURE_VERSION"
+  "RECEIPT_SIGNATURE_VERSION_ID=$NEW_SIGNATURE_VERSION" \
+  "${APPROVAL_ENVIRONMENT[@]}"
 PROMOTER_BUILD_ID="$(start_build "$PROMOTER_PROJECT" "$PROMOTER_ENV")"
 [[ "$PROMOTER_BUILD_ID" == "$PROMOTER_PROJECT:"* ]] || die "invalid promoter build ID"
 wait_build "$PROMOTER_BUILD_ID"
