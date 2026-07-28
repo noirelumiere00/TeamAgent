@@ -9,6 +9,12 @@ REGION="ap-northeast-1"
 ENVIRONMENT="dev"
 MAX_START_DELAY_SECONDS=1800
 MAX_OLD_DWELL_SECONDS=1200
+EVIDENCE_BUCKET="teamagent-dev-openclaw-rollout-evidence"
+EVIDENCE_PREFIX="forced-rollback-drills"
+EVIDENCE_ENCRYPTION_KEY_ALIAS="alias/teamagent-dev-openclaw-rollout-evidence"
+DRILL_SIGNING_KEY_ALIAS="alias/teamagent-dev-forced-rollback-drill-signing"
+DRILL_SIGNING_ALGORITHM="RSASSA_PSS_SHA_256"
+EVIDENCE_MIN_RETENTION_DAYS=3650
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
@@ -2417,6 +2423,7 @@ build_aggregate() {
     --argjson schema_version "$SCHEMA_VERSION" \
     --arg drill_id "$(jq -er '.drill_id' "$state")" \
     --arg status "$status" \
+    --arg signing_algorithm "$DRILL_SIGNING_ALGORITHM" \
     --arg git_commit "$(jq -er '.git_commit' "$state")" \
     --arg contract_sha "$(jq -er '.contract_sha256' "$state")" \
     --arg initial_verified "$(
@@ -2640,17 +2647,443 @@ build_aggregate() {
       ),
       integrity:{
         canonical_sha256:"",
-        kms_key_arn:$contract[0].evidence.integrity.kms_key_arn,
-        signing_algorithm:"RSASSA_PSS_SHA_256",
-        signature:$contract[0].evidence.integrity.signature,
-        immutable_object:$contract[0].evidence.integrity.immutable_object
+        kms_key_arn:"",
+        signing_algorithm:$signing_algorithm,
+        signature:{},
+        immutable_object:{}
       }
     }' > "$output"
   chmod 600 "$output"
 }
 
+persist_aggregate() {
+  local source="$1" output="$2" drill_id="$3" now aws_bin
+  need_cmd aws
+  aws_bin="$(command -v aws)"
+  now="$(date +%s)"
+  PYTHONPATH="$REPO_ROOT/infra/codebuild${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 - \
+      "$source" \
+      "$output" \
+      "$aws_bin" \
+      "$ACCOUNT_ID" \
+      "$REGION" \
+      "$EVIDENCE_BUCKET" \
+      "$EVIDENCE_PREFIX" \
+      "$EVIDENCE_ENCRYPTION_KEY_ALIAS" \
+      "$DRILL_SIGNING_KEY_ALIAS" \
+      "$DRILL_SIGNING_ALGORITHM" \
+      "$EVIDENCE_MIN_RETENTION_DAYS" \
+      "$drill_id" \
+      "$now" <<'PY'
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from forced_rollback_drill_evidence import canonical_drill_body_bytes
+from teamagent_release_approval import canonical_json_bytes
+
+(
+    source_argument,
+    output_argument,
+    aws_bin,
+    account_id,
+    region,
+    evidence_bucket,
+    evidence_prefix,
+    encryption_key_alias,
+    signing_key_alias,
+    signing_algorithm,
+    minimum_retention_days_argument,
+    drill_id,
+    now_argument,
+) = sys.argv[1:]
+source_path = Path(source_argument)
+output_path = Path(output_argument)
+minimum_retention_days = int(minimum_retention_days_argument)
+now = int(now_argument)
+version_id_pattern = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
+kms_arn_pattern = re.compile(
+    rf"arn:aws:kms:{re.escape(region)}:{re.escape(account_id)}:"
+    r"key/[0-9a-f-]{36}"
+)
+
+
+def fail(message: str) -> None:
+    raise RuntimeError(message)
+
+
+def aws_json(
+    service: str,
+    operation: str,
+    arguments: list[str],
+) -> dict[str, object]:
+    endpoint_service = "s3" if service == "s3api" else service
+    command = [
+        aws_bin,
+        service,
+        operation,
+        "--region",
+        region,
+        "--endpoint-url",
+        f"https://{endpoint_service}.{region}.amazonaws.com",
+        *arguments,
+        "--no-cli-pager",
+        "--no-paginate",
+        "--output",
+        "json",
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[:1000]
+        fail(f"AWS {service} {operation} failed: {detail}")
+    try:
+        value = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"AWS {service} {operation} returned invalid JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        fail(f"AWS {service} {operation} returned a non-object")
+    return value
+
+
+def resolve_key(
+    alias: str,
+    *,
+    key_usage: str,
+    key_spec: str | None = None,
+) -> str:
+    response = aws_json("kms", "describe-key", ["--key-id", alias])
+    metadata = response.get("KeyMetadata")
+    if not isinstance(metadata, dict):
+        fail(f"KMS describe-key returned no metadata for {alias}")
+    arn = metadata.get("Arn")
+    if (
+        not isinstance(arn, str)
+        or not kms_arn_pattern.fullmatch(arn)
+        or metadata.get("Enabled") is not True
+        or metadata.get("KeyState") != "Enabled"
+        or metadata.get("KeyUsage") != key_usage
+        or (key_spec is not None and metadata.get("KeySpec") != key_spec)
+    ):
+        fail(f"KMS alias {alias} did not resolve to the required enabled key")
+    return arn
+
+
+def exact_version_id(response: dict[str, object], *, label: str) -> str:
+    version_id = response.get("VersionId")
+    if (
+        not isinstance(version_id, str)
+        or not version_id_pattern.fullmatch(version_id)
+        or version_id in {"None", "null"}
+    ):
+        fail(f"S3 did not return an exact {label} VersionId")
+    return version_id
+
+
+def normalize_timestamp(value: object, *, label: str) -> tuple[str, dt.datetime]:
+    if not isinstance(value, str):
+        fail(f"{label} is missing")
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
+    if parsed.tzinfo is None:
+        fail(f"{label} is not timezone-aware")
+    normalized = parsed.astimezone(dt.timezone.utc).replace(microsecond=0)
+    return normalized.strftime("%Y-%m-%dT%H:%M:%SZ"), normalized
+
+
+def put_object(
+    *,
+    key: str,
+    body: Path,
+    content_type: str,
+    encryption_key_arn: str,
+    retain_until: str,
+) -> str:
+    response = aws_json(
+        "s3api",
+        "put-object",
+        [
+            "--bucket",
+            evidence_bucket,
+            "--key",
+            key,
+            "--body",
+            str(body),
+            "--content-type",
+            content_type,
+            "--server-side-encryption",
+            "aws:kms",
+            "--ssekms-key-id",
+            encryption_key_arn,
+            "--object-lock-mode",
+            "COMPLIANCE",
+            "--object-lock-retain-until-date",
+            retain_until,
+            "--expected-bucket-owner",
+            account_id,
+            "--if-none-match",
+            "*",
+        ],
+    )
+    return exact_version_id(response, label=key)
+
+
+def exact_version_download(
+    *,
+    key: str,
+    version_id: str,
+    expected_bytes: bytes,
+    content_type: str,
+    encryption_key_arn: str,
+    minimum_retain_until: dt.datetime,
+    destination: Path,
+) -> tuple[dict[str, object], str, str]:
+    metadata = aws_json(
+        "s3api",
+        "get-object",
+        [
+            "--bucket",
+            evidence_bucket,
+            "--key",
+            key,
+            "--version-id",
+            version_id,
+            "--expected-bucket-owner",
+            account_id,
+            str(destination),
+        ],
+    )
+    downloaded = destination.read_bytes()
+    downloaded_sha256 = hashlib.sha256(downloaded).hexdigest()
+    retain_until, parsed_retain_until = normalize_timestamp(
+        metadata.get("ObjectLockRetainUntilDate"),
+        label=f"{key} ObjectLockRetainUntilDate",
+    )
+    if (
+        downloaded != expected_bytes
+        or metadata.get("VersionId") != version_id
+        or metadata.get("ContentLength") != len(expected_bytes)
+        or metadata.get("ContentType") != content_type
+        or metadata.get("ServerSideEncryption") != "aws:kms"
+        or metadata.get("SSEKMSKeyId") != encryption_key_arn
+        or metadata.get("ObjectLockMode") != "COMPLIANCE"
+        or parsed_retain_until < minimum_retain_until
+    ):
+        fail(f"immutable aggregate exact-version download did not match: {key}")
+    return metadata, downloaded_sha256, retain_until
+
+
+with source_path.open(encoding="utf-8") as handle:
+    aggregate = json.load(handle)
+if not isinstance(aggregate, dict) or aggregate.get("drill_id") != drill_id:
+    fail("aggregate skeleton does not bind the requested drill")
+
+encryption_key_arn = resolve_key(
+    encryption_key_alias,
+    key_usage="ENCRYPT_DECRYPT",
+)
+signing_key_arn = resolve_key(
+    signing_key_alias,
+    key_usage="SIGN_VERIFY",
+    key_spec="RSA_3072",
+)
+if encryption_key_arn == signing_key_arn:
+    fail("aggregate encryption and signing keys must be distinct")
+
+aggregate["integrity"] = {
+    "canonical_sha256": "",
+    "kms_key_arn": signing_key_arn,
+    "signing_algorithm": signing_algorithm,
+    "signature": {},
+    "immutable_object": {},
+}
+payload_bytes = canonical_drill_body_bytes(aggregate)
+payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+payload_key = f"{evidence_prefix}/{drill_id}/aggregate.json"
+signature_key = f"{payload_key}.sig"
+# Terraform/IAM require at least 3650 whole remaining days.  The extra day is
+# the same request-time cushion used by the DM QA evidence writer.
+requested_retain_until = (
+    dt.datetime.fromtimestamp(now, tz=dt.timezone.utc)
+    + dt.timedelta(days=minimum_retention_days + 1)
+).replace(microsecond=0)
+requested_retain_until_text = requested_retain_until.strftime(
+    "%Y-%m-%dT%H:%M:%SZ"
+)
+
+with tempfile.TemporaryDirectory(
+    prefix=".aggregate-persistence.",
+    dir=output_path.parent,
+) as temporary_directory:
+    directory = Path(temporary_directory)
+    payload_path = directory / "aggregate.json"
+    digest_path = directory / "aggregate.sha256"
+    raw_signature_path = directory / "aggregate.sig"
+    envelope_path = directory / "aggregate.sig.json"
+    downloaded_payload_path = directory / "downloaded-aggregate.json"
+    downloaded_signature_path = directory / "downloaded-aggregate.sig.json"
+    payload_path.write_bytes(payload_bytes)
+    digest_path.write_bytes(bytes.fromhex(payload_sha256))
+
+    signed = aws_json(
+        "kms",
+        "sign",
+        [
+            "--key-id",
+            signing_key_arn,
+            "--message",
+            f"fileb://{digest_path}",
+            "--message-type",
+            "DIGEST",
+            "--signing-algorithm",
+            signing_algorithm,
+        ],
+    )
+    signature_base64 = signed.get("Signature")
+    if (
+        signed.get("KeyId") != signing_key_arn
+        or signed.get("SigningAlgorithm") != signing_algorithm
+        or not isinstance(signature_base64, str)
+    ):
+        fail("KMS returned an invalid aggregate signature")
+    try:
+        signature_bytes = base64.b64decode(signature_base64, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("KMS returned malformed aggregate signature bytes") from exc
+    if len(signature_bytes) < 256:
+        fail("KMS returned a short aggregate signature")
+    raw_signature_path.write_bytes(signature_bytes)
+
+    signature_envelope = {
+        "schema_version": 1,
+        "drill_id": drill_id,
+        "payload_key": payload_key,
+        "payload_sha256": payload_sha256,
+        "signing_kms_key_arn": signing_key_arn,
+        "signing_algorithm": signing_algorithm,
+        "signature_base64": signature_base64,
+    }
+    envelope_bytes = canonical_json_bytes(signature_envelope)
+    envelope_path.write_bytes(envelope_bytes)
+
+    payload_version_id = put_object(
+        key=payload_key,
+        body=payload_path,
+        content_type="application/json",
+        encryption_key_arn=encryption_key_arn,
+        retain_until=requested_retain_until_text,
+    )
+    signature_version_id = put_object(
+        key=signature_key,
+        body=envelope_path,
+        content_type="application/json",
+        encryption_key_arn=encryption_key_arn,
+        retain_until=requested_retain_until_text,
+    )
+    (
+        _,
+        downloaded_payload_sha256,
+        returned_retain_until,
+    ) = exact_version_download(
+        key=payload_key,
+        version_id=payload_version_id,
+        expected_bytes=payload_bytes,
+        content_type="application/json",
+        encryption_key_arn=encryption_key_arn,
+        minimum_retain_until=requested_retain_until,
+        destination=downloaded_payload_path,
+    )
+    _, downloaded_signature_sha256, _ = exact_version_download(
+        key=signature_key,
+        version_id=signature_version_id,
+        expected_bytes=envelope_bytes,
+        content_type="application/json",
+        encryption_key_arn=encryption_key_arn,
+        minimum_retain_until=requested_retain_until,
+        destination=downloaded_signature_path,
+    )
+
+    verified = aws_json(
+        "kms",
+        "verify",
+        [
+            "--key-id",
+            signing_key_arn,
+            "--message",
+            f"fileb://{digest_path}",
+            "--message-type",
+            "DIGEST",
+            "--signature",
+            f"fileb://{raw_signature_path}",
+            "--signing-algorithm",
+            signing_algorithm,
+        ],
+    )
+    if (
+        verified.get("KeyId") != signing_key_arn
+        or verified.get("SigningAlgorithm") != signing_algorithm
+        or verified.get("SignatureValid") is not True
+    ):
+        fail("KMS aggregate signature verification failed")
+
+aggregate["integrity"] = {
+    "canonical_sha256": payload_sha256,
+    "kms_key_arn": signing_key_arn,
+    "signing_algorithm": signing_algorithm,
+    "signature": {
+        "key": signature_key,
+        "version_id": signature_version_id,
+        "sha256": downloaded_signature_sha256,
+        "verified": True,
+    },
+    "immutable_object": {
+        "bucket": evidence_bucket,
+        "key": payload_key,
+        "version_id": payload_version_id,
+        "sha256": payload_sha256,
+        "size": len(payload_bytes),
+        "content_type": "application/json",
+        "object_lock_mode": "COMPLIANCE",
+        "retain_until": returned_retain_until,
+        "encryption_kms_key_arn": encryption_key_arn,
+        "exact_version_redownload": {
+            "requested_version_id": payload_version_id,
+            "returned_version_id": payload_version_id,
+            "sha256": downloaded_payload_sha256,
+            "size": len(payload_bytes),
+            "bytes_match": True,
+        },
+    },
+}
+payload = canonical_json_bytes(aggregate)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(output_path, flags, 0o600)
+with os.fdopen(descriptor, "wb") as handle:
+    handle.write(payload)
+PY
+}
+
 validate_aggregate() {
-  local source="$1" output="$2" trusted_scope="$3"
+  local source="$1" output="$2" trusted_scope="$3" mode="${4:-complete}"
   PYTHONPATH="$REPO_ROOT/infra/codebuild${PYTHONPATH:+:$PYTHONPATH}" \
     python3 - \
       "$AGGREGATE_VALIDATOR" \
@@ -2659,7 +3092,8 @@ validate_aggregate() {
       "$DRILL_DIR/inputs/initial-release.apply.json" \
       "$trusted_scope" \
       "$source" \
-      "$output" <<'PY'
+      "$output" \
+      "$mode" <<'PY'
 import copy
 import datetime
 import hashlib
@@ -2678,6 +3112,7 @@ from teamagent_release_approval import canonical_json_bytes
     trusted_scope_argument,
     source_argument,
     output_argument,
+    mode,
 ) = sys.argv[1:]
 helper_path = Path(helper_argument)
 state_path = Path(state_argument)
@@ -2739,9 +3174,25 @@ body = copy.deepcopy(aggregate)
 body["integrity"].pop("canonical_sha256", None)
 body["integrity"].pop("signature", None)
 body["integrity"].pop("immutable_object", None)
-aggregate["integrity"]["canonical_sha256"] = hashlib.sha256(
+canonical_sha256 = hashlib.sha256(
     canonical_json_bytes(body)
 ).hexdigest()
+if mode == "body-only":
+    aggregate["integrity"]["canonical_sha256"] = canonical_sha256
+    try:
+        module.validate_drill_evidence(aggregate, expected)
+    except ValueError as exc:
+        if not str(exc).startswith("drill.integrity."):
+            raise
+    else:
+        raise SystemExit(
+            "FATAL: aggregate body prevalidation accepted placeholder integrity"
+        )
+    raise SystemExit(0)
+if mode != "complete":
+    raise SystemExit("FATAL: unsupported aggregate validation mode")
+if aggregate["integrity"].get("canonical_sha256") != canonical_sha256:
+    raise SystemExit("FATAL: persisted aggregate canonical SHA-256 changed")
 validated = module.validate_drill_evidence(aggregate, expected)
 payload = canonical_json_bytes(validated)
 flags = 0
@@ -2759,7 +3210,8 @@ PY
 
 finalize_command() {
   local requested_dir="" state status final_receipt plan_sha aggregate_stage
-  local aggregate_out validated_out trusted_scope final_sha now terminal_raw terminal_json
+  local aggregate_located aggregate_out validated_out trusted_scope final_sha
+  local now terminal_raw terminal_json drill_id
   local terminal_ok="true"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2834,35 +3286,49 @@ finalize_command() {
   fi
 
   aggregate_stage="$DRILL_DIR/.aggregate.unvalidated.json"
+  aggregate_located="$DRILL_DIR/.aggregate.located.json"
   aggregate_out="$DRILL_DIR/aggregate.json"
   validated_out="$DRILL_DIR/.aggregate.validated.json"
   trusted_scope="$DRILL_DIR/.trusted-scope.json"
+  drill_id="$(jq -er '.drill_id' "$STATE_FILE")"
   [ ! -e "$aggregate_out" ] && [ ! -L "$aggregate_out" ] ||
     die "aggregate evidence already exists"
-  rm -f "$aggregate_stage" "$validated_out" "$trusted_scope"
+  rm -f "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope"
   if ! build_trusted_scope "$trusted_scope"; then
     rm -f "$trusted_scope"
     die "could not derive trusted scope from registry and initial receipt"
   fi
   build_aggregate "$status" "$aggregate_stage" "$trusted_scope"
-  if ! validate_aggregate "$aggregate_stage" "$validated_out" "$trusted_scope"; then
-    rm -f "$validated_out" "$trusted_scope"
+  if ! validate_aggregate \
+    "$aggregate_stage" "$validated_out" "$trusted_scope" body-only; then
+    rm -f "$aggregate_stage" "$validated_out" "$trusted_scope"
+    die "aggregate body failed pre-persistence validation"
+  fi
+  if ! persist_aggregate "$aggregate_stage" "$aggregate_located" "$drill_id"; then
+    rm -f "$aggregate_stage" "$aggregate_located" "$trusted_scope"
+    die "could not persist and verify immutable aggregate evidence"
+  fi
+  if ! validate_aggregate "$aggregate_located" "$validated_out" "$trusted_scope"; then
+    rm -f \
+      "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope"
     die "validate_drill_evidence rejected the aggregate evidence"
   fi
   [ "$(jq -er '.status' "$validated_out")" = "$status" ] ||
     {
-      rm -f "$validated_out" "$trusted_scope"
+      rm -f \
+        "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope"
       die "aggregate validator changed the drill status"
     }
   if [ "$(jq -er '.failures | length' "$STATE_FILE")" -ne 0 ]; then
     [ "$(jq -er '.status' "$validated_out")" != "PASSED" ] ||
       {
-        rm -f "$validated_out" "$trusted_scope"
+        rm -f \
+          "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope"
         die "a drill with a failed leg cannot be finalized as PASSED"
       }
   fi
   mv "$validated_out" "$aggregate_out"
-  rm -f "$aggregate_stage" "$trusted_scope"
+  rm -f "$aggregate_stage" "$aggregate_located" "$trusted_scope"
   chmod 600 "$aggregate_out"
   final_sha="$(sha256_file "$aggregate_out")"
   now="$(date +%s)"

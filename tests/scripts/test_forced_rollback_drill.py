@@ -28,6 +28,16 @@ ACCOUNT_ID = "718959508629"
 REGION = "ap-northeast-1"
 ENVIRONMENT = "dev"
 INITIAL_APPLIED_AT = 2_000_000_000
+EVIDENCE_BUCKET = "teamagent-dev-openclaw-rollout-evidence"
+EVIDENCE_ENCRYPTION_KEY_ALIAS = "alias/teamagent-dev-openclaw-rollout-evidence"
+DRILL_SIGNING_KEY_ALIAS = "alias/teamagent-dev-forced-rollback-drill-signing"
+EVIDENCE_ENCRYPTION_KEY_ARN = (
+    f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+)
+DRILL_SIGNING_KEY_ARN = (
+    f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+)
+SIGNING_ALGORITHM = "RSASSA_PSS_SHA_256"
 
 CONSUMERS = (
     ("mcp", "teamagent-dev-mcp", "core", "ecs_service"),
@@ -201,6 +211,7 @@ class DrillHarness:
     drill_dir: Path
     calls: Path
     validator_calls: Path
+    aws_objects: Path
     old_live: Path
     new_live: Path
     env: dict[str, str]
@@ -487,12 +498,13 @@ def _make_contract(
     return contract, initial_receipt, var_file, old_live, new_live
 
 
-def _install_fakes(repo: Path) -> tuple[Path, Path]:
+def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
     deploy = repo / "infra" / "deploy"
     codebuild = repo / "infra" / "codebuild"
     fake_bin = repo / "fake-bin"
     calls = repo / "fake-calls.log"
     validator_calls = repo / "validator-calls.log"
+    aws_objects = repo / "fake-aws-objects"
 
     _write_executable(
         deploy / "authorize_image_release.sh",
@@ -995,16 +1007,233 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
         fi
         """,
     )
-    for name in ("aws", "terraform"):
-        _write_executable(
-            fake_bin / name,
-            f"""
-            #!/usr/bin/env bash
-            set -euo pipefail
-            printf 'FORBIDDEN-{name}' >>"$FAKE_DRILL_CALLS"
-            exit 103
-            """,
-        )
+    _write_executable(
+        fake_bin / "terraform",
+        """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf 'FORBIDDEN-terraform' >>"$FAKE_DRILL_CALLS"
+        exit 103
+        """,
+    )
+    _write_executable(
+        fake_bin / "aws",
+        r"""
+        #!/usr/bin/env python3
+        from __future__ import annotations
+
+        import base64
+        import hashlib
+        import json
+        import os
+        import shutil
+        import sys
+        from pathlib import Path
+
+        arguments = sys.argv[1:]
+        with open(os.environ["FAKE_DRILL_CALLS"], "a", encoding="utf-8") as handle:
+            handle.write("\t".join(["aws", *arguments]) + "\n")
+        if len(arguments) < 2:
+            raise SystemExit(90)
+        service, operation = arguments[:2]
+
+
+        def option(name: str) -> str:
+            try:
+                return arguments[arguments.index(name) + 1]
+            except (ValueError, IndexError) as exc:
+                raise SystemExit(f"missing fake AWS option: {name}") from exc
+
+
+        def emit(value: dict[str, object]) -> None:
+            print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+        def object_paths(
+            bucket: str,
+            key: str,
+            version_id: str,
+        ) -> tuple[Path, Path]:
+            identity = hashlib.sha256(
+                f"{bucket}\0{key}\0{version_id}".encode()
+            ).hexdigest()
+            root = Path(os.environ["FAKE_AWS_OBJECT_ROOT"])
+            root.mkdir(parents=True, exist_ok=True)
+            return root / f"{identity}.body", root / f"{identity}.metadata.json"
+
+
+        endpoint_service = "s3" if service == "s3api" else service
+        if option("--endpoint-url") != (
+            f"https://{endpoint_service}.ap-northeast-1.amazonaws.com"
+        ):
+            raise SystemExit(50)
+        if os.environ.get("FAKE_AWS_FAIL_OPERATION") == operation:
+            print(f"fake AWS {service} {operation} failure", file=sys.stderr)
+            raise SystemExit(51)
+
+        encryption_alias = os.environ["FAKE_AWS_ENCRYPTION_KEY_ALIAS"]
+        signing_alias = os.environ["FAKE_AWS_SIGNING_KEY_ALIAS"]
+        encryption_key_arn = os.environ["FAKE_AWS_ENCRYPTION_KEY_ARN"]
+        signing_key_arn = os.environ["FAKE_AWS_SIGNING_KEY_ARN"]
+
+        if (service, operation) == ("kms", "describe-key"):
+            alias = option("--key-id")
+            if alias == encryption_alias:
+                arn = encryption_key_arn
+                usage = "ENCRYPT_DECRYPT"
+                key_spec = "SYMMETRIC_DEFAULT"
+            elif alias == signing_alias:
+                arn = signing_key_arn
+                usage = "SIGN_VERIFY"
+                key_spec = "RSA_3072"
+            else:
+                raise SystemExit(52)
+            emit(
+                {
+                    "KeyMetadata": {
+                        "Arn": arn,
+                        "Enabled": True,
+                        "KeyState": "Enabled",
+                        "KeyUsage": usage,
+                        "KeySpec": key_spec,
+                    }
+                }
+            )
+        elif (service, operation) == ("kms", "sign"):
+            if (
+                option("--key-id") != signing_key_arn
+                or option("--message-type") != "DIGEST"
+                or option("--signing-algorithm") != "RSASSA_PSS_SHA_256"
+            ):
+                raise SystemExit(53)
+            message = option("--message")
+            if not message.startswith("fileb://"):
+                raise SystemExit(54)
+            digest = Path(message.removeprefix("fileb://")).read_bytes()
+            if len(digest) != 32:
+                raise SystemExit(55)
+            object_root = Path(os.environ["FAKE_AWS_OBJECT_ROOT"])
+            object_root.mkdir(parents=True, exist_ok=True)
+            (object_root / "kms-sign.digest").write_bytes(digest)
+            signature = (
+                hashlib.sha384(b"fake-kms-signature\0" + digest).digest() * 8
+            )
+            emit(
+                {
+                    "KeyId": signing_key_arn,
+                    "SigningAlgorithm": "RSASSA_PSS_SHA_256",
+                    "Signature": base64.b64encode(signature).decode(),
+                }
+            )
+        elif (service, operation) == ("kms", "verify"):
+            if (
+                option("--key-id") != signing_key_arn
+                or option("--message-type") != "DIGEST"
+                or option("--signing-algorithm") != "RSASSA_PSS_SHA_256"
+            ):
+                raise SystemExit(56)
+            message = option("--message")
+            signature = option("--signature")
+            if (
+                not message.startswith("fileb://")
+                or not signature.startswith("fileb://")
+            ):
+                raise SystemExit(57)
+            digest = Path(message.removeprefix("fileb://")).read_bytes()
+            signature_bytes = Path(
+                signature.removeprefix("fileb://")
+            ).read_bytes()
+            expected_signature = (
+                hashlib.sha384(b"fake-kms-signature\0" + digest).digest() * 8
+            )
+            if len(digest) != 32 or signature_bytes != expected_signature:
+                raise SystemExit(57)
+            emit(
+                {
+                    "KeyId": signing_key_arn,
+                    "SigningAlgorithm": "RSASSA_PSS_SHA_256",
+                    "SignatureValid": True,
+                }
+            )
+        elif (service, operation) == ("s3api", "put-object"):
+            bucket = option("--bucket")
+            key = option("--key")
+            source = Path(option("--body"))
+            retain_until = option("--object-lock-retain-until-date")
+            if (
+                bucket != os.environ["FAKE_AWS_EVIDENCE_BUCKET"]
+                or option("--content-type") != "application/json"
+                or option("--server-side-encryption") != "aws:kms"
+                or option("--ssekms-key-id") != encryption_key_arn
+                or option("--object-lock-mode") != "COMPLIANCE"
+                or option("--expected-bucket-owner") != "718959508629"
+                or option("--if-none-match") != "*"
+            ):
+                raise SystemExit(58)
+            version_id = (
+                "aggregate-signature-version"
+                if key.endswith(".sig")
+                else "aggregate-payload-version"
+            )
+            body_path, metadata_path = object_paths(bucket, key, version_id)
+            if body_path.exists():
+                print("PreconditionFailed", file=sys.stderr)
+                raise SystemExit(59)
+            shutil.copyfile(source, body_path)
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "VersionId": version_id,
+                        "ContentLength": body_path.stat().st_size,
+                        "ContentType": "application/json",
+                        "ServerSideEncryption": "aws:kms",
+                        "SSEKMSKeyId": encryption_key_arn,
+                        "ObjectLockMode": "COMPLIANCE",
+                        "ObjectLockRetainUntilDate": retain_until,
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            if os.environ.get("FAKE_AWS_MISSING_VERSION_ID") == "true":
+                emit({})
+            else:
+                emit({"VersionId": version_id})
+        elif (service, operation) == ("s3api", "get-object"):
+            bucket = option("--bucket")
+            key = option("--key")
+            version_id = option("--version-id")
+            if (
+                bucket != os.environ["FAKE_AWS_EVIDENCE_BUCKET"]
+                or option("--expected-bucket-owner") != "718959508629"
+            ):
+                raise SystemExit(60)
+            owner_index = arguments.index("--expected-bucket-owner")
+            try:
+                destination = Path(arguments[owner_index + 2])
+            except IndexError as exc:
+                raise SystemExit(61) from exc
+            body_path, metadata_path = object_paths(bucket, key, version_id)
+            if not body_path.is_file() or not metadata_path.is_file():
+                raise SystemExit(62)
+            body = body_path.read_bytes()
+            if (
+                os.environ.get("FAKE_AWS_REDOWNLOAD_MISMATCH") == "true"
+                and key.endswith("/aggregate.json")
+            ):
+                # Keep VersionId, metadata, and byte length valid so only an
+                # actual content comparison can detect this production mode.
+                body = bytes([body[0] ^ 1]) + body[1:]
+            destination.write_bytes(body)
+            emit(json.loads(metadata_path.read_text(encoding="utf-8")))
+        else:
+            print(
+                f"unsupported fake AWS operation: {service} {operation}",
+                file=sys.stderr,
+            )
+            raise SystemExit(63)
+        """,
+    )
 
     codebuild.mkdir(parents=True, exist_ok=True)
     (codebuild / "teamagent_release_approval.py").write_text(
@@ -1035,8 +1264,127 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
             """
             from __future__ import annotations
 
+            import copy
+            import hashlib
             import json
             import os
+
+            from teamagent_release_approval import canonical_json_bytes
+
+
+            def canonical_drill_body_bytes(value: dict) -> bytes:
+                projected = copy.deepcopy(value)
+                integrity = projected["integrity"]
+                for key in (
+                    "canonical_sha256",
+                    "signature",
+                    "immutable_object",
+                ):
+                    del integrity[key]
+                return canonical_json_bytes(projected)
+
+
+            def validate_integrity(aggregate: dict) -> None:
+                integrity = aggregate.get("integrity")
+                if not isinstance(integrity, dict) or set(integrity) != {
+                    "canonical_sha256",
+                    "kms_key_arn",
+                    "signing_algorithm",
+                    "signature",
+                    "immutable_object",
+                }:
+                    raise ValueError("drill.integrity schema mismatch")
+                immutable = integrity["immutable_object"]
+                if not isinstance(immutable, dict) or set(immutable) != {
+                    "bucket",
+                    "key",
+                    "version_id",
+                    "sha256",
+                    "size",
+                    "content_type",
+                    "object_lock_mode",
+                    "retain_until",
+                    "encryption_kms_key_arn",
+                    "exact_version_redownload",
+                }:
+                    raise ValueError(
+                        "drill.integrity.immutable_object schema mismatch"
+                    )
+                signature = integrity["signature"]
+                if not isinstance(signature, dict) or set(signature) != {
+                    "key",
+                    "version_id",
+                    "sha256",
+                    "verified",
+                }:
+                    raise ValueError("drill.integrity.signature schema mismatch")
+                expected_key = (
+                    f"forced-rollback-drills/{aggregate['drill_id']}/"
+                    "aggregate.json"
+                )
+                if (
+                    immutable["bucket"]
+                    != "teamagent-dev-openclaw-rollout-evidence"
+                    or immutable["key"] != expected_key
+                    or immutable["version_id"] in {"", "None", "null"}
+                    or immutable["content_type"] != "application/json"
+                    or immutable["object_lock_mode"] != "COMPLIANCE"
+                    or immutable["encryption_kms_key_arn"]
+                    != (
+                        "arn:aws:kms:ap-northeast-1:718959508629:key/"
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                    )
+                ):
+                    raise ValueError("aggregate immutable object is not production-bound")
+                if (
+                    integrity["kms_key_arn"]
+                    != (
+                        "arn:aws:kms:ap-northeast-1:718959508629:key/"
+                        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+                    )
+                    or integrity["signing_algorithm"]
+                    != "RSASSA_PSS_SHA_256"
+                ):
+                    raise ValueError("aggregate signer is not the drill key")
+                body = canonical_drill_body_bytes(aggregate)
+                body_sha256 = hashlib.sha256(body).hexdigest()
+                if (
+                    integrity["canonical_sha256"] != body_sha256
+                    or immutable["sha256"] != body_sha256
+                    or immutable["size"] != len(body)
+                ):
+                    raise ValueError("aggregate locator does not bind canonical bytes")
+                if (
+                    signature["key"] != f"{expected_key}.sig"
+                    or signature["version_id"] in {"", "None", "null"}
+                    or not isinstance(signature["sha256"], str)
+                    or len(signature["sha256"]) != 64
+                    or signature["verified"] is not True
+                ):
+                    raise ValueError("aggregate signature is not verified")
+                redownload = immutable["exact_version_redownload"]
+                if not isinstance(redownload, dict) or set(redownload) != {
+                    "requested_version_id",
+                    "returned_version_id",
+                    "sha256",
+                    "size",
+                    "bytes_match",
+                }:
+                    raise ValueError("exact aggregate redownload is required")
+                if (
+                    redownload["requested_version_id"] != immutable["version_id"]
+                    or redownload["returned_version_id"] != immutable["version_id"]
+                    or redownload["sha256"] != body_sha256
+                    or redownload["size"] != len(body)
+                    or redownload["bytes_match"] is not True
+                ):
+                    raise ValueError("aggregate redownload does not bind canonical bytes")
+                if any(
+                    locator.get("key") == expected_key
+                    for locator in aggregate.get("artifact_manifest", [])
+                    if isinstance(locator, dict)
+                ):
+                    raise ValueError("aggregate locator must not be in artifact_manifest")
 
 
             def validate_drill_evidence(
@@ -1091,6 +1439,11 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
                     raise ValueError("aggregate scope differs from trusted scope")
                 if aggregate.get("scope") is expected["scope"]:
                     raise ValueError("trusted scope aliases aggregate input")
+                if os.environ.get("FAKE_VALIDATOR_BODY_FAIL") == "true":
+                    raise ValueError(
+                        "drill.actors.automation_principals schema mismatch"
+                    )
+                validate_integrity(aggregate)
                 marker = os.environ["FAKE_VALIDATOR_CALLS"]
                 with open(marker, "a", encoding="utf-8") as handle:
                     handle.write(
@@ -1105,7 +1458,7 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
         ).lstrip(),
         encoding="utf-8",
     )
-    return calls, validator_calls
+    return calls, validator_calls, aws_objects
 
 
 @pytest.fixture
@@ -1123,7 +1476,7 @@ def drill(tmp_path: Path) -> DrillHarness:
         registry,
     )
     contract, initial, var_file, old_live, new_live = _make_contract(repo)
-    calls, validator_calls = _install_fakes(repo)
+    calls, validator_calls, aws_objects = _install_fakes(repo)
     fake_bin = repo / "fake-bin"
     return DrillHarness(
         repo=repo,
@@ -1134,6 +1487,7 @@ def drill(tmp_path: Path) -> DrillHarness:
         drill_dir=repo / "drill-output",
         calls=calls,
         validator_calls=validator_calls,
+        aws_objects=aws_objects,
         old_live=old_live,
         new_live=new_live,
         env={
@@ -1141,11 +1495,49 @@ def drill(tmp_path: Path) -> DrillHarness:
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "FAKE_DRILL_CALLS": str(calls),
             "FAKE_VALIDATOR_CALLS": str(validator_calls),
+            "FAKE_AWS_OBJECT_ROOT": str(aws_objects),
+            "FAKE_AWS_EVIDENCE_BUCKET": EVIDENCE_BUCKET,
+            "FAKE_AWS_ENCRYPTION_KEY_ALIAS": EVIDENCE_ENCRYPTION_KEY_ALIAS,
+            "FAKE_AWS_SIGNING_KEY_ALIAS": DRILL_SIGNING_KEY_ALIAS,
+            "FAKE_AWS_ENCRYPTION_KEY_ARN": EVIDENCE_ENCRYPTION_KEY_ARN,
+            "FAKE_AWS_SIGNING_KEY_ARN": DRILL_SIGNING_KEY_ARN,
             "FAKE_OLD_LIVE": str(old_live),
             "FAKE_NEW_LIVE": str(new_live),
             "PYTHONDONTWRITEBYTECODE": "1",
         },
     )
+
+
+def _advance_to_leg2_applied(drill: DrillHarness) -> None:
+    prepared = drill.prepare()
+    assert prepared.returncode == 0, prepared.stderr
+    preflighted = drill.preflight()
+    assert preflighted.returncode == 0, preflighted.stderr
+    planned1, plan1_sha = drill.plan(
+        "rollback-to-previous",
+        now=INITIAL_APPLIED_AT + 180,
+    )
+    assert planned1.returncode == 0, planned1.stderr
+    applied1 = drill.apply(
+        "rollback-to-previous",
+        approval_leg="rollback",
+        plan_sha256=plan1_sha,
+        now=INITIAL_APPLIED_AT + 240,
+    )
+    assert applied1.returncode == 0, applied1.stderr
+    planned2, plan2_sha = drill.plan(
+        "restore-active",
+        now=INITIAL_APPLIED_AT + 300,
+    )
+    assert planned2.returncode == 0, planned2.stderr
+    applied2 = drill.apply(
+        "restore-active",
+        approval_leg="restore",
+        plan_sha256=plan2_sha,
+        now=INITIAL_APPLIED_AT + 360,
+    )
+    assert applied2.returncode == 0, applied2.stderr
+    assert drill.state()["state"] == "LEG2_APPLIED"
 
 
 @pytest.mark.parametrize(
@@ -1313,6 +1705,134 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert len(validator_lines) == 1
     validator_call = json.loads(validator_lines[0])
     aggregate = validator_call["aggregate"]
+    integrity = aggregate["integrity"]
+    immutable = integrity["immutable_object"]
+    aggregate_key = f"forced-rollback-drills/{DRILL_ID}/aggregate.json"
+    assert immutable == {
+        "bucket": EVIDENCE_BUCKET,
+        "key": aggregate_key,
+        "version_id": "aggregate-payload-version",
+        "sha256": integrity["canonical_sha256"],
+        "size": immutable["size"],
+        "content_type": "application/json",
+        "object_lock_mode": "COMPLIANCE",
+        "retain_until": immutable["retain_until"],
+        "encryption_kms_key_arn": EVIDENCE_ENCRYPTION_KEY_ARN,
+        "exact_version_redownload": {
+            "requested_version_id": "aggregate-payload-version",
+            "returned_version_id": "aggregate-payload-version",
+            "sha256": integrity["canonical_sha256"],
+            "size": immutable["size"],
+            "bytes_match": True,
+        },
+    }
+    assert integrity["kms_key_arn"] == DRILL_SIGNING_KEY_ARN
+    assert integrity["signing_algorithm"] == SIGNING_ALGORITHM
+    assert integrity["signature"] == {
+        "key": f"{aggregate_key}.sig",
+        "version_id": "aggregate-signature-version",
+        "sha256": integrity["signature"]["sha256"],
+        "verified": True,
+    }
+    aggregate_locator = {
+        **immutable,
+        "signature": integrity["signature"],
+        "signer": {
+            "kms_key_arn": integrity["kms_key_arn"],
+            "algorithm": integrity["signing_algorithm"],
+        },
+    }
+    assert set(aggregate_locator) == {
+        "bucket",
+        "key",
+        "version_id",
+        "sha256",
+        "size",
+        "content_type",
+        "object_lock_mode",
+        "retain_until",
+        "encryption_kms_key_arn",
+        "signature",
+        "signer",
+        "exact_version_redownload",
+    }
+    assert re.fullmatch(r"[0-9a-f]{64}", integrity["canonical_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", integrity["signature"]["sha256"])
+    assert re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+        r"[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        immutable["retain_until"],
+    )
+    canonical_body_value = json.loads(json.dumps(aggregate))
+    for detached_key in (
+        "canonical_sha256",
+        "signature",
+        "immutable_object",
+    ):
+        del canonical_body_value["integrity"][detached_key]
+    canonical_body = _canonical_bytes(canonical_body_value)
+    assert immutable["size"] == len(canonical_body)
+    assert (
+        (drill.aws_objects / "kms-sign.digest").read_bytes().hex()
+        == hashlib.sha256(canonical_body).hexdigest()
+        == integrity["canonical_sha256"]
+    )
+    stored_objects = [path.read_bytes() for path in drill.aws_objects.glob("*.body")]
+    assert len(stored_objects) == 2
+    assert canonical_body in stored_objects
+    signature_envelope_bytes = next(body for body in stored_objects if body != canonical_body)
+    signature_envelope = json.loads(signature_envelope_bytes)
+    assert signature_envelope["drill_id"] == DRILL_ID
+    assert signature_envelope["payload_key"] == aggregate_key
+    assert signature_envelope["payload_sha256"] == integrity["canonical_sha256"]
+    assert signature_envelope["signing_kms_key_arn"] == DRILL_SIGNING_KEY_ARN
+    assert signature_envelope["signing_algorithm"] == SIGNING_ALGORITHM
+    assert hashlib.sha256(signature_envelope_bytes).hexdigest() == integrity["signature"]["sha256"]
+    assert all(locator["key"] != aggregate_key for locator in aggregate["artifact_manifest"])
+    aws_calls = [line for line in drill.call_lines() if line[0] == "aws"]
+    assert [(call[1], call[2]) for call in aws_calls] == [
+        ("kms", "describe-key"),
+        ("kms", "describe-key"),
+        ("kms", "sign"),
+        ("s3api", "put-object"),
+        ("s3api", "put-object"),
+        ("s3api", "get-object"),
+        ("s3api", "get-object"),
+        ("kms", "verify"),
+    ]
+    assert all(
+        _arg_value(call, "--endpoint-url")
+        == (
+            "https://s3.ap-northeast-1.amazonaws.com"
+            if call[1] == "s3api"
+            else f"https://{call[1]}.ap-northeast-1.amazonaws.com"
+        )
+        for call in aws_calls
+    )
+    assert [_arg_value(call, "--key-id") for call in aws_calls[:2]] == [
+        EVIDENCE_ENCRYPTION_KEY_ALIAS,
+        DRILL_SIGNING_KEY_ALIAS,
+    ]
+    sign_call = aws_calls[2]
+    assert _arg_value(sign_call, "--key-id") == DRILL_SIGNING_KEY_ARN
+    assert _arg_value(sign_call, "--message-type") == "DIGEST"
+    assert _arg_value(sign_call, "--signing-algorithm") == SIGNING_ALGORITHM
+    put_calls = [call for call in aws_calls if (call[1], call[2]) == ("s3api", "put-object")]
+    assert [_arg_value(call, "--key") for call in put_calls] == [
+        aggregate_key,
+        f"{aggregate_key}.sig",
+    ]
+    assert all(
+        _arg_value(call, "--ssekms-key-id") == EVIDENCE_ENCRYPTION_KEY_ARN
+        and _arg_value(call, "--object-lock-mode") == "COMPLIANCE"
+        and _arg_value(call, "--if-none-match") == "*"
+        for call in put_calls
+    )
+    get_calls = [call for call in aws_calls if (call[1], call[2]) == ("s3api", "get-object")]
+    assert [_arg_value(call, "--version-id") for call in get_calls] == [
+        "aggregate-payload-version",
+        "aggregate-signature-version",
+    ]
     for leg, source_dm_qa in zip(
         aggregate["legs"],
         dm_qa_results,
@@ -2067,6 +2587,103 @@ def test_finalize_rejects_fresh_live_drift_after_restore_receipt(
     assert drill.state()["final_status"] == "RECONCILE_REQUIRED"
     assert not (drill.drill_dir / "final-live.snapshot.json").exists()
     assert drill._guard_calls("snapshot")
+
+
+def test_finalize_does_not_lock_body_rejected_before_integrity(
+    drill: DrillHarness,
+) -> None:
+    _advance_to_leg2_applied(drill)
+
+    finalized = drill.run(
+        "finalize",
+        "--drill-dir",
+        str(drill.drill_dir),
+        now=INITIAL_APPLIED_AT + 420,
+        extra_env={"FAKE_VALIDATOR_BODY_FAIL": "true"},
+    )
+
+    assert finalized.returncode != 0
+    assert "aggregate body failed pre-persistence validation" in finalized.stderr
+    assert drill.state()["state"] == "LEG2_APPLIED"
+    assert not (drill.drill_dir / "aggregate.json").exists()
+    assert not drill.aws_objects.exists()
+    assert all(call[0] != "aws" for call in drill.call_lines())
+
+
+@pytest.mark.parametrize(
+    ("failure_env", "expected_aws_operations"),
+    [
+        (
+            {"FAKE_AWS_FAIL_OPERATION": "put-object"},
+            [
+                ("kms", "describe-key"),
+                ("kms", "describe-key"),
+                ("kms", "sign"),
+                ("s3api", "put-object"),
+            ],
+        ),
+        (
+            {"FAKE_AWS_FAIL_OPERATION": "sign"},
+            [
+                ("kms", "describe-key"),
+                ("kms", "describe-key"),
+                ("kms", "sign"),
+            ],
+        ),
+        (
+            {"FAKE_AWS_REDOWNLOAD_MISMATCH": "true"},
+            [
+                ("kms", "describe-key"),
+                ("kms", "describe-key"),
+                ("kms", "sign"),
+                ("s3api", "put-object"),
+                ("s3api", "put-object"),
+                ("s3api", "get-object"),
+            ],
+        ),
+        (
+            {"FAKE_AWS_MISSING_VERSION_ID": "true"},
+            [
+                ("kms", "describe-key"),
+                ("kms", "describe-key"),
+                ("kms", "sign"),
+                ("s3api", "put-object"),
+            ],
+        ),
+    ],
+    ids=[
+        "put-failure",
+        "sign-failure",
+        "exact-redownload-byte-mismatch",
+        "missing-version-id",
+    ],
+)
+def test_finalize_never_passes_when_aggregate_persistence_is_not_exact(
+    drill: DrillHarness,
+    failure_env: dict[str, str],
+    expected_aws_operations: list[tuple[str, str]],
+) -> None:
+    _advance_to_leg2_applied(drill)
+
+    finalized = drill.run(
+        "finalize",
+        "--drill-dir",
+        str(drill.drill_dir),
+        now=INITIAL_APPLIED_AT + 420,
+        extra_env=failure_env,
+    )
+
+    assert finalized.returncode != 0
+    assert "PASSED" not in finalized.stdout
+    assert "could not persist and verify immutable aggregate evidence" in finalized.stderr
+    state = drill.state()
+    assert state["state"] == "LEG2_APPLIED"
+    assert state["final_status"] is None
+    assert state["aggregate_sha256"] is None
+    assert not (drill.drill_dir / "aggregate.json").exists()
+    assert not drill.validator_calls.exists()
+    aws_operations = [(call[1], call[2]) for call in drill.call_lines() if call[0] == "aws"]
+    assert aws_operations == expected_aws_operations
 
 
 def test_controller_has_no_unguarded_mutation_path_and_plan_keeps_var_file() -> None:
