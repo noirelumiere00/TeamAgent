@@ -61,6 +61,18 @@ APP_HTML = (
     )
     + ";\n</script>\n"
 ).encode()
+APP_VERSION_ID = "fake-current-version-1"
+APP_SHA256 = hashlib.sha256(APP_HTML).hexdigest()
+MCP_APPLICATION_PROVENANCE = {
+    "bucket": "teamagent-dev-raw-files",
+    "key": "codebuild/connect-web-app.html",
+    "version_id": APP_VERSION_ID,
+    "sha256": APP_SHA256,
+    "vault_manifest_sha256": APP_VAULT_MANIFEST_SHA256,
+    "build_inputs_sha256": APP_BUILD_INPUTS_SHA256,
+    "baked_fallback_version_id": APP_VERSION_ID,
+    "baked_fallback_sha256": APP_SHA256,
+}
 MAIL_HMAC_SECRET = (
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/mail-action-AbC123"
 )
@@ -694,18 +706,59 @@ CONSUMER_MANIFEST_IDENTITY_KEYS = (
     "release_repository",
     "receipt",
 )
+CONTAINER_DEFINITION_COMPARE_FIELDS = (
+    "name",
+    "image",
+    "command",
+    "entryPoint",
+    "environment",
+    "secrets",
+    "user",
+    "privileged",
+    "readonlyRootFilesystem",
+    "linuxParameters",
+    "mountPoints",
+    "logConfiguration",
+)
+TASK_DEFINITION_COMPARE_FIELDS = (
+    "container_definitions",
+    "task_role_arn",
+    "execution_role_arn",
+    "network_mode",
+    "cpu",
+    "memory",
+    "volumes",
+)
 
 
-def _consumer_snapshot(
-    consumer: dict[str, Any],
-    *,
-    planned: bool,
-) -> dict[str, Any]:
+def _consumer_task_definition(component: str) -> dict[str, Any]:
+    task = _task_after(component)
+    container_definitions = json.loads(task["container_definitions"])
+    for container in container_definitions:
+        for field in CONTAINER_DEFINITION_COMPARE_FIELDS:
+            container.setdefault(field, None)
+    return {
+        "container_definitions": container_definitions,
+        "task_role_arn": task["task_role_arn"],
+        "execution_role_arn": task["execution_role_arn"],
+        "network_mode": task["network_mode"],
+        "cpu": task["cpu"],
+        "memory": task["memory"],
+        "volumes": task.get("volumes"),
+    }
+
+
+def _consumer_snapshot(consumer: dict[str, Any]) -> dict[str, Any]:
     consumer_id = consumer["consumer_id"]
     component = CONSUMER_COMPONENTS[consumer_id]
-    task_definition_arn = (
-        consumer["terraform_task_definition_address"] if planned else _task_arn(component)
-    )
+    task_definition_arn = _task_arn(component)
+    task_definition = _consumer_task_definition(component)
+    named_containers = [
+        container
+        for container in task_definition["container_definitions"]
+        if container["name"] == consumer["container_name"]
+    ]
+    assert len(named_containers) == 1
     activator_type = consumer["activator"]["type"]
     if activator_type == "ecs_service":
         activation = {
@@ -723,23 +776,23 @@ def _consumer_snapshot(
             "task_definition_arn": task_definition_arn,
         }
     return {
-        "image": _container(component)["image"],
+        "image": named_containers[0]["image"],
         "task_definition_arn": task_definition_arn,
+        "task_definition": task_definition,
         "activation": activation,
     }
 
 
-def _consumer_manifest(*, hmac_active: bool = False) -> dict[str, Any]:
+def _consumer_manifest() -> dict[str, Any]:
     consumers: list[dict[str, Any]] = []
     for consumer in CONSUMER_REGISTRY_DATA["consumers"]:
-        live = _consumer_snapshot(consumer, planned=False)
-        planned = hmac_active or consumer["consumer_id"] != "morning_digest"
+        live = _consumer_snapshot(consumer)
         consumers.append(
             {
                 **{key: copy.deepcopy(consumer[key]) for key in CONSUMER_MANIFEST_IDENTITY_KEYS},
                 "live": copy.deepcopy(live),
                 "before": copy.deepcopy(live),
-                "after": _consumer_snapshot(consumer, planned=planned),
+                "after": copy.deepcopy(live),
             }
         )
     return {
@@ -1143,6 +1196,49 @@ def _activate_hmac_plan(plan: dict[str, Any]) -> None:
         if address not in configured_addresses:
             configurations.append({"address": address, "expressions": {}})
             configured_addresses.add(address)
+
+
+def _stabilize_no_image_plan(
+    plan: dict[str, Any],
+    *,
+    hmac_active: bool,
+) -> None:
+    # HMAC-selected task actions remain mutations so the exact promotion-gate
+    # coverage is exercised; the image-consumer ARN/body/activation stays stable.
+    hmac_task_addresses = set(HMAC_TASK_ADDRESSES.values()) if hmac_active else set()
+    for address in TASK_ADDRESSES.values():
+        task_change = _find(plan, address)["change"]
+        task_change["actions"] = (
+            ["create", "delete"] if address in hmac_task_addresses else ["no-op"]
+        )
+        task_change["after"] = copy.deepcopy(task_change["before"])
+        task_change["after_unknown"] = {}
+
+    activation_addresses = (
+        "aws_ecs_service.openclaw[0]",
+        "aws_ecs_service.mcp[0]",
+        "aws_ecs_service.connect_web[0]",
+        "aws_cloudwatch_event_target.ingest_run_task[0]",
+        "aws_cloudwatch_event_target.morning_digest_run_task[0]",
+        "aws_cloudwatch_event_target.canary_run_task[0]",
+        "aws_lambda_function.tiktok_dispatch[0]",
+        "aws_lambda_function.x_dispatch[0]",
+    )
+    for address in activation_addresses:
+        activation_change = _find(plan, address)["change"]
+        activation_change["actions"] = ["no-op"]
+        activation_change["after"] = copy.deepcopy(activation_change["before"])
+        activation_change["after_unknown"] = {}
+
+    if hmac_active:
+        morning_target = _find(
+            plan,
+            "aws_cloudwatch_event_target.morning_digest_run_task[0]",
+        )["change"]["after"]
+        target = _hmac_target_from_tf(morning_target)
+        for address in HMAC_MORNING_GATE_ADDRESSES:
+            gate_input = _find(plan, address)["change"]["after"]["input"]
+            gate_input["target"] = copy.deepcopy(target)
 
 
 def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
@@ -1772,7 +1868,7 @@ def _fake_aws(path: Path) -> None:
             )
             print(json.dumps({{
                 "ContentLength": len(app_html),
-                "VersionId": "fake-current-version-1",
+                "VersionId": {APP_VERSION_ID!r},
             }}))
         elif args[:2] == ["s3api", "get-object"]:
             version = args[args.index("--version-id") + 1]
@@ -2309,8 +2405,11 @@ def _fake_terraform(path: Path) -> None:
             contracts = json.loads(os.environ["TF_FAKE_RELEASE_CONTRACTS"])
             contract_ready = json.loads(os.environ["TF_FAKE_RELEASE_READY"])
             if force_ready_false:
-                contract_ready["mcp"] = False
-            application_provenance = {"mcp": {}} if force_ready_false else {}
+                contracts = {"mcp": contracts["mcp"]}
+                contract_ready = {"mcp": False}
+            application_provenance = {
+                "mcp": json.loads(os.environ["TF_FAKE_MCP_APPLICATION"])
+            }
             shared_generation_ledger = {}
             gate_query = {
                 "consumer_manifest_json": json.dumps(
@@ -2432,6 +2531,7 @@ def _fake_terraform(path: Path) -> None:
                     for change in plan["resource_changes"]
                     if change["address"] == task_address
                 )
+                task_change["change"]["actions"] = ["create", "delete"]
                 containers = json.loads(
                     task_change["change"]["after"]["container_definitions"]
                 )
@@ -2505,8 +2605,10 @@ def _harness(
     plan_data = _safe_plan()
     if hmac_active:
         _activate_hmac_plan(plan_data)
+    if scenario == "safe":
+        _stabilize_no_image_plan(plan_data, hmac_active=hmac_active)
     state_data = _fake_state_from_plan(plan_data)
-    consumer_manifest = _consumer_manifest(hmac_active=hmac_active)
+    consumer_manifest = _consumer_manifest()
     _mutate_plan(plan_data, scenario)
     template = tmp_path / "template.json"
     template.write_text(json.dumps(plan_data), encoding="utf-8")
@@ -2526,7 +2628,8 @@ def _harness(
     tf_log = tmp_path / "terraform.log"
     tf_log.write_text("", encoding="utf-8")
     tf_log.chmod(0o600)
-    release_contracts, release_ready = _release_contract_bindings()
+    release_contracts, _ = _release_contract_bindings()
+    release_ready = {pipeline: True for pipeline in release_contracts}
     env = os.environ.copy()
     env.update(
         {
@@ -2543,6 +2646,11 @@ def _harness(
             ),
             "TF_FAKE_RELEASE_READY": json.dumps(
                 release_ready,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "TF_FAKE_MCP_APPLICATION": json.dumps(
+                MCP_APPLICATION_PROVENANCE,
                 sort_keys=True,
                 separators=(",", ":"),
             ),
@@ -2685,9 +2793,13 @@ def _release_gate_query(
     contract_ready: dict[str, bool] | None = None,
     application: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    contracts, default_ready = _release_contract_bindings()
+    contracts, _ = _release_contract_bindings()
+    default_ready = {pipeline: True for pipeline in contracts}
     catalog = receipt_catalog or {}
     bindings = consumer_receipt_bindings or {}
+    application_provenance = (
+        {"mcp": copy.deepcopy(MCP_APPLICATION_PROVENANCE)} if application is None else application
+    )
     return {
         "consumer_manifest_json": json.dumps(
             manifest,
@@ -2715,7 +2827,7 @@ def _release_gate_query(
             separators=(",", ":"),
         ),
         "application_json": json.dumps(
-            application or {},
+            application_provenance,
             sort_keys=True,
             separators=(",", ":"),
         ),
@@ -2757,6 +2869,30 @@ def _receipt_required_canary_manifest() -> dict[str, Any]:
     canary["after"]["activation"]["state"] = "ENABLED"
     manifest["mode"] = "receipt-required"
     return manifest
+
+
+def test_receipt_required_canary_fixture_has_only_the_intended_activation_change() -> None:
+    manifest = _receipt_required_canary_manifest()
+
+    assert manifest["mode"] == "receipt-required"
+    for consumer in manifest["consumers"]:
+        before = consumer["before"]
+        after = consumer["after"]
+        assert consumer["live"] == before
+        assert before["image"] == after["image"]
+        assert before["task_definition_arn"] == after["task_definition_arn"]
+        assert before["task_definition"] == after["task_definition"]
+        if consumer["consumer_id"] == "canary":
+            assert before["activation"] == {
+                "state": "DISABLED",
+                "task_definition_arn": before["task_definition_arn"],
+            }
+            assert after["activation"] == {
+                "state": "ENABLED",
+                "task_definition_arn": after["task_definition_arn"],
+            }
+        else:
+            assert before["activation"] == after["activation"]
 
 
 def test_consumer_image_map_preserves_exact_consumer_argument_wiring() -> None:
@@ -3420,19 +3556,60 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
     saved_plan = json.loads(plan.read_text(encoding="utf-8"))
     manifest = saved_plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    task_changes = {
+        change["address"]: change["change"]
+        for change in saved_plan["resource_changes"]
+        if change["address"] in TASK_ADDRESSES.values()
+    }
+    assert set(task_changes) == set(TASK_ADDRESSES.values())
+    assert all(
+        change["actions"] == ["no-op"]
+        and change["before"] == change["after"]
+        and change["after_unknown"] == {}
+        for change in task_changes.values()
+    )
     assert manifest["schema_version"] == 1
     assert manifest["registry_sha256"] == CONSUMERS.consumer_registry_sha256()
     assert manifest["mode"] == "no-image-transition"
-    assert [row["consumer_id"] for row in manifest["consumers"]] == [
-        row["consumer_id"] for row in CONSUMER_REGISTRY_DATA["consumers"]
-    ]
-    for row in manifest["consumers"]:
+    assert len(manifest["consumers"]) == len(CONSUMER_REGISTRY_DATA["consumers"]) == 8
+    for row, registry_consumer in zip(
+        manifest["consumers"],
+        CONSUMER_REGISTRY_DATA["consumers"],
+        strict=True,
+    ):
+        assert {key: row[key] for key in CONSUMER_MANIFEST_IDENTITY_KEYS} == {
+            key: registry_consumer[key] for key in CONSUMER_MANIFEST_IDENTITY_KEYS
+        }
         for phase in ("live", "before", "after"):
             assert set(row[phase]) == {
                 "image",
                 "task_definition_arn",
+                "task_definition",
                 "activation",
             }
+            task_definition = row[phase]["task_definition"]
+            assert set(task_definition) == set(TASK_DEFINITION_COMPARE_FIELDS)
+            named_containers = [
+                container
+                for container in task_definition["container_definitions"]
+                if container["name"] == row["container_name"]
+            ]
+            assert len(named_containers) == 1
+            assert set(CONTAINER_DEFINITION_COMPARE_FIELDS) <= set(named_containers[0])
+            assert named_containers[0]["image"] == row[phase]["image"]
+        assert (
+            row["live"]["task_definition_arn"]
+            == row["before"]["task_definition_arn"]
+            == row["after"]["task_definition_arn"]
+        )
+        assert (
+            row["live"]["task_definition"]
+            == row["before"]["task_definition"]
+            == row["after"]["task_definition"]
+        )
+        assert (
+            row["live"]["activation"] == row["before"]["activation"] == row["after"]["activation"]
+        )
     assert saved_plan["variables"]["image_release_receipt_catalog"]["value"] == {}
     assert saved_plan["variables"]["image_release_consumer_receipt_bindings"]["value"] == {}
     manifest_images = {row["consumer_id"]: row["after"]["image"] for row in manifest["consumers"]}
@@ -3465,6 +3642,7 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     assert gate_input["consumer_receipt_bindings"] == {}
     assert gate_input["release_channels"] == {}
     assert gate_input["consumer_manifest"] == manifest
+    assert gate_input["application_provenance"] == {"mcp": MCP_APPLICATION_PROVENANCE}
     gate_verification = _run_release_gate(gate_input["deployment_gate_query"])
     assert gate_verification.returncode == 0, gate_verification.stdout + gate_verification.stderr
     verified_gate = json.loads(gate_verification.stdout)
@@ -3559,6 +3737,7 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "lineage": "01234567-89ab-cdef-0123-456789abcdef",
         "serial": 42,
     }
+    assert data["state_contract"]["task_revisions"] == {}
     assert set(data["state_contract"]["imports"]) == {
         "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
         "aws_cloudwatch_log_group.codebuild_image",
@@ -3592,6 +3771,13 @@ def test_exact_hmac_runtime_gate_set_is_accepted_by_sync_guard(tmp_path: Path) -
     assert result.returncode == 0, result.stdout + result.stderr
     assert plan.is_file()
     assert Path(f"{plan}.runtime-guard.json").is_file()
+    saved_plan = json.loads(plan.read_text(encoding="utf-8"))
+    manifest = saved_plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    assert manifest["mode"] == "no-image-transition"
+    assert all(
+        consumer["live"] == consumer["before"] == consumer["after"]
+        for consumer in manifest["consumers"]
+    )
     assert not any(
         command == "apply" or command.startswith("apply ")
         for command in tf_log.read_text(encoding="utf-8").splitlines()
