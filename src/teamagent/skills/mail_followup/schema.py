@@ -38,7 +38,7 @@ class MailFollowupInput(BaseModel):
 
 
 class FollowupItem(BaseModel):
-    """放置気味の受信メール 1 件（**DLP マスク後・生データ不可**）。"""
+    """放置気味の受信スレッド 1 件（**DLP マスク後・生データ不可**）。"""
 
     counterpart_masked: str = Field(
         description="相手アドレスのマスク表示（先頭1文字＋ドメイン）",
@@ -70,7 +70,7 @@ class MailFollowupOutput(BaseModel):
     )
     note: str = Field(
         default="",
-        description="ラベルの正直な但し書き（返信済みかは未判定 等）",
+        description="ラベルの正直な但し書き（本人返信が末尾のスレッドは除外 等）",
     )
     total_cost_usd: float = Field(
         default=0.0,

@@ -11,16 +11,53 @@ TERRAFORM = ROOT / "infra" / "terraform" / "codebuild.tf"
 ECR = ROOT / "infra" / "terraform" / "ecr.tf"
 LAUNCHER = ROOT / "infra" / "deploy" / "build_openclaw_image.sh"
 
+OPENCLAW_PUBLISHER_POLICY_DOCUMENTS = (
+    "openclaw_publisher_core",
+    "openclaw_publisher_manage_a",
+    "openclaw_publisher_manage_b",
+)
+
 
 def _terraform() -> str:
     return TERRAFORM.read_text(encoding="utf-8")
 
 
+def _balanced_block_after(body: str, marker: str) -> str:
+    marker_offset = body.index(marker)
+    opening = body.index("{", marker_offset)
+    depth = 0
+    for offset in range(opening, len(body)):
+        if body[offset] == "{":
+            depth += 1
+        elif body[offset] == "}":
+            depth -= 1
+            if depth == 0:
+                return body[opening + 1 : offset]
+    raise AssertionError(f"unterminated Terraform block after {marker!r}")
+
+
 def _policy(name: str) -> str:
+    marker = f'data "aws_iam_policy_document" "{name}"'
+    return _balanced_block_after(_terraform(), marker)
+
+
+def _managed_policy(role_name: str, document_names: tuple[str, ...]) -> str:
     body = _terraform()
-    return body.split(f'data "aws_iam_policy_document" "{name}"', maxsplit=1)[1].split(
-        '\nresource "aws_iam_role_policy"', maxsplit=1
-    )[0]
+    documents = []
+    for name in document_names:
+        documents.append(_policy(name))
+
+        managed_policy = _balanced_block_after(body, f'resource "aws_iam_policy" "{name}"')
+        assert f"policy = data.aws_iam_policy_document.{name}.json" in managed_policy
+
+        attachment = _balanced_block_after(
+            body,
+            f'resource "aws_iam_role_policy_attachment" "{name}"',
+        )
+        assert f"role       = aws_iam_role.{role_name}.name" in attachment
+        assert f"policy_arn = aws_iam_policy.{name}.arn" in attachment
+
+    return "\n".join(documents)
 
 
 def test_project_is_dedicated_fixed_full_sha_source_with_embedded_buildspec() -> None:
@@ -63,7 +100,7 @@ def test_build_role_can_write_only_openclaw_quarantine_and_not_mcp_candidate_or_
 
 def test_openclaw_start_build_denies_environment_buildspec_and_runtime_overrides() -> None:
     body = _terraform()
-    policy = _policy("openclaw_publisher")
+    policy = _managed_policy("openclaw_publisher", OPENCLAW_PUBLISHER_POLICY_DOCUMENTS)
 
     assert 'sid       = "StartExactOpenClawBuild"' in policy
     assert 'sid       = "DenyAnyStartBuildEnvironmentOverride"' in policy
@@ -82,6 +119,18 @@ def test_openclaw_start_build_denies_environment_buildspec_and_runtime_overrides
     ):
         assert f'"{key}"' in body
     assert '"codebuild:timeoutInMinutes"' not in body
+    for key_set in (
+        "launcher_denied_override_condition_keys_manage_a",
+        "launcher_denied_override_condition_keys_manage_b",
+        "launcher_denied_override_condition_keys_guardrails",
+    ):
+        deny = _balanced_block_after(policy, f"for_each = local.{key_set}")
+        assert 'effect  = "Deny"' in deny
+        assert 'actions = ["codebuild:StartBuild"]' in deny
+        assert "aws_codebuild_project.openclaw_provenance.arn" in deny
+        assert 'test     = "Null"' in deny
+        assert "variable = statement.value" in deny
+        assert 'values   = ["false"]' in deny
     assert '"ssmmessages:*"' in policy
 
 
@@ -157,7 +206,14 @@ def test_openclaw_final_subjects_are_single_arm64_manifests_and_full_sha_tagged(
     assert "candidate-${SOURCE_COMMIT}-core" in buildspec
     assert "candidate-${SOURCE_COMMIT}-media" in buildspec
     assert "[:12]" not in launcher
-    assert "git-" not in buildspec
+    assert "${COMMIT:0:12}" not in launcher
+    assert not any(
+        "git-" in line and line.strip() != "git-credential-helper: yes"
+        for line in buildspec.splitlines()
+    )
+    assert "${SOURCE_COMMIT:0:12}" not in buildspec
+    assert '[[ "$CODEBUILD_SOURCE_VERSION" =~ ^[0-9a-f]{40}$ ]]' in buildspec
+    assert '[[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]]' in launcher
     assert "resolve-platform" in launcher
 
 

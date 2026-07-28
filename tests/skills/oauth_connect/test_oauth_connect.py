@@ -211,7 +211,7 @@ def test_superset_scopes_is_connected(monkeypatch: pytest.MonkeyPatch) -> None:
     for k, v in _OAUTH_ENV.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
-    extra = (*_full_scopes(), "https://www.googleapis.com/auth/userinfo.email")
+    extra = (*_full_scopes(), "https://www.googleapis.com/auth/drive.metadata.readonly")
     skill = OAuthConnectSkill(google_store=_ScopedStore(extra))
     out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
     assert out.url is None

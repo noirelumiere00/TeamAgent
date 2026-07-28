@@ -1,10 +1,11 @@
 """per-user OAuth 同意フロー（`/teamagent connect` の中核・W2）。
 
 各メンバーが自分の Google を認可するための「本人専用の同意URL生成」と「authorization
-code → refresh token 交換」を提供する。**CSRF 対策の署名付き state（HMAC）**で、callback で
-「誰の認可か」を改竄なく検証する（エージェント協議の落とし穴・必須要件）。
+code → refresh token 交換」を提供する。**nonce・30分TTL付きの署名 state（HMAC）**で callback
+対象を検証し、既存 hmac-state DynamoDB テーブルの条件付き書き込みで一度だけ消費する。
 
 - state 署名/検証は stdlib のみ（テスト可・課金0）。
+- state のワンタイム消費は connect-web callback だけが行う（UpdateItem・fail-closed）。
 - `google-auth-oauthlib` の Flow は遅延 import（実認可は W1 の OAuth クライアント完了後）。
 設計: docs/poc/workspace_integration_design.md §4。
 """
@@ -15,16 +16,21 @@ import base64
 import hashlib
 import hmac
 import os
+import secrets
+import time
 from typing import Any
 
 from teamagent.adapters.oauth_token_store import OAuthToken
+from teamagent.hmac_durable_state import HMAC_STATE_SCOPE_ENV, HMAC_STATE_TABLE_ENV
 
 # Workspace 連携スコープ（W1 同意画面・OAuth 同意画面 User Type=Internal＝審査不要）。
 # Gmail のみ **modify**（読み＋下書き作成＋ラベル）。送信/削除は GmailClient の adapter-layer
 # denylist で物理封鎖し、create_draft（下書き専用）だけ通す＝「AIは要約・提案・下書きまで、
-# 送信は人間」をコードで強制。他6サービスは readonly。
+# 送信は人間」をコードで強制。Google Workspace API の他6サービスは readonly。
 # ⚠️ 既に readonly で connect 済みの人は、下書き作成(gmail.modify)を使うには再 connect が必要。
 WORKSPACE_SCOPES: tuple[str, ...] = (
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/documents.readonly",
@@ -40,6 +46,9 @@ WORKSPACE_SCOPES: tuple[str, ...] = (
 )
 _AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
+_DEFAULT_STATE_TTL_S = 1800
+_STATE_RECORD_PREFIX = "OAUTH_STATE#"
+_SEP = "|"
 
 
 def _state_secret() -> bytes:
@@ -49,24 +58,107 @@ def _state_secret() -> bytes:
     return secret.encode("utf-8")
 
 
-def make_state(user_email: str, *, secret: bytes | None = None) -> str:
-    """user_email を HMAC 署名して state にする（callback で本人性検証・CSRF/改竄対策）。"""
+def make_state(
+    user_email: str,
+    *,
+    secret: bytes | None = None,
+    now: int | None = None,
+    nonce: str | None = None,
+) -> str:
+    """user_email・発行時刻・nonce を HMAC 署名した30分有効の state にする。"""
     sec = secret or _state_secret()
     email = user_email.strip().lower()
-    sig = hmac.new(sec, email.encode("utf-8"), hashlib.sha256).hexdigest()
-    return base64.urlsafe_b64encode(f"{email}.{sig}".encode()).decode("ascii")
+    issued = int(now if now is not None else time.time())
+    non = nonce or secrets.token_urlsafe(9)
+    body = _SEP.join((email, str(issued), non))
+    sig = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{body}{_SEP}{sig}".encode()).decode("ascii")
 
 
-def verify_state(state: str, *, secret: bytes | None = None) -> str | None:
-    """state を検証し、正しければ user_email を返す。改竄/CSRF/壊れた値なら None。"""
+def verify_state(
+    state: str,
+    *,
+    secret: bytes | None = None,
+    now: int | None = None,
+    max_age_s: int = _DEFAULT_STATE_TTL_S,
+) -> str | None:
+    """state を検証し、正しく未失効なら email を返す。未知・改竄・期限切れは None。"""
     sec = secret or _state_secret()
     try:
         raw = base64.urlsafe_b64decode(state.encode("ascii")).decode("utf-8")
-        email, sig = raw.rsplit(".", 1)
+        body, sig = raw.rsplit(_SEP, 1)
+        email, issued_s, _nonce = body.split(_SEP)
+        issued = int(issued_s)
     except (ValueError, UnicodeDecodeError):
         return None
-    expect = hmac.new(sec, email.encode("utf-8"), hashlib.sha256).hexdigest()
-    return email if hmac.compare_digest(sig, expect) else None
+    expect = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expect):
+        return None
+    current = int(now if now is not None else time.time())
+    if current - issued > max_age_s or issued - current > 60:
+        return None
+    return email
+
+
+def consume_state_once(
+    state: str,
+    *,
+    client: Any | None = None,
+    now: int | None = None,
+    table_name: str | None = None,
+    scope: str | None = None,
+) -> bool:
+    """署名・TTL検証済み state を hmac-state テーブルで一度だけ消費する。
+
+    UpdateItem の ``attribute_not_exists(record)`` が同時 callback 間の直列化点になる。
+    TTL は掃除用で、state 自体の失効判定は verify_state が行う。
+    """
+    table = table_name or os.environ.get(HMAC_STATE_TABLE_ENV, "").strip()
+    state_scope = scope or os.environ.get(HMAC_STATE_SCOPE_ENV, "").strip()
+    if not table or not state_scope:
+        raise RuntimeError("OAuth state のワンタイム消費先が未設定です")
+    if client is None:
+        import boto3
+
+        region = os.environ.get("AWS_REGION") or "ap-northeast-1"
+        client = boto3.session.Session().client("dynamodb", region_name=region)
+    consumed_at = int(now if now is not None else time.time())
+    digest = hashlib.sha256(state.encode("utf-8")).hexdigest()
+    try:
+        client.update_item(
+            TableName=table,
+            Key={
+                "scope": {"S": state_scope},
+                "record": {"S": f"{_STATE_RECORD_PREFIX}{digest}"},
+            },
+            UpdateExpression="SET consumed_at = :now, expires_at = :expires",
+            ConditionExpression="attribute_not_exists(#record)",
+            ExpressionAttributeNames={"#record": "record"},
+            ExpressionAttributeValues={
+                ":now": {"N": str(consumed_at)},
+                ":expires": {"N": str(consumed_at + _DEFAULT_STATE_TTL_S)},
+            },
+        )
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        error = response.get("Error", {}) if isinstance(response, dict) else {}
+        if error.get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+    return True
+
+
+def _allowed_workspace_hd() -> str | None:
+    """既存の会社ドメイン設定から Google OAuth の hd hint を得る。"""
+    configured = os.environ.get("CONNECT_SEARCH_ALLOWED_HD", "").strip().lower()
+    if configured:
+        return configured
+    shared = [
+        domain.strip().lower()
+        for domain in os.environ.get("TEAMAGENT_SHARED_COMPANY_DOMAINS", "").split(",")
+        if domain.strip()
+    ]
+    return shared[0] if len(shared) == 1 else None
 
 
 class OAuthConsentFlow:
@@ -113,14 +205,20 @@ class OAuthConsentFlow:
 
         access_type=offline + prompt=consent で refresh token を確実に取得する。
         """
-        state = make_state(user_email)
+        email = user_email.strip().lower()
+        state = make_state(email)
+        auth_params = {
+            "access_type": "offline",
+            "prompt": "consent",
+            "state": state,
+            "login_hint": email,
+        }
+        allowed_hd = _allowed_workspace_hd()
+        if allowed_hd:
+            auth_params["hd"] = allowed_hd
         # include_granted_scopes は使わない（他アプリで許可済みの scope=gmail.modify 等まで
         # 合算され、要求と返却が食い違う＋readonly の約束に反する write scope が混ざるため）。
-        url, _ = self._flow().authorization_url(
-            access_type="offline",
-            prompt="consent",
-            state=state,
-        )
+        url, _ = self._flow().authorization_url(**auth_params)
         return str(url), state
 
     def exchange(self, code: str) -> OAuthToken:
@@ -135,15 +233,18 @@ class OAuthConsentFlow:
             raise ValueError(
                 "refresh_token を取得できません（access_type=offline / prompt=consent を確認）"
             )
+        id_token = getattr(creds, "id_token", None)
         return OAuthToken(
             refresh_token=str(creds.refresh_token),
             scopes=tuple(creds.scopes or self._scopes),
+            id_token=str(id_token) if id_token else None,
         )
 
 
 __all__ = [
     "WORKSPACE_SCOPES",
     "OAuthConsentFlow",
+    "consume_state_once",
     "make_state",
     "verify_state",
 ]
