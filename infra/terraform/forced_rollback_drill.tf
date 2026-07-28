@@ -430,6 +430,77 @@ resource "aws_iam_role_policy" "forced_rollback_drill" {
   policy = data.aws_iam_policy_document.forced_rollback_drill.json
 }
 
+data "aws_iam_policy_document" "runtime_automation_forced_rollback_drill_evidence" {
+  statement {
+    sid       = "ListOnlyForcedRollbackDrillEvidence"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.openclaw_rollout_evidence.arn]
+    condition {
+      test     = "StringLike"
+      variable = "s3:prefix"
+      values   = ["${local.forced_rollback_drill_evidence_prefix}*"]
+    }
+  }
+
+  statement {
+    sid = "ReadOnlyForcedRollbackDrillEvidence"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectRetention",
+      "s3:GetObjectVersion",
+    ]
+    resources = [local.forced_rollback_drill_evidence_object_arn]
+  }
+
+  statement {
+    sid       = "PutOnlyCompliantForcedRollbackDrillEvidence"
+    actions   = ["s3:PutObject"]
+    resources = [local.forced_rollback_drill_evidence_object_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption"
+      values   = ["aws:kms"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
+      values   = [aws_kms_key.openclaw_rollout_evidence.arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:object-lock-mode"
+      values   = [local.forced_rollback_drill_object_lock_mode]
+    }
+    condition {
+      test     = "NumericGreaterThanEquals"
+      variable = "s3:object-lock-remaining-retention-days"
+      values   = [tostring(local.forced_rollback_drill_retention_days)]
+    }
+  }
+
+  statement {
+    sid       = "ExtendOnlyCompliantForcedRollbackDrillRetention"
+    actions   = ["s3:PutObjectRetention"]
+    resources = [local.forced_rollback_drill_evidence_object_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "s3:object-lock-mode"
+      values   = [local.forced_rollback_drill_object_lock_mode]
+    }
+    condition {
+      test     = "NumericGreaterThanEquals"
+      variable = "s3:object-lock-remaining-retention-days"
+      values   = [tostring(local.forced_rollback_drill_retention_days)]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "runtime_automation_forced_rollback_drill_evidence" {
+  name   = "${local.runtime_automation_role_name}-forced-rollback-drill-evidence"
+  role   = aws_iam_role.runtime_automation.id
+  policy = data.aws_iam_policy_document.runtime_automation_forced_rollback_drill_evidence.json
+}
+
 output "forced_rollback_drill_evidence_bucket" {
   value = aws_s3_bucket.openclaw_rollout_evidence.id
 }

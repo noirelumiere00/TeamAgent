@@ -38,6 +38,7 @@ PLUGIN_OPERATION_SMOKE = ROOT / "infra/openclaw/plugin-operation-smoke.mjs"
 ROLLOUT_TASK_CANARY = ROOT / "infra/openclaw/rollout-task-canary.mjs"
 ROLLOUT_GATE = ROOT / "infra/openclaw/run-live-rollout-gates.mjs"
 RUNTIME_GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
+FORCED_ROLLBACK_DM_QA_PROBE = ROOT / "infra/deploy/forced_rollback_dm_qa_probe.py"
 ROLLOUT_EVIDENCE_TF = ROOT / "infra/terraform/openclaw_rollout_evidence.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra/terraform/runtime_evidence.tf"
 CLOUDWATCH_FARGATE = ROOT / "infra/terraform/cloudwatch_fargate.tf"
@@ -1731,45 +1732,94 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
 
     dm_qa_start = guard.index("run_forced_rollback_dm_qa() {")
     dm_qa = guard[dm_qa_start : guard.index("\nwrite_preflight_receipt()", dm_qa_start)]
+    dm_qa_probe = FORCED_ROLLBACK_DM_QA_PROBE.read_text(encoding="utf-8")
     assert "FORCED_ROLLBACK_DM_QA_MAX_SECONDS=300" in guard
     assert "FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS=30" in guard
+    assert ('FORCED_ROLLBACK_DM_QA_PROBE="$GUARD_JQ_DIR/forced_rollback_dm_qa_probe.py"') in guard
+    assert 'assert_regular_nonwritable "$FORCED_ROLLBACK_DM_QA_PROBE"' in guard
+    assert 'assert_git_tracked_clean "$FORCED_ROLLBACK_DM_QA_PROBE"' in guard
+    assert guard.count('"$FORCED_ROLLBACK_DM_QA_PROBE"') == 4
+    assert 'python3 "$FORCED_ROLLBACK_DM_QA_PROBE"' in dm_qa
+    assert "python3 - \\" not in dm_qa
+    assert '> "$probe_output"' in dm_qa
     assert "--forced-rollback-dm-qa-deadline-epoch)" in apply_case
     assert (
         "available=$((deadline_epoch - now - FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS))"
     ) in dm_qa
     assert ('if [ "$timeout_seconds" -gt "$FORCED_ROLLBACK_DM_QA_MAX_SECONDS" ]; then') in dm_qa
     assert 'timeout_seconds="$FORCED_ROLLBACK_DM_QA_MAX_SECONDS"' in dm_qa
-    assert "deadline_monotonic = started_monotonic + int(timeout_seconds_raw)" in dm_qa
-    assert "timeout=remaining()" in dm_qa
-    assert "timeout=min(15.0, remaining())" in dm_qa
-    assert "time.sleep(min(3.0, remaining()))" in dm_qa
-    assert "time.sleep(min(2.0, remaining()))" in dm_qa
+    assert "deadline_monotonic = started_monotonic + int(timeout_seconds_raw)" in dm_qa_probe
+    assert "timeout=remaining()" in dm_qa_probe
+    assert "timeout=min(15.0, remaining())" in dm_qa_probe
+    assert "time.sleep(min(3.0, remaining()))" in dm_qa_probe
+    assert "time.sleep(min(2.0, remaining()))" in dm_qa_probe
     assert "return 124" in dm_qa
-    assert "raise SystemExit(124)" in dm_qa
+    assert "raise SystemExit(124)" in dm_qa_probe
+    assert "raise SystemExit(24)" in dm_qa_probe
+    assert "24|124)" in dm_qa
+    assert 'return "$status"' in dm_qa
+    assert "return 24" in dm_qa
+    assert "os.link(sys.argv[1], sys.argv[2], follow_symlinks=False)" in dm_qa
+    assert 'mv "$probe_output" "$output"' not in dm_qa
     assert 'if [ "$DM_QA_STATUS" -eq 124 ]; then' in apply_case
     assert "exit 124" in apply_case[dm_qa_call:eventbridge_verified]
     # The non-timeout DM QA failure must also stay fatal: a mutation that swallows
     # this branch survived the whole suite once, so pin the fail-closed exit here.
     assert "apply saga must not be finalized" in apply_case[dm_qa_call:eventbridge_verified]
     assert "exit 24" in apply_case[dm_qa_call:eventbridge_verified]
-    assert '"--object-lock-mode",' in dm_qa
-    assert 'metadata.get("ObjectLockMode") != "COMPLIANCE"' in dm_qa
-    assert '"object_lock_mode": "COMPLIANCE"' in dm_qa
-    assert '.locator.object_lock_mode == "COMPLIANCE"' in dm_qa
+    assert '"--object-lock-mode",' in dm_qa_probe
+    assert 'metadata.get("ObjectLockMode") != "COMPLIANCE"' in dm_qa_probe
+    assert '"object_lock_mode": "COMPLIANCE"' in dm_qa_probe
+    for required_dm_qa_result_binding in (
+        "jq -s -e",
+        "length == 1",
+        '.locator.object_lock_mode == "COMPLIANCE"',
+        ".locator.encryption_kms_key_arn == $encryption_kms",
+        ".locator.signer.kms_key_arn == $signing_kms",
+        ".locator.exact_version_redownload.requested_version_id ==",
+        ".locator.exact_version_redownload.returned_version_id ==",
+        ".locator.exact_version_redownload.bytes_match == true",
+    ):
+        assert required_dm_qa_result_binding in dm_qa
     assert "forced_rollback_drill_evidence_bucket" in apply_case
     assert "forced_rollback_drill_evidence_prefix" in apply_case
     assert '"forced-rollback-drills/"' in apply_case
     assert '"$OPENCLAW_SIGNING_KMS_KEY_ARN"; then' in apply_case[dm_qa_call:eventbridge_verified]
-    assert 'f"{EVIDENCE_PREFIX}/{apply_attempt_id}/dm-qa/result.json"' in dm_qa
-    assert '"signing_kms_key_arn": signing_kms_key_arn' in dm_qa
-    assert '"signing_algorithm": SIGNING_ALGORITHM' in dm_qa
-    assert '"verify",' in dm_qa
-    assert 'page_arguments.extend(["--next-token", next_token])' in dm_qa
-    assert 'returned_token = response.get("nextToken")' in dm_qa
-    assert "seen_tokens.add(returned_token)" in dm_qa
-    assert "service_name=MCP_SERVICE" in dm_qa
-    assert '"mcp_running_tasks_before": mcp_running_before' in dm_qa
-    assert '"mcp_running_tasks_after": mcp_running_after' in dm_qa
+    assert 'f"{EVIDENCE_PREFIX}/{apply_attempt_id}/dm-qa/result.json"' in dm_qa_probe
+    assert '"signing_kms_key_arn": signing_kms_key_arn' in dm_qa_probe
+    assert '"signing_algorithm": SIGNING_ALGORITHM' in dm_qa_probe
+    assert '"verify",' in dm_qa_probe
+    assert 'page_arguments.extend(["--next-token", next_token])' in dm_qa_probe
+    assert 'returned_token = response.get("nextToken")' in dm_qa_probe
+    assert "seen_tokens.add(returned_token)" in dm_qa_probe
+    assert "service_name=MCP_SERVICE" in dm_qa_probe
+    assert '"mcp_running_tasks_before": mcp_running_before' in dm_qa_probe
+    assert '"mcp_running_tasks_after": mcp_running_after' in dm_qa_probe
+    for required_dm_qa_probe_contract in (
+        'caller = aws_json("sts", "get-caller-identity", [])',
+        'caller.get("Arn") != TRUSTED_AUTOMATION_ARN',
+        'set(secret) != {"userToken", "channelId", "botUserId"}',
+        're.fullmatch(r"xoxp-[A-Za-z0-9-]{20,}"',
+        "nonce = os.urandom(12).hex()",
+        "fragment_a =",
+        "fragment_b =",
+        "if response_token in prompt:",
+        '"chat.postMessage"',
+        '"conversations.replies"',
+        'message.get("user") == secret["botUserId"]',
+        'str(message.get("text", "")).strip() == response_token',
+        '"--filter-pattern"',
+        "if len(matched_streams) == 1:",
+        '"token_sha256": sha256_bytes(response_token.encode())',
+        "if running_before != running_after:",
+        "if mcp_running_before != mcp_running_after:",
+        "sys.stdout.buffer.write(canonical_bytes(value))",
+    ):
+        assert required_dm_qa_probe_contract in dm_qa_probe
+    assert dm_qa_probe.count("sys.stdout.buffer.write") == 1
+    assert dm_qa_probe.count("print(") == 2
+    assert dm_qa_probe.count("file=sys.stderr") == 2
+    assert "print(f" not in dm_qa_probe
     reserve_checks = apply_case.count("ensure_forced_rollback_dm_qa_recovery_reserve")
     assert reserve_checks == 3
     assert (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -13,6 +14,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 TF_ROOT = PROJECT_ROOT / "infra" / "terraform"
 GUARD = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+FORCED_ROLLBACK_DM_QA_PROBE = PROJECT_ROOT / "infra" / "deploy" / "forced_rollback_dm_qa_probe.py"
 MIGRATIONS = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_migrations.json"
 
 
@@ -719,6 +721,65 @@ def test_hmac_consumers_and_rotation_deadlines_are_purpose_exact() -> None:
     assert 'validate("mail"; 86400)' in guard
     assert 'validate("report"; 604800)' in guard
     assert "get-secret-value" not in guard
+    assert "SecretString" not in guard
+    assert "xoxp-" not in guard
+    assert '"userToken"' not in guard
+    assert '"channelId"' not in guard
+    assert '"botUserId"' not in guard
+
+
+def test_forced_rollback_dm_qa_probe_secret_read_is_purpose_exact() -> None:
+    probe = FORCED_ROLLBACK_DM_QA_PROBE.read_text(encoding="utf-8")
+    tree = ast.parse(probe, filename=str(FORCED_ROLLBACK_DM_QA_PROBE))
+    string_literals = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    assert string_literals.count("get-secret-value") == 1
+    assert string_literals.count("--secret-id") == 1
+
+    canary_secret_assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "CANARY_SECRET"
+    ]
+    assert len(canary_secret_assignments) == 1
+    assert ast.literal_eval(canary_secret_assignments[0].value) == (
+        "teamagent/dev/openclaw/rollout-canary"
+    )
+
+    aws_json_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "aws_json"
+    ]
+    assert all(
+        len(call.args) == 3
+        and not call.keywords
+        and isinstance(call.args[0], ast.Constant)
+        and isinstance(call.args[0].value, str)
+        and isinstance(call.args[1], ast.Constant)
+        and isinstance(call.args[1].value, str)
+        for call in aws_json_calls
+    )
+    secret_reads = [call for call in aws_json_calls if call.args[0].value == "secretsmanager"]
+    assert len(secret_reads) == 1
+    secret_read = secret_reads[0]
+    assert secret_read.args[1].value == "get-secret-value"
+    assert isinstance(secret_read.args[2], ast.List)
+    secret_arguments = secret_read.args[2].elts
+    assert len(secret_arguments) == 4
+    assert ast.literal_eval(secret_arguments[0]) == "--secret-id"
+    assert isinstance(secret_arguments[1], ast.Name)
+    assert secret_arguments[1].id == "CANARY_SECRET"
+    assert ast.literal_eval(secret_arguments[2]) == "--version-stage"
+    assert ast.literal_eval(secret_arguments[3]) == "AWSCURRENT"
 
 
 def test_two_phase_migration_never_enables_schedules_early() -> None:

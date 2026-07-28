@@ -95,6 +95,7 @@ PROFILE_CHILDREN = {
         "infra/codebuild/release_evidence.py",
         "infra/deploy/bootstrap_runtime_session.sh",
         "infra/deploy/deployment_apply_finalizer.py",
+        "infra/deploy/forced_rollback_dm_qa_probe.py",
         "infra/deploy/media_cutover_apply_authorizer.py",
         "infra/deploy/run_image_deployment_gate.sh",
         "infra/deploy/runtime_evidence_guard.py",

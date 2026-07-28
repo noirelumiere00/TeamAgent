@@ -453,6 +453,115 @@ def test_drill_writes_require_sse_kms_compliance_for_3650_days() -> None:
     )
 
 
+def test_runtime_automation_can_store_and_exactly_redownload_compliant_drill_evidence() -> None:
+    body = DRILL_TERRAFORM.read_text(encoding="utf-8")
+    policy = _declaration(
+        body,
+        "data",
+        "aws_iam_policy_document",
+        "runtime_automation_forced_rollback_drill_evidence",
+    )
+    role_policy = _declaration(
+        body,
+        "resource",
+        "aws_iam_role_policy",
+        "runtime_automation_forced_rollback_drill_evidence",
+    )
+
+    assert _attribute_expression(role_policy, "role") == "aws_iam_role.runtime_automation.id"
+    assert (
+        _attribute_expression(role_policy, "policy")
+        == "data.aws_iam_policy_document.runtime_automation_forced_rollback_drill_evidence.json"
+    )
+    assert _local_string(body, "forced_rollback_drill_object_lock_mode") == "COMPLIANCE"
+    assert _local_integer(body, "forced_rollback_drill_retention_days") == 3650
+    assert len(_statements(policy)) == 4
+
+    listing = _statement(policy, "ListOnlyForcedRollbackDrillEvidence")
+    assert _effect(listing) == "Allow"
+    assert _actions(listing) == {"s3:ListBucket"}
+    assert _list_expressions(listing, "resources") == (
+        "aws_s3_bucket.openclaw_rollout_evidence.arn",
+    )
+    assert len(_conditions(listing)) == 1
+    _assert_condition(
+        listing,
+        variable="s3:prefix",
+        test="StringLike",
+        values=('"${local.forced_rollback_drill_evidence_prefix}*"',),
+    )
+
+    read = _statement(policy, "ReadOnlyForcedRollbackDrillEvidence")
+    assert _effect(read) == "Allow"
+    assert _actions(read) == {
+        "s3:GetObject",
+        "s3:GetObjectRetention",
+        "s3:GetObjectVersion",
+    }
+    assert _list_expressions(read, "resources") == (
+        "local.forced_rollback_drill_evidence_object_arn",
+    )
+    assert _conditions(read) == []
+
+    put = _statement(policy, "PutOnlyCompliantForcedRollbackDrillEvidence")
+    assert _effect(put) == "Allow"
+    assert _actions(put) == {"s3:PutObject"}
+    assert _list_expressions(put, "resources") == (
+        "local.forced_rollback_drill_evidence_object_arn",
+    )
+    assert len(_conditions(put)) == 4
+    _assert_condition(
+        put,
+        variable="s3:x-amz-server-side-encryption",
+        test="StringEquals",
+        values=('"aws:kms"',),
+    )
+    _assert_condition(
+        put,
+        variable="s3:x-amz-server-side-encryption-aws-kms-key-id",
+        test="StringEquals",
+        values=("aws_kms_key.openclaw_rollout_evidence.arn",),
+    )
+    _assert_condition(
+        put,
+        variable="s3:object-lock-mode",
+        test="StringEquals",
+        values=("local.forced_rollback_drill_object_lock_mode",),
+    )
+    _assert_condition(
+        put,
+        variable="s3:object-lock-remaining-retention-days",
+        test="NumericGreaterThanEquals",
+        values=("tostring(local.forced_rollback_drill_retention_days)",),
+    )
+
+    retention = _statement(policy, "ExtendOnlyCompliantForcedRollbackDrillRetention")
+    assert _effect(retention) == "Allow"
+    assert _actions(retention) == {"s3:PutObjectRetention"}
+    assert _list_expressions(retention, "resources") == (
+        "local.forced_rollback_drill_evidence_object_arn",
+    )
+    assert len(_conditions(retention)) == 2
+    _assert_condition(
+        retention,
+        variable="s3:object-lock-mode",
+        test="StringEquals",
+        values=("local.forced_rollback_drill_object_lock_mode",),
+    )
+    _assert_condition(
+        retention,
+        variable="s3:object-lock-remaining-retention-days",
+        test="NumericGreaterThanEquals",
+        values=("tostring(local.forced_rollback_drill_retention_days)",),
+    )
+
+    assert all(
+        not action.startswith("kms:")
+        for statement in _statements(policy)
+        for action in _actions(statement)
+    )
+
+
 def test_drill_aggregate_signer_is_dedicated_and_algorithm_pinned() -> None:
     body = DRILL_TERRAFORM.read_text(encoding="utf-8")
     key = _declaration(
