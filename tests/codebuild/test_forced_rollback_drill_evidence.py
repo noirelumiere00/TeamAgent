@@ -40,7 +40,7 @@ APPROVAL_IDS = (
 )
 LINEAGE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 KMS_KEY_ARN = "arn:aws:kms:ap-northeast-1:718959508629:key/11111111-1111-4111-8111-111111111111"
-EVIDENCE_BUCKET = "teamagent-dev-forced-rollback-evidence"
+EVIDENCE_BUCKET = "teamagent-dev-openclaw-rollout-evidence"
 
 INITIATING_PRINCIPAL = {
     "arn": "arn:aws:iam::718959508629:user/drill-operator",
@@ -127,6 +127,64 @@ def _release_approval(index: int) -> dict[str, Any]:
 
 
 def _scope() -> dict[str, Any]:
+    resource_specs = (
+        (
+            "canary",
+            "aws_ecs_task_definition.canary[0]",
+            "core",
+            "teamagent-dev-canary",
+            10,
+            11,
+        ),
+        (
+            "connect_web",
+            "aws_ecs_task_definition.connect_web[0]",
+            "core",
+            "teamagent-dev-connect-web",
+            20,
+            21,
+        ),
+        (
+            "ingest",
+            "aws_ecs_task_definition.ingest[0]",
+            "core",
+            "teamagent-dev-ingest",
+            30,
+            31,
+        ),
+        (
+            "mcp",
+            "aws_ecs_task_definition.mcp",
+            "core",
+            "teamagent-dev-mcp",
+            40,
+            41,
+        ),
+        (
+            "morning_digest",
+            "aws_ecs_task_definition.morning_digest[0]",
+            "core",
+            "teamagent-dev-morning-digest",
+            50,
+            51,
+        ),
+        (
+            "tiktok_acquire",
+            "aws_ecs_task_definition.tiktok_acquire[0]",
+            "media",
+            "teamagent-dev-tiktok-acquire",
+            60,
+            61,
+        ),
+        (
+            "x_buzz_worker",
+            "aws_ecs_task_definition.x_buzz_worker[0]",
+            "core",
+            "teamagent-dev-x-buzz-worker",
+            70,
+            71,
+        ),
+    )
     return {
         "pipelines": ["mcp"],
         "subjects": [
@@ -147,51 +205,29 @@ def _scope() -> dict[str, Any]:
         ],
         "resources": [
             {
-                "consumer_id": "connect_web",
-                "terraform_address": "aws_ecs_task_definition.connect_web[0]",
+                "consumer_id": consumer_id,
+                "terraform_address": terraform_address,
                 "pipeline": "mcp",
-                "subject": "core",
+                "subject": subject,
                 "previous_task_definition_arn": (
                     "arn:aws:ecs:ap-northeast-1:718959508629:"
-                    "task-definition/teamagent-dev-connect-web:10"
+                    f"task-definition/{family}:{previous_revision}"
                 ),
-                "previous_task_revision": 10,
+                "previous_task_revision": previous_revision,
                 "initial_new_task_definition_arn": (
                     "arn:aws:ecs:ap-northeast-1:718959508629:"
-                    "task-definition/teamagent-dev-connect-web:11"
+                    f"task-definition/{family}:{initial_new_revision}"
                 ),
-                "initial_new_task_revision": 11,
-            },
-            {
-                "consumer_id": "mcp",
-                "terraform_address": "aws_ecs_task_definition.mcp",
-                "pipeline": "mcp",
-                "subject": "core",
-                "previous_task_definition_arn": (
-                    "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:20"
-                ),
-                "previous_task_revision": 20,
-                "initial_new_task_definition_arn": (
-                    "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:21"
-                ),
-                "initial_new_task_revision": 21,
-            },
-            {
-                "consumer_id": "tiktok_acquire",
-                "terraform_address": "aws_ecs_task_definition.tiktok_acquire[0]",
-                "pipeline": "mcp",
-                "subject": "media",
-                "previous_task_definition_arn": (
-                    "arn:aws:ecs:ap-northeast-1:718959508629:"
-                    "task-definition/teamagent-dev-tiktok-acquire:30"
-                ),
-                "previous_task_revision": 30,
-                "initial_new_task_definition_arn": (
-                    "arn:aws:ecs:ap-northeast-1:718959508629:"
-                    "task-definition/teamagent-dev-tiktok-acquire:31"
-                ),
-                "initial_new_task_revision": 31,
-            },
+                "initial_new_task_revision": initial_new_revision,
+            }
+            for (
+                consumer_id,
+                terraform_address,
+                subject,
+                family,
+                previous_revision,
+                initial_new_revision,
+            ) in resource_specs
         ],
     }
 
@@ -712,6 +748,36 @@ def test_complete_passed_aggregate_is_accepted_and_detached() -> None:
     assert normalized is not payload
     payload["status"] = "FAILED"
     assert normalized == original
+
+
+def test_complete_fixture_models_exact_mcp_scope_and_canary_probes() -> None:
+    payload = _complete_passed_aggregate()
+
+    assert [
+        resource["consumer_id"] for resource in payload["scope"]["resources"]
+    ] == [
+        "canary",
+        "connect_web",
+        "ingest",
+        "mcp",
+        "morning_digest",
+        "tiktok_acquire",
+        "x_buzz_worker",
+    ]
+    for leg in payload["legs"]:
+        canary = next(
+            resource
+            for resource in leg["to"]["resources"]
+            if resource["consumer_id"] == "canary"
+        )
+        assert (
+            leg["run_task_health"]["task_definition_arn"]
+            == canary["task_definition_arn"]
+        )
+        assert (
+            leg["dm_qa"]["locator"]["bucket"]
+            == "teamagent-dev-openclaw-rollout-evidence"
+        )
 
 
 @pytest.mark.parametrize(
