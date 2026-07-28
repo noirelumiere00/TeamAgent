@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import sys
 from collections.abc import Callable
@@ -47,15 +48,17 @@ INITIATING_PRINCIPAL = {
     "source_identity": "forced-rollback-drill",
 }
 AUTOMATION_PRINCIPAL = {
-    "arn": ("arn:aws:sts::718959508629:assumed-role/teamagent-dev-drill-controller/build-1"),
-    "user_id": "AROAAUTOMATION:build-1",
-    "source_identity": "forced-rollback-drill",
+    "account_id": "718959508629",
+    "arn": (
+        "arn:aws:sts::718959508629:assumed-role/"
+        "teamagent-dev-terraform-runtime-automation/"
+        "teamagent-terraform-worker"
+    ),
+    "user_id": "AROATEAMAGENTRUNTIME:teamagent-terraform-worker",
 }
-APPROVING_PRINCIPAL = {
-    "arn": "arn:aws:iam::718959508629:role/teamagent-dev-drill-approver",
-    "user_id": "AROAAPPROVER",
-    "source_identity": "forced-rollback-review",
-}
+APPROVING_PRINCIPAL_ARN = (
+    "arn:aws:iam::718959508629:role/teamagent-dev-approval-caller"
+)
 
 
 def _locator(name: str, index: int) -> dict[str, Any]:
@@ -90,6 +93,36 @@ def _locator(name: str, index: int) -> dict[str, Any]:
             "size": size,
             "bytes_match": True,
         },
+    }
+
+
+def _release_approval(index: int) -> dict[str, Any]:
+    source_commit = f"{index + 5:040x}"
+    payload_sha256 = f"{index + 500:064x}"
+    payload_key = (
+        f"approval-records/mcp/{source_commit}/{payload_sha256}.json"
+    )
+    return {
+        "approval_id": APPROVAL_IDS[index],
+        "approved_at_utc": "2026-07-24T11:30:00Z",
+        "approved_by": APPROVING_PRINCIPAL_ARN,
+        "decision": "APPROVED: reviewed forced rollback release",
+        "expires_at_utc": "2026-07-25T12:00:00Z",
+        "forced_gate_sha256": f"{index + 600:064x}",
+        "payload": {
+            "bucket": "teamagent-dev-image-release-evidence",
+            "key": payload_key,
+            "version_id": f"approval-payload-version-{index}",
+            "sha256": payload_sha256,
+        },
+        "pipeline": "mcp",
+        "signature": {
+            "bucket": "teamagent-dev-image-release-evidence",
+            "key": f"{payload_key}.sig",
+            "version_id": f"approval-signature-version-{index}",
+            "sha256": f"{index + 700:064x}",
+        },
+        "source_commit": source_commit,
     }
 
 
@@ -225,10 +258,10 @@ def _complete_passed_aggregate() -> dict[str, Any]:
             "plan": "2026-07-24T12:04:00Z",
             "approval": "2026-07-24T12:05:00Z",
             "apply_started": "2026-07-24T12:06:00Z",
-            "apply_completed": "2026-07-24T12:07:00Z",
-            "ecs": "2026-07-24T12:08:00Z",
-            "run_task": "2026-07-24T12:09:00Z",
-            "dm_qa": "2026-07-24T12:10:00Z",
+            "run_task": "2026-07-24T12:07:00Z",
+            "dm_qa": "2026-07-24T12:08:00Z",
+            "apply_completed": "2026-07-24T12:09:00Z",
+            "ecs": "2026-07-24T12:09:00Z",
             "completed": "2026-07-24T12:11:00Z",
         },
         {
@@ -237,10 +270,10 @@ def _complete_passed_aggregate() -> dict[str, Any]:
             "plan": "2026-07-24T12:14:00Z",
             "approval": "2026-07-24T12:15:00Z",
             "apply_started": "2026-07-24T12:16:00Z",
-            "apply_completed": "2026-07-24T12:17:00Z",
-            "ecs": "2026-07-24T12:18:00Z",
-            "run_task": "2026-07-24T12:19:00Z",
-            "dm_qa": "2026-07-24T12:20:00Z",
+            "run_task": "2026-07-24T12:17:00Z",
+            "dm_qa": "2026-07-24T12:18:00Z",
+            "apply_completed": "2026-07-24T12:19:00Z",
+            "ecs": "2026-07-24T12:19:00Z",
             "completed": "2026-07-24T12:21:00Z",
         },
     )
@@ -261,9 +294,43 @@ def _complete_passed_aggregate() -> dict[str, Any]:
         plan_locator = evidence_locator(f"leg-{ordinal}-plan")
         approval_locator = evidence_locator(f"leg-{ordinal}-approval")
         apply_locator = evidence_locator(f"leg-{ordinal}-apply")
-        ecs_locator = evidence_locator(f"leg-{ordinal}-ecs")
-        run_task_locator = evidence_locator(f"leg-{ordinal}-run-task")
+        automation_locator = evidence_locator(f"leg-{ordinal}-automation")
         dm_qa_locator = evidence_locator(f"leg-{ordinal}-dm-qa")
+        plan_sha256 = f"{9000 + ordinal:064x}"
+        apply_attempt_id = f"50000000-0000-4000-8000-{ordinal:012d}"
+        dm_qa_locator["key"] = (
+            f"forced-rollback-drills/{apply_attempt_id}/dm-qa/result.json"
+        )
+        dm_qa_locator["signature"]["key"] = f"{dm_qa_locator['key']}.sig"
+        release_approval = _release_approval(index)
+        confirmation_action = "rollback" if index == 0 else "restore"
+        confirmation_text = (
+            f"APPROVE {DRILL_ID} {confirmation_action} {plan_sha256}\n"
+        ).encode()
+        probe_resource = next(
+            resource
+            for resource in target["resources"]
+            if resource["consumer_id"] == "canary"
+        )
+        probe_subject = next(
+            subject
+            for subject in target["subjects"]
+            if subject["pipeline"] == probe_resource["pipeline"]
+            and subject["name"] == probe_resource["subject"]
+        )
+        probe_image = (
+            "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+            f"{probe_subject['release_repository']}@{probe_subject['digest']}"
+        )
+        probe_task_arn = (
+            "arn:aws:ecs:ap-northeast-1:718959508629:"
+            f"task/teamagent-dev/{ordinal:032x}"
+        )
+        mcp_task_definition = next(
+            resource["task_definition_arn"]
+            for resource in target["resources"]
+            if resource["consumer_id"] == "mcp"
+        )
         return {
             "ordinal": ordinal,
             "name": name,
@@ -279,11 +346,15 @@ def _complete_passed_aggregate() -> dict[str, Any]:
                     "channel": channel,
                     "subjects": copy.deepcopy(target["subjects"]),
                     "issued_at_utc": times["authorization"],
+                    "release_approval_id": release_approval["approval_id"],
+                    "release_approved_by_arn": release_approval["approved_by"],
+                    "receipt_sha256": authorization_locator["sha256"],
                     "locator": authorization_locator,
                 }
             ],
             "plan": {
-                "sha256": plan_locator["sha256"],
+                "sha256": plan_sha256,
+                "receipt_sha256": plan_locator["sha256"],
                 "created_at_utc": times["plan"],
                 "terraform_lineage": LINEAGE,
                 "terraform_serial": serial_before,
@@ -295,17 +366,22 @@ def _complete_passed_aggregate() -> dict[str, Any]:
                 "locator": plan_locator,
             },
             "approval": {
-                "approval_id": APPROVAL_IDS[index],
+                "confirmation_id": f"OK-{ordinal}",
                 "drill_id": DRILL_ID,
-                "plan_sha256": plan_locator["sha256"],
-                "decision": "APPROVED",
-                "approved_at_utc": times["approval"],
-                "approved_by": copy.deepcopy(APPROVING_PRINCIPAL),
+                "action": confirmation_action,
+                "plan_sha256": plan_sha256,
+                "approval_text_sha256": hashlib.sha256(
+                    confirmation_text
+                ).hexdigest(),
+                "consumed_at_utc": times["approval"],
+                "release_approval": release_approval,
+                "receipt_sha256": approval_locator["sha256"],
                 "locator": approval_locator,
             },
             "apply": {
-                "apply_attempt_id": (f"50000000-0000-4000-8000-{ordinal:012d}"),
-                "plan_sha256": plan_locator["sha256"],
+                "apply_attempt_id": apply_attempt_id,
+                "plan_sha256": plan_sha256,
+                "receipt_sha256": apply_locator["sha256"],
                 "started_at_utc": times["apply_started"],
                 "completed_at_utc": times["apply_completed"],
                 "result": "PASSED",
@@ -313,6 +389,11 @@ def _complete_passed_aggregate() -> dict[str, Any]:
                 "terraform_serial_before": serial_before,
                 "terraform_serial_after": serial_after,
                 "state": copy.deepcopy(target),
+                "automation_principal": copy.deepcopy(
+                    AUTOMATION_PRINCIPAL
+                ),
+                "automation_identity_sha256": automation_locator["sha256"],
+                "automation_identity_locator": automation_locator,
                 "locator": apply_locator,
             },
             "ecs": {
@@ -320,18 +401,48 @@ def _complete_passed_aggregate() -> dict[str, Any]:
                 "steady": True,
                 "verified_at_utc": times["ecs"],
                 "live_snapshot": copy.deepcopy(target),
-                "locator": ecs_locator,
+                "locator": apply_locator,
             },
             "run_task_health": {
                 "result": "PASSED",
                 "verified_at_utc": times["run_task"],
-                "tasks": copy.deepcopy(target["resources"]),
-                "locator": run_task_locator,
+                "apply_attempt_id": apply_attempt_id,
+                "task_definition_arn": probe_resource[
+                    "task_definition_arn"
+                ],
+                "image": probe_image,
+                "log_stream_name": f"canary/probe/{ordinal}",
+                "task": {
+                    "task_arn": probe_task_arn,
+                    "task_definition_arn": probe_resource[
+                        "task_definition_arn"
+                    ],
+                    "image": probe_image,
+                    "image_digest": probe_subject["digest"],
+                    "exit_code": 0,
+                    "stopped_reason_code": "EssentialContainerExited",
+                    "log_stream_name": f"canary/probe/{ordinal}",
+                },
+                "checks": {
+                    "connect_build_inputs_sha256": True,
+                    "connect_contract_ok": True,
+                    "connect_http_200": True,
+                    "connect_manifest_sha256": True,
+                    "connect_sha256": True,
+                    "connect_version_id": True,
+                    "mcp_http_200": True,
+                },
+                "locator": apply_locator,
             },
             "dm_qa": {
                 "result": "PASSED",
                 "verified_at_utc": times["dm_qa"],
-                "subject_digests": copy.deepcopy(target["subjects"]),
+                "apply_attempt_id": apply_attempt_id,
+                "mcp_task_definition_arn": mcp_task_definition,
+                "openclaw_task_definition_arn": (
+                    "arn:aws:ecs:ap-northeast-1:718959508629:"
+                    f"task-definition/teamagent-dev-openclaw:{50 + ordinal}"
+                ),
                 "locator": dm_qa_locator,
             },
             "started_at_utc": times["started"],
@@ -399,11 +510,11 @@ def _complete_passed_aggregate() -> dict[str, Any]:
             "approvals": [
                 {
                     "approval_id": APPROVAL_IDS[0],
-                    "principal": copy.deepcopy(APPROVING_PRINCIPAL),
+                    "approved_by_arn": APPROVING_PRINCIPAL_ARN,
                 },
                 {
                     "approval_id": APPROVAL_IDS[1],
-                    "principal": copy.deepcopy(APPROVING_PRINCIPAL),
+                    "approved_by_arn": APPROVING_PRINCIPAL_ARN,
                 },
             ],
         },
@@ -539,10 +650,10 @@ def _set_leg2_times(payload: dict[str, Any], *, start: str) -> None:
             "plan": "2026-07-24T12:31:02Z",
             "approval": "2026-07-24T12:31:03Z",
             "apply_started": "2026-07-24T12:31:04Z",
-            "apply_completed": "2026-07-24T12:31:05Z",
-            "ecs": "2026-07-24T12:31:06Z",
-            "run_task": "2026-07-24T12:31:07Z",
-            "dm_qa": "2026-07-24T12:31:08Z",
+            "run_task": "2026-07-24T12:31:05Z",
+            "dm_qa": "2026-07-24T12:31:06Z",
+            "apply_completed": "2026-07-24T12:31:07Z",
+            "ecs": "2026-07-24T12:31:07Z",
             "completed": "2026-07-24T12:31:09Z",
             "safe": "2026-07-24T12:31:10Z",
             "control": "2026-07-24T12:31:11Z",
@@ -554,10 +665,10 @@ def _set_leg2_times(payload: dict[str, Any], *, start: str) -> None:
             "plan": "2026-07-24T12:31:03Z",
             "approval": "2026-07-24T12:31:04Z",
             "apply_started": "2026-07-24T12:31:05Z",
-            "apply_completed": "2026-07-24T12:31:06Z",
-            "ecs": "2026-07-24T12:31:07Z",
-            "run_task": "2026-07-24T12:31:08Z",
-            "dm_qa": "2026-07-24T12:31:09Z",
+            "run_task": "2026-07-24T12:31:06Z",
+            "dm_qa": "2026-07-24T12:31:07Z",
+            "apply_completed": "2026-07-24T12:31:08Z",
+            "ecs": "2026-07-24T12:31:08Z",
             "completed": "2026-07-24T12:31:10Z",
             "safe": "2026-07-24T12:31:11Z",
             "control": "2026-07-24T12:31:12Z",
@@ -565,7 +676,7 @@ def _set_leg2_times(payload: dict[str, Any], *, start: str) -> None:
     leg2["started_at_utc"] = values["started"]
     leg2["release_authorizations"][0]["issued_at_utc"] = values["authorization"]
     leg2["plan"]["created_at_utc"] = values["plan"]
-    leg2["approval"]["approved_at_utc"] = values["approval"]
+    leg2["approval"]["consumed_at_utc"] = values["approval"]
     leg2["apply"]["started_at_utc"] = values["apply_started"]
     leg2["apply"]["completed_at_utc"] = values["apply_completed"]
     leg2["ecs"]["verified_at_utc"] = values["ecs"]
@@ -720,8 +831,15 @@ def test_exact_time_limits_are_accepted() -> None:
 
 def test_approval_id_cannot_be_reused_between_legs() -> None:
     payload = _complete_passed_aggregate()
-    duplicate_id = payload["legs"][0]["approval"]["approval_id"]
-    payload["legs"][1]["approval"]["approval_id"] = duplicate_id
+    duplicate_id = payload["legs"][0]["approval"]["release_approval"][
+        "approval_id"
+    ]
+    payload["legs"][1]["approval"]["release_approval"]["approval_id"] = (
+        duplicate_id
+    )
+    payload["legs"][1]["release_authorizations"][0][
+        "release_approval_id"
+    ] = duplicate_id
     payload["actors"]["approvals"][1]["approval_id"] = duplicate_id
     _rehash(payload)
 
@@ -747,6 +865,37 @@ def test_approval_must_bind_the_drill_id() -> None:
         _validate(payload)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("legs", 0, "apply", "automation_principal", "account_id"),
+        ("legs", 0, "apply", "automation_principal", "user_id"),
+        ("legs", 0, "approval", "release_approval", "approval_id"),
+        ("legs", 0, "approval", "release_approval", "approved_by"),
+        ("legs", 0, "plan", "locator"),
+        ("safe_terminal_state", "live_snapshot", "locator"),
+    ],
+    ids=[
+        "automation-account-id",
+        "automation-user-id",
+        "release-approval-id",
+        "release-approver-arn",
+        "plan-receipt-locator",
+        "terminal-locator",
+    ],
+)
+def test_source_backed_evidence_fields_are_mandatory(
+    path: tuple[str | int, ...],
+) -> None:
+    payload = _complete_passed_aggregate()
+    parent = _get_path(payload, path[:-1])
+    del parent[path[-1]]
+    _rehash(payload)
+
+    with pytest.raises(EVIDENCE.DrillEvidenceError, match="missing"):
+        _validate(payload)
+
+
 LOCATOR_PATHS = [
     ("control", "initial_release_apply"),
     ("baseline", "live_snapshot", "locator"),
@@ -754,6 +903,7 @@ LOCATOR_PATHS = [
     ("legs", 0, "plan", "locator"),
     ("legs", 0, "approval", "locator"),
     ("legs", 0, "apply", "locator"),
+    ("legs", 0, "apply", "automation_identity_locator"),
     ("legs", 0, "ecs", "locator"),
     ("legs", 0, "run_task_health", "locator"),
     ("legs", 0, "dm_qa", "locator"),
@@ -926,11 +1076,12 @@ def test_scope_cannot_relabel_a_third_digest_as_initial_new() -> None:
 
 def test_unapproved_third_task_revision_is_rejected() -> None:
     payload = _complete_passed_aggregate()
-    task = payload["legs"][0]["run_task_health"]["tasks"][0]
-    task["task_definition_arn"] = (
+    health = payload["legs"][0]["run_task_health"]
+    third_revision = (
         "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:99"
     )
-    task["task_revision"] = 99
+    health["task_definition_arn"] = third_revision
+    health["task"]["task_definition_arn"] = third_revision
     _rehash(payload)
 
     with pytest.raises(EVIDENCE.DrillEvidenceError, match="target"):

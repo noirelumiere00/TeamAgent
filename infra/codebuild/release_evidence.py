@@ -1585,6 +1585,18 @@ def _write_json(path: Path, value: Any) -> None:
         raise EvidenceError(f"cannot write evidence: {exc}") from exc
 
 
+def _write_json_exclusive(path: Path, value: Any) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(canonical_bytes(value))
+    except OSError as exc:
+        raise EvidenceError(f"cannot exclusively write evidence: {exc}") from exc
+
+
 def _aws_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(
@@ -1827,6 +1839,7 @@ def assert_approved_release(
     runtime_contract_path: Path,
     contract_path: Path,
     now: dt.datetime | None = None,
+    verified_record_out: Path | None = None,
 ) -> dict[str, Any]:
     """Fetch and fully verify one immutable external release approval."""
 
@@ -1956,7 +1969,7 @@ def assert_approved_release(
             validated["gates"]["forced_rollback_evidence"],
         )
     ).hexdigest()
-    return validate_approval_evidence(
+    approval_evidence = validate_approval_evidence(
         {
             **locator,
             "approval_payload_sha256": approval_payload_sha256,
@@ -1965,6 +1978,23 @@ def assert_approved_release(
         pipeline=expected_pipeline,
         expected_commit=expected_commit,
     )
+    if verified_record_out is not None:
+        _write_json_exclusive(
+            verified_record_out,
+            {
+                "approval_id": validated["approval_id"],
+                "approved_at_utc": validated["approved_at_utc"],
+                "approved_by": validated["approved_by"],
+                "decision": validated["decision"],
+                "expires_at_utc": validated["expires_at_utc"],
+                "forced_gate_sha256": forced_gate_sha256,
+                "payload": locator["payload"],
+                "pipeline": validated["pipeline"],
+                "signature": locator["signature"],
+                "source_commit": validated["source_commit"],
+            },
+        )
+    return approval_evidence
 
 
 def _assert_no_release_lifecycle_policy(repository: str, *, label: str) -> None:
@@ -4993,6 +5023,7 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("infra/codebuild/teamagent_core_media_release_contract.json"),
     )
+    approval.add_argument("--verified-record-out", type=Path)
     approval.add_argument("--now")
 
     commands.add_parser("terraform-gate")
@@ -5212,6 +5243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 runtime_contract_path=args.runtime_contract,
                 contract_path=args.contract,
                 now=approval_now,
+                verified_record_out=args.verified_record_out,
             )
             print(
                 json.dumps(

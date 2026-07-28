@@ -1,7 +1,8 @@
 """forced rollback drill controller の状態機械契約テスト。
 
 実 AWS/Terraform には到達させず、controller を一時 repo にコピーして
-同階層の authorizer/runtime guard と aggregate validator を fake 化する。
+同階層の authorizer/runtime guard/AWS を fake 化し、aggregate は実 C1
+validator・builder・artifact store で検証する。
 """
 
 from __future__ import annotations
@@ -38,6 +39,13 @@ DRILL_SIGNING_KEY_ARN = (
     f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 SIGNING_ALGORITHM = "RSASSA_PSS_SHA_256"
+APPROVING_PRINCIPAL_ARN = (
+    f"arn:aws:iam::{ACCOUNT_ID}:role/teamagent-dev-approval-caller"
+)
+AUTOMATION_PRINCIPAL_ARN = (
+    f"arn:aws:sts::{ACCOUNT_ID}:assumed-role/"
+    "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+)
 
 CONSUMERS = (
     ("mcp", "teamagent-dev-mcp", "core", "ecs_service"),
@@ -96,6 +104,46 @@ def _write_json(path: Path, value: Any, *, mode: int = 0o600) -> None:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _evidence_locator(
+    *,
+    key: str,
+    sha256: str,
+    size: int,
+    version_id: str,
+    signature_version_id: str,
+    signature_sha256: str,
+    bucket: str = EVIDENCE_BUCKET,
+) -> dict[str, Any]:
+    return {
+        "bucket": bucket,
+        "key": key,
+        "version_id": version_id,
+        "sha256": sha256,
+        "size": size,
+        "content_type": "application/json",
+        "object_lock_mode": "COMPLIANCE",
+        "retain_until": "2043-05-18T03:33:20Z",
+        "encryption_kms_key_arn": EVIDENCE_ENCRYPTION_KEY_ARN,
+        "signature": {
+            "key": f"{key}.sig",
+            "version_id": signature_version_id,
+            "sha256": signature_sha256,
+            "verified": True,
+        },
+        "signer": {
+            "kms_key_arn": DRILL_SIGNING_KEY_ARN,
+            "algorithm": SIGNING_ALGORITHM,
+        },
+        "exact_version_redownload": {
+            "requested_version_id": version_id,
+            "returned_version_id": version_id,
+            "sha256": sha256,
+            "size": size,
+            "bytes_match": True,
+        },
+    }
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -210,7 +258,6 @@ class DrillHarness:
     var_file: Path
     drill_dir: Path
     calls: Path
-    validator_calls: Path
     aws_objects: Path
     old_live: Path
     new_live: Path
@@ -378,6 +425,7 @@ def _make_contract(
 
     targets: dict[str, Any] = {}
     for label, old in (("old", True), ("new", False)):
+        source_commit = ("1" if old else "2") * 40
         candidate_sha = "6" * 64 if old else "7" * 64
         approval_sha = "8" * 64 if old else "9" * 64
         targets[label] = {
@@ -388,18 +436,22 @@ def _make_contract(
             "runtime_migration_id": f"drill-{label}-runtime",
             "candidate": {
                 "receipt_key": (
-                    "release-receipts/mcp/" + ("1" if old else "2") * 40 + f"/{candidate_sha}.json"
+                    f"release-receipts/mcp/{source_commit}/{candidate_sha}.json"
                 ),
                 "receipt_version_id": f"{label}-candidate-version",
                 "receipt_signature_version_id": f"{label}-candidate-signature-version",
             },
             "approval": {
                 "payload_bucket": "teamagent-dev-image-release-evidence",
-                "payload_key": f"approvals/{label}/{approval_sha}.json",
+                "payload_key": (
+                    f"approval-records/mcp/{source_commit}/{approval_sha}.json"
+                ),
                 "payload_version_id": f"{label}-approval-version",
                 "payload_sha256": approval_sha,
                 "signature_bucket": "teamagent-dev-image-release-evidence",
-                "signature_key": f"approvals/{label}/{approval_sha}.json.sig",
+                "signature_key": (
+                    f"approval-records/mcp/{source_commit}/{approval_sha}.json.sig"
+                ),
                 "signature_version_id": f"{label}-approval-signature-version",
                 "signature_sha256": ("0" * 64 if old else "1" * 64),
             },
@@ -489,6 +541,19 @@ def _make_contract(
             },
         },
     )
+    contract_value = json.loads(contract.read_text(encoding="utf-8"))
+    contract_value["control"]["initial_release_apply_locator"] = _evidence_locator(
+        key=(
+            f"release-receipts/mcp/{'4' * 40}/"
+            f"{_sha256(initial_receipt)}.apply.json"
+        ),
+        sha256=_sha256(initial_receipt),
+        size=initial_receipt.stat().st_size,
+        version_id="initial-release-apply-version",
+        signature_version_id="initial-release-apply-signature-version",
+        signature_sha256="2" * 64,
+    )
+    _write_json(contract, contract_value)
     var_file = inputs / "terraform.tfvars.json"
     _write_json(var_file, {"environment": ENVIRONMENT})
     old_live = inputs / "old-live.json"
@@ -498,12 +563,11 @@ def _make_contract(
     return contract, initial_receipt, var_file, old_live, new_live
 
 
-def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
+def _install_fakes(repo: Path) -> tuple[Path, Path]:
     deploy = repo / "infra" / "deploy"
     codebuild = repo / "infra" / "codebuild"
     fake_bin = repo / "fake-bin"
     calls = repo / "fake-calls.log"
-    validator_calls = repo / "validator-calls.log"
     aws_objects = repo / "fake-aws-objects"
 
     _write_executable(
@@ -519,22 +583,77 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
 
         channel=""
         gate_vars=""
+        verified_approval=""
+        receipt_key=""
+        receipt_version_id=""
+        receipt_signature_version_id=""
+        approval_payload_bucket=""
+        approval_payload_key=""
+        approval_payload_version_id=""
+        approval_payload_sha256=""
+        approval_signature_bucket=""
+        approval_signature_key=""
+        approval_signature_version_id=""
+        approval_signature_sha256=""
         while [ "$#" -gt 0 ]; do
           case "$1" in
             --channel) channel="${2:?}"; shift 2 ;;
             --terraform-gate-vars-out) gate_vars="${2:?}"; shift 2 ;;
-            --pipeline|--receipt-key|--receipt-version-id|--receipt-signature-version-id|\
-            --consumer-manifest|--approval-payload-bucket|--approval-payload-key|\
-            --approval-payload-version-id|--approval-payload-sha256|\
-            --approval-signature-bucket|--approval-signature-key|\
-            --approval-signature-version-id|--approval-signature-sha256)
+            --verified-approval-out) verified_approval="${2:?}"; shift 2 ;;
+            --receipt-key) receipt_key="${2:?}"; shift 2 ;;
+            --receipt-version-id) receipt_version_id="${2:?}"; shift 2 ;;
+            --receipt-signature-version-id)
+              receipt_signature_version_id="${2:?}"
               shift 2
               ;;
+            --approval-payload-bucket)
+              approval_payload_bucket="${2:?}"
+              shift 2
+              ;;
+            --approval-payload-key)
+              approval_payload_key="${2:?}"
+              shift 2
+              ;;
+            --approval-payload-version-id)
+              approval_payload_version_id="${2:?}"
+              shift 2
+              ;;
+            --approval-payload-sha256)
+              approval_payload_sha256="${2:?}"
+              shift 2
+              ;;
+            --approval-signature-bucket)
+              approval_signature_bucket="${2:?}"
+              shift 2
+              ;;
+            --approval-signature-key)
+              approval_signature_key="${2:?}"
+              shift 2
+              ;;
+            --approval-signature-version-id)
+              approval_signature_version_id="${2:?}"
+              shift 2
+              ;;
+            --approval-signature-sha256)
+              approval_signature_sha256="${2:?}"
+              shift 2
+              ;;
+            --pipeline|--consumer-manifest) shift 2 ;;
             *) exit 91 ;;
           esac
         done
         [ "$channel" = rollback ] || [ "$channel" = active ] || exit 92
-        [ -n "$gate_vars" ] || exit 93
+        [ -n "$gate_vars" ] && [ -n "$verified_approval" ] && \
+          [ -n "$receipt_key" ] && [ -n "$receipt_version_id" ] && \
+          [ -n "$receipt_signature_version_id" ] && \
+          [ -n "$approval_payload_bucket" ] && \
+          [ -n "$approval_payload_key" ] && \
+          [ -n "$approval_payload_version_id" ] && \
+          [ -n "$approval_payload_sha256" ] && \
+          [ -n "$approval_signature_bucket" ] && \
+          [ -n "$approval_signature_key" ] && \
+          [ -n "$approval_signature_version_id" ] && \
+          [ -n "$approval_signature_sha256" ] || exit 93
         if [ "${FAKE_AUTH_FAIL_CHANNEL:-}" = "$channel" ]; then
           exit 44
         fi
@@ -560,21 +679,91 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             )
             handle.write("\n")
         PY
-        if [ "$channel" = rollback ]; then
-          receipt_sha="$(printf '%064d' 2)"
-          commit="$(printf '%040d' 2)"
-        else
-          receipt_sha="$(printf '%064d' 3)"
-          commit="$(printf '%040d' 3)"
-        fi
+        python3 - \
+          "$verified_approval" "$channel" \
+          "$approval_payload_bucket" "$approval_payload_key" \
+          "$approval_payload_version_id" "$approval_payload_sha256" \
+          "$approval_signature_bucket" "$approval_signature_key" \
+          "$approval_signature_version_id" "$approval_signature_sha256" <<'PY'
+        import hashlib
+        import json
+        import os
+        import sys
+
+        (
+            output,
+            channel,
+            payload_bucket,
+            payload_key,
+            payload_version_id,
+            payload_sha256,
+            signature_bucket,
+            signature_key,
+            signature_version_id,
+            signature_sha256,
+        ) = sys.argv[1:]
+        source_commit = payload_key.split("/")[2]
+        approval_id = {
+            "rollback": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "active": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        }[channel]
+        if (
+            channel == "active"
+            and os.environ.get("FAKE_REUSE_RELEASE_APPROVAL_ID") == "true"
+        ):
+            approval_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        value = {
+            "approval_id": approval_id,
+            "approved_at_utc": "2033-05-18T03:30:00Z",
+            "approved_by": (
+                "arn:aws:iam::718959508629:"
+                "role/teamagent-dev-approval-caller"
+            ),
+            "decision": "APPROVED: exact MCP release evidence verified",
+            "expires_at_utc": "2034-05-18T03:30:00Z",
+            "forced_gate_sha256": hashlib.sha256(
+                f"{channel}\0{payload_key}\0{payload_version_id}".encode()
+            ).hexdigest(),
+            "payload": {
+                "bucket": payload_bucket,
+                "key": payload_key,
+                "version_id": payload_version_id,
+                "sha256": payload_sha256,
+            },
+            "pipeline": "mcp",
+            "signature": {
+                "bucket": signature_bucket,
+                "key": signature_key,
+                "version_id": signature_version_id,
+                "sha256": signature_sha256,
+            },
+            "source_commit": source_commit,
+        }
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        with os.fdopen(
+            os.open(output, flags, 0o600),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                value,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
+        PY
+        commit="${receipt_key#release-receipts/mcp/}"
+        commit="${commit%%/*}"
         echo "Guarded release authorization completed (no deployment performed):"
         echo "  pipeline=mcp"
         echo "  channel=$channel"
         echo "  commit=$commit"
-        echo "  receipt_key=release-receipts/mcp/$commit/$receipt_sha.json"
-        echo "  receipt_version_id=${channel}-fresh-version"
-        echo "  receipt_signature_key=release-receipts/mcp/$commit/$receipt_sha.json.sig"
-        echo "  receipt_signature_version_id=${channel}-fresh-signature-version"
+        echo "  receipt_key=$receipt_key"
+        echo "  receipt_version_id=$receipt_version_id"
+        echo "  receipt_signature_key=$receipt_key.sig"
+        echo "  receipt_signature_version_id=$receipt_signature_version_id"
         echo "  terraform_gate_vars=$gate_vars"
         """,
     )
@@ -599,6 +788,8 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
         migration=""
         var_file=""
         dm_qa_deadline_epoch=""
+        automation_identity_out=""
+        evidence_json_out=""
         args=("$@")
         while [ "$#" -gt 0 ]; do
           case "$1" in
@@ -612,6 +803,14 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             --var-file) var_file="${2:?}"; shift 2 ;;
             --forced-rollback-dm-qa-deadline-epoch)
               dm_qa_deadline_epoch="${2:?}"
+              shift 2
+              ;;
+            --automation-identity-out)
+              automation_identity_out="${2:?}"
+              shift 2
+              ;;
+            --evidence-json-out)
+              evidence_json_out="${2:?}"
               shift 2
               ;;
             --runtime-sync) shift ;;
@@ -630,20 +829,127 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
 
         case "$command" in
           snapshot)
+            [ -n "$evidence_json_out" ] || exit 96
             live_path="$FAKE_NEW_LIVE"
             if [ "${FAKE_FINAL_LIVE:-new}" = old ]; then
               live_path="$FAKE_OLD_LIVE"
             fi
-            python3 - "$live_path" <<'PY'
+            python3 - "$live_path" "$evidence_json_out" <<'PY'
         import json
+        import os
         import sys
 
         with open(sys.argv[1], encoding="utf-8") as handle:
             live = json.load(handle)
+        evidence_json_out = sys.argv[2]
         resources = {
             resource["consumer_id"]: resource
             for resource in live["resources"]
         }
+        taskdefs = {
+            "mcp": {
+                "arn": resources["mcp"]["task_definition_arn"],
+                "image": resources["mcp"]["image"],
+            },
+            "connect_web": {
+                "arn": resources["connect_web"]["task_definition_arn"],
+                "image": resources["connect_web"]["image"],
+            },
+            "openclaw": {
+                "arn": (
+                    "arn:aws:ecs:ap-northeast-1:718959508629:"
+                    "task-definition/teamagent-dev-openclaw:17"
+                ),
+                "image": live["images"]["openclaw"],
+            },
+            "canary": {
+                "arn": resources["canary"]["task_definition_arn"],
+                "image": resources["canary"]["image"],
+            },
+            "ingest": {
+                "arn": resources["ingest"]["task_definition_arn"],
+                "image": resources["ingest"]["image"],
+            },
+            "morning": {
+                "arn": resources["morning_digest"]["task_definition_arn"],
+                "image": resources["morning_digest"]["image"],
+            },
+            "x_buzz": {
+                "arn": resources["x_buzz_worker"]["task_definition_arn"],
+                "image": resources["x_buzz_worker"]["image"],
+            },
+            "tiktok": {
+                "arn": resources["tiktok_acquire"]["task_definition_arn"],
+                "image": resources["tiktok_acquire"]["image"],
+            },
+        }
+        full = {
+            "taskdefs": taskdefs,
+            "services": {
+                "mcp": {
+                    "critical": {
+                        "desired_count": resources["mcp"]["activation"]["state"]
+                    }
+                },
+                "connect_web": {
+                    "critical": {
+                        "desired_count": (
+                            resources["connect_web"]["activation"]["state"]
+                        )
+                    }
+                },
+                "openclaw": {"critical": {"desired_count": 1}},
+            },
+            "rules": {
+                "canary": {
+                    "critical": {
+                        "state": resources["canary"]["activation"]["state"]
+                    }
+                },
+                "ingest": {
+                    "critical": {
+                        "state": resources["ingest"]["activation"]["state"]
+                    }
+                },
+                "morning": {
+                    "critical": {
+                        "state": (
+                            resources["morning_digest"]["activation"]["state"]
+                        )
+                    }
+                },
+            },
+            "event_mappings": {
+                "x_buzz": {
+                    "critical": {
+                        "enabled": (
+                            resources["x_buzz_worker"]["activation"]["state"]
+                        )
+                    }
+                },
+                "tiktok": {
+                    "critical": {
+                        "enabled": (
+                            resources["tiktok_acquire"]["activation"]["state"]
+                        )
+                    }
+                },
+            },
+        }
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        with os.fdopen(
+            os.open(evidence_json_out, flags, 0o600),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                full,
+                handle,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
 
         def emit(name, value):
             print(f"{name} = {json.dumps(value, separators=(',', ':'))}")
@@ -814,7 +1120,8 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             ;;
           apply)
             [ -f "$plan" ] && [ -n "$out" ] && \
-              [ -n "$dm_qa_deadline_epoch" ] || exit 100
+              [ -n "$dm_qa_deadline_epoch" ] && \
+              [ -n "$automation_identity_out" ] || exit 100
             if [ "${FAKE_DM_QA_TIMEOUT:-}" = "true" ]; then
               exit 124
             fi
@@ -822,19 +1129,31 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
               exit 24
             fi
             mkdir -p "$(dirname -- "$out")"
-            python3 - "$plan" "$out" "$FAKE_OLD_LIVE" "$FAKE_NEW_LIVE" <<'PY'
+            python3 - \
+              "$plan" "$out" "$automation_identity_out" \
+              "$FAKE_OLD_LIVE" "$FAKE_NEW_LIVE" <<'PY'
         import datetime as dt
         import hashlib
         import json
         import os
         import sys
 
-        plan_path, output, old_live_path, new_live_path = sys.argv[1:]
+        (
+            plan_path,
+            output,
+            automation_identity_output,
+            old_live_path,
+            new_live_path,
+        ) = sys.argv[1:]
         with open(plan_path, encoding="utf-8") as handle:
             plan = json.load(handle)
         old = "old" in plan["migration_id"]
-        with open(old_live_path if old else new_live_path, encoding="utf-8") as handle:
-            live = json.load(handle)
+        with open(old_live_path, encoding="utf-8") as handle:
+            old_live = json.load(handle)
+        with open(new_live_path, encoding="utf-8") as handle:
+            new_live = json.load(handle)
+        live = old_live if old else new_live
+        pre_live = new_live if old else old_live
         serial = 101 if old else 102
         revision = 31 if old else 32
         attempt_id = (
@@ -854,6 +1173,28 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             for resource in live["resources"]
             if resource["consumer_id"] == "mcp"
         )
+        canary = next(
+            resource
+            for resource in live["resources"]
+            if resource["consumer_id"] == "canary"
+        )
+        task_id = "1234567890abcdef1234567890abcdef"
+        task_arn = (
+            "arn:aws:ecs:ap-northeast-1:718959508629:"
+            f"task/teamagent-dev/{task_id}"
+        )
+        log_stream_name = f"canary/canary/{task_id}"
+        checks = {
+            "connect_build_inputs_sha256": True,
+            "connect_contract_ok": True,
+            "connect_http_200": True,
+            "connect_manifest_sha256": True,
+            "connect_sha256": True,
+            "connect_version_id": True,
+            "mcp_http_200": True,
+        }
+        if bad_gate == "run-task":
+            checks["connect_http_200"] = False
         openclaw_task_definition_arn = (
             f"arn:aws:ecs:ap-northeast-1:718959508629:"
             "task-definition/teamagent-dev-openclaw:17"
@@ -926,6 +1267,18 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
                 else plan["image_deployment_intent_id"]
             ),
             "apply_attempt_id": attempt_id,
+            "pre_live_contract": pre_live,
+            "pre_state_contract": {
+                "state": {
+                    "lineage": "33333333-3333-4333-8333-333333333333",
+                    "serial": 100 if old else 101,
+                    "address_set_sha256": "a" * 64,
+                },
+                "task_revisions": {
+                    resource["consumer_id"]: (32 if old else 31)
+                    for resource in pre_live["resources"]
+                },
+            },
             "post_live_contract": live,
             "post_state_contract": {
                 "state": {
@@ -953,10 +1306,26 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             },
             "post_apply_service_probe": {
                 "kind": "teamagent-post-apply-service-probe-receipt",
+                "schema_version": 1,
                 "apply_attempt_id": attempt_id,
-                "task": {"exit_code": 0},
+                "task_definition": canary["task_definition_arn"],
+                "image": canary["image"],
+                "log_stream_name": log_stream_name,
+                "verified_at_utc": verified_at_utc,
+                "task": {
+                    "task_arn": task_arn,
+                    "task_definition_arn": canary["task_definition_arn"],
+                    "image": canary["image"],
+                    "image_digest": canary["image"].split("@", 1)[1],
+                    "exit_code": 0,
+                    "stopped_reason_code": "EssentialContainerExited",
+                    "log_stream_name": log_stream_name,
+                },
                 "result": {
-                    "checks": [False] if bad_gate == "run-task" else [True, True]
+                    "kind": "teamagent-post-apply-service-probe",
+                    "schema_version": 1,
+                    "apply_attempt_id": attempt_id,
+                    "checks": checks,
                 },
             },
             "openclaw_rollout_result": {
@@ -983,6 +1352,29 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
             },
         }
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        with os.fdopen(
+            os.open(automation_identity_output, flags, 0o600),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                {
+                    "Account": "718959508629",
+                    "Arn": (
+                        "arn:aws:sts::718959508629:assumed-role/"
+                        "teamagent-dev-terraform-runtime-automation/"
+                        "teamagent-terraform-worker"
+                    ),
+                    "UserId": (
+                        "AROATEAMAGENTRUNTIME:"
+                        "teamagent-terraform-worker"
+                    ),
+                },
+                handle,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            handle.write("\n")
         with os.fdopen(os.open(output, flags, 0o600), "w") as handle:
             json.dump(value, handle, sort_keys=True, separators=(",", ":"))
             handle.write("\n")
@@ -1236,229 +1628,16 @@ def _install_fakes(repo: Path) -> tuple[Path, Path, Path]:
     )
 
     codebuild.mkdir(parents=True, exist_ok=True)
-    (codebuild / "teamagent_release_approval.py").write_text(
-        textwrap.dedent(
-            """
-            from __future__ import annotations
-
-            import json
-
-
-            def canonical_json_bytes(value: object) -> bytes:
-                return (
-                    json.dumps(
-                        value,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    )
-                    + "\\n"
-                ).encode()
-            """
-        ).lstrip(),
-        encoding="utf-8",
-    )
-    (codebuild / "forced_rollback_drill_evidence.py").write_text(
-        textwrap.dedent(
-            """
-            from __future__ import annotations
-
-            import copy
-            import hashlib
-            import json
-            import os
-
-            from teamagent_release_approval import canonical_json_bytes
-
-
-            def canonical_drill_body_bytes(value: dict) -> bytes:
-                projected = copy.deepcopy(value)
-                integrity = projected["integrity"]
-                for key in (
-                    "canonical_sha256",
-                    "signature",
-                    "immutable_object",
-                ):
-                    del integrity[key]
-                return canonical_json_bytes(projected)
-
-
-            def validate_integrity(aggregate: dict) -> None:
-                integrity = aggregate.get("integrity")
-                if not isinstance(integrity, dict) or set(integrity) != {
-                    "canonical_sha256",
-                    "kms_key_arn",
-                    "signing_algorithm",
-                    "signature",
-                    "immutable_object",
-                }:
-                    raise ValueError("drill.integrity schema mismatch")
-                immutable = integrity["immutable_object"]
-                if not isinstance(immutable, dict) or set(immutable) != {
-                    "bucket",
-                    "key",
-                    "version_id",
-                    "sha256",
-                    "size",
-                    "content_type",
-                    "object_lock_mode",
-                    "retain_until",
-                    "encryption_kms_key_arn",
-                    "exact_version_redownload",
-                }:
-                    raise ValueError(
-                        "drill.integrity.immutable_object schema mismatch"
-                    )
-                signature = integrity["signature"]
-                if not isinstance(signature, dict) or set(signature) != {
-                    "key",
-                    "version_id",
-                    "sha256",
-                    "verified",
-                }:
-                    raise ValueError("drill.integrity.signature schema mismatch")
-                expected_key = (
-                    f"forced-rollback-drills/{aggregate['drill_id']}/"
-                    "aggregate.json"
-                )
-                if (
-                    immutable["bucket"]
-                    != "teamagent-dev-openclaw-rollout-evidence"
-                    or immutable["key"] != expected_key
-                    or immutable["version_id"] in {"", "None", "null"}
-                    or immutable["content_type"] != "application/json"
-                    or immutable["object_lock_mode"] != "COMPLIANCE"
-                    or immutable["encryption_kms_key_arn"]
-                    != (
-                        "arn:aws:kms:ap-northeast-1:718959508629:key/"
-                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-                    )
-                ):
-                    raise ValueError("aggregate immutable object is not production-bound")
-                if (
-                    integrity["kms_key_arn"]
-                    != (
-                        "arn:aws:kms:ap-northeast-1:718959508629:key/"
-                        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-                    )
-                    or integrity["signing_algorithm"]
-                    != "RSASSA_PSS_SHA_256"
-                ):
-                    raise ValueError("aggregate signer is not the drill key")
-                body = canonical_drill_body_bytes(aggregate)
-                body_sha256 = hashlib.sha256(body).hexdigest()
-                if (
-                    integrity["canonical_sha256"] != body_sha256
-                    or immutable["sha256"] != body_sha256
-                    or immutable["size"] != len(body)
-                ):
-                    raise ValueError("aggregate locator does not bind canonical bytes")
-                if (
-                    signature["key"] != f"{expected_key}.sig"
-                    or signature["version_id"] in {"", "None", "null"}
-                    or not isinstance(signature["sha256"], str)
-                    or len(signature["sha256"]) != 64
-                    or signature["verified"] is not True
-                ):
-                    raise ValueError("aggregate signature is not verified")
-                redownload = immutable["exact_version_redownload"]
-                if not isinstance(redownload, dict) or set(redownload) != {
-                    "requested_version_id",
-                    "returned_version_id",
-                    "sha256",
-                    "size",
-                    "bytes_match",
-                }:
-                    raise ValueError("exact aggregate redownload is required")
-                if (
-                    redownload["requested_version_id"] != immutable["version_id"]
-                    or redownload["returned_version_id"] != immutable["version_id"]
-                    or redownload["sha256"] != body_sha256
-                    or redownload["size"] != len(body)
-                    or redownload["bytes_match"] is not True
-                ):
-                    raise ValueError("aggregate redownload does not bind canonical bytes")
-                if any(
-                    locator.get("key") == expected_key
-                    for locator in aggregate.get("artifact_manifest", [])
-                    if isinstance(locator, dict)
-                ):
-                    raise ValueError("aggregate locator must not be in artifact_manifest")
-
-
-            def validate_drill_evidence(
-                aggregate: object,
-                expected: object,
-            ) -> dict:
-                if not isinstance(aggregate, dict):
-                    raise ValueError("aggregate must be an object")
-                if not isinstance(expected, dict) or set(expected) != {
-                    "git_commit",
-                    "drill_contract_sha256",
-                    "initial_release_apply",
-                    "initial_release_verified_at_utc",
-                    "scope",
-                }:
-                    raise ValueError("trusted expected bindings are required")
-                if aggregate.get("kind") != "teamagent.forced-rollback-drill":
-                    raise ValueError("wrong aggregate kind")
-                if aggregate.get("status") not in {
-                    "PASSED",
-                    "FAILED",
-                    "RECONCILE_REQUIRED",
-                }:
-                    raise ValueError("wrong aggregate status")
-                legs = aggregate.get("legs")
-                if not isinstance(legs, list) or [
-                    leg.get("name") for leg in legs
-                ] != ["rollback_to_previous", "restore_active"]:
-                    raise ValueError("both ordered legs are required")
-                if aggregate["status"] == "PASSED":
-                    if [leg.get("result") for leg in legs] != [
-                        "PASSED",
-                        "PASSED",
-                    ]:
-                        raise ValueError("PASSED requires two passed legs")
-                    terminal = aggregate.get("safe_terminal_state", {})
-                    if terminal.get("classification") != "INITIAL_NEW":
-                        raise ValueError("PASSED requires initial-new terminal state")
-                    if terminal.get("live_snapshot") != aggregate.get(
-                        "baseline", {}
-                    ).get("initial_new"):
-                        raise ValueError("terminal state is not exact initial new")
-                for key in (
-                    "git_commit",
-                    "drill_contract_sha256",
-                    "initial_release_apply",
-                    "initial_release_verified_at_utc",
-                ):
-                    if aggregate.get("control", {}).get(key) != expected[key]:
-                        raise ValueError(f"untrusted control binding: {key}")
-                if aggregate.get("scope") != expected["scope"]:
-                    raise ValueError("aggregate scope differs from trusted scope")
-                if aggregate.get("scope") is expected["scope"]:
-                    raise ValueError("trusted scope aliases aggregate input")
-                if os.environ.get("FAKE_VALIDATOR_BODY_FAIL") == "true":
-                    raise ValueError(
-                        "drill.actors.automation_principals schema mismatch"
-                    )
-                validate_integrity(aggregate)
-                marker = os.environ["FAKE_VALIDATOR_CALLS"]
-                with open(marker, "a", encoding="utf-8") as handle:
-                    handle.write(
-                        json.dumps(
-                            {"aggregate": aggregate, "expected": expected},
-                            sort_keys=True,
-                        )
-                        + "\\n"
-                    )
-                return dict(aggregate)
-            """
-        ).lstrip(),
-        encoding="utf-8",
-    )
-    return calls, validator_calls, aws_objects
+    for name in (
+        "forced_rollback_drill_aggregate_builder.py",
+        "forced_rollback_drill_artifact_store.py",
+        "forced_rollback_drill_evidence.py",
+        "teamagent_release_approval.py",
+        "teamagent_schema_versions.py",
+    ):
+        source = PROJECT_ROOT / "infra" / "codebuild" / name
+        shutil.copy2(source, codebuild / name)
+    return calls, aws_objects
 
 
 @pytest.fixture
@@ -1476,7 +1655,7 @@ def drill(tmp_path: Path) -> DrillHarness:
         registry,
     )
     contract, initial, var_file, old_live, new_live = _make_contract(repo)
-    calls, validator_calls, aws_objects = _install_fakes(repo)
+    calls, aws_objects = _install_fakes(repo)
     fake_bin = repo / "fake-bin"
     return DrillHarness(
         repo=repo,
@@ -1486,7 +1665,6 @@ def drill(tmp_path: Path) -> DrillHarness:
         var_file=var_file,
         drill_dir=repo / "drill-output",
         calls=calls,
-        validator_calls=validator_calls,
         aws_objects=aws_objects,
         old_live=old_live,
         new_live=new_live,
@@ -1494,7 +1672,6 @@ def drill(tmp_path: Path) -> DrillHarness:
             **os.environ,
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "FAKE_DRILL_CALLS": str(calls),
-            "FAKE_VALIDATOR_CALLS": str(validator_calls),
             "FAKE_AWS_OBJECT_ROOT": str(aws_objects),
             "FAKE_AWS_EVIDENCE_BUCKET": EVIDENCE_BUCKET,
             "FAKE_AWS_ENCRYPTION_KEY_ALIAS": EVIDENCE_ENCRYPTION_KEY_ALIAS,
@@ -1700,11 +1877,30 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert finalized.returncode == 0, finalized.stderr
     assert drill.state()["state"] == "FINALIZED"
     assert "PASSED" in finalized.stdout
-    assert drill.validator_calls.exists()
-    validator_lines = drill.validator_calls.read_text(encoding="utf-8").splitlines()
-    assert len(validator_lines) == 1
-    validator_call = json.loads(validator_lines[0])
-    aggregate = validator_call["aggregate"]
+    aggregate = json.loads(
+        (drill.drill_dir / "aggregate.json").read_text(encoding="utf-8")
+    )
+    assert aggregate["status"] == "PASSED"
+    assert aggregate["actors"]["automation_principals"] == [
+        {
+            "account_id": ACCOUNT_ID,
+            "arn": AUTOMATION_PRINCIPAL_ARN,
+            "user_id": (
+                "AROATEAMAGENTRUNTIME:"
+                "teamagent-terraform-worker"
+            ),
+        }
+    ]
+    assert aggregate["actors"]["approvals"] == [
+        {
+            "approval_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "approved_by_arn": APPROVING_PRINCIPAL_ARN,
+        },
+        {
+            "approval_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            "approved_by_arn": APPROVING_PRINCIPAL_ARN,
+        },
+    ]
     integrity = aggregate["integrity"]
     immutable = integrity["immutable_object"]
     aggregate_key = f"forced-rollback-drills/{DRILL_ID}/aggregate.json"
@@ -1778,9 +1974,17 @@ def test_full_positive_path_has_all_seven_one_way_states(
         == integrity["canonical_sha256"]
     )
     stored_objects = [path.read_bytes() for path in drill.aws_objects.glob("*.body")]
-    assert len(stored_objects) == 2
+    assert len(stored_objects) == 26
     assert canonical_body in stored_objects
-    signature_envelope_bytes = next(body for body in stored_objects if body != canonical_body)
+    aggregate_signature_identity = hashlib.sha256(
+        (
+            f"{EVIDENCE_BUCKET}\0{aggregate_key}.sig\0"
+            "aggregate-signature-version"
+        ).encode()
+    ).hexdigest()
+    signature_envelope_bytes = (
+        drill.aws_objects / f"{aggregate_signature_identity}.body"
+    ).read_bytes()
     signature_envelope = json.loads(signature_envelope_bytes)
     assert signature_envelope["drill_id"] == DRILL_ID
     assert signature_envelope["payload_key"] == aggregate_key
@@ -1789,17 +1993,46 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert signature_envelope["signing_algorithm"] == SIGNING_ALGORITHM
     assert hashlib.sha256(signature_envelope_bytes).hexdigest() == integrity["signature"]["sha256"]
     assert all(locator["key"] != aggregate_key for locator in aggregate["artifact_manifest"])
-    aws_calls = [line for line in drill.call_lines() if line[0] == "aws"]
-    assert [(call[1], call[2]) for call in aws_calls] == [
-        ("kms", "describe-key"),
-        ("kms", "describe-key"),
-        ("kms", "sign"),
-        ("s3api", "put-object"),
-        ("s3api", "put-object"),
-        ("s3api", "get-object"),
-        ("s3api", "get-object"),
-        ("kms", "verify"),
+    persisted_source_locators = [
+        locator
+        for locator in aggregate["artifact_manifest"]
+        if locator["key"].startswith(
+            f"forced-rollback-drills/{DRILL_ID}/"
+        )
     ]
+    assert len(persisted_source_locators) == 12
+    for locator in persisted_source_locators:
+        payload_identity = hashlib.sha256(
+            (
+                f"{locator['bucket']}\0{locator['key']}\0"
+                f"{locator['version_id']}"
+            ).encode()
+        ).hexdigest()
+        payload = (
+            drill.aws_objects / f"{payload_identity}.body"
+        ).read_bytes()
+        assert hashlib.sha256(payload).hexdigest() == locator["sha256"]
+        assert len(payload) == locator["size"]
+        signature_identity = hashlib.sha256(
+            (
+                f"{locator['bucket']}\0{locator['signature']['key']}\0"
+                f"{locator['signature']['version_id']}"
+            ).encode()
+        ).hexdigest()
+        signature_payload = (
+            drill.aws_objects / f"{signature_identity}.body"
+        ).read_bytes()
+        assert (
+            hashlib.sha256(signature_payload).hexdigest()
+            == locator["signature"]["sha256"]
+        )
+    aws_calls = [line for line in drill.call_lines() if line[0] == "aws"]
+    operations = [(call[1], call[2]) for call in aws_calls]
+    assert operations.count(("kms", "describe-key")) == 4
+    assert operations.count(("kms", "sign")) == 13
+    assert operations.count(("s3api", "put-object")) == 26
+    assert operations.count(("s3api", "get-object")) == 26
+    assert operations.count(("kms", "verify")) == 13
     assert all(
         _arg_value(call, "--endpoint-url")
         == (
@@ -1809,19 +2042,33 @@ def test_full_positive_path_has_all_seven_one_way_states(
         )
         for call in aws_calls
     )
-    assert [_arg_value(call, "--key-id") for call in aws_calls[:2]] == [
+    describe_calls = [
+        call
+        for call in aws_calls
+        if (call[1], call[2]) == ("kms", "describe-key")
+    ]
+    assert [_arg_value(call, "--key-id") for call in describe_calls] == [
+        EVIDENCE_ENCRYPTION_KEY_ALIAS,
+        DRILL_SIGNING_KEY_ALIAS,
         EVIDENCE_ENCRYPTION_KEY_ALIAS,
         DRILL_SIGNING_KEY_ALIAS,
     ]
-    sign_call = aws_calls[2]
-    assert _arg_value(sign_call, "--key-id") == DRILL_SIGNING_KEY_ARN
-    assert _arg_value(sign_call, "--message-type") == "DIGEST"
-    assert _arg_value(sign_call, "--signing-algorithm") == SIGNING_ALGORITHM
-    put_calls = [call for call in aws_calls if (call[1], call[2]) == ("s3api", "put-object")]
-    assert [_arg_value(call, "--key") for call in put_calls] == [
-        aggregate_key,
-        f"{aggregate_key}.sig",
+    sign_calls = [
+        call for call in aws_calls if (call[1], call[2]) == ("kms", "sign")
     ]
+    assert all(
+        _arg_value(call, "--key-id") == DRILL_SIGNING_KEY_ARN
+        and _arg_value(call, "--message-type") == "DIGEST"
+        and _arg_value(call, "--signing-algorithm") == SIGNING_ALGORITHM
+        for call in sign_calls
+    )
+    put_calls = [call for call in aws_calls if (call[1], call[2]) == ("s3api", "put-object")]
+    expected_put_keys = {
+        key
+        for locator in persisted_source_locators
+        for key in (locator["key"], locator["signature"]["key"])
+    } | {aggregate_key, f"{aggregate_key}.sig"}
+    assert {_arg_value(call, "--key") for call in put_calls} == expected_put_keys
     assert all(
         _arg_value(call, "--ssekms-key-id") == EVIDENCE_ENCRYPTION_KEY_ARN
         and _arg_value(call, "--object-lock-mode") == "COMPLIANCE"
@@ -1829,10 +2076,7 @@ def test_full_positive_path_has_all_seven_one_way_states(
         for call in put_calls
     )
     get_calls = [call for call in aws_calls if (call[1], call[2]) == ("s3api", "get-object")]
-    assert [_arg_value(call, "--version-id") for call in get_calls] == [
-        "aggregate-payload-version",
-        "aggregate-signature-version",
-    ]
+    assert {_arg_value(call, "--key") for call in get_calls} == expected_put_keys
     for leg, source_dm_qa in zip(
         aggregate["legs"],
         dm_qa_results,
@@ -1842,28 +2086,40 @@ def test_full_positive_path_has_all_seven_one_way_states(
         assert set(dm_qa) == {
             "result",
             "verified_at_utc",
-            "subject_digests",
+            "apply_attempt_id",
+            "mcp_task_definition_arn",
+            "openclaw_task_definition_arn",
             "locator",
         }
         assert dm_qa["result"] == "PASSED"
-        assert dm_qa["subject_digests"] == leg["to"]["subjects"]
+        assert dm_qa["apply_attempt_id"] == leg["apply"]["apply_attempt_id"]
+        assert (
+            dm_qa["mcp_task_definition_arn"]
+            == source_dm_qa["mcpTaskDefinitionArn"]
+        )
+        assert (
+            dm_qa["openclaw_task_definition_arn"]
+            == source_dm_qa["openclawTaskDefinitionArn"]
+        )
         assert dm_qa["locator"] == source_dm_qa["locator"]
         assert re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
             r"[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
             dm_qa["verified_at_utc"],
         )
-    trusted = validator_call["expected"]
-    assert trusted["git_commit"] == "4" * 40
-    assert trusted["drill_contract_sha256"] == _sha256(drill.contract)
+    assert aggregate["control"]["git_commit"] == "4" * 40
+    assert aggregate["control"]["drill_contract_sha256"] == _sha256(
+        drill.contract
+    )
     assert (
-        trusted["initial_release_apply"]
+        aggregate["control"]["initial_release_apply"]
         == json.loads(drill.contract.read_text(encoding="utf-8"))["control"][
             "initial_release_apply_locator"
         ]
     )
-    assert trusted["scope"]["pipelines"] == ["mcp"]
-    assert [subject["name"] for subject in trusted["scope"]["subjects"]] == [
+    scope = aggregate["scope"]
+    assert scope["pipelines"] == ["mcp"]
+    assert [subject["name"] for subject in scope["subjects"]] == [
         "core",
         "media",
     ]
@@ -1876,9 +2132,9 @@ def test_full_positive_path_has_all_seven_one_way_states(
             "previous_digest",
             "initial_new_digest",
         }
-        for subject in trusted["scope"]["subjects"]
+        for subject in scope["subjects"]
     )
-    assert [resource["consumer_id"] for resource in trusted["scope"]["resources"]] == sorted(
+    assert [resource["consumer_id"] for resource in scope["resources"]] == sorted(
         consumer[0] for consumer in CONSUMERS
     )
     assert all(
@@ -1893,7 +2149,7 @@ def test_full_positive_path_has_all_seven_one_way_states(
             "initial_new_task_definition_arn",
             "initial_new_task_revision",
         }
-        for resource in trusted["scope"]["resources"]
+        for resource in scope["resources"]
     )
 
     authorize_calls = [line for line in drill.call_lines() if line[0] == "authorize"]
@@ -1923,6 +2179,13 @@ def test_prepare_rejects_old_not_bound_as_initial_release_pre_live(
         consumer_id: 32 for consumer_id, *_ in CONSUMERS
     }
     _write_json(drill.initial_receipt, receipt)
+    contract = json.loads(drill.contract.read_text(encoding="utf-8"))
+    locator = contract["control"]["initial_release_apply_locator"]
+    locator["sha256"] = _sha256(drill.initial_receipt)
+    locator["size"] = drill.initial_receipt.stat().st_size
+    locator["exact_version_redownload"]["sha256"] = locator["sha256"]
+    locator["exact_version_redownload"]["size"] = locator["size"]
+    _write_json(drill.contract, contract)
 
     result = drill.prepare()
 
@@ -2040,6 +2303,44 @@ def test_restore_plan_must_bind_rollback_post_apply_state_and_revisions(
     assert drill.state()["state"] == "RECOVERY_REQUIRED"
     assert drill.state()["legs"]["restore_active"]["status"] == "FAILED"
     assert len(drill._guard_calls("apply")) == 1
+
+
+def test_restore_plan_rejects_reused_release_approval_record(
+    drill: DrillHarness,
+) -> None:
+    assert drill.prepare().returncode == 0
+    assert drill.preflight().returncode == 0
+    planned1, plan1_sha = drill.plan(
+        "rollback-to-previous",
+        now=INITIAL_APPLIED_AT + 180,
+    )
+    assert planned1.returncode == 0
+    assert (
+        drill.apply(
+            "rollback-to-previous",
+            approval_leg="rollback",
+            plan_sha256=plan1_sha,
+            now=INITIAL_APPLIED_AT + 240,
+        ).returncode
+        == 0
+    )
+    plan_calls_before = len(drill._guard_calls("plan"))
+
+    reused = drill.run(
+        "plan-leg",
+        "--drill-dir",
+        str(drill.drill_dir),
+        "--leg",
+        "restore-active",
+        now=INITIAL_APPLIED_AT + 300,
+        extra_env={"FAKE_REUSE_RELEASE_APPROVAL_ID": "true"},
+    )
+
+    assert reused.returncode != 0
+    assert "did not receive a fresh release receipt" in reused.stderr
+    assert drill.state()["state"] == "RECOVERY_REQUIRED"
+    assert drill.state()["legs"]["restore_active"]["status"] == "FAILED"
+    assert len(drill._guard_calls("plan")) == plan_calls_before
 
 
 @pytest.mark.parametrize("artifact", ["preflight", "consumer-manifest"])
@@ -2416,7 +2717,7 @@ def test_rollback_apply_after_thirty_minute_start_limit_requires_recovery(
     assert len(drill._guard_calls("apply")) == apply_calls_before
 
 
-def test_failed_leg_history_prevents_later_passed_finalize(
+def test_unreachable_failed_leg_history_is_rejected_before_aggregate_persistence(
     drill: DrillHarness,
 ) -> None:
     assert drill.prepare().returncode == 0
@@ -2450,7 +2751,10 @@ def test_failed_leg_history_prevents_later_passed_finalize(
         == 0
     )
 
-    # A recovered exact-new live state must not erase an earlier failed leg.
+    # record_failure would move the controller to RECOVERY_REQUIRED and make
+    # leg 2 unreachable.  Injecting such a history into LEG2_APPLIED models
+    # local state tampering; the builder must reject it instead of inventing a
+    # FAILED aggregate from otherwise successful receipts.
     state_path = drill.drill_dir / "state.json"
     historical_failure = drill.state()
     historical_failure["failures"].append(
@@ -2472,10 +2776,15 @@ def test_failed_leg_history_prevents_later_passed_finalize(
 
     assert finalized.returncode != 0
     assert "PASSED" not in finalized.stdout
-    assert drill.state()["state"] == "FINALIZED"
-    assert drill.state()["final_status"] == "FAILED"
-    aggregate = json.loads((drill.drill_dir / "aggregate.json").read_text(encoding="utf-8"))
-    assert aggregate["status"] == "FAILED"
+    assert "failure history is not reachable" in finalized.stderr
+    assert drill.state()["state"] == "LEG2_APPLIED"
+    assert drill.state()["final_status"] is None
+    assert not (drill.drill_dir / "aggregate.json").exists()
+    assert not [
+        call
+        for call in drill.call_lines()
+        if call[:3] == ["aws", "s3api", "put-object"]
+    ]
 
 
 def test_finalize_rejects_final_receipt_that_is_not_exact_initial_new(
@@ -2535,8 +2844,9 @@ def test_finalize_rejects_final_receipt_that_is_not_exact_initial_new(
 
     assert finalized.returncode != 0
     assert "PASSED" not in finalized.stdout
-    assert drill.state()["state"] == "FINALIZED"
-    assert drill.state()["final_status"] == "RECONCILE_REQUIRED"
+    assert drill.state()["state"] == "LEG2_APPLIED"
+    assert drill.state()["final_status"] is None
+    assert not (drill.drill_dir / "aggregate.json").exists()
 
 
 def test_finalize_rejects_fresh_live_drift_after_restore_receipt(
@@ -2585,7 +2895,32 @@ def test_finalize_rejects_fresh_live_drift_after_restore_receipt(
     assert "PASSED" not in finalized.stdout
     assert drill.state()["state"] == "FINALIZED"
     assert drill.state()["final_status"] == "RECONCILE_REQUIRED"
-    assert not (drill.drill_dir / "final-live.snapshot.json").exists()
+    terminal = json.loads(
+        (drill.drill_dir / "final-live.snapshot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert terminal["classification"] == "PREVIOUS_OLD"
+    aggregate = json.loads(
+        (drill.drill_dir / "aggregate.json").read_text(encoding="utf-8")
+    )
+    assert (
+        aggregate["safe_terminal_state"]["classification"]
+        == "PREVIOUS_OLD"
+    )
+    restore_leg = aggregate["legs"][1]
+    assert restore_leg["result"] == "PASSED"
+    assert restore_leg["apply"]["result"] == "PASSED"
+    assert restore_leg["ecs"]["result"] == "PASSED"
+    assert restore_leg["run_task_health"]["result"] == "PASSED"
+    assert restore_leg["dm_qa"]["result"] == "PASSED"
+    assert restore_leg["recovery"]["result"] == "NOT_ATTEMPTED"
+    assert (
+        restore_leg["recovery"]["last_exact_confirmed_digests"]
+        == aggregate["safe_terminal_state"]["live_snapshot"]["snapshot"][
+            "subjects"
+        ]
+    )
     assert drill._guard_calls("snapshot")
 
 
@@ -2593,62 +2928,65 @@ def test_finalize_does_not_lock_body_rejected_before_integrity(
     drill: DrillHarness,
 ) -> None:
     _advance_to_leg2_applied(drill)
+    state = drill.state()
+    authorization_state = state["legs"]["rollback_to_previous"][
+        "authorization"
+    ]
+    authorization_path = Path(authorization_state["path"])
+    authorization = json.loads(
+        authorization_path.read_text(encoding="utf-8")
+    )
+    authorization["release_approval"][
+        "decision"
+    ] = "REJECTED: approval was revoked before aggregate finalization"
+    _write_json(authorization_path, authorization)
+    authorization_state["sha256"] = _sha256(authorization_path)
+    _write_json(drill.drill_dir / "state.json", state)
 
     finalized = drill.run(
         "finalize",
         "--drill-dir",
         str(drill.drill_dir),
         now=INITIAL_APPLIED_AT + 420,
-        extra_env={"FAKE_VALIDATOR_BODY_FAIL": "true"},
     )
 
     assert finalized.returncode != 0
     assert "aggregate body failed pre-persistence validation" in finalized.stderr
     assert drill.state()["state"] == "LEG2_APPLIED"
     assert not (drill.drill_dir / "aggregate.json").exists()
-    assert not drill.aws_objects.exists()
-    assert all(call[0] != "aws" for call in drill.call_lines())
+    assert drill.aws_objects.exists()
+    put_keys = {
+        _arg_value(call, "--key")
+        for call in drill.call_lines()
+        if call[0:3] == ["aws", "s3api", "put-object"]
+    }
+    aggregate_key = f"forced-rollback-drills/{DRILL_ID}/aggregate.json"
+    assert aggregate_key not in put_keys
+    assert f"{aggregate_key}.sig" not in put_keys
 
 
 @pytest.mark.parametrize(
-    ("failure_env", "expected_aws_operations"),
+    ("failure_env", "expected_last_operation", "expected_error"),
     [
         (
             {"FAKE_AWS_FAIL_OPERATION": "put-object"},
-            [
-                ("kms", "describe-key"),
-                ("kms", "describe-key"),
-                ("kms", "sign"),
-                ("s3api", "put-object"),
-            ],
+            ("s3api", "put-object"),
+            "could not persist and verify aggregate source artifacts",
         ),
         (
             {"FAKE_AWS_FAIL_OPERATION": "sign"},
-            [
-                ("kms", "describe-key"),
-                ("kms", "describe-key"),
-                ("kms", "sign"),
-            ],
+            ("kms", "sign"),
+            "could not persist and verify aggregate source artifacts",
         ),
         (
             {"FAKE_AWS_REDOWNLOAD_MISMATCH": "true"},
-            [
-                ("kms", "describe-key"),
-                ("kms", "describe-key"),
-                ("kms", "sign"),
-                ("s3api", "put-object"),
-                ("s3api", "put-object"),
-                ("s3api", "get-object"),
-            ],
+            ("s3api", "get-object"),
+            "could not persist and verify immutable aggregate evidence",
         ),
         (
             {"FAKE_AWS_MISSING_VERSION_ID": "true"},
-            [
-                ("kms", "describe-key"),
-                ("kms", "describe-key"),
-                ("kms", "sign"),
-                ("s3api", "put-object"),
-            ],
+            ("s3api", "put-object"),
+            "could not persist and verify aggregate source artifacts",
         ),
     ],
     ids=[
@@ -2661,7 +2999,8 @@ def test_finalize_does_not_lock_body_rejected_before_integrity(
 def test_finalize_never_passes_when_aggregate_persistence_is_not_exact(
     drill: DrillHarness,
     failure_env: dict[str, str],
-    expected_aws_operations: list[tuple[str, str]],
+    expected_last_operation: tuple[str, str],
+    expected_error: str,
 ) -> None:
     _advance_to_leg2_applied(drill)
 
@@ -2675,15 +3014,15 @@ def test_finalize_never_passes_when_aggregate_persistence_is_not_exact(
 
     assert finalized.returncode != 0
     assert "PASSED" not in finalized.stdout
-    assert "could not persist and verify immutable aggregate evidence" in finalized.stderr
+    assert expected_error in finalized.stderr
     state = drill.state()
     assert state["state"] == "LEG2_APPLIED"
     assert state["final_status"] is None
     assert state["aggregate_sha256"] is None
     assert not (drill.drill_dir / "aggregate.json").exists()
-    assert not drill.validator_calls.exists()
     aws_operations = [(call[1], call[2]) for call in drill.call_lines() if call[0] == "aws"]
-    assert aws_operations == expected_aws_operations
+    assert aws_operations
+    assert aws_operations[-1] == expected_last_operation
 
 
 def test_controller_has_no_unguarded_mutation_path_and_plan_keeps_var_file() -> None:

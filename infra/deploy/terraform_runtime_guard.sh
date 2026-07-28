@@ -69,7 +69,7 @@ AWS_BIN_IDENTITY=""
 usage() {
   cat <<'EOF'
 usage:
-  terraform_runtime_guard.sh snapshot
+  terraform_runtime_guard.sh snapshot [--evidence-json-out FILE]
   terraform_runtime_guard.sh attest-log-versioning --out RECEIPT
   terraform_runtime_guard.sh attest-log-readiness \
     --versioning-receipt FILE --spec FILE --artifact-dir DIR --out RECEIPT
@@ -102,6 +102,7 @@ usage:
   terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] \
     [--media-authorization FILE --apply-attempt-id UUID] \
     [--forced-rollback-dm-qa-deadline-epoch EPOCH] \
+    [--automation-identity-out FILE] \
     --out APPLY_RECEIPT
 
 plan:
@@ -563,7 +564,7 @@ aws_cost_cli() {
 }
 
 assert_trusted_automation_identity() {
-  local identity="$TMP_ROOT/trusted-automation-identity.json"
+  local output="${1:-}" identity="$TMP_ROOT/trusted-automation-identity.json"
   aws_cli sts get-caller-identity --output json > "$identity"
   jq -e \
     --arg account "$EXPECTED_ACCOUNT_ID" \
@@ -574,6 +575,11 @@ assert_trusted_automation_identity() {
     (.UserId | length) > 0
   ' "$identity" >/dev/null ||
     die "write-capable guard操作はexact trusted automation sessionだけが実行できます"
+  if [ -n "$output" ]; then
+    output="$(secure_new_file "$output")"
+    cp "$identity" "$output"
+    chmod 600 "$output"
+  fi
 }
 
 assert_trusted_media_attestor_identity() {
@@ -8002,6 +8008,7 @@ raise SystemExit(0 if all(checks.values()) else 23)
     --arg task_definition "$task_definition" \
     --arg image "$image" \
     --arg log_stream_name "$log_stream" \
+    --arg verified_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --slurpfile task "$task_result" \
     --slurpfile result "$result" '{
       kind:$kind,
@@ -8010,6 +8017,7 @@ raise SystemExit(0 if all(checks.values()) else 23)
       task_definition:$task_definition,
       image:$image,
       log_stream_name:$log_stream_name,
+      verified_at_utc:$verified_at_utc,
       task:$task[0],
       result:$result[0]
     }' > "$output"
@@ -8620,6 +8628,8 @@ verify_required_migration_apply_receipt() {
       "teamagent-post-apply-service-probe-receipt" and
     .post_apply_service_probe.schema_version == 1 and
     .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
+    (.post_apply_service_probe.verified_at_utc |
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
     .post_apply_service_probe.image == $live[0].taskdefs.canary.image and
     .post_apply_service_probe.task.exit_code == 0 and
     .post_apply_service_probe.result.kind ==
@@ -9516,9 +9526,18 @@ assert_guard_sources
 
 case "$COMMAND" in
   snapshot)
+    SNAPSHOT_EVIDENCE_JSON_OUT=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
+        --evidence-json-out)
+          [ -z "$SNAPSHOT_EVIDENCE_JSON_OUT" ] ||
+            die "--evidence-json-out は1回だけ指定できます"
+          SNAPSHOT_EVIDENCE_JSON_OUT="$(
+            printf '%s' "${2:?--evidence-json-out に値が必要}"
+          )"
+          shift 2
+          ;;
         *) die "不明な引数: $1" ;;
       esac
     done
@@ -9526,6 +9545,13 @@ case "$COMMAND" in
     need_cmd jq
     ensure_tmp
     snapshot_live "$TMP_ROOT/live.json"
+    if [ -n "$SNAPSHOT_EVIDENCE_JSON_OUT" ]; then
+      SNAPSHOT_EVIDENCE_JSON_OUT="$(
+        secure_new_file "$SNAPSHOT_EVIDENCE_JSON_OUT"
+      )"
+      cp "$TMP_ROOT/live.json" "$SNAPSHOT_EVIDENCE_JSON_OUT"
+      chmod 600 "$SNAPSHOT_EVIDENCE_JSON_OUT"
+    fi
     core_from_snapshot \
       "$TMP_ROOT/live.json" "$TMP_ROOT/core.json" "sync" "" \
       "$(jq -er '.taskdefs.openclaw.image' "$TMP_ROOT/live.json")" \
@@ -11203,6 +11229,7 @@ case "$COMMAND" in
     MEDIA_AUTHORIZATION=""
     REQUESTED_APPLY_ATTEMPT_ID=""
     FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH=""
+    AUTOMATION_IDENTITY_OUT=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -11221,6 +11248,14 @@ case "$COMMAND" in
             die "--forced-rollback-dm-qa-deadline-epoch は1回だけ指定できます"
           FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH="$(
             printf '%s' "${2:?--forced-rollback-dm-qa-deadline-epoch に値が必要}"
+          )"
+          shift 2
+          ;;
+        --automation-identity-out)
+          [ -z "$AUTOMATION_IDENTITY_OUT" ] ||
+            die "--automation-identity-out は1回だけ指定できます"
+          AUTOMATION_IDENTITY_OUT="$(
+            printf '%s' "${2:?--automation-identity-out に値が必要}"
           )"
           shift 2
           ;;
@@ -11313,7 +11348,7 @@ case "$COMMAND" in
     [ "$(dirname "$PLAN")" = "$(dirname "$APPLY_RECEIPT")" ] ||
       die "apply receiptもplanと同じprivate directoryに置いてください"
     ensure_tmp
-    assert_trusted_automation_identity
+    assert_trusted_automation_identity "$AUTOMATION_IDENTITY_OUT"
     TERRAFORM_BIN="$(realpath "$(command -v terraform)")"
     assert_regular_nonwritable "$TERRAFORM_BIN"
     [[ "$("$TERRAFORM_BIN" version | head -n 1)" =~ ^Terraform[[:space:]]v1[.] ]] ||

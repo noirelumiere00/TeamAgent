@@ -27,6 +27,13 @@ ENVIRONMENT_NAME = "dev"
 MAX_START_DELAY_SECONDS = 1800
 MAX_OLD_DWELL_SECONDS = 1200
 SIGNING_ALGORITHM = "RSASSA_PSS_SHA_256"
+TRUSTED_AUTOMATION_ARN = (
+    f"arn:aws:sts::{ACCOUNT_ID}:assumed-role/"
+    "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+)
+APPROVAL_APPROVED_BY_ARN = (
+    f"arn:aws:iam::{ACCOUNT_ID}:role/teamagent-dev-approval-caller"
+)
 
 DRILL_STATUSES = frozenset({"PASSED", "FAILED", "RECONCILE_REQUIRED"})
 LEG_RESULTS = frozenset({"PASSED", "FAILED"})
@@ -69,7 +76,8 @@ _ACTORS_KEYS = {
     "approvals",
 }
 _PRINCIPAL_KEYS = {"arn", "user_id", "source_identity"}
-_ACTOR_APPROVAL_KEYS = {"approval_id", "principal"}
+_AUTOMATION_PRINCIPAL_KEYS = {"account_id", "arn", "user_id"}
+_ACTOR_APPROVAL_KEYS = {"approval_id", "approved_by_arn"}
 _SCOPE_KEYS = {"pipelines", "subjects", "resources"}
 _SCOPE_SUBJECT_KEYS = {
     "pipeline",
@@ -132,10 +140,14 @@ _RELEASE_AUTHORIZATION_KEYS = {
     "channel",
     "subjects",
     "issued_at_utc",
+    "release_approval_id",
+    "release_approved_by_arn",
+    "receipt_sha256",
     "locator",
 }
 _PLAN_KEYS = {
     "sha256",
+    "receipt_sha256",
     "created_at_utc",
     "terraform_lineage",
     "terraform_serial",
@@ -145,17 +157,33 @@ _PLAN_KEYS = {
     "locator",
 }
 _APPROVAL_KEYS = {
-    "approval_id",
+    "confirmation_id",
     "drill_id",
+    "action",
     "plan_sha256",
-    "decision",
-    "approved_at_utc",
-    "approved_by",
+    "approval_text_sha256",
+    "consumed_at_utc",
+    "release_approval",
+    "receipt_sha256",
     "locator",
 }
+_RELEASE_APPROVAL_KEYS = {
+    "approval_id",
+    "approved_at_utc",
+    "approved_by",
+    "decision",
+    "expires_at_utc",
+    "forced_gate_sha256",
+    "payload",
+    "pipeline",
+    "signature",
+    "source_commit",
+}
+_EXTERNAL_LOCATOR_KEYS = {"bucket", "key", "version_id", "sha256"}
 _APPLY_KEYS = {
     "apply_attempt_id",
     "plan_sha256",
+    "receipt_sha256",
     "started_at_utc",
     "completed_at_utc",
     "result",
@@ -163,6 +191,9 @@ _APPLY_KEYS = {
     "terraform_serial_before",
     "terraform_serial_after",
     "state",
+    "automation_principal",
+    "automation_identity_sha256",
+    "automation_identity_locator",
     "locator",
 }
 _ECS_KEYS = {
@@ -175,13 +206,38 @@ _ECS_KEYS = {
 _RUN_TASK_HEALTH_KEYS = {
     "result",
     "verified_at_utc",
-    "tasks",
+    "apply_attempt_id",
+    "task_definition_arn",
+    "image",
+    "log_stream_name",
+    "task",
+    "checks",
     "locator",
+}
+_RUN_TASK_KEYS = {
+    "task_arn",
+    "task_definition_arn",
+    "image",
+    "image_digest",
+    "exit_code",
+    "stopped_reason_code",
+    "log_stream_name",
+}
+_RUN_TASK_CHECK_KEYS = {
+    "connect_build_inputs_sha256",
+    "connect_contract_ok",
+    "connect_http_200",
+    "connect_manifest_sha256",
+    "connect_sha256",
+    "connect_version_id",
+    "mcp_http_200",
 }
 _DM_QA_KEYS = {
     "result",
     "verified_at_utc",
-    "subject_digests",
+    "apply_attempt_id",
+    "mcp_task_definition_arn",
+    "openclaw_task_definition_arn",
     "locator",
 }
 _RECOVERY_KEYS = {
@@ -274,6 +330,9 @@ _PRINCIPAL_ARN_RE = re.compile(
     rf"arn:aws:(?:iam|sts)::{ACCOUNT_ID}:"
     r"(?:role|user|assumed-role)/[A-Za-z0-9+=,.@_/-]{1,512}"
 )
+_IAM_ROLE_ARN_RE = re.compile(
+    rf"arn:aws:iam::{ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]{{1,512}}"
+)
 _PIPELINE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _IDENTIFIER_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,127}")
 _REPOSITORY_RE = re.compile(r"[a-z0-9][a-z0-9._/-]{0,255}")
@@ -283,6 +342,14 @@ _TERRAFORM_ADDRESS_RE = re.compile(
 _TASK_DEFINITION_ARN_RE = re.compile(
     rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task-definition/"
     r"([A-Za-z0-9_-]{1,255}):([1-9][0-9]*)"
+)
+_TASK_ARN_RE = re.compile(
+    rf"arn:aws:ecs:{REGION}:{ACCOUNT_ID}:task/"
+    r"[A-Za-z0-9_-]{1,255}/[0-9a-f]{32}"
+)
+_ECR_IMAGE_RE = re.compile(
+    rf"{ACCOUNT_ID}\.dkr\.ecr\.{REGION}\.amazonaws\.com/"
+    r"[a-z0-9][a-z0-9._/-]{0,255}@sha256:[0-9a-f]{64}"
 )
 _CONTENT_TYPE_RE = re.compile(
     r"[a-z0-9][a-z0-9.+-]{0,126}/[A-Za-z0-9][A-Za-z0-9.+_-]{0,126}"
@@ -708,12 +775,76 @@ def _validate_principal(value: Any, *, label: str) -> dict[str, Any]:
     return principal
 
 
-def _principal_identity(principal: dict[str, Any]) -> tuple[str, str, str]:
+def _validate_automation_principal(
+    value: Any,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    principal = _exact_object(
+        value,
+        _AUTOMATION_PRINCIPAL_KEYS,
+        label=label,
+    )
+    if principal["account_id"] != ACCOUNT_ID:
+        raise DrillEvidenceError(
+            f"{label}.account_id is not the fixed AWS account"
+        )
+    _pattern(
+        principal["arn"],
+        _PRINCIPAL_ARN_RE,
+        label=f"{label}.arn",
+        description=f"an IAM or STS principal ARN in account {ACCOUNT_ID}",
+        maximum=600,
+    )
+    if principal["arn"] != TRUSTED_AUTOMATION_ARN:
+        raise DrillEvidenceError(
+            f"{label}.arn is not the exact trusted automation caller"
+        )
+    _text(principal["user_id"], label=f"{label}.user_id", maximum=512)
+    return principal
+
+
+def _automation_principal_identity(
+    principal: dict[str, Any],
+) -> tuple[str, str, str]:
     return (
+        principal["account_id"],
         principal["arn"],
         principal["user_id"],
-        principal["source_identity"] or "",
     )
+
+
+def _principal_arn(value: Any, *, label: str) -> str:
+    return _pattern(
+        value,
+        _PRINCIPAL_ARN_RE,
+        label=label,
+        description=f"an IAM or STS principal ARN in account {ACCOUNT_ID}",
+        maximum=600,
+    )
+
+
+def _validate_external_locator(value: Any, *, label: str) -> dict[str, Any]:
+    locator = _exact_object(value, _EXTERNAL_LOCATOR_KEYS, label=label)
+    bucket = _text(locator["bucket"], label=f"{label}.bucket", maximum=63)
+    if (
+        not _S3_BUCKET_RE.fullmatch(bucket)
+        or ".." in bucket
+        or ".-" in bucket
+        or "-." in bucket
+    ):
+        raise DrillEvidenceError(f"{label}.bucket must be a canonical S3 bucket")
+    key = _text(locator["key"], label=f"{label}.key", maximum=1024)
+    parsed_key = PurePosixPath(key)
+    if (
+        parsed_key.is_absolute()
+        or any(part in {"", ".", ".."} for part in key.split("/"))
+        or "\\" in key
+    ):
+        raise DrillEvidenceError(f"{label}.key must be a safe exact S3 key")
+    _version_id(locator["version_id"], label=f"{label}.version_id")
+    _sha256(locator["sha256"], label=f"{label}.sha256")
+    return locator
 
 
 def _validate_environment(value: Any) -> None:
@@ -805,12 +936,14 @@ def _validate_actors(value: Any) -> dict[str, Any]:
     automation: list[dict[str, Any]] = []
     for index, item in enumerate(automation_values):
         automation.append(
-            _validate_principal(
+            _validate_automation_principal(
                 item,
                 label=f"drill.actors.automation_principals[{index}]",
             )
         )
-    automation_identities = [_principal_identity(item) for item in automation]
+    automation_identities = [
+        _automation_principal_identity(item) for item in automation
+    ]
     if len(automation_identities) != len(set(automation_identities)):
         raise DrillEvidenceError(
             "drill.actors.automation_principals must be unique"
@@ -819,7 +952,11 @@ def _validate_actors(value: Any) -> dict[str, Any]:
         raise DrillEvidenceError(
             "drill.actors.automation_principals must be canonically sorted"
         )
-    if _principal_identity(initiating) in set(automation_identities):
+    if any(
+        initiating["arn"] == item["arn"]
+        and initiating["user_id"] == item["user_id"]
+        for item in automation
+    ):
         raise DrillEvidenceError(
             "drill initiating and automation principals must be distinct"
         )
@@ -844,14 +981,22 @@ def _validate_actors(value: Any) -> dict[str, Any]:
         approval_ids.append(
             _uuid4(actor_approval["approval_id"], label=f"{label}.approval_id")
         )
-        _validate_principal(
-            actor_approval["principal"],
-            label=f"{label}.principal",
+        _principal_arn(
+            actor_approval["approved_by_arn"],
+            label=f"{label}.approved_by_arn",
         )
+        if actor_approval["approved_by_arn"] != APPROVAL_APPROVED_BY_ARN:
+            raise DrillEvidenceError(
+                f"{label}.approved_by_arn is not the fixed approval caller"
+            )
         approvals.append(actor_approval)
     if len(set(approval_ids)) != 2:
         raise DrillEvidenceError("drill approval IDs must be distinct")
-    return {"initiating": initiating, "approvals": approvals}
+    return {
+        "initiating": initiating,
+        "automation": automation,
+        "approvals": approvals,
+    }
 
 
 def _validate_scope(value: Any) -> dict[str, Any]:
@@ -1313,11 +1458,38 @@ def _validate_release_authorizations(
             authorization["issued_at_utc"],
             label=f"{authorization_label}.issued_at_utc",
         )
+        _uuid4(
+            authorization["release_approval_id"],
+            label=f"{authorization_label}.release_approval_id",
+        )
+        _pattern(
+            authorization["release_approved_by_arn"],
+            _IAM_ROLE_ARN_RE,
+            label=f"{authorization_label}.release_approved_by_arn",
+            description="an IAM role ARN in the fixed account",
+            maximum=600,
+        )
+        if (
+            authorization["release_approved_by_arn"]
+            != APPROVAL_APPROVED_BY_ARN
+        ):
+            raise DrillEvidenceError(
+                f"{authorization_label}.release_approved_by_arn is not "
+                "the fixed approval caller"
+            )
+        receipt_sha256 = _sha256(
+            authorization["receipt_sha256"],
+            label=f"{authorization_label}.receipt_sha256",
+        )
         locator = _validate_locator(
             authorization["locator"],
             label=f"{authorization_label}.locator",
             aggregate_completed_at=aggregate_completed_at,
         )
+        if locator["sha256"] != receipt_sha256:
+            raise DrillEvidenceError(
+                f"{authorization_label}.receipt_sha256 must match its locator"
+            )
         locators.append(locator)
     return authorizations
 
@@ -1334,6 +1506,10 @@ def _validate_plan(
 ) -> dict[str, Any]:
     plan = _exact_object(value, _PLAN_KEYS, label=label)
     plan_sha = _sha256(plan["sha256"], label=f"{label}.sha256")
+    receipt_sha = _sha256(
+        plan["receipt_sha256"],
+        label=f"{label}.receipt_sha256",
+    )
     _timestamp(plan["created_at_utc"], label=f"{label}.created_at_utc")
     _uuid(plan["terraform_lineage"], label=f"{label}.terraform_lineage")
     _integer(plan["terraform_serial"], label=f"{label}.terraform_serial")
@@ -1365,8 +1541,10 @@ def _validate_plan(
         label=f"{label}.locator",
         aggregate_completed_at=aggregate_completed_at,
     )
-    if locator["sha256"] != plan_sha:
-        raise DrillEvidenceError(f"{label}.sha256 must match its exact locator")
+    if locator["sha256"] != receipt_sha:
+        raise DrillEvidenceError(
+            f"{label}.receipt_sha256 must match its exact receipt locator"
+        )
     locators.append(locator)
     return plan
 
@@ -1381,24 +1559,132 @@ def _validate_approval(
     locators: list[dict[str, Any]],
 ) -> dict[str, Any]:
     approval = _exact_object(value, _APPROVAL_KEYS, label=label)
-    _uuid4(approval["approval_id"], label=f"{label}.approval_id")
+    confirmation_id = _text(
+        approval["confirmation_id"],
+        label=f"{label}.confirmation_id",
+        maximum=4,
+    )
+    if confirmation_id not in {"OK-1", "OK-2"}:
+        raise DrillEvidenceError(f"{label}.confirmation_id is unsupported")
     if approval["drill_id"] != drill_id:
         raise DrillEvidenceError(f"{label}.drill_id does not bind this drill")
+    if approval["action"] not in {"rollback", "restore"}:
+        raise DrillEvidenceError(f"{label}.action is unsupported")
     actual_plan_sha = _sha256(
         approval["plan_sha256"],
         label=f"{label}.plan_sha256",
     )
     if actual_plan_sha != plan_sha256:
         raise DrillEvidenceError(f"{label}.plan_sha256 does not bind its plan")
-    if approval["decision"] != "APPROVED":
-        raise DrillEvidenceError(f"{label}.decision must be APPROVED")
-    _timestamp(approval["approved_at_utc"], label=f"{label}.approved_at_utc")
-    _validate_principal(approval["approved_by"], label=f"{label}.approved_by")
+    _sha256(
+        approval["approval_text_sha256"],
+        label=f"{label}.approval_text_sha256",
+    )
+    expected_confirmation = (
+        f"APPROVE {drill_id} {approval['action']} {plan_sha256}\n".encode()
+    )
+    if (
+        hashlib.sha256(expected_confirmation).hexdigest()
+        != approval["approval_text_sha256"]
+    ):
+        raise DrillEvidenceError(
+            f"{label}.approval_text_sha256 does not bind the exact confirmation"
+        )
+    _timestamp(
+        approval["consumed_at_utc"],
+        label=f"{label}.consumed_at_utc",
+    )
+    release = _exact_object(
+        approval["release_approval"],
+        _RELEASE_APPROVAL_KEYS,
+        label=f"{label}.release_approval",
+    )
+    _uuid4(
+        release["approval_id"],
+        label=f"{label}.release_approval.approval_id",
+    )
+    approved_at = _timestamp(
+        release["approved_at_utc"],
+        label=f"{label}.release_approval.approved_at_utc",
+    )
+    expires_at = _timestamp(
+        release["expires_at_utc"],
+        label=f"{label}.release_approval.expires_at_utc",
+    )
+    if approved_at >= expires_at:
+        raise DrillEvidenceError(
+            f"{label}.release_approval expiration must follow approval"
+        )
+    _pattern(
+        release["approved_by"],
+        _IAM_ROLE_ARN_RE,
+        label=f"{label}.release_approval.approved_by",
+        description="an IAM role ARN in the fixed account",
+        maximum=600,
+    )
+    if release["approved_by"] != APPROVAL_APPROVED_BY_ARN:
+        raise DrillEvidenceError(
+            f"{label}.release_approval.approved_by is not the fixed "
+            "approval caller"
+        )
+    decision = _text(
+        release["decision"],
+        label=f"{label}.release_approval.decision",
+        maximum=2048,
+    )
+    if not decision.startswith("APPROVED: "):
+        raise DrillEvidenceError(
+            f"{label}.release_approval.decision is not an approval"
+        )
+    _sha256(
+        release["forced_gate_sha256"],
+        label=f"{label}.release_approval.forced_gate_sha256",
+    )
+    if release["pipeline"] != "mcp":
+        raise DrillEvidenceError(
+            f"{label}.release_approval.pipeline must be mcp"
+        )
+    _pattern(
+        release["source_commit"],
+        _GIT_OID_RE,
+        label=f"{label}.release_approval.source_commit",
+        description="a 40-character lowercase Git OID",
+        maximum=40,
+    )
+    payload = _validate_external_locator(
+        release["payload"],
+        label=f"{label}.release_approval.payload",
+    )
+    signature = _validate_external_locator(
+        release["signature"],
+        label=f"{label}.release_approval.signature",
+    )
+    expected_payload_key = (
+        "approval-records/mcp/"
+        f"{release['source_commit']}/{payload['sha256']}.json"
+    )
+    if (
+        payload["bucket"] != "teamagent-dev-image-release-evidence"
+        or payload["key"] != expected_payload_key
+        or signature["bucket"] != payload["bucket"]
+        or signature["key"] != f"{payload['key']}.sig"
+    ):
+        raise DrillEvidenceError(
+            f"{label}.release_approval locators do not bind the approved MCP source"
+        )
+    receipt_sha = _sha256(
+        approval["receipt_sha256"],
+        label=f"{label}.receipt_sha256",
+    )
     locator = _validate_locator(
         approval["locator"],
         label=f"{label}.locator",
         aggregate_completed_at=aggregate_completed_at,
     )
+    if locator["sha256"] != receipt_sha:
+        raise DrillEvidenceError(
+            f"{label}.receipt_sha256 must match its exact locator"
+        )
     locators.append(locator)
     return approval
 
@@ -1421,6 +1707,10 @@ def _validate_apply(
     )
     if actual_plan_sha != plan_sha256:
         raise DrillEvidenceError(f"{label}.plan_sha256 does not bind its plan")
+    receipt_sha = _sha256(
+        apply["receipt_sha256"],
+        label=f"{label}.receipt_sha256",
+    )
     started_at = _timestamp(apply["started_at_utc"], label=f"{label}.started_at_utc")
     completed_at = _timestamp(
         apply["completed_at_utc"],
@@ -1445,6 +1735,24 @@ def _validate_apply(
         scope=scope,
         label=f"{label}.state",
     )
+    automation_principal = _validate_automation_principal(
+        apply["automation_principal"],
+        label=f"{label}.automation_principal",
+    )
+    automation_identity_sha = _sha256(
+        apply["automation_identity_sha256"],
+        label=f"{label}.automation_identity_sha256",
+    )
+    automation_identity_locator = _validate_locator(
+        apply["automation_identity_locator"],
+        label=f"{label}.automation_identity_locator",
+        aggregate_completed_at=aggregate_completed_at,
+    )
+    if automation_identity_locator["sha256"] != automation_identity_sha:
+        raise DrillEvidenceError(
+            f"{label}.automation_identity_sha256 must match its locator"
+        )
+    locators.append(automation_identity_locator)
     if result == "PASSED":
         if serial_after <= serial_before:
             raise DrillEvidenceError(
@@ -1459,6 +1767,10 @@ def _validate_apply(
         label=f"{label}.locator",
         aggregate_completed_at=aggregate_completed_at,
     )
+    if locator["sha256"] != receipt_sha:
+        raise DrillEvidenceError(
+            f"{label}.receipt_sha256 must match its exact locator"
+        )
     locators.append(locator)
     return apply
 
@@ -1498,7 +1810,7 @@ def _validate_run_task_health(
     value: Any,
     *,
     target: dict[str, Any],
-    scope: dict[str, Any],
+    apply_attempt_id: str,
     label: str,
     aggregate_completed_at: dt.datetime,
     locators: list[dict[str, Any]],
@@ -1506,19 +1818,94 @@ def _validate_run_task_health(
     health = _exact_object(value, _RUN_TASK_HEALTH_KEYS, label=label)
     result = _choice(health["result"], LEG_RESULTS, label=f"{label}.result")
     _timestamp(health["verified_at_utc"], label=f"{label}.verified_at_utc")
-    task_snapshot = {
-        "subjects": target["subjects"],
-        "resources": health["tasks"],
-    }
-    validated_tasks = _validate_snapshot(
-        task_snapshot,
-        scope=scope,
-        label=f"{label}.task_snapshot",
-    )["resources"]
-    if result == "PASSED" and validated_tasks != target["resources"]:
+    if health["apply_attempt_id"] != apply_attempt_id:
         raise DrillEvidenceError(
-            f"{label} PASSED tasks must exactly match the leg target"
+            f"{label}.apply_attempt_id does not bind its apply"
         )
+    task_definition_arn = _text(
+        health["task_definition_arn"],
+        label=f"{label}.task_definition_arn",
+        maximum=600,
+    )
+    _task_definition_arn(
+        task_definition_arn,
+        label=f"{label}.task_definition_arn",
+    )
+    matching_resources = [
+        resource
+        for resource in target["resources"]
+        if resource["task_definition_arn"] == task_definition_arn
+    ]
+    if (
+        len(matching_resources) != 1
+        or matching_resources[0]["consumer_id"] != "canary"
+    ):
+        raise DrillEvidenceError(
+            f"{label}.task_definition_arn is not the leg target canary"
+        )
+    image = _pattern(
+        health["image"],
+        _ECR_IMAGE_RE,
+        label=f"{label}.image",
+        description="an exact account ECR digest image",
+        maximum=600,
+    )
+    matching_subjects = [
+        subject
+        for subject in target["subjects"]
+        if subject["pipeline"] == matching_resources[0]["pipeline"]
+        and subject["name"] == matching_resources[0]["subject"]
+    ]
+    if (
+        len(matching_subjects) != 1
+        or image
+        != (
+            f"{ACCOUNT_ID}.dkr.ecr.{REGION}.amazonaws.com/"
+            f"{matching_subjects[0]['release_repository']}@"
+            f"{matching_subjects[0]['digest']}"
+        )
+    ):
+        raise DrillEvidenceError(
+            f"{label}.image does not bind its target subject digest"
+        )
+    log_stream_name = _text(
+        health["log_stream_name"],
+        label=f"{label}.log_stream_name",
+        maximum=512,
+    )
+    task = _exact_object(
+        health["task"],
+        _RUN_TASK_KEYS,
+        label=f"{label}.task",
+    )
+    _pattern(
+        task["task_arn"],
+        _TASK_ARN_RE,
+        label=f"{label}.task.task_arn",
+        description="a canonical ECS task ARN",
+        maximum=600,
+    )
+    if (
+        task["task_definition_arn"] != task_definition_arn
+        or task["image"] != image
+        or task["image_digest"] != image.rsplit("@", 1)[1]
+        or task["log_stream_name"] != log_stream_name
+    ):
+        raise DrillEvidenceError(
+            f"{label}.task must bind the exact probe task definition, image, and log"
+        )
+    _literal_integer(task["exit_code"], 0, label=f"{label}.task.exit_code")
+    if task["stopped_reason_code"] != "EssentialContainerExited":
+        raise DrillEvidenceError(
+            f"{label}.task.stopped_reason_code is not successful"
+        )
+    checks = _exact_object(
+        health["checks"],
+        _RUN_TASK_CHECK_KEYS,
+        label=f"{label}.checks",
+    )
+    if result == "PASSED" and not all(value is True for value in checks.values()):
+        raise DrillEvidenceError(f"{label} PASSED requires all seven exact checks")
     locator = _validate_locator(
         health["locator"],
         label=f"{label}.locator",
@@ -1532,7 +1919,7 @@ def _validate_dm_qa(
     value: Any,
     *,
     target: dict[str, Any],
-    scope: dict[str, Any],
+    apply_attempt_id: str,
     label: str,
     aggregate_completed_at: dt.datetime,
     locators: list[dict[str, Any]],
@@ -1540,20 +1927,58 @@ def _validate_dm_qa(
     dm_qa = _exact_object(value, _DM_QA_KEYS, label=label)
     result = _choice(dm_qa["result"], LEG_RESULTS, label=f"{label}.result")
     _timestamp(dm_qa["verified_at_utc"], label=f"{label}.verified_at_utc")
-    subjects = _validate_subject_list(
-        dm_qa["subject_digests"],
-        scope=scope,
-        label=f"{label}.subject_digests",
-    )
-    if result == "PASSED" and subjects != target["subjects"]:
+    if dm_qa["apply_attempt_id"] != apply_attempt_id:
         raise DrillEvidenceError(
-            f"{label} PASSED must bind the exact leg target digests"
+            f"{label}.apply_attempt_id does not bind its apply"
+        )
+    mcp_task_definition = _text(
+        dm_qa["mcp_task_definition_arn"],
+        label=f"{label}.mcp_task_definition_arn",
+        maximum=600,
+    )
+    _task_definition_arn(
+        mcp_task_definition,
+        label=f"{label}.mcp_task_definition_arn",
+    )
+    openclaw_task_definition = _text(
+        dm_qa["openclaw_task_definition_arn"],
+        label=f"{label}.openclaw_task_definition_arn",
+        maximum=600,
+    )
+    openclaw_family, _ = _task_definition_arn(
+        openclaw_task_definition,
+        label=f"{label}.openclaw_task_definition_arn",
+    )
+    expected_mcp = [
+        resource["task_definition_arn"]
+        for resource in target["resources"]
+        if resource["consumer_id"] == "mcp"
+    ]
+    if (
+        result == "PASSED"
+        and (
+            expected_mcp != [mcp_task_definition]
+            or openclaw_family != "teamagent-dev-openclaw"
+        )
+    ):
+        raise DrillEvidenceError(
+            f"{label} PASSED must bind the exact target MCP and observed OpenClaw revisions"
         )
     locator = _validate_locator(
         dm_qa["locator"],
         label=f"{label}.locator",
         aggregate_completed_at=aggregate_completed_at,
     )
+    expected_key = (
+        f"forced-rollback-drills/{apply_attempt_id}/dm-qa/result.json"
+    )
+    if (
+        locator["bucket"] != "teamagent-dev-openclaw-rollout-evidence"
+        or locator["key"] != expected_key
+    ):
+        raise DrillEvidenceError(
+            f"{label}.locator does not bind the exact apply DM QA evidence"
+        )
     locators.append(locator)
     return dm_qa
 
@@ -1687,6 +2112,46 @@ def _validate_leg(
         aggregate_completed_at=aggregate_completed_at,
         locators=locators,
     )
+    expected_confirmation = (("OK-1", "rollback"), ("OK-2", "restore"))[index]
+    if (
+        approval["confirmation_id"],
+        approval["action"],
+    ) != expected_confirmation:
+        raise DrillEvidenceError(
+            f"{label}.approval must use confirmation/action "
+            f"{expected_confirmation!r}"
+        )
+    release_approval = approval["release_approval"]
+    for authorization_index, authorization in enumerate(authorizations):
+        if (
+            authorization["release_approval_id"]
+            != release_approval["approval_id"]
+            or authorization["release_approved_by_arn"]
+            != release_approval["approved_by"]
+        ):
+            raise DrillEvidenceError(
+                f"{label}.release_authorizations[{authorization_index}] "
+                "does not bind the verified release approval"
+            )
+        issued_at = _timestamp(
+            authorization["issued_at_utc"],
+            label=(
+                f"{label}.release_authorizations[{authorization_index}]"
+                ".issued_at_utc"
+            ),
+        )
+        release_approved_at = _timestamp(
+            release_approval["approved_at_utc"],
+            label=f"{label}.approval.release_approval.approved_at_utc",
+        )
+        release_expires_at = _timestamp(
+            release_approval["expires_at_utc"],
+            label=f"{label}.approval.release_approval.expires_at_utc",
+        )
+        if not release_approved_at <= issued_at < release_expires_at:
+            raise DrillEvidenceError(
+                f"{label} release authorization is outside approval validity"
+            )
     apply = _validate_apply(
         leg["apply"],
         plan_sha256=plan["sha256"],
@@ -1707,7 +2172,7 @@ def _validate_leg(
     run_task_health = _validate_run_task_health(
         leg["run_task_health"],
         target=leg_to,
-        scope=scope,
+        apply_attempt_id=apply["apply_attempt_id"],
         label=f"{label}.run_task_health",
         aggregate_completed_at=aggregate_completed_at,
         locators=locators,
@@ -1715,11 +2180,19 @@ def _validate_leg(
     dm_qa = _validate_dm_qa(
         leg["dm_qa"],
         target=leg_to,
-        scope=scope,
+        apply_attempt_id=apply["apply_attempt_id"],
         label=f"{label}.dm_qa",
         aggregate_completed_at=aggregate_completed_at,
         locators=locators,
     )
+    if (
+        ecs["locator"] != apply["locator"]
+        or run_task_health["locator"] != apply["locator"]
+    ):
+        raise DrillEvidenceError(
+            f"{label} apply, ECS, and run-task proof must share the exact "
+            "runtime-guard receipt locator"
+        )
     recovery = _validate_recovery(
         leg["recovery"],
         scope=scope,
@@ -1740,9 +2213,9 @@ def _validate_leg(
         plan["created_at_utc"],
         label=f"{label}.plan.created_at_utc",
     )
-    approved_at = _timestamp(
-        approval["approved_at_utc"],
-        label=f"{label}.approval.approved_at_utc",
+    confirmed_at = _timestamp(
+        approval["consumed_at_utc"],
+        label=f"{label}.approval.consumed_at_utc",
     )
     apply_started_at = _timestamp(
         apply["started_at_utc"],
@@ -1770,10 +2243,11 @@ def _validate_leg(
         all(started_at <= issued_at <= plan_created_at for issued_at in authorization_times)
         and started_at
         <= plan_created_at
-        <= approved_at
+        <= confirmed_at
         <= apply_started_at
         <= apply_completed_at
-        and all(apply_completed_at <= proof_at <= completed_at for proof_at in proof_times)
+        and all(apply_started_at <= proof_at <= apply_completed_at for proof_at in proof_times)
+        and apply_completed_at <= completed_at
     ):
         raise DrillEvidenceError(
             f"{label} authorization/plan/approval/apply/proof timestamps "
@@ -1894,13 +2368,15 @@ def _validate_artifact_manifest(
             )
         )
 
-    referenced_identities = [
-        _locator_identity(locator) for locator in referenced_locators
-    ]
-    if len(referenced_identities) != len(set(referenced_identities)):
-        raise DrillEvidenceError(
-            "drill artifact locators must have unique bucket/key/VersionId identities"
-        )
+    referenced_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for locator in referenced_locators:
+        identity = _locator_identity(locator)
+        previous = referenced_by_identity.get(identity)
+        if previous is not None and previous != locator:
+            raise DrillEvidenceError(
+                "reused drill artifact identity has conflicting locator metadata"
+            )
+        referenced_by_identity[identity] = locator
     manifest_identities = [_locator_identity(locator) for locator in validated_manifest]
     if manifest_identities != sorted(manifest_identities):
         raise DrillEvidenceError(
@@ -1911,7 +2387,7 @@ def _validate_artifact_manifest(
             "drill.artifact_manifest must not contain duplicate locators"
         )
     expected_manifest = sorted(
-        referenced_locators,
+        referenced_by_identity.values(),
         key=_locator_identity,
     )
     if validated_manifest != expected_manifest:
@@ -2094,17 +2570,20 @@ def _validate_cross_invariants(
     actor_approvals = actors["approvals"]
     leg_approvals = [leg1["approval"], leg2["approval"]]
     if [item["approval_id"] for item in actor_approvals] != [
-        item["approval_id"] for item in leg_approvals
+        item["release_approval"]["approval_id"] for item in leg_approvals
     ]:
         raise DrillEvidenceError(
-            "drill.actors.approvals must exactly index the two leg approvals"
+            "drill.actors.approvals must exactly index the two release approvals"
         )
     for index, (actor_approval, leg_approval) in enumerate(
         zip(actor_approvals, leg_approvals, strict=True)
     ):
-        if actor_approval["principal"] != leg_approval["approved_by"]:
+        if (
+            actor_approval["approved_by_arn"]
+            != leg_approval["release_approval"]["approved_by"]
+        ):
             raise DrillEvidenceError(
-                f"leg {index + 1} approval principal differs from actors.approvals"
+                f"leg {index + 1} release approver differs from actors.approvals"
             )
         if leg_approval["drill_id"] != drill_id:
             raise DrillEvidenceError(
@@ -2114,6 +2593,20 @@ def _validate_cross_invariants(
             raise DrillEvidenceError(
                 f"leg {index + 1} approval does not bind its exact plan SHA"
             )
+    actual_automation = sorted(
+        {
+            _automation_principal_identity(
+                leg["apply"]["automation_principal"]
+            ):
+            leg["apply"]["automation_principal"]
+            for leg in legs
+        }.values(),
+        key=_automation_principal_identity,
+    )
+    if actors["automation"] != actual_automation:
+        raise DrillEvidenceError(
+            "drill.actors.automation_principals must exactly index apply callers"
+        )
 
     safe_verified_at = _timestamp(
         terminal["verified_at_utc"],
@@ -2180,10 +2673,9 @@ def _validate_cross_invariants(
         if (
             leg2["apply"]["state"] != initial_new
             or leg2["ecs"]["live_snapshot"] != initial_new
-            or leg2["run_task_health"]["tasks"] != initial_new["resources"]
         ):
             raise DrillEvidenceError(
-                "final Terraform, live, and ECS task state must exactly match initial new"
+                "final Terraform and live ECS state must exactly match initial new"
             )
         if (
             terminal["classification"] != "INITIAL_NEW"

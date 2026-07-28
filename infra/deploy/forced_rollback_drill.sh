@@ -15,6 +15,7 @@ EVIDENCE_ENCRYPTION_KEY_ALIAS="alias/teamagent-dev-openclaw-rollout-evidence"
 DRILL_SIGNING_KEY_ALIAS="alias/teamagent-dev-forced-rollback-drill-signing"
 DRILL_SIGNING_ALGORITHM="RSASSA_PSS_SHA_256"
 EVIDENCE_MIN_RETENTION_DAYS=3650
+TRUSTED_AUTOMATION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
@@ -22,6 +23,8 @@ AUTHORIZE_IMAGE_RELEASE="$SCRIPT_DIR/authorize_image_release.sh"
 TERRAFORM_RUNTIME_GUARD="$SCRIPT_DIR/terraform_runtime_guard.sh"
 CONSUMER_REGISTRY="$REPO_ROOT/infra/codebuild/image_deployment_consumers.json"
 AGGREGATE_VALIDATOR="$REPO_ROOT/infra/codebuild/forced_rollback_drill_evidence.py"
+AGGREGATE_BUILDER="$REPO_ROOT/infra/codebuild/forced_rollback_drill_aggregate_builder.py"
+ARTIFACT_STORE="$REPO_ROOT/infra/codebuild/forced_rollback_drill_artifact_store.py"
 
 DRILL_DIR=""
 STATE_FILE=""
@@ -638,6 +641,9 @@ validate_state_file() {
         exact_keys([
           "applied_at_epoch",
           "apply_attempt_id",
+          "automation_identity_path",
+          "automation_identity_sha256",
+          "completed_at_epoch",
           "path",
           "plan_sha256",
           "post_serial",
@@ -648,6 +654,8 @@ validate_state_file() {
         ]) and
         (.path | type == "string" and length > 0) and
         (.sha256 | sha) and
+        (.automation_identity_path | type == "string" and length > 0) and
+        (.automation_identity_sha256 | sha) and
         (.plan_sha256 | sha) and
         (.post_target_sha256 | sha) and
         (.apply_attempt_id | test(
@@ -657,7 +665,11 @@ validate_state_file() {
         (.post_serial | type == "number" and . >= 0 and floor == .) and
         (.started_at_epoch | type == "number" and . >= 0 and floor == .) and
         (.applied_at_epoch |
-          type == "number" and . >= $apply.started_at_epoch and floor == .)
+          type == "number" and . >= $apply.started_at_epoch and floor == .) and
+        (.completed_at_epoch |
+          type == "number" and
+          . >= $apply.applied_at_epoch and
+          floor == .)
       );
     def leg($name; $ordinal; $channel; $target; $approval):
       exact_keys([
@@ -1459,7 +1471,7 @@ plan_leg_command() {
   local target_path stdout_file gate_vars merged_var plan receipt migration
   local now expected_serial expected_lineage live_target plan_sha receipt_sha
   local intent authorization authorization_sha previous_intent minimum_created
-  local receipt_now
+  local receipt_now approval_record authorization_id
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --drill-dir)
@@ -1504,10 +1516,12 @@ plan_leg_command() {
   gate_vars="$leg_path/release-authorization.tfvars.json"
   merged_var="$leg_path/terraform.tfvars.json"
   authorization="$leg_path/authorization.json"
+  approval_record="$leg_path/verified-release-approval.json"
   plan="$leg_path/plan.tfplan"
   receipt="$leg_path/plan.runtime-guard.json"
   for output in \
-    "$stdout_file" "$gate_vars" "$merged_var" "$authorization" "$plan" "$receipt"; do
+    "$stdout_file" "$gate_vars" "$merged_var" "$authorization" \
+    "$approval_record" "$plan" "$receipt"; do
     [ ! -e "$output" ] && [ ! -L "$output" ] ||
       die "leg artifact already exists; plans and receipts are one-use"
   done
@@ -1545,14 +1559,18 @@ plan_leg_command() {
     )" \
     --approval-signature-sha256 "$(
       jq -er '.approval.signature_sha256' "$target_path"
-    )" > "$stdout_file"; then
+    )" \
+    --verified-approval-out "$approval_record" > "$stdout_file"; then
     record_failure "$leg" authorization "fresh release authorization failed"
     die "fresh $channel release authorization failed"
   fi
-  chmod 600 "$stdout_file" "$gate_vars"
+  chmod 600 "$stdout_file" "$gate_vars" "$approval_record"
   merge_authorized_var_file "$gate_vars" "$merged_var"
   authorization_sha="$(sha256_file "$gate_vars")"
+  authorization_id="$(new_uuid_v4)"
   jq -n -S -c \
+    --arg authorization_id "$authorization_id" \
+    --arg drill_id "$(jq -er '.drill_id' "$STATE_FILE")" \
     --arg pipeline "$(jq -er '.pipeline' "$DRILL_DIR/contract.json")" \
     --arg channel "$channel" \
     --arg receipt_key "$(authorization_value receipt_key "$stdout_file")" \
@@ -1566,7 +1584,10 @@ plan_leg_command() {
       authorization_value receipt_signature_version_id "$stdout_file"
     )" \
     --arg gate_var_sha256 "$authorization_sha" \
-    --argjson issued_at_epoch "$(date +%s)" '{
+    --argjson issued_at_epoch "$(date +%s)" \
+    --slurpfile release_approval "$approval_record" '{
+      authorization_id:$authorization_id,
+      drill_id:$drill_id,
       pipeline:$pipeline,
       channel:$channel,
       receipt_key:$receipt_key,
@@ -1574,12 +1595,16 @@ plan_leg_command() {
       receipt_signature_key:$receipt_signature_key,
       receipt_signature_version_id:$receipt_signature_version_id,
       gate_var_sha256:$gate_var_sha256,
-      issued_at_epoch:$issued_at_epoch
+      issued_at_epoch:$issued_at_epoch,
+      release_approval:$release_approval[0]
     }' > "$authorization"
   chmod 600 "$authorization"
   if [ "$leg" = "restore-active" ]; then
     jq -e --slurpfile previous \
       "$DRILL_DIR/legs/rollback-to-previous/authorization.json" '
+      .authorization_id != $previous[0].authorization_id and
+      .release_approval.approval_id !=
+        $previous[0].release_approval.approval_id and
       [
         .receipt_key,
         .receipt_version_id,
@@ -1802,6 +1827,8 @@ validate_apply_receipt() {
     .post_apply_service_probe.kind ==
       "teamagent-post-apply-service-probe-receipt" and
     .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
+    (.post_apply_service_probe.verified_at_utc |
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
     .post_apply_service_probe.task.exit_code == 0 and
     ([.post_apply_service_probe.result.checks[]] | all(. == true)) and
     .openclaw_rollout_result.passed == true and
@@ -1863,7 +1890,18 @@ validate_apply_receipt() {
     .deployment_finalization_receipt.apply_attempt_id == .apply_attempt_id and
     .deployment_finalization_receipt.plan_sha256 == .plan_sha256 and
     (.post_apply_service_probe.result.checks |
-      type == "array" and length > 0 and all(.[]; . == true))
+      type == "object" and
+      (keys | sort) == ([
+        "connect_build_inputs_sha256",
+        "connect_contract_ok",
+        "connect_http_200",
+        "connect_manifest_sha256",
+        "connect_sha256",
+        "connect_version_id",
+        "mcp_http_200"
+      ] | sort) and
+      length == 7 and
+      all(.[]; . == true))
   ' "$receipt" >/dev/null; then
     rm -f "$resources"
     return 1
@@ -1874,6 +1912,7 @@ validate_apply_receipt() {
 apply_leg_command() {
   local requested_dir="" leg="" expected state_key approval_id approval_action
   local drill_id leg_path plan receipt apply_receipt plan_sha expected_text supplied
+  local automation_identity
   local now started applied_epoch post_serial post_lineage plan_serial
   local attempt target_sha next_state dm_qa_deadline guard_status
   while [ "$#" -gt 0 ]; do
@@ -1939,7 +1978,9 @@ apply_leg_command() {
     die "rollback apply did not start within 30 minutes of initial verification"
   fi
   apply_receipt="$leg_path/apply.runtime-guard.json"
-  [ ! -e "$apply_receipt" ] && [ ! -L "$apply_receipt" ] ||
+  automation_identity="$leg_path/apply.automation-identity.json"
+  [ ! -e "$apply_receipt" ] && [ ! -L "$apply_receipt" ] &&
+    [ ! -e "$automation_identity" ] && [ ! -L "$automation_identity" ] ||
     die "apply receipt already exists; this plan cannot be executed again"
   started="$now"
   if [ "$leg" = "rollback-to-previous" ]; then
@@ -2006,6 +2047,7 @@ apply_leg_command() {
     --plan "$plan" \
     --receipt "$receipt" \
     --forced-rollback-dm-qa-deadline-epoch "$dm_qa_deadline" \
+    --automation-identity-out "$automation_identity" \
     --out "$apply_receipt"; then
     :
   else
@@ -2022,7 +2064,16 @@ apply_leg_command() {
     record_failure "$leg" apply "guarded apply or pre-finalization QA failed"
     die "guarded apply failed; the plan must not be retried"
   fi
-  chmod 600 "$apply_receipt"
+  chmod 600 "$apply_receipt" "$automation_identity"
+  jq -e \
+    --arg account "$ACCOUNT_ID" \
+    --arg arn "$TRUSTED_AUTOMATION_ARN" '
+    (keys | sort) == ["Account","Arn","UserId"] and
+    .Account == $account and
+    .Arn == $arn and
+    (.UserId | type == "string" and length > 0)
+  ' "$automation_identity" >/dev/null ||
+    die "guard automation identity receipt is invalid"
   if ! validate_apply_receipt "$leg" "$apply_receipt" "$plan_sha"; then
     record_failure "$leg" apply "final apply receipt lacks exact steady run-task DM or saga evidence"
     die "apply receipt does not prove all pre-finalization leg gates"
@@ -2059,6 +2110,8 @@ apply_leg_command() {
     --arg next_state "$next_state" \
     --arg receipt_path "$apply_receipt" \
     --arg receipt_sha "$(sha256_file "$apply_receipt")" \
+    --arg automation_identity_path "$automation_identity" \
+    --arg automation_identity_sha "$(sha256_file "$automation_identity")" \
     --arg plan_sha "$plan_sha" \
     --arg attempt "$attempt" \
     --arg lineage "$post_lineage" \
@@ -2074,13 +2127,16 @@ apply_leg_command() {
     .legs[$key].apply = {
       path:$receipt_path,
       sha256:$receipt_sha,
+      automation_identity_path:$automation_identity_path,
+      automation_identity_sha256:$automation_identity_sha,
       plan_sha256:$plan_sha,
       apply_attempt_id:$attempt,
       terraform_lineage:$lineage,
       post_serial:$post_serial,
       post_target_sha256:$target_sha,
       started_at_epoch:$started,
-      applied_at_epoch:$applied
+      applied_at_epoch:$applied,
+      completed_at_epoch:$now
     } |
     if $key == "rollback_to_previous" then
       .old_dwell.started_at_epoch = $started |
@@ -2094,26 +2150,29 @@ apply_leg_command() {
   echo "Applied $leg with $approval_id and exact plan_sha256=$plan_sha"
 }
 
-epoch_to_utc() {
-  python3 - "$1" <<'PY'
-import datetime
-import sys
-
-value = datetime.datetime.fromtimestamp(int(sys.argv[1]), tz=datetime.timezone.utc)
-print(value.isoformat(timespec="seconds").replace("+00:00", "Z"))
-PY
-}
-
 validate_terminal_live_snapshot() {
-  local raw="$1" target="$2" output="$3" observed_at="$4"
-  python3 - "$raw" "$target" "$output" "$observed_at" <<'PY'
+  local raw="$1" full="$2" previous="$3" initial="$4"
+  local output="$5" observed_at="$6"
+  python3 - \
+    "$raw" "$full" "$previous" "$initial" "$output" "$observed_at" <<'PY'
 import json
 import os
 import sys
 
-raw_path, target_path, output_path, observed_at = sys.argv[1:]
-with open(target_path, encoding="utf-8") as handle:
-    target = json.load(handle)
+(
+    raw_path,
+    full_path,
+    previous_path,
+    initial_path,
+    output_path,
+    observed_at,
+) = sys.argv[1:]
+with open(previous_path, encoding="utf-8") as handle:
+    previous = json.load(handle)
+with open(initial_path, encoding="utf-8") as handle:
+    initial = json.load(handle)
+with open(full_path, encoding="utf-8") as handle:
+    full = json.load(handle)
 
 image_fields = {
     "openclaw_image": "openclaw",
@@ -2143,32 +2202,107 @@ with open(raw_path, encoding="utf-8") as handle:
             raise SystemExit(f"duplicate terminal snapshot field: {name}")
         values[name] = json.loads(encoded)
 
-expected_images = {
-    field: target["images"][image_key]
-    for field, image_key in image_fields.items()
-}
-if any(values.get(field) != value for field, value in expected_images.items()):
-    raise SystemExit("terminal live images differ from initial new")
+def expected_raw(target):
+    expected = {
+        field: target["images"][image_key]
+        for field, image_key in image_fields.items()
+    }
+    for resource in target["resources"]:
+        field = activation_fields.get(resource["consumer_id"])
+        if field is None:
+            continue
+        state = resource["activation"]["state"]
+        if resource["activation"]["type"] == "ecs_service":
+            state = state > 0
+        elif resource["activation"]["type"] == "eventbridge_rule_ecs_target":
+            state = state == "ENABLED"
+        expected[field] = state
+    return expected
 
-expected_activations = {}
-for resource in target["resources"]:
-    field = activation_fields.get(resource["consumer_id"])
+
+previous_raw = expected_raw(previous)
+initial_raw = expected_raw(initial)
+if set(values) != wanted:
+    raise SystemExit("terminal HCL snapshot is missing exact observed fields")
+
+task_keys = {
+    "mcp": "mcp",
+    "connect_web": "connect_web",
+    "openclaw": "openclaw",
+    "canary": "canary",
+    "ingest": "ingest",
+    "morning_digest": "morning",
+    "x_buzz_worker": "x_buzz",
+    "tiktok_acquire": "tiktok",
+}
+
+def live_activation(consumer_id):
+    if consumer_id == "mcp":
+        return full["services"]["mcp"]["critical"]["desired_count"]
+    if consumer_id == "connect_web":
+        return full["services"]["connect_web"]["critical"]["desired_count"]
+    if consumer_id == "openclaw":
+        return full["services"]["openclaw"]["critical"]["desired_count"]
+    if consumer_id == "canary":
+        return full["rules"]["canary"]["critical"]["state"]
+    if consumer_id == "ingest":
+        return full["rules"]["ingest"]["critical"]["state"]
+    if consumer_id == "morning_digest":
+        return full["rules"]["morning"]["critical"]["state"]
+    if consumer_id == "x_buzz_worker":
+        return full["event_mappings"]["x_buzz"]["critical"]["enabled"]
+    if consumer_id == "tiktok_acquire":
+        return full["event_mappings"]["tiktok"]["critical"]["enabled"]
+    raise SystemExit(f"terminal consumer is outside fixed scope: {consumer_id}")
+
+observed_resources = []
+for expected in initial["resources"]:
+    consumer_id = expected["consumer_id"]
+    task = full["taskdefs"][task_keys[consumer_id]]
+    observed = {
+        "activation": {
+            "identity": expected["activation"]["identity"],
+            "state": live_activation(consumer_id),
+            "type": expected["activation"]["type"],
+        },
+        "consumer_id": consumer_id,
+        "image": task["image"],
+        "pipeline": expected["pipeline"],
+        "subject": expected["subject"],
+        "task_definition_arn": task["arn"],
+        "terraform_address": expected["terraform_address"],
+    }
+    observed_resources.append(observed)
+
+observed_raw = {
+    "openclaw_image": full["taskdefs"]["openclaw"]["image"],
+    "mcp_image": full["taskdefs"]["mcp"]["image"],
+    "x_buzz_image": full["taskdefs"]["x_buzz"]["image"],
+    "media_worker_image": full["taskdefs"]["tiktok"]["image"],
+}
+for expected in initial["resources"]:
+    field = activation_fields.get(expected["consumer_id"])
     if field is None:
         continue
-    state = resource["activation"]["state"]
-    if resource["activation"]["type"] == "ecs_service":
+    state = live_activation(expected["consumer_id"])
+    if expected["activation"]["type"] == "ecs_service":
         state = state > 0
-    elif resource["activation"]["type"] == "eventbridge_rule_ecs_target":
+    elif expected["activation"]["type"] == "eventbridge_rule_ecs_target":
         state = state == "ENABLED"
-    expected_activations[field] = state
-if any(
-    values.get(field) != expected
-    for field, expected in expected_activations.items()
-):
-    raise SystemExit("terminal live activations differ from initial new")
+    observed_raw[field] = state
+if values != observed_raw:
+    raise SystemExit("terminal HCL and full JSON observations disagree")
+
+if observed_resources == initial["resources"] and values == initial_raw:
+    classification = "INITIAL_NEW"
+elif observed_resources == previous["resources"] and values == previous_raw:
+    classification = "PREVIOUS_OLD"
+else:
+    classification = "UNKNOWN"
 
 evidence = {
     "kind": "teamagent-forced-rollback-terminal-live-snapshot",
+    "classification": classification,
     "observed_at_epoch": int(observed_at),
     "images": {
         image_key: values[field]
@@ -2176,8 +2310,9 @@ evidence = {
     },
     "activations": {
         field: values[field]
-        for field in sorted(expected_activations)
+        for field in sorted(activation_fields.values())
     },
+    "resources": observed_resources,
 }
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
 if hasattr(os, "O_NOFOLLOW"):
@@ -2193,6 +2328,8 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         allow_nan=False,
     )
     handle.write("\n")
+if classification != "INITIAL_NEW":
+    raise SystemExit(2)
 PY
 }
 
@@ -2403,257 +2540,50 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
 PY
 }
 
+prepare_aggregate_artifacts() {
+  local output="$1" artifact_directory="$2" trusted_scope="$3"
+  python3 "$AGGREGATE_BUILDER" prepare \
+    --state "$STATE_FILE" \
+    --contract "$DRILL_DIR/contract.json" \
+    --initial-receipt "$DRILL_DIR/inputs/initial-release.apply.json" \
+    --trusted-scope "$trusted_scope" \
+    --terminal-snapshot "$DRILL_DIR/final-live.snapshot.json" \
+    --artifact-directory "$artifact_directory" \
+    --out "$output"
+}
+
+persist_aggregate_artifacts() {
+  local manifest="$1" output="$2" now aws_bin
+  need_cmd aws
+  aws_bin="$(command -v aws)"
+  now="$(date +%s)"
+  PYTHONPATH="$REPO_ROOT/infra/codebuild${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 "$ARTIFACT_STORE" \
+      --manifest "$manifest" \
+      --out "$output" \
+      --aws-bin "$aws_bin" \
+      --account-id "$ACCOUNT_ID" \
+      --region "$REGION" \
+      --bucket "$EVIDENCE_BUCKET" \
+      --prefix "$EVIDENCE_PREFIX" \
+      --encryption-key-alias "$EVIDENCE_ENCRYPTION_KEY_ALIAS" \
+      --signing-key-alias "$DRILL_SIGNING_KEY_ALIAS" \
+      --signing-algorithm "$DRILL_SIGNING_ALGORITHM" \
+      --minimum-retention-days "$EVIDENCE_MIN_RETENTION_DAYS" \
+      --now-epoch "$now"
+}
+
 build_aggregate() {
-  local status="$1" output="$2" trusted_scope="$3" state="$STATE_FILE"
-  local leg1_plan leg2_plan leg1_apply leg2_apply
-  local leg1_started leg1_completed leg2_started leg2_completed
-  leg1_plan="$DRILL_DIR/legs/rollback-to-previous/plan.runtime-guard.json"
-  leg2_plan="$DRILL_DIR/legs/restore-active/plan.runtime-guard.json"
-  leg1_apply="$DRILL_DIR/legs/rollback-to-previous/apply.runtime-guard.json"
-  leg2_apply="$DRILL_DIR/legs/restore-active/apply.runtime-guard.json"
-  [ -f "$leg1_plan" ] || leg1_plan="/dev/null"
-  [ -f "$leg2_plan" ] || leg2_plan="/dev/null"
-  [ -f "$leg1_apply" ] || leg1_apply="/dev/null"
-  [ -f "$leg2_apply" ] || leg2_apply="/dev/null"
-  leg1_started="$(jq -r '.legs.rollback_to_previous.apply.started_at_epoch // .updated_at_epoch' "$state")"
-  leg1_completed="$(jq -r '.legs.rollback_to_previous.apply.applied_at_epoch // .updated_at_epoch' "$state")"
-  leg2_started="$(jq -r '.legs.restore_active.apply.started_at_epoch // .updated_at_epoch' "$state")"
-  leg2_completed="$(jq -r '.legs.restore_active.apply.applied_at_epoch // .updated_at_epoch' "$state")"
-  jq -n -S \
-    --argjson schema_version "$SCHEMA_VERSION" \
-    --arg drill_id "$(jq -er '.drill_id' "$state")" \
-    --arg status "$status" \
-    --arg signing_algorithm "$DRILL_SIGNING_ALGORITHM" \
-    --arg git_commit "$(jq -er '.git_commit' "$state")" \
-    --arg contract_sha "$(jq -er '.contract_sha256' "$state")" \
-    --arg initial_verified "$(
-      epoch_to_utc "$(jq -er '.initial_release_verified_at_epoch' "$state")"
-    )" \
-    --arg started "$(epoch_to_utc "$leg1_started")" \
-    --arg completed "$(epoch_to_utc "$leg2_completed")" \
-    --arg leg1_started "$(epoch_to_utc "$leg1_started")" \
-    --arg leg1_completed "$(epoch_to_utc "$leg1_completed")" \
-    --arg leg2_started "$(epoch_to_utc "$leg2_started")" \
-    --arg leg2_completed "$(epoch_to_utc "$leg2_completed")" \
-    --arg lineage "$(jq -er '.initial_state.lineage' "$state")" \
-    --argjson initial_serial "$(jq -er '.initial_state.serial' "$state")" \
-    --arg terminal_verified "$(epoch_to_utc "$(date +%s)")" \
-    --arg terminal_classification "$(
-      if [ -f "$DRILL_DIR/final-live.snapshot.json" ] &&
-        jq -e '.legs.restore_active.apply != null' "$state" >/dev/null &&
-        [ "$(jq -er '.legs.restore_active.apply.post_target_sha256 // ""' "$state")" = \
-          "$(jq -er '.target_sha256.new' "$state")" ]; then
-        printf INITIAL_NEW
-      else
-        printf UNKNOWN
-      fi
-    )" \
-    --argjson terminal_steady "$(
-      if [ "$status" = "RECONCILE_REQUIRED" ]; then printf false; else printf true; fi
-    )" \
-    --argjson leg1_result "$(
-      if [ "$(jq -er '.legs.rollback_to_previous.status' "$state")" = "APPLIED" ]; then
-        printf true
-      else
-        printf false
-      fi
-    )" \
-    --argjson leg2_result "$(
-      if [ "$(jq -er '.legs.restore_active.status' "$state")" = "APPLIED" ]; then
-        printf true
-      else
-        printf false
-      fi
-    )" \
-    --slurpfile contract "$DRILL_DIR/contract.json" \
-    --slurpfile state "$state" \
-    --slurpfile old "$(target_file old)" \
-    --slurpfile new "$(target_file new)" \
-    --slurpfile trusted_scope "$trusted_scope" \
-    --slurpfile initial "$DRILL_DIR/inputs/initial-release.apply.json" \
-    --slurpfile leg1_plan "$leg1_plan" \
-    --slurpfile leg2_plan "$leg2_plan" \
-    --slurpfile leg1_apply "$leg1_apply" \
-    --slurpfile leg2_apply "$leg2_apply" '{
-      schema_version:$schema_version,
-      kind:"teamagent.forced-rollback-drill",
-      drill_id:$drill_id,
-      status:$status,
-      environment:{
-        account_id:"718959508629",
-        region:"ap-northeast-1",
-        name:"dev"
-      },
-      control:{
-        git_commit:$git_commit,
-        drill_contract_sha256:$contract_sha,
-        initial_release_apply:$contract[0].control.initial_release_apply_locator,
-        initial_release_verified_at_utc:$initial_verified,
-        started_at_utc:$started,
-        completed_at_utc:$completed,
-        max_start_delay_seconds:1800,
-        max_old_dwell_seconds:1200
-      },
-      actors:{
-        initiating_principal:$contract[0].actors.initiating_principal,
-        automation_principals:$contract[0].actors.automation_principals,
-        approvals:[
-          $state[0].legs.rollback_to_previous.approval,
-          $state[0].legs.restore_active.approval
-        ] | map(select(. != null))
-      },
-      scope:$trusted_scope[0],
-      baseline:{
-        terraform_lineage:$lineage,
-        terraform_serial:$initial_serial,
-        live_snapshot:$new[0],
-        initial_new:$new[0],
-        initial_new_verified:true
-      },
-      legs:[
-        {
-          ordinal:1,
-          name:"rollback_to_previous",
-          channel:"rollback",
-          from:$new[0],
-          to:$old[0],
-          release_authorizations:[
-            $state[0].legs.rollback_to_previous.authorization
-          ],
-          plan:(
-            $state[0].legs.rollback_to_previous.plan +
-            {receipt:$leg1_plan[0]}
-          ),
-          approval:$state[0].legs.rollback_to_previous.approval,
-          apply:(
-            ($state[0].legs.rollback_to_previous.apply // {}) +
-            {passed:$leg1_result,receipt:($leg1_apply[0] // {})}
-          ),
-          ecs:{
-            steady:$leg1_result,
-            evidence:($leg1_apply[0].ecs_service_saga_verification_receipt // {})
-          },
-          run_task_health:{
-            passed:$leg1_result,
-            evidence:($leg1_apply[0].post_apply_service_probe // {})
-          },
-          dm_qa:{
-            result:(
-              if $leg1_result and
-                $leg1_apply[0].openclaw_rollout_result.dmQa.result == "PASSED"
-              then "PASSED"
-              else "FAILED"
-              end
-            ),
-            verified_at_utc:$leg1_completed,
-            subject_digests:$old[0].subjects,
-            locator:(
-              $leg1_apply[0].openclaw_rollout_result.dmQa.locator // {}
-            )
-          },
-          started_at_utc:$leg1_started,
-          completed_at_utc:$leg1_completed,
-          result:(if $leg1_result then "PASSED" else "FAILED" end),
-          recovery:{
-            attempted:($state[0].failures | length > 0),
-            result:(
-              if $terminal_classification == "INITIAL_NEW" then
-                "INITIAL_NEW_VERIFIED"
-              else
-                "RECONCILIATION_REQUIRED"
-              end
-            ),
-            last_exact_target:$terminal_classification
-          }
-        },
-        {
-          ordinal:2,
-          name:"restore_active",
-          channel:"active",
-          from:$old[0],
-          to:$new[0],
-          release_authorizations:[
-            $state[0].legs.restore_active.authorization
-          ],
-          plan:(
-            $state[0].legs.restore_active.plan +
-            {receipt:$leg2_plan[0]}
-          ),
-          approval:$state[0].legs.restore_active.approval,
-          apply:(
-            ($state[0].legs.restore_active.apply // {}) +
-            {passed:$leg2_result,receipt:($leg2_apply[0] // {})}
-          ),
-          ecs:{
-            steady:$leg2_result,
-            evidence:($leg2_apply[0].ecs_service_saga_verification_receipt // {})
-          },
-          run_task_health:{
-            passed:$leg2_result,
-            evidence:($leg2_apply[0].post_apply_service_probe // {})
-          },
-          dm_qa:{
-            result:(
-              if $leg2_result and
-                $leg2_apply[0].openclaw_rollout_result.dmQa.result == "PASSED"
-              then "PASSED"
-              else "FAILED"
-              end
-            ),
-            verified_at_utc:$leg2_completed,
-            subject_digests:$new[0].subjects,
-            locator:(
-              $leg2_apply[0].openclaw_rollout_result.dmQa.locator // {}
-            )
-          },
-          started_at_utc:$leg2_started,
-          completed_at_utc:$leg2_completed,
-          result:(if $leg2_result then "PASSED" else "FAILED" end),
-          recovery:{
-            attempted:($state[0].failures | length > 0),
-            result:(
-              if $terminal_classification == "INITIAL_NEW" then
-                "INITIAL_NEW_VERIFIED"
-              else
-                "RECONCILIATION_REQUIRED"
-              end
-            ),
-            last_exact_target:$terminal_classification
-          }
-        }
-      ],
-      safe_terminal_state:{
-        classification:$terminal_classification,
-        steady:$terminal_steady,
-        verified_at_utc:$terminal_verified,
-        live_snapshot:(
-          if $terminal_classification == "INITIAL_NEW" then $new[0]
-          elif $terminal_classification == "PREVIOUS_OLD" then $old[0]
-          else {}
-          end
-        )
-      },
-      artifact_manifest:(
-        (
-          $contract[0].evidence.artifact_manifest +
-          [
-            $leg1_apply[0].openclaw_rollout_result.dmQa.locator,
-            $leg2_apply[0].openclaw_rollout_result.dmQa.locator
-          ]
-        ) |
-        map(select(type == "object" and length > 0)) |
-        sort_by([.bucket, .key, .version_id]) |
-        unique_by([.bucket, .key, .version_id])
-      ),
-      integrity:{
-        canonical_sha256:"",
-        kms_key_arn:"",
-        signing_algorithm:$signing_algorithm,
-        signature:{},
-        immutable_object:{}
-      }
-    }' > "$output"
-  chmod 600 "$output"
+  local status="$1" output="$2" trusted_scope="$3" locators="$4"
+  python3 "$AGGREGATE_BUILDER" build \
+    --status "$status" \
+    --state "$STATE_FILE" \
+    --contract "$DRILL_DIR/contract.json" \
+    --initial-receipt "$DRILL_DIR/inputs/initial-release.apply.json" \
+    --trusted-scope "$trusted_scope" \
+    --terminal-snapshot "$DRILL_DIR/final-live.snapshot.json" \
+    --locators "$locators" \
+    --out "$output"
 }
 
 persist_aggregate() {
@@ -3211,7 +3141,8 @@ PY
 finalize_command() {
   local requested_dir="" state status final_receipt plan_sha aggregate_stage
   local aggregate_located aggregate_out validated_out trusted_scope final_sha
-  local now terminal_raw terminal_json drill_id
+  local artifact_manifest artifact_directory artifact_locators
+  local now terminal_raw terminal_full terminal_json drill_id
   local terminal_ok="true"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -3233,6 +3164,10 @@ finalize_command() {
   esac
   [ -f "$AGGREGATE_VALIDATOR" ] ||
     die "forced rollback aggregate validator is missing"
+  [ -f "$AGGREGATE_BUILDER" ] ||
+    die "forced rollback aggregate builder is missing"
+  [ -f "$ARTIFACT_STORE" ] ||
+    die "forced rollback artifact store is missing"
 
   status="PASSED"
   if [ "$state" != "LEG2_APPLIED" ] ||
@@ -3257,18 +3192,22 @@ finalize_command() {
         status="RECONCILE_REQUIRED"
       }
     terminal_raw="$DRILL_DIR/final-live.snapshot.hcl"
+    terminal_full="$DRILL_DIR/final-live.snapshot.full.json"
     terminal_json="$DRILL_DIR/final-live.snapshot.json"
     [ ! -e "$terminal_raw" ] && [ ! -L "$terminal_raw" ] &&
+      [ ! -e "$terminal_full" ] && [ ! -L "$terminal_full" ] &&
       [ ! -e "$terminal_json" ] && [ ! -L "$terminal_json" ] ||
       die "final live snapshot evidence already exists"
-    if ! bash "$TERRAFORM_RUNTIME_GUARD" snapshot > "$terminal_raw"; then
+    if ! bash "$TERRAFORM_RUNTIME_GUARD" snapshot \
+      --evidence-json-out "$terminal_full" > "$terminal_raw"; then
       record_failure restore-active finalize "fresh final live snapshot failed"
       terminal_ok="false"
     else
-      chmod 600 "$terminal_raw"
+      chmod 600 "$terminal_raw" "$terminal_full"
       now="$(date +%s)"
       if ! validate_terminal_live_snapshot \
-        "$terminal_raw" "$(target_file new)" "$terminal_json" "$now"; then
+        "$terminal_raw" "$terminal_full" "$(target_file old)" \
+        "$(target_file new)" "$terminal_json" "$now"; then
         record_failure restore-active finalize \
           "fresh final live snapshot differs from initial new"
         terminal_ok="false"
@@ -3290,15 +3229,32 @@ finalize_command() {
   aggregate_out="$DRILL_DIR/aggregate.json"
   validated_out="$DRILL_DIR/.aggregate.validated.json"
   trusted_scope="$DRILL_DIR/.trusted-scope.json"
+  artifact_manifest="$DRILL_DIR/.aggregate-artifact-manifest.json"
+  artifact_directory="$DRILL_DIR/aggregate-artifacts"
+  artifact_locators="$DRILL_DIR/.aggregate-artifact-locators.json"
   drill_id="$(jq -er '.drill_id' "$STATE_FILE")"
   [ ! -e "$aggregate_out" ] && [ ! -L "$aggregate_out" ] ||
     die "aggregate evidence already exists"
-  rm -f "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope"
+  rm -f \
+    "$aggregate_stage" "$aggregate_located" "$validated_out" "$trusted_scope" \
+    "$artifact_manifest" "$artifact_locators"
+  [ ! -e "$artifact_directory" ] && [ ! -L "$artifact_directory" ] ||
+    die "aggregate artifact staging directory already exists"
   if ! build_trusted_scope "$trusted_scope"; then
     rm -f "$trusted_scope"
     die "could not derive trusted scope from registry and initial receipt"
   fi
-  build_aggregate "$status" "$aggregate_stage" "$trusted_scope"
+  if ! prepare_aggregate_artifacts \
+    "$artifact_manifest" "$artifact_directory" "$trusted_scope"; then
+    die "could not prepare source-bound aggregate artifacts"
+  fi
+  if ! persist_aggregate_artifacts "$artifact_manifest" "$artifact_locators"; then
+    die "could not persist and verify aggregate source artifacts"
+  fi
+  if ! build_aggregate \
+    "$status" "$aggregate_stage" "$trusted_scope" "$artifact_locators"; then
+    die "could not build the exact aggregate from persisted source artifacts"
+  fi
   if ! validate_aggregate \
     "$aggregate_stage" "$validated_out" "$trusted_scope" body-only; then
     rm -f "$aggregate_stage" "$validated_out" "$trusted_scope"
