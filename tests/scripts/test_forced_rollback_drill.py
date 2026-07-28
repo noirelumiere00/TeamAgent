@@ -586,6 +586,7 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
         receipt=""
         migration=""
         var_file=""
+        dm_qa_deadline_epoch=""
         args=("$@")
         while [ "$#" -gt 0 ]; do
           case "$1" in
@@ -597,6 +598,10 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
               shift 2
               ;;
             --var-file) var_file="${2:?}"; shift 2 ;;
+            --forced-rollback-dm-qa-deadline-epoch)
+              dm_qa_deadline_epoch="${2:?}"
+              shift 2
+              ;;
             --runtime-sync) shift ;;
             --preflight-receipt|--alarm-delivery-receipt|\
             --versioning-receipt|--log-readiness-receipt|\
@@ -796,9 +801,17 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
             if [ -n "$receipt" ]; then [ -f "$receipt" ] || exit 99; fi
             ;;
           apply)
-            [ -f "$plan" ] && [ -n "$out" ] || exit 100
+            [ -f "$plan" ] && [ -n "$out" ] && \
+              [ -n "$dm_qa_deadline_epoch" ] || exit 100
+            if [ "${FAKE_DM_QA_TIMEOUT:-}" = "true" ]; then
+              exit 124
+            fi
+            if [ "${FAKE_DM_QA_FAILURE:-}" = "true" ]; then
+              exit 24
+            fi
             mkdir -p "$(dirname -- "$out")"
             python3 - "$plan" "$out" "$FAKE_OLD_LIVE" "$FAKE_NEW_LIVE" <<'PY'
+        import datetime as dt
         import hashlib
         import json
         import os
@@ -819,11 +832,81 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
         )
         plan_sha = hashlib.sha256(open(plan_path, "rb").read()).hexdigest()
         bad_gate = os.environ.get("FAKE_BAD_APPLY_GATE", "")
+        applied_at_epoch = int(os.environ.get("FAKE_NOW_EPOCH", "2000000300"))
+        verified_at_utc = dt.datetime.fromtimestamp(
+            applied_at_epoch,
+            tz=dt.timezone.utc,
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        mcp_task_definition_arn = next(
+            resource["task_definition_arn"]
+            for resource in live["resources"]
+            if resource["consumer_id"] == "mcp"
+        )
+        openclaw_task_definition_arn = (
+            f"arn:aws:ecs:ap-northeast-1:718959508629:"
+            "task-definition/teamagent-dev-openclaw:17"
+        )
+        dm_qa_openclaw_task_definition_arn = (
+            f"arn:aws:ecs:ap-northeast-1:718959508629:"
+            "task-definition/teamagent-dev-openclaw:18"
+            if bad_gate == "dm-openclaw"
+            else openclaw_task_definition_arn
+        )
+        evidence_attempt_id = (
+            "99999999-9999-4999-8999-999999999999"
+            if bad_gate == "dm-locator"
+            else attempt_id
+        )
+        evidence_key = (
+            f"forced-rollback-drills/{evidence_attempt_id}/dm-qa/result.json"
+        )
+        evidence_sha256 = "d" * 64 if old else "e" * 64
+        evidence_size = 512 if old else 513
+        evidence_version = "rollback-dm-qa-version" if old else "restore-dm-qa-version"
+        signature_version = (
+            "rollback-dm-qa-signature-version"
+            if old
+            else "restore-dm-qa-signature-version"
+        )
+        evidence_locator = {
+            "bucket": "teamagent-dev-openclaw-rollout-evidence",
+            "key": evidence_key,
+            "version_id": evidence_version,
+            "sha256": evidence_sha256,
+            "size": evidence_size,
+            "content_type": "application/json",
+            "object_lock_mode": "COMPLIANCE",
+            "retain_until": "2043-05-18T03:33:20Z",
+            "encryption_kms_key_arn": (
+                "arn:aws:kms:ap-northeast-1:718959508629:key/"
+                "11111111-1111-4111-8111-111111111111"
+            ),
+            "signature": {
+                "key": f"{evidence_key}.sig",
+                "version_id": signature_version,
+                "sha256": "f" * 64,
+                "verified": True,
+            },
+            "signer": {
+                "kms_key_arn": (
+                    "arn:aws:kms:ap-northeast-1:718959508629:key/"
+                    "22222222-2222-4222-8222-222222222222"
+                ),
+                "algorithm": "RSASSA_PSS_SHA_256",
+            },
+            "exact_version_redownload": {
+                "requested_version_id": evidence_version,
+                "returned_version_id": evidence_version,
+                "sha256": evidence_sha256,
+                "size": evidence_size,
+                "bytes_match": True,
+            },
+        }
         value = {
             "kind": "terraform-runtime-apply-receipt",
             "schema_version": 7,
             "status": "applied",
-            "applied_at_epoch": int(os.environ.get("FAKE_NOW_EPOCH", "2000000300")),
+            "applied_at_epoch": applied_at_epoch,
             "plan_sha256": plan_sha,
             "image_deployment_intent_id": (
                 "88888888-8888-4888-8888-888888888888"
@@ -865,8 +948,21 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
                 },
             },
             "openclaw_rollout_result": {
-                "passed": bad_gate != "dm",
+                "passed": True,
                 "applyAttemptId": attempt_id,
+                "newTaskDefinitionArn": openclaw_task_definition_arn,
+                "dmQa": {
+                    "kind": "teamagent-forced-rollback-dm-qa-result",
+                    "schema_version": 1,
+                    "result": "FAILED" if bad_gate == "dm" else "PASSED",
+                    "verified_at_utc": verified_at_utc,
+                    "applyAttemptId": attempt_id,
+                    "openclawTaskDefinitionArn": (
+                        dm_qa_openclaw_task_definition_arn
+                    ),
+                    "mcpTaskDefinitionArn": mcp_task_definition_arn,
+                    "locator": evidence_locator,
+                },
             },
             "deployment_finalization_receipt": {
                 "state": "PENDING" if bad_gate == "finalizer" else "APPLIED",
@@ -1164,6 +1260,44 @@ def test_full_positive_path_has_all_seven_one_way_states(
         applied_state["legs"]["rollback_to_previous"]["authorization"]["sha256"]
         != applied_state["legs"]["restore_active"]["authorization"]["sha256"]
     )
+    apply_calls = drill._guard_calls("apply")
+    assert len(apply_calls) == 2
+    apply_started_at = [
+        INITIAL_APPLIED_AT + 240,
+        INITIAL_APPLIED_AT + 360,
+    ]
+    dm_qa_deadlines = [
+        int(_arg_value(call, "--forced-rollback-dm-qa-deadline-epoch")) for call in apply_calls
+    ]
+    assert dm_qa_deadlines[0] == dm_qa_deadlines[1]
+    assert all(
+        started < deadline <= started + 1200
+        for started, deadline in zip(
+            apply_started_at,
+            dm_qa_deadlines,
+            strict=True,
+        )
+    )
+
+    target_contract = json.loads(drill.contract.read_text(encoding="utf-8"))["targets"]
+    assert (
+        target_contract["old"]["images"]["openclaw"] == target_contract["new"]["images"]["openclaw"]
+    ), "OpenClaw task definition が変わらない両 leg でも DM QA deadline を渡す"
+    apply_receipts = [
+        json.loads(
+            Path(applied_state["legs"][state_key]["apply"]["path"]).read_text(encoding="utf-8")
+        )
+        for state_key in ("rollback_to_previous", "restore_active")
+    ]
+    dm_qa_results = [receipt["openclaw_rollout_result"]["dmQa"] for receipt in apply_receipts]
+    assert [result["result"] for result in dm_qa_results] == [
+        "PASSED",
+        "PASSED",
+    ]
+    assert (
+        dm_qa_results[0]["openclawTaskDefinitionArn"]
+        == dm_qa_results[1]["openclawTaskDefinitionArn"]
+    )
 
     finalized = drill.run(
         "finalize",
@@ -1178,6 +1312,27 @@ def test_full_positive_path_has_all_seven_one_way_states(
     validator_lines = drill.validator_calls.read_text(encoding="utf-8").splitlines()
     assert len(validator_lines) == 1
     validator_call = json.loads(validator_lines[0])
+    aggregate = validator_call["aggregate"]
+    for leg, source_dm_qa in zip(
+        aggregate["legs"],
+        dm_qa_results,
+        strict=True,
+    ):
+        dm_qa = leg["dm_qa"]
+        assert set(dm_qa) == {
+            "result",
+            "verified_at_utc",
+            "subject_digests",
+            "locator",
+        }
+        assert dm_qa["result"] == "PASSED"
+        assert dm_qa["subject_digests"] == leg["to"]["subjects"]
+        assert dm_qa["locator"] == source_dm_qa["locator"]
+        assert re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
+            r"[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            dm_qa["verified_at_utc"],
+        )
     trusted = validator_call["expected"]
     assert trusted["git_commit"] == "4" * 40
     assert trusted["drill_contract_sha256"] == _sha256(drill.contract)
@@ -1431,7 +1586,15 @@ def test_same_leg_apply_cannot_be_replayed(
 
 @pytest.mark.parametrize(
     "bad_gate",
-    ["intent", "steady", "run-task", "dm", "finalizer"],
+    [
+        "intent",
+        "steady",
+        "run-task",
+        "dm",
+        "dm-locator",
+        "dm-openclaw",
+        "finalizer",
+    ],
 )
 def test_apply_never_marks_leg_applied_without_all_pre_finalization_gates(
     drill: DrillHarness,
@@ -1460,6 +1623,86 @@ def test_apply_never_marks_leg_applied_without_all_pre_finalization_gates(
     assert state["legs"]["rollback_to_previous"]["status"] == "FAILED"
     assert state["failures"][-1]["phase"] == "apply"
     assert len(drill._guard_calls("apply")) == 1
+
+
+def test_dm_qa_timeout_keeps_restore_inside_old_dwell_and_requires_recovery(
+    drill: DrillHarness,
+) -> None:
+    assert drill.prepare().returncode == 0
+    assert drill.preflight().returncode == 0
+    planned1, plan1_sha = drill.plan(
+        "rollback-to-previous",
+        now=INITIAL_APPLIED_AT + 180,
+    )
+    assert planned1.returncode == 0
+    assert (
+        drill.apply(
+            "rollback-to-previous",
+            approval_leg="rollback",
+            plan_sha256=plan1_sha,
+            now=INITIAL_APPLIED_AT + 240,
+        ).returncode
+        == 0
+    )
+    planned2, plan2_sha = drill.plan(
+        "restore-active",
+        now=INITIAL_APPLIED_AT + 300,
+    )
+    assert planned2.returncode == 0
+
+    timed_out = drill.apply(
+        "restore-active",
+        approval_leg="restore",
+        plan_sha256=plan2_sha,
+        now=INITIAL_APPLIED_AT + 360,
+        extra_env={"FAKE_DM_QA_TIMEOUT": "true"},
+    )
+
+    assert timed_out.returncode != 0
+    state = drill.state()
+    assert state["state"] == "RECOVERY_REQUIRED"
+    assert state["legs"]["restore_active"]["status"] == "FAILED"
+    assert state["failures"][-1]["phase"] == "dm-qa-timeout"
+    apply_calls = drill._guard_calls("apply")
+    assert len(apply_calls) == 2
+    restore_deadline = int(
+        _arg_value(
+            apply_calls[1],
+            "--forced-rollback-dm-qa-deadline-epoch",
+        )
+    )
+    assert restore_deadline == state["old_dwell"]["deadline_epoch"]
+    assert restore_deadline - state["old_dwell"]["started_at_epoch"] <= 1200
+    assert not (drill.drill_dir / "legs" / "restore-active" / "apply.runtime-guard.json").exists()
+
+
+def test_dm_qa_process_failure_marks_the_leg_failed(
+    drill: DrillHarness,
+) -> None:
+    assert drill.prepare().returncode == 0
+    assert drill.preflight().returncode == 0
+    planned, plan_sha = drill.plan(
+        "rollback-to-previous",
+        now=INITIAL_APPLIED_AT + 180,
+    )
+    assert planned.returncode == 0
+
+    failed = drill.apply(
+        "rollback-to-previous",
+        approval_leg="rollback",
+        plan_sha256=plan_sha,
+        now=INITIAL_APPLIED_AT + 240,
+        extra_env={"FAKE_DM_QA_FAILURE": "true"},
+    )
+
+    assert failed.returncode != 0
+    state = drill.state()
+    assert state["state"] == "RECOVERY_REQUIRED"
+    assert state["legs"]["rollback_to_previous"]["status"] == "FAILED"
+    assert state["failures"][-1]["phase"] == "dm-qa"
+    assert not (
+        drill.drill_dir / "legs" / "rollback-to-previous" / "apply.runtime-guard.json"
+    ).exists()
 
 
 @pytest.mark.parametrize(

@@ -27,6 +27,8 @@ EXPECTED_ALARM_EMAIL="s-komata@vectorinc.co.jp"
 EXPECTED_ALARM_EMAIL_SHA256="88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
 EXPECTED_ALARM_DESTINATION_STATE_SHA256="c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9"
 LOG_VERSIONING_SETTLE_SECONDS=900
+FORCED_ROLLBACK_DM_QA_MAX_SECONDS=300
+FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS=30
 TRUSTED_AUTOMATION_ROLE_NAME="teamagent-dev-terraform-runtime-automation"
 TRUSTED_AUTOMATION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
 TRUSTED_MEDIA_ATTESTOR_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/teamagent-media-cutover-attestor"
@@ -98,6 +100,7 @@ usage:
     [--receipt FILE] --apply-attempt-id UUID --out AUTHORIZATION
   terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] \
     [--media-authorization FILE --apply-attempt-id UUID] \
+    [--forced-rollback-dm-qa-deadline-epoch EPOCH] \
     --out APPLY_RECEIPT
 
 plan:
@@ -137,6 +140,21 @@ EOF
 die() {
   echo "★ $*" >&2
   exit 1
+}
+
+ensure_forced_rollback_dm_qa_recovery_reserve() {
+  local phase="$1" now latest_safe_epoch
+  [ -n "${FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH:-}" ] || return 0
+  now="$(date +%s)"
+  latest_safe_epoch=$((
+    FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH -
+      FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS
+  ))
+  if [ "$now" -ge "$latest_safe_epoch" ]; then
+    echo "FATAL: forced rollback DM QA deadline reserve exhausted during $phase" >&2
+    return 124
+  fi
+  return 0
 }
 
 assert_clean_terraform_environment() {
@@ -7994,6 +8012,929 @@ raise SystemExit(0 if all(checks.values()) else 23)
   chmod 600 "$output"
 }
 
+run_forced_rollback_dm_qa() {
+  local snapshot="$1" apply_attempt_id="$2" deadline_epoch="$3" output="$4"
+  local evidence_bucket="$5" evidence_prefix="$6"
+  local encryption_kms_key_arn="$7" signing_kms_key_arn="$8"
+  local now available timeout_seconds status
+  now="$(date +%s)"
+  [[ "$deadline_epoch" =~ ^[0-9]+$ ]] ||
+    die "forced rollback DM QA deadline must be an epoch second"
+  available=$((deadline_epoch - now - FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS))
+  if [ "$available" -le 0 ]; then
+    echo "FATAL: forced rollback DM QA has no time before the old-dwell recovery reserve" >&2
+    return 124
+  fi
+  timeout_seconds="$available"
+  if [ "$timeout_seconds" -gt "$FORCED_ROLLBACK_DM_QA_MAX_SECONDS" ]; then
+    timeout_seconds="$FORCED_ROLLBACK_DM_QA_MAX_SECONDS"
+  fi
+
+  if python3 - \
+    "$AWS_BIN" \
+    "$snapshot" \
+    "$apply_attempt_id" \
+    "$timeout_seconds" \
+    "$output" \
+    "$evidence_bucket" \
+    "$evidence_prefix" \
+    "$encryption_kms_key_arn" \
+    "$signing_kms_key_arn" <<'PY'
+from __future__ import annotations
+
+import base64
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+(
+    aws_bin,
+    snapshot_path,
+    apply_attempt_id,
+    timeout_seconds_raw,
+    output_path,
+    evidence_bucket,
+    evidence_prefix,
+    encryption_kms_key_arn,
+    signing_kms_key_arn,
+) = sys.argv[1:]
+
+ACCOUNT = "718959508629"
+REGION = "ap-northeast-1"
+CLUSTER = "teamagent-dev"
+SERVICE = "teamagent-dev-openclaw"
+CONTAINER = "openclaw"
+MCP_SERVICE = "teamagent-dev-mcp"
+MCP_CONTAINER = "teamagent-mcp"
+LOG_GROUP = "/teamagent/dev/openclaw"
+CANARY_SECRET = "teamagent/dev/openclaw/rollout-canary"
+EVIDENCE_BUCKET = evidence_bucket
+EVIDENCE_PREFIX = evidence_prefix.rstrip("/")
+SIGNING_ALGORITHM = "RSASSA_PSS_SHA_256"
+TRUSTED_AUTOMATION_ARN = (
+    "arn:aws:sts::718959508629:assumed-role/"
+    "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+)
+TASK_DEFINITION_RE = re.compile(
+    r"^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/"
+    r"teamagent-dev-openclaw:[1-9][0-9]*$"
+)
+MCP_TASK_DEFINITION_RE = re.compile(
+    r"^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/"
+    r"teamagent-dev-mcp:[1-9][0-9]*$"
+)
+TASK_ARN_RE = re.compile(
+    r"^arn:aws:ecs:ap-northeast-1:718959508629:task/"
+    r"teamagent-dev/[0-9a-f]{32}$"
+)
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+KMS_ARN_RE = re.compile(
+    r"^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$"
+)
+VERSION_ID_RE = re.compile(r"^[A-Za-z0-9._~+/=-]{1,1024}$")
+started_monotonic = time.monotonic()
+deadline_monotonic = started_monotonic + int(timeout_seconds_raw)
+
+
+class DmQaTimeout(RuntimeError):
+    pass
+
+
+def remaining() -> float:
+    value = deadline_monotonic - time.monotonic()
+    if value <= 0:
+        raise DmQaTimeout("forced rollback DM QA exceeded its absolute timeout")
+    return value
+
+
+def canonical_bytes(value: object) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode()
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def endpoint(service: str) -> str:
+    if service == "s3api":
+        return f"https://s3.{REGION}.amazonaws.com"
+    return f"https://{service}.{REGION}.amazonaws.com"
+
+
+def aws_json(
+    service: str,
+    operation: str,
+    arguments: list[str],
+) -> dict[str, object]:
+    command = [
+        aws_bin,
+        service,
+        operation,
+        "--region",
+        REGION,
+        "--endpoint-url",
+        endpoint(service),
+        *arguments,
+        "--no-cli-pager",
+        "--no-paginate",
+        "--output",
+        "json",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=remaining(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DmQaTimeout(
+            f"forced rollback DM QA timed out during AWS {service} {operation}"
+        ) from exc
+    if completed.returncode != 0:
+        detail = completed.stderr.strip()[:1000]
+        raise RuntimeError(f"AWS {service} {operation} failed: {detail}")
+    try:
+        value = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"AWS {service} {operation} returned invalid JSON"
+        ) from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"AWS {service} {operation} returned a non-object")
+    return value
+
+
+def cloudwatch_events(arguments: list[str]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    next_token: str | None = None
+    seen_tokens: set[str] = set()
+    while True:
+        page_arguments = list(arguments)
+        if next_token is not None:
+            page_arguments.extend(["--next-token", next_token])
+        response = aws_json(
+            "logs",
+            "filter-log-events",
+            page_arguments,
+        )
+        page = response.get("events")
+        if not isinstance(page, list) or not all(
+            isinstance(event, dict) for event in page
+        ):
+            raise RuntimeError("CloudWatch DM QA correlation is malformed")
+        events.extend(page)
+        returned_token = response.get("nextToken")
+        if returned_token is None:
+            return events
+        if not isinstance(returned_token, str) or not returned_token:
+            raise RuntimeError("CloudWatch DM QA pagination token is malformed")
+        if returned_token in seen_tokens:
+            return events
+        seen_tokens.add(returned_token)
+        next_token = returned_token
+
+
+def slack_api(method: str, token: str, body: dict[str, object]) -> dict[str, object]:
+    request = urllib.request.Request(
+        f"https://slack.com/api/{method}",
+        data=json.dumps(body, separators=(",", ":")).encode(),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=min(15.0, remaining()),
+        ) as response:
+            raw = response.read()
+    except TimeoutError as exc:
+        raise DmQaTimeout(f"Slack {method} timed out") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise DmQaTimeout(f"Slack {method} timed out") from exc
+        raise RuntimeError(f"Slack {method} failed") from exc
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Slack {method} returned invalid JSON") from exc
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        reason = value.get("error") if isinstance(value, dict) else "invalid-response"
+        raise RuntimeError(f"Slack {method} failed: {reason}")
+    return value
+
+
+def service_inventory(
+    expected_task_definition: str,
+    *,
+    service_name: str = SERVICE,
+    container_name: str = CONTAINER,
+    log_stream_prefix: str = "openclaw/openclaw",
+) -> tuple[dict[str, object], list[dict[str, str]]]:
+    service_document = aws_json(
+        "ecs",
+        "describe-services",
+        ["--cluster", CLUSTER, "--services", service_name],
+    )
+    services = service_document.get("services")
+    failures = service_document.get("failures")
+    if (
+        not isinstance(services, list)
+        or len(services) != 1
+        or failures not in (None, [])
+    ):
+        raise RuntimeError("OpenClaw service description is incomplete")
+    service = services[0]
+    if not isinstance(service, dict):
+        raise RuntimeError("OpenClaw service description is malformed")
+    deployments = service.get("deployments")
+    circuit_breaker = (
+        service.get("deploymentConfiguration", {}).get(
+            "deploymentCircuitBreaker",
+            {},
+        )
+        if isinstance(service.get("deploymentConfiguration"), dict)
+        else {}
+    )
+    desired_count = service.get("desiredCount")
+    if (
+        service.get("serviceName") != service_name
+        or service.get("clusterArn")
+        != f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/{CLUSTER}"
+        or service.get("taskDefinition") != expected_task_definition
+        or not isinstance(desired_count, int)
+        or desired_count < 1
+        or service.get("runningCount") != desired_count
+        or service.get("pendingCount") != 0
+        or circuit_breaker != {"enable": True, "rollback": True}
+        or not isinstance(deployments, list)
+        or len(deployments) != 1
+        or deployments[0].get("status") != "PRIMARY"
+        or deployments[0].get("rolloutState") != "COMPLETED"
+        or deployments[0].get("taskDefinition") != expected_task_definition
+    ):
+        raise RuntimeError("OpenClaw service is not one exact stable deployment")
+
+    listed = aws_json(
+        "ecs",
+        "list-tasks",
+        [
+            "--cluster",
+            CLUSTER,
+            "--service-name",
+            service_name,
+            "--desired-status",
+            "RUNNING",
+        ],
+    )
+    task_arns = listed.get("taskArns")
+    if (
+        not isinstance(task_arns, list)
+        or len(task_arns) != desired_count
+        or len(set(task_arns)) != len(task_arns)
+        or not all(isinstance(item, str) and TASK_ARN_RE.fullmatch(item) for item in task_arns)
+    ):
+        raise RuntimeError("OpenClaw running task inventory is incomplete")
+    described = aws_json(
+        "ecs",
+        "describe-tasks",
+        ["--cluster", CLUSTER, "--tasks", *sorted(task_arns)],
+    )
+    tasks = described.get("tasks")
+    task_failures = described.get("failures")
+    if (
+        not isinstance(tasks, list)
+        or len(tasks) != desired_count
+        or task_failures not in (None, [])
+    ):
+        raise RuntimeError("OpenClaw running task details are incomplete")
+    inventory: list[dict[str, str]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            raise RuntimeError("OpenClaw running task detail is malformed")
+        task_arn = task.get("taskArn")
+        containers = task.get("containers")
+        matching = (
+            [
+                container
+                for container in containers
+                if isinstance(container, dict)
+                and container.get("name") == container_name
+            ]
+            if isinstance(containers, list)
+            else []
+        )
+        if (
+            not isinstance(task_arn, str)
+            or task_arn not in task_arns
+            or task.get("taskDefinitionArn") != expected_task_definition
+            or task.get("lastStatus") != "RUNNING"
+            or task.get("desiredStatus") != "RUNNING"
+            or task.get("group") != f"service:{service_name}"
+            or len(matching) != 1
+            or matching[0].get("lastStatus") != "RUNNING"
+        ):
+            raise RuntimeError(
+                "OpenClaw running task is not bound to the active revision"
+            )
+        task_id = task_arn.rsplit("/", 1)[-1]
+        inventory.append(
+            {
+                "task_arn": task_arn,
+                "task_definition_arn": expected_task_definition,
+                "log_stream_name": f"{log_stream_prefix}/{task_id}",
+            }
+        )
+    return service, sorted(inventory, key=lambda item: item["task_arn"])
+
+
+def normalize_timestamp(value: str) -> str:
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(dt.timezone.utc).replace(microsecond=0).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def exact_version_download(
+    *,
+    key: str,
+    version_id: str,
+    expected_bytes: bytes,
+    encryption_key_arn: str,
+    destination: Path,
+) -> tuple[dict[str, object], str]:
+    metadata = aws_json(
+        "s3api",
+        "get-object",
+        [
+            "--bucket",
+            EVIDENCE_BUCKET,
+            "--key",
+            key,
+            "--version-id",
+            version_id,
+            "--expected-bucket-owner",
+            ACCOUNT,
+            str(destination),
+        ],
+    )
+    downloaded = destination.read_bytes()
+    downloaded_sha256 = sha256_bytes(downloaded)
+    returned_version = metadata.get("VersionId")
+    if (
+        downloaded != expected_bytes
+        or downloaded_sha256 != sha256_bytes(expected_bytes)
+        or returned_version != version_id
+        or metadata.get("ContentLength") != len(expected_bytes)
+        or metadata.get("ServerSideEncryption") != "aws:kms"
+        or metadata.get("SSEKMSKeyId") != encryption_key_arn
+        or metadata.get("ObjectLockMode") != "COMPLIANCE"
+        or not isinstance(metadata.get("ObjectLockRetainUntilDate"), str)
+    ):
+        raise RuntimeError("immutable DM QA exact-version download did not match")
+    return metadata, downloaded_sha256
+
+
+def persist_evidence(
+    payload: dict[str, object],
+) -> dict[str, object]:
+    evidence_bytes = canonical_bytes(payload)
+    evidence_sha256 = sha256_bytes(evidence_bytes)
+    retain_until = (
+        dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=3651)
+    ).replace(microsecond=0)
+    retain_until_text = retain_until.strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload_key = (
+        f"{EVIDENCE_PREFIX}/{apply_attempt_id}/dm-qa/result.json"
+    )
+    signature_key = f"{payload_key}.sig"
+
+    with tempfile.TemporaryDirectory(prefix="teamagent-drill-dm-qa.") as raw_dir:
+        directory = Path(raw_dir)
+        evidence_path = directory / "result.json"
+        digest_path = directory / "result.sha256"
+        signature_path = directory / "result.sig"
+        envelope_path = directory / "result.sig.json"
+        downloaded_evidence = directory / "downloaded-result.json"
+        downloaded_signature = directory / "downloaded-result.sig.json"
+        evidence_path.write_bytes(evidence_bytes)
+        digest_path.write_bytes(bytes.fromhex(evidence_sha256))
+        signed = aws_json(
+            "kms",
+            "sign",
+            [
+                "--key-id",
+                signing_kms_key_arn,
+                "--message",
+                f"fileb://{digest_path}",
+                "--message-type",
+                "DIGEST",
+                "--signing-algorithm",
+                SIGNING_ALGORITHM,
+            ],
+        )
+        signature_base64 = signed.get("Signature")
+        if (
+            signed.get("KeyId") != signing_kms_key_arn
+            or signed.get("SigningAlgorithm") != SIGNING_ALGORITHM
+            or not isinstance(signature_base64, str)
+        ):
+            raise RuntimeError("KMS returned an invalid DM QA signature")
+        try:
+            signature_bytes = base64.b64decode(
+                signature_base64,
+                validate=True,
+            )
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError("KMS returned malformed DM QA signature bytes") from exc
+        if len(signature_bytes) < 256:
+            raise RuntimeError("KMS returned a short DM QA signature")
+        signature_path.write_bytes(signature_bytes)
+        envelope = {
+            "schema_version": 1,
+            "apply_attempt_id": apply_attempt_id,
+            "payload_key": payload_key,
+            "payload_sha256": evidence_sha256,
+            "signing_kms_key_arn": signing_kms_key_arn,
+            "signing_algorithm": SIGNING_ALGORITHM,
+            "signature_base64": signature_base64,
+        }
+        envelope_bytes = canonical_bytes(envelope)
+        envelope_path.write_bytes(envelope_bytes)
+
+        def put_object(
+            *,
+            key: str,
+            path: Path,
+            content_type: str,
+        ) -> str:
+            response = aws_json(
+                "s3api",
+                "put-object",
+                [
+                    "--bucket",
+                    EVIDENCE_BUCKET,
+                    "--key",
+                    key,
+                    "--body",
+                    str(path),
+                    "--content-type",
+                    content_type,
+                    "--server-side-encryption",
+                    "aws:kms",
+                    "--ssekms-key-id",
+                    encryption_kms_key_arn,
+                    "--object-lock-mode",
+                    "COMPLIANCE",
+                    "--object-lock-retain-until-date",
+                    retain_until_text,
+                    "--expected-bucket-owner",
+                    ACCOUNT,
+                    "--if-none-match",
+                    "*",
+                ],
+            )
+            version_id = response.get("VersionId")
+            if (
+                not isinstance(version_id, str)
+                or not VERSION_ID_RE.fullmatch(version_id)
+                or version_id in {"null", "None"}
+            ):
+                raise RuntimeError("S3 did not return an exact DM QA VersionId")
+            return version_id
+
+        payload_version = put_object(
+            key=payload_key,
+            path=evidence_path,
+            content_type="application/json",
+        )
+        signature_version = put_object(
+            key=signature_key,
+            path=envelope_path,
+            content_type="application/json",
+        )
+        payload_metadata, downloaded_sha256 = exact_version_download(
+            key=payload_key,
+            version_id=payload_version,
+            expected_bytes=evidence_bytes,
+            encryption_key_arn=encryption_kms_key_arn,
+            destination=downloaded_evidence,
+        )
+        _, downloaded_signature_sha256 = exact_version_download(
+            key=signature_key,
+            version_id=signature_version,
+            expected_bytes=envelope_bytes,
+            encryption_key_arn=encryption_kms_key_arn,
+            destination=downloaded_signature,
+        )
+        verified = aws_json(
+            "kms",
+            "verify",
+            [
+                "--key-id",
+                signing_kms_key_arn,
+                "--message",
+                f"fileb://{digest_path}",
+                "--message-type",
+                "DIGEST",
+                "--signature",
+                f"fileb://{signature_path}",
+                "--signing-algorithm",
+                SIGNING_ALGORITHM,
+            ],
+        )
+        if (
+            verified.get("KeyId") != signing_kms_key_arn
+            or verified.get("SigningAlgorithm") != SIGNING_ALGORITHM
+            or verified.get("SignatureValid") is not True
+        ):
+            raise RuntimeError("KMS DM QA signature verification failed")
+        returned_retain_until = normalize_timestamp(
+            str(payload_metadata["ObjectLockRetainUntilDate"])
+        )
+        return {
+            "bucket": EVIDENCE_BUCKET,
+            "key": payload_key,
+            "version_id": payload_version,
+            "sha256": evidence_sha256,
+            "size": len(evidence_bytes),
+            "content_type": "application/json",
+            "object_lock_mode": "COMPLIANCE",
+            "retain_until": returned_retain_until,
+            "encryption_kms_key_arn": encryption_kms_key_arn,
+            "signature": {
+                "key": signature_key,
+                "version_id": signature_version,
+                "sha256": downloaded_signature_sha256,
+                "verified": True,
+            },
+            "signer": {
+                "kms_key_arn": signing_kms_key_arn,
+                "algorithm": SIGNING_ALGORITHM,
+            },
+            "exact_version_redownload": {
+                "requested_version_id": payload_version,
+                "returned_version_id": payload_version,
+                "sha256": downloaded_sha256,
+                "size": len(evidence_bytes),
+                "bytes_match": True,
+            },
+        }
+
+
+def write_output(value: dict[str, object]) -> None:
+    output = Path(output_path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(output, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(canonical_bytes(value))
+
+
+try:
+    timeout_seconds = int(timeout_seconds_raw)
+    if (
+        timeout_seconds < 1
+        or timeout_seconds > 300
+        or evidence_bucket != "teamagent-dev-openclaw-rollout-evidence"
+        or evidence_prefix != "forced-rollback-drills/"
+        or not UUID_RE.fullmatch(apply_attempt_id)
+        or not KMS_ARN_RE.fullmatch(encryption_kms_key_arn)
+        or not KMS_ARN_RE.fullmatch(signing_kms_key_arn)
+        or encryption_kms_key_arn == signing_kms_key_arn
+    ):
+        raise RuntimeError("forced rollback DM QA inputs are invalid")
+    with open(snapshot_path, encoding="utf-8") as handle:
+        snapshot = json.load(handle)
+    openclaw_task_definition = snapshot["taskdefs"]["openclaw"]["arn"]
+    mcp_task_definition = snapshot["taskdefs"]["mcp"]["arn"]
+    if (
+        not TASK_DEFINITION_RE.fullmatch(openclaw_task_definition)
+        or not MCP_TASK_DEFINITION_RE.fullmatch(mcp_task_definition)
+    ):
+        raise RuntimeError("forced rollback DM QA task definitions are invalid")
+
+    caller = aws_json("sts", "get-caller-identity", [])
+    if (
+        caller.get("Account") != ACCOUNT
+        or caller.get("Arn") != TRUSTED_AUTOMATION_ARN
+    ):
+        raise RuntimeError("forced rollback DM QA requires the trusted automation role")
+
+    _, running_before = service_inventory(openclaw_task_definition)
+    _, mcp_running_before = service_inventory(
+        mcp_task_definition,
+        service_name=MCP_SERVICE,
+        container_name=MCP_CONTAINER,
+        log_stream_prefix="mcp/teamagent-mcp",
+    )
+    secret_response = aws_json(
+        "secretsmanager",
+        "get-secret-value",
+        [
+            "--secret-id",
+            CANARY_SECRET,
+            "--version-stage",
+            "AWSCURRENT",
+        ],
+    )
+    secret_string = secret_response.get("SecretString")
+    if not isinstance(secret_string, str):
+        raise RuntimeError("forced rollback DM QA secret is not a JSON string")
+    secret = json.loads(secret_string)
+    if (
+        not isinstance(secret, dict)
+        or set(secret) != {"userToken", "channelId", "botUserId"}
+        or not re.fullmatch(r"xoxp-[A-Za-z0-9-]{20,}", secret.get("userToken", ""))
+        or not re.fullmatch(r"[CG][A-Z0-9]{8,}", secret.get("channelId", ""))
+        or not re.fullmatch(r"U[A-Z0-9]{8,}", secret.get("botUserId", ""))
+    ):
+        raise RuntimeError("forced rollback DM QA secret has an invalid shape")
+
+    nonce = os.urandom(12).hex()
+    fragment_a = f"OPENCLAW_DRILL_DM_QA_{nonce[:12]}"
+    fragment_b = nonce[12:]
+    response_token = f"{fragment_a}{fragment_b}"
+    prompt = (
+        f"<@{secret['botUserId']}> forced rollback drill DM QA. "
+        "Reply with only the concatenation of fragment A and fragment B, "
+        f"with no separator or other text. Fragment A: {fragment_a}; "
+        f"fragment B: {fragment_b}"
+    )
+    if response_token in prompt:
+        raise RuntimeError("DM QA response token must not appear in the prompt")
+    posted = slack_api(
+        "chat.postMessage",
+        secret["userToken"],
+        {"channel": secret["channelId"], "text": prompt},
+    )
+    posted_ts = posted.get("ts")
+    if not isinstance(posted_ts, str):
+        raise RuntimeError("Slack did not return a DM QA message timestamp")
+    matching_message: dict[str, object] | None = None
+    try:
+        reply_deadline = min(deadline_monotonic, time.monotonic() + 120)
+        while time.monotonic() < reply_deadline:
+            thread = slack_api(
+                "conversations.replies",
+                secret["userToken"],
+                {
+                    "channel": secret["channelId"],
+                    "ts": posted_ts,
+                    "limit": 100,
+                    "inclusive": True,
+                },
+            )
+            messages = thread.get("messages")
+            if not isinstance(messages, list):
+                raise RuntimeError("Slack DM QA thread is malformed")
+            candidates = [
+                message
+                for message in messages
+                if isinstance(message, dict)
+                and message.get("ts") != posted_ts
+                and message.get("user") == secret["botUserId"]
+                and str(message.get("text", "")).strip() == response_token
+            ]
+            if len(candidates) == 1:
+                matching_message = candidates[0]
+                break
+            if len(candidates) > 1:
+                raise RuntimeError("Slack DM QA received duplicate exact replies")
+            time.sleep(min(3.0, remaining()))
+        if matching_message is None:
+            raise DmQaTimeout("Slack DM QA exact reply timed out")
+    finally:
+        try:
+            slack_api(
+                "chat.delete",
+                secret["userToken"],
+                {"channel": secret["channelId"], "ts": posted_ts},
+            )
+        except Exception:
+            pass
+
+    reply_ts = matching_message.get("ts")
+    if not isinstance(reply_ts, str):
+        raise RuntimeError("Slack DM QA reply timestamp is invalid")
+    try:
+        posted_time_ms = int(float(posted_ts) * 1000)
+        reply_time_ms = int(float(reply_ts) * 1000)
+    except (ValueError, OverflowError) as exc:
+        raise RuntimeError("Slack DM QA timestamps are malformed") from exc
+    if reply_time_ms < posted_time_ms:
+        raise RuntimeError("Slack DM QA reply predates the mention")
+    start_time_ms = reply_time_ms - 5000
+    streams = [item["log_stream_name"] for item in running_before]
+    stream_to_task = {
+        item["log_stream_name"]: item["task_arn"] for item in running_before
+    }
+    correlation: dict[str, object] | None = None
+    correlation_deadline = min(deadline_monotonic, time.monotonic() + 60)
+    while time.monotonic() < correlation_deadline:
+        events = cloudwatch_events(
+            [
+                "--log-group-name",
+                LOG_GROUP,
+                "--log-stream-names",
+                *streams,
+                "--start-time",
+                str(start_time_ms),
+                "--end-time",
+                str(int(time.time() * 1000) + 5000),
+                "--filter-pattern",
+                f'"{response_token}"',
+            ]
+        )
+        matching_events = [
+            event
+            for event in events
+            if isinstance(event, dict)
+            and event.get("logStreamName") in stream_to_task
+            and response_token in str(event.get("message", ""))
+        ]
+        matched_streams = sorted(
+            {
+                str(event["logStreamName"])
+                for event in matching_events
+            }
+        )
+        if len(matched_streams) == 1:
+            selected = sorted(
+                (
+                    event
+                    for event in matching_events
+                    if event.get("logStreamName") == matched_streams[0]
+                ),
+                key=lambda event: int(event.get("timestamp", 0)),
+            )[0]
+            selected_event_id = selected.get("eventId")
+            selected_timestamp = selected.get("timestamp")
+            if (
+                not isinstance(selected_event_id, str)
+                or not selected_event_id
+                or type(selected_timestamp) is not int
+                or selected_timestamp < reply_time_ms - 5000
+                or selected_timestamp > reply_time_ms + 60_000
+            ):
+                raise RuntimeError(
+                    "DM QA task-log correlation has invalid event binding"
+                )
+            correlation = {
+                "matched": True,
+                "task_arn": stream_to_task[matched_streams[0]],
+                "log_stream_name": matched_streams[0],
+                "event_id": selected_event_id,
+                "event_timestamp": selected_timestamp,
+                "token_sha256": sha256_bytes(response_token.encode()),
+            }
+            break
+        if len(matched_streams) > 1:
+            raise RuntimeError("DM QA token appeared in multiple service task logs")
+        time.sleep(min(2.0, remaining()))
+    if correlation is None:
+        raise DmQaTimeout(
+            "DM QA reply-to-task-log correlation timed out"
+        )
+
+    _, running_after = service_inventory(openclaw_task_definition)
+    _, mcp_running_after = service_inventory(
+        mcp_task_definition,
+        service_name=MCP_SERVICE,
+        container_name=MCP_CONTAINER,
+        log_stream_prefix="mcp/teamagent-mcp",
+    )
+    if running_before != running_after:
+        raise RuntimeError("OpenClaw running task inventory changed during DM QA")
+    if mcp_running_before != mcp_running_after:
+        raise RuntimeError("MCP running task inventory changed during DM QA")
+    verified_at_utc = dt.datetime.now(dt.timezone.utc).replace(
+        microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    evidence = {
+        "kind": "teamagent-forced-rollback-dm-qa-evidence",
+        "schema_version": 1,
+        "result": "PASSED",
+        "verified_at_utc": verified_at_utc,
+        "apply_attempt_id": apply_attempt_id,
+        "openclaw_task_definition_arn": openclaw_task_definition,
+        "mcp_task_definition_arn": mcp_task_definition,
+        "running_tasks_before": running_before,
+        "running_tasks_after": running_after,
+        "mcp_running_tasks_before": mcp_running_before,
+        "mcp_running_tasks_after": mcp_running_after,
+        "slack": {
+            "connected": True,
+            "exact_reply": True,
+            "response_token_absent_from_prompt": True,
+            "posted_ts": posted_ts,
+            "reply_ts": reply_ts,
+            "token_sha256": sha256_bytes(response_token.encode()),
+            "correlation": correlation,
+        },
+    }
+    locator = persist_evidence(evidence)
+    write_output(
+        {
+            "kind": "teamagent-forced-rollback-dm-qa-result",
+            "schema_version": 1,
+            "result": "PASSED",
+            "verified_at_utc": verified_at_utc,
+            "applyAttemptId": apply_attempt_id,
+            "openclawTaskDefinitionArn": openclaw_task_definition,
+            "mcpTaskDefinitionArn": mcp_task_definition,
+            "locator": locator,
+        }
+    )
+except DmQaTimeout as exc:
+    print(f"FATAL: {exc}", file=sys.stderr)
+    raise SystemExit(124)
+except Exception as exc:
+    print(f"FATAL: forced rollback DM QA failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] || return "$status"
+  chmod 600 "$output"
+  jq -e \
+    --arg attempt "$apply_attempt_id" \
+    --arg openclaw "$(jq -er '.taskdefs.openclaw.arn' "$snapshot")" \
+    --arg mcp "$(jq -er '.taskdefs.mcp.arn' "$snapshot")" '
+    (keys | sort) == ([
+      "applyAttemptId",
+      "kind",
+      "locator",
+      "mcpTaskDefinitionArn",
+      "openclawTaskDefinitionArn",
+      "result",
+      "schema_version",
+      "verified_at_utc"
+    ] | sort) and
+    .kind == "teamagent-forced-rollback-dm-qa-result" and
+    .schema_version == 1 and
+    .result == "PASSED" and
+    .applyAttemptId == $attempt and
+    .openclawTaskDefinitionArn == $openclaw and
+    .mcpTaskDefinitionArn == $mcp and
+    (.verified_at_utc |
+      test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+    (.locator | keys | sort) == ([
+      "bucket",
+      "content_type",
+      "encryption_kms_key_arn",
+      "exact_version_redownload",
+      "key",
+      "object_lock_mode",
+      "retain_until",
+      "sha256",
+      "signature",
+      "signer",
+      "size",
+      "version_id"
+    ] | sort) and
+    .locator.object_lock_mode == "COMPLIANCE" and
+    .locator.bucket == "teamagent-dev-openclaw-rollout-evidence" and
+    .locator.key ==
+      ("forced-rollback-drills/" + $attempt + "/dm-qa/result.json") and
+    (.locator.sha256 | test("^[0-9a-f]{64}$")) and
+    .locator.signature.key == (.locator.key + ".sig") and
+    .locator.signature.verified == true and
+    .locator.exact_version_redownload.bytes_match == true
+  ' "$output" >/dev/null ||
+    die "forced rollback DM QA evidence binding is invalid"
+}
+
 write_preflight_receipt() {
   local migration_id="$1" migration="$2" snapshot="$3" profiles="$4" output="$5"
   local config_manifest="$TMP_ROOT/config-manifest.txt"
@@ -11010,6 +11951,7 @@ case "$COMMAND" in
     APPLY_RECEIPT=""
     MEDIA_AUTHORIZATION=""
     REQUESTED_APPLY_ATTEMPT_ID=""
+    FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -h|--help) usage; exit 0 ;;
@@ -11023,15 +11965,28 @@ case "$COMMAND" in
           REQUESTED_APPLY_ATTEMPT_ID="${2:?--apply-attempt-id に値が必要}"
           shift 2
           ;;
+        --forced-rollback-dm-qa-deadline-epoch)
+          [ -z "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ] ||
+            die "--forced-rollback-dm-qa-deadline-epoch は1回だけ指定できます"
+          FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH="$(
+            printf '%s' "${2:?--forced-rollback-dm-qa-deadline-epoch に値が必要}"
+          )"
+          shift 2
+          ;;
         --out) APPLY_RECEIPT="${2:?--out に値が必要}"; shift 2 ;;
         *) die "不明な引数: $1" ;;
       esac
     done
     [ -n "$PLAN" ] || die "applyには --plan が必須です"
     [ -n "$APPLY_RECEIPT" ] || die "applyには --out APPLY_RECEIPT が必須です"
+    if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ]; then
+      [[ "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" =~ ^[0-9]+$ ]] ||
+        die "forced rollback DM QA deadlineはepoch秒で指定してください"
+    fi
     need_cmd aws
     need_cmd jq
     need_cmd node
+    need_cmd python3
     need_cmd terraform
     PLAN="$(secure_existing_file "$PLAN" 600)"
     secure_private_dir "$(dirname "$PLAN")" >/dev/null
@@ -11431,6 +12386,7 @@ case "$COMMAND" in
         exit 73
       fi
       if [ "$OPENCLAW_POST_APPLY_STARTED" = "true" ] &&
+        [ "$OPENCLAW_ROLLOUT_REQUIRED" = "true" ] &&
         [ "$GATE_OUTCOME_RECORDED" != "true" ] &&
         [ "$GATE_LOCK_ACQUIRED" = "true" ] &&
         [ -n "$OPENCLAW_PREVIOUS_TASK_DEFINITION" ]; then
@@ -11778,6 +12734,46 @@ case "$COMMAND" in
     )"
     [[ "$MCP_NEW_TASK_DEFINITION" =~ ^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:[1-9][0-9]*$ ]] ||
       die "apply後のMCP task revisionが不正です"
+    if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ] ||
+      [ "$OPENCLAW_ROLLOUT_REQUIRED" = "true" ]; then
+      OPENCLAW_EVIDENCE_KMS_KEY_ARN="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          openclaw_rollout_evidence_key_arn
+      )" ||
+        die "OpenClaw rollout evidence KMS keyをstateから固定できません"
+      [[ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] ||
+        die "OpenClaw rollout evidence KMS key state bindingが不正です"
+    fi
+    if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ] ||
+      [ "$OPENCLAW_ROLLOUT_REQUIRED" = "true" ]; then
+      OPENCLAW_SIGNING_KMS_KEY_ARN="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          openclaw_rollout_signing_key_arn
+      )" ||
+        die "OpenClaw rollout signing KMS keyをstateから固定できません"
+      [[ "$OPENCLAW_SIGNING_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] &&
+        [ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" !=
+          "$OPENCLAW_SIGNING_KMS_KEY_ARN" ] ||
+        die "OpenClaw rollout KMS key state bindingが不正です"
+    fi
+    FORCED_ROLLBACK_DM_QA_RESULT=""
+    if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ]; then
+      FORCED_ROLLBACK_DM_QA_EVIDENCE_BUCKET="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          forced_rollback_drill_evidence_bucket
+      )" ||
+        die "forced rollback evidence bucketをstateから固定できません"
+      FORCED_ROLLBACK_DM_QA_EVIDENCE_PREFIX="$(
+        terraform -chdir="$TF_DIR" output -raw \
+          forced_rollback_drill_evidence_prefix
+      )" ||
+        die "forced rollback evidence prefixをstateから固定できません"
+      [ "$FORCED_ROLLBACK_DM_QA_EVIDENCE_BUCKET" = \
+        "teamagent-dev-openclaw-rollout-evidence" ] &&
+        [ "$FORCED_ROLLBACK_DM_QA_EVIDENCE_PREFIX" = \
+          "forced-rollback-drills/" ] ||
+        die "forced rollback DM QA evidence state bindingが不正です"
+    fi
     if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then
       [ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" = \
         "$OPENCLAW_NEW_TASK_DEFINITION" ] ||
@@ -11803,21 +12799,6 @@ case "$COMMAND" in
       [ "$OPENCLAW_PREVIOUS_TASK_DEFINITION" != \
         "$OPENCLAW_NEW_TASK_DEFINITION" ] ||
         die "planned OpenClaw candidateがdistinct live revisionになっていません"
-      OPENCLAW_EVIDENCE_KMS_KEY_ARN="$(
-        terraform -chdir="$TF_DIR" output -raw \
-          openclaw_rollout_evidence_key_arn
-      )" ||
-        die "OpenClaw rollout evidence KMS keyをstateから固定できません"
-      OPENCLAW_SIGNING_KMS_KEY_ARN="$(
-        terraform -chdir="$TF_DIR" output -raw \
-          openclaw_rollout_signing_key_arn
-      )" ||
-        die "OpenClaw rollout signing KMS keyをstateから固定できません"
-      [[ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] &&
-        [[ "$OPENCLAW_SIGNING_KMS_KEY_ARN" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f-]{36}$ ]] &&
-        [ "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" !=
-          "$OPENCLAW_SIGNING_KMS_KEY_ARN" ] ||
-        die "OpenClaw rollout KMS key state bindingが不正です"
       if ! node "$OPENCLAW_ROLLOUT_GATE" \
         --new-task-definition "$OPENCLAW_NEW_TASK_DEFINITION" \
         --previous-task-definition "$OPENCLAW_PREVIOUS_TASK_DEFINITION" \
@@ -11930,6 +12911,53 @@ case "$COMMAND" in
       )" ] ||
         die "OpenClaw immutable result hashがpersisted bytesと不一致です"
     fi
+    if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ]; then
+      FORCED_ROLLBACK_DM_QA_RESULT="$TMP_ROOT/forced-rollback-dm-qa-result.json"
+      if run_forced_rollback_dm_qa \
+        "$TMP_ROOT/applied-live.json" \
+        "$APPLY_ATTEMPT_ID" \
+        "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" \
+        "$FORCED_ROLLBACK_DM_QA_RESULT" \
+        "$FORCED_ROLLBACK_DM_QA_EVIDENCE_BUCKET" \
+        "$FORCED_ROLLBACK_DM_QA_EVIDENCE_PREFIX" \
+        "$OPENCLAW_EVIDENCE_KMS_KEY_ARN" \
+        "$OPENCLAW_SIGNING_KMS_KEY_ARN"; then
+        :
+      else
+        DM_QA_STATUS=$?
+        if [ "$DM_QA_STATUS" -eq 124 ]; then
+          echo "FATAL: forced rollback DM QA timed out before old-dwell recovery reserve" >&2
+          exit 124
+        fi
+        echo "FATAL: forced rollback DM QA failed; apply saga must not be finalized" >&2
+        exit 24
+      fi
+      jq -S -c \
+        --slurpfile dm_qa "$FORCED_ROLLBACK_DM_QA_RESULT" \
+        '. + {dmQa:$dm_qa[0]}' \
+        "$OPENCLAW_ROLLOUT_RESULT" \
+        > "$OPENCLAW_ROLLOUT_RESULT.with-dm-qa"
+      mv "$OPENCLAW_ROLLOUT_RESULT.with-dm-qa" \
+        "$OPENCLAW_ROLLOUT_RESULT"
+      jq -e \
+        --arg attempt "$APPLY_ATTEMPT_ID" \
+        --arg openclaw "$OPENCLAW_NEW_TASK_DEFINITION" \
+        --arg mcp "$MCP_NEW_TASK_DEFINITION" '
+        .dmQa.kind == "teamagent-forced-rollback-dm-qa-result" and
+        .dmQa.schema_version == 1 and
+        .dmQa.result == "PASSED" and
+        .dmQa.applyAttemptId == $attempt and
+        .dmQa.openclawTaskDefinitionArn == $openclaw and
+        .dmQa.mcpTaskDefinitionArn == $mcp and
+        .dmQa.locator.object_lock_mode == "COMPLIANCE" and
+        .dmQa.locator.signature.verified == true and
+        .dmQa.locator.exact_version_redownload.bytes_match == true
+      ' "$OPENCLAW_ROLLOUT_RESULT" >/dev/null ||
+        die "forced rollback DM QA result was not bound to the apply result"
+      if ! ensure_forced_rollback_dm_qa_recovery_reserve "DM QA"; then
+        exit 124
+      fi
+    fi
     jq -S -c . "$OPENCLAW_ROLLOUT_RESULT" \
       > "$OPENCLAW_ROLLOUT_RESULT.canonical"
     mv "$OPENCLAW_ROLLOUT_RESULT.canonical" "$OPENCLAW_ROLLOUT_RESULT"
@@ -11945,6 +12973,10 @@ case "$COMMAND" in
     chmod 600 "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT"
     validate_eventbridge_saga_receipt \
       "$EVENTBRIDGE_SAGA_VERIFY_RECEIPT" "verified_applied"
+    if ! ensure_forced_rollback_dm_qa_recovery_reserve \
+      "EventBridge verification"; then
+      exit 124
+    fi
 
     python3 "$ECS_SERVICE_APPLY_SAGA" verify \
       --aws-bin "$AWS_BIN" \
@@ -12142,7 +13174,14 @@ case "$COMMAND" in
         shared_deployment_lock_receipt:$shared_lock[0]
       }' > "$APPLY_DRAFT"
     chmod 600 "$APPLY_DRAFT"
-    jq -e '
+    jq -e \
+      --argjson forced_dm_qa_required "$(
+        if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ]; then
+          printf true
+        else
+          printf false
+        fi
+      )" '
       def task_revisions($resources):
         $resources |
         map({
@@ -12172,6 +13211,22 @@ case "$COMMAND" in
       (.post_apply_service_probe_sha256 | test("^[0-9a-f]{64}$")) and
       .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
       (.openclaw_rollout_result_sha256 | test("^[0-9a-f]{64}$")) and
+      (
+        if $forced_dm_qa_required then
+          .openclaw_rollout_result.dmQa.result == "PASSED" and
+          .openclaw_rollout_result.dmQa.applyAttemptId ==
+            .apply_attempt_id and
+          .openclaw_rollout_result.dmQa.locator.object_lock_mode ==
+            "COMPLIANCE" and
+          .openclaw_rollout_result.dmQa.locator.key ==
+            (
+              "forced-rollback-drills/" + .apply_attempt_id +
+              "/dm-qa/result.json"
+            )
+        else
+          true
+        end
+      ) and
       (
         if .media_cutover_receipt_sha256 == "" then
           .media_apply_authorization_sha256 == "" and
@@ -12231,6 +13286,10 @@ case "$COMMAND" in
         .post_state_contract.state.serial
     ' "$APPLY_DRAFT" >/dev/null ||
       die "apply receipt draft schema/provenance bindingの生成に失敗しました"
+    if ! ensure_forced_rollback_dm_qa_recovery_reserve \
+      "pre-finalization verification"; then
+      exit 124
+    fi
     stop_gate_heartbeat
     python3 "$DEPLOYMENT_APPLY_FINALIZER" commit \
       --aws-bin "$AWS_BIN" \

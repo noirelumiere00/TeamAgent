@@ -1635,14 +1635,26 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert '"$stage/plan-state-contract.json"' in guard
     apply_case = guard[guard.index("  apply)") :]
     revision_gate = apply_case.index('if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then')
+    rollout_else = apply_case.index("\n    else\n", revision_gate)
     rollout_call = apply_case.index(
         'if ! node "$OPENCLAW_ROLLOUT_GATE"',
-        revision_gate,
+        rollout_else,
     )
+    dm_qa_gate = apply_case.index(
+        'if [ -n "$FORCED_ROLLBACK_DM_QA_DEADLINE_EPOCH" ]; then',
+        rollout_call,
+    )
+    rollout_branch_end = apply_case.rindex(
+        "\n    fi\n",
+        rollout_call,
+        dm_qa_gate,
+    )
+    dm_qa_call = apply_case.index("if run_forced_rollback_dm_qa", dm_qa_gate)
+    dm_qa_binding = apply_case.index(". + {dmQa:$dm_qa[0]}", dm_qa_call)
     service_probe = apply_case.index("run_post_apply_service_probe")
     eventbridge_verified = apply_case.index(
         'python3 "$EVENTBRIDGE_APPLY_SAGA" verify',
-        rollout_call,
+        dm_qa_binding,
     )
     ecs_verified = apply_case.index(
         'python3 "$ECS_SERVICE_APPLY_SAGA" verify',
@@ -1657,13 +1669,28 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         heartbeat_stop_before_finalize,
     )
     assert (
-        service_probe
+        apply_case.index('"$APPLY_SUPERVISOR"')
+        < service_probe
+        < revision_gate
         < rollout_call
+        < rollout_branch_end
+        < dm_qa_gate
+        < dm_qa_call
+        < dm_qa_binding
         < eventbridge_verified
         < ecs_verified
         < heartbeat_stop_before_finalize
         < composite_finalize
     )
+    unchanged_rollout_branch = apply_case[revision_gate:rollout_else]
+    assert "task-definition-unchanged" in unchanged_rollout_branch
+    assert "run_forced_rollback_dm_qa" not in unchanged_rollout_branch
+    assert (
+        "run_forced_rollback_dm_qa"
+        not in apply_case[revision_gate : rollout_branch_end + len("\n    fi\n")]
+    )
+    assert "OPENCLAW_ROLLOUT_REQUIRED" not in apply_case[dm_qa_gate:dm_qa_call]
+    assert apply_case.count("if run_forced_rollback_dm_qa") == 1
     assert apply_case.index("--restore-and-verify") < revision_gate < rollout_call
     assert apply_case.index('OPENCLAW_POST_APPLY_STARTED="true"') < rollout_call
     assert 'OPENCLAW_ROLLOUT_REQUIRED="$(' in apply_case
@@ -1680,6 +1707,9 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert apply_case.index('rm -f "$STAGED_PLAN"') < ecs_begin
     assert "stop_gate_heartbeat" not in apply_case[heartbeat_restart:rollout_call]
     assert "release-deployment-lock" not in apply_case[heartbeat_restart:rollout_call]
+    assert '.dmQa.result == "PASSED"' in apply_case
+    assert ".dmQa.applyAttemptId == $attempt" in apply_case
+    assert '.dmQa.locator.object_lock_mode == "COMPLIANCE"' in apply_case
     assert ".schema_version == 7" in apply_case
     assert "openclaw_rollout_result_sha256" in apply_case
     assert "post_apply_service_probe_sha256" in apply_case
@@ -1691,15 +1721,73 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert '--revision-id "$revision_id"' in apply_case
     assert "pre_live_contract:$pre_live_contract[0]" in apply_case
     assert "pre_state_contract:$pre_state_contract[0]" in apply_case
-    assert "post_live_contract:$post_live_contract[0]" in apply_case
+    # post_live_contract is rebuilt from the applied live state (images come from
+    # $live[0]); only .resources is taken from the scoped contract wholesale.
+    assert "post_live_contract:{" in apply_case
+    assert "resources:$post_live_contract[0].resources" in apply_case
     assert "post_state_contract:$post_state_contract[0]" in apply_case
     assert "task_revisions(.pre_live_contract.resources)" in apply_case
     assert "task_revisions(.post_live_contract.resources)" in apply_case
+
+    dm_qa_start = guard.index("run_forced_rollback_dm_qa() {")
+    dm_qa = guard[dm_qa_start : guard.index("\nwrite_preflight_receipt()", dm_qa_start)]
+    assert "FORCED_ROLLBACK_DM_QA_MAX_SECONDS=300" in guard
+    assert "FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS=30" in guard
+    assert "--forced-rollback-dm-qa-deadline-epoch)" in apply_case
+    assert (
+        "available=$((deadline_epoch - now - FORCED_ROLLBACK_DM_QA_RECOVERY_RESERVE_SECONDS))"
+    ) in dm_qa
+    assert ('if [ "$timeout_seconds" -gt "$FORCED_ROLLBACK_DM_QA_MAX_SECONDS" ]; then') in dm_qa
+    assert 'timeout_seconds="$FORCED_ROLLBACK_DM_QA_MAX_SECONDS"' in dm_qa
+    assert "deadline_monotonic = started_monotonic + int(timeout_seconds_raw)" in dm_qa
+    assert "timeout=remaining()" in dm_qa
+    assert "timeout=min(15.0, remaining())" in dm_qa
+    assert "time.sleep(min(3.0, remaining()))" in dm_qa
+    assert "time.sleep(min(2.0, remaining()))" in dm_qa
+    assert "return 124" in dm_qa
+    assert "raise SystemExit(124)" in dm_qa
+    assert 'if [ "$DM_QA_STATUS" -eq 124 ]; then' in apply_case
+    assert "exit 124" in apply_case[dm_qa_call:eventbridge_verified]
+    # The non-timeout DM QA failure must also stay fatal: a mutation that swallows
+    # this branch survived the whole suite once, so pin the fail-closed exit here.
+    assert "apply saga must not be finalized" in apply_case[dm_qa_call:eventbridge_verified]
+    assert "exit 24" in apply_case[dm_qa_call:eventbridge_verified]
+    assert '"--object-lock-mode",' in dm_qa
+    assert 'metadata.get("ObjectLockMode") != "COMPLIANCE"' in dm_qa
+    assert '"object_lock_mode": "COMPLIANCE"' in dm_qa
+    assert '.locator.object_lock_mode == "COMPLIANCE"' in dm_qa
+    assert "forced_rollback_drill_evidence_bucket" in apply_case
+    assert "forced_rollback_drill_evidence_prefix" in apply_case
+    assert '"forced-rollback-drills/"' in apply_case
+    assert '"$OPENCLAW_SIGNING_KMS_KEY_ARN"; then' in apply_case[dm_qa_call:eventbridge_verified]
+    assert 'f"{EVIDENCE_PREFIX}/{apply_attempt_id}/dm-qa/result.json"' in dm_qa
+    assert '"signing_kms_key_arn": signing_kms_key_arn' in dm_qa
+    assert '"signing_algorithm": SIGNING_ALGORITHM' in dm_qa
+    assert '"verify",' in dm_qa
+    assert 'page_arguments.extend(["--next-token", next_token])' in dm_qa
+    assert 'returned_token = response.get("nextToken")' in dm_qa
+    assert "seen_tokens.add(returned_token)" in dm_qa
+    assert "service_name=MCP_SERVICE" in dm_qa
+    assert '"mcp_running_tasks_before": mcp_running_before' in dm_qa
+    assert '"mcp_running_tasks_after": mcp_running_after' in dm_qa
+    reserve_checks = apply_case.count("ensure_forced_rollback_dm_qa_recovery_reserve")
+    assert reserve_checks == 3
+    assert (
+        apply_case.rindex(
+            "ensure_forced_rollback_dm_qa_recovery_reserve",
+            0,
+            composite_finalize,
+        )
+        < composite_finalize
+    )
+    assert "$forced_dm_qa_required" in apply_case[dm_qa_binding:composite_finalize]
+
     cleanup = apply_case[
         apply_case.index("cleanup_apply_command()") : apply_case.index(
             "trap 'cleanup_apply_command' EXIT"
         )
     ]
+    assert '[ "$OPENCLAW_ROLLOUT_REQUIRED" = "true" ]' in cleanup
     recovery_probe = cleanup.index("recover_committed_finalization")
     lambda_restore = cleanup.index("restore_lambda_dispatcher_baselines")
     eventbridge_restore = cleanup.index('python3 "$EVENTBRIDGE_APPLY_SAGA" finish')
@@ -1708,9 +1796,9 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert recovery_probe < ecs_restore < lock_cleanup
     assert recovery_probe < lambda_restore < eventbridge_restore < ecs_restore < lock_cleanup
 
-    probe = guard[
-        guard.index("run_post_apply_service_probe()") : guard.index("\nwrite_preflight_receipt()")
-    ]
+    probe_start = guard.index("run_post_apply_service_probe()")
+    probe_end = guard.index("\nrun_forced_rollback_dm_qa()", probe_start)
+    probe = guard[probe_start:probe_end]
     for expected in (
         "http://teamagent-mcp.teamagent.internal:8787/healthz",
         "http://connect-web.teamagent.internal:8788/healthz",

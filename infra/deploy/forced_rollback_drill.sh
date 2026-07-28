@@ -1800,6 +1800,55 @@ validate_apply_receipt() {
     ([.post_apply_service_probe.result.checks[]] | all(. == true)) and
     .openclaw_rollout_result.passed == true and
     .openclaw_rollout_result.applyAttemptId == .apply_attempt_id and
+    (.openclaw_rollout_result.dmQa as $dm_qa |
+      ($dm_qa | keys | sort) == ([
+        "applyAttemptId",
+        "kind",
+        "locator",
+        "mcpTaskDefinitionArn",
+        "openclawTaskDefinitionArn",
+        "result",
+        "schema_version",
+        "verified_at_utc"
+      ] | sort) and
+      $dm_qa.kind == "teamagent-forced-rollback-dm-qa-result" and
+      $dm_qa.schema_version == 1 and
+      $dm_qa.result == "PASSED" and
+      $dm_qa.applyAttemptId == .apply_attempt_id and
+      ($dm_qa.verified_at_utc |
+        test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")) and
+      ($dm_qa.openclawTaskDefinitionArn |
+        test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:[1-9][0-9]*$")) and
+      $dm_qa.openclawTaskDefinitionArn ==
+        .openclaw_rollout_result.newTaskDefinitionArn and
+      any($expected[0].resources[];
+        .consumer_id == "mcp" and
+        .task_definition_arn == $dm_qa.mcpTaskDefinitionArn
+      ) and
+      ($dm_qa.locator | keys | sort) == ([
+        "bucket",
+        "content_type",
+        "encryption_kms_key_arn",
+        "exact_version_redownload",
+        "key",
+        "object_lock_mode",
+        "retain_until",
+        "sha256",
+        "signature",
+        "signer",
+        "size",
+        "version_id"
+      ] | sort) and
+      $dm_qa.locator.object_lock_mode == "COMPLIANCE" and
+      $dm_qa.locator.key == (
+        "forced-rollback-drills/" + .apply_attempt_id +
+        "/dm-qa/result.json"
+      ) and
+      ($dm_qa.locator.sha256 | test("^[0-9a-f]{64}$")) and
+      $dm_qa.locator.signature.key == ($dm_qa.locator.key + ".sig") and
+      $dm_qa.locator.signature.verified == true and
+      $dm_qa.locator.exact_version_redownload.bytes_match == true
+    ) and
     .ecs_service_saga_verification_receipt.stage == "VERIFIED_APPLIED" and
     .ecs_service_saga_verification_receipt.apply_attempt_id ==
       .apply_attempt_id and
@@ -1820,7 +1869,7 @@ apply_leg_command() {
   local requested_dir="" leg="" expected state_key approval_id approval_action
   local drill_id leg_path plan receipt apply_receipt plan_sha expected_text supplied
   local now started applied_epoch post_serial post_lineage plan_serial
-  local attempt target_sha next_state
+  local attempt target_sha next_state dm_qa_deadline guard_status
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --drill-dir)
@@ -1887,6 +1936,11 @@ apply_leg_command() {
   [ ! -e "$apply_receipt" ] && [ ! -L "$apply_receipt" ] ||
     die "apply receipt already exists; this plan cannot be executed again"
   started="$now"
+  if [ "$leg" = "rollback-to-previous" ]; then
+    dm_qa_deadline="$((started + MAX_OLD_DWELL_SECONDS))"
+  else
+    dm_qa_deadline="$(jq -er '.old_dwell.deadline_epoch' "$STATE_FILE")"
+  fi
   replace_state \
     --arg key "$state_key" \
     --arg approval_id "$approval_id" \
@@ -1900,6 +1954,7 @@ apply_leg_command() {
         shasum -a 256 | awk '{print $1}'
       fi
     })" \
+    --argjson dm_qa_deadline "$dm_qa_deadline" \
     --argjson now "$now" '
     .state = "RECOVERY_REQUIRED" |
     .updated_at_epoch = $now |
@@ -1911,7 +1966,13 @@ apply_leg_command() {
       plan_sha256:$plan_sha,
       approval_text_sha256:$text_sha,
       consumed_at_epoch:$now
-    }
+    } |
+    if $key == "rollback_to_previous" then
+      .old_dwell.started_at_epoch = $now |
+      .old_dwell.deadline_epoch = $dm_qa_deadline
+    else
+      .
+    end
   '
 
   if ! bash "$TERRAFORM_RUNTIME_GUARD" verify \
@@ -1930,10 +1991,28 @@ apply_leg_command() {
     check_old_dwell ||
       die "old dwell exceeded 20 minutes before restore apply"
   fi
-  if ! bash "$TERRAFORM_RUNTIME_GUARD" apply \
+  if [ "$now" -ge "$dm_qa_deadline" ]; then
+    record_failure "$leg" dm-qa-timeout \
+      "no bounded DM QA window remained before guarded apply"
+    die "DM QA deadline elapsed before apply; recovery is required"
+  fi
+  if bash "$TERRAFORM_RUNTIME_GUARD" apply \
     --plan "$plan" \
     --receipt "$receipt" \
+    --forced-rollback-dm-qa-deadline-epoch "$dm_qa_deadline" \
     --out "$apply_receipt"; then
+    :
+  else
+    guard_status=$?
+    if [ "$guard_status" -eq 124 ]; then
+      record_failure "$leg" dm-qa-timeout \
+        "forced rollback DM QA exhausted its bounded old-dwell window"
+      die "DM QA timed out; recovery is required and the plan must not be retried"
+    fi
+    if [ "$guard_status" -eq 24 ]; then
+      record_failure "$leg" dm-qa "forced rollback DM QA failed"
+      die "DM QA failed; recovery is required and the plan must not be retried"
+    fi
     record_failure "$leg" apply "guarded apply or pre-finalization QA failed"
     die "guarded apply failed; the plan must not be retried"
   fi
@@ -1981,7 +2060,7 @@ apply_leg_command() {
     --argjson post_serial "$post_serial" \
     --argjson started "$started" \
     --argjson applied "$applied_epoch" \
-    --argjson dwell_deadline "$((started + MAX_OLD_DWELL_SECONDS))" \
+    --argjson dwell_deadline "$dm_qa_deadline" \
     --argjson now "$now" '
     .state = $next_state |
     .updated_at_epoch = $now |
@@ -2452,8 +2531,18 @@ build_aggregate() {
             evidence:($leg1_apply[0].post_apply_service_probe // {})
           },
           dm_qa:{
-            passed:$leg1_result,
-            evidence:($leg1_apply[0].openclaw_rollout_result // {})
+            result:(
+              if $leg1_result and
+                $leg1_apply[0].openclaw_rollout_result.dmQa.result == "PASSED"
+              then "PASSED"
+              else "FAILED"
+              end
+            ),
+            verified_at_utc:$leg1_completed,
+            subject_digests:$old[0].subjects,
+            locator:(
+              $leg1_apply[0].openclaw_rollout_result.dmQa.locator // {}
+            )
           },
           started_at_utc:$leg1_started,
           completed_at_utc:$leg1_completed,
@@ -2497,8 +2586,18 @@ build_aggregate() {
             evidence:($leg2_apply[0].post_apply_service_probe // {})
           },
           dm_qa:{
-            passed:$leg2_result,
-            evidence:($leg2_apply[0].openclaw_rollout_result // {})
+            result:(
+              if $leg2_result and
+                $leg2_apply[0].openclaw_rollout_result.dmQa.result == "PASSED"
+              then "PASSED"
+              else "FAILED"
+              end
+            ),
+            verified_at_utc:$leg2_completed,
+            subject_digests:$new[0].subjects,
+            locator:(
+              $leg2_apply[0].openclaw_rollout_result.dmQa.locator // {}
+            )
           },
           started_at_utc:$leg2_started,
           completed_at_utc:$leg2_completed,
@@ -2527,7 +2626,18 @@ build_aggregate() {
           end
         )
       },
-      artifact_manifest:$contract[0].evidence.artifact_manifest,
+      artifact_manifest:(
+        (
+          $contract[0].evidence.artifact_manifest +
+          [
+            $leg1_apply[0].openclaw_rollout_result.dmQa.locator,
+            $leg2_apply[0].openclaw_rollout_result.dmQa.locator
+          ]
+        ) |
+        map(select(type == "object" and length > 0)) |
+        sort_by([.bucket, .key, .version_id]) |
+        unique_by([.bucket, .key, .version_id])
+      ),
       integrity:{
         canonical_sha256:"",
         kms_key_arn:$contract[0].evidence.integrity.kms_key_arn,
