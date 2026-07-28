@@ -59,6 +59,11 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
 
+new_uuid_v4() {
+  need_cmd python3
+  python3 -c 'import uuid; print(uuid.uuid4())'
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
