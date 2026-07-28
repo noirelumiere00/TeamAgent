@@ -1630,6 +1630,9 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "process.env.CANARY_SECRET" not in rollout
 
     guard = RUNTIME_GUARD.read_text()
+    assert '--slurpfile state_contract "$TMP_ROOT/plan-state-contract.json"' in guard
+    assert ". == ($receipt[0].state_contract | del(.task_revisions))" in guard
+    assert '"$stage/plan-state-contract.json"' in guard
     apply_case = guard[guard.index("  apply)") :]
     revision_gate = apply_case.index('if [ "$OPENCLAW_ROLLOUT_REQUIRED" = "false" ]; then')
     rollout_call = apply_case.index(
@@ -1683,15 +1686,27 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert "ecs_service_saga_receipt_sha256" in apply_case
     assert "deployment_finalization_receipt_sha256" in apply_case
     assert "eventbridge_apply_saga_verification_receipt" in apply_case
+    assert "build_scoped_release_live_contract" in apply_case
+    assert "build_scoped_release_state_contract" in apply_case
+    assert '--revision-id "$revision_id"' in apply_case
+    assert "pre_live_contract:$pre_live_contract[0]" in apply_case
+    assert "pre_state_contract:$pre_state_contract[0]" in apply_case
+    assert "post_live_contract:$post_live_contract[0]" in apply_case
+    assert "post_state_contract:$post_state_contract[0]" in apply_case
+    assert "task_revisions(.pre_live_contract.resources)" in apply_case
+    assert "task_revisions(.post_live_contract.resources)" in apply_case
     cleanup = apply_case[
         apply_case.index("cleanup_apply_command()") : apply_case.index(
             "trap 'cleanup_apply_command' EXIT"
         )
     ]
     recovery_probe = cleanup.index("recover_committed_finalization")
+    lambda_restore = cleanup.index("restore_lambda_dispatcher_baselines")
+    eventbridge_restore = cleanup.index('python3 "$EVENTBRIDGE_APPLY_SAGA" finish')
     ecs_restore = cleanup.index('python3 "$ECS_SERVICE_APPLY_SAGA" finish')
     lock_cleanup = cleanup.index('bash "$IMAGE_GATE_RUNNER" release-deployment-lock')
     assert recovery_probe < ecs_restore < lock_cleanup
+    assert recovery_probe < lambda_restore < eventbridge_restore < ecs_restore < lock_cleanup
 
     probe = guard[
         guard.index("run_post_apply_service_probe()") : guard.index("\nwrite_preflight_receipt()")

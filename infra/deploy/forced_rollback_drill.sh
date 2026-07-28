@@ -527,6 +527,32 @@ validate_bound_file() {
     die "$label SHA-256 does not match the drill contract"
 }
 
+validate_initial_release_locator_binding() {
+  local receipt="$1" contract="$2" expected_sha expected_size actual_size
+  if jq -e '
+    .control.initial_release_apply_locator |
+    (has("sha256") or has("size"))
+  ' "$contract" >/dev/null; then
+    jq -e '
+      .control.initial_release_apply_locator |
+      has("sha256") and has("size") and
+      (.sha256 | test("^[0-9a-f]{64}$")) and
+      (.size | type == "number" and . >= 1 and floor == .)
+    ' "$contract" >/dev/null ||
+      die "initial release apply locator has an incomplete byte binding"
+    expected_sha="$(
+      jq -er '.control.initial_release_apply_locator.sha256' "$contract"
+    )"
+    expected_size="$(
+      jq -er '.control.initial_release_apply_locator.size' "$contract"
+    )"
+    actual_size="$(wc -c < "$receipt" | tr -d '[:space:]')"
+    [ "$(sha256_file "$receipt")" = "$expected_sha" ] &&
+      [ "$actual_size" = "$expected_size" ] ||
+      die "initial release apply locator does not bind the exact receipt bytes"
+  fi
+}
+
 validate_state_file() {
   local state="$1"
   if ! validate_json_file "$state"; then
@@ -693,6 +719,7 @@ validate_state_file() {
       "drill_id",
       "failures",
       "final_status",
+      "git_commit",
       "initial_apply_receipt_sha256",
       "initial_release_deadline_epoch",
       "initial_release_verified_at_epoch",
@@ -712,6 +739,7 @@ validate_state_file() {
     (.drill_id | type == "string" and test(
       "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     )) and
+    (.git_commit | test("^[0-9a-f]{40}$")) and
     (.state | IN(
       "PREPARED",
       "PREFLIGHTED",
@@ -845,6 +873,9 @@ load_drill() {
     "$DRILL_DIR/inputs/initial-release.apply.json" \
     "$(jq -er '.initial_apply_receipt_sha256' "$STATE_FILE")" \
     "initial apply receipt"
+  validate_initial_release_locator_binding \
+    "$DRILL_DIR/inputs/initial-release.apply.json" \
+    "$DRILL_DIR/contract.json"
   validate_bound_file \
     "$DRILL_DIR/inputs/terraform.tfvars.json" \
     "$(jq -er '.var_file_sha256' "$STATE_FILE")" \
@@ -852,6 +883,9 @@ load_drill() {
   [ "$(jq -er '.drill_id' "$DRILL_DIR/contract.json")" = \
     "$(jq -er '.drill_id' "$STATE_FILE")" ] ||
     die "drill ID differs between contract and state"
+  [ "$(jq -er '.control.git_commit' "$DRILL_DIR/contract.json")" = \
+    "$(jq -er '.git_commit' "$STATE_FILE")" ] ||
+    die "git commit differs between contract and state"
   validate_target_file "$(target_file old)"
   validate_target_file "$(target_file new)"
   jq -e --slurpfile old "$(target_file old)" \
@@ -1071,6 +1105,7 @@ prepare_command() {
   validate_contract_file "$contract"
   validate_json_file "$initial_apply"
   validate_json_file "$var_file"
+  validate_initial_release_locator_binding "$initial_apply" "$contract"
   jq -e 'type == "object"' "$var_file" >/dev/null ||
     die "base var-file must contain one JSON object"
 
@@ -1203,6 +1238,7 @@ prepare_command() {
   jq -n -S -c \
     --argjson schema_version "$SCHEMA_VERSION" \
     --arg drill_id "$(jq -er '.drill_id' "$contract")" \
+    --arg git_commit "$(jq -er '.control.git_commit' "$contract")" \
     --arg contract_sha256 "$contract_sha" \
     --arg initial_apply_receipt_sha256 "$initial_sha" \
     --arg var_file_sha256 "$var_sha" \
@@ -1219,6 +1255,7 @@ prepare_command() {
       schema_version:$schema_version,
       kind:"teamagent.forced-rollback-drill-state",
       drill_id:$drill_id,
+      git_commit:$git_commit,
       state:"PREPARED",
       contract_sha256:$contract_sha256,
       initial_apply_receipt_sha256:$initial_apply_receipt_sha256,
@@ -2074,8 +2111,215 @@ with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
 PY
 }
 
+build_trusted_scope() {
+  local output="$1"
+  python3 - \
+    "$CONSUMER_REGISTRY" \
+    "$DRILL_DIR/inputs/initial-release.apply.json" \
+    "$output" <<'PY'
+import json
+import os
+import re
+import sys
+
+registry_path, receipt_path, output_path = sys.argv[1:]
+with open(registry_path, encoding="utf-8") as handle:
+    registry = json.load(handle)
+with open(receipt_path, encoding="utf-8") as handle:
+    receipt = json.load(handle)
+
+
+def fail(message):
+    raise SystemExit(f"trusted scope: {message}")
+
+
+def resource_index(value, label):
+    if not isinstance(value, list) or not value:
+        fail(f"{label} must contain scoped resources")
+    result = {}
+    for resource in value:
+        if not isinstance(resource, dict):
+            fail(f"{label} contains a non-object resource")
+        consumer_id = resource.get("consumer_id")
+        if not isinstance(consumer_id, str) or not consumer_id:
+            fail(f"{label} contains an invalid consumer_id")
+        if consumer_id in result:
+            fail(f"{label} contains duplicate consumer_id {consumer_id}")
+        result[consumer_id] = resource
+    return result
+
+
+def registry_index(value):
+    consumers = value.get("consumers") if isinstance(value, dict) else None
+    if not isinstance(consumers, list) or not consumers:
+        fail("consumer registry is empty")
+    result = {}
+    for consumer in consumers:
+        if not isinstance(consumer, dict):
+            fail("consumer registry contains a non-object consumer")
+        consumer_id = consumer.get("consumer_id")
+        if not isinstance(consumer_id, str) or not consumer_id:
+            fail("consumer registry contains an invalid consumer_id")
+        if consumer_id in result:
+            fail(f"consumer registry contains duplicate {consumer_id}")
+        result[consumer_id] = consumer
+    return result
+
+
+image_pattern = re.compile(
+    r"^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/"
+    r"(?P<repository>[a-z0-9._/-]+)@"
+    r"(?P<digest>sha256:[0-9a-f]{64})$"
+)
+task_pattern = re.compile(
+    r"^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/"
+    r"(?P<family>[A-Za-z0-9_-]+):(?P<revision>[1-9][0-9]*)$"
+)
+
+
+def digest_for(resource, owner, label):
+    image = resource.get("image")
+    match = image_pattern.fullmatch(image) if isinstance(image, str) else None
+    if match is None:
+        fail(f"{label} has a non-canonical image")
+    if match.group("repository") != owner.get("release_repository"):
+        fail(f"{label} image repository differs from the registry")
+    return match.group("digest")
+
+
+def task_for(resource, owner, label):
+    arn = resource.get("task_definition_arn")
+    match = task_pattern.fullmatch(arn) if isinstance(arn, str) else None
+    if match is None:
+        fail(f"{label} has a non-canonical task definition ARN")
+    if match.group("family") != owner.get("ecs_family"):
+        fail(f"{label} task definition family differs from the registry")
+    return arn, int(match.group("revision"))
+
+
+try:
+    previous_resources = receipt["pre_live_contract"]["resources"]
+    initial_resources = receipt["post_live_contract"]["resources"]
+    previous_revisions = receipt["pre_state_contract"]["task_revisions"]
+    initial_revisions = receipt["post_state_contract"]["task_revisions"]
+except (KeyError, TypeError):
+    fail("initial release receipt lacks exact pre/post resource contracts")
+
+previous_by_id = resource_index(previous_resources, "pre_live_contract.resources")
+initial_by_id = resource_index(initial_resources, "post_live_contract.resources")
+if set(previous_by_id) != set(initial_by_id):
+    fail("pre/post live contracts have different consumer scopes")
+consumer_ids = sorted(initial_by_id)
+owners = registry_index(registry)
+if any(consumer_id not in owners for consumer_id in consumer_ids):
+    fail("initial release receipt contains an unregistered consumer")
+if (
+    not isinstance(previous_revisions, dict)
+    or not isinstance(initial_revisions, dict)
+    or set(previous_revisions) != set(consumer_ids)
+    or set(initial_revisions) != set(consumer_ids)
+):
+    fail("pre/post task revisions do not exactly cover the scoped consumers")
+
+subjects_by_identity = {}
+resources = []
+for consumer_id in consumer_ids:
+    owner = owners[consumer_id]
+    owner_receipt = owner.get("receipt")
+    if not isinstance(owner_receipt, dict):
+        fail(f"registry consumer {consumer_id} lacks receipt ownership")
+    pipeline = owner_receipt.get("pipeline")
+    subject = owner_receipt.get("subject")
+    terraform_address = owner.get("terraform_task_definition_address")
+    if not all(
+        isinstance(value, str) and value
+        for value in (pipeline, subject, terraform_address)
+    ):
+        fail(f"registry consumer {consumer_id} has incomplete ownership")
+
+    previous = previous_by_id[consumer_id]
+    initial = initial_by_id[consumer_id]
+    for label, resource in (("previous", previous), ("initial", initial)):
+        if resource.get("pipeline") != pipeline:
+            fail(f"{label} resource {consumer_id} pipeline differs from registry")
+        if resource.get("subject") != subject:
+            fail(f"{label} resource {consumer_id} subject differs from registry")
+        if resource.get("terraform_address") != terraform_address:
+            fail(
+                f"{label} resource {consumer_id} Terraform address differs from registry"
+            )
+
+    previous_digest = digest_for(previous, owner, f"previous resource {consumer_id}")
+    initial_digest = digest_for(initial, owner, f"initial resource {consumer_id}")
+    previous_arn, previous_revision = task_for(
+        previous, owner, f"previous resource {consumer_id}"
+    )
+    initial_arn, initial_revision = task_for(
+        initial, owner, f"initial resource {consumer_id}"
+    )
+    if (
+        type(previous_revisions[consumer_id]) is not int
+        or type(initial_revisions[consumer_id]) is not int
+        or previous_revisions[consumer_id] != previous_revision
+        or initial_revisions[consumer_id] != initial_revision
+    ):
+        fail(f"resource {consumer_id} ARN/revision binding is inconsistent")
+
+    subject_identity = (pipeline, subject)
+    subject_value = {
+        "pipeline": pipeline,
+        "name": subject,
+        "release_repository": owner["release_repository"],
+        "previous_digest": previous_digest,
+        "initial_new_digest": initial_digest,
+    }
+    existing_subject = subjects_by_identity.setdefault(
+        subject_identity,
+        subject_value,
+    )
+    if existing_subject != subject_value:
+        fail(f"subject {pipeline}/{subject} has inconsistent resource digests")
+    resources.append(
+        {
+            "consumer_id": consumer_id,
+            "terraform_address": terraform_address,
+            "pipeline": pipeline,
+            "subject": subject,
+            "previous_task_definition_arn": previous_arn,
+            "previous_task_revision": previous_revision,
+            "initial_new_task_definition_arn": initial_arn,
+            "initial_new_task_revision": initial_revision,
+        }
+    )
+
+subjects = [
+    subjects_by_identity[identity]
+    for identity in sorted(subjects_by_identity)
+]
+scope = {
+    "pipelines": sorted({subject["pipeline"] for subject in subjects}),
+    "subjects": subjects,
+    "resources": resources,
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(output_path, flags, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    json.dump(
+        scope,
+        handle,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    handle.write("\n")
+PY
+}
+
 build_aggregate() {
-  local status="$1" output="$2" state="$STATE_FILE"
+  local status="$1" output="$2" trusted_scope="$3" state="$STATE_FILE"
   local leg1_plan leg2_plan leg1_apply leg2_apply
   local leg1_started leg1_completed leg2_started leg2_completed
   leg1_plan="$DRILL_DIR/legs/rollback-to-previous/plan.runtime-guard.json"
@@ -2094,7 +2338,7 @@ build_aggregate() {
     --argjson schema_version "$SCHEMA_VERSION" \
     --arg drill_id "$(jq -er '.drill_id' "$state")" \
     --arg status "$status" \
-    --arg git_commit "$(jq -er '.control.git_commit' "$DRILL_DIR/contract.json")" \
+    --arg git_commit "$(jq -er '.git_commit' "$state")" \
     --arg contract_sha "$(jq -er '.contract_sha256' "$state")" \
     --arg initial_verified "$(
       epoch_to_utc "$(jq -er '.initial_release_verified_at_epoch' "$state")"
@@ -2139,6 +2383,7 @@ build_aggregate() {
     --slurpfile state "$state" \
     --slurpfile old "$(target_file old)" \
     --slurpfile new "$(target_file new)" \
+    --slurpfile trusted_scope "$trusted_scope" \
     --slurpfile initial "$DRILL_DIR/inputs/initial-release.apply.json" \
     --slurpfile leg1_plan "$leg1_plan" \
     --slurpfile leg2_plan "$leg2_plan" \
@@ -2171,11 +2416,7 @@ build_aggregate() {
           $state[0].legs.restore_active.approval
         ] | map(select(. != null))
       },
-      scope:{
-        pipelines:[$contract[0].pipeline],
-        subjects:$new[0].subjects,
-        resources:$new[0].resources
-      },
+      scope:$trusted_scope[0],
       baseline:{
         terraform_lineage:$lineage,
         terraform_serial:$initial_serial,
@@ -2299,10 +2540,18 @@ build_aggregate() {
 }
 
 validate_aggregate() {
-  local source="$1" output="$2"
+  local source="$1" output="$2" trusted_scope="$3"
   PYTHONPATH="$REPO_ROOT/infra/codebuild${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 - "$AGGREGATE_VALIDATOR" "$source" "$output" <<'PY'
+    python3 - \
+      "$AGGREGATE_VALIDATOR" \
+      "$STATE_FILE" \
+      "$DRILL_DIR/contract.json" \
+      "$DRILL_DIR/inputs/initial-release.apply.json" \
+      "$trusted_scope" \
+      "$source" \
+      "$output" <<'PY'
 import copy
+import datetime
 import hashlib
 import importlib.util
 import json
@@ -2311,9 +2560,22 @@ from pathlib import Path
 
 from teamagent_release_approval import canonical_json_bytes
 
-helper_path = Path(sys.argv[1])
-source_path = Path(sys.argv[2])
-output_path = Path(sys.argv[3])
+(
+    helper_argument,
+    state_argument,
+    contract_argument,
+    initial_receipt_argument,
+    trusted_scope_argument,
+    source_argument,
+    output_argument,
+) = sys.argv[1:]
+helper_path = Path(helper_argument)
+state_path = Path(state_argument)
+contract_path = Path(contract_argument)
+initial_receipt_path = Path(initial_receipt_argument)
+trusted_scope_path = Path(trusted_scope_argument)
+source_path = Path(source_argument)
+output_path = Path(output_argument)
 spec = importlib.util.spec_from_file_location(
     "forced_rollback_drill_evidence",
     helper_path,
@@ -2324,6 +2586,45 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 with source_path.open(encoding="utf-8") as handle:
     aggregate = json.load(handle)
+with state_path.open(encoding="utf-8") as handle:
+    state = json.load(handle)
+with contract_path.open(encoding="utf-8") as handle:
+    contract = json.load(handle)
+with initial_receipt_path.open(encoding="utf-8") as handle:
+    initial_receipt = json.load(handle)
+with trusted_scope_path.open(encoding="utf-8") as handle:
+    trusted_scope = json.load(handle)
+
+if state["git_commit"] != contract["control"]["git_commit"]:
+    raise SystemExit("FATAL: trusted git commit binding changed")
+if hashlib.sha256(contract_path.read_bytes()).hexdigest() != state["contract_sha256"]:
+    raise SystemExit("FATAL: trusted drill contract binding changed")
+verified_epoch = initial_receipt.get(
+    "initial_release_verified_at_epoch",
+    initial_receipt.get(
+        "verified_at_epoch",
+        initial_receipt.get("applied_at_epoch"),
+    ),
+)
+if (
+    type(verified_epoch) is not int
+    or verified_epoch != state["initial_release_verified_at_epoch"]
+):
+    raise SystemExit("FATAL: trusted initial release timestamp binding changed")
+initial_verified_at = datetime.datetime.fromtimestamp(
+    verified_epoch,
+    tz=datetime.timezone.utc,
+).isoformat(timespec="seconds").replace("+00:00", "Z")
+expected = {
+    "git_commit": state["git_commit"],
+    "drill_contract_sha256": state["contract_sha256"],
+    # Runtime apply receipts do not carry their own immutable locator.  The
+    # SHA-bound drill contract supplies the exact locator; prepare/load bind
+    # its sha256/size to the copied receipt whenever those fields are present.
+    "initial_release_apply": contract["control"]["initial_release_apply_locator"],
+    "initial_release_verified_at_utc": initial_verified_at,
+    "scope": trusted_scope,
+}
 body = copy.deepcopy(aggregate)
 body["integrity"].pop("canonical_sha256", None)
 body["integrity"].pop("signature", None)
@@ -2331,7 +2632,7 @@ body["integrity"].pop("immutable_object", None)
 aggregate["integrity"]["canonical_sha256"] = hashlib.sha256(
     canonical_json_bytes(body)
 ).hexdigest()
-validated = module.validate_drill_aggregate(aggregate)
+validated = module.validate_drill_evidence(aggregate, expected)
 payload = canonical_json_bytes(validated)
 flags = 0
 if hasattr(__import__("os"), "O_NOFOLLOW"):
@@ -2348,7 +2649,7 @@ PY
 
 finalize_command() {
   local requested_dir="" state status final_receipt plan_sha aggregate_stage
-  local aggregate_out validated_out final_sha now terminal_raw terminal_json
+  local aggregate_out validated_out trusted_scope final_sha now terminal_raw terminal_json
   local terminal_ok="true"
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -2425,28 +2726,33 @@ finalize_command() {
   aggregate_stage="$DRILL_DIR/.aggregate.unvalidated.json"
   aggregate_out="$DRILL_DIR/aggregate.json"
   validated_out="$DRILL_DIR/.aggregate.validated.json"
+  trusted_scope="$DRILL_DIR/.trusted-scope.json"
   [ ! -e "$aggregate_out" ] && [ ! -L "$aggregate_out" ] ||
     die "aggregate evidence already exists"
-  rm -f "$aggregate_stage" "$validated_out"
-  build_aggregate "$status" "$aggregate_stage"
-  if ! validate_aggregate "$aggregate_stage" "$validated_out"; then
-    rm -f "$validated_out"
-    die "validate_drill_aggregate rejected the aggregate evidence"
+  rm -f "$aggregate_stage" "$validated_out" "$trusted_scope"
+  if ! build_trusted_scope "$trusted_scope"; then
+    rm -f "$trusted_scope"
+    die "could not derive trusted scope from registry and initial receipt"
+  fi
+  build_aggregate "$status" "$aggregate_stage" "$trusted_scope"
+  if ! validate_aggregate "$aggregate_stage" "$validated_out" "$trusted_scope"; then
+    rm -f "$validated_out" "$trusted_scope"
+    die "validate_drill_evidence rejected the aggregate evidence"
   fi
   [ "$(jq -er '.status' "$validated_out")" = "$status" ] ||
     {
-      rm -f "$validated_out"
+      rm -f "$validated_out" "$trusted_scope"
       die "aggregate validator changed the drill status"
     }
   if [ "$(jq -er '.failures | length' "$STATE_FILE")" -ne 0 ]; then
     [ "$(jq -er '.status' "$validated_out")" != "PASSED" ] ||
       {
-        rm -f "$validated_out"
+        rm -f "$validated_out" "$trusted_scope"
         die "a drill with a failed leg cannot be finalized as PASSED"
       }
   fi
   mv "$validated_out" "$aggregate_out"
-  rm -f "$aggregate_stage"
+  rm -f "$aggregate_stage" "$trusted_scope"
   chmod 600 "$aggregate_out"
   final_sha="$(sha256_file "$aggregate_out")"
   now="$(date +%s)"

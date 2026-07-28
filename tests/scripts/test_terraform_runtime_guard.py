@@ -204,6 +204,15 @@ def _task_arn(component: str) -> str:
     return f"arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/{family}:{revision}"
 
 
+def _task_state_attributes(component: str) -> dict[str, Any]:
+    _, family, revision = COMPONENTS[component]
+    return {
+        "arn": _task_arn(component),
+        "family": family,
+        "revision": revision,
+    }
+
+
 def _environment() -> list[dict[str, str]]:
     return [
         {"name": "BASE_FLAG", "value": "1"},
@@ -1905,6 +1914,16 @@ def _fake_terraform(path: Path) -> None:
             state_path = os.environ.get("TF_FAKE_STATE")
             if state_path:
                 return json.loads(pathlib.Path(state_path).read_text(encoding="utf-8"))
+            task_definitions = {
+                "openclaw": ("teamagent-dev-openclaw", 25),
+                "mcp": ("teamagent-dev-mcp", 55),
+                "connect_web": ("teamagent-dev-connect-web", 53),
+                "ingest": ("teamagent-dev-ingest", 42),
+                "morning_digest": ("teamagent-dev-morning-digest", 44),
+                "canary": ("teamagent-dev-canary", 14),
+                "tiktok_acquire": ("teamagent-dev-tiktok-acquire", 25),
+                "x_buzz_worker": ("teamagent-dev-x-buzz-worker", 19),
+            }
             plan = json.loads(
                 pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text(
                     encoding="utf-8"
@@ -1927,7 +1946,20 @@ def _fake_terraform(path: Path) -> None:
                         "instances": [],
                     },
                 )
-                instance = {"schema_version": 0, "attributes": {}}
+                attributes = {}
+                if resource_type == "aws_ecs_task_definition":
+                    family, revision = task_definitions[name]
+                    if os.environ.get("TF_FAKE_TASK_REVISION_DRIFT") == name:
+                        revision += 1
+                    attributes = {
+                        "arn": (
+                            "arn:aws:ecs:ap-northeast-1:718959508629:"
+                            f"task-definition/{family}:{revision}"
+                        ),
+                        "family": family,
+                        "revision": revision,
+                    }
+                instance = {"schema_version": 0, "attributes": attributes}
                 if separator:
                     encoded_index = raw_index.removesuffix("]")
                     instance["index_key"] = (
@@ -3082,7 +3114,16 @@ def test_state_address_reconstruction_binds_mixed_exact_address_set(
             base_address = base_address[:-3]
             index_key = 0
         resource_type, name = base_address.split(".", 1)
-        instance: dict[str, Any] = {"schema_version": 0, "attributes": {}}
+        attributes: dict[str, Any] = {}
+        if resource_type == "aws_ecs_task_definition":
+            component = next(
+                key for key, task_address in TASK_ADDRESSES.items() if task_address == address
+            )
+            attributes = _task_state_attributes(component)
+        instance: dict[str, Any] = {
+            "schema_version": 0,
+            "attributes": attributes,
+        }
         if index_key is not None:
             instance["index_key"] = index_key
         state_payload["resources"].append(
@@ -3112,6 +3153,94 @@ def test_state_address_reconstruction_binds_mixed_exact_address_set(
             "".join(f"{address}\n" for address in sorted(addresses)).encode()
         ).hexdigest()
     )
+
+
+def test_scoped_state_revision_is_derived_independently_from_live(
+    tmp_path: Path,
+) -> None:
+    env, _, _ = _harness(tmp_path)
+    body = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"capture_state_contract\(\) \{.*?"
+        r"(?=\nverify_alarm_delivery_test_receipt_legacy_retired\(\))",
+        body,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    tmp_root = tmp_path / "state-contract-tmp"
+    tmp_root.mkdir(mode=0o700)
+    live_contract = tmp_path / "live-contract.json"
+    live_contract.write_text(
+        json.dumps(
+            {
+                "resources": [
+                    {
+                        "activation": {
+                            "identity": "teamagent-dev-mcp",
+                            "state": 1,
+                            "type": "ecs_service",
+                        },
+                        "consumer_id": "mcp",
+                        "image": LIVE_IMAGE,
+                        "pipeline": "mcp",
+                        "subject": "core",
+                        "task_definition_arn": _task_arn("mcp"),
+                        "terraform_address": TASK_ADDRESSES["mcp"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    live_contract.chmod(0o600)
+    output = tmp_path / "scoped-state-contract.json"
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"TMP_ROOT={str(tmp_root)!r}",
+            f"TF_DIR={str(PROJECT_ROOT / 'infra' / 'terraform')!r}",
+            f"CONSUMER_REGISTRY={str(PROJECT_ROOT / 'infra' / 'codebuild' / 'image_deployment_consumers.json')!r}",
+            f"EXPECTED_ACCOUNT_ID={ACCOUNT!r}",
+            f"REGION={REGION!r}",
+            'EXPECTED_WORKSPACE="default"',
+            'die() { echo "★ $*" >&2; return 1; }',
+            "sha256_file() { openssl dgst -sha256 \"$1\" | awk '{print $NF}'; }",
+            """
+capture_backend_identity() {
+  jq -n -S '{
+    type:"s3",
+    identity_sha256:"0000000000000000000000000000000000000000000000000000000000000000"
+  }' > "$1"
+}
+""",
+            function.group(0),
+            'capture_state_contract "$1" "$2"',
+        )
+    )
+
+    accepted = subprocess.run(
+        ["bash", "-c", script, "validator", str(output), str(live_contract)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["task_revisions"] == {
+        "mcp": COMPONENTS["mcp"][2]
+    }
+
+    drifted_env = env.copy()
+    drifted_env["TF_FAKE_TASK_REVISION_DRIFT"] = "mcp"
+    rejected = subprocess.run(
+        ["bash", "-c", script, "validator", str(output), str(live_contract)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=drifted_env,
+    )
+    assert rejected.returncode != 0
+    assert "state task definition binding" in rejected.stdout + rejected.stderr
 
 
 def test_state_address_reconstruction_rejects_unknown_resource_mode(

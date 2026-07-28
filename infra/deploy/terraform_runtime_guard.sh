@@ -50,6 +50,7 @@ DEPLOYMENT_APPLY_FINALIZER="$GUARD_JQ_DIR/deployment_apply_finalizer.py"
 PLAN_CONTRACT_HELPER="$GUARD_JQ_DIR/terraform_plan_contract.py"
 IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
+CONSUMER_REGISTRY="$REPO_ROOT/infra/codebuild/image_deployment_consumers.json"
 IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
 APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
@@ -256,6 +257,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$PLAN_CONTRACT_HELPER"
   assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
+  assert_regular_nonwritable "$CONSUMER_REGISTRY"
   assert_regular_nonwritable "$IMAGE_CONTEXT_HELPER"
   assert_regular_nonwritable "$APPLY_SUPERVISOR"
   assert_regular_nonwritable "$PLAN_STAGER"
@@ -272,6 +274,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$PLAN_CONTRACT_HELPER"
   assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
+  assert_git_tracked_clean "$CONSUMER_REGISTRY"
   assert_git_tracked_clean "$IMAGE_CONTEXT_HELPER"
   assert_git_tracked_clean "$APPLY_SUPERVISOR"
   assert_git_tracked_clean "$PLAN_STAGER"
@@ -319,6 +322,7 @@ write_config_manifest() {
     "$PLAN_CONTRACT_HELPER" \
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
+    "$CONSUMER_REGISTRY" \
     "$IMAGE_CONTEXT_HELPER" \
     "$APPLY_SUPERVISOR" \
     "$PLAN_STAGER" \
@@ -625,6 +629,7 @@ capture_backend_identity() {
 
 capture_state_contract() {
   local output="$1"
+  local live_contract="${2:-}"
   local raw="$TMP_ROOT/state-pull-$RANDOM.json"
   local listed="$TMP_ROOT/state-list-$RANDOM.txt"
   local canonical="$TMP_ROOT/state-list-canonical-$RANDOM.txt"
@@ -632,7 +637,13 @@ capture_state_contract() {
   local specs="$TMP_ROOT/state-import-specs-$RANDOM.json"
   local backend="$TMP_ROOT/backend-identity-$RANDOM.json"
   local backend_after="$TMP_ROOT/backend-identity-after-$RANDOM.json"
+  local base_output="$output"
+  local scoped_output=""
   local workspace address_count address_sha
+  if [ -n "$live_contract" ]; then
+    base_output="$TMP_ROOT/state-contract-base-$RANDOM.json"
+    scoped_output="$TMP_ROOT/state-contract-scoped-$RANDOM.json"
+  fi
 
   capture_backend_identity "$backend"
   workspace="$(terraform -chdir="$TF_DIR" workspace show)"
@@ -800,7 +811,151 @@ capture_state_contract() {
           ({}; . + {($spec.address):ownership($spec)})
       )
     }
-  ' > "$output" || die "state lineage/serial/address/import ownership契約を確定できません"
+  ' > "$base_output" ||
+    die "state lineage/serial/address/import ownership契約を確定できません"
+  if [ -n "$live_contract" ]; then
+    jq -n -S \
+      --arg account "$EXPECTED_ACCOUNT_ID" \
+      --arg region "$REGION" \
+      --slurpfile base "$base_output" \
+      --slurpfile state "$raw" \
+      --slurpfile registry "$CONSUMER_REGISTRY" \
+      --slurpfile live "$live_contract" '
+      def instance_address($resource; $instance):
+        (
+          (if (($resource.module // "") == "") then
+             ""
+           else
+             ($resource.module + ".")
+           end) +
+          (if $resource.mode == "managed" then
+             ""
+           elif $resource.mode == "data" then
+             "data."
+           else
+             error("unsupported state resource mode")
+           end) +
+          $resource.type + "." + $resource.name +
+          (
+            if ($instance | has("index_key")) then
+              if ($instance.index_key | type) == "number" then
+                "[" + ($instance.index_key | tostring) + "]"
+              elif ($instance.index_key | type) == "string" then
+                "[" + ($instance.index_key | tojson) + "]"
+              else
+                error("unsupported state index key")
+              end
+            else
+              ""
+            end
+          )
+        );
+      def registry_owner($scope):
+        ([
+          $registry[0].consumers[] |
+          select(.consumer_id == $scope.consumer_id)
+        ]) as $owners |
+        if (
+          ($owners | length) == 1 and
+          ($owners[0].terraform_task_definition_address |
+            type == "string" and length > 0) and
+          ($owners[0].ecs_family |
+            type == "string" and test("^[A-Za-z0-9_-]+$")) and
+          ($owners[0].receipt | type) == "object" and
+          ($owners[0].activator | type) == "object"
+        ) then
+          $owners[0]
+        else
+          error("consumer registry owner is not exact")
+        end;
+      def state_task_revision($scope):
+        registry_owner($scope) as $owner |
+        ([
+          $state[0].resources[] as $resource |
+          ($resource.instances // [])[] as $instance |
+          select(
+            instance_address($resource; $instance) ==
+              $owner.terraform_task_definition_address
+          ) |
+          {
+            attributes:$instance.attributes,
+            mode:$resource.mode,
+            type:$resource.type
+          }
+        ]) as $matches |
+        if ($matches | length) != 1 then
+          error("scoped task definition address ownership is not exact")
+        else
+          $matches[0] as $match |
+          if (
+            $match.mode == "managed" and
+            $match.type == "aws_ecs_task_definition" and
+            ($match.attributes | type) == "object" and
+            ($match.attributes.family |
+              type == "string" and test("^[A-Za-z0-9_-]+$")) and
+            $match.attributes.family == $owner.ecs_family and
+            ($match.attributes.revision |
+              type == "number" and . >= 1 and floor == .) and
+            ($match.attributes.arn | type) == "string" and
+            $match.attributes.arn ==
+              (
+                "arn:aws:ecs:" + $region + ":" + $account +
+                ":task-definition/" + $match.attributes.family + ":" +
+                ($match.attributes.revision | tostring)
+              ) and
+            $match.attributes.arn == $scope.task_definition_arn and
+            $scope.terraform_address ==
+              $owner.terraform_task_definition_address and
+            $scope.pipeline == $owner.receipt.pipeline and
+            $scope.subject == $owner.receipt.subject and
+            $scope.activation.type == $owner.activator.type and
+            $scope.activation.identity == $owner.activator.identity
+          ) then {
+            key:$scope.consumer_id,
+            value:$match.attributes.revision
+          }
+          else
+            error("state task definition binding differs from live")
+          end
+        end;
+      ($live[0].post_live_contract // $live[0]) as $scope |
+      if (
+        $registry[0].schema_version == 1 and
+        ($registry[0].consumers | type) == "array" and
+        ($scope | type) == "object" and
+        ($scope.resources | type) == "array" and
+        ($scope.resources | map(.consumer_id) | unique | length) ==
+          ($scope.resources | length) and
+        ($scope.resources | map(.terraform_address) | unique | length) ==
+          ($scope.resources | length) and
+        all($scope.resources[];
+          (.consumer_id |
+            type == "string" and
+            test("^[a-z][a-z0-9_]*$")) and
+          (.terraform_address |
+            type == "string" and length > 0) and
+          (.task_definition_arn |
+            type == "string" and
+            test(
+              "^arn:aws:ecs:" + $region + ":" + $account +
+              ":task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$"
+            ))
+        )
+      ) then
+        $base[0] + {
+          task_revisions:(
+            $scope.resources |
+            map(state_task_revision(.)) |
+            from_entries
+          )
+        }
+      else
+        error("invalid scoped live contract")
+      end
+    ' > "$scoped_output" ||
+      die "scope内consumerのTerraform state task definition bindingがlive契約と一致しません"
+    mv "$scoped_output" "$output"
+  fi
 }
 
 verify_alarm_delivery_test_receipt_legacy_retired() {
@@ -1771,6 +1926,199 @@ capture_image_release_context() {
   chmod 600 "$output"
   jq -e . "$output" >/dev/null ||
     die "production provenance Terraform context生成に失敗しました"
+}
+
+build_scoped_release_live_contract() {
+  local context="$1" snapshot="$2" output="$3"
+  jq -n -S \
+    --slurpfile context "$context" \
+    --slurpfile live "$snapshot" '
+    def execution_state($consumer; $phase):
+      if $consumer.activator.type == "ecs_service" then
+        $consumer[$phase].activation.desired_count
+      elif $consumer.activator.type == "eventbridge_rule_ecs_target" then
+        $consumer[$phase].activation.state
+      elif $consumer.activator.type ==
+        "lambda_taskdef_arn_environment" then
+        $consumer[$phase].activation.event_source_mapping_enabled
+      else error("consumer outside code-owned activator types")
+      end;
+    def changes_release_contract($consumer):
+      if (($consumer.before.absent // false) or
+        ($consumer.after.absent // false)) then
+        ($consumer.before.absent // false) !=
+          ($consumer.after.absent // false)
+      else
+        $consumer.before.image != $consumer.after.image or
+        $consumer.before.task_definition !=
+          $consumer.after.task_definition or
+        execution_state($consumer; "before") !=
+          execution_state($consumer; "after")
+      end;
+    def binding($id):
+      if $id == "mcp" then {
+        task:$live[0].taskdefs.mcp,
+        state:$live[0].services.mcp.critical.desired_count
+      }
+      elif $id == "connect_web" then {
+        task:$live[0].taskdefs.connect_web,
+        state:$live[0].services.connect_web.critical.desired_count
+      }
+      elif $id == "openclaw" then {
+        task:$live[0].taskdefs.openclaw,
+        state:$live[0].services.openclaw.critical.desired_count
+      }
+      elif $id == "canary" then {
+        task:$live[0].taskdefs.canary,
+        state:$live[0].rules.canary.critical.state
+      }
+      elif $id == "ingest" then {
+        task:$live[0].taskdefs.ingest,
+        state:$live[0].rules.ingest.critical.state
+      }
+      elif $id == "morning_digest" then {
+        task:$live[0].taskdefs.morning,
+        state:$live[0].rules.morning.critical.state
+      }
+      elif $id == "x_buzz_worker" then {
+        task:$live[0].taskdefs.x_buzz,
+        state:$live[0].event_mappings.x_buzz.critical.enabled
+      }
+      elif $id == "tiktok_acquire" then {
+        task:$live[0].taskdefs.tiktok,
+        state:$live[0].event_mappings.tiktok.critical.enabled
+      }
+      else error("consumer outside code-owned release context")
+      end;
+    {
+      images:{
+        openclaw:$live[0].taskdefs.openclaw.image,
+        mcp:$live[0].taskdefs.mcp.image,
+        x_buzz:$live[0].taskdefs.x_buzz.image,
+        tiktok:$live[0].taskdefs.tiktok.image
+      },
+      resources:([
+        $context[0].consumer_manifest.consumers[] |
+        select(
+          (.before.absent // false) == false and
+          (.after.absent // false) == false and
+          changes_release_contract(.)
+        ) |
+        . as $owner |
+        binding($owner.consumer_id) as $binding |
+        {
+          activation:{
+            identity:$owner.activator.identity,
+            state:$binding.state,
+            type:$owner.activator.type
+          },
+          consumer_id:$owner.consumer_id,
+          image:$binding.task.image,
+          pipeline:$owner.receipt.pipeline,
+          subject:$owner.receipt.subject,
+          terraform_address:$owner.terraform_task_definition_address,
+          task_definition_arn:$binding.task.arn
+        }
+      ] | sort_by(.consumer_id)),
+      rule_states:{
+        ingest:$live[0].rules.ingest.critical.state,
+        morning:$live[0].rules.morning.critical.state,
+        canary:$live[0].rules.canary.critical.state
+      }
+    }
+  ' > "$output" ||
+    die "scope内consumerのlive release契約を生成できません"
+  jq -e --slurpfile context "$context" '
+    def execution_state($consumer; $phase):
+      if $consumer.activator.type == "ecs_service" then
+        $consumer[$phase].activation.desired_count
+      elif $consumer.activator.type == "eventbridge_rule_ecs_target" then
+        $consumer[$phase].activation.state
+      elif $consumer.activator.type ==
+        "lambda_taskdef_arn_environment" then
+        $consumer[$phase].activation.event_source_mapping_enabled
+      else error("consumer outside code-owned activator types")
+      end;
+    def changes_release_contract($consumer):
+      if (($consumer.before.absent // false) or
+        ($consumer.after.absent // false)) then
+        ($consumer.before.absent // false) !=
+          ($consumer.after.absent // false)
+      else
+        $consumer.before.image != $consumer.after.image or
+        $consumer.before.task_definition !=
+          $consumer.after.task_definition or
+        execution_state($consumer; "before") !=
+          execution_state($consumer; "after")
+      end;
+    (.images | keys | sort) ==
+      ["mcp","openclaw","tiktok","x_buzz"] and
+    (.rule_states | keys | sort) == ["canary","ingest","morning"] and
+    (.resources | type) == "array" and
+    .resources == (.resources | sort_by(.consumer_id)) and
+    ([.resources[].consumer_id] | unique | length) ==
+      (.resources | length) and
+    (.resources | map(.consumer_id)) ==
+      ([
+        $context[0].consumer_manifest.consumers[] |
+        select(
+          (.before.absent // false) == false and
+          (.after.absent // false) == false and
+          changes_release_contract(.)
+        ) |
+        .consumer_id
+      ] | sort) and
+    all(.resources[];
+      (keys | sort) == ([
+        "activation",
+        "consumer_id",
+        "image",
+        "pipeline",
+        "subject",
+        "task_definition_arn",
+        "terraform_address"
+      ] | sort) and
+      (.activation | keys | sort) == ["identity","state","type"] and
+      (.task_definition_arn |
+        test(
+          "^arn:aws:ecs:ap-northeast-1:718959508629:"
+          + "task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$"
+        )) and
+      (.image |
+        test(
+          "^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/"
+          + "[a-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+        )) and
+      (
+        if .activation.type == "ecs_service" then
+          (.activation.state |
+            type == "number" and . >= 0 and floor == .)
+        elif .activation.type == "eventbridge_rule_ecs_target" then
+          (.activation.state == "ENABLED" or
+            .activation.state == "DISABLED")
+        elif .activation.type == "lambda_taskdef_arn_environment" then
+          (.activation.state | type) == "boolean"
+        else false
+        end
+      )
+    )
+  ' "$output" >/dev/null ||
+    die "scope内consumerのlive release契約が不正です"
+}
+
+build_scoped_release_state_contract() {
+  local state_contract="$1" live_contract="$2" output="$3"
+  local fresh="$TMP_ROOT/state-contract-fresh-scoped-$RANDOM.json"
+  capture_state_contract "$fresh" "$live_contract"
+  jq -e --slurpfile base "$state_contract" '
+    (del(.task_revisions)) ==
+      ($base[0] | del(.task_revisions)) and
+    (.task_revisions | type) == "object" and
+    all(.task_revisions[];
+      type == "number" and . >= 1 and floor == .)
+  ' "$fresh" >/dev/null ||
+    die "scope内consumerのTerraform state metadataが観測間で変化しました"
+  mv "$fresh" "$output"
 }
 
 prepare_image_deployment_intent() {
@@ -7543,6 +7891,7 @@ verify_required_migration_apply_receipt() {
   local embedded_eventbridge_verification="$TMP_ROOT/prior-eventbridge-verification-embedded-$RANDOM.json"
   local embedded_finalization="$TMP_ROOT/prior-deployment-finalization-embedded-$RANDOM.json"
   local embedded_persisted="$TMP_ROOT/prior-openclaw-persisted-$RANDOM.json"
+  local current_state_contract="$TMP_ROOT/prior-current-state-$RANDOM.json"
   receipt_commit="$(
     jq -er '.git_commit | select(test("^[0-9a-f]{40}$"))' "$receipt"
   )" || die "prior apply receiptのsource commitが不正です"
@@ -7552,6 +7901,8 @@ verify_required_migration_apply_receipt() {
   )"
   run_evidence_helper verify-bedrock-retention --output "$retention_live"
   capture_complete_runtime_inventory "$runtime_inventory"
+  build_scoped_release_state_contract \
+    "$state_contract" "$receipt" "$current_state_contract"
   jq -S -c '.bedrock_retention_live' "$receipt" > "$embedded_retention"
   jq -S -c '.shared_deployment_lock_receipt' "$receipt" > "$embedded_lock"
   jq -j -S -c '.provenance_outcome_receipt' "$receipt" > "$embedded_outcome"
@@ -7604,13 +7955,66 @@ verify_required_migration_apply_receipt() {
     --arg required_migration_contract_sha256 \
       "$required_migration_contract_sha256" \
     --arg receipt_sha "$(sha256_file "$receipt")" \
-    --arg state_sha "$(sha256_file "$state_contract")" \
+    --arg state_sha "$(sha256_file "$current_state_contract")" \
     --arg live_sha "$(sha256_file "$snapshot")" \
     --arg inventory_sha "$(jq -er '.inventory_sha256' "$runtime_inventory")" \
     --argjson now "$(date +%s)" \
-    --slurpfile state "$state_contract" \
+    --slurpfile state "$current_state_contract" \
     --slurpfile live "$snapshot" \
     --slurpfile retention "$retention_live" '
+    def task_revisions($resources):
+      $resources |
+      map({
+        key:.consumer_id,
+        value:(.task_definition_arn |
+          capture(":(?<revision>[1-9][0-9]*)$").revision |
+          tonumber)
+      }) |
+      from_entries;
+    def resource_identity:
+      {
+        activation_identity:.activation.identity,
+        activation_type:.activation.type,
+        consumer_id,
+        pipeline,
+        subject,
+        terraform_address
+      };
+    def current_binding($id):
+      if $id == "mcp" then {
+        task:$live[0].taskdefs.mcp,
+        state:$live[0].services.mcp.critical.desired_count
+      }
+      elif $id == "connect_web" then {
+        task:$live[0].taskdefs.connect_web,
+        state:$live[0].services.connect_web.critical.desired_count
+      }
+      elif $id == "openclaw" then {
+        task:$live[0].taskdefs.openclaw,
+        state:$live[0].services.openclaw.critical.desired_count
+      }
+      elif $id == "canary" then {
+        task:$live[0].taskdefs.canary,
+        state:$live[0].rules.canary.critical.state
+      }
+      elif $id == "ingest" then {
+        task:$live[0].taskdefs.ingest,
+        state:$live[0].rules.ingest.critical.state
+      }
+      elif $id == "morning_digest" then {
+        task:$live[0].taskdefs.morning,
+        state:$live[0].rules.morning.critical.state
+      }
+      elif $id == "x_buzz_worker" then {
+        task:$live[0].taskdefs.x_buzz,
+        state:$live[0].event_mappings.x_buzz.critical.enabled
+      }
+      elif $id == "tiktok_acquire" then {
+        task:$live[0].taskdefs.tiktok,
+        state:$live[0].event_mappings.tiktok.critical.enabled
+      }
+      else error("consumer outside code-owned release scope")
+      end;
     (keys | sort) == ([
       "account_id",
       "alarm_delivery_receipt_sha256",
@@ -7641,6 +8045,8 @@ verify_required_migration_apply_receipt() {
       "openclaw_rollout_result",
       "openclaw_rollout_result_sha256",
       "plan_sha256",
+      "pre_live_contract",
+      "pre_state_contract",
       "post_live_contract",
       "post_live_fingerprint_sha256",
       "post_runtime_inventory_sha256",
@@ -7887,19 +8293,56 @@ verify_required_migration_apply_receipt() {
       $state[0].state.address_set_sha256 and
     .post_state_contract == $state[0] and
     .post_live_fingerprint_sha256 == $live_sha and
-    .post_live_contract == {
-      images: {
-        openclaw: $live[0].taskdefs.openclaw.image,
-        mcp: $live[0].taskdefs.mcp.image,
-        x_buzz: $live[0].taskdefs.x_buzz.image,
-        tiktok: $live[0].taskdefs.tiktok.image
-      },
-      rule_states: {
-        ingest: $live[0].rules.ingest.critical.state,
-        morning: $live[0].rules.morning.critical.state,
-        canary: $live[0].rules.canary.critical.state
-      }
+    ([.pre_live_contract, .post_live_contract] |
+      all(.[];
+        (keys | sort) == ["images","resources","rule_states"] and
+        (.images | keys | sort) ==
+          ["mcp","openclaw","tiktok","x_buzz"] and
+        (.rule_states | keys | sort) ==
+          ["canary","ingest","morning"] and
+        (.resources | type) == "array" and
+        .resources == (.resources | sort_by(.consumer_id)) and
+        ([.resources[].consumer_id] | unique | length) ==
+          (.resources | length)
+      )) and
+    ([.pre_live_contract.resources[] | resource_identity]) ==
+      ([.post_live_contract.resources[] | resource_identity]) and
+    .pre_state_contract.task_revisions ==
+      task_revisions(.pre_live_contract.resources) and
+    .post_state_contract.task_revisions ==
+      task_revisions(.post_live_contract.resources) and
+    ([.pre_state_contract, .post_state_contract] |
+      all(.[];
+        (keys | sort) ==
+          ["backend","imports","state","task_revisions"]
+      )) and
+    .pre_state_contract.backend == .post_state_contract.backend and
+    .pre_state_contract.imports == .post_state_contract.imports and
+    .pre_state_contract.state.lineage ==
+      .post_state_contract.state.lineage and
+    .pre_state_contract.state.address_count ==
+      .post_state_contract.state.address_count and
+    .pre_state_contract.state.address_set_sha256 ==
+      .post_state_contract.state.address_set_sha256 and
+    .pre_state_contract.state.serial <
+      .post_state_contract.state.serial and
+    .post_live_contract.images == {
+      openclaw: $live[0].taskdefs.openclaw.image,
+      mcp: $live[0].taskdefs.mcp.image,
+      x_buzz: $live[0].taskdefs.x_buzz.image,
+      tiktok: $live[0].taskdefs.tiktok.image
     } and
+    .post_live_contract.rule_states == {
+      ingest: $live[0].rules.ingest.critical.state,
+      morning: $live[0].rules.morning.critical.state,
+      canary: $live[0].rules.canary.critical.state
+    } and
+    all(.post_live_contract.resources[];
+      current_binding(.consumer_id) as $current |
+      .task_definition_arn == $current.task.arn and
+      .image == $current.task.image and
+      .activation.state == $current.state
+    ) and
     .post_runtime_inventory_sha256 == $inventory_sha and
     (.shared_deployment_lock_receipt_sha256 |
       test("^[0-9a-f]{64}$")) and
@@ -8011,7 +8454,8 @@ verify_receipt() {
       "versioning_receipt_path",
       "versioning_receipt_sha256"
     ] | sort) and
-    (.state_contract | keys | sort) == ["backend","imports","state"] and
+    (.state_contract | keys | sort) ==
+      ["backend","imports","state","task_revisions"] and
     (.state_contract.backend | keys | sort) ==
       ([
         "bucket",
@@ -8088,6 +8532,14 @@ verify_receipt() {
     .state_contract.state.address_count >= 0 and
     (.state_contract.state.address_set_sha256 |
       test("^[0-9a-f]{64}$")) and
+    (.state_contract.task_revisions | type) == "object" and
+    (.state_contract.task_revisions | to_entries | all(
+      (.key | type) == "string" and
+      (.key | length) > 0 and
+      (.value | type) == "number" and
+      .value >= 1 and
+      (.value | floor) == .value
+    )) and
     (.state_contract.imports | keys | sort) == ([
       "aws_cloudwatch_log_group.codebuild_aiia_image_builder",
       "aws_cloudwatch_log_group.codebuild_image",
@@ -8283,7 +8735,7 @@ verify_receipt() {
 
   capture_state_contract "$stage/state-before.json"
   jq -e --slurpfile receipt "$stage/receipt.json" '
-    . == $receipt[0].state_contract
+    . == ($receipt[0].state_contract | del(.task_revisions))
   ' "$stage/state-before.json" >/dev/null ||
     die "backend/workspace/state lineage/serial/address ownershipがreceiptから変化しました"
   snapshot_live "$stage/live-before.json"
@@ -8414,6 +8866,18 @@ verify_receipt() {
   [ "$(sha256_file "$stage/image-release-context.json")" = \
     "$(jq -er '.image_release_context_sha256' "$stage/receipt.json")" ] ||
     die "saved planのbackend/workspace/state ownership contextが変化しました"
+  build_scoped_release_live_contract \
+    "$stage/image-release-context.json" \
+    "$stage/live-before.json" \
+    "$stage/plan-live-contract.json"
+  build_scoped_release_state_contract \
+    "$stage/state-before.json" \
+    "$stage/plan-live-contract.json" \
+    "$stage/plan-state-contract.json"
+  jq -e --slurpfile receipt "$stage/receipt.json" '
+    . == $receipt[0].state_contract
+  ' "$stage/plan-state-contract.json" >/dev/null ||
+    die "saved planのscope内task definition revisionがreceiptから変化しました"
   [ "$(sha256_file "$stage/plan.tfplan")" = "$plan_sha_before" ] || die "plan検証後のprivate copy改ざんを検出しました"
 
   snapshot_live "$stage/live-after.json"
@@ -8433,6 +8897,14 @@ verify_receipt() {
   [ "$(sha256_file "$stage/state-after.json")" = \
     "$(sha256_file "$stage/state-before.json")" ] ||
     die "verify中にbackend/workspace/state lineage/serial/address ownershipが変化しました"
+  build_scoped_release_state_contract \
+    "$stage/state-after.json" \
+    "$stage/plan-live-contract.json" \
+    "$stage/final-state-contract.json"
+  cmp -s \
+    "$stage/plan-state-contract.json" \
+    "$stage/final-state-contract.json" ||
+    die "verify中にscope内Terraform state task definition revisionが変化しました"
   cmp -s "$stage/inventory-before.json" "$stage/inventory-after.json" ||
     die "verify中にall-page runtime/SNS publisher inventoryが変化しました"
   [ "$(sha256_file "$plan")" = "$plan_sha_before" ] || die "verify中にplan pathが変化しました"
@@ -9762,6 +10234,14 @@ case "$COMMAND" in
 
     capture_image_release_context \
       "$STAGE_PLAN" "$TMP_ROOT/image-release-context.json"
+    build_scoped_release_live_contract \
+      "$TMP_ROOT/image-release-context.json" \
+      "$TMP_ROOT/live-after.json" \
+      "$TMP_ROOT/plan-live-contract.json"
+    build_scoped_release_state_contract \
+      "$TMP_ROOT/state-after.json" \
+      "$TMP_ROOT/plan-live-contract.json" \
+      "$TMP_ROOT/plan-state-contract.json"
     prepare_image_deployment_intent \
       "$STAGE_PLAN" "$TMP_ROOT/image-release-context.json" \
       "$TMP_ROOT/image-deployment-intent.json"
@@ -9846,7 +10326,7 @@ case "$COMMAND" in
         jq -er '.inventory_sha256' "$TMP_ROOT/inventory-after.json"
       )" \
       --arg runtime_guard_sha256 "$CORE_SHA" \
-      --slurpfile state_contract "$TMP_ROOT/state-after.json" \
+      --slurpfile state_contract "$TMP_ROOT/plan-state-contract.json" \
       '{
         kind:$kind,
         guard_version:$guard_version,
@@ -10427,10 +10907,137 @@ case "$COMMAND" in
       GATE_LOCK_ACQUIRED="false"
       return 0
     }
+    restore_lambda_dispatcher_baselines() {
+      local dispatcher function family function_arn expected observed revision_id
+      local restore_failed="false"
+      for dispatcher in x_buzz tiktok; do
+        case "$dispatcher" in
+          x_buzz)
+            function="${PROJECT}-${ENVIRONMENT}-x-buzz-dispatch"
+            family="${PROJECT}-${ENVIRONMENT}-x-buzz-worker"
+            ;;
+          tiktok)
+            function="${PROJECT}-${ENVIRONMENT}-tiktok-acquire-dispatch"
+            family="${PROJECT}-${ENVIRONMENT}-tiktok-acquire"
+            ;;
+        esac
+        function_arn="arn:aws:lambda:${REGION}:${EXPECTED_ACCOUNT_ID}:function:${function}"
+        expected="$TMP_ROOT/cleanup-${dispatcher}-lambda-environment.json"
+        observed="$TMP_ROOT/cleanup-${dispatcher}-lambda-observed.json"
+        if ! jq -n -S \
+          --arg dispatcher "$dispatcher" \
+          --slurpfile live "$TMP_ROOT/verify/live-after.json" '{
+            Variables:$live[0].dispatchers[$dispatcher].critical.environment
+          }' > "$expected"; then
+          restore_failed="true"
+          continue
+        fi
+        if ! jq -e \
+          --arg dispatcher "$dispatcher" \
+          --arg function "$function" \
+          --arg function_arn "$function_arn" \
+          --arg family "$family" \
+          --slurpfile expected "$expected" '
+          .dispatchers[$dispatcher].critical.function_name == $function and
+          .dispatchers[$dispatcher].critical.function_arn == $function_arn and
+          .dispatchers[$dispatcher].critical.environment ==
+            $expected[0].Variables and
+          .dispatchers[$dispatcher].task_definition ==
+            $expected[0].Variables.TASKDEF_ARN and
+          ($expected[0] | keys) == ["Variables"] and
+          ($expected[0].Variables | type) == "object" and
+          ($expected[0].Variables | to_entries |
+            all(.[];
+              (.key | type) == "string" and
+              (.value | type) == "string"
+            )) and
+          ($expected[0].Variables.TASKDEF_ARN |
+            test(
+              "^arn:aws:ecs:ap-northeast-1:718959508629:"
+              + "task-definition/" + $family + ":[1-9][0-9]*$"
+            ))
+        ' "$TMP_ROOT/verify/live-after.json" >/dev/null; then
+          restore_failed="true"
+          continue
+        fi
+        if ! aws_cli lambda get-function-configuration \
+          --function-name "$function" --output json > "$observed"; then
+          restore_failed="true"
+          continue
+        fi
+        if [ "$(jq -r '.LastUpdateStatus // ""' "$observed")" = \
+          "InProgress" ]; then
+          aws_cli lambda wait function-updated-v2 \
+            --function-name "$function" >/dev/null 2>&1 || true
+          if ! aws_cli lambda get-function-configuration \
+            --function-name "$function" --output json > "$observed"; then
+            restore_failed="true"
+            continue
+          fi
+        fi
+        if jq -e \
+          --arg function "$function" \
+          --arg function_arn "$function_arn" \
+          --slurpfile expected "$expected" '
+          .FunctionName == $function and
+          .FunctionArn == $function_arn and
+          .State == "Active" and
+          .LastUpdateStatus == "Successful" and
+          .Environment == $expected[0]
+        ' "$observed" >/dev/null; then
+          continue
+        fi
+        revision_id="$(
+          jq -er '
+            .RevisionId |
+            select(
+              type == "string" and
+              test("^[A-Za-z0-9._~+/=-]{1,1024}$") and
+              . != "null" and . != "None"
+            )
+          ' "$observed"
+        )" || {
+          restore_failed="true"
+          continue
+        }
+        if ! aws_cli lambda update-function-configuration \
+          --function-name "$function" \
+          --revision-id "$revision_id" \
+          --environment "file://$expected" \
+          --output json > "$observed"; then
+          restore_failed="true"
+          continue
+        fi
+        if ! aws_cli lambda wait function-updated-v2 \
+          --function-name "$function" >/dev/null; then
+          restore_failed="true"
+          continue
+        fi
+        if ! aws_cli lambda get-function-configuration \
+          --function-name "$function" --output json > "$observed"; then
+          restore_failed="true"
+          continue
+        fi
+        if ! jq -e \
+          --arg function "$function" \
+          --arg function_arn "$function_arn" \
+          --slurpfile expected "$expected" '
+          .FunctionName == $function and
+          .FunctionArn == $function_arn and
+          .State == "Active" and
+          .LastUpdateStatus == "Successful" and
+          .Environment == $expected[0]
+        ' "$observed" >/dev/null; then
+          restore_failed="true"
+        fi
+      done
+      [ "$restore_failed" = "false" ]
+    }
     cleanup_apply_command() {
       local status=$?
       local saga_restore_failed="false"
       local ecs_restore_failed="false"
+      local lambda_restore_failed="false"
       local openclaw_restore_failed="false"
       local composite_recovery_failed="false"
       set +e
@@ -10474,16 +11081,8 @@ case "$COMMAND" in
       cleanup_post_apply_tasks
       if [ "$ECS_SERVICE_SAGA_STARTED" = "true" ] &&
         [ "$ECS_SERVICE_SAGA_FINISHED" != "true" ]; then
-        if python3 "$ECS_SERVICE_APPLY_SAGA" finish \
-          --aws-bin "$AWS_BIN" \
-          --terraform-bin "$TERRAFORM_BIN" \
-          --plan "$GATE_PLAN" \
-          --plan-sha256 "$STAGED_PLAN_SHA256" \
-          --apply-attempt-id "$APPLY_ATTEMPT_ID" \
-          --outcome failed > "$ECS_SERVICE_SAGA_RESTORE_RECEIPT"; then
-          ECS_SERVICE_SAGA_FINISHED="true"
-        else
-          ecs_restore_failed="true"
+        if ! restore_lambda_dispatcher_baselines; then
+          lambda_restore_failed="true"
         fi
       fi
       if [ "$EVENTBRIDGE_SAGA_STARTED" = "true" ] &&
@@ -10497,6 +11096,20 @@ case "$COMMAND" in
           EVENTBRIDGE_SAGA_FINISHED="true"
         else
           saga_restore_failed="true"
+        fi
+      fi
+      if [ "$ECS_SERVICE_SAGA_STARTED" = "true" ] &&
+        [ "$ECS_SERVICE_SAGA_FINISHED" != "true" ]; then
+        if python3 "$ECS_SERVICE_APPLY_SAGA" finish \
+          --aws-bin "$AWS_BIN" \
+          --terraform-bin "$TERRAFORM_BIN" \
+          --plan "$GATE_PLAN" \
+          --plan-sha256 "$STAGED_PLAN_SHA256" \
+          --apply-attempt-id "$APPLY_ATTEMPT_ID" \
+          --outcome failed > "$ECS_SERVICE_SAGA_RESTORE_RECEIPT"; then
+          ECS_SERVICE_SAGA_FINISHED="true"
+        else
+          ecs_restore_failed="true"
         fi
       fi
       stop_gate_heartbeat
@@ -10525,8 +11138,12 @@ case "$COMMAND" in
         echo "FATAL: durable previous OpenClaw revision restoration requires reconciliation" >&2
         exit 71
       fi
+      if [ "$lambda_restore_failed" = "true" ]; then
+        echo "FATAL: Lambda dispatcher baseline restoration requires reconciliation" >&2
+        exit 74
+      fi
       if [ "$ecs_restore_failed" = "true" ]; then
-        echo "FATAL: durable MCP/connect-web baseline restoration requires reconciliation" >&2
+        echo "FATAL: durable ECS consumer baseline restoration requires reconciliation" >&2
         exit 72
       fi
       exit "$status"
@@ -10691,6 +11308,21 @@ case "$COMMAND" in
     capture_state_contract "$TMP_ROOT/applied-state.json"
     snapshot_live "$TMP_ROOT/applied-live.json"
     capture_complete_runtime_inventory "$TMP_ROOT/applied-inventory.json"
+    cp "$TMP_ROOT/verify/plan-live-contract.json" \
+      "$TMP_ROOT/pre-live-contract.json"
+    cp "$TMP_ROOT/verify/plan-state-contract.json" \
+      "$TMP_ROOT/pre-state-contract.json"
+    chmod 600 \
+      "$TMP_ROOT/pre-live-contract.json" \
+      "$TMP_ROOT/pre-state-contract.json"
+    build_scoped_release_live_contract \
+      "$TMP_ROOT/verify/image-release-context.json" \
+      "$TMP_ROOT/applied-live.json" \
+      "$TMP_ROOT/post-live-contract.json"
+    build_scoped_release_state_contract \
+      "$TMP_ROOT/applied-state.json" \
+      "$TMP_ROOT/post-live-contract.json" \
+      "$TMP_ROOT/post-state-contract.json"
     jq -e --slurpfile receipt "$TMP_ROOT/verify/receipt.json" '
       {
         openclaw:.taskdefs.openclaw.image,
@@ -11043,7 +11675,7 @@ case "$COMMAND" in
       --arg bedrock_retention_live_sha256 \
         "$APPLIED_BEDROCK_RETENTION_SHA256" \
       --arg post_state_contract_sha256 "$(
-        sha256_file "$TMP_ROOT/applied-state.json"
+        sha256_file "$TMP_ROOT/post-state-contract.json"
       )" \
       --arg post_state_ownership_sha256 "$(
         jq -er '.state.address_set_sha256' "$TMP_ROOT/applied-state.json"
@@ -11059,8 +11691,10 @@ case "$COMMAND" in
       --arg shared_deployment_lock_receipt_sha256 "$(
         sha256_file "$GATE_LOCK_RECEIPT"
       )" \
-      --slurpfile state_contract "$TMP_ROOT/applied-state.json" \
-      --slurpfile live "$TMP_ROOT/applied-live.json" \
+      --slurpfile pre_state_contract "$TMP_ROOT/pre-state-contract.json" \
+      --slurpfile post_state_contract "$TMP_ROOT/post-state-contract.json" \
+      --slurpfile pre_live_contract "$TMP_ROOT/pre-live-contract.json" \
+      --slurpfile post_live_contract "$TMP_ROOT/post-live-contract.json" \
       --slurpfile bedrock_retention \
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
@@ -11104,21 +11738,11 @@ case "$COMMAND" in
         bedrock_retention_live:$bedrock_retention[0],
         post_state_contract_sha256:$post_state_contract_sha256,
         post_state_ownership_sha256:$post_state_ownership_sha256,
-        post_state_contract:$state_contract[0],
+        pre_state_contract:$pre_state_contract[0],
+        post_state_contract:$post_state_contract[0],
         post_live_fingerprint_sha256:$post_live_fingerprint_sha256,
-        post_live_contract:{
-          images:{
-            openclaw:$live[0].taskdefs.openclaw.image,
-            mcp:$live[0].taskdefs.mcp.image,
-            x_buzz:$live[0].taskdefs.x_buzz.image,
-            tiktok:$live[0].taskdefs.tiktok.image
-          },
-          rule_states:{
-            ingest:$live[0].rules.ingest.critical.state,
-            morning:$live[0].rules.morning.critical.state,
-            canary:$live[0].rules.canary.critical.state
-          }
-        },
+        pre_live_contract:$pre_live_contract[0],
+        post_live_contract:$post_live_contract[0],
         post_runtime_inventory_sha256:$post_runtime_inventory_sha256,
         shared_deployment_lock_record_id:
           $shared_deployment_lock_record_id,
@@ -11128,6 +11752,24 @@ case "$COMMAND" in
       }' > "$APPLY_DRAFT"
     chmod 600 "$APPLY_DRAFT"
     jq -e '
+      def task_revisions($resources):
+        $resources |
+        map({
+          key:.consumer_id,
+          value:(.task_definition_arn |
+            capture(":(?<revision>[1-9][0-9]*)$").revision |
+            tonumber)
+        }) |
+        from_entries;
+      def resource_identity:
+        {
+          activation_identity:.activation.identity,
+          activation_type:.activation.type,
+          consumer_id,
+          pipeline,
+          subject,
+          terraform_address
+        };
       .kind == "terraform-runtime-apply-receipt-draft" and
       .schema_version == 7 and
       .status == "verified_pending_finalization" and
@@ -11157,7 +11799,45 @@ case "$COMMAND" in
         end
       ) and
       .shared_deployment_lock_record_id ==
-        "lock#teamagent/terraform.tfstate"
+        "lock#teamagent/terraform.tfstate" and
+      ([.pre_live_contract, .post_live_contract] |
+        all(.[];
+          (keys | sort) == ["images","resources","rule_states"] and
+          (.resources | type) == "array" and
+          .resources == (.resources | sort_by(.consumer_id)) and
+          ([.resources[].consumer_id] | unique | length) ==
+            (.resources | length)
+        )) and
+      ([.pre_live_contract.resources[],
+        .post_live_contract.resources[]] |
+        all(.[];
+          (.task_definition_arn |
+            test(
+              "^arn:aws:ecs:ap-northeast-1:718959508629:"
+              + "task-definition/[A-Za-z0-9_-]+:[1-9][0-9]*$"
+            ))
+        )) and
+      ([.pre_live_contract.resources[] | resource_identity]) ==
+        ([.post_live_contract.resources[] | resource_identity]) and
+      .pre_state_contract.task_revisions ==
+        task_revisions(.pre_live_contract.resources) and
+      .post_state_contract.task_revisions ==
+        task_revisions(.post_live_contract.resources) and
+      ([.pre_state_contract, .post_state_contract] |
+        all(.[];
+          (keys | sort) ==
+            ["backend","imports","state","task_revisions"]
+        )) and
+      .pre_state_contract.backend == .post_state_contract.backend and
+      .pre_state_contract.imports == .post_state_contract.imports and
+      .pre_state_contract.state.lineage ==
+        .post_state_contract.state.lineage and
+      .pre_state_contract.state.address_count ==
+        .post_state_contract.state.address_count and
+      .pre_state_contract.state.address_set_sha256 ==
+        .post_state_contract.state.address_set_sha256 and
+      .pre_state_contract.state.serial <
+        .post_state_contract.state.serial
     ' "$APPLY_DRAFT" >/dev/null ||
       die "apply receipt draft schema/provenance bindingの生成に失敗しました"
     stop_gate_heartbeat
@@ -11194,7 +11874,14 @@ case "$COMMAND" in
     jq -e \
       --arg intent "$RECOVERY_INTENT_ID" \
       --arg plan "$STAGED_PLAN_SHA256" \
-      --arg attempt "$APPLY_ATTEMPT_ID" '
+      --arg attempt "$APPLY_ATTEMPT_ID" \
+      --arg post_state_sha "$(
+        sha256_file "$TMP_ROOT/post-state-contract.json"
+      )" \
+      --slurpfile pre_live "$TMP_ROOT/pre-live-contract.json" \
+      --slurpfile post_live "$TMP_ROOT/post-live-contract.json" \
+      --slurpfile pre_state "$TMP_ROOT/pre-state-contract.json" \
+      --slurpfile post_state "$TMP_ROOT/post-state-contract.json" '
       .kind == "terraform-runtime-apply-receipt" and
       .schema_version == 7 and
       .status == "applied" and
@@ -11224,7 +11911,12 @@ case "$COMMAND" in
       .deployment_finalization_receipt.plan_sha256 == $plan and
       .deployment_finalization_receipt.apply_attempt_id == $attempt and
       (.deployment_finalization_receipt_sha256 |
-        test("^[0-9a-f]{64}$"))
+        test("^[0-9a-f]{64}$")) and
+      .pre_live_contract == $pre_live[0] and
+      .post_live_contract == $post_live[0] and
+      .pre_state_contract == $pre_state[0] and
+      .post_state_contract == $post_state[0] and
+      .post_state_contract_sha256 == $post_state_sha
     ' "$APPLY_RECEIPT" >/dev/null ||
       die "finalized apply receipt schema/provenance bindingが不正です"
     APPLY_RECEIPT_PUBLISHED="true"

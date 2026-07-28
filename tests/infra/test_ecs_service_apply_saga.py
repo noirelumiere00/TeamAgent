@@ -1238,6 +1238,18 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
     }
 
 
+def test_saga_rejects_consumer_registry_activator_partition_drift() -> None:
+    registry = copy.deepcopy(CONSUMER_REGISTRY)
+    mcp = next(consumer for consumer in registry["consumers"] if consumer["consumer_id"] == "mcp")
+    mcp["activator"]["type"] = "lambda_taskdef_arn_environment"
+
+    with pytest.raises(
+        SAGA.SagaError,
+        match="consumer registry activator partition differs",
+    ):
+        SAGA._load_consumer_specs(registry)
+
+
 def test_saga_fails_closed_when_registry_adds_a_valid_ninth_consumer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

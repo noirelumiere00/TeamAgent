@@ -943,9 +943,20 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
             import os
 
 
-            def validate_drill_aggregate(aggregate: object) -> dict:
+            def validate_drill_evidence(
+                aggregate: object,
+                expected: object,
+            ) -> dict:
                 if not isinstance(aggregate, dict):
                     raise ValueError("aggregate must be an object")
+                if not isinstance(expected, dict) or set(expected) != {
+                    "git_commit",
+                    "drill_contract_sha256",
+                    "initial_release_apply",
+                    "initial_release_verified_at_utc",
+                    "scope",
+                }:
+                    raise ValueError("trusted expected bindings are required")
                 if aggregate.get("kind") != "teamagent.forced-rollback-drill":
                     raise ValueError("wrong aggregate kind")
                 if aggregate.get("status") not in {
@@ -972,9 +983,27 @@ def _install_fakes(repo: Path) -> tuple[Path, Path]:
                         "baseline", {}
                     ).get("initial_new"):
                         raise ValueError("terminal state is not exact initial new")
+                for key in (
+                    "git_commit",
+                    "drill_contract_sha256",
+                    "initial_release_apply",
+                    "initial_release_verified_at_utc",
+                ):
+                    if aggregate.get("control", {}).get(key) != expected[key]:
+                        raise ValueError(f"untrusted control binding: {key}")
+                if aggregate.get("scope") != expected["scope"]:
+                    raise ValueError("aggregate scope differs from trusted scope")
+                if aggregate.get("scope") is expected["scope"]:
+                    raise ValueError("trusted scope aliases aggregate input")
                 marker = os.environ["FAKE_VALIDATOR_CALLS"]
                 with open(marker, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(aggregate, sort_keys=True) + "\\n")
+                    handle.write(
+                        json.dumps(
+                            {"aggregate": aggregate, "expected": expected},
+                            sort_keys=True,
+                        )
+                        + "\\n"
+                    )
                 return dict(aggregate)
             """
         ).lstrip(),
@@ -1051,6 +1080,7 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert prepared.returncode == 0, prepared.stderr
     assert drill.state()["state"] == "PREPARED"
     assert drill.state()["contract_sha256"] == _sha256(drill.contract)
+    assert drill.state()["git_commit"] == "4" * 40
     assert drill.call_text() == "", "prepare は ECS/guard/authorizer を呼ばない"
 
     preflighted = drill.preflight()
@@ -1145,7 +1175,51 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert drill.state()["state"] == "FINALIZED"
     assert "PASSED" in finalized.stdout
     assert drill.validator_calls.exists()
-    assert len(drill.validator_calls.read_text(encoding="utf-8").splitlines()) == 1
+    validator_lines = drill.validator_calls.read_text(encoding="utf-8").splitlines()
+    assert len(validator_lines) == 1
+    validator_call = json.loads(validator_lines[0])
+    trusted = validator_call["expected"]
+    assert trusted["git_commit"] == "4" * 40
+    assert trusted["drill_contract_sha256"] == _sha256(drill.contract)
+    assert (
+        trusted["initial_release_apply"]
+        == json.loads(drill.contract.read_text(encoding="utf-8"))["control"][
+            "initial_release_apply_locator"
+        ]
+    )
+    assert trusted["scope"]["pipelines"] == ["mcp"]
+    assert [subject["name"] for subject in trusted["scope"]["subjects"]] == [
+        "core",
+        "media",
+    ]
+    assert all(
+        set(subject)
+        == {
+            "pipeline",
+            "name",
+            "release_repository",
+            "previous_digest",
+            "initial_new_digest",
+        }
+        for subject in trusted["scope"]["subjects"]
+    )
+    assert [resource["consumer_id"] for resource in trusted["scope"]["resources"]] == sorted(
+        consumer[0] for consumer in CONSUMERS
+    )
+    assert all(
+        set(resource)
+        == {
+            "consumer_id",
+            "terraform_address",
+            "pipeline",
+            "subject",
+            "previous_task_definition_arn",
+            "previous_task_revision",
+            "initial_new_task_definition_arn",
+            "initial_new_task_revision",
+        }
+        for resource in trusted["scope"]["resources"]
+    )
 
     authorize_calls = [line for line in drill.call_lines() if line[0] == "authorize"]
     assert [_arg_value(call, "--channel") for call in authorize_calls] == [
@@ -1758,7 +1832,8 @@ def test_controller_has_no_unguarded_mutation_path_and_plan_keeps_var_file() -> 
 
     assert "set -euo pipefail" in body
     assert os.access(CONTROLLER, os.X_OK)
-    assert "validate_drill_aggregate" in body
+    assert "validate_drill_evidence(aggregate, expected)" in body
+    assert "validate_drill_aggregate" not in body
     guard_plan_marker = 'bash "$TERRAFORM_RUNTIME_GUARD" plan'
     assert executable.count(guard_plan_marker) == 1
     plan_start = executable.index(guard_plan_marker)
