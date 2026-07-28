@@ -66,7 +66,14 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_iam_role.tiktok_build_launcher
     aws_iam_role.tiktok_codebuild
     aws_iam_role_policy.alarm_recipient_ack_signer
-    aws_iam_role_policy.codebuild_launcher
+    aws_iam_policy.codebuild_launcher_core
+    aws_iam_policy.codebuild_launcher_manage_a
+    aws_iam_policy.codebuild_launcher_manage_b
+    aws_iam_policy.codebuild_launcher_guardrails
+    aws_iam_role_policy_attachment.codebuild_launcher_core
+    aws_iam_role_policy_attachment.codebuild_launcher_manage_a
+    aws_iam_role_policy_attachment.codebuild_launcher_manage_b
+    aws_iam_role_policy_attachment.codebuild_launcher_guardrails
     aws_iam_role_policy.image_attestor
     aws_iam_role_policy.image_deployment_gate
     aws_iam_role_policy.image_promoter
@@ -124,6 +131,10 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_s3_bucket_server_side_encryption_configuration.openclaw_build_evidence
     aws_s3_bucket_versioning.image_release_evidence
     aws_s3_bucket_versioning.openclaw_build_evidence
+    aws_s3_object.tiktok_image_buildspec
+    aws_s3_object.mcp_source_publisher_buildspec
+    aws_s3_object.image_attestor_buildspec
+    aws_s3_object.image_promoter_buildspec
     """.split()
 )
 
@@ -132,7 +143,10 @@ EXPECTED_POST_CUT_DATA = frozenset(
     data.aws_iam_policy_document.aiia_dev_no_direct_start_build
     data.aws_iam_policy_document.alarm_recipient_ack_signer
     data.aws_iam_policy_document.alarm_recipient_ack_signer_assume
-    data.aws_iam_policy_document.codebuild_launcher
+    data.aws_iam_policy_document.codebuild_launcher_core
+    data.aws_iam_policy_document.codebuild_launcher_manage_a
+    data.aws_iam_policy_document.codebuild_launcher_manage_b
+    data.aws_iam_policy_document.codebuild_launcher_guardrails
     data.aws_iam_policy_document.codebuild_launcher_assume
     data.aws_iam_policy_document.image_attestor
     data.aws_iam_policy_document.image_attestor_assume
@@ -292,8 +306,8 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
-    assert len(EXPECTED_POST_CUT_MANAGED) == 112
-    assert len(EXPECTED_POST_CUT_DATA) == 39
+    assert len(EXPECTED_POST_CUT_MANAGED) == 123
+    assert len(EXPECTED_POST_CUT_DATA) == 42
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
 
@@ -302,7 +316,7 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     dependencies = set(cast(list[str], contract["create_allowed_dependency_addresses"]))
     existing = set(cast(list[str], contract["existing_dependency_addresses"]))
     forbidden_prefixes = set(cast(list[str], contract["forbidden_change_type_prefixes"]))
-    assert len(targets) == 95
+    assert len(targets) == 106
     assert len(dependencies) == 16
     assert existing == {"aws_s3_bucket.raw_files"}
     assert targets.isdisjoint(dependencies)

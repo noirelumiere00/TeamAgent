@@ -69,11 +69,6 @@ ALLOWED_DATA_SOURCE_TYPES = {
     "aws_iam_user",
 }
 INLINE_POLICY_OWNERSHIP = {
-    "aws_iam_role_policy.codebuild_launcher": (
-        "role",
-        "teamagent-dev-codebuild-launcher",
-        "teamagent-dev-codebuild-launcher",
-    ),
     "aws_iam_user_policy.aiia_dev_no_direct_start_build": (
         "user",
         "AIIAdev",

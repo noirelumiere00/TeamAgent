@@ -31,6 +31,13 @@ def _document(name: str) -> str:
     return _balanced_block_after(_body(), marker)
 
 
+def _launcher_policy() -> str:
+    return "".join(
+        _document(f"codebuild_launcher_{part}")
+        for part in ("core", "manage_a", "manage_b", "guardrails")
+    )
+
+
 def _statement(document: str, sid: str) -> str:
     for match in re.finditer(r"\bstatement\s*\{", document):
         statement = _balanced_block_after(document[match.start() :], match.group(0))
@@ -53,7 +60,7 @@ def _effect(statement: str) -> str:
 
 def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _launcher_policy()
 
     assert 'user_name = "AIIAdev"' in body
     assert "identifiers = [data.aws_iam_user.aiia_dev.arn]" in body
@@ -93,7 +100,7 @@ def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied(
 
 def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _launcher_policy()
 
     for name in (
         "GIT_COMMIT",
@@ -143,7 +150,7 @@ def test_source_publisher_can_read_both_app_inputs_but_only_write_source_zip() -
 
 def test_official_dangerous_override_condition_keys_are_explicit_denies() -> None:
     body = _body()
-    policy = _document("codebuild_launcher")
+    policy = _launcher_policy()
 
     keys = {
         "codebuild:source",
