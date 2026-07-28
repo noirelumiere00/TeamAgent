@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -18,20 +19,35 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 GUARD = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
-CONSUMER_REGISTRY = PROJECT_ROOT / "infra" / "codebuild" / "image_deployment_consumers.json"
+CODEBUILD_DIR = PROJECT_ROOT / "infra" / "codebuild"
+if str(CODEBUILD_DIR) not in sys.path:
+    sys.path.insert(0, str(CODEBUILD_DIR))
+CONSUMER_REGISTRY = CODEBUILD_DIR / "image_deployment_consumers.json"
+CONSUMER_REGISTRY_MODULE = CODEBUILD_DIR / "image_deployment_consumers.py"
+RELEASE_EVIDENCE = CODEBUILD_DIR / "release_evidence.py"
+RELEASE_CONTRACTS = {
+    "mcp": CODEBUILD_DIR / "teamagent_core_media_release_contract.json",
+    "openclaw": CODEBUILD_DIR / "openclaw_bundle_contract.json",
+}
 ACCOUNT = "718959508629"
 REGION = "ap-northeast-1"
 REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp"
-LIVE_IMAGE = f"{REPOSITORY}@sha256:{'f' * 64}"
-# x_buzz is deployed from the same signed MCP release subject in this
-# combined saved-plan fixture.
-X_IMAGE = LIVE_IMAGE
+LIVE_IMAGE = f"{REPOSITORY}@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
+CONNECT_WEB_IMAGE = (
+    f"{REPOSITORY}@sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
+)
+X_IMAGE = f"{REPOSITORY}@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
+CANARY_IMAGE = f"{REPOSITORY}@sha256:{'5' * 64}"
+INGEST_IMAGE = f"{REPOSITORY}@sha256:{'6' * 64}"
+MORNING_IMAGE = f"{REPOSITORY}@sha256:{'7' * 64}"
 LEGACY_TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tiktok-acquire"
 LEGACY_TIKTOK_IMAGE = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
 MEDIA_WORKER_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-media-worker"
 MEDIA_WORKER_IMAGE = f"{MEDIA_WORKER_REPOSITORY}@sha256:{'9' * 64}"
 OPENCLAW_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-openclaw"
-OPENCLAW_IMAGE = f"{OPENCLAW_REPOSITORY}@sha256:{'c' * 64}"
+OPENCLAW_IMAGE = (
+    f"{OPENCLAW_REPOSITORY}@sha256:9cde4c829335ba5196186df0460db29eb6dbe31d3f212d095f6367d1b98be8af"
+)
 APP_VAULT_MANIFEST_SHA256 = "a" * 64
 APP_BUILD_INPUTS_SHA256 = "b" * 64
 APP_HTML = (
@@ -64,6 +80,34 @@ HMAC_RELEASE = {
     "worker_artifacts": {},
     "worker_provenance_key_arn": "",
 }
+
+
+def _load_consumer_registry_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "runtime_guard_consumer_registry_under_test",
+        CONSUMER_REGISTRY_MODULE,
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+CONSUMERS = _load_consumer_registry_module()
+CONSUMER_REGISTRY_DATA = CONSUMERS.load_consumer_registry()
+
+
+def _release_contract_bindings() -> tuple[dict[str, str], dict[str, bool]]:
+    contracts: dict[str, str] = {}
+    ready: dict[str, bool] = {}
+    for pipeline, path in RELEASE_CONTRACTS.items():
+        contracts[pipeline] = hashlib.sha256(path.read_bytes()).hexdigest()
+        value = json.loads(path.read_text(encoding="utf-8"))
+        release_ready = value["release"]["ready"]
+        assert isinstance(release_ready, bool)
+        ready[pipeline] = release_ready
+    return contracts, ready
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -217,6 +261,14 @@ def _container(component: str, image: str = LIVE_IMAGE) -> dict[str, Any]:
     name, _, _ = COMPONENTS[component]
     if component == "openclaw":
         image = OPENCLAW_IMAGE
+    elif component == "connect_web":
+        image = CONNECT_WEB_IMAGE
+    elif component == "canary":
+        image = CANARY_IMAGE
+    elif component == "ingest":
+        image = INGEST_IMAGE
+    elif component == "morning":
+        image = MORNING_IMAGE
     elif component == "tiktok":
         image = MEDIA_WORKER_IMAGE
     elif component == "x_buzz":
@@ -614,6 +666,145 @@ def _change(
     }
 
 
+CONSUMER_COMPONENTS = {
+    "mcp": "mcp",
+    "connect_web": "connect_web",
+    "openclaw": "openclaw",
+    "canary": "canary",
+    "ingest": "ingest",
+    "morning_digest": "morning",
+    "x_buzz_worker": "x_buzz",
+    "tiktok_acquire": "tiktok",
+}
+CONSUMER_MANIFEST_IDENTITY_KEYS = (
+    "consumer_id",
+    "terraform_task_definition_address",
+    "ecs_family",
+    "container_name",
+    "activator",
+    "release_repository",
+    "receipt",
+)
+
+
+def _consumer_snapshot(
+    consumer: dict[str, Any],
+    *,
+    planned: bool,
+) -> dict[str, Any]:
+    consumer_id = consumer["consumer_id"]
+    component = CONSUMER_COMPONENTS[consumer_id]
+    task_definition_arn = (
+        consumer["terraform_task_definition_address"] if planned else _task_arn(component)
+    )
+    activator_type = consumer["activator"]["type"]
+    if activator_type == "ecs_service":
+        activation = {
+            "desired_count": 1,
+            "task_definition_arn": task_definition_arn,
+        }
+    elif activator_type == "eventbridge_rule_ecs_target":
+        activation = {
+            "state": RULES[component][2],
+            "task_definition_arn": task_definition_arn,
+        }
+    else:
+        activation = {
+            "event_source_mapping_enabled": True,
+            "task_definition_arn": task_definition_arn,
+        }
+    return {
+        "image": _container(component)["image"],
+        "task_definition_arn": task_definition_arn,
+        "activation": activation,
+    }
+
+
+def _consumer_manifest(*, hmac_active: bool = False) -> dict[str, Any]:
+    consumers: list[dict[str, Any]] = []
+    for consumer in CONSUMER_REGISTRY_DATA["consumers"]:
+        live = _consumer_snapshot(consumer, planned=False)
+        planned = hmac_active or consumer["consumer_id"] != "morning_digest"
+        consumers.append(
+            {
+                **{key: copy.deepcopy(consumer[key]) for key in CONSUMER_MANIFEST_IDENTITY_KEYS},
+                "live": copy.deepcopy(live),
+                "before": copy.deepcopy(live),
+                "after": _consumer_snapshot(consumer, planned=planned),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "registry_sha256": CONSUMERS.consumer_registry_sha256(),
+        "mode": "no-image-transition",
+        "consumers": consumers,
+    }
+
+
+def _state_address_parts(address: str) -> tuple[str, int | str | None]:
+    match = re.fullmatch(r"(?P<base>.+?)(?:\[(?P<index>.+)\])?", address)
+    assert match is not None
+    base = match.group("base")
+    encoded_index = match.group("index")
+    if encoded_index is None:
+        return base, None
+    if encoded_index.startswith('"'):
+        index = json.loads(encoded_index)
+        assert isinstance(index, str)
+        return base, index
+    return base, int(encoded_index)
+
+
+def _fake_state_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    resources: dict[str, dict[str, Any]] = {}
+    component_by_task_address = {
+        address: component for component, address in TASK_ADDRESSES.items()
+    }
+    for change in plan["resource_changes"]:
+        if change.get("mode", "managed") != "managed":
+            continue
+        before = change["change"].get("before")
+        if before is None:
+            continue
+        address = change["address"]
+        base, index_key = _state_address_parts(address)
+        resource_type, name = base.split(".", 1)
+        resource = resources.setdefault(
+            base,
+            {
+                "mode": "managed",
+                "type": resource_type,
+                "name": name,
+                "provider": (
+                    'provider["terraform.io/builtin/terraform"]'
+                    if resource_type == "terraform_data"
+                    else 'provider["registry.terraform.io/hashicorp/aws"]'
+                ),
+                "instances": [],
+            },
+        )
+        attributes = copy.deepcopy(before)
+        component = component_by_task_address.get(address)
+        if component is not None:
+            attributes["arn"] = _task_arn(component)
+            attributes["id"] = _task_arn(component)
+        instance: dict[str, Any] = {
+            "schema_version": 0,
+            "attributes": attributes,
+        }
+        if index_key is not None:
+            instance["index_key"] = index_key
+        resource["instances"].append(instance)
+    return {
+        "version": 4,
+        "terraform_version": "1.12.2",
+        "serial": 42,
+        "lineage": "01234567-89ab-cdef-0123-456789abcdef",
+        "outputs": {},
+        "resources": list(resources.values()),
+    }
+
+
 def _safe_plan() -> dict[str, Any]:
     changes: list[dict[str, Any]] = [
         _change(
@@ -633,20 +824,27 @@ def _safe_plan() -> dict[str, Any]:
     ]
     for component, address in TASK_ADDRESSES.items():
         after = _task_after(component)
+        before = copy.deepcopy(after)
+        before["arn"] = _task_arn(component)
+        before["id"] = _task_arn(component)
+        if component == "morning":
+            after["arn"] = _task_arn(component)
+            after["id"] = _task_arn(component)
         change = _change(
             address,
             "aws_ecs_task_definition",
-            ["create", "delete"],
-            copy.deepcopy(after),
+            ["no-op"] if component == "morning" else ["create", "delete"],
+            before,
             after,
         )
-        change["change"]["after_unknown"] = {
-            "arn": True,
-            "arn_without_revision": True,
-            "enable_fault_injection": True,
-            "id": True,
-            "revision": True,
-        }
+        if component != "morning":
+            change["change"]["after_unknown"] = {
+                "arn": True,
+                "arn_without_revision": True,
+                "enable_fault_injection": True,
+                "id": True,
+                "revision": True,
+            }
         changes.append(change)
 
     configurations: list[dict[str, Any]] = []
@@ -677,10 +875,15 @@ def _safe_plan() -> dict[str, Any]:
         )
         before = _target_tf(component)
         after = copy.deepcopy(before)
-        actions = ["no-op"] if component == "morning" else ["update"]
         if component != "morning":
             after["ecs_target"][0]["task_definition_arn"] = None
-        change = _change(address, "aws_cloudwatch_event_target", actions, before, after)
+        change = _change(
+            address,
+            "aws_cloudwatch_event_target",
+            ["no-op"] if component == "morning" else ["update"],
+            before,
+            after,
+        )
         if component != "morning":
             change["change"]["after_unknown"] = {"ecs_target": [{"task_definition_arn": True}]}
         changes.append(change)
@@ -832,6 +1035,18 @@ def _activate_hmac_plan(plan: dict[str, Any]) -> None:
     production_gate["change"]["after"]["input"]["hmac_release_bindings"] = copy.deepcopy(
         HMAC_RELEASE
     )
+
+    morning_task = _find(plan, TASK_ADDRESSES["morning"])
+    morning_task["change"]["actions"] = ["create", "delete"]
+    morning_task["change"]["after"].pop("arn")
+    morning_task["change"]["after"].pop("id")
+    morning_task["change"]["after_unknown"] = {
+        "arn": True,
+        "arn_without_revision": True,
+        "enable_fault_injection": True,
+        "id": True,
+        "revision": True,
+    }
 
     morning_target = _find(
         plan,
@@ -1088,7 +1303,7 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     elif scenario == "checks":
         plan["checks"] = [{"status": "unknown", "instances": []}]
     elif scenario == "bad_action":
-        task["change"]["actions"] = ["delete", "create"]
+        task["change"]["actions"] = ["delete"]
     elif scenario == "arbitrary_drift":
         plan["resource_drift"] = [
             _change("aws_iam_policy.bad", "aws_iam_policy", ["update"], {}, {})
@@ -1217,7 +1432,10 @@ def _fake_aws(path: Path) -> None:
             ]
             if os.environ.get("AWS_FAKE_INVALID_BOOL"):
                 values[-1]["value"] = os.environ["AWS_FAKE_INVALID_BOOL"]
-            if os.environ.get("AWS_FAKE_DRIFT"):
+            drift_marker = os.environ.get("TF_FAKE_DRIFT_AFTER_PLAN_MARKER")
+            if os.environ.get("AWS_FAKE_DRIFT") or (
+                drift_marker and pathlib.Path(drift_marker).exists()
+            ):
                 values.append({{"name": "LIVE_DRIFT", "value": "1"}})
             return values
 
@@ -1895,6 +2113,7 @@ def _fake_terraform(path: Path) -> None:
         import json
         import os
         import pathlib
+        import subprocess
         import sys
 
         args = [arg for arg in sys.argv[1:] if not arg.startswith("-chdir=")]
@@ -1903,48 +2122,13 @@ def _fake_terraform(path: Path) -> None:
                 fh.write(" ".join(args) + "\\n")
 
         def state_data():
-            state_path = os.environ.get("TF_FAKE_STATE")
-            if state_path:
-                return json.loads(pathlib.Path(state_path).read_text(encoding="utf-8"))
-            plan = json.loads(
-                pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text(
-                    encoding="utf-8"
-                )
+            state_path = os.environ.get(
+                "TF_FAKE_STATE",
+                os.environ["TF_FAKE_DEFAULT_STATE"],
             )
-            resources_by_address = {}
-            for change in plan["resource_changes"]:
-                if change.get("mode") != "managed":
-                    continue
-                address = change["address"]
-                base, separator, raw_index = address.partition("[")
-                resource_type, name = base.split(".", 1)
-                resource = resources_by_address.setdefault(
-                    base,
-                    {
-                        "mode": "managed",
-                        "type": resource_type,
-                        "name": name,
-                        "provider": "provider[\\\"registry.terraform.io/hashicorp/test\\\"]",
-                        "instances": [],
-                    },
-                )
-                instance = {"schema_version": 0, "attributes": {}}
-                if separator:
-                    encoded_index = raw_index.removesuffix("]")
-                    instance["index_key"] = (
-                        json.loads(encoded_index)
-                        if encoded_index.startswith('"')
-                        else int(encoded_index)
-                    )
-                resource["instances"].append(instance)
-            return {
-                "version": 4,
-                "terraform_version": "1.12.2",
-                "serial": 42,
-                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
-                "outputs": {},
-                "resources": list(resources_by_address.values()),
-            }
+            return json.loads(
+                pathlib.Path(state_path).read_text(encoding="utf-8")
+            )
 
         def state_addresses(state):
             addresses = []
@@ -2004,6 +2188,40 @@ def _fake_terraform(path: Path) -> None:
             image_deployment_intent_id = intent_arg.split("=", 2)[2]
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
+            consumer_manifest = json.loads(
+                pathlib.Path(os.environ["TF_FAKE_CONSUMER_MANIFEST"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            receipt_catalog = {}
+            consumer_receipt_bindings = {}
+            force_ready_false = os.environ.get("TF_FAKE_GATE_READY_FALSE") == "1"
+            if force_ready_false:
+                canary = next(
+                    consumer
+                    for consumer in consumer_manifest["consumers"]
+                    if consumer["consumer_id"] == "canary"
+                )
+                canary["after"]["activation"]["state"] = "ENABLED"
+                consumer_manifest["mode"] = "receipt-required"
+                claim_id = "d" * 64
+                receipt_key = (
+                    "release-receipts/mcp/"
+                    + "a" * 40
+                    + "/"
+                    + claim_id
+                    + ".json"
+                )
+                receipt_catalog = {
+                    claim_id: {
+                        "bucket": "teamagent-dev-image-release-evidence",
+                        "key": receipt_key,
+                        "version_id": "receipt-version-1",
+                        "signature_key": receipt_key + ".sig",
+                        "signature_version_id": "signature-version-1",
+                    }
+                }
+                consumer_receipt_bindings = {"canary": claim_id}
             hmac_active = os.environ.get("TF_FAKE_HMAC_ACTIVE") == "1"
             plan["variables"] = {
                 "openclaw_image": {"value": core["desired_openclaw_image"]},
@@ -2020,6 +2238,15 @@ def _fake_terraform(path: Path) -> None:
                 "canary_rule_enabled": {"value": core["canary_rule_enabled"]},
                 "require_alarm_delivery": {"value": True},
                 "bedrock_logs_retention_days": {"value": 60},
+                "image_deployment_consumer_manifest": {
+                    "value": consumer_manifest
+                },
+                "image_release_receipt_catalog": {
+                    "value": receipt_catalog
+                },
+                "image_release_consumer_receipt_bindings": {
+                    "value": consumer_receipt_bindings
+                },
                 "image_deployment_intent_id": {
                     "value": image_deployment_intent_id
                 },
@@ -2044,41 +2271,102 @@ def _fake_terraform(path: Path) -> None:
                 },
                 "runtime_guard_live": {"value": core},
             }
+            consumer_by_address = {
+                consumer["terraform_task_definition_address"]: consumer["consumer_id"]
+                for consumer in consumer_manifest["consumers"]
+            }
             for change in plan["resource_changes"]:
                 if change["type"] == "aws_ecs_task_definition":
                     containers = json.loads(change["change"]["after"]["container_definitions"])
-                    image_by_address = {
-                        "aws_ecs_task_definition.openclaw[0]": core[
-                            "desired_openclaw_image"
-                        ],
-                        "aws_ecs_task_definition.tiktok_acquire[0]": core[
-                            "desired_tiktok_image"
-                        ],
-                        "aws_ecs_task_definition.x_buzz_worker[0]": core[
-                            "desired_x_image"
-                        ],
-                    }
-                    containers[0]["image"] = image_by_address.get(change["address"], desired)
+                    consumer_id = consumer_by_address[change["address"]]
+                    containers[0]["image"] = core["desired_consumer_images"][consumer_id]
                     change["change"]["after"]["container_definitions"] = json.dumps(containers)
+            contracts = json.loads(os.environ["TF_FAKE_RELEASE_CONTRACTS"])
+            contract_ready = json.loads(os.environ["TF_FAKE_RELEASE_READY"])
+            if force_ready_false:
+                contract_ready["mcp"] = False
+            application_provenance = {"mcp": {}} if force_ready_false else {}
+            shared_generation_ledger = {}
+            gate_query = {
+                "consumer_manifest_json": json.dumps(
+                    consumer_manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "receipt_catalog_json": json.dumps(
+                    receipt_catalog,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "consumer_receipt_bindings_json": json.dumps(
+                    consumer_receipt_bindings,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "contracts_json": json.dumps(
+                    contracts,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "contract_ready_json": json.dumps(
+                    contract_ready,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "application_json": json.dumps(
+                    application_provenance,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "shared_generation_ledger_json": json.dumps(
+                    shared_generation_ledger,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "signing_key_arn": (
+                    "arn:aws:kms:ap-northeast-1:718959508629:"
+                    "key/11111111-1111-4111-8111-111111111111"
+                ),
+                "encryption_key_arn": (
+                    "arn:aws:kms:ap-northeast-1:718959508629:"
+                    "key/22222222-2222-4222-8222-222222222222"
+                ),
+                "deployment_intent_id": image_deployment_intent_id,
+            }
+            gate = subprocess.run(
+                [
+                    sys.executable,
+                    os.environ["TF_FAKE_RELEASE_EVIDENCE"],
+                    "terraform-gate",
+                ],
+                input=json.dumps(gate_query),
+                capture_output=True,
+                text=True,
+            )
+            if gate.returncode != 0:
+                sys.stdout.write(gate.stdout)
+                sys.stderr.write(gate.stderr)
+                raise SystemExit(gate.returncode)
+            verified_gate = json.loads(gate.stdout)
+            assert verified_gate["verified"] == "true"
+            if marker := os.environ.get("TF_FAKE_GATE_VERIFIED_MARKER"):
+                pathlib.Path(marker).touch()
             gate_input = {
                 "deployment_intent_id": image_deployment_intent_id,
-                "deployment_context_sha256": "1" * 64,
-                "receipt_claims_sha256": "2" * 64,
-                "requested_images": {
-                    "mcp": desired,
-                    "openclaw": core["desired_openclaw_image"],
-                    "x_buzz": core["desired_x_image"],
-                },
-                "requested_media_image": core["desired_tiktok_image"],
-                "application_provenance": {
-                    "mcp": {"source_commit": "a" * 40},
-                },
-                "shared_generation_ledger": {},
-                "release_channels": {
-                    "mcp": "active",
-                    "openclaw": "active",
-                    "x_buzz": "active",
-                },
+                "deployment_context_sha256": verified_gate[
+                    "deployment_context_sha256"
+                ],
+                "receipt_claims_sha256": verified_gate[
+                    "receipt_claims_sha256"
+                ],
+                "consumer_manifest": consumer_manifest,
+                "receipt_catalog": receipt_catalog,
+                "consumer_receipt_bindings": consumer_receipt_bindings,
+                "release_channels": json.loads(
+                    verified_gate["release_channels_json"]
+                ),
+                "application_provenance": application_provenance,
+                "shared_generation_ledger": shared_generation_ledger,
                 "hmac_release_bindings": (
                     {
                         "rotation_epoch": "hmac-2026-07",
@@ -2094,34 +2382,41 @@ def _fake_terraform(path: Path) -> None:
                     if hmac_active
                     else {}
                 ),
-                "receipt_authorization_expires_at": "2000000000",
+                "deployment_gate_query": gate_query,
+                "receipt_authorization_expires_at": verified_gate[
+                    "receipt_authorization_expires_at"
+                ],
+                "deployment_mode": verified_gate["deployment_mode"],
             }
-            gate_input["deployment_gate_query"] = {
-                "images_json": json.dumps(
-                    gate_input["requested_images"],
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                "mcp_media_image": gate_input["requested_media_image"],
-                "evidence_json": "{}",
-                "contracts_json": "{}",
-                "contract_ready_json": "{}",
-                "application_json": json.dumps(
-                    gate_input["application_provenance"],
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                "shared_generation_ledger_json": "{}",
-                "signing_key_arn": (
-                    "arn:aws:kms:ap-northeast-1:718959508629:"
-                    "key/11111111-1111-4111-8111-111111111111"
-                ),
-                "encryption_key_arn": (
-                    "arn:aws:kms:ap-northeast-1:718959508629:"
-                    "key/22222222-2222-4222-8222-222222222222"
-                ),
-                "deployment_intent_id": image_deployment_intent_id,
-            }
+            if capture := os.environ.get("TF_FAKE_GATE_INPUT_CAPTURE"):
+                pathlib.Path(capture).write_text(
+                    json.dumps(gate_input, sort_keys=True),
+                    encoding="utf-8",
+                )
+            mismatched_consumer_id = os.environ.get(
+                "TF_FAKE_POST_GATE_IMAGE_MISMATCH"
+            )
+            if mismatched_consumer_id:
+                task_address = next(
+                    address
+                    for address, consumer_id in consumer_by_address.items()
+                    if consumer_id == mismatched_consumer_id
+                )
+                task_change = next(
+                    change
+                    for change in plan["resource_changes"]
+                    if change["address"] == task_address
+                )
+                containers = json.loads(
+                    task_change["change"]["after"]["container_definitions"]
+                )
+                image = containers[0]["image"]
+                containers[0]["image"] = image[:-1] + (
+                    "0" if image[-1] != "0" else "1"
+                )
+                task_change["change"]["after"]["container_definitions"] = (
+                    json.dumps(containers)
+                )
             gate_change = next(
                 change
                 for change in plan["resource_changes"]
@@ -2146,6 +2441,8 @@ def _fake_terraform(path: Path) -> None:
                 }
             }
             pathlib.Path(out).write_text(json.dumps(plan, sort_keys=True), encoding="utf-8")
+            if marker := os.environ.get("TF_FAKE_DRIFT_AFTER_PLAN_MARKER"):
+                pathlib.Path(marker).touch()
         elif args[0] == "show":
             plan_path = pathlib.Path(args[-1])
             data = plan_path.read_bytes()
@@ -2183,10 +2480,18 @@ def _harness(
     plan_data = _safe_plan()
     if hmac_active:
         _activate_hmac_plan(plan_data)
+    state_data = _fake_state_from_plan(plan_data)
+    consumer_manifest = _consumer_manifest(hmac_active=hmac_active)
     _mutate_plan(plan_data, scenario)
     template = tmp_path / "template.json"
     template.write_text(json.dumps(plan_data), encoding="utf-8")
     template.chmod(0o600)
+    default_state = tmp_path / "terraform-state.json"
+    default_state.write_text(json.dumps(state_data), encoding="utf-8")
+    default_state.chmod(0o600)
+    manifest = tmp_path / "image-deployment-consumer-manifest.json"
+    manifest.write_text(json.dumps(consumer_manifest), encoding="utf-8")
+    manifest.chmod(0o600)
     var_file = tmp_path / "terraform.tfvars"
     var_file.write_text(
         'alarm_email_endpoints = ["s-komata@vectorinc.co.jp"]\n',
@@ -2196,12 +2501,26 @@ def _harness(
     tf_log = tmp_path / "terraform.log"
     tf_log.write_text("", encoding="utf-8")
     tf_log.chmod(0o600)
+    release_contracts, release_ready = _release_contract_bindings()
     env = os.environ.copy()
     env.update(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
             "TF_FAKE_LOG": str(tf_log),
             "TF_FAKE_TEMPLATE": str(template),
+            "TF_FAKE_DEFAULT_STATE": str(default_state),
+            "TF_FAKE_CONSUMER_MANIFEST": str(manifest),
+            "TF_FAKE_RELEASE_EVIDENCE": str(RELEASE_EVIDENCE),
+            "TF_FAKE_RELEASE_CONTRACTS": json.dumps(
+                release_contracts,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "TF_FAKE_RELEASE_READY": json.dumps(
+                release_ready,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
             "AWS_FAKE_TRUSTED_AUTOMATION": "1",
         }
     )
@@ -2247,22 +2566,13 @@ SYNC_CONSUMER_SNAPSHOT_KEYS = {
 
 def _strict_sync_expected_images() -> dict[str, str]:
     return {
-        "mcp": (
-            f"{REPOSITORY}@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
-        ),
-        "connect_web": (
-            f"{REPOSITORY}@sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
-        ),
-        "openclaw": (
-            f"{OPENCLAW_REPOSITORY}@sha256:"
-            "9cde4c829335ba5196186df0460db29eb6dbe31d3f212d095f6367d1b98be8af"
-        ),
-        "canary": f"{REPOSITORY}@sha256:{'5' * 64}",
-        "ingest": f"{REPOSITORY}@sha256:{'6' * 64}",
-        "morning_digest": f"{REPOSITORY}@sha256:{'7' * 64}",
-        "x_buzz_worker": (
-            f"{REPOSITORY}@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
-        ),
+        "mcp": LIVE_IMAGE,
+        "connect_web": CONNECT_WEB_IMAGE,
+        "openclaw": OPENCLAW_IMAGE,
+        "canary": CANARY_IMAGE,
+        "ingest": INGEST_IMAGE,
+        "morning_digest": MORNING_IMAGE,
+        "x_buzz_worker": X_IMAGE,
         "tiktok_acquire": MEDIA_WORKER_IMAGE,
     }
 
@@ -2340,6 +2650,88 @@ def _assert_sync_consumer_image_rejected(
 ) -> None:
     assert result.returncode == 1
     assert "registryと完全一致する8 consumer" in result.stderr
+
+
+def _release_gate_query(
+    manifest: dict[str, Any],
+    *,
+    receipt_catalog: dict[str, Any] | None = None,
+    consumer_receipt_bindings: dict[str, str] | None = None,
+    contract_ready: dict[str, bool] | None = None,
+    application: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    contracts, default_ready = _release_contract_bindings()
+    catalog = receipt_catalog or {}
+    bindings = consumer_receipt_bindings or {}
+    return {
+        "consumer_manifest_json": json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "receipt_catalog_json": json.dumps(
+            catalog,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "consumer_receipt_bindings_json": json.dumps(
+            bindings,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "contracts_json": json.dumps(
+            contracts,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "contract_ready_json": json.dumps(
+            default_ready if contract_ready is None else contract_ready,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "application_json": json.dumps(
+            application or {},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        "shared_generation_ledger_json": "{}",
+        "signing_key_arn": (
+            f"arn:aws:kms:{REGION}:{ACCOUNT}:key/11111111-1111-4111-8111-111111111111"
+        ),
+        "encryption_key_arn": (
+            f"arn:aws:kms:{REGION}:{ACCOUNT}:key/22222222-2222-4222-8222-222222222222"
+        ),
+        "deployment_intent_id": "11111111-1111-4111-8111-111111111111",
+    }
+
+
+def _run_release_gate(
+    query: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(RELEASE_EVIDENCE), "terraform-gate"],
+        input=json.dumps(query),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _manifest_consumer(
+    manifest: dict[str, Any],
+    consumer_id: str,
+) -> dict[str, Any]:
+    return next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == consumer_id
+    )
+
+
+def _receipt_required_canary_manifest() -> dict[str, Any]:
+    manifest = _consumer_manifest()
+    canary = _manifest_consumer(manifest, "canary")
+    canary["after"]["activation"]["state"] = "ENABLED"
+    manifest["mode"] = "receipt-required"
+    return manifest
 
 
 def test_consumer_image_map_preserves_exact_consumer_argument_wiring() -> None:
@@ -2616,6 +3008,110 @@ def test_strict_sync_rejects_provisional_registry_consumer(
     )
 
     _assert_sync_consumer_image_rejected(result)
+
+
+def test_verified_gate_does_not_bypass_guard_consumer_digest_binding(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    gate_verified = tmp_path / "gate-verified"
+    env["TF_FAKE_GATE_VERIFIED_MARKER"] = str(gate_verified)
+    env["TF_FAKE_POST_GATE_IMAGE_MISMATCH"] = "connect_web"
+    plan = tmp_path / "post-gate-mismatch.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert gate_verified.is_file()
+    assert (
+        "aws_ecs_task_definition.connect_web[0] は期待container "
+        "connect-web・候補image・unknown allowlistを満たしません"
+    ) in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not Path(f"{plan}.runtime-guard.json").exists()
+    commands = tf_log.read_text(encoding="utf-8").splitlines()
+    assert any(command.startswith("plan ") for command in commands)
+    assert not any(command == "apply" or command.startswith("apply ") for command in commands)
+
+
+def test_release_ready_false_stops_gate_after_guard_image_validation(
+    tmp_path: Path,
+) -> None:
+    expected = _strict_sync_expected_images()
+    guard = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+    )
+    assert guard.returncode == 0, guard.stdout + guard.stderr
+
+    env, var_file, tf_log = _harness(tmp_path)
+    env["TF_FAKE_GATE_READY_FALSE"] = "1"
+    plan = tmp_path / "release-not-ready.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 2
+    assert "FATAL: mcp release.ready is false" in result.stderr
+    assert not plan.exists()
+    assert not Path(f"{plan}.runtime-guard.json").exists()
+    commands = tf_log.read_text(encoding="utf-8").splitlines()
+    assert any(command.startswith("plan ") for command in commands)
+    assert not any(command == "apply" or command.startswith("apply ") for command in commands)
+
+
+def test_no_image_transition_empty_receipts_still_requires_guard_image_match(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    gate_verified = tmp_path / "no-image-transition-gate-verified"
+    gate_input_capture = tmp_path / "no-image-transition-gate-input.json"
+    env["TF_FAKE_GATE_VERIFIED_MARKER"] = str(gate_verified)
+    env["TF_FAKE_GATE_INPUT_CAPTURE"] = str(gate_input_capture)
+    env["TF_FAKE_POST_GATE_IMAGE_MISMATCH"] = "canary"
+    plan = tmp_path / "no-image-transition-mismatch.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert gate_verified.is_file()
+    gate_input = json.loads(gate_input_capture.read_text(encoding="utf-8"))
+    assert gate_input["deployment_mode"] == "no-image-transition"
+    assert gate_input["receipt_catalog"] == {}
+    assert gate_input["consumer_receipt_bindings"] == {}
+    assert gate_input["release_channels"] == {}
+    assert (
+        "aws_ecs_task_definition.canary[0] は期待container "
+        "canary・候補image・unknown allowlistを満たしません"
+    ) in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not Path(f"{plan}.runtime-guard.json").exists()
+    assert not any(
+        command == "apply" or command.startswith("apply ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_registry_identity_drift_is_rejected_independently_by_gate_and_guard(
+    tmp_path: Path,
+) -> None:
+    manifest = _consumer_manifest()
+    _manifest_consumer(manifest, "mcp")["ecs_family"] = "teamagent-dev-mcp-registry-drift"
+    gate = _run_release_gate(_release_gate_query(manifest))
+    assert gate.returncode == 2
+    assert "FATAL: Terraform image consumer manifest is invalid" in gate.stderr
+
+    registry = copy.deepcopy(CONSUMER_REGISTRY_DATA)
+    registry["consumers"][0]["ecs_family"] = "teamagent-dev-mcp-registry-drift"
+    registry_path = _write_consumer_registry(tmp_path, registry)
+    expected = _strict_sync_expected_images()
+    guard = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+        registry=registry_path,
+    )
+    _assert_sync_consumer_image_rejected(guard)
 
 
 def _normalize_lambda_tf(value: dict[str, Any]) -> dict[str, Any]:
@@ -2897,6 +3393,92 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
     result = _run(_plan_command(var_file, plan), env)
 
     assert result.returncode == 0, result.stdout + result.stderr
+    saved_plan = json.loads(plan.read_text(encoding="utf-8"))
+    manifest = saved_plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    assert manifest["schema_version"] == 1
+    assert manifest["registry_sha256"] == CONSUMERS.consumer_registry_sha256()
+    assert manifest["mode"] == "no-image-transition"
+    assert [row["consumer_id"] for row in manifest["consumers"]] == [
+        row["consumer_id"] for row in CONSUMER_REGISTRY_DATA["consumers"]
+    ]
+    for row in manifest["consumers"]:
+        for phase in ("live", "before", "after"):
+            assert set(row[phase]) == {
+                "image",
+                "task_definition_arn",
+                "activation",
+            }
+    assert saved_plan["variables"]["image_release_receipt_catalog"]["value"] == {}
+    assert saved_plan["variables"]["image_release_consumer_receipt_bindings"]["value"] == {}
+    manifest_images = {row["consumer_id"]: row["after"]["image"] for row in manifest["consumers"]}
+    assert {
+        manifest_images[consumer_id].split("@", 1)[0]
+        for consumer_id in ("mcp", "connect_web", "x_buzz_worker")
+    } == {REPOSITORY}
+    assert (
+        len(
+            {
+                manifest_images["mcp"],
+                manifest_images["connect_web"],
+                manifest_images["x_buzz_worker"],
+            }
+        )
+        == 3
+    )
+    for consumer_id in ("canary", "ingest"):
+        row = _manifest_consumer(manifest, consumer_id)
+        assert {row[phase]["activation"]["state"] for phase in ("live", "before", "after")} == {
+            "DISABLED"
+        }
+    gate_input = next(
+        change["change"]["after"]["input"]
+        for change in saved_plan["resource_changes"]
+        if change["address"] == "terraform_data.production_image_release_gate"
+    )
+    assert gate_input["deployment_mode"] == "no-image-transition"
+    assert gate_input["receipt_catalog"] == {}
+    assert gate_input["consumer_receipt_bindings"] == {}
+    assert gate_input["release_channels"] == {}
+    assert gate_input["consumer_manifest"] == manifest
+    gate_verification = _run_release_gate(gate_input["deployment_gate_query"])
+    assert gate_verification.returncode == 0, gate_verification.stdout + gate_verification.stderr
+    verified_gate = json.loads(gate_verification.stdout)
+    assert verified_gate["verified"] == "true"
+    assert gate_input["deployment_context_sha256"] == verified_gate["deployment_context_sha256"]
+    assert gate_input["receipt_claims_sha256"] == verified_gate["receipt_claims_sha256"]
+    fake_state = json.loads(Path(env["TF_FAKE_DEFAULT_STATE"]).read_text(encoding="utf-8"))
+    state_instances = {
+        address: record
+        for resource in fake_state["resources"]
+        for record in resource["instances"]
+        for address in [
+            (
+                f"{resource['type']}.{resource['name']}"
+                + (
+                    ""
+                    if "index_key" not in record
+                    else (
+                        f"[{record['index_key']}]"
+                        if isinstance(record["index_key"], int)
+                        else f"[{json.dumps(record['index_key'])}]"
+                    )
+                )
+            )
+        ]
+    }
+    for consumer in CONSUMER_REGISTRY_DATA["consumers"]:
+        attributes = state_instances[consumer["terraform_task_definition_address"]]["attributes"]
+        assert {
+            "container_definitions",
+            "task_role_arn",
+            "execution_role_arn",
+            "network_mode",
+            "cpu",
+            "memory",
+            "volume",
+            "arn",
+            "id",
+        } <= set(attributes)
     receipt = Path(f"{plan}.runtime-guard.json")
     assert plan.is_file() and receipt.is_file()
     assert stat.S_IMODE(plan.stat().st_mode) == 0o600
@@ -2911,6 +3493,7 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "x_buzz": X_IMAGE,
         "tiktok": MEDIA_WORKER_IMAGE,
     }
+    assert data["images"]["consumers"]["desired"] == manifest_images
     assert data["rule_states"]["desired"] == {
         "ingest": False,
         "morning": True,
@@ -3085,118 +3668,194 @@ def test_cloudtrail_live_lifecycle_deletion_is_rejected_before_plan(
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        "env_add",
-        "env_change",
-        "env_delete",
-        "secret_add",
-        "secret_change",
-        "secret_delete",
-        "wrong_container",
-        "duplicate_container",
-        "task_role",
-        "task_cpu",
-        "task_memory",
-        "task_runtime",
-        "task_command",
-        "task_essential",
-        "task_health",
-        "task_log",
-        "task_ports",
-        "task_volumes",
-        "task_tags",
-        "task_track_latest",
-        "task_skip_destroy",
-        "task_fault_injection",
-        "task_restart_policy",
-        "task_version_consistency",
-        "task_credential_specs",
-        "service_desired",
-        "service_network",
-        "service_lb",
-        "service_deployment",
-        "service_force_deployment",
-        "service_wait",
-        "service_triggers",
-        "service_connect",
-        "target_role",
-        "target_cluster",
-        "target_network",
-        "target_retry",
-        "target_input",
-        "rule_schedule",
-        "lambda_static_env",
-        "lambda_taskdef",
-        "lambda_role",
-        "lambda_code",
-        "lambda_handler",
-        "lambda_runtime",
-        "lambda_timeout",
-        "lambda_kms",
-        "lambda_vpc",
-        "lambda_source_reference",
-        "lambda_filename_reference",
-        "lambda_publish",
-        "lambda_skip_destroy",
-        "mapping_disabled",
-        "mapping_queue",
-    ],
-)
-def test_runtime_attribute_regressions_fail_closed(tmp_path: Path, scenario: str) -> None:
-    env, var_file, _ = _harness(tmp_path, scenario)
-    plan = tmp_path / "unsafe.tfplan"
-    result = _run(_plan_command(var_file, plan), env)
-    assert result.returncode == 1
-    assert not plan.exists()
-    assert not Path(f"{plan}.runtime-guard.json").exists()
+RUNTIME_ATTRIBUTE_FAILURES = {
+    **dict.fromkeys(
+        [
+            "env_add",
+            "env_change",
+            "env_delete",
+            "secret_add",
+            "secret_change",
+            "secret_delete",
+        ],
+        "aws_ecs_task_definition.mcp のenv/secretsがliveと完全一致しません",
+    ),
+    **dict.fromkeys(
+        [
+            "wrong_container",
+            "duplicate_container",
+            "task_skip_destroy",
+        ],
+        "aws_ecs_task_definition.mcp は期待container "
+        "teamagent-mcp・候補image・unknown allowlistを満たしません",
+    ),
+    **dict.fromkeys(
+        [
+            "task_role",
+            "task_cpu",
+            "task_memory",
+            "task_runtime",
+            "task_command",
+            "task_essential",
+            "task_health",
+            "task_log",
+            "task_ports",
+            "task_volumes",
+            "task_tags",
+            "task_track_latest",
+            "task_fault_injection",
+            "task_restart_policy",
+            "task_version_consistency",
+            "task_credential_specs",
+        ],
+        "aws_ecs_task_definition.mcp のrole/cpu/memory/runtime/container/"
+        "port/health/log/volume等がliveから変化します",
+    ),
+    **dict.fromkeys(
+        [
+            "service_desired",
+            "service_network",
+            "service_lb",
+            "service_deployment",
+            "service_force_deployment",
+            "service_wait",
+            "service_triggers",
+            "service_connect",
+        ],
+        "aws_ecs_service.mcp[0] はliveからtask_definition参照以外も変更します",
+    ),
+    **dict.fromkeys(
+        [
+            "target_role",
+            "target_cluster",
+            "target_network",
+            "target_retry",
+            "target_input",
+        ],
+        "aws_cloudwatch_event_target.ingest_run_task[0] "
+        "はliveからtask_definition参照以外も変更します",
+    ),
+    "rule_schedule": (
+        "aws_cloudwatch_event_rule.ingest_weekly[0] "
+        "のstate/schedule/description等を変更するruntime planは禁止です"
+    ),
+    **dict.fromkeys(
+        [
+            "lambda_static_env",
+            "lambda_taskdef",
+            "lambda_role",
+            "lambda_code",
+            "lambda_handler",
+            "lambda_runtime",
+            "lambda_timeout",
+            "lambda_kms",
+            "lambda_vpc",
+            "lambda_source_reference",
+            "lambda_filename_reference",
+            "lambda_publish",
+            "lambda_skip_destroy",
+        ],
+        "aws_lambda_function.tiktok_dispatch[0] は所定taskdef参照以外のdispatcher設定を変更します",
+    ),
+    **dict.fromkeys(
+        [
+            "mapping_disabled",
+            "mapping_queue",
+        ],
+        "aws_lambda_event_source_mapping.tiktok_dispatch[0] "
+        "のqueue/function/enabled/batch/retry/filter等を変更するruntime planは禁止です",
+    ),
+}
 
 
 @pytest.mark.parametrize(
-    "scenario",
-    [
-        "unknown",
-        "arbitrary_update",
-        "arbitrary_create",
-        "missing",
-        "schema",
-        "incomplete",
-        "deferred",
-        "invocation",
-        "checks",
-        "bad_action",
-        "arbitrary_drift",
-        "data_write",
-    ],
+    ("scenario", "expected_error"),
+    tuple(RUNTIME_ATTRIBUTE_FAILURES.items()),
+    ids=tuple(RUNTIME_ATTRIBUTE_FAILURES),
 )
-def test_plan_schema_action_and_allowlist_regressions_fail_closed(
-    tmp_path: Path, scenario: str
+def test_runtime_attribute_regressions_fail_closed(
+    tmp_path: Path,
+    scenario: str,
+    expected_error: str,
 ) -> None:
     env, var_file, _ = _harness(tmp_path, scenario)
     plan = tmp_path / "unsafe.tfplan"
     result = _run(_plan_command(var_file, plan), env)
     assert result.returncode == 1
+    assert expected_error in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not Path(f"{plan}.runtime-guard.json").exists()
+
+
+PLAN_SCHEMA_FAILURES = {
+    "unknown": (
+        "aws_ecs_task_definition.mcp は期待container "
+        "teamagent-mcp・候補image・unknown allowlistを満たしません"
+    ),
+    "arbitrary_update": "runtime planに許可外の変更を検出しました",
+    "arbitrary_create": "非許可の destroy/replace を検出しました",
+    "missing": (
+        "runtime planに必須addressがありません: aws_cloudwatch_event_rule.ingest_weekly[0]"
+    ),
+    "schema": "plan JSON schema/check/image/rule/runtime guard bindingが不正です",
+    "incomplete": "plan JSON schema/check/image/rule/runtime guard bindingが不正です",
+    "deferred": "plan JSON schema/check/image/rule/runtime guard bindingが不正です",
+    "invocation": "plan JSON schema/check/image/rule/runtime guard bindingが不正です",
+    "checks": "plan JSON schema/check/image/rule/runtime guard bindingが不正です",
+    "bad_action": "plan JSONのschema/action/check/runtime_guard束縛が不正です",
+    "arbitrary_drift": "runtime planに許可外resourceのdriftを検出しました",
+    "data_write": "plan JSONのschema/action/check/runtime_guard束縛が不正です",
+}
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_error"),
+    tuple(PLAN_SCHEMA_FAILURES.items()),
+    ids=tuple(PLAN_SCHEMA_FAILURES),
+)
+def test_plan_schema_action_and_allowlist_regressions_fail_closed(
+    tmp_path: Path,
+    scenario: str,
+    expected_error: str,
+) -> None:
+    env, var_file, _ = _harness(tmp_path, scenario)
+    plan = tmp_path / "unsafe.tfplan"
+    result = _run(_plan_command(var_file, plan), env)
+    assert result.returncode == 1
+    assert expected_error in result.stdout + result.stderr
     assert not plan.exists()
 
 
-@pytest.mark.parametrize("show_mode", ["malformed", "race"])
-def test_malformed_or_replaced_plan_is_never_published(tmp_path: Path, show_mode: str) -> None:
+@pytest.mark.parametrize(
+    ("show_mode", "expected_error"),
+    [
+        ("malformed", "planからHMAC metadataを一意に取得できません"),
+        ("race", "terraform show中のplan差替えを検出しました"),
+    ],
+)
+def test_malformed_or_replaced_plan_is_never_published(
+    tmp_path: Path,
+    show_mode: str,
+    expected_error: str,
+) -> None:
     env, var_file, _ = _harness(tmp_path)
     env["TF_FAKE_SHOW_MODE"] = show_mode
     plan = tmp_path / "unsafe.tfplan"
     result = _run(_plan_command(var_file, plan), env)
     assert result.returncode == 1
+    assert expected_error in result.stdout + result.stderr
     assert not plan.exists()
 
 
 def test_live_change_during_plan_is_never_published(tmp_path: Path) -> None:
     env, var_file, _ = _harness(tmp_path)
-    # fakeは全snapshotで同じdriftを返すため、templateとの比較で即座に拒否される。
-    env["AWS_FAKE_DRIFT"] = "1"
+    drift_marker = tmp_path / "terraform-plan-completed"
+    env["TF_FAKE_DRIFT_AFTER_PLAN_MARKER"] = str(drift_marker)
     plan = tmp_path / "unsafe.tfplan"
     result = _run(_plan_command(var_file, plan), env)
     assert result.returncode == 1
+    assert "plan 作成中に live runtime が変化しました" in (result.stdout + result.stderr)
+    assert drift_marker.exists()
     assert not plan.exists()
 
 
@@ -3218,12 +3877,14 @@ def test_wrong_account_and_unstable_service_fail_before_plan(tmp_path: Path) -> 
     env["AWS_FAKE_ACCOUNT"] = "000000000000"
     result = _run(_plan_command(var_file, tmp_path / "account.tfplan"), env)
     assert result.returncode == 1
+    assert "想定外のAWS accountです: 000000000000" in result.stdout + result.stderr
     assert "plan " not in tf_log.read_text(encoding="utf-8")
 
     env.pop("AWS_FAKE_ACCOUNT")
     env["AWS_FAKE_SERVICE_STATE"] = "in_progress"
     result = _run(_plan_command(var_file, tmp_path / "service.tfplan"), env)
     assert result.returncode == 1
+    assert "teamagent-dev-mcp が安定稼働中ではありません" in (result.stdout + result.stderr)
 
 
 @pytest.mark.parametrize(
@@ -3272,6 +3933,7 @@ def test_invalid_bool_value_is_not_echoed(tmp_path: Path) -> None:
     env["AWS_FAKE_INVALID_BOOL"] = secret_value
     result = _run(_plan_command(var_file, tmp_path / "bool.tfplan"), env)
     assert result.returncode == 1
+    assert "live runtimeのboolean/env契約が不正です" in result.stdout + result.stderr
     assert secret_value not in result.stdout + result.stderr
 
 
@@ -3368,104 +4030,76 @@ def test_state_address_reconstruction_binds_mixed_exact_address_set(
 ) -> None:
     env, var_file, _ = _harness(tmp_path)
     state = tmp_path / "module-state.json"
-    addresses = [
+    extra_addresses = [
         "aws_cloudwatch_log_group.audit",
         "data.aws_caller_identity.current",
         'module.example.aws_s3_bucket.logs["blue"]',
         "module.example.data.aws_subnets.private[0]",
     ]
-    state.write_text(
-        json.dumps(
-            {
-                "version": 4,
-                "terraform_version": "1.12.2",
-                "serial": 43,
-                "lineage": "01234567-89ab-cdef-0123-456789abcdef",
-                "outputs": {},
-                "resources": [
-                    {
-                        "mode": "managed",
-                        "type": "aws_cloudwatch_log_group",
-                        "name": "audit",
-                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
-                        "instances": [
-                            {
-                                "schema_version": 0,
-                                "attributes": {"id": "/teamagent/dev/audit"},
-                            }
-                        ],
-                    },
-                    {
-                        "mode": "data",
-                        "type": "aws_caller_identity",
-                        "name": "current",
-                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
-                        "instances": [
-                            {
-                                "schema_version": 0,
-                                "attributes": {"id": "718959508629"},
-                            }
-                        ],
-                    },
-                    {
-                        "module": "module.example",
-                        "mode": "managed",
-                        "type": "aws_s3_bucket",
-                        "name": "logs",
-                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
-                        "instances": [
-                            {
-                                "index_key": "blue",
-                                "schema_version": 0,
-                                "attributes": {
-                                    "id": "teamagent-test-module-logs",
-                                },
-                            }
-                        ],
-                    },
-                    {
-                        "module": "module.example",
-                        "mode": "data",
-                        "type": "aws_subnets",
-                        "name": "private",
-                        "provider": ('provider["registry.terraform.io/hashicorp/aws"]'),
-                        "instances": [
-                            {
-                                "index_key": 0,
-                                "schema_version": 0,
-                                "attributes": {"id": "ap-northeast-1"},
-                            }
-                        ],
-                    },
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    state_payload = json.loads(state.read_text(encoding="utf-8"))
-    template = json.loads(Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8"))
-    for change in template["resource_changes"]:
-        if change.get("mode", "managed") != "managed":
-            continue
-        address = change["address"]
-        base_address = address
-        index_key = None
-        if base_address.endswith("[0]"):
-            base_address = base_address[:-3]
-            index_key = 0
-        resource_type, name = base_address.split(".", 1)
-        instance: dict[str, Any] = {"schema_version": 0, "attributes": {}}
-        if index_key is not None:
-            instance["index_key"] = index_key
-        state_payload["resources"].append(
+    state_payload = json.loads(Path(env["TF_FAKE_DEFAULT_STATE"]).read_text(encoding="utf-8"))
+    state_payload["serial"] = 43
+    state_payload["resources"].extend(
+        [
             {
                 "mode": "managed",
-                "type": resource_type,
-                "name": name,
-                "instances": [instance],
-            }
-        )
-        addresses.append(address)
+                "type": "aws_cloudwatch_log_group",
+                "name": "audit",
+                "provider": 'provider["registry.terraform.io/hashicorp/aws"]',
+                "instances": [
+                    {
+                        "schema_version": 0,
+                        "attributes": {"id": "/teamagent/dev/audit"},
+                    }
+                ],
+            },
+            {
+                "mode": "data",
+                "type": "aws_caller_identity",
+                "name": "current",
+                "provider": 'provider["registry.terraform.io/hashicorp/aws"]',
+                "instances": [
+                    {
+                        "schema_version": 0,
+                        "attributes": {"id": ACCOUNT},
+                    }
+                ],
+            },
+            {
+                "module": "module.example",
+                "mode": "managed",
+                "type": "aws_s3_bucket",
+                "name": "logs",
+                "provider": 'provider["registry.terraform.io/hashicorp/aws"]',
+                "instances": [
+                    {
+                        "index_key": "blue",
+                        "schema_version": 0,
+                        "attributes": {"id": "teamagent-test-module-logs"},
+                    }
+                ],
+            },
+            {
+                "module": "module.example",
+                "mode": "data",
+                "type": "aws_subnets",
+                "name": "private",
+                "provider": 'provider["registry.terraform.io/hashicorp/aws"]',
+                "instances": [
+                    {
+                        "index_key": 0,
+                        "schema_version": 0,
+                        "attributes": {"id": REGION},
+                    }
+                ],
+            },
+        ]
+    )
+    template = json.loads(Path(env["TF_FAKE_TEMPLATE"]).read_text(encoding="utf-8"))
+    addresses = extra_addresses + [
+        change["address"]
+        for change in template["resource_changes"]
+        if change.get("mode", "managed") == "managed" and change["change"].get("before") is not None
+    ]
     state.write_text(json.dumps(state_payload), encoding="utf-8")
     state.chmod(0o600)
     env["TF_FAKE_STATE"] = str(state)
@@ -3603,6 +4237,10 @@ def test_backend_identity_is_observed_from_normalized_initialized_metadata(
         check=False,
     )
     assert rejected.returncode != 0
+    assert (
+        "初期化済みTerraform backend metadataがreview済みS3設定と一致しません"
+        in rejected.stdout + rejected.stderr
+    )
 
 
 def test_ad_hoc_rollout_is_rejected_and_migration_requires_preflight(
@@ -3643,11 +4281,14 @@ def test_private_permissions_symlinks_existing_paths_and_arbitrary_target(
     existing.chmod(0o600)
     result = _run(_plan_command(var_file, existing), env)
     assert result.returncode == 1
+    assert "既存pathへの上書きを拒否します" in result.stdout + result.stderr
     assert existing.read_text(encoding="utf-8") == "do not overwrite"
 
     target_command = _plan_command(var_file, tmp_path / "target.tfplan")
     target_command.extend(["--target", "aws_iam_policy.bad"])
-    assert _run(target_command, env).returncode == 1
+    result = _run(target_command, env)
+    assert result.returncode == 1
+    assert "不明な引数: --target" in result.stdout + result.stderr
 
 
 def test_atomic_publish_race_does_not_overwrite_or_delete_racer(tmp_path: Path) -> None:
@@ -3659,6 +4300,7 @@ def test_atomic_publish_race_does_not_overwrite_or_delete_racer(tmp_path: Path) 
     result = _run(_plan_command(var_file, plan), env)
 
     assert result.returncode == 1
+    assert "publish先receipt pathを原子的に確保できません" in (result.stdout + result.stderr)
     assert not plan.exists()
     assert receipt.read_text(encoding="utf-8") == "racer-owned"
 
@@ -3683,14 +4325,17 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
         env,
     )
     assert swapped.returncode == 1
+    assert "receiptが別plan pathに束縛されています" in (swapped.stdout + swapped.stderr)
 
     first.write_bytes(first.read_bytes() + b"tamper")
     tampered = _run(["bash", str(GUARD), "verify", "--plan", str(first)], env)
     assert tampered.returncode == 1
+    assert "plan SHA256がreceiptと不一致です" in tampered.stdout + tampered.stderr
 
     env["AWS_FAKE_DRIFT"] = "1"
     live = _run(["bash", str(GUARD), "verify", "--plan", str(second)], env)
     assert live.returncode == 1
+    assert "plan作成後にlive runtimeが変化しました" in live.stdout + live.stderr
 
     apply = _run(
         [
@@ -3705,6 +4350,7 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
         env,
     )
     assert apply.returncode != 0
+    assert "review済みTerraform v1だけを使用できます" in (apply.stdout + apply.stderr)
     assert not any(
         command == "apply" or command.startswith("apply ")
         for command in tf_log.read_text(encoding="utf-8").splitlines()
