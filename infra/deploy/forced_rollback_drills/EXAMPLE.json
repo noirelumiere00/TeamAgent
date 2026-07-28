@@ -1,0 +1,359 @@
+{
+  "schema_version": 1,
+  "kind": "teamagent.forced-rollback-drill-contract",
+  "ready": false,
+  "blocked_reason": "Template only: replace every placeholder, independently review the exact changed-consumer scope and immutable locators, then set ready=true.",
+  "drill_id": "00000000-0000-4000-8000-000000000000",
+  "environment": {
+    "account_id": "718959508629",
+    "region": "ap-northeast-1",
+    "name": "dev"
+  },
+  "limits": {
+    "max_start_delay_seconds": 1800,
+    "max_old_dwell_seconds": 1200
+  },
+  "pipeline": "mcp",
+  "control": {
+    "git_commit": "0000000000000000000000000000000000000000",
+    "initial_release_apply_locator": {
+      "bucket": "teamagent-dev-forced-rollback-evidence",
+      "key": "forced-rollback-drills/REPLACE/initial-release.apply.json",
+      "version_id": "REPLACE",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 1,
+      "content_type": "application/json",
+      "object_lock_mode": "COMPLIANCE",
+      "retain_until": "2036-01-01T00:00:00Z",
+      "encryption_kms_key_arn": "arn:aws:kms:ap-northeast-1:718959508629:key/00000000-0000-4000-8000-000000000000",
+      "signature": {
+        "key": "forced-rollback-drills/REPLACE/initial-release.apply.json.sig",
+        "version_id": "REPLACE",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "verified": false
+      },
+      "signer": {
+        "kms_key_arn": "arn:aws:kms:ap-northeast-1:718959508629:key/00000000-0000-4000-8000-000000000000",
+        "algorithm": "RSASSA_PSS_SHA_256"
+      },
+      "exact_version_redownload": {
+        "requested_version_id": "REPLACE",
+        "returned_version_id": "REPLACE",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "size": 1,
+        "bytes_match": false
+      }
+    }
+  },
+  "actors": {
+    "initiating_principal": {
+      "arn": "REPLACE",
+      "user_id": "REPLACE",
+      "source_identity": ""
+    },
+    "automation_principals": [
+      "REPLACE"
+    ]
+  },
+  "targets": {
+    "old": {
+      "images": {
+        "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "subjects": [
+        {
+          "pipeline": "mcp",
+          "name": "core",
+          "release_repository": "teamagent-mcp",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "pipeline": "mcp",
+          "name": "media",
+          "release_repository": "teamagent-media-worker",
+          "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      ],
+      "resources": [
+        {
+          "consumer_id": "canary",
+          "terraform_address": "aws_ecs_task_definition.canary[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:10",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-canary-hourly",
+            "state": "DISABLED"
+          }
+        },
+        {
+          "consumer_id": "connect_web",
+          "terraform_address": "aws_ecs_task_definition.connect_web[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:10",
+          "activation": {
+            "type": "ecs_service",
+            "identity": "teamagent-dev-connect-web",
+            "state": 1
+          }
+        },
+        {
+          "consumer_id": "ingest",
+          "terraform_address": "aws_ecs_task_definition.ingest[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:10",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-ingest-weekly",
+            "state": "DISABLED"
+          }
+        },
+        {
+          "consumer_id": "mcp",
+          "terraform_address": "aws_ecs_task_definition.mcp",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:10",
+          "activation": {
+            "type": "ecs_service",
+            "identity": "teamagent-dev-mcp",
+            "state": 1
+          }
+        },
+        {
+          "consumer_id": "morning_digest",
+          "terraform_address": "aws_ecs_task_definition.morning_digest[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:10",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-morning-digest-weekday",
+            "state": "ENABLED"
+          }
+        },
+        {
+          "consumer_id": "tiktok_acquire",
+          "terraform_address": "aws_ecs_task_definition.tiktok_acquire[0]",
+          "pipeline": "mcp",
+          "subject": "media",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:30",
+          "activation": {
+            "type": "lambda_taskdef_arn_environment",
+            "identity": "teamagent-dev-tiktok-acquire-dispatch",
+            "state": true
+          }
+        },
+        {
+          "consumer_id": "x_buzz_worker",
+          "terraform_address": "aws_ecs_task_definition.x_buzz_worker[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:10",
+          "activation": {
+            "type": "lambda_taskdef_arn_environment",
+            "identity": "teamagent-dev-x-buzz-dispatch",
+            "state": true
+          }
+        }
+      ],
+      "preflight_migration_id": "REPLACE-old-preflight",
+      "runtime_migration_id": "REPLACE-rollback-transition",
+      "candidate": {
+        "receipt_key": "release-receipts/mcp/0000000000000000000000000000000000000000/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        "receipt_version_id": "REPLACE-old",
+        "receipt_signature_version_id": "REPLACE-old-signature"
+      },
+      "approval": {
+        "payload_bucket": "teamagent-dev-image-release-evidence",
+        "payload_key": "REPLACE-old",
+        "payload_version_id": "REPLACE-old",
+        "payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "signature_bucket": "teamagent-dev-image-release-evidence",
+        "signature_key": "REPLACE-old.sig",
+        "signature_version_id": "REPLACE-old-signature",
+        "signature_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "consumer_manifest": {
+        "path": "/secure/REPLACE-old-consumer-manifest.json",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    "new": {
+      "images": {
+        "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "subjects": [
+        {
+          "pipeline": "mcp",
+          "name": "core",
+          "release_repository": "teamagent-mcp",
+          "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        {
+          "pipeline": "mcp",
+          "name": "media",
+          "release_repository": "teamagent-media-worker",
+          "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      ],
+      "resources": [
+        {
+          "consumer_id": "canary",
+          "terraform_address": "aws_ecs_task_definition.canary[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:11",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-canary-hourly",
+            "state": "DISABLED"
+          }
+        },
+        {
+          "consumer_id": "connect_web",
+          "terraform_address": "aws_ecs_task_definition.connect_web[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:11",
+          "activation": {
+            "type": "ecs_service",
+            "identity": "teamagent-dev-connect-web",
+            "state": 1
+          }
+        },
+        {
+          "consumer_id": "ingest",
+          "terraform_address": "aws_ecs_task_definition.ingest[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:11",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-ingest-weekly",
+            "state": "DISABLED"
+          }
+        },
+        {
+          "consumer_id": "mcp",
+          "terraform_address": "aws_ecs_task_definition.mcp",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:11",
+          "activation": {
+            "type": "ecs_service",
+            "identity": "teamagent-dev-mcp",
+            "state": 1
+          }
+        },
+        {
+          "consumer_id": "morning_digest",
+          "terraform_address": "aws_ecs_task_definition.morning_digest[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:11",
+          "activation": {
+            "type": "eventbridge_rule_ecs_target",
+            "identity": "teamagent-dev-morning-digest-weekday",
+            "state": "ENABLED"
+          }
+        },
+        {
+          "consumer_id": "tiktok_acquire",
+          "terraform_address": "aws_ecs_task_definition.tiktok_acquire[0]",
+          "pipeline": "mcp",
+          "subject": "media",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:31",
+          "activation": {
+            "type": "lambda_taskdef_arn_environment",
+            "identity": "teamagent-dev-tiktok-acquire-dispatch",
+            "state": true
+          }
+        },
+        {
+          "consumer_id": "x_buzz_worker",
+          "terraform_address": "aws_ecs_task_definition.x_buzz_worker[0]",
+          "pipeline": "mcp",
+          "subject": "core",
+          "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:11",
+          "activation": {
+            "type": "lambda_taskdef_arn_environment",
+            "identity": "teamagent-dev-x-buzz-dispatch",
+            "state": true
+          }
+        }
+      ],
+      "preflight_migration_id": "REPLACE-new-preflight",
+      "runtime_migration_id": "REPLACE-restore-transition",
+      "candidate": {
+        "receipt_key": "release-receipts/mcp/1111111111111111111111111111111111111111/1111111111111111111111111111111111111111111111111111111111111111.json",
+        "receipt_version_id": "REPLACE-new",
+        "receipt_signature_version_id": "REPLACE-new-signature"
+      },
+      "approval": {
+        "payload_bucket": "teamagent-dev-image-release-evidence",
+        "payload_key": "REPLACE-new",
+        "payload_version_id": "REPLACE-new",
+        "payload_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signature_bucket": "teamagent-dev-image-release-evidence",
+        "signature_key": "REPLACE-new.sig",
+        "signature_version_id": "REPLACE-new-signature",
+        "signature_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "consumer_manifest": {
+        "path": "/secure/REPLACE-new-consumer-manifest.json",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  },
+  "guard_receipts": {
+    "alarm_delivery": {
+      "path": "/secure/REPLACE-alarm-delivery.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "alarm_migration": {
+      "path": "/secure/REPLACE-alarm-migration.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "log_readiness": {
+      "path": "/secure/REPLACE-log-readiness.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "media_cutover": null,
+    "versioning": {
+      "path": "/secure/REPLACE-versioning.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  },
+  "evidence": {
+    "artifact_manifest": [],
+    "integrity": {
+      "kms_key_arn": "REPLACE",
+      "signature": {},
+      "immutable_object": {}
+    }
+  }
+}
