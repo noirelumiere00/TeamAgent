@@ -10526,9 +10526,17 @@ case "$COMMAND" in
     RECEIPT="$(secure_existing_file "$RECEIPT" 600)"
     [ "$(dirname "$PLAN")" = "$(dirname "$RECEIPT")" ] ||
       die "planとreceiptは同じprivate directoryにある必要があります"
+    # `jq -e` exits 1 when the expression itself evaluates to false, so the
+    # legitimate "this apply carries no media cutover" receipt -- which the
+    # schema explicitly allows as an empty path -- was dying here instead of
+    # being read as false. Emit the verdict as a string and check it: a parse
+    # failure leaves it empty, so the branch still fails closed.
     MEDIA_APPLY_REQUIRED="$(
-      jq -er '(.media_cutover_receipt_path // "") != ""' "$RECEIPT"
-    )" ||
+      jq -r '
+        if (.media_cutover_receipt_path // "") != "" then "true" else "false" end
+      ' "$RECEIPT"
+    )"
+    [ "$MEDIA_APPLY_REQUIRED" = "true" ] || [ "$MEDIA_APPLY_REQUIRED" = "false" ] ||
       die "plan receiptのmedia apply契約を判定できません"
     MEDIA_AUTHORIZATION_SHA256=""
     MEDIA_AUTHORIZATION_IDENTITY=""
