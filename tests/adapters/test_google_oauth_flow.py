@@ -23,9 +23,7 @@ _SECRET = b"unit-test-secret"
 
 def test_make_verify_state_roundtrip() -> None:
     state = make_state("S-Komata@Vectorinc.co.jp ", secret=_SECRET, now=1000)
-    assert (
-        verify_state(state, secret=_SECRET, now=1000) == "s-komata@vectorinc.co.jp"
-    )  # 正規化
+    assert verify_state(state, secret=_SECRET, now=1000) == "s-komata@vectorinc.co.jp"  # 正規化
 
 
 def test_state_is_per_request_nonce() -> None:
@@ -38,9 +36,7 @@ def test_state_is_per_request_nonce() -> None:
 
 def test_verify_state_rejects_wrong_secret() -> None:
     state = make_state("a@x.com", secret=_SECRET, now=1000)
-    assert (
-        verify_state(state, secret=b"attacker-secret", now=1000) is None
-    )  # 別鍵では検証失敗
+    assert verify_state(state, secret=b"attacker-secret", now=1000) is None  # 別鍵では検証失敗
 
 
 def test_verify_state_rejects_garbage() -> None:
@@ -109,9 +105,7 @@ def test_exchange_returns_id_token_for_callback_verification(
             assert code == "authorization-code"
 
     monkeypatch.setattr(OAuthConsentFlow, "_flow", lambda _self: _FakeFlow())
-    token = OAuthConsentFlow("https://example.test/oauth2/callback").exchange(
-        "authorization-code"
-    )
+    token = OAuthConsentFlow("https://example.test/oauth2/callback").exchange("authorization-code")
     assert token.refresh_token == "refresh-token"
     assert token.id_token == "signed-id-token"
 

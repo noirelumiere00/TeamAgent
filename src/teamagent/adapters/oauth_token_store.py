@@ -32,10 +32,7 @@ class OAuthToken:
 
     def __repr__(self) -> str:
         id_token = "***" if self.id_token else None
-        return (
-            f"OAuthToken(refresh_token=***, scopes={self.scopes!r}, "
-            f"id_token={id_token})"
-        )
+        return f"OAuthToken(refresh_token=***, scopes={self.scopes!r}, id_token={id_token})"
 
 
 @dataclass(frozen=True, repr=False)
