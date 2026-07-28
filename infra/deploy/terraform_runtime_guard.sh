@@ -14,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="24"
+GUARD_VERSION="25"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -50,7 +50,7 @@ DEPLOYMENT_APPLY_FINALIZER="$GUARD_JQ_DIR/deployment_apply_finalizer.py"
 PLAN_CONTRACT_HELPER="$GUARD_JQ_DIR/terraform_plan_contract.py"
 IMAGE_GATE_RUNNER="$GUARD_JQ_DIR/run_image_deployment_gate.sh"
 RELEASE_EVIDENCE_HELPER="$REPO_ROOT/infra/codebuild/release_evidence.py"
-CONSUMER_REGISTRY="$REPO_ROOT/infra/codebuild/image_deployment_consumers.json"
+IMAGE_DEPLOYMENT_CONSUMER_REGISTRY="$REPO_ROOT/infra/codebuild/image_deployment_consumers.json"
 IMAGE_CONTEXT_HELPER="$TF_DIR/image_release_context.py"
 APPLY_SUPERVISOR="$TF_DIR/terraform_apply_supervisor.py"
 PLAN_STAGER="$TF_DIR/stage_saved_plan.py"
@@ -257,7 +257,7 @@ assert_guard_sources() {
   assert_regular_nonwritable "$PLAN_CONTRACT_HELPER"
   assert_regular_nonwritable "$IMAGE_GATE_RUNNER"
   assert_regular_nonwritable "$RELEASE_EVIDENCE_HELPER"
-  assert_regular_nonwritable "$CONSUMER_REGISTRY"
+  assert_regular_nonwritable "$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY"
   assert_regular_nonwritable "$IMAGE_CONTEXT_HELPER"
   assert_regular_nonwritable "$APPLY_SUPERVISOR"
   assert_regular_nonwritable "$PLAN_STAGER"
@@ -274,7 +274,7 @@ assert_guard_sources() {
   assert_git_tracked_clean "$PLAN_CONTRACT_HELPER"
   assert_git_tracked_clean "$IMAGE_GATE_RUNNER"
   assert_git_tracked_clean "$RELEASE_EVIDENCE_HELPER"
-  assert_git_tracked_clean "$CONSUMER_REGISTRY"
+  assert_git_tracked_clean "$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY"
   assert_git_tracked_clean "$IMAGE_CONTEXT_HELPER"
   assert_git_tracked_clean "$APPLY_SUPERVISOR"
   assert_git_tracked_clean "$PLAN_STAGER"
@@ -322,7 +322,7 @@ write_config_manifest() {
     "$PLAN_CONTRACT_HELPER" \
     "$IMAGE_GATE_RUNNER" \
     "$RELEASE_EVIDENCE_HELPER" \
-    "$CONSUMER_REGISTRY" \
+    "$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY" \
     "$IMAGE_CONTEXT_HELPER" \
     "$APPLY_SUPERVISOR" \
     "$PLAN_STAGER" \
@@ -819,7 +819,7 @@ capture_state_contract() {
       --arg region "$REGION" \
       --slurpfile base "$base_output" \
       --slurpfile state "$raw" \
-      --slurpfile registry "$CONSUMER_REGISTRY" \
+      --slurpfile registry "$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY" \
       --slurpfile live "$live_contract" '
       def instance_address($resource; $instance):
         (
@@ -1992,10 +1992,14 @@ build_scoped_release_live_contract() {
       end;
     {
       images:{
-        openclaw:$live[0].taskdefs.openclaw.image,
         mcp:$live[0].taskdefs.mcp.image,
-        x_buzz:$live[0].taskdefs.x_buzz.image,
-        tiktok:$live[0].taskdefs.tiktok.image
+        connect_web:$live[0].taskdefs.connect_web.image,
+        openclaw:$live[0].taskdefs.openclaw.image,
+        canary:$live[0].taskdefs.canary.image,
+        ingest:$live[0].taskdefs.ingest.image,
+        morning_digest:$live[0].taskdefs.morning.image,
+        x_buzz_worker:$live[0].taskdefs.x_buzz.image,
+        tiktok_acquire:$live[0].taskdefs.tiktok.image
       },
       resources:([
         $context[0].consumer_manifest.consumers[] |
@@ -2051,8 +2055,16 @@ build_scoped_release_live_contract() {
         execution_state($consumer; "before") !=
           execution_state($consumer; "after")
       end;
-    (.images | keys | sort) ==
-      ["mcp","openclaw","tiktok","x_buzz"] and
+    (.images | keys | sort) == ([
+      "canary",
+      "connect_web",
+      "ingest",
+      "mcp",
+      "morning_digest",
+      "openclaw",
+      "tiktok_acquire",
+      "x_buzz_worker"
+    ] | sort) and
     (.rule_states | keys | sort) == ["canary","ingest","morning"] and
     (.resources | type) == "array" and
     .resources == (.resources | sort_by(.consumer_id)) and
@@ -2119,6 +2131,22 @@ build_scoped_release_state_contract() {
   ' "$fresh" >/dev/null ||
     die "scope内consumerのTerraform state metadataが観測間で変化しました"
   mv "$fresh" "$output"
+}
+
+validate_image_release_context_consumer_images() {
+  local context="$1"
+  local expected_consumer_images="$2"
+  jq -e --argjson expected "$expected_consumer_images" '
+    (.consumer_manifest.consumers | type) == "array" and
+    (.consumer_manifest.consumers | length) == 8 and
+    ([.consumer_manifest.consumers[].consumer_id] | length) ==
+      ([.consumer_manifest.consumers[].consumer_id] | unique | length) and
+    ([
+      .consumer_manifest.consumers[] |
+      {key:.consumer_id,value:.after.image}
+    ] | from_entries) == $expected
+  ' "$context" >/dev/null ||
+    die "gate検証済みconsumer manifestの8件のafter.imageがguardのconsumer別期待値と一致しません"
 }
 
 prepare_image_deployment_intent() {
@@ -4571,6 +4599,200 @@ validate_eventbridge_saga_receipt() {
     die "durable EventBridge saga receipt hashが不正です"
 }
 
+consumer_image_map() {
+  local desired_openclaw_image="${1:-}"
+  local desired_mcp_image="${2:-}"
+  local desired_x_image="${3:-}"
+  local desired_tiktok_image="${4:-}"
+  local desired_connect_web_image="${5:-}"
+  local desired_ingest_image="${6:-}"
+  local desired_morning_digest_image="${7:-}"
+  local desired_canary_image="${8:-}"
+  jq -n -c \
+    --arg mcp "$desired_mcp_image" \
+    --arg connect_web "$desired_connect_web_image" \
+    --arg openclaw "$desired_openclaw_image" \
+    --arg canary "$desired_canary_image" \
+    --arg ingest "$desired_ingest_image" \
+    --arg morning_digest "$desired_morning_digest_image" \
+    --arg x_buzz_worker "$desired_x_image" \
+    --arg tiktok_acquire "$desired_tiktok_image" \
+    '{
+      mcp:$mcp,
+      connect_web:$connect_web,
+      openclaw:$openclaw,
+      canary:$canary,
+      ingest:$ingest,
+      morning_digest:$morning_digest,
+      x_buzz_worker:$x_buzz_worker,
+      tiktok_acquire:$tiktok_acquire
+    }'
+}
+
+validate_sync_consumer_images() {
+  local snapshot="$1"
+  local expected_consumer_images="$2"
+  local registry="$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY"
+  local repository_prefix
+  repository_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/"
+
+  jq -e \
+    --argjson expected "$expected_consumer_images" \
+    --arg repository_prefix "$repository_prefix" \
+    --slurpfile registry "$registry" '
+    def guard_consumers:
+      [
+        {
+          consumer_id:"mcp",
+          snapshot_key:"mcp",
+          terraform_task_definition_address:"aws_ecs_task_definition.mcp",
+          ecs_family:"teamagent-dev-mcp",
+          container_name:"teamagent-mcp",
+          activator:{type:"ecs_service",identity:"teamagent-dev-mcp"}
+        },
+        {
+          consumer_id:"connect_web",
+          snapshot_key:"connect_web",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.connect_web[0]",
+          ecs_family:"teamagent-dev-connect-web",
+          container_name:"connect-web",
+          activator:{
+            type:"ecs_service",
+            identity:"teamagent-dev-connect-web"
+          }
+        },
+        {
+          consumer_id:"openclaw",
+          snapshot_key:"openclaw",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.openclaw[0]",
+          ecs_family:"teamagent-dev-openclaw",
+          container_name:"openclaw",
+          activator:{type:"ecs_service",identity:"teamagent-dev-openclaw"}
+        },
+        {
+          consumer_id:"canary",
+          snapshot_key:"canary",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.canary[0]",
+          ecs_family:"teamagent-dev-canary",
+          container_name:"canary",
+          activator:{
+            type:"eventbridge_rule_ecs_target",
+            identity:"teamagent-dev-canary-hourly"
+          }
+        },
+        {
+          consumer_id:"ingest",
+          snapshot_key:"ingest",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.ingest[0]",
+          ecs_family:"teamagent-dev-ingest",
+          container_name:"ingest",
+          activator:{
+            type:"eventbridge_rule_ecs_target",
+            identity:"teamagent-dev-ingest-weekly"
+          }
+        },
+        {
+          consumer_id:"morning_digest",
+          snapshot_key:"morning",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.morning_digest[0]",
+          ecs_family:"teamagent-dev-morning-digest",
+          container_name:"morning-digest",
+          activator:{
+            type:"eventbridge_rule_ecs_target",
+            identity:"teamagent-dev-morning-digest-weekday"
+          }
+        },
+        {
+          consumer_id:"x_buzz_worker",
+          snapshot_key:"x_buzz",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.x_buzz_worker[0]",
+          ecs_family:"teamagent-dev-x-buzz-worker",
+          container_name:"worker",
+          activator:{
+            type:"lambda_taskdef_arn_environment",
+            identity:"teamagent-dev-x-buzz-dispatch"
+          }
+        },
+        {
+          consumer_id:"tiktok_acquire",
+          snapshot_key:"tiktok",
+          terraform_task_definition_address:
+            "aws_ecs_task_definition.tiktok_acquire[0]",
+          ecs_family:"teamagent-dev-tiktok-acquire",
+          container_name:"acquire",
+          activator:{
+            type:"lambda_taskdef_arn_environment",
+            identity:"teamagent-dev-tiktok-acquire-dispatch"
+          }
+        }
+      ];
+    . as $snapshot |
+    $registry as $registries |
+    guard_consumers as $guard |
+    ($registries | length) == 1 and
+    ($registries[0] | keys | sort) == ["consumers","schema_version"] and
+    $registries[0].schema_version == 1 and
+    ($registries[0].consumers | type) == "array" and
+    ($registries[0].consumers | length) == 8 and
+    ($guard | length) == 8 and
+    ($expected | type) == "object" and
+    ($guard | map(.consumer_id) | sort) ==
+      ($registries[0].consumers | map(.consumer_id) | sort) and
+    ($expected | keys | sort) == ($guard | map(.consumer_id) | sort) and
+    all($guard[];
+      . as $spec |
+      ([
+        $registries[0].consumers[] |
+        select(.consumer_id == $spec.consumer_id)
+      ]) as $matches |
+      ($matches | length) == 1 and
+      ($matches[0] | keys | sort) == ([
+        "activator",
+        "consumer_id",
+        "container_name",
+        "ecs_family",
+        "provisional",
+        "provisional_reason",
+        "receipt",
+        "release_repository",
+        "terraform_task_definition_address"
+      ] | sort) and
+      $matches[0].terraform_task_definition_address ==
+        $spec.terraform_task_definition_address and
+      $matches[0].ecs_family == $spec.ecs_family and
+      $matches[0].container_name == $spec.container_name and
+      $matches[0].activator == $spec.activator and
+      ($matches[0].release_repository |
+        type == "string" and test("^[a-z0-9][a-z0-9._/-]*$")) and
+      ($matches[0].receipt | type) == "object" and
+      ($matches[0].receipt | keys | sort) == ["pipeline","subject"] and
+      ($matches[0].receipt.pipeline |
+        type == "string" and length > 0) and
+      ($matches[0].receipt.subject |
+        type == "string" and length > 0) and
+      $matches[0].provisional == false and
+      $matches[0].provisional_reason == null and
+      ($snapshot.taskdefs[$spec.snapshot_key] | type) == "object" and
+      ($snapshot.taskdefs[$spec.snapshot_key].image | type) == "string" and
+      $snapshot.taskdefs[$spec.snapshot_key].image ==
+        $expected[$spec.consumer_id] and
+      ($expected[$spec.consumer_id] | type) == "string" and
+      ($expected[$spec.consumer_id] | split("@") | length) == 2 and
+      ($expected[$spec.consumer_id] | split("@")[0]) ==
+        ($repository_prefix + $matches[0].release_repository) and
+      ($expected[$spec.consumer_id] | split("@")[1] |
+        test("^sha256:[0-9a-f]{64}$"))
+    )
+  ' "$snapshot" >/dev/null ||
+    die "strict syncはregistryと完全一致する8 consumerについて、検証済みafter.imageとの個別一致・許容repository・完全digest pinが必要です"
+}
+
 # Terraform precondition へ渡す、live 由来の non-secret object。
 core_from_snapshot() {
   local snapshot="$1"
@@ -4581,36 +4803,34 @@ core_from_snapshot() {
   local desired_mcp_image="$6"
   local desired_x_image="$7"
   local desired_tiktok_image="$8"
-  local preflight_sha256="$9"
-  local hmac_transition_epoch="${10}"
-  local desired_ingest_rule="${11:-}"
-  local desired_morning_rule="${12:-}"
-  local desired_canary_rule="${13:-}"
-  local versioning_pre_cutover_receipt_sha256="${14:-}"
-  local log_cutover_contract_sha256="${15:-}"
-  local required_migration_id="${16:-}"
-  local required_migration_apply_receipt_sha256="${17:-}"
+  local desired_connect_web_image="${9:-}"
+  local desired_ingest_image="${10:-}"
+  local desired_morning_digest_image="${11:-}"
+  local desired_canary_image="${12:-}"
+  local preflight_sha256="${13:-}"
+  local hmac_transition_epoch="${14:-0}"
+  local desired_ingest_rule="${15:-}"
+  local desired_morning_rule="${16:-}"
+  local desired_canary_rule="${17:-}"
+  local versioning_pre_cutover_receipt_sha256="${18:-}"
+  local log_cutover_contract_sha256="${19:-}"
+  local required_migration_id="${20:-}"
+  local required_migration_apply_receipt_sha256="${21:-}"
+  local desired_consumer_images
+  desired_consumer_images="$(
+    consumer_image_map \
+      "$desired_openclaw_image" "$desired_mcp_image" \
+      "$desired_x_image" "$desired_tiktok_image" \
+      "$desired_connect_web_image" "$desired_ingest_image" \
+      "$desired_morning_digest_image" "$desired_canary_image"
+  )" || die "consumer別期待image mapを構築できません"
   if [ -z "$desired_ingest_rule" ]; then
     desired_ingest_rule="$(jq -r '.rules.ingest.critical.state == "ENABLED"' "$snapshot")"
     desired_morning_rule="$(jq -r '.rules.morning.critical.state == "ENABLED"' "$snapshot")"
     desired_canary_rule="$(jq -r '.rules.canary.critical.state == "ENABLED"' "$snapshot")"
   fi
   if [ "$mode" = "sync" ]; then
-    local media_worker_prefix
-    media_worker_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-media-worker@sha256:"
-    jq -e --arg media_worker_prefix "$media_worker_prefix" '
-      ([
-        .taskdefs.mcp.image,
-        .taskdefs.connect_web.image,
-        .taskdefs.ingest.image,
-        .taskdefs.morning.image,
-        .taskdefs.canary.image
-      ] | unique | length == 1) and
-      (.taskdefs.tiktok.image | startswith($media_worker_prefix)) and
-      (.taskdefs.tiktok.image | split("@")[1] |
-        test("^sha256:[0-9a-f]{64}$"))
-    ' "$snapshot" >/dev/null ||
-      die "strict syncは主要5 runtimeのdigest完全一致とgeneric teamagent-media-worker TikTok経路が必要です。divergent live/legacyはexact one-time migrationでのみ収束できます"
+    validate_sync_consumer_images "$snapshot" "$desired_consumer_images"
   fi
   jq -S -c \
     --arg mode "$mode" \
@@ -4619,6 +4839,7 @@ core_from_snapshot() {
     --arg desired_mcp_image "$desired_mcp_image" \
     --arg desired_x_image "$desired_x_image" \
     --arg desired_tiktok_image "$desired_tiktok_image" \
+    --argjson desired_consumer_images "$desired_consumer_images" \
     --arg preflight_sha256 "$preflight_sha256" \
     --arg versioning_pre_cutover_receipt_sha256 \
       "$versioning_pre_cutover_receipt_sha256" \
@@ -4661,6 +4882,17 @@ core_from_snapshot() {
       desired_x_image: $desired_x_image,
       live_tiktok_image: $s.taskdefs.tiktok.image,
       desired_tiktok_image: $desired_tiktok_image,
+      live_consumer_images: {
+        mcp:$s.taskdefs.mcp.image,
+        connect_web:$s.taskdefs.connect_web.image,
+        openclaw:$s.taskdefs.openclaw.image,
+        canary:$s.taskdefs.canary.image,
+        ingest:$s.taskdefs.ingest.image,
+        morning_digest:$s.taskdefs.morning.image,
+        x_buzz_worker:$s.taskdefs.x_buzz.image,
+        tiktok_acquire:$s.taskdefs.tiktok.image
+      },
+      desired_consumer_images: $desired_consumer_images,
       enable_connect_web: true,
       enable_ingest_schedule: true,
       enable_morning_digest: true,
@@ -5014,6 +5246,21 @@ validate_common_plan_schema() {
     .variables.canary_rule_enabled.value == $expected_core[0].canary_rule_enabled and
     .variables.require_alarm_delivery.value == true and
     .variables.bedrock_logs_retention_days.value == 60 and
+    (.variables.image_deployment_consumer_manifest.value.consumers |
+      type) == "array" and
+    (.variables.image_deployment_consumer_manifest.value.consumers |
+      length) == 8 and
+    ([
+      .variables.image_deployment_consumer_manifest.value.consumers[] |
+      .consumer_id
+    ] | length) == ([
+      .variables.image_deployment_consumer_manifest.value.consumers[] |
+      .consumer_id
+    ] | unique | length) and
+    ([
+      .variables.image_deployment_consumer_manifest.value.consumers[] |
+      {key:.consumer_id,value:.after.image}
+    ] | from_entries) == $expected_core[0].desired_consumer_images and
     (.variables.image_deployment_intent_id.value |
       test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
     .variables.runtime_guard_live.value == $expected_core[0]
@@ -5133,42 +5380,50 @@ validate_runtime_task_contracts() {
     [
       {
         address: "aws_ecs_task_definition.openclaw[0]",
-        name: "openclaw", image: $core[0].desired_openclaw_image,
+        name: "openclaw",
+        image: $core[0].desired_consumer_images.openclaw,
         user: "65532:65532", profile: "openclaw"
       },
       {
         address: "aws_ecs_task_definition.mcp",
-        name: "teamagent-mcp", image: $core[0].desired_mcp_image,
+        name: "teamagent-mcp",
+        image: $core[0].desired_consumer_images.mcp,
         user: "10001:10001", profile: "python"
       },
       {
         address: "aws_ecs_task_definition.connect_web[0]",
-        name: "connect-web", image: $core[0].desired_mcp_image,
+        name: "connect-web",
+        image: $core[0].desired_consumer_images.connect_web,
         user: "10001:10001", profile: "python"
       },
       {
         address: "aws_ecs_task_definition.ingest[0]",
-        name: "ingest", image: $core[0].desired_mcp_image,
+        name: "ingest",
+        image: $core[0].desired_consumer_images.ingest,
         user: "10001:10001", profile: "python"
       },
       {
         address: "aws_ecs_task_definition.morning_digest[0]",
-        name: "morning-digest", image: $core[0].desired_mcp_image,
+        name: "morning-digest",
+        image: $core[0].desired_consumer_images.morning_digest,
         user: "10001:10001", profile: "python"
       },
       {
         address: "aws_ecs_task_definition.canary[0]",
-        name: "canary", image: $core[0].desired_mcp_image,
+        name: "canary",
+        image: $core[0].desired_consumer_images.canary,
         user: "10001:10001", profile: "python"
       },
       {
         address: "aws_ecs_task_definition.tiktok_acquire[0]",
-        name: "acquire", image: $core[0].desired_tiktok_image,
+        name: "acquire",
+        image: $core[0].desired_consumer_images.tiktok_acquire,
         user: "10001:10001", profile: "media"
       },
       {
         address: "aws_ecs_task_definition.x_buzz_worker[0]",
-        name: "worker", image: $core[0].desired_x_image,
+        name: "worker",
+        image: $core[0].desired_consumer_images.x_buzz_worker,
         user: "10001:10001", profile: "python"
       }
     ] | all(. as $spec |
@@ -6753,24 +7008,21 @@ validate_plan() {
   ' "$plan_json" >/dev/null ||
     die "no-op resourceの値/unknownまたはresource actionが不正です"
 
-  local spec address component expected_name image_kind expected_image
+  local spec address component expected_name consumer_id expected_image
   for spec in \
     'aws_ecs_task_definition.openclaw[0]|openclaw|openclaw|openclaw' \
     'aws_ecs_task_definition.mcp|mcp|teamagent-mcp|mcp' \
-    'aws_ecs_task_definition.connect_web[0]|connect_web|connect-web|mcp' \
-    'aws_ecs_task_definition.ingest[0]|ingest|ingest|mcp' \
-    'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|mcp' \
-    'aws_ecs_task_definition.canary[0]|canary|canary|mcp' \
-    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|tiktok' \
-    'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|x'; do
-    IFS='|' read -r address component expected_name image_kind <<< "$spec"
-    case "$image_kind" in
-      openclaw) expected_image="$(jq -er '.desired_openclaw_image' "$core")" ;;
-      mcp) expected_image="$desired_image" ;;
-      x) expected_image="$(jq -er '.desired_x_image' "$core")" ;;
-      tiktok) expected_image="$(jq -er '.desired_tiktok_image' "$core")" ;;
-      *) die "内部error: unknown task image kind" ;;
-    esac
+    'aws_ecs_task_definition.connect_web[0]|connect_web|connect-web|connect_web' \
+    'aws_ecs_task_definition.ingest[0]|ingest|ingest|ingest' \
+    'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|morning_digest' \
+    'aws_ecs_task_definition.canary[0]|canary|canary|canary' \
+    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|tiktok_acquire' \
+    'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|x_buzz_worker'; do
+    IFS='|' read -r address component expected_name consumer_id <<< "$spec"
+    expected_image="$(
+      jq -er --arg consumer_id "$consumer_id" \
+        '.desired_consumer_images[$consumer_id]' "$core"
+    )" || die "内部error: consumer別期待imageがありません: $consumer_id"
     if plan_has_address "$plan_json" "$address"; then
       jq -e --arg address "$address" --arg expected_image "$expected_image" \
         --arg expected_name "$expected_name" '
@@ -8177,7 +8429,6 @@ verify_required_migration_apply_receipt() {
     .post_apply_service_probe.schema_version == 1 and
     .post_apply_service_probe.apply_attempt_id == .apply_attempt_id and
     .post_apply_service_probe.image == $live[0].taskdefs.canary.image and
-    .post_apply_service_probe.image == $live[0].taskdefs.mcp.image and
     .post_apply_service_probe.task.exit_code == 0 and
     .post_apply_service_probe.result.kind ==
       "teamagent-post-apply-service-probe" and
@@ -8296,8 +8547,16 @@ verify_required_migration_apply_receipt() {
     ([.pre_live_contract, .post_live_contract] |
       all(.[];
         (keys | sort) == ["images","resources","rule_states"] and
-        (.images | keys | sort) ==
-          ["mcp","openclaw","tiktok","x_buzz"] and
+        (.images | keys | sort) == ([
+          "canary",
+          "connect_web",
+          "ingest",
+          "mcp",
+          "morning_digest",
+          "openclaw",
+          "tiktok_acquire",
+          "x_buzz_worker"
+        ] | sort) and
         (.rule_states | keys | sort) ==
           ["canary","ingest","morning"] and
         (.resources | type) == "array" and
@@ -8327,10 +8586,31 @@ verify_required_migration_apply_receipt() {
     .pre_state_contract.state.serial <
       .post_state_contract.state.serial and
     .post_live_contract.images == {
-      openclaw: $live[0].taskdefs.openclaw.image,
       mcp: $live[0].taskdefs.mcp.image,
-      x_buzz: $live[0].taskdefs.x_buzz.image,
-      tiktok: $live[0].taskdefs.tiktok.image
+      connect_web: $live[0].taskdefs.connect_web.image,
+      openclaw: $live[0].taskdefs.openclaw.image,
+      canary: $live[0].taskdefs.canary.image,
+      ingest: $live[0].taskdefs.ingest.image,
+      morning_digest: $live[0].taskdefs.morning.image,
+      x_buzz_worker: $live[0].taskdefs.x_buzz.image,
+      tiktok_acquire: $live[0].taskdefs.tiktok.image
+    } and
+    (.post_live_contract | del(.resources)) == {
+      images: {
+        mcp: $live[0].taskdefs.mcp.image,
+        connect_web: $live[0].taskdefs.connect_web.image,
+        openclaw: $live[0].taskdefs.openclaw.image,
+        canary: $live[0].taskdefs.canary.image,
+        ingest: $live[0].taskdefs.ingest.image,
+        morning_digest: $live[0].taskdefs.morning.image,
+        x_buzz_worker: $live[0].taskdefs.x_buzz.image,
+        tiktok_acquire: $live[0].taskdefs.tiktok.image
+      },
+      rule_states: {
+        ingest: $live[0].rules.ingest.critical.state,
+        morning: $live[0].rules.morning.critical.state,
+        canary: $live[0].rules.canary.critical.state
+      }
     } and
     .post_live_contract.rule_states == {
       ingest: $live[0].rules.ingest.critical.state,
@@ -8497,12 +8777,38 @@ verify_receipt() {
     (.image_deployment_intent_expires_at | type) == "number" and
     .image_deployment_intent_expires_at > $now and
     (.runtime_inventory_sha256 | test("^[0-9a-f]{64}$")) and
+    (.images | keys | sort) == ["consumers","desired","live"] and
     (.images.live | type == "object") and
     (.images.desired | type == "object") and
+    (.images.consumers | keys | sort) == ["desired","live"] and
+    (.images.consumers.live | type) == "object" and
+    (.images.consumers.desired | type) == "object" and
     (.rule_states.live | type == "object") and
     (.rule_states.desired | type == "object") and
     (.images.live | keys | sort) == ["mcp","openclaw","tiktok","x_buzz"] and
     (.images.desired | keys | sort) == ["mcp","openclaw","tiktok","x_buzz"] and
+    (.images.consumers.live | keys | sort) == ([
+      "canary",
+      "connect_web",
+      "ingest",
+      "mcp",
+      "morning_digest",
+      "openclaw",
+      "tiktok_acquire",
+      "x_buzz_worker"
+    ] | sort) and
+    (.images.consumers.desired | keys | sort) ==
+      (.images.consumers.live | keys | sort) and
+    (.images.consumers.live | to_entries | all(
+      (.value | type) == "string" and
+      (.value | split("@") | length) == 2 and
+      (.value | split("@")[1] | test("^sha256:[0-9a-f]{64}$"))
+    )) and
+    (.images.consumers.desired | to_entries | all(
+      (.value | type) == "string" and
+      (.value | split("@") | length) == 2 and
+      (.value | split("@")[1] | test("^sha256:[0-9a-f]{64}$"))
+    )) and
     (.rule_states.live | keys | sort) == ["canary","ingest","morning"] and
     (.rule_states.desired | keys | sort) == ["canary","ingest","morning"] and
     (.rule_states.live |
@@ -8753,6 +9059,16 @@ verify_receipt() {
       tiktok: .taskdefs.tiktok.image
     } == $receipt[0].images.live and
     {
+      mcp:.taskdefs.mcp.image,
+      connect_web:.taskdefs.connect_web.image,
+      openclaw:.taskdefs.openclaw.image,
+      canary:.taskdefs.canary.image,
+      ingest:.taskdefs.ingest.image,
+      morning_digest:.taskdefs.morning.image,
+      x_buzz_worker:.taskdefs.x_buzz.image,
+      tiktok_acquire:.taskdefs.tiktok.image
+    } == $receipt[0].images.consumers.live and
+    {
       ingest: .rules.ingest.critical.state,
       morning: .rules.morning.critical.state,
       canary: .rules.canary.critical.state
@@ -8822,6 +9138,12 @@ verify_receipt() {
     "$(jq -er '.images.desired.mcp' "$stage/receipt.json")" \
     "$(jq -er '.images.desired.x_buzz' "$stage/receipt.json")" \
     "$(jq -er '.images.desired.tiktok' "$stage/receipt.json")" \
+    "$(jq -er '.images.consumers.desired.connect_web' \
+      "$stage/receipt.json")" \
+    "$(jq -er '.images.consumers.desired.ingest' "$stage/receipt.json")" \
+    "$(jq -er '.images.consumers.desired.morning_digest' \
+      "$stage/receipt.json")" \
+    "$(jq -er '.images.consumers.desired.canary' "$stage/receipt.json")" \
     "$(jq -r '.preflight_receipt_sha256' "$stage/receipt.json")" \
     "$transition_epoch" \
     "$(jq -er '.rule_states.desired.ingest' "$stage/receipt.json")" \
@@ -8870,6 +9192,9 @@ verify_receipt() {
     "$stage/image-release-context.json" \
     "$stage/live-before.json" \
     "$stage/plan-live-contract.json"
+  validate_image_release_context_consumer_images \
+    "$stage/image-release-context.json" \
+    "$(jq -c '.images.consumers.desired' "$stage/receipt.json")"
   build_scoped_release_state_contract \
     "$stage/state-before.json" \
     "$stage/plan-live-contract.json" \
@@ -9015,6 +9340,10 @@ case "$COMMAND" in
       "$(jq -er '.taskdefs.mcp.image' "$TMP_ROOT/live.json")" \
       "$(jq -er '.taskdefs.x_buzz.image' "$TMP_ROOT/live.json")" \
       "$(jq -er '.taskdefs.tiktok.image' "$TMP_ROOT/live.json")" \
+      "$(jq -er '.taskdefs.connect_web.image' "$TMP_ROOT/live.json")" \
+      "$(jq -er '.taskdefs.ingest.image' "$TMP_ROOT/live.json")" \
+      "$(jq -er '.taskdefs.morning.image' "$TMP_ROOT/live.json")" \
+      "$(jq -er '.taskdefs.canary.image' "$TMP_ROOT/live.json")" \
       "" 0
     print_hcl_snapshot "$TMP_ROOT/core.json"
     ;;
@@ -10005,6 +10334,18 @@ case "$COMMAND" in
     DESIRED_MCP_IMAGE="$LIVE_MCP_IMAGE"
     DESIRED_X_IMAGE="$LIVE_X_IMAGE"
     DESIRED_TIKTOK_IMAGE="$LIVE_TIKTOK_IMAGE"
+    DESIRED_CONNECT_WEB_IMAGE="$(
+      jq -er '.taskdefs.connect_web.image' "$TMP_ROOT/live-before.json"
+    )"
+    DESIRED_INGEST_IMAGE="$(
+      jq -er '.taskdefs.ingest.image' "$TMP_ROOT/live-before.json"
+    )"
+    DESIRED_MORNING_DIGEST_IMAGE="$(
+      jq -er '.taskdefs.morning.image' "$TMP_ROOT/live-before.json"
+    )"
+    DESIRED_CANARY_IMAGE="$(
+      jq -er '.taskdefs.canary.image' "$TMP_ROOT/live-before.json"
+    )"
     DESIRED_INGEST_RULE="$(jq -r '.ingest == "ENABLED"' <<< "$LIVE_RULE_STATES")"
     DESIRED_MORNING_RULE="$(jq -r '.morning == "ENABLED"' <<< "$LIVE_RULE_STATES")"
     DESIRED_CANARY_RULE="$(jq -r '.canary == "ENABLED"' <<< "$LIVE_RULE_STATES")"
@@ -10051,6 +10392,10 @@ case "$COMMAND" in
         DESIRED_MCP_IMAGE="$(jq -er '.to.mcp_image' "$MIGRATION_JSON")"
         DESIRED_X_IMAGE="$(jq -er '.to.x_buzz_image' "$MIGRATION_JSON")"
         DESIRED_TIKTOK_IMAGE="$(jq -er '.to.tiktok_image' "$MIGRATION_JSON")"
+        DESIRED_CONNECT_WEB_IMAGE="$DESIRED_MCP_IMAGE"
+        DESIRED_INGEST_IMAGE="$DESIRED_MCP_IMAGE"
+        DESIRED_MORNING_DIGEST_IMAGE="$DESIRED_MCP_IMAGE"
+        DESIRED_CANARY_IMAGE="$DESIRED_MCP_IMAGE"
       elif [ "$MIGRATION_KIND" = "activation" ]; then
         [ -n "$PRIOR_APPLY_RECEIPT" ] ||
           die "activationには --prior-apply-receipt が必須です"
@@ -10074,7 +10419,10 @@ case "$COMMAND" in
     core_from_snapshot \
       "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" "$MODE" "$MIGRATION_ID" \
       "$DESIRED_OPENCLAW_IMAGE" "$DESIRED_MCP_IMAGE" "$DESIRED_X_IMAGE" \
-      "$DESIRED_TIKTOK_IMAGE" "$PREFLIGHT_SHA256" "$TRANSITION_EPOCH" \
+      "$DESIRED_TIKTOK_IMAGE" \
+      "$DESIRED_CONNECT_WEB_IMAGE" "$DESIRED_INGEST_IMAGE" \
+      "$DESIRED_MORNING_DIGEST_IMAGE" "$DESIRED_CANARY_IMAGE" \
+      "$PREFLIGHT_SHA256" "$TRANSITION_EPOCH" \
       "$DESIRED_INGEST_RULE" "$DESIRED_MORNING_RULE" "$DESIRED_CANARY_RULE" \
       "$VERSIONING_RECEIPT_SHA256" "$LOG_CUTOVER_CONTRACT_SHA256" \
       "$REQUIRED_MIGRATION_ID" \
@@ -10238,6 +10586,9 @@ case "$COMMAND" in
       "$TMP_ROOT/image-release-context.json" \
       "$TMP_ROOT/live-after.json" \
       "$TMP_ROOT/plan-live-contract.json"
+    validate_image_release_context_consumer_images \
+      "$TMP_ROOT/image-release-context.json" \
+      "$(jq -c '.desired_consumer_images' "$TMP_ROOT/core.json")"
     build_scoped_release_state_contract \
       "$TMP_ROOT/state-after.json" \
       "$TMP_ROOT/plan-live-contract.json" \
@@ -10312,6 +10663,12 @@ case "$COMMAND" in
       --arg desired_mcp_image "$DESIRED_MCP_IMAGE" \
       --arg desired_x_image "$DESIRED_X_IMAGE" \
       --arg desired_tiktok_image "$DESIRED_TIKTOK_IMAGE" \
+      --argjson live_consumer_images "$(
+        jq -c '.live_consumer_images' "$TMP_ROOT/core.json"
+      )" \
+      --argjson desired_consumer_images "$(
+        jq -c '.desired_consumer_images' "$TMP_ROOT/core.json"
+      )" \
       --argjson live_rule_states "$LIVE_RULE_STATES" \
       --argjson desired_rule_states "$DESIRED_RULE_STATES" \
       --argjson hmac_transition_epoch "$TRANSITION_EPOCH" \
@@ -10378,6 +10735,10 @@ case "$COMMAND" in
             mcp:$desired_mcp_image,
             x_buzz:$desired_x_image,
             tiktok:$desired_tiktok_image
+          },
+          consumers:{
+            live:$live_consumer_images,
+            desired:$desired_consumer_images
           }
         },
         rule_states:{
@@ -10678,9 +11039,17 @@ case "$COMMAND" in
     RECEIPT="$(secure_existing_file "$RECEIPT" 600)"
     [ "$(dirname "$PLAN")" = "$(dirname "$RECEIPT")" ] ||
       die "planとreceiptは同じprivate directoryにある必要があります"
+    # `jq -e` exits 1 when the expression itself evaluates to false, so the
+    # legitimate "this apply carries no media cutover" receipt -- which the
+    # schema explicitly allows as an empty path -- was dying here instead of
+    # being read as false. Emit the verdict as a string and check it: a parse
+    # failure leaves it empty, so the branch still fails closed.
     MEDIA_APPLY_REQUIRED="$(
-      jq -er '(.media_cutover_receipt_path // "") != ""' "$RECEIPT"
-    )" ||
+      jq -r '
+        if (.media_cutover_receipt_path // "") != "" then "true" else "false" end
+      ' "$RECEIPT"
+    )"
+    [ "$MEDIA_APPLY_REQUIRED" = "true" ] || [ "$MEDIA_APPLY_REQUIRED" = "false" ] ||
       die "plan receiptのmedia apply契約を判定できません"
     MEDIA_AUTHORIZATION_SHA256=""
     MEDIA_AUTHORIZATION_IDENTITY=""
@@ -11330,12 +11699,16 @@ case "$COMMAND" in
         x_buzz:.taskdefs.x_buzz.image,
         tiktok:.taskdefs.tiktok.image
       } == $receipt[0].images.desired and
-      ([
-        .taskdefs.connect_web.image,
-        .taskdefs.ingest.image,
-        .taskdefs.morning.image,
-        .taskdefs.canary.image
-      ] | all(. == $receipt[0].images.desired.mcp)) and
+      {
+        mcp:.taskdefs.mcp.image,
+        connect_web:.taskdefs.connect_web.image,
+        openclaw:.taskdefs.openclaw.image,
+        canary:.taskdefs.canary.image,
+        ingest:.taskdefs.ingest.image,
+        morning_digest:.taskdefs.morning.image,
+        x_buzz_worker:.taskdefs.x_buzz.image,
+        tiktok_acquire:.taskdefs.tiktok.image
+      } == $receipt[0].images.consumers.desired and
       {
         ingest:(.rules.ingest.critical.state == "ENABLED"),
         morning:(.rules.morning.critical.state == "ENABLED"),
@@ -11695,6 +12068,7 @@ case "$COMMAND" in
       --slurpfile post_state_contract "$TMP_ROOT/post-state-contract.json" \
       --slurpfile pre_live_contract "$TMP_ROOT/pre-live-contract.json" \
       --slurpfile post_live_contract "$TMP_ROOT/post-live-contract.json" \
+      --slurpfile live "$TMP_ROOT/applied-live.json" \
       --slurpfile bedrock_retention \
         "$TMP_ROOT/applied-bedrock-retention.json" \
       --slurpfile shared_lock "$GATE_LOCK_RECEIPT" \
@@ -11742,7 +12116,24 @@ case "$COMMAND" in
         post_state_contract:$post_state_contract[0],
         post_live_fingerprint_sha256:$post_live_fingerprint_sha256,
         pre_live_contract:$pre_live_contract[0],
-        post_live_contract:$post_live_contract[0],
+        post_live_contract:{
+          images:{
+            mcp:$live[0].taskdefs.mcp.image,
+            connect_web:$live[0].taskdefs.connect_web.image,
+            openclaw:$live[0].taskdefs.openclaw.image,
+            canary:$live[0].taskdefs.canary.image,
+            ingest:$live[0].taskdefs.ingest.image,
+            morning_digest:$live[0].taskdefs.morning.image,
+            x_buzz_worker:$live[0].taskdefs.x_buzz.image,
+            tiktok_acquire:$live[0].taskdefs.tiktok.image
+          },
+          resources:$post_live_contract[0].resources,
+          rule_states:{
+            ingest:$live[0].rules.ingest.critical.state,
+            morning:$live[0].rules.morning.critical.state,
+            canary:$live[0].rules.canary.critical.state
+          }
+        },
         post_runtime_inventory_sha256:$post_runtime_inventory_sha256,
         shared_deployment_lock_record_id:
           $shared_deployment_lock_record_id,
