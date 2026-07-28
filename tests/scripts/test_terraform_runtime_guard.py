@@ -18,9 +18,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 GUARD = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
-CONSUMER_REGISTRY = (
-    PROJECT_ROOT / "infra" / "codebuild" / "image_deployment_consumers.json"
-)
+CONSUMER_REGISTRY = PROJECT_ROOT / "infra" / "codebuild" / "image_deployment_consumers.json"
 ACCOUNT = "718959508629"
 REGION = "ap-northeast-1"
 REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp"
@@ -2250,12 +2248,10 @@ SYNC_CONSUMER_SNAPSHOT_KEYS = {
 def _strict_sync_expected_images() -> dict[str, str]:
     return {
         "mcp": (
-            f"{REPOSITORY}@sha256:"
-            "fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
+            f"{REPOSITORY}@sha256:fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
         ),
         "connect_web": (
-            f"{REPOSITORY}@sha256:"
-            "0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
+            f"{REPOSITORY}@sha256:0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
         ),
         "openclaw": (
             f"{OPENCLAW_REPOSITORY}@sha256:"
@@ -2265,8 +2261,7 @@ def _strict_sync_expected_images() -> dict[str, str]:
         "ingest": f"{REPOSITORY}@sha256:{'6' * 64}",
         "morning_digest": f"{REPOSITORY}@sha256:{'7' * 64}",
         "x_buzz_worker": (
-            f"{REPOSITORY}@sha256:"
-            "1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
+            f"{REPOSITORY}@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
         ),
         "tiktok_acquire": MEDIA_WORKER_IMAGE,
     }
@@ -2416,13 +2411,16 @@ def test_strict_sync_accepts_distinct_expected_images_per_consumer(
         expected[consumer_id].split("@", 1)[0]
         for consumer_id in ("mcp", "connect_web", "x_buzz_worker")
     } == {REPOSITORY}
-    assert len(
-        {
-            expected["mcp"],
-            expected["connect_web"],
-            expected["x_buzz_worker"],
-        }
-    ) == 3
+    assert (
+        len(
+            {
+                expected["mcp"],
+                expected["connect_web"],
+                expected["x_buzz_worker"],
+            }
+        )
+        == 3
+    )
 
     result = _run_sync_consumer_image_validator(
         tmp_path,
@@ -2445,13 +2443,9 @@ def test_strict_sync_rejects_one_consumer_outside_its_expected_image(
     expected = _strict_sync_expected_images()
     snapshot = _strict_sync_snapshot(expected)
     repository = expected[consumer_id].split("@", 1)[0]
-    snapshot["taskdefs"][snapshot_key]["image"] = (
-        f"{repository}@sha256:{'a' * 64}"
-    )
+    snapshot["taskdefs"][snapshot_key]["image"] = f"{repository}@sha256:{'a' * 64}"
     if snapshot["taskdefs"][snapshot_key]["image"] == expected[consumer_id]:
-        snapshot["taskdefs"][snapshot_key]["image"] = (
-            f"{repository}@sha256:{'b' * 64}"
-        )
+        snapshot["taskdefs"][snapshot_key]["image"] = f"{repository}@sha256:{'b' * 64}"
 
     result = _run_sync_consumer_image_validator(
         tmp_path,
@@ -2547,9 +2541,7 @@ def test_strict_sync_rejects_ninth_registry_consumer(tmp_path: Path) -> None:
     ninth.update(
         {
             "consumer_id": "future_consumer",
-            "terraform_task_definition_address": (
-                "aws_ecs_task_definition.future_consumer[0]"
-            ),
+            "terraform_task_definition_address": ("aws_ecs_task_definition.future_consumer[0]"),
             "ecs_family": "teamagent-dev-future-consumer",
             "container_name": "future-consumer",
             "activator": {
@@ -2593,11 +2585,7 @@ def test_strict_sync_rejects_registry_identity_drift(
     invalid_value: object,
 ) -> None:
     registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
-    mcp = next(
-        consumer
-        for consumer in registry["consumers"]
-        if consumer["consumer_id"] == "mcp"
-    )
+    mcp = next(consumer for consumer in registry["consumers"] if consumer["consumer_id"] == "mcp")
     mcp[field] = invalid_value
     registry_path = _write_consumer_registry(tmp_path, registry)
     expected = _strict_sync_expected_images()
