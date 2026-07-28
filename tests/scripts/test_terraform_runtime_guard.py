@@ -18,6 +18,9 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 GUARD = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+CONSUMER_REGISTRY = (
+    PROJECT_ROOT / "infra" / "codebuild" / "image_deployment_consumers.json"
+)
 ACCOUNT = "718959508629"
 REGION = "ap-northeast-1"
 REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-mcp"
@@ -2232,6 +2235,401 @@ def _run(command: list[str], env: dict[str, str]) -> subprocess.CompletedProcess
     )
 
 
+SYNC_CONSUMER_SNAPSHOT_KEYS = {
+    "mcp": "mcp",
+    "connect_web": "connect_web",
+    "openclaw": "openclaw",
+    "canary": "canary",
+    "ingest": "ingest",
+    "morning_digest": "morning",
+    "x_buzz_worker": "x_buzz",
+    "tiktok_acquire": "tiktok",
+}
+
+
+def _strict_sync_expected_images() -> dict[str, str]:
+    return {
+        "mcp": (
+            f"{REPOSITORY}@sha256:"
+            "fb44f7cdb19c7f683768fe074aa85ba3a99fdefe7b6c9e49422e46055bb458b5"
+        ),
+        "connect_web": (
+            f"{REPOSITORY}@sha256:"
+            "0f23860dc382e29d2051f3e6e415a427c853182d90ef05cce0935c3c7cecc144"
+        ),
+        "openclaw": (
+            f"{OPENCLAW_REPOSITORY}@sha256:"
+            "9cde4c829335ba5196186df0460db29eb6dbe31d3f212d095f6367d1b98be8af"
+        ),
+        "canary": f"{REPOSITORY}@sha256:{'5' * 64}",
+        "ingest": f"{REPOSITORY}@sha256:{'6' * 64}",
+        "morning_digest": f"{REPOSITORY}@sha256:{'7' * 64}",
+        "x_buzz_worker": (
+            f"{REPOSITORY}@sha256:"
+            "1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8"
+        ),
+        "tiktok_acquire": MEDIA_WORKER_IMAGE,
+    }
+
+
+def _strict_sync_snapshot(expected: dict[str, str]) -> dict[str, Any]:
+    return {
+        "taskdefs": {
+            snapshot_key: {"image": expected[consumer_id]}
+            for consumer_id, snapshot_key in SYNC_CONSUMER_SNAPSHOT_KEYS.items()
+        }
+    }
+
+
+def _write_consumer_registry(
+    tmp_path: Path,
+    registry: dict[str, Any],
+) -> Path:
+    path = tmp_path / "image-deployment-consumers.json"
+    path.write_text(
+        json.dumps(registry, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _run_sync_consumer_image_validator(
+    tmp_path: Path,
+    *,
+    snapshot: dict[str, Any],
+    expected: dict[str, str],
+    registry: Path = CONSUMER_REGISTRY,
+) -> subprocess.CompletedProcess[str]:
+    snapshot_path = tmp_path / "sync-consumer-snapshot.json"
+    snapshot_path.write_text(
+        json.dumps(snapshot, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"validate_sync_consumer_images\(\) \{.*?"
+        r"(?=\n# Terraform precondition)",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"EXPECTED_ACCOUNT_ID={ACCOUNT!r}",
+            f"REGION={REGION!r}",
+            'IMAGE_DEPLOYMENT_CONSUMER_REGISTRY="$3"',
+            'die() { echo "★ $*" >&2; return 1; }',
+            function.group(0),
+            'validate_sync_consumer_images "$1" "$2"',
+        )
+    )
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "validator",
+            str(snapshot_path),
+            json.dumps(expected, sort_keys=True, separators=(",", ":")),
+            str(registry),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _assert_sync_consumer_image_rejected(
+    result: subprocess.CompletedProcess[str],
+) -> None:
+    assert result.returncode == 1
+    assert "registryと完全一致する8 consumer" in result.stderr
+
+
+def test_consumer_image_map_preserves_exact_consumer_argument_wiring() -> None:
+    expected = _strict_sync_expected_images()
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"consumer_image_map\(\) \{.*?"
+        r"(?=\nvalidate_sync_consumer_images\(\))",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            function.group(0),
+            'consumer_image_map "$@"',
+        )
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "mapper",
+            expected["openclaw"],
+            expected["mcp"],
+            expected["x_buzz_worker"],
+            expected["tiktok_acquire"],
+            expected["connect_web"],
+            expected["ingest"],
+            expected["morning_digest"],
+            expected["canary"],
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == expected
+
+
+def test_core_strict_sync_path_invokes_consumer_image_validator() -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"core_from_snapshot\(\) \{.*?"
+        r"(?=\nprint_hcl_snapshot\(\))",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    core = function.group(0)
+    assert re.search(
+        r'if \[ "\$mode" = "sync" \]; then\s+'
+        r'validate_sync_consumer_images "\$snapshot" '
+        r'"\$desired_consumer_images"\s+fi',
+        core,
+    )
+    assert "unique | length == 1" not in core
+
+
+def test_strict_sync_accepts_distinct_expected_images_per_consumer(
+    tmp_path: Path,
+) -> None:
+    expected = _strict_sync_expected_images()
+    assert {
+        expected[consumer_id].split("@", 1)[0]
+        for consumer_id in ("mcp", "connect_web", "x_buzz_worker")
+    } == {REPOSITORY}
+    assert len(
+        {
+            expected["mcp"],
+            expected["connect_web"],
+            expected["x_buzz_worker"],
+        }
+    ) == 3
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("consumer_id", "snapshot_key"),
+    tuple(SYNC_CONSUMER_SNAPSHOT_KEYS.items()),
+)
+def test_strict_sync_rejects_one_consumer_outside_its_expected_image(
+    tmp_path: Path,
+    consumer_id: str,
+    snapshot_key: str,
+) -> None:
+    expected = _strict_sync_expected_images()
+    snapshot = _strict_sync_snapshot(expected)
+    repository = expected[consumer_id].split("@", 1)[0]
+    snapshot["taskdefs"][snapshot_key]["image"] = (
+        f"{repository}@sha256:{'a' * 64}"
+    )
+    if snapshot["taskdefs"][snapshot_key]["image"] == expected[consumer_id]:
+        snapshot["taskdefs"][snapshot_key]["image"] = (
+            f"{repository}@sha256:{'b' * 64}"
+        )
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+def test_strict_sync_rejects_repository_outside_consumer_registry(
+    tmp_path: Path,
+) -> None:
+    expected = _strict_sync_expected_images()
+    snapshot = _strict_sync_snapshot(expected)
+    unexpected = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+    expected["tiktok_acquire"] = unexpected
+    snapshot["taskdefs"]["tiktok"]["image"] = unexpected
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+@pytest.mark.parametrize(
+    "invalid_image",
+    (
+        f"{REPOSITORY}:latest",
+        f"{REPOSITORY}@sha256:abc123",
+    ),
+    ids=("tag", "short-digest"),
+)
+def test_strict_sync_rejects_noncanonical_digest_reference(
+    tmp_path: Path,
+    invalid_image: str,
+) -> None:
+    expected = _strict_sync_expected_images()
+    snapshot = _strict_sync_snapshot(expected)
+    expected["mcp"] = invalid_image
+    snapshot["taskdefs"]["mcp"]["image"] = invalid_image
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+def test_strict_sync_rejects_missing_snapshot_consumer(tmp_path: Path) -> None:
+    expected = _strict_sync_expected_images()
+    snapshot = _strict_sync_snapshot(expected)
+    del snapshot["taskdefs"]["canary"]
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+@pytest.mark.parametrize("mutation", ("missing", "extra"))
+def test_strict_sync_rejects_nonexact_expected_consumer_set(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    expected = _strict_sync_expected_images()
+    snapshot = _strict_sync_snapshot(expected)
+    if mutation == "missing":
+        del expected["morning_digest"]
+    else:
+        expected["unexpected_consumer"] = f"{REPOSITORY}@sha256:{'8' * 64}"
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+def test_strict_sync_rejects_ninth_registry_consumer(tmp_path: Path) -> None:
+    registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
+    ninth = copy.deepcopy(registry["consumers"][0])
+    ninth.update(
+        {
+            "consumer_id": "future_consumer",
+            "terraform_task_definition_address": (
+                "aws_ecs_task_definition.future_consumer[0]"
+            ),
+            "ecs_family": "teamagent-dev-future-consumer",
+            "container_name": "future-consumer",
+            "activator": {
+                "type": "ecs_service",
+                "identity": "teamagent-dev-future-consumer",
+            },
+        }
+    )
+    registry["consumers"].append(ninth)
+    registry_path = _write_consumer_registry(tmp_path, registry)
+    expected = _strict_sync_expected_images()
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+        registry=registry_path,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("ecs_family", "teamagent-dev-wrong-family"),
+        ("container_name", "wrong-container"),
+        (
+            "activator",
+            {"type": "ecs_service", "identity": "teamagent-dev-wrong-service"},
+        ),
+        (
+            "terraform_task_definition_address",
+            "aws_ecs_task_definition.wrong",
+        ),
+    ),
+)
+def test_strict_sync_rejects_registry_identity_drift(
+    tmp_path: Path,
+    field: str,
+    invalid_value: object,
+) -> None:
+    registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
+    mcp = next(
+        consumer
+        for consumer in registry["consumers"]
+        if consumer["consumer_id"] == "mcp"
+    )
+    mcp[field] = invalid_value
+    registry_path = _write_consumer_registry(tmp_path, registry)
+    expected = _strict_sync_expected_images()
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+        registry=registry_path,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+def test_strict_sync_rejects_provisional_registry_consumer(
+    tmp_path: Path,
+) -> None:
+    registry = json.loads(CONSUMER_REGISTRY.read_text(encoding="utf-8"))
+    registry["consumers"][0]["provisional"] = True
+    registry_path = _write_consumer_registry(tmp_path, registry)
+    expected = _strict_sync_expected_images()
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+        registry=registry_path,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
 def _normalize_lambda_tf(value: dict[str, Any]) -> dict[str, Any]:
     result = subprocess.run(
         [
@@ -2838,20 +3236,6 @@ def test_wrong_account_and_unstable_service_fail_before_plan(tmp_path: Path) -> 
     env["AWS_FAKE_SERVICE_STATE"] = "in_progress"
     result = _run(_plan_command(var_file, tmp_path / "service.tfplan"), env)
     assert result.returncode == 1
-
-
-def test_divergent_live_core_images_require_exact_migration_without_rollback(
-    tmp_path: Path,
-) -> None:
-    env, var_file, tf_log = _harness(tmp_path)
-    env["AWS_FAKE_CONNECT_IMAGE"] = f"{REPOSITORY}@sha256:{'a' * 64}"
-    env["AWS_FAKE_INGEST_IMAGE"] = f"{REPOSITORY}@sha256:{'b' * 64}"
-
-    result = _run(_plan_command(var_file, tmp_path / "divergent.tfplan"), env)
-
-    assert result.returncode == 1
-    assert "divergent live" in result.stdout + result.stderr
-    assert "plan " not in tf_log.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(
