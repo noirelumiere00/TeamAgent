@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Durable apply-level rollback saga for the MCP and connect-web ECS services."""
+"""Durable apply-level rollback saga for every code-owned image consumer."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import stat
@@ -20,6 +21,14 @@ from typing import Any, Protocol
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPOSITORY_ROOT))
 sys.path.insert(0, str(_REPOSITORY_ROOT / "src"))
+sys.path.insert(0, str(_REPOSITORY_ROOT / "infra" / "codebuild"))
+
+from image_deployment_consumers import (  # noqa: E402
+    ConsumerRegistryError,
+    load_consumer_registry,
+    validate_consumer_registry,
+)
+from teamagent_release_approval import canonical_json_bytes  # noqa: E402
 
 from scripts.hmac_rollout_gate import (  # noqa: E402
     RolloutGateError,
@@ -55,7 +64,11 @@ _TASK_DEFINITION_RE = re.compile(
 _ENDPOINTS = {
     "dynamodb": f"https://dynamodb.{_REGION}.amazonaws.com",
     "ecs": f"https://ecs.{_REGION}.amazonaws.com",
+    "events": f"https://events.{_REGION}.amazonaws.com",
+    "lambda": f"https://lambda.{_REGION}.amazonaws.com",
 }
+_IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_RULE_STATES = frozenset({"DISABLED", "ENABLED"})
 _DEPLOYMENT_CONFIGURATION_FIELDS = frozenset(
     {
         "alarms",
@@ -76,38 +89,177 @@ class SagaError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class ServiceSpec:
+class ConsumerSpec:
     key: str
-    service_name: str
-    service_address: str
     task_address: str
     task_family: str
+    container_name: str
+    release_repository: str
+    activator_type: str
+    activator_identity: str
+    activator_address: str
+    activator_edge_address: str | None
 
     @property
     def service_arn(self) -> str:
-        return f"arn:aws:ecs:{_REGION}:{_ACCOUNT_ID}:service/{_CLUSTER_NAME}/{self.service_name}"
+        if self.activator_type != "ecs_service":
+            raise SagaError("non-service consumer has no ECS service ARN")
+        return (
+            f"arn:aws:ecs:{_REGION}:{_ACCOUNT_ID}:service/"
+            f"{_CLUSTER_NAME}/{self.activator_identity}"
+        )
+
+    @property
+    def rule_arn(self) -> str:
+        if self.activator_type != "eventbridge_rule_ecs_target":
+            raise SagaError("non-EventBridge consumer has no rule ARN")
+        return (
+            f"arn:aws:events:{_REGION}:{_ACCOUNT_ID}:rule/"
+            f"{self.activator_identity}"
+        )
+
+    @property
+    def function_arn(self) -> str:
+        if self.activator_type != "lambda_taskdef_arn_environment":
+            raise SagaError("non-Lambda consumer has no function ARN")
+        return (
+            f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:"
+            f"{self.activator_identity}"
+        )
 
 
+_ACTIVATOR_RESOURCE_ADDRESSES = {
+    "mcp": ("aws_ecs_service.mcp[0]", None),
+    "connect_web": ("aws_ecs_service.connect_web[0]", None),
+    "openclaw": ("aws_ecs_service.openclaw[0]", None),
+    "canary": (
+        "aws_cloudwatch_event_rule.canary_hourly[0]",
+        "aws_cloudwatch_event_target.canary_run_task[0]",
+    ),
+    "ingest": (
+        "aws_cloudwatch_event_rule.ingest_weekly[0]",
+        "aws_cloudwatch_event_target.ingest_run_task[0]",
+    ),
+    "morning_digest": (
+        "aws_cloudwatch_event_rule.morning_digest_weekday[0]",
+        "aws_cloudwatch_event_target.morning_digest_run_task[0]",
+    ),
+    "x_buzz_worker": ("aws_lambda_function.x_dispatch[0]", None),
+    "tiktok_acquire": ("aws_lambda_function.tiktok_dispatch[0]", None),
+}
+_SAGA_CONSUMER_IDS = frozenset(_ACTIVATOR_RESOURCE_ADDRESSES)
+_EXPECTED_ACTIVATOR_COUNTS = {
+    "ecs_service": 3,
+    "eventbridge_rule_ecs_target": 3,
+    "lambda_taskdef_arn_environment": 2,
+}
+
+
+def _load_consumer_specs(
+    registry: object | None = None,
+) -> tuple[dict[str, ConsumerSpec], str]:
+    try:
+        validated = (
+            load_consumer_registry()
+            if registry is None
+            else validate_consumer_registry(registry)
+        )
+    except ConsumerRegistryError as exc:
+        raise SagaError("code-owned consumer registry is invalid") from exc
+    raw_consumers = validated.get("consumers")
+    if type(raw_consumers) is not list:
+        raise SagaError("code-owned consumer registry is invalid")
+    registry_ids = [
+        item.get("consumer_id") if type(item) is dict else None
+        for item in raw_consumers
+    ]
+    if (
+        any(type(consumer_id) is not str for consumer_id in registry_ids)
+        or frozenset(registry_ids) != _SAGA_CONSUMER_IDS
+        or len(registry_ids) != len(_SAGA_CONSUMER_IDS)
+    ):
+        raise SagaError("consumer registry and saga scope differ")
+
+    specs: dict[str, ConsumerSpec] = {}
+    activator_counts = {name: 0 for name in _EXPECTED_ACTIVATOR_COUNTS}
+    seen_families: set[str] = set()
+    seen_activators: set[tuple[str, str]] = set()
+    for raw in raw_consumers:
+        if type(raw) is not dict:
+            raise SagaError("code-owned consumer registry is invalid")
+        key = raw.get("consumer_id")
+        activator = raw.get("activator")
+        if type(key) is not str or type(activator) is not dict:
+            raise SagaError("code-owned consumer registry is invalid")
+        activator_type = activator.get("type")
+        activator_identity = activator.get("identity")
+        if (
+            type(activator_type) is not str
+            or activator_type not in _EXPECTED_ACTIVATOR_COUNTS
+            or type(activator_identity) is not str
+            or raw.get("provisional") is not False
+        ):
+            raise SagaError("consumer registry has an unsupported saga activator")
+        task_address = raw.get("terraform_task_definition_address")
+        task_family = raw.get("ecs_family")
+        container_name = raw.get("container_name")
+        release_repository = raw.get("release_repository")
+        if any(
+            type(value) is not str
+            for value in (
+                task_address,
+                task_family,
+                container_name,
+                release_repository,
+            )
+        ):
+            raise SagaError("code-owned consumer registry is invalid")
+        assert type(task_address) is str
+        assert type(task_family) is str
+        assert type(container_name) is str
+        assert type(release_repository) is str
+        if task_family in seen_families or (
+            activator_type,
+            activator_identity,
+        ) in seen_activators:
+            raise SagaError("consumer registry saga identities are not unique")
+        activator_address, activator_edge_address = _ACTIVATOR_RESOURCE_ADDRESSES[key]
+        if (
+            (activator_type == "eventbridge_rule_ecs_target")
+            != (activator_edge_address is not None)
+        ):
+            raise SagaError("consumer registry activator address contract differs")
+        specs[key] = ConsumerSpec(
+            key=key,
+            task_address=task_address,
+            task_family=task_family,
+            container_name=container_name,
+            release_repository=release_repository,
+            activator_type=activator_type,
+            activator_identity=activator_identity,
+            activator_address=activator_address,
+            activator_edge_address=activator_edge_address,
+        )
+        seen_families.add(task_family)
+        seen_activators.add((activator_type, activator_identity))
+        activator_counts[activator_type] += 1
+    if activator_counts != _EXPECTED_ACTIVATOR_COUNTS:
+        raise SagaError("consumer registry activator partition differs")
+    registry_sha256 = hashlib.sha256(canonical_json_bytes(validated)).hexdigest()
+    return specs, registry_sha256
+
+
+_CONSUMER_SPECS, _CONSUMER_REGISTRY_SHA256 = _load_consumer_specs()
 _SERVICE_SPECS = {
-    "mcp": ServiceSpec(
-        key="mcp",
-        service_name="teamagent-dev-mcp",
-        service_address="aws_ecs_service.mcp[0]",
-        task_address="aws_ecs_task_definition.mcp",
-        task_family="teamagent-dev-mcp",
-    ),
-    "connect_web": ServiceSpec(
-        key="connect_web",
-        service_name="teamagent-dev-connect-web",
-        service_address="aws_ecs_service.connect_web[0]",
-        task_address="aws_ecs_task_definition.connect_web[0]",
-        task_family="teamagent-dev-connect-web",
-    ),
+    key: spec
+    for key, spec in _CONSUMER_SPECS.items()
+    if spec.activator_type == "ecs_service"
 }
 _ALLOWED_ECS_ADDRESSES = frozenset(
-    address
-    for spec in _SERVICE_SPECS.values()
-    for address in (spec.service_address, spec.task_address)
+    {
+        *(spec.task_address for spec in _CONSUMER_SPECS.values()),
+        *(spec.activator_address for spec in _SERVICE_SPECS.values()),
+    }
 )
 
 
@@ -161,7 +313,9 @@ def _canonical_json_value(value: object) -> object:
         return {str(key): _canonical_json_value(item) for key, item in sorted(value.items())}
     if type(value) is list:
         return [_canonical_json_value(item) for item in value]
-    if value is None or type(value) in {str, int, float, bool}:
+    if value is None or type(value) in {str, int, bool}:
+        return value
+    if type(value) is float and math.isfinite(value):
         return value
     raise SagaError("non-JSON value is invalid")
 
@@ -169,6 +323,8 @@ def _canonical_json_value(value: object) -> object:
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         _canonical_json_value(value),
+        allow_nan=False,
+        ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
@@ -176,6 +332,34 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _task_artifact_sha256(value: object) -> str:
+    """Hash a registerable task payload while normalizing AWS empty defaults."""
+
+    normalized = _canonical_json_value(value)
+    if type(normalized) is not dict:
+        raise SagaError("ECS task-definition artifact is invalid")
+    definition = (
+        normalized.get("taskDefinition")
+        if "taskDefinition" in normalized
+        else normalized
+    )
+    if type(definition) is not dict:
+        raise SagaError("ECS task-definition artifact is invalid")
+    for name in ("inferenceAccelerators", "placementConstraints"):
+        if definition.get(name) == []:
+            definition.pop(name)
+    if definition.get("enableFaultInjection") is False:
+        definition.pop("enableFaultInjection")
+    if definition.get("tags") == []:
+        definition.pop("tags")
+    if normalized is not definition and normalized.get("tags") == []:
+        normalized.pop("tags")
+    try:
+        return _task_artifact_digest(normalized)
+    except RolloutGateError as exc:
+        raise SagaError("ECS task-definition artifact is invalid") from exc
 
 
 def _aws_environment() -> dict[str, str]:
@@ -486,10 +670,12 @@ def _resource_after(
     return after, after_unknown
 
 
-def _validate_resource_identity(item: Mapping[str, Any], *, address: str) -> None:
-    expected_type = (
-        "aws_ecs_service" if ".aws_ecs_service." in f".{address}" else ("aws_ecs_task_definition")
-    )
+def _validate_resource_identity(
+    item: Mapping[str, Any],
+    *,
+    address: str,
+    expected_type: str,
+) -> None:
     expected_name = address.split(".", maxsplit=1)[1].split("[", maxsplit=1)[0]
     expected_index: int | None = 0 if address.endswith("[0]") else None
     if (
@@ -501,15 +687,292 @@ def _validate_resource_identity(item: Mapping[str, Any], *, address: str) -> Non
         or item.get("deposed") is not None
         or item.get("previous_address") is not None
     ):
-        raise SagaError("saved plan ECS resource identity is not exact")
+        raise SagaError("saved plan saga resource identity is not exact")
+
+
+def _resource_before(item: Mapping[str, Any], *, label: str) -> dict[str, Any]:
+    change = item.get("change")
+    before = change.get("before") if type(change) is dict else None
+    if type(before) is not dict:
+        raise SagaError(f"{label} prior values are invalid")
+    return before
+
+
+def _nested_value(value: object, path: Sequence[object]) -> object:
+    current = value
+    for part in path:
+        if type(part) is str:
+            if type(current) is not dict:
+                return None
+            current = current.get(part)
+        else:
+            if type(part) is not int or type(current) is not list or part >= len(current):
+                return None
+            current = current[part]
+    return current
+
+
+def _planned_task_pointer(
+    value: object,
+    unknown: object,
+    *,
+    spec: ConsumerSpec,
+) -> dict[str, str]:
+    if type(value) is str:
+        if unknown not in (None, False):
+            raise SagaError("saved plan task-definition value is ambiguously known")
+        return {
+            "kind": "arn",
+            "taskDefinition": _validate_task_definition(
+                value,
+                expected_family=spec.task_family,
+            ),
+        }
+    if value is not None or unknown is not True:
+        raise SagaError("saved plan does not determine the desired task definition")
+    return {
+        "kind": "artifact",
+        "family": spec.task_family,
+    }
+
+
+def _task_pointer_changed(before: str, after: Mapping[str, Any]) -> bool:
+    return after.get("kind") != "arn" or after.get("taskDefinition") != before
+
+
+def _container_image(
+    value: object,
+    *,
+    spec: ConsumerSpec,
+    label: str,
+) -> tuple[str, str]:
+    if type(value) is not list:
+        raise SagaError(f"{label} container definitions are invalid")
+    matches = [
+        container
+        for container in value
+        if type(container) is dict and container.get("name") == spec.container_name
+    ]
+    if len(matches) != 1:
+        raise SagaError(f"{label} registry container is not exact")
+    image = matches[0].get("image")
+    prefix = (
+        f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
+        f"{spec.release_repository}@"
+    )
+    if type(image) is not str or not image.startswith(prefix):
+        raise SagaError(f"{label} registry image is not exact")
+    image_digest = image.removeprefix(prefix)
+    if _IMAGE_DIGEST_RE.fullmatch(image_digest) is None:
+        raise SagaError(f"{label} registry image digest is invalid")
+    return image, image_digest
+
+
+def _planned_task(
+    item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[str, str]:
+    task_after, _task_unknown = _resource_after(
+        item,
+        label=spec.task_address,
+        allowed_actions=frozenset(
+            {
+                ("no-op",),
+                ("read",),
+                ("create",),
+                ("update",),
+                ("delete", "create"),
+                ("create", "delete"),
+            }
+        ),
+    )
+    if task_after.get("family") != spec.task_family:
+        raise SagaError("saved plan ECS task-definition identity differs")
+    try:
+        payload = task_from_change(task_after, task=spec.key)
+    except RolloutGateError as exc:
+        raise SagaError("saved plan task-definition payload is invalid") from exc
+    artifact_sha256 = _task_artifact_sha256(payload)
+    image, image_digest = _container_image(
+        payload.get("containerDefinitions"),
+        spec=spec,
+        label="saved plan task definition",
+    )
+    del image
+    return artifact_sha256, image_digest
+
+
+def _service_plan(
+    item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], bool]:
+    after, unknown = _resource_after(
+        item,
+        label=spec.activator_address,
+        allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
+    )
+    before = _resource_before(item, label=spec.activator_address)
+    if (
+        before.get("name") != spec.activator_identity
+        or after.get("name") != spec.activator_identity
+        or before.get("cluster") not in {_CLUSTER_NAME, _CLUSTER_ARN}
+        or after.get("cluster") not in {_CLUSTER_NAME, _CLUSTER_ARN}
+        or before.get("desired_count") != 1
+        or after.get("desired_count") != 1
+    ):
+        raise SagaError("saved plan ECS service identity differs")
+    before_task = _validate_task_definition(
+        before.get("task_definition"),
+        expected_family=spec.task_family,
+    )
+    pointer = _planned_task_pointer(
+        after.get("task_definition"),
+        unknown.get("task_definition"),
+        spec=spec,
+    )
+    return (
+        {
+            "desiredCount": 1,
+            "taskDefinition": pointer,
+        },
+        _task_pointer_changed(before_task, pointer),
+    )
+
+
+def _eventbridge_plan(
+    rule_item: Mapping[str, Any],
+    target_item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], bool]:
+    rule_after, rule_unknown = _resource_after(
+        rule_item,
+        label=spec.activator_address,
+        allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
+    )
+    rule_before = _resource_before(rule_item, label=spec.activator_address)
+    before_state = rule_before.get("state")
+    after_state = rule_after.get("state")
+    if (
+        rule_before.get("name") != spec.activator_identity
+        or rule_after.get("name") != spec.activator_identity
+        or rule_before.get("event_bus_name") != "default"
+        or rule_after.get("event_bus_name") != "default"
+        or before_state not in _RULE_STATES
+        or after_state not in _RULE_STATES
+        or rule_unknown.get("state") not in (None, False)
+    ):
+        raise SagaError("saved plan EventBridge rule identity is invalid")
+
+    if spec.activator_edge_address is None:
+        raise SagaError("EventBridge activator edge is absent")
+    target_after, target_unknown = _resource_after(
+        target_item,
+        label=spec.activator_edge_address,
+        allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
+    )
+    target_before = _resource_before(target_item, label=spec.activator_edge_address)
+    if (
+        target_before.get("rule") != spec.activator_identity
+        or target_after.get("rule") != spec.activator_identity
+        or target_before.get("event_bus_name") != "default"
+        or target_after.get("event_bus_name") != "default"
+        or target_before.get("arn") != _CLUSTER_ARN
+        or target_after.get("arn") != _CLUSTER_ARN
+    ):
+        raise SagaError("saved plan EventBridge target identity is invalid")
+    before_task = _validate_task_definition(
+        _nested_value(target_before, ("ecs_target", 0, "task_definition_arn")),
+        expected_family=spec.task_family,
+    )
+    pointer = _planned_task_pointer(
+        _nested_value(target_after, ("ecs_target", 0, "task_definition_arn")),
+        _nested_value(target_unknown, ("ecs_target", 0, "task_definition_arn")),
+        spec=spec,
+    )
+    return (
+        {
+            "state": after_state,
+            "taskDefinition": pointer,
+        },
+        before_state != after_state or _task_pointer_changed(before_task, pointer),
+    )
+
+
+def _lambda_variables(
+    value: object,
+    *,
+    label: str,
+    allow_unknown_task: bool = False,
+) -> dict[str, Any]:
+    variables = _nested_value(value, ("environment", 0, "variables"))
+    if (
+        type(variables) is not dict
+        or any(
+            type(name) is not str
+            or (
+                type(item) is not str
+                and not (
+                    allow_unknown_task
+                    and name == "TASKDEF_ARN"
+                    and item is None
+                )
+            )
+            for name, item in variables.items()
+        )
+    ):
+        raise SagaError(f"{label} Lambda environment is invalid")
+    return dict(variables)
+
+
+def _lambda_plan(
+    item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], bool]:
+    after, unknown = _resource_after(
+        item,
+        label=spec.activator_address,
+        allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
+    )
+    before = _resource_before(item, label=spec.activator_address)
+    if (
+        before.get("function_name") != spec.activator_identity
+        or after.get("function_name") != spec.activator_identity
+    ):
+        raise SagaError("saved plan Lambda identity is invalid")
+    before_variables = _lambda_variables(before, label="saved plan prior")
+    after_variables = _lambda_variables(
+        after,
+        label="saved plan",
+        allow_unknown_task=True,
+    )
+    before_task = _validate_task_definition(
+        before_variables.get("TASKDEF_ARN"),
+        expected_family=spec.task_family,
+    )
+    pointer = _planned_task_pointer(
+        after_variables.get("TASKDEF_ARN"),
+        _nested_value(unknown, ("environment", 0, "variables", "TASKDEF_ARN")),
+        spec=spec,
+    )
+    return (
+        {"taskDefinition": pointer},
+        _task_pointer_changed(before_task, pointer),
+    )
 
 
 @dataclass(frozen=True)
 class PlanAnalysis:
     binding: dict[str, Any]
+    specs: dict[str, ConsumerSpec]
+    registry_sha256: str
 
 
 def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
+    specs, registry_sha256 = _load_consumer_specs()
     format_version = plan.get("format_version")
     if (
         type(format_version) is not str
@@ -521,6 +984,19 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
     raw_changes = plan.get("resource_changes")
     if type(raw_changes) is not list:
         raise SagaError("saved plan resource changes are unavailable")
+
+    expected_resource_types: dict[str, str] = {}
+    for spec in specs.values():
+        expected_resource_types[spec.task_address] = "aws_ecs_task_definition"
+        expected_resource_types[spec.activator_address] = {
+            "ecs_service": "aws_ecs_service",
+            "eventbridge_rule_ecs_target": "aws_cloudwatch_event_rule",
+            "lambda_taskdef_arn_environment": "aws_lambda_function",
+        }[spec.activator_type]
+        if spec.activator_edge_address is not None:
+            expected_resource_types[spec.activator_edge_address] = (
+                "aws_cloudwatch_event_target"
+            )
 
     matches: dict[str, dict[str, Any]] = {}
     for raw_item in raw_changes:
@@ -534,77 +1010,68 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
             resource_type in {"aws_ecs_service", "aws_ecs_task_definition"}
             or _ECS_ADDRESS_RE.search(address) is not None
         )
-        if not is_ecs:
+        if not is_ecs and address not in expected_resource_types:
             continue
         actions = _actions(raw_item, label=address)
-        if address not in _ALLOWED_ECS_ADDRESSES:
+        if address not in expected_resource_types:
             if actions not in {("no-op",), ("read",)}:
-                raise SagaError("saved plan mutates an ECS resource outside the saga scope")
+                if is_ecs:
+                    raise SagaError("saved plan mutates an ECS resource outside the saga scope")
             continue
         if address in matches:
             raise SagaError("saved plan repeats an ECS baseline address")
-        _validate_resource_identity(raw_item, address=address)
+        _validate_resource_identity(
+            raw_item,
+            address=address,
+            expected_type=expected_resource_types[address],
+        )
         matches[address] = raw_item
 
-    if frozenset(matches) != _ALLOWED_ECS_ADDRESSES:
-        raise SagaError("saved plan does not contain every exact ECS baseline address")
+    if frozenset(matches) != frozenset(expected_resource_types):
+        raise SagaError("saved plan does not contain every exact consumer baseline address")
 
-    planned_services: dict[str, dict[str, str]] = {}
-    for key, spec in _SERVICE_SPECS.items():
-        service_after, service_unknown = _resource_after(
-            matches[spec.service_address],
-            label=spec.service_address,
-            allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
-        )
-        task_after, _task_unknown = _resource_after(
+    planned_consumers: dict[str, dict[str, Any]] = {}
+    for key, spec in specs.items():
+        artifact_sha256, image_digest = _planned_task(
             matches[spec.task_address],
-            label=spec.task_address,
-            allowed_actions=frozenset(
-                {
-                    ("no-op",),
-                    ("read",),
-                    ("create",),
-                    ("update",),
-                    ("delete", "create"),
-                    ("create", "delete"),
-                }
-            ),
+            spec=spec,
         )
-        if (
-            service_after.get("name") != spec.service_name
-            or service_after.get("cluster") not in {_CLUSTER_NAME, _CLUSTER_ARN}
-            or task_after.get("family") != spec.task_family
-        ):
-            raise SagaError("saved plan ECS baseline identity differs")
-        planned_task = service_after.get("task_definition")
-        task_unknown = service_unknown.get("task_definition")
-        if type(planned_task) is str:
-            if task_unknown not in {None, False}:
-                raise SagaError("saved plan task-definition value is ambiguously known")
-            _validate_task_definition(planned_task, expected_family=spec.task_family)
-            planned_services[key] = {
-                "kind": "arn",
-                "taskDefinition": planned_task,
-            }
-            continue
-        if planned_task is not None or task_unknown is not True:
-            raise SagaError("saved plan does not determine the desired task definition")
-        try:
-            payload = task_from_change(task_after, task=key)
-            artifact_sha256 = _task_artifact_digest(payload)
-        except RolloutGateError as exc:
-            raise SagaError("saved plan task-definition payload is invalid") from exc
-        planned_services[key] = {
-            "kind": "artifact",
-            "family": spec.task_family,
-            "registerableSha256": artifact_sha256,
+        if spec.activator_type == "ecs_service":
+            activation, activation_changed = _service_plan(
+                matches[spec.activator_address],
+                spec=spec,
+            )
+        elif spec.activator_type == "eventbridge_rule_ecs_target":
+            if spec.activator_edge_address is None:
+                raise SagaError("EventBridge activator edge is absent")
+            activation, activation_changed = _eventbridge_plan(
+                matches[spec.activator_address],
+                matches[spec.activator_edge_address],
+                spec=spec,
+            )
+        elif spec.activator_type == "lambda_taskdef_arn_environment":
+            activation, activation_changed = _lambda_plan(
+                matches[spec.activator_address],
+                spec=spec,
+            )
+        else:
+            raise SagaError("consumer registry activator type is unsupported")
+        planned_consumers[key] = {
+            "activatorType": spec.activator_type,
+            "activation": activation,
+            "activationChanged": activation_changed,
+            "imageDigest": image_digest,
+            "taskDefinitionSha256": artifact_sha256,
         }
 
     return PlanAnalysis(
         binding={
             "schemaVersion": _SCHEMA_VERSION,
-            "services": planned_services,
-        }
+            "consumerRegistrySha256": registry_sha256,
+            "consumers": planned_consumers,
+        },
+        specs=specs,
+        registry_sha256=registry_sha256,
     )
 
 
@@ -709,12 +1176,12 @@ def _canonical_network_configuration(value: object) -> dict[str, Any]:
     }
 
 
-def _canonical_service(raw: object, *, spec: ServiceSpec) -> dict[str, Any]:
+def _canonical_service(raw: object, *, spec: ConsumerSpec) -> dict[str, Any]:
     if type(raw) is not dict:
         raise SagaError("ECS service response is invalid")
     if (
         raw.get("serviceArn") != spec.service_arn
-        or raw.get("serviceName") != spec.service_name
+        or raw.get("serviceName") != spec.activator_identity
         or raw.get("clusterArn") != _CLUSTER_ARN
         or raw.get("status") != "ACTIVE"
         or raw.get("launchType") != "FARGATE"
@@ -771,8 +1238,16 @@ def _list_service_arns(cli: AwsCli) -> set[str]:
     raise SagaError("ECS service inventory pagination exceeds its bound")
 
 
-def _read_services(cli: AwsCli) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    expected_arns = {spec.service_arn for spec in _SERVICE_SPECS.values()}
+def _read_services(
+    cli: AwsCli,
+    specs: Mapping[str, ConsumerSpec],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    service_specs = {
+        key: spec
+        for key, spec in specs.items()
+        if spec.activator_type == "ecs_service"
+    }
+    expected_arns = {spec.service_arn for spec in service_specs.values()}
     inventory = _list_service_arns(cli)
     if not expected_arns.issubset(inventory):
         raise SagaError("an exact ECS baseline service is absent from inventory")
@@ -783,14 +1258,14 @@ def _read_services(cli: AwsCli) -> tuple[dict[str, dict[str, Any]], dict[str, di
             "--cluster",
             _CLUSTER_ARN,
             "--services",
-            *(spec.service_arn for spec in _SERVICE_SPECS.values()),
+            *(spec.service_arn for spec in service_specs.values()),
         ],
     )
     if frozenset(response) - {"failures", "services"}:
         raise SagaError("ECS service description has unknown fields")
     services = response.get("services")
     failures = response.get("failures")
-    if type(services) is not list or failures != [] or len(services) != len(_SERVICE_SPECS):
+    if type(services) is not list or failures != [] or len(services) != len(service_specs):
         raise SagaError("ECS service description is incomplete")
     by_arn: dict[str, dict[str, Any]] = {}
     for raw in services:
@@ -804,26 +1279,407 @@ def _read_services(cli: AwsCli) -> tuple[dict[str, dict[str, Any]], dict[str, di
         raise SagaError("ECS service description returned the wrong identities")
     baseline: dict[str, dict[str, Any]] = {}
     raw_by_key: dict[str, dict[str, Any]] = {}
-    for key, spec in _SERVICE_SPECS.items():
+    for key, spec in service_specs.items():
         raw = by_arn[spec.service_arn]
         baseline[key] = _canonical_service(raw, spec=spec)
         raw_by_key[key] = raw
     return baseline, raw_by_key
 
 
-def _assert_stable(
-    raw_services: Mapping[str, Mapping[str, Any]],
-    expected: Mapping[str, Mapping[str, Any]],
+def _list_event_targets(cli: AwsCli, *, spec: ConsumerSpec) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    token: str | None = None
+    seen_tokens: set[str] = set()
+    for _page_number in range(_MAX_INVENTORY_PAGES):
+        request: dict[str, object] = {
+            "EventBusName": "default",
+            "Limit": 100,
+            "Rule": spec.activator_identity,
+        }
+        if token is not None:
+            request["NextToken"] = token
+        response = cli.json(
+            "events",
+            "list-targets-by-rule",
+            [
+                "--cli-input-json",
+                json.dumps(request, separators=(",", ":"), sort_keys=True),
+            ],
+        )
+        if frozenset(response) - {"NextToken", "Targets"}:
+            raise SagaError("EventBridge target inventory has unknown fields")
+        page = response.get("Targets")
+        if type(page) is not list or any(type(item) is not dict for item in page):
+            raise SagaError("EventBridge target inventory is invalid")
+        if len(targets) + len(page) > _MAX_INVENTORY_SERVICES:
+            raise SagaError("EventBridge target inventory exceeds its durable bound")
+        targets.extend(page)
+        next_token = response.get("NextToken")
+        if next_token is None:
+            return targets
+        if type(next_token) is not str or not next_token or next_token in seen_tokens:
+            raise SagaError("EventBridge target pagination is invalid")
+        seen_tokens.add(next_token)
+        token = next_token
+    raise SagaError("EventBridge target pagination exceeds its bound")
+
+
+def _canonical_eventbridge_activation(
+    raw: object,
+    *,
+    spec: ConsumerSpec,
+) -> dict[str, Any]:
+    if type(raw) is not dict or frozenset(raw) != {"rule", "target"}:
+        raise SagaError("EventBridge activation response is invalid")
+    rule = raw.get("rule")
+    target = raw.get("target")
+    if (
+        type(rule) is not dict
+        or rule.get("Name") != spec.activator_identity
+        or rule.get("Arn") != spec.rule_arn
+        or rule.get("EventBusName") != "default"
+        or rule.get("State") not in _RULE_STATES
+        or type(target) is not dict
+    ):
+        raise SagaError("EventBridge activation identity is not exact")
+    target_id = target.get("Id")
+    ecs_parameters = target.get("EcsParameters")
+    task_definition = (
+        ecs_parameters.get("TaskDefinitionArn")
+        if type(ecs_parameters) is dict
+        else None
+    )
+    if (
+        type(target_id) is not str
+        or not target_id
+        or target.get("Arn") != _CLUSTER_ARN
+        or type(ecs_parameters) is not dict
+    ):
+        raise SagaError("EventBridge ECS target identity is not exact")
+    normalized_target = _canonical_json_value(target)
+    if type(normalized_target) is not dict:
+        raise SagaError("EventBridge ECS target is invalid")
+    return {
+        "type": spec.activator_type,
+        "identity": spec.activator_identity,
+        "ruleArn": spec.rule_arn,
+        "state": rule["State"],
+        "taskDefinition": _validate_task_definition(
+            task_definition,
+            expected_family=spec.task_family,
+        ),
+        "target": normalized_target,
+    }
+
+
+def _read_eventbridge_activation(
+    cli: AwsCli,
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    rule = cli.json(
+        "events",
+        "describe-rule",
+        [
+            "--name",
+            spec.activator_identity,
+            "--event-bus-name",
+            "default",
+        ],
+    )
+    targets = _list_event_targets(cli, spec=spec)
+    if len(targets) != 1:
+        raise SagaError("EventBridge ECS target inventory is not exact")
+    raw = {"rule": rule, "target": targets[0]}
+    return _canonical_eventbridge_activation(raw, spec=spec), raw
+
+
+def _canonical_lambda_activation(
+    raw: object,
+    *,
+    spec: ConsumerSpec,
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise SagaError("Lambda activation response is invalid")
+    environment = raw.get("Environment")
+    variables = environment.get("Variables") if type(environment) is dict else None
+    if (
+        raw.get("FunctionName") != spec.activator_identity
+        or raw.get("FunctionArn") != spec.function_arn
+        or type(variables) is not dict
+        or any(
+            type(name) is not str or type(value) is not str
+            for name, value in variables.items()
+        )
+    ):
+        raise SagaError("Lambda activation identity is not exact")
+    task_definition = _validate_task_definition(
+        variables.get("TASKDEF_ARN"),
+        expected_family=spec.task_family,
+    )
+    return {
+        "type": spec.activator_type,
+        "identity": spec.activator_identity,
+        "functionArn": spec.function_arn,
+        "taskDefinition": task_definition,
+        "environmentVariables": {
+            str(name): str(value) for name, value in sorted(variables.items())
+        },
+    }
+
+
+def _read_lambda_activation(
+    cli: AwsCli,
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw = cli.json(
+        "lambda",
+        "get-function-configuration",
+        ["--function-name", spec.activator_identity],
+    )
+    return _canonical_lambda_activation(raw, spec=spec), raw
+
+
+def _read_task_definition(
+    cli: AwsCli,
+    *,
+    spec: ConsumerSpec,
+    task_definition: str,
+) -> dict[str, str]:
+    response = cli.json(
+        "ecs",
+        "describe-task-definition",
+        [
+            "--task-definition",
+            task_definition,
+            "--include",
+            "TAGS",
+        ],
+    )
+    if frozenset(response) - {"tags", "taskDefinition"}:
+        raise SagaError("ECS task-definition response has unknown fields")
+    definition = response.get("taskDefinition")
+    if type(definition) is not dict:
+        raise SagaError("ECS task-definition response is invalid")
+    revision = definition.get("revision")
+    expected_revision = int(task_definition.rsplit(":", maxsplit=1)[1])
+    if (
+        definition.get("taskDefinitionArn") != task_definition
+        or definition.get("family") != spec.task_family
+        or definition.get("status") != "ACTIVE"
+        or type(revision) is not int
+        or revision != expected_revision
+    ):
+        raise SagaError("ECS task-definition identity differs")
+    task_definition_sha256 = _task_artifact_sha256(response)
+    image, image_digest = _container_image(
+        definition.get("containerDefinitions"),
+        spec=spec,
+        label="live task definition",
+    )
+    return {
+        "taskDefinition": task_definition,
+        "taskDefinitionSha256": task_definition_sha256,
+        "image": image,
+        "imageDigest": image_digest,
+    }
+
+
+def _read_consumers(
+    cli: AwsCli,
+    specs: Mapping[str, ConsumerSpec],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    service_activations, raw_services = _read_services(cli, specs)
+    activations: dict[str, dict[str, Any]] = {}
+    raw_activations: dict[str, dict[str, Any]] = {}
+    for key, service in service_activations.items():
+        spec = specs[key]
+        activations[key] = {
+            "type": spec.activator_type,
+            "identity": spec.activator_identity,
+            "status": "ACTIVE",
+            **service,
+        }
+        raw_activations[key] = raw_services[key]
+    for key, spec in specs.items():
+        if spec.activator_type == "eventbridge_rule_ecs_target":
+            activation, raw = _read_eventbridge_activation(cli, spec=spec)
+            activations[key] = activation
+            raw_activations[key] = raw
+        elif spec.activator_type == "lambda_taskdef_arn_environment":
+            activation, raw = _read_lambda_activation(cli, spec=spec)
+            activations[key] = activation
+            raw_activations[key] = raw
+    if frozenset(activations) != frozenset(specs):
+        raise SagaError("consumer activation inventory is incomplete")
+
+    consumers: dict[str, dict[str, Any]] = {}
+    for key, spec in specs.items():
+        activation = activations[key]
+        task_definition = activation.get("taskDefinition")
+        task = _read_task_definition(
+            cli,
+            spec=spec,
+            task_definition=_validate_task_definition(
+                task_definition,
+                expected_family=spec.task_family,
+            ),
+        )
+        consumers[key] = {
+            **task,
+            "activation": activation,
+        }
+    return consumers, raw_activations
+
+
+def _list_service_tasks(cli: AwsCli, *, spec: ConsumerSpec) -> list[str]:
+    task_arns: list[str] = []
+    token: str | None = None
+    seen_tokens: set[str] = set()
+    for _page_number in range(_MAX_INVENTORY_PAGES):
+        arguments = [
+            "--cluster",
+            _CLUSTER_ARN,
+            "--service-name",
+            spec.activator_identity,
+            "--desired-status",
+            "RUNNING",
+            "--max-results",
+            "100",
+        ]
+        if token is not None:
+            arguments.extend(["--next-token", token])
+        response = cli.json("ecs", "list-tasks", arguments)
+        if frozenset(response) - {"nextToken", "taskArns"}:
+            raise SagaError("ECS running task inventory has unknown fields")
+        page = response.get("taskArns")
+        if type(page) is not list or any(type(item) is not str for item in page):
+            raise SagaError("ECS running task inventory is invalid")
+        if len(task_arns) + len(page) > _MAX_INVENTORY_SERVICES:
+            raise SagaError("ECS running task inventory exceeds its durable bound")
+        for task_arn in page:
+            if task_arn in task_arns:
+                raise SagaError("ECS running task inventory repeats an identity")
+            task_arns.append(task_arn)
+        next_token = response.get("nextToken")
+        if next_token is None:
+            return task_arns
+        if type(next_token) is not str or not next_token or next_token in seen_tokens:
+            raise SagaError("ECS running task pagination is invalid")
+        seen_tokens.add(next_token)
+        token = next_token
+    raise SagaError("ECS running task pagination exceeds its bound")
+
+
+def _assert_service_tasks(
+    cli: AwsCli,
+    *,
+    spec: ConsumerSpec,
+    state: Mapping[str, Any],
 ) -> None:
-    for key, spec in _SERVICE_SPECS.items():
-        raw = raw_services.get(key)
+    activation = state.get("activation")
+    if type(activation) is not dict:
+        raise SagaError("ECS stable service task verification is incomplete")
+    desired = activation.get("desiredCount")
+    task_definition = state.get("taskDefinition")
+    image = state.get("image")
+    image_digest = state.get("imageDigest")
+    task_arns = _list_service_tasks(cli, spec=spec)
+    if type(desired) is not int or len(task_arns) != desired:
+        raise SagaError(f"ECS service {spec.activator_identity} running tasks are not exact")
+    described_by_arn: dict[str, dict[str, Any]] = {}
+    for offset in range(0, len(task_arns), 100):
+        batch = task_arns[offset : offset + 100]
+        response = cli.json(
+            "ecs",
+            "describe-tasks",
+            ["--cluster", _CLUSTER_ARN, "--tasks", *batch],
+        )
+        if frozenset(response) - {"failures", "tasks"}:
+            raise SagaError("ECS running task description has unknown fields")
+        tasks = response.get("tasks")
+        if (
+            response.get("failures") != []
+            or type(tasks) is not list
+            or len(tasks) != len(batch)
+        ):
+            raise SagaError("ECS running task description is incomplete")
+        for raw in tasks:
+            if type(raw) is not dict or type(raw.get("taskArn")) is not str:
+                raise SagaError("ECS running task description is invalid")
+            task_arn = raw["taskArn"]
+            containers = raw.get("containers")
+            matching_containers = (
+                [
+                    container
+                    for container in containers
+                    if type(container) is dict
+                    and container.get("name") == spec.container_name
+                ]
+                if type(containers) is list
+                else []
+            )
+            if (
+                task_arn not in batch
+                or task_arn in described_by_arn
+                or raw.get("clusterArn") != _CLUSTER_ARN
+                or raw.get("taskDefinitionArn") != task_definition
+                or raw.get("group") != f"service:{spec.activator_identity}"
+                or raw.get("desiredStatus") != "RUNNING"
+                or raw.get("lastStatus") != "RUNNING"
+                or len(matching_containers) != 1
+                or matching_containers[0].get("image") != image
+                or matching_containers[0].get("imageDigest") != image_digest
+            ):
+                raise SagaError(
+                    f"ECS service {spec.activator_identity} running task differs"
+                )
+            described_by_arn[task_arn] = raw
+    if frozenset(described_by_arn) != frozenset(task_arns):
+        raise SagaError("ECS running task descriptions do not cover the service")
+
+
+def _assert_stable(
+    cli: AwsCli,
+    raw_activations: Mapping[str, Mapping[str, Any]],
+    expected: Mapping[str, Mapping[str, Any]],
+    specs: Mapping[str, ConsumerSpec],
+) -> None:
+    for key, spec in specs.items():
+        raw = raw_activations.get(key)
         state = expected.get(key)
         if type(raw) is not dict or type(state) is not dict:
+            raise SagaError("consumer steady verification is incomplete")
+        if spec.activator_type == "eventbridge_rule_ecs_target":
+            activation = state.get("activation")
+            if (
+                type(activation) is not dict
+                or _canonical_eventbridge_activation(raw, spec=spec) != activation
+            ):
+                raise SagaError(
+                    f"EventBridge consumer {spec.activator_identity} is not exactly steady"
+                )
+            continue
+        if spec.activator_type == "lambda_taskdef_arn_environment":
+            activation = state.get("activation")
+            if (
+                type(activation) is not dict
+                or _canonical_lambda_activation(raw, spec=spec) != activation
+            ):
+                raise SagaError(
+                    f"Lambda consumer {spec.activator_identity} is not exactly steady"
+                )
+            continue
+        if spec.activator_type != "ecs_service":
+            raise SagaError("consumer activator type is unsupported")
+        activation = state.get("activation")
+        if type(activation) is not dict:
             raise SagaError("ECS stable service verification is incomplete")
         running = raw.get("runningCount")
         pending = raw.get("pendingCount")
         deployments = raw.get("deployments")
-        desired = state.get("desiredCount")
+        desired = activation.get("desiredCount")
         if (
             type(running) is not int
             or type(pending) is not int
@@ -839,7 +1695,8 @@ def _assert_stable(
             or deployments[0].get("runningCount") != desired
             or deployments[0].get("pendingCount") != 0
         ):
-            raise SagaError(f"ECS service {spec.service_name} is not exactly stable")
+            raise SagaError(f"ECS service {spec.activator_identity} is not exactly stable")
+        _assert_service_tasks(cli, spec=spec, state=state)
 
 
 def _ddb_value(value: object) -> dict[str, str]:
@@ -909,6 +1766,137 @@ _RECEIPT_STAGES = frozenset(
 )
 
 
+def _validate_consumer_baseline(
+    value: object,
+    *,
+    specs: Mapping[str, ConsumerSpec],
+) -> dict[str, dict[str, Any]]:
+    if type(value) is not dict or frozenset(value) != frozenset(specs):
+        raise SagaError("durable ECS rollback baseline is incomplete")
+    baseline: dict[str, dict[str, Any]] = {}
+    for key, spec in specs.items():
+        raw = value.get(key)
+        if type(raw) is not dict or frozenset(raw) != {
+            "activation",
+            "image",
+            "imageDigest",
+            "taskDefinition",
+            "taskDefinitionSha256",
+        }:
+            raise SagaError("durable ECS rollback baseline is invalid")
+        task_definition = _validate_task_definition(
+            raw.get("taskDefinition"),
+            expected_family=spec.task_family,
+        )
+        task_definition_sha256 = raw.get("taskDefinitionSha256")
+        image = raw.get("image")
+        image_digest = raw.get("imageDigest")
+        image_prefix = (
+            f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
+            f"{spec.release_repository}@"
+        )
+        if (
+            type(task_definition_sha256) is not str
+            or _SHA256_RE.fullmatch(task_definition_sha256) is None
+            or type(image_digest) is not str
+            or _IMAGE_DIGEST_RE.fullmatch(image_digest) is None
+            or image != f"{image_prefix}{image_digest}"
+        ):
+            raise SagaError("durable ECS rollback task binding is invalid")
+        activation = raw.get("activation")
+        if type(activation) is not dict:
+            raise SagaError("durable ECS rollback activation is invalid")
+        if spec.activator_type == "ecs_service":
+            if frozenset(activation) != {
+                "deploymentConfiguration",
+                "desiredCount",
+                "identity",
+                "networkConfiguration",
+                "status",
+                "taskDefinition",
+                "type",
+            }:
+                raise SagaError("durable ECS service rollback activation is invalid")
+            desired = activation.get("desiredCount")
+            if (
+                activation.get("type") != spec.activator_type
+                or activation.get("identity") != spec.activator_identity
+                or activation.get("status") != "ACTIVE"
+                or activation.get("taskDefinition") != task_definition
+                or type(desired) is not int
+                or desired != 1
+            ):
+                raise SagaError("durable ECS service rollback activation is invalid")
+            normalized_activation = {
+                "type": spec.activator_type,
+                "identity": spec.activator_identity,
+                "status": "ACTIVE",
+                "taskDefinition": task_definition,
+                "deploymentConfiguration": _canonical_deployment_configuration(
+                    activation.get("deploymentConfiguration")
+                ),
+                "networkConfiguration": _canonical_network_configuration(
+                    activation.get("networkConfiguration")
+                ),
+                "desiredCount": desired,
+            }
+        elif spec.activator_type == "eventbridge_rule_ecs_target":
+            if frozenset(activation) != {
+                "identity",
+                "ruleArn",
+                "state",
+                "target",
+                "taskDefinition",
+                "type",
+            }:
+                raise SagaError("durable EventBridge rollback activation is invalid")
+            normalized_activation = _canonical_eventbridge_activation(
+                {
+                    "rule": {
+                        "Arn": activation.get("ruleArn"),
+                        "EventBusName": "default",
+                        "Name": activation.get("identity"),
+                        "State": activation.get("state"),
+                    },
+                    "target": activation.get("target"),
+                },
+                spec=spec,
+            )
+            if normalized_activation.get("taskDefinition") != task_definition:
+                raise SagaError("durable EventBridge rollback pointer differs")
+        elif spec.activator_type == "lambda_taskdef_arn_environment":
+            if frozenset(activation) != {
+                "environmentVariables",
+                "functionArn",
+                "identity",
+                "taskDefinition",
+                "type",
+            }:
+                raise SagaError("durable Lambda rollback activation is invalid")
+            normalized_activation = _canonical_lambda_activation(
+                {
+                    "Environment": {
+                        "Variables": activation.get("environmentVariables"),
+                    },
+                    "FunctionArn": activation.get("functionArn"),
+                    "FunctionName": activation.get("identity"),
+                },
+                spec=spec,
+            )
+            if normalized_activation.get("taskDefinition") != task_definition:
+                raise SagaError("durable Lambda rollback pointer differs")
+        else:
+            raise SagaError("durable rollback activator type is unsupported")
+        baseline[key] = {
+            "taskDefinition": task_definition,
+            "taskDefinitionSha256": task_definition_sha256,
+            "image": image,
+            "imageDigest": image_digest,
+            "activation": normalized_activation,
+        }
+    return baseline
+
+
 class EcsServiceApplySaga:
     def __init__(
         self,
@@ -921,13 +1909,27 @@ class EcsServiceApplySaga:
         if (
             _SHA256_RE.fullmatch(plan_sha256) is None
             or _UUID_RE.fullmatch(apply_attempt_id) is None
+            or plan.binding.get("consumerRegistrySha256") != plan.registry_sha256
+            or frozenset(plan.specs) != _SAGA_CONSUMER_IDS
         ):
             raise SagaError("ECS saga identity is invalid")
         self.plan = plan
+        self.specs = dict(plan.specs)
+        self.registry_sha256 = plan.registry_sha256
         self.plan_sha256 = plan_sha256
         self.apply_attempt_id = apply_attempt_id
         self.cli = cli
         self.record_id = f"{_RECORD_PREFIX}{apply_attempt_id}"
+        self._assert_registry_current()
+
+    def _assert_registry_current(self) -> None:
+        specs, registry_sha256 = _load_consumer_specs()
+        if (
+            registry_sha256 != self.registry_sha256
+            or specs != self.specs
+            or self.plan.binding.get("consumerRegistrySha256") != registry_sha256
+        ):
+            raise SagaError("consumer registry changed after saved-plan analysis")
 
     def _read(self, record_id: str | None = None) -> dict[str, Any] | None:
         response = self.cli.json(
@@ -1034,34 +2036,7 @@ class EcsServiceApplySaga:
             raw = json.loads(baseline_json, object_pairs_hook=_reject_duplicate_keys)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SagaError("durable ECS rollback baseline is invalid") from exc
-        if type(raw) is not dict or frozenset(raw) != frozenset(_SERVICE_SPECS):
-            raise SagaError("durable ECS rollback baseline is incomplete")
-        baseline: dict[str, dict[str, Any]] = {}
-        for key, spec in _SERVICE_SPECS.items():
-            value = raw.get(key)
-            if type(value) is not dict or frozenset(value) != {
-                "deploymentConfiguration",
-                "desiredCount",
-                "networkConfiguration",
-                "taskDefinition",
-            }:
-                raise SagaError("durable ECS rollback baseline is invalid")
-            desired = value.get("desiredCount")
-            if type(desired) is not int or desired != 1:
-                raise SagaError("durable ECS rollback baseline desired count is invalid")
-            baseline[key] = {
-                "taskDefinition": _validate_task_definition(
-                    value.get("taskDefinition"),
-                    expected_family=spec.task_family,
-                ),
-                "deploymentConfiguration": _canonical_deployment_configuration(
-                    value.get("deploymentConfiguration")
-                ),
-                "networkConfiguration": _canonical_network_configuration(
-                    value.get("networkConfiguration")
-                ),
-                "desiredCount": desired,
-            }
+        baseline = _validate_consumer_baseline(raw, specs=self.specs)
         if not hmac.compare_digest(
             _ddb_string(item, "baseline_sha256"), _digest(baseline)
         ) or not hmac.compare_digest(
@@ -1072,8 +2047,11 @@ class EcsServiceApplySaga:
         return baseline
 
     def begin(self) -> dict[str, Any]:
-        baseline, raw = _read_services(self.cli)
-        _assert_stable(raw, baseline)
+        self._assert_registry_current()
+        baseline, raw = _read_consumers(self.cli, self.specs)
+        _assert_stable(self.cli, raw, baseline, self.specs)
+        baseline = _validate_consumer_baseline(baseline, specs=self.specs)
+        self._assert_registry_current()
         baseline_json = _canonical_bytes(baseline).decode("utf-8")
         planned_json = _canonical_bytes(self.plan.binding).decode("utf-8")
         item = _ddb_item(
@@ -1155,13 +2133,15 @@ class EcsServiceApplySaga:
         return receipt
 
     def verify(self) -> dict[str, Any]:
+        self._assert_registry_current()
         item = self._read_required()
         if _ddb_string(item, "stage") != "APPLYING":
             raise SagaError("durable ECS saga is not the exact applying attempt")
         self._active(stage="APPLYING")
-        live, raw_live = _read_services(self.cli)
+        live, raw_live = _read_consumers(self.cli, self.specs)
         self._verify_planned(live, raw_live)
-        _assert_stable(raw_live, live)
+        _assert_stable(self.cli, raw_live, live, self.specs)
+        self._assert_registry_current()
         receipt = self._receipt(item)
         receipt["stage"] = "VERIFIED_APPLIED"
         receipt["receipt_sha256"] = _digest(
@@ -1174,58 +2154,95 @@ class EcsServiceApplySaga:
         live: Mapping[str, Mapping[str, Any]],
         raw_live: Mapping[str, Mapping[str, Any]],
     ) -> None:
-        planned_services = self.plan.binding.get("services")
-        if type(planned_services) is not dict:
-            raise SagaError("planned ECS service binding is invalid")
-        for key, spec in _SERVICE_SPECS.items():
-            expected = planned_services.get(key)
+        planned_consumers = self.plan.binding.get("consumers")
+        if (
+            type(planned_consumers) is not dict
+            or frozenset(planned_consumers) != frozenset(self.specs)
+        ):
+            raise SagaError("planned consumer binding is invalid")
+        for key, spec in self.specs.items():
+            expected = planned_consumers.get(key)
             observed = live.get(key)
             raw = raw_live.get(key)
-            if type(expected) is not dict or type(observed) is not dict or type(raw) is not dict:
-                raise SagaError("planned ECS service binding is incomplete")
+            if (
+                type(expected) is not dict
+                or frozenset(expected)
+                != {
+                    "activation",
+                    "activationChanged",
+                    "activatorType",
+                    "imageDigest",
+                    "taskDefinitionSha256",
+                }
+                or type(observed) is not dict
+                or type(raw) is not dict
+                or expected.get("activatorType") != spec.activator_type
+                or type(expected.get("activationChanged")) is not bool
+            ):
+                raise SagaError("planned consumer binding is incomplete")
+            expected_activation = expected.get("activation")
+            observed_activation = observed.get("activation")
+            if type(expected_activation) is not dict or type(observed_activation) is not dict:
+                raise SagaError("planned consumer activation binding is incomplete")
+            pointer = expected_activation.get("taskDefinition")
             task_definition = observed.get("taskDefinition")
-            if expected.get("kind") == "arn":
-                if task_definition != expected.get("taskDefinition"):
-                    raise SagaError("live ECS service does not use the planned task definition")
-                continue
+            if type(pointer) is not dict:
+                raise SagaError("planned consumer task pointer is invalid")
+            if pointer.get("kind") == "arn":
+                if task_definition != pointer.get("taskDefinition"):
+                    raise SagaError(
+                        "live consumer does not use the planned task definition"
+                    )
+            elif (
+                pointer.get("kind") != "artifact"
+                or pointer.get("family") != spec.task_family
+                or frozenset(pointer) != {"family", "kind"}
+            ):
+                raise SagaError("planned consumer task pointer is invalid")
+
+            expected_task_sha256 = expected.get("taskDefinitionSha256")
+            expected_image_digest = expected.get("imageDigest")
             if (
-                expected.get("kind") != "artifact"
-                or expected.get("family") != spec.task_family
-                or type(expected.get("registerableSha256")) is not str
+                type(expected_task_sha256) is not str
+                or _SHA256_RE.fullmatch(expected_task_sha256) is None
+                or observed.get("taskDefinitionSha256") != expected_task_sha256
+                or type(expected_image_digest) is not str
+                or _IMAGE_DIGEST_RE.fullmatch(expected_image_digest) is None
+                or observed.get("imageDigest") != expected_image_digest
             ):
-                raise SagaError("planned ECS task artifact binding is invalid")
-            response = self.cli.json(
-                "ecs",
-                "describe-task-definition",
-                [
-                    "--task-definition",
-                    str(task_definition),
-                    "--include",
-                    "TAGS",
-                ],
-            )
-            definition = response.get("taskDefinition")
-            if (
-                type(definition) is not dict
-                or definition.get("taskDefinitionArn") != task_definition
-                or definition.get("family") != spec.task_family
-            ):
-                raise SagaError("live ECS task artifact identity differs")
-            try:
-                live_digest = _task_artifact_digest(response)
-            except RolloutGateError as exc:
-                raise SagaError("live ECS task artifact is invalid") from exc
-            if not hmac.compare_digest(
-                live_digest,
-                str(expected["registerableSha256"]),
-            ):
-                raise SagaError("live ECS service task artifact differs from the saved plan")
+                raise SagaError("live consumer task artifact differs from the saved plan")
+            if observed_activation.get("taskDefinition") != task_definition:
+                raise SagaError("live consumer activation pointer is inconsistent")
+            if spec.activator_type == "ecs_service":
+                if (
+                    frozenset(expected_activation) != {"desiredCount", "taskDefinition"}
+                    or expected_activation.get("desiredCount") != 1
+                    or observed_activation.get("desiredCount") != 1
+                ):
+                    raise SagaError("planned ECS service activation differs")
+            elif spec.activator_type == "eventbridge_rule_ecs_target":
+                if (
+                    frozenset(expected_activation) != {"state", "taskDefinition"}
+                    or expected_activation.get("state") not in _RULE_STATES
+                    or observed_activation.get("state") != expected_activation.get("state")
+                ):
+                    raise SagaError("live EventBridge activation differs from the saved plan")
+            elif spec.activator_type == "lambda_taskdef_arn_environment":
+                if frozenset(expected_activation) != {"taskDefinition"}:
+                    raise SagaError("planned Lambda activation differs")
+            else:
+                raise SagaError("planned consumer activator type is unsupported")
 
     def _restore(self, baseline: Mapping[str, Mapping[str, Any]]) -> None:
-        for key, spec in _SERVICE_SPECS.items():
+        for key, spec in self.specs.items():
             state = baseline.get(key)
             if type(state) is not dict:
                 raise SagaError("durable ECS rollback baseline is incomplete")
+            activation = state.get("activation")
+            if type(activation) is not dict:
+                raise SagaError("durable consumer rollback activation is incomplete")
+            if spec.activator_type != "ecs_service":
+                continue
             response = self.cli.json(
                 "ecs",
                 "update-service",
@@ -1235,18 +2252,18 @@ class EcsServiceApplySaga:
                     "--service",
                     spec.service_arn,
                     "--task-definition",
-                    str(state["taskDefinition"]),
+                    str(activation["taskDefinition"]),
                     "--desired-count",
-                    str(state["desiredCount"]),
+                    str(activation["desiredCount"]),
                     "--deployment-configuration",
                     json.dumps(
-                        state["deploymentConfiguration"],
+                        activation["deploymentConfiguration"],
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
                     "--network-configuration",
                     json.dumps(
-                        state["networkConfiguration"],
+                        activation["networkConfiguration"],
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
@@ -1255,8 +2272,20 @@ class EcsServiceApplySaga:
             returned = response.get("service")
             if type(returned) is not dict:
                 raise SagaError("ECS rollback update response is invalid")
-            if _canonical_service(returned, spec=spec) != state:
+            expected_service = {
+                name: activation[name]
+                for name in (
+                    "deploymentConfiguration",
+                    "desiredCount",
+                    "networkConfiguration",
+                    "taskDefinition",
+                )
+            }
+            if _canonical_service(returned, spec=spec) != expected_service:
                 raise SagaError("ECS rollback update did not accept the exact baseline")
+
+        # EventBridge/Lambda rollback execution is owned by the apply controller.
+        # Their complete, exact restore payloads remain durably bound in ``baseline``.
         self.cli.run(
             "ecs",
             "wait services-stable",
@@ -1264,14 +2293,18 @@ class EcsServiceApplySaga:
                 "--cluster",
                 _CLUSTER_ARN,
                 "--services",
-                *(spec.service_arn for spec in _SERVICE_SPECS.values()),
+                *(
+                    spec.service_arn
+                    for spec in self.specs.values()
+                    if spec.activator_type == "ecs_service"
+                ),
             ],
             timeout_seconds=900,
         )
-        restored, raw_restored = _read_services(self.cli)
+        restored, raw_restored = _read_consumers(self.cli, self.specs)
         if restored != baseline:
-            raise SagaError("ECS exact rollback baseline could not be verified")
-        _assert_stable(raw_restored, baseline)
+            raise SagaError("exact consumer rollback baseline could not be verified")
+        _assert_stable(self.cli, raw_restored, restored, self.specs)
 
     def _transition(
         self,
@@ -1370,6 +2403,7 @@ class EcsServiceApplySaga:
         return confirmed
 
     def finish(self, *, outcome: str) -> dict[str, Any]:
+        self._assert_registry_current()
         desired = {"applied": "APPLIED", "failed": "RESTORED"}.get(outcome)
         if desired is None:
             raise SagaError("ECS saga outcome is invalid")
@@ -1386,9 +2420,10 @@ class EcsServiceApplySaga:
         if outcome == "failed":
             self._restore(baseline)
         else:
-            live, raw_live = _read_services(self.cli)
+            live, raw_live = _read_consumers(self.cli, self.specs)
             self._verify_planned(live, raw_live)
-            _assert_stable(raw_live, live)
+            _assert_stable(self.cli, raw_live, live, self.specs)
+        self._assert_registry_current()
         return self._receipt(self._transition(item, desired=desired))
 
 
