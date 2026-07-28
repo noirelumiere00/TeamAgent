@@ -15,9 +15,6 @@ locals {
     "${var.project_name}-${var.environment}-media-cutover-attestor"
   )
   media_cutover_attestor_session_name = "teamagent-media-cutover-attestor"
-  media_cutover_attestor_source_identity = (
-    "teamagent-production-media-cutover-attestor"
-  )
 }
 
 resource "aws_kms_key" "media_cutover_attestor" {
@@ -37,22 +34,22 @@ resource "aws_kms_alias" "media_cutover_attestor" {
 }
 
 data "aws_iam_policy_document" "media_cutover_attestor_assume" {
+  # Account root cannot assume roles, and the organization SCP refuses
+  # sts:SetSourceIdentity. The live AIIAdev principal uses AssumeRole while MFA
+  # and the exact session name stay required.
   statement {
-    sid = "ExactRootMfaMediaCutoverSession"
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
+    sid     = "ExactAIIAdevMfaMediaCutoverSession"
+    actions = ["sts:AssumeRole"]
 
     principals {
       type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
+      identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
       test     = "ArnEquals"
       variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
+      values   = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
@@ -65,12 +62,6 @@ data "aws_iam_policy_document" "media_cutover_attestor_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = [local.media_cutover_attestor_session_name]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = [local.media_cutover_attestor_source_identity]
     }
   }
 }

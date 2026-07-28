@@ -548,27 +548,15 @@ data "aws_iam_user" "aiia_dev" {
 }
 
 data "aws_iam_policy_document" "codebuild_launcher_assume" {
+  # The IAM administrator is the live build principal. The account-root branch
+  # cannot assume roles and also demanded sts:SetSourceIdentity, which the
+  # organization SCP refuses. Drop that unusable branch and source identity
+  # while keeping MFA and the exact session name required.
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "AWS"
       identifiers = [data.aws_iam_user.aiia_dev.arn]
-    }
-  }
-
-  statement {
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
-    }
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
     }
     condition {
       test     = "Bool"
@@ -579,11 +567,6 @@ data "aws_iam_policy_document" "codebuild_launcher_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = ["teamagent-build-launcher"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = ["teamagent-production-build"]
     }
   }
 }
@@ -1664,27 +1647,15 @@ resource "aws_iam_user" "tiktok_build_caller" {
 
 data "aws_iam_policy_document" "tiktok_build_launcher_assume" {
   count = local.tk_enabled
+  # The dedicated TikTok caller is the build principal. The account-root branch
+  # cannot assume roles and also demanded sts:SetSourceIdentity, which the
+  # organization SCP refuses. Drop that unusable branch and source identity
+  # while keeping MFA and the exact session name required.
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "AWS"
       identifiers = [aws_iam_user.tiktok_build_caller[0].arn]
-    }
-  }
-
-  statement {
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
-    }
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
     }
     condition {
       test     = "Bool"
@@ -1695,11 +1666,6 @@ data "aws_iam_policy_document" "tiktok_build_launcher_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = ["teamagent-tiktok-build"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = ["teamagent-production-tiktok-build"]
     }
   }
 }
@@ -3817,27 +3783,15 @@ resource "aws_codebuild_project" "openclaw_provenance" {
 }
 
 data "aws_iam_policy_document" "openclaw_publisher_assume" {
+  # The IAM administrator is the live publisher principal. The account-root
+  # branch cannot assume roles and also demanded sts:SetSourceIdentity, which
+  # the organization SCP refuses. Drop that unusable branch and source identity
+  # while keeping MFA and the exact session name required.
   statement {
     actions = ["sts:AssumeRole"]
     principals {
       type        = "AWS"
       identifiers = [data.aws_iam_user.aiia_dev.arn]
-    }
-  }
-
-  statement {
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
-    }
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
     }
     condition {
       test     = "Bool"
@@ -3848,11 +3802,6 @@ data "aws_iam_policy_document" "openclaw_publisher_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = ["openclaw-build-publisher"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = ["teamagent-production-openclaw-build"]
     }
   }
 }

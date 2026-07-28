@@ -20,9 +20,14 @@ def test_media_cutover_has_a_dedicated_mfa_signer_and_key() -> None:
     assert 'resource "aws_iam_role" "media_cutover_attestor"' in ATTESTOR
     assert 'variable = "aws:MultiFactorAuthPresent"' in ATTESTOR
     assert 'values   = ["true"]' in ATTESTOR
-    assert "teamagent-production-media-cutover-attestor" in ATTESTOR
-    assume = _statement(ATTESTOR, "ExactRootMfaMediaCutoverSession")
+    assert "teamagent-production-media-cutover-attestor" not in ATTESTOR
+    assume = _statement(ATTESTOR, "ExactAIIAdevMfaMediaCutoverSession")
+    assert assume.count("data.aws_iam_user.aiia_dev.arn") == 2
+    assert "arn:aws:iam::718959508629:root" not in assume
     assert '"aws:MultiFactorAuthPresent"' in assume
+    assert '"sts:RoleSessionName"' in assume
+    assert '"sts:SetSourceIdentity"' not in assume
+    assert '"sts:SourceIdentity"' not in assume
     assert "ExistingOrganizationRecipientRole" not in ATTESTOR
 
 

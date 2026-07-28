@@ -21,9 +21,6 @@ locals {
     "${var.project_name}-${var.environment}-alarm-recipient-ack-signer"
   )
   alarm_recipient_ack_session_name = "teamagent-alarm-recipient-ack"
-  alarm_recipient_ack_source_identity = (
-    "teamagent-production-alarm-recipient"
-  )
   # This external managed identity represents the approved recipient. It must
   # itself be backed by the organization's SSO/MFA control plane; this state
   # neither creates a user/access key nor grants administrator permissions.
@@ -34,9 +31,6 @@ locals {
     "${var.project_name}-${var.environment}-terraform-runtime-automation"
   )
   runtime_automation_session_name = "teamagent-terraform-worker"
-  runtime_automation_source_identity = (
-    "teamagent-production-terraform"
-  )
   runtime_automation_role_arn = (
     "arn:aws:iam::718959508629:role/${local.runtime_automation_role_name}"
   )
@@ -81,22 +75,22 @@ data "aws_iam_policy_document" "alarm_recipient_ack_signer_assume" {
     }
   }
 
+  # Account root cannot assume roles, and the organization SCP refuses
+  # sts:SetSourceIdentity. The live AIIAdev principal uses AssumeRole while MFA
+  # and the exact session name stay required.
   statement {
-    sid = "ExactRootMfaRecipientSession"
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
+    sid     = "ExactAIIAdevMfaRecipientSession"
+    actions = ["sts:AssumeRole"]
 
     principals {
       type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
+      identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
       test     = "ArnEquals"
       variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
+      values   = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
@@ -110,12 +104,6 @@ data "aws_iam_policy_document" "alarm_recipient_ack_signer_assume" {
       variable = "sts:RoleSessionName"
       values   = [local.alarm_recipient_ack_session_name]
     }
-
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = [local.alarm_recipient_ack_source_identity]
-    }
   }
 }
 
@@ -126,21 +114,21 @@ resource "aws_iam_role" "alarm_recipient_ack_signer" {
 }
 
 data "aws_iam_policy_document" "runtime_automation_assume" {
+  # Account root cannot assume roles, and the organization SCP refuses
+  # sts:SetSourceIdentity. The live AIIAdev principal uses AssumeRole while MFA
+  # and the exact session name stay required.
   statement {
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
+    actions = ["sts:AssumeRole"]
 
     principals {
       type        = "AWS"
-      identifiers = ["arn:aws:iam::718959508629:root"]
+      identifiers = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
       test     = "ArnEquals"
       variable = "aws:PrincipalArn"
-      values   = ["arn:aws:iam::718959508629:root"]
+      values   = [data.aws_iam_user.aiia_dev.arn]
     }
 
     condition {
@@ -153,12 +141,6 @@ data "aws_iam_policy_document" "runtime_automation_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = [local.runtime_automation_session_name]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = [local.runtime_automation_source_identity]
     }
   }
 }

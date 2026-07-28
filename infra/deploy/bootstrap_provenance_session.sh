@@ -23,9 +23,9 @@ usage:
 
 The selected release contract is validated locally before the first AWS call.
 The current root credentials must already be an MFA-authenticated temporary
-session; role trust enforces MFA, the exact role-session name, and source
-identity. The child launcher accepts only its former dedicated IAM caller or
-the exact pre-assumed launcher session, never root.
+session; role trust enforces MFA and the exact role-session name. The child
+launcher accepts only its former dedicated IAM caller or the exact pre-assumed
+launcher session, never root.
 EOF
 }
 
@@ -125,7 +125,6 @@ case "$MODE" in
     CONTRACT_HELPER="$REPO_ROOT/infra/codebuild/teamagent_bundle_provenance.py"
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-codebuild-launcher"
     SESSION_NAME="teamagent-build-launcher"
-    SOURCE_IDENTITY="teamagent-production-build"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-codebuild-launcher/teamagent-build-launcher"
     LAUNCHER="$SCRIPT_DIR/build_teamagent_image.sh"
     ;;
@@ -134,7 +133,6 @@ case "$MODE" in
     CONTRACT_HELPER="$REPO_ROOT/infra/codebuild/openclaw_provenance.py"
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-openclaw-build-publisher"
     SESSION_NAME="openclaw-build-publisher"
-    SOURCE_IDENTITY="teamagent-production-openclaw-build"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-openclaw-build-publisher/openclaw-build-publisher"
     LAUNCHER="$SCRIPT_DIR/build_openclaw_image.sh"
     ;;
@@ -143,7 +141,6 @@ case "$MODE" in
     CONTRACT_HELPER=""
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-tiktok-build-launcher"
     SESSION_NAME="teamagent-tiktok-build"
-    SOURCE_IDENTITY="teamagent-production-tiktok-build"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-tiktok-build-launcher/teamagent-tiktok-build"
     LAUNCHER="$SCRIPT_DIR/build_tiktok_image.sh"
     ;;
@@ -205,7 +202,6 @@ case "$MODE" in
     esac
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-release-launcher"
     SESSION_NAME="teamagent-release-authorization"
-    SOURCE_IDENTITY="teamagent-production-release"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-release-launcher/teamagent-release-authorization"
     LAUNCHER="$SCRIPT_DIR/authorize_image_release.sh"
     ;;
@@ -418,7 +414,6 @@ session="$(
     --region "$REGION" \
     --role-arn "$ROLE_ARN" \
     --role-session-name "$SESSION_NAME" \
-    --source-identity "$SOURCE_IDENTITY" \
     --duration-seconds 10800 \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
     --output text

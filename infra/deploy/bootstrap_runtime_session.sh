@@ -24,7 +24,7 @@ the one-hour, KMS-Sign-only teamagent-dev-alarm-recipient-ack-signer role.
 `attest-media-cutover` and `authorize-media-apply` use the one-hour,
 independent teamagent-dev-media-cutover-attestor role.
 The current root credentials must already be an MFA-authenticated temporary
-session; both role trusts enforce MFA and fixed session/source identities.
+session; both role trusts enforce MFA and fixed session names.
 
 This wrapper does not accept an arbitrary command and cannot invoke build or
 release launchers.
@@ -39,21 +39,18 @@ case "$1" in
   sign-alarm-ack)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-alarm-recipient-ack-signer"
     SESSION_NAME="teamagent-alarm-recipient-ack"
-    SOURCE_IDENTITY="teamagent-production-alarm-recipient"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-alarm-recipient-ack-signer/teamagent-alarm-recipient-ack"
     SESSION_SECONDS=3600
     ;;
   attest-media-cutover|authorize-media-apply)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-media-cutover-attestor"
     SESSION_NAME="teamagent-media-cutover-attestor"
-    SOURCE_IDENTITY="teamagent-production-media-cutover-attestor"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/teamagent-media-cutover-attestor"
     SESSION_SECONDS=3600
     ;;
   snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|prepare-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
     SESSION_NAME="teamagent-terraform-worker"
-    SOURCE_IDENTITY="teamagent-production-terraform"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
     SESSION_SECONDS=10800
     ;;
@@ -169,7 +166,6 @@ session="$(
     --region "$REGION" \
     --role-arn "$ROLE_ARN" \
     --role-session-name "$SESSION_NAME" \
-    --source-identity "$SOURCE_IDENTITY" \
     --duration-seconds "$SESSION_SECONDS" \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
     --output text

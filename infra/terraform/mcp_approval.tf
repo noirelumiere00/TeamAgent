@@ -19,10 +19,7 @@ locals {
     "${var.project_name}-${var.environment}-codebuild-approval-publisher"
   )
   approval_caller_session_name = "teamagent-approval-caller"
-  approval_caller_source_identity = (
-    "teamagent-production-release-approval"
-  )
-  approval_evidence_prefix = "approval-records/mcp"
+  approval_evidence_prefix     = "approval-records/mcp"
   approval_signing_key_alias = (
     "alias/${var.project_name}-${var.environment}-mcp-approval"
   )
@@ -468,12 +465,12 @@ resource "aws_kms_alias" "approval_signing" {
 }
 
 data "aws_iam_policy_document" "approval_caller_assume" {
+  # The organization SCP refuses sts:SetSourceIdentity, so the live AIIAdev
+  # principal assumes this role without source identity. MFA and the exact
+  # session name stay required.
   statement {
-    sid = "ExactAIIAdevMfaApprovalSession"
-    actions = [
-      "sts:AssumeRole",
-      "sts:SetSourceIdentity",
-    ]
+    sid     = "ExactAIIAdevMfaApprovalSession"
+    actions = ["sts:AssumeRole"]
 
     principals {
       type        = "AWS"
@@ -490,12 +487,6 @@ data "aws_iam_policy_document" "approval_caller_assume" {
       test     = "StringEquals"
       variable = "sts:RoleSessionName"
       values   = [local.approval_caller_session_name]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "sts:SourceIdentity"
-      values   = [local.approval_caller_source_identity]
     }
   }
 }

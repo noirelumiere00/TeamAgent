@@ -2261,7 +2261,7 @@ def test_bootstrap_targets_fail_closed_until_split_policy_migration() -> None:
     assert "terraform_data.runtime_guard" not in contract.targets
 
 
-def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None:
+def test_runtime_prerequisites_are_main_owned_and_aiiadev_must_assume_sts() -> None:
     body = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
     assert 'resource "aws_kms_key" "alarm_recipient_ack"' in body
     assert 'resource "aws_iam_role" "alarm_recipient_ack_signer"' in body
@@ -2296,9 +2296,33 @@ def test_runtime_prerequisites_are_main_owned_and_root_must_assume_sts() -> None
     assert 'data "aws_kms_alias" "alarm_recipient_ack"' not in body
     assert 'variable = "aws:MultiFactorAuthPresent"' in body
     assert 'variable = "sts:RoleSessionName"' in body
-    assert 'variable = "sts:SourceIdentity"' in body
+    recipient_trust = body.split(
+        'data "aws_iam_policy_document" "alarm_recipient_ack_signer_assume"',
+        maxsplit=1,
+    )[1].split(
+        'resource "aws_iam_role" "alarm_recipient_ack_signer"',
+        maxsplit=1,
+    )[0]
+    recipient_operator = recipient_trust.split(
+        '"ExactAIIAdevMfaRecipientSession"',
+        maxsplit=1,
+    )[1]
+    runtime_trust = body.split(
+        'data "aws_iam_policy_document" "runtime_automation_assume"',
+        maxsplit=1,
+    )[1].split(
+        'data "aws_iam_policy_document" "runtime_automation_boundary"',
+        maxsplit=1,
+    )[0]
+    for trust in (recipient_operator, runtime_trust):
+        assert trust.count("data.aws_iam_user.aiia_dev.arn") == 2
+        assert "arn:aws:iam::718959508629:root" not in trust
+        assert 'variable = "aws:MultiFactorAuthPresent"' in trust
+        assert 'variable = "sts:RoleSessionName"' in trust
+        assert '"sts:SetSourceIdentity"' not in trust
+        assert 'variable = "sts:SourceIdentity"' not in trust
     assert "teamagent-alarm-recipient-ack" in body
-    assert "teamagent-production-alarm-recipient" in body
+    assert "teamagent-production-alarm-recipient" not in body
     assert (
         '"arn:aws:sns:${var.aws_region}:718959508629:'
         '${var.project_name}-${var.environment}-openclaw-alarms"'
@@ -2438,7 +2462,8 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
     assert "sign-alarm-ack)" in runtime
     assert "teamagent-dev-alarm-recipient-ack-signer" in runtime
     assert "teamagent-dev-media-cutover-attestor" in runtime
-    assert "teamagent-production-media-cutover-attestor" in runtime
+    assert "SOURCE_IDENTITY" not in runtime
+    assert "--source-identity" not in runtime
     assert "--profile runtime-session" in runtime
     assert runtime.index("unset AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE") < runtime.index(
         'bash "$GUARD" "$@"'
@@ -2619,18 +2644,44 @@ def test_blocked_contract_cannot_mint_root_provenance_session(tmp_path: Path) ->
     )
 
 
-def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -> None:
+def test_launcher_trusts_omit_source_identity_and_use_exact_preassumed_sessions() -> None:
     terraform = CODEBUILD_TF.read_text(encoding="utf-8")
     wrapper = PROVENANCE_ENTRY.read_text(encoding="utf-8")
-    assert terraform.count('identifiers = ["arn:aws:iam::718959508629:root"]') >= 4
     assert terraform.count('variable = "aws:MultiFactorAuthPresent"') >= 4
     assert terraform.count('variable = "sts:RoleSessionName"') >= 4
-    # Three launcher roles still gate their root branch on sts:SourceIdentity.
-    # The release launcher no longer can: the organization SCP forbids
-    # sts:SetSourceIdentity, so that branch was unusable. It is guarded by the
-    # administrator principal plus MFA and an exact session name instead, which
-    # the next assertions pin.
-    assert terraform.count('variable = "sts:SourceIdentity"') >= 3
+    for document_name, role_name, principal, session_name in (
+        (
+            "codebuild_launcher_assume",
+            "codebuild_launcher",
+            "data.aws_iam_user.aiia_dev.arn",
+            "teamagent-build-launcher",
+        ),
+        (
+            "tiktok_build_launcher_assume",
+            "tiktok_build_launcher",
+            "aws_iam_user.tiktok_build_caller[0].arn",
+            "teamagent-tiktok-build",
+        ),
+        (
+            "openclaw_publisher_assume",
+            "openclaw_publisher",
+            "data.aws_iam_user.aiia_dev.arn",
+            "openclaw-build-publisher",
+        ),
+    ):
+        trust = terraform[
+            terraform.index(f'data "aws_iam_policy_document" "{document_name}"') : terraform.index(
+                f'resource "aws_iam_role" "{role_name}"'
+            )
+        ]
+        assert '"sts:SetSourceIdentity"' not in trust
+        assert 'variable = "sts:SourceIdentity"' not in trust
+        assert "arn:aws:iam::718959508629:root" not in trust
+        assert trust.count("statement {") == 1
+        assert f"identifiers = [{principal}]" in trust
+        assert 'variable = "aws:MultiFactorAuthPresent"' in trust
+        assert 'variable = "sts:RoleSessionName"' in trust
+        assert f'values   = ["{session_name}"]' in trust
     release_trust = terraform[
         terraform.index(
             'data "aws_iam_policy_document" "release_launcher_assume"'
@@ -2646,7 +2697,8 @@ def test_root_uses_exact_preassumed_launcher_sessions_not_direct_build_calls() -
     assert 'python3 -I "$CONTRACT_HELPER"' in wrapper
     assert '--expected-commit "$CONTRACT_EXPECTED_COMMIT"' in wrapper
     assert "MCP receipt key does not bind one full source commit" in wrapper
-    assert "--source-identity" in wrapper
+    assert "SOURCE_IDENTITY" not in wrapper
+    assert "--source-identity" not in wrapper
     assert "--duration-seconds 10800" in wrapper
     assert "release requires exactly one --pipeline" in wrapper
     assert "MCP provenance requires each approval locator argument exactly once" in wrapper

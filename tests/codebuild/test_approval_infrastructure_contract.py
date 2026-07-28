@@ -480,7 +480,7 @@ def test_approval_caller_trust_is_exact_aiia_dev_mfa_session() -> None:
     assert len(statements) == 1
     statement = statements[0]
 
-    assert _actions(statement) == {"sts:AssumeRole", "sts:SetSourceIdentity"}
+    assert _actions(statement) == {"sts:AssumeRole"}
     principals = _balanced_block_after(statement, "principals")
     assert re.search(r'(?m)^\s*type\s*=\s*"AWS"\s*$', principals)
     assert _list_expressions(principals, "identifiers") == ("data.aws_iam_user.aiia_dev.arn",)
@@ -493,12 +493,9 @@ def test_approval_caller_trust_is_exact_aiia_dev_mfa_session() -> None:
     assert _list_expressions(session, "values") == ("local.approval_caller_session_name",)
     assert _local_literal(body, "approval_caller_session_name")
 
-    source_identity = _condition(statement, "sts:SourceIdentity")
-    assert _list_expressions(source_identity, "values") == (
-        "local.approval_caller_source_identity",
-    )
-    assert _local_literal(body, "approval_caller_source_identity")
-    assert len(_conditions(statement)) == 3
+    assert "sts:SourceIdentity" not in statement
+    assert "approval_caller_source_identity" not in body
+    assert len(_conditions(statement)) == 2
 
 
 def test_approval_caller_can_only_start_and_observe_exact_publisher() -> None:
