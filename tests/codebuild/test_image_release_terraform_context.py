@@ -57,6 +57,48 @@ def _image(
     )
 
 
+def _task_volume(
+    name: str,
+    *,
+    efs_volume_configuration: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "configure_at_launch": False,
+        "docker_volume_configuration": [],
+        "efs_volume_configuration": (
+            [] if efs_volume_configuration is None else efs_volume_configuration
+        ),
+        "fsx_windows_file_server_volume_configuration": [],
+        "host_path": None,
+        "name": name,
+    }
+
+
+def _task_volumes(consumer: dict[str, Any]) -> list[dict[str, Any]]:
+    if consumer["consumer_id"] != "openclaw":
+        return [_task_volume("runtime-tmp")]
+    return [
+        _task_volume("tmp"),
+        _task_volume(
+            "state",
+            efs_volume_configuration=[
+                {
+                    "authorization_config": [
+                        {
+                            "access_point_id": "fsap-0123456789abcdef0",
+                            "iam": "ENABLED",
+                        }
+                    ],
+                    "file_system_id": "fs-0123456789abcdef0",
+                    "root_directory": "/",
+                    "transit_encryption": "ENABLED",
+                    "transit_encryption_port": None,
+                }
+            ],
+        ),
+    ]
+
+
 def _task_attributes(
     consumer: dict[str, Any],
     index: int,
@@ -76,11 +118,7 @@ def _task_attributes(
         "network_mode": "awsvpc",
         "cpu": "256",
         "memory": "512",
-        "volume": (
-            [{"name": "tmp"}, {"name": "state"}]
-            if consumer["consumer_id"] == "openclaw"
-            else [{"name": "runtime-tmp"}]
-        ),
+        "volume": _task_volumes(consumer),
         "container_definitions": json.dumps(
             [
                 {
@@ -1299,6 +1337,79 @@ def test_no_image_transition_rejects_unknown_task_definition_after() -> None:
         )
 
 
+def test_task_definition_after_unknown_allowlist_matches_runtime_guard() -> None:
+    body = COMPOSED_GUARD.read_text(encoding="utf-8")
+    allowlist_match = re.search(
+        r"\[\$change\.change\.after_unknown // \{\} \| paths\(\. == true\)\] -\s*"
+        r"(?P<allowlist>\[\[.*?\]\])\)\s*\|\s*length == 0\)",
+        body,
+        re.DOTALL,
+    )
+
+    assert allowlist_match is not None
+    runtime_guard_allowlist = frozenset(
+        tuple(path) for path in json.loads(allowlist_match.group("allowlist"))
+    )
+    assert CONTEXT.TASK_DEFINITION_AFTER_UNKNOWN_ALLOWLIST == runtime_guard_allowlist
+
+
+def test_no_image_transition_accepts_exact_benign_volume_unknown() -> None:
+    plan = _plan()
+    openclaw = _manifest_consumer(plan, "openclaw")
+    address = openclaw["terraform_task_definition_address"]
+    openclaw["after"]["task_definition_arn"] = address
+    openclaw["after"]["activation"]["task_definition_arn"] = address
+
+    task_change = _resource_change(plan, address)["change"]
+    task_change["actions"] = ["create", "delete"]
+    task_change["after"]["arn"] = None
+    task_change["after"]["id"] = None
+    task_change["after"]["volume"][0]["configure_at_launch"] = None
+    task_change["after_unknown"] = {
+        "arn": True,
+        "id": True,
+        "revision": True,
+        "volume": [{"configure_at_launch": True}],
+    }
+
+    service_change = _resource_change(
+        plan,
+        "aws_ecs_service.openclaw[0]",
+    )["change"]
+    service_change["actions"] = ["update"]
+    service_change["after"]["task_definition"] = None
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    accepted = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "openclaw"
+    )
+    volumes = accepted["after"]["task_definition"]["volumes"]
+    assert task_change["after"]["volume"][0]["configure_at_launch"] is None
+    assert volumes[0]["configure_at_launch"] is False
+    assert volumes[1]["efs_volume_configuration"] == [
+        {
+            "authorization_config": [
+                {
+                    "access_point_id": "fsap-0123456789abcdef0",
+                    "iam": "ENABLED",
+                }
+            ],
+            "file_system_id": "fs-0123456789abcdef0",
+            "root_directory": "/",
+            "transit_encryption": "ENABLED",
+            "transit_encryption_port": None,
+        }
+    ]
+
+
 def test_no_image_transition_rejects_unknown_volume_under_its_provider_name() -> None:
     # after_unknown speaks the provider's singular "volume". The gate used to look
     # only for the canonical "volumes", so a plan could leave its mounts
@@ -1309,6 +1420,67 @@ def test_no_image_transition_rejects_unknown_volume_under_its_provider_name() ->
         REGISTRY["consumers"][0]["terraform_task_definition_address"],
     )
     task["change"]["after_unknown"] = {"volume": True}
+
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match=re.escape("plan after task definition.volumes is unknown"),
+    ):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+@pytest.mark.parametrize(
+    "after_unknown",
+    [
+        pytest.param(
+            {"volume": [{"name": True}]},
+            id="name",
+        ),
+        pytest.param(
+            {"volume": [{"host_path": True}]},
+            id="host-path",
+        ),
+        pytest.param(
+            {
+                "volume": [
+                    {
+                        "efs_volume_configuration": [
+                            {
+                                "file_system_id": True,
+                            }
+                        ]
+                    }
+                ]
+            },
+            id="efs-file-system-id",
+        ),
+        pytest.param(
+            {
+                "volume": [
+                    {},
+                    {
+                        "configure_at_launch": True,
+                    },
+                ]
+            },
+            id="configure-at-launch-on-volume-one",
+        ),
+    ],
+)
+def test_no_image_transition_rejects_security_sensitive_nested_volume_unknown(
+    after_unknown: dict[str, Any],
+) -> None:
+    plan = _plan()
+    openclaw = _manifest_consumer(plan, "openclaw")
+    task = _resource_change(
+        plan,
+        openclaw["terraform_task_definition_address"],
+    )
+    task["change"]["after_unknown"] = after_unknown
 
     with pytest.raises(
         CONTEXT.ContextError,
