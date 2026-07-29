@@ -377,7 +377,7 @@ data "aws_iam_policy_document" "runtime_automation_boundary" {
     ]
     resources = [
       "${aws_s3_bucket.image_release_evidence.arn}/${local.approval_evidence_prefix}/*",
-      "${aws_s3_bucket.image_release_evidence.arn}/${local.approval_publisher_buildspec_s3_key}",
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.approval_publisher_project_name}/*",
     ]
   }
 

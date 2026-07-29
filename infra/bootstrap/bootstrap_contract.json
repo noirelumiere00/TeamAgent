@@ -155,6 +155,7 @@
     "aws_iam_role_policy_attachment.approval_reader_deployment_gate",
     "aws_iam_role_policy_attachment.approval_reader_runtime_automation",
     "aws_s3_object.approval_publisher_buildspec",
+    "aws_s3_object.approval_publisher_resolved_source_buildspec",
     "aws_codebuild_project.approval_publisher",
     "aws_ecr_lifecycle_policy.openclaw_quarantine",
     "aws_ecr_lifecycle_policy.openclaw_verified_candidates",

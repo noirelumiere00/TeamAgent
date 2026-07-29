@@ -145,6 +145,7 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_s3_bucket_versioning.image_release_evidence
     aws_s3_bucket_versioning.openclaw_build_evidence
     aws_s3_object.approval_publisher_buildspec
+    aws_s3_object.approval_publisher_resolved_source_buildspec
     aws_s3_object.image_attestor_buildspec
     aws_s3_object.image_promoter_buildspec
     aws_s3_object.mcp_source_publisher_buildspec
@@ -334,7 +335,7 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
-    assert len(EXPECTED_POST_CUT_MANAGED) == 137
+    assert len(EXPECTED_POST_CUT_MANAGED) == 138
     assert len(EXPECTED_POST_CUT_DATA) == 44
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
@@ -344,7 +345,7 @@ def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     dependencies = set(cast(list[str], contract["create_allowed_dependency_addresses"]))
     existing = set(cast(list[str], contract["existing_dependency_addresses"]))
     forbidden_prefixes = set(cast(list[str], contract["forbidden_change_type_prefixes"]))
-    assert len(targets) == 119
+    assert len(targets) == 120
     assert len(dependencies) == 20
     assert existing == {
         "aws_iam_role.codebuild",

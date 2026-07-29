@@ -221,13 +221,41 @@ locals {
                 )
             PY
 
-            git fetch --force --prune origin \
-              +refs/heads/dev:refs/remotes/origin/dev
-            test "$(git rev-parse refs/remotes/origin/dev)" = "$EXPECTED_COMMIT"
-            git checkout --detach "$EXPECTED_COMMIT"
-            test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
-            test -z "$(git status --porcelain --untracked-files=no)"
-            export SOURCE_TREE_OID="$(git rev-parse "$EXPECTED_COMMIT^{tree}")"
+            test "$${CODEBUILD_SOURCE_VERSION:-}" = "refs/heads/dev" \
+              || { echo "FATAL: CodeBuild source version must be refs/heads/dev" >&2; exit 2; }
+            case "$${CODEBUILD_RESOLVED_SOURCE_VERSION:-}" in
+              *[!0-9a-f]*|"")
+                echo "FATAL: resolved source version must be a full lowercase Git SHA" >&2
+                exit 2
+                ;;
+            esac
+            test "$${#CODEBUILD_RESOLVED_SOURCE_VERSION}" -eq 40 \
+              || { echo "FATAL: resolved source version must be a full lowercase Git SHA" >&2; exit 2; }
+            test "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPECTED_COMMIT" \
+              || { echo "FATAL: resolved source version differs from EXPECTED_COMMIT" >&2; exit 2; }
+            CHECKOUT_HEAD="$(git rev-parse --verify HEAD^{commit})" \
+              || { echo "FATAL: CodeBuild checkout HEAD cannot be resolved" >&2; exit 2; }
+            test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT" \
+              || { echo "FATAL: CodeBuild checkout HEAD differs from EXPECTED_COMMIT" >&2; exit 2; }
+            git checkout --detach "$EXPECTED_COMMIT" \
+              || { echo "FATAL: CodeBuild checkout cannot be detached at EXPECTED_COMMIT" >&2; exit 2; }
+            CHECKOUT_HEAD="$(git rev-parse --verify HEAD^{commit})" \
+              || { echo "FATAL: detached checkout HEAD cannot be resolved" >&2; exit 2; }
+            test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT" \
+              || { echo "FATAL: detached checkout HEAD differs from EXPECTED_COMMIT" >&2; exit 2; }
+            WORKTREE_STATUS="$(git status --porcelain --untracked-files=no)" \
+              || { echo "FATAL: CodeBuild checkout status cannot be read" >&2; exit 2; }
+            test -z "$WORKTREE_STATUS" \
+              || { echo "FATAL: CodeBuild checkout is dirty" >&2; exit 2; }
+            SOURCE_TREE_OID="$(git rev-parse --verify "$EXPECTED_COMMIT^{tree}")" \
+              || { echo "FATAL: EXPECTED_COMMIT tree cannot be resolved" >&2; exit 2; }
+            case "$SOURCE_TREE_OID" in
+              *[!0-9a-f]*|"") echo "FATAL: source tree OID must be lowercase hex" >&2; exit 2 ;;
+            esac
+            test "$${#SOURCE_TREE_OID}" -eq 40 \
+              || { echo "FATAL: source tree OID must be a full Git SHA" >&2; exit 2; }
+            export SOURCE_TREE_OID
+            unset CHECKOUT_HEAD WORKTREE_STATUS
 
             python3 /tmp/teamagent-approval-tools/source_provenance.py \
               assert-contract-ready \
@@ -404,6 +432,80 @@ locals {
             print(json.dumps(locator, sort_keys=True, separators=(",", ":")))
             PY
   YAML
+  # Preserve the already-applied, Object-Locked buildspec at its immutable
+  # address.  The active buildspec below is published at a new address/key.
+  approval_publisher_resolved_source_commands = format(
+    "        %s",
+    indent(
+      8,
+      chomp(<<-SOURCE
+        test "$${CODEBUILD_SOURCE_VERSION:-}" = "refs/heads/dev" \
+          || { echo "FATAL: CodeBuild source version must be refs/heads/dev" >&2; exit 2; }
+        case "$${CODEBUILD_RESOLVED_SOURCE_VERSION:-}" in
+          *[!0-9a-f]*|"")
+            echo "FATAL: resolved source version must be a full lowercase Git SHA" >&2
+            exit 2
+            ;;
+        esac
+        test "$${#CODEBUILD_RESOLVED_SOURCE_VERSION}" -eq 40 \
+          || { echo "FATAL: resolved source version must be a full lowercase Git SHA" >&2; exit 2; }
+        test "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPECTED_COMMIT" \
+          || { echo "FATAL: resolved source version differs from EXPECTED_COMMIT" >&2; exit 2; }
+        CHECKOUT_HEAD="$(git rev-parse --verify HEAD^{commit})" \
+          || { echo "FATAL: CodeBuild checkout HEAD cannot be resolved" >&2; exit 2; }
+        test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT" \
+          || { echo "FATAL: CodeBuild checkout HEAD differs from EXPECTED_COMMIT" >&2; exit 2; }
+        git checkout --detach "$EXPECTED_COMMIT" \
+          || { echo "FATAL: CodeBuild checkout cannot be detached at EXPECTED_COMMIT" >&2; exit 2; }
+        CHECKOUT_HEAD="$(git rev-parse --verify HEAD^{commit})" \
+          || { echo "FATAL: detached checkout HEAD cannot be resolved" >&2; exit 2; }
+        test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT" \
+          || { echo "FATAL: detached checkout HEAD differs from EXPECTED_COMMIT" >&2; exit 2; }
+        WORKTREE_STATUS="$(git status --porcelain --untracked-files=no)" \
+          || { echo "FATAL: CodeBuild checkout status cannot be read" >&2; exit 2; }
+        test -z "$WORKTREE_STATUS" \
+          || { echo "FATAL: CodeBuild checkout is dirty" >&2; exit 2; }
+        SOURCE_TREE_OID="$(git rev-parse --verify "$EXPECTED_COMMIT^{tree}")" \
+          || { echo "FATAL: EXPECTED_COMMIT tree cannot be resolved" >&2; exit 2; }
+        case "$SOURCE_TREE_OID" in
+          *[!0-9a-f]*|"") echo "FATAL: source tree OID must be lowercase hex" >&2; exit 2 ;;
+        esac
+        test "$${#SOURCE_TREE_OID}" -eq 40 \
+          || { echo "FATAL: source tree OID must be a full Git SHA" >&2; exit 2; }
+        export SOURCE_TREE_OID
+        unset CHECKOUT_HEAD WORKTREE_STATUS
+      SOURCE
+      ),
+    ),
+  )
+  approval_publisher_bootstrap_source_commands = format(
+    "        %s",
+    indent(
+      8,
+      chomp(<<-SOURCE
+        git fetch --force --prune origin \
+          +refs/heads/dev:refs/remotes/origin/dev
+        test "$(git rev-parse refs/remotes/origin/dev)" = "$EXPECTED_COMMIT"
+        git checkout --detach "$EXPECTED_COMMIT"
+        test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+        test -z "$(git status --porcelain --untracked-files=no)"
+        export SOURCE_TREE_OID="$(git rev-parse "$EXPECTED_COMMIT^{tree}")"
+      SOURCE
+      ),
+    ),
+  )
+  approval_publisher_bootstrap_buildspec = replace(
+    local.approval_publisher_buildspec,
+    local.approval_publisher_resolved_source_commands,
+    local.approval_publisher_bootstrap_source_commands,
+  )
+  approval_publisher_bootstrap_buildspec_sha256 = sha256(
+    local.approval_publisher_bootstrap_buildspec
+  )
+  approval_publisher_bootstrap_buildspec_expected_sha256 = "ad5ac69a31dc21b6d21c85e1d3d369063c642c6d7f5fd05efa11762e56e8b95d"
+  approval_publisher_bootstrap_buildspec_s3_key = (
+    "codebuild-buildspecs/${local.approval_publisher_project_name}/${local.approval_publisher_bootstrap_buildspec_expected_sha256}.yml"
+  )
   approval_publisher_buildspec_sha256 = sha256(
     local.approval_publisher_buildspec
   )
@@ -832,6 +934,41 @@ resource "aws_iam_role_policy_attachment" "approval_reader_runtime_automation" {
 
 resource "aws_s3_object" "approval_publisher_buildspec" {
   bucket                        = aws_s3_bucket.image_release_evidence.id
+  key                           = local.approval_publisher_bootstrap_buildspec_s3_key
+  content                       = local.approval_publisher_bootstrap_buildspec
+  content_type                  = "text/yaml"
+  source_hash                   = local.approval_publisher_bootstrap_buildspec_sha256
+  server_side_encryption        = "aws:kms"
+  kms_key_id                    = aws_kms_key.image_release_evidence.arn
+  bucket_key_enabled            = true
+  object_lock_mode              = "GOVERNANCE"
+  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
+
+  depends_on = [
+    aws_s3_bucket_object_lock_configuration.image_release_evidence,
+    aws_s3_bucket_policy.image_release_evidence,
+  ]
+
+  # A changed body must be published under a new Terraform address/key.  This
+  # address is the immutable A3a bootstrap object.  Ignore the content-addressed
+  # identity fields so an already-applied historical key is never replaced while
+  # the resolved-source generation is added at its separate address below.
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes  = [key, content, source_hash]
+
+    precondition {
+      condition = (
+        local.approval_publisher_bootstrap_buildspec_sha256 ==
+        local.approval_publisher_bootstrap_buildspec_expected_sha256
+      )
+      error_message = "The immutable approval publisher bootstrap buildspec bytes changed."
+    }
+  }
+}
+
+resource "aws_s3_object" "approval_publisher_resolved_source_buildspec" {
+  bucket                        = aws_s3_bucket.image_release_evidence.id
   key                           = local.approval_publisher_buildspec_s3_key
   content                       = local.approval_publisher_buildspec
   content_type                  = "text/yaml"
@@ -847,10 +984,16 @@ resource "aws_s3_object" "approval_publisher_buildspec" {
     aws_s3_bucket_policy.image_release_evidence,
   ]
 
-  # A changed body must be published under a new Terraform address/key.  This
-  # address is the immutable A3a bootstrap object.
   lifecycle {
     prevent_destroy = true
+
+    precondition {
+      condition = (
+        local.approval_publisher_buildspec_sha256 !=
+        local.approval_publisher_bootstrap_buildspec_expected_sha256
+      )
+      error_message = "The resolved-source approval buildspec must use a new content-addressed key."
+    }
   }
 }
 
@@ -936,7 +1079,7 @@ resource "aws_codebuild_project" "approval_publisher" {
 
   depends_on = [
     aws_iam_role_policy.approval_publisher,
-    aws_s3_object.approval_publisher_buildspec,
+    aws_s3_object.approval_publisher_resolved_source_buildspec,
   ]
 
   lifecycle {
@@ -985,7 +1128,7 @@ output "approval_publisher_project_arn" {
 output "approval_publisher_buildspec_contract" {
   value = {
     bucket = aws_s3_bucket.image_release_evidence.id
-    key    = aws_s3_object.approval_publisher_buildspec.key
+    key    = aws_s3_object.approval_publisher_resolved_source_buildspec.key
     sha256 = local.approval_publisher_buildspec_sha256
   }
 }

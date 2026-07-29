@@ -957,9 +957,7 @@ def test_assert_approved_release_fetches_and_verifies_exact_immutable_objects(
         ).hexdigest()
     )
     forced_gate_sha256 = hashlib.sha256(
-        EVIDENCE.approval_canonical_json_bytes(
-            payload["gates"]["forced_rollback_evidence"]
-        )
+        EVIDENCE.approval_canonical_json_bytes(payload["gates"]["forced_rollback_evidence"])
     ).hexdigest()
     assert verified_record.read_bytes() == EVIDENCE.canonical_bytes(
         {

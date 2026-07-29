@@ -770,8 +770,43 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
             r"local\.approval_publisher_buildspec\s*\)\s*$",
             body,
         )
+    assert (
+        _local_literal(
+            body,
+            "approval_publisher_bootstrap_buildspec_expected_sha256",
+        )
+        == "ad5ac69a31dc21b6d21c85e1d3d369063c642c6d7f5fd05efa11762e56e8b95d"
+    )
+    assert re.search(
+        r"(?ms)^\s*approval_publisher_bootstrap_buildspec\s*=\s*replace\(\s*"
+        r"local\.approval_publisher_buildspec,\s*"
+        r"local\.approval_publisher_resolved_source_commands,\s*"
+        r"local\.approval_publisher_bootstrap_source_commands,\s*\)\s*$",
+        body,
+    )
 
-    obj = _resource(body, "aws_s3_object", "approval_publisher_buildspec")
+    bootstrap_obj = _resource(body, "aws_s3_object", "approval_publisher_buildspec")
+    assert (
+        "key                           = local.approval_publisher_bootstrap_buildspec_s3_key"
+        in bootstrap_obj
+    )
+    assert (
+        "content                       = local.approval_publisher_bootstrap_buildspec"
+        in bootstrap_obj
+    )
+    assert (
+        "source_hash                   = local.approval_publisher_bootstrap_buildspec_sha256"
+        in bootstrap_obj
+    )
+    assert "local.approval_publisher_bootstrap_buildspec_expected_sha256" in bootstrap_obj
+    assert re.search(r"(?m)^\s*prevent_destroy\s*=\s*true\s*$", bootstrap_obj)
+    assert "ignore_changes  = [key, content, source_hash]" in bootstrap_obj
+
+    obj = _resource(
+        body,
+        "aws_s3_object",
+        "approval_publisher_resolved_source_buildspec",
+    )
     assert "key                           = local.approval_publisher_buildspec_s3_key" in obj
     assert "content                       = local.approval_publisher_buildspec" in obj
     assert "source_hash                   = local.approval_publisher_buildspec_sha256" in obj
@@ -780,6 +815,10 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert 'object_lock_mode              = "GOVERNANCE"' in obj
     assert "object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date" in obj
     assert re.search(r"(?m)^\s*prevent_destroy\s*=\s*true\s*$", obj)
+    assert (
+        "local.approval_publisher_buildspec_sha256 !=" in obj
+        and "local.approval_publisher_bootstrap_buildspec_expected_sha256" in obj
+    )
 
     assert "?versionId=" not in body
     assert "APPROVAL_BUILDSPEC_SHA256" in body
@@ -787,8 +826,6 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert re.search(r"\baws\s+s3api\s+get-object\b|\baws\s+s3\s+cp\b", body)
     assert "sha256sum" in body
     for buildspec_contract in (
-        "+refs/heads/dev:refs/remotes/origin/dev",
-        'git rev-parse refs/remotes/origin/dev)" = "$EXPECTED_COMMIT"',
         "approval_observation_values",
         "canonical_json_bytes",
         "RSASSA_PSS_SHA_256",
@@ -832,6 +869,14 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert 'location            = "https://github.com/noirelumiere00/TeamAgent.git"' in project
     assert 'type     = "CODECONNECTIONS"' in project
     assert "local.approval_publisher_buildspec_s3_key" in project
+    assert "aws_s3_object.approval_publisher_resolved_source_buildspec" in project
+    assert "aws_s3_object.approval_publisher_buildspec" not in project
+    buildspec_output = _balanced_block_after(
+        body,
+        'output "approval_publisher_buildspec_contract"',
+    )
+    assert "aws_s3_object.approval_publisher_resolved_source_buildspec.key" in buildspec_output
+    assert "aws_s3_object.approval_publisher_buildspec.key" not in buildspec_output
     # An unusable default, matching every other connection-backed project here:
     # a branch ref would make CreateProject resolve it through the GitHub App and
     # fail, and it fails closed if start-build forgets to name the ref.
@@ -842,6 +887,37 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
         project,
     )
     assert "group_name = aws_cloudwatch_log_group.codebuild_approval_publisher.name" in project
+
+
+def test_approval_buildspec_uses_only_codebuild_resolved_source() -> None:
+    body = _read(APPROVAL_TERRAFORM)
+    match = re.search(
+        r"(?ms)^[ \t]*approval_publisher_buildspec[ \t]*=[ \t]*<<-YAML[ \t]*\n"
+        r"(?P<buildspec>.*?)"
+        r"^[ \t]*YAML[ \t]*$",
+        body,
+    )
+    assert match is not None
+    buildspec = match.group("buildspec")
+
+    assert not re.search(r"\bgit[ \t]+fetch\b", buildspec)
+    for source_contract in (
+        'test "$${CODEBUILD_SOURCE_VERSION:-}" = "refs/heads/dev"',
+        'case "$${CODEBUILD_RESOLVED_SOURCE_VERSION:-}" in',
+        '*[!0-9a-f]*|"")',
+        'test "$${#CODEBUILD_RESOLVED_SOURCE_VERSION}" -eq 40',
+        'test "$CODEBUILD_RESOLVED_SOURCE_VERSION" = "$EXPECTED_COMMIT"',
+        'CHECKOUT_HEAD="$(git rev-parse --verify HEAD^{commit})"',
+        'test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT"',
+        'git checkout --detach "$EXPECTED_COMMIT"',
+        'WORKTREE_STATUS="$(git status --porcelain --untracked-files=no)"',
+        'test -z "$WORKTREE_STATUS"',
+        'SOURCE_TREE_OID="$(git rev-parse --verify "$EXPECTED_COMMIT^{tree}")"',
+        'test "$${#SOURCE_TREE_OID}" -eq 40',
+        "export SOURCE_TREE_OID",
+    ):
+        assert source_contract in buildspec
+    assert buildspec.count('test "$CHECKOUT_HEAD" = "$EXPECTED_COMMIT"') == 2
 
 
 def test_runtime_boundary_approval_kms_denies_are_complete_and_exact() -> None:
@@ -945,7 +1021,10 @@ def test_runtime_boundary_covers_approval_and_buildspec_objects() -> None:
     }
     assert _list_expressions(deny, "resources") == (
         '"${aws_s3_bucket.image_release_evidence.arn}/${local.approval_evidence_prefix}/*"',
-        '"${aws_s3_bucket.image_release_evidence.arn}/${local.approval_publisher_buildspec_s3_key}"',
+        (
+            '"${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/'
+            '${local.approval_publisher_project_name}/*"'
+        ),
     )
     assert 'resources = ["*"]' not in deny
 
@@ -997,10 +1076,7 @@ def test_runtime_boundary_conservative_render_fits_managed_policy_limit() -> Non
         ],
         "DenyApprovalObjects": [
             f"{evidence_bucket_arn}/approval-records/mcp/*",
-            (
-                f"{evidence_bucket_arn}/codebuild-buildspecs/"
-                f"teamagent-dev-approval-publisher/{'0' * 64}.yml"
-            ),
+            (f"{evidence_bucket_arn}/codebuild-buildspecs/teamagent-dev-approval-publisher/*"),
         ],
         "DenyApprovalBucketControls": [evidence_bucket_arn],
         "DenyApprovalProject": [
@@ -1037,7 +1113,7 @@ def test_runtime_boundary_conservative_render_fits_managed_policy_limit() -> Non
         "Statement": rendered_statements,
     }
     conservative_length = len(json.dumps(conservative_policy, separators=(",", ":")))
-    assert conservative_length == 5821
+    assert conservative_length == 5754
     assert conservative_length < 6144
 
 
@@ -1075,6 +1151,7 @@ def test_runtime_guard_has_zero_approval_infrastructure_allowances() -> None:
         "aws_iam_role_policy_attachment.approval_reader_runtime_automation",
         "aws_cloudwatch_log_group.codebuild_approval_publisher",
         "aws_s3_object.approval_publisher_buildspec",
+        "aws_s3_object.approval_publisher_resolved_source_buildspec",
         "aws_codebuild_project.approval_publisher",
     }
     actual_approval_addresses = {
