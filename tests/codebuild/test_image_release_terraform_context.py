@@ -30,6 +30,10 @@ def _load_module() -> Any:
 
 CONTEXT = _load_module()
 REGISTRY = CONTEXT.load_consumer_registry()
+LEGACY_TIKTOK_IMAGE = (
+    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+    f"teamagent-dev-tiktok-acquire@sha256:eb975be{'0' * 57}"
+)
 
 
 def _task_arn(consumer: dict[str, Any], revision: int = 1) -> str:
@@ -39,14 +43,26 @@ def _task_arn(consumer: dict[str, Any], revision: int = 1) -> str:
     )
 
 
-def _image(consumer: dict[str, Any], index: int) -> str:
+def _image(
+    consumer: dict[str, Any],
+    index: int,
+    *,
+    pre_media_cutover: bool = True,
+) -> str:
+    if pre_media_cutover and consumer["consumer_id"] == "tiktok_acquire":
+        return LEGACY_TIKTOK_IMAGE
     return (
         "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
         f"{consumer['release_repository']}@sha256:{format(index + 1, 'x') * 64}"
     )
 
 
-def _task_attributes(consumer: dict[str, Any], index: int) -> dict[str, Any]:
+def _task_attributes(
+    consumer: dict[str, Any],
+    index: int,
+    *,
+    pre_media_cutover: bool = True,
+) -> dict[str, Any]:
     return {
         "arn": _task_arn(consumer),
         "id": _task_arn(consumer),
@@ -60,12 +76,20 @@ def _task_attributes(consumer: dict[str, Any], index: int) -> dict[str, Any]:
         "network_mode": "awsvpc",
         "cpu": "256",
         "memory": "512",
-        "volumes": [],
+        "volume": (
+            [{"name": "tmp"}, {"name": "state"}]
+            if consumer["consumer_id"] == "openclaw"
+            else [{"name": "runtime-tmp"}]
+        ),
         "container_definitions": json.dumps(
             [
                 {
                     "name": consumer["container_name"],
-                    "image": _image(consumer, index),
+                    "image": _image(
+                        consumer,
+                        index,
+                        pre_media_cutover=pre_media_cutover,
+                    ),
                     "command": ["python", "-m", "worker"],
                     "entryPoint": [],
                     "environment": [
@@ -92,8 +116,17 @@ def _task_attributes(consumer: dict[str, Any], index: int) -> dict[str, Any]:
     }
 
 
-def _task_definition(consumer: dict[str, Any], index: int) -> dict[str, Any]:
-    attributes = _task_attributes(consumer, index)
+def _task_definition(
+    consumer: dict[str, Any],
+    index: int,
+    *,
+    pre_media_cutover: bool = True,
+) -> dict[str, Any]:
+    attributes = _task_attributes(
+        consumer,
+        index,
+        pre_media_cutover=pre_media_cutover,
+    )
     containers = json.loads(attributes["container_definitions"])
     for container in containers:
         container["environment"] = sorted(
@@ -107,7 +140,7 @@ def _task_definition(consumer: dict[str, Any], index: int) -> dict[str, Any]:
         "memory": attributes["memory"],
         "network_mode": attributes["network_mode"],
         "task_role_arn": attributes["task_role_arn"],
-        "volumes": attributes["volumes"],
+        "volumes": attributes["volume"],
     }
 
 
@@ -207,14 +240,22 @@ def _consumer_activation(
     )
 
 
-def _consumer_manifest() -> dict[str, Any]:
+def _consumer_manifest(*, pre_media_cutover: bool = True) -> dict[str, Any]:
     consumers: list[dict[str, Any]] = []
     for index, consumer in enumerate(REGISTRY["consumers"]):
         _, activation, _ = _consumer_activation(consumer)
         snapshot = {
-            "image": _image(consumer, index),
+            "image": _image(
+                consumer,
+                index,
+                pre_media_cutover=pre_media_cutover,
+            ),
             "task_definition_arn": _task_arn(consumer),
-            "task_definition": _task_definition(consumer, index),
+            "task_definition": _task_definition(
+                consumer,
+                index,
+                pre_media_cutover=pre_media_cutover,
+            ),
             "activation": activation,
         }
         consumers.append(
@@ -278,7 +319,7 @@ def _backend() -> dict[str, Any]:
     }
 
 
-def _state() -> dict[str, Any]:
+def _state(*, pre_media_cutover: bool = True) -> dict[str, Any]:
     resources = [
         {
             "mode": "managed",
@@ -292,7 +333,11 @@ def _state() -> dict[str, Any]:
             _state_resource(
                 consumer["terraform_task_definition_address"],
                 "aws_ecs_task_definition",
-                _task_attributes(consumer, index),
+                _task_attributes(
+                    consumer,
+                    index,
+                    pre_media_cutover=pre_media_cutover,
+                ),
             )
         )
     for consumer in REGISTRY["consumers"]:
@@ -310,8 +355,9 @@ def _state() -> dict[str, Any]:
     }
 
 
-def _plan() -> dict[str, Any]:
-    manifest = _consumer_manifest()
+def _plan(*, pre_media_cutover: bool = True) -> dict[str, Any]:
+    manifest = _consumer_manifest(pre_media_cutover=pre_media_cutover)
+    manifest_consumers = {consumer["consumer_id"]: consumer for consumer in manifest["consumers"]}
     resources: list[dict[str, Any]] = [{"address": "terraform_data.production_image_release_gate"}]
     changes: list[dict[str, Any]] = [
         {
@@ -328,7 +374,11 @@ def _plan() -> dict[str, Any]:
         address = consumer["terraform_task_definition_address"]
         configuration_address = re.sub(r"\[0\]$", "", address)
         resources.append({"address": configuration_address})
-        attributes = _task_attributes(consumer, index)
+        attributes = _task_attributes(
+            consumer,
+            index,
+            pre_media_cutover=pre_media_cutover,
+        )
         changes.append(
             {
                 "address": address,
@@ -373,28 +423,14 @@ def _plan() -> dict[str, Any]:
         "applyable": True,
         "errored": False,
         "variables": {
-            "mcp_image": {
-                "value": (
-                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                    f"teamagent-mcp@sha256:{'a' * 64}"
-                )
-            },
-            "openclaw_image": {
-                "value": (
-                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                    f"teamagent-openclaw@sha256:{'b' * 64}"
-                )
-            },
-            "x_buzz_image": {
-                "value": (
-                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                    f"teamagent-mcp@sha256:{'c' * 64}"
-                )
-            },
+            "mcp_image": {"value": manifest_consumers["mcp"]["live"]["image"]},
+            "openclaw_image": {"value": manifest_consumers["openclaw"]["live"]["image"]},
+            "x_buzz_image": {"value": manifest_consumers["x_buzz_worker"]["live"]["image"]},
             "media_worker_image": {
                 "value": (
-                    "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-                    f"teamagent-media-worker@sha256:{'d' * 64}"
+                    ""
+                    if pre_media_cutover
+                    else manifest_consumers["tiktok_acquire"]["live"]["image"]
                 )
             },
             "tiktok_acquire_image": {"value": ""},
@@ -404,7 +440,7 @@ def _plan() -> dict[str, Any]:
             "enable_morning_digest": {"value": True},
             "enable_x_research": {"value": True},
             "enable_media_worker": {"value": True},
-            "enable_tiktok_acquire": {"value": False},
+            "enable_tiktok_acquire": {"value": True},
             "image_deployment_consumer_manifest": {"value": manifest},
             "image_release_receipt_catalog": {"value": {}},
             "image_release_consumer_receipt_bindings": {"value": {}},
@@ -642,18 +678,15 @@ def test_context_rejects_empty_managed_runtime_images(variable_name: str) -> Non
 
 
 def test_context_binds_only_the_generic_effective_media_worker_digest() -> None:
-    plan = _plan()
-    media_image = (
-        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-        f"teamagent-media-worker@sha256:{'c' * 64}"
-    )
+    plan = _plan(pre_media_cutover=False)
+    media_image = plan["variables"]["media_worker_image"]["value"]
     plan["variables"]["enable_media_worker"]["value"] = True
     plan["variables"]["enable_tiktok_acquire"]["value"] = True
     plan["variables"]["media_worker_image"]["value"] = media_image
 
     value = CONTEXT.build_context(
         plan=plan,
-        state=_state(),
+        state=_state(pre_media_cutover=False),
         backend_metadata=_backend(),
         workspace="default",
     )
@@ -670,7 +703,7 @@ def test_context_binds_only_the_generic_effective_media_worker_digest() -> None:
     ):
         CONTEXT.build_context(
             plan=plan,
-            state=_state(),
+            state=_state(pre_media_cutover=False),
             backend_metadata=_backend(),
             workspace="default",
         )
@@ -845,6 +878,85 @@ def test_consumer_manifest_derives_no_image_transition_from_exact_eight() -> Non
         CONTEXT.validate_consumer_manifest(wrong_hash)
 
 
+def test_sync_consumer_manifest_binds_the_complete_eight_consumer_state() -> None:
+    state = _state()
+    plan = _plan()
+
+    manifest = CONTEXT.build_sync_consumer_manifest(state)
+
+    assert manifest == CONTEXT.validate_consumer_manifest(_consumer_manifest())
+    assert plan["variables"]["image_deployment_consumer_manifest"]["value"] == manifest
+    assert manifest["mode"] == "no-image-transition"
+    assert len(manifest["consumers"]) == 8
+    assert all(
+        consumer["live"] == consumer["before"] == consumer["after"]
+        for consumer in manifest["consumers"]
+    )
+    raw_volumes = {
+        _state_instance_address(resource): (resource["instances"][0]["attributes"]["volume"])
+        for resource in state["resources"]
+        if resource["type"] == "aws_ecs_task_definition"
+        and "volumes" not in resource["instances"][0]["attributes"]
+    }
+    assert len(raw_volumes) == 8
+    assert all(
+        consumer["live"]["task_definition"]["volumes"]
+        == raw_volumes[consumer["terraform_task_definition_address"]]
+        for consumer in manifest["consumers"]
+    )
+    assert all(raw_volumes.values())
+
+    consumers = {consumer["consumer_id"]: consumer for consumer in manifest["consumers"]}
+    mcp_consumers = {
+        "mcp",
+        "connect_web",
+        "canary",
+        "ingest",
+        "morning_digest",
+        "x_buzz_worker",
+    }
+    assert {
+        consumer_id
+        for consumer_id, consumer in consumers.items()
+        if consumer["release_repository"] == "teamagent-mcp"
+    } == mcp_consumers
+    mcp_images = {
+        consumer_id: consumers[consumer_id]["live"]["image"] for consumer_id in mcp_consumers
+    }
+    assert {image.split("@", 1)[0] for image in mcp_images.values()} == {
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp"
+    }
+    assert len(set(mcp_images.values())) == len(mcp_images)
+    assert consumers["tiktok_acquire"]["live"]["image"] == LEGACY_TIKTOK_IMAGE
+    assert consumers["canary"]["live"]["activation"]["state"] == "DISABLED"
+    assert consumers["ingest"]["live"]["activation"]["state"] == "DISABLED"
+    assert plan["variables"]["mcp_image"]["value"] == consumers["mcp"]["live"]["image"]
+    assert plan["variables"]["x_buzz_image"]["value"] == consumers["x_buzz_worker"]["live"]["image"]
+    assert plan["variables"]["openclaw_image"]["value"] == consumers["openclaw"]["live"]["image"]
+    assert plan["variables"]["media_worker_image"]["value"] == ""
+    assert plan["variables"]["tiktok_acquire_image"]["value"] == ""
+    assert plan["variables"]["enable_canary_health"]["value"] is True
+    assert plan["variables"]["enable_ingest_schedule"]["value"] is True
+    assert plan["variables"]["enable_media_worker"]["value"] is True
+    assert plan["variables"]["enable_tiktok_acquire"]["value"] is True
+
+    drifted_state = _state()
+    mcp_service = next(
+        resource
+        for resource in drifted_state["resources"]
+        if resource["type"] == "aws_ecs_service" and resource["name"] == "mcp"
+    )
+    mcp_service["instances"][0]["attributes"]["task_definition"] = _task_arn(
+        REGISTRY["consumers"][0],
+        revision=2,
+    )
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match="state activation points at another task definition",
+    ):
+        CONTEXT.build_sync_consumer_manifest(drifted_state)
+
+
 def test_consumer_manifest_allows_only_unchanged_pre_cutover_tiktok_legacy_row() -> None:
     manifest = _consumer_manifest()
     tiktok = next(
@@ -852,10 +964,7 @@ def test_consumer_manifest_allows_only_unchanged_pre_cutover_tiktok_legacy_row()
         for consumer in manifest["consumers"]
         if consumer["consumer_id"] == "tiktok_acquire"
     )
-    legacy_image = (
-        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
-        f"teamagent-dev-tiktok-acquire@sha256:eb975be{'0' * 57}"
-    )
+    legacy_image = LEGACY_TIKTOK_IMAGE
     for phase in ("live", "before", "after"):
         tiktok[phase]["image"] = legacy_image
         tiktok[phase]["task_definition"]["container_definitions"][0]["image"] = legacy_image
@@ -919,7 +1028,7 @@ def test_consumer_manifest_canonicalizes_only_the_exact_absent_sentinel() -> Non
 
 
 def test_consumer_manifest_requires_receipt_for_absent_to_present() -> None:
-    manifest = _consumer_manifest()
+    manifest = _consumer_manifest(pre_media_cutover=False)
     consumer = next(item for item in manifest["consumers"] if item["consumer_id"] == "connect_web")
     consumer["live"] = {"absent": True}
     consumer["before"] = {"absent": True}
@@ -931,7 +1040,7 @@ def test_consumer_manifest_requires_receipt_for_absent_to_present() -> None:
 
 
 def test_consumer_manifest_rejects_present_to_absent_decommission() -> None:
-    manifest = _consumer_manifest()
+    manifest = _consumer_manifest(pre_media_cutover=False)
     consumer = next(item for item in manifest["consumers"] if item["consumer_id"] == "connect_web")
     consumer["after"] = {"absent": True}
     manifest["mode"] = "receipt-required"
@@ -992,7 +1101,7 @@ def test_consumer_manifest_normalizes_environment_order_deterministically() -> N
 def test_consumer_manifest_treats_container_collection_changes_as_receipt_required(
     collection_change: str,
 ) -> None:
-    manifest = _consumer_manifest()
+    manifest = _consumer_manifest(pre_media_cutover=False)
     task_definitions = [
         manifest["consumers"][0][phase]["task_definition"] for phase in ("live", "before", "after")
     ]
@@ -1018,7 +1127,7 @@ def test_consumer_manifest_treats_container_collection_changes_as_receipt_requir
 
 
 def test_activation_enable_requires_receipt_mode_and_rejects_mode_downgrade() -> None:
-    plan = _plan()
+    plan = _plan(pre_media_cutover=False)
     canary = _manifest_consumer(plan, "canary")
     canary["after"]["activation"]["state"] = "ENABLED"
     plan["variables"]["image_deployment_consumer_manifest"]["value"]["mode"] = "receipt-required"
@@ -1031,7 +1140,7 @@ def test_activation_enable_requires_receipt_mode_and_rejects_mode_downgrade() ->
 
     value = CONTEXT.build_context(
         plan=plan,
-        state=_state(),
+        state=_state(pre_media_cutover=False),
         backend_metadata=_backend(),
         workspace="default",
     )
@@ -1210,7 +1319,18 @@ def test_manifest_plan_binding_rejects_manifest_state_disagreement(
     mismatch: str,
     message: str,
 ) -> None:
+    plan = _plan()
+    state = _state()
     manifest = CONTEXT.validate_consumer_manifest(_consumer_manifest())
+    assert (
+        CONTEXT._manifest_plan_binding(
+            manifest=manifest,
+            plan=plan,
+            state=state,
+        )["consumer_count"]
+        == 8
+    )
+
     first = manifest["consumers"][0]
     if mismatch.endswith("_image"):
         phase = mismatch.removesuffix("_image")
@@ -1236,8 +1356,8 @@ def test_manifest_plan_binding_rejects_manifest_state_disagreement(
     with pytest.raises(CONTEXT.ContextError, match=message):
         CONTEXT._manifest_plan_binding(
             manifest=manifest,
-            plan=_plan(),
-            state=_state(),
+            plan=plan,
+            state=state,
         )
 
 
@@ -1292,8 +1412,8 @@ def test_context_accepts_already_disabled_consumer_only_when_resources_are_absen
 
 
 def test_context_absent_to_present_requires_receipt_and_exact_create_actions() -> None:
-    plan = _plan()
-    state = _state()
+    plan = _plan(pre_media_cutover=False)
+    state = _state(pre_media_cutover=False)
     _make_connect_web_absent_to_present(plan, state)
 
     value = CONTEXT.build_context(
@@ -1312,8 +1432,8 @@ def test_context_absent_to_present_requires_receipt_and_exact_create_actions() -
     assert connect_web["live"] == connect_web["before"] == {"absent": True}
     assert not CONTEXT.consumer_snapshot_is_absent(connect_web["after"])
 
-    wrong_action = _plan()
-    wrong_action_state = _state()
+    wrong_action = _plan(pre_media_cutover=False)
+    wrong_action_state = _state(pre_media_cutover=False)
     _make_connect_web_absent_to_present(wrong_action, wrong_action_state)
     _resource_change(
         wrong_action,
