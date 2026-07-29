@@ -887,6 +887,24 @@ def test_approval_must_bind_its_own_plan_sha() -> None:
         _validate(payload)
 
 
+def test_approval_plan_sha_cross_check_fires_even_with_consistent_text() -> None:
+    # The internally-consistent variant: the approval text sha is recomputed for
+    # the swapped plan sha, so the approval-text layer passes and only the
+    # approval-vs-leg-plan cross-check can reject. A mutation killing that
+    # cross-check alone survived both suites once; this pins it directly.
+    payload = _complete_passed_aggregate()
+    approval = payload["legs"][1]["approval"]
+    foreign_plan_sha = payload["legs"][0]["plan"]["sha256"]
+    approval["plan_sha256"] = foreign_plan_sha
+    approval["approval_text_sha256"] = hashlib.sha256(
+        f"APPROVE {approval['drill_id']} {approval['action']} {foreign_plan_sha}\n".encode()
+    ).hexdigest()
+    _rehash(payload)
+
+    with pytest.raises(EVIDENCE.DrillEvidenceError, match="plan"):
+        _validate(payload)
+
+
 def test_approval_must_bind_the_drill_id() -> None:
     payload = _complete_passed_aggregate()
     payload["legs"][1]["approval"]["drill_id"] = "10000000-0000-4000-8000-000000000099"
