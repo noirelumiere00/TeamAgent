@@ -1848,7 +1848,11 @@ def _fake_aws(path: Path) -> None:
                     pathlib.Path(state_path).read_text(encoding="utf-8")
                 )
             status = state.get(bucket)
-            print(json.dumps({{"Status": status}} if status else {{}}))
+            # Real AWS prints nothing at all for a bucket that has never had a
+            # versioning configuration. Printing {{}} here made every test green
+            # while production died on the empty document, so mirror the CLI.
+            if status:
+                print(json.dumps({{"Status": status}}))
         elif args[:2] == ["s3api", "get-bucket-lifecycle-configuration"]:
             lifecycle = os.environ.get("AWS_FAKE_CLOUDTRAIL_LIFECYCLE")
             if lifecycle:

@@ -3462,6 +3462,12 @@ snapshot_live() {
   for versioning_file in \
     "$dir/cloudtrail-versioning.json" \
     "$dir/bedrock-versioning.json"; do
+    # A bucket that never had a versioning configuration makes the CLI print
+    # nothing at all -- not even {} -- which jq then rejects as malformed. set -e
+    # would have aborted on a failed call before this point, so an empty file here
+    # can only mean "call succeeded, no configuration", which is exactly the
+    # Unversioned / MFA-Delete-Disabled case the checks below already accept.
+    [ -s "$versioning_file" ] || printf '{}\n' > "$versioning_file"
     jq -e '
       ((.Status // "Unversioned") |
         . == "Unversioned" or . == "Enabled" or . == "Suspended") and
