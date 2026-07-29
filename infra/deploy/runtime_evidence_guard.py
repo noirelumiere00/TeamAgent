@@ -772,8 +772,18 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
     observed_attributes = attributes.get("Attributes")
     if not isinstance(observed_attributes, dict):
         raise ContractError("SNS subscription attributes are missing")
+    # Real AWS adds SubscriptionPrincipal (who confirmed the subscription) to
+    # the response. Rather than merely tolerating it, require it to be a
+    # principal of this account when present -- a foreign confirmer would be a
+    # hijacked delivery path. Every other key remains exact and exclusive.
+    subscription_principal = observed_attributes.get("SubscriptionPrincipal")
+    if subscription_principal is not None and not re.fullmatch(
+        rf"arn:aws:(iam|sts)::{re.escape(ACCOUNT_ID)}:.+",
+        str(subscription_principal),
+    ):
+        raise ContractError("SNS subscription principal is not this account")
     if (
-        set(observed_attributes)
+        set(observed_attributes) - {"SubscriptionPrincipal"}
         != {
             "ConfirmationWasAuthenticated",
             "Endpoint",
