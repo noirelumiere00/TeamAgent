@@ -94,6 +94,10 @@ TASK_DEFINITION_COMPARE_FIELDS = {
     "memory",
     "volumes",
 }
+# The canonical compare-field names above are what the manifest speaks; the raw
+# Terraform provider attribute is singular for volumes. Anything that reads a
+# provider payload (state attributes, plan after_unknown) must accept both.
+_PROVIDER_ATTRIBUTE_ALIASES = {"volumes": ("volume",)}
 RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
 RUNTIME_IMAGE_PATTERNS = {
     "mcp_image": re.compile(
@@ -330,8 +334,13 @@ def _reject_unknown_task_definition(
         raise ContextError(f"{label} is unknown")
     unknown = _mapping(value, label=label)
     for field in TASK_DEFINITION_COMPARE_FIELDS:
-        if _contains_unknown(unknown.get(field)):
-            raise ContextError(f"{label}.{field} is unknown")
+        # after_unknown carries the provider's own attribute names, which differ
+        # from the canonical compare-field names for volumes. Looking up only the
+        # canonical name meant an unknown volume set was never seen -- a plan
+        # could leave its mounts computed-at-apply and still pass this gate.
+        for key in {field, *_PROVIDER_ATTRIBUTE_ALIASES.get(field, ())}:
+            if _contains_unknown(unknown.get(key)):
+                raise ContextError(f"{label}.{field} is unknown")
 
 
 def _consumer_snapshot(

@@ -1299,6 +1299,29 @@ def test_no_image_transition_rejects_unknown_task_definition_after() -> None:
         )
 
 
+def test_no_image_transition_rejects_unknown_volume_under_its_provider_name() -> None:
+    # after_unknown speaks the provider's singular "volume". The gate used to look
+    # only for the canonical "volumes", so a plan could leave its mounts
+    # computed-at-apply and still be approved.
+    plan = _plan()
+    task = _resource_change(
+        plan,
+        REGISTRY["consumers"][0]["terraform_task_definition_address"],
+    )
+    task["change"]["after_unknown"] = {"volume": True}
+
+    with pytest.raises(
+        CONTEXT.ContextError,
+        match=re.escape("plan after task definition.volumes is unknown"),
+    ):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
 @pytest.mark.parametrize(
     ("mismatch", "message"),
     [
