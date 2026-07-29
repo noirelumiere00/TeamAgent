@@ -497,10 +497,11 @@ aws_endpoint() {
     cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
     budgets) printf 'https://budgets.amazonaws.com\n' ;;
     ce) printf 'https://ce.us-east-1.amazonaws.com\n' ;;
-    # AWS Chatbot has no regional endpoints -- only the global management API.
-    # The generic regional form resolved nowhere, which no fake-backed test could
-    # ever notice; it surfaced on the first real-AWS guard plan run.
-    chatbot) printf 'https://management.chatbot.amazonaws.com\n' ;;
+    # AWS Chatbot is not deployed in ap-northeast-1 at all (the regional DNS name
+    # does not exist), and its configurations are account-global, so they are read
+    # through a deployed region. us-east-2 is pinned; the caller must sign for the
+    # same region (aws_chatbot_cli), mirroring how ce is handled by aws_cost_cli.
+    chatbot) printf 'https://chatbot.us-east-2.amazonaws.com\n' ;;
     *)
       case "$1" in
         sts|cloudtrail|bedrock|dynamodb|ec2|ecs|events|scheduler|lambda|\
@@ -562,6 +563,16 @@ aws_cost_cli() {
   local service="$1"
   shift
   "$AWS_BIN" --region us-east-1 \
+    --endpoint-url "$(aws_endpoint "$service")" \
+    --no-cli-pager "$service" "$@"
+}
+
+aws_chatbot_cli() {
+  initialize_aws_trust
+  assert_aws_trust_unchanged
+  local service="$1"
+  shift
+  "$AWS_BIN" --region us-east-2 \
     --endpoint-url "$(aws_endpoint "$service")" \
     --no-cli-pager "$service" "$@"
 }
@@ -3753,9 +3764,9 @@ snapshot_live() {
   jq -n -c --arg email_sha "$EXPECTED_ALARM_EMAIL_SHA256" \
     '[$email_sha]' > "$dir/confirmed-email-hashes.json"
 
-  aws_cli chatbot describe-slack-channel-configurations --output json \
+  aws_chatbot_cli chatbot describe-slack-channel-configurations --output json \
     > "$dir/chatbot-slack.json"
-  aws_cli chatbot list-microsoft-teams-channel-configurations --output json \
+  aws_chatbot_cli chatbot list-microsoft-teams-channel-configurations --output json \
     > "$dir/chatbot-teams.json"
   jq -e '
     (.NextToken // "") == "" and

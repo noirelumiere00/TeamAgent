@@ -1477,7 +1477,7 @@ def _fake_aws(path: Path) -> None:
         if (
             len(args) >= 2
             and args[0] == "--region"
-            and args[1] in (REGION, "us-east-1")
+            and args[1] in (REGION, "us-east-1", "us-east-2")
         ):
             command_region = args[1]
             args = args[2:]
@@ -1503,12 +1503,18 @@ def _fake_aws(path: Path) -> None:
             "cloudwatch": f"https://monitoring.{{REGION}}.amazonaws.com",
             "budgets": "https://budgets.amazonaws.com",
             "ce": "https://ce.us-east-1.amazonaws.com",
+            "chatbot": "https://chatbot.us-east-2.amazonaws.com",
         }}.get(service, f"https://{{service}}.{{REGION}}.amazonaws.com")
         if endpoint != expected_endpoint:
             raise SystemExit("fake AWS endpoint differs")
         if service in ("budgets", "ce") and command_region != "us-east-1":
             raise SystemExit("fake AWS billing region differs")
-        if service not in ("budgets", "ce") and command_region != REGION:
+        # Chatbot is absent from ap-northeast-1 (regional DNS does not exist), so
+        # the guard reads the account-global configurations via us-east-2 -- the
+        # fake must demand the same pairing production requires.
+        if service == "chatbot" and command_region != "us-east-2":
+            raise SystemExit("fake AWS chatbot region differs")
+        if service not in ("budgets", "ce", "chatbot") and command_region != REGION:
             raise SystemExit("fake AWS regional service region differs")
         args = args[command_index:]
         if debug:
