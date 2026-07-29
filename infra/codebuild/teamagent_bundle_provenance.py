@@ -1394,9 +1394,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_contract_sha256=args.expected_contract_sha256,
                 runtime_contract_path=args.runtime_contract,
                 expected_build_context_sha256=args.expected_build_context_sha256,
-                expected_release_approval_sha256=(
-                    args.expected_release_approval_sha256
-                ),
+                expected_release_approval_sha256=(args.expected_release_approval_sha256),
             )
         elif args.command == "binary-probes":
             for probe in binary_probes(load_contract(args.contract), args.subject):

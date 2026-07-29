@@ -381,14 +381,10 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         if normalized_labels.get("io.teamagent.build.context-sha256") != build_context_sha256:
             raise EvidenceError("OCI context label does not match signed source evidence")
         if (
-            normalized_labels.get(
-                "io.teamagent.build.release-approval-sha256"
-            )
+            normalized_labels.get("io.teamagent.build.release-approval-sha256")
             != normalized_approval_evidence["approval_payload_sha256"]
         ):
-            raise EvidenceError(
-                "OCI approval label does not match the verified external approval"
-            )
+            raise EvidenceError("OCI approval label does not match the verified external approval")
     elif requested_build_context_sha256 or requested_runtime_contract is not None:
         raise EvidenceError(
             "build context digest and runtime contract are only valid for the MCP pipeline"

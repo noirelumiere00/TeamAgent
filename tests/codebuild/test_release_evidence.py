@@ -276,6 +276,8 @@ def test_release_authorizer_generates_the_current_consumer_gate_variables() -> N
 
     assert "--consumer-manifest" in body
     assert "--terraform-gate-vars-out" in body
+    assert "--verified-approval-out" in body
+    assert "--verified-record-out" in body
     assert "validate-consumer-manifest" in body
     for variable in (
         "image_deployment_consumer_manifest",
@@ -926,6 +928,7 @@ def test_assert_approved_release_fetches_and_verifies_exact_immutable_objects(
         payload=payload,
         expected_locator_commit=COMMIT,
     )
+    verified_record = tmp_path / "verified-release-approval.json"
 
     evidence = EVIDENCE.assert_approved_release(
         operation="build",
@@ -941,6 +944,7 @@ def test_assert_approved_release_fetches_and_verifies_exact_immutable_objects(
         runtime_contract_path=runtime_contract,
         contract_path=contract,
         now=NOW,
+        verified_record_out=verified_record,
     )
 
     assert evidence["payload"] == locators["mcp"]["payload"]
@@ -952,6 +956,26 @@ def test_assert_approved_release_fetches_and_verifies_exact_immutable_objects(
             EVIDENCE.approval_canonical_json_bytes(payload["gates"]["forced_rollback_evidence"])
         ).hexdigest()
     )
+    forced_gate_sha256 = hashlib.sha256(
+        EVIDENCE.approval_canonical_json_bytes(
+            payload["gates"]["forced_rollback_evidence"]
+        )
+    ).hexdigest()
+    assert verified_record.read_bytes() == EVIDENCE.canonical_bytes(
+        {
+            "approval_id": payload["approval_id"],
+            "approved_at_utc": payload["approved_at_utc"],
+            "approved_by": payload["approved_by"],
+            "decision": payload["decision"],
+            "expires_at_utc": payload["expires_at_utc"],
+            "forced_gate_sha256": forced_gate_sha256,
+            "payload": locators["mcp"]["payload"],
+            "pipeline": payload["pipeline"],
+            "signature": locators["mcp"]["signature"],
+            "source_commit": payload["source_commit"],
+        }
+    )
+    assert verified_record.stat().st_mode & 0o777 == 0o600
 
 
 def test_assert_approved_release_cli_prints_canonical_approval_evidence(

@@ -37,6 +37,7 @@ APPROVAL_SIGNATURE_VERSION_ID=""
 APPROVAL_SIGNATURE_SHA256=""
 CONSUMER_MANIFEST=""
 TERRAFORM_GATE_VARS_OUT=""
+VERIFIED_APPROVAL_OUT=""
 
 die() {
   echo "FATAL: $*" >&2
@@ -53,6 +54,7 @@ usage: authorize_image_release.sh \
   --receipt-signature-version-id VERSION \
   [--consumer-manifest FILE \
    --terraform-gate-vars-out FILE] \
+  [--verified-approval-out FILE] \
   [--approval-payload-bucket BUCKET \
    --approval-payload-key KEY \
    --approval-payload-version-id VERSION_ID \
@@ -90,6 +92,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --consumer-manifest) value "$@"; CONSUMER_MANIFEST="$2"; shift 2 ;;
     --terraform-gate-vars-out) value "$@"; TERRAFORM_GATE_VARS_OUT="$2"; shift 2 ;;
+    --verified-approval-out) value "$@"; VERIFIED_APPROVAL_OUT="$2"; shift 2 ;;
     --approval-payload-bucket) value "$@"; APPROVAL_PAYLOAD_BUCKET="$2"; shift 2 ;;
     --approval-payload-key) value "$@"; APPROVAL_PAYLOAD_KEY="$2"; shift 2 ;;
     --approval-payload-version-id) value "$@"; APPROVAL_PAYLOAD_VERSION_ID="$2"; shift 2 ;;
@@ -145,8 +148,16 @@ if [ "$PIPELINE" = "mcp" ]; then
     esac
   done
   unset approval_version
+  if [ -n "$VERIFIED_APPROVAL_OUT" ]; then
+    [ ! -e "$VERIFIED_APPROVAL_OUT" ] && [ ! -L "$VERIFIED_APPROVAL_OUT" ] \
+      || die "verified approval output already exists"
+    [ -d "$(dirname -- "$VERIFIED_APPROVAL_OUT")" ] \
+      || die "verified approval output directory does not exist"
+  fi
 elif [ -n "$APPROVAL_PAYLOAD_BUCKET$APPROVAL_PAYLOAD_KEY$APPROVAL_PAYLOAD_VERSION_ID$APPROVAL_PAYLOAD_SHA256$APPROVAL_SIGNATURE_BUCKET$APPROVAL_SIGNATURE_KEY$APPROVAL_SIGNATURE_VERSION_ID$APPROVAL_SIGNATURE_SHA256" ]; then
   die "approval locator arguments are only accepted for the MCP pipeline"
+elif [ -n "$VERIFIED_APPROVAL_OUT" ]; then
+  die "verified approval output is only available for the MCP pipeline"
 fi
 [[ "$LOCATOR_KEY" =~ ^release-receipts/$PIPELINE/[0-9a-f]{40}/[0-9a-f]{64}\.json$ ]] \
   || die "receipt key is not content addressed for the selected pipeline"
@@ -440,7 +451,8 @@ if [ "$PIPELINE" = "mcp" ]; then
       --expected-pipeline mcp \
       --expected-environment dev \
       --runtime-contract "$RUNTIME_CONTRACT" \
-      --contract "$CONTRACT"
+      --contract "$CONTRACT" \
+      --verified-record-out "$TMP_DIR/verified-approval.json"
   )" || die "MCP release authorization is missing, invalid, or expired"
   jq -e --argjson expected "$APPROVAL_EVIDENCE_JSON" \
     '.approval_evidence == $expected' "$TMP_DIR/locator.json" >/dev/null \
@@ -733,6 +745,27 @@ PY
   then
     die "could not generate exact Terraform image release gate variables"
   fi
+fi
+
+if [ -n "$VERIFIED_APPROVAL_OUT" ]; then
+  [ -f "$TMP_DIR/verified-approval.json" ] \
+    && [ ! -L "$TMP_DIR/verified-approval.json" ] \
+    || die "verified approval record was not produced"
+  python3 - "$TMP_DIR/verified-approval.json" "$VERIFIED_APPROVAL_OUT" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+payload = source.read_bytes()
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(destination, flags, 0o600)
+with os.fdopen(descriptor, "wb") as handle:
+    handle.write(payload)
+PY
 fi
 
 echo "Guarded release authorization completed (no deployment performed):"
