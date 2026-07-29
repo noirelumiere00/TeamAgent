@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -47,24 +48,18 @@ ALLOWED_EXISTING_LOG_IMPORTS = {
     "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
         "/aws/codebuild/teamagent-dev-aiia-image-builder"
     ),
-    "aws_cloudwatch_log_group.codebuild_image": (
-        "/aws/codebuild/teamagent-dev-image-builder"
-    ),
+    "aws_cloudwatch_log_group.codebuild_image": ("/aws/codebuild/teamagent-dev-image-builder"),
     "aws_cloudwatch_log_group.ecs_containerinsights_teamagent": (
         "/aws/ecs/containerinsights/teamagent-dev/performance"
     ),
     "aws_cloudwatch_log_group.ecs_containerinsights_tiktok": (
         "/aws/ecs/containerinsights/teamagent-dev-tiktok/performance"
     ),
-    "aws_cloudwatch_log_group.reminder_notify": (
-        "/aws/lambda/teamagent-dev-reminders-notify"
-    ),
+    "aws_cloudwatch_log_group.reminder_notify": ("/aws/lambda/teamagent-dev-reminders-notify"),
     "aws_cloudwatch_log_group.tiktok_dispatch": (
         "/aws/lambda/teamagent-dev-tiktok-acquire-dispatch"
     ),
-    "aws_cloudwatch_log_group.x_dispatch": (
-        "/aws/lambda/teamagent-dev-x-buzz-dispatch"
-    ),
+    "aws_cloudwatch_log_group.x_dispatch": ("/aws/lambda/teamagent-dev-x-buzz-dispatch"),
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 LEGACY_TIKTOK_IMAGE_RE = re.compile(
@@ -209,8 +204,7 @@ def _normalized_json_value(value: Any, *, label: str) -> Any:
         if any(not isinstance(key, str) for key in value):
             raise ContextError(f"{label} contains a non-string JSON key")
         return {
-            key: _normalized_json_value(value[key], label=f"{label}.{key}")
-            for key in sorted(value)
+            key: _normalized_json_value(value[key], label=f"{label}.{key}") for key in sorted(value)
         }
     if isinstance(value, list):
         return [
@@ -255,20 +249,14 @@ def _normalized_container_definitions(value: Any, *, label: str) -> list[dict[st
             for environment_index, raw_environment in enumerate(environment):
                 environment_entry = _mapping(
                     raw_environment,
-                    label=(
-                        f"{container_label}.environment"
-                        f"[{environment_index}]"
-                    ),
+                    label=(f"{container_label}.environment[{environment_index}]"),
                 )
                 if not isinstance(environment_entry.get("name"), str):
                     raise ContextError(
-                        f"{container_label}.environment"
-                        f"[{environment_index}].name is unknown"
+                        f"{container_label}.environment[{environment_index}].name is unknown"
                     )
                 if environment_entry["name"] in environment_names:
-                    raise ContextError(
-                        f"{container_label}.environment contains a duplicate name"
-                    )
+                    raise ContextError(f"{container_label}.environment contains a duplicate name")
                 environment_names.add(environment_entry["name"])
             normalized_container["environment"] = sorted(
                 environment,
@@ -387,9 +375,7 @@ def _consumer_snapshot(
         family=consumer["ecs_family"],
         label=f"{label}.task_definition_arn",
         planned_address=(
-            consumer["terraform_task_definition_address"]
-            if allow_planned_pointer
-            else None
+            consumer["terraform_task_definition_address"] if allow_planned_pointer else None
         ),
     )
     activator = consumer["activator"]
@@ -415,9 +401,7 @@ def _consumer_snapshot(
                 family=consumer["ecs_family"],
                 label=f"{label}.activation.task_definition_arn",
                 planned_address=(
-                    consumer["terraform_task_definition_address"]
-                    if allow_planned_pointer
-                    else None
+                    consumer["terraform_task_definition_address"] if allow_planned_pointer else None
                 ),
             ),
         }
@@ -441,9 +425,7 @@ def _consumer_snapshot(
                 family=consumer["ecs_family"],
                 label=f"{label}.activation.task_definition_arn",
                 planned_address=(
-                    consumer["terraform_task_definition_address"]
-                    if allow_planned_pointer
-                    else None
+                    consumer["terraform_task_definition_address"] if allow_planned_pointer else None
                 ),
             ),
         }
@@ -455,9 +437,7 @@ def _consumer_snapshot(
         )
         mapping_enabled = activation["event_source_mapping_enabled"]
         if not isinstance(mapping_enabled, bool):
-            raise ContextError(
-                f"{label}.activation.event_source_mapping_enabled is invalid"
-            )
+            raise ContextError(f"{label}.activation.event_source_mapping_enabled is invalid")
         normalized_activation = {
             "event_source_mapping_enabled": mapping_enabled,
             "task_definition_arn": _task_definition_arn(
@@ -465,9 +445,7 @@ def _consumer_snapshot(
                 family=consumer["ecs_family"],
                 label=f"{label}.activation.task_definition_arn",
                 planned_address=(
-                    consumer["terraform_task_definition_address"]
-                    if allow_planned_pointer
-                    else None
+                    consumer["terraform_task_definition_address"] if allow_planned_pointer else None
                 ),
             ),
         }
@@ -485,9 +463,7 @@ def _consumer_snapshot(
         if container["name"] == consumer["container_name"]
     ]
     if len(named_containers) != 1 or named_containers[0]["image"] != image:
-        raise ContextError(
-            f"{label} task definition does not bind the registry container image"
-        )
+        raise ContextError(f"{label} task definition does not bind the registry container image")
     return {
         "image": image,
         "task_definition_arn": task_definition_arn,
@@ -531,14 +507,11 @@ def derive_consumer_manifest_mode(value: Any) -> str:
         before_absent = consumer_snapshot_is_absent(before)
         after_absent = consumer_snapshot_is_absent(after)
         if live_absent != before_absent:
-            raise ContextError(
-                "consumer live/before presence differs in the complete plan"
-            )
+            raise ContextError("consumer live/before presence differs in the complete plan")
         if after_absent:
             if not live_absent:
                 raise ContextError(
-                    "consumer decommission requires a separately reviewed "
-                    "destructive workflow"
+                    "consumer decommission requires a separately reviewed destructive workflow"
                 )
             continue
         if before_absent:
@@ -547,8 +520,7 @@ def derive_consumer_manifest_mode(value: Any) -> str:
         activator = _mapping(consumer.get("activator"), label="consumer activator")
         if not (
             live.get("image") == before.get("image") == after.get("image")
-            and live.get("task_definition_arn")
-            == before.get("task_definition_arn")
+            and live.get("task_definition_arn") == before.get("task_definition_arn")
             and live.get("task_definition")
             == before.get("task_definition")
             == after.get("task_definition")
@@ -567,9 +539,7 @@ def derive_consumer_manifest_mode(value: Any) -> str:
         ):
             no_image_transition = False
     return (
-        RELEASE_MODE_NO_IMAGE_TRANSITION
-        if no_image_transition
-        else RELEASE_MODE_RECEIPT_REQUIRED
+        RELEASE_MODE_NO_IMAGE_TRANSITION if no_image_transition else RELEASE_MODE_RECEIPT_REQUIRED
     )
 
 
@@ -630,15 +600,9 @@ def validate_consumer_manifest(value: Any) -> dict[str, Any]:
             and isinstance(consumer["live"], dict)
             and consumer["live"] == consumer["before"] == consumer["after"]
             and isinstance(consumer["live"].get("image"), str)
-            and (
-                LEGACY_TIKTOK_IMAGE_RE.fullmatch(consumer["live"]["image"])
-                is not None
-            )
+            and (LEGACY_TIKTOK_IMAGE_RE.fullmatch(consumer["live"]["image"]) is not None)
         )
-        normalized = {
-            key: json.loads(json.dumps(registry_consumer[key]))
-            for key in identity_keys
-        }
+        normalized = {key: json.loads(json.dumps(registry_consumer[key])) for key in identity_keys}
         normalized["live"] = _consumer_snapshot(
             consumer["live"],
             consumer=registry_consumer,
@@ -730,9 +694,7 @@ def _expression_references(value: Any) -> list[str]:
         raw_references = value.get("references")
         if isinstance(raw_references, list):
             references.extend(
-                reference
-                for reference in raw_references
-                if isinstance(reference, str)
+                reference for reference in raw_references if isinstance(reference, str)
             )
         for nested in value.values():
             references.extend(_expression_references(nested))
@@ -815,9 +777,7 @@ def _runtime_image_binding(plan: Mapping[str, Any]) -> dict[str, Any]:
     ):
         value = _plan_variable(plan, variable_name)
         if not isinstance(value, str):
-            raise ContextError(
-                f"Terraform plan runtime image variable is invalid: {variable_name}"
-            )
+            raise ContextError(f"Terraform plan runtime image variable is invalid: {variable_name}")
         if variable_name in {"mcp_image", "openclaw_image"} and not (
             value and RUNTIME_IMAGE_PATTERNS[variable_name].fullmatch(value)
         ):
@@ -988,9 +948,7 @@ def _state_resource_instances(
                 address = base
             elif isinstance(index_key, str):
                 address = (
-                    f"{base}["
-                    f"{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}"
-                    "]"
+                    f"{base}[{json.dumps(index_key, ensure_ascii=False, separators=(',', ':'))}]"
                 )
             elif isinstance(index_key, int) and not isinstance(index_key, bool):
                 if index_key < 0:
@@ -1033,7 +991,7 @@ def _container_binding(
             "network_mode": attributes.get("network_mode"),
             "cpu": attributes.get("cpu"),
             "memory": attributes.get("memory"),
-            "volumes": attributes.get("volumes"),
+            "volumes": attributes.get("volume"),
         },
         label=f"{label} task definition",
     )
@@ -1089,17 +1047,18 @@ def _managed_plan_changes(
 
 
 def _matches_resource_type(address: str, resource_type: str) -> bool:
-    return re.search(
-        rf"(?:^|\.){re.escape(resource_type)}\.[a-zA-Z0-9_-]+(?:\[|$)",
-        address,
-    ) is not None
+    return (
+        re.search(
+            rf"(?:^|\.){re.escape(resource_type)}\.[a-zA-Z0-9_-]+(?:\[|$)",
+            address,
+        )
+        is not None
+    )
 
 
 def _identity_matches(value: Any, identity: str) -> bool:
     return isinstance(value, str) and (
-        value == identity
-        or value.endswith(f":{identity}")
-        or value.endswith(f"/{identity}")
+        value == identity or value.endswith(f":{identity}") or value.endswith(f"/{identity}")
     )
 
 
@@ -1116,9 +1075,7 @@ def _find_optional_state_resource(
         for address, record in resources.items()
         if record["type"] == resource_type
         and _identity_matches(
-            _mapping(record["attributes"], label=f"{label} attributes").get(
-                identity_field
-            ),
+            _mapping(record["attributes"], label=f"{label} attributes").get(identity_field),
             identity,
         )
     ]
@@ -1362,9 +1319,7 @@ def _consumer_activation_binding(
             label=label,
         )
         if (state_match is not None) != present["live"]:
-            raise ContextError(
-                f"{label} presence differs from the consumer manifest live snapshot"
-            )
+            raise ContextError(f"{label} presence differs from the consumer manifest live snapshot")
         state_address = None if state_match is None else state_match[0]
         live_value = None if state_match is None else state_match[1]
         plan_match = _find_optional_plan_change(
@@ -1388,21 +1343,15 @@ def _consumer_activation_binding(
         if not isinstance(actions, list):
             raise ContextError(f"{label} actions are invalid")
         if not present["before"] and present["after"] and actions != ["create"]:
-            raise ContextError(
-                f"{label} absent-to-present transition must be a create"
-            )
+            raise ContextError(f"{label} absent-to-present transition must be a create")
         if present["before"] and not present["after"] and actions != ["delete"]:
-            raise ContextError(
-                f"{label} present-to-absent transition must be a delete"
-            )
+            raise ContextError(f"{label} present-to-absent transition must be a delete")
         phase_values: dict[str, Mapping[str, Any] | None] = {}
         for phase in ("before", "after"):
             raw_phase = change.get(phase)
             if not present[phase]:
                 if raw_phase is not None:
-                    raise ContextError(
-                        f"{label} plan {phase} must prove the resource is absent"
-                    )
+                    raise ContextError(f"{label} plan {phase} must prove the resource is absent")
                 phase_values[phase] = None
             else:
                 phase_values[phase] = _mapping(
@@ -1454,9 +1403,7 @@ def _consumer_activation_binding(
             secondary=secondary_phase,
             label=f"{consumer_id} {phase} activation",
             planned_address=(
-                str(consumer["terraform_task_definition_address"])
-                if phase == "after"
-                else None
+                str(consumer["terraform_task_definition_address"]) if phase == "after" else None
             ),
         )
     pointer_resource_address = (
@@ -1590,9 +1537,7 @@ def validate_consumer_activation_state(
             )
             continue
         if state_resource is None or state_resource["type"] != "aws_ecs_task_definition":
-            raise ContextError(
-                f"consumer task definition is absent from state: {consumer_id}"
-            )
+            raise ContextError(f"consumer task definition is absent from state: {consumer_id}")
         task_definition = _container_binding(
             _mapping(
                 state_resource["attributes"],
@@ -1613,9 +1558,7 @@ def validate_consumer_activation_state(
             "task_definition_arn": expected_task_definition_arn,
             "task_definition": expected["task_definition"],
         }:
-            raise ContextError(
-                f"{consumer_id} state task definition differs from manifest {phase}"
-            )
+            raise ContextError(f"{consumer_id} state task definition differs from manifest {phase}")
         expected_activation = dict(
             _mapping(
                 expected["activation"],
@@ -1623,17 +1566,13 @@ def validate_consumer_activation_state(
             )
         )
         if planned_pointer:
-            expected_activation["task_definition_arn"] = task_definition[
-                "task_definition_arn"
-            ]
+            expected_activation["task_definition_arn"] = task_definition["task_definition_arn"]
         activation = _consumer_state_activation(
             consumer=consumer,
             state_resources=state_resources,
         )
         if activation != expected_activation:
-            raise ContextError(
-                f"{consumer_id} state activation edge differs from manifest {phase}"
-            )
+            raise ContextError(f"{consumer_id} state activation edge differs from manifest {phase}")
         edges.append(
             {
                 "consumer_id": consumer_id,
@@ -1647,9 +1586,7 @@ def validate_consumer_activation_state(
         "phase": phase,
         "registry_sha256": validated_manifest["registry_sha256"],
         "consumer_count": len(edges),
-        "activation_edges_sha256": hashlib.sha256(
-            _canonical_bytes(edges)
-        ).hexdigest(),
+        "activation_edges_sha256": hashlib.sha256(_canonical_bytes(edges)).hexdigest(),
     }
 
 
@@ -1687,9 +1624,7 @@ def _manifest_plan_binding(
         )
     ]
     if actual_consumers != expected_consumers:
-        raise ContextError(
-            "consumer manifest consumer set does not match the code-owned registry"
-        )
+        raise ContextError("consumer manifest consumer set does not match the code-owned registry")
     state_resources = _state_resource_instances(state)
     plan_changes = _managed_plan_changes(plan)
     configuration = _mapping(
@@ -1724,15 +1659,10 @@ def _manifest_plan_binding(
         state_resource = state_resources.get(address)
         if live_absent:
             if state_resource is not None:
-                raise ContextError(
-                    f"{consumer_id} live task definition must be absent from state"
-                )
+                raise ContextError(f"{consumer_id} live task definition must be absent from state")
             live = dict(ABSENT_CONSUMER_SNAPSHOT)
         else:
-            if (
-                state_resource is None
-                or state_resource["type"] != "aws_ecs_task_definition"
-            ):
+            if state_resource is None or state_resource["type"] != "aws_ecs_task_definition":
                 raise ContextError(
                     f"consumer live task definition is absent from state: {consumer_id}"
                 )
@@ -1750,9 +1680,7 @@ def _manifest_plan_binding(
                 "task_definition_arn": live_manifest["task_definition_arn"],
                 "task_definition": live_manifest["task_definition"],
             }:
-                raise ContextError(
-                    f"{consumer_id} live task definition differs from the manifest"
-                )
+                raise ContextError(f"{consumer_id} live task definition differs from the manifest")
 
         task_change = plan_changes.get(address)
         if before_absent and after_absent:
@@ -1766,14 +1694,11 @@ def _manifest_plan_binding(
         else:
             if task_change is None:
                 raise ContextError(
-                    "consumer task definition is absent from the complete plan: "
-                    f"{consumer_id}"
+                    f"consumer task definition is absent from the complete plan: {consumer_id}"
                 )
             actions_value = task_change.get("actions")
             if not isinstance(actions_value, list):
-                raise ContextError(
-                    f"{consumer_id} task definition actions are invalid"
-                )
+                raise ContextError(f"{consumer_id} task definition actions are invalid")
             actions = list(actions_value)
             if before_absent and not after_absent and actions != ["create"]:
                 raise ContextError(
@@ -1805,8 +1730,7 @@ def _manifest_plan_binding(
                     "task_definition": before_manifest["task_definition"],
                 }:
                     raise ContextError(
-                        f"{consumer_id} plan before task definition differs "
-                        "from the manifest"
+                        f"{consumer_id} plan before task definition differs from the manifest"
                     )
             if after_absent:
                 if task_change.get("after") is not None or _contains_unknown(
@@ -1826,9 +1750,7 @@ def _manifest_plan_binding(
                     container_name=str(consumer["container_name"]),
                     label=f"{consumer_id} plan after task definition",
                     planned_address=(
-                        address
-                        if after_manifest["task_definition_arn"] == address
-                        else None
+                        address if after_manifest["task_definition_arn"] == address else None
                     ),
                     unknown_attributes=task_change.get("after_unknown"),
                 )
@@ -1838,25 +1760,22 @@ def _manifest_plan_binding(
                     "task_definition": after_manifest["task_definition"],
                 }:
                     raise ContextError(
-                        f"{consumer_id} plan after task definition differs "
-                        "from the manifest"
+                        f"{consumer_id} plan after task definition differs from the manifest"
                     )
 
-        pointer_changed = (
-            not after_absent
-            and (
-                before_absent
-                or after_manifest["task_definition_arn"]
-                != before_manifest["task_definition_arn"]
-            )
+        pointer_changed = not after_absent and (
+            before_absent
+            or after_manifest["task_definition_arn"] != before_manifest["task_definition_arn"]
         )
-        if pointer_changed and not before_absent and (
-            "create" not in actions
-            or any(action not in {"create", "delete"} for action in actions)
-        ):
-            raise ContextError(
-                f"{consumer_id} after pointer is not its scheduled task definition"
+        if (
+            pointer_changed
+            and not before_absent
+            and (
+                "create" not in actions
+                or any(action not in {"create", "delete"} for action in actions)
             )
+        ):
+            raise ContextError(f"{consumer_id} after pointer is not its scheduled task definition")
         activation, pointer_resource_address = _consumer_activation_binding(
             consumer=consumer,
             state_resources=state_resources,
@@ -1874,9 +1793,7 @@ def _manifest_plan_binding(
                 )
         if pointer_changed:
             if pointer_resource_address is None:
-                raise ContextError(
-                    f"{consumer_id} activation pointer resource is absent"
-                )
+                raise ContextError(f"{consumer_id} activation pointer resource is absent")
             if (
                 manifest["mode"] == RELEASE_MODE_NO_IMAGE_TRANSITION
                 and not before_absent
@@ -1905,9 +1822,7 @@ def _manifest_plan_binding(
         )
     return {
         "consumer_count": len(comparison),
-        "consumer_comparison_sha256": hashlib.sha256(
-            _canonical_bytes(comparison)
-        ).hexdigest(),
+        "consumer_comparison_sha256": hashlib.sha256(_canonical_bytes(comparison)).hexdigest(),
     }
 
 
@@ -1956,11 +1871,7 @@ def _release_evidence_plan_binding(
         "consumer_receipt_bindings": consumer_bindings,
         "release_channels": release_channels,
     }
-    return {
-        "release_evidence_binding_sha256": hashlib.sha256(
-            _canonical_bytes(value)
-        ).hexdigest()
-    }
+    return {"release_evidence_binding_sha256": hashlib.sha256(_canonical_bytes(value)).hexdigest()}
 
 
 def _state_binding(state: Mapping[str, Any]) -> dict[str, Any]:
@@ -1983,6 +1894,72 @@ def _state_binding(state: Mapping[str, Any]) -> dict[str, Any]:
         "managed_addresses_sha256": hashlib.sha256(_canonical_bytes(addresses)).hexdigest(),
         "_addresses": addresses,
     }
+
+
+def build_sync_consumer_manifest(state: Any) -> dict[str, Any]:
+    """Build the exact no-transition manifest from the current Terraform state."""
+
+    normalized_state = _mapping(state, label="Terraform live state")
+    _state_binding(normalized_state)
+    state_resources = _state_resource_instances(normalized_state)
+    try:
+        registry_consumers = load_consumer_registry()["consumers"]
+        registry_sha256 = consumer_registry_sha256()
+    except ConsumerRegistryError as exc:
+        raise ContextError("code-owned consumer registry is invalid") from exc
+
+    identity_keys = (
+        "consumer_id",
+        "terraform_task_definition_address",
+        "ecs_family",
+        "container_name",
+        "activator",
+        "release_repository",
+        "receipt",
+    )
+    consumers: list[dict[str, Any]] = []
+    for registry_consumer in registry_consumers:
+        consumer_id = str(registry_consumer["consumer_id"])
+        address = str(registry_consumer["terraform_task_definition_address"])
+        state_resource = state_resources.get(address)
+        if state_resource is None or state_resource["type"] != "aws_ecs_task_definition":
+            raise ContextError(f"sync consumer task definition is absent from state: {consumer_id}")
+        task_snapshot = _container_binding(
+            _mapping(
+                state_resource["attributes"],
+                label=f"{consumer_id} state task definition",
+            ),
+            family=str(registry_consumer["ecs_family"]),
+            container_name=str(registry_consumer["container_name"]),
+            label=f"{consumer_id} state task definition",
+        )
+        activation = _consumer_state_activation(
+            consumer=registry_consumer,
+            state_resources=state_resources,
+        )
+        if activation.get("task_definition_arn") != task_snapshot["task_definition_arn"]:
+            raise ContextError(f"{consumer_id} state activation points at another task definition")
+        live_snapshot = {
+            **task_snapshot,
+            "activation": activation,
+        }
+        consumers.append(
+            {
+                **{key: copy.deepcopy(registry_consumer[key]) for key in identity_keys},
+                "live": copy.deepcopy(live_snapshot),
+                "before": copy.deepcopy(live_snapshot),
+                "after": copy.deepcopy(live_snapshot),
+            }
+        )
+
+    return validate_consumer_manifest(
+        {
+            "schema_version": CONSUMER_MANIFEST_SCHEMA,
+            "registry_sha256": registry_sha256,
+            "mode": RELEASE_MODE_NO_IMAGE_TRANSITION,
+            "consumers": consumers,
+        }
+    )
 
 
 def _backend_binding(metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -2019,9 +1996,7 @@ def build_context(
         raise ContextError("Terraform saved plan is not applyable")
 
     runtime_images = _runtime_image_binding(plan)
-    consumer_manifest = validate_consumer_manifest(
-        _plan_variable(plan, CONSUMER_MANIFEST_VARIABLE)
-    )
+    consumer_manifest = validate_consumer_manifest(_plan_variable(plan, CONSUMER_MANIFEST_VARIABLE))
     state_binding = _state_binding(state)
     state_addresses = set(state_binding.pop("_addresses"))
     configuration = _mapping(
@@ -2056,13 +2031,8 @@ def build_context(
                 label=f"Terraform import operation {address}",
             )
             expected_import_id = ALLOWED_EXISTING_LOG_IMPORTS.get(address)
-            if (
-                set(import_contract) != {"id"}
-                or import_contract.get("id") != expected_import_id
-            ):
-                raise ContextError(
-                    "Terraform import is outside the exact existing-log allowlist"
-                )
+            if set(import_contract) != {"id"} or import_contract.get("id") != expected_import_id:
+                raise ContextError("Terraform import is outside the exact existing-log allowlist")
             import_id = str(expected_import_id)
         actions = details.get("actions")
         if (
@@ -2074,9 +2044,7 @@ def build_context(
         ):
             raise ContextError(f"Terraform actions are invalid for {address}")
         if import_id and actions not in (["no-op"], ["update"]):
-            raise ContextError(
-                f"Terraform existing-log import action is destructive: {address}"
-            )
+            raise ContextError(f"Terraform existing-log import action is destructive: {address}")
         in_state = address in state_addresses
         in_configuration = (
             address in configuration_addresses
@@ -2087,9 +2055,7 @@ def build_context(
                 f"Terraform import address is already owned by the bound state: {address}"
             )
         if not in_state and "create" not in actions and not import_id:
-            raise ContextError(
-                f"Terraform change is not owned by the bound state: {address}"
-            )
+            raise ContextError(f"Terraform change is not owned by the bound state: {address}")
         if ("create" in actions or import_id) and not in_configuration:
             raise ContextError(
                 f"Terraform create/import is not owned by the reviewed configuration: {address}"
@@ -2108,11 +2074,7 @@ def build_context(
         raise ContextError("Terraform saved plan has no managed resource ownership")
     if len({item["address"] for item in ownership}) != len(ownership):
         raise ContextError("Terraform saved plan has duplicate managed addresses")
-    gate_changes = [
-        item
-        for item in ownership
-        if item["address"] == RELEASE_GATE_ADDRESS
-    ]
+    gate_changes = [item for item in ownership if item["address"] == RELEASE_GATE_ADDRESS]
     if len(gate_changes) != 1 or "create" not in gate_changes[0]["actions"]:
         raise ContextError("Terraform saved plan will not run the production release gate")
 
@@ -2138,12 +2100,8 @@ def build_context(
             "applyable": True,
             "errored": False,
             "managed_change_count": len(ownership),
-            "address_ownership_sha256": hashlib.sha256(
-                _canonical_bytes(ownership)
-            ).hexdigest(),
-            "runtime_images_sha256": hashlib.sha256(
-                _canonical_bytes(runtime_images)
-            ).hexdigest(),
+            "address_ownership_sha256": hashlib.sha256(_canonical_bytes(ownership)).hexdigest(),
+            "runtime_images_sha256": hashlib.sha256(_canonical_bytes(runtime_images)).hexdigest(),
             "consumer_manifest_sha256": hashlib.sha256(
                 _canonical_bytes(consumer_manifest)
             ).hexdigest(),
@@ -2229,15 +2187,15 @@ def validate_context(value: Any) -> dict[str, Any]:
         or not isinstance(plan["replace_change_count"], int)
         or isinstance(plan["replace_change_count"], bool)
         or plan["replace_change_count"] < 0
-        or plan["delete_change_count"] + plan["replace_change_count"]
-        > plan["managed_change_count"]
+        or plan["delete_change_count"] + plan["replace_change_count"] > plan["managed_change_count"]
         or plan["consumer_count"] != 8
     ):
         raise ContextError("Terraform context plan markers are invalid")
     consumer_manifest = validate_consumer_manifest(context["consumer_manifest"])
-    if hashlib.sha256(_canonical_bytes(consumer_manifest)).hexdigest() != plan[
-        "consumer_manifest_sha256"
-    ]:
+    if (
+        hashlib.sha256(_canonical_bytes(consumer_manifest)).hexdigest()
+        != plan["consumer_manifest_sha256"]
+    ):
         raise ContextError("Terraform context consumer manifest hash mismatch")
     _sha256(
         plan["address_ownership_sha256"],
@@ -2321,6 +2279,9 @@ def _parser() -> argparse.ArgumentParser:
     validate_command.add_argument("--context", type=Path, required=True)
     manifest_command = commands.add_parser("validate-consumer-manifest")
     manifest_command.add_argument("--manifest", type=Path, required=True)
+    sync_manifest_command = commands.add_parser("build-sync-consumer-manifest")
+    sync_manifest_command.add_argument("--state", type=Path, required=True)
+    sync_manifest_command.add_argument("--output", type=Path, required=True)
     activation_command = commands.add_parser("validate-activation-state")
     activation_command.add_argument("--manifest", type=Path, required=True)
     activation_command.add_argument("--state", type=Path, required=True)
@@ -2344,10 +2305,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "validate":
             validate_context(_load(args.context, label="Terraform context"))
         elif args.command == "validate-consumer-manifest":
-            result = validate_consumer_manifest(
-                _load(args.manifest, label="consumer manifest")
-            )
+            result = validate_consumer_manifest(_load(args.manifest, label="consumer manifest"))
             sys.stdout.buffer.write(_canonical_bytes(result))
+        elif args.command == "build-sync-consumer-manifest":
+            result = build_sync_consumer_manifest(_load(args.state, label="Terraform live state"))
+            args.output.write_bytes(_canonical_bytes(result))
         elif args.command == "validate-activation-state":
             result = validate_consumer_activation_state(
                 _load(args.manifest, label="consumer manifest"),
@@ -2365,9 +2327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 registry_sha256 = consumer_registry_sha256()
             except ConsumerRegistryError as exc:
                 raise ContextError("code-owned consumer registry is invalid") from exc
-            sys.stdout.buffer.write(
-                _canonical_bytes({"sha256": registry_sha256})
-            )
+            sys.stdout.buffer.write(_canonical_bytes({"sha256": registry_sha256}))
         else:
             raise ContextError("Terraform context command is unsupported")
     except ContextError as exc:

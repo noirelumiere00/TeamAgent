@@ -667,6 +667,7 @@ capture_backend_identity() {
 capture_state_contract() {
   local output="$1"
   local live_contract="${2:-}"
+  local raw_output="${3:-}"
   local raw="$TMP_ROOT/state-pull-$RANDOM.json"
   local listed="$TMP_ROOT/state-list-$RANDOM.txt"
   local canonical="$TMP_ROOT/state-list-canonical-$RANDOM.txt"
@@ -992,6 +993,11 @@ capture_state_contract() {
     ' > "$scoped_output" ||
       die "scope内consumerのTerraform state task definition bindingがlive契約と一致しません"
     mv "$scoped_output" "$output"
+  fi
+  if [ -n "$raw_output" ]; then
+    cp "$raw" "$raw_output" ||
+      die "検証済みTerraform state snapshotを保存できません"
+    chmod 600 "$raw_output"
   fi
 }
 
@@ -1963,6 +1969,184 @@ capture_image_release_context() {
   chmod 600 "$output"
   jq -e . "$output" >/dev/null ||
     die "production provenance Terraform context生成に失敗しました"
+}
+
+build_sync_image_deployment_consumer_manifest() {
+  local state="$1" snapshot="$2" core="$3" output="$4"
+  need_cmd python3
+  jq -L "$GUARD_JQ_DIR" -e \
+    --slurpfile registry "$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY" \
+    --slurpfile live "$snapshot" '
+    include "terraform_runtime_guard";
+    def instance_address($resource; $instance):
+      (
+        (if (($resource.module // "") == "") then
+           ""
+         else
+           ($resource.module + ".")
+         end) +
+        (if ($resource.mode // "managed") == "managed" then
+           ""
+         elif $resource.mode == "data" then
+           "data."
+         else
+           error("unsupported state resource mode")
+         end) +
+        $resource.type + "." + $resource.name +
+        (
+          if ($instance | has("index_key")) then
+            if ($instance.index_key | type) == "number" then
+              "[" + ($instance.index_key | tostring) + "]"
+            elif ($instance.index_key | type) == "string" then
+              "[" + ($instance.index_key | tojson) + "]"
+            else
+              error("unsupported state index key")
+            end
+          else
+            ""
+          end
+        )
+      );
+    def live_task($id):
+      if $id == "mcp" then $live[0].taskdefs.mcp.critical
+      elif $id == "connect_web" then
+        $live[0].taskdefs.connect_web.critical
+      elif $id == "openclaw" then $live[0].taskdefs.openclaw.critical
+      elif $id == "canary" then $live[0].taskdefs.canary.critical
+      elif $id == "ingest" then $live[0].taskdefs.ingest.critical
+      elif $id == "morning_digest" then
+        $live[0].taskdefs.morning.critical
+      elif $id == "x_buzz_worker" then
+        $live[0].taskdefs.x_buzz.critical
+      elif $id == "tiktok_acquire" then
+        $live[0].taskdefs.tiktok.critical
+      else error("consumer outside code-owned live task snapshot")
+      end;
+    ([
+      .resources[] as $resource |
+      select(($resource.mode // "managed") == "managed") |
+      ($resource.instances // [])[] as $instance |
+      {
+        address:instance_address($resource; $instance),
+        type:$resource.type,
+        attributes:$instance.attributes
+      }
+    ]) as $state_instances |
+    $registry[0].schema_version == 1 and
+    ($registry[0].consumers | length) == 8 and
+    all($registry[0].consumers[];
+      . as $consumer |
+      ([
+        $state_instances[] |
+        select(
+          .address ==
+            $consumer.terraform_task_definition_address
+        )
+      ]) as $matches |
+      ($matches | length) == 1 and
+      $matches[0].type == "aws_ecs_task_definition" and
+      ($matches[0].attributes | guard_task_from_tf) ==
+        live_task($consumer.consumer_id)
+    )
+  ' "$state" >/dev/null ||
+    die "sync用consumerのTerraform state full task bodyがlive AWS snapshotと一致しません"
+  python3 "$IMAGE_CONTEXT_HELPER" build-sync-consumer-manifest \
+    --state "$state" \
+    --output "$output" ||
+    die "sync用consumer manifestをlive Terraform stateから生成できません"
+  chmod 600 "$output"
+  jq -e --slurpfile live "$snapshot" --slurpfile core "$core" '
+    def live_binding($id):
+      if $id == "mcp" then {
+        image:$live[0].taskdefs.mcp.image,
+        task_definition_arn:$live[0].taskdefs.mcp.arn,
+        activation:{
+          desired_count:$live[0].services.mcp.critical.desired_count,
+          task_definition_arn:$live[0].services.mcp.task_definition
+        }
+      }
+      elif $id == "connect_web" then {
+        image:$live[0].taskdefs.connect_web.image,
+        task_definition_arn:$live[0].taskdefs.connect_web.arn,
+        activation:{
+          desired_count:$live[0].services.connect_web.critical.desired_count,
+          task_definition_arn:$live[0].services.connect_web.task_definition
+        }
+      }
+      elif $id == "openclaw" then {
+        image:$live[0].taskdefs.openclaw.image,
+        task_definition_arn:$live[0].taskdefs.openclaw.arn,
+        activation:{
+          desired_count:$live[0].services.openclaw.critical.desired_count,
+          task_definition_arn:$live[0].services.openclaw.task_definition
+        }
+      }
+      elif $id == "canary" then {
+        image:$live[0].taskdefs.canary.image,
+        task_definition_arn:$live[0].taskdefs.canary.arn,
+        activation:{
+          state:$live[0].rules.canary.critical.state,
+          task_definition_arn:$live[0].targets.canary.task_definition
+        }
+      }
+      elif $id == "ingest" then {
+        image:$live[0].taskdefs.ingest.image,
+        task_definition_arn:$live[0].taskdefs.ingest.arn,
+        activation:{
+          state:$live[0].rules.ingest.critical.state,
+          task_definition_arn:$live[0].targets.ingest.task_definition
+        }
+      }
+      elif $id == "morning_digest" then {
+        image:$live[0].taskdefs.morning.image,
+        task_definition_arn:$live[0].taskdefs.morning.arn,
+        activation:{
+          state:$live[0].rules.morning.critical.state,
+          task_definition_arn:$live[0].targets.morning.task_definition
+        }
+      }
+      elif $id == "x_buzz_worker" then {
+        image:$live[0].taskdefs.x_buzz.image,
+        task_definition_arn:$live[0].taskdefs.x_buzz.arn,
+        activation:{
+          event_source_mapping_enabled:
+            $live[0].event_mappings.x_buzz.critical.enabled,
+          task_definition_arn:$live[0].dispatchers.x_buzz.task_definition
+        }
+      }
+      elif $id == "tiktok_acquire" then {
+        image:$live[0].taskdefs.tiktok.image,
+        task_definition_arn:$live[0].taskdefs.tiktok.arn,
+        activation:{
+          event_source_mapping_enabled:
+            $live[0].event_mappings.tiktok.critical.enabled,
+          task_definition_arn:$live[0].dispatchers.tiktok.task_definition
+        }
+      }
+      else error("consumer outside code-owned live snapshot")
+      end;
+    .schema_version == 1 and
+    .mode == "no-image-transition" and
+    (.registry_sha256 | test("^[0-9a-f]{64}$")) and
+    (.consumers | type) == "array" and
+    (.consumers | length) == 8 and
+    ([.consumers[].consumer_id] | length) ==
+      ([.consumers[].consumer_id] | unique | length) and
+    all(.consumers[]; .live == .before and .before == .after) and
+    all(.consumers[];
+      . as $consumer |
+      live_binding($consumer.consumer_id) as $expected |
+      $consumer.live.image == $expected.image and
+      $consumer.live.task_definition_arn ==
+        $expected.task_definition_arn and
+      $consumer.live.activation == $expected.activation
+    ) and
+    ([
+      .consumers[] |
+      {key:.consumer_id,value:.after.image}
+    ] | from_entries) == $core[0].desired_consumer_images
+  ' "$output" >/dev/null ||
+    die "sync用consumer manifestがlive AWS/state snapshot由来のexact-8 no-image-transition契約と不一致です"
 }
 
 build_scoped_release_live_contract() {
@@ -4364,6 +4548,33 @@ snapshot_live() {
   # signing used MAIL_ACTION_HMAC_SECRET; preserve that as the effective
   # deployed report primary so the exact legacy version can become previous.
   jq -S -c '
+    def primary_base_arn($purpose):
+      . as $value |
+      (
+        if $purpose == "mail" then
+          "(database-url|hmac/mail-action)"
+        else
+          "(database-url|hmac/mail-action|hmac/report-link)"
+        end
+      ) as $path |
+      (
+        "^arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+        + "secret:teamagent/dev/" + $path + "-[A-Za-z0-9]{6}$"
+      ) as $base_pattern |
+      (
+        "^arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+        + "secret:teamagent/dev/" + $path
+        + "-[A-Za-z0-9]{6}:::[A-Za-z0-9_-]{32,64}$"
+      ) as $pinned_pattern |
+      if (($value | type) != "string") then
+        error("deployed HMAC primary selector is not a string")
+      elif ($value | test($base_pattern)) then
+        $value
+      elif ($value | test($pinned_pattern)) then
+        $value | split(":::")[0]
+      else
+        error("deployed HMAC primary selector is outside the exact contract")
+      end;
     def parsed_t0($value):
       if $value == null then null
       elif (($value | type) == "string" and
@@ -4398,18 +4609,33 @@ snapshot_live() {
         error("deployed HMAC previous/T0 pair mismatch")
       else .
       end;
-    . + {
-      hmac: {
-        mail: uniform(
-          [.taskdefs.mcp, .taskdefs.connect_web, .taskdefs.morning];
-          "mail"
-        ),
-        report: uniform(
-          [.taskdefs.mcp, .taskdefs.connect_web];
-          "report"
-        )
+    def prefix_absent($task; $prefix):
+      all(($task.env | keys)[]; startswith($prefix) | not) and
+      all(($task.secrets | keys)[]; startswith($prefix) | not);
+    (uniform([.taskdefs.mcp, .taskdefs.morning]; "mail")) as $mail |
+    (uniform([.taskdefs.mcp, .taskdefs.connect_web]; "report")) as $report |
+    if (
+      (
+        prefix_absent(.taskdefs.connect_web; "MAIL_ACTION_") or
+        metadata(.taskdefs.connect_web; "mail") == $mail
+      ) and
+      prefix_absent(.taskdefs.morning; "REPORT_LINK_")
+    ) then
+      . + {
+        hmac: {
+          mail: (
+            $mail |
+            .primary_secret_arn |= primary_base_arn("mail")
+          ),
+          report: (
+            $report |
+            .primary_secret_arn |= primary_base_arn("report")
+          )
+        }
       }
-    }
+    else
+      error("deployed HMAC consumer ownership is inconsistent")
+    end
   ' "$output" > "$dir/snapshot-with-hmac.json" ||
     die "実デプロイHMAC metadataがpurpose consumer間で不整合です"
   mv "$dir/snapshot-with-hmac.json" "$output"
@@ -4582,6 +4808,133 @@ select_terraform_media_image_inputs() {
      [[ "${live_image#"$legacy_prefix"}" =~ ^[0-9a-f]{64}$ ]]; then
     TF_MEDIA_WORKER_IMAGE=""
   fi
+}
+
+derive_live_hmac_terraform_inputs() {
+  local snapshot="$1" output="$2"
+  jq -e -S -c '
+    def prefix_absent($task; $prefix):
+      all(($task.env | keys)[]; startswith($prefix) | not) and
+      all(($task.secrets | keys)[]; startswith($prefix) | not);
+    def exact_generation($value; $purpose):
+      if (($value | type) != "string") then
+        error("HMAC secret valueFrom is not a string")
+      else
+        (
+          $value |
+          capture(
+            "^arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+            + "secret:teamagent/dev/hmac/" + $purpose
+            + "-[A-Za-z0-9]{6}:::(?<version>[A-Za-z0-9_-]{32,64})$"
+          )
+        ) as $pin |
+        {
+          generation:(
+            ($value | split(":::")[0]) + "@" + $pin.version
+          ),
+          version:$pin.version
+        }
+      end;
+    def exact_previous_generation($value; $purpose):
+      if $value == "" then {generation:"",version:""}
+      else
+        (
+          $value |
+          capture(
+            "^(?<arn>arn:aws:secretsmanager:ap-northeast-1:718959508629:"
+            + "secret:teamagent/dev/(database-url|hmac/" + $purpose + ")"
+            + "-[A-Za-z0-9]{6}):::(?<version>[A-Za-z0-9_-]{32,64})$"
+          )
+        ) as $pin |
+        {
+          generation:($pin.arn + "@" + $pin.version),
+          version:$pin.version
+        }
+      end;
+    def purpose_metadata($tasks; $prefix; $purpose):
+      ([
+        $tasks[] |
+        (exact_generation(
+          .secrets[$prefix + "_SECRET"]; $purpose
+        )) as $primary |
+        (.secrets[$prefix + "_PREVIOUS_SECRET"] // "") as $previous_value |
+        (exact_previous_generation($previous_value; $purpose)) as $previous |
+        (.env[$prefix + "_PRIMARY_GENERATION"] // "") as $primary_env |
+        (.env[$prefix + "_PREVIOUS_GENERATION"] // "") as $previous_env |
+        (.env[$prefix + "_PREVIOUS_ROTATION_STARTED_AT"] // "") as $t0 |
+        (.env.TEAMAGENT_HMAC_ROTATION_EPOCH // "") as $rotation_epoch |
+        {
+          primary_generation:$primary.generation,
+          primary_version_id:$primary.version,
+          previous_generation:$previous.generation,
+          previous_version_id:$previous.version,
+          rotation_started_at:$t0,
+          rotation_epoch:$rotation_epoch,
+          valid:(
+            $primary_env == $primary.generation and
+            ($rotation_epoch |
+              test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")) and
+            (
+              if $previous_value == "" then
+                $previous_env == "" and $t0 == ""
+              else
+                $previous_env == $previous.generation and
+                ($t0 | test("^(0|[1-9][0-9]{0,9})$"))
+              end
+            )
+          )
+        }
+      ]) as $rows |
+      if (
+        ($rows | length) > 0 and
+        ($rows | unique | length) == 1 and
+        $rows[0].valid
+      ) then $rows[0] | del(.valid)
+      else error("purpose HMAC metadata is not exact and uniform")
+      end;
+    (purpose_metadata(
+      [.taskdefs.mcp, .taskdefs.morning];
+      "MAIL_ACTION_HMAC";
+      "mail-action"
+    )) as $mail |
+    (purpose_metadata(
+      [.taskdefs.mcp, .taskdefs.connect_web];
+      "REPORT_LINK_HMAC";
+      "report-link"
+    )) as $report |
+    if (
+      (
+        prefix_absent(.taskdefs.connect_web; "MAIL_ACTION_") or
+        purpose_metadata(
+          [.taskdefs.connect_web];
+          "MAIL_ACTION_HMAC";
+          "mail-action"
+        ) == $mail
+      ) and
+      prefix_absent(.taskdefs.morning; "REPORT_LINK_")
+    ) then . else
+      error("live HMAC consumer ownership is not exact")
+    end |
+    if $mail.rotation_epoch != $report.rotation_epoch then
+      error("purpose HMAC rotation epochs differ")
+    else {
+      mail_action_hmac_deployed_primary_generation:
+        $mail.primary_generation,
+      mail_action_hmac_deployed_previous_generation:
+        $mail.previous_generation,
+      mail_action_hmac_deployed_rotation_started_at:
+        $mail.rotation_started_at,
+      report_link_hmac_deployed_primary_generation:
+        $report.primary_generation,
+      report_link_hmac_deployed_previous_generation:
+        $report.previous_generation,
+      report_link_hmac_deployed_rotation_started_at:
+        $report.rotation_started_at
+    }
+    end
+  ' "$snapshot" > "$output" ||
+    die "live HMAC metadataはexact VersionId pin・generation env・rotation epochの完全一致が必要です"
+  chmod 600 "$output"
 }
 
 validate_ecs_service_saga_receipt() {
@@ -5698,10 +6051,16 @@ validate_planned_hmac_consumers() {
     def secmap($container):
       ($container.secrets // []) |
       map({key: .name, value: .valueFrom}) | from_entries;
+    def primary_base_arn($value):
+      if ($value | contains(":::")) then
+        $value | split(":::")[0]
+      else $value
+      end;
     def purpose($container; $prefix; $expected):
       (envmap($container)) as $env |
       (secmap($container)) as $secrets |
-      $secrets[$prefix + "_SECRET"] == $expected.primary_secret_arn and
+      primary_base_arn($secrets[$prefix + "_SECRET"]) ==
+        $expected.primary_secret_arn and
       (
         if $expected.previous_present then
           $secrets[$prefix + "_PREVIOUS_SECRET"] ==
@@ -5713,14 +6072,20 @@ validate_planned_hmac_consumers() {
           ($env | has($prefix + "_PREVIOUS_ROTATION_STARTED_AT") | not)
         end
       );
+    def purpose_absent($container; $prefix):
+      (envmap($container) | keys |
+        all(.[]; startswith($prefix + "_") | not)) and
+      (secmap($container) | keys |
+        all(.[]; startswith($prefix + "_") | not));
     (container("aws_ecs_task_definition.mcp"; "teamagent-mcp")) as $mcp |
     (container("aws_ecs_task_definition.connect_web[0]"; "connect-web")) as $connect |
     (container("aws_ecs_task_definition.morning_digest[0]"; "morning-digest")) as $morning |
     purpose($mcp; "MAIL_ACTION_HMAC"; $proposed[0].mail) and
-    purpose($connect; "MAIL_ACTION_HMAC"; $proposed[0].mail) and
     purpose($morning; "MAIL_ACTION_HMAC"; $proposed[0].mail) and
+    purpose_absent($connect; "MAIL_ACTION") and
     purpose($mcp; "REPORT_LINK_HMAC"; $proposed[0].report) and
-    purpose($connect; "REPORT_LINK_HMAC"; $proposed[0].report)
+    purpose($connect; "REPORT_LINK_HMAC"; $proposed[0].report) and
+    purpose_absent($morning; "REPORT_LINK")
   ' "$plan_json" >/dev/null ||
     die "planned task definitionsのpurpose別HMAC env/secrets/T0が同一revision契約を満たしません"
 }
@@ -10572,7 +10937,8 @@ case "$COMMAND" in
     }
     trap 'cleanup_plan_stage' EXIT
 
-    capture_state_contract "$TMP_ROOT/state-before.json"
+    capture_state_contract \
+      "$TMP_ROOT/state-before.json" "" "$TMP_ROOT/state-before-full.json"
     snapshot_live "$TMP_ROOT/live-before.json"
     capture_complete_runtime_inventory "$TMP_ROOT/inventory-before.json"
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
@@ -10708,6 +11074,70 @@ case "$COMMAND" in
       "$REQUIRED_MIGRATION_ID" \
       "$REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256"
     CORE_JSON="$(jq -c . "$TMP_ROOT/core.json")"
+    SYNC_DERIVED_VAR_FILE=""
+    SYNC_DERIVED_VAR_SHA256=""
+    SYNC_DERIVED_VAR_IDENTITY=""
+    if [ "$MODE" = "sync" ]; then
+      derive_live_hmac_terraform_inputs \
+        "$TMP_ROOT/live-before.json" "$TMP_ROOT/hmac-terraform-inputs.json"
+      MAIL_HMAC_DEPLOYED_PRIMARY="$(
+        jq -er '.mail_action_hmac_deployed_primary_generation' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      MAIL_HMAC_DEPLOYED_PREVIOUS="$(
+        jq -r '.mail_action_hmac_deployed_previous_generation' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      MAIL_HMAC_DEPLOYED_T0="$(
+        jq -r '.mail_action_hmac_deployed_rotation_started_at' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      REPORT_HMAC_DEPLOYED_PRIMARY="$(
+        jq -er '.report_link_hmac_deployed_primary_generation' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      REPORT_HMAC_DEPLOYED_PREVIOUS="$(
+        jq -r '.report_link_hmac_deployed_previous_generation' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      REPORT_HMAC_DEPLOYED_T0="$(
+        jq -r '.report_link_hmac_deployed_rotation_started_at' \
+          "$TMP_ROOT/hmac-terraform-inputs.json"
+      )"
+      build_sync_image_deployment_consumer_manifest \
+        "$TMP_ROOT/state-before-full.json" "$TMP_ROOT/live-before.json" \
+        "$TMP_ROOT/core.json" \
+        "$TMP_ROOT/sync-consumer-manifest.json"
+      SYNC_DERIVED_VAR_FILE="$STAGE/sync-derived.tfvars.json"
+      jq -n -S \
+        --slurpfile manifest "$TMP_ROOT/sync-consumer-manifest.json" \
+        --arg mail_primary "$MAIL_HMAC_DEPLOYED_PRIMARY" \
+        --arg mail_previous "$MAIL_HMAC_DEPLOYED_PREVIOUS" \
+        --arg mail_t0 "$MAIL_HMAC_DEPLOYED_T0" \
+        --arg report_primary "$REPORT_HMAC_DEPLOYED_PRIMARY" \
+        --arg report_previous "$REPORT_HMAC_DEPLOYED_PREVIOUS" \
+        --arg report_t0 "$REPORT_HMAC_DEPLOYED_T0" '
+        {
+          image_deployment_consumer_manifest:$manifest[0],
+          image_release_receipt_catalog:{},
+          image_release_consumer_receipt_bindings:{},
+          mail_action_hmac_deployed_primary_generation:$mail_primary,
+          mail_action_hmac_deployed_previous_generation:$mail_previous,
+          mail_action_hmac_deployed_rotation_started_at:$mail_t0,
+          report_link_hmac_deployed_primary_generation:$report_primary,
+          report_link_hmac_deployed_previous_generation:$report_previous,
+          report_link_hmac_deployed_rotation_started_at:$report_t0
+        }
+      ' > "$SYNC_DERIVED_VAR_FILE" ||
+        die "sync用live-derived Terraform variable overlayを生成できません"
+      chmod 600 "$SYNC_DERIVED_VAR_FILE"
+      SYNC_DERIVED_VAR_SHA256="$(
+        sha256_file "$SYNC_DERIVED_VAR_FILE"
+      )"
+      SYNC_DERIVED_VAR_IDENTITY="$(
+        stat_identity "$SYNC_DERIVED_VAR_FILE"
+      )"
+    fi
     select_terraform_media_image_inputs \
       "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
     TF_ARGS=(
@@ -10730,8 +11160,21 @@ case "$COMMAND" in
       "-var=canary_rule_enabled=$DESIRED_CANARY_RULE"
       "-var=require_alarm_delivery=true"
       "-var=image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID"
+      "-var=hmac_preflight_epoch_s=$TRANSITION_EPOCH"
     )
+    if [ "$MODE" = "sync" ]; then
+      TF_ARGS+=(
+        "-var-file=$SYNC_DERIVED_VAR_FILE"
+      )
+    fi
     terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"
+    if [ "$MODE" = "sync" ]; then
+      [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \
+        "$SYNC_DERIVED_VAR_SHA256" ] &&
+        [ "$(stat_identity "$SYNC_DERIVED_VAR_FILE")" = \
+          "$SYNC_DERIVED_VAR_IDENTITY" ] ||
+        die "terraform plan中にsync用live-derived variable overlayが差替えられました"
+    fi
     chmod 600 "$STAGE_PLAN"
     PLAN_SHA="$(sha256_file "$STAGE_PLAN")"
     terraform -chdir="$TF_DIR" show -json "$STAGE_PLAN" > "$TMP_ROOT/plan.json"
@@ -10775,6 +11218,13 @@ case "$COMMAND" in
     [ "$(sha256_file "$VAR_FILE")" = "$VAR_SHA" ] || die "plan作成中にvar-fileが変化しました"
     [ "$(stat_identity "$VAR_FILE")" = "$VAR_IDENTITY" ] || die "plan作成中にvar-file pathが差替えられました"
     [ "$(sha256_file "$STAGE_VAR")" = "$VAR_SHA" ] || die "private var-file copyが変化しました"
+    if [ "$MODE" = "sync" ]; then
+      [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \
+        "$SYNC_DERIVED_VAR_SHA256" ] &&
+        [ "$(stat_identity "$SYNC_DERIVED_VAR_FILE")" = \
+          "$SYNC_DERIVED_VAR_IDENTITY" ] ||
+        die "plan検証中にsync用live-derived variable overlayが差替えられました"
+    fi
     if [ -n "$ALARM_DELIVERY_RECEIPT" ]; then
       [ "$(sha256_file "$ALARM_DELIVERY_RECEIPT")" = \
         "$ALARM_DELIVERY_RECEIPT_SHA256" ] ||

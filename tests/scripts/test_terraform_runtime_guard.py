@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -79,8 +80,21 @@ MAIL_HMAC_SECRET = (
 REPORT_HMAC_SECRET = (
     f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:teamagent/dev/hmac/report-link-XyZ789"
 )
+MAIL_HMAC_VERSION_ID = "01234567-89ab-cdef-0123-456789abcdef"
+REPORT_HMAC_VERSION_ID = "fedcba98-7654-3210-fedc-ba9876543210"
+MAIL_HMAC_VALUE_FROM = f"{MAIL_HMAC_SECRET}:::{MAIL_HMAC_VERSION_ID}"
+REPORT_HMAC_VALUE_FROM = f"{REPORT_HMAC_SECRET}:::{REPORT_HMAC_VERSION_ID}"
+MAIL_HMAC_GENERATION = f"{MAIL_HMAC_SECRET}@{MAIL_HMAC_VERSION_ID}"
+REPORT_HMAC_GENERATION = f"{REPORT_HMAC_SECRET}@{REPORT_HMAC_VERSION_ID}"
+MAIL_HMAC_PREVIOUS_VERSION_ID = "11111111-2222-3333-4444-555555555555"
+REPORT_HMAC_PREVIOUS_VERSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+MAIL_HMAC_PREVIOUS_VALUE_FROM = f"{MAIL_HMAC_SECRET}:::{MAIL_HMAC_PREVIOUS_VERSION_ID}"
+REPORT_HMAC_PREVIOUS_VALUE_FROM = f"{REPORT_HMAC_SECRET}:::{REPORT_HMAC_PREVIOUS_VERSION_ID}"
+MAIL_HMAC_PREVIOUS_GENERATION = f"{MAIL_HMAC_SECRET}@{MAIL_HMAC_PREVIOUS_VERSION_ID}"
+REPORT_HMAC_PREVIOUS_GENERATION = f"{REPORT_HMAC_SECRET}@{REPORT_HMAC_PREVIOUS_VERSION_ID}"
 HMAC_MANIFEST_SHA256 = "3" * 64
 HMAC_CONTROL_SHA256 = "4" * 64
+WORKER_HMAC_ARTIFACT_SHA256 = "8" * 64
 HMAC_RELEASE = {
     "rotation_epoch": "hmac-2026-07",
     "gate_mode": "candidate",
@@ -349,20 +363,39 @@ def _container(component: str, image: str = LIVE_IMAGE) -> dict[str, Any]:
             }
         )
     elif component in {"mcp", "connect_web", "morning"}:
-        container["secrets"].append(
-            {"name": "MAIL_ACTION_HMAC_SECRET", "valueFrom": MAIL_HMAC_SECRET}
+        container["environment"].append(
+            {
+                "name": "TEAMAGENT_HMAC_ROTATION_EPOCH",
+                "value": HMAC_RELEASE["rotation_epoch"],
+            }
         )
-        if component in {"mcp", "connect_web"}:
-            container["secrets"].append(
-                {"name": "REPORT_LINK_HMAC_SECRET", "valueFrom": REPORT_HMAC_SECRET}
-            )
-        if component == "connect_web":
-            container["environment"].append(
-                {
-                    "name": "CONNECT_APP_HTML_S3_URI",
-                    "value": ("s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"),
-                }
-            )
+    if component in {"mcp", "morning"}:
+        container["secrets"].append(
+            {"name": "MAIL_ACTION_HMAC_SECRET", "valueFrom": MAIL_HMAC_VALUE_FROM}
+        )
+        container["environment"].append(
+            {
+                "name": "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+                "value": MAIL_HMAC_GENERATION,
+            }
+        )
+    if component in {"mcp", "connect_web"}:
+        container["secrets"].append(
+            {"name": "REPORT_LINK_HMAC_SECRET", "valueFrom": REPORT_HMAC_VALUE_FROM}
+        )
+        container["environment"].append(
+            {
+                "name": "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+                "value": REPORT_HMAC_GENERATION,
+            }
+        )
+    if component == "connect_web":
+        container["environment"].append(
+            {
+                "name": "CONNECT_APP_HTML_S3_URI",
+                "value": ("s3://teamagent-dev-raw-files/codebuild/connect-web-app.html"),
+            }
+        )
     return container
 
 
@@ -744,7 +777,7 @@ def _consumer_task_definition(component: str) -> dict[str, Any]:
         "network_mode": task["network_mode"],
         "cpu": task["cpu"],
         "memory": task["memory"],
-        "volumes": task.get("volumes"),
+        "volumes": task.get("volume"),
     }
 
 
@@ -1241,10 +1274,7 @@ def _stabilize_no_image_plan(
             gate_input["target"] = copy.deepcopy(target)
 
 
-def _set_pre_media_cutover_sync_fixture(
-    plan: dict[str, Any],
-    consumer_manifest: dict[str, Any],
-) -> None:
+def _set_pre_media_cutover_sync_fixture(plan: dict[str, Any]) -> None:
     task_change = _find(plan, TASK_ADDRESSES["tiktok"])["change"]
     for phase in ("before", "after"):
         containers = json.loads(task_change[phase]["container_definitions"])
@@ -1258,18 +1288,57 @@ def _set_pre_media_cutover_sync_fixture(
         # correctly requires raw value equality for every no-op resource.
         task_change[phase]["container_definitions"] = json.dumps(containers)
 
-    tiktok = next(
-        row for row in consumer_manifest["consumers"] if row["consumer_id"] == "tiktok_acquire"
-    )
-    for phase in ("live", "before", "after"):
-        snapshot = tiktok[phase]
-        snapshot["image"] = LEGACY_TIKTOK_IMAGE
-        containers = snapshot["task_definition"]["container_definitions"]
-        matches = [
-            container for container in containers if container["name"] == tiktok["container_name"]
-        ]
-        assert len(matches) == 1
-        matches[0]["image"] = LEGACY_TIKTOK_IMAGE
+
+def _set_active_hmac_previous_fixture(
+    plan: dict[str, Any],
+    *,
+    rotation_started_at: str,
+) -> None:
+    owners = {
+        TASK_ADDRESSES["mcp"]: ("mail", "report"),
+        TASK_ADDRESSES["connect_web"]: ("report",),
+        TASK_ADDRESSES["morning"]: ("mail",),
+    }
+    metadata = {
+        "mail": {
+            "prefix": "MAIL_ACTION_HMAC",
+            "selector": MAIL_HMAC_PREVIOUS_VALUE_FROM,
+            "generation": MAIL_HMAC_PREVIOUS_GENERATION,
+        },
+        "report": {
+            "prefix": "REPORT_LINK_HMAC",
+            "selector": REPORT_HMAC_PREVIOUS_VALUE_FROM,
+            "generation": REPORT_HMAC_PREVIOUS_GENERATION,
+        },
+    }
+    for address, purposes in owners.items():
+        task_change = _find(plan, address)["change"]
+        for phase in ("before", "after"):
+            containers = json.loads(task_change[phase]["container_definitions"])
+            assert len(containers) == 1
+            container = containers[0]
+            for purpose in purposes:
+                values = metadata[purpose]
+                prefix = values["prefix"]
+                container["secrets"].append(
+                    {
+                        "name": prefix + "_PREVIOUS_SECRET",
+                        "valueFrom": values["selector"],
+                    }
+                )
+                container["environment"].extend(
+                    [
+                        {
+                            "name": prefix + "_PREVIOUS_GENERATION",
+                            "value": values["generation"],
+                        },
+                        {
+                            "name": (prefix + "_PREVIOUS_ROTATION_STARTED_AT"),
+                            "value": rotation_started_at,
+                        },
+                    ]
+                )
+            task_change[phase]["container_definitions"] = json.dumps(containers)
 
 
 def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
@@ -1468,6 +1537,13 @@ def _fake_aws(path: Path) -> None:
         REGION = {REGION!r}
         LIVE_IMAGE = {LIVE_IMAGE!r}
         APP_HTML = {APP_HTML!r}
+        MAIL_HMAC_GENERATION = {MAIL_HMAC_GENERATION!r}
+        REPORT_HMAC_GENERATION = {REPORT_HMAC_GENERATION!r}
+        MAIL_HMAC_PREVIOUS_VALUE_FROM = {MAIL_HMAC_PREVIOUS_VALUE_FROM!r}
+        REPORT_HMAC_PREVIOUS_VALUE_FROM = {REPORT_HMAC_PREVIOUS_VALUE_FROM!r}
+        MAIL_HMAC_PREVIOUS_GENERATION = {MAIL_HMAC_PREVIOUS_GENERATION!r}
+        REPORT_HMAC_PREVIOUS_GENERATION = {REPORT_HMAC_PREVIOUS_GENERATION!r}
+        HMAC_ROTATION_EPOCH = {HMAC_RELEASE["rotation_epoch"]!r}
         components = {json.dumps(COMPONENTS)!r}
         components = json.loads(components)
         rules = {json.dumps(RULES)!r}
@@ -1566,14 +1642,64 @@ def _fake_aws(path: Path) -> None:
             _, family, revision = components[component]
             return f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:task-definition/{{family}}:{{revision}}"
 
-        def environment():
+        def environment(component):
             values = [
                 {{"name": "BASE_FLAG", "value": "1"}},
                 {{"name": "USE_TIKTOK_TOOLS", "value": "0"}},
                 {{"name": "USE_VIDEO_TOOLS", "value": "0"}},
             ]
+            if component in ("mcp", "connect_web", "morning"):
+                values.append({{
+                    "name": "TEAMAGENT_HMAC_ROTATION_EPOCH",
+                    "value": HMAC_ROTATION_EPOCH,
+                }})
+            if component in ("mcp", "morning"):
+                values.append({{
+                    "name": "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+                    "value": MAIL_HMAC_GENERATION,
+                }})
+            if component in ("mcp", "connect_web"):
+                values.append({{
+                    "name": "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+                    "value": REPORT_HMAC_GENERATION,
+                }})
+            if hmac_previous_t0 := os.environ.get(
+                "AWS_FAKE_HMAC_PREVIOUS_T0"
+            ):
+                if component in ("mcp", "morning"):
+                    values.extend([
+                        {{
+                            "name": "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
+                            "value": MAIL_HMAC_PREVIOUS_GENERATION,
+                        }},
+                        {{
+                            "name": (
+                                "MAIL_ACTION_HMAC_"
+                                "PREVIOUS_ROTATION_STARTED_AT"
+                            ),
+                            "value": hmac_previous_t0,
+                        }},
+                    ])
+                if component in ("mcp", "connect_web"):
+                    values.extend([
+                        {{
+                            "name": "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
+                            "value": REPORT_HMAC_PREVIOUS_GENERATION,
+                        }},
+                        {{
+                            "name": (
+                                "REPORT_LINK_HMAC_"
+                                "PREVIOUS_ROTATION_STARTED_AT"
+                            ),
+                            "value": hmac_previous_t0,
+                        }},
+                    ])
             if os.environ.get("AWS_FAKE_INVALID_BOOL"):
-                values[-1]["value"] = os.environ["AWS_FAKE_INVALID_BOOL"]
+                next(
+                    item
+                    for item in values
+                    if item["name"] == "USE_VIDEO_TOOLS"
+                )["value"] = os.environ["AWS_FAKE_INVALID_BOOL"]
             drift_marker = os.environ.get("TF_FAKE_DRIFT_AFTER_PLAN_MARKER")
             if os.environ.get("AWS_FAKE_DRIFT") or (
                 drift_marker and pathlib.Path(drift_marker).exists()
@@ -2184,7 +2310,7 @@ def _fake_aws(path: Path) -> None:
             if image_override:
                 task["containerDefinitions"][0]["image"] = image_override
             if component not in ("tiktok", "x_buzz"):
-                task_environment = environment()
+                task_environment = environment(component)
                 if component == "connect_web":
                     task_environment.append({{
                         "name": "CONNECT_APP_HTML_S3_URI",
@@ -2194,6 +2320,17 @@ def _fake_aws(path: Path) -> None:
                         ),
                     }})
                 task["containerDefinitions"][0]["environment"] = task_environment
+                if os.environ.get("AWS_FAKE_HMAC_PREVIOUS_T0"):
+                    if component in ("mcp", "morning"):
+                        task["containerDefinitions"][0]["secrets"].append({{
+                            "name": "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+                            "valueFrom": MAIL_HMAC_PREVIOUS_VALUE_FROM,
+                        }})
+                    if component in ("mcp", "connect_web"):
+                        task["containerDefinitions"][0]["secrets"].append({{
+                            "name": "REPORT_LINK_HMAC_PREVIOUS_SECRET",
+                            "valueFrom": REPORT_HMAC_PREVIOUS_VALUE_FROM,
+                        }})
             print(json.dumps({{"taskDefinition": task}}))
         elif args[:2] == ["lambda", "get-function-configuration"]:
             name = args[args.index("--function-name") + 1]
@@ -2233,11 +2370,24 @@ def _fake_aws(path: Path) -> None:
                 "Name": secret_id.split(":secret:", 1)[1],
             }}))
         elif args[:2] == ["secretsmanager", "list-secret-version-ids"]:
+            secret_id = args[args.index("--secret-id") + 1]
+            if "/hmac/report-link-" in secret_id:
+                current_version = {REPORT_HMAC_VERSION_ID!r}
+                previous_version = {REPORT_HMAC_PREVIOUS_VERSION_ID!r}
+            else:
+                current_version = {MAIL_HMAC_VERSION_ID!r}
+                previous_version = {MAIL_HMAC_PREVIOUS_VERSION_ID!r}
             print(json.dumps({{
-                "Versions": [{{
-                    "VersionId": "01234567-89ab-cdef-0123-456789abcdef",
-                    "VersionStages": ["AWSCURRENT"],
-                }}]
+                "Versions": [
+                    {{
+                        "VersionId": current_version,
+                        "VersionStages": ["AWSCURRENT"],
+                    }},
+                    {{
+                        "VersionId": previous_version,
+                        "VersionStages": [],
+                    }},
+                ]
             }}))
         elif args[:2] == ["ecr", "describe-images"]:
             if os.environ.get("AWS_FAKE_ECR_MISSING"):
@@ -2260,6 +2410,7 @@ def _fake_terraform(path: Path) -> None:
         import json
         import os
         import pathlib
+        import re
         import subprocess
         import sys
 
@@ -2341,27 +2492,716 @@ def _fake_terraform(path: Path) -> None:
                 for address in state_addresses(state_data()):
                     print(address)
         elif args[0] == "plan":
-            out = next(arg.split("=", 1)[1] for arg in args if arg.startswith("-out="))
-            core_arg = next(arg for arg in args if arg.startswith("-var=runtime_guard_live="))
-            core = json.loads(core_arg.split("=", 2)[2])
-            intent_arg = next(
-                arg for arg in args
-                if arg.startswith("-var=image_deployment_intent_id=")
-            )
-            image_deployment_intent_id = intent_arg.split("=", 2)[2]
-            media_worker_arg = next(
-                arg for arg in args if arg.startswith("-var=media_worker_image=")
-            )
-            tiktok_acquire_arg = next(
-                arg for arg in args if arg.startswith("-var=tiktok_acquire_image=")
-            )
-            desired = core["desired_mcp_image"]
-            plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
-            consumer_manifest = json.loads(
-                pathlib.Path(os.environ["TF_FAKE_CONSUMER_MANIFEST"]).read_text(
-                    encoding="utf-8"
+            def cli_var(name):
+                prefix = f"-var={name}="
+                matches = [
+                    arg[len(prefix) :]
+                    for arg in args
+                    if arg.startswith(prefix)
+                ]
+                if len(matches) > 1:
+                    raise SystemExit(
+                        "fake terraform precondition: duplicate "
+                        + name
+                        + " argument"
+                    )
+                return matches[0] if matches else None
+
+            def required_var(name):
+                value = cli_var(name)
+                if value is None:
+                    raise SystemExit(
+                        "fake terraform precondition: missing "
+                        + name
+                        + " argument"
+                    )
+                return value
+
+            var_file_args = [
+                arg.split("=", 1)[1]
+                for arg in args
+                if arg.startswith("-var-file=")
+            ]
+            if not var_file_args:
+                raise SystemExit(
+                    "fake terraform precondition: expected at least one var-file"
                 )
+            var_sources = []
+            for var_file_arg in var_file_args:
+                var_path = pathlib.Path(var_file_arg)
+                if var_path.suffix == ".json":
+                    value = json.loads(var_path.read_text(encoding="utf-8"))
+                    if not isinstance(value, dict):
+                        raise SystemExit(
+                            "fake terraform precondition: JSON var-file "
+                            "must be an object"
+                        )
+                    var_sources.append(("json", value))
+                else:
+                    var_sources.append(
+                        (
+                            "hcl",
+                            var_path.read_text(encoding="utf-8"),
+                        )
+                    )
+            missing = object()
+
+            def source_value(source, name):
+                source_kind, payload = source
+                if source_kind == "json":
+                    return payload.get(name, missing)
+                matches = re.findall(
+                    r"^\\s*"
+                    + re.escape(name)
+                    + r"\\s*=\\s*(.*?)\\s*$",
+                    payload,
+                    flags=re.MULTILINE,
+                )
+                if len(matches) > 1:
+                    raise SystemExit(
+                        "fake terraform precondition: duplicate tfvars " + name
+                    )
+                if not matches:
+                    return missing
+                try:
+                    return json.loads(matches[0])
+                except json.JSONDecodeError as exc:
+                    raise SystemExit(
+                        "fake terraform precondition: unsupported tfvars "
+                        + name
+                    ) from exc
+
+            def configured_var(name, default=None):
+                value = default
+                for source in var_sources:
+                    candidate = source_value(source, name)
+                    if candidate is not missing:
+                        value = candidate
+                override = cli_var(name)
+                if override is None:
+                    return value
+                try:
+                    return json.loads(override)
+                except json.JSONDecodeError:
+                    return override
+
+            def required_configured_var(name):
+                value = missing
+                for source in var_sources:
+                    candidate = source_value(source, name)
+                    if candidate is not missing:
+                        value = candidate
+                override = cli_var(name)
+                if override is not None:
+                    try:
+                        value = json.loads(override)
+                    except json.JSONDecodeError:
+                        value = override
+                if value is missing:
+                    raise SystemExit(
+                        "fake terraform precondition: missing configured "
+                        + name
+                    )
+                return value
+
+            if capture_path := os.environ.get("TF_FAKE_DERIVED_VARS_CAPTURE"):
+                overlays = [
+                    value
+                    for kind, value in var_sources
+                    if kind == "json"
+                    and "image_deployment_consumer_manifest" in value
+                ]
+                if len(overlays) != 1:
+                    raise SystemExit(
+                        "fake terraform precondition: expected one derived overlay"
+                    )
+                pathlib.Path(capture_path).write_text(
+                    json.dumps(overlays[0], sort_keys=True),
+                    encoding="utf-8",
+                )
+
+            out = next(
+                arg.split("=", 1)[1]
+                for arg in args
+                if arg.startswith("-out=")
             )
+            core = json.loads(required_var("runtime_guard_live"))
+            image_deployment_intent_id = required_var(
+                "image_deployment_intent_id"
+            )
+            media_worker_image = required_var("media_worker_image")
+            tiktok_acquire_image = required_var("tiktok_acquire_image")
+            consumer_manifest = required_configured_var(
+                "image_deployment_consumer_manifest"
+            )
+            receipt_catalog_arg = required_configured_var(
+                "image_release_receipt_catalog"
+            )
+            consumer_receipt_bindings_arg = required_configured_var(
+                "image_release_consumer_receipt_bindings"
+            )
+            hmac_preflight_epoch_s = required_var("hmac_preflight_epoch_s")
+            mail_deployed_primary = required_configured_var(
+                "mail_action_hmac_deployed_primary_generation"
+            )
+            mail_deployed_previous = required_configured_var(
+                "mail_action_hmac_deployed_previous_generation"
+            )
+            mail_deployed_t0 = required_configured_var(
+                "mail_action_hmac_deployed_rotation_started_at"
+            )
+            report_deployed_primary = required_configured_var(
+                "report_link_hmac_deployed_primary_generation"
+            )
+            report_deployed_previous = required_configured_var(
+                "report_link_hmac_deployed_previous_generation"
+            )
+            report_deployed_t0 = required_configured_var(
+                "report_link_hmac_deployed_rotation_started_at"
+            )
+            mail_primary_arn = configured_var("mail_action_hmac_secret_arn", "")
+            mail_previous_arn = configured_var(
+                "mail_action_hmac_previous_secret_arn",
+                "",
+            )
+            mail_previous_t0 = configured_var(
+                "mail_action_hmac_previous_rotation_started_at",
+                None,
+            )
+            report_primary_arn = configured_var(
+                "report_link_hmac_secret_arn",
+                "",
+            )
+            report_previous_arn = configured_var(
+                "report_link_hmac_previous_secret_arn",
+                "",
+            )
+            report_previous_t0 = configured_var(
+                "report_link_hmac_previous_rotation_started_at",
+                None,
+            )
+            hmac_rotation_epoch = configured_var("hmac_rotation_epoch", "")
+            mail_rollout_phase = configured_var(
+                "mail_action_hmac_rollout_phase",
+                "blocked",
+            )
+            report_rollout_phase = configured_var(
+                "report_link_hmac_rollout_phase",
+                "blocked",
+            )
+            mail_primary_version = configured_var(
+                "mail_action_hmac_primary_version_id",
+                "",
+            )
+            report_primary_version = configured_var(
+                "report_link_hmac_primary_version_id",
+                "",
+            )
+            mail_previous_version = configured_var(
+                "mail_action_hmac_previous_version_id",
+                "",
+            )
+            report_previous_version = configured_var(
+                "report_link_hmac_previous_version_id",
+                "",
+            )
+            mail_proposed_t0 = configured_var(
+                "mail_action_hmac_rotation_started_at",
+                "",
+            )
+            report_proposed_t0 = configured_var(
+                "report_link_hmac_rotation_started_at",
+                "",
+            )
+            hmac_live_manifest_path = configured_var(
+                "hmac_live_manifest_path",
+                "",
+            )
+            hmac_rollout_control_path = configured_var(
+                "hmac_rollout_control_path",
+                "",
+            )
+            worker_hmac_artifact_sha256 = configured_var(
+                "worker_hmac_artifact_sha256",
+                "",
+            )
+            plan = json.loads(
+                pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text()
+            )
+
+            if core["mode"] != "sync":
+                raise SystemExit("fake terraform supports only sync plan wiring")
+            for name in ("openclaw", "mcp", "x", "tiktok"):
+                if core[f"desired_{name}_image"] != core[f"live_{name}_image"]:
+                    raise SystemExit(
+                        "runtime_guard_verified precondition: sync image mismatch"
+                    )
+            legacy_tiktok_prefix = (
+                "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+                "teamagent-dev-tiktok-acquire@sha256:"
+            )
+            if core["live_tiktok_image"].startswith(legacy_tiktok_prefix):
+                if media_worker_image != "" or tiktok_acquire_image != "":
+                    raise SystemExit(
+                        "runtime_guard_verified precondition: legacy media inputs "
+                        "must both be empty"
+                    )
+                resolved_media_image = core["live_tiktok_image"]
+            else:
+                if tiktok_acquire_image != "":
+                    raise SystemExit(
+                        "runtime_guard_verified precondition: retired media alias "
+                        "must be empty"
+                    )
+                resolved_media_image = media_worker_image
+            if resolved_media_image != core["desired_tiktok_image"]:
+                raise SystemExit(
+                    "runtime_guard_verified precondition: resolved media image mismatch"
+                )
+
+            consumers = consumer_manifest.get("consumers")
+            if (
+                consumer_manifest.get("schema_version") != 1
+                or consumer_manifest.get("registry_sha256")
+                != os.environ["TF_FAKE_CONSUMER_REGISTRY_SHA256"]
+                or consumer_manifest.get("mode") != "no-image-transition"
+                or not isinstance(consumers, list)
+                or len(consumers) != 8
+            ):
+                raise SystemExit(
+                    "image release precondition: malformed sync consumer manifest"
+                )
+            consumer_ids = [consumer.get("consumer_id") for consumer in consumers]
+            if len(set(consumer_ids)) != 8 or any(
+                consumer.get("live")
+                != consumer.get("before")
+                or consumer.get("before")
+                != consumer.get("after")
+                for consumer in consumers
+            ):
+                raise SystemExit(
+                    "image release precondition: manifest is not exact no-transition"
+                )
+            manifest_images = {
+                consumer["consumer_id"]: consumer["after"]["image"]
+                for consumer in consumers
+            }
+            if manifest_images != core["desired_consumer_images"]:
+                raise SystemExit(
+                    "image release precondition: manifest image map mismatch"
+                )
+            if receipt_catalog_arg != {} or consumer_receipt_bindings_arg != {}:
+                raise SystemExit(
+                    "image release precondition: no-transition evidence must be empty"
+                )
+
+            def task_container(address, name, phase="before"):
+                change = next(
+                    item
+                    for item in plan["resource_changes"]
+                    if item["address"] == address
+                )
+                containers = json.loads(
+                    change["change"][phase]["container_definitions"]
+                )
+                matches = [
+                    container
+                    for container in containers
+                    if container["name"] == name
+                ]
+                if len(matches) != 1:
+                    raise SystemExit(
+                        "worker HMAC precondition: live owner is missing"
+                    )
+                return matches[0]
+
+            def field_map(container, field, value_field):
+                rows = container.get(field, [])
+                result = {
+                    row["name"]: row[value_field]
+                    for row in rows
+                }
+                if len(result) != len(rows):
+                    raise SystemExit(
+                        "worker HMAC precondition: duplicate live metadata"
+                    )
+                return result
+
+            mcp_container = task_container(
+                "aws_ecs_task_definition.mcp",
+                "teamagent-mcp",
+            )
+            connect_container = task_container(
+                "aws_ecs_task_definition.connect_web[0]",
+                "connect-web",
+            )
+            morning_container = task_container(
+                "aws_ecs_task_definition.morning_digest[0]",
+                "morning-digest",
+            )
+
+            def has_prefix(container, prefix):
+                env = field_map(container, "environment", "value")
+                secrets = field_map(container, "secrets", "valueFrom")
+                return any(
+                    name.startswith(prefix)
+                    for name in [*env, *secrets]
+                )
+
+            if has_prefix(morning_container, "REPORT_LINK_"):
+                raise SystemExit(
+                    "worker HMAC precondition: purpose ownership mismatch"
+                )
+
+            version_pattern = r"[A-Za-z0-9_-]{32,64}"
+
+            def observed_purpose(owners, prefix, purpose):
+                rows = []
+                primary_pattern = re.compile(
+                    r"^(arn:aws:secretsmanager:ap-northeast-1:"
+                    r"718959508629:secret:teamagent/dev/hmac/"
+                    + re.escape(purpose)
+                    + r"-[A-Za-z0-9]{6}):::("
+                    + version_pattern
+                    + r")$"
+                )
+                previous_pattern = re.compile(
+                    r"^(arn:aws:secretsmanager:ap-northeast-1:"
+                    r"718959508629:secret:teamagent/dev/"
+                    r"(?:database-url|hmac/"
+                    + re.escape(purpose)
+                    + r")-[A-Za-z0-9]{6}):::("
+                    + version_pattern
+                    + r")$"
+                )
+                for container in owners:
+                    env = field_map(container, "environment", "value")
+                    secrets = field_map(
+                        container,
+                        "secrets",
+                        "valueFrom",
+                    )
+                    primary_selector = secrets.get(prefix + "_SECRET", "")
+                    primary_match = primary_pattern.fullmatch(primary_selector)
+                    if primary_match is None:
+                        raise SystemExit(
+                            "worker HMAC precondition: primary is not exact"
+                        )
+                    primary_generation = (
+                        primary_match.group(1)
+                        + "@"
+                        + primary_match.group(2)
+                    )
+                    if (
+                        env.get(prefix + "_PRIMARY_GENERATION")
+                        != primary_generation
+                    ):
+                        raise SystemExit(
+                            "worker HMAC precondition: primary generation mismatch"
+                        )
+                    previous_selector = secrets.get(
+                        prefix + "_PREVIOUS_SECRET",
+                        "",
+                    )
+                    if previous_selector:
+                        previous_match = previous_pattern.fullmatch(
+                            previous_selector
+                        )
+                        if previous_match is None:
+                            raise SystemExit(
+                                "worker HMAC precondition: previous is not exact"
+                            )
+                        previous_generation = (
+                            previous_match.group(1)
+                            + "@"
+                            + previous_match.group(2)
+                        )
+                        previous_t0 = env.get(
+                            prefix + "_PREVIOUS_ROTATION_STARTED_AT",
+                            "",
+                        )
+                        if (
+                            env.get(prefix + "_PREVIOUS_GENERATION")
+                            != previous_generation
+                            or re.fullmatch(
+                                r"(?:0|[1-9][0-9]{0,9})",
+                                previous_t0,
+                            )
+                            is None
+                        ):
+                            raise SystemExit(
+                                "worker HMAC precondition: previous pair mismatch"
+                            )
+                    else:
+                        previous_generation = ""
+                        previous_t0 = ""
+                        if (
+                            prefix + "_PREVIOUS_GENERATION" in env
+                            or prefix + "_PREVIOUS_ROTATION_STARTED_AT" in env
+                        ):
+                            raise SystemExit(
+                                "worker HMAC precondition: absent previous leaked"
+                            )
+                    rotation_epoch = env.get(
+                        "TEAMAGENT_HMAC_ROTATION_EPOCH",
+                        "",
+                    )
+                    if (
+                        re.fullmatch(
+                            r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                            rotation_epoch,
+                        )
+                        is None
+                    ):
+                        raise SystemExit(
+                            "worker HMAC precondition: rotation epoch is invalid"
+                        )
+                    rows.append(
+                        {
+                            "primary_base": primary_match.group(1),
+                            "primary_generation": primary_generation,
+                            "previous_selector": previous_selector,
+                            "previous_generation": previous_generation,
+                            "previous_t0": previous_t0,
+                            "rotation_epoch": rotation_epoch,
+                        }
+                    )
+                if any(row != rows[0] for row in rows[1:]):
+                    raise SystemExit(
+                        "worker HMAC precondition: owners are not uniform"
+                    )
+                return rows[0]
+
+            observed_mail = observed_purpose(
+                [mcp_container, morning_container],
+                "MAIL_ACTION_HMAC",
+                "mail-action",
+            )
+            observed_report = observed_purpose(
+                [mcp_container, connect_container],
+                "REPORT_LINK_HMAC",
+                "report-link",
+            )
+            if (
+                has_prefix(connect_container, "MAIL_ACTION_")
+                and observed_purpose(
+                    [connect_container],
+                    "MAIL_ACTION_HMAC",
+                    "mail-action",
+                )
+                != observed_mail
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: legacy mail owner mismatch"
+                )
+            if (
+                observed_mail["rotation_epoch"]
+                != observed_report["rotation_epoch"]
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: purpose epochs differ"
+                )
+            planned_connect = task_container(
+                "aws_ecs_task_definition.connect_web[0]",
+                "connect-web",
+                "after",
+            )
+            planned_morning = task_container(
+                "aws_ecs_task_definition.morning_digest[0]",
+                "morning-digest",
+                "after",
+            )
+            if has_prefix(planned_connect, "MAIL_ACTION_") or has_prefix(
+                planned_morning,
+                "REPORT_LINK_",
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: planned ownership mismatch"
+                )
+
+            try:
+                preflight_epoch = int(hmac_preflight_epoch_s)
+            except ValueError as exc:
+                raise SystemExit(
+                    "worker HMAC precondition: trusted epoch is invalid"
+                ) from exc
+            if (
+                str(preflight_epoch) != hmac_preflight_epoch_s
+                or preflight_epoch < 0
+                or preflight_epoch > 9_999_999_999
+                or preflight_epoch != core["hmac_transition_epoch"]
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: trusted epoch is not core-bound"
+                )
+            if (
+                mail_deployed_primary
+                != observed_mail["primary_generation"]
+                or mail_deployed_previous
+                != observed_mail["previous_generation"]
+                or mail_deployed_t0 != observed_mail["previous_t0"]
+                or report_deployed_primary
+                != observed_report["primary_generation"]
+                or report_deployed_previous
+                != observed_report["previous_generation"]
+                or report_deployed_t0 != observed_report["previous_t0"]
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: deployed generation metadata mismatch"
+                )
+
+            for purpose, proposed_primary, proposed_previous, proposed_t0, observed in (
+                (
+                    "mail",
+                    mail_primary_arn,
+                    mail_previous_arn,
+                    mail_previous_t0,
+                    observed_mail,
+                ),
+                (
+                    "report",
+                    report_primary_arn,
+                    report_previous_arn,
+                    report_previous_t0,
+                    observed_report,
+                ),
+            ):
+                deployed_core = core["deployed_hmac"][purpose]
+                expected_core_t0 = (
+                    int(observed["previous_t0"])
+                    if observed["previous_t0"]
+                    else None
+                )
+                if (
+                    deployed_core["primary_secret_arn"]
+                    != observed["primary_base"]
+                    or deployed_core["previous_secret_arn"]
+                    != observed["previous_selector"]
+                    or deployed_core["previous_present"]
+                    != bool(observed["previous_selector"])
+                    or deployed_core["rotation_started_at"]
+                    != expected_core_t0
+                    or proposed_primary != deployed_core["primary_secret_arn"]
+                    or proposed_previous != deployed_core["previous_secret_arn"]
+                    or proposed_t0 != deployed_core["rotation_started_at"]
+                ):
+                    raise SystemExit(
+                        "runtime_guard_verified precondition: live HMAC "
+                        "metadata mismatch"
+                    )
+
+            def proposed_purpose(
+                phase,
+                primary_arn,
+                primary_version,
+                previous_version,
+                proposed_t0,
+            ):
+                if (
+                    re.fullmatch(version_pattern, primary_version) is None
+                    or phase not in {"steady", "dedicated_rotation"}
+                ):
+                    raise SystemExit(
+                        "worker HMAC precondition: proposed config is blocked"
+                    )
+                primary_generation = primary_arn + "@" + primary_version
+                if phase == "steady":
+                    if previous_version != "" or proposed_t0 != "":
+                        raise SystemExit(
+                            "worker HMAC precondition: steady pair is not empty"
+                        )
+                    previous_generation = ""
+                else:
+                    if (
+                        re.fullmatch(version_pattern, previous_version) is None
+                        or re.fullmatch(
+                            r"(?:0|[1-9][0-9]{0,9})",
+                            proposed_t0,
+                        )
+                        is None
+                    ):
+                        raise SystemExit(
+                            "worker HMAC precondition: proposed rotation is invalid"
+                        )
+                    previous_generation = (
+                        primary_arn + "@" + previous_version
+                    )
+                return {
+                    "primary_generation": primary_generation,
+                    "previous_generation": previous_generation,
+                    "t0": proposed_t0,
+                }
+
+            proposed_mail = proposed_purpose(
+                mail_rollout_phase,
+                mail_primary_arn,
+                mail_primary_version,
+                mail_previous_version,
+                mail_proposed_t0,
+            )
+            proposed_report = proposed_purpose(
+                report_rollout_phase,
+                report_primary_arn,
+                report_primary_version,
+                report_previous_version,
+                report_proposed_t0,
+            )
+            if (
+                re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                    hmac_rotation_epoch,
+                )
+                is None
+                or hmac_live_manifest_path == ""
+                or hmac_rollout_control_path == ""
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    worker_hmac_artifact_sha256,
+                )
+                is None
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: proposed config is not ready"
+                )
+            if hmac_rotation_epoch != observed_mail["rotation_epoch"]:
+                raise SystemExit(
+                    "worker HMAC precondition: planned epoch differs from live"
+                )
+
+            def steady_transition_is_valid(proposed, observed, ttl):
+                if (
+                    proposed["primary_generation"]
+                    != observed["primary_generation"]
+                    or proposed["previous_generation"]
+                    != observed["previous_generation"]
+                    or proposed["t0"] != observed["previous_t0"]
+                ):
+                    return False
+                if observed["previous_t0"] == "":
+                    return True
+                t0 = int(observed["previous_t0"])
+                return (
+                    t0 <= preflight_epoch + 300
+                    and preflight_epoch < t0 + 900 + ttl
+                )
+
+            if not (
+                steady_transition_is_valid(
+                    proposed_mail,
+                    observed_mail,
+                    86_400,
+                )
+                and steady_transition_is_valid(
+                    proposed_report,
+                    observed_report,
+                    604_800,
+                )
+            ):
+                raise SystemExit(
+                    "worker HMAC precondition: transition is invalid"
+                )
+
+            desired = core["desired_mcp_image"]
             receipt_catalog = {}
             consumer_receipt_bindings = {}
             force_ready_false = os.environ.get("TF_FAKE_GATE_READY_FALSE") == "1"
@@ -2396,12 +3236,8 @@ def _fake_terraform(path: Path) -> None:
                 "openclaw_image": {"value": core["desired_openclaw_image"]},
                 "mcp_image": {"value": desired},
                 "x_buzz_image": {"value": core["desired_x_image"]},
-                "media_worker_image": {
-                    "value": media_worker_arg.split("=", 2)[2]
-                },
-                "tiktok_acquire_image": {
-                    "value": tiktok_acquire_arg.split("=", 2)[2]
-                },
+                "media_worker_image": {"value": media_worker_image},
+                "tiktok_acquire_image": {"value": tiktok_acquire_image},
                 "enable_connect_web": {"value": True},
                 "enable_canary_health": {"value": True},
                 "enable_ingest_schedule": {"value": True},
@@ -2429,17 +3265,43 @@ def _fake_terraform(path: Path) -> None:
                     "value": image_deployment_intent_id
                 },
                 "mail_action_hmac_secret_arn": {
-                    "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
-                    "secret:teamagent/dev/hmac/mail-action-AbC123"
+                    "value": mail_primary_arn
                 },
-                "mail_action_hmac_previous_secret_arn": {"value": ""},
-                "mail_action_hmac_previous_rotation_started_at": {"value": None},
+                "mail_action_hmac_previous_secret_arn": {
+                    "value": mail_previous_arn
+                },
+                "mail_action_hmac_previous_rotation_started_at": {
+                    "value": mail_previous_t0
+                },
                 "report_link_hmac_secret_arn": {
-                    "value": "arn:aws:secretsmanager:ap-northeast-1:718959508629:"
-                    "secret:teamagent/dev/hmac/report-link-XyZ789"
+                    "value": report_primary_arn
                 },
-                "report_link_hmac_previous_secret_arn": {"value": ""},
-                "report_link_hmac_previous_rotation_started_at": {"value": None},
+                "report_link_hmac_previous_secret_arn": {
+                    "value": report_previous_arn
+                },
+                "report_link_hmac_previous_rotation_started_at": {
+                    "value": report_previous_t0
+                },
+                "hmac_preflight_epoch_s": {"value": hmac_preflight_epoch_s},
+                "hmac_rotation_epoch": {"value": hmac_rotation_epoch},
+                "mail_action_hmac_deployed_primary_generation": {
+                    "value": mail_deployed_primary
+                },
+                "mail_action_hmac_deployed_previous_generation": {
+                    "value": mail_deployed_previous
+                },
+                "mail_action_hmac_deployed_rotation_started_at": {
+                    "value": mail_deployed_t0
+                },
+                "report_link_hmac_deployed_primary_generation": {
+                    "value": report_deployed_primary
+                },
+                "report_link_hmac_deployed_previous_generation": {
+                    "value": report_deployed_previous
+                },
+                "report_link_hmac_deployed_rotation_started_at": {
+                    "value": report_deployed_t0
+                },
                 "hmac_runtime_promotion_tasks": {
                     "value": (
                         ["connect_web", "mcp", "morning_digest"]
@@ -2652,6 +3514,7 @@ def _harness(
     scenario: str = "safe",
     *,
     hmac_active: bool = False,
+    hmac_previous_active: bool = False,
     pre_media_cutover_sync: bool = False,
 ) -> tuple[dict[str, str], Path, Path]:
     tmp_path.chmod(0o700)
@@ -2665,11 +3528,19 @@ def _harness(
         _activate_hmac_plan(plan_data)
     if scenario == "safe":
         _stabilize_no_image_plan(plan_data, hmac_active=hmac_active)
-    consumer_manifest = _consumer_manifest()
+    hmac_rotation_started_at = ""
+    if hmac_previous_active:
+        if scenario != "safe":
+            raise AssertionError("active HMAC fixture requires safe sync")
+        hmac_rotation_started_at = str(int(time.time()) - 60)
+        _set_active_hmac_previous_fixture(
+            plan_data,
+            rotation_started_at=hmac_rotation_started_at,
+        )
     if pre_media_cutover_sync:
-        if scenario != "safe" or hmac_active:
+        if scenario != "safe" or hmac_active or hmac_previous_active:
             raise AssertionError("pre-media-cutover fixture requires plain safe sync")
-        _set_pre_media_cutover_sync_fixture(plan_data, consumer_manifest)
+        _set_pre_media_cutover_sync_fixture(plan_data)
     state_data = _fake_state_from_plan(plan_data)
     _mutate_plan(plan_data, scenario)
     template = tmp_path / "template.json"
@@ -2678,12 +3549,44 @@ def _harness(
     default_state = tmp_path / "terraform-state.json"
     default_state.write_text(json.dumps(state_data), encoding="utf-8")
     default_state.chmod(0o600)
-    manifest = tmp_path / "image-deployment-consumer-manifest.json"
-    manifest.write_text(json.dumps(consumer_manifest), encoding="utf-8")
-    manifest.chmod(0o600)
     var_file = tmp_path / "terraform.tfvars"
+    hmac_phase = "dedicated_rotation" if hmac_previous_active else "steady"
+    hmac_previous_tfvars = (
+        [
+            (f'mail_action_hmac_previous_version_id = "{MAIL_HMAC_PREVIOUS_VERSION_ID}"'),
+            (f'report_link_hmac_previous_version_id = "{REPORT_HMAC_PREVIOUS_VERSION_ID}"'),
+            (f'mail_action_hmac_rotation_started_at = "{hmac_rotation_started_at}"'),
+            (f'report_link_hmac_rotation_started_at = "{hmac_rotation_started_at}"'),
+            (f'mail_action_hmac_previous_secret_arn = "{MAIL_HMAC_PREVIOUS_VALUE_FROM}"'),
+            (f'report_link_hmac_previous_secret_arn = "{REPORT_HMAC_PREVIOUS_VALUE_FROM}"'),
+            (f"mail_action_hmac_previous_rotation_started_at = {hmac_rotation_started_at}"),
+            (f"report_link_hmac_previous_rotation_started_at = {hmac_rotation_started_at}"),
+        ]
+        if hmac_previous_active
+        else []
+    )
     var_file.write_text(
-        'alarm_email_endpoints = ["s-komata@vectorinc.co.jp"]\n',
+        "\n".join(
+            [
+                'alarm_email_endpoints = ["s-komata@vectorinc.co.jp"]',
+                f'mail_action_hmac_rollout_phase = "{hmac_phase}"',
+                f'report_link_hmac_rollout_phase = "{hmac_phase}"',
+                f'mail_action_hmac_secret_arn = "{MAIL_HMAC_SECRET}"',
+                f'report_link_hmac_secret_arn = "{REPORT_HMAC_SECRET}"',
+                (f'mail_action_hmac_primary_version_id = "{MAIL_HMAC_VERSION_ID}"'),
+                (f'report_link_hmac_primary_version_id = "{REPORT_HMAC_VERSION_ID}"'),
+                f'hmac_rotation_epoch = "{HMAC_RELEASE["rotation_epoch"]}"',
+                ('hmac_live_manifest_path = "' + str(tmp_path / "hmac-live-manifest.json") + '"'),
+                (
+                    'hmac_rollout_control_path = "'
+                    + str(tmp_path / "hmac-rollout-control.json")
+                    + '"'
+                ),
+                (f'worker_hmac_artifact_sha256 = "{WORKER_HMAC_ARTIFACT_SHA256}"'),
+                *hmac_previous_tfvars,
+                "",
+            ]
+        ),
         encoding="utf-8",
     )
     var_file.chmod(0o600)
@@ -2699,7 +3602,7 @@ def _harness(
             "TF_FAKE_LOG": str(tf_log),
             "TF_FAKE_TEMPLATE": str(template),
             "TF_FAKE_DEFAULT_STATE": str(default_state),
-            "TF_FAKE_CONSUMER_MANIFEST": str(manifest),
+            "TF_FAKE_DERIVED_VARS_CAPTURE": str(tmp_path / "sync-derived-vars.json"),
             "TF_FAKE_RELEASE_EVIDENCE": str(RELEASE_EVIDENCE),
             "TF_FAKE_RELEASE_CONTRACTS": json.dumps(
                 release_contracts,
@@ -2716,11 +3619,14 @@ def _harness(
                 sort_keys=True,
                 separators=(",", ":"),
             ),
+            "TF_FAKE_CONSUMER_REGISTRY_SHA256": (CONSUMERS.consumer_registry_sha256()),
             "AWS_FAKE_TRUSTED_AUTOMATION": "1",
         }
     )
     if hmac_active:
         env["TF_FAKE_HMAC_ACTIVE"] = "1"
+    if hmac_previous_active:
+        env["AWS_FAKE_HMAC_PREVIOUS_T0"] = hmac_rotation_started_at
     if pre_media_cutover_sync:
         env["AWS_FAKE_TIKTOK_IMAGE"] = LEGACY_TIKTOK_IMAGE
     return env, var_file, tf_log
@@ -3752,6 +4658,10 @@ def test_pre_media_cutover_legacy_sync_binds_empty_tf_inputs_through_saved_plan(
         saved_plan["variables"]["runtime_guard_live"]["value"]["live_tiktok_image"]
         == LEGACY_TIKTOK_IMAGE
     )
+    assert (
+        saved_plan["variables"]["runtime_guard_live"]["value"]["desired_tiktok_image"]
+        == LEGACY_TIKTOK_IMAGE
+    )
     task_change = _find(saved_plan, TASK_ADDRESSES["tiktok"])["change"]
     assert task_change["actions"] == ["no-op"]
     assert task_change["before"] == task_change["after"]
@@ -3810,6 +4720,10 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
             }
             task_definition = row[phase]["task_definition"]
             assert set(task_definition) == set(TASK_DEFINITION_COMPARE_FIELDS)
+            assert (
+                task_definition["volumes"]
+                == task_changes[row["terraform_task_definition_address"]]["before"]["volume"]
+            )
             named_containers = [
                 container
                 for container in task_definition["container_definitions"]
@@ -3923,6 +4837,68 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         "morning": True,
         "canary": False,
     }
+    plan_command = next(
+        command
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+        if command.startswith("plan ")
+    )
+    plan_var_files = [
+        argument for argument in plan_command.split() if argument.startswith("-var-file=")
+    ]
+    assert len(plan_var_files) == 2
+    # The guard hands terraform its own staged copy of the operator var file, and
+    # that staging directory is gone by the time this runs, so pin the shape. The
+    # copy's contents are already exercised: the fake reads this very file for the
+    # operator-supplied rollout inputs it asserts on below.
+    staged_var_file = Path(plan_var_files[0].removeprefix("-var-file="))
+    assert staged_var_file.name == Path(var_file).name
+    assert staged_var_file.parent.name.startswith(".teamagent-runtime-plan.")
+    # The derived overlay must stay second so the operator file cannot shadow it.
+    assert plan_var_files[1].endswith("/sync-derived.tfvars.json")
+    derived_vars = json.loads(Path(env["TF_FAKE_DERIVED_VARS_CAPTURE"]).read_text(encoding="utf-8"))
+    assert set(derived_vars) == {
+        "image_deployment_consumer_manifest",
+        "image_release_receipt_catalog",
+        "image_release_consumer_receipt_bindings",
+        "mail_action_hmac_deployed_primary_generation",
+        "mail_action_hmac_deployed_previous_generation",
+        "mail_action_hmac_deployed_rotation_started_at",
+        "report_link_hmac_deployed_primary_generation",
+        "report_link_hmac_deployed_previous_generation",
+        "report_link_hmac_deployed_rotation_started_at",
+    }
+    assert derived_vars["image_deployment_consumer_manifest"] == manifest
+    assert derived_vars["image_release_receipt_catalog"] == {}
+    assert derived_vars["image_release_consumer_receipt_bindings"] == {}
+    assert "-var=hmac_preflight_epoch_s=" in plan_command
+    assert "-var=image_deployment_consumer_manifest=" not in plan_command
+    assert "-var=hmac_rotation_epoch=" not in plan_command
+    assert "-var=mail_action_hmac_secret_arn=" not in plan_command
+    assert "-var=report_link_hmac_secret_arn=" not in plan_command
+    core = saved_plan["variables"]["runtime_guard_live"]["value"]
+    assert {
+        name: core[f"desired_{name}_image"] == core[f"live_{name}_image"]
+        for name in ("openclaw", "mcp", "x", "tiktok")
+    } == {
+        "openclaw": True,
+        "mcp": True,
+        "x": True,
+        "tiktok": True,
+    }
+    assert (
+        int(saved_plan["variables"]["hmac_preflight_epoch_s"]["value"])
+        == core["hmac_transition_epoch"]
+    )
+    assert (
+        saved_plan["variables"]["mail_action_hmac_deployed_primary_generation"]["value"]
+        == MAIL_HMAC_GENERATION
+    )
+    assert (
+        saved_plan["variables"]["report_link_hmac_deployed_primary_generation"]["value"]
+        == REPORT_HMAC_GENERATION
+    )
+    assert core["deployed_hmac"]["mail"]["primary_secret_arn"] == MAIL_HMAC_SECRET
+    assert core["deployed_hmac"]["report"]["primary_secret_arn"] == REPORT_HMAC_SECRET
     assert data["mode"] == "sync"
     assert data["migration_id"] == ""
     assert data["preflight_receipt_sha256"] == ""
@@ -3981,6 +4957,114 @@ def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> No
         command == "apply" or command.startswith("apply ")
         for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_sync_manifest_rejects_state_pointer_that_is_not_aws_live(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    state_path = Path(env["TF_FAKE_DEFAULT_STATE"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    stale_arn = _task_arn("mcp").rsplit(":", 1)[0] + ":999"
+    task_resource = next(
+        resource
+        for resource in state["resources"]
+        if resource["type"] == "aws_ecs_task_definition" and resource["name"] == "mcp"
+    )
+    task_resource["instances"][0]["attributes"]["arn"] = stale_arn
+    task_resource["instances"][0]["attributes"]["id"] = stale_arn
+    service_resource = next(
+        resource
+        for resource in state["resources"]
+        if resource["type"] == "aws_ecs_service" and resource["name"] == "mcp"
+    )
+    service_resource["instances"][0]["attributes"]["task_definition"] = stale_arn
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    plan = tmp_path / "state-live-mismatch.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert "live AWS/state snapshot" in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not any(
+        command == "plan" or command.startswith("plan ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_sync_manifest_rejects_state_task_body_that_is_not_aws_live(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    state_path = Path(env["TF_FAKE_DEFAULT_STATE"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    task_resource = next(
+        resource
+        for resource in state["resources"]
+        if resource["type"] == "aws_ecs_task_definition" and resource["name"] == "mcp"
+    )
+    task_resource["instances"][0]["attributes"]["volume"] = [{"name": "state-only-volume"}]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    plan = tmp_path / "state-body-mismatch.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 1
+    assert "state full task body" in result.stdout + result.stderr
+    assert not plan.exists()
+    assert not any(
+        command == "plan" or command.startswith("plan ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_sync_overlay_binds_active_hmac_previous_pair_from_live(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(
+        tmp_path,
+        hmac_previous_active=True,
+    )
+    plan = tmp_path / "active-hmac.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    saved_plan = json.loads(plan.read_text(encoding="utf-8"))
+    variables = saved_plan["variables"]
+    assert (
+        variables["mail_action_hmac_deployed_previous_generation"]["value"]
+        == MAIL_HMAC_PREVIOUS_GENERATION
+    )
+    assert (
+        variables["report_link_hmac_deployed_previous_generation"]["value"]
+        == REPORT_HMAC_PREVIOUS_GENERATION
+    )
+    mail_t0 = variables["mail_action_hmac_deployed_rotation_started_at"]["value"]
+    report_t0 = variables["report_link_hmac_deployed_rotation_started_at"]["value"]
+    assert mail_t0 == report_t0
+    assert re.fullmatch(r"(?:0|[1-9][0-9]{0,9})", mail_t0)
+    core = variables["runtime_guard_live"]["value"]
+    assert core["deployed_hmac"]["mail"]["rotation_started_at"] == int(mail_t0)
+    assert core["deployed_hmac"]["report"]["rotation_started_at"] == int(report_t0)
+    derived_vars = json.loads(Path(env["TF_FAKE_DERIVED_VARS_CAPTURE"]).read_text(encoding="utf-8"))
+    assert (
+        derived_vars["mail_action_hmac_deployed_previous_generation"]
+        == MAIL_HMAC_PREVIOUS_GENERATION
+    )
+    assert (
+        derived_vars["report_link_hmac_deployed_previous_generation"]
+        == REPORT_HMAC_PREVIOUS_GENERATION
+    )
+    plan_command = next(
+        command
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+        if command.startswith("plan ")
+    )
+    assert plan_command.count("-var-file=") == 2
+    assert "-var=mail_action_hmac_deployed_previous_generation=" not in plan_command
+    assert "-var=report_link_hmac_deployed_previous_generation=" not in plan_command
 
 
 def test_exact_hmac_runtime_gate_set_is_accepted_by_sync_guard(tmp_path: Path) -> None:
