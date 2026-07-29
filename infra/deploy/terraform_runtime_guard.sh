@@ -497,10 +497,14 @@ aws_endpoint() {
     cloudwatch) printf 'https://monitoring.%s.amazonaws.com\n' "$REGION" ;;
     budgets) printf 'https://budgets.amazonaws.com\n' ;;
     ce) printf 'https://ce.us-east-1.amazonaws.com\n' ;;
+    # AWS Chatbot has no regional endpoints -- only the global management API.
+    # The generic regional form resolved nowhere, which no fake-backed test could
+    # ever notice; it surfaced on the first real-AWS guard plan run.
+    chatbot) printf 'https://management.chatbot.amazonaws.com\n' ;;
     *)
       case "$1" in
         sts|cloudtrail|bedrock|dynamodb|ec2|ecs|events|scheduler|lambda|\
-        logs|chatbot|sns|sqs|kms|autoscaling|codestar-notifications|rds|\
+        logs|sns|sqs|kms|autoscaling|codestar-notifications|rds|\
         secretsmanager)
           printf 'https://%s.%s.amazonaws.com\n' "$1" "$REGION"
           ;;
