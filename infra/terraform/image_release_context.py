@@ -98,6 +98,22 @@ TASK_DEFINITION_COMPARE_FIELDS = {
 # Terraform provider attribute is singular for volumes. Anything that reads a
 # provider payload (state attributes, plan after_unknown) must accept both.
 _PROVIDER_ATTRIBUTE_ALIASES = {"volumes": ("volume",)}
+# Paths the provider computes at apply time for a task definition replacement --
+# which is what a release plan is. configure_at_launch is Optional+Computed and
+# no .tf sets it, so it is unknown on every release. This set is asserted equal
+# to terraform_runtime_guard.sh's own jq allowlist, so the two can never drift.
+# Every path is anchored: an unknown name, host_path, EFS block, or a second
+# volume is outside the set and still fails closed.
+TASK_DEFINITION_AFTER_UNKNOWN_ALLOWLIST = frozenset(
+    {
+        ("arn",),
+        ("arn_without_revision",),
+        ("enable_fault_injection",),
+        ("id",),
+        ("revision",),
+        ("volume", 0, "configure_at_launch"),
+    }
+)
 RELEASE_GATE_ADDRESS = "terraform_data.production_image_release_gate"
 RUNTIME_IMAGE_PATTERNS = {
     "mcp_image": re.compile(
@@ -296,6 +312,17 @@ def _normalized_task_definition(value: Any, *, label: str) -> dict[str, Any]:
         list,
     ):
         raise ContextError(f"{label}.volumes must be an array or null")
+    if isinstance(task_definition["volumes"], list):
+        # A plan's after side reports the computed configure_at_launch as null
+        # while state and live carry the resolved false, so the two would never
+        # compare equal. Settle on the same default the guard's jq uses
+        # (`$volume.configure_at_launch // false`).
+        task_definition["volumes"] = [
+            {**volume, "configure_at_launch": bool(volume.get("configure_at_launch"))}
+            if isinstance(volume, dict)
+            else volume
+            for volume in task_definition["volumes"]
+        ]
     normalized = {
         field: _normalized_json_value(
             task_definition[field],
@@ -313,13 +340,13 @@ def _normalized_task_definition(value: Any, *, label: str) -> dict[str, Any]:
     }
 
 
-def _contains_unknown(value: Any) -> bool:
+def _contains_unknown(value: Any, *, path: tuple[Any, ...] = ()) -> bool:
     if value is True:
-        return True
+        return path not in TASK_DEFINITION_AFTER_UNKNOWN_ALLOWLIST
     if isinstance(value, dict):
-        return any(_contains_unknown(item) for item in value.values())
+        return any(_contains_unknown(item, path=(*path, key)) for key, item in value.items())
     if isinstance(value, list):
-        return any(_contains_unknown(item) for item in value)
+        return any(_contains_unknown(item, path=(*path, index)) for index, item in enumerate(value))
     return False
 
 
@@ -339,7 +366,9 @@ def _reject_unknown_task_definition(
         # canonical name meant an unknown volume set was never seen -- a plan
         # could leave its mounts computed-at-apply and still pass this gate.
         for key in {field, *_PROVIDER_ATTRIBUTE_ALIASES.get(field, ())}:
-            if _contains_unknown(unknown.get(key)):
+            # Seed the path with the attribute name so it lines up with the
+            # allowlist, which is written in the guard's whole-document terms.
+            if _contains_unknown(unknown.get(key), path=(key,)):
                 raise ContextError(f"{label}.{field} is unknown")
 
 
