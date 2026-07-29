@@ -832,7 +832,11 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert 'location            = "https://github.com/noirelumiere00/TeamAgent.git"' in project
     assert 'type     = "CODECONNECTIONS"' in project
     assert "local.approval_publisher_buildspec_s3_key" in project
-    assert 'source_version = "refs/heads/dev"' in project
+    # An unusable default, matching every other connection-backed project here:
+    # a branch ref would make CreateProject resolve it through the GitHub App and
+    # fail, and it fails closed if start-build forgets to name the ref.
+    assert 'source_version = "0000000000000000000000000000000000000000"' in project
+    assert not re.search(r'(?m)^\s*source_version\s*=\s*"refs/', project)
     assert re.search(
         r"(?m)^\s*service_role\s*=\s*aws_iam_role\.approval_publisher\.arn\s*$",
         project,

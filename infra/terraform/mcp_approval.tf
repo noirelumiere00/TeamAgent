@@ -855,10 +855,16 @@ resource "aws_s3_object" "approval_publisher_buildspec" {
 }
 
 resource "aws_codebuild_project" "approval_publisher" {
-  name           = local.approval_publisher_project_name
-  description    = "Validate protected dev and issue immutable signed MCP approvals"
-  service_role   = aws_iam_role.approval_publisher.arn
-  source_version = "refs/heads/dev"
+  name         = local.approval_publisher_project_name
+  description  = "Validate protected dev and issue immutable signed MCP approvals"
+  service_role = aws_iam_role.approval_publisher.arn
+  # Unusable default; the operator must pass --source-version refs/heads/dev at
+  # start-build. A branch ref here makes CreateProject resolve the ref through
+  # the CodeConnections GitHub App, which the account cannot do -- the create
+  # fails with OAuthProviderException. Every other connection-backed project in
+  # this account uses the same unusable default for the same reason, and it
+  # fails closed: a start-build that forgets the ref cannot resolve a commit.
+  source_version = "0000000000000000000000000000000000000000"
 
   artifacts { type = "NO_ARTIFACTS" }
 
