@@ -709,7 +709,15 @@ def collect_inventory(aws: AwsCli) -> dict[str, Any]:
                 ("--topic-arn", topic),
             ),
         )
-        subscriptions[topic] = _items(pages, "Subscriptions", "SNS subscriptions")
+        # SNS leaves a "Deleted" tombstone in the listing for a short while
+        # after an unsubscribe. It has no ARN, no attributes and delivers
+        # nothing, so counting it would fail the exactly-one contract against
+        # an entry that no longer exists.
+        subscriptions[topic] = [
+            item
+            for item in _items(pages, "Subscriptions", "SNS subscriptions")
+            if item.get("SubscriptionArn") != "Deleted"
+        ]
 
     canonical_subscriptions = subscriptions[CANONICAL_TOPIC]
     all_subscriptions = [
