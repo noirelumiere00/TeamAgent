@@ -50,6 +50,8 @@ EXPECTED_APPROVAL_KEY_POLICY = {
                 "kms:DisableKey",
                 "kms:EnableKey",
                 "kms:GetKeyPolicy",
+                # Terraform refreshes rotation status on every read of the key.
+                "kms:GetKeyRotationStatus",
                 "kms:GetPublicKey",
                 "kms:ListGrants",
                 "kms:ListKeyPolicies",

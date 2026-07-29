@@ -62,6 +62,10 @@ locals {
           "kms:DisableKey",
           "kms:EnableKey",
           "kms:GetKeyPolicy",
+          # Terraform reads rotation status on every refresh of the key, so an
+          # administrator that cannot call this can create the key but never
+          # manage it -- the apply fails on the post-create read.
+          "kms:GetKeyRotationStatus",
           "kms:GetPublicKey",
           "kms:ListGrants",
           "kms:ListKeyPolicies",
@@ -114,7 +118,7 @@ locals {
   approval_signing_key_policy_sha256 = sha256(
     local.approval_signing_key_policy_json
   )
-  approval_signing_key_policy_expected_sha256 = "057f8a2ff1f06aa1e5ec03e5c4ecdfed4b3313146aca7d88c9ced95dca72709b"
+  approval_signing_key_policy_expected_sha256 = "d8d82d6f561524893d396fc70c4e37dd5dd2e2b8749f0863b974892d813b760b"
 
   approval_publisher_environment_names = [
     "APPROVAL_DECISION",

@@ -39,6 +39,10 @@ data "aws_iam_policy_document" "forced_rollback_drill_signing_key" {
       "kms:DisableKey",
       "kms:EnableKey",
       "kms:GetKeyPolicy",
+      # Terraform reads rotation status on every refresh of the key, so an
+      # administrator that cannot call this can create the key but never manage
+      # it -- the apply fails on the post-create read.
+      "kms:GetKeyRotationStatus",
       "kms:GetPublicKey",
       "kms:ListGrants",
       "kms:ListKeyPolicies",
