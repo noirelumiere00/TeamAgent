@@ -183,6 +183,22 @@ assert_clean_terraform_environment() {
   fi
 }
 
+# Corporate networks terminate TLS with a private CA, so every AWS call needs a
+# CA bundle. The scrubber above rightly refuses an ambient AWS_CA_BUNDLE: taking
+# one from the caller would let them redirect Terraform's trust anchor. Derive it
+# from SSL_CERT_FILE instead, and only after that check has run, so the value is
+# this script's own. runtime_evidence_guard.py derives it the same way for its
+# own child environment.
+derive_aws_ca_bundle_from_ssl_cert_file() {
+  if [ -n "${AWS_CA_BUNDLE:-}" ]; then
+    return 0
+  fi
+  if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
+    export AWS_CA_BUNDLE="${SSL_CERT_FILE}"
+  fi
+  return 0
+}
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "$1 が必要です"
 }
@@ -9975,6 +9991,7 @@ case "$COMMAND" in
 esac
 shift
 assert_clean_terraform_environment
+derive_aws_ca_bundle_from_ssl_cert_file
 assert_guard_sources
 
 case "$COMMAND" in
