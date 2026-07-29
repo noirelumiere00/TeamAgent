@@ -14,9 +14,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any, Sequence
+from typing import Any
 
 from teamagent_release_approval import ProvenanceError, canonical_json_bytes
 
@@ -85,9 +86,7 @@ def _exact_object(
     missing = sorted(expected_keys - actual_keys)
     unknown = sorted(actual_keys - expected_keys)
     if missing or unknown:
-        _fail(
-            f"{label} schema mismatch: missing={missing}, unknown={unknown}"
-        )
+        _fail(f"{label} schema mismatch: missing={missing}, unknown={unknown}")
     return value
 
 
@@ -170,11 +169,7 @@ def _load_manifest(path: Path, *, evidence_prefix: str) -> tuple[str, list[Artif
         _fail("manifest.drill_id must be a canonical lowercase UUID")
 
     raw_artifacts = manifest["artifacts"]
-    if (
-        type(raw_artifacts) is not list
-        or not raw_artifacts
-        or len(raw_artifacts) > 128
-    ):
+    if type(raw_artifacts) is not list or not raw_artifacts or len(raw_artifacts) > 128:
         _fail("manifest.artifacts must contain between 1 and 128 artifacts")
 
     base_key = f"{evidence_prefix}/{drill_id}/"
@@ -187,9 +182,7 @@ def _load_manifest(path: Path, *, evidence_prefix: str) -> tuple[str, list[Artif
 
         name = item["name"]
         if type(name) is not str or not _NAME_RE.fullmatch(name):
-            _fail(
-                f"{label}.name must be a lowercase artifact identifier"
-            )
+            _fail(f"{label}.name must be a lowercase artifact identifier")
         if name in names:
             _fail(f"{label}.name is duplicated")
         names.add(name)
@@ -205,9 +198,7 @@ def _load_manifest(path: Path, *, evidence_prefix: str) -> tuple[str, list[Artif
 
         key = _safe_s3_key(item["key"], label=f"{label}.key")
         if not key.startswith(base_key) or key == base_key:
-            _fail(
-                f"{label}.key must be below {base_key}"
-            )
+            _fail(f"{label}.key must be below {base_key}")
         signature_key = _safe_s3_key(
             f"{key}.sig",
             label=f"{label}.signature_key",
@@ -217,10 +208,7 @@ def _load_manifest(path: Path, *, evidence_prefix: str) -> tuple[str, list[Artif
         all_object_keys.update((key, signature_key))
 
         content_type = item["content_type"]
-        if (
-            type(content_type) is not str
-            or not _CONTENT_TYPE_RE.fullmatch(content_type)
-        ):
+        if type(content_type) is not str or not _CONTENT_TYPE_RE.fullmatch(content_type):
             _fail(f"{label}.content_type must be a canonical media type")
 
         artifacts.append(
@@ -262,24 +250,19 @@ class Store:
         self.signing_algorithm = signing_algorithm
         self.temporary_directory = temporary_directory
 
-        if (
-            type(minimum_retention_days) is not int
-            or minimum_retention_days < 1
-        ):
+        if type(minimum_retention_days) is not int or minimum_retention_days < 1:
             _fail("minimum retention days must be an integer >= 1")
         if type(now_epoch) is not int or now_epoch < 0:
             _fail("now epoch must be a non-negative integer")
         try:
             requested = (
-                dt.datetime.fromtimestamp(now_epoch, tz=dt.timezone.utc)
+                dt.datetime.fromtimestamp(now_epoch, tz=dt.UTC)
                 + dt.timedelta(days=minimum_retention_days + 1)
             ).replace(microsecond=0)
         except (OverflowError, OSError, ValueError) as exc:
             raise ArtifactStoreError("retention timestamp is invalid") from exc
         self.requested_retain_until = requested
-        self.requested_retain_until_text = requested.strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
+        self.requested_retain_until_text = requested.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         self._kms_arn_pattern = re.compile(
             rf"arn:aws:kms:{re.escape(region)}:{re.escape(account_id)}:"
@@ -316,9 +299,7 @@ class Store:
                 timeout=120,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ArtifactStoreError(
-                f"AWS {service} {operation} could not run"
-            ) from exc
+            raise ArtifactStoreError(f"AWS {service} {operation} could not run") from exc
         if completed.returncode != 0:
             detail = completed.stderr.strip()[:1000]
             _fail(f"AWS {service} {operation} failed: {detail}")
@@ -329,9 +310,7 @@ class Store:
                 parse_constant=_reject_nonfinite,
             )
         except json.JSONDecodeError as exc:
-            raise ArtifactStoreError(
-                f"AWS {service} {operation} returned invalid JSON"
-            ) from exc
+            raise ArtifactStoreError(f"AWS {service} {operation} returned invalid JSON") from exc
         if type(value) is not dict:
             _fail(f"AWS {service} {operation} returned a non-object")
         return value
@@ -360,9 +339,7 @@ class Store:
             or metadata.get("KeyUsage") != key_usage
             or (key_spec is not None and metadata.get("KeySpec") != key_spec)
         ):
-            _fail(
-                f"KMS alias {alias} did not resolve to the required enabled key"
-            )
+            _fail(f"KMS alias {alias} did not resolve to the required enabled key")
         return arn
 
     @staticmethod
@@ -394,7 +371,7 @@ class Store:
             raise ArtifactStoreError(f"{label} is invalid") from exc
         if parsed.tzinfo is None:
             _fail(f"{label} is not timezone-aware")
-        normalized = parsed.astimezone(dt.timezone.utc).replace(microsecond=0)
+        normalized = parsed.astimezone(dt.UTC).replace(microsecond=0)
         return normalized.strftime("%Y-%m-%dT%H:%M:%SZ"), normalized
 
     def put_object(
@@ -478,9 +455,7 @@ class Store:
             or metadata.get("ObjectLockMode") != "COMPLIANCE"
             or parsed_retain_until < self.requested_retain_until
         ):
-            _fail(
-                f"immutable artifact exact-version download did not match: {key}"
-            )
+            _fail(f"immutable artifact exact-version download did not match: {key}")
         return downloaded_sha256, retain_until
 
     def persist(
@@ -569,15 +544,13 @@ class Store:
             content_type="application/json",
             encryption_key_arn=encryption_key_arn,
         )
-        downloaded_payload_sha256, returned_retain_until = (
-            self.exact_version_download(
-                key=artifact.key,
-                version_id=payload_version_id,
-                expected_bytes=payload_bytes,
-                content_type=artifact.content_type,
-                encryption_key_arn=encryption_key_arn,
-                destination=downloaded_payload_path,
-            )
+        downloaded_payload_sha256, returned_retain_until = self.exact_version_download(
+            key=artifact.key,
+            version_id=payload_version_id,
+            expected_bytes=payload_bytes,
+            content_type=artifact.content_type,
+            encryption_key_arn=encryption_key_arn,
+            destination=downloaded_payload_path,
         )
         downloaded_signature_sha256, _ = self.exact_version_download(
             key=signature_key,
@@ -643,11 +616,7 @@ class Store:
 
 def _validate_cli(args: argparse.Namespace) -> str:
     aws_path = Path(args.aws_bin)
-    if (
-        not aws_path.is_absolute()
-        or not aws_path.is_file()
-        or not os.access(aws_path, os.X_OK)
-    ):
+    if not aws_path.is_absolute() or not aws_path.is_file() or not os.access(aws_path, os.X_OK):
         _fail("--aws-bin must be an absolute executable file")
     if not _ACCOUNT_ID_RE.fullmatch(args.account_id):
         _fail("--account-id must be 12 decimal digits")
@@ -744,9 +713,7 @@ def _write_exclusive(path: Path, value: dict[str, dict[str, Any]]) -> None:
     try:
         payload = canonical_json_bytes(value)
     except ProvenanceError as exc:
-        raise ArtifactStoreError(
-            "artifact locator map is not canonical JSON data"
-        ) from exc
+        raise ArtifactStoreError("artifact locator map is not canonical JSON data") from exc
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_CLOEXEC"):
         flags |= os.O_CLOEXEC

@@ -35,9 +35,7 @@ _ACTIVATOR_TYPES = {
     "eventbridge_rule_ecs_target",
     "lambda_taskdef_arn_environment",
 }
-_TASK_DEFINITION_ADDRESS_RE = re.compile(
-    r"aws_ecs_task_definition\.[a-z][a-z0-9_]*(?:\[0\])?"
-)
+_TASK_DEFINITION_ADDRESS_RE = re.compile(r"aws_ecs_task_definition\.[a-z][a-z0-9_]*(?:\[0\])?")
 _IDENTIFIER_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _REPOSITORY_RE = re.compile(r"[a-z0-9][a-z0-9._/-]*")
 

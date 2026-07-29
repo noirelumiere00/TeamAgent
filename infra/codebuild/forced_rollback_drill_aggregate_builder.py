@@ -84,7 +84,7 @@ def _utc(epoch: Any, *, label: str) -> str:
     if type(epoch) is not int or epoch < 0:
         raise AggregateBuildError(f"{label} must be an epoch second")
     return (
-        dt.datetime.fromtimestamp(epoch, tz=dt.timezone.utc)
+        dt.datetime.fromtimestamp(epoch, tz=dt.UTC)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z")
     )
@@ -111,8 +111,7 @@ def _validate_complete_failure_history(state: dict[str, Any]) -> None:
         or type(apply_state.get("completed_at_epoch")) is not int
     ):
         raise AggregateBuildError(
-            "complete drill failure history is not reachable from the "
-            "controller state machine"
+            "complete drill failure history is not reachable from the controller state machine"
         )
     completed_at = apply_state["completed_at_epoch"]
     for failure in failures:
@@ -124,8 +123,7 @@ def _validate_complete_failure_history(state: dict[str, Any]) -> None:
             or failure["at_epoch"] < completed_at
         ):
             raise AggregateBuildError(
-                "complete drill failure history is not a source-backed "
-                "finalize failure"
+                "complete drill failure history is not a source-backed finalize failure"
             )
 
 
@@ -231,9 +229,7 @@ def _artifact_entries(
         )
         release_approval = authorization.get("release_approval")
         if type(release_approval) is not dict:
-            raise AggregateBuildError(
-                f"{key} authorization has no verified release approval"
-            )
+            raise AggregateBuildError(f"{key} authorization has no verified release approval")
         approval_payload = _canonical_bytes(
             {
                 "plan_confirmation": approval_state,
@@ -252,20 +248,14 @@ def _artifact_entries(
                 "issued_at_epoch": authorization["issued_at_epoch"],
                 "pipeline": authorization["pipeline"],
                 "receipt_key": authorization["receipt_key"],
-                "receipt_signature_key": authorization[
-                    "receipt_signature_key"
-                ],
-                "receipt_signature_version_id": authorization[
-                    "receipt_signature_version_id"
-                ],
+                "receipt_signature_key": authorization["receipt_signature_key"],
+                "receipt_signature_version_id": authorization["receipt_signature_version_id"],
                 "receipt_version_id": authorization["receipt_version_id"],
                 "release_approval": release_approval,
                 "subjects": target_snapshot["subjects"],
             }
         )
-        authorization_evidence_path = (
-            artifact_directory / f"leg-{ordinal}-authorization.json"
-        )
+        authorization_evidence_path = artifact_directory / f"leg-{ordinal}-authorization.json"
         _write_exclusive(authorization_evidence_path, authorization_payload)
         prefix = f"legs/{ordinal}"
         add(
@@ -342,9 +332,7 @@ def _projected_snapshot(
     for scoped in trusted_scope["resources"]:
         observed = live_by_id.get(scoped["consumer_id"])
         if type(observed) is not dict:
-            raise AggregateBuildError(
-                f"runtime receipt lacks consumer {scoped['consumer_id']}"
-            )
+            raise AggregateBuildError(f"runtime receipt lacks consumer {scoped['consumer_id']}")
         image = observed.get("image")
         if type(image) is not str or "@" not in image:
             raise AggregateBuildError("runtime receipt image is not digest pinned")
@@ -364,8 +352,7 @@ def _projected_snapshot(
         matching = {
             resource["digest"]
             for resource in resources
-            if resource["pipeline"] == scoped["pipeline"]
-            and resource["subject"] == scoped["name"]
+            if resource["pipeline"] == scoped["pipeline"] and resource["subject"] == scoped["name"]
         }
         if len(matching) != 1:
             raise AggregateBuildError("runtime subject digest is not unique")
@@ -439,13 +426,8 @@ def build(args: argparse.Namespace) -> None:
     }
     if set(locators) != expected_locator_names:
         raise AggregateBuildError("artifact locator set is incomplete or unknown")
-    if (
-        _sha256_bytes(args.terminal_snapshot.read_bytes())
-        != locators["terminal"]["sha256"]
-    ):
-        raise AggregateBuildError(
-            "persisted terminal observation bytes differ from fresh snapshot"
-        )
+    if _sha256_bytes(args.terminal_snapshot.read_bytes()) != locators["terminal"]["sha256"]:
+        raise AggregateBuildError("persisted terminal observation bytes differ from fresh snapshot")
 
     initial_locator = contract["control"]["initial_release_apply_locator"]
     initial_path = _bound_path(
@@ -505,13 +487,15 @@ def build(args: argparse.Namespace) -> None:
             automation_path,
             label=f"{state_key} automation identity receipt",
         )
-        if _sha256_bytes(plan_receipt_path.read_bytes()) != locators[
-            f"leg{ordinal}_plan"
-        ]["sha256"]:
+        if (
+            _sha256_bytes(plan_receipt_path.read_bytes())
+            != locators[f"leg{ordinal}_plan"]["sha256"]
+        ):
             raise AggregateBuildError("persisted plan receipt bytes differ")
-        if _sha256_bytes(apply_receipt_path.read_bytes()) != locators[
-            f"leg{ordinal}_apply"
-        ]["sha256"]:
+        if (
+            _sha256_bytes(apply_receipt_path.read_bytes())
+            != locators[f"leg{ordinal}_apply"]["sha256"]
+        ):
             raise AggregateBuildError("persisted apply receipt bytes differ")
         source = _projected_snapshot(
             apply_receipt.get("pre_live_contract"),
@@ -536,43 +520,33 @@ def build(args: argparse.Namespace) -> None:
                 "issued_at_epoch": authorization_receipt["issued_at_epoch"],
                 "pipeline": authorization_receipt["pipeline"],
                 "receipt_key": authorization_receipt["receipt_key"],
-                "receipt_signature_key": authorization_receipt[
-                    "receipt_signature_key"
-                ],
+                "receipt_signature_key": authorization_receipt["receipt_signature_key"],
                 "receipt_signature_version_id": authorization_receipt[
                     "receipt_signature_version_id"
                 ],
-                "receipt_version_id": authorization_receipt[
-                    "receipt_version_id"
-                ],
+                "receipt_version_id": authorization_receipt["receipt_version_id"],
                 "release_approval": release_approval,
                 "subjects": target["subjects"],
             }
         )
-        if _sha256_bytes(expected_authorization_payload) != locators[
-            f"leg{ordinal}_authorization"
-        ]["sha256"]:
-            raise AggregateBuildError(
-                "persisted authorization evidence differs from its sources"
-            )
+        if (
+            _sha256_bytes(expected_authorization_payload)
+            != locators[f"leg{ordinal}_authorization"]["sha256"]
+        ):
+            raise AggregateBuildError("persisted authorization evidence differs from its sources")
         expected_approval_payload = _canonical_bytes(
             {
                 "plan_confirmation": approval_state,
                 "release_approval": release_approval,
             }
         )
-        if _sha256_bytes(expected_approval_payload) != locators[
-            f"leg{ordinal}_approval"
-        ]["sha256"]:
-            raise AggregateBuildError(
-                "persisted approval evidence differs from its sources"
-            )
-        if _sha256_bytes(automation_path.read_bytes()) != locators[
-            f"leg{ordinal}_automation_identity"
-        ]["sha256"]:
-            raise AggregateBuildError(
-                "persisted automation identity differs from guard receipt"
-            )
+        if _sha256_bytes(expected_approval_payload) != locators[f"leg{ordinal}_approval"]["sha256"]:
+            raise AggregateBuildError("persisted approval evidence differs from its sources")
+        if (
+            _sha256_bytes(automation_path.read_bytes())
+            != locators[f"leg{ordinal}_automation_identity"]["sha256"]
+        ):
+            raise AggregateBuildError("persisted automation identity differs from guard receipt")
         post_state = apply_receipt.get("post_state_contract", {}).get("state")
         pre_state = apply_receipt.get("pre_state_contract", {}).get("state")
         if type(post_state) is not dict or type(pre_state) is not dict:
@@ -581,21 +555,12 @@ def build(args: argparse.Namespace) -> None:
         service_probe = apply_receipt.get("post_apply_service_probe")
         dm_qa_receipt = apply_receipt.get("openclaw_rollout_result", {}).get("dmQa")
         ecs_receipt = apply_receipt.get("ecs_service_saga_verification_receipt")
-        if not all(
-            type(value) is dict
-            for value in (service_probe, dm_qa_receipt, ecs_receipt)
-        ):
+        if not all(type(value) is dict for value in (service_probe, dm_qa_receipt, ecs_receipt)):
             raise AggregateBuildError("apply proof receipts are incomplete")
-        finalization_receipt = apply_receipt.get(
-            "deployment_finalization_receipt"
-        )
+        finalization_receipt = apply_receipt.get("deployment_finalization_receipt")
         service_task = service_probe.get("task")
         service_result = service_probe.get("result")
-        service_checks = (
-            service_result.get("checks")
-            if type(service_result) is dict
-            else None
-        )
+        service_checks = service_result.get("checks") if type(service_result) is dict else None
         if (
             apply_receipt.get("status") != "applied"
             or type(finalization_receipt) is not dict
@@ -609,8 +574,7 @@ def build(args: argparse.Namespace) -> None:
             or dm_qa_receipt.get("result") != "PASSED"
         ):
             raise AggregateBuildError(
-                "registered apply receipt does not prove a completed "
-                "successful leg"
+                "registered apply receipt does not prove a completed successful leg"
             )
         # A terminal observation may fail after both guarded applies completed.
         # Preserve the receipt facts here; terminal drift belongs to the drill
@@ -650,9 +614,7 @@ def build(args: argparse.Namespace) -> None:
                     ),
                     "release_approval_id": release_approval["approval_id"],
                     "release_approved_by_arn": release_approval["approved_by"],
-                    "receipt_sha256": locators[
-                        f"leg{ordinal}_authorization"
-                    ]["sha256"],
+                    "receipt_sha256": locators[f"leg{ordinal}_authorization"]["sha256"],
                     "locator": locators[f"leg{ordinal}_authorization"],
                 }
             ],
@@ -668,8 +630,7 @@ def build(args: argparse.Namespace) -> None:
                 "from": copy.deepcopy(source),
                 "to": copy.deepcopy(target),
                 "changed_resources": [
-                    resource["terraform_address"]
-                    for resource in trusted_scope["resources"]
+                    resource["terraform_address"] for resource in trusted_scope["resources"]
                 ],
                 "locator": locators[f"leg{ordinal}_plan"],
             },
@@ -691,15 +652,11 @@ def build(args: argparse.Namespace) -> None:
                 "terraform_serial_before": pre_state["serial"],
                 "terraform_serial_after": post_state["serial"],
                 "state": copy.deepcopy(target),
-                "automation_principal": _automation_principal(
-                    automation_identity
-                ),
-                "automation_identity_sha256": locators[
-                    f"leg{ordinal}_automation_identity"
-                ]["sha256"],
-                "automation_identity_locator": locators[
-                    f"leg{ordinal}_automation_identity"
+                "automation_principal": _automation_principal(automation_identity),
+                "automation_identity_sha256": locators[f"leg{ordinal}_automation_identity"][
+                    "sha256"
                 ],
+                "automation_identity_locator": locators[f"leg{ordinal}_automation_identity"],
                 "locator": apply_locator,
             },
             "ecs": {
@@ -727,12 +684,8 @@ def build(args: argparse.Namespace) -> None:
                 "result": dm_qa_receipt["result"],
                 "verified_at_utc": dm_qa_receipt["verified_at_utc"],
                 "apply_attempt_id": dm_qa_receipt["applyAttemptId"],
-                "mcp_task_definition_arn": dm_qa_receipt[
-                    "mcpTaskDefinitionArn"
-                ],
-                "openclaw_task_definition_arn": dm_qa_receipt[
-                    "openclawTaskDefinitionArn"
-                ],
+                "mcp_task_definition_arn": dm_qa_receipt["mcpTaskDefinitionArn"],
+                "openclaw_task_definition_arn": dm_qa_receipt["openclawTaskDefinitionArn"],
                 "locator": dm_qa_receipt["locator"],
             },
             "started_at_utc": _utc(
@@ -748,9 +701,7 @@ def build(args: argparse.Namespace) -> None:
                 "attempted": False,
                 "result": "NOT_REQUIRED",
                 "completed_at_utc": None,
-                "last_exact_confirmed_digests": copy.deepcopy(
-                    target["subjects"]
-                ),
+                "last_exact_confirmed_digests": copy.deepcopy(target["subjects"]),
                 "locator": None,
             },
         }
@@ -785,9 +736,7 @@ def build(args: argparse.Namespace) -> None:
         try:
             revision = int(task_definition_arn.rsplit(":", 1)[1])
         except ValueError as exc:
-            raise AggregateBuildError(
-                "terminal task definition revision is invalid"
-            ) from exc
+            raise AggregateBuildError("terminal task definition revision is invalid") from exc
         terminal_revisions[resource["consumer_id"]] = revision
     terminal_snapshot = _projected_snapshot(
         {"resources": terminal_resources},
@@ -800,55 +749,39 @@ def build(args: argparse.Namespace) -> None:
         "PREVIOUS_OLD",
         "UNKNOWN",
     }:
-        raise AggregateBuildError(
-            "terminal observation classification is missing or unsupported"
-        )
+        raise AggregateBuildError("terminal observation classification is missing or unsupported")
     expected_terminal = {
         "INITIAL_NEW": baseline_snapshot,
         "PREVIOUS_OLD": legs[0]["to"],
     }.get(classification)
-    if (
-        expected_terminal is not None
-        and terminal_snapshot != expected_terminal
-    ):
-        raise AggregateBuildError(
-            "fresh terminal snapshot differs from its exact classification"
-        )
+    if expected_terminal is not None and terminal_snapshot != expected_terminal:
+        raise AggregateBuildError("fresh terminal snapshot differs from its exact classification")
     if args.status == "PASSED" and classification != "INITIAL_NEW":
-        raise AggregateBuildError(
-            "PASSED aggregate terminal observation is not initial new"
-        )
+        raise AggregateBuildError("PASSED aggregate terminal observation is not initial new")
     if args.status != "PASSED":
         failures = state.get("failures")
         if type(failures) is not list or not failures:
-            raise AggregateBuildError(
-                "non-passed aggregate has no recorded controller failure"
-            )
+            raise AggregateBuildError("non-passed aggregate has no recorded controller failure")
         affected_legs = {
             failure.get("leg")
             for failure in failures
             if type(failure) is dict
-            and failure.get("leg") in {
+            and failure.get("leg")
+            in {
                 "rollback-to-previous",
                 "restore-active",
             }
         }
         if not affected_legs:
-            raise AggregateBuildError(
-                "non-passed aggregate failure does not identify a drill leg"
-            )
-        for index, failure_leg in enumerate(
-            ("rollback-to-previous", "restore-active")
-        ):
+            raise AggregateBuildError("non-passed aggregate failure does not identify a drill leg")
+        for index, failure_leg in enumerate(("rollback-to-previous", "restore-active")):
             if failure_leg not in affected_legs:
                 continue
             legs[index]["recovery"] = {
                 "attempted": False,
                 "result": "NOT_ATTEMPTED",
                 "completed_at_utc": None,
-                "last_exact_confirmed_digests": copy.deepcopy(
-                    terminal_snapshot["subjects"]
-                ),
+                "last_exact_confirmed_digests": copy.deepcopy(terminal_snapshot["subjects"]),
                 "locator": None,
             }
     automation_principals = sorted(
@@ -873,9 +806,7 @@ def build(args: argparse.Namespace) -> None:
         }
         for leg in legs
     ]
-    initiating_principal = copy.deepcopy(
-        contract["actors"]["initiating_principal"]
-    )
+    initiating_principal = copy.deepcopy(contract["actors"]["initiating_principal"])
     if initiating_principal.get("source_identity") == "":
         initiating_principal["source_identity"] = None
     referenced_locators = [
