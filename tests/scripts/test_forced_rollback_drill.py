@@ -39,9 +39,7 @@ DRILL_SIGNING_KEY_ARN = (
     f"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 SIGNING_ALGORITHM = "RSASSA_PSS_SHA_256"
-APPROVING_PRINCIPAL_ARN = (
-    f"arn:aws:iam::{ACCOUNT_ID}:role/teamagent-dev-approval-caller"
-)
+APPROVING_PRINCIPAL_ARN = f"arn:aws:iam::{ACCOUNT_ID}:role/teamagent-dev-approval-caller"
 AUTOMATION_PRINCIPAL_ARN = (
     f"arn:aws:sts::{ACCOUNT_ID}:assumed-role/"
     "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
@@ -435,23 +433,17 @@ def _make_contract(
             "preflight_migration_id": f"drill-{label}-preflight",
             "runtime_migration_id": f"drill-{label}-runtime",
             "candidate": {
-                "receipt_key": (
-                    f"release-receipts/mcp/{source_commit}/{candidate_sha}.json"
-                ),
+                "receipt_key": (f"release-receipts/mcp/{source_commit}/{candidate_sha}.json"),
                 "receipt_version_id": f"{label}-candidate-version",
                 "receipt_signature_version_id": f"{label}-candidate-signature-version",
             },
             "approval": {
                 "payload_bucket": "teamagent-dev-image-release-evidence",
-                "payload_key": (
-                    f"approval-records/mcp/{source_commit}/{approval_sha}.json"
-                ),
+                "payload_key": (f"approval-records/mcp/{source_commit}/{approval_sha}.json"),
                 "payload_version_id": f"{label}-approval-version",
                 "payload_sha256": approval_sha,
                 "signature_bucket": "teamagent-dev-image-release-evidence",
-                "signature_key": (
-                    f"approval-records/mcp/{source_commit}/{approval_sha}.json.sig"
-                ),
+                "signature_key": (f"approval-records/mcp/{source_commit}/{approval_sha}.json.sig"),
                 "signature_version_id": f"{label}-approval-signature-version",
                 "signature_sha256": ("0" * 64 if old else "1" * 64),
             },
@@ -543,10 +535,7 @@ def _make_contract(
     )
     contract_value = json.loads(contract.read_text(encoding="utf-8"))
     contract_value["control"]["initial_release_apply_locator"] = _evidence_locator(
-        key=(
-            f"release-receipts/mcp/{'4' * 40}/"
-            f"{_sha256(initial_receipt)}.apply.json"
-        ),
+        key=(f"release-receipts/mcp/{'4' * 40}/{_sha256(initial_receipt)}.apply.json"),
         sha256=_sha256(initial_receipt),
         size=initial_receipt.stat().st_size,
         version_id="initial-release-apply-version",
@@ -1877,18 +1866,13 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert finalized.returncode == 0, finalized.stderr
     assert drill.state()["state"] == "FINALIZED"
     assert "PASSED" in finalized.stdout
-    aggregate = json.loads(
-        (drill.drill_dir / "aggregate.json").read_text(encoding="utf-8")
-    )
+    aggregate = json.loads((drill.drill_dir / "aggregate.json").read_text(encoding="utf-8"))
     assert aggregate["status"] == "PASSED"
     assert aggregate["actors"]["automation_principals"] == [
         {
             "account_id": ACCOUNT_ID,
             "arn": AUTOMATION_PRINCIPAL_ARN,
-            "user_id": (
-                "AROATEAMAGENTRUNTIME:"
-                "teamagent-terraform-worker"
-            ),
+            "user_id": ("AROATEAMAGENTRUNTIME:teamagent-terraform-worker"),
         }
     ]
     assert aggregate["actors"]["approvals"] == [
@@ -1977,10 +1961,7 @@ def test_full_positive_path_has_all_seven_one_way_states(
     assert len(stored_objects) == 26
     assert canonical_body in stored_objects
     aggregate_signature_identity = hashlib.sha256(
-        (
-            f"{EVIDENCE_BUCKET}\0{aggregate_key}.sig\0"
-            "aggregate-signature-version"
-        ).encode()
+        (f"{EVIDENCE_BUCKET}\0{aggregate_key}.sig\0aggregate-signature-version").encode()
     ).hexdigest()
     signature_envelope_bytes = (
         drill.aws_objects / f"{aggregate_signature_identity}.body"
@@ -1996,21 +1977,14 @@ def test_full_positive_path_has_all_seven_one_way_states(
     persisted_source_locators = [
         locator
         for locator in aggregate["artifact_manifest"]
-        if locator["key"].startswith(
-            f"forced-rollback-drills/{DRILL_ID}/"
-        )
+        if locator["key"].startswith(f"forced-rollback-drills/{DRILL_ID}/")
     ]
     assert len(persisted_source_locators) == 12
     for locator in persisted_source_locators:
         payload_identity = hashlib.sha256(
-            (
-                f"{locator['bucket']}\0{locator['key']}\0"
-                f"{locator['version_id']}"
-            ).encode()
+            (f"{locator['bucket']}\0{locator['key']}\0{locator['version_id']}").encode()
         ).hexdigest()
-        payload = (
-            drill.aws_objects / f"{payload_identity}.body"
-        ).read_bytes()
+        payload = (drill.aws_objects / f"{payload_identity}.body").read_bytes()
         assert hashlib.sha256(payload).hexdigest() == locator["sha256"]
         assert len(payload) == locator["size"]
         signature_identity = hashlib.sha256(
@@ -2019,13 +1993,8 @@ def test_full_positive_path_has_all_seven_one_way_states(
                 f"{locator['signature']['version_id']}"
             ).encode()
         ).hexdigest()
-        signature_payload = (
-            drill.aws_objects / f"{signature_identity}.body"
-        ).read_bytes()
-        assert (
-            hashlib.sha256(signature_payload).hexdigest()
-            == locator["signature"]["sha256"]
-        )
+        signature_payload = (drill.aws_objects / f"{signature_identity}.body").read_bytes()
+        assert hashlib.sha256(signature_payload).hexdigest() == locator["signature"]["sha256"]
     aws_calls = [line for line in drill.call_lines() if line[0] == "aws"]
     operations = [(call[1], call[2]) for call in aws_calls]
     assert operations.count(("kms", "describe-key")) == 4
@@ -2042,20 +2011,14 @@ def test_full_positive_path_has_all_seven_one_way_states(
         )
         for call in aws_calls
     )
-    describe_calls = [
-        call
-        for call in aws_calls
-        if (call[1], call[2]) == ("kms", "describe-key")
-    ]
+    describe_calls = [call for call in aws_calls if (call[1], call[2]) == ("kms", "describe-key")]
     assert [_arg_value(call, "--key-id") for call in describe_calls] == [
         EVIDENCE_ENCRYPTION_KEY_ALIAS,
         DRILL_SIGNING_KEY_ALIAS,
         EVIDENCE_ENCRYPTION_KEY_ALIAS,
         DRILL_SIGNING_KEY_ALIAS,
     ]
-    sign_calls = [
-        call for call in aws_calls if (call[1], call[2]) == ("kms", "sign")
-    ]
+    sign_calls = [call for call in aws_calls if (call[1], call[2]) == ("kms", "sign")]
     assert all(
         _arg_value(call, "--key-id") == DRILL_SIGNING_KEY_ARN
         and _arg_value(call, "--message-type") == "DIGEST"
@@ -2093,14 +2056,8 @@ def test_full_positive_path_has_all_seven_one_way_states(
         }
         assert dm_qa["result"] == "PASSED"
         assert dm_qa["apply_attempt_id"] == leg["apply"]["apply_attempt_id"]
-        assert (
-            dm_qa["mcp_task_definition_arn"]
-            == source_dm_qa["mcpTaskDefinitionArn"]
-        )
-        assert (
-            dm_qa["openclaw_task_definition_arn"]
-            == source_dm_qa["openclawTaskDefinitionArn"]
-        )
+        assert dm_qa["mcp_task_definition_arn"] == source_dm_qa["mcpTaskDefinitionArn"]
+        assert dm_qa["openclaw_task_definition_arn"] == source_dm_qa["openclawTaskDefinitionArn"]
         assert dm_qa["locator"] == source_dm_qa["locator"]
         assert re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}T"
@@ -2108,9 +2065,7 @@ def test_full_positive_path_has_all_seven_one_way_states(
             dm_qa["verified_at_utc"],
         )
     assert aggregate["control"]["git_commit"] == "4" * 40
-    assert aggregate["control"]["drill_contract_sha256"] == _sha256(
-        drill.contract
-    )
+    assert aggregate["control"]["drill_contract_sha256"] == _sha256(drill.contract)
     assert (
         aggregate["control"]["initial_release_apply"]
         == json.loads(drill.contract.read_text(encoding="utf-8"))["control"][
@@ -2780,11 +2735,7 @@ def test_unreachable_failed_leg_history_is_rejected_before_aggregate_persistence
     assert drill.state()["state"] == "LEG2_APPLIED"
     assert drill.state()["final_status"] is None
     assert not (drill.drill_dir / "aggregate.json").exists()
-    assert not [
-        call
-        for call in drill.call_lines()
-        if call[:3] == ["aws", "s3api", "put-object"]
-    ]
+    assert not [call for call in drill.call_lines() if call[:3] == ["aws", "s3api", "put-object"]]
 
 
 def test_finalize_rejects_final_receipt_that_is_not_exact_initial_new(
@@ -2844,7 +2795,10 @@ def test_finalize_rejects_final_receipt_that_is_not_exact_initial_new(
 
     assert finalized.returncode != 0
     assert "PASSED" not in finalized.stdout
-    assert drill.state()["state"] == "LEG2_APPLIED"
+    # Tampered terminal evidence goes through record_failure like every other
+    # failure path: the drill demands manual recovery instead of staying in a
+    # state that invites a plain finalize retry over inconsistent evidence.
+    assert drill.state()["state"] == "RECOVERY_REQUIRED"
     assert drill.state()["final_status"] is None
     assert not (drill.drill_dir / "aggregate.json").exists()
 
@@ -2896,18 +2850,11 @@ def test_finalize_rejects_fresh_live_drift_after_restore_receipt(
     assert drill.state()["state"] == "FINALIZED"
     assert drill.state()["final_status"] == "RECONCILE_REQUIRED"
     terminal = json.loads(
-        (drill.drill_dir / "final-live.snapshot.json").read_text(
-            encoding="utf-8"
-        )
+        (drill.drill_dir / "final-live.snapshot.json").read_text(encoding="utf-8")
     )
     assert terminal["classification"] == "PREVIOUS_OLD"
-    aggregate = json.loads(
-        (drill.drill_dir / "aggregate.json").read_text(encoding="utf-8")
-    )
-    assert (
-        aggregate["safe_terminal_state"]["classification"]
-        == "PREVIOUS_OLD"
-    )
+    aggregate = json.loads((drill.drill_dir / "aggregate.json").read_text(encoding="utf-8"))
+    assert aggregate["safe_terminal_state"]["classification"] == "PREVIOUS_OLD"
     restore_leg = aggregate["legs"][1]
     assert restore_leg["result"] == "PASSED"
     assert restore_leg["apply"]["result"] == "PASSED"
@@ -2917,9 +2864,7 @@ def test_finalize_rejects_fresh_live_drift_after_restore_receipt(
     assert restore_leg["recovery"]["result"] == "NOT_ATTEMPTED"
     assert (
         restore_leg["recovery"]["last_exact_confirmed_digests"]
-        == aggregate["safe_terminal_state"]["live_snapshot"]["snapshot"][
-            "subjects"
-        ]
+        == aggregate["safe_terminal_state"]["live_snapshot"]["snapshot"]["subjects"]
     )
     assert drill._guard_calls("snapshot")
 
@@ -2929,16 +2874,12 @@ def test_finalize_does_not_lock_body_rejected_before_integrity(
 ) -> None:
     _advance_to_leg2_applied(drill)
     state = drill.state()
-    authorization_state = state["legs"]["rollback_to_previous"][
-        "authorization"
-    ]
+    authorization_state = state["legs"]["rollback_to_previous"]["authorization"]
     authorization_path = Path(authorization_state["path"])
-    authorization = json.loads(
-        authorization_path.read_text(encoding="utf-8")
+    authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+    authorization["release_approval"]["decision"] = (
+        "REJECTED: approval was revoked before aggregate finalization"
     )
-    authorization["release_approval"][
-        "decision"
-    ] = "REJECTED: approval was revoked before aggregate finalization"
     _write_json(authorization_path, authorization)
     authorization_state["sha256"] = _sha256(authorization_path)
     _write_json(drill.drill_dir / "state.json", state)
