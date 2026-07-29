@@ -4565,6 +4565,25 @@ validate_media_envelope_cutover_gate() {
     die "legacy→generic media切替のdurable 900秒証跡が不正です"
 }
 
+select_terraform_media_image_inputs() {
+  local mode="$1" live_image="$2" desired_image="$3"
+  local legacy_prefix
+  legacy_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/teamagent-dev-tiktok-acquire@sha256:"
+
+  TF_MEDIA_WORKER_IMAGE="$desired_image"
+  TF_TIKTOK_ACQUIRE_IMAGE=""
+  # validate_media_envelope_cutover_gate uses this same canonical live image to
+  # identify the legacy side of the cutover.  While sync proves live=desired,
+  # keep both caller-controlled image variables empty and let Terraform recover
+  # only this exact digest from the ephemeral runtime_guard_live object.
+  if [ "$mode" = "sync" ] &&
+     [ "$live_image" = "$desired_image" ] &&
+     [[ "$live_image" == "$legacy_prefix"* ]] &&
+     [[ "${live_image#"$legacy_prefix"}" =~ ^[0-9a-f]{64}$ ]]; then
+    TF_MEDIA_WORKER_IMAGE=""
+  fi
+}
+
 validate_ecs_service_saga_receipt() {
   local receipt="$1" expected_stage="$2"
   jq -e \
@@ -4676,12 +4695,18 @@ validate_sync_consumer_images() {
   local snapshot="$1"
   local expected_consumer_images="$2"
   local registry="$IMAGE_DEPLOYMENT_CONSUMER_REGISTRY"
-  local repository_prefix
+  local repository_prefix legacy_tiktok_repository
   repository_prefix="${EXPECTED_ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/"
+  legacy_tiktok_repository="${repository_prefix}teamagent-dev-tiktok-acquire"
 
+  # The exception below remains anchored to the same canonical live task image
+  # used by validate_media_envelope_cutover_gate: snapshot.image must still equal
+  # the sync expected image, and only the exact legacy TikTok digest may differ
+  # from the code-owned generic release repository.
   jq -e \
     --argjson expected "$expected_consumer_images" \
     --arg repository_prefix "$repository_prefix" \
+    --arg legacy_tiktok_repository "$legacy_tiktok_repository" \
     --slurpfile registry "$registry" '
     def guard_consumers:
       [
@@ -4827,13 +4852,21 @@ validate_sync_consumer_images() {
         $expected[$spec.consumer_id] and
       ($expected[$spec.consumer_id] | type) == "string" and
       ($expected[$spec.consumer_id] | split("@") | length) == 2 and
-      ($expected[$spec.consumer_id] | split("@")[0]) ==
-        ($repository_prefix + $matches[0].release_repository) and
+      (
+        ($expected[$spec.consumer_id] | split("@")[0]) ==
+          ($repository_prefix + $matches[0].release_repository) or
+        (
+          $spec.consumer_id == "tiktok_acquire" and
+          $matches[0].release_repository == "teamagent-media-worker" and
+          ($expected[$spec.consumer_id] | split("@")[0]) ==
+            $legacy_tiktok_repository
+        )
+      ) and
       ($expected[$spec.consumer_id] | split("@")[1] |
         test("^sha256:[0-9a-f]{64}$"))
     )
   ' "$snapshot" >/dev/null ||
-    die "strict syncはregistryと完全一致する8 consumerについて、検証済みafter.imageとの個別一致・許容repository・完全digest pinが必要です"
+    die "strict syncはregistryと完全一致する8 consumerについて、検証済みafter.imageとの個別一致・許容repository・完全digest pinが必要です（tiktok_acquireのexact live legacy digestだけはmedia cutover前に限り許容）"
 }
 
 # Terraform precondition へ渡す、live 由来の non-secret object。
@@ -5015,13 +5048,23 @@ print_hcl_snapshot() {
   local core="$1"
   jq -r '
     def line($name; $value): $name + " = " + ($value | tojson);
+    def pre_media_cutover_sync:
+      .mode == "sync" and
+      .live_tiktok_image == .desired_tiktok_image and
+      (.live_tiktok_image |
+        test(
+          "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+        ));
     [
       "# terraform_runtime_guard.sh snapshot (non-secret / live-derived)",
       "# 既存の gitignored terraform.tfvars へ必要行だけ反映し、この出力自体は commit しない。",
       line("openclaw_image"; .live_openclaw_image),
       line("mcp_image"; .live_mcp_image),
       line("x_buzz_image"; .live_x_image),
-      line("media_worker_image"; .live_tiktok_image),
+      line(
+        "media_worker_image";
+        if pre_media_cutover_sync then "" else .live_tiktok_image end
+      ),
       line("tiktok_acquire_image"; ""),
       line("enable_connect_web"; .enable_connect_web),
       line("enable_ingest_schedule"; .enable_ingest_schedule),
@@ -5257,6 +5300,14 @@ validate_hmac_runtime_mutation_gates() {
 validate_common_plan_schema() {
   local plan_json="$1" core="$2"
   jq -e --slurpfile expected_core "$core" '
+    def pre_media_cutover_sync:
+      $expected_core[0].mode == "sync" and
+      $expected_core[0].live_tiktok_image ==
+        $expected_core[0].desired_tiktok_image and
+      ($expected_core[0].live_tiktok_image |
+        test(
+          "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+        ));
     type == "object" and
     .format_version == "1.2" and
     (.terraform_version | type == "string") and
@@ -5279,7 +5330,11 @@ validate_common_plan_schema() {
     .variables.openclaw_image.value == $expected_core[0].desired_openclaw_image and
     .variables.mcp_image.value == $expected_core[0].desired_mcp_image and
     .variables.x_buzz_image.value == $expected_core[0].desired_x_image and
-    .variables.media_worker_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.media_worker_image.value ==
+      (if pre_media_cutover_sync
+       then ""
+       else $expected_core[0].desired_tiktok_image
+       end) and
     .variables.tiktok_acquire_image.value == "" and
     .variables.enable_media_worker.value == true and
     .variables.enable_tiktok_acquire.value == true and
@@ -6909,6 +6964,14 @@ validate_plan() {
   fi
 
   jq -e --arg desired_image "$desired_image" --slurpfile expected_core "$core" '
+    def pre_media_cutover_sync:
+      $expected_core[0].mode == "sync" and
+      $expected_core[0].live_tiktok_image ==
+        $expected_core[0].desired_tiktok_image and
+      ($expected_core[0].live_tiktok_image |
+        test(
+          "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+        ));
     type == "object" and
     .format_version == "1.2" and
     (.terraform_version | type == "string") and
@@ -6956,7 +7019,11 @@ validate_plan() {
       .status == "pass" and ((.instances // []) | all(.status == "pass"))
     )) and
     .variables.mcp_image.value == $desired_image and
-    .variables.media_worker_image.value == $expected_core[0].desired_tiktok_image and
+    .variables.media_worker_image.value ==
+      (if pre_media_cutover_sync
+       then ""
+       else $expected_core[0].desired_tiktok_image
+       end) and
     .variables.tiktok_acquire_image.value == "" and
     .variables.enable_media_worker.value == true and
     .variables.enable_tiktok_acquire.value == true and
@@ -10641,6 +10708,8 @@ case "$COMMAND" in
       "$REQUIRED_MIGRATION_ID" \
       "$REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256"
     CORE_JSON="$(jq -c . "$TMP_ROOT/core.json")"
+    select_terraform_media_image_inputs \
+      "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
     TF_ARGS=(
       plan
       -input=false
@@ -10652,8 +10721,8 @@ case "$COMMAND" in
       "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
       "-var=mcp_image=$DESIRED_MCP_IMAGE"
       "-var=x_buzz_image=$DESIRED_X_IMAGE"
-      "-var=media_worker_image=$DESIRED_TIKTOK_IMAGE"
-      "-var=tiktok_acquire_image="
+      "-var=media_worker_image=$TF_MEDIA_WORKER_IMAGE"
+      "-var=tiktok_acquire_image=$TF_TIKTOK_ACQUIRE_IMAGE"
       "-var=enable_media_worker=true"
       "-var=enable_tiktok_acquire=true"
       "-var=ingest_rule_enabled=$DESIRED_INGEST_RULE"

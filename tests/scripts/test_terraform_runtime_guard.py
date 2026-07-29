@@ -41,7 +41,7 @@ CANARY_IMAGE = f"{REPOSITORY}@sha256:{'5' * 64}"
 INGEST_IMAGE = f"{REPOSITORY}@sha256:{'6' * 64}"
 MORNING_IMAGE = f"{REPOSITORY}@sha256:{'7' * 64}"
 LEGACY_TIKTOK_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-dev-tiktok-acquire"
-LEGACY_TIKTOK_IMAGE = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+LEGACY_TIKTOK_IMAGE = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:eb975be{'0' * 57}"
 MEDIA_WORKER_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-media-worker"
 MEDIA_WORKER_IMAGE = f"{MEDIA_WORKER_REPOSITORY}@sha256:{'9' * 64}"
 OPENCLAW_REPOSITORY = f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/teamagent-openclaw"
@@ -1241,6 +1241,37 @@ def _stabilize_no_image_plan(
             gate_input["target"] = copy.deepcopy(target)
 
 
+def _set_pre_media_cutover_sync_fixture(
+    plan: dict[str, Any],
+    consumer_manifest: dict[str, Any],
+) -> None:
+    task_change = _find(plan, TASK_ADDRESSES["tiktok"])["change"]
+    for phase in ("before", "after"):
+        containers = json.loads(task_change[phase]["container_definitions"])
+        matches = [
+            container for container in containers if container["name"] == COMPONENTS["tiktok"][0]
+        ]
+        assert len(matches) == 1
+        matches[0]["image"] = LEGACY_TIKTOK_IMAGE
+        # The fake Terraform plan pass re-serializes ``after`` with the default
+        # json.dumps shape. Keep ``before`` byte-identical because the guard
+        # correctly requires raw value equality for every no-op resource.
+        task_change[phase]["container_definitions"] = json.dumps(containers)
+
+    tiktok = next(
+        row for row in consumer_manifest["consumers"] if row["consumer_id"] == "tiktok_acquire"
+    )
+    for phase in ("live", "before", "after"):
+        snapshot = tiktok[phase]
+        snapshot["image"] = LEGACY_TIKTOK_IMAGE
+        containers = snapshot["task_definition"]["container_definitions"]
+        matches = [
+            container for container in containers if container["name"] == tiktok["container_name"]
+        ]
+        assert len(matches) == 1
+        matches[0]["image"] = LEGACY_TIKTOK_IMAGE
+
+
 def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     task = _find(plan, TASK_ADDRESSES["mcp"])
     container = json.loads(task["change"]["after"]["container_definitions"])[0]
@@ -2147,6 +2178,7 @@ def _fake_aws(path: Path) -> None:
                 {{
                     "connect_web": "AWS_FAKE_CONNECT_IMAGE",
                     "ingest": "AWS_FAKE_INGEST_IMAGE",
+                    "tiktok": "AWS_FAKE_TIKTOK_IMAGE",
                 }}.get(component, "")
             )
             if image_override:
@@ -2317,6 +2349,12 @@ def _fake_terraform(path: Path) -> None:
                 if arg.startswith("-var=image_deployment_intent_id=")
             )
             image_deployment_intent_id = intent_arg.split("=", 2)[2]
+            media_worker_arg = next(
+                arg for arg in args if arg.startswith("-var=media_worker_image=")
+            )
+            tiktok_acquire_arg = next(
+                arg for arg in args if arg.startswith("-var=tiktok_acquire_image=")
+            )
             desired = core["desired_mcp_image"]
             plan = json.loads(pathlib.Path(os.environ["TF_FAKE_TEMPLATE"]).read_text())
             consumer_manifest = json.loads(
@@ -2358,8 +2396,12 @@ def _fake_terraform(path: Path) -> None:
                 "openclaw_image": {"value": core["desired_openclaw_image"]},
                 "mcp_image": {"value": desired},
                 "x_buzz_image": {"value": core["desired_x_image"]},
-                "media_worker_image": {"value": core["desired_tiktok_image"]},
-                "tiktok_acquire_image": {"value": ""},
+                "media_worker_image": {
+                    "value": media_worker_arg.split("=", 2)[2]
+                },
+                "tiktok_acquire_image": {
+                    "value": tiktok_acquire_arg.split("=", 2)[2]
+                },
                 "enable_connect_web": {"value": True},
                 "enable_canary_health": {"value": True},
                 "enable_ingest_schedule": {"value": True},
@@ -2610,6 +2652,7 @@ def _harness(
     scenario: str = "safe",
     *,
     hmac_active: bool = False,
+    pre_media_cutover_sync: bool = False,
 ) -> tuple[dict[str, str], Path, Path]:
     tmp_path.chmod(0o700)
     fake_bin = tmp_path / "bin"
@@ -2622,8 +2665,12 @@ def _harness(
         _activate_hmac_plan(plan_data)
     if scenario == "safe":
         _stabilize_no_image_plan(plan_data, hmac_active=hmac_active)
-    state_data = _fake_state_from_plan(plan_data)
     consumer_manifest = _consumer_manifest()
+    if pre_media_cutover_sync:
+        if scenario != "safe" or hmac_active:
+            raise AssertionError("pre-media-cutover fixture requires plain safe sync")
+        _set_pre_media_cutover_sync_fixture(plan_data, consumer_manifest)
+    state_data = _fake_state_from_plan(plan_data)
     _mutate_plan(plan_data, scenario)
     template = tmp_path / "template.json"
     template.write_text(json.dumps(plan_data), encoding="utf-8")
@@ -2674,6 +2721,8 @@ def _harness(
     )
     if hmac_active:
         env["TF_FAKE_HMAC_ACTIVE"] = "1"
+    if pre_media_cutover_sync:
+        env["AWS_FAKE_TIKTOK_IMAGE"] = LEGACY_TIKTOK_IMAGE
     return env, var_file, tf_log
 
 
@@ -2798,6 +2847,57 @@ def _assert_sync_consumer_image_rejected(
 ) -> None:
     assert result.returncode == 1
     assert "registryと完全一致する8 consumer" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mode", "live_image", "desired_image", "expected_media_input"),
+    (
+        ("sync", LEGACY_TIKTOK_IMAGE, LEGACY_TIKTOK_IMAGE, ""),
+        ("sync", MEDIA_WORKER_IMAGE, MEDIA_WORKER_IMAGE, MEDIA_WORKER_IMAGE),
+        ("sync", LEGACY_TIKTOK_IMAGE, MEDIA_WORKER_IMAGE, MEDIA_WORKER_IMAGE),
+        ("migration", LEGACY_TIKTOK_IMAGE, MEDIA_WORKER_IMAGE, MEDIA_WORKER_IMAGE),
+    ),
+    ids=(
+        "pre-cutover-sync",
+        "post-cutover-sync",
+        "sync-live-desired-mismatch",
+        "cutover-migration",
+    ),
+)
+def test_terraform_media_image_inputs_are_empty_only_for_anchored_legacy_sync(
+    mode: str,
+    live_image: str,
+    desired_image: str,
+    expected_media_input: str,
+) -> None:
+    guard = GUARD.read_text(encoding="utf-8")
+    function = re.search(
+        r"select_terraform_media_image_inputs\(\) \{.*?"
+        r"(?=\nvalidate_ecs_service_saga_receipt\(\))",
+        guard,
+        flags=re.DOTALL,
+    )
+    assert function is not None
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"EXPECTED_ACCOUNT_ID={ACCOUNT!r}",
+            f"REGION={REGION!r}",
+            function.group(0),
+            'select_terraform_media_image_inputs "$1" "$2" "$3"',
+            'printf "%s\\n%s\\n" "$TF_MEDIA_WORKER_IMAGE" "$TF_TIKTOK_ACQUIRE_IMAGE"',
+        )
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", script, "selector", mode, live_image, desired_image],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines() == [expected_media_input, ""]
 
 
 def _release_gate_query(
@@ -2999,6 +3099,21 @@ def test_strict_sync_accepts_distinct_expected_images_per_consumer(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_strict_sync_accepts_exact_live_legacy_tiktok_digest_before_cutover(
+    tmp_path: Path,
+) -> None:
+    expected = _strict_sync_expected_images()
+    expected["tiktok_acquire"] = LEGACY_TIKTOK_IMAGE
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected),
+        expected=expected,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize(
     ("consumer_id", "snapshot_key"),
     tuple(SYNC_CONSUMER_SNAPSHOT_KEYS.items()),
@@ -3029,9 +3144,64 @@ def test_strict_sync_rejects_repository_outside_consumer_registry(
 ) -> None:
     expected = _strict_sync_expected_images()
     snapshot = _strict_sync_snapshot(expected)
-    unexpected = f"{LEGACY_TIKTOK_REPOSITORY}@sha256:{'e' * 64}"
+    unexpected = (
+        f"{ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/"
+        f"teamagent-dev-not-tiktok-acquire@sha256:{'e' * 64}"
+    )
     expected["tiktok_acquire"] = unexpected
     snapshot["taskdefs"]["tiktok"]["image"] = unexpected
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+@pytest.mark.parametrize(
+    "invalid_image",
+    (
+        LEGACY_TIKTOK_REPOSITORY,
+        f"{LEGACY_TIKTOK_REPOSITORY}:latest",
+        f"{LEGACY_TIKTOK_REPOSITORY}@sha256:eb975be",
+    ),
+    ids=("digest-missing", "tag", "short-digest"),
+)
+def test_strict_sync_rejects_noncanonical_legacy_tiktok_image(
+    tmp_path: Path,
+    invalid_image: str,
+) -> None:
+    expected = _strict_sync_expected_images()
+    expected["tiktok_acquire"] = invalid_image
+    snapshot = _strict_sync_snapshot(expected)
+
+    result = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=snapshot,
+        expected=expected,
+    )
+
+    _assert_sync_consumer_image_rejected(result)
+
+
+@pytest.mark.parametrize(
+    ("consumer_id", "snapshot_key"),
+    tuple(
+        (consumer_id, snapshot_key)
+        for consumer_id, snapshot_key in SYNC_CONSUMER_SNAPSHOT_KEYS.items()
+        if consumer_id != "tiktok_acquire"
+    ),
+)
+def test_strict_sync_rejects_legacy_tiktok_repository_for_other_consumers(
+    tmp_path: Path,
+    consumer_id: str,
+    snapshot_key: str,
+) -> None:
+    expected = _strict_sync_expected_images()
+    expected[consumer_id] = LEGACY_TIKTOK_IMAGE
+    snapshot = _strict_sync_snapshot(expected)
 
     result = _run_sync_consumer_image_validator(
         tmp_path,
@@ -3561,6 +3731,42 @@ def test_dispatcher_migration_validator_rejects_non_allowlisted_changes(
     result = _run_dispatcher_migration_validator(tmp_path, scenario)
     assert result.returncode == 1
     assert "destination code hash/taskdef参照以外" in result.stderr
+
+
+def test_pre_media_cutover_legacy_sync_binds_empty_tf_inputs_through_saved_plan(
+    tmp_path: Path,
+) -> None:
+    env, var_file, _tf_log = _harness(
+        tmp_path,
+        pre_media_cutover_sync=True,
+    )
+    plan = tmp_path / "pre-media-cutover.tfplan"
+
+    result = _run(_plan_command(var_file, plan), env)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    saved_plan = json.loads(plan.read_text(encoding="utf-8"))
+    assert saved_plan["variables"]["media_worker_image"]["value"] == ""
+    assert saved_plan["variables"]["tiktok_acquire_image"]["value"] == ""
+    assert (
+        saved_plan["variables"]["runtime_guard_live"]["value"]["live_tiktok_image"]
+        == LEGACY_TIKTOK_IMAGE
+    )
+    task_change = _find(saved_plan, TASK_ADDRESSES["tiktok"])["change"]
+    assert task_change["actions"] == ["no-op"]
+    assert task_change["before"] == task_change["after"]
+    containers = json.loads(task_change["after"]["container_definitions"])
+    assert [
+        container["image"]
+        for container in containers
+        if container["name"] == COMPONENTS["tiktok"][0]
+    ] == [LEGACY_TIKTOK_IMAGE]
+    manifest = saved_plan["variables"]["image_deployment_consumer_manifest"]["value"]
+    tiktok = _manifest_consumer(manifest, "tiktok_acquire")
+    assert tiktok["release_repository"] == "teamagent-media-worker"
+    assert {tiktok[phase]["image"] for phase in ("live", "before", "after")} == {
+        LEGACY_TIKTOK_IMAGE
+    }
 
 
 def test_safe_sync_publishes_private_fully_bound_artifacts(tmp_path: Path) -> None:

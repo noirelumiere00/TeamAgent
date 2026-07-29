@@ -23,6 +23,8 @@ ATTEMPT = "12345678-1234-4123-8123-123456789abc"
 PLAN_SHA256 = "a" * 64
 CLUSTER_ARN = "arn:aws:ecs:ap-northeast-1:718959508629:cluster/teamagent-dev"
 ECR_REGISTRY = "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com"
+LEGACY_TIKTOK_IMAGE_DIGEST = f"sha256:eb975be{'0' * 57}"
+LEGACY_TIKTOK_IMAGE = f"{ECR_REGISTRY}/teamagent-dev-tiktok-acquire@{LEGACY_TIKTOK_IMAGE_DIGEST}"
 EXPECTED_CONSUMER_IDS = frozenset(
     {
         "mcp",
@@ -463,6 +465,100 @@ def _plan(
             },
         ],
     }
+
+
+def _set_planned_consumer_image(
+    plan: dict[str, Any],
+    *,
+    consumer_id: str,
+    image: str,
+) -> None:
+    address = CONSUMERS[consumer_id]["terraform_task_definition_address"]
+    change = next(item for item in plan["resource_changes"] if item["address"] == address)["change"]
+    for phase in ("before", "after"):
+        containers = json.loads(change[phase]["container_definitions"])
+        matches = [
+            container
+            for container in containers
+            if container["name"] == CONSUMERS[consumer_id]["container_name"]
+        ]
+        assert len(matches) == 1
+        matches[0]["image"] = image
+        change[phase]["container_definitions"] = json.dumps(
+            containers,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+
+def _pre_media_cutover_sync_plan() -> dict[str, Any]:
+    plan = _plan(
+        mcp_task=OLD_MCP_TASK,
+        connect_task=OLD_CONNECT_TASK,
+    )
+    _set_planned_consumer_image(
+        plan,
+        consumer_id="tiktok_acquire",
+        image=LEGACY_TIKTOK_IMAGE,
+    )
+    images = {
+        consumer_id: (
+            LEGACY_TIKTOK_IMAGE
+            if consumer_id == "tiktok_acquire"
+            else (
+                f"{ECR_REGISTRY}/{consumer['release_repository']}"
+                f"@sha256:{OLD_IMAGE_DIGESTS[consumer_id]}"
+            )
+        )
+        for consumer_id, consumer in CONSUMERS.items()
+    }
+    manifest_consumers: list[dict[str, Any]] = []
+    for consumer_id, consumer in CONSUMERS.items():
+        snapshot = {"image": images[consumer_id]}
+        manifest_consumers.append(
+            {
+                "consumer_id": consumer_id,
+                "terraform_task_definition_address": consumer["terraform_task_definition_address"],
+                "ecs_family": consumer["ecs_family"],
+                "container_name": consumer["container_name"],
+                "release_repository": consumer["release_repository"],
+                "activator": copy.deepcopy(consumer["activator"]),
+                "live": copy.deepcopy(snapshot),
+                "before": copy.deepcopy(snapshot),
+                "after": copy.deepcopy(snapshot),
+            }
+        )
+    plan["variables"] = {
+        "media_worker_image": {"value": ""},
+        "tiktok_acquire_image": {"value": ""},
+        "runtime_guard_live": {
+            "value": {
+                "mode": "sync",
+                "live_tiktok_image": LEGACY_TIKTOK_IMAGE,
+                "desired_tiktok_image": LEGACY_TIKTOK_IMAGE,
+            }
+        },
+        "image_deployment_consumer_manifest": {
+            "value": {
+                "schema_version": 1,
+                "registry_sha256": SAGA._CONSUMER_REGISTRY_SHA256,
+                "mode": "no-image-transition",
+                "consumers": manifest_consumers,
+            }
+        },
+    }
+    return plan
+
+
+def _set_live_tiktok_image(cli: Any, image: str) -> None:
+    definition = cli.task_definitions[OLD_TASKS["tiktok_acquire"]]["taskDefinition"]
+    matches = [
+        container
+        for container in definition["containerDefinitions"]
+        if container["name"] == CONSUMERS["tiktok_acquire"]["container_name"]
+    ]
+    assert len(matches) == 1
+    matches[0]["image"] = image
 
 
 def _deployment_configuration(
@@ -1236,6 +1332,81 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
         "eventbridge_rule_ecs_target",
         "lambda_taskdef_arn_environment",
     }
+
+
+def test_pre_media_cutover_sync_accepts_exact_plan_bound_tiktok_legacy_image() -> None:
+    plan = _pre_media_cutover_sync_plan()
+    analysis = SAGA._analyze_plan(plan)
+    cli = _FakeCli()
+    _set_live_tiktok_image(cli, LEGACY_TIKTOK_IMAGE)
+    saga = SAGA.EcsServiceApplySaga(
+        plan=analysis,
+        plan_sha256=PLAN_SHA256,
+        apply_attempt_id=ATTEMPT,
+        cli=cli,
+    )
+
+    begin_receipt = saga.begin()
+    verify_receipt = saga.verify()
+    finish_receipt = saga.finish(outcome="applied")
+
+    assert analysis.pre_media_cutover_sync_image == LEGACY_TIKTOK_IMAGE
+    assert analysis.binding["preMediaCutoverSyncImage"] == LEGACY_TIKTOK_IMAGE
+    assert begin_receipt["stage"] == "APPLYING"
+    assert verify_receipt["stage"] == "VERIFIED_APPLIED"
+    assert finish_receipt["stage"] == "APPLIED"
+    assert cli.item is not None
+    baseline = json.loads(cli.item["baseline_json"]["S"])
+    assert baseline["tiktok_acquire"]["image"] == LEGACY_TIKTOK_IMAGE
+    assert baseline["tiktok_acquire"]["imageDigest"] == LEGACY_TIKTOK_IMAGE_DIGEST
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "media-input-present",
+        "not-sync",
+        "live-desired-mismatch",
+        "manifest-transition",
+    ],
+)
+def test_pre_media_cutover_saga_rejects_legacy_without_every_sync_anchor(
+    scenario: str,
+) -> None:
+    plan = _pre_media_cutover_sync_plan()
+    variables = plan["variables"]
+    runtime_guard = variables["runtime_guard_live"]["value"]
+    manifest = variables["image_deployment_consumer_manifest"]["value"]
+    if scenario == "media-input-present":
+        variables["media_worker_image"]["value"] = (
+            f"{ECR_REGISTRY}/teamagent-media-worker@sha256:{'e' * 64}"
+        )
+    elif scenario == "not-sync":
+        runtime_guard["mode"] = "migration"
+    elif scenario == "live-desired-mismatch":
+        runtime_guard["desired_tiktok_image"] = (
+            f"{ECR_REGISTRY}/teamagent-media-worker@sha256:{'e' * 64}"
+        )
+    else:
+        tiktok = next(
+            row for row in manifest["consumers"] if row["consumer_id"] == "tiktok_acquire"
+        )
+        tiktok["after"]["image"] = f"{ECR_REGISTRY}/teamagent-media-worker@sha256:{'e' * 64}"
+
+    with pytest.raises(SAGA.SagaError, match="registry image is not exact"):
+        SAGA._analyze_plan(plan)
+
+
+def test_pre_media_cutover_saga_never_allows_legacy_image_for_other_consumer() -> None:
+    plan = _pre_media_cutover_sync_plan()
+    _set_planned_consumer_image(
+        plan,
+        consumer_id="mcp",
+        image=LEGACY_TIKTOK_IMAGE,
+    )
+
+    with pytest.raises(SAGA.SagaError, match="registry image is not exact"):
+        SAGA._analyze_plan(plan)
 
 
 def test_saga_rejects_consumer_registry_activator_partition_drift() -> None:

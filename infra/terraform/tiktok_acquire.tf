@@ -121,13 +121,20 @@ locals {
   # Keep existing physical names/state addresses while widening their contract.
   # Promotion tooling exposes MEDIA_* names; no destructive resource rename is
   # required merely to adopt the generic envelope.
-  media_name         = "${var.project_name}-${var.environment}-tiktok-acquire"
-  media_worker_image = var.media_worker_image != "" ? var.media_worker_image : var.tiktok_acquire_image
-  media_bucket_name  = "${var.project_name}-${var.environment}-media-jobs-${data.aws_caller_identity.current.account_id}"
-  tk_enabled         = local.media_enabled
-  tk_name            = local.media_name
-  tk_acct            = data.aws_caller_identity.current.account_id
-  tk_loggroup        = "/teamagent/${var.environment}/tiktok-acquire"
+  media_name = "${var.project_name}-${var.environment}-tiktok-acquire"
+  # Keep both persisted/caller-controlled inputs generic-only. Before the
+  # cutover, only the exact live=desired sync attested by runtime_guard_live may
+  # recover the deployed legacy digest; after cutover this fallback is empty.
+  media_worker_image = (
+    var.media_worker_image != "" ? var.media_worker_image :
+    var.tiktok_acquire_image != "" ? var.tiktok_acquire_image :
+    local.pre_media_cutover_sync_image
+  )
+  media_bucket_name = "${var.project_name}-${var.environment}-media-jobs-${data.aws_caller_identity.current.account_id}"
+  tk_enabled        = local.media_enabled
+  tk_name           = local.media_name
+  tk_acct           = data.aws_caller_identity.current.account_id
+  tk_loggroup       = "/teamagent/${var.environment}/tiktok-acquire"
   tk_dispatch_static_environment = {
     # Keep the always-present runtime guard independent from the guarded ECS
     # task revision while binding every non-revision dispatcher input exactly.
@@ -481,11 +488,19 @@ resource "aws_ecs_task_definition" "tiktok_acquire" {
     create_before_destroy = true
 
     precondition {
-      condition = local.media_worker_image != "" && can(regex(
-        "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
-        local.media_worker_image,
-      ))
-      error_message = "media_worker_image must be the fixed TeamAgent media-worker release digest."
+      condition = (
+        can(regex(
+          "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
+          local.media_worker_image,
+        )) ||
+        (
+          var.media_worker_image == "" &&
+          var.tiktok_acquire_image == "" &&
+          local.pre_media_cutover_sync &&
+          local.media_worker_image == local.pre_media_cutover_sync_image
+        )
+      )
+      error_message = "media_worker_image must be the fixed TeamAgent media-worker release digest, except for the exact runtime-guard-bound pre-cutover legacy sync."
     }
 
     precondition {

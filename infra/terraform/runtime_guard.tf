@@ -132,6 +132,22 @@ locals {
     local.runtime_migration_manifest.migrations[var.runtime_guard_live.migration_id],
     null,
   )
+  legacy_tiktok_image_pattern = "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+  # The media cutover gate uses the canonical live task image to identify the
+  # legacy side. Receipt presence is not cutover history (sync forbids receipts),
+  # so only an exact live=desired sync can expose this transitional fallback.
+  pre_media_cutover_sync_image = var.runtime_guard_live == null ? "" : (
+    var.runtime_guard_live.mode == "sync" &&
+    var.runtime_guard_live.live_tiktok_image ==
+    var.runtime_guard_live.desired_tiktok_image &&
+    can(regex(
+      local.legacy_tiktok_image_pattern,
+      var.runtime_guard_live.live_tiktok_image,
+    )) ?
+    var.runtime_guard_live.live_tiktok_image :
+    ""
+  )
+  pre_media_cutover_sync = local.pre_media_cutover_sync_image != ""
   runtime_image_contracts_valid = (
     can(regex(
       "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-openclaw@sha256:[0-9a-f]{64}$",
@@ -145,10 +161,17 @@ locals {
       "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-mcp@sha256:[0-9a-f]{64}$",
       var.x_buzz_image,
     ))) &&
-    (!local.media_worker_enabled || can(regex(
-      "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
-      local.media_worker_image,
-    )))
+    (
+      !local.media_worker_enabled ||
+      can(regex(
+        "^718959508629\\.dkr\\.ecr\\.ap-northeast-1\\.amazonaws\\.com/teamagent-media-worker@sha256:[0-9a-f]{64}$",
+        local.media_worker_image,
+      )) ||
+      (
+        local.pre_media_cutover_sync &&
+        local.media_worker_image == local.pre_media_cutover_sync_image
+      )
+    )
   )
 
   runtime_guard_hmac_deployed = var.runtime_guard_live == null ? {

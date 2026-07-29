@@ -845,6 +845,53 @@ def test_consumer_manifest_derives_no_image_transition_from_exact_eight() -> Non
         CONTEXT.validate_consumer_manifest(wrong_hash)
 
 
+def test_consumer_manifest_allows_only_unchanged_pre_cutover_tiktok_legacy_row() -> None:
+    manifest = _consumer_manifest()
+    tiktok = next(
+        consumer
+        for consumer in manifest["consumers"]
+        if consumer["consumer_id"] == "tiktok_acquire"
+    )
+    legacy_image = (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
+        f"teamagent-dev-tiktok-acquire@sha256:eb975be{'0' * 57}"
+    )
+    for phase in ("live", "before", "after"):
+        tiktok[phase]["image"] = legacy_image
+        tiktok[phase]["task_definition"]["container_definitions"][0]["image"] = legacy_image
+
+    validated = CONTEXT.validate_consumer_manifest(manifest)
+
+    validated_tiktok = next(
+        consumer
+        for consumer in validated["consumers"]
+        if consumer["consumer_id"] == "tiktok_acquire"
+    )
+    assert validated["mode"] == "no-image-transition"
+    assert {validated_tiktok[phase]["image"] for phase in ("live", "before", "after")} == {
+        legacy_image
+    }
+
+    changed = json.loads(json.dumps(manifest))
+    changed_tiktok = next(
+        consumer for consumer in changed["consumers"] if consumer["consumer_id"] == "tiktok_acquire"
+    )
+    changed_tiktok["after"]["task_definition_arn"] = "aws_ecs_task_definition.tiktok_acquire[0]"
+    changed["mode"] = "receipt-required"
+    with pytest.raises(CONTEXT.ContextError, match="anchored pre-cutover"):
+        CONTEXT.validate_consumer_manifest(changed)
+
+    other_consumer = json.loads(json.dumps(manifest))
+    mcp = next(
+        consumer for consumer in other_consumer["consumers"] if consumer["consumer_id"] == "mcp"
+    )
+    for phase in ("live", "before", "after"):
+        mcp[phase]["image"] = legacy_image
+        mcp[phase]["task_definition"]["container_definitions"][0]["image"] = legacy_image
+    with pytest.raises(CONTEXT.ContextError, match="anchored pre-cutover"):
+        CONTEXT.validate_consumer_manifest(other_consumer)
+
+
 def test_consumer_manifest_canonicalizes_only_the_exact_absent_sentinel() -> None:
     manifest = _consumer_manifest()
     consumer = next(

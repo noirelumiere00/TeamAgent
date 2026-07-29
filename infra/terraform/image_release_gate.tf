@@ -328,8 +328,18 @@ locals {
         consumer.after.image ==
         local.deployment_expected_consumer_images[consumer.consumer_id] &&
         length(split("@sha256:", consumer.after.image)) == 2 &&
-        split("@sha256:", consumer.after.image)[0] ==
-        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/${consumer.release_repository}" &&
+        (
+          split("@sha256:", consumer.after.image)[0] ==
+          "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/${consumer.release_repository}" ||
+          (
+            consumer.consumer_id == "tiktok_acquire" &&
+            consumer.release_repository == "teamagent-media-worker" &&
+            local.pre_media_cutover_sync &&
+            consumer.after.image == local.pre_media_cutover_sync_image &&
+            consumer.live == consumer.before &&
+            consumer.before == consumer.after
+          )
+        ) &&
         can(regex(
           "^[0-9a-f]{64}$",
           split("@sha256:", consumer.after.image)[1],

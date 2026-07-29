@@ -67,6 +67,10 @@ ALLOWED_EXISTING_LOG_IMPORTS = {
     ),
 }
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+LEGACY_TIKTOK_IMAGE_RE = re.compile(
+    r"^718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+    r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+)
 INSTANCE_SELECTOR_RE = re.compile(r'\[(?:[0-9]+|"(?:[^"\\]|\\.)*")\]')
 TASK_DEFINITION_ARN_RE = re.compile(
     r"arn:aws:ecs:ap-northeast-1:718959508629:"
@@ -348,6 +352,7 @@ def _consumer_snapshot(
     consumer: Mapping[str, Any],
     label: str,
     allow_planned_pointer: bool = False,
+    allow_pre_media_cutover_legacy: bool = False,
 ) -> dict[str, Any]:
     if consumer_snapshot_is_absent(value):
         return dict(ABSENT_CONSUMER_SNAPSHOT)
@@ -358,16 +363,25 @@ def _consumer_snapshot(
     )
     repository = consumer["release_repository"]
     image = snapshot["image"]
-    if (
-        not isinstance(image, str)
-        or re.fullmatch(
+    registry_image = isinstance(image, str) and (
+        re.fullmatch(
             rf"{re.escape(ECR_REGISTRY)}/{re.escape(repository)}"
             r"@sha256:[0-9a-f]{64}",
             image,
         )
-        is None
-    ):
-        raise ContextError(f"{label}.image is not the registry repository digest")
+        is not None
+    )
+    pre_media_cutover_legacy = (
+        allow_pre_media_cutover_legacy
+        and consumer["consumer_id"] == "tiktok_acquire"
+        and isinstance(image, str)
+        and LEGACY_TIKTOK_IMAGE_RE.fullmatch(image) is not None
+    )
+    if not registry_image and not pre_media_cutover_legacy:
+        raise ContextError(
+            f"{label}.image is not the registry repository digest "
+            "or anchored pre-cutover TikTok legacy digest"
+        )
     task_definition_arn = _task_definition_arn(
         snapshot["task_definition_arn"],
         family=consumer["ecs_family"],
@@ -607,6 +621,20 @@ def validate_consumer_manifest(value: Any) -> dict[str, Any]:
             key: registry_consumer[key] for key in identity_keys
         }:
             raise ContextError(f"{label} identity does not match the code-owned registry")
+        # The canonical manifest live snapshot is the same source used by the
+        # media cutover gate.  Permit legacy only for an unchanged TikTok row in
+        # no-image-transition mode; no other consumer or transition can opt in.
+        pre_media_cutover_legacy = (
+            manifest["mode"] == RELEASE_MODE_NO_IMAGE_TRANSITION
+            and registry_consumer["consumer_id"] == "tiktok_acquire"
+            and isinstance(consumer["live"], dict)
+            and consumer["live"] == consumer["before"] == consumer["after"]
+            and isinstance(consumer["live"].get("image"), str)
+            and (
+                LEGACY_TIKTOK_IMAGE_RE.fullmatch(consumer["live"]["image"])
+                is not None
+            )
+        )
         normalized = {
             key: json.loads(json.dumps(registry_consumer[key]))
             for key in identity_keys
@@ -615,17 +643,20 @@ def validate_consumer_manifest(value: Any) -> dict[str, Any]:
             consumer["live"],
             consumer=registry_consumer,
             label=f"{label}.live",
+            allow_pre_media_cutover_legacy=pre_media_cutover_legacy,
         )
         normalized["before"] = _consumer_snapshot(
             consumer["before"],
             consumer=registry_consumer,
             label=f"{label}.before",
+            allow_pre_media_cutover_legacy=pre_media_cutover_legacy,
         )
         normalized["after"] = _consumer_snapshot(
             consumer["after"],
             consumer=registry_consumer,
             label=f"{label}.after",
             allow_planned_pointer=True,
+            allow_pre_media_cutover_legacy=pre_media_cutover_legacy,
         )
         normalized_consumers.append(normalized)
     normalized_manifest = {

@@ -150,11 +150,23 @@ def test_stopped_recovery_has_delivery_and_invocation_failure_sinks() -> None:
 
 def test_runtime_guard_keeps_generic_and_compatibility_enable_aliases_active() -> None:
     guard = (ROOT / "infra/deploy/terraform_runtime_guard.sh").read_text(encoding="utf-8")
+    runtime_guard_tf = (ROOT / "infra/terraform/runtime_guard.tf").read_text(encoding="utf-8")
 
-    assert '"-var=media_worker_image=$DESIRED_TIKTOK_IMAGE"' in guard
-    assert '"-var=tiktok_acquire_image="' in guard
+    assert "select_terraform_media_image_inputs \\" in guard
+    assert '"-var=media_worker_image=$TF_MEDIA_WORKER_IMAGE"' in guard
+    assert '"-var=tiktok_acquire_image=$TF_TIKTOK_ACQUIRE_IMAGE"' in guard
     assert '"-var=enable_media_worker=true"' in guard
     assert '"-var=enable_tiktok_acquire=true"' in guard
+    assert "pre_media_cutover_sync_image" in runtime_guard_tf
+    assert "teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}" in runtime_guard_tf
+    assert 'var.runtime_guard_live.mode == "sync"' in runtime_guard_tf
+    assert (
+        "var.runtime_guard_live.live_tiktok_image ==\n"
+        "    var.runtime_guard_live.desired_tiktok_image"
+    ) in runtime_guard_tf
+    assert "local.pre_media_cutover_sync_image" in MEDIA_TF
+    assert 'var.media_worker_image == ""' in MEDIA_TF
+    assert 'var.tiktok_acquire_image == ""' in MEDIA_TF
 
 
 def test_stopped_reconciler_and_deprecated_ecr_output_are_explicit() -> None:

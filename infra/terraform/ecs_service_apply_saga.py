@@ -68,6 +68,10 @@ _ENDPOINTS = {
     "lambda": f"https://lambda.{_REGION}.amazonaws.com",
 }
 _IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_LEGACY_TIKTOK_IMAGE_RE = re.compile(
+    rf"^{_ACCOUNT_ID}\.dkr\.ecr\.{re.escape(_REGION)}\.amazonaws\.com/"
+    r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
+)
 _RULE_STATES = frozenset({"DISABLED", "ENABLED"})
 _DEPLOYMENT_CONFIGURATION_FIELDS = frozenset(
     {
@@ -745,6 +749,7 @@ def _container_image(
     *,
     spec: ConsumerSpec,
     label: str,
+    pre_media_cutover_sync_image: str = "",
 ) -> tuple[str, str]:
     if type(value) is not list:
         raise SagaError(f"{label} container definitions are invalid")
@@ -756,15 +761,29 @@ def _container_image(
     if len(matches) != 1:
         raise SagaError(f"{label} registry container is not exact")
     image = matches[0].get("image")
-    prefix = (
-        f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
-        f"{spec.release_repository}@"
-    )
-    if type(image) is not str or not image.startswith(prefix):
-        raise SagaError(f"{label} registry image is not exact")
-    image_digest = image.removeprefix(prefix)
+    if (
+        spec.key == "tiktok_acquire"
+        and pre_media_cutover_sync_image
+        and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(pre_media_cutover_sync_image)
+        is not None
+    ):
+        if type(image) is not str or not hmac.compare_digest(
+            image,
+            pre_media_cutover_sync_image,
+        ):
+            raise SagaError(f"{label} pre-cutover TikTok image is not exact")
+        image_digest = image.rsplit("@", maxsplit=1)[1]
+    else:
+        prefix = (
+            f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
+            f"{spec.release_repository}@"
+        )
+        if type(image) is not str or not image.startswith(prefix):
+            raise SagaError(f"{label} registry image is not exact")
+        image_digest = image.removeprefix(prefix)
     if _IMAGE_DIGEST_RE.fullmatch(image_digest) is None:
         raise SagaError(f"{label} registry image digest is invalid")
+    assert type(image) is str
     return image, image_digest
 
 
@@ -772,6 +791,7 @@ def _planned_task(
     item: Mapping[str, Any],
     *,
     spec: ConsumerSpec,
+    pre_media_cutover_sync_image: str = "",
 ) -> tuple[str, str]:
     task_after, _task_unknown = _resource_after(
         item,
@@ -798,6 +818,7 @@ def _planned_task(
         payload.get("containerDefinitions"),
         spec=spec,
         label="saved plan task definition",
+        pre_media_cutover_sync_image=pre_media_cutover_sync_image,
     )
     del image
     return artifact_sha256, image_digest
@@ -969,10 +990,93 @@ class PlanAnalysis:
     binding: dict[str, Any]
     specs: dict[str, ConsumerSpec]
     registry_sha256: str
+    pre_media_cutover_sync_image: str
+
+
+def _pre_media_cutover_sync_image(
+    plan: Mapping[str, Any],
+    *,
+    specs: Mapping[str, ConsumerSpec],
+    registry_sha256: str,
+) -> str:
+    """Return the exact plan-bound legacy image only for the pre-cutover sync state."""
+
+    variables = plan.get("variables")
+    if type(variables) is not dict:
+        return ""
+
+    def variable_value(name: str) -> object:
+        binding = variables.get(name)
+        return binding.get("value") if type(binding) is dict else None
+
+    runtime_guard = variable_value("runtime_guard_live")
+    manifest = variable_value("image_deployment_consumer_manifest")
+    if (
+        type(runtime_guard) is not dict
+        or runtime_guard.get("mode") != "sync"
+        or variable_value("media_worker_image") != ""
+        or variable_value("tiktok_acquire_image") != ""
+        or type(manifest) is not dict
+        or manifest.get("schema_version") != 1
+        or manifest.get("registry_sha256") != registry_sha256
+        or manifest.get("mode") != "no-image-transition"
+    ):
+        return ""
+
+    candidate = runtime_guard.get("live_tiktok_image")
+    if (
+        type(candidate) is not str
+        or _LEGACY_TIKTOK_IMAGE_RE.fullmatch(candidate) is None
+        or runtime_guard.get("desired_tiktok_image") != candidate
+    ):
+        return ""
+
+    consumers = manifest.get("consumers")
+    if type(consumers) is not list or len(consumers) != len(specs):
+        return ""
+    consumer_ids = [
+        row.get("consumer_id") if type(row) is dict else None for row in consumers
+    ]
+    if (
+        any(type(consumer_id) is not str for consumer_id in consumer_ids)
+        or len(set(consumer_ids)) != len(consumer_ids)
+        or frozenset(consumer_ids) != frozenset(specs)
+    ):
+        return ""
+    row = next(
+        item
+        for item in consumers
+        if type(item) is dict and item.get("consumer_id") == "tiktok_acquire"
+    )
+    spec = specs["tiktok_acquire"]
+    activator = row.get("activator")
+    live = row.get("live")
+    before = row.get("before")
+    after = row.get("after")
+    if (
+        row.get("terraform_task_definition_address") != spec.task_address
+        or row.get("ecs_family") != spec.task_family
+        or row.get("container_name") != spec.container_name
+        or row.get("release_repository") != spec.release_repository
+        or type(activator) is not dict
+        or activator.get("type") != spec.activator_type
+        or activator.get("identity") != spec.activator_identity
+        or type(live) is not dict
+        or live != before
+        or live != after
+        or live.get("image") != candidate
+    ):
+        return ""
+    return candidate
 
 
 def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
     specs, registry_sha256 = _load_consumer_specs()
+    pre_media_cutover_sync_image = _pre_media_cutover_sync_image(
+        plan,
+        specs=specs,
+        registry_sha256=registry_sha256,
+    )
     format_version = plan.get("format_version")
     if (
         type(format_version) is not str
@@ -1035,6 +1139,7 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         artifact_sha256, image_digest = _planned_task(
             matches[spec.task_address],
             spec=spec,
+            pre_media_cutover_sync_image=pre_media_cutover_sync_image,
         )
         if spec.activator_type == "ecs_service":
             activation, activation_changed = _service_plan(
@@ -1068,10 +1173,12 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         binding={
             "schemaVersion": _SCHEMA_VERSION,
             "consumerRegistrySha256": registry_sha256,
+            "preMediaCutoverSyncImage": pre_media_cutover_sync_image,
             "consumers": planned_consumers,
         },
         specs=specs,
         registry_sha256=registry_sha256,
+        pre_media_cutover_sync_image=pre_media_cutover_sync_image,
     )
 
 
@@ -1446,6 +1553,7 @@ def _read_task_definition(
     *,
     spec: ConsumerSpec,
     task_definition: str,
+    pre_media_cutover_sync_image: str = "",
 ) -> dict[str, str]:
     response = cli.json(
         "ecs",
@@ -1477,6 +1585,7 @@ def _read_task_definition(
         definition.get("containerDefinitions"),
         spec=spec,
         label="live task definition",
+        pre_media_cutover_sync_image=pre_media_cutover_sync_image,
     )
     return {
         "taskDefinition": task_definition,
@@ -1489,6 +1598,8 @@ def _read_task_definition(
 def _read_consumers(
     cli: AwsCli,
     specs: Mapping[str, ConsumerSpec],
+    *,
+    pre_media_cutover_sync_image: str = "",
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     service_activations, raw_services = _read_services(cli, specs)
     activations: dict[str, dict[str, Any]] = {}
@@ -1525,6 +1636,7 @@ def _read_consumers(
                 task_definition,
                 expected_family=spec.task_family,
             ),
+            pre_media_cutover_sync_image=pre_media_cutover_sync_image,
         )
         consumers[key] = {
             **task,
@@ -1770,6 +1882,7 @@ def _validate_consumer_baseline(
     value: object,
     *,
     specs: Mapping[str, ConsumerSpec],
+    pre_media_cutover_sync_image: str = "",
 ) -> dict[str, dict[str, Any]]:
     if type(value) is not dict or frozenset(value) != frozenset(specs):
         raise SagaError("durable ECS rollback baseline is incomplete")
@@ -1791,16 +1904,34 @@ def _validate_consumer_baseline(
         task_definition_sha256 = raw.get("taskDefinitionSha256")
         image = raw.get("image")
         image_digest = raw.get("imageDigest")
-        image_prefix = (
-            f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
-            f"{spec.release_repository}@"
+        expected_image = (
+            pre_media_cutover_sync_image
+            if spec.key == "tiktok_acquire" and pre_media_cutover_sync_image
+            else (
+                f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
+                f"{spec.release_repository}@{image_digest}"
+            )
         )
         if (
             type(task_definition_sha256) is not str
             or _SHA256_RE.fullmatch(task_definition_sha256) is None
             or type(image_digest) is not str
             or _IMAGE_DIGEST_RE.fullmatch(image_digest) is None
-            or image != f"{image_prefix}{image_digest}"
+            or (
+                spec.key == "tiktok_acquire"
+                and pre_media_cutover_sync_image
+                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(
+                    pre_media_cutover_sync_image
+                )
+                is None
+            )
+            or image != expected_image
+            or (
+                spec.key == "tiktok_acquire"
+                and pre_media_cutover_sync_image
+                and image_digest
+                != pre_media_cutover_sync_image.rsplit("@", maxsplit=1)[1]
+            )
         ):
             raise SagaError("durable ECS rollback task binding is invalid")
         activation = raw.get("activation")
@@ -1910,6 +2041,15 @@ class EcsServiceApplySaga:
             _SHA256_RE.fullmatch(plan_sha256) is None
             or _UUID_RE.fullmatch(apply_attempt_id) is None
             or plan.binding.get("consumerRegistrySha256") != plan.registry_sha256
+            or plan.binding.get("preMediaCutoverSyncImage")
+            != plan.pre_media_cutover_sync_image
+            or (
+                plan.pre_media_cutover_sync_image
+                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(
+                    plan.pre_media_cutover_sync_image
+                )
+                is None
+            )
             or frozenset(plan.specs) != _SAGA_CONSUMER_IDS
         ):
             raise SagaError("ECS saga identity is invalid")
@@ -2036,7 +2176,11 @@ class EcsServiceApplySaga:
             raw = json.loads(baseline_json, object_pairs_hook=_reject_duplicate_keys)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise SagaError("durable ECS rollback baseline is invalid") from exc
-        baseline = _validate_consumer_baseline(raw, specs=self.specs)
+        baseline = _validate_consumer_baseline(
+            raw,
+            specs=self.specs,
+            pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+        )
         if not hmac.compare_digest(
             _ddb_string(item, "baseline_sha256"), _digest(baseline)
         ) or not hmac.compare_digest(
@@ -2048,9 +2192,17 @@ class EcsServiceApplySaga:
 
     def begin(self) -> dict[str, Any]:
         self._assert_registry_current()
-        baseline, raw = _read_consumers(self.cli, self.specs)
+        baseline, raw = _read_consumers(
+            self.cli,
+            self.specs,
+            pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+        )
         _assert_stable(self.cli, raw, baseline, self.specs)
-        baseline = _validate_consumer_baseline(baseline, specs=self.specs)
+        baseline = _validate_consumer_baseline(
+            baseline,
+            specs=self.specs,
+            pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+        )
         self._assert_registry_current()
         baseline_json = _canonical_bytes(baseline).decode("utf-8")
         planned_json = _canonical_bytes(self.plan.binding).decode("utf-8")
@@ -2138,7 +2290,11 @@ class EcsServiceApplySaga:
         if _ddb_string(item, "stage") != "APPLYING":
             raise SagaError("durable ECS saga is not the exact applying attempt")
         self._active(stage="APPLYING")
-        live, raw_live = _read_consumers(self.cli, self.specs)
+        live, raw_live = _read_consumers(
+            self.cli,
+            self.specs,
+            pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+        )
         self._verify_planned(live, raw_live)
         _assert_stable(self.cli, raw_live, live, self.specs)
         self._assert_registry_current()
@@ -2301,7 +2457,11 @@ class EcsServiceApplySaga:
             ],
             timeout_seconds=900,
         )
-        restored, raw_restored = _read_consumers(self.cli, self.specs)
+        restored, raw_restored = _read_consumers(
+            self.cli,
+            self.specs,
+            pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+        )
         if restored != baseline:
             raise SagaError("exact consumer rollback baseline could not be verified")
         _assert_stable(self.cli, raw_restored, restored, self.specs)
@@ -2420,7 +2580,11 @@ class EcsServiceApplySaga:
         if outcome == "failed":
             self._restore(baseline)
         else:
-            live, raw_live = _read_consumers(self.cli, self.specs)
+            live, raw_live = _read_consumers(
+                self.cli,
+                self.specs,
+                pre_media_cutover_sync_image=self.plan.pre_media_cutover_sync_image,
+            )
             self._verify_planned(live, raw_live)
             _assert_stable(self.cli, raw_live, live, self.specs)
         self._assert_registry_current()
