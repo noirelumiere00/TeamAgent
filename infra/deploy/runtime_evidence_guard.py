@@ -1353,7 +1353,10 @@ def validate_inventory_contract(contract: Mapping[str, Any]) -> None:
             subscription_arn,
         )
         or not isinstance(attributes, Mapping)
-        or set(attributes)
+        # SubscriptionPrincipal is validated (same-account) where the attributes
+        # are first observed; the recorded inventory carries it through, so the
+        # exact-set comparison here must exclude it the same way.
+        or set(attributes) - {"SubscriptionPrincipal"}
         != {
             "ConfirmationWasAuthenticated",
             "Endpoint",
