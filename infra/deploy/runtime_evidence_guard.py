@@ -458,8 +458,26 @@ class AwsCli:
             "AWS_SECRET_ACCESS_KEY",
             "AWS_SESSION_TOKEN",
             "AWS_SECURITY_TOKEN",
+            # Corporate networks terminate TLS with a private CA; dropping the
+            # operator's CA-bundle settings made every AWS call die on
+            # CERTIFICATE_VERIFY_FAILED in the sanitized environment while the
+            # same call succeeded in the ambient shell. Trusting these is no
+            # wider than trusting the credential variables above -- both come
+            # from the same operator shell.
+            "AWS_CA_BUNDLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE",
         }
         environment = {key: value for key, value in os.environ.items() if key in allowed}
+        # The AWS CLI only honors AWS_CA_BUNDLE (or the config ca_bundle we null
+        # out), not SSL_CERT_FILE. Derive it here, inside this child environment
+        # only, so the guard's own Terraform environment scrubber -- which rightly
+        # rejects an ambient AWS_CA_BUNDLE -- never sees it.
+        if "AWS_CA_BUNDLE" not in environment:
+            ssl_cert_file = environment.get("SSL_CERT_FILE")
+            if ssl_cert_file and os.path.isfile(ssl_cert_file):
+                environment["AWS_CA_BUNDLE"] = ssl_cert_file
         environment.update(
             {
                 "AWS_CONFIG_FILE": "/dev/null",
