@@ -423,7 +423,9 @@ def _task_after(component: str) -> dict[str, Any]:
         "placement_constraints": [],
         "proxy_configuration": [],
         "inference_accelerator": [],
-        "volume": [{"name": "tmp"}] if is_worker else [],
+        # The provider always emits configure_at_launch (Optional+Computed), so a
+        # fixture without it does not look like a real plan or state payload.
+        "volume": [{"name": "tmp", "configure_at_launch": False}] if is_worker else [],
         "container_definitions": json.dumps([_container(component)]),
     }
 
