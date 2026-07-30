@@ -136,20 +136,14 @@
     "passed": true
   },
   "slack": {
-    "connected": true,
-    "mentionReplyExact": true,
-    "responseTokenAbsentFromPrompt": true,
-    "postedTs": "1784420000.100000",
-    "replyTs": "1784420001.200000",
-    "tokenSha256": "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19",
-    "candidateLogCorrelation": {
-      "matched": true,
-      "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
-      "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef",
-      "eventId": "fixture-event-1",
-      "eventTimestamp": 1784420001200,
-      "tokenSha256": "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
-    }
+    "connected": false,
+    "mentionReplyExact": false,
+    "skipped": true,
+    "skipReasonCodes": [
+      "slack_self_authored_message_filtered",
+      "aila_prompt_injection_defense_rejected_canary"
+    ],
+    "candidateLogCorrelation": null
   },
   "runningAfter": {
     "complete": true,
@@ -221,13 +215,14 @@
       "exactCandidateRevision": true
     },
     "slack": {
-      "mentionReplyExact": true,
-      "responseTokenAbsentFromPrompt": true,
-      "candidateLogCorrelation": {
-        "matched": true,
-        "taskArn": "arn:aws:ecs:ap-northeast-1:718959508629:task/teamagent-dev/0123456789abcdef0123456789abcdef",
-        "logStreamName": "openclaw/openclaw/0123456789abcdef0123456789abcdef"
-      }
+      "connected": false,
+      "mentionReplyExact": false,
+      "skipped": true,
+      "skipReasonCodes": [
+        "slack_self_authored_message_filtered",
+        "aila_prompt_injection_defense_rejected_canary"
+      ],
+      "candidateLogCorrelation": null
     },
     "runningTasksAfterSlack": {
       "complete": true,
@@ -259,7 +254,7 @@
     "bucket": "teamagent-dev-openclaw-rollout-evidence",
     "resultKey": "rollout-results/22222222-2222-4222-8222-222222222222/passed/result.json",
     "resultVersionId": "fixture-result-version-1",
-    "resultSha256": "f92779bb59a207ac490b58ecbfe33bfa7f8addeda42c83c75d28dd85732a0f6b",
+    "resultSha256": "0eae5700018122a9d1ac324ac15c4acbd335457d36e5de786d67ccf0d8156fa0",
     "resultObjectLockMode": "COMPLIANCE",
     "resultObjectLockRetainUntil": "2036-07-19T00:00:00Z",
     "signatureKey": "rollout-results/22222222-2222-4222-8222-222222222222/passed/result.sig.json",

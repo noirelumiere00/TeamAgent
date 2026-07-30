@@ -46,6 +46,13 @@ TASK_FIXTURE = ROOT / "tests/fixtures/openclaw/current-task-definition.json"
 ROLLOUT_FIXTURE = ROOT / "tests/fixtures/openclaw/rollout-gates-pass.json"
 STARTUP_LOG_FIXTURE = ROOT / "tests/fixtures/openclaw/startup-log-events.jsonl"
 ADVERSARIAL_RUNBOOK = ROOT / "docs/openclaw/adversarial_harness_runbook.md"
+SLACK_CANARY_SKIP_REASON_CODES = [
+    "slack_self_authored_message_filtered",
+    "aila_prompt_injection_defense_rejected_canary",
+]
+SLACK_CANARY_TOKEN_SHA256 = (
+    "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
+)
 
 
 def _strip_json5_comments(source: str) -> str:
@@ -87,6 +94,40 @@ def _strip_json5_comments(source: str) -> str:
         index += 1
     assert quote is None, "unterminated JSON5 string"
     return "".join(output)
+
+
+def _bind_rollout_fixture_result_hash(fixture: dict[str, Any]) -> None:
+    canonical_result = json.dumps(
+        fixture["persistedResult"],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    fixture["immutableEvidence"]["resultSha256"] = hashlib.sha256(
+        f"{canonical_result}\n".encode()
+    ).hexdigest()
+
+
+def _active_slack_canary_evidence(fixture: dict[str, Any]) -> dict[str, Any]:
+    task = fixture["runningBefore"]["tasks"][0]
+    task_id = task["taskArn"].rsplit("/", maxsplit=1)[-1]
+    return {
+        "connected": True,
+        "mentionReplyExact": True,
+        "responseTokenAbsentFromPrompt": True,
+        "postedTs": "1784420000.100000",
+        "replyTs": "1784420001.200000",
+        "tokenSha256": SLACK_CANARY_TOKEN_SHA256,
+        "correlationSha256": "9" * 64,
+        "candidateLogCorrelation": {
+            "matched": True,
+            "taskArn": task["taskArn"],
+            "logStreamName": f"openclaw/openclaw/{task_id}",
+            "eventId": "fixture-event-1",
+            "eventTimestamp": 1784420001200,
+            "tokenSha256": SLACK_CANARY_TOKEN_SHA256,
+        },
+    }
 
 
 def _load_reviewed_json5(path: Path) -> dict[str, Any]:
@@ -1459,6 +1500,22 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     assert passed.returncode == 0, passed.stderr
     assert json.loads(passed.stdout)["passed"] is True
 
+    active_fixture = copy.deepcopy(fixture)
+    active_slack = _active_slack_canary_evidence(active_fixture)
+    active_fixture["slack"] = copy.deepcopy(active_slack)
+    active_fixture["persistedResult"]["slack"] = copy.deepcopy(active_slack)
+    _bind_rollout_fixture_result_hash(active_fixture)
+    active_path = tmp_path / "rollout-active-slack.json"
+    active_path.write_text(json.dumps(active_fixture))
+    active_passed = subprocess.run(
+        ["node", str(ROLLOUT_GATE), "--validate-fixture", str(active_path)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert active_passed.returncode == 0, active_passed.stderr
+    assert json.loads(active_passed.stdout)["passed"] is True
+
     mutations: list[tuple[str, dict[str, Any]]] = []
     changed = copy.deepcopy(fixture)
     changed["consumption"]["state"] = "APPLYING"
@@ -1507,14 +1564,54 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     ]
     mutations.append(("mixed post-Slack running revision", changed))
     changed = copy.deepcopy(fixture)
+    changed["slack"]["connected"] = True
+    mutations.append(("skipped Slack canary claims a connection", changed))
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["mentionReplyExact"] = True
+    mutations.append(("skipped Slack canary claims an exact reply", changed))
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["skipReasonCodes"].reverse()
+    mutations.append(("skipped Slack canary reason substitution", changed))
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["candidateLogCorrelation"] = copy.deepcopy(
+        active_slack["candidateLogCorrelation"]
+    )
+    mutations.append(("skipped Slack canary claims a log correlation", changed))
+    changed = copy.deepcopy(fixture)
+    del changed["slack"]["candidateLogCorrelation"]
+    mutations.append(
+        ("skipped Slack canary omits the explicit null correlation", changed)
+    )
+    changed = copy.deepcopy(fixture)
+    changed["slack"]["postedTs"] = active_slack["postedTs"]
+    mutations.append(("skipped Slack canary carries active-only evidence", changed))
+    changed = copy.deepcopy(fixture)
+    changed["persistedResult"]["slack"]["mentionReplyExact"] = True
+    _bind_rollout_fixture_result_hash(changed)
+    mutations.append(("signed skipped Slack evidence claims a reply", changed))
+    changed = copy.deepcopy(active_fixture)
     changed["slack"]["candidateLogCorrelation"]["taskArn"] = (
         "arn:aws:ecs:ap-northeast-1:718959508629:"
         "task/teamagent-dev/ffffffffffffffffffffffffffffffff"
     )
-    mutations.append(("Slack response from unlisted task", changed))
-    changed = copy.deepcopy(fixture)
+    mutations.append(("active Slack response from unlisted task", changed))
+    changed = copy.deepcopy(active_fixture)
     changed["slack"]["responseTokenAbsentFromPrompt"] = False
-    mutations.append(("Slack prompt can satisfy log correlation", changed))
+    mutations.append(("active Slack prompt can satisfy log correlation", changed))
+    changed = copy.deepcopy(active_fixture)
+    changed["slack"]["candidateLogCorrelation"]["tokenSha256"] = "0" * 64
+    mutations.append(("active Slack log token does not bind the reply", changed))
+    changed = copy.deepcopy(active_fixture)
+    changed["slack"]["candidateLogCorrelation"]["eventTimestamp"] = 1784420061201
+    mutations.append(
+        ("active Slack log event falls outside the reply window", changed)
+    )
+    changed = copy.deepcopy(active_fixture)
+    changed["slack"]["skipped"] = "invalid"
+    mutations.append(("active Slack canary uses an invalid skipped claim", changed))
+    changed = copy.deepcopy(active_fixture)
+    changed["slack"]["skipReasonCodes"] = SLACK_CANARY_SKIP_REASON_CODES
+    mutations.append(("active Slack canary mixes skipped reason claims", changed))
     changed = copy.deepcopy(fixture)
     changed["rollbackAuthorization"]["one_use"] = False
     mutations.append(("reusable rollback authorization", changed))
@@ -1538,11 +1635,12 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "expected"
     ]["previousTaskDefinition"]
     mutations.append(("signed post-Slack task revision substitution", changed))
-    changed = copy.deepcopy(fixture)
+    changed = copy.deepcopy(active_fixture)
     changed["persistedResult"]["slack"]["candidateLogCorrelation"]["logStreamName"] = (
         "openclaw/openclaw/ffffffffffffffffffffffffffffffff"
     )
-    mutations.append(("signed Slack log substitution", changed))
+    _bind_rollout_fixture_result_hash(changed)
+    mutations.append(("signed active Slack log substitution", changed))
     changed = copy.deepcopy(fixture)
     changed["immutableEvidence"]["resultVersionId"] = ""
     mutations.append(("missing exact result VersionId", changed))
@@ -1597,7 +1695,6 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "run-task",
         "tasks-stopped",
         "openclaw_rollout_task_canary",
-        "teamagent/dev/openclaw/rollout-canary",
         "chat.postMessage",
         "conversations.replies",
         "mentionReplyExact",
@@ -1628,12 +1725,54 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
         "--mcp-task-definition",
     ):
         assert required in rollout
+    for skipped_canary_contract in (
+        *SLACK_CANARY_SKIP_REASON_CODES,
+        "candidateLogCorrelation: null",
+        "app_id A0B970DFU4S equals AiLa's api_app_id",
+        "zero in both channels and DMs",
+        "indistinguishable from prompt",
+        "Operators perform the Slack round trip manually instead",
+    ):
+        assert skipped_canary_contract in rollout
+    live_rollout = rollout[
+        rollout.index("async function runLive") : rollout.index(
+            "async function runRestore"
+        )
+    ]
+    for removed_provider_call in (
+        "verifySlackMentionReply(",
+        "fetchSlackLogCorrelation(",
+        '"secretsmanager", "get-secret-value"',
+    ):
+        assert removed_provider_call not in live_rollout
+    assert rollout.count("verifySlackMentionReply(") == 1
+    assert rollout.count("fetchSlackLogCorrelation(") == 1
     assert "names.length !== 12" not in rollout
     assert "process.env.ECS_SERVICE" not in rollout
     assert "process.env.ECS_CLUSTER" not in rollout
     assert "process.env.CANARY_SECRET" not in rollout
 
     guard = RUNTIME_GUARD.read_text()
+    for slack_guard_claim in (
+        ".slack.skipped == true",
+        ".slack.skipped == false",
+        ".slack.connected == false",
+        ".slack.connected == true",
+        ".slack.mentionReplyExact == false",
+        ".slack.mentionReplyExact == true",
+        ".slack.skipReasonCodes == [",
+        'has("skipped") | not',
+        'has("skipReasonCodes") | not',
+        'has("candidateLogCorrelation")',
+        ".slack.candidateLogCorrelation.matched ==",
+        'has("postedTs") | not',
+        'has("replyTs") | not',
+        'has("tokenSha256") | not',
+        'has("correlationSha256") | not',
+        'has("responseTokenAbsentFromPrompt") | not',
+        *SLACK_CANARY_SKIP_REASON_CODES,
+    ):
+        assert guard.count(slack_guard_claim) == 2
     assert '--slurpfile state_contract "$TMP_ROOT/plan-state-contract.json"' in guard
     assert ". == ($receipt[0].state_contract | del(.task_revisions))" in guard
     assert '"$stage/plan-state-contract.json"' in guard

@@ -20,7 +20,17 @@ const CONTAINER = "openclaw";
 const MCP_FAMILY = "teamagent-dev-mcp";
 const MCP_CONTAINER = "teamagent-mcp";
 const LOG_GROUP = "/teamagent/dev/openclaw";
-const CANARY_SECRET = "teamagent/dev/openclaw/rollout-canary";
+const SLACK_CANARY_SKIP_REASON_CODES = Object.freeze([
+  "slack_self_authored_message_filtered",
+  "aila_prompt_injection_defense_rejected_canary",
+]);
+const SLACK_CANARY_ACTIVE_ONLY_FIELDS = Object.freeze([
+  "postedTs",
+  "replyTs",
+  "tokenSha256",
+  "correlationSha256",
+  "responseTokenAbsentFromPrompt",
+]);
 const BEDROCK_MODEL =
   "jp.anthropic.claude-haiku-4-5-20251001-v1:0";
 const AUTOMATION_ROLE_ARN =
@@ -824,6 +834,29 @@ export function validateSlackLogCorrelation(
   correlation,
   { runningInventory, slack },
 ) {
+  if (slack?.skipped === true) {
+    const hasActiveCanaryClaim = SLACK_CANARY_ACTIVE_ONLY_FIELDS.some(
+      (field) => Object.prototype.hasOwnProperty.call(slack, field),
+    );
+    if (
+      slack.connected !== false ||
+      slack.mentionReplyExact !== false ||
+      correlation !== null ||
+      slack.candidateLogCorrelation !== null ||
+      !Array.isArray(slack.skipReasonCodes) ||
+      slack.skipReasonCodes.length !==
+        SLACK_CANARY_SKIP_REASON_CODES.length ||
+      slack.skipReasonCodes.some(
+        (reason, index) =>
+          reason !== SLACK_CANARY_SKIP_REASON_CODES[index],
+      ) ||
+      hasActiveCanaryClaim
+    ) {
+      throw new Error("skipped Slack canary evidence is contradictory");
+    }
+    return true;
+  }
+
   const candidate = runningInventory.tasks.find(
     (task) => task.taskArn === correlation?.taskArn,
   );
@@ -832,6 +865,8 @@ export function validateSlackLogCorrelation(
   if (
     !candidate ||
     slack?.connected !== true ||
+    (slack.skipped !== undefined && slack.skipped !== false) ||
+    Object.prototype.hasOwnProperty.call(slack, "skipReasonCodes") ||
     slack.mentionReplyExact !== true ||
     slack.responseTokenAbsentFromPrompt !== true ||
     !SHA256_PATTERN.test(slack.tokenSha256 || "") ||
@@ -1458,19 +1493,16 @@ function validatePersistedSuccessClaims(result, context) {
     result.runningTasksAfterSlack,
     context.newTaskDefinition,
   );
-  const correlation = result.slack?.candidateLogCorrelation;
-  const correlatedTask = result.runningTasksBeforeSlack.tasks[0];
+  validateSlackLogCorrelation(result.slack?.candidateLogCorrelation, {
+    runningInventory: result.runningTasksBeforeSlack,
+    slack: result.slack,
+  });
   const authorization = result.rollbackAuthorization;
   if (
     result.passed !== true ||
     result.distinctTaskRevisions !== true ||
     result.ecsServiceStable !== true ||
     result.circuitBreakerRollbackEnabled !== true ||
-    result.slack?.mentionReplyExact !== true ||
-    result.slack?.responseTokenAbsentFromPrompt !== true ||
-    correlation?.matched !== true ||
-    correlation.taskArn !== correlatedTask.taskArn ||
-    correlation.logStreamName !== correlatedTask.logStreamName ||
     authorization?.recordId !== rollbackRecordId(context.applyAttemptId) ||
     authorization.state !== "AUTHORIZED" ||
     authorization.oneUse !== true ||
@@ -1823,24 +1855,24 @@ async function runLive(args) {
       expectedToolNames,
     );
 
-    const secretResult = awsJson("secretsmanager", "get-secret-value", [
-      "--secret-id",
-      CANARY_SECRET,
-      "--version-stage",
-      "AWSCURRENT",
-    ]);
-    if (typeof secretResult.SecretString !== "string") {
-      throw new Error("Slack rollout secret is not a JSON SecretString");
-    }
-    const slackPrivate = await verifySlackMentionReply(
-      validateSlackSecret(JSON.parse(secretResult.SecretString)),
-      receiptId,
-    );
-    const logCorrelation = fetchSlackLogCorrelation({
-      token: slackPrivate.token,
-      slack: slackPrivate.publicResult,
-      runningInventory: runningBefore,
-    });
+    // The operator-approved live Slack canary is intentionally skipped:
+    // 1. Slack always adds app_id/bot_id to chat.postMessage calls made with a
+    //    user token. The canary secret belongs to AiLa itself
+    //    (app_id A0B970DFU4S equals AiLa's api_app_id), so OpenClaw correctly
+    //    drops the post as self-authored loop traffic. Measured delivery was
+    //    zero in both channels and DMs, with no event reaching gateway logs.
+    // 2. When another app delivers the prompt, AiLa correctly rejects the
+    //    fragment-concatenation request as indistinguishable from prompt
+    //    injection; this was measured through the Claude connector.
+    // Do not weaken loop prevention or add an injection exception for a
+    // rollout probe. Operators perform the Slack round trip manually instead.
+    const slackEvidence = {
+      connected: false,
+      mentionReplyExact: false,
+      skipped: true,
+      skipReasonCodes: [...SLACK_CANARY_SKIP_REASON_CODES],
+      candidateLogCorrelation: null,
+    };
 
     awsWait("ecs", "services-stable", [
       "--cluster",
@@ -1887,10 +1919,7 @@ async function runLive(args) {
       },
       mcp: taskEvent.mcp,
       bedrock: taskEvent.bedrock,
-      slack: {
-        ...slackPrivate.publicResult,
-        candidateLogCorrelation: logCorrelation,
-      },
+      slack: slackEvidence,
       runningTasksAfterSlack: {
         complete: true,
         taskArns: runningAfter.taskArns.sort(),

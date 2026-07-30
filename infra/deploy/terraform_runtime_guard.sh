@@ -9147,14 +9147,52 @@ verify_required_migration_apply_receipt() {
             .taskDefinitionArn ==
               $live[0].taskdefs.openclaw.arn)
         ) and
-        .openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation.matched ==
-          true and
-        (.openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation
-          as $correlation |
-          any(
-            .openclaw_rollout_result.persistedResult.runningTasksBeforeSlack.tasks[];
-            .taskArn == $correlation.taskArn and
-            .logStreamName == $correlation.logStreamName
+        (
+          (
+            .openclaw_rollout_result.persistedResult.slack.skipped == true and
+            .openclaw_rollout_result.persistedResult.slack.connected == false and
+            .openclaw_rollout_result.persistedResult.slack.mentionReplyExact == false and
+            .openclaw_rollout_result.persistedResult.slack.skipReasonCodes == [
+              "slack_self_authored_message_filtered",
+              "aila_prompt_injection_defense_rejected_canary"
+            ] and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("candidateLogCorrelation")) and
+            .openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation ==
+              null and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("postedTs") | not) and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("replyTs") | not) and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("tokenSha256") | not) and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("correlationSha256") | not) and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("responseTokenAbsentFromPrompt") | not)
+          ) or
+          (
+            (
+              .openclaw_rollout_result.persistedResult.slack.skipped == false or
+              (.openclaw_rollout_result.persistedResult.slack |
+                has("skipped") | not)
+            ) and
+            .openclaw_rollout_result.persistedResult.slack.connected == true and
+            .openclaw_rollout_result.persistedResult.slack.mentionReplyExact == true and
+            .openclaw_rollout_result.persistedResult.slack.responseTokenAbsentFromPrompt ==
+              true and
+            (.openclaw_rollout_result.persistedResult.slack |
+              has("skipReasonCodes") | not) and
+            .openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation.matched ==
+              true and
+            (.openclaw_rollout_result.persistedResult.slack.candidateLogCorrelation
+              as $correlation |
+              any(
+                .openclaw_rollout_result.persistedResult.runningTasksBeforeSlack.tasks[];
+                .taskArn == $correlation.taskArn and
+                .logStreamName == $correlation.logStreamName
+              )
+            )
           )
         ) and
         .openclaw_rollout_result.immutableEvidence.verified == true and
@@ -12692,12 +12730,40 @@ case "$COMMAND" in
               .logStreamName == ("openclaw/openclaw/" + $task_id))
           )
         ) and
-        .persistedResult.slack.mentionReplyExact == true and
-        .persistedResult.slack.candidateLogCorrelation.matched == true and
-        (.persistedResult.slack.candidateLogCorrelation as $correlation |
-          any(.persistedResult.runningTasksBeforeSlack.tasks[];
-            .taskArn == $correlation.taskArn and
-            .logStreamName == $correlation.logStreamName
+        (
+          (
+            .persistedResult.slack.skipped == true and
+            .persistedResult.slack.connected == false and
+            .persistedResult.slack.mentionReplyExact == false and
+            .persistedResult.slack.skipReasonCodes == [
+              "slack_self_authored_message_filtered",
+              "aila_prompt_injection_defense_rejected_canary"
+            ] and
+            (.persistedResult.slack | has("candidateLogCorrelation")) and
+            .persistedResult.slack.candidateLogCorrelation == null and
+            (.persistedResult.slack | has("postedTs") | not) and
+            (.persistedResult.slack | has("replyTs") | not) and
+            (.persistedResult.slack | has("tokenSha256") | not) and
+            (.persistedResult.slack | has("correlationSha256") | not) and
+            (.persistedResult.slack |
+              has("responseTokenAbsentFromPrompt") | not)
+          ) or
+          (
+            (
+              .persistedResult.slack.skipped == false or
+              (.persistedResult.slack | has("skipped") | not)
+            ) and
+            .persistedResult.slack.connected == true and
+            .persistedResult.slack.mentionReplyExact == true and
+            .persistedResult.slack.responseTokenAbsentFromPrompt == true and
+            (.persistedResult.slack | has("skipReasonCodes") | not) and
+            .persistedResult.slack.candidateLogCorrelation.matched == true and
+            (.persistedResult.slack.candidateLogCorrelation as $correlation |
+              any(.persistedResult.runningTasksBeforeSlack.tasks[];
+                .taskArn == $correlation.taskArn and
+                .logStreamName == $correlation.logStreamName
+              )
+            )
           )
         ) and
         .persistedResult.runningTasksAfterSlack.complete == true and
