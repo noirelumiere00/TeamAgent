@@ -587,7 +587,7 @@ while IFS= read -r subject; do
   repository="$(jq -er '.release_repository' <<<"$subject")"
   expected_digest="$(jq -er '.digest' <<<"$subject")"
   suffix=""
-  if [ "$SUBJECT_COUNT" -gt 1 ]; then
+  if [ "$SUBJECT_COUNT" -gt 1 ] || [ "$PIPELINE" = "openclaw" ]; then
     suffix="-$name"
   fi
   release_tag="$CHANNEL-$SOURCE_COMMIT$suffix"

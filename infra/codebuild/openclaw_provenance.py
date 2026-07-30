@@ -939,7 +939,9 @@ def _subject_digest_arguments(
         )
     expected_names = [subject["name"] for subject in contract["bundle"]["subjects"]]
     if set(parsed) != set(expected_names):
-        raise ContractError("--subject-digest must contain exactly core and media")
+        raise ContractError(
+            "--subject-digest must contain exactly " + " and ".join(expected_names)
+        )
     return parsed
 
 

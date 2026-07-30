@@ -176,16 +176,15 @@ PIPELINES: dict[str, dict[str, Any]] = {
         "build_project": "teamagent-dev-openclaw-provenance-builder",
         "contract_path": "infra/codebuild/openclaw_bundle_contract.json",
         "contract_label": "io.teamagent.build.contract-sha256",
+        # OpenClaw keeps the explicit subject suffix even though its canonical
+        # bundle is core-only, matching the immutable tags emitted by the
+        # dedicated provenance build.
+        "single_subject_tag_suffix": True,
         "subjects": {
             "core": (
                 "teamagent-openclaw-quarantine",
                 "teamagent-openclaw-verified-candidates",
                 "teamagent-openclaw",
-            ),
-            "media": (
-                "teamagent-openclaw-media-quarantine",
-                "teamagent-openclaw-media-verified-candidates",
-                "teamagent-openclaw-media",
             ),
         },
     },
@@ -883,8 +882,21 @@ def verify_source_approval_binding(
     )
 
 
-def _expected_tag(channel: str, commit: str, subject: str, subject_count: int) -> str:
-    suffix = f"-{subject}" if subject_count > 1 else ""
+def subject_tag_suffix(pipeline: str, subject: str, subject_count: int) -> str:
+    pipeline_contract = PIPELINES[pipeline]
+    if subject_count > 1 or pipeline_contract.get("single_subject_tag_suffix") is True:
+        return f"-{subject}"
+    return ""
+
+
+def _expected_tag(
+    channel: str,
+    pipeline: str,
+    commit: str,
+    subject: str,
+    subject_count: int,
+) -> str:
+    suffix = subject_tag_suffix(pipeline, subject, subject_count)
     prefix = {
         "verified-candidate": "verified",
         "active": "active",
@@ -1137,12 +1149,19 @@ def validate_release_receipt(
             or subject["release_repository"] != release_repository
         ):
             raise EvidenceError(f"{label} repositories do not match the allowlist")
-        candidate_tag = commit if pipeline == "tiktok" else f"candidate-{commit}"
-        if pipeline != "tiktok" and len(expected_subjects) > 1:
-            candidate_tag += f"-{name}"
+        tag_suffix = subject_tag_suffix(pipeline, name, len(expected_subjects))
+        candidate_tag = (
+            commit if pipeline == "tiktok" else f"candidate-{commit}{tag_suffix}"
+        )
         if subject["candidate_tag"] != candidate_tag:
             raise EvidenceError(f"{label}.candidate_tag must use the full source commit")
-        expected_tag = _expected_tag(channel, commit, name, len(expected_subjects))
+        expected_tag = _expected_tag(
+            channel,
+            pipeline,
+            commit,
+            name,
+            len(expected_subjects),
+        )
         if subject["release_tag"] != expected_tag:
             raise EvidenceError(f"{label}.release_tag is not canonical")
         digest = _digest(subject["digest"], label=f"{label}.digest")
@@ -1402,6 +1421,7 @@ def authorize_release_receipt(
     for subject in value["subjects"]:
         subject["release_tag"] = _expected_tag(
             channel,
+            value["pipeline"],
             commit,
             subject["name"],
             subject_count,
