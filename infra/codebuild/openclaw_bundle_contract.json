@@ -2,7 +2,7 @@
   "schema_version": 1,
   "release": {
     "ready": false,
-    "blocked_reason": "The guarded post-apply rollout and rollback implementation is present, but the separate media subject, exact two-subject bundle emitter, independent review, signed final-HEAD registry evidence, and real immutable rollout/forced-rollback evidence are incomplete. Keep every build, promotion, and Terraform image gate closed."
+    "blocked_reason": "The guarded post-apply rollout and rollback implementation is present, but the exact core bundle emitter, independent review, signed final-HEAD registry evidence, and real immutable rollout/forced-rollback evidence are incomplete. Keep every build, promotion, and Terraform image gate closed."
   },
   "source": {
     "repository": "https://github.com/noirelumiere00/TeamAgent.git",
@@ -32,13 +32,6 @@
         "quarantine_repository": "teamagent-openclaw-quarantine",
         "candidate_repository": "teamagent-openclaw-verified-candidates",
         "release_repository": "teamagent-openclaw",
-        "binary_probes": []
-      },
-      {
-        "name": "media",
-        "quarantine_repository": "teamagent-openclaw-media-quarantine",
-        "candidate_repository": "teamagent-openclaw-media-verified-candidates",
-        "release_repository": "teamagent-openclaw-media",
         "binary_probes": []
       }
     ],

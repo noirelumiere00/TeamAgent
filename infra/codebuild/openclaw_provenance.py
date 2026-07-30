@@ -23,6 +23,26 @@ _SHA1_RE = re.compile(r"[0-9a-f]{40}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _REPOSITORY_RE = re.compile(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*")
+
+# The one place that decides which bundle subjects exist.  Both the count check
+# and the exact repository mapping read from here, so re-adding a subject is a
+# single edit and the two checks can never disagree.
+#
+# The media subject was declared in the contract but never built: no Dockerfile,
+# no image in any of its three ECR repositories, no reference anywhere in the
+# tree, and docs/openclaw/deploy_runbook.md recorded it as "未統合".  It was
+# removed from the required set rather than satisfied with an empty image,
+# because an image built only to make a contract check pass is a receipt for
+# nothing.  The three media repositories are intentionally left in place so
+# re-adding the subject stays a code-only change.
+_EXPECTED_BUNDLE_SUBJECTS: list[dict[str, str]] = [
+    {
+        "name": "core",
+        "quarantine_repository": "teamagent-openclaw-quarantine",
+        "candidate_repository": "teamagent-openclaw-verified-candidates",
+        "release_repository": "teamagent-openclaw",
+    },
+]
 _ARTIFACT_TYPE_RE = re.compile(r"application/[A-Za-z0-9.+_-]{1,200}")
 _S3_VERSION_ID_RE = re.compile(r"[A-Za-z0-9._~+/=-]{1,1024}")
 _BUILD_ID_RE = re.compile(
@@ -210,8 +230,11 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
     if bundle["arm64_subject_media_type"] != "application/vnd.oci.image.manifest.v1+json":
         raise ContractError(f"{label} arm64 subject must be a single OCI image manifest")
     subjects = bundle["subjects"]
-    if not isinstance(subjects, list) or len(subjects) != 2:
-        raise ContractError(f"{label} bundle must declare exactly core and media")
+    if not isinstance(subjects, list) or len(subjects) != len(_EXPECTED_BUNDLE_SUBJECTS):
+        raise ContractError(
+            f"{label} bundle must declare exactly "
+            + " and ".join(subject["name"] for subject in _EXPECTED_BUNDLE_SUBJECTS)
+        )
     normalized_subjects: list[dict[str, Any]] = []
     for index, subject in enumerate(subjects):
         subject_label = f"{label} bundle.subjects[{index}]"
@@ -270,20 +293,7 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
             if not _REPOSITORY_RE.fullmatch(repository_name) or "mcp" in repository_name:
                 raise ContractError(f"{subject_label} cannot reference an MCP repository")
         normalized_subjects.append(normalized)
-    expected_subjects = [
-        {
-            "name": "core",
-            "quarantine_repository": "teamagent-openclaw-quarantine",
-            "candidate_repository": "teamagent-openclaw-verified-candidates",
-            "release_repository": "teamagent-openclaw",
-        },
-        {
-            "name": "media",
-            "quarantine_repository": "teamagent-openclaw-media-quarantine",
-            "candidate_repository": "teamagent-openclaw-media-verified-candidates",
-            "release_repository": "teamagent-openclaw-media",
-        },
-    ]
+    expected_subjects = _EXPECTED_BUNDLE_SUBJECTS
     repository_mappings = [
         {
             key: subject[key]
@@ -854,8 +864,14 @@ def verify_bundle_receipt(
     if receipt["bundle_contract_sha256"] != expected_contract_sha256:
         raise ContractError("OpenClaw build receipt contract SHA-256 mismatch")
     subjects = receipt["subjects"]
-    if not isinstance(subjects, list) or len(subjects) != 2:
-        raise ContractError("OpenClaw build receipt must contain exactly core and media")
+    # Derived from the contract, not a literal: the zip below is strict=True, so a
+    # count that disagreed with the contract would raise a bare ValueError here
+    # instead of this contract error.
+    if not isinstance(subjects, list) or len(subjects) != len(contract["bundle"]["subjects"]):
+        raise ContractError(
+            "OpenClaw build receipt must contain exactly "
+            + " and ".join(subject["name"] for subject in contract["bundle"]["subjects"])
+        )
     normalized: list[dict[str, str]] = []
     for expected, subject in zip(contract["bundle"]["subjects"], subjects, strict=True):
         if not isinstance(subject, dict):
@@ -1057,8 +1073,11 @@ def validate_release_evidence(
     )
 
     subjects = value["subjects"]
-    if not isinstance(subjects, list) or len(subjects) != 2:
-        raise ContractError("OpenClaw release evidence must contain core and media")
+    if not isinstance(subjects, list) or len(subjects) != len(contract["bundle"]["subjects"]):
+        raise ContractError(
+            "OpenClaw release evidence must contain "
+            + " and ".join(subject["name"] for subject in contract["bundle"]["subjects"])
+        )
     signature_type = contract["bundle"]["signature_artifact_type"]
     required_types = {item["artifact_type"] for item in contract["bundle"]["required_referrers"]}
     allowed_types = required_types | {signature_type}

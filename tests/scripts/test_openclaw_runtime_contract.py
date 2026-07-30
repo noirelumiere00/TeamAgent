@@ -1400,10 +1400,11 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert '"/nodejs/bin/node"' in task_filter
     assert contract["release"]["ready"] is False
     assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
-    assert [subject["name"] for subject in contract["bundle"]["subjects"]] == [
-        "core",
-        "media",
-    ]
+    # The media subject was removed from the required set: it had no Dockerfile,
+    # no image in any of its ECR repositories, and no reference in the tree.
+    # Pinning the list (rather than just its length) keeps a silent re-expansion
+    # from slipping in without a deliberate edit here.
+    assert [subject["name"] for subject in contract["bundle"]["subjects"]] == ["core"]
     assert contract["bundle"]["contract_oci_label"] == ("io.teamagent.build.contract-sha256")
     assert bundle_helper.index("assert-release-ready") < bundle_helper.index(
         "media subject and exact two-subject receipt emitter are not implemented"

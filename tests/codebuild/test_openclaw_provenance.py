@@ -269,3 +269,51 @@ def test_legacy_referrer_only_release_commands_are_not_exposed() -> None:
 
     assert completed.returncode != 0
     assert "invalid choice" in completed.stderr
+
+
+def test_bundle_receipt_subject_count_must_match_the_contract(tmp_path: Path) -> None:
+    """A receipt carrying more subjects than the contract must be refused.
+
+    Nothing covered this before: deleting the count check left the whole suite
+    green, because the strict zip that follows would raise a bare ValueError
+    instead of a contract error.  This pins the contract-derived count so the
+    check cannot be removed silently.
+    """
+
+    contract = _ready_contract(tmp_path)
+    commit = "1" * 40
+    contract_sha = hashlib.sha256(contract.read_bytes()).hexdigest()
+    declared = json.loads(contract.read_text())["bundle"]["subjects"]
+
+    def _subject(name: str, index: int) -> dict[str, Any]:
+        return {
+            "name": name,
+            "quarantine_repository": f"teamagent-openclaw-{name}-quarantine"
+            if name != "core"
+            else "teamagent-openclaw-quarantine",
+            "release_repository": f"teamagent-openclaw-{name}"
+            if name != "core"
+            else "teamagent-openclaw",
+            "tag": f"candidate-{commit}-{name}",
+            "index_digest": "sha256:" + str(index) * 64,
+            "arm64_digest": "sha256:" + str(index + 2) * 64,
+            "scan": {"critical": 0, "high": 0},
+        }
+
+    subjects = [_subject(expected["name"], index) for index, expected in enumerate(declared, 1)]
+    subjects.append(_subject("media", len(subjects) + 1))
+    path = tmp_path / "receipt.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_commit": commit,
+                "bundle_contract_sha256": contract_sha,
+                "subjects": subjects,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(provenance.ContractError, match="must contain exactly"):
+        provenance.verify_bundle_receipt(path, contract, commit, contract_sha)
