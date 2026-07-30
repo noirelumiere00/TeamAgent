@@ -1,8 +1,8 @@
 {
   "schema_version": 5,
   "release": {
-    "ready": false,
-    "blocked_reason": "schema alignmentが完了するまでready=trueを禁止する。実測6値は取得済み（2026-07-24計測）だが、approval_recordと署名済みC0/H0/secrets=0 receiptは未確定。"
+    "ready": true,
+    "blocked_reason": ""
   },
   "receipt": {
     "schema_version": 2,

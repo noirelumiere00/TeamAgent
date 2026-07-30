@@ -254,11 +254,45 @@ def _write_release_contracts(root: Path, *, ready_index: int | None = None) -> N
         )
 
 
-def test_contract_is_strict_and_current_release_contracts_are_blocked() -> None:
+def test_bootstrap_refuses_to_run_while_the_release_contracts_are_ready() -> None:
+    """The bootstrap ceremony must not run against a live release contract.
+
+    provenance_iam_bootstrap.py:531 requires release.ready=false for every
+    release contract.  Both contracts are now ready by operator decision, so
+    this asserts the guard actually bites on the current tree: re-running the
+    ceremony requires deliberately re-blocking the contracts first.
+    """
+
     contract = _contract()
-    hashes = BOOTSTRAP.validate_release_contracts(ROOT, contract)
+    with pytest.raises(BOOTSTRAP.BootstrapError, match=r"bootstrap requires release\.ready=false"):
+        BOOTSTRAP.validate_release_contracts(ROOT, contract)
+
+
+def test_release_contract_hashes_are_returned_when_the_contracts_are_blocked(
+    tmp_path: Path,
+) -> None:
+    """Happy path of validate_release_contracts, against a blocked copy.
+
+    Keeps the hash-return behaviour covered now that the checked-in contracts no
+    longer satisfy the blocked precondition.
+    """
+
+    contract = _contract()
+    for relative in contract.release_contracts:
+        source = ROOT / relative
+        destination = tmp_path / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        value = json.loads(source.read_text(encoding="utf-8"))
+        value["release"] = {"ready": False, "blocked_reason": "synthetic block for this test"}
+        destination.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+    hashes = BOOTSTRAP.validate_release_contracts(tmp_path, contract)
     assert set(hashes) == set(contract.release_contracts)
     assert all(re.fullmatch(r"[0-9a-f]{64}", value) for value in hashes.values())
+
+
+def test_contract_is_strict() -> None:
+    contract = _contract()
     assert contract.bootstrap_principal_arn == "arn:aws:iam::718959508629:user/AIIAdev"
     assert re.fullmatch(
         r"arn:aws:iam::718959508629:user/[\w+=,.@-]+",

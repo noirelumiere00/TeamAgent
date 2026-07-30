@@ -182,8 +182,12 @@ def test_current_contract_pair_and_latest_record_are_valid() -> None:
     assert runtime["receipt"]["subject"] == "core"
     assert record["app_html_s3_version_id"] == "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
     assert len(PROVENANCE.application_provenance_sha256(contract, record)) == 64
-    with pytest.raises(PROVENANCE.ProvenanceError, match="release is blocked"):
-        PROVENANCE.require_release_ready(contract)
+    # Released by operator decision; the fail-closed path is covered against a
+    # synthetic blocked contract in
+    # test_outer_contract_ready_cli_keeps_blocked_contract_fail_closed.
+    assert contract["release"]["ready"] is True
+    assert contract["release"]["blocked_reason"] == ""
+    PROVENANCE.require_release_ready(contract)
 
 
 def test_binary_probe_keys_are_subject_scoped_and_cli_order_stays_path_sorted() -> None:
@@ -258,7 +262,29 @@ def test_outer_contract_ready_cli_validates_static_completion(
 
 def test_outer_contract_ready_cli_keeps_blocked_contract_fail_closed(
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    # Against a blocked copy, not the checked-in contract: the real one is now
+    # ready, and re-pointing this at it would quietly test nothing.
+    blocked = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    blocked["release"] = {"ready": False, "blocked_reason": "synthetic block for this test"}
+    blocked_path = tmp_path / "blocked-outer-contract.json"
+    blocked_path.write_text(json.dumps(blocked, ensure_ascii=False, indent=2) + "\n")
+
+    assert (
+        PROVENANCE.main(
+            [
+                "assert-contract-ready",
+                "--contract",
+                str(blocked_path),
+            ]
+        )
+        == 2
+    )
+    assert "release is blocked" in capsys.readouterr().err
+
+
+def test_outer_contract_ready_cli_accepts_the_checked_in_contract() -> None:
     assert (
         PROVENANCE.main(
             [
@@ -267,9 +293,8 @@ def test_outer_contract_ready_cli_keeps_blocked_contract_fail_closed(
                 str(CONTRACT_PATH),
             ]
         )
-        == 2
+        == 0
     )
-    assert "release is blocked" in capsys.readouterr().err
 
 
 def test_public_approval_observation_values_return_exact_six_contract_values() -> None:

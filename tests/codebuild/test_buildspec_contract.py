@@ -170,21 +170,43 @@ def test_post_build_uses_bundle_context_binding_and_core_receipt_verifier() -> N
         assert legacy_argument not in receipt_call
 
 
-def test_active_schema_alignment_is_explicitly_blocked_after_six_measurements() -> None:
+def test_active_schema_alignment_is_released_with_the_same_hygiene_intact() -> None:
+    # This used to assert release.ready is False.  The flip to true is a
+    # deliberate, operator-authorised decision, so the assertion is inverted
+    # rather than deleted: the contract must now be *provably* ready, and every
+    # hygiene check that surrounded the blocked state still has to hold.
     contract = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
 
-    assert contract["release"]["ready"] is False
-    assert "schema alignment" in contract["release"]["blocked_reason"]
-    assert "ready=trueを禁止" in contract["release"]["blocked_reason"]
-    assert "実測6値は取得済み" in contract["release"]["blocked_reason"]
-    assert "2026-07-24計測" in contract["release"]["blocked_reason"]
+    assert contract["release"]["ready"] is True
+    # The schema forbids saying anything here while ready is true
+    # (teamagent_bundle_provenance.py:446 -- ready XOR blocked_reason), which is
+    # why the provisional nature of this release lives in the commit message and
+    # the runbook instead of in the contract.
+    assert contract["release"]["blocked_reason"] == ""
+    assert set(contract["release"]) == {"ready", "blocked_reason"}
     assert "approval_record" not in contract
     serialized = json.dumps(contract)
     assert all(entry["value"] != "latest-dev" for entry in contract["receipt"]["entries"])
     assert "playwright" not in serialized.lower()
     assert "archive_sha256" not in serialized
-    with pytest.raises(PROVENANCE.ProvenanceError, match="release is blocked"):
-        PROVENANCE.require_release_ready(PROVENANCE.load_runtime_contract(ACTIVE_CONTRACT))
+    # The six measured values are what made the flip defensible; losing any of
+    # them must fail here, not silently ship.
+    assert len(contract["receipt"]["entries"]) >= 6
+    PROVENANCE.require_release_ready(PROVENANCE.load_runtime_contract(ACTIVE_CONTRACT))
+
+
+def test_outer_contract_pin_tracks_the_inner_contract_bytes() -> None:
+    # Flipping the inner contract changes its bytes, so the outer pin has to be
+    # re-cut in the same commit.  Nothing else in the suite catches a stale pin
+    # at rest, and a stale pin only surfaces mid-release as
+    # "outer source runtime contract SHA-256 does not match inner raw bytes".
+    import hashlib
+
+    outer = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
+    inner_sha256 = hashlib.sha256(ACTIVE_CONTRACT.read_bytes()).hexdigest()
+    assert outer["source_runtime_contract"]["sha256"] == inner_sha256
+    assert outer["release"]["ready"] is True
+    assert outer["release"]["blocked_reason"] == ""
 
 
 def test_provenance_inputs_have_no_unknown_or_implicit_defaults() -> None:

@@ -187,11 +187,15 @@ def _oci_fixture(
     return config_path, config_digest, response_path, image_digest
 
 
-def test_active_core_contract_is_schema_aligned_but_release_remains_fail_closed() -> None:
+def test_active_core_contract_is_schema_aligned_and_released() -> None:
     contract = provenance.load_runtime_contract(ACTIVE_CONTRACT_PATH)
 
     assert contract["schema_version"] == provenance.RUNTIME_CONTRACT_SCHEMA_VERSION == 5
-    assert contract["release"]["ready"] is False
+    # Flipped to true by operator decision.  The fail-closed behaviour it used to
+    # demonstrate is still covered, against a synthetic blocked contract, in
+    # test_runtime_contract_ready_cli_keeps_blocked_contract_fail_closed below.
+    assert contract["release"]["ready"] is True
+    assert contract["release"]["blocked_reason"] == ""
     assert "approval_record" not in contract
     assert contract["receipt"]["subject"] == "core"
     assert {entry["key"] for entry in contract["receipt"]["entries"]} == {
@@ -206,8 +210,7 @@ def test_active_core_contract_is_schema_aligned_but_release_remains_fail_closed(
         "component.uv.version",
         "model.e5.revision",
     }
-    with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
-        provenance.require_release_ready(contract)
+    provenance.require_release_ready(contract)
     assert all(
         not entry["build_arg"].startswith("WOLFI_") and entry["build_arg"] != "NODE_IMAGE_DIGEST"
         for entry in contract["receipt"]["entries"]
@@ -266,7 +269,30 @@ def test_runtime_contract_ready_cli_loads_shared_version_authority_in_isolated_m
 
 def test_runtime_contract_ready_cli_keeps_blocked_contract_fail_closed(
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
+    # The checked-in contract is now ready, so this exercises the fail-closed
+    # path against a blocked copy.  Pointing it at the real file instead would
+    # silently stop testing anything the day the contract flipped.
+    blocked = json.loads(ACTIVE_CONTRACT_PATH.read_text(encoding="utf-8"))
+    blocked["release"] = {"ready": False, "blocked_reason": "synthetic block for this test"}
+    blocked_path = tmp_path / "blocked-runtime-contract.json"
+    blocked_path.write_text(json.dumps(blocked, ensure_ascii=False, indent=2) + "\n")
+
+    assert (
+        provenance.main(
+            [
+                "assert-contract-ready",
+                "--contract",
+                str(blocked_path),
+            ]
+        )
+        == 1
+    )
+    assert "release is blocked" in capsys.readouterr().err
+
+
+def test_runtime_contract_ready_cli_accepts_the_checked_in_contract() -> None:
     assert (
         provenance.main(
             [
@@ -275,9 +301,8 @@ def test_runtime_contract_ready_cli_keeps_blocked_contract_fail_closed(
                 str(ACTIVE_CONTRACT_PATH),
             ]
         )
-        == 1
+        == 0
     )
-    assert "release is blocked" in capsys.readouterr().err
 
 
 def test_release_ready_rejects_missing_or_rebound_builder_digest() -> None:
@@ -496,11 +521,10 @@ def test_dockerfile_contract_rejects_invalid_numeric_copy_stages(
         provenance.verify_dockerfile_contract(READY_CONTRACT_PATH, dockerfile)
 
 
-def test_checked_in_dockerfile_implements_active_contract_while_release_is_blocked() -> None:
+def test_checked_in_dockerfile_implements_the_released_active_contract() -> None:
     contract = provenance.load_runtime_contract(ACTIVE_CONTRACT_PATH)
-    assert contract["release"]["ready"] is False
-    with pytest.raises(provenance.ProvenanceError, match="release is blocked"):
-        provenance.require_release_ready(contract)
+    assert contract["release"]["ready"] is True
+    provenance.require_release_ready(contract)
     provenance.verify_dockerfile_contract(ACTIVE_CONTRACT_PATH, TEAMAGENT_DOCKERFILE)
 
 
