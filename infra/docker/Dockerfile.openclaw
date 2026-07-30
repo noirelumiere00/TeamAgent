@@ -50,24 +50,28 @@ RUN set -eux; \
     rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
     chmod -R a-w /opt/teamagent
 
-# The upstream release contains its complete development workspace. Resolve the
-# production dependency closure, prune browser registration/CLI chunks that are
-# unreachable from the real entry points, and physically remove source
-# compilers, tests, fixtures, type sources, source maps, and package CLIs.
-# A machine-readable reachability/pruning report is retained in the image.
-COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
-RUN node /tmp/prune-runtime.mjs && rm -f /tmp/prune-runtime.mjs
-
 # The pinned upstream release ships three transitively vulnerable packages that
 # the release gate rejects (it requires zero Critical/High findings). Upstream
 # has no patched tag for 2026.7.1, so exact-version registry tarballs are unpacked
 # over only the affected directories here. Running npm pack from /tmp avoids the
 # /app workspace root and does not resolve or mutate the rest of the dependency
-# closure. The assertions below fail the build if a tarball contains anything
-# other than the reviewed version, so a silent downgrade cannot slip through.
+# closure. The prune pass immediately below must run after these tarballs are
+# unpacked so their development metadata and payload are removed before the
+# runtime inventory check. The assertions below fail the build if a tarball
+# contains anything other than the reviewed version.
 #   axios           1.16.0 -> 1.18.0  GHSA-gcfj-64vw-6mp9 (inherited proxy)
 #   brace-expansion 5.0.7  -> 5.0.8   CVE-2026-14257 (unbounded expansion DoS)
 #   fast-uri        3.1.2  -> 3.1.4   CVE-2026-13676, CVE-2026-16221 (host confusion)
+# Every axios release that carries the GHSA-gcfj-64vw-6mp9 fix (1.16.1 and later)
+# also declares a new production dependency on https-proxy-agent ^5.0.1, so its
+# closure has to be completed here or the prune resolver fails on an unresolved
+# requirement. No node_modules directory exists above the Slack plugin, so the
+# /app copies (https-proxy-agent 7.0.6, agent-base 7.1.4) are unreachable from
+# axios and would not satisfy the ^5.0.1 range anyway. debug 4.4.3 and ms 2.1.3
+# already sit beside axios and are reused. Both added packages carry zero known
+# advisories, so the zero-Critical/High gate is unaffected.
+#   https-proxy-agent 5.0.1 (new)     required by axios 1.18.0
+#   agent-base        6.0.2 (new)     required by https-proxy-agent 5.0.1
 RUN set -eux; \
     chmod -R u+w /opt/teamagent; \
     patch_dir=/tmp/openclaw-vulnerability-patches; \
@@ -76,21 +80,37 @@ RUN set -eux; \
     npm pack axios@1.18.0 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack brace-expansion@5.0.8 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack fast-uri@3.1.4 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
     rm -rf \
       /opt/teamagent/plugins/slack/node_modules/axios \
+      /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
+      /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
       /app/node_modules/fast-uri; \
     mkdir -p \
       /opt/teamagent/plugins/slack/node_modules/axios \
+      /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
+      /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
       /app/node_modules/fast-uri; \
     tar -xzf "$patch_dir/axios-1.18.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
+    tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
+    tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
     tar -xzf "$patch_dir/brace-expansion-5.0.8.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
     tar -xzf "$patch_dir/fast-uri-3.1.4.tgz" --strip-components=1 -C /app/node_modules/fast-uri; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.8","/app/node_modules/fast-uri":"3.1.4","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.8","/app/node_modules/fast-uri":"3.1.4","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
+
+# The upstream release contains its complete development workspace. Resolve the
+# production dependency closure, prune browser registration/CLI chunks that are
+# unreachable from the real entry points, and physically remove source
+# compilers, tests, fixtures, type sources, source maps, and package CLIs.
+# A machine-readable reachability/pruning report is retained in the image.
+COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
+RUN node /tmp/prune-runtime.mjs && rm -f /tmp/prune-runtime.mjs
 
 # Rebuild the persisted plugin registry after pruning so its source hashes and
 # extension inventory describe the final runtime, not the upstream workspace.
