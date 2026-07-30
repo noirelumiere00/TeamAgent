@@ -58,6 +58,24 @@ RUN set -eux; \
 COPY infra/openclaw/prune-runtime.mjs /tmp/prune-runtime.mjs
 RUN node /tmp/prune-runtime.mjs && rm -f /tmp/prune-runtime.mjs
 
+# The pinned upstream release ships three transitively vulnerable packages that
+# the release gate rejects (it requires zero Critical/High findings). Upstream
+# has no patched tag for 2026.7.1, so the exact patched versions are installed
+# over the resolved closure here. Each version is the first release that carries
+# the advisory fix; the assertions below fail the build if npm resolves anything
+# else, so a silent downgrade cannot slip through.
+#   axios           1.16.0 -> 1.18.0  GHSA-gcfj-64vw-6mp9 (inherited proxy)
+#   brace-expansion 5.0.7  -> 5.0.8   CVE-2026-14257 (unbounded expansion DoS)
+#   fast-uri        3.1.2  -> 3.1.4   CVE-2026-13676, CVE-2026-16221 (host confusion)
+RUN set -eux; \
+    chmod -R u+w /opt/teamagent; \
+    npm install --prefix /app --no-save --no-audit --no-fund \
+      brace-expansion@5.0.8 fast-uri@3.1.4; \
+    npm install --prefix /opt/teamagent/plugins/slack --no-save --no-audit --no-fund \
+      axios@1.18.0; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.8","/app/node_modules/fast-uri":"3.1.4","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    chmod -R a-w /opt/teamagent
+
 # Rebuild the persisted plugin registry after pruning so its source hashes and
 # extension inventory describe the final runtime, not the upstream workspace.
 RUN set -eux; \
