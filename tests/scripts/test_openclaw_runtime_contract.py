@@ -724,11 +724,12 @@ def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> 
     assert "service_role = aws_iam_role.openclaw_codebuild.arn" in terraform
     assert 'resource "aws_codebuild_project" "openclaw_image"' not in terraform
     assert not (ROOT / "infra/codebuild/buildspec.openclaw.yml").exists()
-    assert bundle_helper.index("assert-release-ready") < bundle_helper.index(
-        "media subject and exact two-subject receipt emitter are not implemented"
-    )
-    assert "docker " not in bundle_helper
-    assert "aws " not in bundle_helper
+    # This used to pin the emitter's unconditional die.  The emitter is now
+    # implemented, so the invariant it really protected is pinned directly: the
+    # release gate must run before any external mutation, and nothing may reach
+    # a registry or a builder ahead of it.
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index("docker ")
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index("aws ")
 
 
 def test_blocked_bundle_interface_stops_before_output_or_external_work(
@@ -1406,11 +1407,12 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     # from slipping in without a deliberate edit here.
     assert [subject["name"] for subject in contract["bundle"]["subjects"]] == ["core"]
     assert contract["bundle"]["contract_oci_label"] == ("io.teamagent.build.contract-sha256")
-    assert bundle_helper.index("assert-release-ready") < bundle_helper.index(
-        "media subject and exact two-subject receipt emitter are not implemented"
-    )
-    assert "docker " not in bundle_helper
-    assert "aws " not in bundle_helper
+    # This used to pin the emitter's unconditional die.  The emitter is now
+    # implemented, so the invariant it really protected is pinned directly: the
+    # release gate must run before any external mutation, and nothing may reach
+    # a registry or a builder ahead of it.
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index("docker ")
+    assert bundle_helper.index("assert-release-ready") < bundle_helper.index("aws ")
     assert "no-new-privileges" not in task_filter
 
 
