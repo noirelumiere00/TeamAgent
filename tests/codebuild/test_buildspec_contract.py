@@ -452,3 +452,47 @@ def test_terraform_embeds_all_verifier_and_contract_hashes() -> None:
     assert "teamagent_runtime_contract.json" in body
     assert "teamagent_core_media_release_contract.json" in body
     assert "teamagent_core_media_release_contract.json" in body
+
+
+# Every production caller of assert-approved-release picks its operation from a
+# literal in one of these files.  The "drill" operation accepts a provisional
+# gate with no byte pin and no sunset, so flipping any of these literals to
+# "drill" would open a permanent, unaudited equivalent of the initial-release
+# exemption.  Nothing pinned these literals before this test.
+_APPROVAL_OPERATION_CALLERS = {
+    "infra/codebuild/buildspec.yml": {"build"},
+    "infra/codebuild/mcp-source-publisher-buildspec.yml": {"build"},
+    "infra/codebuild/image-attestor-buildspec.yml": {"build", "authorize"},
+    "infra/codebuild/image-promoter-buildspec.yml": {"build", "authorize"},
+    "infra/deploy/build_teamagent_image.sh": {"build"},
+    "infra/deploy/authorize_image_release.sh": {"authorize"},
+}
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_operations"),
+    sorted(_APPROVAL_OPERATION_CALLERS.items()),
+)
+def test_release_approval_operation_literals_are_pinned(
+    relative_path: str,
+    expected_operations: set[str],
+) -> None:
+    import re
+
+    text = (ROOT / relative_path).read_text(encoding="utf-8")
+    # Both spellings are in use: a direct --operation flag, and an
+    # APPROVAL_OPERATION shell variable that the flag then expands.
+    found = set(re.findall(r"--operation\s+([a-z][a-z-]*)", text))
+    found |= set(re.findall(r"APPROVAL_OPERATION=\"?([a-z][a-z-]*)\"?", text))
+    assert found == expected_operations, (
+        f"{relative_path} approval operations changed: {sorted(found)} "
+        f"!= {sorted(expected_operations)}"
+    )
+
+
+def test_no_production_caller_overrides_the_validation_clock() -> None:
+    # --now exists on the CLI, so a caller could otherwise wind the clock back
+    # past the exemption sunset.
+    for relative_path in _APPROVAL_OPERATION_CALLERS:
+        text = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "--now" not in text, f"{relative_path} must not pass --now"

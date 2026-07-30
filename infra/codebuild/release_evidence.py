@@ -30,6 +30,7 @@ if str(_TRUSTED_HELPER_DIRECTORY) not in sys.path:
 
 from teamagent_release_approval import (  # noqa: E402
     APPROVAL_PIPELINES,
+    FORCED_ROLLBACK_GATE_VERSION,
     FORCED_ROLLBACK_PASSED,
     FORCED_ROLLBACK_PROVISIONAL,
     validate_approval_payload,
@@ -71,6 +72,36 @@ APPROVAL_OPERATION_STATES = {
     "terraform-apply": FORCED_ROLLBACK_PASSED,
     "drill": FORCED_ROLLBACK_PROVISIONAL,
 }
+# Time-boxed initial-release exemption -- NOT a permanent relaxation.
+#
+# Why it exists: build and authorize both demand FORCED_ROLLBACK_PASSED, but a
+# PASSED gate can only come out of a drill whose own plan leg calls
+# authorize_image_release.sh with --operation authorize.  Nothing in the tree
+# ever passes --operation drill, so the first release can never be produced.
+#
+# What it does NOT claim: this cannot enforce "exactly once".  The validator is
+# a pure function and one release fans out to at least four separate processes,
+# so there is nowhere to keep a one-shot ledger.  What is enforced is narrower
+# and honest: one byte-pinned gate object, two operations, and a deadline.
+#
+# Why it does not widen the attack surface: the PASSED branch of
+# _validate_forced_rollback_gate only shape-checks drill_manifest -- no S3 read,
+# no KMS verify -- so anyone who can issue an approval today can already declare
+# a fabricated PASSED and get through unpinned.  The exemption below accepts a
+# single fixed gate object, so it is strictly narrower and fully auditable.
+# The sunset is therefore a forcing function to build the real PASSED path, not
+# a security control.
+INITIAL_RELEASE_EXEMPT_STATES: dict[str, frozenset[str]] = {
+    "build": frozenset({FORCED_ROLLBACK_PROVISIONAL}),
+    "authorize": frozenset({FORCED_ROLLBACK_PROVISIONAL}),
+}
+INITIAL_RELEASE_EXEMPTION_SUNSET_UTC = "2026-09-15T00:00:00Z"
+INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC = "2026-09-22T00:00:00Z"
+INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID = "initial-release-exemption-no-charter-object"
+# The campaign locators are deliberately unresolvable: no drill charter object
+# exists yet, and inventing a plausible locator would be a fabricated citation.
+_INITIAL_RELEASE_EXEMPTION_UNREFERENCED_VERSION_ID = "initial-release-exemption-no-charter-object"
+_INITIAL_RELEASE_EXEMPTION_UNREFERENCED_SHA256 = "0" * 64
 MAX_RELEASE_RECEIPT_LIFETIME_SECONDS = 3600
 # Verified candidates are durable rollback inputs, not short-lived deployment
 # authorizations. Active/rollback receipts remain limited to one hour.
@@ -1709,6 +1740,60 @@ def _canonical_approval_payload(payload: bytes) -> Mapping[str, Any]:
     return approval
 
 
+_INITIAL_RELEASE_EXEMPTION_SUNSET = _timestamp(
+    INITIAL_RELEASE_EXEMPTION_SUNSET_UTC,
+    label="initial release exemption sunset",
+)
+_INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT = _timestamp(
+    INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC,
+    label="initial release exemption campaign expiry",
+)
+# The sunset must land strictly before the campaign expiry.  If they were equal
+# the campaign expiry would fire first, and deleting the sunset guard would not
+# turn any test red -- a guard no mutation can kill is not a guard.
+if _INITIAL_RELEASE_EXEMPTION_SUNSET >= _INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT:
+    raise EvidenceError("initial release exemption sunset must precede the campaign expiry")
+
+
+def _initial_release_exemption_gate(approval_signing_key_arn: str) -> dict[str, Any]:
+    """The one forced-rollback gate object the exemption will accept."""
+
+    return {
+        "gate_version": FORCED_ROLLBACK_GATE_VERSION,
+        "state": FORCED_ROLLBACK_PROVISIONAL,
+        "provisional_campaign": {
+            "campaign_id": INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID,
+            "phase": "R1",
+            "payload_version_id": _INITIAL_RELEASE_EXEMPTION_UNREFERENCED_VERSION_ID,
+            "payload_sha256": _INITIAL_RELEASE_EXEMPTION_UNREFERENCED_SHA256,
+            "signature_version_id": _INITIAL_RELEASE_EXEMPTION_UNREFERENCED_VERSION_ID,
+            "kms_key_arn": approval_signing_key_arn,
+            "expires_at_utc": INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC,
+        },
+    }
+
+
+def _observed_forced_rollback_state(payload: bytes) -> str:
+    """Read the declared gate state.
+
+    This only selects which expectation to build; validate_approval_payload
+    re-checks the same field against that expectation afterwards, so a lie here
+    cannot widen anything on its own.
+    """
+
+    approval = _canonical_approval_payload(payload)
+    gates = _mapping(approval.get("gates"), label="approval payload gates")
+    gate = _mapping(
+        gates.get("forced_rollback_evidence"),
+        label="approval payload forced rollback gate",
+    )
+    return _string(
+        gate.get("state"),
+        label="approval payload forced rollback state",
+        maximum=31,
+    )
+
+
 def validate_approved_release_for_operation(
     payload: bytes,
     *,
@@ -1728,6 +1813,16 @@ def validate_approved_release_for_operation(
     state = APPROVAL_OPERATION_STATES.get(operation)
     if state is None:
         raise EvidenceError("approval operation is not allowlisted")
+    # The exemption is an overlay, never a replacement: when it does not apply we
+    # fall through with the baseline scalar untouched, so the existing
+    # "forced rollback state mismatch" rejection downstream still fires.
+    exempt_gate: dict[str, Any] | None = None
+    exempt_states = INITIAL_RELEASE_EXEMPT_STATES.get(operation, frozenset())
+    if exempt_states and now < _INITIAL_RELEASE_EXEMPTION_SUNSET:
+        observed = _observed_forced_rollback_state(payload)
+        if observed in exempt_states:
+            state = observed
+            exempt_gate = _initial_release_exemption_gate(approval_signing_key_arn)
     publisher_build_id = _approval_publisher_build_id(payload)
     expected = {
         "commit": expected_commit,
@@ -1745,6 +1840,11 @@ def validate_approved_release_for_operation(
         },
         "forced_rollback_state": state,
     }
+    if exempt_gate is not None:
+        # Pin the whole gate object by bytes.  validate_approval_payload compares
+        # canonical JSON, so a single differing character is rejected -- the
+        # operator has no freedom over what the exemption accepts.
+        expected["forced_rollback_evidence"] = exempt_gate
     try:
         return validate_approval_payload(payload, expected, now=now)
     except ApprovalProvenanceError as exc:

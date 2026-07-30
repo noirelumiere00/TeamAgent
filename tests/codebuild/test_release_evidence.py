@@ -104,8 +104,13 @@ def _external_approval_payload(
     expires_at: str = "2026-07-17T07:00:00Z",
     state: str = "PASSED",
     observations: Mapping[str, str] = APPROVAL_OBSERVATIONS,
+    approved_at: str = "2026-07-17T05:00:00Z",
+    observed_at: str = "2026-07-17T04:00:00Z",
+    forced_gate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if state == "PASSED":
+    if forced_gate is not None:
+        pass
+    elif state == "PASSED":
         forced_gate = {
             "gate_version": 1,
             "state": state,
@@ -145,7 +150,7 @@ def _external_approval_payload(
         "approval_id": "11111111-1111-4111-8111-111111111111",
         "pipeline": "mcp",
         "environment": "dev",
-        "approved_at_utc": "2026-07-17T05:00:00Z",
+        "approved_at_utc": approved_at,
         "expires_at_utc": expires_at,
         "approved_by": EVIDENCE.APPROVAL_APPROVED_BY_ARN,
         "source_commit": commit,
@@ -158,7 +163,7 @@ def _external_approval_payload(
             {
                 "key": key,
                 "value": value,
-                "observed_at_utc": "2026-07-17T04:00:00Z",
+                "observed_at_utc": observed_at,
                 "source": f"contract://immutable/{key}",
             }
             for key, value in observations.items()
@@ -3974,3 +3979,217 @@ def test_release_lifecycle_absence_check_fails_closed(
             "teamagent-mcp",
             label="active core",
         )
+
+
+# --- Initial-release exemption ------------------------------------------------
+#
+# These pin behaviour that nothing pinned before: the strictness of build and
+# authorize was never covered by a test, so a green suite proved nothing about
+# it.  The dates below are deliberately wall-clock literals rather than values
+# derived from the module constants -- deriving them would let a two-line diff
+# that slides the sunset into the future stay green.
+
+_EXEMPT_WINDOW_NOW = dt.datetime(2026, 8, 20, 6, 0, tzinfo=dt.UTC)
+_EXEMPT_APPROVED_AT = "2026-08-20T05:00:00Z"
+_EXEMPT_OBSERVED_AT = "2026-08-20T04:00:00Z"
+_EXEMPT_EXPIRES_AT = "2026-08-20T07:00:00Z"
+_EXEMPT_RETENTION_UNTIL = "2036-10-01T00:00:00+00:00"
+
+
+def _pinned_exemption_gate(**overrides: Any) -> dict[str, Any]:
+    campaign = {
+        "campaign_id": EVIDENCE.INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID,
+        "phase": "R1",
+        "payload_version_id": EVIDENCE.INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID,
+        "payload_sha256": "0" * 64,
+        "signature_version_id": EVIDENCE.INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID,
+        "kms_key_arn": APPROVAL_KEY_ARN,
+        "expires_at_utc": EVIDENCE.INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC,
+    }
+    campaign.update(overrides)
+    return {
+        "gate_version": 1,
+        "state": "PROVISIONAL_INITIAL_RELEASE",
+        "provisional_campaign": campaign,
+    }
+
+
+def _exemption_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    operation: str,
+    gate: Mapping[str, Any],
+    now: dt.datetime,
+    approved_at: str = _EXEMPT_APPROVED_AT,
+    observed_at: str = _EXEMPT_OBSERVED_AT,
+    expires_at: str = _EXEMPT_EXPIRES_AT,
+    retention_until: str = _EXEMPT_RETENTION_UNTIL,
+) -> Any:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid="2" * 40,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+        approved_at=approved_at,
+        observed_at=observed_at,
+        expires_at=expires_at,
+        forced_gate=gate,
+    )
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+        retention_until=retention_until,
+    )
+    return EVIDENCE.assert_approved_release(
+        operation=operation,
+        approval_locators=locators,
+        approval_signing_key_arn=APPROVAL_KEY_ARN,
+        approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+        expected_commit=COMMIT,
+        expected_tree_oid="2" * 40,
+        expected_inner_sha256=inner_sha256,
+        expected_outer_sha256=outer_sha256,
+        expected_pipeline="mcp",
+        expected_environment="dev",
+        runtime_contract_path=runtime_contract,
+        contract_path=contract,
+        now=now,
+    )
+
+
+@pytest.mark.parametrize("operation", ["build", "authorize"])
+def test_exemption_accepts_pinned_provisional(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    evidence = _exemption_call(
+        tmp_path,
+        monkeypatch,
+        operation=operation,
+        gate=_pinned_exemption_gate(),
+        now=_EXEMPT_WINDOW_NOW,
+    )
+    assert evidence is not None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"campaign_id": "some-other-campaign"},
+        {"phase": "R2"},
+        {"payload_sha256": "1" * 64},
+        {"payload_version_id": "another-version"},
+        {"signature_version_id": "another-version"},
+        {"kms_key_arn": KEY_ARN},
+        {"expires_at_utc": "2026-09-22T00:00:01Z"},
+    ],
+)
+def test_exemption_rejects_any_unpinned_gate_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overrides: Mapping[str, Any],
+) -> None:
+    with pytest.raises(EVIDENCE.EvidenceError):
+        _exemption_call(
+            tmp_path,
+            monkeypatch,
+            operation="build",
+            gate=_pinned_exemption_gate(**overrides),
+            now=_EXEMPT_WINDOW_NOW,
+        )
+
+
+@pytest.mark.parametrize("operation", ["terraform-plan", "terraform-apply"])
+def test_exemption_is_not_granted_to_other_operations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    with pytest.raises(EVIDENCE.EvidenceError, match="forced rollback state mismatch"):
+        _exemption_call(
+            tmp_path,
+            monkeypatch,
+            operation=operation,
+            gate=_pinned_exemption_gate(),
+            now=_EXEMPT_WINDOW_NOW,
+        )
+
+
+def test_exemption_closes_at_the_code_sunset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Wall-clock literals on purpose: sliding the sunset constant must turn this
+    # red.  The approval itself is dated just before the sunset so that it is
+    # still live at that instant -- otherwise "approval is expired" would fire
+    # first and the test would pass for the wrong reason.
+    with pytest.raises(EVIDENCE.EvidenceError, match="forced rollback state mismatch"):
+        _exemption_call(
+            tmp_path,
+            monkeypatch,
+            operation="build",
+            gate=_pinned_exemption_gate(),
+            now=dt.datetime(2026, 9, 15, 0, 0, tzinfo=dt.UTC),
+            approved_at="2026-09-14T23:30:00Z",
+            observed_at="2026-09-14T23:00:00Z",
+            expires_at="2026-09-15T00:30:00Z",
+            retention_until="2036-12-01T00:00:00+00:00",
+        )
+
+
+def test_exemption_sunset_precedes_the_campaign_expiry(tmp_path: Path) -> None:
+    # If these were equal, the campaign expiry would fire first and deleting the
+    # sunset guard would not turn anything red.
+    assert (
+        EVIDENCE.INITIAL_RELEASE_EXEMPTION_SUNSET_UTC
+        < EVIDENCE.INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC
+    )
+
+
+def test_exemption_does_not_widen_drill_or_passed_paths() -> None:
+    assert set(EVIDENCE.INITIAL_RELEASE_EXEMPT_STATES) == {"build", "authorize"}
+    assert EVIDENCE.APPROVAL_OPERATION_STATES["build"] == "PASSED"
+    assert EVIDENCE.APPROVAL_OPERATION_STATES["authorize"] == "PASSED"
+    assert EVIDENCE.APPROVAL_OPERATION_STATES["drill"] == "PROVISIONAL_INITIAL_RELEASE"
+
+
+def test_passed_path_still_works_inside_the_exemption_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_contract, contract, inner_sha256, outer_sha256 = _approval_contract_paths(tmp_path)
+    payload = _external_approval_payload(
+        commit=COMMIT,
+        tree_oid="2" * 40,
+        inner_sha256=inner_sha256,
+        outer_sha256=outer_sha256,
+        approved_at=_EXEMPT_APPROVED_AT,
+        observed_at=_EXEMPT_OBSERVED_AT,
+        expires_at=_EXEMPT_EXPIRES_AT,
+    )
+    locators, _ = _install_approval_aws_fake(
+        monkeypatch,
+        payload=payload,
+        expected_locator_commit=COMMIT,
+        retention_until=_EXEMPT_RETENTION_UNTIL,
+    )
+    evidence = EVIDENCE.assert_approved_release(
+        operation="build",
+        approval_locators=locators,
+        approval_signing_key_arn=APPROVAL_KEY_ARN,
+        approval_encryption_key_arn=APPROVAL_ENCRYPTION_KEY_ARN,
+        expected_commit=COMMIT,
+        expected_tree_oid="2" * 40,
+        expected_inner_sha256=inner_sha256,
+        expected_outer_sha256=outer_sha256,
+        expected_pipeline="mcp",
+        expected_environment="dev",
+        runtime_contract_path=runtime_contract,
+        contract_path=contract,
+        now=_EXEMPT_WINDOW_NOW,
+    )
+    assert evidence is not None
