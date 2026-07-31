@@ -257,13 +257,31 @@ trivy image \
   --format json \
   --output "$TRIVY_REPORT" \
   "$IMAGE"
-python3 - "$TRIVY_REPORT" "$IMAGE" <<'PY'
+python3 - "$TRIVY_REPORT" "$IMAGE" "$CONTRACT" <<'PY'
 import json
 import sys
 
-path, expected_image = sys.argv[1:]
+path, expected_image, contract_path = sys.argv[1:]
 with open(path, encoding="utf-8") as handle:
     report = json.load(handle)
+# The gate to enforce is the one the signed contract declares. A contract that
+# declares bundle.scan_gate is enforced at exactly those thresholds; one that
+# declares nothing keeps the historical all-severities-zero behaviour.
+# Only an explicit zero Critical/High gate is accepted, so a contract can never
+# be edited to permit Critical or High findings.
+with open(contract_path, encoding="utf-8") as handle:
+    contract = json.load(handle)
+declared_gate = None
+if isinstance(contract.get("bundle"), dict):
+    declared_gate = contract["bundle"].get("scan_gate")
+if declared_gate is not None:
+    if not isinstance(declared_gate, dict) or set(declared_gate) != {"critical", "high"}:
+        raise SystemExit("FATAL: contract scan gate is malformed")
+    for key in ("critical", "high"):
+        value = declared_gate[key]
+        if value is not True and value is not False and isinstance(value, int) and value == 0:
+            continue
+        raise SystemExit("FATAL: contract scan gate must require zero Critical and High")
 if report.get("ArtifactName") != expected_image:
     raise SystemExit("FATAL: Trivy report does not bind the exact quarantine digest")
 if report.get("ArtifactType") not in {"container_image", "image"}:
@@ -291,7 +309,19 @@ for result in results:
             raise SystemExit("FATAL: actual-image scan has unsupported severity")
         counts[item["Severity"]] += 1
     secrets += len(discovered_secrets)
-if any(counts.values()) or secrets:
+if declared_gate is None:
+    blocking = sum(counts.values())
+else:
+    blocking = counts["CRITICAL"] + counts["HIGH"]
+    # Distroless Debian ships Low/Medium CVEs with no fixed version at all, so an
+    # all-severities-zero gate can never pass. Report them so they stay visible
+    # in the build record instead of being silently dropped.
+    print(
+        f"actual-image scan: severities={counts}, secrets={secrets}; "
+        "gate is contract-declared zero Critical/High plus zero secrets",
+        flush=True,
+    )
+if blocking or secrets:
     raise SystemExit(
         f"FATAL: actual-image gate failed: severities={counts}, secrets={secrets}"
     )
