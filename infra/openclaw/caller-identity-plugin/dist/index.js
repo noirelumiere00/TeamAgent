@@ -770,7 +770,12 @@ export function createCallerIdentityPlugin({
         const fresh = pend.filter(
           i => nowMs - i.receivedAtMs <= INBOUND_CONTEXT_TTL_MS,
         ).length;
-        mismatch = ` matchSessionKey=${sk} matchSenderId=${sd} matchChannelId=${ch} fresh=${fresh}`;
+        // channelId だけが合わない場合は、両側の実値を出す。会話 id は Slack の
+        // チャンネル/DM 識別子であって caller identity ではないので出力してよい。
+        const seen = ch === 0 ? [...new Set(pend.map(i => i.channelId))].join(",") : "";
+        mismatch =
+          ` matchSessionKey=${sk} matchSenderId=${sd} matchChannelId=${ch} fresh=${fresh}` +
+          (ch === 0 ? ` runChannelId=${channelId} pendingChannelIds=[${seen}]` : "");
       }
       logger?.warn?.(
         `${PLUGIN_ID}: agent run has no unique fresh Slack message binding` +
