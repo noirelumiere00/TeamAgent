@@ -152,6 +152,13 @@ COPY --from=upstream --chown=65532:65532 /app/node_modules /app/node_modules
 COPY --from=upstream --chown=65532:65532 /app/openclaw.mjs /app/openclaw.mjs
 COPY --from=upstream --chown=65532:65532 /app/package.json /app/package.json
 COPY --from=upstream --chown=65532:65532 /app/skills /app/skills
+# Workspace templates are runtime data, not documentation. dist resolves them as
+# <package root>/src/agents/templates first and falls back to
+# <package root>/docs/reference/templates, so both must ship or the gateway
+# starts and reports healthy but fails on the first message with
+# "Missing workspace template: AGENTS.md".
+COPY --from=upstream --chown=65532:65532 /app/src/agents/templates /app/src/agents/templates
+COPY --from=upstream --chown=65532:65532 /app/docs/reference/templates /app/docs/reference/templates
 COPY --from=upstream --chown=65532:65532 /opt/teamagent /opt/teamagent
 COPY --chown=65532:65532 --chmod=0555 infra/docker/openclaw-entrypoint.mjs /opt/teamagent/entrypoint.mjs
 COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/teamagent/gateway-runtime.mjs
