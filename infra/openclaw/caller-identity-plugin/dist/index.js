@@ -758,10 +758,24 @@ export function createCallerIdentityPlugin({
       // and from "the single candidate was refused by bindRun". Without this
       // split the log looked the same in all three cases.
       const bindFailed = candidates.length === 1;
+      // When nothing matched but inbounds are pending, report which of the three
+      // join keys disagreed. Only per-key match counts are emitted, never the
+      // values themselves, so caller identity stays out of the logs.
+      let mismatch = "";
+      if (candidates.length === 0 && pendingByMessage.size > 0) {
+        const pend = [...pendingByMessage.values()];
+        const sk = pend.filter(i => i.sessionKey === sessionKey).length;
+        const sd = pend.filter(i => i.senderId === senderId).length;
+        const ch = pend.filter(i => i.channelId === channelId).length;
+        const fresh = pend.filter(
+          i => nowMs - i.receivedAtMs <= INBOUND_CONTEXT_TTL_MS,
+        ).length;
+        mismatch = ` matchSessionKey=${sk} matchSenderId=${sd} matchChannelId=${ch} fresh=${fresh}`;
+      }
       logger?.warn?.(
         `${PLUGIN_ID}: agent run has no unique fresh Slack message binding` +
           ` (candidates=${candidates.length} pending=${pendingByMessage.size}` +
-          `${bindFailed ? " bindRunRefused=true" : ""})`,
+          `${bindFailed ? " bindRunRefused=true" : ""}${mismatch})`,
       );
     }
   }
