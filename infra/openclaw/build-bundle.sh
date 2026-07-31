@@ -332,9 +332,13 @@ docker buildx create \
   --platform linux/arm64 \
   --bootstrap >/dev/null ||
   die "could not create the isolated OpenClaw Buildx builder"
+# awk must consume the whole stream. Exiting at the first match closes the pipe
+# while docker is still writing, which kills it with SIGPIPE; under pipefail that
+# fails the substitution with status 141 and no stderr at all, so the build dies
+# without a diagnosable cause. Keep the first Driver: value and read to the end.
 buildx_driver="$(
   docker buildx inspect "$buildx_builder" |
-    awk '$1 == "Driver:" { print $2; exit }'
+    awk '$1 == "Driver:" && driver == "" { driver = $2 } END { print driver }'
 )" || die "could not inspect the isolated OpenClaw Buildx builder"
 [ "$buildx_driver" = "docker-container" ] ||
   die "isolated OpenClaw Buildx builder has an unsupported driver"
