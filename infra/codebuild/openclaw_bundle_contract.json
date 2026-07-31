@@ -32,7 +32,16 @@
         "quarantine_repository": "teamagent-openclaw-quarantine",
         "candidate_repository": "teamagent-openclaw-verified-candidates",
         "release_repository": "teamagent-openclaw",
-        "binary_probes": []
+        "binary_probes": [
+          {
+            "path": "/app/openclaw.mjs",
+            "sha256": "f643b005d6db233a0b45204e8d8e943256874ccc6897b8a6e0cf42a9b376a188"
+          },
+          {
+            "path": "/nodejs/bin/node",
+            "sha256": "6bf69d0eda41a12030d5f28d958cd09ce323bc0c13f1ab4d8bb426933aa08812"
+          }
+        ]
       }
     ],
     "required_referrers": [
