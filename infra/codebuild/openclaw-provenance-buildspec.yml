@@ -71,7 +71,22 @@ phases:
         install -m 0755 /tmp/trivy /usr/local/bin/trivy
         rm -f "/tmp/$TRIVY_ARCHIVE" /tmp/trivy
         [ "$(trivy --version --format json | jq -er '.Version')" = "$TRIVY_VERSION" ] || { echo "FATAL: installed Trivy version does not match the lock file"; exit 1; }
-        unset TRIVY_LOCK TRIVY_VERSION TRIVY_SHA256 TRIVY_ARCHIVE
+        # The image ships an older Buildx than build-bundle.sh accepts, so install
+        # the locked one as a user CLI plugin (that directory wins over the system
+        # one). Version and digest come from the same lock file the builder checks.
+        BUILDX_VERSION="$(jq -er '.tooling.buildx.version' "$TRIVY_LOCK")"
+        BUILDX_SHA256="$(jq -er '.tooling.buildx.linuxArm64BinarySha256' "$TRIVY_LOCK")"
+        [[ "$BUILDX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FATAL: locked Buildx version is malformed"; exit 1; }
+        [[ "$BUILDX_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: locked Buildx binary digest is malformed"; exit 1; }
+        mkdir -p "$HOME/.docker/cli-plugins"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          --output /tmp/docker-buildx \
+          "https://github.com/docker/buildx/releases/download/v${BUILDX_VERSION}/buildx-v${BUILDX_VERSION}.linux-arm64"
+        printf '%s  %s\n' "$BUILDX_SHA256" /tmp/docker-buildx | sha256sum -c -
+        install -m 0755 /tmp/docker-buildx "$HOME/.docker/cli-plugins/docker-buildx"
+        rm -f /tmp/docker-buildx
+        [ "$(docker buildx version | awk '{print $2}')" = "v$BUILDX_VERSION" ] || { echo "FATAL: installed Buildx version does not match the lock file"; exit 1; }
+        unset TRIVY_LOCK TRIVY_VERSION TRIVY_SHA256 TRIVY_ARCHIVE BUILDX_VERSION BUILDX_SHA256
         python3 "$PROVENANCE" create-source-manifest \
           --repo-root "$CODEBUILD_SRC_DIR" \
           --commit "$SOURCE_COMMIT" \
