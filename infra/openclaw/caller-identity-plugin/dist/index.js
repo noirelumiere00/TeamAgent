@@ -131,7 +131,17 @@ function normalizeSlackId(value, pattern) {
 function resolveSlackChannel(value) {
   if (typeof value !== "string") return null;
   const match = /(?:^|:)([CDG][A-Z0-9]{8,})$/iu.exec(value.trim());
-  return match ? match[1].toUpperCase() : null;
+  if (match) return match[1].toUpperCase();
+  // A direct message never carries its D… conversation id on this path: the
+  // Slack plugin sets reply.to to `user:<U…>` and OpenClaw derives every
+  // candidate (conversationId / to / originatingTo) from that, so the D… id
+  // only survives on ctxPayload and is dropped before the plugin sees it.
+  // The peer user id identifies the 1:1 conversation just as uniquely, so
+  // accept it under a distinct `DM:` prefix. The prefix keeps the DM namespace
+  // disjoint from real channels, so a U… value can never be mistaken for — or
+  // collide with — a C/D/G channel id.
+  const dm = /(?:^|:)(U[A-Z0-9]{8,})$/iu.exec(value.trim());
+  return dm ? `DM:${dm[1].toUpperCase()}` : null;
 }
 
 function consistentValue(values, normalize) {
