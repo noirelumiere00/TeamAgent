@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-only trusted publisher for the isolated OpenClaw core/media project.
+# Build-only trusted publisher for the isolated OpenClaw core project.
 # It publishes immutable signed evidence, starts one fixed CodeBuild project,
 # verifies isolated candidate digests/referrers, and never mutates deployment.
 set -euo pipefail
@@ -22,9 +22,6 @@ EVIDENCE_KMS_KEY_ALIAS="alias/teamagent-dev-openclaw-build-evidence"
 CORE_QUARANTINE_REPOSITORY="teamagent-openclaw-quarantine"
 CORE_VERIFIED_CANDIDATE_REPOSITORY="teamagent-openclaw-verified-candidates"
 CORE_RELEASE_REPOSITORY="teamagent-openclaw"
-MEDIA_QUARANTINE_REPOSITORY="teamagent-openclaw-media-quarantine"
-MEDIA_VERIFIED_CANDIDATE_REPOSITORY="teamagent-openclaw-media-verified-candidates"
-MEDIA_RELEASE_REPOSITORY="teamagent-openclaw-media"
 SOURCE_CONNECTION_NAME="teamagent-dev-openclaw-codebuild"
 POLL_SECONDS=15
 TIMEOUT_SECONDS=7200
@@ -38,7 +35,7 @@ Options:
   --timeout-seconds <seconds>    Overall CodeBuild wait timeout (default: 7200)
   -h, --help                     Show this help
 
-The core/media tags are derived from the exact remote dev commit. This command
+The core tag is derived from the exact remote dev commit. This command
 is build-only: it never updates ECS, task definitions, schedules, or services.
 EOF
 }
@@ -127,10 +124,9 @@ BUNDLE_CONTRACT_SHA256="$(
 [[ "$BUNDLE_CONTRACT_SHA256" =~ ^[0-9a-f]{64}$ ]] \
   || die "OpenClaw bundle contract returned an invalid SHA-256"
 python3 "$PROVENANCE" assert-release-ready --contract "$BUNDLE_CONTRACT" \
-  || die "OpenClaw core/media contract is not approved for release"
+  || die "OpenClaw core contract is not approved for release"
 
-# The blocked contract above intentionally prevents every AWS call until the
-# Boyle-owned core/media interfaces and complete signed receipt have landed.
+# The contract gate above intentionally runs before every AWS call.
 INITIAL_IDENTITY="$(
   AWS_PAGER="" aws sts get-caller-identity --query '[Account,Arn]' --output text
 )"
@@ -587,16 +583,10 @@ exported_build_value() {
 }
 
 SUBJECTS_JSON="[]"
-for SUBJECT in core media; do
-  if [ "$SUBJECT" = "core" ]; then
-    QUARANTINE_REPOSITORY="$CORE_QUARANTINE_REPOSITORY"
-    VERIFIED_CANDIDATE_REPOSITORY="$CORE_VERIFIED_CANDIDATE_REPOSITORY"
-    RELEASE_REPOSITORY="$CORE_RELEASE_REPOSITORY"
-  else
-    QUARANTINE_REPOSITORY="$MEDIA_QUARANTINE_REPOSITORY"
-    VERIFIED_CANDIDATE_REPOSITORY="$MEDIA_VERIFIED_CANDIDATE_REPOSITORY"
-    RELEASE_REPOSITORY="$MEDIA_RELEASE_REPOSITORY"
-  fi
+for SUBJECT in core; do
+  QUARANTINE_REPOSITORY="$CORE_QUARANTINE_REPOSITORY"
+  VERIFIED_CANDIDATE_REPOSITORY="$CORE_VERIFIED_CANDIDATE_REPOSITORY"
+  RELEASE_REPOSITORY="$CORE_RELEASE_REPOSITORY"
   TAG="candidate-$COMMIT-$SUBJECT"
   QUARANTINE_TAG_DIGEST="$(
     AWS_PAGER="" aws ecr describe-images \
@@ -703,7 +693,7 @@ while IFS= read -r SUBJECT; do
     || die "$NAME verified-candidate digest differs from the signed quarantine digest"
 done < <(jq -c '.[]' <<<"$SUBJECTS_JSON")
 
-echo "OpenClaw core/media build verified (build only; no deployment performed):"
+echo "OpenClaw core build verified (build only; no deployment performed):"
 echo "  build_id=$BUILD_ID"
 echo "  commit=$COMMIT"
 echo "  source_manifest_key=$SOURCE_MANIFEST_KEY"

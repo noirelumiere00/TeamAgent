@@ -22,6 +22,7 @@ from release_evidence import (
     EvidenceError,
     canonical_bytes,
     release_receipt_schema_for_pipeline,
+    subject_tag_suffix,
     validate_approval_evidence,
     validate_release_receipt,
 )
@@ -534,7 +535,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         raise EvidenceError("signature key ARN is outside the fixed account/region")
 
     subject_count = len(expected_subjects)
-    suffix = f"-{args.name}" if subject_count > 1 else ""
+    suffix = subject_tag_suffix(args.pipeline, args.name, subject_count)
     release_prefix = {
         "verified-candidate": "verified",
         "active": "active",
