@@ -52,6 +52,26 @@ phases:
         [ "$BUNDLE_CONTRACT_SHA256" = "__OPENCLAW_BUNDLE_CONTRACT_SHA256__" ] || { echo "FATAL: bundle contract hash mismatch"; exit 1; }
         python3 "$PROVENANCE" assert-release-ready --contract "$BUNDLE_CONTRACT"
         [ -x infra/openclaw/build-bundle.sh ] || { echo "FATAL: OpenClaw bundle builder interface is missing"; exit 1; }
+        # The CodeBuild image ships no Trivy, and build-bundle.sh requires it and
+        # pins its version against infra/openclaw/plugins-lock.json. Read both the
+        # version and the archive digest from that same lock file so the installed
+        # binary can never drift from the version the bundle builder enforces.
+        # The checkout was proven clean and equal to origin/dev above.
+        TRIVY_LOCK="infra/openclaw/plugins-lock.json"
+        TRIVY_VERSION="$(jq -er '.tooling.trivy.version' "$TRIVY_LOCK")"
+        TRIVY_SHA256="$(jq -er '.tooling.trivy.linuxArm64ArchiveSha256' "$TRIVY_LOCK")"
+        [[ "$TRIVY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "FATAL: locked Trivy version is malformed"; exit 1; }
+        [[ "$TRIVY_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "FATAL: locked Trivy archive digest is malformed"; exit 1; }
+        TRIVY_ARCHIVE="trivy_${TRIVY_VERSION}_Linux-ARM64.tar.gz"
+        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+          --output "/tmp/$TRIVY_ARCHIVE" \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/${TRIVY_ARCHIVE}"
+        printf '%s  %s\n' "$TRIVY_SHA256" "/tmp/$TRIVY_ARCHIVE" | sha256sum -c -
+        tar -xzf "/tmp/$TRIVY_ARCHIVE" -C /tmp trivy
+        install -m 0755 /tmp/trivy /usr/local/bin/trivy
+        rm -f "/tmp/$TRIVY_ARCHIVE" /tmp/trivy
+        [ "$(trivy --version --format json | jq -er '.Version')" = "$TRIVY_VERSION" ] || { echo "FATAL: installed Trivy version does not match the lock file"; exit 1; }
+        unset TRIVY_LOCK TRIVY_VERSION TRIVY_SHA256 TRIVY_ARCHIVE
         python3 "$PROVENANCE" create-source-manifest \
           --repo-root "$CODEBUILD_SRC_DIR" \
           --commit "$SOURCE_COMMIT" \
