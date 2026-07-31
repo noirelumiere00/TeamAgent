@@ -445,6 +445,22 @@ def _zero(value: Any, *, label: str) -> int:
     return value
 
 
+def _reported_count(value: Any, *, label: str) -> int:
+    """A recorded finding count: any non-negative integer.
+
+    Used for the severities the release gate does not block on. Whether those
+    findings are permitted at all is decided upstream by the contract-declared
+    gate in actual_image_evidence, which refuses to emit a subject when the gate
+    is exceeded. A pipeline whose contract declares no gate is still held to
+    all-severities-zero there, so its receipts can never carry a non-zero count
+    and this stays as strict as before for them. Here the value only has to be a
+    truthful, well-formed count.
+    """
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise EvidenceError(f"{label} must be a non-negative integer")
+    return value
+
+
 def _json_object_argument(value: str, *, label: str) -> Mapping[str, Any]:
     try:
         parsed = json.loads(value, object_pairs_hook=_reject_duplicate_keys)
@@ -1275,9 +1291,9 @@ def validate_release_receipt(
         expected_image = f"{REGISTRY}/{quarantine_repository}@{digest}"
         if scan["actual_image"] != expected_image:
             raise EvidenceError(f"{label}.scan does not bind the quarantine digest")
-        _zero(scan["unknown"], label=f"{label}.scan.unknown")
-        _zero(scan["low"], label=f"{label}.scan.low")
-        _zero(scan["medium"], label=f"{label}.scan.medium")
+        _reported_count(scan["unknown"], label=f"{label}.scan.unknown")
+        _reported_count(scan["low"], label=f"{label}.scan.low")
+        _reported_count(scan["medium"], label=f"{label}.scan.medium")
         _zero(scan["critical"], label=f"{label}.scan.critical")
         _zero(scan["high"], label=f"{label}.scan.high")
         _zero(scan["secrets"], label=f"{label}.scan.secrets")
