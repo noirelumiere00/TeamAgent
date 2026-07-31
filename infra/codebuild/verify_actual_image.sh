@@ -203,8 +203,12 @@ case "$PIPELINE" in
       --subject "$SUBJECT_NAME" >"$BINARY_EXPECTED"
     ;;
   tiktok)
+    # The readiness guard must keep the contract as the pipeline value. Writing it
+    # as `.release.ready == true or error(...)` emits a boolean instead, so the
+    # next stage indexes a boolean and dies -- and only once a contract is
+    # actually ready, since a blocked one short-circuits into error() first.
     jq -er '
-      .release.ready == true or error("release.ready is false") |
+      if .release.ready != true then error("release.ready is false") else . end |
       .image.binary_probes |
       if length > 0 then .[] | [.path, .sha256] | @tsv
       else error("binary probes are missing")
@@ -213,7 +217,7 @@ case "$PIPELINE" in
     ;;
   openclaw)
     jq -er --arg subject "$SUBJECT_NAME" '
-      .release.ready == true or error("release.ready is false") |
+      if .release.ready != true then error("release.ready is false") else . end |
       .bundle.subjects[] |
       select(.name == $subject) |
       .binary_probes |
