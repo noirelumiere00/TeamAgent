@@ -626,6 +626,7 @@ export function createCallerIdentityPlugin({
     const runId = canonicalInvocationId(ctx?.runId);
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const channelId = consistentSlackChannel([
+      ctx?.conversationId,
       ctx?.channelId,
       ctx?.chatId,
       ctx?.channel,
@@ -815,7 +816,16 @@ export function createCallerIdentityPlugin({
       return block("authoritative tool invocation binding is missing or mismatched");
     }
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
-    const channelId = resolveSlackChannel(ctx?.channelId);
+    // ctx.channelId is the provider name ("slack") here too, so resolving only
+    // that never yielded a conversation and the trusted-ingress comparison below
+    // could never match. Use the same candidate list as the other three sites so
+    // every path derives one identical conversation id.
+    const channelId = consistentSlackChannel([
+      ctx?.conversationId,
+      ctx?.channelId,
+      ctx?.chatId,
+      ctx?.channel,
+    ]);
     if (!sessionKey || !channelId) {
       return block("trusted Slack session or channel binding is missing");
     }
