@@ -458,8 +458,27 @@ export function createCallerIdentityPlugin({
       !messageId ||
       (suppliedRunIds.length > 0 && !runId)
     ) {
+      // Report which field failed. The combined message made every rejection
+      // look identical, so a missing team could not be told apart from a
+      // missing run id and the real cause stayed invisible in production.
+      // Only field names and a boolean-ish shape are logged, never the values:
+      // sender and channel ids are caller identity and must not reach logs.
+      // The team id is the sole exception, and only when it is present and
+      // wrong, because operators cannot fix a workspace mismatch without
+      // seeing which workspace actually arrived.
+      const missing = [];
+      if (!sessionKey) missing.push("sessionKey");
+      if (!senderId) missing.push("senderId");
+      if (!teamId) missing.push("teamId");
+      if (!channelId) missing.push("channelId");
+      if (!messageId) missing.push("messageId");
+      if (suppliedRunIds.length > 0 && !runId) missing.push("runId");
+      const mismatch = teamId && teamId !== expectedTeamId;
       logger?.warn?.(
-        `${PLUGIN_ID}: rejected incomplete, conflicting, or foreign Slack ingress identity`,
+        `${PLUGIN_ID}: rejected incomplete, conflicting, or foreign Slack ingress identity` +
+          ` (missing=[${missing.join(",")}]` +
+          `${mismatch ? ` foreignTeam=${teamId} expected=${expectedTeamId}` : ""}` +
+          ` suppliedRunIds=${suppliedRunIds.length})`,
       );
       return;
     }
@@ -705,8 +724,15 @@ export function createCallerIdentityPlugin({
     );
     if (candidates.length !== 1 || !bindRun(runId, candidates[0])) {
       rejectRun(runId, nowMs, candidates.length === 1 ? candidates[0] : null);
+      // Distinguish "no inbound was ever recorded" (the usual downstream effect
+      // of rememberInbound rejecting the message) from "several inbounds match"
+      // and from "the single candidate was refused by bindRun". Without this
+      // split the log looked the same in all three cases.
+      const bindFailed = candidates.length === 1;
       logger?.warn?.(
-        `${PLUGIN_ID}: agent run has no unique fresh Slack message binding`,
+        `${PLUGIN_ID}: agent run has no unique fresh Slack message binding` +
+          ` (candidates=${candidates.length} pending=${pendingByMessage.size}` +
+          `${bindFailed ? " bindRunRefused=true" : ""})`,
       );
     }
   }
