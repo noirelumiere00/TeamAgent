@@ -702,9 +702,27 @@ export function createCallerIdentityPlugin({
     const runId = canonicalInvocationId(ctx?.runId);
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
-    const channelId = consistentSlackChannel([ctx?.channelId, ctx?.channel]);
+    // ctx.channelId is the provider name ("slack"), not a Slack channel, and
+    // ctx.channel is not part of this context at all, so the original pair could
+    // never resolve for either a DM or a channel. conversationId is the field
+    // that actually carries the conversation ("channel:C…" / "user:U…"), and it
+    // comes from the same derivation the inbound path uses, so both sides agree.
+    const channelId = consistentSlackChannel([
+      ctx?.conversationId,
+      ctx?.channelId,
+      ctx?.chatId,
+      ctx?.channel,
+    ]);
     if (!runId || !sessionKey || !senderId || !channelId) {
-      logger?.warn?.(`${PLUGIN_ID}: rejected incomplete authoritative agent run`);
+      const missing = [];
+      if (!runId) missing.push("runId");
+      if (!sessionKey) missing.push("sessionKey");
+      if (!senderId) missing.push("senderId");
+      if (!channelId) missing.push("channelId");
+      logger?.warn?.(
+        `${PLUGIN_ID}: rejected incomplete authoritative agent run` +
+          ` (missing=[${missing.join(",")}])`,
+      );
       return;
     }
     const nowMs = now();
