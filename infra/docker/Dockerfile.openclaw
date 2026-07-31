@@ -9,6 +9,11 @@ ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
 ARG DISTROLESS_ARM64_DIGEST=sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3
 
+# The same pinned upstream image, kept untouched. The stage below prunes /app
+# aggressively and removes /app/src, so the workspace templates the runtime
+# needs are taken from here instead.
+FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream-templates
+
 FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream
 
 USER root
@@ -156,9 +161,14 @@ COPY --from=upstream --chown=65532:65532 /app/skills /app/skills
 # <package root>/src/agents/templates first and falls back to
 # <package root>/docs/reference/templates, so both must ship or the gateway
 # starts and reports healthy but fails on the first message with
-# "Missing workspace template: AGENTS.md".
-COPY --from=upstream --chown=65532:65532 /app/src/agents/templates /app/src/agents/templates
-COPY --from=upstream --chown=65532:65532 /app/docs/reference/templates /app/docs/reference/templates
+# "Missing workspace template: AGENTS.md". HEARTBEAT.md is worse: it is only
+# ever read from the primary directory, so the src copy is not optional.
+# These come from the untouched upstream layer because the pruning stage deletes
+# /app/src entirely, and they are pinned to the same digest as that stage.
+COPY --from=upstream-templates --chown=65532:65532 \
+  /app/src/agents/templates /app/src/agents/templates
+COPY --from=upstream-templates --chown=65532:65532 \
+  /app/docs/reference/templates /app/docs/reference/templates
 COPY --from=upstream --chown=65532:65532 /opt/teamagent /opt/teamagent
 COPY --chown=65532:65532 --chmod=0555 infra/docker/openclaw-entrypoint.mjs /opt/teamagent/entrypoint.mjs
 COPY --chown=65532:65532 --chmod=0555 infra/openclaw/gateway-runtime.mjs /opt/teamagent/gateway-runtime.mjs
