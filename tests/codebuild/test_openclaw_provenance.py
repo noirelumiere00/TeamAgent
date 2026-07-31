@@ -105,9 +105,23 @@ def _manifest_response(
 def test_active_contract_is_fail_closed_and_names_all_three_repository_stages() -> None:
     contract = provenance.load_contract(ACTIVE_CONTRACT)
 
-    assert contract["release"]["ready"] is False
+    # The operator approved release readiness once the measured core probes
+    # landed, so the checked-in contract is now open. The fail-closed behaviour
+    # itself is the invariant under test: blocking the contract must still shut
+    # every caller of require_release_ready, and a blocked contract must still
+    # carry a reason. Reopening it must stay a deliberate, reviewable edit.
+    assert contract["release"]["ready"] is True
+    assert contract["release"]["blocked_reason"] == ""
+    provenance.require_release_ready(contract)
+
+    blocked = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
+    blocked["release"] = {
+        "ready": False,
+        "blocked_reason": "held for the fail-closed regression test",
+    }
     with pytest.raises(provenance.ContractError, match="release is blocked"):
-        provenance.require_release_ready(contract)
+        provenance.require_release_ready(provenance.validate_contract(blocked))
+
     assert contract["bundle"]["interfaces"] == {
         "build": "infra/openclaw/build-bundle.sh",
         "attest": "infra/codebuild/verify_actual_image.sh",
@@ -122,6 +136,14 @@ def test_active_contract_is_fail_closed_and_names_all_three_repository_stages() 
 def test_ready_contract_requires_binary_hashes_and_signed_sbom_provenance() -> None:
     value = json.loads(ACTIVE_CONTRACT.read_text(encoding="utf-8"))
     value["release"] = {"ready": True, "blocked_reason": ""}
+    # The checked-in contract now carries measured probes, so strip them here to
+    # keep exercising the negative case: a ready release without binary probes
+    # must be rejected. Reading the real file first means a subject added later
+    # is covered too.
+    assert value["bundle"]["subjects"], "contract must declare at least one subject"
+    for subject in value["bundle"]["subjects"]:
+        assert subject["binary_probes"], f"{subject['name']} must ship measured probes"
+        subject["binary_probes"] = []
     with pytest.raises(provenance.ContractError, match="binary_probes is required"):
         provenance.validate_contract(value)
 

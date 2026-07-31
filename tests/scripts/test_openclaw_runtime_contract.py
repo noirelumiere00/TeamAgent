@@ -751,7 +751,10 @@ def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> 
     contract = json.loads(TRUST_CONTRACT.read_text())
     bundle_helper = BUNDLE_HELPER.read_text()
 
-    assert contract["release"]["ready"] is False
+    # The contract is open now that the emitter and the measured core probes
+    # landed. What must survive is the boundary itself, pinned below: exactly one
+    # gate, and it runs before anything reaches a registry or a builder.
+    assert contract["release"]["ready"] is True
     assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
     assert buildspec.index("assert-release-ready") < buildspec.index(
         "bash infra/openclaw/build-bundle.sh"
@@ -776,26 +779,47 @@ def test_codebuild_and_local_runtime_have_one_fail_closed_release_boundary() -> 
 def test_blocked_bundle_interface_stops_before_output_or_external_work(
     tmp_path: Path,
 ) -> None:
+    # The checked-in contract is open now, and the emitter accepts only the
+    # canonical path, so block the canonical file in place and restore its exact
+    # bytes afterwards. The invariant under test is the emitter's behaviour when
+    # the gate is closed, not the current state of the file: a blocked contract
+    # must stop before it writes a manifest or touches a registry, and say why.
+    original_bytes = TRUST_CONTRACT.read_bytes()
+    blocked_contract = json.loads(original_bytes)
+    assert blocked_contract["release"]["ready"] is True
+    blocked_contract["release"] = {
+        "ready": False,
+        "blocked_reason": "held closed for the fail-closed emitter regression test",
+    }
+
     manifest = tmp_path / "bundle.json"
-    completed = subprocess.run(
-        [
-            "bash",
-            str(BUNDLE_HELPER),
-            "--bundle-contract",
-            str(TRUST_CONTRACT),
-            "--core-image",
-            "example.invalid/core:candidate",
-            "--media-image",
-            "example.invalid/media:candidate",
-            "--push",
-            "--manifest",
-            str(manifest),
-        ],
-        cwd=ROOT,
-        check=False,
-        text=True,
-        capture_output=True,
-    )
+    try:
+        TRUST_CONTRACT.write_text(
+            json.dumps(blocked_contract, indent=2) + "\n", encoding="utf-8"
+        )
+        completed = subprocess.run(
+            [
+                "bash",
+                str(BUNDLE_HELPER),
+                "--bundle-contract",
+                str(TRUST_CONTRACT),
+                "--core-image",
+                "example.invalid/core:candidate",
+                "--media-image",
+                "example.invalid/media:candidate",
+                "--push",
+                "--manifest",
+                str(manifest),
+            ],
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    finally:
+        TRUST_CONTRACT.write_bytes(original_bytes)
+
+    assert TRUST_CONTRACT.read_bytes() == original_bytes
     assert completed.returncode != 0
     assert "OpenClaw core/media release is blocked" in completed.stderr
     assert "OpenClaw core/media release contract is not active" in completed.stderr
@@ -1440,7 +1464,8 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert "terraform apply" not in deploy
     assert ".stopTimeout = 120" in task_filter
     assert '"/nodejs/bin/node"' in task_filter
-    assert contract["release"]["ready"] is False
+    assert contract["release"]["ready"] is True
+    assert contract["release"]["blocked_reason"] == ""
     assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"
     # The media subject was removed from the required set: it had no Dockerfile,
     # no image in any of its ECR repositories, and no reference in the tree.

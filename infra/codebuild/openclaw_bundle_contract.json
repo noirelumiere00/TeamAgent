@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "release": {
-    "ready": false,
-    "blocked_reason": "Operator-approved release readiness is waiting only for the separately measured core binary_probes to be merged. Keep every build, promotion, and Terraform image gate closed until those probes land and release.ready is enabled."
+    "ready": true,
+    "blocked_reason": ""
   },
   "source": {
     "repository": "https://github.com/noirelumiere00/TeamAgent.git",
