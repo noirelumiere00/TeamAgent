@@ -451,9 +451,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
     # no fixed version, which is why all-zero can never pass for such an image.
     scan_gate_contract = _load(args.contract, label="release contract")
     declared_gate = None
-    if isinstance(scan_gate_contract, dict) and isinstance(
-        scan_gate_contract.get("bundle"), dict
-    ):
+    if isinstance(scan_gate_contract, dict) and isinstance(scan_gate_contract.get("bundle"), dict):
         declared_gate = scan_gate_contract["bundle"].get("scan_gate")
     if declared_gate is not None:
         if not isinstance(declared_gate, dict) or set(declared_gate) != {
@@ -464,9 +462,7 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
         for key in ("critical", "high"):
             value = declared_gate[key]
             if isinstance(value, bool) or not isinstance(value, int) or value != 0:
-                raise EvidenceError(
-                    "contract scan gate must require zero Critical and High"
-                )
+                raise EvidenceError("contract scan gate must require zero Critical and High")
         blocking = scan_counts["critical"] + scan_counts["high"] + scan_counts["secrets"]
     else:
         blocking = sum(scan_counts.values())
