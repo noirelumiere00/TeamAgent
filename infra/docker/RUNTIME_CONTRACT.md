@@ -94,7 +94,8 @@ ECS `RunTask` overrideにはenvelopeやcapability secretを複製せず、job/at
 VersionId固定private control `.env` ARNだけを渡す。overrideはAWS API上限の8192文字以下を
 コードとテストで強制する。入力は
 S3 referenceだけを許し、bucket/key/content type/size/SHA-256を必須とする。deadlineは最大15分、
-outputは最大128 MiBとする。idempotency keyはoperationとcaller fingerprintから作るretry-stable
+input/outputは原則最大128 MiBとし、143 MB級の統合FMTを扱う`proposal_pptx`のtemplateと
+`proposal.pptx`だけ最大256 MiBとする。idempotency keyはoperationとcaller fingerprintから作るretry-stable
 semantic SHA-256であり、timestamp/deadlineを含むcanonical envelope SHA-256とは分離する。
 遅延retryでは同じsemantic job rowと、そのrowに保存済みのexact envelopeを再利用する。
 deadlineは1つのabsolute epochとしてdispatcher、adapter poll、worker、各loop、network call、

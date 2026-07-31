@@ -31,3 +31,20 @@ s3_noncurrent_expiration_days = 180
 bedrock_model_id   = "jp.anthropic.claude-sonnet-4-6"
 lambda_memory_size = 1024
 lambda_timeout     = 300
+
+# proposal_builder（既定OFF）。実測済み統合FMTを作成し、2資産をversioning+SSE-KMS有効S3へ
+# 配置した後だけ値を埋める。アカウントDB本体や実bucket/key/versionはrepoへ書かない。
+# enable_proposal_builder                  = true
+# proposal_builder_sync_runtime_verified   = true # 代表143MB E2Eを共有deadline内で実測後のみ
+# proposal_builder_template_s3_bucket      = "<private-assets-bucket>"
+# proposal_builder_template_s3_key         = "<integrated-template-key>"
+# proposal_builder_template_s3_version_id  = "<immutable-version-id>"
+# proposal_builder_template_s3_sha256      = "<64-lowercase-hex>"
+# proposal_builder_template_s3_size        = 0
+# proposal_builder_account_s3_bucket       = "<private-assets-bucket>"
+# proposal_builder_account_s3_key          = "<protected-account-db-key>"
+# proposal_builder_account_s3_version_id   = "<immutable-version-id>"
+# proposal_builder_account_s3_sha256       = "<64-lowercase-hex>"
+# proposal_builder_account_s3_size         = 0
+# proposal_builder_assets_kms_key_arn      = "<kms-key-arn>"
+# proposal_builder_news_channel_id         = "" # ingest metadataで実測後のみC...を設定

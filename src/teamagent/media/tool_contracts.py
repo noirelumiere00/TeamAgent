@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from teamagent.media.contracts import MAX_OUTPUT_BYTES, MediaJobRequest, S3ObjectRef
+from teamagent.media.contracts import (
+    MAX_INPUT_BYTES,
+    MAX_OUTPUT_BYTES,
+    MAX_PROPOSAL_PPTX_BYTES,
+    MediaJobRequest,
+    S3ObjectRef,
+)
 
 MAX_CONTROL_BYTES = 768 * 1024
 MAX_COMPLETION_BYTES = 128 * 1024
@@ -373,20 +379,28 @@ def _presigned_post(
 
 def _input_refs(request: MediaJobRequest) -> tuple[S3ObjectRef, ...]:
     operation = request.operation.model_dump(mode="json")
-    raw: list[dict[str, Any]] = []
+    raw: list[tuple[dict[str, Any], int]] = []
     for name in ("source", "html", "template", "composer_json"):
         value = operation.get(name)
         if isinstance(value, dict):
-            raw.append(value)
+            maximum = (
+                MAX_PROPOSAL_PPTX_BYTES
+                if operation.get("kind") == "proposal_pptx" and name == "template"
+                else MAX_INPUT_BYTES
+            )
+            raw.append((value, maximum))
     evidence = operation.get("evidence", [])
     if isinstance(evidence, list):
         raw.extend(
-            item["source"]
+            (item["source"], MAX_INPUT_BYTES)
             for item in evidence
             if isinstance(item, dict) and isinstance(item.get("source"), dict)
         )
-    refs = tuple(S3ObjectRef.model_validate(value) for value in raw)
-    for ref in refs:
+    refs_with_limits = tuple((S3ObjectRef.model_validate(value), maximum) for value, maximum in raw)
+    refs = tuple(ref for ref, _maximum in refs_with_limits)
+    for ref, maximum in refs_with_limits:
+        if ref.size > maximum:
+            raise ToolControlError("input reference exceeds its operation-specific bound")
         if ref.bucket != request.output_bucket or not ref.key.startswith(
             f"{request.output_prefix}input/"
         ):
@@ -441,7 +455,7 @@ def _output_slots(
     elif kind == "slides":
         slots.append(("slides.pptx", "slides.pptx", MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
-        slots.append(("proposal.pptx", "proposal.pptx", MAX_OUTPUT_BYTES))
+        slots.append(("proposal.pptx", "proposal.pptx", MAX_PROPOSAL_PPTX_BYTES))
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", MAX_OUTPUT_BYTES))
     else:

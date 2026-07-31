@@ -160,6 +160,10 @@
         toolFilter: {
           include: [
             "search", "clientkarte", "proposal_draft", "proposal_review",
+            // proposal_builder: Gemini v3 JSON + 投稿開始日Dから、既存RAG/95枠rendererを
+            // 再利用して統合PPTXを生成し、検証済み依頼元へ添付。USE_PROPOSAL_BUILDER_TOOLS=1、
+            // 代表143MB E2Eの実測attestation、S3固定version資産、media workerが全て必要。
+            "proposal_builder",
             "tiktok_search", "video_analysis", "video_algorithm",
             // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
             //   現在は scope enabledBy=never。解禁4点セットは (1) tf task env 配線、

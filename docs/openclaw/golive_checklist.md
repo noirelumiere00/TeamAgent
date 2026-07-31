@@ -68,7 +68,7 @@
 - [ ] exact new revisionで `services-stable`
 - [ ] same revision/networkのone-off task exit 0
 - [ ] task-role credentialで Bedrock `Converse` 成功
-- [ ] MCP `tools/list` が既定12件かつreviewed 28件内
+- [ ] MCP `tools/list` が既定12件かつreviewed 29件内
 - [ ] Slack Socket Modeとexact mention/reply成功
 - [ ] rollout結果を署名・耐久記録
 - [ ] 強制失敗で durable previous revisionへの自動復旧を実証

@@ -27,7 +27,12 @@ from pydantic import BaseModel, ValidationError
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.proposal_deck.contract import ComposerOutput
+from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
+from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
+from teamagent.skills.proposal_deck.provenance import (
+    ProvenanceValidationError,
+    validate_composer_provenance,
+)
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
 
 logger = structlog.get_logger(__name__)
@@ -113,7 +118,11 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             )
 
             pptx_url = self._publish_if_enabled(
-                str(rendered), input.product_name, ctx.request_id, kind="pptx"
+                str(rendered),
+                input.product_name,
+                ctx.request_id,
+                kind="pptx",
+                publish_artifact=input.publish_artifact,
             )
             pdf_path, pdf_url = self._emit_pdf_if_enabled(
                 composer_out, input, ctx, version_id=version_id, out_dir=out_dir, safe=safe
@@ -238,20 +247,33 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             logger.exception("proposal_deck_pdf_failed", product=input.product_name)
             raise
         pdf_url = self._publish_if_enabled(
-            str(rendered_pdf), input.product_name, ctx.request_id, kind="pdf"
+            str(rendered_pdf),
+            input.product_name,
+            ctx.request_id,
+            kind="pdf",
+            publish_artifact=input.publish_artifact,
         )
         return str(rendered_pdf), pdf_url
 
     @staticmethod
     def _publish_if_enabled(
-        path: str, product_name: str, request_id: str, *, kind: str = "pptx"
+        path: str,
+        product_name: str,
+        request_id: str,
+        *,
+        kind: str = "pptx",
+        publish_artifact: bool | None = None,
     ) -> str | None:
-        """USE_PROPOSAL_DECK_PUBLISH=1 のときだけ署名付き URL を返す（kind=pptx|pdf）.
+        """Explicit input or USE_PROPOSAL_DECK_PUBLISH controls publishing.
 
-        既定 OFF。S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、
-        失敗しても skill 全体は成功扱い（Slack に URL は出ないだけ）。
+        ``publish_artifact=False`` always suppresses S3 writes, ``True`` forces
+        publishing, and ``None`` preserves the legacy environment-gated behavior.
+        S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、失敗しても
+        skill 全体は成功扱い（Slack に URL は出ないだけ）。
         """
-        if not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
+        if publish_artifact is False:
+            return None
+        if publish_artifact is None and not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
             return None
         try:
             from teamagent.adapters.report_publish import publish_pdf_file, publish_pptx_file
@@ -292,8 +314,117 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             total_cost += resp.usage.cost_usd
             try:
                 data = json.loads(_extract_json(resp.text))
-                return ComposerOutput.model_validate(data), total_cost
-            except (json.JSONDecodeError, ValidationError) as exc:
+                composer_out = ComposerOutput.model_validate(data)
+                forced_skips = set(input.forced_skipped_ids)
+                placeholders = {
+                    placeholder_id: text
+                    for placeholder_id, text in composer_out.placeholders.items()
+                    if placeholder_id not in forced_skips
+                }
+                citations = {
+                    placeholder_id: values
+                    for placeholder_id, values in composer_out.citations_per_placeholder.items()
+                    if placeholder_id not in forced_skips
+                }
+                skipped = [
+                    item
+                    for item in composer_out.skipped_placeholders
+                    if item.id not in forced_skips
+                ]
+                skipped.extend(
+                    SkippedPlaceholder(
+                        id=placeholder_id,
+                        reason=(
+                            "要確認（データ未検出）: "
+                            "proposal-builderの依存入力がありません"
+                        ),
+                    )
+                    for placeholder_id in sorted(forced_skips)
+                )
+                resolved_auxiliary = dict(input.auxiliary_placeholders)
+                for key, placeholder_id in input.derived_auxiliary_placeholders.items():
+                    resolved_auxiliary[key] = placeholders.get(
+                        placeholder_id,
+                        "要確認（データ未検出）",
+                    )
+                # LLMには95枠本文だけを生成させる。事例・アカウント・D起点日付と
+                # template profile は検証済みの決定論的入力を後付けし、モデルに改変させない。
+                composer_out = ComposerOutput.model_validate(
+                    {
+                        **composer_out.model_dump(mode="python"),
+                        "placeholders": placeholders,
+                        "citations_per_placeholder": citations,
+                        "skipped_placeholders": skipped,
+                        "auxiliary_placeholders": resolved_auxiliary,
+                        "posting_start_date": input.posting_start_date,
+                        "template_profile": input.template_profile,
+                    }
+                )
+                forbidden_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, text in composer_out.placeholders.items()
+                    if contains_forbidden_term(text, input.forbidden_output_terms)
+                )
+                forbidden_citation_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, citations in composer_out.citations_per_placeholder.items()
+                    if any(
+                        contains_forbidden_term(citation, input.forbidden_output_terms)
+                        for citation in citations
+                    )
+                )
+                forbidden_skip_ids = sorted(
+                    item.id
+                    for item in composer_out.skipped_placeholders
+                    if contains_forbidden_term(item.reason, input.forbidden_output_terms)
+                )
+                forbidden_evidence_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, images in composer_out.evidence_images.items()
+                    if any(
+                        contains_forbidden_term(
+                            " ".join(
+                                value
+                                for value in (
+                                    image.keyword,
+                                    image.source_url,
+                                    image.image_path,
+                                    image.video_url,
+                                )
+                                if value
+                            ),
+                            input.forbidden_output_terms,
+                        )
+                        for image in images
+                    )
+                )
+                if (
+                    forbidden_ids
+                    or forbidden_citation_ids
+                    or forbidden_skip_ids
+                    or forbidden_evidence_ids
+                ):
+                    raise ProvenanceValidationError(
+                        [
+                            "confidential term remains in placeholder IDs "
+                            f"{forbidden_ids}, citation IDs {forbidden_citation_ids}, "
+                            f"skip IDs {forbidden_skip_ids}, or evidence IDs "
+                            f"{forbidden_evidence_ids}"
+                        ]
+                    )
+                if input.enforce_provenance:
+                    validate_composer_provenance(
+                        composer_out,
+                        input_urls=input.urls,
+                        research_material=input.research_material,
+                        quantitative_evidence=input.quantitative_evidence,
+                    )
+                return composer_out, total_cost
+            except (
+                json.JSONDecodeError,
+                ValidationError,
+                ProvenanceValidationError,
+            ) as exc:
                 last_error = str(exc)
                 if attempt >= input.max_repair:
                     break
@@ -304,9 +435,9 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                         "content": [
                             {
                                 "text": (
-                                    "前回の出力が ComposerOutput スキーマに"
-                                    f"合いませんでした: {last_error}\n"
-                                    "指摘の ID/文字数/網羅の不足を直し、"
+                                    "前回の出力が ComposerOutput スキーマまたは"
+                                    f"根拠検証に合いませんでした: {last_error}\n"
+                                    "指摘の ID/文字数/網羅/citation の不足を直し、"
                                     "JSON のみ（前後の説明文なし）で再送してください。"
                                 )
                             }

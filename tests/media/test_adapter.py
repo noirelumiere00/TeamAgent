@@ -474,8 +474,11 @@ class _GuardClient(MediaJobClient):
         content_type: str,
         deadline_epoch_s: int,
         ttl_s: int = 3600,
+        max_bytes: int = 128 * 1024 * 1024,
     ) -> S3ObjectRef:
         del name, content_type, deadline_epoch_s, ttl_s
+        if not body or len(body) > max_bytes:
+            raise AssertionError("test staging body is outside its explicit bound")
         self.staged += 1
         return S3ObjectRef(
             bucket=_BUCKET,

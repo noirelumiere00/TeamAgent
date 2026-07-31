@@ -55,7 +55,7 @@ class SlackClient:
         self._identity_cache: dict[str, tuple[ResolvedIdentity | None, float]] = {}
 
     @classmethod
-    def from_env(cls) -> SlackClient:
+    def from_env(cls, *, timeout_seconds: int | None = None) -> SlackClient:
         """環境変数から Slack Bot Token を取得して構築する。
 
         必須: SLACK_BOT_TOKEN
@@ -64,6 +64,13 @@ class SlackClient:
         if not token:
             raise RuntimeError(
                 "SLACK_BOT_TOKEN が未設定です。.env を読み込んでから起動してください"
+            )
+        if timeout_seconds is not None:
+            if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 900:
+                raise ValueError("Slack client timeout_seconds must be between 1 and 900")
+            return cls(
+                bot_token=token,
+                client=AsyncWebClient(token=token, timeout=timeout_seconds),
             )
         return cls(bot_token=token)
 

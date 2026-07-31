@@ -1156,7 +1156,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 28
+    assert len(inventory_names) == len(set(inventory_names)) == 29
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1203,6 +1203,13 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "kind": "envAllTrue",
         "names": ["USE_TIKTOK_TOOLS"],
     }
+    assert activation_by_name["proposal_builder"] == {
+        "kind": "envAllTrue",
+        "names": [
+            "USE_PROPOSAL_BUILDER_TOOLS",
+            "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED",
+        ],
+    }
     assert activation_by_name["x_voice_search"] == {
         "kind": "envAllTrue",
         "names": ["USE_X_RESEARCH_TOOLS"],
@@ -1239,6 +1246,8 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "enable_scrape_tools",
         "enable_tiktok_acquire",
         "enable_media_worker",
+        "enable_proposal_builder",
+        "proposal_builder_sync_runtime_verified",
         "enable_x_research",
     ):
         assert gate in terraform

@@ -18,7 +18,9 @@ from teamagent.media.contracts import (
     ARTIFACT_RETENTION_SECONDS,
     MAX_DEADLINE_SECONDS,
     MAX_INPUT_BYTES,
+    MAX_OUTPUT_BYTES,
     MAX_PRESIGNED_URL_SECONDS,
+    MAX_PROPOSAL_PPTX_BYTES,
     AcquireOperation,
     FrameOperation,
     MediaJobRequest,
@@ -240,11 +242,14 @@ class MediaJobClient:
         content_type: str,
         deadline_epoch_s: int,
         ttl_s: int | None = None,
+        max_bytes: int = MAX_INPUT_BYTES,
     ) -> S3ObjectRef:
         self._assert_configured()
         if not _JOB_ID_RE.fullmatch(job_id):
             raise MediaJobError("MEDIA_JOB_ID_INVALID")
-        if not body or len(body) > MAX_INPUT_BYTES:
+        if max_bytes < 1 or max_bytes > MAX_PROPOSAL_PPTX_BYTES:
+            raise MediaJobError("MEDIA_INPUT_BOUND_INVALID")
+        if not body or len(body) > max_bytes:
             raise MediaJobError("MEDIA_INPUT_SIZE_INVALID")
         if not name or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-._" for char in name):
             raise MediaJobError("MEDIA_INPUT_NAME_INVALID")
@@ -622,6 +627,14 @@ class MediaJobClient:
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
             artifacts: dict[str, bytes] = {}
             for artifact in result.artifacts:
+                artifact_bound = (
+                    MAX_PROPOSAL_PPTX_BYTES
+                    if isinstance(request.operation, ProposalPptxOperation)
+                    and artifact.name == "proposal.pptx"
+                    else MAX_OUTPUT_BYTES
+                )
+                if artifact.object.size > artifact_bound:
+                    raise MediaJobError("MEDIA_ARTIFACT_SIZE_INVALID")
                 for attempt in range(3):
                     self._remaining(execution_deadline_epoch_s)
                     try:
@@ -923,6 +936,7 @@ class MediaJobClient:
                     "application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 ),
                 deadline_epoch_s=deadline_epoch_s,
+                max_bytes=MAX_PROPOSAL_PPTX_BYTES,
             )
             composer_ref = self.stage_bytes(
                 job_id=job_id,

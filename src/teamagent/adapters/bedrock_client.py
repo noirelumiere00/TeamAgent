@@ -275,18 +275,21 @@ class BedrockClient:
         )
 
     @classmethod
-    def from_env(cls) -> BedrockClient:
+    def from_env(cls, *, model_id_override: str | None = None) -> BedrockClient:
         """環境変数から BedrockClient を構築する。
 
         必須: AWS_REGION, BEDROCK_MODEL_ID
         オプション: BEDROCK_RERANK_MODEL_ARN (省略時は ap-northeast-1 の Cohere v3.5)
+        model_id_override 指定時は BEDROCK_MODEL_ID より優先する（用途別の明示モデル用）。
         """
         region = os.environ.get("AWS_REGION", "ap-northeast-1")
         # コスト方針(2026-06-29): env 未設定時の既定は Haiku。以前の既定 Sonnet は
         # 「BEDROCK_MODEL_ID を注入し忘れたタスク」が silent に Sonnet 課金へ落ちる事故源だった
         # （2026-07-13 実測: 週次 ingest 分類が 573回/週 Sonnet 落ち＝CloudTrail で確定）。
         # 高品質が要る呼び出しは env で明示的に Sonnet を指定する（暗黙昇格の禁止）。
-        model_id = os.environ.get("BEDROCK_MODEL_ID", "jp.anthropic.claude-haiku-4-5-20251001-v1:0")
+        model_id = model_id_override or os.environ.get(
+            "BEDROCK_MODEL_ID", "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
+        )
         rerank_arn = os.environ.get("BEDROCK_RERANK_MODEL_ARN")
         embed_model_id = os.environ.get("COHERE_EMBED_MODEL_ID", "cohere.embed-multilingual-v3")
         # 任意で env からバックオフを上書き（既定: 5回 / base 0.5s / cap 20s）。

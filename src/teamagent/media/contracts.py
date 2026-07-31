@@ -29,6 +29,9 @@ from teamagent.media.url_policy import acquire_host_allowed
 MAX_JOB_BODY_BYTES = 128 * 1024
 MAX_INPUT_BYTES = 128 * 1024 * 1024
 MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+# proposal-builder の統合FMTは元FMTだけで約143MB。一般media操作の境界を広げず、
+# proposal_pptx の template / output だけを明示的に拡張する。
+MAX_PROPOSAL_PPTX_BYTES = 256 * 1024 * 1024
 MAX_JOB_BUDGET_SECONDS = 15 * 60
 MAX_DEADLINE_SECONDS = MAX_JOB_BUDGET_SECONDS
 MAX_CLOCK_SKEW_SECONDS = 30
@@ -74,7 +77,9 @@ class S3ObjectRef(_StrictModel):
     key: S3Key
     version_id: S3VersionId
     sha256: Sha256
-    size: int = Field(ge=0, le=MAX_INPUT_BYTES)
+    # operation/result の文脈を持たない参照型なので全体上限のみを宣言する。
+    # MediaJobRequest/worker/tool capability が一般128MiB・proposal PPTXのみ256MiBを再強制する。
+    size: int = Field(ge=0, le=MAX_PROPOSAL_PPTX_BYTES)
     content_type: str = Field(min_length=1, max_length=128)
 
     @field_validator("key")
@@ -339,6 +344,23 @@ class MediaJobRequest(_StrictModel):
             raise ValueError("deadline must be within the bounded execution window")
         if f"/{self.job_id}/" not in f"/{self.output_prefix}":
             raise ValueError("output_prefix must be scoped to job_id")
+        operation = self.operation
+        refs: list[tuple[S3ObjectRef, int]] = []
+        if isinstance(operation, ProposalPptxOperation):
+            refs.extend(
+                (
+                    (operation.template, MAX_PROPOSAL_PPTX_BYTES),
+                    (operation.composer_json, MAX_INPUT_BYTES),
+                )
+            )
+            refs.extend((item.source, MAX_INPUT_BYTES) for item in operation.evidence)
+        else:
+            for name in ("source", "html"):
+                value = getattr(operation, name, None)
+                if isinstance(value, S3ObjectRef):
+                    refs.append((value, MAX_INPUT_BYTES))
+        if any(ref.size > maximum for ref, maximum in refs):
+            raise ValueError("operation input exceeds its bounded size")
         expected = self.compute_payload_sha256()
         if self.payload_sha256 != expected:
             raise ValueError("payload_sha256 mismatch")
@@ -496,6 +518,7 @@ __all__ = [
     "MAX_JOB_BODY_BYTES",
     "MAX_JOB_BUDGET_SECONDS",
     "MAX_OUTPUT_BYTES",
+    "MAX_PROPOSAL_PPTX_BYTES",
     "MAX_PRESIGNED_URL_SECONDS",
     "AcquireOperation",
     "FrameOperation",

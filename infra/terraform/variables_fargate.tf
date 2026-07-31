@@ -70,6 +70,90 @@ variable "mcp_model_id" {
   }
 }
 
+variable "enable_proposal_builder" {
+  description = "Gemini v3→RAG→統合FMT→Slack添付の proposal_builder をMCPで有効化する。S3固定version資産、KMS権限、generic media workerが全て必須。"
+  type        = bool
+  default     = false
+}
+
+variable "proposal_builder_sync_runtime_verified" {
+  description = "代表143MB級でRAG→LLM→render→Slack uploadがOpenClaw共有deadline内に完走したことを受入環境で確認済みならtrue"
+  type        = bool
+  default     = false
+}
+
+variable "proposal_builder_template_s3_bucket" {
+  description = "統合FMTのversioning/SSE-KMS有効S3 bucket（enable_proposal_builder時必須）"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_template_s3_key" {
+  description = "統合FMT object key（enable_proposal_builder時必須）"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_template_s3_version_id" {
+  description = "統合FMTのimmutable S3 VersionId。null/latestは禁止"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_template_s3_sha256" {
+  description = "統合FMT全体のSHA-256 hex"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_template_s3_size" {
+  description = "統合FMTの実byte数（1〜256MiB）"
+  type        = number
+  default     = 0
+}
+
+variable "proposal_builder_account_s3_bucket" {
+  description = "改変禁止アカウントDBのversioning/SSE-KMS有効S3 bucket（enable時必須）"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_account_s3_key" {
+  description = "改変禁止アカウントDB object key（enable時必須）"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_account_s3_version_id" {
+  description = "アカウントDBのimmutable S3 VersionId。null/latestは禁止"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_account_s3_sha256" {
+  description = "アカウントDB全体のSHA-256 hex"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_account_s3_size" {
+  description = "アカウントDBの実byte数（1〜5MiB）"
+  type        = number
+  default     = 0
+}
+
+variable "proposal_builder_assets_kms_key_arn" {
+  description = "統合FMTとアカウントDBを暗号化する単一KMS key ARN（enable時必須）"
+  type        = string
+  default     = ""
+}
+
+variable "proposal_builder_news_channel_id" {
+  description = "ingestで実測した general_news-tv のSlack channel ID。未設定時はchannel_nameだけで絞る"
+  type        = string
+  default     = ""
+}
+
 variable "use_calendar_event_tool" {
   description = "calendar_event tool（📅カレンダー登録ボタンの押下処理・v0.3 Task3）を mcp で有効化。既定 false。ON 後に morning_digest_calendar_button=true にする（順序を守らないと無反応ボタン）。"
   type        = bool

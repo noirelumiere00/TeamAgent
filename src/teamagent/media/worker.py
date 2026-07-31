@@ -28,9 +28,11 @@ from teamagent.media.contracts import (
     MAX_INPUT_BYTES,
     MAX_JOB_BUDGET_SECONDS,
     MAX_OUTPUT_BYTES,
+    MAX_PROPOSAL_PPTX_BYTES,
     MediaArtifact,
     MediaJobRequest,
     MediaJobResult,
+    ProposalPptxOperation,
     S3ObjectRef,
     TikTokAcquireOperation,
     artifact_manifest_sha256,
@@ -735,7 +737,13 @@ class AwsWorkerBackend:
     ) -> Path:
         self._renew_lease(request, lease)
         self.assert_request_scope(request)
-        if ref.size > MAX_INPUT_BYTES:
+        input_bound = MAX_INPUT_BYTES
+        if (
+            isinstance(request.operation, ProposalPptxOperation)
+            and ref == request.operation.template
+        ):
+            input_bound = MAX_PROPOSAL_PPTX_BYTES
+        if ref.size > input_bound:
             raise ValueError("input size exceeds worker bound")
         head = self._call(
             "s3",
@@ -820,11 +828,17 @@ class AwsWorkerBackend:
         version_id: str | None = None
         try:
             before = os.fstat(fd)
+            output_bound = (
+                MAX_PROPOSAL_PPTX_BYTES
+                if isinstance(request.operation, ProposalPptxOperation)
+                and artifact.name == "proposal.pptx"
+                else MAX_OUTPUT_BYTES
+            )
             if (
                 not stat.S_ISREG(before.st_mode)
                 or before.st_nlink != 1
                 or before.st_size < 1
-                or before.st_size > MAX_OUTPUT_BYTES
+                or before.st_size > output_bound
             ):
                 raise ValueError("output artifact file is invalid")
             digest_state = hashlib.sha256()

@@ -67,6 +67,19 @@
       "enabledBy": { "kind": "always" }
     },
     {
+      "name": "proposal_builder",
+      "effect": "company-data-read-generated-content-s3-read-slack-file-write",
+      "terraformGate": "enable_proposal_builder",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": {
+        "kind": "envAllTrue",
+        "names": [
+          "USE_PROPOSAL_BUILDER_TOOLS",
+          "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED"
+        ]
+      }
+    },
+    {
       "name": "tiktok_search",
       "effect": "external-read-scrape",
       "terraformGate": "enable_scrape_tools",

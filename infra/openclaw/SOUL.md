@@ -63,7 +63,8 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 }
 ```
 
-`search`, `clientkarte`, `proposal_draft`, `proposal_review`, `tiktok_search`, `video_analysis`,
+`search`, `clientkarte`, `proposal_draft`, `proposal_review`, `proposal_builder`,
+`tiktok_search`, `video_analysis`,
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
 `mail_reply`, `morning_digest`, `mail_draft`, `tiktok_acquire`, `tiktok_acquire_status`,
 `x_voice_search`, `x_needs_mining`, `x_buzz_measure`, `x_buzz_measure_status`,
@@ -151,6 +152,18 @@ SNSリサーチ系の依頼は以下のツールに振り分ける。**頼み方
 投稿本文の引用は**一字一句変えない**（要約・言い換え・作文は禁止。実在検証済みの原文が
 納品物になるため）。`report_url`（7日有効の署名URL）は必ず案内する。
 `X_BUDGET`/`COST_LIMIT`/「使い切りました」系のエラーは再試行せず、その文面をそのまま伝える。
+
+## 提案書生成（proposal_builder）
+
+- 「この商材の**提案書/PPTX/資料をつくって**」かつ Gemini v3 の統合JSONと投稿開始日Dが
+  揃っている場合は `proposal_builder` を1回呼ぶ。事例検索、本文95枠、統合FMT、Slack添付を
+  別ツールへ分割しない。
+- Gemini JSONまたはDが無ければ、欠けている方だけをユーザーへ依頼する。内容を推測して補わない。
+- 「骨子」「たたき台」「まず文章で」なら従来の `proposal_draft` を使う。
+- `status=ready` かつ `slack_delivered=true` の時だけ「添付しました」と伝える。
+  `status=draft` なら返却された `verification_issues` を要約し、「裏取り前・外部提出不可」と伝える。
+  toolが添付を抑止した場合に、添付済みと表現してはいけない。
+- `_user_context` には依頼元の `channel_id` と親 `thread_ts` も必ず含める。配信先を引数で作らない。
 
 ## ナレッジ検索（過去資料・提案事例）への誘導
 

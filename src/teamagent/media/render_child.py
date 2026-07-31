@@ -5,7 +5,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,30 @@ from teamagent.media.operations import (
     _iter_text_frames,
     _replace_placeholders,
 )
+
+_AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
+_DATE = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
+_TEMPLATE_VERSION = re.compile(r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}")
+_PB_TOKEN = re.compile(r"\{\{PB-[^{}]+\}\}")
+_LEGACY_INSTRUCTION = re.compile(
+    r"自動入力|貼り付けてください|はめ込|転記|差し替え"
+)
+_BRACE_CHARACTER = re.compile(r"[{}｛｝]")
+_PROPOSAL_BUILDER_PROFILE = "proposal-builder-v1"
+_PROPOSAL_BUILDER_REQUIRED_AUXILIARY = frozenset(
+    {
+        "PB-ACCOUNTS",
+        "PB-CASES",
+        "PB-CLIENT-NAME",
+        "PB-DATETIME",
+        "PB-EXPERIENCE",
+        "PB-KEY-MESSAGE",
+        "PB-MONTH",
+        "PB-PRODUCT-NAME",
+    }
+)
+_PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
+_PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT = 83
 
 
 def _exact(value: Any, keys: set[str], name: str) -> dict[str, Any]:
@@ -108,6 +134,51 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     return {"slides": len(images), "network_requests_allowed": 0}
 
 
+def _replace_proposal_special_tokens(
+    text_frame: Any,
+    auxiliary: dict[str, str],
+    posting_start_date: date | None,
+) -> None:
+    paragraphs = list(text_frame.paragraphs)
+    combined = "".join(paragraph.text for paragraph in paragraphs)
+    if not combined:
+        return
+    replaced = _AUXILIARY.sub(
+        lambda match: auxiliary.get(match.group(1), match.group(0)),
+        combined,
+    )
+    if posting_start_date is not None:
+        replaced = _DATE.sub(
+            lambda match: (
+                posting_start_date + timedelta(days=int(match.group(1)))
+            ).strftime(match.group(2)),
+            replaced,
+        )
+    replaced = _TEMPLATE_VERSION.sub(
+        lambda match: "" if match.group(1) == _PROPOSAL_BUILDER_PROFILE else match.group(0),
+        replaced,
+    )
+    if replaced == combined:
+        return
+    paragraphs[0].text = replaced
+    for paragraph in paragraphs[1:]:
+        paragraph.text = ""
+
+
+def _legacy_artifacts(text: str, *, allow_template_tokens: bool) -> list[str]:
+    """Return obsolete brace tokens/manual instructions at a render boundary."""
+
+    scrubbed = text
+    if allow_template_tokens:
+        for pattern in (_PLACEHOLDER, _DATE, _TEMPLATE_VERSION, _AUXILIARY):
+            scrubbed = pattern.sub("", scrubbed)
+    findings: list[str] = []
+    if _BRACE_CHARACTER.search(scrubbed):
+        findings.append("brace")
+    findings.extend(match.group(0) for match in _LEGACY_INSTRUCTION.finditer(scrubbed))
+    return findings
+
+
 def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     spec = _exact(
         manifest,
@@ -124,6 +195,14 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raw = json.loads(composer.read_text(encoding="utf-8"))
         placeholders = {int(key): str(value) for key, value in raw["placeholders"].items()}
         skipped = {int(item["id"]) for item in raw.get("skipped_placeholders", [])}
+        auxiliary = {
+            str(key): str(value) for key, value in raw.get("auxiliary_placeholders", {}).items()
+        }
+        profile = str(raw.get("template_profile", "base"))
+        raw_start_date = raw.get("posting_start_date")
+        posting_start_date = (
+            date.fromisoformat(raw_start_date) if isinstance(raw_start_date, str) else None
+        )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise MediaOperationError("MEDIA_COMPOSER_INVALID", "composer JSON is invalid") from exc
     valid_ids = set(range(1, 104)) - set(range(48, 56))
@@ -136,13 +215,75 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     from pptx.util import Emu
 
     presentation = Presentation(str(template))
+    template_ids: set[int] = set()
+    template_auxiliary: set[str] = set()
+    template_date_offsets: set[int] = set()
+    template_versions: set[str] = set()
+    template_legacy_artifacts: list[str] = []
+    for text_frame in _iter_text_frames(presentation):
+        combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
+        template_ids.update(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
+        template_auxiliary.update(match.group(1) for match in _AUXILIARY.finditer(combined))
+        template_date_offsets.update(int(match.group(1)) for match in _DATE.finditer(combined))
+        template_versions.update(
+            match.group(1) for match in _TEMPLATE_VERSION.finditer(combined)
+        )
+        template_legacy_artifacts.extend(
+            _legacy_artifacts(combined, allow_template_tokens=True)
+        )
+    if profile == _PROPOSAL_BUILDER_PROFILE:
+        invalid_numeric_inventory = template_ids != valid_ids
+        invalid_values = set(auxiliary) != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
+        invalid_tokens = (
+            template_auxiliary != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
+        )
+        if (
+            invalid_numeric_inventory
+            or invalid_values
+            or invalid_tokens
+            or template_legacy_artifacts
+        ):
+            raise MediaOperationError(
+                "MEDIA_PPTX_TEMPLATE_PROFILE_INVALID",
+                "integrated proposal template inventory is incomplete",
+            )
+        if (
+            posting_start_date is None
+            or len(presentation.slides) != _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT
+            or template_versions != {_PROPOSAL_BUILDER_PROFILE}
+            or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(
+                template_date_offsets
+            )
+        ):
+            raise MediaOperationError(
+                "MEDIA_PPTX_TEMPLATE_PROFILE_INVALID",
+                "integrated proposal template schedule markers are incomplete",
+            )
+    elif profile != "base":
+        raise MediaOperationError(
+            "MEDIA_COMPOSER_INVALID",
+            "composer template profile is invalid",
+        )
+
     for text_frame in _iter_text_frames(presentation):
         _replace_placeholders(text_frame, placeholders)
+        _replace_proposal_special_tokens(text_frame, auxiliary, posting_start_date)
     remaining: list[int] = []
+    remaining_special: list[str] = []
+    remaining_legacy: list[str] = []
     for text_frame in _iter_text_frames(presentation):
         combined = "".join(paragraph.text for paragraph in text_frame.paragraphs)
         remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
-    if remaining and spec["fail_if_missing"] is True:
+        remaining_special.extend(match.group(0) for match in _PB_TOKEN.finditer(combined))
+        if profile == _PROPOSAL_BUILDER_PROFILE:
+            remaining_legacy.extend(
+                _legacy_artifacts(combined, allow_template_tokens=False)
+            )
+    if (
+        remaining
+        or remaining_special
+        or remaining_legacy
+    ) and spec["fail_if_missing"] is True:
         raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
 
     slots = _iter_proposal_image_slots(presentation)
@@ -181,6 +322,10 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "skipped": len(skipped),
         "evidence_images": injected,
         "remaining_placeholders": len(remaining),
+        "remaining_special_placeholders": len(remaining_special),
+        "remaining_legacy_artifacts": len(remaining_legacy),
+        "template_numeric_ids": len(template_ids),
+        "template_slides": len(presentation.slides),
     }
 
 

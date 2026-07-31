@@ -45,6 +45,7 @@ _PROGRESS_MESSAGES: dict[str, str] = {
     "tiktok_acquire": "🔍 TikTok の動画を取得しています…",
     "proposal_draft": "📝 提案を作成しています…",
     "proposal_deck": "📝 提案資料を作成しています…",
+    "proposal_builder": "📝 提案書を生成・検証しています（少し時間がかかります）…",
     "run_agent": "⏳ 調べています…",
 }
 

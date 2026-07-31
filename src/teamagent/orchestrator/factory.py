@@ -272,6 +272,25 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # proposal_builder: Gemini v3 JSON + 投稿開始日D → RAG事例/保護アカウント選定 →
+    # 既存proposal_deck 95枠 → 統合FMT → 検証済みSlack添付。**既定 OFF**
+    # USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED=1 は、代表143MB級で共有deadline内の
+    # render+Slack uploadを実測済みであるという運用attestation。未実測の同期副作用を
+    # OpenClawへ露出しない。
+    if _envflag("USE_PROPOSAL_BUILDER_TOOLS") and _envflag(
+        "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED"
+    ):
+        from teamagent.skills.proposal_builder.skill import ProposalBuilderSkill
+
+        specs.append(
+            ToolSpec(
+                ProposalBuilderSkill.name,
+                ProposalBuilderSkill.description,
+                ProposalBuilderSkill,
+                factory=lambda: ProposalBuilderSkill(search=search),
+            )
+        )
+
     # proposal_campaign: KW群 → 並列で TikTok 1位の実物サムネ → {58-92}枠の evidence_images。
     # **既定 OFF**（USE_PROPOSAL_CAMPAIGN_TOOLS=1 で opt-in）。video_algorithm と同列の取得系で、
     # 並列検索/サムネ取得/正規化は skill 内 ThreadPool に閉じる（OC は 1 回呼ぶだけ）。OC 露出は
