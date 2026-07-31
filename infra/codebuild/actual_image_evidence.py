@@ -660,7 +660,10 @@ def create_subject(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser()
+    # Abbreviations are refused: a caller that passed --subject had it silently
+    # bound to --subject-referrers by prefix matching, so the real value was
+    # discarded and the failure surfaced as an unrelated missing --name.
+    parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--pipeline", choices=sorted(PIPELINES), required=True)
     parser.add_argument(
         "--channel",

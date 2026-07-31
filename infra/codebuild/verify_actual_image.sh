@@ -485,7 +485,7 @@ fi
 python3 "$EVIDENCE_HELPER" \
   --pipeline "$PIPELINE" \
   --channel "$PROMOTION_CHANNEL" \
-  --subject "$SUBJECT_NAME" \
+  --name "$SUBJECT_NAME" \
   --quarantine-repository "$QUARANTINE_REPOSITORY" \
   --candidate-repository "$CANDIDATE_REPOSITORY" \
   --release-repository "$RELEASE_REPOSITORY" \
