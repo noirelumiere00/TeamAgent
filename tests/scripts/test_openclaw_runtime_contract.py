@@ -213,10 +213,22 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         lock["runtime"]["linuxArm64Digest"],
     ]
     from_lines = re.findall(r"^FROM\s+(.+)$", dockerfile, flags=re.MULTILINE)
+    # The list stays exact so an unpinned or unexpected base cannot be added
+    # unnoticed. upstream-templates is the same pinned digest as upstream, kept
+    # unpruned so the workspace templates the runtime reads can be copied from
+    # it; the pruning stage deletes /app/src.
     assert from_lines == [
+        "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream-templates",
         "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream",
         "gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime",
     ]
+    # Every workspace template directory the runtime resolves must ship, or the
+    # gateway starts healthy and then fails on the first message.
+    for template_dir in ("/app/src/agents/templates", "/app/docs/reference/templates"):
+        assert (
+            f"COPY --from=upstream-templates --chown=65532:65532 \\\n"
+            f"  {template_dir} {template_dir}\n"
+        ) in dockerfile
     add_artifacts = {
         url: checksum
         for checksum, url in re.findall(
