@@ -50,9 +50,7 @@ SLACK_CANARY_SKIP_REASON_CODES = [
     "slack_self_authored_message_filtered",
     "aila_prompt_injection_defense_rejected_canary",
 ]
-SLACK_CANARY_TOKEN_SHA256 = (
-    "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
-)
+SLACK_CANARY_TOKEN_SHA256 = "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
 
 
 def _strip_json5_comments(source: str) -> str:
@@ -794,9 +792,7 @@ def test_blocked_bundle_interface_stops_before_output_or_external_work(
 
     manifest = tmp_path / "bundle.json"
     try:
-        TRUST_CONTRACT.write_text(
-            json.dumps(blocked_contract, indent=2) + "\n", encoding="utf-8"
-        )
+        TRUST_CONTRACT.write_text(json.dumps(blocked_contract, indent=2) + "\n", encoding="utf-8")
         completed = subprocess.run(
             [
                 "bash",
@@ -1604,9 +1600,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     mutations.append(("skipped Slack canary claims a log correlation", changed))
     changed = copy.deepcopy(fixture)
     del changed["slack"]["candidateLogCorrelation"]
-    mutations.append(
-        ("skipped Slack canary omits the explicit null correlation", changed)
-    )
+    mutations.append(("skipped Slack canary omits the explicit null correlation", changed))
     changed = copy.deepcopy(fixture)
     changed["slack"]["postedTs"] = active_slack["postedTs"]
     mutations.append(("skipped Slack canary carries active-only evidence", changed))
@@ -1628,9 +1622,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     mutations.append(("active Slack log token does not bind the reply", changed))
     changed = copy.deepcopy(active_fixture)
     changed["slack"]["candidateLogCorrelation"]["eventTimestamp"] = 1784420061201
-    mutations.append(
-        ("active Slack log event falls outside the reply window", changed)
-    )
+    mutations.append(("active Slack log event falls outside the reply window", changed))
     changed = copy.deepcopy(active_fixture)
     changed["slack"]["skipped"] = "invalid"
     mutations.append(("active Slack canary uses an invalid skipped claim", changed))
@@ -1760,9 +1752,7 @@ def test_rollout_gate_contract_is_fail_closed_without_provider_calls(
     ):
         assert skipped_canary_contract in rollout
     live_rollout = rollout[
-        rollout.index("async function runLive") : rollout.index(
-            "async function runRestore"
-        )
+        rollout.index("async function runLive") : rollout.index("async function runRestore")
     ]
     for removed_provider_call in (
         "verifySlackMentionReply(",
