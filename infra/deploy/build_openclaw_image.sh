@@ -274,7 +274,11 @@ OBJECT_LOCK="$(
     --region "$REGION" \
     --bucket "$EVIDENCE_BUCKET" \
     --expected-bucket-owner "$EXPECTED_ACCOUNT_ID" \
-    --query '[ObjectLockEnabled,Rule.DefaultRetention.Mode,Rule.DefaultRetention.Days]' \
+    --query '[
+      ObjectLockConfiguration.ObjectLockEnabled,
+      ObjectLockConfiguration.Rule.DefaultRetention.Mode,
+      ObjectLockConfiguration.Rule.DefaultRetention.Days
+    ]' \
     --output text
 )"
 [[ "$OBJECT_LOCK" != *$'\n'* && "$OBJECT_LOCK" != *$'\r'* ]] \
