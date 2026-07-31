@@ -353,7 +353,9 @@ def validate_contract(value: Any, *, label: str = "OpenClaw bundle contract") ->
     if normalized_referrers != expected_referrers:
         raise ContractError(f"{label} referrer allowlist is not exact")
     signature_type = bundle["signature_artifact_type"]
-    if signature_type != "application/vnd.dev.cosign.simplesigning.v1+json":
+    # cosign 3.x signs with the sigstore bundle envelope and offers no flag to
+    # emit the older simplesigning type, so the contract declares that format.
+    if signature_type != "application/vnd.dev.sigstore.bundle.v0.3+json":
         raise ContractError(f"{label} signature artifact type is not fixed")
     scan_gate = bundle["scan_gate"]
     if not isinstance(scan_gate, dict):

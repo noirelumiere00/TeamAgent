@@ -47,6 +47,9 @@ _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 _PATH_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_./+-]{0,511}")
 _KEY_ARN_RE = re.compile(rf"arn:aws:kms:{REGION}:{ACCOUNT_ID}:key/[0-9a-f-]{{36}}")
 _COSIGN_SIGNATURE_ARTIFACT_TYPES = {
+    # cosign 3.x emits the sigstore bundle envelope; the older types stay
+    # accepted so signatures produced by earlier cosign releases still verify.
+    "application/vnd.dev.sigstore.bundle.v0.3+json",
     "application/vnd.dev.cosign.simplesigning.v1+json",
     "application/vnd.dsse.envelope.v1+json",
 }

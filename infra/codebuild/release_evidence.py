@@ -139,6 +139,9 @@ REFERRER_ARTIFACT_TYPES = {
     "provenance": "application/vnd.in-toto+json",
 }
 SIGNATURE_ARTIFACT_TYPES = {
+    # cosign 3.x emits the sigstore bundle envelope; the two older types stay
+    # accepted so signatures produced by earlier cosign releases still verify.
+    "application/vnd.dev.sigstore.bundle.v0.3+json",
     "application/vnd.dev.cosign.simplesigning.v1+json",
     "application/vnd.dsse.envelope.v1+json",
 }
@@ -1150,9 +1153,7 @@ def validate_release_receipt(
         ):
             raise EvidenceError(f"{label} repositories do not match the allowlist")
         tag_suffix = subject_tag_suffix(pipeline, name, len(expected_subjects))
-        candidate_tag = (
-            commit if pipeline == "tiktok" else f"candidate-{commit}{tag_suffix}"
-        )
+        candidate_tag = commit if pipeline == "tiktok" else f"candidate-{commit}{tag_suffix}"
         if subject["candidate_tag"] != candidate_tag:
             raise EvidenceError(f"{label}.candidate_tag must use the full source commit")
         expected_tag = _expected_tag(

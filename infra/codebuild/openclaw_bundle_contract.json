@@ -58,7 +58,7 @@
         "signature_required": true
       }
     ],
-    "signature_artifact_type": "application/vnd.dev.cosign.simplesigning.v1+json",
+    "signature_artifact_type": "application/vnd.dev.sigstore.bundle.v0.3+json",
     "scan_gate": {
       "critical": 0,
       "high": 0

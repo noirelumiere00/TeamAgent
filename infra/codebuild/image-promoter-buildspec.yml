@@ -509,7 +509,8 @@ phases:
               ) and
               ([.referrers[] | select(
                 .digest == $image_signature and
-                (.artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
+                (.artifactType == "application/vnd.dev.sigstore.bundle.v0.3+json" or
+                 .artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
                  .artifactType == "application/vnd.dsse.envelope.v1+json") and
                 .artifactStatus == "ACTIVE"
               )] | length) == 1
@@ -532,7 +533,8 @@ phases:
               (.nextToken == null) and
               ([.referrers[] | select(
                 .digest == $signature and
-                (.artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
+                (.artifactType == "application/vnd.dev.sigstore.bundle.v0.3+json" or
+                 .artifactType == "application/vnd.dev.cosign.simplesigning.v1+json" or
                  .artifactType == "application/vnd.dsse.envelope.v1+json") and
                 .artifactStatus == "ACTIVE"
               )] | length) == 1
