@@ -377,7 +377,7 @@
           "build_arg": "CHROMIUM_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.chromium-package-version",
           "dockerfile_uses": [
-            "test \"$(apk info -v chromium)\" = \"chromium-$CHROMIUM_PACKAGE_VERSION\""
+            "test \"$(apk list --installed chromium 2>/dev/null | awk 'NR==1{print $1}')\" = \"chromium-$CHROMIUM_PACKAGE_VERSION\""
           ]
         },
         {
