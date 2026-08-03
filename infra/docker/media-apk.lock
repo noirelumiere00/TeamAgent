@@ -66,7 +66,7 @@ harfbuzz-subset-13.2.1-r0
 hwdata-pci-0.408-r0
 icu-data-full-78.1-r0
 icu-libs-78.1-r0
-json-c-0.19-r0
+json-c-0.19-r1
 lame-libs-3.100-r5
 lcms2-2.19-r0
 libSvtAv1Enc-4.1.0-r0
@@ -183,8 +183,8 @@ musl-1.2.6-r2
 musl-utils-1.2.6-r2
 ncurses-terminfo-base-6.6_p20260516-r0
 nettle-3.10.2-r0
-nghttp2-libs-1.69.0-r0
-nodejs-24.18.0-r0
+nghttp2-libs-1.70.0-r0
+nodejs-24.18.1-r0
 nspr-4.38.2-r0
 nss-3.124-r0
 numactl-2.0.19-r0

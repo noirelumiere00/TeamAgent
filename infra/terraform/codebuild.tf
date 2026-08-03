@@ -541,7 +541,7 @@ resource "aws_codebuild_project" "image" {
     # 他 3 プロジェクトと同じ content-addressed S3 参照へ移行（2026-08-03 CLI 反映済み）。
     # TODO: runtime guard 解除後に aws_s3_object 管理へ取り込み、key を
     # sha256(local.image_builder_buildspec) 導出に置き換える。
-    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.main_codebuild_project_name}/77e53cde0281ffc3324aa375db1e4bef15bae56b450994f71950ca17bec949cb.yml"
+    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.main_codebuild_project_name}/37fe24aa645f5a8a8878e844bdacc984e164ed9f199439d4ebe83c4299bc2976.yml"
   }
 
   logs_config {
