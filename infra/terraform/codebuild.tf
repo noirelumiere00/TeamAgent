@@ -2963,6 +2963,20 @@ data "aws_iam_policy_document" "image_promoter" {
     resources = [aws_kms_key.image_release_evidence.arn]
   }
   statement {
+    # 初実走で露見: promoterはsource declarationの実在検証(head/get)と
+    # publisher署名のkms verifyを行うが、どちらの権限も未定義だった
+    sid     = "ReadImmutableSourceDeclarations"
+    actions = ["s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectVersion"]
+    resources = [
+      "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
+    ]
+  }
+  statement {
+    sid       = "VerifySourcePublisherSignature"
+    actions   = ["kms:Verify", "kms:DescribeKey"]
+    resources = [aws_kms_key.mcp_source_publisher_signing.arn]
+  }
+  statement {
     sid       = "VerifyAttestorReceiptSignature"
     actions   = ["kms:DescribeKey", "kms:GetPublicKey", "kms:Verify"]
     resources = [aws_kms_key.image_attestor_signing.arn]
