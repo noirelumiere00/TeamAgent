@@ -415,6 +415,8 @@ data "aws_iam_policy_document" "codebuild" {
       "${aws_s3_bucket.raw_files.arn}/codebuild/baked-fallback/connect-web-app.html",
       "${aws_s3_bucket.image_release_evidence.arn}/source-declarations/mcp/*",
       "${aws_s3_bucket.image_release_evidence.arn}/source-contexts/mcp/*",
+      # builder buildspec は inline 上限(25,600字)超過のため content-addressed S3 参照
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/teamagent-dev-image-builder/*",
     ]
   }
   statement {
@@ -526,9 +528,14 @@ resource "aws_codebuild_project" "image" {
   }
 
   source {
-    type      = "S3"
-    location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
-    buildspec = local.image_builder_buildspec
+    type     = "S3"
+    location = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"
+    # inline buildspec は CodeBuild 上限 25,600 字（実測 InvalidInputException）で、
+    # レンダリング済み local.image_builder_buildspec は 36,991 字のため適用不能。
+    # 他 3 プロジェクトと同じ content-addressed S3 参照へ移行（2026-08-03 CLI 反映済み）。
+    # TODO: runtime guard 解除後に aws_s3_object 管理へ取り込み、key を
+    # sha256(local.image_builder_buildspec) 導出に置き換える。
+    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.main_codebuild_project_name}/68189efd142b6a433ec0e204b7af05818af51290a80025c31f7fa7e98f528a14.yml"
   }
 
   logs_config {
