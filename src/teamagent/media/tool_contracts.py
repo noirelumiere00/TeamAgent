@@ -470,7 +470,12 @@ def _parse_control(encoded: bytes) -> ToolControl:
     if control["schema_version"] != "1":
         raise ToolControlError("media control schema version is unsupported")
     try:
-        request = MediaJobRequest.model_validate(control["request"])
+        # control は dispatcher が JSON で運ぶ署名済み封筒。JSON に tuple は
+        # 存在しないため、strict モデルのままだと tuple フィールド
+        # (keywords/competitors 等) が list 入力で必ず落ちる（実測: 初回
+        # e2e で ValidationError tuple_type）。型・形状検証は維持しつつ
+        # JSON 由来の等価コンテナを受けるため、この境界のみ lax で検証する。
+        request = MediaJobRequest.model_validate(control["request"], strict=False)
     except Exception as exc:
         raise ToolControlError("media control request is invalid") from exc
     attempt_id = control["attempt_id"]
