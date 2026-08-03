@@ -7,7 +7,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "3a19e1e0cc53852f6292af2462d94e0e3f5e48aad678dd8eb66ee676a968cb38"
+    "sha256": "b554500b56419162cb083b8faea1a51706017777a88c3dd8e12fa60f7e4abb34"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -75,7 +75,7 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
-          "sha256": "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
+          "sha256": "0c4cd49d2c023a1f0325489c610e37c5ad3756fdf6e31f715ac9eabaeecbeba7"
         }
       ],
       "source_assertions": []
@@ -201,7 +201,7 @@
         },
         {
           "key": "artifact.yt-dlp-sanitized-tree.sha256",
-          "value": "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b",
+          "value": "32a2d7849c3897ae7c28c3e17853b10e3b74a0d280808177c20407496d52e817",
           "build_arg": "YTDLP_SANITIZED_TREE_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-sanitized-tree-sha256",
           "dockerfile_uses": [
@@ -219,7 +219,7 @@
         },
         {
           "key": "artifact.yt-dlp-sdist.sha256",
-          "value": "d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86",
+          "value": "b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432",
           "build_arg": "YTDLP_SDIST_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-sdist-sha256",
           "dockerfile_uses": [
@@ -228,7 +228,7 @@
         },
         {
           "key": "artifact.yt-dlp-wheel.sha256",
-          "value": "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
+          "value": "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
           "build_arg": "YTDLP_WHEEL_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-wheel-sha256",
           "dockerfile_uses": [
@@ -364,7 +364,7 @@
         },
         {
           "key": "component.yt-dlp.version",
-          "value": "2026.6.9",
+          "value": "2026.7.4",
           "build_arg": "YTDLP_VERSION",
           "oci_label": "io.teamagent.contract.yt-dlp-version",
           "dockerfile_uses": [
