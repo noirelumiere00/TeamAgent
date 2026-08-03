@@ -420,6 +420,12 @@ data "aws_iam_policy_document" "codebuild" {
     ]
   }
   statement {
+    # Docker Hub 429対策: chromiumベースはdigest保存ミラー(teamagent-mirror/)から取得
+    sid     = "PullChromiumBaseMirror"
+    actions = ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"]
+    resources = ["arn:aws:ecr:ap-northeast-1:718959508629:repository/teamagent-mirror/chromium-headless"]
+  }
+  statement {
     sid       = "DecryptAndVerifySignedMcpSource"
     actions   = ["kms:Decrypt", "kms:DescribeKey"]
     resources = [aws_kms_key.image_release_evidence.arn]
@@ -535,7 +541,7 @@ resource "aws_codebuild_project" "image" {
     # 他 3 プロジェクトと同じ content-addressed S3 参照へ移行（2026-08-03 CLI 反映済み）。
     # TODO: runtime guard 解除後に aws_s3_object 管理へ取り込み、key を
     # sha256(local.image_builder_buildspec) 導出に置き換える。
-    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.main_codebuild_project_name}/de123a8444076d90941f50f8cfb419c47e7ef82cb5db419014f71b8c77e8e889.yml"
+    buildspec = "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.main_codebuild_project_name}/1cc7536aca676433fe8726841ccf6e02def786983814d3ee57cedd696c6bb43c.yml"
   }
 
   logs_config {

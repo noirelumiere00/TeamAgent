@@ -51,7 +51,7 @@ FROM ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST} AS uv
 # Chromium is an official Alpine package in this pinned arm64 child. The
 # upstream child carries SLSA provenance and the full apk database. We retain
 # that database and generate our own final package inventory/SBOM.
-FROM akorn/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST} AS runtime-packages
+FROM 718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mirror/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST} AS runtime-packages
 USER 0
 
 ARG ALPINE_EDGE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
