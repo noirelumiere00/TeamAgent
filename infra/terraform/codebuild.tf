@@ -147,6 +147,19 @@ locals {
     "RECEIPT_SIGNATURE_KEY",
     "RECEIPT_SIGNATURE_VERSION_ID",
   ]
+  # 承認ロケータ: build_teamagent_image.sh が4段全部へ渡す。値の真正性は各buildspecが
+  # KMS署名検証で確定するため、ここでは名前のみ許可（値pinは署名検証と重複）。
+  approval_locator_environment_names = [
+    "APPROVAL_PAYLOAD_BUCKET",
+    "APPROVAL_PAYLOAD_KEY",
+    "APPROVAL_PAYLOAD_VERSION_ID",
+    "APPROVAL_PAYLOAD_SHA256",
+    "APPROVAL_SIGNATURE_BUCKET",
+    "APPROVAL_SIGNATURE_KEY",
+    "APPROVAL_SIGNATURE_VERSION_ID",
+    "APPROVAL_SIGNATURE_SHA256",
+    "APPROVAL_SIGNING_KEY_ARN",
+  ]
   tiktok_image_environment_names = [
     "GIT_COMMIT",
     "GIT_BRANCH",
@@ -623,7 +636,7 @@ data "aws_iam_policy_document" "codebuild_launcher_core" {
     condition {
       test     = "ForAllValues:StringEquals"
       variable = "codebuild:environment.environmentVariables.name"
-      values   = local.launcher_environment_names
+      values   = concat(local.launcher_environment_names, local.approval_locator_environment_names)
     }
     dynamic "condition" {
       for_each = local.launcher_fixed_environment_values
@@ -651,7 +664,7 @@ data "aws_iam_policy_document" "codebuild_launcher_core" {
     condition {
       test     = "ForAllValues:StringEquals"
       variable = "codebuild:environment.environmentVariables.name"
-      values   = local.source_publisher_environment_names
+      values   = concat(local.source_publisher_environment_names, local.approval_locator_environment_names)
     }
     condition {
       test     = "ForAllValues:StringEquals"
@@ -676,7 +689,7 @@ data "aws_iam_policy_document" "codebuild_launcher_core" {
     condition {
       test     = "ForAllValues:StringEquals"
       variable = "codebuild:environment.environmentVariables.name"
-      values   = local.attestor_environment_names
+      values   = concat(local.attestor_environment_names, local.approval_locator_environment_names)
     }
     condition {
       test     = "ForAllValues:StringEquals"
@@ -701,7 +714,7 @@ data "aws_iam_policy_document" "codebuild_launcher_core" {
     condition {
       test     = "ForAllValues:StringEquals"
       variable = "codebuild:environment.environmentVariables.name"
-      values   = local.promoter_environment_names
+      values   = concat(local.promoter_environment_names, local.approval_locator_environment_names)
     }
     condition {
       test     = "ForAllValues:StringEquals"
