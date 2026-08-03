@@ -118,7 +118,7 @@
         {
           "key": "binary.node.sha256",
           "path": "/usr/bin/node",
-          "sha256": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1"
+          "sha256": "b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2"
         },
         {
           "key": "binary.python.sha256",
@@ -283,7 +283,7 @@
         },
         {
           "key": "binary.node.sha256",
-          "value": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1",
+          "value": "b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2",
           "build_arg": "NODE_BINARY_SHA256",
           "oci_label": "io.teamagent.contract.node-binary-sha256",
           "dockerfile_uses": [
@@ -328,7 +328,7 @@
         },
         {
           "key": "component.node.version",
-          "value": "24.18.0",
+          "value": "24.18.1",
           "build_arg": "NODE_VERSION",
           "oci_label": "io.teamagent.contract.node-version",
           "dockerfile_uses": [
@@ -391,7 +391,7 @@
         },
         {
           "key": "package.node.version",
-          "value": "24.18.0-r0",
+          "value": "24.18.1-r0",
           "build_arg": "NODE_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.node-package-version",
           "dockerfile_uses": [
