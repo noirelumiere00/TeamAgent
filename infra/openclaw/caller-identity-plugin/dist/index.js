@@ -744,13 +744,29 @@ export function createCallerIdentityPlugin({
       }
       return;
     }
+    // Production measurement (2026-08-03): for a DM the two sides name the same
+    // conversation differently. The inbound event only ever carries the peer
+    // (`user:U…` → stored as `DM:U…`), while the agent-run ctx carries the real
+    // DM channel id (`D…`). Both are valid names for the identical 1:1
+    // conversation, so treat `D…` as equivalent to `DM:<senderId>` — and only
+    // for the sender that every other check already pins. A cross-user or
+    // cross-channel forgery still fails on senderId / sessionKey.
+    const dmAlias =
+      /^D[A-Z0-9]{8,}$/u.test(channelId) ? `DM:${senderId}` : null;
+    const channelMatches = value =>
+      value === channelId || (dmAlias !== null && value === dmAlias);
     const candidates = [...pendingByMessage.values()].filter(
       ingress =>
         ingress.sessionKey === sessionKey &&
         ingress.senderId === senderId &&
-        ingress.channelId === channelId &&
+        channelMatches(ingress.channelId) &&
         nowMs - ingress.receivedAtMs <= INBOUND_CONTEXT_TTL_MS,
     );
+    if (candidates.length === 1 && candidates[0].channelId !== channelId) {
+      // Remember the run-side name too, so the tool gate can accept either
+      // representation without re-deriving the sender-based alias.
+      candidates[0].channelAliases = [candidates[0].channelId, channelId];
+    }
     if (candidates.length !== 1 || !bindRun(runId, candidates[0])) {
       rejectRun(runId, nowMs, candidates.length === 1 ? candidates[0] : null);
       // Distinguish "no inbound was ever recorded" (the usual downstream effect
@@ -858,10 +874,11 @@ export function createCallerIdentityPlugin({
     if (!trusted || nowMs - trusted.receivedAtMs > trustedTtl) {
       return block("trusted Slack run identity is missing or stale");
     }
-    if (
-      trusted.sessionKey !== sessionKey ||
-      trusted.channelId !== channelId
-    ) {
+    const trustedChannelMatches =
+      trusted.channelId === channelId ||
+      (Array.isArray(trusted.channelAliases) &&
+        trusted.channelAliases.includes(channelId));
+    if (!trusted.sessionKey || trusted.sessionKey !== sessionKey || !trustedChannelMatches) {
       return block("tool context does not match the bound Slack run");
     }
     const exactInvocationKey = invocationKey(eventRunId, eventToolCallId);
