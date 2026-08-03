@@ -464,10 +464,35 @@ phases:
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
         docker buildx version
         docker buildx inspect --bootstrap >/dev/null
+        # CodeBuild のフェーズ境界は export 値を落とすことがある（実測: build 冒頭で
+        # APPROVAL_EVIDENCE_JSON が空になり jq -er が無言で exit 1）。エージェントの
+        # 持越しに依存せず /tmp 経由で明示的に受け渡す。
+        {
+          printf 'export APPROVAL_EVIDENCE_JSON=%q\n' "$APPROVAL_EVIDENCE_JSON"
+          printf 'export CONTEXT_VERIFY_DIR=%q\n' "$CONTEXT_VERIFY_DIR"
+          printf 'export BUILD_CONTEXT_TAR=%q\n' "$BUILD_CONTEXT_TAR"
+          printf 'export BUILD_CONTEXT_SHA256=%q\n' "$BUILD_CONTEXT_SHA256"
+          printf 'export CORE_QUARANTINE_REPOSITORY=%q\n' "$CORE_QUARANTINE_REPOSITORY"
+          printf 'export MEDIA_QUARANTINE_REPOSITORY=%q\n' "$MEDIA_QUARANTINE_REPOSITORY"
+          printf 'export ECR_REGISTRY=%q\n' "$ECR_REGISTRY"
+          printf 'export EXPECTED_REGION=%q\n' "$EXPECTED_REGION"
+          printf 'export EXPECTED_ACCOUNT_ID=%q\n' "$EXPECTED_ACCOUNT_ID"
+          printf 'export RELEASE_CONTRACT=%q\n' "$RELEASE_CONTRACT"
+        } > /tmp/teamagent-cross-phase.env
   build:
     commands:
       - |
         set -euo pipefail
+        # フェーズ境界の env 消失対策: pre_build の /tmp 受け渡しを正とし、欠落は即死
+        [ -s /tmp/teamagent-cross-phase.env ] \
+          || { echo "FATAL: cross-phase environment handoff file is missing"; exit 1; }
+        . /tmp/teamagent-cross-phase.env
+        : "${APPROVAL_EVIDENCE_JSON:?FATAL: approval evidence lost at phase boundary}"
+        : "${CONTEXT_VERIFY_DIR:?FATAL: canonical context dir lost at phase boundary}"
+        : "${BUILD_CONTEXT_TAR:?FATAL: canonical context tar lost at phase boundary}"
+        : "${BUILD_CONTEXT_SHA256:?FATAL: canonical context sha lost at phase boundary}"
+        : "${CORE_QUARANTINE_REPOSITORY:?FATAL: core quarantine repo lost at phase boundary}"
+        : "${MEDIA_QUARANTINE_REPOSITORY:?FATAL: media quarantine repo lost at phase boundary}"
         CORE_TAG="candidate-$GIT_COMMIT-core"
         MEDIA_TAG="candidate-$GIT_COMMIT-media"
         RELEASE_APPROVAL_SHA256="$(
@@ -543,12 +568,23 @@ phases:
           - <"$BUILD_CONTEXT_TAR"
         [ "$(sha256sum "$BUILD_CONTEXT_TAR" | awk '{print $1}')" = "$BUILD_CONTEXT_SHA256" ] \
           || { echo "FATAL: canonical context changed during dual build"; exit 1; }
+        printf 'export RELEASE_APPROVAL_SHA256=%q\n' "$RELEASE_APPROVAL_SHA256" \
+          >> /tmp/teamagent-cross-phase.env
   post_build:
     commands:
       - |
         set -euo pipefail
         [ "${CODEBUILD_BUILD_SUCCEEDING:-0}" = "1" ] \
           || { echo "FATAL: core/media build failed before the quarantine gate"; exit 1; }
+        # フェーズ境界の env 消失対策（build 冒頭と同一機構）
+        [ -s /tmp/teamagent-cross-phase.env ] \
+          || { echo "FATAL: cross-phase environment handoff file is missing"; exit 1; }
+        . /tmp/teamagent-cross-phase.env
+        : "${RELEASE_APPROVAL_SHA256:?FATAL: release approval sha lost at phase boundary}"
+        : "${EXPECTED_REGION:?FATAL: expected region lost at phase boundary}"
+        : "${EXPECTED_ACCOUNT_ID:?FATAL: expected account lost at phase boundary}"
+        : "${RELEASE_CONTRACT:?FATAL: release contract path lost at phase boundary}"
+        : "${BUILD_CONTEXT_SHA256:?FATAL: canonical context sha lost at phase boundary}"
         for subject in core media; do
           case "$subject" in
             core)
