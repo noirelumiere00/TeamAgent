@@ -1196,15 +1196,24 @@ def validate_release_receipt(
         for label_name, label_value in labels.items():
             if not isinstance(label_name, str) or not _LABEL_RE.fullmatch(label_name):
                 raise EvidenceError(f"{label}.labels contains an invalid OCI label")
-            normalized_label_value = _string(
-                label_value,
-                label=f"{label}.labels[{label_name}]",
-                maximum=8192,
-            )
-            if label_name.startswith("io.teamagent.") and (
-                normalized_label_value.strip().lower() in _UNTRUSTED_LABEL_VALUES
-            ):
-                raise EvidenceError(f"{label}.labels[{label_name}] uses an untrusted placeholder")
+            # 非空・プレースホルダ禁止は自前契約ラベルに限定する。digest固定の上流
+            # ベース(chainguard python が dev.chainguard.package.main='' を同梱)の
+            # 継承ラベルまで対象にすると原理的に通らない検査になる（実測）。
+            if label_name.startswith("io.teamagent."):
+                normalized_label_value = _string(
+                    label_value,
+                    label=f"{label}.labels[{label_name}]",
+                    maximum=8192,
+                )
+                if normalized_label_value.strip().lower() in _UNTRUSTED_LABEL_VALUES:
+                    raise EvidenceError(
+                        f"{label}.labels[{label_name}] uses an untrusted placeholder"
+                    )
+            else:
+                if not isinstance(label_value, str) or len(label_value) > 8192:
+                    raise EvidenceError(
+                        f"{label}.labels[{label_name}] must be a string within 8192 chars"
+                    )
         if labels.get("org.opencontainers.image.revision") != commit:
             raise EvidenceError(f"{label} OCI revision does not match the full commit")
         contract_label = pipeline_contract["contract_label"]
