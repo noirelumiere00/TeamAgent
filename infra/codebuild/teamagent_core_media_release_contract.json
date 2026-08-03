@@ -122,7 +122,7 @@
         },
         {
           "key": "binary.python.sha256",
-          "path": "/usr/bin/python3.14",
+          "path": "/usr/bin/python3",
           "sha256": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
         }
       ],

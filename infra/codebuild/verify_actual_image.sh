@@ -242,7 +242,9 @@ while IFS=$'\t' read -r BINARY_PATH EXPECTED_BINARY_SHA256; do
     || die "unsafe binary probe path"
   [[ "$EXPECTED_BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "invalid expected binary hash"
   LOCAL_BINARY="$TMP_DIR/binary-${#BINARY_PATH}-$(printf '%s' "$BINARY_PATH" | sha256sum | cut -c1-16)"
-  docker cp "$CONTAINER_NAME:$BINARY_PATH" "$LOCAL_BINARY" >/dev/null
+  # -L: alpineの/usr/bin/python3等のsymlinkプローブを実体へ追従してコピーする
+  # （素のcpはリンクのままコピーし宙吊りでsha256sum必発失敗・実測）
+  docker cp -L "$CONTAINER_NAME:$BINARY_PATH" "$LOCAL_BINARY" >/dev/null
   ACTUAL_BINARY_SHA256="$(sha256sum "$LOCAL_BINARY" | awk '{print $1}')"
   [ "$ACTUAL_BINARY_SHA256" = "$EXPECTED_BINARY_SHA256" ] \
     || die "actual-image binary hash mismatch: $BINARY_PATH"
