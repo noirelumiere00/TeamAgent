@@ -550,7 +550,7 @@ phases:
         docker buildx build \
           --builder teamagent-mcp-builder \
           --platform linux/arm64 \
-          --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-mcp" \
+          --file infra/docker/Dockerfile.teamagent-mcp \
           --target final \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
@@ -580,7 +580,7 @@ phases:
         docker buildx build \
           --builder teamagent-mcp-builder \
           --platform linux/arm64 \
-          --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker" \
+          --file infra/docker/Dockerfile.teamagent-media-worker \
           --target final \
           --build-arg "GIT_COMMIT=$GIT_COMMIT" \
           --build-arg "GIT_BRANCH=$GIT_BRANCH" \
