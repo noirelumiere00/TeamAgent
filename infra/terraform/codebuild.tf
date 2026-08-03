@@ -624,108 +624,9 @@ data "aws_iam_policy_document" "codebuild_launcher_core" {
     ]
   }
   statement {
-    sid       = "StartExactProvenanceBuild"
-    actions   = ["codebuild:StartBuild"]
-    resources = [local.launcher_project_arn]
-
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = concat(local.launcher_environment_names, local.approval_locator_environment_names)
-    }
-    dynamic "condition" {
-      for_each = local.launcher_fixed_environment_values
-      content {
-        test     = "ForAllValues:StringEquals"
-        variable = "codebuild:environment.environmentVariables/${condition.key}.value"
-        values   = [condition.value]
-      }
-    }
-  }
-  statement {
     sid       = "PollExactProvenanceBuild"
     actions   = ["codebuild:BatchGetBuilds"]
     resources = local.launcher_all_project_arns
-  }
-  statement {
-    sid       = "StartIndependentSourcePublisher"
-    actions   = ["codebuild:StartBuild"]
-    resources = [local.launcher_all_project_arns[1]]
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = concat(local.source_publisher_environment_names, local.approval_locator_environment_names)
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/SOURCE_MANIFEST_CONTRACT_SHA256.value"
-      values   = [local.runtime_contract_sha256]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/RELEASE_CONTRACT_SHA256.value"
-      values   = [local.mcp_release_contract_sha256]
-    }
-  }
-  statement {
-    sid       = "StartSourceFreeAttestor"
-    actions   = ["codebuild:StartBuild"]
-    resources = [local.launcher_all_project_arns[2]]
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = concat(local.attestor_environment_names, local.approval_locator_environment_names)
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
-      values   = ["mcp"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
-      values   = ["verified-candidate"]
-    }
-  }
-  statement {
-    sid       = "StartSourceFreePromoter"
-    actions   = ["codebuild:StartBuild"]
-    resources = [local.launcher_all_project_arns[3]]
-    condition {
-      test     = "Null"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = ["false"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables.name"
-      values   = concat(local.promoter_environment_names, local.approval_locator_environment_names)
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
-      values   = ["mcp"]
-    }
-    condition {
-      test     = "ForAllValues:StringEquals"
-      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
-      values   = ["verified-candidate"]
-    }
   }
 }
 
@@ -902,6 +803,126 @@ resource "aws_iam_role_policy_attachment" "codebuild_launcher_manage_b" {
 resource "aws_iam_role_policy_attachment" "codebuild_launcher_guardrails" {
   role       = aws_iam_role.codebuild_launcher.name
   policy_arn = aws_iam_policy.codebuild_launcher_guardrails.arn
+}
+
+# Start系4文は名前allow-list拡張で6,144字上限を超えるため core から分離。
+data "aws_iam_policy_document" "codebuild_launcher_start" {
+  statement {
+    sid       = "StartExactProvenanceBuild"
+    actions   = ["codebuild:StartBuild"]
+    resources = [local.launcher_project_arn]
+
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = concat(local.launcher_environment_names, local.approval_locator_environment_names)
+    }
+    dynamic "condition" {
+      for_each = local.launcher_fixed_environment_values
+      content {
+        test     = "ForAllValues:StringEquals"
+        variable = "codebuild:environment.environmentVariables/${condition.key}.value"
+        values   = [condition.value]
+      }
+    }
+  }
+  statement {
+    sid       = "StartIndependentSourcePublisher"
+    actions   = ["codebuild:StartBuild"]
+    resources = [local.launcher_all_project_arns[1]]
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = concat(local.source_publisher_environment_names, local.approval_locator_environment_names)
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/SOURCE_MANIFEST_CONTRACT_SHA256.value"
+      values   = [local.runtime_contract_sha256]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/RELEASE_CONTRACT_SHA256.value"
+      values   = [local.mcp_release_contract_sha256]
+    }
+  }
+  statement {
+    sid       = "StartSourceFreeAttestor"
+    actions   = ["codebuild:StartBuild"]
+    resources = [local.launcher_all_project_arns[2]]
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = concat(local.attestor_environment_names, local.approval_locator_environment_names)
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
+      values   = ["mcp"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
+      values   = ["verified-candidate"]
+    }
+  }
+  statement {
+    sid       = "StartSourceFreePromoter"
+    actions   = ["codebuild:StartBuild"]
+    resources = [local.launcher_all_project_arns[3]]
+    condition {
+      test     = "Null"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables.name"
+      values   = concat(local.promoter_environment_names, local.approval_locator_environment_names)
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PIPELINE.value"
+      values   = ["mcp"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "codebuild:environment.environmentVariables/PROMOTION_CHANNEL.value"
+      values   = ["verified-candidate"]
+    }
+  }
+}
+
+resource "aws_iam_policy" "codebuild_launcher_start" {
+  name   = "${local.launcher_role_name}-start"
+  policy = data.aws_iam_policy_document.codebuild_launcher_start.json
+
+  lifecycle {
+    precondition {
+      condition     = length(replace(data.aws_iam_policy_document.codebuild_launcher_start.json, "/\\s/", "")) < 6144
+      error_message = "CodeBuild launcher start policy must remain below 6,144 non-whitespace characters (AWS ignores whitespace when measuring IAM policy size)."
+    }
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "codebuild_launcher_start" {
+  role       = aws_iam_role.codebuild_launcher.name
+  policy_arn = aws_iam_policy.codebuild_launcher_start.arn
 }
 
 data "aws_iam_policy_document" "aiia_dev_no_direct_start_build" {
