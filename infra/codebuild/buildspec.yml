@@ -463,7 +463,14 @@ phases:
         aws ecr get-login-password --region "$EXPECTED_REGION" \
           | docker login --username AWS --password-stdin "$ECR_REGISTRY"
         docker buildx version
-        docker buildx inspect --bootstrap >/dev/null
+        # 既定の docker ドライバは --provenance/--sbom(attestation) を拒否する
+        # （実測: "Attestation is not supported for the docker driver"）。
+        # OpenClaw 鎖(7/31成立)と同じ隔離 docker-container ビルダーを使う。
+        docker buildx create \
+          --name teamagent-mcp-builder \
+          --driver docker-container \
+          --platform linux/arm64 \
+          --bootstrap >/dev/null
         # CodeBuild のフェーズ境界は export 値を落とすことがある（実測: build 冒頭で
         # APPROVAL_EVIDENCE_JSON が空になり jq -er が無言で exit 1）。エージェントの
         # 持越しに依存せず /tmp 経由で明示的に受け渡す。
@@ -541,6 +548,7 @@ phases:
           DOCKER_RUNTIME_BUILD_ARGS+=(--build-arg "$runtime_argument")
         done
         docker buildx build \
+          --builder teamagent-mcp-builder \
           --platform linux/arm64 \
           --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-mcp" \
           --target final \
@@ -570,6 +578,7 @@ phases:
         . /tmp/teamagent-cross-phase.env
         MEDIA_TAG="candidate-$GIT_COMMIT-media"
         docker buildx build \
+          --builder teamagent-mcp-builder \
           --platform linux/arm64 \
           --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker" \
           --target final \
