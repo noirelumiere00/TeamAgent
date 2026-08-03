@@ -877,6 +877,17 @@ data "aws_iam_policy_document" "approval_reader" {
     actions   = ["kms:Verify"]
     resources = [aws_kms_key.approval_signing.arn]
   }
+
+  # Readers pin the fixed aliases back to exact key ARNs before trusting them;
+  # alias resolution requires DescribeKey on the underlying keys (metadata only).
+  statement {
+    sid     = "ResolveFixedApprovalKeyAliases"
+    actions = ["kms:DescribeKey"]
+    resources = [
+      aws_kms_key.image_release_evidence.arn,
+      aws_kms_key.approval_signing.arn,
+    ]
+  }
 }
 
 resource "aws_iam_policy" "approval_reader" {
