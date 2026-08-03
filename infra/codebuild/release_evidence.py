@@ -1201,7 +1201,9 @@ def validate_release_receipt(
                 label=f"{label}.labels[{label_name}]",
                 maximum=8192,
             )
-            if normalized_label_value.strip().lower() in _UNTRUSTED_LABEL_VALUES:
+            if label_name.startswith("io.teamagent.") and (
+                normalized_label_value.strip().lower() in _UNTRUSTED_LABEL_VALUES
+            ):
                 raise EvidenceError(f"{label}.labels[{label_name}] uses an untrusted placeholder")
         if labels.get("org.opencontainers.image.revision") != commit:
             raise EvidenceError(f"{label} OCI revision does not match the full commit")

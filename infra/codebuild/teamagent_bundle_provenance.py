@@ -1222,6 +1222,11 @@ def verify_oci_config(
     if len(labels) != len(raw_labels):
         raise ProvenanceError("OCI labels must be string pairs")
     for label_name, value in labels.items():
+        # プレースホルダ禁止は自前契約ラベルに限定する。digest固定の上流ベース
+        # (例: chainguard python が dev.chainguard.package.main='' を同梱) の
+        # 継承ラベルまで対象にすると原理的に通らない検査になる（実測）。
+        if not label_name.startswith("io.teamagent."):
+            continue
         if value.strip().lower() in UNTRUSTED_PLACEHOLDER_VALUES:
             raise ProvenanceError(f"OCI label {label_name} uses an untrusted placeholder")
     if expected_build_context_sha256 is None:
