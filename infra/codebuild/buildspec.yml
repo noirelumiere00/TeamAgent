@@ -481,9 +481,11 @@ phases:
         } > /tmp/teamagent-cross-phase.env
   build:
     commands:
+      # 沈黙死の位置特定のためコマンドを分割: 各コマンドの "Running command" ログで
+      # 出力ゼロでも死亡地点が一意に定まる。各コマンドは /tmp handoff を自前で読む。
+      - echo "BUILD phase alive"
       - |
         set -euo pipefail
-        # フェーズ境界の env 消失対策: pre_build の /tmp 受け渡しを正とし、欠落は即死
         [ -s /tmp/teamagent-cross-phase.env ] \
           || { echo "FATAL: cross-phase environment handoff file is missing"; exit 1; }
         . /tmp/teamagent-cross-phase.env
@@ -493,23 +495,28 @@ phases:
         : "${BUILD_CONTEXT_SHA256:?FATAL: canonical context sha lost at phase boundary}"
         : "${CORE_QUARANTINE_REPOSITORY:?FATAL: core quarantine repo lost at phase boundary}"
         : "${MEDIA_QUARANTINE_REPOSITORY:?FATAL: media quarantine repo lost at phase boundary}"
-        CORE_TAG="candidate-$GIT_COMMIT-core"
-        MEDIA_TAG="candidate-$GIT_COMMIT-media"
+        echo "cross-phase handoff verified"
+      - |
+        set -euo pipefail
+        . /tmp/teamagent-cross-phase.env
         RELEASE_APPROVAL_SHA256="$(
           jq -er '.approval_payload_sha256' <<<"$APPROVAL_EVIDENCE_JSON"
         )"
         [[ "$RELEASE_APPROVAL_SHA256" =~ ^[0-9a-f]{64}$ ]] \
           && [ "$RELEASE_APPROVAL_SHA256" = "$APPROVAL_PAYLOAD_SHA256" ] \
           || { echo "FATAL: approval evidence payload hash mismatch"; exit 1; }
-        readonly RELEASE_APPROVAL_SHA256
+        printf 'export RELEASE_APPROVAL_SHA256=%q\n' "$RELEASE_APPROVAL_SHA256" \
+          >> /tmp/teamagent-cross-phase.env
+        echo "approval binding verified"
+      - |
+        set -euo pipefail
+        . /tmp/teamagent-cross-phase.env
         python3 "$CONTEXT_VERIFY_DIR/infra/codebuild/source_provenance.py" \
           docker-build-arguments \
           --contract "$CONTEXT_VERIFY_DIR/infra/codebuild/teamagent_runtime_contract.json" \
           --expected-contract-sha256 "$SOURCE_MANIFEST_CONTRACT_SHA256" \
           >/tmp/teamagent-runtime-build-arguments
-        mapfile -t RUNTIME_BUILD_ARGUMENTS \
-          </tmp/teamagent-runtime-build-arguments
-        [ "${#RUNTIME_BUILD_ARGUMENTS[@]}" -gt 3 ] \
+        [ "$(wc -l </tmp/teamagent-runtime-build-arguments)" -gt 3 ] \
           || { echo "FATAL: runtime build arguments are incomplete"; exit 1; }
         for required_runtime_argument in \
           RUNTIME_CONTRACT_SHA256 \
@@ -520,6 +527,13 @@ phases:
             /tmp/teamagent-runtime-build-arguments)" -eq 1 ] \
             || { echo "FATAL: missing or duplicate runtime receipt argument"; exit 1; }
         done
+        echo "runtime build arguments ready"
+      - |
+        set -euo pipefail
+        . /tmp/teamagent-cross-phase.env
+        CORE_TAG="candidate-$GIT_COMMIT-core"
+        mapfile -t RUNTIME_BUILD_ARGUMENTS \
+          </tmp/teamagent-runtime-build-arguments
         DOCKER_RUNTIME_BUILD_ARGS=()
         for runtime_argument in "${RUNTIME_BUILD_ARGUMENTS[@]}"; do
           [[ "$runtime_argument" =~ ^[A-Z][A-Z0-9_]+=.+$ ]] \
@@ -550,6 +564,11 @@ phases:
           --tag "$CORE_QUARANTINE_REPOSITORY:$CORE_TAG" \
           --push \
           - <"$BUILD_CONTEXT_TAR"
+        echo "core quarantine image pushed"
+      - |
+        set -euo pipefail
+        . /tmp/teamagent-cross-phase.env
+        MEDIA_TAG="candidate-$GIT_COMMIT-media"
         docker buildx build \
           --platform linux/arm64 \
           --file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker" \
@@ -568,8 +587,7 @@ phases:
           - <"$BUILD_CONTEXT_TAR"
         [ "$(sha256sum "$BUILD_CONTEXT_TAR" | awk '{print $1}')" = "$BUILD_CONTEXT_SHA256" ] \
           || { echo "FATAL: canonical context changed during dual build"; exit 1; }
-        printf 'export RELEASE_APPROVAL_SHA256=%q\n' "$RELEASE_APPROVAL_SHA256" \
-          >> /tmp/teamagent-cross-phase.env
+        echo "media quarantine image pushed"
   post_build:
     commands:
       - |
