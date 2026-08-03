@@ -660,6 +660,10 @@ function buildChromeArgs(pinnedProxyUrl) {
     throw new Error("external browser proxy is incompatible with DNS pinning");
   }
   const chromeArgs = [
+    // Fargate は unprivileged userns 無効のため Chromium 自前サンドボックスは
+    // 成立しない (実測: No usable sandbox! で起動即死)。隔離は実行コンテナ側
+    // (非root uid 10001 / cap drop ALL / readonly rootfs / taskRole 無し) が担う。
+    "--no-sandbox",
     "--disable-dev-shm-usage", "--disable-gpu",
     "--disable-features=AsyncDns",
     "--disable-quic",

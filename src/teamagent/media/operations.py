@@ -444,6 +444,12 @@ def _node_json(
             "TikTok output is invalid",
         ) from exc
     if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
+        raw_error = result.get("error") if isinstance(result, dict) else None
+        logger.warning(
+            "tiktok browser job failed: error=%s stderr=%s",
+            raw_error if isinstance(raw_error, str) else "",
+            completed.stderr.decode("utf-8", "replace")[-300:],
+        )
         raw_error_code = result.get("errorCode") if isinstance(result, dict) else None
         error_code = raw_error_code if isinstance(raw_error_code, str) else ""
         safe_code = {
