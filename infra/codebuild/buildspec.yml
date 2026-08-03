@@ -715,7 +715,7 @@ phases:
             --output json >"/tmp/$subject-ecr-scan.json"
           python3 infra/codebuild/verify_ecr_scan.py \
             --scan "/tmp/$subject-ecr-scan.json" \
-            --exceptions infra/codebuild/ecr_scan_exceptions.json \
+            --exceptions "infra/codebuild/ecr_scan_exceptions_$subject.json" \
             --expected-image-digest "$arm64_digest" \
             --expected-repository "$repository"
           case "$subject" in

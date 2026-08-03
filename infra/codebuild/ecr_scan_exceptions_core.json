@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "stale_exception_policy": "fail",
+  "exceptions": [
+    {
+      "cve": "CVE-2026-15308",
+      "severity": "HIGH",
+      "package": "python-3.14",
+      "version": "3.14.6-r3",
+      "owner": "s-komata",
+      "reason": "digest固定ベース由来で修正版未公開のため一時許容。ベース更新時に解消・除去する。",
+      "expires_on": "2026-09-22"
+    }
+  ]
+}
