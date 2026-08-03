@@ -766,6 +766,14 @@ export function createCallerIdentityPlugin({
       // Remember the run-side name too, so the tool gate can accept either
       // representation without re-deriving the sender-based alias.
       candidates[0].channelAliases = [candidates[0].channelId, channelId];
+      // Claims must carry a real Slack conversation id: mcp's caller-claim
+      // verifier pins `^[CDG][A-Z0-9]{8,}$` and rejects the internal `DM:U…`
+      // matching alias (実測: caller_claim_rejected field=channel). When the
+      // run ctx supplies the genuine `D…` for a DM bound via a user-only
+      // inbound, promote it to the canonical id and keep the alias for gates.
+      if (/^[CDG][A-Z0-9]{8,}$/u.test(channelId)) {
+        candidates[0].channelId = channelId;
+      }
     }
     if (candidates.length !== 1 || !bindRun(runId, candidates[0])) {
       rejectRun(runId, nowMs, candidates.length === 1 ? candidates[0] : null);
