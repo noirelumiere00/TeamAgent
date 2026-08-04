@@ -669,7 +669,10 @@ function buildChromeArgs(pinnedProxyUrl) {
     "--disable-quic",
     "--disable-setuid-sandbox",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-    "--host-resolver-rules=MAP * ~NOTFOUND",
+    // EXCLUDE が無いと chromium 150 では proxy 自身の 127.0.0.1 も NOTFOUND に
+    // 巻き込まれ ERR_PROXY_CONNECTION_FAILED で全滅する (Fargate 実測: EXCLUDE
+    // 無し=接続失敗 / あり=tiktok.com 200)。DNS 遮断は proxy 以外に対して維持。
+    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
     "--proxy-bypass-list=<-loopback>",
     `--proxy-server=${pinnedProxyUrl}`,
     "--window-size=1280,900", "--lang=ja-JP",

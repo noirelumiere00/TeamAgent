@@ -183,7 +183,7 @@
         },
         {
           "key": "artifact.tiktok-scraper.sha256",
-          "value": "07fa9959fddbd887283f0aa97c44294073261a1624cbf556c8a8d9a81a2926b8",
+          "value": "65df0f8b16fc3da51222518b9382f1369067c10fe00c87555fe0feef5c728037",
           "build_arg": "TIKTOK_SCRAPER_SHA256",
           "oci_label": "io.teamagent.contract.tiktok-scraper-sha256",
           "dockerfile_uses": [
