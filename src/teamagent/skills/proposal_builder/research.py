@@ -352,8 +352,8 @@ def redact_unverified_quantities(text: str) -> tuple[str, bool]:
 
 
 __all__ = [
-    "build_quantitative_evidence",
     "build_evidence_registry",
+    "build_quantitative_evidence",
     "parse_gemini_research",
     "redact_unverified_quantities",
     "repair_json_syntax",

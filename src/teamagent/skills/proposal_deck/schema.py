@@ -227,8 +227,8 @@ class ProposalDeckOutput(BaseModel):
         default=None,
         description=(
             "Slack から開ける署名付き URL（既定: 非公開 S3 presigned 7 日）。"
-            "publish_artifact=True、または USE_PROPOSAL_DECK_PUBLISH=1 "
-            "+ VSEO_REPORT_BUCKET 設定時のみ非 None。"
+            "USE_PROPOSAL_DECK_PUBLISH=1（権威ゲート）+ VSEO_REPORT_BUCKET "
+            "設定時のみ非 None。publish_artifact=True でもゲート OFF なら公開しない。"
         ),
     )
     version_id: str = Field(
@@ -241,8 +241,8 @@ class ProposalDeckOutput(BaseModel):
     pdf_url: str | None = Field(
         default=None,
         description=(
-            "PDF の署名付き URL（emit_pdf + publish_artifact=True、または "
-            "USE_PROPOSAL_DECK_PUBLISH=1 時のみ非 None）。"
+            "PDF の署名付き URL（emit_pdf かつ USE_PROPOSAL_DECK_PUBLISH=1 "
+            "の権威ゲート ON 時のみ非 None）。"
         ),
     )
     filled_count: int = Field(ge=0, description="埋めた placeholder 数")

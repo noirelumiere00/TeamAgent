@@ -602,13 +602,13 @@ def render_deck(
 
 
 __all__ = [
-    "PLACEHOLDER_PATTERN",
     "AUXILIARY_PATTERN",
-    "DATE_PATTERN",
-    "TEMPLATE_VERSION_PATTERN",
-    "PB_TOKEN_PATTERN",
     "BRACE_CHARACTER_PATTERN",
+    "DATE_PATTERN",
     "LEGACY_INSTRUCTION_PATTERN",
+    "PB_TOKEN_PATTERN",
+    "PLACEHOLDER_PATTERN",
+    "TEMPLATE_VERSION_PATTERN",
     "AuditResult",
     "TemplateInventory",
     "UnfilledPlaceholderError",

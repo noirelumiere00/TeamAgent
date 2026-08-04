@@ -264,16 +264,19 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         kind: str = "pptx",
         publish_artifact: bool | None = None,
     ) -> str | None:
-        """Explicit input or USE_PROPOSAL_DECK_PUBLISH controls publishing.
+        """USE_PROPOSAL_DECK_PUBLISH is the authoritative publish gate.
 
-        ``publish_artifact=False`` always suppresses S3 writes, ``True`` forces
-        publishing, and ``None`` preserves the legacy environment-gated behavior.
+        ``USE_PROPOSAL_DECK_PUBLISH`` が公開の権威ゲート。OFF なら
+        ``publish_artifact=True`` でも公開しない（入力はツール呼び出し経由で
+        外部から到達するため、env ゲートをバイパスできると S3 公開+presigned
+        URL 発行をインジェクションで強制できてしまう＝レビュー MED）。
+        ``publish_artifact=False`` はゲート ON でも個別に抑止できる。
         S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、失敗しても
         skill 全体は成功扱い（Slack に URL は出ないだけ）。
         """
-        if publish_artifact is False:
+        if not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
             return None
-        if publish_artifact is None and not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
+        if publish_artifact is False:
             return None
         try:
             from teamagent.adapters.report_publish import publish_pdf_file, publish_pptx_file

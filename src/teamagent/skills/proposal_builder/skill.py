@@ -139,12 +139,35 @@ def _is_http_url(value: str) -> bool:
     return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
+# 顧客提出資料に印字してはならない社内原典のホスト。事例セルの excerpt は
+# 守秘マスクを通すのに出典 URL だけ素通しでは自己矛盾になる（レビュー MED:
+# 社内 Drive 原典 URL の漏洩面）。ここに載る出典は「社内RAG」表記へ落とす。
+_INTERNAL_SOURCE_HOSTS = (
+    "drive.google.com",
+    "docs.google.com",
+    "newstv.co.jp",
+    "vectorinc.co.jp",
+)
+
+
+def _is_internal_source_url(value: str) -> bool:
+    try:
+        host = (urlsplit(value).hostname or "").lower()
+    except ValueError:
+        return True
+    return any(host == h or host.endswith(f".{h}") for h in _INTERNAL_SOURCE_HOSTS)
+
+
 def _format_cases(cases: list[CaseCandidate], *, confidential_term: str = "") -> str:
     rows: list[str] = []
     for index, case in enumerate(cases, start=1):
-        has_http_source = _is_http_url(case.url) and (
-            not confidential_term
-            or not _contains_confidential_term(case.url, confidential_term)
+        has_http_source = (
+            _is_http_url(case.url)
+            and not _is_internal_source_url(case.url)
+            and (
+                not confidential_term
+                or not _contains_confidential_term(case.url, confidential_term)
+            )
         )
         title = (
             _redact_confidential_text(case.title, confidential_term)
