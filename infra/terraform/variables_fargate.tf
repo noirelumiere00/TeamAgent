@@ -76,6 +76,18 @@ variable "enable_proposal_builder" {
   default     = false
 }
 
+variable "proposal_builder_publish_ready" {
+  description = "ready提案書のS3公開(presigned URL発行)を許可する。既定OFF＝Slack添付のみ。"
+  type        = bool
+  default     = false
+}
+
+variable "proposal_builder_deliver_internal_drafts" {
+  description = "draft(裏取り前)提案書の社内Slack添付を許可する。既定OFF＝ready以外は添付しない。"
+  type        = bool
+  default     = false
+}
+
 variable "proposal_builder_sync_runtime_verified" {
   description = "代表143MB級でRAG→LLM→render→Slack uploadがOpenClaw共有deadline内に完走したことを受入環境で確認済みならtrue"
   type        = bool
