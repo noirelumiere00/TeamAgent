@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Literal
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Any, Final, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -217,6 +221,61 @@ class GeminiResearch(_StrictModel):
         return value
 
 
+class QuantitativeClaimRole(StrEnum):
+    """How unit-bearing text in one research field must be treated."""
+
+    EXTERNAL_FACT = "external_fact"
+    DESCRIPTION_OR_PLAN = "description_or_plan"
+    STRUCTURAL = "structural"
+
+    @property
+    def requires_evidence(self) -> bool:
+        """Return whether quantities in this role need same-object evidence."""
+
+        return self is QuantitativeClaimRole.EXTERNAL_FACT
+
+
+@dataclass(frozen=True)
+class ResearchObjectSemantics:
+    """Quantitative-claim semantics for schema-declared fields of one model."""
+
+    default_role: QuantitativeClaimRole
+    field_roles: Mapping[str, QuantitativeClaimRole] = field(default_factory=dict)
+
+
+# This table follows the Pydantic object structure rather than globally exempting
+# repeated field names.  The sanitizer applies a model role only after resolving a
+# key against that model's declared fields, so schema-unknown keys remain facts.
+GEMINI_RESEARCH_OBJECT_SEMANTICS: Final[Mapping[type[_StrictModel], ResearchObjectSemantics]] = (
+    MappingProxyType(
+        {
+            GeminiResearch: ResearchObjectSemantics(
+                default_role=QuantitativeClaimRole.EXTERNAL_FACT,
+                field_roles=MappingProxyType(
+                    {
+                        "research_date": QuantitativeClaimRole.STRUCTURAL,
+                        "brand": QuantitativeClaimRole.DESCRIPTION_OR_PLAN,
+                    }
+                ),
+            ),
+            # Selector metadata describes the requested audience and proposed activation;
+            # its numbers are not observations about the external world.
+            ProductMeta: ResearchObjectSemantics(
+                default_role=QuantitativeClaimRole.DESCRIPTION_OR_PLAN,
+            ),
+            # Insight text is qualitative, but a quantity placed here still asserts an
+            # external observation and must fail closed because this object has no URL.
+            InsightEvidence: ResearchObjectSemantics(
+                default_role=QuantitativeClaimRole.EXTERNAL_FACT,
+            ),
+            _GeminiEvidenceModel: ResearchObjectSemantics(
+                default_role=QuantitativeClaimRole.EXTERNAL_FACT,
+            ),
+        }
+    )
+)
+
+
 class EvidenceReference(_GeminiEvidenceModel):
     """One syntactically valid HTTP(S) evidence URL found in the payload."""
 
@@ -387,6 +446,7 @@ class ProposalBuilderOutput(_StrictModel):
 
 
 __all__ = [
+    "GEMINI_RESEARCH_OBJECT_SEMANTICS",
     "AlternativeEvidence",
     "CommunityEvidence",
     "CommunityTagEvidence",
@@ -402,7 +462,9 @@ __all__ = [
     "ProposalBuilderInput",
     "ProposalBuilderOutput",
     "PublicityEvidence",
+    "QuantitativeClaimRole",
     "ResearchIssue",
+    "ResearchObjectSemantics",
     "SanitizationResult",
     "SocialTrendEvidence",
     "TikTokEvidence",

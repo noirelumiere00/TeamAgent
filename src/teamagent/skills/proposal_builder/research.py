@@ -6,13 +6,17 @@ import copy
 import json
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import urlsplit
 
+from pydantic import BaseModel
+
 from teamagent.skills.proposal_builder.schema import (
+    GEMINI_RESEARCH_OBJECT_SEMANTICS,
     EvidenceReference,
     EvidenceRegistry,
     GeminiResearch,
+    QuantitativeClaimRole,
     ResearchIssue,
     SanitizationResult,
 )
@@ -29,14 +33,6 @@ _CODE_FENCE_RE = re.compile(
 _URL_RE = re.compile(r"https?://[^\s<>{}\\^`\"']+", flags=re.IGNORECASE)
 _URL_TRAILING_PUNCTUATION = ".,;:!?)]}、。；：！？）】」』＞"
 _UNVERIFIED_REPLACEMENT = "要確認（出典URL未取得）"
-_PLANNING_FIELD_NAMES = frozenset(
-    {
-        "purpose",
-        "channel",
-        "moment",
-        "target_categories",
-    }
-)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -244,22 +240,67 @@ def build_evidence_registry(
     return EvidenceRegistry(references=references)
 
 
-def _is_numeric_claim(value: object, *, field_name: str | None) -> bool:
-    if not isinstance(value, str):
-        return False
-    if field_name == "research_date" or field_name in _PLANNING_FIELD_NAMES:
-        return False
-    return has_quantitative_claim(value)
+def _nested_model_type(annotation: object) -> type[BaseModel] | None:
+    """Return the Pydantic model nested directly or in a container annotation."""
+
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    for argument in get_args(annotation):
+        nested = _nested_model_type(argument)
+        if nested is not None:
+            return nested
+    return None
+
+
+def _schema_field_context(
+    model_type: type[BaseModel] | None,
+    wire_name: str,
+) -> tuple[type[BaseModel] | None, QuantitativeClaimRole]:
+    """Resolve one declared field and its role, defaulting unknown input to fact."""
+
+    fact_role = QuantitativeClaimRole.EXTERNAL_FACT
+    if model_type is None:
+        return None, fact_role
+
+    resolved_name: str | None = None
+    field_info: Any = None
+    for candidate_name, candidate_info in model_type.model_fields.items():
+        if wire_name in {candidate_name, candidate_info.alias}:
+            resolved_name = candidate_name
+            field_info = candidate_info
+            break
+    if resolved_name is None:
+        return None, fact_role
+
+    semantics = next(
+        (
+            declared
+            for candidate_type in model_type.__mro__
+            if (declared := GEMINI_RESEARCH_OBJECT_SEMANTICS.get(candidate_type)) is not None
+        ),
+        None,
+    )
+    role = (
+        semantics.field_roles.get(resolved_name, semantics.default_role)
+        if semantics is not None
+        else fact_role
+    )
+    return _nested_model_type(field_info.annotation), role
+
+
+def _is_numeric_claim(value: object, *, role: QuantitativeClaimRole) -> bool:
+    return isinstance(value, str) and role.requires_evidence and has_quantitative_claim(value)
 
 
 def sanitize_unverified_numbers(
     raw: GeminiResearch | Mapping[str, Any] | str,
 ) -> SanitizationResult:
-    """Replace numeric claims lacking same-object evidence in a copied payload.
+    """Replace external-fact quantities lacking same-object evidence in a copy.
 
     The original model/mapping/string is never modified. A valid URL elsewhere
     in the document or an ancestor object does not launder a leaf claim: the URL
-    must belong to the leaf's nearest containing JSON object.
+    must belong to the leaf's nearest containing JSON object. Schema-declared
+    descriptions and plans remain intact; unknown fields retain the fact default.
     """
 
     data = _as_plain_data(raw)
@@ -269,26 +310,33 @@ def sanitize_unverified_numbers(
     }
     issues: list[ResearchIssue] = []
 
-    def visit(node: object, path: str, owner_path: str | None, field_name: str | None) -> object:
+    def visit(
+        node: object,
+        path: str,
+        owner_path: str | None,
+        model_type: type[BaseModel] | None,
+        role: QuantitativeClaimRole,
+    ) -> object:
         if isinstance(node, Mapping):
             current_owner = path
-            return {
-                str(key): visit(
+            sanitized_object: dict[str, object] = {}
+            for key, child in node.items():
+                wire_name = str(key)
+                child_model_type, child_role = _schema_field_context(model_type, wire_name)
+                sanitized_object[wire_name] = visit(
                     child,
                     _json_path(path, key),
                     current_owner,
-                    str(key),
+                    child_model_type,
+                    child_role,
                 )
-                for key, child in node.items()
-            }
+            return sanitized_object
         if isinstance(node, list):
             return [
-                visit(child, _json_path(path, index), owner_path, field_name)
+                visit(child, _json_path(path, index), owner_path, model_type, role)
                 for index, child in enumerate(node)
             ]
-        if _is_numeric_claim(node, field_name=field_name) and not urls_by_object.get(
-            owner_path or ""
-        ):
+        if _is_numeric_claim(node, role=role) and not urls_by_object.get(owner_path or ""):
             issues.append(
                 ResearchIssue(
                     path=path,
@@ -299,7 +347,13 @@ def sanitize_unverified_numbers(
             return _UNVERIFIED_REPLACEMENT
         return copy.deepcopy(node)
 
-    sanitized = visit(data, "$", None, None)
+    sanitized = visit(
+        data,
+        "$",
+        None,
+        GeminiResearch,
+        QuantitativeClaimRole.EXTERNAL_FACT,
+    )
     if not isinstance(sanitized, dict):
         raise TypeError("research root must be an object")
     return SanitizationResult(
@@ -313,24 +367,37 @@ def build_quantitative_evidence(
     sanitized: Mapping[str, Any],
     registry: EvidenceRegistry,
 ) -> dict[str, list[str]]:
-    """Map exact retained quantities to URLs from their nearest source object."""
+    """Map retained external-fact quantities to their nearest source URLs."""
 
     urls_by_object = {
         ref.object_path: registry.urls_for_object(ref.object_path) for ref in registry.references
     }
     claims: dict[str, list[str]] = {}
 
-    def visit(node: object, path: str, owner_path: str | None) -> None:
+    def visit(
+        node: object,
+        path: str,
+        owner_path: str | None,
+        model_type: type[BaseModel] | None,
+        role: QuantitativeClaimRole,
+    ) -> None:
         if isinstance(node, Mapping):
             current_owner = path
             for key, child in node.items():
-                visit(child, _json_path(path, key), current_owner)
+                child_model_type, child_role = _schema_field_context(model_type, str(key))
+                visit(
+                    child,
+                    _json_path(path, key),
+                    current_owner,
+                    child_model_type,
+                    child_role,
+                )
             return
         if isinstance(node, list):
             for index, child in enumerate(node):
-                visit(child, _json_path(path, index), owner_path)
+                visit(child, _json_path(path, index), owner_path, model_type, role)
             return
-        if not isinstance(node, str):
+        if not isinstance(node, str) or not role.requires_evidence:
             return
         sources = urls_by_object.get(owner_path or "", ())
         if not sources:
@@ -339,7 +406,13 @@ def build_quantitative_evidence(
             target = claims.setdefault(claim, [])
             target.extend(url for url in sources if url not in target)
 
-    visit(sanitized, "$", None)
+    visit(
+        sanitized,
+        "$",
+        None,
+        GeminiResearch,
+        QuantitativeClaimRole.EXTERNAL_FACT,
+    )
     return claims
 
 
