@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import hashlib
 import json
 from collections.abc import Mapping
@@ -807,3 +808,92 @@ def test_run_sync_retries_transient_download_then_succeeds() -> None:
         exhausted.run_sync(request)
     assert exhausted.download_attempts == 3
     assert exhausted.consumers == 0
+
+
+class _WorkerOutputS3:
+    """dispatcher の presigned POST が実際に焼き込む固定メタデータを持つ S3。
+
+    本番実測 (mj_35c6f086… の posts.normalized.json) と同じく、内容依存の
+    ``sha256`` メタデータは存在せず job/attempt 識別子だけが載る。
+    """
+
+    def __init__(self, body: bytes, *, metadata: dict[str, str]) -> None:
+        self.body = body
+        self.metadata = metadata
+        self.checksum = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
+
+    def _response(self) -> dict[str, Any]:
+        return {
+            "ContentLength": len(self.body),
+            "ContentType": "application/json",
+            "ChecksumSHA256": self.checksum,
+            "ServerSideEncryption": "AES256",
+            "VersionId": "version-1",
+            "Metadata": dict(self.metadata),
+        }
+
+    def head_object(self, **_kwargs: Any) -> dict[str, Any]:
+        return self._response()
+
+    def get_object(self, **_kwargs: Any) -> dict[str, Any]:
+        response = self._response()
+        response["Body"] = io.BytesIO(self.body)
+        return response
+
+
+def _worker_output_ref(body: bytes) -> S3ObjectRef:
+    return S3ObjectRef(
+        bucket=_BUCKET,
+        key=(
+            "media-jobs/mj_35c6f08656296cb86bdf3098/attempts/1/"
+            "61e088b6-820a-4f35-8ee1-4ff2416de1fe/output/posts.normalized.json"
+        ),
+        version_id="version-1",
+        sha256=hashlib.sha256(body).hexdigest(),
+        size=len(body),
+        content_type="application/json",
+    )
+
+
+def test_download_accepts_worker_output_with_dispatcher_fixed_metadata() -> None:
+    body = b'{"posts":[]}'
+    s3 = _WorkerOutputS3(
+        body,
+        metadata={
+            "job-id": "mj_35c6f08656296cb86bdf3098",
+            "attempt-id": "61e088b6-820a-4f35-8ee1-4ff2416de1fe",
+            "attempt-version": "1",
+            "capability-sha256": "0" * 64,
+        },
+    )
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=object(), s3=s3),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+    assert client.download(_worker_output_ref(body), deadline_epoch_s=130) == body
+
+
+def test_download_rejects_output_whose_metadata_names_another_attempt() -> None:
+    body = b'{"posts":[]}'
+    s3 = _WorkerOutputS3(
+        body,
+        metadata={
+            "job-id": "mj_35c6f08656296cb86bdf3098",
+            # 別試行の attempt-id（取り違えの再現）
+            "attempt-id": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "attempt-version": "1",
+            "capability-sha256": "0" * 64,
+        },
+    )
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=object(), s3=s3),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        clock=lambda: 100.0,
+    )
+    with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_INTEGRITY_FAILED"):
+        client.download(_worker_output_ref(body), deadline_epoch_s=130)

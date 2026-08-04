@@ -54,6 +54,33 @@ def _checksum_sha256_b64(hex_digest: str) -> str:
     return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
 
 
+def _artifact_identity_matches(ref: S3ObjectRef, metadata: Mapping[str, Any]) -> bool:
+    """メタデータが参照先オブジェクトの出自と一致するか（書き手ごとに検査を選ぶ）。
+
+    - core 自身が put するオブジェクト (入力等) は内容依存の ``sha256``
+      メタデータを持つ。従来どおりそれを照合する。
+    - worker の出力 (``media-jobs/<job>/attempts/<ver>/<attempt>/output/<name>``)
+      は dispatcher の presigned POST 経由で put される。POST 条件は固定
+      メタデータの完全一致なので内容依存値は原理的に載らない (実測: 実
+      オブジェクトは job-id/attempt-id/attempt-version/capability-sha256 のみ)。
+      この経路では dispatcher が焼き込む識別子とキー経路の一致を検査し、
+      別ジョブ・別試行の成果物を掴まないことを保証する。
+    どちらの経路でも内容の完全性は S3 の ChecksumSHA256 と download() の
+    本文 sha256 照合が別途担保する。
+    """
+    if hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256):
+        return True
+    parts = ref.key.split("/")
+    if len(parts) < 6 or parts[0] != "media-jobs" or parts[2] != "attempts":
+        return False
+    job_id, attempt_version, attempt_id = parts[1], parts[3], parts[4]
+    return (
+        hmac.compare_digest(str(metadata.get("job-id") or ""), job_id)
+        and hmac.compare_digest(str(metadata.get("attempt-id") or ""), attempt_id)
+        and hmac.compare_digest(str(metadata.get("attempt-version") or ""), attempt_version)
+    )
+
+
 def _is_transient_network_error(exc: BaseException) -> bool:
     """botocore の接続層エラーか（deadline 予算内で再試行してよい失敗か）。
 
@@ -424,7 +451,15 @@ class MediaJobClient:
                 _checksum_sha256_b64(ref.sha256),
             )
             or not isinstance(metadata, dict)
-            or not hmac.compare_digest(str(metadata.get("sha256") or ""), ref.sha256)
+            # dispatcher の presigned POST は「固定メタデータの完全一致」条件で
+            # 発行されるため、producer は内容依存値 (x-amz-meta-sha256) を原理的に
+            # 付けられない＝設計時から不通過の検査だった (実測: 実オブジェクトの
+            # metadata は job-id/attempt-id/attempt-version/capability-sha256 のみ)。
+            # 内容の完全性は S3 が実バイトから計算した ChecksumSHA256 の一致
+            # (上) と download() の本文 sha256 照合が担保する。ここでは代わりに
+            # 固定メタデータが参照先の job/attempt と一致することを検査し、
+            # 別ジョブ・別試行の成果物を掴まないことを保証する。
+            or not _artifact_identity_matches(ref, metadata)
         ):
             raise MediaJobError("MEDIA_ARTIFACT_INTEGRITY_FAILED")
 
