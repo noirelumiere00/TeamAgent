@@ -31,20 +31,12 @@ _TEMPLATE_MAX_BYTES = 256 * 1024 * 1024
 _ACCOUNT_DB_MAX_BYTES = 5 * 1024 * 1024
 _STREAM_CHUNK_BYTES = 1024 * 1024
 _SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
-_KMS_KEY_ARN_PATTERN = re.compile(
-    r"arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-fA-F-]{36}"
-)
+_KMS_KEY_ARN_PATTERN = re.compile(r"arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-fA-F-]{36}")
 _NUMERIC_PLACEHOLDER = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
-_DATE_PLACEHOLDER = re.compile(
-    r"\{\{PB-DATE:([+-]?\d{1,3}):(?:%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}"
-)
-_TEMPLATE_VERSION_PLACEHOLDER = re.compile(
-    r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}"
-)
+_DATE_PLACEHOLDER = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(?:%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
+_TEMPLATE_VERSION_PLACEHOLDER = re.compile(r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}")
 _AUXILIARY_PLACEHOLDER = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
-_LEGACY_INSTRUCTION = re.compile(
-    r"自動入力|貼り付けてください|はめ込|転記|差し替え"
-)
+_LEGACY_INSTRUCTION = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 _BRACE_CHARACTER = re.compile(r"[{}｛｝]")
 _VALID_NUMERIC_IDS = frozenset(range(1, 104)) - frozenset(range(48, 56))
 _REQUIRED_AUXILIARY = frozenset(
@@ -62,14 +54,10 @@ _REQUIRED_AUXILIARY = frozenset(
 _EXPECTED_SLIDE_COUNT = 83
 _REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
 _PRESENTATION_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
-_OFFICE_REL_NS = (
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-)
+_OFFICE_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _DRAWING_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
-_SLIDE_REL_TYPE = (
-    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
-)
+_SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
 
 
 class ProposalAssetProvisionError(RuntimeError):
@@ -151,9 +139,7 @@ def _asset_spec(
     if version_id.strip().lower() in {"null", "none"}:
         raise ProposalAssetProvisionError(f"{prefix}_S3_VERSION_ID must be a concrete version")
 
-    sha256 = (
-        _required_environment_value(environment, f"{prefix}_S3_SHA256").strip().lower()
-    )
+    sha256 = _required_environment_value(environment, f"{prefix}_S3_SHA256").strip().lower()
     if _SHA256_PATTERN.fullmatch(sha256) is None:
         raise ProposalAssetProvisionError(f"{prefix}_S3_SHA256 must be a SHA-256 hex digest")
 
@@ -212,7 +198,9 @@ def _prepare_asset_directory() -> None:
     except ProposalAssetProvisionError:
         raise
     except OSError:
-        raise ProposalAssetProvisionError("proposal asset directory could not be prepared") from None
+        raise ProposalAssetProvisionError(
+            "proposal asset directory could not be prepared"
+        ) from None
 
 
 def _provision_asset(s3: Any, spec: _AssetSpec) -> None:
@@ -300,9 +288,7 @@ def _stream_and_publish(response: Mapping[str, Any], spec: _AssetSpec) -> None:
                     raise ProposalAssetProvisionError(f"{spec.label} S3 body is not binary")
                 received += len(chunk)
                 if received > spec.size or received > spec.maximum_size:
-                    raise ProposalAssetProvisionError(
-                        f"{spec.label} exceeded its declared size"
-                    )
+                    raise ProposalAssetProvisionError(f"{spec.label} exceeded its declared size")
                 digest.update(chunk)
                 output.write(chunk)
             output.flush()
@@ -340,10 +326,7 @@ def _assert_private_regular_file(path: Path, label: str) -> None:
         file_stat = path.lstat()
     except OSError:
         raise ProposalAssetProvisionError(f"{label} file metadata could not be read") from None
-    if (
-        not stat.S_ISREG(file_stat.st_mode)
-        or stat.S_IMODE(file_stat.st_mode) != 0o600
-    ):
+    if not stat.S_ISREG(file_stat.st_mode) or stat.S_IMODE(file_stat.st_mode) != 0o600:
         raise ProposalAssetProvisionError(f"{label} is not a private regular file")
 
 
@@ -397,17 +380,11 @@ def _validate_template(path: Path) -> None:
                 )
                 for text_body in root.iter(f"{{{_PRESENTATION_NS}}}txBody"):
                     text_bodies.append(
-                        "".join(
-                            text.text or ""
-                            for text in text_body.iter(f"{{{_DRAWING_NS}}}t")
-                        )
+                        "".join(text.text or "" for text in text_body.iter(f"{{{_DRAWING_NS}}}t"))
                     )
                 for text_body in root.iter(f"{{{_DRAWING_NS}}}txBody"):
                     text_bodies.append(
-                        "".join(
-                            text.text or ""
-                            for text in text_body.iter(f"{{{_DRAWING_NS}}}t")
-                        )
+                        "".join(text.text or "" for text in text_body.iter(f"{{{_DRAWING_NS}}}t"))
                     )
     except ProposalAssetProvisionError:
         raise
@@ -415,21 +392,15 @@ def _validate_template(path: Path) -> None:
         raise ProposalAssetProvisionError("template OOXML could not be inspected") from None
 
     numeric_ids = frozenset(
-        int(match.group(1))
-        for text in text_bodies
-        for match in _NUMERIC_PLACEHOLDER.finditer(text)
+        int(match.group(1)) for text in text_bodies for match in _NUMERIC_PLACEHOLDER.finditer(text)
     )
     if numeric_ids != _VALID_NUMERIC_IDS:
         raise ProposalAssetProvisionError("integrated template numeric inventory is incomplete")
     auxiliary_keys = frozenset(
-        match.group(1)
-        for text in text_bodies
-        for match in _AUXILIARY_PLACEHOLDER.finditer(text)
+        match.group(1) for text in text_bodies for match in _AUXILIARY_PLACEHOLDER.finditer(text)
     )
     if auxiliary_keys != _REQUIRED_AUXILIARY:
-        raise ProposalAssetProvisionError(
-            "integrated template auxiliary inventory is invalid"
-        )
+        raise ProposalAssetProvisionError("integrated template auxiliary inventory is invalid")
     template_versions = frozenset(
         match.group(1)
         for text in text_bodies
@@ -438,16 +409,12 @@ def _validate_template(path: Path) -> None:
     if template_versions != {"proposal-builder-v1"}:
         raise ProposalAssetProvisionError("integrated template version marker is missing")
     date_offsets = frozenset(
-        int(match.group(1))
-        for text in text_bodies
-        for match in _DATE_PLACEHOLDER.finditer(text)
+        int(match.group(1)) for text in text_bodies for match in _DATE_PLACEHOLDER.finditer(text)
     )
     if not _REQUIRED_DATE_OFFSETS.issubset(date_offsets):
         raise ProposalAssetProvisionError("integrated template schedule inventory is incomplete")
     legacy_artifacts = [
-        artifact
-        for text in text_bodies
-        for artifact in _find_legacy_template_artifacts(text)
+        artifact for text in text_bodies for artifact in _find_legacy_template_artifacts(text)
     ]
     if legacy_artifacts:
         raise ProposalAssetProvisionError(
@@ -511,10 +478,7 @@ def _linked_slide_names(
             resolved = posixpath.normpath(target.lstrip("/"))
         else:
             resolved = posixpath.normpath(posixpath.join("ppt", target))
-        if (
-            resolved not in names
-            or re.fullmatch(r"ppt/slides/slide[0-9]+\.xml", resolved) is None
-        ):
+        if resolved not in names or re.fullmatch(r"ppt/slides/slide[0-9]+\.xml", resolved) is None:
             raise ProposalAssetProvisionError("template slide target is invalid")
         targets[relationship_id] = resolved
 

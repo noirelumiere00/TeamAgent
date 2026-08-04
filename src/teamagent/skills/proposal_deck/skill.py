@@ -337,10 +337,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 skipped.extend(
                     SkippedPlaceholder(
                         id=placeholder_id,
-                        reason=(
-                            "要確認（データ未検出）: "
-                            "proposal-builderの依存入力がありません"
-                        ),
+                        reason=("要確認（データ未検出）: proposal-builderの依存入力がありません"),
                     )
                     for placeholder_id in sorted(forced_skips)
                 )

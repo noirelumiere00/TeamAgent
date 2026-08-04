@@ -265,8 +265,7 @@ def sanitize_unverified_numbers(
     data = _as_plain_data(raw)
     registry = build_evidence_registry(data)
     urls_by_object = {
-        ref.object_path: registry.urls_for_object(ref.object_path)
-        for ref in registry.references
+        ref.object_path: registry.urls_for_object(ref.object_path) for ref in registry.references
     }
     issues: list[ResearchIssue] = []
 
@@ -317,8 +316,7 @@ def build_quantitative_evidence(
     """Map exact retained quantities to URLs from their nearest source object."""
 
     urls_by_object = {
-        ref.object_path: registry.urls_for_object(ref.object_path)
-        for ref in registry.references
+        ref.object_path: registry.urls_for_object(ref.object_path) for ref in registry.references
     }
     claims: dict[str, list[str]] = {}
 

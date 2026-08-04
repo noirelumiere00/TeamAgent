@@ -63,6 +63,8 @@ _QUANTITATIVE_CLAIM = re.compile(
     rf"){_DIRECTION_SUFFIX}",
     re.IGNORECASE,
 )
+
+
 class ProvenanceValidationError(ValueError):
     """Composer output cites unsupported evidence or makes an uncited quantity."""
 

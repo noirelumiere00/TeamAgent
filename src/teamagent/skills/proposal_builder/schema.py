@@ -213,9 +213,7 @@ class GeminiResearch(_StrictModel):
             or value != value.strip()
             or value != unicodedata.normalize("NFKC", value)
         ):
-            raise ValueError(
-                "brand must be non-blank, whitespace-trimmed NFKC text"
-            )
+            raise ValueError("brand must be non-blank, whitespace-trimmed NFKC text")
         return value
 
 

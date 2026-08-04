@@ -44,12 +44,8 @@ def _decoded_variants(value: str) -> tuple[tuple[str, ...], bool]:
         variants.append(next_decoded)
         decoded = next_decoded
     next_after_cap = _normalize(unquote(decoded))
-    ambiguous = (
-        next_after_cap != decoded
-        or (
-            len(variants) > _MAX_PERCENT_DECODE_ROUNDS
-            and _PERCENT_ESCAPE.search(decoded) is not None
-        )
+    ambiguous = next_after_cap != decoded or (
+        len(variants) > _MAX_PERCENT_DECODE_ROUNDS and _PERCENT_ESCAPE.search(decoded) is not None
     )
     for candidate in tuple(variants):
         try:
@@ -70,11 +66,7 @@ def contains_forbidden_term(text: str, terms: Iterable[str]) -> bool:
     """
 
     normalized = _normalize(text)
-    normalized_terms = [
-        (term, _normalize(term))
-        for term in terms
-        if _normalize(term)
-    ]
+    normalized_terms = [(term, _normalize(term)) for term in terms if _normalize(term)]
     if not normalized_terms:
         return False
     prose_variants, prose_ambiguous = _decoded_variants(normalized)

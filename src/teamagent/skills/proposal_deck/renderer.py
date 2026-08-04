@@ -31,16 +31,10 @@ from teamagent.skills.proposal_deck.contract import (
 # テキストフレーム単位で連結すれば段落跨ぎトークンも 1 マッチになる。
 PLACEHOLDER_PATTERN = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
 AUXILIARY_PATTERN = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
-DATE_PATTERN = re.compile(
-    r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}"
-)
-TEMPLATE_VERSION_PATTERN = re.compile(
-    r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}"
-)
+DATE_PATTERN = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
+TEMPLATE_VERSION_PATTERN = re.compile(r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}")
 PB_TOKEN_PATTERN = re.compile(r"\{\{PB-[^{}]+\}\}")
-LEGACY_INSTRUCTION_PATTERN = re.compile(
-    r"自動入力|貼り付けてください|はめ込|転記|差し替え"
-)
+LEGACY_INSTRUCTION_PATTERN = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 BRACE_CHARACTER_PATTERN = re.compile(r"[{}｛｝]")
 _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
 _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT = 83
@@ -444,8 +438,8 @@ def render_pptx(
     required_template_ids: set[int] = set()
     if template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE:
         required_template_ids = set(VALID_IDS)
-        missing_auxiliary_values = (
-            PROPOSAL_BUILDER_REQUIRED_AUXILIARY - set(auxiliary_placeholders or {})
+        missing_auxiliary_values = PROPOSAL_BUILDER_REQUIRED_AUXILIARY - set(
+            auxiliary_placeholders or {}
         )
         invalid_auxiliary_values = (
             set(auxiliary_placeholders or {}) != PROPOSAL_BUILDER_REQUIRED_AUXILIARY
@@ -473,18 +467,14 @@ def render_pptx(
                 "integrated template numeric inventory must exactly match the 95-ID contract"
             )
         if inventory.slide_count != _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT:
-            raise UnfilledPlaceholderError(
-                "integrated template must contain exactly 83 slides"
-            )
+            raise UnfilledPlaceholderError("integrated template must contain exactly 83 slides")
         if inventory.template_versions != {PROPOSAL_BUILDER_TEMPLATE_PROFILE}:
             raise UnfilledPlaceholderError(
                 "integrated template version marker is missing or ambiguous"
             )
         if posting_start_date is None:
             raise UnfilledPlaceholderError("proposal-builder posting_start_date is required")
-        if not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(
-            inventory.date_offsets
-        ):
+        if not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(inventory.date_offsets):
             raise UnfilledPlaceholderError(
                 "integrated template D-56 through D+21 schedule markers are incomplete"
             )
@@ -501,9 +491,7 @@ def render_pptx(
         expected_filled_ids=set(placeholders),
         observed_template_ids=set(inventory.numeric_ids),
         required_template_ids=required_template_ids,
-        reject_legacy_artifacts=(
-            template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE
-        ),
+        reject_legacy_artifacts=(template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE),
     )
     if fail_if_missing and not audit.is_clean:
         raise UnfilledPlaceholderError(
@@ -546,9 +534,7 @@ def audit_presentation(
         unfilled_auxiliary.update(match.group(0) for match in PB_TOKEN_PATTERN.finditer(cat))
         unfilled_dates.update(match.group(0) for match in DATE_PATTERN.finditer(cat))
         if reject_legacy_artifacts:
-            legacy_artifacts.extend(
-                _find_legacy_artifacts(cat, allow_template_tokens=False)
-            )
+            legacy_artifacts.extend(_find_legacy_artifacts(cat, allow_template_tokens=False))
     filled = (expected_filled_ids or set()) - unfilled
     missing_template_ids = (required_template_ids or set()) - (observed_template_ids or set())
     return AuditResult(

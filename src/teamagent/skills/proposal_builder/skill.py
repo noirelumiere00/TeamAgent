@@ -81,11 +81,7 @@ def _redact_confidential_text(text: str, term: str) -> str:
     cursor = 0
     for match in _HTTP_URL.finditer(normalized_text):
         pieces.append(pattern.sub("本商品", normalized_text[cursor : match.start()]))
-        pieces.append(
-            "[守秘URL非表示]"
-            if pattern.search(match.group(0))
-            else match.group(0)
-        )
+        pieces.append("[守秘URL非表示]" if pattern.search(match.group(0)) else match.group(0))
         cursor = match.end()
     pieces.append(pattern.sub("本商品", normalized_text[cursor:]))
     redacted = "".join(pieces)
@@ -98,10 +94,7 @@ def _redact_confidential_text(text: str, term: str) -> str:
 
 def _redact_confidential_value(value: object, term: str) -> object:
     if isinstance(value, dict):
-        return {
-            key: _redact_confidential_value(child, term)
-            for key, child in value.items()
-        }
+        return {key: _redact_confidential_value(child, term) for key, child in value.items()}
     if isinstance(value, list):
         return [_redact_confidential_value(child, term) for child in value]
     if isinstance(value, str):
@@ -182,11 +175,7 @@ def _format_cases(cases: list[CaseCandidate], *, confidential_term: str = "") ->
         if not has_http_source:
             excerpt, _ = redact_unverified_quantities(excerpt)
         source_label = case.url if has_http_source else "社内RAG（参照リンク非表示）"
-        rows.append(
-            f"{index}. {title}\n"
-            f"概要: {excerpt}\n"
-            f"出典: {source_label}"
-        )
+        rows.append(f"{index}. {title}\n概要: {excerpt}\n出典: {source_label}")
     return "\n\n".join(rows) or "要確認（出典付き実績候補未検出）"
 
 
@@ -296,9 +285,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         # 高品質モデルへの暗黙昇格も、Haikuへの暗黙降格も避ける。用途別model IDを
         # 明示し、未指定時だけ明示済みの全体BEDROCK_MODEL_IDを継承する。
         model_id = (
-            os.environ.get("PROPOSAL_BUILDER_MODEL_ID")
-            or os.environ.get("BEDROCK_MODEL_ID")
-            or ""
+            os.environ.get("PROPOSAL_BUILDER_MODEL_ID") or os.environ.get("BEDROCK_MODEL_ID") or ""
         ).strip()
         if not model_id:
             raise ValueError(
@@ -381,12 +368,9 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         if input.confidential_product_name:
             safe_brief = _redact_confidential_text(safe_brief, research.brand)
             safe_constraints = [
-                _redact_confidential_text(item, research.brand)
-                for item in safe_constraints
+                _redact_confidential_text(item, research.brand) for item in safe_constraints
             ]
-            safe_category_term = _redact_confidential_text(
-                safe_category_term, research.brand
-            )
+            safe_category_term = _redact_confidential_text(safe_category_term, research.brand)
         research_material = _build_research_material(
             sanitized=safe_research,
             cases=cases,
@@ -394,9 +378,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             constraints=safe_constraints,
             category_term=safe_category_term,
             confidential=input.confidential_product_name,
-            confidential_term=(
-                research.brand if input.confidential_product_name else ""
-            ),
+            confidential_term=(research.brand if input.confidential_product_name else ""),
         )
         quantitative_evidence = build_quantitative_evidence(
             sanitized.sanitized,
@@ -404,17 +386,11 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         )
         if input.confidential_product_name:
             quantitative_evidence = {
-                claim: [
-                    url
-                    for url in urls
-                    if not _contains_confidential_term(url, research.brand)
-                ]
+                claim: [url for url in urls if not _contains_confidential_term(url, research.brand)]
                 for claim, urls in quantitative_evidence.items()
             }
             quantitative_evidence = {
-                claim: urls
-                for claim, urls in quantitative_evidence.items()
-                if urls
+                claim: urls for claim, urls in quantitative_evidence.items() if urls
             }
         for case in cases:
             if not _is_http_url(case.url):
@@ -448,24 +424,18 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         )
         if input.confidential_product_name:
             evidence_urls = [
-                url
-                for url in evidence_urls
-                if not _contains_confidential_term(url, research.brand)
+                url for url in evidence_urls if not _contains_confidential_term(url, research.brand)
             ]
         safe_purpose = list(meta.purpose)
         safe_target_categories = list(meta.target_categories)
         safe_moment = meta.moment
-        safe_target_persona = (
-            input.target_persona or " / ".join(safe_target_categories)
-        )
+        safe_target_persona = input.target_persona or " / ".join(safe_target_categories)
         if input.confidential_product_name:
             safe_purpose = [
-                _redact_confidential_text(item, research.brand)
-                for item in safe_purpose
+                _redact_confidential_text(item, research.brand) for item in safe_purpose
             ]
             safe_target_categories = [
-                _redact_confidential_text(item, research.brand)
-                for item in safe_target_categories
+                _redact_confidential_text(item, research.brand) for item in safe_target_categories
             ]
             safe_moment = _redact_confidential_text(safe_moment, research.brand)
             safe_target_persona = _redact_confidential_text(
@@ -478,18 +448,12 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 safe_client_name,
                 research.brand,
             )
-        experience_text = (
-            f"{product_name}の体験・使用感を紹介"
-            "（撮影前に表現・構成の詳細を確定）"
-        )
+        experience_text = f"{product_name}の体験・使用感を紹介（撮影前に表現・構成の詳細を確定）"
         deck_input = ProposalDeckInput(
             product_name=product_name,
             goal=" / ".join(safe_purpose),
             target_persona=safe_target_persona,
-            deadline=(
-                "投稿開始日は統合FMTの決定論的スケジュール欄へ反映 / "
-                f"{safe_moment}"
-            ),
+            deadline=(f"投稿開始日は統合FMTの決定論的スケジュール欄へ反映 / {safe_moment}"),
             urls=evidence_urls,
             research_material=research_material,
             posting_start_date=input.posting_start_date,
@@ -505,9 +469,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             derived_auxiliary_placeholders={"PB-KEY-MESSAGE": 46},
             enforce_provenance=True,
             quantitative_evidence=quantitative_evidence,
-            forbidden_output_terms=(
-                [research.brand] if input.confidential_product_name else []
-            ),
+            forbidden_output_terms=([research.brand] if input.confidential_product_name else []),
             forced_skipped_ids=([41, 42] if not research.f_competitor else []),
             publish_artifact=False,
             template_profile="proposal-builder-v1",
@@ -519,10 +481,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         deck_output: ProposalDeckOutput | None = None
         try:
             deck_output = self._deck.run(deck_input, ctx)
-            issues = [
-                f"{issue.code}:{issue.path}"
-                for issue in sanitized.issues
-            ]
+            issues = [f"{issue.code}:{issue.path}" for issue in sanitized.issues]
             if rag_failed:
                 issues.append("case_rag_unavailable")
             elif not cases:
@@ -542,9 +501,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 "Drive 03_レポートは現行SearchInputにfolder厳密filterがなく資料種別で検索",
             ]
             if not os.environ.get("PROPOSAL_BUILDER_NEWS_CHANNEL_ID", "").strip():
-                warnings.append(
-                    "general_news-tvはchannel_nameメタデータ一致のみで絞込"
-                )
+                warnings.append("general_news-tvはchannel_nameメタデータ一致のみで絞込")
 
             pptx_url = deck_output.pptx_url
             if status == "ready" and _envflag("PROPOSAL_BUILDER_PUBLISH_READY"):

@@ -24,9 +24,7 @@ _AUXILIARY = re.compile(r"\{\{(PB-[A-Z0-9_-]{1,60})\}\}")
 _DATE = re.compile(r"\{\{PB-DATE:([+-]?\d{1,3}):(%Y/%m/%d|%m/%d|%Y年%m月%d日)\}\}")
 _TEMPLATE_VERSION = re.compile(r"\{\{PB-TEMPLATE:([a-z0-9-]{1,40})\}\}")
 _PB_TOKEN = re.compile(r"\{\{PB-[^{}]+\}\}")
-_LEGACY_INSTRUCTION = re.compile(
-    r"自動入力|貼り付けてください|はめ込|転記|差し替え"
-)
+_LEGACY_INSTRUCTION = re.compile(r"自動入力|貼り付けてください|はめ込|転記|差し替え")
 _BRACE_CHARACTER = re.compile(r"[{}｛｝]")
 _PROPOSAL_BUILDER_PROFILE = "proposal-builder-v1"
 _PROPOSAL_BUILDER_REQUIRED_AUXILIARY = frozenset(
@@ -149,9 +147,9 @@ def _replace_proposal_special_tokens(
     )
     if posting_start_date is not None:
         replaced = _DATE.sub(
-            lambda match: (
-                posting_start_date + timedelta(days=int(match.group(1)))
-            ).strftime(match.group(2)),
+            lambda match: (posting_start_date + timedelta(days=int(match.group(1)))).strftime(
+                match.group(2)
+            ),
             replaced,
         )
     replaced = _TEMPLATE_VERSION.sub(
@@ -225,18 +223,12 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         template_ids.update(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
         template_auxiliary.update(match.group(1) for match in _AUXILIARY.finditer(combined))
         template_date_offsets.update(int(match.group(1)) for match in _DATE.finditer(combined))
-        template_versions.update(
-            match.group(1) for match in _TEMPLATE_VERSION.finditer(combined)
-        )
-        template_legacy_artifacts.extend(
-            _legacy_artifacts(combined, allow_template_tokens=True)
-        )
+        template_versions.update(match.group(1) for match in _TEMPLATE_VERSION.finditer(combined))
+        template_legacy_artifacts.extend(_legacy_artifacts(combined, allow_template_tokens=True))
     if profile == _PROPOSAL_BUILDER_PROFILE:
         invalid_numeric_inventory = template_ids != valid_ids
         invalid_values = set(auxiliary) != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
-        invalid_tokens = (
-            template_auxiliary != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
-        )
+        invalid_tokens = template_auxiliary != _PROPOSAL_BUILDER_REQUIRED_AUXILIARY
         if (
             invalid_numeric_inventory
             or invalid_values
@@ -251,9 +243,7 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             posting_start_date is None
             or len(presentation.slides) != _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT
             or template_versions != {_PROPOSAL_BUILDER_PROFILE}
-            or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(
-                template_date_offsets
-            )
+            or not _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS.issubset(template_date_offsets)
         ):
             raise MediaOperationError(
                 "MEDIA_PPTX_TEMPLATE_PROFILE_INVALID",
@@ -276,14 +266,8 @@ def _proposal(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         remaining.extend(int(match.group(1)) for match in _PLACEHOLDER.finditer(combined))
         remaining_special.extend(match.group(0) for match in _PB_TOKEN.finditer(combined))
         if profile == _PROPOSAL_BUILDER_PROFILE:
-            remaining_legacy.extend(
-                _legacy_artifacts(combined, allow_template_tokens=False)
-            )
-    if (
-        remaining
-        or remaining_special
-        or remaining_legacy
-    ) and spec["fail_if_missing"] is True:
+            remaining_legacy.extend(_legacy_artifacts(combined, allow_template_tokens=False))
+    if (remaining or remaining_special or remaining_legacy) and spec["fail_if_missing"] is True:
         raise MediaOperationError("MEDIA_PPTX_UNFILLED", "unfilled placeholders remain")
 
     slots = _iter_proposal_image_slots(presentation)

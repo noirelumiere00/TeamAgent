@@ -46,9 +46,7 @@ class ProposalDeckInput(BaseModel):
     )
     auxiliary_placeholders: dict[str, str] = Field(
         default_factory=dict,
-        description=(
-            "統合FMTの補助枠。キーは PB-[A-Z0-9_-]+、値は非空、値の合計は最大20000文字。"
-        ),
+        description=("統合FMTの補助枠。キーは PB-[A-Z0-9_-]+、値は非空、値の合計は最大20000文字。"),
     )
     derived_auxiliary_placeholders: dict[str, int] = Field(
         default_factory=dict,
@@ -123,29 +121,24 @@ class ProposalDeckInput(BaseModel):
         for key, text in value.items():
             if _AUXILIARY_PLACEHOLDER_KEY.fullmatch(key) is None:
                 raise ValueError(
-                    f"invalid auxiliary placeholder key {key!r}; "
-                    "expected PB-[A-Z0-9_-]+"
+                    f"invalid auxiliary placeholder key {key!r}; expected PB-[A-Z0-9_-]+"
                 )
             if not text.strip():
                 raise ValueError(f"auxiliary placeholder {key!r} must not be empty")
         total_chars = sum(len(text) for text in value.values())
         if total_chars > _MAX_AUXILIARY_PLACEHOLDER_CHARS:
             raise ValueError(
-                "auxiliary placeholder values exceed "
-                f"{_MAX_AUXILIARY_PLACEHOLDER_CHARS} characters"
+                f"auxiliary placeholder values exceed {_MAX_AUXILIARY_PLACEHOLDER_CHARS} characters"
             )
         return value
 
     @field_validator("derived_auxiliary_placeholders")
     @classmethod
-    def _validate_derived_auxiliary_placeholders(
-        cls, value: dict[str, int]
-    ) -> dict[str, int]:
+    def _validate_derived_auxiliary_placeholders(cls, value: dict[str, int]) -> dict[str, int]:
         for key, placeholder_id in value.items():
             if _AUXILIARY_PLACEHOLDER_KEY.fullmatch(key) is None:
                 raise ValueError(
-                    f"invalid derived auxiliary placeholder key {key!r}; "
-                    "expected PB-[A-Z0-9_-]+"
+                    f"invalid derived auxiliary placeholder key {key!r}; expected PB-[A-Z0-9_-]+"
                 )
             if placeholder_id not in VALID_IDS:
                 raise ValueError(
@@ -196,8 +189,7 @@ class ProposalDeckInput(BaseModel):
         overlap = explicit_keys & derived_keys
         if overlap:
             raise ValueError(
-                "auxiliary placeholders cannot be both explicit and derived: "
-                f"{sorted(overlap)}"
+                f"auxiliary placeholders cannot be both explicit and derived: {sorted(overlap)}"
             )
         if self.template_profile == PROPOSAL_BUILDER_TEMPLATE_PROFILE:
             supplied_keys = explicit_keys | derived_keys

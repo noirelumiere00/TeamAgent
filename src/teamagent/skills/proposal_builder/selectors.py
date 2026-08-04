@@ -146,9 +146,7 @@ def select_top_accounts(
             keyword for keyword in selected_for.kaiwai_keywords if keyword in (account.desc or "")
         ]
         score = 2 * len(matched_categories) + len(matched_keywords)
-        scored.append(
-            (score, source_index, account, matched_categories, matched_keywords)
-        )
+        scored.append((score, source_index, account, matched_categories, matched_keywords))
 
     # source_index is the explicit secondary key, preserving flow_fill/Python's
     # stable input order for equal scores.
@@ -230,10 +228,7 @@ def _candidate_excerpt(hit: SearchHitOut) -> str | None:
         return None
     replacement = (hit.industry or "").strip() or "同業種企業"
     kinds = "・".join(
-        dict.fromkeys(
-            "成果" if "結果" in label or "成果" in label else "施策"
-            for label in labels
-        )
+        dict.fromkeys("成果" if "結果" in label or "成果" in label else "施策" for label in labels)
     )
     return (
         f"{replacement}領域の{kinds}ラベルを含む出典付き候補。"
