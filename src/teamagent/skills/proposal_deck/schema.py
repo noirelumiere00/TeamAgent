@@ -17,6 +17,7 @@ from teamagent.skills.proposal_deck.contract import (
     PROPOSAL_BUILDER_REQUIRED_AUXILIARY,
     PROPOSAL_BUILDER_TEMPLATE_PROFILE,
     VALID_IDS,
+    EvidenceImage,
 )
 
 _AUXILIARY_PLACEHOLDER_KEY = re.compile(r"PB-[A-Z0-9_-]+")
@@ -38,6 +39,13 @@ class ProposalDeckInput(BaseModel):
         max_length=40000,
         description=(
             "過去事例/Slack/Mail/Web から収集した研究素材（Agent が投入する自然文/箇条書き）"
+        ),
+    )
+    evidence_images: dict[int, list[EvidenceImage]] = Field(
+        default_factory=dict,
+        description=(
+            "同一requestのproposal_campaignフィーダが取得した証拠画像。"
+            "Composerには生成させず決定論的に後付けする。"
         ),
     )
     posting_start_date: date | None = Field(
@@ -132,6 +140,21 @@ class ProposalDeckInput(BaseModel):
             )
         return value
 
+    @field_validator("evidence_images")
+    @classmethod
+    def _validate_evidence_images(
+        cls, value: dict[int, list[EvidenceImage]]
+    ) -> dict[int, list[EvidenceImage]]:
+        invalid = set(value) - VALID_IDS
+        if invalid:
+            raise ValueError(f"evidence_images reference invalid ids: {sorted(invalid)}")
+        for placeholder_id, images in value.items():
+            if any(image.placeholder_id != placeholder_id for image in images):
+                raise ValueError(
+                    f"evidence_images key {placeholder_id} does not match image.placeholder_id"
+                )
+        return value
+
     @field_validator("derived_auxiliary_placeholders")
     @classmethod
     def _validate_derived_auxiliary_placeholders(cls, value: dict[str, int]) -> dict[str, int]:
@@ -158,7 +181,7 @@ class ProposalDeckInput(BaseModel):
             raise ValueError("quantitative_evidence exceeds 500 claims")
         total_chars = 0
         for claim, urls in value.items():
-            if not claim.strip() or len(claim) > 200 or not urls or len(urls) > 20:
+            if not claim.strip() or len(claim) > 200 or not urls or len(urls) > 80:
                 raise ValueError("quantitative_evidence entry is invalid")
             total_chars += len(claim) + sum(len(url) for url in urls)
         if total_chars > 100_000:

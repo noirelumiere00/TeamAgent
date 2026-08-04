@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import re
 import threading
 import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
+from teamagent.adapters.media_job import MediaJobClient
+from teamagent.adapters.tiktok_scraper import (
+    TikTokScrapeError,
+    TikTokSearchResult,
+    TikTokVideo,
+    search_tiktok,
+)
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_builder.research import (
     build_quantitative_evidence,
@@ -33,7 +43,15 @@ from teamagent.skills.proposal_builder.selectors import (
     load_and_select_accounts,
     search_case_candidates,
 )
+from teamagent.skills.proposal_campaign.adapters import Searcher
+from teamagent.skills.proposal_campaign.feeder import build_evidence_images
+from teamagent.skills.proposal_campaign.schema import (
+    ProposalCampaignInput,
+    ProposalCampaignOutput,
+)
+from teamagent.skills.proposal_campaign.skill import ProposalCampaignSkill
 from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
+from teamagent.skills.proposal_deck.contract import EvidenceImage
 from teamagent.skills.proposal_deck.provenance import iter_quantitative_claims
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
 from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
@@ -41,6 +59,35 @@ from teamagent.skills.proposal_deck.skill import ProposalDeckSkill
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
 _HTTP_URL = re.compile(r"https?://[^\s<>{}\\^`\"']+", re.IGNORECASE)
 _RESEARCH_MATERIAL_LIMIT = 40_000
+_TIKTOK_KEYWORD_LIMIT = 6
+_TIKTOK_VIDEOS_PER_KEYWORD = 10
+_TIKTOK_UNAVAILABLE = "取得不可（UI非表示）"
+_MAX_QUANTITATIVE_SOURCES = 20 + _TIKTOK_KEYWORD_LIMIT * _TIKTOK_VIDEOS_PER_KEYWORD
+_MAX_QUANTITATIVE_EVIDENCE_CHARS = 100_000
+_SAFE_ERROR_CODE = re.compile(r"\b(?:TIKTOK|MEDIA)_[A-Z0-9_]{1,56}\b")
+_TIKTOK_VIDEO_PATH = re.compile(r"^/@[^/]+/video/[1-9][0-9]*/?$")
+
+
+@dataclass(frozen=True)
+class _TikTokMeasurement:
+    keyword: str
+    videos: tuple[TikTokVideo, ...]
+
+    @property
+    def urls(self) -> tuple[str, ...]:
+        return tuple(video.url for video in self.videos)
+
+
+@dataclass(frozen=True)
+class _TikTokEnrichment:
+    evidence_images: dict[int, list[EvidenceImage]]
+    measurements: tuple[_TikTokMeasurement, ...]
+    campaign_skill: ProposalCampaignSkill | None = None
+    campaign_output: ProposalCampaignOutput | None = None
+
+
+_CampaignFactory = Callable[[Searcher], ProposalCampaignSkill]
+_TikTokSearcher = Callable[..., TikTokSearchResult]
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -100,6 +147,149 @@ def _redact_confidential_value(value: object, term: str) -> object:
     if isinstance(value, str):
         return _redact_confidential_text(value, term)
     return value
+
+
+def _normalize_tiktok_keyword(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = " ".join(normalized.split()).lstrip("#").strip()
+    return normalized[:200].strip()
+
+
+def _tiktok_keywords(
+    *,
+    meta: Any,
+    category_term: str,
+    confidential: bool,
+    brand: str,
+) -> list[str]:
+    """Resolve a bounded, stable KW set without leaking a confidential brand."""
+
+    candidates = (
+        [category_term, meta.sector]
+        if confidential
+        else [*meta.kaiwai_keywords, *meta.target_categories]
+    )
+    keywords: list[str] = []
+    for candidate in candidates:
+        keyword = _normalize_tiktok_keyword(candidate)
+        if not keyword or keyword in keywords:
+            continue
+        if confidential and _contains_confidential_term(keyword, brand):
+            continue
+        keywords.append(keyword)
+        if len(keywords) >= _TIKTOK_KEYWORD_LIMIT:
+            break
+    return keywords
+
+
+def _is_tiktok_video_url(value: str) -> bool:
+    if not value or value != value.strip() or any(char.isspace() for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "www.tiktok.com"
+        and parsed.username is None
+        and parsed.password is None
+        and port in {None, 443}
+        and _TIKTOK_VIDEO_PATH.fullmatch(parsed.path) is not None
+    )
+
+
+def _safe_error_code(exc: BaseException) -> str:
+    match = _SAFE_ERROR_CODE.search(str(exc))
+    return match.group(0) if match else type(exc).__name__
+
+
+def _measure_tiktok_results(
+    keywords: list[str],
+    results: dict[str, tuple[TikTokVideo, ...]],
+    *,
+    confidential_term: str,
+) -> tuple[_TikTokMeasurement, ...]:
+    measurements: list[_TikTokMeasurement] = []
+    for keyword in keywords:
+        seen_urls: set[str] = set()
+        videos: list[TikTokVideo] = []
+        for video in results.get(keyword, ())[:_TIKTOK_VIDEOS_PER_KEYWORD]:
+            if not _is_tiktok_video_url(video.url) or video.url in seen_urls:
+                continue
+            if confidential_term and _contains_confidential_term(video.url, confidential_term):
+                continue
+            seen_urls.add(video.url)
+            videos.append(video)
+        if videos and any(video.play_count > 0 for video in videos):
+            measurements.append(_TikTokMeasurement(keyword=keyword, videos=tuple(videos)))
+    return tuple(measurements)
+
+
+def _add_quantitative_sources(
+    evidence: dict[str, list[str]],
+    text: str,
+    urls: tuple[str, ...],
+) -> None:
+    for claim in iter_quantitative_claims(text):
+        sources = evidence.setdefault(claim, [])
+        for url in urls:
+            if url not in sources and len(sources) < _MAX_QUANTITATIVE_SOURCES:
+                sources.append(url)
+
+
+def _quantitative_evidence_chars(evidence: dict[str, list[str]]) -> int:
+    return sum(len(claim) + sum(len(url) for url in urls) for claim, urls in evidence.items())
+
+
+def _format_tiktok_measurements(
+    measurements: tuple[_TikTokMeasurement, ...],
+) -> tuple[str, dict[str, str], dict[str, list[str]]]:
+    """Return section body, legacy-marker replacement, and provenance mapping."""
+
+    if not measurements:
+        return "", {}, {}
+
+    lines = ["検索総投稿数ではなく、取得時点のTikTok検索上位動画について実測した再生数です。"]
+    summaries: dict[str, str] = {}
+    quantitative_evidence: dict[str, list[str]] = {}
+    for measurement in measurements:
+        heading = f"## キーワード: {measurement.keyword}"
+        total_plays = sum(max(0, video.play_count) for video in measurement.videos)
+        summary = f"上位{len(measurement.videos)}本合計再生数 {total_plays:,}回"
+        field_summary = f"実測:「{measurement.keyword}」検索{summary}"
+        summaries[_normalize_tiktok_keyword(measurement.keyword)] = field_summary
+        lines.extend((heading, summary))
+        _add_quantitative_sources(quantitative_evidence, heading, measurement.urls)
+        _add_quantitative_sources(quantitative_evidence, summary, measurement.urls)
+        _add_quantitative_sources(quantitative_evidence, field_summary, measurement.urls)
+        for rank, video in enumerate(measurement.videos, start=1):
+            video_line = f"- {rank}位: {max(0, video.play_count):,}回 | {video.url}"
+            lines.append(video_line)
+            _add_quantitative_sources(quantitative_evidence, video_line, (video.url,))
+
+    return "\n".join(lines), summaries, quantitative_evidence
+
+
+def _replace_tiktok_unavailable_counts(
+    research: dict[str, object],
+    summaries: dict[str, str],
+) -> dict[str, object]:
+    updated = copy.deepcopy(research)
+    entries = updated.get("C_tiktok")
+    if not summaries or not isinstance(entries, list):
+        return updated
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("total_count") != _TIKTOK_UNAVAILABLE:
+            continue
+        related_tag = entry.get("related_tag")
+        if not isinstance(related_tag, str):
+            continue
+        summary = summaries.get(_normalize_tiktok_keyword(related_tag))
+        if summary:
+            entry["total_count"] = summary
+    return updated
 
 
 def _format_accounts(accounts: list[SelectedAccount]) -> str:
@@ -217,6 +407,7 @@ def _build_research_material(
     category_term: str,
     confidential: bool,
     confidential_term: str = "",
+    tiktok_measurements: str = "",
 ) -> str:
     sections = [
         "# 信頼境界",
@@ -229,6 +420,8 @@ def _build_research_material(
         "# 既存RAGから選定した事例候補",
         _format_cases(cases, confidential_term=confidential_term),
     ]
+    if tiktok_measurements:
+        sections.extend(("# 実測TikTokデータ", tiktok_measurements))
     if category_term:
         sections.extend(("# 守秘時カテゴリ語", category_term))
     if proposal_brief:
@@ -272,11 +465,15 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         deck: ProposalDeckSkill | None = None,
         slack: Any | None = None,
         account_db_path: str | None = None,
+        tiktok_searcher: _TikTokSearcher | None = None,
+        campaign_factory: _CampaignFactory | None = None,
     ) -> None:
         self._search = search
         self._deck = deck or self._build_deck()
         self._slack = slack
         self._account_db_path = account_db_path
+        self._tiktok_searcher = tiktok_searcher or search_tiktok
+        self._campaign_factory = campaign_factory or self._build_campaign
         self._owned_outputs: dict[str, ProposalDeckOutput] = {}
         self._owned_outputs_lock = threading.Lock()
 
@@ -303,7 +500,171 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             ),
         )
 
+    @staticmethod
+    def _build_campaign(searcher: Searcher) -> ProposalCampaignSkill:
+        return ProposalCampaignSkill(searcher=searcher)
+
+    def _collect_tiktok_enrichment(
+        self,
+        *,
+        keywords: list[str],
+        confidential_term: str,
+        ctx: SkillContext,
+        log: Any,
+    ) -> _TikTokEnrichment:
+        empty = _TikTokEnrichment(evidence_images={}, measurements=())
+        if not keywords:
+            log.warning("proposal_builder_tiktok_skip_no_safe_keywords")
+            return empty
+        if not MediaJobClient.is_configured():
+            log.info("proposal_builder_tiktok_skip_media_unconfigured")
+            return empty
+
+        search_results: dict[str, tuple[TikTokVideo, ...]] = {}
+        search_failures: dict[str, BaseException] = {}
+        results_lock = threading.Lock()
+
+        def cached_searcher(query: str, max_videos: int, request_id: str) -> list[TikTokVideo]:
+            try:
+                result = self._tiktok_searcher(
+                    query,
+                    max_videos=_TIKTOK_VIDEOS_PER_KEYWORD,
+                    request_id=request_id,
+                )
+                videos = tuple(result.videos[:_TIKTOK_VIDEOS_PER_KEYWORD])
+                if not videos:
+                    raise TikTokScrapeError("TIKTOK_EMPTY_RESULT")
+            except Exception as exc:
+                with results_lock:
+                    search_failures[query] = exc
+                raise
+            with results_lock:
+                search_results[query] = videos
+            return list(videos[:max_videos])
+
+        campaign_skill: ProposalCampaignSkill | None = None
+        campaign_output: ProposalCampaignOutput | None = None
+        try:
+            campaign_skill = self._campaign_factory(cached_searcher)
+            campaign_output = campaign_skill.run(
+                ProposalCampaignInput(
+                    keywords=keywords,
+                    max_keywords=_TIKTOK_KEYWORD_LIMIT,
+                ),
+                ctx,
+            )
+        except Exception as exc:
+            log.warning(
+                "proposal_builder_thumbnail_pipeline_failed",
+                error_type=type(exc).__name__,
+                error_code=_safe_error_code(exc),
+            )
+
+        if campaign_output is not None:
+            for result in campaign_output.results:
+                if result.success:
+                    continue
+                search_failure = search_failures.get(result.keyword)
+                if search_failure is not None:
+                    log.warning(
+                        "proposal_builder_tiktok_search_failed",
+                        error_type=type(search_failure).__name__,
+                        error_code=_safe_error_code(search_failure),
+                    )
+                else:
+                    log.warning(
+                        "proposal_builder_thumbnail_failed",
+                        error_type=result.error or "unknown",
+                        error_code=result.error or "no_result",
+                    )
+
+        measurements = _measure_tiktok_results(
+            keywords,
+            search_results,
+            confidential_term=confidential_term,
+        )
+        measured_keywords = {measurement.keyword for measurement in measurements}
+        unavailable_measurement_count = len(search_results.keys() - measured_keywords)
+        if unavailable_measurement_count:
+            log.warning(
+                "proposal_builder_tiktok_measurement_unavailable",
+                error_code="no_usable_source_backed_play_data",
+                keyword_count=unavailable_measurement_count,
+            )
+
+        evidence_images = campaign_output.evidence_images if campaign_output is not None else {}
+        if evidence_images:
+            safe_evidence: list[EvidenceImage] = []
+            invalid_source_count = 0
+            confidential_count = 0
+            for images in evidence_images.values():
+                for image in images:
+                    if not image.video_url or not _is_tiktok_video_url(image.video_url):
+                        invalid_source_count += 1
+                        continue
+                    metadata = " ".join(
+                        value
+                        for value in (
+                            image.keyword,
+                            image.source_url,
+                            image.image_path,
+                            image.video_url,
+                        )
+                        if value
+                    )
+                    if confidential_term and _contains_confidential_term(
+                        metadata, confidential_term
+                    ):
+                        confidential_count += 1
+                    else:
+                        safe_evidence.append(image)
+            evidence_images = build_evidence_images(safe_evidence)
+            if invalid_source_count:
+                log.warning(
+                    "proposal_builder_invalid_tiktok_evidence_removed",
+                    removed_count=invalid_source_count,
+                )
+            if confidential_count:
+                log.warning(
+                    "proposal_builder_confidential_evidence_removed",
+                    removed_count=confidential_count,
+                )
+
+        return _TikTokEnrichment(
+            evidence_images=evidence_images,
+            measurements=measurements,
+            campaign_skill=campaign_skill,
+            campaign_output=campaign_output,
+        )
+
+    @staticmethod
+    def _cleanup_tiktok_enrichment(enrichment: _TikTokEnrichment, log: Any) -> None:
+        if enrichment.campaign_skill is None or enrichment.campaign_output is None:
+            return
+        try:
+            enrichment.campaign_skill.cleanup_output(enrichment.campaign_output)
+        except Exception as exc:
+            log.warning(
+                "proposal_builder_thumbnail_cleanup_failed",
+                error_type=type(exc).__name__,
+                error_code=_safe_error_code(exc),
+            )
+
     def run(self, input: ProposalBuilderInput, ctx: SkillContext) -> ProposalBuilderOutput:
+        enrichment_lease: list[_TikTokEnrichment] = []
+        log = ctx.bind_logger(self.name)
+        try:
+            return self._run_pipeline(input, ctx, enrichment_lease)
+        finally:
+            for enrichment in enrichment_lease:
+                self._cleanup_tiktok_enrichment(enrichment, log)
+
+    def _run_pipeline(
+        self,
+        input: ProposalBuilderInput,
+        ctx: SkillContext,
+        enrichment_lease: list[_TikTokEnrichment],
+    ) -> ProposalBuilderOutput:
         log = ctx.bind_logger(self.name)
         research = parse_gemini_research(input.gemini_json)
         sanitized = sanitize_unverified_numbers(research)
@@ -371,15 +732,57 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 _redact_confidential_text(item, research.brand) for item in safe_constraints
             ]
             safe_category_term = _redact_confidential_text(safe_category_term, research.brand)
-        research_material = _build_research_material(
-            sanitized=safe_research,
-            cases=cases,
-            proposal_brief=safe_brief,
-            constraints=safe_constraints,
-            category_term=safe_category_term,
+        tiktok_keywords = _tiktok_keywords(
+            meta=meta,
+            category_term=input.category_term,
             confidential=input.confidential_product_name,
-            confidential_term=(research.brand if input.confidential_product_name else ""),
+            brand=research.brand,
         )
+        tiktok_enrichment = self._collect_tiktok_enrichment(
+            keywords=tiktok_keywords,
+            confidential_term=(research.brand if input.confidential_product_name else ""),
+            ctx=ctx,
+            log=log,
+        )
+        enrichment_lease.append(tiktok_enrichment)
+        tiktok_material, tiktok_summaries, tiktok_quantitative_evidence = (
+            _format_tiktok_measurements(tiktok_enrichment.measurements)
+        )
+        measured_research = _replace_tiktok_unavailable_counts(
+            safe_research,
+            tiktok_summaries,
+        )
+
+        confidential_term = research.brand if input.confidential_product_name else ""
+        try:
+            research_material = _build_research_material(
+                sanitized=measured_research,
+                cases=cases,
+                proposal_brief=safe_brief,
+                constraints=safe_constraints,
+                category_term=safe_category_term,
+                confidential=input.confidential_product_name,
+                confidential_term=confidential_term,
+                tiktok_measurements=tiktok_material,
+            )
+        except ValueError:
+            if not tiktok_material:
+                raise
+            log.warning(
+                "proposal_builder_tiktok_material_dropped",
+                error_code="research_material_limit",
+            )
+            tiktok_material = ""
+            tiktok_quantitative_evidence = {}
+            research_material = _build_research_material(
+                sanitized=safe_research,
+                cases=cases,
+                proposal_brief=safe_brief,
+                constraints=safe_constraints,
+                category_term=safe_category_term,
+                confidential=input.confidential_product_name,
+                confidential_term=confidential_term,
+            )
         quantitative_evidence = build_quantitative_evidence(
             sanitized.sanitized,
             sanitized.evidence_registry,
@@ -404,6 +807,34 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 sources = quantitative_evidence.setdefault(claim, [])
                 if case.url not in sources:
                     sources.append(case.url)
+        base_quantitative_evidence = copy.deepcopy(quantitative_evidence)
+        base_quantitative_chars = _quantitative_evidence_chars(base_quantitative_evidence)
+        for claim, urls in tiktok_quantitative_evidence.items():
+            sources = quantitative_evidence.setdefault(claim, [])
+            for url in urls:
+                if url not in sources and len(sources) < _MAX_QUANTITATIVE_SOURCES:
+                    sources.append(url)
+        if (
+            tiktok_material
+            and base_quantitative_chars <= _MAX_QUANTITATIVE_EVIDENCE_CHARS
+            and _quantitative_evidence_chars(quantitative_evidence)
+            > _MAX_QUANTITATIVE_EVIDENCE_CHARS
+        ):
+            log.warning(
+                "proposal_builder_tiktok_material_dropped",
+                error_code="quantitative_evidence_limit",
+            )
+            tiktok_material = ""
+            quantitative_evidence = base_quantitative_evidence
+            research_material = _build_research_material(
+                sanitized=safe_research,
+                cases=cases,
+                proposal_brief=safe_brief,
+                constraints=safe_constraints,
+                category_term=safe_category_term,
+                confidential=input.confidential_product_name,
+                confidential_term=confidential_term,
+            )
         product_name = (
             safe_category_term or "未発表商材"
             if input.confidential_product_name
@@ -456,6 +887,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             deadline=(f"投稿開始日は統合FMTの決定論的スケジュール欄へ反映 / {safe_moment}"),
             urls=evidence_urls,
             research_material=research_material,
+            evidence_images=tiktok_enrichment.evidence_images,
             posting_start_date=input.posting_start_date,
             auxiliary_placeholders={
                 "PB-ACCOUNTS": accounts_text,
@@ -496,10 +928,14 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
 
             status: Literal["ready", "draft"] = "ready" if not issues else "draft"
             warnings = [
-                "SNSキャプチャは未自動化（既存media workerまたは人手貼付の別工程）",
                 "アカウントの直近投稿・死活はDB選定後に未検証",
                 "Drive 03_レポートは現行SearchInputにfolder厳密filterがなく資料種別で検索",
             ]
+            if not tiktok_enrichment.evidence_images:
+                warnings.insert(
+                    0,
+                    "SNSキャプチャは未自動化（既存media workerまたは人手貼付の別工程）",
+                )
             if not os.environ.get("PROPOSAL_BUILDER_NEWS_CHANNEL_ID", "").strip():
                 warnings.append("general_news-tvはchannel_nameメタデータ一致のみで絞込")
 

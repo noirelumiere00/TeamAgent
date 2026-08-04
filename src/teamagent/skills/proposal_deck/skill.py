@@ -39,6 +39,7 @@ logger = structlog.get_logger(__name__)
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
+_MAX_RENDER_EVIDENCE = 20
 
 
 def _envflag(name: str) -> bool:
@@ -184,19 +185,106 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         """media job設定時はworkerへ委譲し、ローカル開発だけ従来rendererを使う。"""
         from teamagent.adapters.media_job import MediaJobClient
 
+        render_out = ProposalDeckSkill._filter_render_evidence(composer_out, request_id)
         if not MediaJobClient.is_configured() and MediaJobClient.local_runtime_enabled():
             from teamagent.skills.proposal_deck.renderer import render_deck
 
-            return render_deck(composer_out, template, out_path)
+            return render_deck(
+                render_out,
+                template,
+                out_path,
+                enable_images=bool(render_out.evidence_images),
+            )
         MediaJobClient.require_configured()
+        staged_images: list[tuple[int, int, bytes, str]] = []
+        for placeholder_id, images in render_out.evidence_images.items():
+            for image in images:
+                if not image.image_path:
+                    continue
+                try:
+                    body = Path(image.image_path).read_bytes()
+                except OSError as exc:
+                    logger.warning(
+                        "proposal_deck_evidence_image_unreadable",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                if not body:
+                    logger.warning(
+                        "proposal_deck_evidence_image_empty",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                    )
+                    continue
+                if body.startswith(b"\x89PNG\r\n\x1a\n"):
+                    content_type = "image/png"
+                elif body.startswith(b"\xff\xd8\xff"):
+                    content_type = "image/jpeg"
+                else:
+                    logger.warning(
+                        "proposal_deck_evidence_image_unsupported",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                    )
+                    continue
+                staged_images.append((placeholder_id, image.rank, body, content_type))
         pptx = MediaJobClient().render_proposal_pptx(
             template.read_bytes(),
-            composer_out.model_dump_json().encode("utf-8"),
+            render_out.model_dump_json().encode("utf-8"),
             request_fingerprint=f"{request_id}:proposal-pptx",
+            evidence_images=staged_images,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(pptx)
         return out_path
+
+    @staticmethod
+    def _filter_render_evidence(
+        composer_out: ComposerOutput,
+        request_id: str,
+    ) -> ComposerOutput:
+        """Keep only request-owned campaign images within the worker's 20-image contract."""
+
+        if not composer_out.evidence_images:
+            return composer_out
+        safe_request = _SAFE_NAME.sub("_", request_id).strip("_")[:64] or "request"
+        owned_prefix = f"teamagent-campaign-{safe_request}-"
+        selected: dict[int, list[Any]] = {}
+        selected_count = 0
+        rejected_count = 0
+        for placeholder_id in sorted(composer_out.evidence_images):
+            for image in sorted(
+                composer_out.evidence_images[placeholder_id],
+                key=lambda item: item.rank,
+            ):
+                if (
+                    selected_count >= _MAX_RENDER_EVIDENCE
+                    or image.rank > 20
+                    or not image.image_path
+                ):
+                    rejected_count += 1
+                    continue
+                try:
+                    resolved = Path(image.image_path).resolve(strict=True)
+                except (OSError, RuntimeError):
+                    rejected_count += 1
+                    continue
+                if not resolved.is_file() or not any(
+                    parent.name.startswith(owned_prefix) for parent in resolved.parents
+                ):
+                    rejected_count += 1
+                    continue
+                selected.setdefault(placeholder_id, []).append(image)
+                selected_count += 1
+        if rejected_count:
+            logger.warning(
+                "proposal_deck_evidence_filtered",
+                rejected_count=rejected_count,
+                selected_count=selected_count,
+            )
+        return composer_out.model_copy(update={"evidence_images": selected})
 
     def _emit_pdf_if_enabled(
         self,
@@ -317,6 +405,10 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             total_cost += resp.usage.cost_usd
             try:
                 data = json.loads(_extract_json(resp.text))
+                # evidence は上流フィーダだけを信頼し、モデルが出した値は検証前に破棄する。
+                # 不正な model-supplied path/key で repair を浪費させない。
+                if isinstance(data, dict):
+                    data["evidence_images"] = input.evidence_images
                 composer_out = ComposerOutput.model_validate(data)
                 forced_skips = set(input.forced_skipped_ids)
                 placeholders = {
@@ -355,6 +447,7 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                         "placeholders": placeholders,
                         "citations_per_placeholder": citations,
                         "skipped_placeholders": skipped,
+                        "evidence_images": input.evidence_images,
                         "auxiliary_placeholders": resolved_auxiliary,
                         "posting_start_date": input.posting_start_date,
                         "template_profile": input.template_profile,
