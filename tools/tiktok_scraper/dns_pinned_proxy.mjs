@@ -108,6 +108,13 @@ export async function startDnsPinnedProxy({
   });
   server.on("connect", async (request, client, head) => {
     let upstream;
+    // chromium 側が転送中にトンネルを切ると pipe の書き込みが client 側で
+    // EPIPE を emit する。ハンドラ未設置だと 'error' が未処理例外となり
+    // node ごと落ちる (Fargate 実測: 検索ページ遷移直後に write EPIPE で
+    // プロセス全体がクラッシュし JSON 出力ゼロ)。両方向とも相手側を畳む。
+    client.on("error", () => {
+      if (upstream) upstream.destroy();
+    });
     try {
       const hostname = parseConnectAuthority(request.url || "");
       const pinned = await resolvePinnedTarget(hostname, { lookup, blockedCidrs });
@@ -135,7 +142,7 @@ export async function startDnsPinnedProxy({
           client.destroy();
         }
       });
-      upstream.once("error", () => client.destroy());
+      upstream.on("error", () => client.destroy());
     } catch {
       if (upstream) upstream.destroy();
       client.destroy();

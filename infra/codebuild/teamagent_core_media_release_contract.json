@@ -138,7 +138,7 @@
         },
         {
           "key": "artifact.dns-pinned-proxy.sha256",
-          "value": "d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a",
+          "value": "ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19",
           "build_arg": "TIKTOK_DNS_PINNED_PROXY_SHA256",
           "oci_label": "io.teamagent.contract.dns-pinned-proxy-sha256",
           "dockerfile_uses": [

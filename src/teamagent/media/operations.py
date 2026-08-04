@@ -439,6 +439,11 @@ def _node_json(
     try:
         result = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "tiktok browser output invalid: rc=%s stderr=%s",
+            completed.returncode,
+            completed.stderr.decode("utf-8", "replace")[-300:],
+        )
         raise MediaOperationError(
             "MEDIA_TIKTOK_OUTPUT_INVALID",
             "TikTok output is invalid",
