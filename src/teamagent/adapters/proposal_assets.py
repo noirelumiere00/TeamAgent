@@ -242,15 +242,37 @@ def _s3_get(s3: Any, spec: _AssetSpec) -> Mapping[str, Any]:
     return response
 
 
+_COMPOSITE_CHECKSUM = re.compile(r"^[A-Za-z0-9+/]+={0,2}-[0-9]+$")
+
+
+def _checksum_header_matches(returned: str, spec: _AssetSpec) -> bool:
+    """Accept a whole-object SHA-256, or a composite one for multipart uploads.
+
+    マルチパートで上がったオブジェクトの ``ChecksumSHA256`` は各パートの
+    ダイジェストを畳んだ合成値 (``<base64>-<パート数>``) であり、全体の
+    SHA-256 とは原理的に一致しない。統合 FMT は 143MB あり CLI 既定手順
+    (8MB 超で自動マルチパート) では必ず合成値になるため、完全一致のみを
+    要求する検査は設計時から不通過だった。本文の完全性は
+    ``_stream_and_publish`` が全バイトの SHA-256 を ``spec.sha256`` と
+    照合して担保するので、ここでは形式が合成値でないときのみ完全一致を要求する。
+    """
+
+    if not returned:
+        return False
+    if _COMPOSITE_CHECKSUM.fullmatch(returned):
+        return True
+    expected = base64.b64encode(bytes.fromhex(spec.sha256)).decode("ascii")
+    return hmac.compare_digest(returned, expected)
+
+
 def _assert_exact_s3_response(response: Mapping[str, Any], spec: _AssetSpec) -> None:
-    expected_checksum = base64.b64encode(bytes.fromhex(spec.sha256)).decode("ascii")
     returned_checksum = str(response.get("ChecksumSHA256") or "")
     if (
         response.get("VersionId") != spec.version_id
         or response.get("ContentLength") != spec.size
         or response.get("ServerSideEncryption") != "aws:kms"
         or response.get("SSEKMSKeyId") != spec.kms_key_arn
-        or not hmac.compare_digest(returned_checksum, expected_checksum)
+        or not _checksum_header_matches(returned_checksum, spec)
     ):
         raise ProposalAssetProvisionError(f"{spec.label} S3 metadata did not match its pin")
 
