@@ -54,6 +54,22 @@ def _checksum_sha256_b64(hex_digest: str) -> str:
     return base64.b64encode(bytes.fromhex(hex_digest)).decode("ascii")
 
 
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """botocore の接続層エラーか（deadline 予算内で再試行してよい失敗か）。
+
+    deadline.py は「1 呼び出し＝リトライ 0 回」を意図的に貫くため、過渡的な
+    ConnectTimeoutError 1 発がジョブ全体を落とす（実測: worker 成功・S3 に
+    結果ありでも取得段の瞬断で TIKTOK_MEDIA_JOB_FAILED）。再試行の責務は
+    残り予算を再計算できる呼び出し側ループにあり、その判定にのみ使う。
+    """
+    try:
+        from botocore.exceptions import ConnectionError as _BotoConnectionError
+        from botocore.exceptions import HTTPClientError as _BotoHTTPClientError
+    except ImportError:  # pragma: no cover - botocore はランタイム必須依存
+        return False
+    return isinstance(exc, (_BotoConnectionError, _BotoHTTPClientError))
+
+
 class MediaJobError(RuntimeError):
     """media job境界のsubmit/status/integrity失敗。"""
 
@@ -344,11 +360,20 @@ class MediaJobClient:
         )
         while self._monotonic() <= monotonic_deadline:
             remaining_absolute = self._remaining(absolute_deadline)
-            result = self.get_result(
-                job_id,
-                deadline_epoch_s=int(absolute_deadline),
-                expected_audit_principal_hash=expected_audit_principal_hash,
-            )
+            try:
+                result = self.get_result(
+                    job_id,
+                    deadline_epoch_s=int(absolute_deadline),
+                    expected_audit_principal_hash=expected_audit_principal_hash,
+                )
+            except MediaJobError:
+                raise
+            except Exception as exc:
+                if not _is_transient_network_error(exc):
+                    raise
+                # 瞬断はこのポーリング 1 回の空振りとして扱う（全体は
+                # monotonic/absolute の両 deadline が引き続き制限する）
+                result = None
             if result is not None and result.status in ("done", "failed"):
                 return result
             remaining = monotonic_deadline - self._monotonic()
@@ -562,11 +587,20 @@ class MediaJobClient:
                 raise MediaJobError(result.error_code or "MEDIA_JOB_FAILED")
             artifacts: dict[str, bytes] = {}
             for artifact in result.artifacts:
-                self._remaining(execution_deadline_epoch_s)
-                artifacts[artifact.name] = self.download(
-                    artifact.object,
-                    deadline_epoch_s=execution_deadline_epoch_s,
-                )
+                for attempt in range(3):
+                    self._remaining(execution_deadline_epoch_s)
+                    try:
+                        artifacts[artifact.name] = self.download(
+                            artifact.object,
+                            deadline_epoch_s=execution_deadline_epoch_s,
+                        )
+                        break
+                    except MediaJobError:
+                        raise
+                    except Exception as exc:
+                        if not _is_transient_network_error(exc) or attempt == 2:
+                            raise
+                        self._sleeper(1.0)
                 self._remaining(execution_deadline_epoch_s)
             return artifacts, result.metadata
         finally:

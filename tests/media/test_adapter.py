@@ -708,3 +708,102 @@ def test_artifact_ttl_contract_is_bounded_and_environment_driven(
     monkeypatch.setenv("MEDIA_ARTIFACT_TTL_SECONDS", "2592001")
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_TTL_INVALID"):
         MediaJobClient.artifact_ttl_seconds()
+
+
+class _FlakyDynamo:
+    """1回目だけ実物の botocore ConnectTimeoutError を投げる DynamoDB フェイク。
+
+    本番の失敗モードそのもの (worker 成功後の取得段で接続層が瞬断し、
+    リトライ 0 回設計のため即ジョブ全体が落ちた) を再現する。
+    """
+
+    def __init__(self, item: dict[str, Any]) -> None:
+        self.item = item
+        self.calls = 0
+
+    def get_item(self, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        if self.calls == 1:
+            from botocore.exceptions import ConnectTimeoutError
+
+            raise ConnectTimeoutError(endpoint_url="https://dynamodb.example")
+        return {"Item": self.item}
+
+
+def test_wait_survives_transient_connect_timeout_and_returns_done() -> None:
+    job_id = "mj_0123456789abcdef01234567"
+    owner = "a" * 64
+    item, expected = _done_item(job_id, audit_principal_hash=owner)
+    ddb = _FlakyDynamo(item)
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=ddb, s3=object()),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        sleeper=lambda _s: None,
+        clock=lambda: 100.0,
+    )
+
+    result = client.wait(
+        job_id,
+        timeout_s=30,
+        deadline_epoch_s=130,
+        expected_audit_principal_hash=owner,
+    )
+    assert result == expected
+    assert ddb.calls == 2
+
+
+def test_wait_still_raises_on_non_transient_errors() -> None:
+    job_id = "mj_0123456789abcdef01234567"
+
+    class _BrokenDynamo:
+        def get_item(self, **_kwargs: Any) -> dict[str, Any]:
+            raise ValueError("not a network error")
+
+    client = MediaJobClient(
+        session=_Session(queue=object(), ddb=_BrokenDynamo(), s3=object()),
+        queue_url="queue",
+        table="jobs",
+        bucket=_BUCKET,
+        sleeper=lambda _s: None,
+        clock=lambda: 100.0,
+    )
+    with pytest.raises(ValueError, match="not a network error"):
+        client.wait(job_id, timeout_s=30, deadline_epoch_s=130)
+
+
+class _FlakyDownloadClient(_LifecycleClient):
+    def __init__(self, result: MediaJobResult, *, failures: int) -> None:
+        super().__init__(result)
+        self.failures = failures
+        self.download_attempts = 0
+
+    def download(self, ref: S3ObjectRef, *, deadline_epoch_s: int) -> bytes:
+        self.download_attempts += 1
+        if self.download_attempts <= self.failures:
+            from botocore.exceptions import ConnectTimeoutError
+
+            raise ConnectTimeoutError(endpoint_url="https://s3.example")
+        return super().download(ref, deadline_epoch_s=deadline_epoch_s)
+
+
+def test_run_sync_retries_transient_download_then_succeeds() -> None:
+    request = _request()
+    done = MediaJobResult(
+        job_id=request.job_id,
+        status="done",
+        artifacts=(MediaArtifact(name="media", object=_ref(request.job_id)),),
+    )
+    client = _FlakyDownloadClient(done, failures=2)
+    artifacts, _metadata = client.run_sync(request)
+    assert artifacts == {"media": b"artifact"}
+    assert client.download_attempts == 3
+
+    exhausted = _FlakyDownloadClient(done, failures=3)
+    from botocore.exceptions import ConnectTimeoutError
+
+    with pytest.raises(ConnectTimeoutError):
+        exhausted.run_sync(request)
+    assert exhausted.download_attempts == 3
+    assert exhausted.consumers == 0
