@@ -1156,7 +1156,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 29
+    assert len(inventory_names) == len(set(inventory_names)) == 30
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1165,6 +1165,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "mail_constraints",
         "workspace_search",
         "proposal_deck",
+        "proposal_builder",
     } <= set(excluded)
     assert not set(included) & set(excluded)
     assert scope["nativeTools"]["profile"] == config["tools"]["profile"]
@@ -1203,13 +1204,12 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "kind": "envAllTrue",
         "names": ["USE_TIKTOK_TOOLS"],
     }
-    assert activation_by_name["proposal_builder"] == {
+    proposal_activation = {
         "kind": "envAllTrue",
-        "names": [
-            "USE_PROPOSAL_BUILDER_TOOLS",
-            "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED",
-        ],
+        "names": ["USE_PROPOSAL_BUILDER_TOOLS"],
     }
+    assert activation_by_name["proposal_builder_submit"] == proposal_activation
+    assert activation_by_name["proposal_builder_status"] == proposal_activation
     assert activation_by_name["x_voice_search"] == {
         "kind": "envAllTrue",
         "names": ["USE_X_RESEARCH_TOOLS"],
@@ -1230,6 +1230,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     media_worker_gate = "enable_media_worker || enable_tiktok_acquire (deprecated alias)"
     assert tools_by_name["tiktok_acquire"]["terraformGate"] == media_worker_gate
     assert tools_by_name["tiktok_acquire_status"]["terraformGate"] == media_worker_gate
+    assert "s3-write" in tools_by_name["proposal_builder_submit"]["effect"]
     fargate = FARGATE.read_text()
     terraform = "\n".join(
         path.read_text() for path in sorted((ROOT / "infra/terraform").glob("*.tf"))
@@ -1247,10 +1248,40 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "enable_tiktok_acquire",
         "enable_media_worker",
         "enable_proposal_builder",
-        "proposal_builder_sync_runtime_verified",
         "enable_x_research",
     ):
         assert gate in terraform
+    assert "proposal_builder_sync_runtime_verified" not in terraform
+    table_start = terraform.index('resource "aws_dynamodb_table" "proposal_builder_jobs"')
+    table_end = terraform.index("\nresource ", table_start + 1)
+    proposal_table = terraform[table_start:table_end]
+    for table_contract in (
+        'billing_mode = "PAY_PER_REQUEST"',
+        'hash_key     = "job_id"',
+        'name = "job_id"',
+        "server_side_encryption {",
+        "point_in_time_recovery {",
+        'attribute_name = "expires_at"',
+        "prevent_destroy = true",
+    ):
+        assert table_contract in proposal_table
+    ledger_start = fargate.index('sid       = "ProposalBuilderJobLedger"')
+    ledger_end = fargate.index("\n  statement {", ledger_start)
+    proposal_ledger = fargate[ledger_start:ledger_end]
+    for action in ("dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"):
+        assert action in proposal_ledger
+    assert "aws_dynamodb_table.proposal_builder_jobs.arn" in proposal_ledger
+    assert "dynamodb:Scan" not in proposal_ledger
+    assert "dynamodb:DeleteItem" not in proposal_ledger
+    assert (
+        '{ name = "PROPOSAL_JOBS_TABLE", value = aws_dynamodb_table.proposal_builder_jobs.name }'
+    ) in fargate
+    for timing_env, value in (
+        ("PROPOSAL_JOB_HEARTBEAT_SECONDS", "30"),
+        ("PROPOSAL_JOB_STALE_SECONDS", "180"),
+        ("PROPOSAL_JOB_RETRY_AFTER_SECONDS", "30"),
+    ):
+        assert f'{{ name = "{timing_env}", value = "{value}" }}' in fargate
     assert (
         "media_worker_enabled = var.enable_media_worker || var.enable_tiktok_acquire" in terraform
     )

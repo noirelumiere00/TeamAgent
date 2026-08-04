@@ -191,6 +191,37 @@ resource "aws_dynamodb_table" "mcp_caller_claim_nonces" {
   deletion_protection_enabled = true
 }
 
+# proposal_builder runs inside the MCP task because only that role may invoke
+# Bedrock.  This ledger survives task replacement; a stale queued/running row is
+# terminalized as MCP_RESTARTED by proposal_builder_status.
+resource "aws_dynamodb_table" "proposal_builder_jobs" {
+  name         = "${var.project_name}-${var.environment}-proposal-builder-jobs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "job_id"
+
+  attribute {
+    name = "job_id"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # ============================================================
 # IAM
 # ============================================================
@@ -379,6 +410,14 @@ data "aws_iam_policy_document" "mcp_task" {
         "arn:aws:s3:::${var.proposal_builder_template_s3_bucket}/${var.proposal_builder_template_s3_key}",
         "arn:aws:s3:::${var.proposal_builder_account_s3_bucket}/${var.proposal_builder_account_s3_key}",
       ]
+    }
+  }
+  dynamic "statement" {
+    for_each = var.enable_proposal_builder ? [1] : []
+    content {
+      sid       = "ProposalBuilderJobLedger"
+      actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+      resources = [aws_dynamodb_table.proposal_builder_jobs.arn]
     }
   }
   statement {
@@ -655,7 +694,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # proposal_builderの一括tool公開。entrypointが以下のimmutable pinを検証し、task-local
       # PROPOSAL_BUILDER_TEMPLATE_PATH / PROPOSAL_BUILDER_ACCOUNT_DB_PATHへ変換してからMCPを起動する。
       { name = "USE_PROPOSAL_BUILDER_TOOLS", value = "1" },
-      { name = "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED", value = var.proposal_builder_sync_runtime_verified ? "1" : "0" },
+      { name = "PROPOSAL_JOBS_TABLE", value = aws_dynamodb_table.proposal_builder_jobs.name },
+      { name = "PROPOSAL_JOB_HEARTBEAT_SECONDS", value = "30" },
+      { name = "PROPOSAL_JOB_STALE_SECONDS", value = "180" },
+      { name = "PROPOSAL_JOB_RETRY_AFTER_SECONDS", value = "30" },
       { name = "PROPOSAL_BUILDER_MODEL_ID", value = var.x_analysis_model_id },
       { name = "PROPOSAL_BUILDER_MAX_TOKENS", value = "16000" },
       { name = "PROPOSAL_BUILDER_SLACK_UPLOAD_TIMEOUT_SECONDS", value = "240" },
@@ -780,11 +822,6 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.enable_proposal_builder || local.media_enabled == 1
       error_message = "enable_proposal_builder requires the generic media worker for the integrated PPTX renderer."
-    }
-
-    precondition {
-      condition     = !var.enable_proposal_builder || var.proposal_builder_sync_runtime_verified
-      error_message = "enable_proposal_builder requires a representative 143MB end-to-end sync runtime and Slack upload verification."
     }
 
     precondition {

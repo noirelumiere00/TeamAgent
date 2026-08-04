@@ -272,22 +272,36 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # proposal_builder: Gemini v3 JSON + 投稿開始日D → RAG事例/保護アカウント選定 →
-    # 既存proposal_deck 95枠 → 統合FMT → 検証済みSlack添付。**既定 OFF**
-    # USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED=1 は、代表143MB級で共有deadline内の
-    # render+Slack uploadを実測済みであるという運用attestation。未実測の同期副作用を
-    # OpenClawへ露出しない。
-    if _envflag("USE_PROPOSAL_BUILDER_TOOLS") and _envflag(
-        "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED"
-    ):
-        from teamagent.skills.proposal_builder.skill import ProposalBuilderSkill
+    # proposal_builder: submit は job row 作成後に MCP 内 daemon thread で生成を継続し、
+    # status が DynamoDB（未設定時だけprocess-local memory）の状態と安全な結果要約を返す。
+    # Composer/Bedrock は権限を持つ MCP task 内に残し、roleless media workerへ委譲しない。
+    # **既定 OFF**（USE_PROPOSAL_BUILDER_TOOLS=1）。
+    if _envflag("USE_PROPOSAL_BUILDER_TOOLS"):
+        from teamagent.adapters.proposal_job_store import ProposalJobStore
+        from teamagent.skills.proposal_builder.skill import (
+            ProposalBuilderSkill,
+            ProposalBuilderStatusSkill,
+            ProposalBuilderSubmitSkill,
+        )
 
+        _proposal_store = ProposalJobStore()
         specs.append(
             ToolSpec(
-                ProposalBuilderSkill.name,
-                ProposalBuilderSkill.description,
-                ProposalBuilderSkill,
-                factory=lambda: ProposalBuilderSkill(search=search),
+                ProposalBuilderSubmitSkill.name,
+                ProposalBuilderSubmitSkill.description,
+                ProposalBuilderSubmitSkill,
+                factory=lambda: ProposalBuilderSubmitSkill(
+                    builder_factory=lambda: ProposalBuilderSkill(search=search),
+                    store=_proposal_store,
+                ),
+            )
+        )
+        specs.append(
+            ToolSpec(
+                ProposalBuilderStatusSkill.name,
+                ProposalBuilderStatusSkill.description,
+                ProposalBuilderStatusSkill,
+                factory=lambda: ProposalBuilderStatusSkill(store=_proposal_store),
             )
         )
 

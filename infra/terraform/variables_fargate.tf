@@ -88,12 +88,6 @@ variable "proposal_builder_deliver_internal_drafts" {
   default     = false
 }
 
-variable "proposal_builder_sync_runtime_verified" {
-  description = "代表143MB級でRAG→LLM→render→Slack uploadがOpenClaw共有deadline内に完走したことを受入環境で確認済みならtrue"
-  type        = bool
-  default     = false
-}
-
 variable "proposal_builder_template_s3_bucket" {
   description = "統合FMTのversioning/SSE-KMS有効S3 bucket（enable_proposal_builder時必須）"
   type        = string

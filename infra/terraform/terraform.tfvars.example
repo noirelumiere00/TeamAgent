@@ -35,7 +35,6 @@ lambda_timeout     = 300
 # proposal_builder（既定OFF）。実測済み統合FMTを作成し、2資産をversioning+SSE-KMS有効S3へ
 # 配置した後だけ値を埋める。アカウントDB本体や実bucket/key/versionはrepoへ書かない。
 # enable_proposal_builder                  = true
-# proposal_builder_sync_runtime_verified   = true # 代表143MB E2Eを共有deadline内で実測後のみ
 # proposal_builder_template_s3_bucket      = "<private-assets-bucket>"
 # proposal_builder_template_s3_key         = "<integrated-template-key>"
 # proposal_builder_template_s3_version_id  = "<immutable-version-id>"

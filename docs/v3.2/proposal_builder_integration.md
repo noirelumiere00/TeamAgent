@@ -3,21 +3,23 @@
 ## 1. 結論
 
 既存の `proposal_deck`（FMT v2、95数値枠、coverage/self-repair、PPTX renderer）は
-作り直さない。差分として `proposal_builder` を追加し、次の経路を1つのMCP toolに閉じる。
+作り直さない。同期 `proposal_builder.run()` はPython互換用に残し、MCP面は
+`proposal_builder_submit` / `proposal_builder_status` の2ツールにする。
 
 ```text
 Slack / OpenClaw
-  └─ Gemini v3 JSON + 投稿開始日 D
-       ├─ JSON構文だけを限定修復・strict schema検証
-       ├─ 未検証数値の入力側サニタイズ
-       ├─ 既存RAGから実績候補を検索・外部向け構造化投影
-       ├─ 保護S3から取得したアカウントDBで上位5件を選定
-       ├─ AiLa LLM → 既存95枠 ComposerOutput
-       ├─ 数値と引用を決定論的に再検証
-       ├─ 事例・アカウント・D相対日付を統合FMTへ注入
-       ├─ 既存media workerでPPTX化
-       └─ readyだけ依頼元Slack threadへ添付（失敗時DM）
+  ├─ proposal_builder_submit(Gemini v3 JSON + 投稿開始日 D)
+  │    ├─ DynamoDBへqueued rowを作成（local/testはprocess内dict）
+  │    └─ MCP process内daemon threadを起動してjob_idを即返す
+  │         ├─ strict検証、RAG/account選定、AiLa LLM、数値・引用検証
+  │         ├─ 既存media workerでPPTX rendererだけを実行
+  │         └─ readyだけ依頼元Slack threadへ添付（失敗時DM）→ done/failed
+  └─ proposal_builder_status(job_id) → queued | running | done | failed
 ```
+
+Composer/Bedrockを含むrun本体は、権限を持たないroleless media workerへ移さずMCP task内に残す。
+running中はheartbeatで `updated_at` を更新し、thread起動前またはMCP再起動後に更新が止まったqueued/running rowはstatus照会時に
+`failed / MCP_RESTARTED` へ条件付き更新する。
 
 PowerPoint COMはランタイムから除く。前段14枚、検証2枚、2週間モデル、
 D相対ガントの固定レイアウトを、案件作成前に1つの83枚統合FMTへ焼き込む。
@@ -76,7 +78,7 @@ S3 VersionId、byte size、SHA-256、KMS key ARNを固定する。起動時にta
 | URL screenshot | 不要 | 外部はWindows Chrome path固定（`PB_ROOT/scripts/screenshot_pipeline.py:10-20`）。第一段では本文・事例・account・日付を価値範囲とし、SNS captureは人手または既存media系の後段に分離する。既存rendererには取得済み画像注入がある（`proposal_deck/renderer.py:289-381`）。 |
 | 残留token・FMT監査 | 既存で足りる | 既存auditを再利用し、builder profileだけ83枚、95 ID exact、補助枠、版marker、全週次date offsetへ強化した（`proposal_deck/renderer.py:384-464,474-503`）。外部の非致命checker（`PB_ROOT/scripts/build_proposal.py:140-165`）よりfail-closed。 |
 | 143MB超PPTXのmedia搬送 | 作り直しが要る | 一般mediaの128MiB境界は維持し、`proposal_pptx` のtemplate/outputだけ256MiBへ拡張した（`src/teamagent/media/contracts.py:29-35,340-368`、`media/tool_contracts.py:455-462`、`infra/terraform/lambda/tiktok_dispatch/handler.py:58-60,341-345,1068-1073,1943-1961`）。 |
-| Slack tool公開と添付 | 移植が要る | factory gateと共有Search注入は `orchestrator/factory.py:275-294`、OpenClaw allow/routingは `infra/openclaw/openclaw.config.json5:163-167` と `SOUL.md:156-167`。tool公開には機能gateに加え代表143MB E2Eの同期実測attestationを要求する。Slack clientはbuilderだけ明示timeoutを持ち、readyはverified callerのthread→本人DM、両方失敗かつURLなしは成功扱いにしない（`proposal_builder/skill.py:536-578,635-688`、`adapters/slack_client.py:51-76`）。 |
+| Slack tool公開と添付 | 移植が要る | factoryは `proposal_builder_submit/status` を同じjob storeへ接続し、OpenClawはjob_idをpollする。同期runtime attestationは廃止し、重いrunはMCP内threadで継続する。Slack clientはbuilderだけ明示timeoutを持ち、readyはverified callerのthread→本人DM、両方失敗かつURLなしは成功扱いにしない。 |
 | 生成後の会話微調整 | 不要 | 外部では主用途後半（`PB_ROOT/SKILL.md:79-80`）だが、今回の第一段はSlack一回生成が受入範囲。再生成は新しいGemini/与件/制約で別versionを作る。差分編集UIは後続段階。 |
 
 ## 4. 統合FMT契約とCOM解消
@@ -184,6 +186,7 @@ versioning＋SSE-KMS有効の非公開S3を推奨する。Secrets Managerには�
 | `skills/proposal_builder/research.py` | 構文限定修復、URL registry、入力metric sanitize |
 | `skills/proposal_builder/selectors.py` | account exact score、RAG case検索/安全投影/dedupe |
 | `skills/proposal_builder/skill.py` | 全体orchestration、ready/draft、Slack配送 |
+| `adapters/proposal_job_store.py` | DynamoDB job row、process内fallback、状態遷移CAS |
 | `prompts/proposal_deck/v2/system.md` | 青木版ルールをAiLa 95-ID/citation契約へ翻訳 |
 | `skills/proposal_deck/provenance.py` | Composer出力のmetric/citation検査 |
 | `skills/proposal_deck/renderer.py` | 既存数値枠＋補助枠＋D相対日付＋統合FMT監査 |
@@ -197,18 +200,17 @@ versioning＋SSE-KMS有効の非公開S3を推奨する。Secrets Managerには�
 
 ## 9. 段階計画と受け入れ条件
 
-### 第一段: Slack one-shot MVP（COM解消を含む）
+### 第一段: Slack非同期job MVP（COM解消を含む）
 
 実施:
 
 - repo外で83枚統合FMTを作り、S3 fixed versionにする。
 - account DBを同じ保護方式でS3へ置く。
-- `proposal_builder` gateを有効化する前にasset pinとchannel metadataを設定し、
-  `proposal_builder_sync_runtime_verified` は代表E2Eの実測後だけtrueにする。
-- Gemini v3＋D→RAG/account→95枠→PPTX→Slackを一回で通す。
+- `proposal_builder` gateを有効化する前にasset pin、channel metadata、Terraformによる専用DynamoDB tableの作成とtaskへの注入を確認する。
+- submitでjob_idを即返し、statusでqueued/running/done/failedを照会する。
+- background threadでGemini v3＋D→RAG/account→95枠→PPTX→Slackを一回で通す。
 - screenshotは対象外、draftは外部配送しない。
-- 同期経路は既存OpenClawの共有deadline内でのみ動かす。代表143MB級で完走を実測するまで
-  `USE_PROPOSAL_BUILDER_TOOLS` はOFFのままにする。
+- queued/runningの更新がstale閾値を超えた場合は `MCP_RESTARTED` でfail-closeする。job rowはTTLで7日後に削除する。
 
 受け入れ条件:
 
@@ -218,11 +220,10 @@ versioning＋SSE-KMS有効の非公開S3を推奨する。Secrets Managerには�
 - sourceなしmetric、入力にないmetric、別object URL、同ID citationなしはreadyにならない。
 - confidential=trueで元brandが本文/citation/補助枠へ残らない。
 - case/accountが選定され、raw account DBとraw RAG chunkはtool output/logへ出ない。
-- `status=ready` の既定経路はverified callerのSlack threadまたは本人DMへ添付される。
+- job `status=done` かつ `proposal_status=ready` の既定経路はverified callerのSlack threadまたは本人DMへ添付される。
   両方失敗し代替URLもなければtool successにしない。
-- 代表サイズでRAG、最大5回のLLM、143MB級template搬送/描画、Slack uploadを含む
-  end-to-endが共有deadline内に収まる。収まらなければ同期toolを有効化せず、
-  submit/status＋完了時Slack投稿の非同期job化を第一段の必須差分に切り替える。
+- submit自体はMCP timeout内にjob row作成とthread起動だけを終え、生成時間に依存しない。
+- stale判定とdone更新が競合しても、failed rowがdoneへ復活しない。
 - draftは既定で添付されず、理由が `verification_issues` に出る。
 - PPTX、account DB、静的事例DBはrepo/imageへ含まれない。
 
@@ -277,9 +278,10 @@ versioning＋SSE-KMS有効の非公開S3を推奨する。Secrets Managerには�
   filterが見当たらないため、第一段はdoc type filterとした。
 - `#general_news-tv` のIDは外部文書に記載があるが、現行ingest `source_uri` の値と
   実データ照合していないため、設定値として注入し、未設定時だけchannel nameへfallbackする。
-- 146MB超の最終PPTXをSlackへ添付できる上限、upload時間、OpenClaw/MCPの300秒内完走、
-  Slack SDKの既定HTTP timeout、media worker memoryは未実測。このためtool gateは既定OFFで、
-  同期経路を本番有効化できるとはまだ判定していない。
+- 146MB超の最終PPTXをSlackへ添付できる上限、upload時間、Slack SDK timeout、
+  media worker memoryは未実測。生成全体は非同期化済みだが、各下流I/O固有のtimeoutは引き続き計測する。
+- MCP task再起動でprocess内threadは失われる。DynamoDB上のqueued/running rowはheartbeat停止後、
+  status照会が `MCP_RESTARTED` へfail-closeし、自動再実行はしない。
 - Gemini v3 URLが実在し、内容がclaimを意味的に裏付けることは入力側の契約。
   本実装はネットワークでURL本文を再取得していない。
 - 統合FMTのfull-object S3 checksum、VersionId、KMS key、sizeは未設定。

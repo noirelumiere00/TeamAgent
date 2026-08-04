@@ -376,7 +376,7 @@ class ProposalBuilderInput(_StrictModel):
         default=4,
         ge=0,
         le=4,
-        description="Composer自己修復回数（同期runtime attestationの最大5回呼出しに固定）",
+        description="Composer自己修復回数（初回を含む最大5回呼出しに固定）",
     )
 
     @field_validator("gemini_json")
@@ -417,6 +417,25 @@ class ProposalBuilderInput(_StrictModel):
         return value
 
 
+class ProposalBuilderSubmitInput(ProposalBuilderInput):
+    """非同期 proposal-builder job の投入入力。"""
+
+
+class ProposalBuilderSubmitOutput(_StrictModel):
+    """重い生成処理を待たずに返す job 受付結果。"""
+
+    job_id: str
+    status: Literal["queued", "failed"]
+    retry_after_seconds: int = Field(ge=0)
+    message: str
+
+
+class ProposalBuilderStatusInput(_StrictModel):
+    """proposal_builder_submit が返した job_id の照会入力。"""
+
+    job_id: str = Field(min_length=1, max_length=100)
+
+
 class ProposalBuilderCaseReference(_StrictModel):
     """生成物へ採用したRAG事例のトレース情報。"""
 
@@ -445,6 +464,31 @@ class ProposalBuilderOutput(_StrictModel):
     total_cost_usd: float = Field(ge=0.0)
 
 
+class ProposalBuilderStatusOutput(_StrictModel):
+    """非同期 job の状態と、完了時の既存出力サマリ。"""
+
+    job_id: str
+    status: Literal["queued", "running", "done", "failed"]
+    retry_after_seconds: int = Field(default=0, ge=0)
+    proposal_status: Literal["ready", "draft"] | None = None
+    result_message: str = ""
+    pptx_url: str | None = None
+    version_id: str | None = None
+    filled_count: int | None = Field(default=None, ge=0)
+    skipped_count: int | None = Field(default=None, ge=0)
+    coverage_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    skipped_ids: list[int] = Field(default_factory=list)
+    selected_account_names: list[str] = Field(default_factory=list)
+    case_references: list[ProposalBuilderCaseReference] = Field(default_factory=list)
+    verification_issues: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    slack_delivered: bool = False
+    delivery_target: Literal["thread", "dm", "none"] = "none"
+    total_cost_usd: float = Field(default=0.0, ge=0.0)
+    error_code: str | None = None
+    message: str = ""
+
+
 __all__ = [
     "GEMINI_RESEARCH_OBJECT_SEMANTICS",
     "AlternativeEvidence",
@@ -461,6 +505,10 @@ __all__ = [
     "ProposalBuilderCaseReference",
     "ProposalBuilderInput",
     "ProposalBuilderOutput",
+    "ProposalBuilderStatusInput",
+    "ProposalBuilderStatusOutput",
+    "ProposalBuilderSubmitInput",
+    "ProposalBuilderSubmitOutput",
     "PublicityEvidence",
     "QuantitativeClaimRole",
     "ResearchIssue",

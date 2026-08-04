@@ -67,17 +67,18 @@
       "enabledBy": { "kind": "always" }
     },
     {
-      "name": "proposal_builder",
-      "effect": "company-data-read-generated-content-s3-read-slack-file-write",
+      "name": "proposal_builder_submit",
+      "effect": "company-data-read-generated-content-s3-read-s3-write-dynamodb-job-write-slack-file-write",
       "terraformGate": "enable_proposal_builder",
       "defaultEnabledByTerraform": false,
-      "enabledBy": {
-        "kind": "envAllTrue",
-        "names": [
-          "USE_PROPOSAL_BUILDER_TOOLS",
-          "USE_PROPOSAL_BUILDER_SYNC_RUNTIME_VERIFIED"
-        ]
-      }
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_PROPOSAL_BUILDER_TOOLS"] }
+    },
+    {
+      "name": "proposal_builder_status",
+      "effect": "job-status-read-dynamodb-stale-write",
+      "terraformGate": "enable_proposal_builder",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_PROPOSAL_BUILDER_TOOLS"] }
     },
     {
       "name": "tiktok_search",

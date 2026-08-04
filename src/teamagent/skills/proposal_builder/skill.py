@@ -11,6 +11,7 @@ import threading
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, ClassVar, Literal
 from urllib.parse import urlsplit
 
@@ -18,6 +19,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.media_job import MediaJobClient
+from teamagent.adapters.proposal_job_store import ProposalJobStore, new_proposal_job_id
 from teamagent.adapters.tiktok_scraper import (
     TikTokScrapeError,
     TikTokSearchResult,
@@ -35,6 +37,10 @@ from teamagent.skills.proposal_builder.schema import (
     ProposalBuilderCaseReference,
     ProposalBuilderInput,
     ProposalBuilderOutput,
+    ProposalBuilderStatusInput,
+    ProposalBuilderStatusOutput,
+    ProposalBuilderSubmitInput,
+    ProposalBuilderSubmitOutput,
 )
 from teamagent.skills.proposal_builder.selectors import (
     AccountProspect,
@@ -66,6 +72,13 @@ _MAX_QUANTITATIVE_SOURCES = 20 + _TIKTOK_KEYWORD_LIMIT * _TIKTOK_VIDEOS_PER_KEYW
 _MAX_QUANTITATIVE_EVIDENCE_CHARS = 100_000
 _SAFE_ERROR_CODE = re.compile(r"\b(?:TIKTOK|MEDIA)_[A-Z0-9_]{1,56}\b")
 _TIKTOK_VIDEO_PATH = re.compile(r"^/@[^/]+/video/[1-9][0-9]*/?$")
+_PROPOSAL_JOB_ERROR_CODE = "PROPOSAL_BUILD_FAILED"
+_PROPOSAL_JOB_START_ERROR_CODE = "JOB_START_FAILED"
+_PROPOSAL_JOB_STATE_ERROR_CODE = "JOB_STATE_WRITE_FAILED"
+_PROPOSAL_JOB_RESULT_ERROR_CODE = "RESULT_INVALID"
+_PROPOSAL_JOB_RETRY_SECONDS = 30
+_PROPOSAL_JOB_HEARTBEAT_SECONDS = 30
+_PROPOSAL_JOB_STALE_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -88,6 +101,35 @@ class _TikTokEnrichment:
 
 _CampaignFactory = Callable[[Searcher], ProposalCampaignSkill]
 _TikTokSearcher = Callable[..., TikTokSearchResult]
+_ProposalBuilderFactory = Callable[[], "ProposalBuilderSkill"]
+_ProposalInputValidator = Callable[[ProposalBuilderInput], None]
+_ThreadLauncher = Callable[[Callable[[], None], str], None]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _launch_daemon_thread(target: Callable[[], None], name: str) -> None:
+    threading.Thread(target=target, name=name, daemon=True).start()
+
+
+def _parse_job_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _validate_submit_input(input: ProposalBuilderInput) -> None:
+    # ProposalBuilderInput bounds the outer MCP payload; the A-H research
+    # contract is intentionally parsed at the Skill boundary.
+    parse_gemini_research(input.gemini_json)
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -101,6 +143,27 @@ def _envint(name: str, default: int, *, minimum: int, maximum: int) -> int:
     except ValueError:
         value = default
     return min(maximum, max(minimum, value))
+
+
+def _configured_heartbeat_seconds() -> int:
+    return _envint(
+        "PROPOSAL_JOB_HEARTBEAT_SECONDS",
+        _PROPOSAL_JOB_HEARTBEAT_SECONDS,
+        minimum=5,
+        maximum=300,
+    )
+
+
+def _configured_stale_seconds() -> int:
+    heartbeat_seconds = _configured_heartbeat_seconds()
+    configured = _envint(
+        "PROPOSAL_JOB_STALE_SECONDS",
+        _PROPOSAL_JOB_STALE_SECONDS,
+        minimum=60,
+        maximum=86_400,
+    )
+    # A delayed heartbeat must not make a healthy job look like an MCP restart.
+    return max(configured, heartbeat_seconds * 3)
 
 
 def _confidential_pattern(term: str) -> re.Pattern[str] | None:
@@ -651,6 +714,13 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             )
 
     def run(self, input: ProposalBuilderInput, ctx: SkillContext) -> ProposalBuilderOutput:
+        """Run synchronously for compatibility with existing Python callers."""
+
+        return self._execute(input, ctx)
+
+    def _execute(self, input: ProposalBuilderInput, ctx: SkillContext) -> ProposalBuilderOutput:
+        """Shared proposal execution path used by sync and submitted jobs."""
+
         enrichment_lease: list[_TikTokEnrichment] = []
         log = ctx.bind_logger(self.name)
         try:
@@ -1112,4 +1182,432 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
             self._deck.cleanup_output(deck_output)
 
 
-__all__ = ["ProposalBuilderSkill"]
+@register
+class ProposalBuilderSubmitSkill(
+    BaseSkill[ProposalBuilderSubmitInput, ProposalBuilderSubmitOutput]
+):
+    """Create a proposal job and run it on a daemon thread in this MCP process."""
+
+    name: ClassVar[str] = "proposal_builder_submit"
+    description: ClassVar[str] = (
+        "Gemini v3 JSONと投稿開始日Dを検証して提案書生成jobを受け付け、即job_idを返す。"
+        "生成はMCP内のバックグラウンドthreadで継続するため、返された秒数後に"
+        "proposal_builder_statusで同じjob_idを照会する。queued/running中は再submitしない。"
+    )
+    input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
+    output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput
+    version: ClassVar[str] = "1.0"
+    owner: ClassVar[str] = "AiLa"
+    audit_tag: ClassVar[str] = "proposal-artifact-submit"
+
+    def __init__(
+        self,
+        *,
+        builder_factory: _ProposalBuilderFactory | None = None,
+        store: ProposalJobStore | None = None,
+        thread_launcher: _ThreadLauncher = _launch_daemon_thread,
+        input_validator: _ProposalInputValidator = _validate_submit_input,
+        heartbeat_seconds: int | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        self._builder_factory = builder_factory
+        self._store = store or ProposalJobStore()
+        self._thread_launcher = thread_launcher
+        self._input_validator = input_validator
+        self._heartbeat_seconds = (
+            _configured_heartbeat_seconds()
+            if heartbeat_seconds is None
+            else max(0, heartbeat_seconds)
+        )
+        self._retry_after_seconds = (
+            _envint(
+                "PROPOSAL_JOB_RETRY_AFTER_SECONDS",
+                _PROPOSAL_JOB_RETRY_SECONDS,
+                minimum=5,
+                maximum=300,
+            )
+            if retry_after_seconds is None
+            else max(0, retry_after_seconds)
+        )
+
+    def run(
+        self,
+        input: ProposalBuilderSubmitInput,
+        ctx: SkillContext,
+    ) -> ProposalBuilderSubmitOutput:
+        self._input_validator(input)
+        job_id = new_proposal_job_id()
+        log = ctx.bind_logger(self.name)
+        request_summary = {
+            "request_id": ctx.request_id,
+            "posting_start_date": input.posting_start_date.isoformat(),
+            "confidential_product_name": input.confidential_product_name,
+            "case_limit": input.case_limit,
+            "max_repair": input.max_repair,
+        }
+        self._store.create_job(job_id, request_summary)
+
+        job_input = input.model_copy(deep=True)
+        job_ctx = SkillContext(
+            request_id=ctx.request_id,
+            user_id=ctx.user_id,
+            metadata=copy.deepcopy(ctx.metadata),
+        )
+        try:
+            self._thread_launcher(
+                lambda: self._run_background(job_id, job_input, job_ctx),
+                f"proposal-builder-{job_id}",
+            )
+        except Exception as exc:
+            self._store.mark_failed(
+                job_id,
+                _PROPOSAL_JOB_START_ERROR_CODE,
+                expected_statuses=("queued",),
+            )
+            log.warning(
+                "proposal_builder_thread_start_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
+            return ProposalBuilderSubmitOutput(
+                job_id=job_id,
+                status="failed",
+                retry_after_seconds=0,
+                message="提案書生成jobの開始に失敗しました。",
+            )
+
+        log.info("proposal_builder_submitted", job_id=job_id)
+        return ProposalBuilderSubmitOutput(
+            job_id=job_id,
+            status="queued",
+            retry_after_seconds=self._retry_after_seconds,
+            message="提案書生成を受け付けました。完了までstatusを照会してください。",
+        )
+
+    def _run_background(
+        self,
+        job_id: str,
+        input: ProposalBuilderInput,
+        ctx: SkillContext,
+    ) -> None:
+        log = ctx.bind_logger(self.name)
+        try:
+            claimed = self._store.mark_running(job_id)
+        except Exception as exc:
+            log.warning(
+                "proposal_builder_job_claim_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
+            try:
+                self._store.mark_failed(job_id, _PROPOSAL_JOB_STATE_ERROR_CODE)
+            except Exception as write_exc:
+                log.warning(
+                    "proposal_builder_job_failure_write_failed",
+                    job_id=job_id,
+                    error_type=type(write_exc).__name__,
+                )
+            return
+        if not claimed:
+            log.warning("proposal_builder_job_claim_rejected", job_id=job_id)
+            return
+
+        heartbeat_stop = threading.Event()
+        heartbeat_thread: threading.Thread | None = None
+        if self._heartbeat_seconds:
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                args=(job_id, heartbeat_stop, log),
+                name=f"proposal-heartbeat-{job_id}",
+                daemon=True,
+            )
+            heartbeat_thread.start()
+
+        builder: ProposalBuilderSkill | None = None
+        output: ProposalBuilderOutput | None = None
+        try:
+            if self._builder_factory is None:
+                raise RuntimeError("proposal builder factory is not configured")
+            builder = self._builder_factory()
+            execute = getattr(builder, "_execute", None)
+            if not callable(execute):
+                execute = builder.run
+            output = execute(input, ctx)
+            result_json = output.model_dump_json()
+            try:
+                stored = self._store.mark_done(job_id, result_json)
+            except Exception as exc:
+                log.warning(
+                    "proposal_builder_result_write_failed",
+                    job_id=job_id,
+                    error_type=type(exc).__name__,
+                )
+                self._store.mark_failed(
+                    job_id,
+                    _PROPOSAL_JOB_STATE_ERROR_CODE,
+                    expected_statuses=("running",),
+                )
+            else:
+                if stored:
+                    log.info(
+                        "proposal_builder_job_done",
+                        job_id=job_id,
+                        proposal_status=output.status,
+                        slack_delivered=output.slack_delivered,
+                    )
+                else:
+                    log.warning("proposal_builder_terminal_write_rejected", job_id=job_id)
+        except Exception as exc:
+            log.warning(
+                "proposal_builder_job_failed",
+                job_id=job_id,
+                error_type=type(exc).__name__,
+            )
+            try:
+                self._store.mark_failed(
+                    job_id,
+                    _PROPOSAL_JOB_ERROR_CODE,
+                    expected_statuses=("running",),
+                )
+            except Exception as write_exc:
+                log.warning(
+                    "proposal_builder_job_failure_write_failed",
+                    job_id=job_id,
+                    error_type=type(write_exc).__name__,
+                )
+        finally:
+            heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
+            if builder is not None and output is not None:
+                try:
+                    builder.cleanup_output(output)
+                except Exception as exc:
+                    log.warning(
+                        "proposal_builder_output_cleanup_failed",
+                        job_id=job_id,
+                        error_type=type(exc).__name__,
+                    )
+
+    def _heartbeat_loop(
+        self,
+        job_id: str,
+        stop: threading.Event,
+        log: Any,
+    ) -> None:
+        while not stop.wait(self._heartbeat_seconds):
+            try:
+                if not self._store.heartbeat(job_id):
+                    return
+            except Exception as exc:
+                log.warning(
+                    "proposal_builder_heartbeat_failed",
+                    job_id=job_id,
+                    error_type=type(exc).__name__,
+                )
+
+
+@register
+class ProposalBuilderStatusSkill(
+    BaseSkill[ProposalBuilderStatusInput, ProposalBuilderStatusOutput]
+):
+    """Read proposal job state and terminalize stale in-process executions."""
+
+    name: ClassVar[str] = "proposal_builder_status"
+    description: ClassVar[str] = (
+        "proposal_builder_submitが返したjob_idのqueued/running/done/failedを照会する。"
+        "doneならPPTX URL、Slack添付済みフラグ、ready/draft等の安全な結果サマリを返す。"
+        "running中は再submitせず、retry_after_seconds後に同じjob_idを再照会する。"
+    )
+    input_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusInput
+    output_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusOutput
+    version: ClassVar[str] = "1.0"
+    owner: ClassVar[str] = "AiLa"
+    audit_tag: ClassVar[str] = "proposal-artifact-status"
+
+    def __init__(
+        self,
+        *,
+        store: ProposalJobStore | None = None,
+        stale_after_seconds: int | None = None,
+        retry_after_seconds: int | None = None,
+        clock: Callable[[], datetime] = _utc_now,
+    ) -> None:
+        self._store = store or ProposalJobStore()
+        self._stale_after_seconds = (
+            _configured_stale_seconds()
+            if stale_after_seconds is None
+            else max(1, stale_after_seconds)
+        )
+        self._retry_after_seconds = (
+            _envint(
+                "PROPOSAL_JOB_RETRY_AFTER_SECONDS",
+                _PROPOSAL_JOB_RETRY_SECONDS,
+                minimum=5,
+                maximum=300,
+            )
+            if retry_after_seconds is None
+            else max(0, retry_after_seconds)
+        )
+        self._clock = clock
+
+    def run(
+        self,
+        input: ProposalBuilderStatusInput,
+        ctx: SkillContext,
+    ) -> ProposalBuilderStatusOutput:
+        log = ctx.bind_logger(self.name)
+        row = self._store.get_job(input.job_id)
+        if row is None:
+            return ProposalBuilderStatusOutput(
+                job_id=input.job_id,
+                status="failed",
+                error_code="JOB_NOT_FOUND",
+                message="そのjob_idは見つかりません。",
+            )
+
+        raw_status = row.get("status")
+        if raw_status in ("queued", "running"):
+            error_code = self._active_failure_code(row)
+            if error_code is not None:
+                if self._store.mark_failed(
+                    input.job_id,
+                    error_code,
+                    expected_statuses=(raw_status,),
+                    **self._timestamp_cas_args(row),
+                ):
+                    log.warning(
+                        "proposal_builder_active_job_failed_closed",
+                        job_id=input.job_id,
+                        previous_status=raw_status,
+                        error_code=error_code,
+                    )
+                row = self._store.get_job(input.job_id) or row
+                if (
+                    row.get("status") in ("queued", "running")
+                    and (latest_error_code := self._active_failure_code(row)) is not None
+                ):
+                    log.error(
+                        "proposal_builder_fail_closed_write_rejected",
+                        job_id=input.job_id,
+                        error_code=latest_error_code,
+                    )
+                    raise RuntimeError("proposal job state could not be terminalized")
+
+        raw_status = row.get("status")
+        status = raw_status if raw_status in ("queued", "running", "done", "failed") else None
+        if status is None:
+            return ProposalBuilderStatusOutput(
+                job_id=input.job_id,
+                status="failed",
+                error_code="JOB_STATE_INVALID",
+                message="jobの状態を判定できません。",
+            )
+        log.info("proposal_builder_status", job_id=input.job_id, status=status)
+        if status == "done":
+            return self._done_output(input.job_id, row)
+        if status == "failed":
+            error_code = row.get("error_code")
+            return ProposalBuilderStatusOutput(
+                job_id=input.job_id,
+                status="failed",
+                error_code=error_code if isinstance(error_code, str) else "JOB_STATE_INVALID",
+                message="提案書生成に失敗しました。error_codeを確認してください。",
+            )
+        if status in ("queued", "running"):
+            message = (
+                "提案書生成は順番待ちです。"
+                if status == "queued"
+                else "提案書を生成・検証しています。"
+            )
+            return ProposalBuilderStatusOutput(
+                job_id=input.job_id,
+                status=status,
+                retry_after_seconds=self._retry_after_seconds,
+                message=message,
+            )
+        raise AssertionError(f"unhandled proposal job status: {status}")
+
+    def _active_failure_code(self, row: dict[str, Any]) -> str | None:
+        timestamp = _parse_job_timestamp(row.get("updated_at"))
+        if timestamp is None:
+            return "JOB_STATE_INVALID"
+        return "MCP_RESTARTED" if self._is_stale(timestamp) else None
+
+    @staticmethod
+    def _timestamp_cas_args(row: dict[str, Any]) -> dict[str, Any]:
+        updated_at = row.get("updated_at")
+        if isinstance(updated_at, str):
+            return {"expected_updated_at": updated_at}
+        if "updated_at" in row or row.get("_updated_at_invalid") is True:
+            return {"expected_updated_at_invalid": True}
+        return {"expected_updated_at_missing": True}
+
+    def _is_stale(self, updated_at: object) -> bool:
+        timestamp = (
+            updated_at if isinstance(updated_at, datetime) else _parse_job_timestamp(updated_at)
+        )
+        if timestamp is None:
+            return False
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+        return (now.astimezone(UTC) - timestamp).total_seconds() > self._stale_after_seconds
+
+    def _done_output(
+        self,
+        job_id: str,
+        row: dict[str, Any],
+    ) -> ProposalBuilderStatusOutput:
+        raw_result = row.get("result_json")
+        try:
+            if isinstance(raw_result, str):
+                result = ProposalBuilderOutput.model_validate_json(raw_result)
+            else:
+                result = ProposalBuilderOutput.model_validate(raw_result)
+        except Exception:
+            transitioned = self._store.mark_failed(
+                job_id,
+                _PROPOSAL_JOB_RESULT_ERROR_CODE,
+                expected_statuses=("done",),
+                **self._timestamp_cas_args(row),
+            )
+            if not transitioned:
+                latest = self._store.get_job(job_id)
+                if latest is None or latest.get("status") != "failed":
+                    raise RuntimeError(
+                        "invalid proposal result could not be terminalized"
+                    ) from None
+            return ProposalBuilderStatusOutput(
+                job_id=job_id,
+                status="failed",
+                error_code=_PROPOSAL_JOB_RESULT_ERROR_CODE,
+                message="完了結果を検証できませんでした。",
+            )
+        return ProposalBuilderStatusOutput(
+            job_id=job_id,
+            status="done",
+            proposal_status=result.status,
+            result_message=result.message,
+            pptx_url=result.pptx_url,
+            version_id=result.version_id,
+            filled_count=result.filled_count,
+            skipped_count=result.skipped_count,
+            coverage_ratio=result.coverage_ratio,
+            skipped_ids=result.skipped_ids,
+            selected_account_names=result.selected_account_names,
+            case_references=result.case_references,
+            verification_issues=result.verification_issues,
+            warnings=result.warnings,
+            slack_delivered=result.slack_delivered,
+            delivery_target=result.delivery_target,
+            total_cost_usd=result.total_cost_usd,
+            message="提案書生成が完了しました。",
+        )
+
+
+__all__ = [
+    "ProposalBuilderSkill",
+    "ProposalBuilderStatusSkill",
+    "ProposalBuilderSubmitSkill",
+]
