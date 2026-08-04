@@ -267,7 +267,10 @@ class ProposalBuilderInput(_StrictModel):
 
     # MCP JSONのISO日付文字列をdateへ変換するため、この外部入力境界だけstrict=False。
     # Gemini本文は parse_gemini_research() が改めてstrict検証する。
-    model_config = ConfigDict(extra="forbid")
+    # NOTE: pydantic の model_config は親 (_StrictModel: strict=True) とキー単位で
+    # マージされるため、ここで strict=False を「明示」しないと親の strict=True が
+    # 残り、MCP 経由の全呼び出しが date 文字列で必ず ValidationError になる（実測）。
+    model_config = ConfigDict(extra="forbid", strict=False)
 
     gemini_json: dict[str, Any] | str = Field(
         description=(
