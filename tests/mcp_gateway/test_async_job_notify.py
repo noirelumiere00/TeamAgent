@@ -229,11 +229,18 @@ async def test_notify_exception_does_not_change_submit_response(
 def test_flag_off_does_not_start_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("USE_ASYNC_JOB_NOTIFY", raising=False)
 
-    class _ForbiddenThread:
-        def __init__(self, **kwargs: Any) -> None:
-            raise AssertionError("thread must not be created")
+    # 呼び出し側の try/except が AssertionError まで握り潰すため、例外で検出せず
+    # 「生成されたか」を記録して検証する（フラグ判定を外すとこのテストが赤になる）。
+    created: list[dict[str, Any]] = []
 
-    monkeypatch.setattr(notify.threading, "Thread", _ForbiddenThread)
+    class _RecordingThread:
+        def __init__(self, **kwargs: Any) -> None:
+            created.append(kwargs)
+
+        def start(self) -> None:
+            created.append({"started": True})
+
+    monkeypatch.setattr(notify.threading, "Thread", _RecordingThread)
 
     result = notify.schedule_completion_notice(
         tool="tiktok_acquire",
@@ -244,3 +251,4 @@ def test_flag_off_does_not_start_thread(monkeypatch: pytest.MonkeyPatch) -> None
     )
 
     assert result is None
+    assert created == [], "フラグ OFF ではスレッドを生成してはならない"
