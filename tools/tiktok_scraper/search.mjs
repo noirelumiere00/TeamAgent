@@ -680,6 +680,17 @@ function buildChromeArgs(pinnedProxyUrl) {
   return chromeArgs;
 }
 
+// stdout がパイプのとき process.exit() は書き込み完了を待たない。大きな JSON
+// （board_size=30 の検索結果など）は 64KB のパイプバッファを超えた時点で切れ、
+// 受け側が JSON パースに失敗する（実測: VSEO分析が MEDIA_TIKTOK_OUTPUT_INVALID で
+// 連続失敗。スクレイプ自体は 38 件成功していた）。書き切ってから終了する。
+function writeOutAndExit(text, code) {
+  process.exitCode = code;
+  process.stdout.write(text, () => {
+    process.exit(code);
+  });
+}
+
 // ---- main: comments モード ----
 async function mainComments() {
   const result = { ok: false, mode: "comments", url: args.url, count: 0, comments: [], error: null };
@@ -715,8 +726,7 @@ async function mainComments() {
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);
-  process.stdout.write(out);
-  process.exit(result.ok ? 0 : 2);
+  writeOutAndExit(out, result.ok ? 0 : 2);
 }
 
 // ---- main: download モード ----
@@ -862,8 +872,7 @@ async function main() {
   }
   const out = JSON.stringify(result);
   if (args.out) fs.writeFileSync(args.out, out);
-  process.stdout.write(out);
-  process.exit(result.ok ? 0 : 2);
+  writeOutAndExit(out, result.ok ? 0 : 2);
 }
 
 main();
