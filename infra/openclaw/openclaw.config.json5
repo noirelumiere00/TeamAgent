@@ -146,10 +146,12 @@
         transport: "streamable-http",
         headers: { Authorization: "Bearer ${TEAMAGENT_MCP_BEARER}" }, // 値は注入
         // video_algorithm（同期・5〜10本の TikTok 動画 DL+ffmpeg+Gemini 分析）が
-        // 60s では完走できず report_url/slides_url が返らない問題への対応で 300s に延長。
-        // 全ツール共通の上限（天井）＝通常の高速ツールには無影響。本数は MCP の
-        // VIDEO_ALGO_MAX_VIDEOS と整合させること（10本の重い回は 300s に迫り得る＝将来は非同期化）。
-        timeout: 300,
+        // 60s では完走できず report_url/slides_url が返らない問題への対応で延長してきた枠。
+        // 実測(2026-08-05 再QA): 5本・board_size=30 の回は検索 ~60s + 分析 240s 超で
+        // 300s を超え、MCP error -32001 で打ち切られた（mcp 側はまだ処理中だった）。
+        // 全ツール共通の上限（天井）＝通常の高速ツールには無影響なので 600s へ引き上げる。
+        // 本数は MCP の VIDEO_ALGO_MAX_VIDEOS と整合させること（恒久解は非同期化）。
+        timeout: 600,
         // Effective scopeはinfra/openclaw/effective-tool-scope.jsonが副作用分類の正。
         // 会社データ読取に加え、Gmail下書き保存(mail_reply/mail_draft/schedule_propose)、
         // 本人Calendar書込(calendar_event・招待なし)、Slackファイル配信(knowledge_deliver)、
