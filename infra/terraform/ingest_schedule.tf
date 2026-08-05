@@ -39,15 +39,19 @@ variable "ingest_owner_email" {
 }
 
 variable "ingest_sources" {
-  description = "取り込むソース（カンマ区切り・slack,gdrive,gsheets）"
+  # shared_drives は data/ingest_sources.yaml の shared_drives_crawl(enabled=true) を
+  # 発火させる唯一のキー。ここに無いと pipeline の `if "shared_drives" in kinds:` に
+  # 入らず、共有ドライブ配下は yaml が有効でも永久に巡回されない（実測: 共有ドライブ内の
+  # 案件フォルダが金庫に存在しなかった原因）。
+  description = "取り込むソース（カンマ区切り・slack,gdrive,gsheets,shared_drives）"
   type        = string
-  default     = "slack,gdrive,gsheets"
+  default     = "slack,gdrive,gsheets,shared_drives"
 }
 
 variable "ingest_schedule_expression" {
-  description = "EventBridge cron 式（既定: 毎週月 18:00 UTC = 火 03:00 JST・EC2 systemd timer と同タイミング）"
+  description = "EventBridge cron 式（既定: 平日 09:00 UTC = 平日 18:00 JST。EventBridge cron は常に UTC）"
   type        = string
-  default     = "cron(0 18 ? * MON *)"
+  default     = "cron(0 9 ? * MON-FRI *)"
 }
 
 variable "ingest_google_oauth_secret_name" {
