@@ -27,13 +27,19 @@ from pydantic import BaseModel, ValidationError
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
-from teamagent.skills.proposal_deck.contract import ComposerOutput
+from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_term
+from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
+from teamagent.skills.proposal_deck.provenance import (
+    ProvenanceValidationError,
+    validate_composer_provenance,
+)
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
 
 logger = structlog.get_logger(__name__)
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 _SAFE_NAME = re.compile(r"[^\w\-]+", re.UNICODE)
+_MAX_RENDER_EVIDENCE = 20
 
 
 def _envflag(name: str) -> bool:
@@ -113,7 +119,11 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             )
 
             pptx_url = self._publish_if_enabled(
-                str(rendered), input.product_name, ctx.request_id, kind="pptx"
+                str(rendered),
+                input.product_name,
+                ctx.request_id,
+                kind="pptx",
+                publish_artifact=input.publish_artifact,
             )
             pdf_path, pdf_url = self._emit_pdf_if_enabled(
                 composer_out, input, ctx, version_id=version_id, out_dir=out_dir, safe=safe
@@ -175,19 +185,106 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         """media job設定時はworkerへ委譲し、ローカル開発だけ従来rendererを使う。"""
         from teamagent.adapters.media_job import MediaJobClient
 
+        render_out = ProposalDeckSkill._filter_render_evidence(composer_out, request_id)
         if not MediaJobClient.is_configured() and MediaJobClient.local_runtime_enabled():
             from teamagent.skills.proposal_deck.renderer import render_deck
 
-            return render_deck(composer_out, template, out_path)
+            return render_deck(
+                render_out,
+                template,
+                out_path,
+                enable_images=bool(render_out.evidence_images),
+            )
         MediaJobClient.require_configured()
+        staged_images: list[tuple[int, int, bytes, str]] = []
+        for placeholder_id, images in render_out.evidence_images.items():
+            for image in images:
+                if not image.image_path:
+                    continue
+                try:
+                    body = Path(image.image_path).read_bytes()
+                except OSError as exc:
+                    logger.warning(
+                        "proposal_deck_evidence_image_unreadable",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                        error_type=type(exc).__name__,
+                    )
+                    continue
+                if not body:
+                    logger.warning(
+                        "proposal_deck_evidence_image_empty",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                    )
+                    continue
+                if body.startswith(b"\x89PNG\r\n\x1a\n"):
+                    content_type = "image/png"
+                elif body.startswith(b"\xff\xd8\xff"):
+                    content_type = "image/jpeg"
+                else:
+                    logger.warning(
+                        "proposal_deck_evidence_image_unsupported",
+                        placeholder_id=placeholder_id,
+                        rank=image.rank,
+                    )
+                    continue
+                staged_images.append((placeholder_id, image.rank, body, content_type))
         pptx = MediaJobClient().render_proposal_pptx(
             template.read_bytes(),
-            composer_out.model_dump_json().encode("utf-8"),
+            render_out.model_dump_json().encode("utf-8"),
             request_fingerprint=f"{request_id}:proposal-pptx",
+            evidence_images=staged_images,
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(pptx)
         return out_path
+
+    @staticmethod
+    def _filter_render_evidence(
+        composer_out: ComposerOutput,
+        request_id: str,
+    ) -> ComposerOutput:
+        """Keep only request-owned campaign images within the worker's 20-image contract."""
+
+        if not composer_out.evidence_images:
+            return composer_out
+        safe_request = _SAFE_NAME.sub("_", request_id).strip("_")[:64] or "request"
+        owned_prefix = f"teamagent-campaign-{safe_request}-"
+        selected: dict[int, list[Any]] = {}
+        selected_count = 0
+        rejected_count = 0
+        for placeholder_id in sorted(composer_out.evidence_images):
+            for image in sorted(
+                composer_out.evidence_images[placeholder_id],
+                key=lambda item: item.rank,
+            ):
+                if (
+                    selected_count >= _MAX_RENDER_EVIDENCE
+                    or image.rank > 20
+                    or not image.image_path
+                ):
+                    rejected_count += 1
+                    continue
+                try:
+                    resolved = Path(image.image_path).resolve(strict=True)
+                except (OSError, RuntimeError):
+                    rejected_count += 1
+                    continue
+                if not resolved.is_file() or not any(
+                    parent.name.startswith(owned_prefix) for parent in resolved.parents
+                ):
+                    rejected_count += 1
+                    continue
+                selected.setdefault(placeholder_id, []).append(image)
+                selected_count += 1
+        if rejected_count:
+            logger.warning(
+                "proposal_deck_evidence_filtered",
+                rejected_count=rejected_count,
+                selected_count=selected_count,
+            )
+        return composer_out.model_copy(update={"evidence_images": selected})
 
     def _emit_pdf_if_enabled(
         self,
@@ -238,20 +335,36 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             logger.exception("proposal_deck_pdf_failed", product=input.product_name)
             raise
         pdf_url = self._publish_if_enabled(
-            str(rendered_pdf), input.product_name, ctx.request_id, kind="pdf"
+            str(rendered_pdf),
+            input.product_name,
+            ctx.request_id,
+            kind="pdf",
+            publish_artifact=input.publish_artifact,
         )
         return str(rendered_pdf), pdf_url
 
     @staticmethod
     def _publish_if_enabled(
-        path: str, product_name: str, request_id: str, *, kind: str = "pptx"
+        path: str,
+        product_name: str,
+        request_id: str,
+        *,
+        kind: str = "pptx",
+        publish_artifact: bool | None = None,
     ) -> str | None:
-        """USE_PROPOSAL_DECK_PUBLISH=1 のときだけ署名付き URL を返す（kind=pptx|pdf）.
+        """USE_PROPOSAL_DECK_PUBLISH is the authoritative publish gate.
 
-        既定 OFF。S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、
-        失敗しても skill 全体は成功扱い（Slack に URL は出ないだけ）。
+        ``USE_PROPOSAL_DECK_PUBLISH`` が公開の権威ゲート。OFF なら
+        ``publish_artifact=True`` でも公開しない（入力はツール呼び出し経由で
+        外部から到達するため、env ゲートをバイパスできると S3 公開+presigned
+        URL 発行をインジェクションで強制できてしまう＝レビュー MED）。
+        ``publish_artifact=False`` はゲート ON でも個別に抑止できる。
+        S3 認証や VSEO_REPORT_BUCKET 未設定なら publish_file 側が None を返すため、失敗しても
+        skill 全体は成功扱い（Slack に URL は出ないだけ）。
         """
         if not _envflag("USE_PROPOSAL_DECK_PUBLISH"):
+            return None
+        if publish_artifact is False:
             return None
         try:
             from teamagent.adapters.report_publish import publish_pdf_file, publish_pptx_file
@@ -292,8 +405,119 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             total_cost += resp.usage.cost_usd
             try:
                 data = json.loads(_extract_json(resp.text))
-                return ComposerOutput.model_validate(data), total_cost
-            except (json.JSONDecodeError, ValidationError) as exc:
+                # evidence は上流フィーダだけを信頼し、モデルが出した値は検証前に破棄する。
+                # 不正な model-supplied path/key で repair を浪費させない。
+                if isinstance(data, dict):
+                    data["evidence_images"] = input.evidence_images
+                composer_out = ComposerOutput.model_validate(data)
+                forced_skips = set(input.forced_skipped_ids)
+                placeholders = {
+                    placeholder_id: text
+                    for placeholder_id, text in composer_out.placeholders.items()
+                    if placeholder_id not in forced_skips
+                }
+                citations = {
+                    placeholder_id: values
+                    for placeholder_id, values in composer_out.citations_per_placeholder.items()
+                    if placeholder_id not in forced_skips
+                }
+                skipped = [
+                    item
+                    for item in composer_out.skipped_placeholders
+                    if item.id not in forced_skips
+                ]
+                skipped.extend(
+                    SkippedPlaceholder(
+                        id=placeholder_id,
+                        reason=("要確認（データ未検出）: proposal-builderの依存入力がありません"),
+                    )
+                    for placeholder_id in sorted(forced_skips)
+                )
+                resolved_auxiliary = dict(input.auxiliary_placeholders)
+                for key, placeholder_id in input.derived_auxiliary_placeholders.items():
+                    resolved_auxiliary[key] = placeholders.get(
+                        placeholder_id,
+                        "要確認（データ未検出）",
+                    )
+                # LLMには95枠本文だけを生成させる。事例・アカウント・D起点日付と
+                # template profile は検証済みの決定論的入力を後付けし、モデルに改変させない。
+                composer_out = ComposerOutput.model_validate(
+                    {
+                        **composer_out.model_dump(mode="python"),
+                        "placeholders": placeholders,
+                        "citations_per_placeholder": citations,
+                        "skipped_placeholders": skipped,
+                        "evidence_images": input.evidence_images,
+                        "auxiliary_placeholders": resolved_auxiliary,
+                        "posting_start_date": input.posting_start_date,
+                        "template_profile": input.template_profile,
+                    }
+                )
+                forbidden_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, text in composer_out.placeholders.items()
+                    if contains_forbidden_term(text, input.forbidden_output_terms)
+                )
+                forbidden_citation_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, citations in composer_out.citations_per_placeholder.items()
+                    if any(
+                        contains_forbidden_term(citation, input.forbidden_output_terms)
+                        for citation in citations
+                    )
+                )
+                forbidden_skip_ids = sorted(
+                    item.id
+                    for item in composer_out.skipped_placeholders
+                    if contains_forbidden_term(item.reason, input.forbidden_output_terms)
+                )
+                forbidden_evidence_ids = sorted(
+                    placeholder_id
+                    for placeholder_id, images in composer_out.evidence_images.items()
+                    if any(
+                        contains_forbidden_term(
+                            " ".join(
+                                value
+                                for value in (
+                                    image.keyword,
+                                    image.source_url,
+                                    image.image_path,
+                                    image.video_url,
+                                )
+                                if value
+                            ),
+                            input.forbidden_output_terms,
+                        )
+                        for image in images
+                    )
+                )
+                if (
+                    forbidden_ids
+                    or forbidden_citation_ids
+                    or forbidden_skip_ids
+                    or forbidden_evidence_ids
+                ):
+                    raise ProvenanceValidationError(
+                        [
+                            "confidential term remains in placeholder IDs "
+                            f"{forbidden_ids}, citation IDs {forbidden_citation_ids}, "
+                            f"skip IDs {forbidden_skip_ids}, or evidence IDs "
+                            f"{forbidden_evidence_ids}"
+                        ]
+                    )
+                if input.enforce_provenance:
+                    validate_composer_provenance(
+                        composer_out,
+                        input_urls=input.urls,
+                        research_material=input.research_material,
+                        quantitative_evidence=input.quantitative_evidence,
+                    )
+                return composer_out, total_cost
+            except (
+                json.JSONDecodeError,
+                ValidationError,
+                ProvenanceValidationError,
+            ) as exc:
                 last_error = str(exc)
                 if attempt >= input.max_repair:
                     break
@@ -304,9 +528,9 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                         "content": [
                             {
                                 "text": (
-                                    "前回の出力が ComposerOutput スキーマに"
-                                    f"合いませんでした: {last_error}\n"
-                                    "指摘の ID/文字数/網羅の不足を直し、"
+                                    "前回の出力が ComposerOutput スキーマまたは"
+                                    f"根拠検証に合いませんでした: {last_error}\n"
+                                    "指摘の ID/文字数/網羅/citation の不足を直し、"
                                     "JSON のみ（前後の説明文なし）で再送してください。"
                                 )
                             }

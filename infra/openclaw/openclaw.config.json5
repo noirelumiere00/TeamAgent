@@ -160,6 +160,9 @@
         toolFilter: {
           include: [
             "search", "clientkarte", "proposal_draft", "proposal_review",
+            // proposal_builder: submitは即job_idを返し、MCP内threadが既存RAG/95枠rendererを
+            // 継続実行する。statusで完了を照会する。S3固定version資産とmedia workerは引き続き必要。
+            "proposal_builder_submit", "proposal_builder_status",
             "tiktok_search", "video_analysis", "video_algorithm",
             // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
             //   現在は scope enabledBy=never。解禁4点セットは (1) tf task env 配線、
@@ -219,13 +222,12 @@
           // ※ L2 run_agent（MCP: USE_AGENT_ORCHESTRATOR=1 で露出する適応オーケストレーター）は
           //   この include に **意図的に入れない**＝パイロット中は dark。OpenClaw 自身がオーケスト
           //   レーションの外殻なので二重オーケストレーションを避ける。解禁はパイロット後に別途判断（§L C2）。
-          // 台帳外6本（SkillRegistryには実在）を明示 exclude:
-          // chitchat / recommend / proposal_campaign / mail_constraints / workspace_search /
-          // proposal_deck。前3本も暗黙の include 非掲載にせず、棚卸し対象としてここに残す。
+          // 台帳外7本（SkillRegistryには実在）を明示 exclude。同期proposal_builderは
+          // Python互換用だけに残し、MCPではsubmit/status面だけを公開する。
           // *reply* / *write* ワイルドカードは Step C で外し、include の明示許可リスト（mail_reply）に置き換え。
           exclude: [
             "chitchat", "recommend", "proposal_campaign",
-            "mail_constraints", "workspace_search", "proposal_deck", "*confirm*",
+            "mail_constraints", "workspace_search", "proposal_deck", "proposal_builder", "*confirm*",
           ],
         },
       },

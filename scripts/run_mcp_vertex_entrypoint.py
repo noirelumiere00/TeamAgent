@@ -28,6 +28,30 @@ def main() -> None:
         finally:
             os.close(descriptor)
         environment["GOOGLE_APPLICATION_CREDENTIALS"] = str(_ADC_PATH)
+    proposal_builder_enabled = environment.get(
+        "USE_PROPOSAL_BUILDER_TOOLS", "false"
+    ).strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if proposal_builder_enabled:
+        from teamagent.adapters.proposal_assets import provision_proposal_builder_assets
+
+        assets = provision_proposal_builder_assets(environment)
+        environment["PROPOSAL_BUILDER_TEMPLATE_PATH"] = str(assets.template_path)
+        environment["PROPOSAL_BUILDER_ACCOUNT_DB_PATH"] = str(assets.account_db_path)
+        for name in tuple(environment):
+            if (
+                name.startswith(
+                    (
+                        "PROPOSAL_BUILDER_TEMPLATE_S3_",
+                        "PROPOSAL_BUILDER_ACCOUNT_S3_",
+                    )
+                )
+                or name == "PROPOSAL_BUILDER_ASSETS_KMS_KEY_ARN"
+            ):
+                environment.pop(name, None)
     os.execve(_PYTHON, [_PYTHON, _SERVER], environment)
 
 

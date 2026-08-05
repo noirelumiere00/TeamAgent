@@ -57,6 +57,7 @@ _ACQUIRE_HOST_SUFFIXES = (
 )
 _MAX_INPUT_BYTES = 128 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 128 * 1024 * 1024
+_MAX_PROPOSAL_PPTX_BYTES = 256 * 1024 * 1024
 _OPERATIONS = {
     "acquire",
     "tiktok_acquire",
@@ -108,7 +109,11 @@ def _bounded_string(value: Any, *, minimum: int, maximum: int, name: str) -> str
     return value
 
 
-def _validate_s3_ref(value: Any) -> dict[str, Any]:
+def _validate_s3_ref(
+    value: Any,
+    *,
+    maximum_size: int = _MAX_INPUT_BYTES,
+) -> dict[str, Any]:
     ref = _exact_keys(
         value,
         {"bucket", "key", "version_id", "sha256", "size", "content_type"},
@@ -140,7 +145,7 @@ def _validate_s3_ref(value: Any) -> dict[str, Any]:
         raise ValueError("S3 digest is invalid")
     if version_id == "null" or not re.fullmatch(r"[A-Za-z0-9._~+/=-]+", version_id):
         raise ValueError("S3 version ID is invalid")
-    _bounded_int(ref["size"], minimum=0, maximum=_MAX_INPUT_BYTES, name="S3 size")
+    _bounded_int(ref["size"], minimum=0, maximum=maximum_size, name="S3 size")
     if "\r" in content_type or "\n" in content_type:
         raise ValueError("S3 content type is invalid")
     return ref
@@ -333,7 +338,10 @@ def _validate_operation(value: Any) -> None:
             {"kind", "template", "composer_json", "evidence", "fail_if_missing"},
             "proposal operation",
         )
-        _validate_s3_ref(operation["template"])
+        _validate_s3_ref(
+            operation["template"],
+            maximum_size=_MAX_PROPOSAL_PPTX_BYTES,
+        )
         _validate_s3_ref(operation["composer_json"])
         evidence = operation["evidence"]
         if not isinstance(evidence, list) or len(evidence) > 20:
@@ -1060,7 +1068,9 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
     elif kind == "slides":
         slots.append(("slides.pptx", "slides.pptx", _MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
-        slots.append(("proposal.pptx", "proposal.pptx", _MAX_OUTPUT_BYTES))
+        slots.append(
+            ("proposal.pptx", "proposal.pptx", _MAX_PROPOSAL_PPTX_BYTES)
+        )
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", _MAX_OUTPUT_BYTES))
     else:
@@ -1943,8 +1953,11 @@ def _validate_completion_result(
             or name not in slots
         ):
             raise ValueError("media artifact name is invalid")
-        ref = _validate_s3_ref(artifact["object"])
         slot = slots[name]
+        ref = _validate_s3_ref(
+            artifact["object"],
+            maximum_size=slot["max_bytes"],
+        )
         if (
             ref["bucket"] != bucket
             or ref["key"] != slot["key"]

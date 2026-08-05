@@ -11,12 +11,28 @@ teamagent_consulting で凍結した「FMT v2 / 95 placeholder（{1}–{103}、�
 
 from __future__ import annotations
 
+import re
+from datetime import date
 from typing import Final
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 _MISSING_IDS: Final[frozenset[int]] = frozenset({48, 49, 50, 51, 52, 53, 54, 55})
 VALID_IDS: Final[frozenset[int]] = frozenset(range(1, 104)) - _MISSING_IDS
+_AUXILIARY_KEY: Final[re.Pattern[str]] = re.compile(r"^PB-[A-Z0-9_-]{1,60}$")
+PROPOSAL_BUILDER_TEMPLATE_PROFILE: Final[str] = "proposal-builder-v1"
+PROPOSAL_BUILDER_REQUIRED_AUXILIARY: Final[frozenset[str]] = frozenset(
+    {
+        "PB-ACCOUNTS",
+        "PB-CASES",
+        "PB-CLIENT-NAME",
+        "PB-DATETIME",
+        "PB-EXPERIENCE",
+        "PB-KEY-MESSAGE",
+        "PB-MONTH",
+        "PB-PRODUCT-NAME",
+    }
+)
 
 LENGTH_RULES: Final[dict[int, tuple[int, int]]] = {
     # 「程度」表記の下限は運用緩和（日本語はモデルが字数を下振れしやすい）.
@@ -102,6 +118,13 @@ class ComposerOutput(BaseModel):
     skipped_placeholders: list[SkippedPlaceholder] = Field(default_factory=list)
     # フィーダ（TikTok 等）が後付けする証拠画像メタ。95 枠 text 被覆とは直交（既定空＝後方互換）。
     evidence_images: dict[int, list[EvidenceImage]] = Field(default_factory=dict)
+    # proposal-builder 統合FMTの非数値枠。95枠の被覆契約とは直交し、renderer が
+    # `{{PB-ACCOUNTS}}` / `{{PB-CASES}}` のような明示トークンだけを置換する。
+    auxiliary_placeholders: dict[str, str] = Field(default_factory=dict)
+    # 投稿開始日 D。統合FMT内の `{{PB-DATE:<offset>:<format>}}` を決定論的に解決する。
+    posting_start_date: date | None = None
+    # 既定値は従来テンプレとの後方互換。統合経路だけが厳格なtemplate inventory検証を有効化する。
+    template_profile: str = Field(default="base", max_length=80)
 
     @field_validator("placeholders")
     @classmethod
@@ -139,6 +162,27 @@ class ComposerOutput(BaseModel):
                     )
         return v
 
+    @field_validator("auxiliary_placeholders")
+    @classmethod
+    def _auxiliary_placeholders_valid(cls, value: dict[str, str]) -> dict[str, str]:
+        total = 0
+        for key, text in value.items():
+            if not _AUXILIARY_KEY.fullmatch(key):
+                raise ValueError(f"invalid auxiliary placeholder key: {key!r}")
+            if not text or not text.strip():
+                raise ValueError(f"auxiliary placeholder {key!r} is empty")
+            total += len(text)
+        if total > 20_000:
+            raise ValueError("auxiliary placeholder text exceeds 20000 characters")
+        return value
+
+    @field_validator("template_profile")
+    @classmethod
+    def _template_profile_valid(cls, value: str) -> str:
+        if value not in {"base", PROPOSAL_BUILDER_TEMPLATE_PROFILE}:
+            raise ValueError(f"unsupported template profile: {value!r}")
+        return value
+
     @model_validator(mode="after")
     def _coverage_and_lengths(self) -> ComposerOutput:
         filled_ids = set(self.placeholders)
@@ -168,4 +212,12 @@ class ComposerOutput(BaseModel):
         return len(self.placeholders) / len(VALID_IDS)
 
 
-__all__ = ["LENGTH_RULES", "VALID_IDS", "ComposerOutput", "EvidenceImage", "SkippedPlaceholder"]
+__all__ = [
+    "LENGTH_RULES",
+    "PROPOSAL_BUILDER_REQUIRED_AUXILIARY",
+    "PROPOSAL_BUILDER_TEMPLATE_PROFILE",
+    "VALID_IDS",
+    "ComposerOutput",
+    "EvidenceImage",
+    "SkippedPlaceholder",
+]

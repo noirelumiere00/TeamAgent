@@ -186,7 +186,7 @@ revision before either lock is released.
 
 The effective MCP authority is `effective-tool-scope.json`. The default
 Terraform task currently exposes 12 tools; the reviewed OpenClaw include list
-contains 28. This scope is not read-only: Gmail draft and Slack file-delivery
+contains 29. This scope is not read-only: Gmail draft and Slack file-delivery
 operations are among the default tools.
 
 The five required runtime secrets are `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`,

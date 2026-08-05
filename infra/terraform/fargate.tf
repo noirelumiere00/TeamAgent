@@ -191,6 +191,37 @@ resource "aws_dynamodb_table" "mcp_caller_claim_nonces" {
   deletion_protection_enabled = true
 }
 
+# proposal_builder runs inside the MCP task because only that role may invoke
+# Bedrock.  This ledger survives task replacement; a stale queued/running row is
+# terminalized as MCP_RESTARTED by proposal_builder_status.
+resource "aws_dynamodb_table" "proposal_builder_jobs" {
+  name         = "${var.project_name}-${var.environment}-proposal-builder-jobs"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "job_id"
+
+  attribute {
+    name = "job_id"
+    type = "S"
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 # ============================================================
 # IAM
 # ============================================================
@@ -355,6 +386,39 @@ data "aws_iam_policy_document" "mcp_task" {
     sid       = "KmsDecrypt"
     actions   = ["kms:Decrypt"]
     resources = [data.aws_kms_alias.oauth_tokens.target_key_arn]
+  }
+  dynamic "statement" {
+    for_each = var.enable_proposal_builder ? [1] : []
+    content {
+      sid       = "ProposalBuilderAssetKmsDecrypt"
+      actions   = ["kms:Decrypt"]
+      resources = [var.proposal_builder_assets_kms_key_arn]
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${var.aws_region}.amazonaws.com"]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = var.enable_proposal_builder ? [1] : []
+    content {
+      sid     = "ProposalBuilderPinnedAssetRead"
+      actions = ["s3:GetObjectVersion"]
+      resources = [
+        "arn:aws:s3:::${var.proposal_builder_template_s3_bucket}/${var.proposal_builder_template_s3_key}",
+        "arn:aws:s3:::${var.proposal_builder_account_s3_bucket}/${var.proposal_builder_account_s3_key}",
+      ]
+    }
+  }
+  dynamic "statement" {
+    for_each = var.enable_proposal_builder ? [1] : []
+    content {
+      sid       = "ProposalBuilderJobLedger"
+      actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+      resources = [aws_dynamodb_table.proposal_builder_jobs.arn]
+    }
   }
   statement {
     sid       = "ConsumeCallerClaimNonce"
@@ -626,7 +690,32 @@ resource "aws_ecs_task_definition" "mcp" {
       # ナレッジ回答の末尾に「資料リンク」を付与（@AiLa=openclaw が markdown を装飾リンクへ
       # 変換する mcp のみ ON。connect-web(/app) は未設定＝生テキスト化しないため付けない）。
       { name = "SEARCH_ANSWER_SOURCE_LINKS", value = "1" },
-      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, local.mcp_hmac_runtime_environment, local.media_enabled == 1 ? [
+      ], local.mail_action_hmac_environment, local.report_link_hmac_environment, local.mcp_hmac_runtime_environment, var.enable_proposal_builder ? [
+      # proposal_builderの一括tool公開。entrypointが以下のimmutable pinを検証し、task-local
+      # PROPOSAL_BUILDER_TEMPLATE_PATH / PROPOSAL_BUILDER_ACCOUNT_DB_PATHへ変換してからMCPを起動する。
+      { name = "USE_PROPOSAL_BUILDER_TOOLS", value = "1" },
+      { name = "PROPOSAL_JOBS_TABLE", value = aws_dynamodb_table.proposal_builder_jobs.name },
+      { name = "PROPOSAL_JOB_HEARTBEAT_SECONDS", value = "30" },
+      { name = "PROPOSAL_JOB_STALE_SECONDS", value = "180" },
+      { name = "PROPOSAL_JOB_RETRY_AFTER_SECONDS", value = "30" },
+      { name = "PROPOSAL_BUILDER_MODEL_ID", value = var.x_analysis_model_id },
+      { name = "PROPOSAL_BUILDER_MAX_TOKENS", value = "16000" },
+      { name = "PROPOSAL_BUILDER_SLACK_UPLOAD_TIMEOUT_SECONDS", value = "240" },
+      { name = "PROPOSAL_BUILDER_PUBLISH_READY", value = var.proposal_builder_publish_ready ? "1" : "0" },
+      { name = "PROPOSAL_BUILDER_DELIVER_INTERNAL_DRAFTS", value = var.proposal_builder_deliver_internal_drafts ? "1" : "0" },
+      { name = "PROPOSAL_BUILDER_NEWS_CHANNEL_ID", value = var.proposal_builder_news_channel_id },
+      { name = "PROPOSAL_BUILDER_TEMPLATE_S3_BUCKET", value = var.proposal_builder_template_s3_bucket },
+      { name = "PROPOSAL_BUILDER_TEMPLATE_S3_KEY", value = var.proposal_builder_template_s3_key },
+      { name = "PROPOSAL_BUILDER_TEMPLATE_S3_VERSION_ID", value = var.proposal_builder_template_s3_version_id },
+      { name = "PROPOSAL_BUILDER_TEMPLATE_S3_SHA256", value = var.proposal_builder_template_s3_sha256 },
+      { name = "PROPOSAL_BUILDER_TEMPLATE_S3_SIZE", value = tostring(var.proposal_builder_template_s3_size) },
+      { name = "PROPOSAL_BUILDER_ACCOUNT_S3_BUCKET", value = var.proposal_builder_account_s3_bucket },
+      { name = "PROPOSAL_BUILDER_ACCOUNT_S3_KEY", value = var.proposal_builder_account_s3_key },
+      { name = "PROPOSAL_BUILDER_ACCOUNT_S3_VERSION_ID", value = var.proposal_builder_account_s3_version_id },
+      { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SHA256", value = var.proposal_builder_account_s3_sha256 },
+      { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SIZE", value = tostring(var.proposal_builder_account_s3_size) },
+      { name = "PROPOSAL_BUILDER_ASSETS_KMS_KEY_ARN", value = var.proposal_builder_assets_kms_key_arn },
+      ] : [], local.media_enabled == 1 ? [
       # Generic media delegation.  Legacy TIKTOK_* aliases point at the same
       # queue/table/bucket so the existing skill schema remains compatible.
       { name = "USE_TIKTOK_ACQUIRE", value = "1" },
@@ -728,6 +817,34 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.enable_scrape_tools || local.media_enabled == 1
       error_message = "enable_scrape_tools requires the generic media worker; hardened core contains no browser/ffmpeg/yt-dlp fallback."
+    }
+
+    precondition {
+      condition     = !var.enable_proposal_builder || local.media_enabled == 1
+      error_message = "enable_proposal_builder requires the generic media worker for the integrated PPTX renderer."
+    }
+
+    precondition {
+      condition = !var.enable_proposal_builder || (
+        can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.proposal_builder_template_s3_bucket)) &&
+        can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.proposal_builder_account_s3_bucket)) &&
+        length(var.proposal_builder_template_s3_key) > 0 &&
+        length(var.proposal_builder_account_s3_key) > 0 &&
+        !contains(["", "null", "none"], lower(var.proposal_builder_template_s3_version_id)) &&
+        !contains(["", "null", "none"], lower(var.proposal_builder_account_s3_version_id)) &&
+        can(regex("^[0-9a-f]{64}$", var.proposal_builder_template_s3_sha256)) &&
+        can(regex("^[0-9a-f]{64}$", var.proposal_builder_account_s3_sha256)) &&
+        var.proposal_builder_template_s3_size >= 1 &&
+        var.proposal_builder_template_s3_size <= 268435456 &&
+        var.proposal_builder_account_s3_size >= 1 &&
+        var.proposal_builder_account_s3_size <= 5242880 &&
+        can(regex("^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[0-9a-f-]+$", var.proposal_builder_assets_kms_key_arn)) &&
+        (
+          var.proposal_builder_news_channel_id == "" ||
+          can(regex("^C[A-Z0-9]{8,}$", var.proposal_builder_news_channel_id))
+        )
+      )
+      error_message = "proposal_builder requires exact S3 bucket/key/version/SHA256/size pins, one KMS key ARN, and an optional canonical Slack channel ID."
     }
 
     precondition {

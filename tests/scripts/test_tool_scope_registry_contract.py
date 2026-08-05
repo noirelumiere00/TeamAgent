@@ -27,11 +27,12 @@ DARK_SKILL_ALLOWLIST = frozenset(
         "workspace_search",
         "proposal_deck",
         "proposal_campaign",
+        "proposal_builder",
     }
 )
 
-# chitchat は Socket Mode の intent 経路専用で、MCP factory の ToolSpec にはならない。
-NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat"})
+# chitchat は Socket Mode 専用。同期proposal_builderはPython互換用で、MCPはsubmit/statusだけ。
+NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat", "proposal_builder"})
 
 # ToolSpec を経由せず server.py が直接 MCP に追加できる dark tool。
 MCP_ONLY_DARK_ALLOWLIST = {"run_agent": "USE_AGENT_ORCHESTRATOR"}
@@ -505,10 +506,10 @@ def test_scope_registry_and_factory_have_an_exact_classification() -> None:
         isinstance(tool.get("effect"), str) and tool["effect"].strip() for tool in scope["tools"]
     ), "scope 登録には空でない副作用分類 effect が必須"
 
-    # 素朴な registry⊆scope ではなく、台帳外は6本の固定 allowlist と完全一致させる。
+    # 素朴な registry⊆scope ではなく、台帳外は固定 allowlist と完全一致させる。
     assert registry_names - scope_names == DARK_SKILL_ALLOWLIST
 
-    # 不変量(2): factory は scope 全件 + MCP化されるdark 5本を過不足なく登録可能。
+    # 不変量(2): factory は scope 全件 + MCP化されるdark skillを過不足なく登録可能。
     assert factory_names == scope_names | (DARK_SKILL_ALLOWLIST - NON_FACTORY_SKILL_ALLOWLIST)
     assert registry_names == factory_names | NON_FACTORY_SKILL_ALLOWLIST
 
