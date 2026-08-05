@@ -1138,6 +1138,24 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     return f"https://drive.google.com/file/d/{fid}/view"
         return None
 
+    # 管理シート行の本文に載る資料ファイル名（拡張子つき）。行の title はシート名
+    # （例「サンマルクカフェ 祇園辻利コラボ」）で実ファイル名ではないため、本文から拾う。
+    _FILE_NAME_RE = re.compile(r"[^\s\u3000|｜/\\]{4,120}?\.(?:pdf|pptx|ppt|docx|doc|xlsx|xls)")
+
+    @classmethod
+    def _candidate_file_names(cls, meta: dict[str, Any], content: str) -> list[str]:
+        """このヒットが指している資料ファイル名の候補を、確からしい順に返す。"""
+        names: list[str] = []
+        for raw in (meta.get("title"), meta.get("file_name")):
+            text = str(raw or "").strip()
+            if text and cls._FILE_NAME_RE.fullmatch(text):
+                names.append(text)
+        for match in cls._FILE_NAME_RE.finditer(content or ""):
+            name = match.group(0).strip()
+            if name and name not in names:
+                names.append(name)
+        return names[:5]
+
     def _resolve_file_urls(self, hits: list[SearchHit], ctx: SkillContext) -> dict[str, str]:
         """管理シート行のヒットについて、資料名から実ファイル(Drive)URL を引き当てる。
 
@@ -1151,9 +1169,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             meta = h.metadata or {}
             if str(meta.get("source_type") or "") != "gsheets":
                 continue
-            title = str(meta.get("title") or meta.get("file_name") or "").strip()
-            if title and title not in titles:
-                titles.append(title)
+            for name in self._candidate_file_names(meta, h.content or ""):
+                if name not in titles:
+                    titles.append(name)
         if not titles:
             return {}
         try:
@@ -1192,8 +1210,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         lines: list[str] = []
         for h in hits:
             meta = h.metadata or {}
-            title_key = str(meta.get("title") or meta.get("file_name") or "").strip()
-            url = resolved.get(title_key) or cls._doc_url(meta)
+            url = ""
+            for name in cls._candidate_file_names(meta, h.content or ""):
+                if name in resolved:
+                    url = resolved[name]
+                    break
+            url = url or cls._doc_url(meta)
             if not url or url in seen:
                 continue
             # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。

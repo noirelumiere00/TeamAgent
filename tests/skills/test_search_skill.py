@@ -1185,3 +1185,40 @@ def test_source_links_prefer_real_file_url_over_sheet_row() -> None:
     # 解決できないときは従来どおり元URLを出す（リンクを消さない fail-open）
     fallback = SearchSkill._source_links_block([hit], file_urls={})
     assert sheet_row in fallback
+
+
+def test_sheet_row_resolves_file_named_in_body_not_sheet_title() -> None:
+    """管理シート行の title はシート名なので、本文中のファイル名で実資料を引き当てる。
+
+    実測(2026-08-05): 行の title は「サンマルクカフェ 祇園辻利コラボ」で
+    実ファイル名ではなく、title 一致だけでは永久に解決できなかった。
+    """
+
+    from teamagent.skills.search.skill import SearchSkill
+
+    file_name = "レポート_株式会社サンマルクカフェ_祇園辻利コラボ_0617【詳細レポート】.pdf"
+    hit = SearchHit(
+        chunk_id=2,
+        content=f"提出物: {file_name} ｜ KPI/KGI設定、施策設計",
+        score=0.8,
+        metadata={
+            "title": "サンマルクカフェ 祇園辻利コラボ",
+            "source_type": "gsheets",
+            "source_uri": "https://docs.google.com/spreadsheets/d/S/edit?gid=1#gid=1",
+        },
+    )
+    assert file_name in SearchSkill._candidate_file_names(hit.metadata, hit.content)
+
+    real = "https://drive.google.com/file/d/REAL/view"
+    block = SearchSkill._source_links_block([hit], file_urls={file_name: real})
+    assert real in block
+    assert "gid=" not in block
+
+
+def test_candidate_file_names_ignores_text_without_extension() -> None:
+    from teamagent.skills.search.skill import SearchSkill
+
+    names = SearchSkill._candidate_file_names(
+        {"title": "サンマルクカフェ"}, "提案の記録です。ファイルはありません。"
+    )
+    assert names == []
