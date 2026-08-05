@@ -42,6 +42,10 @@ _SCRAPER_SCRIPT = _SCRAPER_DIR / "search.mjs"
 
 # 1 回の検索で待つ最大秒数 (ブラウザ起動 + スクロール数回で通常 10〜60s)
 _DEFAULT_TIMEOUT_S = 120
+# media job 経路の下限秒。SQS→dispatcher→Fargate タスク起動(30〜45s)＋スクレイプ(40〜90s)を
+# 賄えず MEDIA_JOB_DEADLINE_EXCEEDED になる実測事故があったため（検索面チェックQA 08-05）。
+# OpenClaw 側の全体上限 300s を超えない範囲に収める。
+_MEDIA_JOB_MIN_TIMEOUT_S = 200
 
 
 class TikTokScrapeError(RuntimeError):
@@ -221,7 +225,7 @@ def search_tiktok(
                 request_fingerprint=f"tiktok-search:{fingerprint}",
                 search_type=search_type,
                 max_videos=max_videos,
-                timeout_s=min(timeout_s, 15 * 60),
+                timeout_s=min(max(timeout_s, _MEDIA_JOB_MIN_TIMEOUT_S), 15 * 60),
             )
         except Exception as exc:
             raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
@@ -471,7 +475,7 @@ def download_tiktok_video(
             return MediaJobClient().acquire_video(
                 video_url,
                 request_fingerprint=f"{request_id or 'no-request'}:download:{fingerprint}",
-                timeout_s=min(timeout_s, 15 * 60),
+                timeout_s=min(max(timeout_s, _MEDIA_JOB_MIN_TIMEOUT_S), 15 * 60),
             )
         except Exception as exc:
             raise TikTokScrapeError(f"TIKTOK_MEDIA_JOB_FAILED: {type(exc).__name__}") from exc
