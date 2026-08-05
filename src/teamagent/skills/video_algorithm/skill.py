@@ -343,6 +343,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     # eg_rate は既に百分率ポイント。/100 は二重換算になる。
                     engagement_rate=float(p.get("eg_rate", 0.0) or 0.0),
                     cover_url=None,
+                    duration_sec=float(p.get("duration", 0.0) or 0.0),
                 )
             )
         return metas
@@ -377,6 +378,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     # scraper は比率（0.029）を返すため、百分率ポイントへ揃える。
                     engagement_rate=float(getattr(v, "engagement_rate", 0.0) or 0.0) * 100.0,
                     cover_url=getattr(v, "cover_url", None),
+                    duration_sec=float(getattr(v, "duration", 0.0) or 0.0),
                 )
             )
         return metas
@@ -970,12 +972,28 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             return empty
 
         system = load_prompt("video_algorithm", self._prompt_version, "system")
+        # 深掘り候補は「実際に DL して Gemini に渡せる動画」だけに絞る。
+        # カルーセル/画像投稿は TikTok 側に video オブジェクトが無く duration=0 で届くため、
+        # そのまま試行すると DL 失敗で 1 枠を空費し、結果が target 本に届かないことがある
+        # （ユーザー実測の「5本揃わない」の主因）。ボード表示は pool のまま＝取得の事実は保つ。
+        analyzable = [m for m in pool if float(getattr(m, "duration_sec", 0.0) or 0.0) > 0.0]
+        skipped_non_video = len(pool) - len(analyzable)
+        if skipped_non_video:
+            log.info(
+                "video_algorithm_skipped_non_video",
+                skipped=skipped_non_video,
+                analyzable=len(analyzable),
+                target=target,
+            )
+        # duration が全件 0（取得経路が尺を返さない等）の場合は従来どおり pool を使う＝
+        # 「情報が無いだけ」で分析ゼロに落とす方が有害なため fail-open。
+        candidates = analyzable or pool
         # 上位から波状に分析し、成功が target 本に達するか候補が尽きるまで（再検索はしない）
         results: list[AnalyzedVideo] = []
         attempted = 0
-        while sum(1 for v in results if v.analysis) < target and attempted < len(pool):
+        while sum(1 for v in results if v.analysis) < target and attempted < len(candidates):
             need = target - sum(1 for v in results if v.analysis)
-            batch = pool[attempted : attempted + need]
+            batch = candidates[attempted : attempted + need]
             attempted += len(batch)
             # 事前 consume: DL/Gemini/parse の失敗もコスト試行として数え、上限の並行すり抜けを防ぐ。
             # バックフィル batch もここを通るため、実際に開始した分析本数が台帳へ乗る。

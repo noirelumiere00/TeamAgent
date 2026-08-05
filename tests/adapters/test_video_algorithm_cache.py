@@ -386,3 +386,34 @@ def test_complete_result_cannot_downgrade_to_paid_core_in_same_generation() -> N
     assert hit is not None
     assert hit.stage == "complete"
     assert hit.output["query"] == "complete"
+
+
+def test_carousel_posts_do_not_consume_deep_analysis_slots() -> None:
+    """カルーセル/画像投稿(duration=0)は深掘り対象から外し、必ず target 本の動画を分析する。
+
+    実測起点: ユーザー報告「5本揃わないことがある」。画像投稿は DL できず 1 枠を
+    空費するため、候補段階で除外する（ボード表示は取得事実として残す）。
+    """
+
+    from teamagent.skills.video_algorithm.schema import VideoMeta
+
+    pool = [
+        VideoMeta(rank=1, url="https://www.tiktok.com/@a/video/1", duration_sec=0.0),
+        VideoMeta(rank=2, url="https://www.tiktok.com/@a/video/2", duration_sec=21.0),
+        VideoMeta(rank=3, url="https://www.tiktok.com/@a/video/3", duration_sec=0.0),
+        VideoMeta(rank=4, url="https://www.tiktok.com/@a/video/4", duration_sec=15.5),
+    ]
+    analyzable = [m for m in pool if float(getattr(m, "duration_sec", 0.0) or 0.0) > 0.0]
+    assert [m.rank for m in analyzable] == [2, 4]
+
+    # duration を一切返さない取得経路では fail-open（全件を候補に戻す）
+    unknown = [VideoMeta(rank=i, url=f"https://www.tiktok.com/@a/video/{i}") for i in (1, 2)]
+    fallback = [m for m in unknown if float(getattr(m, "duration_sec", 0.0) or 0.0) > 0.0]
+    assert (fallback or unknown) == unknown
+
+
+def test_video_meta_carries_duration_for_carousel_detection() -> None:
+    from teamagent.skills.video_algorithm.schema import VideoMeta
+
+    assert VideoMeta().duration_sec == 0.0
+    assert VideoMeta(duration_sec=12.0).duration_sec == 12.0

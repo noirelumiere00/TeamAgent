@@ -227,6 +227,10 @@ class VideoMeta(BaseModel):
     collect_count: int = 0  # 保存
     engagement_rate: float = 0.0  # 百分率ポイント（2.9% は 2.9）
     cover_url: str | None = None
+    # 尺（秒）。カルーセル/画像投稿は TikTok 側に video オブジェクトが無く 0 になる＝
+    # 「DL して Gemini に渡せない投稿」の判別に使う（深掘り対象から除外し、
+    # 次の候補で必ず max_videos 本を埋めるため）。
+    duration_sec: float = 0.0
 
     @field_validator("engagement_rate")
     @classmethod
