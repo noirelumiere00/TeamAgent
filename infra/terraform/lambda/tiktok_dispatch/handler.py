@@ -845,10 +845,9 @@ def _terminalize_expired_row(
         ConsistentRead=True,
     ).get("Item", {})
     _assert_owned_row(current, spec)
-    if (
-        _ddb_int(current, "deadline") == spec["deadline_epoch_s"]
-        and _ddb_string(current, "status") in {"done", "failed"}
-    ):
+    if _ddb_int(current, "deadline") == spec["deadline_epoch_s"] and _ddb_string(
+        current, "status"
+    ) in {"done", "failed"}:
         return
     raise RuntimeError("expired media job terminal transition lost exact row fence")
 
@@ -972,12 +971,11 @@ def _ensure_queued_row(
         Key={"job_id": {"S": spec["job_id"]}},
         ConsistentRead=True,
     ).get("Item", {})
-    if (
-        _ddb_string(existing, "idempotency_key") != spec["idempotency_key"]
-        or not hmac.compare_digest(
-            _ddb_string(existing, "audit_principal_hash"),
-            str(spec["audit_principal_hash"] or ""),
-        )
+    if _ddb_string(existing, "idempotency_key") != spec[
+        "idempotency_key"
+    ] or not hmac.compare_digest(
+        _ddb_string(existing, "audit_principal_hash"),
+        str(spec["audit_principal_hash"] or ""),
     ):
         raise RuntimeError("media dispatcher idempotency ownership conflict")
     persisted_json = _ddb_string(existing, "request_json")
@@ -1068,9 +1066,7 @@ def _operation_output_slots(spec: dict[str, Any], attempt: dict[str, Any]) -> li
     elif kind == "slides":
         slots.append(("slides.pptx", "slides.pptx", _MAX_OUTPUT_BYTES))
     elif kind == "proposal_pptx":
-        slots.append(
-            ("proposal.pptx", "proposal.pptx", _MAX_PROPOSAL_PPTX_BYTES)
-        )
+        slots.append(("proposal.pptx", "proposal.pptx", _MAX_PROPOSAL_PPTX_BYTES))
     elif kind == "pdf":
         slots.append(("document.pdf", "document.pdf", _MAX_OUTPUT_BYTES))
     else:
@@ -1114,6 +1110,12 @@ def _allowed_content_types(spec: dict[str, Any], name: str) -> set[str]:
         return {operation["source"]["content_type"], "video/mp4"}
     if name.startswith("frame-") or name.startswith("thumb-") or name == "thumbnail":
         return {"image/jpeg"}
+    # tiktok_acquire(artifact_mode="full") の動画スロットは `video-<pid>`。
+    # ここに分岐が無いと下の raise に落ち、worker が動画を取得できていても
+    # 完了封筒が必ず MEDIA_COMPLETION_INVALID になる（実測: tk_d24be671ec1a は
+    # 9.5MB の mp4 を S3 へ上げたのにジョブが failed になった）。
+    if name.startswith("video-"):
+        return {"video/mp4", "application/octet-stream"}
     if name.endswith(".json"):
         return {"application/json"}
     if name.endswith(".pptx"):

@@ -1336,3 +1336,71 @@ def test_ecs_stopped_reconciler_never_overwrites_terminal_result(
         "job_id": request["job_id"],
         "status": "done",
     }
+
+
+def test_every_output_slot_has_an_approved_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全 operation の全出力スロットが content-type 契約を持つ（通過不能スロット禁止）。
+
+    実測回帰: tiktok_acquire(full) の `video-<pid>` スロットに分岐が無く、
+    worker が 9.5MB の mp4 を S3 へ上げても完了封筒が必ず
+    MEDIA_COMPLETION_INVALID になっていた（job tk_d24be671ec1a）。
+    """
+
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    operations = [
+        AcquireOperation(kind="acquire", url="https://www.youtube.com/watch?v=BaW_jenozKc"),
+        TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("coffee",),
+            artifact_mode="full",
+        ),
+        ProxyOperation(kind="proxy", source=_staged_ref("video.mp4")),
+        FrameOperation(
+            kind="frame",
+            source=_staged_ref("video.mp4"),
+            timecodes=(0.0, 1.0),
+        ),
+        ThumbnailOperation(kind="thumbnail", source=_staged_ref("video.mp4")),
+        SlidesOperation(kind="slides", html=_staged_ref("slides.html")),
+        PdfOperation(kind="pdf", html=_staged_ref("document.html")),
+    ]
+    attempt = {
+        "attempt_version": 1,
+        "attempt_id": "00000000-0000-4000-8000-000000000000",
+    }
+    for operation in operations:
+        request = make_job_request(
+            operation=operation,
+            output_bucket="teamagent-media",
+            request_fingerprint=f"content-type-contract:{operation.kind}",
+            job_id="mj_0123456789abcdef01234567",
+            now_epoch_s=1_000,
+            timeout_s=300,
+        )
+        spec = json.loads(request.to_json_bytes())
+        for slot in module._operation_output_slots(spec, attempt):
+            allowed = module._allowed_content_types(spec, slot["name"])
+            assert allowed, f"{operation.kind}/{slot['name']} has an empty content-type contract"
+
+
+def test_tiktok_acquire_video_slot_accepts_mp4(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_handler(monkeypatch, ddb=_Dynamo(), ecs=_Ecs())
+    request = make_job_request(
+        operation=TikTokAcquireOperation(
+            kind="tiktok_acquire",
+            keywords=("coffee",),
+            artifact_mode="full",
+        ),
+        output_bucket="teamagent-media",
+        request_fingerprint="content-type-video",
+        job_id="mj_0123456789abcdef01234567",
+        now_epoch_s=1_000,
+        timeout_s=300,
+    )
+    spec = json.loads(request.to_json_bytes())
+    assert "video/mp4" in module._allowed_content_types(spec, "video-p01001")
+    # 画像/JSON の既存契約は弱体化させない
+    assert module._allowed_content_types(spec, "thumb-p01001") == {"image/jpeg"}
+    assert module._allowed_content_types(spec, "posts.json") == {"application/json"}
