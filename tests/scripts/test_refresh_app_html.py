@@ -244,3 +244,30 @@ def test_fully_applied_retry_does_not_create_another_task_revision(
 
     assert ecs.register_calls == []
     assert ecs.update_calls == []
+
+
+def test_refresh_stops_when_live_would_equal_baked_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """live と baked が同一になる更新は fail-closed で止める。
+
+    connect_web/app.py:419-420 は live と baked が同値の契約を拒否する。
+    そのまま登録すると /app は契約違反で内蔵版へ落ち、画面が更新されないどころか
+    「更新したのに反映されない」状態になる。生成物が baked と同一になる異常時
+    （Vault が空で退避HTMLが出た等）に S3/TD を触らないことを縛る。
+    """
+
+    artifact = _artifact()
+    baked_same = copy.deepcopy(_task_definition())
+    for item in baked_same["containerDefinitions"][0]["environment"]:
+        if item["name"] == "CONNECT_APP_HTML_BAKED_SHA256":
+            item["value"] = artifact.sha256  # 生成物と同一＝異常
+    monkeypatch.setattr(refresh, "_generate_artifact", lambda progress: artifact)
+    ecs = FakeECS(task_definition=baked_same)
+    s3 = FakeS3()
+
+    with pytest.raises(refresh.RefreshError, match="baked"):
+        refresh.run_refresh(refresh.Config(), s3_client=s3, ecs_client=ecs)
+
+    assert ecs.register_calls == []
+    assert ecs.update_calls == []
