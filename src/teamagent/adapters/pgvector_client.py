@@ -1200,6 +1200,74 @@ class PgVectorClient:
         )
         return hits
 
+    def resolve_file_urls_by_titles(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        titles: list[str],
+        *,
+        request_id: str | None = None,
+    ) -> dict[str, str]:
+        """資料名 → 実ファイル(Drive)の URL を引き当てる（read-only）。
+
+        営業管理シートの「行」がヒットしたとき、出典として提示すべきなのは
+        シートの行 URL ではなく、その行が指している資料そのものの URL である
+        （ユーザー判定: 行 URL の提示は不合格）。行のセルにある資料名と、
+        gdrive として取り込まれた実ファイルの title を突き合わせて解決する。
+
+        引き当ては「完全一致」優先・見つからなければ拡張子を除いた前方一致。
+        取り違えを避けるため部分一致の緩い検索はしない（見つからなければ空）。
+        """
+        clean = [t.strip() for t in titles if isinstance(t, str) and t.strip()]
+        if not clean:
+            return {}
+        clean = clean[:20]
+        sql = """
+            SELECT d.title, d.source_uri
+            FROM documents d
+            WHERE d.source_type = 'gdrive'
+              AND d.source_uri IS NOT NULL
+              AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND d.title = ANY(%s)
+        """  # nosec B608
+        resolved: dict[str, str] = {}
+        with conn.cursor() as cur:
+            cur.execute(sql, [clean])
+            for row in cur.fetchall():
+                title = str(row.get("title") or "")
+                uri = str(row.get("source_uri") or "")
+                if title and uri.startswith(("http://", "https://")):
+                    resolved.setdefault(title, uri)
+        missing = [t for t in clean if t not in resolved]
+        if missing:
+            # 拡張子違い/前後の空白ゆれを救う（前方一致・1件に確定するものだけ採用）
+            like_sql = """
+                SELECT d.title, d.source_uri
+                FROM documents d
+                WHERE d.source_type = 'gdrive'
+                  AND d.source_uri IS NOT NULL
+                  AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+                  AND d.title ILIKE %s
+                LIMIT 2
+            """  # nosec B608
+            with conn.cursor() as cur:
+                for title in missing:
+                    stem = title.rsplit(".", 1)[0].strip()
+                    if len(stem) < 8:
+                        continue
+                    cur.execute(like_sql, [f"{stem}%"])
+                    rows = cur.fetchall()
+                    if len(rows) == 1:
+                        uri = str(rows[0].get("source_uri") or "")
+                        if uri.startswith(("http://", "https://")):
+                            resolved[title] = uri
+        logger.info(
+            "pgvector_resolve_file_urls",
+            request_id=request_id,
+            requested=len(clean),
+            resolved=len(resolved),
+        )
+        return resolved
+
     def list_documents_for_client(
         self,
         conn: psycopg.Connection[dict[str, Any]],

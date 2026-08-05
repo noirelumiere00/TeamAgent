@@ -1152,3 +1152,36 @@ def test_source_links_block_skips_url_with_markdown_breaking_chars() -> None:
     block = SearchSkill._source_links_block(hits)
     assert "a)b" not in block  # ')' を含む壊れURLは採用しない
     assert "https://drive.google.com/file/d/F9/view" in block  # 正常な資料は出る
+
+
+def test_source_links_prefer_real_file_url_over_sheet_row() -> None:
+    """管理シート行がヒットしても、資料リンクは実ファイル(Drive)のURLを出す。
+
+    ユーザー判定（2026-08-05）: シート行URL（?gid=..&range=107:107）の提示は不合格。
+    資料は全て Drive にあるので、資料名から実ファイルを引き当てて出す。
+    """
+
+    from teamagent.skills.search.skill import SearchSkill
+
+    sheet_row = "https://docs.google.com/spreadsheets/d/SHEET/edit?gid=278789217#gid=278789217"
+    hit = SearchHit(
+        chunk_id=1,
+        content="提案の記録",
+        score=0.9,
+        metadata={
+            "title": "提案_株式会社サンマルクカフェ_0115.pdf",
+            "source_type": "gsheets",
+            "source_uri": sheet_row,
+        },
+    )
+    real = "https://drive.google.com/file/d/REALFILE/view"
+
+    block = SearchSkill._source_links_block(
+        [hit], file_urls={"提案_株式会社サンマルクカフェ_0115.pdf": real}
+    )
+    assert real in block
+    assert "range=" not in block
+
+    # 解決できないときは従来どおり元URLを出す（リンクを消さない fail-open）
+    fallback = SearchSkill._source_links_block([hit], file_urls={})
+    assert sheet_row in fallback

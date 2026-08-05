@@ -343,7 +343,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
             # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
             if _source_links_enabled():
-                answer += self._source_links_block(hits)
+                answer += self._source_links_block(
+                    hits, file_urls=self._resolve_file_urls(hits, ctx)
+                )
         else:
             answer, cost_usd = "", 0.0
 
@@ -1136,14 +1138,62 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     return f"https://drive.google.com/file/d/{fid}/view"
         return None
 
+    def _resolve_file_urls(self, hits: list[SearchHit], ctx: SkillContext) -> dict[str, str]:
+        """管理シート行のヒットについて、資料名から実ファイル(Drive)URL を引き当てる。
+
+        営業管理シート(gsheets)は「行」が 1 チャンクとして入っており、その source_uri は
+        シートの ``#gid=..&range=N:N`` を指す。ユーザーが求めるのは資料そのものの URL
+        なので、行に載っている資料名で gdrive 実ファイルを解決する。fail-open:
+        解決できなければ従来どおり元の URL を使う（リンクを消さない）。
+        """
+        titles: list[str] = []
+        for h in hits:
+            meta = h.metadata or {}
+            if str(meta.get("source_type") or "") != "gsheets":
+                continue
+            title = str(meta.get("title") or meta.get("file_name") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+        if not titles:
+            return {}
+        try:
+            with self._pgvector.connection(
+                app_role=self._app_role,
+                user_email=ctx.metadata.get("user_email"),
+                user_groups=(
+                    list(ctx.metadata["user_groups"])
+                    if isinstance(ctx.metadata.get("user_groups"), (list, tuple))
+                    else None
+                ),
+                user_role=ctx.metadata.get("user_role"),
+            ) as conn:
+                return self._pgvector.resolve_file_urls_by_titles(
+                    conn, titles, request_id=ctx.request_id
+                )
+        except Exception as exc:  # 解決失敗で検索回答そのものを壊さない
+            logger.warning(
+                "search_file_url_resolve_failed",
+                request_id=ctx.request_id,
+                error=type(exc).__name__,
+            )
+            return {}
+
     @classmethod
-    def _source_links_block(cls, hits: list[SearchHit]) -> str:
-        """回答末尾に付ける『📎 資料リンク』の markdown ブロック（重複資料は畳む・最大6件）。"""
+    def _source_links_block(
+        cls, hits: list[SearchHit], *, file_urls: dict[str, str] | None = None
+    ) -> str:
+        """回答末尾に付ける『📎 資料リンク』の markdown ブロック（重複資料は畳む・最大6件）。
+
+        file_urls は「資料名 → 実ファイル(Drive)URL」。営業管理シートの行がヒットした
+        場合、行 URL ではなく実ファイルの URL を出すために使う（ユーザー判定: 行 URL は不合格）。
+        """
+        resolved = file_urls or {}
         seen: set[str] = set()
         lines: list[str] = []
         for h in hits:
             meta = h.metadata or {}
-            url = cls._doc_url(meta)
+            title_key = str(meta.get("title") or meta.get("file_name") or "").strip()
+            url = resolved.get(title_key) or cls._doc_url(meta)
             if not url or url in seen:
                 continue
             # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。
