@@ -33,12 +33,12 @@ double-conversion-3.4.0-r0
 eudev-libs-3.2.14-r6
 ffmpeg-8.1.2-r0
 ffmpeg-libavcodec-8.1.2-r0
-ffmpeg-libavdevice-8.1.2-r0
-ffmpeg-libavfilter-8.1.2-r0
+ffmpeg-libavdevice-8.1.2-r1
+ffmpeg-libavfilter-8.1.2-r1
 ffmpeg-libavformat-8.1.2-r0
 ffmpeg-libavutil-8.1.2-r0
 ffmpeg-libswresample-8.1.2-r0
-ffmpeg-libswscale-8.1.2-r0
+ffmpeg-libswscale-8.1.2-r1
 file-5.47-r2
 font-liberation-2.1.5-r2
 font-noto-2026.08.01-r0
