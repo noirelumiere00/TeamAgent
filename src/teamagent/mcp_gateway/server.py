@@ -27,6 +27,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -63,6 +64,10 @@ RUN_AGENT_TOOL_NAME = "run_agent"
 # 注入は本ゲート層でのみ行い、SearchSkill / skills/search/schema.py は不変に保つ
 # （並行編集との衝突回避）。CONNECT_BASE_URL 未設定なら一切載せない（壊れたリンクを出さない）。
 SEARCH_TOOL_NAME = "search"
+
+# submit 応答を返した後も MCP process 内で完了を待つ対象。SQS/DynamoDB/worker の契約は
+# 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
+_ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit"})
 
 
 def _envflag(name: str, default: str = "false") -> bool:
@@ -207,6 +212,113 @@ def _inject_search_web_links(data: dict[str, Any]) -> None:
         link = build_app_client_link(str(hit.get("client_name") or ""))
         if link:
             hit["app_client_url"] = link
+
+
+def _format_tiktok_completion(output: Any) -> str:
+    failed = output.status == "failed"
+    lines = [
+        "❌ TikTok取得に失敗しました。" if failed else "✅ TikTok取得が完了しました。",
+        f"job_id: `{output.job_id}`",
+    ]
+    if output.message:
+        lines.append(output.message)
+    if output.error_code:
+        lines.append(f"error_code: `{output.error_code}`")
+    if output.counts:
+        counts = "、".join(f"{key}={value}" for key, value in output.counts.items())
+        lines.append(f"件数: {counts}")
+    if output.videos:
+        downloaded = sum(1 for video in output.videos if video.get("downloaded"))
+        lines.append(f"動画: {downloaded}/{len(output.videos)}本取得")
+    if output.posts_json_url:
+        lines.append(f"投稿データ: {output.posts_json_url}")
+    return "\n".join(lines)
+
+
+def _format_proposal_completion(output: Any) -> str:
+    failed = output.status == "failed"
+    lines = [
+        "❌ 提案書生成に失敗しました。" if failed else "✅ 提案書生成が完了しました。",
+        f"job_id: `{output.job_id}`",
+    ]
+    result_message = output.result_message or output.message
+    if result_message:
+        lines.append(result_message)
+    if output.error_code:
+        lines.append(f"error_code: `{output.error_code}`")
+    if output.proposal_status:
+        lines.append(f"結果: {output.proposal_status}")
+    if output.filled_count is not None and output.skipped_count is not None:
+        lines.append(f"反映: {output.filled_count}件 / スキップ: {output.skipped_count}件")
+    if output.pptx_url:
+        lines.append(f"提案資料: {output.pptx_url}")
+    return "\n".join(lines)
+
+
+def _build_async_job_poll(
+    tool: str,
+    job_id: str,
+    ctx: SkillContext,
+) -> Callable[[], tuple[str, str]]:
+    """対象 job の status skill を呼ぶ poll closure を作る（初期化も通知 thread 内）。"""
+    poll_ctx = SkillContext(
+        request_id=ctx.request_id,
+        user_id=ctx.user_id,
+        metadata=dict(ctx.metadata),
+    )
+    status_skill: Any = None
+
+    def _poll() -> tuple[str, str]:
+        nonlocal status_skill
+        if tool == "tiktok_acquire":
+            from teamagent.skills.tiktok_acquire.schema import TikTokAcquireStatusInput
+            from teamagent.skills.tiktok_acquire.skill import TikTokAcquireStatusSkill
+
+            status_skill = status_skill or TikTokAcquireStatusSkill()
+            output = status_skill.run(TikTokAcquireStatusInput(job_id=job_id), poll_ctx)
+            return output.status, _format_tiktok_completion(output)
+
+        from teamagent.skills.proposal_builder.schema import ProposalBuilderStatusInput
+        from teamagent.skills.proposal_builder.skill import ProposalBuilderStatusSkill
+
+        status_skill = status_skill or ProposalBuilderStatusSkill()
+        output = status_skill.run(ProposalBuilderStatusInput(job_id=job_id), poll_ctx)
+        return output.status, _format_proposal_completion(output)
+
+    return _poll
+
+
+def _schedule_async_job_notice(
+    tool: str,
+    data: dict[str, Any],
+    raw: dict[str, Any],
+    ctx: SkillContext,
+) -> None:
+    if tool not in _ASYNC_JOB_TOOLS:
+        return
+    job_id = data.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return
+    try:
+        from teamagent.mcp_gateway.async_job_notify import enabled, schedule_completion_notice
+
+        if not enabled():
+            return
+        schedule_completion_notice(
+            tool=tool,
+            job_id=job_id,
+            user_context=raw,
+            request_id=ctx.request_id,
+            poll=_build_async_job_poll(tool, job_id, ctx),
+        )
+    except Exception as exc:
+        logger.warning(
+            "async_job_notify_dispatch_failed",
+            tool=tool,
+            job_id=job_id,
+            request_id=ctx.request_id,
+            error=type(exc).__name__,
+        )
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:
@@ -450,6 +562,8 @@ async def dispatch_tool(
         data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
     finally:
         skill.cleanup_output(output)
+    if isinstance(data, dict):
+        _schedule_async_job_notice(name, data, raw, ctx)
     # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
     # 本番主経路（AiLa→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
     # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
