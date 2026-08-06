@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.gmail_client import GmailClient, extract_plain_text
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_constraints.schema import (
     CONSTRAINT_KINDS,
@@ -174,8 +175,14 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
 
         # 本文取得 → G3: DLP マスク（LLM へ渡す前に必須）。
         masked_docs: list[dict[str, Any]] = []
+        excluded = 0
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in refs:
             msg = gmail.get_message(ref.id, ctx.request_id)
+            # 読み取り系のみ、配信ヘッダ・noreply・除外件名を落とす。
+            if exclude_bulk and should_skip_mail(getattr(msg, "headers", {}) or {}):
+                excluded += 1
+                continue
             body = extract_plain_text(msg.payload)
             masked = str(scrub_value(body))[: self._max_body_chars]
             masked_docs.append(
@@ -185,6 +192,13 @@ class MailConstraintsSkill(BaseSkill[MailConstraintsInput, MailConstraintsOutput
                     "ts": msg.internal_date_ms,
                 }
             )
+        logger.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=len(masked_docs),
+            request_id=ctx.request_id,
+        )
 
         # G6: メール=データとして固定スキーマ抽出。
         constraints, summary, cost = self._extract_constraints(masked_docs, input, ctx.request_id)

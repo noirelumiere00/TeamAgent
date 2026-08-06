@@ -88,8 +88,16 @@ def _ctx(user_email: str | None = OWNER) -> SkillContext:
     return SkillContext(request_id="r", user_id="U1", metadata={"user_email": user_email})
 
 
-def _msg(sender: str, subject: str, body: str) -> _Msg:
-    return _Msg(headers={"From": sender, "Subject": subject}, payload=_payload(body))
+def _msg(
+    sender: str,
+    subject: str,
+    body: str,
+    *,
+    extra_headers: dict[str, str] | None = None,
+) -> _Msg:
+    headers = {"From": sender, "Subject": subject}
+    headers.update(extra_headers or {})
+    return _Msg(headers=headers, payload=_payload(body))
 
 
 def test_g1_requires_user_email() -> None:
@@ -126,6 +134,57 @@ def test_happy_path_summarizes_and_masks() -> None:
     # G5: client + 期間で絞る
     assert '"森ビル"' in (fake.last_query or "")
     assert "newer_than:14d" in (fake.last_query or "")
+
+
+def test_bulk_noreply_and_daily_subject_are_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msgs = [
+        _msg(
+            "配信 <news@example.com>",
+            "ニュースレター",
+            "配信ヘッダ付き本文",
+            extra_headers={"List-Unsubscribe": "<mailto:unsubscribe@example.com>"},
+        ),
+        _msg("通知 <noreply@example.com>", "自動通知", "noreply本文"),
+        _msg("営業企画 <sales@example.com>", "営業日報", "日報本文"),
+        _msg("田中 <tanaka@example.com>", "個別相談", "通常の個人メール本文"),
+    ]
+    bedrock = FakeBedrock()
+
+    out = MailSummarySkill(gmail=FakeGmail(msgs), bedrock=bedrock).run(
+        MailSummaryInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert out.scanned_count == 4
+    assert [item.subject_scrubbed for item in out.highlights] == ["個別相談"]
+    prompt = str(bedrock.last_messages)
+    assert "通常の個人メール本文" in prompt
+    assert "配信ヘッダ付き本文" not in prompt
+    assert "noreply本文" not in prompt
+    assert "日報本文" not in prompt
+
+
+def test_bulk_exclusion_kill_switch_keeps_mail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MAIL_EXCLUDE_BULK", "false")
+    msg = _msg(
+        "配信 <news@example.com>",
+        "ニュースレター",
+        "kill switch で保持される本文",
+        extra_headers={"List-Id": "newsletter.example.com"},
+    )
+    bedrock = FakeBedrock()
+
+    out = MailSummarySkill(gmail=FakeGmail([msg]), bedrock=bedrock).run(
+        MailSummaryInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert len(out.highlights) == 1
+    assert "kill switch で保持される本文" in str(bedrock.last_messages)
 
 
 def test_empty_inbox_friendly_no_cost() -> None:

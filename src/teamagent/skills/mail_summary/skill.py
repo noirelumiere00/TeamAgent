@@ -30,6 +30,7 @@ from teamagent.adapters.gmail_client import (
 )
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_summary.schema import (
     MailHighlight,
@@ -112,8 +113,15 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
 
         highlights: list[MailHighlight] = []
         masked_bodies: list[str] = []
+        excluded = 0
+        kept = 0
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in refs:
             msg = gmail.get_message(ref.id, ctx.request_id)  # full（要約には本文が要る）
+            if exclude_bulk and should_skip_mail(msg.headers):
+                excluded += 1
+                continue
+            kept += 1
             counterpart = _first_counterpart(msg.headers, requester)
             highlights.append(
                 MailHighlight(
@@ -124,6 +132,14 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
             )
             body = extract_plain_text(msg.payload)
             masked_bodies.append(str(scrub_value(body))[: self._max_body_chars])
+
+        log.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=kept,
+            request_id=ctx.request_id,
+        )
 
         summary, cost = self._summarize(input, masked_bodies, ctx)
         log.info("mail_summary_done", scanned=len(refs), cost_usd=cost)

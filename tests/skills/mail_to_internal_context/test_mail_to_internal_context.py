@@ -186,6 +186,49 @@ def test_happy_path_links_and_masked_signal() -> None:
     assert out.note
 
 
+def test_bulk_noreply_and_daily_report_are_excluded_from_mail_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    gmail = FakeGmail(
+        [
+            _Msg(
+                headers={
+                    "From": "news@newsletter.example",
+                    "Subject": "お知らせ",
+                    "List-Id": "<news.newsletter.example>",
+                }
+            ),
+            _Msg(headers={"From": "noreply@notify.example", "Subject": "自動通知"}),
+            _Msg(headers={"From": "report@daily.example", "Subject": "営業日報"}),
+            _Msg(
+                headers={"From": "田中 <tanaka@client.example>", "Subject": "個別のご相談"}
+            ),
+        ]
+    )
+
+    out = MailToInternalContextSkill(gmail=gmail, search_skill=FakeSearch([])).run(
+        MailInternalContextInput(client_name="A社"), _ctx()
+    )
+
+    assert out.mail_signal.recent_count == 1
+    assert out.mail_signal.counterpart_domains == ["client.example"]
+
+
+def test_personal_mail_is_kept_in_mail_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    gmail = FakeGmail([_mail("client.example")])
+
+    out = MailToInternalContextSkill(gmail=gmail, search_skill=FakeSearch([])).run(
+        MailInternalContextInput(client_name="A社"), _ctx()
+    )
+
+    assert out.mail_signal.recent_count == 1
+    assert out.mail_signal.counterpart_domains == ["client.example"]
+
+
 def test_g6_internal_query_has_no_mail_body() -> None:
     gmail = FakeGmail([_mail("moribuild.co.jp")])
     search = FakeSearch(_hits())

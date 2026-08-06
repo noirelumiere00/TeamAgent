@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from teamagent.adapters.gmail_client import GmailClient, extract_thread_participants
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_to_internal_context.schema import (
     InternalRef,
@@ -147,9 +148,17 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
         domains: list[str] = []
         seen: set[str] = set()
         latest_ms: int | None = None
+        excluded = 0
+        kept = 0
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in refs:
-            # format='metadata' = From/To/Cc/Subject/Date のみ（本文 payload なし＝G3/G6 構造的）。
+            # format='metadata' = 本文 payload なし（G3/G6 構造的）。
             msg = gmail.get_message(ref.id, ctx.request_id, format="metadata")
+            # 読み取り系のみ、配信ヘッダ・noreply・除外件名を落とす。
+            if exclude_bulk and should_skip_mail(msg.headers):
+                excluded += 1
+                continue
+            kept += 1
             if msg.internal_date_ms and (latest_ms is None or msg.internal_date_ms > latest_ms):
                 latest_ms = msg.internal_date_ms
             for field in ("From", "To", "Cc"):
@@ -164,8 +173,15 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
                     if dom not in seen:
                         seen.add(dom)
                         domains.append(dom)
+        logger.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=kept,
+            request_id=ctx.request_id,
+        )
         return MailSignal(
-            recent_count=len(refs),
+            recent_count=kept,
             counterpart_domains=domains[:6],  # G3: ドメインのみ・数件
             latest_at=_iso_or_none(latest_ms),
         )

@@ -12,6 +12,7 @@ morning_digest（朝の自動下書き）と mail_reply（メンション時の�
 from __future__ import annotations
 
 import os
+import unicodedata
 from typing import Any
 
 import structlog
@@ -162,6 +163,60 @@ def build_thread_history(
 
 # ── 一斉送信/自動配信の判定（個人返信不要 → 下書き対象外）──────────────────
 
+_NO_REPLY_MARKERS = ("noreply", "no-reply", "donotreply", "do-not-reply", "no_reply")
+
+
+def _get_header(headers: dict[str, str], name: str) -> str:
+    """RFC 5322 上で大小文字を区別しないヘッダ名から値を取得する。"""
+    target = name.lower()
+    matched = ""
+    for key, value in (headers or {}).items():
+        if str(key).lower() != target:
+            continue
+        matched = str(value or "")
+        if matched:
+            return matched
+    return matched
+
+
+def is_bulk_delivery(headers: dict[str, str]) -> bool:
+    """配信ヘッダまたは no-reply 系差出人のメールか判定する。
+
+    本文は見ない。人が書いた全社連絡を読む系で消さないため、
+    「各位」等の一般宛名は `is_mass_or_impersonal` だけで判定する。
+    """
+    if _get_header(headers, "List-Unsubscribe").strip():
+        return True
+    if _get_header(headers, "List-Id").strip():
+        return True
+    if _get_header(headers, "Precedence").strip().lower() in ("bulk", "list", "junk"):
+        return True
+    auto = _get_header(headers, "Auto-Submitted").strip().lower()
+    if auto and auto != "no":
+        return True
+    frm = _get_header(headers, "From").lower()
+    return any(marker in frm for marker in _NO_REPLY_MARKERS)
+
+
+def is_excluded_subject(headers: dict[str, str]) -> bool:
+    """環境変数のキーワードを含む件名か判定する。"""
+    raw_keywords = os.environ.get("MAIL_EXCLUDE_SUBJECT_KEYWORDS", "日報")
+    if raw_keywords == "":
+        return False
+
+    subject = unicodedata.normalize("NFKC", _get_header(headers, "Subject")).lower()
+    keywords = (
+        unicodedata.normalize("NFKC", value.strip()).lower()
+        for value in raw_keywords.split(",")
+    )
+    return any(keyword and keyword in subject for keyword in keywords)
+
+
+def should_skip_mail(headers: dict[str, str]) -> bool:
+    """読む系で除外対象とするメールか判定する。"""
+    return is_bulk_delivery(headers) or is_excluded_subject(headers)
+
+
 _BULK_SALUTATIONS = (
     "各位",
     "ご担当者",
@@ -184,17 +239,12 @@ def is_mass_or_impersonal(headers: dict[str, str], body: str) -> bool:
     いずれか該当で True:
       - 一括配信ヘッダ（List-Unsubscribe / List-Id / Precedence: bulk|list / Auto-Submitted）
       - no-reply 系の差出人
+      - 除外キーワードを含む件名
       - 本文冒頭が一般宛名（各位 / ご担当者様 / みなさま 等）＝特定個人宛でない
     """
-    if headers.get("List-Unsubscribe") or headers.get("List-Id"):
-        return True
-    if (headers.get("Precedence") or "").strip().lower() in ("bulk", "list", "junk"):
-        return True
-    auto = (headers.get("Auto-Submitted") or "").strip().lower()
-    if auto and auto != "no":
-        return True
-    frm = (headers.get("From") or "").lower()
-    if any(k in frm for k in ("noreply", "no-reply", "donotreply", "do-not-reply", "no_reply")):
+    # 下書き系は MAIL_EXCLUDE_BULK kill switch の影響を受けず、
+    # 配信・件名除外を常に適用する。
+    if should_skip_mail(headers):
         return True
     # 本文冒頭の一般宛名を検出。固定 120 字窓だと空行/画像/前置きが先頭にあると
     # 「各位」等が窓外に出て取りこぼす（＝マスメールを下書きしてしまう）。

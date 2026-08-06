@@ -232,6 +232,27 @@ def test_get_message_maps_payload_and_headers() -> None:
     assert msg.internal_date_ms == 1700000000000
 
 
+def test_get_message_metadata_requests_bulk_delivery_headers() -> None:
+    fake = FakeGmailService(message_get={"id": "M1", "payload": {"headers": []}})
+    client = GmailClient(service=fake)
+
+    client.get_message(msg_id="M1", request_id="r", format="metadata")
+
+    kwargs = fake.users().messages().last_get_kwargs
+    assert kwargs["format"] == "metadata"
+    assert kwargs["metadataHeaders"] == [
+        "From",
+        "To",
+        "Cc",
+        "Subject",
+        "Date",
+        "List-Id",
+        "List-Unsubscribe",
+        "Precedence",
+        "Auto-Submitted",
+    ]
+
+
 # -----------------------------------------------------------
 # extract_plain_text
 # -----------------------------------------------------------
@@ -570,6 +591,31 @@ def test_decode_rfc2047_japanese_headers() -> None:
     out = _decode_header_value(evil)
     assert "\n" not in out and "\r" not in out
     assert "1行目" in out and "偽の警告" in out  # 内容は残るが改行は除去
+
+
+def test_lowercase_rfc2047_subject_is_decoded_for_exclusion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from email.header import Header
+
+    from teamagent.adapters.gmail_client import _message_from_resp
+    from teamagent.skills._shared.mail_compose import should_skip_mail
+
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msg = _message_from_resp(
+        {
+            "id": "m-lower-subject",
+            "payload": {
+                "headers": [
+                    {"name": "subject", "value": Header("営業日報", "utf-8").encode()},
+                    {"name": "from", "value": "person@example.com"},
+                ]
+            },
+        }
+    )
+
+    assert msg.headers["subject"] == "営業日報"
+    assert should_skip_mail(msg.headers) is True
 
 
 def test_extract_plain_text_respects_charset() -> None:

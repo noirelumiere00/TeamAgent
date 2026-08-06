@@ -46,6 +46,7 @@ from teamagent.skills._shared.mail_compose import (
     env_int,
     env_str,
     is_mass_or_impersonal,
+    should_skip_mail,
 )
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest.draft_token import (
@@ -331,6 +332,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         masked_bodies: list[str] = []  # triage 入力（最新メッセージ本文・境界無害化）
         full_msgs: list[Any] = []  # アンカー（=最新メッセージ。下書きヘッダ/履歴の起点）
         priorities: list[str] = []
+        unread_excluded = 0
+        unread_kept = 0
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in unique_refs:
             tid = getattr(ref, "thread_id", "") or getattr(ref, "id", "")
             try:
@@ -351,11 +355,22 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             # 未読判定（UNREAD）＝未開封用。スレッド内に未読が1つでもあれば未読扱い。
             is_unread = any("UNREAD" in (getattr(m, "label_ids", ()) or ()) for m in thread)
+            # 一斉配信・noreply・除外件名の判定は1回だけ行い、未開封欄と下書きボタンで共用する。
+            # ボタン側は MAIL_EXCLUDE_BULK に依らず常に適用する: 下書き生成側の
+            # is_mass_or_impersonal は同じ条件を無条件に弾くため、ここを flag で緩めると
+            # 「ボタンは出るが押すと not_draftable」という壊れた見え方になる。
+            bulk_mail = should_skip_mail(anchor.headers)
+            if is_unread:
+                if exclude_bulk and bulk_mail:
+                    is_unread = False
+                    unread_excluded += 1
+                else:
+                    unread_kept += 1
             # 下書きボタンは「本人が To に直接いる」場合だけ出す（CC のみ/メーリス宛は対象外）。
             # ※ 表示は high なら出るが、下書きトークンが空＝作成ボタンは出ない（確認するのみ）。
             addressed = _is_addressed_to(anchor.headers, requester)
             draft_action_token = ""
-            if tid and addressed and mail_action_hmac_ready:
+            if tid and addressed and not bulk_mail and mail_action_hmac_ready:
                 try:
                     draft_action_token = encode_draft_token(tid, requester) or ""
                 except Exception:
@@ -388,6 +403,14 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             masked_bodies.append(_strip_sentinels(str(scrub_value(body))[: self._max_body_chars]))
             full_msgs.append(anchor)
             priorities.append(priority)
+
+        logger.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=unread_excluded,
+            kept=unread_kept,
+            request_id=ctx.request_id,
+        )
 
         cost = 0.0
         if items:

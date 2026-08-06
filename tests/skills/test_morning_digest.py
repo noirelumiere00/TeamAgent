@@ -46,6 +46,7 @@ class _FakeMsg:
     internal_date_ms: int | None = None
     thread_id: str = "thr-1"
     id: str = ""
+    label_ids: tuple[str, ...] = ()
 
 
 def _b64(text: str) -> str:
@@ -272,6 +273,118 @@ def test_basic_digest_with_triage_and_sort(fake_msgs, triage_json) -> None:
     # DLP マスクされた相手
     assert out.mail_digest[0].counterpart_masked.endswith("@x.com")
     assert "***" in out.mail_digest[0].counterpart_masked
+
+
+def test_bulk_noreply_and_daily_report_are_hidden_only_from_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    headers = [
+        {
+            "From": "news@example.com",
+            "To": _OWNER,
+            "Subject": "配信ニュース",
+            "List-Unsubscribe": "<mailto:unsubscribe@example.com>",
+        },
+        {"From": "noreply@example.com", "To": _OWNER, "Subject": "自動通知"},
+        {"From": "report@example.com", "To": _OWNER, "Subject": "営業日報"},
+        {"From": "tanaka@example.com", "To": _OWNER, "Subject": "個別のご相談"},
+    ]
+    msgs = [
+        _FakeMsg(
+            headers=value,
+            payload={"mimeType": "text/plain", "body": {"data": _b64("body")}},
+            internal_date_ms=1000 + index,
+            thread_id=f"T{index}",
+            id=f"m{index}",
+            label_ids=("UNREAD",),
+        )
+        for index, value in enumerate(headers)
+    ]
+    triage = "[" + ",".join(
+        '{"importance":"high","summary":"要返信"}' for _ in msgs
+    ) + "]"
+
+    out = _run(_FakeGmail(msgs), triage, max_drafts=0)
+
+    assert len(out.mail_digest) == 4
+    by_subject = {item.subject_display: item for item in out.mail_digest}
+    for subject in ("配信ニュース", "自動通知", "営業日報"):
+        item = by_subject[subject]
+        assert item.is_unread is False
+        assert item.importance == "high"
+        assert item.to_self is True
+    assert by_subject["個別のご相談"].is_unread is True
+
+
+def test_bulk_mail_gets_no_draft_button(monkeypatch: pytest.MonkeyPatch) -> None:
+    """一斉配信・noreply・日報には下書きボタンを出さない。
+
+    下書き生成側 (_create_single_draft → is_mass_or_impersonal) はこれらを無条件に
+    弾くため、ボタンだけ出すと「押しても not_draftable で失敗する」壊れた見え方になる。
+    ボタンの有無と実際に作れるかを一致させるための回帰テスト。
+    """
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    # 鍵が無いと全件トークン空になり「除外が効いた」と区別できないため、有効な鍵を張る。
+    monkeypatch.setenv("MAIL_ACTION_HMAC_SECRET", "dedicated-mail-key-" + "k" * 40)
+    headers = [
+        {
+            "From": "news@example.com",
+            "To": _OWNER,
+            "Subject": "配信ニュース",
+            "List-Id": "news.example.com",
+        },
+        {"From": "noreply@example.com", "To": _OWNER, "Subject": "自動通知"},
+        {"From": "report@example.com", "To": _OWNER, "Subject": "営業日報"},
+        {"From": "tanaka@example.com", "To": _OWNER, "Subject": "個別のご相談"},
+    ]
+    msgs = [
+        _FakeMsg(
+            headers=value,
+            payload={"mimeType": "text/plain", "body": {"data": _b64("body")}},
+            internal_date_ms=1000 + index,
+            thread_id=f"T{index}",
+            id=f"m{index}",
+            label_ids=("UNREAD",),
+        )
+        for index, value in enumerate(headers)
+    ]
+    triage = "[" + ",".join('{"importance":"high","summary":"要返信"}' for _ in msgs) + "]"
+
+    out = _run(_FakeGmail(msgs), triage, max_drafts=0)
+
+    by_subject = {item.subject_display: item for item in out.mail_digest}
+    for subject in ("配信ニュース", "自動通知", "営業日報"):
+        assert by_subject[subject].draft_token == "", f"{subject} にボタンが出ている"
+    # 個人宛は従来どおりボタンが出る（除外が効きすぎていないことの保証）。
+    assert by_subject["個別のご相談"].draft_token != ""
+
+
+def test_unread_personal_mail_is_kept_in_morning_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msg = _FakeMsg(
+        headers={"From": "tanaka@example.com", "To": _OWNER, "Subject": "個別のご相談"},
+        payload={"mimeType": "text/plain", "body": {"data": _b64("ご確認ください")}},
+        internal_date_ms=1000,
+        thread_id="T-personal",
+        id="m0",
+        label_ids=("UNREAD",),
+    )
+
+    out = _run(
+        _FakeGmail([msg]),
+        '[{"importance":"medium","summary":"個別相談"}]',
+        max_drafts=0,
+    )
+
+    assert len(out.mail_digest) == 1
+    assert out.mail_digest[0].is_unread is True
+    assert out.mail_digest[0].subject_display == "個別のご相談"
 
 
 def test_drafts_created_only_for_high_importance(fake_msgs, triage_json) -> None:

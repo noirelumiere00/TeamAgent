@@ -108,9 +108,12 @@ def _msg(
     thread_id: str = "",
     msg_id: str = "",
     label_ids: tuple[str, ...] = (),
+    extra_headers: dict[str, str] | None = None,
 ) -> _Msg:
+    headers = {"From": sender, "Subject": subject}
+    headers.update(extra_headers or {})
     return _Msg(
-        headers={"From": sender, "Subject": subject},
+        headers=headers,
         internal_date_ms=NOW_MS - days_ago * MS_PER_DAY,
         id=msg_id,
         thread_id=thread_id,
@@ -170,6 +173,45 @@ def test_happy_path_sorted_and_masked() -> None:
         assert "@moribuild.co.jp" in it.counterpart_masked
         assert "tanaka@" not in it.counterpart_masked
         assert it.evidence_ref and "@" not in it.evidence_ref
+
+
+def test_bulk_noreply_and_daily_subject_are_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msgs = [
+        _msg(
+            "配信 <news@example.com>",
+            "ニュースレター",
+            days_ago=5,
+            extra_headers={"List-Id": "newsletter.example.com"},
+        ),
+        _msg("通知 <noreply@example.com>", "自動通知", days_ago=4),
+        _msg("営業企画 <sales@example.com>", "営業日報", days_ago=3),
+        _msg("田中 <tanaka@example.com>", "個別相談", days_ago=2),
+    ]
+
+    out = MailFollowupSkill(gmail=FakeGmail(msgs), now_ms=NOW_MS).run(
+        MailFollowupInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert [item.subject_scrubbed for item in out.items] == ["個別相談"]
+
+
+def test_personal_mail_is_kept_by_bulk_filter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msg = _msg("田中 <tanaka@example.com>", "個別のご相談", days_ago=1)
+
+    out = MailFollowupSkill(gmail=FakeGmail([msg]), now_ms=NOW_MS).run(
+        MailFollowupInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert len(out.items) == 1
+    assert out.items[0].subject_scrubbed == "個別のご相談"
 
 
 def test_idle_days_filter() -> None:

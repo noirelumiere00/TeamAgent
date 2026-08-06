@@ -438,7 +438,17 @@ class GmailClient:
         service = self._ensure_safe_service()
         kwargs: dict[str, Any] = {"userId": user_id, "id": msg_id, "format": format}
         if format == "metadata":
-            kwargs["metadataHeaders"] = ["From", "To", "Cc", "Subject", "Date"]
+            kwargs["metadataHeaders"] = [
+                "From",
+                "To",
+                "Cc",
+                "Subject",
+                "Date",
+                "List-Id",
+                "List-Unsubscribe",
+                "Precedence",
+                "Auto-Submitted",
+            ]
 
         start = time.perf_counter()
         resp = service.users().messages().get(**kwargs).execute()
@@ -749,7 +759,8 @@ class GmailClient:
 # ヘルパー: MIME 解析 / ACL 抽出
 # -----------------------------------------------------------
 # RFC2047 デコード対象の人間可読ヘッダ（Subject/差出人名などが非ASCIIだとエンコードされる）。
-_DECODE_HEADERS: frozenset[str] = frozenset({"From", "To", "Cc", "Bcc", "Reply-To", "Subject"})
+# RFC 5322 のヘッダ名は大小文字を区別しないため、比較用の名前も lower で保持する。
+_DECODE_HEADERS: frozenset[str] = frozenset({"from", "to", "cc", "bcc", "reply-to", "subject"})
 
 
 def _decode_header_value(raw: str) -> str:
@@ -784,7 +795,7 @@ def _message_from_resp(resp: dict[str, Any]) -> GmailMessage:
         if not name:
             continue
         value = h.get("value", "")
-        headers[name] = _decode_header_value(value) if name in _DECODE_HEADERS else value
+        headers[name] = _decode_header_value(value) if name.lower() in _DECODE_HEADERS else value
     return GmailMessage(
         id=str(resp.get("id", "")),
         thread_id=str(resp.get("threadId", "")),

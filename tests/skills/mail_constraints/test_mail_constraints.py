@@ -42,11 +42,15 @@ class _Ref:
 class _Msg:
     payload: dict[str, Any]
     internal_date_ms: int | None = 1_700_000_000_000
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class FakeGmail:
-    def __init__(self, bodies: list[str]) -> None:
+    def __init__(
+        self, bodies: list[str], headers: list[dict[str, str]] | None = None
+    ) -> None:
         self._bodies = bodies
+        self._headers = headers or [{} for _ in bodies]
         self.last_query: str | None = None
 
     def list_messages(
@@ -65,7 +69,8 @@ class FakeGmail:
     def get_message(
         self, msg_id: str, request_id: str, *, format: str = "full", user_id: str = "me"
     ) -> _Msg:
-        return _Msg(payload=_payload(self._bodies[int(msg_id[1:])]))
+        index = int(msg_id[1:])
+        return _Msg(payload=_payload(self._bodies[index]), headers=self._headers[index])
 
 
 @dataclass
@@ -147,6 +152,59 @@ def test_happy_path_returns_structured_constraints() -> None:
     assert out.summary == "タイアップNGあり"
     assert out.inbox_owner_masked == "s***@vectorinc.co.jp"
     assert out.total_cost_usd == 0.001
+
+
+def test_bulk_noreply_and_daily_report_are_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    gmail = FakeGmail(
+        ["配信本文", "noreply本文", "日報本文", "個人メールの制約"],
+        headers=[
+            {
+                "From": "news@example.com",
+                "Subject": "お知らせ",
+                "List-Unsubscribe": "<mailto:unsubscribe@example.com>",
+            },
+            {"From": "noreply@example.com", "Subject": "自動通知"},
+            {"From": "report@example.com", "Subject": "営業日報"},
+            {"From": "tanaka@example.com", "Subject": "予算のご相談"},
+        ],
+    )
+    bedrock = FakeBedrock('{"constraints":[],"summary":""}')
+
+    out = _skill(gmail, bedrock).run(
+        MailConstraintsInput(client_name="A社"), _ctx("s-komata@vectorinc.co.jp")
+    )
+
+    assert out.scanned_count == 4
+    assert bedrock.last_user is not None
+    assert bedrock.last_user.count("<<<MAIL id=") == 1
+    assert "個人メールの制約" in bedrock.last_user
+    assert "配信本文" not in bedrock.last_user
+    assert "noreply本文" not in bedrock.last_user
+    assert "日報本文" not in bedrock.last_user
+
+
+def test_personal_mail_is_kept_for_constraint_extraction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    bedrock = FakeBedrock('{"constraints":[],"summary":""}')
+    gmail = FakeGmail(
+        ["予算上限は300万円です"],
+        headers=[{"From": "田中 <tanaka@example.com>", "Subject": "予算のご相談"}],
+    )
+
+    _skill(gmail, bedrock).run(
+        MailConstraintsInput(client_name="A社"), _ctx("s-komata@vectorinc.co.jp")
+    )
+
+    assert bedrock.called is True
+    assert bedrock.last_user is not None
+    assert "予算上限は300万円" in bedrock.last_user
 
 
 # ── G3: DLP マスク（LLM へ渡す前に PII 除去）────────────────────────────────

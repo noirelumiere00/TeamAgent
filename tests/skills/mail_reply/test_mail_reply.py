@@ -117,6 +117,23 @@ def _inbound() -> _Msg:
     )
 
 
+def _candidate(
+    sender: str,
+    subject: str,
+    body: str,
+    *,
+    extra_headers: dict[str, str] | None = None,
+) -> _Msg:
+    headers = {
+        "From": sender,
+        "To": OWNER,
+        "Subject": subject,
+        "Message-ID": "<candidate@example.com>",
+    }
+    headers.update(extra_headers or {})
+    return _Msg(headers=headers, payload=_payload(body))
+
+
 def test_g1_requires_user_email() -> None:
     skill = MailReplySkill(gmail=FakeGmail([_inbound()]), bedrock=FakeBedrock())
     with pytest.raises(PermissionError):
@@ -151,6 +168,106 @@ def test_happy_path_creates_draft_does_not_send() -> None:
     # G5: 受信のみ・client+期間で絞る
     assert '"森ビル"' in (gmail.last_query or "")
     assert "-in:sent" in (gmail.last_query or "")
+
+
+def test_skips_bulk_noreply_and_daily_then_replies_to_personal_mail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msgs = [
+        _candidate(
+            "配信 <news@example.com>",
+            "ニュースレター",
+            "配信本文",
+            extra_headers={"List-Unsubscribe": "<mailto:unsubscribe@example.com>"},
+        ),
+        _candidate("通知 <noreply@example.com>", "自動通知", "自動通知本文"),
+        _candidate("営業企画 <sales@example.com>", "営業日報", "日報本文"),
+        _candidate("田中 <tanaka@example.com>", "個別相談", "通常の個人メール本文"),
+    ]
+    gmail = FakeGmail(msgs)
+
+    out = MailReplySkill(gmail=gmail, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert out.created is True
+    assert out.to_display == "tanaka@example.com"
+    assert out.draft_subject == "Re: 個別相談"
+    assert gmail.create_draft_calls[0]["to"] == "tanaka@example.com"
+
+
+def test_all_excluded_candidates_return_no_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    msgs = [
+        _candidate(
+            "配信 <news@example.com>",
+            "ニュースレター",
+            "配信本文",
+            extra_headers={"Precedence": "bulk"},
+        ),
+        _candidate("通知 <no-reply@example.com>", "自動通知", "自動通知本文"),
+        _candidate("営業企画 <sales@example.com>", "営業日報", "日報本文"),
+    ]
+    gmail = FakeGmail(msgs)
+
+    out = MailReplySkill(gmail=gmail, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert out.created is False
+    assert "見つかりません" in out.note
+    assert gmail.create_draft_calls == []
+
+
+def test_explicit_bulk_target_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本人が target_message_id で指したメールは、一斉配信でも除外しない。
+
+    除外は「どれに返信するか自動で選ぶ」ときの事故防止であって、指を差された
+    ものまで落とすと「対象が見つかりません」しか返せなくなる（＝依頼が実行不能）。
+    """
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    msg = _candidate(
+        "配信 <news@example.com>",
+        "ニュースレター",
+        "配信本文",
+        extra_headers={"List-Id": "newsletter.example.com"},
+    )
+    gmail = FakeGmail([msg])
+
+    out = MailReplySkill(gmail=gmail, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="Example", target_message_id="m0"),
+        _ctx(),
+    )
+
+    assert out.created is True
+    assert len(gmail.create_draft_calls) == 1
+
+
+def test_bulk_is_still_excluded_when_target_is_auto_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自動選択のときは従来どおり一斉配信を飛ばす（上の明示指定と対になる保証）。"""
+    monkeypatch.delenv("MAIL_EXCLUDE_BULK", raising=False)
+    msg = _candidate(
+        "配信 <news@example.com>",
+        "ニュースレター",
+        "配信本文",
+        extra_headers={"List-Id": "newsletter.example.com"},
+    )
+    gmail = FakeGmail([msg])
+
+    out = MailReplySkill(gmail=gmail, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="Example"),
+        _ctx(),
+    )
+
+    assert out.created is False
+    assert gmail.create_draft_calls == []
 
 
 def test_instructions_passed_to_model() -> None:

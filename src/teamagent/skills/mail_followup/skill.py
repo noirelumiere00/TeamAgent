@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from teamagent.adapters.gmail_client import GmailClient, extract_thread_participants
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_followup.schema import (
     FollowupItem,
@@ -116,6 +117,9 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
 
         now_ms = self._now_ms if self._now_ms is not None else int(time.time() * 1000)
         items: list[FollowupItem] = []
+        excluded = 0
+        kept = 0
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in unique_refs:
             thread_id = str(getattr(ref, "thread_id", "") or "")
             if not thread_id:
@@ -144,6 +148,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                 key=lambda msg: int(getattr(msg, "internal_date_ms", 0) or 0),
             )
             anchor = thread[-1]
+            if exclude_bulk and should_skip_mail(anchor.headers):
+                excluded += 1
+                continue
+            kept += 1
             if _is_from_requester(anchor, requester):
                 continue
             counterpart = _first_counterpart(anchor.headers, requester)
@@ -160,6 +168,14 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                     evidence_ref=_hash_id(anchor.id),
                 )
             )
+
+        log.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=kept,
+            request_id=ctx.request_id,
+        )
 
         # 放置日数が大きい順（最も後回しになっているもの＝失注リスクが高い）。
         items.sort(key=lambda it: it.idle_days, reverse=True)

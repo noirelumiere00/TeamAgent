@@ -38,6 +38,7 @@ from teamagent.skills._shared.mail_compose import (
     build_thread_history,
     env_bool,
     env_int,
+    should_skip_mail,
 )
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_reply.schema import MailReplyInput, MailReplyOutput
@@ -224,13 +225,38 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
     def _find_target(
         self, gmail: GmailClient, input: MailReplyInput, ctx: SkillContext
     ) -> Any | None:
+        log = ctx.bind_logger(self.name)
+        # 本人が明示したメールは除外しない。除外は「どれに返信するか自動で選ぶ」ときの
+        # 事故防止であって、指を差されたものまで消すと「対象なし」しか返せなくなる。
+        explicit_target = bool(input.target_message_id)
         if input.target_message_id:
-            return gmail.get_message(input.target_message_id, ctx.request_id)
-        query = f'"{input.client_name}" newer_than:{input.lookback_days}d -in:sent in:inbox'
-        refs, _ = gmail.list_messages(query, ctx.request_id, max_results=10)
-        if not refs:
-            return None
-        return gmail.get_message(refs[0].id, ctx.request_id)  # 最新の受信を返信元にする
+            candidate_ids = [input.target_message_id]
+        else:
+            query = f'"{input.client_name}" newer_than:{input.lookback_days}d -in:sent in:inbox'
+            refs, _ = gmail.list_messages(query, ctx.request_id, max_results=10)
+            candidate_ids = [ref.id for ref in refs]
+
+        excluded = 0
+        kept = 0
+        target = None
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
+        for message_id in candidate_ids:
+            candidate = gmail.get_message(message_id, ctx.request_id)
+            if not explicit_target and exclude_bulk and should_skip_mail(candidate.headers):
+                excluded += 1
+                continue
+            kept += 1
+            target = candidate  # newest-first の最初の通常受信を返信元にする
+            break
+
+        log.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=kept,
+            request_id=ctx.request_id,
+        )
+        return target
 
     def _create_draft(
         self,

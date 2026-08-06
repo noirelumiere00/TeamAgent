@@ -11,7 +11,10 @@ from teamagent.skills._shared.mail_compose import (
     build_thread_history,
     env_bool,
     env_int,
+    is_bulk_delivery,
+    is_excluded_subject,
     is_mass_or_impersonal,
+    should_skip_mail,
 )
 
 
@@ -171,3 +174,46 @@ def test_personal_email_not_mass() -> None:
     assert (
         is_mass_or_impersonal({"From": "tanaka@x.com"}, "小俣様\nお世話になっております。") is False
     )
+
+
+# ── 読む系の除外判定 ──────────────────────────────────────────────
+
+
+def test_bulk_delivery_header_names_are_case_insensitive() -> None:
+    assert is_bulk_delivery({"LIST-UNSUBSCRIBE": "<https://example.com/unsubscribe>"}) is True
+    assert is_bulk_delivery({"List-ID": "sales.example.com"}) is True
+    assert is_bulk_delivery({"precedence": " list "}) is True
+
+
+def test_auto_submitted_no_is_not_bulk_delivery() -> None:
+    assert is_bulk_delivery({"AUTO-SUBMITTED": " no ", "FROM": "person@example.com"}) is False
+
+
+def test_excluded_subject_normalizes_width_and_case(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", "ABC")
+    assert is_excluded_subject({"subject": "ａｂｃ 進捗報告"}) is True
+
+
+def test_bulk_kill_switch_only_disables_reading_filter(monkeypatch: Any) -> None:
+    headers = {"LIST-ID": "sales.example.com"}
+    monkeypatch.setenv("MAIL_EXCLUDE_BULK", "false")
+
+    assert should_skip_mail(headers) is True
+    assert (env_bool("MAIL_EXCLUDE_BULK", True) and should_skip_mail(headers)) is False
+    assert is_mass_or_impersonal(headers, "本文") is True
+
+
+def test_generic_salutation_is_excluded_only_from_drafts(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", raising=False)
+    headers = {"From": "person@example.com", "Subject": "全社連絡"}
+
+    assert should_skip_mail(headers) is False
+    assert is_mass_or_impersonal(headers, "各位\nお知らせします。") is True
+
+
+def test_empty_subject_keywords_disable_subject_filter(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAIL_EXCLUDE_SUBJECT_KEYWORDS", "")
+    headers = {"From": "person@example.com", "Subject": "営業日報"}
+
+    assert is_excluded_subject(headers) is False
+    assert should_skip_mail(headers) is False
