@@ -196,10 +196,12 @@ def _candidate_url(hit: SearchHitOut) -> str | None:
         for value in (hit.client_name, hit.project)
         if value and value.strip()
     }
-    for value in (hit.drive_url, hit.source_uri):
+    for value in (hit.url, hit.drive_url, hit.source_uri):
         if not value or not value.strip():
             continue
         candidate = value.strip()
+        if not candidate.lower().startswith(("http://", "https://")):
+            continue
         lowered = candidate.casefold()
         if any(term in lowered for term in sensitive_terms):
             continue

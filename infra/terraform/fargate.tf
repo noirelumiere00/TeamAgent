@@ -587,6 +587,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "TEAMAGENT_SHARED_COMPANY_DOMAINS", value = var.shared_company_domains },
       # Slack event署名claimとusers.info resolverが照合する本番必須workspace ID。
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
+      # Slack出典の内部識別子を開けるpermalinkへ変換するworkspace名。空ならURLを出さない。
+      { name = "SLACK_WORKSPACE", value = var.slack_workspace },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が

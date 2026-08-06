@@ -4132,12 +4132,14 @@ def create_app(
                 detail=str(exc)[:200],
             )
             return JSONResponse({"error": "search_failed"}, status_code=500)
-        # gdrive:// は実ブラウザで開けないため、Drive の view リンクへ整形して「出典を開く」を
-        # 実クリック可能にする（資料提出 段階1）。file_id 抽出失敗時は従来 source_uri に
-        # fail-open。doc_id（FB 識別子）は元の h.source_uri のままに保つ。
+        # 正準 url を優先し、旧形式の gdrive:// だけ Drive view リンクへ補完する。
+        # 旧形式の補完に失敗した場合は既存 API 契約どおり元の値を返し、フロント側の
+        # safeUrl 判定に委ねる。doc_id は常に元の内部識別子を保持する。
         from teamagent.skills.knowledge_deliver.skill import extract_drive_file_id
 
         def _open_url(h: SearchHitOut) -> str | None:
+            if h.url:
+                return h.url
             uri: str | None = h.source_uri or h.drive_url
             if h.source_type == "gdrive":
                 fid = extract_drive_file_id(h.source_uri)

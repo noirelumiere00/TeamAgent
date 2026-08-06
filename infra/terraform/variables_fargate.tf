@@ -243,6 +243,15 @@ variable "slack_team_id" {
   }
 }
 
+variable "slack_workspace" {
+  # 本番の実値は "vector-workspcae"（Slack が返す permalink の実測値。綴りは
+  # ワークスペース側がそうなっている。"vectorinc" ではない）。誤った値を入れると
+  # 開けない URL を出すことになるため、変更時は必ず実 permalink と突き合わせること。
+  description = "Slack出典の内部識別子を開けるpermalinkへ変換するためのworkspace名。既定の空文字では変換せず、URLを出さない。"
+  type        = string
+  default     = ""
+}
+
 variable "slack_dm_allowlist" {
   description = "本番で必須のSlack DM契約。\"*\"はdmPolicy=open+allowFrom=[\"*\"]、それ以外は1〜100件の重複しないSlack U IDを空白なしのカンマ区切りで指定しdmPolicy=allowlistにする。既定の空文字は安全な未設定sentinelであり、明示値なしのplanをfail-closedにする。"
   type        = string

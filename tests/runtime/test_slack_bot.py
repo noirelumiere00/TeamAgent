@@ -378,6 +378,38 @@ def test_build_search_blocks_slack_source_shows_thread_button(monkeypatch: Any) 
     assert btn["text"]["text"] == "💬 Slack で開く"
 
 
+def test_build_search_blocks_slack_source_prefers_resolved_drive_url(monkeypatch: Any) -> None:
+    """Slack ヒットでも正準 URL が Drive なら Drive ボタンとして表示する。"""
+
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    drive_url = "https://drive.google.com/file/d/RESOLVED/view"
+    output = SearchOutput(
+        answer="Drive 資料を解決しました",
+        hits=[
+            SearchHitOut(
+                chunk_id=99,
+                content="...",
+                score=0.92,
+                source="#proj-ナレッジ共有",
+                source_type="slack",
+                source_uri="slack://C091ZSVTKF1/1748244936.050099",
+                channel_name="#proj-ナレッジ共有",
+                url=drive_url,
+            ),
+        ],
+        total_cost_usd=0.0,
+    )
+
+    blocks = build_search_blocks(output)
+
+    button_sections = [b for b in blocks if b.get("type") == "section" and "accessory" in b]
+    assert len(button_sections) == 1
+    button = button_sections[0]["accessory"]
+    assert button["url"] == drive_url
+    assert button["text"]["text"] == "📎 Drive で開く"
+    assert button["action_id"] == "open_drive_99"
+
+
 def test_format_search_response_slack_source_shows_channel(monkeypatch: Any) -> None:
     """source_type='slack' のとき 💬 channel_name で表示される。"""
     monkeypatch.delenv("SLACK_WORKSPACE_DOMAIN", raising=False)
