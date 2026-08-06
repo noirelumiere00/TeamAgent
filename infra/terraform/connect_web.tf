@@ -438,6 +438,8 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "OAUTH_REDIRECT_URI", value = var.connect_redirect_uri },
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
+      # Slack出典の内部識別子を開けるpermalinkへ変換するworkspace名。空ならURLを出さない。
+      { name = "SLACK_WORKSPACE", value = var.slack_workspace },
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       { name = "CONNECT_GOOGLE_CLIENT_ID", value = var.connect_google_client_id },
       # /app・/search を @vectorinc.co.jp の社員全員に開放（email_verified + 会社ドメイン hd 許可）。

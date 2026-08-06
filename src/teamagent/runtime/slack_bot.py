@@ -46,6 +46,7 @@ from teamagent.runtime.request_gate import (
     RequestGate,
 )
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder, UsageTrace
+from teamagent.skills._shared.source_url import slack_thread_permalink as _slack_thread_permalink
 from teamagent.skills.base import SkillContext
 from teamagent.skills.router import SkillRouter
 from teamagent.skills.search.schema import SearchInput, SearchOutput
@@ -91,30 +92,6 @@ def strip_mention(text: str) -> str:
         "<@U082ABC> A社の前回提案は？" → "A社の前回提案は？"
     """
     return _MENTION_PATTERN.sub("", text, count=1).strip()
-
-
-def _slack_thread_permalink(source_uri: str) -> str | None:
-    """slack://CHANNEL_ID/THREAD_TS を Slack permalink URL に変換する。
-
-    変換例: slack://C091ZSVTKF1/1748244936.050099
-          → https://vectorinc.slack.com/archives/C091ZSVTKF1/p1748244936050099
-
-    SLACK_WORKSPACE 環境変数が未設定の場合は None を返す。
-    """
-    # SLACK_WORKSPACE はワークスペース名のみ（例: "vectorinc"）
-    workspace = os.environ.get("SLACK_WORKSPACE")
-    if not workspace:
-        return None
-    if not source_uri.startswith("slack://"):
-        return None
-    rest = source_uri[len("slack://") :]
-    parts = rest.split("/", 1)
-    if len(parts) != 2:
-        return None
-    channel_id, thread_ts = parts[0], parts[1]
-    # "1748244936.050099" → "1748244936050099" (小数点を除去)
-    ts_digits = thread_ts.replace(".", "")
-    return f"https://{workspace}.slack.com/archives/{channel_id}/p{ts_digits}"
 
 
 # /teamagent_search で受け付けるオプションのホワイトリスト
@@ -199,14 +176,25 @@ def format_search_response(output: SearchOutput) -> str:
     """SearchOutput を Slack に表示する文字列（フォールバック / 通知用）に整形する。
 
     Block Kit を使う場合も text フィールドにこれを入れて、通知やインデックス用に保持する。
-    引用フォーマット：📄 file_name (p.N) — score=0.91 → Drive で開く
+    引用フォーマット：📄 file_name (p.N) — score=0.91 → 出典を開く
     """
     lines = [output.answer, ""]
     if output.hits:
         lines.append("*参考資料:*")
         for hit in output.hits[:5]:
             label = _format_hit_source_label(hit)
-            link = f" → <{hit.drive_url}|Drive で開く>" if hit.drive_url else ""
+            permalink = (
+                _slack_thread_permalink(hit.source_uri)
+                if hit.source_type == "slack" and hit.source_uri
+                else None
+            )
+            open_url = hit.url or hit.drive_url or permalink
+            link_label = (
+                "Slack で開く"
+                if open_url and ".slack.com/archives/" in open_url
+                else "Drive で開く"
+            )
+            link = f" → <{open_url}|{link_label}>" if open_url else ""
             lines.append(f"• {label}  _score={hit.score:.2f}_{link}")
     suggestions = build_suggestions(output)
     if suggestions:
@@ -221,7 +209,7 @@ def format_search_response(output: SearchOutput) -> str:
 def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
     """SearchOutput を Slack Block Kit に整形する。
 
-    Drive URL があれば各 hit を「Drive で開く」ボタン付きで表示する。
+    正準 URL があれば各 hit を出典種別に合うボタン付きで表示する。
     Block Kit が無効な環境（通知中心）でも text フィールドで読める形を保つ。
     """
     blocks: list[dict[str, Any]] = [
@@ -246,24 +234,25 @@ def build_search_blocks(output: SearchOutput) -> list[dict[str, Any]]:
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": line},
             }
-            # ボタン優先順位: Slack thread > Drive（source_type で判定）
+            # 正準 URL は Drive 解決結果を Slack permalink より優先する。
             source_type = getattr(hit, "source_type", None)
             source_uri = getattr(hit, "source_uri", None)
-            if source_type == "slack" and source_uri:
-                permalink = _slack_thread_permalink(source_uri)
-                if permalink:
-                    section["accessory"] = {
-                        "type": "button",
-                        "text": {"type": "plain_text", "text": "💬 Slack で開く"},
-                        "url": permalink,
-                        "action_id": f"open_slack_{hit.chunk_id}",
-                    }
-            elif hit.drive_url:
+            permalink = (
+                _slack_thread_permalink(source_uri)
+                if source_type == "slack" and source_uri
+                else None
+            )
+            open_url = hit.url or hit.drive_url or permalink
+            if open_url:
+                is_slack = permalink is not None and open_url == permalink
                 section["accessory"] = {
                     "type": "button",
-                    "text": {"type": "plain_text", "text": "📎 Drive で開く"},
-                    "url": hit.drive_url,
-                    "action_id": f"open_drive_{hit.chunk_id}",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "💬 Slack で開く" if is_slack else "📎 Drive で開く",
+                    },
+                    "url": open_url,
+                    "action_id": f"open_{'slack' if is_slack else 'drive'}_{hit.chunk_id}",
                 }
             blocks.append(section)
 

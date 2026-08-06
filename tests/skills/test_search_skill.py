@@ -13,7 +13,7 @@ import pytest
 from teamagent.adapters.bedrock_client import ConverseResponse, TokenUsage
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.base import SkillContext
-from teamagent.skills.search.schema import SearchInput
+from teamagent.skills.search.schema import SearchHitOut, SearchInput
 from teamagent.skills.search.skill import SearchSkill
 
 
@@ -1068,7 +1068,7 @@ def test_client_match_sort_default_off_keeps_dense_order(
 # ---- 資料リンク付与（_source_links_block / _doc_url） ----
 
 
-def test_doc_url_http_and_gdrive_and_slack() -> None:
+def test_doc_url_http_and_gdrive_and_slack(monkeypatch: Any) -> None:
     assert (
         SearchSkill._doc_url({"drive_url": "https://drive.google.com/file/d/ABC/view"})
         == "https://drive.google.com/file/d/ABC/view"
@@ -1077,8 +1077,14 @@ def test_doc_url_http_and_gdrive_and_slack() -> None:
         SearchSkill._doc_url({"source_uri": "gdrive://XYZ123"})
         == "https://drive.google.com/file/d/XYZ123/view"
     )
-    # Slack 出典（非http）はリンク化しない
+    # workspace 未設定なら内部 Slack 識別子をリンク化しない。
+    monkeypatch.delenv("SLACK_WORKSPACE", raising=False)
     assert SearchSkill._doc_url({"source_uri": "slack://C1/1700.5"}) is None
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    assert (
+        SearchSkill._doc_url({"source_uri": "slack://C1/1700.5"})
+        == "https://vectorinc.slack.com/archives/C1/p17005"
+    )
     assert SearchSkill._doc_url({}) is None
 
 
@@ -1117,7 +1123,8 @@ def test_source_links_block_dedups_and_renders_markdown() -> None:
     assert block.count("drive.google.com/file/d/F1") == 1  # 重複資料は1回だけ
 
 
-def test_source_links_block_empty_when_no_links() -> None:
+def test_source_links_block_empty_when_no_links(monkeypatch: Any) -> None:
+    monkeypatch.delenv("SLACK_WORKSPACE", raising=False)
     hits = [SearchHit(chunk_id=1, content="c", score=0.9, metadata={"source_uri": "slack://C/1"})]
     assert SearchSkill._source_links_block(hits) == ""
     assert SearchSkill._source_links_block([]) == ""
@@ -1222,3 +1229,148 @@ def test_candidate_file_names_ignores_text_without_extension() -> None:
         {"title": "サンマルクカフェ"}, "提案の記録です。ファイルはありません。"
     )
     assert names == []
+
+
+def _pgvector_for_url_hits(hits: list[SearchHit]) -> MagicMock:
+    """URL 解決テスト用の pgvector ダブルを組み立てる。"""
+
+    pgvector = MagicMock()
+    connection = MagicMock()
+    connection.__enter__ = MagicMock(return_value=MagicMock())
+    connection.__exit__ = MagicMock(return_value=False)
+    pgvector.connection.return_value = connection
+    pgvector.search_similar_new_schema.return_value = hits
+    pgvector.resolve_file_urls_by_titles.return_value = {}
+    return pgvector
+
+
+def test_slack_urls_resolve_drive_titles_once_and_hide_internal_uri(
+    fake_bedrock: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """Slack の資料名を一括解決し、Drive URL を permalink より優先する。"""
+
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    pgvector = _pgvector_for_url_hits(
+        [
+            SearchHit(
+                chunk_id=1,
+                content="共有資料: proposal_alpha.pdf",
+                score=0.9,
+                metadata={
+                    "source_type": "slack",
+                    "source_uri": "slack://C111/1700.1",
+                    "title": "提案共有スレッド",
+                },
+            ),
+            SearchHit(
+                chunk_id=2,
+                content="共有資料: proposal_beta.pptx",
+                score=0.8,
+                metadata={
+                    "source_type": "slack",
+                    "source_uri": "slack://C222/1700.2",
+                    "title": "別の提案共有スレッド",
+                },
+            ),
+        ]
+    )
+    drive_url = "https://drive.google.com/file/d/ALPHA/view"
+    pgvector.resolve_file_urls_by_titles.return_value = {"proposal_alpha.pdf": drive_url}
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+
+    out = skill.run(
+        SearchInput(query="提案資料", top_k=2, include_answer=False),
+        SkillContext(),
+    )
+
+    assert out.hits[0].url == drive_url
+    assert out.hits[1].url == "https://vectorinc.slack.com/archives/C222/p17002"
+    assert out.hits[0].source_uri == "slack://C111/1700.1"  # 内部用途の属性は保持する。
+    pgvector.resolve_file_urls_by_titles.assert_called_once()
+    requested_titles = pgvector.resolve_file_urls_by_titles.call_args.args[1]
+    assert requested_titles == ["proposal_alpha.pdf", "proposal_beta.pptx"]
+    llm_payload = out.model_dump_json()
+    assert "source_uri" not in llm_payload
+    assert "slack://" not in llm_payload
+
+
+def test_slack_url_is_none_without_workspace(
+    fake_bedrock: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """資料名を解決できず workspace も無ければ、開ける URL を返さない。"""
+
+    monkeypatch.delenv("SLACK_WORKSPACE", raising=False)
+    pgvector = _pgvector_for_url_hits(
+        [
+            SearchHit(
+                chunk_id=1,
+                content="資料名の記載なし",
+                score=0.9,
+                metadata={
+                    "source_type": "slack",
+                    "source_uri": "slack://C111/1700.1",
+                    "title": "提案共有スレッド",
+                },
+            )
+        ]
+    )
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+
+    out = skill.run(SearchInput(query="提案資料", include_answer=False), SkillContext())
+
+    assert out.hits[0].url is None
+    pgvector.resolve_file_urls_by_titles.assert_not_called()
+
+
+def test_existing_drive_url_skips_title_resolution(
+    fake_bedrock: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """明示済み drive_url は最優先し、そのヒットの資料名解決を行わない。"""
+
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    drive_url = "https://drive.google.com/file/d/DIRECT/view"
+    pgvector = _pgvector_for_url_hits(
+        [
+            SearchHit(
+                chunk_id=1,
+                content="共有資料: proposal_direct.pdf",
+                score=0.9,
+                metadata={
+                    "source_type": "slack",
+                    "source_uri": "slack://C111/1700.1",
+                    "drive_url": drive_url,
+                },
+            )
+        ]
+    )
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+
+    out = skill.run(SearchInput(query="提案資料", include_answer=False), SkillContext())
+
+    assert out.hits[0].url == drive_url
+    pgvector.resolve_file_urls_by_titles.assert_not_called()
+
+
+def test_search_hit_url_drops_non_http_scheme() -> None:
+    """正準 url に内部 URI や実行可能スキームを保持しない。"""
+
+    hit = SearchHitOut(chunk_id=1, content="x", score=0.5, url="javascript:alert(1)")
+    assert hit.url is None

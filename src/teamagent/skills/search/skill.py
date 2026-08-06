@@ -25,6 +25,7 @@ from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
 from teamagent.skills.search.dedup import cap_per_document, collapse_near_duplicates
@@ -331,6 +332,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         hits = self._retrieve(embedding, input, ctx)
 
+        # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
+        # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
+        file_urls = self._resolve_file_urls(hits, ctx)
+
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
         #    include_answer=False（二段レスポンスの fast path）は要約そのものを
         #    スキップし answer='' / 要約コスト 0 で hits だけ返す。0 件時の
@@ -343,9 +348,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
             # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
             if _source_links_enabled():
-                answer += self._source_links_block(
-                    hits, file_urls=self._resolve_file_urls(hits, ctx)
-                )
+                answer += self._source_links_block(hits, file_urls=file_urls)
         else:
             answer, cost_usd = "", 0.0
 
@@ -365,6 +368,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     drive_url=(
                         str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
                     ),
+                    url=self._hit_url(h, file_urls=file_urls),
                     source_uri=(
                         str(h.metadata["source_uri"]) if h.metadata.get("source_uri") else None
                     ),
@@ -1124,7 +1128,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         """SearchHit の metadata から資料の開けるURL（Drive view 等）を1本組み立てる。
 
         drive_url / source_uri を http はそのまま、`gdrive://FILE_ID` は Drive view URL へ整形。
-        Slack 出典（slack://）等の非http URIはリンク化しない（None）。
+        `slack://` は SLACK_WORKSPACE 設定時だけ Slack permalink へ整形する。
         """
         for v in (meta.get("drive_url"), meta.get("source_uri")):
             if not v:
@@ -1136,6 +1140,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 fid = s[len("gdrive://") :].split("/")[0].split("?")[0]
                 if fid:
                     return f"https://drive.google.com/file/d/{fid}/view"
+            if s.startswith("slack://"):
+                permalink = slack_thread_permalink(s)
+                if permalink:
+                    return permalink
         return None
 
     # 管理シート行の本文に載る資料ファイル名（拡張子つき）。行の title はシート名
@@ -1156,18 +1164,49 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 names.append(name)
         return names[:5]
 
+    @classmethod
+    def _hit_url(
+        cls,
+        hit: SearchHit,
+        *,
+        file_urls: dict[str, str] | None = None,
+    ) -> str | None:
+        """1ヒットの正準 URL を、明示した優先順位で決定する。
+
+        優先順位は ``drive_url`` → 資料名で解決した Drive URL →
+        ``source_uri`` の http(s) / gdrive 整形 → Slack permalink → ``None``。
+        """
+
+        meta = hit.metadata or {}
+        direct = cls._doc_url({"drive_url": meta.get("drive_url")})
+        if direct:
+            return direct
+
+        resolved = file_urls or {}
+        for name in cls._candidate_file_names(meta, hit.content or ""):
+            candidate = str(resolved.get(name) or "").strip()
+            if candidate.lower().startswith(("http://", "https://")):
+                return candidate
+
+        return cls._doc_url({"source_uri": meta.get("source_uri")})
+
     def _resolve_file_urls(self, hits: list[SearchHit], ctx: SkillContext) -> dict[str, str]:
-        """管理シート行のヒットについて、資料名から実ファイル(Drive)URL を引き当てる。
+        """Slack / 管理シートのヒットから資料名を集め、Drive URL を一括解決する。
 
         営業管理シート(gsheets)は「行」が 1 チャンクとして入っており、その source_uri は
         シートの ``#gid=..&range=N:N`` を指す。ユーザーが求めるのは資料そのものの URL
-        なので、行に載っている資料名で gdrive 実ファイルを解決する。fail-open:
-        解決できなければ従来どおり元の URL を使う（リンクを消さない）。
+        なので、行に載っている資料名で gdrive 実ファイルを解決する。Slack ヒットも本文・
+        metadata 中の資料名を同じ一括問い合わせに含める。明示的な drive_url があるヒットは
+        解決不要として除外する。fail-open: 解決できなければ元出典の URL 整形へ戻す。
         """
         titles: list[str] = []
         for h in hits:
             meta = h.metadata or {}
-            if str(meta.get("source_type") or "") != "gsheets":
+            if meta.get("drive_url"):
+                continue
+            source_type = str(meta.get("source_type") or "")
+            source_uri = str(meta.get("source_uri") or "")
+            if source_type not in ("gsheets", "slack") and not source_uri.startswith("slack://"):
                 continue
             for name in self._candidate_file_names(meta, h.content or ""):
                 if name not in titles:
@@ -1210,12 +1249,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         lines: list[str] = []
         for h in hits:
             meta = h.metadata or {}
-            url = ""
-            for name in cls._candidate_file_names(meta, h.content or ""):
-                if name in resolved:
-                    url = resolved[name]
-                    break
-            url = url or cls._doc_url(meta)
+            url = cls._hit_url(h, file_urls=resolved)
             if not url or url in seen:
                 continue
             # url に markdown を壊す文字（)・空白・制御）が混ざる資料は安全側でスキップ。

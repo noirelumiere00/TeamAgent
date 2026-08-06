@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+from urllib.parse import urlsplit
 
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
@@ -93,6 +95,40 @@ def _shorten(s: str, n: int = 40) -> str:
 
 def _esc(s: object) -> str:
     return html.escape(str(s if s is not None else ""))
+
+
+def _http_image_url(value: str | None) -> str:
+    """外部画像として描画できる http(s) URL だけを返す。"""
+    url = value or ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return url
+
+
+def _image_post_top_n() -> int:
+    """画像投稿タブを出す順位上限。0 は機能 OFF。"""
+    raw = os.environ.get("VIDEO_ALGO_IMAGE_POST_TOP_N", "5")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 5
+
+
+def _image_post_metas(out: VideoAlgorithmOutput) -> list[VideoMeta]:
+    """取得ボードから、動画深掘り済みではない画像投稿を順位順で返す。"""
+    analyzed_ranks = {v.meta.rank for v in out.videos if v.analysis}
+    return sorted(
+        (
+            meta
+            for meta in out.board
+            if meta.rank > 0 and meta.duration_sec == 0.0 and meta.rank not in analyzed_ranks
+        ),
+        key=lambda meta: meta.rank,
+    )
 
 
 def _hex(h: str) -> str:
@@ -254,11 +290,14 @@ def _mini_bar(value: float, vmax: float, *, accent: bool) -> str:
     return f'<span class="{cls}"><i style="width:{w:.0f}%"></i></span>'
 
 
-def _scrape_board(out: VideoAlgorithmOutput) -> str:
+def _scrape_board(
+    out: VideoAlgorithmOutput, *, image_post_ranks: frozenset[int] | None = None
+) -> str:
     """取得（スクレイプ）した上位 board_size 本のメタ一覧（深掘り分析の有無に依らず全件）。
 
     提案書の「上位N動画ボード(03-5)」の素材。営業がここから提案に載せる動画を選定する。
     深掘り分析（DL+Gemini）した上位本には ★ を付ける（取得≠分析を明示）。
+    画像投稿タブ機能が有効な場合は、画像投稿に 📷 を付ける。
     """
     metas = out.board
     if not metas:
@@ -272,15 +311,22 @@ def _scrape_board(out: VideoAlgorithmOutput) -> str:
             if m.rank in analyzed_ranks
             else ""
         )
+        is_image_post = image_post_ranks is not None and m.rank in image_post_ranks
+        image_post = (
+            '<span class="sbimage" title="画像投稿（動画深掘り対象外）">📷</span>'
+            if is_image_post
+            else ""
+        )
+        cover_url = _http_image_url(m.cover_url) if is_image_post else (m.cover_url or "")
         thumb = (
-            f'<img class="sbth" src="{_esc(m.cover_url)}" alt="#{m.rank}" loading="lazy">'
-            if m.cover_url
+            f'<img class="sbth" src="{_esc(cover_url)}" alt="#{m.rank}" loading="lazy">'
+            if cover_url
             else '<div class="sbth ph"></div>'
         )
         auth = _esc(m.author) or "—"
         return (
             "<tr>"
-            f'<td class="sbr">#{m.rank}{deep}</td>'
+            f'<td class="sbr">#{m.rank}{deep}{image_post}</td>'
             f'<td class="sbtdth">{thumb}</td>'
             f'<td class="sbauth"><a href="{_esc(m.url)}" target="_blank" rel="noopener">@{auth}</a></td>'
             f'<td class="sbnum">{_fmt(m.follower_count)}</td>'
@@ -292,9 +338,10 @@ def _scrape_board(out: VideoAlgorithmOutput) -> str:
         )
 
     body = "".join(row(m) for m in metas)
+    image_legend = "・📷＝画像投稿（動画深掘り対象外）" if image_post_ranks else ""
     return (
         '<section><div class="th big">検索上位 取得ボード'
-        f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象）</div>"
+        f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象{image_legend}）</div>"
         '<div class="sbwrap"><table class="sboard">'
         "<thead><tr><th>#</th><th>サムネ</th><th>アカウント</th><th>フォロワー</th>"
         "<th>再生</th><th>保存率</th><th>いいね</th><th>キャプション</th></tr></thead>"
@@ -773,6 +820,48 @@ def _video_tab_btn(v: AnalyzedVideo, idx: int) -> str:
     )
 
 
+def _image_post_tab_btn(meta: VideoMeta, idx: int) -> str:
+    """トップタブの画像投稿ボタン。動画タブとはアイコンと配色で区別する。"""
+    return (
+        f'<button class="toptab imageposttab" type="button" data-tt="i{idx}">'
+        f"📷 #{meta.rank}</button>"
+    )
+
+
+def _image_post_pane(meta: VideoMeta) -> str:
+    """取得済みメタと1枚目サムネだけで画像投稿の個別 pane を作る。"""
+    cover_url = _http_image_url(meta.cover_url)
+    cover = (
+        f'<div class="ipcover"><img src="{_esc(cover_url)}" '
+        f'alt="画像投稿 #{meta.rank} の1枚目サムネ" loading="lazy"></div>'
+        if cover_url
+        else '<div class="ipcover ph"><span>サムネイルを表示できません</span></div>'
+    )
+    head = (
+        f'<div class="vphead iphead"><span class="rank iprank">📷 #{meta.rank}</span>'
+        f'<span class="ipauthor"><b>投稿者</b> @{_esc(meta.author) or "—"}</span></div>'
+    )
+    kpi = (
+        '<div class="vpkpi"><div class="engage big">'
+        + _stat(_fmt(meta.follower_count), "フォロワー")
+        + _stat(_fmt(meta.play_count), "再生")
+        + _stat(_fmt(meta.digg_count), "いいね")
+        + _stat(_fmt(meta.collect_count), "保存")
+        + _stat(f"{meta.save_rate():.2f}%", "保存率", kpi=True)
+        + _stat(f"{meta.engagement_rate:.1f}%", "エンゲージメント率", kpi=True)
+        + "</div></div>"
+    )
+    caption = (
+        '<div class="ipcaption"><div class="th big">キャプション全文</div>'
+        f'<div class="ipcaptionbody">{_esc(meta.desc) or "—"}</div></div>'
+    )
+    notice = (
+        '<div class="ipnotice">この投稿は画像投稿（カルーセル）のため、動画の深掘り分析'
+        "（テロップ・フック・カメラワーク）は行っていません。</div>"
+    )
+    return f'<div class="vpane imagepostpane">{head}{cover}{kpi}{caption}{notice}</div>'
+
+
 def _video_pane(v: AnalyzedVideo, idx: int) -> str:
     """個別レポート1本分（上部に数値KPI → 大型タイムライン動画プレーヤー → 詳細タブ）。"""
     m = v.meta
@@ -1097,6 +1186,24 @@ section{margin:0 0 40px}
 @media(prefers-reduced-motion:reduce){.nplayhead{transition:none}}
 """
 
+_IMAGE_POST_STYLE = """
+.toptab.imageposttab{color:var(--warn)}
+.toptab.imageposttab.on{color:#92400e;border-bottom-color:var(--warn);background:#fffbeb}
+.sbimage{margin-left:3px}
+.imagepostpane{max-width:980px;margin:0 auto}
+.iphead{border-bottom-color:#fde68a}
+.iprank{background:var(--warn)}
+.ipauthor{font-size:15px}.ipauthor b{font-size:11px;color:var(--sub);margin-right:6px}
+.ipcover{display:flex;align-items:center;justify-content:center;min-height:360px;max-height:680px;
+ background:#111827;border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:14px}
+.ipcover img{display:block;max-width:100%;max-height:680px;object-fit:contain}
+.ipcover.ph{background:var(--soft);color:var(--sub);font-size:12px}
+.ipcaption{border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#fff;margin-top:14px}
+.ipcaptionbody{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}
+.ipnotice{margin-top:14px;padding:11px 14px;background:#fffbeb;border:1px solid #fde68a;
+ border-radius:8px;color:#92400e;font-size:12.5px}
+"""
+
 _TIMELINE_JS = r"""
 (function(){
   function nearest(frames, sec){var b=0,bd=1e9;for(var i=0;i<frames.length;i++){var d=Math.abs(frames[i].sec-sec);if(d<bd){bd=d;b=i;}}return b;}
@@ -1237,17 +1344,30 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
     トップタブで「📊 統計レポート（全体横断）」と「各動画の個別レポート」を切り替える。
     """
     analyzed = [(i, v) for i, v in enumerate(out.videos) if v.analysis]
+    image_post_top_n = _image_post_top_n()
+    image_post_metas = _image_post_metas(out) if image_post_top_n > 0 else []
+    image_posts = [meta for meta in image_post_metas if meta.rank <= image_post_top_n]
     # トップタブ（統計＋分析成立した各動画）
     tabs = '<button class="toptab on" type="button" data-tt="ov">📊 統計レポート</button>'
     tabs += "".join(_video_tab_btn(v, i) for i, v in analyzed)
+    tabs += "".join(_image_post_tab_btn(meta, i) for i, meta in enumerate(image_posts))
     # 統計（全体横断）pane
+    scrape_board = (
+        _scrape_board(out, image_post_ranks=frozenset(meta.rank for meta in image_post_metas))
+        if image_post_metas
+        else _scrape_board(out)
+    )
     overview = (
-        f"{_verdict_band(out)}{_scrape_board(out)}{_top5_board(out)}{_thumb_board(out)}"
+        f"{_verdict_band(out)}{scrape_board}{_top5_board(out)}{_thumb_board(out)}"
         f"{_synthesis_block(out)}{_matrix_block(out)}{_stats_block(out.cross.stats)}"
     )
     # 個別レポート pane（動画ごと）
     panes = "".join(
         f'<div class="ttpane" data-ttp="v{i}">{_video_pane(v, i)}</div>' for i, v in analyzed
+    )
+    panes += "".join(
+        f'<div class="ttpane" data-ttp="i{i}">{_image_post_pane(meta)}</div>'
+        for i, meta in enumerate(image_posts)
     )
     note = (
         "※ 本レポートは上位動画の観測可能な特徴に基づく仮説です。TikTok内部のランキング重みは"
@@ -1258,10 +1378,11 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
     scraped = len(out.board) or len(out.videos)
     n = _analyzed(out)
     scope = f"取得{scraped}本・深掘り分析{n}本"
+    report_style = _STYLE + (_IMAGE_POST_STYLE if image_post_metas else "")
     return (
         "<!doctype html><html lang='ja'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>VSEO動画アルゴリズム分析: {_esc(out.query)}</title><style>{_STYLE}</style></head><body>"
+        f"<title>VSEO動画アルゴリズム分析: {_esc(out.query)}</title><style>{report_style}</style></head><body>"
         "<h1>VSEO 動画アルゴリズム分析</h1>"
         f"<div class='meta'>検索KW「{_esc(out.query)}」 {scope}を読み解き{stamp}</div>"
         f'<div class="toptabs">{tabs}</div>'

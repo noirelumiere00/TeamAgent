@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SearchInput(BaseModel):
@@ -91,6 +91,7 @@ class SearchHitOut(BaseModel):
     引用フォーマット強化（Sprint 2 / 2.8）：
     - `source` は表示用のフォールバック文字列（後方互換）
     - `file_name` / `page_num` を別フィールドで持ち、Block Kit で構造化表示する
+    - `url` は開ける http(s) URL、`source_uri` はシリアライズしない内部識別子
     - `score` は cosine 類似度（0.0〜1.0）
     """
 
@@ -115,13 +116,19 @@ class SearchHitOut(BaseModel):
     )
     drive_url: str | None = Field(
         default=None,
-        description="Google Drive 等の正本 URL。営業がクリックして元 PDF を開く",
+        description="Google Drive 等の正本 URL（後方互換）。ユーザー提示には url を優先する",
+    )
+    url: str | None = Field(
+        default=None,
+        description=("ユーザーがブラウザで開ける正準 URL。http(s) のみ。無い場合は None"),
     )
     source_uri: str | None = Field(
         default=None,
         description=(
-            "元データの URI（新スキーマ）。'slack://CHANNEL_ID/THREAD_TS' / 'gdrive://FILE_ID' 等"
+            "元データの内部識別子。URL ではなく、ユーザーに提示してはならない。"
+            "'slack://CHANNEL_ID/THREAD_TS' / 'gdrive://FILE_ID' 等"
         ),
+        exclude=True,
     )
     source_type: str | None = Field(
         default=None,
@@ -171,6 +178,18 @@ class SearchHitOut(BaseModel):
         default=False,
         description="低信頼ヒット（fallback しきい値で救出された borderline）。配信は控える",
     )
+
+    @field_validator("url")
+    @classmethod
+    def validate_openable_url(cls, value: str | None) -> str | None:
+        """正準 URL にはブラウザで開ける http(s) だけを残す。"""
+
+        if value is None:
+            return None
+        cleaned = value.strip()
+        if not cleaned.lower().startswith(("http://", "https://")):
+            return None
+        return cleaned
 
 
 class SearchOutput(BaseModel):
