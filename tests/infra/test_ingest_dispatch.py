@@ -123,11 +123,9 @@ def test_no_running_task_starts_fargate_with_the_scheduled_network_configuration
         "platformVersion": "LATEST",
         "count": 1,
         "clientToken": hashlib.sha256(
-            (
-                "teamagent-ingest-v1\0scheduled-event-1\0"
-                "arn:aws:ecs:ap-northeast-1:123456789012:"
-                "task-definition/teamagent-dev-ingest:45"
-            ).encode()
+            b"teamagent-ingest-v1\0scheduled-event-1\0"
+            b"arn:aws:ecs:ap-northeast-1:123456789012:"
+            b"task-definition/teamagent-dev-ingest:45"
         ).hexdigest(),
         "networkConfiguration": {
             "awsvpcConfiguration": {

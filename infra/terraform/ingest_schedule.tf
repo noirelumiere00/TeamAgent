@@ -23,17 +23,17 @@ variable "enable_ingest_schedule" {
 variable "fargate_ingest_cpu" {
   description = "ingest タスク CPU（embedding + Bedrock API call + RDS bulk write）"
   type        = number
-  # 1024（1 vCPU）では E5-large の CPU forward が 1 コアに直列化し、1 件 5〜6 秒・
-  # 1 回の取り込みが 2 日以上かかって完走しなかった（2026-08-06 実測）。
-  # 変更時は fargate_ingest_memory も Fargate の有効組合せに合わせること
-  # （4096 CPU は memory 8192 以上が必須）。OMP/MKL_NUM_THREADS はこの値から導出される。
-  default = 4096
+  # ⚠️ 実運用値はここではなく CLI（register-task-definition）で上書きする。
+  # infra/docker/runtime-consumers.json の memory 契約とスモークテストが
+  # この既定値に固定されているため、ここを動かすと契約テストが赤くなる。
+  # 2026-08-06 の高速化では live を cpu=4096/memory=8192 へ CLI で引き上げた。
+  default     = 1024
 }
 
 variable "fargate_ingest_memory" {
-  description = "ingest タスク メモリ MB（fargate_ingest_cpu と有効な組合せであること）"
+  description = "ingest タスク メモリ MB"
   type        = number
-  default     = 8192
+  default     = 4096
 }
 
 variable "ingest_owner_email" {
@@ -248,14 +248,13 @@ resource "aws_ecs_task_definition" "ingest" {
       # §知識ベース: 共有ドライブの走査/DL は「個人OAuth」を使う。これが無いと Vertex SA が
       # 選ばれ、SA は外部 Drive 非対応で walk が 0 件になる（OAuth3点は GOOGLE_OAUTH_JSON から展開済）。
       { name = "GOOGLE_FORCE_OAUTH", value = "1" },
-      # §取り込み時間の短縮（2026-08-06）。1回の取り込みが2日以上かかり完走しなくなったため。
-      # 差分取り込み: 未変更ファイルの download/extract/embed/DB書き込みを丸ごと飛ばす。
-      # 初回は cursor が無いのでフル走査になり、その走査開始前の token が次回基点になる。
+      # §取り込み時間の短縮（2026-08-06）。未変更ファイルの download/extract/embed/
+      # DB書き込みを丸ごと飛ばす。初回は cursor が無いのでフル走査になり、その走査
+      # 開始前の token が次回基点になる。
+      # ⚠️ OMP/MKL_NUM_THREADS は live の cpu に追随させる必要があるため、
+      #    ここではなく CLI 側の task definition で設定する（terraform の既定 cpu と
+      #    live が異なるため、ここで導出すると誤った値が焼かれる）。
       { name = "USE_INCREMENTAL_SYNC", value = "1" },
-      # torch の CPU スレッド数。未指定だと 1 コアしか使わず E5 の forward が直列化する。
-      # fargate_ingest_cpu（1024 単位 = 1 vCPU）に合わせること。
-      { name = "OMP_NUM_THREADS", value = tostring(var.fargate_ingest_cpu / 1024) },
-      { name = "MKL_NUM_THREADS", value = tostring(var.fargate_ingest_cpu / 1024) },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },
