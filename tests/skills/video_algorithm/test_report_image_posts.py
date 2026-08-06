@@ -123,7 +123,7 @@ def test_video_only_input_is_byte_identical_when_feature_is_enabled(
 
 @pytest.mark.parametrize(
     "cover_url",
-    ["javascript:alert(1)", '\"><script>alert(1)</script>'],
+    ["javascript:alert(1)", '"><script>alert(1)</script>'],
 )
 def test_non_http_image_post_cover_is_not_rendered(
     monkeypatch: pytest.MonkeyPatch, cover_url: str
@@ -137,7 +137,7 @@ def test_non_http_image_post_cover_is_not_rendered(
 
 def test_http_image_post_cover_is_html_escaped(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VIDEO_ALGO_IMAGE_POST_TOP_N", "5")
-    cover_url = 'https://cdn.example.com/x.jpg?q=\"><script>alert(1)</script>'
+    cover_url = 'https://cdn.example.com/x.jpg?q="><script>alert(1)</script>'
     report = render_report(_output(_image(3, cover_url=cover_url)))
 
     assert cover_url not in report

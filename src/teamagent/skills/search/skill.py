@@ -1206,9 +1206,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 continue
             source_type = str(meta.get("source_type") or "")
             source_uri = str(meta.get("source_uri") or "")
-            if source_type not in ("gsheets", "slack") and not source_uri.startswith(
-                "slack://"
-            ):
+            if source_type not in ("gsheets", "slack") and not source_uri.startswith("slack://"):
                 continue
             for name in self._candidate_file_names(meta, h.content or ""):
                 if name not in titles:

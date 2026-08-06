@@ -109,27 +109,20 @@ class ConsumerSpec:
         if self.activator_type != "ecs_service":
             raise SagaError("non-service consumer has no ECS service ARN")
         return (
-            f"arn:aws:ecs:{_REGION}:{_ACCOUNT_ID}:service/"
-            f"{_CLUSTER_NAME}/{self.activator_identity}"
+            f"arn:aws:ecs:{_REGION}:{_ACCOUNT_ID}:service/{_CLUSTER_NAME}/{self.activator_identity}"
         )
 
     @property
     def rule_arn(self) -> str:
         if self.activator_type != "eventbridge_rule_ecs_target":
             raise SagaError("non-EventBridge consumer has no rule ARN")
-        return (
-            f"arn:aws:events:{_REGION}:{_ACCOUNT_ID}:rule/"
-            f"{self.activator_identity}"
-        )
+        return f"arn:aws:events:{_REGION}:{_ACCOUNT_ID}:rule/{self.activator_identity}"
 
     @property
     def function_arn(self) -> str:
         if self.activator_type != "lambda_taskdef_arn_environment":
             raise SagaError("non-Lambda consumer has no function ARN")
-        return (
-            f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:"
-            f"{self.activator_identity}"
-        )
+        return f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:{self.activator_identity}"
 
 
 _ACTIVATOR_RESOURCE_ADDRESSES = {
@@ -164,9 +157,7 @@ def _load_consumer_specs(
 ) -> tuple[dict[str, ConsumerSpec], str]:
     try:
         validated = (
-            load_consumer_registry()
-            if registry is None
-            else validate_consumer_registry(registry)
+            load_consumer_registry() if registry is None else validate_consumer_registry(registry)
         )
     except ConsumerRegistryError as exc:
         raise SagaError("code-owned consumer registry is invalid") from exc
@@ -174,8 +165,7 @@ def _load_consumer_specs(
     if type(raw_consumers) is not list:
         raise SagaError("code-owned consumer registry is invalid")
     registry_ids = [
-        item.get("consumer_id") if type(item) is dict else None
-        for item in raw_consumers
+        item.get("consumer_id") if type(item) is dict else None for item in raw_consumers
     ]
     if (
         any(type(consumer_id) is not str for consumer_id in registry_ids)
@@ -222,15 +212,18 @@ def _load_consumer_specs(
         assert type(task_family) is str
         assert type(container_name) is str
         assert type(release_repository) is str
-        if task_family in seen_families or (
-            activator_type,
-            activator_identity,
-        ) in seen_activators:
+        if (
+            task_family in seen_families
+            or (
+                activator_type,
+                activator_identity,
+            )
+            in seen_activators
+        ):
             raise SagaError("consumer registry saga identities are not unique")
         activator_address, activator_edge_address = _ACTIVATOR_RESOURCE_ADDRESSES[key]
-        if (
-            (activator_type == "eventbridge_rule_ecs_target")
-            != (activator_edge_address is not None)
+        if (activator_type == "eventbridge_rule_ecs_target") != (
+            activator_edge_address is not None
         ):
             raise SagaError("consumer registry activator address contract differs")
         specs[key] = ConsumerSpec(
@@ -255,9 +248,7 @@ def _load_consumer_specs(
 
 _CONSUMER_SPECS, _CONSUMER_REGISTRY_SHA256 = _load_consumer_specs()
 _SERVICE_SPECS = {
-    key: spec
-    for key, spec in _CONSUMER_SPECS.items()
-    if spec.activator_type == "ecs_service"
+    key: spec for key, spec in _CONSUMER_SPECS.items() if spec.activator_type == "ecs_service"
 }
 _ALLOWED_ECS_ADDRESSES = frozenset(
     {
@@ -344,11 +335,7 @@ def _task_artifact_sha256(value: object) -> str:
     normalized = _canonical_json_value(value)
     if type(normalized) is not dict:
         raise SagaError("ECS task-definition artifact is invalid")
-    definition = (
-        normalized.get("taskDefinition")
-        if "taskDefinition" in normalized
-        else normalized
-    )
+    definition = normalized.get("taskDefinition") if "taskDefinition" in normalized else normalized
     if type(definition) is not dict:
         raise SagaError("ECS task-definition artifact is invalid")
     for name in ("inferenceAccelerators", "placementConstraints"):
@@ -764,8 +751,7 @@ def _container_image(
     if (
         spec.key == "tiktok_acquire"
         and pre_media_cutover_sync_image
-        and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(pre_media_cutover_sync_image)
-        is not None
+        and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(pre_media_cutover_sync_image) is not None
     ):
         if type(image) is not str or not hmac.compare_digest(
             image,
@@ -774,10 +760,7 @@ def _container_image(
             raise SagaError(f"{label} pre-cutover TikTok image is not exact")
         image_digest = image.rsplit("@", maxsplit=1)[1]
     else:
-        prefix = (
-            f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/"
-            f"{spec.release_repository}@"
-        )
+        prefix = f"{_ACCOUNT_ID}.dkr.ecr.{_REGION}.amazonaws.com/{spec.release_repository}@"
         if type(image) is not str or not image.startswith(prefix):
             raise SagaError(f"{label} registry image is not exact")
         image_digest = image.removeprefix(prefix)
@@ -929,20 +912,13 @@ def _lambda_variables(
     allow_unknown_task: bool = False,
 ) -> dict[str, Any]:
     variables = _nested_value(value, ("environment", 0, "variables"))
-    if (
-        type(variables) is not dict
-        or any(
-            type(name) is not str
-            or (
-                type(item) is not str
-                and not (
-                    allow_unknown_task
-                    and name == "TASKDEF_ARN"
-                    and item is None
-                )
-            )
-            for name, item in variables.items()
+    if type(variables) is not dict or any(
+        type(name) is not str
+        or (
+            type(item) is not str
+            and not (allow_unknown_task and name == "TASKDEF_ARN" and item is None)
         )
+        for name, item in variables.items()
     ):
         raise SagaError(f"{label} Lambda environment is invalid")
     return dict(variables)
@@ -1034,9 +1010,7 @@ def _pre_media_cutover_sync_image(
     consumers = manifest.get("consumers")
     if type(consumers) is not list or len(consumers) != len(specs):
         return ""
-    consumer_ids = [
-        row.get("consumer_id") if type(row) is dict else None for row in consumers
-    ]
+    consumer_ids = [row.get("consumer_id") if type(row) is dict else None for row in consumers]
     if (
         any(type(consumer_id) is not str for consumer_id in consumer_ids)
         or len(set(consumer_ids)) != len(consumer_ids)
@@ -1098,9 +1072,7 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
             "lambda_taskdef_arn_environment": "aws_lambda_function",
         }[spec.activator_type]
         if spec.activator_edge_address is not None:
-            expected_resource_types[spec.activator_edge_address] = (
-                "aws_cloudwatch_event_target"
-            )
+            expected_resource_types[spec.activator_edge_address] = "aws_cloudwatch_event_target"
 
     matches: dict[str, dict[str, Any]] = {}
     for raw_item in raw_changes:
@@ -1350,9 +1322,7 @@ def _read_services(
     specs: Mapping[str, ConsumerSpec],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     service_specs = {
-        key: spec
-        for key, spec in specs.items()
-        if spec.activator_type == "ecs_service"
+        key: spec for key, spec in specs.items() if spec.activator_type == "ecs_service"
     }
     expected_arns = {spec.service_arn for spec in service_specs.values()}
     inventory = _list_service_arns(cli)
@@ -1452,9 +1422,7 @@ def _canonical_eventbridge_activation(
     target_id = target.get("Id")
     ecs_parameters = target.get("EcsParameters")
     task_definition = (
-        ecs_parameters.get("TaskDefinitionArn")
-        if type(ecs_parameters) is dict
-        else None
+        ecs_parameters.get("TaskDefinitionArn") if type(ecs_parameters) is dict else None
     )
     if (
         type(target_id) is not str
@@ -1514,10 +1482,7 @@ def _canonical_lambda_activation(
         raw.get("FunctionName") != spec.activator_identity
         or raw.get("FunctionArn") != spec.function_arn
         or type(variables) is not dict
-        or any(
-            type(name) is not str or type(value) is not str
-            for name, value in variables.items()
-        )
+        or any(type(name) is not str or type(value) is not str for name, value in variables.items())
     ):
         raise SagaError("Lambda activation identity is not exact")
     task_definition = _validate_task_definition(
@@ -1711,11 +1676,7 @@ def _assert_service_tasks(
         if frozenset(response) - {"failures", "tasks"}:
             raise SagaError("ECS running task description has unknown fields")
         tasks = response.get("tasks")
-        if (
-            response.get("failures") != []
-            or type(tasks) is not list
-            or len(tasks) != len(batch)
-        ):
+        if response.get("failures") != [] or type(tasks) is not list or len(tasks) != len(batch):
             raise SagaError("ECS running task description is incomplete")
         for raw in tasks:
             if type(raw) is not dict or type(raw.get("taskArn")) is not str:
@@ -1726,8 +1687,7 @@ def _assert_service_tasks(
                 [
                     container
                     for container in containers
-                    if type(container) is dict
-                    and container.get("name") == spec.container_name
+                    if type(container) is dict and container.get("name") == spec.container_name
                 ]
                 if type(containers) is list
                 else []
@@ -1744,9 +1704,7 @@ def _assert_service_tasks(
                 or matching_containers[0].get("image") != image
                 or matching_containers[0].get("imageDigest") != image_digest
             ):
-                raise SagaError(
-                    f"ECS service {spec.activator_identity} running task differs"
-                )
+                raise SagaError(f"ECS service {spec.activator_identity} running task differs")
             described_by_arn[task_arn] = raw
     if frozenset(described_by_arn) != frozenset(task_arns):
         raise SagaError("ECS running task descriptions do not cover the service")
@@ -1779,9 +1737,7 @@ def _assert_stable(
                 type(activation) is not dict
                 or _canonical_lambda_activation(raw, spec=spec) != activation
             ):
-                raise SagaError(
-                    f"Lambda consumer {spec.activator_identity} is not exactly steady"
-                )
+                raise SagaError(f"Lambda consumer {spec.activator_identity} is not exactly steady")
             continue
         if spec.activator_type != "ecs_service":
             raise SagaError("consumer activator type is unsupported")
@@ -1920,17 +1876,13 @@ def _validate_consumer_baseline(
             or (
                 spec.key == "tiktok_acquire"
                 and pre_media_cutover_sync_image
-                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(
-                    pre_media_cutover_sync_image
-                )
-                is None
+                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(pre_media_cutover_sync_image) is None
             )
             or image != expected_image
             or (
                 spec.key == "tiktok_acquire"
                 and pre_media_cutover_sync_image
-                and image_digest
-                != pre_media_cutover_sync_image.rsplit("@", maxsplit=1)[1]
+                and image_digest != pre_media_cutover_sync_image.rsplit("@", maxsplit=1)[1]
             )
         ):
             raise SagaError("durable ECS rollback task binding is invalid")
@@ -2041,14 +1993,10 @@ class EcsServiceApplySaga:
             _SHA256_RE.fullmatch(plan_sha256) is None
             or _UUID_RE.fullmatch(apply_attempt_id) is None
             or plan.binding.get("consumerRegistrySha256") != plan.registry_sha256
-            or plan.binding.get("preMediaCutoverSyncImage")
-            != plan.pre_media_cutover_sync_image
+            or plan.binding.get("preMediaCutoverSyncImage") != plan.pre_media_cutover_sync_image
             or (
                 plan.pre_media_cutover_sync_image
-                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(
-                    plan.pre_media_cutover_sync_image
-                )
-                is None
+                and _LEGACY_TIKTOK_IMAGE_RE.fullmatch(plan.pre_media_cutover_sync_image) is None
             )
             or frozenset(plan.specs) != _SAGA_CONSUMER_IDS
         ):
@@ -2311,9 +2259,8 @@ class EcsServiceApplySaga:
         raw_live: Mapping[str, Mapping[str, Any]],
     ) -> None:
         planned_consumers = self.plan.binding.get("consumers")
-        if (
-            type(planned_consumers) is not dict
-            or frozenset(planned_consumers) != frozenset(self.specs)
+        if type(planned_consumers) is not dict or frozenset(planned_consumers) != frozenset(
+            self.specs
         ):
             raise SagaError("planned consumer binding is invalid")
         for key, spec in self.specs.items():
@@ -2346,9 +2293,7 @@ class EcsServiceApplySaga:
                 raise SagaError("planned consumer task pointer is invalid")
             if pointer.get("kind") == "arn":
                 if task_definition != pointer.get("taskDefinition"):
-                    raise SagaError(
-                        "live consumer does not use the planned task definition"
-                    )
+                    raise SagaError("live consumer does not use the planned task definition")
             elif (
                 pointer.get("kind") != "artifact"
                 or pointer.get("family") != spec.task_family

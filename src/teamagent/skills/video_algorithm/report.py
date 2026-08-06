@@ -338,9 +338,7 @@ def _scrape_board(
         )
 
     body = "".join(row(m) for m in metas)
-    image_legend = (
-        "・📷＝画像投稿（動画深掘り対象外）" if image_post_ranks else ""
-    )
+    image_legend = "・📷＝画像投稿（動画深掘り対象外）" if image_post_ranks else ""
     return (
         '<section><div class="th big">検索上位 取得ボード'
         f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象{image_legend}）</div>"
@@ -859,7 +857,7 @@ def _image_post_pane(meta: VideoMeta) -> str:
     )
     notice = (
         '<div class="ipnotice">この投稿は画像投稿（カルーセル）のため、動画の深掘り分析'
-        '（テロップ・フック・カメラワーク）は行っていません。</div>'
+        "（テロップ・フック・カメラワーク）は行っていません。</div>"
     )
     return f'<div class="vpane imagepostpane">{head}{cover}{kpi}{caption}{notice}</div>'
 
@@ -1355,9 +1353,7 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
     tabs += "".join(_image_post_tab_btn(meta, i) for i, meta in enumerate(image_posts))
     # 統計（全体横断）pane
     scrape_board = (
-        _scrape_board(
-            out, image_post_ranks=frozenset(meta.rank for meta in image_post_metas)
-        )
+        _scrape_board(out, image_post_ranks=frozenset(meta.rank for meta in image_post_metas))
         if image_post_metas
         else _scrape_board(out)
     )

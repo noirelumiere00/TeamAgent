@@ -120,9 +120,7 @@ class SearchHitOut(BaseModel):
     )
     url: str | None = Field(
         default=None,
-        description=(
-            "ユーザーがブラウザで開ける正準 URL。http(s) のみ。無い場合は None"
-        ),
+        description=("ユーザーがブラウザで開ける正準 URL。http(s) のみ。無い場合は None"),
     )
     source_uri: str | None = Field(
         default=None,

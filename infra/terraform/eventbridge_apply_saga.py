@@ -365,10 +365,7 @@ def _canonical_planned_rule(
         "State": value.get("state"),
     }
     configuration = _canonical_rule_configuration(normalized)
-    if (
-        configuration["Name"] != spec[2]
-        or configuration["EventBusName"] != "default"
-    ):
+    if configuration["Name"] != spec[2] or configuration["EventBusName"] != "default":
         raise SagaError("saved plan EventBridge rule identity differs")
     return configuration
 
@@ -400,9 +397,7 @@ def _rule_plan_from_change(
     if type(before) is not dict or type(after) is not dict or type(after_unknown) is not dict:
         raise SagaError("saved plan EventBridge rule values are invalid")
     changed_fields = {
-        name
-        for name in frozenset(before) | frozenset(after)
-        if before.get(name) != after.get(name)
+        name for name in frozenset(before) | frozenset(after) if before.get(name) != after.get(name)
     }
     if changed_fields - _RESTORABLE_TERRAFORM_FIELDS:
         raise SagaError("saved plan changes an EventBridge rule field the saga cannot restore")
@@ -417,9 +412,7 @@ def _rule_plan_from_change(
         address=address,
         before=_canonical_planned_rule(before, key=key),
         after=_canonical_planned_rule(after, key=key),
-        target_policy=(
-            "promoted" if key == "morning" and target_mutates else "unchanged"
-        ),
+        target_policy=("promoted" if key == "morning" and target_mutates else "unchanged"),
         target_after=target_after if key == "morning" and target_mutates else None,
     )
 
@@ -523,11 +516,7 @@ def _event_rule_plans(
         if mutating != set(_RULE_SPECS) or any(
             binding.before["State"] != "DISABLED"
             or binding.after["State"] != "ENABLED"
-            or {
-                name
-                for name in _RULE_CONFIG_FIELDS
-                if binding.before[name] != binding.after[name]
-            }
+            or {name for name in _RULE_CONFIG_FIELDS if binding.before[name] != binding.after[name]}
             != {"State"}
             for binding in bindings
         ):
@@ -677,10 +666,7 @@ def _decode_canonical_json(raw: str, *, label: str) -> dict[str, Any]:
         value = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
     except (ValueError, json.JSONDecodeError) as exc:
         raise SagaError(f"{label} is invalid") from exc
-    if (
-        type(value) is not dict
-        or json.dumps(value, separators=(",", ":"), sort_keys=True) != raw
-    ):
+    if type(value) is not dict or json.dumps(value, separators=(",", ":"), sort_keys=True) != raw:
         raise SagaError(f"{label} is not canonical")
     return value
 
@@ -777,10 +763,7 @@ def _canonical_planned_configuration(
         "State": value.get("State"),
     }
     configuration = _canonical_rule_configuration(normalized)
-    if (
-        configuration["Name"] != _RULE_SPECS[key][2]
-        or configuration["EventBusName"] != "default"
-    ):
+    if configuration["Name"] != _RULE_SPECS[key][2] or configuration["EventBusName"] != "default":
         raise SagaError("durable saga planned rule identity differs")
     return configuration
 
@@ -874,10 +857,7 @@ class EventBridgeApplySaga:
         self.ddb = clients.client("dynamodb", region_name=parsed.region)
         # One stable active record makes an interrupted prior attempt discoverable. Terminal
         # records are archived under their attempt IDs before this slot is reused.
-        self.record_id = (
-            "ecs-service-apply#eventbridge#active#"
-            f"{parsed.rotation_epoch}"
-        )
+        self.record_id = f"ecs-service-apply#eventbridge#active#{parsed.rotation_epoch}"
 
     def _key(self, record_id: str | None = None) -> dict[str, dict[str, str]]:
         return {"record_id": {"S": record_id or self.record_id}}
@@ -1074,8 +1054,7 @@ class EventBridgeApplySaga:
         if previous_stage not in {"complete", "restored"}:
             raise SagaError("prior durable saga is not terminal")
         audit_record = (
-            "ecs-service-apply#eventbridge#audit#"
-            f"{self.control.rotation_epoch}#{previous_attempt}"
+            f"ecs-service-apply#eventbridge#audit#{self.control.rotation_epoch}#{previous_attempt}"
         )
         audit = copy.deepcopy(previous)
         audit["record_id"] = {"S": audit_record}
@@ -1290,10 +1269,7 @@ class EventBridgeApplySaga:
         return max(trusted_now, verified_now)
 
     def _restore(self, baseline: dict[str, Any]) -> int:
-        restored_times = [
-            self._restore_rule(baseline["rules"][key])
-            for key in sorted(_RULE_SPECS)
-        ]
+        restored_times = [self._restore_rule(baseline["rules"][key]) for key in sorted(_RULE_SPECS)]
         return max(restored_times)
 
     def finish(self, *, outcome: str) -> None:
