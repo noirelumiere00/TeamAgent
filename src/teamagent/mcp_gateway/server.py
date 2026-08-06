@@ -565,7 +565,7 @@ async def dispatch_tool(
     if isinstance(data, dict):
         _schedule_async_job_notice(name, data, raw, ctx)
     # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
-    # 本番主経路（AiLa→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
+    # 本番主経路（NewsTV AI→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
     # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
     # DB 計上（クォータ台帳）は migration 0017 とセットで次段（このログが検証データになる）。
     logger.info(

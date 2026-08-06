@@ -447,7 +447,7 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # §U: oauth_connect — 本人専用の Google 連携 URL を発行（@AiLa「連携」で個別 URL）。
+    # §U: oauth_connect — 本人専用の Google 連携 URL を発行（@NewsTV AI「連携」で個別 URL）。
     # OpenClaw に connect 経路が無い問題への対応。URL 生成のみ＝token_store 依存なし。
     # 実行時に run() が本人 user_email を metadata から必須取得し fail-closed。
     # **既定 OFF**（USE_OAUTH_CONNECT_TOOL=1）。OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/
@@ -463,7 +463,7 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # knowledge_search_url — @AiLa「検索ページ教えて」で資料検索 Web UI（connect-web の
+    # knowledge_search_url — @NewsTV AI「検索ページ教えて」で資料検索 Web UI（connect-web の
     # /search・/search/graph）の URL を返す（oauth_connect と同じく URL 生成のみ＝依存なし）。
     # CONNECT_BASE_URL 未設定なら壊れたリンクを出さず「未公開」と返す（fail-safe）。
     # **既定 OFF**（USE_KNOWLEDGE_SEARCH_URL_TOOL=1）。OC 露出は openclaw.config.json5 の

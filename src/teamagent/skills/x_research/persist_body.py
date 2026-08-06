@@ -1,7 +1,7 @@
 """カタログ成果物 → 永続化用の構造化要約 markdown（Part1）。
 
 生 HTML でなく素の markdown を documents の本文(1 chunk)にする。理由: export_vault が
-excerpt を本文 chunk 先頭から作り、@AiLa 検索の対象にもなるため、営業が後から「何を研究/
+excerpt を本文 chunk 先頭から作り、@NewsTV AI 検索の対象にもなるため、営業が後から「何を研究/
 提案したか」を読める素テキストが最適。要再確認(未検証)の声は ⚠️ 付きで残す（黙って捨てない）。
 """
 
@@ -13,7 +13,7 @@ from typing import Any
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 
 _JST = _dt.timezone(_dt.timedelta(hours=9))
-_FOOTER = "\n---\n（@AiLa のカタログツールが自動生成した施策研究の記録）"
+_FOOTER = "\n---\n（@NewsTV AI のカタログツールが自動生成した施策研究の記録）"
 _MAX_POSTS = 12  # ノートに載せる代表投稿の上限（肥大抑制）
 
 

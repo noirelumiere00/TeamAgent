@@ -518,7 +518,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderOutput
     version: ClassVar[str] = "1.0"
-    owner: ClassVar[str] = "AiLa"
+    owner: ClassVar[str] = "NewsTV AI"
     audit_tag: ClassVar[str] = "proposal-artifact"
 
     def __init__(
@@ -1197,7 +1197,7 @@ class ProposalBuilderSubmitSkill(
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderSubmitOutput
     version: ClassVar[str] = "1.0"
-    owner: ClassVar[str] = "AiLa"
+    owner: ClassVar[str] = "NewsTV AI"
     audit_tag: ClassVar[str] = "proposal-artifact-submit"
 
     def __init__(
@@ -1422,7 +1422,7 @@ class ProposalBuilderStatusSkill(
     input_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusInput
     output_schema: ClassVar[type[BaseModel]] = ProposalBuilderStatusOutput
     version: ClassVar[str] = "1.0"
-    owner: ClassVar[str] = "AiLa"
+    owner: ClassVar[str] = "NewsTV AI"
     audit_tag: ClassVar[str] = "proposal-artifact-status"
 
     def __init__(

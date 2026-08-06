@@ -1,7 +1,7 @@
 """レポート成果物の「配信URL」決定を一元化する（短縮URL /r か 従来 presigned か）。
 
 なぜ必要か（2026-07-15 の実機事故）:
-    @AiLa(openclaw) の LLM は、ツール結果を文脈から**書き直して**Slack へ返すことがある。その際
+    @NewsTV AI(openclaw) の LLM は、ツール結果を文脈から**書き直して**Slack へ返すことがある。その際
     presigned URL の長大なクエリ(?AWSAccessKeyId=…&Signature=…&Expires=…)を再タイプできず、
     パスだけ残して落とす。結果 `https://<bucket>.s3.amazonaws.com/vseo-reports/x.html` という
     裸URLが営業に渡り、バケットは公開全ブロックなので **AccessDenied で誰も開けない**。
@@ -14,7 +14,7 @@
 なぜ共通化するか:
     短縮URL化は当初 x_research にしか無く、tiktok_comment_mining / search_surface_check /
     video_algorithm は presigned を返したままだった（＝同じ事故が残る）。**HTML レポートの URL を
-    @AiLa 経由で人に渡す** skill は必ずここを通す。
+    @NewsTV AI 経由で人に渡す** skill は必ずここを通す。
 
 対象と残件（誇張しないこと）:
     通る  : x_research(声集め/ニーズ/バズ)・tiktok_comment_mining・search_surface_check・

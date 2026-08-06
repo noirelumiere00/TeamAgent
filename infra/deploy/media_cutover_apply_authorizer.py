@@ -135,9 +135,7 @@ def _authorization_payload(
             label="media apply control commit",
         ),
     }
-    authorization["authorization_sha256"] = runtime.canonical_sha256(
-        authorization
-    )
+    authorization["authorization_sha256"] = runtime.canonical_sha256(authorization)
     return authorization
 
 
@@ -150,9 +148,7 @@ def _authorization_ledger_item(
         authorization.get("image_deployment_intent_id"),
         "authorization deployment intent ID",
     )
-    canonical_json = runtime.canonical_bytes(authorization).decode("utf-8").rstrip(
-        "\n"
-    )
+    canonical_json = runtime.canonical_bytes(authorization).decode("utf-8").rstrip("\n")
     return {
         "record_id": _authorization_record_id(intent_id),
         "record_type": AUTHORIZATION_RECORD_TYPE,
@@ -207,15 +203,10 @@ def _authorization_from_ledger(
     try:
         authorization = json.loads(raw_json)
     except json.JSONDecodeError as exc:
-        raise AuthorizationError(
-            "durable media authorization is not canonical JSON"
-        ) from exc
+        raise AuthorizationError("durable media authorization is not canonical JSON") from exc
     if not isinstance(authorization, dict) or set(authorization) != _AUTHORIZATION_KEYS:
         raise AuthorizationError("durable media authorization payload schema differs")
-    if (
-        runtime.canonical_bytes(authorization).decode("utf-8").rstrip("\n")
-        != raw_json
-    ):
+    if runtime.canonical_bytes(authorization).decode("utf-8").rstrip("\n") != raw_json:
         raise AuthorizationError("durable media authorization JSON is not canonical")
     unhashed = dict(authorization)
     authorization_sha256 = _string(
@@ -243,44 +234,34 @@ def _authorization_from_ledger(
         control_commit,
         label="media apply control commit",
     )
-    expected_media_record_id = (
-        f"{runtime.MEDIA_CUTOVER_LEDGER_PREFIX}{image_deployment_intent_id}"
-    )
+    expected_media_record_id = f"{runtime.MEDIA_CUTOVER_LEDGER_PREFIX}{image_deployment_intent_id}"
     if (
-        item.get("record_id")
-        != _authorization_record_id(image_deployment_intent_id)
+        item.get("record_id") != _authorization_record_id(image_deployment_intent_id)
         or item.get("record_type") != AUTHORIZATION_RECORD_TYPE
         or item.get("schema_version") != AUTHORIZATION_SCHEMA_VERSION
         or item.get("state") != "AUTHORIZED"
         or item.get("media_record_id") != expected_media_record_id
-        or item.get("image_deployment_intent_id")
-        != image_deployment_intent_id
+        or item.get("image_deployment_intent_id") != image_deployment_intent_id
         or item.get("apply_attempt_id") != apply_attempt_id
         or item.get("plan_sha256") != metadata["plan_sha256"]
         or item.get("authorized_at_epoch") != authorized_at_epoch
         or item.get("lock_lease_expires_at") != lock_lease_expires_at
         or item.get("authorization_sha256") != authorization_sha256
         or authorization.get("kind") != AUTHORIZATION_KIND
-        or authorization.get("schema_version")
-        != AUTHORIZATION_SCHEMA_VERSION
+        or authorization.get("schema_version") != AUTHORIZATION_SCHEMA_VERSION
         or authorization.get("state") != "AUTHORIZED"
         or authorization.get("record_id") != expected_media_record_id
-        or authorization.get("image_deployment_intent_id")
-        != image_deployment_intent_id
+        or authorization.get("image_deployment_intent_id") != image_deployment_intent_id
         or authorization.get("apply_attempt_id") != apply_attempt_id
         or authorization.get("plan_sha256") != metadata["plan_sha256"]
-        or authorization.get("migration_contract_sha256")
-        != migration_contract_sha256
-        or authorization.get("reviewed_plan_sha256")
-        != reviewed_plan_sha256
+        or authorization.get("migration_contract_sha256") != migration_contract_sha256
+        or authorization.get("reviewed_plan_sha256") != reviewed_plan_sha256
         or authorization.get("control_commit") != expected_control_commit
         or authorization.get("authorization_sha256") != authorization_sha256
         or authorized_at_epoch >= lock_lease_expires_at
         or lock_lease_expires_at >= audit_expires_at
     ):
-        raise AuthorizationError(
-            "durable media authorization does not bind this exact apply"
-        )
+        raise AuthorizationError("durable media authorization does not bind this exact apply")
     return authorization
 
 
@@ -333,9 +314,7 @@ def _transaction(
         {
             "Update": {
                 "TableName": release.DEPLOYMENT_INTENT_TABLE,
-                "Key": release._ddb_item(
-                    {"record_id": str(prepared["record_id"])}
-                ),
+                "Key": release._ddb_item({"record_id": str(prepared["record_id"])}),
                 "UpdateExpression": (
                     "SET #state = :applying, apply_attempt_id = :attempt, "
                     "apply_started_at = :started"
@@ -363,9 +342,7 @@ def _transaction(
                         ":claims": metadata["receipt_claims_sha256"],
                         ":shared_ledger": metadata["shared_ledger_sha256"],
                         ":gate_query": metadata["gate_query_sha256"],
-                        ":terraform_context": prepared[
-                            "terraform_context_sha256"
-                        ],
+                        ":terraform_context": prepared["terraform_context_sha256"],
                         ":control_commit": expected_control_commit,
                         ":now": now_epoch,
                     }
@@ -431,11 +408,9 @@ def _validate_consumed_media_binding(
         or media.get("desired_image") != desired_image
         or media.get("claims_sha256") != authorization.get("claims_sha256")
         or media.get("kms_key_arn") != authorization.get("kms_key_arn")
-        or media.get("apply_attempt_id")
-        != authorization.get("apply_attempt_id")
+        or media.get("apply_attempt_id") != authorization.get("apply_attempt_id")
         or media.get("plan_sha256") != authorization.get("plan_sha256")
-        or media.get("consumed_at_epoch")
-        != authorization.get("authorized_at_epoch")
+        or media.get("consumed_at_epoch") != authorization.get("authorized_at_epoch")
     ):
         raise AuthorizationError("consumed media evidence binding differs")
 
@@ -452,9 +427,7 @@ def _confirm_durable_authorization(
     now: dt.datetime,
     expected_media: Mapping[str, str | int] | None = None,
 ) -> dict[str, Any]:
-    media_record_id = (
-        f"{runtime.MEDIA_CUTOVER_LEDGER_PREFIX}{metadata['intent_id']}"
-    )
+    media_record_id = f"{runtime.MEDIA_CUTOVER_LEDGER_PREFIX}{metadata['intent_id']}"
     authorization_record_id = _authorization_record_id(metadata["intent_id"])
     confirmed_lock = release._dynamodb_get(release.DEPLOYMENT_LOCK_RECORD_ID)
     confirmed_intent = release._dynamodb_get(f"intent#{metadata['intent_id']}")
@@ -503,15 +476,18 @@ def _confirm_durable_authorization(
         confirmed_payload.get("authorized_at_epoch"),
         "confirmed media authorization time",
     )
-    expected_started_at = dt.datetime.fromtimestamp(
-        authorized_at,
-        tz=dt.UTC,
-    ).isoformat().replace("+00:00", "Z")
+    expected_started_at = (
+        dt.datetime.fromtimestamp(
+            authorized_at,
+            tz=dt.UTC,
+        )
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     if (
         confirmed_lock.get("acquired_at") != expected_started_at
         or confirmed_intent.get("apply_started_at") != expected_started_at
-        or confirmed_lock.get("lease_expires_at")
-        != confirmed_payload.get("lock_lease_expires_at")
+        or confirmed_lock.get("lease_expires_at") != confirmed_payload.get("lock_lease_expires_at")
     ):
         raise AuthorizationError("media authorization timing binding differs")
     return confirmed_payload
@@ -553,13 +529,10 @@ def _recover_media_authorization(
     )
     if (
         authorization.get("claims_sha256") != verification.get("claims_sha256")
-        or authorization.get("signature_sha256")
-        != verification.get("signature_sha256")
+        or authorization.get("signature_sha256") != verification.get("signature_sha256")
         or authorization.get("kms_key_arn") != verification.get("kms_key_arn")
     ):
-        raise AuthorizationError(
-            "durable media authorization signature binding differs"
-        )
+        raise AuthorizationError("durable media authorization signature binding differs")
     observed_at = runtime.require_int(
         verification.get("kms_verified_at_epoch"),
         "media recovery AWS time",
@@ -722,8 +695,7 @@ def authorize_media_apply(
                 control_commit=control_commit,
             )
         raise AuthorizationError(
-            "media evidence, deployment intent, and shared lock "
-            "could not be consumed atomically"
+            "media evidence, deployment intent, and shared lock could not be consumed atomically"
         ) from exc
 
     expected_media = _media_consumed_item(

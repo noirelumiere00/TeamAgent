@@ -3661,7 +3661,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で AiLa に「連携」と話しかけてください。",
+                    "もう一度 Slack で NewsTV AI に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3671,7 +3671,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で AiLa に「連携」と話しかけてください。",
+                    "リンクが壊れています。Slack で NewsTV AI に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3681,7 +3681,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で AiLa に「連携」と話しかけてください。",
+                    "リンクが古いか不正です。Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3701,7 +3701,8 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか使用済みです。Slack で AiLa に「連携」と話しかけてください。",
+                    "リンクが古いか使用済みです。"
+                    "Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3719,7 +3720,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3731,7 +3732,7 @@ def create_app(
                 _page(
                     "Googleアカウントを確認できませんでした",
                     f"{email} でログインし直してください。"
-                    "Slack で AiLa に「連携」と話しかけてください。",
+                    "Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3742,7 +3743,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3763,7 +3764,7 @@ def create_app(
                 _page(
                     "Googleアカウントを確認できませんでした",
                     f"{email} でログインし直してください。"
-                    "Slack で AiLa に「連携」と話しかけてください。",
+                    "Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3781,7 +3782,7 @@ def create_app(
                 _page(
                     "Googleアカウントが一致しません",
                     f"別のアカウントで許可されました。{email} でログインし直してください。"
-                    "Slack で AiLa に「連携」と話しかけてください。",
+                    "Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3803,7 +3804,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3827,7 +3828,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で AiLa に「連携」と話しかけてください。",
+                    "もう一度 Slack で NewsTV AI に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3837,7 +3838,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で AiLa に「連携」と話しかけてください。",
+                    "リンクが壊れています。Slack で NewsTV AI に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3847,7 +3848,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で AiLa に「連携」と話しかけてください。",
+                    "リンクが古いか不正です。Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3865,7 +3866,7 @@ def create_app(
                 return HTMLResponse(
                     _page(
                         "対象ワークスペースが違います",
-                        "所属ワークスペースの Slack で AiLa に「連携」と話しかけてください。",
+                        "所属ワークスペースの Slack で NewsTV AI に「連携」と話しかけてください。",
                         accent="#f9667a",
                     ),
                     status_code=403,
@@ -3881,7 +3882,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で AiLa に「連携」と話しかけてください。",
+                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -4012,7 +4013,8 @@ def create_app(
     def report_redirect(rid: str) -> Response:
         """レポート短縮リンク: 署名トークンを検証し、都度新鮮な presigned S3 へ 302。
 
-        openclaw(@AiLa) が長い presigned URL のクエリ(?X-Amz-Signature…)を削って壊す問題の根治。
+        openclaw(@NewsTV AI) が長い presigned URL のクエリ(?X-Amz-Signature…)を
+        削って壊す問題の根治。
         認証は掛けない（トークンが不透明・時限＝現行 presigned と同一の信頼境界。Slack 受信者は
         ログイン不要）。token 不正/失効/prefix・bucket 外は 404（fail-closed）。presigned は毎回
         再生成するため Cache-Control: no-store で中間キャッシュに期限切れURLを残さない。
