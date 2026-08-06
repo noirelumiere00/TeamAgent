@@ -531,9 +531,9 @@ def _should_skip_unchanged_gdrive_file(
         )
         return False
 
-    unchanged = bool(stored_checksum) and str(stored_checksum).lower() == str(
-        current_checksum
-    ).lower()
+    unchanged = (
+        bool(stored_checksum) and str(stored_checksum).lower() == str(current_checksum).lower()
+    )
     if unchanged:
         logger.info(
             "gdrive_unchanged_skipped",
@@ -3195,9 +3195,7 @@ def _ingest_shared_drives_crawl(
 
             prior_validator_version = (
                 str(
-                    (getattr(state, "metadata", {}) or {}).get(
-                        _CONNECTOR_VALIDATOR_METADATA_KEY
-                    )
+                    (getattr(state, "metadata", {}) or {}).get(_CONNECTOR_VALIDATOR_METADATA_KEY)
                     or ""
                 )
                 if state is not None

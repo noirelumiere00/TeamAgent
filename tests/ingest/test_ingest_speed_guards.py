@@ -108,9 +108,7 @@ def _drive_file(*, checksum: str | None, native: bool = False) -> DriveFile:
     return DriveFile(
         id="FILE-1",
         name="proposal",
-        mime_type=(
-            "application/vnd.google-apps.presentation" if native else "application/pdf"
-        ),
+        mime_type=("application/vnd.google-apps.presentation" if native else "application/pdf"),
         modified_time="2026-08-01T00:00:00Z",
         size=None if native else 123,
         web_view_link="https://drive.google.com/file/d/FILE-1/view",

@@ -80,7 +80,9 @@ def _load_handler(monkeypatch: pytest.MonkeyPatch, ecs: _Ecs) -> Any:
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CLUSTER_ARN", "arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev")
+    monkeypatch.setenv(
+        "CLUSTER_ARN", "arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev"
+    )
     monkeypatch.setenv(
         "TASKDEF_ARN",
         "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-ingest:45",
@@ -115,8 +117,7 @@ def test_no_running_task_starts_fargate_with_the_scheduled_network_configuration
     assert ecs.calls[1][1] == {
         "cluster": "arn:aws:ecs:ap-northeast-1:123456789012:cluster/teamagent-dev",
         "taskDefinition": (
-            "arn:aws:ecs:ap-northeast-1:123456789012:"
-            "task-definition/teamagent-dev-ingest:45"
+            "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/teamagent-dev-ingest:45"
         ),
         "launchType": "FARGATE",
         "platformVersion": "LATEST",

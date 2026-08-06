@@ -175,19 +175,13 @@ ECR_LIFECYCLE_OWNERSHIP = {
     "aws_ecr_lifecycle_policy.openclaw_verified_candidates": (
         "teamagent-openclaw-verified-candidates"
     ),
-    "aws_ecr_lifecycle_policy.openclaw_media_quarantine": (
-        "teamagent-openclaw-media-quarantine"
-    ),
+    "aws_ecr_lifecycle_policy.openclaw_media_quarantine": ("teamagent-openclaw-media-quarantine"),
     "aws_ecr_lifecycle_policy.openclaw_media_verified_candidates": (
         "teamagent-openclaw-media-verified-candidates"
     ),
     "aws_ecr_lifecycle_policy.mcp_quarantine": "teamagent-mcp-quarantine",
-    "aws_ecr_lifecycle_policy.mcp_verified_candidates": (
-        "teamagent-mcp-verified-candidates"
-    ),
-    "aws_ecr_lifecycle_policy.mcp_media_quarantine": (
-        "teamagent-media-worker-quarantine"
-    ),
+    "aws_ecr_lifecycle_policy.mcp_verified_candidates": ("teamagent-mcp-verified-candidates"),
+    "aws_ecr_lifecycle_policy.mcp_media_quarantine": ("teamagent-media-worker-quarantine"),
     "aws_ecr_lifecycle_policy.mcp_media_verified_candidates": (
         "teamagent-media-worker-verified-candidates"
     ),
@@ -2017,9 +2011,7 @@ def _assert_upsert_create_ownership(
             )
             continue
 
-        raise BootstrapError(
-            f"upsert-style create lacks an exact AWS ownership probe: {address}"
-        )
+        raise BootstrapError(f"upsert-style create lacks an exact AWS ownership probe: {address}")
 
 
 def _terraform(
@@ -2614,9 +2606,10 @@ def _prove_seed_ownership(
         if key in parameter_map:
             raise BootstrapError(f"seed stack has duplicate parameter: {key}")
         parameter_map[key] = value
-    if parameter_map.get("BootstrapNonce") != nonce or parameter_map.get(
-        "BootstrapCommit"
-    ) != commit:
+    if (
+        parameter_map.get("BootstrapNonce") != nonce
+        or parameter_map.get("BootstrapCommit") != commit
+    ):
         raise BootstrapError("seed stack parameters do not match this invocation")
 
     resource_response = _decode_json_result(
@@ -3546,15 +3539,11 @@ def run_bootstrap(
             commit=commit,
             source_tree_sha256=source_tree_sha256,
             contract_sha256=immutable_inputs[contract.path],
-            seed_template_sha256=immutable_inputs[
-                contract.path.parent / "seed-stack.yaml"
-            ],
+            seed_template_sha256=immutable_inputs[contract.path.parent / "seed-stack.yaml"],
             tfvars_sha256=immutable_inputs[var_file],
             release_hashes=release_hashes,
             tool_versions=tool_versions,
-            tool_evidence=(
-                runner.tool_evidence() if isinstance(runner, CommandRunner) else {}
-            ),
+            tool_evidence=(runner.tool_evidence() if isinstance(runner, CommandRunner) else {}),
             plan_sha256=plan_sha,
             plan_validation=plan_validation,
             handoff=handoff,
@@ -3610,9 +3599,7 @@ def run_bootstrap(
             },
             "principal": {
                 "arn": principal_identity["Arn"],
-                "user_id_sha256": sha256_bytes(
-                    str(principal_identity["UserId"]).encode()
-                ),
+                "user_id_sha256": sha256_bytes(str(principal_identity["UserId"]).encode()),
                 "mutating_workflow_actions": [
                     "cloudformation:CreateStack",
                     "sts:AssumeRole",
@@ -3756,9 +3743,7 @@ def _verify_consumed_handoff_artifacts(
     ledger_item: Mapping[str, Any],
 ) -> tuple[str, str]:
     claims_path = _secure_existing_file(artifact_dir / "bootstrap-handoff-claims.json")
-    ownership_path = _secure_existing_file(
-        artifact_dir / "bootstrap-handoff-ownership.json"
-    )
+    ownership_path = _secure_existing_file(artifact_dir / "bootstrap-handoff-ownership.json")
     claims_sha = sha256_file(claims_path)
     ownership_sha = sha256_file(ownership_path)
     if (
@@ -3814,18 +3799,16 @@ def reconcile_and_retire(
     _reject_influential_environment(source_env)
     base_env = _clean_aws_environment(source_env)
     repo_root = repo_root.resolve(strict=True)
-    expected_contract = (
-        repo_root / "infra" / "bootstrap" / "bootstrap_contract.json"
-    ).resolve(strict=True)
+    expected_contract = (repo_root / "infra" / "bootstrap" / "bootstrap_contract.json").resolve(
+        strict=True
+    )
     contract_path = contract_path.resolve(strict=True)
     if contract_path != expected_contract:
         raise BootstrapError("reconcile contract path is not the fixed repository control")
     contract = load_contract(contract_path)
     validate_release_contracts(repo_root, contract)
     artifact_dir = _secure_existing_artifact_dir(artifact_dir)
-    invocation_path = _secure_existing_file(
-        artifact_dir / "bootstrap-invocation.json"
-    )
+    invocation_path = _secure_existing_file(artifact_dir / "bootstrap-invocation.json")
     invocation = _mapping(
         load_json(invocation_path, label="bootstrap invocation"),
         label="bootstrap invocation",
@@ -3845,10 +3828,7 @@ def reconcile_and_retire(
         raise BootstrapError("bootstrap invocation artifact differs from reviewed controls")
 
     current_commit, source_tree_sha256 = _validate_repository(repo_root, runner, base_env)
-    if (
-        current_commit != commit
-        or invocation.get("source_tree_sha256") != source_tree_sha256
-    ):
+    if current_commit != commit or invocation.get("source_tree_sha256") != source_tree_sha256:
         raise BootstrapError("reconcile repository differs from the bootstrap invocation")
     _validate_local_toolchain(runner, cwd=repo_root, env=base_env)
     base_env = _temporary_principal_environment(base_env, region=contract.region)
@@ -3921,9 +3901,7 @@ def reconcile_and_retire(
             expected_state="PREPARED",
             next_state="RECONCILE_REQUIRED",
             extra_values={
-                "FailureSha256": sha256_bytes(
-                    b"reconcile-retire:apply-was-never-authorized"
-                )
+                "FailureSha256": sha256_bytes(b"reconcile-retire:apply-was-never-authorized")
             },
         )
         retirement = _revoke_and_delete_seed(
@@ -3955,25 +3933,20 @@ def reconcile_and_retire(
     if state not in {"APPLYING", "RECONCILE_REQUIRED"}:
         raise BootstrapError(f"bootstrap ledger has unsupported state: {state}")
 
-    reviewed_path = _secure_existing_file(
-        artifact_dir / "bootstrap-reviewed-plan.json"
-    )
+    reviewed_path = _secure_existing_file(artifact_dir / "bootstrap-reviewed-plan.json")
     reviewed = _mapping(
         load_json(reviewed_path, label="reviewed plan artifact"),
         label="reviewed plan artifact",
     )
     plan_sha = _string(reviewed.get("plan_sha256"), label="reviewed plan SHA-256")
     plan_path = _secure_existing_file(
-        artifact_dir
-        / _string(reviewed.get("plan_file"), label="reviewed plan filename")
+        artifact_dir / _string(reviewed.get("plan_file"), label="reviewed plan filename")
     )
     plan_json_path = _secure_existing_file(
-        artifact_dir
-        / _string(reviewed.get("plan_json_file"), label="reviewed plan JSON filename")
+        artifact_dir / _string(reviewed.get("plan_json_file"), label="reviewed plan JSON filename")
     )
     before_path = _secure_existing_file(
-        artifact_dir
-        / _string(reviewed.get("before_state_file"), label="before state filename")
+        artifact_dir / _string(reviewed.get("before_state_file"), label="before state filename")
     )
     if (
         reviewed.get("kind") != "teamagent-provenance-bootstrap-reviewed-plan"
@@ -3993,10 +3966,9 @@ def reconcile_and_retire(
         contract,
         plan_sha256=plan_sha,
     )
-    if (
-        list(plan_validation.created_addresses) != reviewed.get("created_addresses")
-        or list(plan_validation.no_op_addresses) != reviewed.get("no_op_addresses")
-    ):
+    if list(plan_validation.created_addresses) != reviewed.get("created_addresses") or list(
+        plan_validation.no_op_addresses
+    ) != reviewed.get("no_op_addresses"):
         raise BootstrapError("reviewed plan address claims differ")
 
     terraform_data_dir = artifact_dir / "terraform-data"
@@ -4037,9 +4009,7 @@ def reconcile_and_retire(
                 expected_state="APPLYING",
                 next_state="RECONCILE_REQUIRED",
                 extra_values={
-                    "FailureSha256": sha256_bytes(
-                        b"reconcile-retire:main-state-handoff-incomplete"
-                    )
+                    "FailureSha256": sha256_bytes(b"reconcile-retire:main-state-handoff-incomplete")
                 },
             )
         retirement = _revoke_and_delete_seed(
@@ -4151,11 +4121,15 @@ def reconcile_and_retire(
             contract=contract,
             nonce=nonce,
         )
-        if concurrent is None or _typed_string(
-            concurrent,
-            "State",
-            label="concurrent bootstrap ledger",
-        ) != "CONSUMED":
+        if (
+            concurrent is None
+            or _typed_string(
+                concurrent,
+                "State",
+                label="concurrent bootstrap ledger",
+            )
+            != "CONSUMED"
+        ):
             raise
         _verify_consumed_handoff_artifacts(
             artifact_dir,
