@@ -439,6 +439,25 @@ class IngestRepository:
             application_name=_INGEST_APPLICATION_NAME,
         )
 
+    def get_document_checksum(self, source_type: str, external_id: str) -> str | None:
+        """既存documentのmetadataに保存したMD5を返す。
+
+        未登録またはchecksum未保存ならNoneを返す。
+        """
+        sql = """
+            SELECT metadata ->> 'md5_checksum' AS md5_checksum
+            FROM documents
+            WHERE source_type = %s::document_source_type
+              AND external_id = %s
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (source_type, _strip_nul(external_id)))
+                row = cur.fetchone()
+        if row is None or row["md5_checksum"] is None:
+            return None
+        return str(row["md5_checksum"])
+
     def find_invalid_source_reason(
         self,
         source_type: str,
