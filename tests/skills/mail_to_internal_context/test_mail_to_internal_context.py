@@ -202,9 +202,7 @@ def test_bulk_noreply_and_daily_report_are_excluded_from_mail_signal(
             ),
             _Msg(headers={"From": "noreply@notify.example", "Subject": "自動通知"}),
             _Msg(headers={"From": "report@daily.example", "Subject": "営業日報"}),
-            _Msg(
-                headers={"From": "田中 <tanaka@client.example>", "Subject": "個別のご相談"}
-            ),
+            _Msg(headers={"From": "田中 <tanaka@client.example>", "Subject": "個別のご相談"}),
         ]
     )
 

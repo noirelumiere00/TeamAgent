@@ -302,9 +302,7 @@ def test_bulk_noreply_and_daily_report_are_hidden_only_from_unread(
         )
         for index, value in enumerate(headers)
     ]
-    triage = "[" + ",".join(
-        '{"importance":"high","summary":"要返信"}' for _ in msgs
-    ) + "]"
+    triage = "[" + ",".join('{"importance":"high","summary":"要返信"}' for _ in msgs) + "]"
 
     out = _run(_FakeGmail(msgs), triage, max_drafts=0)
 

@@ -206,8 +206,7 @@ def is_excluded_subject(headers: dict[str, str]) -> bool:
 
     subject = unicodedata.normalize("NFKC", _get_header(headers, "Subject")).lower()
     keywords = (
-        unicodedata.normalize("NFKC", value.strip()).lower()
-        for value in raw_keywords.split(",")
+        unicodedata.normalize("NFKC", value.strip()).lower() for value in raw_keywords.split(",")
     )
     return any(keyword and keyword in subject for keyword in keywords)
 

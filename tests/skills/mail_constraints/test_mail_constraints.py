@@ -46,9 +46,7 @@ class _Msg:
 
 
 class FakeGmail:
-    def __init__(
-        self, bodies: list[str], headers: list[dict[str, str]] | None = None
-    ) -> None:
+    def __init__(self, bodies: list[str], headers: list[dict[str, str]] | None = None) -> None:
         self._bodies = bodies
         self._headers = headers or [{} for _ in bodies]
         self.last_query: str | None = None
