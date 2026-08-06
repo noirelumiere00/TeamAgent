@@ -273,21 +273,37 @@ EOF
 fi
 
 # ---------- 本番: MFA 1 回で 2 ロール分の一時認証を取得 ----------
+# AWS の TOTP コードは 1 回しか使えない（同一コードの再利用は
+# "MultiFactorAuthentication failed" で拒否される。2026-08-06 実測）。
+# そのため「MFA 付きセッション」を GetSessionToken で 1 回だけ確立し、
+# そのセッション（aws:MultiFactorAuthPresent=true を帯びる）から
+# 両ロールを MFA なしで assume する。これが AWS の定石。
 read -r -s -p "MFAコード（1回だけ入力）: " MFA_CODE; echo
 [ -n "$MFA_CODE" ] || die "MFA コードが空です"
 
-assume() { # $1=role-arn $2=session-name → "AK SK TOKEN"
-  aws sts assume-role --role-arn "$1" --role-session-name "$2" \
-    --serial-number "$MFA_ARN" --token-code "$MFA_CODE" \
-    --profile "$PROFILE" --region "$REGION" \
+info "MFA 付きセッションを確立中..."
+BASE="$(aws sts get-session-token \
+  --serial-number "$MFA_ARN" --token-code "$MFA_CODE" \
+  --duration-seconds 3600 \
+  --profile "$PROFILE" --region "$REGION" \
+  --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text)" \
+  || die "MFA セッションの確立に失敗（コードの打ち間違い・時計ずれの可能性）"
+unset MFA_CODE
+BASE_AK="$(echo "$BASE" | cut -f1)"
+BASE_SK="$(echo "$BASE" | cut -f2)"
+BASE_TK="$(echo "$BASE" | cut -f3)"
+
+assume() { # $1=role-arn $2=session-name → "AK SK TOKEN"（MFA セッション経由・コード不要）
+  AWS_ACCESS_KEY_ID="$BASE_AK" AWS_SECRET_ACCESS_KEY="$BASE_SK" AWS_SESSION_TOKEN="$BASE_TK" \
+  AWS_PROFILE= aws sts assume-role --role-arn "$1" --role-session-name "$2" \
+    --region "$REGION" \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text
 }
 
 info "承認ロールを引き受け中..."
 CRED_A="$(assume "$ROLE_APPROVAL" "$SESS_APPROVAL")" || die "承認ロールの assume に失敗"
-info "起動ロールを引き受け中（同じ MFA コードの 30 秒窓内）..."
-CRED_L="$(assume "$ROLE_LAUNCHER" "$SESS_LAUNCHER")" || die "起動ロールの assume に失敗（30 秒窓を超えた場合はやり直してください）"
-unset MFA_CODE
+info "起動ロールを引き受け中..."
+CRED_L="$(assume "$ROLE_LAUNCHER" "$SESS_LAUNCHER")" || die "起動ロールの assume に失敗"
 
 use_creds() { # $1="AK SK TOKEN"（タブ区切り）
   AWS_ACCESS_KEY_ID="$(echo "$1" | cut -f1)"
