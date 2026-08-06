@@ -74,7 +74,13 @@ APP_PROVENANCE_SHA256="f0d40e7986fcd54d68f9e1ceed9a9987af23a72f5cc4a608fee5819b0
 APPROVAL_SIGNING_KEY_ARN="arn:aws:kms:ap-northeast-1:${ACCOUNT}:key/8ef3c43c-3fff-4f2e-9d92-e493a3a923b1"
 
 GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-GIT_BASE_OID="$(git -C "$REPO_ROOT" rev-parse HEAD^1)"
+# EXPECTED_BASE_OID は「親コミット」ではなく origin/main の先端。
+# publisher は EXPECTED_BASE_REF="refs/heads/main" を fresh に照合し、
+# さらに merge-base(main, release) == main（main が祖先）を要求する。
+# HEAD^1 を渡すと 'fresh protected remote base differs from expected base' で落ちる
+# （2026-08-06 実測）。
+git -C "$REPO_ROOT" fetch -q origin main
+GIT_BASE_OID="$(git -C "$REPO_ROOT" rev-parse origin/main)"
 GIT_BRANCH=dev
 
 # ---------- ヘルパ ----------
