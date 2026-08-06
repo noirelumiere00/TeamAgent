@@ -119,12 +119,17 @@ s3_sha256() { # $1=key $2=version-id → sha256
   rm -f "$tmp"
 }
 
-start_and_wait() { # $1=project $2=env json $3=source-version("-"で無指定) $4=source-type-label
-  local project="$1" envfile="$2" srcver="$3"
+start_and_wait() { # $1=project $2=env json $3=source-version("-"で無指定) $4=起動用creds("AK\tSK\tTK")
+  local project="$1" envfile="$2" srcver="$3" creds="$4"
   local args=(--project-name "$project" --environment-variables-override "file://$envfile"
               --region "$REGION" --query 'build.id' --output text)
   [ "$srcver" != "-" ] && args+=(--source-version "$srcver")
-  local bid; bid="$(aws codebuild start-build "${args[@]}")"
+  # StartBuild だけロール認証で撃つ。待機・ログ・S3 は MFA セッション（AIIAdev）で行う
+  # （ロール側に読み取り権限があるとは限らないため。AIIAdev の読み取りは本日実績あり）。
+  local bid; bid="$(AWS_ACCESS_KEY_ID="$(echo "$creds" | cut -f1)" \
+    AWS_SECRET_ACCESS_KEY="$(echo "$creds" | cut -f2)" \
+    AWS_SESSION_TOKEN="$(echo "$creds" | cut -f3)" \
+    env -u AWS_PROFILE aws codebuild start-build "${args[@]}")"
   info "$project 起動: $bid"
   while :; do
     sleep "$POLL_SECONDS"
@@ -294,8 +299,9 @@ BASE_SK="$(echo "$BASE" | cut -f2)"
 BASE_TK="$(echo "$BASE" | cut -f3)"
 
 assume() { # $1=role-arn $2=session-name → "AK SK TOKEN"（MFA セッション経由・コード不要）
+  # AWS_PROFILE を空文字で潰すと「空名プロファイル指定」と解釈され失敗する。env -u で外す。
   AWS_ACCESS_KEY_ID="$BASE_AK" AWS_SECRET_ACCESS_KEY="$BASE_SK" AWS_SESSION_TOKEN="$BASE_TK" \
-  AWS_PROFILE= aws sts assume-role --role-arn "$1" --role-session-name "$2" \
+  env -u AWS_PROFILE aws sts assume-role --role-arn "$1" --role-session-name "$2" \
     --region "$REGION" \
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text
 }
@@ -305,13 +311,10 @@ CRED_A="$(assume "$ROLE_APPROVAL" "$SESS_APPROVAL")" || die "承認ロールの 
 info "起動ロールを引き受け中..."
 CRED_L="$(assume "$ROLE_LAUNCHER" "$SESS_LAUNCHER")" || die "起動ロールの assume に失敗"
 
-use_creds() { # $1="AK SK TOKEN"（タブ区切り）
-  AWS_ACCESS_KEY_ID="$(echo "$1" | cut -f1)"
-  AWS_SECRET_ACCESS_KEY="$(echo "$1" | cut -f2)"
-  AWS_SESSION_TOKEN="$(echo "$1" | cut -f3)"
-  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-  unset AWS_PROFILE 2>/dev/null || true
-}
+# 以降の既定認証は MFA セッション（AIIAdev）。読み取り系はすべてこちらで行う。
+AWS_ACCESS_KEY_ID="$BASE_AK"; AWS_SECRET_ACCESS_KEY="$BASE_SK"; AWS_SESSION_TOKEN="$BASE_TK"
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+unset AWS_PROFILE 2>/dev/null || true
 
 # ---------- 段1: 承認発行 ----------
 FORCED_ROLLBACK_EVIDENCE_JSON='{"gate_version":1,"state":"PROVISIONAL_INITIAL_RELEASE","provisional":true}'
@@ -331,12 +334,10 @@ FORCED_ROLLBACK_EVIDENCE_JSON=$FORCED_ROLLBACK_EVIDENCE_JSON
 EOF
 validate_env "段1 approval-publisher" "$ALLOWED_STAGE1" "$WORK/s1.json"
 
-use_creds "$CRED_A"
-start_and_wait teamagent-dev-approval-publisher "$WORK/s1.json" refs/heads/dev
+start_and_wait teamagent-dev-approval-publisher "$WORK/s1.json" refs/heads/dev "$CRED_A"
 APPROVAL_BUILD_ID="$LAST_BUILD_ID"
 
 # 承認レコード（{"mcp":{"payload":{...},"signature":{...}}}）をログから取得（実測済み形式）
-use_creds "$CRED_L"
 LG="$(aws codebuild batch-get-builds --ids "$APPROVAL_BUILD_ID" --region "$REGION" --query 'builds[0].logs.groupName' --output text)"
 LS="$(aws codebuild batch-get-builds --ids "$APPROVAL_BUILD_ID" --region "$REGION" --query 'builds[0].logs.streamName' --output text)"
 aws logs get-log-events --log-group-name "$LG" --log-stream-name "$LS" --region "$REGION" \
@@ -370,7 +371,7 @@ RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256
 $APPROVAL_BLOCK
 EOF
 validate_env "段2 mcp-source-publisher" "$ALLOWED_STAGE2" "$WORK/s2.json"
-start_and_wait teamagent-dev-mcp-source-publisher "$WORK/s2.json" "$GIT_COMMIT"
+start_and_wait teamagent-dev-mcp-source-publisher "$WORK/s2.json" "$GIT_COMMIT" "$CRED_L"
 
 # 段2 の出力を S3 のキー構造から導出:
 #   source-declarations/mcp/<commit>/<src_sha>/<SOURCE_ARCHIVE_VERSION_ID>.json (+.sig)
@@ -407,7 +408,7 @@ RELEASE_CONTRACT_SHA256=$RELEASE_CONTRACT_SHA256
 $APPROVAL_BLOCK
 EOF
 validate_env "段3 image-builder" "$ALLOWED_STAGE3" "$WORK/s3.json"
-start_and_wait teamagent-dev-image-builder "$WORK/s3.json" "$SOURCE_ARCHIVE_VERSION_ID"
+start_and_wait teamagent-dev-image-builder "$WORK/s3.json" "$SOURCE_ARCHIVE_VERSION_ID" "$CRED_L"
 BUILDER_BUILD_ID="$LAST_BUILD_ID"
 
 # SUBJECTS_JSON: quarantine の candidate タグから digest を引いて構成（形式は昨日の実測どおり）
@@ -455,7 +456,7 @@ SUBJECTS_JSON=$SUBJECTS_JSON
 $APPROVAL_BLOCK
 EOF
 validate_env "段4 image-attestor" "$ALLOWED_STAGE4" "$WORK/s4.json"
-start_and_wait teamagent-dev-image-attestor "$WORK/s4.json" "-"
+start_and_wait teamagent-dev-image-attestor "$WORK/s4.json" "-" "$CRED_L"
 
 # 段4 の出力（レシート）を S3 から: release-receipts/mcp/<commit>/<sha>.json (+.sig)
 RECEIPT_KEY="$(aws s3api list-objects-v2 --bucket "$EVIDENCE_BUCKET" \
@@ -480,7 +481,7 @@ RECEIPT_SIGNATURE_VERSION_ID=$RECEIPT_SIG_VID
 $APPROVAL_BLOCK
 EOF
 validate_env "段5 image-promoter" "$ALLOWED_STAGE5" "$WORK/s5.json"
-start_and_wait teamagent-dev-image-promoter "$WORK/s5.json" "-"
+start_and_wait teamagent-dev-image-promoter "$WORK/s5.json" "-" "$CRED_L"
 
 # ---------- 完了: 昇格済み digest を表示（本番へは適用しない） ----------
 info "=== 5 段完走 ==="
