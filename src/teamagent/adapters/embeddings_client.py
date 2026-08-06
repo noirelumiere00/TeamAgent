@@ -114,13 +114,42 @@ class LocalE5Embedder:
         prefix = "passage" if self._passage_prefix_enabled else "query"
         return self._encode(text, prefix)
 
+    def embed_passage_batch(self, texts: list[str]) -> list[list[float]]:
+        """複数のパッセージを 1 回の行列演算で埋め込む。
+
+        prefix の選択と二重付与ガードは ``embed_passage()`` と同一にし、既存コーパスとの
+        ベクトル空間の互換性を維持する。空入力ではモデルを呼び出さず空リストを返す。
+        """
+        if not texts:
+            return []
+
+        prefix = "passage" if self._passage_prefix_enabled else "query"
+        prefixed = [self._prefix_text(text, prefix) for text in texts]
+        start = time.perf_counter()
+        matrix = self._model.encode(
+            prefixed,
+            normalize_embeddings=True,
+        ).tolist()
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        vectors = [list(vec) for vec in matrix]
+        logger.info(
+            "embedder_embed_batch",
+            model=self.model_name,
+            prefix=prefix,
+            batch_size=len(texts),
+            text_len=sum(len(text) for text in texts),
+            dim=len(vectors[0]) if vectors else 0,
+            latency_ms=latency_ms,
+        )
+        return vectors
+
     def _encode(self, text: str, prefix: str) -> list[float]:
         """``"{prefix}: {text}"`` を埋め込み、正規化済み 1024 次元ベクトルを返す。
 
         QW-1: 二重付与ガード。既に ``"query: "`` / ``"passage: "`` で始まる文字列には
         プレフィックスを足さない（呼び出し側が誤って付与済みの値を渡しても安全）。
         """
-        prefixed = text if text.startswith(("query: ", "passage: ")) else f"{prefix}: {text}"
+        prefixed = self._prefix_text(text, prefix)
         start = time.perf_counter()
         vec = self._model.encode(
             prefixed,
@@ -136,6 +165,11 @@ class LocalE5Embedder:
             latency_ms=latency_ms,
         )
         return list(vec)
+
+    @staticmethod
+    def _prefix_text(text: str, prefix: str) -> str:
+        """単一・バッチ経路で共通の prefix を付与する（二重付与はしない）。"""
+        return text if text.startswith(("query: ", "passage: ")) else f"{prefix}: {text}"
 
 
 class BedrockCohereEmbedder:

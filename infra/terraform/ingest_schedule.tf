@@ -23,6 +23,10 @@ variable "enable_ingest_schedule" {
 variable "fargate_ingest_cpu" {
   description = "ingest タスク CPU（embedding + Bedrock API call + RDS bulk write）"
   type        = number
+  # ⚠️ 実運用値はここではなく CLI（register-task-definition）で上書きする。
+  # infra/docker/runtime-consumers.json の memory 契約とスモークテストが
+  # この既定値に固定されているため、ここを動かすと契約テストが赤くなる。
+  # 2026-08-06 の高速化では live を cpu=4096/memory=8192 へ CLI で引き上げた。
   default     = 1024
 }
 
@@ -52,6 +56,17 @@ variable "ingest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 09:00 UTC = 平日 18:00 JST。EventBridge cron は常に UTC）"
   type        = string
   default     = "cron(0 9 ? * MON-FRI *)"
+}
+
+variable "ingest_max_runtime_hours" {
+  description = "先行 ingest タスクを異常滞留として停止・再起動するまでの時間"
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = var.ingest_max_runtime_hours > 0
+    error_message = "ingest_max_runtime_hours は 0 より大きい値にしてください。"
+  }
 }
 
 variable "ingest_google_oauth_secret_name" {
@@ -233,6 +248,13 @@ resource "aws_ecs_task_definition" "ingest" {
       # §知識ベース: 共有ドライブの走査/DL は「個人OAuth」を使う。これが無いと Vertex SA が
       # 選ばれ、SA は外部 Drive 非対応で walk が 0 件になる（OAuth3点は GOOGLE_OAUTH_JSON から展開済）。
       { name = "GOOGLE_FORCE_OAUTH", value = "1" },
+      # §取り込み時間の短縮（2026-08-06）。未変更ファイルの download/extract/embed/
+      # DB書き込みを丸ごと飛ばす。初回は cursor が無いのでフル走査になり、その走査
+      # 開始前の token が次回基点になる。
+      # ⚠️ OMP/MKL_NUM_THREADS は live の cpu に追随させる必要があるため、
+      #    ここではなく CLI 側の task definition で設定する（terraform の既定 cpu と
+      #    live が異なるため、ここで導出すると誤った値が焼かれる）。
+      { name = "USE_INCREMENTAL_SYNC", value = "1" },
       ], var.enable_scrape_tools ? [
       { name = "VERTEX_SA_PATH", value = "/tmp/vertex-sa.json" },
       { name = "GEMINI_USE_VERTEX", value = "true" },
@@ -262,26 +284,52 @@ resource "aws_ecs_task_definition" "ingest" {
   }
 }
 
-# --- EventBridge → ECS RunTask の IAM role ---
-data "aws_iam_policy_document" "events_assume" {
-  count = var.enable_ingest_schedule ? 1 : 0
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["events.amazonaws.com"]
-    }
+# --- EventBridge → Lambda dispatcher → ECS RunTask ---
+# ECS 直起動では前回タスクを確認できないため、Lambda が RUNNING の有無と上限時間を判定する。
+data "archive_file" "ingest_dispatch" {
+  count            = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  type             = "zip"
+  source_file      = "${path.module}/lambda/ingest_dispatch/handler.py"
+  output_path      = "${path.module}/build/ingest_dispatch.zip"
+  output_file_mode = "0644"
+}
+
+resource "aws_cloudwatch_log_group" "ingest_dispatch" {
+  count             = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  name              = "/aws/lambda/${var.project_name}-${var.environment}-ingest-dispatch"
+  retention_in_days = 30
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
   }
 }
 
-resource "aws_iam_role" "events_ingest_invoke" {
-  count              = var.enable_ingest_schedule ? 1 : 0
-  name               = "${var.project_name}-${var.environment}-events-ingest-invoke"
-  assume_role_policy = data.aws_iam_policy_document.events_assume[0].json
+resource "aws_iam_role" "ingest_dispatch" {
+  count              = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  name               = "${var.project_name}-${var.environment}-ingest-dispatch"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
-data "aws_iam_policy_document" "events_ingest_run_task" {
-  count = var.enable_ingest_schedule ? 1 : 0
+data "aws_iam_policy_document" "ingest_dispatch" {
+  count = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+
+  statement {
+    sid       = "ListIngestTasks"
+    actions   = ["ecs:ListTasks"]
+    resources = ["*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [aws_ecs_cluster.main.arn]
+    }
+  }
+  statement {
+    sid       = "DescribeAndStopIngestTasks"
+    actions   = ["ecs:DescribeTasks", "ecs:StopTask"]
+    resources = ["arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.main.name}/*"]
+  }
   statement {
     sid       = "RunIngestTask"
     actions   = ["ecs:RunTask"]
@@ -305,13 +353,54 @@ data "aws_iam_policy_document" "events_ingest_run_task" {
       values   = ["ecs-tasks.amazonaws.com"]
     }
   }
+  statement {
+    sid       = "Logs"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.ingest_dispatch[0].arn}:*"]
+  }
 }
 
-resource "aws_iam_role_policy" "events_ingest_run_task" {
-  count  = var.enable_ingest_schedule ? 1 : 0
-  name   = "${var.project_name}-${var.environment}-events-ingest-run-task"
-  role   = aws_iam_role.events_ingest_invoke[0].id
-  policy = data.aws_iam_policy_document.events_ingest_run_task[0].json
+resource "aws_iam_role_policy" "ingest_dispatch" {
+  count  = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  name   = "${var.project_name}-${var.environment}-ingest-dispatch"
+  role   = aws_iam_role.ingest_dispatch[0].id
+  policy = data.aws_iam_policy_document.ingest_dispatch[0].json
+}
+
+resource "aws_lambda_function" "ingest_dispatch" {
+  count            = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  function_name    = "${var.project_name}-${var.environment}-ingest-dispatch"
+  role             = aws_iam_role.ingest_dispatch[0].arn
+  runtime          = "python3.12"
+  architectures    = ["arm64"]
+  handler          = "handler.handler"
+  filename         = data.archive_file.ingest_dispatch[0].output_path
+  source_code_hash = data.archive_file.ingest_dispatch[0].output_base64sha256
+  timeout          = 30
+
+  # EventBridge の重複配送が並行しても ListTasks 判定を直列化する。
+  reserved_concurrent_executions = 1
+
+  depends_on = [
+    aws_cloudwatch_log_group.ingest_dispatch,
+    aws_iam_role_policy.ingest_dispatch,
+    terraform_data.runtime_guard,
+  ]
+
+  environment {
+    variables = {
+      CLUSTER_ARN              = aws_ecs_cluster.main.arn
+      TASKDEF_ARN              = aws_ecs_task_definition.ingest[0].arn
+      TASK_FAMILY              = aws_ecs_task_definition.ingest[0].family
+      SUBNETS                  = join(",", data.aws_subnets.default.ids)
+      SG_ID                    = aws_security_group.ingest[0].id
+      INGEST_MAX_RUNTIME_HOURS = tostring(var.ingest_max_runtime_hours)
+    }
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # --- EventBridge rule: 毎週月 18:00 UTC = 火 03:00 JST（EC2 systemd timer と同タイミング） ---
@@ -336,25 +425,14 @@ resource "aws_cloudwatch_event_rule" "ingest_weekly" {
 }
 
 resource "aws_cloudwatch_event_target" "ingest_run_task" {
-  count    = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
-  rule     = aws_cloudwatch_event_rule.ingest_weekly[0].name
-  arn      = aws_ecs_cluster.main.arn
-  role_arn = aws_iam_role.events_ingest_invoke[0].arn
+  count = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  rule  = aws_cloudwatch_event_rule.ingest_weekly[0].name
+  arn   = aws_lambda_function.ingest_dispatch[0].arn
 
-  depends_on = [terraform_data.runtime_guard]
-
-  ecs_target {
-    task_definition_arn = aws_ecs_task_definition.ingest[0].arn
-    task_count          = 1
-    launch_type         = "FARGATE"
-    platform_version    = "LATEST"
-
-    network_configuration {
-      subnets          = data.aws_subnets.default.ids
-      security_groups  = [aws_security_group.ingest[0].id]
-      assign_public_ip = true
-    }
-  }
+  depends_on = [
+    aws_lambda_permission.ingest_weekly,
+    terraform_data.runtime_guard,
+  ]
 
   # 失敗時の retry（max 1 回・遅延 5 分）
   retry_policy {
@@ -365,6 +443,15 @@ resource "aws_cloudwatch_event_target" "ingest_run_task" {
   lifecycle {
     prevent_destroy = true
   }
+}
+
+resource "aws_lambda_permission" "ingest_weekly" {
+  count         = var.enable_ingest_schedule && var.mcp_image != "" ? 1 : 0
+  statement_id  = "AllowEventBridgeIngestWeekly"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingest_dispatch[0].function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.ingest_weekly[0].arn
 }
 
 # ---------- Outputs ----------

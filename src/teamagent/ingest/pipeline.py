@@ -501,6 +501,48 @@ def _normalized_office_warning_reason(reason: str) -> str:
     return reason if reason in _OFFICE_WARNING_REASONS else "invalid_source"
 
 
+def _should_skip_unchanged_gdrive_file(
+    repository: IngestRepository,
+    f: Any,
+    *,
+    request_id: str,
+) -> bool:
+    """保存済みMD5と一致するbinary fileは重い処理へ入る前に除外する。"""
+    if not _envflag("USE_UNCHANGED_SKIP", "true"):
+        return False
+
+    current_checksum = getattr(f, "md5_checksum", None)
+    # Google native形式はMD5を持たない。更新を取りこぼさないよう必ず従来処理へ流す。
+    if not current_checksum:
+        return False
+
+    lookup = getattr(repository, "get_document_checksum", None)
+    if not callable(lookup):
+        return False
+    try:
+        stored_checksum = lookup("gdrive", f.id)
+    except Exception as exc:
+        # lookup障害では取り込みを止めず、従来のdownload/extract経路へfail-openする。
+        logger.warning(
+            "gdrive_checksum_lookup_failed",
+            request_id=request_id,
+            file_ref=_external_id_ref(f.id),
+            error_type=type(exc).__name__,
+        )
+        return False
+
+    unchanged = (
+        bool(stored_checksum) and str(stored_checksum).lower() == str(current_checksum).lower()
+    )
+    if unchanged:
+        logger.info(
+            "gdrive_unchanged_skipped",
+            request_id=request_id,
+            file_ref=_external_id_ref(f.id),
+        )
+    return unchanged
+
+
 def _known_invalid_office_reason(
     repository: IngestRepository,
     f: Any,
@@ -927,10 +969,38 @@ def _embed_page_chunks(
     embedder: _EmbedderProto,
     lease_heartbeat: Callable[[bool], None] | None = None,
 ) -> list[ChunkUpsert]:
-    """embedding件数をhard capし、retry leaseを処理中も定期更新する。"""
+    """embedding件数をhard capし、利用可能ならまとめて埋め込む。"""
     if len(page_chunks) > MAX_INGEST_EMBEDDINGS_PER_FILE:
         raise _IngestContentVolumeError("embedding_limit")
+
     chunks: list[ChunkUpsert] = []
+    embed_batch = getattr(embedder, "embed_passage_batch", None)
+    if callable(embed_batch):
+        batch_size = max(1, _envint("EMBED_BATCH_SIZE", 16))
+        for offset in range(0, len(page_chunks), batch_size):
+            batch = page_chunks[offset : offset + batch_size]
+            # 行列演算の直前と直後にleaseを更新し、各バッチ中の失効余地を狭める。
+            if lease_heartbeat is not None:
+                lease_heartbeat(False)
+            embeddings = list(embed_batch([text for _, text in batch]))
+            if lease_heartbeat is not None:
+                lease_heartbeat(False)
+            if len(embeddings) != len(batch):
+                raise ValueError("embed_passage_batch returned an unexpected number of embeddings")
+            for batch_idx, ((page_num, content), embedding) in enumerate(
+                zip(batch, embeddings, strict=True)
+            ):
+                chunks.append(
+                    ChunkUpsert(
+                        chunk_idx=offset + batch_idx,
+                        content=content,
+                        embedding=embedding,
+                        metadata={"page_num": page_num},
+                    )
+                )
+        return chunks
+
+    # バッチ API を持たない実装は従来どおり 1 chunk ずつ処理する。
     for idx, (page_num, text) in enumerate(page_chunks):
         if lease_heartbeat is not None:
             lease_heartbeat(False)
@@ -2210,6 +2280,24 @@ def _process_one_gdrive_file(
     if lease_heartbeat is not None:
         lease_heartbeat(True)
 
+    if _should_skip_unchanged_gdrive_file(repository, f, request_id=request_id):
+        # claimed retryが残っている場合だけlease fence付きで解消する。
+        # document/chunksは触らない。
+        if retry_lease_owner is not None or retry_lease_token is not None:
+            _resolve_source_retry(
+                repository=repository,
+                f=f,
+                source_kind=warning_source_kind,
+                source_id=warning_source_id,
+                request_id=request_id,
+                dry_run=dry_run,
+                expected_lease_owner=retry_lease_owner,
+                expected_lease_token=retry_lease_token,
+                durability_tracker=durability_tracker,
+            )
+        skipped.append(f.id)
+        return 0, 0
+
     # INGEST_RICH_EXTRACT=1 のときだけ rich 抽出（gslide/gsheet/plain-text 本文化・抽出器の
     # rich 引数）を有効化。OFF（既定）は現行と 1 バイトも挙動を変えない（後方互換）。
     rich = _rich_extract_enabled()
@@ -3020,6 +3108,7 @@ def _ingest_shared_drives_crawl(
     from teamagent.ingest.office_extract import (
         GDOC_NATIVE_MIME,
         OFFICE_BINARY_MIMES,
+        OFFICE_VALIDATOR_SCHEMA_VERSION,
         OfficePayloadError,
         extract_office_pages,
     )
@@ -3056,6 +3145,12 @@ def _ingest_shared_drives_crawl(
         else _WarningSnapshot(reasons={}, suppressed=0)
     )
 
+    # migration 0012 の契約どおり、共有ドライブはdrive_idごとにcursorを保持する。
+    incremental = _envflag("USE_INCREMENTAL_SYNC")
+    changes_cache: dict[str, tuple[set[str], str | None] | None] = {}
+    full_scan_cursor_attempted = False
+    full_scan_cursor: str | None = None
+
     # 1. 共有ドライブ列挙
     all_drives = client.list_shared_drives(request_id=request_id)
     if spec.name_filter:
@@ -3078,6 +3173,89 @@ def _ingest_shared_drives_crawl(
     )
 
     for drive in drives:
+        drive_warning_before = (
+            warning_collector.snapshot(warning_source_kind, warning_source_id)
+            if warning_collector is not None
+            else _WarningSnapshot(reasons={}, suppressed=0)
+        )
+        changed_ids: set[str] | None = None
+        next_cursor: str | None = None
+        if incremental:
+            state: Any | None = None
+            prior_cursor: str | None = None
+            try:
+                state = repository.load_connector_state(warning_source_kind, drive.id)
+                prior_cursor = state.cursor if state else None
+            except Exception:
+                logger.exception(
+                    "connector_state_load_failed",
+                    source_kind=warning_source_kind,
+                    source_id_ref=_external_id_ref(drive.id),
+                )
+
+            prior_validator_version = (
+                str(
+                    (getattr(state, "metadata", {}) or {}).get(_CONNECTOR_VALIDATOR_METADATA_KEY)
+                    or ""
+                )
+                if state is not None
+                else ""
+            )
+            validator_generation_changed = bool(prior_cursor) and (
+                prior_validator_version != OFFICE_VALIDATOR_SCHEMA_VERSION
+            )
+            if validator_generation_changed:
+                logger.warning(
+                    "shared_drives_validator_generation_changed",
+                    request_id=request_id,
+                    drive_ref=_external_id_ref(drive.id),
+                    previous_validator=prior_validator_version or "unrecorded",
+                    current_validator=OFFICE_VALIDATOR_SCHEMA_VERSION,
+                    action="full_revalidation",
+                )
+            if prior_cursor and not validator_generation_changed:
+                try:
+                    if prior_cursor not in changes_cache:
+                        try:
+                            changes_cache[prior_cursor] = _drain_changes(
+                                client,
+                                prior_cursor,
+                                request_id,
+                            )
+                        except Exception:
+                            changes_cache[prior_cursor] = None
+                            raise
+                    cached = changes_cache[prior_cursor]
+                    if cached is not None:
+                        changed_ids, next_cursor = cached
+                    logger.info(
+                        "shared_drives_incremental_changes",
+                        request_id=request_id,
+                        drive_ref=_external_id_ref(drive.id),
+                        changed=len(changed_ids or ()),
+                        fail_open=cached is None,
+                    )
+                except Exception:
+                    logger.exception(
+                        "shared_drives_get_changes_failed",
+                        request_id=request_id,
+                        drive_ref=_external_id_ref(drive.id),
+                    )
+                    changed_ids = None
+            if changed_ids is None:
+                # full走査開始前にtokenを確保し、走査中の変更を次回changesで拾う。
+                if not full_scan_cursor_attempted:
+                    full_scan_cursor_attempted = True
+                    try:
+                        full_scan_cursor = client.get_start_page_token(request_id)
+                    except Exception:
+                        logger.exception(
+                            "shared_drives_start_page_token_failed",
+                            request_id=request_id,
+                            drive_ref=_external_id_ref(drive.id),
+                        )
+                next_cursor = full_scan_cursor
+
         # 2. 各ドライブを再帰 walk
         files = client.walk_files_recursive(
             root_id=drive.id,
@@ -3105,6 +3283,8 @@ def _ingest_shared_drives_crawl(
             drive_name=drive.name,
             files_found=len(files),
         )
+        if changed_ids is not None:
+            files = [f for f in files if f.id in changed_ids]
 
         for f in files:
             # M4: file ループ本体を file 単位 try/except で囲む。folder 経路（~838）は
@@ -3119,6 +3299,14 @@ def _ingest_shared_drives_crawl(
                     if not relevant:
                         filtered_count += 1
                         continue
+
+                if _should_skip_unchanged_gdrive_file(
+                    repository,
+                    f,
+                    request_id=request_id,
+                ):
+                    skipped_count += 1
+                    continue
 
                 if f.mime_type in OFFICE_BINARY_MIMES:
                     known_reason = _known_invalid_office_reason(repository, f)
@@ -3529,6 +3717,36 @@ def _ingest_shared_drives_crawl(
                 skipped_count += 1
                 continue
 
+        drive_warning_delta = (
+            warning_collector.delta(warning_source_kind, warning_source_id, drive_warning_before)
+            if warning_collector is not None
+            else _WarningSnapshot(reasons={}, suppressed=0)
+        )
+        if incremental and not dry_run:
+            try:
+                repository.save_connector_state(
+                    warning_source_kind,
+                    drive.id,
+                    cursor=next_cursor,
+                    success=True,
+                    metadata={
+                        "outcome": (
+                            "success_with_warnings" if drive_warning_delta.reasons else "success"
+                        ),
+                        "warning_count": sum(drive_warning_delta.reasons.values()),
+                        "warning_reasons": drive_warning_delta.reasons,
+                        "known_invalid_suppressed": drive_warning_delta.suppressed,
+                        _CONNECTOR_VALIDATOR_METADATA_KEY: OFFICE_VALIDATOR_SCHEMA_VERSION,
+                    },
+                )
+            except Exception as exc:
+                logger.exception(
+                    "connector_state_save_failed",
+                    source_kind=warning_source_kind,
+                    source_id_ref=_external_id_ref(drive.id),
+                )
+                raise IngestDurabilityError("connector cursor state could not be saved") from exc
+
     warning_delta = (
         warning_collector.delta(warning_source_kind, warning_source_id, warning_before)
         if warning_collector is not None
@@ -3546,6 +3764,7 @@ def _ingest_shared_drives_crawl(
         warning_reasons=warning_delta.reasons,
         known_invalid_suppressed=warning_delta.suppressed,
         outcome="success_with_warnings" if warning_delta.reasons else "success",
+        incremental=incremental,
         dry_run=dry_run,
     )
     return docs_n, chunks_n

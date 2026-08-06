@@ -65,6 +65,25 @@ def _repo(fetch_result: Any | None = None) -> tuple[IngestRepository, _FakePgVec
 
 
 # -----------------------------------------------------------
+# document fingerprint
+# -----------------------------------------------------------
+def test_get_document_checksum_reads_saved_metadata() -> None:
+    repo, pg = _repo(fetch_result={"md5_checksum": "abc123"})
+
+    assert repo.get_document_checksum("gdrive", "FILE-1") == "abc123"
+    sql, params = pg.conn.cursor_obj.executed[0]
+    assert "metadata ->> 'md5_checksum'" in sql
+    assert "FROM documents" in sql
+    assert params == ("gdrive", "FILE-1")
+
+
+def test_get_document_checksum_returns_none_when_document_is_absent() -> None:
+    repo, _pg = _repo(fetch_result=None)
+
+    assert repo.get_document_checksum("gdrive", "MISSING") is None
+
+
+# -----------------------------------------------------------
 # connector_state
 # -----------------------------------------------------------
 def test_load_connector_state_returns_none_when_absent() -> None:
