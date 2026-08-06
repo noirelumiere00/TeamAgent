@@ -1,6 +1,6 @@
 """レポート短縮リンク用 署名トークン（HMAC-SHA256）。
 
-openclaw(@AiLa) の LLM が長い presigned URL のクエリ（``?X-Amz-Signature…``）を
+openclaw(@NewsTV AI) の LLM が長い presigned URL のクエリ（``?X-Amz-Signature…``）を
 削って壊す問題を根治するため、配布URLを **クエリ無しの短い**
 ``https://connect.newstv.co.jp/r/<token>`` にする。``<token>`` は S3 の
 ``bucket/key`` を HMAC 署名で埋めた不透明文字列。connect-web の ``/r`` が署名検証して
