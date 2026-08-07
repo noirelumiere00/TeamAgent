@@ -55,7 +55,7 @@ RUN set -eux; \
     rm -rf /root/.cache/ms-playwright /home/node/.cache/ms-playwright /ms-playwright; \
     chmod -R a-w /opt/teamagent
 
-# The pinned upstream release ships three transitively vulnerable packages that
+# The pinned upstream release ships five transitively vulnerable packages that
 # the release gate rejects (it requires zero Critical/High findings). Upstream
 # has no patched tag for 2026.7.1, so exact-version registry tarballs are unpacked
 # over only the affected directories here. Running npm pack from /tmp avoids the
@@ -65,8 +65,10 @@ RUN set -eux; \
 # runtime inventory check. The assertions below fail the build if a tarball
 # contains anything other than the reviewed version.
 #   axios           1.16.0 -> 1.18.0  GHSA-gcfj-64vw-6mp9 (inherited proxy)
-#   brace-expansion 5.0.7  -> 5.0.8   CVE-2026-14257 (unbounded expansion DoS)
-#   fast-uri        3.1.2  -> 3.1.4   CVE-2026-13676, CVE-2026-16221 (host confusion)
+#   brace-expansion 5.0.7  -> 5.0.9   CVE-2026-69152
+#   fast-uri        3.1.2  -> 3.1.5   CVE-2026-18446
+#   ip-address      10.2.0 -> 10.3.1  CVE-2026-69192
+#   undici          8.5.0  -> 8.9.0   CVE-2026-13697
 # Every axios release that carries the GHSA-gcfj-64vw-6mp9 fix (1.16.1 and later)
 # also declares a new production dependency on https-proxy-agent ^5.0.1, so its
 # closure has to be completed here or the prune resolver fails on an unresolved
@@ -83,8 +85,10 @@ RUN set -eux; \
     mkdir -p "$patch_dir"; \
     cd "$patch_dir"; \
     npm pack axios@1.18.0 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack brace-expansion@5.0.8 --ignore-scripts --pack-destination "$patch_dir"; \
-    npm pack fast-uri@3.1.4 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack brace-expansion@5.0.9 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack fast-uri@3.1.5 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack ip-address@10.3.1 --ignore-scripts --pack-destination "$patch_dir"; \
+    npm pack undici@8.9.0 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack https-proxy-agent@5.0.1 --ignore-scripts --pack-destination "$patch_dir"; \
     npm pack agent-base@6.0.2 --ignore-scripts --pack-destination "$patch_dir"; \
     rm -rf \
@@ -92,21 +96,27 @@ RUN set -eux; \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
       /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
-      /app/node_modules/fast-uri; \
+      /app/node_modules/fast-uri \
+      /app/node_modules/ip-address \
+      /app/node_modules/undici; \
     mkdir -p \
       /opt/teamagent/plugins/slack/node_modules/axios \
       /opt/teamagent/plugins/slack/node_modules/https-proxy-agent \
       /opt/teamagent/plugins/slack/node_modules/agent-base \
       /app/node_modules/brace-expansion \
-      /app/node_modules/fast-uri; \
+      /app/node_modules/fast-uri \
+      /app/node_modules/ip-address \
+      /app/node_modules/undici; \
     tar -xzf "$patch_dir/axios-1.18.0.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/axios; \
     tar -xzf "$patch_dir/https-proxy-agent-5.0.1.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/https-proxy-agent; \
     tar -xzf "$patch_dir/agent-base-6.0.2.tgz" --strip-components=1 -C /opt/teamagent/plugins/slack/node_modules/agent-base; \
-    tar -xzf "$patch_dir/brace-expansion-5.0.8.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
-    tar -xzf "$patch_dir/fast-uri-3.1.4.tgz" --strip-components=1 -C /app/node_modules/fast-uri; \
+    tar -xzf "$patch_dir/brace-expansion-5.0.9.tgz" --strip-components=1 -C /app/node_modules/brace-expansion; \
+    tar -xzf "$patch_dir/fast-uri-3.1.5.tgz" --strip-components=1 -C /app/node_modules/fast-uri; \
+    tar -xzf "$patch_dir/ip-address-10.3.1.tgz" --strip-components=1 -C /app/node_modules/ip-address; \
+    tar -xzf "$patch_dir/undici-8.9.0.tgz" --strip-components=1 -C /app/node_modules/undici; \
     cd /tmp; \
     rm -rf "$patch_dir"; \
-    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.8","/app/node_modules/fast-uri":"3.1.4","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
+    node -e 'const fs=require("fs");const want={"/app/node_modules/brace-expansion":"5.0.9","/app/node_modules/fast-uri":"3.1.5","/app/node_modules/ip-address":"10.3.1","/app/node_modules/undici":"8.9.0","/opt/teamagent/plugins/slack/node_modules/agent-base":"6.0.2","/opt/teamagent/plugins/slack/node_modules/axios":"1.18.0","/opt/teamagent/plugins/slack/node_modules/https-proxy-agent":"5.0.1"};for(const [dir,v] of Object.entries(want)){const got=JSON.parse(fs.readFileSync(dir+"/package.json")).version;if(got!==v)throw new Error(`vulnerability patch mismatch: ${dir} is ${got}, expected ${v}`)}'; \
     chmod -R a-w /opt/teamagent
 
 # The upstream release contains its complete development workspace. Resolve the

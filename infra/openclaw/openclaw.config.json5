@@ -29,7 +29,7 @@
         // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
         model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
-        identity: { name: "TeamAgent", emoji: "🧭" },
+        identity: { name: "NewsTV AI", emoji: "🧭" },
         // §S: skipBootstrap は v2026.6.1 schema の agents.list[] に無い（config validate で弾かれた）ため削除。
         // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。
       },

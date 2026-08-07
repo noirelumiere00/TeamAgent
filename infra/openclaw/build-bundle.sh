@@ -510,7 +510,7 @@ if [ "$critical_count" -gt "$scan_gate_critical" ] ||
   jq -r '
     .Results[]? as $result |
     ($result.Vulnerabilities // [])[]? |
-    "\(.Severity) \(.VulnerabilityID) \(.PkgName) \($result.Target)"
+    "\(.Severity) \(.VulnerabilityID) \(.PkgName)@\(.InstalledVersion) \(.PkgPath // $result.Target)"
   ' "$tmp_dir/vulnerabilities.json" >&2 || true
   die "Critical/High vulnerability gate failed (critical=$critical_count, high=$high_count)"
 fi
