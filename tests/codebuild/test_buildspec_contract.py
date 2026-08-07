@@ -98,11 +98,19 @@ def test_core_and_media_builds_pass_every_required_provenance_binding() -> None:
     contract = json.loads(RELEASE_CONTRACT.read_text(encoding="utf-8"))
 
     assert body.count("docker buildx build") == 2
-    assert '--file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-mcp"' in body
-    assert ('--file "$CONTEXT_VERIFY_DIR/infra/docker/Dockerfile.teamagent-media-worker"') in body
+    assert "--file infra/docker/Dockerfile.teamagent-mcp" in body
+    assert "--file infra/docker/Dockerfile.teamagent-media-worker" in body
     assert body.count('- <"$BUILD_CONTEXT_TAR"') == 2
     assert body.count("--target final") == 2
-    assert body.count("--platform linux/arm64") == 2
+    # 隔離ビルダーの作成（docker buildx create）も arm64 を指定するため、素の出現回数では
+    # 判定できない。数ではなく「2つの build がそれぞれ arm64 で走ること」を見る。
+    core_build_at = body.index("docker buildx build")
+    media_build_at = body.index("docker buildx build", core_build_at + 1)
+    assert "--platform linux/arm64" in body[core_build_at:media_build_at]
+    assert "--platform linux/arm64" in body[media_build_at:]
+    # attestation（--provenance/--sbom）は既定の docker ドライバでは拒否されるため、
+    # 隔離 docker-container ビルダーの作成が build より前にあることまで縛る。
+    assert "--driver docker-container" in body[:core_build_at]
     assert body.count("--provenance=mode=max") == 2
     assert body.count("--sbom=true") == 2
     assert body.count("--push") == 2
@@ -275,7 +283,14 @@ def test_both_builds_stop_at_quarantine_and_source_free_projects_own_promotion()
     scan = body.index("python3 infra/codebuild/verify_ecr_scan.py")
     second_guard = body.index("CODEBUILD_BUILD_SUCCEEDING", first_guard + 1)
     assert core_push < media_push < first_guard < resolve < provenance < wait < scan < second_guard
-    assert "--deny-all" in body
+    assert '--exceptions "infra/codebuild/ecr_scan_exceptions_$subject.json"' in body
+    for subject in ("core", "media"):
+        exceptions_path = (
+            ROOT / "infra" / "codebuild" / f"ecr_scan_exceptions_{subject}.json"
+        )
+        assert exceptions_path.is_file()
+        exceptions = json.loads(exceptions_path.read_text(encoding="utf-8"))
+        assert exceptions["stale_exception_policy"] == "fail"
     assert '--expected-config-digest "$config_digest"' in body
     assert "ecr_scan_exceptions.json" not in body
     assert "BatchDeleteImage" not in body

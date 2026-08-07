@@ -1176,6 +1176,8 @@ def test_approval_reader_policy_is_exact_version_only_and_non_mutating() -> None
     allow = _allow_statements(policy)
     assert {action for statement in allow for action in _actions(statement)} == {
         "kms:Decrypt",
+        # authorize_image_release.sh が alias から鍵 ARN を実行時解決するために使う。読み取り専用。
+        "kms:DescribeKey",
         "kms:Verify",
         "s3:GetObjectRetention",
         "s3:GetObjectVersion",

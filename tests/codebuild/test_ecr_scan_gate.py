@@ -12,7 +12,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "codebuild" / "verify_ecr_scan.py"
-EXCEPTIONS_PATH = ROOT / "infra" / "codebuild" / "ecr_scan_exceptions.json"
+# 例外レジストリは c101715 で subject 別（core / media）へ分割された。
+# 単一ファイルへ戻る回帰を防ぐため、両方を明示して回す。
+EXCEPTIONS_PATHS = (
+    ROOT / "infra" / "codebuild" / "ecr_scan_exceptions_core.json",
+    ROOT / "infra" / "codebuild" / "ecr_scan_exceptions_media.json",
+)
 DIGEST = "sha256:" + "d" * 64
 REPOSITORY = "teamagent-mcp"
 TODAY = date(2026, 7, 16)
@@ -108,14 +113,15 @@ def _parse_scan(tmp_path: Path, keys: set[tuple[str, str, str, str]]) -> set[Any
 
 
 def test_bootstrap_registry_is_empty_until_final_true_image_is_scanned() -> None:
-    payload = json.loads(EXCEPTIONS_PATH.read_text(encoding="utf-8"))
+    for path in EXCEPTIONS_PATHS:
+        payload = json.loads(path.read_text(encoding="utf-8"))
 
-    assert payload == {
-        "schema_version": 1,
-        "stale_exception_policy": "fail",
-        "exceptions": [],
-    }
-    assert gate.load_exceptions(EXCEPTIONS_PATH, today=TODAY) == {}
+        assert payload == {
+            "schema_version": 1,
+            "stale_exception_policy": "fail",
+            "exceptions": [],
+        }
+        assert gate.load_exceptions(path, today=TODAY) == {}
 
 
 def test_exact_synthetic_exception_set_passes(tmp_path: Path) -> None:

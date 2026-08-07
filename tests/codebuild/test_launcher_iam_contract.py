@@ -5,18 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TERRAFORM = ROOT / "infra" / "terraform" / "codebuild.tf"
+TERRAFORM_DIR = TERRAFORM.parent
 README = ROOT / "infra" / "terraform" / "README.md"
 
-CODEBUILD_LAUNCHER_POLICY_DOCUMENTS = (
-    "codebuild_launcher_core",
-    "codebuild_launcher_manage_a",
-    "codebuild_launcher_manage_b",
-    "codebuild_launcher_guardrails",
-)
-RELEASE_LAUNCHER_POLICY_DOCUMENTS = (
-    "release_launcher_a",
-    "release_launcher_b",
-)
+START_BUILD_ACTIONS = {
+    "codebuild:*",
+    "codebuild:RetryBuild",
+    "codebuild:RetryBuildBatch",
+    "codebuild:StartBuild",
+    "codebuild:StartBuildBatch",
+}
 
 
 def _body() -> str:
@@ -37,28 +35,235 @@ def _balanced_block_after(body: str, marker: str) -> str:
     raise AssertionError(f"unterminated Terraform block after {marker!r}")
 
 
-def _document(name: str) -> str:
-    marker = f'data "aws_iam_policy_document" "{name}"'
-    return _balanced_block_after(_body(), marker)
+def _terraform_sources() -> tuple[tuple[Path, str], ...]:
+    return tuple(
+        (path, path.read_text(encoding="utf-8")) for path in sorted(TERRAFORM_DIR.glob("*.tf"))
+    )
 
 
-def _managed_policy(role_name: str, document_names: tuple[str, ...]) -> str:
-    body = _body()
-    documents = []
-    for name in document_names:
-        documents.append(_document(name))
+def _terraform_blocks(
+    declaration: str,
+    terraform_type: str,
+) -> tuple[tuple[Path, str, str], ...]:
+    pattern = re.compile(
+        rf'^\s*{re.escape(declaration)}\s+"{re.escape(terraform_type)}"\s+'
+        r'"(?P<name>[^"]+)"\s*\{',
+        re.MULTILINE,
+    )
+    blocks: list[tuple[Path, str, str]] = []
+    for path, source in _terraform_sources():
+        for match in pattern.finditer(source):
+            block = _balanced_block_after(source[match.start() :], match.group(0))
+            blocks.append((path, match.group("name"), block))
+    return tuple(blocks)
 
-        managed_policy = _balanced_block_after(body, f'resource "aws_iam_policy" "{name}"')
-        assert f"policy = data.aws_iam_policy_document.{name}.json" in managed_policy
 
-        attachment = _balanced_block_after(
-            body,
-            f'resource "aws_iam_role_policy_attachment" "{name}"',
+def _unique_terraform_block(
+    declaration: str,
+    terraform_type: str,
+    name: str,
+) -> str:
+    matches = [
+        (path, block)
+        for path, block_name, block in _terraform_blocks(declaration, terraform_type)
+        if block_name == name
+    ]
+    if len(matches) != 1:
+        locations = ", ".join(str(path) for path, _ in matches) or "none"
+        raise AssertionError(
+            f"expected exactly one {declaration} {terraform_type}.{name}, "
+            f"found {len(matches)} in {locations}"
         )
-        assert f"role       = aws_iam_role.{role_name}.name" in attachment
-        assert f"policy_arn = aws_iam_policy.{name}.arn" in attachment
+    return matches[0][1]
 
-    return "\n".join(documents)
+
+def _document(name: str) -> str:
+    return _unique_terraform_block("data", "aws_iam_policy_document", name)
+
+
+def _assignment(block: str, name: str) -> str:
+    matches = tuple(
+        re.finditer(
+            rf"^\s*{re.escape(name)}\s*=\s*(.*?)\s*$",
+            block,
+            re.MULTILINE,
+        )
+    )
+    if len(matches) != 1:
+        raise AssertionError(f"expected exactly one {name!r} assignment, found {len(matches)}")
+    return matches[0].group(1)
+
+
+def _references_role(block: str, role_name: str) -> bool:
+    role = re.fullmatch(
+        rf"aws_iam_role\.{re.escape(role_name)}\.(?:id|name)",
+        _assignment(block, "role"),
+    )
+    return role is not None
+
+
+def _policy_document_reference(block: str, context: str) -> str:
+    policy_expression = _assignment(block, "policy")
+    match = re.fullmatch(
+        r"data\.aws_iam_policy_document\.([A-Za-z0-9_-]+)\.json",
+        policy_expression,
+    )
+    if match is None:
+        raise AssertionError(f"cannot resolve {context} policy document from {policy_expression!r}")
+    return match.group(1)
+
+
+def _attached_policy_documents(role_name: str) -> tuple[str, ...]:
+    documents: set[str] = set()
+    for _, attachment_name, attachment in _terraform_blocks(
+        "resource", "aws_iam_role_policy_attachment"
+    ):
+        if not _references_role(attachment, role_name):
+            continue
+
+        policy_arn = _assignment(attachment, "policy_arn")
+        policy_reference = re.fullmatch(
+            r"aws_iam_policy\.([A-Za-z0-9_-]+)\.arn",
+            policy_arn,
+        )
+        if policy_reference is None:
+            raise AssertionError(
+                f"cannot resolve attachment {attachment_name!r} policy ARN from {policy_arn!r}"
+            )
+        policy_name = policy_reference.group(1)
+        managed_policy = _unique_terraform_block("resource", "aws_iam_policy", policy_name)
+        documents.add(
+            _policy_document_reference(
+                managed_policy,
+                f"managed policy {policy_name!r}",
+            )
+        )
+
+    for _, inline_name, inline_policy in _terraform_blocks("resource", "aws_iam_role_policy"):
+        if not _references_role(inline_policy, role_name):
+            continue
+        documents.add(
+            _policy_document_reference(
+                inline_policy,
+                f"inline policy {inline_name!r}",
+            )
+        )
+
+    if not documents:
+        raise AssertionError(f"no policy documents attached to role {role_name!r}")
+    return tuple(sorted(documents))
+
+
+def _managed_policy(role_name: str) -> str:
+    return "\n".join(
+        _document(document_name) for document_name in _attached_policy_documents(role_name)
+    )
+
+
+def _nested_blocks(source: str, pattern: re.Pattern[str]) -> tuple[str, ...]:
+    return tuple(
+        _balanced_block_after(source[match.start() :], match.group(0))
+        for match in pattern.finditer(source)
+    )
+
+
+def _list_expression(block: str, name: str) -> str:
+    assignment = re.search(rf"\b{re.escape(name)}\s*=", block)
+    if assignment is None:
+        raise AssertionError(f"missing {name!r} list assignment")
+    opening = assignment.end()
+    while opening < len(block) and block[opening].isspace():
+        opening += 1
+    if opening == len(block) or block[opening] != "[":
+        raise AssertionError(f"{name!r} is not a literal list")
+
+    depth = 0
+    for offset in range(opening, len(block)):
+        if block[offset] == "[":
+            depth += 1
+        elif block[offset] == "]":
+            depth -= 1
+            if depth == 0:
+                return block[opening + 1 : offset]
+    raise AssertionError(f"unterminated {name!r} list")
+
+
+def _resources_expression(statement: str) -> str:
+    expression = re.sub(r"\s+", "", _list_expression(statement, "resources"))
+    return expression.strip(",")
+
+
+def _start_build_allow_statements(policy: str) -> tuple[str, ...]:
+    statements = _nested_blocks(policy, re.compile(r"\bstatement\s*\{"))
+    return tuple(
+        statement
+        for statement in statements
+        if _effect(statement) == "Allow" and not _actions(statement).isdisjoint(START_BUILD_ACTIONS)
+    )
+
+
+def _assert_start_build_allows_are_pinned(policy: str) -> None:
+    statements = _start_build_allow_statements(policy)
+    expected_resources = {
+        "local.launcher_project_arn",
+        "local.launcher_all_project_arns[1]",
+        "local.launcher_all_project_arns[2]",
+        "local.launcher_all_project_arns[3]",
+    }
+
+    resources: set[str] = set()
+    for statement in statements:
+        expression = _resources_expression(statement)
+        assert '"*"' not in expression
+        assert (
+            "local.launcher_project_arn" in expression
+            or "local.launcher_all_project_arns" in expression
+        )
+        resources.add(expression)
+
+    assert len(statements) == 4
+    assert resources == expected_resources
+
+
+def _string_assignment(block: str, name: str) -> str | None:
+    match = re.search(
+        rf'^\s*{re.escape(name)}\s*=\s*"([^"]*)"\s*$',
+        block,
+        re.MULTILINE,
+    )
+    return match.group(1) if match else None
+
+
+def _condition_matches(condition: str, test: str, variable: str) -> bool:
+    return (
+        _string_assignment(condition, "test") == test
+        and _string_assignment(condition, "variable") == variable
+    )
+
+
+def _local_map(name: str) -> dict[str, str]:
+    body = _body()
+    pattern = re.compile(rf"^\s*{re.escape(name)}\s*=\s*\{{", re.MULTILINE)
+    matches = tuple(pattern.finditer(body))
+    if len(matches) != 1:
+        raise AssertionError(f"expected exactly one local map {name!r}, found {len(matches)}")
+    map_body = _balanced_block_after(
+        body[matches[0].start() :],
+        matches[0].group(0),
+    )
+    entries: dict[str, str] = {}
+    for raw_line in map_body.splitlines():
+        line = raw_line.split("#", maxsplit=1)[0].strip()
+        if not line:
+            continue
+        entry = re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)", line)
+        if entry is None:
+            raise AssertionError(f"cannot parse {name!r} entry {line!r}")
+        key = entry.group(1)
+        if key in entries:
+            raise AssertionError(f"duplicate {name!r} entry {key!r}")
+        entries[key] = entry.group(2).removesuffix(",").rstrip()
+    return entries
 
 
 def _statement(document: str, sid: str) -> str:
@@ -83,8 +288,14 @@ def _effect(statement: str) -> str:
 
 def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied() -> None:
     body = _body()
-    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
+    documents = _attached_policy_documents("codebuild_launcher")
+    policy = _managed_policy("codebuild_launcher")
 
+    assert {
+        "codebuild_launcher_core",
+        "codebuild_launcher_start",
+        "approval_reader",
+    } <= set(documents)
     assert 'user_name = "AIIAdev"' in body
     assert "identifiers = [data.aws_iam_user.aiia_dev.arn]" in body
     assert re.search(
@@ -119,11 +330,12 @@ def test_main_launcher_is_exact_assume_once_boundary_and_direct_start_is_denied(
         "codebuild:StartSandbox",
         "codebuild:StartSandboxConnection",
     }
+    _assert_start_build_allows_are_pinned(policy)
 
 
 def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() -> None:
     body = _body()
-    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
+    policy = _managed_policy("codebuild_launcher")
 
     for name in (
         "GIT_COMMIT",
@@ -143,12 +355,67 @@ def test_start_build_environment_is_allowlisted_and_fixed_values_are_pinned() ->
     ):
         assert f'"{name}"' in body
     assert '"IMAGE_TAG"' not in body
-    assert 'test     = "ForAllValues:StringEquals"' in policy
-    assert 'variable = "codebuild:environment.environmentVariables.name"' in policy
-    assert re.search(r'^\s*GIT_BRANCH\s*=\s*"dev"$', body, re.MULTILINE)
-    assert ("APP_HTML_VERSION_ID             = local.canonical_app_html_version_id") in body
-    assert ("APP_HTML_SHA256                 = local.canonical_app_html_sha256") in body
-    assert ("APP_PROVENANCE_SHA256           = local.canonical_app_provenance_sha256") in body
+    _assert_start_build_allows_are_pinned(policy)
+
+    environment_variable_names = "codebuild:environment.environmentVariables.name"
+    start_build_statements = _start_build_allow_statements(policy)
+    for statement in start_build_statements:
+        conditions = _nested_blocks(statement, re.compile(r"\bcondition\s*\{"))
+        null_conditions = tuple(
+            condition
+            for condition in conditions
+            if _condition_matches(condition, "Null", environment_variable_names)
+        )
+        assert len(null_conditions) == 1
+        null_values = re.sub(r"\s+", "", _list_expression(null_conditions[0], "values")).strip(",")
+        assert null_values == '"false"'
+
+        allowlist_conditions = tuple(
+            condition
+            for condition in conditions
+            if _condition_matches(
+                condition,
+                "ForAllValues:StringEquals",
+                environment_variable_names,
+            )
+        )
+        assert len(allowlist_conditions) == 1
+
+    provenance_statements = tuple(
+        statement
+        for statement in start_build_statements
+        if _resources_expression(statement) == "local.launcher_project_arn"
+    )
+    assert len(provenance_statements) == 1
+    dynamic_conditions = _nested_blocks(
+        provenance_statements[0],
+        re.compile(r'\bdynamic\s+"condition"\s*\{'),
+    )
+    assert len(dynamic_conditions) == 1
+    dynamic_condition = dynamic_conditions[0]
+    assert re.search(
+        r"^\s*for_each\s*=\s*local\.launcher_fixed_environment_values\s*$",
+        dynamic_condition,
+        re.MULTILINE,
+    )
+    assert _string_assignment(dynamic_condition, "test") == "ForAllValues:StringEquals"
+    assert _string_assignment(dynamic_condition, "variable") == (
+        "codebuild:environment.environmentVariables/${condition.key}.value"
+    )
+    assert re.sub(r"\s+", "", _list_expression(dynamic_condition, "values")) == ("condition.value")
+
+    assert _local_map("launcher_fixed_environment_values") == {
+        "GIT_BRANCH": '"dev"',
+        "APP_HTML_VERSION_ID": "local.canonical_app_html_version_id",
+        "APP_HTML_SHA256": "local.canonical_app_html_sha256",
+        "VAULT_MANIFEST_SHA256": "local.canonical_vault_manifest_sha256",
+        "BUILD_INPUTS_SHA256": "local.canonical_build_inputs_sha256",
+        "BAKED_APP_HTML_VERSION_ID": "local.canonical_baked_app_html_version_id",
+        "BAKED_APP_HTML_SHA256": "local.canonical_baked_app_html_sha256",
+        "APP_PROVENANCE_SHA256": "local.canonical_app_provenance_sha256",
+        "SOURCE_MANIFEST_CONTRACT_SHA256": "local.runtime_contract_sha256",
+        "RELEASE_CONTRACT_SHA256": "local.mcp_release_contract_sha256",
+    }
 
 
 def test_source_publisher_can_read_both_app_inputs_but_only_write_source_zip() -> None:
@@ -173,7 +440,7 @@ def test_source_publisher_can_read_both_app_inputs_but_only_write_source_zip() -
 
 def test_official_dangerous_override_condition_keys_are_explicit_denies() -> None:
     body = _body()
-    policy = _managed_policy("codebuild_launcher", CODEBUILD_LAUNCHER_POLICY_DOCUMENTS)
+    policy = _managed_policy("codebuild_launcher")
 
     keys = {
         "codebuild:source",
@@ -376,7 +643,7 @@ def test_every_codebuild_service_trust_pins_source_account_and_project_arn() -> 
 
 def test_release_launcher_accepts_candidate_locator_fields_only_for_active_or_rollback() -> None:
     body = _body()
-    policy = _managed_policy("release_launcher", RELEASE_LAUNCHER_POLICY_DOCUMENTS)
+    policy = _managed_policy("release_launcher")
 
     for name in (
         "CANDIDATE_RECEIPT_KEY",

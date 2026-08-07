@@ -748,31 +748,135 @@ def test_oci_config_rejects_wrong_context_and_inner_receipt_value(
         )
 
 
-def test_oci_config_rejects_placeholder_before_it_can_be_receipted(
-    tmp_path: Path,
-) -> None:
-    contract = PROVENANCE.load_contract(CONTRACT_PATH)
-    runtime = PROVENANCE._load_runtime_contract(RUNTIME_CONTRACT_PATH)
-    contract_sha256 = PROVENANCE.contract_sha256(CONTRACT_PATH)
+# Keep this independent from the implementation constant so shrinking the
+# implementation denylist remains a detectable guard regression.
+FORBIDDEN_PLACEHOLDERS = ("", "n/a", "none", "null", "placeholder", "tbd", "unknown")
+
+
+def _verify_core(
+    config: Path,
+    digest: str,
+    contract_sha256: str,
+    *,
+    contract_path: Path = CONTRACT_PATH,
+    runtime_contract_path: Path = RUNTIME_CONTRACT_PATH,
+) -> dict[str, str]:
+    return PROVENANCE.verify_oci_config(
+        config,
+        subject_name="core",
+        commit=COMMIT,
+        expected_config_digest=digest,
+        contract_path=contract_path,
+        expected_contract_sha256=contract_sha256,
+        runtime_contract_path=runtime_contract_path,
+        expected_build_context_sha256=BUILD_CONTEXT_SHA256,
+        expected_release_approval_sha256=RELEASE_APPROVAL_SHA256,
+    )
+
+
+def _core_labels(
+    *,
+    contract_path: Path = CONTRACT_PATH,
+    runtime_contract_path: Path = RUNTIME_CONTRACT_PATH,
+) -> tuple[dict[str, str], str]:
+    contract = PROVENANCE.load_contract(contract_path)
+    runtime = PROVENANCE._load_runtime_contract(runtime_contract_path)
+    contract_sha256 = PROVENANCE.contract_sha256(contract_path)
     labels = _expected_oci_labels(
         contract,
         runtime,
         subject_name="core",
         contract_sha256=contract_sha256,
     )
-    labels["org.opencontainers.image.ref.name"] = "unknown"
+    return labels, contract_sha256
+
+
+def test_placeholder_denylist_is_not_silently_shrunk() -> None:
+    assert PROVENANCE.UNTRUSTED_PLACEHOLDER_VALUES == set(FORBIDDEN_PLACEHOLDERS)
+
+
+# TeamAgent label allowlist set equality is covered separately by
+# test_oci_config_requires_complete_exact_teamagent_label_set.
+def test_every_teamagent_label_rejects_every_placeholder(tmp_path: Path) -> None:
+    labels, contract_sha256 = _core_labels()
+    config = tmp_path / "core.json"
+    teamagent_labels = sorted(
+        label_name for label_name in labels if label_name.startswith("io.teamagent.")
+    )
+    assert teamagent_labels, "the TeamAgent placeholder check must not be vacuous"
+
+    for label_name in teamagent_labels:
+        for placeholder in FORBIDDEN_PLACEHOLDERS:
+            mutated = dict(labels)
+            mutated[label_name] = placeholder
+            digest = _write_oci_config(config, mutated)
+            with pytest.raises(
+                PROVENANCE.ProvenanceError,
+                match="untrusted placeholder",
+            ) as excinfo:
+                _verify_core(config, digest, contract_sha256)
+            assert label_name in str(excinfo.value)
+
+
+def test_teamagent_placeholder_is_rejected_when_contract_and_image_agree(
+    tmp_path: Path,
+) -> None:
+    """Reject an input-side placeholder before an exact label match can accept it."""
+    runtime_contract_path, contract_path = _copy_pair(tmp_path)
+    contract = _read_json(contract_path)
+    contract["app_html"]["production"]["app_html_s3_version_id"] = "null"
+    _write_json(contract_path, contract)
+
+    labels, contract_sha256 = _core_labels(
+        contract_path=contract_path,
+        runtime_contract_path=runtime_contract_path,
+    )
+    label_name = "io.teamagent.contract.app-html-version-id"
+    assert (
+        labels[label_name]
+        == contract["app_html"]["production"]["app_html_s3_version_id"]
+        == "null"
+    )
     config = tmp_path / "core.json"
     digest = _write_oci_config(config, labels)
 
-    with pytest.raises(PROVENANCE.ProvenanceError, match="untrusted placeholder"):
-        PROVENANCE.verify_oci_config(
+    with pytest.raises(
+        PROVENANCE.ProvenanceError,
+        match="untrusted placeholder",
+    ) as excinfo:
+        _verify_core(
             config,
-            subject_name="core",
-            commit=COMMIT,
-            expected_config_digest=digest,
-            contract_path=CONTRACT_PATH,
-            expected_contract_sha256=contract_sha256,
-            runtime_contract_path=RUNTIME_CONTRACT_PATH,
-            expected_build_context_sha256=BUILD_CONTEXT_SHA256,
-            expected_release_approval_sha256=RELEASE_APPROVAL_SHA256,
+            digest,
+            contract_sha256,
+            contract_path=contract_path,
+            runtime_contract_path=runtime_contract_path,
         )
+    assert label_name in str(excinfo.value)
+
+
+def test_non_contract_label_may_be_empty(tmp_path: Path) -> None:
+    """Permit an empty inherited label outside the TeamAgent contract namespace.
+
+    Production config sha256:1261b7f75a9eb590cb7576c900f5ee35fa45b17faae0e650278990d594e58faf
+    contains dev.chainguard.package.main="".
+    """
+    labels, contract_sha256 = _core_labels()
+    labels["dev.chainguard.package.main"] = ""
+    config = tmp_path / "core.json"
+    digest = _write_oci_config(config, labels)
+
+    verified = _verify_core(config, digest, contract_sha256)
+    assert verified["dev.chainguard.package.main"] == ""
+
+
+def test_oci_standard_labels_are_still_pinned_by_exact_match(tmp_path: Path) -> None:
+    labels, contract_sha256 = _core_labels()
+    config = tmp_path / "core.json"
+
+    for bad_value in ("unknown", "", "main"):
+        mutated = dict(labels)
+        mutated["org.opencontainers.image.ref.name"] = bad_value
+        digest = _write_oci_config(config, mutated)
+        with pytest.raises(PROVENANCE.ProvenanceError) as excinfo:
+            _verify_core(config, digest, contract_sha256)
+        assert "org.opencontainers.image.ref.name" in str(excinfo.value)
