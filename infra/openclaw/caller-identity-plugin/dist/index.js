@@ -128,10 +128,33 @@ function normalizeSlackId(value, pattern) {
   return pattern.test(normalized) ? normalized : null;
 }
 
+// OpenClaw がセッション鍵の末尾に付ける唯一の構造サフィックス。
+// 実測 2026-08-07（本番 image sha256:144e4edd… の上流コードを実行）:
+//   app/dist/hook-agent-context-DPPRzCBU.js:40-62
+//     resolveAgentHookChannelId が parseRawSessionConversationRef(sessionKey).rawId を
+//     最優先で返し、channelId と chatId に同じ値を入れる（conversationId は ctx に無い）
+//   app/dist/session-key-utils-A-JGvyXu.js:246-266  その parser は :thread: を落とさない
+//   slack/dist/pipeline.runtime-rpVpay59.js:3060,2304  app_mention は必ず thread を種付ける
+// ＝チャンネルでは値が `c0b0pqd83n2:thread:1785206176.940189` になり、
+//   会話 id が末尾に来ないため下の $ アンカーが原理的に当たらない。
+const SLACK_SESSION_THREAD_SUFFIX_RE = /:thread:[^:]+$/u;
+const SLACK_CHANNEL_TAIL_RE = /(?:^|:)([CDG][A-Z0-9]{8,})$/iu;
+
 function resolveSlackChannel(value) {
   if (typeof value !== "string") return null;
-  const match = /(?:^|:)([CDG][A-Z0-9]{8,})$/iu.exec(value.trim());
-  if (match) return match[1].toUpperCase();
+  const trimmed = value.trim();
+  // ① 従来どおりの解決を先に試す。ここで当たる値の結果は一切変わらない（単調性）。
+  const direct = SLACK_CHANNEL_TAIL_RE.exec(trimmed);
+  if (direct) return direct[1].toUpperCase();
+  // ② 従来はここで諦めていた。セッション鍵由来の :thread:<ts> を **1 回だけ** 外して再試行する。
+  //    照合そのものは緩めない。外した残りが空・不正形式なら従来どおり null。
+  const stripped = trimmed.replace(SLACK_SESSION_THREAD_SUFFIX_RE, "");
+  if (stripped !== trimmed) {
+    const threaded = SLACK_CHANNEL_TAIL_RE.exec(stripped);
+    if (threaded) return threaded[1].toUpperCase();
+  }
+  // ③ DM フォールバックは **元の値** に対して行う（サフィックス除去を波及させない）。
+  //    DM は kind=direct で thread が付かないため、剥がす必要が無い。
   // A direct message never carries its D… conversation id on this path: the
   // Slack plugin sets reply.to to `user:<U…>` and OpenClaw derives every
   // candidate (conversationId / to / originatingTo) from that, so the D… id
@@ -140,7 +163,7 @@ function resolveSlackChannel(value) {
   // accept it under a distinct `DM:` prefix. The prefix keeps the DM namespace
   // disjoint from real channels, so a U… value can never be mistaken for — or
   // collide with — a C/D/G channel id.
-  const dm = /(?:^|:)(U[A-Z0-9]{8,})$/iu.exec(value.trim());
+  const dm = /(?:^|:)(U[A-Z0-9]{8,})$/iu.exec(trimmed);
   return dm ? `DM:${dm[1].toUpperCase()}` : null;
 }
 
@@ -703,11 +726,12 @@ export function createCallerIdentityPlugin({
     const runId = canonicalInvocationId(ctx?.runId);
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
-    // ctx.channelId is the provider name ("slack"), not a Slack channel, and
-    // ctx.channel is not part of this context at all, so the original pair could
-    // never resolve for either a DM or a channel. conversationId is the field
-    // that actually carries the conversation ("channel:C…" / "user:U…"), and it
-    // comes from the same derivation the inbound path uses, so both sides agree.
+    // OpenClaw 2026.7.1 does not put conversationId on this agent-hook ctx.
+    // buildAgentHookContextChannelFields puts the same session-key-derived value
+    // in channelId and chatId: `c0b0pqd83n2:thread:<ts>` for a channel and
+    // `U09CX1CCBLN` for a DM. channel is currently the provider name (`slack`);
+    // conversationId and channel remain candidates in case a future ctx supplies
+    // a conversation id through either field.
     const channelId = consistentSlackChannel([
       ctx?.conversationId,
       ctx?.channelId,
@@ -720,9 +744,27 @@ export function createCallerIdentityPlugin({
       if (!sessionKey) missing.push("sessionKey");
       if (!senderId) missing.push("senderId");
       if (!channelId) missing.push("channelId");
+      const resolution = !channelId
+        ? ` resolve=[${[
+            ["conversationId", ctx?.conversationId],
+            ["channelId", ctx?.channelId],
+            ["chatId", ctx?.chatId],
+            ["channel", ctx?.channel],
+          ]
+            .map(([field, value]) => {
+              const status =
+                typeof value !== "string"
+                  ? "absent"
+                  : resolveSlackChannel(value) === null
+                    ? "unresolved"
+                    : "ok";
+              return `${field}:${status}`;
+            })
+            .join(",")}]`
+        : "";
       logger?.warn?.(
         `${PLUGIN_ID}: rejected incomplete authoritative agent run` +
-          ` (missing=[${missing.join(",")}])`,
+          ` (missing=[${missing.join(",")}]${resolution})`,
       );
       return;
     }
@@ -859,10 +901,11 @@ export function createCallerIdentityPlugin({
       return block("authoritative tool invocation binding is missing or mismatched");
     }
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
-    // ctx.channelId is the provider name ("slack") here too, so resolving only
-    // that never yielded a conversation and the trusted-ingress comparison below
-    // could never match. Use the same candidate list as the other three sites so
-    // every path derives one identical conversation id.
+    // This is the same OpenClaw 2026.7.1 agent-hook ctx: conversationId is absent,
+    // while buildAgentHookContextChannelFields puts one session-key-derived value
+    // in both channelId and chatId (`c0b0pqd83n2:thread:<ts>` for a channel,
+    // `U09CX1CCBLN` for a DM). channel is currently `slack`; conversationId and
+    // channel remain candidates in case a future ctx supplies a conversation id.
     const channelId = consistentSlackChannel([
       ctx?.conversationId,
       ctx?.channelId,

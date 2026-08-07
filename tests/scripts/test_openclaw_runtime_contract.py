@@ -2327,3 +2327,70 @@ def test_canonical_filesystem_inventory_ignores_tar_metadata_and_order(
         assert generated.returncode == 0, generated.stderr
         inventory_hashes.append(hashlib.sha256(inventory.read_bytes()).hexdigest())
     assert inventory_hashes[0] == inventory_hashes[1]
+
+
+CALLER_IDENTITY_PROBE = Path(__file__).resolve().parent / "openclaw_caller_identity_probe.mjs"
+
+
+def _caller_identity_report() -> dict[str, Any]:
+    """caller-identity プラグインの実物を本番形状の ctx で駆動した結果を返す。
+
+    2026-08-07: チャンネル経路は 07-31 の導入以来ずっと全断していたのに、
+    契約テスト(test_openclaw_runtime_image.py)は OPENCLAW_RUNTIME_TEST_IMAGE 未設定で
+    スキップされ、CodeBuild のビルド経路(build-bundle.sh)からも呼ばれないため
+    7日間「緑のまま」だった。ここは環境変数もイメージも要らない形で常に走らせる。
+    """
+    completed = subprocess.run(
+        ["node", str(CALLER_IDENTITY_PROBE)],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_channel_mention_binds_the_conversation_despite_the_thread_suffix() -> None:
+    """チャンネルの app_mention でツール呼び出しが通ること。
+
+    上流はセッション鍵由来の会話 id を渡すため、チャンネルでは
+    `c0b0pqd83n2:thread:<ts>` の形になる。末尾アンカーの正規表現では解決できず、
+    本番では `missing=[channelId]` でツールが全ブロックされていた。
+    """
+    channel = _caller_identity_report()["channel_threaded"]
+    assert channel["inboundAccepted"] is True
+    assert channel["blocked"] is False, channel["blockReason"]
+    assert channel["claimChannel"] == "C0B0PQD83N2"
+    assert channel["warnings"] == []
+
+
+def test_direct_message_binding_is_unchanged_by_the_thread_suffix_handling() -> None:
+    """DM は従来どおり peer user id の別名で通ること（回帰なしの確認）。"""
+    direct = _caller_identity_report()["direct_message"]
+    assert direct["blocked"] is False, direct["blockReason"]
+    assert direct["claimChannel"] == "DM:U09CX1CCBLN"
+
+
+def test_unknown_conversation_suffix_still_fails_closed() -> None:
+    """会話 id を取り出せない値は従来どおり拒否されること（緩めていないことの証明）。"""
+    malformed = _caller_identity_report()["channel_malformed_suffix"]
+    assert malformed["blocked"] is True
+    assert malformed["claimChannel"] is None
+    # 診断ログは候補ごとの可否だけを出し、生値は含めない。
+    assert any("missing=[channelId]" in warning for warning in malformed["warnings"])
+    assert all("c0b0pqd83n2" not in warning for warning in malformed["warnings"])
+
+
+def test_thread_suffix_removal_stays_narrow_and_fails_closed() -> None:
+    """`:thread:<ts>` 以外へ除去を広げていないこと（除去を緩める変異を赤くする）。
+
+    - `:reply:<ts>`   … 貪欲な正規表現にすると誤って通る
+    - `:thread:`(空)  … `[^:]+` を `[^:]*` にすると誤って通る
+    - DM + `:thread:` … DM ブランチを除去後の値で照合すると誤って通る
+    いずれも上流が作らない形なので、拒否のままであることが入力面の広がりを防ぐ。
+    """
+    report = _caller_identity_report()
+    for case in ("channel_unknown_suffix", "channel_empty_thread", "dm_with_thread_suffix"):
+        assert report[case]["blocked"] is True, case
+        assert report[case]["claimChannel"] is None, case

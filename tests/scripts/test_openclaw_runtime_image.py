@@ -152,7 +152,7 @@ const trustedContext = {
   channelId: "slack",
   sessionKey: "agent:main:slack:channel:actual-image",
   senderId: "U0123456789",
-  conversationId: "C0123456789",
+  conversationId: "C0B0PQD83N2",
   messageId: "1784424000.000001"
 };
 hooks.message_received({
@@ -160,7 +160,7 @@ hooks.message_received({
   senderId: "U0123456789",
   metadata: {
     guildId: process.env.SLACK_TEAM_ID,
-    to: "C0123456789",
+    to: "C0B0PQD83N2",
     messageId: "1784424000.000001",
     senderId: "U0123456789"
   }
@@ -170,8 +170,9 @@ const runContext = {
   sessionKey: trustedContext.sessionKey,
   messageProvider: "slack",
   senderId: "U0123456789",
-  channel: "C0123456789",
-  channelId: "C0123456789"
+  channel: "slack",
+  channelId: "c0b0pqd83n2:thread:1785206176.940189",
+  chatId: "c0b0pqd83n2:thread:1785206176.940189"
 };
 hooks.before_model_resolve({prompt: "actual image contract"}, runContext);
 const toolContext = {
@@ -202,7 +203,7 @@ if (
   signatureSegment !== expectedSignature ||
   payload.sub !== "U0123456789" ||
   payload.team !== process.env.SLACK_TEAM_ID ||
-  payload.channel !== "C0123456789" ||
+  payload.channel !== "C0B0PQD83N2" ||
   payload.run_id !== runContext.runId ||
   payload.tool_call_id !== toolContext.toolCallId ||
   payload.v !== 2 ||
@@ -213,6 +214,60 @@ if (
   payload.arguments_sha256 !== canonicalRequestSha256(valid.params)
 ) {
   throw new Error("signed caller claim binding is invalid");
+}
+const dmTrustedContext = {
+  channelId: "slack",
+  sessionKey: "agent:main:slack:direct:actual-image",
+  senderId: "U09CX1CCBLN",
+  conversationId: "user:U09CX1CCBLN",
+  messageId: "1784424000.000003"
+};
+hooks.message_received({
+  messageId: "1784424000.000003",
+  senderId: "U09CX1CCBLN",
+  metadata: {
+    guildId: process.env.SLACK_TEAM_ID,
+    to: "user:U09CX1CCBLN",
+    messageId: "1784424000.000003",
+    senderId: "U09CX1CCBLN"
+  }
+}, dmTrustedContext);
+const dmRunContext = {
+  runId: "44444444-4444-4444-8444-444444444444",
+  sessionKey: dmTrustedContext.sessionKey,
+  messageProvider: "slack",
+  senderId: "U09CX1CCBLN",
+  channel: "slack",
+  channelId: "U09CX1CCBLN",
+  chatId: "U09CX1CCBLN"
+};
+hooks.before_model_resolve({prompt: "actual image DM contract"}, dmRunContext);
+const dmToolCallId = "toolu_actual_image_dm_0123456789";
+const dmSigned = hooks.before_tool_call({
+  toolName: "teamagent__search",
+  runId: dmRunContext.runId,
+  toolCallId: dmToolCallId,
+  params: {
+    query: "actual image DM contract",
+    _user_context: {slack_user_id: "U09CX1CCBLN"}
+  }
+}, {
+  ...dmRunContext,
+  toolName: "teamagent__search",
+  toolCallId: dmToolCallId
+});
+const dmClaim = dmSigned?.params?._user_context?.caller_claim;
+const dmPayloadSegment = dmClaim?.split(".")[0];
+const dmPayload = dmPayloadSegment
+  ? JSON.parse(Buffer.from(dmPayloadSegment, "base64url").toString("utf8"))
+  : null;
+if (
+  dmSigned?.block ||
+  dmSigned?.params?._user_context?.channel_id !== "DM:U09CX1CCBLN" ||
+  dmPayload?.channel !== "DM:U09CX1CCBLN" ||
+  dmPayload?.sub !== "U09CX1CCBLN"
+) {
+  throw new Error("DM peer channel fallback regressed");
 }
 const mismatch = hooks.before_tool_call({
   toolName: "teamagent__search",
@@ -230,7 +285,7 @@ const foreignContext = {
 hooks.message_received({
   messageId: "1784424000.000002",
   senderId: "U0123456789",
-  metadata: {guildId: "T9999999999", to: "C0123456789"}
+  metadata: {guildId: "T9999999999", to: "C0B0PQD83N2"}
 }, foreignContext);
 const foreignRunContext = {
   ...runContext,
@@ -352,6 +407,8 @@ process.stdout.write(JSON.stringify({
   installedHookSchemaVerified: true,
   installedBeforeToolFailClosedVerified: true,
   trustedSlackEventSigned: true,
+  threadedChannelRunAccepted: true,
+  dmPeerFallbackPreserved: true,
   exactRequestBinding: true,
   exactRunAndInvocationBinding: true,
   callerMismatchBlocked: true,
@@ -1011,6 +1068,8 @@ def _caller_identity_plugin_contract(image: str) -> dict[str, Any]:
         "installedHookSchemaVerified": True,
         "installedBeforeToolFailClosedVerified": True,
         "trustedSlackEventSigned": True,
+        "threadedChannelRunAccepted": True,
+        "dmPeerFallbackPreserved": True,
         "exactRequestBinding": True,
         "exactRunAndInvocationBinding": True,
         "callerMismatchBlocked": True,
