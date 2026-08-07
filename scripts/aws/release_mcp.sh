@@ -42,6 +42,13 @@ RELEASE_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_core_media_release_contra
 MANIFEST_CONTRACT="$REPO_ROOT/infra/codebuild/teamagent_runtime_contract.json"
 
 die() { echo "FATAL: $*" >&2; exit 1; }
+
+# --from=N: 段 N から再開する（前段が SUCCEEDED 済みのとき、承認と成果物を
+# S3/ECR から引き直して続きだけ流す）。段4 で落ちた再走を安く済ませるため。
+START_STAGE=1
+for a in "$@"; do
+  case "$a" in --from=*) START_STAGE="${a#--from=}" ;; esac
+done
 info() { echo "[release_mcp] $*"; }
 
 command -v aws >/dev/null || die "aws CLI が見つかりません"
@@ -422,28 +429,75 @@ validate_env "段3 image-builder" "$ALLOWED_STAGE3" "$WORK/s3.json"
 start_and_wait teamagent-dev-image-builder "$WORK/s3.json" "$SOURCE_ARCHIVE_VERSION_ID" "$CRED_L"
 BUILDER_BUILD_ID="$LAST_BUILD_ID"
 
-# SUBJECTS_JSON: quarantine の candidate タグから digest を引いて構成（形式は昨日の実測どおり）
+# SUBJECTS_JSON: attestor は「単一の arm64 マニフェスト」を要求する。
+# タグは index（manifest list）を指すため、タグの digest をそのまま渡すと
+# 'FATAL: subject must be a single ECR-scan-capable image manifest, not an index'
+# で段4が落ちる（2026-08-07 実測）。index を展開して linux/arm64 の子を選ぶ。
 subjects() {
   python3 - "$GIT_COMMIT" <<'PYEOF'
 import json, subprocess, sys
+
+REGION = "ap-northeast-1"
+ACCEPT = [
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+]
+
+
+def manifest(repo, tag):
+    out = subprocess.run(
+        ["aws", "ecr", "batch-get-image", "--repository-name", repo,
+         "--image-ids", f"imageTag={tag}",
+         "--accepted-media-types", *ACCEPT,
+         "--query", "images[0].imageManifest", "--output", "text",
+         "--region", REGION],
+        capture_output=True, text=True)
+    body = out.stdout.strip()
+    if out.returncode != 0 or not body or body == "None":
+        print(f"FATAL: {repo} に {tag} が見つかりません", file=sys.stderr)
+        sys.exit(1)
+    return json.loads(body)
+
+
+def arm64_digest(repo, tag):
+    m = manifest(repo, tag)
+    children = m.get("manifests")
+    if not children:
+        # 既に単一マニフェスト。ECR に digest を問い合わせて確定させる。
+        out = subprocess.run(
+            ["aws", "ecr", "describe-images", "--repository-name", repo,
+             "--image-ids", f"imageTag={tag}",
+             "--query", "imageDetails[0].imageDigest", "--output", "text",
+             "--region", REGION],
+            capture_output=True, text=True)
+        d = out.stdout.strip()
+        if not d or d == "None":
+            print(f"FATAL: {repo}:{tag} の digest を解決できません", file=sys.stderr)
+            sys.exit(1)
+        return d
+    hits = [
+        c["digest"] for c in children
+        if c.get("platform", {}).get("architecture") == "arm64"
+        and c.get("platform", {}).get("os") == "linux"
+    ]
+    if len(hits) != 1:
+        print(f"FATAL: {repo}:{tag} の linux/arm64 子が {len(hits)} 件（1件であるべき）",
+              file=sys.stderr)
+        sys.exit(1)
+    return hits[0]
+
+
 commit = sys.argv[1]
 subs = []
 for name, q, c, r in (
     ("core",  "teamagent-mcp-quarantine",          "teamagent-mcp-verified-candidates",          "teamagent-mcp"),
     ("media", "teamagent-media-worker-quarantine", "teamagent-media-worker-verified-candidates", "teamagent-media-worker"),
 ):
-    tag = f"candidate-{commit}-{name}"
-    out = subprocess.run(
-        ["aws", "ecr", "describe-images", "--repository-name", q,
-         "--image-ids", f"imageTag={tag}",
-         "--query", "imageDetails[0].imageDigest", "--output", "text",
-         "--region", "ap-northeast-1"],
-        capture_output=True, text=True)
-    digest = out.stdout.strip()
-    if out.returncode != 0 or not digest or digest == "None":
-        print(f"FATAL: {q} に {tag} が見つかりません", file=sys.stderr); sys.exit(1)
     subs.append({"name": name, "quarantine_repository": q,
-                 "candidate_repository": c, "release_repository": r, "digest": digest})
+                 "candidate_repository": c, "release_repository": r,
+                 "digest": arm64_digest(q, f"candidate-{commit}-{name}")})
 print(json.dumps(subs, separators=(",", ":")))
 PYEOF
 }
