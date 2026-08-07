@@ -68,10 +68,15 @@ BUILD_INPUTS_SHA256="$(contract "['app_html']['production']['build_inputs_sha256
 BAKED_APP_HTML_VERSION_ID="$(contract "['app_html']['baked_fallback']['s3_version_id']")"
 BAKED_APP_HTML_SHA256="$(contract "['app_html']['baked_fallback']['sha256']")"
 
-# APP_PROVENANCE_SHA256 と KMS 鍵はポリシー Condition の固定値（契約 JSON に無い）。
-# ポリシー実物 teamagent-dev-codebuild-launcher-start から写した（2026-08-06）。
+# APP_PROVENANCE_SHA256 はポリシー Condition の固定値（昨日の成功ビルド env と一致確認済み）。
 APP_PROVENANCE_SHA256="f0d40e7986fcd54d68f9e1ceed9a9987af23a72f5cc4a608fee5819b078a5008"
-APPROVAL_SIGNING_KEY_ARN="arn:aws:kms:ap-northeast-1:${ACCOUNT}:key/8ef3c43c-3fff-4f2e-9d92-e493a3a923b1"
+# 承認署名鍵は手で写さない。suffix を書き間違えて KMS NotFoundException →
+# 「AWS evidence verification failed without exposing details」で段2が落ちた（2026-08-07 実測）。
+# alias から実行時に解決する（list-aliases は AIIAdev で可・実測済み）。
+APPROVAL_KEY_ID="$(aws kms list-aliases --profile "$PROFILE" --region "$REGION" \
+  --query "Aliases[?AliasName=='alias/teamagent-dev-mcp-approval'].TargetKeyId | [0]" --output text)"
+[ -n "$APPROVAL_KEY_ID" ] && [ "$APPROVAL_KEY_ID" != "None" ] || die "承認鍵 alias が解決できません"
+APPROVAL_SIGNING_KEY_ARN="arn:aws:kms:${REGION}:${ACCOUNT}:key/${APPROVAL_KEY_ID}"
 
 GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 # EXPECTED_BASE_OID は「親コミット」ではなく origin/main の先端。
