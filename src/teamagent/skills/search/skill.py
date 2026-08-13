@@ -1172,7 +1172,20 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             name = match.group(0).strip()
             if name and name not in names:
                 names.append(name)
-        return names[:5]
+        # 管理シート行の資料名は「社内共有情報_<会社名>__<実ファイル名>.pdf」のように
+        # `__`（二重アンダースコア）で命名規約プレフィックスと実ファイル名を区切る運用があり、
+        # gdrive 側の実ファイル title は後半（プレフィックス無し）だけを持つ。
+        # 例: 社内共有情報_花王株式会社__20250820花王様限定_縦型ソリューションパッケージ.pdf
+        #   → 実ファイル title は 20250820花王様限定_縦型ソリューションパッケージ.pdf。
+        # finditer は左優先・非重複なので接頭辞込みの1候補しか出ず、完全一致も前方一致も外れる。
+        # `__` 以降を追加候補にして実ファイルへ引き当てる（区切りは二重に限定し、
+        # 実ファイル名内の単独アンダースコアは割らない＝取り違えを避ける）。
+        for name in list(names):
+            if "__" in name:
+                tail = name.split("__", 1)[1].strip()
+                if len(tail) >= 8 and tail not in names:
+                    names.append(tail)
+        return names[:8]
 
     @classmethod
     def _hit_url(

@@ -1271,6 +1271,34 @@ def test_candidate_file_names_ignores_text_without_extension() -> None:
     assert names == []
 
 
+def test_candidate_file_names_strips_double_underscore_prefix() -> None:
+    """管理シート命名規約 社内共有情報_<会社>__<実ファイル名> の後半を候補に足す。
+
+    2026-08-13 本番: 花王の資料で実ファイル title は
+    「20250820花王様限定_縦型ソリューションパッケージ.pdf」なのに、シート行 title は
+    「社内共有情報_花王株式会社__20250820花王様限定_縦型ソリューションパッケージ.pdf」で、
+    接頭辞込みの1候補しか出ず実ファイルへ引き当てられなかった。
+    """
+    from teamagent.skills.search.skill import SearchSkill
+
+    full = "社内共有情報_花王株式会社__20250820花王様限定_縦型ソリューションパッケージ.pdf"
+    tail = "20250820花王様限定_縦型ソリューションパッケージ.pdf"
+    names = SearchSkill._candidate_file_names({"title": full}, "")
+    assert full in names  # 完全名も残す（実ファイルが接頭辞込みで登録されている場合のため）
+    assert tail in names  # __ 以降の実ファイル名を候補に追加
+    # 実ファイル名内の単独アンダースコア（花王様限定_縦型…）は割らない
+    assert "縦型ソリューションパッケージ.pdf" not in names
+
+
+def test_candidate_file_names_keeps_single_underscore_names_intact() -> None:
+    """`__` を含まない通常のファイル名は分割しない（取り違え防止）。"""
+    from teamagent.skills.search.skill import SearchSkill
+
+    name = "20250820花王様限定_縦型ソリューションパッケージ.pdf"
+    names = SearchSkill._candidate_file_names({"title": name}, "")
+    assert names == [name]
+
+
 def _pgvector_for_url_hits(hits: list[SearchHit]) -> MagicMock:
     """URL 解決テスト用の pgvector ダブルを組み立てる。"""
 
