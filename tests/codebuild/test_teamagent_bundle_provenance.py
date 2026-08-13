@@ -404,6 +404,48 @@ def test_contract_rejects_duplicate_subject_key_probe_identity(tmp_path: Path) -
         PROVENANCE.load_contract(contract_path)
 
 
+def test_contract_declares_zero_critical_high_scan_gate() -> None:
+    """2026-08-13 裁定: mcp 契約も openclaw と同じ C/H ゼロ宣言を必須で持つ。
+
+    宣言が無いと attestor の Trivy ゲートが「全重大度ゼロ」へフォールバックし、
+    Trivy DB の日次更新（LOW/MEDIUM 新規掲載）だけでリリースが必発停止する。
+    """
+    contract = PROVENANCE.load_contract(CONTRACT_PATH)
+    assert contract["bundle"]["scan_gate"] == {"critical": 0, "high": 0}
+
+
+def test_contract_without_scan_gate_declaration_is_rejected(tmp_path: Path) -> None:
+    _, contract_path = _copy_pair(tmp_path)
+    contract = _read_json(contract_path)
+    del contract["bundle"]
+    _write_json(contract_path, contract)
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match=r"missing=\['bundle'\]"):
+        PROVENANCE.load_contract(contract_path)
+
+
+@pytest.mark.parametrize("bad_value", [1, -1, True, False, "0", None])
+def test_contract_rejects_relaxed_scan_gate_values(tmp_path: Path, bad_value: object) -> None:
+    _, contract_path = _copy_pair(tmp_path)
+    contract = _read_json(contract_path)
+    contract["bundle"]["scan_gate"]["critical"] = bad_value
+    _write_json(contract_path, contract)
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match="integer zero"):
+        PROVENANCE.load_contract(contract_path)
+
+
+def test_contract_rejects_extra_scan_gate_severity(tmp_path: Path) -> None:
+    # medium/low を宣言に足してもゲートは緩まない（キー集合ごと拒否する）
+    _, contract_path = _copy_pair(tmp_path)
+    contract = _read_json(contract_path)
+    contract["bundle"]["scan_gate"]["medium"] = 0
+    _write_json(contract_path, contract)
+
+    with pytest.raises(PROVENANCE.ProvenanceError, match=r"unknown=\['medium'\]"):
+        PROVENANCE.load_contract(contract_path)
+
+
 def test_contract_rejects_chromium_old_path(tmp_path: Path) -> None:
     _, contract_path = _copy_pair(tmp_path)
     contract = _read_json(contract_path)

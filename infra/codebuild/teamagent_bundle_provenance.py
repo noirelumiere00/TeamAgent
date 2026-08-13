@@ -220,6 +220,7 @@ def load_contract(path: Path) -> dict[str, Any]:
             "schema_version",
             "kind",
             "release",
+            "bundle",
             "source_runtime_contract",
             "app_html",
             "subjects",
@@ -239,6 +240,22 @@ def load_contract(path: Path) -> dict[str, Any]:
         raise ProvenanceError(
             "ready contracts need an empty blocked_reason; blocked contracts need a reason"
         )
+    # 2026-08-13 裁定: attestor の Trivy ゲートは契約宣言制で、未宣言だと
+    # 「全重大度ゼロ」へフォールバックする。digest 固定ベースに対して Trivy DB は
+    # 日々更新されるため、その基準は LOW/MEDIUM の新規掲載だけで必発停止すると
+    # 実測で確定した。openclaw 契約と同じ Critical/High ゼロの明示宣言を必須化し、
+    # 緩和方向（非ゼロ・bool・宣言削除）はすべて拒否する。受理条件は
+    # verify_actual_image.sh のゲート実装と鏡合わせに保つこと。
+    bundle = _mapping(contract["bundle"], label="contract.bundle")
+    _exact_keys(bundle, {"scan_gate"}, label="contract.bundle")
+    scan_gate = _mapping(bundle["scan_gate"], label="contract.bundle.scan_gate")
+    _exact_keys(scan_gate, {"critical", "high"}, label="contract.bundle.scan_gate")
+    for severity in ("critical", "high"):
+        value = scan_gate[severity]
+        if value is True or value is False or not isinstance(value, int) or value != 0:
+            raise ProvenanceError(
+                "contract.bundle.scan_gate must pin Critical and High to integer zero"
+            )
     runtime_contract = _mapping(
         contract["source_runtime_contract"],
         label="contract.source_runtime_contract",
