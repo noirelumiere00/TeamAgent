@@ -15,6 +15,7 @@ import base64
 import copy
 import hashlib
 import html
+import importlib
 import json
 import logging
 import os
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from psycopg.errors import UndefinedColumn
 from starlette.datastructures import MutableHeaders
@@ -59,6 +60,7 @@ from teamagent.dashboard.auth import (
     verify_session,
 )
 from teamagent.dashboard.config import DashboardConfig
+from teamagent.dashboard.render import render_usage_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -548,12 +550,13 @@ def _resolve_app_html() -> dict[str, Any]:
 def _safe_next(raw: str | None) -> str:
     """ログイン後の戻り先を検証（オープンリダイレクト防止）。
 
-    既知の内部ページ（``/app`` / ``/search``）のみ許可し、それ以外は既定 ``/app``。
+    既知の内部ページ（``/app`` / ``/search`` / ``/admin``）のみ許可し、それ以外は既定
+    ``/app``。
     ＝ログイン後は原則 Obsidian 風 UI(/app) に着地する（旧 /search UI は明示遷移時のみ）。
     外部 URL・``//host``・スキーム付き等は一切通さない（ホワイトリスト方式）。
     """
     candidate = (raw or "").strip()
-    if candidate in {"/app", "/search"}:
+    if candidate in {"/app", "/search", "/admin"}:
         return candidate
     return "/app"
 
@@ -561,6 +564,14 @@ def _safe_next(raw: str | None) -> str:
 _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
 _DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
+_DEFAULT_ADMIN_EMAILS = frozenset({"s-komata@vectorinc.co.jp"})
+
+
+def _admin_emails() -> frozenset[str]:
+    """利用状況ページの email allowlist（空・未設定は小俣さんだけに倒す）。"""
+    raw = os.environ.get("CONNECT_ADMIN_EMAILS", "")
+    parsed = frozenset(email.strip().lower() for email in raw.split(",") if email.strip())
+    return parsed or _DEFAULT_ADMIN_EMAILS
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3380,6 +3391,7 @@ def create_app(
     feedback_store: Any | None = None,
     graph_docs_provider: Callable[[str], list[dict[str, Any]]] | None = None,
     client_karte_provider: Callable[[str, str], dict[str, Any]] | None = None,
+    admin_pg: Any | None = None,
 ) -> FastAPI:
     """連携コールバックアプリを構築する。redirect_uri/kms_key_id は env 既定、注入も可。
 
@@ -3392,6 +3404,8 @@ def create_app(
       - client_karte_provider: (email, client) -> {"timeline": SearchHit list（古い順）,
         "documents": dict list} を返す callable（テストで実 DB を排除・graph_docs_provider
         と同列）。本番未指定時は RLS 接続で pgvector から実取得。
+      - admin_pg: 利用状況ページ用 PgVectorClient（テストで実 DB を排除）。本番未指定時は
+        初回の許可済み /admin アクセス時に遅延生成。
 
     Google per-user 連携:
       - google_state_consumer: 署名・TTL検証済みstateのワンタイム消費（テストでDDBを排除）。
@@ -3414,6 +3428,8 @@ def create_app(
     search_state: dict[str, Any] = {"skill": None}
     search_skill_lock = threading.Lock()
     feedback_state: dict[str, Any] = {"store": feedback_store}
+    admin_state: dict[str, Any] = {"pg": admin_pg}
+    admin_pg_lock = threading.Lock()
     # 検索の同時実行上限（LocalE5 CPU 推論の worker スレッド暴走防止）。env で再ビルド無し較正。
     search_concurrency = max(1, _env_int("SEARCH_CONCURRENCY", 4))
     # asyncio.Semaphore は最初に await したイベントループに bind される。TestClient は
@@ -3631,6 +3647,18 @@ def create_app(
         if not cookie:
             return None
         return verify_session(cookie, search_cfg.session_secret)
+
+    def _get_admin_pg() -> Any:
+        pg = admin_state["pg"]
+        if pg is None:
+            with admin_pg_lock:
+                pg = admin_state["pg"]
+                if pg is None:
+                    from teamagent.adapters.pgvector_client import PgVectorClient
+
+                    pg = PgVectorClient.from_env()
+                    admin_state["pg"] = pg
+        return pg
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
@@ -4345,6 +4373,76 @@ def create_app(
             )
             return JSONResponse({"error": "karte_failed"}, status_code=500)
         return JSONResponse(payload)
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def usage_admin(request: Request) -> Response:
+        """小俣さん限定の利用状況・質問フィード。
+
+        非許可ユーザーにはページの存在を秘匿する。
+        """
+        email = _search_email(request)
+        if email is None:
+            return RedirectResponse("/search/login?next=/admin", status_code=303)
+        if email.strip().lower() not in _admin_emails():
+            # 未登録ルートと同じ FastAPI 標準404に揃え、body/content-type でも
+            # 存在を秘匿する。
+            raise HTTPException(status_code=404)
+
+        data: dict[str, Any] = {
+            "email": email,
+            "kpis": {},
+            "daily": [],
+            "questions": [],
+            "skills": [],
+            "users": [],
+            "errors": [],
+            "notes": [],
+        }
+        successful: set[str] = set()
+        try:
+            query_module = importlib.import_module("teamagent.dashboard.queries")
+            pg = _get_admin_pg()
+        except Exception as exc:
+            logger.warning("usage_admin_setup_failed", error=type(exc).__name__, exc_info=True)
+            data["notes"].append("利用状況データへ接続できませんでした。")
+        else:
+            query_specs = (
+                ("kpis", "kpis", ()),
+                ("daily", "daily_series", (30,)),
+                ("skills", "skill_breakdown", (7,)),
+                ("users", "user_breakdown", ()),
+                ("errors", "error_list", (50,)),
+                ("questions", "recent_questions", (200,)),
+            )
+            for target, function_name, args in query_specs:
+                try:
+                    query_fn = getattr(query_module, function_name)
+                    # SQL エラーで transaction が abort しても他の集計を
+                    # 巻き込まないよう、
+                    # 関数ごとに read-only 接続境界を分ける。
+                    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+                        data[target] = query_fn(conn, *args)
+                    successful.add(target)
+                except Exception as exc:
+                    logger.warning(
+                        "usage_admin_query_failed",
+                        query=function_name,
+                        error=type(exc).__name__,
+                        exc_info=True,
+                    )
+                    error_name = type(exc).__name__
+                    data["notes"].append(f"{function_name} は現在表示できません（{error_name}）。")
+
+        metrics = data["kpis"]
+        if "kpis" in successful:
+            data["empty"] = metrics.get("total_events", 0) == 0
+        else:
+            data["empty"] = (
+                "daily" in successful
+                and not data["daily"]
+                and not any((data["questions"], data["skills"], data["users"], data["errors"]))
+            )
+        return HTMLResponse(render_usage_admin(data))
 
     return app
 

@@ -63,6 +63,7 @@ def test_write_inserts_row_with_app_role() -> None:
             cost_usd=0.0123,
             latency_ms=120,
             query_chars=5,
+            query_text="hello",
             via="mention",
         )
     )
@@ -77,6 +78,24 @@ def test_write_inserts_row_with_app_role() -> None:
     assert params["user_email"] == "a@x.com"
     assert params["status"] == "ok"
     assert params["query_chars"] == 5
+    assert params["query_text"] == "hello"
+    assert "query_text" in sql
+
+
+def test_write_truncates_query_text_to_2000_characters() -> None:
+    pg = _FakePg()
+    rec = UsageRecorder(pg)
+    rec.write(UsageEvent(request_id="r1-long", skill="search", query_text="あ" * 2001))
+    _sql, params = pg.executed[-1]
+    assert params["query_text"] == "あ" * 2000
+
+
+def test_write_preserves_none_query_text() -> None:
+    pg = _FakePg()
+    rec = UsageRecorder(pg)
+    rec.write(UsageEvent(request_id="r1-none", skill="search", query_text=None))
+    _sql, params = pg.executed[-1]
+    assert params["query_text"] is None
 
 
 def test_write_coerces_unknown_status_to_ok() -> None:

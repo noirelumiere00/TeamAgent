@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import html
 import json
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 _CHART_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4"
+_JST = timezone(timedelta(hours=9), name="JST")
 
 _STYLE = """
 :root { --bg:#0f1420; --card:#1a2233; --ink:#e8edf7; --muted:#93a1bd; --accent:#4f8cff;
@@ -48,6 +50,7 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
 a.btn{ display:inline-block; background:var(--accent); color:#fff; text-decoration:none;
   padding:10px 18px; border-radius:9px; font-weight:600; }
 .note{ color:var(--muted); font-size:12px; margin-top:14px; line-height:1.6; }
+.question{ white-space:pre-wrap; overflow-wrap:anywhere; min-width:260px; max-width:520px; }
 """
 
 
@@ -60,6 +63,21 @@ def _money(v: Any, digits: int = 3) -> str:
         return f"{float(v):.{digits}f}"
     except (TypeError, ValueError):
         return "0"
+
+
+def _jst(v: Any) -> str:
+    """timestamptz/datetime を JST の管理画面表示へ整形する。"""
+    if v is None:
+        return ""
+    value = v
+    if not isinstance(value, datetime):
+        try:
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return str(value)[:19]
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(_JST).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _page(title: str, body: str, *, email: str | None = None, scripts: str = "") -> str:
@@ -281,10 +299,119 @@ def render_errors(rows: list[dict[str, Any]], *, email: str | None = None) -> st
         + _e(len(rows))
         + "件）</h2><table><tr><th>時刻</th><th>種別</th><th>Skill</th><th>code</th>"
         "<th>ユーザ</th><th>request_id</th></tr>" + "".join(trs) + "</table>"
-        '<p class="note">本文・回答は保存していません。詳細スタックは Sentry を request_id で'
-        "検索してください。</p></div>"
+        '<p class="note">質問文は裁定済みの利用状況記録でのみ保存します。'
+        "回答本文は保存せず、"
+        "詳細スタックは Sentry を request_id で検索してください。</p></div>"
     )
     return _page("エラー一覧", body, email=email)
 
 
-__all__ = ["render_dashboard", "render_errors", "render_login"]
+def render_usage_admin(data: dict[str, Any]) -> str:
+    """connect-web の小俣さん限定利用状況ページを描画する。"""
+    metrics = data.get("kpis", {})
+    kpi_cards = (
+        '<div class="kpis">'
+        '<div class="kpi"><div class="label">今日の件数</div><div class="value">'
+        + _e(metrics.get("today_requests", 0))
+        + '</div></div><div class="kpi"><div class="label">今日のユーザー数</div>'
+        '<div class="value">'
+        + _e(metrics.get("today_users", metrics.get("active_users", 0)))
+        + '</div></div><div class="kpi"><div class="label">今日のコスト</div>'
+        '<div class="value">$'
+        + _e(_money(metrics.get("today_cost_usd", 0), 3))
+        + '</div></div><div class="kpi"><div class="label">今日のエラー数</div>'
+        '<div class="value">'
+        + _e(metrics.get("today_errors", 0))
+        + '</div></div><div class="kpi"><div class="label">直近7日の件数</div>'
+        '<div class="value">'
+        + _e(metrics.get("seven_day_requests", 0))
+        + '</div></div><div class="kpi"><div class="label">直近7日のユーザー数</div>'
+        '<div class="value">'
+        + _e(metrics.get("seven_day_users", 0))
+        + '</div></div><div class="kpi"><div class="label">直近7日のコスト</div>'
+        '<div class="value">$'
+        + _e(_money(metrics.get("seven_day_cost_usd", 0), 3))
+        + '</div></div><div class="kpi"><div class="label">直近7日のエラー数</div>'
+        '<div class="value">' + _e(metrics.get("seven_day_errors", 0)) + "</div></div></div>"
+    )
+
+    question_rows = []
+    for row in data.get("questions", []):
+        status = str(row.get("status", ""))
+        badge_class = "b-ok" if status == "ok" else "b-error"
+        latency = row.get("latency_ms")
+        question_rows.append(
+            '<tr><td class="muted">'
+            + _e(_jst(row.get("occurred_at")))
+            + " JST</td><td>"
+            + _e(row.get("who"))
+            + "</td><td>"
+            + _e(row.get("skill"))
+            + '</td><td class="question">'
+            + _e(row.get("query_text"))
+            + '</td><td><span class="badge '
+            + badge_class
+            + '">'
+            + _e(status)
+            + '</span></td><td class="num">'
+            + _e(latency if latency is not None else "-")
+            + '</td><td class="num">$'
+            + _e(_money(row.get("cost_usd", 0), 4))
+            + "</td></tr>"
+        )
+    questions = (
+        '<div class="card"><h2>質問フィード（直近200件）</h2><table>'
+        "<tr><th>時刻</th><th>誰が</th><th>スキル</th><th>質問文</th><th>status</th>"
+        '<th class="num">latency(ms)</th><th class="num">cost</th></tr>'
+        + "".join(question_rows)
+        + "</table></div>"
+    )
+
+    error_rows = []
+    for row in data.get("errors", []):
+        status = str(row.get("status", ""))
+        error_rows.append(
+            '<tr><td class="muted">'
+            + _e(_jst(row.get("occurred_at")))
+            + " JST</td><td>"
+            + _e(row.get("who"))
+            + "</td><td>"
+            + _e(row.get("skill"))
+            + "</td><td>"
+            + _e(status)
+            + "</td><td>"
+            + _e(row.get("error_code"))
+            + '</td><td class="muted">'
+            + _e(row.get("request_id"))
+            + "</td></tr>"
+        )
+    errors = (
+        '<div class="card"><h2>エラー一覧</h2><table><tr><th>時刻</th><th>誰が</th>'
+        "<th>スキル</th><th>status</th><th>code</th><th>request_id</th></tr>"
+        + "".join(error_rows)
+        + "</table></div>"
+    )
+
+    notes = list(data.get("notes", []))
+    if data.get("empty"):
+        empty_note = "まだ記録がありません。記録は mcp の次回デプロイから始まります"
+        notes.insert(0, empty_note)
+    note_html = "".join('<p class="note">' + _e(note) + "</p>" for note in notes)
+    body = (
+        '<h1 style="font-size:22px">NewsTV AI 利用状況（管理）</h1>'
+        '<p class="who">閲覧者: '
+        + _e(data.get("email"))
+        + "</p>"
+        + kpi_cards
+        + questions
+        + '<div class="grid2">'
+        + _skill_block(data.get("skills", []))
+        + _user_block(data.get("users", []))
+        + "</div>"
+        + errors
+        + note_html
+    )
+    return _page("NewsTV AI 利用状況（管理）", body)
+
+
+__all__ = ["render_dashboard", "render_errors", "render_login", "render_usage_admin"]

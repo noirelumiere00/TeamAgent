@@ -1,13 +1,216 @@
 """管理画面の read-only 集計クエリ（usage_events / runtime_metrics / oauth_tokens）。
 
-すべて ``PgVectorClient.connection(app_role='teamagent_dashboard', user_role='admin')`` 経由で
-SELECT する（migration 0007/0008 の RLS が admin GUC のみ可視を担保、dashboard ロールは
-SELECT のみ・暗号化列は GRANT 対象外）。**復号・本文取得は一切行わない**。
+すべて ``PgVectorClient.connection(app_role='teamagent_dashboard', user_role='admin')``
+経由で SELECT する（migration 0007/0008 の RLS が admin GUC のみ可視を担保、
+dashboard ロールは SELECT のみ・暗号化列は GRANT 対象外）。本文は 2026-08-13 の
+ユーザー裁定による ``usage_events.query_text`` だけを管理者向け質問フィードで
+取得し、他の本文・復号情報は扱わない。
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+
+def _select_conn(conn: Any, sql: str, params: Any = None) -> list[dict[str, Any]]:
+    """dict-row の注入済み接続で SELECT する。"""
+    with conn.cursor() as cur:
+        cur.execute(sql, params if params is not None else [])
+        rows = cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+def kpis(conn: Any) -> dict[str, Any]:
+    """今日・直近7日の件数、利用者数、コスト、エラー数を返す。
+
+    日付の境界は JST 基準。
+    """
+    rows = _select_conn(
+        conn,
+        """
+        SELECT
+            COUNT(*) AS total_events,
+            COUNT(*) FILTER (
+                WHERE (occurred_at AT TIME ZONE 'Asia/Tokyo')::date
+                      = (NOW() AT TIME ZONE 'Asia/Tokyo')::date
+            ) AS today_requests,
+            COUNT(DISTINCT COALESCE(user_email, user_id, '(unknown)')) FILTER (
+                WHERE (occurred_at AT TIME ZONE 'Asia/Tokyo')::date
+                      = (NOW() AT TIME ZONE 'Asia/Tokyo')::date
+            ) AS today_users,
+            COALESCE(SUM(cost_usd) FILTER (
+                WHERE (occurred_at AT TIME ZONE 'Asia/Tokyo')::date
+                      = (NOW() AT TIME ZONE 'Asia/Tokyo')::date
+            ), 0) AS today_cost_usd,
+            COUNT(*) FILTER (
+                WHERE (occurred_at AT TIME ZONE 'Asia/Tokyo')::date
+                      = (NOW() AT TIME ZONE 'Asia/Tokyo')::date
+                  AND status <> 'ok'
+            ) AS today_errors,
+            COUNT(*) FILTER (
+                WHERE occurred_at >= NOW() - INTERVAL '7 days'
+            ) AS seven_day_requests,
+            COUNT(DISTINCT COALESCE(user_email, user_id, '(unknown)')) FILTER (
+                WHERE occurred_at >= NOW() - INTERVAL '7 days'
+            ) AS seven_day_users,
+            COALESCE(SUM(cost_usd) FILTER (
+                WHERE occurred_at >= NOW() - INTERVAL '7 days'
+            ), 0) AS seven_day_cost_usd,
+            COUNT(*) FILTER (
+                WHERE occurred_at >= NOW() - INTERVAL '7 days'
+                  AND status <> 'ok'
+            ) AS seven_day_errors
+        FROM usage_events
+        """,
+    )
+    row = rows[0] if rows else {}
+    today_users = int(row.get("today_users", 0) or 0)
+    return {
+        "total_events": int(row.get("total_events", 0) or 0),
+        "today_requests": int(row.get("today_requests", 0) or 0),
+        "today_users": today_users,
+        # 既存 DashboardQueries.kpis の利用側にも合わせる別名。
+        "active_users": today_users,
+        "today_cost_usd": float(row.get("today_cost_usd", 0) or 0),
+        "today_errors": int(row.get("today_errors", 0) or 0),
+        "seven_day_requests": int(row.get("seven_day_requests", 0) or 0),
+        "seven_day_users": int(row.get("seven_day_users", 0) or 0),
+        "seven_day_cost_usd": float(row.get("seven_day_cost_usd", 0) or 0),
+        "seven_day_errors": int(row.get("seven_day_errors", 0) or 0),
+    }
+
+
+def daily_series(conn: Any, days: int = 30) -> list[dict[str, Any]]:
+    """日次の件数とコスト（JST）。"""
+    rows = _select_conn(
+        conn,
+        """
+        SELECT (occurred_at AT TIME ZONE 'Asia/Tokyo')::date AS day,
+               COUNT(*) AS requests,
+               ROUND(SUM(cost_usd), 4) AS cost_usd
+        FROM usage_events
+        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        GROUP BY day ORDER BY day
+        """,
+        [str(int(days))],
+    )
+    return [
+        {
+            "day": str(row["day"]),
+            "requests": int(row["requests"]),
+            "cost_usd": float(row["cost_usd"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def skill_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
+    """skill 別の件数・コスト・p50/p95 レイテンシ。"""
+    rows = _select_conn(
+        conn,
+        """
+        SELECT skill,
+               COUNT(*) AS n,
+               ROUND(SUM(cost_usd), 4) AS cost_usd,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)
+                   FILTER (WHERE latency_ms IS NOT NULL) AS p50_ms,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms)
+                   FILTER (WHERE latency_ms IS NOT NULL) AS p95_ms
+        FROM usage_events
+        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        GROUP BY skill ORDER BY n DESC
+        """,
+        [str(int(days))],
+    )
+    return [
+        {
+            "skill": str(row["skill"]),
+            "n": int(row["n"]),
+            "cost_usd": float(row["cost_usd"] or 0),
+            "p50_ms": int(row["p50_ms"]) if row["p50_ms"] is not None else None,
+            "p95_ms": int(row["p95_ms"]) if row["p95_ms"] is not None else None,
+        }
+        for row in rows
+    ]
+
+
+def user_breakdown(conn: Any, *, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
+    """ユーザ別の件数・コスト（コスト降順）。"""
+    rows = _select_conn(
+        conn,
+        """
+        SELECT COALESCE(user_email, user_id, '(unknown)') AS who,
+               COUNT(*) AS requests,
+               ROUND(SUM(cost_usd), 4) AS cost_usd
+        FROM usage_events
+        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        GROUP BY who ORDER BY cost_usd DESC NULLS LAST LIMIT %s
+        """,
+        [str(int(days)), int(limit)],
+    )
+    return [
+        {
+            "who": str(row["who"]),
+            "requests": int(row["requests"]),
+            "cost_usd": float(row["cost_usd"] or 0),
+        }
+        for row in rows
+    ]
+
+
+def error_list(conn: Any, limit: int = 50) -> list[dict[str, Any]]:
+    """直近のエラー/拒否を返す（本文は含めない）。"""
+    rows = _select_conn(
+        conn,
+        """
+        SELECT occurred_at, request_id, skill, status, error_code,
+               COALESCE(user_email, user_id, '(unknown)') AS who
+        FROM usage_events
+        WHERE status <> 'ok'
+        ORDER BY occurred_at DESC LIMIT %s
+        """,
+        [int(limit)],
+    )
+    return [
+        {
+            "occurred_at": row["occurred_at"],
+            "request_id": str(row["request_id"]),
+            "skill": str(row["skill"]),
+            "status": str(row["status"]),
+            "error_code": row["error_code"],
+            "who": str(row["who"]),
+        }
+        for row in rows
+    ]
+
+
+def recent_questions(conn: Any, limit: int = 200) -> list[dict[str, Any]]:
+    """質問本文を含む直近の usage_events を管理ページ向けに返す。"""
+    rows = _select_conn(
+        conn,
+        """
+        SELECT occurred_at,
+               COALESCE(user_email, user_id, '(unknown)') AS who,
+               skill, query_text, status, latency_ms, cost_usd
+        FROM usage_events
+        WHERE query_text IS NOT NULL
+        ORDER BY occurred_at DESC
+        LIMIT %(limit)s
+        """,
+        {"limit": int(limit)},
+    )
+    return [
+        {
+            "occurred_at": row["occurred_at"],
+            "who": str(row["who"]),
+            "skill": str(row["skill"]),
+            "query_text": str(row["query_text"]),
+            "status": str(row["status"]),
+            "latency_ms": int(row["latency_ms"]) if row["latency_ms"] is not None else None,
+            "cost_usd": float(row["cost_usd"] or 0),
+        }
+        for row in rows
+    ]
 
 
 class DashboardQueries:
@@ -210,4 +413,12 @@ class DashboardQueries:
         ]
 
 
-__all__ = ["DashboardQueries"]
+__all__ = [
+    "DashboardQueries",
+    "daily_series",
+    "error_list",
+    "kpis",
+    "recent_questions",
+    "skill_breakdown",
+    "user_breakdown",
+]

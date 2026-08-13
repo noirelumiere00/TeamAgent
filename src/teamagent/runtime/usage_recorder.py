@@ -5,7 +5,8 @@ dispatch の出口で1リクエスト分のメタ（skill / cost / latency / sta
 - **ユーザ処理を止めない**: 記録の失敗はログのみで握り潰す（監視データの欠落は許容）。
 - **イベントループを塞がない**: 同期 DB 書込は ``run_in_executor`` でワーカースレッドへ逃がす。
 - **二重書込に安全**: ``ON CONFLICT (request_id) DO NOTHING``（リトライ/再入で重複しない）。
-- **本文/PII を持ち込まない**: query_chars（文字数）のみ。本文・回答・トークンは列に入れない。
+- **本文/PII は原則持ち込まない**: ユーザー裁定済みの query_text のみ例外として
+  最大 2000 文字を保存する。回答・トークン等は列に入れない。
 
 書込ロール: ``teamagent_app``（migration 0007 で usage_events に INSERT のみ許可）。
 ``app.user_role`` は立てない＝admin でない＝SELECT 不可（書くだけ）。
@@ -38,7 +39,7 @@ class UsageTrace:
 
 @dataclass(frozen=True)
 class UsageEvent:
-    """usage_events 1行分（本文/PII は持たない）。フィールド名は SQL の placeholder と一致。"""
+    """usage_events 1行分（query_text のみ裁定済みの本文例外・最大2000文字）。"""
 
     request_id: str
     skill: str
@@ -52,6 +53,7 @@ class UsageEvent:
     error_code: str | None = None
     throttle_retries: int = 0
     query_chars: int | None = None
+    query_text: str | None = None
     via: str | None = None
 
 
@@ -59,11 +61,11 @@ _INSERT_SQL = """
 INSERT INTO usage_events
     (request_id, user_email, user_id, skill, cost_usd, latency_ms,
      input_tokens, output_tokens, status, error_code, throttle_retries,
-     query_chars, via)
+     query_chars, query_text, via)
 VALUES
     (%(request_id)s, %(user_email)s, %(user_id)s, %(skill)s, %(cost_usd)s, %(latency_ms)s,
      %(input_tokens)s, %(output_tokens)s, %(status)s, %(error_code)s, %(throttle_retries)s,
-     %(query_chars)s, %(via)s)
+     %(query_chars)s, %(query_text)s, %(via)s)
 ON CONFLICT (request_id) DO NOTHING
 """
 
@@ -83,6 +85,8 @@ class UsageRecorder:
         params = asdict(event)
         if params["status"] not in _VALID_STATUS:
             params["status"] = "ok"  # 未知 status は ok に倒す（CHECK 制約違反で全行落とさない）
+        if params["query_text"] is not None:
+            params["query_text"] = params["query_text"][:2000]
         with self._pg.connection(app_role=self._app_role) as conn:
             with conn.cursor() as cur:
                 cur.execute(_INSERT_SQL, params)

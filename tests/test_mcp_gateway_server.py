@@ -10,12 +10,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel
 
+from teamagent.identity import ResolvedIdentity
+from teamagent.mcp_gateway import server as mcp_server
 from teamagent.mcp_gateway.server import (
     SEARCH_TOOL_NAME,
     USER_CONTEXT_KEY,
@@ -25,6 +28,11 @@ from teamagent.mcp_gateway.server import (
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
+from tests.caller_claim_testkit import (
+    TEST_SLACK_USER_ID,
+    make_verifier,
+    sign_arguments,
+)
 
 
 class _EchoInput(BaseModel):
@@ -177,6 +185,224 @@ class _FakeSearchSkill(BaseSkill[_EchoInput, _FakeSearchOutput]):
 
 
 _SEARCH_BY_NAME = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _FakeSearchSkill)}
+
+
+# --- 本番 MCP 経路の usage_events best-effort 記録 ------------------------------
+
+
+class _UsageSearchInput(BaseModel):
+    query: str
+    mail_body: str | None = None
+
+
+class _UsageSearchOutput(BaseModel):
+    answer: str
+    total_cost_usd: float
+
+
+class _UsageSearchSkill(BaseSkill[_UsageSearchInput, _UsageSearchOutput]):
+    """query と cost の usage 配線だけを観測する外部 I/O 無しの search。"""
+
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "usage 記録テスト用フェイク検索。"
+    input_schema: ClassVar[type[BaseModel]] = _UsageSearchInput
+    output_schema: ClassVar[type[BaseModel]] = _UsageSearchOutput
+
+    def run(self, input: _UsageSearchInput, ctx: SkillContext) -> _UsageSearchOutput:
+        return _UsageSearchOutput(answer=f"hits for {input.query}", total_cost_usd=0.125)
+
+
+class _UsageSearchBoomSkill(BaseSkill[_UsageSearchInput, _UsageSearchOutput]):
+    name: ClassVar[str] = SEARCH_TOOL_NAME
+    description: ClassVar[str] = "usage エラー記録テスト用フェイク検索。"
+    input_schema: ClassVar[type[BaseModel]] = _UsageSearchInput
+    output_schema: ClassVar[type[BaseModel]] = _UsageSearchOutput
+
+    def run(self, input: _UsageSearchInput, ctx: SkillContext) -> _UsageSearchOutput:
+        raise RuntimeError("usage search kaboom")
+
+
+_USAGE_SEARCH_BY_NAME = {SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _UsageSearchSkill)}
+_USAGE_SEARCH_BOOM_BY_NAME = {
+    SEARCH_TOOL_NAME: ToolSpec(SEARCH_TOOL_NAME, "fake", _UsageSearchBoomSkill)
+}
+
+
+class _FakeUsageRecorder:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.events: list[Any] = []
+        self._raises = raises
+
+    async def record(self, event: Any) -> None:
+        self.events.append(event)
+        if self._raises:
+            # UsageRecorder.record 自体が想定外に失敗する本番の failure mode を再現する。
+            raise RuntimeError("usage db down")
+
+
+def _install_usage_recorder(monkeypatch: pytest.MonkeyPatch, recorder: _FakeUsageRecorder) -> None:
+    monkeypatch.delenv("USAGE_EVENTS_DISABLE", raising=False)
+    monkeypatch.setattr(mcp_server, "_usage_record_tasks", set())
+    monkeypatch.setattr(mcp_server, "_usage_recorder", lambda: recorder)
+
+
+async def _drain_usage_tasks() -> None:
+    tasks = tuple(mcp_server._usage_record_tasks)
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # task の done callback（set からの discard と例外回収）まで進める。
+    await asyncio.sleep(0)
+
+
+async def test_dispatch_records_search_query_and_trusted_slack_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+
+    async def resolver(slack_user_id: str) -> ResolvedIdentity | None:
+        assert slack_user_id == TEST_SLACK_USER_ID
+        return ResolvedIdentity(
+            slack_user_id=slack_user_id,
+            email="member@vectorinc.co.jp",
+        )
+
+    out = _parse(
+        await dispatch_tool(
+            _USAGE_SEARCH_BY_NAME,
+            SEARCH_TOOL_NAME,
+            sign_arguments(
+                SEARCH_TOOL_NAME,
+                {"query": "競合の最新事例", "mail_body": "保存してはいけない本文"},
+            ),
+            identity_resolver=resolver,
+            caller_claim_verifier=make_verifier(),
+        )
+    )
+    assert out["answer"] == "hits for 競合の最新事例"
+    await _drain_usage_tasks()
+
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.skill == SEARCH_TOOL_NAME
+    assert event.user_email == "member@vectorinc.co.jp"
+    assert event.user_id == TEST_SLACK_USER_ID  # 署名検証済み claim の ID
+    assert event.query_text == "競合の最新事例"
+    assert event.query_chars == len("競合の最新事例")
+    assert event.cost_usd == 0.125
+    assert event.status == "ok"
+    assert event.via == "mcp"
+    assert not hasattr(event, "mail_body")
+    assert not mcp_server._usage_record_tasks
+
+
+async def test_dispatch_without_query_records_none_and_ignores_legacy_slack_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {
+                "q": "hi",
+                USER_CONTEXT_KEY: {
+                    "user_email": "a@b.co",
+                    "slack_user_id": "U_UNVERIFIED",
+                },
+            },
+        )
+    )
+    assert out["echo"] == "hi"
+    await _drain_usage_tasks()
+
+    event = recorder.events[0]
+    assert event.query_text is None
+    assert event.query_chars is None
+    assert event.user_id is None  # LEGACY の未検証申告値は保存しない
+
+
+async def test_usage_recorder_exception_does_not_change_dispatch_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _FakeUsageRecorder(raises=True)
+    _install_usage_recorder(monkeypatch, recorder)
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+        )
+    )
+    # record coroutine は await されず、失敗する前に tool 応答がそのまま返る。
+    assert out["echo"] == "hi"
+    await _drain_usage_tasks()
+    assert len(recorder.events) == 1
+    assert not mcp_server._usage_record_tasks
+
+
+async def test_usage_events_disable_skips_recording(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+    monkeypatch.setenv("USAGE_EVENTS_DISABLE", "1")
+    out = _parse(
+        await dispatch_tool(
+            _BY_NAME,
+            "echo",
+            {"q": "hi", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+        )
+    )
+    assert out["echo"] == "hi"
+    await asyncio.sleep(0)
+    assert recorder.events == []
+    assert not mcp_server._usage_record_tasks
+
+
+async def test_dispatch_error_records_error_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = _FakeUsageRecorder()
+    _install_usage_recorder(monkeypatch, recorder)
+    out = _parse(
+        await dispatch_tool(
+            _USAGE_SEARCH_BOOM_BY_NAME,
+            SEARCH_TOOL_NAME,
+            {
+                "query": "失敗する質問",
+                USER_CONTEXT_KEY: {"user_email": "a@b.co"},
+            },
+        )
+    )
+    assert "RuntimeError" in out["error"]
+    await _drain_usage_tasks()
+
+    event = recorder.events[0]
+    assert event.status == "error"
+    assert event.error_code == "RuntimeError"
+    assert event.query_text == "失敗する質問"
+    assert event.query_chars == len("失敗する質問")
+    assert isinstance(event.latency_ms, int)
+    assert event.latency_ms >= 0
+
+
+def test_usage_recorder_init_failure_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.adapters.pgvector_client import PgVectorClient
+
+    calls = 0
+
+    def fail_from_env(cls: type[PgVectorClient]) -> PgVectorClient:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("DATABASE_URL missing")
+
+    monkeypatch.setattr(PgVectorClient, "from_env", classmethod(fail_from_env))
+    monkeypatch.setattr(
+        mcp_server,
+        "_usage_recorder_singleton",
+        mcp_server._USAGE_RECORDER_UNSET,
+    )
+    assert mcp_server._usage_recorder() is None
+    assert mcp_server._usage_recorder() is None
+    assert calls == 1
 
 
 async def test_search_includes_web_links_when_base_url_set(

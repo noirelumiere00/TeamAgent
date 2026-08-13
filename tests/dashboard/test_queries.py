@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any
 
-from teamagent.dashboard.queries import DashboardQueries
+from teamagent.dashboard.queries import DashboardQueries, recent_questions
 
 
 class _FakeCursor:
@@ -124,3 +124,25 @@ def test_oauth_status_maps_without_ciphertext() -> None:
     # クエリに暗号化列を含めない
     sql = pg.executed[0][0]
     assert "refresh_token_enc" not in sql
+
+
+def test_recent_questions_uses_named_limit_and_maps_query_text() -> None:
+    row = {
+        "occurred_at": "2026-08-13 00:00:00+00",
+        "who": "u@x.com",
+        "skill": "search",
+        "query_text": "質問です",
+        "status": "ok",
+        "latency_ms": 120,
+        "cost_usd": 0.02,
+    }
+    pg = _FakePg([[row]])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        out = recent_questions(conn, limit=17)
+    sql, params = pg.executed[0]
+    assert "WHERE query_text IS NOT NULL" in sql
+    assert "ORDER BY occurred_at DESC" in sql
+    assert "LIMIT %(limit)s" in sql
+    assert params == {"limit": 17}
+    assert out[0]["query_text"] == "質問です"
+    assert out[0]["latency_ms"] == 120

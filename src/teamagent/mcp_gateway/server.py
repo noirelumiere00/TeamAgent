@@ -28,7 +28,7 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from mcp.server import Server
@@ -49,6 +49,7 @@ from teamagent.mcp_gateway.caller_claim import (
     VerifiedCallerClaim,
 )
 from teamagent.orchestrator.tools import ToolSpec
+from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder
 from teamagent.skills.base import SkillContext
 
 logger = structlog.get_logger(__name__)
@@ -69,6 +70,15 @@ SEARCH_TOOL_NAME = "search"
 # 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
 _ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit"})
 
+# usage_events 記録器は本番 MCP プロセス内で 1 つだけ遅延生成する。初期化失敗時の None も
+# キャッシュし、env 不足等を各 tool 呼び出しで繰り返さない（利用者処理は常に fail-open）。
+_USAGE_RECORDER_UNSET = object()
+_usage_recorder_singleton: UsageRecorder | None | object = _USAGE_RECORDER_UNSET
+
+# fire-and-forget task は完了まで強参照を保持する。done callback で例外も回収するため、
+# recorder の失敗が MCP 応答や event loop の未回収例外へ波及しない。
+_usage_record_tasks: set[asyncio.Future[Any]] = set()
+
 
 def _envflag(name: str, default: str = "false") -> bool:
     """ENV を bool に変換（"1"/"true"/"yes" を True とみなす・factory._envflag と同流儀）。
@@ -77,6 +87,91 @@ def _envflag(name: str, default: str = "false") -> bool:
     スペース付き ``"1 "`` でも意図どおり ON 判定されるようにする（フラグの取りこぼし防止）。
     """
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _usage_recorder() -> UsageRecorder | None:
+    """usage_events 記録器を遅延生成する。初期化失敗も None としてキャッシュする。"""
+    global _usage_recorder_singleton
+
+    if _usage_recorder_singleton is _USAGE_RECORDER_UNSET:
+        try:
+            from teamagent.adapters.pgvector_client import PgVectorClient
+
+            _usage_recorder_singleton = UsageRecorder(
+                PgVectorClient.from_env(), app_role="teamagent_app"
+            )
+        except Exception as exc:
+            _usage_recorder_singleton = None
+            logger.warning("usage_recorder_init_failed", error=type(exc).__name__)
+    return cast(UsageRecorder | None, _usage_recorder_singleton)
+
+
+def _usage_record_done(task: asyncio.Future[Any]) -> None:
+    """完了 task の参照と例外を回収する（dispatch へは伝播させない）。"""
+    _usage_record_tasks.discard(task)
+    try:
+        error = task.exception()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+    if error is not None:
+        logger.warning("usage_event_record_failed", error=type(error).__name__)
+
+
+async def _record_usage_event(event: UsageEvent) -> None:
+    """遅延初期化を含む DB 記録を fire-and-forget task の内側で行う。"""
+    recorder = _usage_recorder()
+    if recorder is not None:
+        await recorder.record(event)
+
+
+def _record_usage(
+    *,
+    request_id: str,
+    skill: str,
+    user_email: str | None,
+    user_id: str | None,
+    cost_usd: float,
+    latency_ms: int,
+    skill_args: dict[str, Any],
+    status: str = "ok",
+    error_code: str | None = None,
+) -> None:
+    """MCP 利用を非同期記録へ渡す。入力本文は非空 ``query`` だけを採る。"""
+    if _envflag("USAGE_EVENTS_DISABLE"):
+        return
+
+    try:
+        # query 以外の引数（メール本文等）は usage_events へ絶対に持ち込まない。
+        query = skill_args.get("query")
+        query_text = query if isinstance(query, str) and query else None
+
+        event = UsageEvent(
+            request_id=request_id,
+            skill=skill,
+            status=status,
+            user_email=user_email,
+            user_id=user_id,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
+            error_code=error_code,
+            query_chars=len(query_text) if query_text is not None else None,
+            query_text=query_text,
+            via="mcp",
+        )
+        # singleton 初期化と DB 書込を task 内へ送り、dispatch は完了を await しない。
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(_record_usage_event(event))
+        _usage_record_tasks.add(task)
+        task.add_done_callback(_usage_record_done)
+    except Exception as exc:
+        # recorder double の同期例外や task 生成失敗も利用者応答には影響させない。
+        logger.warning(
+            "usage_event_schedule_failed",
+            request_id=request_id,
+            error=type(exc).__name__,
+        )
 
 
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -528,6 +623,9 @@ async def dispatch_tool(
     )
     if fail is not None:
         return fail
+    # usage_events.user_id には署名検証済み claim 由来の Slack ID だけを採る。
+    # LEGACY の raw["slack_user_id"] は未検証なので不採用。metadata 契約は変えない。
+    usage_user_id = verified_caller.slack_user_id if verified_caller is not None else None
 
     skill_args = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
     try:
@@ -537,8 +635,8 @@ async def dispatch_tool(
 
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
     # ── 進捗表示（v0.3.1 Task7・ENABLE_PROGRESS_NOTIFY 既定OFF・fail-open）───────────
-    # 重いツールの実行前に「📂 資料を検索しています…」等を Slack へ投稿し、完了後（成功/
-    # 失敗どちらも finally）に削除する。宛先は raw の channel_id → 無ければ slack_user_id DM。
+    # 重いツールの実行前に「📂 資料を検索しています…」等を Slack へ投稿し、成功/失敗
+    # どちらも返却前に削除する。宛先は raw の channel_id → 無ければ slack_user_id DM。
     # ⚠️ send/clear は latency 計測窓の外に置く（_started はツール実行の直前で取る）＝
     # mcp_tool_usage.latency_ms を Slack 往復で水増ししない（Task10 台帳の検証データを歪めない）。
     from teamagent.mcp_gateway.progress_notify import clear_progress, send_progress
@@ -551,12 +649,29 @@ async def dispatch_tool(
         output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except Exception as e:
+        _elapsed_ms = int((time.perf_counter() - _started) * 1000)
         logger.warning(
             "mcp_tool_error", tool=name, error=type(e).__name__, request_id=ctx.request_id
         )
+        # error 応答でも進捗削除を先に終え、usage task を schedule した後には await しない。
+        # これにより lazy 初期化/DB I/O が応答の critical path に入らない。
+        await clear_progress(_progress, request_id=ctx.request_id)
+        _progress = None
+        _record_usage(
+            request_id=ctx.request_id,
+            skill=name,
+            user_email=metadata.get("user_email"),
+            user_id=usage_user_id,
+            cost_usd=0.0,
+            latency_ms=_elapsed_ms,
+            skill_args=skill_args,
+            status="error",
+            error_code=type(e).__name__,
+        )
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
     finally:
-        await clear_progress(_progress, request_id=ctx.request_id)
+        if _progress is not None:
+            await clear_progress(_progress, request_id=ctx.request_id)
 
     try:
         data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
@@ -564,10 +679,11 @@ async def dispatch_tool(
         skill.cleanup_output(output)
     if isinstance(data, dict):
         _schedule_async_job_notice(name, data, raw, ctx)
-    # ── ミドルウェア(0): usage 計測（v0.3 Task10・常時ON・PII 無し）────────────────
-    # 本番主経路（NewsTV AI→MCP）の tool 使用量がどこにも記録されていなかった穴（監査指摘）を
-    # まず構造化ログで塞ぐ（CloudWatch Insights で user 単位/tool 単位に集計可能）。
-    # DB 計上（クォータ台帳）は migration 0017 とセットで次段（このログが検証データになる）。
+    # ── ミドルウェア(0): usage 計測（既定ON・best-effort DB 記録）─────────────────
+    # 本番主経路（NewsTV AI→MCP）の tool 使用量を構造化ログと usage_events の両方へ
+    # 記録する。本文/PII は原則保存せず、裁定済みの非空 query_text だけを例外とする
+    # （長さ上限は UsageRecorder が適用）。
+    tool_cost_usd = float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0
     logger.info(
         "mcp_tool_usage",
         tool=name,
@@ -576,13 +692,22 @@ async def dispatch_tool(
         # ⚠️ キー名は cost_usd に**しない**こと: cloudwatch_fargate.tf のメトリックフィルタ
         # { $.cost_usd = * } が adapter/skill 層の既存ログと合算して日次コストアラームを
         # 二重〜三重計上に汚染する（レビュー F-1）。usage 集計は専用 Insights クエリで行う。
-        tool_cost_usd=float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0,
+        tool_cost_usd=tool_cost_usd,
+    )
+    _record_usage(
+        request_id=ctx.request_id,
+        skill=name,
+        user_email=metadata.get("user_email"),
+        user_id=usage_user_id,
+        cost_usd=tool_cost_usd,
+        latency_ms=_elapsed_ms,
+        skill_args=skill_args,
     )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない
     #     よう **リンク注入より先** に行う（逆順だと注入したURLごと切り詰め対象になる）。
     # (2) リンク注入（Task6）: search 応答にだけ Web UI/AiLaVault リンクを差し込む。
-    # 将来の usage 計測/quota（Task10）は (0) として tool 実行の前後に入る想定。
+    # usage DB/ログ記録は (0)。将来 quota を強制する場合もこの順序契約を保つ。
     if isinstance(data, dict):
         from teamagent.mcp_gateway.payload_offload import maybe_offload
 
