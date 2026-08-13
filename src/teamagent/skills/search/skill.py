@@ -1001,6 +1001,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         matched = self._match_client(query, conn, request_id)
         if not matched:
             return hits
+        # 絞り込みは __client__（cls_project / client_name / title の OR-ILIKE）で行う。
+        # かつて metadata_filters={"client_name": matched} の完全一致 AND を使っていたが、
+        # client_name は is_sales_fb の行にしか詰まらない（pgvector_client.py:642）。
+        # 一方 boost を発火させる語彙 list_client_names は client_name ∪ cls_project の
+        # UNION（pgvector_client.py:904-913）なので、「Drive の提案書しか無い取引先」では
+        # boost が発火するのに引く対象が 0〜1 件しか無いという最悪の組み合わせになっていた。
+        # 実測 2026-08-07: query="資生堂" で limit=10 に対し hit_count=1、
+        # 結果として提案書を拾えず広告出稿データが返った。
+        # __client__ は明示 filter_client 経路（skill.py:601-606）が既に使っている同じ鍵。
+        boost_contains = dict(metadata_contains or {})
+        boost_contains.setdefault("__client__", matched)
         boost = self._pgvector.search_similar_new_schema(
             conn=conn,
             embedding=embedding,
@@ -1008,9 +1019,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             filter_industry=input.filter_industry,
             request_id=request_id,
             strict_industry=input.strict_industry,
-            metadata_filters={"client_name": matched},
             sticky_filters=sticky_filters,
-            metadata_contains=metadata_contains,
+            metadata_contains=boost_contains,
             exclude_boilerplate=self._exclude_boilerplate,
             exclude_duplicates=self._exclude_duplicates,
             exclude_templates=self._exclude_templates,

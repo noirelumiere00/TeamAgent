@@ -971,7 +971,47 @@ def test_client_boost_merges_filtered_hits(
     hits = skill.retrieve_hits("ユニーの2回目提案", SkillContext(), top_k=5)
     assert sorted(h.chunk_id for h in hits) == [1, 2]  # dense + boost 合流
     second = fake_pgvector_new_schema.search_similar_new_schema.call_args_list[1]
-    assert second.kwargs["metadata_filters"] == {"client_name": "ユニー"}
+    # 絞り込みは __client__（cls_project / client_name / title の OR-ILIKE）で行う。
+    # client_name の完全一致 AND に戻すと、Drive の提案書しか無い取引先を拾えなくなる。
+    assert second.kwargs["metadata_contains"] == {"__client__": "ユニー"}
+    assert not second.kwargs.get("metadata_filters")
+
+
+def test_client_boost_reaches_drive_only_clients(
+    fake_bedrock: MagicMock, fake_pgvector_new_schema: MagicMock
+) -> None:
+    """client_name を持たない（cls_project だけの）Drive 提案書にも boost が届くこと。
+
+    2026-08-07 本番: query="資生堂" で boost の limit=10 に対し hit_count=1 しか返らず、
+    提案書を拾えずに広告出稿データが返った。原因は boost が client_name の完全一致 AND で
+    絞っていたこと。client_name は営業 FB の行にしか詰まらない（pgvector_client.py:642）
+    のに、boost を発火させる語彙は client_name ∪ cls_project の UNION だった。
+    """
+    fake_pgvector_new_schema.list_client_names.return_value = ["資生堂"]
+    dense = [SearchHit(chunk_id=1, content="広告出稿データ", score=0.5, metadata={})]
+    # Drive の提案書は cls_project だけを持ち client_name は無い。
+    boost = [
+        SearchHit(
+            chunk_id=2,
+            content="提案_株式会社資生堂_シーブリーズ",
+            score=0.4,
+            metadata={"cls_project": "資生堂"},
+        )
+    ]
+    fake_pgvector_new_schema.search_similar_new_schema.side_effect = [dense, boost]
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_new_schema,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_client_boost=True,
+    )
+    hits = skill.retrieve_hits("資生堂", SkillContext(), top_k=5)
+    assert sorted(h.chunk_id for h in hits) == [1, 2]
+    second = fake_pgvector_new_schema.search_similar_new_schema.call_args_list[1]
+    # client_name で AND を掛けると Drive 提案書は SQL 段で除外され、ここへ到達しない。
+    assert second.kwargs["metadata_contains"] == {"__client__": "資生堂"}
+    assert not second.kwargs.get("metadata_filters")
 
 
 def test_client_boost_no_match_no_extra_search(

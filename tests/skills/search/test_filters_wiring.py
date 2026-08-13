@@ -413,10 +413,16 @@ def test_no_doc_type_solution_passes_none() -> None:
 
 
 def _boost_call(pg: MagicMock) -> dict[str, object]:
-    """metadata_filters に client_name を持つ呼び出し（= boost のサブ検索）を返す。"""
-    for call in pg.search_similar_new_schema.call_args_list:
-        mf = call.kwargs.get("metadata_filters")
-        if isinstance(mf, dict) and "client_name" in mf:
+    """boost のサブ検索（2 本目以降で __client__ を持つ呼び出し）を返す。
+
+    boost は filter_client 未指定時だけ走るので、本検索（1 本目）は __client__ を持たない。
+    したがって「1 本目以外で __client__ を持つ呼び出し」で一意に特定できる。
+    以前は metadata_filters の client_name で特定していたが、それは
+    「client_name 完全一致 AND」という誤った絞り込み自体を前提にした特定方法だった。
+    """
+    for call in pg.search_similar_new_schema.call_args_list[1:]:
+        mc = call.kwargs.get("metadata_contains")
+        if isinstance(mc, dict) and "__client__" in mc:
             return dict(call.kwargs)
     raise AssertionError("client_boost のサブ検索が見つからない")
 
@@ -441,8 +447,9 @@ def test_client_boost_carries_explicit_doc_type_solution_sticky() -> None:
     )
     boost = _boost_call(pg)
     assert boost["sticky_filters"] == {"cls_doc_type": "報告書", "cls_solution": "動画広告"}
-    # filter_client 未指定なので boost の metadata_contains（__client__）は None
-    assert boost["metadata_contains"] is None
+    # boost は自分で __client__ を注入する（client_name 完全一致 AND では
+    # Drive の提案書しか無い取引先を拾えないため）。
+    assert boost["metadata_contains"] == {"__client__": "電通"}
 
 
 def test_client_boost_carries_budget_sticky() -> None:
@@ -466,7 +473,7 @@ def test_client_boost_sticky_none_when_no_explicit_filters() -> None:
     skill.run(input=SearchInput(query="電通の提案"), ctx=SkillContext())
     boost = _boost_call(pg)
     assert boost["sticky_filters"] is None
-    assert boost["metadata_contains"] is None
+    assert boost["metadata_contains"] == {"__client__": "電通"}
 
 
 # --- §D: NL client 抽出 → __client__ 昇格（query_planner 経路）------------------------

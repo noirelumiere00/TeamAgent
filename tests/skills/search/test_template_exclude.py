@@ -227,7 +227,11 @@ def test_client_boost_call_also_carries_flags(monkeypatch: pytest.MonkeyPatch) -
     skill.run(input=SearchInput(query="ユニーの提案事例", top_k=5), ctx=SkillContext())
     calls = pg.search_similar_new_schema.call_args_list
     assert len(calls) >= 2  # primary + client boost
-    boost_calls = [c for c in calls if (c.kwargs.get("metadata_filters") or {}).get("client_name")]
+    # boost は __client__（cls_project / client_name / title の OR-ILIKE）で絞る。
+    # 本検索は filter_client 未指定なので __client__ を持たず、2 本目以降で一意に特定できる。
+    boost_calls = [
+        c for c in calls[1:] if (c.kwargs.get("metadata_contains") or {}).get("__client__")
+    ]
     assert boost_calls, "client boost の検索が走っていない"
     for call in calls:
         assert _flags(call) == (True, True)
