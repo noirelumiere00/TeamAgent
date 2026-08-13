@@ -19,7 +19,9 @@ FROM ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS u
 USER root
 
 COPY infra/openclaw/openclaw.config.json5 /opt/teamagent/openclaw.source.json5
-COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md /opt/teamagent/workspace-seed/
+COPY infra/openclaw/SOUL.md infra/openclaw/HEARTBEAT.md infra/openclaw/IDENTITY.md /opt/teamagent/workspace-seed/
+# App Home / DM 初回ウェルカムのビルド時パッチ（中身と理由はスクリプト冒頭コメント参照）。
+COPY infra/openclaw/patch-slack-home.mjs /opt/teamagent/patch-slack-home.mjs
 COPY infra/openclaw/caller-identity-plugin /opt/teamagent/plugins/teamagent-caller-identity/
 
 # Convert the reviewed JSON5 source into immutable canonical JSON. Runtime
@@ -40,6 +42,8 @@ RUN set -eux; \
     tar -xzf /tmp/openclaw-bedrock.tgz --strip-components=1 -C /opt/teamagent/plugins/amazon-bedrock; \
     test "$(sha256sum /opt/teamagent/plugins/slack/npm-shrinkwrap.json | cut -d' ' -f1)" = "79f3179b6163c1878bef8820673419a0547027c536666e482b02bd8ae5a7980c"; \
     test "$(sha256sum /opt/teamagent/plugins/amazon-bedrock/npm-shrinkwrap.json | cut -d' ' -f1)" = "1580dc988ec8ef3e430a166274062ddde547a75f9e338d00905021ebb283f31e"; \
+    node /opt/teamagent/patch-slack-home.mjs /opt/teamagent/plugins/slack/dist; \
+    node --check /opt/teamagent/plugins/slack/dist/provider-*.js; \
     node -e 'const fs=require("fs");const checks=[["/opt/teamagent/plugins/slack/package.json","@openclaw/slack","2026.7.1",true],["/opt/teamagent/plugins/amazon-bedrock/package.json","@openclaw/amazon-bedrock-provider","2026.7.1",true],["/opt/teamagent/plugins/teamagent-caller-identity/package.json","@teamagent/openclaw-caller-identity","1.0.0",false]];for(const [p,n,v,official] of checks){const x=JSON.parse(fs.readFileSync(p));if(x.name!==n||x.version!==v||(official&&x.peerDependencies?.openclaw!==">=2026.7.1"))throw new Error(`plugin contract mismatch: ${n}`)}'; \
     ln -s /app /opt/teamagent/plugins/slack/node_modules/openclaw; \
     ln -s /app /opt/teamagent/plugins/amazon-bedrock/node_modules/openclaw; \

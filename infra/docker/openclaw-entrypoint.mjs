@@ -285,17 +285,19 @@ async function prepareRuntime() {
   });
   await chmod(configPath, 0o600);
 
-  for (const file of ["SOUL.md", "HEARTBEAT.md"]) {
-    try {
-      await copyFile(
-        join("/opt/teamagent/workspace-seed", file),
-        join(workspaceDir, file),
-        constants.COPYFILE_EXCL,
-      );
-      await chmod(join(workspaceDir, file), 0o600);
-    } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
-    }
+  // ペルソナ/名乗りは repo でレビューした seed が唯一の真実源なので**毎起動上書き**する。
+  // かつては COPYFILE_EXCL（EEXIST 握り潰し）で初回だけ seed していたが、workspace は
+  // EFS 上に永続するため、07-31 に初回 seed された TeamAgent 時代の SOUL.md が残り続け、
+  // 2026-08-07 の NewsTV AI 改名がイメージを載せ替えても本番に一切届かなかった（実測:
+  // config identity.name を変えても bot は「IDENTITY.md が未設定」と旧人格のまま名乗った）。
+  // エージェントの長期記憶は MEMORY.md 系の別ファイルであり、この 3 枚は上書きしてよい。
+  for (const file of ["SOUL.md", "HEARTBEAT.md", "IDENTITY.md"]) {
+    const target = join(workspaceDir, file);
+    // 上書き化で copyFile がリンク先へ追従し得るため、configPath/sqlite と同じく
+    // 書き込み前に symlink を拒否する（EXCL 時代には不要だった検査）。
+    await rejectSymlink(target);
+    await copyFile(join("/opt/teamagent/workspace-seed", file), target);
+    await chmod(target, 0o600);
   }
 
   process.stderr.write(
