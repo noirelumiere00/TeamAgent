@@ -26,7 +26,7 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 CHROMIUM_BASE_DIGEST = "ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04"
 NODE_BUILDER_DIGEST = "eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-APK_LOCK_SHA256 = "d3a888e3bfa7e75d2c4c7b6b6dca2a7e0812c1231fdb342e96bb79af9166cca8"
+APK_LOCK_SHA256 = "12d493793e95c7958f02e95f9131403013ece1ed68d41b00fb34112013bdcb3b"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -38,7 +38,10 @@ def test_media_external_images_are_exact_arm64_children() -> None:
     assert f"ARG CHROMIUM_BASE_ARM64_DIGEST=sha256:{CHROMIUM_BASE_DIGEST}" in TEXT
     assert f"ARG NODE_BUILDER_ARM64_DIGEST=sha256:{NODE_BUILDER_DIGEST}" in TEXT
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
-    assert "akorn/chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST}" in TEXT
+    assert (
+        "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mirror/"
+        "chromium-headless:150-alpine@${CHROMIUM_BASE_ARM64_DIGEST}" in TEXT
+    )
     assert "node:24-alpine@${NODE_BUILDER_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
     assert 'org.opencontainers.image.revision="$GIT_COMMIT"' in TEXT
@@ -56,8 +59,8 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         "FFMPEG_BINARY_SHA256": (
             "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
         ),
-        "NODE_PACKAGE_VERSION": "24.18.0-r0",
-        "NODE_BINARY_SHA256": ("b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1"),
+        "NODE_PACKAGE_VERSION": "24.18.1-r0",
+        "NODE_BINARY_SHA256": ("b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2"),
         "PYTHON_PACKAGE_VERSION": "3.14.5-r2",
         "PYTHON_BINARY_SHA256": (
             "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
@@ -67,7 +70,10 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         assert f"ARG {name}={value}" in TEXT
     for package in ("ffmpeg", "font-liberation", "font-noto", "font-noto-cjk", "font-noto-emoji"):
         assert f'"{package}=$' in TEXT
-    assert 'test "$(apk info -v chromium)" = "chromium-$CHROMIUM_PACKAGE_VERSION"' in TEXT
+    assert (
+        "test \"$(apk list --installed chromium 2>/dev/null | awk 'NR==1{print $1}')\""
+        ' = "chromium-$CHROMIUM_PACKAGE_VERSION"' in TEXT
+    )
     assert "apk list --installed" in TEXT
     assert "test -s /lib/apk/db/installed" in TEXT
     assert "rm -rf /lib/apk" not in TEXT
@@ -125,11 +131,11 @@ def test_ytdlp_sources_are_hash_verified_then_secret_bearing_extractors_are_remo
         "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db"
     )
     for digest in (
-        "442ba4c75724b9496144c8434b617962ee08d0ee7c26ec663848fe9b78d5a3e4",
-        "d50fcb95f48d61bedde33e408c1881d4c279e51c31354a599ce09e96ba0f4b86",
+        "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
+        "b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432",
         "f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd",
         "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
-        "638d0864a2551a143f29fc8dbe1b4da6aa8dcfb9392f1a8907a6e07f7a05118b",
+        "32a2d7849c3897ae7c28c3e17853b10e3b74a0d280808177c20407496d52e817",
     ):
         assert digest in TEXT
     assert TEXT.count("ARG YTDLP_WHEEL_SHA256=") == 2
@@ -214,7 +220,13 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     assert "TMPDIR=/tmp/teamagent/tmp" in TEXT
     assert "TEAMAGENT_RUNTIME_KIND=media-worker" in TEXT
     assert 'ENTRYPOINT ["/app/.venv/bin/python", "-m", "teamagent.media.tool_worker"]' in TEXT
-    assert "--no-sandbox" not in SCRAPER.read_text(encoding="utf-8")
+    scraper_text = SCRAPER.read_text(encoding="utf-8")
+    # Fargate は unprivileged userns 無効で Chromium 自前サンドボックスが成立しない
+    # （実測: No usable sandbox! で起動即死・search.mjs:663-665 のコメント参照）。
+    # 隔離はコンテナ側（uid 10001 / cap drop / readonly rootfs）が担う設計へ移行済み。
+    # フラグは根拠コメント付きの launch-args 1箇所だけに許し、黙った増殖は赤にする。
+    assert scraper_text.count("--no-sandbox") == 1
+    assert "隔離は実行コンテナ側" in scraper_text
     assert "chromium_sandbox=True" in (ROOT / "src/teamagent/media/render_child.py").read_text(
         encoding="utf-8"
     )
@@ -289,8 +301,8 @@ def test_media_sources_and_js_lock_are_content_addressed() -> None:
     expected = {
         PACKAGE: "c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28",
         PACKAGE_LOCK: "f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2",
-        SCRAPER: "0350b1b6af44b7879429581965b7c701cdcc42da566431304723db701c76aef6",
-        DNS_PINNED_PROXY: ("d4e8e528f5004fc51b35227a41a4c2721247a50ac907bb12df6faa813e930d9a"),
+        SCRAPER: "99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e",
+        DNS_PINNED_PROXY: ("ccac597a429069074d2b362d6b15ad75c00c23941be97e9ea87503d36fd50e19"),
     }
     for path, digest in expected.items():
         assert _sha256(path) == digest

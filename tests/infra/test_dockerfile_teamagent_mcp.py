@@ -13,10 +13,10 @@ PYPROJECT = ROOT / "pyproject.toml"
 LOCK = ROOT / "uv.lock"
 TEXT = DOCKERFILE.read_text(encoding="utf-8")
 
-PYTHON_BUILDER_DIGEST = "2eac0b3ef42685b2d45d57633364aaa87ec54bf29960dcf7ecd0eed20e14d124"
-PYTHON_RUNTIME_DIGEST = "b7fda4f2d99284fe078f751034a0c858676f3456c4d75f1e935527c1951b5ba9"
+PYTHON_BUILDER_DIGEST = "f777da61cdf0013a462142e6a6e12d8ee75c0922c3708de21bccd9675c4abb12"
+PYTHON_RUNTIME_DIGEST = "bc4c6cd80ef5dbacdfa4e81f74444f358a073faa2ba1ebcd311b3bc87cfe06c2"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "0d036a463b218cff354adfb9c09a969a9a659698fa376bd3b55fe5bc002e7af8"
+PYTHON_BINARY_SHA256 = "0c4cd49d2c023a1f0325489c610e37c5ad3756fdf6e31f715ac9eabaeecbeba7"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
@@ -204,4 +204,4 @@ def test_core_lock_has_no_bundled_agent_or_media_runtime_dependencies() -> None:
         assert not any(item.startswith(dependency) for item in base)
     assert 'name = "claude-agent-sdk"' not in lock
     assert '"playwright==1.60.0"' in pyproject
-    assert '"yt-dlp==2026.6.9"' in pyproject
+    assert '"yt-dlp==2026.7.4"' in pyproject
