@@ -103,6 +103,7 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64,target=/var/cache/apk,sharin
       "libssh=$LIBSSH_PACKAGE_VERSION" \
       "mbedtls3=$MBEDTLS3_PACKAGE_VERSION" \
       "nodejs=$NODE_PACKAGE_VERSION" \
+      "pyc=$PYTHON_PACKAGE_VERSION" \
       "python3=$PYTHON_PACKAGE_VERSION"; \
     test "$(apk list --installed chromium 2>/dev/null | awk 'NR==1{print $1}')" = "chromium-$CHROMIUM_PACKAGE_VERSION"; \
     test "$(python3 --version)" = "Python $PYTHON_VERSION"; \
