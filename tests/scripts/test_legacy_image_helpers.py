@@ -124,6 +124,10 @@ def test_all_shell_start_build_and_source_zip_paths_are_allowlisted() -> None:
         ROOT / "infra" / "deploy" / "build_teamagent_image.sh",
         ROOT / "infra" / "deploy" / "build_openclaw_image.sh",
         ROOT / "infra" / "deploy" / "build_tiktok_image.sh",
+        # mcp 署名リリースを MFA 1回で完走させるランチャー（2026-08-07 導入・実運用済み）。
+        # 各段の StartBuild は IAM の ForAllValues 許可集合と突き合わせてから投げる設計で、
+        # 迂回ではなく正規5段の起動口。
+        ROOT / "scripts" / "aws" / "release_mcp.sh",
     }
     shell_files = sorted(
         path

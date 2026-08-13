@@ -1417,9 +1417,13 @@ def test_quarantine_codebuild_is_active_but_cannot_publish_a_release() -> None:
         'description  = "Build and vulnerability-gate TeamAgent MCP candidate images inside AWS"',
         'type            = "ARM_CONTAINER"',
         "privileged_mode = true",
-        'type      = "S3"',
-        'location  = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"',
-        "buildspec = local.image_builder_buildspec",
+        'type     = "S3"',
+        'location = "${aws_s3_bucket.raw_files.id}/codebuild/source.zip"',
+        # inline buildspec は CodeBuild の 25,600 字上限で適用不能になったため、
+        # content-addressed な S3 参照へ移行済み（2026-08-03）。参照先が
+        # evidence バケット配下のプロジェクト名ディレクトリであることまで縛る。
+        'buildspec = "${aws_s3_bucket.image_release_evidence.arn}'
+        "/codebuild-buildspecs/${local.main_codebuild_project_name}/",
         "terraform_data.runtime_guard",
         "prevent_destroy = true",
     ):
@@ -1516,6 +1520,30 @@ def test_teamagent_codebuild_contract_wiring_follows_checked_in_bytes() -> None:
         'resource "aws_iam_policy" "codebuild_launcher_core" {',
         maxsplit=1,
     )[0]
+    # 369f1b0 で StartBuild 4文（契約 sha の値 pin を含む）は IAM の 6,144 非空白字上限の
+    # ため専用 managed policy codebuild_launcher_start へ分離された。値 pin はそちらを見る。
+    launcher_start = body.split(
+        'data "aws_iam_policy_document" "codebuild_launcher_start" {',
+        maxsplit=1,
+    )[1].split(
+        'resource "aws_iam_policy" "codebuild_launcher_start" {',
+        maxsplit=1,
+    )[0]
+    for environment_name, local_name in (
+        ("SOURCE_MANIFEST_CONTRACT_SHA256", "runtime_contract_sha256"),
+        ("RELEASE_CONTRACT_SHA256", "mcp_release_contract_sha256"),
+    ):
+        assert re.search(
+            rf"(?m)^\s*{environment_name}\s*=\s*local\.{local_name}$",
+            body,
+        )
+    # 固定値 map（launcher_fixed_environment_values）を dynamic condition で消費して
+    # いること＝契約 sha が「値ごと」IAM に固定される配線が生きていることを縛る。
+    assert "local.launcher_fixed_environment_values" in launcher_start
+    assert (
+        'variable = "codebuild:environment.environmentVariables/${condition.key}.value"'
+        in launcher_start
+    )
     for environment_name, local_name in (
         ("SOURCE_MANIFEST_CONTRACT_SHA256", "runtime_contract_sha256"),
         ("RELEASE_CONTRACT_SHA256", "mcp_release_contract_sha256"),
@@ -1523,14 +1551,13 @@ def test_teamagent_codebuild_contract_wiring_follows_checked_in_bytes() -> None:
         assert re.search(
             rf'environment\.environmentVariables/{environment_name}\.value"\s*'
             rf"values\s*=\s*\[local\.{local_name}\]",
-            launcher_core,
-        )
-        assert re.search(
-            rf"(?m)^\s*{environment_name}\s*=\s*local\.{local_name}$",
-            body,
+            launcher_start,
         )
 
     runtime_sha256 = hashlib.sha256(runtime_contract.read_bytes()).hexdigest()
     release_sha256 = hashlib.sha256(release_contract.read_bytes()).hexdigest()
-    assert runtime_sha256 not in launcher_core
-    assert release_sha256 not in launcher_core
+    # 契約 sha のリテラル焼き込みは core / start のどちらにも存在しないこと
+    # （必ず local 経由＝apply で自動追随する形を保つ）。
+    for block in (launcher_core, launcher_start):
+        assert runtime_sha256 not in block
+        assert release_sha256 not in block
