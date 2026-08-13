@@ -112,16 +112,32 @@ def _parse_scan(tmp_path: Path, keys: set[tuple[str, str, str, str]]) -> set[Any
     )
 
 
-def test_bootstrap_registry_is_empty_until_final_true_image_is_scanned() -> None:
-    for path in EXCEPTIONS_PATHS:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
+    """例外レジストリの中身を「裁定済みの集合そのもの」に固定する。
 
-        assert payload == {
-            "schema_version": 1,
-            "stale_exception_policy": "fail",
-            "exceptions": [],
-        }
-        assert gate.load_exceptions(path, today=TODAY) == {}
+    2026-08-13: chainguard python ベース（digest 固定）に公開後の新規 findings 2件
+    （MEDIUM/LOW）が付き、0件ゲートが落ちた。ベース更新は契約リップルの再演になるため、
+    設計どおり期限つき例外（stale=fail・expires 2026-09-22）で通す裁定をユーザーが実施。
+    このテストは黙った追加・削除・改変をすべて赤にする（タプル完全一致）。
+    """
+    core, media = EXCEPTIONS_PATHS
+
+    core_records = gate.load_exceptions(core, today=TODAY)
+    assert {(k.cve, k.severity, k.package, k.version) for k in core_records} == {
+        ("CVE-2025-15366", "MEDIUM", "python-3.14", "3.14.6-r4"),
+        ("CVE-2026-6879", "LOW", "python-3.14", "3.14.6-r4"),
+    }
+    for record in core_records.values():
+        assert record.owner == "s-komata@vectorinc.co.jp"
+        assert record.expires_on.isoformat() == "2026-09-22"
+
+    media_payload = json.loads(media.read_text(encoding="utf-8"))
+    assert media_payload == {
+        "schema_version": 1,
+        "stale_exception_policy": "fail",
+        "exceptions": [],
+    }
+    assert gate.load_exceptions(media, today=TODAY) == {}
 
 
 def test_exact_synthetic_exception_set_passes(tmp_path: Path) -> None:

@@ -1,5 +1,24 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2025-15366",
+      "severity": "MEDIUM",
+      "package": "python-3.14",
+      "version": "3.14.6-r4",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "digest固定のchainguard pythonベース由来。2026-08-13にスキャナDBへ追加され0件ゲートを破った。ベース更新は契約リップル再演のため期限つきで例外化し、次回ベース更新で解消する",
+      "expires_on": "2026-09-22"
+    },
+    {
+      "cve": "CVE-2026-6879",
+      "severity": "LOW",
+      "package": "python-3.14",
+      "version": "3.14.6-r4",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "digest固定のchainguard pythonベース由来。2026-08-13にスキャナDBへ追加され0件ゲートを破った。ベース更新は契約リップル再演のため期限つきで例外化し、次回ベース更新で解消する",
+      "expires_on": "2026-09-22"
+    }
+  ]
 }
