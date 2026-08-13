@@ -285,9 +285,7 @@ def test_both_builds_stop_at_quarantine_and_source_free_projects_own_promotion()
     assert core_push < media_push < first_guard < resolve < provenance < wait < scan < second_guard
     assert '--exceptions "infra/codebuild/ecr_scan_exceptions_$subject.json"' in body
     for subject in ("core", "media"):
-        exceptions_path = (
-            ROOT / "infra" / "codebuild" / f"ecr_scan_exceptions_{subject}.json"
-        )
+        exceptions_path = ROOT / "infra" / "codebuild" / f"ecr_scan_exceptions_{subject}.json"
         assert exceptions_path.is_file()
         exceptions = json.loads(exceptions_path.read_text(encoding="utf-8"))
         assert exceptions["stale_exception_policy"] == "fail"

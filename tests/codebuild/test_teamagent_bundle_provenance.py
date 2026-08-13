@@ -833,9 +833,7 @@ def test_teamagent_placeholder_is_rejected_when_contract_and_image_agree(
     )
     label_name = "io.teamagent.contract.app-html-version-id"
     assert (
-        labels[label_name]
-        == contract["app_html"]["production"]["app_html_s3_version_id"]
-        == "null"
+        labels[label_name] == contract["app_html"]["production"]["app_html_s3_version_id"] == "null"
     )
     config = tmp_path / "core.json"
     digest = _write_oci_config(config, labels)
