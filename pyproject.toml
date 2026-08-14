@@ -102,6 +102,9 @@ media = [
 # optional extraと内容を重ねるのは、利用者向け `teamagent[media]` と最小worker buildを
 # 同じuv.lockで両立させるため。tests/infra が版の一致を固定する。
 [dependency-groups]
+dev = [
+    "types-defusedxml>=0.7.0.20260504",
+]
 media-runtime = [
     "pydantic>=2.9.0",
     "yt-dlp==2026.7.4",
