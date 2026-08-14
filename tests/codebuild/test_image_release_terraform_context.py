@@ -85,7 +85,7 @@ def _task_volumes(consumer: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "authorization_config": [
                         {
-                            "access_point_id": "fsap-0123456789abcdef0",
+                            "access_point_id": "fsap-0123456789abcdef0",  # gitleaks:allow 合成フィクスチャID
                             "iam": "ENABLED",
                         }
                     ],
@@ -1398,7 +1398,7 @@ def test_no_image_transition_accepts_exact_benign_volume_unknown() -> None:
         {
             "authorization_config": [
                 {
-                    "access_point_id": "fsap-0123456789abcdef0",
+                    "access_point_id": "fsap-0123456789abcdef0",  # gitleaks:allow 合成フィクスチャID
                     "iam": "ENABLED",
                 }
             ],

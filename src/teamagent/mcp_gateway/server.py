@@ -73,7 +73,7 @@ _ASYNC_JOB_TOOLS = frozenset({"tiktok_acquire", "proposal_builder_submit"})
 # usage_events 記録器は本番 MCP プロセス内で 1 つだけ遅延生成する。初期化失敗時の None も
 # キャッシュし、env 不足等を各 tool 呼び出しで繰り返さない（利用者処理は常に fail-open）。
 _USAGE_RECORDER_UNSET = object()
-_usage_recorder_singleton: UsageRecorder | None | object = _USAGE_RECORDER_UNSET
+_usage_recorder_singleton: UsageRecorder | object | None = _USAGE_RECORDER_UNSET
 
 # fire-and-forget task は完了まで強参照を保持する。done callback で例外も回収するため、
 # recorder の失敗が MCP 応答や event loop の未回収例外へ波及しない。

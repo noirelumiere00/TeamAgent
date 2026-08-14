@@ -55,3 +55,16 @@ misconfigurations:
       - "terraform/lambda_iam.tf"
     expired_at: 2026-10-01
     statement: "SSE-S3 で暗号化済み・CMK 化は試験環境では見送り"
+
+# ── 依存脆弱性の一時退避（原則は依存バンプ・ここは契約リップル待ちのみ）──
+
+vulnerabilities:
+  # ip-address 10.2.0 (tools/tiktok_scraper, socks 経由の間接依存) の HIGH。
+  # fix=10.3.1 は判明済みだが package-lock.json は契約ピン
+  # （TIKTOK_PACKAGE_LOCK_SHA256）のため、バンプは次回の署名リリース
+  # リップルに同乗させる（2026-08-14 判断・単独リップルはコスト過大）。
+  - id: CVE-2026-69192
+    paths:
+      - "tools/tiktok_scraper/package-lock.json"
+    expired_at: 2026-09-22
+    statement: "fix 10.3.1 確認済み・契約ピンのため次回リリースリップルで根治"

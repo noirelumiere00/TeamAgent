@@ -50,7 +50,7 @@ SLACK_CANARY_SKIP_REASON_CODES = [
     "slack_self_authored_message_filtered",
     "aila_prompt_injection_defense_rejected_canary",
 ]
-SLACK_CANARY_TOKEN_SHA256 = "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"
+SLACK_CANARY_TOKEN_SHA256 = "34fc25aac72a3608fc4fe8c0914f128c51aa767b93d2d4ff4915d35aa9415e19"  # gitleaks:allow トークンの sha256 ハッシュ（秘密そのものではない）
 
 
 def _strip_json5_comments(source: str) -> str:
