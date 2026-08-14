@@ -197,6 +197,69 @@ def test_lambda_handler_posts_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
+def test_lambda_handler_renders_end_time_and_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2026-08-14 拡張: end_hm / loc があれば「実際の予定」らしく描画する。
+
+    旧 producer の payload（キー無し）は上の test_lambda_handler_posts_reminder が
+    そのまま後方互換を担保する。
+    """
+    h = _load_handler()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr(h, "_post_message", lambda c, t: posted.append((c, t)))
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "v": 1,
+                        "channel": "D1",
+                        "start_hm": "11:00",
+                        "end_hm": "12:00",
+                        "title": "MTG",
+                        "loc": "本社-13F-会議室A",
+                        "url": "https://meet.example/x",
+                    }
+                )
+            }
+        ]
+    }
+    out = h.handler(event, None)
+    assert out["ok"] and posted == [
+        (
+            "D1",
+            "🔔 まもなく: *MTG* （11:00〜12:00・本社-13F-会議室A）\n<https://meet.example/x|開く>",
+        )
+    ]
+
+
+def test_lambda_handler_escapes_angle_brackets_in_location(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """loc 経由のリンク偽装（<url|text>）も title と同様に無害化する。"""
+    h = _load_handler()
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    posted: list[tuple[str, str]] = []
+    monkeypatch.setattr(h, "_post_message", lambda c, t: posted.append((c, t)))
+    event = {
+        "Records": [
+            {
+                "body": json.dumps(
+                    {
+                        "v": 1,
+                        "channel": "D1",
+                        "start_hm": "09:00",
+                        "loc": "<https://evil|クリック>",
+                    }
+                )
+            }
+        ]
+    }
+    h.handler(event, None)
+    assert "＜https://evil|クリック＞" in posted[0][1]
+    assert "<https://evil" not in posted[0][1]
+
+
 def test_lambda_handler_skips_invalid_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     h = _load_handler()
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
@@ -276,7 +339,7 @@ def test_lambda_handler_renders_title(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     out = h.handler(event, None)
     assert out["ok"]
-    assert posted == [("D1", "🔔 まもなく「定例MTG」があります（14:00〜）\n<https://m|開く>")]
+    assert posted == [("D1", "🔔 まもなく: *定例MTG* （14:00〜）\n<https://m|開く>")]
     # ⚠️ タイトル（PII）が CloudWatch ログに出ていないこと。
     assert all("定例MTG" not in line for line in logged)
 

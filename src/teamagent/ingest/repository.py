@@ -25,7 +25,13 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 logger = structlog.get_logger(__name__)
 
 _SCHEMA_REPROBE_SECONDS = 60.0
-_SOURCE_RETRY_LEASE_SECONDS = 600
+# 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕
+# （2026-08-14 毒ループ対策で 600→1800）。
+_SOURCE_RETRY_LEASE_SECONDS = 1800
+# claim（=処理着手）回数の上限。毒ファイル（決定論的に失敗するのに pending に残る行）が
+# 毎日 claim → lease 切れ → cursor 停止を永続させた実測（2026-08-10〜13）への直接対策。
+# 上限到達行は claim 前に invalid_source へ掃き出し、必ずログで可視化する（黙った切り捨て禁止）。
+_SOURCE_RETRY_MAX_CLAIM_ATTEMPTS = 5
 _SOURCE_RETRY_LIMIT = 1000
 _INGEST_APPLICATION_NAME = "teamagent-ingest"
 
@@ -680,6 +686,79 @@ class IngestRepository:
             raise ValueError("retry lease_seconds must be positive")
         if not self._schema_probe_allowed("source_retries"):
             raise SourceRetryUnavailableError("durable retry queue is temporarily unavailable")
+        # status 語彙は 0020 の CHECK で pending|resolved のみ。掃き出しは resolved で
+        # queue から外し、指紋は ingest_source_health へ invalid_source として永続記録する
+        # （resolved は再 enqueue で reset され得るため、health 側の known-invalid が再燃を塞ぐ）。
+        exhaust_sql = """
+            UPDATE ingest_source_retries
+            SET status = 'resolved',
+                resolved_at = now(),
+                lease_owner = NULL,
+                lease_token = NULL,
+                lease_expires_at = NULL
+            WHERE source_kind = %s
+              AND source_id = %s
+              AND status = 'pending'
+              AND attempt_count >= %s
+              AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+            RETURNING external_id, reason, attempt_count, md5_checksum, size_bytes,
+                      mime_type, validator_schema_version, source_type
+        """
+        try:
+            with self._ops_connection() as conn:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        exhaust_sql,
+                        (
+                            source_kind,
+                            _strip_nul(source_id),
+                            _SOURCE_RETRY_MAX_CLAIM_ATTEMPTS,
+                        ),
+                    )
+                    exhausted = cur.fetchall()
+        except Exception as exc:
+            # 掃き出しの失敗は claim を止めない（従来挙動へフォールバック）。
+            logger.warning(
+                "ingest_source_retry_exhaust_sweep_unavailable",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                error_type=type(exc).__name__,
+            )
+            exhausted = []
+        if exhausted:
+            # 黙った切り捨て禁止: 何を諦めたかを行単位で必ず残す。
+            logger.warning(
+                "ingest_source_retry_exhausted",
+                request_id=request_id,
+                source_kind=source_kind,
+                source_id_ref=_external_id_ref(source_id),
+                count=len(exhausted),
+                items=[
+                    {
+                        "external_id_ref": _external_id_ref(str(row["external_id"])),
+                        "reason": str(row["reason"]),
+                        "attempt_count": int(row["attempt_count"]),
+                    }
+                    for row in exhausted
+                ],
+            )
+            for row in exhausted:
+                # 指紋を known-invalid 化。以後の walk/changes で同じバイト列に再遭遇しても
+                # 取り込み前に suppress される（_known_invalid_office_reason 経由）。
+                self.record_invalid_source(
+                    str(row["source_type"]),
+                    str(row["external_id"]),
+                    md5_checksum=(
+                        str(row["md5_checksum"]) if row["md5_checksum"] is not None else None
+                    ),
+                    size_bytes=(int(row["size_bytes"]) if row["size_bytes"] is not None else None),
+                    reason=f"retry_exhausted:{row['reason']}",
+                    mime_type=str(row["mime_type"]),
+                    validator_schema_version=str(row["validator_schema_version"]),
+                    request_id=request_id,
+                    metadata={"exhausted_by": "claim_due_source_retries"},
+                )
         sql = """
             WITH due AS (
                 SELECT id
@@ -696,7 +775,8 @@ class IngestRepository:
             UPDATE ingest_source_retries AS retry
             SET lease_owner = %s,
                 lease_token = gen_random_uuid()::text,
-                lease_expires_at = now() + (%s * interval '1 second')
+                lease_expires_at = now() + (%s * interval '1 second'),
+                attempt_count = retry.attempt_count + 1
             FROM due
             WHERE retry.id = due.id
             RETURNING retry.external_id,

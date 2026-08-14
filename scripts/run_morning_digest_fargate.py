@@ -719,6 +719,10 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
             url=url,
             request_id=f"reminder-{uuid.uuid4().hex[:8]}",
             title=title,
+            end_iso=str(getattr(ev, "end_at", "") or ""),
+            location=str(
+                getattr(ev, "location_display", "") or getattr(ev, "location_scrubbed", "") or ""
+            ),
         )
         if ok:
             count += 1

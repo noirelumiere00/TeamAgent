@@ -273,10 +273,16 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
     assert retries[0].attempt_count == 2
     assert retries[0].lease_owner == "req-2"
     assert retries[0].lease_token == "opaque-claim-token"
-    sql, params, row_factory = conn.executed[0]
-    assert "FOR UPDATE SKIP LOCKED" in sql
+    # claim の前に毒行掃き出し（attempt_count 上限）が走るため、claim 文は
+    # 内容マーカーで特定する（2026-08-14 毒ループ対策）。
+    sweep_sql, _sweep_params, _ = conn.executed[0]
+    assert "status = 'resolved'" in sweep_sql
+    assert "attempt_count >= %s" in sweep_sql
+    claim = next(e for e in conn.executed if "FOR UPDATE SKIP LOCKED" in e[0])
+    sql, params, row_factory = claim
     assert "lease_token = gen_random_uuid()::text" in sql
     assert "lease_expires_at" in sql
+    assert "attempt_count = retry.attempt_count + 1" in sql
     assert params[:4] == ("gdrive", "FOLDER1", 1000, "req-2")
     assert row_factory is not None
     assert pgvector.connection_calls[0]["user_role"] == "admin"
@@ -299,7 +305,9 @@ def test_claim_failure_is_not_indistinguishable_from_an_empty_retry_queue() -> N
             request_id="req-2",
         )
 
-    assert len(conn.executed) == 1
+    # 1回目: 掃き出し(失敗・fail-open)→claim(失敗・fail-closed) の2文。
+    # 2回目: schema probe が閉じており SQL は1文も発行されない（従来の保護は不変）。
+    assert len(conn.executed) == 2
 
 
 def test_record_retry_is_request_idempotent_and_has_exponential_backoff() -> None:

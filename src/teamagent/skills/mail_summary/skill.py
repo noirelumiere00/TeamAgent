@@ -31,6 +31,7 @@ from teamagent.adapters.gmail_client import (
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_summary.schema import (
     MailHighlight,
@@ -127,7 +128,8 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
                 MailHighlight(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=str(scrub_value(msg.headers.get("Subject", "")))[:80],
-                    occurred_at=_iso_or_none(msg.internal_date_ms),
+                    occurred_at=jst_iso_or_none(msg.internal_date_ms),
+                    occurred_at_display=jst_display_or_none(msg.internal_date_ms),
                 )
             )
             body = extract_plain_text(msg.payload)
@@ -231,15 +233,3 @@ def _mask_email(email: str) -> str:
 
 def _short_hash(n: int) -> str:
     return hashlib.sha256(str(n).encode()).hexdigest()[:8]
-
-
-def _iso_or_none(internal_date_ms: int | None) -> str | None:
-    if not internal_date_ms:
-        return None
-    import datetime
-
-    return (
-        datetime.datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=datetime.UTC)
-        .replace(microsecond=0)
-        .isoformat()
-    )

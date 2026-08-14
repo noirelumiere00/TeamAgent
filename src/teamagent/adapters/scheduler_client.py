@@ -82,11 +82,15 @@ class SchedulerClient:
         url: str,
         request_id: str,
         title: str = "",
+        end_iso: str = "",
+        location: str = "",
     ) -> bool:
         """予定開始前リマインドのワンタイム schedule を登録する（冪等・fail-open）。
 
         payload: channel・開始時刻 HH:MM・リンク・short title（≤60字・本人DM表示用）。
         title は「本人の予定を本人 DM に出す」ためだけに載せる（2026-07-14・§docstring）。
+        end_hm / loc は 2026-08-14 拡張（「実際の予定を表示させたい」）。旧 Lambda は
+        未知キーを無視するだけなので配備順に依存しない。
         """
         name = reminder_schedule_name(channel, start_iso)
         fire_jst = fire_at.astimezone(_JST)
@@ -102,6 +106,20 @@ class SchedulerClient:
         short_title = (title or "").strip().replace("\n", " ")
         if short_title:
             payload["title"] = short_title[:60]
+        end_hm = ""
+        try:
+            if end_iso:
+                parsed_end = _dt.datetime.fromisoformat(end_iso)
+                if parsed_end.tzinfo is None:
+                    parsed_end = parsed_end.replace(tzinfo=_JST)
+                end_hm = parsed_end.astimezone(_JST).strftime("%H:%M")
+        except (ValueError, TypeError):
+            pass
+        if end_hm:
+            payload["end_hm"] = end_hm
+        short_loc = (location or "").strip().replace("\n", " ")
+        if short_loc:
+            payload["loc"] = short_loc[:60]
         started = time.perf_counter()
         try:
             self._ensure_client().create_schedule(

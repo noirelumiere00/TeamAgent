@@ -650,7 +650,11 @@ def test_retry_sql_is_idempotent_leased_and_resets_on_fingerprint_change() -> No
                     WHERE external_id = 'opaque-retry-id'
                     """
                 )
-                assert cur.fetchone() == (2, True, True)
+                assert cur.fetchone() == (
+                    3,
+                    True,
+                    True,
+                )  # enqueue=1+claim=1+再record=1（claim加算は2026-08-14毒ループ対策）
 
             assert repository.resolve_source_retry(
                 source_kind="gdrive",

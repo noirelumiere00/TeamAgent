@@ -493,7 +493,12 @@ def _format_mail_summary_response(out: Any) -> str:
         lines += ["", "*— 対象メール —*"]
         for h in out.highlights:
             subj = h.subject_scrubbed or "(件名なし)"
-            when = f"（{h.occurred_at[:10]}）" if h.occurred_at else ""
+            display = getattr(h, "occurred_at_display", None)
+            when = (
+                f"（{display}）"
+                if display
+                else (f"（{h.occurred_at[:10]}）" if h.occurred_at else "")
+            )
             lines.append(f"• {h.counterpart_masked} / {subj}{when}")
     if out.total_cost_usd:
         lines += ["", f"_概算コスト: ${out.total_cost_usd:.4f}_"]

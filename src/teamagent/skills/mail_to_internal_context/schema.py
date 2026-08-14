@@ -53,7 +53,14 @@ class MailSignal(BaseModel):
     )
     latest_at: str | None = Field(
         default=None,
-        description="直近メールの日時（ISO 文字列・判明時のみ）",
+        description="直近メールの日時（ISO・JST +09:00・判明時のみ）",
+    )
+    latest_at_display: str | None = Field(
+        default=None,
+        description=(
+            "受信日時のJST表示（例 08/13(木) 19:00）。"
+            "表示にはこの文字列をそのまま使い、ISO から時刻・曜日を再計算しないこと"
+        ),
     )
 
 

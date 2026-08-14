@@ -252,10 +252,13 @@ def format_case_candidates(
 
     ranked: list[tuple[int, float, int, CaseCandidate]] = []
     ordinal = 0
-    for source, hits in (
+    source_pairs: tuple[
+        tuple[Literal["report_rag", "general_news-tv"], Sequence[SearchHitOut]], ...
+    ] = (
         ("report_rag", report_hits),
         ("general_news-tv", slack_hits),
-    ):
+    )
+    for source, hits in source_pairs:
         for hit in hits:
             ordinal += 1
             if hit.is_low_confidence:
