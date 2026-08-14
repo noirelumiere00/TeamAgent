@@ -54,7 +54,9 @@ logger = structlog.get_logger(__name__)
 MAX_INGEST_CHUNKS_PER_FILE = 2_000
 MAX_INGEST_EMBEDDINGS_PER_FILE = 2_000
 MAX_INGEST_EXTRACTED_CHARACTERS = 2_000_000
-_SOURCE_RETRY_LEASE_SECONDS = 1800  # 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕（2026-08-14 毒ループ対策）
+# 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕
+# （2026-08-14 毒ループ対策で 600→1800）。
+_SOURCE_RETRY_LEASE_SECONDS = 1800
 _SOURCE_RETRY_HEARTBEAT_SECONDS = 120.0
 _CONNECTOR_VALIDATOR_METADATA_KEY = "office_validator_schema_version"
 

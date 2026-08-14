@@ -25,7 +25,9 @@ from teamagent.adapters.pgvector_client import PgVectorClient
 logger = structlog.get_logger(__name__)
 
 _SCHEMA_REPROBE_SECONDS = 60.0
-_SOURCE_RETRY_LEASE_SECONDS = 1800  # 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕（2026-08-14 毒ループ対策）
+# 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕
+# （2026-08-14 毒ループ対策で 600→1800）。
+_SOURCE_RETRY_LEASE_SECONDS = 1800
 # claim（=処理着手）回数の上限。毒ファイル（決定論的に失敗するのに pending に残る行）が
 # 毎日 claim → lease 切れ → cursor 停止を永続させた実測（2026-08-10〜13）への直接対策。
 # 上限到達行は claim 前に invalid_source へ掃き出し、必ずログで可視化する（黙った切り捨て禁止）。
