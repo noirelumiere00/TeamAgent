@@ -5,7 +5,8 @@
 
 設計:
 - 検索＋要約は SearchSkill をそのまま再利用（Phase1 の自動分類フィルタも効く）。
-- ヒットの source_uri から Drive file_id を解決し download_file_bytes で実体取得。
+- gdrive ヒットは source_uri、gsheets/slack ヒットは search が資料名解決した
+  Drive 実ファイル URL（h.url）から file_id を解決し download_file_bytes で実体取得。
 - 依頼者本人（ctx.metadata["user_email"]）の DM を開いて upload_file で添付する。
 - skill.run は同期だが dispatch が thread 実行するため、Slack 非同期呼び出しは asyncio.run で駆動。
 - どこで失敗しても要約テキストは返す（fail-open）。
@@ -36,6 +37,19 @@ logger = structlog.get_logger(__name__)
 
 _DRIVE_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]+)")
 _DRIVE_QUERY_ID_RE = re.compile(r"[?&]id=([A-Za-z0-9_-]+)")
+# 解決済み URL から file_id を取るのは「アップロード実体ファイル」の形だけに限定する。
+# ナレッジシート行の自リンク（docs.google.com/spreadsheets/...）や
+# Google ネイティブ文書（docs.google.com/document|presentation/...）を誤って候補化しない
+# （後者は download_file_bytes が get_media 専用で export 未対応のため配信不能）。
+_DRIVE_BINARY_FILE_URL_RE = re.compile(r"https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)")
+
+
+def extract_drive_binary_file_id(url: str | None) -> str | None:
+    """resolved URL（http(s)）からアップロード実体ファイルの file_id だけを取り出す。"""
+    if not url:
+        return None
+    m = _DRIVE_BINARY_FILE_URL_RE.search(url.strip())
+    return m.group(1) if m else None
 
 
 def extract_drive_file_id(source_uri: str | None) -> str | None:
@@ -52,32 +66,6 @@ def extract_drive_file_id(source_uri: str | None) -> str | None:
     m2 = _DRIVE_QUERY_ID_RE.search(s)
     if m2:
         return m2.group(1)
-    return None
-
-
-def resolve_hit_drive_file_id(hit: Any) -> str | None:
-    """ヒットから原本 Drive ファイル id を最大限に引き当てる。
-
-    gdrive ヒットは従来どおり source_uri が実体。ナレッジ行(gsheets)や Slack の
-    ヒットでも、検索側のタイトル照合（SearchSkill._resolve_file_urls）が
-    drive_url / url へ原本 Drive URL を解決済みのことがあるため、そちらも試す
-    （2026-08-14 ユーザー指示「資料本体を出す」）。
-
-    ガード: 解決失敗時の url はナレッジシートの行リンク
-    （…/spreadsheets/d/<sheet_id>/…&range=N:N）へフォールバックしており、
-    /d/<id> 正規表現が**シート本体の id を誤抽出**する。range= を含む URL は
-    行リンクとみなして拒否する（原本が Google Sheets ファイルでも webViewLink
-    に range= は付かない）。Slack permalink 等の非 Drive URL は
-    extract_drive_file_id が None を返すので安全。
-    """
-    if getattr(hit, "source_type", None) == "gdrive":
-        return extract_drive_file_id(hit.source_uri)
-    for candidate in (getattr(hit, "drive_url", None), getattr(hit, "url", None)):
-        if not candidate or "range=" in candidate:
-            continue
-        fid = extract_drive_file_id(candidate)
-        if fid:
-            return fid
     return None
 
 
@@ -153,7 +141,8 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             ctx,
         )
 
-        # 2. ヒットから「Drive 実体があり、かつ確信を持って関連が高い資料」だけを配信候補に。
+        # 2. gdrive は source_uri、gsheets/slack は search が資料名解決した
+        #    h.url から Drive 実体を特定し、関連が高い資料だけを配信候補にする。
         #    確信配信ポリシー（無関係/本文なし/別業界を添付しない・"参考"ダンプ廃止）:
         #    - score >= 閾値（rerank relevance スケール。USE_COHERE_RERANK で真の関連度になる）
         #    - 低信頼(is_low_confidence)はスキップ
@@ -166,21 +155,31 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 従来どおりクエリ文字列から推定して別業界の誤添付を防ぐ（設計 E: 明示フィルタ優先）。
         query_industry = input.filter_industry or extract_query_industry(input.query)
         refs: list[KnowledgeRef] = []
-        ref_file_ids: list[str | None] = []  # refs と同順。配信済みマークの照合に使う
+        ref_by_fid: dict[str, list[KnowledgeRef]] = {}
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
+        resolved_candidates = 0
         for h in s_out.hits:
-            file_id = resolve_hit_drive_file_id(h)
-            ref_file_ids.append(file_id)
+            if h.source_type == "gdrive":
+                file_id = extract_drive_file_id(h.source_uri)
+            else:
+                # gsheets 行 / slack ヒット: search が資料名→Drive 実ファイルに
+                # 解決した URL を使う。drive_url は旧 SearchHitOut 呼び出しとの互換用。
+                # 解決失敗時の行自リンク等は実体ファイル形に一致しないため None になる。
+                file_id = extract_drive_binary_file_id(h.url)
+                if file_id is None:
+                    file_id = extract_drive_binary_file_id(h.drive_url)
             ref = KnowledgeRef(
                 title=h.title or h.file_name,
-                url=h.source_uri,
+                url=h.url or h.source_uri,
                 doc_type=h.doc_type,
                 industry=h.industry,
                 score=h.score,
                 delivered=False,
             )
             refs.append(ref)
+            if file_id:
+                ref_by_fid.setdefault(file_id, []).append(ref)
             industry_mismatch = bool(query_industry and h.industry and h.industry != query_industry)
             if (
                 file_id
@@ -191,7 +190,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 and len(candidates) < input.top_k
             ):
                 seen_ids.add(file_id)
-                candidates.append((file_id, _safe_filename(h.title or h.file_name)))
+                candidates.append(
+                    (file_id, _safe_filename(h.resolved_file_name or h.title or h.file_name))
+                )
+                if h.source_type != "gdrive":
+                    resolved_candidates += 1
 
         # 3. 候補ファイルを Drive から取得 → 一時ファイル化。
         prepared: list[tuple[str, str, str]] = []  # (file_id, local_path, filename)
@@ -204,8 +207,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 except Exception:
                     log.warning("knowledge_deliver_download_failed", file_id=file_id)
                     continue
-                path = str(Path(tmpdir) / filename)
+                # sanitize 後に同名となる別ファイルが上書きし合わないよう file_id で区切る
+                # （file_id は [A-Za-z0-9_-] のみでパスとして安全）。
+                path = str(Path(tmpdir) / file_id / filename)
                 try:
+                    Path(path).parent.mkdir(parents=True, exist_ok=True)
                     Path(path).write_bytes(data)
                 except Exception:
                     log.warning("knowledge_deliver_tmpwrite_failed", file_id=file_id)
@@ -265,17 +271,15 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 note = "資料配信に失敗しました（要約のみお返しします）。"
 
         # 配信できたファイルに対応する ref を delivered=True に。
-        # ref.url(=source_uri) からの再解決は行ヒットでシート id を誤抽出するため、
-        # 候補選定と同じ resolve 結果（ref_file_ids・refs と同順）で照合する。
-        if delivered_ids:
-            for ref, fid in zip(refs, ref_file_ids, strict=True):
-                if fid and fid in delivered_ids:
-                    ref.delivered = True
+        for fid in delivered_ids:
+            for ref in ref_by_fid.get(fid, []):
+                ref.delivered = True
 
         log.info(
             "knowledge_deliver_done",
             hits=len(refs),
             candidates=len(candidates),
+            resolved_candidates=resolved_candidates,
             delivered=len(delivered_ids),
             cost_usd=s_out.total_cost_usd,
         )
