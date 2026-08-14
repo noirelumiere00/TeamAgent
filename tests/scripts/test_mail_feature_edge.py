@@ -9,6 +9,7 @@ from __future__ import annotations
 # シナリオ ID（test_E01 等）は大文字を意図的に使うため N802 を無効化。
 # ruff: noqa: N802
 import base64
+import hashlib
 import importlib.util
 import sys
 from dataclasses import dataclass
@@ -149,7 +150,7 @@ class _Bedrock:
         return _Resp(self._t if "分類規則" in str(kw.get("system", "")) else self._d)
 
 
-def _skill(gmail, triage='[{"importance":"high","summary":"x"}]', gcal=None, **kw):
+def _skill(gmail, triage='[{"id":"5feceb66","importance":"high","summary":"x"}]', gcal=None, **kw):
     return MorningDigestSkill(
         token_store=_Tokens({ME: object()}),
         gmail=gmail,
@@ -277,21 +278,32 @@ def test_E20_huge_body_truncated_no_crash():
 
 
 def test_E07_triage_more_items_than_input_no_crash():
-    t = "[" + ",".join(['{"importance":"high","summary":"x"}'] * 5) + "]"
+    # 1通しか無いのに5件返る過剰応答: 対応 id の1件だけ採用し、余剰は無視して落ちない
+    t = (
+        '[{"id":"5feceb66","importance":"high","summary":"x"}'
+        + "".join(f',{{"id":"bogus{i}","importance":"low","summary":"余剰"}}' for i in range(4))
+        + "]"
+    )
     out = _run(_skill(_Gmail([_to_me()]), triage=t), max_drafts=0)  # 1通だが5件返る
     assert len(out.mail_digest) == 1 and out.mail_digest[0].importance == "high"
 
 
 def test_E08_triage_importance_uppercase_whitespace_normalized():
     out = _run(
-        _skill(_Gmail([_to_me()]), triage='[{"importance":" HIGH ","summary":"x"}]'), max_drafts=0
+        _skill(
+            _Gmail([_to_me()]), triage='[{"id":"5feceb66","importance":" HIGH ","summary":"x"}]'
+        ),
+        max_drafts=0,
     )
     assert out.mail_digest[0].importance == "high"
 
 
 def test_E08b_triage_unknown_importance_defaults_medium():
     out = _run(
-        _skill(_Gmail([_to_me()]), triage='[{"importance":"urgent!!","summary":"x"}]'), max_drafts=0
+        _skill(
+            _Gmail([_to_me()]), triage='[{"id":"5feceb66","importance":"urgent!!","summary":"x"}]'
+        ),
+        max_drafts=0,
     )
     assert out.mail_digest[0].importance == "medium"
 
@@ -299,7 +311,8 @@ def test_E08b_triage_unknown_importance_defaults_medium():
 def test_E09_deadline_as_number_coerced():
     out = _run(
         _skill(
-            _Gmail([_to_me()]), triage='[{"importance":"high","summary":"x","deadline":20260630}]'
+            _Gmail([_to_me()]),
+            triage='[{"id":"5feceb66","importance":"high","summary":"x","deadline":20260630}]',
         ),
         max_drafts=0,
     )
@@ -322,7 +335,7 @@ def test_E10_reply_all_over_max_cc_returns_none():
         token_store=_Tokens({ME: object()}),
         gmail=g,
         gcalendar=_GCal([]),
-        bedrock=_Bedrock('[{"importance":"high","summary":"x"}]'),
+        bedrock=_Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]'),
         reply_all=True,
     )
     _run(skill, max_drafts=1)
@@ -331,7 +344,7 @@ def test_E10_reply_all_over_max_cc_returns_none():
 
 def test_E11_create_draft_failure_others_continue():
     msgs = [_to_me(thread="t1", subj="A"), _to_me(thread="t2", subj="B")]
-    t = '[{"importance":"high","summary":"a"},{"importance":"high","summary":"b"}]'
+    t = '[{"id":"5feceb66","importance":"high","summary":"a"},{"id":"6b86b273","importance":"high","summary":"b"}]'
     g = _Gmail(msgs, raise_on_create={"t1"})  # t1 の作成だけ失敗
     out = _run(_skill(g, triage=t), max_drafts=3)
     assert out.drafts_created == 1 and g.created[0]["thread_id"] == "t2"
@@ -342,7 +355,7 @@ def test_E12_none_internal_date_sort_no_crash():
     out = _run(
         _skill(
             _Gmail(msgs),
-            triage='[{"importance":"high","summary":"a"},{"importance":"low","summary":"b"}]',
+            triage='[{"id":"5feceb66","importance":"high","summary":"a"},{"id":"6b86b273","importance":"low","summary":"b"}]',
         ),
         max_drafts=0,
     )
@@ -397,7 +410,7 @@ def test_E21_calendar_failure_does_not_break_mail():
         token_store=_Tokens({ME: object()}),
         gmail=_Gmail([_to_me()]),
         gcalendar=_BoomCal(),
-        bedrock=_Bedrock('[{"importance":"high","summary":"x"}]'),
+        bedrock=_Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]'),
     )
     out = _run(skill, max_drafts=0)
     assert len(out.mail_digest) == 1 and any("calendar" in e for e in out.errors)
@@ -414,7 +427,7 @@ def test_E25_draft_none_text_does_not_create_none_body():
     class _NoneText:
         def converse(self, **kw):
             if "分類規則" in str(kw.get("system", "")):
-                return _Resp('[{"importance":"high","summary":"x"}]')
+                return _Resp('[{"id":"5feceb66","importance":"high","summary":"x"}]')
             return _Resp(None)  # 下書き応答が None
 
     g = _Gmail([_to_me()])
@@ -435,7 +448,7 @@ def test_E26_html_only_mail_uses_snippet_fallback():
         def converse(self, **kw):
             if "分類規則" in str(kw.get("system", "")):
                 captured.append(str(kw.get("messages")))
-                return _Resp('[{"importance":"medium","summary":"x"}]')
+                return _Resp('[{"id":"5feceb66","importance":"medium","summary":"x"}]')
             return _Resp("下書き")
 
     m = _Msg(
@@ -484,7 +497,7 @@ def test_E27_max_drafts_backfills_when_top_candidate_deduped():
     修正後は作成数基準のキャップで tB に繰り上げ created=1。
     """
     msgs = [_to_me(thread="tA", subj="A"), _to_me(thread="tB", subj="B")]
-    t = '[{"importance":"high","summary":"a"},{"importance":"high","summary":"b"}]'
+    t = '[{"id":"5feceb66","importance":"high","summary":"a"},{"id":"6b86b273","importance":"high","summary":"b"}]'
     g = _Gmail(msgs, existing=["tA"])  # tA には既に下書きがある
     out = _run(_skill(g, triage=t), max_drafts=1)
     assert out.drafts_created == 1
@@ -494,7 +507,16 @@ def test_E27_max_drafts_backfills_when_top_candidate_deduped():
 def test_E28_max_drafts_cap_still_enforced_on_created_count():
     """backfill 後も作成数の上限（max_drafts）は厳守する（作りすぎない）。"""
     msgs = [_to_me(thread=f"t{i}", subj=f"s{i}") for i in range(4)]
-    t = "[" + ",".join(['{"importance":"high","summary":"x"}'] * 4) + "]"
+    t = (
+        "["
+        + ",".join(
+            '{"id":"'
+            + hashlib.sha256(str(i).encode()).hexdigest()[:8]
+            + '","importance":"high","summary":"x"}'
+            for i in range(4)
+        )
+        + "]"
+    )
     g = _Gmail(msgs)
     out = _run(_skill(g, triage=t), max_drafts=2)
     assert out.drafts_created == 2 and len(g.created) == 2  # 4候補でも2件で停止
@@ -750,7 +772,7 @@ def test_E40_draft_button_only_for_to_self(monkeypatch):
         internal_date_ms=2,
         thread_id="tC",
     )
-    t = '[{"importance":"high","summary":"a"},{"importance":"high","summary":"b"}]'
+    t = '[{"id":"5feceb66","importance":"high","summary":"a"},{"id":"6b86b273","importance":"high","summary":"b"}]'
     out = _run(_skill(_Gmail([to_self, cc_only]), triage=t), max_drafts=0)
     by = {i.subject_display: i for i in out.mail_digest}
     assert by["To自分"].draft_token != ""  # To自分宛 → 下書きボタンが出る
@@ -822,7 +844,7 @@ def test_E39_is_unread_collected_from_label_ids():
     m_unread.label_ids = ("INBOX", "UNREAD")  # type: ignore[attr-defined]
     m_read = _to_me(thread="tR", subj="既読")
     m_read.label_ids = ("INBOX",)  # type: ignore[attr-defined]
-    t = '[{"importance":"medium","summary":"a"},{"importance":"medium","summary":"b"}]'
+    t = '[{"id":"5feceb66","importance":"medium","summary":"a"},{"id":"6b86b273","importance":"medium","summary":"b"}]'
     out = _run(_skill(_Gmail([m_unread, m_read]), triage=t), max_drafts=0)
     by_subj = {i.subject_display: i.is_unread for i in out.mail_digest}
     assert by_subj.get("未読") is True
