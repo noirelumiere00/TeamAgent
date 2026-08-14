@@ -54,7 +54,7 @@ logger = structlog.get_logger(__name__)
 MAX_INGEST_CHUNKS_PER_FILE = 2_000
 MAX_INGEST_EMBEDDINGS_PER_FILE = 2_000
 MAX_INGEST_EXTRACTED_CHARACTERS = 2_000_000
-_SOURCE_RETRY_LEASE_SECONDS = 600
+_SOURCE_RETRY_LEASE_SECONDS = 1800  # 巨大ファイルの単発 download が heartbeat 間隔を超えても lease が生きる余裕（2026-08-14 毒ループ対策）
 _SOURCE_RETRY_HEARTBEAT_SECONDS = 120.0
 _CONNECTOR_VALIDATOR_METADATA_KEY = "office_validator_schema_version"
 
@@ -483,6 +483,11 @@ _PERSISTENT_OFFICE_INVALID_REASONS = frozenset(
         "unsafe_archive",
         "unsafe_content_volume",
         "encrypted_office",
+        # download_too_large は「サイズ上限を超える固定サイズのファイル」への決定論的
+        # 判定で、再試行しても結果が変わらない。retry queue に残すと lease 毒ループ
+        # （2026-08-10〜13 実測: 7件が毎日 lease 切れ→cursor 停止→gdrive 全断）の
+        # 燃料になるため invalid_source として永続記録し再試行を止める。
+        "download_too_large",
     }
 )
 _PDF_WARNING_REASONS = frozenset(
