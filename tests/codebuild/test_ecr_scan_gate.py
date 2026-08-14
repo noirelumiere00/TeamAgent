@@ -131,13 +131,16 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
         assert record.owner == "s-komata@vectorinc.co.jp"
         assert record.expires_on.isoformat() == "2026-09-22"
 
-    media_payload = json.loads(media.read_text(encoding="utf-8"))
-    assert media_payload == {
-        "schema_version": 1,
-        "stale_exception_policy": "fail",
-        "exceptions": [],
+    # 2026-08-14: media の Alpine python3 3.14.5-r2 にも公開後の新規 MEDIUM が付き
+    # （ECR DB の日次更新）、空レジストリの deny-all ゲートが停止した。core と同じ
+    # 期限つき例外（stale=fail・expires 2026-09-22）で通す裁定。
+    media_records = gate.load_exceptions(media, today=TODAY)
+    assert {(k.cve, k.severity, k.package, k.version) for k in media_records} == {
+        ("CVE-2026-7210", "MEDIUM", "python3", "3.14.5-r2"),
     }
-    assert gate.load_exceptions(media, today=TODAY) == {}
+    for record in media_records.values():
+        assert record.owner == "s-komata@vectorinc.co.jp"
+        assert record.expires_on.isoformat() == "2026-09-22"
 
 
 def test_exact_synthetic_exception_set_passes(tmp_path: Path) -> None:
