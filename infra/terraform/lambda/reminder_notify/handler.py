@@ -72,11 +72,28 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             continue
         start_hm = str(body.get("start_hm") or "")
         url = str(body.get("url") or "")
-        # title は本人の予定（本人 DM 表示用）。60字で切り、山括弧はエスケープしてリンク偽装を防ぐ。
-        title = str(body.get("title") or "").replace("<", "＜").replace(">", "＞")[:60]
-        when = f"（{start_hm}〜）" if start_hm else ""
+
+        # title/loc は本人の予定（本人 DM 表示用）。山括弧はエスケープしてリンク偽装を防ぐ。
+        # end_hm/loc は 2026-08-14 拡張（ユーザー要望「実際の予定を表示させたい」）。
+        # 旧 producer の payload には無いキーなので .get で後方互換。
+        def _safe(value: Any, limit: int) -> str:
+            return str(value or "").replace("<", "＜").replace(">", "＞").strip()[:limit]
+
+        title = _safe(body.get("title"), 60)
+        end_hm = str(body.get("end_hm") or "")
+        loc = _safe(body.get("loc"), 60)
+        if start_hm and end_hm:
+            when = f"（{start_hm}〜{end_hm}"
+        elif start_hm:
+            when = f"（{start_hm}〜"
+        else:
+            when = ""
+        if when:
+            when += f"・{loc}）" if loc else "）"
+        elif loc:
+            when = f"（{loc}）"
         if title:
-            text = f"🔔 まもなく「{title}」があります{when}"
+            text = f"🔔 まもなく: *{title}* {when}".rstrip()
         else:
             text = f"🔔 まもなく予定があります{when}"
         if url:
