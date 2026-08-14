@@ -23,6 +23,9 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+from defusedxml import DefusedXmlException
+from defusedxml.ElementTree import fromstring as defused_fromstring
+
 _ASSET_DIRECTORY = Path("/tmp/teamagent/proposal-builder")  # nosec B108
 _TEMPLATE_PATH = _ASSET_DIRECTORY / "integrated_fmt.pptx"
 _ACCOUNT_DB_PATH = _ASSET_DIRECTORY / "account_db.json"
@@ -471,10 +474,10 @@ def _read_bounded_xml(
     if name not in archive.namelist() or archive.getinfo(name).file_size > maximum_bytes:
         raise ProposalAssetProvisionError("template XML part is missing or exceeds its bound")
     try:
-        # 入力は社内 provision 済み FMT テンプレート zip の XML パートのみ（サイズ上限・
-        # プレースホルダ検査済みの信頼境界内）。stdlib ElementTree は外部実体を解決しない。
-        return ElementTree.fromstring(archive.read(name))  # nosec B314
-    except ElementTree.ParseError:
+        # defusedxml: テンプレは Drive 由来（準非信頼）のため entity 展開等の
+        # XML 攻撃を遮断してから stdlib Element として返す (bandit B314)。
+        return defused_fromstring(archive.read(name))
+    except (ElementTree.ParseError, DefusedXmlException):
         raise ProposalAssetProvisionError("template contains invalid XML") from None
 
 
