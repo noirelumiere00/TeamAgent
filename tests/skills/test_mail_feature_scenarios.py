@@ -10,6 +10,7 @@ from __future__ import annotations
 # シナリオ ID（test_S01 等）は大文字 S を意図的に使うため N802 を無効化。
 # ruff: noqa: N802
 import base64
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -163,14 +164,26 @@ class _BatchFail:
             self.n += 1
             if self.n == 2:
                 raise RuntimeError("batch2 boom")
-            return _Resp("[" + ",".join(['{"importance":"high","summary":"x"}'] * 8) + "]")
+            return _Resp(
+                "["
+                + ",".join(
+                    f'{{"id":"{__import__("hashlib").sha256(str(i).encode()).hexdigest()[:8]}","importance":"high","summary":"x"}}'
+                    for i in range(8)
+                )
+                + "]"
+            )
         return _Resp("下書き")
 
 
 ME = "me@vectorinc.co.jp"
 
 
-def _skill(gmail, triage='[{"importance":"high","summary":"件名の要約"}]', bedrock=None, **kw):
+def _skill(
+    gmail,
+    triage='[{"id":"5feceb66","importance":"high","summary":"件名の要約"}]',
+    bedrock=None,
+    **kw,
+):
     return MorningDigestSkill(
         token_store=_Tokens({ME: object()}),
         gmail=gmail,
@@ -265,7 +278,8 @@ def test_S06_distinct_threads_become_separate_items():
     g = _Gmail([_to_me_high(thread="t1", mid="<1>"), _to_me_high(thread="t2", mid="<2>")])
     out = _run(
         _skill(
-            g, triage='[{"importance":"high","summary":"a"},{"importance":"medium","summary":"b"}]'
+            g,
+            triage='[{"id":"5feceb66","importance":"high","summary":"a"},{"id":"6b86b273","importance":"medium","summary":"b"}]',
         ),
         max_drafts=0,
     )
@@ -287,7 +301,7 @@ def test_S07_get_thread_failure_falls_back_to_get_message():
 
 def test_S08_structured_fields_extracted():
     t = (
-        '[{"importance":"high","summary":"契約の件","deadline":"6/30まで",'
+        '[{"id":"5feceb66","importance":"high","summary":"契約の件","deadline":"6/30まで",'
         '"ask":"署名版を返送","next_step":"法務確認"}]'
     )
     out = _run(_skill(_Gmail([_to_me_high()]), triage=t), max_drafts=0)
@@ -305,9 +319,7 @@ def test_S09_batch_failure_degrades_only_that_batch():
 
 
 def test_S10_truncated_triage_keeps_parsed_not_all_medium():
-    truncated = (
-        '[{"importance":"high","summary":"緊急"}, {"importance":"low","summary":"x"}, {"impo'
-    )
+    truncated = '[{"id":"5feceb66","importance":"high","summary":"緊急"}, {"id":"6b86b273","importance":"low","summary":"x"}, {"impo'
     g = _Gmail(
         [
             _to_me_high(thread="t1", mid="<1>"),
@@ -334,8 +346,8 @@ def test_S12_importance_sort_high_then_medium_then_low():
         ]
     )
     t = (
-        '[{"importance":"low","summary":"a"},{"importance":"high","summary":"b"},'
-        '{"importance":"medium","summary":"c"}]'
+        '[{"id":"5feceb66","importance":"low","summary":"a"},{"id":"6b86b273","importance":"high","summary":"b"},'
+        '{"id":"d4735e3a","importance":"medium","summary":"c"}]'
     )
     out = _run(_skill(g, triage=t), max_drafts=0)
     assert [m.importance for m in out.mail_digest] == ["high", "medium", "low"]
@@ -413,7 +425,10 @@ def test_S18_noreply_sender_no_draft():
 
 def test_S19_non_high_no_draft():
     out = _run(
-        _skill(_Gmail([_to_me_high()]), triage='[{"importance":"medium","summary":"x"}]'),
+        _skill(
+            _Gmail([_to_me_high()]),
+            triage='[{"id":"5feceb66","importance":"medium","summary":"x"}]',
+        ),
         max_drafts=3,
     )
     assert out.drafts_created == 0
@@ -421,7 +436,16 @@ def test_S19_non_high_no_draft():
 
 def test_S20_max_drafts_cap():
     msgs = [_to_me_high(thread=f"t{i}", mid=f"<{i}>") for i in range(5)]
-    t = "[" + ",".join(['{"importance":"high","summary":"x"}'] * 5) + "]"
+    t = (
+        "["
+        + ",".join(
+            '{"id":"'
+            + hashlib.sha256(str(i).encode()).hexdigest()[:8]
+            + '","importance":"high","summary":"x"}'
+            for i in range(5)
+        )
+        + "]"
+    )
     out = _run(_skill(_Gmail(msgs), triage=t), max_drafts=2)
     assert out.drafts_created == 2
 
@@ -466,7 +490,7 @@ def test_S23_reply_all_cc_excludes_self_and_to():
         token_store=_Tokens({ME: object()}),
         gmail=g,
         gcalendar=_GCal(),
-        bedrock=_Bedrock('[{"importance":"high","summary":"x"}]'),
+        bedrock=_Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]'),
         reply_all=True,
     )
     _run(skill, max_drafts=1)
@@ -481,7 +505,7 @@ def test_S24_reply_all_off_cc_none():
         token_store=_Tokens({ME: object()}),
         gmail=g,
         gcalendar=_GCal(),
-        bedrock=_Bedrock('[{"importance":"high","summary":"x"}]'),
+        bedrock=_Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]'),
         reply_all=False,
     )
     _run(skill, max_drafts=1)
@@ -503,7 +527,7 @@ def test_S25_thread_history_passed_to_draft_prompt():
             thread_id="T",
         ),
     ]
-    b = _Bedrock('[{"importance":"high","summary":"x"}]')
+    b = _Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]')
     skill = MorningDigestSkill(
         token_store=_Tokens({ME: object()}),
         gmail=_Gmail(msgs),
@@ -566,7 +590,7 @@ def test_S32_injection_in_body_cannot_escape_frame():
         internal_date_ms=1,
         thread_id="T",
     )
-    b = _Bedrock('[{"importance":"low","summary":"x"}]')
+    b = _Bedrock('[{"id":"5feceb66","importance":"low","summary":"x"}]')
     skill = MorningDigestSkill(
         token_store=_Tokens({ME: object()}), gmail=_Gmail([m]), gcalendar=_GCal(), bedrock=b
     )
@@ -608,7 +632,7 @@ def test_S37_calendar_failure_recorded_mail_continues():
         token_store=_Tokens({ME: object()}),
         gmail=_Gmail([_to_me_high()]),
         gcalendar=_ExplodingGCal(),
-        bedrock=_Bedrock('[{"importance":"high","summary":"x"}]'),
+        bedrock=_Bedrock('[{"id":"5feceb66","importance":"high","summary":"x"}]'),
     )
     out = _run(skill, max_drafts=0)
     assert len(out.mail_digest) == 1 and any("calendar" in e for e in out.errors)

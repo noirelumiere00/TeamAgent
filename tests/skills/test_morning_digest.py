@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -216,16 +217,67 @@ def fake_msgs() -> list[_FakeMsg]:
 
 @pytest.fixture
 def triage_json() -> str:
+    # 2026-08-14 混同対策: 本番プロンプトは id 複写を要求し、skill は id で結合する。
+    # フェイクも本番の応答形を模倣する（id は _short_hash(0..2)）。
     return (
-        '[{"importance": "high", "summary": "契約書の差し戻し対応依頼"},'
-        ' {"importance": "low", "summary": "業界ニュースの共有"},'
-        ' {"importance": "medium", "summary": "資料確認の依頼"}]'
+        '[{"id": "5feceb66", "importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"id": "6b86b273", "importance": "low", "summary": "業界ニュースの共有"},'
+        ' {"id": "d4735e3a", "importance": "medium", "summary": "資料確認の依頼"}]'
     )
 
 
 # ─────────────────────────────────────────────────────────────
 # テスト
 # ─────────────────────────────────────────────────────────────
+
+
+def _blend_skill(fake_msgs, triage: str) -> MorningDigestSkill:
+    return MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=_FakeGmail(fake_msgs),
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock(triage),
+    )
+
+
+def _blend_ctx() -> SkillContext:
+    return SkillContext(request_id="req-blend", metadata={"user_email": "me@vectorinc.co.jp"})
+
+
+def test_triage_joins_by_id_even_when_llm_reorders(fake_msgs) -> None:
+    """LLM が並べ替えて返しても id で正しいメールへ要約が付く（位置紐付け全廃の回帰）。"""
+    shuffled = (
+        '[{"id": "d4735e3a", "importance": "medium", "summary": "資料確認の依頼"},'
+        ' {"id": "5feceb66", "importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"id": "6b86b273", "importance": "low", "summary": "業界ニュースの共有"}]'
+    )
+    out = _blend_skill(fake_msgs, shuffled).run(MorningDigestInput(max_drafts=0), _blend_ctx())
+    # 混同検知の本丸: 「どのメール（実件名）に」どの要約が付いたかを検証する。
+    # 位置紐付けだと並べ替えで隣のメールの要約が付く（封筒と中身の取り違え）。
+    by_subject = {m.subject_display: m.summary for m in out.mail_digest}
+    assert by_subject["Re: 契約書"] == "契約書の差し戻し対応依頼"
+    assert by_subject["FYI: 業界ニュース"] == "業界ニュースの共有"
+    assert by_subject["確認のお願い"] == "資料確認の依頼"
+
+
+def test_triage_dropped_element_degrades_to_metadata_only(fake_msgs) -> None:
+    """LLM が1通を省略したら、そのメールは要約なし（捏造や隣要約の付替えをしない）。
+
+    2026-08-14 実害の再現: 位置紐付けだと省略以降が全ズレし「落とし物メールの封筒に
+    MTG メモの中身」が載る。id 結合では欠落＝空要約に留まる。
+    """
+    dropped_middle = (
+        '[{"id": "5feceb66", "importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"id": "d4735e3a", "importance": "medium", "summary": "資料確認の依頼"}]'
+    )
+    out = _blend_skill(fake_msgs, dropped_middle).run(
+        MorningDigestInput(max_drafts=0), _blend_ctx()
+    )
+    by_subject = {m.subject_display: m.summary for m in out.mail_digest}
+    assert by_subject["Re: 契約書"] == "契約書の差し戻し対応依頼"
+    # 省略された「業界ニュース」へ隣の要約（資料確認）が流れ込まないこと
+    assert by_subject["FYI: 業界ニュース"] == ""  # 欠落＝空要約（メタデータのみ）
+    assert by_subject["確認のお願い"] == "資料確認の依頼"
 
 
 def test_fail_closed_when_user_email_missing(fake_msgs, triage_json) -> None:
@@ -302,7 +354,16 @@ def test_bulk_noreply_and_daily_report_are_hidden_only_from_unread(
         )
         for index, value in enumerate(headers)
     ]
-    triage = "[" + ",".join('{"importance":"high","summary":"要返信"}' for _ in msgs) + "]"
+    triage = (
+        "["
+        + ",".join(
+            '{"id":"'
+            + hashlib.sha256(str(i).encode()).hexdigest()[:8]
+            + '","importance":"high","summary":"要返信"}'
+            for i, _ in enumerate(msgs)
+        )
+        + "]"
+    )
 
     out = _run(_FakeGmail(msgs), triage, max_drafts=0)
 
@@ -349,7 +410,16 @@ def test_bulk_mail_gets_no_draft_button(monkeypatch: pytest.MonkeyPatch) -> None
         )
         for index, value in enumerate(headers)
     ]
-    triage = "[" + ",".join('{"importance":"high","summary":"要返信"}' for _ in msgs) + "]"
+    triage = (
+        "["
+        + ",".join(
+            '{"id":"'
+            + hashlib.sha256(str(i).encode()).hexdigest()[:8]
+            + '","importance":"high","summary":"要返信"}'
+            for i, _ in enumerate(msgs)
+        )
+        + "]"
+    )
 
     out = _run(_FakeGmail(msgs), triage, max_drafts=0)
 
@@ -376,7 +446,7 @@ def test_unread_personal_mail_is_kept_in_morning_digest(
 
     out = _run(
         _FakeGmail([msg]),
-        '[{"importance":"medium","summary":"個別相談"}]',
+        '[{"id":"5feceb66","importance":"medium","summary":"個別相談"}]',
         max_drafts=0,
     )
 
@@ -525,7 +595,7 @@ def test_reply_all_cc_includes_other_recipients() -> None:
         token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
         gmail=fake_gmail,
         gcalendar=_FakeGCal([]),
-        bedrock=_FakeBedrock('[{"importance": "high", "summary": "契約"}]'),
+        bedrock=_FakeBedrock('[{"id": "5feceb66", "importance": "high", "summary": "契約"}]'),
     )
     ctx = SkillContext(request_id="rc", metadata={"user_email": "me@vectorinc.co.jp"})
     out = skill.run(MorningDigestInput(max_drafts=1), ctx)
@@ -545,7 +615,7 @@ def test_reply_all_disabled_sets_no_cc() -> None:
         token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
         gmail=fake_gmail,
         gcalendar=_FakeGCal([]),
-        bedrock=_FakeBedrock('[{"importance": "high", "summary": "契約"}]'),
+        bedrock=_FakeBedrock('[{"id": "5feceb66", "importance": "high", "summary": "契約"}]'),
         reply_all=False,
     )
     ctx = SkillContext(request_id="rc2", metadata={"user_email": "me@vectorinc.co.jp"})
@@ -565,7 +635,9 @@ def test_thread_history_passed_to_model() -> None:
         id="m-prev",
         thread_id="T9",
     )
-    bedrock = _FakeBedrock('[{"importance": "high", "summary": "契約"}]', draft_text="返信本文")
+    bedrock = _FakeBedrock(
+        '[{"id": "5feceb66", "importance": "high", "summary": "契約"}]', draft_text="返信本文"
+    )
     fake_gmail = _FakeGmail([target], thread_msgs=[prior, target])
     skill = MorningDigestSkill(
         token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
@@ -662,7 +734,9 @@ def test_thread_dedupe_one_item_with_count() -> None:
         ),
     ]
     gmail = _FakeGmail([thread[0]], thread_msgs=thread)
-    out = _run(gmail, '[{"importance":"high","summary":"契約の最新"}]', max_drafts=3)
+    out = _run(
+        gmail, '[{"id":"5feceb66","importance":"high","summary":"契約の最新"}]', max_drafts=3
+    )
     assert len(out.mail_digest) == 1
     assert out.mail_digest[0].thread_count == 3
     assert out.drafts_created == 1
@@ -677,7 +751,7 @@ def test_structured_triage_fields_populated() -> None:
         thread_id="T1",
     )
     triage = (
-        '[{"importance":"high","summary":"契約","deadline":"6/30まで",'
+        '[{"id":"5feceb66","importance":"high","summary":"契約","deadline":"6/30まで",'
         '"ask":"署名版を返送","next_step":"法務確認後に返信"}]'
     )
     out = _run(_FakeGmail([msg]), triage, max_drafts=0)
@@ -696,7 +770,7 @@ def test_no_draft_for_cc_only_recipient() -> None:
         thread_id="T1",
     )
     gmail = _FakeGmail([msg])
-    out = _run(gmail, '[{"importance":"high","summary":"x"}]', max_drafts=5)
+    out = _run(gmail, '[{"id":"5feceb66","importance":"high","summary":"x"}]', max_drafts=5)
     assert out.drafts_created == 0
     assert len(gmail.created_drafts) == 0
 
@@ -709,7 +783,7 @@ def test_idempotency_skips_existing_draft_thread() -> None:
         thread_id="thr-1",
     )
     gmail = _FakeGmail([msg], existing_draft_threads=["thr-1"])
-    out = _run(gmail, '[{"importance":"high","summary":"x"}]', max_drafts=5)
+    out = _run(gmail, '[{"id":"5feceb66","importance":"high","summary":"x"}]', max_drafts=5)
     assert out.drafts_created == 0  # 既存下書きスレッドなのでスキップ
     assert len(gmail.created_drafts) == 0
 
@@ -721,7 +795,9 @@ def test_display_fields_unmasked() -> None:
         internal_date_ms=1000,
         thread_id="T1",
     )
-    out = _run(_FakeGmail([msg]), '[{"importance":"high","summary":"x"}]', max_drafts=0)
+    out = _run(
+        _FakeGmail([msg]), '[{"id":"5feceb66","importance":"high","summary":"x"}]', max_drafts=0
+    )
     top = out.mail_digest[0]
     assert top.subject_display == "重要な件"  # 未マスク
     assert top.counterpart_display == "山田太郎"  # 未マスク

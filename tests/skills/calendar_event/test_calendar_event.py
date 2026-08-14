@@ -339,6 +339,7 @@ def test_triage_to_event_token_integration(monkeypatch: pytest.MonkeyPatch) -> N
     triage_json = _json.dumps(
         [
             {
+                "id": "5feceb66",  # _short_hash(0)（id 結合の本番契約に合わせる）
                 "importance": "high",
                 "summary": "定例の確定連絡",
                 "deadline": None,
