@@ -4,9 +4,14 @@
   "private": true,
   "type": "module",
   "description": "ラッコキーワード 検索量スクレイパ。ログイン済みプロファイル(userDataDir)を再利用して月間検索数/SEO難易度を取得。VSEO提案書のkw50生成用。",
-  "bin": { "rakko-scrape": "./scrape.mjs" },
+  "bin": {
+    "rakko-scrape": "./scrape.mjs"
+  },
   "dependencies": {
+    "ip-address": "^10.3.1",
     "puppeteer-core": "^23.0.0"
   },
-  "engines": { "node": ">=20" }
+  "engines": {
+    "node": ">=20"
+  }
 }
