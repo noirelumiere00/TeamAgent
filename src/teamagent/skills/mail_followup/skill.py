@@ -23,10 +23,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import hashlib
 import time
+from collections.abc import Sequence
 from typing import ClassVar, TypeVar
 
 import structlog
