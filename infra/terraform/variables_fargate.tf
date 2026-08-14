@@ -172,6 +172,12 @@ variable "use_schedule_propose_tool" {
   default     = false
 }
 
+variable "use_calendar_freebusy_tool" {
+  description = "calendar_freebusy tool（空き時間の自由文照会）を mcp で有効化。read-only＝freebusy 読み取りのみで書込 API は一切呼ばない。既定 false。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_progress_notify" {
   description = "ツール実行中の進捗表示（v0.3.1 Task7）。ON で mcp が重いツール実行前に『📂 資料を検索しています…』等を Slack へ投稿し完了後に削除する。既定 false。fail-open（送信失敗はツール実行を阻害しない）。bot の chat:write/im:write scope 前提。"
   type        = bool

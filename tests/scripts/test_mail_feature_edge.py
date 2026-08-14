@@ -457,11 +457,13 @@ def test_E26_html_only_mail_uses_snippet_fallback():
 
 
 def test_E24_iso_or_none_treats_epoch_zero_as_valid():
-    from teamagent.skills.morning_digest.skill import _iso_or_none
+    # 2026-08-14 UTC表示バグ根治でローカル _iso_or_none は共通ヘルパー（JST）へ統合。
+    # 「0 は有効な epoch・None のみ不明」の意味論はそのまま維持されていることを検証。
+    from teamagent.skills._shared.timefmt import jst_iso_or_none
 
-    assert _iso_or_none(None) is None
-    assert _iso_or_none(0) == "1970-01-01T00:00:00+00:00"  # 0 は有効な時刻
-    assert _iso_or_none(1718681400000) is not None
+    assert jst_iso_or_none(None) is None
+    assert jst_iso_or_none(0) == "1970-01-01T09:00:00+09:00"  # 0 は有効な時刻（JST 表示）
+    assert jst_iso_or_none(1718681400000) is not None
 
 
 def test_E23_mass_mail_salutation_after_long_preamble_no_draft():

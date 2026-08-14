@@ -40,6 +40,7 @@ variable "runtime_guard_live" {
     enable_kaiwai_classify                  = bool
     use_calendar_event_tool                 = bool
     use_schedule_propose_tool               = bool
+    use_calendar_freebusy_tool              = bool
     enable_progress_notify                  = bool
     use_entity_tags                         = bool
     use_ailavault_deeplinks                 = bool
@@ -531,6 +532,7 @@ locals {
     var.enable_kaiwai_classify == var.runtime_guard_live.enable_kaiwai_classify &&
     var.use_calendar_event_tool == var.runtime_guard_live.use_calendar_event_tool &&
     var.use_schedule_propose_tool == var.runtime_guard_live.use_schedule_propose_tool &&
+    var.use_calendar_freebusy_tool == var.runtime_guard_live.use_calendar_freebusy_tool &&
     var.enable_progress_notify == var.runtime_guard_live.enable_progress_notify &&
     var.use_entity_tags == var.runtime_guard_live.use_entity_tags &&
     var.use_ailavault_deeplinks == var.runtime_guard_live.use_ailavault_deeplinks &&
