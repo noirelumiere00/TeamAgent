@@ -173,6 +173,79 @@ def test_no_gdrive_hits_returns_answer_only() -> None:
     slack.upload_file.assert_not_awaited()
 
 
+_ROW_LINK = "https://docs.google.com/spreadsheets/d/SHEETID99/edit?gid=278#gid=278&range=126:126"
+
+
+def test_row_hit_with_resolved_drive_url_is_delivered() -> None:
+    """ナレッジ行(gsheets)ヒットでも、検索側のタイトル照合が解決した原本 Drive URL
+    （SearchHitOut.url / drive_url）があれば資料本体を添付する（2026-08-14 指示:
+    「しっかり資料本体を出すように」。従来は source_type=='gdrive' 限定で常に候補外だった）。
+    """
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri=_ROW_LINK,
+            url="https://drive.google.com/file/d/FILE67ID/view",
+            title="社内共有情報_花王__KANEBO提案.pdf",
+        ),
+    ]
+    slack = _slack_mock()
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 1
+    assert gdrive.download_file_bytes.call_args.kwargs.get("file_id") == "FILE67ID"
+    assert out.references[0].delivered is True
+
+
+def test_row_hit_drive_url_field_also_delivers() -> None:
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri=_ROW_LINK,
+            drive_url="https://drive.google.com/file/d/FILEDU1/view",
+            title="社内共有情報_花王__melt施策.pdf",
+        ),
+    ]
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=_slack_mock(), gdrive=gdrive)
+    out = skill.run(KnowledgeDeliverInput(query="花王"), _ctx())
+    assert out.delivered_count == 1
+    assert gdrive.download_file_bytes.call_args.kwargs.get("file_id") == "FILEDU1"
+
+
+def test_row_hit_without_resolution_never_attaches_the_sheet_itself() -> None:
+    """解決失敗時の url はシート行リンクへフォールバックする。/d/ 正規表現が
+    シート本体の id を誤抽出し、ナレッジシートごと添付する事故を range= ガードで防ぐ。"""
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri=_ROW_LINK,
+            url=_ROW_LINK,
+            title="社内共有情報_花王__melt",
+        )
+    ]
+    slack = _slack_mock()
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+    out = skill.run(KnowledgeDeliverInput(query="花王"), _ctx())
+
+    assert out.delivered_count == 0
+    gdrive.download_file_bytes.assert_not_called()
+    slack.upload_file.assert_not_awaited()
+
+
+def test_slack_permalink_url_is_not_a_candidate() -> None:
+    permalink = "https://vector.slack.com/archives/C1/p1786000000000000"
+    hits = [_hit(source_type="slack", source_uri="slack://C1/1.2", url=permalink, title="FB")]
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=_slack_mock(), gdrive=gdrive)
+    out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
+    assert out.delivered_count == 0
+    gdrive.download_file_bytes.assert_not_called()
+
+
 def test_no_channel_no_email_skips_delivery() -> None:
     hits = [_hit(source_type="gdrive", source_uri="gdrive://F1", title="a.pdf")]
     slack = _slack_mock()

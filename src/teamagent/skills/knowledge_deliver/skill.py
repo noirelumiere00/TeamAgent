@@ -55,6 +55,32 @@ def extract_drive_file_id(source_uri: str | None) -> str | None:
     return None
 
 
+def resolve_hit_drive_file_id(hit: Any) -> str | None:
+    """ヒットから原本 Drive ファイル id を最大限に引き当てる。
+
+    gdrive ヒットは従来どおり source_uri が実体。ナレッジ行(gsheets)や Slack の
+    ヒットでも、検索側のタイトル照合（SearchSkill._resolve_file_urls）が
+    drive_url / url へ原本 Drive URL を解決済みのことがあるため、そちらも試す
+    （2026-08-14 ユーザー指示「資料本体を出す」）。
+
+    ガード: 解決失敗時の url はナレッジシートの行リンク
+    （…/spreadsheets/d/<sheet_id>/…&range=N:N）へフォールバックしており、
+    /d/<id> 正規表現が**シート本体の id を誤抽出**する。range= を含む URL は
+    行リンクとみなして拒否する（原本が Google Sheets ファイルでも webViewLink
+    に range= は付かない）。Slack permalink 等の非 Drive URL は
+    extract_drive_file_id が None を返すので安全。
+    """
+    if getattr(hit, "source_type", None) == "gdrive":
+        return extract_drive_file_id(hit.source_uri)
+    for candidate in (getattr(hit, "drive_url", None), getattr(hit, "url", None)):
+        if not candidate or "range=" in candidate:
+            continue
+        fid = extract_drive_file_id(candidate)
+        if fid:
+            return fid
+    return None
+
+
 def _safe_filename(name: str | None, *, fallback: str = "document") -> str:
     base = (name or "").strip() or fallback
     base = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", base)
@@ -140,10 +166,12 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         # 従来どおりクエリ文字列から推定して別業界の誤添付を防ぐ（設計 E: 明示フィルタ優先）。
         query_industry = input.filter_industry or extract_query_industry(input.query)
         refs: list[KnowledgeRef] = []
+        ref_file_ids: list[str | None] = []  # refs と同順。配信済みマークの照合に使う
         candidates: list[tuple[str, str]] = []  # (file_id, filename)
         seen_ids: set[str] = set()
         for h in s_out.hits:
-            file_id = extract_drive_file_id(h.source_uri) if h.source_type == "gdrive" else None
+            file_id = resolve_hit_drive_file_id(h)
+            ref_file_ids.append(file_id)
             ref = KnowledgeRef(
                 title=h.title or h.file_name,
                 url=h.source_uri,
@@ -237,13 +265,11 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
                 note = "資料配信に失敗しました（要約のみお返しします）。"
 
         # 配信できたファイルに対応する ref を delivered=True に。
+        # ref.url(=source_uri) からの再解決は行ヒットでシート id を誤抽出するため、
+        # 候補選定と同じ resolve 結果（ref_file_ids・refs と同順）で照合する。
         if delivered_ids:
-            delivered_urls = {
-                fid: True for fid in delivered_ids
-            }  # file_id ベース。ref は url から再解決して照合。
-            for ref in refs:
-                fid = extract_drive_file_id(ref.url)
-                if fid and fid in delivered_urls:
+            for ref, fid in zip(refs, ref_file_ids, strict=True):
+                if fid and fid in delivered_ids:
                     ref.delivered = True
 
         log.info(
