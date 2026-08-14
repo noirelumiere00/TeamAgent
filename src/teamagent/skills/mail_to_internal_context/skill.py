@@ -31,6 +31,7 @@ from teamagent.adapters.gmail_client import GmailClient, extract_thread_particip
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_to_internal_context.schema import (
     InternalRef,
@@ -183,7 +184,8 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
         return MailSignal(
             recent_count=kept,
             counterpart_domains=domains[:6],  # G3: ドメインのみ・数件
-            latest_at=_iso_or_none(latest_ms),
+            latest_at=jst_iso_or_none(latest_ms),
+            latest_at_display=jst_display_or_none(latest_ms),
         )
 
     def _resolve_gmail(self, requester: str) -> GmailClient:
@@ -295,15 +297,3 @@ def _mask_email(email: str) -> str:
     local, _, domain = email.partition("@")
     head = local[:1] if local else ""
     return f"{head}***@{domain}"
-
-
-def _iso_or_none(internal_date_ms: int | None) -> str | None:
-    if not internal_date_ms:
-        return None
-    import datetime
-
-    return (
-        datetime.datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=datetime.UTC)
-        .replace(microsecond=0)
-        .isoformat()
-    )

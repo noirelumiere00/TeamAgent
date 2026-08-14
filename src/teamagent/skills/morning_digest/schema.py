@@ -66,7 +66,14 @@ class MailDigestItem(BaseModel):
     importance: str = Field(default="medium", description="優先度: high / medium / low")
     is_unread: bool = Field(default=False, description="未読(UNREAD)か＝未開封セクション用")
     to_self: bool = Field(default=False, description="本人が To に直接いるか＝要返信(下書き)の条件")
-    occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
+    occurred_at: str | None = Field(default=None, description="受信日時（ISO・JST +09:00・判明時）")
+    occurred_at_display: str | None = Field(
+        default=None,
+        description=(
+            "受信日時のJST表示（例 08/13(木) 19:00）。"
+            "表示にはこの文字列をそのまま使い、ISO から時刻・曜日を再計算しないこと"
+        ),
+    )
     summary: str = Field(default="", max_length=200, description="1 行サマリ（LLM 生成）")
     has_draft: bool = Field(default=False, description="この件で下書きを生成したか")
     # --- 構造化抽出（LLM triage）---

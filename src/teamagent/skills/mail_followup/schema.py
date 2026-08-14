@@ -51,7 +51,14 @@ class FollowupItem(BaseModel):
     idle_days: int = Field(ge=0, description="相手から最後に来てからの経過日数")
     occurred_at: str | None = Field(
         default=None,
-        description="相手から最後に来た日時（ISO 文字列・判明時のみ）",
+        description="相手から最後に来た日時（ISO・JST +09:00・判明時のみ）",
+    )
+    occurred_at_display: str | None = Field(
+        default=None,
+        description=(
+            "受信日時のJST表示（例 08/13(木) 19:00）。"
+            "表示にはこの文字列をそのまま使い、ISO から時刻・曜日を再計算しないこと"
+        ),
     )
     evidence_ref: str = Field(
         description="根拠メールの参照（messageId のハッシュ。生 ID は入れない）",

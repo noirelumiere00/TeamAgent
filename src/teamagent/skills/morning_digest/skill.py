@@ -48,6 +48,7 @@ from teamagent.skills._shared.mail_compose import (
     is_mass_or_impersonal,
     should_skip_mail,
 )
+from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest.draft_token import (
     encode_draft_token,
@@ -385,7 +386,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 MailDigestItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=str(scrub_value(anchor.headers.get("Subject", "")))[:80],
-                    occurred_at=_iso_or_none(anchor.internal_date_ms),
+                    occurred_at=jst_iso_or_none(anchor.internal_date_ms),
+                    occurred_at_display=jst_display_or_none(anchor.internal_date_ms),
                     thread_count=len(thread),
                     sender_label=_sender_label_ja(priority),
                     is_unread=is_unread,
@@ -1039,17 +1041,6 @@ def _gmail_thread_url(thread_id: str) -> str:
     """そのスレッドの Gmail 直リンク（確認するボタン用）。All Mail で開く＝必ず存在する。"""
     tid = str(thread_id or "")
     return f"https://mail.google.com/mail/u/0/#all/{tid}" if tid else ""
-
-
-def _iso_or_none(internal_date_ms: int | None) -> str | None:
-    # 0（=1970-01-01）は有効な epoch。None だけを「不明」として扱う。
-    if internal_date_ms is None:
-        return None
-    return (
-        _dt.datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=_dt.UTC)
-        .replace(microsecond=0)
-        .isoformat()
-    )
 
 
 def _safe_json_array(text: str) -> list[dict[str, Any]]:

@@ -35,6 +35,7 @@ from teamagent.adapters.gmail_client import GmailClient, extract_thread_particip
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_followup.schema import (
     FollowupItem,
@@ -165,7 +166,8 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
                     subject_scrubbed=subject,
                     idle_days=idle_days,
-                    occurred_at=_iso_or_none(anchor.internal_date_ms),
+                    occurred_at=jst_iso_or_none(anchor.internal_date_ms),
+                    occurred_at_display=jst_display_or_none(anchor.internal_date_ms),
                     evidence_ref=_hash_id(anchor.id),
                 )
             )
@@ -303,19 +305,6 @@ def _idle_days(internal_date_ms: int | None, now_ms: int) -> int:
     if delta < 0:
         return 0
     return delta // _MS_PER_DAY
-
-
-def _iso_or_none(internal_date_ms: int | None) -> str | None:
-    if not internal_date_ms:
-        return None
-    # epoch ms → ISO(UTC, 秒精度)。日付の手掛かりのみ（PII ではない）。
-    import datetime
-
-    return (
-        datetime.datetime.fromtimestamp(int(internal_date_ms) / 1000, tz=datetime.UTC)
-        .replace(microsecond=0)
-        .isoformat()
-    )
 
 
 def _hash_id(msg_id: str) -> str:

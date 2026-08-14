@@ -28,7 +28,14 @@ class MailHighlight(BaseModel):
 
     counterpart_masked: str = Field(description="相手アドレスのマスク表示")
     subject_scrubbed: str = Field(default="", max_length=80, description="件名（マスク後・短縮）")
-    occurred_at: str | None = Field(default=None, description="受信日時（ISO・判明時）")
+    occurred_at: str | None = Field(default=None, description="受信日時（ISO・JST +09:00・判明時）")
+    occurred_at_display: str | None = Field(
+        default=None,
+        description=(
+            "受信日時のJST表示（例 08/13(木) 19:00）。"
+            "表示にはこの文字列をそのまま使い、ISO から時刻・曜日を再計算しないこと"
+        ),
+    )
 
 
 class MailSummaryOutput(BaseModel):
