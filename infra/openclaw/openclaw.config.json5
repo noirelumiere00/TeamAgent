@@ -189,6 +189,9 @@
             "calendar_event",
             // v0.3 Task4: 🗓日程候補提案ボタン（候補入り下書き＋透明仮予定・送信/招待なし・既定OFF）
             "schedule_propose",
+            // calendar_freebusy: 「空いてる？」「◯分どこに入る？」の自由文空き時間照会。
+            // read-only＝freebusy 読み取りのみ・書込APIなし（USE_CALENDAR_FREEBUSY_TOOL=1・既定OFF）。
+            "calendar_freebusy",
             // morning_digest は EventBridge Scheduled Taskに加えてmention-capable MCPにもincludeされる。
             // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
             // USE_MORNING_DIGEST_TOOL=1 が必要。

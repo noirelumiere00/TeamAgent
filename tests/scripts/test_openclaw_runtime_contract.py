@@ -1156,7 +1156,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 30
+    assert len(inventory_names) == len(set(inventory_names)) == 31
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1218,6 +1218,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     effects = {tool["effect"] for tool in scope["tools"]}
     assert "gmail-draft-write-no-send" in effects
     assert "calendar-write-no-invite" in effects
+    assert "calendar-freebusy-read-only" in effects
     assert "external-job-submit-s3-write" in effects
     tools_by_name = {tool["name"]: tool for tool in scope["tools"]}
     assert tools_by_name["x_voice_search"]["effect"] == "external-read-scrape-analysis-report-write"

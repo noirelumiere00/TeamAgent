@@ -412,6 +412,21 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 自由文の空き時間照会ツール（「空いてる？」「◯分どこに入る？」）。read-only＝
+    # freebusy 読み取りのみで書込 API は一切呼ばない。**既定 OFF**。
+    if _envflag("USE_CALENDAR_FREEBUSY_TOOL"):
+        from teamagent.skills.calendar_freebusy.skill import CalendarFreeBusySkill
+
+        freebusy_store = _build_token_store()
+        specs.append(
+            ToolSpec(
+                CalendarFreeBusySkill.name,
+                CalendarFreeBusySkill.description,
+                CalendarFreeBusySkill,
+                factory=lambda: CalendarFreeBusySkill(token_store=freebusy_store),
+            )
+        )
+
     # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
     # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
     # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。

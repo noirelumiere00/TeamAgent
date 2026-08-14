@@ -165,6 +165,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SCHEDULE_PROPOSE_TOOL"] }
     },
     {
+      "name": "calendar_freebusy",
+      "effect": "calendar-freebusy-read-only",
+      "terraformGate": "use_calendar_freebusy_tool",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_CALENDAR_FREEBUSY_TOOL"] }
+    },
+    {
       "name": "morning_digest",
       "effect": "gmail-calendar-slack-read-analysis",
       "terraformGate": "USE_MORNING_DIGEST_TOOL=true; DRAFT_ON_DEMAND_ONLY=true on the mention-capable MCP runtime",
