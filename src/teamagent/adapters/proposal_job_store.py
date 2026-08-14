@@ -127,8 +127,8 @@ class ProposalJobStore:
 
         if not self.uses_dynamodb:
             with self._memory_lock:
-                row = self._memory.get(job_id)
-                return copy.deepcopy(row) if row is not None else None
+                cached = self._memory.get(job_id)
+                return copy.deepcopy(cached) if cached is not None else None
 
         response = self._client().get_item(
             TableName=self._table_name,

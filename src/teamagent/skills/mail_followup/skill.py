@@ -23,9 +23,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import hashlib
 import time
-from typing import ClassVar
+from typing import ClassVar, TypeVar
 
 import structlog
 from pydantic import BaseModel
@@ -279,10 +281,13 @@ def _is_from_requester(msg: object, requester: str) -> bool:
     )
 
 
-def _dedupe_refs_by_thread(refs: list[object]) -> list[object]:
+_RefT = TypeVar("_RefT")
+
+
+def _dedupe_refs_by_thread(refs: Sequence[_RefT]) -> list[_RefT]:
     """list_messages の newest-first 順を保ち、thread_id ごとに最初の ref だけを残す。"""
     seen: set[str] = set()
-    unique: list[object] = []
+    unique: list[_RefT] = []
     for ref in refs:
         thread_id = str(getattr(ref, "thread_id", "") or "")
         if not thread_id or thread_id in seen:
