@@ -438,6 +438,9 @@ def test_slack_acl_membership_change_forces_reupsert(
 
     ACL をハッシュ対象から外す変異はここで赤くなる（権限変更の取りこぼしは
     コストでなくセキュリティの問題なので、専用テストで固定する）。
+    メンバーは「追加」でなく**同人数の交代**（U002 → U003）にする: 追加だと
+    metadata の channel_member_count 経由でもハッシュが変わり、acl_emails を
+    ハッシュから外す変異を検知できない（変異テストで実証済みの隠蔽経路）。
     """
     monkeypatch.setenv("INGEST_DIFFERENTIAL", "1")
     bedrock = _install_counting_classifier(monkeypatch)
@@ -445,8 +448,8 @@ def test_slack_acl_membership_change_forces_reupsert(
     repo = _FakeDifferentialRepository()
     assert _run_slack(repo, request_id="r1") == (1, 1)
 
-    # 本文は同一のままメンバー U003 が join
-    _install_slack_channel(monkeypatch, member_ids=("U001", "U002", "U003"))
+    # 本文・メンバー数は同一のまま U002 が leave し U003 が join（ACL だけが差分）
+    _install_slack_channel(monkeypatch, member_ids=("U001", "U003"))
     collector = _IngestUnchangedCollector()
     assert _run_slack(repo, collector=collector, request_id="r2") == (1, 1)
 
