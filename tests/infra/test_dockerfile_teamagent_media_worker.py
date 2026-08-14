@@ -26,7 +26,7 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 CHROMIUM_BASE_DIGEST = "ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04"
 NODE_BUILDER_DIGEST = "eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-APK_LOCK_SHA256 = "12d493793e95c7958f02e95f9131403013ece1ed68d41b00fb34112013bdcb3b"
+APK_LOCK_SHA256 = "f807b1a02ffc9109eea879c0322593d990f7cd491fd3b74412657b961894795c"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -61,9 +61,9 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         ),
         "NODE_PACKAGE_VERSION": "24.18.1-r0",
         "NODE_BINARY_SHA256": ("b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2"),
-        "PYTHON_PACKAGE_VERSION": "3.14.5-r2",
+        "PYTHON_PACKAGE_VERSION": "3.14.7-r0",
         "PYTHON_BINARY_SHA256": (
-            "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
+            "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8"
         ),
     }
     for name, value in expected.items():
@@ -95,7 +95,9 @@ def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
 
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
-    assert len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 240
+    assert (
+        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 242
+    )  # 2026-08-14 python 3.14.7-r0 バンプで expat/gdbm が新規依存
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
