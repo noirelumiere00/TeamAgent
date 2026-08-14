@@ -338,6 +338,7 @@ def test_classify_bedrock_failure_with_rules_returns_flags_only() -> None:
         title="提案書テンプレート", text="x", request_id="r"
     )
     assert cls == DocClassification(is_template=True)
+    assert cls is not None and cls.should_carry_forward is True
 
 
 def test_classify_bedrock_failure_without_rules_stays_none() -> None:
@@ -468,3 +469,4 @@ def test_classify_bedrock_failure_with_folder_rule_returns_flags_only() -> None:
         title="ふつうのタイトル", text="x", request_id="r", folder_name="03_定期報告"
     )
     assert cls == DocClassification(is_recurring=True)
+    assert cls is not None and cls.should_carry_forward is True

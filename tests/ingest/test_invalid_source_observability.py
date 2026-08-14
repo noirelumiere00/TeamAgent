@@ -82,6 +82,12 @@ class _Repository:
         self.reconciliation_counts: dict[str, int] = {}
         self.reconciliation_resolutions: list[str] = []
 
+    def get_document_classification_metadata(
+        self,
+        document_keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        return {}
+
     def find_invalid_source_reason(
         self,
         source_type: str,

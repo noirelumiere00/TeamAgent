@@ -46,7 +46,7 @@ from teamagent.ingest.ops_alert import IngestOpsAlerter
 from teamagent.ingest.repository import ChunkUpsert, DocumentUpsert, IngestRepository
 
 if TYPE_CHECKING:
-    from teamagent.ingest.classify import DocClassifier
+    from teamagent.ingest.classify import DocClassification, DocClassifier
     from teamagent.ingest.contextualize import ChunkContextualizer
 
 logger = structlog.get_logger(__name__)
@@ -197,6 +197,37 @@ def _envflag(name: str, default: str = "false") -> bool:
     これが無いと ``"true\n"`` 等の末尾空白付き値が無効化されて意図せず OFF 扱いになる。
     """
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
+
+
+def _load_classification_metadata_for_carry_forward(
+    repository: IngestRepository,
+    document_keys: list[tuple[str, str]],
+    *,
+    dry_run: bool,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """carry-forward 用の既存分類を一括取得する（既定 ON）。
+
+    読み出し失敗を空結果には倒さない。carry-forward が必要な run でそのまま upsert を
+    続けると既存分類を消すため、例外を呼び出し元へ伝播して書き込みを止める。
+    """
+    if dry_run or not document_keys or not _envflag("USE_CLS_CARRY_FORWARD", "true"):
+        return {}
+    return repository.get_document_classification_metadata(document_keys)
+
+
+def _classification_metadata_or_carry_forward(
+    classification: DocClassification | None,
+    existing_metadata: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """分類成功時は新結果だけ、未実行・失敗時だけ既存分類を返す。"""
+    carry_forward_enabled = _envflag("USE_CLS_CARRY_FORWARD", "true")
+    if classification is not None and (
+        not carry_forward_enabled or not classification.should_carry_forward
+    ):
+        return dict(classification.as_metadata())
+    if not carry_forward_enabled:
+        return {}
+    return dict(existing_metadata or {})
 
 
 def _envint(name: str, default: int) -> int:
@@ -1327,6 +1358,15 @@ def _ingest_slack_channel(
         request_id=request_id,
         limit=100,
     )
+    existing_classification_metadata = _load_classification_metadata_for_carry_forward(
+        repository,
+        [
+            ("slack", f"{spec.channel_id}:{parent.thread_ts or parent.ts}")
+            for parent in batch.messages
+            if parent.is_top_level
+        ],
+        dry_run=dry_run,
+    )
 
     for parent in batch.messages:
         if not parent.is_top_level:
@@ -1376,6 +1416,7 @@ def _ingest_slack_channel(
         # 失敗しても取り込みは継続（fail-open）。cls_* キーは client_name 等の既存キーと
         # 衝突しないので update でマージする。contextualize より前（元の thread 本文）に実行。
         thread_title = f"{spec.channel_name} {parent.ts}"
+        classification = None
         if classifier is not None:
             try:
                 classification = classifier.classify(
@@ -1388,8 +1429,12 @@ def _ingest_slack_channel(
                     thread_ts=parent.thread_ts or parent.ts,
                 )
                 classification = None
-            if classification is not None:
-                doc_metadata.update(classification.as_metadata())
+        doc_metadata.update(
+            _classification_metadata_or_carry_forward(
+                classification,
+                existing_classification_metadata.get(("slack", external_id)),
+            )
+        )
 
         doc = DocumentUpsert(
             source_type="slack",
@@ -2054,6 +2099,12 @@ def _ingest_gdrive_folder(
         selected_ids = changed_ids | retry_ids
         files = [f for f in files if f.id in selected_ids]
 
+    classification_metadata_by_document = _load_classification_metadata_for_carry_forward(
+        repository,
+        [("gdrive", f.id) for f in files],
+        dry_run=dry_run,
+    )
+
     for f in files:
         # Day 7 (2026-05-27): 1 ファイル失敗で全体停止しないよう全体を try/except でラップ。
         # 既存の細かい try/except (download/extract) はそのまま生かす。
@@ -2091,6 +2142,9 @@ def _ingest_gdrive_folder(
                 lease_heartbeat=lease_heartbeat,
                 retry_lease_owner=retry_lease_owners.get(f.id),
                 retry_lease_token=retry_lease_tokens.get(f.id),
+                existing_classification_metadata=classification_metadata_by_document.get(
+                    ("gdrive", f.id)
+                ),
             )
             docs_n += docs_added
             chunks_n += chunks_added
@@ -2262,6 +2316,7 @@ def _process_one_gdrive_file(
     lease_heartbeat: Callable[[bool], None] | None = None,
     retry_lease_owner: str | None = None,
     retry_lease_token: str | None = None,
+    existing_classification_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[int, int]:
     """1 ファイル分の処理を切り出し（_ingest_gdrive_folder から呼ばれる）。
 
@@ -2936,7 +2991,7 @@ def _process_one_gdrive_file(
 
     # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
     # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。失敗しても取り込みは継続（fail-open）。
-    cls_metadata: dict[str, str] = {}
+    classification = None
     if classifier is not None and chunks:
         if lease_heartbeat is not None:
             lease_heartbeat(False)
@@ -2958,10 +3013,12 @@ def _process_one_gdrive_file(
         except Exception:
             logger.exception("gdrive_classify_unexpected", file_id=f.id, file_name=f.name)
             classification = None
-        if classification is not None:
-            cls_metadata = classification.as_metadata()
         if lease_heartbeat is not None:
             lease_heartbeat(False)
+    cls_metadata = _classification_metadata_or_carry_forward(
+        classification,
+        existing_classification_metadata,
+    )
 
     # Contextual Retrieval: 抽出ページを結合した全文を full_text に文脈前置詞を付与する。
     # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換（fail-open）。
@@ -3292,6 +3349,12 @@ def _ingest_shared_drives_crawl(
         )
         if changed_ids is not None:
             files = [f for f in files if f.id in changed_ids]
+
+        classification_metadata_by_document = _load_classification_metadata_for_carry_forward(
+            repository,
+            [("gdrive", f.id) for f in files],
+            dry_run=dry_run,
+        )
 
         for f in files:
             # M4: file ループ本体を file 単位 try/except で囲む。folder 経路（~838）は
@@ -3629,7 +3692,7 @@ def _ingest_shared_drives_crawl(
                 # （DriveFile.parents は ID のみ）、drive.name はドライブ名であって
                 # フォルダ名ではない（広すぎて配下全ファイルへの誤爆リスクが勝る）。
                 # 親フォルダ名が取れる gdrive_folders 経路のみ実装（正直なスコープ）。
-                cls_metadata: dict[str, str] = {}
+                classification = None
                 if classifier is not None and chunks:
                     sample = "\n".join(c.content for c in chunks[:8])
                     try:
@@ -3644,8 +3707,10 @@ def _ingest_shared_drives_crawl(
                             drive_id=drive.id,
                         )
                         classification = None
-                    if classification is not None:
-                        cls_metadata = classification.as_metadata()
+                cls_metadata = _classification_metadata_or_carry_forward(
+                    classification,
+                    classification_metadata_by_document.get(("gdrive", f.id)),
+                )
 
                 # Contextual Retrieval: 抽出ページ結合の全文を full_text に文脈前置詞を付与する。
                 # contextualizer が None（既定）なら chunks はそのまま＝従来挙動・完全後方互換。
@@ -3839,6 +3904,14 @@ def _ingest_gsheet(
         )
         if not tab_rows.headers:
             continue
+        existing_classification_metadata = _load_classification_metadata_for_carry_forward(
+            repository,
+            [
+                ("gsheets", build_external_id(spec.sheet_id, tab.gid, row_idx))
+                for row_idx, _row in enumerate(tab_rows.rows, start=2)
+            ],
+            dry_run=dry_run,
+        )
         for row_idx, row in enumerate(tab_rows.rows, start=2):  # 1=headers, 2 から data
             text = format_row_as_document(tab_rows.headers, row)
             if not text.strip():
@@ -3909,7 +3982,7 @@ def _ingest_gsheet(
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
             # 失敗しても取り込みは継続（fail-open）。
-            cls_metadata: dict[str, str] = {}
+            classification = None
             if classifier is not None:
                 try:
                     classification = classifier.classify(
@@ -3923,11 +3996,17 @@ def _ingest_gsheet(
                         row_idx=row_idx,
                     )
                     classification = None
-                if classification is not None:
-                    cls_metadata = classification.as_metadata()
+            cls_metadata = _classification_metadata_or_carry_forward(
+                classification,
+                existing_classification_metadata.get(("gsheets", external_id)),
+            )
+            if classification is not None and (
+                not _envflag("USE_CLS_CARRY_FORWARD", "true")
+                or not classification.should_carry_forward
+            ):
                 # Haiku の再分類で監査済みの公開業種が揺れないよう、exact external_id と
                 # 人間入力由来 client_name の二重一致で 3 行だけ決定論的に固定する。
-                # classifier 無効時は従来どおり cls_* を付けない（feature gate を維持）。
+                # 分類失敗時は既存値をそのまま持ち越すため、成功時だけ override を適用する。
                 cls_metadata = apply_gsheet_industry_override(
                     external_id,
                     client_name=derived_knowledge_client,

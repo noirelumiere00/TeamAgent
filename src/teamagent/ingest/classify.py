@@ -254,6 +254,9 @@ class DocClassification:
     is_recurring: bool = False
     # 名寄せタグ（2026-07-14・USE_ENTITY_TAGS）: 資料に登場する取引先/代理店/ブランド/コラボ名。
     entities: tuple[str, ...] = field(default_factory=tuple)
+    # Bedrock / JSON / 空分類の失敗後に決定論ルールや entities だけを返した部分結果。
+    # metadata には出さず、比較にも含めない。pipeline が既存分類を消さないためだけに使う。
+    should_carry_forward: bool = field(default=False, compare=False, repr=False)
 
     def is_empty(self) -> bool:
         return not (
@@ -380,7 +383,11 @@ class DocClassifier:
         """LLM 失敗時のフォールバック: ルールが立っていれば 2 フラグだけの分類を返す。"""
         if not (is_template or is_recurring):
             return None
-        return DocClassification(is_template=is_template, is_recurring=is_recurring)
+        return DocClassification(
+            is_template=is_template,
+            is_recurring=is_recurring,
+            should_carry_forward=True,
+        )
 
     def classify(
         self, *, title: str, text: str, request_id: str, folder_name: str = ""
@@ -404,7 +411,7 @@ class DocClassifier:
         if not ents:
             return cls
         if cls is None:
-            return DocClassification(entities=tuple(ents))
+            return DocClassification(entities=tuple(ents), should_carry_forward=True)
         return replace(cls, entities=tuple(ents))
 
     def _classify_core(

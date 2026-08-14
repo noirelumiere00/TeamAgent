@@ -34,6 +34,19 @@ _SOURCE_RETRY_LEASE_SECONDS = 1800
 _SOURCE_RETRY_MAX_CLAIM_ATTEMPTS = 5
 _SOURCE_RETRY_LIMIT = 1000
 _INGEST_APPLICATION_NAME = "teamagent-ingest"
+_CLASSIFICATION_METADATA_KEYS = (
+    "cls_project",
+    "cls_industry",
+    "cls_doc_type",
+    "cls_phase",
+    "cls_solution",
+    "cls_budget",
+    "cls_target",
+    "cls_is_template",
+    "cls_is_recurring",
+    "cls_entities",
+    "industry",
+)
 
 
 def _external_id_ref(external_id: str) -> str:
@@ -463,6 +476,64 @@ class IngestRepository:
         if row is None or row["md5_checksum"] is None:
             return None
         return str(row["md5_checksum"])
+
+    def get_document_classification_metadata(
+        self,
+        document_keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """既存 documents の分類 metadata だけを複合キー単位で一括取得する。
+
+        ``documents.metadata`` 全体は返さず、分類器が管理するキーと後方互換の
+        ``industry`` だけを DB 側で射影する。空入力なら DB 接続を開かない。
+        """
+        if not document_keys:
+            return {}
+
+        normalized_keys = list(
+            dict.fromkeys(
+                (source_type, _strip_nul(external_id) or "")
+                for source_type, external_id in document_keys
+            )
+        )
+        source_types = [source_type for source_type, _external_id in normalized_keys]
+        external_ids = [external_id for _source_type, external_id in normalized_keys]
+        sql = """
+            SELECT d.source_type::text AS source_type,
+                   d.external_id,
+                   COALESCE(
+                       (
+                           SELECT jsonb_object_agg(entry.key, entry.value)
+                           FROM jsonb_each(d.metadata) AS entry(key, value)
+                           WHERE entry.key = ANY(%s::text[])
+                       ),
+                       '{}'::jsonb
+                   ) AS classification_metadata
+            FROM documents AS d
+            JOIN unnest(%s::text[], %s::text[])
+                AS requested(source_type, external_id)
+              ON d.source_type = requested.source_type::document_source_type
+             AND d.external_id = requested.external_id
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    sql,
+                    (
+                        list(_CLASSIFICATION_METADATA_KEYS),
+                        source_types,
+                        external_ids,
+                    ),
+                )
+                rows = cur.fetchall()
+
+        allowed_keys = frozenset(_CLASSIFICATION_METADATA_KEYS)
+        result: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            metadata = row["classification_metadata"] or {}
+            result[(str(row["source_type"]), str(row["external_id"]))] = {
+                str(key): value for key, value in dict(metadata).items() if key in allowed_keys
+            }
+        return result
 
     def find_invalid_source_reason(
         self,
