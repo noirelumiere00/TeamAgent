@@ -129,13 +129,13 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3",
-          "sha256": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4"
+          "sha256": "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8"
         }
       ],
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "12d493793e95c7958f02e95f9131403013ece1ed68d41b00fb34112013bdcb3b",
+          "value": "f807b1a02ffc9109eea879c0322593d990f7cd491fd3b74412657b961894795c",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [
@@ -298,7 +298,7 @@
         },
         {
           "key": "binary.python.sha256",
-          "value": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4",
+          "value": "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8",
           "build_arg": "PYTHON_BINARY_SHA256",
           "oci_label": "io.teamagent.contract.python-binary-sha256",
           "dockerfile_uses": [
@@ -361,7 +361,7 @@
         },
         {
           "key": "component.python.version",
-          "value": "3.14.5",
+          "value": "3.14.7",
           "build_arg": "PYTHON_VERSION",
           "oci_label": "io.teamagent.contract.python-version",
           "dockerfile_uses": [
@@ -406,7 +406,7 @@
         },
         {
           "key": "package.python.version",
-          "value": "3.14.5-r2",
+          "value": "3.14.7-r0",
           "build_arg": "PYTHON_PACKAGE_VERSION",
           "oci_label": "io.teamagent.contract.python-package-version",
           "dockerfile_uses": [

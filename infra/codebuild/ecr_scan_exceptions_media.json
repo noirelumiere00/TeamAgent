@@ -1,15 +1,5 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": [
-    {
-      "cve": "CVE-2026-7210",
-      "severity": "MEDIUM",
-      "package": "python3",
-      "version": "3.14.5-r2",
-      "owner": "s-komata@vectorinc.co.jp",
-      "reason": "Alpine 3.23 python3 3.14.5-r2 に公開後掲載された MEDIUM。ベース更新は契約リップル再演になるため期限つき例外で通す（2026-08-14 裁定・core の CVE-2025-15366/CVE-2026-6879 と同型）。",
-      "expires_on": "2026-09-22"
-    }
-  ]
+  "exceptions": []
 }

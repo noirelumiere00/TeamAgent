@@ -33,7 +33,7 @@ from teamagent.media.operations import execute_operation
 from teamagent.media.security import validate_acquire_url
 
 EXPECTED_BINARY_HASHES = {
-    "/usr/bin/python3": "95f57c0555bdc6237e2a70f1c88e0bcef04732131f2023728ea9c5baa63964c4",
+    "/usr/bin/python3": "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8",
     "/usr/bin/node": "b9fb3beb6d397b33284966e6c1efb2056d6bc9ccc030f6f92caaac121c87a8e1",
     "/usr/bin/ffmpeg": "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba",
     "/usr/lib/chromium/chromium": (

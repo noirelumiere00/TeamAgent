@@ -131,16 +131,17 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
         assert record.owner == "s-komata@vectorinc.co.jp"
         assert record.expires_on.isoformat() == "2026-09-22"
 
-    # 2026-08-14: media の Alpine python3 3.14.5-r2 にも公開後の新規 MEDIUM が付き
-    # （ECR DB の日次更新）、空レジストリの deny-all ゲートが停止した。core と同じ
-    # 期限つき例外（stale=fail・expires 2026-09-22）で通す裁定。
-    media_records = gate.load_exceptions(media, today=TODAY)
-    assert {(k.cve, k.severity, k.package, k.version) for k in media_records} == {
-        ("CVE-2026-7210", "MEDIUM", "python3", "3.14.5-r2"),
+    # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
+    # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
+    # 通せないと実測で確定。fix 版 3.14.7-r0 が存在したため python バンプで根治し、
+    # 例外は同時に撤去した（残すと finding 消滅で stale=fail が発火する）。media は空へ復帰。
+    media_payload = json.loads(media.read_text(encoding="utf-8"))
+    assert media_payload == {
+        "schema_version": 1,
+        "stale_exception_policy": "fail",
+        "exceptions": [],
     }
-    for record in media_records.values():
-        assert record.owner == "s-komata@vectorinc.co.jp"
-        assert record.expires_on.isoformat() == "2026-09-22"
+    assert gate.load_exceptions(media, today=TODAY) == {}
 
 
 def test_exact_synthetic_exception_set_passes(tmp_path: Path) -> None:
