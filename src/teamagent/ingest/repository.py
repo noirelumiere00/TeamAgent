@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,7 @@ import structlog
 from psycopg.rows import dict_row
 
 from teamagent.adapters.pgvector_client import PgVectorClient
+from teamagent.ingest.content_hash import INGEST_CONTENT_HASH_KEY
 
 logger = structlog.get_logger(__name__)
 
@@ -463,6 +465,38 @@ class IngestRepository:
         if row is None or row["md5_checksum"] is None:
             return None
         return str(row["md5_checksum"])
+
+    def get_document_content_hashes(
+        self, source_type: str, external_ids: Sequence[str]
+    ) -> dict[str, str]:
+        """差分取り込み（``INGEST_DIFFERENTIAL``）用: 保存済み content_sha256 を一括取得する。
+
+        ``external_ids`` のうち ``documents.metadata`` に ``content_sha256`` を持つものだけを
+        ``{external_id: sha256}`` で返す（未登録・未保存の id は含めない）。gdrive 経路の
+        ``get_document_checksum``（1 件ずつ）と違い、gsheets の行 / slack のスレッド単位
+        （1 run ≒ 947 件・接続を 1 件ずつ開くと接続数が件数に比例する）を
+        source あたり 1 クエリで引くための batched 版。
+        """
+        ids = [stripped for e in external_ids if (stripped := _strip_nul(e))]
+        if not ids:
+            return {}
+        sql = """
+            SELECT external_id, metadata ->> %s AS content_hash
+            FROM documents
+            WHERE source_type = %s::document_source_type
+              AND external_id = ANY(%s)
+              AND metadata ? %s
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    sql,
+                    (INGEST_CONTENT_HASH_KEY, source_type, ids, INGEST_CONTENT_HASH_KEY),
+                )
+                rows = cur.fetchall()
+        return {
+            str(row["external_id"]): str(row["content_hash"]) for row in rows if row["content_hash"]
+        }
 
     def find_invalid_source_reason(
         self,

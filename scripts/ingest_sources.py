@@ -134,6 +134,7 @@ def main() -> int:
     for kind, stats in result.by_kind.items():
         print(
             f"  [{kind}] documents={stats.documents_upserted} "
+            f"documents_unchanged={stats.documents_unchanged} "
             f"chunks={stats.chunks_inserted} "
             f"sources_processed={stats.sources_processed} "
             f"sources_skipped={stats.sources_skipped} "
@@ -147,6 +148,7 @@ def main() -> int:
             print(f"    warning_reasons={dict(sorted(stats.warning_reasons.items()))}")
     print(
         f"  TOTAL documents={result.total_documents()} "
+        f"documents_unchanged={result.total_documents_unchanged()} "
         f"errors={result.total_errors()} "
         f"warnings={result.total_warnings()} "
         f"outcome={result.outcome}"
