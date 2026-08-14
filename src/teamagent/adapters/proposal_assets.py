@@ -471,7 +471,9 @@ def _read_bounded_xml(
     if name not in archive.namelist() or archive.getinfo(name).file_size > maximum_bytes:
         raise ProposalAssetProvisionError("template XML part is missing or exceeds its bound")
     try:
-        return ElementTree.fromstring(archive.read(name))
+        # 入力は社内 provision 済み FMT テンプレート zip の XML パートのみ（サイズ上限・
+        # プレースホルダ検査済みの信頼境界内）。stdlib ElementTree は外部実体を解決しない。
+        return ElementTree.fromstring(archive.read(name))  # nosec B314
     except ElementTree.ParseError:
         raise ProposalAssetProvisionError("template contains invalid XML") from None
 
