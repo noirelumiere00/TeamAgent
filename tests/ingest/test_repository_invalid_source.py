@@ -275,7 +275,7 @@ def test_claim_due_retries_uses_skip_locked_and_maps_dict_rows() -> None:
     assert retries[0].lease_token == "opaque-claim-token"
     # claim の前に毒行掃き出し（attempt_count 上限）が走るため、claim 文は
     # 内容マーカーで特定する（2026-08-14 毒ループ対策）。
-    sweep_sql, sweep_params, _ = conn.executed[0]
+    sweep_sql, _sweep_params, _ = conn.executed[0]
     assert "status = 'resolved'" in sweep_sql
     assert "attempt_count >= %s" in sweep_sql
     claim = next(e for e in conn.executed if "FOR UPDATE SKIP LOCKED" in e[0])
