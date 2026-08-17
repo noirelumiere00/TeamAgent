@@ -27,7 +27,13 @@ class ChunkLimitExceededError(ValueError):
     """ファイル単位のchunk hard capを超えた。"""
 
 
-def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str]]:
+def extract_pdf_pages(
+    data: bytes,
+    *,
+    min_chars: int = 0,
+    max_pages: int | None = None,
+    max_total_chars: int | None = None,
+) -> list[tuple[int, str]]:
     """PDF バイナリをページごとのテキストに分解する。
 
     戻り値: [(page_num_1_indexed, text), ...]
@@ -39,6 +45,14 @@ def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str
             ``min_chars`` 未満のページを空扱いで除外する。スキャン PDF
             （pypdf がテキスト 0／極小を返す）を「中身あり」と誤認しないため。
             既定 0 は現行挙動（空文字だけ除外）。後方互換。
+        max_pages: 走査するページ数の hard cap。``None``（既定）は無制限＝現行挙動。
+            ``office_extract`` の zip-bomb 上限群に相当するガードが PDF 側には
+            無かったため新設（高圧縮 PDF の decompression bomb で mcp タスクを
+            OOM させられる経路を塞ぐ）。超過分は走査せず打ち切る。
+        max_total_chars: 保持する抽出本文の総文字数 hard cap。``None``（既定）は
+            無制限＝現行挙動。``office_extract.MAX_OFFICE_EXTRACTED_CHARACTERS``
+            と同じ役割。到達した時点でページ走査を打ち切る（最後のページは
+            cap までで切り詰める）。
 
     Notes:
         暗号化 PDF は ``reader.is_encrypted`` を見て空パスワードで decrypt を試み、
@@ -49,6 +63,11 @@ def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str
         ``min_chars > 0`` でページが落ちた場合、歩留まり観測用に
         ``low_text_yield`` 構造化ログを出す（戻り値の形は現状維持）。
     """
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be positive")
+    if max_total_chars is not None and max_total_chars < 1:
+        raise ValueError("max_total_chars must be positive")
+
     from pypdf import PdfReader
 
     reader = PdfReader(BytesIO(data))
@@ -73,7 +92,19 @@ def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str
     pages: list[tuple[int, str]] = []
     total_pages = 0
     low_text_pages = 0
+    kept_chars = 0
     for i, page in enumerate(reader.pages, start=1):
+        # --- hard cap（decompression bomb の走査を打ち切る）---
+        # cap 到達判定は extract_text() の **前** に置く。後ろに置くと「1 ページ余分に
+        # 展開してから止める」ことになり、1 ページで数百 MB 展開する PDF を止められない。
+        if max_pages is not None and total_pages >= max_pages:
+            logger.info("pdf_page_cap_reached", max_pages=max_pages, kept_pages=len(pages))
+            break
+        if max_total_chars is not None and kept_chars >= max_total_chars:
+            logger.info(
+                "pdf_char_cap_reached", max_total_chars=max_total_chars, kept_pages=len(pages)
+            )
+            break
         total_pages += 1
         text = page.extract_text() or ""
         # 連続空白を 1 スペースに圧縮
@@ -84,6 +115,12 @@ def extract_pdf_pages(data: bytes, *, min_chars: int = 0) -> list[tuple[int, str
         if min_chars > 0 and len(text) < min_chars:
             low_text_pages += 1
             continue
+        # --- 総文字数 hard cap（office 側の MAX_OFFICE_EXTRACTED_CHARACTERS と同役）---
+        if max_total_chars is not None:
+            remaining = max_total_chars - kept_chars
+            if len(text) > remaining:
+                text = text[:remaining]
+        kept_chars += len(text)
         pages.append((i, text))
 
     # --- D: 低テキスト歩留まりの観測用ログ（戻り値の形は維持） ---

@@ -178,6 +178,12 @@ variable "use_calendar_freebusy_tool" {
   default     = false
 }
 
+variable "use_attachment_tools" {
+  description = "attachment_assist tool（会話に添付されたファイルの読取・加工＝要約/修正案/議事録FMT/集計/英訳）を mcp で有効化。read-only＝Slack へのファイル生成・再配信はしない（P2 は別フラグ）。読取対象は署名済み caller claim 由来の会話に添付されたファイルのみ（file_id/URL/channel は入力に持たない）。既定 false。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_progress_notify" {
   description = "ツール実行中の進捗表示（v0.3.1 Task7）。ON で mcp が重いツール実行前に『📂 資料を検索しています…』等を Slack へ投稿し完了後に削除する。既定 false。fail-open（送信失敗はツール実行を阻害しない）。bot の chat:write/im:write scope 前提。"
   type        = bool

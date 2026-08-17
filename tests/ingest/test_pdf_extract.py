@@ -325,3 +325,55 @@ def test_extract_pdf_pages_not_encrypted_skips_decrypt(
 
     fake_reader.decrypt.assert_not_called()
     assert pages == [(1, "通常本文")]
+
+
+# -----------------------------------------------------------
+# hard cap: max_pages / max_total_chars（decompression bomb 対策）
+#   office_extract の zip-bomb 上限群に相当するガードが PDF 側には無かった。
+#   既定（None）は無制限＝現行挙動と完全一致であることも固定する。
+# -----------------------------------------------------------
+def test_extract_pdf_pages_caps_default_to_unlimited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定は無制限（後方互換）。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    fake_reader.pages = [_make_fake_page(f"ページ{i}") for i in range(1, 51)]
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    assert len(extract_pdf_pages(b"fake")) == 50
+
+
+def test_extract_pdf_pages_max_pages_stops_scanning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_pages 超過分は extract_text すら呼ばない（走査ごと打ち切る）。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    pages_in = [_make_fake_page(f"ページ{i}") for i in range(1, 11)]
+    fake_reader.pages = pages_in
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    out = extract_pdf_pages(b"fake", max_pages=3)
+    assert [n for n, _ in out] == [1, 2, 3]
+    pages_in[3].extract_text.assert_not_called()
+
+
+def test_extract_pdf_pages_max_total_chars_truncates_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """総文字数 cap に到達したらその場で切り、以降のページは走査しない。"""
+    fake_reader = MagicMock()
+    fake_reader.is_encrypted = False
+    pages_in = [_make_fake_page("あ" * 100) for _ in range(5)]
+    fake_reader.pages = pages_in
+    monkeypatch.setattr("pypdf.PdfReader", lambda _stream: fake_reader)
+
+    out = extract_pdf_pages(b"fake", max_total_chars=250)
+    assert sum(len(t) for _, t in out) == 250
+    assert [n for n, _ in out] == [1, 2, 3]
+    assert len(out[2][1]) == 50  # 3 ページ目は cap までで切られる
+    pages_in[3].extract_text.assert_not_called()
+
+
+def test_extract_pdf_pages_rejects_invalid_caps() -> None:
+    with pytest.raises(ValueError):
+        extract_pdf_pages(b"fake", max_pages=0)
+    with pytest.raises(ValueError):
+        extract_pdf_pages(b"fake", max_total_chars=0)

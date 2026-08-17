@@ -72,6 +72,20 @@ def _scrub_str(s: str) -> str:
     return s
 
 
+def redact_secrets(text: str) -> str:
+    """シークレットだけを redact する（**長さ制限も PII マスクもしない**）。
+
+    ``scrub_value`` は 1 フィールド 2000 文字の hard cap を持つ（Sentry イベントに
+    PDF 全文が乗るのを防ぐため）。資料本文をそのまま LLM へ渡す用途に ``scrub_value``
+    を使うと **本文が黙って 2000 文字で切れる**ので、シークレット除去だけが要る
+    経路（attachment_assist の抽出本文）はこちらを使う。文字数の上限は呼び出し側が
+    自分の要件で明示的に切る（切ったことを利用者に伝える責務も呼び出し側）。
+    """
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[REDACTED_SECRET]", text)
+    return text
+
+
 def scrub_value(value: Any) -> Any:
     """任意の値を再帰的にスクラブする。
 

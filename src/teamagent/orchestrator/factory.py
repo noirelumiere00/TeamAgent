@@ -427,6 +427,24 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。**既定 OFF**。
+    # 読むのは署名済み claim 由来の会話（channel_id/thread_ts）に添付されたファイルだけで、
+    # file_id/URL/channel を入力に持たない＝会話外は構造的に読めない。テキスト返答のみ
+    # （ファイル生成・再配信は P2 の別フラグ）。
+    if _envflag("USE_ATTACHMENT_TOOLS"):
+        from teamagent.skills.attachment_assist.skill import AttachmentAssistSkill
+
+        specs.append(
+            ToolSpec(
+                AttachmentAssistSkill.name,
+                AttachmentAssistSkill.description,
+                AttachmentAssistSkill,
+                # 依存（Slack / ingest / Bedrock）は初回利用時に遅延生成する
+                # ＝フラグ ON だけで env 不足の起動 crash を作らない。
+                factory=lambda: AttachmentAssistSkill(),
+            )
+        )
+
     # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
     # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
     # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。
