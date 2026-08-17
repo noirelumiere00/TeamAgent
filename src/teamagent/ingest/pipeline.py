@@ -30,6 +30,10 @@ import structlog
 
 from teamagent.identity import shared_company_domains_from_env
 from teamagent.ingest.boilerplate import mark_boilerplate
+from teamagent.ingest.content_hash import (
+    INGEST_CONTENT_HASH_KEY,
+    compute_document_content_hash,
+)
 from teamagent.ingest.docdedup import mark_duplicate_documents
 from teamagent.ingest.form_mappings import _normalize_form_label
 from teamagent.ingest.gsheet_classification_overrides import (
@@ -230,6 +234,63 @@ def _envfloat(name: str, default: float) -> float:
         return default
 
 
+def _differential_enabled(*, dry_run: bool) -> bool:
+    """差分取り込み（``INGEST_DIFFERENTIAL``・既定 OFF）が有効か。
+
+    dry-run では常に無効（DB 照合をせず、従来どおり全件を数える＝
+    「dry-run は処理予定の全量を見せる」挙動を維持する）。
+    """
+    return _envflag("INGEST_DIFFERENTIAL") and not dry_run
+
+
+def _differential_pipeline_config(*, classify: bool, contextualize: bool = False) -> dict[str, Any]:
+    """出力へ影響する実行時設定を content hash へ畳み込む（設定切替＝全件再処理）。
+
+    分類 ON/OFF・contextualize ON/OFF・embedder backend が変わった run では
+    全文書のハッシュが不一致になり、スキップせず再処理される（設定を切り替えたのに
+    旧出力が残り続ける、を防ぐ）。
+    """
+    from teamagent.adapters.embeddings_client import resolve_embedder_backend
+
+    return {
+        "classify": classify,
+        "contextualize": contextualize,
+        "embedder_backend": resolve_embedder_backend(),
+    }
+
+
+def _load_stored_content_hashes(
+    repository: IngestRepository,
+    source_type: str,
+    external_ids: list[str],
+    *,
+    request_id: str,
+) -> dict[str, str]:
+    """``INGEST_DIFFERENTIAL`` 用: 保存済み content_sha256 の一括読み出し（fail-open）。
+
+    読み出し失敗は「保存なし」と同じ扱い＝その run は全件を従来どおり再処理する
+    （コスト側へ倒す）。carry-forward（PR#299）の読み出しと違い、こちらは失敗しても
+    データを消さない: スキップしない＝全部再計算して upsert し直すだけなので、
+    fail-open が安全側になる。
+    """
+    if not external_ids:
+        return {}
+    lookup = getattr(repository, "get_document_content_hashes", None)
+    if not callable(lookup):
+        return {}
+    try:
+        return dict(lookup(source_type, external_ids))
+    except Exception as exc:
+        logger.warning(
+            "ingest_content_hash_lookup_failed",
+            request_id=request_id,
+            source_type=source_type,
+            candidate_count=len(external_ids),
+            error_type=type(exc).__name__,
+        )
+        return {}
+
+
 def _disable_corpus_scan_timeouts(conn: Any) -> None:
     """コーパス横断処理の2 timeoutを当該transaction内だけ無制限（0）にする。
 
@@ -357,6 +418,9 @@ class IngestStats:
     errors: list[str] = field(default_factory=list)
     warning_reasons: dict[str, int] = field(default_factory=dict)
     known_invalid_suppressed: int = 0
+    # 差分取り込み（INGEST_DIFFERENTIAL）で「内容不変＝再処理スキップ」と判定した
+    # document 数。黙った省略を禁じるため、run サマリで必ず可視化する。
+    documents_unchanged: int = 0
 
     @property
     def warning_count(self) -> int:
@@ -379,6 +443,9 @@ class IngestResult:
 
     def total_documents(self) -> int:
         return sum(s.documents_upserted for s in self.by_kind.values())
+
+    def total_documents_unchanged(self) -> int:
+        return sum(s.documents_unchanged for s in self.by_kind.values())
 
     def total_errors(self) -> int:
         return sum(len(s.errors) for s in self.by_kind.values())
@@ -459,6 +526,25 @@ class _IngestWarningCollector:
             reasons=reasons,
             suppressed=max(0, after.suppressed - before.suppressed),
         )
+
+
+@dataclass
+class _IngestUnchangedCollector:
+    """kind ごとの documents_unchanged 集計（INGEST_DIFFERENTIAL の可視化用）。
+
+    handler の戻り値 ``(docs_n, chunks_n)`` を widen せずに、run() → handler →
+    ``_run_kind`` の stats へ「内容不変スキップ数」を運ぶ小さな側路
+    （``_IngestWarningCollector`` と同じ受け渡し方式）。
+    """
+
+    _counts: dict[str, int] = field(default_factory=dict)
+
+    def add(self, source_kind: str, count: int) -> None:
+        if count > 0:
+            self._counts[source_kind] = self._counts.get(source_kind, 0) + count
+
+    def count_for(self, source_kind: str) -> int:
+        return self._counts.get(source_kind, 0)
 
 
 _OFFICE_WARNING_REASONS = frozenset(
@@ -1264,6 +1350,7 @@ def _ingest_slack_channel(
     owner_email: str,
     dry_run: bool,
     request_id: str,
+    unchanged_collector: _IngestUnchangedCollector | None = None,
 ) -> tuple[int, int]:
     """1 Slack channel を取り込む。戻り値: (documents 数, chunks 数)。
 
@@ -1328,6 +1415,23 @@ def _ingest_slack_channel(
         limit=100,
     )
 
+    # 差分取り込み（INGEST_DIFFERENTIAL・既定 OFF）: この channel の候補 thread の
+    # 保存済み content hash を 1 クエリで先読みする（fail-open＝失敗時は全件再処理）。
+    differential = _differential_enabled(dry_run=dry_run)
+    stored_content_hashes: dict[str, str] = {}
+    if differential:
+        stored_content_hashes = _load_stored_content_hashes(
+            repository,
+            "slack",
+            [
+                f"{spec.channel_id}:{parent.thread_ts or parent.ts}"
+                for parent in batch.messages
+                if parent.is_top_level
+            ],
+            request_id=request_id,
+        )
+    unchanged_n = 0
+
     for parent in batch.messages:
         if not parent.is_top_level:
             continue
@@ -1371,6 +1475,38 @@ def _ingest_slack_channel(
             if derived_client_name:
                 doc_metadata["client_name"] = derived_client_name
 
+        # 差分取り込み: 分類（Bedrock）より前に、upsert 入力すべての正規化ハッシュを
+        # 計算し、保存済みと一致したら分類・embedding・upsert を丸ごとスキップする。
+        # doc_metadata はこの時点で cls_* 合流前＝「入力 metadata」そのもの。
+        # ACL（acl_emails / acl_groups）を含むため、メンバー変動があれば必ず再 upsert される。
+        content_hash: str | None = None
+        if differential:
+            content_hash = compute_document_content_hash(
+                source_type="slack",
+                external_id=external_id,
+                text=text,
+                title=f"{spec.channel_name} {parent.ts}",
+                source_uri=f"slack://{spec.channel_id}/{parent.thread_ts or parent.ts}",
+                owner_email=owner_email,
+                acl_emails=acl_emails,
+                acl_groups=_company_acl_groups(),
+                metadata=doc_metadata,
+                modified_at=_slack_message_modified_at(parent.thread_ts or parent.ts),
+                pipeline_config=_differential_pipeline_config(
+                    classify=classifier is not None,
+                    contextualize=contextualizer is not None,
+                ),
+            )
+            if stored_content_hashes.get(external_id) == content_hash:
+                unchanged_n += 1
+                logger.info(
+                    "ingest_document_unchanged_skipped",
+                    request_id=request_id,
+                    source_type="slack",
+                    external_id_ref=_external_id_ref(external_id),
+                )
+                continue
+
         # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
         # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
         # 失敗しても取り込みは継続（fail-open）。cls_* キーは client_name 等の既存キーと
@@ -1390,6 +1526,12 @@ def _ingest_slack_channel(
                 classification = None
             if classification is not None:
                 doc_metadata.update(classification.as_metadata())
+
+        # 差分取り込み: 次回 run の照合用に content hash を metadata へ保存する
+        # （gdrive 経路が md5_checksum を保存するのと同じ流儀。OFF なら一切書かない
+        # ＝従来とバイト等価の metadata）。
+        if content_hash is not None:
+            doc_metadata[INGEST_CONTENT_HASH_KEY] = content_hash
 
         doc = DocumentUpsert(
             source_type="slack",
@@ -1423,12 +1565,15 @@ def _ingest_slack_channel(
         if not dry_run:
             repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
 
+    if unchanged_collector is not None:
+        unchanged_collector.add("slack", unchanged_n)
     logger.info(
         "ingest_slack_channel_done",
         channel_id=spec.channel_id,
         channel_name=spec.channel_name,
         documents=docs_n,
         chunks=chunks_n,
+        documents_unchanged=unchanged_n,
         dry_run=dry_run,
     )
     return docs_n, chunks_n
@@ -3796,6 +3941,7 @@ def _ingest_gsheet(
     owner_email: str,
     dry_run: bool,
     request_id: str,
+    unchanged_collector: _IngestUnchangedCollector | None = None,
 ) -> tuple[int, int]:
     """1 Sheet を取り込む（row_unit=True で 1 行 = 1 document）。"""
     from teamagent.adapters.gsheets_client import (
@@ -3818,8 +3964,11 @@ def _ingest_gsheet(
     # ナレッジ自動分類（USE_DOC_CLASSIFY=1 のときだけ非 None。sheet 単位で 1 回構築）。
     # gsheet は row_unit=True（1 行 = 1 document = 1 chunk）なので contextualizer は付けない。
     classifier = build_classifier_from_env()
+    # 差分取り込み（INGEST_DIFFERENTIAL・既定 OFF）。
+    differential = _differential_enabled(dry_run=dry_run)
     docs_n = 0
     chunks_n = 0
+    unchanged_n = 0
 
     # 2026-07-06: タブ名は運用でリネームされ得る（命名ルール導入時に実際に発生し
     # "Unable to parse range" で全シート取り込み失敗した）。gid は不変なので、取り込み時に
@@ -3850,6 +3999,19 @@ def _ingest_gsheet(
         )
         if not tab_rows.headers:
             continue
+        # 差分取り込み: この tab の候補行（external_id は gid×row_idx で決定論）の
+        # 保存済み content hash を 1 クエリで先読みする（fail-open＝失敗時は全件再処理）。
+        stored_content_hashes: dict[str, str] = {}
+        if differential:
+            stored_content_hashes = _load_stored_content_hashes(
+                repository,
+                "gsheets",
+                [
+                    build_external_id(spec.sheet_id, tab.gid, row_idx)
+                    for row_idx, _row in enumerate(tab_rows.rows, start=2)
+                ],
+                request_id=request_id,
+            )
         for row_idx, row in enumerate(tab_rows.rows, start=2):  # 1=headers, 2 から data
             text = format_row_as_document(tab_rows.headers, row)
             if not text.strip():
@@ -3917,6 +4079,54 @@ def _ingest_gsheet(
                 if _title_parts:
                     row_title = " ".join(_title_parts)
 
+            # Slack 経路と同じ合成順: 固定キー → fb → knowledge（cls は分類後に後置）。
+            # fb と knowledge はコアヘッダが交差せず同一シートで両方立つことはない。
+            # 人間入力 (fb/knowledge) と Haiku (cls_*) はキーが交差しない設計
+            # (client_type/proposed_menu/knowledge_kind ≠ cls_industry/cls_solution/
+            # cls_doc_type・根拠は form_mappings の module docstring) なので、
+            # cls を後置しても人間入力が Haiku に上書きされることはない＝併存。
+            input_metadata: dict[str, Any] = {
+                **spec.extra_metadata,
+                "tab_name": tab.tab_name,
+                "row_idx": row_idx,
+                **fb_doc_metadata,
+                **knowledge_doc_metadata,
+            }
+            row_source_uri = (
+                f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit"
+                f"?gid={tab.gid}#gid={tab.gid}&range={row_idx}:{row_idx}"
+            )
+
+            # 差分取り込み: 分類（Bedrock）より前に、upsert 入力すべての正規化ハッシュを
+            # 計算し、保存済みと一致したら分類・embedding・upsert を丸ごとスキップする。
+            # input_metadata は cls_* 合流前＝「入力 metadata」そのもの。
+            content_hash: str | None = None
+            if differential:
+                content_hash = compute_document_content_hash(
+                    source_type="gsheets",
+                    external_id=external_id,
+                    text=text,
+                    title=row_title,
+                    source_uri=row_source_uri,
+                    owner_email=owner_email,
+                    acl_emails=[owner_email],
+                    acl_groups=_company_acl_groups(),
+                    metadata=input_metadata,
+                    modified_at=row_modified_at,
+                    pipeline_config=_differential_pipeline_config(
+                        classify=classifier is not None,
+                    ),
+                )
+                if stored_content_hashes.get(external_id) == content_hash:
+                    unchanged_n += 1
+                    logger.info(
+                        "ingest_document_unchanged_skipped",
+                        request_id=request_id,
+                        source_type="gsheets",
+                        external_id_ref=_external_id_ref(external_id),
+                    )
+                    continue
+
             # ナレッジ自動分類（案件 / 業界 / 資料種別 / 商談フェーズ）。
             # USE_DOC_CLASSIFY=1 のときだけ classifier が非 None。
             # 失敗しても取り込みは継続（fail-open）。
@@ -3945,26 +4155,21 @@ def _ingest_gsheet(
                     classification_metadata=cls_metadata,
                 )
 
+            # 差分取り込み: 次回 run の照合用に content hash を metadata へ保存する
+            # （OFF なら一切書かない＝従来とバイト等価の metadata）。
+            if content_hash is not None:
+                input_metadata[INGEST_CONTENT_HASH_KEY] = content_hash
+
             doc = DocumentUpsert(
                 source_type="gsheets",  # migration 0004 で ENUM に追加済
                 external_id=external_id,
-                source_uri=f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit?gid={tab.gid}#gid={tab.gid}&range={row_idx}:{row_idx}",
+                source_uri=row_source_uri,
                 title=row_title,
                 owner_email=owner_email,
                 acl_emails=[owner_email],
                 acl_groups=_company_acl_groups(),  # §G 会社共有（未設定なら []）
                 metadata={
-                    **spec.extra_metadata,
-                    "tab_name": tab.tab_name,
-                    "row_idx": row_idx,
-                    # Slack 経路と同じ合成順: 固定キー → fb → knowledge → cls。
-                    # fb と knowledge はコアヘッダが交差せず同一シートで両方立つことはない。
-                    # 人間入力 (fb/knowledge) と Haiku (cls_*) はキーが交差しない設計
-                    # (client_type/proposed_menu/knowledge_kind ≠ cls_industry/cls_solution/
-                    # cls_doc_type・根拠は form_mappings の module docstring) なので、
-                    # cls を後置しても人間入力が Haiku に上書きされることはない＝併存。
-                    **fb_doc_metadata,
-                    **knowledge_doc_metadata,
+                    **input_metadata,
                     **cls_metadata,
                 },
                 modified_at=row_modified_at,
@@ -3982,12 +4187,15 @@ def _ingest_gsheet(
             if not dry_run:
                 repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
 
+    if unchanged_collector is not None:
+        unchanged_collector.add("gsheets", unchanged_n)
     logger.info(
         "ingest_gsheet_done",
         sheet_id=spec.sheet_id,
         sheet_name=spec.sheet_name,
         documents=docs_n,
         chunks=chunks_n,
+        documents_unchanged=unchanged_n,
         dry_run=dry_run,
     )
     return docs_n, chunks_n
@@ -4161,6 +4369,9 @@ class IngestRunner:
         # 打ち切りがあった run は観測集合が不完全＝mark を skip する（両経路で 1 個を共有）。
         truncated_walk_roots: set[str] = set()
         warning_collector = _IngestWarningCollector()
+        # 差分取り込み（INGEST_DIFFERENTIAL）の「内容不変スキップ数」集計。
+        # slack / gsheets 経路だけに渡す（gdrive は既存の USE_UNCHANGED_SKIP が担当）。
+        unchanged_collector = _IngestUnchangedCollector()
         # フォルダ名除外 regex（yaml グローバルキー。None ならコード既定を handler 側で解決）。
         gdrive_extra_kwargs: dict[str, Any] = {
             "content_registry": content_registry,
@@ -4189,6 +4400,7 @@ class IngestRunner:
                 sources.slack_channels,
                 _ingest_slack_channel,
                 request_id=request_id,
+                extra_kwargs={"unchanged_collector": unchanged_collector},
             )
         if "gdrive" in kinds:
             result.by_kind["gdrive"] = self._run_kind(
@@ -4200,7 +4412,11 @@ class IngestRunner:
             )
         if "gsheets" in kinds:
             result.by_kind["gsheets"] = self._run_kind(
-                "gsheets", sources.gsheets, _ingest_gsheet, request_id=request_id
+                "gsheets",
+                sources.gsheets,
+                _ingest_gsheet,
+                request_id=request_id,
+                extra_kwargs={"unchanged_collector": unchanged_collector},
             )
         if "shared_drives" in kinds:
             # 共有ドライブ全自動 crawl: spec が 0 or 1 件（yaml の単一 toggle）
@@ -4262,6 +4478,7 @@ class IngestRunner:
             "ingest_runner_done",
             request_id=request_id,
             total_documents=result.total_documents(),
+            total_documents_unchanged=result.total_documents_unchanged(),
             total_errors=result.total_errors(),
             total_warnings=result.total_warnings(),
             outcome=result.outcome,
@@ -4616,6 +4833,12 @@ class IngestRunner:
             if isinstance(warning_collector_obj, _IngestWarningCollector)
             else None
         )
+        unchanged_collector_obj = handler_kwargs.get("unchanged_collector")
+        unchanged_collector = (
+            unchanged_collector_obj
+            if isinstance(unchanged_collector_obj, _IngestUnchangedCollector)
+            else None
+        )
         stats = IngestStats(source_kind=kind)
         for spec in specs:
             source_id = _spec_source_id(spec) or kind
@@ -4728,4 +4951,7 @@ class IngestRunner:
                     request_id=request_id,
                     dry_run=self._dry_run,
                 )
+        # 差分取り込みの「内容不変スキップ数」を stats へ反映（可視化・黙った省略の禁止）。
+        if unchanged_collector is not None:
+            stats.documents_unchanged = unchanged_collector.count_for(kind)
         return stats
