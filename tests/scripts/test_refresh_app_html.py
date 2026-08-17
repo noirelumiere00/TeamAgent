@@ -96,6 +96,13 @@ class FakeECS:
         return {"taskDefinition": definition, "tags": tags}
 
     def register_task_definition(self, **kwargs: Any) -> dict[str, Any]:
+        # 本番 ECS は tags=[] を ClientException "Tags can not be empty." で拒否する
+        # （2026-08-17 実測。これを再現しないフェイクは緑の意味を失う）。
+        if "tags" in kwargs and not kwargs["tags"]:
+            raise RuntimeError(
+                "An error occurred (ClientException) when calling the "
+                "RegisterTaskDefinition operation: Tags can not be empty."
+            )
         self.register_calls.append(kwargs)
         return {"taskDefinition": {"taskDefinitionArn": "arn:new"}}
 
@@ -271,3 +278,24 @@ def test_refresh_stops_when_live_would_equal_baked_fallback(
 
     assert ecs.register_calls == []
     assert ecs.update_calls == []
+
+
+def test_untagged_task_definition_registers_without_empty_tags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """タグ無し task definition でも登録できる（2026-08-17 本番で全断した経路）。
+
+    ECS の RegisterTaskDefinition は tags=[] を ClientException で拒否するため、
+    タグが空のときはキーごと落とす必要がある。
+    """
+    artifact = _artifact()
+    monkeypatch.setattr(refresh, "_generate_artifact", lambda progress: artifact)
+    untagged = _task_definition()
+    untagged.pop("tags")
+    ecs = FakeECS(task_definition=untagged)
+
+    refresh.run_refresh(refresh.Config(), s3_client=FakeS3(), ecs_client=ecs)
+
+    assert len(ecs.register_calls) == 1
+    assert "tags" not in ecs.register_calls[0]
+    assert ecs.update_calls

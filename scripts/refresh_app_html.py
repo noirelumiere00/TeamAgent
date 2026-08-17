@@ -228,7 +228,11 @@ def _describe_task_definition(ecs: Any, config: Config) -> dict[str, Any]:
     if tags is not None:
         if not isinstance(tags, list):
             raise RefreshError("ECS task definition tags are invalid")
-        described["tags"] = copy.deepcopy(tags)
+        # 空リストのまま RegisterTaskDefinition へ渡すと ClientException
+        # "Tags can not be empty." で必ず落ちる（2026-08-17 実測）。タグ無しの
+        # task definition ではキー自体を省く。
+        if tags:
+            described["tags"] = copy.deepcopy(tags)
     return described
 
 
