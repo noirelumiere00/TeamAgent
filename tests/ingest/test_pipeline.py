@@ -47,8 +47,24 @@ class _FakeEmbedder:
 class _FakeRepository:
     """実 DB なしで upsert を記録する fake。"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        existing_classification_metadata: dict[tuple[str, str], dict[str, Any]] | None = None,
+    ) -> None:
         self.upsert_calls: list[dict[str, Any]] = []
+        self.existing_classification_metadata = existing_classification_metadata or {}
+        self.classification_metadata_calls: list[list[tuple[str, str]]] = []
+
+    def get_document_classification_metadata(
+        self,
+        document_keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        self.classification_metadata_calls.append(list(document_keys))
+        return {
+            key: dict(self.existing_classification_metadata[key])
+            for key in document_keys
+            if key in self.existing_classification_metadata
+        }
 
     def upsert_document_with_chunks(
         self,
@@ -2023,6 +2039,347 @@ def test_ingest_gsheet_applies_classification(monkeypatch: pytest.MonkeyPatch) -
     # 既存キーは cls_* マージで破壊されない（後方互換）
     assert md["tab_name"] == "フォーム回答 1"
     assert md["row_idx"] == 2
+
+
+class _NoneDocClassifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def classify(self, **_kwargs: Any) -> None:
+        self.calls += 1
+        return None
+
+
+def _run_gsheet_classification_carry_forward(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    classifier: Any | None,
+    existing: dict[tuple[str, str], dict[str, Any]],
+    rows: tuple[tuple[str, ...], ...] = (("本文1",),),
+) -> _FakeRepository:
+    from teamagent.adapters.gsheets_client import TabRows
+    from teamagent.ingest.pipeline import _ingest_gsheet
+
+    fake_client = MagicMock()
+    fake_client.get_sheet_metadata.return_value.tabs = ()
+    fake_client.get_tab_rows.return_value = TabRows(
+        sheet_id="CLS-CARRY",
+        tab_name="分類保持",
+        headers=("本文",),
+        rows=rows,
+        row_count=len(rows),
+    )
+    monkeypatch.setattr(
+        "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr(
+        "teamagent.ingest.classify.build_classifier_from_env",
+        lambda: classifier,
+    )
+
+    repo = _FakeRepository(existing)
+    docs_n, _ = _ingest_gsheet(
+        GSheetSpec(
+            sheet_id="CLS-CARRY",
+            sheet_name="分類保持",
+            description="",
+            tabs=(GSheetsTabSpec(gid=123, tab_name="分類保持"),),
+        ),
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-cls-carry-forward",
+    )
+    assert docs_n == len(rows)
+    return repo
+
+
+def test_cls_carry_forward_when_classifier_is_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """classifier が無い run は既存分類を行単位で保持し、lookup は一括で行う。"""
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    keys = [("gsheets", "CLS-CARRY:123:2"), ("gsheets", "CLS-CARRY:123:3")]
+    existing = {
+        keys[0]: {
+            "cls_project": "既存案件1",
+            "cls_industry": "食品",
+            "industry": "食品",
+            "cls_entities": "既存社,既存ブランド",
+            "cls_is_template": "true",
+        },
+        keys[1]: {
+            "cls_project": "既存案件2",
+            "cls_is_recurring": "true",
+        },
+    }
+
+    repo = _run_gsheet_classification_carry_forward(
+        monkeypatch,
+        classifier=None,
+        existing=existing,
+        rows=(("本文1",), ("本文2",)),
+    )
+
+    assert repo.classification_metadata_calls == [keys]
+    first_metadata = repo.upsert_calls[0]["metadata"]
+    assert {key: first_metadata[key] for key in existing[keys[0]]} == existing[keys[0]]
+    second_metadata = repo.upsert_calls[1]["metadata"]
+    assert {key: second_metadata[key] for key in existing[keys[1]]} == existing[keys[1]]
+
+
+def test_cls_carry_forward_when_classify_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分類器が空分類を返しても既存分類を消さない。"""
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    key = ("gsheets", "CLS-CARRY:123:2")
+    existing = {
+        key: {
+            "cls_project": "既存案件",
+            "cls_doc_type": "提案書",
+            "industry": "日用品",
+        }
+    }
+    classifier = _NoneDocClassifier()
+
+    repo = _run_gsheet_classification_carry_forward(
+        monkeypatch,
+        classifier=classifier,
+        existing=existing,
+    )
+
+    assert classifier.calls == 1
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert {name: metadata[name] for name in existing[key]} == existing[key]
+
+
+def test_cls_carry_forward_when_classifier_returns_failure_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """決定論フラグだけ残った失敗結果も成功扱いせず、既存分類を保持する。"""
+    from teamagent.ingest.classify import DocClassification
+
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    key = ("gsheets", "CLS-CARRY:123:2")
+    existing = {
+        key: {
+            "cls_project": "既存案件",
+            "cls_industry": "既存業界",
+            "industry": "既存業界",
+        }
+    }
+    classifier = MagicMock()
+    classifier.classify.return_value = DocClassification(
+        is_template=True,
+        should_carry_forward=True,
+    )
+
+    repo = _run_gsheet_classification_carry_forward(
+        monkeypatch,
+        classifier=classifier,
+        existing=existing,
+    )
+
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert {name: metadata[name] for name in existing[key]} == existing[key]
+    assert "cls_is_template" not in metadata
+
+
+def test_successful_classification_replaces_carry_without_sticky_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """成功時は新分類だけを採用し、旧 true フラグや旧値を混ぜない。"""
+    from teamagent.ingest.classify import DocClassification
+
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    key = ("gsheets", "CLS-CARRY:123:2")
+    existing = {
+        key: {
+            "cls_project": "旧案件",
+            "cls_industry": "旧業界",
+            "industry": "旧業界",
+            "cls_solution": "旧施策",
+            "cls_is_template": "true",
+            "cls_entities": "旧ブランド",
+        }
+    }
+    classifier = MagicMock()
+    classifier.classify.return_value = DocClassification(
+        project="新案件",
+        industry="IT",
+        doc_type="提案書",
+        is_template=False,
+    )
+
+    repo = _run_gsheet_classification_carry_forward(
+        monkeypatch,
+        classifier=classifier,
+        existing=existing,
+    )
+
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert metadata["cls_project"] == "新案件"
+    assert metadata["cls_industry"] == "IT"
+    assert metadata["industry"] == "IT"
+    assert metadata["cls_doc_type"] == "提案書"
+    assert "cls_is_template" not in metadata
+    assert "cls_solution" not in metadata
+    assert "cls_entities" not in metadata
+
+
+def test_cls_carry_forward_gate_false_restores_full_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """緊急 gate を false にすると既存分類を読まず、従来の全置換へ戻る。"""
+    monkeypatch.setenv("USE_CLS_CARRY_FORWARD", "false")
+    key = ("gsheets", "CLS-CARRY:123:2")
+    repo = _run_gsheet_classification_carry_forward(
+        monkeypatch,
+        classifier=None,
+        existing={
+            key: {
+                "cls_project": "既存案件",
+                "cls_industry": "食品",
+                "industry": "食品",
+                "cls_is_template": "true",
+            }
+        },
+    )
+
+    assert repo.classification_metadata_calls == []
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert "industry" not in metadata
+    assert not any(name.startswith("cls_") for name in metadata)
+
+
+def test_cls_carry_forward_is_wired_to_slack(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.adapters.slack_channel_ingest_client import (
+        HistoryBatch,
+        SlackChannelMember,
+        SlackMessage,
+    )
+    from teamagent.ingest import pipeline as pipeline_mod
+    from teamagent.ingest.pipeline import _ingest_slack_channel
+
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    parent = SlackMessage(ts="1700.000001", user="U1", text="分類保持する Slack 本文")
+    fake_client = MagicMock()
+    fake_client.list_channel_history.return_value = HistoryBatch(
+        messages=(parent,), next_cursor=None, has_more=False
+    )
+    fake_client.list_channel_members.return_value = (["U001"], None)
+    fake_client.get_user_emails.return_value = [
+        SlackChannelMember(user_id="U001", email="taro@x.jp", display_name="Taro")
+    ]
+    monkeypatch.setattr(
+        "teamagent.adapters.slack_channel_ingest_client.SlackChannelIngestClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env", lambda: None
+    )
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+    key = ("slack", "C-CARRY:1700.000001")
+    existing = {key: {"cls_project": "Slack既存案件", "industry": "IT"}}
+    repo = _FakeRepository(existing)
+    docs_n, _ = _ingest_slack_channel(
+        SlackChannelSpec(channel_id="C-CARRY", channel_name="#carry", description=""),
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="x@y.jp",
+        dry_run=False,
+        request_id="r-slack-carry",
+    )
+
+    assert docs_n == 1
+    assert repo.classification_metadata_calls == [[key]]
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert {name: metadata[name] for name in existing[key]} == existing[key]
+    pipeline_mod._USER_EMAIL_CACHE.clear()
+
+
+def test_cls_carry_forward_is_wired_to_gdrive_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.ingest.pipeline import _ingest_gdrive_folder
+
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "false")
+    monkeypatch.setenv("USE_UNCHANGED_SKIP", "false")
+    monkeypatch.setenv("INGEST_RICH_EXTRACT", "false")
+    _setup_fake_drive_pdf(monkeypatch, name="carry.pdf")
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env", lambda: None
+    )
+
+    key = ("gdrive", "F1")
+    existing = {key: {"cls_project": "Drive既存案件", "cls_entities": "既存ブランド"}}
+    repo = _FakeRepository(existing)
+    docs_n, _ = _ingest_gdrive_folder(
+        GDriveFolderSpec(
+            folder_id="FOLDER-CARRY",
+            folder_name="分類保持",
+            description="",
+            mime_type_filter="application/pdf",
+        ),
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-gdrive-carry",
+    )
+
+    assert docs_n == 1
+    assert repo.classification_metadata_calls == [[key]]
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert {name: metadata[name] for name in existing[key]} == existing[key]
+
+
+def test_cls_carry_forward_is_wired_to_shared_drives(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.adapters.gdrive_client import SharedDrive
+    from teamagent.ingest.loader import SharedDriveCrawlSpec
+    from teamagent.ingest.pipeline import _ingest_shared_drives_crawl
+
+    monkeypatch.delenv("USE_CLS_CARRY_FORWARD", raising=False)
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "false")
+    monkeypatch.setenv("USE_UNCHANGED_SKIP", "false")
+    monkeypatch.setenv("INGEST_RICH_EXTRACT", "false")
+    fake_client = MagicMock()
+    fake_client.list_shared_drives.return_value = [SharedDrive(id="D-CARRY", name="営業資料")]
+    fake_client.walk_files_recursive.return_value = [
+        _make_drive_file(
+            id="F-SHARED-CARRY",
+            name="carry.png",
+            mime="image/png",
+            owners=("alice@x.jp",),
+        )
+    ]
+    fake_client.list_permissions.return_value = [_make_drive_perm("user", "owner", "alice@x.jp")]
+    monkeypatch.setattr(
+        "teamagent.adapters.gdrive_client.GDriveClient.from_env",
+        classmethod(lambda cls, **kwargs: fake_client),
+    )
+    monkeypatch.setattr("teamagent.ingest.classify.build_classifier_from_env", lambda: None)
+    monkeypatch.setattr(
+        "teamagent.ingest.contextualize.build_contextualizer_from_env", lambda: None
+    )
+
+    key = ("gdrive", "F-SHARED-CARRY")
+    existing = {key: {"cls_project": "共有Drive既存案件", "industry": "広告"}}
+    repo = _FakeRepository(existing)
+    docs_n, _ = _ingest_shared_drives_crawl(
+        SharedDriveCrawlSpec(enabled=True, sales_relevance_filter=False),
+        embedder=_FakeEmbedder(),
+        repository=repo,  # type: ignore[arg-type]
+        owner_email="bot@x.jp",
+        dry_run=False,
+        request_id="r-shared-drive-carry",
+    )
+
+    assert docs_n == 1
+    assert repo.classification_metadata_calls == [[key]]
+    metadata = repo.upsert_calls[0]["metadata"]
+    assert {name: metadata[name] for name in existing[key]} == existing[key]
 
 
 @pytest.mark.parametrize(

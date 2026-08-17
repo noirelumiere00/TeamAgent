@@ -36,6 +36,12 @@ class _SharedDriveRepository:
         self.saved_states: list[dict[str, Any]] = []
         self.upsert_calls: list[str] = []
 
+    def get_document_classification_metadata(
+        self,
+        document_keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        return {}
+
     def load_connector_state(self, source_kind: str, source_id: str) -> ConnectorState | None:
         self.load_calls.append((source_kind, source_id))
         if self.load_error is not None:

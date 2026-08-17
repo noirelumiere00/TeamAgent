@@ -33,6 +33,12 @@ class _FakeIncrementalRepo:
         self.load_calls = 0
         self._prior_state = prior_state
 
+    def get_document_classification_metadata(
+        self,
+        document_keys: list[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        return {}
+
     def upsert_document_with_chunks(
         self, doc: Any, chunks: list[Any], request_id: str, *, replace_existing_chunks: bool = True
     ) -> str:
