@@ -130,6 +130,14 @@ class SearchHitOut(BaseModel):
         ),
         exclude=True,
     )
+    resolved_file_name: str | None = Field(
+        default=None,
+        description=(
+            "資料名→Drive 実ファイル解決が成功したときの実ファイル名（拡張子つき）。"
+            "配信ファイル名などプロセス内でのみ使う内部フィールド。"
+        ),
+        exclude=True,
+    )
     source_type: str | None = Field(
         default=None,
         description="ソース種別（'slack' / 'pdf' / 'gdrive' 等）。新スキーマ用",

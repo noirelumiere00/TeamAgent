@@ -1299,6 +1299,37 @@ def test_candidate_file_names_keeps_single_underscore_names_intact() -> None:
     assert names == [name]
 
 
+def test_resolved_file_ref_returns_matching_name_and_url() -> None:
+    """通常候補と `__` 分割候補を解決し、未解決なら None を返す。"""
+
+    name = "proposal_alpha.pdf"
+    url = "https://drive.google.com/file/d/ALPHA/view"
+    meta = {"source_type": "gsheets", "title": name}
+    assert SearchSkill._resolved_file_ref(meta, "", {name: url}) == (name, url)
+    assert SearchSkill._resolved_file_ref(meta, "", {}) is None
+
+    full = "社内共有情報_花王株式会社__20250820花王様限定_縦型提案.pdf"
+    tail = "20250820花王様限定_縦型提案.pdf"
+    assert SearchSkill._resolved_file_ref(
+        {"source_type": "gsheets", "title": full}, "", {tail: url}
+    ) == (tail, url)
+
+
+def test_resolved_file_ref_not_applied_to_gdrive_hits() -> None:
+    """gdrive ヒットには資料名解決を適用しない（収集対象と同じ判定）。
+
+    gdrive ヒット自身の title は file_urls に収集されないため、本文中で言及された
+    **別資料**のファイル名で引けてしまうと url/配信ファイル名が取り違わる。"""
+
+    other = "別紙_価格表2025.pdf"
+    url = "https://drive.google.com/file/d/OTHER/view"
+    gdrive_meta = {"source_type": "gdrive", "title": "顧客提案資料"}
+    assert SearchSkill._resolved_file_ref(gdrive_meta, f"詳細は {other} 参照", {other: url}) is None
+    # drive_url 持ちヒットも解決不要（従来の収集除外と同じ）。
+    slack_meta = {"source_type": "slack", "drive_url": "https://drive.google.com/file/d/D1/view"}
+    assert SearchSkill._resolved_file_ref(slack_meta, f"共有: {other}", {other: url}) is None
+
+
 def _pgvector_for_url_hits(hits: list[SearchHit]) -> MagicMock:
     """URL 解決テスト用の pgvector ダブルを組み立てる。"""
 
@@ -1366,6 +1397,104 @@ def test_slack_urls_resolve_drive_titles_once_and_hide_internal_uri(
     llm_payload = out.model_dump_json()
     assert "source_uri" not in llm_payload
     assert "slack://" not in llm_payload
+
+
+def test_gsheet_row_hit_resolves_url_and_file_name_via_run(
+    fake_bedrock: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """ナレッジシート行ヒットは run 経由で url と resolved_file_name の両方が解決される。
+
+    knowledge_deliver の配信経路（file_id 抽出とファイル名）が依存する seam を
+    run レベルで固定する（helper 単体テストでは配線退行を検知できない）。"""
+
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    row_link = "https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1#gid=1&range=5:5"
+    name = "社内共有情報_花王株式会社__縦型提案.pdf"
+    drive_url = "https://drive.google.com/file/d/RESOLVED1/view?usp=drivesdk"
+    pgvector = _pgvector_for_url_hits(
+        [
+            SearchHit(
+                chunk_id=1,
+                content=f"保存ファイル: {name}",
+                score=0.9,
+                metadata={
+                    "source_type": "gsheets",
+                    "source_uri": row_link,
+                    "title": "花王株式会社 縦型ソリューション",
+                },
+            )
+        ]
+    )
+    pgvector.resolve_file_urls_by_titles.return_value = {name: drive_url}
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+
+    out = skill.run(SearchInput(query="花王の提案資料", include_answer=False), SkillContext())
+
+    assert out.hits[0].url == drive_url
+    assert out.hits[0].resolved_file_name == name
+    requested_titles = pgvector.resolve_file_urls_by_titles.call_args.args[1]
+    assert name in requested_titles
+
+
+def test_gdrive_hit_not_contaminated_by_other_docs_resolution(
+    fake_bedrock: MagicMock,
+    monkeypatch: Any,
+) -> None:
+    """gdrive ヒットは、同時ヒットの行経由で解決された**別資料**の名前/URL を拾わない。
+
+    gdrive 文書の本文が別資料名（別紙等）を言及し、その名前が gsheets 行経由で
+    file_urls に載っていても、gdrive ヒットの url は自身の source_uri のまま・
+    resolved_file_name は None のままであること。"""
+
+    monkeypatch.setenv("SLACK_WORKSPACE", "vectorinc")
+    other = "別紙_価格表2025.pdf"
+    other_url = "https://drive.google.com/file/d/OTHER/view"
+    own_url = "https://drive.google.com/file/d/SELF/view?usp=drivesdk"
+    pgvector = _pgvector_for_url_hits(
+        [
+            SearchHit(
+                chunk_id=1,
+                content=f"保存ファイル: {other}",
+                score=0.9,
+                metadata={
+                    "source_type": "gsheets",
+                    "source_uri": "https://docs.google.com/spreadsheets/d/S1/edit?gid=1&range=2:2",
+                    "title": "価格表の行",
+                },
+            ),
+            SearchHit(
+                chunk_id=2,
+                content=f"本提案の詳細は {other} を参照",
+                score=0.8,
+                metadata={
+                    "source_type": "gdrive",
+                    "source_uri": own_url,
+                    "title": "顧客提案資料",
+                },
+            ),
+        ]
+    )
+    pgvector.resolve_file_urls_by_titles.return_value = {other: other_url}
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=pgvector,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+    )
+
+    out = skill.run(SearchInput(query="提案資料", top_k=2, include_answer=False), SkillContext())
+
+    gsheets_hit, gdrive_hit = out.hits[0], out.hits[1]
+    assert gsheets_hit.url == other_url
+    assert gsheets_hit.resolved_file_name == other
+    assert gdrive_hit.url == own_url  # 自身の正本 URL を保つ
+    assert gdrive_hit.resolved_file_name is None
 
 
 def test_slack_url_is_none_without_workspace(
@@ -1442,3 +1571,17 @@ def test_search_hit_url_drops_non_http_scheme() -> None:
 
     hit = SearchHitOut(chunk_id=1, content="x", score=0.5, url="javascript:alert(1)")
     assert hit.url is None
+
+
+def test_search_hit_resolved_file_name_is_internal() -> None:
+    """解決済みファイル名はプロセス内で保持し、wire format から除外する。"""
+
+    hit = SearchHitOut(
+        chunk_id=1,
+        content="x",
+        score=0.5,
+        resolved_file_name="proposal_alpha.pdf",
+    )
+
+    assert hit.resolved_file_name == "proposal_alpha.pdf"
+    assert "resolved_file_name" not in hit.model_dump()

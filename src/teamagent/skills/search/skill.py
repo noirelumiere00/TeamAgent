@@ -352,61 +352,48 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         else:
             answer, cost_usd = "", 0.0
 
-        # 4. 出力スキーマに整形
-        output = SearchOutput(
-            answer=answer,
-            hits=[
+        # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
+        #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
+        search_hits: list[SearchHitOut] = []
+        for h in hits:
+            meta = h.metadata or {}
+            resolved_file_ref = self._resolved_file_ref(meta, h.content or "", file_urls)
+            url = self._doc_url({"drive_url": meta.get("drive_url")})
+            if not url and resolved_file_ref:
+                url = resolved_file_ref[1]
+            if not url:
+                url = self._doc_url({"source_uri": meta.get("source_uri")})
+
+            search_hits.append(
                 SearchHitOut(
                     chunk_id=h.chunk_id,
                     content=h.content,
                     score=h.score,
                     source=self._build_source(h),
-                    file_name=(
-                        str(h.metadata.get("file_name")) if h.metadata.get("file_name") else None
-                    ),
-                    page_num=self._safe_int(h.metadata.get("page_num")),
-                    drive_url=(
-                        str(h.metadata.get("drive_url")) if h.metadata.get("drive_url") else None
-                    ),
-                    url=self._hit_url(h, file_urls=file_urls),
-                    source_uri=(
-                        str(h.metadata["source_uri"]) if h.metadata.get("source_uri") else None
-                    ),
-                    source_type=(
-                        str(h.metadata["source_type"]) if h.metadata.get("source_type") else None
-                    ),
-                    channel_name=(
-                        str(h.metadata["channel_name"]) if h.metadata.get("channel_name") else None
-                    ),
-                    client_name=(
-                        str(h.metadata["client_name"]) if h.metadata.get("client_name") else None
-                    ),
-                    deal_phase=(
-                        str(h.metadata["deal_phase"]) if h.metadata.get("deal_phase") else None
-                    ),
-                    bant_score=(
-                        str(h.metadata["bant_score"]) if h.metadata.get("bant_score") else None
-                    ),
-                    channel_type=(
-                        str(h.metadata["channel_type"]) if h.metadata.get("channel_type") else None
-                    ),
-                    title=(str(h.metadata["title"]) if h.metadata.get("title") else None),
-                    project=(
-                        str(h.metadata["cls_project"]) if h.metadata.get("cls_project") else None
-                    ),
-                    industry=(
-                        str(h.metadata["cls_industry"]) if h.metadata.get("cls_industry") else None
-                    ),
-                    doc_type=(
-                        str(h.metadata["cls_doc_type"]) if h.metadata.get("cls_doc_type") else None
-                    ),
-                    budget=(
-                        str(h.metadata["cls_budget"]) if h.metadata.get("cls_budget") else None
-                    ),
-                    is_low_confidence=bool(h.metadata.get("is_low_confidence", False)),
+                    file_name=(str(meta.get("file_name")) if meta.get("file_name") else None),
+                    page_num=self._safe_int(meta.get("page_num")),
+                    drive_url=(str(meta.get("drive_url")) if meta.get("drive_url") else None),
+                    url=url,
+                    source_uri=(str(meta["source_uri"]) if meta.get("source_uri") else None),
+                    resolved_file_name=(resolved_file_ref[0] if resolved_file_ref else None),
+                    source_type=(str(meta["source_type"]) if meta.get("source_type") else None),
+                    channel_name=(str(meta["channel_name"]) if meta.get("channel_name") else None),
+                    client_name=(str(meta["client_name"]) if meta.get("client_name") else None),
+                    deal_phase=(str(meta["deal_phase"]) if meta.get("deal_phase") else None),
+                    bant_score=(str(meta["bant_score"]) if meta.get("bant_score") else None),
+                    channel_type=(str(meta["channel_type"]) if meta.get("channel_type") else None),
+                    title=(str(meta["title"]) if meta.get("title") else None),
+                    project=(str(meta["cls_project"]) if meta.get("cls_project") else None),
+                    industry=(str(meta["cls_industry"]) if meta.get("cls_industry") else None),
+                    doc_type=(str(meta["cls_doc_type"]) if meta.get("cls_doc_type") else None),
+                    budget=(str(meta["cls_budget"]) if meta.get("cls_budget") else None),
+                    is_low_confidence=bool(meta.get("is_low_confidence", False)),
                 )
-                for h in hits
-            ],
+            )
+
+        output = SearchOutput(
+            answer=answer,
+            hits=search_hits,
             total_cost_usd=cost_usd,
         )
         log.info(
@@ -1188,6 +1175,42 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         return names[:8]
 
     @classmethod
+    def _resolved_file_ref(
+        cls,
+        meta: dict[str, Any],
+        content: str,
+        file_urls: dict[str, str] | None,
+    ) -> tuple[str, str] | None:
+        """資料名→Drive URL 解決が成功していれば (実ファイル名, URL) を返す。
+
+        適用対象は資料名の収集対象（_name_resolution_target）と同じ集合に限定する。
+        gdrive 等の対象外ヒットにまで適用すると、本文中で言及された**別資料**の
+        ファイル名で file_urls が引け、url/配信ファイル名がその別資料に取り違わる
+        （gdrive ヒット自身の title は file_urls に収集されないため自名では引けない）。
+        """
+        if not cls._name_resolution_target(meta):
+            return None
+        resolved = file_urls or {}
+        for name in cls._candidate_file_names(meta, content):
+            candidate = str(resolved.get(name) or "").strip()
+            if candidate.lower().startswith(("http://", "https://")):
+                return name, candidate
+        return None
+
+    @staticmethod
+    def _name_resolution_target(meta: dict[str, Any]) -> bool:
+        """資料名→Drive URL 解決の対象ヒットか（収集と適用で同じ判定を使う）。
+
+        対象は「行/スレッドが資料を指す」gsheets・slack ヒットのみ。明示的な
+        drive_url を持つヒットは解決不要。gdrive ヒットは自身の source_uri が正本。
+        """
+        if meta.get("drive_url"):
+            return False
+        source_type = str(meta.get("source_type") or "")
+        source_uri = str(meta.get("source_uri") or "")
+        return source_type in ("gsheets", "slack") or source_uri.startswith("slack://")
+
+    @classmethod
     def _hit_url(
         cls,
         hit: SearchHit,
@@ -1205,11 +1228,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         if direct:
             return direct
 
-        resolved = file_urls or {}
-        for name in cls._candidate_file_names(meta, hit.content or ""):
-            candidate = str(resolved.get(name) or "").strip()
-            if candidate.lower().startswith(("http://", "https://")):
-                return candidate
+        ref = cls._resolved_file_ref(meta, hit.content or "", file_urls)
+        if ref:
+            return ref[1]
 
         return cls._doc_url({"source_uri": meta.get("source_uri")})
 
@@ -1225,11 +1246,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         titles: list[str] = []
         for h in hits:
             meta = h.metadata or {}
-            if meta.get("drive_url"):
-                continue
-            source_type = str(meta.get("source_type") or "")
-            source_uri = str(meta.get("source_uri") or "")
-            if source_type not in ("gsheets", "slack") and not source_uri.startswith("slack://"):
+            if not self._name_resolution_target(meta):
                 continue
             for name in self._candidate_file_names(meta, h.content or ""):
                 if name not in titles:

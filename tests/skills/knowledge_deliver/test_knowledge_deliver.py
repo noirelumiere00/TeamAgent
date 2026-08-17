@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 from teamagent.skills.base import SkillContext
@@ -216,8 +217,9 @@ def test_row_hit_drive_url_field_also_delivers() -> None:
 
 
 def test_row_hit_without_resolution_never_attaches_the_sheet_itself() -> None:
-    """解決失敗時の url はシート行リンクへフォールバックする。/d/ 正規表現が
-    シート本体の id を誤抽出し、ナレッジシートごと添付する事故を range= ガードで防ぐ。"""
+    """解決失敗時の url はシート行リンクへフォールバックする。汎用 /d/ 正規表現だと
+    シート本体の id を誤抽出し、ナレッジシートごと添付する事故になるため、
+    実体ファイル形（drive.google.com/file/d/）限定の抽出で防ぐ。"""
     hits = [
         _hit(
             source_type="gsheets",
@@ -449,3 +451,143 @@ def test_note_zero_hit_no_filter_keeps_plain_message() -> None:
     out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
     assert out.delivered_count == 0
     assert out.note == "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
+
+
+# ── 管理シート行の解決済み Drive 実体配信 ────────────────────────────────
+def test_gsheet_row_hit_with_resolved_url_delivers() -> None:
+    resolved_url = "https://drive.google.com/file/d/RESOLVED1/view?usp=drivesdk"
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri=("https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1#gid=1&range=5:5"),
+            url=resolved_url,
+            resolved_file_name="社内共有情報_花王株式会社__縦型提案.pdf",
+            title="花王株式会社 縦型ソリューション",
+            doc_type="提案書",
+        )
+    ]
+    slack = _slack_mock()
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 1
+    gdrive.download_file_bytes.assert_called_once()
+    assert gdrive.download_file_bytes.call_args.kwargs["file_id"] == "RESOLVED1"
+    assert slack.upload_file.await_args.kwargs["title"] == (
+        "社内共有情報_花王株式会社__縦型提案.pdf"
+    )
+    assert out.references[0].delivered is True
+    assert out.references[0].url == resolved_url
+
+
+def test_gsheet_row_hit_unresolved_url_not_candidate() -> None:
+    sheet_row_url = "https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1#gid=1&range=5:5"
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri=sheet_row_url,
+            url=sheet_row_url,
+            title="花王株式会社 縦型ソリューション",
+        )
+    ]
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=_slack_mock(), gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 0
+    gdrive.download_file_bytes.assert_not_called()
+
+
+def test_gsheet_resolved_native_google_doc_not_candidate() -> None:
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri="https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1",
+            url="https://docs.google.com/presentation/d/PRES1/edit",
+            title="花王株式会社 縦型ソリューション",
+        )
+    ]
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=_slack_mock(), gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 0
+    gdrive.download_file_bytes.assert_not_called()
+
+
+def test_gsheet_resolved_dedups_with_gdrive_hit() -> None:
+    hits = [
+        _hit(source_type="gdrive", source_uri="gdrive://F1", title="提案.pdf"),
+        _hit(
+            chunk_id=2,
+            source_type="gsheets",
+            source_uri="https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1",
+            url="https://drive.google.com/file/d/F1/view",
+            resolved_file_name="提案.pdf",
+            title="花王株式会社 縦型ソリューション",
+        ),
+    ]
+    slack = _slack_mock()
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 1
+    assert gdrive.download_file_bytes.call_count == 1
+    assert slack.upload_file.await_count == 1
+    assert all(ref.delivered for ref in out.references)
+
+
+def test_same_filename_different_files_do_not_overwrite_each_other() -> None:
+    """sanitize 後に同名となる別 file_id の候補同士が一時ファイルを上書きし合わない。
+
+    旧実装は tmpdir 直下にファイル名だけで書いており、同名別ファイルが2候補あると
+    2件目が1件目を上書きし、両添付とも2件目のバイト列になっていた。"""
+
+    hits = [
+        _hit(source_type="gdrive", source_uri="gdrive://F1", title="提案書_共通フォーマット.pdf"),
+        _hit(
+            chunk_id=2,
+            source_type="gdrive",
+            source_uri="gdrive://F2",
+            title="提案書_共通フォーマット.pdf",
+        ),
+    ]
+    slack = _slack_mock()
+    gdrive = MagicMock()
+    gdrive.download_file_bytes.side_effect = lambda *, file_id, request_id: (
+        b"%PDF-1.4 " + file_id.encode()
+    )
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="提案書", top_k=2), _ctx())
+
+    assert out.delivered_count == 2
+    uploaded_paths = [c.args[1] for c in slack.upload_file.await_args_list]
+    contents = {Path(p).read_bytes() for p in uploaded_paths}
+    assert contents == {b"%PDF-1.4 F1", b"%PDF-1.4 F2"}
+
+
+def test_gsheet_resolved_respects_confidence_gates() -> None:
+    hits = [
+        _hit(
+            source_type="gsheets",
+            source_uri="https://docs.google.com/spreadsheets/d/SHEET1/edit?gid=1",
+            url="https://drive.google.com/file/d/RESOLVED1/view",
+            resolved_file_name="提案.pdf",
+            title="花王株式会社 縦型ソリューション",
+            score=0.2,
+        )
+    ]
+    gdrive = _gdrive_mock()
+    skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=_slack_mock(), gdrive=gdrive)
+
+    out = skill.run(KnowledgeDeliverInput(query="花王の提案資料を探して"), _ctx())
+
+    assert out.delivered_count == 0
+    gdrive.download_file_bytes.assert_not_called()
