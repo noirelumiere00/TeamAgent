@@ -10,10 +10,10 @@ DEPLOY_LOG = ROOT / "infra" / "deploy_log.md"
 
 CURRENT_PRODUCTION = {
     "schema_version": 1,
-    "app_html_s3_version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
-    "app_html_sha256": ("03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"),
-    "vault_manifest_sha256": ("aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"),
-    "build_inputs_sha256": ("6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"),
+    "app_html_s3_version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
+    "app_html_sha256": ("16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831"),
+    "vault_manifest_sha256": ("1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d"),
+    "build_inputs_sha256": ("c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"),
 }
 STALE_ROLLBACK = {
     "app_html_s3_version_id": "I1qOb7Kwl.pMg71wqFxbHnbbTqMWjQcY",
@@ -107,7 +107,7 @@ def _latest_production_app_record() -> tuple[dict[str, Any], str]:
 def test_latest_deploy_record_is_the_exact_current_production_allowlist() -> None:
     record, heading = _latest_production_app_record()
 
-    assert heading.startswith("2026-07-17 ")
+    assert heading.startswith("2026-08-17 ")
     assert record == CURRENT_PRODUCTION
     assert set(record.values()).isdisjoint(STALE_ROLLBACK.values())
 

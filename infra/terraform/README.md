@@ -39,10 +39,10 @@ guard/receiptを「管理者にも強制できる安全境界」とは扱いま�
 - 手動gsheets ingest `:42` は完了済みです。runtime migration直前にもactive taskが
   0であることを再確認し、新規実行を止めた状態にします。
 - `/app` のreview済みS3 objectは
-  VersionId `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`、
-  SHA-256 `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`、
-  Vault manifest `aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e`、
-  build inputs `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf`
+  VersionId `TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE`、
+  SHA-256 `16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831`、
+  Vault manifest `1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d`、
+  build inputs `c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa`
   です。guardはlatest objectをexact versionで再取得し、HTML bytesと埋込みprovenanceを
   照合するため、旧版や別publishへ暗黙に移行しません。
 - 記録済みliveではingest-weekly/canary-hourlyが無効、morning-digestが有効です。ただし
@@ -334,10 +334,10 @@ The production application source allowlist is:
 
 | Evidence | Canonical value |
 |---|---|
-| app HTML S3 VersionId | `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee` |
-| app HTML SHA-256 | `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c` |
-| Vault manifest SHA-256 | `aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e` |
-| build_inputs SHA-256 | `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf` |
+| app HTML S3 VersionId | `TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE` |
+| app HTML SHA-256 | `16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831` |
+| Vault manifest SHA-256 | `1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d` |
+| build_inputs SHA-256 | `c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa` |
 
 The old `46f007…` / `I1qOb7…` set, along with `ec1b…`, `7a13…`, and
 `716ac…`, is rollback/test evidence only; none may be restored as the

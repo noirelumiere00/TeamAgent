@@ -1431,8 +1431,8 @@ def test_runtime_live_anchors_are_unchanged_by_log_hardening() -> None:
     assert migration["from"]["task_definition_arns"]["canary"].endswith(":14")
     assert migration["from"]["connect_app_html"] == migration["to"]["connect_app_html"]
     assert migration["from"]["connect_app_html"]["version_id"] == (
-        "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
+        "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE"
     )
     assert migration["from"]["connect_app_html"]["sha256"] == (
-        "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"
+        "16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831"
     )

@@ -63,10 +63,10 @@
         "connect_app_html": {
           "bucket": "teamagent-dev-raw-files",
           "key": "codebuild/connect-web-app.html",
-          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
-          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
-          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
-          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+          "version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
+          "sha256": "16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831",
+          "vault_manifest_sha256": "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d",
+          "build_inputs_sha256": "c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"
         },
         "api_gateway": {
           "api_id": "esk97z9grh",
@@ -153,10 +153,10 @@
         "connect_app_html": {
           "bucket": "teamagent-dev-raw-files",
           "key": "codebuild/connect-web-app.html",
-          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
-          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
-          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
-          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+          "version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
+          "sha256": "16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831",
+          "vault_manifest_sha256": "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d",
+          "build_inputs_sha256": "c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"
         },
         "required_contract_labels": {
           "main": {
@@ -262,10 +262,10 @@
         "connect_app_html": {
           "bucket": "teamagent-dev-raw-files",
           "key": "codebuild/connect-web-app.html",
-          "version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
-          "sha256": "03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c",
-          "vault_manifest_sha256": "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e",
-          "build_inputs_sha256": "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+          "version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
+          "sha256": "16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831",
+          "vault_manifest_sha256": "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d",
+          "build_inputs_sha256": "c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"
         },
         "rule_states": {
           "ingest": "DISABLED",

@@ -180,7 +180,7 @@ def test_current_contract_pair_and_latest_record_are_valid() -> None:
     assert "approval_record" not in runtime
     assert runtime["receipt"]["schema_version"] == 2
     assert runtime["receipt"]["subject"] == "core"
-    assert record["app_html_s3_version_id"] == "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee"
+    assert record["app_html_s3_version_id"] == "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE"
     assert len(PROVENANCE.application_provenance_sha256(contract, record)) == 64
     # Released by operator decision; the fail-closed path is covered against a
     # synthetic blocked contract in

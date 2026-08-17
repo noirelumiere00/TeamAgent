@@ -116,13 +116,13 @@ def test_core_separates_baked_fallback_from_qa_s3_app_contract() -> None:
     app = CONTRACT["tasks"]["teamagent-mcp-core"]["app_html_contract"]
     assert app == {
         "production_source": "s3",
-        "production_sha256": ("03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c"),
-        "production_s3_version_id": "FTXbcN70D0DCN90TI_hRK1IdQK_HhLee",
+        "production_sha256": ("16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831"),
+        "production_s3_version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
         "production_manifest_sha256": (
-            "aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e"
+            "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d"
         ),
         "production_build_inputs_sha256": (
-            "6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"
+            "c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"
         ),
         "baked_fallback_sha256": (
             "716ac25a96516efd6443277c903102d514f3f86729f8706baea41ee48f0ecdeb"

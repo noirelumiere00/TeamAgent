@@ -45,12 +45,12 @@ materialized build contextを別々のSHA-256で記録する。ignoredなlive wo
 build inputにしてはならない。
 
 - production artifact SHA-256
-  `03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c`
-- S3 VersionId `FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`
+  `16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831`
+- S3 VersionId `TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE`
 - manifest SHA-256
-  `aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e`
+  `1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d`
 - build inputs SHA-256
-  `6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf`
+  `c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa`
 
 Image buildはローカルfallbackのbyte hashを検証し、別のOCI labels/provenance filesへ上記S3
 artifact contractを記録する。ローカルbuildはS3を取得・更新しない。
