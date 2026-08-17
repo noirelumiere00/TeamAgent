@@ -1399,6 +1399,11 @@ def test_shared_drive_known_invalid_is_observed_and_suppressed_before_acl(
 def test_shared_drive_walk_saturation_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """walk 上限到達 drive は fail-closed のまま drive 単位で skip する。
+
+    2026-08-17 変更: raise で crawl 全体を落とすと巨大 drive 1 つで他 drive まで
+    毎日 0 件になるため、「取り込まない」は維持しつつ skip + warning に変更。
+    """
     drive_file = _file("SHARED-SATURATED", _pptx_bytes())
     client = MagicMock()
     client.list_shared_drives.return_value = [SharedDrive(id="DRIVE", name="drive")]
@@ -1408,27 +1413,30 @@ def test_shared_drive_walk_saturation_fails_closed(
         classmethod(lambda cls, **kwargs: client),
     )
     truncated: set[str] = set()
+    collector = _IngestWarningCollector()
 
-    from teamagent.ingest.pipeline import GDrivePaginationIncompleteError
+    result = _ingest_shared_drives_crawl(
+        SharedDriveCrawlSpec(
+            enabled=True,
+            sales_relevance_filter=False,
+            max_files_per_drive=1,
+        ),
+        embedder=_Embedder(),
+        repository=_Repository(),  # type: ignore[arg-type]
+        owner_email="bot@example.jp",
+        dry_run=False,
+        request_id="req",
+        truncated_walk_roots=truncated,
+        warning_collector=collector,
+    )
 
-    with pytest.raises(GDrivePaginationIncompleteError, match="safety limit"):
-        _ingest_shared_drives_crawl(
-            SharedDriveCrawlSpec(
-                enabled=True,
-                sales_relevance_filter=False,
-                max_files_per_drive=1,
-            ),
-            embedder=_Embedder(),
-            repository=_Repository(),  # type: ignore[arg-type]
-            owner_email="bot@example.jp",
-            dry_run=False,
-            request_id="req",
-            truncated_walk_roots=truncated,
-            warning_collector=_IngestWarningCollector(),
-        )
-
+    # fail-closed の本体: 飽和 drive からは 1 件も取り込まない。
+    assert result == (0, 0)
     assert truncated == {"DRIVE"}
     client.list_permissions.assert_not_called()
+    # 黙って 0 件にならないよう source warning として観測される。
+    snapshot = collector.snapshot("shared_drives", "shared_drives")
+    assert snapshot.reasons.get("walk_truncated") == 1
 
 
 def test_incremental_cursor_records_success_with_warnings_metadata(
