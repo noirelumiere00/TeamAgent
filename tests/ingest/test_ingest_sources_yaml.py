@@ -57,7 +57,7 @@ def test_existing_sections_unchanged() -> None:
     assert len(sources.gsheets) == 2
     assert sources.shared_drives_crawl is not None
     assert sources.shared_drives_crawl.enabled is True
-    assert sources.shared_drives_crawl.max_files_per_drive == 12000
+    assert sources.shared_drives_crawl.max_files_per_drive == 30000
 
 
 def test_knowledge_sheet_does_not_ingest_filerecord_tab() -> None:

@@ -151,7 +151,10 @@ shared_drives_crawl:
   # 2026-08-14: 3000 では対象共有ドライブ（1139 フォルダ・3000+ ファイル）の初回
   # 走査が必ず上限打ち切り→fail-closed で 1 件も入らないと実測。窓を 1 年へ絞りつつ
   # 上限へ余裕を持たせ、初回全量走査を完走させる（完走後は changes API の増分が主経路）。
-  max_files_per_drive: 12000
+  # 2026-08-17: 12000 でも共有ドライブ「ドライブ」(0AG3odbqoCwM8・4195 フォルダ・
+  # 12000+ ファイル) が打ち切りと実測（08-14 の 2 run とも）。カバー裁定に基づき増枠。
+  # 上限到達 drive は raise でなく skip + walk_truncated warning になる（同日修正）。
+  max_files_per_drive: 30000
   modified_within_days: 365        # 1 年以内（null で全期間）
   extra_metadata:
     topic: "共有ドライブ横断クロール"
