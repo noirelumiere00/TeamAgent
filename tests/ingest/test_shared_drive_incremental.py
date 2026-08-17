@@ -212,3 +212,62 @@ def test_shared_drive_changes_failure_fails_open_to_full_scan(
     client.get_changes.assert_called_once_with(page_token="PRIOR", request_id="request")
     client.get_start_page_token.assert_called_once_with("request")
     assert repository.saved_states[0]["cursor"] == "FAIL-OPEN-SEED"
+
+
+# -----------------------------------------------------------
+# walk 上限到達 drive の skip（2026-08-17: 巨大 drive が crawl 全体を
+# 道連れにして shared_drives が毎日 0 件になった本番障害の回帰）
+# -----------------------------------------------------------
+def test_shared_drive_walk_truncated_skips_only_that_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from teamagent.ingest.pipeline import (
+        _ingest_shared_drives_crawl,
+        _IngestWarningCollector,
+    )
+
+    monkeypatch.setenv("USE_INCREMENTAL_SYNC", "true")
+    client = _client(monkeypatch)
+    client.get_start_page_token.return_value = "SEED"
+    client.list_shared_drives.return_value = [
+        SharedDrive(id="GIANT", name="ドライブ"),
+        SharedDrive(id="SMALL", name="Sales"),
+    ]
+
+    def _walk(*, root_id: str, **kwargs: Any) -> list[DriveFile]:
+        if root_id == "GIANT":
+            # max_files=2 ちょうどまで集まった＝完走と打ち切りを区別できない状態。
+            return [_file("G1"), _file("G2")]
+        return [_file("S1")]
+
+    client.walk_files_recursive.side_effect = _walk
+    repository = _SharedDriveRepository()
+    truncated: set[str] = set()
+    observed: set[str] = set()
+    collector = _IngestWarningCollector()
+
+    docs_n, chunks_n = _ingest_shared_drives_crawl(
+        SharedDriveCrawlSpec(enabled=True, sales_relevance_filter=False, max_files_per_drive=2),
+        embedder=_Embedder(),
+        repository=repository,  # type: ignore[arg-type]
+        owner_email="owner@example.com",
+        dry_run=False,
+        request_id="request",
+        observed_gdrive_ids=observed,
+        truncated_walk_roots=truncated,
+        warning_collector=collector,
+    )
+
+    # 巨大 drive は 1 件も取り込まず、後続 drive は普通に取り込む。
+    assert (docs_n, chunks_n) == (1, 1)
+    assert repository.upsert_calls == ["S1"]
+    # stale ガードへの伝搬: 打ち切り drive が登録され、部分列挙は観測集合に入らない。
+    assert truncated == {"GIANT"}
+    assert observed == {"S1"}
+    # 打ち切り drive の cursor は保存されない（次回 run で必ず再 walk）。
+    saved_ids = [s["source_id"] for s in repository.saved_states]
+    assert "GIANT" not in saved_ids
+    assert "SMALL" in saved_ids
+    # source warning として記録され outcome が success_with_warnings に落ちる。
+    snapshot = collector.snapshot("shared_drives", "shared_drives")
+    assert snapshot.reasons.get("walk_truncated") == 1

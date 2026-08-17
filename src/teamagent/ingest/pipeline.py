@@ -3271,14 +3271,25 @@ def _ingest_shared_drives_crawl(
             max_files=spec.max_files_per_drive,
             exclude_folder_name_re=effective_exclude_re,
         )
-        # stale/cursor堅牢化: max_files到達は完走と区別できないためfail-closedする。
+        # stale/cursor堅牢化: max_files到達は完走と区別できないため、この drive は
+        # 取り込まない（drive 単位 fail-closed）。ただし raise で crawl 全体を落とすと
+        # 巨大 drive 1 つで他の全 drive まで毎日 0 件になるため、skip して次の drive へ:
+        # - truncated_walk_roots 登録 → run 全体の stale mark/clear は既存ガードが skip
+        # - cursor 保存（ループ末尾）も skip される → 次回 run で必ず再 walk
         if len(files) >= spec.max_files_per_drive:
             if truncated_walk_roots is not None:
                 truncated_walk_roots.add(drive.id)
-            raise GDrivePaginationIncompleteError(
-                "Shared Drive recursive listing reached "
-                f"{spec.max_files_per_drive} file safety limit"
+            if warning_collector is not None:
+                warning_collector.add(warning_source_kind, warning_source_id, "walk_truncated")
+            logger.warning(
+                "ingest_shared_drive_walk_truncated",
+                request_id=request_id,
+                drive_id=drive.id,
+                drive_name=drive.name,
+                files_collected=len(files),
+                max_files_per_drive=spec.max_files_per_drive,
             )
+            continue
         # stale 差集合用: 営業価値フィルタの**前**（Drive 上に存在が確認できた全 file）で
         # 観測済みを記録する（フィルタ落ちした存在中の file が stale 誤爆しないよう安全側）。
         if observed_gdrive_ids is not None:
