@@ -16,6 +16,16 @@
 
 ---
 
+## 2026-08-17 🚀 `/app` を掃除済み金庫から再生成（引用元の絞り込み裁定を反映）
+<!-- PRODUCTION_APP_PROVENANCE={"schema_version":1,"app_html_s3_version_id":"TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE","app_html_sha256":"16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831","vault_manifest_sha256":"1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d","build_inputs_sha256":"c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"} -->
+- source=`dev`@`ecc19b62ae832923a6f0873238973bf3f03c938b`（本日の署名リリース完走版・本番 mcp:78 / connect-web:63 系）。08-17 のユーザー裁定で共有ドライブ横断クロールを停止し、crawl 由来 documents 2,521 件（chunks 82,945）を削除した後の RDS から Vault を全量再生成した。
+- 生成実測: Vault `clients=820 / planned=written=1829 / delete_planned=0`。公開HTMLは `clients=599 / docs=856 / graph=1548n 4466e / 実リンク=1895 / FB timeline=568 / size=4,730KB`（前回 2026-07-17 は clients=516 / docs=662）。縮小ガードは非該当（増加）。
+- S3 `codebuild/connect-web-app.html` VersionId=`TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE`・sha=`16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831`（往復GETで実測一致）。connect-web は `:64` を登録して force deploy、rollout COMPLETED・1/1 healthy・pending=0。`/healthz` は `app_html_contract_ok=true` / source=`s3` / sha=`16cf0fedabf6` / expected VersionId 一致。未ログイン `/app` は 303（認証画面）。
+- ⚠️ `refresh_app_html.py` は RegisterTaskDefinition が `Tags can not be empty.` で落ちる既知欠陥あり（S3 put までは成功する）。今回は taskdef 登録とサービス切替を手動で実施した。次回はスクリプト側で空 tags を落とす修正を先に入れること。
+- rollback: S3 VersionId=`FTXbcN70D0DCN90TI_hRK1IdQK_HhLee`（sha=`03f8e8cc0adb…`）＋ connect-web `:63` へ戻す。実行者=Claude（s-komata AWSアカウント）。
+
+---
+
 ## 2026-07-17 🚀 `/app` の日付・取引先所有者・業種名寄せを本番反映
 <!-- PRODUCTION_APP_PROVENANCE={"schema_version":1,"app_html_s3_version_id":"FTXbcN70D0DCN90TI_hRK1IdQK_HhLee","app_html_sha256":"03f8e8cc0adbc397cc636e30fcc8baaffeb1c53502cf74baf1031399cceb391c","vault_manifest_sha256":"aa451e744d26e9dc13c170b019307b0eb10d3645267960fbff41c4038e9b909e","build_inputs_sha256":"6697acf311f0c9a96b41426e81ae05ad221482a6e6f69799281ad3532c2e78bf"} -->
 - source=`dev`@`6872880b69a0e8b252e56ebdc4b585e38b7681e3`（#245、CI全緑）。資料の `client_name` / `cls_project` をVaultへ保持し、取引先カードの活動資料を「明示リンクかつ完全一致する所有者」に限定。Portと「レポート／パスポート／portfolio」の部分一致を禁止し、SBI生命保険・SBI証券を分離、i-ne・泉屋の正式表記を安全に名寄せ。監査済み28社の業種マスターと、非マスター企業も所有資料から独立再計算するQAを追加。
