@@ -96,8 +96,8 @@ def test_media_chromium_path_matches_the_measured_binary_everywhere() -> None:
 
 def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert (
-        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 242
-    )  # 2026-08-14 python 3.14.7-r0 バンプで expat/gdbm が新規依存
+        len(APK_LOCK.read_text(encoding="utf-8").splitlines()) == 240
+    )  # 2026-08-17 edge 依存グラフ変更で expat/gdbm が再び依存から脱落（実ビルド diff で確定）
     assert _sha256(APK_LOCK) == APK_LOCK_SHA256
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
