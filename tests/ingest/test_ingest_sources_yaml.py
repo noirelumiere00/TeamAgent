@@ -56,7 +56,8 @@ def test_existing_sections_unchanged() -> None:
     assert len(sources.slack_channels) == 2
     assert len(sources.gsheets) == 2
     assert sources.shared_drives_crawl is not None
-    assert sources.shared_drives_crawl.enabled is True
+    # 2026-08-17 裁定: 横断クロール停止（ナレッジ実体は 14Wfp6… 配下でカバー済み）
+    assert sources.shared_drives_crawl.enabled is False
     assert sources.shared_drives_crawl.max_files_per_drive == 30000
 
 

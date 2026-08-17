@@ -145,7 +145,13 @@ gsheets:
 # - max_files_per_drive: 1 ドライブあたりの安全上限
 # - modified_within_days: 過去 N 日以内に更新されたファイルのみ（古い案件除外）
 shared_drives_crawl:
-  enabled: true
+  # 2026-08-17 ユーザー裁定: 全共有ドライブ横断は停止する。
+  # ナレッジの実体（01_提案〜08_AI活用）は gdrive_folders の
+  # 「ショート動画資料全般」(14Wfp6…) 配下として既にカバー済みで、
+  # 横断クロールの実収穫は経費・HP更新・社内ポータル等のノイズが主だった
+  # （08-17 DB 実測: 経費 606 件・HP 237・ポータル 206・SBI 108 など）。
+  # 巨大共有ドライブ「ドライブ」(0AG3odbqoCwM8) の全量取り込み案もこの裁定で撤回。
+  enabled: false
   name_filter: []                  # 空: 全共有ドライブ。["営業", "ナレッジ"] で絞れる
   sales_relevance_filter: true     # PDF/Doc/Sheet/Slide + ノイズ除外
   # 2026-08-14: 3000 では対象共有ドライブ（1139 フォルダ・3000+ ファイル）の初回
