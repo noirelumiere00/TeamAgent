@@ -644,6 +644,8 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
       # calendar_freebusy: 空き時間の自由文照会（read-only・freebusy のみ・既定 false）。
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
+      # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
+      { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。

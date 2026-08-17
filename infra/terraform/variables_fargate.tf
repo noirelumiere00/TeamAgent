@@ -178,6 +178,12 @@ variable "use_calendar_freebusy_tool" {
   default     = false
 }
 
+variable "use_slack_summary_tool" {
+  description = "slack_summary tool（Slack スレッド要約）を mcp で有効化。読取は依頼者本人の xoxp のみ（bot token 不使用）・Slack への書込は一切なし。出力面ガードで発信元チャンネル以外のスレッド要約は拒否。既定 false。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_progress_notify" {
   description = "ツール実行中の進捗表示（v0.3.1 Task7）。ON で mcp が重いツール実行前に『📂 資料を検索しています…』等を Slack へ投稿し完了後に削除する。既定 false。fail-open（送信失敗はツール実行を阻害しない）。bot の chat:write/im:write scope 前提。"
   type        = bool

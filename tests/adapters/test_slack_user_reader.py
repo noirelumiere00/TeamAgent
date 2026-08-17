@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from slack_sdk.errors import SlackApiError
 
 from teamagent.adapters.slack_user_reader import SlackUserReader, _run_sync
 
@@ -87,6 +88,73 @@ def test_search_failopen_on_exception() -> None:
     client = _client(search_messages=AsyncMock(side_effect=RuntimeError("429")))
     reader = SlackUserReader("xoxp-x", client=client)
     assert reader.search("q", "req") == []
+
+
+# ── read_thread_checked（fail-closed 用・error code を返す）────────────────────
+# フェイクは本番の失敗モードを再現する: slack_sdk は ok:false で SlackApiError を投げ、
+# .response["error"] に code が入る。
+
+
+def test_read_thread_checked_maps_messages_on_success() -> None:
+    resp = {
+        "ok": True,
+        "messages": [
+            {"ts": "1.1", "user": "U1", "text": "親", "thread_ts": "1.1", "reply_count": 1},
+            {"ts": "1.2", "user": "U2", "text": "返信"},
+        ],
+    }
+    client = _client(conversations_replies=AsyncMock(return_value=resp))
+    reader = SlackUserReader("xoxp-x", client=client)
+    out = reader.read_thread_checked("C1", "1.1", "req")
+    assert out.error == ""
+    assert [m.text for m in out.messages] == ["親", "返信"]
+
+
+@pytest.mark.parametrize("code", ["not_in_channel", "channel_not_found", "thread_not_found"])
+def test_read_thread_checked_surfaces_slack_error_code(code: str) -> None:
+    client = _client(
+        conversations_replies=AsyncMock(
+            side_effect=SlackApiError("failed", {"ok": False, "error": code})
+        )
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    out = reader.read_thread_checked("C1", "1.1", "req")
+    assert out.error == code
+    assert out.messages == ()
+
+
+def test_read_thread_checked_generic_exception_is_api_error() -> None:
+    client = _client(conversations_replies=AsyncMock(side_effect=RuntimeError("boom")))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.read_thread_checked("C1", "1.1", "req").error == "api_error"
+
+
+def test_read_thread_checked_ok_false_without_raise() -> None:
+    """slack_sdk が例外を投げず ok:false を素通りさせても error を拾う（防御的）。"""
+    client = _client(
+        conversations_replies=AsyncMock(return_value={"ok": False, "error": "not_in_channel"})
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.read_thread_checked("C1", "1.1", "req").error == "not_in_channel"
+
+
+def test_read_thread_checked_bad_target_no_call() -> None:
+    client = _client(conversations_replies=AsyncMock(return_value={"messages": []}))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.read_thread_checked("", "1.1", "req").error == "bad_target"
+    assert reader.read_thread_checked("C1", "", "req").error == "bad_target"
+    client.conversations_replies.assert_not_awaited()
+
+
+def test_existing_read_thread_stays_fail_open_on_slack_api_error() -> None:
+    """回帰: 既存 read_thread は fail-open のまま（slack_context / unreplied を壊さない）。"""
+    client = _client(
+        conversations_replies=AsyncMock(
+            side_effect=SlackApiError("failed", {"ok": False, "error": "not_in_channel"})
+        )
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.read_thread("C1", "1.1", "req") == []
 
 
 def test_run_sync_without_running_loop() -> None:
