@@ -644,6 +644,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
       # calendar_freebusy: 空き時間の自由文照会（read-only・freebusy のみ・既定 false）。
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
+      # video_capture: 動画の指定時刻を JPEG 切出し→依頼スレッド/本人 DM へ添付（既定 false）。
+      # 前提は media worker（enable_media_worker）と MEDIA_TASK_QUEUE/MEDIA_JOBS_TABLE/
+      # MEDIA_JOB_BUCKET の配線（下の media job ブロックで既に本番稼働中）。
+      { name = "USE_VIDEO_CAPTURE_TOOL", value = var.use_video_capture_tool ? "true" : "false" },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。

@@ -427,6 +427,23 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 動画のシーン切出しツール（「このTikTokの0:05を画像にして」「添付動画の1:20切り出して」）。
+    # 入口は URL（TikTok/Instagram）か会話の添付動画の排他 2 系統。どちらも media worker の
+    # acquire/frame を通り、依頼スレッド（無ければ本人 DM）に JPEG を添付する。
+    # 外部公開URL・自WS添付のみが対象＝社内データ読取ゼロ。**既定 OFF**。
+    # 前提: media worker（enable_media_worker）と MEDIA_TASK_QUEUE 等の env 配線。
+    if _envflag("USE_VIDEO_CAPTURE_TOOL"):
+        from teamagent.skills.video_capture.skill import VideoCaptureSkill
+
+        specs.append(
+            ToolSpec(
+                VideoCaptureSkill.name,
+                VideoCaptureSkill.description,
+                VideoCaptureSkill,
+                factory=lambda: VideoCaptureSkill(),
+            )
+        )
+
     # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
     # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
     # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。
