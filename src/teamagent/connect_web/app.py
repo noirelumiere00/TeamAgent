@@ -236,9 +236,33 @@ class _RedactShortLinkAccessLog(logging.Filter):
         return True
 
 
-def build_uvicorn_log_config() -> dict[str, Any]:
-    """uvicorn の既定ログ設定に、/r/<token> をアクセスログで伏せるフィルタを足して返す。
+class _RedactAdminUserAccessLog(logging.Filter):
+    """uvicorn アクセスログの ``/admin?user=<email>`` を ``/admin?user=<redacted>`` に伏せる。
 
+    /admin の利用者ドリルダウンは同僚の会社メールを query string に載せるため、そのままだと
+    CloudWatch のアクセスログに氏名相当が平文で溜まる（G8: PII をログへ持ち込まない）。
+    ``/r/<token>`` と同じ流儀でパスだけ伏せ、他ルートのログは通常どおり残す。
+    uvicorn.access のレコードは args=(client, method, full_path, http_version, status) 形式。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            isinstance(args, tuple)
+            and len(args) >= 3
+            and isinstance(args[2], str)
+            and args[2].startswith("/admin?")
+        ):
+            redacted = list(args)
+            redacted[2] = "/admin?<redacted>"
+            record.args = tuple(redacted)
+        return True
+
+
+def build_uvicorn_log_config() -> dict[str, Any]:
+    """uvicorn の既定ログ設定に、URL の秘匿対象を伏せるフィルタを足して返す。
+
+    対象は ``/r/<token>``（capability トークン）と ``/admin?user=<email>``（PII）。
     __main__ が ``uvicorn.run(log_config=build_uvicorn_log_config())`` で使う。dictConfig が
     確実にフィルタを登録するよう、uvicorn 起動時の設定として渡す（後付け addFilter は
     uvicorn の dictConfig 適用で消えうるため）。
@@ -246,12 +270,16 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     from uvicorn.config import LOGGING_CONFIG
 
     cfg = copy.deepcopy(LOGGING_CONFIG)
-    cfg.setdefault("filters", {})["redact_shortlink"] = {
-        "()": f"{__name__}._RedactShortLinkAccessLog",
-    }
+    filters = cfg.setdefault("filters", {})
+    filters["redact_shortlink"] = {"()": f"{__name__}._RedactShortLinkAccessLog"}
+    filters["redact_admin_user"] = {"()": f"{__name__}._RedactAdminUserAccessLog"}
     access = cfg.get("loggers", {}).get("uvicorn.access")
     if access is not None:
-        access["filters"] = [*access.get("filters", []), "redact_shortlink"]
+        access["filters"] = [
+            *access.get("filters", []),
+            "redact_shortlink",
+            "redact_admin_user",
+        ]
     return cfg
 
 
@@ -565,6 +593,8 @@ _SEARCH_COOKIE = "ta_search_session"
 _SESSION_TTL_S = 8 * 3600
 _DEFAULT_SEARCH_EMAILS = "s-komata@vectorinc.co.jp"
 _DEFAULT_ADMIN_EMAILS = frozenset({"s-komata@vectorinc.co.jp"})
+# /admin?user= の受け入れ上限。RFC 5321 の email 上限(254)を採る。
+_ADMIN_FILTER_USER_MAX = 254
 
 
 def _admin_emails() -> frozenset[str]:
@@ -4378,7 +4408,9 @@ def create_app(
     def usage_admin(request: Request) -> Response:
         """小俣さん限定の利用状況・質問フィード。
 
-        非許可ユーザーにはページの存在を秘匿する。
+        非許可ユーザーにはページの存在を秘匿する。``?user=<email>`` を付けると質問
+        フィードだけをその利用者に絞り込む（admin ゲート通過後にのみ解釈する）。
+        絞り込み値は WHERE 句へプレースホルダで渡し、ログにも出さない（G8）。
         """
         email = _search_email(request)
         if email is None:
@@ -4387,6 +4419,11 @@ def create_app(
             # 未登録ルートと同じ FastAPI 標準404に揃え、body/content-type でも
             # 存在を秘匿する。
             raise HTTPException(status_code=404)
+
+        # ドリルダウン対象。email/Slack ID より長い値は捨てる（無意味な全表スキャン避け）。
+        filter_user = (request.query_params.get("user") or "").strip()
+        if len(filter_user) > _ADMIN_FILTER_USER_MAX:
+            filter_user = ""
 
         data: dict[str, Any] = {
             "email": email,
@@ -4397,6 +4434,9 @@ def create_app(
             "users": [],
             "errors": [],
             "notes": [],
+            "work_types_7d": [],
+            "work_types_30d": [],
+            "filter_user": filter_user,
         }
         successful: set[str] = set()
         try:
@@ -4406,22 +4446,24 @@ def create_app(
             logger.warning("usage_admin_setup_failed", error=type(exc).__name__, exc_info=True)
             data["notes"].append("利用状況データへ接続できませんでした。")
         else:
-            query_specs = (
-                ("kpis", "kpis", ()),
-                ("daily", "daily_series", (30,)),
-                ("skills", "skill_breakdown", (7,)),
-                ("users", "user_breakdown", ()),
-                ("errors", "error_list", (50,)),
-                ("questions", "recent_questions", (200,)),
+            query_specs: tuple[tuple[str, str, tuple[Any, ...], dict[str, Any]], ...] = (
+                ("kpis", "kpis", (), {}),
+                ("daily", "daily_series", (30,), {}),
+                ("skills", "skill_breakdown", (7,), {}),
+                ("work_types_7d", "work_type_breakdown", (7,), {}),
+                ("work_types_30d", "work_type_breakdown", (30,), {}),
+                ("users", "user_breakdown", (), {}),
+                ("errors", "error_list", (50,), {}),
+                ("questions", "recent_questions", (200,), {"who": filter_user or None}),
             )
-            for target, function_name, args in query_specs:
+            for target, function_name, args, kwargs in query_specs:
                 try:
                     query_fn = getattr(query_module, function_name)
                     # SQL エラーで transaction が abort しても他の集計を
                     # 巻き込まないよう、
                     # 関数ごとに read-only 接続境界を分ける。
                     with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
-                        data[target] = query_fn(conn, *args)
+                        data[target] = query_fn(conn, *args, **kwargs)
                     successful.add(target)
                 except Exception as exc:
                     logger.warning(
@@ -4437,6 +4479,7 @@ def create_app(
         if "kpis" in successful:
             data["empty"] = metrics.get("total_events", 0) == 0
         else:
+            # work_types は 0 件でも中核4束を返す（＝空判定の材料にしない）。
             data["empty"] = (
                 "daily" in successful
                 and not data["daily"]
