@@ -14,8 +14,11 @@ CLAUDE.md 6-bis ルール準拠：
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
+import threading
+import time
 from typing import Any, ClassVar
 
 import structlog
@@ -37,6 +40,14 @@ from teamagent.skills.search.knowledge_query import (
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
+from teamagent.skills.search.two_stage import (
+    TWO_STAGE_CTX_KEY,
+    TWO_STAGE_NOTICE,
+    FollowupTarget,
+    resolve_followup_target,
+    to_slack_mrkdwn,
+    two_stage_enabled,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -103,6 +114,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         summary_max_tokens: int = 4096,
         app_role: str | None = "teamagent_app",
         query_planner: QueryPlanner | None = None,
+        slack: Any = None,
     ) -> None:
         """Adapter は外から注入する（テストでモック差し替え可能にするため）。
 
@@ -126,6 +138,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         self._bedrock = bedrock or BedrockClient.from_env()
         self._pgvector = pgvector or PgVectorClient.from_env()
         self._embedder = embedder
+        # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）の後追い投稿に使う Slack クライアント。
+        # 既定 None＝必要になった時に SlackClient.from_env() を遅延生成する
+        # （knowledge_deliver と同じ流儀。フラグ OFF のときは一切生成しない）。
+        self._slack = slack
         self._use_new_schema = use_new_schema
         if use_contextual:
             # Contextual Retrieval テーブルを優先（明示指定がなければ）
@@ -325,24 +341,43 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             top_k=input.top_k,
             filter_industry=input.filter_industry,
         )
+        # 区間別レイテンシ（G8: 本文・クエリ原文は一切載せない。数値と件数だけ）。
+        # 実測で残っていた「分解不能な約1.9秒」を潰すための計器で、挙動には影響しない。
+        run_started = time.perf_counter()
+        timings: dict[str, float] = {}
 
         # 1. クエリを embedding 化
+        _t = time.perf_counter()
         embedding = self._embed(input.query)
+        timings["embed_ms"] = (time.perf_counter() - _t) * 1000
 
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
-        hits = self._retrieve(embedding, input, ctx)
+        _t = time.perf_counter()
+        hits = self._retrieve(embedding, input, ctx, timings=timings)
+        timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
 
         # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
         # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
+        _t = time.perf_counter()
         file_urls = self._resolve_file_urls(hits, ctx)
+        timings["resolve_urls_ms"] = (time.perf_counter() - _t) * 1000
 
         # 3. Bedrock で要約（chunk が 0 件のときはスキップ）。
         #    include_answer=False（二段レスポンスの fast path）は要約そのものを
         #    スキップし answer='' / 要約コスト 0 で hits だけ返す。0 件時の
         #    「該当する資料が見つかりませんでした。」も要約側の文言なので出さない
         #    （フロントは include_answer=True の並行フェッチで従来文言を得る）。
-        if input.include_answer:
+        #    二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）は「要約を待たずヒットを返し、
+        #    回答文は発信元スレッドへ後追い投稿する」。フラグ OFF ならこの分岐は
+        #    _should_defer_answer が必ず False を返し、以下は 1 バイトも従来と変わらない。
+        deferred = False
+        if input.include_answer and self._should_defer_answer(hits, ctx):
+            answer, cost_usd = self._start_followup_answer(input, hits, file_urls, ctx), 0.0
+            deferred = True
+        elif input.include_answer:
+            _t = time.perf_counter()
             answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
+            timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
             # markdown [label](url) は openclaw(@NewsTV AI) が Slack 装飾リンクへ変換する。ただし
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
@@ -396,11 +431,28 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             hits=search_hits,
             total_cost_usd=cost_usd,
         )
+        total_ms = (time.perf_counter() - run_started) * 1000
         log.info(
             "search_skill_done",
             hit_count=len(hits),
             cost_usd=cost_usd,
             top_score=hits[0].score if hits else None,
+            # cloudwatch_fargate.tf のダッシュボードが search_skill_done.latency_ms を
+            # 参照していたが、これまで一度も出ていなかった（常に空カラム）。
+            latency_ms=int(total_ms),
+        )
+        # 内訳 1 行（区間別）。converse_ms は二段返し時は 0（後追い側の
+        # search_followup_done に出る）。retrieve_ms は rerank_ms を内包する。
+        log.info(
+            "search_latency_breakdown",
+            embed_ms=int(timings.get("embed_ms", 0.0)),
+            retrieve_ms=int(timings.get("retrieve_ms", 0.0)),
+            rerank_ms=int(timings.get("rerank_ms", 0.0)),
+            resolve_urls_ms=int(timings.get("resolve_urls_ms", 0.0)),
+            converse_ms=int(timings.get("converse_ms", 0.0)),
+            total_ms=int(total_ms),
+            hit_count=len(hits),
+            deferred=deferred,
         )
         return output
 
@@ -535,9 +587,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         return auto_doc_type == "提案書"
 
     def _retrieve(
-        self, embedding: list[float], input: SearchInput, ctx: SkillContext
+        self,
+        embedding: list[float],
+        input: SearchInput,
+        ctx: SkillContext,
+        *,
+        timings: dict[str, float] | None = None,
     ) -> list[SearchHit]:
         """pgvector で類似検索する。
+
+        timings: 区間別レイテンシの収集先（None＝計測しない）。run() が 1 リクエストにつき
+        1 個の dict を渡す（常駐シングルトンでも request 間で混ざらない）。retrieve_hits 等の
+        他 Skill からの再利用口は None のままで挙動不変。
 
         ctx.metadata から RLS 評価用の user_email / user_groups / user_role を取得し、
         PgVectorClient.connection() に渡す。runtime/slack_bot.py の SkillDispatcher が
@@ -757,12 +818,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 閾値フィルタの後段で行う。
                 if self._use_cohere_rerank and hits:
                     rerank_n = min(len(hits), self._rerank_return_size)
+                    _t_rerank = time.perf_counter()
                     hits = self._apply_cohere_rerank(
                         query=input.query,
                         hits=hits,
                         top_n=rerank_n,
                         request_id=ctx.request_id,
                     )
+                    if timings is not None:
+                        timings["rerank_ms"] = timings.get("rerank_ms", 0.0) + (
+                            (time.perf_counter() - _t_rerank) * 1000
+                        )
                 # Sprint 5: 反ハルシネーション閾値。relevance < 閾値の hit を落とす。
                 # Rerank 後の relevance score に対して適用 (drive-match の固定 score=1.0
                 # より前に評価し、弱い根拠しか無いクエリでは drive-match も発火させない)。
@@ -1027,6 +1093,130 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 pool_before=len(hits),
             )
         return list(hits) + added
+
+    # ── 二段返し（ヒット先出し → 回答後追い）。USE_SEARCH_TWO_STAGE 既定 OFF ──────────
+    def _should_defer_answer(self, hits: list[SearchHit], ctx: SkillContext) -> bool:
+        """この呼び出しで回答を後追いにしてよいか（4 条件すべてを満たす時だけ True）。
+
+        1. env USE_SEARCH_TWO_STAGE が ON（既定 OFF＝常に False＝従来挙動と完全一致）
+        2. MCP ゲートが立てた印がある（/app・slack_bot 直呼び・knowledge_deliver 内部呼びを除外）
+        3. ヒットが 1 件以上（0 件は元々 Bedrock を呼ばず速い。後追いしても価値が無い）
+        4. 後追い投稿の宛先が ctx.metadata から決まる（決まらないなら同期要約に落とす）
+        """
+        if not hits:
+            return False
+        if not two_stage_enabled():
+            return False
+        if not ctx.metadata.get(TWO_STAGE_CTX_KEY):
+            return False
+        return resolve_followup_target(ctx.metadata) is not None
+
+    def _start_followup_answer(
+        self,
+        input: SearchInput,
+        hits: list[SearchHit],
+        file_urls: dict[str, str],
+        ctx: SkillContext,
+    ) -> str:
+        """回答生成をバックグラウンドへ逃がし、ツール応答に載せる定型文を返す。
+
+        skill.run 自体が dispatch の worker thread（asyncio.to_thread）なので、ここから
+        更に daemon thread を起こす。後追いは fail-open（失敗してもヒット一覧は既に届く）。
+        """
+        target = resolve_followup_target(ctx.metadata)
+        if target is None:  # _should_defer_answer で確認済み。二重ガード（宛先未確定では投げない）
+            return TWO_STAGE_NOTICE
+        thread = threading.Thread(
+            target=self.deliver_followup_answer,
+            kwargs={
+                "query": input.query,
+                "hits": list(hits),
+                "file_urls": dict(file_urls),
+                "request_id": ctx.request_id,
+                "target": target,
+            },
+            name=f"search-followup-{ctx.request_id}",
+            daemon=True,
+        )
+        thread.start()
+        logger.info(
+            "search_two_stage_deferred",
+            request_id=ctx.request_id,
+            hit_count=len(hits),
+            target=target.kind,
+            threaded=bool(target.thread_ts),
+        )
+        return TWO_STAGE_NOTICE
+
+    def deliver_followup_answer(
+        self,
+        *,
+        query: str,
+        hits: list[SearchHit],
+        file_urls: dict[str, str],
+        request_id: str,
+        target: FollowupTarget,
+    ) -> bool:
+        """要約を生成して後追い投稿する（同期）。例外は握って False（fail-open）。
+
+        バックグラウンド thread の本体。テストからは直接呼んで検証する。
+        """
+        started = time.perf_counter()
+        try:
+            answer, cost_usd = self._summarize(query, hits, request_id)
+            if _source_links_enabled():
+                answer += self._source_links_block(hits, file_urls=file_urls)
+            converse_ms = (time.perf_counter() - started) * 1000
+            posted = asyncio.run(self._post_followup(to_slack_mrkdwn(answer), target, request_id))
+        except Exception as exc:
+            # ヒット一覧は既にユーザーへ届いている＝ここで落ちても検索は成立している。
+            logger.warning(
+                "search_followup_failed",
+                request_id=request_id,
+                error=type(exc).__name__,
+                target=target.kind,
+            )
+            return False
+        logger.info(
+            "search_followup_done",
+            request_id=request_id,
+            posted=posted,
+            target=target.kind,
+            converse_ms=int(converse_ms),
+            total_ms=int((time.perf_counter() - started) * 1000),
+            cost_usd=cost_usd,
+            hit_count=len(hits),
+        )
+        return posted
+
+    async def _post_followup(self, text: str, target: FollowupTarget, request_id: str) -> bool:
+        """発信元スレッドへ投稿し、駄目なら依頼者本人の DM へフォールバックする。
+
+        宛先は resolve_followup_target が ctx.metadata から決めたものだけを使う
+        （既定チャンネル等へのフォールバックは持たない）。
+        """
+        slack = self._slack or self._build_slack()
+        if target.channel_id:
+            res = await slack.post_message(
+                target.channel_id, text, request_id, thread_ts=target.thread_ts
+            )
+            if bool(getattr(res, "ok", False)):
+                return True
+        if not target.email:
+            return False
+        user_id = await slack.lookup_user_id_by_email(target.email, request_id)
+        if not user_id:
+            return False
+        dm = await slack.open_dm(user_id, request_id)
+        if not dm:
+            return False
+        res = await slack.post_message(dm, text, request_id)
+        return bool(getattr(res, "ok", False))
+
+    def _build_slack(self) -> Any:
+        from teamagent.adapters.slack_client import SlackClient
+
+        return SlackClient.from_env()
 
     def _summarize(
         self,

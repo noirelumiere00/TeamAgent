@@ -798,6 +798,74 @@ def test_prompt_v2c_file_exists_and_is_compact() -> None:
     assert "戦略" in v2c or "翻訳" in v2c
 
 
+# ==================================================================
+# 2026-08-17: v2e（350字・3セクション）— 出力トークン削減の本体
+#   本番 bedrock_converse の 68% は出力生成で、v2d の「550 文字以内」指示どおり
+#   出力中央値 498tok まで書き切っている。短縮するのは max_tokens ではなく**字数指示**。
+#   下の3本は「v2e が壊れても CI が緑のまま製品価値だけ落ちる」非対称を塞ぐためのもの。
+# ==================================================================
+def test_prompt_v2e_file_exists_and_caps_at_350_chars() -> None:
+    """v2e が存在し、出力字数の上限指示が 350 文字であること（レイテンシ削減の根本）。"""
+    from teamagent.prompts.loader import load_prompt
+
+    v2e = load_prompt("search", "v2e", "system")
+    assert "350 文字以内" in v2e, "字数指示が v2e から消えている（短縮の効果が消滅する）"
+    # v2d の 550 文字指示が残っていたら短縮になっていない
+    assert "550 文字以内" not in v2e
+
+
+def test_prompt_v2e_keeps_three_sections_with_caps() -> None:
+    """3セクション構成（📋 / 💡最大1個 / 🎯最大1個）を守る。
+
+    💡刺さったパターンは営業が実際に評価している機能（部署の脳の萌芽）なので、
+    字数を詰める過程で落とすことを禁止する。⚠️避けたい論点は v2e では持たない。
+    """
+    from teamagent.prompts.loader import load_prompt
+
+    v2e = load_prompt("search", "v2e", "system")
+    lines = v2e.splitlines()
+
+    direct = [ln for ln in lines if ln.startswith("📋")]
+    pattern = [ln for ln in lines if ln.startswith("💡")]
+    action = [ln for ln in lines if ln.startswith("🎯")]
+    assert direct, "📋 直接回答セクションが無い"
+    assert pattern, "💡 刺さったパターンセクションが無い（営業評価済み機能・削除禁止）"
+    assert action, "🎯 推奨アクションセクションが無い"
+
+    assert "刺さったパターン" in pattern[0]
+    assert "最大 1 個" in pattern[0], "💡 の上限が 1 個で固定されていない"
+    assert "推奨アクション" in action[0]
+    assert "最大 1 個" in action[0], "🎯 の上限が 1 個で固定されていない"
+    # 3セクション固定＝⚠️避けたい論点は見出しとして持たない（350字に収めるため）
+    assert not [ln for ln in lines if ln.startswith("⚠️")]
+
+
+def test_prompt_v2e_keeps_anti_hallucination_clauses() -> None:
+    """字数圧縮で反ハルシネーション契約（fail-honest / ※推論 / chunk_id 禁止）を落とさない。"""
+    from teamagent.prompts.loader import load_prompt
+
+    v2e = load_prompt("search", "v2e", "system")
+    assert "資料に記載がありません" in v2e  # fail-honest
+    assert "※ 推論:" in v2e  # 推論の明示
+    assert "chunk_id" in v2e  # 技術IDを回答に出さない指示
+
+
+def test_prompt_version_default_stays_v2d(monkeypatch: pytest.MonkeyPatch) -> None:
+    """コード既定は v2d のまま（v2e への切替は env で行う）。
+
+    順序契約: **イメージ配備が先、env 切替が後**。prompts/loader.py は存在しないバージョンで
+    FileNotFoundError を投げフォールバックが無いため、v2e を含まないイメージに
+    PROMPT_VERSION=v2e を入れると include_answer=True の検索が全断する。コード既定を
+    v2e にすると「イメージだけロールバック」で同じ全断が起きるため、既定は動かさない。
+    """
+    from teamagent.orchestrator.factory import resolve_search_skill_config
+
+    monkeypatch.delenv("PROMPT_VERSION", raising=False)
+    assert resolve_search_skill_config()["prompt_version"] == "v2d"
+    monkeypatch.setenv("PROMPT_VERSION", "v2e")
+    assert resolve_search_skill_config()["prompt_version"] == "v2e"
+
+
 def test_summary_max_tokens_passed_to_bedrock(
     fake_bedrock: MagicMock, fake_pgvector: MagicMock
 ) -> None:
