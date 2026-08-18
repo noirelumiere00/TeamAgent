@@ -1156,7 +1156,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 31
+    assert len(inventory_names) == len(set(inventory_names)) == 35
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1215,11 +1215,31 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "names": ["USE_X_RESEARCH_TOOLS"],
     }
     assert activation_by_name["video_approval"] == {"kind": "never"}
+    assert activation_by_name["slack_summary"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_SLACK_SUMMARY_TOOL"],
+    }
+    assert activation_by_name["attachment_assist"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_ATTACHMENT_TOOLS"],
+    }
+    assert activation_by_name["video_capture"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_VIDEO_CAPTURE_TOOL"],
+    }
+    assert activation_by_name["web_research"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_WEB_RESEARCH_TOOL"],
+    }
     effects = {tool["effect"] for tool in scope["tools"]}
     assert "gmail-draft-write-no-send" in effects
     assert "calendar-write-no-invite" in effects
     assert "calendar-freebusy-read-only" in effects
     assert "external-job-submit-s3-write" in effects
+    assert "slack-thread-read-analysis" in effects
+    assert "slack-file-read-analysis" in effects
+    assert "external-video-read-slack-file-delivery" in effects
+    assert "external-web-search-read-only" in effects
     tools_by_name = {tool["name"]: tool for tool in scope["tools"]}
     assert tools_by_name["x_voice_search"]["effect"] == "external-read-scrape-analysis-report-write"
     assert tools_by_name["x_needs_mining"]["effect"] == "external-read-analysis-report-write"
@@ -1250,6 +1270,10 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "enable_media_worker",
         "enable_proposal_builder",
         "enable_x_research",
+        "USE_SLACK_SUMMARY_TOOL",
+        "USE_ATTACHMENT_TOOLS",
+        "USE_VIDEO_CAPTURE_TOOL",
+        "USE_WEB_RESEARCH_TOOL",
     ):
         assert gate in terraform
     assert "proposal_builder_sync_runtime_verified" not in terraform

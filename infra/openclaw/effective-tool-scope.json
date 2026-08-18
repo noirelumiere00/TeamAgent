@@ -254,6 +254,34 @@
       "terraformGate": "enable_x_research",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_TIKTOK_COMMENT_TOOLS"] }
+    },
+    {
+      "name": "slack_summary",
+      "effect": "slack-thread-read-analysis",
+      "terraformGate": "use_slack_summary_tool",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SUMMARY_TOOL"] }
+    },
+    {
+      "name": "attachment_assist",
+      "effect": "slack-file-read-analysis",
+      "terraformGate": "use_attachment_tools",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_ATTACHMENT_TOOLS"] }
+    },
+    {
+      "name": "video_capture",
+      "effect": "external-video-read-slack-file-delivery",
+      "terraformGate": "use_video_capture_tool",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_VIDEO_CAPTURE_TOOL"] }
+    },
+    {
+      "name": "web_research",
+      "effect": "external-web-search-read-only",
+      "terraformGate": "use_web_research_tool",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_WEB_RESEARCH_TOOL"] }
     }
   ]
 }

@@ -192,6 +192,18 @@
             // calendar_freebusy: 「空いてる？」「◯分どこに入る？」の自由文空き時間照会。
             // read-only＝freebusy 読み取りのみ・書込APIなし（USE_CALENDAR_FREEBUSY_TOOL=1・既定OFF）。
             "calendar_freebusy",
+            // slack_summary: 「このスレッド要約して」。読取は依頼者本人の xoxp のみ（bot token 不使用）・
+            // 出力面ガードで発信元チャンネル以外のスレッドは拒否（USE_SLACK_SUMMARY_TOOL=1・既定OFF）。
+            "slack_summary",
+            // attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
+            // read-only・テキスト返答のみ（USE_ATTACHMENT_TOOLS=1・既定OFF）。
+            "attachment_assist",
+            // video_capture: 動画の指定時刻を JPEG 切出しして依頼スレッド/本人DMに添付。
+            // 対象は TikTok/Instagram URL と自WS添付動画のみ（USE_VIDEO_CAPTURE_TOOL=1・既定OFF）。
+            "video_capture",
+            // web_research: 公開Webの市場リサーチ（Gemini Google検索グラウンディング・read-only）。
+            // 社内資料・案件・顧客名の照会は絶対に回さない（USE_WEB_RESEARCH_TOOL=1・既定OFF）。
+            "web_research",
             // morning_digest は EventBridge Scheduled Taskに加えてmention-capable MCPにもincludeされる。
             // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
             // USE_MORNING_DIGEST_TOOL=1 が必要。
