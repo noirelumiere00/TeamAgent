@@ -52,6 +52,9 @@ from teamagent.orchestrator.tools import ToolSpec
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder
 from teamagent.skills.base import SkillContext
 
+# 二段返しの契約定数だけを持つ軽量モジュール（boto3/psycopg を引かない）。
+from teamagent.skills.search.two_stage import TWO_STAGE_CTX_KEY
+
 logger = structlog.get_logger(__name__)
 
 # 呼び出し元（外殻）が RLS 用コンテキストを渡す予約キー。skill 入力とは分離する。
@@ -595,6 +598,9 @@ async def dispatch_tool(
 
     例外は握って構造化エラーで返す（MCP サーバも外殻のループも落とさない）。
     """
+    # ゲート受信時刻。skill 実行前（身元検証・resolver 往復・入力検証・進捗投稿）に
+    # どれだけ溶けているかを mcp_tool_usage.gateway_ms として可視化する（挙動は不変）。
+    _received = time.perf_counter()
     spec = by_name.get(name)
     if spec is None:
         return _err(f"unknown tool: {name}")
@@ -633,6 +639,13 @@ async def dispatch_tool(
     except Exception as e:  # 入力検証エラーは構造化で返す
         return _err(f"invalid input: {type(e).__name__}: {e}")
 
+    # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）を許可してよい面の印。**この境界を通った
+    # search tool だけ**が対象で、connect-web(/app)・runtime/slack_bot.py の直呼び・
+    # knowledge_deliver が内部で回す search には印が付かない（env を入れても影響しない）。
+    # 実際に後追いするかは skill 側が env と宛先の有無で決める。
+    if name == SEARCH_TOOL_NAME:
+        metadata[TWO_STAGE_CTX_KEY] = True
+
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
     # ── 進捗表示（v0.3.1 Task7・ENABLE_PROGRESS_NOTIFY 既定OFF・fail-open）───────────
     # 重いツールの実行前に「📂 資料を検索しています…」等を Slack へ投稿し、成功/失敗
@@ -643,6 +656,8 @@ async def dispatch_tool(
 
     _progress = await send_progress(name, raw, request_id=ctx.request_id)
     _started = time.perf_counter()
+    # 受信 → skill 開始 の内訳（身元検証・resolver・入力検証・進捗投稿の合計）。
+    _gateway_ms = int((_started - _received) * 1000)
     skill = spec.instantiate()
     try:
         # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
@@ -651,7 +666,12 @@ async def dispatch_tool(
     except Exception as e:
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
         logger.warning(
-            "mcp_tool_error", tool=name, error=type(e).__name__, request_id=ctx.request_id
+            "mcp_tool_error",
+            tool=name,
+            error=type(e).__name__,
+            request_id=ctx.request_id,
+            gateway_ms=_gateway_ms,
+            latency_ms=_elapsed_ms,
         )
         # error 応答でも進捗削除を先に終え、usage task を schedule した後には await しない。
         # これにより lazy 初期化/DB I/O が応答の critical path に入らない。
@@ -689,6 +709,12 @@ async def dispatch_tool(
         tool=name,
         request_id=ctx.request_id,
         latency_ms=_elapsed_ms,
+        # 内訳（Slack 体感と mcp 実測の差を詰めるための計器）:
+        # gateway_ms = 受信→skill 開始（身元検証・Slack resolver・入力検証・進捗投稿）
+        # latency_ms = skill 開始→完了（既存キー・定義不変。台帳の連続性を壊さない）
+        # total_ms   = 受信→skill 完了（返却前ミドルウェアは含まない）
+        gateway_ms=_gateway_ms,
+        total_ms=_gateway_ms + _elapsed_ms,
         # ⚠️ キー名は cost_usd に**しない**こと: cloudwatch_fargate.tf のメトリックフィルタ
         # { $.cost_usd = * } が adapter/skill 層の既存ログと合算して日次コストアラームを
         # 二重〜三重計上に汚染する（レビュー F-1）。usage 集計は専用 Insights クエリで行う。
