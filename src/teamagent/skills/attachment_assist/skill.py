@@ -29,6 +29,9 @@ P1 スコープ: **テキスト返答のみ**。docx/xlsx/pdf/pptx を作って�
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
 
 import structlog
@@ -337,15 +340,31 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         )
 
     def _extract(self, target: AttachmentCandidate, data: bytes) -> list[tuple[int, str]]:
-        """抽出を別スレッドで壁時計タイムアウト付きに実行する。"""
+        """抽出を別スレッドで壁時計上限つきに実行する（超えたら **待たずに** 見切る）。
+
+        ⚠️ ``asyncio.run(asyncio.wait_for(asyncio.to_thread(...)))`` にしてはいけない。
+        ``asyncio.run`` は終了時に既定 executor の join を待つため、**timeout しても
+        抽出スレッドが終わるまで戻ってこない**（実測: 2 秒かかる抽出 × timeout 0.05 秒で
+        2.008 秒ブロック。同条件の ThreadPoolExecutor は 0.055 秒）。それでは
+        「重いファイルで mcp タスクを占有させない」という目的を果たさない。
+
+        二段構え:
+          1. office 抽出は ``progress_callback`` の deadline で**協調的に**打ち切る
+             （スレッド自体が止まる）。
+          2. それでも返らないケースは ``future.result(timeout=...)`` で見切り、
+             executor を ``wait=False`` で捨てる。
+        """
+        deadline = time.monotonic() + self._extract_timeout_s
 
         def _work() -> list[tuple[int, str]]:
-            return _extract_pages(target, data, max_chars=self._max_input_chars)
+            return _extract_pages(target, data, max_chars=self._max_input_chars, deadline=deadline)
 
-        async def _runner() -> list[tuple[int, str]]:
-            return await asyncio.wait_for(asyncio.to_thread(_work), timeout=self._extract_timeout_s)
-
-        return asyncio.run(_runner())
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="attach-extract")
+        try:
+            # concurrent.futures.TimeoutError は Python 3.11+ で組込 TimeoutError と同一。
+            return pool.submit(_work).result(timeout=self._extract_timeout_s)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
     def _process(
         self,
@@ -401,8 +420,26 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
 
 
+def _deadline_callback(deadline: float | None) -> Callable[[], None] | None:
+    """office 抽出の heartbeat で期限超過を**協調的に**打ち切る hook を作る。
+
+    ``office_extract._report_progress`` は callback の例外を
+    ``_OfficeProgressCallbackError`` で包み、``extract_office_pages`` が cause を
+    そのまま再送出する＝ここで投げた ``TimeoutError`` が呼び出し側へ届く
+    （payload 破損とは混同されない）。
+    """
+    if deadline is None:
+        return None
+
+    def _cb() -> None:
+        if time.monotonic() > deadline:
+            raise TimeoutError("office extraction exceeded deadline")
+
+    return _cb
+
+
 def _extract_pages(
-    target: AttachmentCandidate, data: bytes, *, max_chars: int
+    target: AttachmentCandidate, data: bytes, *, max_chars: int, deadline: float | None = None
 ) -> list[tuple[int, str]]:
     """kind に応じて既存抽出器へ dispatch する（上限は必ず明示で渡す）。"""
     if target.kind == "pdf":
@@ -424,6 +461,7 @@ def _extract_pages(
             include_notes=True,
             include_tables=True,
             max_extracted_chars=max_chars * 2,
+            progress_callback=_deadline_callback(deadline),
         )
     text = data.decode("utf-8", errors="replace").strip()
     return [(1, text)] if text else []

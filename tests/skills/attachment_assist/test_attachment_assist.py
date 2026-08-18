@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import time
 from io import BytesIO
 from typing import Any
 
@@ -334,18 +335,62 @@ def test_llm_failure_reported() -> None:
 
 
 def test_extraction_timeout_reported(monkeypatch: pytest.MonkeyPatch) -> None:
-    """抽出は壁時計上限つき（巨大ファイルで mcp タスクを占有させない）。"""
+    """抽出は壁時計上限つき（巨大ファイルで mcp タスクを占有させない）。
+
+    ⚠️ 「timeout を返す」だけでは不十分で、**実際に待たずに戻る**ことまで見る。
+    asyncio.run(wait_for(to_thread(...))) 実装は timeout を返すが既定 executor の
+    join を待ち、1.0 秒の抽出に対して 1.0 秒ブロックしていた（実測）。
+    """
     import time
 
     def _slow(*_a: Any, **_kw: Any) -> list[tuple[int, str]]:
-        time.sleep(2.0)
+        time.sleep(1.0)
         return [(1, "x")]
 
     monkeypatch.setattr("teamagent.skills.attachment_assist.skill._extract_pages", _slow)
     skill, _, _, bedrock = _skill(extract_timeout_s=0.05)
+    started = time.monotonic()
     out = _run(skill)
+    elapsed = time.monotonic() - started
     assert out.error == "extract_failed"
     assert bedrock.calls == []
+    assert elapsed < 0.6, f"抽出スレッドの終了を待っている（{elapsed:.3f}秒）"
+
+
+def test_office_extraction_aborts_cooperatively_on_deadline() -> None:
+    """office 経路は progress_callback の deadline でスレッド自体が止まる。"""
+    from teamagent.skills.attachment_assist.skill import _deadline_callback
+
+    assert _deadline_callback(None) is None
+    future = _deadline_callback(time.monotonic() + 60)
+    assert future is not None
+    future()  # 期限内は何も起きない
+    past = _deadline_callback(time.monotonic() - 1)
+    assert past is not None
+    with pytest.raises(TimeoutError):
+        past()
+
+
+def test_office_deadline_is_wired_into_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """docx/pptx/xlsx 抽出に progress_callback（deadline hook）が必ず渡る。"""
+    from teamagent.skills.attachment_assist import skill as skill_mod
+    from teamagent.skills.attachment_assist.discover import AttachmentCandidate
+
+    seen: dict[str, Any] = {}
+
+    def _fake_office(data: bytes, mime: str, **kw: Any) -> list[tuple[int, str]]:
+        seen.update(kw)
+        return [(1, "x")]
+
+    monkeypatch.setattr("teamagent.ingest.office_extract.extract_office_pages", _fake_office)
+    cand = AttachmentCandidate(
+        file_id="F", name="a.docx", kind="docx", mime="", size=1, url="u", ts=1.0
+    )
+    skill_mod._extract_pages(cand, b"x", max_chars=100, deadline=time.monotonic() - 1)
+    cb = seen["progress_callback"]
+    assert cb is not None
+    with pytest.raises(TimeoutError):
+        cb()
 
 
 # ── ⑤ 長文の扱い ───────────────────────────────────────────────────────────
