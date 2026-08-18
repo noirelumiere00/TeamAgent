@@ -175,7 +175,10 @@ def test_missing_user_email_is_fail_closed() -> None:
         ({"title": "打合せ", "start": ""}, "no_input"),
         ({"title": "打合せ", "start": "来週あたり"}, "bad_datetime"),
         ({"title": "打合せ", "start": "2026-08-20"}, "bad_datetime"),  # 日付だけ＝時刻未確定
-        ({"title": "打合せ", "start": "2026-08-20T15:00+09:00", "end": "とりあえず"}, "bad_datetime"),
+        (
+            {"title": "打合せ", "start": "2026-08-20T15:00+09:00", "end": "とりあえず"},
+            "bad_datetime",
+        ),
         # 所要ガード（0 分以下 / 8 時間超）
         (
             {
@@ -208,9 +211,7 @@ def test_missing_user_email_is_fail_closed() -> None:
         ({"title": "打合せ", "start": "2126-08-20T15:00+09:00"}, "out_of_range"),
     ],
 )
-def test_freeform_guards_reject_before_touching_the_api(
-    kwargs: dict[str, str], error: str
-) -> None:
+def test_freeform_guards_reject_before_touching_the_api(kwargs: dict[str, str], error: str) -> None:
     skill, gcal = _skill()
 
     out = _run(skill, **kwargs)
