@@ -174,19 +174,27 @@ class FakeReader:
         *,
         thread: list[SlackMessage] | None = None,
         history: list[SlackMessage] | None = None,
+        read_error: Exception | None = None,
     ) -> None:
         self.thread = thread or []
         self.history = history or []
+        # 本番の失敗モード: bot に im:history / channels:history が無いと
+        # conversations.* が missing_scope で例外になる（「動画0件」ではない）。
+        self.read_error = read_error
         self.calls: list[str] = []
 
     def list_thread_replies(
         self, channel_id: str, thread_ts: str, request_id: str, **kwargs: Any
     ) -> HistoryBatch:
         self.calls.append("thread")
+        if self.read_error is not None:
+            raise self.read_error
         return HistoryBatch(messages=tuple(self.thread))
 
     def list_channel_history(self, channel_id: str, request_id: str, **kwargs: Any) -> HistoryBatch:
         self.calls.append("history")
+        if self.read_error is not None:
+            raise self.read_error
         return HistoryBatch(messages=tuple(self.history))
 
 
@@ -602,6 +610,33 @@ def test_missing_attachment_gives_actionable_message() -> None:
     )
     assert out.error == "attachment_not_found"
     assert "添付" in out.message
+
+
+def test_unreadable_conversation_is_not_reported_as_no_video() -> None:
+    """history scope 不足を「動画が見つかりません」に化けさせない。
+
+    化けさせると、bot の scope 設定ミスが恒久的に『動画0件』として隠れ、
+    誰も原因に辿り着けなくなる（実測の注記を事実として報告するな、と同じ罠）。
+    """
+
+    reader = FakeReader(read_error=RuntimeError("missing_scope"))
+    out = make_skill(FakeMedia(), FakeSlack(), reader).run(
+        VideoCaptureInput(slack_file=True, timecodes=["0:02"]), make_ctx()
+    )
+    assert out.error == "conversation_read_failed"
+    assert "履歴を読めませんでした" in out.message
+    assert "確認できていません" in out.message
+    assert reader.calls == ["thread", "history"]  # 両方試したうえでの判定
+
+
+def test_readable_but_empty_conversation_still_says_not_found() -> None:
+    """読めた場合はこれまでどおり『添付してください』の案内に落とす。"""
+
+    reader = FakeReader(thread=[SlackMessage(ts="1700.2", user="U1", text="雑談だけ")])
+    out = make_skill(FakeMedia(), FakeSlack(), reader).run(
+        VideoCaptureInput(slack_file=True, timecodes=["0:02"]), make_ctx()
+    )
+    assert out.error == "attachment_not_found"
 
 
 # ---------------------------------------------------------------------------

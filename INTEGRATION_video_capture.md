@@ -185,3 +185,24 @@ dev merge → CI 緑
 | `VIDEO_CAPTURE_ALLOW_YOUTUBE` | false | YouTube URL を受けるか（実測でブロック中） |
 | `VIDEO_CAPTURE_SLACK_MAX_MB` | 100 | 添付動画の上限（1〜128） |
 | `VIDEO_CAPTURE_MAX_CONCURRENCY` | 2 | 同時切出し数（3GB 共有コンテナの総量規制） |
+
+---
+
+## 8. 添付経路が必要とする Slack bot scope（未確認・要点検）
+
+`slack_file=true` の経路は bot token で会話履歴を読み、`url_private` を取得する。
+
+| API | 必要 scope | 用途 |
+| --- | --- | --- |
+| `conversations.replies` | `channels:history` / `groups:history` / `im:history` | スレッドの添付を探す |
+| `conversations.history` | 同上 | スレッド外／DM の直近30件を探す |
+| `files.slack.com` の GET | `files:read` | 添付実体の取得 |
+| `files.upload v2` | `files:write` | JPEG の添付返信 |
+
+`files:read` / `files:write` は EC2 bot 経路（`runtime/slack_bot.py` の動画添付分析・
+`knowledge_deliver` の資料配信）で実績があるが、**mcp コンテナの bot token で
+`im:history` があるかは未確認**。
+
+⚠️ scope 不足は「動画が見つかりません」に化けない設計にしてある
+（`conversation_read_failed`＝「この会話の履歴を読めませんでした（動画の有無を確認できていません）」）。
+本番検証で **DM で `slack_file=true` を1回試し**、このメッセージが出たら scope を追加する。

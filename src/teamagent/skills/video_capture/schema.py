@@ -66,6 +66,11 @@ SKILL_ERROR_MESSAGES: dict[str, str] = {
         "この会話に動画ファイルが見つかりませんでした。"
         "切り出したい動画をこのスレッドに添付してから、もう一度お声がけください。"
     ),
+    # 「読めなかった」を「動画が無かった」と言わない（bot の history scope 不足を隠さない）。
+    "conversation_read_failed": (
+        "この会話の履歴を読めませんでした（動画の有無を確認できていません）。"
+        "解消しない場合は管理者に連絡してください。"
+    ),
     "attachment_too_large": "添付動画が大きすぎます（上限 {limit_mb}MB）。",
     "attachment_failed": "添付動画を取得できませんでした。",
     "media_unavailable": "動画処理の基盤が利用できません（管理者に連絡してください）。",

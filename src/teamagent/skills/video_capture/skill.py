@@ -367,12 +367,17 @@ class VideoCaptureSkill(BaseSkill[VideoCaptureInput, VideoCaptureOutput]):
         if reader is None:
             return b"", "", "attachment_not_found"
 
+        # 「会話を読めなかった」と「読めたが動画が無かった」を混同しない。
+        # 混同すると、bot に im:history / channels:history が無いだけの構成ミスが
+        # 「動画が見つかりません」に化けて永久に診断されない（注記を事実として報告するな）。
         messages: list[Any] = []
+        read_ok = False
         if thread_ts:
             try:
                 messages.extend(
                     reader.list_thread_replies(channel_id, thread_ts, request_id).messages
                 )
+                read_ok = True
             except Exception:
                 log.warning("video_capture_thread_read_failed")
         file, reason = select_video_file(messages, file_id=input.slack_file_id, max_bytes=max_bytes)
@@ -384,12 +389,16 @@ class VideoCaptureSkill(BaseSkill[VideoCaptureInput, VideoCaptureOutput]):
                         channel_id, request_id, limit=_ATTACHMENT_HISTORY_LIMIT
                     ).messages
                 )
+                read_ok = True
             except Exception:
                 log.warning("video_capture_history_read_failed")
             file, reason = select_video_file(
                 messages, file_id=input.slack_file_id, max_bytes=max_bytes
             )
         if file is None:
+            if not read_ok:
+                log.warning("video_capture_conversation_unreadable")
+                return b"", "", "conversation_read_failed"
             log.info("video_capture_attachment_missing", reason=reason)
             error = "attachment_too_large" if reason == "too_large" else "attachment_not_found"
             return b"", "", error
