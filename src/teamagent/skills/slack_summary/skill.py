@@ -20,6 +20,9 @@ Slack API 側が本人の可視範囲を強制するので、幻覚・注入さ�
   A8 Bedrock 入力を有界にする（件数上限 × 1 件あたり文字数上限＝長大スレッドでも費用が跳ねない）。
   A9 副作用ゼロの出力: 要約に <!channel> / <@U…> 等の通知トリガを残さない（投稿した瞬間に
      第三者へ通知が飛ぶのを防ぐ＝読み取り専用ツールが人を叩き起こさない）。
+  A10 出典 URL: 要約の末尾に **対象スレッドの permalink** を決定論で付ける（サーバ側整形・
+     LLM に書かせない）。SLACK_WORKSPACE_DOMAIN / SLACK_WORKSPACE が未設定なら
+     省略する（fail-open。壊れたリンクを推測して出すことはしない）。
 """
 
 from __future__ import annotations
@@ -34,7 +37,15 @@ from pydantic import BaseModel
 from teamagent.adapters.slack_channel_ingest_client import SlackMessage
 from teamagent.adapters.slack_user_reader import SlackUserReader
 from teamagent.skills._shared.mail_compose import env_int
+from teamagent.skills._shared.next_step import (
+    CALENDAR_SUGGESTION,
+    append_suggestion,
+    has_scheduling_cue,
+    suggestions_enabled,
+    tool_enabled,
+)
 from teamagent.skills._shared.slack_context import _neutralize
+from teamagent.skills._shared.source_url import slack_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.slack_summary.schema import SlackSummaryInput, SlackSummaryOutput
 
@@ -183,11 +194,25 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
                 total_cost_usd=cost,
             )
 
-        log.info("slack_summary_done", messages=len(blocks), cost_usd=cost)  # 本文は出さない
+        # A10: 出典（対象スレッドそのもの）へのリンクを決定論で付ける。
+        message = f"🧵 スレッド要約（{len(blocks)} 件）\n\n{summary}"
+        permalink = slack_permalink(target_channel, target_ts)
+        if permalink:
+            message = f"{message}\n\n🔗 出典: {permalink}"
+        # 次の一手: 決定事項＋日時が読み取れたらカレンダー登録を 1 個だけ提案する
+        # （受け皿は calendar_event の自由文経路。OFF の環境では提案しない）。
+        message = _with_calendar_suggestion(message, summary)
+
+        log.info(
+            "slack_summary_done",
+            messages=len(blocks),
+            cost_usd=cost,
+            has_permalink=bool(permalink),
+        )  # 本文は出さない
         return SlackSummaryOutput(
             summary=summary,
             message_count=len(blocks),
-            message=f"🧵 スレッド要約（{len(blocks)} 件）\n\n{summary}",
+            message=message,
             total_cost_usd=cost,
         )
 
@@ -252,6 +277,19 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
+
+
+def _with_calendar_suggestion(message: str, summary: str) -> str:
+    """要約に「決定事項＋日時」があればカレンダー登録を提案する（決定論・最大 1 個）。
+
+    受け皿は ``calendar_event`` の自由文経路。その tool が OFF の環境では **提案しない**
+    （出来ない約束を作らない）。提案は文字列を足すだけで、ツールは呼ばない。
+    """
+    if not suggestions_enabled() or not tool_enabled("USE_CALENDAR_EVENT_TOOL"):
+        return message
+    if not has_scheduling_cue(summary):
+        return message
+    return append_suggestion(message, CALENDAR_SUGGESTION)
 
 
 def _is_channel_surface(channel_id: str) -> bool:

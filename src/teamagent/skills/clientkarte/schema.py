@@ -25,6 +25,13 @@ class KarteEvent(BaseModel):
     channel_type: str | None = Field(default=None, description="代理店/直販")
     next_action: str | None = Field(default=None, description="次アクション")
     summary: str = Field(description="FB 本文の冒頭抜粋")
+    url: str | None = Field(
+        default=None,
+        description=(
+            "この FB の出典（元 Slack スレッド）を開く permalink。"
+            "workspace が未設定など組み立てられない場合は None（推測した URL は入れない）"
+        ),
+    )
 
 
 class ClientKarteOutput(BaseModel):

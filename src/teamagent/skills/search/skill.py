@@ -28,6 +28,13 @@ from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.next_step import (
+    DELIVER_SUGGESTION,
+    append_suggestion,
+    asks_for_delivery,
+    suggestions_enabled,
+    tool_enabled,
+)
 from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
@@ -39,6 +46,7 @@ from teamagent.skills.search.knowledge_query import (
 )
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
+from teamagent.skills.search.result_guard import build_result_header, prefix_header
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 from teamagent.skills.search.two_stage import (
     TWO_STAGE_CTX_KEY,
@@ -273,6 +281,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         self._embedding_column = resolve_embedding_column()
         validate_embedder_column_pair(resolve_embedder_backend(), self._embedding_column)
+        # 検索結果の「顔つき」補正（result_guard）。retrieval の実数値だけを見て
+        # 決定論でヘッダ文字列を作り、要約本文の先頭へサーバ側で強制注入する。
+        # - SEARCH_RESULT_GUARD: 全体の kill switch（**既定 ON**）。
+        # - SEARCH_WEAK_RESULT_THRESHOLD: top1 スコアがこの値未満なら「関連度が低い」と表示。
+        #   0 以下にすると弱ヒット判定だけを止められる（client 不一致警告は残る）。
+        # LLM の作文（プロンプト）に任せない理由: プロンプトは守られないことがあるが、
+        # ここは守られないことが原理的に無い（本番実測で「関係ないクライアントが
+        # 関連資料の顔で出る」事故が起きたのはプロンプト側に任せていたため）。
+        self._result_guard = self._envflag("SEARCH_RESULT_GUARD", default="true")
+        self._weak_result_threshold = self._envfloat("SEARCH_WEAK_RESULT_THRESHOLD", 0.3)
 
     @property
     def embedder(self) -> Any:
@@ -353,8 +371,27 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
         # 2. pgvector で類似 chunk を取得（RLS 評価用 user_email を ctx から取得）
         _t = time.perf_counter()
-        hits = self._retrieve(embedding, input, ctx, timings=timings)
+        probe: dict[str, str] | None = {} if self._result_guard else None
+        hits = self._retrieve(embedding, input, ctx, timings=timings, probe=probe)
         timings["retrieve_ms"] = (time.perf_counter() - _t) * 1000
+
+        # 2-bis. **回答生成に入る前に**、retrieval の実数値だけで警告ヘッダを確定させる。
+        #        LLM に判断させない（プロンプトは守られないことがある／ここは無い）。
+        guard_header = ""
+        if self._result_guard:
+            guard_header = build_result_header(
+                query=input.query,
+                hits=hits,
+                weak_threshold=self._weak_result_threshold,
+                query_client=(probe or {}).get("query_client"),
+            )
+            if guard_header:
+                log.info(
+                    "search_result_guard_header",  # G8: クエリ原文・資料名は出さない
+                    request_id=ctx.request_id,
+                    top_score=hits[0].score if hits else None,
+                    lines=guard_header.count("\n") + 1,
+                )
 
         # Slack / 管理シートの本文にある資料名は、全ヒット分をまとめて 1 回だけ
         # Drive URL に解決する。answer と構造化 hits の両方で同じ結果を使い回す。
@@ -386,6 +423,19 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 answer += self._source_links_block(hits, file_urls=file_urls)
         else:
             answer, cost_usd = "", 0.0
+
+        # 3-bis. 警告ヘッダを回答の**先頭**へサーバ側で強制注入する。
+        #        二段返しの第一報（続報予告文）にも同じヘッダが載る＝「関連度が低い」
+        #        「別クライアント」の事実が、要約本体を待たずに最初の一報で伝わる。
+        #        include_answer=False（/app の fast path）は answer='' の契約を守るため
+        #        触らない（/app は include_answer=True の並行フェッチ側でヘッダを受け取る）。
+        if input.include_answer:
+            answer = prefix_header(guard_header, answer)
+
+        # 3-ter. 次の一手の提案。ヒットの**実ファイルが解決済み**のときだけ、
+        #        「実ファイルをお送りしますか？」を末尾に 1 個だけ足す（受け皿は
+        #        knowledge_deliver。その tool が OFF の環境では出来ない約束をしない）。
+        answer = self._append_next_step(answer, query=input.query, file_urls=file_urls)
 
         # 4. 出力スキーマに整形。資料名解決はヒットごとに一度だけ行い、
         #    正準 URL と配信用の内部ファイル名で同じ結果を使う。
@@ -593,12 +643,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         ctx: SkillContext,
         *,
         timings: dict[str, float] | None = None,
+        probe: dict[str, str] | None = None,
     ) -> list[SearchHit]:
         """pgvector で類似検索する。
 
         timings: 区間別レイテンシの収集先（None＝計測しない）。run() が 1 リクエストにつき
         1 個の dict を渡す（常駐シングルトンでも request 間で混ざらない）。retrieve_hits 等の
         他 Skill からの再利用口は None のままで挙動不変。
+
+        probe: retrieval 中に判明した事実を run() へ持ち帰る out-param（timings と同じ流儀）。
+        現在の唯一のキーは ``query_client``（クエリに含まれる既知クライアント名）。
+        **None のときはクライアント辞書を一切引かない**＝retrieve_hits 経由の他 Skill には
+        DB クエリ 1 本も増えない（後方互換）。
 
         ctx.metadata から RLS 評価用の user_email / user_groups / user_role を取得し、
         PgVectorClient.connection() に渡す。runtime/slack_bot.py の SkillDispatcher が
@@ -622,6 +678,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_groups=user_groups,
             user_role=user_role,
         ) as conn:
+            # result_guard 用: 「利用者はどのクライアントの資料を求めたか」をここで確定させる。
+            # 明示 filter_client が最優先、無ければ既知クライアント語彙への substring 一致
+            # （_match_client。語彙は初回 1 度だけ取得しインスタンスにキャッシュ）。
+            # 語彙取得に失敗しても _match_client が握って None を返す＝検索本体は継続。
+            if probe is not None:
+                matched_client = input.filter_client or self._match_client(
+                    input.query, conn, ctx.request_id
+                )
+                if matched_client:
+                    probe["query_client"] = matched_client
             if self._use_new_schema:
                 # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
@@ -1217,6 +1283,29 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         from teamagent.adapters.slack_client import SlackClient
 
         return SlackClient.from_env()
+
+    # ── 次の一手の提案（決定論・最大 1 個・実行はしない）──────────────────────────
+
+    @staticmethod
+    def _append_next_step(answer: str, *, query: str, file_urls: dict[str, str]) -> str:
+        """「📎 実ファイルをお送りしますか？」を回答末尾へ足す（条件を満たすときだけ）。
+
+        発火条件（すべて満たす場合のみ）:
+          1. 提案機能が有効（``SUGGEST_NEXT_STEP``・既定 ON）
+          2. 受け皿の ``knowledge_deliver`` が今 ON（``USE_KNOWLEDGE_DELIVER``）
+          3. ヒットの **実ファイル（Drive 実体）が解決済み**＝送るものが実在する
+          4. 利用者がまだ「送って」と頼んでいない（頼んでいれば依頼は完結している）
+          5. 回答本文がある（二段返しの第一報にも付く／fast path の空回答には付けない）
+
+        提案は文字列を足すだけで、ツールは一切呼ばない（実行は利用者の明示 YES 後）。
+        """
+        if not answer or not file_urls:
+            return answer
+        if not suggestions_enabled() or not tool_enabled("USE_KNOWLEDGE_DELIVER"):
+            return answer
+        if asks_for_delivery(query):
+            return answer
+        return append_suggestion(answer, DELIVER_SUGGESTION)
 
     def _summarize(
         self,
