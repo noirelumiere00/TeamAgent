@@ -28,6 +28,12 @@ DARK_SKILL_ALLOWLIST = frozenset(
         "proposal_deck",
         "proposal_campaign",
         "proposal_builder",
+        # web_research: MCP には露出するが、OpenClaw 側の露出（effective-tool-scope.json /
+        # openclaw.config.json5 の toolFilter.include / SOUL.md）は共有ファイルのため本 PR では
+        # 触っていない＝**エージェントからはまだ呼べない**。よって現時点の実体は dark。
+        # ⚠️ INTEGRATION_web_research.md の ①〜④ を反映したら、この 1 行を必ず外すこと
+        #    （外し忘れると「台帳に載っているのに dark 宣言」で本テストが赤くなる）。
+        "web_research",
     }
 )
 

@@ -644,6 +644,11 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
       # calendar_freebusy: 空き時間の自由文照会（read-only・freebusy のみ・既定 false）。
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
+      # web_research: 公開Webの市場リサーチ（Gemini の Google 検索グラウンディング・既定 false）。
+      # Gemini 認証 env は下の enable_scrape_tools ブロックが供給する（precondition で強制）。
+      { name = "USE_WEB_RESEARCH_TOOL", value = var.use_web_research_tool ? "true" : "false" },
+      # 段階公開（skill 層 gate・空=全員許可）。X系 allowlist とは別枠で運用する。
+      { name = "WEB_RESEARCH_ALLOWED_EMAILS", value = var.web_research_allowed_emails },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。
@@ -826,6 +831,15 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.enable_proposal_builder || local.media_enabled == 1
       error_message = "enable_proposal_builder requires the generic media worker for the integrated PPTX renderer."
+    }
+
+    # web_research は Gemini の Google 検索グラウンディングで動く。Gemini 認証 env
+    # (GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT) と VERTEX_SA_JSON secret は
+    # enable_scrape_tools ブロックが供給しているため、片方だけ ON にすると
+    # 「ツールは出るが必ず失敗する」状態になる。apply 前に落とす。
+    precondition {
+      condition     = !var.use_web_research_tool || var.enable_scrape_tools
+      error_message = "use_web_research_tool requires enable_scrape_tools=true (Gemini Vertex env + VERTEX_SA_JSON are wired in that block)."
     }
 
     precondition {

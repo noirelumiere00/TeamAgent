@@ -178,6 +178,18 @@ variable "use_calendar_freebusy_tool" {
   default     = false
 }
 
+variable "use_web_research_tool" {
+  description = "web_research tool（公開Webの市場リサーチ＝Gemini の Google 検索グラウンディング）を mcp で有効化。read-only＝Web への直 fetch も書込 API も無い（取得は Google 側で完結）。既定 false。⚠️ON の前提: mcp に Gemini の認証 env（GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT/VERTEX_SA_JSON）が入っていること＝現状は enable_scrape_tools=true が必要（task definition の precondition で強制）。段階公開は web_research_allowed_emails。"
+  type        = bool
+  default     = false
+}
+
+variable "web_research_allowed_emails" {
+  description = "web_research の段階公開 allowlist（カンマ区切りの会社メール）。空=全員許可。stage1=小俣のみ→数名→空。値変更は taskdef env 差し替えのみで反映可（再ビルド不要）。"
+  type        = string
+  default     = ""
+}
+
 variable "enable_progress_notify" {
   description = "ツール実行中の進捗表示（v0.3.1 Task7）。ON で mcp が重いツール実行前に『📂 資料を検索しています…』等を Slack へ投稿し完了後に削除する。既定 false。fail-open（送信失敗はツール実行を阻害しない）。bot の chat:write/im:write scope 前提。"
   type        = bool
