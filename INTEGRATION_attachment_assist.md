@@ -257,6 +257,11 @@ $ pytest tests/scripts/test_tool_scope_registry_contract.py \
 `effective-tool-scope.json` / `openclaw.config.json5` を読むテストは
 この 3 ファイルで全部（`grep -rln` で確認済み）。
 
+> **SOUL.md についての注記**: `grep -rln "SOUL.md" tests/` は 0 件＝**SOUL.md を読むテストは存在しない**。
+> したがって上の 46 passed は SOUL 節の文面を検証していない（構文・整合を機械で守る仕組みが無い）。
+> SOUL 節は人間レビューで入れること。文面を変えたら **OpenClaw イメージの再ビルドが必須**
+> （SOUL はイメージに焼き込まれる）。
+
 ## 変異テスト（ガードの実質性の証明）
 
 「緑」がガードのおかげであることを、ガードを 1 つずつ壊して赤くなることで証明した
