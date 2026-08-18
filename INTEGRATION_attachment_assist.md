@@ -186,7 +186,7 @@ Drive の中から資料を探して取り出す依頼は `knowledge_deliver`（
 | 1 | `download_file` にホスト検証は**実在しない**（bot token 漏洩経路） | `adapters/slack_file_guard.validate_slack_file_url` を新設。`download_file_guarded`（ネットワーク直前）と skill 側の事前選別が**同じ 1 関数**を呼ぶ。`is_external` / `external_type` / `mode=external` 付きは download 対象外 |
 | 2 | 全量メモリ展開してから size 判定（OOM 経路） | ① Slack metadata の `size` で **download 前**に拒否（30MB）② `download_file_guarded` が `httpx.stream` で逐次検査し cap 超過で切断（`Content-Length` があれば 1 バイトも読まずに拒否）。既存 `download_file` の挙動は不変 |
 | 3 | LEGACY では channel_id が LLM 申告値のまま入る | skill 冒頭で `ctx.metadata["identity_verified"] is not True` なら `PermissionError`（`is True` の厳密判定＝文字列 "true" では通らない） |
-| 4 | `extract_pdf_pages` にページ／文字数 cap が無い | `max_pages` / `max_total_chars` を新設（既定 None＝現行挙動）。cap 判定は `extract_text()` の**前**に置き「1 ページ余分に展開してから止める」を避けた。skill からは `max_pages=300` を明示。抽出全体に壁時計 45 秒 |
+| 4 | `extract_pdf_pages` にページ／文字数 cap が無い | `max_pages` / `max_total_chars` を新設（既定 None＝現行挙動）。cap 判定は `extract_text()` の**前**に置き「1 ページ余分に展開してから止める」を避けた。skill からは `max_pages=300` を明示。抽出全体に壁時計 45 秒（下記「設計外の事実」5 も参照） |
 | 5 | `html_to_slides` は実在しない（正: `slides_to_pptx`） | P2 の話なので P1 コードには未登場。設計書側の訂正事項として記録 |
 | 6 | translate/minutes は 1 回の converse で全文が切れる | 入力 20,000 字 cap。超過時は `truncated: true` ＋ message に「冒頭 N 文字ぶんのみ処理」を決定的に出し、プロンプトにも「冒頭部分のみ・補完禁止」を入れる。全文翻訳の chunk ループは P2 |
 | 7 | aggregate は LLM に数えさせると必ず捏造する | `aggregate.py` が openpyxl で列ごとの件数/合計/平均/最小/最大を **Python で**計算し、LLM には「整形と説明だけ・再計算禁止」を渡す。xlsx 以外の aggregate は免責文を message に焼き込む |
@@ -211,7 +211,15 @@ Drive の中から資料を探して取り出す依頼は `knowledge_deliver`（
    （`assert_guard_paths_clean`）。そのため `tests/scripts/test_terraform_runtime_guard.py` の
    約 97 本は **tf を触って未コミットの間だけ**赤くなる。コミット後は緑（実測確認済み）。
    tf を触る作業をレビューするときは、この赤を「壊した」と誤読しないこと。
-4. **`runtime_guard_live` は tfvars ではなく guard script が生成する一時値**。よって
+4. **`asyncio.run` は終了時に既定 executor の join を待つ**。よって
+   `asyncio.run(asyncio.wait_for(asyncio.to_thread(work), timeout=0.05))` は
+   **timeout を返しても work スレッドが終わるまで戻らない**（実測: 2 秒かかる処理で 2.008 秒
+   ブロック／同条件の `ThreadPoolExecutor` + `shutdown(wait=False)` は 0.055 秒）。
+   exam fix #4 の「asyncio.to_thread 内でタイムアウト付きに」を字面どおり実装すると
+   **タイムアウトが壁時計を全く縛らない**。`concurrent.futures` へ変更し、
+   office 経路は `progress_callback` の deadline で協調的に打ち切る二段構えにした。
+   テストは「timeout を返す」ではなく「**実際に待たずに戻る**（elapsed < 0.6 秒）」を見る。
+5. **`runtime_guard_live` は tfvars ではなく guard script が生成する一時値**。よって
    `use_attachment_tools` は `optional(bool, false)` で追加した。フラグを ON にするときは
    `terraform_runtime_guard.sh` の 2 か所（`core` JSON 生成 5360 行付近／`line(...)` 出力 5459 行付近）に
    `use_attachment_tools: boolenv($m.USE_ATTACHMENT_TOOLS)` と
@@ -228,8 +236,40 @@ Drive の中から資料を探して取り出す依頼は `knowledge_deliver`（
 | `tests/scripts/test_openclaw_runtime_contract.py::test_effective_tool_scope_matches_config_and_deployment_gates` | inventory 件数 31 固定・include との一致 |
 
 **この 2 本は「4 点セットを同じ変更単位で入れろ」という設計どおりのガードであり、
-本ブランチが壊したものではない。** 上記 1〜4 を反映すると両方緑になることを、
-ローカルで一時適用して実測確認した（適用状態はコミットせず revert 済み）。
+本ブランチが壊したものではない。**
+
+実測（一時適用 → 計測 → revert 済み・適用状態はコミットしていない）:
+
+```
+# 未反映
+$ pytest tests/scripts/test_tool_scope_registry_contract.py \
+         tests/scripts/test_openclaw_runtime_contract.py
+FAILED test_tool_scope_registry_contract.py::test_scope_registry_and_factory_have_an_exact_classification
+1 failed, 33 passed
+
+# 上記 1〜4 を一時適用（scope json / config.json5 / SOUL.md / 契約テスト）
+$ pytest tests/scripts/test_tool_scope_registry_contract.py \
+         tests/scripts/test_openclaw_runtime_contract.py \
+         tests/scripts/test_check_openclaw_config.py
+46 passed
+```
+
+`effective-tool-scope.json` / `openclaw.config.json5` を読むテストは
+この 3 ファイルで全部（`grep -rln` で確認済み）。
+
+## 変異テスト（ガードの実質性の証明）
+
+「緑」がガードのおかげであることを、ガードを 1 つずつ壊して赤くなることで証明した
+（各回 commit → 変異 → 実測 → `git checkout` で revert。残骸が無いことも grep で確認）。
+
+| 変異 | 壊した箇所 | 結果 |
+|---|---|---|
+| ① ホスト検証除去 | `slack_file_guard.validate_slack_file_url` の `_host_matches` 判定を `if False:` に | **7 failed / 62 passed**。`test_guarded_download_rejects_foreign_host_without_network` が赤になり、ログに `slack_file_downloaded_guarded size_bytes=6` ＝ **evil.example.com へ実際に bot token 付きで GET した**ことが出る |
+| ② size 事前チェック除去 | `discover.evaluate_file` の `if size > max_bytes:` ブロックを削除 | **2 failed / 67 passed**。`test_oversized_file_rejected_before_download` が `out.error == ''`（40MB を素通りさせて download に進んだ） |
+| ③ identity_verified ガード除去 | `skill.run` 冒頭の `PermissionError` を削除 | **3 failed / 66 passed**。ログに `attachment_assist_done ... pages=1` ＝ **LEGACY 相当の ctx で実際にファイルを読み切った** |
+
+いずれも「たまたま別の理由で赤い」のではなく、**その経路が実際に開通したこと**が
+ログ／assert 値で観測できている。
 
 ---
 
