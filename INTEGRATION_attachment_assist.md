@@ -219,7 +219,23 @@ Drive の中から資料を探して取り出す依頼は `knowledge_deliver`（
    **タイムアウトが壁時計を全く縛らない**。`concurrent.futures` へ変更し、
    office 経路は `progress_callback` の deadline で協調的に打ち切る二段構えにした。
    テストは「timeout を返す」ではなく「**実際に待たずに戻る**（elapsed < 0.6 秒）」を見る。
-5. **`runtime_guard_live` は tfvars ではなく guard script が生成する一時値**。よって
+5. **`optional()` の既定値は plan JSON の `variables.*.value` に materialize されない**（実測）。
+   guard script は `.variables.runtime_guard_live.value == $expected_core[0]` という
+   **オブジェクト完全一致**で検証している（`terraform_runtime_guard.sh` 5741 行付近）ため、
+   「`optional(bool,false)` を足すと余分なキーが増えて一致しなくなるのでは」を疑ったが、
+   最小構成で実測して **否定**した:
+
+   ```
+   variable "live" { type = object({ a = bool, b = optional(bool, false) }) }
+   # live = { a = true } を渡して plan → show -json
+   plan variables.live.value = {"a": true}   # b は現れない
+   ```
+
+   plan JSON は型変換後ではなく**入力そのまま**を出す。よって `optional()` 追加は
+   完全一致チェックを壊さない。⚠️ この不変量は fake terraform を使う
+   `tests/scripts/test_terraform_runtime_guard.py` では**検証できない**
+   （shim は渡された値をそのまま返すだけで型変換をしない）＝実 terraform でしか出ない差。
+6. **`runtime_guard_live` は tfvars ではなく guard script が生成する一時値**。よって
    `use_attachment_tools` は `optional(bool, false)` で追加した。フラグを ON にするときは
    `terraform_runtime_guard.sh` の 2 か所（`core` JSON 生成 5360 行付近／`line(...)` 出力 5459 行付近）に
    `use_attachment_tools: boolenv($m.USE_ATTACHMENT_TOOLS)` と
