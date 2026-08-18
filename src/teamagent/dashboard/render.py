@@ -11,6 +11,7 @@ import html
 import json
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 _CHART_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4"
 _JST = timezone(timedelta(hours=9), name="JST")
@@ -51,6 +52,16 @@ a.btn{ display:inline-block; background:var(--accent); color:#fff; text-decorati
   padding:10px 18px; border-radius:9px; font-weight:600; }
 .note{ color:var(--muted); font-size:12px; margin-top:14px; line-height:1.6; }
 .question{ white-space:pre-wrap; overflow-wrap:anywhere; min-width:260px; max-width:520px; }
+.bars{ display:flex; flex-direction:column; gap:10px; }
+.bar-row{ display:grid; grid-template-columns:74px 1fr 118px; align-items:center; gap:10px;
+  font-size:13px; }
+.bar-track{ background:var(--bg); border:1px solid var(--line); border-radius:999px;
+  height:12px; overflow:hidden; }
+.bar-fill{ height:100%; background:var(--accent); border-radius:999px; }
+.bar-value{ text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+td a, .filter a{ color:var(--accent); text-decoration:none; }
+td a:hover, .filter a:hover{ text-decoration:underline; }
+.filter{ color:var(--muted); font-size:12px; margin:0 0 10px; }
 """
 
 
@@ -180,6 +191,46 @@ def _congestion_block(rt: dict[str, Any], pk: dict[str, Any]) -> str:
     )
 
 
+def _pct(share: Any) -> float:
+    """割合(0..1) を 0..100 の百分率へ。異常値は 0 に倒し、必ず 0..100 に丸め込む。"""
+    try:
+        value = float(share) * 100.0
+    except (TypeError, ValueError):
+        return 0.0
+    if value != value:  # NaN
+        return 0.0
+    return max(0.0, min(100.0, value))
+
+
+def _admin_user_href(who: Any) -> str:
+    """/admin の利用者ドリルダウン URL（? 以降は percent-encode してから HTML escape）。"""
+    return "/admin?user=" + _e(quote(str(who or ""), safe=""))
+
+
+def _work_type_block(rows: list[dict[str, Any]], *, title: str) -> str:
+    """作業束の横棒バー（外部ライブラリ非依存・CSS の幅指定だけで描く）。"""
+    bars = []
+    for row in rows:
+        percent = _pct(row.get("share", 0))
+        bars.append(
+            '<div class="bar-row"><div>'
+            + _e(row.get("work_type"))
+            + '</div><div class="bar-track"><div class="bar-fill" style="width:'
+            + f"{percent:.1f}"
+            + '%"></div></div><div class="bar-value">'
+            + f"{percent:.1f}"
+            + "% / "
+            + _e(row.get("requests", 0))
+            + "件</div></div>"
+        )
+    inner = (
+        '<div class="bars">' + "".join(bars) + "</div>"
+        if bars
+        else '<p class="note">まだ記録がありません。</p>'
+    )
+    return '<div class="card"><h2>' + _e(title) + "</h2>" + inner + "</div>"
+
+
 def _skill_block(skills: list[dict[str, Any]]) -> str:
     rows = []
     for s in skills:
@@ -200,12 +251,24 @@ def _skill_block(skills: list[dict[str, Any]]) -> str:
     )
 
 
-def _user_block(users: list[dict[str, Any]]) -> str:
-    rows = [
-        "<tr><td>" + _e(u.get("who")) + '</td><td class="num">' + _e(u.get("requests", 0)) + "</td>"
-        '<td class="num">$' + _e(_money(u.get("cost_usd", 0))) + "</td></tr>"
-        for u in users
-    ]
+def _user_block(users: list[dict[str, Any]], *, drilldown: bool = False) -> str:
+    """ユーザ別内訳。``drilldown`` のときだけ /admin?user=... へのリンクにする。
+
+    /（ダッシュボード本体）にはドリルダウン先が無いので既定は素のテキストのまま
+    （既存の出力バイトを変えない）。
+    """
+    rows = []
+    for u in users:
+        who = _e(u.get("who"))
+        cell = (
+            ('<a href="' + _admin_user_href(u.get("who")) + '">' + who + "</a>")
+            if drilldown
+            else who
+        )
+        rows.append(
+            "<tr><td>" + cell + '</td><td class="num">' + _e(u.get("requests", 0)) + "</td>"
+            '<td class="num">$' + _e(_money(u.get("cost_usd", 0))) + "</td></tr>"
+        )
     return (
         '<div class="card"><h2>ユーザ別（直近30日・コスト順）</h2><table>'
         '<tr><th>ユーザ</th><th class="num">件数</th><th class="num">コスト</th></tr>'
@@ -359,8 +422,21 @@ def render_usage_admin(data: dict[str, Any]) -> str:
             + _e(_money(row.get("cost_usd", 0), 4))
             + "</td></tr>"
         )
+    filter_user = str(data.get("filter_user") or "")
+    if filter_user:
+        heading = "質問フィード（" + _e(filter_user) + " で絞り込み・直近200件）"
+        filter_html = (
+            '<p class="filter">利用者 '
+            + _e(filter_user)
+            + ' で絞り込み中 · <a href="/admin">絞り込みを解除</a></p>'
+        )
+        if not question_rows:
+            filter_html += '<p class="note">この利用者の質問はまだ記録がありません。</p>'
+    else:
+        heading = "質問フィード（直近200件）"
+        filter_html = ""
     questions = (
-        '<div class="card"><h2>質問フィード（直近200件）</h2><table>'
+        '<div class="card"><h2>' + heading + "</h2>" + filter_html + "<table>"
         "<tr><th>時刻</th><th>誰が</th><th>スキル</th><th>質問文</th><th>status</th>"
         '<th class="num">latency(ms)</th><th class="num">cost</th></tr>'
         + "".join(question_rows)
@@ -403,10 +479,14 @@ def render_usage_admin(data: dict[str, Any]) -> str:
         + _e(data.get("email"))
         + "</p>"
         + kpi_cards
+        + '<div class="grid2">'
+        + _work_type_block(data.get("work_types_7d", []), title="作業の内訳（直近7日）")
+        + _work_type_block(data.get("work_types_30d", []), title="作業の内訳（直近30日）")
+        + "</div>"
         + questions
         + '<div class="grid2">'
         + _skill_block(data.get("skills", []))
-        + _user_block(data.get("users", []))
+        + _user_block(data.get("users", []), drilldown=True)
         + "</div>"
         + errors
         + note_html

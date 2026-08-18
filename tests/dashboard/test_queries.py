@@ -146,3 +146,39 @@ def test_recent_questions_uses_named_limit_and_maps_query_text() -> None:
     assert params == {"limit": 17}
     assert out[0]["query_text"] == "質問です"
     assert out[0]["latency_ms"] == 120
+
+
+def test_recent_questions_without_who_has_no_user_filter() -> None:
+    pg = _FakePg([[]])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        recent_questions(conn, limit=200, who=None)
+    sql, params = pg.executed[0]
+    assert "%(who)s" not in sql
+    assert "who" not in params
+
+
+def test_recent_questions_who_filter_uses_placeholder_not_interpolation() -> None:
+    """ドリルダウンの email は必ず bind パラメータ（SQL 文字列に混ざらない）。"""
+    injected = "u@x.com' OR '1'='1"
+    pg = _FakePg([[]])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        recent_questions(conn, limit=200, who=injected)
+    sql, params = pg.executed[0]
+    assert injected not in sql
+    assert "OR '1'='1" not in sql
+    assert "%(who)s" in sql
+    assert params == {"limit": 200, "who": injected}
+    # user_breakdown が返す who と同じ式で、大小文字を無視して突き合わせる。
+    assert "lower(COALESCE(user_email, user_id, '(unknown)')) = lower(%(who)s)" in sql
+    assert "WHERE query_text IS NOT NULL" in sql
+    assert sql.index("AND lower(COALESCE") > sql.index("WHERE query_text IS NOT NULL")
+    assert sql.index("ORDER BY occurred_at DESC") > sql.index("AND lower(COALESCE")
+
+
+def test_recent_questions_empty_who_is_treated_as_no_filter() -> None:
+    pg = _FakePg([[]])
+    with pg.connection(app_role="teamagent_dashboard", user_role="admin") as conn:
+        recent_questions(conn, limit=200, who="")
+    sql, params = pg.executed[0]
+    assert "%(who)s" not in sql
+    assert params == {"limit": 200}

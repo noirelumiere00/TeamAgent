@@ -11,6 +11,123 @@ from __future__ import annotations
 
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# 作業束（Courant 式）: MCP tool 名 → 4 束の決定論マッピング
+# ---------------------------------------------------------------------------
+# usage_events.skill には mcp_gateway.server.dispatch_tool が **tool 名をそのまま**
+# 書く（server.py の ``_record_usage(skill=name)``）。したがってここのキーは MCP tool 名
+# ＝ Skill クラスの ``name`` ClassVar と 1:1 で対応する。
+#
+# 分類は「LLM に推測させない」= 定数表のみ。表に無い tool は必ず「その他」へ落ちる
+# （fail-open）。新ツールを足しても画面は壊れず、件数は必ずどこかの束に入る。
+WORK_TYPE_INVESTIGATE = "調べる"
+WORK_TYPE_CREATE = "作る"
+WORK_TYPE_ORGANIZE = "整える"
+WORK_TYPE_ASSIST = "秘書"
+WORK_TYPE_OTHER = "その他"
+
+# 表示順（横棒バーの並び）。「その他」は常に最後。
+WORK_TYPE_ORDER: tuple[str, ...] = (
+    WORK_TYPE_INVESTIGATE,
+    WORK_TYPE_CREATE,
+    WORK_TYPE_ORGANIZE,
+    WORK_TYPE_ASSIST,
+    WORK_TYPE_OTHER,
+)
+
+# (a) 指示で確定している中核マッピング。ここは仕様そのもので、勝手に増減させない。
+_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
+    WORK_TYPE_INVESTIGATE: (
+        "search",
+        "web_research",
+        "x_voice_search",
+        "x_needs_mining",
+        "search_surface_check",
+        "tiktok_search",
+        "tiktok_comment_mining",
+        "video_algorithm",
+        "video_analysis",
+    ),
+    WORK_TYPE_CREATE: (
+        "proposal_draft",
+        "proposal_review",
+        "proposal_builder_submit",
+        "proposal_builder_status",
+        "mail_draft",
+        "mail_reply",
+        "video_capture",
+    ),
+    WORK_TYPE_ORGANIZE: (
+        "slack_summary",
+        "attachment_assist",
+        "clientkarte",
+        "knowledge_deliver",
+        "knowledge_search_url",
+    ),
+    WORK_TYPE_ASSIST: (
+        "mail_summary",
+        "mail_followup",
+        "mail_to_internal_context",
+        "calendar_event",
+        "calendar_freebusy",
+        "schedule_propose",
+        "morning_digest",
+        "oauth_connect",
+    ),
+}
+
+# (b) (a) に載っていない **factory 登録済みツール**の割り当て。中核の兄弟に当たるもの
+# （同じ束の別入口・非同期版・status 版）だけをここへ置く。(a) と分けているのは
+# 「仕様で決まった分」と「実装側で補った分」を後から見分けられるようにするため。
+#   - tiktok_acquire / x_buzz_measure とその *_status: 収集・計測＝調べる
+#   - recommend: 過去提案のベクトル近傍提示＝調べる
+#   - proposal_builder / proposal_deck / proposal_campaign: 成果物生成＝作る
+#   - video_approval: 納品動画の一次FB。proposal_review と同型の「レビュー」＝作る
+#   - operation_log: Slack 会話を CRM 転記用に構造化＝整える
+#   - mail_constraints / workspace_search: 本人の受信箱・予定を引く秘書業務＝秘書
+_SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
+    WORK_TYPE_INVESTIGATE: (
+        "tiktok_acquire",
+        "tiktok_acquire_status",
+        "x_buzz_measure",
+        "x_buzz_measure_status",
+        "recommend",
+    ),
+    WORK_TYPE_CREATE: (
+        "proposal_builder",
+        "proposal_deck",
+        "proposal_campaign",
+        "video_approval",
+    ),
+    WORK_TYPE_ORGANIZE: ("operation_log",),
+    WORK_TYPE_ASSIST: (
+        "mail_constraints",
+        "workspace_search",
+    ),
+}
+
+
+def _build_work_type_index() -> dict[str, str]:
+    """tool → 束 の逆引きを組む。重複定義は起動時に落とす（表の事故を早期検出）。"""
+    index: dict[str, str] = {}
+    for table in (_WORK_TYPE_TOOLS, _SIBLING_WORK_TYPE_TOOLS):
+        for work_type, tools in table.items():
+            for tool in tools:
+                if tool in index:  # pragma: no cover - 定数表の重複はレビューで弾く
+                    raise ValueError(f"work type mapping duplicated: {tool}")
+                index[tool] = work_type
+    return index
+
+
+WORK_TYPE_BY_TOOL: dict[str, str] = _build_work_type_index()
+
+
+def work_type_of(tool: str | None) -> str:
+    """tool 名を作業束へ落とす。未知・空は「その他」（fail-open・例外を投げない）。"""
+    if not tool:
+        return WORK_TYPE_OTHER
+    return WORK_TYPE_BY_TOOL.get(str(tool), WORK_TYPE_OTHER)
+
 
 def _select_conn(conn: Any, sql: str, params: Any = None) -> list[dict[str, Any]]:
     """dict-row の注入済み接続で SELECT する。"""
@@ -134,6 +251,49 @@ def skill_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
     ]
 
 
+def work_type_breakdown(conn: Any, days: int = 7) -> list[dict[str, Any]]:
+    """作業束（調べる/作る/整える/秘書/その他）別の件数・コスト・割合。
+
+    集計は skill_breakdown と同型（同じ WHERE・同じ GROUP BY skill）。tool→束 の対応だけ
+    Python 側の定数表で畳む＝SQL に分類ロジックを持ち込まない（表を直せば SQL 不変で追随）。
+    中核4束は 0 件でも必ず行として返す（バーが消えて「無かったこと」にならないように）。
+    「その他」は 1 件以上あるときだけ出す（未知ツールが出た事実を可視化する）。
+    """
+    rows = _select_conn(
+        conn,
+        """
+        SELECT skill,
+               COUNT(*) AS n,
+               ROUND(SUM(cost_usd), 4) AS cost_usd
+        FROM usage_events
+        WHERE occurred_at >= NOW() - (%s || ' days')::interval
+        GROUP BY skill
+        """,
+        [str(int(days))],
+    )
+    requests: dict[str, int] = {work_type: 0 for work_type in WORK_TYPE_ORDER}
+    costs: dict[str, float] = {work_type: 0.0 for work_type in WORK_TYPE_ORDER}
+    for row in rows:
+        work_type = work_type_of(row.get("skill"))
+        requests[work_type] += int(row["n"] or 0)
+        costs[work_type] += float(row["cost_usd"] or 0)
+    total = sum(requests.values())
+    out: list[dict[str, Any]] = []
+    for work_type in WORK_TYPE_ORDER:
+        n = requests[work_type]
+        if work_type == WORK_TYPE_OTHER and n == 0:
+            continue
+        out.append(
+            {
+                "work_type": work_type,
+                "requests": n,
+                "cost_usd": round(costs[work_type], 4),
+                "share": (n / total) if total else 0.0,
+            }
+        )
+    return out
+
+
 def user_breakdown(conn: Any, *, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
     """ユーザ別の件数・コスト（コスト降順）。"""
     rows = _select_conn(
@@ -184,8 +344,21 @@ def error_list(conn: Any, limit: int = 50) -> list[dict[str, Any]]:
     ]
 
 
-def recent_questions(conn: Any, limit: int = 200) -> list[dict[str, Any]]:
-    """質問本文を含む直近の usage_events を管理ページ向けに返す。"""
+def recent_questions(
+    conn: Any, limit: int = 200, *, who: str | None = None
+) -> list[dict[str, Any]]:
+    """質問本文を含む直近の usage_events を管理ページ向けに返す。
+
+    ``who`` を渡すと利用者ドリルダウン（``/admin?user=<email>``）。値は**必ず**
+    プレースホルダで渡す（文字列連結しない）。user_breakdown が返す
+    ``COALESCE(user_email, user_id, '(unknown)')`` と同じ式で、大小文字を無視して
+    突き合わせる（migration 0010 の email 大小文字非依存と同じ流儀）。
+    """
+    params: dict[str, Any] = {"limit": int(limit)}
+    who_clause = ""
+    if who:
+        params["who"] = str(who)
+        who_clause = "  AND lower(COALESCE(user_email, user_id, '(unknown)')) = lower(%(who)s)\n"
     rows = _select_conn(
         conn,
         """
@@ -194,10 +367,13 @@ def recent_questions(conn: Any, limit: int = 200) -> list[dict[str, Any]]:
                skill, query_text, status, latency_ms, cost_usd
         FROM usage_events
         WHERE query_text IS NOT NULL
+        """
+        + who_clause
+        + """
         ORDER BY occurred_at DESC
         LIMIT %(limit)s
         """,
-        {"limit": int(limit)},
+        params,
     )
     return [
         {
@@ -414,6 +590,13 @@ class DashboardQueries:
 
 
 __all__ = [
+    "WORK_TYPE_ASSIST",
+    "WORK_TYPE_BY_TOOL",
+    "WORK_TYPE_CREATE",
+    "WORK_TYPE_INVESTIGATE",
+    "WORK_TYPE_ORDER",
+    "WORK_TYPE_ORGANIZE",
+    "WORK_TYPE_OTHER",
     "DashboardQueries",
     "daily_series",
     "error_list",
@@ -421,4 +604,6 @@ __all__ = [
     "recent_questions",
     "skill_breakdown",
     "user_breakdown",
+    "work_type_breakdown",
+    "work_type_of",
 ]
