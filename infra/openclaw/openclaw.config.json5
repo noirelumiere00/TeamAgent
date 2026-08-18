@@ -101,6 +101,29 @@
   // 検証で bot 起動を必ず確認し、reject されたら本節を外して再ビルド（=upstream 版上げ待ち）。
   messages: {
     groupChat: { historyLimit: 20 },
+
+    // ── 進捗リアクション: 依頼メッセージの絵文字を工程に応じて差し替える（⑧待たせないUX）──
+    // Slack は既定が native assistant thread status のため明示 true が必要
+    // （docs/channels/slack.md「Ack reactions」）。絵文字は Slack の reactions.add が
+    // 要求するショートコード表記。emojis/timing は zod .strict()＝未知キーで exit 78。
+    // まず5キー最小構成で実機検証し、stall系/compacting は確認後に追加する。
+    statusReactions: {
+      enabled: true,
+      emojis: {
+        queued: "eyes",
+        thinking: "brain",
+        tool: "hammer_and_wrench",
+        done: "white_check_mark",
+        error: "x",
+      },
+      timing: {
+        debounceMs: 700,
+        stallSoftMs: 10000,
+        stallHardMs: 30000,
+        doneHoldMs: 1500,
+        errorHoldMs: 2500,
+      },
+    },
   },
 
   // ── tool ポリシー（最小権限＝攻撃面の縮小） ───────────────────────────────
