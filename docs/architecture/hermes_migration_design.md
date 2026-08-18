@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-TeamAgent は現在、**Slack → OpenClaw（外殻）→ TeamAgent MCP Gateway（信頼境界）→ Skill Registry → 会社データ/API → AWS Bedrock Claude** という構成で本番稼働している。本 ADR は、この構成を**一切壊さず**、Hermes Agent（NousResearch 製・OpenClaw 直系後継の agent runtime）を **`run_hermes_agent` という dark な MCP tool** として境界の内側に段階導入する設計を定める。
+TeamAgent は現在、**Slack → OpenClaw（外殻）→ TeamAgent MCP Gateway（信頼境界）→ Skill Registry → 会社データ/API → AWS Bedrock Claude** という構成で本番稼働している。本 ADR は、この構成を**一切壊さず**、Hermes Agent（NousResearch 製・**OpenClaw からの移行を公式サポートする** agent runtime）を **`run_hermes_agent` という dark な MCP tool** として境界の内側に段階導入する設計を定める。
 
 位置づけを一文で言うと:
 
@@ -40,9 +40,9 @@ TeamAgent は現在、**Slack → OpenClaw（外殻）→ TeamAgent MCP Gateway�
 
 ## 4. Why Hermes
 
-- OpenClaw 直系の後継 runtime（upstream README に "Migrating from OpenClaw" 章・設定/メモリ/スキルの import 経路あり）＝移行リスクが最小の選択肢
+- **OpenClaw からの移行を公式サポートする** agent runtime（upstream に設定・Memory・Skills 等の import 機能と "Migrating from OpenClaw" ガイド）＝移行リスクが小さい選択肢。※公式に確認できるのは移行機能の提供までで、「直系後継」といった系譜は公式の主張ではないため本 ADR では表現しない
 - 必要な 3 能力が標準装備: (a) MCP client（TeamAgent 境界をそのまま使える） (b) agent-curated Memory（MEMORY.md/USER.md・FTS5 session search） (c) Skills（agentskills.io 標準）
-- AWS Bedrock（bedrock_converse transport）を標準サポート → 既存 IAM task role で動き、新しい API key・外部送信先が増えない
+- AWS Bedrock を **native provider** としてサポート（**boto3 / IAM 認証**）→ 既存 ECS task role で動き、新しい API key・外部送信先が増えない。具体的 transport は版により異なる（Claude 系を AnthropicBedrock 経路・非 Claude 系を bedrock_converse 経路に分ける実装がある）ため **Hermes runtime 実装に追従**し、本 ADR では固定しない
 - 自前 agent loop（意図的にミニマル）と比較して、memory/skills/session という「経験の器」を最初から持つ
 
 ## 5. Why not Big Bang
@@ -113,21 +113,20 @@ delegated 経路でも次を維持する:
   "v": 1,
   "iss": "teamagent-mcp-delegator",          // 既存 "teamagent-openclaw" と分離
   "aud": "teamagent-hermes-callback",        // 既存 "teamagent-mcp" と分離
-  "sub": "<server-resolved email>",           // 照合値。metadata 生成の鍵にはしない
-  "slack_user_id": "U…",                      // resolver 再実行の入力
-  "profile_id": "<HMAC(profile_salt, email)>",// サーバ導出のみ
+  "sub": "<principal_id = team_id:slack_user_id>", // stable principal（§8）。email は入れない
+  "profile_id": "<HMAC(profile_salt, principal_id)>", // サーバ導出のみ
   "session_id": "<uuid>",                     // 1 run_hermes_agent = 1 session
   "parent_request_id": "<request_id>",        // trace 貫通
   "allowed_tools": ["search", "clientkarte", …], // サーバ側 policy の縮小コピー（§7.5）
   "max_calls": 8,
-  "iat": …, "exp": …,                         // exp - iat ≤ 300s
-  "absolute_deadline": …,                     // iat + 900s。いかなる延長でも越えられない
+  "iat": …, "exp": …,                         // exp - iat ≤ 300s（同期 session の上限）
+  "absolute_deadline": …,                     // ≤ exp（v1 では exp と同値）。将来 renew を導入しても越えられない絶対上限
   "nonce": "<22char b64url>"                  // session 一意性
 }
 ```
 
 - 署名鍵は既存 caller claim 鍵と**別**。裸の env ではなく `hmac_keyring.py` に `HMAC_PURPOSE_HERMES_DELEGATION` として追加（purpose 重複拒否・verifier-first rotation を継承）。相互排他チェックは「hermes 鍵 ≠ caller 鍵 ≠ MCP bearer ≠ hermes ingress bearer ≠ hermes callback bearer」の 5 値へ拡張
-- **renew は v1 では実装しない**。TTL 内に取り切れない仕事は部分結果で終了する（既存の submit/status 非同期 job パターンが「claim 消費後の長時間処理」の正しい形）。将来 renew を導入する場合の必須条件（Gateway mint・resolver 再実行・absolute_deadline 不可越・max_calls 非リセット）は §24 に記録
+- **renew は v1 では実装しない**。したがって**同期 Hermes session は実質最大 300 秒**であり、`absolute_deadline` は v1 では `exp` と同値（独立した長い deadline は意味を持たないため置かない。将来 renew を導入した場合にのみ「renew でも越えられない絶対上限」として独立の意味を持つ）。**それを超える長時間処理は claim を延命するのではなく、既存の async submit/status tool（`proposal_builder_submit` 等）へ委譲する** — Agent の同期 session は 5 分以内・長仕事は非同期 tool へ、が既存 TeamAgent 思想（§20）と整合する基本形。将来 renew の必須条件（Gateway mint・resolver 再実行・absolute_deadline 不可越・max_calls 非リセット）は §24 に記録
 
 ### 7.3 per-call MAC（session_mac_key 方式）— request binding の復元
 
@@ -161,9 +160,11 @@ call_mac = HMAC-SHA256(K_session,
 |---|---|
 | session state（sub / allowed_tools のサーバ側正本 / policy version） | claim 単体を真実源にしない（confused deputy 対策） |
 | absolute_deadline | 期限の非延長性 |
-| remaining_calls | `SET calls = if_not_exists(calls,:0)+:1` + `ConditionExpression: calls < :max` の**実行前** conditional UpdateItem（TOCTOU 不可） |
-| consumed call_nonce | per-callback one-use（conditional PutItem） |
+| remaining_calls | calls < max の判定 + increment（**実行前**・下記 transaction 内） |
+| consumed call_nonce | per-callback one-use（下記 transaction 内） |
 | budget（cost / wall-clock 累計） | §19 |
+
+**単一の認可線形化点（PR3 実装要件）**: 「call_nonce 未使用 ∧ calls < max_calls ∧ deadline 未超過 ∧ budget 内」の判定と「nonce consume + call count increment」は、**可能な限り 1 回の DynamoDB `TransactWriteItems`** で原子的に行い、全部成立した時だけ skill を実行する。write を nonce Put と calls Update に分割すると「replay 攻撃が拒否されつつ call budget だけを削る」DoS 余地が生まれるため、分割 write は不可。
 
 障害時は**全て fail-closed**（既存 replay store と同じ裁定: 「予算台帳が壊れている時に skill を実行しない」）。SSE / PITR / TTL / deletion_protection は既存 nonce テーブルと同水準。
 
@@ -194,17 +195,18 @@ effective_tools =
 ## 8. Identity — resolver 再実行と cache
 
 ```
-claim.slack_user_id
-  → server-side Identity Resolver（既存 SlackClient.resolve_identity）
+claim.sub（principal_id = team_id:slack_user_id・stable principal）
+  → slack_user_id を取り出し server-side Identity Resolver（既存 SlackClient.resolve_identity）
   → ResolvedIdentity {email, groups, is_member}
   → build_rls_metadata()（唯一の変換点・role=member 固定）
   → RLS GUC
 ```
 
-- **claim 内の email/groups/role は authority にしない**（sub は resolver 結果との一致照合のみ。不一致は fail-closed）
+- **Identity の主キーは stable principal**（`team_id + ":" + slack_user_id`、将来的には社内 immutable user id）。**email は Resolver 由来の「属性」としてのみ扱い、主キーにしない** — email を Personal Memory / profile のキーにすると、改姓・ドメイン変更・アカウント移行で「旧 email → Memory A / 新 email → Memory B」に分裂する事故が起きる。RLS / per-user OAuth が email を要求する箇所へは、毎回 resolver が返した現在の email を流す
+- **claim 内の値は authority にしない**（sub は resolver 結果との一致照合のみ。不一致は fail-closed）
 - `build_rls_metadata` に **email 文字列を渡す実装は禁止**（str 分岐は `is_member` を検査しない＝退職者・ゲスト降格・stranger を検出できない）。必ず `ResolvedIdentity` を渡す
 - **ただし「claim を信用しない」と「毎 tool call で Slack API を叩く」は別問題**。既存 resolver のプロセス内 TTL cache（成功/失敗とも 60s）をそのまま利用してよく、100 人展開を見据えて**短 TTL の server-side cache（上限 60s・失効イベントでの明示 purge 付き）を許可**する。cache の TTL は claim の exp を超えないこと
-- `hermes_profile_id = HMAC(profile_salt, normalize_email(email))` — サーバ導出のみ。Hermes にもモデルにも生成・指定させない
+- `hermes_profile_id = HMAC(profile_salt, principal_id)` — サーバ導出のみ。Hermes にもモデルにも生成・指定させない
 
 ## 9. Personal Hermes Profile
 
@@ -268,21 +270,21 @@ Connect RAG（connect.newstv.co.jp/app）は同一 repo の connect_web サー�
 ## 19. Cost / Model / Budget
 
 - Routing=Haiku（OpenClaw 外側・変更なし）/ Hermes planning=Sonnet（重い時のみ）/ Tool 実行=deterministic Python / Embedding=既存 LocalE5
-- per-session 予算: `max_calls`（既定 8）+ `cost_cap_usd`（既定 0.5・既存 run_agent と同水準）+ wall-clock（`absolute_deadline`=900s）+ per-tool timeout。予算は §7.4 の台帳で線形化
+- per-session 予算: `max_calls`（既定 8）+ `cost_cap_usd`（既定 0.5・既存 run_agent と同水準）+ wall-clock（同期 session ≤300s・`absolute_deadline` は v1 では exp と同値）+ per-tool timeout。予算は §7.4 の台帳（TransactWriteItems）で線形化
 - profile 単位の日次上限は PR5 以降（既存 cost_guard / quota_store のパターンを流用）
 
 ## 20. Failure / Rollback / PR2 の dark 形態
 
 - 各 Phase は env flag 1 個で完全 rollback: `USE_HERMES_ORCHESTRATOR=0` → list_tools から消滅（run_agent と同機構）
 - Hermes down → run_hermes_agent は構造化エラー（既存 `_err` 契約）→ OpenClaw は既存 L1 で応答継続（SOUL の「境界が拒否したら素直に伝える」規範に接続）
-- **PR2 の dark runtime 形態（裁定済み）**: `desired_count=0` を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に desired_count=1 へ上げる（それでも flag OFF なら tool 面に出ない）
+- **PR2 の dark runtime 形態（裁定済み）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言・手動の ECS 直接操作ではない）を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に Terraform 変更として desired_count を 1 へ上げる（それでも flag OFF なら tool 面に出ない）
 
 ## 21. Migration Phases
 
 | Phase / PR | 内容 | flag | 出口条件 |
 |---|---|---|---|
 | PR1 | docs only（本 ADR + README 全面更新） | — | CI 緑・code diff 0 |
-| PR2 | Hermes dark runtime（ECS desired_count=0・IAM 最小・healthz） | — | RunTask 受け入れ試験（§20） |
+| PR2 | Hermes dark runtime（ECS 常駐タスク 0・IAM 最小・healthz） | — | RunTask 受け入れ試験（§20） |
 | PR3 | run_hermes_agent + delegated claim + callback boundary + Security Tests | USE_HERMES_ORCHESTRATOR=0 のまま | マージブロッカーテスト 8 本（§25）全緑・OC include 非掲載の契約テスト |
 | **PR-R** | **容量制御（必須 Gate・§22）** | — | admission control + in-flight metrics + heavy-tool semaphore + 明示 overload 応答 |
 | PR4 | Proposal Specialist を限定ユーザーへ | HERMES_ALLOWED_EMAILS | 既存フローとの A/B（quality/latency/cost/citation） |
@@ -333,7 +335,7 @@ PR-R の必要条件（PR4 前の必須 Gate）:
 
 1. **cross-user session race**: 同一 Hermes プロセスに A/B の session が並存しても claim/K_session が混線しない（既存 `test_same_session_cross_user_race…` の同型）
 2. **予算ストア障害時に skill が実行されない**（fail-closed・resolver より前）
-3. **max_calls 並行 race**: 16 本同時 callback で成功がちょうど 8 本
+3. **max_calls 並行 race**: 16 本同時 callback で成功がちょうど 8 本（nonce 消費 + call count increment が単一 `TransactWriteItems` で原子的であることの実証・replay で budget だけ削れないこと）
 4. **鍵の双方向偽造不可**: caller 鍵で hermes claim を作れない / 逆も / MCP bearer ではどちらも不可
 5. **denylist 優先**: allowed_tools に run_hermes_agent / mail_draft を入れても server-side denylist が勝つ
 6. **resolver 再実行**: callback 時点でゲスト降格・退職・stranger 化したユーザーは fail-closed
