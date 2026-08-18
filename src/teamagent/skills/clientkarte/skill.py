@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.clientkarte.schema import (
     ClientKarteInput,
@@ -164,8 +165,11 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
 
     def _to_event(self, hit: SearchHit) -> KarteEvent:
         meta = hit.metadata or {}
+        # 出典 URL 方針: カルテの 1 行 1 行が「どの Slack スレッドの FB か」へ辿れるようにする。
+        # source_uri は内部識別子なのでそのまま出さず、permalink に整形できたときだけ載せる。
         return KarteEvent(
             chunk_id=hit.chunk_id,
+            url=slack_thread_permalink(str(meta.get("source_uri") or "")),
             occurred_at=meta.get("occurred_at"),
             deal_phase=meta.get("deal_phase"),
             bant_score=meta.get("bant_score"),

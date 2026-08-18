@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from teamagent.adapters.slack_file_guard import (
     SlackFileGuardError,
@@ -59,6 +60,10 @@ class AttachmentCandidate:
     size: int  # Slack metadata 上のバイト数（0 = 不明）
     url: str  # 検証済み url_private
     ts: float  # 投稿時刻（新しい順に並べるためのキー）
+    # Slack が返す原本 permalink（``https://<ws>.slack.com/files/…``）。出典表示用。
+    # ⚠️ url_private とは別物（permalink はブラウザで本人の権限で開く画面 URL で、
+    #    bot token を載せて GET する取得用 URL ではない）。取れなければ空文字。
+    permalink: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,27 @@ def _int_or_zero(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return n if n > 0 else 0
+
+
+def _safe_permalink(raw: Any) -> str:
+    """Slack file の ``permalink`` を表示に使ってよい形だけ通す（それ以外は空文字）。
+
+    自 WS の Slack 画面 URL（``https://<何か>.slack.com/…``）だけを許す。file dict は
+    外部由来のデータなので、ここを緩めると任意 URL を「出典」として提示させられる。
+    """
+    url = str(raw or "").strip()
+    if not url or len(url) > 2048:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return ""
+    try:
+        if parsed.port not in (None, 443):
+            return ""
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").rstrip(".").lower()
+    return url if host == "slack.com" or host.endswith(".slack.com") else ""
 
 
 def evaluate_file(
@@ -154,6 +180,7 @@ def evaluate_file(
             size=size,
             url=url,
             ts=ts,
+            permalink=_safe_permalink(file.get("permalink")),
         ),
         None,
     )

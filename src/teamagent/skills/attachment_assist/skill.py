@@ -39,6 +39,11 @@ from pydantic import BaseModel
 
 from teamagent.adapters.slack_file_guard import SlackFileGuardError, slack_file_allowed_hosts
 from teamagent.observability import redact_secrets
+from teamagent.skills._shared.next_step import (
+    ATTACHMENT_MODE_SUGGESTION,
+    append_suggestion,
+    suggestions_enabled,
+)
 from teamagent.skills.attachment_assist.aggregate import compute_xlsx_stats, format_stats_ja
 from teamagent.skills.attachment_assist.discover import (
     REASON_BAD_URL,
@@ -496,6 +501,10 @@ def _compose_message(
     head = f"📄 {target.name}（{kind_label}・{pages}{unit}）の{spec.label}"
     parts = [head, "", answer.strip()]
     notes: list[str] = []
+    # 出典 URL 方針: 読んだ「原本」（Slack 上のそのファイル）へのリンクを必ず添える。
+    # Slack が返した permalink をそのまま使う（自作・推測はしない。無ければ省略）。
+    if target.permalink:
+        parts.extend(["", f"🔗 出典: {target.permalink}"])
     if truncated:
         notes.append(
             f"※ 資料が長いため冒頭 {chars:,} 文字ぶんのみを処理しました"
@@ -514,4 +523,17 @@ def _compose_message(
         )
     if notes:
         parts.extend(["", "\n".join(notes)])
-    return "\n".join(parts).strip()
+    # 次の一手: summary の結果にだけ「他モードもできる」を 1 個だけ添える
+    # （revise/minutes/translate は同じツールの別 mode ＝必ず実在する）。
+    return _with_mode_suggestion("\n".join(parts).strip(), mode)
+
+
+def _with_mode_suggestion(message: str, mode: str) -> str:
+    """``mode=summary`` の結果末尾に他モードの案内を 1 個だけ添える（決定論）。
+
+    要約以外（revise/minutes/aggregate/translate）は利用者が既に目的を指定して
+    呼んでいる＝依頼が完結しているので提案しない。
+    """
+    if mode != "summary" or not suggestions_enabled():
+        return message
+    return append_suggestion(message, ATTACHMENT_MODE_SUGGESTION)
