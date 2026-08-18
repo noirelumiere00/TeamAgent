@@ -20,6 +20,7 @@ import httpx
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 
+from teamagent.adapters.slack_file_guard import SlackFileGuardError, validate_slack_file_url
 from teamagent.identity import ResolvedIdentity, normalize_email
 
 logger = structlog.get_logger(__name__)
@@ -433,3 +434,72 @@ class SlackClient:
             raise RuntimeError(f"VIDEO_FILE_TOO_LARGE: {size_mb:.0f}MB > {max_mb}MB")
         logger.info("slack_file_downloaded", request_id=request_id, size_mb=round(size_mb, 2))
         return data
+
+    async def download_file_guarded(
+        self,
+        url_private: str,
+        *,
+        request_id: str | None = None,
+        max_bytes: int,
+        allowed_hosts: frozenset[str] | None = None,
+        timeout_s: float = 60.0,
+    ) -> bytes:
+        """``download_file`` の安全版。**ホスト allowlist + ストリーミング逐次サイズ検査**。
+
+        ``download_file`` との違い（後者の挙動は一切変えない）:
+
+        1. **ホスト検証**: ``url_private`` を ``validate_slack_file_url`` に通してから GET する。
+           無検証だと、Slack の ``files`` 配列に混入し得る外部ファイルの URL へ
+           **bot token を Authorization ヘッダごと送ってしまう**。
+        2. **逐次サイズ検査**: ``httpx.stream`` でチャンク受信し、累積が ``max_bytes`` を
+           超えた時点で **接続を切って例外**にする（全量をメモリへ展開してから測る
+           ``download_file`` は、共有 mcp タスク（メモリ 3GB・16 名共用）で巨大ファイル
+           による OOM を誘発できる）。``Content-Length`` があれば読む前に拒否する。
+
+        Raises:
+            SlackFileGuardError: allowlist 外ホスト / 非 HTTPS / 容量超過。
+            httpx.HTTPStatusError: Slack が 4xx/5xx を返した。
+        """
+        safe_url = validate_slack_file_url(
+            url_private, allowed=allowed_hosts, request_id=request_id
+        )
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        dl_timeout = httpx.Timeout(timeout_s, connect=10.0)
+        chunks: list[bytes] = []
+        total = 0
+        async with httpx.AsyncClient(timeout=dl_timeout) as client:
+            async with client.stream(
+                "GET",
+                safe_url,
+                headers={"Authorization": f"Bearer {self._bot_token}"},
+            ) as resp:
+                resp.raise_for_status()
+                # ⚠️ SlackFileGuardError は ValueError の派生。int() の失敗だけを
+                #    握るため、パースと判定を必ず分ける（同じ try に入れると
+                #    「大きすぎ」の拒否そのものが黙って握り潰される）。
+                declared = _parse_content_length(resp.headers.get("content-length"))
+                if declared is not None and declared > max_bytes:
+                    raise SlackFileGuardError(f"SLACK_FILE_TOO_LARGE: {declared}B > {max_bytes}B")
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        # ここで with を抜ける＝残りを読まずに接続を閉じる。
+                        raise SlackFileGuardError(f"SLACK_FILE_TOO_LARGE: {total}B > {max_bytes}B")
+                    chunks.append(chunk)
+        logger.info(
+            "slack_file_downloaded_guarded",
+            request_id=request_id,
+            size_bytes=total,
+        )
+        return b"".join(chunks)
+
+
+def _parse_content_length(raw: str | None) -> int | None:
+    """``Content-Length`` を int で返す。欠落・不正は None（逐次検査に委ねる）。"""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None

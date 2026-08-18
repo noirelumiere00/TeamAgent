@@ -8,7 +8,8 @@ Skill / Adapter からはこの層を直接 import せず、Runtime（slack_bot.
 from teamagent.observability.sentry import (
     capture_skill_exception,
     init_sentry,
+    redact_secrets,
     scrub_value,
 )
 
-__all__ = ["capture_skill_exception", "init_sentry", "scrub_value"]
+__all__ = ["capture_skill_exception", "init_sentry", "redact_secrets", "scrub_value"]

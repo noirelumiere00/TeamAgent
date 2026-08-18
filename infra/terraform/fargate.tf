@@ -646,6 +646,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
+      # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
+      # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
+      # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
+      { name = "USE_ATTACHMENT_TOOLS", value = var.use_attachment_tools ? "true" : "false" },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。
