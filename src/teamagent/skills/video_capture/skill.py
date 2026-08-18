@@ -57,7 +57,8 @@ _FRAMES_TIMEOUT_S = 180
 # exam fix: acquire の既定 30MB は 360p 数分で足りない。契約上限 128MB の内側で 80MB。
 _ACQUIRE_MAX_BYTES = 80 * 1024 * 1024
 # 添付経路は取得元ブロックが無く長尺が来やすいので 100MB まで許す（契約 128MB の内側）。
-_SLACK_FILE_MAX_BYTES = 100 * 1024 * 1024
+_SLACK_FILE_MAX_MB_DEFAULT = 100
+_SLACK_FILE_MAX_MB_CEILING = 128
 _ATTACHMENT_HISTORY_LIMIT = 30
 
 _SEMAPHORE_LOCK = threading.Lock()
@@ -86,7 +87,15 @@ def _capture_semaphore() -> threading.BoundedSemaphore:
 
 
 def slack_file_max_bytes() -> int:
-    return _envint("VIDEO_CAPTURE_SLACK_MAX_MB", 100, minimum=1, maximum=128) * 1024 * 1024
+    """添付動画の上限バイト（既定100MB・env で 1〜128MB に調整可）。"""
+
+    megabytes = _envint(
+        "VIDEO_CAPTURE_SLACK_MAX_MB",
+        _SLACK_FILE_MAX_MB_DEFAULT,
+        minimum=1,
+        maximum=_SLACK_FILE_MAX_MB_CEILING,
+    )
+    return megabytes * 1024 * 1024
 
 
 def _is_youtube(host: str) -> bool:
