@@ -190,6 +190,12 @@ variable "use_attachment_tools" {
   default     = false
 }
 
+variable "use_video_capture_tool" {
+  description = "video_capture tool（動画の指定時刻を JPEG 切出しして依頼スレッド/本人 DM に添付）を mcp で有効化。既定 false。前提: enable_media_worker=true（acquire/frame の media job 基盤）。対象は外部公開URL（TikTok/Instagram）と自WSの添付動画のみで社内データは読まない。⚠️ YouTube は取得元の bot 判定でブロックされる実測があり、スキル側で既定 OFF（env VIDEO_CAPTURE_ALLOW_YOUTUBE で解禁可能だが cookie/PO_TOKEN 対応が入るまで通らない）。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_progress_notify" {
   description = "ツール実行中の進捗表示（v0.3.1 Task7）。ON で mcp が重いツール実行前に『📂 資料を検索しています…』等を Slack へ投稿し完了後に削除する。既定 false。fail-open（送信失敗はツール実行を阻害しない）。bot の chat:write/im:write scope 前提。"
   type        = bool

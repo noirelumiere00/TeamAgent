@@ -650,6 +650,10 @@ resource "aws_ecs_task_definition" "mcp" {
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。
       { name = "USE_ATTACHMENT_TOOLS", value = var.use_attachment_tools ? "true" : "false" },
+      # video_capture: 動画の指定時刻を JPEG 切出し→依頼スレッド/本人 DM へ添付（既定 false）。
+      # 前提は media worker（enable_media_worker）と MEDIA_TASK_QUEUE/MEDIA_JOBS_TABLE/
+      # MEDIA_JOB_BUCKET の配線（下の media job ブロックで既に本番稼働中）。
+      { name = "USE_VIDEO_CAPTURE_TOOL", value = var.use_video_capture_tool ? "true" : "false" },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。

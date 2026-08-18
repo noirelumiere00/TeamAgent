@@ -15,6 +15,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -31,6 +32,26 @@ _SLACK_TEAM_ID_RE = re.compile(r"^T[A-Z0-9]{8,}$")
 # 身元解決キャッシュ TTL（秒）。署名 claim の最長寿命を超えて membership を信用しない。
 _IDENTITY_TTL_OK = 60.0
 _IDENTITY_TTL_NONE = 60.0
+
+# url_private へは bot token の Authorization ヘッダが載る。自ワークスペースの
+# ファイル配信ホスト以外へ**絶対にトークンを出さない**ための一次防壁（SSRF/トークン漏洩）。
+_SLACK_FILE_HOST_SUFFIX = "slack.com"
+_SLACK_FILE_CHUNK_BYTES = 256 * 1024
+
+
+def slack_file_url_allowed(url: str) -> bool:
+    """``url_private`` が自 WS のファイル配信ホスト（*.slack.com）の正規 HTTPS か。"""
+
+    parsed = urlsplit(url or "")
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme != "https" or parsed.username or parsed.password:
+        return False
+    try:
+        if parsed.port not in (None, 443):
+            return False
+    except ValueError:
+        return False
+    return host == _SLACK_FILE_HOST_SUFFIX or host.endswith(f".{_SLACK_FILE_HOST_SUFFIX}")
 
 
 @dataclass(frozen=True)
@@ -503,3 +524,55 @@ def _parse_content_length(raw: str | None) -> int | None:
         return int(raw)
     except ValueError:
         return None
+    async def download_file_bounded(
+        self,
+        url_private: str,
+        *,
+        max_bytes: int,
+        request_id: str | None = None,
+    ) -> bytes:
+        """``url_private`` を**逐次サイズ検査つきストリーミング**で取得する。
+
+        ``download_file`` との違いと、その理由:
+        - ホスト allowlist（``*.slack.com`` の正規 HTTPS）を先に強制する。url_private へは
+          bot token が載るため、任意ホストへトークンを出す経路を作らない。
+        - リダイレクトを追わない。追うと転送先ホストへトークンが渡り得る（本番の
+          EC2 bot 経路も追わずに成功している＝追う必要が無い）。
+        - Content-Length と実受信バイトの**両方**で上限を切る。全量をメモリに広げてから
+          測る方式は 3GB 共有コンテナで OOM を招く（16名同時利用）。
+        """
+
+        if max_bytes < 1:
+            raise ValueError("max_bytes must be positive")
+        if not slack_file_url_allowed(url_private):
+            logger.warning("slack_file_host_rejected", request_id=request_id)
+            raise RuntimeError("SLACK_FILE_HOST_NOT_ALLOWED")
+
+        dl_timeout = httpx.Timeout(120.0, connect=10.0)
+        buffer = bytearray()
+        async with httpx.AsyncClient(timeout=dl_timeout, follow_redirects=False) as client:
+            async with client.stream(
+                "GET",
+                url_private,
+                headers={"Authorization": f"Bearer {self._bot_token}"},
+            ) as resp:
+                resp.raise_for_status()
+                declared = resp.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > max_bytes:
+                    raise RuntimeError(
+                        f"SLACK_FILE_TOO_LARGE: {int(declared)} > {max_bytes}",
+                    )
+                async for chunk in resp.aiter_bytes(_SLACK_FILE_CHUNK_BYTES):
+                    if len(buffer) + len(chunk) > max_bytes:
+                        raise RuntimeError(
+                            f"SLACK_FILE_TOO_LARGE: >{max_bytes}",
+                        )
+                    buffer.extend(chunk)
+        if not buffer:
+            raise RuntimeError("SLACK_FILE_EMPTY")
+        logger.info(
+            "slack_file_downloaded_bounded",
+            request_id=request_id,
+            size_mb=round(len(buffer) / 1024 / 1024, 2),
+        )
+        return bytes(buffer)
