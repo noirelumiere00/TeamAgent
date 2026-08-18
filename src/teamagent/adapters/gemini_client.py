@@ -79,12 +79,133 @@ class GeminiResponse:
     latency_ms: int
 
 
+@dataclass(frozen=True)
+class GroundingSource:
+    """groundingMetadata.groundingChunks[i].web を素の値へ落としたもの。
+
+    **index は groundingChunks の添字と 1:1 で保たれる**（web 以外の chunk は uri="" の
+    プレースホルダとして残す）。groundingSupports[].groundingChunkIndices が
+    この添字を指すため、間引くと参照がずれる。
+    """
+
+    title: str
+    uri: str
+    domain: str
+
+
+@dataclass(frozen=True)
+class GroundingSupport:
+    """groundingMetadata.groundingSupports[i]（本文断片 ↔ 出典 chunk の対応）。"""
+
+    text: str
+    source_indices: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class GeminiGroundedResponse:
+    """Google 検索グラウンディング付き生成の返り値。
+
+    grounded=False は「検索の裏付けが取れていない」＝呼び出し側は fail-closed にする。
+    """
+
+    text: str
+    sources: tuple[GroundingSource, ...]
+    supports: tuple[GroundingSupport, ...]
+    search_queries: tuple[str, ...]
+    grounded: bool
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    model_id: str
+    latency_ms: int
+
+
+def _pick(obj: Any, *names: str) -> Any:
+    """SDK オブジェクト（snake_case 属性）と生 JSON（camelCase キー）の両方から値を取る。
+
+    google-genai は版によって pydantic オブジェクトを返したり、REST の生 dict を
+    そのまま持ち回ったりする。どちらでも壊れないように両対応で読む。
+    """
+    for name in names:
+        if isinstance(obj, dict):
+            value = obj.get(name)
+        else:
+            value = getattr(obj, name, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _as_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _parse_grounding(
+    candidate: Any,
+) -> tuple[tuple[GroundingSource, ...], tuple[GroundingSupport, ...], tuple[str, ...]]:
+    """candidate.groundingMetadata から出典・対応・検索クエリを取り出す。
+
+    metadata が無い / chunks が空なら全て空で返す（＝呼び出し側が grounded=False と判定）。
+    """
+    meta = _pick(candidate, "grounding_metadata", "groundingMetadata")
+    if meta is None:
+        return ((), (), ())
+
+    sources: list[GroundingSource] = []
+    for chunk in _as_list(_pick(meta, "grounding_chunks", "groundingChunks")):
+        web = _pick(chunk, "web")
+        if web is None:
+            # retrievedContext / maps 等。添字を保つためプレースホルダを置く。
+            sources.append(GroundingSource(title="", uri="", domain=""))
+            continue
+        sources.append(
+            GroundingSource(
+                title=str(_pick(web, "title") or ""),
+                uri=str(_pick(web, "uri") or ""),
+                domain=str(_pick(web, "domain") or ""),
+            )
+        )
+
+    supports: list[GroundingSupport] = []
+    for support in _as_list(_pick(meta, "grounding_supports", "groundingSupports")):
+        segment = _pick(support, "segment")
+        indices = _as_list(_pick(support, "grounding_chunk_indices", "groundingChunkIndices"))
+        clean: list[int] = []
+        for raw in indices:
+            try:
+                idx = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(sources):
+                clean.append(idx)
+        supports.append(
+            GroundingSupport(
+                text=str(_pick(segment, "text") or "") if segment is not None else "",
+                source_indices=tuple(clean),
+            )
+        )
+
+    queries = tuple(
+        str(q) for q in _as_list(_pick(meta, "web_search_queries", "webSearchQueries")) if q
+    )
+    return (tuple(sources), tuple(supports), queries)
+
+
 # Gemini 2.5 Flash 料金（2026/5 時点、USD per 1M tokens）
 # https://ai.google.dev/pricing
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.15, 0.60),
     "gemini-2.5-pro": (1.25, 5.00),
 }
+
+
+# Google 検索グラウンディングは token 課金と別に「1 grounded prompt」単位で課金される
+# （公表 $35 / 1,000 prompt・無料枠を超えた分）。token 換算だけだと実費を桁で過小報告する
+# ので、grounded 呼び出しのコストにはこの定額を足す。⚠️料金改定時は要更新。
+_GROUNDING_REQUEST_USD = 0.035
+# grounded 呼び出しのリトライ上限（動画分析の 3 とは別値。理由は
+# generate_with_google_search の docstring）。
+_GROUNDED_RETRY_ATTEMPTS = 2
 
 
 def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
@@ -114,6 +235,7 @@ class GeminiClient:
         use_vertex: bool = False,
         project: str | None = None,
         location: str = "us-central1",
+        client: Any | None = None,
     ) -> None:
         self.api_key = api_key
         self.model_id = model_id
@@ -121,7 +243,8 @@ class GeminiClient:
         self.project = project
         self.location = location
         # 遅延 import：google-genai は heavy & 一部環境で SSL 問題が出るため
-        self._client: Any | None = None
+        # client を渡すと遅延生成をスキップする（テストのフェイク注入口）。
+        self._client: Any | None = client
 
     @classmethod
     def from_env(cls) -> GeminiClient:
@@ -214,6 +337,117 @@ class GeminiClient:
         from google.genai import types
 
         return self._generate_video([types.Part(text=prompt)], request_id, system=system)
+
+    def generate_with_google_search(
+        self,
+        prompt: str,
+        request_id: str,
+        *,
+        system: str | None = None,
+        timeout_s: float | None = None,
+    ) -> GeminiGroundedResponse:
+        """Google 検索グラウンディングを有効にして生成する（web_research Skill 用）。
+
+        CLAUDE.md 6-bis: Skill 側は google-genai を import しない。検索ツールの有効化も
+        groundingMetadata の解釈もここ（Adapter 層）に閉じ、Skill には素の dataclass を返す。
+
+        ⚠️ Google 検索ツールは structured output（responseSchema / JSON mime type）と併用
+        できない。要約は自由記述で受け、**出典は必ず groundingMetadata から機械的に組む**
+        （LLM 本文中の URL は呼び出し側で採用しないこと）。
+
+        grounded=False は「検索の裏付けが無い応答」＝呼び出し側は fail-closed にする。
+
+        timeout_s は **1 回の HTTP 試行あたり** の上限。リトライは既定 2 回までに絞ってあり
+        （_GROUNDED_RETRY_ATTEMPTS）、最悪でも timeout_s×2＋バックオフで頭打ちになる。
+        動画分析と同じ 3 回にすると 3×deadline で OpenClaw のターン制限（実測 ~181s）を
+        突き抜け、ターンごと応答全損する。
+        """
+        from google.genai import types
+
+        client = self._ensure_client()
+        config_kwargs: dict[str, Any] = {
+            "tools": [types.Tool(google_search=types.GoogleSearch())],
+        }
+        if system:
+            config_kwargs["system_instruction"] = system
+        if timeout_s is not None and timeout_s > 0:
+            # google-genai の timeout はミリ秒。OpenClaw のターン制限の内側で必ず返すため。
+            config_kwargs["http_options"] = types.HttpOptions(timeout=int(timeout_s * 1000))
+        config = types.GenerateContentConfig(**config_kwargs)
+        contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
+
+        start = time.perf_counter()
+        try:
+            response = call_with_retry(
+                lambda: client.models.generate_content(
+                    model=self.model_id,
+                    contents=contents,
+                    config=config,
+                ),
+                is_retryable=_is_retryable_vertex,
+                policy=RetryPolicy(
+                    max_attempts=_env_int(
+                        "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                    ),
+                    base_delay_s=0.6,
+                    max_delay_s=4.0,
+                ),
+                on_retry=lambda n, d, e: logger.warning(
+                    "gemini_grounded_retry",
+                    request_id=request_id,
+                    attempt=n,
+                    delay_s=round(d, 2),
+                    error=type(e).__name__,
+                ),
+            )
+        except Exception as e:
+            # 生プロンプト（＝利用者のクエリ）はログに残さない (CLAUDE.md 6-bis)
+            logger.exception("gemini_grounded_generate_failed", request_id=request_id)
+            raise RuntimeError(f"Gemini Web 検索に失敗しました: {type(e).__name__}") from e
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        candidates = _as_list(_pick(response, "candidates"))
+        candidate = candidates[0] if candidates else None
+        sources, supports, queries = (
+            _parse_grounding(candidate) if candidate is not None else ((), (), ())
+        )
+        text = str(_pick(response, "text") or "")
+        usage = _pick(response, "usage_metadata", "usageMetadata")
+        input_tokens = int(_pick(usage, "prompt_token_count", "promptTokenCount") or 0)
+        output_tokens = int(_pick(usage, "candidates_token_count", "candidatesTokenCount") or 0)
+        grounded = any(s.uri for s in sources)
+        cost_usd = round(
+            _estimate_cost(self.model_id, input_tokens, output_tokens)
+            + (_GROUNDING_REQUEST_USD if grounded else 0.0),
+            6,
+        )
+
+        logger.info(
+            "gemini_google_search",
+            request_id=request_id,
+            model_id=self.model_id,
+            grounded=grounded,
+            source_count=sum(1 for s in sources if s.uri),
+            support_count=len(supports),
+            query_count=len(queries),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            latency_ms=latency_ms,
+            text_len=len(text),
+        )  # 検索クエリ本文・ページ本文はログに出さない
+        return GeminiGroundedResponse(
+            text=text,
+            sources=sources,
+            supports=supports,
+            search_queries=queries,
+            grounded=grounded,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            model_id=self.model_id,
+            latency_ms=latency_ms,
+        )
 
     def _generate_video(
         self, parts: list[Any], request_id: str, *, system: str | None

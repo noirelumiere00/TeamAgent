@@ -184,6 +184,12 @@ variable "use_slack_summary_tool" {
   default     = false
 }
 
+variable "use_web_research_tool" {
+  description = "web_research tool（公開Webの市場リサーチ＝Gemini の Google 検索グラウンディング）を mcp で有効化。read-only＝Web への直 fetch も書込 API も無い（取得は Google 側で完結）。既定 false。⚠️ON の前提: mcp に Gemini の認証 env（GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT/VERTEX_SA_JSON）が入っていること＝現状は enable_scrape_tools=true が必要（task definition の precondition で強制）。段階公開は web_research_allowed_emails。"
+  type        = bool
+  default     = false
+}
+
 variable "use_attachment_tools" {
   description = "attachment_assist tool（会話に添付されたファイルの読取・加工＝要約/修正案/議事録FMT/集計/英訳）を mcp で有効化。read-only＝Slack へのファイル生成・再配信はしない（P2 は別フラグ）。読取対象は署名済み caller claim 由来の会話に添付されたファイルのみ（file_id/URL/channel は入力に持たない）。既定 false。"
   type        = bool
@@ -194,6 +200,12 @@ variable "use_video_capture_tool" {
   description = "video_capture tool（動画の指定時刻を JPEG 切出しして依頼スレッド/本人 DM に添付）を mcp で有効化。既定 false。前提: enable_media_worker=true（acquire/frame の media job 基盤）。対象は外部公開URL（TikTok/Instagram）と自WSの添付動画のみで社内データは読まない。⚠️ YouTube は取得元の bot 判定でブロックされる実測があり、スキル側で既定 OFF（env VIDEO_CAPTURE_ALLOW_YOUTUBE で解禁可能だが cookie/PO_TOKEN 対応が入るまで通らない）。"
   type        = bool
   default     = false
+}
+
+variable "web_research_allowed_emails" {
+  description = "web_research の段階公開 allowlist（カンマ区切りの会社メール）。空=全員許可。stage1=小俣のみ→数名→空。値変更は taskdef env 差し替えのみで反映可（再ビルド不要）。"
+  type        = string
+  default     = ""
 }
 
 variable "enable_progress_notify" {

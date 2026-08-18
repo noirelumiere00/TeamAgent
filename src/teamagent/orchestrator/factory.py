@@ -478,6 +478,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 公開Webの市場リサーチツール（Gemini の Google 検索グラウンディング・read-only）。
+    # 検索も本文取得も Google 側で完結＝自 VPC からの直 fetch は無い。出典は
+    # groundingMetadata からサーバが機械付与し、LLM 出力の URL は採用しない。
+    # **既定 OFF**（USE_WEB_RESEARCH_TOOL=1）。段階公開は WEB_RESEARCH_ALLOWED_EMAILS。
+    # 前提: GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT（または GEMINI_API_KEY）が env にあること。
+    if _envflag("USE_WEB_RESEARCH_TOOL"):
+        from teamagent.skills.web_research.skill import WebResearchSkill
+
+        specs.append(
+            ToolSpec(
+                WebResearchSkill.name,
+                WebResearchSkill.description,
+                WebResearchSkill,
+            )
+        )
+
     # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
     # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
     # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。

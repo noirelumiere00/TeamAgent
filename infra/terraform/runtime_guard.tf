@@ -44,6 +44,7 @@ variable "runtime_guard_live" {
     use_slack_summary_tool                  = bool
     use_attachment_tools                    = optional(bool, false)
     use_video_capture_tool                  = bool
+    use_web_research_tool                   = bool
     enable_progress_notify                  = bool
     use_entity_tags                         = bool
     use_ailavault_deeplinks                 = bool
@@ -539,6 +540,7 @@ locals {
     var.use_slack_summary_tool == var.runtime_guard_live.use_slack_summary_tool &&
     var.use_attachment_tools == var.runtime_guard_live.use_attachment_tools &&
     var.use_video_capture_tool == var.runtime_guard_live.use_video_capture_tool &&
+    var.use_web_research_tool == var.runtime_guard_live.use_web_research_tool &&
     var.enable_progress_notify == var.runtime_guard_live.enable_progress_notify &&
     var.use_entity_tags == var.runtime_guard_live.use_entity_tags &&
     var.use_ailavault_deeplinks == var.runtime_guard_live.use_ailavault_deeplinks &&
