@@ -11,8 +11,11 @@ CLAUDE.md 6-bis Adapter 層。Skill から slack_sdk を直接呼ばない。
     を再利用（マッピングの単一真実源）。search 用に SlackSearchMatch を追加。
   - Skill は同期実行なので、内部で `_run_sync` により async クライアントを同期呼び出しする。
     実行中ループがある場合（将来 orchestrator が async 文脈で呼ぶ場合）は別スレッドへ退避。
-  - **fail-open**: 例外は握って空を返す（下書き生成を絶対に止めない）。
-  - **G8**: ログは件数・latency のみ。本文 / permalink / channel 名は出さない。
+  - **fail-open**: `read_thread` / `search` は例外を握って空を返す（下書き生成を絶対に止めない）。
+  - **fail-closed 用の別口**: `read_thread_checked` は Slack の error code を返す
+    （not_in_channel / channel_not_found 等）。「空スレッド」と「権限なし」を区別しないと
+    いけない用途（slack_summary）はこちらを使う。既存 2 メソッドの挙動は変えない。
+  - **G8**: ログは件数・latency・error code のみ。本文 / permalink / channel 名は出さない。
 """
 
 from __future__ import annotations
@@ -45,6 +48,35 @@ class SlackSearchMatch:
     channel_name: str
     user: str | None = None
     permalink: str = ""
+
+
+@dataclass(frozen=True)
+class SlackThreadRead:
+    """error-aware なスレッド取得結果（fail-closed 用）。
+
+    ``error`` は Slack API の error code をそのまま入れる（not_in_channel /
+    channel_not_found / thread_not_found / ratelimited …）。成功時は空文字。
+    引数不備は ``bad_target``、code を取り出せない例外は ``api_error``。
+    """
+
+    messages: tuple[SlackMessage, ...] = ()
+    error: str = ""
+
+
+def _slack_error_code(exc: BaseException) -> str:
+    """例外から Slack API の error code を取り出す（取れなければ 'api_error'）。
+
+    slack_sdk は ok:false で ``SlackApiError`` を投げ、``.response`` が dict 互換
+    （SlackResponse.get / dict.get のどちらでも同じ経路で読める）。
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return "api_error"
+    try:
+        code = resp.get("error")
+    except Exception:
+        return "api_error"
+    return str(code) if code else "api_error"
 
 
 def _run_sync(coro_factory: Callable[[], Any]) -> Any:
@@ -101,6 +133,46 @@ class SlackUserReader:
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
         return msgs
+
+    def read_thread_checked(
+        self, channel_id: str, thread_ts: str, request_id: str, *, limit: int = 200
+    ) -> SlackThreadRead:
+        """conversations.replies を **error code つき** で取得（1 ページ・読み取り専用）。
+
+        `read_thread` は fail-open で「権限なし」と「空スレッド」が両方 `[]` になり、
+        呼び出し側が区別できない。要約のように fail-closed が要る用途はこちらを使う。
+        既存の `read_thread` / `search` は不変（slack_context / slack_unreplied 影響なし）。
+        """
+        if not channel_id or not thread_ts:
+            return SlackThreadRead(error="bad_target")
+        start = time.perf_counter()
+        try:
+            resp = _run_sync(
+                lambda: self._client.conversations_replies(
+                    channel=channel_id, ts=thread_ts, limit=limit
+                )
+            )
+        except Exception as e:  # fail-closed（error code を上へ返す）
+            code = _slack_error_code(e)
+            logger.warning(
+                "slack_user_read_thread_checked_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                slack_error=code,  # G8: channel 名・本文は出さない
+            )
+            return SlackThreadRead(error=code)
+        # slack_sdk は通常 ok:false で例外を投げるが、ok:false が素通りしても落とさない。
+        if resp.get("ok") is False:
+            return SlackThreadRead(error=str(resp.get("error") or "api_error"))
+        raw: list[dict[str, Any]] = resp.get("messages", []) or []
+        msgs = tuple(_message_from_raw(m) for m in raw)
+        logger.info(
+            "slack_user_read_thread_checked",
+            request_id=request_id,
+            returned=len(msgs),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return SlackThreadRead(messages=msgs)
 
     def search(self, query: str, request_id: str, *, count: int = 15) -> list[SlackSearchMatch]:
         """search.messages で横断検索（user token 限定）。fail-open で空返し。"""
