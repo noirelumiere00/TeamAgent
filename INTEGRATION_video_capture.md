@@ -66,6 +66,23 @@ assert registry_names - scope_names == DARK_SKILL_ALLOWLIST
 
 ---
 
+## 0-ter. テスト実測（2026-08-18・本ブランチ HEAD）
+
+| 範囲 | 結果 |
+| --- | --- |
+| `tests/`（`tests/scripts` を除く全部） | **4459 passed / 25 skipped / 0 failed** |
+| `tests/scripts`（`test_terraform_runtime_guard.py` 除く） | 983 passed / 2 skipped / **1 failed**＝上記 §0-bis の scope 契約のみ |
+| `tests/scripts/test_terraform_runtime_guard.py` | 168 passed / 1 failed → **孤立再実行で 54 passed（当該パラメータ含む全件）** |
+| ruff check / ruff format --check / mypy strict / import-linter | すべて緑 |
+| `tests/skills/video_capture` + `tests/adapters/test_slack_file_bounded_download.py` | 71 passed |
+
+> `test_runtime_attribute_regressions_fail_closed[lambda_source_reference]` の1件は
+> **高負荷下のフレーク**。同ファイルを単独で回すと当該シナリオを含む 54 件が全部緑になる
+> （本ブランチの変更は `core_from_snapshot` / `print_hcl_snapshot`＝snapshot 系のみで、
+> このテストが叩く plan 系の lambda 属性検査とは経路が交わらない）。
+
+---
+
 ## 1. `infra/openclaw/openclaw.config.json5`
 
 `mcp.servers.teamagent.toolFilter.include` に 1 要素を追加する。
