@@ -75,8 +75,9 @@ BUILD_INPUTS_SHA256="$(contract "['app_html']['production']['build_inputs_sha256
 BAKED_APP_HTML_VERSION_ID="$(contract "['app_html']['baked_fallback']['s3_version_id']")"
 BAKED_APP_HTML_SHA256="$(contract "['app_html']['baked_fallback']['sha256']")"
 
-# APP_PROVENANCE_SHA256 はポリシー Condition の固定値（昨日の成功ビルド env と一致確認済み）。
-APP_PROVENANCE_SHA256="f0d40e7986fcd54d68f9e1ceed9a9987af23a72f5cc4a608fee5819b078a5008"
+# APP_PROVENANCE_SHA256 はポリシー Condition の固定値。/app を再生成したら
+# `teamagent_bundle_provenance.py app-provenance-sha256` の再計算値でここと IAM を両方更新する（2026-08-18 の教訓）。
+APP_PROVENANCE_SHA256="088f4947d2c2df6e26dcd7c36a28b66fbecf8504c7d85038e561f95db5ae0298"
 # 承認署名鍵は手で写さない。suffix を書き間違えて KMS NotFoundException →
 # 「AWS evidence verification failed without exposing details」で段2が落ちた（2026-08-07 実測）。
 # alias から実行時に解決する（list-aliases は AIIAdev で可・実測済み）。
