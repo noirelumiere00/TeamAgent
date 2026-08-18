@@ -35,7 +35,7 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 
 - **リポジトリは `~/Documents/teamagent-orchestrator-poc`**。
   - ⚠️ `~/Documents/TeamAgent` は**別の旧リポ**。worktree が複数あり「気づいたら別ブランチ/別ディレクトリ」になる事故が頻発 → 作業前に必ず `git -C <repo> rev-parse --show-toplevel && git branch --show-current` で現在地確認。
-- **オーケストレータ/実行基盤は確定済**：OpenClaw を Slack 受け口＋MCP 外殻として本番採用（2026-06-12 go-live）、skill オーケストレーションは **Claude Agent SDK on Bedrock**。OpenClaw は TypeScript/Node、Skill 実体は Python（MCP gateway）。
+- **オーケストレータ/実行基盤は確定済**：OpenClaw を Slack 受け口＋MCP 外殻として本番採用（2026-06-12 go-live）、skill オーケストレーションは **anthropic Python client（`AsyncAnthropicBedrock`）による自前 bounded tool loop**（`orchestrator/sdk_runner.py`。Claude Agent SDK は 2026-07-17 の `6589e79` で置換済み・core イメージでは禁止依存）。OpenClaw は TypeScript/Node、Skill 実体は Python（MCP gateway）。
 - **Bedrock モデル ID は東京の推論プロファイル `jp.anthropic.*`**。env `BEDROCK_MODEL_ID`（既定 `jp.anthropic.claude-sonnet-4-6`）。`adapters/bedrock_client.py` の PRICE_TABLE は `jp.` / `us.` 両対応（region-aware）。
   - ⚠️ tf の既定が `variables.tf`(sonnet, サフィックス無し) と `variables_fargate.tf`(haiku, `-20251001-v1:0` 付き) で**書式不一致**。新規にモデルを指す時は `aws bedrock list-inference-profiles --region ap-northeast-1` で実在 ID を確認してから設定。
 - 3層分離 `src/teamagent/{adapters,skills,runtime}` は §3 のルールに従う（CI で強制）。

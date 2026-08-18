@@ -1,5 +1,9 @@
 # TeamAgent v2.1 — 構想・要件・アーキテクチャ ドキュメント集
 
+> 🗄 **Archived（2026-08-18）**: 本文書は v2.1（2026-05）時点の構想であり、現行実装とは異なる。
+> 現行アーキテクチャは [リポジトリ README](../../../README.md)、索引は [docs/README.md](../../README.md) を参照。
+> （旧 `README.v2.md` をリンク先実体のあるこのディレクトリへ移設したもの）
+
 営業16名 + マネージャー向け Slack AI エージェント「TeamAgent」のドキュメント一式。
 
 ## 最新版（v2.1）ドキュメント一覧
@@ -7,7 +11,7 @@
 | 文書 | ファイル | 役割 | 主な読者 |
 |---|---|---|---|
 | 🎯 **上司共有用サマリー** | [`teamagent_summary_v2.1.html`](teamagent_summary_v2.1.html) | 1〜2ページの経営層向けサマリー（機能 + Slack具体例 + 削減効果） | 経営層・上司 |
-| ✋ **Phase 0〜E 全工程仕様書** | [`teamagent_phase0E_spec_v1.html`](teamagent_phase0E_spec_v1.html) | 機能③ の Phase 0〜E 詳細仕様（営業確認用・26質問項目つき） | 営業・推進担当 |
+| ✋ **Phase 0〜E 全工程仕様書** | [`teamagent_phase0E_spec_v1.html`](../../v3.0/teamagent_phase0E_spec_v1.html)（v3.0 へ引き継ぎ） | 機能③ の Phase 0〜E 詳細仕様（営業確認用・26質問項目つき） | 営業・推進担当 |
 | 構想・概要書 | [`teamagent_overview_v2.1.html`](teamagent_overview_v2.1.html) | 5機能 / 6データ層 / 4共通基盤の俯瞰 | 営業・推進担当 |
 | 実装計画書 | [`teamagent_implementation_plan_v2.1.html`](teamagent_implementation_plan_v2.1.html) | 8.5ヶ月 17 Sprint 反復型計画 + コスト + 月次ダッシュボード | FDE |
 | 要件定義書 | [`teamagent_requirements_v2.1.html`](teamagent_requirements_v2.1.html) | FR 40件 + NFR 25件 + その他37件 = 計102件、Sprint 別 DoD | FDE・QA |
@@ -17,8 +21,8 @@
 
 | 版 | ファイル | 備考 |
 |---|---|---|
-| v2.0 | [`teamagent_overview_v2.0.html`](teamagent_overview_v2.0.html) など | IBM レビュー前の初版。v2.1 と並列して参照可能 |
-| v1.5 | [`teamagent_overview_v1.5.html`](teamagent_overview_v1.5.html) | 5機能整理前の旧構想 |
+| v2.0 | [`teamagent_overview_v2.0.html`](../v2.0/teamagent_overview_v2.0.html) など | IBM レビュー前の初版。v2.1 と並列して参照可能 |
+| v1.5 | [`teamagent_overview_v1.5.html`](../v1.5/teamagent_overview_v1.5.html) | 5機能整理前の旧構想 |
 
 ## 5機能（Phase 順）
 
