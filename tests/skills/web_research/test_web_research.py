@@ -191,6 +191,44 @@ def test_grounding_metadata_without_usable_uri_is_fail_closed(factory: Any) -> N
     assert out.message == NOT_GROUNDED_MESSAGE
 
 
+def test_retry_budget_stays_inside_the_openclaw_turn_limit() -> None:
+    """一過性エラーのリトライ総和が OpenClaw のターン制限（~181s）を超えない。
+
+    動画分析と同じ 3 回のままだと 3×deadline でターンごと全損する（本番の失敗モード）。
+    """
+    from teamagent.adapters import gemini_client as gc
+    from teamagent.skills.web_research.skill import _deadline_s
+
+    retryable = RuntimeError("503 UNAVAILABLE")
+    assert gc._is_retryable_vertex(retryable) is True
+    skill = _skill(_raw_response(_SUMMARY, _CHUNKS), error=retryable)
+    out = skill.run(WebResearchInput(query="市場規模"), _ctx())
+
+    assert out.error == "search_failed"
+    attempts = len(_fake_of(skill).calls)
+    assert attempts == gc._GROUNDED_RETRY_ATTEMPTS == 2
+    assert attempts * _deadline_s() < 181
+
+
+def test_grounded_cost_includes_the_search_surcharge() -> None:
+    """grounded 課金（1 prompt 定額）を足さないと実費を桁で過小報告する。"""
+    from teamagent.adapters import gemini_client as gc
+
+    client = GeminiClient(
+        api_key="k", client=_FakeGenaiClient(_raw_response(_SUMMARY, _CHUNKS, _SUPPORTS))
+    )
+    grounded = client.generate_with_google_search("p", "req-1")
+    assert grounded.grounded is True
+    assert grounded.cost_usd > gc._GROUNDING_REQUEST_USD
+
+    plain = GeminiClient(
+        api_key="k",
+        client=_FakeGenaiClient(_raw_response(_SUMMARY, [], with_metadata=False)),
+    ).generate_with_google_search("p", "req-2")
+    assert plain.grounded is False
+    assert plain.cost_usd < gc._GROUNDING_REQUEST_USD  # 検索が走っていなければ加算しない
+
+
 def test_search_exception_is_distinguished_from_not_grounded() -> None:
     """API 障害は『裏付けなし』と別事象として扱う（偽の事実を断言しない）。"""
     skill = _skill(_raw_response("", []), error=RuntimeError("invalid argument"))

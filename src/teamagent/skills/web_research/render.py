@@ -33,6 +33,7 @@ SEARCH_FAILED_MESSAGE = (
 )
 
 _TITLE_MAX = 100
+_QUERY_MAX = 200  # WebResearchInput.query の max_length と同値（表示で切らない）
 _UNTITLED = "（タイトルなし）"
 SUMMARY_MAX_LEN = 1200
 
@@ -81,7 +82,7 @@ def build_message(query: str, summary: str, sources: Sequence[WebSource]) -> str
 
     query も表示前に無害化する（Slack 経由で外部の文字列がそのまま入り得るため）。
     """
-    shown_query = sanitize_display_text(query, max_len=_TITLE_MAX)
+    shown_query = sanitize_display_text(query, max_len=_QUERY_MAX)
     lines = [MESSAGE_HEADER, f"検索クエリ: {shown_query}", "", summary, "", "出典"]
     for src in sources:
         lines.append(f"[{src.index}] {src.title}")

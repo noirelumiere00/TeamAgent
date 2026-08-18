@@ -199,6 +199,15 @@ _PRICE_TABLE: dict[str, tuple[float, float]] = {
 }
 
 
+# Google 検索グラウンディングは token 課金と別に「1 grounded prompt」単位で課金される
+# （公表 $35 / 1,000 prompt・無料枠を超えた分）。token 換算だけだと実費を桁で過小報告する
+# ので、grounded 呼び出しのコストにはこの定額を足す。⚠️料金改定時は要更新。
+_GROUNDING_REQUEST_USD = 0.035
+# grounded 呼び出しのリトライ上限（動画分析の 3 とは別値。理由は
+# generate_with_google_search の docstring）。
+_GROUNDED_RETRY_ATTEMPTS = 2
+
+
 def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
     """ざっくりコスト推算。"""
     price = _PRICE_TABLE.get(model_id, (0.0, 0.0))
@@ -347,6 +356,11 @@ class GeminiClient:
         （LLM 本文中の URL は呼び出し側で採用しないこと）。
 
         grounded=False は「検索の裏付けが無い応答」＝呼び出し側は fail-closed にする。
+
+        timeout_s は **1 回の HTTP 試行あたり** の上限。リトライは既定 2 回までに絞ってあり
+        （_GROUNDED_RETRY_ATTEMPTS）、最悪でも timeout_s×2＋バックオフで頭打ちになる。
+        動画分析と同じ 3 回にすると 3×deadline で OpenClaw のターン制限（実測 ~181s）を
+        突き抜け、ターンごと応答全損する。
         """
         from google.genai import types
 
@@ -372,9 +386,11 @@ class GeminiClient:
                 ),
                 is_retryable=_is_retryable_vertex,
                 policy=RetryPolicy(
-                    max_attempts=_env_int("GEMINI_RETRY_MAX_ATTEMPTS", 3),
+                    max_attempts=_env_int(
+                        "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                    ),
                     base_delay_s=0.6,
-                    max_delay_s=8.0,
+                    max_delay_s=4.0,
                 ),
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_grounded_retry",
@@ -399,8 +415,12 @@ class GeminiClient:
         usage = _pick(response, "usage_metadata", "usageMetadata")
         input_tokens = int(_pick(usage, "prompt_token_count", "promptTokenCount") or 0)
         output_tokens = int(_pick(usage, "candidates_token_count", "candidatesTokenCount") or 0)
-        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens)
         grounded = any(s.uri for s in sources)
+        cost_usd = round(
+            _estimate_cost(self.model_id, input_tokens, output_tokens)
+            + (_GROUNDING_REQUEST_USD if grounded else 0.0),
+            6,
+        )
 
         logger.info(
             "gemini_google_search",
