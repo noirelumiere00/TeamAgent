@@ -515,15 +515,6 @@ class SlackClient:
         )
         return b"".join(chunks)
 
-
-def _parse_content_length(raw: str | None) -> int | None:
-    """``Content-Length`` を int で返す。欠落・不正は None（逐次検査に委ねる）。"""
-    if raw is None:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
     async def download_file_bounded(
         self,
         url_private: str,
@@ -576,3 +567,13 @@ def _parse_content_length(raw: str | None) -> int | None:
             size_mb=round(len(buffer) / 1024 / 1024, 2),
         )
         return bytes(buffer)
+
+
+def _parse_content_length(raw: str | None) -> int | None:
+    """``Content-Length`` を int で返す。欠落・不正は None（逐次検査に委ねる）。"""
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
