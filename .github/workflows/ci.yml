@@ -67,7 +67,7 @@ jobs:
             'sentry-sdk[asyncio]>=2.18.0' \
             pyyaml pypdf python-pptx pillow python-docx openpyxl \
             'fonttools[woff]>=4.63.0' defusedxml types-defusedxml \
-            google-auth google-api-python-client google-auth-oauthlib \
+            google-auth google-api-python-client google-auth-oauthlib 'google-genai==2.7.0' \
             pytest pytest-asyncio pytest-cov mypy 'ruff==0.15.15' bandit import-linter
 
       - name: Prepare disposable PostgreSQL test role

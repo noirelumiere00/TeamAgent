@@ -477,7 +477,7 @@ def test_document_instructions_are_quarantined() -> None:
 
 
 def test_secrets_in_document_are_redacted_before_llm() -> None:
-    body = "接続情報: xoxb-1111111111-2222222222-abcdefghijklmnop を使ってください"
+    body = "接続情報: xoxb-1111111111-2222222222-abcdefghijklmnop を使ってください"  # gitleaks:allow (偽トークン: 秘匿処理のテスト素材)
     skill, _, _, bedrock = _skill(payload=body.encode())
     _run(skill)
     text = bedrock.last_user_text
