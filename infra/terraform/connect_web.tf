@@ -74,7 +74,7 @@ variable "connect_base_url" {
 variable "connect_app_html_s3_version_id" {
   description = "Exact immutable S3 VersionId served at /app; update only with matching signed image evidence."
   type        = string
-  default     = "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE"
+  default     = "D5zzWNc44db5i5lz1DxeRxAkmnf1x8jZ"
 
   validation {
     condition = (
@@ -89,7 +89,7 @@ variable "connect_app_html_s3_version_id" {
 variable "connect_app_html_sha256" {
   description = "Full SHA-256 of the exact /app S3 object VersionId."
   type        = string
-  default     = "16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831"
+  default     = "fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28"
 
   validation {
     condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_sha256))
@@ -100,7 +100,7 @@ variable "connect_app_html_sha256" {
 variable "connect_app_html_manifest_sha256" {
   description = "Vault manifest SHA-256 that produced the pinned /app object."
   type        = string
-  default     = "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d"
+  default     = "1a2834b62a12c60c31ee874820a3a5cfccafb7960193047a17abd426c890568a"
 
   validation {
     condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_manifest_sha256))
@@ -111,7 +111,7 @@ variable "connect_app_html_manifest_sha256" {
 variable "connect_app_html_build_inputs_sha256" {
   description = "build_inputs SHA-256 that produced the pinned /app object."
   type        = string
-  default     = "c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"
+  default     = "28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba"
 
   validation {
     condition     = can(regex("^[0-9a-f]{64}$", var.connect_app_html_build_inputs_sha256))

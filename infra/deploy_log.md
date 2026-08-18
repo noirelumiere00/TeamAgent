@@ -16,6 +16,15 @@
 
 ---
 
+## 2026-08-18 🚀 `/app` を夜間再生成し本番反映（差分化初日の変更16件を同期）
+<!-- PRODUCTION_APP_PROVENANCE={"schema_version":1,"app_html_s3_version_id":"D5zzWNc44db5i5lz1DxeRxAkmnf1x8jZ","app_html_sha256":"fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28","vault_manifest_sha256":"1a2834b62a12c60c31ee874820a3a5cfccafb7960193047a17abd426c890568a","build_inputs_sha256":"28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba"} -->
+
+- source=`dev`@`147b6e2`ベースの scripts/refresh_app_html.py 実行（INGEST_DIFFERENTIAL 2日目・変更16件: FB新規行485-490/AP更新_上條_20260818/ジェイアール東日本企画_饗場様.docx/Slackスレ8本）。公開HTMLは `clients=607 / docs=862 / graph=1562n 4503e / size=4,784KB`（前回 08-17 は 599/856）。
+- 証跡は `manifest_sha256=1a2834b62a12c60c31ee874820a3a5cfccafb7960193047a17abd426c890568a` / `build_inputs_sha256=28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba` / `app_html_sha256=fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28` / `app_html_s3_version_id=D5zzWNc44db5i5lz1DxeRxAkmnf1x8jZ`。
+- S3 `codebuild/connect-web-app.html` 最新VersionId=`D5zzWNc44db5i5lz1DxeRxAkmnf1x8jZ`、connect-web=`:66` へ自動登録・rollout COMPLETED・1/1 healthy。戻す場合は VersionId=`TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE`（sha=`16cf0fed…`）+ connect-web `:65` へ。実行者=Claude（s-komata AWSアカウント）。
+
+---
+
 ## 2026-08-17 🚀 `/app` を掃除済み金庫から再生成し本番反映（引用元の絞り込み裁定）
 <!-- PRODUCTION_APP_PROVENANCE={"schema_version":1,"app_html_s3_version_id":"TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE","app_html_sha256":"16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831","vault_manifest_sha256":"1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d","build_inputs_sha256":"c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"} -->
 - source=`dev`@`ecc19b62ae832923a6f0873238973bf3f03c938b`（本日の署名リリース完走版・本番 mcp:78 / connect-web:63 系）。08-17 のユーザー裁定で共有ドライブ横断クロールを停止し、crawl 由来 documents 2,521 件（chunks 82,945）を削除した後の RDS から Vault を全量再生成した。

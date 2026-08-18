@@ -294,12 +294,12 @@ def test_connect_app_html_uses_current_exact_version_and_sha_contract() -> None:
     exact = {
         "bucket": "teamagent-dev-raw-files",
         "key": "codebuild/connect-web-app.html",
-        "version_id": "TFuClUMRy.qrlxsNdtZpHBazdrCQEsLE",
-        "sha256": ("16cf0fedabf6c7f940724730cb21d394d9e2d15201bfd92335241feda432b831"),
+        "version_id": "D5zzWNc44db5i5lz1DxeRxAkmnf1x8jZ",
+        "sha256": ("fd62e56e51d3cee25c3d3a87085048fae08ce3babc82480411c61df36e467e28"),
         "vault_manifest_sha256": (
-            "1f4829847329226250f7e8414d8ff28e4731deaa948b8988f5164f011ac1871d"
+            "1a2834b62a12c60c31ee874820a3a5cfccafb7960193047a17abd426c890568a"
         ),
-        "build_inputs_sha256": ("c73aaeef3d1f49d839982c78d72d6e4d985489ebc2a86104b5690b295d9df6fa"),
+        "build_inputs_sha256": ("28ea06cf04cf5d0774ea3e9635cb7dfcfcc2985e49160521cee412431cf38bba"),
     }
     manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
     runtime = manifest["2026-07-wolfi-runtime-v1"]
