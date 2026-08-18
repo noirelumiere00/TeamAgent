@@ -1,0 +1,10 @@
+{
+  "name": "video_capture",
+  "effect": "external-video-read-slack-file-delivery",
+  "terraformGate": "use_video_capture_tool",
+  "defaultEnabledByTerraform": false,
+  "enabledBy": {
+    "kind": "envAllTrue",
+    "names": ["USE_VIDEO_CAPTURE_TOOL"]
+  }
+}

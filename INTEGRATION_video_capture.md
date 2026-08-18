@@ -39,6 +39,33 @@ cookie / PO_TOKEN 対応が入るまで通らない）。90 秒待たせて汎�
 
 ---
 
+## 0-bis. 🔴 この単独ブランチでは 1 本のテストが必ず赤になる（設計どおり）
+
+```
+FAILED tests/scripts/test_tool_scope_registry_contract.py::
+       test_scope_registry_and_factory_have_an_exact_classification
+```
+
+原因は欠陥ではなく **fail-closed 契約**である。同テストの不変量:
+
+```python
+assert registry_names - scope_names == DARK_SKILL_ALLOWLIST
+```
+
+＝「`@register` された skill は、effective-tool-scope.json に副作用分類つきで載るか、
+明示的な dark 許容リストに載るかの**どちらかでなければならない**」。
+新スキルを分類せずに factory の env flag だけ増やす変更を、この repo は構造的に拒否する。
+
+本ブランチは共有ファイル（scope）を編集しない方針のため、**scope エントリが入るまでこの 1 本は赤**。
+`§2` のエントリを追加すると緑になることは実測済み（追加→`2 passed`→ファイルは SHA256 一致で復元）。
+
+そのまま貼れる JSON を `INTEGRATION_video_capture.scope.json` に置いた。
+
+> ⚠️ 逆に **`DARK_SKILL_ALLOWLIST` に `video_capture` を足して緑にするのは誤り**。
+> このツールは dark ではなく scope 掲載が正しい分類で、後で必ず剥がす必要が出る。
+
+---
+
 ## 1. `infra/openclaw/openclaw.config.json5`
 
 `mcp.servers.teamagent.toolFilter.include` に 1 要素を追加する。
