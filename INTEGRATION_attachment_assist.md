@@ -278,6 +278,34 @@ $ pytest tests/scripts/test_tool_scope_registry_contract.py \
 > SOUL 節は人間レビューで入れること。文面を変えたら **OpenClaw イメージの再ビルドが必須**
 > （SOUL はイメージに焼き込まれる）。
 
+## テスト実測（このブランチ・commit 済みツリー）
+
+```
+# ① tests/ 全体（重い test_terraform_runtime_guard.py だけ除外）
+1 failed, 5444 passed, 27 skipped in 620s
+  └ 唯一の赤 = test_tool_scope_registry_contract.py::
+      test_scope_registry_and_factory_have_an_exact_classification
+    ＝上の「未反映時に赤くなるテスト」そのもの（共有ファイル4点を入れれば緑）
+
+# ② tests/scripts/test_terraform_runtime_guard.py（169 件・別走）
+```
+
+### ⚠️ `test_terraform_runtime_guard.py` は高負荷時に flake する（既知・本変更とは無関係）
+
+- この 169 件は 1 件ずつ `subprocess.run(..., timeout=120)` で guard shell を起動する
+  （`tests/scripts/test_terraform_runtime_guard.py` 3655/3749/3804/3876 行）。
+- 並列で他の重いテストが走っていると 1 件が 120 秒を超えて timeout し、赤になる。
+  実測: 並列 4 セッション・**load average 16〜24** の状態で
+  `test_runtime_attribute_regressions_fail_closed[service_connect]` が 1 件だけ赤。
+  **同じ commit のまま単体で再実行すると 53.28 秒で緑**（＝内容ではなく負荷が原因）。
+- そもそもこのファイルは **`infra/terraform/*.tf` を一切読まない**
+  （`grep -nE "infra/terraform|\.tf\"" tests/scripts/test_terraform_runtime_guard.py` が 0 件。
+  読むのは `infra/deploy/terraform_runtime_guard.sh` だけで、terraform は fake shim）。
+  よって本ブランチの tf 変更がこのファイルを壊す経路は構造的に存在しない。
+- **本当に壊れているときの見分け方**: 赤が 90 件以上まとめて出るなら、それは flake ではなく
+  `assert_guard_paths_clean`（`infra/deploy` `infra/terraform` に未 commit 変更があると die）。
+  commit してから再実行すること。
+
 ## 変異テスト（ガードの実質性の証明）
 
 「緑」がガードのおかげであることを、ガードを 1 つずつ壊して赤くなることで証明した
