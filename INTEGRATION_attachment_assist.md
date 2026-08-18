@@ -288,6 +288,9 @@ $ pytest tests/scripts/test_tool_scope_registry_contract.py \
     ＝上の「未反映時に赤くなるテスト」そのもの（共有ファイル4点を入れれば緑）
 
 # ② tests/scripts/test_terraform_runtime_guard.py（169 件・別走）
+128/169 まで走った時点で 1 件だけ赤（下記 flake）→ 残り 41 件を別走 → 41 passed
+赤だった 1 件を同 commit のまま単体再実行 → 1 passed (53.28s)
+＝169 件すべて緑を確認（内 1 件は負荷 flake のため単体で再確認）
 ```
 
 ### ⚠️ `test_terraform_runtime_guard.py` は高負荷時に flake する（既知・本変更とは無関係）
