@@ -87,6 +87,33 @@ OpenClaw のエージェントから実際に呼べるようにするには、�
 
 ---
 
+## env 一覧（Gemini キー / GCP 設定が取れた後の投入手順）
+
+新規シークレットの調達はゼロ。**既存の Vertex SA（`teamagent/dev/vertex_sa`）をそのまま使う**。
+
+| env | 誰が設定 | 値 | 備考 |
+| --- | --- | --- | --- |
+| `USE_WEB_RESEARCH_TOOL` | tf `use_web_research_tool` | `true` | 既定 false。ON でツールが MCP に出る |
+| `WEB_RESEARCH_ALLOWED_EMAILS` | tf `web_research_allowed_emails` | stage1 は小俣のみ→数名→空 | 空=全員。taskdef 差替のみで遷移可 |
+| `WEB_RESEARCH_DEADLINE_S` | 任意（未設定=60） | 例 `60` | 1 試行あたりの上限秒。**2 試行ぶんが OpenClaw のターン制限 ~181s の内側に収まる値にすること** |
+| `GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS` | 任意（未設定=2） | 例 `2` | 上げると総和が伸びる。上の制約とセットで見る |
+| `GEMINI_USE_VERTEX` | tf（既存・`enable_scrape_tools` ブロック） | `true` | 既に本番 mcp に入っている |
+| `GEMINI_VERTEX_PROJECT` | tf `gemini_vertex_project`（既存） | GCP プロジェクト ID | 同上 |
+| `GEMINI_VERTEX_LOCATION` | tf `gemini_vertex_location`（既存） | 例 `us-central1` | 同上 |
+| `VERTEX_SA_JSON` | Secrets Manager（既存） | SA JSON | entrypoint が /tmp へファイル化して ADC に渡す |
+| `GEMINI_MODEL_ID` | 任意（未設定=`gemini-2.5-flash`） | — | 検索グラウンディング対応モデルであること |
+| `GEMINI_API_KEY` | **Vertex 経路なら不要** | — | AI Studio 経路のときだけ。Vertex が優先される |
+
+投入順:
+
+1. GCP 側で Vertex AI の Gemini（Google 検索グラウンディング）を有効化。
+   ※ Vertex 経路なら **AI Studio の API キーは不要**。既存 SA の権限で足りる。
+2. tfvars に `use_web_research_tool = true` と `web_research_allowed_emails = "<小俣>"` を追加。
+   `enable_scrape_tools = true` が既に立っていることを確認（立っていなければ apply が
+   precondition で落ちる）。
+3. `terraform apply -var-file=...`（tfvars 無し apply は禁止）。
+4. run-task で mcp を起動し、Slack 実往復 1 回まで見て「完了」とする。
+
 ## 反映後の確認手順
 
 1. `uv run --extra dev --extra mcp pytest tests/scripts/test_openclaw_runtime_contract.py tests/scripts/test_tool_scope_registry_contract.py -q`
@@ -95,3 +122,26 @@ OpenClaw のエージェントから実際に呼べるようにするには、�
    ⚠️ `enable_scrape_tools = true` が前提（Gemini Vertex env と VERTEX_SA_JSON がそのブロック配線。
    task definition の precondition で apply 前に落ちる）。
 4. Slack で実往復 1 回（health check はすり抜けるので必ず実メッセージで確認）。
+
+---
+
+## 残リスク（実装で潰していないもの）
+
+1. **コスト上限のガードが無い**。x_research 系は CostGuard（DynamoDB 月次台帳・予算超過
+   fail-close）を通しているが、web_research は通していない。グラウンディングは 1 回あたり
+   定額（公表 $35/1,000 prompt）が乗るので、16 名全開放時は月額が読みにくい。
+   入れるなら `skill.py` の検索呼び出しを `CostGuard.from_env()` の reserve/settle で挟み、
+   `COST_GEMINI_MONTHLY_USD` / `COST_PER_USER_MONTHLY_USD` を taskdef env に足す（adapter 1 枚
+   に閉じる）。**当面は allowlist（stage1=小俣のみ）が実質的な上限**。
+2. **`recency_days` はベストエフォート**。Gemini の google_search ツールに日付フィルタの
+   ネイティブ入力が無いため、サーバが計算した `after:YYYY-MM-DD` を「検索クエリに付けて」と
+   プロンプトで指示している。モデルが従わない可能性があり、決定的な保証はしていない
+   （日付そのものはサーバ計算なので、少なくとも**日付のねつ造は起きない**）。
+3. **Google 検索グラウンディングは structured output と併用できない**。そのため要約は
+   自由記述で受けている（固定フィールド JSON にできない）。防御は「LLM 出力からは要約文しか
+   採らない・出典は必ず groundingMetadata から」という非対称性で担保している。
+4. **実 API での疎通は未検証**（キー未取得のため外部呼び出しは 1 度も行っていない）。
+   モデルが実際に `google_search` を発火するか、Vertex のリージョンで grounding が
+   有効かは、キー投入後の dev 実機 1 回で必ず確認すること。
+5. **要約の品質**（何ページ読むか・日本語ソースを引くか）は未実測。`max_results` は
+   「message に載せる出典の上限」であって、モデルが読むページ数を強制はできない。
