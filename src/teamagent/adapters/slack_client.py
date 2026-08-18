@@ -21,7 +21,13 @@ import httpx
 import structlog
 from slack_sdk.web.async_client import AsyncWebClient
 
-from teamagent.adapters.slack_file_guard import SlackFileGuardError, validate_slack_file_url
+from teamagent.adapters.slack_file_guard import (
+    SLACK_FILE_MAX_REDIRECTS,
+    SlackFileGuardError,
+    is_followable_redirect,
+    validate_slack_file_redirect,
+    validate_slack_file_url,
+)
 from teamagent.identity import ResolvedIdentity, normalize_email
 
 logger = structlog.get_logger(__name__)
@@ -489,29 +495,43 @@ class SlackClient:
         dl_timeout = httpx.Timeout(timeout_s, connect=10.0)
         chunks: list[bytes] = []
         total = 0
-        async with httpx.AsyncClient(timeout=dl_timeout) as client:
-            async with client.stream(
-                "GET",
-                safe_url,
-                headers={"Authorization": f"Bearer {self._bot_token}"},
-            ) as resp:
-                resp.raise_for_status()
-                # ⚠️ SlackFileGuardError は ValueError の派生。int() の失敗だけを
-                #    握るため、パースと判定を必ず分ける（同じ try に入れると
-                #    「大きすぎ」の拒否そのものが黙って握り潰される）。
-                declared = _parse_content_length(resp.headers.get("content-length"))
-                if declared is not None and declared > max_bytes:
-                    raise SlackFileGuardError(f"SLACK_FILE_TOO_LARGE: {declared}B > {max_bytes}B")
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        # ここで with を抜ける＝残りを読まずに接続を閉じる。
-                        raise SlackFileGuardError(f"SLACK_FILE_TOO_LARGE: {total}B > {max_bytes}B")
-                    chunks.append(chunk)
+        # follow_redirects=False を保つ（httpx に自動追従させない）。302 は下の
+        # ループが **1 回だけ・allowlist 済みホストへ・Authorization を外して** 追う。
+        async with httpx.AsyncClient(timeout=dl_timeout, follow_redirects=False) as client:
+            url = safe_url
+            send_auth = True
+            hops = 0
+            while True:
+                async with client.stream("GET", url, headers=self._file_headers(send_auth)) as resp:
+                    next_url = self._next_redirect_url(
+                        resp, hops=hops, request_id=request_id, error=SlackFileGuardError
+                    )
+                    if next_url is not None:
+                        url, send_auth, hops = next_url, False, hops + 1
+                        continue
+                    resp.raise_for_status()
+                    # ⚠️ SlackFileGuardError は ValueError の派生。int() の失敗だけを
+                    #    握るため、パースと判定を必ず分ける（同じ try に入れると
+                    #    「大きすぎ」の拒否そのものが黙って握り潰される）。
+                    declared = _parse_content_length(resp.headers.get("content-length"))
+                    if declared is not None and declared > max_bytes:
+                        raise SlackFileGuardError(
+                            f"SLACK_FILE_TOO_LARGE: {declared}B > {max_bytes}B"
+                        )
+                    async for chunk in resp.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            # ここで with を抜ける＝残りを読まずに接続を閉じる。
+                            raise SlackFileGuardError(
+                                f"SLACK_FILE_TOO_LARGE: {total}B > {max_bytes}B"
+                            )
+                        chunks.append(chunk)
+                    break
         logger.info(
             "slack_file_downloaded_guarded",
             request_id=request_id,
             size_bytes=total,
+            redirects=hops,
         )
         return b"".join(chunks)
 
@@ -527,10 +547,14 @@ class SlackClient:
         ``download_file`` との違いと、その理由:
         - ホスト allowlist（``*.slack.com`` の正規 HTTPS）を先に強制する。url_private へは
           bot token が載るため、任意ホストへトークンを出す経路を作らない。
-        - リダイレクトを追わない。追うと転送先ホストへトークンが渡り得る（本番の
-          EC2 bot 経路も追わずに成功している＝追う必要が無い）。
+        - httpx には**リダイレクトを追わせない**（``follow_redirects=False``）。自動追従は
+          転送先ホストへ Authorization ごと再送し得るため。ただし 2026-08-18 の本番実測で
+          「2.4MB の PDF は files.slack.com が 302 → slack-files.com の署名 URL を返す」
+          （小さい .txt は 200 直返し）とわかった＝非追従のままではサイズ依存で必ず失敗する。
+          そこで **allowlist 済み転送先へ 1 回だけ・Authorization を外して**追う。
         - Content-Length と実受信バイトの**両方**で上限を切る。全量をメモリに広げてから
-          測る方式は 3GB 共有コンテナで OOM を招く（16名同時利用）。
+          測る方式は 3GB 共有コンテナで OOM を招く（16名同時利用）。転送先レスポンスにも
+          同じ検査が効く（追従で cap が素通りしない）。
         """
 
         if max_bytes < 1:
@@ -542,31 +566,81 @@ class SlackClient:
         dl_timeout = httpx.Timeout(120.0, connect=10.0)
         buffer = bytearray()
         async with httpx.AsyncClient(timeout=dl_timeout, follow_redirects=False) as client:
-            async with client.stream(
-                "GET",
-                url_private,
-                headers={"Authorization": f"Bearer {self._bot_token}"},
-            ) as resp:
-                resp.raise_for_status()
-                declared = resp.headers.get("content-length", "")
-                if declared.isdigit() and int(declared) > max_bytes:
-                    raise RuntimeError(
-                        f"SLACK_FILE_TOO_LARGE: {int(declared)} > {max_bytes}",
+            url = url_private
+            send_auth = True
+            hops = 0
+            while True:
+                async with client.stream("GET", url, headers=self._file_headers(send_auth)) as resp:
+                    next_url = self._next_redirect_url(
+                        resp, hops=hops, request_id=request_id, error=RuntimeError
                     )
-                async for chunk in resp.aiter_bytes(_SLACK_FILE_CHUNK_BYTES):
-                    if len(buffer) + len(chunk) > max_bytes:
+                    if next_url is not None:
+                        url, send_auth, hops = next_url, False, hops + 1
+                        continue
+                    resp.raise_for_status()
+                    declared = resp.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > max_bytes:
                         raise RuntimeError(
-                            f"SLACK_FILE_TOO_LARGE: >{max_bytes}",
+                            f"SLACK_FILE_TOO_LARGE: {int(declared)} > {max_bytes}",
                         )
-                    buffer.extend(chunk)
+                    async for chunk in resp.aiter_bytes(_SLACK_FILE_CHUNK_BYTES):
+                        if len(buffer) + len(chunk) > max_bytes:
+                            raise RuntimeError(
+                                f"SLACK_FILE_TOO_LARGE: >{max_bytes}",
+                            )
+                        buffer.extend(chunk)
+                    break
         if not buffer:
             raise RuntimeError("SLACK_FILE_EMPTY")
         logger.info(
             "slack_file_downloaded_bounded",
             request_id=request_id,
             size_mb=round(len(buffer) / 1024 / 1024, 2),
+            redirects=hops,
         )
         return bytes(buffer)
+
+    # ── 302 追従（1 ホップ・Authorization 非転送）の共通実装 ──────────────────────
+
+    def _file_headers(self, send_auth: bool) -> dict[str, str]:
+        """ファイル取得リクエストのヘッダ。
+
+        ``send_auth=False``（＝リダイレクト転送先）では **Authorization を一切載せない**。
+        転送先の署名 URL は自己完結しており token を必要としないため、別ドメインへ
+        bot token を出す理由が無い（出せば漏洩経路そのもの）。
+        """
+        return {"Authorization": f"Bearer {self._bot_token}"} if send_auth else {}
+
+    @staticmethod
+    def _next_redirect_url(
+        resp: Any,
+        *,
+        hops: int,
+        request_id: str | None,
+        error: type[Exception],
+    ) -> str | None:
+        """このレスポンスが「追ってよい 302/303」なら検証済み転送先を返す。それ以外は None。
+
+        - 302 / 303 以外（200 も 307/308 も 4xx/5xx も）は None＝呼び出し側が通常処理へ。
+        - 既に 1 ホップ追っていたら **拒否**（多段リダイレクトは allowlist 洗浄の常套手段）。
+        - Location は ``validate_slack_file_redirect`` が絶対 https・canonical authority・
+          転送先 allowlist（既定 ``slack-files.com`` のみ）で検証する。
+
+        ``error`` は呼び出し側の例外型を合わせるためのもの（``download_file_guarded`` は
+        ``SlackFileGuardError``、``download_file_bounded`` は ``RuntimeError``）。転送先
+        allowlist 違反は ``validate_slack_file_redirect`` が投げる ``SlackFileGuardError``
+        をそのまま伝播させる（どちらの経路でも同じコードで観測できるようにする）。
+        """
+        status = int(getattr(resp, "status_code", 200) or 200)
+        if not is_followable_redirect(status):
+            return None
+        if hops >= SLACK_FILE_MAX_REDIRECTS:
+            logger.warning("slack_file_redirect_chain_rejected", request_id=request_id, hops=hops)
+            raise error("SLACK_FILE_REDIRECT_CHAIN: リダイレクトが多すぎます")
+        location = str(resp.headers.get("location") or "")
+        target = validate_slack_file_redirect(location, request_id=request_id)
+        logger.info("slack_file_redirect_followed", request_id=request_id, status=status)
+        return target
 
 
 def _parse_content_length(raw: str | None) -> int | None:
