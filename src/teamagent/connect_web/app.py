@@ -236,9 +236,33 @@ class _RedactShortLinkAccessLog(logging.Filter):
         return True
 
 
-def build_uvicorn_log_config() -> dict[str, Any]:
-    """uvicorn の既定ログ設定に、/r/<token> をアクセスログで伏せるフィルタを足して返す。
+class _RedactAdminUserAccessLog(logging.Filter):
+    """uvicorn アクセスログの ``/admin?user=<email>`` を ``/admin?user=<redacted>`` に伏せる。
 
+    /admin の利用者ドリルダウンは同僚の会社メールを query string に載せるため、そのままだと
+    CloudWatch のアクセスログに氏名相当が平文で溜まる（G8: PII をログへ持ち込まない）。
+    ``/r/<token>`` と同じ流儀でパスだけ伏せ、他ルートのログは通常どおり残す。
+    uvicorn.access のレコードは args=(client, method, full_path, http_version, status) 形式。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            isinstance(args, tuple)
+            and len(args) >= 3
+            and isinstance(args[2], str)
+            and args[2].startswith("/admin?")
+        ):
+            redacted = list(args)
+            redacted[2] = "/admin?<redacted>"
+            record.args = tuple(redacted)
+        return True
+
+
+def build_uvicorn_log_config() -> dict[str, Any]:
+    """uvicorn の既定ログ設定に、URL の秘匿対象を伏せるフィルタを足して返す。
+
+    対象は ``/r/<token>``（capability トークン）と ``/admin?user=<email>``（PII）。
     __main__ が ``uvicorn.run(log_config=build_uvicorn_log_config())`` で使う。dictConfig が
     確実にフィルタを登録するよう、uvicorn 起動時の設定として渡す（後付け addFilter は
     uvicorn の dictConfig 適用で消えうるため）。
@@ -246,12 +270,16 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     from uvicorn.config import LOGGING_CONFIG
 
     cfg = copy.deepcopy(LOGGING_CONFIG)
-    cfg.setdefault("filters", {})["redact_shortlink"] = {
-        "()": f"{__name__}._RedactShortLinkAccessLog",
-    }
+    filters = cfg.setdefault("filters", {})
+    filters["redact_shortlink"] = {"()": f"{__name__}._RedactShortLinkAccessLog"}
+    filters["redact_admin_user"] = {"()": f"{__name__}._RedactAdminUserAccessLog"}
     access = cfg.get("loggers", {}).get("uvicorn.access")
     if access is not None:
-        access["filters"] = [*access.get("filters", []), "redact_shortlink"]
+        access["filters"] = [
+            *access.get("filters", []),
+            "redact_shortlink",
+            "redact_admin_user",
+        ]
     return cfg
 
 

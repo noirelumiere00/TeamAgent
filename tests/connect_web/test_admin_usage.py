@@ -317,3 +317,36 @@ def test_admin_drilldown_does_not_log_the_email(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 200
     assert captured, "クエリ失敗の warning が出ていない＝テストが空振り"
     assert _OWNER not in repr(captured)
+
+
+def test_admin_query_string_is_redacted_in_uvicorn_access_log() -> None:
+    """G8: ?user=<email> をアクセスログへ平文で残さない（/r/<token> と同じ流儀）。"""
+    import logging
+
+    from teamagent.connect_web.app import (
+        _RedactAdminUserAccessLog,
+        build_uvicorn_log_config,
+    )
+
+    flt = _RedactAdminUserAccessLog()
+    record = logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', None, None
+    )
+    record.args = ("1.2.3.4:5", "GET", f"/admin?user={_OWNER}", "1.1", 200)
+    assert flt.filter(record) is True
+    assert isinstance(record.args, tuple)
+    assert _OWNER not in str(record.args)
+    assert record.args[2] == "/admin?<redacted>"
+
+    # 絞り込み無しの /admin と他ルートは通常どおり残す（観測性を落とさない）。
+    plain = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, "%s", None, None)
+    plain.args = ("1.2.3.4:5", "GET", "/admin", "1.1", 200)
+    flt.filter(plain)
+    assert isinstance(plain.args, tuple)
+    assert plain.args[2] == "/admin"
+
+    cfg = build_uvicorn_log_config()
+    assert "redact_admin_user" in cfg.get("filters", {})
+    assert "redact_admin_user" in cfg["loggers"]["uvicorn.access"].get("filters", [])
+    # 既存の短縮リンク秘匿は残っている。
+    assert "redact_shortlink" in cfg["loggers"]["uvicorn.access"].get("filters", [])
