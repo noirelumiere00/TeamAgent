@@ -1294,3 +1294,31 @@ def test_guard_crosschecks_the_plan_against_live_before_binding_it() -> None:
     assert plan_body.index('"$ADOPT_INTEGRITY" snapshot') < plan_body.index(
         '"$ADOPT_INTEGRITY" crosscheck'
     )
+
+
+def test_bootstrap_starts_as_the_iam_administrator_not_root() -> None:
+    """bootstrap の起点 principal が live の trust policy と同じ主体であること。
+
+    live の teamagent-dev-terraform-runtime-automation は AIIAdev + MFA + 固定 session 名
+    しか受け付けない（実測）。bootstrap が root 起点を要求していた実装は stale で、
+    root は AWS 側で AssumeRole 自体が拒否されるため、その経路は成立しなかった。
+    """
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    assert 'ADMIN_ARN="arn:aws:iam::718959508629:user/AIIAdev"' in bootstrap
+    assert ':root"' not in bootstrap, "root 起点の要求が残っている"
+    assert '[ "$initial_arn" = "$ADMIN_ARN" ]' in bootstrap
+    # 起点検査は必ず assume-role より前に置く。
+    assert bootstrap.index('"$initial_arn" = "$ADMIN_ARN"') < bootstrap.index("sts assume-role")
+
+
+def test_bootstrap_admin_matches_the_terraform_trust_principal() -> None:
+    """bootstrap の起点と Terraform の trust policy の principal が一致していること。"""
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    admin = re.search(r'ADMIN_ARN="([^"]+)"', bootstrap).group(1)
+    user_name = admin.rsplit("/", 1)[-1]
+    codebuild_tf = CODEBUILD_TF.read_text(encoding="utf-8")
+    assert f'user_name = "{user_name}"' in codebuild_tf
+    assume = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    assume = assume[assume.index('"runtime_automation_assume"') :]
+    assume = assume[: assume.index("\ndata ")]
+    assert "data.aws_iam_user.aiia_dev.arn" in assume

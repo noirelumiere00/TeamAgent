@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Enter the existing runtime guard through the exact short-lived automation
-# session. Root is permitted to call STS only; the guard rejects root itself.
+# session. The caller starts as the IAM administrator (AIIAdev) holding an
+# MFA-authenticated temporary session; every role trust here requires that
+# exact principal, MFA and a fixed session name. Account root is NOT accepted:
+# AWS refuses AssumeRole for root principals, identity policies and permissions
+# boundaries do not apply to root, and the live trust policies name AIIAdev.
 set -euo pipefail
 umask 077
 
 REGION="ap-northeast-1"
 ACCOUNT_ID="718959508629"
-ROOT_ARN="arn:aws:iam::718959508629:root"
+ADMIN_ARN="arn:aws:iam::718959508629:user/AIIAdev"
 
 die() {
   echo "FATAL: $*" >&2
@@ -25,8 +29,9 @@ requires that exact session for adopt and refuses to run adopt as root.
 teamagent-dev-alarm-recipient-ack-signer role.
 `attest-media-cutover` and `authorize-media-apply` use the one-hour,
 independent teamagent-dev-media-cutover-attestor role.
-The current root credentials must already be an MFA-authenticated temporary
-session; both role trusts enforce MFA and fixed session names.
+The caller must already hold an MFA-authenticated temporary session for the
+IAM administrator (AIIAdev); every role trust enforces that exact principal,
+MFA and a fixed session name. Account root is rejected before any STS call.
 
 This wrapper does not accept an arbitrary command and cannot invoke build or
 release launchers.
@@ -159,8 +164,8 @@ initial="$(identity)"
 IFS=$'\t' read -r initial_account initial_arn extra <<<"$initial"
 [ -z "${extra:-}" ] \
   && [ "$initial_account" = "$ACCOUNT_ID" ] \
-  && [ "$initial_arn" = "$ROOT_ARN" ] \
-  || die "runtime session wrapper must start as the exact account root"
+  && [ "$initial_arn" = "$ADMIN_ARN" ] \
+  || die "runtime session wrapper must start as the exact IAM administrator ($ADMIN_ARN); account root cannot assume roles"
 unset initial initial_account initial_arn extra
 
 session="$(
