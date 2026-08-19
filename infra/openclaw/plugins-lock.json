@@ -12,7 +12,7 @@
     "image": "gcr.io/distroless/nodejs24-debian13",
     "tag": "nonroot",
     "imageIndexDigest": "sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212",
-    "linuxArm64Digest": "sha256:c6465a8fcd268010c53e6e33e58d479dd232aa34f2312500afad8f605caffdc3",
+    "linuxArm64Digest": "sha256:029157d80b0b475dbd9e59715bb1cf51cd637f667ca546b3af39d9ad71bcffd5",
     "nodeVersion": "24.18.0",
     "uid": 65532,
     "gid": 65532
