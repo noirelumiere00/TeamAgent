@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "b554500b56419162cb083b8faea1a51706017777a88c3dd8e12fa60f7e4abb34"
+    "sha256": "78173cec90f8cab9989f0d82493465401693a9e6096adf662840303342d9a704"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",

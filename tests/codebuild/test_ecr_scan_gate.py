@@ -122,14 +122,15 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     """
     core, media = EXCEPTIONS_PATHS
 
-    core_records = gate.load_exceptions(core, today=TODAY)
-    assert {(k.cve, k.severity, k.package, k.version) for k in core_records} == {
-        ("CVE-2025-15366", "MEDIUM", "python-3.14", "3.14.6-r4"),
-        ("CVE-2026-6879", "LOW", "python-3.14", "3.14.6-r4"),
+    # 2026-08-19: CVE-2026-54876(openssl HIGH)を機にchainguardベースをバンプ。
+    # python 3.14.6-r4→3.14.7系で上記2件のfindingが消えるため、08-14のmediaと同じく
+    # 例外は同時撤去し core も空へ復帰（残すと stale=fail が発火する）。
+    core_payload = json.loads(core.read_text(encoding="utf-8"))
+    assert core_payload == {
+        "schema_version": 1,
+        "stale_exception_policy": "fail",
+        "exceptions": [],
     }
-    for record in core_records.values():
-        assert record.owner == "s-komata@vectorinc.co.jp"
-        assert record.expires_on.isoformat() == "2026-09-22"
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
