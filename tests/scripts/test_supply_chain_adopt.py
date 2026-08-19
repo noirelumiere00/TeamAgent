@@ -1152,20 +1152,42 @@ def test_trusted_session_arn_is_stable_across_credential_refresh() -> None:
     assert guard_arn == bootstrap_arn
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PR2-A0.1 で報告済みの既知ギャップ: adopt-plan / adopt-apply が "
-        "bootstrap_runtime_session.sh の allowlist に未登録のため、承認済みの "
-        "non-root 経路から adopt を起動できない。allowlist 追加の承認後にこの "
-        "xfail を外すこと。"
-    ),
-)
 def test_adopt_modes_are_reachable_through_the_approved_session_bootstrap() -> None:
-    """guard が受け付ける adopt モードは、承認済み bootstrap からも起動できるべき。"""
-    allowlist = BOOTSTRAP.read_text(encoding="utf-8")
+    """guard が受け付ける adopt モードは、承認済み bootstrap からも起動できること。
+
+    ここが外れていると adopt は ambient credential（実測では account root）でしか
+    起動できず、trusted automation role に紐づいた Deny ポリシー群が一切効かなくなる。
+    """
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    branch = next(
+        line
+        for line in bootstrap.splitlines()
+        if line.lstrip().startswith("snapshot|") and line.rstrip().endswith(")")
+    )
     for mode in ("adopt-plan", "adopt-apply"):
-        assert f"{mode}" in allowlist
+        assert f"|{mode}" in branch or branch.lstrip().startswith(f"{mode}|"), (
+            f"{mode} が runtime 分岐の case ラベルに無い: {branch.strip()}"
+        )
+
+
+def test_adopt_uses_the_same_trusted_role_branch_as_the_other_runtime_commands() -> None:
+    """adopt を独立 case にすると別 ARN を混ぜられるので、必ず既存 runtime 分岐に置く。"""
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    assert bootstrap.count("terraform-runtime-automation/teamagent-terraform-worker") == 1
+    guard_arn = re.search(
+        r'TRUSTED_AUTOMATION_ARN="([^"]+)"', GUARD.read_text(encoding="utf-8")
+    ).group(1)
+    assert guard_arn in bootstrap
+
+
+def test_every_guard_adopt_mode_is_allowlisted_in_the_bootstrap() -> None:
+    """guard に adopt モードを増やしたら bootstrap 側の追随を強制する。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    bootstrap = BOOTSTRAP.read_text(encoding="utf-8")
+    dispatched = set(re.findall(r"^  (adopt-[a-z]+)\)", guard, flags=re.MULTILINE))
+    assert dispatched, "guard に adopt モードの dispatch が見つからない"
+    for mode in sorted(dispatched):
+        assert f"|{mode}" in bootstrap, f"guard の {mode} が bootstrap allowlist に無い"
 
 
 @pytest.mark.parametrize(

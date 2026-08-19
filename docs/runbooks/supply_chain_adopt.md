@@ -55,11 +55,18 @@ evidence バケット上の buildspec は content-addressed key（`codebuild-bui
 
 ### 4-1. plan（read-only。state backup と ownership discovery を含む）
 
+**guard を直接叩かず、承認済みの session bootstrap 経由で実行する。**
+adopt は Terraform state を書き換える操作なので、guard 自身が
+`teamagent-dev-terraform-runtime-automation` の exact session を要求し、root では拒否する。
+
 ```bash
-bash infra/deploy/terraform_runtime_guard.sh adopt-plan \
+bash infra/deploy/bootstrap_runtime_session.sh adopt-plan \
   --var-file infra/terraform/terraform.tfvars \
   --out /secure/path/adopt-$(date +%Y%m%d-%H%M%S)
 ```
+
+bootstrap は一時 credential で当該 role を assume し、その session で guard を起動する。
+起点の credential は MFA 済みの一時 STS session でなければならない（静的キー不可）。
 
 **`--out` は必ず repository の外を指定する。** repository 配下（相対パス・`../` 経由・
 repo 内へ戻る symlink を含む）を指定した場合、guard は plan を作る前に FATAL で停止する。
@@ -77,8 +84,13 @@ repo 内へ戻る symlink を含む）を指定した場合、guard は plan を
 1. `terraform state pull` で state を退避（perm 600）
 2. ownership discovery — 旧アドレスが state に**存在し**、新アドレスが state に**存在しない**こと
 3. adopt 前の S3 integrity snapshot（body SHA256 と Object Lock の precondition を含む）
-4. `terraform plan -out`（保存 plan）
-5. adopt plan validation（fail-closed。mapping 外・create・delete・replace を全拒否）
+4. 保存 plan の作成
+5. adopt plan validation（層1・fail-closed）。mapping 外・create・delete・replace を全拒否し、
+   さらに import の `before` と `after` を全キー比較して、AWS 実体を変える import を拒否する
+   （`importing.id` の一致だけでは実体を変更しない証明にならないため）
+6. plan と live 実体の cross-check（層2）。独立に採取した integrity snapshot と
+   bucket / key / Object Lock mode / retain-until を突き合わせ、差があれば中断する
+7. binding manifest の記録（commit・state・account・principal を焼き込む）
 
 ### 4-2. apply（明示の承認が必要）
 
@@ -99,7 +111,7 @@ I-HAVE-REVIEWED-THE-ADOPT-PLAN:<plan_sha256 の先頭16文字>
 PLAN_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' \
   /secure/path/adopt-.../adopt-binding.json)"
 
-bash infra/deploy/terraform_runtime_guard.sh adopt-apply --out /secure/path/adopt-... \
+bash infra/deploy/bootstrap_runtime_session.sh adopt-apply --out /secure/path/adopt-... \
   --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN:${PLAN_SHA256:0:16}"
 ```
 
