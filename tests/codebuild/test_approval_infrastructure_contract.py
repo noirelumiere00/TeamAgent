@@ -884,8 +884,7 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
         'output "approval_publisher_buildspec_contract"',
     )
     assert (
-        "aws_s3_object.approval_publisher_resolved_source_buildspec_generation"
-        in buildspec_output
+        "aws_s3_object.approval_publisher_resolved_source_buildspec_generation" in buildspec_output
     )
     assert "aws_s3_object.approval_publisher_buildspec.key" not in buildspec_output
     # An unusable default, matching every other connection-backed project here:

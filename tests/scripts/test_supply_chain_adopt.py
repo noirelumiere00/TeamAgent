@@ -51,9 +51,7 @@ GENERATION_RESOURCES = (
 
 def _strip_comments(source: str) -> str:
     """行コメントを除いた実行部分だけを返す（契約検査はコメント文言に依存させない）。"""
-    return "\n".join(
-        line for line in source.splitlines() if not line.lstrip().startswith("#")
-    )
+    return "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
 
 
 def _adoptions() -> list[dict[str, Any]]:
@@ -319,6 +317,7 @@ def _body_for_first_adoption() -> bytes:
     import hashlib
 
     target = _adoptions()[0]["expected_content_sha256"]
+
     # 実 body は取得できないので、sha256 が一致する状況だけをスタブで再現する。
     class _Exact(bytes):
         pass
@@ -434,7 +433,7 @@ def test_adopt_runs_integrity_before_and_after_apply() -> None:
 def test_adopt_backs_up_state_and_discovers_ownership_before_planning() -> None:
     section = _guard_adopt_section()
     plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
-    assert plan_body.index("state pull") < plan_body.index("terraform -chdir=\"$TF_DIR\" plan")
+    assert plan_body.index("state pull") < plan_body.index('terraform -chdir="$TF_DIR" plan')
     assert "adopt_ownership_discovery" in plan_body
 
 
