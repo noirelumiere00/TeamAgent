@@ -61,7 +61,7 @@
         "component": "python",
         "evidence": "binary_sha256",
         "value_kind": "sha256",
-        "value": "0c4cd49d2c023a1f0325489c610e37c5ad3756fdf6e31f715ac9eabaeecbeba7",
+        "value": "ba90008a7fbb6949214788223cc214d753e6375e045d6d4b7fda65e2ad60b674",
         "build_arg": "PYTHON_BINARY_SHA256",
         "oci_label": "io.teamagent.contract.python-binary-sha256",
         "dockerfile_uses": [
@@ -85,7 +85,7 @@
         "component": "python",
         "evidence": "component_version",
         "value_kind": "version",
-        "value": "3.14.6",
+        "value": "3.14.7",
         "build_arg": "PYTHON_VERSION",
         "oci_label": "io.teamagent.contract.python-version",
         "dockerfile_uses": [

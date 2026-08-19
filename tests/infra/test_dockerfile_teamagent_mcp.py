@@ -16,7 +16,7 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 PYTHON_BUILDER_DIGEST = "453badbd98f293a5f26882a109194355795d5fa262e4b2e62da8634cfa113d3a"
 PYTHON_RUNTIME_DIGEST = "360c4cdb4cb20d4834e2daa47849a5b5275e9437a34501de8e2261ed966fb855"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-PYTHON_BINARY_SHA256 = "0c4cd49d2c023a1f0325489c610e37c5ad3756fdf6e31f715ac9eabaeecbeba7"
+PYTHON_BINARY_SHA256 = "ba90008a7fbb6949214788223cc214d753e6375e045d6d4b7fda65e2ad60b674"
 UV_BINARY_SHA256 = "f32f61ced7feb20342032cdac4d0825cebbda61911554f5de5231ec72821812e"
 TORCH_WHEEL_SHA256 = "ca021f9eb2f8345c83fa03e3a04587308afb8df71bd472670b3ece00df58621c"
 E5_MODEL_REVISION = "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3"
@@ -44,7 +44,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
     assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
     assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
-    assert "ARG PYTHON_VERSION=3.14.6" in TEXT
+    assert "ARG PYTHON_VERSION=3.14.7" in TEXT
     assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
