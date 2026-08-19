@@ -10110,10 +10110,30 @@ adopt_assert_out_dir_outside_repo() {
   done
 }
 
+# adopt は Terraform state を書き換える操作なので「誰が実行したか」を plan と apply で束縛する。
+# account ID の一致だけでは principal の差し替えを検出できない。root は AWS 自身が日常運用に
+# 使わないよう推奨している主体であり、activation の実行主体としては明示的に拒否する。
+adopt_caller_principal_arn() {
+  local arn
+  arn="$(aws_cli sts get-caller-identity --query Arn --output text)" ||
+    die "adopt: caller identity を取得できませんでした"
+  [ -n "$arn" ] && [ "$arn" != "None" ] ||
+    die "adopt: caller identity の ARN が空です"
+  case "$arn" in
+    arn:aws*:iam::*:root)
+      die "root principal では adopt を実行できません: $arn
+   root は全リソースへの実質無制限権限を持ち、一時 credential でもありません。
+   非 root の一時 credential（assumed-role session）で実行してください。"
+      ;;
+  esac
+  printf '%s\n' "$arn"
+}
+
 adopt_plan() {
-  local var_file="$1" out_dir="$2"
+  local var_file="$1" out_dir="$2" principal_arn
   adopt_require_helpers
   adopt_assert_out_dir_outside_repo "$out_dir"
+  principal_arn="$(adopt_caller_principal_arn)"
   (umask 077 && mkdir -p "$out_dir") ||
     die "adopt の out ディレクトリを作成できませんでした: $out_dir"
   chmod 700 "$out_dir"
@@ -10150,7 +10170,8 @@ adopt_plan() {
   python3 "$ADOPT_BINDING" record \
     --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
     --mapping "$ADOPT_MAPPING" --state "$out_dir/state-backup.json" \
-    --account "$EXPECTED_ACCOUNT_ID" --workspace "$EXPECTED_WORKSPACE" ||
+    --account "$EXPECTED_ACCOUNT_ID" --principal-arn "$principal_arn" \
+    --workspace "$EXPECTED_WORKSPACE" ||
     die "adopt plan binding manifest の作成に失敗しました"
   chmod 600 "$out_dir/adopt-binding.json"
 
@@ -10160,9 +10181,10 @@ print(json.load(open(sys.argv[1]))["plan_sha256"])' "$out_dir/adopt-binding.json
 }
 
 adopt_apply() {
-  local out_dir="$1" approve="$2"
+  local out_dir="$1" approve="$2" principal_arn
   adopt_require_helpers
   adopt_assert_out_dir_outside_repo "$out_dir"
+  principal_arn="$(adopt_caller_principal_arn)"
   for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json \
     state-backup.json adopt-binding.json; do
     [ -f "$out_dir/$adopt_artifact" ] || die "adopt 成果物がありません: $out_dir/$adopt_artifact"
@@ -10174,6 +10196,7 @@ adopt_apply() {
   python3 "$ADOPT_BINDING" verify \
     --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
     --mapping "$ADOPT_MAPPING" --account "$EXPECTED_ACCOUNT_ID" \
+    --principal-arn "$principal_arn" \
     --workspace "$EXPECTED_WORKSPACE" --approve "$approve" ||
     die "adopt plan binding の再照合に失敗しました（apply は行いません）"
 

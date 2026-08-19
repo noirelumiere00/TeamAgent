@@ -452,18 +452,26 @@ def test_adopt_never_weakens_immutability() -> None:
 from supply_chain_adopt_binding import (  # noqa: E402
     APPROVE_TOKEN,
     BOUND_FIELDS,
+    SCHEMA_VERSION,
     BindingError,
+    assert_usable_principal,
     check_approval,
     compare_binding,
     expected_approval,
 )
+
+TRUSTED_SESSION_ARN = (
+    "arn:aws:sts::718959508629:assumed-role/"
+    "teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
+)
+ROOT_ARN = "arn:aws:iam::718959508629:root"
 
 GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
 
 
 def _binding() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "plan_sha256": "a" * 64,
         "plan_json_sha256": "b" * 64,
         "git_head": "c" * 40,
@@ -472,6 +480,7 @@ def _binding() -> dict[str, Any]:
         "state_lineage": "11111111-2222-3333-4444-555555555555",
         "state_serial": 42,
         "aws_account": "718959508629",
+        "aws_principal_arn": TRUSTED_SESSION_ARN,
         "terraform_workspace": "default",
         "terraform_version": "1.12.2",
     }
@@ -802,3 +811,143 @@ def test_guard_usage_documents_adopt_modes() -> None:
     usage = body[body.index("usage() {") : body.index("die() {")]
     assert "adopt-plan --var-file FILE --out DIR" in usage
     assert "adopt-apply --out DIR --approve TOKEN" in usage
+
+
+# ── PR2-A0.1 / P0-B: activation を実行した principal を plan と apply で束縛する ─────
+#
+# binding が aws_account しか持たないと、同一 account 内で principal を差し替えても
+# 通ってしまう。実測で clean environment の caller identity が root だったため、
+# caller ARN 自体を束縛し、root は plan / apply の両方で明示的に拒否する。
+
+
+def test_principal_arn_is_a_bound_field() -> None:
+    assert "aws_principal_arn" in BOUND_FIELDS
+
+
+def test_binding_schema_version_rejects_manifests_without_principal_binding() -> None:
+    """principal を束縛しない v1 manifest を黙って受け入れないこと。"""
+    assert SCHEMA_VERSION == 2
+    recorded = _binding()
+    recorded["schema_version"] = 1
+    with pytest.raises(BindingError, match="schema_version"):
+        compare_binding(recorded, _binding())
+
+
+def test_binding_accepts_same_account_same_role() -> None:
+    recorded = _binding()
+    compare_binding(recorded, copy.deepcopy(recorded))
+
+
+def test_binding_rejects_same_account_different_role() -> None:
+    """account が同じでも principal が違えば apply させない。"""
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["aws_principal_arn"] = "arn:aws:sts::718959508629:assumed-role/some-other-role/session"
+    with pytest.raises(BindingError, match="aws_principal_arn"):
+        compare_binding(recorded, observed)
+
+
+@pytest.mark.parametrize("side", ["recorded", "observed", "both"])
+def test_binding_rejects_root_principal(side: str) -> None:
+    """root は「両者一致していても」拒否する（account 一致では authorization にならない）。"""
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    if side in ("recorded", "both"):
+        recorded["aws_principal_arn"] = ROOT_ARN
+    if side in ("observed", "both"):
+        observed["aws_principal_arn"] = ROOT_ARN
+    with pytest.raises(BindingError, match="root"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_missing_principal_field() -> None:
+    recorded = _binding()
+    del recorded["aws_principal_arn"]
+    with pytest.raises(BindingError, match="aws_principal_arn"):
+        compare_binding(recorded, _binding())
+
+
+def test_binding_rejects_tampered_principal_field() -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["aws_principal_arn"] = TRUSTED_SESSION_ARN + "x"
+    with pytest.raises(BindingError, match="aws_principal_arn"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_different_account_even_with_same_role_name() -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["aws_account"] = "111122223333"
+    observed["aws_principal_arn"] = TRUSTED_SESSION_ARN.replace("718959508629", "111122223333")
+    with pytest.raises(BindingError, match="aws_account"):
+        compare_binding(recorded, observed)
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        ROOT_ARN,
+        "arn:aws:iam::111122223333:root",
+        "arn:aws-cn:iam::718959508629:root",
+    ],
+)
+def test_assert_usable_principal_rejects_root(arn: str) -> None:
+    with pytest.raises(BindingError, match="root"):
+        assert_usable_principal(arn, source="test")
+
+
+@pytest.mark.parametrize("value", ["", "   ", None, 42, "718959508629", "not-an-arn"])
+def test_assert_usable_principal_rejects_non_arn(value: Any) -> None:
+    with pytest.raises(BindingError):
+        assert_usable_principal(value, source="test")
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        TRUSTED_SESSION_ARN,
+        "arn:aws:iam::718959508629:user/deployer",
+        "arn:aws:sts::718959508629:assumed-role/role-named-root-suffix/root",
+    ],
+)
+def test_assert_usable_principal_accepts_non_root_arns(arn: str) -> None:
+    assert assert_usable_principal(arn, source="test") == arn
+
+
+def test_guard_resolves_and_binds_caller_principal_in_both_adopt_modes() -> None:
+    """plan と apply の両方で live の caller identity を取り直して束縛すること。"""
+    section = _guard_adopt_section()
+    plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
+    apply_body = section[section.index("adopt_apply()") :]
+    for body in (plan_body, apply_body):
+        assert "adopt_caller_principal_arn" in body
+        assert '--principal-arn "$principal_arn"' in body
+    assert plan_body.index("adopt_caller_principal_arn") < plan_body.index("state pull")
+
+
+def test_guard_rejects_root_principal_before_any_adopt_work() -> None:
+    """guard 側でも root を拒否する（binding 到達前に止める）。"""
+    section = _guard_adopt_section()
+    resolver = section[
+        section.index("adopt_caller_principal_arn() {") : section.index("adopt_plan() {")
+    ]
+    assert "arn:aws*:iam::*:root)" in resolver
+    assert "root principal では adopt を実行できません" in resolver
+
+
+@pytest.mark.parametrize(
+    ("arn", "expected_reject"),
+    [
+        ("arn:aws:iam::718959508629:root", True),
+        ("arn:aws:sts::718959508629:assumed-role/teamagent/worker", False),
+        ("arn:aws:iam::718959508629:user/deployer", False),
+    ],
+)
+def test_guard_root_pattern_matches_only_account_root(arn: str, expected_reject: bool) -> None:
+    """guard の case パターンが account root だけを拾い、role/user を誤爆しないこと。"""
+    script = 'case "$1" in\n  arn:aws*:iam::*:root) echo REJECT ;;\n  *) echo ACCEPT ;;\nesac\n'
+    result = subprocess.run(
+        ["bash", "-c", script, "probe", arn], capture_output=True, text=True, check=False
+    )
+    assert ("REJECT" in result.stdout) is expected_reject
