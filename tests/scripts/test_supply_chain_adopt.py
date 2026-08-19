@@ -36,11 +36,16 @@ sys.path.insert(0, str(ROOT / "infra/deploy"))
 
 from supply_chain_adopt_integrity import (  # noqa: E402
     COMPARED_FIELDS,
+    CROSSCHECKED_FIELDS,
     IntegrityError,
+    _normalize_timestamp,
     compare,
+    crosscheck,
     snapshot,
 )
 from supply_chain_adopt_validate import (  # noqa: E402
+    IMPORT_DIFF_IGNORED_ATTRIBUTES,
+    IMPORT_INVARIANT_ATTRIBUTES,
     AdoptValidationError,
     load_mapping,
     validate_plan,
@@ -77,8 +82,36 @@ def _resource_body(name: str) -> str:
     raise AssertionError(f"unterminated resource block: {name}")
 
 
+def _s3_object_state(entry: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    """import 対象 aws_s3_object の state（before/after 共通の素）。
+
+    実体を変更しない adopt では before と after が完全一致する。テストはこの素を片側だけ
+    書き換えて「実体を変える import」を作り、validator が拒否することを確かめる。
+    """
+    state: dict[str, Any] = {
+        "bucket": entry["bucket"],
+        "key": entry["key"],
+        "content_type": "binary/octet-stream",
+        "object_lock_mode": "GOVERNANCE",
+        "object_lock_retain_until_date": "2099-12-31T00:00:00Z",
+        "object_lock_legal_hold_status": None,
+        "server_side_encryption": "aws:kms",
+        "kms_key_id": "arn:aws:kms:ap-northeast-1:718959508629:key/EXAMPLE",
+        "bucket_key_enabled": True,
+        "storage_class": "STANDARD",
+        "etag": entry["expected_content_sha256"][:32],
+        "tags": {},
+    }
+    state.update(overrides)
+    return state
+
+
 def _adopt_plan(adoptions: list[dict[str, Any]]) -> dict[str, Any]:
-    """実 plan から抽出したのと同じ形の、正常な adopt plan を組み立てる。"""
+    """正常な adopt plan を組み立てる。
+
+    実体と config が完全一致する健全な adopt では、import の actions は ["no-op"] になり
+    before == after になる。terraform show -json の resource_changes と同じキー構成にする。
+    """
     changes: list[dict[str, Any]] = []
     for entry in adoptions:
         changes.append(
@@ -89,13 +122,17 @@ def _adopt_plan(adoptions: list[dict[str, Any]]) -> dict[str, Any]:
                 "change": {"actions": ["forget"]},
             }
         )
+        state = _s3_object_state(entry)
         changes.append(
             {
                 "address": entry["new_address"],
                 "mode": "managed",
                 "type": "aws_s3_object",
                 "change": {
-                    "actions": ["update"],
+                    "actions": ["no-op"],
+                    "before": copy.deepcopy(state),
+                    "after": copy.deepcopy(state),
+                    "after_unknown": {},
                     "importing": {"id": entry["import_id"]},
                 },
             }
@@ -229,8 +266,143 @@ def test_validator_rejects_update_without_import() -> None:
     adoptions = _adoptions()
     plan = _adopt_plan(adoptions)
     del plan["resource_changes"][1]["change"]["importing"]
+    plan["resource_changes"][1]["change"]["actions"] = ["update"]
     with pytest.raises(AdoptValidationError, match="without an import"):
         validate_plan(plan, adoptions)
+
+
+# ── PR2-A0.1 / 層1: import が AWS 実体を変更しないことを plan 段階で証明する ──────
+#
+# importing.id の一致だけでは「実体を変更しない import」の証明にならなかった。
+# 実例: adoption #4 の object_lock_retain_until_date を 23:59:59 から 00:00:00 へ
+# 短縮する import は、旧 validator を素通りして apply まで到達しえた。
+
+
+def test_validator_accepts_an_import_whose_before_and_after_match() -> None:
+    adoptions = _adoptions()
+    validate_plan(_adopt_plan(adoptions), adoptions)
+
+
+def test_validator_accepts_a_no_op_import() -> None:
+    """実体と config が完全一致する健全な adopt は actions が ["no-op"] になる。
+
+    ここを import として数えないと「差分ゼロの正しい plan ほど落ちる」逆転が起きる。
+    """
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    assert all(
+        item["change"]["actions"] == ["no-op"]
+        for item in plan["resource_changes"]
+        if "importing" in item["change"]
+    )
+    validate_plan(plan, adoptions)
+
+
+def test_validator_accepts_an_import_reported_as_update_when_nothing_changes() -> None:
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    for item in plan["resource_changes"]:
+        if "importing" in item["change"]:
+            item["change"]["actions"] = ["update"]
+    validate_plan(plan, adoptions)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("object_lock_retain_until_date", "2099-12-31T23:59:59Z"),
+        ("object_lock_mode", "COMPLIANCE"),
+        ("object_lock_legal_hold_status", "ON"),
+        ("content_type", "text/yaml"),
+        ("server_side_encryption", "AES256"),
+        ("kms_key_id", "arn:aws:kms:ap-northeast-1:718959508629:key/OTHER"),
+        ("bucket_key_enabled", False),
+        ("storage_class", "GLACIER"),
+        ("etag", "0" * 32),
+        ("tags", {"owner": "someone"}),
+        ("acl", "public-read"),
+        ("content", "mutated"),
+    ],
+)
+def test_validator_rejects_an_import_that_changes_the_aws_object(
+    attribute: str, value: Any
+) -> None:
+    """import と同時に実体を変える属性差分が乗った plan を拒否する。"""
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    change = plan["resource_changes"][1]["change"]
+    change["actions"] = ["update"]
+    change["after"][attribute] = value
+    with pytest.raises(AdoptValidationError, match="must not change the AWS object"):
+        validate_plan(plan, adoptions)
+
+
+def test_validator_rejects_the_exact_retain_until_shortening_we_found_in_production() -> None:
+    """本番で見つかった retain-until 短縮（23:59:59 → 00:00:00）を再現して拒否を実証する。"""
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    change = plan["resource_changes"][1]["change"]
+    change["actions"] = ["update"]
+    change["before"]["object_lock_retain_until_date"] = "2099-12-31T23:59:59Z"
+    with pytest.raises(AdoptValidationError, match="object_lock_retain_until_date"):
+        validate_plan(plan, adoptions)
+
+
+@pytest.mark.parametrize("side", ["before", "after"])
+def test_validator_rejects_an_import_without_state_to_compare(side: str) -> None:
+    """before / after が無い import は「変更しない証明」ができないので拒否する。"""
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    del plan["resource_changes"][1]["change"][side]
+    with pytest.raises(AdoptValidationError, match=f"change.{side}"):
+        validate_plan(plan, adoptions)
+
+
+def test_validator_rejects_an_import_with_unknown_security_critical_attributes() -> None:
+    """plan 時に確定しない security-critical 属性がある import を拒否する。"""
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    change = plan["resource_changes"][1]["change"]
+    change["after_unknown"] = {"object_lock_retain_until_date": True}
+    with pytest.raises(AdoptValidationError, match="unknown at plan time"):
+        validate_plan(plan, adoptions)
+
+
+@pytest.mark.parametrize("attribute", ["bucket", "key"])
+def test_validator_rejects_an_import_pointing_at_another_object(attribute: str) -> None:
+    """import ID が合っていても、実体が mapping と別のオブジェクトなら拒否する。"""
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    change = plan["resource_changes"][1]["change"]
+    change["before"][attribute] = "somewhere-else"
+    change["after"][attribute] = "somewhere-else"
+    with pytest.raises(AdoptValidationError, match="the mapping declares"):
+        validate_plan(plan, adoptions)
+
+
+def test_import_invariant_ignore_list_stays_empty() -> None:
+    """「変更を許す属性」を黙って増やせないようにする。
+
+    S3 の API 呼び出しを要する属性をここへ足すと、validator の「実体を変更しない」という
+    保証が嘘になる。増やすときは必ずレビューを通すこと。
+    """
+    assert IMPORT_DIFF_IGNORED_ATTRIBUTES == frozenset()
+
+
+def test_import_invariant_covers_every_object_lock_and_content_attribute() -> None:
+    for attribute in (
+        "bucket",
+        "key",
+        "object_lock_mode",
+        "object_lock_retain_until_date",
+        "object_lock_legal_hold_status",
+        "content",
+        "source_hash",
+        "etag",
+        "server_side_encryption",
+        "kms_key_id",
+    ):
+        assert attribute in IMPORT_INVARIANT_ATTRIBUTES
 
 
 def test_validator_rejects_mismatched_import_id() -> None:
@@ -1011,3 +1183,92 @@ def test_guard_root_pattern_matches_only_account_root(arn: str, expected_reject:
         ["bash", "-c", script, "probe", arn], capture_output=True, text=True, check=False
     )
     assert ("REJECT" in result.stdout) is expected_reject
+
+
+# ── PR2-A0.1 / 層2: plan の宣言値と live 実体を突き合わせる ────────────────────
+#
+# 層1 は plan 内部の before/after 整合しか見ない。plan の before は Terraform が読んだ値
+# なので、独立に採取した integrity snapshot と突き合わせて初めて「plan が live 実体を
+# 変えない」と言える。
+
+
+def _live_snapshot(adoptions: list[dict[str, Any]], **overrides: Any) -> dict[str, Any]:
+    """live 実体の integrity snapshot（boto3 由来なので timestamp は +00:00 表記）。"""
+    objects = {}
+    for entry in adoptions:
+        probe = {
+            "bucket": entry["bucket"],
+            "key": entry["key"],
+            "object_lock_mode": "GOVERNANCE",
+            "object_lock_retain_until_date": "2099-12-31T00:00:00+00:00",
+            "body_sha256": entry["expected_content_sha256"],
+        }
+        probe.update(overrides)
+        objects[entry["new_address"]] = probe
+    return {"schema_version": 1, "objects": objects}
+
+
+def test_crosscheck_accepts_a_plan_that_matches_the_live_objects() -> None:
+    adoptions = _adoptions()
+    crosscheck(_live_snapshot(adoptions), _adopt_plan(adoptions), adoptions)
+
+
+def test_crosscheck_absorbs_the_timestamp_notation_difference() -> None:
+    """snapshot は +00:00、plan は Z。同じ時刻を不一致と誤検知しないこと。"""
+    assert _normalize_timestamp("2099-12-31T00:00:00Z") == _normalize_timestamp(
+        "2099-12-31T00:00:00+00:00"
+    )
+    assert _normalize_timestamp("2099-12-31T00:00:00Z") != _normalize_timestamp(
+        "2099-12-31T23:59:59Z"
+    )
+
+
+def test_crosscheck_rejects_the_exact_retain_until_drift_found_in_production() -> None:
+    """live が 23:59:59 なのに plan が 00:00:00 を宣言している状態を拒否する。"""
+    adoptions = _adoptions()
+    snapshot_doc = _live_snapshot(adoptions)
+    target = adoptions[-1]["new_address"]
+    snapshot_doc["objects"][target]["object_lock_retain_until_date"] = "2099-12-31T23:59:59+00:00"
+    with pytest.raises(IntegrityError, match="object_lock_retain_until_date"):
+        crosscheck(snapshot_doc, _adopt_plan(adoptions), adoptions)
+
+
+@pytest.mark.parametrize("field", [field for field, _ in CROSSCHECKED_FIELDS])
+def test_crosscheck_detects_any_single_field_drift(field: str) -> None:
+    adoptions = _adoptions()
+    snapshot_doc = _live_snapshot(adoptions)
+    snapshot_doc["objects"][adoptions[0]["new_address"]][field] = "DRIFTED"
+    with pytest.raises(IntegrityError, match="does not match the live AWS objects"):
+        crosscheck(snapshot_doc, _adopt_plan(adoptions), adoptions)
+
+
+def test_crosscheck_rejects_a_plan_without_an_import_to_compare() -> None:
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    for item in plan["resource_changes"]:
+        item["change"].pop("importing", None)
+    with pytest.raises(IntegrityError, match="no imported state"):
+        crosscheck(_live_snapshot(adoptions), plan, adoptions)
+
+
+def test_crosscheck_rejects_an_object_missing_from_the_snapshot() -> None:
+    adoptions = _adoptions()
+    snapshot_doc = _live_snapshot(adoptions)
+    del snapshot_doc["objects"][adoptions[0]["new_address"]]
+    with pytest.raises(IntegrityError, match="missing from the integrity snapshot"):
+        crosscheck(snapshot_doc, _adopt_plan(adoptions), adoptions)
+
+
+def test_guard_crosschecks_the_plan_against_live_before_binding_it() -> None:
+    """guard が層1と層2の両方を、binding 記録より前に通すこと（順序が本質）。"""
+    section = _guard_adopt_section()
+    plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
+    assert '"$ADOPT_INTEGRITY" crosscheck' in plan_body
+    assert plan_body.index('"$ADOPT_VALIDATOR"') < plan_body.index('"$ADOPT_INTEGRITY" crosscheck')
+    assert plan_body.index('"$ADOPT_INTEGRITY" crosscheck') < plan_body.index(
+        '"$ADOPT_BINDING" record'
+    )
+    # snapshot は crosscheck より前に取れていること（比較対象が無ければ意味がない）。
+    assert plan_body.index('"$ADOPT_INTEGRITY" snapshot') < plan_body.index(
+        '"$ADOPT_INTEGRITY" crosscheck'
+    )

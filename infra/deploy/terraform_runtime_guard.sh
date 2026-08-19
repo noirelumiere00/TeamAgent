@@ -10176,6 +10176,13 @@ adopt_plan() {
   python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が不変条件を満たしません（plan は破棄してください）"
 
+  # 層2: validator は plan 内部の before/after 整合しか見ない。plan の before は Terraform が
+  # 読んだ値なので、独立に採取した integrity snapshot と突き合わせて初めて
+  # 「plan が live 実体そのものを宣言している」と言える。
+  python3 "$ADOPT_INTEGRITY" crosscheck --snapshot "$out_dir/integrity-before.json" \
+    --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
+    die "adopt plan が live の AWS 実体と一致しません（plan は破棄してください）"
+
   python3 "$ADOPT_BINDING" record \
     --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
     --mapping "$ADOPT_MAPPING" --state "$out_dir/state-backup.json" \
