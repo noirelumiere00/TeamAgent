@@ -61,6 +61,17 @@ bash infra/deploy/terraform_runtime_guard.sh adopt-plan \
   --out /secure/path/adopt-$(date +%Y%m%d-%H%M%S)
 ```
 
+**`--out` は必ず repository の外を指定する。** repository 配下（相対パス・`../` 経由・
+repo 内へ戻る symlink を含む）を指定した場合、guard は plan を作る前に FATAL で停止する。
+理由は 2 つある。
+
+- 生成物（`adopt.tfplan` / `adopt-plan.json` / `adopt-binding.json` / `state-backup.json` /
+  `state-list.txt` / `integrity-*.json`）は untracked file として working tree を dirty にし、
+  apply 時の binding 照合（`git_tree_clean`）が**必ず**失敗する。
+- `state-backup.json` は Terraform state の全文であり、機微な値を含む。repository へ持ち込まない。
+
+出力ディレクトリと成果物は owner-only（ディレクトリ 700 / ファイル 600）で作成される。
+
 このコマンドは順に次を行う。1 つでも失敗したら中断する。
 
 1. `terraform state pull` で state を退避（perm 600）
@@ -71,10 +82,44 @@ bash infra/deploy/terraform_runtime_guard.sh adopt-plan \
 
 ### 4-2. apply（明示の承認が必要）
 
-```bash
-bash infra/deploy/terraform_runtime_guard.sh adopt-apply --out /secure/path/adopt-... \
-  --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN"
+承認トークンは **plan に束縛されている**。固定文字列ではなく、その plan の SHA256 を
+連結した次の書式でなければ `check_approval()` が拒否する
+（実装: `infra/deploy/supply_chain_adopt_binding.py` の `expected_approval()`）。
+
 ```
+I-HAVE-REVIEWED-THE-ADOPT-PLAN:<plan_sha256 の先頭16文字>
+```
+
+`plan_sha256` の入手方法は 2 通り。どちらも同じ値になる。
+
+- `adopt-plan` が完了時に標準出力へ出す（`承認は plan SHA256 に束縛されます: ...`）
+- `<out_dir>/adopt-binding.json` の `plan_sha256` フィールド
+
+```bash
+PLAN_SHA256="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["plan_sha256"])' \
+  /secure/path/adopt-.../adopt-binding.json)"
+
+bash infra/deploy/terraform_runtime_guard.sh adopt-apply --out /secure/path/adopt-... \
+  --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN:${PLAN_SHA256:0:16}"
+```
+
+書式の worked example（この値は contract test が実装から再計算して照合している。
+手で書き換えないこと）。
+
+<!-- approval-token-contract
+plan_sha256: 9842a7b6f7f24f5924bfbb2da4be3222d1c9e5c8b2bfdef222fb105d80eec6e3
+approve:     I-HAVE-REVIEWED-THE-ADOPT-PLAN:9842a7b6f7f24f59
+-->
+
+| 入力 | 結果 |
+| --- | --- |
+| 上記書式（この plan の SHA256 先頭16文字を連結） | 受理 |
+| `:` 以降が無い裸のトークン | **拒否**（束縛されていない） |
+| 別 plan の SHA256 を連結したトークン | **拒否**（承認の流用不可） |
+| `--approve` 未指定 | **拒否** |
+
+plan を取り直すと `plan_sha256` が変わるため、**承認トークンも取り直しになる**。
+
 
 apply は直前に validation と integrity を再実行し、apply 後にも integrity を再取得して比較する。
 比較項目は VersionId / ETag / ContentLength / LastModified / ObjectLockMode / retain-until / body SHA256 で、**1 項目でも変化したら activation failure** として扱う。

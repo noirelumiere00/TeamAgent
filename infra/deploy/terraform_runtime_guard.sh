@@ -97,6 +97,10 @@ usage:
     [--prior-apply-receipt FILE]) [--media-cutover-receipt FILE] \
     [--receipt FILE]
   terraform_runtime_guard.sh verify --plan PLAN [--receipt FILE]
+  terraform_runtime_guard.sh adopt-plan --var-file FILE --out DIR
+  terraform_runtime_guard.sh adopt-apply --out DIR --approve TOKEN
+      adopt の --out は repository 外を指定すること（repo 配下は fail-closed で拒否）。
+      --approve は "I-HAVE-REVIEWED-THE-ADOPT-PLAN:<plan_sha256 先頭16桁>"。
   terraform_runtime_guard.sh authorize-media-apply --plan PLAN \
     [--receipt FILE] --apply-attempt-id UUID --out AUTHORIZATION
   terraform_runtime_guard.sh apply --plan PLAN [--receipt FILE] \
@@ -10065,10 +10069,53 @@ for a in json.load(open(sys.argv[1]))["adoptions"]: print(a["old_address"])' "$A
 for a in json.load(open(sys.argv[1]))["adoptions"]: print(a["new_address"])' "$ADOPT_MAPPING")
 }
 
+# adopt の成果物は Terraform state 全文の backup・保存 plan・binding manifest を含む。
+# これを repository 配下へ出力すると (1) untracked artifact が working tree を dirty にし、
+# apply 時の binding 照合（git_tree_clean）が必ず失敗する (2) 機微な state を repository へ
+# 持ち込む。運用の注意ではなく入口で機械的に拒否する。relative / ../ / symlink は
+# realpath で正規化してから判定するので、repo 内へ戻る経路はすべて塞がる。
+adopt_canonical_path() {
+  python3 -c 'import os, sys
+print(os.path.realpath(os.path.join(sys.argv[1], sys.argv[2])))' "$1" "$2"
+}
+
+adopt_assert_out_dir_outside_repo() {
+  local out_dir="$1" canonical root resolved toplevel git_common
+  [ -n "$out_dir" ] || die "adopt の --out が空です"
+  canonical="$(adopt_canonical_path "$PWD" "$out_dir")" ||
+    die "adopt の --out を正規化できませんでした: $out_dir"
+
+  local -a forbidden_roots=()
+  forbidden_roots+=("$REPO_ROOT")
+  toplevel="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$toplevel" ]; then
+    forbidden_roots+=("$toplevel")
+  fi
+  git_common="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [ -n "$git_common" ]; then
+    forbidden_roots+=("$(adopt_canonical_path "$REPO_ROOT" "$git_common")")
+  fi
+
+  for root in "${forbidden_roots[@]}"; do
+    [ -n "$root" ] || continue
+    resolved="$(adopt_canonical_path "$PWD" "$root")" || continue
+    if [ "$canonical" = "$resolved" ] || [ "${canonical#"$resolved"/}" != "$canonical" ]; then
+      die "adopt の --out に repository 配下は指定できません: $out_dir
+   解決後のパス: $canonical
+   禁止領域    : $resolved
+   理由: 生成物が working tree を dirty にし apply 時の binding 照合が必ず失敗します。
+         また state-backup.json は Terraform state 全文（機微）を含みます。
+   repository 外の安全なディレクトリを --out に指定してください。"
+    fi
+  done
+}
+
 adopt_plan() {
   local var_file="$1" out_dir="$2"
   adopt_require_helpers
-  mkdir -p "$out_dir"
+  adopt_assert_out_dir_outside_repo "$out_dir"
+  (umask 077 && mkdir -p "$out_dir") ||
+    die "adopt の out ディレクトリを作成できませんでした: $out_dir"
   chmod 700 "$out_dir"
 
   # plan した「世界」を manifest へ固定する。apply 時に全項目を exact match で再照合し、
@@ -10083,11 +10130,13 @@ adopt_plan() {
   [ -s "$out_dir/state-backup.json" ] || die "adopt の state backup が空です"
 
   terraform -chdir="$TF_DIR" state list > "$out_dir/state-list.txt"
+  chmod 600 "$out_dir/state-list.txt"
   adopt_ownership_discovery "$out_dir/state-list.txt"
 
   python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
     --out "$out_dir/integrity-before.json" ||
     die "adopt 前の S3 integrity snapshot に失敗しました"
+  chmod 600 "$out_dir/integrity-before.json"
 
   terraform -chdir="$TF_DIR" plan -input=false -lock-timeout=5m \
     "-var-file=$var_file" -out="$out_dir/adopt.tfplan" ||
@@ -10113,6 +10162,7 @@ print(json.load(open(sys.argv[1]))["plan_sha256"])' "$out_dir/adopt-binding.json
 adopt_apply() {
   local out_dir="$1" approve="$2"
   adopt_require_helpers
+  adopt_assert_out_dir_outside_repo "$out_dir"
   for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json \
     state-backup.json adopt-binding.json; do
     [ -f "$out_dir/$adopt_artifact" ] || die "adopt 成果物がありません: $out_dir/$adopt_artifact"
@@ -10132,6 +10182,7 @@ adopt_apply() {
   python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
     --out "$out_dir/integrity-preapply.json" ||
     die "adopt-apply 直前の S3 integrity snapshot に失敗しました"
+  chmod 600 "$out_dir/integrity-preapply.json"
   python3 "$ADOPT_INTEGRITY" compare --before "$out_dir/integrity-before.json" \
     --after "$out_dir/integrity-preapply.json" ||
     die "adopt-apply 直前に S3 実体が変化しています"
@@ -10142,6 +10193,7 @@ adopt_apply() {
   python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
     --out "$out_dir/integrity-after.json" ||
     die "adopt 後の S3 integrity snapshot に失敗しました"
+  chmod 600 "$out_dir/integrity-after.json"
   python3 "$ADOPT_INTEGRITY" compare --before "$out_dir/integrity-before.json" \
     --after "$out_dir/integrity-after.json" ||
     die "adopt により AWS 実体が変化しました（activation failure）"
