@@ -359,22 +359,21 @@ def recent_questions(
     if who:
         params["who"] = str(who)
         who_clause = "  AND lower(COALESCE(user_email, user_id, '(unknown)')) = lower(%(who)s)\n"
-    rows = _select_conn(
-        conn,
+    sql = (
         """
         SELECT occurred_at,
                COALESCE(user_email, user_id, '(unknown)') AS who,
                skill, query_text, status, latency_ms, cost_usd
         FROM usage_events
         WHERE query_text IS NOT NULL
-        """
+        """  # nosec B608  # who_clause は定数2択・who/limit は placeholder（下で bind）
         + who_clause
         + """
         ORDER BY occurred_at DESC
         LIMIT %(limit)s
-        """,
-        params,
+        """
     )
+    rows = _select_conn(conn, sql, params)
     return [
         {
             "occurred_at": row["occurred_at"],
