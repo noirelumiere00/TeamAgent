@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
-from teamagent.skills._shared.source_url import slack_thread_permalink
+from teamagent.skills._shared.source_url import source_link
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.clientkarte.schema import (
     ClientKarteInput,
@@ -49,6 +49,21 @@ def _env_positive_int(name: str, default: int) -> int:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+_SOURCE_LINKS_MAX = 3
+
+
+def _with_source_links(answer: str, events: list[KarteEvent]) -> str:
+    """イベントで解決済みの出典 URL を回答末尾へ決定論で追記する（重複除去・最大3件）。"""
+    links: list[str] = []
+    for e in events:
+        if e.url and e.url not in links:
+            links.append(e.url)
+    if not links:
+        return answer
+    lines = "\n".join(f"🔗 出典: {u}" for u in links[:_SOURCE_LINKS_MAX])
+    return f"{answer}\n\n{lines}"
 
 
 def _truncate_at_sentence_boundary(text: str, max_chars: int) -> str:
@@ -153,6 +168,9 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
 
         events = [self._to_event(h) for h in hits]
         answer, cost_usd = self._synthesize(input.client_name, hits, ctx.request_id)
+        # 出典 URL は LLM に書かせず、イベントに解決済みの URL をサーバ側で末尾へ付ける
+        # （slack_summary A10 と同じ流儀）。重複を除き最大 3 件まで。
+        answer = _with_source_links(answer, events)
 
         log.info("clientkarte_done", event_count=len(events), cost_usd=cost_usd)
         return ClientKarteOutput(
@@ -165,11 +183,12 @@ class ClientKarteSkill(BaseSkill[ClientKarteInput, ClientKarteOutput]):
 
     def _to_event(self, hit: SearchHit) -> KarteEvent:
         meta = hit.metadata or {}
-        # 出典 URL 方針: カルテの 1 行 1 行が「どの Slack スレッドの FB か」へ辿れるようにする。
-        # source_uri は内部識別子なのでそのまま出さず、permalink に整形できたときだけ載せる。
+        # 出典 URL 方針: カルテの 1 行 1 行が引用元（Slack スレッド permalink /
+        # FB シート行直リンク / Drive web_view_link）へ辿れるようにする。
+        # 変換できない内部識別子は URL を出さない（推測しない）。
         return KarteEvent(
             chunk_id=hit.chunk_id,
-            url=slack_thread_permalink(str(meta.get("source_uri") or "")),
+            url=source_link(str(meta.get("source_uri") or "")),
             occurred_at=meta.get("occurred_at"),
             deal_phase=meta.get("deal_phase"),
             bant_score=meta.get("bant_score"),

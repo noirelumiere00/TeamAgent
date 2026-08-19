@@ -410,3 +410,80 @@ def test_clientkarte_event_url_is_none_when_not_resolvable() -> None:
     )
 
     assert out.events[0].url is None  # 推測した URL は入れない
+
+
+# ── ①d source_link: シート行直リンク / Drive リンクのパススルー ──────────────
+
+
+def test_source_link_passes_through_sheet_row_deeplink() -> None:
+    from teamagent.skills._shared.source_url import source_link
+
+    url = "https://docs.google.com/spreadsheets/d/1AbC_dEf/edit?gid=123#gid=123&range=57:57"
+    assert source_link(url) == url
+
+
+def test_source_link_passes_through_drive_web_view_link() -> None:
+    from teamagent.skills._shared.source_url import source_link
+
+    url = "https://drive.google.com/file/d/1XyZ/view"
+    assert source_link(url) == url
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "gdrive://abc123",
+        "https://evil.example.com/spreadsheets/d/1AbC/edit",
+        "http://docs.google.com/spreadsheets/d/1AbC/edit",
+        "",
+    ],
+)
+def test_source_link_refuses_internal_ids_and_unknown_hosts(uri: str) -> None:
+    from teamagent.skills._shared.source_url import source_link
+
+    assert source_link(uri) is None
+
+
+def test_source_link_still_resolves_slack_uri(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.skills._shared.source_url import source_link
+
+    monkeypatch.setenv("SLACK_WORKSPACE_DOMAIN", "vectorinc")
+    assert (
+        source_link("slack://C0AAA/1755500000.123456")
+        == "https://vectorinc.slack.com/archives/C0AAA/p1755500000123456"
+    )
+
+
+def test_clientkarte_answer_appends_resolved_source_links() -> None:
+    from teamagent.skills.clientkarte.schema import KarteEvent
+    from teamagent.skills.clientkarte.skill import _with_source_links
+
+    sheet = "https://docs.google.com/spreadsheets/d/1AbC/edit?gid=1#gid=1&range=5:5"
+    events = [
+        KarteEvent(chunk_id=1, url=sheet, summary="a"),
+        KarteEvent(chunk_id=2, url=sheet, summary="b"),
+        KarteEvent(chunk_id=3, url=None, summary="c"),
+    ]
+    out = _with_source_links("カルテ本文", events)
+    assert out == f"カルテ本文\n\n🔗 出典: {sheet}"
+
+
+def test_clientkarte_answer_caps_source_links_at_three() -> None:
+    from teamagent.skills.clientkarte.schema import KarteEvent
+    from teamagent.skills.clientkarte.skill import _with_source_links
+
+    events = [
+        KarteEvent(
+            chunk_id=i, url=f"https://docs.google.com/spreadsheets/d/x{i}/edit", summary=str(i)
+        )
+        for i in range(5)
+    ]
+    out = _with_source_links("本文", events)
+    assert out.count("🔗 出典:") == 3
+
+
+def test_clientkarte_answer_unchanged_without_links() -> None:
+    from teamagent.skills.clientkarte.schema import KarteEvent
+    from teamagent.skills.clientkarte.skill import _with_source_links
+
+    assert _with_source_links("本文", [KarteEvent(chunk_id=1, url=None, summary="x")]) == "本文"

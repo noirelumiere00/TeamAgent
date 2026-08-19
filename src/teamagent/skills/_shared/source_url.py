@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from urllib.parse import urlsplit
 
 _SLACK_WORKSPACE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$")
 _SLACK_SOURCE_URI_RE = re.compile(
@@ -67,4 +68,32 @@ def slack_thread_permalink(source_uri: str) -> str | None:
     return slack_permalink(match.group("channel_id"), match.group("thread_ts"))
 
 
-__all__ = ["slack_permalink", "slack_thread_permalink", "slack_workspace_domain"]
+# ingest が source_uri に焼く「そのまま開ける URL」のホスト（シート行直リンク・
+# Drive の web_view_link）。ここに無いホストは内部識別子扱いで URL を出さない。
+_TRUSTED_HTTPS_SOURCE_HOSTS = frozenset({"docs.google.com", "drive.google.com"})
+
+
+def source_link(source_uri: str) -> str | None:
+    """内部 ``source_uri`` をブラウザで開ける出典 URL へ決定論で変換する。
+
+    - ``slack://<channel>/<ts>`` → workspace permalink（workspace 未設定なら None）
+    - ``https://`` かつ信頼ホスト（Google Sheets 行直リンク / Drive web_view_link）
+      → そのまま返す
+    - それ以外（``gdrive://`` 等の内部識別子・未知ホスト）→ None（URL を推測しない）
+    """
+    uri = (source_uri or "").strip()
+    if uri.startswith("slack://"):
+        return slack_thread_permalink(uri)
+    if uri.startswith("https://"):
+        host = (urlsplit(uri).hostname or "").lower()
+        if host in _TRUSTED_HTTPS_SOURCE_HOSTS:
+            return uri
+    return None
+
+
+__all__ = [
+    "slack_permalink",
+    "slack_thread_permalink",
+    "slack_workspace_domain",
+    "source_link",
+]
