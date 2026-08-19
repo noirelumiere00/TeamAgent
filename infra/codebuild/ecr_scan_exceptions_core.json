@@ -19,6 +19,33 @@
       "owner": "s-komata@vectorinc.co.jp",
       "reason": "digest固定のchainguard pythonベース由来。2026-08-13にスキャナDBへ追加され0件ゲートを破った。ベース更新は契約リップル再演のため期限つきで例外化し、次回ベース更新で解消する",
       "expires_on": "2026-09-22"
+    },
+    {
+      "cve": "CVE-2026-54876",
+      "severity": "HIGH",
+      "package": "openssl",
+      "version": "3.6.3-r3",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "digest固定のchainguard pythonベース由来のopenssl 3.6.3-r3。2026-08-19公開のCVEでwolfiには修正3.6.3-r4が同日リリース済みだが、ベースdigestはruntime契約にピンされておりバンプは契約リップル再演になるため期限付きで例外化し、次回ベース更新リップル便(python 3.14.7系バンプ・既存2例外の解消と同時)で解消する",
+      "expires_on": "2026-09-23"
+    },
+    {
+      "cve": "CVE-2026-54876",
+      "severity": "HIGH",
+      "package": "libssl3",
+      "version": "3.6.3-r3",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "digest固定のchainguard pythonベース由来のopenssl 3.6.3-r3。2026-08-19公開のCVEでwolfiには修正3.6.3-r4が同日リリース済みだが、ベースdigestはruntime契約にピンされておりバンプは契約リップル再演になるため期限付きで例外化し、次回ベース更新リップル便(python 3.14.7系バンプ・既存2例外の解消と同時)で解消する",
+      "expires_on": "2026-09-23"
+    },
+    {
+      "cve": "CVE-2026-54876",
+      "severity": "HIGH",
+      "package": "libcrypto3",
+      "version": "3.6.3-r3",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "digest固定のchainguard pythonベース由来のopenssl 3.6.3-r3。2026-08-19公開のCVEでwolfiには修正3.6.3-r4が同日リリース済みだが、ベースdigestはruntime契約にピンされておりバンプは契約リップル再演になるため期限付きで例外化し、次回ベース更新リップル便(python 3.14.7系バンプ・既存2例外の解消と同時)で解消する",
+      "expires_on": "2026-09-23"
     }
   ]
 }
