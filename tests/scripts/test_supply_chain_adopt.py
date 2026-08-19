@@ -28,6 +28,8 @@ MAPPING = ROOT / "infra/deploy/supply_chain_adoptions.json"
 VALIDATOR = ROOT / "infra/deploy/supply_chain_adopt_validate.py"
 INTEGRITY = ROOT / "infra/deploy/supply_chain_adopt_integrity.py"
 GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
+BOOTSTRAP = ROOT / "infra/deploy/bootstrap_runtime_session.sh"
+RUNTIME_EVIDENCE_TF = ROOT / "infra/terraform/runtime_evidence.tf"
 RUNBOOK = ROOT / "docs/runbooks/supply_chain_adopt.md"
 
 sys.path.insert(0, str(ROOT / "infra/deploy"))
@@ -921,19 +923,77 @@ def test_guard_resolves_and_binds_caller_principal_in_both_adopt_modes() -> None
     plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
     apply_body = section[section.index("adopt_apply()") :]
     for body in (plan_body, apply_body):
-        assert "adopt_caller_principal_arn" in body
+        assert "adopt_trusted_principal_arn" in body
         assert '--principal-arn "$principal_arn"' in body
-    assert plan_body.index("adopt_caller_principal_arn") < plan_body.index("state pull")
+    assert plan_body.index("adopt_trusted_principal_arn") < plan_body.index("state pull")
+
+
+def test_adopt_reuses_the_existing_trusted_identity_verifier() -> None:
+    """adopt 専用の principal 正規化を作らず、既存 verifier をそのまま通すこと。"""
+    section = _guard_adopt_section()
+    resolver = section[
+        section.index("adopt_trusted_principal_arn() {") : section.index("adopt_plan() {")
+    ]
+    assert "assert_trusted_automation_identity" in resolver
+    # canonical principal は verifier が検証した identity から取る（独自加工しない）。
+    assert "jq -er '.Arn'" in resolver
+    for invented in ("sed ", "awk ", "cut -d", "${arn%%", "${arn##"):
+        assert invented not in resolver, f"adopt 独自の principal 加工が入っている: {invented}"
 
 
 def test_guard_rejects_root_principal_before_any_adopt_work() -> None:
     """guard 側でも root を拒否する（binding 到達前に止める）。"""
     section = _guard_adopt_section()
     resolver = section[
-        section.index("adopt_caller_principal_arn() {") : section.index("adopt_plan() {")
+        section.index("adopt_trusted_principal_arn() {") : section.index("adopt_plan() {")
     ]
     assert "arn:aws*:iam::*:root)" in resolver
     assert "root principal では adopt を実行できません" in resolver
+    assert resolver.index("arn:aws*:iam::*:root)") < resolver.index(
+        "assert_trusted_automation_identity"
+    )
+
+
+def test_trusted_session_arn_is_stable_across_credential_refresh() -> None:
+    """canonical principal が session ごとに変わらないことを構成で保証する。
+
+    role の trust policy が sts:RoleSessionName を固定値で StringEquals しているため、
+    別の session 名で assume することが STS 側で拒否される。よって plan と apply が
+    別 temporary session になっても assumed-role session ARN は同一になる。
+    """
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    assume = tf[tf.index('data "aws_iam_policy_document" "runtime_automation_assume"') :]
+    assume = assume[: assume.index("\ndata ")]
+    assert 'variable = "sts:RoleSessionName"' in assume
+    assert 'test     = "StringEquals"' in assume
+    assert 'variable = "aws:MultiFactorAuthPresent"' in assume
+
+    session_name = re.search(r'runtime_automation_session_name\s*=\s*"([^"]+)"', tf).group(1)
+    guard_arn = re.search(
+        r'TRUSTED_AUTOMATION_ARN="([^"]+)"', GUARD.read_text(encoding="utf-8")
+    ).group(1)
+    bootstrap_arn = re.search(
+        r'EXPECTED_SESSION_ARN="(arn:aws:sts::[^"]*terraform-runtime-automation[^"]*)"',
+        BOOTSTRAP.read_text(encoding="utf-8"),
+    ).group(1)
+    assert guard_arn.endswith(f"/{session_name}")
+    assert guard_arn == bootstrap_arn
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "PR2-A0.1 で報告済みの既知ギャップ: adopt-plan / adopt-apply が "
+        "bootstrap_runtime_session.sh の allowlist に未登録のため、承認済みの "
+        "non-root 経路から adopt を起動できない。allowlist 追加の承認後にこの "
+        "xfail を外すこと。"
+    ),
+)
+def test_adopt_modes_are_reachable_through_the_approved_session_bootstrap() -> None:
+    """guard が受け付ける adopt モードは、承認済み bootstrap からも起動できるべき。"""
+    allowlist = BOOTSTRAP.read_text(encoding="utf-8")
+    for mode in ("adopt-plan", "adopt-apply"):
+        assert f"{mode}" in allowlist
 
 
 @pytest.mark.parametrize(

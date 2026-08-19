@@ -10111,10 +10111,17 @@ adopt_assert_out_dir_outside_repo() {
 }
 
 # adopt は Terraform state を書き換える操作なので「誰が実行したか」を plan と apply で束縛する。
-# account ID の一致だけでは principal の差し替えを検出できない。root は AWS 自身が日常運用に
-# 使わないよう推奨している主体であり、activation の実行主体としては明示的に拒否する。
-adopt_caller_principal_arn() {
-  local arn
+# account ID の一致だけでは principal の差し替えを検出できない。
+#
+# 認可は adopt 専用ロジックを作らず、既存の trusted identity verifier
+# （assert_trusted_automation_identity）をそのまま入口に置く。canonical principal は
+# その verifier が既に持っている TRUSTED_AUTOMATION_ARN（role session ARN）で、role の
+# trust policy が sts:RoleSessionName を固定値で要求しているため（runtime_evidence.tf の
+# runtime_automation_assume）、credential を取り直しても session ARN は変わらない。
+# したがって plan と apply が別 session になっても canonical principal は一致する。
+# 読み取った生の caller identity は out_dir へ audit evidence として残す。
+adopt_trusted_principal_arn() {
+  local identity_out="$1" arn
   arn="$(aws_cli sts get-caller-identity --query Arn --output text)" ||
     die "adopt: caller identity を取得できませんでした"
   [ -n "$arn" ] && [ "$arn" != "None" ] ||
@@ -10123,20 +10130,22 @@ adopt_caller_principal_arn() {
     arn:aws*:iam::*:root)
       die "root principal では adopt を実行できません: $arn
    root は全リソースへの実質無制限権限を持ち、一時 credential でもありません。
-   非 root の一時 credential（assumed-role session）で実行してください。"
+   infra/deploy/bootstrap_runtime_session.sh 経由の trusted automation session で実行してください。"
       ;;
   esac
-  printf '%s\n' "$arn"
+  assert_trusted_automation_identity "$identity_out"
+  jq -er '.Arn' "$identity_out" ||
+    die "adopt: trusted identity から canonical principal を取り出せませんでした"
 }
 
 adopt_plan() {
   local var_file="$1" out_dir="$2" principal_arn
   adopt_require_helpers
   adopt_assert_out_dir_outside_repo "$out_dir"
-  principal_arn="$(adopt_caller_principal_arn)"
   (umask 077 && mkdir -p "$out_dir") ||
     die "adopt の out ディレクトリを作成できませんでした: $out_dir"
   chmod 700 "$out_dir"
+  principal_arn="$(adopt_trusted_principal_arn "$out_dir/identity-plan.json")"
 
   # plan した「世界」を manifest へ固定する。apply 時に全項目を exact match で再照合し、
   # 1 項目でも違えば FATAL にする（別 commit / 別 state / 改竄 plan での apply を封じる）。
@@ -10184,7 +10193,7 @@ adopt_apply() {
   local out_dir="$1" approve="$2" principal_arn
   adopt_require_helpers
   adopt_assert_out_dir_outside_repo "$out_dir"
-  principal_arn="$(adopt_caller_principal_arn)"
+  principal_arn="$(adopt_trusted_principal_arn "$out_dir/identity-apply.json")"
   for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json \
     state-backup.json adopt-binding.json; do
     [ -f "$out_dir/$adopt_artifact" ] || die "adopt 成果物がありません: $out_dir/$adopt_artifact"
