@@ -141,7 +141,9 @@ Personal Agent / Memory / Specialist 化のため、Hermes Agent（NousResearch�
 
 位置づけ: **TeamAgent を Hermes で作り直すのではなく、自前で持っている Agent Runtime 部分（上記 L2 bounded loop）に Hermes という選択肢を追加する**。Security / MCP / Skills / RAG はすべて既存のまま。Security Authority は永続的に TeamAgent MCP Gateway 側にあり、Hermes には RDS / OAuth token / Secrets / 既存 MCP bearer を渡さない。
 
-- PR2: Hermes dark runtime（ECS 常駐タスク 0 — Terraform で desired_count を 0 と宣言・最小 IAM・healthz）
+- PR2-A0: Supply-Chain Adopt（content-addressed buildspec を hash-keyed append-only 世代モデルへ。Hermes は登場しない）
+- PR2-A1: Hermes Supply-Chain Onboarding（upstream image を digest 固定した薄い derived image を署名リリース鎖へ通す）
+- PR2-B: Hermes Dark Runtime（PR2-A1 の release digest を ECS へ。常駐タスク 0・受け入れは RunTask のみ）
 - PR3: `run_hermes_agent`（`USE_HERMES_ORCHESTRATOR` 既定 OFF・OpenClaw 非公開）+ delegated session claim（per-call MAC・引数束縛・専用 callback boundary）
 - PR-R: 容量制御（**実ユーザー routing 前の必須 Gate**）
 - PR4-8: Proposal Specialist → Personal Profile → Memory（approval 付き）→ Multi source（policy version による段階解禁）→ AI General Router

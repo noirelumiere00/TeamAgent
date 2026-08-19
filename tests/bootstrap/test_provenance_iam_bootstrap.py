@@ -27,6 +27,7 @@ ECR_TF = ROOT / "infra" / "terraform" / "ecr.tf"
 RUNTIME_EVIDENCE_TF = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
 MEDIA_CUTOVER_ATTESTOR_TF = ROOT / "infra" / "terraform" / "media_cutover_attestor.tf"
 MCP_APPROVAL_TF = ROOT / "infra" / "terraform" / "mcp_approval.tf"
+SUPPLY_CHAIN_ADOPT_TF = ROOT / "infra" / "terraform" / "supply_chain_adopt.tf"
 BUILD_TEAMAGENT = ROOT / "infra" / "deploy" / "build_teamagent_image.sh"
 BUILD_OPENCLAW = ROOT / "infra" / "deploy" / "build_openclaw_image.sh"
 BUILD_TIKTOK = ROOT / "infra" / "deploy" / "build_tiktok_image.sh"
@@ -2247,6 +2248,7 @@ def test_bootstrap_targets_fail_closed_until_split_policy_migration() -> None:
         RUNTIME_EVIDENCE_TF,
         MEDIA_CUTOVER_ATTESTOR_TF,
         MCP_APPROVAL_TF,
+        SUPPLY_CHAIN_ADOPT_TF,
     ):
         declarations.update(
             f"{resource_type}.{name}"

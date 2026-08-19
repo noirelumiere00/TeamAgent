@@ -6,15 +6,18 @@
 ## PR 分割と順序
 
 ```
-PR1 Docs → PR2 Hermes dark runtime → PR3 run_hermes_agent + delegated security
+PR1 Docs → PR2-A0 Supply-Chain Adopt → PR2-A1 Hermes supply-chain onboarding
+        → PR2-B Hermes dark runtime → PR3 run_hermes_agent + delegated security
         → PR-R capacity control（必須 Gate）→ PR4 Proposal pilot
         → PR5 Profile → PR6 Memory → PR7 Multi source → PR8 Router
 ```
 
 | PR | 内容 | 変更範囲 | リスク | 承認 |
 |---|---|---|---|---|
-| PR1 | docs only（ADR/実装計画/README/索引/Archive） | *.md のみ | ゼロ | 本 PR |
-| PR2 | Hermes dark runtime: コンテナ + ECS service（**常駐タスク 0 — Terraform で desired_count を 0 と宣言**）+ 最小 IAM + healthz | infra/docker, infra/terraform（新規リソースのみ） | 低 | PR1 後に個別承認 |
+| PR1 | docs only（ADR/実装計画/README/索引/Archive） | *.md のみ | ゼロ | 完了（PR #302 merged） |
+| **PR2-A0** | **Supply-Chain Adopt（本 PR）**: content-addressed buildspec を hash-keyed append-only generation model へ移行し、実態から取り残された Terraform state を adopt。**Hermes は一切登場しない** | infra/terraform（既存 buildspec object の世代化）, infra/deploy, docs/runbooks | 中（供給網の要・実体は不変） | PR1 後に個別承認 |
+| **PR2-A1** | **Hermes Supply-Chain Onboarding**: upstream image を digest 固定 → 薄い derived image → 署名リリース鎖へ載せる（ECR 3 本・promoter 3 層 allowlist・receipt subject・contract・テスト）。**ECS は作らない** | infra/docker, infra/codebuild, infra/terraform（ECR/IAM/promoter）, tests | 中（既存鎖の改修を含む＝最低 14 ファイル） | PR2-A0 後に個別承認 |
+| **PR2-B** | **Hermes dark runtime**: PR2-A1 の release digest で ECS service（**常駐タスク 0 — Terraform で desired_count を 0 と宣言**）+ 最小 IAM + healthz | infra/terraform（新規リソースのみ） | 低 | PR2-A1 後に個別承認 |
 | PR3 | run_hermes_agent + delegated session claim + callback boundary + Security Tests | mcp_gateway/, hermes/, tests/ | 中（flag OFF で不活性） | **着手前に delegated claim 設計の再レビューを実施**（裁定済み） |
 | **PR-R** | **容量制御（PR4 前の必須 Gate）**: MCP admission control / in-flight metrics / heavy-tool semaphore / 明示 overload 応答 | mcp_gateway/, runtime/, fargate.tf env | 中 | 個別承認 |
 | PR4 | Proposal Specialist pilot（allowlist + A/B eval） | hermes profile 定義, eval | 低 | 個別承認 |
@@ -23,19 +26,51 @@ PR1 Docs → PR2 Hermes dark runtime → PR3 run_hermes_agent + delegated securi
 | PR7 | Multi source 解禁拡大（policy version 更新を含む） | policy 定義, （必要なら）skill G1 強化 | 中 | 個別承認 |
 | PR8 | AI General Router（SOUL 改訂 + OC 4点セット） | infra/openclaw/ | 中 | 個別承認 |
 
-## PR2 詳細（Hermes dark runtime）
+## PR2-A0 詳細（Supply-Chain Adopt・本 PR）
 
-**受け入れ形態（ADR §20 裁定）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言）。受け入れ試験は ECS RunTask で 1 タスク起動 → `startup → /healthz → Bedrock client 初期化 → CloudWatch logs` を確認して終了。常駐ゼロ＝idle コストゼロ・外部 routing 0・MCP exposure 0 が自明。
+**なぜ独立した PR なのか（ADR §20.1）**: buildspec は evidence バケット上に content-addressed key（`codebuild-buildspecs/<project>/<body の sha256>.yml`）で置かれ、Object Lock GOVERNANCE と bucket policy の Delete Deny で不変化されている。body の入力が変わるたびに key が変わり replacement 判定になるが、`prevent_destroy` が plan 段階で停止させるため、**dev HEAD は `aws_s3_object` 4 本で apply 不能**だった。AWS 実体は正しく、取り残されていたのは tfstate だけである。**Hermes はこの PR に一切登場しない。**
+
+**モデル**: 世代（generation）を body の sha256 をキーにした **append-only 台帳**として持つ。新世代の取り込みは「実体を publish → 台帳へ 1 エントリ追記 → adopt（import）」で、既存エントリは削除しない。
 
 | Priority | File | Change | Test / 証明 | Rollback |
 |---|---|---|---|---|
-| P0 | `infra/docker/Dockerfile.hermes` | hermes-agent を digest 固定 pin・非 root・readonly rootfs | Trivy C0/H0（リリース契約と同基準） | イメージ未使用なら無影響 |
-| P0 | `infra/terraform/hermes.tf` | ECS service `teamagent-hermes`（desired_count を 0 で宣言・常駐なし）・Cloud Map `teamagent-hermes.teamagent.internal`・SG は mcp→hermes:8790 / hermes→mcp:8787 のみ。**RDS SG / vpce SG に hermes SG を足さない** | SG 契約テスト・tf diff レビュー | 新規リソースのみ＝除去容易 |
+| P0 | `infra/terraform/supply_chain_adopt.tf` | 世代台帳 + `for_each` の世代リソース（`prevent_destroy` 維持）・旧アドレスの `removed`（`destroy = false`）・publish 済み実体の `import` | read-only plan で replacement 0 件・実体の VersionId 不変 | 台帳/世代リソースを戻すだけ（実体は不変） |
+| P0 | `infra/terraform/codebuild.tf` / `mcp_approval.tf` | 単一アドレスの content-addressed `aws_s3_object` 定義を撤去し、世代アドレスへ移す（key 導出 local は body 検査用に残す） | `terraform validate` + plan 差分レビュー | 同上 |
+| P0 | Terraform `check` ブロック | 現行 body の sha256 が台帳に登録済みであることを要求（実体の無い key を CodeBuild へ指す事故を停止） | 未登録 sha に変異させて check が赤くなることを確認 | — |
+| P0 | `infra/deploy/supply_chain_adoptions.json` | adopt の exact mapping（old_address / new_address / key / import_id / expected_content_sha256）。列挙外は通さない | key の basename と new_address の index が sha256 に一致することの検査 | 台帳エントリを戻すだけ |
+| P0 | `infra/deploy/supply_chain_adopt_validate.py` | plan validator（**fail-closed**）。許可するのは `no-op` / `forget`（mapping の old_address 一致）/ `update` かつ import 付き（mapping の new_address・import_id 一致）の 3 種のみ。create・delete・replace・mapping 外アドレスは 1 件でも拒否。mapping 全件が過不足なく plan に現れることも要求 | 実 plan JSON に対する実行 + 変異（create/delete/アドレス改変）で赤になることの確認 | validator を通さない apply はしない |
+| P1 | 手順書（新世代の publish → 台帳追記 → adopt） | 運用手順を runbook 化 | — | — |
+
+**PR2-A0 受け入れ条件**: dev HEAD の `terraform plan` が prevent_destroy 停止なしに通る / replacement・destroy 0 件 / 新しい buildspec 世代を出せる承認済み apply 経路が実在する / **既存の `prevent_destroy` / Object Lock（GOVERNANCE）/ bucket policy の Delete Deny を一切弱めていない** / 既存リリース鎖の挙動不変。
+
+## PR2-A1 詳細（Hermes Supply-Chain Onboarding）
+
+**スコープ**: Hermes upstream image（Docker Hub `nousresearch/hermes-agent` の release tag を **digest 固定**）から薄い derived image を作り、TeamAgent の署名リリース鎖（**quarantine → SBOM/Trivy/attestation → verified-candidates → promoter → release ECR**）を通せる状態にする。**ECS は作らない**（成果物は検証済みの release digest 1 つ）。既存改修だけで最低 14 ファイルに及ぶため PR2-B と分離する。
+
+| Priority | File | Change | Test / 証明 | Rollback |
+|---|---|---|---|---|
+| P0 | `infra/docker/Dockerfile.hermes` | upstream を **digest 固定** pin した薄い derived image・非 root・readonly rootfs | Trivy C0/H0（リリース契約と同基準） | イメージ未使用なら無影響 |
+| P0 | ECR 3 本（`*-hermes-quarantine` / `*-hermes-verified-candidates` / `*-hermes`） | 既存 openclaw/mcp と同型で追加（immutable tag・lifecycle） | ECR 契約テスト・tf diff レビュー | 新規リソースのみ＝除去容易 |
+| P0 | image promoter の 3 層 allowlist | pipeline / receipt subject name / receipt repository mapping の各 allowlist へ hermes を追加（**既存 3 層構造を緩めない**） | 未登録 subject / 未登録 mapping が FATAL で落ちることを実測 | allowlist から除去 |
+| P0 | receipt subject / contract | hermes の subject 名と repository mapping を契約側へ登録 | 既存 receipt 契約テストと同型 | 同上 |
+| P0 | attestation / SBOM 経路 | attestor に hermes pipeline を追加（証跡は既存 evidence バケット・KMS を流用） | 実走で receipt / attestation が生成されること | — |
+
+**PR2-A1 受け入れ条件**: release ECR に Hermes の digest が 1 本入る / receipt・attestation が既存 OpenClaw・MCP と同基準で揃う / promoter の 3 層 allowlist が未登録値を FATAL で拒否する（変異テストで実証）/ **ECS リソースを一切作っていない** / 既存 pipeline の挙動不変。
+
+## PR2-B 詳細（Hermes dark runtime）
+
+**入力**: PR2-A1 が生成した **release digest**（タグではなく digest で参照）。
+
+**受け入れ形態（ADR §20.4 裁定）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言）。受け入れ試験は ECS RunTask で 1 タスク起動 → `startup → /healthz → Bedrock client 初期化 → CloudWatch logs` を確認して終了。常駐ゼロ＝idle コストゼロ・外部 routing 0・MCP exposure 0 が自明。
+
+| Priority | File | Change | Test / 証明 | Rollback |
+|---|---|---|---|---|
+| P0 | `infra/terraform/hermes.tf` | ECS service `teamagent-hermes`（desired_count を 0 で宣言・常駐なし）・image は PR2-A1 の release digest・Cloud Map `teamagent-hermes.teamagent.internal`・SG は mcp→hermes:8790 / hermes→mcp:8787 のみ。**RDS SG / vpce SG に hermes SG を足さない** | SG 契約テスト・tf diff レビュー | 新規リソースのみ＝除去容易 |
 | P0 | hermes IAM role | Allow = bedrock:InvokeModel（限定 profile）+ logs のみ。OpenClaw 同様の**明示 Deny**（secretsmanager:\* / kms:\* / rds\* / dynamodb:\* / s3:\*） | IAM policy 契約テスト（既存 test_\*_contract 同型） | 同上 |
 | P0 | healthz | GET /healthz = process alive + config loaded + Bedrock client init + MCP callback 設定 presence（外部 tool call は含めない） | RunTask 受け入れ試験 | — |
 | P0 | 構造化ログ | service/version/request_id/model/latency/error（dark 中は startup/health のみ） | CloudWatch 実ログ確認 | — |
 
-**PR2 受け入れ条件**: OpenClaw 挙動完全不変 / MCP tool list 完全不変 / existing tests green / RunTask 試験緑 / RDS・OAuth token へのアクセス権なし（IAM 実証）/ rollback = リソース削除 or 常駐タスク 0（Terraform 宣言値）のまま放置。
+**PR2-B 受け入れ条件**: OpenClaw 挙動完全不変 / MCP tool list 完全不変 / existing tests green / RunTask 試験緑 / RDS・OAuth token へのアクセス権なし（IAM 実証）/ rollback = リソース削除 or 常駐タスク 0（Terraform 宣言値）のまま放置。
 
 ## PR3 詳細（run_hermes_agent + delegated claim）
 
