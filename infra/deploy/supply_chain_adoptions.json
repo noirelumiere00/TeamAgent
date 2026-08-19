@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "description": "PR2-A0 Supply-Chain Adopt: content-addressed buildspec を hash-keyed append-only 世代モデルへ移行するための exact mapping。ここに列挙された組み合わせだけが adopt 経路を通れる。列挙外のアドレス・key・import ID が plan に現れたら fail-closed で拒否する。",
+  "bucket": "teamagent-dev-image-release-evidence",
+  "adoptions": [
+    {
+      "old_address": "aws_s3_object.mcp_source_publisher_buildspec",
+      "new_address": "aws_s3_object.mcp_source_publisher_buildspec_generation[\"c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce\"]",
+      "resource_type": "aws_s3_object",
+      "bucket": "teamagent-dev-image-release-evidence",
+      "key": "codebuild-buildspecs/teamagent-dev-mcp-source-publisher/c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce.yml",
+      "expected_content_sha256": "c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce"
+    },
+    {
+      "old_address": "aws_s3_object.image_attestor_buildspec",
+      "new_address": "aws_s3_object.image_attestor_buildspec_generation[\"6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c\"]",
+      "resource_type": "aws_s3_object",
+      "bucket": "teamagent-dev-image-release-evidence",
+      "key": "codebuild-buildspecs/teamagent-dev-image-attestor/6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c.yml",
+      "expected_content_sha256": "6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c"
+    },
+    {
+      "old_address": "aws_s3_object.image_promoter_buildspec",
+      "new_address": "aws_s3_object.image_promoter_buildspec_generation[\"bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9\"]",
+      "resource_type": "aws_s3_object",
+      "bucket": "teamagent-dev-image-release-evidence",
+      "key": "codebuild-buildspecs/teamagent-dev-image-promoter/bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9.yml",
+      "expected_content_sha256": "bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9"
+    },
+    {
+      "old_address": "aws_s3_object.approval_publisher_resolved_source_buildspec",
+      "new_address": "aws_s3_object.approval_publisher_resolved_source_buildspec_generation[\"33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4\"]",
+      "resource_type": "aws_s3_object",
+      "bucket": "teamagent-dev-image-release-evidence",
+      "key": "codebuild-buildspecs/teamagent-dev-approval-publisher/33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4.yml",
+      "import_id": "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-approval-publisher/33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4.yml",
+      "expected_content_sha256": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
+    }
+  ]
+}

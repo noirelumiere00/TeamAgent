@@ -3206,72 +3206,6 @@ locals {
   )
 }
 
-resource "aws_s3_object" "mcp_source_publisher_buildspec" {
-  bucket                        = aws_s3_bucket.image_release_evidence.id
-  key                           = local.mcp_source_publisher_buildspec_s3_key
-  content                       = local.mcp_source_publisher_buildspec
-  content_type                  = "text/yaml"
-  source_hash                   = local.mcp_source_publisher_buildspec_sha256
-  server_side_encryption        = "aws:kms"
-  kms_key_id                    = aws_kms_key.image_release_evidence.arn
-  bucket_key_enabled            = true
-  object_lock_mode              = "GOVERNANCE"
-  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
-
-  depends_on = [
-    aws_s3_bucket_object_lock_configuration.image_release_evidence,
-    aws_s3_bucket_policy.image_release_evidence,
-  ]
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_s3_object" "image_attestor_buildspec" {
-  bucket                        = aws_s3_bucket.image_release_evidence.id
-  key                           = local.image_attestor_buildspec_s3_key
-  content                       = local.image_attestor_buildspec
-  content_type                  = "text/yaml"
-  source_hash                   = local.image_attestor_buildspec_sha256
-  server_side_encryption        = "aws:kms"
-  kms_key_id                    = aws_kms_key.image_release_evidence.arn
-  bucket_key_enabled            = true
-  object_lock_mode              = "GOVERNANCE"
-  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
-
-  depends_on = [
-    aws_s3_bucket_object_lock_configuration.image_release_evidence,
-    aws_s3_bucket_policy.image_release_evidence,
-  ]
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
-resource "aws_s3_object" "image_promoter_buildspec" {
-  bucket                        = aws_s3_bucket.image_release_evidence.id
-  key                           = local.image_promoter_buildspec_s3_key
-  content                       = local.image_promoter_buildspec
-  content_type                  = "text/yaml"
-  source_hash                   = local.image_promoter_buildspec_sha256
-  server_side_encryption        = "aws:kms"
-  kms_key_id                    = aws_kms_key.image_release_evidence.arn
-  bucket_key_enabled            = true
-  object_lock_mode              = "GOVERNANCE"
-  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
-
-  depends_on = [
-    aws_s3_bucket_object_lock_configuration.image_release_evidence,
-    aws_s3_bucket_policy.image_release_evidence,
-  ]
-
-  lifecycle {
-    prevent_destroy = true
-  }
-}
-
 resource "aws_codebuild_project" "mcp_source_publisher" {
   name           = local.mcp_source_publisher_project_name
   description    = "Independently validate origin/dev and publish a signed versioned MCP source"
@@ -3322,7 +3256,7 @@ resource "aws_codebuild_project" "mcp_source_publisher" {
 
   depends_on = [
     aws_iam_role_policy.mcp_source_publisher,
-    aws_s3_object.mcp_source_publisher_buildspec,
+    aws_s3_object.mcp_source_publisher_buildspec_generation,
   ]
 }
 
@@ -3369,7 +3303,7 @@ resource "aws_codebuild_project" "image_attestor" {
 
   depends_on = [
     aws_iam_role_policy.image_attestor,
-    aws_s3_object.image_attestor_buildspec,
+    aws_s3_object.image_attestor_buildspec_generation,
   ]
 }
 
@@ -3416,7 +3350,7 @@ resource "aws_codebuild_project" "image_promoter" {
 
   depends_on = [
     aws_iam_role_policy.image_promoter,
-    aws_s3_object.image_promoter_buildspec,
+    aws_s3_object.image_promoter_buildspec_generation,
   ]
 }
 

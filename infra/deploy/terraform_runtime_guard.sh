@@ -10031,6 +10031,124 @@ verify_receipt() {
   fi
 }
 
+
+# ── PR2-A0: Supply-Chain Adopt（既存 sync / runtime migration / activation とは
+# 完全に独立した経路）。adopt は「AWS 実体を一切変更せず Terraform state だけを実態へ
+# 追いつかせる」操作で、許可範囲は sync より狭い。既存 3 経路の validator・allowlist には
+# 一切関与しない。判定ロジックは infra/deploy/supply_chain_adopt_validate.py（fail-closed）と
+# supply_chain_adopt_integrity.py（S3 実体の不変性検査）が持つ。
+ADOPT_MAPPING="$REPO_ROOT/infra/deploy/supply_chain_adoptions.json"
+ADOPT_VALIDATOR="$REPO_ROOT/infra/deploy/supply_chain_adopt_validate.py"
+ADOPT_INTEGRITY="$REPO_ROOT/infra/deploy/supply_chain_adopt_integrity.py"
+ADOPT_BINDING="$REPO_ROOT/infra/deploy/supply_chain_adopt_binding.py"
+ADOPT_APPROVE_TOKEN="I-HAVE-REVIEWED-THE-ADOPT-PLAN"
+
+adopt_require_helpers() {
+  for adopt_path in "$ADOPT_MAPPING" "$ADOPT_VALIDATOR" "$ADOPT_INTEGRITY" "$ADOPT_BINDING"; do
+    [ -f "$adopt_path" ] || die "adopt の必須ファイルがありません: $adopt_path"
+  done
+}
+
+# 旧アドレスが state に存在し、新アドレスが未登録であることを確認する。
+adopt_ownership_discovery() {
+  local state_list="$1" address
+  while IFS= read -r address; do
+    grep -Fxq "$address" "$state_list" ||
+      die "adopt ownership discovery 失敗: 旧アドレスが state にありません: $address"
+  done < <(python3 -c 'import json,sys
+for a in json.load(open(sys.argv[1]))["adoptions"]: print(a["old_address"])' "$ADOPT_MAPPING")
+  while IFS= read -r address; do
+    if grep -Fxq "$address" "$state_list"; then
+      die "adopt ownership discovery 失敗: 新アドレスが既に state にあります: $address"
+    fi
+  done < <(python3 -c 'import json,sys
+for a in json.load(open(sys.argv[1]))["adoptions"]: print(a["new_address"])' "$ADOPT_MAPPING")
+}
+
+adopt_plan() {
+  local var_file="$1" out_dir="$2"
+  adopt_require_helpers
+  mkdir -p "$out_dir"
+  chmod 700 "$out_dir"
+
+  # plan した「世界」を manifest へ固定する。apply 時に全項目を exact match で再照合し、
+  # 1 項目でも違えば FATAL にする（別 commit / 別 state / 改竄 plan での apply を封じる）。
+  git -C "$REPO_ROOT" diff --quiet HEAD -- ||
+    die "adopt-plan は clean tree でのみ実行できます（working tree に未コミット変更があります）"
+  [ -z "$(git -C "$REPO_ROOT" ls-files --others --exclude-standard)" ] ||
+    die "adopt-plan は clean tree でのみ実行できます（untracked file があります）"
+
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-backup.json"
+  chmod 600 "$out_dir/state-backup.json"
+  [ -s "$out_dir/state-backup.json" ] || die "adopt の state backup が空です"
+
+  terraform -chdir="$TF_DIR" state list > "$out_dir/state-list.txt"
+  adopt_ownership_discovery "$out_dir/state-list.txt"
+
+  python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
+    --out "$out_dir/integrity-before.json" ||
+    die "adopt 前の S3 integrity snapshot に失敗しました"
+
+  terraform -chdir="$TF_DIR" plan -input=false -lock-timeout=5m \
+    "-var-file=$var_file" -out="$out_dir/adopt.tfplan" ||
+    die "adopt の terraform plan に失敗しました"
+  terraform -chdir="$TF_DIR" show -json "$out_dir/adopt.tfplan" > "$out_dir/adopt-plan.json"
+  chmod 600 "$out_dir/adopt.tfplan" "$out_dir/adopt-plan.json"
+
+  python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
+    die "adopt plan が不変条件を満たしません（plan は破棄してください）"
+
+  python3 "$ADOPT_BINDING" record \
+    --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
+    --mapping "$ADOPT_MAPPING" --state "$out_dir/state-backup.json" \
+    --account "$EXPECTED_ACCOUNT_ID" --workspace "$EXPECTED_WORKSPACE" ||
+    die "adopt plan binding manifest の作成に失敗しました"
+  chmod 600 "$out_dir/adopt-binding.json"
+
+  echo "✅ adopt plan 検証済み: $out_dir/adopt.tfplan"
+  echo "   承認は plan SHA256 に束縛されます: $(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["plan_sha256"])' "$out_dir/adopt-binding.json")"
+}
+
+adopt_apply() {
+  local out_dir="$1" approve="$2"
+  adopt_require_helpers
+  for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json \
+    state-backup.json adopt-binding.json; do
+    [ -f "$out_dir/$adopt_artifact" ] || die "adopt 成果物がありません: $out_dir/$adopt_artifact"
+  done
+
+  # plan した世界と apply する世界が完全一致することを要求する。
+  # commit / tree / plan hash / mapping hash / state lineage+serial / account /
+  # workspace / terraform version のいずれか 1 つでも違えば FATAL。
+  python3 "$ADOPT_BINDING" verify \
+    --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
+    --mapping "$ADOPT_MAPPING" --account "$EXPECTED_ACCOUNT_ID" \
+    --workspace "$EXPECTED_WORKSPACE" --approve "$approve" ||
+    die "adopt plan binding の再照合に失敗しました（apply は行いません）"
+
+  python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
+    die "adopt-apply 直前の検証に失敗しました"
+  python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
+    --out "$out_dir/integrity-preapply.json" ||
+    die "adopt-apply 直前の S3 integrity snapshot に失敗しました"
+  python3 "$ADOPT_INTEGRITY" compare --before "$out_dir/integrity-before.json" \
+    --after "$out_dir/integrity-preapply.json" ||
+    die "adopt-apply 直前に S3 実体が変化しています"
+
+  terraform -chdir="$TF_DIR" apply -input=false -lock-timeout=5m "$out_dir/adopt.tfplan" ||
+    die "adopt の apply に失敗しました。state backup: $out_dir/state-backup.json"
+
+  python3 "$ADOPT_INTEGRITY" snapshot --mapping "$ADOPT_MAPPING" \
+    --out "$out_dir/integrity-after.json" ||
+    die "adopt 後の S3 integrity snapshot に失敗しました"
+  python3 "$ADOPT_INTEGRITY" compare --before "$out_dir/integrity-before.json" \
+    --after "$out_dir/integrity-after.json" ||
+    die "adopt により AWS 実体が変化しました（activation failure）"
+
+  echo "✅ adopt completed（AWS 実体の変更ゼロを前後比較で確認）"
+}
+
 COMMAND="${1:-}"
 case "$COMMAND" in
   -h|--help|help|"") usage; exit 0 ;;
@@ -13294,6 +13412,35 @@ case "$COMMAND" in
     GATE_LOCK_ACQUIRED="false"
     release_deployment_lock
     echo "✅ guarded apply completed: $APPLY_RECEIPT"
+    ;;
+
+  adopt-plan)
+    ADOPT_VAR_FILE=""
+    ADOPT_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --var-file) ADOPT_VAR_FILE="${2:?--var-file に値が必要}"; shift 2 ;;
+        --out) ADOPT_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "未知の引数: $1" ;;
+      esac
+    done
+    [ -n "$ADOPT_VAR_FILE" ] || die "adopt-plan には --var-file が必須です"
+    [ -n "$ADOPT_OUT" ] || die "adopt-plan には --out が必須です"
+    adopt_plan "$ADOPT_VAR_FILE" "$ADOPT_OUT"
+    ;;
+
+  adopt-apply)
+    ADOPT_OUT=""
+    ADOPT_APPROVE=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --out) ADOPT_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        --approve) ADOPT_APPROVE="${2:?--approve に値が必要}"; shift 2 ;;
+        *) die "未知の引数: $1" ;;
+      esac
+    done
+    [ -n "$ADOPT_OUT" ] || die "adopt-apply には --out が必須です"
+    adopt_apply "$ADOPT_OUT" "$ADOPT_APPROVE"
     ;;
 
   *)

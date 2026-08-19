@@ -273,18 +273,52 @@ Connect RAG（connect.newstv.co.jp/app）は同一 repo の connect_web サー�
 - per-session 予算: `max_calls`（既定 8）+ `cost_cap_usd`（既定 0.5・既存 run_agent と同水準）+ wall-clock（同期 session ≤300s・`absolute_deadline` は v1 では exp と同値）+ per-tool timeout。予算は §7.4 の台帳（TransactWriteItems）で線形化
 - profile 単位の日次上限は PR5 以降（既存 cost_guard / quota_store のパターンを流用）
 
-## 20. Failure / Rollback / PR2 の dark 形態
+## 20. Failure / Rollback / PR2 系列（A0 / A1 / B）の分割と dark 形態
 
 - 各 Phase は env flag 1 個で完全 rollback: `USE_HERMES_ORCHESTRATOR=0` → list_tools から消滅（run_agent と同機構）
 - Hermes down → run_hermes_agent は構造化エラー（既存 `_err` 契約）→ OpenClaw は既存 L1 で応答継続（SOUL の「境界が拒否したら素直に伝える」規範に接続）
-- **PR2 の dark runtime 形態（裁定済み）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言・手動の ECS 直接操作ではない）を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に Terraform 変更として desired_count を 1 へ上げる（それでも flag OFF なら tool 面に出ない）
+
+### 20.1 PR2 を 3 本へ分割した理由（監査で確定）
+
+当初 PR2 は「Hermes dark runtime」1 本の想定だったが、その後の監査で**先に解かないと着手できない供給網側の問題**が 2 段見つかった。よって PR2 を **PR2-A0 / PR2-A1 / PR2-B** の 3 本へ分割する。
+
+| 発見 | 実測内容 | 帰結 |
+|---|---|---|
+| ① Hermes image を署名リリース鎖へ追加する作業は、それ自体が独立した Supply-Chain Security 変更 | ECR 3 本（quarantine / verified-candidates / release）・promoter の 3 層 allowlist（pipeline / receipt subject name / receipt repository mapping）・receipt subject・contract・テストなど、**既存改修だけで最低 14 ファイル**に及ぶ | container 供給網作業を ECS 展開と同一 PR に混ぜない＝**PR2-A1** として切り出す |
+| ② content-addressed buildspec の Terraform state が実態から取り残されている | buildspec の S3 key が body の sha256 由来のため、内容が変わると key が変わり replacement 判定になるが、**`aws_s3_object` 4 本の `prevent_destroy` が plan を停止させる**。つまり**現在の dev HEAD 自体が apply 不能**で、新しい S3 object を作れる承認済み apply 経路も存在しない | ① より前に供給網の土台を直す必要がある＝**PR2-A0** |
+
+### 20.2 PR2-A0: Supply-Chain Adopt（Hermes は一切登場しない）
+
+content-addressed buildspec を **hash-keyed append-only generation model** へ移行し、実態から取り残された Terraform state を安全に adopt できる仕組みを作る。世代（generation）を body の sha256 ごとのエントリとして**追記するだけ**の台帳にし、既存世代は destroy しない。
+
+- **Hermes は一切登場しない**。この PR 単体でも、既存リリース鎖の apply 可能性を回復させる価値がある
+- 既存の **`prevent_destroy` / S3 Object Lock（GOVERNANCE）/ bucket policy の Delete Deny は一切弱めない**。「消せるようにする」のではなく「消さずに済む形にする」
+- state への取込みは create ではなく **adopt（import）**。旧アドレスは `removed` ブロックの `destroy = false` で state から外すだけとし、S3 実体には触れない
+- 出口条件: dev HEAD で `terraform plan` が prevent_destroy 停止なしに通ること、かつ新しい buildspec 世代を出せる承認済み apply 経路が実在すること
+
+### 20.3 PR2-A1: Hermes Supply-Chain Onboarding（ECS は作らない）
+
+Hermes upstream image（Docker Hub `nousresearch/hermes-agent` の release tag を **digest 固定**）から薄い derived image を作り、TeamAgent の署名リリース鎖―― **quarantine → SBOM/Trivy/attestation → verified-candidates → promoter → release ECR** ――を通せる状態にする。
+
+- **ECS は作らない**（service / task definition は PR2-B）。この PR の成果物は「検証済み release digest」1 つ
+- 出口条件: release ECR に Hermes の digest が 1 本入り、receipt / attestation が既存 OpenClaw・MCP と同基準（Trivy C0/H0）で揃うこと
+
+### 20.4 PR2-B: Hermes Dark Runtime（旧 PR2）
+
+PR2-A1 が生成した **release digest** を使って ECS/Fargate に載せる。
+
+- **dark runtime 形態（裁定済み）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言・手動の ECS 直接操作ではない）を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に Terraform 変更として desired_count を 1 へ上げる（それでも flag OFF なら tool 面に出ない）
 
 ## 21. Migration Phases
+
+順序は `PR1 → PR2-A0 → PR2-A1 → PR2-B → PR3 → PR-R → PR4 → PR5 → PR6 → PR7 → PR8`。
 
 | Phase / PR | 内容 | flag | 出口条件 |
 |---|---|---|---|
 | PR1 | docs only（本 ADR + README 全面更新） | — | CI 緑・code diff 0 |
-| PR2 | Hermes dark runtime（ECS 常駐タスク 0・IAM 最小・healthz） | — | RunTask 受け入れ試験（§20） |
+| **PR2-A0** | **Supply-Chain Adopt**: content-addressed buildspec を hash-keyed append-only generation model へ移行し、取り残された Terraform state を adopt（**Hermes は登場しない**） | — | dev HEAD の plan が prevent_destroy 停止なしに通る・新世代を出せる承認済み apply 経路が実在（§20.2） |
+| **PR2-A1** | **Hermes Supply-Chain Onboarding**: upstream image を digest 固定 → 薄い derived image → 署名リリース鎖（quarantine → SBOM/Trivy/attestation → verified-candidates → promoter → release ECR）。**ECS は作らない** | — | release ECR に Hermes digest 1 本・receipt/attestation が既存と同基準（§20.3） |
+| **PR2-B** | **Hermes dark runtime**: PR2-A1 の release digest で ECS/Fargate（**常駐タスク 0**）・IAM 最小・healthz | — | RunTask 受け入れ試験（§20.4） |
 | PR3 | run_hermes_agent + delegated claim + callback boundary + Security Tests | USE_HERMES_ORCHESTRATOR=0 のまま | マージブロッカーテスト 8 本（§25）全緑・OC include 非掲載の契約テスト |
 | **PR-R** | **容量制御（必須 Gate・§22）** | — | admission control + in-flight metrics + heavy-tool semaphore + 明示 overload 応答 |
 | PR4 | Proposal Specialist を限定ユーザーへ | HERMES_ALLOWED_EMAILS | 既存フローとの A/B（quality/latency/cost/citation） |
@@ -294,7 +328,7 @@ Connect RAG（connect.newstv.co.jp/app）は同一 repo の connect_web サー�
 | PR8 | AI General / Router | SOUL+config | fast path の latency 劣化なし |
 | Phase 7 | OpenClaw role review: **KEEP / THIN / REPLACE** をここで初めて判断 | — | Hermes 成熟度評価 |
 
-**PR-R は PR4（実ユーザー routing 開始）前の必須 Gate**。PR1〜PR3 は dark のためブロッカーではない。
+**PR-R は PR4（実ユーザー routing 開始）前の必須 Gate**。PR1〜PR3（PR2-A0 / PR2-A1 / PR2-B を含む）は dark のためブロッカーではない。
 
 ## 22. Capacity Control（検証で確定した現状と PR-R）
 
@@ -311,7 +345,7 @@ PR-R の必要条件（PR4 前の必須 Gate）:
 
 | リスク | 深刻度 | 緩和 |
 |---|---|---|
-| delegated claim の設計穴 | HIGH | §7 の敵対審査反映設計 + §25 マージブロッカーテスト。**PR2 完了後・PR3 着手前に delegated claim 周りの再レビューを実施**（裁定済み） |
+| delegated claim の設計穴 | HIGH | §7 の敵対審査反映設計 + §25 マージブロッカーテスト。**PR2-B 完了後・PR3 着手前に delegated claim 周りの再レビューを実施**（裁定済み） |
 | toolFilter がクライアント側ゲートであることの誤解 | HIGH | §6 の禁止形を明文化・callback は別 route + server-side policy |
 | 会社共有モードで per-user OAuth 面が開く | HIGH | §7.5 v1 hard deny + 将来は policy version + G1 強化 |
 | Memory への会社データ混入 | HIGH | 永続化 API 非公開 + 監査 job |

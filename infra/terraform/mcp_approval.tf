@@ -978,36 +978,6 @@ resource "aws_s3_object" "approval_publisher_buildspec" {
   }
 }
 
-resource "aws_s3_object" "approval_publisher_resolved_source_buildspec" {
-  bucket                        = aws_s3_bucket.image_release_evidence.id
-  key                           = local.approval_publisher_buildspec_s3_key
-  content                       = local.approval_publisher_buildspec
-  content_type                  = "text/yaml"
-  source_hash                   = local.approval_publisher_buildspec_sha256
-  server_side_encryption        = "aws:kms"
-  kms_key_id                    = aws_kms_key.image_release_evidence.arn
-  bucket_key_enabled            = true
-  object_lock_mode              = "GOVERNANCE"
-  object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date
-
-  depends_on = [
-    aws_s3_bucket_object_lock_configuration.image_release_evidence,
-    aws_s3_bucket_policy.image_release_evidence,
-  ]
-
-  lifecycle {
-    prevent_destroy = true
-
-    precondition {
-      condition = (
-        local.approval_publisher_buildspec_sha256 !=
-        local.approval_publisher_bootstrap_buildspec_expected_sha256
-      )
-      error_message = "The resolved-source approval buildspec must use a new content-addressed key."
-    }
-  }
-}
-
 resource "aws_codebuild_project" "approval_publisher" {
   name         = local.approval_publisher_project_name
   description  = "Validate protected dev and issue immutable signed MCP approvals"
@@ -1090,7 +1060,7 @@ resource "aws_codebuild_project" "approval_publisher" {
 
   depends_on = [
     aws_iam_role_policy.approval_publisher,
-    aws_s3_object.approval_publisher_resolved_source_buildspec,
+    aws_s3_object.approval_publisher_resolved_source_buildspec_generation,
   ]
 
   lifecycle {
@@ -1139,7 +1109,9 @@ output "approval_publisher_project_arn" {
 output "approval_publisher_buildspec_contract" {
   value = {
     bucket = aws_s3_bucket.image_release_evidence.id
-    key    = aws_s3_object.approval_publisher_resolved_source_buildspec.key
+    key = aws_s3_object.approval_publisher_resolved_source_buildspec_generation[
+      local.approval_publisher_buildspec_sha256
+    ].key
     sha256 = local.approval_publisher_buildspec_sha256
   }
 }

@@ -145,10 +145,10 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
     aws_s3_bucket_versioning.image_release_evidence
     aws_s3_bucket_versioning.openclaw_build_evidence
     aws_s3_object.approval_publisher_buildspec
-    aws_s3_object.approval_publisher_resolved_source_buildspec
-    aws_s3_object.image_attestor_buildspec
-    aws_s3_object.image_promoter_buildspec
-    aws_s3_object.mcp_source_publisher_buildspec
+    aws_s3_object.approval_publisher_resolved_source_buildspec_generation
+    aws_s3_object.image_attestor_buildspec_generation
+    aws_s3_object.image_promoter_buildspec_generation
+    aws_s3_object.mcp_source_publisher_buildspec_generation
     aws_s3_object.tiktok_image_buildspec
     """.split()
 )
