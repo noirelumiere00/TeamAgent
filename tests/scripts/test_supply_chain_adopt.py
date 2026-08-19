@@ -26,7 +26,7 @@ MCP_APPROVAL_TF = ROOT / "infra/terraform/mcp_approval.tf"
 MAPPING = ROOT / "infra/deploy/supply_chain_adoptions.json"
 VALIDATOR = ROOT / "infra/deploy/supply_chain_adopt_validate.py"
 INTEGRITY = ROOT / "infra/deploy/supply_chain_adopt_integrity.py"
-ADOPT_SH = ROOT / "infra/deploy/supply_chain_adopt.sh"
+GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
 
 sys.path.insert(0, str(ROOT / "infra/deploy"))
 
@@ -386,48 +386,59 @@ def test_integrity_compare_detects_any_single_field_change(field: str) -> None:
     compare(before, copy.deepcopy(before))
 
 
-# ── adopt 実行経路の契約 ────────────────────────────────────────────────────
+# ── adopt 実行経路の契約（guard 内の独立モード）────────────────────────────
 
 
-def test_adopt_entrypoint_does_not_touch_the_existing_guard() -> None:
-    """adopt は独立経路。既存 guard を書き換えないこと。"""
-    body = _strip_comments(ADOPT_SH.read_text(encoding="utf-8"))
-    assert "terraform_runtime_guard.sh" not in body
+def _guard_adopt_section() -> str:
+    """guard 内の adopt 関連部分だけを取り出す（既存経路と混ざらないことの担保）。"""
+    body = GUARD.read_text(encoding="utf-8")
+    start = body.index("ADOPT_MAPPING=")
+    end = body.index('COMMAND="${1:-}"')
+    return body[start:end]
 
 
-def test_adopt_entrypoint_refuses_apply_without_approval() -> None:
-    result = subprocess.run(
-        ["bash", str(ADOPT_SH), "apply", "--out", "/tmp/does-not-exist"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode != 0
-    assert "承認" in result.stderr
+def test_adopt_is_a_separate_guard_mode() -> None:
+    """adopt は既存 sync / migration / activation とは別のサブコマンドとして生える。"""
+    body = GUARD.read_text(encoding="utf-8")
+    assert "  adopt-plan)" in body
+    assert "  adopt-apply)" in body
 
 
-def test_adopt_entrypoint_rejects_unknown_subcommand() -> None:
-    result = subprocess.run(["bash", str(ADOPT_SH), "destroy"], capture_output=True, text=True)
-    assert result.returncode != 0
-    assert "未知のサブコマンド" in result.stderr
-
-
-def test_adopt_entrypoint_never_weakens_immutability() -> None:
-    """禁止操作が実行経路へ紛れ込んでいないことを固定する。"""
-    body = _strip_comments(ADOPT_SH.read_text(encoding="utf-8"))
-    for forbidden in (
-        "terraform state rm",
-        "terraform import ",
-        "-target=",
-        "object-lock-retain-until-date",
-        "delete-object",
+def test_adopt_does_not_touch_existing_allowlists() -> None:
+    """adopt の実装が既存 3 経路の allowlist 変数へ触れていないこと。"""
+    section = _guard_adopt_section()
+    for existing in (
+        "allowed_runtime_changes",
+        "allowed_replacements",
+        "validate_manifest_change_allowlist",
+        "MIGRATION_KIND",
     ):
-        assert forbidden not in body, f"禁止操作が含まれている: {forbidden}"
+        assert existing not in section, f"adopt が既存経路の要素に触れている: {existing}"
 
 
-def test_adopt_entrypoint_runs_integrity_before_and_after_apply() -> None:
-    """apply の前後で必ず実体不変を検査する。"""
-    body = ADOPT_SH.read_text(encoding="utf-8")
-    apply_section = body[body.index("cmd_apply()") :]
-    assert apply_section.count("supply_chain_adopt_integrity.py") == 0
-    assert apply_section.count('"$INTEGRITY"') >= 3
-    assert apply_section.index("terraform") < apply_section.rindex('"$INTEGRITY"')
+def test_adopt_apply_requires_explicit_approval() -> None:
+    section = _guard_adopt_section()
+    assert 'ADOPT_APPROVE_TOKEN' in section
+    assert "adopt-apply には明示の承認が必要です" in section
+
+
+def test_adopt_runs_integrity_before_and_after_apply() -> None:
+    """apply の前後で必ず S3 実体の不変性を検査する。"""
+    section = _guard_adopt_section()
+    apply_body = section[section.index("adopt_apply()") :]
+    assert apply_body.count('"$ADOPT_INTEGRITY"') >= 3
+    assert apply_body.index("terraform -chdir") < apply_body.rindex('"$ADOPT_INTEGRITY"')
+
+
+def test_adopt_backs_up_state_and_discovers_ownership_before_planning() -> None:
+    section = _guard_adopt_section()
+    plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
+    assert plan_body.index("state pull") < plan_body.index("terraform -chdir=\"$TF_DIR\" plan")
+    assert "adopt_ownership_discovery" in plan_body
+
+
+def test_adopt_never_weakens_immutability() -> None:
+    """禁止操作が adopt 実装へ紛れ込んでいないことを固定する。"""
+    section = _strip_comments(_guard_adopt_section())
+    for forbidden in ("prevent_destroy", "object-lock", "delete-object", "state rm"):
+        assert forbidden not in section, f"禁止操作が含まれている: {forbidden}"

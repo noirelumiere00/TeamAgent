@@ -1,7 +1,8 @@
 # Runbook: Supply-Chain Adopt（content-addressed buildspec の世代 adopt）
 
-対象: `infra/deploy/supply_chain_adopt.sh` を使った Terraform state の adopt 操作。
-既存の `terraform_runtime_guard.sh`（sync / runtime migration / activation）とは**完全に独立した経路**で、guard には一切変更を加えない。
+対象: `terraform_runtime_guard.sh` の `adopt-plan` / `adopt-apply` モードを使った Terraform state の adopt 操作。
+
+adopt は既存の sync / runtime migration / activation とは**完全に独立した経路**で、それらの validator・allowlist には一切関与しない（許可範囲は sync より狭い）。terraform を実行してよいのは guard だけ、というリポジトリの契約に従い、adopt も guard 内のモードとして実装している。判定ロジックは `supply_chain_adopt_validate.py`（fail-closed）と `supply_chain_adopt_integrity.py`（S3 実体の不変性検査）が持つ。
 
 ---
 
@@ -55,7 +56,7 @@ evidence バケット上の buildspec は content-addressed key（`codebuild-bui
 ### 4-1. plan（read-only。state backup と ownership discovery を含む）
 
 ```bash
-bash infra/deploy/supply_chain_adopt.sh plan \
+bash infra/deploy/terraform_runtime_guard.sh adopt-plan \
   --var-file infra/terraform/terraform.tfvars \
   --out /secure/path/adopt-$(date +%Y%m%d-%H%M%S)
 ```
@@ -68,23 +69,17 @@ bash infra/deploy/supply_chain_adopt.sh plan \
 4. `terraform plan -out`（保存 plan）
 5. adopt plan validation（fail-closed。mapping 外・create・delete・replace を全拒否）
 
-### 4-2. verify（plan 作成後に実体が動いていないことを確認）
+### 4-2. apply（明示の承認が必要）
 
 ```bash
-bash infra/deploy/supply_chain_adopt.sh verify --out /secure/path/adopt-...
-```
-
-### 4-3. apply（明示の承認が必要）
-
-```bash
-bash infra/deploy/supply_chain_adopt.sh apply --out /secure/path/adopt-... \
+bash infra/deploy/terraform_runtime_guard.sh adopt-apply --out /secure/path/adopt-... \
   --approve "I-HAVE-REVIEWED-THE-ADOPT-PLAN"
 ```
 
 apply は直前に validation と integrity を再実行し、apply 後にも integrity を再取得して比較する。
 比較項目は VersionId / ETag / ContentLength / LastModified / ObjectLockMode / retain-until / body SHA256 で、**1 項目でも変化したら activation failure** として扱う。
 
-### 4-4. post-activation の確認
+### 4-3. post-activation の確認
 
 adopt 後、通常の guarded plan が clean になることを確認する。
 
@@ -98,7 +93,7 @@ bash infra/deploy/terraform_runtime_guard.sh plan --var-file ... --out ...
 - Object Lock / retain-until / bucket policy の Delete Deny の緩和
 - 既存 sync / runtime migration / activation の allowlist・validator の変更
 - `aws_s3_object` に `content` を持たせること
-- raw `terraform import` / `terraform state rm` / `-target` / 無制限 `terraform apply`
+- raw な state 直接操作（手動での取り込み・除去・対象限定フラグ・無制限 apply）
 - mapping（`supply_chain_adoptions.json`）に列挙されていない対象への操作
 - 世代台帳からのエントリ削除
 
