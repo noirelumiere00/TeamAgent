@@ -380,6 +380,32 @@ def test_validator_rejects_an_import_pointing_at_another_object(attribute: str) 
         validate_plan(plan, adoptions)
 
 
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        ("metadata", {"injected": "value"}),
+        ("cache_control", "no-store"),
+        ("website_redirect", "https://example.invalid/"),
+        ("x_future_provider_attribute", "anything"),
+    ],
+)
+def test_import_rejects_any_remote_write_causing_attribute_change(
+    attribute: str, value: Any
+) -> None:
+    """契約 = remote-write-causing update 0。
+
+    security-critical に限らず、provider-configurable な mutable 属性（さらには
+    validator が名前を知らない将来の属性まで）の差分が 1 つでもあれば FATAL。
+    「Terraform state だけを変えた」という主張は、この全キー比較が成立して初めて成り立つ。
+    """
+    adoptions = _adoptions()
+    plan = _adopt_plan(adoptions)
+    change = plan["resource_changes"][1]["change"]
+    change["after"][attribute] = value
+    with pytest.raises(AdoptValidationError, match="must not change the AWS object"):
+        validate_plan(plan, adoptions)
+
+
 def test_import_invariant_ignore_list_stays_empty() -> None:
     """「変更を許す属性」を黙って増やせないようにする。
 
@@ -461,24 +487,50 @@ def _load_mapping_from_dict(raw: dict[str, Any], tmp: Path | None = None) -> lis
 
 
 class _FakeS3:
-    """head_object / get_object だけを持つ最小の S3 スタブ。"""
+    """head_object / get_object だけを持つ最小の S3 スタブ。
 
-    def __init__(self, body: bytes, *, lock: str = "GOVERNANCE", version: str = "v1") -> None:
-        self._body = body
+    本番の失敗モードを再現する: get_object は VersionId ごとの body を保持し、
+    version 指定の無い get は「head の後に差し替えられたかもしれない最新 body」を返す。
+    これにより VersionId 固定を外した実装は TOCTOU テストで必ず赤くなる。
+    """
+
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        lock: str = "GOVERNANCE",
+        version: str | None = "v1",
+    ) -> None:
         self._lock = lock
         self._version = version
+        self._versions: dict[str, bytes] = {} if version is None else {version: body}
+        self._latest = body
+        self.get_calls: list[dict[str, Any]] = []
+
+    def swap_latest(self, body: bytes) -> None:
+        """head の後に別 body へ差し替えられた状況を再現する（version は据え置き）。"""
+        self._latest = body
 
     def head_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
-        return {
-            "VersionId": self._version,
+        head: dict[str, Any] = {
             "ETag": '"etag"',
-            "ContentLength": len(self._body),
+            "ContentLength": len(self._latest),
             "LastModified": "2026-08-17T00:00:00+00:00",
             "ObjectLockMode": self._lock,
             "ObjectLockRetainUntilDate": "2099-12-31T00:00:00+00:00",
         }
+        if self._version is not None:
+            head["VersionId"] = self._version
+        return head
 
-    def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+    def get_object(
+        self,
+        Bucket: str,  # noqa: N803
+        Key: str,  # noqa: N803
+        VersionId: str | None = None,  # noqa: N803
+    ) -> dict[str, Any]:
+        self.get_calls.append({"Key": Key, "VersionId": VersionId})
+
         class _Body:
             def __init__(self, data: bytes) -> None:
                 self._data = data
@@ -486,7 +538,9 @@ class _FakeS3:
             def read(self) -> bytes:
                 return self._data
 
-        return {"Body": _Body(self._body)}
+        if VersionId is None:
+            return {"Body": _Body(self._latest)}
+        return {"Body": _Body(self._versions[VersionId])}
 
 
 def _body_for_first_adoption() -> bytes:
@@ -535,6 +589,83 @@ def test_integrity_snapshot_rejects_weakened_object_lock() -> None:
             snapshot(path, "ap-northeast-1", client=fake)
     finally:
         path.unlink(missing_ok=True)
+
+
+def _mapping_for_body(body: bytes) -> Path:
+    """body の sha256 に整合する 1 エントリ mapping を一時ファイルへ書く（テスト用）。"""
+    import hashlib
+    import tempfile
+
+    entry = _adoptions()[0]
+    digest = hashlib.sha256(body).hexdigest()
+    raw = json.loads(MAPPING.read_text(encoding="utf-8"))
+    raw["adoptions"] = [dict(entry)]
+    raw["adoptions"][0]["expected_content_sha256"] = digest
+    raw["adoptions"][0]["key"] = f"codebuild-buildspecs/p/{digest}.yml"
+    raw["adoptions"][0]["import_id"] = f"{entry['bucket']}/codebuild-buildspecs/p/{digest}.yml"
+    raw["adoptions"][0]["new_address"] = f'aws_s3_object.x["{digest}"]'
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+        json.dump(raw, handle)
+        return Path(handle.name)
+
+
+# ── PR2-A0.1 / P1-1: body 読みは HeadObject の VersionId に固定する ───────────
+#
+# head と get が別コールである以上、version を固定しないと両者の間で差し替えられた
+# body を「head 時点の実体」として誤採取しうる（TOCTOU）。Object Lock 対象バケットは
+# versioning が前提なので、VersionId を確定できないオブジェクトは fail-closed で拒否する。
+
+
+def test_probe_reads_the_body_pinned_to_the_head_version() -> None:
+    """get_object は必ず HeadObject が返した VersionId で呼ぶこと。"""
+    body = b"pinned-body"
+    fake = _FakeS3(body, version="vHEAD")
+    mapping = _mapping_for_body(body)
+    try:
+        snapshot(mapping, "ap-northeast-1", client=fake)
+    finally:
+        mapping.unlink(missing_ok=True)
+    assert fake.get_calls, "get_object が呼ばれていない"
+    assert all(call["VersionId"] == "vHEAD" for call in fake.get_calls)
+
+
+def test_probe_survives_a_body_swap_between_head_and_get() -> None:
+    """head の後に body が差し替えられても、head 時点の version を読むこと（TOCTOU）。"""
+    body = b"original-body"
+    fake = _FakeS3(body, version="vHEAD")
+    fake.swap_latest(b"attacker-swapped-body")
+    mapping = _mapping_for_body(body)
+    try:
+        result = snapshot(mapping, "ap-northeast-1", client=fake)
+    finally:
+        mapping.unlink(missing_ok=True)
+    import hashlib
+
+    probe = next(iter(result["objects"].values()))
+    assert probe["body_sha256"] == hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.parametrize("version", [None, "", "null"])
+def test_probe_rejects_objects_without_a_determinable_version(version: str | None) -> None:
+    """VersionId が確定できないオブジェクトの integrity は証明できないので FATAL。"""
+    body = b"unversioned-body"
+    fake = _FakeS3(body, version=version if version not in ("", "null") else None)
+    if version in ("", "null"):
+        # head が空文字 / "null" を返すケースを直接再現する
+        original = fake.head_object
+
+        def head_with_bad_version(Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+            head = original(Bucket=Bucket, Key=Key)
+            head["VersionId"] = version
+            return head
+
+        fake.head_object = head_with_bad_version  # type: ignore[method-assign]
+    mapping = _mapping_for_body(body)
+    try:
+        with pytest.raises(IntegrityError, match="VersionId"):
+            snapshot(mapping, "ap-northeast-1", client=fake)
+    finally:
+        mapping.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("field", COMPARED_FIELDS)

@@ -64,9 +64,21 @@ def _iso(value: Any) -> str | None:
 
 
 def probe_object(client: Any, bucket: str, key: str) -> dict[str, Any]:
-    """1 オブジェクトの不変性証跡を採取する（body を読んで SHA256 も計算する）。"""
+    """1 オブジェクトの不変性証跡を採取する（body を読んで SHA256 も計算する）。
+
+    body は HeadObject が返した VersionId に固定して読む。head と get が別コールである以上、
+    version を固定しないと両者の間で差し替えられた body を「head 時点の実体」として
+    誤採取しうる（TOCTOU）。Object Lock 対象バケットは versioning が前提なので、
+    VersionId を確定できないオブジェクトは integrity を証明できないものとして拒否する。
+    """
     head = client.head_object(Bucket=bucket, Key=key)
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    version_id = head.get("VersionId")
+    if not isinstance(version_id, str) or not version_id or version_id == "null":
+        raise IntegrityError(
+            f"{key}: VersionId を確定できません（{version_id!r}）。"
+            "version を固定できないオブジェクトの integrity は証明できません"
+        )
+    body = client.get_object(Bucket=bucket, Key=key, VersionId=version_id)["Body"].read()
     return {
         "bucket": bucket,
         "key": key,

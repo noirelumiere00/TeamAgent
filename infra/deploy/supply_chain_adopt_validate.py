@@ -20,10 +20,15 @@ adopt は完全に独立した経路で、許可範囲は sync より **狭い**
 これ以外は 1 件でもあれば拒否する（mapping 外アドレス・create・delete・replace を含む）。
 さらに mapping の全エントリが過不足なく plan に現れることを要求する（数も exact）。
 
-3 の before/after 検査が本 validator の要。importing.id の一致だけでは「実体を変更しない
-import」の証明にならず、retain-until を短縮する import が素通りした実例がある。before /
-after が無い、あるいは security-critical 属性が unknown の場合も「証明できない」として拒否
-する（fail-closed）。
+3 の before/after 検査が本 validator の要で、契約は **remote-write-causing update = 0**。
+security-critical 属性に限らず、before と after の**全キー**を比較し、provider-configurable
+な mutable 属性（tags / metadata / content_type / storage_class / ACL 系を含む）の差分が
+1 つでもあれば拒否する。importing.id の一致だけでは「実体を変更しない import」の証明に
+ならず、retain-until を短縮する import が素通りした実例がある。before / after が無い、
+あるいは security-critical 属性が unknown の場合も「証明できない」として拒否する
+（fail-closed）。これにより adopt の正式契約
+「AWS managed application resources mutation = 0 / Terraform remote state mutation only」
+が plan 段階で成立する。
 
 data source は no-op / read のみ許可する。
 
