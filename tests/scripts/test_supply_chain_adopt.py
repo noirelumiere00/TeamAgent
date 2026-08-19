@@ -12,7 +12,6 @@ from __future__ import annotations
 import copy
 import json
 import re
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -417,9 +416,11 @@ def test_adopt_does_not_touch_existing_allowlists() -> None:
 
 
 def test_adopt_apply_requires_explicit_approval() -> None:
+    """承認検査は binding 側（plan hash へ束縛）で行い、guard は必ずそれを通す。"""
     section = _guard_adopt_section()
-    assert 'ADOPT_APPROVE_TOKEN' in section
-    assert "adopt-apply には明示の承認が必要です" in section
+    apply_body = section[section.index("adopt_apply()") :]
+    assert '--approve "$approve"' in apply_body
+    assert '"$ADOPT_BINDING" verify' in apply_body
 
 
 def test_adopt_runs_integrity_before_and_after_apply() -> None:
@@ -442,3 +443,135 @@ def test_adopt_never_weakens_immutability() -> None:
     section = _strip_comments(_guard_adopt_section())
     for forbidden in ("prevent_destroy", "object-lock", "delete-object", "state rm"):
         assert forbidden not in section, f"禁止操作が含まれている: {forbidden}"
+
+
+# ── plan binding: 「plan した世界」と「apply する世界」の完全一致 ──────────────
+
+from supply_chain_adopt_binding import (  # noqa: E402
+    BOUND_FIELDS,
+    BindingError,
+    check_approval,
+    compare_binding,
+    expected_approval,
+)
+
+GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
+
+
+def _binding() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "plan_sha256": "a" * 64,
+        "plan_json_sha256": "b" * 64,
+        "git_head": "c" * 40,
+        "git_tree_clean": True,
+        "mapping_sha256": "d" * 64,
+        "state_lineage": "11111111-2222-3333-4444-555555555555",
+        "state_serial": 42,
+        "aws_account": "718959508629",
+        "terraform_workspace": "default",
+        "terraform_version": "1.12.2",
+    }
+
+
+def test_binding_accepts_the_identical_world() -> None:
+    """同一 plan + 同一 commit + 同一 state + 正しい承認なら通る。"""
+    recorded = _binding()
+    compare_binding(recorded, copy.deepcopy(recorded))
+    check_approval(recorded, expected_approval(recorded["plan_sha256"]))
+
+
+def test_binding_rejects_stale_plan_after_new_commit() -> None:
+    """plan 後にコードが commit されたら apply させない（今回塞いだ穴）。"""
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["git_head"] = "f" * 40
+    with pytest.raises(BindingError, match="git_head"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_dirty_working_tree() -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["git_tree_clean"] = False
+    with pytest.raises(BindingError):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_tampered_plan_file() -> None:
+    """保存 plan を 1 byte でも改変したら apply させない。"""
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["plan_sha256"] = "9" * 64
+    with pytest.raises(BindingError, match="plan_sha256"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_changed_adopt_mapping() -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["mapping_sha256"] = "e" * 64
+    with pytest.raises(BindingError, match="mapping_sha256"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_state_moved_since_plan() -> None:
+    """コードが同じでも state が動いていたら apply させない（serial binding）。"""
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["state_serial"] = 43
+    with pytest.raises(BindingError, match="state_serial"):
+        compare_binding(recorded, observed)
+
+
+def test_binding_rejects_different_state_lineage() -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed["state_lineage"] = "99999999-2222-3333-4444-555555555555"
+    with pytest.raises(BindingError, match="state_lineage"):
+        compare_binding(recorded, observed)
+
+
+@pytest.mark.parametrize("field", ("aws_account", "terraform_workspace", "terraform_version"))
+def test_binding_rejects_different_environment(field: str) -> None:
+    recorded = _binding()
+    observed = copy.deepcopy(recorded)
+    observed[field] = "other"
+    with pytest.raises(BindingError, match=field):
+        compare_binding(recorded, observed)
+
+
+def test_binding_covers_every_declared_field() -> None:
+    """BOUND_FIELDS の各項目が実際に照合されていること（見落とし防止）。"""
+    recorded = _binding()
+    for field in BOUND_FIELDS:
+        observed = copy.deepcopy(recorded)
+        observed[field] = "MUTATED" if field != "state_serial" else -1
+        with pytest.raises(BindingError):
+            compare_binding(recorded, observed)
+
+
+def test_approval_is_bound_to_the_plan_hash() -> None:
+    """別 plan の承認を流用できない。無指定でも通らない。"""
+    recorded = _binding()
+    with pytest.raises(BindingError, match="束縛"):
+        check_approval(recorded, expected_approval("f" * 64))
+    with pytest.raises(BindingError, match="束縛"):
+        check_approval(recorded, "")
+    with pytest.raises(BindingError, match="束縛"):
+        check_approval(recorded, "I-HAVE-REVIEWED-THE-ADOPT-PLAN")
+
+
+def test_guard_adopt_apply_requires_binding_verification() -> None:
+    """guard の adopt-apply が binding 照合を apply より前に必ず通すこと。"""
+    section = _guard_adopt_section()
+    apply_body = section[section.index("adopt_apply()") :]
+    assert '"$ADOPT_BINDING" verify' in apply_body
+    assert apply_body.index('"$ADOPT_BINDING" verify') < apply_body.index("terraform -chdir")
+
+
+def test_guard_adopt_plan_records_binding_on_clean_tree_only() -> None:
+    section = _guard_adopt_section()
+    plan_body = section[section.index("adopt_plan()") : section.index("adopt_apply()")]
+    assert "clean tree でのみ実行できます" in plan_body
+    assert '"$ADOPT_BINDING" record' in plan_body

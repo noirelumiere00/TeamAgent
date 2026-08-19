@@ -199,6 +199,16 @@ check "approval_publisher_resolved_source_buildspec_generation_is_registered" {
     )
     error_message = "approval-publisher resolved-source buildspec の現行 body の sha256 が世代台帳に未登録です。実体を publish してから supply_chain_adopt.tf の台帳と infra/deploy/supply_chain_adoptions.json へ追記してください。"
   }
+
+  # 旧 aws_s3_object.approval_publisher_resolved_source_buildspec が precondition で
+  # 守っていた不変条件の移植: resolved-source 世代は bootstrap 世代の key と衝突しない。
+  assert {
+    condition = !contains(
+      keys(local.approval_publisher_resolved_source_buildspec_generations),
+      local.approval_publisher_bootstrap_buildspec_expected_sha256,
+    )
+    error_message = "resolved-source の世代台帳が bootstrap 世代の content-addressed key と衝突しています。"
+  }
 }
 
 # ── 移行ブロック（PR2-A0 の activation 用・一度 adopt したら削除してよい）──────────

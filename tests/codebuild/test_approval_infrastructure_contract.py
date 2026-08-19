@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 TERRAFORM_DIR = ROOT / "infra" / "terraform"
 APPROVAL_TERRAFORM = ROOT / "infra" / "terraform" / "mcp_approval.tf"
+SUPPLY_CHAIN_ADOPT_TERRAFORM = APPROVAL_TERRAFORM.parent / "supply_chain_adopt.tf"
 RUNTIME_TERRAFORM = ROOT / "infra" / "terraform" / "runtime_evidence.tf"
 RUNTIME_GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
 
@@ -802,22 +803,29 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert re.search(r"(?m)^\s*prevent_destroy\s*=\s*true\s*$", bootstrap_obj)
     assert "ignore_changes  = [key, content, source_hash]" in bootstrap_obj
 
+    # PR2-A0: resolved-source 世代は hash-keyed append-only モデルへ移設された。
+    # content は Terraform に持たせず（import 後の PutObject で Object Lock 済み実体を
+    # 書き換えないため）、content-addressed 性は check ブロックと独立 SHA256 検査が担う。
+    adopt_body = _read(SUPPLY_CHAIN_ADOPT_TERRAFORM)
     obj = _resource(
-        body,
+        adopt_body,
         "aws_s3_object",
-        "approval_publisher_resolved_source_buildspec",
+        "approval_publisher_resolved_source_buildspec_generation",
     )
-    assert "key                           = local.approval_publisher_buildspec_s3_key" in obj
-    assert "content                       = local.approval_publisher_buildspec" in obj
-    assert "source_hash                   = local.approval_publisher_buildspec_sha256" in obj
+    assert "for_each = local.approval_publisher_resolved_source_buildspec_generations" in obj
+    assert "${each.key}.yml" in obj
+    assert "content " not in obj
+    assert "source_hash" not in obj
     assert 'server_side_encryption        = "aws:kms"' in obj
     assert "kms_key_id                    = aws_kms_key.image_release_evidence.arn" in obj
     assert 'object_lock_mode              = "GOVERNANCE"' in obj
-    assert "object_lock_retain_until_date = local.codebuild_buildspec_retain_until_date" in obj
+    assert "local.approval_publisher_buildspec_sha256," in adopt_body
+    assert "object_lock_retain_until_date = each.value.object_lock_retain_until_date" in obj
     assert re.search(r"(?m)^\s*prevent_destroy\s*=\s*true\s*$", obj)
+    # 旧 resource の precondition は check ブロックへ移植された（衝突防止は維持）。
     assert (
-        "local.approval_publisher_buildspec_sha256 !=" in obj
-        and "local.approval_publisher_bootstrap_buildspec_expected_sha256" in obj
+        "local.approval_publisher_bootstrap_buildspec_expected_sha256," in adopt_body
+        and "bootstrap 世代の content-addressed key と衝突" in adopt_body
     )
 
     assert "?versionId=" not in body
@@ -869,13 +877,16 @@ def test_approval_buildspec_is_content_addressed_locked_and_self_checked() -> No
     assert 'location            = "https://github.com/noirelumiere00/TeamAgent.git"' in project
     assert 'type     = "CODECONNECTIONS"' in project
     assert "local.approval_publisher_buildspec_s3_key" in project
-    assert "aws_s3_object.approval_publisher_resolved_source_buildspec" in project
+    assert "aws_s3_object.approval_publisher_resolved_source_buildspec_generation" in project
     assert "aws_s3_object.approval_publisher_buildspec" not in project
     buildspec_output = _balanced_block_after(
         body,
         'output "approval_publisher_buildspec_contract"',
     )
-    assert "aws_s3_object.approval_publisher_resolved_source_buildspec.key" in buildspec_output
+    assert (
+        "aws_s3_object.approval_publisher_resolved_source_buildspec_generation"
+        in buildspec_output
+    )
     assert "aws_s3_object.approval_publisher_buildspec.key" not in buildspec_output
     # An unusable default, matching every other connection-backed project here:
     # a branch ref would make CreateProject resolve it through the GitHub App and
@@ -1151,7 +1162,6 @@ def test_runtime_guard_has_zero_approval_infrastructure_allowances() -> None:
         "aws_iam_role_policy_attachment.approval_reader_runtime_automation",
         "aws_cloudwatch_log_group.codebuild_approval_publisher",
         "aws_s3_object.approval_publisher_buildspec",
-        "aws_s3_object.approval_publisher_resolved_source_buildspec",
         "aws_codebuild_project.approval_publisher",
     }
     actual_approval_addresses = {

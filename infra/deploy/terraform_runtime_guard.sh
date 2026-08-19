@@ -10040,10 +10040,11 @@ verify_receipt() {
 ADOPT_MAPPING="$REPO_ROOT/infra/deploy/supply_chain_adoptions.json"
 ADOPT_VALIDATOR="$REPO_ROOT/infra/deploy/supply_chain_adopt_validate.py"
 ADOPT_INTEGRITY="$REPO_ROOT/infra/deploy/supply_chain_adopt_integrity.py"
+ADOPT_BINDING="$REPO_ROOT/infra/deploy/supply_chain_adopt_binding.py"
 ADOPT_APPROVE_TOKEN="I-HAVE-REVIEWED-THE-ADOPT-PLAN"
 
 adopt_require_helpers() {
-  for adopt_path in "$ADOPT_MAPPING" "$ADOPT_VALIDATOR" "$ADOPT_INTEGRITY"; do
+  for adopt_path in "$ADOPT_MAPPING" "$ADOPT_VALIDATOR" "$ADOPT_INTEGRITY" "$ADOPT_BINDING"; do
     [ -f "$adopt_path" ] || die "adopt の必須ファイルがありません: $adopt_path"
   done
 }
@@ -10070,6 +10071,13 @@ adopt_plan() {
   mkdir -p "$out_dir"
   chmod 700 "$out_dir"
 
+  # plan した「世界」を manifest へ固定する。apply 時に全項目を exact match で再照合し、
+  # 1 項目でも違えば FATAL にする（別 commit / 別 state / 改竄 plan での apply を封じる）。
+  git -C "$REPO_ROOT" diff --quiet HEAD -- ||
+    die "adopt-plan は clean tree でのみ実行できます（working tree に未コミット変更があります）"
+  [ -z "$(git -C "$REPO_ROOT" ls-files --others --exclude-standard)" ] ||
+    die "adopt-plan は clean tree でのみ実行できます（untracked file があります）"
+
   terraform -chdir="$TF_DIR" state pull > "$out_dir/state-backup.json"
   chmod 600 "$out_dir/state-backup.json"
   [ -s "$out_dir/state-backup.json" ] || die "adopt の state backup が空です"
@@ -10090,17 +10098,34 @@ adopt_plan() {
   python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が不変条件を満たしません（plan は破棄してください）"
 
+  python3 "$ADOPT_BINDING" record \
+    --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
+    --mapping "$ADOPT_MAPPING" --state "$out_dir/state-backup.json" \
+    --account "$EXPECTED_ACCOUNT_ID" --workspace "$EXPECTED_WORKSPACE" ||
+    die "adopt plan binding manifest の作成に失敗しました"
+  chmod 600 "$out_dir/adopt-binding.json"
+
   echo "✅ adopt plan 検証済み: $out_dir/adopt.tfplan"
+  echo "   承認は plan SHA256 に束縛されます: $(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1]))["plan_sha256"])' "$out_dir/adopt-binding.json")"
 }
 
 adopt_apply() {
   local out_dir="$1" approve="$2"
-  [ "$approve" = "$ADOPT_APPROVE_TOKEN" ] ||
-    die "adopt-apply には明示の承認が必要です（--approve に承認トークン）"
   adopt_require_helpers
-  for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json state-backup.json; do
+  for adopt_artifact in adopt.tfplan adopt-plan.json integrity-before.json \
+    state-backup.json adopt-binding.json; do
     [ -f "$out_dir/$adopt_artifact" ] || die "adopt 成果物がありません: $out_dir/$adopt_artifact"
   done
+
+  # plan した世界と apply する世界が完全一致することを要求する。
+  # commit / tree / plan hash / mapping hash / state lineage+serial / account /
+  # workspace / terraform version のいずれか 1 つでも違えば FATAL。
+  python3 "$ADOPT_BINDING" verify \
+    --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
+    --mapping "$ADOPT_MAPPING" --account "$EXPECTED_ACCOUNT_ID" \
+    --workspace "$EXPECTED_WORKSPACE" --approve "$approve" ||
+    die "adopt plan binding の再照合に失敗しました（apply は行いません）"
 
   python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt-apply 直前の検証に失敗しました"
