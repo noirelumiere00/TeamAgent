@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,7 +37,8 @@ from typing import Any
 
 BINDING_FILENAME = "adopt-binding.json"
 APPROVE_TOKEN = "I-HAVE-REVIEWED-THE-ADOPT-PLAN"
-SCHEMA_VERSION = 1
+# 2: aws_principal_arn を追加。principal を束縛しない v1 manifest は受け付けない。
+SCHEMA_VERSION = 2
 
 # apply 前に exact match を要求する全項目。
 BOUND_FIELDS = (
@@ -48,9 +50,14 @@ BOUND_FIELDS = (
     "state_lineage",
     "state_serial",
     "aws_account",
+    "aws_principal_arn",
     "terraform_workspace",
     "terraform_version",
 )
+
+# account root user の ARN。root は全リソースへの実質無制限権限を持ち、
+# 一時 credential でもないため activation の実行主体にしない。
+_ROOT_PRINCIPAL_RE = re.compile(r"^arn:aws[a-z0-9-]*:iam::\d+:root$")
 
 
 class BindingError(Exception):
@@ -105,6 +112,28 @@ def _state_identity(state_path: Path) -> tuple[str, int]:
     return lineage, serial
 
 
+def assert_usable_principal(principal_arn: Any, *, source: str) -> str:
+    """activation を実行する principal が「実在する非 root の ARN」であることを要求する。
+
+    account ID の一致だけでは principal の差し替えを検出できないため、caller identity の
+    ARN 自体を束縛する。root は AWS 自身が日常運用に使わないよう推奨している主体であり、
+    ここでは plan / apply の両方で明示的に拒否する。
+    """
+    if not isinstance(principal_arn, str) or not principal_arn.strip():
+        raise BindingError(
+            f"{source}: aws_principal_arn が空です（caller identity を束縛できません）"
+        )
+    arn = principal_arn.strip()
+    if not arn.startswith("arn:"):
+        raise BindingError(f"{source}: aws_principal_arn が ARN 形式ではありません: {arn!r}")
+    if _ROOT_PRINCIPAL_RE.match(arn):
+        raise BindingError(
+            f"{source}: root principal では adopt を実行できません（{arn}）。"
+            "非 root の一時 credential で実行してください。"
+        )
+    return arn
+
+
 def expected_approval(plan_sha256: str) -> str:
     """承認トークンを plan へ束縛した形にする（別 plan の承認を流用できないように）。"""
     return f"{APPROVE_TOKEN}:{plan_sha256[:16]}"
@@ -118,6 +147,7 @@ def collect(
     mapping: Path,
     state_path: Path,
     account: str,
+    principal_arn: str,
     workspace: str,
 ) -> dict[str, Any]:
     lineage, serial = _state_identity(state_path)
@@ -131,6 +161,7 @@ def collect(
         "state_lineage": lineage,
         "state_serial": serial,
         "aws_account": account,
+        "aws_principal_arn": assert_usable_principal(principal_arn, source="collect"),
         "terraform_workspace": workspace,
         "terraform_version": _terraform_version(tf_dir),
     }
@@ -142,6 +173,9 @@ def compare_binding(recorded: dict[str, Any], observed: dict[str, Any]) -> None:
         raise BindingError(
             f"unsupported binding schema_version: {recorded.get('schema_version')!r}"
         )
+    # 改竄された manifest が root を名乗る／principal を欠く場合、両者が一致していても通さない。
+    assert_usable_principal(recorded.get("aws_principal_arn"), source="recorded")
+    assert_usable_principal(observed.get("aws_principal_arn"), source="observed")
     drifted = [
         f"{field}: recorded={recorded.get(field)!r} observed={observed.get(field)!r}"
         for field in BOUND_FIELDS
@@ -175,6 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         item.add_argument("--out-dir", required=True, type=Path)
         item.add_argument("--mapping", required=True, type=Path)
         item.add_argument("--account", required=True)
+        item.add_argument("--principal-arn", required=True)
         item.add_argument("--workspace", required=True)
         if name == "record":
             item.add_argument("--state", required=True, type=Path)
@@ -192,6 +227,7 @@ def main(argv: list[str] | None = None) -> int:
                 mapping=args.mapping,
                 state_path=args.state,
                 account=args.account,
+                principal_arn=args.principal_arn,
                 workspace=args.workspace,
             )
             if not binding["git_tree_clean"]:
@@ -223,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                 mapping=args.mapping,
                 state_path=current_state,
                 account=args.account,
+                principal_arn=args.principal_arn,
                 workspace=args.workspace,
             )
             compare_binding(recorded, observed)

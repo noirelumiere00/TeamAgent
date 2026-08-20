@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Enter the existing runtime guard through the exact short-lived automation
-# session. Root is permitted to call STS only; the guard rejects root itself.
+# session. The caller starts as the IAM administrator (AIIAdev) holding an
+# MFA-authenticated temporary session; every role trust here requires that
+# exact principal, MFA and a fixed session name. Account root is NOT accepted:
+# AWS refuses AssumeRole for root principals, identity policies and permissions
+# boundaries do not apply to root, and the live trust policies name AIIAdev.
 set -euo pipefail
 umask 077
 
 REGION="ap-northeast-1"
 ACCOUNT_ID="718959508629"
-ROOT_ARN="arn:aws:iam::718959508629:root"
+ADMIN_ARN="arn:aws:iam::718959508629:user/AIIAdev"
 
 die() {
   echo "FATAL: $*" >&2
@@ -18,13 +22,16 @@ usage() {
 usage: bootstrap_runtime_session.sh GUARD_COMMAND [GUARD_ARGUMENTS...]
 
 Runs infra/deploy/terraform_runtime_guard.sh under an exact main-owned STS
-role. Runtime/plan commands use the three-hour
-teamagent-dev-terraform-runtime-automation role. `sign-alarm-ack` alone uses
-the one-hour, KMS-Sign-only teamagent-dev-alarm-recipient-ack-signer role.
+role. Runtime commands, including `adopt-plan` and `adopt-apply`, use the
+three-hour teamagent-dev-terraform-runtime-automation role; the guard itself
+requires that exact session for adopt and refuses to run adopt as root.
+`sign-alarm-ack` alone uses the one-hour, KMS-Sign-only
+teamagent-dev-alarm-recipient-ack-signer role.
 `attest-media-cutover` and `authorize-media-apply` use the one-hour,
 independent teamagent-dev-media-cutover-attestor role.
-The current root credentials must already be an MFA-authenticated temporary
-session; both role trusts enforce MFA and fixed session names.
+The caller must already hold an MFA-authenticated temporary session for the
+IAM administrator (AIIAdev); every role trust enforces that exact principal,
+MFA and a fixed session name. Account root is rejected before any STS call.
 
 This wrapper does not accept an arbitrary command and cannot invoke build or
 release launchers.
@@ -48,7 +55,7 @@ case "$1" in
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/teamagent-media-cutover-attestor"
     SESSION_SECONDS=3600
     ;;
-  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|prepare-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply)
+  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|prepare-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply|adopt-plan|adopt-apply)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
     SESSION_NAME="teamagent-terraform-worker"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"
@@ -157,8 +164,8 @@ initial="$(identity)"
 IFS=$'\t' read -r initial_account initial_arn extra <<<"$initial"
 [ -z "${extra:-}" ] \
   && [ "$initial_account" = "$ACCOUNT_ID" ] \
-  && [ "$initial_arn" = "$ROOT_ARN" ] \
-  || die "runtime session wrapper must start as the exact account root"
+  && [ "$initial_arn" = "$ADMIN_ARN" ] \
+  || die "runtime session wrapper must start as the exact IAM administrator ($ADMIN_ARN); account root cannot assume roles"
 unset initial initial_account initial_arn extra
 
 session="$(

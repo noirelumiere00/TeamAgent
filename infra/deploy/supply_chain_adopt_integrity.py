@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,21 @@ def _iso(value: Any) -> str | None:
 
 
 def probe_object(client: Any, bucket: str, key: str) -> dict[str, Any]:
-    """1 オブジェクトの不変性証跡を採取する（body を読んで SHA256 も計算する）。"""
+    """1 オブジェクトの不変性証跡を採取する（body を読んで SHA256 も計算する）。
+
+    body は HeadObject が返した VersionId に固定して読む。head と get が別コールである以上、
+    version を固定しないと両者の間で差し替えられた body を「head 時点の実体」として
+    誤採取しうる（TOCTOU）。Object Lock 対象バケットは versioning が前提なので、
+    VersionId を確定できないオブジェクトは integrity を証明できないものとして拒否する。
+    """
     head = client.head_object(Bucket=bucket, Key=key)
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
+    version_id = head.get("VersionId")
+    if not isinstance(version_id, str) or not version_id or version_id == "null":
+        raise IntegrityError(
+            f"{key}: VersionId を確定できません（{version_id!r}）。"
+            "version を固定できないオブジェクトの integrity は証明できません"
+        )
+    body = client.get_object(Bucket=bucket, Key=key, VersionId=version_id)["Body"].read()
     return {
         "bucket": bucket,
         "key": key,
@@ -128,6 +141,88 @@ def compare(before: dict[str, Any], after: dict[str, Any]) -> None:
         raise IntegrityError("AWS object mutated during adopt:\n  " + "\n  ".join(drifted))
 
 
+def _normalize_timestamp(value: Any) -> Any:
+    """`2099-12-31T00:00:00+00:00` と `2099-12-31T00:00:00Z` を同じ値として扱う。
+
+    snapshot は boto3 の datetime を isoformat 化した文字列、plan は Terraform が持つ
+    RFC3339 文字列で、同じ時刻でも表記が違う。表記差を不一致と誤検知しないよう正規化する。
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return datetime.fromisoformat(text).astimezone(UTC).isoformat()
+    except ValueError:
+        return value
+
+
+# plan の宣言値と live 実体を突き合わせる項目。表記揺れのない、かつ変更に S3 の書き込み
+# API を要するものだけを対象にする（etag は plan とヘッダで引用符の有無が異なるため除外し、
+# body の同一性は snapshot 側の content-addressed precondition が担保する）。
+CROSSCHECKED_FIELDS: tuple[tuple[str, bool], ...] = (
+    ("bucket", False),
+    ("key", False),
+    ("object_lock_mode", False),
+    ("object_lock_retain_until_date", True),
+)
+
+
+def crosscheck(
+    snapshot_doc: dict[str, Any], plan: dict[str, Any], adoptions: list[dict[str, Any]]
+) -> None:
+    """plan が live 実体そのものを宣言していることを apply 前に確かめる（層2）。
+
+    validator（層1）は plan 内部の before/after 整合しか見ない。plan の before は Terraform が
+    読んだ値なので、plan だけでは「Terraform の読みが live と一致しているか」は分からない。
+    独立に採取した integrity snapshot と突き合わせて初めて、plan が実体を変えないと言える。
+    """
+    objects = snapshot_doc.get("objects")
+    if not isinstance(objects, dict):
+        raise IntegrityError("snapshot is malformed: objects must be an object")
+
+    changes = plan.get("resource_changes")
+    if changes is None:
+        changes = []
+    if not isinstance(changes, list):
+        raise IntegrityError("plan.resource_changes must be an array")
+
+    planned: dict[str, Any] = {}
+    for item in changes:
+        if not isinstance(item, dict):
+            continue
+        change = item.get("change")
+        if not isinstance(change, dict):
+            continue
+        importing = change.get("importing")
+        if isinstance(importing, dict) and importing.get("id"):
+            planned[item.get("address")] = change.get("after")
+
+    drifted: list[str] = []
+    for entry in adoptions:
+        address = entry["new_address"]
+        probe = objects.get(address)
+        if not isinstance(probe, dict):
+            raise IntegrityError(f"{address}: missing from the integrity snapshot")
+        after = planned.get(address)
+        if not isinstance(after, dict):
+            raise IntegrityError(f"{address}: the plan has no imported state to cross-check")
+        for field, normalize in CROSSCHECKED_FIELDS:
+            live = probe.get(field)
+            want = after.get(field)
+            if normalize:
+                live, want = _normalize_timestamp(live), _normalize_timestamp(want)
+            if live != want:
+                drifted.append(
+                    f"{address}.{field}: live={probe.get(field)!r} planned={after.get(field)!r}"
+                )
+    if drifted:
+        raise IntegrityError(
+            "the adopt plan does not match the live AWS objects:\n  " + "\n  ".join(drifted)
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -141,6 +236,11 @@ def main(argv: list[str] | None = None) -> int:
     cmp_parser.add_argument("--before", required=True, type=Path)
     cmp_parser.add_argument("--after", required=True, type=Path)
 
+    cross = sub.add_parser("crosscheck", help="plan の宣言値と live 実体を突き合わせる")
+    cross.add_argument("--snapshot", required=True, type=Path)
+    cross.add_argument("--plan", required=True, type=Path)
+    cross.add_argument("--mapping", required=True, type=Path)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "snapshot":
@@ -151,6 +251,15 @@ def main(argv: list[str] | None = None) -> int:
             args.out.chmod(0o600)
             count = len(result["objects"])
             print(f"integrity snapshot written: {args.out} ({count} object(s))")
+        elif args.command == "crosscheck":
+            from supply_chain_adopt_validate import load_mapping
+
+            crosscheck(
+                json.loads(args.snapshot.read_text(encoding="utf-8")),
+                json.loads(args.plan.read_text(encoding="utf-8")),
+                load_mapping(args.mapping),
+            )
+            print("adopt plan cross-check passed: the plan declares the live AWS objects")
         else:
             compare(
                 json.loads(args.before.read_text(encoding="utf-8")),

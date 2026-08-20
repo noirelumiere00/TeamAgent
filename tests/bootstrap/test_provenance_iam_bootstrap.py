@@ -2494,7 +2494,10 @@ def test_entrypoints_never_dispatch_build_or_release_from_bootstrap_session() ->
     assert "build_teamagent_image.sh" not in runtime
     assert "authorize_image_release.sh" not in runtime
     assert 'EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/' in runtime
-    assert 'ROOT_ARN="arn:aws:iam::718959508629:root"' in runtime
+    # 起点は IAM administrator（AIIAdev）。account root は AWS が AssumeRole を拒否し、
+    # identity policy も permissions boundary も適用されないため受け付けない。
+    assert 'ADMIN_ARN="arn:aws:iam::718959508629:user/AIIAdev"' in runtime
+    assert 'ROOT_ARN="arn:aws:iam::718959508629:root"' not in runtime
     assert "sign-alarm-ack)" in runtime
     assert "teamagent-dev-alarm-recipient-ack-signer" in runtime
     assert "teamagent-dev-media-cutover-attestor" in runtime
