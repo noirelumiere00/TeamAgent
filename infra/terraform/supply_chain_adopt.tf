@@ -26,42 +26,50 @@
 #   (b) infra/deploy/supply_chain_adopt_integrity.py の独立した S3 body SHA256 検査
 # の二重で担保する。ignore_changes は使わない（実測で不要と確認済み）。
 #
-# 【属性値の出所】各世代の content_type / object_lock_retain_until_date は **実体の値**。
-# 従来の単一リソース定義は content_type="text/yaml" / retain_until=23:59:59 を宣言していたが、
-# admin が publish した実体は binary/octet-stream / 00:00:00 で食い違っていた。実体に
-# 合わせないと import 直後に差分が出る（PR2-A0 で read-only plan により実測）。
+# 【属性値の出所】各世代の content_type / object_lock_retain_until_date は **実体の値**を
+# 世代ごとに明示する。共通定数でまとめない — 実体は世代ごとに publish イベントが異なり、
+# retain-until も揃っているとは限らない（実測: 2026-08-17 世代は 00:00:00Z、
+# approval-publisher の 08-13 世代は 23:59:59Z）。共通定数への一般化が PR2-A0 初版で
+# 実体との不一致を生み、adopt が Object Lock を短縮する import になりかけた。
+# 各値は adopt 前に supply_chain_adopt_integrity.py の crosscheck が live 実体と照合する。
+#
+# 【この台帳は短命 manifest】activation 対象の dev HEAD（Generation Baseline）に束縛される。
+# buildspec 入力（infra/deploy/buildspec_generation_inputs.json が列挙）が変わると
+# content-addressed key も変わり、この台帳は陳腐化する。値の正は Terraform 自身の評価
+# （local.*_buildspec_sha256）であり、live CodeBuild 参照への盲目的な追随は禁止。
 # 詳細は docs/runbooks/supply_chain_adopt.md を参照。
 
 locals {
-  # 実体が publish 済みの世代に共通する属性。
-  adopted_buildspec_content_type      = "binary/octet-stream"
-  adopted_buildspec_retain_until_date = "2099-12-31T00:00:00Z"
-
   mcp_source_publisher_buildspec_generations = {
-    "c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce" = {
-      content_type                  = local.adopted_buildspec_content_type
-      object_lock_retain_until_date = local.adopted_buildspec_retain_until_date
+    # 2026-08-19 06:55 UTC publish 世代（Generation Baseline 88f4696 の評価値と4点一致）
+    "e7d1fb6c1083a293fea4cb8c71952aa5701e3830e8320754cf6006086dca5871" = {
+      content_type                  = "binary/octet-stream"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
 
   image_attestor_buildspec_generations = {
-    "6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c" = {
-      content_type                  = local.adopted_buildspec_content_type
-      object_lock_retain_until_date = local.adopted_buildspec_retain_until_date
+    # 2026-08-19 06:55 UTC publish 世代（Generation Baseline 88f4696 の評価値と4点一致）
+    "31af144bf46b1febdd30ed1697814979b35189b7681460ef1da721ddcf5fbd32" = {
+      content_type                  = "binary/octet-stream"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
 
   image_promoter_buildspec_generations = {
-    "bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9" = {
-      content_type                  = local.adopted_buildspec_content_type
-      object_lock_retain_until_date = local.adopted_buildspec_retain_until_date
+    # 2026-08-19 06:55 UTC publish 世代（Generation Baseline 88f4696 の評価値と4点一致）
+    "7d62c3ad205f191586a8951e80533d28e9100ce48e107b1b2655063ba4380cdf" = {
+      content_type                  = "binary/octet-stream"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
 
   approval_publisher_resolved_source_buildspec_generations = {
+    # 2026-08-13 09:59 UTC publish 世代。retain-until は実体実測の 23:59:59Z
+    # （他世代の 00:00:00Z と異なる。ここを共通定数で潰さないこと）
     "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4" = {
-      content_type                  = local.adopted_buildspec_content_type
-      object_lock_retain_until_date = local.adopted_buildspec_retain_until_date
+      content_type                  = "binary/octet-stream"
+      object_lock_retain_until_date = "2099-12-31T23:59:59Z"
     }
   }
 }
@@ -249,18 +257,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/c47473411fea400668ebec0628e81d521c9b28f971320a6d0336204a1c3e25ce.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["e7d1fb6c1083a293fea4cb8c71952aa5701e3830e8320754cf6006086dca5871"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/e7d1fb6c1083a293fea4cb8c71952aa5701e3830e8320754cf6006086dca5871.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/6a3d489cd3c29b5bb90b85094f98765027a1580befeb9642763f185f830cfb8c.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["31af144bf46b1febdd30ed1697814979b35189b7681460ef1da721ddcf5fbd32"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/31af144bf46b1febdd30ed1697814979b35189b7681460ef1da721ddcf5fbd32.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/bbc67883a4f03a40187588cf0bddc3a23e2cf6a331b8692945570a88e6fcb1c9.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["7d62c3ad205f191586a8951e80533d28e9100ce48e107b1b2655063ba4380cdf"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/7d62c3ad205f191586a8951e80533d28e9100ce48e107b1b2655063ba4380cdf.yml"
 }
 
 import {

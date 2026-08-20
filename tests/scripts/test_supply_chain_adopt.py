@@ -31,6 +31,7 @@ GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
 BOOTSTRAP = ROOT / "infra/deploy/bootstrap_runtime_session.sh"
 RUNTIME_EVIDENCE_TF = ROOT / "infra/terraform/runtime_evidence.tf"
 RUNBOOK = ROOT / "docs/runbooks/supply_chain_adopt.md"
+GENERATION_INPUTS = ROOT / "infra/deploy/buildspec_generation_inputs.json"
 
 sys.path.insert(0, str(ROOT / "infra/deploy"))
 
@@ -49,6 +50,11 @@ from supply_chain_adopt_validate import (  # noqa: E402
     AdoptValidationError,
     load_mapping,
     validate_plan,
+)
+from verify_generation_inputs import (  # noqa: E402
+    StaleManifestError,
+    load_manifest,
+    verify,
 )
 
 GENERATION_RESOURCES = (
@@ -1516,3 +1522,139 @@ def test_buildspec_read_grant_lives_in_the_evidence_inline_policy() -> None:
     doc_start = tf.index('data "aws_iam_policy_document" "runtime_evidence_automation"')
     doc_end = tf.index('resource "aws_iam_role_policy" "runtime_evidence_automation"')
     assert doc_start < tf.index('sid = "ReadExactSupplyChainBuildspecGenerations"') < doc_end
+
+
+# ── PR2-A0.3: generation input manifest（短命 activation manifest の機械束縛） ──
+#
+# adoption mapping は「Generation Baseline 時点の buildspec 入力」に束縛される。
+# 入力が 1 つでも動けば content-addressed key が変わり mapping は陳腐化する
+# （実測: 契約 JSON の CVE 対応 1 コミットで 3 世代が入れ替わった）。
+# freeze の repo 側を manifest + verifier で機械化し、手書きリストの記憶に依存しない。
+
+
+def _generation_manifest() -> dict[str, Any]:
+    return load_manifest(GENERATION_INPUTS)
+
+
+def test_generation_manifest_is_fresh_against_the_current_tree() -> None:
+    """CI 自体が freeze の番人になる: 入力が動いた PR はこのテストで赤くなる。
+
+    activation 完了後の unfreeze では、manifest の再生成（または退役）を同じ PR で
+    行うこと。これは意図された「freeze 違反の検出」であり、テストの skip や削除で
+    回避してはならない。
+    """
+    verify(_generation_manifest(), ROOT)
+
+
+def test_generation_manifest_covers_every_terraform_referenced_input() -> None:
+    """codebuild.tf / mcp_approval.tf が file()/filebase64() で読む入力を漏れなく列挙する。
+
+    合成式に入力が増えたのに manifest が追随しない（= freeze の穴）をここで検出する。
+    """
+    manifest_inputs = set(_generation_manifest()["inputs"])
+    referenced: set[str] = set()
+    # 世代 SHA へ流入する合成式の領域だけを対象にする（他パイプラインの入力は adopt の
+    # freeze 対象ではない）。マーカーが消えたら index が例外を出しテストごと落ちる =
+    # 領域の付け替え忘れも検出される。
+    codebuild = CODEBUILD_TF.read_text(encoding="utf-8")
+    region = codebuild[
+        codebuild.index("mcp_source_publisher_buildspec = replace(") : codebuild.index(
+            "image_promoter_buildspec_sha256 = sha256("
+        )
+    ]
+    approval = MCP_APPROVAL_TF.read_text(encoding="utf-8")
+    region += approval[
+        approval.index("approval_publisher_buildspec = <<-YAML") : approval.index(
+            "approval_publisher_buildspec_sha256 = sha256("
+        )
+    ]
+    for match in re.findall(
+        r'(?:file|filebase64|filesha256)\("\$\{path\.module\}/\.\./codebuild/([^"]+)"\)',
+        region,
+    ):
+        referenced.add(f"infra/codebuild/{match}")
+    assert referenced, "tf から入力参照を抽出できていない（正規表現/マーカーの破損）"
+    missing = referenced - manifest_inputs
+    assert not missing, f"manifest に無い buildspec 入力: {sorted(missing)}"
+    # 合成式そのものを持つ tf 2 本も必ず束縛する
+    assert "infra/terraform/codebuild.tf" in manifest_inputs
+    assert "infra/terraform/mcp_approval.tf" in manifest_inputs
+
+
+def test_generation_manifest_binds_baseline_kms_and_evaluation_context() -> None:
+    """3層束縛: repo blob / KMS key ARN / Terraform 評価 context がすべて揃っていること。"""
+    manifest = _generation_manifest()
+    assert re.fullmatch(r"[0-9a-f]{40}", manifest["generation_baseline"])
+    assert manifest["kms_keys"], "KMS ARN の束縛が空（実質不変扱いは禁止）"
+    for arn in manifest["kms_keys"].values():
+        assert arn.startswith("arn:aws:kms:ap-northeast-1:718959508629:key/")
+    context = manifest["terraform_evaluation_context"]
+    for field in (
+        "terraform_version",
+        "workspace",
+        "var_file_sha256",
+        "aws_account",
+        "canonical_principal",
+    ):
+        assert context.get(field), f"evaluation context に {field} が無い"
+    assert context["aws_account"] == "718959508629"
+    assert ":root" not in context["canonical_principal"]
+
+
+def test_generation_manifest_expected_sha_matches_the_adoption_mapping() -> None:
+    """manifest の expected 世代 sha と adoption mapping / tf 台帳が一致していること。
+
+    「Terraform 評価値 == mapping」の repo 内整合。live との一致は Gate 3 直前の
+    fresh probe（runbook 手順）が担う。
+    """
+    expected = _generation_manifest()["expected_generation_sha256"]
+    by_project = {
+        entry["key"].split("/")[1]: entry["expected_content_sha256"] for entry in _adoptions()
+    }
+    assert expected == by_project
+
+
+def test_stale_input_is_rejected_fail_closed(tmp_path: Path) -> None:
+    """入力 blob が 1 つでも違えば STALE MANIFEST。"""
+    manifest = _generation_manifest()
+    mutated = copy.deepcopy(manifest)
+    first = sorted(mutated["inputs"])[0]
+    mutated["inputs"][first] = "0" * 40
+    with pytest.raises(StaleManifestError, match="STALE MANIFEST"):
+        verify(mutated, ROOT)
+
+
+def test_missing_input_file_is_rejected_fail_closed() -> None:
+    manifest = _generation_manifest()
+    mutated = copy.deepcopy(manifest)
+    mutated["inputs"]["infra/codebuild/does-not-exist.json"] = "0" * 40
+    with pytest.raises(StaleManifestError, match="存在しない"):
+        verify(mutated, ROOT)
+
+
+# ── PR2-A0.3: 世代別 RetainUntil（共通定数への一般化の禁止） ─────────────────
+
+
+def test_retain_until_is_declared_per_generation_not_via_shared_constant() -> None:
+    """retain-until は世代ごとの実測値を明示する。共通定数は再発の温床なので禁止。"""
+    adopt = ADOPT_TF.read_text(encoding="utf-8")
+    assert "adopted_buildspec_retain_until_date" not in adopt, (
+        "共通 retain-until 定数が復活している（世代ごとの明示に戻すこと）"
+    )
+
+
+def test_approval_publisher_generation_retains_until_its_measured_value() -> None:
+    """#4 の retain-until は live 実測の 23:59:59Z（他世代の 00:00:00Z と異なる）。"""
+    adopt = ADOPT_TF.read_text(encoding="utf-8")
+    start = adopt.index("approval_publisher_resolved_source_buildspec_generations = {")
+    block = adopt[start : adopt.index("\n  }", start)]
+    assert '"2099-12-31T23:59:59Z"' in block
+    assert '"2099-12-31T00:00:00Z"' not in block
+    for other in (
+        "mcp_source_publisher_buildspec_generations",
+        "image_attestor_buildspec_generations",
+        "image_promoter_buildspec_generations",
+    ):
+        start = adopt.index(f"{other} = {{")
+        block = adopt[start : adopt.index("\n  }", start)]
+        assert '"2099-12-31T00:00:00Z"' in block

@@ -49,7 +49,46 @@ evidence バケット上の buildspec は content-addressed key（`codebuild-bui
 5. 本 runbook の §4 の adopt 手順を実行する
 ```
 
-**既存エントリは絶対に削除しない。** 世代は積み上げるだけ。
+**state に取り込み済み（adopt 済み）の世代エントリは絶対に削除しない**（prevent_destroy が
+物理的にも停止させる）。一方、**まだ adopt していない「予定エントリ」は置換してよい** —
+予定エントリは実 state に居らず、buildspec 入力が動いて content-addressed key が変われば
+陳腐化する宣言にすぎない（実測: 2026-08-19 に契約 JSON の CVE 対応 1 コミットで
+3 世代が入れ替わり、旧予定エントリは一度も adopt されないまま無効になった）。
+
+台帳と mapping は **activation 対象の dev HEAD（Generation Baseline）に束縛された短命
+manifest** として扱う。恒久設定ではない。値の正は Terraform 自身の評価
+（`local.*_buildspec_sha256`）であり、live CodeBuild 参照だけを見て追随させることは禁止。
+採用条件は各世代で次の 4 点一致:
+
+```
+Terraform evaluated SHA == S3 body SHA256 == content-addressed key == CodeBuild current ref
+```
+
+> **既知の課題（未解決・backlog）**: 本 runbook §3 の「新世代を追記して adopt」手順は、
+> 現行 validator が mapping 全エントリに old_address と forget を要求するため
+> **そのままでは実行できない**（初回移行専用のモデルになっている）。次の世代追加までに
+> mapping モデルの拡張（import-only エントリの導入）が必要。
+
+## 3.5 freshness ゲート（merge 判断直前と adopt-plan 開始前に必ず実行）
+
+generation input の freeze は二層で守る:
+**repo 側 = 機械検証**（下記スクリプト）/ **publisher 側 = human・admin gate**
+（activation 完了まで admin は新世代を publish しない合意）。
+
+```bash
+# repo 側: 入力 blob が Generation Baseline から不変であること（1件でも動けば STALE MANIFEST）
+python3 infra/deploy/verify_generation_inputs.py \
+  --manifest infra/deploy/buildspec_generation_inputs.json --repo-root .
+```
+
+さらに fresh credential（AIIAdev MFA → trusted automation session）で 4 点一致を全世代
+再確認する: `terraform console` で `local.*_buildspec_sha256` を評価し、S3 body SHA256
+（VersionId 固定 GetObject）・content-addressed key・`codebuild batch-get-projects` の
+current ref と突き合わせる。**過去に採取した evidence の使い回しは禁止**（評価 context =
+Terraform version / workspace / var-file SHA / account / principal / git HEAD を記録し、
+異なる context の値と比較しない）。
+
+1 件でも不一致 → `STALE MANIFEST`。merge / adopt へ進まず manifest を再生成する。
 
 ## 4. adopt の実行手順
 
