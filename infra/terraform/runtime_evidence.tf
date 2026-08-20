@@ -636,6 +636,30 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
     ]
   }
 
+  # PR2-A0.2: supply-chain adopt の integrity 検査（HeadObject + VersionId 固定
+  # GetObject + Object Lock メタデータ）と、adopt(import) 時の provider read
+  # （HeadObject + GetObjectTagging）に必要な最小 read だけを許可する。
+  # GetObjectRetention は 403 を返す権限ではなく、無いと HeadObject の応答から
+  # lock mode / retain-until ヘッダが黙って欠落する種類の権限（integrity は
+  # None 検出で fail-closed する）。GetObjectVersion は既に別 statement で許可済み。
+  # 書き込みは boundary / control-plane / bucket policy の Deny 群がそのまま塞ぐ。
+  # prefix scope なのは、世代 key（content-addressed sha）が manifest refresh の
+  # たびに変わるため。対象は GOVERNANCE ロック済みの不変オブジェクトのみ。
+  statement {
+    sid = "ReadExactSupplyChainBuildspecGenerations"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectRetention",
+      "s3:GetObjectTagging",
+    ]
+    resources = [
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.mcp_source_publisher_project_name}/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.image_attestor_project_name}/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.image_promoter_project_name}/*",
+      "${aws_s3_bucket.image_release_evidence.arn}/codebuild-buildspecs/${local.approval_publisher_project_name}/*",
+    ]
+  }
+
   statement {
     sid       = "DecryptExactDeploymentGateEvidence"
     actions   = ["kms:Decrypt", "kms:DescribeKey"]
