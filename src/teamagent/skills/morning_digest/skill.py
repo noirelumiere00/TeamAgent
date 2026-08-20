@@ -50,6 +50,7 @@ from teamagent.skills._shared.mail_compose import (
 )
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.morning_digest import calendar_window as _calwin
 from teamagent.skills.morning_digest.draft_token import (
     encode_draft_token,
     mail_action_hmac_configured,
@@ -64,6 +65,11 @@ from teamagent.skills.morning_digest.schema import (
 )
 
 logger = structlog.get_logger(__name__)
+
+#: Slack 返信漏れとして下流（判定層・描画層）へ渡すアイテム数の上限。
+#: Provider 側は max_thread_checks で構造的に有界だが、下流は全件を舐める
+#: （生 ID 掃除・triage）ので、上限は受け取り側でも明示しておく。
+_SLACK_UNREAD_MAX_ITEMS = 25
 
 # G6: メール本文は「資料（データ）」であり指示ではない、を明示する分類器プロンプト。
 _TRIAGE_SYSTEM_PROMPT = """\
@@ -222,6 +228,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         token = self._resolve_token(requester)
 
         out = MorningDigestOutput(user_email_masked=_mask_email(requester))
+        # 予定セクションの対象日は JST の暦日（描画の見出し「8/20(木) の予定」に使う）。
+        # カレンダー取得が失敗しても日付は出したいので、try の外で先に確定させる。
+        out.calendar_date = _calwin.now_jst().date().isoformat()
         total_cost = 0.0
 
         # --- 1. メール digest ---
@@ -251,7 +260,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
 
         # --- 3. Slack 未返信メンション ---
         try:
-            out.slack_unread = self._collect_slack_unread(requester, input, ctx)
+            items, total, truncated, scanned = self._collect_slack_unread(requester, input, ctx)
+            out.slack_unread = items
+            out.slack_unread_total = total
+            out.slack_unread_truncated = truncated
+            # 走査できていない（機能OFF・未連携・scope 不足・取得失敗）ときに False のまま
+            # 残るのが要点。描画はこれを見て「なし」と「確認できませんでした」を出し分ける。
+            out.slack_unread_scanned = scanned
         except Exception as exc:
             logger.warning(
                 "morning_digest_slack_failed", request_id=ctx.request_id, err=type(exc).__name__
@@ -282,6 +297,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             mail=len(out.mail_digest),
             calendar=len(out.calendar_events),
             slack_unread=len(out.slack_unread),
+            slack_unread_total=out.slack_unread_total,
             drafts=out.drafts_created,
             errors=len(out.errors),
             cost_usd=total_cost,
@@ -585,59 +601,121 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         self, token: Any, input: MorningDigestInput, ctx: SkillContext
     ) -> list[CalendarEventItem]:
         gcal = self._gcal_for(token)
-        now = _dt.datetime.now(_dt.UTC).replace(microsecond=0)
-        horizon = now + _dt.timedelta(hours=input.calendar_horizon_hours)
+        # 🔴 窓は「JST の当日 00:00 起点」。実行時刻起点の移動 24 時間にすると
+        #   ① 翌日の終日予定が窓に入り「今日の予定」に混ざる（2026-08-20 本番事象）
+        #   ② 実行時刻より前に始まる当日の予定が窓の手前に落ちて消える
+        # の両方が起きる。両方ともこの 1 行の起点で決まる。
+        window_start, window_end = _calwin.jst_day_window(
+            _calwin.now_jst(), input.calendar_horizon_hours
+        )
         events = gcal.list_events(
             ctx.request_id,
-            time_min=now.isoformat(),
-            time_max=horizon.isoformat(),
+            time_min=window_start.isoformat(),
+            time_max=window_end.isoformat(),
             max_results=20,
         )
         # ⚠️ CalendarEvent の属性は start / end（start_at/end_at ではない）。
         # 旧コードは start_at を読んでいたため予定の時刻が常に空だった（本番バグ）。
-        return [
-            CalendarEventItem(
-                summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
-                # 本人 DM 表示用の実名（未マスク）。runner が DM にだけ描画しログには出さない。
-                summary_display=str(getattr(ev, "summary", "") or "")[:120],
-                start_at=str(getattr(ev, "start", "") or "") or None,
-                end_at=str(getattr(ev, "end", "") or "") or None,
-                location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
-                location_display=str(getattr(ev, "location", "") or "")[:120],
-                meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
+        items: list[CalendarEventItem] = []
+        dropped = 0
+        for ev in events:
+            start_at = str(getattr(ev, "start", "") or "") or None
+            end_at = str(getattr(ev, "end", "") or "") or None
+            # 終日は API の date key 由来フラグを優先（値が "…T00:00:00Z" 形でも誤認しない）。
+            all_day = bool(getattr(ev, "all_day", False)) or _calwin.is_all_day(start_at)
+            bounds = _calwin.event_bounds(start_at, end_at, all_day=all_day)
+            # events.list は「窓に重なる予定」を返す＝窓の外に出た予定は自前で落とす
+            # （Google 側の境界解釈に依存しないための決定論フィルタ）。
+            # 解釈できない日時は落とさない（fail-open＝予定を黙って消す方が有害）。
+            if bounds is not None and not _calwin.overlaps_window(bounds, window_start, window_end):
+                dropped += 1
+                continue
+            items.append(
+                CalendarEventItem(
+                    summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
+                    # 本人 DM 表示用の実名（未マスク）。runner が DM にだけ描画しログには出さない。
+                    summary_display=str(getattr(ev, "summary", "") or "")[:120],
+                    start_at=start_at,
+                    end_at=end_at,
+                    all_day=all_day,
+                    location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
+                    location_display=str(getattr(ev, "location", "") or "")[:120],
+                    meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
+                )
             )
-            for ev in events
-        ]
+        # 窓と件数だけを記録（PII ゼロ）。日付ずれの再調査で「窓が分からない」を繰り返さない。
+        logger.info(
+            "morning_digest_calendar_window",
+            request_id=ctx.request_id,
+            time_min=window_start.isoformat(),
+            time_max=window_end.isoformat(),
+            returned=len(events),
+            kept=len(items),
+            dropped=dropped,
+        )
+        return items
 
     # ── 3. Slack 未返信メンション ────────────────────────────────────────
 
     def _collect_slack_unread(
         self, requester: str, input: MorningDigestInput, ctx: SkillContext
-    ) -> list[SlackUnreadItem]:
+    ) -> tuple[list[SlackUnreadItem], int, bool, bool]:
         """Slack 返信漏れ（未返信メンション）を集める。
 
-        判定と xoxp I/O は SlackUnrepliedProvider（skills/_shared/slack_unreplied.py）
-        に委譲。self._slack が None（機能フラグ OFF / 未配線）なら空＝従来挙動。
-        Provider は fail-open（未連携・scope 不足・API 失敗はすべて空リスト）なので、
-        ここでの例外は想定外のみ（呼び出し元 run() が errors へ封じ込める）。
+        戻り値は ``(判定対象アイテム, 母数, 走査打ち切りフラグ, 走査できたか)``。
+        表示件数まで削らずに渡すのは、描画側の判定層（バケット分け）が並べ替えてから
+        上位 5 件を選ぶため（ここで削ると 6 件目以降の「あなたの番」が永久に出ない）。
+        「全部で何件あるか」は別の事実なので分けて返す（len(items) と母数は一致しない）。
+
+        4 つ目の ``scanned`` が肝: Provider は fail-open（未連携・scope 不足・store
+        障害・API 失敗をすべて空リストに潰す）なので、**空リストだけでは「0 件」と
+        「見ていない」を区別できない**。区別できないまま描画すると毎朝「返信漏れなし」
+        と嘘をつく。self._slack が None（機能フラグ OFF / 未配線）も走査していない側。
+
+        実名解決も Provider 側（reader.get_display_name）で完結する。解決できなかった
+        差出人は **None のまま** 通す＝架空の名前を作らない。
         """
         if self._slack is None:
-            return []
-        mentions = self._slack.collect(requester, input.slack_unread_horizon_days, ctx.request_id)
+            return ([], 0, False, False)
+        collected = self._slack.collect_detailed(
+            requester, input.slack_unread_horizon_days, ctx.request_id
+        )
         items: list[SlackUnreadItem] = []
-        for m in mentions:
+        # 判定層・描画層は全件を舐める（生 ID 掃除・triage）。Provider 側は
+        # max_thread_checks で構造的に有界だが、上限は呼び出し側でも明示しておく。
+        for m in collected.items[:_SLACK_UNREAD_MAX_ITEMS]:
             items.append(
                 SlackUnreadItem(
                     channel_name_masked=str(scrub_value(m.channel_name))[:40],
                     excerpt_scrubbed=_strip_sentinels(str(scrub_value(m.text))[:120]),
                     # display はマスク無し（本人 DM 専用・G3/G7: ログには絶対に出さない）。
                     channel_name_display=str(m.channel_name)[:80],
-                    excerpt_display=str(m.text)[:200],
+                    # ⚠️ 1500 は schema.SlackUnreadItem.excerpt_display の max_length と対。
+                    # 片方だけ動かすと pydantic ValidationError で digest が落ちる。
+                    excerpt_display=str(m.text)[:1500],
                     permalink=m.permalink or None,
                     occurred_at=m.occurred_at or None,
+                    channel_id=str(m.channel_id or "")[:32],
+                    channel_kind=m.channel_kind,
+                    from_user_id=(str(m.user)[:32] if m.user else None),
+                    from_display_name=(str(m.user_display)[:80] if m.user_display else None),
+                    thread_message_count=m.thread_message_count,
+                    thread_participant_ids=[str(u)[:32] for u in m.thread_participant_ids],
+                    thread_last_user_id=(
+                        str(m.thread_last_user_id)[:32] if m.thread_last_user_id else None
+                    ),
+                    thread_last_at=m.thread_last_at or None,
+                    answered_by_other=m.answered_by_other,
+                    sender_followed_up=m.sender_followed_up,
+                    mentioned_user_ids=[str(u)[:32] for u in m.mentioned_user_ids],
                 )
             )
-        return items
+        return (
+            items,
+            collected.total_unreplied,
+            collected.scan_truncated,
+            bool(getattr(collected, "scanned", False)),
+        )
 
     # ── 4. 重要メールへの下書き生成（drafts.create のみ・送信しない） ───
 

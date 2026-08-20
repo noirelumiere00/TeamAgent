@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import functools
 import json
 import os
 import re
@@ -28,6 +29,8 @@ import structlog
 
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
+from teamagent.skills._shared import slack_handoff as _handoff
+from teamagent.skills.morning_digest import calendar_window as _calwin
 
 logger = structlog.get_logger(__name__)
 
@@ -157,13 +160,50 @@ def _compact_enabled() -> bool:
 
 # --- 密度優先描画（MORNING_DIGEST_COMPACT）の表示上限と切り詰め ---
 _COMPACT_SUBJ_LEN = 60  # 件名/要約の切詰
-_COMPACT_EXCERPT_LEN = 60  # Slack本文抜粋の切詰
 _COMPACT_SECTION_CHARS = 2800  # Slack section text 上限3000字の保険
 _COMPACT_MAX_BLOCKS = 48  # Slack blocks 上限50個の保険
 
-_MENTION_RE = re.compile(r"<@[A-Z0-9]+\|([^>]+)>")
-_MENTION_BARE_RE = re.compile(r"<@[A-Z0-9]+>")
+# --- 💬 Slack 返信漏れ（判定層 _shared/slack_handoff の出力を並べるだけ）---
+_HANDOFF_MAX_ITEMS = 5  # DM に並べるカード数の上限（母数は見出しに出す）
+_HANDOFF_CHANNEL_NAME_LEN = 24  # chip のチャンネル名の切詰（1 件 1 行を守る）
+_HANDOFF_SENDER_NAME_LEN = 12  # chip の差出人名の切詰（同上）
+_HANDOFF_BUCKET_EMOJI: dict[str, str] = {
+    _handoff.BUCKET_YOURS: "🔴",
+    _handoff.BUCKET_WATCH: "⏸",
+    _handoff.BUCKET_FYI: "👁",
+}
+_HANDOFF_EMPTY_LINE = "💬 *Slack 返信漏れ*: なし"
+#: 走査できていない（未連携・scope 不足・取得失敗）ときの 1 行。**「なし」と言わない**。
+#: 見逃し防止が目的の機能で「見ていない」を「無い」と言うのは、最もやってはいけない嘘。
+_HANDOFF_UNSCANNED_LINE = (
+    "💬 *Slack 返信漏れ*: 確認できませんでした（Slack 未連携か、取得に失敗しています）"
+)
+#: 判定層で想定外の例外が出たときの 1 行（💬 だけを落とし、DM 全体は配信する）。
+_HANDOFF_FAILED_LINE = "💬 *Slack 返信漏れ*: 表示できませんでした"
+#: ⚠️ 見出しは逐語ではない（話題の切り出し＋固定語尾・型不明のときだけ依頼文そのまま）。
+#: ここで「原文のみ」と言い切ると、その真横で作った述語が嘘になる。
+_HANDOFF_FOOTNOTE = "※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。"
+
+#: 実名が引けなかったときの表記。**架空の名前を作らない**＝空欄だと明示する。
+_NAME_UNRESOLVED = "（表示名なし）"
+_MENTION_UNRESOLVED = f"@{_NAME_UNRESOLVED}"
+_CHANNEL_UNRESOLVED = f"#{_NAME_UNRESOLVED}"
+
+#: 描画済みリンク `<url|ラベル>` / `<url>`。生 ID 検査から URL を退避するのに使う。
+_LINK_MARKUP_RE = re.compile(r"<(https?://[^|>\s]+)(?:\|([^>]*))?>")
+
+#: channel_id の先頭1文字 → 会話種別（API 追加呼び出し 0 回で判る）。
+_CHANNEL_ID_PREFIX_KIND: dict[str, str] = {"D": "dm", "G": "group_dm", "C": "channel"}
+
+_MENTION_RE = re.compile(r"<@[A-Za-z0-9_.\-]+\|([^>]+)>")
+_MENTION_BARE_RE = re.compile(r"<@([A-Za-z0-9_.\-]+)>")
 _CHANNEL_TOKEN_RE = re.compile(r"<#[A-Z0-9]+\|([^>]*)>")
+#: ラベル無しの `<#C08…>`。現行の Slack API はこの形も普通に返すので、生 ID を
+#: そのまま見せないよう「#（表示名なし）」へ畳む（名前は取りに行かない＝API 追加 0 回）。
+_CHANNEL_BARE_RE = re.compile(r"<#[A-Z0-9]+>")
+#: ユーザーグループ `<!subteam^S08…|@design>` / ラベル無し、および `<!here>` 等。
+_USERGROUP_RE = re.compile(r"<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>")
+_SPECIAL_MENTION_RE = re.compile(r"<!(here|channel|everyone)(?:\|[^>]*)?>")
 _LINK_LABEL_RE = re.compile(r"<https?://[^|>]+\|([^>]+)>")
 _LINK_BARE_RE = re.compile(r"<https?://[^>]+>")
 
@@ -174,22 +214,37 @@ def _truncate(s: str, limit: int) -> str:
     return s if len(s) <= limit else s[: max(0, limit - 1)] + "…"
 
 
-def _flatten_slack_text(raw: str) -> str:
-    """Slack 生本文の抜粋整形（compact 用）: メンション/リンク表記を可読化し空白を1つに畳む。
+def _resolve_mention(user_id: str, names: dict[str, str] | None) -> str:
+    """`<@U…>` を実名へ。**引けなければ架空の名前を作らず「表示名なし」と明示する。**
+
+    旧描画は一律 "@メンバー" に潰していたが、これは DLP マスクではなく単なる表示整形
+    だった（実名が引ければ置換で直る）。data 層が users.info で解決した表示名を
+    ``names``（user_id → 表示名）で渡し、引けなかったものだけ空欄表記へ落とす。
+    """
+    name = (names or {}).get(user_id, "")
+    return f"@{name}" if name else _MENTION_UNRESOLVED
+
+
+def _flatten_slack_text(raw: str, names: dict[str, str] | None = None) -> str:
+    """Slack 生本文の抜粋整形: メンション/リンク表記を可読化し空白を1つに畳む。
 
     処理順は「正規化→切詰→escape」（escape は呼び出し側）。`<https://evil|クリック>` の
     ような偽装リンクはラベル文字列だけが残り、リンクとしては絶対に描画されない。
     """
     s = raw or ""
     s = _MENTION_RE.sub(r"@\1", s)
-    s = _MENTION_BARE_RE.sub("@メンバー", s)
+    s = _MENTION_BARE_RE.sub(lambda m: _resolve_mention(m.group(1), names), s)
+    s = _SPECIAL_MENTION_RE.sub(r"@\1", s)
+    s = _USERGROUP_RE.sub(lambda m: m.group(1) or _MENTION_UNRESOLVED, s)
     s = _CHANNEL_TOKEN_RE.sub(r"#\1", s)
+    s = _CHANNEL_BARE_RE.sub(_CHANNEL_UNRESOLVED, s)
     s = _LINK_LABEL_RE.sub(r"\1", s)
     s = _LINK_BARE_RE.sub("(リンク)", s)
-    return re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s+", " ", s.replace("\x00", "")).strip()
 
 
-_JST = _dt.timezone(_dt.timedelta(hours=9))
+# JST は skill 側と同一定義を使う（窓・表示・リマインドで解釈がズレないよう単一の真実源）。
+_JST = _calwin.JST
 
 
 def _fmt_time(iso: str | None) -> str:
@@ -215,32 +270,345 @@ def _slack_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+# ---------------------------------------------------------------------------
+# 💬 Slack 返信漏れセクション（判定は _shared/slack_handoff・ここは並べるだけ）
+#
+# 設計の芯（ユーザー承認済みモック）:
+#   - 1件=1行。補足行（└）は判定層が「原文を見る価値がある」と印を付けた件だけ。
+#   - 要約文は作らない。ただし **見出しは逐語ではない**（判定層が原文から切り出した話題
+#     ＋固定語尾。型が判らない依頼だけ依頼文そのまま）。脚注もそう名乗ること。
+#   - 読み取れなかった項目は **描かない**（推測で埋めない）。0 件も「走査できたときだけ」
+#     なしと書く（未走査を「なし」と言うのは、この機能が潰そうとしている見逃しそのもの）。
+#   - この digest が持っている user_id / channel_id は 1 文字も出さない
+#     （_guard_no_raw_ids が最終検査。本文中の `<#C…>` `<!subteam^…>` は種別語へ畳む）。
+#     ⚠️ 形が ID に似ているだけの語（@BUZZFEEDJAPAN・#CAMPAIGN2026）は **潰さない**。
+#     根拠のない置換は原文改変＝捏造側であり、見逃しより有害。
+# ---------------------------------------------------------------------------
+
+
+def _handoff_now() -> _dt.datetime:
+    """判定層へ注入する現在時刻（JST）。テストで固定できるよう関数に切ってある。"""
+    now: _dt.datetime = _calwin.now_jst()
+    return now
+
+
+def _handoff_names(items: list[Any]) -> dict[str, str]:
+    """user_id → 表示名（data 層が users.info で解決できたぶんだけ）。"""
+    names: dict[str, str] = {}
+    for it in items:
+        uid = str(getattr(it, "from_user_id", "") or "").strip()
+        name = str(getattr(it, "from_display_name", "") or "").strip()
+        if uid and name:
+            names[uid] = name
+    return names
+
+
+def _handoff_known_ids(items: list[Any]) -> frozenset[str]:
+    """この digest が実際に持っている Slack ID＝描画に漏れうる ID の全集合。
+
+    「形が ID っぽい語」ではなく「実在する ID」だけを掃除対象にするための材料。
+    """
+    ids: set[str] = set()
+    for it in items:
+        for field in ("channel_id", "from_user_id", "thread_last_user_id"):
+            value = str(getattr(it, field, "") or "").strip()
+            if len(value) >= 4:
+                ids.add(value)
+        for field in ("thread_participant_ids", "mentioned_user_ids"):
+            for raw in getattr(it, field, ()) or ():
+                value = str(raw).strip()
+                if len(value) >= 4:
+                    ids.add(value)
+    return frozenset(ids)
+
+
+@functools.lru_cache(maxsize=16)
+def _id_scrub_pattern(known_ids: frozenset[str]) -> re.Pattern[str] | None:
+    """``known_ids`` を **1 本の交替パターンへ事前コンパイル**して使い回す。
+
+    ⚠️ ID ごとに `re.sub(パターン文字列, …)` を呼ぶと、ID 数が `re._MAXCACHE`(512) を
+    超えた瞬間に全パターンが毎回再コンパイルされ、描画が数十倍に跳ねる（実測 22ms→1.2s）。
+    件数に比例して増えるものを毎行ループで回さないこと。
+    """
+    ids = sorted((i for i in known_ids if i), key=len, reverse=True)
+    if not ids:
+        return None
+    body = "|".join(re.escape(i) for i in ids)
+    return re.compile(rf"(?<![0-9A-Za-z])(?:{body})(?![0-9A-Za-z])")
+
+
+def _scrub_slack_ids(s: str, known_ids: frozenset[str] = frozenset()) -> str:
+    """生 ID を「（表示名なし）」へ落とす（本人にとって無意味な文字列を見せない）。
+
+    落とすのは **``known_ids`` の完全一致だけ**＝この digest に実在する channel_id /
+    user_id。形だけの総当たり置換をしないのは、原文の普通の語を壊さないため
+    （`@BUZZFEEDJAPAN` `#CAMPAIGN2026` `CONFIDENTIAL` は生 ID と同じ形をしている）。
+    実名が引けなかった `<@U…>` は :func:`_flatten_slack_text` が既に
+    「@（表示名なし）」へ落としているので、素の `@英大文字` を形で潰す必要は無い。
+    """
+    pat = _id_scrub_pattern(known_ids)
+    return pat.sub(_NAME_UNRESOLVED, s or "") if pat is not None else (s or "")
+
+
+def _handoff_display(
+    raw: str, names: dict[str, str], known_ids: frozenset[str] = frozenset()
+) -> str:
+    """表示テキストの共通経路: 実名解決 → 生 ID 除去 → mrkdwn エスケープ。
+
+    順序が要（escape を先にやると `<@U…>` が `&lt;@U…&gt;` になって実名解決が効かない）。
+    """
+    return _slack_escape(_scrub_slack_ids(_flatten_slack_text(raw, names), known_ids))
+
+
+def _handoff_link(url: str) -> str:
+    """permalink をリンクとして描画してよいか。https 以外・区切り文字混入は捨てる。
+
+    ⚠️ `javascript:` 等を弾くだけでなく `http://` も捨てる（Slack permalink は必ず
+    https。平文にダウングレードした URL を DM から踏ませる導線を作らない）。
+    """
+    u = (url or "").strip()
+    if not u.startswith("https://"):
+        return ""
+    return "" if any(c in u for c in "<>|\x00 \t\n") else u
+
+
+def _guard_no_raw_ids(line: str, known_ids: frozenset[str] = frozenset()) -> str:
+    """**描画直前の最終検査**。リンク URL 以外に生 ID が残っていたら安全な表記へ落とす。
+
+    permalink の URL には会話 ID が必ず入るが、それは本人に見えない（ラベルは「開く」）。
+    そこでリンク記法だけを退避してから検査し、URL は原形のまま戻す。
+
+    ⚠️ 退避の目印に NUL を使うので、**本文由来の NUL は先に落とす**（`\\x000\\x00` を
+    本文に仕込まれると、戻すときに permalink 記法を任意の位置へ複製できてしまう）。
+    """
+    line = (line or "").replace("\x00", "")
+    holes: list[str] = []
+
+    def _hide(m: re.Match[str]) -> str:
+        url, label = m.group(1), m.group(2)
+        safe = f"<{url}|{_scrub_slack_ids(label, known_ids)}>" if label is not None else f"<{url}>"
+        holes.append(safe)
+        return f"\x00{len(holes) - 1}\x00"
+
+    masked = _scrub_slack_ids(_LINK_MARKUP_RE.sub(_hide, line or ""), known_ids)
+    for i, hole in enumerate(holes):
+        masked = masked.replace(f"\x00{i}\x00", hole)
+    return masked
+
+
+def _handoff_channel_kind(item: Any) -> str:
+    """会話種別。data 層の channel_kind が正。無い（旧 output）ときだけ ID の先頭で補う。
+
+    ⚠️ 明示的な "unknown" は「判定できなかった」＝空欄と同義なので上書きしない。
+    """
+    kind = str(getattr(item, "channel_kind", "") or "").strip()
+    if kind:
+        return kind
+    cid = str(getattr(item, "channel_id", "") or "").strip().upper()
+    return _CHANNEL_ID_PREFIX_KIND.get(cid[:1], "unknown") if cid else "unknown"
+
+
+def _handoff_channel_chip(item: Any, names: dict[str, str], known_ids: frozenset[str]) -> str:
+    """会話の chip（**戻り値は display 済み**＝呼び出し側で二重に通さないこと）。
+
+    **`#` はチャンネル（C）のときだけ**付ける。DM / グループDM の `channel.name` は
+    user_id そのものなので、`#` を無条件に前置すると本人に意味の無い生 ID が出る
+    （旧描画の実害）。DM 系は種別ラベル＋**差出人の実名**を出す
+    （DM が 3 件並ぶと「・DM」だけでは誰が待っているのか分からないため）。
+    """
+    kind = _handoff_channel_kind(item)
+    # "DM" / "グループDM" / "チャンネル" / ""（unknown＝判定できなかった＝空欄）
+    base: str = _handoff.channel_label(kind)
+    if kind == "channel":
+        name = _handoff_display(
+            str(getattr(item, "channel_name_display", "") or ""), names, known_ids
+        )
+        name = _truncate(name.strip().lstrip("#").strip(), _HANDOFF_CHANNEL_NAME_LEN)
+        # 名前が引けない＝「チャンネル」までしか言わない（生 ID を `#` で飾らない）。
+        return f"#{name}" if name and _NAME_UNRESOLVED not in name else base
+    # 差出人名は `_handoff_names`（user_id → 表示名）を唯一の解決経路にする
+    # ＝実名解決の配線がここで実際に効く（配線が切れたら chip から名前が消えて赤くなる）。
+    who = _handoff_display(
+        names.get(str(getattr(item, "from_user_id", "") or "").strip(), ""), names, known_ids
+    )
+    who = _truncate(who.strip(), _HANDOFF_SENDER_NAME_LEN)
+    if not who or _NAME_UNRESOLVED in who:
+        return base  # 実名が引けなかった＝架空の名前を作らず種別だけ
+    return f"{base}（{who}）" if base else who
+
+
+def _handoff_card_line(
+    card: Any, item: Any, names: dict[str, str], known_ids: frozenset[str]
+) -> str:
+    """カード 1 件 = 1 行。chip は判定層が確定済みのものを非空だけ並べる。
+
+    時間の chip は **期限として書かれていれば期限・無ければ経過日数**（1 行に時間軸を
+    2 つ出さない）。期限ではない日付語は `date_mention_label` として別に添える
+    （経過日数を押し出さない＝「期限」を騙る日付で本当の滞留時間を消さない）。
+    """
+    line = f"{card.index}. *{_handoff_display(card.headline, names, known_ids)}*"
+    context = _handoff_display(card.context, names, known_ids)
+    if context:
+        line += f"（{context}）"
+    # ⚠️ 会話 chip は **既に display 済み**。ここで再度通すと `&` が二重エスケープされる
+    #    （実測: "r&d-team" → "#r&amp;amp;d-team"）。display は 1 回だけ。
+    chips = [_handoff_channel_chip(item, names, known_ids)]
+    chips += [
+        _handoff_display(raw, names, known_ids)
+        for raw in (
+            card.due_label or card.elapsed_label,
+            card.date_mention_label,
+            card.effort_label,
+            f"他{card.mentioned_others}名も名指し" if card.mentioned_others >= 1 else "",
+            card.fold_reason,
+        )
+        if raw
+    ]
+    for chip in chips:
+        if chip:
+            line += f" ・{chip}"
+    url = _handoff_link(card.permalink)
+    if url:
+        line += f" 〔<{url}|開く>〕"  # permalink は実 URL なのでエスケープしない
+    return line
+
+
+def _handoff_header_line(shown: int, total: int, truncated: bool, summary: str) -> str:
+    """見出し。母数は走査打ち切り時に下限値なので「N件以上」と明示する（確定値と混ぜない）。"""
+    head = f"💬 *Slack 返信漏れ {total}件以上*" if truncated else f"💬 *Slack 返信漏れ {total}件*"
+    if total > shown:
+        head += f"（うち{shown}件を表示）"
+    return f"{head} ｜ {summary}" if summary else head
+
+
+def _slack_handoff_count(digest: Any) -> int:
+    """💬 の件数（母数）。表示は上限で切るが、ヘッダは走査で見つかった総数を出す。"""
+    items = list(getattr(digest, "slack_unread", []) or [])
+    return max(int(getattr(digest, "slack_unread_total", 0) or 0), len(items))
+
+
+def _slack_was_scanned(digest: Any) -> bool:
+    """Slack を **実際に走査できたか**（0 件が「無い」なのか「見ていない」なのかの根拠）。
+
+    data 層は fail-open で、未連携・scope 不足・store 障害・API 失敗がすべて
+    「空リスト」に潰れる。走査の有無は :attr:`MorningDigestOutput.slack_unread_scanned`
+    が唯一の証拠。加えて skill が `slack:` の失敗を errors に積んでいたら未走査扱い。
+    """
+    if any(str(e).startswith("slack:") for e in (getattr(digest, "errors", []) or [])):
+        return False
+    return bool(getattr(digest, "slack_unread_scanned", False))
+
+
+def _slack_handoff_lines(digest: Any) -> list[str]:
+    """💬 セクションの行リスト（旧描画・compact 描画で共通）。0 件でも 1 行返す。"""
+    items = list(getattr(digest, "slack_unread", []) or [])
+    if not items:
+        # 「なし」と言い切れるのは **走査できたときだけ**。未走査を「なし」と書くのは
+        # 見逃し防止が目的の機能で最も出してはいけない出力（毎朝の嘘になる）。
+        return [_HANDOFF_EMPTY_LINE if _slack_was_scanned(digest) else _HANDOFF_UNSCANNED_LINE]
+    names = _handoff_names(items)
+    known_ids = _handoff_known_ids(items)
+    # me_user_id は描画時点で解決できない（email→user_id は API 呼び出し）。判定層は
+    # 未指定なら「名指しリストから自分 1 人を引く」フォールバックで他人数を数える。
+    triaged = _handoff.triage_slack_handoff(items, now=_handoff_now(), me_user_id=None)
+    shown = triaged.cards[:_HANDOFF_MAX_ITEMS]
+    total = _slack_handoff_count(digest)
+    truncated = bool(getattr(digest, "slack_unread_truncated", False))
+
+    # 内訳は **取得できた全件**で数える（表示 5 件の内訳を母数の内訳と誤読させない。
+    # 隠れた 4 件が全部「あなたの番」でも見出しが変わらないのでは見落とし防止にならない）。
+    counts = {b: triaged.count(b) for b in _handoff.BUCKET_ORDER}
+    summary = "・".join(
+        f"{_handoff.BUCKET_LABELS[b]} {counts[b]}" for b in _handoff.BUCKET_ORDER if counts[b]
+    )
+    lines = [_handoff_header_line(len(shown), total, truncated, summary)]
+    for bucket in _handoff.BUCKET_ORDER:
+        cards = [c for c in shown if c.bucket == bucket]
+        if not cards:
+            continue
+        emoji = _HANDOFF_BUCKET_EMOJI[bucket]
+        label = _handoff.BUCKET_LABELS[bucket]
+        # バケット見出しは「このバケットの取得件数」と「うち何件を並べたか」を分けて出す。
+        head = (
+            f"{label}（{len(cards)}件）"
+            if counts[bucket] == len(cards)
+            else f"{label}（{counts[bucket]}件中{len(cards)}件を表示）"
+        )
+        lines.append("")
+        lines.append(f"{emoji} *{head}*")
+        for card in cards:
+            lines.append(_handoff_card_line(card, items[card.source_index], names, known_ids))
+            if card.note:  # 補足行は「原文を見る価値が本当にある件」だけ（判定層が印を付ける）
+                lines.append(f"　└ {_handoff_display(card.note, names, known_ids)}")
+    lines.append("")
+    lines.append(_HANDOFF_FOOTNOTE)
+    return [_guard_no_raw_ids(ln, known_ids) for ln in lines]
+
+
+def _slack_handoff_section(digest: Any) -> list[str]:
+    """💬 セクションの描画（**このセクションだけの fail-safe**）。
+
+    判定層は 800 行を超える決定論ロジックを任意のユーザー本文に対して走らせる。そこで
+    想定外の例外が出たときに、メールも予定もリマインドも含む DM ごと落とす
+    （`_process_user` の except が `return "error"` ＝ 1 通も届かない）のは割に合わない。
+    ここで受け止めて 💬 の 1 行へ縮退させ、他セクションを巻き添えにしない。
+    """
+    try:
+        return _slack_handoff_lines(digest)
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: 💬 描画失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return [_HANDOFF_FAILED_LINE]
+
+
+def _push_section_lines(blocks: list[dict[str, Any]], lines: list[str]) -> None:
+    """行リストを 2800 字以内の section に分割して積む（3000 字上限の保険）。"""
+    buf: list[str] = []
+    size = 0
+    for ln in lines:
+        if buf and size + len(ln) + 1 > _COMPACT_SECTION_CHARS:
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+            buf, size = [], 0
+        buf.append(ln)
+        size += len(ln) + 1
+    if buf:
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+
+
 def _fmt_meeting_button_time(start_iso: str | None) -> str:
     """meeting_start(ISO) → 「7/15 14:00」（📅ボタン文言用・JST）。不正は "" で汎用文言に落とす。"""
-    if not start_iso:
+    # ⚠️ offset 無し（naive）はコンテナのローカル TZ（本番 UTC）解釈で 9 時間ずれるため、
+    #    JST を明示的に付ける（parse_jst_datetime が naive を JST とみなす）。
+    dt = _calwin.parse_jst_datetime(start_iso)
+    if dt is None:
         return ""
-    try:
-        dt = _dt.datetime.fromisoformat(start_iso).astimezone(_JST)
-        return f"{dt.month}/{dt.day} {dt.strftime('%H:%M')}"
-    except (ValueError, TypeError):
-        return ""
+    return f"{dt.month}/{dt.day} {dt.strftime('%H:%M')}"
 
 
-def _fmt_event_time(start_at: str | None, end_at: str | None) -> str:
-    """ISO 文字列（…T10:00:00+09:00 / 日付のみ=終日）を '10:00–11:00' / '終日' に整形する。"""
+def _digest_date(digest: Any) -> _dt.date:
+    """予定セクションの対象日（JST）。skill が載せた calendar_date を最優先で使う。
 
-    def _hm(s: str | None) -> str | None:
-        if not s:
-            return ""
-        if "T" not in s:  # 日付のみ ＝ 終日イベント
-            return None
-        return s.split("T", 1)[1][:5]  # "HH:MM"
+    旧バージョンの output（calendar_date 無し）でも描画できるよう、空なら JST の今日。
+    """
+    raw = str(getattr(digest, "calendar_date", "") or "").strip()
+    return _calwin.parse_jst_date(raw) or _calwin.now_jst().date()
 
-    sh = _hm(start_at)
-    if sh is None:
-        return "終日"
-    eh = _hm(end_at)
-    return f"{sh}–{eh}" if eh else (sh or "")
+
+def _fmt_event_time(
+    start_at: str | None,
+    end_at: str | None,
+    *,
+    all_day: bool | None = None,
+    target_date: _dt.date | None = None,
+) -> str:
+    """ISO 文字列を '10:00–11:00' / '終日' に整形する（JST 明示）。
+
+    `target_date` を渡すと、その日と違う予定には日付を前置する（例 "8/21(金) 終日"）。
+    複数日の終日は "終日(8/19–8/21)"（Google の排他的 end.date を -1 日した最終日）。
+    """
+    return _calwin.event_when_label(start_at, end_at, all_day=all_day, target_date=target_date)
 
 
 def _mail_line(m: Any) -> tuple[str, str]:
@@ -308,8 +676,12 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
 
 
 def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
-    """MorningDigestOutput → Slack Block Kit（要返信→未開封→今日の予定。下書きはボタン生成）。"""
+    """MorningDigestOutput → Slack Block Kit（要返信→未開封→当日の予定。下書きはボタン生成）。"""
+    # fallback text は通知プレビュー用。slack_bot の chat_update が同一文字列を再送するため
+    # ここは固定のまま（日付明示は本文側＝blocks で行う）。
     text = "メールと本日の予定をお送りします。"
+    day = _digest_date(digest)
+    day_label = _calwin.fmt_jst_date(day)  # 例 "8/20(木)"
 
     mail_items = list(getattr(digest, "mail_digest", []) or [])
 
@@ -322,13 +694,15 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     # 未開封 ＝ 未読(UNREAD) かつ 要返信に出ていないもの（To に自分がいない高重要もここ・閲覧のみ）。
     unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
-    slack_unread = list(getattr(digest, "slack_unread", []) or [])
 
     # 冒頭の枕詞（飾らない一文）。
     blocks: list[dict[str, Any]] = [
         {
             "type": "section",
-            "text": {"type": "mrkdwn", "text": "📬 *メールと本日の予定をお送りします。*"},
+            "text": {
+                "type": "mrkdwn",
+                "text": f"📬 *メールと {day_label} の予定をお送りします。*",
+            },
         },
         {"type": "divider"},
     ]
@@ -396,29 +770,23 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         )
         blocks.append({"type": "divider"})
 
-    # --- 💬 Slack 返信漏れ（未返信メンション・最大5件。display は本人 DM のみ・ログ厳禁 G3/G7）---
-    if slack_unread:
-        lines = [f"💬 *Slack 返信漏れ（{len(slack_unread)}件）*"]
-        for it in slack_unread[:5]:
-            ch = _slack_escape(
-                getattr(it, "channel_name_display", "") or getattr(it, "channel_name_masked", "")
-            )
-            ex = _slack_escape(
-                getattr(it, "excerpt_display", "") or getattr(it, "excerpt_scrubbed", "")
-            )
-            line = f"• *#{ch or '(不明)'}*: {ex}" if ex else f"• *#{ch or '(不明)'}*"
-            link = getattr(it, "permalink", None)
-            if link:
-                line += f"  <{link}|開く>"  # permalink は実 URL なのでエスケープしない
-            lines.append(line)
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
-        blocks.append({"type": "divider"})
+    # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
+    #     display は本人 DM のみ・ログ厳禁 G3/G7）---
+    _push_section_lines(blocks, _slack_handoff_section(digest))
+    blocks.append({"type": "divider"})
 
-    # --- 📅 今日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
+    # --- 📅 当日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
+    # 見出しは「今日」ではなく実日付を出す（2026-08-20 の日付ずれで「今日」表記が誤りを
+    # 隠したため。行側も対象日と違う予定には日付を前置する）。
     if cal_items:
-        lines = [f"📅 *今日の予定（{len(cal_items)}件）*"]
+        lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
         for ev in cal_items[:10]:
-            when = _fmt_event_time(getattr(ev, "start_at", None), getattr(ev, "end_at", None))
+            when = _fmt_event_time(
+                getattr(ev, "start_at", None),
+                getattr(ev, "end_at", None),
+                all_day=getattr(ev, "all_day", None),
+                target_date=day,
+            )
             title = _slack_escape(
                 getattr(ev, "summary_display", "")
                 or getattr(ev, "summary_scrubbed", "")
@@ -435,7 +803,10 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
     else:
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "📅 *今日の予定*: なし"}}
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"📅 *{day_label} の予定*: なし"},
+            }
         )
 
     # --- 脚注（DLP 注記）---
@@ -474,18 +845,20 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     high = [m for m in mail_items if _is_reply(m)]
     unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
-    slack_unread = list(getattr(digest, "slack_unread", []) or [])
+    slack_total = _slack_handoff_count(digest)
 
-    now = _dt.datetime.now(_JST)
-    wd = "月火水木金土日"[now.weekday()]
+    # ヘッダも予定セクションも同じ「対象日」を使う（描画のたびに now を読むと、
+    # 日付をまたぐ再描画でヘッダと予定の日付がズレる）。
+    day = _digest_date(digest)
+    day_label = _calwin.fmt_jst_date(day)  # 例 "8/20(木)"
     # fallback text は通知プレビューに出るため件数のみ（PII ゼロ）。
     text = (
         f"朝ダイジェスト｜要返信{len(high)}・未確認{len(unread)}"
-        f"・Slack{len(slack_unread)}・予定{len(cal_items)}"
+        f"・Slack{slack_total}・予定{len(cal_items)}"
     )
     header = (
-        f"📬 *{now.month}/{now.day}({wd}) の朝ダイジェスト*"
-        f"｜🔴{len(high)}・📬{len(unread)}・💬{len(slack_unread)}・📅{len(cal_items)}"
+        f"📬 *{day_label} の朝ダイジェスト*"
+        f"｜🔴{len(high)}・📬{len(unread)}・💬{slack_total}・📅{len(cal_items)}"
     )
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
@@ -493,19 +866,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     ]
 
     def _push_lines(lines: list[str]) -> None:
-        """行リストを 2800 字以内の section に分割して積む（3000 字上限の保険）。"""
-        buf: list[str] = []
-        size = 0
-        for ln in lines:
-            if buf and size + len(ln) + 1 > _COMPACT_SECTION_CHARS:
-                blocks.append(
-                    {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}}
-                )
-                buf, size = [], 0
-            buf.append(ln)
-            size += len(ln) + 1
-        if buf:
-            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(buf)}})
+        _push_section_lines(blocks, lines)
 
     def _subj_who(m: Any) -> tuple[str, str]:
         subj = _slack_escape(
@@ -586,31 +947,21 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         )
         blocks.append({"type": "divider"})
 
-    # --- 💬 Slack 返信漏れ（最大5件・本文は正規化→60字切詰→escape）---
-    if slack_unread:
-        lines = [f"💬 *Slack 返信漏れ（{len(slack_unread)}件）*"]
-        for it in slack_unread[:5]:
-            ch = _slack_escape(
-                getattr(it, "channel_name_display", "") or getattr(it, "channel_name_masked", "")
-            )
-            raw = getattr(it, "excerpt_display", "") or getattr(it, "excerpt_scrubbed", "")
-            ex = _slack_escape(_truncate(_flatten_slack_text(raw), _COMPACT_EXCERPT_LEN))
-            line = f"• *#{ch or '(不明)'}*: {ex}" if ex else f"• *#{ch or '(不明)'}*"
-            link = getattr(it, "permalink", None)
-            if link:
-                line += f"  <{link}|開く>"  # permalink は実 URL なのでエスケープしない
-            lines.append(line)
-        rem = len(slack_unread) - 5
-        if rem > 0:
-            lines.append(f"• 〈他{rem}件〉")
-        _push_lines(lines)
-        blocks.append({"type": "divider"})
+    # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
+    #     display は本人 DM のみ・ログ厳禁 G3/G7）---
+    _push_section_lines(blocks, _slack_handoff_section(digest))
+    blocks.append({"type": "divider"})
 
-    # --- 📅 今日の予定（最大10件・1行形式は旧描画と共通）---
+    # --- 📅 当日の予定（最大10件・1行形式は旧描画と共通・見出しは実日付）---
     if cal_items:
-        lines = [f"📅 *今日の予定（{len(cal_items)}件）*"]
+        lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
         for ev in cal_items[:10]:
-            when = _fmt_event_time(getattr(ev, "start_at", None), getattr(ev, "end_at", None))
+            when = _fmt_event_time(
+                getattr(ev, "start_at", None),
+                getattr(ev, "end_at", None),
+                all_day=getattr(ev, "all_day", None),
+                target_date=day,
+            )
             title = _slack_escape(
                 getattr(ev, "summary_display", "")
                 or getattr(ev, "summary_scrubbed", "")
@@ -630,7 +981,10 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         _push_lines(lines)
     else:
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "📅 *今日の予定*: なし"}}
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"📅 *{day_label} の予定*: なし"},
+            }
         )
 
     # --- 脚注（DLP 注記・旧描画と同一）---
@@ -698,13 +1052,11 @@ def _schedule_event_reminders(digest: Any, im_channel: str) -> int:
     count = 0
     for ev in list(getattr(digest, "calendar_events", []) or []):
         start_iso = str(getattr(ev, "start_at", "") or "")
-        if "T" not in start_iso:
+        # 終日は API 由来フラグを優先（"…T00:00:00Z" 形の終日を時刻付きと誤認しない）。
+        if bool(getattr(ev, "all_day", False)) or "T" not in start_iso:
             continue  # 終日 or 不明
-        try:
-            start = _dt.datetime.fromisoformat(start_iso)
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=_JST)
-        except ValueError:
+        start = _calwin.parse_jst_datetime(start_iso)  # naive は JST とみなす（UTC 誤解釈防止）
+        if start is None:
             continue
         fire_at = start - _dt.timedelta(minutes=lead_min)
         if fire_at <= now + _dt.timedelta(minutes=1):

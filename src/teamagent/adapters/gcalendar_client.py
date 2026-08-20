@@ -125,6 +125,10 @@ class CalendarEvent:
     attendees: tuple[str, ...]  # 参加者メール（マスクは上位層の責務）
     location: str = ""  # 会議室/場所（自由文・URL のこともある）
     meeting_url: str = ""  # 会議リンク（Meet=hangoutLink / Zoom 等=conferenceData）
+    # 終日予定か。Google は終日を start.date（時刻なし）で返すため **key の有無**が真実源。
+    # 文字列に "T" が無いことで判定すると、経路によって "2026-08-21T00:00:00Z" に整形された
+    # 終日を時刻付きと誤認する（2026-08-20 の日付ずれ調査で実測）。
+    all_day: bool = False
 
 
 def _extract_meeting_url(it: dict[str, Any]) -> str:
@@ -170,8 +174,12 @@ def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
     """events.list の items[] を CalendarEvent 群へ変換する。"""
     out: list[CalendarEvent] = []
     for it in items or []:
-        start = (it.get("start") or {}).get("dateTime") or (it.get("start") or {}).get("date") or ""
-        end = (it.get("end") or {}).get("dateTime") or (it.get("end") or {}).get("date") or ""
+        start_obj = it.get("start") or {}
+        end_obj = it.get("end") or {}
+        start = start_obj.get("dateTime") or start_obj.get("date") or ""
+        end = end_obj.get("dateTime") or end_obj.get("date") or ""
+        # 終日判定は date key の有無で行う（値の文字列形ではなく API の構造で見る）。
+        all_day = not start_obj.get("dateTime") and bool(start_obj.get("date"))
         attendees = tuple(
             str(a.get("email")) for a in (it.get("attendees") or []) if a.get("email")
         )
@@ -184,6 +192,7 @@ def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
                 attendees=attendees,
                 location=str(it.get("location", "") or ""),
                 meeting_url=_extract_meeting_url(it),
+                all_day=all_day,
             )
         )
     return out

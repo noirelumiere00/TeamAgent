@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as _dt
 import hashlib
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 import pytest
 
 from teamagent.skills.base import SkillContext
+from teamagent.skills.morning_digest import calendar_window as calwin
 from teamagent.skills.morning_digest.schema import MorningDigestInput
 from teamagent.skills.morning_digest.skill import (
     MorningDigestSkill,
@@ -115,10 +117,20 @@ class _FakeGmail:
 
 
 class _FakeGCal:
+    """events.list の fake。
+
+    ⚠️ 本物の Google は「窓に重なる予定」を返す＝窓外の予定も混ざる（2026-08-20 の
+    日付ずれの実体）。ここで time_min/time_max を使って絞り込んでしまうと本番の
+    失敗モードを再現できないので、**渡された窓は記録するだけで全件返す**。
+    窓が正しいかは last_kwargs を、混入を落とせるかは skill 側のフィルタを検証する。
+    """
+
     def __init__(self, events: list[Any]):
         self._events = events
+        self.last_kwargs: dict[str, Any] = {}
 
     def list_events(self, request_id: str, **kwargs: Any) -> list[Any]:
+        self.last_kwargs = dict(kwargs)
         return self._events
 
 
@@ -130,6 +142,7 @@ class _FakeCalEvent:
     start: str = ""
     end: str = ""
     location: str = ""
+    all_day: bool = False
 
 
 class _FakeTokenStore:
@@ -512,7 +525,67 @@ def test_calendar_partial_failure_is_recorded_in_errors(fake_msgs, triage_json) 
     assert out.calendar_events == []
 
 
-def test_calendar_events_collected(fake_msgs, triage_json) -> None:
+def test_slack_scanned_flag_reaches_the_output(fake_msgs, triage_json) -> None:
+    """run() が「Slack を走査できたか」を出力へ載せる（描画がここを見て出し分ける）。
+
+    ⚠️ 載せ忘れると、未連携・scope 不足・API 失敗のユーザーに毎朝
+    「Slack 返信漏れ: なし」という嘘の DM が届く（0 件と見ていないの区別が消える）。
+    """
+    from teamagent.skills._shared.slack_unreplied import UnrepliedCollection
+
+    class _Prov:
+        def __init__(self, collection: Any) -> None:
+            self._c = collection
+
+        def collect_detailed(self, email: str, horizon: int, rid: str) -> Any:
+            return self._c
+
+    def _run(prov: Any) -> Any:
+        skill = MorningDigestSkill(
+            token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+            gmail=_FakeGmail(fake_msgs),
+            gcalendar=_FakeGCal([]),
+            bedrock=_FakeBedrock(triage_json),
+            slack=prov,
+        )
+        ctx = SkillContext(request_id="req-slack", metadata={"user_email": "me@vectorinc.co.jp"})
+        return skill.run(MorningDigestInput(max_drafts=0), ctx)
+
+    # 走査できて 0 件（「なし」と言い切ってよい）
+    assert _run(_Prov(UnrepliedCollection(scanned=True))).slack_unread_scanned is True
+    # provider の fail-open（未連携・scope 不足・API 失敗）＝走査していない
+    assert _run(_Prov(UnrepliedCollection())).slack_unread_scanned is False
+    # 機能フラグ OFF / 未配線
+    assert _run(None).slack_unread_scanned is False
+
+
+def test_slack_collection_failure_is_recorded_and_not_scanned(fake_msgs, triage_json) -> None:
+    """想定外の例外は errors に残り、走査済みを名乗らない。"""
+
+    class _ExplodingProv:
+        def collect_detailed(self, email: str, horizon: int, rid: str) -> Any:
+            raise RuntimeError("slack api down")
+
+    skill = MorningDigestSkill(
+        token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),
+        gmail=_FakeGmail(fake_msgs),
+        gcalendar=_FakeGCal([]),
+        bedrock=_FakeBedrock(triage_json),
+        slack=_ExplodingProv(),
+    )
+    ctx = SkillContext(request_id="req-slack-err", metadata={"user_email": "me@vectorinc.co.jp"})
+    out = skill.run(MorningDigestInput(max_drafts=0), ctx)
+    assert any("slack" in e for e in out.errors)
+    assert out.slack_unread_scanned is False
+    assert len(out.mail_digest) == 3  # mail は巻き添えにならない
+
+
+def test_calendar_events_collected(fake_msgs, triage_json, monkeypatch) -> None:
+    # 「今日」を予定と同じ 2026-06-18(木) に固定（窓は JST 当日 00:00 起点になったため、
+    # 固定日フィクスチャは今日を固定しないと窓外に落ちる）。
+    monkeypatch.setattr(
+        calwin, "now_jst", lambda: _dt.datetime(2026, 6, 18, 9, 30, tzinfo=calwin.JST)
+    )
     events = [
         _FakeCalEvent(
             summary="営業 MTG",

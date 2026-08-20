@@ -38,6 +38,32 @@ def test_extract_events() -> None:
     assert events[0].summary == "森ビル 商談"
     assert events[0].attendees == ("a@x.com",)
     assert events[1].start == "2026-05-02"  # 終日は date
+    # 終日判定は **date key の有無**（値の文字列形ではない）。
+    # 朝ダイジェストの日付ずれ根治で下流が all_day に依存するため回帰固定する。
+    assert events[0].all_day is False
+    assert events[1].all_day is True
+    assert events[1].end == "2026-05-03"  # end.date は排他的（5/2 のみの終日）
+
+
+def test_extract_events_all_day_flag_is_key_based_not_string_based() -> None:
+    """dateTime が "T00:00:00" でも終日にしない／date が Z 付き整形でも終日にする。"""
+    items: list[dict[str, Any]] = [
+        {
+            "id": "midnight",
+            "summary": "0時開始の会議",
+            "start": {"dateTime": "2026-05-02T00:00:00+09:00"},
+            "end": {"dateTime": "2026-05-02T01:00:00+09:00"},
+        },
+        {
+            "id": "allday-z",
+            "summary": "整形された終日",
+            "start": {"date": "2026-05-02T00:00:00Z"},
+            "end": {"date": "2026-05-03T00:00:00Z"},
+        },
+    ]
+    events = extract_events(items)
+    assert events[0].all_day is False
+    assert events[1].all_day is True
 
 
 def test_extract_events_location_and_meeting_url() -> None:

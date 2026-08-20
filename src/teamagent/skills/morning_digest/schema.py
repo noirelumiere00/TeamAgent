@@ -121,6 +121,13 @@ class CalendarEventItem(BaseModel):
     )
     start_at: str | None = Field(default=None, description="開始時刻（ISO）")
     end_at: str | None = Field(default=None, description="終了時刻（ISO）")
+    all_day: bool = Field(
+        default=False,
+        description=(
+            "終日予定か（Google の start.date 由来）。"
+            "⚠️ end_at（＝end.date）は排他的（8/21 のみの終日は end=8/22）"
+        ),
+    )
     location_scrubbed: str = Field(
         default="", max_length=80, description="場所（マスク後・ログ用）"
     )
@@ -141,10 +148,66 @@ class SlackUnreadItem(BaseModel):
         default="", max_length=80, description="チャンネル名（本人DM表示用・未マスク・ログ厳禁）"
     )
     excerpt_display: str = Field(
-        default="", max_length=200, description="抜粋（本人DM表示用・未マスク・ログ厳禁）"
+        default="",
+        max_length=1500,
+        description=(
+            "本文（本人DM表示用・未マスク・ログ厳禁）。"
+            "⚠️ 上限を変えるときは skill 側の切り詰め長と必ず同時に直すこと"
+            "（片方だけ伸ばすと pydantic ValidationError で digest ごと落ちる）"
+        ),
     )
     permalink: str | None = Field(default=None, description="Slack の permalink")
     occurred_at: str | None = Field(default=None, description="メンション日時（ISO）")
+    # --- 会話の素性（描画の分岐材料・読み取れなかったものは空/None/unknown のまま）---
+    channel_id: str = Field(
+        default="", max_length=32, description="会話 ID（D=DM / G=グループDM / C=チャンネル）"
+    )
+    channel_kind: str = Field(
+        default="unknown",
+        max_length=16,
+        description=(
+            '会話種別: "dm" / "group_dm" / "channel" / "unknown"。'
+            "unknown は「判定できなかった」＝空欄と同義（推測で埋めない）"
+        ),
+    )
+    # --- 差出人（誰の返事を止めているのかを言うための最小材料）---
+    from_user_id: str | None = Field(
+        default=None, max_length=32, description="差出人の Slack user_id"
+    )
+    from_display_name: str | None = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "差出人の表示名（本人DM表示用・未マスク・ログ厳禁）。"
+            "users.info で解決できなかったら None のまま＝架空の名前を作らない"
+        ),
+    )
+    # --- スレッド由来の文脈（追加 API 呼び出し 0 回で拾えたぶん）---
+    thread_message_count: int = Field(
+        default=0, ge=0, description="スレッド内メッセージ総数（親含む）。0=取得できなかった"
+    )
+    thread_participant_ids: list[str] = Field(
+        default_factory=list, description="スレッド参加者の user_id（登場順）"
+    )
+    thread_last_user_id: str | None = Field(
+        default=None, max_length=32, description="スレッド最終発言者の user_id"
+    )
+    thread_last_at: str | None = Field(
+        default=None, description="スレッド最終発言の日時（ISO・JST）"
+    )
+    answered_by_other: bool = Field(
+        default=False,
+        description=(
+            "メンション後に「自分でも差出人でもない」誰かが発言したか"
+            "（＝他人が代わりに答えた可能性）。差出人の追撃は sender_followed_up 側"
+        ),
+    )
+    sender_followed_up: bool = Field(
+        default=False, description="差出人自身がメンション後に再度発言したか（催促 or 自己解決）"
+    )
+    mentioned_user_ids: list[str] = Field(
+        default_factory=list, description="本文で名指しされた user_id（自分含む・登場順）"
+    )
 
 
 class MorningDigestOutput(BaseModel):
@@ -153,7 +216,37 @@ class MorningDigestOutput(BaseModel):
     user_email_masked: str = Field(description="参照した受信箱（マスク）")
     mail_digest: list[MailDigestItem] = Field(default_factory=list)
     calendar_events: list[CalendarEventItem] = Field(default_factory=list)
+    calendar_date: str = Field(
+        default="",
+        description=(
+            "予定セクションの対象日（JST・YYYY-MM-DD）。"
+            "見出しの日付明示に使う（空なら描画側が JST の今日にフォールバック）"
+        ),
+    )
     slack_unread: list[SlackUnreadItem] = Field(default_factory=list)
+    slack_unread_total: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "走査範囲で見つかった未返信メンションの総件数（母数）。"
+            "slack_unread は表示上限で切った先頭ぶんなので len() とは一致しない"
+        ),
+    )
+    slack_unread_truncated: bool = Field(
+        default=False,
+        description=(
+            "走査が上限で打ち切られたか。True のとき slack_unread_total は下限値"
+            "（＝「少なくともこれだけ」）であり、確定値として表示してはいけない"
+        ),
+    )
+    slack_unread_scanned: bool = Field(
+        default=False,
+        description=(
+            "Slack を実際に走査できたか。False は「見ていない」（機能OFF・未連携・"
+            "scope 不足・取得失敗）であって「0 件だった」ではない。"
+            "⚠️ 描画側はこれを見ずに空リストを『返信漏れなし』と書いてはいけない"
+        ),
+    )
     drafts_created: int = Field(default=0, ge=0, description="Gmail draft として作成した下書き数")
     delivered: bool = Field(default=False, description="Slack DM 配信に成功したか")
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="この digest の概算コスト")

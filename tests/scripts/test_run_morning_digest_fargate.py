@@ -83,16 +83,20 @@ def _digest() -> MorningDigestOutput:
                 summary_scrubbed="社内レビュー", start_at="2026-06-19T05:00:00+00:00"
             ),
         ],
+        # 予定セクションの対象日（JST）。見出しの日付明示に使われる。
+        calendar_date="2026-06-19",
         drafts_created=1,
     )
 
 
 def test_preamble_and_no_scoreboard() -> None:
-    """冒頭は固定の枕詞。旧スコアボード（要返信/下書き済/要確認 カウント）は無い（v2）。"""
+    """冒頭の枕詞は日付明示（「本日」ではなく 8/20(木) 形式）。旧スコアボードは無い（v2）。"""
     text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
+    # fallback text（通知プレビュー）は slack_bot の chat_update と同一文字列のまま。
     assert text == "メールと本日の予定をお送りします。"
     dump = str(blocks)
-    assert "メールと本日の予定をお送りします" in dump
+    assert "メールと 6/19(金) の予定をお送りします" in dump  # 日付を明示
+    assert "本日の予定" not in dump  # 「本日」表記は撤去（日付ずれを隠すため）
     assert "下書き済" not in dump and "要確認" not in dump  # スコアボード削除
 
 
@@ -117,10 +121,10 @@ def test_reply_section_has_per_mail_buttons() -> None:
 
 
 def test_calendar_section_rendered() -> None:
-    """カレンダー（今日の予定）が DM に描画される。display 未設定時は scrubbed にフォールバック。"""
+    """カレンダーが DM に描画される。display 未設定時は scrubbed にフォールバック。"""
     _text, blocks = mod._format_block_kit(_digest(), "s-komata@vectorinc.co.jp")
     dump = str(blocks)
-    assert "今日の予定（2件）" in dump
+    assert "6/19(金) の予定（2件）" in dump  # 見出しは calendar_date の実日付
     assert "ノーベル定例" in dump  # 件名
     assert "渋谷オフィス" in dump  # 会議室
 
