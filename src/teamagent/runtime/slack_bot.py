@@ -469,8 +469,24 @@ def _format_mail_link_response(out: Any) -> str:
     return "\n".join(lines)
 
 
+def _mail_guard_message(out: Any) -> str:
+    """メール系 Skill の構造化応答（error != ""）なら、そのまま出せる message を返す。
+
+    error が無い / message が空なら空文字を返し、呼び出し側は通常整形へ進む。
+    """
+    if not str(getattr(out, "error", "") or ""):
+        return ""
+    return str(getattr(out, "message", "") or "")
+
+
 def _format_mail_followup_response(out: Any) -> str:
     """MailFollowupOutput を Slack メッセージに整形する（放置日数つきトリアージ）。"""
+    # P0-3/P0-4: error 付き応答（未連携・再連携要・client_name ガード・0 件）は message が
+    # 完成した案内文なのでそのまま返す。「見つかりませんでした」等と併記すると原因を
+    # 取り違える（例: 未連携なのに「0 件」と読める）。
+    guarded = _mail_guard_message(out)
+    if guarded:
+        return guarded
     if not out.items:
         return (
             f"📭 {out.client_name} について、対象期間に放置気味の受信メールは見つかりませんでした。"
@@ -486,6 +502,12 @@ def _format_mail_followup_response(out: Any) -> str:
 
 def _format_mail_summary_response(out: Any) -> str:
     """MailSummaryOutput を Slack メッセージに整形する（横断要約 + 件名リスト）。"""
+    # P0-3/P0-4: error 付き応答（未連携・再連携要・client_name ガード・0 件）は message が
+    # 完成した案内文なのでそのまま返す。「見つかりませんでした」等と併記すると原因を
+    # 取り違える（例: 未連携なのに「0 件」と読める）。
+    guarded = _mail_guard_message(out)
+    if guarded:
+        return guarded
     lines = [f"*📨 {out.client_name} — メール要約* （{out.scanned_count} 件）"]
     if out.summary:
         lines += ["", out.summary]

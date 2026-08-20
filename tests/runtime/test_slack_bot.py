@@ -11,6 +11,8 @@ from typing import Any
 from teamagent.runtime.slack_bot import (
     SkillDispatcher,
     _asyncio_exception_handler,
+    _format_mail_followup_response,
+    _format_mail_summary_response,
     _slack_thread_permalink,
     _swap_draft_button,
     build_ack_message,
@@ -509,3 +511,53 @@ def test_asyncio_exception_handler_no_init_no_raise() -> None:
 
     # 3) 空 context
     _asyncio_exception_handler(loop, {})
+
+
+# ── P0-3/P0-4: メール系の構造化応答は Slack でも message をそのまま出す ──────
+
+
+class _FakeMailOut:
+    """MailSummaryOutput / MailFollowupOutput の最小スタブ（error/message を持つ）。"""
+
+    def __init__(self, *, error: str, message: str) -> None:
+        self.error = error
+        self.message = message
+        self.client_name = "X社"
+        self.scanned_count = 0
+        self.summary = message
+        self.note = message
+        self.items: list[Any] = []
+        self.highlights: list[Any] = []
+        self.total_cost_usd = 0.0
+
+
+def test_followup_not_connected_does_not_render_as_zero_hits() -> None:
+    """未連携なのに『見つかりませんでした』と併記すると原因を取り違える（P0-4 の退行防止）。"""
+    out = _FakeMailOut(
+        error="not_connected",
+        message="メールの確認には Google の連携が必要です（@NewsTV AI に『連携』と話しかけて許可してください）。",
+    )
+
+    rendered = _format_mail_followup_response(out)
+
+    assert rendered == out.message
+    assert "見つかりませんでした" not in rendered
+
+
+def test_summary_guard_message_is_returned_verbatim() -> None:
+    out = _FakeMailOut(
+        error="no_hits", message="連携は正常です（受信箱 s***@x.jp を実際に検索しました）。"
+    )
+
+    assert _format_mail_summary_response(out) == out.message
+
+
+def test_normal_followup_response_is_unaffected_by_the_guard() -> None:
+    """error が無い応答は従来どおりの整形（ガードが正常系を食わないこと）。"""
+    out = _FakeMailOut(error="", message="")
+    out.note = "※ 但し書き"
+
+    rendered = _format_mail_followup_response(out)
+
+    assert "見つかりませんでした" in rendered
+    assert "※ 但し書き" in rendered

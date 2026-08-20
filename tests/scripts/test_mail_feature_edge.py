@@ -9,6 +9,7 @@ from __future__ import annotations
 # シナリオ ID（test_E01 等）は大文字を意図的に使うため N802 を無効化。
 # ruff: noqa: N802
 import base64
+import datetime as _dt
 import hashlib
 import importlib.util
 import sys
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from teamagent.skills.base import SkillContext
+from teamagent.skills.morning_digest import calendar_window as calwin
 from teamagent.skills.morning_digest.schema import (
     CalendarEventItem,
     MailDigestItem,
@@ -71,6 +73,7 @@ class _Ev:
     start: str = ""
     end: str = ""
     location: str = ""
+    all_day: bool = False
 
 
 class _Gmail:
@@ -178,8 +181,12 @@ def _to_me(frm="c@acme.co.jp", subj="件名", thread="T", body="本文です。"
 # ════ 回帰固定：今回直した2バグ ════
 
 
-def test_E01_calendar_times_populated_not_blank():
+def test_E01_calendar_times_populated_not_blank(monkeypatch):
     """バグ①回帰：CalendarEvent.start/end を読み、時刻が空にならない。"""
+    # 窓が JST 当日 00:00 起点になったため、固定日フィクスチャは「今日」も固定する。
+    monkeypatch.setattr(
+        calwin, "now_jst", lambda: _dt.datetime(2026, 6, 25, 9, 30, tzinfo=calwin.JST)
+    )
     ev = _Ev(summary="営業MTG", start="2026-06-25T10:00:00+09:00", end="2026-06-25T11:00:00+09:00")
     out = _run(_skill(_Gmail([_to_me()]), gcal=_GCal([ev])), max_drafts=0)
     assert out.calendar_events[0].start_at == "2026-06-25T10:00:00+09:00"
@@ -551,10 +558,11 @@ def test_E30_calendar_section_rendered_with_real_titles():
                 meeting_url="https://meet.google.com/abc-defg-hij",
             )
         ],
+        calendar_date="2026-06-25",
     )
     _t, blocks = runner._format_block_kit(d, ME)
     dump = str(blocks)
-    assert "今日の予定" in dump  # 予定セクションが出る
+    assert "6/25(木) の予定" in dump  # 予定セクションが出る（見出しは実日付）
     assert "営業定例 with 法人A" in dump  # 実名(display)で表示
     assert "10:00–11:00" in dump  # 時刻が出る
     assert "本社3F" in dump  # 場所が出る
@@ -586,9 +594,9 @@ def test_E32_preamble_and_no_scoreboard():
     """冒頭は『メールと本日の予定をお送りします。』、旧スコアボード(要確認/下書き済)は無い。"""
     d = MorningDigestOutput(user_email_masked="m***@x")
     text, blocks = runner._format_block_kit(d, ME)
-    assert text == "メールと本日の予定をお送りします。"
+    assert text == "メールと本日の予定をお送りします。"  # 通知プレビューの fallback は据置
     dump = str(blocks)
-    assert "メールと本日の予定をお送りします" in dump
+    assert "の予定をお送りします" in dump and "本日の予定" not in dump  # 本文は日付明示
     assert "下書き済" not in dump and "要確認" not in dump  # スコアボード削除
 
 

@@ -377,3 +377,59 @@ def test_slack_context_skipped_when_gate_off(monkeypatch: pytest.MonkeyPatch) ->
 
     assert "社内Slackの関連文脈" not in str(bedrock.last_messages)
     assert prov.calls == []  # gate OFF なら provider は呼ばれない
+
+
+# ── 要修正2(G5 バイパス): 生 client_name をフレーズに直挿ししない ─────────────
+
+
+# 空文字は本 Skill の schema が min_length=1 で弾く（ガードの担当は断片のみ）。
+@pytest.mark.parametrize("bad", ["今日のメール", "返信必要", "今週の空き時間", "の"])
+def test_guard_blocks_request_fragments_without_touching_gmail(bad: str) -> None:
+    """依頼文の断片で受信箱を漁らない（mail_summary / mail_followup と同じ規律）。"""
+    fake = FakeGmail([_inbound()])
+    skill = MailReplySkill(gmail=fake, bedrock=FakeBedrock())
+
+    out = skill.run(MailReplyInput(client_name=bad), _ctx())
+
+    assert fake.last_query is None, "受信箱を検索してはいけない"
+    assert fake.create_draft_calls == [], "下書きを作ってはいけない"
+    assert out.created is False
+    assert "連携は正常です" in out.note
+
+
+def test_guard_refuses_gmail_operator_injection_in_the_query() -> None:
+    """``"`` でフレーズを閉じて ``from:`` を継ぎ足す注入を、クエリを組む前に落とす。"""
+    fake = FakeGmail([_inbound()])
+    skill = MailReplySkill(gmail=fake, bedrock=FakeBedrock())
+
+    out = skill.run(MailReplyInput(client_name='x" OR from:ceo@example.com "'), _ctx())
+
+    assert fake.last_query is None
+    assert out.created is False
+    assert "ceo@example.com" not in out.note  # エコーも PII マスク後
+
+
+def test_query_is_phrase_quoted_for_a_real_client_name() -> None:
+    fake = FakeGmail([_inbound()])
+    MailReplySkill(gmail=fake, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="森ビル", lookback_days=7), _ctx()
+    )
+    assert fake.last_query == '"森ビル" newer_than:7d -in:sent in:inbox'
+
+
+def test_explicit_target_message_id_bypasses_the_guard() -> None:
+    """本人が返信先を指名しているなら client_name の検査で止めない（検索もしない）。"""
+    fake = FakeGmail([_inbound()])
+    out = MailReplySkill(gmail=fake, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="今日のメール", target_message_id="m0"), _ctx()
+    )
+    assert fake.last_query is None  # 指名時はそもそも検索しない
+    assert out.created is True
+
+
+def test_output_client_name_is_scrubbed() -> None:
+    fake = FakeGmail([_inbound()])
+    out = MailReplySkill(gmail=fake, bedrock=FakeBedrock()).run(
+        MailReplyInput(client_name="tanaka@example.com 森ビル"), _ctx()
+    )
+    assert "tanaka@example.com" not in out.client_name

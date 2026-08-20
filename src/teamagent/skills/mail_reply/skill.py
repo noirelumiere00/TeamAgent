@@ -33,6 +33,12 @@ from teamagent.adapters.gmail_client import (
 )
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.client_name_guard import (
+    classify_client_name,
+    guard_message,
+    safe_client_name,
+    to_gmail_phrase,
+)
 from teamagent.skills._shared.mail_compose import (
     build_cc,
     build_thread_history,
@@ -130,7 +136,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         log = ctx.bind_logger(self.name)
         log.info(
             "mail_reply_start",
-            client_name=input.client_name,
+            client_name_chars=len(input.client_name),
             lookback_days=input.lookback_days,
             has_instructions=bool(input.instructions),
         )
@@ -147,15 +153,38 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         gmail = self._resolve_gmail(requester)
 
         # G5: 対象メールを client+期間で絞り、最新の受信（自分の送信は除外）を返信元にする。
-        target = self._find_target(gmail, input, ctx)
+        # 本人が返信先を指名していない時だけ client_name の意味検査を通す（依頼文の断片で
+        # 受信箱を漁らない・`"` を含む値でフレーズを閉じる演算子注入を通さない）。
+        search_term = ""
+        if not input.target_message_id:
+            verdict = classify_client_name(input.client_name)
+            if verdict.verdict != "ok":
+                log.info(
+                    "mail_client_name_guard",
+                    skill=self.name,
+                    verdict=verdict.verdict,  # 値そのものは出さない（verdict/reason のみ）
+                    reason=verdict.reason,
+                )
+                return MailReplyOutput(
+                    client_name=safe_client_name(input.client_name),
+                    created=False,
+                    note=guard_message(verdict),
+                )
+            search_term = verdict.search_terms[0]
+
+        target = self._find_target(gmail, input, ctx, search_term=search_term)
         if target is None:
             log.info("mail_reply_no_target")
-            return MailReplyOutput(client_name=input.client_name, created=False, note=_NO_TARGET)
+            return MailReplyOutput(
+                client_name=safe_client_name(input.client_name), created=False, note=_NO_TARGET
+            )
 
         sender = _first_external(target.headers, requester)
         if not sender:
             log.info("mail_reply_no_sender")
-            return MailReplyOutput(client_name=input.client_name, created=False, note=_NO_TARGET)
+            return MailReplyOutput(
+                client_name=safe_client_name(input.client_name), created=False, note=_NO_TARGET
+            )
 
         orig_subject = target.headers.get("Subject", "")
         body = extract_plain_text(target.payload)
@@ -191,7 +220,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
 
         log.info("mail_reply_done", created=bool(draft_id), cost_usd=cost)  # 本文・宛先は出さない
         return MailReplyOutput(
-            client_name=input.client_name,
+            client_name=safe_client_name(input.client_name),
             created=bool(draft_id),
             to_display=sender,  # 本人の取引相手＝本人にのみ ephemeral 表示（確認用）
             draft_subject=reply_subject,
@@ -223,7 +252,12 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             ) from e
 
     def _find_target(
-        self, gmail: GmailClient, input: MailReplyInput, ctx: SkillContext
+        self,
+        gmail: GmailClient,
+        input: MailReplyInput,
+        ctx: SkillContext,
+        *,
+        search_term: str = "",
     ) -> Any | None:
         log = ctx.bind_logger(self.name)
         # 本人が明示したメールは除外しない。除外は「どれに返信するか自動で選ぶ」ときの
@@ -232,7 +266,12 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         if input.target_message_id:
             candidate_ids = [input.target_message_id]
         else:
-            query = f'"{input.client_name}" newer_than:{input.lookback_days}d -in:sent in:inbox'
+            # search_term は client_name_guard が検査済みのキーワード。生の client_name を
+            # ここに流さないこと（`"` を含む値でフレーズを閉じられるため）。
+            query = (
+                f"{to_gmail_phrase(search_term)} "
+                f"newer_than:{input.lookback_days}d -in:sent in:inbox"
+            )
             refs, _ = gmail.list_messages(query, ctx.request_id, max_results=10)
             candidate_ids = [ref.id for ref in refs]
 

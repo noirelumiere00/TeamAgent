@@ -56,3 +56,21 @@
 {"id": "adv-11", "utterance": "インスタで『#韓国コスメ』の面、上位に出てるのがインフルばっかか一般人かの割合出して", "expect": "search_surface_check"}
 {"id": "adv-13", "utterance": "白湯のポジティブ/ネガティブの割合をXで、期間は今月1ヶ月分で日別に", "expect": "x_buzz_measure", "note": "期間+日別=buzz"}
 {"id": "adv-14", "utterance": "うちのブランドのXでの評判、いい声も悪い声も実物の投稿で全部見たい", "expect": "x_voice_search"}
+{"id": "freebusy-01", "utterance": "今週の空いてる時間を教えて", "expect": "calendar_freebusy", "forbid": ["mail_followup", "mail_summary"], "note": "R4 実測事故: mail_followup(client_name='今週の空き時間') に化けた発話そのもの"}
+{"id": "freebusy-02", "utterance": "30分のMTGどこに入る？", "expect": "calendar_freebusy", "forbid": ["calendar_event", "mail_followup"], "note": "R4: 所要時間だけの依頼。登録(calendar_event)に盗ませない"}
+{"id": "freebusy-03", "utterance": "明日の午後空いてる？", "expect": "calendar_freebusy", "forbid": ["calendar_event"], "note": "R4: 『空いてる』は free モード"}
+{"id": "agenda-01", "utterance": "明日の予定を教えて", "expect": "calendar_freebusy", "forbid": ["calendar_event", "morning_digest"], "arg_rules": {"mode": "must_equal:agenda"}, "note": "R4: 『予定教えて』(読取) を『予定入れて』(登録) に流さない"}
+{"id": "agenda-02", "utterance": "今日のスケジュール一覧", "expect": "calendar_freebusy", "forbid": ["calendar_event", "morning_digest"], "arg_rules": {"mode": "must_equal:agenda", "relative_day": "must_equal:today"}, "note": "R4: 『今日』は relative_day で渡す（LLM に日付計算をさせない）"}
+{"id": "agenda-03", "utterance": "今日なにがある？", "expect": "calendar_freebusy", "forbid": ["search"], "arg_rules": {"mode": "must_equal:agenda", "relative_day": "must_equal:today"}, "note": "R4: 一語に近い曖昧発話。資料検索に流さない"}
+{"id": "mailnc-01", "utterance": "返信が必要なメールを教えて", "expect": "__ask_back__", "alt_ok": ["mail_followup"], "forbid": ["clientkarte", "mail_to_internal_context", "mail_reply"], "arg_rules": {"client_name": "must_be_absent"}, "note": "R4 実測事故: client_name='返信必要' が詰められ scanned=0。聞き返すか client_name 空で mail_followup。forbid は client_name 必須ツール（＝捏造を強制する）"}
+{"id": "mailnc-02", "utterance": "今日届いたメールを要約して", "expect": "__ask_back__", "alt_ok": ["mail_summary"], "forbid": ["clientkarte", "mail_to_internal_context", "mail_reply"], "arg_rules": {"client_name": "must_be_absent"}, "note": "R4 実測事故: client_name='今日のメール' が詰められ scanned=0"}
+{"id": "mailnc-03", "utterance": "未読たまってない？", "expect": "__ask_back__", "alt_ok": ["mail_followup"], "forbid": ["clientkarte", "mail_to_internal_context", "mail_reply"], "arg_rules": {"client_name": "must_be_absent"}, "note": "R4: 一語に近い曖昧発話"}
+{"id": "mailnc-04", "utterance": "放置してるメールある？", "expect": "__ask_back__", "alt_ok": ["mail_followup"], "forbid": ["clientkarte", "mail_to_internal_context", "mail_reply"], "arg_rules": {"client_name": "must_be_absent"}, "note": "R4: 『放置してるメール』は残差『してる』が残りガードを素通りする（既知の穴・test_client_name_guard_contract.py の KNOWN_GAPS）"}
+{"id": "oauth-02", "utterance": "連携", "expect": "oauth_connect", "forbid": ["search"], "note": "R4: 一語入力。資料検索に流さない"}
+{"id": "oauth-03", "utterance": "再連携", "expect": "oauth_connect", "forbid": ["search"]}
+{"id": "oauth-04", "utterance": "接続して", "expect": "oauth_connect", "forbid": ["search"]}
+{"id": "r4neg-cal-01", "utterance": "明日10時に花王と定例入れといて", "expect": "calendar_event", "forbid": ["calendar_freebusy"], "note": "R4 対照: 『入れといて』＝登録。agenda 新設で登録が読取に盗まれないこと"}
+{"id": "r4neg-mail-01", "utterance": "花王からのメールで止まってる案件を教えて", "expect": "mail_followup", "arg_rules": {"client_name": "must_be_present"}, "note": "R4 対照: 顧客名がある正常系はガード前と同じ挙動でなければならない"}
+{"id": "r4neg-mail-02", "utterance": "アサヒの直近メールを要約して", "expect": "mail_summary", "arg_rules": {"client_name": "must_be_present"}, "note": "R4 対照: 顧客名がある正常系"}
+{"id": "r4neg-search-01", "utterance": "今日の会議資料どこ？", "expect": "search", "forbid": ["calendar_freebusy", "calendar_event"], "note": "R4 対照: 『今日』語をカレンダーに横取りさせない（資料探索）"}
+{"id": "r4neg-karte-01", "utterance": "花王の温度感まとめて", "expect": "clientkarte", "forbid": ["mail_summary"], "note": "R4 対照: 顧客名つきカルテ依頼はメール要約に流れない"}

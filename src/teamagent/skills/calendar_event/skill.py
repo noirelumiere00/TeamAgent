@@ -116,6 +116,8 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
         "カレンダーで開くリンク(event_url)と案内文(message)を返す。"
         "参加者の招待・他人のカレンダーへの登録・予定の変更/削除はできない（引数が存在しない）。"
         "空き時間の照会は calendar_freebusy、相手との日程調整は schedule_propose を使う。"
+        "**予定の確認・一覧（『明日の予定は？』『今日なにがある？』）は "
+        "calendar_freebusy(mode='agenda')**＝このツールは登録専用で、読み取りには使わない。"
         "呼び出し時は arguments に `_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を"
         "必ず含める（本人解決鍵）。"
     )

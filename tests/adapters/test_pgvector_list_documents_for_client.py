@@ -5,6 +5,9 @@
 - suppressed（dedup 非正本）と is_sales_fb（FB は timeline 側で出す）を除外する
 - cls_project / client_name / title の ILIKE 部分一致で SQL 側絞り込み
   （like pattern は placeholder bind・injection 安全）
+- LIKE メタ文字（% _ \\）はエスケープして ESCAPE '\\' を付ける。この結果は
+  clientkarte の**自動 DM 添付の候補選定**に使われるため、``client_name='%'`` が
+  「会社中の新しい資料 50 件」に化けると他社資料がそのまま送られる
 - modified_at DESC NULLS LAST（新しい資料優先）
 - 空白のみの client_name は SQL を発行せず [] を即返す
 """
@@ -115,3 +118,39 @@ def test_returns_rows_as_plain_dicts() -> None:
     docs = client.list_documents_for_client(conn, "出光興産")
     assert docs == [row]
     assert isinstance(docs[0], dict)
+
+
+def test_like_wildcards_in_client_name_are_escaped() -> None:
+    """``%`` / ``_`` / ``\\`` を素通ししない（ワイルドカードで全社資料を掴ませない）。
+
+    この行の結果は clientkarte が自動 DM 添付の候補選定に使う。素通しだと
+    ``client_name='%'`` だけで他社資料が「関連資料」として送られてしまう。
+    """
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_client(conn, "%")
+    sql: str = cur.execute.call_args.args[0]
+    params: list[Any] = cur.execute.call_args.args[1]
+
+    assert sql.count("ESCAPE '\\'") == 3
+    assert params[0] == "%\\%%"  # 中央の % はリテラル化されている
+    assert params[0] == params[1] == params[2]
+
+
+def test_like_escape_covers_underscore_and_backslash() -> None:
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_client(conn, "a_b\\c")
+    params: list[Any] = cur.execute.call_args.args[1]
+
+    assert params[0] == "%a\\_b\\\\c%"
+
+
+def test_ordinary_client_name_is_unchanged_by_escaping() -> None:
+    """エスケープが通常の社名の検索結果を変えない（既存挙動の回帰防止）。"""
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.list_documents_for_client(conn, "日本ガイシ")
+    params: list[Any] = cur.execute.call_args.args[1]
+
+    assert params[0] == "%日本ガイシ%"

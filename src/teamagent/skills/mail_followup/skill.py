@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Sequence
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import structlog
 from pydantic import BaseModel
@@ -34,7 +34,25 @@ from pydantic import BaseModel
 from teamagent.adapters.gmail_client import GmailClient, extract_thread_participants
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.client_name_guard import (
+    ERROR_BY_VERDICT,
+    classify_client_name,
+    guard_message,
+    retry_disclosure,
+    retry_zero_note,
+    safe_client_name,
+    to_gmail_phrase,
+)
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.mail_connection import (
+    CONNECTION_LIVE,
+    CONNECTION_OK,
+    MESSAGE_BY_CONNECTION_ERROR,
+    MailConnectionError,
+    classify_gmail_failure,
+    resolve_gmail_for_user,
+    searched_inbox_prefix,
+)
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_followup.schema import (
@@ -52,6 +70,22 @@ _HONEST_NOTE = (
     "います（gmail.readonly のみ・本文は読みません）。"
 )
 
+_MISCONFIG_MSG = "TokenStore が未設定です（mail_followup は本人連携前提）"
+
+
+def _no_hits_message(name: str, lookback_days: int, inbox_masked: str) -> str:
+    """該当 0 件の決定論文言（P0-3）。
+
+    「連携は正常」「実際に検索した」をサーバが断言することで、LLM が空白を埋めて
+    「Google 連携が未完了かもしれません」と創作するのを止める。本 Skill の 0 件は
+    「メールが 1 通も無い」ではなく「**相手から来たまま止まっているものが**無い」なので、
+    文言もそのとおりに書く（返信済みで除外された分を「無かった」ことにしない）。
+    """
+    return (
+        searched_inbox_prefix(inbox_masked) + f"「{name}」で直近 {lookback_days} 日に"
+        "『相手から来たまま止まっている』受信メールは 0 件でした。"
+    )
+
 
 @register
 class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
@@ -59,10 +93,17 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
 
     name: ClassVar[str] = "mail_followup"
     description: ClassVar[str] = (
+        "**『要返信』『返信が必要』『返信漏れ』『返信待ち』『放置しているメール』"
+        "と言われたらこれ。**"
         "本人の受信箱から、指定クライアントについて『相手から最後に来たまま動いていない』"
         "メールスレッドを放置日数つきで列挙する。本文は読まず件名・相手はマスク。"
         "スレッド末尾が本人の返信なら候補から除外する。"
-        "本人が /teamagent connect で連携済みの時のみ使える（未連携は不可）。"
+        "メール内容の横断要約は mail_summary、空き時間は calendar_freebusy、"
+        "予定の一覧は calendar_freebusy(mode='agenda')。"
+        "顧客名が特定できない依頼では client_name を空にして呼ぶ（サーバが案内を返す）。"
+        "未連携なら error='not_connected' と message を返す（message をそのまま伝え、"
+        "oauth_connect＝@NewsTV AI に『連携』へ誘導する）。0 件なら error='no_hits'、"
+        "connection='live'（＝連携は正常）。**0 件の原因を推測して補わないこと**。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
         "必ず含める（mcp 境界の本人解決鍵）。"
@@ -85,10 +126,10 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
 
     def run(self, input: MailFollowupInput, ctx: SkillContext) -> MailFollowupOutput:
         log = ctx.bind_logger(self.name)
-        # G7: 監査ログに本文・件名・生 email は出さない。
+        # G7: 監査ログに本文・件名・生 email・client_name の値そのものは出さない。
         log.info(
             "mail_followup_start",
-            client_name=input.client_name,
+            client_name_chars=len(input.client_name),
             lookback_days=input.lookback_days,
             idle_days=input.idle_days,
             max_messages=input.max_messages,
@@ -104,11 +145,67 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         if not requester:
             raise PermissionError("本人 user_email が必須です（空不可・fail-closed）")
 
-        gmail = self._resolve_gmail(requester)
+        # 連携の解決を先に済ませる（TokenStore 参照＋Credentials 構築のみで **Gmail API は
+        # 叩かない**）。ガードの文言は「連携は正常です」と断言するため、未連携のまま
+        # ガードへ落ちると嘘を返してしまう。
+        # P0-4: 未連携/再連携要は **例外ではなく構造化 return**（calendar_freebusy と同型）。
+        # PermissionError のままだと MCP 境界で和文 1 本に潰れ、SOUL の
+        # 「error=not_connected なら oauth_connect へ誘導」契約に載らない。
+        try:
+            gmail = self._resolve_gmail(requester)
+        except MailConnectionError as e:
+            log.info("mail_not_connected", skill=self.name, error=e.code)
+            return MailFollowupOutput(
+                client_name=safe_client_name(input.client_name),
+                items=[],
+                scanned_count=0,
+                inbox_owner_masked=_mask_email(requester),
+                note=e.message,
+                total_cost_usd=0.0,
+                error=e.code,
+                message=e.message,
+                connection="",
+            )
+
+        # P0-2: client_name が依頼文の断片（「今週の空き時間」等）や空なら、**Gmail を
+        # 1 回も叩かずに**案内文を返す。無検査で通すと '"今週の空き時間"' という完全一致
+        # フレーズ検索になり必ず 0 件＝「連携が壊れている」と誤解させるため。
+        verdict = classify_client_name(input.client_name)
+        if verdict.verdict != "ok":
+            log.info(
+                "mail_client_name_guard",
+                skill=self.name,
+                verdict=verdict.verdict,  # 値そのものは出さない（verdict/reason のみ）
+                reason=verdict.reason,
+            )
+            message = guard_message(verdict)
+            return MailFollowupOutput(
+                # エコーも scrub 済みにする（message だけマスクして client_name は生、
+                # という二重基準を同じ応答の中に作らない）。
+                client_name=safe_client_name(verdict.normalized),
+                items=[],
+                scanned_count=0,
+                inbox_owner_masked=_mask_email(requester),
+                # SOUL は「message をそのまま返す」規約を持たないので、既に表示対象に
+                # なっている note にも同じ文言を載せる（二重掲載は意図的）。
+                note=message,
+                total_cost_usd=0.0,
+                error=ERROR_BY_VERDICT[verdict.verdict],
+                message=message,
+                connection=CONNECTION_OK,
+            )
+
+        inbox_masked = _mask_email(requester)
+        # エコーは scrub 済み（client_name にメールアドレス等が入っていても素で返さない）。
+        display_name = safe_client_name(verdict.normalized)
 
         # G5: クエリ限定（client + 期間 + 受信のみ。自分の送信は除外）。
-        query = self._build_query(input)
-        refs, _ = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
+        # ⚠️ ここから先は実際に Gmail を叩く。失効トークンはここで初めて露見するので、
+        # 例外のまま抜けさせない（要修正3: reauth_needed に落として再連携へ誘導する）。
+        try:
+            refs, retried_with = self._search(gmail, verdict, input, ctx, log)
+        except Exception as e:
+            return self._api_failure(e, log=log, client_display=display_name, inbox=inbox_masked)
         # Gmail quota が 10 units/threads.get のため、API 呼び出しより先にスレッド重複を除く。
         unique_refs = _dedupe_refs_by_thread(refs)
         log.info(
@@ -118,10 +215,134 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
         )  # 本文・件名なし
 
         now_ms = self._now_ms if self._now_ms is not None else int(time.time() * 1000)
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
+        try:
+            items, excluded, kept = self._triage(
+                gmail, unique_refs, requester, input, ctx, now_ms=now_ms, exclude_bulk=exclude_bulk
+            )
+        except Exception as e:
+            return self._api_failure(e, log=log, client_display=display_name, inbox=inbox_masked)
+
+        log.info(
+            "mail_bulk_excluded",
+            skill=self.name,
+            excluded=excluded,
+            kept=kept,
+            request_id=ctx.request_id,
+        )
+
+        # 放置日数が大きい順（最も後回しになっているもの＝失注リスクが高い）。
+        items.sort(key=lambda it: it.idle_days, reverse=True)
+
+        # 2 本目は「東京メール大学」→「東京大学」のように別法人へ化けうる。どの語で
+        # 当てたかを黙ると、別クライアントのメールを自分の案件として読ませてしまう。
+        retry_note = retry_disclosure(verdict.normalized, retried_with) if retried_with else ""
+        note = f"{retry_note}\n{_HONEST_NOTE}" if retry_note else _HONEST_NOTE
+        message = ""
+        error = ""
+        if not items:
+            # P0-3: 0 件の意味づけをサーバ側で確定させる（LLM に理由を創作させない）。
+            zero = _no_hits_message(
+                display_name,
+                self._effective_lookback(input),
+                inbox_masked,
+            )
+            if retried_with:
+                zero += retry_zero_note(retried_with)
+            note = zero + _HONEST_NOTE
+            message = note
+            error = "no_hits"
+
+        log.info("mail_followup_done", returned=len(items), scanned=len(refs))
+        return MailFollowupOutput(
+            client_name=display_name,
+            items=items,
+            scanned_count=len(refs),
+            inbox_owner_masked=inbox_masked,
+            note=note,
+            total_cost_usd=0.0,
+            error=error,
+            message=message,
+            connection=CONNECTION_LIVE,
+        )
+
+    # ── 依存解決 ───────────────────────────────────────────────────────────
+
+    def _resolve_gmail(self, requester: str) -> GmailClient:
+        """G1/G2: 本人 OAuth トークン（TokenStore）から readonly クライアントを構築する。
+
+        テスト/明示注入があればそれを使う。無ければ TokenStore から本人トークンを引き、
+        from_user_token で本人受信箱のみ参照可能な readonly クライアントを作る（G4）。
+        未連携（トークン無し）は fail-closed（G2）＝受信箱には触れず MailConnectionError。
+        """
+        if self._gmail is not None:
+            return self._gmail
+        return resolve_gmail_for_user(
+            self._token_store, requester, misconfig_message=_MISCONFIG_MSG
+        )
+
+    def _search(
+        self,
+        gmail: GmailClient,
+        verdict: Any,
+        input: MailFollowupInput,
+        ctx: SkillContext,
+        log: Any,
+    ) -> tuple[list[Any], str]:
+        """1 本目（原文フレーズ）→ 0 件なら 2 本目（固有名詞残差）。Gmail 往復は最大 2 回。"""
+        query = self._build_query(input, verdict.search_terms[0])
+        refs, _ = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
+        if refs or len(verdict.search_terms) <= 1:
+            return (list(refs), "")
+        # 「花王のメール」のように依頼文が混じった名前は 1 本目が 0 件になる。
+        log.info("mail_followup_retry_residual", skill=self.name)
+        retried_with = str(verdict.search_terms[1])
+        refs, _ = gmail.list_messages(
+            self._build_query(input, retried_with), ctx.request_id, max_results=input.max_messages
+        )
+        return (list(refs), retried_with)
+
+    def _api_failure(
+        self, exc: BaseException, *, log: Any, client_display: str, inbox: str
+    ) -> MailFollowupOutput:
+        """受信箱アクセスの失敗を「0 件」と区別できる構造化 return にする（要修正3）。"""
+        code = classify_gmail_failure(exc)
+        log.warning("mail_search_failed", skill=self.name, error=code, err=type(exc).__name__)
+        message = MESSAGE_BY_CONNECTION_ERROR[code]
+        return MailFollowupOutput(
+            client_name=client_display,
+            items=[],
+            scanned_count=0,
+            inbox_owner_masked=inbox,
+            note=message,
+            total_cost_usd=0.0,
+            error=code,
+            message=message,
+            connection="",
+        )
+
+    # ── トリアージ（G3/G4: メタデータのみ）──────────────────────────────────
+
+    def _triage(
+        self,
+        gmail: GmailClient,
+        unique_refs: list[Any],
+        requester: str,
+        input: MailFollowupInput,
+        ctx: SkillContext,
+        *,
+        now_ms: int,
+        exclude_bulk: bool,
+    ) -> tuple[list[FollowupItem], int, int]:
+        """スレッド末尾をメタデータで確認し、放置中のものだけを列挙する。
+
+        Returns:
+            (items, bulk 除外数, 判定対象数)。Gmail 側の例外はそのまま送出し、
+            呼び出し側が :meth:`_api_failure` で「0 件」と区別できる形へ落とす。
+        """
         items: list[FollowupItem] = []
         excluded = 0
         kept = 0
-        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
         for ref in unique_refs:
             thread_id = str(getattr(ref, "thread_id", "") or "")
             if not thread_id:
@@ -171,69 +392,31 @@ class MailFollowupSkill(BaseSkill[MailFollowupInput, MailFollowupOutput]):
                     evidence_ref=_hash_id(anchor.id),
                 )
             )
-
-        log.info(
-            "mail_bulk_excluded",
-            skill=self.name,
-            excluded=excluded,
-            kept=kept,
-            request_id=ctx.request_id,
-        )
-
-        # 放置日数が大きい順（最も後回しになっているもの＝失注リスクが高い）。
-        items.sort(key=lambda it: it.idle_days, reverse=True)
-
-        log.info("mail_followup_done", returned=len(items), scanned=len(refs))
-        return MailFollowupOutput(
-            client_name=input.client_name,
-            items=items,
-            scanned_count=len(refs),
-            inbox_owner_masked=_mask_email(requester),
-            note=_HONEST_NOTE,
-            total_cost_usd=0.0,
-        )
-
-    # ── 依存解決 ───────────────────────────────────────────────────────────
-
-    def _resolve_gmail(self, requester: str) -> GmailClient:
-        """G1/G2: 本人 OAuth トークン（TokenStore）から readonly クライアントを構築する。
-
-        テスト/明示注入があればそれを使う。無ければ TokenStore から本人トークンを引き、
-        from_user_token で本人受信箱のみ参照可能な readonly クライアントを作る（G4）。
-        未連携（トークン無し）は fail-closed（G2）。
-        """
-        if self._gmail is not None:
-            return self._gmail
-        if self._token_store is None:
-            raise PermissionError("TokenStore が未設定です（mail_followup は本人連携前提）")
-        token = self._token_store.get(requester)
-        if token is None:
-            raise PermissionError(
-                "メール連携が未完了です（/teamagent connect で自分の Google を認可してください）"
-            )
-        try:
-            return GmailClient.from_user_token(token, readonly=True)
-        except ValueError as e:
-            # 認証情報(GOOGLE_CLIENT_ID/SECRET 未設定・失効/空 refresh token)は連携案内に寄せる。
-            raise PermissionError(
-                "メール連携の認証情報を解決できませんでした。"
-                "/teamagent connect で自分の Google を認可し直してください。"
-            ) from e
+        return (items, excluded, kept)
 
     # ── クエリ構築（G5）─────────────────────────────────────────────────────
 
     @staticmethod
-    def _build_query(input: MailFollowupInput) -> str:
+    def _effective_lookback(input: MailFollowupInput) -> int:
+        """実際に検索した遡り日数。idle_days 指定時は窓を広げる（0 件文言と必ず一致させる）。"""
+        lookback = input.lookback_days
+        if input.idle_days is not None:
+            lookback = min(90, max(lookback, input.idle_days + 3))
+        return lookback
+
+    @staticmethod
+    def _build_query(input: MailFollowupInput, term: str) -> str:
         """Gmail 検索クエリ。client + 期間で必ず絞り、自分の送信は除外して受信のみ見る。
 
         `-in:sent` で送信済みを除外し `in:inbox` で受信トレイに限定する（放置 = 受信箱に残存）。
         idle_days 指定時は走査窓をその閾値より十分前まで広げる（広げないと post-filter で全部
         落ちて「見つかりませんでした」と誤答する＝信頼を損なう）。上限は schema 同様 90 日。
+
+        term は client_name_guard が検査済みのキーワード（原文 or 固有名詞残差）。生の
+        client_name をここに流さないこと（`"` を含む値でフレーズを閉じられるため）。
         """
-        lookback = input.lookback_days
-        if input.idle_days is not None:
-            lookback = min(90, max(lookback, input.idle_days + 3))
-        return f'"{input.client_name}" newer_than:{lookback}d -in:sent in:inbox'
+        lookback = MailFollowupSkill._effective_lookback(input)
+        return f"{to_gmail_phrase(term)} newer_than:{lookback}d -in:sent in:inbox"
 
 
 # ── モジュール関数（純粋・テスト容易）──────────────────────────────────────
