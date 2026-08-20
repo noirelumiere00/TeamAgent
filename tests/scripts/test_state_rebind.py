@@ -64,16 +64,30 @@ def test_mapping_accepts_a_valid_target(tmp_path: Path) -> None:
     assert len(load_targets(_mapping_file(tmp_path, [_target()]))) == 1
 
 
-def test_production_mapping_stays_empty_until_deployment_freeze() -> None:
-    """調査時点の ARN を焼かない契約。
+def test_production_mapping_is_frozen_with_the_approved_six_targets() -> None:
+    """freeze 後に確定した production mapping の改竄封印。
 
-    production mapping は PRODUCTION DEPLOYMENT FREEZE 開始後の fresh 再解決でのみ
-    確定する（2026-08-20 に調査中 mcp:86 が増えた実例が根拠）。freeze 後に mapping を
-    確定する commit では、このテストを「6 targets の内容検証」へ置き換えること。
+    値の由来: PRODUCTION DEPLOYMENT FREEZE（2026-08-20 18:15 JST）後の fresh 再解決。
+    approved evidence = mcp 系 5 件は署名検証済み release receipt、tiktok_acquire:25 は
+    human gate 明示承認（freeze 窓限定）。ここを変える場合は freeze 境界の引き直しと
+    human gate の再承認が必要。
     """
     raw = json.loads(MAPPING.read_text(encoding="utf-8"))
-    assert raw["targets"] == []
-    assert raw["frozen_at"] is None
+    assert raw["frozen_at"] == "2026-08-20T09:15:00Z"
+    expected = {
+        "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:86",
+        "aws_ecs_task_definition.connect_web": "teamagent-dev-connect-web:71",
+        "aws_ecs_task_definition.morning_digest": "teamagent-dev-morning-digest:53",
+        "aws_ecs_task_definition.canary": "teamagent-dev-canary:23",
+        "aws_ecs_task_definition.ingest": "teamagent-dev-ingest:55",
+        "aws_ecs_task_definition.tiktok_acquire": "teamagent-dev-tiktok-acquire:25",
+    }
+    actual = {t["address"]: t["target_arn"].split("/")[-1] for t in raw["targets"]}
+    assert actual == expected
+    # x_buzz_worker は state == live (:1) のため対象外（含まれていたら誤り）
+    assert "aws_ecs_task_definition.x_buzz_worker" not in actual
+    # loader の厳密検証も通ること（consumer 宣言含む）
+    assert len(load_targets(MAPPING, require_targets=True)) == 6
 
 
 def test_empty_targets_are_rejected_when_required(tmp_path: Path) -> None:
