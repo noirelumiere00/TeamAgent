@@ -10122,6 +10122,10 @@ adopt_assert_out_dir_outside_repo() {
 # 読み取った生の caller identity は out_dir へ audit evidence として残す。
 adopt_trusted_principal_arn() {
   local identity_out="$1" arn
+  # 後段の identity 検査は $TMP_ROOT へ evidence を書く。adopt 経路は他モードの
+  # 前処理を通らないため、ここで必ず tmp を確保する（未確保だと / 直下への
+  # 書き込みになり preflight で実測どおり即死する）。
+  ensure_tmp
   arn="$(aws_cli sts get-caller-identity --query Arn --output text)" ||
     die "adopt: caller identity を取得できませんでした"
   [ -n "$arn" ] && [ "$arn" != "None" ] ||

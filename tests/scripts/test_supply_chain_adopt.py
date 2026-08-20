@@ -1658,3 +1658,15 @@ def test_approval_publisher_generation_retains_until_its_measured_value() -> Non
         start = adopt.index(f"{other} = {{")
         block = adopt[start : adopt.index("\n  }", start)]
         assert '"2099-12-31T00:00:00Z"' in block
+
+
+def test_adopt_identity_resolver_ensures_tmp_before_writing_evidence() -> None:
+    """adopt は他モードの前処理を通らないため、identity evidence を書く前に必ず
+    ensure_tmp で $TMP_ROOT を確保すること（未確保だと / 直下への書き込みで即死する。
+    2026-08-20 の preflight で実測）。"""
+    section = _guard_adopt_section()
+    resolver = section[
+        section.index("adopt_trusted_principal_arn() {") : section.index("adopt_plan() {")
+    ]
+    assert "ensure_tmp" in resolver
+    assert resolver.index("ensure_tmp") < resolver.index("assert_trusted_automation_identity")
