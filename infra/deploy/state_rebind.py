@@ -34,7 +34,7 @@ SCHEMA_VERSION = 1
 BINDING_FILENAME = "rebind-binding.json"
 APPROVE_TOKEN = "I-HAVE-REVIEWED-THE-STATE-REBIND"
 
-ADDRESS_RE = re.compile(r"^aws_ecs_task_definition\.[a-z0-9_]+$")
+ADDRESS_RE = re.compile(r"^aws_ecs_task_definition\.[a-z0-9_]+(\[0\])?$")
 TASKDEF_ARN_RE = re.compile(
     r"^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/"
     r"(?P<family>[A-Za-z0-9_-]+):(?P<revision>[1-9][0-9]*)$"
@@ -144,15 +144,22 @@ def compare_state_to_live(
     state_doc: dict[str, Any], address: str, describe_doc: dict[str, Any]
 ) -> None:
     """rebind 後の state 属性が live DescribeTaskDefinition と一致することを機械証明する。"""
+    base_address = address.split("[", 1)[0]
+    wants_index = address.endswith("[0]")
     instance = None
     for resource in state_doc.get("resources", []):
         if (
             resource.get("mode") == "managed"
-            and f"{resource.get('type')}.{resource.get('name')}" == address
+            and f"{resource.get('type')}.{resource.get('name')}" == base_address
         ):
             instances = resource.get("instances") or []
             if len(instances) != 1:
                 raise RebindError(f"{address}: expected exactly one instance in state")
+            index_key = instances[0].get("index_key")
+            if wants_index and index_key != 0:
+                raise RebindError(f"{address}: state instance index_key is {index_key!r}")
+            if not wants_index and index_key is not None:
+                raise RebindError(f"{address}: state instance is indexed ({index_key!r})")
             instance = instances[0].get("attributes") or {}
             break
     if instance is None:
