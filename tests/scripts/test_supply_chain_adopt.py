@@ -1453,3 +1453,66 @@ def test_bootstrap_admin_matches_the_terraform_trust_principal() -> None:
     assume = assume[assume.index('"runtime_automation_assume"') :]
     assume = assume[: assume.index("\ndata ")]
     assert "data.aws_iam_user.aiia_dev.arn" in assume
+
+
+# ── PR2-A0.2: trusted automation role の activation 用最小 read 権限 ──────────
+#
+# integrity 検査（HeadObject / VersionId 固定 GetObject / Object Lock メタデータ）と
+# adopt(import) の provider read に必要な read だけを evidence inline policy へ許可する。
+# 書き込みは boundary / control-plane / bucket policy の Deny 群が塞いだまま。
+
+
+def _buildspec_read_statement() -> str:
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    start = tf.index('sid = "ReadExactSupplyChainBuildspecGenerations"')
+    return tf[start : tf.index("statement {", start)]
+
+
+def test_buildspec_read_grant_has_exactly_the_minimal_actions() -> None:
+    """許可は read 3 action のみ。ワイルドカード・書き込み系は一切含まない。"""
+    stmt = _buildspec_read_statement()
+    granted = set(re.findall(r'"(s3:[A-Za-z]+)"', stmt))
+    assert granted == {"s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectTagging"}
+    assert ":*" not in stmt
+    for write in ("Put", "Delete", "Restore", "Create"):
+        assert f"s3:{write}" not in stmt
+
+
+def test_buildspec_read_grant_covers_every_adoption_project_prefix() -> None:
+    """mapping が対象とする全プロジェクトの prefix を過不足なくカバーする。
+
+    mapping に新しいプロジェクト族が増えたのに read 権限が追随していない状態
+    （今回の 403 の再発）をテストで強制的に検出する。
+    """
+    stmt = _buildspec_read_statement()
+    prefixes = re.findall(r"codebuild-buildspecs/\$\{local\.([a-z_]+)_project_name\}/\*", stmt)
+    granted_projects = set(prefixes)
+    assert granted_projects == {
+        "mcp_source_publisher",
+        "image_attestor",
+        "image_promoter",
+        "approval_publisher",
+    }
+    # mapping 側の全 project がカバーされていること（mapping から逆引き）
+    mapping_projects = {
+        entry["key"].split("/")[1].replace("teamagent-dev-", "").replace("-", "_")
+        for entry in _adoptions()
+    }
+    assert mapping_projects <= granted_projects
+
+
+def test_buildspec_read_grant_has_no_conditions() -> None:
+    """condition を付けると既存の Null-condition 数一致テストと衝突しうるため付けない。"""
+    assert "condition" not in _buildspec_read_statement()
+
+
+def test_buildspec_read_grant_lives_in_the_evidence_inline_policy() -> None:
+    """statement は runtime_evidence_automation（inline -evidence）の中にあること。
+
+    managed policy 側（manage-a/b/core）に足すと action ハッシュ・statement 数の
+    contract test 群と衝突し、6144 文字の size precondition にも影響する。
+    """
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    doc_start = tf.index('data "aws_iam_policy_document" "runtime_evidence_automation"')
+    doc_end = tf.index('resource "aws_iam_role_policy" "runtime_evidence_automation"')
+    assert doc_start < tf.index('sid = "ReadExactSupplyChainBuildspecGenerations"') < doc_end
