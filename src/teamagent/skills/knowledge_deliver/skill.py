@@ -16,14 +16,20 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
-import tempfile
-from pathlib import Path
+import shutil
 from typing import Any, ClassVar
 
 import structlog
 from pydantic import BaseModel
 
+from teamagent.skills._shared.drive_slack_delivery import (
+    PreparedFile,
+    deliver_files,
+    extract_drive_binary_file_id,
+    extract_drive_file_id,
+    prepare_drive_files,
+    safe_filename,
+)
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.knowledge_deliver.schema import (
     KnowledgeDeliverInput,
@@ -35,44 +41,14 @@ from teamagent.skills.search.schema import SearchInput
 
 logger = structlog.get_logger(__name__)
 
-_DRIVE_ID_RE = re.compile(r"/d/([A-Za-z0-9_-]+)")
-_DRIVE_QUERY_ID_RE = re.compile(r"[?&]id=([A-Za-z0-9_-]+)")
-# 解決済み URL から file_id を取るのは「アップロード実体ファイル」の形だけに限定する。
-# ナレッジシート行の自リンク（docs.google.com/spreadsheets/...）や
-# Google ネイティブ文書（docs.google.com/document|presentation/...）を誤って候補化しない
-# （後者は download_file_bytes が get_media 専用で export 未対応のため配信不能）。
-_DRIVE_BINARY_FILE_URL_RE = re.compile(r"https://drive\.google\.com/file/d/([A-Za-z0-9_-]+)")
-
-
-def extract_drive_binary_file_id(url: str | None) -> str | None:
-    """resolved URL（http(s)）からアップロード実体ファイルの file_id だけを取り出す。"""
-    if not url:
-        return None
-    m = _DRIVE_BINARY_FILE_URL_RE.search(url.strip())
-    return m.group(1) if m else None
-
-
-def extract_drive_file_id(source_uri: str | None) -> str | None:
-    """source_uri（`gdrive://FILE_ID` or Drive web リンク）から file_id を取り出す。"""
-    if not source_uri:
-        return None
-    s = source_uri.strip()
-    if s.startswith("gdrive://"):
-        fid = s[len("gdrive://") :].strip().strip("/")
-        return fid or None
-    m = _DRIVE_ID_RE.search(s)
-    if m:
-        return m.group(1)
-    m2 = _DRIVE_QUERY_ID_RE.search(s)
-    if m2:
-        return m2.group(1)
-    return None
-
-
-def _safe_filename(name: str | None, *, fallback: str = "document") -> str:
-    base = (name or "").strip() or fallback
-    base = re.sub(r'[\\/:*?"<>|\r\n\t]+', "_", base)
-    return base[:120] or fallback
+# file_id 抽出 / ファイル名 sanitize / Drive DL / Slack 添付は
+# _shared/drive_slack_delivery.py に集約（clientkarte と同じ部品を使う）。
+# 既存の import 経路（connect_web / tests）を壊さないため、ここからも明示的に再公開する。
+__all__ = [
+    "KnowledgeDeliverSkill",
+    "extract_drive_binary_file_id",
+    "extract_drive_file_id",
+]
 
 
 def _format_applied_filters(input: KnowledgeDeliverInput) -> str:
@@ -191,84 +167,86 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             ):
                 seen_ids.add(file_id)
                 candidates.append(
-                    (file_id, _safe_filename(h.resolved_file_name or h.title or h.file_name))
+                    (file_id, safe_filename(h.resolved_file_name or h.title or h.file_name))
                 )
                 if h.source_type != "gdrive":
                     resolved_candidates += 1
 
-        # 3. 候補ファイルを Drive から取得 → 一時ファイル化。
-        prepared: list[tuple[str, str, str]] = []  # (file_id, local_path, filename)
-        if candidates:
-            gdrive = self._gdrive or self._build_gdrive()
-            tmpdir = tempfile.mkdtemp(prefix="aila_knowledge_")
-            for file_id, filename in candidates:
-                try:
-                    data = gdrive.download_file_bytes(file_id=file_id, request_id=ctx.request_id)
-                except Exception:
-                    log.warning("knowledge_deliver_download_failed", file_id=file_id)
-                    continue
-                # sanitize 後に同名となる別ファイルが上書きし合わないよう file_id で区切る
-                # （file_id は [A-Za-z0-9_-] のみでパスとして安全）。
-                path = str(Path(tmpdir) / file_id / filename)
-                try:
-                    Path(path).parent.mkdir(parents=True, exist_ok=True)
-                    Path(path).write_bytes(data)
-                except Exception:
-                    log.warning("knowledge_deliver_tmpwrite_failed", file_id=file_id)
-                    continue
-                prepared.append((file_id, path, filename))
-
-        # 4. 配信。聞かれたチャンネル/スレッドがあればそこに添付（メール以外は基本チャンネル完結）。
-        #    無ければ依頼者本人の DM にフォールバック（個人的・気まずい依頼や DM 直依頼向け）。
-        requester = ctx.metadata.get("user_email")
-        requester_email = (
-            requester.strip() if isinstance(requester, str) and requester.strip() else None
-        )
-        channel_id = ctx.metadata.get("channel_id")
-        channel_id = channel_id if isinstance(channel_id, str) and channel_id else None
-        thread_ts = ctx.metadata.get("thread_ts")
-        thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
-
-        # 適用フィルタのラベル（例「電通 × 提案書」）。note に「何で絞ったか」を明示し、
-        # 0 件時は絞りを述べて緩和提案する（設計 E）。
-        applied = _format_applied_filters(input)
-        filt_prefix = f"{applied} で" if applied else ""
-
+        # 3. 候補ファイルを Drive から取得 → 一時ファイル化（_shared の共通部品）。
+        #    tmpdir の後始末は呼び出し側の責務（_shared/drive_slack_delivery の契約）。
+        #    常駐 ECS タスクの /tmp に最大 256MB × top_k が残り続けるのを防ぐため、
+        #    添付が終わったら（失敗しても）必ず消す。
+        prepared: list[PreparedFile] = []
+        tmpdir: str | None = None
         delivered_ids: set[str] = set()
         where = ""
-        if not prepared:
-            if applied:
-                note = (
-                    f"{applied} で該当する添付可能な資料が見つかりませんでした"
-                    "（要約のみお返しします）。"
-                    "取引先のみ／資料種別を外す等、条件を緩めて再検索しますか。"
+        try:
+            if candidates:
+                gdrive = self._gdrive or self._build_gdrive()
+                tmpdir, prepared = prepare_drive_files(
+                    gdrive,
+                    candidates,
+                    request_id=ctx.request_id,
+                    log=log,
+                    log_prefix="knowledge_deliver",
+                    tmp_prefix="aila_knowledge_",
                 )
-            else:
-                note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
-        elif not channel_id and not requester_email:
-            note = "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"
-        else:
-            try:
-                delivered_ids, where = asyncio.run(
-                    self._deliver(
-                        prepared=prepared,
-                        answer=s_out.answer,
-                        request_id=ctx.request_id,
-                        channel_id=channel_id,
-                        thread_ts=thread_ts,
-                        email=requester_email,
+
+            # 4. 配信。聞かれたチャンネル/スレッドがあればそこに添付
+            #    （メール以外は基本チャンネル完結）。無ければ依頼者本人の DM に
+            #    フォールバック（個人的・気まずい依頼や DM 直依頼向け）。
+            requester = ctx.metadata.get("user_email")
+            requester_email = (
+                requester.strip() if isinstance(requester, str) and requester.strip() else None
+            )
+            channel_id = ctx.metadata.get("channel_id")
+            channel_id = channel_id if isinstance(channel_id, str) and channel_id else None
+            thread_ts = ctx.metadata.get("thread_ts")
+            thread_ts = thread_ts if isinstance(thread_ts, str) and thread_ts else None
+
+            # 適用フィルタのラベル（例「電通 × 提案書」）。note に「何で絞ったか」を明示し、
+            # 0 件時は絞りを述べて緩和提案する（設計 E）。
+            applied = _format_applied_filters(input)
+            filt_prefix = f"{applied} で" if applied else ""
+
+            if not prepared:
+                if applied:
+                    note = (
+                        f"{applied} で該当する添付可能な資料が見つかりませんでした"
+                        "（要約のみお返しします）。"
+                        "取引先のみ／資料種別を外す等、条件を緩めて再検索しますか。"
                     )
+                else:
+                    note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
+            elif not channel_id and not requester_email:
+                note = (
+                    "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"
                 )
-            except Exception:
-                log.warning("knowledge_deliver_failed")
-                delivered_ids, where = set(), ""
-            n = len(delivered_ids)
-            if where == "thread":
-                note = f"{filt_prefix}該当資料 {n} 件をこのスレッドにお出ししました。"
-            elif where == "dm":
-                note = f"{filt_prefix}該当資料 {n} 件をあなたの DM にお送りしました。"
             else:
-                note = "資料配信に失敗しました（要約のみお返しします）。"
+                try:
+                    delivered_ids, where = asyncio.run(
+                        self._deliver(
+                            prepared=prepared,
+                            answer=s_out.answer,
+                            request_id=ctx.request_id,
+                            channel_id=channel_id,
+                            thread_ts=thread_ts,
+                            email=requester_email,
+                        )
+                    )
+                except Exception:
+                    log.warning("knowledge_deliver_failed")
+                    delivered_ids, where = set(), ""
+                n = len(delivered_ids)
+                if where == "thread":
+                    note = f"{filt_prefix}該当資料 {n} 件をこのスレッドにお出ししました。"
+                elif where == "dm":
+                    note = f"{filt_prefix}該当資料 {n} 件をあなたの DM にお送りしました。"
+                else:
+                    note = "資料配信に失敗しました（要約のみお返しします）。"
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
 
         # 配信できたファイルに対応する ref を delivered=True に。
         for fid in delivered_ids:
@@ -294,62 +272,24 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
     async def _deliver(
         self,
         *,
-        prepared: list[tuple[str, str, str]],
+        prepared: list[PreparedFile],
         answer: str,
         request_id: str,
         channel_id: str | None = None,
         thread_ts: str | None = None,
         email: str | None = None,
     ) -> tuple[set[str], str]:
-        """prepared を配信。返り値 (配信できた file_id 集合, 配信先種別 "thread"|"dm"|"")。
-
-        1) channel_id があれば そのチャンネル/スレッドに添付（メール以外は基本チャンネル完結）。
-        2) チャンネル配信が 0 件 or channel_id 無しなら、email から本人 DM にフォールバック。
-        """
+        """prepared を配信（配信先の決定ルールは _shared/drive_slack_delivery に集約）。"""
         slack = self._slack or self._build_slack()
-
-        if channel_id:
-            delivered = await self._upload_all(
-                slack, channel_id, thread_ts, prepared, answer, request_id
-            )
-            if delivered:
-                return delivered, "thread"
-
-        if email:
-            user_id = await slack.lookup_user_id_by_email(email, request_id)
-            if user_id:
-                dm = await slack.open_dm(user_id, request_id)
-                if dm:
-                    delivered = await self._upload_all(
-                        slack, dm, None, prepared, answer, request_id
-                    )
-                    if delivered:
-                        return delivered, "dm"
-        return set(), ""
-
-    @staticmethod
-    async def _upload_all(
-        slack: Any,
-        channel: str,
-        thread_ts: str | None,
-        prepared: list[tuple[str, str, str]],
-        answer: str,
-        request_id: str,
-    ) -> set[str]:
-        """prepared を channel（任意で thread_ts）に添付。要約は最初の1件のコメントに同梱。"""
-        delivered: set[str] = set()
-        for i, (file_id, path, filename) in enumerate(prepared):
-            ok = await slack.upload_file(
-                channel,
-                path,
-                request_id,
-                title=filename,
-                initial_comment=answer if i == 0 else None,
-                thread_ts=thread_ts,
-            )
-            if ok:
-                delivered.add(file_id)
-        return delivered
+        return await deliver_files(
+            slack,
+            prepared=prepared,
+            comment=answer,
+            request_id=request_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            email=email,
+        )
 
     # --- 遅延生成（factory が注入しない / 本番起動時のフォールバック） ---
 

@@ -29,7 +29,7 @@ from typing import Any
 import structlog
 from anthropic import AsyncAnthropicBedrock
 
-from teamagent.skills.base import SkillContext
+from teamagent.skills.base import ORCHESTRATED_METADATA_KEY, SkillContext
 
 from .faithfulness import extract_chunk_ids_from_tool_json
 from .loop import OrchestratorError
@@ -198,7 +198,13 @@ def _make_handler(
             return _err(f"入力がスキーマに合いません（{type(e).__name__}）")
 
         calls.append(spec.name)  # 有効な入力で呼ばれた＝エージェントのツール選択を記録（評価用）
-        ctx = SkillContext(request_id=request_id, user_id=user_id, metadata=dict(ctx_metadata))
+        # オーケストレーターの中間ステップである印を立てる。配信系スキルはこの印を見て
+        # Slack へのファイル投下を止める（「調べるだけ」の呼び出しで資料を飛ばさない）。
+        ctx = SkillContext(
+            request_id=request_id,
+            user_id=user_id,
+            metadata={**ctx_metadata, ORCHESTRATED_METADATA_KEY: True},
+        )
         skill = spec.instantiate()
         loop = asyncio.get_running_loop()
         try:

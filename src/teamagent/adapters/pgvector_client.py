@@ -1325,13 +1325,19 @@ class PgVectorClient:
             ) ex ON true
             WHERE d.metadata->>'suppressed' IS DISTINCT FROM 'true'
               AND d.metadata->>'is_sales_fb' IS DISTINCT FROM 'true'
-              AND (d.metadata->>'cls_project' ILIKE %s
-                   OR d.metadata->>'client_name' ILIKE %s
-                   OR d.title ILIKE %s)
+              AND (d.metadata->>'cls_project' ILIKE %s ESCAPE '\\'
+                   OR d.metadata->>'client_name' ILIKE %s ESCAPE '\\'
+                   OR d.title ILIKE %s ESCAPE '\\')
             ORDER BY d.modified_at DESC NULLS LAST
             LIMIT %s
         """  # nosec B608
-        like_pattern = f"%{client_name}%"
+        # LIKE メタ文字をエスケープしてから %wrap（_pool_search の metadata_contains と同じ流儀）。
+        # ここを素通しにすると ``client_name='%'`` が「会社中の新しい資料 50 件」に化ける。
+        # 従来この結果は connect_web の一覧表示（見えるだけ）だったが、clientkarte が
+        # **自動 DM 添付の候補選定**に使うようになったため、ワイルドカード素通しは
+        # 「他社資料が関連資料として送られる」に直結する（2026-08-19 レビュー M6）。
+        safe_name = client_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like_pattern = f"%{safe_name}%"
         with conn.cursor() as cur:
             cur.execute(sql, [like_pattern, like_pattern, like_pattern, limit])
             rows = cur.fetchall()

@@ -37,6 +37,16 @@ NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat", "proposal_builder"})
 # ToolSpec を経由せず server.py が直接 MCP に追加できる dark tool。
 MCP_ONLY_DARK_ALLOWLIST = {"run_agent": "USE_AGENT_ORCHESTRATOR"}
 
+# Drive→Slack の実ファイル配信共通部品（_shared/drive_slack_delivery.py）。
+# これを使う skill は「読むだけ」ではなく**利用者の Slack にファイルを投下する**。
+DELIVERY_MODULE = "teamagent.skills._shared.drive_slack_delivery"
+DELIVERY_SYMBOLS = frozenset({"deliver_files", "upload_all", "prepare_drive_files"})
+# 実ファイル配信を行うと人間が裁定した skill。ここに載る skill は台帳 effect でも
+# 配信を申告する（下の契約テストが機械照合する）。新しく配信を始めた skill は
+# この集合との差分で必ず赤くなる＝申告漏れのままマージできない。
+FILE_DELIVERY_SKILLS = frozenset({"clientkarte", "knowledge_deliver"})
+DELIVERY_EFFECT_MARKER = "slack-file-delivery"
+
 
 def _parse(path: Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -77,6 +87,58 @@ def _registered_skills() -> dict[str, str]:
             assert skill_name not in registered, f"SkillRegistry name 重複: {skill_name}"
             registered[skill_name] = node.name
     return registered
+
+
+def _skill_names_by_module() -> dict[Path, set[str]]:
+    """skills package の各 .py が定義する @register skill 名を返す。"""
+    by_module: dict[Path, set[str]] = {}
+    for path in sorted(SKILLS_ROOT.rglob("*.py")):
+        tree = _parse(path)
+        names = set()
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            if not any(
+                isinstance(decorator, ast.Name) and decorator.id == "register"
+                for decorator in node.decorator_list
+            ):
+                continue
+            for statement in node.body:
+                target_is_name = (
+                    isinstance(statement, ast.AnnAssign)
+                    and isinstance(statement.target, ast.Name)
+                    and statement.target.id == "name"
+                ) or (
+                    isinstance(statement, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "name"
+                        for target in statement.targets
+                    )
+                )
+                if not target_is_name:
+                    continue
+                value = statement.value  # type: ignore[union-attr]
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    names.add(value.value)
+                break
+        if names:
+            by_module[path] = names
+    return by_module
+
+
+def _file_delivering_skill_names() -> set[str]:
+    """Drive→Slack 配信の共通部品を import している module の skill 名を集める。"""
+    by_module = _skill_names_by_module()
+    delivering: set[str] = set()
+    for path, names in by_module.items():
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or node.module != DELIVERY_MODULE:
+                continue
+            if any(alias.name in DELIVERY_SYMBOLS for alias in node.names):
+                delivering |= names
+                break
+    return delivering
 
 
 def _tool_spec_name(call: ast.Call, class_to_skill: dict[str, str]) -> str:
@@ -527,3 +589,28 @@ def test_server_only_mcp_tools_are_explicitly_dark_allowlisted() -> None:
     for tool_name, env_gate in MCP_ONLY_DARK_ALLOWLIST.items():
         assert f'"{tool_name}"' in server_source
         assert f'_envflag("{env_gate}")' in server_source
+
+
+def test_file_delivering_skills_declare_the_side_effect_in_the_scope_ledger() -> None:
+    """「読むだけ」の申告のまま実ファイル配信を始めた skill を機械的に落とす。
+
+    effect が非空かどうかだけでは、clientkarte が Drive バイナリ DL + Slack file upload を
+    始めても台帳が ``company-data-read-analysis`` のまま通ってしまう（実際に起きた）。
+    共通部品の import という**実装側の事実**と台帳の申告を突き合わせる。
+    """
+    detected = _file_delivering_skill_names()
+    # 検出器そのものが空振り（import 経路の改名等）したら vacuous に緑にしない。
+    assert detected, f"{DELIVERY_MODULE} の配信部品を使う skill が 1 つも検出できていない"
+    assert detected == FILE_DELIVERY_SKILLS, (
+        "実ファイル配信を始めた/やめた skill がある。"
+        "FILE_DELIVERY_SKILLS と effective-tool-scope.json の effect を人間が裁定して更新すること"
+    )
+
+    scope = json.loads(SCOPE.read_text(encoding="utf-8"))
+    effect_by_name = {tool["name"]: tool["effect"] for tool in scope["tools"]}
+    for name in sorted(FILE_DELIVERY_SKILLS):
+        assert name in effect_by_name, f"{name} が effective-tool-scope.json に無い"
+        assert DELIVERY_EFFECT_MARKER in effect_by_name[name], (
+            f"{name} は Slack に実ファイルを投下するのに "
+            f"effect='{effect_by_name[name]}' が配信を申告していない"
+        )

@@ -1252,6 +1252,30 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert tools_by_name["tiktok_acquire"]["terraformGate"] == media_worker_gate
     assert tools_by_name["tiktok_acquire_status"]["terraformGate"] == media_worker_gate
     assert "s3-write" in tools_by_name["proposal_builder_submit"]["effect"]
+    # clientkarte は Drive バイナリ DL + Slack file upload を行う（**既定 ON** の env gate 付き）。
+    assert "slack-file-delivery" in tools_by_name["clientkarte"]["effect"]
+    karte_gate = tools_by_name["clientkarte"]["sideEffectGate"]
+    assert "KARTE_ATTACH_DOCS" in karte_gate
+    # 台帳が運用実態と食い違わないことを固定する（2026-08-19 レビュー H2）:
+    # mcp task definition の env は validate_plan(mode=sync) が live と完全一致を要求するため、
+    # この変数は「素の apply で即止まる kill switch」ではない。台帳がそう読める文言に
+    # 戻ったら落とす。
+    assert "signed release" not in karte_gate.lower().replace("-", " ") or (
+        "not a no-release kill" in karte_gate
+    ), "sideEffectGate が『署名リリース無しで止まる』と読める文言に戻っている"
+    assert "migration" in karte_gate, "env を倒すのに mode=migration 経路が要ることを台帳に書くこと"
+    # 2026-08-19 レビュー 要修正3 の実測結果（2026-08-20）:
+    # ClientKarteSkill を作る runtime は mcp ECS と runtime/slack_bot.py の 2 つあるが、
+    # 後者を載せていた EC2 systemd worker は停止中（teamagent-dev-worker / 2026-08-03 以降）で、
+    # ECS には slack_bot を動かすサービスが無い。台帳が「EC2 側も現役の第 2 経路」と
+    # 読める書き方に戻ったら落とす。
+    assert "stopped since" in karte_gate, "EC2 slack_bot 経路が現役でない実測を台帳に残すこと"
+    # 2026-08-20 ユーザー裁定 A: 資料名・Drive リンクも DM 限定。台帳が「バイトだけ DM」に
+    # 戻ったら落とす（旧文言 "File bytes go to the requester's DM only" が復活したら赤）。
+    assert "ruling A" in karte_gate
+    assert "never a document name" in karte_gate, (
+        "チャンネルには資料名を出さない（件数だけ）ことを台帳に書くこと"
+    )
     fargate = FARGATE.read_text()
     terraform = "\n".join(
         path.read_text() for path in sorted((ROOT / "infra/terraform").glob("*.tf"))
@@ -1276,6 +1300,22 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "USE_WEB_RESEARCH_TOOL",
     ):
         assert gate in terraform
+    # カルテの関連資料機能は「本番で止められる状態」を terraform 側に持つのが条件
+    # （既定 ON。倒すには mode=migration/kind=runtime の apply が要る＝素の apply では
+    # env parity guard に落とされる。それでも変数が結線されていること自体は前提条件）。
+    # ここを上の素の部分文字列ループに混ぜてはいけない: ``KARTE_ATTACH_DOCS`` は
+    # 兄弟 env ``KARTE_ATTACH_DOCS_MAX`` の部分文字列なので、kill switch の行を丸ごと
+    # 消してもループは緑のまま通る（変異テストで実測）。env の結線と fail-safe 既定値を
+    # 行単位で固定する。
+    assert (
+        '{ name = "KARTE_ATTACH_DOCS", value = var.karte_attach_docs ? "true" : "false" },'
+        in fargate
+    ), "カルテ添付の kill switch env が mcp task definition に結線されていない"
+    karte_var_start = terraform.index('variable "karte_attach_docs" {')
+    karte_var_block = terraform[karte_var_start : terraform.index("\n}", karte_var_start)]
+    assert "default     = true" in karte_var_block, (
+        "karte_attach_docs の既定は true（カルテと資料を一緒に出すのが要求そのもの）"
+    )
     assert "proposal_builder_sync_runtime_verified" not in terraform
     table_start = terraform.index('resource "aws_dynamodb_table" "proposal_builder_jobs"')
     table_end = terraform.index("\nresource ", table_start + 1)

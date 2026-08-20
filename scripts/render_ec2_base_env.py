@@ -68,6 +68,16 @@ NONSECRET_KEYS = frozenset(
         "HAIKU_OUTPUT_USD_PER_MTOK",
         "HTTPS_PROXY",
         "IMPORTANT_SENDERS",
+        # カルテの関連資料同梱。EC2 systemd の slack_bot も ClientKarteSkill を作る
+        # （runtime/slack_bot.py）が、terraform の var.karte_attach_docs は mcp ECS task
+        # にしか結線されていない。この 4 キーを allowlist に載せておかないと、EC2 側で
+        # 「既定 ON のまま止められない」状態になる（2026-08-19 レビュー 要修正3）。
+        # サイズ上限と重複防止 TTL も運用つまみなので同じ扱いにする
+        # （2026-08-20 レビュー 指摘7: 本番で調整・無効化できない状態だった）。
+        "KARTE_ATTACH_DOCS",
+        "KARTE_ATTACH_DOCS_DEDUP_TTL_S",
+        "KARTE_ATTACH_DOCS_MAX",
+        "KARTE_ATTACH_DOCS_MAX_BYTES",
         "KARTE_PROMPT_VERSION",
         "LOCAL_EMBED_MODEL",
         "LOG_LEVEL",

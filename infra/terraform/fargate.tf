@@ -682,6 +682,27 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_NEW_SCHEMA", value = "true" },
       { name = "USE_KNOWLEDGE_FILTERS", value = "true" },
       { name = "USE_KNOWLEDGE_DELIVER", value = "true" },
+      # カルテ(clientkarte)の「関連資料」機能まるごとの kill switch。**既定 ON**。
+      # ON: 資料名+Drive リンクの一覧と実ファイルを、まとめて依頼者本人の DM へ出す
+      #     （2026-08-20 裁定 A）。チャンネル/スラッシュでカルテを呼ばれた場合、
+      #     チャンネルへ出るのは件数だけの 1 行（「📎 関連資料N件（うち実ファイルM件）を
+      #     DM でお送りしました」）で、資料名も Drive リンクも実ファイルも社外共有
+      #     チャンネルへ出る面を作らない。N は DM に名前を書いた件数で、その顧客の
+      #     資料在庫数ではない。
+      #     DM で呼ばれた場合だけ、その場に一覧を出す（転送しない）。
+      # OFF: 一覧も添付も出ない（本機能追加前の出力に戻る）。
+      # ⚠️ env の変更は素の apply では通らない（validate_plan(mode=sync) が live と完全一致を
+      #    要求する）。倒すときは mode=migration / kind=runtime の manifest 経路を使うこと。
+      { name = "KARTE_ATTACH_DOCS", value = var.karte_attach_docs ? "true" : "false" },
+      # 添付上限（0 = 実ファイルを送らない・skill 側で 5 件にハードクランプ）。
+      { name = "KARTE_ATTACH_DOCS_MAX", value = tostring(var.karte_attach_docs_max) },
+      # 1 ファイルあたりの Drive 取得上限（既定 50MiB）。gdrive_client は最大 256MB を
+      # メモリに載せるので、常時経路に無制限の DL を許さないための運用つまみ。
+      { name = "KARTE_ATTACH_DOCS_MAX_BYTES", value = tostring(var.karte_attach_docs_max_bytes) },
+      # 同じ資料の重ね送り防止 TTL 秒（H4 対策そのもの・0 で無効）。OpenClaw の
+      # タイムアウト再試行で同じ資料が 2 度 DM に届く事故の唯一のつまみなので、
+      # 本番で調整・無効化できるようにここへ出す（2026-08-20 レビュー 指摘7）。
+      { name = "KARTE_ATTACH_DOCS_DEDUP_TTL_S", value = tostring(var.karte_attach_docs_dedup_ttl_s) },
       # §知識ベース: knowledge_deliver の Drive DL は共有「個人OAuth」を使う。これが無いと
       # GOOGLE_APPLICATION_CREDENTIALS(Vertex SA) が選ばれ、SA は外部 Drive 非対応で DL 失敗する。
       { name = "GOOGLE_FORCE_OAUTH", value = "1" },

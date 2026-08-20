@@ -268,6 +268,48 @@ variable "use_payload_offload" {
   default     = false
 }
 
+variable "karte_attach_docs" {
+  description = "clientkarte(カルテ)の「関連資料」機能まるごとの kill switch。既定 true（「カルテを見て資料をクリックする」工数をなくす要求そのもの）。true のとき資料名+Drive リンクの一覧と実ファイルを、まとめて依頼者本人の DM へ出す（2026-08-20 裁定 A）。チャンネル/スラッシュでカルテを呼ばれた場合、チャンネルへ出るのは件数だけの 1 行通知で、資料名も Drive リンクも実ファイルも出さない。DM で呼ばれた場合だけその場に一覧を出す。false にすると一覧も添付も出ず、本機能追加前の出力（カルテ本文+出典 URL のみ）へ戻る。⚠️ 止め方: mcp task definition の env は terraform_runtime_guard の validate_plan(mode=sync) が live と完全一致を要求し env の追加・変更・削除を die するため、素の apply では倒せない。mode=migration / kind=runtime の manifest allowlist 経路で適用すること（「apply するだけで即止まる」ではない）。"
+  type        = bool
+  default     = true
+}
+
+variable "karte_attach_docs_max" {
+  description = "カルテ添付の最大件数。0 は「一覧は出すが実ファイルは 1 件も送らない」の明示指定。skill 側で 5 件にハードクランプされる。"
+  type        = number
+  default     = 3
+
+  validation {
+    # 0 は skill 側で「添付しない」の明示指定として尊重される（黙って既定 3 件に戻らない）。
+    # 負値・小数・上限超過は運用ミスなので plan で落とす（skill 側の clamp 頼みにしない）。
+    condition     = var.karte_attach_docs_max >= 0 && var.karte_attach_docs_max <= 5 && floor(var.karte_attach_docs_max) == var.karte_attach_docs_max
+    error_message = "karte_attach_docs_max は 0〜5 の整数（0 = 実ファイルを送らない）。"
+  }
+}
+
+variable "karte_attach_docs_max_bytes" {
+  description = "カルテ添付の 1 ファイルあたり取得上限（バイト）。既定 50MiB。gdrive_client の既定 256MB をそのまま常時経路に許さないためのつまみ。"
+  type        = number
+  default     = 52428800
+
+  validation {
+    # 0 以下は「上限なし」と紛らわしいので plan で落とす（skill 側は不正値を既定へ戻す）。
+    condition     = var.karte_attach_docs_max_bytes > 0 && var.karte_attach_docs_max_bytes <= 268435456 && floor(var.karte_attach_docs_max_bytes) == var.karte_attach_docs_max_bytes
+    error_message = "karte_attach_docs_max_bytes は 1〜268435456(256MiB) の整数。"
+  }
+}
+
+variable "karte_attach_docs_dedup_ttl_s" {
+  description = "同じ資料を同じ相手へ重ね送りしない TTL 秒。既定 600。0 で重複防止を無効化（OpenClaw のタイムアウト再試行で同じ資料が 2 度 DM に届く事故の唯一のつまみ）。"
+  type        = number
+  default     = 600
+
+  validation {
+    condition     = var.karte_attach_docs_dedup_ttl_s >= 0 && var.karte_attach_docs_dedup_ttl_s <= 86400 && floor(var.karte_attach_docs_dedup_ttl_s) == var.karte_attach_docs_dedup_ttl_s
+    error_message = "karte_attach_docs_dedup_ttl_s は 0〜86400 の整数（0 = 重複防止を無効）。"
+  }
+}
+
 variable "slack_team_id" {
   description = "本番必須の自社Slack workspace team_id（T + 8文字以上の英大文字/数字）。OpenClaw署名claimとMCP resolverが同じexact IDを検証する。既定の空文字は未設定sentinelでplanをfail-closedにする。"
   type        = string

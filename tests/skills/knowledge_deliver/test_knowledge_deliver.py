@@ -547,7 +547,10 @@ def test_same_filename_different_files_do_not_overwrite_each_other() -> None:
     """sanitize 後に同名となる別 file_id の候補同士が一時ファイルを上書きし合わない。
 
     旧実装は tmpdir 直下にファイル名だけで書いており、同名別ファイルが2候補あると
-    2件目が1件目を上書きし、両添付とも2件目のバイト列になっていた。"""
+    2件目が1件目を上書きし、両添付とも2件目のバイト列になっていた。
+
+    バイト列は**アップロード時点**で読む。run() は tmpdir を必ず削除するため
+    （常駐タスクの /tmp に残さない契約）、戻った後にパスを読むことはできない。"""
 
     hits = [
         _hit(source_type="gdrive", source_uri="gdrive://F1", title="提案書_共通フォーマット.pdf"),
@@ -558,7 +561,16 @@ def test_same_filename_different_files_do_not_overwrite_each_other() -> None:
             title="提案書_共通フォーマット.pdf",
         ),
     ]
+    uploaded_bytes: list[bytes] = []
+    uploaded_paths: list[str] = []
+
+    async def _capture(channel: str, path: str, request_id: str, **kwargs: object) -> bool:
+        uploaded_paths.append(path)
+        uploaded_bytes.append(Path(path).read_bytes())
+        return True
+
     slack = _slack_mock()
+    slack.upload_file = AsyncMock(side_effect=_capture)
     gdrive = MagicMock()
     gdrive.download_file_bytes.side_effect = lambda *, file_id, request_id: (
         b"%PDF-1.4 " + file_id.encode()
@@ -568,9 +580,9 @@ def test_same_filename_different_files_do_not_overwrite_each_other() -> None:
     out = skill.run(KnowledgeDeliverInput(query="提案書", top_k=2), _ctx())
 
     assert out.delivered_count == 2
-    uploaded_paths = [c.args[1] for c in slack.upload_file.await_args_list]
-    contents = {Path(p).read_bytes() for p in uploaded_paths}
-    assert contents == {b"%PDF-1.4 F1", b"%PDF-1.4 F2"}
+    assert set(uploaded_bytes) == {b"%PDF-1.4 F1", b"%PDF-1.4 F2"}
+    # 添付が済んだら一時ファイルは残さない（共通部品の契約を呼び出し側が守っている）。
+    assert uploaded_paths and not any(Path(p).exists() for p in uploaded_paths)
 
 
 def test_gsheet_resolved_respects_confidence_gates() -> None:

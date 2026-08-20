@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -36,6 +37,22 @@ logger = structlog.get_logger(__name__)
 
 TInput = TypeVar("TInput", bound=BaseModel)
 TOutput = TypeVar("TOutput", bound=BaseModel)
+
+# 「この実行は L2 オーケストレーター（run_agent）の中間ステップである」印。
+# orchestrator/sdk_runner が全ツール呼び出しの metadata に立てる。
+#
+# なぜ要るか: オーケストレーターは最終回答を作る途中で「まず調べる」目的に任意のツールを
+# 何度でも呼ぶ。そこで Slack へのファイル投下のような**取り返しのつかない副作用**が出ると、
+# ユーザーが何も頼んでいない段階で・最終回答より前に・場合によっては複数回、資料が飛ぶ。
+# 配信系の副作用はこの印が立っていない「対話の直接応答経路」だけに限る。
+ORCHESTRATED_METADATA_KEY = "orchestrated_tool_call"
+
+
+def is_orchestrated_call(metadata: Mapping[str, Any] | None) -> bool:
+    """L2 オーケストレーター経由の中間ステップなら True（配信系副作用を止める判定）。"""
+    if not metadata:
+        return False
+    return bool(metadata.get(ORCHESTRATED_METADATA_KEY))
 
 
 @dataclass

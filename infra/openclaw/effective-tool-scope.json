@@ -47,10 +47,11 @@
     },
     {
       "name": "clientkarte",
-      "effect": "company-data-read-analysis",
+      "effect": "company-data-read-analysis-drive-read-slack-file-delivery",
       "terraformGate": "always",
       "defaultEnabledByTerraform": true,
-      "enabledBy": { "kind": "always" }
+      "enabledBy": { "kind": "always" },
+      "sideEffectGate": "KARTE_ATTACH_DOCS (default true) gates the whole related-documents feature (link list AND file delivery); wired only into the mcp ECS task definition via var.karte_attach_docs in fargate.tf. Flipping it needs a mode=migration/kind=runtime apply - validate_plan(mode=sync) rejects any env add/change/delete - so it is NOT a no-release kill switch. Measured 2026-08-20: the mcp ECS task is the only live host of ClientKarteSkill. runtime/slack_bot.py builds the skill too, but that runtime only ever ran on the EC2 systemd worker, and no ECS service runs it (mcp=run_mcp_vertex_entrypoint.py, openclaw=OpenClaw); teamagent-dev-worker has been stopped since 2026-08-03 and the instance id in scripts/deploy_to_ec2.sh no longer exists. If that worker is ever revived it reads these env vars from teamagent.env.base (release-time, not terraform), so all four keys (KARTE_ATTACH_DOCS, _MAX, _MAX_BYTES, _DEDUP_TTL_S) are on the render_ec2_base_env.py non-secret allowlist. Output surface (2026-08-20 ruling A): the whole documents section - names, Drive links and file bytes - goes to the requester's DM only; a channel/slash-command karte gets a single count-only line and never a document name, and that holds on the run_agent/orchestrated path too (measured 2026-08-20: the old short-circuit put document names in the return value whenever USE_AGENT_ORCHESTRATOR was on, whatever the channel). The number in that line is what actually went into the DM (names listed, files delivered) - never the customer's document inventory. Rows whose client_name column contradicts the requested customer are dropped before the list, the offer and the auto-attach; a client_name that client_name_guard reads as a request fragment skips the documents path entirely. KARTE_ATTACH_DOCS_MAX=0 stops file delivery while keeping the list"
     },
     {
       "name": "proposal_draft",
