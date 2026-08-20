@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
+  "generation_baseline": "88f46963b08944e0f372e99560b525192130528d",
+  "inputs": {
+    "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
+    "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
+    "infra/codebuild/image-promoter-buildspec.yml": "adaf16dd1ebd090007f1ba9e16dc667f28a7406b",
+    "infra/codebuild/source_provenance.py": "61884d2f820c8484f1bbd76f6a12ce8887a801ad",
+    "infra/codebuild/release_evidence.py": "d5e6e8288a2a4be478b80378c29f825a88906c8f",
+    "infra/codebuild/teamagent_bundle_provenance.py": "fb379e6999566de8f6588c20f141c71ff414dda8",
+    "infra/codebuild/teamagent_schema_versions.py": "1e100f61fa15c4ae6eb4bcc4f054de849149d8cb",
+    "infra/codebuild/teamagent_release_approval.py": "fd8f442f68f75bafdd6a239a378547050658d404",
+    "infra/codebuild/actual_image_evidence.py": "65237dff9b4598d562b29e64a13676e3612ffcf6",
+    "infra/codebuild/openclaw_provenance.py": "22ef083687245abf56c4fbfe8f51569aca0d1775",
+    "infra/codebuild/tiktok_source_provenance.py": "77e61e9eb2606b295ae5adfe47ea8bde1c1960eb",
+    "infra/codebuild/verify_actual_image.sh": "74795d433d3bb9c42e4922b799ccb2f9f7059063",
+    "infra/codebuild/teamagent_runtime_contract.json": "993efd838dc764cf6731669919f9b1b93451060b",
+    "infra/codebuild/teamagent_core_media_release_contract.json": "0fd8bf7bc415b40613a49f7eca8bba6e7378f954",
+    "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
+    "infra/codebuild/openclaw_bundle_contract.json": "b40176dc5defb1c965f195e7cdda94dc9b044663",
+    "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
+    "infra/terraform/mcp_approval.tf": "ca9d809d4cc2b3d1ea32aac1c796cd13d6dc98ca"
+  },
+  "kms_keys": {
+    "mcp_source_publisher_signing": "arn:aws:kms:ap-northeast-1:718959508629:key/c0f0506d-09c7-45f6-8ceb-aa582323041f",
+    "image_attestor_signing": "arn:aws:kms:ap-northeast-1:718959508629:key/a86f9d5f-b130-4b6d-9873-124f04274c0f",
+    "tiktok_source_publisher_signing": "arn:aws:kms:ap-northeast-1:718959508629:key/111a2a8c-9be6-40f8-badf-6d8d5328e100",
+    "openclaw_publisher_signing": "arn:aws:kms:ap-northeast-1:718959508629:key/67af8286-7788-4f51-9164-0b1624177b9e",
+    "openclaw_evidence": "arn:aws:kms:ap-northeast-1:718959508629:key/39967f34-43dc-4dca-a93e-4891ee8a9cb4",
+    "image_release_evidence": "arn:aws:kms:ap-northeast-1:718959508629:key/04b8ec11-c259-4312-b6c0-61cad47301e5"
+  },
+  "terraform_evaluation_context": {
+    "terraform_version": "1.12.2",
+    "workspace": "default",
+    "var_file_sha256": "3abd9a11211fbd1729e1e19b3a9e3053ad01a3e104b19ad25da60f7e86a5da61",
+    "aws_account": "718959508629",
+    "canonical_principal": "arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker",
+    "evaluated_at": "2026-08-20T03:15:43Z"
+  },
+  "expected_generation_sha256": {
+    "teamagent-dev-mcp-source-publisher": "e7d1fb6c1083a293fea4cb8c71952aa5701e3830e8320754cf6006086dca5871",
+    "teamagent-dev-image-attestor": "31af144bf46b1febdd30ed1697814979b35189b7681460ef1da721ddcf5fbd32",
+    "teamagent-dev-image-promoter": "7d62c3ad205f191586a8951e80533d28e9100ce48e107b1b2655063ba4380cdf",
+    "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
+  }
+}
