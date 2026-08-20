@@ -157,6 +157,114 @@ def test_existing_read_thread_stays_fail_open_on_slack_api_error() -> None:
     assert reader.read_thread("C1", "1.1", "req") == []
 
 
+# ── 差出人の実名解決（users.info・24h TTL キャッシュ）──────────────────────
+
+
+def _users_info(profile: dict[str, object] | None = None, **user: object) -> dict[str, object]:
+    return {"ok": True, "user": {**user, "profile": profile or {}}}
+
+
+def test_get_display_name_prefers_display_name() -> None:
+    client = _client(
+        users_info=AsyncMock(
+            return_value=_users_info({"display_name": "こまた", "real_name": "小俣 慎悟"})
+        )
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") == "こまた"
+
+
+def test_get_display_name_falls_back_through_real_name_and_handle() -> None:
+    # display_name 空 → profile.real_name
+    r1 = SlackUserReader(
+        "xoxp-x",
+        client=_client(
+            users_info=AsyncMock(
+                return_value=_users_info({"display_name": "", "real_name": "小俣"})
+            )
+        ),
+    )
+    assert r1.get_display_name("U12345678", "req") == "小俣"
+    # profile が空 → user.real_name
+    r2 = SlackUserReader(
+        "xoxp-x",
+        client=_client(users_info=AsyncMock(return_value=_users_info({}, real_name="佐藤"))),
+    )
+    assert r2.get_display_name("U12345678", "req") == "佐藤"
+    # real_name も無い → user.name（ハンドル）
+    r3 = SlackUserReader(
+        "xoxp-x", client=_client(users_info=AsyncMock(return_value=_users_info({}, name="taro")))
+    )
+    assert r3.get_display_name("U12345678", "req") == "taro"
+
+
+def test_get_display_name_returns_none_on_api_error() -> None:
+    """失敗は None（呼び出し側を壊さない・架空の名前を作らない）。"""
+    client = _client(
+        users_info=AsyncMock(
+            side_effect=SlackApiError("failed", {"ok": False, "error": "user_not_found"})
+        )
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") is None
+
+
+def test_get_display_name_returns_none_when_no_name_fields() -> None:
+    client = _client(users_info=AsyncMock(return_value=_users_info({})))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") is None
+
+
+def test_get_display_name_returns_none_on_ok_false_without_raise() -> None:
+    client = _client(users_info=AsyncMock(return_value={"ok": False, "error": "user_not_found"}))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") is None
+
+
+def test_get_display_name_rejects_bad_ids_without_api_call() -> None:
+    client = _client(users_info=AsyncMock(return_value=_users_info({"real_name": "誰か"})))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("", "req") is None
+    assert reader.get_display_name("   ", "req") is None
+    assert reader.get_display_name("B0123456", "req") is None  # bot ID は対象外
+    assert reader.get_display_name("not-an-id", "req") is None
+    client.users_info.assert_not_awaited()
+
+
+def test_get_display_name_caches_hit_for_24h() -> None:
+    client = _client(users_info=AsyncMock(return_value=_users_info({"real_name": "小俣"})))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") == "小俣"
+    assert reader.get_display_name("U12345678", "req") == "小俣"
+    assert client.users_info.await_count == 1  # 2 回目はキャッシュ
+    # TTL は 24h。期限切れにすると再度叩く。
+    name, expires = reader._name_cache["U12345678"]
+    assert name == "小俣" and expires > 0
+    reader._name_cache["U12345678"] = (name, -1.0)
+    assert reader.get_display_name("U12345678", "req") == "小俣"
+    assert client.users_info.await_count == 2
+
+
+def test_get_display_name_caches_miss_but_retries_sooner() -> None:
+    """失敗も一旦キャッシュ（連打しない）が、24h 焼き付けない。"""
+    from teamagent.adapters.slack_user_reader import _DISPLAY_NAME_TTL, _DISPLAY_NAME_TTL_MISS
+
+    client = _client(users_info=AsyncMock(side_effect=RuntimeError("boom")))
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.get_display_name("U12345678", "req") is None
+    assert reader.get_display_name("U12345678", "req") is None
+    assert client.users_info.await_count == 1
+    assert _DISPLAY_NAME_TTL_MISS < _DISPLAY_NAME_TTL
+
+
+def test_get_display_name_cache_is_per_instance() -> None:
+    """トークン（＝人）が違えば結果を混ぜない。"""
+    c1 = _client(users_info=AsyncMock(return_value=_users_info({"real_name": "A"})))
+    c2 = _client(users_info=AsyncMock(return_value=_users_info({"real_name": "B"})))
+    assert SlackUserReader("xoxp-1", client=c1).get_display_name("U12345678", "req") == "A"
+    assert SlackUserReader("xoxp-2", client=c2).get_display_name("U12345678", "req") == "B"
+
+
 def test_run_sync_without_running_loop() -> None:
     async def _coro() -> int:
         return 42

@@ -1,7 +1,9 @@
 """密度優先描画（MORNING_DIGEST_COMPACT・2026-07-13 パイロットFB対応）の単体テスト。
 
 固定する仕様:
-  - 1件=1行原則（未確認の要約廃止・💬本文は正規化→60字切詰→escape）
+  - 1件=1行原則（未確認の要約廃止）
+  - 💬 Slack 返信漏れは判定層（_shared/slack_handoff）のカードを並べる形
+    （本文抜粋は出さない・`#` はチャンネルのときだけ・生 ID は 1 文字も出さない）
   - 見出し=全数・表示=上限・超過=〈他N件〉+リンク の統一
   - フラグ OFF では旧描画（_format_block_kit）が使われ従来挙動が不変
   - `<https://evil|クリック>` 偽装がリンクとして描画されないこと（正規化→escape の順序）
@@ -59,9 +61,12 @@ def _mail(
 
 def _slack_item(i: int, text: str) -> SlackUnreadItem:
     return SlackUnreadItem(
+        channel_id="C08CHAN0001",
+        channel_kind="channel",
         channel_name_display=f"ch-{i}",
         excerpt_display=text[:200],
-        permalink=f"https://vector.slack.com/archives/C0/p{i}",
+        occurred_at="2026-07-13T09:00:00+09:00",
+        permalink=f"https://vector.slack.com/archives/C08CHAN0001/p{i}",
     )
 
 
@@ -77,6 +82,8 @@ def _digest(
             CalendarEventItem(summary_scrubbed=f"予定{i}", start_at="2026-07-14T01:00:00+09:00")
             for i in range(n_cal)
         ],
+        calendar_date="2026-07-14",  # 見出しの日付明示（「今日の予定」→「7/14(火) の予定」）
+        slack_unread_scanned=True,
         slack_unread=[
             _slack_item(
                 i,
@@ -95,11 +102,19 @@ def _digest(
 def test_flatten_mentions_channels_links() -> None:
     raw = "<@U08GGD873QC> と <@U09CX1CCBLN|小俣翔碁> が <#C091ZSVTKF1|l_lifull> で <https://x.com/a|記事> と <https://bare.example.com/path> を共有\n\n改行  空白"
     out = mod._flatten_slack_text(raw)
-    assert "@メンバー" in out and "@小俣翔碁" in out
+    # 実名が引けないメンションは架空名を作らず「表示名なし」と明示する（旧: "@メンバー"）。
+    assert "@（表示名なし）" in out and "@小俣翔碁" in out
+    assert "U08GGD873QC" not in out
     assert "#l_lifull" in out
     assert "記事" in out and "https://x.com/a" not in out
     assert "(リンク)" in out and "bare.example.com" not in out
     assert "\n" not in out and "  " not in out
+
+
+def test_flatten_resolves_bare_mention_with_real_name() -> None:
+    """data 層が users.info で引けた表示名を渡せば実名になる（マスクではなく表示整形）。"""
+    out = mod._flatten_slack_text("<@U08GGD873QC> 確認お願いします", {"U08GGD873QC": "森田"})
+    assert out == "@森田 確認お願いします"
 
 
 def test_flatten_then_escape_kills_fake_link() -> None:
@@ -142,18 +157,23 @@ def test_unread_one_line_no_summary_and_overflow_link() -> None:
     assert "…" in dump
 
 
-def test_slack_section_normalized_and_truncated() -> None:
+def test_slack_section_is_handoff_cards_not_body_excerpts() -> None:
+    """💬 は判定済みカード（1件=1行）。本文抜粋・生 ID は出さず、母数は見出しに出す。"""
     _t, blocks = mod._format_block_kit_compact(_digest(n_slack=6), "u@ex.com")
     dump = str(blocks)
-    assert "Slack 返信漏れ（6件）" in dump
-    assert "〈他1件〉" in dump
-    assert "\\n確認" not in dump  # 改行は畳まれている
+    assert "💬 *Slack 返信漏れ 6件*（うち5件を表示）" in dump  # 母数と表示件数を分けて出す
+    # バケット内訳は取得できた全件で数え、並べた件数は分けて言う（表示 5 件の内訳を
+    # 母数の内訳と誤読させない）。
+    assert "🔴 *あなたの番（6件中5件を表示）*" in dump
+    assert "・#ch-0 ・" in dump  # チャンネル（C）にだけ # を付ける
+    assert "※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。" in dump
     assert "|開く>" in dump  # permalink リンクは維持
-    # 60字切詰: 「追」の連打が途中で切れて … になる
-    assert (
-        "追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追追"
-        not in dump
+    assert "C08CHAN0001" not in dump.replace(  # URL の外に生 ID を出さない
+        "https://vector.slack.com/archives/C08CHAN0001/", ""
     )
+    # 本文（「追」の連打・偽装リンク・改行）はそのまま描かない。
+    assert "追追追追追追追追追追" not in dump
+    assert "(リンク)" not in dump
 
 
 def test_reply_section_buttons_and_meta_line() -> None:
@@ -178,9 +198,10 @@ def test_reply_overflow_uses_inbox_link() -> None:
 def test_calendar_overflow_and_zero_state() -> None:
     _t, blocks = mod._format_block_kit_compact(_digest(n_cal=12), "u@ex.com")
     dump = str(blocks)
-    assert "今日の予定（12件）" in dump and "〈他2件〉" in dump and "カレンダーを開く" in dump
+    assert "7/14(火) の予定（12件）" in dump and "〈他2件〉" in dump and "カレンダーを開く" in dump
+    assert "今日の予定" not in dump  # 「今日」決め打ちは撤去（日付ずれを隠すため）
     _t2, blocks2 = mod._format_block_kit_compact(_digest(), "u@ex.com")
-    assert "今日の予定*: なし" in str(blocks2)
+    assert "7/14(火) の予定*: なし" in str(blocks2)
 
 
 def test_blocks_under_limit_worst_case() -> None:
