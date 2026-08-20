@@ -353,3 +353,27 @@ def test_consumer_pointer_check_rejects_mismatch_not_adopts_it() -> None:
     ]
     assert "STALE MAPPING" in checker
     assert "die" in checker
+
+
+# ── state pull の非決定性への耐性（2026-08-20 実測: check_results の並びが揺れる） ──
+
+from state_rebind import _state_canonical_sha256  # noqa: E402
+
+
+def test_state_sha_ignores_check_results_ordering(tmp_path: Path) -> None:
+    """check_results の並び替えだけでは sha が変わらない（apply 照合の誤爆防止）。"""
+    base = {"serial": 187, "lineage": "x", "resources": [{"a": 1}]}
+    p1 = tmp_path / "s1.json"
+    p2 = tmp_path / "s2.json"
+    p1.write_text(json.dumps({**base, "check_results": [{"c": 1}, {"c": 2}]}))
+    p2.write_text(json.dumps({"check_results": [{"c": 2}, {"c": 1}], **base}))
+    assert _state_canonical_sha256(p1) == _state_canonical_sha256(p2)
+
+
+def test_state_sha_still_detects_resource_tampering(tmp_path: Path) -> None:
+    """resource 実体の改変は引き続き検出される（緩めすぎ防止の変異対）。"""
+    p1 = tmp_path / "s1.json"
+    p2 = tmp_path / "s2.json"
+    p1.write_text(json.dumps({"serial": 187, "resources": [{"a": 1}]}))
+    p2.write_text(json.dumps({"serial": 187, "resources": [{"a": 2}]}))
+    assert _state_canonical_sha256(p1) != _state_canonical_sha256(p2)

@@ -65,6 +65,23 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _state_canonical_sha256(state_path: Path) -> str:
+    """state pull の canonical hash。
+
+    `terraform state pull` は check_results（plan 時の check メタデータ）の並びが
+    呼び出しごとに揺れて **バイト非決定**（2026-08-20 に連続 2 pull の sha 不一致で実測）。
+    raw バイトを束縛すると apply 時の再照合が必ず誤爆するため、check_results を除外し
+    キーを正規順序化した canonical JSON を hash する。resource 実体・serial・lineage の
+    改変は引き続き検出される（serial は BOUND_FIELDS でも独立に束縛している）。
+    """
+    doc = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise RebindError("state is not an object")
+    doc.pop("check_results", None)
+    canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def load_targets(path: Path, *, require_targets: bool = False) -> list[dict[str, Any]]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -249,7 +266,7 @@ def collect(
         "git_tree_clean": _tree_is_clean(repo_root),
         "state_lineage": lineage,
         "state_serial": serial,
-        "state_sha256": _sha256_file(state_path),
+        "state_sha256": _state_canonical_sha256(state_path),
         "aws_account": account,
         "aws_principal_arn": assert_usable_principal(principal_arn, source="collect"),
         "targets_count": len(targets),
