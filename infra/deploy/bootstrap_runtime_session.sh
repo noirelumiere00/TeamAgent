@@ -55,7 +55,7 @@ case "$1" in
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-media-cutover-attestor/teamagent-media-cutover-attestor"
     SESSION_SECONDS=3600
     ;;
-  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|prepare-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply|adopt-plan|adopt-apply)
+  snapshot|attest-log-versioning|issue-alarm-challenge|attest-alarm-delivery|advance-alarm-migration|prepare-media-cutover|attest-log-readiness|preflight|review-plan|plan|verify|apply|adopt-plan|adopt-apply|state-rebind-precheck|state-rebind-apply)
     ROLE_ARN="arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation"
     SESSION_NAME="teamagent-terraform-worker"
     EXPECTED_SESSION_ARN="arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker"

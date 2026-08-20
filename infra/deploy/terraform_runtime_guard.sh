@@ -99,6 +99,9 @@ usage:
   terraform_runtime_guard.sh verify --plan PLAN [--receipt FILE]
   terraform_runtime_guard.sh adopt-plan --var-file FILE --out DIR
   terraform_runtime_guard.sh adopt-apply --out DIR --approve TOKEN
+  terraform_runtime_guard.sh state-rebind-precheck --out DIR
+  terraform_runtime_guard.sh state-rebind-apply --out DIR --var-file FILE --approve TOKEN
+      state binding だけを live の exact revision へ付け替える（1 address ずつ atomic）。
       adopt の --out は repository 外を指定すること（repo 配下は fail-closed で拒否）。
       --approve は "I-HAVE-REVIEWED-THE-ADOPT-PLAN:<plan_sha256 先頭16桁>"。
   terraform_runtime_guard.sh authorize-media-apply --plan PLAN \
@@ -10244,6 +10247,159 @@ adopt_apply() {
   echo "✅ adopt completed（AWS 実体の変更ゼロを前後比較で確認）"
 }
 
+# ── PR2-A0.4: Terraform state の同一アドレス rebind ──────────────────────────
+# 本番は正しく（approved receipt == live）、state の binding だけが旧 revision を指す
+# とき、live を再デプロイして state へ合わせるのは順序が逆。state の binding だけを
+# live の exact revision へ付け替える。同一アドレスの rebind は removed/import ブロック
+# では表現できないため、`state rm → 即 import` を guard 監督下の唯一の経路として
+# 儀式化する（素の state 操作は引き続き禁止）。
+# 正式契約: AWS managed application resources mutation = 0 / Terraform remote state mutation only
+REBIND_MAPPING="$REPO_ROOT/infra/deploy/state_rebind_targets.json"
+REBIND_HELPER="$REPO_ROOT/infra/deploy/state_rebind.py"
+
+rebind_require_helpers() {
+  for rebind_path in "$REBIND_MAPPING" "$REBIND_HELPER"; do
+    [ -f "$rebind_path" ] || die "rebind の必須ファイルがありません: $rebind_path"
+  done
+}
+
+# mapping の consumer 宣言に基づき、live の参照先が target_arn と一致することを確認する。
+# これは検証であって再解決ではない（mapping の動的追随は禁止 — 不一致なら die）。
+rebind_assert_consumer_points_at_target() {
+  local kind="$1" name="$2" cluster="$3" target_arn="$4" live_arn=""
+  case "$kind" in
+    ecs-service)
+      live_arn="$(aws_cli ecs describe-services --cluster "$cluster" --services "$name"         --query 'services[0].taskDefinition' --output text)" ||
+        die "rebind: consumer service $name を describe できません"
+      ;;
+    events-rule)
+      live_arn="$(aws_cli events list-targets-by-rule --rule "$name"         --query 'Targets[0].EcsParameters.TaskDefinitionArn' --output text)" ||
+        die "rebind: rule $name の target を取得できません"
+      ;;
+    lambda-env)
+      live_arn="$(aws_cli lambda get-function-configuration --function-name "$name"         --query 'Environment.Variables.TASKDEF_ARN' --output text)" ||
+        die "rebind: lambda $name の TASKDEF_ARN を取得できません"
+      ;;
+    *) die "rebind: 未知の consumer kind: $kind" ;;
+  esac
+  [ "$live_arn" = "$target_arn" ] ||
+    die "rebind: consumer $name の live 参照が mapping と一致しません
+   live    : $live_arn
+   mapping : $target_arn
+   live が動いた場合は STALE MAPPING — freeze を確認し mapping を作り直すこと（動的追随は禁止）"
+}
+
+rebind_precheck() {
+  local out_dir="$1" principal_arn
+  rebind_require_helpers
+  adopt_assert_out_dir_outside_repo "$out_dir"
+  (umask 077 && mkdir -p "$out_dir") ||
+    die "rebind の out ディレクトリを作成できませんでした: $out_dir"
+  chmod 700 "$out_dir"
+  principal_arn="$(adopt_trusted_principal_arn "$out_dir/identity-precheck.json")"
+
+  git -C "$REPO_ROOT" diff --quiet HEAD -- ||
+    die "rebind は clean tree でのみ実行できます（未コミット変更があります）"
+  [ -z "$(git -C "$REPO_ROOT" ls-files --others --exclude-standard)" ] ||
+    die "rebind は clean tree でのみ実行できます（untracked file があります）"
+
+  python3 "$REBIND_HELPER" validate --mapping "$REBIND_MAPPING" --require-targets ||
+    die "rebind mapping が不変条件を満たしません"
+
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-backup.json"
+  chmod 600 "$out_dir/state-backup.json"
+  [ -s "$out_dir/state-backup.json" ] || die "rebind の state backup が空です"
+  terraform -chdir="$TF_DIR" state list > "$out_dir/state-list.txt"
+  chmod 600 "$out_dir/state-list.txt"
+
+  local address family target_arn kind name cluster current_arn
+  while IFS=$'\t' read -r address family target_arn kind name cluster; do
+    grep -Fxq "$address" "$out_dir/state-list.txt" ||
+      die "rebind: $address が state にありません"
+    current_arn="$(jq -er --arg addr "$address" '
+      .resources[] | select(.mode == "managed")
+      | select((.type + "." + .name) == $addr)
+      | .instances[0].attributes.arn
+    ' "$out_dir/state-backup.json")" ||
+      die "rebind: $address の現 state ARN を取得できません"
+    [ "$current_arn" != "$target_arn" ] ||
+      die "rebind: $address は既に $target_arn へ束縛済みです（mapping から除外すること）"
+    aws_cli ecs describe-task-definition --task-definition "$target_arn"       --query 'taskDefinition.status' --output text | grep -qx "ACTIVE" ||
+      die "rebind: $target_arn が ACTIVE ではありません"
+    rebind_assert_consumer_points_at_target "$kind" "$name" "$cluster" "$target_arn"
+    printf '%s\t%s\t%s\n' "$address" "$current_arn" "$target_arn" >> "$out_dir/rebind-plan.tsv"
+  done < <(python3 -c 'import json,sys
+for t in json.load(open(sys.argv[1]))["targets"]:
+    c = t["consumer"]
+    print(t["address"], t["family"], t["target_arn"], c["kind"], c["name"], c.get("cluster",""), sep="\t")' "$REBIND_MAPPING")
+  chmod 600 "$out_dir/rebind-plan.tsv"
+
+  python3 "$REBIND_HELPER" record \
+    --repo-root "$REPO_ROOT" --out-dir "$out_dir" --mapping "$REBIND_MAPPING" \
+    --state "$out_dir/state-backup.json" \
+    --account "$EXPECTED_ACCOUNT_ID" --principal-arn "$principal_arn" ||
+    die "rebind binding の作成に失敗しました"
+  echo "✅ rebind precheck 完了: $out_dir/rebind-plan.tsv（人間レビュー後、表示された承認トークンで apply）"
+}
+
+rebind_apply() {
+  local out_dir="$1" var_file="$2" approve="$3" principal_arn
+  rebind_require_helpers
+  adopt_assert_out_dir_outside_repo "$out_dir"
+  ensure_tmp
+  var_file="$(secure_existing_file "$var_file")"
+  for rebind_artifact in state-backup.json rebind-plan.tsv rebind-binding.json; do
+    [ -f "$out_dir/$rebind_artifact" ] || die "rebind 成果物がありません: $out_dir/$rebind_artifact"
+  done
+  principal_arn="$(adopt_trusted_principal_arn "$out_dir/identity-apply.json")"
+
+  # precheck した世界と apply する世界の完全一致（mapping/state/commit/principal）+ 承認束縛。
+  terraform -chdir="$TF_DIR" state pull > "$out_dir/state-now.json"
+  chmod 600 "$out_dir/state-now.json"
+  python3 "$REBIND_HELPER" verify \
+    --repo-root "$REPO_ROOT" --out-dir "$out_dir" --mapping "$REBIND_MAPPING" \
+    --state "$out_dir/state-now.json" \
+    --account "$EXPECTED_ACCOUNT_ID" --principal-arn "$principal_arn" \
+    --approve "$approve" ||
+    die "rebind binding の再照合に失敗しました（apply は行いません）"
+
+  # 共有 deployment lock で他の guard 操作を完全停止（terraform の backend lock は
+  # state rm / import が各操作で個別に取得する）。die した場合 lock は TTL まで残り、
+  # 復旧判断まで他の apply を塞ぐ — これは意図された fail-closed。
+  acquire_deployment_lock
+
+  # 1 address ずつ atomic-like に進める: precheck → rm → 即 import → verify → 次へ。
+  # 「全部 rm してから import」は禁止（途中失敗で複数 address が未束縛になる状態を作らない）。
+  local address family target_arn kind name cluster
+  while IFS=$'\t' read -r address family target_arn kind name cluster; do
+    # 実行直前の再検証: live の参照が precheck 時から動いていたら STALE として停止。
+    rebind_assert_consumer_points_at_target "$kind" "$name" "$cluster" "$target_arn"
+    aws_cli ecs describe-task-definition --task-definition "$target_arn"       --output json > "$out_dir/describe-$family.json"
+    chmod 600 "$out_dir/describe-$family.json"
+
+    terraform -chdir="$TF_DIR" state rm -lock-timeout=5m "$address" ||
+      die "rebind: state rm に失敗しました: $address（以降の対象へ進みません。復旧は human 裁定）"
+    terraform -chdir="$TF_DIR" import -input=false -lock-timeout=5m \
+      "-var-file=$var_file" "$address" "$target_arn" ||
+      die "rebind: import に失敗しました: $address（state backup から復旧を検討。以降の対象へ進みません）"
+
+    terraform -chdir="$TF_DIR" state pull > "$out_dir/state-after-$family.json"
+    chmod 600 "$out_dir/state-after-$family.json"
+    python3 "$REBIND_HELPER" compare \
+      --state-json "$out_dir/state-after-$family.json" \
+      --address "$address" \
+      --describe-json "$out_dir/describe-$family.json" ||
+      die "rebind: $address の state と live が一致しません（以降の対象へ進みません）"
+    echo "✅ rebound: $address → $target_arn"
+  done < <(python3 -c 'import json,sys
+for t in json.load(open(sys.argv[1]))["targets"]:
+    c = t["consumer"]
+    print(t["address"], t["family"], t["target_arn"], c["kind"], c["name"], c.get("cluster",""), sep="\t")' "$REBIND_MAPPING")
+
+  release_deployment_lock
+  echo "✅ state rebind 完了（AWS managed application resources mutation = 0 / Terraform remote state mutation only）"
+}
+
 COMMAND="${1:-}"
 case "$COMMAND" in
   -h|--help|help|"") usage; exit 0 ;;
@@ -13536,6 +13692,35 @@ case "$COMMAND" in
     done
     [ -n "$ADOPT_OUT" ] || die "adopt-apply には --out が必須です"
     adopt_apply "$ADOPT_OUT" "$ADOPT_APPROVE"
+    ;;
+
+  state-rebind-precheck)
+    REBIND_OUT=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --out) REBIND_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        *) die "未知の引数: $1" ;;
+      esac
+    done
+    [ -n "$REBIND_OUT" ] || die "state-rebind-precheck には --out が必須です"
+    rebind_precheck "$REBIND_OUT"
+    ;;
+
+  state-rebind-apply)
+    REBIND_OUT=""
+    REBIND_VAR_FILE=""
+    REBIND_APPROVE=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --out) REBIND_OUT="${2:?--out に値が必要}"; shift 2 ;;
+        --var-file) REBIND_VAR_FILE="${2:?--var-file に値が必要}"; shift 2 ;;
+        --approve) REBIND_APPROVE="${2:?--approve に値が必要}"; shift 2 ;;
+        *) die "未知の引数: $1" ;;
+      esac
+    done
+    [ -n "$REBIND_OUT" ] || die "state-rebind-apply には --out が必須です"
+    [ -n "$REBIND_VAR_FILE" ] || die "state-rebind-apply には --var-file が必須です"
+    rebind_apply "$REBIND_OUT" "$REBIND_VAR_FILE" "$REBIND_APPROVE"
     ;;
 
   *)

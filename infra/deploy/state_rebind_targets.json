@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "description": "PR2-A0.4 state rebind の対象台帳。Terraform state の binding だけを live の exact task-definition revision へ付け替える（AWS managed application resources mutation = 0 / Terraform remote state mutation only）。targets は PRODUCTION DEPLOYMENT FREEZE 開始後に fresh な live 再解決から確定する — 調査時点の ARN を焼いてはならない（2026-08-20 に mcp:86 が調査中に増えた実例あり）。空のまま state-rebind-precheck を実行すると fail-closed で停止する。",
+  "frozen_at": null,
+  "targets": []
+}
