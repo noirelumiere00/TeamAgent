@@ -14,7 +14,7 @@
       }
     },
     {
-      "address": "aws_ecs_task_definition.connect_web",
+      "address": "aws_ecs_task_definition.connect_web[0]",
       "family": "teamagent-dev-connect-web",
       "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:71",
       "consumer": {
@@ -24,7 +24,7 @@
       }
     },
     {
-      "address": "aws_ecs_task_definition.morning_digest",
+      "address": "aws_ecs_task_definition.morning_digest[0]",
       "family": "teamagent-dev-morning-digest",
       "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:53",
       "consumer": {
@@ -33,7 +33,7 @@
       }
     },
     {
-      "address": "aws_ecs_task_definition.canary",
+      "address": "aws_ecs_task_definition.canary[0]",
       "family": "teamagent-dev-canary",
       "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:23",
       "consumer": {
@@ -42,7 +42,7 @@
       }
     },
     {
-      "address": "aws_ecs_task_definition.ingest",
+      "address": "aws_ecs_task_definition.ingest[0]",
       "family": "teamagent-dev-ingest",
       "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:55",
       "consumer": {
@@ -51,7 +51,7 @@
       }
     },
     {
-      "address": "aws_ecs_task_definition.tiktok_acquire",
+      "address": "aws_ecs_task_definition.tiktok_acquire[0]",
       "family": "teamagent-dev-tiktok-acquire",
       "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25",
       "consumer": {

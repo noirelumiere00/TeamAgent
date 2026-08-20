@@ -10316,7 +10316,8 @@ rebind_precheck() {
   while IFS=$'\t' read -r address family target_arn kind name cluster; do
     grep -Fxq "$address" "$out_dir/state-list.txt" ||
       die "rebind: $address が state にありません"
-    current_arn="$(jq -er --arg addr "$address" '
+    base_address="${address%%\[*}"
+    current_arn="$(jq -er --arg addr "$base_address" '
       .resources[] | select(.mode == "managed")
       | select((.type + "." + .name) == $addr)
       | .instances[0].attributes.arn

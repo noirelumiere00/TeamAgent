@@ -76,11 +76,11 @@ def test_production_mapping_is_frozen_with_the_approved_six_targets() -> None:
     assert raw["frozen_at"] == "2026-08-20T09:15:00Z"
     expected = {
         "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:86",
-        "aws_ecs_task_definition.connect_web": "teamagent-dev-connect-web:71",
-        "aws_ecs_task_definition.morning_digest": "teamagent-dev-morning-digest:53",
-        "aws_ecs_task_definition.canary": "teamagent-dev-canary:23",
-        "aws_ecs_task_definition.ingest": "teamagent-dev-ingest:55",
-        "aws_ecs_task_definition.tiktok_acquire": "teamagent-dev-tiktok-acquire:25",
+        "aws_ecs_task_definition.connect_web[0]": "teamagent-dev-connect-web:71",
+        "aws_ecs_task_definition.morning_digest[0]": "teamagent-dev-morning-digest:53",
+        "aws_ecs_task_definition.canary[0]": "teamagent-dev-canary:23",
+        "aws_ecs_task_definition.ingest[0]": "teamagent-dev-ingest:55",
+        "aws_ecs_task_definition.tiktok_acquire[0]": "teamagent-dev-tiktok-acquire:25",
     }
     actual = {t["address"]: t["target_arn"].split("/")[-1] for t in raw["targets"]}
     assert actual == expected
@@ -198,6 +198,16 @@ def test_compare_rejects_arn_or_revision_mismatch() -> None:
     describe["taskDefinition"]["revision"] = 87
     with pytest.raises(RebindError, match="state arn"):
         compare_state_to_live(_state_doc(), "aws_ecs_task_definition.mcp", describe)
+
+
+def test_compare_resolves_count_indexed_addresses() -> None:
+    """count リソース（address[0]）は base 名 + index_key=0 で state instance を解決する。"""
+    doc = _state_doc()
+    doc["resources"][0]["instances"][0]["index_key"] = 0
+    compare_state_to_live(doc, "aws_ecs_task_definition.mcp[0]", _describe_doc())
+    # index 無し address で indexed instance を引いたら拒否（取り違え防止）
+    with pytest.raises(RebindError, match="indexed"):
+        compare_state_to_live(doc, "aws_ecs_task_definition.mcp", _describe_doc())
 
 
 def test_compare_rejects_missing_address() -> None:
