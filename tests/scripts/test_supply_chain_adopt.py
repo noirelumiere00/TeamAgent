@@ -702,10 +702,19 @@ def test_integrity_compare_detects_any_single_field_change(field: str) -> None:
 
 
 def _guard_adopt_section() -> str:
-    """guard 内の adopt 関連部分だけを取り出す（既存経路と混ざらないことの担保）。"""
+    """guard 内の adopt 関連部分だけを取り出す（既存経路と混ざらないことの担保）。
+
+    末尾境界は state-rebind セクション（PR2-A0.4。同一アドレス rebind のため
+    guard 監督下で state rm/import を使う唯一の経路）の開始点。adopt セクション
+    自体に state 操作が混ざらないことは引き続きこの切り出しで検査される。
+    """
     body = GUARD.read_text(encoding="utf-8")
     start = body.index("ADOPT_MAPPING=")
-    end = body.index('COMMAND="${1:-}"')
+    end = (
+        body.index("REBIND_MAPPING=")
+        if "REBIND_MAPPING=" in body
+        else body.index('COMMAND="${1:-}"')
+    )
     return body[start:end]
 
 
