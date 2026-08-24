@@ -10394,13 +10394,6 @@ adopt_plan() {
   terraform -chdir="$TF_DIR" show -json "$out_dir/adopt.tfplan" > "$out_dir/adopt-plan.json"
   chmod 600 "$out_dir/adopt.tfplan" "$out_dir/adopt-plan.json"
 
-  # Freeze v2 が ACTIVE な間、plan が enforcement の 11 リソースを destroy しない
-  # ことと、activation_freeze_enabled=true が実際に plan へ入っていることを要求する
-  # （未注入なら既定 false で全て destroy 候補になる）。
-  python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
-    assert-plan-preserves-freeze --plan "$out_dir/adopt-plan.json" ||
-    die "adopt plan が Freeze v2 の enforcement を壊します（plan は破棄してください）"
-
   python3 "$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が不変条件を満たしません（plan は破棄してください）"
 
@@ -10410,6 +10403,11 @@ adopt_plan() {
   python3 "$ADOPT_INTEGRITY" crosscheck --snapshot "$out_dir/integrity-before.json" \
     --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が live の AWS 実体と一致しません（plan は破棄してください）"
+
+  # Freeze v2 の enforcement 保全検査（validator / crosscheck の後）。
+  python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
+    assert-plan-preserves-freeze --plan "$out_dir/adopt-plan.json" ||
+    die "adopt plan が Freeze v2 の enforcement を壊します（plan は破棄してください）"
 
   # 通常経路と同じ TOCTOU 防止: plan が bind した live snapshot が plan 完了時点でも
   # そのままであることを要求する（plan 中の別デプロイは fail-closed）。
@@ -11740,9 +11738,6 @@ case "$COMMAND" in
     PLAN_SHA="$(sha256_file "$STAGE_PLAN")"
     terraform -chdir="$TF_DIR" show -json "$STAGE_PLAN" > "$TMP_ROOT/plan.json"
     [ "$(sha256_file "$STAGE_PLAN")" = "$PLAN_SHA" ] || die "terraform show中のplan差替えを検出しました"
-    python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
-      assert-plan-preserves-freeze --plan "$TMP_ROOT/plan.json" ||
-      die "plan が Freeze v2 の enforcement を壊します"
     hmac_from_plan "$TMP_ROOT/plan.json" "$TMP_ROOT/proposed-hmac.json"
     validate_hmac_transition_metadata \
       "$TMP_ROOT/live-before.json" "$TMP_ROOT/proposed-hmac.json" "$MODE" \
@@ -11760,6 +11755,12 @@ case "$COMMAND" in
       "$TMP_ROOT/state-before.json" "$PLAN_CONTRACT_MODE" \
       "$PLAN_CONTRACT_OUTPUT"
     [ "$(sha256_file "$STAGE_PLAN")" = "$PLAN_SHA" ] || die "plan検証中の差替えを検出しました"
+
+    # Freeze v2 の enforcement 保全検査。plan 自体の整合性検査（validate_plan 等）を
+    # 通した後に置く。先に置くと malformed plan の診断を奪ってしまう（2026-08-24 実測）。
+    python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
+      assert-plan-preserves-freeze --plan "$TMP_ROOT/plan.json" ||
+      die "plan が Freeze v2 の enforcement を壊します"
 
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
     snapshot_live "$TMP_ROOT/live-after.json"

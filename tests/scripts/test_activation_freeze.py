@@ -668,6 +668,25 @@ def test_both_plan_paths_run_the_preservation_check() -> None:
     assert guard.count("assert-plan-preserves-freeze") == 2
 
 
+def test_freeze_check_runs_after_plan_integrity_validation() -> None:
+    """freeze 検査は plan 自体の整合性検査より **後** に走ること。
+
+    2026-08-24 実測: 先に置くと malformed plan に対して JSON parse エラーで死に、
+    guard 本来の「plan から HMAC metadata を一意に取得できません」という診断を
+    奪ってしまう。freeze 検査は追加の不変条件であって整合性検査の代替ではない。
+    """
+    guard = GUARD.read_text(encoding="utf-8")
+    # normal path: validate_plan（plan 検証）→ freeze 検査
+    normal = guard.index('die "plan検証中の差替えを検出しました"')
+    normal_freeze = guard.index('--plan "$TMP_ROOT/plan.json"')
+    assert normal < normal_freeze
+    assert guard.index("hmac_from_plan") < normal_freeze
+    # adopt path: ADOPT_VALIDATOR / crosscheck → freeze 検査
+    adopt_validator = guard.index('"$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json"')
+    adopt_freeze = guard.index('--plan "$out_dir/adopt-plan.json"', adopt_validator + 10)
+    assert adopt_validator < adopt_freeze
+
+
 def test_runbook_requires_the_var_on_guard_free_plan_paths() -> None:
     """guard を通らない IAM targeted plan でも変数の明示と検査を要求する。"""
     text = (ROOT / "docs/runbooks/activation_freeze.md").read_text(encoding="utf-8")
