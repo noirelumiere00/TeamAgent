@@ -85,6 +85,16 @@ class MailFollowupOutput(BaseModel):
     client_name: str
     items: list[FollowupItem] = Field(default_factory=list)
     scanned_count: int = Field(ge=0, description="走査したメール数")
+    lookback_days: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "実際に遡った日数（**入力の lookback_days とは限らない**。idle_days 指定時は"
+            "その分だけ窓を広げる）。この候補について mail_draft を呼ぶときは"
+            "**この値をそのまま lookback_days に渡す**（窓がずれると『見つからなくなって"
+            "いました』と事実と異なる説明になる）"
+        ),
+    )
     inbox_owner_masked: str = Field(
         default="",
         description="参照した受信箱（マスク表示）。本人性監査用",
@@ -102,8 +112,9 @@ class MailFollowupOutput(BaseModel):
         default="",
         description=(
             "決定論コード（空文字＝正常に結果あり）。"
-            "'client_name_structural'=client_name が依頼文の断片 / "
-            "'client_name_missing'=client_name が空 / "
+            "'inbox_triage'=顧客名が無い/断片だったので**受信箱全体**から候補を出した"
+            "（items は候補・client_name は空。message をそのまま出して番号で選ばせる。"
+            "**この候補を特定の顧客の件として説明しないこと**）/ "
             "'not_connected'=Google 未連携 / "
             "'reauth_needed'=認証情報の再取得が必要（失効・スコープ不足を含む） / "
             "'gmail_api_failed'=受信箱の検索に失敗（**0 件という意味ではない**） / "
@@ -121,8 +132,7 @@ class MailFollowupOutput(BaseModel):
         default="",
         description=(
             "メール連携の状態。'live'=実際に受信箱を検索した（0 件でも連携は正常）/ "
-            "'ok'=連携は解決済みだが検索していない（client_name ガードで停止）/ "
             "空文字=連携できていない（error=not_connected / reauth_needed）。"
-            "**'live' や 'ok' が入っているのに『連携が未完了かもしれません』と言わないこと**"
+            "**'live' が入っているのに『連携が未完了かもしれません』と言わないこと**"
         ),
     )

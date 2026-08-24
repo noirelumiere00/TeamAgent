@@ -10,10 +10,20 @@ from pydantic import BaseModel, Field
 
 
 class MailReplyInput(BaseModel):
-    """返信ドラフト生成の入力。G5: client_name 必須（対象メールを絞る）。"""
+    """返信ドラフト生成の入力。G5: 対象メールは client_name か target_message_id で必ず絞る。
+
+    ``client_name`` の required を外したのは、**返信先が既に確定している呼び出し**
+    （``target_message_id`` 指定＝一覧から本人が選んだ 1 件）で、顧客名を捏造して
+    埋める以外に呼びようが無かったため。空のまま ``target_message_id`` 無しで呼べば、
+    従来どおり client_name_guard が受信箱を 1 度も叩かずに案内文へ落とす。
+    """
 
     client_name: str = Field(
-        min_length=1, max_length=100, description="返信対象を探すクライアント/案件名（必須）"
+        default="",
+        max_length=100,
+        description=(
+            "返信対象を探すクライアント/案件名。target_message_id で対象を明示するときは空でよい"
+        ),
     )
     instructions: str | None = Field(
         default=None, max_length=500, description="返信の方針・盛り込みたい点（任意・トーン等）"
@@ -38,5 +48,12 @@ class MailReplyOutput(BaseModel):
         default="", description="生成した下書き本文（AI 生成・本人がGmailで確認→送信）"
     )
     gmail_draft_id: str = Field(default="", description="作成された Gmail 下書きの ID")
+    open_url: str = Field(
+        default="",
+        description=(
+            "その下書きを Gmail で開くリンク（スレッド直リンク）。"
+            "**リンクは原文のまま本人へ併記すること**"
+        ),
+    )
     note: str = Field(default="", description="但し書き（送信していない 等）")
     total_cost_usd: float = Field(default=0.0, ge=0.0, description="この生成の概算コスト")

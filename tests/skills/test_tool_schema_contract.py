@@ -38,7 +38,9 @@ from typing import Any
 import teamagent.skills as _skills_pkg
 from teamagent.skills.base import SkillRegistry
 from teamagent.skills.calendar_freebusy.schema import CalendarFreeBusyInput
+from teamagent.skills.mail_draft.schema import MailDraftInput
 from teamagent.skills.mail_followup.schema import MailFollowupInput
+from teamagent.skills.mail_reply.schema import MailReplyInput
 from teamagent.skills.mail_summary.schema import MailSummaryInput
 
 # 値空間を機械的に狭めるキー。1 つでもあれば「自由文字列」ではない。
@@ -56,17 +58,13 @@ Key = tuple[str, str]
 
 # 🔴 期限つき負債（2026-09-30 までに「任意化 + client_name_guard」か enum 化）。
 # ここに載っている tool は、顧客名を言わない依頼で今も依頼文の断片を詰められる。
-# clientkarte / mail_to_internal_context / mail_reply は **本番で OC に露出済み**。
+# clientkarte / mail_to_internal_context は **本番で OC に露出済み**。
 ENTITY_NAME_DEBT: dict[Key, str] = {
     ("clientkarte", "client_name"): "本番露出。P0-2 と同型。任意化 + guard へ移す（〜2026-09-30）",
     (
         "mail_to_internal_context",
         "client_name",
     ): "本番露出。client_name_guard 適用済（断片では受信箱を叩かない）。任意化は未（〜2026-09-30）",
-    (
-        "mail_reply",
-        "client_name",
-    ): "本番露出。client_name_guard 適用済（断片は下書きを作らず聞き返す）。任意化は未（〜2026-09-30）",
     ("mail_constraints", "client_name"): "dark（USE_MAIL_TOOLS）。露出前に任意化（〜2026-09-30）",
     ("x_voice_search", "product_name"): "商材名。空振りで済むが表題に嘘が載る（〜2026-09-30）",
     (
@@ -83,7 +81,6 @@ SEARCH_TERM_DEBT: dict[Key, str] = {
 
 # 捏造すると大きな音で失敗する（存在しない job/token は即エラー）。自由文字列のままでよい。
 OPAQUE_TOKEN_OK: dict[Key, str] = {
-    ("mail_draft", "draft_token"): "HMAC 署名トークン。改竄は検証で落ちる",
     ("schedule_propose", "schedule_token"): "HMAC 署名トークン。同上",
     ("proposal_builder_status", "job_id"): "存在しない job_id は not found",
     ("tiktok_acquire_status", "job_id"): "同上",
@@ -188,7 +185,7 @@ def test_entity_name_fields_are_exactly_the_tracked_debt() -> None:
 
 def test_mail_tools_no_longer_require_a_customer_name() -> None:
     """P0-2 の修正が required へ戻る退行を止める（**この失敗クラスの本丸**）。"""
-    for model in (MailSummaryInput, MailFollowupInput):
+    for model in (MailSummaryInput, MailFollowupInput, MailReplyInput):
         schema = model.model_json_schema()
         assert "client_name" not in (schema.get("required") or []), (
             f"{model.__name__}.client_name が required に戻っている。"
@@ -200,7 +197,21 @@ def test_mail_tools_no_longer_require_a_customer_name() -> None:
     # 直った 2 本は負債台帳から消えていること／同型の未修理が残っていることの両方を固定する。
     assert ("mail_summary", "client_name") not in ENTITY_NAME_DEBT
     assert ("mail_followup", "client_name") not in ENTITY_NAME_DEBT
+    assert ("mail_reply", "client_name") not in ENTITY_NAME_DEBT
     assert ("clientkarte", "client_name") in ENTITY_NAME_DEBT
+
+
+def test_mail_draft_can_be_called_without_inventing_a_token() -> None:
+    """一覧から選ばれた件の下書きは **署名トークン無し**でも作れる（selection 経路）。
+
+    draft_token を required のまま残すと、ルーターは押していないボタンの value を捏造する
+    しかなくなる。任意化したので負債台帳（OPAQUE_TOKEN_OK）からも外れていること。
+    """
+    schema = MailDraftInput.model_json_schema()
+    assert not (schema.get("required") or []), "mail_draft は全項目省略可（入口が 2 つあるため）"
+    assert schema["properties"]["draft_token"]["default"] == ""
+    assert schema["properties"]["selection"]["default"] == ""
+    assert ("mail_draft", "draft_token") not in OPAQUE_TOKEN_OK
 
 
 def test_calendar_freebusy_router_knobs_are_enumerated_not_free_text() -> None:

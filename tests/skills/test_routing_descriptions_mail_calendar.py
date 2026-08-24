@@ -65,7 +65,10 @@ def test_mail_followup_points_to_the_other_surfaces() -> None:
     assert "calendar_freebusy" in d  # 空き時間・予定一覧はカレンダー側
     assert "mode='agenda'" in d  # 予定一覧の呼び方まで明示
     # 顧客名が取れない依頼で断片を詰めない（P0-2 のガードと description を一致させる）
-    assert "client_name を空にして呼ぶ" in d
+    assert "client_name を**空のまま呼ぶ**" in d
+    # 2026-08-21 裁定: 空で呼んだ先は「聞き返し」ではなく候補一覧。外側に文面を自作させない。
+    assert "inbox_triage" in d
+    assert "聞き返しの文面を自作しない" in d
 
 
 # ── mail_summary: 相互排他と client_name の規律 ────────────────────────────
