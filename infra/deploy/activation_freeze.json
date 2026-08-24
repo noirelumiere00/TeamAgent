@@ -2,7 +2,7 @@
   "schema_version": 1,
   "description": "PR2-A0.x activation の freeze 宣言。口頭合意を機械強制へ格上げするための唯一の宣言ファイル。generation publisher freeze は 2 度破られた（2026-08-20 / 08-21 の 2 波）ため、v1 境界は失効。v2 境界は「最後に変更された時刻」ではなく「変更できない状態を確認した時刻」に置く（2026-08-24 ユーザー裁定）。",
   "generation_publisher_freeze": {
-    "state": "pending_v2",
+    "state": "active",
     "state_values": [
       "pending_v2",
       "active",
@@ -87,8 +87,8 @@
       "violation_count_correction": "当初 6 件と報告したが 8 件が正しい。adopt 台帳の 4 プロジェクトから S3 prefix を導出したため teamagent-dev-image-builder を両波で見落としていた（2026-08-24 に無条件 prefix スキャンで訂正）。以後 generation freeze integrity の surface は adopt 対象から導出してはならない。"
     },
     "v2": {
-      "started_at": null,
-      "recorded_by": null,
+      "started_at": "2026-08-24T08:24:04Z",
+      "recorded_by": "AIIAdev（MFA 済み一時 session。AssumeRole 成功で MFA を機械証明）",
       "precondition": "publisher / deployment entry point が実際に停止し、他セッション・自動処理による generation publish と CodeBuild UpdateProject が発生しない状態を fresh read で確認した時点を境界とする。直近の変更時刻を自動的に境界にしてはならない。",
       "evidence_required": [
         "S3 codebuild-buildspecs/* の list-object-versions で境界候補時刻以降の publish が 0 件",
@@ -132,6 +132,43 @@
           "StartBuild",
           "UpdateProject"
         ]
+      },
+      "enforcement_applied": {
+        "policy_arn": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze",
+        "applied_at": "2026-08-24T08:19:16Z",
+        "plan_sha256": "3df18fd30a72115804280189c54c8329035e4b2d37ee5c72444e560e2923b338",
+        "apply_result": "11 added / 0 changed / 0 destroyed",
+        "state_serial": "200 → 201（lineage 不変）",
+        "attached_principals": {
+          "users": [
+            "AIIAdev"
+          ],
+          "roles": [
+            "teamagent-dev-approval-caller",
+            "teamagent-dev-codebuild-launcher",
+            "teamagent-dev-image-deployment-gate",
+            "teamagent-dev-media-cutover-attestor",
+            "teamagent-dev-openclaw-build-publisher",
+            "teamagent-dev-release-control-updater",
+            "teamagent-dev-release-launcher",
+            "teamagent-dev-terraform-runtime-automation",
+            "teamagent-dev-tiktok-build-launcher"
+          ]
+        }
+      },
+      "boundary_verification": {
+        "verified_at": "2026-08-24T08:24:04Z",
+        "results": {
+          "resources_created": "11/11（policy 1 + attachment 10）",
+          "principals_attached": "10/10（live の list-entities-for-policy で実測）",
+          "deny_simulation": "10 principals × freeze surface 12 action = 全て explicitDeny",
+          "buildspec_prefix_write": "10 principals × s3 write 4 action = 全て explicitDeny",
+          "tfstate_write_preserved": "AIIAdev / runtime_automation ともに s3:PutObject on tfstate = allowed（state 操作は温存）",
+          "in_flight_builds": 0,
+          "post_apply_mutations": "全 principal × 9 event で 0 件",
+          "root_mutations": 0,
+          "root_status": "break-glass 例外のまま（root は IAM entity ではないため attach 不能）"
+        }
       }
     }
   },
