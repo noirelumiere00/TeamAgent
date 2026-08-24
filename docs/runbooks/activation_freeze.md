@@ -179,6 +179,32 @@ terraform -chdir=infra/terraform plan -input=false \
 terraform -chdir=infra/terraform apply /secure/path/freeze.tfplan
 ```
 
+### 🔑 desired-state binding（Freeze ACTIVE 中の必須事項）
+
+`var.activation_freeze_enabled` の既定は **false**。ACTIVE な間にこれを注入し忘れると、
+次の full plan で freeze の **11 リソースが destroy 候補**になり freeze 自体が巻き戻る。
+そこで宣言の state を単一の真実源として変数を機械束縛する:
+
+```
+activation_freeze.json.state == "active"  →  activation_freeze_enabled=true
+```
+
+- **guard 経由（normal plan / adopt-plan）**: `build_live_injection_args` が
+  `freeze_desired_state_binding` を呼び、注入値を宣言から決める。宣言が読めない /
+  state が未知なら FATAL（fail-open で freeze を溶かさない）
+- **plan 検査**: 両経路とも plan JSON に対し
+  `activation_freeze_check.py assert-plan-preserves-freeze` を実行する。
+  freeze リソースの delete があるか、`activation_freeze_enabled` が true でなければ FATAL
+- **IAM targeted plan（guard を通らない）**: 手順に
+  `-var=activation_freeze_enabled=true` を **必ず明示**する。plan 後に同じ検査を回す
+
+```bash
+# guard を通さない plan を打つときは必ずこの 2 つ
+terraform -chdir=infra/terraform plan ... -var=activation_freeze_enabled=true -out=<plan>
+terraform -chdir=infra/terraform show -json <plan> > <plan>.json
+python3 infra/deploy/activation_freeze_check.py assert-plan-preserves-freeze --plan <plan>.json
+```
+
 ### Freeze v2 の発効判定（apply 後）
 
 **「最後の変更時刻」を境界にしない。** 次を全て満たした時刻を `v2.started_at` に記録する:

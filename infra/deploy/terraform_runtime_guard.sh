@@ -10039,6 +10039,37 @@ verify_receipt() {
 }
 
 
+# ── Freeze v2: desired-state binding（Terraform 変数の機械注入）──────────────
+# activation_freeze_policy.tf の var.activation_freeze_enabled は既定 false。
+# Freeze が ACTIVE な間にこれを注入し忘れると、次の full plan で freeze の 11
+# リソース（policy + attachment 10）が **destroy 候補**になり、freeze 自体が
+# 巻き戻る。2026-08-24 ユーザー裁定に従い、宣言の state を単一の真実源として
+# 変数を機械束縛する:
+#
+#   activation_freeze.json.state == "active"  →  activation_freeze_enabled=true
+#
+# 宣言が読めない / state が未知 / true を注入できない場合はいずれも FATAL
+# （fail-open で freeze を溶かさない）。normal plan と adopt-plan は共有の
+# build_live_injection_args を通るので、ここ 1 箇所で両経路を守る。IAM targeted
+# plan は guard を通らないため runbook が同じ変数の明示を要求する。
+FREEZE_DECLARATION="$REPO_ROOT/infra/deploy/activation_freeze.json"
+FREEZE_CHECKER="$REPO_ROOT/infra/deploy/activation_freeze_check.py"
+FREEZE_DESIRED_ENABLED=""
+
+freeze_desired_state_binding() {
+  [ -f "$FREEZE_DECLARATION" ] ||
+    die "freeze 宣言がありません: $FREEZE_DECLARATION"
+  [ -f "$FREEZE_CHECKER" ] ||
+    die "freeze checker がありません: $FREEZE_CHECKER"
+  local state
+  state="$(python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" desired-var)" ||
+    die "freeze desired-state の判定に失敗しました（fail-closed）"
+  case "$state" in
+    true|false) FREEZE_DESIRED_ENABLED="$state" ;;
+    *) die "freeze desired-state の判定結果が不正です: $state" ;;
+  esac
+}
+
 # ── PR2-A0.3.2: live snapshot 注入の共有経路 ─────────────────────────────────
 # 通常 guarded plan と adopt-plan が「live snapshot → CORE_JSON → live-derived vars →
 # terraform への注入」を同一コードで行うための唯一の実装。第二実装は禁止で、
@@ -10178,7 +10209,9 @@ build_live_injection_args() {
   fi
   select_terraform_media_image_inputs \
     "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
+  freeze_desired_state_binding
   LIVE_INJECTION_TF_ARGS=(
+    "-var=activation_freeze_enabled=$FREEZE_DESIRED_ENABLED"
     "-var=runtime_guard_live=$CORE_JSON"
     "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
     "-var=mcp_image=$DESIRED_MCP_IMAGE"
@@ -10370,6 +10403,11 @@ adopt_plan() {
   python3 "$ADOPT_INTEGRITY" crosscheck --snapshot "$out_dir/integrity-before.json" \
     --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が live の AWS 実体と一致しません（plan は破棄してください）"
+
+  # Freeze v2 の enforcement 保全検査（validator / crosscheck の後）。
+  python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
+    assert-plan-preserves-freeze --plan "$out_dir/adopt-plan.json" ||
+    die "adopt plan が Freeze v2 の enforcement を壊します（plan は破棄してください）"
 
   # 通常経路と同じ TOCTOU 防止: plan が bind した live snapshot が plan 完了時点でも
   # そのままであることを要求する（plan 中の別デプロイは fail-closed）。
@@ -11717,6 +11755,12 @@ case "$COMMAND" in
       "$TMP_ROOT/state-before.json" "$PLAN_CONTRACT_MODE" \
       "$PLAN_CONTRACT_OUTPUT"
     [ "$(sha256_file "$STAGE_PLAN")" = "$PLAN_SHA" ] || die "plan検証中の差替えを検出しました"
+
+    # Freeze v2 の enforcement 保全検査。plan 自体の整合性検査（validate_plan 等）を
+    # 通した後に置く。先に置くと malformed plan の診断を奪ってしまう（2026-08-24 実測）。
+    python3 "$FREEZE_CHECKER" --freeze "$FREEZE_DECLARATION" \
+      assert-plan-preserves-freeze --plan "$TMP_ROOT/plan.json" ||
+      die "plan が Freeze v2 の enforcement を壊します"
 
     # plan 中に別デプロイが走った場合も fail-closed（TOCTOU 防止）。
     snapshot_live "$TMP_ROOT/live-after.json"

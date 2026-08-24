@@ -26,6 +26,7 @@ FREEZE = ROOT / "infra/deploy/activation_freeze.json"
 ALLOWLIST = ROOT / "infra/deploy/activation_execution_allowlist.json"
 CHECKER = ROOT / "infra/deploy/activation_freeze_check.py"
 CI = ROOT / ".github/workflows/ci.yml"
+GUARD = ROOT / "infra/deploy/terraform_runtime_guard.sh"
 
 sys.path.insert(0, str(ROOT / "infra/deploy"))
 
@@ -614,3 +615,324 @@ def test_boundary_verification_records_all_nine_checks() -> None:
     assert results["in_flight_builds"] == 0
     assert results["root_mutations"] == 0
     assert "break-glass" in results["root_status"]
+
+
+# ── P0: Freeze desired-state binding（既定 false による巻き戻しの防止） ──────
+
+
+def test_desired_var_is_true_while_freeze_is_active() -> None:
+    """宣言の state を単一の真実源として注入値を決める。"""
+    from activation_freeze_check import desired_freeze_var
+
+    assert desired_freeze_var(FREEZE) == "true"
+
+
+def test_desired_var_follows_the_declaration(tmp_path: Path) -> None:
+    """state が active 以外なら false（宣言と乖離した固定値を返さない）。"""
+    from activation_freeze_check import desired_freeze_var
+
+    doc = _freeze_doc()
+    doc["generation_publisher_freeze"]["state"] = "pending_v2"
+    doc["generation_publisher_freeze"]["v2"]["started_at"] = None
+    assert desired_freeze_var(_write(tmp_path, "f.json", doc)) == "false"
+
+
+def test_guard_injects_the_freeze_var_into_both_plan_paths() -> None:
+    """normal plan と adopt-plan が共有する注入配列に freeze 変数が入っている。
+
+    A0.3.2 で両経路は build_live_injection_args を共有しているので、ここ 1 箇所で
+    両方が守られる。注入値は宣言から決まる（ハードコードしない）。
+    """
+    guard = GUARD.read_text(encoding="utf-8")
+    stripped = "\n".join(line for line in guard.splitlines() if not line.lstrip().startswith("#"))
+    assert stripped.count('"-var=activation_freeze_enabled=$FREEZE_DESIRED_ENABLED"') == 1
+    assert "freeze_desired_state_binding" in stripped
+    # 注入は配列構築の直前に決まること（順序契約）
+    binding = stripped.index("freeze_desired_state_binding\n")
+    array = stripped.index("LIVE_INJECTION_TF_ARGS=(")
+    assert binding < array
+
+
+def test_guard_fails_closed_when_the_declaration_is_unreadable() -> None:
+    """宣言が読めない / 判定が不正なら die する（fail-open で freeze を溶かさない）。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    section = guard[guard.index("freeze_desired_state_binding() {") :]
+    section = section[: section.index("\n}\n")]
+    assert "die" in section
+    assert section.count("die") >= 3, "宣言欠落 / checker 欠落 / 判定失敗の 3 経路で die すること"
+
+
+def test_both_plan_paths_run_the_preservation_check() -> None:
+    """normal plan と adopt-plan の両方が assert-plan-preserves-freeze を通る。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    assert guard.count("assert-plan-preserves-freeze") == 2
+
+
+def test_freeze_check_runs_after_plan_integrity_validation() -> None:
+    """freeze 検査は plan 自体の整合性検査より **後** に走ること。
+
+    2026-08-24 実測: 先に置くと malformed plan に対して JSON parse エラーで死に、
+    guard 本来の「plan から HMAC metadata を一意に取得できません」という診断を
+    奪ってしまう。freeze 検査は追加の不変条件であって整合性検査の代替ではない。
+    """
+    guard = GUARD.read_text(encoding="utf-8")
+    # normal path: validate_plan（plan 検証）→ freeze 検査
+    normal = guard.index('die "plan検証中の差替えを検出しました"')
+    normal_freeze = guard.index('--plan "$TMP_ROOT/plan.json"')
+    assert normal < normal_freeze
+    assert guard.index("hmac_from_plan") < normal_freeze
+    # adopt path: ADOPT_VALIDATOR / crosscheck → freeze 検査
+    adopt_validator = guard.index('"$ADOPT_VALIDATOR" --plan "$out_dir/adopt-plan.json"')
+    adopt_freeze = guard.index('--plan "$out_dir/adopt-plan.json"', adopt_validator + 10)
+    assert adopt_validator < adopt_freeze
+
+
+def test_runbook_requires_the_var_on_guard_free_plan_paths() -> None:
+    """guard を通らない IAM targeted plan でも変数の明示と検査を要求する。"""
+    text = (ROOT / "docs/runbooks/activation_freeze.md").read_text(encoding="utf-8")
+    assert "desired-state binding" in text
+    assert "-var=activation_freeze_enabled=true" in text
+    assert "assert-plan-preserves-freeze" in text
+    assert "destroy 候補" in text
+
+
+# ── plan 検査ロジックそのものの契約（合成 plan による検出の実証） ────────────
+
+
+def _plan_doc(changes: list[dict[str, Any]], var: Any = True) -> dict[str, Any]:
+    doc: dict[str, Any] = {"resource_changes": changes}
+    if var is not None:
+        doc["variables"] = {"activation_freeze_enabled": {"value": var}}
+    return doc
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "aws_iam_policy.activation_freeze[0]",
+        "aws_iam_user_policy_attachment.activation_freeze_aiia_dev[0]",
+        'aws_iam_role_policy_attachment.activation_freeze["teamagent-dev-release-launcher"]',
+    ],
+)
+def test_plan_check_rejects_destroy_of_each_freeze_resource_kind(
+    tmp_path: Path, address: str
+) -> None:
+    """freeze の 3 種のリソースいずれの delete も FATAL（巻き戻しの検出）。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc([{"address": address, "change": {"actions": ["delete"]}}]),
+    )
+    with pytest.raises(FreezeError, match="FREEZE ROLLBACK"):
+        assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_plan_check_rejects_replace_not_just_plain_delete(tmp_path: Path) -> None:
+    """delete+create（replace）も巻き戻しなので拒否する。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc(
+            [
+                {
+                    "address": "aws_iam_policy.activation_freeze[0]",
+                    "change": {"actions": ["delete", "create"]},
+                }
+            ]
+        ),
+    )
+    with pytest.raises(FreezeError, match="FREEZE ROLLBACK"):
+        assert_plan_preserves_freeze(FREEZE, plan)
+
+
+@pytest.mark.parametrize("var", [False, "false", None])
+def test_plan_check_requires_the_var_when_freeze_resources_are_in_scope(
+    tmp_path: Path, var: Any
+) -> None:
+    """scope に freeze リソースがあるのに false / 未注入なら FATAL。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc(
+            [{"address": "aws_iam_policy.activation_freeze[0]", "change": {"actions": ["no-op"]}}],
+            var=var,
+        ),
+    )
+    with pytest.raises(FreezeError, match="FREEZE BINDING"):
+        assert_plan_preserves_freeze(FREEZE, plan)
+
+
+@pytest.mark.parametrize("var", [False, None])
+def test_plan_check_skips_the_var_when_freeze_is_out_of_scope(tmp_path: Path, var: Any) -> None:
+    """freeze リソースを含まない plan（-target / 合成 fixture）には変数を要求しない。
+
+    2026-08-24 実測: 無条件に要求すると guard の既存テスト fixture が全滅する。
+    var 欠落の full plan は 11 リソースが delete として現れるため destroy 検査が捕捉する。
+    """
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc([{"address": "aws_ecs_service.mcp", "change": {"actions": ["update"]}}], var=var),
+    )
+    assert "適用しない" in assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_plan_check_accepts_a_healthy_plan(tmp_path: Path) -> None:
+    """正常な plan は通す（偽陽性の防止）。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc(
+            [
+                {
+                    "address": "aws_iam_policy.activation_freeze[0]",
+                    "change": {"actions": ["no-op"]},
+                }
+            ]
+        ),
+    )
+    assert "保持している" in assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_plan_check_ignores_unrelated_destroys(tmp_path: Path) -> None:
+    """freeze と無関係なリソースの destroy まで止めない（過剰ブロックの防止）。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc(
+            [{"address": "aws_iam_policy.something_else", "change": {"actions": ["delete"]}}]
+        ),
+    )
+    assert assert_plan_preserves_freeze(FREEZE, plan)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "aws_iam_policy.activation_freeze_lookalike",
+        "aws_iam_policy.other_activation_freeze",
+        "aws_iam_role_policy_attachment.activation_freeze_other",
+        "aws_ecs_task_definition.mcp",
+        "aws_s3_bucket.raw_files",
+    ],
+)
+def test_plan_check_does_not_over_block_lookalike_addresses(tmp_path: Path, address: str) -> None:
+    """判定を広げすぎると通常の destroy が一切できなくなる（過剰ブロックの防止）。
+
+    prefix 完全一致 + index 付き（`[`）のみを freeze リソースとみなすこと。
+    """
+    from activation_freeze_check import _is_freeze_resource, assert_plan_preserves_freeze
+
+    assert not _is_freeze_resource(address), address
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc([{"address": address, "change": {"actions": ["delete"]}}]),
+    )
+    # 例外を出さないことが本質（メッセージは scope 有無で変わる）
+    assert assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_freeze_resource_matcher_is_exact_about_prefixes() -> None:
+    """freeze リソース判定の境界を両方向で固定する。"""
+    from activation_freeze_check import _is_freeze_resource
+
+    for hit in (
+        "aws_iam_policy.activation_freeze",
+        "aws_iam_policy.activation_freeze[0]",
+        'aws_iam_role_policy_attachment.activation_freeze["x"]',
+        "aws_iam_user_policy_attachment.activation_freeze_aiia_dev[0]",
+    ):
+        assert _is_freeze_resource(hit), hit
+    for miss in (
+        "aws_iam_policy.activation_freeze_lookalike",
+        "aws_iam_policy.other_activation_freeze",
+        "aws_iam_role_policy_attachment.activation_freeze_other",
+        "aws_ecs_service.mcp",
+    ):
+        assert not _is_freeze_resource(miss), miss
+
+
+# ── 変数要求の scope 契約（3 ケースを exact に固定）─────────────────────────
+#
+# 2026-08-24 実測: 変数を無条件に要求すると guard の合成 plan fixture が全滅した。
+# 「入力（変数注入）で守る + 出力（destroy 検出）でも守る」二重化を保ちつつ、
+# 誤爆しない境界を次の 3 ケースで固定する。
+
+
+def test_case1_full_plan_with_freeze_in_scope_and_missing_var_is_fatal(tmp_path: Path) -> None:
+    """① full plan + freeze resources present + var missing/false → FATAL。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    for var in (None, False, "false"):
+        plan = _write(
+            tmp_path,
+            f"c1-{var}.json",
+            _plan_doc(
+                [
+                    {
+                        "address": 'aws_iam_role_policy_attachment.activation_freeze["r"]',
+                        "change": {"actions": ["no-op"]},
+                    }
+                ],
+                var=var,
+            ),
+        )
+        with pytest.raises(FreezeError, match="FREEZE BINDING"):
+            assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_case2_targeted_plan_without_freeze_does_not_require_the_var(tmp_path: Path) -> None:
+    """② targeted plan + freeze resources absent → 変数要求は発火しない。"""
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    for var in (None, False):
+        plan = _write(
+            tmp_path,
+            f"c2-{var}.json",
+            _plan_doc(
+                [
+                    {
+                        "address": "aws_iam_role_policy.runtime_evidence_automation",
+                        "change": {"actions": ["update"]},
+                    }
+                ],
+                var=var,
+            ),
+        )
+        assert "適用しない" in assert_plan_preserves_freeze(FREEZE, plan)
+
+
+@pytest.mark.parametrize("actions", [["delete"], ["delete", "create"], ["create", "delete"]])
+@pytest.mark.parametrize("var", [None, False, True])
+def test_case3_freeze_destroy_is_fatal_regardless_of_the_var(
+    tmp_path: Path, actions: list[str], var: Any
+) -> None:
+    """③ freeze resource の delete / replace → var の有無に関係なく FATAL。
+
+    destroy 検査が変数検査より先に走ることを、var=True の場合も含めて固定する。
+    """
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "c3.json",
+        _plan_doc(
+            [{"address": "aws_iam_policy.activation_freeze[0]", "change": {"actions": actions}}],
+            var=var,
+        ),
+    )
+    with pytest.raises(FreezeError, match="FREEZE ROLLBACK"):
+        assert_plan_preserves_freeze(FREEZE, plan)
