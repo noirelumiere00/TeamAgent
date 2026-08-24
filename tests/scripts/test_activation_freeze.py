@@ -351,3 +351,95 @@ def test_runbook_records_the_boundary_rule_and_the_202398f_prohibition() -> None
     assert "202398f" in text and "恒久禁止" in text
     assert "fast-forward only" in text
     assert "fetch-depth: 0" in text
+
+
+def _mini_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *env, *args], capture_output=True, text=True, check=True
+        ).stdout
+
+    git("init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("base\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base commit")
+    return repo
+
+
+def _rev(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_execution_line_detects_a_rewritten_history_as_force_push(tmp_path: Path) -> None:
+    """expected_head が現 HEAD の祖先でない = force push / rebase を専用メッセージで検出。
+
+    commit 列の SHA 照合とは独立のガード。履歴が作り直されると、subject が同じでも
+    SHA が変わるため「allowlist 外 commit」ではなく「履歴改変」として止める必要がある。
+    """
+    repo = _mini_repo(tmp_path)
+    env = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *env, *args], capture_output=True, check=True)
+
+    base = _rev(repo, "HEAD")
+    (repo / "b.txt").write_text("approved\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "approved change")
+    original_head = _rev(repo, "HEAD")
+
+    # 履歴を作り直す（同じ subject・別 SHA）。amend で親は base のまま
+    (repo / "b.txt").write_text("approved but rewritten\n")
+    git("add", "-A")
+    git("commit", "-q", "--amend", "-m", "approved change")
+    rewritten_head = _rev(repo, "HEAD")
+    assert rewritten_head != original_head
+
+    allowlist = _write(
+        tmp_path,
+        "a.json",
+        {
+            "schema_version": 1,
+            "execution_ref": "main",
+            "execution_base": {"sha": base, "subject": "base commit"},
+            "approved_commits": [
+                {"sha": original_head, "subject": "approved change", "gate": "test gate"}
+            ],
+            "expected_head": original_head,
+        },
+    )
+    with pytest.raises(FreezeError, match="force push"):
+        assert_execution_line(repo, allowlist, "main")
+
+
+def test_execution_line_accepts_the_recorded_history_in_a_clean_repo(tmp_path: Path) -> None:
+    """上と同じ構成で履歴を書き換えなければ通る（force push 検出の偽陽性防止）。"""
+    repo = _mini_repo(tmp_path)
+    env = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+    base = _rev(repo, "HEAD")
+    (repo / "b.txt").write_text("approved\n")
+    subprocess.run(["git", "-C", str(repo), *env, "add", "-A"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *env, "commit", "-q", "-m", "approved change"],
+        capture_output=True,
+        check=True,
+    )
+    head = _rev(repo, "HEAD")
+    allowlist = _write(
+        tmp_path,
+        "a.json",
+        {
+            "schema_version": 1,
+            "execution_ref": "main",
+            "execution_base": {"sha": base, "subject": "base commit"},
+            "approved_commits": [{"sha": head, "subject": "approved change", "gate": "test gate"}],
+            "expected_head": head,
+        },
+    )
+    assert "検証済み" in assert_execution_line(repo, allowlist, "main")
