@@ -103,10 +103,68 @@ SHA は 40 桁完全形のみ（短縮 SHA は衝突と取り違えを許すた�
 `assert-frozen-surface --base <merge-base> --head HEAD` を実行する
 （`fetch-depth: 0` が必須。shallow では merge-base が引けない）。
 
-## AWS 側の deny について
+## AWS 側の persistent explicit-deny（Freeze v2 の本体）
 
-publisher 経路を AWS の IAM Deny で塞ぐのは **それ自体が production IAM mutation** なので、
-別の human gate を経てから行う。本 runbook の範囲は repo 側の機械強制まで。
+repo 側の機械強制は **repo 経由の変更しか止められない**。AWS を直接叩く経路
+（admin 手動 / 他セッション / 長期 credential）は素通りする。実際、repo lock を入れた後も
+2026-08-21 に `RegisterTaskDefinition` ×10 + `UpdateService` ×4 + `PutTargets` ×4 が走り、
+**state rebind 完了後に B3 を作り直した**。よって mutation できる principal 側へ
+persistent な explicit Deny を置く（session policy は当該 session にしか効かないため
+hard control にしない）。
+
+実装: `infra/terraform/activation_freeze_policy.tf`
+有効化: `var.activation_freeze_enabled = true`（既定 false）
+
+### 対象 principal（census 由来・推測で広げない）
+
+| 種別 | 対象 | 根拠 |
+|---|---|---|
+| user | AIIAdev | CloudTrail で UpdateProject / RegisterTaskDefinition / UpdateService / PutTargets / PutRule / DeregisterTaskDefinition を実行。simulate で 5/6 が allowed |
+| role | runtime_automation | manage-a/b が ECS/events/lambda/codebuild の mutation を許可 |
+| role | codebuild_launcher / approval_caller / openclaw_publisher / release_launcher / release_control_updater / image_deployment_gate / media_cutover_attestor / tiktok_build_launcher | StartBuild 経由の generation publish 経路（CloudTrail + repo policy census） |
+
+### 🔴 root は止められない
+
+root は **identity-based policy と permissions boundary をバイパス**する。
+CloudTrail 実測でも root が `PutTargets` ×23 / `DeregisterTaskDefinition` ×40 を実行している。
+root の封鎖には **SCP** が必要で、本 policy の射程外（別 human gate）。
+root 静的キーの無効化も別タスクとして未了。**「freeze したから絶対に動かない」とは言えない。**
+
+### 適用手順（production mutation。human gate 必須）
+
+guard の boundary が `iam:PutRolePolicy` / `iam:AttachUserPolicy` を自己拒否するため、
+guard 経由では適用できない。A0.2 と同じ **AIIAdev による saved targeted plan** を使う。
+
+```bash
+# 1. saved targeted plan（repo 外・0600）
+terraform -chdir=infra/terraform plan -input=false \
+  -var-file=<0600 tfvars> -var=activation_freeze_enabled=true \
+  -target=aws_iam_policy.activation_freeze \
+  -target=aws_iam_user_policy_attachment.activation_freeze_aiia_dev \
+  -target=aws_iam_role_policy_attachment.activation_freeze \
+  -out=/secure/path/freeze.tfplan
+
+# 2. human review（IAM のみ・Deny statement の内容と attach 先を行単位で確認）
+#    → 🛑 FREEZE POLICY APPLY GO を得る。review 後の再 plan は禁止
+
+# 3. 保存済み plan のみを apply
+terraform -chdir=infra/terraform apply /secure/path/freeze.tfplan
+```
+
+### Freeze v2 の発効判定（apply 後）
+
+**「最後の変更時刻」を境界にしない。** 次を全て満たした時刻を `v2.started_at` に記録する:
+
+```
+simulate-principal-policy で各 principal の mutation が explicitDeny
+in-flight build = 0
+freeze 後の StartBuild / RegisterTaskDefinition / UpdateService /
+PutTargets / UpdateFunctionConfiguration / UpdateProject /
+generation PutObject が 0
+```
+
+確認できたら `activation_freeze.json` の `state` を `active` にし
+`v2.started_at` を記録する（checker が state=active に started_at を必須化している）。
 
 ## 解除
 

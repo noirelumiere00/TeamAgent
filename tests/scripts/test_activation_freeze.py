@@ -70,12 +70,16 @@ def _has_ref(ref: str) -> bool:
 def test_committed_freeze_declaration_is_valid() -> None:
     doc = load_freeze(FREEZE)
     assert doc["generation_publisher_freeze"]["v1"]["status"] == "voided"
-    assert len(doc["generation_publisher_freeze"]["v1"]["violations"]) == 6
+    assert len(doc["generation_publisher_freeze"]["v1"]["violations"]) == 8
 
 
 def test_v1_violations_record_what_when_and_which_version() -> None:
     """失効の根拠は「何が・いつ・どの VersionId で」越えたかを保持する。"""
-    for entry in _freeze_doc()["generation_publisher_freeze"]["v1"]["violations"]:
+    violations = _freeze_doc()["generation_publisher_freeze"]["v1"]["violations"]
+    # 訂正: 当初 6 件と報告したが image-builder を両波で見落としていた
+    assert len(violations) == 8
+    assert sum(1 for v in violations if v["project"].endswith("image-builder")) == 2
+    for entry in violations:
         assert entry["wave"] in (1, 2)
         assert entry["published_at"].endswith("Z")
         assert entry["project"].startswith("teamagent-dev-")
@@ -443,3 +447,56 @@ def test_execution_line_accepts_the_recorded_history_in_a_clean_repo(tmp_path: P
         },
     )
     assert "検証済み" in assert_execution_line(repo, allowlist, "main")
+
+
+# ── 裁定⑦: integrity surface は adopt 対象から導出しない ────────────────────
+
+
+def test_release_chain_inventory_is_the_integrity_surface_not_adopt_targets() -> None:
+    """generation freeze integrity は release chain 全体を対象にする。
+
+    2026-08-24 実測: adopt 台帳の 4 プロジェクトから S3 prefix を導出したため
+    teamagent-dev-image-builder を両波で見落とし、違反を 6 件と誤報告した。
+    adopt purity（4 forget + 4 import）と generation freeze integrity は別概念。
+    """
+    surface = _freeze_doc()["frozen_change_surface"]
+    chain = set(surface["generation_release_chain_projects"])
+    adopt_targets = {
+        "teamagent-dev-mcp-source-publisher",
+        "teamagent-dev-image-attestor",
+        "teamagent-dev-image-promoter",
+        "teamagent-dev-approval-publisher",
+    }
+    assert adopt_targets < chain, "release chain は adopt 対象の真の上位集合であること"
+    assert "teamagent-dev-image-builder" in chain
+    assert "別概念" in surface["generation_release_chain_note"]
+
+
+def test_violation_count_correction_is_recorded() -> None:
+    """誤報告の訂正理由が残っている（同じ導出ミスの再発防止）。"""
+    note = _freeze_doc()["generation_publisher_freeze"]["v1"]["violation_count_correction"]
+    assert "image-builder" in note
+    assert "adopt 対象から導出してはならない" in note
+
+
+# ── 裁定①: production deployment freeze 違反（B3 再発）の記録 ──────────────
+
+
+def test_production_freeze_violation_records_the_b3_recurrence() -> None:
+    """rebind 完了後に B3 を作り直したデプロイが実測つきで記録されている。"""
+    prod = _freeze_doc()["production_deployment_freeze"]
+    violation = prod["violations"][0]
+    assert violation["principal"] == "user/AIIAdev"
+    assert violation["events"]["RegisterTaskDefinition"] == 10
+    assert violation["events"]["UpdateService"] == 4
+    assert "B3" in violation["effect"]
+    drift = violation["drift"]
+    assert drift["mcp"] == "state :86 / live :88"
+    assert drift["tiktok_acquire"].startswith("一致")
+
+
+def test_production_freeze_points_at_the_persistent_deny_and_root_gap() -> None:
+    """repo lock だけでは不足であること、root は SCP が要ることを宣言に残す。"""
+    enforcement = _freeze_doc()["production_deployment_freeze"]["enforcement"]
+    assert "activation_freeze_policy.tf" in enforcement
+    assert "root" in enforcement and "SCP" in enforcement
