@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.mail_connection import CONNECT_SUFFIX
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.workspace_search.schema import (
     WORKSPACE_SERVICES,
@@ -46,7 +47,7 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
     name: ClassVar[str] = "workspace_search"
     description: ClassVar[str] = (
         "本人の Google Workspace（カレンダー予定・連絡先）を本人 OAuth で検索する。"
-        "本人が /teamagent connect で連携済みの時のみ使える（未連携は不可）。生データは返さない。"
+        "未連携では使えないため、利用前に" + CONNECT_SUFFIX + "生データは返さない。"
     )
     input_schema: ClassVar[type[BaseModel]] = WorkspaceSearchInput
     output_schema: ClassVar[type[BaseModel]] = WorkspaceSearchOutput
@@ -70,9 +71,7 @@ class WorkspaceSearchSkill(BaseSkill[WorkspaceSearchInput, WorkspaceSearchOutput
             raise PermissionError("TokenStore が未設定です（workspace_search は連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError(
-                "Workspace 未連携です（/teamagent connect で自分の Google を認可してください）"
-            )
+            raise PermissionError("Workspace が未連携です。利用には" + CONNECT_SUFFIX)
 
         if input.service == "calendar":
             from teamagent.adapters.gcalendar_client import GCalendarClient

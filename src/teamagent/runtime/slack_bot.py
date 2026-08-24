@@ -46,6 +46,7 @@ from teamagent.runtime.request_gate import (
     RequestGate,
 )
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder, UsageTrace
+from teamagent.skills._shared.mail_connection import CONNECT_SUFFIX, NOT_CONNECTED_MESSAGE
 from teamagent.skills._shared.source_url import slack_thread_permalink as _slack_thread_permalink
 from teamagent.skills.base import SkillContext
 from teamagent.skills.router import SkillRouter
@@ -1563,8 +1564,7 @@ class SkillDispatcher:
                 link = await self.run_mail_link(intent.client_name, request_id, user_id)
             except PermissionError:
                 return (
-                    "🔗 メール連携が必要です。`/teamagent connect` で自分の Google を"
-                    "認可してください（gmail.readonly のみ・読み取り専用）。",
+                    "🔗 メールの確認には、gmail.readonly のみ・読み取り専用の" + CONNECT_SUFFIX,
                     None,
                 )
             if trace is not None:
@@ -1584,8 +1584,7 @@ class SkillDispatcher:
                 )
             except PermissionError:
                 return (
-                    "🔗 メール連携が必要です。`/teamagent connect` で自分の Google を"
-                    "認可してください（gmail.readonly のみ・読み取り専用）。",
+                    "🔗 メールの確認には、gmail.readonly のみ・読み取り専用の" + CONNECT_SUFFIX,
                     None,
                 )
             return _format_mail_followup_response(fu), None
@@ -1601,8 +1600,7 @@ class SkillDispatcher:
                 summ = await self.run_mail_summary(intent.client_name, request_id, user_id)
             except PermissionError:
                 return (
-                    "🔗 メール連携が必要です。`/teamagent connect` で自分の Google を"
-                    "認可してください。",
+                    "🔗 " + NOT_CONNECTED_MESSAGE,
                     None,
                 )
             if trace is not None:
@@ -1620,8 +1618,9 @@ class SkillDispatcher:
                 rep = await self.run_mail_reply(intent.client_name, request_id, user_id)
             except PermissionError:
                 return (
-                    "🔗 下書き作成にはメールの連携（再認可）が必要です。`/teamagent connect` で"
-                    "自分の Google を認可（メールの下書き作成を許可）してからお試しください。",
+                    "🔗 下書き作成権限を許可するため、もう一度"
+                    + CONNECT_SUFFIX
+                    + "連携後、お試しください。",
                     None,
                 )
             if trace is not None:

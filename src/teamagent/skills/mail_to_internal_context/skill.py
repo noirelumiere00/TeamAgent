@@ -36,6 +36,11 @@ from teamagent.skills._shared.client_name_guard import (
     to_gmail_phrase,
 )
 from teamagent.skills._shared.mail_compose import env_bool, should_skip_mail
+from teamagent.skills._shared.mail_connection import (
+    CONNECT_SUFFIX,
+    NOT_CONNECTED_MESSAGE,
+    REAUTH_NEEDED_MESSAGE,
+)
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_to_internal_context.schema import (
@@ -71,7 +76,9 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
     description: ClassVar[str] = (
         "本人の受信箱（gmail.readonly・メタデータのみ）で指定クライアントのメールを確認し、"
         "対応する社内のSlackスレッド・過去提案・営業FBを突き合わせて参照リンクつきで返す。"
-        "『このメール、社内で何か話してた?』に答える。本人が /teamagent connect 済みの時のみ。"
+        "『このメール、社内で何か話してた?』に答える。本人が利用するには"
+        + CONNECT_SUFFIX
+        + "連携済みの時のみ使える。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
         "必ず含める（mcp 境界の本人解決鍵）。"
@@ -217,18 +224,13 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
             raise PermissionError("TokenStore が未設定です（本 Skill は本人連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError(
-                "メール連携が未完了です（/teamagent connect で自分の Google を認可してください）"
-            )
+            raise PermissionError(NOT_CONNECTED_MESSAGE)
         try:
             return GmailClient.from_user_token(token, readonly=True)
         except ValueError as e:
             # 認証情報(GOOGLE_CLIENT_ID/SECRET 未設定・失効/空 refresh token)は連携案内に寄せる
-            # （dispatch は PermissionError を捕捉して /teamagent connect を案内する）。
-            raise PermissionError(
-                "メール連携の認証情報を解決できませんでした。"
-                "/teamagent connect で自分の Google を認可し直してください。"
-            ) from e
+            # dispatch は PermissionError を捕捉し、@NewsTV AI に『連携』と話す導線を案内する。
+            raise PermissionError(REAUTH_NEEDED_MESSAGE) from e
 
     # ── 社内側 ──────────────────────────────────────────────────────────────
 
