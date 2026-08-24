@@ -1457,6 +1457,17 @@ class ProposalBuilderStatusSkill(
         ctx: SkillContext,
     ) -> ProposalBuilderStatusOutput:
         log = ctx.bind_logger(self.name)
+        if not input.job_id.startswith("pb_"):
+            # 同じ job store に omiyage_report 等の異種 job（omy_...）が同居する。
+            # 異種 job の done 行をここで読むと ProposalBuilderOutput 検証に失敗し
+            # RESULT_INVALID へ**破壊的に** terminalize してしまうため、store に
+            # 触れる前にプレフィクスで拒否する（読み取りも書き込みもしない）。
+            return ProposalBuilderStatusOutput(
+                job_id=input.job_id,
+                status="failed",
+                error_code="JOB_KIND_MISMATCH",
+                message="そのjob_idはproposal_builderのjobではありません。",
+            )
         row = self._store.get_job(input.job_id)
         if row is None:
             return ProposalBuilderStatusOutput(

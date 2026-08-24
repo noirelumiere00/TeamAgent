@@ -103,9 +103,17 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
             page.route("**/*", lambda route: route.abort())
             page.set_content(html, wait_until="domcontentloaded")
+            # data:URI の @font-face でも FontFace ロードは非同期のため、フォント適用と
+            # 画像デコードの完了を待ってから撮影する（未対策だと非決定的にフォールバック
+            # 字形・未ロード画像が焼き込まれる。spec_README 必要改修3）。
+            page.evaluate("() => document.fonts.ready.then(() => undefined)")
+            page.wait_for_function(
+                "() => Array.from(document.images).every((img) => img.complete)",
+                timeout=30_000,
+            )
             slides = page.locator(str(spec["selector"]))
             count = slides.count()
-            if count < 1 or count > 20:
+            if count < 1 or count > 30:
                 raise MediaOperationError(
                     "MEDIA_SLIDE_COUNT_INVALID",
                     "slide count is out of range",

@@ -30,6 +30,7 @@ from teamagent.media.contracts import (
     SlidesOperation,
     ThumbnailOperation,
     TikTokAcquireOperation,
+    tiktok_search_timeout_seconds,
 )
 from teamagent.media.deadline import DeadlineBudget, MediaDeadlineExceededError
 from teamagent.media.security import (
@@ -709,7 +710,7 @@ def _tiktok_acquire(
                 ],
                 workdir=workdir,
                 budget=budget,
-                timeout_s=120,
+                timeout_s=tiktok_search_timeout_seconds(operation.n_per_kw),
             )
         except MediaOperationError as exc:
             if exc.code not in {

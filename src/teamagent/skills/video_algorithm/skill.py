@@ -1273,9 +1273,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             if MediaJobClient.is_configured():
                 from teamagent.skills.video_algorithm.slides import render_slides
 
+                # 従来挙動維持: 1280x720 の HTML を device_scale_factor=2 で撮影する
+                # （slides_to_pptx の既定 scale が 1 に変わったため明示する）。
                 pptx = MediaJobClient().slides_to_pptx(
                     render_slides(out),
                     request_fingerprint=f"{request_id}:slides-pptx",
+                    width=1280,
+                    height=720,
+                    device_scale_factor=2,
                 )
                 with open(ppath, "wb") as file:
                     file.write(pptx)

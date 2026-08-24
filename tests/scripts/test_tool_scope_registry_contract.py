@@ -28,6 +28,10 @@ DARK_SKILL_ALLOWLIST = frozenset(
         "proposal_deck",
         "proposal_campaign",
         "proposal_builder",
+        # お土産資料 便1（2026-08-24 実装）。USE_OMIYAGE_REPORT_TOOLS は未点灯のため
+        # scope/OC toolFilter へは未掲載。点灯時に scope 台帳 + include へ移す（人間ゲート）。
+        "omiyage_report_submit",
+        "omiyage_report_status",
     }
 )
 

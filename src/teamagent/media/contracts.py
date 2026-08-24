@@ -40,8 +40,21 @@ MAX_PRESIGNED_URL_SECONDS = 15 * 60
 DDB_RETENTION_GRACE_SECONDS = 24 * 60 * 60
 TIKTOK_OPERATION_EXECUTION_LIMIT_SECONDS = MAX_JOB_BUDGET_SECONDS - 30
 _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
+# 深掘り検索（n_per_kw>30・お土産資料 便1）は1検索の実測47s（ローカル120本）に対し
+# Fargate起動＋回転proxyのレイテンシ余裕を持たせた上限を使う。
+_TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS = 240
+_TIKTOK_DEEP_SEARCH_THRESHOLD_N_PER_KW = 30
+_TIKTOK_MAX_N_PER_KW = 120
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
+
+
+def tiktok_search_timeout_seconds(n_per_kw: int) -> int:
+    """1キーワード検索のnode実行上限秒（worker側subprocessとadmission見積りで共用）。"""
+    if n_per_kw <= _TIKTOK_DEEP_SEARCH_THRESHOLD_N_PER_KW:
+        return _TIKTOK_SEARCH_WORST_CASE_SECONDS
+    return _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS
+
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 JobId = Annotated[str, StringConstraints(pattern=r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")]
@@ -138,7 +151,7 @@ def estimate_tiktok_operation_seconds(
     videos_per_kw: int,
     artifact_mode: Literal["metadata_only", "full"],
 ) -> int:
-    search_seconds = keyword_count * _TIKTOK_SEARCH_WORST_CASE_SECONDS
+    search_seconds = keyword_count * tiktok_search_timeout_seconds(n_per_kw)
     if artifact_mode == "metadata_only":
         return search_seconds
     return search_seconds + keyword_count * (
@@ -154,7 +167,7 @@ class TikTokAcquireOperation(_StrictModel):
         Annotated[str, StringConstraints(min_length=1, max_length=100)],
         ...,
     ] = Field(min_length=1, max_length=10)
-    n_per_kw: int = Field(default=10, ge=1, le=30)
+    n_per_kw: int = Field(default=10, ge=1, le=_TIKTOK_MAX_N_PER_KW)
     videos_per_kw: int = Field(default=2, ge=0, le=10)
     sort: Literal["display", "save_rate", "recent"] = "display"
     artifact_mode: Literal["metadata_only", "full"] = "full"

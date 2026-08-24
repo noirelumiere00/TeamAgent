@@ -44,6 +44,12 @@ dependencies = [
     # --- 動画分析（推論だけcore。取得/変換依存は media extraへ分離） ---
     "google-genai>=0.5.0",  # Gemini 2.5 Flash 用
 
+    # --- FMT デッキのフォントサブセット（お土産資料 便1・spec_README 必要改修4） ---
+    # デッキごとに woff2 サブセットを生成し data:URI で HTML へ埋め込む。
+    # woff2 圧縮に brotli が必須。
+    "fonttools>=4.55.0",
+    "brotli>=1.1.0",
+
     # --- ユーティリティ ---
     "pydantic>=2.9.0",
     "pydantic-settings>=2.14.2",
@@ -169,6 +175,10 @@ ignore = [
 # HTML レポート生成は inline テンプレート文字列が長くなる（可読性のため1行維持）
 "src/teamagent/skills/video_algorithm/report.py" = ["E501"]
 "src/teamagent/skills/video_algorithm/slides.py" = ["E501"]
+# FMT レンダラの HTML/OOXML テンプレートも同様（1宣言=1行を維持）
+"src/teamagent/skills/omiyage_report/fmt/html.py" = ["E501"]
+"src/teamagent/skills/omiyage_report/fmt/editable.py" = ["E501"]
+"src/teamagent/skills/omiyage_report/fmt/ooxml.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -210,6 +220,9 @@ module = [
     "weasyprint.*",
     "playwright",
     "playwright.*",
+    # fontTools は py.typed マーカーなし（FMT デッキのフォントサブセットで使用）
+    "fontTools",
+    "fontTools.*",
 ]
 ignore_missing_imports = true
 

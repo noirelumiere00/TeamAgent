@@ -1,0 +1,519 @@
+{
+  "meta": {
+    "version": "1.1.0",
+    "name": "fmt_tiktok_search_deck",
+    "generated": "2026-08-24",
+    "language": "ja",
+    "source_deck": {
+      "pptx": "/private/tmp/claude-163649916/-Users-s-komata-Claude-----/b9b3add1-809e-4b94-b483-187ea15ce518/scratchpad/fmt_design/src.pptx",
+      "design_doc": "/private/tmp/claude-163649916/-Users-s-komata-Claude-----/b9b3add1-809e-4b94-b483-187ea15ce518/scratchpad/fmt_design/DESIGN.md",
+      "style_truth_html": "/private/tmp/claude-163649916/-Users-s-komata-Claude-----/b9b3add1-809e-4b94-b483-187ea15ce518/scratchpad/fmt_design/TikTok検索面 徹底解剖.dc.html",
+      "measurement": "/private/tmp/claude-163649916/-Users-s-komata-Claude-----/b9b3add1-809e-4b94-b483-187ea15ce518/scratchpad/fmt_design/extracted/content-report.txt",
+      "_note": "真実源の分離（実測により確定）: 内容・スライド構成 = src.pptx（花王様向け実物23枚）／ スタイル（色・フォント・寸法）= DESIGN.md（本spec tokens/image_rules）／ レイアウト（slot位置・カラム構成・幅・gap・段差）= dc.html（layout.layout_canon 参照）。src.pptx の実装スタイル（Meiryo+Courier New / #141414 / #9B3A2C / #356148 / #DEDEDC）は FMT の正ではない（DESIGN.md パレット・フォントが1つも出現しないことを全 run 実測で確認済み。dc.html は F6F4EF×37箇所・A24765×84箇所で DESIGN.md と一致）"
+    },
+    "canvas": {
+      "width_px": 1920,
+      "height_px": 1080,
+      "aspect": "16:9",
+      "min_font_size_px": 24,
+      "min_font_size_note": "1920幅における下限。これ未満は使わない",
+      "intended_use": "提案・調査レポート（画面投影 + PPTX/PDF 書き出し）",
+      "export": "画像モードPPTX（1920×1080）／PDFは印刷経由。どちらもレイアウト調整不要",
+      "coordinate_system": {
+        "internal": "1920x1080 px（本specの全数値はこの座標系）",
+        "pptx_emu_per_px_1920": 6350,
+        "src_pptx_native": "1280x720 px（EMU÷9525・96dpi。content-report.txt の座標系）",
+        "src_to_spec_scale": 1.5,
+        "_note": "レンダラ内部は1920系で保持し、PPTX出力時 EMU = px × 6350。src.pptx 実測座標を流用する場合のみ EMU = px × 9525。src.pptx は DESIGN.md レイアウトの忠実実装ではない（×1.5換算で表紙タイトル68px vs 規定104px 等の乖離実測済み）ため、寸法は必ず本spec（=DESIGN.md 側）を正とする"
+      }
+    },
+    "degradation_corrections": {
+      "_note": "実物 src.pptx が DESIGN.md 規定から劣化していた5点。spec は規定側に寄せて修正済み",
+      "items": [
+        "① 表紙(A)の右9:16サムネ2枚が実物では欠落 → spec ではスロット維持（条件付き）",
+        "② 章扉(B)の右520px Q一覧が実物では欠落 → spec ではスロット維持",
+        "③ Q5 のEランキングカードが実物では表(D形態)へ退化 → spec は E カードを正",
+        "④ Q8 比較サムネ148×263が実物では欠落 → spec の image_rules に保持",
+        "⑤ フォント/パレットの全面差し替え（Meiryo等） → spec は DESIGN.md + dc.html を正"
+      ]
+    },
+    "auto_rulings": {
+      "_note": "SKILL.md（tiktok-competitive-analysis）との衝突12件の自動裁定サマリ。原則: 見た目=DESIGN.md が正／誠実性=SKILL.md が正。詳細は各所の _note に記載。要ユーザー裁定3件は conflicts_for_ruling.md 参照",
+      "rulings": [
+        {"id": "C1", "topic": "サムネ角丸", "decision": "DESIGN採用: 角丸8〜14pxは許容（円形・楕円・大径角丸は引き続き禁止）。SKILL §8/§9 の禁止文言は改訂要"},
+        {"id": "C2", "topic": "資料構成", "decision": "器はDESIGN 8類型採用。便1は A/B/C/D/E/H のサブセット。G は動画取得済み案件のみの条件付き類型"},
+        {"id": "C3", "topic": "CTA固定文", "decision": "両立: H類型 dark結論バンド内に SKILL 固定文を配置（深掘り未実施=便1のとき必須。フル解剖版は不要）"},
+        {"id": "C4", "topic": "元TikTokリンク", "decision": "SKILL採用: 全カードに source_url 必須（検証済みURLのみ）。便1はカード下 24px muted のURL短表記（可視テキスト）のみで充足。透明ハイパーリンク矩形は SlidesOperation 契約（contracts.py）へのフィールド追加=契約変更が必要なため後続便へ降格（現行 slides オペは画像貼付のみでリンク機構ゼロと実読確認済み）"},
+        {"id": "C5", "topic": "手法欄と未計測明記", "decision": "SKILL採用: 表紙定義リストを2行→最大3行に拡張し、便1では制約行を必須化"},
+        {"id": "C6", "topic": "contain/9:16", "decision": "ほぼ一致。crop禁止・containのみに表現統一。4:5/1:1 は SKILL の補完規定を採用"},
+        {"id": "C7", "topic": "オーガニック言い換え", "decision": "SKILL採用: 語彙は「PR表記あり/PR表記なし」が正。「オーガニック」使用時は初出定義注記必須"},
+        {"id": "C8", "topic": "数値の丸め", "decision": "実物準拠でDESIGN修正: K/M省略は一覧表内のみ許可。ヘッダー・KPI・比較根拠は実数+tabular-nums。QA照合は丸め前実数"},
+        {"id": "C9", "topic": "ランキングカード本数・指標", "decision": "DESIGN採用: 5列150×267・指標=再生数/EG率/フォロワー。保存数系はデータがある場合のみ表列へ追加。SKILL の2×2/3本規定はFMT非適用時の従来モードへ降格"},
+        {"id": "C10", "topic": "主指標", "decision": "条件分岐: 便1=登場率(caption/hashtag)+EG率／フル計測時=4経路+統合登場回数。SKILL「主指標」文言は限定改訂要"},
+        {"id": "C11", "topic": "解剖6項目ラベル", "decision": "DESIGN採用: 6ラベル固定enum。「未確認」と「表記なし」の書き分けで SKILL の null 規律と両立"},
+        {"id": "C12", "topic": "画像種別ラベル", "decision": "SKILL採用: image_kind enum を必須化。provided_thumbnail のみ画像直下24px mutedラベル必須"}
+      ]
+    }
+  },
+  "tokens": {
+    "colors": {
+      "paper": {"value": "#F6F4EF", "usage": "本文スライドの地色"},
+      "ink": {"value": "#1A1B1F", "usage": "見出し・罫線（主）・強調タグ地"},
+      "dark": {"value": "#17181C", "usage": "章扉・結論バンドの地色"},
+      "panel": {"value": "#EFEBE1", "usage": "「実例」等の埋め込みパネル地"},
+      "body": {"value": "#3A3833", "usage": "本文"},
+      "body_sub": {"value": "#55514A", "usage": "補足本文"},
+      "lead": {"value": "#6E695F", "usage": "見出し直下のリード文"},
+      "muted": {"value": "#8A847A", "usage": "ラベル・単位・ページ番号"},
+      "rule_strong": {"value": "#1A1B1F", "usage": "ヘッダー罫線 1px / 表ヘッダー罫線 2px"},
+      "rule_row": {"value": "#DDD8CC", "usage": "表の行罫"},
+      "rule_card": {"value": "#D8D2C4", "usage": "カード枠線"},
+      "hairline": {"value": "#C9C2B4", "usage": "弱い区切り・数字のゴースト"},
+      "track": {"value": "#E7E1D2", "usage": "バーの下地"},
+      "neutral_bar": {"value": "#B9B2A4", "usage": "比較対象（PR動画など）のバー"},
+      "brand_accents": {
+        "premise": "2社比較が前提",
+        "brand_a": {"value": "#A24765", "note": "参照実装=エリクシール"},
+        "brand_b": {"value": "#2F5397", "note": "参照実装=ワンバイコーセー"},
+        "_note": "案件ごとに差し替え可能（production_flow.replaceable）"
+      },
+      "chapter_dark_whites": {
+        "text_dim": "rgba(246,244,239,.6)",
+        "text_mid": "rgba(246,244,239,.82)",
+        "text_strong": "rgba(246,244,239,.88)",
+        "rule": "rgba(246,244,239,.22)"
+      },
+      "operation_rules": [
+        "アクセントは2色まで。3社以上を扱う場合は Brand C を追加せず、地色のトーン差か凡例で分ける",
+        "数値の色付けは「その列/群の最大値」のみ。全部に色を付けない"
+      ]
+    },
+    "typography": {
+      "fonts": {
+        "mincho": {"family": "Shippori Mincho B1", "weights": [600, 700, 800], "roles": "大見出し、引用（動画フック文）、「本質1行」、結論文"},
+        "gothic": {"family": "Zen Kaku Gothic New", "weights": [400, 500, 700, 900], "roles": "本文、ラベル、表の文字"},
+        "latin": {"family": "Instrument Sans", "weights": [500, 600, 650, 700], "roles": "数値、欧文ラベル、Q番号、ページ番号、ランニングヘッド"}
+      },
+      "tabular_nums": "数値は必ず font-variant-numeric: tabular-nums（桁がずれない）",
+      "styles": {
+        "cover_title": {"size_px": 104, "font": "mincho", "weight": 800},
+        "chapter_title": {"size_px": 80, "font": "mincho", "weight": 700},
+        "chapter_ghost_number": {"size_px": 400, "font": "latin", "weight": 700, "fill": "none", "stroke": "-webkit-text-stroke: 2px"},
+        "slide_heading_q": {"size_px": 40, "font": "mincho", "weight": 700},
+        "slide_heading_anatomy": {"size_px": 38, "font": "mincho", "weight": 700},
+        "q_number_list": {"size_px": 46, "font": "latin", "weight": 650},
+        "q_number_anatomy": {"size_px": 42, "font": "latin", "weight": 650},
+        "section_number": {"size_px": 64, "font": "latin", "weight": 600},
+        "quote_hook": {"size_px": [25, 28], "font": "mincho", "weight": 600},
+        "essence_line": {"size_px": [26, 27], "font": "mincho", "weight": [600, 700]},
+        "kpi_number": {"size_px": [30, 42], "font": "latin", "weight": [600, 700]},
+        "lead": {"size_px": 25, "font": "gothic", "weight": 400},
+        "body": {"size_px": [24, 26], "font": "gothic", "weight": [400, 500]},
+        "label": {"size_px": 24, "font": "gothic|latin", "weight": "gothic 500-900 / latin 500"}
+      },
+      "letter_spacing": {
+        "latin_label": ".12em〜.3em",
+        "ja_emphasis_tag": ".14em〜.2em",
+        "ja_body": "0"
+      },
+      "line_height": {
+        "body": "1.5〜1.62",
+        "lead": "1.85",
+        "heading": "1.2",
+        "number": "1.15"
+      },
+      "font_embedding": {
+        "method": "デッキごとに fonttools でサブセット化した woff2 を data:URI で @font-face 埋め込み（Google Fonts link は media worker の _EXTERNAL_HTML_REF が拒否するため埋め込み必須）",
+        "subset_source": "デッキ全テキスト + 固定基本チャーセット（数字・約物・K/M/%・括弧・スラッシュ・空白等）から生成する",
+        "glyph_gate": "fonttools の missing glyph 検出で漏れ0をハードゲート化。漏れ検出=レンダリング失敗の fail-fast（勝手な代替字形での続行禁止）",
+        "css_fallback": "各 font-family に sans-serif / serif の名目フォールバックを必ず書く。ただしフォールバック発火=品質事故と定義する（画像焼き込みのため豆腐・代替字形が納品物に固定される）",
+        "assets": "サブセットの原資となるフル3書体（OFLライセンス）のイメージ同梱が前提。現行イメージ内に .ttf/.otf/.woff2 は0件と実測済み（spec_README 必要改修5参照）"
+      }
+    },
+    "spacing": {
+      "lead_margin_top_px": 16,
+      "tag_padding": "7px 16px",
+      "kpi_badge_padding": {"views": "7px 16px", "eg_rate": "8px 16px"},
+      "tag_top_rule_padding_px": [18, 20],
+      "ranking_metric_gap_px": 11,
+      "gap_rule": "グリッド内の項目間隔は gap で統一。margin-top の積み上げで間隔を作らない"
+    },
+    "shadows": {
+      "hero": "0 22px 48px rgba(26,27,31,.18)",
+      "mid": "0 16px 34px rgba(26,27,31,.16)",
+      "small": "0 12px 26px rgba(26,27,31,.16)"
+    }
+  },
+  "layout": {
+    "side_margin_px": 110,
+    "side_margin_note": "左右マージン 110px（全スライド共通・例外なし）",
+    "padding_top_px": {"list_pages": 56, "anatomy_pages": 52, "chapter": 90, "cover": 72},
+    "padding_bottom_px": {"list_pages": 104, "anatomy_pages": 96, "q5_ranking": 88, "_note": "フッターストリップ分を確保"},
+    "footer_strip": {
+      "css": "position:absolute; left:110px; right:110px; bottom:34px（解剖ページGのみ bottom:32px）",
+      "left": "ランニングヘッド（欧文・大文字・letter_spacing latin_label）",
+      "right": "NN / 総枚数",
+      "_note": "スライド枚数が増減しても全ページの『NN / 総数』を更新する。DESIGN.md の『32〜34px』幅記述は dc.html 実測（一覧/比較/総括系=34px×12箇所・解剖G=32px×10箇所）で決定論化した"
+    },
+    "layout_canon": {
+      "source": "/private/tmp/claude-163649916/-Users-s-komata-Claude-----/b9b3add1-809e-4b94-b483-187ea15ce518/scratchpad/fmt_design/TikTok検索面 徹底解剖.dc.html",
+      "rule": "DESIGN.md は x/y座標・カラム幅を持たないため、slot単位のジオメトリ（位置・カラム構成・幅・gap・整列・段差）は dc.html の該当 section のインラインstyleを正典とする。レンダラは該当 section をテンプレート化し、文言と画像だけを差し替える",
+      "precedence": "寸法トークン（フォントサイズ・画像サイズ・角丸・色）が dc.html と食い違う場合は tokens / image_rules（=DESIGN.md）を優先して上書きする。それ以外のレイアウト値は dc.html が正",
+      "selector_map": {
+        "_note": "dc.html はCSSクラスを持たない（全インラインstyle）ため、対応は section[data-label] 単位。slot の位置=テンプレート化した該当 section 内のDOM構造がそのまま正",
+        "A": "section[data-label='01 表紙']",
+        "B": "section[data-label='02 PART 1 扉'] ／ section[data-label='08 PART 2 扉']",
+        "C": "section[data-label='04 Q2 PRvsオーガニック']（クラスタ形は section[data-label='05 Q3 語られ方クラスタ']）",
+        "D": "section[data-label='03 Q1 階層別効果'] ／ section[data-label='06 Q4 商品と文脈']",
+        "E": "section[data-label='07 Q5 最上位動画']",
+        "F": "section[data-label='09 Q6 エリクシール5本'] ／ section[data-label='15 Q7 ワンバイコーセー5本']",
+        "G": "section[data-label='10 Q6-1 エガチャン']〜'14 Q6-5' ／ section[data-label='16 Q7-1 GYUTAE']〜'20 Q7-5'",
+        "H": "section[data-label='22 総括 1/2'] ／ section[data-label='23 総括 2/2']（variant cross_comparison_q8 = section[data-label='21 Q8 共通パターン']）",
+        "interstitial_conclusion": "section[data-label='06 動画の構成解剖 — 結論'] ／ section[data-label='07 動画の構成解剖 — 結論']（解剖章の中間結論dark帯。便2のみ・H.dark_band と同型）"
+      },
+      "known_drift": [
+        "見出し: dc.html 50/46px vs tokens 40/38px → tokens優先",
+        "ランキングカード画像: dc.html 124×220 vs image_rules 150×267 → image_rules優先",
+        "一覧hero画像: dc.html 413×734 vs image_rules 334×594 → image_rules優先",
+        "実例パネル画像: dc.html 150×267 vs image_rules 118×210/132×235 → image_rules優先",
+        "表紙サムネ角丸: dc.html 16px vs border_radius.hero 14px → tokens優先（角丸≤14px規定）"
+      ]
+    },
+    "vertical_whitespace_absolute_rules": [
+      "1. コンテンツ領域は flex:1; min-height:0 で確保し、中身は必ず高さを埋める。表・リストは justify-content: space-between または align-content: center で等分。「上詰めで下に穴が空く」状態を残さない",
+      "2. サムネイルと隣の表・グリッドは同じ高さで上下を揃える。img: 334×594px に対し、隣接ブロックは height:594px; align-self:flex-start",
+      "3. グリッド内の項目間隔は gap で統一。margin-top の積み上げで間隔を作らない",
+      "4. 余白は怖がらない。要素を大きくするより、空白を残して整列を優先"
+    ]
+  },
+  "image_rules": {
+    "aspect": "9:16",
+    "fit_policy": {
+      "mode": "contain",
+      "crop": "禁止",
+      "non_916_sources": "元比率を維持し 9:16 の白/ニュートラル枠へ contain（4:5写真投稿・1:1提供サムネ等）",
+      "_note": "C6裁定: DESIGN.md の『切り出し』表現は crop でなく contain に統一。縦動画フレームは元々9:16なので実害なし"
+    },
+    "sizes_px": {
+      "cover_pair": {"w": 236, "h": 420, "usage": "表紙（A）右サムネ2枚", "_note": "dc.html 実測。gap 26px・段差=左 margin-top:-70px／右 margin-top:+90px"},
+      "anatomy_hero": {"w": 334, "h": 594, "usage": "解剖ページ主役（G）"},
+      "list_hero": {"w": 334, "h": 594, "usage": "一覧ページ主役（F）"},
+      "ranking_card": {"w": 150, "h": 267, "usage": "ランキングカード（E・5枚並列）"},
+      "example_panel_s": {"w": 118, "h": 210, "usage": "実例パネル小"},
+      "example_panel_m": {"w": 132, "h": 235, "usage": "実例パネル中"},
+      "comparison": {"w": 148, "h": 263, "usage": "比較用（Q8横断比較）", "_note": "劣化補正④: 実物pptxには無いが規定として保持"}
+    },
+    "embed_budget": {
+      "resize": "埋め込み前に表示px×2へ再縮小（例: ranking_card は 300×534 まで）",
+      "format": "JPEG quality 75",
+      "per_image_max_kb": 120,
+      "deck_total_max_kb": 600,
+      "_note": "media worker の 2MB/HTML 制限（operations.py:1182-1183）対策。base64 で +33% 膨張を見込む。TikTok cover は 50〜150KB/枚が実勢のため再縮小なしでは便1デッキ（10枚超）で1MBを超えうる"
+    },
+    "border_radius_px": {
+      "hero": 14,
+      "card": 12,
+      "small": [8, 10],
+      "_note": "C1裁定: FMT規定内（≤14px）の角丸は許容。円形・楕円・大径角丸マスクは禁止（円形はプロフィール画像のみ許可）"
+    },
+    "shadow_map": {"hero": "shadows.hero", "card": "shadows.mid", "small": "shadows.small"},
+    "image_kind": {
+      "enum": ["real_frame", "real_screen_browser", "provided_thumbnail"],
+      "label_rule": "provided_thumbnail のみ画像直下に 24px muted で『提供サムネ』ラベル必須。混在ページはカード別に正しく分ける",
+      "ben1_rule": "便1で使う cover_url サムネは provided_thumbnail（投稿者設定のカバー・当方未検証フレーム）として扱い、全カードにラベル必須（C12誠実性原則の帰結）",
+      "_note": "C12裁定: SKILL採用（誠実性）。実物は全て real_frame だったためラベル無しだった"
+    },
+    "source_url": {
+      "required": true,
+      "rule": "全カード必須。検証済み投稿URLのみ・推測URL禁止。提供サムネはプロフィールURL止まり",
+      "pptx_impl": "便1: カード下部 24px muted のURL短表記（可視テキスト）のみで C4 充足。透明ハイパーリンク矩形は SlidesOperation 契約（contracts.py）へのフィールド追加が必要なため後続便へ降格",
+      "_note": "C4裁定改訂: SKILL採用（誠実性）は不変。実物は hyperlink 0件だったが spec では必須化。現行 slides オペは画像貼付のみでリンク機構ゼロ（render_child.py 実読）のため『契約変更不要』とは両立しないと判明し、便1実装を可視短表記へ降格した"
+    }
+  },
+  "slide_types": {
+    "_shared_parts": {
+      "slide_header": {
+        "scope": "全本文スライド（C/D/E/F/G/H）",
+        "slots": [
+          {"id": "q_number", "typography": "q_number_list|q_number_anatomy", "color": "brand_accent", "position": "左上・見出しと同一行"},
+          {"id": "heading", "typography": "slide_heading_q|slide_heading_anatomy", "color": "ink", "text_rule": "問い（「誰が/どこが/なぜ」）で立てる。名詞止めの羅列にしない"},
+          {"id": "part_label", "typography": "label", "color": "muted", "letter_spacing": "latin_label", "position": "右上", "format": "PART N — 章名"},
+          {"id": "header_rule", "style": "1px solid rule_strong", "position": "見出し行の下・全幅（マージン内）"},
+          {"id": "lead", "typography": "lead", "color": "lead", "margin_top_px": 16, "text_rule": "1文・句点なしで、そのスライドが何のデータかだけを言う"}
+        ]
+      },
+      "emphasis_tag": {
+        "variants": ["発見", "結論", "所見"],
+        "style": "地 ink ／ 文字 paper ／ 24px / weight 900 / letter-spacing .18em / padding 7px 16px",
+        "essence_one_line_exception": "「本質1行」のみ地をブランドアクセント（A/B）",
+        "placement": "margin-top:auto + 上罫線 1px rule_strong + padding-top 18〜20px（スライド下端に固定）",
+        "text_rule": "タグ本文は2〜3文。通説との差分か分岐点を必ず1つ含める"
+      },
+      "bar_with_number": {
+        "structure": "ラベル 25px ／ 数値 27〜42px（最大値のみ accent 色）／ track 高さ8〜10px + fill accent",
+        "track_color": "track",
+        "comparison_bar_color": "neutral_bar",
+        "normalization": "バーの幅は「その群の最大値=100%」で正規化。数値そのものは改変しない"
+      },
+      "kpi_badge": {
+        "scope": "解剖ページ（G）",
+        "views": "再生数: 枠線 1px hairline / 透明地 / padding 7px 16px",
+        "eg_rate": "EG率: 地=ブランドアクセント / 文字 paper / padding 8px 16px",
+        "supplement": "補足（「全データ中最高EG」等）は左に 24px muted で置く"
+      },
+      "legend": {
+        "style": "■ 12〜14px 正方形（角丸なし）+ ブランド名 24〜28px / weight 700",
+        "rule": "丸は使わない"
+      }
+    },
+    "A": {
+      "name": "表紙",
+      "background": "paper",
+      "condition": "常時（1枚目）",
+      "slots": [
+        {"id": "addressee", "position": "上部左", "typography": "label", "content": "宛名（例: ◯◯株式会社 御中）"},
+        {"id": "confidential", "position": "上部右", "typography": "label", "letter_spacing": "latin_label", "content": "CONFIDENTIAL"},
+        {"id": "category_en", "position": "左カラム上", "typography": "label", "font": "latin", "letter_spacing": "latin_label", "content": "英字カテゴリ"},
+        {"id": "brand_names", "position": "左カラム", "typography": "body", "content": "ブランドA × ブランドB"},
+        {"id": "title", "position": "左カラム中央", "typography": "cover_title", "color": "ink"},
+        {"id": "abstract", "position": "タイトル下", "typography": "body", "color": "body"},
+        {"id": "thumbnail_pair", "position": "右・段差配置（gap 26px・左 margin-top:-70px／右 +90px）", "image": "cover_pair（236×420）×2枚", "selection_rule": "各ブランド再生数1位の投稿の cover 各1枚（決定論）", "fallback": "取得失敗（egress不達等）時は slot を除去し左カラムを全幅化する（穴を残さない）", "condition": "サムネ入手済みのとき必須", "_note": "劣化補正①: 実物は欠落・spec は規定側採用。寸法・段差は dc.html 実測"},
+        {"id": "method_target_constraints", "position": "下部", "typography": "label|body", "structure": "定義リスト2行（手法/対象）+ 最大3行目（制約）", "_note": "C5裁定: 便1では制約行必須（例:『テロップ・音声内の言及は本便では未計測（キャプション・ハッシュタグのみ計測）』）。実物の手法欄文面は全計測済み案件のものなので便1流用禁止"},
+        {"id": "issuer", "position": "下部右", "typography": "label", "color": "muted", "content": "発行元"}
+      ]
+    },
+    "B": {
+      "name": "章扉（dark）",
+      "background": "dark",
+      "padding_top_px": 90,
+      "condition": "PART 切り替わり時。ただし後続Qが1枚も無いPARTの章扉は出さない（空承知で残さない）",
+      "slots": [
+        {"id": "part_label", "position": "左上", "typography": "label", "font": "latin", "color": "chapter_dark_whites.text_dim", "content": "PART N"},
+        {"id": "ghost_number", "position": "左", "typography": "chapter_ghost_number", "style": "塗りなし・-webkit-text-stroke 2px（白系）"},
+        {"id": "title", "position": "左", "typography": "chapter_title", "color": "chapter_dark_whites.text_strong"},
+        {"id": "abstract", "position": "タイトル下", "typography": "body", "color": "chapter_dark_whites.text_mid"},
+        {"id": "q_list", "position": "右・幅520px", "structure": "Q番号 + 問いのリスト（罫線区切り chapter_dark_whites.rule）", "_note": "劣化補正②: 実物は欠落・spec は規定側採用"}
+      ]
+    },
+    "C": {
+      "name": "データ2社比較",
+      "background": "paper",
+      "condition": "2社の同一指標比較（PR比較・クラスタ別EG等）",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header"},
+        {"id": "legend", "ref": "_shared_parts.legend"},
+        {"id": "card_left", "structure": "枠線 1px rule_card のカード。バー付き数値を等分配置", "bar": "_shared_parts.bar_with_number", "brand": "brand_a"},
+        {"id": "card_right", "structure": "同上", "brand": "brand_b"},
+        {"id": "example_panel", "background": "panel", "image": "example_panel_s|example_panel_m", "condition": "実例があるとき", "ben1_rule": "便1は cover_url 静止画で可（image_kind=provided_thumbnail・ラベル必須）。実例が無いときは panel 非表示とし、カードをコンテンツ領域全高へ再配分する（穴を残さない）", "image_kind_required": true, "source_url_required": true},
+        {"id": "tag", "ref": "_shared_parts.emphasis_tag", "variant": "発見|結論"}
+      ]
+    },
+    "D": {
+      "name": "横断表",
+      "background": "paper",
+      "condition": "階層別・群別の横断集計",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header"},
+        {"id": "table", "structure": "ヘッダー行=2px罫 rule_strong + 行罫=1px rule_row。行はコンテンツ領域内で等分（space-between）", "typography": "body（表の文字はgothic）・数値は tabular-nums", "highlight": "数値の色付けは列/群の最大値のみ accent"},
+        {"id": "example_panel", "background": "panel", "condition": "実例があるとき", "image_kind_required": true, "source_url_required": true},
+        {"id": "tag", "ref": "_shared_parts.emphasis_tag", "variant": "発見"}
+      ]
+    },
+    "E": {
+      "name": "ランキングカード",
+      "background": "paper",
+      "condition": "TOP5 ランキング",
+      "_note": "劣化補正③+C9裁定: 実物Q5は表へ退化していたが spec は5列カードを正とする。指標セット=再生数/EG率/フォロワー。保存数・保存率はデータにある場合のみ F/D の表列へ追加（5,000再生未満の保存率は参考値と明記、SKILL継承）。SKILL の 2×2/3本規定は FMT 非適用時の従来モードへ降格",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header"},
+        {"id": "cards", "count": 5, "layout": "5列均等・gap統一", "card_structure": [
+          {"id": "thumb", "image": "ranking_card（150×267）", "radius": "card", "shadow": "small", "image_kind_required": true, "source_url_required": true},
+          {"id": "rule", "style": "1px rule_row"},
+          {"id": "metrics", "content": "再生数 / EG率 / フォロワー", "typography": "kpi_number（数値）+ label（単位）", "gap_px": 11},
+          {"id": "account_name", "typography": "body", "weight": 700},
+          {"id": "content_summary", "typography": "label", "color": "body_sub"}
+        ]},
+        {"id": "tag", "ref": "_shared_parts.emphasis_tag", "variant": "発見"}
+      ]
+    },
+    "F": {
+      "name": "一覧＋サムネ",
+      "background": "paper",
+      "condition": "ブランド別上位N本の一覧",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header"},
+        {"id": "hero_thumb", "image": "list_hero（334×594）", "radius": "hero", "shadow": "hero", "image_kind_required": true, "source_url_required": true},
+        {"id": "table", "structure": "サムネと同高さ（height:594px; align-self:flex-start）・行は space-between で等分", "columns": "投稿者 / 再生数 / EG率 / 内容要約（desc由来）", "ben1_rule": "便1の列構成は左記4列で固定。フック要約列は便2で列ごと追加する（便1では列自体を出さない=空欄禁止と整合）"},
+        {"id": "tag", "ref": "_shared_parts.emphasis_tag", "variant": "所見"}
+      ]
+    },
+    "G": {
+      "name": "構成解剖",
+      "background": "paper",
+      "padding_top_px": 52,
+      "condition": "動画本体取得+解析済み（便2）の案件のみ有効。便1では生成しない",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header", "typography_override": {"heading": "slide_heading_anatomy", "q_number": "q_number_anatomy"}},
+        {"id": "quote", "typography": "quote_hook", "content": "動画フック文の引用", "text_rule": "原典から一字も変えない"},
+        {"id": "kpi_badges", "ref": "_shared_parts.kpi_badge", "content": "再生数バッジ + EG率バッジ + 補足"},
+        {"id": "hero_thumb", "image": "anatomy_hero（334×594）", "radius": "hero", "shadow": "hero", "image_kind_required": true, "source_url_required": true},
+        {"id": "anatomy_grid", "layout": "2列×3行・gap統一", "fixed_order": ["フック(0-3秒)", "視覚演出・キラー演出", "テロップ", "価格・スペック訴求", "商品識別", "勝因仮説"], "fixed_order_rule": "6項目は固定順。項目が無い動画でも「価格表記なし」等と明記して枠を空けない", "_note": "C11裁定: 未確認は「未確認」、確認済み不在は「表記なし」と書き分ける（推測で埋めない）。「勝因仮説」ラベルは断定回避規範と整合"},
+        {"id": "essence_line", "ref": "_shared_parts.emphasis_tag", "variant": "本質1行", "background": "brand_accent", "typography": "essence_line", "text_rule": "必ず1文で、動画の勝ち筋を言い切る（体言止め可）"}
+      ]
+    },
+    "H": {
+      "name": "総括",
+      "background": "paper",
+      "condition": "デッキ末尾。便1=1枚固定／便2（フル解剖）=2枚（実物どおり）",
+      "slots": [
+        {"id": "header", "ref": "_shared_parts.slide_header"},
+        {"id": "summary_rows", "structure": "「番号(section_number 64px) / 型名+実例 / 解説」の3カラム行をコンテンツ領域内で等分配置", "ben1_rule": "便1: 行=各Qの発見/結論タグ要旨の再掲（Q数=行数・3〜5行）。勝ちパターン5類型のフル版は便2の cross_analyze 結果でのみ生成"},
+        {"id": "dark_band", "condition": "最終ページのみ", "background": "dark", "content": "結論文（essence_line 相当・paper文字）"}
+      ],
+      "variants": {
+        "cross_comparison_q8": {
+          "_note": "実物slide21の型。タグ付き段落2バンド+比較サムネ（comparison 148×263）で2ブランド横断の共通項を示す。8類型の正式な変形として許容",
+          "condition": "便2限定（cross_analyze 結果が前提。便1では生成しない）",
+          "slots": [
+            {"id": "header", "ref": "_shared_parts.slide_header"},
+            {"id": "bands", "count": 2, "structure": "各バンド=見出しラベル（24px / weight 700 / letter-spacing .1em / muted）+ 段落（body）。バンド=grid-template-columns:430px 1fr・gap 0 70px・padding 44px 0・下罫 1px rule_card（dc.html slide21 実測）"},
+            {"id": "comparison_thumbs", "image": "comparison（148×263）", "condition": "比較サムネ入手済みのとき", "image_kind_required": true, "source_url_required": true}
+          ]
+        }
+      },
+      "cta": {
+        "required_when": "no_dense_analysis（便1=Q6〜Q8解剖なしのとき必須）",
+        "text": "上位10本の冒頭・価格・商品説明まで詳しく比較した事例が必要な方はご連絡ください。",
+        "placement": "closing_dark_band",
+        "_note": "C3裁定: 見た目=FMT（dark結論バンド）・文言=SKILL固定文。フル解剖版（Q6〜Q8込み）では CTA 不要（実物と同じ）"
+      }
+    }
+  },
+  "text_rules": {
+    "design_rules": [
+      "見出しは問い（「誰が/どこが/なぜ」）で立てる。名詞止めの羅列にしない",
+      "リード文は1文・句点なしで、そのスライドが何のデータかだけを言う",
+      "発見/結論タグの本文は2〜3文。通説との差分か分岐点を必ず1つ含める",
+      "「本質1行」は必ず1文で、動画の勝ち筋を言い切る（体言止め可）",
+      "数値・固有名詞・引用は原典から一字も変えない",
+      "推定には「推定」「可能性」「〜と読める」を必ず付す"
+    ],
+    "number_display": {
+      "raw_required": ["見出し・ヘッダー内の数値", "KPIバッジ", "比較の根拠数値"],
+      "km_abbrev_allowed": ["一覧表内のみ（例: 940K / 2.2M / 18.0M）"],
+      "qa": "元信号との数値照合は丸め前の実数で行う",
+      "tabular_nums": true,
+      "_note": "C8裁定: DESIGN『丸めない』条項は実物と自己矛盾していたため、『原典数値の改変禁止・表示上の桁省略は一覧表内K/M表記のみ許可』に修正"
+    },
+    "pr_labels": {
+      "canonical": ["PR表記あり", "PR表記なし"],
+      "forbidden": "「#PR表記なし」を「オーガニック」と言い換えない",
+      "alternative": "「オーガニック」を使う場合は初出で『本資料では#PR等の表記が確認できない投稿を指す（広告出稿の有無は未確認）』の定義注記を必須とする（既定は canonical 準拠）",
+      "detection_note": "PR判定はデータ上のハッシュタグ/本文判定。見出し・凡例は「PR明記（データ上）」の含意を保つ",
+      "_note": "C7裁定: SKILL採用（誠実性の核心）。見出しは「伸びているのは、PR表記あり投稿か・なし投稿か？」型へ"
+    },
+    "method_and_constraints": {
+      "cover_slot": "slide_types.A.method_target_constraints",
+      "ben1_required_text": "テロップ・音声内の言及は本便では未計測（キャプション・ハッシュタグのみ計測）",
+      "gate_check": "誠実性ゲートの『表紙の制約行存在』チェックは、ben1_required_text との完全一致文字列照合で判定する（不一致=生成失敗の fail-fast）",
+      "unmeasured_rule": "未計測は「未計測（0件ではない）」として扱い、調査方法・制約に必ず明記",
+      "mother_set_rule": "母数定義は「検索上位N本（N≤30/クエリ）」。複数クエリ和集合の場合はクエリ一覧と重複排除を明記"
+    },
+    "display_text_preprocess": {
+      "emoji": "表示テキスト（desc・nickname 等の入力データ由来文字列）から絵文字・サブセット外の装飾記号は除去する。「原典から一字も変えない」条項の例外=表示上の省略として扱い、元データ自体は改変しない（prohibitions の絵文字禁止と glyph_gate の両立策）",
+      "quote_exception": "G.quote（フック引用）のみ除去不可（引用の原典性が優先）。絵文字を含む引用は採用せず別の引用を選ぶ"
+    },
+    "honesty_rules": [
+      "検証済み投稿URLのみ掲載。推測URL禁止（image_rules.source_url）",
+      "画像種別（実画面/実フレーム/提供サムネ）をカード別に正しくラベルする（image_rules.image_kind）",
+      "非決定論の分類（クラスタ等）には「推定」を付し、判定方法を注記する"
+    ]
+  },
+  "prohibitions": {
+    "items": [
+      "グラデーション背景",
+      "絵文字",
+      "角丸の大きいカード",
+      "左端アクセントバー",
+      "円グラフ・ドーナツグラフ（本フォーマットは横バーと表のみ）",
+      "3色以上のアクセント",
+      "装飾アイコン",
+      "SVGイラストの自作",
+      "24px未満の文字",
+      "余白埋めのための画像挿入",
+      "上詰めで下に空白が残るレイアウト",
+      "サムネイルの円形・楕円・大径角丸マスク（FMT規定内 ≤14px の角丸は許容）",
+      "空のPART章扉（後続Qが無いPARTの章扉を残さない）"
+    ],
+    "_note": "先頭11項目はDESIGN.md §8 原文。12項目目はC1裁定でSKILL規定を角丸許容込みに再定義したもの、13項目目はC2裁定由来"
+  },
+  "data_requirements": {
+    "_note": "便1 = tiktok_search のみ（caption/hashtag/メタ計測）。便2 = 動画DL + video_algorithm 解析。フィールド実在は schema.py / tiktok_scraper.py / search.mjs 実読で確認済み",
+    "global_constraints": {
+      "max_videos_per_query": 30,
+      "max_videos_note": "TikTokSearchInput le=30・video_algorithm _MAX_POOL=30（レート制限を踏み抜かない実証値・安易な引き上げ危険）",
+      "mother_set_redefinition": "デッキ側の母数定義を「検索上位N本（N≤30）」に再定義（検索面=上位表示の解剖という主旨に整合）。実務上は表記ゆれ複数クエリ×30のURL重複排除和集合で60〜90本まで",
+      "eg_rate_formula": "(いいね+コメント+シェア+保存)/再生。再生0は0（決定論）",
+      "pr_detection": "hashtags/desc の #PR|#プロモーション|#ad|#タイアップ 文字列判定（決定論・定義明記必須）。TikTok公式アンカーは search.mjs 未抽出（normalizeVideo 1フィールド追加で拾える可能性）",
+      "follower_zero_caveat": "author_followers は欠損時0埋め（followerCount || 0）に注意",
+      "nickname": "投稿者日本語表示名は adapter で取得済みだが TikTokVideoOut 未露出 → 1行改修 or uniqueId で妥協",
+      "primary_metrics": {
+        "ben1": ["登場率（caption/hashtag）", "EG率"],
+        "full": ["4経路（caption/hashtag/telop/voice）+ 同時刻telop×voice統合登場回数", "EG率"],
+        "_note": "C10裁定: SKILL『主指標』は telop/voice 計測済み案件に限定"
+      }
+    },
+    "by_slide_type": {
+      "A": {"needs": ["宛名", "ブランドA/B名", "対象本数（母数定義付き）", "手法・対象・制約文", "表紙サムネ2枚（任意）"], "ben1": "充足（制約行必須・サムネは cover_url で可）"},
+      "B": {"needs": ["章タイトル", "要旨", "後続Qの番号+問い一覧"], "ben1": "充足（便1では PART2 章扉自体を生成しない）"},
+      "C": {"needs": ["2社の群別集計値（PR有無別EG率・クラスタ別EG率等）", "実例投稿（任意）"], "ben1": "PR比較=完成可（hashtag/desc判定）／語られ方クラスタ=部分（caption/hashtagベースLLM分類・非決定論・「推定」付記必須。精度担保は便2）", "ben1_provisional_default": "U1裁定までの仮置きデフォルト: 便1では語られ方クラスタのスライドを生成しない（U1裁定でQ3枠の置換先が確定したら本デフォルトを置換。レンダラはこの仮置きで先行実装してよい）"},
+      "D": {"needs": ["author_followers の階層binning", "階層別 本数/平均再生/平均EG率", "階層代表例"], "ben1": "完成可（全フィールド実在・決定論）"},
+      "E": {"needs": ["再生数TOP5", "再生数/EG率/フォロワー/投稿者/内容(desc)", "サムネ150×267"], "ben1": "完成可（nickname未露出のみ1行改修 or uniqueId 妥協。オントピック除外は desc/author ベース暫定）"},
+      "F": {"needs": ["ブランド別上位5本の表", "サムネ334×594", "フック要約列"], "ben1": "部分（投稿者/再生数/EG率/desc=充足・サムネ=cover_url 静止で代替可[本番egress要実機1回]。フック要約列と実フレームは便2）"},
+      "G": {"needs": ["フック引用", "テロップ", "視覚演出", "価格・スペック訴求", "商品識別%（brand_detections）", "勝因仮説", "実フレーム9:16"], "ben1": "不可（便2必須）。受け皿=video_algorithm 既存スキーマが6項目中5対応（hook_*/telops/scenes/brand_detections/win_factors）。小改修推奨=price_mentions フィールド追加。商品識別%=total_screen_time_sec÷duration_sec で決定論"},
+      "H": {"needs": ["勝ちパターン型の行データ", "結論文", "CTA（便1時）"], "ben1": "部分（Q1〜Q5範囲の総括+CTA固定文は可。勝ちパターン5類型のフル版は便2の cross_analyze。2ブランド×5本=2ジョブ結合が必要）"}
+    },
+    "ben1_deck_composition": {
+      "_note": "便1の標準構成（C2裁定）: A 表紙 → B 章扉(PART1) → C/D/E による Q群 → H 総括+CTA（1枚固定）。G と PART2 章扉は生成しない。Q番号の意味論（露出シェア・登場率をどのQに立てるか）は要ユーザー裁定 U1（裁定までの仮置き=語られ方クラスタ非生成、by_slide_type.C.ben1_provisional_default 参照）",
+      "slide_types_used": ["A", "B", "C", "D", "E", "H"],
+      "footer_total_rule": "総枚数は実生成枚数で全ページ更新"
+    }
+  },
+  "production_flow": {
+    "_note": "DESIGN.md §7 の転記（tokens.colors.brand_accents._note の参照先）",
+    "replaceable": ["ブランドA/Bの名称とアクセント色", "対象本数", "Q1〜Q8のデータ", "サムネイル画像（9:16）", "ランニングヘッドの英字", "宛名・発行元"],
+    "keep": ["マージン110px", "フォント3種", "サイズ体系", "8類型", "タグの位置と色", "サムネ寸法"],
+    "thumbnails": "サムネイルは元動画のフレームを 9:16 で配置（DESIGN原文は『切り出し』だが C6裁定により crop 禁止・contain 統一）",
+    "footer_update": "スライド枚数が増減しても、フッターの『NN / 総数』を全ページ更新する",
+    "export": "画像モードPPTX（1920×1080）／PDFは印刷経由。どちらもレイアウト調整不要"
+  },
+  "input_contract": {
+    "_note": "レンダラへの入力データ契約（deck content contract）。spec本体=『どう見せるか』の規範、本契約=『誰が何をどのフィールドで渡すか』の規範。実装者ごとの発明を防ぐため spec と対で固定する",
+    "deck_meta": {
+      "addressee": "string 必須（宛名。例: ◯◯株式会社 御中）",
+      "cover_title": "string 必須（表紙タイトル文言）",
+      "abstract": "string 必須（表紙要旨）",
+      "category_en": "string 必須（欧文カテゴリ。例: TIKTOK SEARCH DEEP-DIVE REPORT）",
+      "running_head": "string 必須（欧文左フッター文字列。大文字・letter_spacing latin_label）",
+      "issuer": "string 必須（発行元）",
+      "brand_a": "{name: string 必須, accent_color: hex 任意（既定 tokens.colors.brand_accents.brand_a）}",
+      "brand_b": "{name: string 必須, accent_color: hex 任意（既定 tokens.colors.brand_accents.brand_b）}",
+      "part_titles": "string[] 必須（PART N の章名。part_label『PART N — 章名』と B 章扉タイトルの唯一の出所）",
+      "method_target_constraints": "string[2..3] 必須（手法/対象/制約。便1は3行目に text_rules.method_and_constraints.ben1_required_text と完全一致する制約行が必須）"
+    },
+    "slide_plan": {
+      "structure": "slides[] 順序付き配列。各要素 = {type: 'A'〜'H', part?: int, q_number?: string, heading: string, lead: string, tag?: {variant: '発見'|'結論'|'所見', text: string}, data: 類型別ペイロード}",
+      "data_by_type": {
+        "B": "{part: int, title: string（part_titles参照）, abstract: string, q_list: [{q_number, question}]}",
+        "C": "{groups: [{label, value_a, value_b, unit}], example?: card}",
+        "D": "{columns: string[], rows: string[][], highlight: '列/群の最大値のみ accent'}",
+        "E": "{cards: card×5（metrics=再生数/EG率/フォロワー + account_name + content_summary）}",
+        "F": "{hero: card, rows: [{投稿者, 再生数, EG率, 内容要約}]}",
+        "H": "{summary_rows: [{number, pattern, description}], cta: bool（便1=true）, conclusion?: string}"
+      },
+      "card": "{source_url: string 必須（検証済み投稿URLのみ・推測URL禁止）, image: {data_uri または参照, image_kind: image_rules.image_kind.enum 必須}, caption?: string}"
+    },
+    "numbers_rule": "全数値は丸め前実数で渡す。表示上の丸め（一覧表内K/M）はレンダラが text_rules.number_display を決定論適用する",
+    "text_authorship": "heading/lead/tag/summary_rows の文言は集計側（AiLa の生成パイプライン）が text_rules.design_rules に従って作文して渡す。レンダラは作文しない（レンダラ無作文原則）"
+  }
+}

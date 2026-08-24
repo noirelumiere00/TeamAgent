@@ -860,8 +860,17 @@ class MediaJobClient:
         html: str,
         *,
         request_fingerprint: str,
+        width: int = 1280,
+        height: int = 720,
+        device_scale_factor: int = 1,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> bytes:
+        """HTML の `.slide` 群をスクショして PPTX 化する（media worker slides operation）。
+
+        契約 ``SlidesOperation`` の既定 device_scale_factor は 2 だが、ここでは 1 を
+        既定にする（1920×1080 を明示せず呼ぶと 3840×2160×枚数へ肥大する罠の回避。
+        spec_README 必要改修2）。高解像度が要る呼び出し側は明示的に 2 を渡す。
+        """
         job_id = self._job_id(request_fingerprint)
 
         def operation_factory(deadline_epoch_s: int) -> MediaOperation:
@@ -872,7 +881,13 @@ class MediaJobClient:
                 content_type="text/html; charset=utf-8",
                 deadline_epoch_s=deadline_epoch_s,
             )
-            return SlidesOperation(kind="slides", html=html_ref)
+            return SlidesOperation(
+                kind="slides",
+                html=html_ref,
+                width=width,
+                height=height,
+                device_scale_factor=device_scale_factor,
+            )
 
         artifacts, _metadata = self._run_staged(
             job_id=job_id,

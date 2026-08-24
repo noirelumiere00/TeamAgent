@@ -305,6 +305,35 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # omiyage_report: お土産資料 便1（TikTok検索実測→決定論集計→PPTX→依頼スレッド添付）。
+    # ジョブ行は proposal_builder と同じ ProposalJobStore（同一 DynamoDB table）へ相乗りし、
+    # job_id の omy_ プレフィクス + request_summary.kind + 両 status skill の kind ガードで
+    # 相互照会・破壊を遮断する。**既定 OFF**（USE_OMIYAGE_REPORT_TOOLS=1 で opt-in）。
+    if _envflag("USE_OMIYAGE_REPORT_TOOLS"):
+        from teamagent.adapters.proposal_job_store import ProposalJobStore as _OmiyageJobStore
+        from teamagent.skills.omiyage_report.skill import (
+            OmiyageReportStatusSkill,
+            OmiyageReportSubmitSkill,
+        )
+
+        _omiyage_store = _OmiyageJobStore()
+        specs.append(
+            ToolSpec(
+                OmiyageReportSubmitSkill.name,
+                OmiyageReportSubmitSkill.description,
+                OmiyageReportSubmitSkill,
+                factory=lambda: OmiyageReportSubmitSkill(store=_omiyage_store),
+            )
+        )
+        specs.append(
+            ToolSpec(
+                OmiyageReportStatusSkill.name,
+                OmiyageReportStatusSkill.description,
+                OmiyageReportStatusSkill,
+                factory=lambda: OmiyageReportStatusSkill(store=_omiyage_store),
+            )
+        )
+
     # proposal_campaign: KW群 → 並列で TikTok 1位の実物サムネ → {58-92}枠の evidence_images。
     # **既定 OFF**（USE_PROPOSAL_CAMPAIGN_TOOLS=1 で opt-in）。video_algorithm と同列の取得系で、
     # 並列検索/サムネ取得/正規化は skill 内 ThreadPool に閉じる（OC は 1 回呼ぶだけ）。OC 露出は
