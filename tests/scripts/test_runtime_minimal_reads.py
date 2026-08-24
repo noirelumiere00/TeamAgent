@@ -228,11 +228,16 @@ def test_new_statements_carry_no_conditions() -> None:
         assert "condition" not in _strip_comments(_statement(sid))
 
 
-def test_evidence_policy_grants_no_secret_value_read() -> None:
-    """A0.2.2a は non-secret read のみ。secret 値の read は A0.2.2b で分離実装する。"""
-    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
-    doc_start, doc_end = _evidence_doc_span()
-    assert "secretsmanager:GetSecretValue" not in tf[doc_start:doc_end]
+def test_a022a_statements_grant_no_secret_value_read() -> None:
+    """A0.2.2a の statement 自体には secret 値 read を含めない。
+
+    PR2-A0.2.2b で evidence policy に別 statement として
+    ReadExactTerraformManagedSecretValue が追加された（db_password の exact ARN）。
+    その境界越えは意図的で、契約は tests/scripts/test_runtime_secret_read.py が持つ。
+    ここでは A0.2.2a の 2 statement に相乗りしていないことだけを固定する。
+    """
+    for sid in ("ReadExactTerraformBucketConfigurations", "ReadExactInstanceTypeCatalog"):
+        assert "secretsmanager:" not in _strip_comments(_statement(sid))
 
 
 def test_derivation_of_each_action_class_is_documented() -> None:
