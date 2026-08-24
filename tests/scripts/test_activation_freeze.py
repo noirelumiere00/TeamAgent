@@ -101,9 +101,14 @@ def test_v1_cannot_be_quietly_reinstated(tmp_path: Path) -> None:
 
 
 def test_v2_boundary_cannot_be_left_blank_when_active(tmp_path: Path) -> None:
-    """state=active を主張するなら v2 境界の記録が必須（口頭 freeze の再発防止）。"""
+    """state=active を主張するなら v2 境界の記録が必須（口頭 freeze の再発防止）。
+
+    現在の宣言値に依存しないよう、active かつ started_at 空という組み合わせを
+    明示的に作って拒否されることを確かめる。
+    """
     doc = _freeze_doc()
     doc["generation_publisher_freeze"]["state"] = "active"
+    doc["generation_publisher_freeze"]["v2"]["started_at"] = None
     with pytest.raises(FreezeError, match=r"v2\.started_at"):
         load_freeze(_write(tmp_path, "f.json", doc))
 
@@ -111,6 +116,7 @@ def test_v2_boundary_cannot_be_left_blank_when_active(tmp_path: Path) -> None:
 def test_pending_v2_cannot_carry_a_boundary(tmp_path: Path) -> None:
     """pending_v2 のまま境界を書き込む矛盾を拒否（勝手な境界確定の防止）。"""
     doc = _freeze_doc()
+    doc["generation_publisher_freeze"]["state"] = "pending_v2"
     doc["generation_publisher_freeze"]["v2"]["started_at"] = "2026-08-21T07:18:00Z"
     with pytest.raises(FreezeError, match="矛盾"):
         load_freeze(_write(tmp_path, "f.json", doc))
@@ -557,3 +563,54 @@ def test_monitored_events_cover_every_deny_surface_action_family() -> None:
         "UpdateProject",
     ):
         assert required in events, required
+
+
+# ── Freeze v2 発効の記録（2026-08-24 apply 後） ─────────────────────────────
+
+
+def test_freeze_v2_is_active_with_a_recorded_boundary() -> None:
+    """state=active と v2.started_at が揃っている（checker が両立を要求する）。"""
+    doc = load_freeze(FREEZE)
+    publisher = doc["generation_publisher_freeze"]
+    assert publisher["state"] == "active"
+    assert publisher["v2"]["started_at"] == "2026-08-24T08:24:04Z"
+    assert publisher["v2"]["recorded_by"]
+
+
+def test_boundary_is_after_the_enforcement_apply_not_the_last_change() -> None:
+    """境界は「最後の変更時刻」ではなく「deny を確認した時刻」。
+
+    apply（08:19:16Z）より後、かつ検証完了時刻と一致していること。
+    """
+    v2 = _freeze_doc()["generation_publisher_freeze"]["v2"]
+    applied = v2["enforcement_applied"]["applied_at"]
+    started = v2["started_at"]
+    verified = v2["boundary_verification"]["verified_at"]
+    assert applied < started, "境界が apply より前になっている"
+    assert started == verified, "境界は検証完了時刻と一致すること"
+
+
+def test_enforcement_record_pins_the_authorized_plan() -> None:
+    """承認された plan の SHA と結果が記録されている（別 plan での適用を後から見分けられる）。"""
+    applied = _freeze_doc()["generation_publisher_freeze"]["v2"]["enforcement_applied"]
+    assert (
+        applied["plan_sha256"] == "3df18fd30a72115804280189c54c8329035e4b2d37ee5c72444e560e2923b338"
+    )
+    assert applied["apply_result"] == "11 added / 0 changed / 0 destroyed"
+    assert len(applied["attached_principals"]["users"]) == 1
+    assert len(applied["attached_principals"]["roles"]) == 9
+
+
+def test_boundary_verification_records_all_nine_checks() -> None:
+    """発効判定の 9 項目が実測値つきで残っている。"""
+    results = _freeze_doc()["generation_publisher_freeze"]["v2"]["boundary_verification"]["results"]
+    assert results["resources_created"].startswith("11/11")
+    assert results["principals_attached"].startswith("10/10")
+    assert "explicitDeny" in results["deny_simulation"]
+    assert "explicitDeny" in results["buildspec_prefix_write"]
+    assert "allowed" in results["tfstate_write_preserved"], (
+        "state 書き込みの温存が記録されていること"
+    )
+    assert results["in_flight_builds"] == 0
+    assert results["root_mutations"] == 0
+    assert "break-glass" in results["root_status"]
