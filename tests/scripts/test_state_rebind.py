@@ -377,3 +377,179 @@ def test_state_sha_still_detects_resource_tampering(tmp_path: Path) -> None:
     p1.write_text(json.dumps({"serial": 187, "resources": [{"a": 1}]}))
     p2.write_text(json.dumps({"serial": 187, "resources": [{"a": 2}]}))
     assert _state_canonical_sha256(p1) != _state_canonical_sha256(p2)
+
+
+# ── P0: rebind session policy の least-privilege 契約 ─────────────────────────
+#
+# 2026-08-21 実測: 読み取り列挙が不足した session policy は terraform import を 403 で
+# 殺し「rm 済み・import 未完」の中間 state を作る。復旧に使った Allow-all + Deny 型
+# （v2）は恒久化・再利用禁止（同日ユーザー裁定）。canonical policy はここで機械固定する。
+
+from state_rebind import (  # noqa: E402
+    APPLICATION_WRITE_DENY_ACTIONS,
+    SESSION_POLICY_EXPECTED_STATEMENTS,
+    SESSION_POLICY_PATH,
+    assert_session_policy_least_privilege,
+    evaluate_session_policy,
+    load_session_policy,
+    validate_session_policy_file,
+)
+
+RUNBOOK = ROOT / "docs/runbooks/state_rebind.md"
+
+
+def _policy_doc() -> dict[str, Any]:
+    return load_session_policy(SESSION_POLICY_PATH)
+
+
+def test_session_policy_file_satisfies_the_least_privilege_contract() -> None:
+    """repo の canonical policy がそのまま契約を満たす（CLI と同経路）。"""
+    validate_session_policy_file(SESSION_POLICY_PATH)
+
+
+def test_session_policy_contains_no_wildcard_action_anywhere() -> None:
+    """`Allow *` を含む action ワイルドカードの混入を全 statement で拒否（v2 再流入防止）。"""
+    doc = _policy_doc()
+    for statement in doc["Statement"]:
+        actions = statement["Action"]
+        for action in actions if isinstance(actions, list) else [actions]:
+            assert "*" not in action, f"action ワイルドカード検出: {action}"
+
+
+def test_session_policy_rejects_allow_star_mutation() -> None:
+    """Allow * を注入すると契約検証が赤くなる（committed mutation対）。"""
+    doc = _policy_doc()
+    doc["Statement"][2]["Action"] = "*"
+    with pytest.raises(RebindError, match=r"ワイルドカード|一致しません"):
+        assert_session_policy_least_privilege(doc)
+
+
+@pytest.mark.parametrize("action", sorted(APPLICATION_WRITE_DENY_ACTIONS))
+def test_session_policy_explicitly_denies_each_application_write(action: str) -> None:
+    """application write は 1 つずつ explicit deny（simulate 相当の決定論評価）。"""
+    assert evaluate_session_policy(_policy_doc(), action, "*") == "deny"
+
+
+@pytest.mark.parametrize(
+    ("action", "resource"),
+    [
+        # v1 実績: state backend / lock / 検証読み
+        ("s3:GetObject", "arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate"),
+        ("s3:PutObject", "arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate"),
+        ("dynamodb:PutItem", "arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock"),
+        ("ecs:DescribeTaskDefinition", "*"),
+        ("ecs:DescribeServices", "*"),
+        ("events:ListTargetsByRule", "*"),
+        ("lambda:GetFunctionConfiguration", "*"),
+        ("sts:GetCallerIdentity", "*"),
+        # 403 実測: terraform import の root data source 評価
+        ("ec2:DescribeImages", "*"),
+        ("ec2:DescribeVpcs", "*"),
+        ("kms:ListAliases", "*"),
+        ("iam:GetUser", "arn:aws:iam::718959508629:user/AIIAdev"),
+        (
+            "secretsmanager:DescribeSecret",
+            "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/google_oauth-AbC123",
+        ),
+        # 静的導出: data.aws_vpc.default.id 依存の第二波
+        ("ec2:DescribeSubnets", "*"),
+        ("ec2:DescribeRouteTables", "*"),
+    ],
+)
+def test_session_policy_allows_each_required_read(action: str, resource: str) -> None:
+    """rebind / import が必要とする read が代表 resource で通る。"""
+    assert evaluate_session_policy(_policy_doc(), action, resource) == "allow"
+
+
+def test_session_policy_scopes_iam_and_secrets_reads_to_exact_resources() -> None:
+    """iam:GetUser と DescribeSecret は観測された resource の外に出ない。"""
+    doc = _policy_doc()
+    assert (
+        evaluate_session_policy(doc, "iam:GetUser", "arn:aws:iam::718959508629:user/other")
+        == "implicit-deny"
+    )
+    assert (
+        evaluate_session_policy(
+            doc,
+            "secretsmanager:DescribeSecret",
+            "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:other/secret-XyZ",
+        )
+        == "implicit-deny"
+    )
+
+
+def test_session_policy_grants_no_write_outside_state_backend_and_lock() -> None:
+    """未列挙 write（deny 表に無いものも含む）が implicit-deny に落ちる。"""
+    doc = _policy_doc()
+    for action in (
+        "ecs:RunTask",
+        "events:DeleteRule",
+        "lambda:UpdateFunctionCode",
+        "s3:DeleteObject",
+        "iam:PutRolePolicy",
+        "secretsmanager:GetSecretValue",
+        "codebuild:UpdateProject",
+    ):
+        assert evaluate_session_policy(doc, action, "*") == "implicit-deny", action
+
+
+@pytest.mark.parametrize(
+    "sid", sorted(set(SESSION_POLICY_EXPECTED_STATEMENTS) - {"DenyApplicationWrites"})
+)
+def test_session_policy_detects_each_dropped_required_read(sid: str) -> None:
+    """必要 read を 1 action 削ると契約検証が赤くなる（committed mutation対）。"""
+    doc = _policy_doc()
+    for statement in doc["Statement"]:
+        if statement.get("Sid") == sid:
+            statement["Action"] = list(statement["Action"])[:-1] or ["sts:GetCallerIdentity"]
+    with pytest.raises(RebindError, match="一致しません"):
+        assert_session_policy_least_privilege(doc)
+
+
+def test_session_policy_detects_dropped_or_weakened_deny() -> None:
+    """Deny の削除・action 削減はどちらも赤くなる。"""
+    doc = _policy_doc()
+    doc["Statement"] = [s for s in doc["Statement"] if s.get("Sid") != "DenyApplicationWrites"]
+    with pytest.raises(RebindError, match="一致しません"):
+        assert_session_policy_least_privilege(doc)
+
+    doc = _policy_doc()
+    for statement in doc["Statement"]:
+        if statement.get("Sid") == "DenyApplicationWrites":
+            statement["Action"] = [a for a in statement["Action"] if a != "ecs:UpdateService"]
+    with pytest.raises(RebindError, match="一致しません"):
+        assert_session_policy_least_privilege(doc)
+
+
+def test_session_policy_detects_broadened_backend_resources() -> None:
+    """state backend の resource を広げる変異（bucket/* 等）が赤くなる。"""
+    doc = _policy_doc()
+    for statement in doc["Statement"]:
+        if statement.get("Sid") == "StateBackend":
+            statement["Resource"] = ["arn:aws:s3:::teamagent-tfstate-718959508629/*"]
+    with pytest.raises(RebindError, match="Resource"):
+        assert_session_policy_least_privilege(doc)
+
+
+def test_session_policy_write_surface_is_exactly_backend_and_lock() -> None:
+    """Allow 側の非 read 動詞は s3:PutObject / dynamodb:PutItem / dynamodb:DeleteItem だけ。"""
+    doc = _policy_doc()
+    writes = set()
+    for statement in doc["Statement"]:
+        if statement.get("Effect") != "Allow":
+            continue
+        for action in statement["Action"]:
+            verb = action.split(":", 1)[1]
+            if not verb.startswith(("Describe", "Get", "List")) and action != "kms:Decrypt":
+                writes.add(action)
+    assert writes == {"s3:PutObject", "dynamodb:PutItem", "dynamodb:DeleteItem"}
+
+
+def test_runbook_points_operators_at_the_canonical_policy() -> None:
+    """runbook は canonical policy と検証 CLI を参照し、v2 形の再利用を禁止している。"""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    assert "infra/deploy/state_rebind_session_policy.json" in text
+    assert "validate-session-policy" in text
+    assert "再利用しない" in text
+    # 旧 inline policy（列挙不足で 403 事故を起こした形）が normative に残っていないこと
+    assert '"Sid": "ReadOnlyVerify"' not in text
