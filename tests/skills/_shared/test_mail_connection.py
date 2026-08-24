@@ -1,11 +1,13 @@
 """_shared/mail_connection.py の契約テスト（P0-4: 未連携シグナルの構造化）。
 
 「文言が calendar_freebusy と揃っている」「断絶した導線（/teamagent connect）が
-skills 配下から消えている」を **grep 相当の実測**で固定する。
+skills 配下と Slack runtime から消えている」を
+**grep 相当の実測**で固定する。
 """
 
 from __future__ import annotations
 
+import ast
 import pathlib
 from typing import Any
 
@@ -25,7 +27,8 @@ from teamagent.skills._shared.mail_connection import (
 )
 
 OWNER = "s-komata@vectorinc.co.jp"
-_SRC = pathlib.Path(__file__).resolve().parents[3] / "src" / "teamagent" / "skills"
+_TEAMAGENT_SRC = pathlib.Path(__file__).resolve().parents[3] / "src" / "teamagent"
+_SRC = _TEAMAGENT_SRC / "skills"
 
 
 def test_connect_wording_matches_calendar_freebusy() -> None:
@@ -40,12 +43,25 @@ def test_connect_wording_matches_calendar_freebusy() -> None:
 
 
 def test_dead_slash_command_is_gone_from_mail_skills() -> None:
-    """『/teamagent connect』はその語では起動しない断絶導線。mail_* から根絶する。"""
+    """断絶導線を全 Skill と利用者へ返信する Slack runtime から根絶する。"""
+    paths = [*_SRC.rglob("*.py"), _TEAMAGENT_SRC / "runtime" / "slack_bot.py"]
+
+    def text_for_check(path: pathlib.Path) -> str:
+        text = path.read_text(encoding="utf-8")
+        if path != _SRC / "_shared" / "mail_connection.py":
+            return text
+        # このモジュール docstring だけは、断絶導線を廃止した歴史的理由として引用を残す。
+        module_docstring = ast.parse(text).body[0]
+        assert isinstance(module_docstring, ast.Expr)
+        assert isinstance(module_docstring.value, ast.Constant)
+        assert isinstance(module_docstring.value.value, str)
+        assert module_docstring.end_lineno is not None
+        return "".join(text.splitlines(keepends=True)[module_docstring.end_lineno :])
+
     offenders = [
-        str(path.relative_to(_SRC))
-        for path in sorted(_SRC.rglob("*.py"))
-        if path.parent.name in {"mail_summary", "mail_followup"}
-        and "/teamagent connect" in path.read_text(encoding="utf-8")
+        str(path.relative_to(_TEAMAGENT_SRC))
+        for path in sorted(paths)
+        if "/teamagent connect" in text_for_check(path)
     ]
     assert offenders == []
 

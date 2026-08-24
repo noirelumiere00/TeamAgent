@@ -47,6 +47,7 @@ from teamagent.skills._shared.mail_compose import (
     gmail_thread_url,
     should_skip_mail,
 )
+from teamagent.skills._shared.mail_connection import CONNECT_SUFFIX, REAUTH_NEEDED_MESSAGE
 from teamagent.skills._shared.mail_history import (
     counterpart_history_section,
     fetch_counterpart_history,
@@ -90,8 +91,9 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
     name: ClassVar[str] = "mail_reply"
     description: ClassVar[str] = (
         "本人受信箱の指定クライアントの直近メールへの返信案を起草し、Gmail の下書きとして"
-        "保存する（送信はしない＝本人が確認して送信）。本人が /teamagent connect で"
-        "gmail.modify を認可済みの時のみ使える。"
+        "保存する（送信はしない＝本人が確認して送信）。利用前に"
+        + CONNECT_SUFFIX
+        + "gmail.modify を認可済みの時のみ使える。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
         "必ず含める（mcp 境界の本人解決鍵）。"
@@ -264,17 +266,12 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             raise PermissionError("TokenStore が未設定です（本 Skill は本人連携前提）")
         token = self._token_store.get(requester)
         if token is None:
-            raise PermissionError(
-                "メール連携が未完了です（/teamagent connect で自分の Google を認可してください）"
-            )
+            raise PermissionError("下書き作成には" + CONNECT_SUFFIX)
         try:
             # readonly=False = gmail.modify。drafts.create を使う（send/delete は denylist 封鎖）。
             return GmailClient.from_user_token(token, readonly=False)
         except ValueError as e:
-            raise PermissionError(
-                "メール連携の認証情報を解決できませんでした。"
-                "/teamagent connect で自分の Google を認可し直してください。"
-            ) from e
+            raise PermissionError(REAUTH_NEEDED_MESSAGE) from e
 
     def _find_target(
         self,
@@ -348,8 +345,9 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             # 例: readonly のみで connect 済み → gmail.modify 不足で 403。再連携に寄せる。
             logger.warning("mail_reply_create_draft_failed", request_id=request_id)
             raise PermissionError(
-                "下書きの作成に失敗しました。`/teamagent connect` で Google を再認可"
-                "（メールの下書き作成権限を許可）してから、もう一度お試しください。"
+                "下書きの作成に失敗しました。下書き作成権限を許可するため、もう一度"
+                + CONNECT_SUFFIX
+                + "連携後、お試しください。"
             ) from e
         return draft.id
 
