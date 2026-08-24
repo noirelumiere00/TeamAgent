@@ -500,3 +500,60 @@ def test_production_freeze_points_at_the_persistent_deny_and_root_gap() -> None:
     enforcement = _freeze_doc()["production_deployment_freeze"]["enforcement"]
     assert "activation_freeze_policy.tf" in enforcement
     assert "root" in enforcement and "SCP" in enforcement
+
+
+# ── Freeze v2 の scope 定義（root は break-glass 例外） ──────────────────────
+
+
+def test_freeze_v2_scope_is_not_claimed_to_be_mechanically_complete() -> None:
+    """「production mutation が機械的に不可能」とは主張しない（2026-08-24 裁定）。
+
+    root は identity policy をバイパスするため deny できない。誤った安心を
+    与えないよう、宣言の文言レベルで固定する。
+    """
+    scope = _freeze_doc()["generation_publisher_freeze"]["v2"]["scope_definition"]
+    assert "機械的に不可能な状態」ではない" in scope["statement"]
+    assert "break-glass" in scope["statement"]
+    components = scope["components"]
+    assert len(components) == 4
+    joined = "\n".join(components)
+    assert "non-root" in joined
+    assert "break-glass" in joined
+    assert "root credential" in joined and "禁止" in joined
+    assert "CloudTrail" in joined and "0" in joined
+
+
+def test_root_residual_risk_is_explicitly_left_open() -> None:
+    """SCP / root key 無効化を activation のついでにやらないことを明記する。"""
+    scope = _freeze_doc()["generation_publisher_freeze"]["v2"]["scope_definition"]
+    assert "SCP" in scope["residual_risk"]
+    assert "ついでにはやらない" in scope["residual_risk"]
+
+
+def test_root_baseline_is_recorded_with_measurements() -> None:
+    """監視の基準となる root mutation ベースラインが実測つきで残っている。"""
+    baseline = _freeze_doc()["generation_publisher_freeze"]["v2"]["scope_definition"][
+        "root_mutation_baseline"
+    ]
+    assert baseline["since_2026_07_01"]["total"] == 64
+    assert baseline["since_freeze_v1_window_2026_08_20T09_15_00Z"]["total"] == 0
+    assert baseline["since_last_violation_2026_08_21T08_54_16Z"]["total"] == 0
+
+
+def test_monitored_events_cover_every_deny_surface_action_family() -> None:
+    """監視対象 event が freeze policy の deny surface を取りこぼさない。"""
+    events = set(
+        _freeze_doc()["generation_publisher_freeze"]["v2"]["scope_definition"]["monitored_events"]
+    )
+    for required in (
+        "RegisterTaskDefinition",
+        "DeregisterTaskDefinition",
+        "UpdateService",
+        "PutTargets",
+        "PutRule",
+        "RemoveTargets",
+        "UpdateFunctionConfiguration",
+        "StartBuild",
+        "UpdateProject",
+    ):
+        assert required in events, required

@@ -123,7 +123,35 @@ hard control にしない）。
 | role | runtime_automation | manage-a/b が ECS/events/lambda/codebuild の mutation を許可 |
 | role | codebuild_launcher / approval_caller / openclaw_publisher / release_launcher / release_control_updater / image_deployment_gate / media_cutover_attestor / tiktok_build_launcher | StartBuild 経由の generation publish 経路（CloudTrail + repo policy census） |
 
-### 🔴 root は止められない
+### 🔴 Freeze v2 の正確な定義（root は break-glass 例外）
+
+**「production mutation が機械的に不可能な状態」とは呼ばない**（2026-08-24 ユーザー裁定）:
+
+```
+Freeze v2 =
+  enumerated non-root deployment principals が mechanical に deny される
+  + root は explicit break-glass exception
+  + freeze 期間中は root credential / session の使用を禁止（運用規律）
+  + CloudTrail で root mutation = 0 を継続監視
+```
+
+root の残存リスクは**未解決のまま明示的に残す**。SCP 導入と root key の無効化 / 削除は
+この activation のついでにはやらない（別スコープ）。
+
+継続監視:
+
+```bash
+python3 infra/deploy/root_mutation_monitor.py --since <Freeze v2 境界の UTC 時刻>
+```
+
+CloudTrail API が失敗したら「0 件」ではなく **検査不能=違反扱い**で非ゼロ終了する
+（ExpiredToken を空結果と誤読して偽 green を出した実害があるため）。
+
+**root mutation ベースライン（2026-08-24 実測）**: 2026-07-01 以降で 64 件
+（DeregisterTaskDefinition 40 / PutTargets 23 / PutRule 1、最新 2026-07-17T17:55 JST）。
+**freeze v1 窓（08-20T09:15Z）以降は 0 件**。監視はこの 0 を維持しているかを見る。
+
+### root は identity policy では止められない
 
 root は **identity-based policy と permissions boundary をバイパス**する。
 CloudTrail 実測でも root が `PutTargets` ×23 / `DeregisterTaskDefinition` ×40 を実行している。
