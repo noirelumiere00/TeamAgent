@@ -94,7 +94,45 @@
         "S3 codebuild-buildspecs/* の list-object-versions で境界候補時刻以降の publish が 0 件",
         "CloudTrail の UpdateProject / StartBuild が境界候補時刻以降 0 件",
         "本ファイルの state が active になっており、frozen surface の変更が CI で落ちること"
-      ]
+      ],
+      "scope_definition": {
+        "statement": "Freeze v2 は「production mutation が機械的に不可能な状態」ではない。enumerated non-root deployment principals への mechanical deny + root break-glass exception として定義する（2026-08-24 ユーザー裁定）。",
+        "components": [
+          "enumerated non-root deployment principals が persistent explicit-deny で機械的に拒否される",
+          "root は explicit break-glass exception（identity policy をバイパスするため deny 不能）",
+          "freeze 期間中は root credential / root session の使用を禁止する（運用規律）",
+          "CloudTrail で root mutation = 0 を継続監視する"
+        ],
+        "residual_risk": "root は本 policy で止まらない。SCP 導入と root key の無効化 / 削除は この activation のついでにはやらない（別スコープの未解決課題として明示的に残す）。",
+        "root_baseline_measured_at": "2026-08-24T06:5x:00Z（AIIAdev read-only）",
+        "root_mutation_baseline": {
+          "since_2026_07_01": {
+            "total": 64,
+            "DeregisterTaskDefinition": 40,
+            "PutTargets": 23,
+            "PutRule": 1,
+            "latest_event": "2026-07-17T17:55:26+09:00"
+          },
+          "since_freeze_v1_window_2026_08_20T09_15_00Z": {
+            "total": 0
+          },
+          "since_last_violation_2026_08_21T08_54_16Z": {
+            "total": 0
+          },
+          "note": "root の mutation は 2026-07-17 が最後で、freeze v1 窓以降は 0 件。監視はこの 0 を維持しているかを見る。"
+        },
+        "monitored_events": [
+          "RegisterTaskDefinition",
+          "DeregisterTaskDefinition",
+          "UpdateService",
+          "PutTargets",
+          "PutRule",
+          "RemoveTargets",
+          "UpdateFunctionConfiguration",
+          "StartBuild",
+          "UpdateProject"
+        ]
+      }
     }
   },
   "frozen_change_surface": {
