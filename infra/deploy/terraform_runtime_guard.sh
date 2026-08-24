@@ -10039,6 +10039,169 @@ verify_receipt() {
 }
 
 
+# ── PR2-A0.3.2: live snapshot 注入の共有経路 ─────────────────────────────────
+# 通常 guarded plan と adopt-plan が「live snapshot → CORE_JSON → live-derived vars →
+# terraform への注入」を同一コードで行うための唯一の実装。第二実装は禁止で、
+# `-var=runtime_guard_live=` の構築はこのファイル内で build_live_injection_args だけが
+# 持つ（契約テストが出現回数 1 を固定している）。共有コードを消すと両経路が同時に壊れる。
+#
+# sync_live_world_from_snapshot: live snapshot から LIVE_* / DESIRED_*（sync では
+# desired == live）/ rule 状態 / epoch / intent id を導出して globals へ置く。
+# migration 経路はこの直後に DESIRED_* を上書きする（通常経路のみ）。
+sync_live_world_from_snapshot() {
+  local live="$1"
+  LIVE_OPENCLAW_IMAGE="$(jq -er '.taskdefs.openclaw.image' "$live")"
+  LIVE_MCP_IMAGE="$(jq -er '.taskdefs.mcp.image' "$live")"
+  LIVE_X_IMAGE="$(jq -er '.taskdefs.x_buzz.image' "$live")"
+  LIVE_TIKTOK_IMAGE="$(jq -er '.taskdefs.tiktok.image' "$live")"
+  LIVE_RULE_STATES="$(jq -c '{
+    ingest:.rules.ingest.critical.state,
+    morning:.rules.morning.critical.state,
+    canary:.rules.canary.critical.state
+  }' "$live")"
+
+  MODE="sync"
+  MIGRATION_KIND=""
+  MIGRATION_JSON=""
+  MIGRATION_CONTRACT_SHA256=""
+  REVIEWED_PLAN_SHA256=""
+  PREFLIGHT_SHA256=""
+  REQUIRED_MIGRATION_ID=""
+  REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256=""
+  DESIRED_OPENCLAW_IMAGE="$LIVE_OPENCLAW_IMAGE"
+  DESIRED_MCP_IMAGE="$LIVE_MCP_IMAGE"
+  DESIRED_X_IMAGE="$LIVE_X_IMAGE"
+  DESIRED_TIKTOK_IMAGE="$LIVE_TIKTOK_IMAGE"
+  DESIRED_CONNECT_WEB_IMAGE="$(
+    jq -er '.taskdefs.connect_web.image' "$live"
+  )"
+  DESIRED_INGEST_IMAGE="$(
+    jq -er '.taskdefs.ingest.image' "$live"
+  )"
+  DESIRED_MORNING_DIGEST_IMAGE="$(
+    jq -er '.taskdefs.morning.image' "$live"
+  )"
+  DESIRED_CANARY_IMAGE="$(
+    jq -er '.taskdefs.canary.image' "$live"
+  )"
+  DESIRED_INGEST_RULE="$(jq -r '.ingest == "ENABLED"' <<< "$LIVE_RULE_STATES")"
+  DESIRED_MORNING_RULE="$(jq -r '.morning == "ENABLED"' <<< "$LIVE_RULE_STATES")"
+  DESIRED_CANARY_RULE="$(jq -r '.canary == "ENABLED"' <<< "$LIVE_RULE_STATES")"
+  TRANSITION_EPOCH="$(date +%s)"
+  IMAGE_DEPLOYMENT_INTENT_ID="$(new_uuid_v4)"
+}
+
+# build_live_injection_args: CORE_JSON と live-derived overlay を構築し、terraform へ
+# 渡す注入引数列を LIVE_INJECTION_TF_ARGS へ置く。呼び出し前提は
+# sync_live_world_from_snapshot（+ migration 経路なら DESIRED_* 上書き）済みであること。
+# sync では overlay（consumer manifest + HMAC deployed 世代）も生成し、改竄検出用に
+# SYNC_DERIVED_VAR_SHA256 / SYNC_DERIVED_VAR_IDENTITY を採取する（plan 後に呼び出し側が
+# 再照合する）。
+build_live_injection_args() {
+  local live="$1" core_out="$2" state_full="$3" derived_dir="$4"
+  ensure_tmp
+  core_from_snapshot \
+    "$live" "$core_out" "$MODE" "$MIGRATION_ID" \
+    "$DESIRED_OPENCLAW_IMAGE" "$DESIRED_MCP_IMAGE" "$DESIRED_X_IMAGE" \
+    "$DESIRED_TIKTOK_IMAGE" \
+    "$DESIRED_CONNECT_WEB_IMAGE" "$DESIRED_INGEST_IMAGE" \
+    "$DESIRED_MORNING_DIGEST_IMAGE" "$DESIRED_CANARY_IMAGE" \
+    "$PREFLIGHT_SHA256" "$TRANSITION_EPOCH" \
+    "$DESIRED_INGEST_RULE" "$DESIRED_MORNING_RULE" "$DESIRED_CANARY_RULE" \
+    "$VERSIONING_RECEIPT_SHA256" "$LOG_CUTOVER_CONTRACT_SHA256" \
+    "$REQUIRED_MIGRATION_ID" \
+    "$REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256"
+  CORE_JSON="$(jq -c . "$core_out")"
+  SYNC_DERIVED_VAR_FILE=""
+  SYNC_DERIVED_VAR_SHA256=""
+  SYNC_DERIVED_VAR_IDENTITY=""
+  if [ "$MODE" = "sync" ]; then
+    derive_live_hmac_terraform_inputs \
+      "$live" "$TMP_ROOT/hmac-terraform-inputs.json"
+    MAIL_HMAC_DEPLOYED_PRIMARY="$(
+      jq -er '.mail_action_hmac_deployed_primary_generation' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    MAIL_HMAC_DEPLOYED_PREVIOUS="$(
+      jq -r '.mail_action_hmac_deployed_previous_generation' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    MAIL_HMAC_DEPLOYED_T0="$(
+      jq -r '.mail_action_hmac_deployed_rotation_started_at' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    REPORT_HMAC_DEPLOYED_PRIMARY="$(
+      jq -er '.report_link_hmac_deployed_primary_generation' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    REPORT_HMAC_DEPLOYED_PREVIOUS="$(
+      jq -r '.report_link_hmac_deployed_previous_generation' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    REPORT_HMAC_DEPLOYED_T0="$(
+      jq -r '.report_link_hmac_deployed_rotation_started_at' \
+        "$TMP_ROOT/hmac-terraform-inputs.json"
+    )"
+    build_sync_image_deployment_consumer_manifest \
+      "$state_full" "$live" \
+      "$core_out" \
+      "$TMP_ROOT/sync-consumer-manifest.json"
+    SYNC_DERIVED_VAR_FILE="$derived_dir/sync-derived.tfvars.json"
+    jq -n -S \
+      --slurpfile manifest "$TMP_ROOT/sync-consumer-manifest.json" \
+      --arg mail_primary "$MAIL_HMAC_DEPLOYED_PRIMARY" \
+      --arg mail_previous "$MAIL_HMAC_DEPLOYED_PREVIOUS" \
+      --arg mail_t0 "$MAIL_HMAC_DEPLOYED_T0" \
+      --arg report_primary "$REPORT_HMAC_DEPLOYED_PRIMARY" \
+      --arg report_previous "$REPORT_HMAC_DEPLOYED_PREVIOUS" \
+      --arg report_t0 "$REPORT_HMAC_DEPLOYED_T0" '
+      {
+        image_deployment_consumer_manifest:$manifest[0],
+        image_release_receipt_catalog:{},
+        image_release_consumer_receipt_bindings:{},
+        mail_action_hmac_deployed_primary_generation:$mail_primary,
+        mail_action_hmac_deployed_previous_generation:$mail_previous,
+        mail_action_hmac_deployed_rotation_started_at:$mail_t0,
+        report_link_hmac_deployed_primary_generation:$report_primary,
+        report_link_hmac_deployed_previous_generation:$report_previous,
+        report_link_hmac_deployed_rotation_started_at:$report_t0
+      }
+    ' > "$SYNC_DERIVED_VAR_FILE" ||
+      die "sync用live-derived Terraform variable overlayを生成できません"
+    chmod 600 "$SYNC_DERIVED_VAR_FILE"
+    SYNC_DERIVED_VAR_SHA256="$(
+      sha256_file "$SYNC_DERIVED_VAR_FILE"
+    )"
+    SYNC_DERIVED_VAR_IDENTITY="$(
+      stat_identity "$SYNC_DERIVED_VAR_FILE"
+    )"
+  fi
+  select_terraform_media_image_inputs \
+    "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
+  LIVE_INJECTION_TF_ARGS=(
+    "-var=runtime_guard_live=$CORE_JSON"
+    "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
+    "-var=mcp_image=$DESIRED_MCP_IMAGE"
+    "-var=x_buzz_image=$DESIRED_X_IMAGE"
+    "-var=media_worker_image=$TF_MEDIA_WORKER_IMAGE"
+    "-var=tiktok_acquire_image=$TF_TIKTOK_ACQUIRE_IMAGE"
+    "-var=enable_media_worker=true"
+    "-var=enable_tiktok_acquire=true"
+    "-var=ingest_rule_enabled=$DESIRED_INGEST_RULE"
+    "-var=morning_digest_rule_enabled=$DESIRED_MORNING_RULE"
+    "-var=canary_rule_enabled=$DESIRED_CANARY_RULE"
+    "-var=require_alarm_delivery=true"
+    "-var=image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID"
+    "-var=hmac_preflight_epoch_s=$TRANSITION_EPOCH"
+  )
+  if [ "$MODE" = "sync" ]; then
+    LIVE_INJECTION_TF_ARGS+=(
+      "-var-file=$SYNC_DERIVED_VAR_FILE"
+    )
+  fi
+}
+
+
 # ── PR2-A0: Supply-Chain Adopt（既存 sync / runtime migration / activation とは
 # 完全に独立した経路）。adopt は「AWS 実体を一切変更せず Terraform state だけを実態へ
 # 追いつかせる」操作で、許可範囲は sync より狭い。既存 3 経路の validator・allowlist には
@@ -10174,9 +10337,27 @@ adopt_plan() {
     die "adopt 前の S3 integrity snapshot に失敗しました"
   chmod 600 "$out_dir/integrity-before.json"
 
+  # PR2-A0.3.2: 通常 guarded plan と同一の live snapshot / CORE_JSON / live-derived vars
+  # 注入を共有実装から reuse する。注入なしの plan は runtime_guard_verified の前提
+  # 17 項を評価できず、preflight を「純粋 forget+import」にできない。adopt 専用の
+  # 第二実装は禁止（-var=runtime_guard_live= の構築は build_live_injection_args のみ）。
+  # 通常経路の受領 receipt 検査・migration 分岐・media cutover gate は deployment
+  # 承認の機構であり、AWS 実体変更ゼロが validator で強制される adopt では対象外。
+  snapshot_live "$out_dir/live-before.json"
+  chmod 600 "$out_dir/live-before.json"
+  sync_live_world_from_snapshot "$out_dir/live-before.json"
+  build_live_injection_args \
+    "$out_dir/live-before.json" "$out_dir/adopt-core.json" \
+    "$out_dir/state-backup.json" "$out_dir"
+  chmod 600 "$out_dir/adopt-core.json"
+
   terraform -chdir="$TF_DIR" plan -input=false -lock-timeout=5m \
-    "-var-file=$var_file" -out="$out_dir/adopt.tfplan" ||
+    "-var-file=$var_file" "${LIVE_INJECTION_TF_ARGS[@]}" \
+    -out="$out_dir/adopt.tfplan" ||
     die "adopt の terraform plan に失敗しました"
+  [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = "$SYNC_DERIVED_VAR_SHA256" ] &&
+    [ "$(stat_identity "$SYNC_DERIVED_VAR_FILE")" = "$SYNC_DERIVED_VAR_IDENTITY" ] ||
+    die "adopt plan 中に live-derived variable overlay が差替えられました"
   terraform -chdir="$TF_DIR" show -json "$out_dir/adopt.tfplan" > "$out_dir/adopt-plan.json"
   chmod 600 "$out_dir/adopt.tfplan" "$out_dir/adopt-plan.json"
 
@@ -10189,6 +10370,14 @@ adopt_plan() {
   python3 "$ADOPT_INTEGRITY" crosscheck --snapshot "$out_dir/integrity-before.json" \
     --plan "$out_dir/adopt-plan.json" --mapping "$ADOPT_MAPPING" ||
     die "adopt plan が live の AWS 実体と一致しません（plan は破棄してください）"
+
+  # 通常経路と同じ TOCTOU 防止: plan が bind した live snapshot が plan 完了時点でも
+  # そのままであることを要求する（plan 中の別デプロイは fail-closed）。
+  snapshot_live "$out_dir/live-after.json"
+  chmod 600 "$out_dir/live-after.json"
+  [ "$(sha256_file "$out_dir/live-before.json")" = \
+    "$(sha256_file "$out_dir/live-after.json")" ] ||
+    die "adopt plan 作成中に live runtime が変化しました（plan は破棄してください）"
 
   python3 "$ADOPT_BINDING" record \
     --repo-root "$REPO_ROOT" --tf-dir "$TF_DIR" --out-dir "$out_dir" \
@@ -11417,45 +11606,9 @@ case "$COMMAND" in
     if [ -n "$ALARM_MIGRATION_RECEIPT" ]; then
       verify_alarm_migration_final_receipt "$ALARM_MIGRATION_RECEIPT"
     fi
-    LIVE_OPENCLAW_IMAGE="$(jq -er '.taskdefs.openclaw.image' "$TMP_ROOT/live-before.json")"
-    LIVE_MCP_IMAGE="$(jq -er '.taskdefs.mcp.image' "$TMP_ROOT/live-before.json")"
-    LIVE_X_IMAGE="$(jq -er '.taskdefs.x_buzz.image' "$TMP_ROOT/live-before.json")"
-    LIVE_TIKTOK_IMAGE="$(jq -er '.taskdefs.tiktok.image' "$TMP_ROOT/live-before.json")"
-    LIVE_RULE_STATES="$(jq -c '{
-      ingest:.rules.ingest.critical.state,
-      morning:.rules.morning.critical.state,
-      canary:.rules.canary.critical.state
-    }' "$TMP_ROOT/live-before.json")"
-
-    MODE="sync"
-    MIGRATION_KIND=""
-    MIGRATION_JSON=""
-    MIGRATION_CONTRACT_SHA256=""
-    REVIEWED_PLAN_SHA256=""
-    PREFLIGHT_SHA256=""
-    REQUIRED_MIGRATION_ID=""
-    REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256=""
-    DESIRED_OPENCLAW_IMAGE="$LIVE_OPENCLAW_IMAGE"
-    DESIRED_MCP_IMAGE="$LIVE_MCP_IMAGE"
-    DESIRED_X_IMAGE="$LIVE_X_IMAGE"
-    DESIRED_TIKTOK_IMAGE="$LIVE_TIKTOK_IMAGE"
-    DESIRED_CONNECT_WEB_IMAGE="$(
-      jq -er '.taskdefs.connect_web.image' "$TMP_ROOT/live-before.json"
-    )"
-    DESIRED_INGEST_IMAGE="$(
-      jq -er '.taskdefs.ingest.image' "$TMP_ROOT/live-before.json"
-    )"
-    DESIRED_MORNING_DIGEST_IMAGE="$(
-      jq -er '.taskdefs.morning.image' "$TMP_ROOT/live-before.json"
-    )"
-    DESIRED_CANARY_IMAGE="$(
-      jq -er '.taskdefs.canary.image' "$TMP_ROOT/live-before.json"
-    )"
-    DESIRED_INGEST_RULE="$(jq -r '.ingest == "ENABLED"' <<< "$LIVE_RULE_STATES")"
-    DESIRED_MORNING_RULE="$(jq -r '.morning == "ENABLED"' <<< "$LIVE_RULE_STATES")"
-    DESIRED_CANARY_RULE="$(jq -r '.canary == "ENABLED"' <<< "$LIVE_RULE_STATES")"
-    TRANSITION_EPOCH="$(date +%s)"
-    IMAGE_DEPLOYMENT_INTENT_ID="$(new_uuid_v4)"
+    # PR2-A0.3.2: live からの世界導出は adopt-plan と共有の単一実装
+    #（sync_live_world_from_snapshot）。migration 経路は直後に DESIRED_* を上書きする。
+    sync_live_world_from_snapshot "$TMP_ROOT/live-before.json"
 
     if [ -n "$MIGRATION_ID" ]; then
       MODE="migration"
@@ -11521,84 +11674,11 @@ case "$COMMAND" in
         "$MIGRATION_CONTRACT_SHA256" "$REVIEWED_PLAN_SHA256"
     fi
 
-    core_from_snapshot \
-      "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" "$MODE" "$MIGRATION_ID" \
-      "$DESIRED_OPENCLAW_IMAGE" "$DESIRED_MCP_IMAGE" "$DESIRED_X_IMAGE" \
-      "$DESIRED_TIKTOK_IMAGE" \
-      "$DESIRED_CONNECT_WEB_IMAGE" "$DESIRED_INGEST_IMAGE" \
-      "$DESIRED_MORNING_DIGEST_IMAGE" "$DESIRED_CANARY_IMAGE" \
-      "$PREFLIGHT_SHA256" "$TRANSITION_EPOCH" \
-      "$DESIRED_INGEST_RULE" "$DESIRED_MORNING_RULE" "$DESIRED_CANARY_RULE" \
-      "$VERSIONING_RECEIPT_SHA256" "$LOG_CUTOVER_CONTRACT_SHA256" \
-      "$REQUIRED_MIGRATION_ID" \
-      "$REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256"
-    CORE_JSON="$(jq -c . "$TMP_ROOT/core.json")"
-    SYNC_DERIVED_VAR_FILE=""
-    SYNC_DERIVED_VAR_SHA256=""
-    SYNC_DERIVED_VAR_IDENTITY=""
-    if [ "$MODE" = "sync" ]; then
-      derive_live_hmac_terraform_inputs \
-        "$TMP_ROOT/live-before.json" "$TMP_ROOT/hmac-terraform-inputs.json"
-      MAIL_HMAC_DEPLOYED_PRIMARY="$(
-        jq -er '.mail_action_hmac_deployed_primary_generation' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      MAIL_HMAC_DEPLOYED_PREVIOUS="$(
-        jq -r '.mail_action_hmac_deployed_previous_generation' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      MAIL_HMAC_DEPLOYED_T0="$(
-        jq -r '.mail_action_hmac_deployed_rotation_started_at' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      REPORT_HMAC_DEPLOYED_PRIMARY="$(
-        jq -er '.report_link_hmac_deployed_primary_generation' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      REPORT_HMAC_DEPLOYED_PREVIOUS="$(
-        jq -r '.report_link_hmac_deployed_previous_generation' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      REPORT_HMAC_DEPLOYED_T0="$(
-        jq -r '.report_link_hmac_deployed_rotation_started_at' \
-          "$TMP_ROOT/hmac-terraform-inputs.json"
-      )"
-      build_sync_image_deployment_consumer_manifest \
-        "$TMP_ROOT/state-before-full.json" "$TMP_ROOT/live-before.json" \
-        "$TMP_ROOT/core.json" \
-        "$TMP_ROOT/sync-consumer-manifest.json"
-      SYNC_DERIVED_VAR_FILE="$STAGE/sync-derived.tfvars.json"
-      jq -n -S \
-        --slurpfile manifest "$TMP_ROOT/sync-consumer-manifest.json" \
-        --arg mail_primary "$MAIL_HMAC_DEPLOYED_PRIMARY" \
-        --arg mail_previous "$MAIL_HMAC_DEPLOYED_PREVIOUS" \
-        --arg mail_t0 "$MAIL_HMAC_DEPLOYED_T0" \
-        --arg report_primary "$REPORT_HMAC_DEPLOYED_PRIMARY" \
-        --arg report_previous "$REPORT_HMAC_DEPLOYED_PREVIOUS" \
-        --arg report_t0 "$REPORT_HMAC_DEPLOYED_T0" '
-        {
-          image_deployment_consumer_manifest:$manifest[0],
-          image_release_receipt_catalog:{},
-          image_release_consumer_receipt_bindings:{},
-          mail_action_hmac_deployed_primary_generation:$mail_primary,
-          mail_action_hmac_deployed_previous_generation:$mail_previous,
-          mail_action_hmac_deployed_rotation_started_at:$mail_t0,
-          report_link_hmac_deployed_primary_generation:$report_primary,
-          report_link_hmac_deployed_previous_generation:$report_previous,
-          report_link_hmac_deployed_rotation_started_at:$report_t0
-        }
-      ' > "$SYNC_DERIVED_VAR_FILE" ||
-        die "sync用live-derived Terraform variable overlayを生成できません"
-      chmod 600 "$SYNC_DERIVED_VAR_FILE"
-      SYNC_DERIVED_VAR_SHA256="$(
-        sha256_file "$SYNC_DERIVED_VAR_FILE"
-      )"
-      SYNC_DERIVED_VAR_IDENTITY="$(
-        stat_identity "$SYNC_DERIVED_VAR_FILE"
-      )"
-    fi
-    select_terraform_media_image_inputs \
-      "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
+    # PR2-A0.3.2: CORE_JSON / live-derived vars の構築と注入引数列は adopt-plan と
+    # 共有の単一実装（build_live_injection_args）。plan 固有の flag だけをここで足す。
+    build_live_injection_args \
+      "$TMP_ROOT/live-before.json" "$TMP_ROOT/core.json" \
+      "$TMP_ROOT/state-before-full.json" "$STAGE"
     TF_ARGS=(
       plan
       -input=false
@@ -11606,26 +11686,8 @@ case "$COMMAND" in
       -lock-timeout=5m
       "-var-file=$STAGE_VAR"
       "-out=$STAGE_PLAN"
-      "-var=runtime_guard_live=$CORE_JSON"
-      "-var=openclaw_image=$DESIRED_OPENCLAW_IMAGE"
-      "-var=mcp_image=$DESIRED_MCP_IMAGE"
-      "-var=x_buzz_image=$DESIRED_X_IMAGE"
-      "-var=media_worker_image=$TF_MEDIA_WORKER_IMAGE"
-      "-var=tiktok_acquire_image=$TF_TIKTOK_ACQUIRE_IMAGE"
-      "-var=enable_media_worker=true"
-      "-var=enable_tiktok_acquire=true"
-      "-var=ingest_rule_enabled=$DESIRED_INGEST_RULE"
-      "-var=morning_digest_rule_enabled=$DESIRED_MORNING_RULE"
-      "-var=canary_rule_enabled=$DESIRED_CANARY_RULE"
-      "-var=require_alarm_delivery=true"
-      "-var=image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID"
-      "-var=hmac_preflight_epoch_s=$TRANSITION_EPOCH"
+      "${LIVE_INJECTION_TF_ARGS[@]}"
     )
-    if [ "$MODE" = "sync" ]; then
-      TF_ARGS+=(
-        "-var-file=$SYNC_DERIVED_VAR_FILE"
-      )
-    fi
     terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"
     if [ "$MODE" = "sync" ]; then
       [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \

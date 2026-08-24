@@ -1679,3 +1679,112 @@ def test_adopt_identity_resolver_ensures_tmp_before_writing_evidence() -> None:
     ]
     assert "ensure_tmp" in resolver
     assert resolver.index("ensure_tmp") < resolver.index("assert_trusted_automation_identity")
+
+
+# ── PR2-A0.3.2: live snapshot 注入の共有経路 ─────────────────────────────────
+#
+# adopt-plan は通常 guarded plan と同一の live snapshot / CORE_JSON / live-derived vars
+# 注入を共有実装から reuse する（Gate 4 裁定）。第二実装は禁止で、共有コードを消すと
+# 通常経路と adopt 経路の契約が同時に赤くなることをここで固定する。
+
+
+def _shared_injection_functions() -> str:
+    """共有実装（adopt セクション直前に定義される 2 関数）の本文。"""
+    body = GUARD.read_text(encoding="utf-8")
+    start = body.index("sync_live_world_from_snapshot() {")
+    return body[start : body.index("ADOPT_MAPPING=")]
+
+
+def _adopt_plan_body() -> str:
+    section = _guard_adopt_section()
+    return section[section.index("adopt_plan() {") : section.index("adopt_apply() {")]
+
+
+def test_runtime_guard_live_injection_has_exactly_one_implementation() -> None:
+    """`-var=runtime_guard_live=` の構築は build_live_injection_args の 1 箇所だけ。
+
+    2 箇所目が生えたらそれは第二実装（禁止）。共有関数を消しても、通常経路 /
+    adopt 経路の呼び出し契約テストが両方赤くなる。
+    """
+    stripped = _strip_comments(GUARD.read_text(encoding="utf-8"))
+    assert stripped.count("-var=runtime_guard_live=") == 1
+    assert "-var=runtime_guard_live=" in _shared_injection_functions()
+    for fn in ("sync_live_world_from_snapshot() {", "build_live_injection_args() {"):
+        assert stripped.count(fn) == 1
+
+
+def test_adopt_plan_reuses_the_shared_injection_path() -> None:
+    """adopt-plan は共有実装を呼び、注入引数列を terraform plan に乗せる。"""
+    body = _strip_comments(_adopt_plan_body())
+    assert "snapshot_live" in body
+    assert "sync_live_world_from_snapshot" in body
+    assert "build_live_injection_args" in body
+    assert '"${LIVE_INJECTION_TF_ARGS[@]}"' in body
+    # var-file の後に注入（CLI -var が優先され、desired == live の sync 世界で plan される）
+    plan_at = body.index('terraform -chdir="$TF_DIR" plan')
+    assert body.index('"-var-file=$var_file"', plan_at) < body.index(
+        '"${LIVE_INJECTION_TF_ARGS[@]}"', plan_at
+    )
+
+
+def test_normal_plan_dispatch_reuses_the_same_shared_functions() -> None:
+    """通常 guarded plan 側も同じ共有関数だけを使う（inline の旧実装が残っていない）。"""
+    body = GUARD.read_text(encoding="utf-8")
+    dispatch = _strip_comments(body[body.index('COMMAND="${1:-}"') :])
+    assert dispatch.count("sync_live_world_from_snapshot") == 1
+    assert dispatch.count("build_live_injection_args") == 1
+    assert '"${LIVE_INJECTION_TF_ARGS[@]}"' in dispatch
+    # 注入リテラルも overlay 構築も dispatch 側に残っていない（第二実装の残骸検出）
+    assert "-var=runtime_guard_live=" not in dispatch
+    assert "mail_action_hmac_deployed_primary_generation:$mail_primary" not in dispatch
+
+
+def test_shared_injection_builds_core_overlay_and_media_inputs() -> None:
+    """共有実装が CORE_JSON / sync overlay / media image 入力の全構築を持つ。"""
+    fns = _strip_comments(_shared_injection_functions())
+    for needle in (
+        "core_from_snapshot",
+        'CORE_JSON="$(jq -c . "$core_out")"',
+        "derive_live_hmac_terraform_inputs",
+        "build_sync_image_deployment_consumer_manifest",
+        "select_terraform_media_image_inputs",
+        "image_deployment_consumer_manifest:$manifest[0]",
+        "SYNC_DERIVED_VAR_SHA256",
+    ):
+        assert needle in fns, needle
+
+
+def test_adopt_plan_checks_overlay_tamper_and_live_toctou() -> None:
+    """adopt-plan は通常経路と同じ overlay 改竄検査と live before/after 比較を行う。
+
+    順序契約: state backup → live-before → 世界導出 → 注入構築 → plan →
+    overlay 再照合 → show → validator → crosscheck → live-after 比較 → binding 記録。
+    """
+    body = _strip_comments(_adopt_plan_body())
+    order = [
+        'state pull > "$out_dir/state-backup.json"',
+        'snapshot_live "$out_dir/live-before.json"',
+        "sync_live_world_from_snapshot",
+        "build_live_injection_args",
+        'terraform -chdir="$TF_DIR" plan',
+        '"$SYNC_DERIVED_VAR_SHA256"',
+        "show -json",
+        '"$ADOPT_VALIDATOR"',
+        "crosscheck",
+        'snapshot_live "$out_dir/live-after.json"',
+        '"$ADOPT_BINDING" record',
+    ]
+    positions = [body.index(needle) for needle in order]
+    assert positions == sorted(positions), "adopt_plan の順序契約が崩れています"
+    # live before/after は sha 比較で fail-closed
+    assert 'sha256_file "$out_dir/live-before.json"' in body
+    assert 'sha256_file "$out_dir/live-after.json"' in body
+
+
+def test_adopt_apply_does_not_replan_or_reinject() -> None:
+    """adopt-apply は保存済み plan の適用のみ（再 plan / 再注入は禁止のまま）。"""
+    section = _guard_adopt_section()
+    body = _strip_comments(section[section.index("adopt_apply() {") :])
+    assert "build_live_injection_args" not in body
+    assert "sync_live_world_from_snapshot" not in body
+    assert '-chdir="$TF_DIR" plan' not in body

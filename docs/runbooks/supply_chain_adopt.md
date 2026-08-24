@@ -92,6 +92,28 @@ Terraform version / workspace / var-file SHA / account / principal / git HEAD �
 
 ## 4. adopt の実行手順
 
+### 4-0. live snapshot 注入（PR2-A0.3.2。plan の前提）
+
+adopt-plan は通常 guarded plan と**同一の共有実装**
+（`sync_live_world_from_snapshot` → `build_live_injection_args`）で
+live snapshot → `CORE_JSON` → live-derived vars（consumer manifest / HMAC deployed 世代）を
+構築し、`-var=runtime_guard_live=` として terraform へ注入する。注入なしの plan は
+`runtime_guard_verified` の前提 17 項を評価できず必ず失敗し、preflight を
+「純粋 forget + import」にできない。**adopt 専用の第二実装は禁止**
+（注入リテラルの出現回数 1 を契約テストが固定）。
+
+通常経路のうち adopt が**意図して通らない**もの（除外の根拠つき）:
+
+| 除外 | 根拠 |
+|---|---|
+| 受領 receipt 検査（alarm / versioning / log readiness / migration） | deployment 承認の入力。adopt は deployment をしない（validator が remote-write 0 を強制） |
+| migration 分岐（DESIRED_* の上書き） | adopt は常に sync 相当（desired == live）。migration id を受け取る口が無い |
+| media cutover gate | cutover の進行承認機構。adopt では対象イメージ変更が起こり得ない |
+
+adopt-plan は同じ共有実装に加えて、通常経路と同型の
+overlay 改竄検査（plan 後の sha/stat 再照合）と live before/after 比較（TOCTOU 防止）を行う。
+どちらかが破れたら plan は破棄する。
+
 ### 4-1. plan（read-only。state backup と ownership discovery を含む）
 
 **guard を直接叩かず、承認済みの session bootstrap 経由で実行する。**
