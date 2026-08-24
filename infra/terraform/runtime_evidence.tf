@@ -728,6 +728,42 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
   }
 
 
+  # PR2-A0.2.2b: rds.tf の db_password secret version（managed resource）に対する
+  # provider read。secret の **値** を読む唯一の箇所で、2026-08-20T05:45:10Z の refresh で
+  # AccessDenied を実測している。A0.2.2a（non-secret read）とは意図的に別 PR / 別
+  # statement に分けている（secret 面の境界判断を独立にレビューするため）。
+  #
+  # scope: db_password の exact ARN 1 本のみ。6 桁 suffix を含む完全形で、
+  # ワイルドカード（-* / -??????）は使わない。guard 側の validate_exact_runtime_iam_plan
+  # も secretsmanager: を Allow する statement へ exact secret ARN を要求する。
+  #
+  # kms:Decrypt は **追加しない**。実測 2 点で不要と確定:
+  #   1. この secret の KmsKeyId は未設定 = AWS managed key
+  #      （alias/aws/secretsmanager = f512e1ea…, KeyManager=AWS）。その key policy が
+  #      Principal {"AWS":"*"} + kms:ViaService=secretsmanager.ap-northeast-1 +
+  #      kms:CallerAccount 条件で Decrypt を直接許可している（root 委譲ではない）
+  #   2. 対照実験: teamagent-dev-ecs-exec-mcp は同じ AWS managed key で暗号化された
+  #      teamagent/dev/database-url に対し GetSecretValue=allowed / kms:Decrypt=
+  #      implicitDeny のまま本番稼働している
+  # customer managed key へ移行した場合は exact key ARN で別途レビューすること。
+  #
+  # 取り扱い: この許可により plan / show -json が DB パスワードを内包し得る。
+  # 成果物は repo 外 0600・生 JSON をチャット / CI ログへ出さない・機械検証と
+  # redacted 要約のみ人間へ・作業後に破棄（docs/runbooks/secret_bearing_plan.md）。
+  # ARN は secret resource を参照せず literal で書く。理由 2 点:
+  #   1. Secrets Manager の 6 桁 suffix は AWS 生成で config から導出できない。guard の
+  #      exact_secret_arn は -[A-Za-z0-9]{6}$ を要求するため、ワイルドカードは契約違反
+  #   2. secret resource を参照すると bootstrap の reviewed closure へ managed resource が
+  #      流入し、bootstrap 供給契約まで書き換えが波及する（read grant のために広げない）
+  # secret を作り直すと suffix が変わり refresh が 403 で fail-closed する（検出可能）。
+  statement {
+    sid     = "ReadExactTerraformManagedSecretValue"
+    actions = ["secretsmanager:GetSecretValue"]
+    resources = [
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${var.project_name}/${var.environment}/db_password-ObO75F",
+    ]
+  }
+
   statement {
     sid       = "DecryptExactDeploymentGateEvidence"
     actions   = ["kms:Decrypt", "kms:DescribeKey"]
