@@ -155,6 +155,7 @@ EXPECTED_POST_CUT_MANAGED = frozenset(
 
 EXPECTED_POST_CUT_DATA = frozenset(
     """
+    data.aws_caller_identity.current
     data.aws_iam_policy_document.aiia_dev_no_direct_start_build
     data.aws_iam_policy_document.alarm_recipient_ack_signer
     data.aws_iam_policy_document.alarm_recipient_ack_signer_assume
@@ -336,7 +337,7 @@ def _post_cut_closure() -> tuple[set[str], set[str], dict[str, tuple[str, str]]]
 def test_post_cut_bootstrap_closure_is_the_exact_reviewed_graph() -> None:
     managed, data, _ = _post_cut_closure()
     assert len(EXPECTED_POST_CUT_MANAGED) == 138
-    assert len(EXPECTED_POST_CUT_DATA) == 44
+    assert len(EXPECTED_POST_CUT_DATA) == 45
     assert managed == EXPECTED_POST_CUT_MANAGED
     assert data == EXPECTED_POST_CUT_DATA
 
