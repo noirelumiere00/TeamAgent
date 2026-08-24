@@ -123,6 +123,33 @@ jobs:
       - name: Bandit (security scan)
         run: bandit -r src/teamagent -ll  # low+ severity 以上
 
+  activation-freeze:
+    name: activation freeze (frozen surface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # merge-base を解決するため full history が必要（shallow では base が引けない）
+          fetch-depth: 0
+
+      - name: Enforce generation freeze on the frozen change surface
+        # PR2-A0.x activation の generation publisher freeze は口頭合意だけでは 2 度破られた
+        # （2026-08-20 / 08-21）。18 generation inputs と publisher 判定パスの変更は、
+        # 同じ PR 内の unlock 宣言が無い限りここで落とす（fail-closed）。
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PR_BASE:-}" ]; then
+            base="$(git merge-base "$PR_BASE" HEAD)"
+          else
+            base="$(git rev-parse HEAD^ 2>/dev/null || git rev-parse HEAD)"
+          fi
+          echo "base=$base head=$(git rev-parse HEAD)"
+          python3 infra/deploy/activation_freeze_check.py status
+          python3 infra/deploy/activation_freeze_check.py \
+            assert-frozen-surface --base "$base" --head HEAD
+
   gitleaks:
     name: gitleaks (secrets scan)
     runs-on: ubuntu-latest

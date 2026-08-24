@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "description": "PR2-A0.x activation の freeze 宣言。口頭合意を機械強制へ格上げするための唯一の宣言ファイル。generation publisher freeze は 2 度破られた（2026-08-20 / 08-21 の 2 波）ため、v1 境界は失効。v2 境界は「最後に変更された時刻」ではなく「変更できない状態を確認した時刻」に置く（2026-08-24 ユーザー裁定）。",
+  "generation_publisher_freeze": {
+    "state": "pending_v2",
+    "state_values": [
+      "pending_v2",
+      "active",
+      "released"
+    ],
+    "v1": {
+      "started_at": "2026-08-20T09:15:00Z",
+      "status": "voided",
+      "voided_reason": "freeze 中に buildspec generation が 2 波 publish され、CodeBuild の参照も切り替えられた。口頭 freeze のみを hard safety control にしていたことが原因。",
+      "violations": [
+        {
+          "wave": 1,
+          "published_at": "2026-08-20T10:48:21Z",
+          "project": "teamagent-dev-mcp-source-publisher",
+          "key_sha256_prefix": "e663deeb929d518c",
+          "version_id": "Iq7B4nuFj0OFfphG4P_k7GxPYC3eyZDG"
+        },
+        {
+          "wave": 1,
+          "published_at": "2026-08-20T10:48:22Z",
+          "project": "teamagent-dev-image-attestor",
+          "key_sha256_prefix": "f5b84d0e8f95a751",
+          "version_id": "zrYU7KeCeijckcCDfO2JVmIa.itl7fj3"
+        },
+        {
+          "wave": 1,
+          "published_at": "2026-08-20T10:48:25Z",
+          "project": "teamagent-dev-image-promoter",
+          "key_sha256_prefix": "7fa0d7bde4a0dd17",
+          "version_id": "SQK_C.oy7ozlHQk.NC0w7Wr2wq3aDl7H"
+        },
+        {
+          "wave": 2,
+          "published_at": "2026-08-21T07:16:58Z",
+          "project": "teamagent-dev-mcp-source-publisher",
+          "key_sha256_prefix": "00f6dc3a2b640498",
+          "version_id": "E.2mnkmrcqaU5NsMUpUQ.eD3gbJbMO5W"
+        },
+        {
+          "wave": 2,
+          "published_at": "2026-08-21T07:16:59Z",
+          "project": "teamagent-dev-image-attestor",
+          "key_sha256_prefix": "dba4ce93929bca00",
+          "version_id": "jtz85oMW_z3Di043U4rAB2vl2pUDFJ1j"
+        },
+        {
+          "wave": 2,
+          "published_at": "2026-08-21T07:17:02Z",
+          "project": "teamagent-dev-image-promoter",
+          "key_sha256_prefix": "a624798aa0d6721b",
+          "version_id": "5EhsLumj236KGFAgAtC2UbF3TxN3s8mT"
+        }
+      ],
+      "codebuild_update_project_after_boundary": [
+        {
+          "wave": 1,
+          "window_jst": "2026-08-20 19:49:03 - 19:49:12",
+          "calls": 7,
+          "principal": "AIIAdev"
+        },
+        {
+          "wave": 2,
+          "window_jst": "2026-08-21 16:17:46 - 16:18:02",
+          "calls": 7,
+          "principal": "AIIAdev"
+        }
+      ]
+    },
+    "v2": {
+      "started_at": null,
+      "recorded_by": null,
+      "precondition": "publisher / deployment entry point が実際に停止し、他セッション・自動処理による generation publish と CodeBuild UpdateProject が発生しない状態を fresh read で確認した時点を境界とする。直近の変更時刻を自動的に境界にしてはならない。",
+      "evidence_required": [
+        "S3 codebuild-buildspecs/* の list-object-versions で境界候補時刻以降の publish が 0 件",
+        "CloudTrail の UpdateProject / StartBuild が境界候補時刻以降 0 件",
+        "本ファイルの state が active になっており、frozen surface の変更が CI で落ちること"
+      ]
+    }
+  },
+  "frozen_change_surface": {
+    "generation_inputs_source": "infra/deploy/buildspec_generation_inputs.json#inputs",
+    "additional_publisher_paths": [
+      "infra/deploy/supply_chain_adopt_integrity.py",
+      "infra/deploy/supply_chain_adopt_validate.py",
+      "infra/deploy/verify_generation_inputs.py"
+    ],
+    "note": "generation inputs（18 件）は manifest を単一の真実源として参照する。ここに列挙するのは manifest 外で publish/adopt の判定に効くファイルのみ。"
+  },
+  "unlock": {
+    "active": false,
+    "scope_paths": [],
+    "reason": null,
+    "gate": null,
+    "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。"
+  },
+  "production_deployment_freeze": {
+    "state": "active",
+    "started_at": "2026-08-20T09:15:00Z",
+    "note": "ECS taskdef 登録 / service td 更新 / 承認済み 8 flag / pipeline・admin デプロイ / taskdef ARN 参照 Lambda env / rebind consumer 参照先。state rebind 完了後も activation 完了まで解除しない。",
+    "scope_is_operational": true
+  },
+  "dev_merge_freeze": {
+    "state": "operational_only",
+    "note": "dev への非 activation merge 停止は運用上お願いする対象であり、複数回破られている（4f7da58 KARTE / d3fe768 vulkan / 27fe776 CVE / 9eea313 mail）。よって activation の安全性を dev tip の不変性に依存させない。hard boundary は activation-execution-base + approved commit allowlist + fast-forward only（2026-08-24 ユーザー裁定）。",
+    "hard_boundary": "infra/deploy/activation_execution_allowlist.json"
+  }
+}

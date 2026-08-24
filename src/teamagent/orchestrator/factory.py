@@ -494,19 +494,23 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # 朝ダイジェストの「✏️ 下書きを作成」ボタン押下を処理するツール（OpenClaw 経由）。
-    # 押下 → OpenClaw(socket) が system event でエージェントへ転送 → SOUL 指示で本ツールを呼ぶ。
-    # その案件へ Reply-All 下書きを作成（送信しない）。**既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。
+    # 「本人が選んだ 1 件」へ返信下書きを作るツール（送信しない）。入口は 2 つ:
+    # (1) 朝ダイジェストの「✏️ 下書きを作成」ボタン押下（OpenClaw が system event で転送）
+    # (2) mail_followup の候補一覧に対する本人の返事（selection）
+    # **既定 OFF**（USE_MAIL_DRAFT_TOOL=1）。
     if _envflag("USE_MAIL_DRAFT_TOOL"):
         from teamagent.skills.mail_draft.skill import MailDraftSkill
 
         draft_store = _build_token_store()
+        # selection 経路は mail_reply を起草エンジンに使うので、同じ Slack 文脈を注入する
+        # （USE_SLACK_CONTEXT が無効なら None＝Slack は見ない）。
+        draft_slack = _build_slack_context_provider()
         specs.append(
             ToolSpec(
                 MailDraftSkill.name,
                 MailDraftSkill.description,
                 MailDraftSkill,
-                factory=lambda: MailDraftSkill(token_store=draft_store),
+                factory=lambda: MailDraftSkill(token_store=draft_store, deal_provider=draft_slack),
             )
         )
 

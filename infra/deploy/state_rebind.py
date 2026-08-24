@@ -56,6 +56,100 @@ BOUND_FIELDS = (
 
 _ROOT_PRINCIPAL_RE = re.compile(r"^arn:aws[a-z0-9-]*:iam::\d+:root$")
 
+# ── P0: rebind 実行 session policy の least-privilege 契約 ─────────────────────
+#
+# 2026-08-21 の rebind 実走で「読み取り列挙が不足した session policy は terraform import
+# を 403 で殺し、rm 済み・import 未完の中間 state を作る」ことが実測された。復旧に使った
+# 全 Allow + Deny 型（v2）は成功実績としてのみ有効で、恒久 policy への昇格と再利用は
+# 禁止（同日ユーザー裁定）。本契約はその代替: 必要 read だけを列挙した canonical policy を
+# repo に置き、内容をここで機械固定する。
+#
+# 許可 action の出典は 3 種のみで、推測での追加は禁止:
+#   v1 実績   … 初版 policy で許可済みかつ rm / backend / 検証読みが実際に使用
+#   403 実測  … v1 policy 下の import 失敗ログで AccessDenied として観測
+#               （ec2:DescribeImages / ec2:DescribeVpcs / iam:GetUser /
+#                 kms:ListAliases / secretsmanager:DescribeSecret）
+#   静的導出  … data.aws_vpc.default.id に依存する第二波 root data source
+#               （aws_subnets / aws_route_tables）。第一波の 403 で評価に到達しなかった
+#               だけで、config 上 import 時評価が確定している
+SESSION_POLICY_FILENAME = "state_rebind_session_policy.json"
+SESSION_POLICY_PATH = Path(__file__).resolve().parent / SESSION_POLICY_FILENAME
+
+# Sid → (Effect, 期待 action 集合, 期待 Resource リスト)。exact match を要求し、
+# action / resource の追加・削除・拡大はこの表とテストの両方を通らないと通らない。
+_STATE_BUCKET_ARN = "arn:aws:s3:::teamagent-tfstate-718959508629"
+SESSION_POLICY_EXPECTED_STATEMENTS: dict[str, tuple[str, frozenset[str], tuple[str, ...]]] = {
+    "StateBackend": (
+        "Allow",
+        frozenset({"s3:GetObject", "s3:PutObject", "s3:ListBucket"}),
+        (_STATE_BUCKET_ARN, f"{_STATE_BUCKET_ARN}/teamagent/terraform.tfstate"),
+    ),
+    "BackendLock": (
+        "Allow",
+        frozenset({"dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"}),
+        ("arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock",),
+    ),
+    "RebindVerifyReads": (
+        "Allow",
+        frozenset(
+            {
+                "ecs:DescribeTaskDefinition",
+                "ecs:DescribeServices",
+                "events:ListTargetsByRule",
+                "lambda:GetFunctionConfiguration",
+                "sts:GetCallerIdentity",
+                "kms:Decrypt",
+                "kms:DescribeKey",
+            }
+        ),
+        ("*",),
+    ),
+    "TerraformImportDataSourceReads": (
+        "Allow",
+        frozenset(
+            {
+                "ec2:DescribeImages",
+                "ec2:DescribeRouteTables",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeVpcs",
+                "kms:ListAliases",
+            }
+        ),
+        ("*",),
+    ),
+    "TerraformImportIamUserRead": (
+        "Allow",
+        frozenset({"iam:GetUser"}),
+        ("arn:aws:iam::718959508629:user/AIIAdev",),
+    ),
+    "TerraformImportSecretMetadataReads": (
+        "Allow",
+        frozenset({"secretsmanager:DescribeSecret"}),
+        ("arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/*",),
+    ),
+    "DenyApplicationWrites": (
+        "Deny",
+        frozenset(
+            {
+                "ecs:RegisterTaskDefinition",
+                "ecs:DeregisterTaskDefinition",
+                "ecs:UpdateService",
+                "lambda:UpdateFunctionConfiguration",
+                "events:PutTargets",
+                "events:PutRule",
+            }
+        ),
+        ("*",),
+    ),
+}
+
+APPLICATION_WRITE_DENY_ACTIONS = SESSION_POLICY_EXPECTED_STATEMENTS["DenyApplicationWrites"][1]
+
+# Allow に現れてよい「書き込み動詞」の action は state backend / lock の 3 つだけ。
+# exact-set 照合とは独立の意味検査として持つ（表を書き換える変更でも必ずここを通る）。
+_ALLOWED_WRITE_ACTIONS = frozenset({"s3:PutObject", "dynamodb:PutItem", "dynamodb:DeleteItem"})
+_READ_VERB_RE = re.compile(r"^[a-z0-9]+:(Describe|Get|List)[A-Za-z]*$|^kms:Decrypt$")
+
 
 class RebindError(Exception):
     """rebind の不変条件が満たされない。呼び出し側は必ず fail-closed で扱う。"""
@@ -300,6 +394,143 @@ def check_approval(binding_path: Path, approve: str) -> None:
         )
 
 
+def _statement_actions(statement: dict[str, Any]) -> list[str]:
+    actions = statement.get("Action")
+    if isinstance(actions, str):
+        actions = [actions]
+    if not isinstance(actions, list) or not actions:
+        raise RebindError("session policy: Action がありません")
+    if not all(isinstance(action, str) and action for action in actions):
+        raise RebindError("session policy: Action は非空文字列の列でなければなりません")
+    return actions
+
+
+def _statement_resources(statement: dict[str, Any]) -> list[str]:
+    resources = statement.get("Resource")
+    if isinstance(resources, str):
+        resources = [resources]
+    if not isinstance(resources, list) or not resources:
+        raise RebindError("session policy: Resource がありません")
+    if not all(isinstance(resource, str) and resource for resource in resources):
+        raise RebindError("session policy: Resource は非空文字列の列でなければなりません")
+    return resources
+
+
+def load_session_policy(path: Path) -> dict[str, Any]:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise RebindError("session policy はオブジェクトでなければなりません")
+    if set(doc) != {"Version", "Statement"}:
+        raise RebindError("session policy の top-level は Version / Statement のみ")
+    if doc["Version"] != "2012-10-17":
+        raise RebindError("session policy の Version が不正です")
+    if not isinstance(doc["Statement"], list) or not doc["Statement"]:
+        raise RebindError("session policy の Statement が不正です")
+    return doc
+
+
+def assert_session_policy_least_privilege(doc: dict[str, Any]) -> None:
+    """canonical session policy の least-privilege 契約（fail-closed）。
+
+    - `Allow *` / action ワイルドカードの一切を拒否（v2 形の再流入防止）
+    - Sid / Effect / Action / Resource は期待表と exact match
+    - Deny は application write の 6 action ちょうど 1 statement
+    - Allow 側の書き込み動詞は state backend / lock の 3 action だけ
+    """
+    statements = doc["Statement"]
+    seen: dict[str, dict[str, Any]] = {}
+    for statement in statements:
+        if not isinstance(statement, dict):
+            raise RebindError("session policy: statement はオブジェクトでなければなりません")
+        sid = statement.get("Sid")
+        if not isinstance(sid, str) or not sid:
+            raise RebindError("session policy: Sid のない statement は許可しません")
+        if sid in seen:
+            raise RebindError(f"session policy: Sid 重複: {sid}")
+        seen[sid] = statement
+
+    if set(seen) != set(SESSION_POLICY_EXPECTED_STATEMENTS):
+        raise RebindError(
+            "session policy: statement 構成が契約と一致しません: "
+            f"actual={sorted(seen)} expected={sorted(SESSION_POLICY_EXPECTED_STATEMENTS)}"
+        )
+
+    deny_sids = []
+    for sid, (
+        effect,
+        expected_actions,
+        expected_resources,
+    ) in SESSION_POLICY_EXPECTED_STATEMENTS.items():
+        statement = seen[sid]
+        if statement.get("Effect") != effect:
+            raise RebindError(f"session policy: {sid} の Effect が {effect} ではありません")
+        actions = _statement_actions(statement)
+        for action in actions:
+            if "*" in action:
+                raise RebindError(
+                    f"session policy: action ワイルドカードは禁止です: {sid}: {action}"
+                )
+        if set(actions) != set(expected_actions) or len(actions) != len(expected_actions):
+            raise RebindError(f"session policy: {sid} の Action 集合が契約と一致しません")
+        resources = _statement_resources(statement)
+        if tuple(resources) != expected_resources:
+            raise RebindError(f"session policy: {sid} の Resource が契約と一致しません")
+        if statement.get("Condition") is not None:
+            raise RebindError(f"session policy: {sid} に契約外の Condition があります")
+        if effect == "Deny":
+            deny_sids.append(sid)
+        else:
+            for action in actions:
+                if action in _ALLOWED_WRITE_ACTIONS:
+                    continue
+                if not _READ_VERB_RE.match(action):
+                    raise RebindError(
+                        "session policy: read 動詞でない Allow action は "
+                        f"state backend / lock 以外に置けません: {sid}: {action}"
+                    )
+    if deny_sids != ["DenyApplicationWrites"]:
+        raise RebindError("session policy: Deny statement は DenyApplicationWrites の 1 つだけ")
+
+
+def _resource_matches(pattern: str, resource: str) -> bool:
+    if pattern == "*":
+        return True
+    if pattern.endswith("*"):
+        return resource.startswith(pattern[:-1])
+    return pattern == resource
+
+
+def evaluate_session_policy(doc: dict[str, Any], action: str, resource: str) -> str:
+    """IAM 評価の最小モデル: 明示 Deny > 明示 Allow > implicit-deny。
+
+    実 AWS の simulate-principal-policy は credential が要るため、repo 内では
+    この決定論評価を契約テストの根拠にする（policy 側の action ワイルドカードは
+    assert_session_policy_least_privilege が禁止済みなので exact 比較で足りる）。
+    """
+    allowed = False
+    for statement in doc["Statement"]:
+        if action not in _statement_actions(statement):
+            continue
+        if not any(
+            _resource_matches(pattern, resource) for pattern in _statement_resources(statement)
+        ):
+            continue
+        if statement.get("Effect") == "Deny":
+            return "deny"
+        allowed = True
+    return "allow" if allowed else "implicit-deny"
+
+
+def validate_session_policy_file(path: Path) -> str:
+    """canonical policy の契約検証 + 全 deny action の評価確認。sha256 を返す。"""
+    doc = load_session_policy(path)
+    assert_session_policy_least_privilege(doc)
+    for action in sorted(APPLICATION_WRITE_DENY_ACTIONS):
+        if evaluate_session_policy(doc, action, "*") != "deny":
+            raise RebindError(f"session policy: {action} が explicit deny になりません")
+    return _sha256_file(path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -324,11 +555,18 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("--address", required=True)
     compare.add_argument("--describe-json", required=True, type=Path)
 
+    policy = sub.add_parser("validate-session-policy")
+    policy.add_argument("--policy", type=Path, default=SESSION_POLICY_PATH)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "validate":
             targets = load_targets(args.mapping, require_targets=args.require_targets)
             print(f"rebind mapping validated: {len(targets)} target(s)")
+        elif args.command == "validate-session-policy":
+            digest = validate_session_policy_file(args.policy)
+            print(f"session policy validated (least-privilege contract): {args.policy}")
+            print(f"session policy sha256: {digest}")
         elif args.command == "compare":
             compare_state_to_live(
                 json.loads(args.state_json.read_text(encoding="utf-8")),

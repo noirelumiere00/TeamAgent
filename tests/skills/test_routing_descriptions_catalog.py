@@ -247,6 +247,12 @@ NON_TOOL_IDENTIFIERS = frozenset(
         "not_connected",
         "agenda_failed",  # calendar_freebusy(mode='agenda') の取得失敗＝「予定 0 件」ではない
         "no_hits",
+        # mail_followup が顧客名なしで受信箱全体から候補を出したことを示すコード（ツールではない）
+        "inbox_triage",
+        # mail_draft が「どれを指しているか確定できないので作らなかった」ことを示すコード
+        "ambiguous_selection",
+        # mail_draft が「選ばれた番号の件が受信箱から消えていた」ことを示すコード
+        "vanished_selection",
         "no_attachment",
         "too_large",
         "unsupported_type",

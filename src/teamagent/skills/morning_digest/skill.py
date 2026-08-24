@@ -45,6 +45,7 @@ from teamagent.skills._shared.mail_compose import (
     env_bool,
     env_int,
     env_str,
+    gmail_thread_url,
     is_mass_or_impersonal,
     should_skip_mail,
 )
@@ -1138,9 +1139,8 @@ def _short_hash(n: int) -> str:
 
 
 def _gmail_thread_url(thread_id: str) -> str:
-    """そのスレッドの Gmail 直リンク（確認するボタン用）。All Mail で開く＝必ず存在する。"""
-    tid = str(thread_id or "")
-    return f"https://mail.google.com/mail/u/0/#all/{tid}" if tid else ""
+    """そのスレッドの Gmail 直リンク（確認するボタン用）。実装は _shared に一本化。"""
+    return gmail_thread_url(thread_id)
 
 
 def _safe_json_array(text: str) -> list[dict[str, Any]]:

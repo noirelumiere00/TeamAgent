@@ -251,3 +251,13 @@ def is_mass_or_impersonal(headers: dict[str, str], body: str) -> bool:
     meaningful = [ln for ln in (body or "").splitlines() if ln.strip()]
     head = "\n".join(meaningful[:6])[:400]
     return any(s in head for s in _BULK_SALUTATIONS)
+
+
+def gmail_thread_url(thread_id: str) -> str:
+    """そのスレッドの Gmail 直リンク（本人確認用）。All Mail で開く＝必ず存在する。
+
+    下書きは ``users.drafts.update`` が denylist 封鎖されている都合上「作り直し」しか
+    できないため、リンク先は下書き ID ではなく **スレッド**にする（作り直しても切れない）。
+    """
+    tid = str(thread_id or "")
+    return f"https://mail.google.com/mail/u/0/#all/{tid}" if tid else ""

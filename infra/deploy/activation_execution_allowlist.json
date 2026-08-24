@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "description": "activation execution line（branch activation-execution-base）の hard boundary。dev freeze が複数回破られた実績から、activation の安全性を dev tip の不変性に依存させず「execution line に何が入っているか」を機械検証可能にする（2026-08-24 ユーザー裁定）。base..HEAD の commit 列が本 allowlist と exact 一致しない場合、および expected_head が現 HEAD の祖先でない（= force push / 履歴改変）場合は FATAL。",
+  "execution_ref": "activation-execution-base",
+  "execution_base": {
+    "sha": "0eab7f240e52090aea6a992c55b13e9ca39a66a1",
+    "subject": "fix(infra): rebind binding の state SHA を canonical 化（pull 非決定性の実測対応）",
+    "note": "Activation Candidate / Execution Base（案B, 2026-08-20 裁定）= e7191f3 + canonical-sha fix の cherry-pick。正式 Activation Baseline ではない。"
+  },
+  "approved_commits": [
+    {
+      "sha": "fbff28d065a9f866c798c08d29f4acc0779e55c8",
+      "subject": "feat(rebind): 実行 session policy を least-privilege の canonical ファイルへ縮小",
+      "source_sha": "c1ddfc1",
+      "gate": "PR #313 MERGE GO（2026-08-24 ユーザー裁定）"
+    },
+    {
+      "sha": "7dc368245d189d87348a7c5736eb26b6f425800f",
+      "subject": "feat(adopt): live snapshot 注入を通常 guarded plan と共有実装化（PR2-A0.3.2）",
+      "source_sha": "7ebbfa1",
+      "gate": "PR #314 MERGE GO（2026-08-24 ユーザー裁定）"
+    }
+  ],
+  "expected_head": "7dc368245d189d87348a7c5736eb26b6f425800f",
+  "excluded_commits": [
+    {
+      "sha": "4f7da58",
+      "reason": "KARTE 機能。activation と無関係のため execution line へ取り込まない"
+    },
+    {
+      "sha": "d3fe768",
+      "reason": "vulkan-loader ドリフト追随。18 generation inputs のうち 1 件を変更するため、Generation Re-baseline の裁定を経ずに取り込まない"
+    },
+    {
+      "sha": "202398f",
+      "reason": "台帳/manifest のみの再生成。単独 cherry-pick は「execution line に存在しない入力の SHA を台帳だけが持つ」事故になるため恒久禁止（2026-08-24 ユーザー裁定）。台帳は execution line 自身の inputs から再生成する"
+    },
+    {
+      "sha": "27fe776",
+      "reason": "openssl CVE-2026-14456 バンプ。18 inputs のうち 2 件を変更。Generation Re-baseline v2 の承認 evidence が確認できた場合にのみ、exact approved input commit として別途取り込む"
+    },
+    {
+      "sha": "9eea313",
+      "reason": "mail 機能。activation と無関係のため execution line へ取り込まない"
+    }
+  ]
+}
