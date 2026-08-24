@@ -660,6 +660,74 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
     ]
   }
 
+  # PR2-A0.2.2a: guarded plan の refresh が aws_s3_bucket を読むときに provider
+  # （terraform-provider-aws 5.100.0）が呼ぶ bucket 設定 read。
+  #
+  # 由来（推測での追加は禁止。2026-08-20T05:45Z の automation role による refresh の
+  # CloudTrail 全件と simulate-principal-policy の実測に基づく）:
+  #   403 実測  … s3:GetBucketCORS（exact 6 bucket で AccessDenied）
+  #   同経路継続 … 残り 6 action。CORS で refresh が abort したため 403 は観測できて
+  #                いないが、(a) simulate-principal-policy が全 bucket で
+  #                implicitDeny を返すこと（= identity policy に無い）と
+  #                (b) bootstrap seed-stack の ReadExactTerraformBuckets が同じ
+  #                provider 版の aws_s3_bucket read に対してこの 7 action 集合を
+  #                exact bucket ARN で付与済みであること、の 2 点で必要と判定した。
+  #                CORS だけ足すと次の refresh で同じ壁を 6 回踏む。
+  # なお s3:GetBucketVersioning 等は既に別 statement で許可済み（simulate=allowed）。
+  # 誤 action 名 s3:GetBucketLifecycleConfiguration は使わない（正しくは
+  # s3:GetLifecycleConfiguration。bootstrap 側は commit 722a94a で訂正済み）。
+  # bucket-level の read なので resource に /* は付けない。count 条件付き bucket は
+  # ReadExactDeploymentSubjectGraph と同じ形で条件付き concat() にし、無効時は付与しない。
+  #
+  # ARN は **bucket resource ではなく bucket 名の式から組み立てる**。bucket resource を
+  # 参照すると bootstrap の reviewed closure（tests/bootstrap/..._closure.py）へ
+  # managed resource が 4 件流入し、bootstrap 供給契約（infra/bootstrap/
+  # bootstrap_contract.json の existing_dependency_addresses 等）まで書き換えが波及する。
+  # read-only の grant のためにその契約を広げるのは activation の scope 外なので、
+  # 各 bucket resource が bucket 名に使っているのと同一の式を再利用する
+  # （名前がずれれば下のカバレッジテストが検出する）。
+  statement {
+    sid = "ReadExactTerraformBucketConfigurations"
+    actions = [
+      "s3:GetAccelerateConfiguration",
+      "s3:GetBucketCORS",
+      "s3:GetBucketLogging",
+      "s3:GetBucketRequestPayment",
+      "s3:GetBucketWebsite",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration",
+    ]
+    resources = concat(
+      [
+        "arn:aws:s3:::${var.project_name}-${var.environment}-raw-files",
+        "arn:aws:s3:::${local.release_evidence_bucket}",
+        "arn:aws:s3:::${local.openclaw_evidence_bucket}",
+        "arn:aws:s3:::${local.openclaw_rollout_evidence_bucket}",
+      ],
+      var.enable_cloudtrail ? [
+        "arn:aws:s3:::${var.project_name}-${var.environment}-cloudtrail-${data.aws_caller_identity.current.account_id}",
+      ] : [],
+      var.enable_bedrock_invocation_logging ? [
+        "arn:aws:s3:::${var.project_name}-${var.environment}-bedrock-logs-${data.aws_caller_identity.current.account_id}",
+      ] : [],
+      local.tk_enabled == 1 ? ["arn:aws:s3:::${local.media_bucket_name}"] : [],
+    )
+  }
+
+  # PR2-A0.2.2a: bastion（t4g.nano）/ worker（t4g.medium）の EC2 インスタンスに対する
+  # provider read が呼ぶ。2026-08-20 の refresh で 2 回 AccessDenied を実測。
+  # DescribeInstanceTypes は instance type を ARN で表現しないため resource は "*"
+  # のみ（repo 内の他の ec2 Describe 系 statement も同じく "*" scope）。read-only で、
+  # 書き込みは boundary / control-plane の Deny 群がそのまま塞ぐ。
+  # ※コメントに Terraform リソースアドレスを書かないこと: bootstrap closure テストが
+  #   コメント本文も参照として走査するため、偽のグラフ辺が入る（2026-08-24 実測）。
+  statement {
+    sid       = "ReadExactInstanceTypeCatalog"
+    actions   = ["ec2:DescribeInstanceTypes"]
+    resources = ["*"]
+  }
+
+
   statement {
     sid       = "DecryptExactDeploymentGateEvidence"
     actions   = ["kms:Decrypt", "kms:DescribeKey"]
