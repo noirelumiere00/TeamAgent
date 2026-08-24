@@ -42,6 +42,16 @@ FREEZE_STATES = ("pending_v2", "active", "released")
 # pending_v2 = v1 が失効し v2 未確定という最も危険な期間なので、当然ここでも落とす）。
 ENFORCING_STATES = ("pending_v2", "active")
 
+# Freeze v2 の enforcement を構成する Terraform リソース。ACTIVE な間はこの
+# いずれも destroy / replace されてはならない（destroy = freeze の巻き戻し）。
+# var.activation_freeze_enabled が false のまま plan すると全て destroy 候補になる。
+FREEZE_RESOURCE_PREFIXES = (
+    "aws_iam_policy.activation_freeze",
+    "aws_iam_user_policy_attachment.activation_freeze_aiia_dev",
+    "aws_iam_role_policy_attachment.activation_freeze",
+)
+FREEZE_ENABLED_VAR = "activation_freeze_enabled"
+
 
 class FreezeError(Exception):
     """freeze の不変条件が満たされない。呼び出し側は必ず fail-closed で扱う。"""
@@ -162,6 +172,69 @@ def assert_frozen_surface(repo: Path, freeze_path: Path, base: str, head: str) -
     )
 
 
+def desired_freeze_var(freeze_path: Path) -> str:
+    """`activation_freeze_enabled` に注入すべき値を宣言から決める。
+
+    state=active なら "true"。それ以外は "false"。宣言が壊れていれば load_freeze が
+    例外を投げ、呼び出し側（guard）は fail-closed で停止する。
+    """
+    state = load_freeze(freeze_path)["generation_publisher_freeze"]["state"]
+    return "true" if state == "active" else "false"
+
+
+def _is_freeze_resource(address: str) -> bool:
+    return any(
+        address == prefix or address.startswith(f"{prefix}[") for prefix in FREEZE_RESOURCE_PREFIXES
+    )
+
+
+def assert_plan_preserves_freeze(freeze_path: Path, plan_path: Path) -> str:
+    """plan が Freeze v2 の enforcement を壊していないことを要求する。
+
+    Freeze ACTIVE 中に次のいずれかがあれば FATAL:
+      - freeze リソースの delete（destroy / replace を含む）
+      - plan の variables に activation_freeze_enabled=true が入っていない
+        （未注入 / false 注入はどちらも 11 リソースを destroy 候補にする）
+    """
+    state = load_freeze(freeze_path)["generation_publisher_freeze"]["state"]
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    changes = plan.get("resource_changes") or []
+    destroyed = sorted(
+        change["address"]
+        for change in changes
+        if _is_freeze_resource(change.get("address", ""))
+        and "delete" in (change.get("change", {}).get("actions") or [])
+    )
+    if state != "active":
+        return f"freeze state={state} のため plan 検査は情報提供のみ（destroy {len(destroyed)} 件）"
+    if destroyed:
+        raise FreezeError(
+            "FREEZE ROLLBACK 違反: Freeze v2 が ACTIVE なのに plan が enforcement を"
+            f"削除しようとしています。\n  対象: {destroyed}\n"
+            "  原因の典型は var.activation_freeze_enabled の未注入（既定 false）です。"
+        )
+    # 変数チェックは **plan の scope に freeze リソースが含まれるときだけ** 適用する。
+    # 対象外へ -target した plan や、guard の合成 plan fixture は freeze の存廃に
+    # 関与しないため要求しない（誤爆すると無関係な検証がすべて止まる）。
+    # なお var が false / 未注入の full plan では 11 リソースが delete として現れるので、
+    # 上の destroy 検査が先に捕捉する（二重化）。
+    in_scope = [
+        change["address"] for change in changes if _is_freeze_resource(change.get("address", ""))
+    ]
+    if not in_scope:
+        return "plan の scope に freeze リソースが無いため変数要求は適用しない（destroy 0）"
+    variables = plan.get("variables") or {}
+    raw = variables.get(FREEZE_ENABLED_VAR, {})
+    value = raw.get("value") if isinstance(raw, dict) else raw
+    if value not in (True, "true"):
+        raise FreezeError(
+            f"FREEZE BINDING 違反: plan の scope に freeze リソース {len(in_scope)} 件が"
+            f"含まれるのに {FREEZE_ENABLED_VAR} が true ではありません（実際: {value!r}）。"
+            "Freeze ACTIVE 中は全 plan 経路で true を注入すること。"
+        )
+    return "plan は Freeze v2 の enforcement を保持している（destroy 0 / 変数 true）"
+
+
 def load_allowlist(path: Path) -> dict[str, Any]:
     doc = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(doc, dict):
@@ -279,6 +352,11 @@ def main(argv: list[str] | None = None) -> int:
     line = sub.add_parser("assert-execution-line")
     line.add_argument("--ref", default=None)
 
+    sub.add_parser("desired-var")
+
+    preserve = sub.add_parser("assert-plan-preserves-freeze")
+    preserve.add_argument("--plan", required=True, type=Path)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "status":
@@ -294,6 +372,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"production deployment freeze: {prod}")
             print(f"dev merge freeze            : {freeze['dev_merge_freeze']['state']}")
             print(f"hard boundary               : {freeze['dev_merge_freeze']['hard_boundary']}")
+        elif args.command == "desired-var":
+            print(desired_freeze_var(args.freeze))
+        elif args.command == "assert-plan-preserves-freeze":
+            print(assert_plan_preserves_freeze(args.freeze, args.plan))
         elif args.command == "assert-frozen-surface":
             print(assert_frozen_surface(args.repo, args.freeze, args.base, args.head))
         else:
