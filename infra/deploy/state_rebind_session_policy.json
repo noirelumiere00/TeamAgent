@@ -1,0 +1,83 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StateBackend",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::teamagent-tfstate-718959508629",
+        "arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate"
+      ]
+    },
+    {
+      "Sid": "BackendLock",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock"
+    },
+    {
+      "Sid": "RebindVerifyReads",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:DescribeTaskDefinition",
+        "ecs:DescribeServices",
+        "events:ListTargetsByRule",
+        "lambda:GetFunctionConfiguration",
+        "sts:GetCallerIdentity",
+        "kms:Decrypt",
+        "kms:DescribeKey"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerraformImportDataSourceReads",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeImages",
+        "ec2:DescribeRouteTables",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "kms:ListAliases"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "TerraformImportIamUserRead",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetUser"
+      ],
+      "Resource": "arn:aws:iam::718959508629:user/AIIAdev"
+    },
+    {
+      "Sid": "TerraformImportSecretMetadataReads",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/*"
+    },
+    {
+      "Sid": "DenyApplicationWrites",
+      "Effect": "Deny",
+      "Action": [
+        "ecs:RegisterTaskDefinition",
+        "ecs:DeregisterTaskDefinition",
+        "ecs:UpdateService",
+        "lambda:UpdateFunctionConfiguration",
+        "events:PutTargets",
+        "events:PutRule"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

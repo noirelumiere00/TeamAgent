@@ -30,39 +30,50 @@ import は config 存在を要求し矛盾する）。よって `state rm → �
    調査時点の ARN を焼かない（2026-08-20 に調査中 `mcp:86` が増えた実例）。
 3. 実行 session は可能なら **application write を絞った一時 session** を使う（下記）。
 
-## 実行 session の制限（推奨）
+## 実行 session の制限（必須）
 
 trusted automation role を assume する際に **session policy** で許可を絞る。
-session policy は権限の交差にしか働かないため、ここに無い操作は role が許可していても拒否される:
+session policy は権限の交差にしか働かないため、ここに無い操作は role が許可していても拒否される。
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {"Sid": "StateBackend", "Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
-     "Resource": ["arn:aws:s3:::teamagent-tfstate-718959508629", "arn:aws:s3:::teamagent-tfstate-718959508629/teamagent/terraform.tfstate"]},
-    {"Sid": "BackendLock", "Effect": "Allow", "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"],
-     "Resource": "arn:aws:dynamodb:ap-northeast-1:718959508629:table/teamagent-tflock"},
-    {"Sid": "ReadOnlyVerify", "Effect": "Allow",
-     "Action": ["ecs:DescribeTaskDefinition", "ecs:DescribeServices", "events:ListTargetsByRule", "lambda:GetFunctionConfiguration", "sts:GetCallerIdentity", "kms:Decrypt", "kms:DescribeKey"],
-     "Resource": "*"},
-    {"Sid": "DenyApplicationWrites", "Effect": "Deny",
-     "Action": ["ecs:RegisterTaskDefinition", "ecs:DeregisterTaskDefinition", "ecs:UpdateService", "lambda:UpdateFunctionConfiguration", "events:PutTargets", "events:PutRule"],
-     "Resource": "*"}
-  ]
-}
-```
+**canonical policy は repo にコミットされた 1 ファイルだけ**:
+`infra/deploy/state_rebind_session_policy.json`
+（内容は `state_rebind.py` の least-privilege 契約と契約テストが exact に固定している。
+手元コピーの改変や別 JSON の代用は禁止。）
 
 ```bash
+# 1. 契約検証 + sha256 採取（evidence）
+python3 infra/deploy/state_rebind.py validate-session-policy
+
+# 2. assume-role（session 名は trust policy が固定値で要求）
 aws sts assume-role \
   --role-arn arn:aws:iam::718959508629:role/teamagent-dev-terraform-runtime-automation \
   --role-session-name teamagent-terraform-worker \
-  --policy file:///secure/path/rebind-session-policy.json \
+  --policy file://infra/deploy/state_rebind_session_policy.json \
   --duration-seconds 3600
 ```
 
 使用した session policy の JSON と SHA256 を evidence として out ディレクトリへ保存すること
 （session policy の適用有無はサーバ側から検証できないため、evidence で補う）。
+
+### 許可 read の由来（2026-08-21 実測。推測での追加は禁止）
+
+| 区分 | action | 根拠 |
+|---|---|---|
+| v1 実績 | s3/dynamodb backend 6種 + ecs/events/lambda/sts/kms の検証読み 7種 | 初版 policy 下で rm・backend・consumer 検証が実際に使用 |
+| 403 実測 | ec2:DescribeImages / ec2:DescribeVpcs / iam:GetUser / kms:ListAliases / secretsmanager:DescribeSecret | 読み取り列挙が不足した初版 policy 下で `terraform import` が AccessDenied で失敗した実ログ（rm 済み・import 未完の中間 state を作った事故） |
+| 静的導出 | ec2:DescribeSubnets / ec2:DescribeRouteTables | `data.aws_vpc.default.id` に依存する第二波 data source。第一波の 403 で評価に到達しなかっただけで、config 上 import 時評価が確定している |
+
+`terraform import` は対象 resource だけでなく **root module の全 data source を評価する**。
+新しい data source を config に足したら、この policy と `state_rebind.py` の契約表の
+両方を更新しない限り rebind は 403 で止まる（fail-closed）。
+
+### 禁止事項（2026-08-21 ユーザー裁定）
+
+- **`Allow *` + Deny 型（復旧時の暫定 v2）を本番 operation で再利用しないこと。**
+  base role の「Deny に書き忘れた write」がそのまま残る形であり、成功実績として
+  evidence に残っているだけの過去の形。契約テストが `Allow *` の混入を拒否する。
+- 次の本番使用前に、可能なら read-only の dry-run で policy の十分性を再確認する
+  （403 実測リストは「第一波で観測できた分」であり、config が変われば必要 read も変わる）。
 
 ## 手順（two-phase・すべて guard 経由）
 
