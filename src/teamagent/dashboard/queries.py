@@ -53,6 +53,8 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "proposal_review",
         "proposal_builder_submit",
         "proposal_builder_status",
+        "omiyage_report_submit",
+        "omiyage_report_status",
         "mail_draft",
         "mail_reply",
         "video_capture",
