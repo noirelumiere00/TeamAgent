@@ -128,6 +128,42 @@ resource "aws_cloudwatch_log_metric_filter" "morning_digest_error_count" {
   }
 }
 
+# ⚠️ 上の ErrorCount 集約だけでは不足する。error_spike は「5 分窓で 3 件以上」で鳴るが、
+# triage 不発の ERROR は 1 人 1 走あたり ceil(スレッド数 / MORNING_DIGEST_TRIAGE_BATCH) 件しか出ない
+# （max_threads=25・batch=8 なら最大 4 件）。2026-08-25 は 25 件＝4 バッチでたまたま閾値を超えたが、
+# 受信 16 件以下の日は 2 件どまりで届かず、同じ無音に戻る。
+# 「Bedrock 課金だけ発生して判定 0 件」は 1 回でも契約崩れなので、専用計で 1 件から鳴らす。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_triage_dead" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-triage-dead"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  # ログレベルではなく事実（matched=0）で拾う。Python 側の ERROR 化が将来剥がれても検知は残る。
+  pattern = "{ $.event = \"morning_digest_triage_id_mismatch\" && $.matched = 0 }"
+
+  metric_transformation {
+    name          = "MorningDigestTriageDead"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_triage_dead" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-triage-dead"
+  alarm_description   = "朝ダイジェストのトリアージが1バッチも id 結合できず判定0件（Bedrock 課金だけ発生）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestTriageDead"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  # 朝ダイジェストは平日 9:30 の 1 日 1 回。走っていない時間帯の欠測は異常ではない。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
 # ---------- 以降は enable_morning_digest ゲート ----------
 
 # morning_digest は per-user OAuth で gmail/gcalendar/Bedrock を叩く。

@@ -1721,3 +1721,43 @@ def test_triage_total_mismatch_is_logged_at_error_level() -> None:
         PROJECT_ROOT / "src" / "teamagent" / "skills" / "morning_digest" / "skill.py"
     ).read_text(encoding="utf-8")
     assert "emit = logger.error if matched == 0 else logger.warning" in skill
+
+
+def test_triage_dead_alarm_fires_on_a_single_occurrence() -> None:
+    """「課金だけ発生して判定 0 件」が 1 回でも起きたら鳴ること。
+
+    ErrorCount への相乗りだけでは足りない。error_spike の閾値は「5 分窓で 3 件以上」だが、
+    triage 不発の ERROR は 1 人 1 走あたり ceil(スレッド数 / batch) 件しか出ない
+    （max_threads=25・MORNING_DIGEST_TRIAGE_BATCH=8 で最大 4 件）。2026-08-25 は 4 件で
+    たまたま閾値を超えただけで、受信 16 件以下の日は 2 件どまり＝再び無音になる。
+    そこで matched=0 だけを数える専用計を threshold=1 で持つ。
+    """
+    filt = _block(
+        TF_ROOT / "morning_digest_schedule.tf",
+        "aws_cloudwatch_log_metric_filter",
+        "morning_digest_triage_dead",
+    )
+    assert "aws_cloudwatch_log_group.morning_digest.name" in filt
+    assert 'name          = "MorningDigestTriageDead"' in filt
+    assert "namespace     = local.metric_namespace" in filt
+
+    alarm = _block(
+        TF_ROOT / "morning_digest_schedule.tf",
+        "aws_cloudwatch_metric_alarm",
+        "morning_digest_triage_dead",
+    )
+    assert 'metric_name         = "MorningDigestTriageDead"' in alarm
+    # 1 件で鳴らないなら「小さい受信箱の日は無音」に戻る＝この alarm を置く意味が消える。
+    assert "threshold           = 1" in alarm
+    assert 'comparison_operator = "GreaterThanOrEqualToThreshold"' in alarm
+    assert "alarm_actions      = [aws_sns_topic.alarms.arn]" in alarm
+
+    # filter の pattern と Python が実際に出すイベント名/フィールドの対応を機械で縛る。
+    # どちらか片方だけ変えると、tf も Python も単体では正しいまま無音に戻る。
+    skill = (
+        PROJECT_ROOT / "src" / "teamagent" / "skills" / "morning_digest" / "skill.py"
+    ).read_text(encoding="utf-8")
+    assert '"morning_digest_triage_id_mismatch"' in skill
+    assert "matched=matched," in skill
+    assert '$.event = \\"morning_digest_triage_id_mismatch\\"' in filt
+    assert "$.matched = 0" in filt
