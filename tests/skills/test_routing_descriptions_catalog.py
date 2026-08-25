@@ -253,6 +253,8 @@ NON_TOOL_IDENTIFIERS = frozenset(
         "ambiguous_selection",
         # mail_draft が「選ばれた番号の件が受信箱から消えていた」ことを示すコード
         "vanished_selection",
+        # omiyage_report_submit の status 値（不足入力あり＝ジョブを作らない）。ツールではない
+        "needs_input",
         "no_attachment",
         "too_large",
         "unsupported_type",
@@ -294,7 +296,7 @@ def _scope_tools() -> list[dict[str, Any]]:
 
 
 def _exposed_descriptions() -> dict[str, str]:
-    """OC へ露出する 35 本の name→description（真実源は effective-tool-scope.json）。"""
+    """OC へ露出する 37 本の name→description（真実源は effective-tool-scope.json）。"""
     known = _all_registered_skills()
     out: dict[str, str] = {}
     for tool in _scope_tools():
