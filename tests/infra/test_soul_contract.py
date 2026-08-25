@@ -179,3 +179,73 @@ def test_calendar_agenda_section_is_present(soul: str, label: str, phrase: str) 
 def test_old_freebusy_only_restrictions_are_gone(soul: str) -> None:
     """旧文言が残ると agenda と矛盾する（読取面が広がったのに『freebusy だけ』と宣言）。"""
     assert "このツールは freebusy の読み取りだけで" not in soul
+
+
+# ── ⑩ 連携（oauth_connect）— 本番で「連携」が不発だった件の根治 ────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## 連携（oauth_connect）— 「連携」の一語でも必ず呼ぶ"),
+        ("一語でも呼ぶ", "メッセージが「連携」の一語だけでも呼ぶ"),
+        ("聞き返さない", "聞き返さず `oauth_connect` を呼ぶ"),
+        ("発火語", "connect / reconnect"),
+        ("毎回呼ぶ", "「連携」と言われた回数だけ毎回呼ぶ"),
+        ("空引数の禁止", "`{}` では ingress plugin が黙って block する"),
+        ("message そのまま", "ツールが返した **`message` をそのまま出す**"),
+        ("原因を推測しない", "自分で原因を推測して"),
+        ("必須リストに載っている", "`oauth_connect` — 全ての tool で同様"),
+    ],
+)
+def test_oauth_connect_section_is_present(soul: str, label: str, phrase: str) -> None:
+    """本番実測: 利用者が「連携」と言っても LLM が oauth_connect を選ばなかった。
+
+    ⚠️ ここが赤くなったら「テストを直す」のではなく、**連携の導線を本当に消してよいのか**を
+    先に確認すること（消すと「AI が反応しない」という形で利用者に出る）。
+    """
+    assert phrase in soul, f"oauth_connect の規約が欠けている: {label}"
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("確認を挟まない", "確認を挟まず即座にリンクを提示する"),
+        ("聞き返し禁止の明文", "「リンクを出しますか？」と聞き返してはならない"),
+        ("1返信にリンクを載せる", "その 1 回の返信の中に連携リンクそのものを載せる"),
+        ("呼ぶ前に質問しない", "`oauth_connect` を呼ぶ前に利用者へ質問を返してはならない"),
+        ("分岐質問の禁止", "「Google と Slack のどちらを連携しますか？」などの**分岐質問**"),
+        ("両方まとめて返る", "未連携の Google と Slack を**まとめて 1 レスポンスで返す**"),
+        ("既連携も1返信", "同じ 1 回の返信で完結"),
+    ],
+)
+def test_oauth_connect_delivers_link_in_one_reply(soul: str, label: str, phrase: str) -> None:
+    """🔴 ユーザー指示（2026-08-25）: 「連携」の 1 メッセージで**リンクまで**届くこと。
+
+    実害: 「連携」と打つと聞き返しになり、利用者が「リンクが欲しい」と重ねて言って初めて
+    リンクが出ていた＝**2 往復**。ここが赤くなったら文言を消す前に、往復が 1 回のままかを
+    実機（Slack 1 メッセージ）で確認すること。聞き返しは利用者にとって「動かない」と同義。
+    """
+    assert phrase in soul, f"1 往復でリンクを届ける規約が欠けている: {label}"
+
+
+def test_oauth_connect_section_does_not_soften_the_no_askback_rule(soul: str) -> None:
+    """「聞き返す必要は無い」のような**任意に読める**書き方へ後退していないこと。
+
+    「必要は無い」は許容（＝聞き返してもよい）と読めてしまい、実際に聞き返しが起きた。
+    禁止は禁止として書き切る。
+    """
+    assert "と聞き返す必要は無い" not in soul, (
+        "聞き返しの禁止が『必要は無い』（任意）へ後退している。"
+        "『聞き返さない』『してはならない』と書き切ること"
+    )
+
+
+def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
+    """`slack_user_id` 欠落の節が「連携案内そのものの禁止」に読めてはいけない。
+
+    実装調査（2026-08）で、この 1 行だけが `oauth_connect` に対する**逆バイアス**として
+    効いていた。禁止対象は「引数漏れエラーを連携案内へすり替えること」に限定する。
+    """
+    assert "エラー文言の言い換えを禁じる規約であって、連携そのものを避ける規約ではない" in soul
+    assert "利用者が自分から連携を求めたら、必ず `oauth_connect` を呼ぶ" in soul

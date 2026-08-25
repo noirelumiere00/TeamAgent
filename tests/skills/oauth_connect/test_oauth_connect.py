@@ -236,3 +236,41 @@ def test_no_row_still_issues_link(monkeypatch: pytest.MonkeyPatch) -> None:
     out = skill.run(OAuthConnectInput(), _ctx("user@example.com"))
     assert out.url is not None
     assert "再連携" not in out.message
+
+
+# ── 🔴 1 往復でリンクまで届ける（ユーザー指示 2026-08-25）────────────────────────
+
+
+def test_description_forbids_asking_back_before_calling() -> None:
+    """tool description は LLM が **選択時**に読む面。ここに聞き返し禁止を書いておく。
+
+    SOUL.md だけに書くと、tool 一覧しか見ていない判断の局面で効かない。実害は
+    「連携」→ 聞き返し →「リンクが欲しい」→ ようやくリンク、の 2 往復。
+    """
+    desc = OAuthConnectSkill.description
+    assert "呼ぶ前に確認や聞き返しを挟まないこと" in desc
+    assert "リンクを出しますか？" in desc
+    assert "どちらですか？" in desc
+    assert "まとめて 1 レスポンスで返す" in desc
+
+
+def test_single_response_carries_both_links_without_a_choice_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """1 レスポンスに Google と Slack の**両方**が載り、選択を促す文言が無いこと。
+
+    「どちらを連携しますか？」と聞かせない根拠は、そもそも両方まとめて返る実装
+    （`_compose_message` の ① / ②）にある。分岐質問の必要が無いことを実出力で固定する。
+    """
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    # 1 レスポンスで両方のリンクが届いている＝利用者に選ばせる必要が無い。
+    assert out.url is not None and out.url in out.message
+    assert out.slack_url is not None and out.slack_url in out.message
+
+    # 出力自体が聞き返し・選択要求になっていない。
+    for banned in ("どちらを", "どちらの", "選んでください", "どれを", "しますか？"):
+        assert banned not in out.message, f"案内文が聞き返しになっている: {banned}"

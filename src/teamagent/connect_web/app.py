@@ -3744,16 +3744,49 @@ def create_app(
                 ),
                 status_code=400,
             )
+        # ⚠️ ワンタイム消費の失敗は **原因別に出し分ける**（2026-08 実害）。
+        # 旧実装は全例外を握って ``state_consumed=False`` に倒し、「リンクが古いか
+        # 使用済みです」と表示していた。実際には `consume_state_once` は state 保管先の
+        # env（テーブル名/scope）未設定で ``RuntimeError`` を投げる。利用者からは
+        # 「リンクを取り直せば直る」としか読めないため、**連打しても永久に直らない**
+        # 案内で 8 回押させた。再利用（DynamoDB の条件付き書込が False を返す）だけが
+        # 「使用済み」であって、例外は使用済みではない。
         try:
             state_consumed = _consume_google_state(state)
+        except RuntimeError as exc:
+            # 設定不備（state 保管先の env 未設定など）。利用者側の操作では直らない。
+            logger.error(
+                "connect_callback_state_store_unconfigured",
+                user_email=email,
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return HTMLResponse(
+                _page(
+                    "システム側の設定不備です",
+                    "管理者にご連絡ください。"
+                    "リンクを取り直しても解消しません（連携の設定が未完了です）。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
         except Exception as exc:
+            # 一時障害（DynamoDB のスロットリング・権限・ネットワーク等）。時間をおけば直りうる。
             logger.warning(
                 "connect_callback_state_consume_failed",
                 user_email=email,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
             )
-            state_consumed = False
+            return HTMLResponse(
+                _page(
+                    "一時的なエラーが発生しました",
+                    "少し時間をおいて、もう一度リンクを開いてください。"
+                    "繰り返す場合は管理者にご連絡ください。",
+                    accent="#f9667a",
+                ),
+                status_code=503,
+            )
         if not state_consumed:
             logger.warning("connect_callback_reused_state", user_email=email)
             return HTMLResponse(

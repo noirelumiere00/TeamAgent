@@ -50,6 +50,10 @@ from teamagent.mcp_gateway.caller_claim import (
 )
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder
+from teamagent.skills._shared.connect_intent import (
+    ConnectIntent,
+    detect_connect_intent_in_args,
+)
 from teamagent.skills.base import SkillContext
 
 # 二段返しの契約定数だけを持つ軽量モジュール（boto3/psycopg を引かない）。
@@ -68,6 +72,10 @@ RUN_AGENT_TOOL_NAME = "run_agent"
 # 注入は本ゲート層でのみ行い、SearchSkill / skills/search/schema.py は不変に保つ
 # （並行編集との衝突回避）。CONNECT_BASE_URL 未設定なら一切載せない（壊れたリンクを出さない）。
 SEARCH_TOOL_NAME = "search"
+
+# 「連携」依頼の決定論分岐で寄せ先にする tool 名。露出していない環境（USE_OAUTH_CONNECT_TOOL
+# 未設定）では by_name に居ないので、その場合は寄せずに通常ディスパッチへ落とす。
+OAUTH_CONNECT_TOOL_NAME = "oauth_connect"
 
 # submit 応答を返した後も MCP process 内で完了を待つ対象。SQS/DynamoDB/worker の契約は
 # 変えず、それぞれの status skill を通常どおり呼んで利用者向けサマリへ整形する。
@@ -220,6 +228,18 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
         },
     }
     out["properties"] = props
+    # ``_user_context`` を required に入れる（**入力 0 個のツールでも**）。
+    #
+    # 実測（2026-08）: ``oauth_connect`` は入力パラメータを持たないため、素の
+    # ``model_json_schema()`` には properties も required も無い。外側 LLM は素直に
+    # ``{}`` で呼び、trusted ingress plugin が ``_user_context must be a plain object``
+    # で **無言 block** する（利用者には「反応しない」としか見えない）。SOUL.md は
+    # 「全 tool call に ``_user_context`` を含めること」と宣言しているので、スキーマ側でも
+    # 同じ不変条件を宣言して LLM に必ず載せさせる。
+    required = list(out.get("required") or [])
+    if USER_CONTEXT_KEY not in required:
+        required.append(USER_CONTEXT_KEY)
+    out["required"] = required
     return out
 
 
@@ -583,6 +603,89 @@ async def _verify_caller(
         )
 
 
+def _log_connect_intent(
+    intent: ConnectIntent,
+    *,
+    requested: str,
+    dispatched: str,
+    slack_user_id: str | None,
+    connect_tool_available: bool,
+) -> None:
+    """連携依頼の検出結果を構造化ログへ出す（観測性・柱2）。
+
+    ⚠️ **本文・クライアント名は絶対に載せない**（G7 規律）。載せるのは
+    「誰が（署名検証済み slack_user_id）」「連携語を検出したか」「どの tool へ流れたか」
+    「判定理由コード」「一致した引数名」だけ。これで「連携と言ったのに何も起きなかった」
+    を、Slack のログを見ずに CloudWatch 側だけで後追いできる。
+    """
+    logger.info(
+        "mcp_connect_intent",
+        tool_requested=requested,
+        tool_dispatched=dispatched,
+        connect_keyword=intent.matched,
+        connect_reason=intent.reason,
+        connect_field=intent.field,
+        redirected=requested != dispatched,
+        connect_tool_available=connect_tool_available,
+        slack_user_id=slack_user_id,
+    )
+
+
+def _maybe_redirect_to_connect(
+    by_name: dict[str, ToolSpec],
+    *,
+    name: str,
+    spec: ToolSpec,
+    skill_args: dict[str, Any],
+    slack_user_id: str | None,
+) -> tuple[str, ToolSpec, dict[str, Any]]:
+    """「連携」依頼を、LLM の tool 選択に関係なく ``oauth_connect`` へ寄せる決定論分岐。
+
+    ## なぜここ（MCP 境界）なのか
+
+    OpenClaw 側で「本文が連携語なら必ずこの tool を呼ぶ」を書ける層は**存在しない**:
+
+    * ``infra/openclaw/openclaw.config.json5`` にルーティング DSL は無い
+      （あるのは ``tools.profile`` / ``mcp.servers.teamagent.toolFilter`` の許可リストだけ）。
+    * ``infra/openclaw/caller-identity-plugin`` が握れる hook は
+      ``inbound_claim`` / ``message_received`` / ``before_model_resolve`` /
+      ``before_tool_call`` / ``agent_end`` の 5 つで、戻り値で挙動を変えられるのは
+      ``before_tool_call``（``{block, blockReason}`` か ``{params}`` を返す）だけ。
+      **tool 呼び出しを新規に発生させる hook は無い**。
+
+    したがって「LLM が何かしらの tool を呼んだ後」に効かせられるのは MCP 境界だけで、
+    ここが実際に配線できる最下流の決定論点になる。
+
+    ## 安全性
+
+    * 寄せ替えは ``_verify_caller`` / ``_resolve_metadata`` の **後**に行う。署名 claim は
+      LLM が申告した元の tool 名に対して検証済みで、その束縛は一切緩めない。
+    * 寄せ先の ``oauth_connect`` は「呼んだ本人向けの認可 URL を組み立てて返すだけ」で、
+      元の tool より広い権限を要求しない（＝権限昇格にならない）。
+    * ``oauth_connect`` が露出していない環境では寄せずに通常ディスパッチへ落とす。
+
+    ## 残る限界（正直に書く）
+
+    LLM が **1 つも tool を呼ばなかった**ターン（本番実測の 1・2 ターン目）はここへ来ない。
+    そこは SOUL.md の専用節（連携語は一語でも ``oauth_connect`` を呼ぶ）が担う。
+    """
+    intent = detect_connect_intent_in_args(skill_args)
+    connect_spec = by_name.get(OAUTH_CONNECT_TOOL_NAME)
+    redirect = intent.matched and name != OAUTH_CONNECT_TOOL_NAME and connect_spec is not None
+    if intent.matched or name == OAUTH_CONNECT_TOOL_NAME:
+        _log_connect_intent(
+            intent,
+            requested=name,
+            dispatched=OAUTH_CONNECT_TOOL_NAME if redirect else name,
+            slack_user_id=slack_user_id,
+            connect_tool_available=connect_spec is not None,
+        )
+    if redirect and connect_spec is not None:
+        # oauth_connect は入力を持たない（対象は常に呼び出した本人）。元の引数は捨てる。
+        return OAUTH_CONNECT_TOOL_NAME, connect_spec, {}
+    return name, spec, skill_args
+
+
 async def dispatch_tool(
     by_name: dict[str, ToolSpec],
     name: str,
@@ -634,6 +737,17 @@ async def dispatch_tool(
     usage_user_id = verified_caller.slack_user_id if verified_caller is not None else None
 
     skill_args = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
+
+    # ── 決定論分岐: 「連携」依頼は LLM の tool 選択を待たず oauth_connect へ寄せる ──
+    # 身元検証・metadata 解決の後・入力検証の前に置く（claim は元の tool 名で検証済み）。
+    name, spec, skill_args = _maybe_redirect_to_connect(
+        by_name,
+        name=name,
+        spec=spec,
+        skill_args=skill_args,
+        slack_user_id=usage_user_id,
+    )
+
     try:
         skill_input = spec.input_schema(**skill_args)
     except Exception as e:  # 入力検証エラーは構造化で返す
