@@ -241,6 +241,24 @@ def test_oauth_connect_section_does_not_soften_the_no_askback_rule(soul: str) ->
     )
 
 
+def test_top_level_askback_rule_carves_out_connecting(soul: str) -> None:
+    """🔴 **最上位規約**側にも連携の例外を書く（precedence の穴を塞ぐ）。
+
+    敵対レビューでの発見（2026-08-25）: 「意図のくみ取り」は **【最上位規約】** と銘打たれて
+    おり、`oauth_connect` の専用節（通常の節）より上位に読める。しかもその聞き返しの例が
+    「メールの件ですか、Slack の件ですか？」＝ **禁止したい分岐質問とほぼ同型**で、
+    「Google と Slack のどちらですか？」を上位規約の側から正当化できてしまう。
+
+    専用節に禁止を書くだけでは、上位規約を根拠にした聞き返しを閉じられない。ここが赤に
+    なったら、消す前に「連携が 1 往復で終わるか」を実機（Slack 1 メッセージ）で確認すること。
+    """
+    askback_rule = soul.split("【最上位規約・意図のくみ取り】", 1)[1].split("**全 tool call", 1)[0]
+    assert "例外: 連携（`oauth_connect`）はこの聞き返しの対象外" in askback_rule, (
+        "最上位規約に連携の例外が無い。専用節だけでは上位規約を根拠にした聞き返しを閉じられない"
+    )
+    assert "この規約を根拠にしても禁止" in askback_rule
+
+
 def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
     """`slack_user_id` 欠落の節が「連携案内そのものの禁止」に読めてはいけない。
 
