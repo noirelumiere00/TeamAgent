@@ -2,12 +2,12 @@
 # OpenClaw gateway for ECS/Fargate (linux/arm64 only).
 #
 # The official image is used only as a content source. The runtime is a pinned
-# distroless Node 24 image: no shell, package manager, curl, npm, or compiler.
-# Secrets are injected by ECS at runtime and are never accepted as build args.
+# Chainguard (Wolfi) Node 26 image: no shell, package manager, curl, npm, or
+# compiler. Secrets are injected by ECS at runtime, never as build args.
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG DISTROLESS_ARM64_DIGEST=sha256:029157d80b0b475dbd9e59715bb1cf51cd637f667ca546b3af39d9ad71bcffd5
+ARG RUNTIME_ARM64_DIGEST=sha256:827a1a2add4e9566b3ca69a4f98aec1bb0d9eddbb5410382def798fc4024071b
 
 # The same pinned upstream image, kept untouched. The stage below prunes /app
 # aggressively and removes /app/src, so the workspace templates the runtime
@@ -152,11 +152,11 @@ RUN set -eux; \
     rm -rf /tmp/teamagent-openclaw; \
     chmod -R a-w /opt/teamagent
 
-FROM gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime
+FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG DISTROLESS_ARM64_DIGEST=sha256:029157d80b0b475dbd9e59715bb1cf51cd637f667ca546b3af39d9ad71bcffd5
+ARG RUNTIME_ARM64_DIGEST=sha256:827a1a2add4e9566b3ca69a4f98aec1bb0d9eddbb5410382def798fc4024071b
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
 ARG SOURCE_TREE=unknown
@@ -190,7 +190,7 @@ COPY --chown=65532:65532 --chmod=0555 infra/openclaw/rollout-task-canary.mjs /op
 COPY --chown=65532:65532 --chmod=0444 infra/openclaw/effective-tool-scope.json /opt/teamagent/effective-tool-scope.json
 
 ENV NODE_ENV=production \
-    PATH=/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin \
     HOME=/tmp/teamagent-openclaw/home \
     TMPDIR=/tmp \
     XDG_CACHE_HOME=/tmp/teamagent-openclaw/cache \
@@ -207,8 +207,8 @@ LABEL org.opencontainers.image.title="TeamAgent OpenClaw Gateway" \
       org.opencontainers.image.source="${SOURCE_URI}" \
       org.opencontainers.image.version="${OPENCLAW_VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
-      org.opencontainers.image.base.name="gcr.io/distroless/nodejs24-debian13:nonroot" \
-      org.opencontainers.image.base.digest="${DISTROLESS_ARM64_DIGEST}" \
+      org.opencontainers.image.base.name="cgr.dev/chainguard/node:latest" \
+      org.opencontainers.image.base.digest="${RUNTIME_ARM64_DIGEST}" \
       io.teamagent.source.branch="${GIT_BRANCH}" \
       io.teamagent.source.tree="${SOURCE_TREE}" \
       io.teamagent.source.archive.sha256="${SOURCE_ARCHIVE_SHA256}" \
@@ -224,7 +224,7 @@ WORKDIR /app
 USER 65532:65532
 # ECS/Fargate copies this path's image ownership/mode into a task-scoped bind
 # volume when the task mounts the same containerPath. /tmp is 01777 in the
-# distroless base, so uid 65532 can write while the root filesystem stays RO.
+# Chainguard base, so uid 65532 can write while the root filesystem stays RO.
 VOLUME ["/tmp"]
-ENTRYPOINT ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"]
+ENTRYPOINT ["/usr/bin/node", "/opt/teamagent/entrypoint.mjs"]
 CMD ["/opt/teamagent/gateway-runtime.mjs", "gateway", "--bind", "loopback", "--port", "18789"]

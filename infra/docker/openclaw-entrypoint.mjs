@@ -39,7 +39,7 @@ const REQUIRED_PLUGINS = new Map([
     ],
   ],
 ]);
-const FIXED_PATH = "/nodejs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const FIXED_PATH = "/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin";
 const PASSTHROUGH_ENV = [
   // ECS task-role credentials and container/task metadata.
   "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
@@ -325,11 +325,11 @@ function normalizeCommand(rawArgs) {
   if (args.length === 0) {
     return ["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"];
   }
-  const explicitNode = ["node", "/nodejs/bin/node", process.execPath].includes(args[0]);
+  const explicitNode = ["node", "/usr/bin/node", process.execPath].includes(args[0]);
   if (explicitNode) args.shift();
   if (args.length === 0) throw new Error("runtime command is empty after removing node");
   if (["sh", "bash", "/bin/sh", "/bin/bash"].includes(args[0])) {
-    throw new Error("shell commands are unavailable in the distroless runtime");
+    throw new Error("shell commands are unavailable in the shell-less runtime");
   }
   if (args[0] === "dist/index.js") args[0] = "/app/dist/index.js";
   if (!explicitNode && (args[0].startsWith("-") || !isAbsolute(args[0]))) {

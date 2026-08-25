@@ -4,7 +4,7 @@ This directory defines the reviewed TeamAgent OpenClaw core runtime and its
 fail-closed integration with the repository's canonical provenance and
 one-time Terraform release gate. The only locally supported runtime is
 OpenClaw `2026.7.1` on a single `linux/arm64` manifest, rebuilt onto the
-digest-pinned distroless Node 24 base and run as UID/GID `65532`.
+digest-pinned Chainguard (Wolfi) Node 26 base and run as UID/GID `65532`.
 
 The production bundle contract remains `release.ready=false`. The separate
 media subject, exact two-subject receipt emitter, signed final-HEAD registry

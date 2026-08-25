@@ -1022,7 +1022,7 @@ resource "aws_ecs_task_definition" "openclaw" {
     healthCheck = {
       command = [
         "CMD",
-        "/nodejs/bin/node",
+        "/usr/bin/node",
         "-e",
         "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
       ]

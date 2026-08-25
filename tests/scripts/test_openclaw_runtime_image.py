@@ -29,7 +29,7 @@ EXPECTED_CMD = [
     "--port",
     "18789",
 ]
-EXPECTED_ENTRYPOINT = ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"]
+EXPECTED_ENTRYPOINT = ["/usr/bin/node", "/opt/teamagent/entrypoint.mjs"]
 PLACEHOLDER_ENV = [
     "SLACK_BOT_TOKEN=xoxb-offline-contract",
     "SLACK_APP_TOKEN=xapp-offline-contract",
@@ -742,7 +742,7 @@ def _gateway_lifecycle_contract(
     run_args.extend(
         [
             image,
-            "/nodejs/bin/node",
+            "/usr/bin/node",
             "-e",
             GATEWAY_LAUNCHER,
         ]
@@ -768,7 +768,7 @@ def _gateway_lifecycle_contract(
                     "docker",
                     "exec",
                     container_id,
-                    "/nodejs/bin/node",
+                    "/usr/bin/node",
                     "-e",
                     (
                         "fetch('http://127.0.0.1:18789/readyz')"
@@ -804,7 +804,7 @@ def _gateway_lifecycle_contract(
                 "docker",
                 "exec",
                 container_id,
-                "/nodejs/bin/node",
+                "/usr/bin/node",
                 "-e",
                 (
                     "const fs=require('node:fs');"
@@ -829,7 +829,7 @@ def _gateway_lifecycle_contract(
                     "docker",
                     "exec",
                     container_id,
-                    "/nodejs/bin/node",
+                    "/usr/bin/node",
                     "-e",
                     CONTROL_UI_HTTP_PROBE,
                 ],
@@ -858,7 +858,7 @@ def _gateway_lifecycle_contract(
                 "docker",
                 "exec",
                 container_id,
-                "/nodejs/bin/node",
+                "/usr/bin/node",
                 "-e",
                 (
                     "process.stdout.write("
@@ -928,7 +928,7 @@ def _empty_slack_dm_allowlist_contract(image: str) -> dict[str, Any]:
     ]
     for assignment in _runtime_env(""):
         args.extend(["-e", assignment])
-    args.extend([image, "/nodejs/bin/node", "-e", "process.exit(0)"])
+    args.extend([image, "/usr/bin/node", "-e", "process.exit(0)"])
     result = _run(args, check=False)
     output = result.stdout + result.stderr
     assert result.returncode == 78, output
@@ -968,7 +968,7 @@ def _invalid_caller_runtime_env_contract(
     for assignment in _runtime_env("*"):
         name = assignment.split("=", 1)[0]
         args.extend(["-e", f"{variable}={value}" if name == variable else assignment])
-    args.extend([image, "/nodejs/bin/node", "-e", "process.exit(0)"])
+    args.extend([image, "/usr/bin/node", "-e", "process.exit(0)"])
     result = _run(args, check=False)
     output = result.stdout + result.stderr
     assert result.returncode == 78, output
@@ -1006,7 +1006,7 @@ def _plugin_operation_contract(image: str) -> dict[str, Any]:
                 "dst=/opt/openclaw-plugin-operation-smoke.mjs,readonly"
             ),
             "--entrypoint",
-            "/nodejs/bin/node",
+            "/usr/bin/node",
             image,
             "/opt/openclaw-plugin-operation-smoke.mjs",
         ]
@@ -1053,7 +1053,7 @@ def _caller_identity_plugin_contract(image: str) -> dict[str, Any]:
             "-e",
             "SLACK_TEAM_ID=T0123456789",
             "--entrypoint",
-            "/nodejs/bin/node",
+            "/usr/bin/node",
             image,
             "--input-type=module",
             "-e",
@@ -1240,7 +1240,7 @@ const result = {
 };
 console.log(JSON.stringify(result));
 """
-    probe_result = _run([*_isolated_run_args(image), "/nodejs/bin/node", "-e", node_probe])
+    probe_result = _run([*_isolated_run_args(image), "/usr/bin/node", "-e", node_probe])
     process_contract = json.loads(probe_result.stdout)
     assert process_contract["uid"] == 65532
     assert process_contract["gid"] == 65532
@@ -1374,7 +1374,7 @@ console.log(JSON.stringify(result));
     exit_42 = _run(
         [
             *_isolated_run_args(image),
-            "/nodejs/bin/node",
+            "/usr/bin/node",
             "-e",
             "process.exit(42)",
         ],
@@ -1482,7 +1482,7 @@ fs.writeFileSync(1, JSON.stringify({
             "--tmpfs",
             "/tmp:rw,noexec,nosuid,size=64m",
             "--entrypoint",
-            "/nodejs/bin/node",
+            "/usr/bin/node",
             image,
             "--input-type=module",
             "-e",

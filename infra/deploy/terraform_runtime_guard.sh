@@ -3597,7 +3597,7 @@ validate_image_contract() {
     (
       if $profile == "openclaw" then
         .config.Entrypoint ==
-          ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"] and
+          ["/usr/bin/node", "/opt/teamagent/entrypoint.mjs"] and
         .config.Cmd ==
           ["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"]
       else true
@@ -5948,7 +5948,7 @@ validate_runtime_task_contracts() {
           $container.stopTimeout == 120 and
           exact_health(
             $container;
-            ["CMD", "/nodejs/bin/node", "-e", $openclaw_health];
+            ["CMD", "/usr/bin/node", "-e", $openclaw_health];
             40
           ) and
           ($env | has("OPENCLAW_CONFIG_PATH") | not)
@@ -8035,7 +8035,7 @@ run_registered_preflight_task() {
   esac
 
   if [ "$profile" = "openclaw" ]; then
-    entry_point_json='["/nodejs/bin/node"]'
+    entry_point_json='["/usr/bin/node"]'
     command_json="$(jq -n -c --arg script "$script" '["-e", $script]')"
   else
     entry_point_json='["/bin/sh","-c"]'
