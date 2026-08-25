@@ -323,3 +323,95 @@ def test_connect_app_read_lives_in_the_evidence_inline_policy() -> None:
     tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
     doc_start, doc_end = _evidence_doc_span()
     assert doc_start < tf.index(f'"{CONNECT_APP_SID}"') < doc_end
+
+
+# --- PR2-A0.2.2d: guard が 2026-07-17 から要求していた read 2 種 -------------------
+#
+# どちらも automation role へ一度も付与されていなかった。2026-08-25 の preflight で
+# assume-role した実 API 呼び出しにより AccessDenied を実測して確定した
+# （simulate は CLI 名を IAM action 名へ素朴変換すると誤検知するため単独では使わない）。
+
+CONCURRENCY_SID = "ReadExactDispatcherReservedConcurrency"
+DESCRIBE_TASKS_SID = "ReadExactClusterTaskDescriptions"
+
+
+def test_dispatcher_concurrency_read_is_a_single_readonly_action() -> None:
+    stmt = _strip_comments(_statement(CONCURRENCY_SID))
+    assert re.findall(r'"(lambda:[A-Za-z]+)"', stmt) == ["lambda:GetFunctionConcurrency"]
+    for write in ("Put", "Delete", "Create", "Update", "Add", "Remove", "Invoke", "Tag"):
+        assert f"lambda:{write}" not in stmt
+
+
+def test_dispatcher_concurrency_read_covers_exactly_the_two_sqs_dispatchers() -> None:
+    """tiktok / x_buzz の exact ARN 2 本ちょうど。ワイルドカードは使わない。"""
+    stmt = _strip_comments(_statement(CONCURRENCY_SID))
+    arns = re.findall(r'"(arn:aws:lambda:[^"]+)"', stmt)
+    assert len(arns) == 2, arns
+    assert all("*" not in arn for arn in arns), arns
+    assert any(arn.endswith("-tiktok-acquire-dispatch") for arn in arns), arns
+    assert any(arn.endswith("-x-buzz-dispatch") for arn in arns), arns
+    # ARN は config 由来の式で組み立てる（丸ごとの literal にしない）
+    assert all("${var.project_name}-${var.environment}" in arn for arn in arns), arns
+
+
+def test_dispatcher_concurrency_read_excludes_the_ingest_dispatch() -> None:
+    """ingest の dispatch はこの API を使わない設計なので権限も与えない。
+
+    ここが緩むと「使っていない権限が付いている」状態になり、
+    案 B が ingest 用に concurrency API を避けた意味が消える。
+    """
+    stmt = _strip_comments(_statement(CONCURRENCY_SID))
+    assert "ingest" not in stmt
+    guard = (ROOT / "infra/deploy/terraform_runtime_guard.sh").read_text(encoding="utf-8")
+    ingest_branch_start = guard.index("local ingest_dispatch_function=")
+    ingest_branch = guard[
+        ingest_branch_start : guard.index("aws_cli ecs list-tasks", ingest_branch_start)
+    ]
+    assert "get-function-concurrency" not in ingest_branch
+
+
+def test_describe_tasks_read_is_scoped_to_the_project_cluster() -> None:
+    """アカウント全体の task へ広げない。cluster 配下だけに限定する。"""
+    stmt = _strip_comments(_statement(DESCRIBE_TASKS_SID))
+    assert re.findall(r'"(ecs:[A-Za-z]+)"', stmt) == ["ecs:DescribeTasks"]
+    arns = re.findall(r'"(arn:aws:ecs:[^"]+)"', stmt)
+    assert len(arns) == 1, arns
+    arn = arns[0]
+    assert ":task/${var.project_name}-${var.environment}/*" in arn, arn
+    # resource 全体のワイルドカード化は禁止（cluster 名を挟まない形にしない）
+    assert not arn.endswith(":task/*"), arn
+    assert '"*"' not in stmt
+
+
+def test_a022d_statements_grant_no_write_and_no_conditions() -> None:
+    for sid in (CONCURRENCY_SID, DESCRIBE_TASKS_SID):
+        stmt = _strip_comments(_statement(sid))
+        assert "condition" not in stmt, sid
+        assert "Deny" not in stmt, sid
+
+
+def test_a022d_statements_live_in_the_evidence_inline_policy() -> None:
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    doc_start, doc_end = _evidence_doc_span()
+    for sid in (CONCURRENCY_SID, DESCRIBE_TASKS_SID):
+        assert doc_start < tf.index(f'"{sid}"') < doc_end, sid
+
+
+def test_a022d_actions_are_the_ones_the_guard_actually_calls() -> None:
+    """guard 側の呼び出しと statement の action が一致する。
+
+    乖離すると preflight が再び AccessDenied で止まる。
+    """
+    guard = (ROOT / "infra/deploy/terraform_runtime_guard.sh").read_text(encoding="utf-8")
+    assert "aws_cli lambda get-function-concurrency" in guard
+    assert "aws_cli ecs describe-tasks" in guard
+
+
+def test_a022d_documents_why_the_permission_was_missing() -> None:
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    comment = tf[tf.index("# PR2-A0.2.2d") : tf.index(f'sid     = "{CONCURRENCY_SID}"')]
+    assert "2026-07-17" in comment
+    assert "AccessDenied" in comment
+    assert "simulate" in comment
+    # security control を削る方向で解決していないことを明記させる
+    assert "security control" in comment
