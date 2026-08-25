@@ -11,7 +11,7 @@
     {
       "sha": "fbff28d065a9f866c798c08d29f4acc0779e55c8",
       "subject": "feat(rebind): 実行 session policy を least-privilege の canonical ファイルへ縮小",
-      "source_sha": "c1ddfc1",
+      "source_sha": "c1ddfc11bba6a6079abd340ad6789157e381dc69",
       "gate": "PR #313 MERGE GO（2026-08-24 ユーザー裁定）",
       "source_pr": "#313",
       "patch_id": "135903ac16ddb8d27e0ea50da03b0c438c8c6bc2"
@@ -19,7 +19,7 @@
     {
       "sha": "7dc368245d189d87348a7c5736eb26b6f425800f",
       "subject": "feat(adopt): live snapshot 注入を通常 guarded plan と共有実装化（PR2-A0.3.2）",
-      "source_sha": "7ebbfa1",
+      "source_sha": "7ebbfa17a0ef4876fc19db349f6f6684f6dba6bf",
       "gate": "PR #314 MERGE GO（2026-08-24 ユーザー裁定）",
       "source_pr": "#314",
       "patch_id": "8cdb9a7ba34c34bb931086ddd650a36026d3e8da"
@@ -103,9 +103,94 @@
       "source_sha": "81a83391754449a18c2f883617a58edffa4db8ab",
       "patch_id": "0339cb90d2bfb3766fd445602f8c4f435dee1a1e",
       "gate": "#322 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "c63e4893d7f9ca21c69f0a93e9cf3dccad76f9c9",
+      "subject": "chore(base): vulkan-loader ドリフト追随を execution line へ再現（Wave2 1/2）",
+      "source_pr": "dev-commit",
+      "source_sha": "d3fe768e5f507bca003f8c742c5b0875d7a70db5",
+      "patch_id": "16e95f394ead17b7a14ade45c9b031ff57f5979b",
+      "gate": "Wave2 reconstruction GO（2026-08-24）",
+      "source_note": "dev d3fe768 と patch-id 一致。導入 PR は特定できなかったため provenance の錨は dev SHA とする。"
+    },
+    {
+      "sha": "296720ee37ab3af3da6d4001817889196726a3cc",
+      "subject": "fix(base): CVE-2026-14456 openssl 3.6.3-r5 を execution line へ再現（Wave2 2/2）",
+      "source_pr": "dev-commit",
+      "source_sha": "27fe7764aa6a8b2042e0225fc04b7e78c34b69e7",
+      "patch_id": "deea6032a866e5d665009862e3dfcb4899d0e9f9",
+      "gate": "Wave2 reconstruction GO（2026-08-24）",
+      "source_note": "承認済み 27fe776 の非台帳部分を再現。cherry-pick ではないため patch-id は一致しない。同一性は touched blob 4/4 の exact 一致で担保する。"
+    },
+    {
+      "sha": "f9731455860bbf16a4fa3af0cd2666e6758803f8",
+      "subject": "chore(supply-chain): 世代台帳を execution line 自身の inputs から再生成（Wave2）",
+      "source_pr": "execution-line-native",
+      "source_sha": "",
+      "patch_id": "57b4a627572b390e17058ebc54c046f47d86dab2",
+      "gate": "Wave2 reconstruction GO（2026-08-24）",
+      "source_note": "dev 側に対応 commit は存在しない。execution line 自身を入力として世代台帳を生成するため、構造上 dev には作れない。"
+    },
+    {
+      "sha": "868fcb7826e5bad72eb5fb369b61c22be19c5905",
+      "subject": "chore(rebind): rebind #2 の mapping を 5 target へ確定",
+      "source_pr": "execution-line-native",
+      "source_sha": "",
+      "patch_id": "2b24cb0f8e1474e747cfef9c33e6d2ceab90bfde",
+      "gate": "Production State Rebind #2 GO（2026-08-24）",
+      "source_note": "dev 側に対応 commit は存在しない。rebind #2 実行時点の live に束縛された mapping であるため。"
+    },
+    {
+      "sha": "1243b85451c1e81eaaf241a2445544192a1e35d1",
+      "subject": "feat(iam): adopt-plan の connect /app snapshot read を追加（PR2-A0.2.2c）",
+      "source_pr": "#324",
+      "source_sha": "8bfdf16c604e30b495e2af450252170149cfe450",
+      "patch_id": "81b8b97d61cab7a2316ad7cd143f260eaf94e307",
+      "gate": "#324 MERGE GO（2026-08-25）: A0.2.2c IAM は live へ適用済み（serial 213）。execution line 未取込だと plan に巻き戻し update が混入する"
+    },
+    {
+      "sha": "e97e8cc4d67fa0777fe074add293fe44fbabfe04",
+      "subject": "fix(guard): ingest の taskdef 観測経路を dispatch Lambda へ（activation-only shim）",
+      "source_pr": "#328",
+      "source_sha": "2132fd61ad91650f0c302fe6932bae98ede5aef6",
+      "patch_id": "52e81457d8c928142222016429d3602622388381",
+      "gate": "#328 MERGE GO（2026-08-25・案 B）"
+    },
+    {
+      "sha": "b819bc6cc3f4615bdb8b9f61ece6883bff3dbc85",
+      "subject": "fix(guard): 敵対的レビューで確定した shim の欠陥 5 件を修正",
+      "source_pr": "#328",
+      "source_sha": "5d4bf389d3d1c1e2bfd48901d419b1005e97a9bd",
+      "patch_id": "b05ff1a52c37e6e17ed12c2f4b33b3e797afad13",
+      "gate": "#328 MERGE GO（2026-08-25・案 B）: 敵対的レビュー確定 5 件の修正"
+    },
+    {
+      "sha": "63ff4e097eb940428080c5e137e15c0ab6b486d8",
+      "subject": "test(guard): ECS target 属性の負テストを canary へ移す",
+      "source_pr": "#328",
+      "source_sha": "b5f4ea69a9bf6da1ecced4cd1c71575c9d4ee3e1",
+      "patch_id": "dd3a1bc43a07bdd5310020e2a8c93ac49eca6050",
+      "gate": "#328 MERGE GO（2026-08-25・案 B）"
+    },
+    {
+      "sha": "c57bedf72136878b8c862b71c4835a9118fa24a9",
+      "subject": "test(guard): ingest activation preflight の network 取得元を固定",
+      "source_pr": "#328",
+      "source_sha": "e7f7cb18512be1afd62f755516cadf3953d78aef",
+      "patch_id": "8f4589b817442e87c4762df37408169ed6e1931b",
+      "gate": "#328 MERGE GO（2026-08-25・案 B）"
+    },
+    {
+      "sha": "5ef4e8e9bc307f051c112554ccbd73485dc57241",
+      "subject": "docs(activation): 案 B の裁定・正名化の hard blocker・レビュー結果を記録",
+      "source_pr": "#328",
+      "source_sha": "dfdb52d6bb09b8685142285dc948d7f39b154c4f",
+      "patch_id": "899071c1b12bb23d24dacfaf4f1a62dea0afe9fa",
+      "gate": "#328 MERGE GO（2026-08-25・案 B）",
+      "source_note": "記録媒体は dev 版を正として衝突解決したため patch-id は dev と一致しない。同一性は docs/activation/ACTIVATION_STATE.md の blob が dev と exact 一致することで担保する。"
     }
   ],
-  "expected_head": "e40f1c23c0fe8f7807f15922588d4b46e1a79da8",
+  "expected_head": "5ef4e8e9bc307f051c112554ccbd73485dc57241",
   "excluded_commits": [
     {
       "sha": "4f7da58",
@@ -128,6 +213,6 @@
       "reason": "mail 機能。activation と無関係のため execution line へ取り込まない"
     }
   ],
-  "payload_control_boundary": "approved_commits は execution line 上の payload commit のみを数える（現在 base + 12）。本ファイル自身を書き換える commit は dev 側の control-plane metadata であり payload に含めない（自己参照を避けるため。2026-08-24 裁定）。",
+  "payload_control_boundary": "approved_commits は execution line 上の payload commit のみを数える（現在 base + 22）。本ファイル自身を書き換える commit は dev 側の control-plane metadata であり payload に含めない（自己参照を避けるため。2026-08-24 裁定）。provenance は 3 形式のいずれかで宣言する: (1) #<PR> + source_sha、(2) dev-commit + source_sha（導入 PR 未特定。錨は dev SHA）、(3) execution-line-native（dev に対応 commit が構造上存在しない）。(2)(3) は source_note で理由を明記する。",
   "authoritative_copy": "dev 側の本ファイルが唯一の真実源。#315 の patch は execution line にも同名ファイルのコピーを持ち込むが、それは stale な inert コピーであり検証に使ってはならない。assert-execution-line は execution line 自身から実行された場合に拒否する。"
 }
