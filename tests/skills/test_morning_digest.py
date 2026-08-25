@@ -410,6 +410,25 @@ def test_triage_id_join_tolerates_case_and_quote_noise(fake_msgs) -> None:
     assert by_subject["確認のお願い"] == "資料確認の依頼"
 
 
+def test_triage_duplicate_ids_keep_the_first_element(fake_msgs) -> None:
+    """同じ id が 2 回返ってきたら **先勝ち**（後から来た重複で上書きしない）。
+
+    LLM の併合/重複ハルシネーションでは、同じ id の要素が 2 つ返ることがある。実装は
+    ``by_id.setdefault`` で先勝ちを選んでいる（＝入力順に対応した最初の判定を採る）が、
+    ``by_id[key] = obj`` へ変えても既存テストは全て緑のままだった（変異テストで実測・
+    2026-08-26）。どちらを採るかは決定論でなければならないので、機械で固定する。
+    """
+    duplicated = (
+        '[{"id": "5feceb66", "importance": "high", "summary": "最初の判定"},'
+        ' {"id": "5feceb66", "importance": "low", "summary": "後から来た重複"},'
+        ' {"id": "6b86b273", "importance": "low", "summary": "業界ニュースの共有"}]'
+    )
+    out = _blend_skill(fake_msgs, duplicated).run(MorningDigestInput(max_drafts=0), _blend_ctx())
+    by_subject = {m.subject_display: m for m in out.mail_digest}
+    assert by_subject["Re: 契約書"].summary == "最初の判定"
+    assert by_subject["Re: 契約書"].importance == "high"
+
+
 def test_fail_closed_when_user_email_missing(fake_msgs, triage_json) -> None:
     skill = MorningDigestSkill(
         token_store=_FakeTokenStore({"me@vectorinc.co.jp": object()}),

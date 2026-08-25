@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from teamagent.identity import IdentityResolver, ResolvedIdentity
+from teamagent.mcp_gateway import server as mcp_server
 from teamagent.mcp_gateway.server import (
     OAUTH_CONNECT_TOOL_NAME,
     USER_CONTEXT_KEY,
@@ -152,10 +153,61 @@ async def test_non_connect_request_is_not_redirected(text: str) -> None:
     assert out["query"] == text
 
 
+async def test_redirect_drops_the_original_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """寄せ替え時に元 tool の引数を持ち越さない（本文が利用記録として残るのを防ぐ）。
+
+    `_record_usage` は ``skill_args["query"]`` を **`query_text` として usage_events DB へ
+    保存する**（server.py: 「入力本文は非空 query だけを採る」）。寄せ替えで元の引数を
+    そのまま渡すと、利用者が Slack に打った本文が `oauth_connect` の利用記録として DB に
+    残る。`oauth_connect` の入力モデルは項目ゼロで extra を無視するため、**引数を渡しても
+    例外は出ず、テストは緑のまま通ってしまう**（変異テストで実測・2026-08-26）。
+    そこで「recorder に何が渡ったか」を直接見る。
+    """
+    captured: list[dict[str, Any]] = []
+    real = mcp_server._record_usage
+
+    def spy(**kwargs: Any) -> None:
+        captured.append(dict(kwargs["skill_args"]))
+        real(**kwargs)
+
+    monkeypatch.setattr(mcp_server, "_record_usage", spy)
+    out = await _dispatch("search", {"query": "Google連携したい"})
+    assert out["ran"] == OAUTH_CONNECT_TOOL_NAME, out
+    assert captured == [{}], captured
+
+
 async def test_no_redirect_when_connect_tool_is_not_exposed() -> None:
     """`USE_OAUTH_CONNECT_TOOL` 未設定の環境では寄せずに通常ディスパッチへ落とす。"""
     out = await _dispatch("search", {"query": "連携"}, by_name=_WITHOUT_CONNECT)
     assert out["ran"] == "search", out
+
+
+async def test_unverified_caller_is_rejected_before_the_connect_redirect() -> None:
+    """署名検証を通らない呼び出しは、連携語を含んでいても寄せ替えない（順序の固定）。
+
+    寄せ替えは `_verify_caller` / `_resolve_metadata` の **後**に置く契約になっている
+    （server.py `_maybe_redirect_to_connect` の docstring）。先に寄せると
+    ①「search 用に署名された claim」で `oauth_connect` を発火させられ、
+    ② 身元未確定のまま `slack_user_id` 入りの分岐ログを出すことになる。
+    この順序は既存テストのどれにも縛られていなかったので、ここで固定する。
+    """
+    tampered = sign_arguments("search", {"query": "連携"}, secret="x" * 40)
+    with capture_logs() as logs:
+        out = _parse(
+            await dispatch_tool(
+                _BY_NAME,
+                "search",
+                tampered,
+                identity_resolver=_resolver(),
+                caller_claim_verifier=make_verifier(),
+                allowed_domains=frozenset({"vectorinc.co.jp"}),
+                require_rls=True,
+            )
+        )
+    assert "error" in out, out
+    assert out.get("ran") is None, out
+    # 身元が確定していない段階で分岐判定・ログまで進んでいないこと。
+    assert [entry for entry in logs if entry.get("event") == "mcp_connect_intent"] == []
 
 
 async def test_direct_oauth_connect_call_still_works() -> None:

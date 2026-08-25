@@ -1571,6 +1571,13 @@ CANONICAL_ALARM_ACTIONS = (
 )
 
 
+def _alarm_number(block: str, key: str) -> str:
+    """alarm ブロックから数値属性を 1 つ取り出す（`GreaterThanOrEqualToThreshold` に誤マッチしない）。"""
+    match = re.search(rf"^\s*{key}\s*=\s*([0-9.]+)\s*$", block, re.MULTILINE)
+    assert match is not None, f"{key} が見つからない"
+    return match.group(1)
+
+
 def test_web_research_is_open_to_everyone_from_git() -> None:
     """web_research の allowlist が空（=全員）であることを git 側で固定する。
 
@@ -1654,6 +1661,22 @@ def test_saturation_alarms_exist_and_use_the_canonical_topic() -> None:
         for action in CANONICAL_ALARM_ACTIONS:
             assert action in block
         assert "prevent_destroy = true" in block
+
+    # ⚠️ 「alarm が在る」だけでは監視にならない。**到達可能な閾値か**まで縛る。
+    # 変異テスト実測（2026-08-26）: memory の threshold を 101、credits の threshold を 0 に
+    # しても、名前・namespace・通知先が揃っているせいで上の assert 群は全て緑のままだった
+    # ＝「在るのに絶対鳴らない alarm」を素通しする穴。
+    mem_threshold = float(_alarm_number(memory, "threshold"))
+    # MemoryUtilization は 0〜100(%)。100 超は原理的に到達不能、50 未満は常時鳴りっぱなし。
+    assert 50 <= mem_threshold <= 95, f"到達不能/過敏なメモリ閾値: {mem_threshold}"
+    cred_threshold = float(_alarm_number(credits, "threshold"))
+    # t4g.micro の CPUCreditBalance は上限 288。0 以下だと枯渇しても LessThan にならない。
+    assert 0 < cred_threshold < 288, f"到達不能な CPU クレジット閾値: {cred_threshold}"
+    for block in (memory, credits):
+        periods = int(_alarm_number(block, "evaluation_periods"))
+        datapoints = int(_alarm_number(block, "datapoints_to_alarm"))
+        # datapoints_to_alarm > evaluation_periods は「N 期間中 M 個」が成立せず永久に鳴らない。
+        assert 1 <= datapoints <= periods, f"評価窓が破綻: {datapoints}/{periods}"
 
 
 def test_canary_failure_alarm_stays_notbreaching_and_liveness_is_the_heartbeat() -> None:
@@ -1751,6 +1774,21 @@ def test_triage_dead_alarm_fires_on_a_single_occurrence() -> None:
     assert "threshold           = 1" in alarm
     assert 'comparison_operator = "GreaterThanOrEqualToThreshold"' in alarm
     assert "alarm_actions      = [aws_sns_topic.alarms.arn]" in alarm
+
+    # ⚠️ 「1 件で鳴る」は threshold だけでは決まらない。変異テスト実測（2026-08-26）で、
+    # 以下の 3 つはどれを壊しても threshold=1 のまま緑だった＝穴だった。
+    # (a) evaluation_periods を 1 より大きくすると「連続 N 期間 breach」条件になる。
+    #     朝ダイジェストは平日 1 日 1 回なので 5 分窓が連続で breach することは無く、
+    #     この alarm は二度と発火しない。
+    assert "evaluation_periods  = 1" in alarm
+    assert 'statistic           = "Sum"' in alarm
+    assert "period              = 300" in alarm
+    # (b) 1 日 1 回しか走らない計で欠測を breaching にすると 24 時間ほぼ ALARM に張り付き、
+    #     通知が信用されなくなる（無音と実質同じ）。
+    assert 'treat_missing_data = "notBreaching"' in alarm
+    # (c) metric 値が 0 だと Sum は常に 0＝threshold 1 に永久に届かない。
+    assert 'value         = "1"' in filt
+    assert 'default_value = "0"' in filt
 
     # filter の pattern と Python が実際に出すイベント名/フィールドの対応を機械で縛る。
     # どちらか片方だけ変えると、tf も Python も単体では正しいまま無音に戻る。
