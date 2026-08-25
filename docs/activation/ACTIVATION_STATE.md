@@ -236,6 +236,49 @@ morning / canary は今も直接 ECS target を持っており（実測 `:55` / 
 
 `snapshot_live` を通れないため plan 自体が生成できない。
 
+### blocker 1-b: 修正が frozen surface と衝突した（PR #327・要裁定）
+
+blocker 1 の修正（PR #327 / `82a6b59`）は CI で 2 つ落ちる。**原因は同一**:
+
+| CI job | 結果 |
+|---|---|
+| activation freeze (frozen surface) | `FROZEN SURFACE 違反: infra/codebuild/release_evidence.py` |
+| pytest 3.11 / 3.13 / 3.14 | `StaleManifestError: STALE MANIFEST — generation inputs が Generation Baseline から変化した` |
+| gitleaks / terraform / trivy | pass |
+
+`infra/codebuild/release_evidence.py` は `buildspec_generation_inputs.json` の
+**18 input のうちの 1 つ**（frozen surface）。触ると 4 世代の expected generation SHA が動く。
+本 PR で frozen surface に触れているのは**この 1 ファイルだけ**（他 15 ファイルは surface 外）。
+
+**分離不可であることを実測で確認**: `release_evidence.py` は import 時に canonical
+consumer manifest を読んで activator type を検証する（`release_evidence.py:2484`）。
+registry を hybrid にして `release_evidence.py` を据え置くと
+`EvidenceError: Terraform image consumer manifest is invalid` で fail-closed になる。
+= 「registry の type 変更」と「release_evidence.py の追随」は原子的。
+
+#### なぜ unlock では解決しないか
+
+frozen surface を触ると expected generation SHA が変わる。すると adopt の
+**4 点一致**（repo 導出 SHA == S3 body SHA == content-addressed key == CodeBuild ref）が崩れる。
+揃え直すには新世代の publish が必要だが、それは Freeze v2 が禁じている当のものであり、
+Freeze v1 を void させた wave1/wave2 の再演になる。
+→ **unlock は「freeze を緩める」だけでなく adopt そのものを壊す。**
+
+#### 選択肢
+
+| 案 | 内容 | frozen surface | adopt への影響 |
+|---|---|---|---|
+| A | unlock を宣言して `release_evidence.py` を変更 | 1 ファイル変更 | ❌ 4 点一致が崩れ、新世代 publish が必要になる |
+| B | ingest の宣言 activator type は据え置き、**観測経路と plan/saga 側だけ**修正 | 触らない | ✅ 影響なし |
+
+B で触るのは `terraform_runtime_guard.sh` / `image_release_context.py` /
+`ecs_service_apply_saga.py` / `image_release_gate.tf` で、**いずれも frozen surface 外**。
+
+B の代償は、registry が「ECS target を持たない consumer」を
+`eventbridge_rule_ecs_target` と宣言し続けること（＝今回の事故と同種の
+「モデルが実態を偽る」状態を意図的に残す）。
+その解消は **activation 完了・freeze 解除後の後続 PR** へ送る。
+
 ### blocker 2: A0.2.2c の IAM statement が execution line に無い
 
 live には **適用済み**（serial 213）だが、execution line `868fcb7` の
