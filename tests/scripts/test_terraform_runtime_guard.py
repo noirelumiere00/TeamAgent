@@ -483,10 +483,7 @@ def _ingest_dispatcher_environment() -> dict[str, str]:
 
 
 def _ingest_lambda_arn() -> str:
-    return (
-        f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:"
-        f"{INGEST_DISPATCHER['function_name']}"
-    )
+    return f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:{INGEST_DISPATCHER['function_name']}"
 
 
 def _ingest_lambda_aws() -> dict[str, Any]:
@@ -998,11 +995,7 @@ def _safe_plan() -> dict[str, Any]:
         if component in {"ingest", "morning"}:
             after["arn"] = _task_arn(component)
             after["id"] = _task_arn(component)
-        actions = (
-            ["no-op"]
-            if component in {"ingest", "morning"}
-            else ["create", "delete"]
-        )
+        actions = ["no-op"] if component in {"ingest", "morning"} else ["create", "delete"]
         change = _change(
             address,
             "aws_ecs_task_definition",
@@ -1066,9 +1059,7 @@ def _safe_plan() -> dict[str, Any]:
                 {
                     "address": config_address,
                     "expressions": {
-                        "arn": {
-                            "references": ["aws_lambda_function.ingest_dispatch[0].arn"]
-                        }
+                        "arn": {"references": ["aws_lambda_function.ingest_dispatch[0].arn"]}
                     },
                 }
             )
@@ -1079,11 +1070,7 @@ def _safe_plan() -> dict[str, Any]:
                     "address": config_address,
                     "expressions": {
                         "ecs_target": [
-                            {
-                                "task_definition_arn": {
-                                    "references": [f"{task_address}.arn"]
-                                }
-                            }
+                            {"task_definition_arn": {"references": [f"{task_address}.arn"]}}
                         ]
                     },
                 }
@@ -1118,13 +1105,7 @@ def _safe_plan() -> dict[str, Any]:
         {
             "address": "aws_lambda_function.ingest_dispatch",
             "expressions": {
-                "environment": [
-                    {
-                        "variables": {
-                            "references": [f"{TASK_ADDRESSES['ingest']}.arn"]
-                        }
-                    }
-                ]
+                "environment": [{"variables": {"references": [f"{TASK_ADDRESSES['ingest']}.arn"]}}]
             },
         }
     )
@@ -1560,9 +1541,9 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
         target["change"]["after"]["arn"] = "arn:other-cluster"
     elif scenario == "target_network":
         ecs_target["change"]["actions"] = ["update"]
-        ecs_target["change"]["after"]["ecs_target"][0]["network_configuration"][0][
-            "subnets"
-        ] = ["other"]
+        ecs_target["change"]["after"]["ecs_target"][0]["network_configuration"][0]["subnets"] = [
+            "other"
+        ]
     elif scenario == "target_retry":
         target["change"]["actions"] = ["update"]
         target["change"]["after"]["retry_policy"][0]["maximum_retry_attempts"] = 9
@@ -4194,9 +4175,7 @@ def test_runtime_guard_consumer_activator_types_are_exact(tmp_path: Path) -> Non
         snapshot=_strict_sync_snapshot(expected_images),
         expected=expected_images,
     )
-    assert embedded_registry.returncode == 0, (
-        embedded_registry.stdout + embedded_registry.stderr
-    )
+    assert embedded_registry.returncode == 0, embedded_registry.stdout + embedded_registry.stderr
 
 
 def test_both_execution_state_copies_use_rule_state_for_ingest_activator() -> None:
@@ -5029,8 +5008,7 @@ def test_ingest_rule_rejects_noncanonical_dispatch_lambda_target(
     assert result.returncode == 1
     assert "dispatch Lambda target が一意ではありません" in (result.stdout + result.stderr)
     assert not any(
-        command.startswith("plan ")
-        for command in tf_log.read_text(encoding="utf-8").splitlines()
+        command.startswith("plan ") for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
 
 
@@ -5056,12 +5034,9 @@ def test_ingest_dispatch_task_definition_must_be_exact_revision_pin(
     )
 
     assert result.returncode == 1
-    assert "TASKDEF_ARNが期待familyのrevision pinではありません" in (
-        result.stdout + result.stderr
-    )
+    assert "TASKDEF_ARNが期待familyのrevision pinではありません" in (result.stdout + result.stderr)
     assert not any(
-        command.startswith("plan ")
-        for command in tf_log.read_text(encoding="utf-8").splitlines()
+        command.startswith("plan ") for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
 
 
@@ -5081,8 +5056,7 @@ def test_ingest_rule_dispatcher_task_definition_must_match_snapshot_task(
         result.stdout + result.stderr
     )
     assert not any(
-        command.startswith("plan ")
-        for command in tf_log.read_text(encoding="utf-8").splitlines()
+        command.startswith("plan ") for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
 
 

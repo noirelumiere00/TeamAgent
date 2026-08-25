@@ -1350,9 +1350,7 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
 def test_saga_activator_partition_has_exact_hybrid_counts() -> None:
     specs, _registry_sha256 = SAGA._load_consumer_specs(copy.deepcopy(CONSUMER_REGISTRY))
     observed_counts = {
-        activator_type: sum(
-            spec.activator_type == activator_type for spec in specs.values()
-        )
+        activator_type: sum(spec.activator_type == activator_type for spec in specs.values())
         for activator_type in SAGA._EXPECTED_ACTIVATOR_COUNTS
     }
 
@@ -1400,13 +1398,9 @@ def test_hybrid_ingest_plan_rejects_ecs_target_shaped_task_pointer() -> None:
         if change["address"] == "aws_lambda_function.ingest_dispatch[0]"
     )
     for phase in ("before", "after"):
-        task_definition = dispatch["change"][phase]["environment"][0]["variables"][
-            "TASKDEF_ARN"
-        ]
+        task_definition = dispatch["change"][phase]["environment"][0]["variables"]["TASKDEF_ARN"]
         dispatch["change"][phase].pop("environment")
-        dispatch["change"][phase]["ecs_target"] = [
-            {"task_definition_arn": task_definition}
-        ]
+        dispatch["change"][phase]["ecs_target"] = [{"task_definition_arn": task_definition}]
     dispatch["change"]["after_unknown"] = {}
 
     with pytest.raises(SAGA.SagaError, match="Lambda environment"):
@@ -1626,18 +1620,12 @@ def test_begin_dispatches_each_activator_without_treating_nonservices_as_service
         _argument(arguments, "--name")
         for service, operation, arguments in cli.calls
         if (service, operation) == ("events", "describe-rule")
-    } == {
-        CONSUMERS[key]["activator"]["identity"]
-        for key in ("canary", "ingest", "morning_digest")
-    }
+    } == {CONSUMERS[key]["activator"]["identity"] for key in ("canary", "ingest", "morning_digest")}
     assert {
         json.loads(_argument(arguments, "--cli-input-json"))["Rule"]
         for service, operation, arguments in cli.calls
         if (service, operation) == ("events", "list-targets-by-rule")
-    } == {
-        CONSUMERS[key]["activator"]["identity"]
-        for key in ("canary", "morning_digest")
-    }
+    } == {CONSUMERS[key]["activator"]["identity"] for key in ("canary", "morning_digest")}
     assert {
         _argument(arguments, "--function-name")
         for service, operation, arguments in cli.calls
@@ -1646,18 +1634,13 @@ def test_begin_dispatches_each_activator_without_treating_nonservices_as_service
             "lambda",
             "get-function-configuration",
         )
-    } == {
-        _lambda_function_name(key)
-        for key in ("ingest", "x_buzz_worker", "tiktok_acquire")
-    }
+    } == {_lambda_function_name(key) for key in ("ingest", "x_buzz_worker", "tiktok_acquire")}
     task_service_values = {
         _argument(arguments, "--service-name")
         for service, operation, arguments in cli.calls
         if (service, operation) == ("ecs", "list-tasks")
     }
-    assert task_service_values == {
-        CONSUMERS[key]["activator"]["identity"] for key in SERVICE_ARNS
-    }
+    assert task_service_values == {CONSUMERS[key]["activator"]["identity"] for key in SERVICE_ARNS}
     assert {
         _argument(arguments, "--task-definition")
         for service, operation, arguments in cli.calls
@@ -1979,9 +1962,9 @@ def test_verify_applies_only_the_steady_contract_for_each_activator_type(
         duplicate["Id"] = "second-canary-target"
         cli.targets["canary"].append(duplicate)
     elif scenario == "hybrid-task-definition":
-        cli.lambda_configurations["ingest"]["Environment"]["Variables"]["TASKDEF_ARN"] = (
-            NEW_TASKS["ingest"]
-        )
+        cli.lambda_configurations["ingest"]["Environment"]["Variables"]["TASKDEF_ARN"] = NEW_TASKS[
+            "ingest"
+        ]
     elif scenario == "hybrid-rule-state":
         cli.rules["ingest"]["State"] = "ENABLED"
     elif scenario == "hybrid-missing-task-definition":

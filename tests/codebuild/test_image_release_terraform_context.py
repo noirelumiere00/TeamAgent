@@ -983,9 +983,7 @@ def test_hybrid_consumer_rejects_nonstandard_eventbridge_rule_state() -> None:
             family=registry_consumer["ecs_family"],
             primary={"state": invalid_state},
             secondary={
-                "environment": [
-                    {"variables": {"TASKDEF_ARN": _task_arn(registry_consumer)}}
-                ]
+                "environment": [{"variables": {"TASKDEF_ARN": _task_arn(registry_consumer)}}]
             },
             label="ingest live activation",
         )
@@ -1110,9 +1108,7 @@ def test_hybrid_planned_pointer_requires_the_lambda_environment_expression() -> 
         plan,
         "aws_lambda_function.ingest_dispatch",
     )
-    configuration["expressions"]["ecs_target"] = configuration["expressions"].pop(
-        "environment"
-    )
+    configuration["expressions"]["ecs_target"] = configuration["expressions"].pop("environment")
     with pytest.raises(CONTEXT.ContextError, match="planned pointer expression is absent"):
         CONTEXT.build_context(
             plan=plan,
@@ -1123,9 +1119,7 @@ def test_hybrid_planned_pointer_requires_the_lambda_environment_expression() -> 
 
     with pytest.raises(CONTEXT.ContextError, match="activation pointer type is unsupported"):
         CONTEXT._require_planned_pointer_reference(
-            configuration_resources={
-                "aws_lambda_function.ingest_dispatch": {"expressions": {}}
-            },
+            configuration_resources={"aws_lambda_function.ingest_dispatch": {"expressions": {}}},
             pointer_resource_address="aws_lambda_function.ingest_dispatch[0]",
             task_definition_address=address,
             activator_type="unknown",
@@ -1207,14 +1201,14 @@ def test_image_release_gate_routes_hybrid_and_unknown_activators_explicitly() ->
         '''.split()
     )
     lambda_shape_fail_closed = " ".join(
-        '''
+        """
         consumer.activator.type == "lambda_taskdef_arn_environment" ?
         sort(keys(consumer[phase].activation)) == sort([
           "event_source_mapping_enabled",
           "task_definition_arn",
         ]) :
         false
-        '''.split()
+        """.split()
     )
 
     assert gate.count(HYBRID_ACTIVATOR_TYPE) == 2
