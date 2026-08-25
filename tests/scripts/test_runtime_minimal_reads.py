@@ -265,3 +265,61 @@ def test_new_comments_inject_no_terraform_graph_edges() -> None:
         assert token not in comments, f"コメントにリソースアドレス: {token}"
     assert "ec2:Describe*" not in comments
     assert "s3:Get*" not in comments
+
+
+# ── PR2-A0.2.2c: connect /app snapshot object の exact read ─────────────────
+#
+# A0.3.2 で adopt-plan が normal guarded plan と同じ live snapshot 経路を共有する
+# ようになった帰結で必要になった read。2026-08-25 の preflight で HeadObject 403 を
+# 実測し、simulate で不足 3 action を確定した。GetObjectVersion は既許可のため追加しない。
+
+CONNECT_APP_SID = "ReadExactConnectAppSnapshotObject"
+CONNECT_APP_ACTIONS = {"s3:GetObject", "s3:GetObjectRetention", "s3:GetObjectTagging"}
+
+
+def test_connect_app_read_grants_exactly_the_three_measured_actions() -> None:
+    """403 実測で確定した 3 action ちょうど。GetObjectVersion は既許可なので足さない。"""
+    stmt = _statement(CONNECT_APP_SID)
+    assert set(re.findall(r'"(s3:[A-Za-z]+)"', stmt)) == CONNECT_APP_ACTIONS
+    assert "s3:GetObjectVersion" not in stmt
+    for write in ("Put", "Delete", "Create", "Restore"):
+        assert f"s3:{write}" not in stmt
+
+
+def test_connect_app_read_is_scoped_to_one_exact_object() -> None:
+    """prefix wildcard 化は禁止。exact object ARN 1 本のみ。"""
+    stmt = _strip_comments(_statement(CONNECT_APP_SID))
+    arns = re.findall(r'"(arn:aws:s3:::[^"]+)"', stmt)
+    assert len(arns) == 1, arns
+    arn = arns[0]
+    assert arn.endswith("/codebuild/connect-web-app.html"), arn
+    assert "*" not in arn
+    # bucket 名は config 由来の式で組み立てる（丸ごとの literal にしない）
+    assert "${var.project_name}-${var.environment}-raw-files" in arn
+
+
+def test_connect_app_read_matches_what_the_guard_actually_reads() -> None:
+    """guard が読む bucket / key と statement の resource が一致する。
+
+    ここが乖離すると preflight が再び 403 で止まる。
+    """
+    guard = (ROOT / "infra/deploy/terraform_runtime_guard.sh").read_text(encoding="utf-8")
+    assert 'connect_app_bucket="${PROJECT}-${ENVIRONMENT}-raw-files"' in guard
+    assert 'connect_app_key="codebuild/connect-web-app.html"' in guard
+    stmt = _strip_comments(_statement(CONNECT_APP_SID))
+    assert "-raw-files/codebuild/connect-web-app.html" in stmt
+
+
+def test_connect_app_read_documents_the_a032_origin() -> None:
+    """なぜ後から必要になったか（A0.3.2 の snapshot 経路共有）が残っている。"""
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    comment = tf[tf.index("# PR2-A0.2.2c") : tf.index(f'sid = "{CONNECT_APP_SID}"')]
+    assert "A0.3.2" in comment
+    assert "403" in comment
+    assert "wildcard" in comment
+
+
+def test_connect_app_read_lives_in_the_evidence_inline_policy() -> None:
+    tf = RUNTIME_EVIDENCE_TF.read_text(encoding="utf-8")
+    doc_start, doc_end = _evidence_doc_span()
+    assert doc_start < tf.index(f'"{CONNECT_APP_SID}"') < doc_end
