@@ -44,6 +44,9 @@ EXPECTED_BACKEND = {
     "encrypt": True,
 }
 EXPECTED_WORKSPACE = "default"
+# ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+# 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
 ALLOWED_EXISTING_LOG_IMPORTS = {
     "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
         "/aws/codebuild/teamagent-dev-aiia-image-builder"
@@ -748,6 +751,7 @@ def _require_planned_pointer_reference(
     pointer_resource_address: str,
     task_definition_address: str,
     activator_type: str,
+    consumer_id: str,
     label: str,
 ) -> None:
     configuration_address = _configuration_address(pointer_resource_address)
@@ -758,11 +762,15 @@ def _require_planned_pointer_reference(
         configuration.get("expressions"),
         label=f"{label} pointer expressions",
     )
-    expression_name = {
-        "ecs_service": "task_definition",
-        "eventbridge_rule_ecs_target": "ecs_target",
-        "lambda_taskdef_arn_environment": "environment",
-    }[activator_type]
+    if activator_type == "eventbridge_rule_ecs_target":
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+        expression_name = "environment" if consumer_id == "ingest" else "ecs_target"
+    else:
+        expression_name = {
+            "ecs_service": "task_definition",
+            "lambda_taskdef_arn_environment": "environment",
+        }[activator_type]
     pointer_expression = expressions.get(expression_name)
     if pointer_expression is None:
         raise ContextError(f"{label} planned pointer expression is absent")
@@ -1237,6 +1245,7 @@ def _event_target_task_definition(
 
 def _activation_phase(
     *,
+    consumer_id: str,
     activator_type: str,
     family: str,
     primary: Mapping[str, Any],
@@ -1274,14 +1283,24 @@ def _activation_phase(
             "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
         }:
             raise ContextError(f"{label} rule state is invalid")
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+        if consumer_id == "ingest":
+            task_definition_arn = _task_definition_from_environment(
+                secondary.get("environment"),
+                label=label,
+                planned_address=planned_address,
+            )
+        else:
+            task_definition_arn = _event_target_task_definition(
+                secondary.get("ecs_target"),
+                label=label,
+                planned_address=planned_address,
+            )
         return {
             "state": state,
             "task_definition_arn": _task_definition_arn(
-                _event_target_task_definition(
-                    secondary.get("ecs_target"),
-                    label=label,
-                    planned_address=planned_address,
-                ),
+                task_definition_arn,
                 family=family,
                 label=f"{label} task definition ARN",
                 planned_address=planned_address,
@@ -1323,16 +1342,26 @@ def _consumer_activation_binding(
         primary_field = "name"
         secondary_type = None
         secondary_field = None
+        secondary_identity = None
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        secondary_type = "aws_cloudwatch_event_target"
-        secondary_field = "rule"
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+        if consumer_id == "ingest":
+            secondary_type = "aws_lambda_function"
+            secondary_field = "function_name"
+            secondary_identity = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+        else:
+            secondary_type = "aws_cloudwatch_event_target"
+            secondary_field = "rule"
+            secondary_identity = identity
     else:
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
         secondary_type = "aws_lambda_event_source_mapping"
         secondary_field = "function_name"
+        secondary_identity = identity
     present = {
         phase: not consumer_snapshot_is_absent(consumer[phase])
         for phase in ("live", "before", "after")
@@ -1342,6 +1371,7 @@ def _consumer_activation_binding(
         *,
         resource_type: str,
         identity_field: str,
+        resource_identity: str,
         label: str,
     ) -> tuple[
         Mapping[str, Any] | None,
@@ -1353,7 +1383,7 @@ def _consumer_activation_binding(
             state_resources,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=label,
         )
         if (state_match is not None) != present["live"]:
@@ -1364,7 +1394,7 @@ def _consumer_activation_binding(
             plan_changes,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=label,
             expected_address=state_address,
         )
@@ -1406,13 +1436,18 @@ def _consumer_activation_binding(
     primary_live, primary_before, primary_after, primary_address = bind_resource(
         resource_type=primary_type,
         identity_field=primary_field,
+        resource_identity=identity,
         label=f"{consumer_id} activation resource",
     )
     secondary_live: Mapping[str, Any] | None = None
     secondary_before: Mapping[str, Any] | None = None
     secondary_after: Mapping[str, Any] | None = None
     secondary_address: str | None = None
-    if secondary_type is not None and secondary_field is not None:
+    if (
+        secondary_type is not None
+        and secondary_field is not None
+        and secondary_identity is not None
+    ):
         (
             secondary_live,
             secondary_before,
@@ -1421,6 +1456,7 @@ def _consumer_activation_binding(
         ) = bind_resource(
             resource_type=secondary_type,
             identity_field=secondary_field,
+            resource_identity=secondary_identity,
             label=f"{consumer_id} activation edge",
         )
     phases: dict[str, dict[str, Any]] = {}
@@ -1435,6 +1471,7 @@ def _consumer_activation_binding(
         if primary_phase is None:
             raise ContextError(f"{consumer_id} {phase} activation is absent")
         phases[phase] = _activation_phase(
+            consumer_id=consumer_id,
             activator_type=activator_type,
             family=family,
             primary=primary_phase,
@@ -1468,16 +1505,26 @@ def _consumer_state_activation(
         primary_field = "name"
         secondary_type = None
         secondary_field = None
+        secondary_identity = None
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        secondary_type = "aws_cloudwatch_event_target"
-        secondary_field = "rule"
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+        if consumer_id == "ingest":
+            secondary_type = "aws_lambda_function"
+            secondary_field = "function_name"
+            secondary_identity = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+        else:
+            secondary_type = "aws_cloudwatch_event_target"
+            secondary_field = "rule"
+            secondary_identity = identity
     else:
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
         secondary_type = "aws_lambda_event_source_mapping"
         secondary_field = "function_name"
+        secondary_identity = identity
     _, primary = _find_state_resource(
         state_resources,
         resource_type=primary_type,
@@ -1486,15 +1533,20 @@ def _consumer_state_activation(
         label=f"{consumer_id} activation resource",
     )
     secondary: Mapping[str, Any] | None = None
-    if secondary_type is not None and secondary_field is not None:
+    if (
+        secondary_type is not None
+        and secondary_field is not None
+        and secondary_identity is not None
+    ):
         _, secondary = _find_state_resource(
             state_resources,
             resource_type=secondary_type,
             identity_field=secondary_field,
-            identity=identity,
+            identity=secondary_identity,
             label=f"{consumer_id} activation edge",
         )
     return _activation_phase(
+        consumer_id=consumer_id,
         activator_type=activator_type,
         family=str(consumer["ecs_family"]),
         primary=primary,
@@ -1513,27 +1565,39 @@ def _consumer_state_activation_is_absent(
     activator_type = str(activator["type"])
     identity = str(activator["identity"])
     if activator_type == "ecs_service":
-        resource_contracts = (("aws_ecs_service", "name"),)
+        resource_contracts = (("aws_ecs_service", "name", identity),)
     elif activator_type == "eventbridge_rule_ecs_target":
-        resource_contracts = (
-            ("aws_cloudwatch_event_rule", "name"),
-            ("aws_cloudwatch_event_target", "rule"),
-        )
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+        if consumer_id == "ingest":
+            resource_contracts = (
+                ("aws_cloudwatch_event_rule", "name", identity),
+                (
+                    "aws_lambda_function",
+                    "function_name",
+                    _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION,
+                ),
+            )
+        else:
+            resource_contracts = (
+                ("aws_cloudwatch_event_rule", "name", identity),
+                ("aws_cloudwatch_event_target", "rule", identity),
+            )
     else:
         resource_contracts = (
-            ("aws_lambda_function", "function_name"),
-            ("aws_lambda_event_source_mapping", "function_name"),
+            ("aws_lambda_function", "function_name", identity),
+            ("aws_lambda_event_source_mapping", "function_name", identity),
         )
     return all(
         _find_optional_state_resource(
             state_resources,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=f"{consumer_id} activation resource",
         )
         is None
-        for resource_type, identity_field in resource_contracts
+        for resource_type, identity_field, resource_identity in resource_contracts
     )
 
 
@@ -1845,6 +1909,7 @@ def _manifest_plan_binding(
                 pointer_resource_address=pointer_resource_address,
                 task_definition_address=address,
                 activator_type=str(consumer["activator"]["type"]),
+                consumer_id=consumer_id,
                 label=consumer_id,
             )
         comparison.append(

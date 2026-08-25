@@ -113,6 +113,12 @@ RULE_STATES = {
     "ingest": "DISABLED",
     "morning_digest": "ENABLED",
 }
+_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
+_ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS = "aws_lambda_function.ingest_dispatch[0]"
+_ACTIVATION_SHIM_INGEST_DISPATCH_ARN = (
+    "arn:aws:lambda:ap-northeast-1:718959508629:function:"
+    f"{_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION}"
+)
 
 
 def _load_module() -> Any:
@@ -315,6 +321,19 @@ def _event_target_change(
         "morning_digest": "aws_cloudwatch_event_target.morning_digest_run_task[0]",
     }[consumer_id]
     identity = CONSUMERS[consumer_id]["activator"]["identity"]
+    if consumer_id == "ingest":
+        return _resource(
+            address=address,
+            resource_type="aws_cloudwatch_event_target",
+            name=address.split(".", maxsplit=1)[1].split("[", maxsplit=1)[0],
+            index=0,
+            actions=["no-op"],
+            after={
+                "rule": identity,
+                "event_bus_name": "default",
+                "arn": _ACTIVATION_SHIM_INGEST_DISPATCH_ARN,
+            },
+        )
     unknown = {"ecs_target": [{"task_definition_arn": True}]} if task_definition is None else {}
     return _resource(
         address=address,
@@ -348,10 +367,14 @@ def _lambda_change(
     task_definition: str | None,
 ) -> dict[str, Any]:
     address = {
+        "ingest": _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS,
         "x_buzz_worker": "aws_lambda_function.x_dispatch[0]",
         "tiktok_acquire": "aws_lambda_function.tiktok_dispatch[0]",
     }[consumer_id]
-    identity = CONSUMERS[consumer_id]["activator"]["identity"]
+    if consumer_id == "ingest":
+        identity = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+    else:
+        identity = CONSUMERS[consumer_id]["activator"]["identity"]
     variables: dict[str, Any] = {
         "CLUSTER_ARN": CLUSTER_ARN,
         "SUBNETS": "subnet-a,subnet-b",
@@ -448,6 +471,10 @@ def _plan(
                         task_definition=planned_tasks[consumer_id],
                     ),
                 )
+            ),
+            _lambda_change(
+                "ingest",
+                task_definition=planned_tasks["ingest"],
             ),
             *(
                 _lambda_change(
@@ -681,6 +708,15 @@ def _target(
     task_definition: str,
 ) -> dict[str, Any]:
     target_id = "morning" if consumer_id == "morning_digest" else f"target-{consumer_id}"
+    if consumer_id == "ingest":
+        return {
+            "Id": target_id,
+            "Arn": _ACTIVATION_SHIM_INGEST_DISPATCH_ARN,
+            "RetryPolicy": {
+                "MaximumEventAgeInSeconds": 3600,
+                "MaximumRetryAttempts": 1,
+            },
+        }
     return {
         "Id": target_id,
         "Arn": CLUSTER_ARN,
@@ -714,7 +750,10 @@ def _lambda_configuration(
     task_definition: str,
 ) -> dict[str, Any]:
     consumer = CONSUMERS[consumer_id]
-    name = consumer["activator"]["identity"]
+    if consumer_id == "ingest":
+        name = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+    else:
+        name = consumer["activator"]["identity"]
     return {
         "FunctionName": name,
         "FunctionArn": (f"arn:aws:lambda:ap-northeast-1:718959508629:function:{name}"),
@@ -853,11 +892,17 @@ class _FakeCli:
             for consumer_id in ("canary", "ingest", "morning_digest")
         }
         self.lambda_configurations = {
-            consumer_id: _lambda_configuration(
-                consumer_id,
-                task_definition=OLD_TASKS[consumer_id],
-            )
-            for consumer_id in ("x_buzz_worker", "tiktok_acquire")
+            "ingest": _lambda_configuration(
+                "ingest",
+                task_definition=OLD_TASKS["ingest"],
+            ),
+            **{
+                consumer_id: _lambda_configuration(
+                    consumer_id,
+                    task_definition=OLD_TASKS[consumer_id],
+                )
+                for consumer_id in ("x_buzz_worker", "tiktok_acquire")
+            },
         }
         self.service_task_arns: dict[str, list[str]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
@@ -1228,6 +1273,11 @@ def _set_live_consumer_task(
             task_definition=task_definition,
         )
         return
+    if consumer_id == "ingest":
+        cli.lambda_configurations[consumer_id]["Environment"]["Variables"]["TASKDEF_ARN"] = (
+            task_definition
+        )
+        return
     if activator_type == "eventbridge_rule_ecs_target":
         cli.targets[consumer_id][0]["EcsParameters"]["TaskDefinitionArn"] = task_definition
         return
@@ -1332,6 +1382,58 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
         "eventbridge_rule_ecs_target",
         "lambda_taskdef_arn_environment",
     }
+
+
+def test_saga_activator_partition_remains_three_three_two() -> None:
+    assert SAGA._EXPECTED_ACTIVATOR_COUNTS == {
+        "ecs_service": 3,
+        "eventbridge_rule_ecs_target": 3,
+        "lambda_taskdef_arn_environment": 2,
+    }
+
+
+def test_ingest_plan_uses_dispatch_lambda_environment_as_the_task_pointer() -> None:
+    plan = _plan()
+    analysis = SAGA._analyze_plan(plan)
+    spec = analysis.specs["ingest"]
+    target = next(
+        change
+        for change in plan["resource_changes"]
+        if change["address"] == "aws_cloudwatch_event_target.ingest_run_task[0]"
+    )
+    pointer = next(
+        change
+        for change in plan["resource_changes"]
+        if change["address"] == _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS
+    )
+
+    assert spec.activator_edge_address == "aws_cloudwatch_event_target.ingest_run_task[0]"
+    assert spec.task_pointer_address == _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS
+    assert "ecs_target" not in target["change"]["after"]
+    assert pointer["change"]["after"]["function_name"] == (
+        _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+    )
+    assert analysis.binding["consumers"]["ingest"]["activation"] == {
+        "state": RULE_STATES["ingest"],
+        "taskDefinition": {
+            "kind": "arn",
+            "taskDefinition": OLD_TASKS["ingest"],
+        },
+    }
+
+
+def test_ingest_plan_rejects_task_pointer_from_a_non_dispatch_lambda() -> None:
+    plan = _plan()
+    pointer = next(
+        change
+        for change in plan["resource_changes"]
+        if change["address"] == _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS
+    )
+    pointer["change"]["before"]["function_name"] = "teamagent-dev-other-dispatch"
+    pointer["change"]["after"]["function_name"] = "teamagent-dev-other-dispatch"
+
+    with pytest.raises(SAGA.SagaError, match="Lambda identity"):
+        SAGA._analyze_plan(plan)
 
 
 def test_pre_media_cutover_sync_accepts_exact_plan_bound_tiktok_legacy_image() -> None:
@@ -1538,7 +1640,10 @@ def test_begin_dispatches_each_activator_without_treating_nonservices_as_service
             "lambda",
             "get-function-configuration",
         )
-    } == {CONSUMERS[key]["activator"]["identity"] for key in ("x_buzz_worker", "tiktok_acquire")}
+    } == {
+        _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION,
+        *(CONSUMERS[key]["activator"]["identity"] for key in ("x_buzz_worker", "tiktok_acquire")),
+    }
     task_service_values = {
         _argument(arguments, "--service-name")
         for service, operation, arguments in cli.calls
@@ -1578,6 +1683,36 @@ def test_lambda_steady_uses_taskdef_environment_not_ecs_or_idle_runtime_state() 
             ("ecs", "list-tasks"),
         }
     )
+
+
+def test_ingest_live_task_pointer_comes_from_the_dispatch_lambda_environment() -> None:
+    cli = _FakeCli()
+
+    _saga(cli).begin()
+
+    assert cli.item is not None
+    baseline = json.loads(cli.item["baseline_json"]["S"])
+    activation = baseline["ingest"]["activation"]
+    assert activation["taskDefinition"] == OLD_TASKS["ingest"]
+    assert activation["target"] == cli.targets["ingest"][0]
+    assert "EcsParameters" not in activation["target"]
+    assert any(
+        (service, operation) == ("lambda", "get-function-configuration")
+        and _argument(arguments, "--function-name") == _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+        for service, operation, arguments in cli.calls
+    )
+
+
+def test_ingest_steady_rejects_dispatch_lambda_task_pointer_drift() -> None:
+    cli = _FakeCli()
+    saga = _saga(cli)
+    saga.begin()
+    cli.lambda_configurations["ingest"]["Environment"]["Variables"]["TASKDEF_ARN"] = NEW_TASKS[
+        "ingest"
+    ]
+
+    with pytest.raises(SAGA.SagaError, match=r"planned task definition|EventBridge"):
+        saga.verify()
 
 
 def test_begin_baseline_contains_task_digest_and_activation_for_all_consumers() -> None:
