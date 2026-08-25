@@ -360,6 +360,129 @@ guard の契約パターンに `report-link-hmac` を足して緑にするのは
 「モデルを実態に合わせて security control を緩める」方向であり、
 案 A/案 B の裁定で否定された筋。**どちらが正か**の裁定が先。
 
+## HMAC remediation plan（案 β・2026-08-25・**要 Human Gate**）
+
+裁定: **案 β 採用**（`hmac/report-link` を canonical desired として復元。`report-link-hmac` を
+approved desired へ昇格させる案 α は NO-GO）。以下は read-only 調査に基づく remediation 設計。
+**apply も Freeze 解除もまだ行わない。**
+
+### 調査で判明した前提（設計を変える 3 点）
+
+**① REPORT_LINK の consumer は 3 つではなく 2 つ。**
+
+| workload | MAIL_ACTION | REPORT_LINK |
+|---|---|---|
+| `mcp` | ✅ | ✅ |
+| `connect_web` | ✅（live のみ） | ✅ |
+| `morning_digest` | ✅ | ❌ 持たない |
+
+tf 上 `local.report_link_hmac_secrets` を含むのは `fargate.tf`（mcp）と
+`connect_web.tf` のみ。guard も report purpose の consumer を mcp + connect_web と定義している。
+
+**② tfvars に HMAC 設定が 1 行も無い（全 worktree で 0 件）。**
+
+`teamagent-build` / `teamagent-activation` / `teamagent` のどの tfvars にも `hmac` が無く、
+`hmac_rollout_control_path` も未設定。したがって Terraform desired は全て default:
+
+- `report_link_hmac_rollout_phase = "blocked"` / `*_secret_arn = ""` / `*_primary_version_id = ""`
+- → `local.*_primary_value_from = ""`
+
+`local.mail_action_hmac_secrets` / `report_link_hmac_secrets` は primary entry を
+**無条件で** taskdef へ入れるため、いま plan を取ると **MAIL_ACTION も REPORT_LINK も
+valueFrom が空**になる。つまり **remediation は report-link 単独では成立しない**
+（report-link だけ直すと mail HMAC が本番で壊れる）。
+
+**③ live の MAIL_ACTION も repo で表現できない。**
+
+live は `MAIL_ACTION_HMAC_SECRET → teamagent/dev/database-url`。
+guard の contract はこれを許容するが、tf の `mail_action_hmac_secret_arn` validation は
+`teamagent/dev/hmac/mail-action-XXXXXX` しか許さない。
+＝ **report-link と同じ「live にしか無い」問題が mail_action にもある。**
+
+さらに `*_config_ready` は `hmac_live_manifest_path` と `hmac_rollout_control_path` の
+実ファイル存在を要求するが、**どちらも存在しない**。
+
+### canonical secret creation / migration method
+
+Terraform は secret を **作らない**（全て `data` 参照。`hmac_rotation.tf` 冒頭
+「Secret values never enter Terraform」）。よって canonical secret の作成は
+**Terraform 外の管理操作**であり、state にも plan にも値は入らない。
+
+権限の実測:
+
+| principal | GetSecretValue | CreateSecret | PutSecretValue |
+|---|---|---|---|
+| `AIIAdev`（MFA） | ✅ | ✅ | ✅ |
+| automation role | **implicitDeny** | ✅ | ✅ |
+
+automation role は素材を**読めない**（least privilege 維持）。よって移送は **AIIAdev で実行**。
+
+手順（**同一 material を移す。新しい乱数を生成しない。既存 secret は削除しない**）:
+
+1. boto3 で `GetSecretValue("teamagent/dev/report-link-hmac")` — **プロセス内のみ**
+2. `sha256(material)` を計算（＝ fingerprint。これだけが外に出る）
+3. `CreateSecret(Name="teamagent/dev/hmac/report-link", SecretString=material)`
+4. canonical を読み直して `sha256` 一致を確認
+5. 新 ARN（6 桁 suffix 付き）と `VersionId` を採取（**どちらも非機密**）
+
+禁止: シェルパイプ・一時ファイル・標準出力・plan JSON・証跡・チャットへの平文露出。
+出すのは **fingerprint / ARN / VersionId のみ**。
+
+### 3 consumer desired diff（remediation 後の想定）
+
+| workload | 変更内容 |
+|---|---|
+| `mcp` | `REPORT_LINK_HMAC_SECRET` → `<canonical ARN>:::<VersionId>`。`MAIL_ACTION_HMAC_SECRET` は **裁定待ち**（②③ のため） |
+| `connect_web` | 同上（REPORT_LINK のみ） |
+| `morning_digest` | REPORT_LINK は無い。`MAIL_ACTION` の扱い次第で **変更 0 にもできる** |
+
+**desired を「live 相当 + canonical 名」にするには tfvars へ最低限**
+`report_link_hmac_rollout_phase` / `report_link_hmac_secret_arn` /
+`report_link_hmac_primary_version_id` / `hmac_live_manifest_path` /
+`hmac_rollout_control_path` / `worker_hmac_artifact_sha256` などの設定が要る
+（`report_link_hmac_config_ready` の全条件）。**mail_action 側の裁定が無いと確定できない。**
+
+### Freeze temporary opening scope（最小）
+
+freeze policy は 3 statement / 16 action。必要なのは **1 statement の 3 action だけ**:
+
+| statement | action | 要否 |
+|---|---|---|
+| DenyWorkloadDeployment… | `ecs:RegisterTaskDefinition` | ✅ 必要（新 taskdef） |
+| 〃 | `ecs:UpdateService` | ✅ 必要（mcp / connect_web） |
+| 〃 | `events:PutTargets` | ✅ 必要（morning_digest を変える場合のみ） |
+| 〃 | `ecs:DeregisterTaskDefinition` / `events:PutRule` / `events:RemoveTargets` / `lambda:UpdateFunctionConfiguration` | ❌ 不要 |
+| DenyGenerationPublisher…（5 action） | codebuild 系 | ❌ **開けない** |
+| DenyBuildspecGenerationWrites…（4 action） | s3 書込 | ❌ **開けない** |
+
+**Freeze v1 を void させたのは generation publisher 面**なので、そこは閉じたままにする。
+
+### rollback
+
+- 旧 secret `teamagent/dev/report-link-hmac` は**削除しない**（rollback の前提）
+- 現行 revision へ戻す: `mcp:88` / `connect_web:73` / `morning_digest:55`
+- repo には `hmac_gate_mode = "rollback"` と `hmac_rollout_control_path` の
+  rollback taskdef ARN 機構が既にある（`hmac_keyrings.tf`）
+- rollback 自体も `ecs:UpdateService` を要するため、Freeze の一時開放は
+  **rollback 完了まで**閉じない
+
+### expected AWS mutations
+
+| 対象 | 種別 | 件数 |
+|---|---|---|
+| Secrets Manager | CreateSecret（canonical） | 1 |
+| ECS | RegisterTaskDefinition | 最大 3 |
+| ECS | UpdateService | 2（mcp / connect_web） |
+| EventBridge | PutTargets | 0〜1（morning を変える場合） |
+| CodeBuild / S3 buildspec | — | **0** |
+
+### state impact
+
+新 taskdef revision が state に入る。**rebind #2 が確立した
+`mcp:88` / `connect_web:73` / `morning_digest:55` への束縛は上書きされる。**
+adopt との順序関係を裁定する必要がある（remediation を先にすると rebind #2 の
+mapping と live が再びずれる）。
+
 ## Known risks
 
 | リスク | 状態 |
