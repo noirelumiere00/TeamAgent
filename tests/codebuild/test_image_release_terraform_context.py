@@ -30,6 +30,7 @@ def _load_module() -> Any:
 
 CONTEXT = _load_module()
 REGISTRY = CONTEXT.load_consumer_registry()
+INGEST_DISPATCH_FUNCTION = CONTEXT._ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
 LEGACY_TIKTOK_IMAGE = (
     "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
     f"teamagent-dev-tiktok-acquire@sha256:eb975be{'0' * 57}"
@@ -224,21 +225,55 @@ def _consumer_activation(
             address,
         )
     if activator["type"] == "eventbridge_rule_ecs_target":
-        suffix = {
+        rule_suffix = {
             "canary": "canary_hourly",
             "ingest": "ingest_weekly",
             "morning_digest": "morning_digest_weekday",
         }[consumer_id]
-        rule_address = f"aws_cloudwatch_event_rule.{suffix}[0]"
-        target_address = f"aws_cloudwatch_event_target.{suffix}[0]"
+        target_suffix = {
+            "canary": "canary_run_task",
+            "ingest": "ingest_run_task",
+            "morning_digest": "morning_digest_run_task",
+        }[consumer_id]
+        rule_address = f"aws_cloudwatch_event_rule.{rule_suffix}[0]"
+        target_address = f"aws_cloudwatch_event_target.{target_suffix}[0]"
         state = "ENABLED" if consumer_id == "morning_digest" else "DISABLED"
+        rule_resource = (
+            rule_address,
+            "aws_cloudwatch_event_rule",
+            {"name": activator["identity"], "state": state},
+        )
+        if consumer_id == "ingest":
+            function_address = "aws_lambda_function.ingest_dispatch[0]"
+            return (
+                [
+                    rule_resource,
+                    (
+                        target_address,
+                        "aws_cloudwatch_event_target",
+                        {
+                            "rule": activator["identity"],
+                            "arn": (
+                                "arn:aws:lambda:ap-northeast-1:718959508629:function:"
+                                f"{INGEST_DISPATCH_FUNCTION}"
+                            ),
+                        },
+                    ),
+                    (
+                        function_address,
+                        "aws_lambda_function",
+                        {
+                            "function_name": INGEST_DISPATCH_FUNCTION,
+                            "environment": [{"variables": {"TASKDEF_ARN": task_arn}}],
+                        },
+                    ),
+                ],
+                {"state": state, "task_definition_arn": task_arn},
+                function_address,
+            )
         return (
             [
-                (
-                    rule_address,
-                    "aws_cloudwatch_event_rule",
-                    {"name": activator["identity"], "state": state},
-                ),
+                rule_resource,
                 (
                     target_address,
                     "aws_cloudwatch_event_target",
@@ -434,11 +469,14 @@ def _plan(*, pre_media_cutover: bool = True) -> dict[str, Any]:
             configuration_address = re.sub(r"\[0\]$", "", address)
             configuration: dict[str, Any] = {"address": configuration_address}
             if address == pointer_address:
-                expression_name = {
-                    "ecs_service": "task_definition",
-                    "eventbridge_rule_ecs_target": "ecs_target",
-                    "lambda_taskdef_arn_environment": "environment",
-                }[consumer["activator"]["type"]]
+                if consumer["consumer_id"] == "ingest":
+                    expression_name = "environment"
+                else:
+                    expression_name = {
+                        "ecs_service": "task_definition",
+                        "eventbridge_rule_ecs_target": "ecs_target",
+                        "lambda_taskdef_arn_environment": "environment",
+                    }[consumer["activator"]["type"]]
                 configuration["expressions"] = {
                     expression_name: {
                         "references": [f"{consumer['terraform_task_definition_address']}.arn"]
@@ -583,13 +621,13 @@ def test_context_binds_exact_backend_workspace_state_and_plan_ownership() -> Non
     assert value["workspace"] == "default"
     assert value["state"]["lineage"] == _state()["lineage"]
     assert value["state"]["serial"] == 1234
-    assert value["state"]["managed_address_count"] == 22
+    assert value["state"]["managed_address_count"] == 23
     assert value["consumer_manifest"]["mode"] == "no-image-transition"
     assert value["plan"] == {
         "complete": True,
         "applyable": True,
         "errored": False,
-        "managed_change_count": 22,
+        "managed_change_count": 23,
         "address_ownership_sha256": value["plan"]["address_ownership_sha256"],
         "runtime_images_sha256": value["plan"]["runtime_images_sha256"],
         "consumer_manifest_sha256": value["plan"]["consumer_manifest_sha256"],
@@ -626,7 +664,7 @@ def test_context_allows_only_exact_unowned_existing_log_import() -> None:
         workspace="default",
     )
 
-    assert value["plan"]["managed_change_count"] == 23
+    assert value["plan"]["managed_change_count"] == 24
     assert len(value["plan"]["address_ownership_sha256"]) == 64
 
     wrong_id = _plan()
@@ -1730,6 +1768,91 @@ def test_no_image_transition_accepts_only_its_scheduled_task_pointer() -> None:
             backend_metadata=_backend(),
             workspace="default",
         )
+
+
+def test_ingest_planned_pointer_requires_dispatch_lambda_environment_expression() -> None:
+    plan = _plan()
+    ingest = _manifest_consumer(plan, "ingest")
+    address = ingest["terraform_task_definition_address"]
+    ingest["after"]["task_definition_arn"] = address
+    ingest["after"]["activation"]["task_definition_arn"] = address
+
+    task = _resource_change(plan, address)["change"]
+    task["actions"] = ["delete", "create"]
+    task["after"]["arn"] = None
+    task["after"]["id"] = None
+
+    dispatch_address = "aws_lambda_function.ingest_dispatch[0]"
+    dispatch = _resource_change(plan, dispatch_address)["change"]
+    dispatch["actions"] = ["update"]
+    dispatch["after"]["environment"][0]["variables"]["TASKDEF_ARN"] = None
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    accepted = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "ingest"
+    )
+    assert accepted["after"]["activation"]["task_definition_arn"] == address
+    dispatch_configuration = _configuration_resource(
+        plan,
+        "aws_lambda_function.ingest_dispatch",
+    )
+    dispatch_configuration["expressions"] = {"ecs_target": {"references": [f"{address}.arn"]}}
+
+    with pytest.raises(CONTEXT.ContextError, match="planned pointer expression is absent"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+
+@pytest.mark.parametrize("consumer_id", ["canary", "morning_digest"])
+def test_eventbridge_ecs_consumers_do_not_use_ingest_environment_shim(
+    consumer_id: str,
+) -> None:
+    consumer = next(item for item in REGISTRY["consumers"] if item["consumer_id"] == consumer_id)
+    target_task_definition = _task_arn(consumer)
+    environment_task_definition = _task_arn(consumer, revision=2)
+
+    activation = CONTEXT._activation_phase(
+        consumer_id=consumer_id,
+        activator_type="eventbridge_rule_ecs_target",
+        family=consumer["ecs_family"],
+        primary={"state": "DISABLED"},
+        secondary={
+            "ecs_target": [{"task_definition_arn": target_task_definition}],
+            "environment": [{"variables": {"TASKDEF_ARN": environment_task_definition}}],
+        },
+        label=f"{consumer_id} test activation",
+    )
+
+    assert activation["task_definition_arn"] == target_task_definition
+    _, _, pointer_address = _consumer_activation(consumer)
+    task_definition_address = consumer["terraform_task_definition_address"]
+    CONTEXT._require_planned_pointer_reference(
+        configuration_resources={
+            re.sub(r"\[0\]$", "", pointer_address): {
+                "expressions": {
+                    "ecs_target": {"references": [f"{task_definition_address}.arn"]},
+                    "environment": {"references": ["aws_ecs_task_definition.ingest[0].arn"]},
+                }
+            }
+        },
+        pointer_resource_address=pointer_address,
+        task_definition_address=task_definition_address,
+        activator_type=consumer["activator"]["type"],
+        consumer_id=consumer_id,
+        label=consumer_id,
+    )
 
 
 def test_public_activation_state_validator_rechecks_all_eight_after_apply() -> None:
