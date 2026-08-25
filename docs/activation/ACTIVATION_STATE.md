@@ -18,8 +18,8 @@ PR2-A0.x activation の**現在地だけ**を持つ単一の記録媒体。会�
 | 項目 | 値 |
 |---|---|
 | branch | `activation-execution-base` |
-| HEAD | `7dc3682`（= `0eab7f2` + P0 + A0.3.2） |
-| 予定 | 8 commit の controlled cherry-pick 後に更新 → allowlist を base + 10 へ |
+| HEAD | `e40f1c2`（= `0eab7f2` + 承認済み 12 commit） |
+| allowlist | base + **12** payload commit（patch-id 12/12・touched blob 全一致で検証済み） |
 
 `0eab7f2` は **Activation Candidate / Execution Base**。正式 Activation Baseline は
 preflight が純粋 4 forget + 4 import を出した時点で確定する（未確定）。
