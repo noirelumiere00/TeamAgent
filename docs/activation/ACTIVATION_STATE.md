@@ -22,8 +22,49 @@ A0.2.2c → fresh preflight → pure 4 forget + 4 import 判定
   → HERMES DARK RUNTIME DEPLOYED
 ```
 
-自律進行するが、**production mutation の直前は必ず human gate で停止**する。
-repo / live AWS / signed evidence と矛盾したら推測せず STOP して差分を報告する。
+### 自律実行してよい
+repo/git/read-only AWS 調査・terraform plan の準備・実装・tests・mutation/contract tests・
+CI 修正・PR 作成/rebase/retarget・evidence の redacted summary・manifest/checksum/patch-id/
+blob identity 検証・release-chain integrity・live vs desired 比較・runbook と本ファイルの更新。
+既承認の設計原則は再確認しない。
+
+### Human Gate 必須（14）
+①production AWS mutation ②terraform apply ③state mutation ④IAM apply / scope 変更
+⑤Freeze 変更・解除 ⑥secret/credential 権限の追加拡大 ⑦approved scope 拡張
+⑧想定外の production drift ⑨invariant violation ⑩production user traffic 切替
+⑪Hermes runtime 初回 production deployment ⑫rollback が必要な状態
+⑬root credential/account 操作 ⑭signed approval/provenance 不足
+
+### SURPRISE ポリシー
+approved scope 内で安全に直せるものは自律修正して続行（test fixture 不整合・自変更由来の
+CI 失敗・path/local 名の誤り・read-only checker のバグ・patch-id/blob 検査の実装ミス）。
+即 STOP: production drift / 想定外の AWS mutation / IAM scope 拡張が必要 / state mismatch /
+evidence・provenance 不成立 / security boundary 変更が必要 / Freeze が効いていない /
+root mutation / approved desired と live の不一致。
+
+### GO の束縛
+GO はその Gate の exact action のみ。plan SHA / git HEAD / mapping SHA / state serial /
+state SHA / target list / resource scope / IAM actions / Freeze state のいずれかが変われば
+承認失効 → 再度 Gate を提示する。
+
+### Hermes 原則
+`Slack → OpenClaw/Router → Hermes specialist → Claude → MCP`。既存の identity.py /
+MCP Gateway / RLS / per-user OAuth / HITL write boundary / OpenClaw security restrictions を
+再利用し、tools/adapters を作り直さない。初回は 1 specialist・dark runtime・
+production user traffic 0・minimal permissions・explicit network/tool boundary・rollback 可能。
+mega-agent にしない。Hermes Slack Pilot は別 MISSION。
+
+### Hermes supply-chain（PR2-A1 の既定 upstream）
+| 項目 | 値 |
+|---|---|
+| tag | `v2026.8.18` / release `v0.20.4` |
+| commit | `e624e9fde561e1add9388384012b295fde669ade` |
+| image | `docker.io/nousresearch/hermes-agent` |
+| index digest | `sha256:22e37bb4ed1b0f50cb6bd991dca7ecacd6c9f29df9b4a20fc989d32bc763ccf6` |
+| arm64 digest | `sha256:dd9d587caa787a8c287fc86e8a52537caaeeb16a6ebd3e0f6845c0ab34f90a50` |
+
+方針: `pinned upstream → thin derived image → TeamAgent supply-chain → attest/promote → runtime`。
+digest / provenance / source commit を evidence 化する。**mutable tag を runtime source にしない。**
 
 PR2-A0.x activation の**現在地だけ**を持つ単一の記録媒体。会話ログではなくこのファイルが真実源。
 経緯・原則・承認済み事項はここを更新し、チャット本文へ再掲しない（2026-08-24 運用裁定）。
