@@ -1460,10 +1460,12 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     container = json.loads(task["change"]["after"]["container_definitions"])[0]
     service = _find(plan, "aws_ecs_service.mcp[0]")
     target = _find(plan, "aws_cloudwatch_event_target.ingest_run_task[0]")
-    morning_target = _find(
-        plan,
-        "aws_cloudwatch_event_target.morning_digest_run_task[0]",
-    )
+    # ingest の target は dispatch Lambda を指すようになり、plan 上は常に no-op。
+    # 「ECS target の属性が live から動く」系の負テストは ecs_target を持ち、かつ
+    # release で正当に ["update"] になる canary を対象にする。
+    # ingest 固有の負テストは target_action（no-op 必須）と
+    # target_lambda_reference（dispatch Lambda 参照必須）が担う。
+    canary_target = _find(plan, "aws_cloudwatch_event_target.canary_run_task[0]")
     rule = _find(plan, RULES["ingest"][0])
     dispatcher = _find(plan, "aws_lambda_function.tiktok_dispatch[0]")
     mapping = _find(plan, "aws_lambda_event_source_mapping.tiktok_dispatch[0]")
@@ -1551,21 +1553,21 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     elif scenario == "service_connect":
         service["change"]["after"]["service_connect_configuration"] = [{"enabled": False}]
     elif scenario == "target_role":
-        target["change"]["after"]["role_arn"] = "arn:changed"
+        canary_target["change"]["after"]["role_arn"] = "arn:changed"
     elif scenario == "target_cluster":
-        target["change"]["after"]["arn"] = "arn:other-cluster"
+        canary_target["change"]["after"]["arn"] = "arn:other-cluster"
     elif scenario == "target_network":
-        morning_target["change"]["after"]["ecs_target"][0]["network_configuration"][0][
-            "subnets"
-        ] = ["other"]
+        canary_target["change"]["after"]["ecs_target"][0]["network_configuration"][0]["subnets"] = [
+            "other"
+        ]
     elif scenario == "target_retry":
-        target["change"]["after"]["retry_policy"][0]["maximum_retry_attempts"] = 9
+        canary_target["change"]["after"]["retry_policy"][0]["maximum_retry_attempts"] = 9
     elif scenario == "target_input":
-        target["change"]["after"]["input"] = "changed"
+        canary_target["change"]["after"]["input"] = "changed"
     elif scenario == "target_action":
         target["change"]["actions"] = ["update"]
     elif scenario == "target_unknown":
-        target["change"]["after_unknown"] = {"arn": True}
+        canary_target["change"]["after_unknown"]["arn"] = True
     elif scenario == "target_lambda_reference":
         ingest_target_config["expressions"] = {
             "ecs_target": [
@@ -5529,22 +5531,27 @@ RUNTIME_ATTRIBUTE_FAILURES = {
         ],
         "aws_ecs_service.mcp[0] はliveからtask_definition参照以外も変更します",
     ),
+    # ingest 固有（shim 分岐が拒否する）
+    **dict.fromkeys(
+        [
+            "target_action",
+            "target_lambda_reference",
+        ],
+        "aws_cloudwatch_event_target.ingest_run_task[0] "
+        "はliveからtask_definition参照以外も変更します",
+    ),
+    # ECS target を持つ consumer 側（従来経路が拒否する）
     **dict.fromkeys(
         [
             "target_role",
             "target_cluster",
             "target_retry",
             "target_input",
-            "target_action",
             "target_unknown",
-            "target_lambda_reference",
+            "target_network",
         ],
-        "aws_cloudwatch_event_target.ingest_run_task[0] "
+        "aws_cloudwatch_event_target.canary_run_task[0] "
         "はliveからtask_definition参照以外も変更します",
-    ),
-    "target_network": (
-        "aws_cloudwatch_event_target.morning_digest_run_task[0] "
-        "はliveからtask_definition参照以外も変更します"
     ),
     "rule_schedule": (
         "aws_cloudwatch_event_rule.ingest_weekly[0] "
