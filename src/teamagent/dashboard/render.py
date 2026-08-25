@@ -474,7 +474,7 @@ def render_usage_admin(data: dict[str, Any]) -> str:
         notes.insert(0, empty_note)
     note_html = "".join('<p class="note">' + _e(note) + "</p>" for note in notes)
     body = (
-        '<h1 style="font-size:22px">NewsTV AI 利用状況（管理）</h1>'
+        '<h1 style="font-size:22px">Aico 利用状況（管理）</h1>'
         '<p class="who">閲覧者: '
         + _e(data.get("email"))
         + "</p>"
@@ -491,7 +491,7 @@ def render_usage_admin(data: dict[str, Any]) -> str:
         + errors
         + note_html
     )
-    return _page("NewsTV AI 利用状況（管理）", body)
+    return _page("Aico 利用状況（管理）", body)
 
 
 __all__ = ["render_dashboard", "render_errors", "render_login", "render_usage_admin"]

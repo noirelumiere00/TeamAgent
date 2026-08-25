@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @openclaw/slack の App Home 実装をビルド時に NewsTV AI 仕様へ差し替える。
+// @openclaw/slack の App Home 実装をビルド時に Aico 仕様へ差し替える。
 //
 // なぜ dist を触るのか（2026-08-13）:
 //   - Home タブの view は上流にハードコード（header "OpenClaw"・英語文面）。
@@ -45,16 +45,16 @@ function replaceOnce(label, from, to) {
   src = src.replace(from, to);
 }
 
-// ── ① Home タブの文面を NewsTV AI 仕様へ ─────────────────────────────
+// ── ① Home タブの文面を Aico 仕様へ ─────────────────────────────
 replaceOnce(
   "home ヘッダ",
   `text: "OpenClaw"`,
-  `text: "NewsTV AI"`,
+  `text: "Aico"`,
 );
 replaceOnce(
   "home 本文",
   `text: "Send a DM, mention OpenClaw in a channel, or use \`/openclaw\` to start a session."`,
-  `text: "*NewsTV AI* は Vector 社の営業を支援する社内アシスタントです。\\n" +
+  `text: "*Aico* は Vector 社の営業を支援する社内アシスタントです。\\n" +
 \t\t\t\t\t"*まずはこれをコピーして DM に送ってみてください*（約25秒で返ります）\\n" +
 \t\t\t\t\t"\\u0060\\u0060\\u0060「（取引先名）」の社内資料を最大3件。資料名・種別・日付・出典リンクを一覧で。\\u0060\\u0060\\u0060\\n" +
 \t\t\t\t\t"*できること*\\n" +
@@ -104,7 +104,7 @@ replaceOnce(
 \t\t\ttoken: ctx.botToken,
 \t\t\tchannel,
 \t\t\ttext:
-\t\t\t\t":wave: *NewsTV AI へようこそ*\\n" +
+\t\t\t\t":wave: *Aico へようこそ*\\n" +
 \t\t\t\t"Slack で話しかけるだけで、調べもの・整理・下書きを引き受ける社内アシスタントです。専用画面も、覚えるコマンドもありません。\\n" +
 \t\t\t\t"*まずはこれをコピーして、この DM に送ってみてください*（約25秒で返ります）\\n" +
 \t\t\t\t"\\u0060\\u0060\\u0060「（取引先名）」の社内資料を最大3件。資料名・種別・日付・出典リンクを一覧で。\\u0060\\u0060\\u0060\\n" +

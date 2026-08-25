@@ -9,8 +9,8 @@
 
 1. MCP 境界（``mcp_gateway/server.py`` の ``_err``）はこれを **例外名＋和文の 1 本の文字列**へ
    潰すため、LLM から見て機械可読な手がかりが無い。SOUL は「``error=not_connected`` なら
-   oauth_connect（@NewsTV AI に『連携』）へ誘導」という契約を持つのに、その ``error`` が届かない。
-2. 案内語「/teamagent connect」は **その語では起動しない**（実際の導線は「@NewsTV AI に
+   oauth_connect（@Aico に『連携』）へ誘導」という契約を持つのに、その ``error`` が届かない。
+2. 案内語「/teamagent connect」は **その語では起動しない**（実際の導線は「@Aico に
    『連携』と話しかける」）＝断絶した導線を案内していた。
 
 そこで calendar_freebusy（``CalendarFreeBusyOutput(error="not_connected", message=…)``）と
@@ -49,9 +49,9 @@ from teamagent.adapters.gmail_client import GmailClient
 from teamagent.adapters.oauth_token_store import TokenStore
 
 # ``calendar_freebusy/skill.py`` の ``_ERR_MSG["not_connected"]`` と **同じ後半**。
-# 導線（@NewsTV AI に『連携』）を 1 か所に集約し、片方だけ古くなるのを防ぐ。
+# 導線（@Aico に『連携』）を 1 か所に集約し、片方だけ古くなるのを防ぐ。
 CONNECT_SUFFIX: Final[str] = (
-    " Google の連携が必要です（@NewsTV AI に『連携』と話しかけて許可してください）。"
+    " Google の連携が必要です（@Aico に『連携』と話しかけて許可してください）。"
 )
 
 NOT_CONNECTED_MESSAGE: Final[str] = "メールの確認には" + CONNECT_SUFFIX

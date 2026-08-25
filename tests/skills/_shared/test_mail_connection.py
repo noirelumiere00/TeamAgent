@@ -39,7 +39,7 @@ def test_connect_wording_matches_calendar_freebusy() -> None:
     assert NOT_CONNECTED_MESSAGE.endswith(CONNECT_SUFFIX)
     assert REAUTH_NEEDED_MESSAGE.endswith(CONNECT_SUFFIX)
     assert NOT_CONNECTED_MESSAGE == "メールの確認には" + CONNECT_SUFFIX
-    assert "@NewsTV AI に『連携』と話しかけて許可してください" in CONNECT_SUFFIX
+    assert "@Aico に『連携』と話しかけて許可してください" in CONNECT_SUFFIX
 
 
 def test_dead_slash_command_is_gone_from_mail_skills() -> None:
@@ -71,7 +71,7 @@ def test_dead_slash_command_is_gone_from_shared_connection_module() -> None:
     # docstring では「なぜ消したか」の説明として引用してよいが、利用者向け文言には無いこと。
     assert "/teamagent connect" not in NOT_CONNECTED_MESSAGE
     assert "/teamagent connect" not in REAUTH_NEEDED_MESSAGE
-    assert "@NewsTV AI に『連携』" in text
+    assert "@Aico に『連携』" in text
 
 
 def test_missing_token_store_is_operational_bug_not_user_message() -> None:

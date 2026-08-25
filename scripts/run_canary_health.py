@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fargate Scheduled Task: AiLa 主要経路の合成カナリア（柱3・2026-06-22 事故対策）。
+"""Fargate Scheduled Task: Aico 主要経路の合成カナリア（柱3・2026-06-22 事故対策）。
 
 「壊れても自動で気づかない」を潰す。1時間ごとに主要経路を合成的に叩き、壊れていたら
 構造化ログ `canary_health_result overall=false` ＋ exit 非0 を出す（CloudWatch metric filter→

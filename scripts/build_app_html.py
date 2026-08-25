@@ -1503,7 +1503,7 @@ function welcome(){
   +'<span class="plarr">・</span>'+plChip("その他")
   +'<span class="tagchip plc" tabindex="0" role="button" data-p="__none__" title="フェーズ未記録の取引先をテーブルで開く"><span class="tcv">フェーズ未記録</span><span class="qfn">'+unset+'</span></span>';
  const tz=TAGORDER.filter(c=>tagTree[c]).map(c=>'<span class="tagchip tzc" tabindex="0" role="button" data-c="'+esc(c)+'" style="--cc2:'+(CATMETA[c]||"var(--accent)")+'" title="タグペインで「'+esc(c)+'」を開く"><span class="tcdot" style="background:'+(CATMETA[c]||"var(--accent)")+'"></span><span class="tcv">'+esc(c)+'</span><span class="qfn">'+(tagCount[c]||0)+'</span></span>').join("");
- $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} AiLaVault</h1>
+ $("#inner").innerHTML=`<div class="welcome"><h1>${ic("vault")} Aico Vault</h1>
   <p class="sub">営業16名の社内ナレッジ — ${DATA.stats.clients} 取引先 / ${DATA.stats.docs} 資料。左の検索・タグ・グラフで分類・回遊できます。取引先カルテには資料と商談FBを時系列で一望できる<b>施策タイムライン</b>付き。<kbd>⌘O</kbd> でどこへでもジャンプ。</p>
   ${qf?`<div class="wsec">クイックフィルタ</div><div class="chiprow">${qf}</div>`:""}
   <div class="wsec">パイプライン</div><div class="chiprow plrow">${pl}</div>

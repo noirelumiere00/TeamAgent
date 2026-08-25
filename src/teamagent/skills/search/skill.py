@@ -74,7 +74,7 @@ def _strip_internal_markers(text: str) -> str:
 
 
 # 回答末尾への「資料リンク」付与をサーフェス単位で制御する env（既定OFF）。
-# markdown リンクを装飾リンクへ変換する openclaw(@NewsTV AI) を通す mcp では ON、
+# markdown リンクを装飾リンクへ変換する openclaw(@Aico) を通す mcp では ON、
 # answer を textContent で生表示する connect-web(/app) では未設定＝OFF にする。
 _SOURCE_LINKS_ENV = "SEARCH_ANSWER_SOURCE_LINKS"
 
@@ -416,7 +416,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             answer, cost_usd = self._summarize(input.query, hits, ctx.request_id)
             timings["converse_ms"] = (time.perf_counter() - _t) * 1000
             # 要約は資料名を挙げてもURLを出さないため回答末尾に「資料リンク」を決定論で付与。
-            # markdown [label](url) は openclaw(@NewsTV AI) が Slack 装飾リンクへ変換する。ただし
+            # markdown [label](url) は openclaw(@Aico) が Slack 装飾リンクへ変換する。ただし
             # connect-web(/app) は answer を textContent で生表示しリテラル化するため、env で
             # サーフェス制御する（mcp=ON / connect-web=未設定 で /app を汚さない）。既定OFF。
             if _source_links_enabled():

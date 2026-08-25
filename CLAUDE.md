@@ -1,4 +1,4 @@
-# TeamAgent / AiLa — Claude Code 運用マニュアル
+# TeamAgent / Aico — Claude Code 運用マニュアル
 
 このファイルは Claude Code 起動時に自動で読み込まれます。
 **現状アーキ・変えないルール・運用地雷・多人数原則・CIゲート・runbookリンク**を集約した運用マニュアルです。
@@ -13,7 +13,7 @@
 
 ## 0. プロジェクト概要
 
-- **TeamAgent v3.1** — 社内営業 **16 名**向け Slack ベース AI Agent プラットフォーム。本番 Bot 名は **AiLa**。
+- **TeamAgent v3.1** — 社内営業 **16 名**向け Slack ベース AI Agent プラットフォーム。本番 Bot 名は **Aico**（旧称 NewsTV AI / AiLa）。
 - **多人数ツール**（→ §5 の原則を厳守。特定個人の前提・ハードコード禁止）。
 - スケジュール：14 Sprint × 2 週（2026/5〜12）。**Sprint 14（2026-12-28）本番運用ターゲット**。Go/No-Go ゲート ①(Sprint 2末) / ②(Sprint 10末)。
 - コスト枠：Dev ¥80K 一時 / Ops ¥100K〜¥1M/月（規模次第）。
@@ -24,7 +24,7 @@
 ## 1. 現状アーキ（実態 — ここが最重要・旧 EC2 中心の記述は廃止）
 
 ```
-Slack ─▶ OpenClaw (TypeScript/Node, ECS Fargate)         ← Slack 受け口 + MCP 外殻 + @AiLa
+Slack ─▶ OpenClaw (TypeScript/Node, ECS Fargate)         ← Slack 受け口 + MCP 外殻 + @Aico
             └─▶ MCP gateway (Python, ECS Fargate)        ← Skill 実体・Bedrock/pgvector
 EventBridge(cron) ─▶ ECS Fargate scheduled tasks ×4:
             morning_digest / ingest / connect-web / canary
@@ -173,15 +173,15 @@ ruff check . && ruff format --check src/ tests/ scripts/
 | 構築当時の経緯を追う | `docs/handoff/teamagent_handoff_day0-4_2026-05.md` |
 | 検索 Skill を実装 | `docs/v3.1/teamagent_search_skill_design_v1.md` |
 | AWS リソース ID / モデル ID | §0 + `aws bedrock list-inference-profiles` |
-| AiLa にツール/機能を足したい | §10（4段ゲート＋description＋チェックリスト） |
+| Aico にツール/機能を足したい | §10（4段ゲート＋description＋チェックリスト） |
 
 ---
 
-## 10. AiLa にツール/機能を足すとき ★忘れてはいけない手順（2026-06-25 追記）
+## 10. Aico にツール/機能を足すとき ★忘れてはいけない手順（2026-06-25 追記）
 
-新しい能力は「skill を書いたら使える」ではない。**OC(AiLa) に届くには段が4つ**あり、どこかで止まると「実装したのに本番で呼べない」になる（実際 ③`video_approval` は skill 完成済みなのに OC 未露出で長く埋もれていた）。
+新しい能力は「skill を書いたら使える」ではない。**OC(Aico) に届くには段が4つ**あり、どこかで止まると「実装したのに本番で呼べない」になる（実際 ③`video_approval` は skill 完成済みなのに OC 未露出で長く埋もれていた）。
 
-### E1 ツールが本番で AiLa に届くまでの4段（全部通って初めて稼働）
+### E1 ツールが本番で Aico に届くまでの4段（全部通って初めて稼働）
 1. **skill 実装**：`skills/<name>/{schema,skill}.py` ＋ `@register`（§3）。←ここまでで「実装済」。
 2. **factory 登録（env-gate）**：`orchestrator/factory.py` の `build_production_tools()` に `if _envflag("USE_<X>"): specs.append(ToolSpec(...))`。新規は**必ず既定 OFF**（後方互換）。
 3. **OC 露出（第2ゲート）**：`infra/openclaw/openclaw.config.json5` の `mcp.servers.teamagent.toolFilter.include` に **tool 名を追加**。← factory に在っても include に無ければ **OpenClaw からは見えない**（一番の見落としポイント）。

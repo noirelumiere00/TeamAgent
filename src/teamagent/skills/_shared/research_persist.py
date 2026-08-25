@@ -2,7 +2,7 @@
 
 x_research(声集め/ニーズ/バズ) と tiktok_comment_mining が生成した「構造化要約 markdown」を
 IngestRepository 経由で **1 document = 1 chunk** として保存する。目的＝「過去にどんな施策研究/
-提案をしたか」を AiLaVault(Obsidian)/@NewsTV AI 検索で振り返れる外部脳にすること。
+提案をしたか」を Aico Vault(Obsidian)/@Aico 検索で振り返れる外部脳にすること。
 
 設計:
 - 書込はユーザー応答の**ホットパス外**（module-level ThreadPoolExecutor に fire-and-forget）。

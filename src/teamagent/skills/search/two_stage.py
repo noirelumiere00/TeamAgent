@@ -35,7 +35,7 @@ TWO_STAGE_ENV = "USE_SEARCH_TWO_STAGE"
 # 二段返しを行わない。
 TWO_STAGE_CTX_KEY = "search_two_stage_allowed"
 
-# ツール応答に載せる定型文。OpenClaw（@NewsTV AI）が「自分で回答を書き足す」のではなく
+# ツール応答に載せる定型文。OpenClaw（@Aico）が「自分で回答を書き足す」のではなく
 # 「ヒット一覧＋この一文をそのまま返す」よう SOUL 側にも同趣旨を書く
 # （docs/INTEGRATION_search_speed.md の SOUL 文面案）。
 TWO_STAGE_NOTICE = "🔎 該当資料を先にお出しします。詳細な考察を続けてこのスレッドに投稿します。"

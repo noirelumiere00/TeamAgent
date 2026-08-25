@@ -121,7 +121,7 @@ class MailSummarySkill(BaseSkill[MailSummaryInput, MailSummaryOutput]):
         "client_name には依頼文の断片（『今日のメール』『返信必要』等）を入れない。"
         "顧客名が特定できない依頼では client_name を空にして呼ぶ（サーバが案内を返す）。"
         "未連携なら error='not_connected' と message を返す（message をそのまま伝え、"
-        "oauth_connect＝@NewsTV AI に『連携』へ誘導する）。0 件なら error='no_hits'、"
+        "oauth_connect＝@Aico に『連携』へ誘導する）。0 件なら error='no_hits'、"
         "connection='live'（＝連携は正常）。**0 件の原因を推測して補わないこと**。"
         "呼び出し時は arguments に "
         "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"

@@ -229,7 +229,7 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
             return GmailClient.from_user_token(token, readonly=True)
         except ValueError as e:
             # 認証情報(GOOGLE_CLIENT_ID/SECRET 未設定・失効/空 refresh token)は連携案内に寄せる
-            # dispatch は PermissionError を捕捉し、@NewsTV AI に『連携』と話す導線を案内する。
+            # dispatch は PermissionError を捕捉し、@Aico に『連携』と話す導線を案内する。
             raise PermissionError(REAUTH_NEEDED_MESSAGE) from e
 
     # ── 社内側 ──────────────────────────────────────────────────────────────

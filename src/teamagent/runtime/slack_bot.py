@@ -2689,7 +2689,7 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 response_type="ephemeral",
                 text=(
                     "下書き作成には Google の再連携が必要です（下書き権限）。"
-                    "NewsTV AI に『連携』と話しかけて Google を許可してください。"
+                    "Aico に『連携』と話しかけて Google を許可してください。"
                 ),
             )
             return

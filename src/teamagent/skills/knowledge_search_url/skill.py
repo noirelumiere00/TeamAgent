@@ -7,7 +7,7 @@ URL を生成して案内文と一緒に返すだけで、データ I/O は一�
 URL は ``CONNECT_BASE_URL`` から組み立てる:
   - 検索ページ:   ``{base}/search``
   - グラフ閲覧:   ``{base}/search/graph``
-  - AiLaVault:    ``{base}/app``（＋ ``#client:<名前>`` ディープリンク）
+  - Aico Vault:   ``{base}/app``（＋ ``#client:<名前>`` ディープリンク）
 ``CONNECT_BASE_URL`` 未設定（Web UI 未デプロイ）のときは、壊れた相対リンクを返さず
 「まだ公開されていない」旨を返す（fail-safe・後方互換）。
 
@@ -67,7 +67,7 @@ def build_search_web_links(base: str | None = None) -> dict[str, str]:
 
 
 def build_app_url(base: str | None = None) -> str:
-    """AiLaVault（Obsidian 風ナレッジ UI ``/app``）の URL。base 未解決なら ""。"""
+    """Aico Vault（Obsidian 風ナレッジ UI ``/app``）の URL。base 未解決なら ""。"""
     resolved = connect_base_url() if base is None else base.strip().rstrip("/")
     if not resolved:
         return ""

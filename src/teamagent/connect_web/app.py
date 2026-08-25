@@ -3719,7 +3719,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "もう一度 Slack で Aico に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3729,7 +3729,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3739,7 +3739,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3759,8 +3759,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか使用済みです。"
-                    "Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3778,7 +3777,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3790,7 +3789,7 @@ def create_app(
                 _page(
                     "Googleアカウントを確認できませんでした",
                     f"{email} でログインし直してください。"
-                    "Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3801,7 +3800,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3822,7 +3821,7 @@ def create_app(
                 _page(
                     "Googleアカウントを確認できませんでした",
                     f"{email} でログインし直してください。"
-                    "Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3840,7 +3839,7 @@ def create_app(
                 _page(
                     "Googleアカウントが一致しません",
                     f"別のアカウントで許可されました。{email} でログインし直してください。"
-                    "Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=403,
@@ -3862,7 +3861,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3886,7 +3885,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "認可がキャンセルされました",
-                    "もう一度 Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "もう一度 Slack で Aico に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3896,7 +3895,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "不正なリクエスト",
-                    "リンクが壊れています。Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
                 ),
                 status_code=400,
             )
@@ -3906,7 +3905,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=400,
@@ -3924,7 +3923,7 @@ def create_app(
                 return HTMLResponse(
                     _page(
                         "対象ワークスペースが違います",
-                        "所属ワークスペースの Slack で NewsTV AI に「連携」と話しかけてください。",
+                        "所属ワークスペースの Slack で Aico に「連携」と話しかけてください。",
                         accent="#f9667a",
                     ),
                     status_code=403,
@@ -3940,7 +3939,7 @@ def create_app(
             return HTMLResponse(
                 _page(
                     "連携に失敗しました",
-                    "時間をおいて Slack で NewsTV AI に「連携」と話しかけてください。",
+                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
                     accent="#f9667a",
                 ),
                 status_code=500,
@@ -3976,7 +3975,7 @@ def create_app(
             )
         cid_e = html.escape(cid)
         nxt_e = html.escape(_safe_next(request.query_params.get("next")))
-        # AiLaVault ディープリンク（/app#client:… 等）の維持:
+        # Aico Vault ディープリンク（/app#client:… 等）の維持:
         # URL フラグメントはサーバに送信されないが、303 リダイレクトではブラウザが
         # 引き継ぐため、この login ページの URL には残っている。一方この後の
         # Google Sign-In → form POST → 303 /app の遷移でフラグメントは消えるので、
@@ -4071,7 +4070,7 @@ def create_app(
     def report_redirect(rid: str) -> Response:
         """レポート短縮リンク: 署名トークンを検証し、都度新鮮な presigned S3 へ 302。
 
-        openclaw(@NewsTV AI) が長い presigned URL のクエリ(?X-Amz-Signature…)を
+        openclaw(@Aico) が長い presigned URL のクエリ(?X-Amz-Signature…)を
         削って壊す問題の根治。
         認証は掛けない（トークンが不透明・時限＝現行 presigned と同一の信頼境界。Slack 受信者は
         ログイン不要）。token 不正/失効/prefix・bucket 外は 404（fail-closed）。presigned は毎回

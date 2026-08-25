@@ -500,7 +500,7 @@ def test_envflag_default_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _envflag("TA_ENVFLAG_TEST", default="1") is True
 
 
-# --- AiLaVault ディープリンク注入（v0.3 Task6・USE_AILAVAULT_DEEPLINKS 既定OFF） ---------
+# --- Aico Vault ディープリンク注入（v0.3 Task6・USE_AILAVAULT_DEEPLINKS 既定OFF） ---------
 
 
 class _FakeSearchHitsOutput(BaseModel):

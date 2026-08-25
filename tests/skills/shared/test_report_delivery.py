@@ -125,7 +125,7 @@ def test_all_prereqs_met_returns_short_url(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def _report_skills() -> list[tuple[str, Any]]:
-    """HTMLレポートURLを @AiLa 経由で人へ渡す skill の _publish_html 相当を集める。"""
+    """HTMLレポートURLを @Aico 経由で人へ渡す skill の _publish_html 相当を集める。"""
     from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
     from teamagent.skills.tiktok_comment_mining.skill import TikTokCommentMiningSkill
     from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill

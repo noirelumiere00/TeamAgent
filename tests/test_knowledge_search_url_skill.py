@@ -76,7 +76,7 @@ def test_build_search_web_links_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     }
 
 
-# --- AiLaVault（/app）ディープリンク builder（v0.3 Task6・ゲート層と共有する真実源） ---
+# --- Aico Vault（/app）ディープリンク builder（v0.3 Task6・ゲート層と共有する真実源） ---
 
 
 def test_build_app_url(monkeypatch: pytest.MonkeyPatch) -> None:

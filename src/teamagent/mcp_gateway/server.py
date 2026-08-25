@@ -281,7 +281,7 @@ def _inject_search_web_links(data: dict[str, Any]) -> None:
     SearchSkill / skills/search/schema.py は不変（注入はこのゲート層だけで完結）。
 
     v0.3 Task6: ``USE_AILAVAULT_DEEPLINKS=1``（既定 OFF・§10 E1-2）のとき、追加で
-    AiLaVault（/app）へのディープリンクも注入する:
+    Aico Vault（/app）へのディープリンクも注入する:
       - トップレベル ``app_url``: /app そのもの
       - 各 hit の ``app_client_url``: hit に client_name があるときだけ ``/app#client:<名前>``
     フラグ既定 OFF の理由: リンク先の app.html 側ハッシュ展開 JS（別デプロイ・repo 外生成器）
@@ -700,7 +700,7 @@ async def dispatch_tool(
     if isinstance(data, dict):
         _schedule_async_job_notice(name, data, raw, ctx)
     # ── ミドルウェア(0): usage 計測（既定ON・best-effort DB 記録）─────────────────
-    # 本番主経路（NewsTV AI→MCP）の tool 使用量を構造化ログと usage_events の両方へ
+    # 本番主経路（Aico→MCP）の tool 使用量を構造化ログと usage_events の両方へ
     # 記録する。本文/PII は原則保存せず、裁定済みの非空 query_text だけを例外とする
     # （長さ上限は UsageRecorder が適用）。
     tool_cost_usd = float(data.get("total_cost_usd") or 0.0) if isinstance(data, dict) else 0.0
@@ -732,7 +732,7 @@ async def dispatch_tool(
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない
     #     よう **リンク注入より先** に行う（逆順だと注入したURLごと切り詰め対象になる）。
-    # (2) リンク注入（Task6）: search 応答にだけ Web UI/AiLaVault リンクを差し込む。
+    # (2) リンク注入（Task6）: search 応答にだけ Web UI/Aico Vault リンクを差し込む。
     # usage DB/ログ記録は (0)。将来 quota を強制する場合もこの順序契約を保つ。
     if isinstance(data, dict):
         from teamagent.mcp_gateway.payload_offload import maybe_offload

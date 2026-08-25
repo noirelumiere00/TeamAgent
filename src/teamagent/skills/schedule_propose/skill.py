@@ -43,13 +43,13 @@ _CAL_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 _ERR_MSG: dict[str, str] = {
     "expired": "このボタンは無効です（期限切れ/不正）。最新のダイジェストから操作してください。",
     "not_connected": "日程提案には Google の連携が必要です"
-    "（@NewsTV AI に『連携』と話しかけて許可してください）。",
+    "（@Aico に『連携』と話しかけて許可してください）。",
     "no_slots": "直近5営業日に空き枠が見つかりませんでした。お手数ですが手動でご調整ください。",
     "freebusy_failed": "カレンダーの空き状況を取得できませんでした。"
     "時間をおいて再度お試しください。",
     "draft_failed": "返信下書きの作成に失敗しました。時間をおいて再度お試しください。",
 }
-_HOLD_TITLE = "仮: 日程候補（NewsTV AI）"
+_HOLD_TITLE = "仮: 日程候補（Aico）"
 
 
 @register

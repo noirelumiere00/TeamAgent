@@ -359,7 +359,7 @@ def test_unconnected_user_gets_connect_guidance_not_guard_message() -> None:
 
     assert out.error == "not_connected"  # client_name_structural ではない
     assert "連携は正常です" not in out.summary
-    assert "@NewsTV AI に『連携』" in out.summary
+    assert "@Aico に『連携』" in out.summary
 
 
 # ── P0-3: 0 件の理由を LLM に創作させない ───────────────────────────────────
@@ -422,7 +422,7 @@ def test_not_connected_is_structured_and_points_at_the_real_flow() -> None:
     assert out.error == "not_connected"
     assert out.message == NOT_CONNECTED_MESSAGE
     assert out.summary == out.message  # SOUL は summary を見るので二重掲載
-    assert "@NewsTV AI に『連携』" in out.message
+    assert "@Aico に『連携』" in out.message
     assert "/teamagent connect" not in out.message
 
 
@@ -443,7 +443,7 @@ def test_credential_failure_is_reauth_needed(monkeypatch: pytest.MonkeyPatch) ->
 
     assert out.error == "reauth_needed"
     assert out.connection == ""
-    assert "@NewsTV AI に『連携』" in out.message
+    assert "@Aico に『連携』" in out.message
 
 
 def test_missing_token_store_is_still_permission_error() -> None:
@@ -650,7 +650,7 @@ def test_expired_token_becomes_reauth_needed_not_zero_hits() -> None:
 
     assert out.error == "reauth_needed"
     assert out.connection == ""  # live とは名乗らない
-    assert "@NewsTV AI に『連携』" in out.message
+    assert "@Aico に『連携』" in out.message
     assert "0 件" not in out.summary
 
 

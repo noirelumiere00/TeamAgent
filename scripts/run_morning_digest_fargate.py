@@ -972,7 +972,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "_AiLa｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
+                        "_Aico｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
                         "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
                     ),
                 }
@@ -1152,7 +1152,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "_AiLa｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
+                        "_Aico｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
                         "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
                     ),
                 }

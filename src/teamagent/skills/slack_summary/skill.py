@@ -65,7 +65,7 @@ _UNIFORM_DENY_CODES = frozenset(
 
 _ERR_MSG: dict[str, str] = {
     "not_connected": "スレッド要約には本人の Slack 連携が必要です"
-    "（@NewsTV AI に『連携』と話しかけて許可してください）。",
+    "（@Aico に『連携』と話しかけて許可してください）。",
     "no_target": "要約するスレッドを特定できませんでした。"
     "要約したいスレッドの中で依頼するか、スレッドのリンクを添えて依頼してください。",
     "cross_channel_blocked": "このチャンネルでは、別の場所のスレッドは要約できません"

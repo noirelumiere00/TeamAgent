@@ -239,7 +239,7 @@ def source_link(source_uri: str | None, source_type: str | None) -> str | None:
 def render_claude_md() -> str:
     """Vault ルートの CLAUDE.md（使用ルール）を生成する。"""
     return (
-        "# AiLa Vault 使用ルール\n"
+        "# Aico Vault 使用ルール\n"
         "\n"
         "- この Vault は **読み取りミラー** です。正（source of truth）は pgvector"
         "（RDS）で、ここでの編集は元データに反映されません。\n"

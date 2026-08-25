@@ -1,6 +1,6 @@
 # カタログ第一弾ツールのルーティング検証（CLAUDE.md §10 E2）
 
-OpenClaw(AiLa) の外側ルーター（Haiku 4.5）は **name + description だけ**でツールを選ぶ。
+OpenClaw(Aico) の外側ルーター（Haiku 4.5）は **name + description だけ**でツールを選ぶ。
 新6ツール（x_voice_search / x_needs_mining / x_buzz_measure(+status) / search_surface_check /
 tiktok_comment_mining）が、既存の動画/TikTok系（tiktok_search / tiktok_acquire /
 video_algorithm / video_analysis / video_approval）や X系どうしで**取り違えられないこと**を、

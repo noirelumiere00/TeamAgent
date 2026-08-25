@@ -1,6 +1,6 @@
 """attachment_assist Skill 本体 — 会話に添付されたファイルを読んで加工する（read-only）。
 
-経路: Slack でファイルを @NewsTV AI に投げる → OpenClaw が SOUL 指示で本ツールを呼ぶ
+経路: Slack でファイルを @Aico に投げる → OpenClaw が SOUL 指示で本ツールを呼ぶ
 （引数は mode / instruction / file_name のみ）→ mcp_gateway が **署名済み claim** 由来の
 user_email / channel_id / thread_ts を注入（server.py:441-445）→ 本 Skill がその会話の
 添付だけを発見・取得・本文化し、mode 別に整形して**テキストで**返す。

@@ -2,7 +2,7 @@
 
 **Slack を入口に OpenClaw + TeamAgent MCP Gateway + AWS Bedrock Claude で動く社内 AI Agent 基盤。**
 
-ベクトル社の営業 16 名パイロット向け。Slack で `@NewsTV AI`（旧称 AiLa）に話しかけると、営業ナレッジ検索・クライアントカルテ・提案書生成・メール要約/下書き・カレンダー・TikTok/X 分析などを、per-user 認可と行レベルセキュリティ（RLS）の内側で実行する。
+ベクトル社の営業 16 名パイロット向け。Slack で `@Aico`（旧称 NewsTV AI / AiLa）に話しかけると、営業ナレッジ検索・クライアントカルテ・提案書生成・メール要約/下書き・カレンダー・TikTok/X 分析などを、per-user 認可と行レベルセキュリティ（RLS）の内側で実行する。
 
 > 📌 本 README は **現在実装されているもの**を説明する（2026-08 時点・dev 基準）。旧 v3.0 設計（「Claude Agent SDK が常駐オーケストレーター」「Slack Bolt が Frontend」「OpenClaw 不採用」）は**現実装と異なる**歴史文書であり、[docs/archive/](docs/archive/) と [docs/v3.0/](docs/v3.0/) に保管されている。将来構想（Hermes）は末尾の Future Roadmap にのみ記載する。
 
@@ -67,7 +67,7 @@ Slack user_id（署名claim内・改ざん不可）
 
 - RDS PostgreSQL + pgvector。embedding は Local E5（multilingual-e5-large・1024 次元）既定、Bedrock Cohere 切替可（列ペア fail-loud 検証）
 - ingest: Slack thread（channel メンバー = ACL）/ Google Drive（permissions 実取得 = ACL）/ Sheets 行単位。Bedrock 分類・Contextual Retrieval・差分取り込み（INGEST_DIFFERENTIAL）
-- Web UI: [src/teamagent/connect_web/](src/teamagent/connect_web/)（/search・/app = AiLaVault・Google OAuth callback 受け）
+- Web UI: [src/teamagent/connect_web/](src/teamagent/connect_web/)（/search・/app = Aico Vault・Google OAuth callback 受け）
 
 ### Agent Runtime（L2・現在 dark）
 

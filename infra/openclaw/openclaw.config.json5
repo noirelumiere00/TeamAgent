@@ -29,7 +29,7 @@
         // §O: 公式は provider/model 記法（amazon-bedrock/ プレフィックス必須）。
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
         model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
-        identity: { name: "NewsTV AI", emoji: "🧭" },
+        identity: { name: "Aico", emoji: "🧭" },
         // §S: skipBootstrap は v2026.6.1 schema の agents.list[] に無い（config validate で弾かれた）ため削除。
         // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。
       },
@@ -198,7 +198,7 @@
             //   現在は scope enabledBy=never。解禁時は tf task env + scope enabledBy +
             //   contract test + OCイメージ再ビルドの4点を同じ変更単位で揃える。
             "operation_log",
-            // §U-PartA-Step A: メール機能（readonly 3つ）を mention 経由で公開（@NewsTV AI メール要約・要返信トリアージ・社内資料横断）。
+            // §U-PartA-Step A: メール機能（readonly 3つ）を mention 経由で公開（@Aico メール要約・要返信トリアージ・社内資料横断）。
             // per-user OAuth(本人受信箱)で動作・DLPマスク後 Bedrock 要約（mail_summary/skill.py の G1-G7 死守）。
             "mail_summary", "mail_followup", "mail_to_internal_context",
             // §U-Part3-Step C: 返信下書き生成も公開（gmail.modify drafts.create のみ・送信は人間が手動）。
@@ -235,14 +235,14 @@
             // MCP taskはDRAFT_ON_DEMAND_ONLY=trueを必須化し、mentionからの自動Gmail draftを拒否する。
             // USE_MORNING_DIGEST_TOOL=1 が必要。
             "morning_digest",
-            // §U: oauth_connect — @NewsTV AI「連携」で本人専用の Google 認可 URL を返す。
+            // §U: oauth_connect — @Aico「連携」で本人専用の Google 認可 URL を返す。
             // OpenClaw に connect 経路が無い問題への対応。URL生成のみ（token保存は connect-web）。
             // USE_OAUTH_CONNECT_TOOL=1 + OAUTH_REDIRECT_URI/OAUTH_STATE_SECRET/CONNECT_GOOGLE_* が必要。
             "oauth_connect",
             // knowledge_deliver: 「資料そのものを出して」系で該当ファイルを依頼者 DM に添付配信
             // （USE_KNOWLEDGE_DELIVER=1 で MCP 側に出る）。検索+読取DLのみ・Drive書込なし。
             "knowledge_deliver",
-            // knowledge_search_url: @NewsTV AI「検索ページ教えて」で資料検索 Web UI（connect-web の
+            // knowledge_search_url: @Aico「検索ページ教えて」で資料検索 Web UI（connect-web の
             // /search・/search/graph）の URL を返す。URL生成のみ（CONNECT_BASE_URL 未設定なら
             // 「未公開」を返し壊れたリンクは出さない）。現在は scope enabledBy=never。
             // 解禁4点セット: tf task env / scope enabledBy / contract test / OCイメージ再ビルド。

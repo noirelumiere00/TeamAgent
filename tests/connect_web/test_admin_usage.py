@@ -199,7 +199,7 @@ def test_admin_escapes_question_text_and_renders_jst(monkeypatch: pytest.MonkeyP
     assert '<script>alert("x")</script>' not in response.text
     assert "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;" in response.text
     assert "2026-08-13 09:30:00 JST" in response.text
-    assert "NewsTV AI 利用状況（管理）" in response.text
+    assert "Aico 利用状況（管理）" in response.text
 
 
 def test_admin_empty_usage_events_renders_deployment_note(

@@ -1,6 +1,6 @@
 """レポート短縮リンク用 署名トークン（HMAC-SHA256）。
 
-openclaw(@NewsTV AI) の LLM が長い presigned URL のクエリ（``?X-Amz-Signature…``）を
+openclaw(@Aico) の LLM が長い presigned URL のクエリ（``?X-Amz-Signature…``）を
 削って壊す問題を根治するため、配布URLを **クエリ無しの短い**
 ``https://connect.newstv.co.jp/r/<token>`` にする。``<token>`` は S3 の
 ``bucket/key`` を HMAC 署名で埋めた不透明文字列。connect-web の ``/r`` が署名検証して
@@ -43,7 +43,7 @@ _LEGACY_FIELDS = frozenset({"typ", "b", "k", "r", "e"})
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"  # report_publish._DEFAULT_BUCKET と一致
 _ALLOWED_KEY_PREFIXES = ("vseo-reports/", "vseo-proposals/")  # 発行しうる prefix のみ許可
 # 既定 7日（旧 presigned と同等の露出窓）。トークンはアクセスログに残りうる capability なので
-# 恒久寿命にしない（過去施策の恒久記録は AiLaVault(Part1)側が担う）。REPORT_LINK_TTL_S で調整可。
+# 恒久寿命にしない（過去施策の恒久記録は Aico Vault(Part1)側が担う）。REPORT_LINK_TTL_S で調整可。
 _SIG_LEN = 16  # HMAC-SHA256 の先頭16バイト（トークンを短く保つ・draft_token と同じ）
 
 

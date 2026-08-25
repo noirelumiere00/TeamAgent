@@ -64,9 +64,9 @@ _AGENDA_TRUNCATED_NOTE = (
 
 _ERR_MSG: dict[str, str] = {
     "not_connected": "空き時間の照会には Google の連携が必要です"
-    "（@NewsTV AI に『連携』と話しかけて許可してください）。",
+    "（@Aico に『連携』と話しかけて許可してください）。",
     "not_connected_agenda": "予定の確認には Google の連携が必要です"
-    "（@NewsTV AI に『連携』と話しかけて許可してください）。",
+    "（@Aico に『連携』と話しかけて許可してください）。",
     "freebusy_failed": "カレンダーの空き状況を取得できませんでした。"
     "時間をおいて再度お試しください。",
     "agenda_failed": "カレンダーの予定を取得できませんでした。"

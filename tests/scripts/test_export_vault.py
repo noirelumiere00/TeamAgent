@@ -368,7 +368,7 @@ def test_render_client_note_escapes_markdown_injection() -> None:
     """FB 由来テキスト（client 名/見出し/pair 値/blockquote 本文）の Markdown 記法を退避する。
 
     Slack FB 本文や LLM 分類値に混ざった [x](javascript:…) / <img> / `code` / [[wikilink]] が
-    AiLaVault(Obsidian) で装飾リンク・HTML・埋め込みとして描画されないよう、逐語出力箇所を
+    Aico Vault(Obsidian) で装飾リンク・HTML・埋め込みとして描画されないよう、逐語出力箇所を
     md_inline_escape 済みで出す（frontmatter は yaml_quote が守るため対象外）。
     """
     fb = _fb(

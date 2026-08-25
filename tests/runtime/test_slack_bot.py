@@ -589,7 +589,7 @@ def test_followup_not_connected_does_not_render_as_zero_hits() -> None:
     """未連携なのに『見つかりませんでした』と併記すると原因を取り違える（P0-4 の退行防止）。"""
     out = _FakeMailOut(
         error="not_connected",
-        message="メールの確認には Google の連携が必要です（@NewsTV AI に『連携』と話しかけて許可してください）。",
+        message="メールの確認には Google の連携が必要です（@Aico に『連携』と話しかけて許可してください）。",
     )
 
     rendered = _format_mail_followup_response(out)

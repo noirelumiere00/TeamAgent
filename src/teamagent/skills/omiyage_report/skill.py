@@ -269,7 +269,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput
     version: ClassVar[str] = "1.0"
-    owner: ClassVar[str] = "NewsTV AI"
+    owner: ClassVar[str] = "Aico"
     audit_tag: ClassVar[str] = "omiyage-report-submit"
 
     def __init__(
@@ -864,7 +864,7 @@ class OmiyageReportStatusSkill(BaseSkill[OmiyageReportStatusInput, OmiyageReport
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportStatusOutput
     version: ClassVar[str] = "1.0"
-    owner: ClassVar[str] = "NewsTV AI"
+    owner: ClassVar[str] = "Aico"
     audit_tag: ClassVar[str] = "omiyage-report-status"
 
     def __init__(
