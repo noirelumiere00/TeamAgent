@@ -13,13 +13,16 @@
 #   steady             - dedicated primary only; previous removal is allowed only after deadline
 
 variable "mail_action_hmac_rollout_phase" {
-  description = "MAIL_ACTION HMAC phase: blocked, legacy_migration, dedicated_rotation, or steady."
+  description = "MAIL_ACTION HMAC phase: blocked, bootstrap_pin, legacy_migration, dedicated_rotation, or steady."
   type        = string
   default     = "blocked"
 
+  # bootstrap_pin は移行専用の一時 phase。selector も鍵 material も変えず、
+  # live の曖昧な AWSCURRENT 参照を exact VersionId へ固定するためだけに使う。
+  # canonical 化が完了したらこの phase 値と exact legacy selector 許可を撤去する。
   validation {
     condition = contains(
-      ["blocked", "legacy_migration", "dedicated_rotation", "steady"],
+      ["blocked", "bootstrap_pin", "legacy_migration", "dedicated_rotation", "steady"],
       var.mail_action_hmac_rollout_phase,
     )
     error_message = "mail_action_hmac_rollout_phase is invalid."
@@ -27,13 +30,16 @@ variable "mail_action_hmac_rollout_phase" {
 }
 
 variable "report_link_hmac_rollout_phase" {
-  description = "REPORT_LINK HMAC phase: blocked, legacy_migration, dedicated_rotation, or steady."
+  description = "REPORT_LINK HMAC phase: blocked, bootstrap_pin, legacy_migration, dedicated_rotation, or steady."
   type        = string
   default     = "blocked"
 
+  # bootstrap_pin は移行専用の一時 phase。selector も鍵 material も変えず、
+  # live の曖昧な AWSCURRENT 参照を exact VersionId へ固定するためだけに使う。
+  # canonical 化が完了したらこの phase 値と exact legacy selector 許可を撤去する。
   validation {
     condition = contains(
-      ["blocked", "legacy_migration", "dedicated_rotation", "steady"],
+      ["blocked", "bootstrap_pin", "legacy_migration", "dedicated_rotation", "steady"],
       var.report_link_hmac_rollout_phase,
     )
     error_message = "report_link_hmac_rollout_phase is invalid."

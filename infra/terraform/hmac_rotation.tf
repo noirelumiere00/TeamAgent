@@ -11,11 +11,18 @@ variable "mail_action_hmac_secret_arn" {
   type        = string
   default     = ""
 
+  # MIGRATION-ONLY(bootstrap_pin): live が canonical 化前の legacy selector を指しているため、
+  # VersionId 固定のためだけに exact legacy ARN を primary として一時許可する。
+  # 許すのは下の exact ARN 1 本だけ。ワイルドカード・任意 ARN・任意の第三 secret は許さない。
+  # canonical 化が完了したらこの選択肢ごと削除する。
   validation {
     condition = var.mail_action_hmac_secret_arn == "" || can(regex(
       "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/hmac/mail-action-[A-Za-z0-9]{6}$",
       var.mail_action_hmac_secret_arn,
-    ))
+      )) || (
+      var.mail_action_hmac_rollout_phase == "bootstrap_pin" &&
+      var.mail_action_hmac_secret_arn == "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/database-url-4pJMDr"
+    )
     error_message = "mail_action_hmac_secret_arnは東京/dev accountのmail-action purpose exact ARNに限定します。"
   }
 }
@@ -25,11 +32,18 @@ variable "report_link_hmac_secret_arn" {
   type        = string
   default     = ""
 
+  # MIGRATION-ONLY(bootstrap_pin): live が canonical 化前の legacy selector を指しているため、
+  # VersionId 固定のためだけに exact legacy ARN を primary として一時許可する。
+  # 許すのは下の exact ARN 1 本だけ。ワイルドカード・任意 ARN・任意の第三 secret は許さない。
+  # canonical 化が完了したらこの選択肢ごと削除する。
   validation {
     condition = var.report_link_hmac_secret_arn == "" || can(regex(
       "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/hmac/report-link-[A-Za-z0-9]{6}$",
       var.report_link_hmac_secret_arn,
-    ))
+      )) || (
+      var.report_link_hmac_rollout_phase == "bootstrap_pin" &&
+      var.report_link_hmac_secret_arn == "arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-RKEHWS"
+    )
     error_message = "report_link_hmac_secret_arnは東京/dev accountのreport-link purpose exact ARNに限定します。"
   }
 }
@@ -56,6 +70,12 @@ variable "report_link_hmac_previous_secret_arn" {
   validation {
     condition = var.report_link_hmac_previous_secret_arn == "" || can(regex(
       "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/(database-url|hmac/report-link)-[A-Za-z0-9]{6}:::[A-Za-z0-9-]{32,64}$",
+      var.report_link_hmac_previous_secret_arn,
+      )) || can(regex(
+      # MIGRATION-ONLY: canonical 化では previous は「いま live が指している legacy selector」
+      # でなければならない（keyring 契約が previous == deployed primary を要求する）。
+      # exact name のみ・version pin 必須。canonical 化完了後に削除する。
+      "^arn:aws:secretsmanager:ap-northeast-1:718959508629:secret:teamagent/dev/report-link-hmac-[A-Za-z0-9]{6}:::[A-Za-z0-9-]{32,64}$",
       var.report_link_hmac_previous_secret_arn,
     ))
     error_message = "report previousは同account/regionのlegacy database-urlまたはreport-link secretをexact version pinしてください。"
