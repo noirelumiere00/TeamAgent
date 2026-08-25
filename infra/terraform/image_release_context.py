@@ -44,8 +44,8 @@ EXPECTED_BACKEND = {
     "encrypt": True,
 }
 EXPECTED_WORKSPACE = "default"
-# ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-# release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+# ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+# 詳細は docs/activation/ACTIVATION_STATE.md 参照。
 _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
 ALLOWED_EXISTING_LOG_IMPORTS = {
     "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
@@ -763,8 +763,8 @@ def _require_planned_pointer_reference(
         label=f"{label} pointer expressions",
     )
     if activator_type == "eventbridge_rule_ecs_target":
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         expression_name = "environment" if consumer_id == "ingest" else "ecs_target"
     else:
         expression_name = {
@@ -1283,8 +1283,8 @@ def _activation_phase(
             "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
         }:
             raise ContextError(f"{label} rule state is invalid")
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if consumer_id == "ingest":
             task_definition_arn = _task_definition_from_environment(
                 secondary.get("environment"),
@@ -1346,8 +1346,8 @@ def _consumer_activation_binding(
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if consumer_id == "ingest":
             secondary_type = "aws_lambda_function"
             secondary_field = "function_name"
@@ -1509,8 +1509,8 @@ def _consumer_state_activation(
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if consumer_id == "ingest":
             secondary_type = "aws_lambda_function"
             secondary_field = "function_name"
@@ -1567,8 +1567,8 @@ def _consumer_state_activation_is_absent(
     if activator_type == "ecs_service":
         resource_contracts = (("aws_ecs_service", "name", identity),)
     elif activator_type == "eventbridge_rule_ecs_target":
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if consumer_id == "ingest":
             resource_contracts = (
                 ("aws_cloudwatch_event_rule", "name", identity),
