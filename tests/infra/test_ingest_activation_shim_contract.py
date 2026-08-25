@@ -13,9 +13,13 @@ GENERATION_INPUTS = ROOT / "infra/deploy/buildspec_generation_inputs.json"
 
 _SHIM_KEY = "ACTIVATION-SHIM" + "(ingest)"
 _SHIM_COMMENT = (
-    f"# {_SHIM_KEY}: 一時対応。Activation 完了後に canonical registry と",
-    "# release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。",
+    f"# {_SHIM_KEY}: Activation 完了後に正名化して撤去する一時対応。",
+    "# 詳細は docs/activation/ACTIVATION_STATE.md 参照。",
 )
+# shim の棚卸しは「コードに shim が黙って増えていないか」を見るもの。
+# 散文（docs/）はタグ名を引用してよいので数の pin からは外す。
+# frozen surface との非交差判定は repo 全体で行う（下の disjoint テスト）。
+_TAG_COUNT_EXCLUDED_PREFIXES = ("docs/",)
 _FORBIDDEN_ACTIVATOR_TYPE = "eventbridge_rule_" + "lambda_taskdef_arn_environment"
 _EXACT_INGEST_IDENTITIES = {"ingest", "teamagent-dev-ingest-weekly"}
 _EXPECTED_SHIM_TAG_COUNTS = {
@@ -52,13 +56,16 @@ def _repository_file_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _tag_counts() -> dict[str, int]:
+def _tag_counts(*, include_prose: bool = False) -> dict[str, int]:
     key = _SHIM_KEY.encode("utf-8")
     counts: dict[str, int] = {}
     for path in _repository_files():
+        relative = path.relative_to(ROOT).as_posix()
+        if not include_prose and relative.startswith(_TAG_COUNT_EXCLUDED_PREFIXES):
+            continue
         count = _repository_file_bytes(path).count(key)
         if count:
-            counts[path.relative_to(ROOT).as_posix()] = count
+            counts[relative] = count
     return counts
 
 
@@ -132,7 +139,9 @@ def test_each_shim_file_uses_exact_ingest_equality_without_set_membership() -> N
 def test_shim_tag_surface_does_not_intersect_the_frozen_generation_inputs() -> None:
     manifest = json.loads(GENERATION_INPUTS.read_text(encoding="utf-8"))
     frozen_inputs = set(manifest["inputs"])
-    tagged_files = set(_tag_counts())
+    # 非交差判定は散文も含めた repo 全体で行う。frozen surface のファイルに
+    # タグ名が現れること自体を禁止する（コメントでも記述でも）。
+    tagged_files = set(_tag_counts(include_prose=True))
 
     assert len(frozen_inputs) == 18
     assert "infra/codebuild/release_evidence.py" in frozen_inputs

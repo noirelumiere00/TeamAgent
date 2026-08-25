@@ -73,8 +73,8 @@ _LEGACY_TIKTOK_IMAGE_RE = re.compile(
     r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
 )
 _RULE_STATES = frozenset({"DISABLED", "ENABLED"})
-# ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-# release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+# ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+# 詳細は docs/activation/ACTIVATION_STATE.md 参照。
 _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
 _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS = "aws_lambda_function.ingest_dispatch[0]"
 _DEPLOYMENT_CONFIGURATION_FIELDS = frozenset(
@@ -231,8 +231,8 @@ def _load_consumer_specs(
             activator_edge_address is not None
         ):
             raise SagaError("consumer registry activator address contract differs")
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if key == "ingest":
             if (
                 activator_type != "eventbridge_rule_ecs_target"
@@ -901,8 +901,8 @@ def _eventbridge_plan(
 
     if spec.activator_edge_address is None:
         raise SagaError("EventBridge activator edge is absent")
-    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+    # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
     if spec.key == "ingest":
         target_after, target_unknown = _resource_after(
             target_item,
@@ -1158,8 +1158,8 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         }[spec.activator_type]
         if spec.activator_edge_address is not None:
             expected_resource_types[spec.activator_edge_address] = "aws_cloudwatch_event_target"
-        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         if spec.key == "ingest":
             if spec.task_pointer_address != _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS:
                 raise SagaError("ingest activation shim task pointer address differs")
@@ -1215,8 +1215,7 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
             if spec.activator_edge_address is None:
                 raise SagaError("EventBridge activator edge is absent")
             task_pointer_item = None
-            # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-            # release_evidence を原子的に正名化して撤去する。
+            # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
             # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
             if spec.key == "ingest":
                 if spec.task_pointer_address != _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS:
@@ -1510,8 +1509,8 @@ def _canonical_eventbridge_activation(
 ) -> dict[str, Any]:
     if type(raw) is not dict:
         raise SagaError("EventBridge activation response is invalid")
-    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+    # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
     if spec.key == "ingest":
         expected_fields = {"lambda", "rule", "target"}
     else:
@@ -1530,8 +1529,8 @@ def _canonical_eventbridge_activation(
     ):
         raise SagaError("EventBridge activation identity is not exact")
     target_id = target.get("Id")
-    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+    # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
     if spec.key == "ingest":
         lambda_configuration = raw.get("lambda")
         environment = (
@@ -1604,8 +1603,8 @@ def _read_eventbridge_activation(
     if len(targets) != 1:
         raise SagaError("EventBridge ECS target inventory is not exact")
     raw = {"rule": rule, "target": targets[0]}
-    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
+    # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
     if spec.key == "ingest":
         raw["lambda"] = cli.json(
             "lambda",
@@ -2088,8 +2087,7 @@ def _validate_consumer_baseline(
                 },
                 "target": activation.get("target"),
             }
-            # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
-            # release_evidence を原子的に正名化して撤去する。
+            # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
             # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
             if spec.key == "ingest":
                 eventbridge_raw["lambda"] = {

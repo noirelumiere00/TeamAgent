@@ -1092,16 +1092,23 @@ def _safe_plan() -> dict[str, Any]:
             )
         )
 
+    # ingest taskdef は release のたびに create/delete されるため、その arn を env で
+    # 参照する dispatch Lambda は必ず ["update"]（TASKDEF_ARN が after_unknown）になる。
+    # tiktok/x と同じ本番形状を再現する。no-op に固定すると allowlist の穴を隠してしまう。
     ingest_lambda = _ingest_lambda_tf()
-    changes.append(
-        _change(
-            "aws_lambda_function.ingest_dispatch[0]",
-            "aws_lambda_function",
-            ["no-op"],
-            ingest_lambda,
-            copy.deepcopy(ingest_lambda),
-        )
+    ingest_lambda_after = copy.deepcopy(ingest_lambda)
+    ingest_lambda_after["environment"][0]["variables"]["TASKDEF_ARN"] = None
+    ingest_lambda_change = _change(
+        "aws_lambda_function.ingest_dispatch[0]",
+        "aws_lambda_function",
+        ["update"],
+        ingest_lambda,
+        ingest_lambda_after,
     )
+    ingest_lambda_change["change"]["after_unknown"] = {
+        "environment": [{"variables": {"TASKDEF_ARN": True}}]
+    }
+    changes.append(ingest_lambda_change)
     configurations.append(
         {
             "address": "aws_lambda_function.ingest_dispatch",
