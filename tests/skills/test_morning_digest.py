@@ -306,8 +306,13 @@ def test_triage_prompt_output_template_declares_every_key_the_parser_reads() -> 
     9 キーのまま（id 無し）だった。LLM は雛形どおり id 抜きで返すため by_id が空になり、
     parsed 件数は合っているのに matched=0＝全件が空要約へ縮退した（課金だけ発生）。
     散文と雛形の乖離は目視では通ってしまうので、機械で固定する。
+
+    ⚠️ 見るのは JSON 雛形（`[` から `]` まで）だけ。節そのものを対象にすると、雛形の外に
+    ある注意書き（※ "id" は必須キー…）の文字列で条件が満たされてしまい、雛形から id を
+    落とすという真因そのものの変異を素通しする（変異テストで実測・2026-08-25）。
     """
-    template = _TRIAGE_SYSTEM_PROMPT.split("【出力形式", 1)[1]
+    section = _TRIAGE_SYSTEM_PROMPT.split("【出力形式", 1)[1]
+    template = section[section.index("[") : section.rindex("]") + 1]
     for key in (
         "id",
         "importance",
