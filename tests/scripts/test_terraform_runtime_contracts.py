@@ -1682,3 +1682,42 @@ def test_canary_failure_alarm_stays_notbreaching_and_liveness_is_the_heartbeat()
     assert match is not None and match.group(1) == "false"
     migrations = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
     assert migrations["2026-07-wolfi-runtime-v1"]["to"]["rule_states"]["canary"] == "DISABLED"
+
+
+def test_morning_digest_errors_reach_the_existing_error_spike_alarm() -> None:
+    """朝ダイジェストの ERROR が既存 alarm の射程に入っていること。
+
+    2026-08-25 の triage 不発が無音だった二次原因: 朝ダイジェストは専用ロググループ
+    （/teamagent/dev/morning-digest）へ出るのに、error-count フィルタは app ロググループ
+    （/teamagent/dev）にしか無かった。ログレベルを上げるだけでは通知されない。
+    metric 名と namespace を app 側と揃えることで、新規 alarm を足さずに error-spike が拾う。
+    """
+    app_filter = _block(
+        TF_ROOT / "cloudwatch.tf", "aws_cloudwatch_log_metric_filter", "error_count"
+    )
+    digest_filter = _block(
+        TF_ROOT / "morning_digest_schedule.tf",
+        "aws_cloudwatch_log_metric_filter",
+        "morning_digest_error_count",
+    )
+    assert "aws_cloudwatch_log_group.morning_digest.name" in digest_filter
+    assert '$.level = \\"error\\"' in digest_filter
+    # 集約先が app 側と一致していないと error_spike alarm は見に行かない。
+    for shared in ('name          = "ErrorCount"', "namespace     = local.metric_namespace"):
+        assert shared in app_filter
+        assert shared in digest_filter
+
+    alarm = _block(TF_ROOT / "cloudwatch.tf", "aws_cloudwatch_metric_alarm", "error_spike")
+    assert 'metric_name         = "ErrorCount"' in alarm
+    assert "namespace           = local.metric_namespace" in alarm
+
+
+def test_triage_total_mismatch_is_logged_at_error_level() -> None:
+    """tf 側の metric filter と対になる Python 側の ERROR 化が消えていないこと。
+
+    片方だけ残っても無音に戻るので、2 つを 1 つのテストで縛る（ここは tf 側の対）。
+    """
+    skill = (
+        PROJECT_ROOT / "src" / "teamagent" / "skills" / "morning_digest" / "skill.py"
+    ).read_text(encoding="utf-8")
+    assert "emit = logger.error if matched == 0 else logger.warning" in skill

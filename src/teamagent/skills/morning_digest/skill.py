@@ -719,8 +719,10 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         if matched < len(bodies):
             # matched=0 は「1 件も判定できなかったのに Bedrock 課金だけ発生した」状態。
             # プロンプト側の契約崩れ（id を書かせ損ねる等）が典型で、WARN だと埋もれる。
-            # ERROR にすると cloudwatch.tf の error_count フィルタ（$.level="error"）に乗り、
-            # 既存の error-spike alarm がそのまま鳴る＝無音の空振りを運用が検知できる。
+            # ERROR にすると morning_digest_schedule.tf の error-count フィルタ
+            # （$.level="error"）に乗り、既存の error-spike alarm がそのまま鳴る。
+            # ⚠️ 朝ダイジェストは専用ロググループなので、cloudwatch.tf の app 向けフィルタ
+            # だけでは拾われない。ERROR 化と metric filter は必ずセットで維持すること。
             emit = logger.error if matched == 0 else logger.warning
             emit(
                 "morning_digest_triage_id_mismatch",

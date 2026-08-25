@@ -109,6 +109,25 @@ resource "aws_cloudwatch_log_group" "morning_digest" {
   retention_in_days = 30
 }
 
+# 朝ダイジェストは専用ロググループへ出るため、cloudwatch.tf の error-count フィルタ
+# （/teamagent/dev = mcp 等の app ロググループのみが対象）に載っていなかった。
+# その結果 2026-08-25 の triage 不発（全4バッチで判定 0 件・Bedrock 課金だけ発生）は
+# ERROR 相当の異常でありながら誰にも通知されなかった。同じ metric 名・namespace へ
+# 流し込むことで、新規 alarm を増やさずに既存の error-spike alarm の射程へ入れる。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_error_count" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-error-count"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.level = \"error\" }"
+
+  metric_transformation {
+    name          = "ErrorCount"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
 # ---------- 以降は enable_morning_digest ゲート ----------
 
 # morning_digest は per-user OAuth で gmail/gcalendar/Bedrock を叩く。
