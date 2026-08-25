@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
-  "description": "PR2-A0.4 state rebind の対象台帳。PRODUCTION DEPLOYMENT FREEZE（2026-08-20 18:15 JST 発効）後の fresh 再解決で確定した exact live ARN。approved evidence = mcp 系 5 件は署名検証済み release receipt（digest 77d0c154…）、tiktok_acquire:25 は 2026-08-20 の human gate 明示承認（署名 receipt の代替ではなく欠落 evidence の補完・本 freeze 窓限定）。x_buzz_worker は state == live (:1) のため対象外。実行時に live 参照が本台帳と異なる場合、guard は STALE MAPPING として停止する（追随しない）。",
-  "frozen_at": "2026-08-20T09:15:00Z",
+  "description": "PR2-A0.4 state rebind #2 の対象台帳。Freeze v2（2026-08-24T08:24:04Z 発効）下で 5 target のみを state-only で付け替える。tiktok_acquire:25 と x_buzz_worker:1 は state==live のため対象外。値は Wave2 approved desired == live taskdef semantics == consumer reference の 5/5 一致を実測して確定。実行時に live 参照が本台帳と異なる場合、guard は STALE MAPPING として停止する（追随しない）。",
+  "frozen_at": "2026-08-24T08:24:04Z",
   "targets": [
     {
       "address": "aws_ecs_task_definition.mcp",
       "family": "teamagent-dev-mcp",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:86",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:88",
       "consumer": {
         "kind": "ecs-service",
         "name": "teamagent-dev-mcp",
@@ -16,7 +16,7 @@
     {
       "address": "aws_ecs_task_definition.connect_web[0]",
       "family": "teamagent-dev-connect-web",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:71",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:73",
       "consumer": {
         "kind": "ecs-service",
         "name": "teamagent-dev-connect-web",
@@ -26,7 +26,7 @@
     {
       "address": "aws_ecs_task_definition.morning_digest[0]",
       "family": "teamagent-dev-morning-digest",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:53",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:55",
       "consumer": {
         "kind": "events-rule",
         "name": "teamagent-dev-morning-digest-weekday"
@@ -35,7 +35,7 @@
     {
       "address": "aws_ecs_task_definition.canary[0]",
       "family": "teamagent-dev-canary",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:23",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:25",
       "consumer": {
         "kind": "events-rule",
         "name": "teamagent-dev-canary-hourly"
@@ -44,19 +44,10 @@
     {
       "address": "aws_ecs_task_definition.ingest[0]",
       "family": "teamagent-dev-ingest",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:55",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:57",
       "consumer": {
         "kind": "lambda-env",
         "name": "teamagent-dev-ingest-dispatch"
-      }
-    },
-    {
-      "address": "aws_ecs_task_definition.tiktok_acquire[0]",
-      "family": "teamagent-dev-tiktok-acquire",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:25",
-      "consumer": {
-        "kind": "lambda-env",
-        "name": "teamagent-dev-tiktok-acquire-dispatch"
       }
     }
   ]

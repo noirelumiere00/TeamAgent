@@ -64,30 +64,34 @@ def test_mapping_accepts_a_valid_target(tmp_path: Path) -> None:
     assert len(load_targets(_mapping_file(tmp_path, [_target()]))) == 1
 
 
-def test_production_mapping_is_frozen_with_the_approved_six_targets() -> None:
-    """freeze 後に確定した production mapping の改竄封印。
+def test_production_mapping_is_frozen_with_the_approved_five_targets() -> None:
+    """rebind #2 の mapping 改竄封印。
 
-    値の由来: PRODUCTION DEPLOYMENT FREEZE（2026-08-20 18:15 JST）後の fresh 再解決。
-    approved evidence = mcp 系 5 件は署名検証済み release receipt、tiktok_acquire:25 は
-    human gate 明示承認（freeze 窓限定）。ここを変える場合は freeze 境界の引き直しと
-    human gate の再承認が必要。
+    値の由来: Freeze v2 発効（2026-08-24T08:24:04Z）下で確定した 5 target。
+    Wave2 approved desired == live taskdef semantics == consumer reference の
+    5/5 一致を実測して確定した。tiktok_acquire:25 と x_buzz_worker:1 は
+    state == live のため **対象外**（触らない）。
+
+    rebind #1 は 6 target だったが、その後の本番デプロイ（2026-08-21 の
+    production deployment freeze 違反）で 5 件が再ドリフトし tiktok_acquire だけが
+    一致したままになった。ここを変える場合は freeze 境界の引き直しと human gate の
+    再承認が必要。
     """
     raw = json.loads(MAPPING.read_text(encoding="utf-8"))
-    assert raw["frozen_at"] == "2026-08-20T09:15:00Z"
+    assert raw["frozen_at"] == "2026-08-24T08:24:04Z"
     expected = {
-        "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:86",
-        "aws_ecs_task_definition.connect_web[0]": "teamagent-dev-connect-web:71",
-        "aws_ecs_task_definition.morning_digest[0]": "teamagent-dev-morning-digest:53",
-        "aws_ecs_task_definition.canary[0]": "teamagent-dev-canary:23",
-        "aws_ecs_task_definition.ingest[0]": "teamagent-dev-ingest:55",
-        "aws_ecs_task_definition.tiktok_acquire[0]": "teamagent-dev-tiktok-acquire:25",
+        "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:88",
+        "aws_ecs_task_definition.connect_web[0]": "teamagent-dev-connect-web:73",
+        "aws_ecs_task_definition.morning_digest[0]": "teamagent-dev-morning-digest:55",
+        "aws_ecs_task_definition.canary[0]": "teamagent-dev-canary:25",
+        "aws_ecs_task_definition.ingest[0]": "teamagent-dev-ingest:57",
     }
     actual = {t["address"]: t["target_arn"].split("/")[-1] for t in raw["targets"]}
     assert actual == expected
-    # x_buzz_worker は state == live (:1) のため対象外（含まれていたら誤り）
-    assert "aws_ecs_task_definition.x_buzz_worker" not in actual
-    # loader の厳密検証も通ること（consumer 宣言含む）
-    assert len(load_targets(MAPPING, require_targets=True)) == 6
+    # 一致済みの 2 つは対象外（含まれていたら誤り）
+    assert not any("tiktok_acquire" in a for a in actual)
+    assert not any("x_buzz_worker" in a for a in actual)
+    assert len(load_targets(MAPPING, require_targets=True)) == 5
 
 
 def test_empty_targets_are_rejected_when_required(tmp_path: Path) -> None:
