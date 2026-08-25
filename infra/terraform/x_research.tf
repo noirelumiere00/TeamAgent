@@ -47,6 +47,20 @@ variable "cost_apify_monthly_usd" {
   default     = "50"
 }
 
+variable "cost_per_user_monthly_usd" {
+  description = <<-EOT
+    1 人あたりの月次上限(USD)。cost_guard.py が provider ごとに `<provider>#<月>#<email>` 行で
+    集計する（全 provider 合算の総額ではなく provider 別の個人枠）。空=個人上限なし。
+
+    既定 15 = 全体枠 50 の 30%。狙いは「1 人の暴走で共有枠を溶かさない」ことだけで、
+    通常利用を止めないこと。実測単価は X 検索 $0.00025/件・Instagram $0.0023/件なので、
+    15 USD は Instagram で約 6,500 件・X で約 60,000 件に相当する（1 回の調査は数百件）。
+    全体枠 50 の方が先に効くので、16 名 × 15 で 240 使えるという意味にはならない。
+  EOT
+  type        = string
+  default     = "15"
+}
+
 variable "pr_research_allowed_emails" {
   description = "カタログ系スキルの段階公開 allowlist(カンマ区切りemail・空=全員許可)。stage1=小俣のみ。"
   type        = string
@@ -322,6 +336,8 @@ resource "aws_ecs_task_definition" "x_buzz_worker" {
         { name = "X_JOBS_TABLE", value = aws_dynamodb_table.x_jobs[0].name },
         { name = "COST_GUARD_TABLE", value = aws_dynamodb_table.cost_usage[0].name },
         { name = "COST_APIFY_MONTHLY_USD", value = var.cost_apify_monthly_usd },
+        # mcp 側と同値でないと、同じ人でも経路によって上限が変わる（worker だけ無制限になる）。
+        { name = "COST_PER_USER_MONTHLY_USD", value = var.cost_per_user_monthly_usd },
         { name = "TMPDIR", value = "/tmp" },
         { name = "HOME", value = "/tmp/home" },
         { name = "XDG_CACHE_HOME", value = "/tmp/.cache" },

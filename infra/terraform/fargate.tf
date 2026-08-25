@@ -660,8 +660,11 @@ resource "aws_ecs_task_definition" "mcp" {
       # web_research: 公開Webの市場リサーチ（Gemini の Google 検索グラウンディング・既定 false）。
       # Gemini 認証 env は下の enable_scrape_tools ブロックが供給する（precondition で強制）。
       { name = "USE_WEB_RESEARCH_TOOL", value = var.use_web_research_tool ? "true" : "false" },
-      # 段階公開（skill 層 gate・空=全員許可）。X系 allowlist とは別枠で運用する。
-      { name = "WEB_RESEARCH_ALLOWED_EMAILS", value = var.web_research_allowed_emails },
+      # 段階公開は完了（2026-08-25 裁定: web_research は全員開放）。空=全員許可。
+      # ⚠️ var 経由をやめて "" を直接焼く。実運用の tfvars は git 管理外の 1 本しかなく、
+      # そこに stage1 の値（小俣のみ）が残っていると開放の裁定が黙って無効化されるため、
+      # 「全員に開いている」ことを git から検証できる形に固定する。X 系 allowlist は別枠で継続。
+      { name = "WEB_RESEARCH_ALLOWED_EMAILS", value = "" },
       # v0.3 Task6: AiLaVault ディープリンク注入（既定 false）。ON で検索結果に /app#client:<名前>
       # を付与。前提: connect-web が実 app.html 配信中（healthz source=s3）。app.html 側の
       # applyHashTarget は実装済み（build_app_html.py）＝この env の ON だけで機能する。
@@ -790,6 +793,8 @@ resource "aws_ecs_task_definition" "mcp" {
       # SaaSコスト台帳（予算超過 fail-close・80%警告）。値変更は taskdef env 差し替えのみ。
       { name = "COST_GUARD_TABLE", value = aws_dynamodb_table.cost_usage[0].name },
       { name = "COST_APIFY_MONTHLY_USD", value = var.cost_apify_monthly_usd },
+      # 個人月次上限（未設定=個人上限なし＝1 人で全体枠を溶かせる）。16 名展開の前提として入れる。
+      { name = "COST_PER_USER_MONTHLY_USD", value = var.cost_per_user_monthly_usd },
       # 段階公開（skill層 gate・空=全員許可）。stage1=小俣のみ→数名→空。CLI taskdef 差替で遷移。
       { name = "X_RESEARCH_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },
       { name = "SEARCH_SURFACE_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },

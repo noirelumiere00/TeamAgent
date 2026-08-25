@@ -1561,3 +1561,124 @@ def test_teamagent_codebuild_contract_wiring_follows_checked_in_bytes() -> None:
     for block in (launcher_core, launcher_start):
         assert runtime_sha256 not in block
         assert release_sha256 not in block
+
+
+# ── 幹部公開の前提（2026-08-25 裁定）の静的契約 ────────────────────────────────
+
+CANONICAL_ALARM_ACTIONS = (
+    "alarm_actions      = [aws_sns_topic.alarms.arn]",
+    "ok_actions         = [aws_sns_topic.alarms.arn]",
+)
+
+
+def test_web_research_is_open_to_everyone_from_git() -> None:
+    """web_research の allowlist が空（=全員）であることを git 側で固定する。
+
+    実運用の tfvars は git 管理外の 1 本しか無く、そこに stage1 の値が残っていると
+    「全員開放」の裁定が黙って無効化される。var 参照をやめた形を回帰で固定する。
+    """
+    mcp = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "mcp")
+    assert mcp.count('{ name = "WEB_RESEARCH_ALLOWED_EMAILS", value = "" },') == 1
+    assert "var.web_research_allowed_emails" not in mcp
+    # X 系の段階公開は別枠で継続する（巻き添えで開けていないこと）。
+    assert '{ name = "X_RESEARCH_ALLOWED_EMAILS", value = var.pr_research_allowed_emails },' in mcp
+
+
+@pytest.mark.parametrize(
+    ("filename", "task_definition"),
+    [("fargate.tf", "mcp"), ("x_research.tf", "x_buzz_worker")],
+)
+def test_per_user_cost_cap_reaches_every_apify_consumer(
+    filename: str,
+    task_definition: str,
+) -> None:
+    """個人月次上限は Apify を叩ける全経路へ同値で入れる。
+
+    片方だけだと「mcp 経由は上限あり・worker 経由は無制限」という抜け道になる。
+    """
+    block = _block(TF_ROOT / filename, "aws_ecs_task_definition", task_definition)
+    assert "COST_APIFY_MONTHLY_USD" in block, "前提: この taskdef は Apify 消費者である"
+    assert (
+        block.count('name = "COST_PER_USER_MONTHLY_USD", value = var.cost_per_user_monthly_usd')
+        == 1
+    )
+
+
+def test_per_user_cost_cap_has_a_real_default() -> None:
+    """既定が空だと「個人上限なし」に戻る（cost_guard は空 env をガード無効として扱う）。"""
+    text = (TF_ROOT / "x_research.tf").read_text(encoding="utf-8")
+    match = re.search(
+        r'variable "cost_per_user_monthly_usd" \{.*?default\s*=\s*"([^"]*)"',
+        text,
+        re.DOTALL,
+    )
+    assert match is not None
+    per_user = float(match.group(1))
+    assert per_user > 0
+    global_match = re.search(
+        r'variable "cost_apify_monthly_usd" \{.*?default\s*=\s*"([^"]*)"',
+        text,
+        re.DOTALL,
+    )
+    assert global_match is not None
+    # 個人枠が全体枠以上だと「1 人で全部使える」＝上限として意味を成さない。
+    assert per_user < float(global_match.group(1))
+
+
+def test_saturation_alarms_exist_and_use_the_canonical_topic() -> None:
+    """タスク停止の手前（メモリ逼迫）と RDS のクレジット枯渇を通知経路ごと固定する。
+
+    通知先が canonical topic でない alarm は runtime guard の alarm delivery 契約で
+    plan ごと落ちる（legacy topic 復活の防止）。
+    """
+    memory = _block(
+        TF_ROOT / "runtime_monitoring.tf", "aws_cloudwatch_metric_alarm", "ecs_service_memory_high"
+    )
+    assert 'namespace           = "AWS/ECS"' in memory
+    assert 'metric_name         = "MemoryUtilization"' in memory
+    assert "for_each = local.monitored_ecs_services" in memory
+    # 欠測で鳴らさない（「居ない」は running-task-missing の担当・二重通知にしない）。
+    assert 'treat_missing_data = "notBreaching"' in memory
+
+    credits = _block(
+        TF_ROOT / "runtime_monitoring.tf",
+        "aws_cloudwatch_metric_alarm",
+        "rds_cpu_credit_balance_low",
+    )
+    assert 'namespace           = "AWS/RDS"' in credits
+    assert 'metric_name         = "CPUCreditBalance"' in credits
+    assert 'comparison_operator = "LessThanThreshold"' in credits
+    assert "DBInstanceIdentifier = aws_db_instance.main.identifier" in credits
+
+    for block in (memory, credits):
+        for action in CANONICAL_ALARM_ACTIONS:
+            assert action in block
+        assert "prevent_destroy = true" in block
+
+
+def test_canary_failure_alarm_stays_notbreaching_and_liveness_is_the_heartbeat() -> None:
+    """カナリアの 2 本立てを固定する（片方だけ見た「修正」を防ぐ）。
+
+    canary_unhealthy を breaching へ変えると、カナリアを止めている間ずっと誤報し続ける。
+    「走っていない」を捕まえるのは breaching 側の heartbeat_missing の役目。
+    """
+    unhealthy = _block(
+        TF_ROOT / "canary_schedule.tf", "aws_cloudwatch_metric_alarm", "canary_unhealthy"
+    )
+    heartbeat = _block(
+        TF_ROOT / "canary_schedule.tf", "aws_cloudwatch_metric_alarm", "canary_heartbeat_missing"
+    )
+    assert 'treat_missing_data  = "notBreaching"' in unhealthy
+    assert 'comparison_operator = "GreaterThanOrEqualToThreshold"' in unhealthy
+    assert 'treat_missing_data  = "breaching"' in heartbeat
+    assert 'comparison_operator = "LessThanThreshold"' in heartbeat
+    # 有効化は migration が握る。ここの既定値を true にして回避してはいけない。
+    text = (TF_ROOT / "canary_schedule.tf").read_text(encoding="utf-8")
+    match = re.search(
+        r'variable "canary_rule_enabled" \{.*?default\s*=\s*(\w+)',
+        text,
+        re.DOTALL,
+    )
+    assert match is not None and match.group(1) == "false"
+    migrations = json.loads(MIGRATIONS.read_text(encoding="utf-8"))["migrations"]
+    assert migrations["2026-07-wolfi-runtime-v1"]["to"]["rule_states"]["canary"] == "DISABLED"

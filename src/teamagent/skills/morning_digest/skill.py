@@ -158,8 +158,10 @@ _TRIAGE_SYSTEM_PROMPT = """\
   場合のみ true。それ以外 false。
 
 【出力形式（JSON 配列・1 スレッド 1 オブジェクト・入力順・要素数も入力と同じ・ネスト禁止）】
+※ "id" は必須キー。対応する <<<MAIL id=...>>> の値をそのまま複写する（省略した要素は破棄される）。
 [
-  {"importance":"high|medium|low","summary":"…","deadline":"… or null","ask":"…","next_step":"…",
+  {"id":"<対応する MAIL id をそのまま複写>",
+   "importance":"high|medium|low","summary":"…","deadline":"… or null","ask":"…","next_step":"…",
    "meeting_start":"… or null","meeting_end":"… or null","meeting_title":"…",
    "scheduling_request":false},
   ...
@@ -706,19 +708,29 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # 別メールへ付け替える（実害: 落とし物メールの封筒に MTG メモの中身が載った）。
         # id 不一致の要素は「要約なし」で実メタデータのみ表示に落とす（捏造より欠落を選ぶ）。
         ids = [_short_hash(offset + i) for i in range(len(bodies))]
-        by_id = {
-            str(obj.get("id") or ""): obj
-            for obj in parsed
-            if isinstance(obj, dict) and obj.get("id")
-        }
+        by_id: dict[str, dict[str, Any]] = {}
+        for obj in parsed:
+            if not isinstance(obj, dict):
+                continue
+            key = _normalize_triage_id(obj.get("id"))
+            if key:
+                by_id.setdefault(key, obj)
         matched = sum(1 for mail_id in ids if mail_id in by_id)
         if matched < len(bodies):
-            logger.warning(
+            # matched=0 は「1 件も判定できなかったのに Bedrock 課金だけ発生した」状態。
+            # プロンプト側の契約崩れ（id を書かせ損ねる等）が典型で、WARN だと埋もれる。
+            # ERROR にすると cloudwatch.tf の error_count フィルタ（$.level="error"）に乗り、
+            # 既存の error-spike alarm がそのまま鳴る＝無音の空振りを運用が検知できる。
+            emit = logger.error if matched == 0 else logger.warning
+            emit(
                 "morning_digest_triage_id_mismatch",
                 request_id=ctx.request_id,
                 offset=offset,
                 matched=matched,
                 expected=len(bodies),
+                parsed=len(parsed),
+                with_id=len(by_id),
+                cost_usd=round(cost, 6),
             )
         out: list[dict[str, Any]] = []
         for i in range(len(bodies)):
@@ -1312,6 +1324,18 @@ def _mask_email(email: str) -> str:
 
 def _short_hash(n: int) -> str:
     return hashlib.sha256(str(n).encode()).hexdigest()[:8]
+
+
+def _normalize_triage_id(raw: Any) -> str:
+    """LLM が複写した id の表記ゆれだけを吸収する（同一性の判定は変えない）。
+
+    _short_hash は小文字 hex なので、前後空白・大文字化・引用符の混入で結合が落ちるのは
+    純粋な損。逆に「別の id」を同じものへ寄せる正規化はしない（混同型ハルシネーション対策の
+    id 結合そのものを緩めないため）。
+    """
+    if not isinstance(raw, str):
+        return ""
+    return raw.strip().strip("\"'").lower()
 
 
 def _gmail_thread_url(thread_id: str) -> str:

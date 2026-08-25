@@ -19,11 +19,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest import calendar_window as calwin
 from teamagent.skills.morning_digest.schema import MorningDigestInput
 from teamagent.skills.morning_digest.skill import (
+    _TRIAGE_SYSTEM_PROMPT,
     MorningDigestSkill,
     _dedupe_refs_by_thread,
     _display_counterpart,
@@ -290,6 +292,116 @@ def test_triage_dropped_element_degrades_to_metadata_only(fake_msgs) -> None:
     assert by_subject["Re: 契約書"] == "契約書の差し戻し対応依頼"
     # 省略された「業界ニュース」へ隣の要約（資料確認）が流れ込まないこと
     assert by_subject["FYI: 業界ニュース"] == ""  # 欠落＝空要約（メタデータのみ）
+    assert by_subject["確認のお願い"] == "資料確認の依頼"
+
+
+# ── 2026-08-25 本番不発（triage_id_mismatch expected=8 matched=0）の回帰群 ──────────
+
+
+def test_triage_prompt_output_template_declares_every_key_the_parser_reads() -> None:
+    """【出力形式】の JSON 雛形に、_triage_batch_call が読むキーが全て載っていること。
+
+    真因（2026-08-25 本番・全4バッチ matched=0）: f60b1c6 が id 結合を導入した際、
+    散文の規則には「id を複写せよ」を足したが、LLM が実際に写す【出力形式】の雛形は
+    9 キーのまま（id 無し）だった。LLM は雛形どおり id 抜きで返すため by_id が空になり、
+    parsed 件数は合っているのに matched=0＝全件が空要約へ縮退した（課金だけ発生）。
+    散文と雛形の乖離は目視では通ってしまうので、機械で固定する。
+    """
+    template = _TRIAGE_SYSTEM_PROMPT.split("【出力形式", 1)[1]
+    for key in (
+        "id",
+        "importance",
+        "summary",
+        "deadline",
+        "ask",
+        "next_step",
+        "meeting_start",
+        "meeting_end",
+        "meeting_title",
+        "scheduling_request",
+    ):
+        assert f'"{key}"' in template, f"出力形式の雛形に {key} が無い（LLM は雛形どおり返す）"
+
+
+@pytest.fixture
+def triage_json_without_id() -> str:
+    """本番で実際に返っていた形（雛形どおり・順序も内容も正しいが id が無い）。"""
+    return (
+        '[{"importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"importance": "low", "summary": "業界ニュースの共有"},'
+        ' {"importance": "medium", "summary": "資料確認の依頼"}]'
+    )
+
+
+def test_triage_without_id_costs_money_but_yields_zero_judgement(
+    fake_msgs, triage_json_without_id
+) -> None:
+    """本番症状の再現: 課金は発生するのに判定 0 件（要約空・全 medium・下書き 0）。
+
+    id が無い応答を捏造で救わない（隣の要約を付けない）ことも同時に固定する。
+    """
+    out = _blend_skill(fake_msgs, triage_json_without_id).run(
+        MorningDigestInput(max_drafts=3), _blend_ctx()
+    )
+    assert [m.summary for m in out.mail_digest] == ["", "", ""]
+    assert {m.importance for m in out.mail_digest} == {"medium"}
+    assert not any(m.has_draft for m in out.mail_digest)
+    # 「判定 0 件なのに Bedrock 課金だけ発生した」ことを金額で固定する。
+    assert out.total_cost_usd > 0.0
+
+
+def test_triage_total_id_mismatch_logs_error_so_the_alarm_can_fire(
+    fake_msgs, triage_json_without_id
+) -> None:
+    """matched=0 は ERROR で出す（cloudwatch.tf の $.level="error" → error-spike alarm）。
+
+    WARN のままだと「毎朝課金だけして判定 0 件」が無音で続く。
+    """
+    with capture_logs() as logs:
+        _blend_skill(fake_msgs, triage_json_without_id).run(
+            MorningDigestInput(max_drafts=0), _blend_ctx()
+        )
+    records = [r for r in logs if r["event"] == "morning_digest_triage_id_mismatch"]
+    assert len(records) == 1
+    record = records[0]
+    assert record["log_level"] == "error"
+    assert record["matched"] == 0
+    assert record["expected"] == 3
+    # parsed は合っているのに with_id=0 ＝ 打ち切りではなく契約崩れ、と切り分けられること。
+    assert record["parsed"] == 3
+    assert record["with_id"] == 0
+    assert record["cost_usd"] > 0.0
+
+
+def test_triage_partial_id_mismatch_stays_warning(fake_msgs) -> None:
+    """一部だけ落ちた場合は WARN のまま（ERROR 化を無差別にしない＝alarm を汚さない）。"""
+    partial = (
+        '[{"id": "5feceb66", "importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"id": "6b86b273", "importance": "low", "summary": "業界ニュースの共有"}]'
+    )
+    with capture_logs() as logs:
+        _blend_skill(fake_msgs, partial).run(MorningDigestInput(max_drafts=0), _blend_ctx())
+    records = [r for r in logs if r["event"] == "morning_digest_triage_id_mismatch"]
+    assert len(records) == 1
+    assert records[0]["log_level"] == "warning"
+    assert records[0]["matched"] == 2
+
+
+def test_triage_id_join_tolerates_case_and_quote_noise(fake_msgs) -> None:
+    """複写時の表記ゆれ（大文字化・前後空白・引用符）で結合を落とさない。
+
+    _short_hash は小文字 hex なので、これらを弾くのは純粋な取りこぼし。
+    別 id へ寄せる正規化はしない（混同対策の id 結合自体は緩めない）。
+    """
+    noisy = (
+        '[{"id": " 5FECEB66 ", "importance": "high", "summary": "契約書の差し戻し対応依頼"},'
+        ' {"id": "\'6b86b273\'", "importance": "low", "summary": "業界ニュースの共有"},'
+        ' {"id": "D4735E3A", "importance": "medium", "summary": "資料確認の依頼"}]'
+    )
+    out = _blend_skill(fake_msgs, noisy).run(MorningDigestInput(max_drafts=0), _blend_ctx())
+    by_subject = {m.subject_display: m.summary for m in out.mail_digest}
+    assert by_subject["Re: 契約書"] == "契約書の差し戻し対応依頼"
+    assert by_subject["FYI: 業界ニュース"] == "業界ニュースの共有"
     assert by_subject["確認のお願い"] == "資料確認の依頼"
 
 

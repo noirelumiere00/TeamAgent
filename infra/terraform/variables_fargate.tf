@@ -209,7 +209,7 @@ variable "use_video_capture_tool" {
 }
 
 variable "web_research_allowed_emails" {
-  description = "web_research の段階公開 allowlist（カンマ区切りの会社メール）。空=全員許可。stage1=小俣のみ→数名→空。値変更は taskdef env 差し替えのみで反映可（再ビルド不要）。"
+  description = "【退役・2026-08-25 裁定で全員開放】web_research の段階公開 allowlist だったもの。stage1=小俣のみ→数名→空 を経て空（全員）で確定したため、fargate.tf は本変数を参照せず WEB_RESEARCH_ALLOWED_EMAILS へ \"\" を直接焼く。宣言だけ残すのは、git 管理外の実 tfvars に本キーが残っていても `-var-file` が undeclared variable で警告/失敗しないようにするため。再び絞る場合は変数を復活させるのではなく、fargate.tf の値を明示的に変更する（誰に開いているかが git で読めることを優先する）。"
   type        = string
   default     = ""
 }

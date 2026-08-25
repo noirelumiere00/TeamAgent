@@ -47,6 +47,42 @@ resource "aws_cloudwatch_metric_alarm" "ecs_running_tasks" {
   }
 }
 
+# タスク停止の検知は上の running-task-missing が担う（RunningTaskCount<1・breaching）。
+# ここは「停止する前」＝メモリ逼迫（OOM で killed になる直前）を捕まえる。OOM kill 後は
+# コンテナのログが残らないため、アプリログの metric filter では原理的に取れない。
+# AWS/ECS MemoryUtilization は task definition の memory に対する % なので、
+# taskdef の memory を変えた時に閾値の意味が変わらない（絶対値で書かない理由）。
+resource "aws_cloudwatch_metric_alarm" "ecs_service_memory_high" {
+  for_each = local.monitored_ecs_services
+
+  alarm_name          = "${var.project_name}-${var.environment}-${replace(each.key, "_", "-")}-memory-high"
+  alarm_description   = "${each.value} sustained memory utilisation above the OOM safety margin"
+  namespace           = "AWS/ECS"
+  metric_name         = "MemoryUtilization"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  # 85%。瞬間的なピークではなく「10分以上張り付いている」状態だけを通知する。
+  threshold           = 85
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  # 欠測は「サービスが居ない」＝running-task-missing の担当。ここで二重に鳴らさない。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = each.value
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
 resource "aws_cloudwatch_metric_alarm" "connect_api_5xx" {
   alarm_name          = "${var.project_name}-${var.environment}-connect-api-5xx"
   alarm_description   = "Connect HTTP API returned one or more 5xx responses in five minutes"
@@ -142,6 +178,38 @@ resource "aws_cloudwatch_metric_alarm" "rds_database_connections_high" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
   ok_actions          = [aws_sns_topic.alarms.arn]
+
+  dimensions = {
+    DBInstanceIdentifier = aws_db_instance.main.identifier
+  }
+
+  depends_on = [terraform_data.runtime_guard]
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# db.t4g.micro は burstable＝CPU クレジットを使い切ると baseline(10%) まで絞られる。
+# その時 CPUUtilization は「下がって」見えるので、CPU 系の閾値監視では原理的に検知できない。
+# 検索/ingest が体感で遅くなるだけの無音劣化になるため、残高そのものを見る。
+resource "aws_cloudwatch_metric_alarm" "rds_cpu_credit_balance_low" {
+  alarm_name          = "${var.project_name}-${var.environment}-rds-cpu-credit-balance-low"
+  alarm_description   = "RDS burstable CPU credits are close to exhaustion (throttling to baseline)"
+  namespace           = "AWS/RDS"
+  metric_name         = "CPUCreditBalance"
+  statistic           = "Minimum"
+  period              = 300
+  evaluation_periods  = 3
+  datapoints_to_alarm = 2
+  # t4g.micro は 12 credit/h 獲得・上限 288。30 は「約 2.5 時間ぶんしか残っていない」水準。
+  threshold           = 30
+  comparison_operator = "LessThanThreshold"
+  # 非 burstable クラス（db.r7g 等）へ変更すると本メトリクスは発行されなくなる。
+  # そこで永久 ALARM にしないため notBreaching。instance class 変更時は本 alarm を再裁定する。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
 
   dimensions = {
     DBInstanceIdentifier = aws_db_instance.main.identifier

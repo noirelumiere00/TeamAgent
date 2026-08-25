@@ -40,6 +40,16 @@ resource "aws_cloudwatch_log_group" "canary" {
 }
 
 # ---------- カナリア失敗 alarm（ゲート外・データが無ければ notBreaching） ----------
+# ⚠️ 2 本立てで役割が違う。片方だけ見て「notBreaching だから永久に鳴らない」と直さないこと。
+#   canary_unhealthy        = 失敗の“計数”。欠測は失敗ではないので notBreaching が正しい。
+#                             breaching にすると canary を止めている間ずっと誤報し続ける。
+#   canary_heartbeat_missing = 生存確認。こちらが breaching で「走っていない」を捕まえる。
+# したがって「カナリアが止まっているのに無音」は alarm 設定の誤りではなく、
+# canary_rule_enabled=false（rule が DISABLED）そのものが原因。rule の状態は
+# infra/deploy/terraform_runtime_migrations.json が握っており
+# （2026-07-wolfi-runtime-v1.to.rule_states.canary = "DISABLED" →
+#   2026-07-enable-ingest-canary-v1 で ENABLED へ）、ここの var 既定値を書き換えて
+# 有効化してはいけない（migration の exact contract と食い違って plan が拒否される）。
 resource "aws_cloudwatch_log_metric_filter" "canary_unhealthy" {
   name           = "${var.project_name}-${var.environment}-canary-unhealthy"
   log_group_name = aws_cloudwatch_log_group.canary.name
