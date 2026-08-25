@@ -721,6 +721,25 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
   # 書き込みは boundary / control-plane の Deny 群がそのまま塞ぐ。
   # ※コメントに Terraform リソースアドレスを書かないこと: bootstrap closure テストが
   #   コメント本文も参照として走査するため、偽のグラフ辺が入る（2026-08-24 実測）。
+  # PR2-A0.2.2c: adopt-plan が live snapshot を取る際に読む connect /app オブジェクト。
+  # A0.3.2 で adopt-plan が normal guarded plan と同じ snapshot 経路を共有するように
+  # なった帰結で新たに必要になった read（A0.2.2a/b の census は 2026-08-20 の refresh
+  # ログに基づいており、その時点の adopt-plan はこの経路を通っていなかった）。
+  # 2026-08-25 の preflight で HeadObject 403 を実測し、simulate で不足 3 action を確定。
+  # GetObjectVersion は既に別 statement で許可済みなので追加しない。
+  # scope は **exact object ARN 1 本のみ**（prefix wildcard 化は禁止）。
+  statement {
+    sid = "ReadExactConnectAppSnapshotObject"
+    actions = [
+      "s3:GetObject",
+      "s3:GetObjectRetention",
+      "s3:GetObjectTagging",
+    ]
+    resources = [
+      "arn:aws:s3:::${var.project_name}-${var.environment}-raw-files/codebuild/connect-web-app.html",
+    ]
+  }
+
   statement {
     sid       = "ReadExactInstanceTypeCatalog"
     actions   = ["ec2:DescribeInstanceTypes"]
