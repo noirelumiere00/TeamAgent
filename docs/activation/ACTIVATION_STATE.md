@@ -303,6 +303,63 @@ read-only 2 action の追加のみ。write は 1 つも要らない。
 
 代替案（guard から concurrency 検査を外す）は**既存の security control を弱める**ため推奨しない。
 
+## 🛑 blocker 4: live の HMAC selector が repo に存在しない（2026-08-25・要裁定）
+
+A0.2.2d の apply で IAM の壁は解消し、`snapshot_live()` は**最後まで完走**するようになった
+（`live-before.json` 生成まで到達）。その直後の HMAC 契約検査で停止する。
+
+```
+deployed HMAC primary selector is outside the exact contract
+★ 実デプロイHMAC metadataがpurpose consumer間で不整合です
+```
+
+### 実測
+
+live の 3 consumer（mcp / connect_web / morning_digest）の taskdef が持つ値:
+
+| 変数 | live の値（suffix 伏せ） | 契約 |
+|---|---|---|
+| `MAIL_ACTION_HMAC_SECRET` | `teamagent/dev/database-url-XXXXXX` | ✅ 契約内（`database-url` は許容） |
+| `REPORT_LINK_HMAC_SECRET` | `teamagent/dev/**report-link-hmac**-XXXXXX` | ❌ 契約は `teamagent/dev/**hmac/report-link**-XXXXXX` |
+
+名前の並びが違う（`hmac/report-link` ではなく `report-link-hmac`）。
+
+### repo との突合
+
+| 観点 | 結果 |
+|---|---|
+| repo 内で `hmac/report-link` を参照 | **10 件**（`hmac_rotation.tf` の変数 validation・guard の契約パターン） |
+| repo 内で `report-link-hmac` を参照 | **0 件** |
+| git 全履歴で `report-link-hmac` が存在した commit | **0 件** |
+| Secrets Manager の実体 | `teamagent/dev/report-link-hmac`（作成 2026-08-05）。`teamagent/dev/hmac/report-link` は**存在しない** |
+| tfvars の `report_link_hmac_secret_arn` / `mail_action_hmac_secret_arn` | **未設定**（＝ tf 的には valueFrom が空になる） |
+
+### いつ入ったか
+
+3 consumer の taskdef 登録時刻は**すべて記録済み違反 window の中**:
+
+| taskdef | registeredAt (JST) |
+|---|---|
+| `teamagent-dev-mcp:88` | 2026-08-21 17:50:28 |
+| `teamagent-dev-connect-web:73` | 2026-08-21 17:50:31 |
+| `teamagent-dev-morning-digest:55` | 2026-08-21 17:54:08 |
+
+記録済み違反 window = `2026-08-21T08:45:58Z - 08:54:15Z`（JST 17:45:58 - 17:54:15）＝
+`production_deployment_freeze.violations` に B3 再発として残っている out-of-band デプロイ。
+
+### 判定: approved desired ≠ live（STOP）
+
+live は **repo に一度も存在しない secret selector** を参照している。
+これは ingest の件（live == desired で guard だけが stale）とは**性質が違う**。
+
+さらに **rebind #2 は state をこの taskdef revision 群（mcp:88 等）へ束縛済み**である点に注意。
+
+### やってはいけないこと
+
+guard の契約パターンに `report-link-hmac` を足して緑にするのは、
+「モデルを実態に合わせて security control を緩める」方向であり、
+案 A/案 B の裁定で否定された筋。**どちらが正か**の裁定が先。
+
 ## Known risks
 
 | リスク | 状態 |
