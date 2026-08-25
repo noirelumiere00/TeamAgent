@@ -94,7 +94,7 @@ OpenClaw のエージェントから実際に呼べるようにするには、�
 | env | 誰が設定 | 値 | 備考 |
 | --- | --- | --- | --- |
 | `USE_WEB_RESEARCH_TOOL` | tf `use_web_research_tool` | `true` | 既定 false。ON でツールが MCP に出る |
-| `WEB_RESEARCH_ALLOWED_EMAILS` | tf `web_research_allowed_emails` | stage1 は小俣のみ→数名→空 | 空=全員。taskdef 差替のみで遷移可 |
+| `WEB_RESEARCH_ALLOWED_EMAILS` | tf `fargate.tf` に `""` を直接記述 | `""`（=全員） | 段階公開は 2026-08-25 の裁定で終了（全員開放）。var `web_research_allowed_emails` は退役し taskdef からは参照しない（git 管理外の tfvars に stage1 の値が残っていても開放が無効化されないようにするため）。再び絞る場合は fargate.tf の値を明示的に変更する |
 | `WEB_RESEARCH_DEADLINE_S` | 任意（未設定=60） | 例 `60` | 1 試行あたりの上限秒。**2 試行ぶんが OpenClaw のターン制限 ~181s の内側に収まる値にすること** |
 | `GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS` | 任意（未設定=2） | 例 `2` | 上げると総和が伸びる。上の制約とセットで見る |
 | `GEMINI_USE_VERTEX` | tf（既存・`enable_scrape_tools` ブロック） | `true` | 既に本番 mcp に入っている |
