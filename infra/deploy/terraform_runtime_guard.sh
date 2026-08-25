@@ -2118,12 +2118,15 @@ build_sync_image_deployment_consumer_manifest() {
           task_definition_arn:$live[0].targets.canary.task_definition
         }
       }
+      # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+      # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
       elif $id == "ingest" then {
         image:$live[0].taskdefs.ingest.image,
         task_definition_arn:$live[0].taskdefs.ingest.arn,
         activation:{
           state:$live[0].rules.ingest.critical.state,
-          task_definition_arn:$live[0].targets.ingest.task_definition
+          task_definition_arn:
+            $live[0].rule_dispatchers.ingest.task_definition
         }
       }
       elif $id == "morning_digest" then {
@@ -3419,7 +3422,10 @@ validate_migration_source() {
         morning: $live.rules.morning.critical.state,
         canary: $live.rules.canary.critical.state
       } == $m.from.rule_states and
-      $live.targets.ingest.task_definition == $live.taskdefs.ingest.arn and
+      # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+      # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+      $live.rule_dispatchers.ingest.task_definition ==
+        $live.taskdefs.ingest.arn and
       $live.targets.canary.task_definition == $live.taskdefs.canary.arn and
       api_hardened($live.api_gateway) == $m.from.api_gateway and
       {
@@ -3659,6 +3665,9 @@ snapshot_live() {
   local connect_service="${PROJECT}-${ENVIRONMENT}-connect-web"
   local openclaw_service="${PROJECT}-${ENVIRONMENT}-openclaw"
   local ingest_rule="${PROJECT}-${ENVIRONMENT}-ingest-weekly"
+  # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+  # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+  local ingest_dispatch_function="${PROJECT}-${ENVIRONMENT}-ingest-dispatch"
   local morning_rule="${PROJECT}-${ENVIRONMENT}-morning-digest-weekday"
   local canary_rule="${PROJECT}-${ENVIRONMENT}-canary-hourly"
   local tiktok_function="${PROJECT}-${ENVIRONMENT}-tiktok-acquire-dispatch"
@@ -4164,11 +4173,29 @@ snapshot_live() {
 
   local ingest_arn morning_arn canary_arn
   local ingest_state morning_state canary_state
+
+  # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+  # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+  local expected_ingest_dispatch_arn
+  expected_ingest_dispatch_arn="arn:aws:lambda:${REGION}:${EXPECTED_ACCOUNT_ID}:function:${ingest_dispatch_function}"
+  aws_cli events describe-rule --name "$ingest_rule" \
+    --output json > "$dir/ingest-rule.json"
+  aws_cli events list-targets-by-rule --rule "$ingest_rule" \
+    --output json > "$dir/ingest-targets.json"
+  jq -e --arg function_arn "$expected_ingest_dispatch_arn" '
+    (.Targets | length) == 1 and
+    .Targets[0].Arn == $function_arn and
+    .Targets[0].EcsParameters == null
+  ' "$dir/ingest-targets.json" >/dev/null ||
+    die "$ingest_rule の dispatch Lambda target が一意ではありません"
+  ingest_state="$(jq -er '
+    .State | select(. == "ENABLED" or . == "DISABLED")
+  ' "$dir/ingest-rule.json")" || die "$ingest_rule の state が不正です"
+
   local rule
-  for rule in "$ingest_rule" "$morning_rule" "$canary_rule"; do
+  for rule in "$morning_rule" "$canary_rule"; do
     local key
     case "$rule" in
-      "$ingest_rule") key="ingest" ;;
       "$morning_rule") key="morning" ;;
       "$canary_rule") key="canary" ;;
     esac
@@ -4183,11 +4210,34 @@ snapshot_live() {
     rule_state="$(jq -er '.State | select(. == "ENABLED" or . == "DISABLED")' "$dir/${key}-rule.json")" \
       || die "$rule の state が不正です"
     case "$key" in
-      ingest) ingest_arn="$target_arn"; ingest_state="$rule_state" ;;
       morning) morning_arn="$target_arn"; morning_state="$rule_state" ;;
       canary) canary_arn="$target_arn"; canary_state="$rule_state" ;;
     esac
   done
+
+  # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+  # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+  aws_cli lambda get-function-configuration \
+    --function-name "$ingest_dispatch_function" \
+    --output json > "$dir/ingest-lambda.json"
+  jq -e --arg name "$ingest_dispatch_function" '
+    .FunctionName == $name and .State == "Active" and
+    .LastUpdateStatus == "Successful" and
+    (.Environment.Variables | type == "object") and
+    (.Environment.Variables.TASKDEF_ARN | type == "string")
+  ' "$dir/ingest-lambda.json" >/dev/null ||
+    die "$ingest_dispatch_function が安定稼働中ではありません"
+  local ingest_function_arn
+  ingest_function_arn="$(jq -er '
+    .FunctionArn | select(type == "string")
+  ' "$dir/ingest-lambda.json")"
+  aws_cli lambda list-tags --resource "$ingest_function_arn" \
+    --output json > "$dir/ingest-lambda-tags.json"
+  ingest_arn="$(jq -er '
+    .Environment.Variables.TASKDEF_ARN
+  ' "$dir/ingest-lambda.json")"
+  [[ "$ingest_arn" =~ ^arn:aws:ecs:${REGION}:${EXPECTED_ACCOUNT_ID}:task-definition/${PROJECT}-${ENVIRONMENT}-ingest:[0-9]+$ ]] ||
+    die "$ingest_dispatch_function のTASKDEF_ARNが期待familyのrevision pinではありません"
 
   aws_cli ecs list-tasks \
     --cluster "$cluster" \
@@ -4308,6 +4358,8 @@ snapshot_live() {
     --slurpfile canary "$dir/canary.json" \
     --slurpfile tiktok "$dir/tiktok.json" \
     --slurpfile x "$dir/x.json" \
+    --slurpfile ingest_lambda "$dir/ingest-lambda.json" \
+    --slurpfile ingest_lambda_tags "$dir/ingest-lambda-tags.json" \
     --slurpfile tiktok_lambda "$dir/tiktok-lambda.json" \
     --slurpfile tiktok_lambda_concurrency "$dir/tiktok-lambda-concurrency.json" \
     --slurpfile tiktok_lambda_tags "$dir/tiktok-lambda-tags.json" \
@@ -4383,6 +4435,22 @@ snapshot_live() {
           static_environment: ($lambda.Environment.Variables | del(.TASKDEF_ARN)),
           code_sha256: $lambda.CodeSha256,
           critical: ($lambda | guard_lambda_from_aws($concurrency[0]; $tags[0]))
+        };
+      # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+      # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+      def rule_dispatcher($doc; $tags):
+        $doc[0] as $lambda | {
+          task_definition: $lambda.Environment.Variables.TASKDEF_ARN,
+          static_environment: ($lambda.Environment.Variables | del(.TASKDEF_ARN)),
+          code_sha256: $lambda.CodeSha256,
+          critical: {
+            function_name: $lambda.FunctionName,
+            function_arn: $lambda.FunctionArn,
+            state: $lambda.State,
+            last_update_status: $lambda.LastUpdateStatus,
+            environment: $lambda.Environment.Variables,
+            tags: ($tags[0].Tags // {})
+          }
         };
       def event_mapping($doc; $tags):
         $doc[0].EventSourceMappings[0] as $mapping | {
@@ -4561,6 +4629,11 @@ snapshot_live() {
             .taskArn
           ] | sort)
         },
+        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        rule_dispatchers: {
+          ingest: rule_dispatcher($ingest_lambda; $ingest_lambda_tags)
+        },
         dispatchers: {
           tiktok: dispatcher($tiktok_lambda; $tiktok_lambda_concurrency; $tiktok_lambda_tags),
           x_buzz: dispatcher($x_lambda; $x_lambda_concurrency; $x_lambda_tags)
@@ -4715,9 +4788,18 @@ snapshot_live() {
   local openclaw_image="${account_id}.dkr.ecr.${REGION}.amazonaws.com/teamagent-openclaw"
   [[ "$(jq -er '.taskdefs.openclaw.image' "$output")" == "$openclaw_image@sha256:"* ]] ||
     die "OpenClaw live imageは同一account/regionの専用ECR digestである必要があります"
-  jq -e '
+  # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+  # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+  jq -L "$GUARD_JQ_DIR" -e '
+    include "terraform_runtime_guard";
     .taskdefs.connect_web.env.CONNECT_APP_HTML_S3_URI ==
       "s3://teamagent-dev-raw-files/codebuild/connect-web-app.html" and
+    .rule_dispatchers.ingest.task_definition == .taskdefs.ingest.arn and
+    .targets.ingest.critical.arn ==
+      .rule_dispatchers.ingest.critical.function_arn and
+    .rule_dispatchers.ingest.critical.state == "Active" and
+    .targets.ingest.critical.ecs_target ==
+      ({} | guard_norm_aws_ecs_target) and
     .dispatchers.tiktok.task_definition == .taskdefs.tiktok.arn and
     .dispatchers.x_buzz.task_definition == .taskdefs.x_buzz.arn and
     (.event_mappings.tiktok.critical.enabled | type) == "boolean" and
@@ -6192,13 +6274,32 @@ validate_runtime_links() {
       --arg address "$address" --arg component "$component" \
       --slurpfile live "$snapshot" '
       include "terraform_runtime_guard";
-      .resource_changes[] | select(.address == $address) as $change |
-      ($change.change.before.ecs_target[0].task_definition_arn ==
-        $live[0].targets[$component].task_definition) and
-      (($change.change.before | guard_target_from_tf) ==
-        $live[0].targets[$component].critical) and
-      (($change.change.after | del(.ecs_target[0].task_definition_arn)) ==
-       ($change.change.before | del(.ecs_target[0].task_definition_arn)))
+      . as $plan |
+      $plan.resource_changes[] | select(.address == $address) as $change |
+      # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+      # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+      if $component == "ingest" then
+        $change.change.actions == ["no-op"] and
+        ([$change.change.after_unknown // {} | paths(. == true)] |
+          length == 0) and
+        ([$plan.configuration.root_module.resources[] |
+          select(
+            .address ==
+              "aws_cloudwatch_event_target.ingest_run_task"
+          ) |
+          .expressions.arn.references[]?] |
+          index("aws_lambda_function.ingest_dispatch[0].arn")) != null and
+        (($change.change.before | guard_target_from_tf) ==
+          $live[0].targets.ingest.critical) and
+        $change.change.before == $change.change.after
+      else
+        ($change.change.before.ecs_target[0].task_definition_arn ==
+          $live[0].targets[$component].task_definition) and
+        (($change.change.before | guard_target_from_tf) ==
+          $live[0].targets[$component].critical) and
+        (($change.change.after | del(.ecs_target[0].task_definition_arn)) ==
+         ($change.change.before | del(.ecs_target[0].task_definition_arn)))
+      end
     ' "$plan_json" >/dev/null || die "$address はtask revision以外を変更します"
   done
 }
@@ -7632,8 +7733,10 @@ validate_plan() {
     fi
   done
 
+  # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+  # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
   for spec in \
-    'aws_cloudwatch_event_target.ingest_run_task[0]|ingest|aws_cloudwatch_event_target.ingest_run_task|aws_ecs_task_definition.ingest[0]' \
+    'aws_cloudwatch_event_target.ingest_run_task[0]|ingest|aws_cloudwatch_event_target.ingest_run_task|aws_lambda_function.ingest_dispatch[0]' \
     'aws_cloudwatch_event_target.morning_digest_run_task[0]|morning|aws_cloudwatch_event_target.morning_digest_run_task|aws_ecs_task_definition.morning_digest[0]' \
     'aws_cloudwatch_event_target.canary_run_task[0]|canary|aws_cloudwatch_event_target.canary_run_task|aws_ecs_task_definition.canary[0]'; do
     IFS='|' read -r address component config_address task_address <<< "$spec"
@@ -7647,19 +7750,35 @@ validate_plan() {
         $plan.resource_changes[] | select(.address == $address) as $change |
         ([$plan.configuration.root_module.resources[] |
           select(.address == $config_address) |
-          .expressions.ecs_target[0].task_definition_arn.references[]?] |
+          if $component == "ingest" then
+            .expressions.arn.references[]?
+          else
+            .expressions.ecs_target[0].task_definition_arn.references[]?
+          end] |
           index($task_address + ".arn")) as $reference |
-        (($change.change.actions == ["no-op"] and
-          ([$change.change.after_unknown // {} | paths(. == true)] | length == 0)) or
-         ($change.change.actions == ["update"] and
-          [$change.change.after_unknown // {} | paths(. == true)] ==
-            [["ecs_target", 0, "task_definition_arn"]])) and
-        $reference != null and
-        ($change.change.before.ecs_target[0].task_definition_arn ==
-          $live[0].targets[$component].task_definition) and
-        (($change.change.before | guard_target_from_tf) == $live[0].targets[$component].critical) and
-        (($change.change.before | del(.ecs_target[0].task_definition_arn)) ==
-          ($change.change.after | del(.ecs_target[0].task_definition_arn)))
+        if $component == "ingest" then
+          $change.change.actions == ["no-op"] and
+          ([$change.change.after_unknown // {} | paths(. == true)] |
+            length == 0) and
+          $reference != null and
+          (($change.change.before | guard_target_from_tf) ==
+            $live[0].targets.ingest.critical) and
+          $change.change.before == $change.change.after
+        else
+          (($change.change.actions == ["no-op"] and
+            ([$change.change.after_unknown // {} | paths(. == true)] |
+              length == 0)) or
+           ($change.change.actions == ["update"] and
+            [$change.change.after_unknown // {} | paths(. == true)] ==
+              [["ecs_target", 0, "task_definition_arn"]])) and
+          $reference != null and
+          ($change.change.before.ecs_target[0].task_definition_arn ==
+            $live[0].targets[$component].task_definition) and
+          (($change.change.before | guard_target_from_tf) ==
+            $live[0].targets[$component].critical) and
+          (($change.change.before | del(.ecs_target[0].task_definition_arn)) ==
+            ($change.change.after | del(.ecs_target[0].task_definition_arn)))
+        end
       ' "$plan_json" >/dev/null ||
         die "$address はliveからtask_definition参照以外も変更します"
     else

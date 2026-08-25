@@ -73,6 +73,10 @@ _LEGACY_TIKTOK_IMAGE_RE = re.compile(
     r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
 )
 _RULE_STATES = frozenset({"DISABLED", "ENABLED"})
+# ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+# release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
+_ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS = "aws_lambda_function.ingest_dispatch[0]"
 _DEPLOYMENT_CONFIGURATION_FIELDS = frozenset(
     {
         "alarms",
@@ -103,6 +107,7 @@ class ConsumerSpec:
     activator_identity: str
     activator_address: str
     activator_edge_address: str | None
+    task_pointer_address: str | None
 
     @property
     def service_arn(self) -> str:
@@ -226,6 +231,17 @@ def _load_consumer_specs(
             activator_edge_address is not None
         ):
             raise SagaError("consumer registry activator address contract differs")
+        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        if key == "ingest":
+            if (
+                activator_type != "eventbridge_rule_ecs_target"
+                or activator_identity != "teamagent-dev-ingest-weekly"
+            ):
+                raise SagaError("ingest activation shim identity differs")
+            task_pointer_address = _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS
+        else:
+            task_pointer_address = None
         specs[key] = ConsumerSpec(
             key=key,
             task_address=task_address,
@@ -236,6 +252,7 @@ def _load_consumer_specs(
             activator_identity=activator_identity,
             activator_address=activator_address,
             activator_edge_address=activator_edge_address,
+            task_pointer_address=task_pointer_address,
         )
         seen_families.add(task_family)
         seen_activators.add((activator_type, activator_identity))
@@ -845,12 +862,11 @@ def _service_plan(
     )
 
 
-def _eventbridge_plan(
+def _eventbridge_rule_plan(
     rule_item: Mapping[str, Any],
-    target_item: Mapping[str, Any],
     *,
     spec: ConsumerSpec,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[str, str]:
     rule_after, rule_unknown = _resource_after(
         rule_item,
         label=spec.activator_address,
@@ -869,9 +885,66 @@ def _eventbridge_plan(
         or rule_unknown.get("state") not in (None, False)
     ):
         raise SagaError("saved plan EventBridge rule identity is invalid")
+    assert type(before_state) is str
+    assert type(after_state) is str
+    return before_state, after_state
+
+
+def _eventbridge_plan(
+    rule_item: Mapping[str, Any],
+    target_item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+    task_pointer_item: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    before_state, after_state = _eventbridge_rule_plan(rule_item, spec=spec)
 
     if spec.activator_edge_address is None:
         raise SagaError("EventBridge activator edge is absent")
+    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    if spec.key == "ingest":
+        target_after, target_unknown = _resource_after(
+            target_item,
+            label=spec.activator_edge_address,
+            allowed_actions=frozenset({("no-op",), ("read",)}),
+        )
+        target_before = _resource_before(target_item, label=spec.activator_edge_address)
+        expected_function_arn = (
+            f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:"
+            f"{_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION}"
+        )
+        if (
+            target_before.get("rule") != spec.activator_identity
+            or target_after.get("rule") != spec.activator_identity
+            or target_before.get("event_bus_name") != "default"
+            or target_after.get("event_bus_name") != "default"
+            or target_before.get("arn") != expected_function_arn
+            or target_after.get("arn") != expected_function_arn
+            or target_before.get("ecs_target") not in (None, [])
+            or target_after.get("ecs_target") not in (None, [])
+            or target_unknown.get("ecs_target") not in (None, False, [])
+        ):
+            raise SagaError("saved plan ingest dispatch target identity is invalid")
+        if (
+            spec.task_pointer_address != _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS
+            or task_pointer_item is None
+        ):
+            raise SagaError("saved plan ingest task pointer is absent")
+        pointer_activation, pointer_changed = _lambda_pointer_plan(
+            task_pointer_item,
+            spec=spec,
+            address=spec.task_pointer_address,
+            function_name=_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION,
+        )
+        return (
+            {
+                "state": after_state,
+                "taskDefinition": pointer_activation["taskDefinition"],
+            },
+            before_state != after_state or pointer_changed,
+        )
+
     target_after, target_unknown = _resource_after(
         target_item,
         label=spec.activator_edge_address,
@@ -929,16 +1002,28 @@ def _lambda_plan(
     *,
     spec: ConsumerSpec,
 ) -> tuple[dict[str, Any], bool]:
+    return _lambda_pointer_plan(
+        item,
+        spec=spec,
+        address=spec.activator_address,
+        function_name=spec.activator_identity,
+    )
+
+
+def _lambda_pointer_plan(
+    item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+    address: str,
+    function_name: str,
+) -> tuple[dict[str, Any], bool]:
     after, unknown = _resource_after(
         item,
-        label=spec.activator_address,
+        label=address,
         allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
     )
-    before = _resource_before(item, label=spec.activator_address)
-    if (
-        before.get("function_name") != spec.activator_identity
-        or after.get("function_name") != spec.activator_identity
-    ):
+    before = _resource_before(item, label=address)
+    if before.get("function_name") != function_name or after.get("function_name") != function_name:
         raise SagaError("saved plan Lambda identity is invalid")
     before_variables = _lambda_variables(before, label="saved plan prior")
     after_variables = _lambda_variables(
@@ -1073,6 +1158,14 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         }[spec.activator_type]
         if spec.activator_edge_address is not None:
             expected_resource_types[spec.activator_edge_address] = "aws_cloudwatch_event_target"
+        # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+        # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+        if spec.key == "ingest":
+            if spec.task_pointer_address != _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS:
+                raise SagaError("ingest activation shim task pointer address differs")
+            expected_resource_types[spec.task_pointer_address] = "aws_lambda_function"
+        elif spec.task_pointer_address is not None:
+            raise SagaError("non-ingest consumer has an activation shim task pointer")
 
     matches: dict[str, dict[str, Any]] = {}
     for raw_item in raw_changes:
@@ -1121,10 +1214,19 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         elif spec.activator_type == "eventbridge_rule_ecs_target":
             if spec.activator_edge_address is None:
                 raise SagaError("EventBridge activator edge is absent")
+            task_pointer_item = None
+            # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+            # release_evidence を原子的に正名化して撤去する。
+            # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+            if spec.key == "ingest":
+                if spec.task_pointer_address != _ACTIVATION_SHIM_INGEST_TASK_POINTER_ADDRESS:
+                    raise SagaError("ingest activation shim task pointer address differs")
+                task_pointer_item = matches[spec.task_pointer_address]
             activation, activation_changed = _eventbridge_plan(
                 matches[spec.activator_address],
                 matches[spec.activator_edge_address],
                 spec=spec,
+                task_pointer_item=task_pointer_item,
             )
         elif spec.activator_type == "lambda_taskdef_arn_environment":
             activation, activation_changed = _lambda_plan(
@@ -1406,7 +1508,15 @@ def _canonical_eventbridge_activation(
     *,
     spec: ConsumerSpec,
 ) -> dict[str, Any]:
-    if type(raw) is not dict or frozenset(raw) != {"rule", "target"}:
+    if type(raw) is not dict:
+        raise SagaError("EventBridge activation response is invalid")
+    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    if spec.key == "ingest":
+        expected_fields = {"lambda", "rule", "target"}
+    else:
+        expected_fields = {"rule", "target"}
+    if frozenset(raw) != expected_fields:
         raise SagaError("EventBridge activation response is invalid")
     rule = raw.get("rule")
     target = raw.get("target")
@@ -1420,17 +1530,45 @@ def _canonical_eventbridge_activation(
     ):
         raise SagaError("EventBridge activation identity is not exact")
     target_id = target.get("Id")
-    ecs_parameters = target.get("EcsParameters")
-    task_definition = (
-        ecs_parameters.get("TaskDefinitionArn") if type(ecs_parameters) is dict else None
-    )
-    if (
-        type(target_id) is not str
-        or not target_id
-        or target.get("Arn") != _CLUSTER_ARN
-        or type(ecs_parameters) is not dict
-    ):
-        raise SagaError("EventBridge ECS target identity is not exact")
+    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    if spec.key == "ingest":
+        lambda_configuration = raw.get("lambda")
+        environment = (
+            lambda_configuration.get("Environment") if type(lambda_configuration) is dict else None
+        )
+        variables = environment.get("Variables") if type(environment) is dict else None
+        expected_function_arn = (
+            f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:"
+            f"{_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION}"
+        )
+        if (
+            type(target_id) is not str
+            or not target_id
+            or target.get("Arn") != expected_function_arn
+            or target.get("EcsParameters") is not None
+            or type(lambda_configuration) is not dict
+            or lambda_configuration.get("FunctionName") != _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+            or lambda_configuration.get("FunctionArn") != expected_function_arn
+            or type(variables) is not dict
+            or any(
+                type(name) is not str or type(value) is not str for name, value in variables.items()
+            )
+        ):
+            raise SagaError("ingest dispatch activation identity is not exact")
+        task_definition = variables.get("TASKDEF_ARN")
+    else:
+        ecs_parameters = target.get("EcsParameters")
+        task_definition = (
+            ecs_parameters.get("TaskDefinitionArn") if type(ecs_parameters) is dict else None
+        )
+        if (
+            type(target_id) is not str
+            or not target_id
+            or target.get("Arn") != _CLUSTER_ARN
+            or type(ecs_parameters) is not dict
+        ):
+            raise SagaError("EventBridge ECS target identity is not exact")
     normalized_target = _canonical_json_value(target)
     if type(normalized_target) is not dict:
         raise SagaError("EventBridge ECS target is invalid")
@@ -1466,6 +1604,14 @@ def _read_eventbridge_activation(
     if len(targets) != 1:
         raise SagaError("EventBridge ECS target inventory is not exact")
     raw = {"rule": rule, "target": targets[0]}
+    # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+    # release_evidence を原子的に正名化して撤去する。docs/activation/ACTIVATION_STATE.md 参照。
+    if spec.key == "ingest":
+        raw["lambda"] = cli.json(
+            "lambda",
+            "get-function-configuration",
+            ["--function-name", _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION],
+        )
     return _canonical_eventbridge_activation(raw, spec=spec), raw
 
 
@@ -1933,16 +2079,33 @@ def _validate_consumer_baseline(
                 "type",
             }:
                 raise SagaError("durable EventBridge rollback activation is invalid")
-            normalized_activation = _canonical_eventbridge_activation(
-                {
-                    "rule": {
-                        "Arn": activation.get("ruleArn"),
-                        "EventBusName": "default",
-                        "Name": activation.get("identity"),
-                        "State": activation.get("state"),
-                    },
-                    "target": activation.get("target"),
+            eventbridge_raw = {
+                "rule": {
+                    "Arn": activation.get("ruleArn"),
+                    "EventBusName": "default",
+                    "Name": activation.get("identity"),
+                    "State": activation.get("state"),
                 },
+                "target": activation.get("target"),
+            }
+            # ACTIVATION-SHIM(ingest): 一時対応。Activation 完了後に canonical registry と
+            # release_evidence を原子的に正名化して撤去する。
+            # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
+            if spec.key == "ingest":
+                eventbridge_raw["lambda"] = {
+                    "Environment": {
+                        "Variables": {
+                            "TASKDEF_ARN": activation.get("taskDefinition"),
+                        },
+                    },
+                    "FunctionArn": (
+                        f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:"
+                        f"{_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION}"
+                    ),
+                    "FunctionName": _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION,
+                }
+            normalized_activation = _canonical_eventbridge_activation(
+                eventbridge_raw,
                 spec=spec,
             )
             if normalized_activation.get("taskDefinition") != task_definition:
