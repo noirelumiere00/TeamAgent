@@ -267,6 +267,42 @@ Freeze 解除 / 次の通常 generation publish
 `validate_plan` の allowlist への ingest dispatch Lambda 追加と、
 `run_activation_task` の ingest network 取得元。どちらもトポロジ由来なので正名化後も残る。
 
+## 🛑 blocker 3: preflight が IAM 不足で止まる（2026-08-25・要 Human Gate ④）
+
+blocker 1（ingest）と blocker 2（A0.2.2c 取込）は解消し、preflight は
+**integrity snapshot の採取まで到達**した（4 object）。その先で `snapshot_live()` が
+**automation role に無い read 権限**を呼んで止まる。
+
+### 実測（assume-role した実 API 呼び出しで確認。simulate だけに依存していない）
+
+| action | 判定 | guard の呼び出し箇所 | tf での付与 |
+|---|---|---|---|
+| `lambda:GetFunctionConcurrency` | ❌ AccessDenied | `terraform_runtime_guard.sh:4307`（tiktok / x_buzz の 2 dispatch） | **tf 全体で 0 件**＝誰にも付与されていない |
+| `ecs:DescribeTasks` | ❌ AccessDenied | 同 `:4261`（ingest の active task 詳細） | 他 3 role にはあるが automation role には**無い** |
+
+同時に検査した他 20 action は全て可（apigatewayv2 3 種 / s3 head-object・get-bucket-versioning /
+lambda GetFunctionConfiguration・ListTags・ListEventSourceMappings 等）。
+`simulate-principal-policy` は CLI 名（`s3api` / `apigatewayv2`）を IAM action 名へ
+素朴に変換すると誤検知するため、**疑わしいものは実 API 呼び出しで確定**させた。
+
+### これは案 B が作った問題ではない
+
+両 action は **2026-07-17 の `3efc8e0` / `d94a167`** で guard に入ったが、
+IAM 側には最初から無い。つまり **automation role で `snapshot_live` が最後まで通ったことは一度も無い**。
+ingest の壁（2026-08-06）に到達すらしていなかったのは、この 2 つが先にあったからではなく、
+ingest の壁が先に立っていたため。壁を 1 枚ずつ剥がして 3 枚目に到達した状態。
+
+### 必要な変更（最小）
+
+read-only 2 action の追加のみ。write は 1 つも要らない。
+
+- `lambda:GetFunctionConcurrency` → resource は **dispatch 2 本の exact ARN**
+  （`teamagent-dev-tiktok-acquire-dispatch` / `teamagent-dev-x-buzz-dispatch`）。
+  **ingest dispatch は含めない**（案 B は意図的にこの API を使わない設計にしたため不要）
+- `ecs:DescribeTasks` → resource は `teamagent-dev` クラスタの task
+
+代替案（guard から concurrency 検査を外す）は**既存の security control を弱める**ため推奨しない。
+
 ## Known risks
 
 | リスク | 状態 |
