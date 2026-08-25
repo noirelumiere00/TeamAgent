@@ -483,6 +483,76 @@ freeze policy は 3 statement / 16 action。必要なのは **1 statement の 3 
 adopt との順序関係を裁定する必要がある（remediation を先にすると rebind #2 の
 mapping と live が再びずれる）。
 
+## 🛑 HMAC remediation は現状の repo 契約では実行不能（2026-08-26・要裁定）
+
+裁定どおり remediation → adopt の順で設計を進めたが、**承認された形のままでは実行できない**
+ことが read-only 調査＋一次ソース照合で確定した。plan を作っても通らないので作らない。
+
+### 一次ソースで検証した 4 点
+
+| # | 事実 | 根拠（実コード確認済み） |
+|---|---|---|
+| 1 | **primary の ARN を変えるなら previous は必須**。鍵 material が同一でも迂回不可 | `src/teamagent/hmac_keyring.py:519-521` `elif proposed_primary != deployed_primary: if not proposed_previous_present: return _contract_result(False, "primary_changed_without_previous")` |
+| 2 | しかも **previous は deployed primary そのもの**でなければならない | 同 `:522-523` `if proposed_previous != deployed_primary: ... "previous_generation_mismatch"` / `hmac_keyrings.tf:762-768` の `previous_generation == deployed_primary_generation` |
+| 3 | 失敗時 rollback 経路は EventBridge を**復元**する（`PutRule` を含む） | `infra/terraform/eventbridge_apply_saga.py:1294` `finished_at = self._restore(baseline)` |
+| 4 | **live の valueFrom は 5 件すべて VersionId 未 pin** | 自前 live snapshot 実測。`mcp` / `connect_web` / `morning` の MAIL/REPORT すべて `:::` 無し |
+
+### 帰結①: report_link は現行契約で表現できない（構造的に詰み）
+
+1+2 より previous は deployed primary＝`teamagent/dev/report-link-hmac` でなければならない。
+ところが `report_link_hmac_previous_secret_arn` の validation は
+`(database-url|hmac/report-link)` しか許さない（`hmac_rotation.tf:56-60`）。
+**第三の secret である `report-link-hmac` を previous として書けない。**
+
+→ tfvars だけでは不可能。**repo 側の HMAC 契約そのものの変更**（report_link 用の
+legacy 変数追加、または新 phase の新設）が要る。これは security-critical 契約の変更なので
+別途裁定が要る。
+
+なお **mail_action は表現できる**（deployed primary が `database-url` で、
+legacy_migration の previous も `database-url` なので一致する）。report_link だけ非対称。
+
+### 帰結②: そもそも gate が live を読めない（未 pin）
+
+gate は live taskdef の valueFrom が `ARN:::VersionId` であることを要求し、
+素の ARN なら `secret_reference_unpinned` で即失敗する（`hmac_rollout_gate.py:932-935`）。
+live は 5 件すべて未 pin なので、**IAM を直しても ledger initialize に到達しない**。
+先に「pinned legacy revision を登録する」段が要る（`docs/runbooks/hmac_domain_migration.md:123-128`）。
+
+### 帰結③: Freeze 例外は 3 action では足りない
+
+失敗時 rollback は canary / ingest / morning の **3 rule 分の `events:PutRule` を無条件発行**し、
+余剰 target があれば `RemoveTargets`、drift 時は `lambda:UpdateFunctionConfiguration` も出す。
+3 action だけ開けると「apply 失敗 → rollback も失敗 → reconcile-required」に落ちる。
+
+さらに **例外を閉じた後は rollback 自体が実行できない**（rollback も同じ deny action を使う）。
+freeze policy は AIIAdev user にも attach されているため、
+runtime_automation だけ例外にすると**緊急時の手動 rollback 主体が残らない**。
+
+### 帰結④: remediation は adopt の純粋 4+4 を壊す
+
+`terraform_data.hmac_live_task_gate` の `triggers_replace` に
+`var.image_deployment_intent_id`（リリースごとの UUID）が入るため、
+remediation 後に adopt plan を取ると gate 3 件が replace、
+count 0→1 になった pre/post_update 最大 6 件が destroy として現れる。
+adopt validator は no-op / forget / import しか許さない（`supply_chain_adopt_validate.py:11-17`）。
+
+→ **remediation → adopt の順序は、間に「gate を inactive へ戻す整地 apply」を挟まないと成立しない。**
+
+### 帰結⑤: guard 経由 apply は control ファイル無しでは始まらない
+
+`eventbridge_apply_saga.py:542-549` が saved plan の `hmac_rollout_control_path` が空なら
+`SagaError`。HMAC と無関係な apply でも guard 経路なら control 必須。
+A0.2.2a-d の IAM apply が通ったのは guard を使わない targeted saved-plan 経路だったため。
+
+### その他の未解決
+
+- `worker_hmac_artifact_sha256` は config_ready が 64 hex を無条件要求するが、
+  値の出所が repo 内に無い
+- DynamoDB ledger の stage 進行（mcp は `worker_verified` 以降）が必要で、
+  worker-verified には worker rollback artifact の提示が要る
+- mail_action の canonical 化は「**DB 接続文字列を別 secret へ複製する**」ことを意味する
+  （live の MAIL_ACTION material は `database-url` の値そのもの）
+
 ## Known risks
 
 | リスク | 状態 |
