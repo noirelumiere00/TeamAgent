@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "PR2-A0.3 activation manifest の generation input 束縛。buildspec 世代の content-addressed key へ影響する入力を Generation Baseline 時点の git blob へ固定する。1 つでも変化したら STALE MANIFEST（adopt へ進まず manifest を再生成する）。検証: infra/deploy/verify_generation_inputs.py",
-  "generation_baseline": "88f46963b08944e0f372e99560b525192130528d",
+  "generation_baseline": "296720ee37ab3af3da6d4001817889196726a3cc",
   "inputs": {
     "infra/codebuild/mcp-source-publisher-buildspec.yml": "9cdb0123e96a8f79a0886d40c29efb4fa30dac15",
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
@@ -15,8 +15,8 @@
     "infra/codebuild/openclaw_provenance.py": "22ef083687245abf56c4fbfe8f51569aca0d1775",
     "infra/codebuild/tiktok_source_provenance.py": "77e61e9eb2606b295ae5adfe47ea8bde1c1960eb",
     "infra/codebuild/verify_actual_image.sh": "74795d433d3bb9c42e4922b799ccb2f9f7059063",
-    "infra/codebuild/teamagent_runtime_contract.json": "993efd838dc764cf6731669919f9b1b93451060b",
-    "infra/codebuild/teamagent_core_media_release_contract.json": "0fd8bf7bc415b40613a49f7eca8bba6e7378f954",
+    "infra/codebuild/teamagent_runtime_contract.json": "26f45a3d962b5500b69d66dc9f06d52aa5bbe540",
+    "infra/codebuild/teamagent_core_media_release_contract.json": "53fe2e1e3a734c8782fac501c00fb09dab55f702",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
     "infra/codebuild/openclaw_bundle_contract.json": "b40176dc5defb1c965f195e7cdda94dc9b044663",
     "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
@@ -33,15 +33,15 @@
   "terraform_evaluation_context": {
     "terraform_version": "1.12.2",
     "workspace": "default",
-    "var_file_sha256": "3abd9a11211fbd1729e1e19b3a9e3053ad01a3e104b19ad25da60f7e86a5da61",
+    "var_file_sha256": "9b73e705ec4d352b503ab86afd568ad2ff205c004a856c707f17ad91f1a60319",
     "aws_account": "718959508629",
     "canonical_principal": "arn:aws:sts::718959508629:assumed-role/teamagent-dev-terraform-runtime-automation/teamagent-terraform-worker",
-    "evaluated_at": "2026-08-20T03:15:43Z"
+    "evaluated_at": "2026-08-25T00:20:00Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "e7d1fb6c1083a293fea4cb8c71952aa5701e3830e8320754cf6006086dca5871",
-    "teamagent-dev-image-attestor": "31af144bf46b1febdd30ed1697814979b35189b7681460ef1da721ddcf5fbd32",
-    "teamagent-dev-image-promoter": "7d62c3ad205f191586a8951e80533d28e9100ce48e107b1b2655063ba4380cdf",
+    "teamagent-dev-mcp-source-publisher": "00f6dc3a2b640498707511aafdf46309c7d72d8f8b351a69123a6f1f65bb8291",
+    "teamagent-dev-image-attestor": "dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478",
+    "teamagent-dev-image-promoter": "a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }
