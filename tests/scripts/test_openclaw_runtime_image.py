@@ -579,7 +579,7 @@ const authenticatedConfigJson = JSON.parse(
 );
 const expectedAuthenticatedConfig = {
   basePath: "",
-  assistantName: "TeamAgent",
+  assistantName: "NewsTV AI",
   assistantAvatar: "🧭",
   assistantAvatarSource: null,
   assistantAvatarStatus: "none",
