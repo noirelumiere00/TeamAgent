@@ -746,6 +746,35 @@ data "aws_iam_policy_document" "runtime_evidence_automation" {
     resources = ["*"]
   }
 
+  # PR2-A0.2.2d: guard の snapshot_live が 2026-07-17 から要求しているのに
+  # automation role へ一度も付与されていなかった read 2 種。
+  # 2026-08-25 の preflight で、assume-role した実 API 呼び出しにより AccessDenied を実測。
+  # simulate は CLI 名を IAM action 名へ素朴変換すると誤検知するため、実呼び出しで確定させた。
+  #
+  # security control を削る（guard 側の検査を外す）のではなく、
+  # guard が元から要求していた read を role へ補完する方向で解消する。
+  #
+  # scope は dispatch 2 本の exact ARN のみ。ingest の dispatch は
+  # この API を使わない設計にしたため **含めない**。
+  statement {
+    sid     = "ReadExactDispatcherReservedConcurrency"
+    actions = ["lambda:GetFunctionConcurrency"]
+    resources = [
+      "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-${var.environment}-tiktok-acquire-dispatch",
+      "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-${var.environment}-x-buzz-dispatch",
+    ]
+  }
+
+  # scope は teamagent-dev クラスタ配下の task のみ。
+  # アカウント全体の task へ広げることは禁止（広げる必要が出たら再 Gate）。
+  statement {
+    sid     = "ReadExactClusterTaskDescriptions"
+    actions = ["ecs:DescribeTasks"]
+    resources = [
+      "arn:aws:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${var.project_name}-${var.environment}/*",
+    ]
+  }
+
 
   # PR2-A0.2.2b: rds.tf の db_password secret version（managed resource）に対する
   # provider read。secret の **値** を読む唯一の箇所で、2026-08-20T05:45:10Z の refresh で
