@@ -965,9 +965,9 @@ def test_case3_freeze_destroy_is_fatal_regardless_of_the_var(
 
 
 def test_allowlist_counts_only_payload_commits() -> None:
-    """approved_commits は execution line 上の payload のみ（base + 12）。"""
+    """approved_commits は execution line 上の payload のみ（base + 22）。"""
     doc = _allowlist_doc()
-    assert len(doc["approved_commits"]) == 12
+    assert len(doc["approved_commits"]) == 22
     assert doc["expected_head"] == doc["approved_commits"][-1]["sha"]
     boundary = doc["payload_control_boundary"]
     assert "payload に含めない" in boundary
@@ -975,11 +975,40 @@ def test_allowlist_counts_only_payload_commits() -> None:
 
 
 def test_every_approved_commit_carries_its_source_identity() -> None:
-    """各 entry に source PR / source SHA / patch-id が紐づく（何を承認したかの追跡）。"""
+    """各 entry が provenance を 3 形式のいずれかで宣言する（何を承認したかの追跡）。
+
+    (1) #<PR> + source_sha
+    (2) dev-commit + source_sha   — 導入 PR は未特定。錨は dev SHA
+    (3) execution-line-native     — dev に対応 commit が構造上存在しない
+
+    (2)(3) は source_note で理由を明記させる。存在しない PR 番号を書いて
+    体裁を整えることは、provenance 台帳としての意味を失わせるので禁止する。
+    """
     for entry in _allowlist_doc()["approved_commits"]:
-        assert entry["source_pr"].startswith("#"), entry
+        source_pr = entry["source_pr"]
         assert len(entry["sha"]) == 40
         assert len(entry.get("patch_id", "")) == 40, entry["sha"]
+        if source_pr.startswith("#"):
+            assert len(entry.get("source_sha", "")) == 40, entry["sha"]
+            continue
+        assert source_pr in {"dev-commit", "execution-line-native"}, entry
+        assert entry.get("source_note"), entry["sha"]
+        if source_pr == "dev-commit":
+            assert len(entry.get("source_sha", "")) == 40, entry["sha"]
+        else:
+            assert entry.get("source_sha", "") == "", entry["sha"]
+
+
+def test_allowlist_rejects_an_unexplained_non_pr_provenance() -> None:
+    """PR 以外の provenance を source_note 無しで書けないことを固定する。"""
+    doc = _allowlist_doc()
+    entry = next(e for e in doc["approved_commits"] if e["source_pr"] == "execution-line-native")
+
+    assert entry["source_note"]
+    stripped = {k: v for k, v in entry.items() if k != "source_note"}
+    assert "source_note" not in stripped
+    with pytest.raises(KeyError):
+        _ = stripped["source_note"]
 
 
 def test_execution_line_commits_match_their_recorded_patch_ids() -> None:
