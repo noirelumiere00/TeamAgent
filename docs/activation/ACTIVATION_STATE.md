@@ -1,5 +1,30 @@
 # ACTIVATION STATE
 
+## MISSION（2026-08-25 設定）
+
+**GOAL: `HERMES DARK RUNTIME DEPLOYED`**
+
+DONE 条件（全て GREEN であること）:
+
+- Production Activation 完了 / 正式 Activation Baseline 確定
+- Hermes supply-chain 構築 / upstream・image・digest・provenance 固定
+- Hermes runtime を AWS へデプロイ / health check GREEN
+- isolation GREEN / rollback readiness GREEN
+- **production user traffic は Hermes に流れていない**
+- 既存 OpenClaw / MCP / production workloads に regression なし
+- evidence 保全済み
+
+```
+A0.2.2c → fresh preflight → pure 4 forget + 4 import 判定
+  → production adopt plan/apply → post-apply verification
+  → ACTIVATION COMPLETE → 正式 Activation Baseline 確定
+  → PR2-A1 Hermes supply-chain → PR2-B Hermes dark runtime
+  → HERMES DARK RUNTIME DEPLOYED
+```
+
+自律進行するが、**production mutation の直前は必ず human gate で停止**する。
+repo / live AWS / signed evidence と矛盾したら推測せず STOP して差分を報告する。
+
 PR2-A0.x activation の**現在地だけ**を持つ単一の記録媒体。会話ログではなくこのファイルが真実源。
 経緯・原則・承認済み事項はここを更新し、チャット本文へ再掲しない（2026-08-24 運用裁定）。
 
