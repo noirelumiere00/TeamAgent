@@ -283,6 +283,19 @@ def assert_execution_line(repo: Path, allowlist_path: Path, ref: str | None = No
     doc = load_allowlist(allowlist_path)
     ref = ref or doc["execution_ref"]
     head = _git(repo, "rev-parse", ref).strip()
+
+    # self-reference ガード: execution line 自身から実行してはならない。
+    # #315 の patch は execution line にも allowlist の **コピー** を持ち込むため、
+    # execution worktree から実行すると stale なコピーで判定してしまう
+    # （2026-08-24 実測。dev 側の 1 本だけが authoritative）。
+    current = _git(repo, "rev-parse", "HEAD").strip()
+    if current == head:
+        raise FreezeError(
+            "SELF-REFERENCE 違反: execution line 自身から allowlist 検証を実行しています。\n"
+            f"  repo HEAD == {ref}（{head[:12]}）\n"
+            "  execution line 上の allowlist は #315 の patch が持ち込んだ stale な"
+            " inert コピーです。dev 側の作業ツリーから実行してください。"
+        )
     base = doc["execution_base"]["sha"]
     expected_head = doc["expected_head"]
 

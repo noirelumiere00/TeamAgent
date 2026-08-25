@@ -364,6 +364,27 @@ def test_runbook_records_the_boundary_rule_and_the_202398f_prohibition() -> None
     assert "fetch-depth: 0" in text
 
 
+def _control_branch(repo: Path) -> None:
+    """検証を実行する側（dev 相当）へ移る。
+
+    self-reference ガードにより execution ref と同一 commit の HEAD では検証できない。
+    実運用でも allowlist は dev 側にあり、検証は dev の作業ツリーから行う。
+    """
+    env = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+    subprocess.run(
+        ["git", "-C", str(repo), *env, "checkout", "-q", "-b", "control"],
+        capture_output=True,
+        check=True,
+    )
+    (repo / "control.txt").write_text("control-plane\n")
+    subprocess.run(["git", "-C", str(repo), *env, "add", "-A"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *env, "commit", "-q", "-m", "control metadata"],
+        capture_output=True,
+        check=True,
+    )
+
+
 def _mini_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -411,6 +432,7 @@ def test_execution_line_detects_a_rewritten_history_as_force_push(tmp_path: Path
     git("commit", "-q", "--amend", "-m", "approved change")
     rewritten_head = _rev(repo, "HEAD")
     assert rewritten_head != original_head
+    _control_branch(repo)
 
     allowlist = _write(
         tmp_path,
@@ -442,6 +464,7 @@ def test_execution_line_accepts_the_recorded_history_in_a_clean_repo(tmp_path: P
         check=True,
     )
     head = _rev(repo, "HEAD")
+    _control_branch(repo)
     allowlist = _write(
         tmp_path,
         "a.json",
@@ -936,3 +959,84 @@ def test_case3_freeze_destroy_is_fatal_regardless_of_the_var(
     )
     with pytest.raises(FreezeError, match="FREEZE ROLLBACK"):
         assert_plan_preserves_freeze(FREEZE, plan)
+
+
+# ── allowlist: payload と control metadata の境界 / self-reference ガード ────
+
+
+def test_allowlist_counts_only_payload_commits() -> None:
+    """approved_commits は execution line 上の payload のみ（base + 12）。"""
+    doc = _allowlist_doc()
+    assert len(doc["approved_commits"]) == 12
+    assert doc["expected_head"] == doc["approved_commits"][-1]["sha"]
+    boundary = doc["payload_control_boundary"]
+    assert "payload に含めない" in boundary
+    assert "自己参照" in boundary
+
+
+def test_every_approved_commit_carries_its_source_identity() -> None:
+    """各 entry に source PR / source SHA / patch-id が紐づく（何を承認したかの追跡）。"""
+    for entry in _allowlist_doc()["approved_commits"]:
+        assert entry["source_pr"].startswith("#"), entry
+        assert len(entry["sha"]) == 40
+        assert len(entry.get("patch_id", "")) == 40, entry["sha"]
+
+
+def test_execution_line_commits_match_their_recorded_patch_ids() -> None:
+    """記録された patch-id が execution line の実 commit と一致する。
+
+    cherry-pick で SHA は変わるが diff は変わらない。ここが崩れたら
+    「承認したものと違う変更が入っている」ことになる。
+    """
+    if not _has_ref("activation-execution-base"):
+        pytest.skip("execution line 未取得")
+    for entry in _allowlist_doc()["approved_commits"]:
+        show = subprocess.run(
+            ["git", "-C", str(ROOT), "show", entry["sha"]], capture_output=True, text=True
+        ).stdout
+        actual = subprocess.run(
+            ["git", "patch-id", "--stable"], input=show, capture_output=True, text=True
+        ).stdout.split()[0]
+        assert actual == entry["patch_id"], entry["sha"]
+
+
+def test_allowlist_declares_dev_as_the_authoritative_copy() -> None:
+    """execution line 上のコピーは inert であることを宣言に残す。"""
+    note = _allowlist_doc()["authoritative_copy"]
+    assert "dev 側" in note and "inert" in note
+    assert "assert-execution-line" in note
+
+
+def test_execution_line_verification_refuses_to_run_from_the_execution_line(
+    tmp_path: Path,
+) -> None:
+    """self-reference ガード: execution line 自身からの検証を拒否する。
+
+    #315 の patch が execution line にも allowlist のコピーを持ち込むため、
+    execution worktree から実行すると stale なコピーで判定してしまう。
+    """
+    repo = _mini_repo(tmp_path)
+    env = ["-c", "user.email=t@example.com", "-c", "user.name=t"]
+    base = _rev(repo, "HEAD")
+    (repo / "b.txt").write_text("approved\n")
+    subprocess.run(["git", "-C", str(repo), *env, "add", "-A"], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), *env, "commit", "-q", "-m", "approved change"],
+        capture_output=True,
+        check=True,
+    )
+    head = _rev(repo, "HEAD")
+    allowlist = _write(
+        tmp_path,
+        "a.json",
+        {
+            "schema_version": 1,
+            "execution_ref": "main",
+            "execution_base": {"sha": base, "subject": "base commit"},
+            "approved_commits": [{"sha": head, "subject": "approved change", "gate": "t"}],
+            "expected_head": head,
+        },
+    )
+    # repo の HEAD == execution ref なので拒否される
+    with pytest.raises(FreezeError, match="SELF-REFERENCE"):
+        assert_execution_line(repo, allowlist, "main")

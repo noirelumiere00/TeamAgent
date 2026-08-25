@@ -12,16 +12,100 @@
       "sha": "fbff28d065a9f866c798c08d29f4acc0779e55c8",
       "subject": "feat(rebind): 実行 session policy を least-privilege の canonical ファイルへ縮小",
       "source_sha": "c1ddfc1",
-      "gate": "PR #313 MERGE GO（2026-08-24 ユーザー裁定）"
+      "gate": "PR #313 MERGE GO（2026-08-24 ユーザー裁定）",
+      "source_pr": "#313",
+      "patch_id": "135903ac16ddb8d27e0ea50da03b0c438c8c6bc2"
     },
     {
       "sha": "7dc368245d189d87348a7c5736eb26b6f425800f",
       "subject": "feat(adopt): live snapshot 注入を通常 guarded plan と共有実装化（PR2-A0.3.2）",
       "source_sha": "7ebbfa1",
-      "gate": "PR #314 MERGE GO（2026-08-24 ユーザー裁定）"
+      "gate": "PR #314 MERGE GO（2026-08-24 ユーザー裁定）",
+      "source_pr": "#314",
+      "patch_id": "8cdb9a7ba34c34bb931086ddd650a36026d3e8da"
+    },
+    {
+      "sha": "a939ce007a8505172b588f878940d1d913857931",
+      "subject": "feat(activation): freeze を口頭合意から機械強制へ格上げ（Freeze v2 / hard boundary 移設）",
+      "source_pr": "#315",
+      "source_sha": "5f539a2cb8805935687aebec576b41db631d0121",
+      "patch_id": "215d17fcdd23fddb040dd2b6046dad61c3f19024",
+      "gate": "#315 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "d07aee8d6de385e817da7259ce77a2d82e0f545e",
+      "subject": "test(activation): force push 検出の変異対を追加（合成 repo で履歴改変を再現）",
+      "source_pr": "#315",
+      "source_sha": "639a1b7bb8df804cd81fa3906538fc4627d2270a",
+      "patch_id": "498e6396095f1f7c31e8a8500b0ef46ba1eed4b2",
+      "gate": "#315 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "a7a1e4cac8bd94191f0dc254fd077b9523f68097",
+      "subject": "feat(iam): guarded plan refresh の non-secret minimal read を追加（PR2-A0.2.2a）",
+      "source_pr": "#316",
+      "source_sha": "43af628f3ab73ee642378705a68cbc18eb5be8a7",
+      "patch_id": "8e2f8abbfe7b0339b5a7447b4677a4b84f379d8e",
+      "gate": "#316 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "fe1c5ae0348a39832a440734610eed0957ee8430",
+      "subject": "feat(iam): db_password の secret 値 read を分離して追加（PR2-A0.2.2b）",
+      "source_pr": "#318",
+      "source_sha": "45971f1617c9907fbd09690a77cf00c936504211",
+      "patch_id": "b737558ee6581f6f476d9cae57dc0c98de75973a",
+      "gate": "#318 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "5b06a815f554ab0d79634c0a3b7326418ab49fff",
+      "subject": "feat(activation): Freeze v2 を persistent explicit-deny で AWS 側に機械化",
+      "source_pr": "#319",
+      "source_sha": "8777769040ab90027765104a0a877fa9151fbd49",
+      "patch_id": "38df19ec0ae68e375373451f5d81b83e75288962",
+      "gate": "#319 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "9783daf78ac9c71a3591f51e59eb844f495ee660",
+      "subject": "feat(activation): Freeze v2 を root break-glass 例外つきで定義し継続監視を追加",
+      "source_pr": "#320",
+      "source_sha": "46e6d0f3dc839364326a63cf4eed37fa70387d40",
+      "patch_id": "7d94a200f47f02048afb0a37955933f465fd5973",
+      "gate": "#320 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "65073aa378a048b4ee9dea9a91cdfa6e65d4e6eb",
+      "subject": "feat(activation): Freeze v2 を ACTIVE にし境界を 2026-08-24T08:24:04Z で確定",
+      "source_pr": "#321",
+      "source_sha": "8a43116eac35fe3a39675ff15520e9af88b2e918",
+      "patch_id": "c5bf64381c2d9f79960bee1cd25fbd074cdd8534",
+      "gate": "#321 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "f023190b5e0342acfd9a64e8e3f038380f26e645",
+      "subject": "feat(activation): Freeze ACTIVE 中の desired-state binding を機械強制（P0）",
+      "source_pr": "#322",
+      "source_sha": "01fc6296bfb9dd0b4cffd86744bb7148fbf50418",
+      "patch_id": "61801af1a5e8450a93ec6ff9fc7dc0cca0d68028",
+      "gate": "#322 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "2066039b5067769f9bf60fa0a6861b856eab7219",
+      "subject": "docs(activation): ACTIVATION_STATE.md を新設し記録媒体を repo へ移す",
+      "source_pr": "#322",
+      "source_sha": "c1fb117fc2141647cf01d39691da35140e30fe7a",
+      "patch_id": "2225853c5a5c9109192eb23b79032c5585779c6e",
+      "gate": "#322 MERGE GO（2026-08-24）"
+    },
+    {
+      "sha": "e40f1c23c0fe8f7807f15922588d4b46e1a79da8",
+      "subject": "fix(activation): freeze 保全検査を plan 整合性検査の後ろへ移す",
+      "source_pr": "#322",
+      "source_sha": "81a83391754449a18c2f883617a58edffa4db8ab",
+      "patch_id": "0339cb90d2bfb3766fd445602f8c4f435dee1a1e",
+      "gate": "#322 MERGE GO（2026-08-24）"
     }
   ],
-  "expected_head": "7dc368245d189d87348a7c5736eb26b6f425800f",
+  "expected_head": "e40f1c23c0fe8f7807f15922588d4b46e1a79da8",
   "excluded_commits": [
     {
       "sha": "4f7da58",
@@ -43,5 +127,7 @@
       "sha": "9eea313",
       "reason": "mail 機能。activation と無関係のため execution line へ取り込まない"
     }
-  ]
+  ],
+  "payload_control_boundary": "approved_commits は execution line 上の payload commit のみを数える（現在 base + 12）。本ファイル自身を書き換える commit は dev 側の control-plane metadata であり payload に含めない（自己参照を避けるため。2026-08-24 裁定）。",
+  "authoritative_copy": "dev 側の本ファイルが唯一の真実源。#315 の patch は execution line にも同名ファイルのコピーを持ち込むが、それは stale な inert コピーであり検証に使ってはならない。assert-execution-line は execution line 自身から実行された場合に拒否する。"
 }
