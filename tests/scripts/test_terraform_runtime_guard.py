@@ -243,6 +243,12 @@ DISPATCHERS = {
         "code_sha256": "IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI=",
     },
 }
+INGEST_DISPATCHER = {
+    "function_name": "teamagent-dev-ingest-dispatch",
+    "cluster": f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/teamagent-dev",
+    "security_group": "sg-ingest",
+    "code_sha256": "MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=",
+}
 RULES = {
     "ingest": (
         "aws_cloudwatch_event_rule.ingest_weekly[0]",
@@ -465,6 +471,47 @@ def _dispatcher_environment(component: str) -> dict[str, str]:
     }
 
 
+def _ingest_dispatcher_environment() -> dict[str, str]:
+    return {
+        "CLUSTER_ARN": INGEST_DISPATCHER["cluster"],
+        "TASKDEF_ARN": _task_arn("ingest"),
+        "TASK_FAMILY": COMPONENTS["ingest"][1],
+        "SUBNETS": "subnet-a,subnet-b",
+        "SG_ID": INGEST_DISPATCHER["security_group"],
+        "INGEST_MAX_RUNTIME_HOURS": "6",
+    }
+
+
+def _ingest_lambda_arn() -> str:
+    return (
+        f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:"
+        f"{INGEST_DISPATCHER['function_name']}"
+    )
+
+
+def _ingest_lambda_aws() -> dict[str, Any]:
+    function_name = INGEST_DISPATCHER["function_name"]
+    return {
+        "FunctionName": function_name,
+        "FunctionArn": _ingest_lambda_arn(),
+        "State": "Active",
+        "LastUpdateStatus": "Successful",
+        "Role": f"arn:aws:iam::{ACCOUNT}:role/{function_name}",
+        "Runtime": "python3.12",
+        "Handler": "handler.handler",
+        "Architectures": ["arm64"],
+        "CodeSha256": INGEST_DISPATCHER["code_sha256"],
+        "Description": "",
+        "Timeout": 30,
+        "MemorySize": 128,
+        "PackageType": "Zip",
+        "Environment": {"Variables": _ingest_dispatcher_environment()},
+        "TracingConfig": {"Mode": "PassThrough"},
+        "EphemeralStorage": {"Size": 512},
+        "SnapStart": {"ApplyOn": "None"},
+    }
+
+
 def _lambda_arn(component: str) -> str:
     return f"arn:aws:lambda:{REGION}:{ACCOUNT}:function:{DISPATCHERS[component]['function_name']}"
 
@@ -607,6 +654,25 @@ def _service_tf(component: str) -> dict[str, Any]:
 
 def _target_tf(component: str) -> dict[str, Any]:
     _, rule_name, _, _ = RULES[component]
+    if component == "ingest":
+        return {
+            "target_id": "ingest-dispatch",
+            "arn": _ingest_lambda_arn(),
+            "role_arn": "",
+            "input": "",
+            "input_path": "",
+            "input_transformer": [],
+            "retry_policy": [
+                {
+                    "maximum_event_age_in_seconds": 3600,
+                    "maximum_retry_attempts": 1,
+                }
+            ],
+            "dead_letter_config": [],
+            "event_bus_name": "default",
+            "rule": rule_name,
+            "ecs_target": [],
+        }
     return {
         "target_id": "morning" if component == "morning" else f"target-{component}",
         "arn": f"arn:aws:ecs:{REGION}:{ACCOUNT}:cluster/teamagent-dev",
@@ -800,16 +866,21 @@ def _consumer_snapshot(consumer: dict[str, Any]) -> dict[str, Any]:
             "desired_count": 1,
             "task_definition_arn": task_definition_arn,
         }
-    elif activator_type == "eventbridge_rule_ecs_target":
+    elif activator_type in {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }:
         activation = {
             "state": RULES[component][2],
             "task_definition_arn": task_definition_arn,
         }
-    else:
+    elif activator_type == "lambda_taskdef_arn_environment":
         activation = {
             "event_source_mapping_enabled": True,
             "task_definition_arn": task_definition_arn,
         }
+    else:
+        raise AssertionError(f"unsupported test activator type: {activator_type}")
     return {
         "image": named_containers[0]["image"],
         "task_definition_arn": task_definition_arn,
@@ -924,17 +995,22 @@ def _safe_plan() -> dict[str, Any]:
         before = copy.deepcopy(after)
         before["arn"] = _task_arn(component)
         before["id"] = _task_arn(component)
-        if component == "morning":
+        if component in {"ingest", "morning"}:
             after["arn"] = _task_arn(component)
             after["id"] = _task_arn(component)
+        actions = (
+            ["no-op"]
+            if component in {"ingest", "morning"}
+            else ["create", "delete"]
+        )
         change = _change(
             address,
             "aws_ecs_task_definition",
-            ["no-op"] if component == "morning" else ["create", "delete"],
+            actions,
             before,
             after,
         )
-        if component != "morning":
+        if component not in {"ingest", "morning"}:
             change["change"]["after_unknown"] = {
                 "arn": True,
                 "arn_without_revision": True,
@@ -972,28 +1048,46 @@ def _safe_plan() -> dict[str, Any]:
         )
         before = _target_tf(component)
         after = copy.deepcopy(before)
-        if component != "morning":
+        if component == "canary":
             after["ecs_target"][0]["task_definition_arn"] = None
         change = _change(
             address,
             "aws_cloudwatch_event_target",
-            ["no-op"] if component == "morning" else ["update"],
+            ["no-op"] if component in {"ingest", "morning"} else ["update"],
             before,
             after,
         )
-        if component != "morning":
+        if component == "canary":
             change["change"]["after_unknown"] = {"ecs_target": [{"task_definition_arn": True}]}
         changes.append(change)
         config_address = address.removesuffix("[0]")
-        task_address = TASK_ADDRESSES[component]
-        configurations.append(
-            {
-                "address": config_address,
-                "expressions": {
-                    "ecs_target": [{"task_definition_arn": {"references": [f"{task_address}.arn"]}}]
-                },
-            }
-        )
+        if component == "ingest":
+            configurations.append(
+                {
+                    "address": config_address,
+                    "expressions": {
+                        "arn": {
+                            "references": ["aws_lambda_function.ingest_dispatch[0].arn"]
+                        }
+                    },
+                }
+            )
+        else:
+            task_address = TASK_ADDRESSES[component]
+            configurations.append(
+                {
+                    "address": config_address,
+                    "expressions": {
+                        "ecs_target": [
+                            {
+                                "task_definition_arn": {
+                                    "references": [f"{task_address}.arn"]
+                                }
+                            }
+                        ]
+                    },
+                }
+            )
 
     for component, (address, _, _, _) in RULES.items():
         value = _rule_tf(component)
@@ -1006,6 +1100,34 @@ def _safe_plan() -> dict[str, Any]:
                 copy.deepcopy(value),
             )
         )
+
+    ingest_lambda = {
+        "function_name": INGEST_DISPATCHER["function_name"],
+        "environment": [{"variables": _ingest_dispatcher_environment()}],
+    }
+    changes.append(
+        _change(
+            "aws_lambda_function.ingest_dispatch[0]",
+            "aws_lambda_function",
+            ["no-op"],
+            copy.deepcopy(ingest_lambda),
+            ingest_lambda,
+        )
+    )
+    configurations.append(
+        {
+            "address": "aws_lambda_function.ingest_dispatch",
+            "expressions": {
+                "environment": [
+                    {
+                        "variables": {
+                            "references": [f"{TASK_ADDRESSES['ingest']}.arn"]
+                        }
+                    }
+                ]
+            },
+        }
+    )
 
     for component, task_address in (
         ("tiktok", TASK_ADDRESSES["tiktok"]),
@@ -1348,6 +1470,7 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     container = json.loads(task["change"]["after"]["container_definitions"])[0]
     service = _find(plan, "aws_ecs_service.mcp[0]")
     target = _find(plan, "aws_cloudwatch_event_target.ingest_run_task[0]")
+    ecs_target = _find(plan, "aws_cloudwatch_event_target.morning_digest_run_task[0]")
     rule = _find(plan, RULES["ingest"][0])
     dispatcher = _find(plan, "aws_lambda_function.tiktok_dispatch[0]")
     mapping = _find(plan, "aws_lambda_event_source_mapping.tiktok_dispatch[0]")
@@ -1430,16 +1553,21 @@ def _mutate_plan(plan: dict[str, Any], scenario: str) -> None:
     elif scenario == "service_connect":
         service["change"]["after"]["service_connect_configuration"] = [{"enabled": False}]
     elif scenario == "target_role":
+        target["change"]["actions"] = ["update"]
         target["change"]["after"]["role_arn"] = "arn:changed"
     elif scenario == "target_cluster":
+        target["change"]["actions"] = ["update"]
         target["change"]["after"]["arn"] = "arn:other-cluster"
     elif scenario == "target_network":
-        target["change"]["after"]["ecs_target"][0]["network_configuration"][0]["subnets"] = [
-            "other"
-        ]
+        ecs_target["change"]["actions"] = ["update"]
+        ecs_target["change"]["after"]["ecs_target"][0]["network_configuration"][0][
+            "subnets"
+        ] = ["other"]
     elif scenario == "target_retry":
+        target["change"]["actions"] = ["update"]
         target["change"]["after"]["retry_policy"][0]["maximum_retry_attempts"] = 9
     elif scenario == "target_input":
+        target["change"]["actions"] = ["update"]
         target["change"]["after"]["input"] = "changed"
     elif scenario == "rule_schedule":
         rule["change"]["actions"] = ["update"]
@@ -1556,6 +1684,8 @@ def _fake_aws(path: Path) -> None:
         dispatchers = json.loads(dispatchers)
         lambda_configs = {json.dumps({key: _lambda_aws(key) for key in DISPATCHERS})!r}
         lambda_configs = json.loads(lambda_configs)
+        ingest_lambda_config = {json.dumps(_ingest_lambda_aws())!r}
+        ingest_lambda_config = json.loads(ingest_lambda_config)
         mappings = {json.dumps({key: _mapping_aws(key) for key in DISPATCHERS})!r}
         mappings = json.loads(mappings)
         args = sys.argv[1:]
@@ -1626,6 +1756,9 @@ def _fake_aws(path: Path) -> None:
         if service not in ("budgets", "ce", "chatbot") and command_region != REGION:
             raise SystemExit("fake AWS regional service region differs")
         args = args[command_index:]
+        if log_path := os.environ.get("AWS_FAKE_LOG"):
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write(" ".join(args) + "\\n")
         if debug:
             import email.utils
 
@@ -2274,34 +2407,84 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["events", "list-targets-by-rule"]:
             name = args[args.index("--rule") + 1]
             component = next(key for key, value in rules.items() if value[1] == name)
-            print(json.dumps({{"Targets": [{{
-                "Id": "morning" if component == "morning" else f"target-{{component}}",
-                "Arn": f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:cluster/teamagent-dev",
-                "RoleArn": f"arn:aws:iam::{{ACCOUNT}}:role/events-{{component}}",
-                **({{"Input": "{{}}"}} if component == "morning" else {{}}),
-                "EcsParameters": {{
-                    "TaskDefinitionArn": task_arn(component),
-                    "TaskCount": 1,
-                    "LaunchType": "FARGATE",
-                    "PlatformVersion": "LATEST",
-                    "EnableECSManagedTags": False,
-                    "EnableExecuteCommand": False,
-                    "NetworkConfiguration": {{"awsvpcConfiguration": {{
-                        "AssignPublicIp": "ENABLED",
-                        "SecurityGroups": [f"sg-{{component}}"],
-                        "Subnets": ["subnet-a", "subnet-b"],
-                    }}}},
-                }},
-                "RetryPolicy": {{
-                    "MaximumEventAgeInSeconds": 3600,
-                    "MaximumRetryAttempts": 1,
-                }},
-            }}]}}))
+            if component == "ingest":
+                target = {{
+                    "Id": "ingest-dispatch",
+                    "Arn": ingest_lambda_config["FunctionArn"],
+                    "RetryPolicy": {{
+                        "MaximumEventAgeInSeconds": 3600,
+                        "MaximumRetryAttempts": 1,
+                    }},
+                }}
+                topology = os.environ.get("AWS_FAKE_INGEST_TARGET_TOPOLOGY", "lambda")
+                if topology == "ecs":
+                    target = {{
+                        "Id": "target-ingest",
+                        "Arn": f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:cluster/teamagent-dev",
+                        "RoleArn": f"arn:aws:iam::{{ACCOUNT}}:role/events-ingest",
+                        "EcsParameters": {{
+                            "TaskDefinitionArn": task_arn("ingest"),
+                            "TaskCount": 1,
+                            "LaunchType": "FARGATE",
+                            "PlatformVersion": "LATEST",
+                        }},
+                    }}
+                elif topology == "lambda-with-ecs-parameters":
+                    target["EcsParameters"] = {{
+                        "TaskDefinitionArn": task_arn("ingest"),
+                        "TaskCount": 1,
+                        "LaunchType": "FARGATE",
+                        "PlatformVersion": "LATEST",
+                    }}
+                elif topology == "wrong-lambda":
+                    target["Arn"] = (
+                        f"arn:aws:lambda:{{REGION}}:{{ACCOUNT}}:function:"
+                        "teamagent-dev-wrong-dispatch"
+                    )
+                elif topology not in (
+                    "lambda",
+                    "lambda-with-ecs-parameters",
+                    "multiple",
+                ):
+                    raise SystemExit("unknown ingest target topology")
+                targets = [target]
+                if topology == "multiple":
+                    targets.append(copy.deepcopy(target))
+                print(json.dumps({{"Targets": targets}}))
+            else:
+                print(json.dumps({{"Targets": [{{
+                    "Id": "morning" if component == "morning" else f"target-{{component}}",
+                    "Arn": f"arn:aws:ecs:{{REGION}}:{{ACCOUNT}}:cluster/teamagent-dev",
+                    "RoleArn": f"arn:aws:iam::{{ACCOUNT}}:role/events-{{component}}",
+                    **({{"Input": "{{}}"}} if component == "morning" else {{}}),
+                    "EcsParameters": {{
+                        "TaskDefinitionArn": task_arn(component),
+                        "TaskCount": 1,
+                        "LaunchType": "FARGATE",
+                        "PlatformVersion": "LATEST",
+                        "EnableECSManagedTags": False,
+                        "EnableExecuteCommand": False,
+                        "NetworkConfiguration": {{"awsvpcConfiguration": {{
+                            "AssignPublicIp": "ENABLED",
+                            "SecurityGroups": [f"sg-{{component}}"],
+                            "Subnets": ["subnet-a", "subnet-b"],
+                        }}}},
+                    }},
+                    "RetryPolicy": {{
+                        "MaximumEventAgeInSeconds": 3600,
+                        "MaximumRetryAttempts": 1,
+                    }},
+                }}]}}))
         elif args[:2] == ["ecs", "describe-task-definition"]:
             arn = args[args.index("--task-definition") + 1]
             component = next(key for key in components if components[key][1] in arn)
             task = copy.deepcopy(tasks[component])
             task["taskDefinitionArn"] = arn
+            if (
+                component == "ingest"
+                and os.environ.get("AWS_FAKE_INGEST_TASKDEF_SNAPSHOT_MISMATCH")
+            ):
+                task["taskDefinitionArn"] = arn.rsplit(":", 1)[0] + ":999"
             image_override = os.environ.get(
                 {{
                     "connect_web": "AWS_FAKE_CONNECT_IMAGE",
@@ -2336,15 +2519,23 @@ def _fake_aws(path: Path) -> None:
             print(json.dumps({{"taskDefinition": task}}))
         elif args[:2] == ["lambda", "get-function-configuration"]:
             name = args[args.index("--function-name") + 1]
-            component = next(
-                key for key, value in dispatchers.items()
-                if value["function_name"] == name
-            )
-            print(json.dumps(lambda_configs[component]))
+            if name == ingest_lambda_config["FunctionName"]:
+                config = copy.deepcopy(ingest_lambda_config)
+                if taskdef := os.environ.get("AWS_FAKE_INGEST_TASKDEF_ARN"):
+                    config["Environment"]["Variables"]["TASKDEF_ARN"] = taskdef
+                print(json.dumps(config))
+            else:
+                component = next(
+                    key for key, value in dispatchers.items()
+                    if value["function_name"] == name
+                )
+                print(json.dumps(lambda_configs[component]))
         elif args[:2] == ["lambda", "list-tags"]:
             print(json.dumps({{"Tags": {{}}}}))
         elif args[:2] == ["lambda", "get-function-concurrency"]:
             name = args[args.index("--function-name") + 1]
+            if name == ingest_lambda_config["FunctionName"]:
+                raise SystemExit("ingest concurrency read is forbidden")
             component = next(
                 key for key, value in dispatchers.items()
                 if value["function_name"] == name
@@ -2357,6 +2548,8 @@ def _fake_aws(path: Path) -> None:
         elif args[:2] == ["lambda", "list-event-source-mappings"]:
             if "--function-name" in args:
                 name = args[args.index("--function-name") + 1]
+                if name == ingest_lambda_config["FunctionName"]:
+                    raise SystemExit("ingest event source mapping read is forbidden")
                 component = next(
                     key for key, value in dispatchers.items()
                     if value["function_name"] == name
@@ -3595,6 +3788,9 @@ def _harness(
     tf_log = tmp_path / "terraform.log"
     tf_log.write_text("", encoding="utf-8")
     tf_log.chmod(0o600)
+    aws_log = tmp_path / "aws.log"
+    aws_log.write_text("", encoding="utf-8")
+    aws_log.chmod(0o600)
     release_contracts, _ = _release_contract_bindings()
     release_ready = {pipeline: True for pipeline in release_contracts}
     env = os.environ.copy()
@@ -3623,6 +3819,7 @@ def _harness(
             ),
             "TF_FAKE_CONSUMER_REGISTRY_SHA256": (CONSUMERS.consumer_registry_sha256()),
             "AWS_FAKE_TRUSTED_AUTOMATION": "1",
+            "AWS_FAKE_LOG": str(aws_log),
         }
     )
     if hmac_active:
@@ -3884,6 +4081,172 @@ def _manifest_consumer(
     return next(
         consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == consumer_id
     )
+
+
+def _runtime_guard_execution_state_definitions() -> list[str]:
+    return re.findall(
+        r"def execution_state\(\$consumer; \$phase\):.*?\n\s+end;",
+        GUARD.read_text(encoding="utf-8"),
+        flags=re.DOTALL,
+    )
+
+
+def _run_execution_state_definition(
+    definition: str,
+    *,
+    activator_type: str,
+    state: str,
+) -> subprocess.CompletedProcess[str]:
+    program = "\n".join(
+        (
+            definition,
+            "{",
+            "  activator:{type:$activator_type},",
+            "  before:{activation:{state:$state}}",
+            '} as $consumer | execution_state($consumer; "before")',
+        )
+    )
+    return subprocess.run(
+        [
+            "jq",
+            "-n",
+            "-c",
+            "--arg",
+            "activator_type",
+            activator_type,
+            "--arg",
+            "state",
+            state,
+            program,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _runtime_guard_activation_state_validator() -> str:
+    match = re.search(
+        r"\(\s*if \.activation\.type == \"ecs_service\" then.*?"
+        r"else false\s+end\s*\)",
+        GUARD.read_text(encoding="utf-8"),
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return match.group(0)
+
+
+def _run_activation_state_validator(
+    *,
+    activator_type: str,
+    state: object,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["jq", "-e", _runtime_guard_activation_state_validator()],
+        input=json.dumps({"activation": {"type": activator_type, "state": state}}),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def test_runtime_guard_consumer_activator_types_are_exact(tmp_path: Path) -> None:
+    assert [
+        (
+            consumer["consumer_id"],
+            consumer["activator"]["type"],
+            consumer["activator"]["identity"],
+        )
+        for consumer in CONSUMER_REGISTRY_DATA["consumers"]
+    ] == [
+        ("mcp", "ecs_service", "teamagent-dev-mcp"),
+        ("connect_web", "ecs_service", "teamagent-dev-connect-web"),
+        ("openclaw", "ecs_service", "teamagent-dev-openclaw"),
+        (
+            "canary",
+            "eventbridge_rule_ecs_target",
+            "teamagent-dev-canary-hourly",
+        ),
+        (
+            "ingest",
+            "eventbridge_rule_lambda_taskdef_arn_environment",
+            "teamagent-dev-ingest-weekly",
+        ),
+        (
+            "morning_digest",
+            "eventbridge_rule_ecs_target",
+            "teamagent-dev-morning-digest-weekday",
+        ),
+        (
+            "x_buzz_worker",
+            "lambda_taskdef_arn_environment",
+            "teamagent-dev-x-buzz-dispatch",
+        ),
+        (
+            "tiktok_acquire",
+            "lambda_taskdef_arn_environment",
+            "teamagent-dev-tiktok-acquire-dispatch",
+        ),
+    ]
+    expected_images = _strict_sync_expected_images()
+    embedded_registry = _run_sync_consumer_image_validator(
+        tmp_path,
+        snapshot=_strict_sync_snapshot(expected_images),
+        expected=expected_images,
+    )
+    assert embedded_registry.returncode == 0, (
+        embedded_registry.stdout + embedded_registry.stderr
+    )
+
+
+def test_both_execution_state_copies_use_rule_state_for_ingest_activator() -> None:
+    definitions = _runtime_guard_execution_state_definitions()
+    assert len(definitions) == 2
+
+    for state in ("ENABLED", "DISABLED"):
+        for definition in definitions:
+            result = _run_execution_state_definition(
+                definition,
+                activator_type="eventbridge_rule_lambda_taskdef_arn_environment",
+                state=state,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert json.loads(result.stdout) == state
+
+
+def test_unknown_activator_type_is_fail_closed_in_execution_and_schema() -> None:
+    definitions = _runtime_guard_execution_state_definitions()
+    assert len(definitions) == 2
+    for definition in definitions:
+        result = _run_execution_state_definition(
+            definition,
+            activator_type="unknown_activator",
+            state="ENABLED",
+        )
+        assert result.returncode != 0
+        assert "consumer outside code-owned activator types" in result.stderr
+
+    schema = _run_activation_state_validator(
+        activator_type="unknown_activator",
+        state="ENABLED",
+    )
+    assert schema.returncode == 1
+
+
+@pytest.mark.parametrize("state", ("ENABLED", "DISABLED"))
+def test_ingest_activator_schema_accepts_only_rule_states(state: str) -> None:
+    result = _run_activation_state_validator(
+        activator_type="eventbridge_rule_lambda_taskdef_arn_environment",
+        state=state,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    for invalid_state in ("RUNNING", True):
+        invalid = _run_activation_state_validator(
+            activator_type="eventbridge_rule_lambda_taskdef_arn_environment",
+            state=invalid_state,
+        )
+        assert invalid.returncode == 1
 
 
 def _receipt_required_canary_manifest() -> dict[str, Any]:
@@ -4641,6 +5004,117 @@ def test_dispatcher_migration_validator_rejects_non_allowlisted_changes(
     assert "destination code hash/taskdef参照以外" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "topology",
+    ("ecs", "lambda-with-ecs-parameters", "multiple", "wrong-lambda"),
+    ids=(
+        "ecs-target",
+        "lambda-arn-with-ecs-parameters",
+        "multiple-targets",
+        "wrong-lambda",
+    ),
+)
+def test_ingest_rule_rejects_noncanonical_dispatch_lambda_target(
+    tmp_path: Path,
+    topology: str,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_INGEST_TARGET_TOPOLOGY"] = topology
+
+    result = _run(
+        _plan_command(var_file, tmp_path / f"ingest-target-{topology}.tfplan"),
+        env,
+    )
+
+    assert result.returncode == 1
+    assert "dispatch Lambda target が一意ではありません" in (result.stdout + result.stderr)
+    assert not any(
+        command.startswith("plan ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_task_definition_arn",
+    (
+        f"arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/teamagent-dev-wrong:42",
+        f"arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/teamagent-dev-ingest:latest",
+        f"arn:aws:ecs:{REGION}:{ACCOUNT}:task-definition/teamagent-dev-ingest",
+    ),
+    ids=("wrong-family", "latest", "missing-revision"),
+)
+def test_ingest_dispatch_task_definition_must_be_exact_revision_pin(
+    tmp_path: Path,
+    invalid_task_definition_arn: str,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_INGEST_TASKDEF_ARN"] = invalid_task_definition_arn
+
+    result = _run(
+        _plan_command(var_file, tmp_path / "ingest-unpinned-taskdef.tfplan"),
+        env,
+    )
+
+    assert result.returncode == 1
+    assert "TASKDEF_ARNが期待familyのrevision pinではありません" in (
+        result.stdout + result.stderr
+    )
+    assert not any(
+        command.startswith("plan ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_ingest_rule_dispatcher_task_definition_must_match_snapshot_task(
+    tmp_path: Path,
+) -> None:
+    env, var_file, tf_log = _harness(tmp_path)
+    env["AWS_FAKE_INGEST_TASKDEF_SNAPSHOT_MISMATCH"] = "1"
+
+    result = _run(
+        _plan_command(var_file, tmp_path / "ingest-taskdef-mismatch.tfplan"),
+        env,
+    )
+
+    assert result.returncode == 1
+    assert "dispatcher/taskdef/event mappingのlive契約が不整合です" in (
+        result.stdout + result.stderr
+    )
+    assert not any(
+        command.startswith("plan ")
+        for command in tf_log.read_text(encoding="utf-8").splitlines()
+    )
+
+
+def test_ingest_snapshot_avoids_unauthorized_lambda_reads(tmp_path: Path) -> None:
+    env, var_file, _tf_log = _harness(tmp_path)
+
+    result = _run(
+        _plan_command(var_file, tmp_path / "ingest-authorized-reads.tfplan"),
+        env,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = Path(env["AWS_FAKE_LOG"]).read_text(encoding="utf-8").splitlines()
+    function_name = INGEST_DISPATCHER["function_name"]
+    function_arn = _ingest_lambda_arn()
+    assert (
+        f"lambda get-function-configuration --function-name {function_name} --output json"
+        in commands
+    )
+    assert f"lambda list-tags --resource {function_arn} --output json" in commands
+    assert not any(
+        command.startswith("lambda get-function-concurrency ")
+        and f"--function-name {function_name}" in command
+        for command in commands
+    )
+    assert not any(
+        command.startswith("lambda list-event-source-mappings ")
+        and f"--function-name {function_name}" in command
+        for command in commands
+    )
+
+
 def test_pre_media_cutover_legacy_sync_binds_empty_tf_inputs_through_saved_plan(
     tmp_path: Path,
 ) -> None:
@@ -5246,12 +5720,15 @@ RUNTIME_ATTRIBUTE_FAILURES = {
         [
             "target_role",
             "target_cluster",
-            "target_network",
             "target_retry",
             "target_input",
         ],
         "aws_cloudwatch_event_target.ingest_run_task[0] "
         "はliveからtask_definition参照以外も変更します",
+    ),
+    "target_network": (
+        "aws_cloudwatch_event_target.morning_digest_run_task[0] "
+        "はliveからtask_definition参照以外も変更します"
     ),
     "rule_schedule": (
         "aws_cloudwatch_event_rule.ingest_weekly[0] "

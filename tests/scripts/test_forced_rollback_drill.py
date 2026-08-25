@@ -58,7 +58,7 @@ CONSUMERS = (
         "ingest",
         "teamagent-dev-ingest",
         "core",
-        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
     ),
     (
         "morning_digest",
@@ -212,10 +212,15 @@ def _resources(*, old: bool) -> list[dict[str, Any]]:
         }[consumer_id]
         if activator_type == "ecs_service":
             activation_state: Any = 1
-        elif activator_type == "eventbridge_rule_ecs_target":
+        elif activator_type in {
+            "eventbridge_rule_ecs_target",
+            "eventbridge_rule_lambda_taskdef_arn_environment",
+        }:
             activation_state = "DISABLED" if consumer_id in {"canary", "ingest"} else "ENABLED"
-        else:
+        elif activator_type == "lambda_taskdef_arn_environment":
             activation_state = True
+        else:
+            raise AssertionError(f"unsupported test activator type: {activator_type}")
         activation = {
             "type": activator_type,
             "identity": identity,

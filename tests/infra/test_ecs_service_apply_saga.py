@@ -115,6 +115,12 @@ RULE_STATES = {
 }
 
 
+def _lambda_function_name(consumer_id: str) -> str:
+    if consumer_id == "ingest":
+        return "teamagent-dev-ingest-dispatch"
+    return str(CONSUMERS[consumer_id]["activator"]["identity"])
+
+
 def _load_module() -> Any:
     spec = importlib.util.spec_from_file_location(
         "ecs_service_apply_saga_under_test",
@@ -311,7 +317,6 @@ def _event_target_change(
 ) -> dict[str, Any]:
     address = {
         "canary": "aws_cloudwatch_event_target.canary_run_task[0]",
-        "ingest": "aws_cloudwatch_event_target.ingest_run_task[0]",
         "morning_digest": "aws_cloudwatch_event_target.morning_digest_run_task[0]",
     }[consumer_id]
     identity = CONSUMERS[consumer_id]["activator"]["identity"]
@@ -348,10 +353,11 @@ def _lambda_change(
     task_definition: str | None,
 ) -> dict[str, Any]:
     address = {
+        "ingest": "aws_lambda_function.ingest_dispatch[0]",
         "x_buzz_worker": "aws_lambda_function.x_dispatch[0]",
         "tiktok_acquire": "aws_lambda_function.tiktok_dispatch[0]",
     }[consumer_id]
-    identity = CONSUMERS[consumer_id]["activator"]["identity"]
+    identity = _lambda_function_name(consumer_id)
     variables: dict[str, Any] = {
         "CLUSTER_ARN": CLUSTER_ARN,
         "SUBNETS": "subnet-a,subnet-b",
@@ -435,26 +441,26 @@ def _plan(
                 for consumer_id in ("mcp", "connect_web", "openclaw")
             ),
             *(
-                change
-                for consumer_id in ("canary", "ingest", "morning_digest")
-                for change in (
-                    _event_rule_change(
-                        consumer_id,
-                        before_state=planned_rule_states[consumer_id][0],
-                        after_state=planned_rule_states[consumer_id][1],
-                    ),
-                    _event_target_change(
-                        consumer_id,
-                        task_definition=planned_tasks[consumer_id],
-                    ),
+                _event_rule_change(
+                    consumer_id,
+                    before_state=planned_rule_states[consumer_id][0],
+                    after_state=planned_rule_states[consumer_id][1],
                 )
+                for consumer_id in ("canary", "ingest", "morning_digest")
+            ),
+            *(
+                _event_target_change(
+                    consumer_id,
+                    task_definition=planned_tasks[consumer_id],
+                )
+                for consumer_id in ("canary", "morning_digest")
             ),
             *(
                 _lambda_change(
                     consumer_id,
                     task_definition=planned_tasks[consumer_id],
                 )
-                for consumer_id in ("x_buzz_worker", "tiktok_acquire")
+                for consumer_id in ("ingest", "x_buzz_worker", "tiktok_acquire")
             ),
             {
                 "address": "aws_s3_bucket.unrelated",
@@ -714,7 +720,7 @@ def _lambda_configuration(
     task_definition: str,
 ) -> dict[str, Any]:
     consumer = CONSUMERS[consumer_id]
-    name = consumer["activator"]["identity"]
+    name = _lambda_function_name(consumer_id)
     return {
         "FunctionName": name,
         "FunctionArn": (f"arn:aws:lambda:ap-northeast-1:718959508629:function:{name}"),
@@ -850,14 +856,14 @@ class _FakeCli:
                     task_definition=OLD_TASKS[consumer_id],
                 )
             ]
-            for consumer_id in ("canary", "ingest", "morning_digest")
+            for consumer_id in ("canary", "morning_digest")
         }
         self.lambda_configurations = {
             consumer_id: _lambda_configuration(
                 consumer_id,
                 task_definition=OLD_TASKS[consumer_id],
             )
-            for consumer_id in ("x_buzz_worker", "tiktok_acquire")
+            for consumer_id in ("ingest", "x_buzz_worker", "tiktok_acquire")
         }
         self.service_task_arns: dict[str, list[str]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
@@ -1231,9 +1237,15 @@ def _set_live_consumer_task(
     if activator_type == "eventbridge_rule_ecs_target":
         cli.targets[consumer_id][0]["EcsParameters"]["TaskDefinitionArn"] = task_definition
         return
-    cli.lambda_configurations[consumer_id]["Environment"]["Variables"]["TASKDEF_ARN"] = (
-        task_definition
-    )
+    if activator_type in {
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+        "lambda_taskdef_arn_environment",
+    }:
+        cli.lambda_configurations[consumer_id]["Environment"]["Variables"]["TASKDEF_ARN"] = (
+            task_definition
+        )
+        return
+    raise AssertionError(f"unsupported test activator: {activator_type}")
 
 
 def _promote_default_plan(cli: _FakeCli) -> None:
@@ -1330,8 +1342,75 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
     assert {spec.activator_type for spec in specs.values()} == {
         "ecs_service",
         "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
         "lambda_taskdef_arn_environment",
     }
+
+
+def test_saga_activator_partition_has_exact_hybrid_counts() -> None:
+    specs, _registry_sha256 = SAGA._load_consumer_specs(copy.deepcopy(CONSUMER_REGISTRY))
+    observed_counts = {
+        activator_type: sum(
+            spec.activator_type == activator_type for spec in specs.values()
+        )
+        for activator_type in SAGA._EXPECTED_ACTIVATOR_COUNTS
+    }
+
+    assert SAGA._EXPECTED_ACTIVATOR_COUNTS == {
+        "ecs_service": 3,
+        "eventbridge_rule_ecs_target": 2,
+        "eventbridge_rule_lambda_taskdef_arn_environment": 1,
+        "lambda_taskdef_arn_environment": 2,
+    }
+    assert observed_counts == SAGA._EXPECTED_ACTIVATOR_COUNTS
+
+
+def test_hybrid_ingest_uses_rule_activator_and_separate_lambda_pointer() -> None:
+    specs, _registry_sha256 = SAGA._load_consumer_specs(copy.deepcopy(CONSUMER_REGISTRY))
+    ingest = specs["ingest"]
+    analysis = SAGA._analyze_plan(_plan())
+    planned = analysis.binding["consumers"]["ingest"]
+
+    assert ingest.activator_type == "eventbridge_rule_lambda_taskdef_arn_environment"
+    assert ingest.activator_address == "aws_cloudwatch_event_rule.ingest_weekly[0]"
+    assert ingest.activator_edge_address is None
+    assert ingest.task_pointer_address == "aws_lambda_function.ingest_dispatch[0]"
+    assert ingest.task_pointer_identity == "teamagent-dev-ingest-dispatch"
+    assert ingest.rule_arn == (
+        "arn:aws:events:ap-northeast-1:718959508629:rule/teamagent-dev-ingest-weekly"
+    )
+    assert ingest.function_arn == (
+        "arn:aws:lambda:ap-northeast-1:718959508629:function:teamagent-dev-ingest-dispatch"
+    )
+    assert planned["activation"] == {
+        "state": "DISABLED",
+        "taskDefinition": {
+            "kind": "arn",
+            "taskDefinition": OLD_TASKS["ingest"],
+        },
+    }
+    assert planned["activationChanged"] is False
+
+
+def test_hybrid_ingest_plan_rejects_ecs_target_shaped_task_pointer() -> None:
+    plan = _plan()
+    dispatch = next(
+        change
+        for change in plan["resource_changes"]
+        if change["address"] == "aws_lambda_function.ingest_dispatch[0]"
+    )
+    for phase in ("before", "after"):
+        task_definition = dispatch["change"][phase]["environment"][0]["variables"][
+            "TASKDEF_ARN"
+        ]
+        dispatch["change"][phase].pop("environment")
+        dispatch["change"][phase]["ecs_target"] = [
+            {"task_definition_arn": task_definition}
+        ]
+    dispatch["change"]["after_unknown"] = {}
+
+    with pytest.raises(SAGA.SagaError, match="Lambda environment"):
+        SAGA._analyze_plan(plan)
 
 
 def test_pre_media_cutover_sync_accepts_exact_plan_bound_tiktok_legacy_image() -> None:
@@ -1418,6 +1497,24 @@ def test_saga_rejects_consumer_registry_activator_partition_drift() -> None:
         SAGA.SagaError,
         match="consumer registry activator partition differs",
     ):
+        SAGA._load_consumer_specs(registry)
+
+
+def test_saga_fails_closed_for_unknown_activator_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = copy.deepcopy(CONSUMER_REGISTRY)
+    ingest = next(
+        consumer for consumer in registry["consumers"] if consumer["consumer_id"] == "ingest"
+    )
+    ingest["activator"]["type"] = "unknown_future_activator"
+    monkeypatch.setattr(
+        SAGA,
+        "validate_consumer_registry",
+        lambda value: copy.deepcopy(value),
+    )
+
+    with pytest.raises(SAGA.SagaError, match="unsupported saga activator"):
         SAGA._load_consumer_specs(registry)
 
 
@@ -1529,7 +1626,18 @@ def test_begin_dispatches_each_activator_without_treating_nonservices_as_service
         _argument(arguments, "--name")
         for service, operation, arguments in cli.calls
         if (service, operation) == ("events", "describe-rule")
-    } == {CONSUMERS[key]["activator"]["identity"] for key in ("canary", "ingest", "morning_digest")}
+    } == {
+        CONSUMERS[key]["activator"]["identity"]
+        for key in ("canary", "ingest", "morning_digest")
+    }
+    assert {
+        json.loads(_argument(arguments, "--cli-input-json"))["Rule"]
+        for service, operation, arguments in cli.calls
+        if (service, operation) == ("events", "list-targets-by-rule")
+    } == {
+        CONSUMERS[key]["activator"]["identity"]
+        for key in ("canary", "morning_digest")
+    }
     assert {
         _argument(arguments, "--function-name")
         for service, operation, arguments in cli.calls
@@ -1538,13 +1646,18 @@ def test_begin_dispatches_each_activator_without_treating_nonservices_as_service
             "lambda",
             "get-function-configuration",
         )
-    } == {CONSUMERS[key]["activator"]["identity"] for key in ("x_buzz_worker", "tiktok_acquire")}
+    } == {
+        _lambda_function_name(key)
+        for key in ("ingest", "x_buzz_worker", "tiktok_acquire")
+    }
     task_service_values = {
         _argument(arguments, "--service-name")
         for service, operation, arguments in cli.calls
         if (service, operation) == ("ecs", "list-tasks")
     }
-    assert task_service_values == {CONSUMERS[key]["activator"]["identity"] for key in SERVICE_ARNS}
+    assert task_service_values == {
+        CONSUMERS[key]["activator"]["identity"] for key in SERVICE_ARNS
+    }
     assert {
         _argument(arguments, "--task-definition")
         for service, operation, arguments in cli.calls
@@ -1629,6 +1742,15 @@ def test_begin_baseline_contains_task_digest_and_activation_for_all_consumers() 
                 "taskDefinition",
                 "target",
             },
+            "eventbridge_rule_lambda_taskdef_arn_environment": {
+                "type",
+                "identity",
+                "ruleArn",
+                "state",
+                "functionArn",
+                "taskDefinition",
+                "environmentVariables",
+            },
             "lambda_taskdef_arn_environment": {
                 "type",
                 "identity",
@@ -1643,6 +1765,11 @@ def test_begin_baseline_contains_task_digest_and_activation_for_all_consumers() 
     assert baseline["ingest"]["activation"]["state"] == "DISABLED"
     assert baseline["morning_digest"]["activation"]["state"] == "ENABLED"
     assert baseline["canary"]["activation"]["target"] == cli.targets["canary"][0]
+    assert (
+        baseline["ingest"]["activation"]["environmentVariables"]
+        == cli.lambda_configurations["ingest"]["Environment"]["Variables"]
+    )
+    assert "target" not in baseline["ingest"]["activation"]
     for consumer_id in ("mcp", "connect_web", "openclaw"):
         assert baseline[consumer_id]["activation"]["status"] == "ACTIVE"
         assert baseline[consumer_id]["activation"]["desiredCount"] == 1
@@ -1652,7 +1779,7 @@ def test_begin_baseline_contains_task_digest_and_activation_for_all_consumers() 
     )
 
 
-def test_disabled_eventbridge_rules_are_observed_and_never_excluded() -> None:
+def test_disabled_rule_activators_are_observed_without_inventing_a_hybrid_ecs_target() -> None:
     cli = _FakeCli()
 
     _saga(cli).begin()
@@ -1667,11 +1794,23 @@ def test_disabled_eventbridge_rules_are_observed_and_never_excluded() -> None:
             and _argument(arguments, "--name") == identity
             for service, operation, arguments in cli.calls
         )
-        assert any(
-            (service, operation) == ("events", "list-targets-by-rule")
-            and json.loads(_argument(arguments, "--cli-input-json"))["Rule"] == identity
-            for service, operation, arguments in cli.calls
-        )
+    assert any(
+        (service, operation) == ("events", "list-targets-by-rule")
+        and json.loads(_argument(arguments, "--cli-input-json"))["Rule"]
+        == CONSUMERS["canary"]["activator"]["identity"]
+        for service, operation, arguments in cli.calls
+    )
+    assert not any(
+        (service, operation) == ("events", "list-targets-by-rule")
+        and json.loads(_argument(arguments, "--cli-input-json"))["Rule"]
+        == CONSUMERS["ingest"]["activator"]["identity"]
+        for service, operation, arguments in cli.calls
+    )
+    assert any(
+        (service, operation) == ("lambda", "get-function-configuration")
+        and _argument(arguments, "--function-name") == _lambda_function_name("ingest")
+        for service, operation, arguments in cli.calls
+    )
 
 
 def test_begin_rejects_replay_without_recapturing_or_overwriting_baseline() -> None:
@@ -1789,12 +1928,28 @@ def test_verify_accepts_planned_task_changes_for_each_activator_type() -> None:
     )
 
 
+def test_verify_rejects_mutated_hybrid_planned_activation_shape() -> None:
+    cli = _FakeCli()
+    saga = _saga(cli)
+    activation = saga.plan.binding["consumers"]["ingest"]["activation"]
+    assert frozenset(activation) == {"state", "taskDefinition"}
+    activation["unexpected"] = True
+    saga.begin()
+    _promote_default_plan(cli)
+
+    with pytest.raises(SAGA.SagaError, match=r"hybrid activation"):
+        saga.verify()
+
+
 @pytest.mark.parametrize(
     "scenario",
     [
         "eventbridge-task-definition",
         "eventbridge-rule-state",
         "eventbridge-two-targets",
+        "hybrid-task-definition",
+        "hybrid-rule-state",
+        "hybrid-missing-task-definition",
         "lambda-task-definition",
         "lambda-missing-task-definition",
     ],
@@ -1823,6 +1978,14 @@ def test_verify_applies_only_the_steady_contract_for_each_activator_type(
         duplicate = copy.deepcopy(cli.targets["canary"][0])
         duplicate["Id"] = "second-canary-target"
         cli.targets["canary"].append(duplicate)
+    elif scenario == "hybrid-task-definition":
+        cli.lambda_configurations["ingest"]["Environment"]["Variables"]["TASKDEF_ARN"] = (
+            NEW_TASKS["ingest"]
+        )
+    elif scenario == "hybrid-rule-state":
+        cli.rules["ingest"]["State"] = "ENABLED"
+    elif scenario == "hybrid-missing-task-definition":
+        cli.lambda_configurations["ingest"]["Environment"]["Variables"].pop("TASKDEF_ARN")
     elif scenario == "lambda-task-definition":
         cli.task_definitions[NEW_TASKS["x_buzz_worker"]] = copy.deepcopy(
             cli.task_definitions[OLD_TASKS["x_buzz_worker"]]
@@ -1836,18 +1999,21 @@ def test_verify_applies_only_the_steady_contract_for_each_activator_type(
         cli.lambda_configurations["x_buzz_worker"]["Environment"]["Variables"]["TASKDEF_ARN"] = (
             NEW_TASKS["x_buzz_worker"]
         )
-    else:
+    elif scenario == "lambda-missing-task-definition":
         cli.lambda_configurations["x_buzz_worker"]["Environment"]["Variables"].pop("TASKDEF_ARN")
+    else:
+        raise AssertionError(scenario)
 
     with pytest.raises(SAGA.SagaError):
         saga.verify()
 
 
-def test_disabled_to_enabled_eventbridge_transition_is_a_verified_change() -> None:
+@pytest.mark.parametrize("consumer_id", ["canary", "ingest"])
+def test_disabled_to_enabled_rule_transition_is_a_verified_change(consumer_id: str) -> None:
     cli = _FakeCli()
     plan = _plan(
         rule_states={
-            "canary": ("DISABLED", "ENABLED"),
+            consumer_id: ("DISABLED", "ENABLED"),
         }
     )
     saga = _saga(cli, plan=plan)
@@ -1855,16 +2021,16 @@ def test_disabled_to_enabled_eventbridge_transition_is_a_verified_change() -> No
     saga.begin()
     _promote_default_plan(cli)
 
-    planned = saga.plan.binding["consumers"]["canary"]
+    planned = saga.plan.binding["consumers"][consumer_id]
     assert planned["activationChanged"] is True
     assert planned["activation"]["state"] == "ENABLED"
     assert cli.item is not None
     baseline = json.loads(cli.item["baseline_json"]["S"])
-    assert baseline["canary"]["activation"]["state"] == "DISABLED"
-    with pytest.raises(SAGA.SagaError, match="EventBridge"):
+    assert baseline[consumer_id]["activation"]["state"] == "DISABLED"
+    with pytest.raises(SAGA.SagaError, match=r"EventBridge|hybrid"):
         saga.verify()
 
-    cli.rules["canary"]["State"] = "ENABLED"
+    cli.rules[consumer_id]["State"] = "ENABLED"
     assert saga.verify()["stage"] == "VERIFIED_APPLIED"
 
 
@@ -2300,6 +2466,13 @@ def test_finish_rejects_tampered_durable_binding_before_any_ecs_write(
         ("canary", "activation.state"),
         ("canary", "activation.taskDefinition"),
         ("canary", "activation.target"),
+        ("ingest", "activation.type"),
+        ("ingest", "activation.identity"),
+        ("ingest", "activation.ruleArn"),
+        ("ingest", "activation.state"),
+        ("ingest", "activation.functionArn"),
+        ("ingest", "activation.taskDefinition"),
+        ("ingest", "activation.environmentVariables"),
         ("x_buzz_worker", "activation.type"),
         ("x_buzz_worker", "activation.identity"),
         ("x_buzz_worker", "activation.functionArn"),
@@ -2337,6 +2510,32 @@ def test_finish_rejects_any_missing_consumer_baseline_field_before_aws_writes(
     }
     assert all(
         (service, operation) not in mutating_operations
+        for service, operation, _arguments in cli.calls[calls_before:]
+    )
+
+
+def test_finish_rejects_extra_hybrid_activation_field_before_aws_writes() -> None:
+    cli = _FakeCli()
+    saga = _saga(cli)
+    saga.begin()
+    assert cli.item is not None
+    baseline = json.loads(cli.item["baseline_json"]["S"])
+    baseline["ingest"]["activation"]["unexpected"] = True
+    _rewrite_durable_baseline(cli, baseline)
+    calls_before = len(cli.calls)
+
+    with pytest.raises(SAGA.SagaError, match="durable hybrid rollback activation"):
+        saga.finish(outcome="failed")
+
+    assert all(
+        (service, operation)
+        not in {
+            ("ecs", "update-service"),
+            ("events", "put-targets"),
+            ("events", "enable-rule"),
+            ("events", "disable-rule"),
+            ("lambda", "update-function-configuration"),
+        }
         for service, operation, _arguments in cli.calls[calls_before:]
     )
 

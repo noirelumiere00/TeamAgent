@@ -11,9 +11,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "infra" / "terraform" / "image_release_context.py"
+GATE_PATH = ROOT / "infra" / "terraform" / "image_release_gate.tf"
 PLAN_SCRIPT = ROOT / "infra" / "terraform" / "plan_image_release.sh"
 APPLY_SCRIPT = ROOT / "infra" / "terraform" / "apply_image_release_plan.sh"
 COMPOSED_GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+HYBRID_ACTIVATOR_TYPE = "eventbridge_rule_lambda_taskdef_arn_environment"
 
 
 def _load_module() -> Any:
@@ -223,10 +225,34 @@ def _consumer_activation(
             {"desired_count": 1, "task_definition_arn": task_arn},
             address,
         )
+    if activator["type"] == HYBRID_ACTIVATOR_TYPE:
+        assert consumer_id == "ingest"
+        rule_address = "aws_cloudwatch_event_rule.ingest_weekly[0]"
+        function_address = "aws_lambda_function.ingest_dispatch[0]"
+        function_name = f"{consumer['ecs_family']}-dispatch"
+        state = "DISABLED"
+        return (
+            [
+                (
+                    rule_address,
+                    "aws_cloudwatch_event_rule",
+                    {"name": activator["identity"], "state": state},
+                ),
+                (
+                    function_address,
+                    "aws_lambda_function",
+                    {
+                        "function_name": function_name,
+                        "environment": [{"variables": {"TASKDEF_ARN": task_arn}}],
+                    },
+                ),
+            ],
+            {"state": state, "task_definition_arn": task_arn},
+            function_address,
+        )
     if activator["type"] == "eventbridge_rule_ecs_target":
         suffix = {
             "canary": "canary_hourly",
-            "ingest": "ingest_weekly",
             "morning_digest": "morning_digest_weekday",
         }[consumer_id]
         rule_address = f"aws_cloudwatch_event_rule.{suffix}[0]"
@@ -251,31 +277,33 @@ def _consumer_activation(
             {"state": state, "task_definition_arn": task_arn},
             target_address,
         )
-    suffix = "x_dispatch" if consumer_id == "x_buzz_worker" else "tiktok_dispatch"
-    function_address = f"aws_lambda_function.{suffix}[0]"
-    mapping_address = f"aws_lambda_event_source_mapping.{suffix}[0]"
-    return (
-        [
-            (
-                function_address,
-                "aws_lambda_function",
-                {
-                    "function_name": activator["identity"],
-                    "environment": [{"variables": {"TASKDEF_ARN": task_arn}}],
-                },
-            ),
-            (
-                mapping_address,
-                "aws_lambda_event_source_mapping",
-                {"function_name": activator["identity"], "enabled": True},
-            ),
-        ],
-        {
-            "event_source_mapping_enabled": True,
-            "task_definition_arn": task_arn,
-        },
-        function_address,
-    )
+    if activator["type"] == "lambda_taskdef_arn_environment":
+        suffix = "x_dispatch" if consumer_id == "x_buzz_worker" else "tiktok_dispatch"
+        function_address = f"aws_lambda_function.{suffix}[0]"
+        mapping_address = f"aws_lambda_event_source_mapping.{suffix}[0]"
+        return (
+            [
+                (
+                    function_address,
+                    "aws_lambda_function",
+                    {
+                        "function_name": activator["identity"],
+                        "environment": [{"variables": {"TASKDEF_ARN": task_arn}}],
+                    },
+                ),
+                (
+                    mapping_address,
+                    "aws_lambda_event_source_mapping",
+                    {"function_name": activator["identity"], "enabled": True},
+                ),
+            ],
+            {
+                "event_source_mapping_enabled": True,
+                "task_definition_arn": task_arn,
+            },
+            function_address,
+        )
+    raise AssertionError(f"unsupported test activator type: {activator['type']}")
 
 
 def _consumer_manifest(*, pre_media_cutover: bool = True) -> dict[str, Any]:
@@ -437,6 +465,7 @@ def _plan(*, pre_media_cutover: bool = True) -> dict[str, Any]:
                 expression_name = {
                     "ecs_service": "task_definition",
                     "eventbridge_rule_ecs_target": "ecs_target",
+                    "eventbridge_rule_lambda_taskdef_arn_environment": "environment",
                     "lambda_taskdef_arn_environment": "environment",
                 }[consumer["activator"]["type"]]
                 configuration["expressions"] = {
@@ -914,6 +943,284 @@ def test_consumer_manifest_derives_no_image_transition_from_exact_eight() -> Non
     wrong_hash["registry_sha256"] = "0" * 64
     with pytest.raises(CONTEXT.ContextError, match="registry hash"):
         CONTEXT.validate_consumer_manifest(wrong_hash)
+
+
+def test_hybrid_consumer_requires_the_exact_rule_state_activation_shape() -> None:
+    manifest = _consumer_manifest()
+    ingest = next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == "ingest"
+    )
+
+    assert ingest["activator"]["type"] == HYBRID_ACTIVATOR_TYPE
+    assert set(ingest["after"]["activation"]) == {"state", "task_definition_arn"}
+    CONTEXT.validate_consumer_manifest(manifest)
+
+    ingest["after"]["activation"] = {
+        "event_source_mapping_enabled": False,
+        "task_definition_arn": ingest["after"]["task_definition_arn"],
+    }
+    with pytest.raises(CONTEXT.ContextError, match="activation schema mismatch"):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+
+def test_hybrid_consumer_rejects_nonstandard_eventbridge_rule_state() -> None:
+    invalid_state = "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
+    manifest = _consumer_manifest()
+    ingest = next(
+        consumer for consumer in manifest["consumers"] if consumer["consumer_id"] == "ingest"
+    )
+    ingest["after"]["activation"]["state"] = invalid_state
+
+    with pytest.raises(CONTEXT.ContextError, match=r"activation\.state is invalid"):
+        CONTEXT.validate_consumer_manifest(manifest)
+
+    registry_consumer = next(
+        consumer for consumer in REGISTRY["consumers"] if consumer["consumer_id"] == "ingest"
+    )
+    with pytest.raises(CONTEXT.ContextError, match="rule state is invalid"):
+        CONTEXT._activation_phase(
+            activator_type=HYBRID_ACTIVATOR_TYPE,
+            family=registry_consumer["ecs_family"],
+            primary={"state": invalid_state},
+            secondary={
+                "environment": [
+                    {"variables": {"TASKDEF_ARN": _task_arn(registry_consumer)}}
+                ]
+            },
+            label="ingest live activation",
+        )
+
+
+def test_hybrid_execution_state_uses_rule_state_and_unknown_type_fails_closed() -> None:
+    snapshot = {
+        "activation": {
+            "state": "DISABLED",
+            "task_definition_arn": "unused-by-execution-state",
+        }
+    }
+
+    assert (
+        CONTEXT._activation_execution_state(
+            snapshot,
+            activator_type=HYBRID_ACTIVATOR_TYPE,
+        )
+        == "DISABLED"
+    )
+    with pytest.raises(CONTEXT.ContextError, match="activation type is unsupported"):
+        CONTEXT._activation_execution_state(snapshot, activator_type="unknown")
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "snapshot",
+        "activation-phase",
+        "plan-binding",
+        "state-binding",
+        "absence",
+    ],
+)
+def test_unknown_activator_type_fails_closed_at_every_context_boundary(
+    operation: str,
+) -> None:
+    manifest_consumer = next(
+        consumer
+        for consumer in _consumer_manifest()["consumers"]
+        if consumer["consumer_id"] == "ingest"
+    )
+    unknown_consumer = json.loads(
+        json.dumps(
+            next(
+                consumer
+                for consumer in REGISTRY["consumers"]
+                if consumer["consumer_id"] == "ingest"
+            )
+        )
+    )
+    unknown_consumer["activator"]["type"] = "unknown"
+
+    with pytest.raises(CONTEXT.ContextError, match="activation type is unsupported"):
+        if operation == "snapshot":
+            CONTEXT._consumer_snapshot(
+                manifest_consumer["live"],
+                consumer=unknown_consumer,
+                label="unknown live snapshot",
+            )
+        elif operation == "activation-phase":
+            CONTEXT._activation_phase(
+                activator_type="unknown",
+                family=unknown_consumer["ecs_family"],
+                primary={},
+                secondary=None,
+                label="unknown activation",
+            )
+        elif operation == "plan-binding":
+            CONTEXT._consumer_activation_binding(
+                consumer=unknown_consumer,
+                state_resources={},
+                plan_changes={},
+            )
+        elif operation == "state-binding":
+            CONTEXT._consumer_state_activation(
+                consumer=unknown_consumer,
+                state_resources={},
+            )
+        else:
+            CONTEXT._consumer_state_activation_is_absent(
+                consumer=unknown_consumer,
+                state_resources={},
+            )
+
+
+def test_hybrid_planned_pointer_requires_the_lambda_environment_expression() -> None:
+    plan = _plan()
+    ingest = _manifest_consumer(plan, "ingest")
+    address = ingest["terraform_task_definition_address"]
+    ingest["after"]["task_definition_arn"] = address
+    ingest["after"]["activation"]["task_definition_arn"] = address
+    task_change = _resource_change(plan, address)["change"]
+    task_change["actions"] = ["delete", "create"]
+    task_change["after"]["arn"] = None
+    task_change["after"]["id"] = None
+    dispatch_change = _resource_change(
+        plan,
+        "aws_lambda_function.ingest_dispatch[0]",
+    )["change"]
+    dispatch_change["actions"] = ["update"]
+    dispatch_change["after"]["environment"][0]["variables"]["TASKDEF_ARN"] = None
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=_state(),
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+
+    accepted = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "ingest"
+    )
+    assert accepted["after"]["activation"] == {
+        "state": "DISABLED",
+        "task_definition_arn": address,
+    }
+
+    configuration = _configuration_resource(
+        plan,
+        "aws_lambda_function.ingest_dispatch",
+    )
+    configuration["expressions"]["ecs_target"] = configuration["expressions"].pop(
+        "environment"
+    )
+    with pytest.raises(CONTEXT.ContextError, match="planned pointer expression is absent"):
+        CONTEXT.build_context(
+            plan=plan,
+            state=_state(),
+            backend_metadata=_backend(),
+            workspace="default",
+        )
+
+    with pytest.raises(CONTEXT.ContextError, match="activation pointer type is unsupported"):
+        CONTEXT._require_planned_pointer_reference(
+            configuration_resources={
+                "aws_lambda_function.ingest_dispatch": {"expressions": {}}
+            },
+            pointer_resource_address="aws_lambda_function.ingest_dispatch[0]",
+            task_definition_address=address,
+            activator_type="unknown",
+            label="ingest",
+        )
+
+
+@pytest.mark.parametrize(
+    "hidden_address",
+    [
+        "aws_cloudwatch_event_rule.ingest_weekly[0]",
+        "aws_lambda_function.ingest_dispatch[0]",
+    ],
+)
+def test_hybrid_absence_requires_rule_and_dispatch_lambda_to_be_absent(
+    hidden_address: str,
+) -> None:
+    plan = _plan()
+    state = _state()
+    _make_consumer_already_absent(plan, state, "ingest")
+    plan["variables"]["enable_ingest_schedule"]["value"] = False
+
+    value = CONTEXT.build_context(
+        plan=plan,
+        state=state,
+        backend_metadata=_backend(),
+        workspace="default",
+    )
+    ingest = next(
+        consumer
+        for consumer in value["consumer_manifest"]["consumers"]
+        if consumer["consumer_id"] == "ingest"
+    )
+    assert ingest["live"] == ingest["before"] == ingest["after"] == {"absent": True}
+    assert (
+        CONTEXT.validate_consumer_activation_state(
+            plan["variables"]["image_deployment_consumer_manifest"]["value"],
+            state,
+            phase="after",
+        )["consumer_count"]
+        == 8
+    )
+
+    drifted_state = json.loads(json.dumps(state))
+    hidden_resource = next(
+        resource
+        for resource in _state()["resources"]
+        if _state_instance_address(resource) == hidden_address
+    )
+    drifted_state["resources"].append(json.loads(json.dumps(hidden_resource)))
+    with pytest.raises(CONTEXT.ContextError, match="state resources must be absent"):
+        CONTEXT.validate_consumer_activation_state(
+            plan["variables"]["image_deployment_consumer_manifest"]["value"],
+            drifted_state,
+            phase="after",
+        )
+
+
+def test_image_release_gate_routes_hybrid_and_unknown_activators_explicitly() -> None:
+    gate = " ".join(GATE_PATH.read_text(encoding="utf-8").split())
+    hybrid_shape_branch = " ".join(
+        f'''
+        consumer.activator.type == "{HYBRID_ACTIVATOR_TYPE}" ?
+        sort(keys(consumer[phase].activation)) == sort([
+          "state",
+          "task_definition_arn",
+        ]) :
+        consumer.activator.type == "lambda_taskdef_arn_environment" ?
+        '''.split()
+    )
+    hybrid_execution_branch = " ".join(
+        f'''
+        consumer.activator.type == "{HYBRID_ACTIVATOR_TYPE}" ?
+        consumer.before.activation.state != consumer.after.activation.state :
+        consumer.activator.type == "lambda_taskdef_arn_environment" ?
+        consumer.before.activation.event_source_mapping_enabled !=
+        consumer.after.activation.event_source_mapping_enabled :
+        true
+        '''.split()
+    )
+    lambda_shape_fail_closed = " ".join(
+        '''
+        consumer.activator.type == "lambda_taskdef_arn_environment" ?
+        sort(keys(consumer[phase].activation)) == sort([
+          "event_source_mapping_enabled",
+          "task_definition_arn",
+        ]) :
+        false
+        '''.split()
+    )
+
+    assert gate.count(HYBRID_ACTIVATOR_TYPE) == 2
+    assert hybrid_shape_branch in gate
+    assert hybrid_execution_branch in gate
+    assert lambda_shape_fail_closed in gate
 
 
 def test_sync_consumer_manifest_binds_the_complete_eight_consumer_state() -> None:

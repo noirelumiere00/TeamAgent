@@ -73,6 +73,13 @@ _LEGACY_TIKTOK_IMAGE_RE = re.compile(
     r"teamagent-dev-tiktok-acquire@sha256:[0-9a-f]{64}$"
 )
 _RULE_STATES = frozenset({"DISABLED", "ENABLED"})
+_HYBRID_ACTIVATOR_TYPE = "eventbridge_rule_lambda_taskdef_arn_environment"
+_RULE_ACTIVATOR_TYPES = frozenset(
+    {"eventbridge_rule_ecs_target", _HYBRID_ACTIVATOR_TYPE}
+)
+_LAMBDA_POINTER_ACTIVATOR_TYPES = frozenset(
+    {"lambda_taskdef_arn_environment", _HYBRID_ACTIVATOR_TYPE}
+)
 _DEPLOYMENT_CONFIGURATION_FIELDS = frozenset(
     {
         "alarms",
@@ -103,6 +110,8 @@ class ConsumerSpec:
     activator_identity: str
     activator_address: str
     activator_edge_address: str | None
+    task_pointer_address: str | None
+    task_pointer_identity: str | None
 
     @property
     def service_arn(self) -> str:
@@ -114,15 +123,37 @@ class ConsumerSpec:
 
     @property
     def rule_arn(self) -> str:
-        if self.activator_type != "eventbridge_rule_ecs_target":
+        if self.activator_type not in _RULE_ACTIVATOR_TYPES:
             raise SagaError("non-EventBridge consumer has no rule ARN")
         return f"arn:aws:events:{_REGION}:{_ACCOUNT_ID}:rule/{self.activator_identity}"
 
     @property
+    def function_name(self) -> str:
+        if self.activator_type == "lambda_taskdef_arn_environment":
+            return self.activator_identity
+        if (
+            self.activator_type == _HYBRID_ACTIVATOR_TYPE
+            and type(self.task_pointer_identity) is str
+        ):
+            return self.task_pointer_identity
+        raise SagaError("non-Lambda consumer has no function name")
+
+    @property
     def function_arn(self) -> str:
-        if self.activator_type != "lambda_taskdef_arn_environment":
+        if self.activator_type not in _LAMBDA_POINTER_ACTIVATOR_TYPES:
             raise SagaError("non-Lambda consumer has no function ARN")
-        return f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:{self.activator_identity}"
+        return f"arn:aws:lambda:{_REGION}:{_ACCOUNT_ID}:function:{self.function_name}"
+
+    @property
+    def lambda_pointer_address(self) -> str:
+        if self.activator_type == "lambda_taskdef_arn_environment":
+            return self.activator_address
+        if (
+            self.activator_type == _HYBRID_ACTIVATOR_TYPE
+            and type(self.task_pointer_address) is str
+        ):
+            return self.task_pointer_address
+        raise SagaError("non-Lambda consumer has no Lambda pointer address")
 
 
 _ACTIVATOR_RESOURCE_ADDRESSES = {
@@ -135,7 +166,7 @@ _ACTIVATOR_RESOURCE_ADDRESSES = {
     ),
     "ingest": (
         "aws_cloudwatch_event_rule.ingest_weekly[0]",
-        "aws_cloudwatch_event_target.ingest_run_task[0]",
+        None,
     ),
     "morning_digest": (
         "aws_cloudwatch_event_rule.morning_digest_weekday[0]",
@@ -144,10 +175,17 @@ _ACTIVATOR_RESOURCE_ADDRESSES = {
     "x_buzz_worker": ("aws_lambda_function.x_dispatch[0]", None),
     "tiktok_acquire": ("aws_lambda_function.tiktok_dispatch[0]", None),
 }
+_HYBRID_POINTER_RESOURCES = {
+    "ingest": (
+        "aws_lambda_function.ingest_dispatch[0]",
+        "teamagent-dev-ingest-dispatch",
+    ),
+}
 _SAGA_CONSUMER_IDS = frozenset(_ACTIVATOR_RESOURCE_ADDRESSES)
 _EXPECTED_ACTIVATOR_COUNTS = {
     "ecs_service": 3,
-    "eventbridge_rule_ecs_target": 3,
+    "eventbridge_rule_ecs_target": 2,
+    _HYBRID_ACTIVATOR_TYPE: 1,
     "lambda_taskdef_arn_environment": 2,
 }
 
@@ -222,10 +260,15 @@ def _load_consumer_specs(
         ):
             raise SagaError("consumer registry saga identities are not unique")
         activator_address, activator_edge_address = _ACTIVATOR_RESOURCE_ADDRESSES[key]
+        pointer_resource = _HYBRID_POINTER_RESOURCES.get(key)
+        task_pointer_address = pointer_resource[0] if pointer_resource is not None else None
+        task_pointer_identity = pointer_resource[1] if pointer_resource is not None else None
         if (activator_type == "eventbridge_rule_ecs_target") != (
             activator_edge_address is not None
         ):
             raise SagaError("consumer registry activator address contract differs")
+        if (activator_type == _HYBRID_ACTIVATOR_TYPE) != (pointer_resource is not None):
+            raise SagaError("consumer registry task pointer address contract differs")
         specs[key] = ConsumerSpec(
             key=key,
             task_address=task_address,
@@ -236,6 +279,8 @@ def _load_consumer_specs(
             activator_identity=activator_identity,
             activator_address=activator_address,
             activator_edge_address=activator_edge_address,
+            task_pointer_address=task_pointer_address,
+            task_pointer_identity=task_pointer_identity,
         )
         seen_families.add(task_family)
         seen_activators.add((activator_type, activator_identity))
@@ -845,12 +890,11 @@ def _service_plan(
     )
 
 
-def _eventbridge_plan(
+def _eventbridge_rule_plan(
     rule_item: Mapping[str, Any],
-    target_item: Mapping[str, Any],
     *,
     spec: ConsumerSpec,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[str, str]:
     rule_after, rule_unknown = _resource_after(
         rule_item,
         label=spec.activator_address,
@@ -869,6 +913,18 @@ def _eventbridge_plan(
         or rule_unknown.get("state") not in (None, False)
     ):
         raise SagaError("saved plan EventBridge rule identity is invalid")
+    assert type(before_state) is str
+    assert type(after_state) is str
+    return before_state, after_state
+
+
+def _eventbridge_plan(
+    rule_item: Mapping[str, Any],
+    target_item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], bool]:
+    before_state, after_state = _eventbridge_rule_plan(rule_item, spec=spec)
 
     if spec.activator_edge_address is None:
         raise SagaError("EventBridge activator edge is absent")
@@ -929,15 +985,16 @@ def _lambda_plan(
     *,
     spec: ConsumerSpec,
 ) -> tuple[dict[str, Any], bool]:
+    address = spec.lambda_pointer_address
     after, unknown = _resource_after(
         item,
-        label=spec.activator_address,
+        label=address,
         allowed_actions=frozenset({("no-op",), ("read",), ("update",)}),
     )
-    before = _resource_before(item, label=spec.activator_address)
+    before = _resource_before(item, label=address)
     if (
-        before.get("function_name") != spec.activator_identity
-        or after.get("function_name") != spec.activator_identity
+        before.get("function_name") != spec.function_name
+        or after.get("function_name") != spec.function_name
     ):
         raise SagaError("saved plan Lambda identity is invalid")
     before_variables = _lambda_variables(before, label="saved plan prior")
@@ -958,6 +1015,23 @@ def _lambda_plan(
     return (
         {"taskDefinition": pointer},
         _task_pointer_changed(before_task, pointer),
+    )
+
+
+def _hybrid_plan(
+    rule_item: Mapping[str, Any],
+    lambda_item: Mapping[str, Any],
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], bool]:
+    before_state, after_state = _eventbridge_rule_plan(rule_item, spec=spec)
+    pointer_activation, pointer_changed = _lambda_plan(lambda_item, spec=spec)
+    return (
+        {
+            "state": after_state,
+            "taskDefinition": pointer_activation["taskDefinition"],
+        },
+        before_state != after_state or pointer_changed,
     )
 
 
@@ -1069,10 +1143,13 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
         expected_resource_types[spec.activator_address] = {
             "ecs_service": "aws_ecs_service",
             "eventbridge_rule_ecs_target": "aws_cloudwatch_event_rule",
+            _HYBRID_ACTIVATOR_TYPE: "aws_cloudwatch_event_rule",
             "lambda_taskdef_arn_environment": "aws_lambda_function",
         }[spec.activator_type]
         if spec.activator_edge_address is not None:
             expected_resource_types[spec.activator_edge_address] = "aws_cloudwatch_event_target"
+        if spec.task_pointer_address is not None:
+            expected_resource_types[spec.task_pointer_address] = "aws_lambda_function"
 
     matches: dict[str, dict[str, Any]] = {}
     for raw_item in raw_changes:
@@ -1124,6 +1201,14 @@ def _analyze_plan(plan: Mapping[str, Any]) -> PlanAnalysis:
             activation, activation_changed = _eventbridge_plan(
                 matches[spec.activator_address],
                 matches[spec.activator_edge_address],
+                spec=spec,
+            )
+        elif spec.activator_type == _HYBRID_ACTIVATOR_TYPE:
+            if spec.task_pointer_address is None:
+                raise SagaError("hybrid activator task pointer is absent")
+            activation, activation_changed = _hybrid_plan(
+                matches[spec.activator_address],
+                matches[spec.task_pointer_address],
                 spec=spec,
             )
         elif spec.activator_type == "lambda_taskdef_arn_environment":
@@ -1401,6 +1486,20 @@ def _list_event_targets(cli: AwsCli, *, spec: ConsumerSpec) -> list[dict[str, An
     raise SagaError("EventBridge target pagination exceeds its bound")
 
 
+def _canonical_eventbridge_rule_state(raw: object, *, spec: ConsumerSpec) -> str:
+    if (
+        type(raw) is not dict
+        or raw.get("Name") != spec.activator_identity
+        or raw.get("Arn") != spec.rule_arn
+        or raw.get("EventBusName") != "default"
+        or raw.get("State") not in _RULE_STATES
+    ):
+        raise SagaError("EventBridge activation identity is not exact")
+    state = raw["State"]
+    assert type(state) is str
+    return state
+
+
 def _canonical_eventbridge_activation(
     raw: object,
     *,
@@ -1410,14 +1509,8 @@ def _canonical_eventbridge_activation(
         raise SagaError("EventBridge activation response is invalid")
     rule = raw.get("rule")
     target = raw.get("target")
-    if (
-        type(rule) is not dict
-        or rule.get("Name") != spec.activator_identity
-        or rule.get("Arn") != spec.rule_arn
-        or rule.get("EventBusName") != "default"
-        or rule.get("State") not in _RULE_STATES
-        or type(target) is not dict
-    ):
+    state = _canonical_eventbridge_rule_state(rule, spec=spec)
+    if type(target) is not dict:
         raise SagaError("EventBridge activation identity is not exact")
     target_id = target.get("Id")
     ecs_parameters = target.get("EcsParameters")
@@ -1438,7 +1531,7 @@ def _canonical_eventbridge_activation(
         "type": spec.activator_type,
         "identity": spec.activator_identity,
         "ruleArn": spec.rule_arn,
-        "state": rule["State"],
+        "state": state,
         "taskDefinition": _validate_task_definition(
             task_definition,
             expected_family=spec.task_family,
@@ -1479,7 +1572,7 @@ def _canonical_lambda_activation(
     environment = raw.get("Environment")
     variables = environment.get("Variables") if type(environment) is dict else None
     if (
-        raw.get("FunctionName") != spec.activator_identity
+        raw.get("FunctionName") != spec.function_name
         or raw.get("FunctionArn") != spec.function_arn
         or type(variables) is not dict
         or any(type(name) is not str or type(value) is not str for name, value in variables.items())
@@ -1491,7 +1584,7 @@ def _canonical_lambda_activation(
     )
     return {
         "type": spec.activator_type,
-        "identity": spec.activator_identity,
+        "identity": spec.function_name,
         "functionArn": spec.function_arn,
         "taskDefinition": task_definition,
         "environmentVariables": {
@@ -1508,9 +1601,57 @@ def _read_lambda_activation(
     raw = cli.json(
         "lambda",
         "get-function-configuration",
-        ["--function-name", spec.activator_identity],
+        ["--function-name", spec.function_name],
     )
     return _canonical_lambda_activation(raw, spec=spec), raw
+
+
+def _canonical_hybrid_activation(
+    raw: object,
+    *,
+    spec: ConsumerSpec,
+) -> dict[str, Any]:
+    if (
+        spec.activator_type != _HYBRID_ACTIVATOR_TYPE
+        or type(raw) is not dict
+        or frozenset(raw) != {"lambda", "rule"}
+    ):
+        raise SagaError("hybrid activation response is invalid")
+    state = _canonical_eventbridge_rule_state(raw.get("rule"), spec=spec)
+    lambda_activation = _canonical_lambda_activation(raw.get("lambda"), spec=spec)
+    return {
+        "type": spec.activator_type,
+        "identity": spec.activator_identity,
+        "ruleArn": spec.rule_arn,
+        "state": state,
+        "functionArn": lambda_activation["functionArn"],
+        "taskDefinition": lambda_activation["taskDefinition"],
+        "environmentVariables": lambda_activation["environmentVariables"],
+    }
+
+
+def _read_hybrid_activation(
+    cli: AwsCli,
+    *,
+    spec: ConsumerSpec,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    rule = cli.json(
+        "events",
+        "describe-rule",
+        [
+            "--name",
+            spec.activator_identity,
+            "--event-bus-name",
+            "default",
+        ],
+    )
+    lambda_configuration = cli.json(
+        "lambda",
+        "get-function-configuration",
+        ["--function-name", spec.function_name],
+    )
+    raw = {"lambda": lambda_configuration, "rule": rule}
+    return _canonical_hybrid_activation(raw, spec=spec), raw
 
 
 def _read_task_definition(
@@ -1583,10 +1724,16 @@ def _read_consumers(
             activation, raw = _read_eventbridge_activation(cli, spec=spec)
             activations[key] = activation
             raw_activations[key] = raw
+        elif spec.activator_type == _HYBRID_ACTIVATOR_TYPE:
+            activation, raw = _read_hybrid_activation(cli, spec=spec)
+            activations[key] = activation
+            raw_activations[key] = raw
         elif spec.activator_type == "lambda_taskdef_arn_environment":
             activation, raw = _read_lambda_activation(cli, spec=spec)
             activations[key] = activation
             raw_activations[key] = raw
+        elif spec.activator_type != "ecs_service":
+            raise SagaError("consumer activator type is unsupported")
     if frozenset(activations) != frozenset(specs):
         raise SagaError("consumer activation inventory is incomplete")
 
@@ -1729,6 +1876,16 @@ def _assert_stable(
             ):
                 raise SagaError(
                     f"EventBridge consumer {spec.activator_identity} is not exactly steady"
+                )
+            continue
+        if spec.activator_type == _HYBRID_ACTIVATOR_TYPE:
+            activation = state.get("activation")
+            if (
+                type(activation) is not dict
+                or _canonical_hybrid_activation(raw, spec=spec) != activation
+            ):
+                raise SagaError(
+                    f"hybrid consumer {spec.activator_identity} is not exactly steady"
                 )
             continue
         if spec.activator_type == "lambda_taskdef_arn_environment":
@@ -1947,6 +2104,37 @@ def _validate_consumer_baseline(
             )
             if normalized_activation.get("taskDefinition") != task_definition:
                 raise SagaError("durable EventBridge rollback pointer differs")
+        elif spec.activator_type == _HYBRID_ACTIVATOR_TYPE:
+            if frozenset(activation) != {
+                "environmentVariables",
+                "functionArn",
+                "identity",
+                "ruleArn",
+                "state",
+                "taskDefinition",
+                "type",
+            }:
+                raise SagaError("durable hybrid rollback activation is invalid")
+            normalized_activation = _canonical_hybrid_activation(
+                {
+                    "rule": {
+                        "Arn": activation.get("ruleArn"),
+                        "EventBusName": "default",
+                        "Name": activation.get("identity"),
+                        "State": activation.get("state"),
+                    },
+                    "lambda": {
+                        "Environment": {
+                            "Variables": activation.get("environmentVariables"),
+                        },
+                        "FunctionArn": activation.get("functionArn"),
+                        "FunctionName": spec.function_name,
+                    },
+                },
+                spec=spec,
+            )
+            if normalized_activation.get("taskDefinition") != task_definition:
+                raise SagaError("durable hybrid rollback pointer differs")
         elif spec.activator_type == "lambda_taskdef_arn_environment":
             if frozenset(activation) != {
                 "environmentVariables",
@@ -2328,6 +2516,13 @@ class EcsServiceApplySaga:
                     or observed_activation.get("state") != expected_activation.get("state")
                 ):
                     raise SagaError("live EventBridge activation differs from the saved plan")
+            elif spec.activator_type == _HYBRID_ACTIVATOR_TYPE:
+                if (
+                    frozenset(expected_activation) != {"state", "taskDefinition"}
+                    or expected_activation.get("state") not in _RULE_STATES
+                    or observed_activation.get("state") != expected_activation.get("state")
+                ):
+                    raise SagaError("live hybrid activation differs from the saved plan")
             elif spec.activator_type == "lambda_taskdef_arn_environment":
                 if frozenset(expected_activation) != {"taskDefinition"}:
                     raise SagaError("planned Lambda activation differs")
@@ -2342,8 +2537,14 @@ class EcsServiceApplySaga:
             activation = state.get("activation")
             if type(activation) is not dict:
                 raise SagaError("durable consumer rollback activation is incomplete")
-            if spec.activator_type != "ecs_service":
+            if spec.activator_type in {
+                "eventbridge_rule_ecs_target",
+                _HYBRID_ACTIVATOR_TYPE,
+                "lambda_taskdef_arn_environment",
+            }:
                 continue
+            if spec.activator_type != "ecs_service":
+                raise SagaError("consumer activator type is unsupported")
             response = self.cli.json(
                 "ecs",
                 "update-service",

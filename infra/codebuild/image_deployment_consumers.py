@@ -33,6 +33,7 @@ _RECEIPT_KEYS = {"pipeline", "subject"}
 _ACTIVATOR_TYPES = {
     "ecs_service",
     "eventbridge_rule_ecs_target",
+    "eventbridge_rule_lambda_taskdef_arn_environment",
     "lambda_taskdef_arn_environment",
 }
 _TASK_DEFINITION_ADDRESS_RE = re.compile(r"aws_ecs_task_definition\.[a-z][a-z0-9_]*(?:\[0\])?")

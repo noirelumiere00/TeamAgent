@@ -443,18 +443,20 @@ def _consumer_snapshot(
                 ),
             ),
         }
-    elif activator_type == "eventbridge_rule_ecs_target":
+    elif activator_type in {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }:
         _exact_keys(
             activation,
             {"state", "task_definition_arn"},
             label=f"{label}.activation",
         )
         state = activation["state"]
-        if state not in {
-            "DISABLED",
-            "ENABLED",
-            "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
-        }:
+        allowed_states = {"DISABLED", "ENABLED"}
+        if activator_type == "eventbridge_rule_ecs_target":
+            allowed_states.add("ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS")
+        if state not in allowed_states:
             raise ContextError(f"{label}.activation.state is invalid")
         normalized_activation = {
             "state": state,
@@ -518,7 +520,10 @@ def _activation_execution_state(
     activation = _mapping(snapshot["activation"], label="consumer activation")
     if activator_type == "ecs_service":
         return activation["desired_count"]
-    if activator_type == "eventbridge_rule_ecs_target":
+    if activator_type in {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }:
         return activation["state"]
     if activator_type == "lambda_taskdef_arn_environment":
         return activation["event_source_mapping_enabled"]
@@ -758,11 +763,17 @@ def _require_planned_pointer_reference(
         configuration.get("expressions"),
         label=f"{label} pointer expressions",
     )
-    expression_name = {
-        "ecs_service": "task_definition",
-        "eventbridge_rule_ecs_target": "ecs_target",
-        "lambda_taskdef_arn_environment": "environment",
-    }[activator_type]
+    if activator_type == "ecs_service":
+        expression_name = "task_definition"
+    elif activator_type == "eventbridge_rule_ecs_target":
+        expression_name = "ecs_target"
+    elif activator_type in {
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+        "lambda_taskdef_arn_environment",
+    }:
+        expression_name = "environment"
+    else:
+        raise ContextError(f"{label} activation pointer type is unsupported")
     pointer_expression = expressions.get(expression_name)
     if pointer_expression is None:
         raise ContextError(f"{label} planned pointer expression is absent")
@@ -1287,24 +1298,45 @@ def _activation_phase(
                 planned_address=planned_address,
             ),
         }
-    if secondary is None:
-        raise ContextError(f"{label} event source mapping is absent")
-    mapping_enabled = secondary.get("enabled")
-    if not isinstance(mapping_enabled, bool):
-        raise ContextError(f"{label} event source mapping state is invalid")
-    return {
-        "event_source_mapping_enabled": mapping_enabled,
-        "task_definition_arn": _task_definition_arn(
-            _task_definition_from_environment(
-                primary.get("environment"),
-                label=label,
+    if activator_type == "eventbridge_rule_lambda_taskdef_arn_environment":
+        if secondary is None:
+            raise ContextError(f"{label} dispatch Lambda is absent")
+        state = primary.get("state")
+        if state not in {"DISABLED", "ENABLED"}:
+            raise ContextError(f"{label} rule state is invalid")
+        return {
+            "state": state,
+            "task_definition_arn": _task_definition_arn(
+                _task_definition_from_environment(
+                    secondary.get("environment"),
+                    label=label,
+                    planned_address=planned_address,
+                ),
+                family=family,
+                label=f"{label} task definition ARN",
                 planned_address=planned_address,
             ),
-            family=family,
-            label=f"{label} task definition ARN",
-            planned_address=planned_address,
-        ),
-    }
+        }
+    if activator_type == "lambda_taskdef_arn_environment":
+        if secondary is None:
+            raise ContextError(f"{label} event source mapping is absent")
+        mapping_enabled = secondary.get("enabled")
+        if not isinstance(mapping_enabled, bool):
+            raise ContextError(f"{label} event source mapping state is invalid")
+        return {
+            "event_source_mapping_enabled": mapping_enabled,
+            "task_definition_arn": _task_definition_arn(
+                _task_definition_from_environment(
+                    primary.get("environment"),
+                    label=label,
+                    planned_address=planned_address,
+                ),
+                family=family,
+                label=f"{label} task definition ARN",
+                planned_address=planned_address,
+            ),
+        }
+    raise ContextError(f"{label} activation type is unsupported")
 
 
 def _consumer_activation_binding(
@@ -1321,18 +1353,33 @@ def _consumer_activation_binding(
     if activator_type == "ecs_service":
         primary_type = "aws_ecs_service"
         primary_field = "name"
+        primary_identity = identity
         secondary_type = None
         secondary_field = None
+        secondary_identity = None
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
+        primary_identity = identity
         secondary_type = "aws_cloudwatch_event_target"
         secondary_field = "rule"
-    else:
+        secondary_identity = identity
+    elif activator_type == "eventbridge_rule_lambda_taskdef_arn_environment":
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        primary_identity = identity
+        secondary_type = "aws_lambda_function"
+        secondary_field = "function_name"
+        secondary_identity = f"{family}-dispatch"
+    elif activator_type == "lambda_taskdef_arn_environment":
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
+        primary_identity = identity
         secondary_type = "aws_lambda_event_source_mapping"
         secondary_field = "function_name"
+        secondary_identity = identity
+    else:
+        raise ContextError(f"{consumer_id} activation type is unsupported")
     present = {
         phase: not consumer_snapshot_is_absent(consumer[phase])
         for phase in ("live", "before", "after")
@@ -1342,6 +1389,7 @@ def _consumer_activation_binding(
         *,
         resource_type: str,
         identity_field: str,
+        resource_identity: str,
         label: str,
     ) -> tuple[
         Mapping[str, Any] | None,
@@ -1353,7 +1401,7 @@ def _consumer_activation_binding(
             state_resources,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=label,
         )
         if (state_match is not None) != present["live"]:
@@ -1364,7 +1412,7 @@ def _consumer_activation_binding(
             plan_changes,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=label,
             expected_address=state_address,
         )
@@ -1406,13 +1454,18 @@ def _consumer_activation_binding(
     primary_live, primary_before, primary_after, primary_address = bind_resource(
         resource_type=primary_type,
         identity_field=primary_field,
+        resource_identity=primary_identity,
         label=f"{consumer_id} activation resource",
     )
     secondary_live: Mapping[str, Any] | None = None
     secondary_before: Mapping[str, Any] | None = None
     secondary_after: Mapping[str, Any] | None = None
     secondary_address: str | None = None
-    if secondary_type is not None and secondary_field is not None:
+    if (
+        secondary_type is not None
+        and secondary_field is not None
+        and secondary_identity is not None
+    ):
         (
             secondary_live,
             secondary_before,
@@ -1421,6 +1474,7 @@ def _consumer_activation_binding(
         ) = bind_resource(
             resource_type=secondary_type,
             identity_field=secondary_field,
+            resource_identity=secondary_identity,
             label=f"{consumer_id} activation edge",
         )
     phases: dict[str, dict[str, Any]] = {}
@@ -1444,11 +1498,15 @@ def _consumer_activation_binding(
                 str(consumer["terraform_task_definition_address"]) if phase == "after" else None
             ),
         )
-    pointer_resource_address = (
-        primary_address
-        if activator_type in {"ecs_service", "lambda_taskdef_arn_environment"}
-        else secondary_address
-    )
+    if activator_type in {"ecs_service", "lambda_taskdef_arn_environment"}:
+        pointer_resource_address = primary_address
+    elif activator_type in {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }:
+        pointer_resource_address = secondary_address
+    else:
+        raise ContextError(f"{consumer_id} activation pointer type is unsupported")
     if present["after"] and pointer_resource_address is None:
         raise ContextError(f"{consumer_id} activation pointer resource is absent")
     return phases, pointer_resource_address
@@ -1466,32 +1524,51 @@ def _consumer_state_activation(
     if activator_type == "ecs_service":
         primary_type = "aws_ecs_service"
         primary_field = "name"
+        primary_identity = identity
         secondary_type = None
         secondary_field = None
+        secondary_identity = None
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
+        primary_identity = identity
         secondary_type = "aws_cloudwatch_event_target"
         secondary_field = "rule"
-    else:
+        secondary_identity = identity
+    elif activator_type == "eventbridge_rule_lambda_taskdef_arn_environment":
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        primary_identity = identity
+        secondary_type = "aws_lambda_function"
+        secondary_field = "function_name"
+        secondary_identity = f"{consumer['ecs_family']}-dispatch"
+    elif activator_type == "lambda_taskdef_arn_environment":
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
+        primary_identity = identity
         secondary_type = "aws_lambda_event_source_mapping"
         secondary_field = "function_name"
+        secondary_identity = identity
+    else:
+        raise ContextError(f"{consumer_id} activation type is unsupported")
     _, primary = _find_state_resource(
         state_resources,
         resource_type=primary_type,
         identity_field=primary_field,
-        identity=identity,
+        identity=primary_identity,
         label=f"{consumer_id} activation resource",
     )
     secondary: Mapping[str, Any] | None = None
-    if secondary_type is not None and secondary_field is not None:
+    if (
+        secondary_type is not None
+        and secondary_field is not None
+        and secondary_identity is not None
+    ):
         _, secondary = _find_state_resource(
             state_resources,
             resource_type=secondary_type,
             identity_field=secondary_field,
-            identity=identity,
+            identity=secondary_identity,
             label=f"{consumer_id} activation edge",
         )
     return _activation_phase(
@@ -1513,27 +1590,34 @@ def _consumer_state_activation_is_absent(
     activator_type = str(activator["type"])
     identity = str(activator["identity"])
     if activator_type == "ecs_service":
-        resource_contracts = (("aws_ecs_service", "name"),)
+        resource_contracts = (("aws_ecs_service", "name", identity),)
     elif activator_type == "eventbridge_rule_ecs_target":
         resource_contracts = (
-            ("aws_cloudwatch_event_rule", "name"),
-            ("aws_cloudwatch_event_target", "rule"),
+            ("aws_cloudwatch_event_rule", "name", identity),
+            ("aws_cloudwatch_event_target", "rule", identity),
+        )
+    elif activator_type == "eventbridge_rule_lambda_taskdef_arn_environment":
+        resource_contracts = (
+            ("aws_cloudwatch_event_rule", "name", identity),
+            ("aws_lambda_function", "function_name", f"{consumer['ecs_family']}-dispatch"),
+        )
+    elif activator_type == "lambda_taskdef_arn_environment":
+        resource_contracts = (
+            ("aws_lambda_function", "function_name", identity),
+            ("aws_lambda_event_source_mapping", "function_name", identity),
         )
     else:
-        resource_contracts = (
-            ("aws_lambda_function", "function_name"),
-            ("aws_lambda_event_source_mapping", "function_name"),
-        )
+        raise ContextError(f"{consumer_id} activation type is unsupported")
     return all(
         _find_optional_state_resource(
             state_resources,
             resource_type=resource_type,
             identity_field=identity_field,
-            identity=identity,
+            identity=resource_identity,
             label=f"{consumer_id} activation resource",
         )
         is None
-        for resource_type, identity_field in resource_contracts
+        for resource_type, identity_field, resource_identity in resource_contracts
     )
 
 

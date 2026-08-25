@@ -357,16 +357,21 @@ def _consumer_snapshot(
             "desired_count": execution,
             "task_definition_arn": task_definition_arn,
         }
-    elif activator_type == "eventbridge_rule_ecs_target":
+    elif activator_type in {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }:
         activation = {
             "state": execution,
             "task_definition_arn": task_definition_arn,
         }
-    else:
+    elif activator_type == "lambda_taskdef_arn_environment":
         activation = {
             "event_source_mapping_enabled": execution,
             "task_definition_arn": task_definition_arn,
         }
+    else:
+        raise AssertionError(f"unsupported test activator type: {activator_type}")
     return {
         "image": image,
         "task_definition_arn": task_definition_arn,
@@ -438,10 +443,15 @@ def _consumer_manifest(
         default_execution: int | str | bool
         if activator_type == "ecs_service":
             default_execution = 1
-        elif activator_type == "eventbridge_rule_ecs_target":
+        elif activator_type in {
+            "eventbridge_rule_ecs_target",
+            "eventbridge_rule_lambda_taskdef_arn_environment",
+        }:
             default_execution = "ENABLED" if consumer_id == "morning_digest" else "DISABLED"
-        else:
+        elif activator_type == "lambda_taskdef_arn_environment":
             default_execution = True
+        else:
+            raise AssertionError(f"unsupported test activator type: {activator_type}")
         before_execution, after_execution = activation_changes.get(
             consumer_id,
             (default_execution, default_execution),

@@ -291,10 +291,17 @@ locals {
                   "state",
                   "task_definition_arn",
                 ]) :
+                consumer.activator.type == "eventbridge_rule_lambda_taskdef_arn_environment" ?
+                sort(keys(consumer[phase].activation)) == sort([
+                  "state",
+                  "task_definition_arn",
+                ]) :
+                consumer.activator.type == "lambda_taskdef_arn_environment" ?
                 sort(keys(consumer[phase].activation)) == sort([
                   "event_source_mapping_enabled",
                   "task_definition_arn",
-                ])
+                ]) :
+                false
               ),
               false,
             )
@@ -366,8 +373,12 @@ locals {
             consumer.after.activation.desired_count :
             consumer.activator.type == "eventbridge_rule_ecs_target" ?
             consumer.before.activation.state != consumer.after.activation.state :
+            consumer.activator.type == "eventbridge_rule_lambda_taskdef_arn_environment" ?
+            consumer.before.activation.state != consumer.after.activation.state :
+            consumer.activator.type == "lambda_taskdef_arn_environment" ?
             consumer.before.activation.event_source_mapping_enabled !=
-            consumer.after.activation.event_source_mapping_enabled
+            consumer.after.activation.event_source_mapping_enabled :
+            true
           ),
           true,
         )
