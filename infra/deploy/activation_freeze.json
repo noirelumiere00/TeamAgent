@@ -191,10 +191,12 @@
     "generation_release_chain_note": "S3 codebuild-buildspecs/ 配下の全 prefix を無条件スキャンして得た release chain の実体。adopt purity（4 forget + 4 import）と generation freeze integrity は別概念で、後者はこの inventory 全体を対象とする（2026-08-24 ユーザー裁定⑦）。"
   },
   "unlock": {
-    "active": false,
-    "scope_paths": [],
-    "reason": null,
-    "gate": null,
+    "active": true,
+    "scope_paths": [
+      "infra/codebuild/teamagent_core_media_release_contract.json"
+    ],
+    "reason": "wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避。2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED しており、この追随なしにはリリース鎖が再走できない。総数 240→240・追加0・削除0・Chromium 不変。",
+    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定し実装まで進める / AWS 側 freeze は全 principal から detach 済み）",
     "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。"
   },
   "production_deployment_freeze": {
