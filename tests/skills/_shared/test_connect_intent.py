@@ -13,6 +13,10 @@ from __future__ import annotations
 import pytest
 
 from teamagent.skills._shared.connect_intent import (
+    _CORE_TERMS,
+    _REQUEST_MARKERS,
+    _STRONG_TERMS,
+    _WEAK_TERMS,
     REASON_EMPTY,
     REASON_TOO_LONG,
     detect_connect_intent,
@@ -54,6 +58,34 @@ DOES_NOT_FIRE: list[tuple[str, str]] = [
     ("空文字", ""),
 ]
 
+# ── 誤爆表（2026-08 レッドチームが実文例 150 超で見つけた 17 件）────────────────
+#
+# 判定対象は生発話ではなく **LLM が要約した tool 引数**。語尾が落ちて名詞句に凝縮されるので、
+# 「残差＝連携語」だけを条件にすると資料検索の素キーワードがそのまま連携リンクに化けた。
+# 実測で `search(query="メール認証")` が `oauth_connect` へ寄せ替えられていた。
+FALSE_POSITIVES: list[tuple[str, str]] = [
+    # A. サービス名前置き + 弱い連携語（＝資料検索の素キーワード）
+    ("資料KW: メール認証", "メール認証"),
+    ("資料KW: アカウント認証", "アカウント認証"),
+    ("資料KW: Google認証", "Google認証"),
+    ("資料KW: Slack認証", "Slack認証"),
+    ("資料KW: メール接続", "メール接続"),
+    ("資料KW: カレンダー連動", "カレンダー連動"),
+    ("資料KW: アカウントコネクト", "アカウントコネクト"),
+    # B. 弱い連携語の素出し（「コネクト」「連動」は実在社名でもある）
+    ("素の社名", "コネクト"),
+    ("素の名詞: 連動", "連動"),
+    ("素の名詞: 認証", "認証"),
+    ("素の名詞: 認可", "認可"),
+    ("素の名詞: 接続", "接続"),
+    ("素の名詞: つなぎ", "つなぎ"),
+    ("素の英単語", "authorization"),
+    # C. 助詞だけで剥がれる話題提示
+    ("定義質問", "連携とは"),
+    ("定義質問(接続)", "接続とは？"),
+    ("社名+助詞", "コネクトの"),
+]
+
 
 @pytest.mark.parametrize(("label", "text"), FIRES, ids=[label for label, _ in FIRES])
 def test_connect_requests_fire(label: str, text: str) -> None:
@@ -67,11 +99,52 @@ def test_non_connect_requests_do_not_fire(label: str, text: str) -> None:
     assert not detect_connect_intent(text).matched, f"誤爆した: {label} / {text!r}"
 
 
+@pytest.mark.parametrize(
+    ("label", "text"), FALSE_POSITIVES, ids=[label for label, _ in FALSE_POSITIVES]
+)
+def test_search_keywords_are_not_hijacked(label: str, text: str) -> None:
+    """資料検索の素キーワードを連携リンクで潰さない（誤爆＞発火漏れ の非対称性）。"""
+    assert not detect_connect_intent(text).matched, f"誤爆した: {label} / {text!r}"
+
+
+def test_weak_terms_fire_only_with_a_request_marker() -> None:
+    """弱い連携語は素出しでは発火せず、依頼語尾がついたときだけ発火する。"""
+    for term in sorted(_WEAK_TERMS):
+        assert not detect_connect_intent(term).matched, f"弱語の素出しで誤爆: {term!r}"
+    assert detect_connect_intent("認証して").matched
+    assert detect_connect_intent("接続したい").matched
+    assert detect_connect_intent("連動お願いします").matched
+
+
+def test_strong_terms_fire_bare_and_with_a_service_prefix() -> None:
+    """強い連携語は単体・前置きつきでも発火する（＝従来の一語運用を壊さない）。"""
+    for term in sorted(_STRONG_TERMS):
+        assert detect_connect_intent(term).matched, f"強語が落ちた: {term!r}"
+    assert detect_connect_intent("Google連携").matched
+    assert detect_connect_intent("メール連携").matched
+    assert detect_connect_intent("Aico 連携").matched, "自分の名前を前置きにした呼びかけ"
+
+
+def test_term_split_covers_every_core_term() -> None:
+    """強／弱の分割が `_CORE_TERMS` を過不足なく覆う（片方に足し忘れない）。"""
+    assert _STRONG_TERMS | _WEAK_TERMS == _CORE_TERMS
+    assert _STRONG_TERMS & _WEAK_TERMS == frozenset()
+    assert _STRONG_TERMS <= _CORE_TERMS
+
+
+def test_request_markers_exclude_bare_particles_and_copulas() -> None:
+    """裸助詞・コピュラを依頼マーカーに入れない（「連携とは」が依頼に化ける）。"""
+    for particle in ("の", "を", "は", "が", "に", "へ", "と", "ね", "よ", "な", "です", "ます"):
+        assert particle not in _REQUEST_MARKERS, f"助詞が依頼マーカーに混ざった: {particle!r}"
+    for marker in ("して", "したい", "お願いします", "ください", "リンク"):
+        assert marker in _REQUEST_MARKERS, f"依頼マーカーが落ちた: {marker!r}"
+
+
 def test_reason_codes_are_deterministic_and_carry_no_text() -> None:
     """ログへ出すのは理由コードだけ。入力本文が混ざらないことを固定する。"""
     assert detect_connect_intent("").reason == REASON_EMPTY
     assert detect_connect_intent("あ" * 40).reason == REASON_TOO_LONG
-    for _, text in FIRES + DOES_NOT_FIRE:
+    for _, text in FIRES + DOES_NOT_FIRE + FALSE_POSITIVES:
         reason = detect_connect_intent(text).reason
         assert reason.isascii(), f"理由コードは ASCII の決定論コードに保つこと: {reason!r}"
         assert not text or text not in reason, f"理由コードに本文が混ざった: {reason!r}"

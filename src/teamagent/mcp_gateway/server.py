@@ -668,6 +668,11 @@ def _maybe_redirect_to_connect(
 
     LLM が **1 つも tool を呼ばなかった**ターン（本番実測の 1・2 ターン目）はここへ来ない。
     そこは SOUL.md の専用節（連携語は一語でも ``oauth_connect`` を呼ぶ）が担う。
+
+    また :func:`dispatch_run_agent`（``USE_AGENT_ORCHESTRATOR=1`` の dark 経路）には
+    **意図的に適用していない**。あちらは L1 tool 一式（``oauth_connect`` を含む）を
+    そのまま SDK へ渡す委譲口なので、境界で ``goal`` を横取りすると
+    「エージェントに任せる」という当の契約を壊す。連携語は SDK 側の tool 選択で拾う。
     """
     intent = detect_connect_intent_in_args(skill_args)
     connect_spec = by_name.get(OAUTH_CONNECT_TOOL_NAME)

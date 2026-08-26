@@ -145,6 +145,13 @@ async def test_connect_request_is_redirected_to_oauth_connect(text: str) -> None
         "〇〇社との連携について提案書を作って",
         "他社との連携事例を検索して",
         "花王の最近の提案資料",
+        # 2026-08 レッドチーム実測: 素キーワードが実際に oauth_connect へ寄せ替えられていた
+        # （ログ `tool_requested=search tool_dispatched=oauth_connect`）。境界で再現しない。
+        "メール認証",
+        "アカウント認証",
+        "カレンダー連動",
+        "コネクト",
+        "連携とは",
     ],
 )
 async def test_non_connect_request_is_not_redirected(text: str) -> None:

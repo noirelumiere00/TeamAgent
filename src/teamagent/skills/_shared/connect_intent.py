@@ -20,6 +20,29 @@
 2. 依頼の**外側**から、丁寧語・サービス名の前置きと、依頼語尾の後置きを削る
 3. 残差が **連携語ちょうど 1 個と完全一致** したときだけ発火する
 
+## 残差一致だけでは足りない（2026-08 レッドチーム実測）
+
+判定対象は利用者の生発話ではなく **外側 LLM が要約した tool 引数**である。LLM は文脈語尾を
+落として名詞句へ凝縮するため、誤爆を防いでいた語尾・長さの手掛かりが判定時点で消えている。
+実際、残差一致だけだと ``メール認証`` ``コネクト`` ``連動`` ``authorization``（＝資料検索の
+素キーワード）や ``連携とは``（＝話題提示。裸助詞が多段で剥がれる）まで発火した。
+
+そこで連携語を **強／弱** に割り、剥がした後置きが**依頼マーカー**
+（:data:`_REQUEST_MARKERS`＝「して」「したい」「お願い」「リンク」等。裸助詞とコピュラは含めない）
+だったかを持ち回り、発火条件を次に絞る:
+
+    残差 ∈ :data:`_CORE_TERMS` かつ
+    （依頼マーカーを剥がした **または**
+    残差 ∈ :data:`_STRONG_TERMS` かつ後置きを 1 つも剥がしていない）
+
+- ``連携`` ``Google連携`` … 強語＋前置きのみ → 発火
+- ``連携して`` ``認証して`` ``接続したい`` ``連携リンク`` … マーカーあり → 発火
+- ``メール認証`` ``コネクト`` ``連動`` ``authorization`` … 弱語＋マーカー無し → **発火しない**
+- ``連携とは`` ``コネクトの`` … 助詞だけ → **発火しない**
+
+これで :func:`detect_connect_intent_in_args` が ``client_name`` を見ない理由
+（「コネクト」「連動」は実在社名）と、``query`` 欄での挙動が初めて一致する。
+
 加えて「短い依頼文で連携語が主辞」であることを、正規化後の長さ上限
 （:data:`_MAX_NORMALIZED_LEN`）で明示する。長文の中に「連携して」が現れるだけの文
 （「先方と連携して進める件、議事録まとめて」）は 2 の段階で既に落ちるが、
@@ -89,10 +112,35 @@ _CORE_TERMS: Final[frozenset[str]] = frozenset(
     }
 )
 
+# 強い連携語＝「これ単体で依頼になりうる」語。資料検索の素キーワードとしては滅多に打たれない。
+_STRONG_TERMS: Final[frozenset[str]] = frozenset(
+    {
+        "連携",
+        "再連携",
+        "つなぐ",
+        "繋ぐ",
+        "つないで",
+        "繋いで",
+        "つなげる",
+        "繋げる",
+        "つなげて",
+        "繋げて",
+        "connect",
+        "reconnect",
+    }
+)
+
+# 弱い連携語＝**資料検索の素キーワードとしても普通に打たれる**語（社名「コネクト」を含む）。
+# これらは依頼語尾（_REQUEST_MARKERS）を伴うときだけ連携依頼と見なす。
+_WEAK_TERMS: Final[frozenset[str]] = _CORE_TERMS - _STRONG_TERMS
+
 # ── 前置き（外側から削る）────────────────────────────────────────────────────
 # サービス名・所有格・丁寧語の枕。**削った結果が連携語ちょうどのときだけ**発火するので、
 # ここを広げても「連携事例を検索して」のような文には効かない。
 _PREFIXES: Final[tuple[str, ...]] = (
+    # 自分の名前（@ 付きは正規化で落ちるが、素の「Aico 連携」も拾えるようにする）
+    "aico",
+    "エイコ",
     "google",
     "グーグル",
     "gmail",
@@ -149,9 +197,11 @@ _SUFFIXES: Final[tuple[str, ...]] = (
     "したいんですが",
     "してくださいます",
     "してほしいです",
+    "して欲しいです",
     "してください",
     "して下さい",
     "してほしい",
+    "して欲しい",
     "しなおしたい",
     "し直したい",
     "やり直したい",
@@ -174,6 +224,7 @@ _SUFFIXES: Final[tuple[str, ...]] = (
     "下さい",
     "くれる",
     "ほしい",
+    "欲しい",
     "たいです",
     "たい",
     "です",
@@ -194,6 +245,13 @@ _SUFFIXES: Final[tuple[str, ...]] = (
     "ね",
     "よ",
     "な",
+)
+
+# 依頼マーカー＝「〜して」「〜したい」「〜お願い」「リンク」等、**依頼・要求**を表す語尾。
+# 助詞・コピュラ（の/を/は/が/に/へ/と/ね/よ/な/です/ます）は **含めない**——
+# 含めると「連携とは」「認証を」のような話題提示まで依頼に化ける。
+_REQUEST_MARKERS: Final[frozenset[str]] = frozenset(_SUFFIXES) - frozenset(
+    {"の", "を", "は", "が", "に", "へ", "と", "ね", "よ", "な", "です", "ます"}
 )
 
 # 「短い依頼文で連携語が主辞」を長さでも宣言する（正規化後＝記号・空白を除いた文字数）。
@@ -255,32 +313,53 @@ def _strip_once(text: str, affixes: tuple[str, ...], *, prefix: bool) -> str:
     return text
 
 
-def strip_connect_affixes(normalized: str) -> str:
-    """正規化文字列から前置き・後置きを外側から繰り返し削り、残差を返す。"""
+def _strip_with_flags(normalized: str) -> tuple[str, bool, bool]:
+    """残差と「後置きを削ったか」「依頼マーカーを削ったか」を返す。"""
     text = normalized
     previous = ""
+    suffix_stripped = False
+    marker_stripped = False
     while text and text != previous:
         previous = text
         text = _strip_once(text, _PREFIXES, prefix=True)
+        before = text
         text = _strip_once(text, _SUFFIXES, prefix=False)
-    return text
+        if text != before:
+            suffix_stripped = True
+            if before[len(text) :] in _REQUEST_MARKERS:
+                marker_stripped = True
+    return text, suffix_stripped, marker_stripped
+
+
+def strip_connect_affixes(normalized: str) -> str:
+    """正規化文字列から前置き・後置きを外側から繰り返し削り、残差を返す。"""
+    return _strip_with_flags(normalized)[0]
 
 
 def detect_connect_intent(raw: str | None) -> ConnectIntent:
     """本文が「連携してほしい」という依頼そのものかを判定する純粋関数。
 
     発火するのは **短い依頼文で連携語が主辞**のときだけ。長文・修飾された文
-    （「〇〇社との連携について提案書を」）では発火しない。
+    （「〇〇社との連携について提案書を」）では発火しない。さらに弱い連携語
+    （「認証」「連動」「コネクト」等＝資料検索の素キーワードにもなる語）は、
+    依頼マーカーを伴うときだけ発火する（モジュール docstring の判定式を参照）。
     """
     normalized = normalize_connect_text(raw)
     if not normalized:
         return ConnectIntent(matched=False, reason=REASON_EMPTY)
     if len(normalized) > _MAX_NORMALIZED_LEN:
         return ConnectIntent(matched=False, reason=REASON_TOO_LONG)
-    if normalized in _CORE_TERMS:
+    if normalized in _STRONG_TERMS:
         return ConnectIntent(matched=True, reason=REASON_CORE_ONLY)
-    residual = strip_connect_affixes(normalized)
-    if residual in _CORE_TERMS:
+    residual, suffix_stripped, marker_stripped = _strip_with_flags(normalized)
+    if residual not in _CORE_TERMS:
+        return ConnectIntent(matched=False, reason=REASON_NO_MATCH)
+    # 依頼マーカー付きなら強弱を問わず依頼。マーカーが無い場合は、強い連携語が
+    # 前置きだけを伴って現れたとき（「Google連携」）に限る。弱い連携語の素出し
+    # （「コネクト」「メール認証」「連動」）と助詞だけの話題提示（「連携とは」）は落とす。
+    if marker_stripped:
+        return ConnectIntent(matched=True, reason=REASON_AFFIX_STRIPPED)
+    if residual in _STRONG_TERMS and not suffix_stripped:
         return ConnectIntent(matched=True, reason=REASON_AFFIX_STRIPPED)
     return ConnectIntent(matched=False, reason=REASON_NO_MATCH)
 
