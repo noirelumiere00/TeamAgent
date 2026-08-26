@@ -1156,7 +1156,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 36
+    assert len(inventory_names) == len(set(inventory_names)) == 38
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1299,6 +1299,8 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "enable_tiktok_acquire",
         "enable_media_worker",
         "enable_proposal_builder",
+        "enable_omiyage_report",
+        "USE_OMIYAGE_REPORT_TOOLS",
         "enable_x_research",
         "USE_SLACK_SUMMARY_TOOL",
         "USE_ATTACHMENT_TOOLS",

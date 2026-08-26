@@ -188,6 +188,10 @@
             // proposal_builder: submitは即job_idを返し、MCP内threadが既存RAG/95枠rendererを
             // 継続実行する。statusで完了を照会する。S3固定version資産とmedia workerは引き続き必要。
             "proposal_builder_submit", "proposal_builder_status",
+            // omiyage_report: お土産資料 便1（submitは即job_id・MCP内threadがTikTok検索実測→
+            //   動画解析(Bedrock課金)→PPTX 2通を依頼元スレッドへ添付。statusで照会）。
+            //   USE_OMIYAGE_REPORT_TOOLS=1（tf: enable_omiyage_report・media worker必須）が必要。
+            "omiyage_report_submit", "omiyage_report_status",
             "tiktok_search", "video_analysis", "video_algorithm",
             // ③動画チェック: 自社編集者の納品動画をオリエンと照合し合否/誤植/尺の一次FB。
             //   現在は scope enabledBy=never。解禁4点セットは (1) tf task env 配線、

@@ -412,8 +412,11 @@ data "aws_iam_policy_document" "mcp_task" {
       ]
     }
   }
+  # omiyage_report はジョブ行を同じ table へ相乗りする（omy_ prefix + kind ガードで分離）ため、
+  # どちらか一方の点灯でも ledger 権限が要る。enable_omiyage_report 単独点灯で本 statement を
+  # 落とすと、PROPOSAL_JOBS_TABLE は注入されるのに PutItem が AccessDenied になり submit 全滅。
   dynamic "statement" {
-    for_each = var.enable_proposal_builder ? [1] : []
+    for_each = (var.enable_proposal_builder || var.enable_omiyage_report) ? [1] : []
     content {
       sid       = "ProposalBuilderJobLedger"
       actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
@@ -761,6 +764,15 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SHA256", value = var.proposal_builder_account_s3_sha256 },
       { name = "PROPOSAL_BUILDER_ACCOUNT_S3_SIZE", value = tostring(var.proposal_builder_account_s3_size) },
       { name = "PROPOSAL_BUILDER_ASSETS_KMS_KEY_ARN", value = var.proposal_builder_assets_kms_key_arn },
+      ] : [], var.enable_omiyage_report ? [
+      # お土産資料 便1（omiyage_report_submit/status）の点灯。TikTok検索実測と動画DL/フレーム
+      # 抽出は media worker 委譲（下の precondition で強制）・解析は Bedrock 視覚推論＝課金あり。
+      { name = "USE_OMIYAGE_REPORT_TOOLS", value = "1" },
+      ] : [], (var.enable_omiyage_report && !var.enable_proposal_builder) ? [
+      # ジョブ行は proposal_builder_jobs table へ相乗り（omy_ prefix + kind ガードで分離）。
+      # enable_proposal_builder が ON のときは上のブロックが同名 env を注入済みなので、
+      # ここで重ねると taskdef env の重複名になり rollout gate が拒否する＝OFF のときだけ注入。
+      { name = "PROPOSAL_JOBS_TABLE", value = aws_dynamodb_table.proposal_builder_jobs.name },
       ] : [], local.media_enabled == 1 ? [
       # Generic media delegation.  Legacy TIKTOK_* aliases point at the same
       # queue/table/bucket so the existing skill schema remains compatible.
@@ -870,6 +882,11 @@ resource "aws_ecs_task_definition" "mcp" {
     precondition {
       condition     = !var.enable_proposal_builder || local.media_enabled == 1
       error_message = "enable_proposal_builder requires the generic media worker for the integrated PPTX renderer."
+    }
+
+    precondition {
+      condition     = !var.enable_omiyage_report || local.media_enabled == 1
+      error_message = "enable_omiyage_report requires the generic media worker (TikTok search delegation + video download/frame extraction; hardened core contains no Node/Chromium/ffmpeg fallback)."
     }
 
     # web_research は Gemini の Google 検索グラウンディングで動く。Gemini 認証 env

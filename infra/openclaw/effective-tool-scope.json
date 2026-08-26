@@ -82,6 +82,21 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_PROPOSAL_BUILDER_TOOLS"] }
     },
     {
+      "name": "omiyage_report_submit",
+      "effect": "external-read-scrape-external-job-submit-video-download-analysis-bedrock-inference-generated-content-dynamodb-job-write-s3-write-slack-file-write",
+      "terraformGate": "enable_omiyage_report",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_OMIYAGE_REPORT_TOOLS"] },
+      "sideEffectGate": "お土産資料 便1 submit の実挙動（過小申告しない・2026-08-25 点灯便で台帳掲載）: (1) TikTok検索は media worker 委譲の実スクレイプ（一般KW/ブランド/競合の検索軸ごとに tiktok_search 実測）。(2) 上位動画を media worker 経由で実ダウンロード＋フレーム抽出し、Bedrock Converse 視覚推論を動画1本につき1コール実行＝Bedrock 課金が発生する（OMIYAGE_VA_PER_AXIS とコスト cap で上限管理・実測 usage をジョブ記録へ残す）。(3) ジョブ行は proposal_builder_jobs DynamoDB table へ相乗り書込（job_id の omy_ prefix + request_summary.kind ガードで proposal_builder と相互分離）。(4) 計測JSON+監査JSONは OMIYAGE_DECK_PLAN_BUCKET 設定時のみ非公開 S3 へ書込（未設定なら保存なしを \"\" で開示）。(5) 完成 PPTX 2通（レポート本体＋編集用FMT）を依頼元スレッドへ Slack ファイル配信し、スレッド不達時のみ依頼者本人 DM へフォールバック。"
+    },
+    {
+      "name": "omiyage_report_status",
+      "effect": "job-status-read-dynamodb-stale-write",
+      "terraformGate": "enable_omiyage_report",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_OMIYAGE_REPORT_TOOLS"] }
+    },
+    {
       "name": "tiktok_search",
       "effect": "external-read-scrape",
       "terraformGate": "enable_scrape_tools",

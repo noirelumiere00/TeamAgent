@@ -76,6 +76,12 @@ variable "enable_proposal_builder" {
   default     = false
 }
 
+variable "enable_omiyage_report" {
+  description = "お土産資料 便1（omiyage_report_submit/status）をMCPで有効化する。点灯条件: generic media worker（TikTok検索委譲＋動画DL/フレーム抽出）が必須（precondition で強制）・Bedrock視覚推論の課金が発生・ジョブ行は proposal_builder_jobs DynamoDB table へ相乗り（enable_proposal_builder が OFF のときは本フラグが PROPOSAL_JOBS_TABLE を注入）。既定 false＝env未注入でツール未登録のまま。"
+  type        = bool
+  default     = false
+}
+
 variable "proposal_builder_publish_ready" {
   description = "ready提案書のS3公開(presigned URL発行)を許可する。既定OFF＝Slack添付のみ。"
   type        = bool
