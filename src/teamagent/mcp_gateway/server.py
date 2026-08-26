@@ -228,18 +228,15 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
         },
     }
     out["properties"] = props
-    # ``_user_context`` を required に入れる（**入力 0 個のツールでも**）。
+    # ⚠️ ``_user_context`` を **required に入れてはならない**（2026-08-26 本番全ツール障害）。
     #
-    # 実測（2026-08）: ``oauth_connect`` は入力パラメータを持たないため、素の
-    # ``model_json_schema()`` には properties も required も無い。外側 LLM は素直に
-    # ``{}`` で呼び、trusted ingress plugin が ``_user_context must be a plain object``
-    # で **無言 block** する（利用者には「反応しない」としか見えない）。SOUL.md は
-    # 「全 tool call に ``_user_context`` を含めること」と宣言しているので、スキーマ側でも
-    # 同じ不変条件を宣言して LLM に必ず載せさせる。
-    required = list(out.get("required") or [])
-    if USER_CONTEXT_KEY not in required:
-        required.append(USER_CONTEXT_KEY)
-    out["required"] = required
+    # かつてここで required へ注入していたが、OpenClaw のクライアント側引数検証
+    # （validateToolArguments）は caller-identity plugin の注入（execute 内側の
+    # before_tool_call）**より前**に走る。つまり ``_user_context`` は plugin が後から
+    # 足す設計なのに、モデルが省略した時点で required 違反となり、tools/call が
+    # ワイヤに出る前に全ツールが死ぬ（OC 実物リプレイで旧 40/40 PASS vs
+    # required 注入後 0/44 PASS を実測）。properties への注入は宣言として無害かつ
+    # 有益なので残すが、required 化は同じ轍を踏まないこと。
     return out
 
 

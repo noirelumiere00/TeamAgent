@@ -1,10 +1,13 @@
-"""MCP 境界の「連携」決定論分岐と `_user_context` 必須化のテスト。
+"""MCP 境界の「連携」決定論分岐と `_user_context` **非 required** のテスト。
 
-本番実測（2026-08）で確定した 2 つの欠陥を塞いだことを固定する:
+本番実測（2026-08）で固定した 2 つの契約:
 
 1. 外側 LLM が `oauth_connect` を選ばず `search` へ落ちる → 境界側で `oauth_connect` へ寄せる。
-2. 入力 0 個の `oauth_connect` を LLM が `{}` で呼び、ingress plugin が**無言 block** する
-   → スキーマで `_user_context` を required にして必ず載せさせる。
+2. `_user_context` はスキーマの properties に**宣言するだけ**で required にしない。
+   required 化は OpenClaw のクライアント側引数検証（validateToolArguments）が
+   caller-identity plugin の注入より前に走るため、モデルが省略した呼び出しを
+   全ツールで required 違反にし、tools/call がワイヤに出る前に死ぬ
+   （2026-08-26 本番全ツール障害・OC 実物リプレイ 旧 40/40 PASS vs 新 0/44 PASS）。
 """
 
 from __future__ import annotations
@@ -112,21 +115,39 @@ async def _dispatch(
     )
 
 
-# ── ① 入力 0 個のツールでも _user_context を required にする ────────────────────
+# ── ① _user_context は properties に宣言するが required にしない ─────────────────
+# required 化は 2026-08-26 の本番全ツール障害（OC クライアント検証が plugin 注入より
+# 先に走り、モデル省略時に tools/call がワイヤに出る前に死ぬ）で撤回済み。
 
 
-def test_zero_input_tool_still_requires_user_context() -> None:
-    """`{}` 呼び出し（＝ingress plugin の無言 block）をスキーマ側で塞ぐ。"""
+def test_zero_input_tool_does_not_require_user_context() -> None:
+    """入力 0 個のツールでも `_user_context` は宣言のみ（required に入れない）。"""
     schema = next(
         t for t in list_tool_defs([_CONNECT_SPEC]) if t.name == OAUTH_CONNECT_TOOL_NAME
     ).inputSchema
     assert USER_CONTEXT_KEY in schema["properties"]
-    assert USER_CONTEXT_KEY in schema["required"]
+    assert USER_CONTEXT_KEY not in (schema.get("required") or [])
 
 
-def test_existing_required_fields_are_preserved() -> None:
+def test_existing_required_fields_are_preserved_without_user_context() -> None:
+    """元スキーマの required（search の query 等）は保持し、`_user_context` は足さない。"""
     schema = next(t for t in list_tool_defs([_SEARCH_SPEC]) if t.name == "search").inputSchema
-    assert set(schema["required"]) == {"query", USER_CONTEXT_KEY}
+    assert set(schema["required"]) == {"query"}
+    assert USER_CONTEXT_KEY in schema["properties"]
+
+
+def test_no_tool_schema_requires_user_context() -> None:
+    """回帰ガード: `required` に `_user_context` を含むツールが **0 本**であること。
+
+    OpenClaw の validateToolArguments は caller-identity plugin の注入より前に走るため、
+    1 本でも required 化すると、そのツールはモデル省略時に全滅する（2026-08-26 実証）。
+    """
+    offenders = [
+        t.name
+        for t in list_tool_defs([_SEARCH_SPEC, _CONNECT_SPEC])
+        if USER_CONTEXT_KEY in (t.inputSchema.get("required") or [])
+    ]
+    assert offenders == [], offenders
 
 
 # ── ② 「連携」依頼は oauth_connect へ寄せる ──────────────────────────────────
