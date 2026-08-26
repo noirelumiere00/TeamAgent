@@ -212,6 +212,10 @@
             "calendar_event",
             // v0.3 Task4: 🗓日程候補提案ボタン（候補入り下書き＋透明仮予定・送信/招待なし・既定OFF）
             "schedule_propose",
+            // 朝ダイジェストの「☑️確認済み」ボタン押下（個別/一括/取り消し）。押された項目を
+            // 翌朝以降のダイジェストから隠す。触るのは本人の digest_ack 行だけで、Gmail も
+            // Calendar も Slack API も呼ばない（外部送信ゼロ）。USE_DIGEST_ACK_TOOL=1・既定OFF。
+            "digest_ack",
             // calendar_freebusy: 「空いてる？」「◯分どこに入る？」の自由文空き時間照会。
             // read-only＝freebusy 読み取りのみ・書込APIなし（USE_CALENDAR_FREEBUSY_TOOL=1・既定OFF）。
             "calendar_freebusy",

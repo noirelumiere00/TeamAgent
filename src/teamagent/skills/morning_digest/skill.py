@@ -52,6 +52,12 @@ from teamagent.skills._shared.mail_compose import (
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest import calendar_window as _calwin
+from teamagent.skills.morning_digest.ack_token import (
+    AckItem,
+    ack_hmac_configured,
+    encode_ack_all_token,
+    encode_ack_token,
+)
 from teamagent.skills.morning_digest.draft_token import (
     encode_draft_token,
     mail_action_hmac_configured,
@@ -71,6 +77,54 @@ logger = structlog.get_logger(__name__)
 #: Provider 側は max_thread_checks で構造的に有界だが、下流は全件を舐める
 #: （生 ID 掃除・triage）ので、上限は受け取り側でも明示しておく。
 _SLACK_UNREAD_MAX_ITEMS = 25
+
+#: 「☑️ 全部確認した」1 トークンに載せる項目数の上限。
+#: Slack の button `value` は 2000 バイト上限で、ack_token 側にも 1900 バイトの
+#: サイズガードがある。1 項目は概算 36 バイト（["m","<16hex>",<10桁>],）なので
+#: 30 件で約 1550 バイト＝ガード内に収まる。これを超える朝は一括ボタンを出さない
+#: （個別ボタンは各項目に付いたままなので機能は失われない）。
+_ACK_ALL_MAX_ITEMS = 30
+
+
+class _AckFilter:
+    """「確認済み」の状態と、除外/発行のカウンタをまとめて持ち回す入れ物。
+
+    ``_collect_mail_digest`` / ``_collect_slack_unread`` へ **キーワード引数で** 渡す。
+    渡さない（None）ときは従来どおり＝1 件も隠さずトークンも発行しない。既存の呼出
+    シグネチャと戻り値の arity を変えないための設計（既存テストが 4-tuple を固定している）。
+    """
+
+    __slots__ = ("acked", "excluded_mail", "excluded_slack", "items", "requester")
+
+    def __init__(self, requester: str, acked: dict[tuple[str, str], int]) -> None:
+        self.requester = requester
+        #: {(item_kind, item_key): ack 時点の anchor}
+        self.acked = acked
+        #: この朝に出した項目ぶんの AckItem（一括トークンの材料・二重計算しない）
+        self.items: list[AckItem] = []
+        self.excluded_mail = 0
+        self.excluded_slack = 0
+
+    def is_settled(self, item_kind: str, item_key: str, now_anchor: int) -> bool:
+        """確認済み **かつ** その後の新着が無いか（＝今朝は隠してよいか）。
+
+        新着があれば（``now_anchor`` が ack 時点より進んでいれば）False を返し、
+        翌朝また表示させる。裁定: 一度押したら永久に消えるのではなく、返信が来たら再浮上する。
+        """
+        prev = self.acked.get((item_kind, item_key))
+        return prev is not None and now_anchor <= prev
+
+
+def _ack_store_key(item_kind: str, requester: str, raw_id: str) -> str:
+    """生 ID を鍵化する（G3 を DB／トークン層まで延長）。
+
+    import は関数内で行う。adapters 側が psycopg を引くため、DB を使わない
+    経路（既定 OFF・ユニットテスト）で import コストと副作用を負わないようにする。
+    """
+    from teamagent.adapters.digest_ack_store import DigestAckStore
+
+    return DigestAckStore.item_key(item_kind, requester, raw_id)
+
 
 # G6: メール本文は「資料（データ）」であり指示ではない、を明示する分類器プロンプト。
 _TRIAGE_SYSTEM_PROMPT = """\
@@ -212,6 +266,36 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # has_draft は朝に list_drafts 照合のみで埋める（ボタン状態の出し分け用）。
         # コード既定は False（後方互換＝従来の自動生成）。本番は terraform env で true にする。
         self._draft_on_demand_only = env_bool("DRAFT_ON_DEMAND_ONLY", False)
+        # 「確認済み」除外（既定 OFF）。ON にすると ☑️ボタン用トークンの発行も始まる。
+        # 描画（MORNING_DIGEST_ACK_BUTTON）と押下先ツール（USE_DIGEST_ACK_TOOL）が
+        # 揃うまでは OFF のままで安全: トークンが空＝ボタンが 1 つも描画されない。
+        self._ack_filter = env_bool("MORNING_DIGEST_ACK_FILTER", False)
+
+    def _load_ack_filter(self, requester: str, ctx: SkillContext) -> _AckFilter | None:
+        """本人の「確認済み」状態を 1 回だけ引く（ついでに本人行の期限切れを掃除）。
+
+        fail-open: ストアが落ちていれば空 dict が返り、**1 件も隠さない**。見逃し防止が
+        目的の機能なので、障害は「隠す側」ではなく「出す側」に倒す（quota_store の
+        fail-open とは理由が違う。あちらはコスト、こちらは安全側の向き）。
+        """
+        if not self._ack_filter:
+            return None
+        try:
+            from teamagent.adapters.digest_ack_store import DigestAckStore
+
+            store = DigestAckStore()
+            store.purge_expired(requester, request_id=ctx.request_id)
+            return _AckFilter(requester, store.active(requester, request_id=ctx.request_id))
+        except Exception as exc:
+            # ストア層も内部で fail-open だが、ここでも受け止める。この機能の障害で
+            # 朝 9:30 の配信そのものを落とすことは、どんな理由でも割に合わない。
+            # None を返す＝1 件も隠さず、☑️トークンも発行しない（従来どおりの DM）。
+            logger.warning(
+                "morning_digest_ack_state_failed",
+                request_id=ctx.request_id,
+                err=type(exc).__name__,
+            )
+            return None
 
     def run(self, input: MorningDigestInput, ctx: SkillContext) -> MorningDigestOutput:
         log = ctx.bind_logger(self.name)
@@ -227,6 +311,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         log.info("morning_digest_start", lookback_days=input.lookback_days)
 
         token = self._resolve_token(requester)
+        ack = self._load_ack_filter(requester, ctx)
 
         out = MorningDigestOutput(user_email_masked=_mask_email(requester))
         # 予定セクションの対象日は JST の暦日（描画の見出し「8/20(木) の予定」に使う）。
@@ -235,9 +320,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         total_cost = 0.0
 
         # --- 1. メール digest ---
+        # ack.items は「今朝ちゃんと出した項目」だけを表すべき集合。途中で落ちた
+        # セクションぶんが残ると、一括ボタンが **画面に出ていない項目まで確認済みに
+        # してしまう**（押した人には見えない副作用）。落ちたら印まで巻き戻す。
+        ack_mark = len(ack.items) if ack is not None else 0
         try:
             mail_items, mail_cost, raw_msgs = self._collect_mail_digest(
-                token, requester, input, ctx
+                token, requester, input, ctx, ack=ack
             )
             out.mail_digest = mail_items
             total_cost += mail_cost
@@ -249,6 +338,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             out.errors.append(f"mail: {type(exc).__name__}")
             raw_msgs = []
+            if ack is not None:
+                del ack.items[ack_mark:]  # 出せなかったメールを一括ボタンに含めない
 
         # --- 2. カレンダー ---
         try:
@@ -260,8 +351,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             out.errors.append(f"calendar: {type(exc).__name__}")
 
         # --- 3. Slack 未返信メンション ---
+        ack_mark = len(ack.items) if ack is not None else 0
         try:
-            items, total, truncated, scanned = self._collect_slack_unread(requester, input, ctx)
+            items, total, truncated, scanned = self._collect_slack_unread(
+                requester, input, ctx, ack=ack
+            )
             out.slack_unread = items
             out.slack_unread_total = total
             out.slack_unread_truncated = truncated
@@ -273,6 +367,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 "morning_digest_slack_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
             out.errors.append(f"slack: {type(exc).__name__}")
+            if ack is not None:
+                del ack.items[ack_mark:]  # 出せなかった Slack カードを一括ボタンに含めない
 
         # --- 4. 下書き ---
         # 既定（オンデマンド）: 朝は生成しない。要返信メールのボタン押下で生成する。
@@ -292,6 +388,25 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             )
             out.errors.append(f"draft: {type(exc).__name__}")
 
+        # --- 5. 「☑️ 全部確認した」用の一括トークン ---
+        # 各項目の encode 時に作った AckItem を再利用する（鍵の二重計算をしない）。
+        # 上限超過やサイズガードで None が返れば空のまま＝一括ボタンだけ出さない
+        # （個別ボタンは各項目に付いたままなので、機能そのものは失われない）。
+        if ack is not None:
+            out.ack_excluded_mail = ack.excluded_mail
+            out.ack_excluded_slack = ack.excluded_slack
+            if ack.items and ack_hmac_configured():
+                try:
+                    out.ack_all_token = (
+                        encode_ack_all_token(ack.items[:_ACK_ALL_MAX_ITEMS], requester) or ""
+                    )
+                except Exception:
+                    logger.warning(
+                        "mail_action_token_encode_failed",
+                        request_id=ctx.request_id,
+                        token_type="ackall",
+                    )
+
         out.total_cost_usd = total_cost
         log.info(
             "morning_digest_done",
@@ -302,6 +417,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             drafts=out.drafts_created,
             errors=len(out.errors),
             cost_usd=total_cost,
+            # 件数だけ（item_key も生 ID も出さない＝G3）。
+            ack_excluded_mail=out.ack_excluded_mail,
+            ack_excluded_slack=out.ack_excluded_slack,
         )
         return out
 
@@ -335,9 +453,14 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         requester: str,
         input: MorningDigestInput,
         ctx: SkillContext,
+        *,
+        ack: _AckFilter | None = None,
     ) -> tuple[list[MailDigestItem], float, list[Any]]:
         gmail = self._gmail_for(token, readonly=True)
         mail_action_hmac_ready = mail_action_hmac_configured()
+        # ☑️トークンは「除外フィルタが ON」かつ「鍵が有効」なときだけ発行する。
+        # 片方でも欠けたら空のまま＝描画側はボタンを出さない（押しても効かないボタンを作らない）。
+        ack_ready = ack is not None and ack_hmac_configured()
         if not mail_action_hmac_ready:
             # 値や不正理由は出さない。設定が直るまで action button 自体を発行しない。
             logger.warning("mail_action_hmac_keyring_invalid", request_id=ctx.request_id)
@@ -370,6 +493,17 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     continue
             thread = sorted(thread, key=lambda m: int(getattr(m, "internal_date_ms", 0) or 0))
             anchor = thread[-1]
+            # 「確認済み」除外。基準値は最新メッセージの受信時刻（秒）。ack した時点より
+            # 新しいメッセージが来ていれば隠さない＝翌朝また出す（裁定）。
+            ack_item: AckItem | None = None
+            if ack is not None and tid:
+                now_anchor = int(getattr(anchor, "internal_date_ms", 0) or 0) // 1000
+                item_key = _ack_store_key("m", requester, tid)
+                if ack.is_settled("m", item_key, now_anchor):
+                    ack.excluded_mail += 1
+                    continue
+                ack_item = AckItem(item_kind="m", item_key=item_key, anchor=now_anchor)
+                ack.items.append(ack_item)
             counterpart = _first_counterpart(anchor.headers, requester)
             priority = _sender_priority(
                 anchor.headers.get("From", ""), self._important_senders, self._internal_domain
@@ -402,6 +536,18 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                         request_id=ctx.request_id,
                         token_type="draft",
                     )
+            # ☑️確認済みトークン。下書きボタンと違い To 自分宛/一斉配信の条件は課さない
+            # （「読んだので今日はもう出さなくていい」は要返信でないメールにも要る）。
+            ack_action_token = ""
+            if ack_ready and ack_item is not None:
+                try:
+                    ack_action_token = encode_ack_token([ack_item], requester) or ""
+                except Exception:
+                    logger.warning(
+                        "mail_action_token_encode_failed",
+                        request_id=ctx.request_id,
+                        token_type="ack",
+                    )
             items.append(
                 MailDigestItem(
                     counterpart_masked=_mask_email(counterpart) if counterpart else "***",
@@ -417,6 +563,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     subject_display=str(anchor.headers.get("Subject", ""))[:160],
                     # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。To 自分宛のみ発行。
                     draft_token=draft_action_token,
+                    ack_token=ack_action_token,
                     thread_gmail_url=_gmail_thread_url(tid),
                 )
             )
@@ -659,7 +806,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
     # ── 3. Slack 未返信メンション ────────────────────────────────────────
 
     def _collect_slack_unread(
-        self, requester: str, input: MorningDigestInput, ctx: SkillContext
+        self,
+        requester: str,
+        input: MorningDigestInput,
+        ctx: SkillContext,
+        *,
+        ack: _AckFilter | None = None,
     ) -> tuple[list[SlackUnreadItem], int, bool, bool]:
         """Slack 返信漏れ（未返信メンション）を集める。
 
@@ -684,9 +836,33 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         items: list[SlackUnreadItem] = []
         # 判定層・描画層は全件を舐める（生 ID 掃除・triage）。Provider 側は
         # max_thread_checks で構造的に有界だが、上限は呼び出し側でも明示しておく。
+        ack_ready = ack is not None and ack_hmac_configured()
         for m in collected.items[:_SLACK_UNREAD_MAX_ITEMS]:
+            # 「確認済み」除外。基準値はスレッドのメッセージ総数＝ack 後に返信が
+            # 積まれたら数が増えて再浮上する（メール側の受信時刻と同じ役割）。
+            # channel_id / ts が欠けている件は判定せず従来どおり出す（隠す側に倒さない）。
+            ack_token_value = ""
+            raw_id = f"{m.channel_id}:{m.ts}" if m.channel_id and m.ts else ""
+            if ack is not None and raw_id:
+                now_anchor = int(getattr(m, "thread_message_count", 0) or 0)
+                item_key = _ack_store_key("s", requester, raw_id)
+                if ack.is_settled("s", item_key, now_anchor):
+                    ack.excluded_slack += 1
+                    continue
+                ack_item = AckItem(item_kind="s", item_key=item_key, anchor=now_anchor)
+                ack.items.append(ack_item)
+                if ack_ready:
+                    try:
+                        ack_token_value = encode_ack_token([ack_item], requester) or ""
+                    except Exception:
+                        logger.warning(
+                            "mail_action_token_encode_failed",
+                            request_id=ctx.request_id,
+                            token_type="ack",
+                        )
             items.append(
                 SlackUnreadItem(
+                    ack_token=ack_token_value,
                     channel_name_masked=str(scrub_value(m.channel_name))[:40],
                     excerpt_scrubbed=_strip_sentinels(str(scrub_value(m.text))[:120]),
                     # display はマスク無し（本人 DM 専用・G3/G7: ログには絶対に出さない）。

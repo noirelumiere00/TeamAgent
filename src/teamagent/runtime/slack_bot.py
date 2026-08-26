@@ -1810,6 +1810,39 @@ def _swap_draft_button(
     return out
 
 
+def _disable_ack_button(
+    blocks: list[dict[str, Any]], block_id: str
+) -> list[dict[str, Any]]:
+    """押下された「☑️ 確認済みにする」を、押せない「☑️ 確認済み」表示へ置き換える。
+
+    Block Kit には「押せないボタン」が無いので、``actions`` 側では要素を取り除き、
+    状態は同じブロックの直前 ``section`` へ末尾追記…とはせず、**要素を落とすだけ**にする。
+    残った「✅ 下書きを確認」等の url ボタンはそのまま残るので行は消えない。
+    要素が 1 つも残らない actions ブロックは Slack が弾くため、その場合はブロックごと落とす。
+
+    💬 セクションのように accessory へ載せたボタンは、``section`` の accessory を外す。
+    該当が無ければ blocks をそのまま返す（fail-open＝更新できなくても押下自体は成立済み）。
+    """
+    out: list[dict[str, Any]] = []
+    for b in blocks:
+        if str(b.get("block_id", "")) != block_id:
+            out.append(b)
+            continue
+        if b.get("type") == "actions":
+            new_el = [e for e in b.get("elements", []) if e.get("action_id") != "digest_ack"]
+            if new_el:
+                out.append({**b, "elements": new_el})
+            # 空になったら actions ブロックごと捨てる（elements 空は Slack が拒否する）
+            continue
+        if b.get("type") == "section" and (b.get("accessory") or {}).get(
+            "action_id"
+        ) == "digest_ack":
+            out.append({k: v for k, v in b.items() if k != "accessory"})
+            continue
+        out.append(b)
+    return out
+
+
 def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
     """Bolt AsyncApp を構築する。
 
@@ -2687,6 +2720,101 @@ def build_app(dispatcher: SkillDispatcher | None = None) -> AsyncApp:
                 response_type="ephemeral",
                 text=f"✅ 下書きを作成しました。<{open_url}|Gmail の下書きを開く>",
             )
+
+    @app.action("digest_ack")
+    async def handle_digest_ack(
+        ack: Any,
+        body: dict[str, Any],
+        action: dict[str, Any],
+        client: Any,
+        respond: Any,
+    ) -> None:
+        """朝ダイジェストの「☑️ 確認済み」系ボタン押下（個別 / 一括 / 取り消し）。
+
+        ※ 本番の押下経路は OpenClaw（Slack adapter → system event → digest_ack tool）。
+        こちらは EC2 systemd 経路のパリティで、mail_draft が両方に居るのと同じ理由で置く。
+
+        個別・一括・取り消しはすべてこの action_id に来る。どれなのかは署名済みトークンの
+        typ が持つので、ここでは判別しない（判別を here に置くと、署名の外側に種別の
+        判断が漏れる）。3 秒以内に ack し、DB 書込は別スレッドで実行する。
+        """
+        await ack()  # Slack の 3 秒制約：まず即 ack
+        request_id = f"act-{uuid.uuid4().hex[:12]}"
+        user_id = (body.get("user") or {}).get("id")
+        token_value = str((action or {}).get("value") or "")
+        block_id = str((action or {}).get("block_id") or "")
+        channel = (body.get("channel") or {}).get("id") or (body.get("container") or {}).get(
+            "channel_id"
+        )
+        message = body.get("message") or {}
+        ts = message.get("ts")
+        logger.info("slack_action_digest_ack", request_id=request_id, user_id=user_id)
+
+        email = await disp._resolve_user_email(user_id)
+        if not email:
+            await respond(
+                response_type="ephemeral",
+                text="ユーザーを特定できませんでした（社外/ゲストは対象外です）。",
+            )
+            return
+
+        from teamagent.skills.base import SkillContext
+        from teamagent.skills.digest_ack.schema import DigestAckInput
+        from teamagent.skills.digest_ack.skill import DigestAckSkill
+
+        out = await asyncio.to_thread(
+            DigestAckSkill().run,
+            DigestAckInput(ack_token=token_value),
+            SkillContext(request_id=request_id, metadata={"user_email": email}),
+        )
+        if out.error:
+            await respond(response_type="ephemeral", text=out.message)
+            return
+
+        # 取り消し操作だった場合は、過去の DM を書き戻さない。取り消した項目は翌朝の
+        # ダイジェストに再び出るので、古い DM のボタンを復活させる必要が無い。
+        if out.unacked:
+            await respond(response_type="ephemeral", text=out.message)
+            return
+
+        # 押下直後の取り消し導線（ephemeral・本人にだけ見える）。
+        if out.undo_token:
+            await respond(
+                response_type="ephemeral",
+                text=out.message,
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": out.message},
+                        "accessory": {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "↩︎ 取り消す",
+                                "emoji": True,
+                            },
+                            "action_id": "digest_ack",
+                            "value": out.undo_token,
+                        },
+                    }
+                ],
+            )
+        else:
+            await respond(response_type="ephemeral", text=out.message)
+
+        # 押されたボタンを消して「押せる状態」を残さない（連打・二度押しの混乱を防ぐ）。
+        try:
+            new_blocks = _disable_ack_button(message.get("blocks") or [], block_id)
+            await client.chat_update(
+                channel=channel,
+                ts=ts,
+                blocks=new_blocks,
+                text="メールと本日の予定をお送りします。",
+            )
+        except Exception:
+            # 更新に失敗しても確認済みの記録自体は成立している（fail-open）。
+            # ephemeral では既に結果を伝えているので、ここでの再通知はしない。
+            logger.warning("digest_ack_chat_update_failed", request_id=request_id)
 
     # Bolt のグローバルエラーハンドラ — ハンドラ外で起きた例外を Sentry に飛ばす
     @app.error

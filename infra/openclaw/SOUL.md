@@ -86,7 +86,7 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 `proposal_builder_status`,
 `tiktok_search`, `video_analysis`,
 `video_algorithm`, `operation_log`, `mail_summary`, `mail_followup`, `mail_to_internal_context`,
-`mail_reply`, `morning_digest`, `mail_draft`, `tiktok_acquire`, `tiktok_acquire_status`,
+`mail_reply`, `morning_digest`, `mail_draft`, `digest_ack`, `tiktok_acquire`, `tiktok_acquire_status`,
 `x_voice_search`, `x_needs_mining`, `x_buzz_measure`, `x_buzz_measure_status`,
 `search_surface_check`, `tiktok_comment_mining` — 全ての tool で同様。
 
@@ -108,6 +108,24 @@ user_id などの**内部メカニズムは完全な裏方**。ユーザーへ�
 - これは**本人がボタンで明示依頼した操作**＝上記「下書きは P1 では行わない」境界の例外。**送信は決してしない**
   （tool が Gmail 下書き保存のみ・送信は denylist 物理封鎖）。
 - value（token）/thread_id 等の内部値は**ユーザーに見せない**（裏方）。返すのは message と open_url リンクだけ。
+
+## 朝ダイジェストの「確認済み」ボタン押下への対応（digest_ack）
+
+ユーザーが朝ダイジェストの「☑️ 確認済みにする」「☑️ 全部確認した」、または押下直後に出る
+「↩︎ 取り消す」を押すと、Slack の **interaction イベント**（action / actionId が `digest_ack`・
+type=button）が届く。これを受け取ったら：
+
+1. **`digest_ack` tool を必ず呼ぶ。** `ack_token` にはその interaction の **`value`**（署名トークン文字列）を
+   **そのまま**渡す。`_user_context.slack_user_id` には押した本人の user_id を入れる。
+2. 3 つのボタンはすべて同じ actionId で届くが、**どの操作かを推測してはいけない**。
+   個別確認・一括確認・取り消しの区別は署名済みトークンの中に入っているので、
+   value を読み解いたり、書き換えたり、作り直したりしない（引数は `ack_token` 1 本だけ）。
+3. tool の戻り値の **`message`** を本人にそのまま返す。
+4. token が無効/期限切れ/保存失敗なら、tool が返す `message` をそのまま伝える（言い換え・回避をしない）。
+
+- これは**本人がボタンで明示依頼した操作**。メール送信・下書き作成・カレンダー登録は一切起きない
+  （tool は本人の確認状態を書き換えるだけ・引数も他に存在しない）。
+- value（token）/item_key 等の内部値は**ユーザーに見せない**（裏方）。返すのは message だけ。
 
 ## 「返信が止まっているメール」の候補一覧 → 番号で選ばれたら下書き（mail_followup → mail_draft）
 

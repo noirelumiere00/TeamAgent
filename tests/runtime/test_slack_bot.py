@@ -11,6 +11,7 @@ from typing import Any
 from teamagent.runtime.slack_bot import (
     SkillDispatcher,
     _asyncio_exception_handler,
+    _disable_ack_button,
     _format_mail_followup_response,
     _format_mail_summary_response,
     _slack_thread_permalink,
@@ -48,6 +49,61 @@ def test_swap_draft_button_replaces_only_draft_action() -> None:
 def test_swap_draft_button_no_match_returns_unchanged() -> None:
     blocks = [{"type": "actions", "block_id": "other", "elements": []}]
     assert _swap_draft_button(blocks, "b1", "url") == blocks
+
+
+def test_disable_ack_button_removes_only_the_ack_element() -> None:
+    """押下した ☑️ボタンだけを消し、同じ行の url ボタン（開く/確認する）は残す。"""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "件名"}},
+        {
+            "type": "actions",
+            "block_id": "b1",
+            "elements": [
+                {"type": "button", "action_id": "digest_ack", "value": "TOK", "text": {}},
+                {"type": "button", "url": "https://mail.google.com/#all/t1", "text": {}},
+            ],
+        },
+    ]
+    out = _disable_ack_button(blocks, "b1")
+    actions = out[1]["elements"]
+    assert not [e for e in actions if e.get("action_id") == "digest_ack"]
+    assert any(e.get("url", "").endswith("#all/t1") for e in actions)
+
+
+def test_disable_ack_button_drops_block_when_it_would_become_empty() -> None:
+    """要素が空の actions ブロックは Slack が拒否するので、ブロックごと落とす。"""
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "件名"}},
+        {
+            "type": "actions",
+            "block_id": "b1",
+            "elements": [
+                {"type": "button", "action_id": "digest_ack", "value": "TOK", "text": {}}
+            ],
+        },
+    ]
+    out = _disable_ack_button(blocks, "b1")
+    assert out == [blocks[0]]
+
+
+def test_disable_ack_button_strips_section_accessory() -> None:
+    """💬 セクションは accessory にボタンを載せているので、そちらも外せること。"""
+    blocks = [
+        {
+            "type": "section",
+            "block_id": "s1",
+            "text": {"type": "mrkdwn", "text": "1. 返信する ・#ch"},
+            "accessory": {"type": "button", "action_id": "digest_ack", "value": "TOK"},
+        }
+    ]
+    out = _disable_ack_button(blocks, "s1")
+    assert "accessory" not in out[0]
+    assert out[0]["text"]["text"] == "1. 返信する ・#ch"  # 本文は消さない
+
+
+def test_disable_ack_button_no_match_returns_unchanged() -> None:
+    blocks = [{"type": "actions", "block_id": "other", "elements": []}]
+    assert _disable_ack_button(blocks, "b1") == blocks
 
 
 def test_mail_draft_quota_counts_per_day() -> None:

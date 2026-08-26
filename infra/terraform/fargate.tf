@@ -642,6 +642,9 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_EVENT_TOOL", value = var.use_calendar_event_tool ? "true" : "false" },
       # v0.3 Task4: 🗓日程候補提案（既定 false・ボタン描画フラグより先に ON）。
       { name = "USE_SCHEDULE_PROPOSE_TOOL", value = var.use_schedule_propose_tool ? "true" : "false" },
+      # ☑️確認済みボタンの押下処理（個別/一括/取り消し）。状態は digest_ack テーブルの
+      # 本人行のみ（RLS で束縛）。外部送信なし。既定 false・ボタン描画フラグより先に ON にする。
+      { name = "USE_DIGEST_ACK_TOOL", value = var.use_digest_ack_tool ? "true" : "false" },
       # calendar_freebusy: 空き時間の自由文照会（read-only・freebusy のみ・既定 false）。
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。

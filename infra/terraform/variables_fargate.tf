@@ -166,6 +166,12 @@ variable "use_calendar_event_tool" {
   default     = false
 }
 
+variable "use_digest_ack_tool" {
+  description = "digest_ack tool（☑️確認済みボタンの押下処理）を mcp で有効化。既定 false。ON 後に morning_digest_ack_button=true にする（順序を守らないと無反応ボタン）。触るのは本人の digest_ack 行のみで、Google API・Slack API・外部送信は一切呼ばない。"
+  type        = bool
+  default     = false
+}
+
 variable "use_schedule_propose_tool" {
   description = "schedule_propose tool（🗓日程候補提案ボタンの押下処理・v0.3 Task4）を mcp で有効化。既定 false。ON 後に morning_digest_schedule_button=true にする（順序を守らないと無反応ボタン）。"
   type        = bool

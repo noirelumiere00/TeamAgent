@@ -110,6 +110,15 @@ class MailDigestItem(BaseModel):
         max_length=500,
         description="📅カレンダー登録ボタン用の署名トークン（To本人かつ日時確定時のみ発行）",
     )
+    ack_token: str = Field(
+        default="",
+        max_length=500,
+        description=(
+            "☑️確認済みボタン用の署名トークン（生 thread_id は載らない＝G3）。"
+            "MORNING_DIGEST_ACK_FILTER が OFF のときは発行しない"
+            "（押せても翌朝反映されないボタンを出さないため）"
+        ),
+    )
 
 
 class CalendarEventItem(BaseModel):
@@ -182,6 +191,14 @@ class SlackUnreadItem(BaseModel):
             "users.info で解決できなかったら None のまま＝架空の名前を作らない"
         ),
     )
+    ack_token: str = Field(
+        default="",
+        max_length=500,
+        description=(
+            "☑️確認済みボタン用の署名トークン（生 channel_id / permalink は載らない＝G3）。"
+            "MORNING_DIGEST_ACK_FILTER が OFF のときは発行しない"
+        ),
+    )
     # --- スレッド由来の文脈（追加 API 呼び出し 0 回で拾えたぶん）---
     thread_message_count: int = Field(
         default=0, ge=0, description="スレッド内メッセージ総数（親含む）。0=取得できなかった"
@@ -246,6 +263,20 @@ class MorningDigestOutput(BaseModel):
             "scope 不足・取得失敗）であって「0 件だった」ではない。"
             "⚠️ 描画側はこれを見ずに空リストを『返信漏れなし』と書いてはいけない"
         ),
+    )
+    ack_all_token: str = Field(
+        default="",
+        max_length=2000,
+        description=(
+            "「☑️ 全部確認した」ボタン用の署名トークン。"
+            "対象が多くトークンがサイズ上限を超えたときは空＝一括ボタンを描画しない"
+        ),
+    )
+    ack_excluded_mail: int = Field(
+        default=0, ge=0, description="確認済みとして除外したメールスレッド数（観測用）"
+    )
+    ack_excluded_slack: int = Field(
+        default=0, ge=0, description="確認済みとして除外した Slack 返信漏れ件数（観測用）"
     )
     drafts_created: int = Field(default=0, ge=0, description="Gmail draft として作成した下書き数")
     delivered: bool = Field(default=False, description="Slack DM 配信に成功したか")

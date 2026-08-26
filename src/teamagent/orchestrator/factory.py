@@ -441,6 +441,20 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # 朝ダイジェストの「☑️ 確認済み」ボタン押下を処理するツール（OpenClaw 経由）。
+    # 触るのは本人の digest_ack 行だけ（Google API も Slack API も呼ばない）。**既定 OFF**。
+    if _envflag("USE_DIGEST_ACK_TOOL"):
+        from teamagent.skills.digest_ack.skill import DigestAckSkill
+
+        specs.append(
+            ToolSpec(
+                DigestAckSkill.name,
+                DigestAckSkill.description,
+                DigestAckSkill,
+                factory=lambda: DigestAckSkill(),
+            )
+        )
+
     # 自由文の空き時間照会ツール（「空いてる？」「◯分どこに入る？」）。read-only＝
     # freebusy 読み取りのみで書込 API は一切呼ばない。**既定 OFF**。
     if _envflag("USE_CALENDAR_FREEBUSY_TOOL"):
