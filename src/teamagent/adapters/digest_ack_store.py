@@ -15,20 +15,43 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
-from teamagent.skills.morning_digest.ack_token import AckItem
-
 logger = structlog.get_logger(__name__)
+
+
+class AckIdentity(Protocol):
+    """ストアが必要とする項目の形だけを表す構造的な型。
+
+    ⚠️ ここで ``skills.morning_digest.ack_token.AckItem`` を import してはいけない。
+    adapters が skills に依存するのはレイヤ違反（import-linter が弾く）。実際に渡って
+    来るのは AckItem だが、ストアが要るのはこの 3 属性だけなので Protocol で受ける。
+    """
+
+    @property
+    def item_kind(self) -> str: ...
+
+    @property
+    def item_key(self) -> str: ...
+
+    @property
+    def anchor(self) -> int: ...
+
 
 _ACK_TTL_DAYS = 30  # 保持期間（裁定済み）
 _ITEM_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
 
-_ACK_SQL = f"""
+# 保持期間は f-string で SQL に埋め込まず、バインドパラメータで渡す。
+# 値は定数なので実害は無いが、SQL を文字列組み立てしない形にしておけば
+# 「ここは安全」という判断を後任が毎回やり直さずに済む（bandit B608 も消える）。
+_ACK_SQL = """
 INSERT INTO digest_ack (user_email, item_kind, item_key, anchor, expires_at)
-VALUES (%(email)s, %(kind)s, %(key)s, %(anchor)s, NOW() + INTERVAL '{_ACK_TTL_DAYS} days')
+VALUES (
+    %(email)s, %(kind)s, %(key)s, %(anchor)s,
+    NOW() + make_interval(days => %(ttl_days)s)
+)
 ON CONFLICT (user_email, item_kind, item_key) DO UPDATE SET
     anchor = EXCLUDED.anchor,
     acked_at = NOW(),
@@ -53,7 +76,7 @@ def _normalise_email(user_email: str) -> str:
     return (user_email or "").strip().lower()
 
 
-def _valid_identity(item: AckItem) -> bool:
+def _valid_identity(item: AckIdentity) -> bool:
     return item.item_kind in {"m", "s"} and _ITEM_KEY_RE.fullmatch(item.item_key) is not None
 
 
@@ -80,7 +103,7 @@ class DigestAckStore:
         material = f"digestack:{item_kind}:{email}:{raw_id}".encode()
         return hashlib.sha256(material).hexdigest()[:16]
 
-    def ack(self, user_email: str, items: Sequence[AckItem], *, request_id: str) -> int:
+    def ack(self, user_email: str, items: Sequence[AckIdentity], *, request_id: str) -> int:
         """確認済み項目を UPSERT し、書けた件数を返す。"""
         email = _normalise_email(user_email)
         pending = tuple(items)
@@ -89,9 +112,7 @@ class DigestAckStore:
             or "@" not in email
             or not pending
             or not all(
-                _valid_identity(item)
-                and type(item.anchor) is int
-                and item.anchor >= 0
+                _valid_identity(item) and type(item.anchor) is int and item.anchor >= 0
                 for item in pending
             )
         ):
@@ -111,6 +132,7 @@ class DigestAckStore:
                             "kind": item.item_kind,
                             "key": item.item_key,
                             "anchor": item.anchor,
+                            "ttl_days": _ACK_TTL_DAYS,
                         },
                     )
                     written += max(0, int(cur.rowcount))
@@ -122,7 +144,7 @@ class DigestAckStore:
             logger.warning("digest_ack_ack_failed", request_id=request_id, count=0)
             return 0
 
-    def unack(self, user_email: str, items: Sequence[AckItem], *, request_id: str) -> int:
+    def unack(self, user_email: str, items: Sequence[AckIdentity], *, request_id: str) -> int:
         """指定された確認済み項目を削除し、削除できた件数を返す。"""
         email = _normalise_email(user_email)
         pending = tuple(items)
@@ -175,10 +197,10 @@ class DigestAckStore:
                     kind, key, anchor = row["item_kind"], row["item_key"], row["anchor"]
                 else:
                     kind, key, anchor = row
-                item = AckItem(item_kind=str(kind), item_key=str(key), anchor=int(anchor))
-                if not _valid_identity(item) or item.anchor < 0:
+                kind, key, anchor = str(kind), str(key), int(anchor)
+                if kind not in {"m", "s"} or _ITEM_KEY_RE.fullmatch(key) is None or anchor < 0:
                     raise ValueError("invalid digest_ack row")
-                active[(item.item_kind, item.item_key)] = item.anchor
+                active[(kind, key)] = anchor
             logger.info("digest_ack_active", request_id=request_id, count=len(active))
             return active
         except Exception:

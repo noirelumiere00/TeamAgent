@@ -66,9 +66,7 @@ def _ctx(email: str | None = ME) -> SkillContext:
 
 
 def _run(token: str, store: _Store, *, ctx: SkillContext | None = None) -> Any:
-    return DigestAckSkill(store=store).run(
-        DigestAckInput(ack_token=token), ctx or _ctx()
-    )
+    return DigestAckSkill(store=store).run(DigestAckInput(ack_token=token), ctx or _ctx())
 
 
 # ── G1 ───────────────────────────────────────────────────────────────────

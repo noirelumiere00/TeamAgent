@@ -84,12 +84,8 @@ class _TokenStore:
 
 class _Bedrock:
     def converse(self, **kwargs: Any) -> Any:
-        body = json.dumps(
-            [{"id": "x", "importance": "high", "summary": ""}], ensure_ascii=False
-        )
-        return type(
-            "R", (), {"text": body, "usage": type("U", (), {"cost_usd": 0.0})()}
-        )()
+        body = json.dumps([{"id": "x", "importance": "high", "summary": ""}], ensure_ascii=False)
+        return type("R", (), {"text": body, "usage": type("U", (), {"cost_usd": 0.0})()})()
 
 
 @dataclass

@@ -1810,9 +1810,7 @@ def _swap_draft_button(
     return out
 
 
-def _disable_ack_button(
-    blocks: list[dict[str, Any]], block_id: str
-) -> list[dict[str, Any]]:
+def _disable_ack_button(blocks: list[dict[str, Any]], block_id: str) -> list[dict[str, Any]]:
     """押下された「☑️ 確認済みにする」を、押せない「☑️ 確認済み」表示へ置き換える。
 
     Block Kit には「押せないボタン」が無いので、``actions`` 側では要素を取り除き、
@@ -1834,9 +1832,10 @@ def _disable_ack_button(
                 out.append({**b, "elements": new_el})
             # 空になったら actions ブロックごと捨てる（elements 空は Slack が拒否する）
             continue
-        if b.get("type") == "section" and (b.get("accessory") or {}).get(
-            "action_id"
-        ) == "digest_ack":
+        if (
+            b.get("type") == "section"
+            and (b.get("accessory") or {}).get("action_id") == "digest_ack"
+        ):
             out.append({k: v for k, v in b.items() if k != "accessory"})
             continue
         out.append(b)

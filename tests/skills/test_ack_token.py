@@ -124,9 +124,7 @@ def _signed_payload(
 
 def test_roundtrip_for_all_token_kinds() -> None:
     ack = _require_token(encode_ack_token([_ITEM_MAIL], ME, now=_NOW))
-    ack_all = _require_token(
-        encode_ack_all_token([_ITEM_MAIL, _ITEM_SLACK], ME, now=_NOW)
-    )
+    ack_all = _require_token(encode_ack_all_token([_ITEM_MAIL, _ITEM_SLACK], ME, now=_NOW))
     unack_items = (AckItem("m", _ITEM_MAIL.item_key, 0), AckItem("s", _ITEM_SLACK.item_key, 0))
     unack = _require_token(encode_unack_token(unack_items, ME, now=_NOW))
 
@@ -167,9 +165,7 @@ def test_owner_mismatch_rejected() -> None:
 
 def test_expired_token_rejected_at_exact_boundary() -> None:
     token = _require_token(encode_ack_token([_ITEM_MAIL], ME, now=_NOW, ttl_s=60))
-    assert decode_ack_token(token, ME, now=_NOW + 59) == AckTokenPayload(
-        "ack", (_ITEM_MAIL,)
-    )
+    assert decode_ack_token(token, ME, now=_NOW + 59) == AckTokenPayload("ack", (_ITEM_MAIL,))
     assert decode_ack_token(token, ME, now=_NOW + 60) is None
 
 
@@ -178,9 +174,7 @@ def test_one_signature_byte_tamper_is_rejected() -> None:
     raw, signature = _signature(token)
     tampered_signature = bytes([signature[0] ^ 1]) + signature[1:]
 
-    assert decode_ack_token(
-        f"{_b64(raw)}.{_b64(tampered_signature)}", ME, now=_NOW
-    ) is None
+    assert decode_ack_token(f"{_b64(raw)}.{_b64(tampered_signature)}", ME, now=_NOW) is None
 
 
 def test_item_key_payload_tamper_is_rejected() -> None:

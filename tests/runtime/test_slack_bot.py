@@ -77,9 +77,7 @@ def test_disable_ack_button_drops_block_when_it_would_become_empty() -> None:
         {
             "type": "actions",
             "block_id": "b1",
-            "elements": [
-                {"type": "button", "action_id": "digest_ack", "value": "TOK", "text": {}}
-            ],
+            "elements": [{"type": "button", "action_id": "digest_ack", "value": "TOK", "text": {}}],
         },
     ]
     out = _disable_ack_button(blocks, "b1")
