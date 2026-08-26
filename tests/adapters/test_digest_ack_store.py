@@ -11,7 +11,13 @@ from teamagent.adapters.digest_ack_store import DigestAckStore
 from teamagent.skills.morning_digest.ack_token import AckItem
 
 _EMAIL = "me@example.com"
-_ITEM = AckItem(item_kind="m", item_key="0123456789abcdef", anchor=42)
+# 鍵は本物の導出を通す（16 桁の hex をベタ書きすると gitleaks の generic-api-key に
+# 引っかかるうえ、テストが検証している鍵が本番の鍵と別物になる）。
+_ITEM = AckItem(
+    item_kind="m",
+    item_key=DigestAckStore.item_key("m", _EMAIL, "thread-1"),
+    anchor=42,
+)
 
 
 class _FailingPg:
