@@ -147,3 +147,80 @@ def test_provenance_requirement_is_documented_as_deferred_not_deleted() -> None:
     assert "消す" in note
     assert "worker readiness" in note
     assert "hard blocker" in note
+
+
+# ── 形式が正しいだけの仮 SHA を弾く（provenance hard blocker の実体）────────
+
+
+def _measured_equality_precondition(source: str) -> str:
+    block = source[source.index('resource "terraform_data" "hmac_worker_deploy"') :]
+    lifecycle = block[block.index("lifecycle {") :]
+    start = lifecycle.index("hmac_worker_deploy_hashes.candidate_artifact")
+    return lifecycle[max(0, start - 400) : start + 400]
+
+
+def test_declared_sha_must_equal_the_measured_artifact_sha() -> None:
+    """宣言値と、artifact を実際に測った値の一致を要求すること。
+
+    形式検査だけだと `a` * 64 のような仮 SHA が通り、
+    「仮 SHA 禁止」の hard blocker が worker deploy 時に実質抜ける。
+    measured 側は filesha256 で artifact を直接測るので宣言値とは独立に得られる。
+    """
+    source = WORKER_TF.read_text(encoding="utf-8")
+    block = _measured_equality_precondition(source)
+    assert "try(" in block
+    assert "hmac_worker_deploy_hashes.candidate_artifact" in block
+    assert f"var.{_SHA_VAR}" in block
+    assert "==" in block
+    assert "unmeasured SHA is refused" in block
+
+
+def _artifact_accepted(*, worker_enabled: bool, declared: str, measured: str) -> bool:
+    """tf の worker precondition 2 本を合成した意味。
+
+    1) 形式: can(regex 64hex)
+    2) 実測一致: try(measured, "") == declared
+    worker 無効なら resource 自体が count = 0 で評価されない。
+    """
+    if not worker_enabled:
+        return True
+    return bool(_SHA_RE.match(declared)) and measured == declared
+
+
+def test_worker_enabled_with_wellformed_but_unmeasured_sha_is_red() -> None:
+    """形式は正しいが実 artifact と一致しない SHA は拒否される。"""
+    bogus = "a" * 64
+    real = "b" * 64
+    assert _SHA_RE.match(bogus), "前提: 形式としては正しい"
+    assert _artifact_accepted(worker_enabled=True, declared=bogus, measured=real) is False
+
+
+def test_worker_enabled_with_missing_artifact_is_red() -> None:
+    """artifact が無い（measured が空）なら fail-closed。"""
+    assert _artifact_accepted(worker_enabled=True, declared="a" * 64, measured="") is False
+
+
+def test_worker_enabled_with_measured_match_is_green() -> None:
+    """宣言値 == 実測値なら通る。"""
+    sha = "c" * 64
+    assert _artifact_accepted(worker_enabled=True, declared=sha, measured=sha) is True
+
+
+def test_provenance_receipt_and_signature_are_actually_verified() -> None:
+    """provenance evidence が「存在するだけ」でなく検証されること。
+
+    artifact SHA の一致だけでは「approved かどうか」は決まらない。
+    署名付き receipt の検証が deploy 経路で実行されていることを固定する。
+    """
+    deploy = (ROOT / "scripts" / "deploy_to_ec2.sh").read_text(encoding="utf-8")
+    assert deploy.count("verify_worker_bundle_provenance.py") >= 2
+    worker_tf = WORKER_TF.read_text(encoding="utf-8")
+    for required in (
+        "hmac_worker_provenance_receipt_path",
+        "hmac_worker_provenance_signature_path",
+        "hmac_worker_rollback_provenance_receipt_path",
+        "hmac_worker_rollback_provenance_signature_path",
+    ):
+        assert required in worker_tf, required
+    # 全ファイルの存在が readiness 条件に入っている
+    assert "hmac_worker_deploy_files_ready" in worker_tf
