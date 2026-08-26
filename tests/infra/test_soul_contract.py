@@ -27,6 +27,32 @@ def test_soul_exists(soul: str) -> None:
     assert len(soul) > 1000
 
 
+# ── ⓪ 長さ上限（OpenClaw embedded bootstrap の切断防止）─────────────────────
+
+MAX_SOUL_CHARS = 19_500
+
+
+def test_soul_fits_in_openclaw_embedded_bootstrap(soul: str) -> None:
+    """SOUL.md は 19,500 字以下でなければならない。
+
+    OpenClaw は embedded bootstrap でファイルを **20,000 字で切断する**
+    （openclaw-entrypoint 実測）。2026-08-26、23,070 字の SOUL.md が実行時に切断され、
+    モデルが最後に見るものがツール呼び出しの JSON 実例＋言いかけの文になった結果、
+    全ツールの引数を ``{"arguments": {...}}`` で二重に包んで生成し、クライアント側
+    検証の required 違反で**本番の全ツールが停止**した。末尾セクション（メール要約
+    フォーマット/訪問前ブリーフィング/時間のかかる処理/次の一手/トーン）も切断で
+    丸ごと消えていた。
+
+    上限は 19,500 字とし、20,000 字までの余白 500 字は今後の追記用に確保する。
+    ここが赤くなったら**上限を上げるのではなく SOUL.md を圧縮する**こと。
+    """
+    assert len(soul) <= MAX_SOUL_CHARS, (
+        f"SOUL.md が {len(soul)} 字で上限 {MAX_SOUL_CHARS} 字を超えている。"
+        "OpenClaw は 20,000 字で切断し、切断は全ツール障害になる（2026-08-26 本番実測）。"
+        "上限を上げるのではなく SOUL.md 側を圧縮すること"
+    )
+
+
 # ── ① 出典 URL の全機能強制 ──────────────────────────────────────────────────
 
 
