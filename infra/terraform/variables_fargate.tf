@@ -191,7 +191,7 @@ variable "use_slack_summary_tool" {
 }
 
 variable "use_web_research_tool" {
-  description = "web_research tool（公開Webの市場リサーチ＝Gemini の Google 検索グラウンディング）を mcp で有効化。read-only＝Web への直 fetch も書込 API も無い（取得は Google 側で完結）。既定 false。⚠️ON の前提: mcp に Gemini の認証 env（GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT/VERTEX_SA_JSON）が入っていること＝現状は enable_scrape_tools=true が必要（task definition の precondition で強制）。段階公開は web_research_allowed_emails。"
+  description = "web_research tool（公開Webの市場リサーチ＝Gemini の Google 検索グラウンディング）を mcp で有効化。read-only＝Web への直 fetch も書込 API も無い（取得は Google 側で完結）。既定 false。⚠️ON の前提: mcp に Gemini の認証 env（GEMINI_USE_VERTEX/GEMINI_VERTEX_PROJECT/VERTEX_SA_JSON）が入っていること＝現状は enable_scrape_tools=true が必要（task definition の precondition で強制）。⚠️ 到達確認の限界: 「全員開放」の裁定のうち **allowlist 側だけが git で読める**（fargate.tf が WEB_RESEARCH_ALLOWED_EMAILS へ \"\" を直接焼く）。本フラグの ON/OFF は依然 git 管理外の tfvars が真実源なので、実際に全員が使えているかは tfvars 実物か本番 taskdef の env でしか確認できない。段階公開用だった web_research_allowed_emails は退役済み。"
   type        = bool
   default     = false
 }
