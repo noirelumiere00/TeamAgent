@@ -25,8 +25,8 @@ import json
 from typing import Any
 
 __all__ = [
-    "BootstrapPinError",
     "PIN_SEPARATOR",
+    "BootstrapPinError",
     "assert_semantic_no_op_pin",
     "split_pinned_reference",
 ]
