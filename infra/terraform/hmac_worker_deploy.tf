@@ -137,6 +137,14 @@ resource "terraform_data" "hmac_worker_deploy" {
   ]
 
   lifecycle {
+    # worker readiness の fail-closed はここ。共通 HMAC readiness から移してきた分で、
+    # worker deploy を有効化した時点で approved artifact の SHA を必須にする。
+    # 仮 SHA / その場で作った tar.gz は provenance を満たさないため NO-GO のまま。
+    precondition {
+      condition     = can(regex("^[a-f0-9]{64}$", var.worker_hmac_artifact_sha256))
+      error_message = "enable_hmac_worker_deploy requires the reviewed worker archive SHA-256 (worker_hmac_artifact_sha256)."
+    }
+
     precondition {
       condition = (
         local.hmac_worker_deploy_files_ready
