@@ -137,6 +137,26 @@ resource "terraform_data" "hmac_worker_deploy" {
   ]
 
   lifecycle {
+    # worker readiness の fail-closed はここ。共通 HMAC readiness から移してきた分で、
+    # worker deploy を有効化した時点で approved artifact の SHA を必須にする。
+    # 仮 SHA / その場で作った tar.gz は provenance を満たさないため NO-GO のまま。
+    precondition {
+      condition     = can(regex("^[a-f0-9]{64}$", var.worker_hmac_artifact_sha256))
+      error_message = "enable_hmac_worker_deploy requires the reviewed worker archive SHA-256 (worker_hmac_artifact_sha256)."
+    }
+
+    # 形式が正しいだけの 64hex（仮 SHA）を弾く。宣言値は、実際に配布する artifact を
+    # その場で測った値と一致していなければならない。measured 側は filesha256 で
+    # hmac_worker_artifact_path を直接測っており、宣言値とは独立に得られる。
+    # files_ready でない場合は try() が "" を返して不一致＝ RED（fail-closed）。
+    precondition {
+      condition = (
+        try(local.hmac_worker_deploy_hashes.candidate_artifact, "")
+        == var.worker_hmac_artifact_sha256
+      )
+      error_message = "worker_hmac_artifact_sha256 must equal the measured SHA-256 of hmac_worker_artifact_path; a well-formed but unmeasured SHA is refused."
+    }
+
     precondition {
       condition = (
         local.hmac_worker_deploy_files_ready

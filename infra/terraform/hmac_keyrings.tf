@@ -608,12 +608,26 @@ locals {
     -1,
   )
 
+  # worker HMAC deploy は独立した feature。worker を使わない移行
+  # （bootstrap_pin / canonical rotation）でも artifact SHA を要求すると、
+  # worker と無関係な作業まで全部止まる（2026-08-26 実測: 承認済み worker archive の
+  # 所在が repo・AWS・ローカルのいずれからも特定できなかった）。
+  #
+  # 検査を **消す** のではなく、fail-closed の位置を
+  # 「共通 HMAC readiness」から「worker readiness」へ移す。
+  # worker deploy を有効化する時点で hard blocker として復活する。
+  hmac_worker_in_scope = var.enable_hmac_worker_deploy
+  hmac_worker_artifact_ready = (
+    !local.hmac_worker_in_scope
+    || can(regex("^[a-f0-9]{64}$", var.worker_hmac_artifact_sha256))
+  )
+
   mail_action_hmac_config_ready = (
     var.mail_action_hmac_rollout_phase != "blocked"
     && local.hmac_rotation_epoch_valid
     && var.hmac_live_manifest_path != ""
     && var.hmac_rollout_control_path != ""
-    && can(regex("^[a-f0-9]{64}$", var.worker_hmac_artifact_sha256))
+    && local.hmac_worker_artifact_ready
     && local.hmac_image_digest_valid
     && local.mail_action_hmac_primary_generation != ""
     && local.mail_action_hmac_primary_value_from != ""
@@ -651,7 +665,7 @@ locals {
     && local.hmac_rotation_epoch_valid
     && var.hmac_live_manifest_path != ""
     && var.hmac_rollout_control_path != ""
-    && can(regex("^[a-f0-9]{64}$", var.worker_hmac_artifact_sha256))
+    && local.hmac_worker_artifact_ready
     && local.hmac_image_digest_valid
     && local.report_link_hmac_primary_generation != ""
     && local.report_link_hmac_primary_value_from != ""
