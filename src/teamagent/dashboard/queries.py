@@ -87,6 +87,7 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
 #   - video_approval: 納品動画の一次FB。proposal_review と同型の「レビュー」＝作る
 #   - operation_log: Slack 会話を CRM 転記用に構造化＝整える
 #   - mail_constraints / workspace_search: 本人の受信箱・予定を引く秘書業務＝秘書
+#   - digest_ack: 朝ダイジェストの「確認済み」ボタン押下＝morning_digest の別入口＝秘書
 _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
     WORK_TYPE_INVESTIGATE: (
         "tiktok_acquire",
@@ -105,6 +106,7 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
     WORK_TYPE_ASSIST: (
         "mail_constraints",
         "workspace_search",
+        "digest_ack",
     ),
 }
 
