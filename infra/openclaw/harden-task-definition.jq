@@ -221,7 +221,7 @@ def harden_openclaw_container($image):
   .healthCheck = {
     command: [
       "CMD",
-      "/nodejs/bin/node",
+      "/usr/bin/node",
       "-e",
       "fetch(\"http://127.0.0.1:18789/readyz\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
     ],
@@ -280,7 +280,7 @@ if (
   ($after | has("command") | not) and
   $after.mountPoints == exact_mounts and
   $after.stopTimeout == 120 and
-  $after.healthCheck.command[1] == "/nodejs/bin/node" and
+  $after.healthCheck.command[1] == "/usr/bin/node" and
   ($after.healthCheck.command[3] | contains("/readyz"))
 ) then . else
   fail("rendered hardening contract is incomplete")

@@ -245,8 +245,8 @@ openclaw_version="$(jq -er '.openclaw.version' "$lock_file")" ||
   die "could not read the locked OpenClaw version"
 openclaw_arm64_digest="$(jq -er '.openclaw.linuxArm64Digest' "$lock_file")" ||
   die "could not read the locked OpenClaw arm64 digest"
-distroless_arm64_digest="$(jq -er '.runtime.linuxArm64Digest' "$lock_file")" ||
-  die "could not read the locked distroless arm64 digest"
+runtime_arm64_digest="$(jq -er '.runtime.linuxArm64Digest' "$lock_file")" ||
+  die "could not read the locked runtime base arm64 digest"
 dockerfile_frontend_digest="$(
   jq -er '.tooling.dockerfileFrontend.digest' "$lock_file"
 )" || die "could not read the locked Dockerfile frontend digest"
@@ -254,7 +254,7 @@ plugins_lock_sha256="$(sha256sum "$lock_file" | cut -d' ' -f1)" ||
   die "could not hash the OpenClaw plugins lock"
 for digest in \
   "$openclaw_arm64_digest" \
-  "$distroless_arm64_digest" \
+  "$runtime_arm64_digest" \
   "$dockerfile_frontend_digest"; do
   [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
     die "OpenClaw plugins lock contains an invalid image digest"
@@ -264,7 +264,7 @@ done
 for pin in \
   "$openclaw_version" \
   "$openclaw_arm64_digest" \
-  "$distroless_arm64_digest" \
+  "$runtime_arm64_digest" \
   "$dockerfile_frontend_digest"; do
   grep -F -- "$pin" "$dockerfile" >/dev/null ||
     die "Dockerfile does not contain lock pin: $pin"
@@ -352,7 +352,7 @@ build=(
   -f "$dockerfile"
   --build-arg "OPENCLAW_VERSION=$openclaw_version"
   --build-arg "OPENCLAW_ARM64_DIGEST=$openclaw_arm64_digest"
-  --build-arg "DISTROLESS_ARM64_DIGEST=$distroless_arm64_digest"
+  --build-arg "RUNTIME_ARM64_DIGEST=$runtime_arm64_digest"
   --build-arg "GIT_COMMIT=$source_commit"
   --build-arg "GIT_BRANCH=$source_branch"
   --build-arg "SOURCE_TREE=$source_tree"

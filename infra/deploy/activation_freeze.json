@@ -193,10 +193,11 @@
   "unlock": {
     "active": true,
     "scope_paths": [
+      "infra/codebuild/openclaw_bundle_contract.json",
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避。2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED しており、この追随なしにはリリース鎖が再走できない。総数 240→240・追加0・削除0・Chromium 不変。",
-    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定し実装まで進める / AWS 側 freeze は全 principal から detach 済み）",
+    "reason": "統合裁定（2026-08-26・両変更とも個別裁定済みの合併）: ① core_media 契約 = wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避（2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED・総数 240→240・追加0・削除0・Chromium 不変）。② openclaw 契約 = runtime base を gcr.io/distroless/nodejs24-debian13 から cgr.dev/chainguard/node (Wolfi) へ乗換え、CVE-2026-14456 (Debian trixie fix_deferred) による scan gate の恒久閉塞を根治するため、binary_probe (path=/nodejs/bin/node, sha256=6bf69d0e…) → (path=/usr/bin/node, sha256=5452461a…) の更新が不可避（scan_gate 0/0・repo 集合・referrer 種別は不変）。",
+    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）",
     "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。"
   },
   "production_deployment_freeze": {

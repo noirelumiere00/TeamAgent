@@ -156,7 +156,7 @@ fi
 
 OPENCLAW_VERSION=$(jq -r '.openclaw.version' "$LOCK_FILE")
 OPENCLAW_ARM64_DIGEST=$(jq -r '.openclaw.linuxArm64Digest' "$LOCK_FILE")
-DISTROLESS_ARM64_DIGEST=$(jq -r '.runtime.linuxArm64Digest' "$LOCK_FILE")
+RUNTIME_ARM64_DIGEST=$(jq -r '.runtime.linuxArm64Digest' "$LOCK_FILE")
 DOCKERFILE_FRONTEND_DIGEST=$(jq -r '.tooling.dockerfileFrontend.digest' "$LOCK_FILE")
 PLUGINS_LOCK_SHA256=$(sha256sum "$LOCK_FILE" | cut -d' ' -f1)
 DOCKERFILE_SHA256=$(sha256sum "$DOCKERFILE" | cut -d' ' -f1)
@@ -178,8 +178,13 @@ EXPECTED_MATERIALS=$(jq -c '
       sha256: (.tooling.dockerfileFrontend.digest | sub("^sha256:"; ""))
     },
     {
+      # Expected purl for the Chainguard runtime base. buildx derives it from
+      # the FROM reference (repository@tag?digest=...&platform=...). If the
+      # first real build fails on material validation, diff the provenance
+      # actual output in evidence materials.json against this expectation and
+      # align this template with the buildx-emitted purl before promoting.
       uri: (
-        "pkg:docker/gcr.io/distroless/nodejs24-debian13@nonroot?digest=" +
+        "pkg:docker/cgr.dev/chainguard/node@latest?digest=" +
         .runtime.linuxArm64Digest +
         "&platform=linux%2Farm64"
       ),
@@ -201,14 +206,14 @@ EXPECTED_MATERIALS=$(jq -c '
     )
   ] | sort_by(.uri, .sha256)
 ' "$LOCK_FILE")
-for pin in "$OPENCLAW_VERSION" "$OPENCLAW_ARM64_DIGEST" "$DISTROLESS_ARM64_DIGEST" "$DOCKERFILE_FRONTEND_DIGEST"; do
+for pin in "$OPENCLAW_VERSION" "$OPENCLAW_ARM64_DIGEST" "$RUNTIME_ARM64_DIGEST" "$DOCKERFILE_FRONTEND_DIGEST"; do
   grep -F -- "$pin" "$DOCKERFILE" >/dev/null || fail "Dockerfile does not contain lock pin: $pin"
 done
 
 build=(docker buildx build --platform linux/arm64 --pull -f "$DOCKERFILE"
   --build-arg "OPENCLAW_VERSION=$OPENCLAW_VERSION"
   --build-arg "OPENCLAW_ARM64_DIGEST=$OPENCLAW_ARM64_DIGEST"
-  --build-arg "DISTROLESS_ARM64_DIGEST=$DISTROLESS_ARM64_DIGEST"
+  --build-arg "RUNTIME_ARM64_DIGEST=$RUNTIME_ARM64_DIGEST"
   --build-arg "GIT_COMMIT=$SOURCE_COMMIT"
   --build-arg "GIT_BRANCH=$SOURCE_BRANCH"
   --build-arg "SOURCE_TREE=$SOURCE_TREE"
@@ -244,14 +249,14 @@ jq -e \
   --arg releaseContract "$BUNDLE_CONTRACT_SHA256" \
   --arg openclawVersion "$OPENCLAW_VERSION" \
   --arg openclawDigest "$OPENCLAW_ARM64_DIGEST" \
-  --arg distrolessDigest "$DISTROLESS_ARM64_DIGEST" \
+  --arg runtimeBaseDigest "$RUNTIME_ARM64_DIGEST" \
   --argjson expectedMaterials "$EXPECTED_MATERIALS" '
   ."buildx.build.provenance" as $p |
   $p.buildType == "https://mobyproject.org/buildkit@v1" and
   $p.invocation.configSource.entryPoint == "Dockerfile.openclaw" and
   $p.invocation.environment.platform == "linux/arm64" and
   ($p.invocation.parameters.args | keys | sort) == ([
-    "build-arg:DISTROLESS_ARM64_DIGEST",
+    "build-arg:RUNTIME_ARM64_DIGEST",
     "build-arg:GIT_BRANCH",
     "build-arg:GIT_COMMIT",
     "build-arg:OPENCLAW_ARM64_DIGEST",
@@ -270,7 +275,7 @@ jq -e \
   $p.invocation.parameters.args["build-arg:SOURCE_TREE"] == $tree and
   $p.invocation.parameters.args["build-arg:OPENCLAW_VERSION"] == $openclawVersion and
   $p.invocation.parameters.args["build-arg:OPENCLAW_ARM64_DIGEST"] == $openclawDigest and
-  $p.invocation.parameters.args["build-arg:DISTROLESS_ARM64_DIGEST"] == $distrolessDigest and
+  $p.invocation.parameters.args["build-arg:RUNTIME_ARM64_DIGEST"] == $runtimeBaseDigest and
   $p.invocation.parameters.args["build-arg:SOURCE_URI"] == $sourceUri and
   $p.invocation.parameters.args["build-arg:SOURCE_ARCHIVE_SHA256"] == $archive and
   $p.invocation.parameters.args["build-arg:SOURCE_ARTIFACT_VERSION"] == $artifactVersion and
@@ -345,7 +350,7 @@ mkdir -p "$EVIDENCE_DIR"
   fail "evidence directory must be empty: $EVIDENCE_DIR"
 
 docker run --rm --user 0:0 --network none --read-only --cap-drop ALL \
-  --security-opt no-new-privileges --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
+  --security-opt no-new-privileges --entrypoint /usr/bin/node "$RUNTIME_REF" -e '
 const fs=require("fs");
 const forbidden=[
   "/root/.cache/ms-playwright",
@@ -362,7 +367,7 @@ process.exit(present.length?1:0);
 ' || fail "privileged-path browser cache inventory failed"
 
 docker run --rm --network none --read-only --cap-drop ALL \
-  --security-opt no-new-privileges --entrypoint /nodejs/bin/node "$RUNTIME_REF" -e '
+  --security-opt no-new-privileges --entrypoint /usr/bin/node "$RUNTIME_REF" -e '
 const fs=require("fs"),path=require("path");
 const forbiddenNames=new Set([
   "@openclaw/browser-plugin","@typescript/native-preview","esbuild","jiti","jscpd",
@@ -574,7 +579,7 @@ process.exit(
   !jitiResolvable&&pruneReportValid&&
   process.getuid()===65532&&process.getgid()===65532&&
   typeof process.execve==="function"?0:1
-);' >"$tmp_dir/runtime-probe.json" || fail "distroless/nonroot/runtime inventory contract failed"
+);' >"$tmp_dir/runtime-probe.json" || fail "chainguard/nonroot/runtime inventory contract failed"
 
 jq -e . "$tmp_dir/runtime-probe.json" >/dev/null || fail "runtime inventory is not valid JSON"
 jq -n \
@@ -601,7 +606,7 @@ docker run --rm --platform linux/arm64 --network none --read-only \
   --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,noexec,nosuid,size=64m \
   --mount "type=bind,src=$REPO_ROOT/infra/openclaw/plugin-operation-smoke.mjs,dst=/opt/openclaw-plugin-operation-smoke.mjs,readonly" \
-  --entrypoint /nodejs/bin/node "$RUNTIME_REF" \
+  --entrypoint /usr/bin/node "$RUNTIME_REF" \
   /opt/openclaw-plugin-operation-smoke.mjs \
   >"$EVIDENCE_DIR/plugin-operation-smoke.json" || \
   fail "representative Slack/Bedrock operation module smoke failed"
@@ -640,7 +645,7 @@ docker run "${run_args[@]}" \
   -e NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
   -e ECS_CONTAINER_METADATA_URI_V4=http://169.254.170.2/v4/test \
   -e AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/v2/credentials/test \
-  "$RUNTIME_REF" /nodejs/bin/node -e 'console.log(JSON.stringify(process.env))' \
+  "$RUNTIME_REF" /usr/bin/node -e 'console.log(JSON.stringify(process.env))' \
   >"$tmp_dir/child-env.json"
 jq -e '
   def allowed: [
@@ -672,7 +677,7 @@ jq -e '
   .AWS_CONTAINER_CREDENTIALS_RELATIVE_URI == "/v2/credentials/test"
 ' "$tmp_dir/child-env.json" >/dev/null || fail "child environment allowlist failed"
 
-if docker run "${run_args[@]}" "$RUNTIME_REF" /nodejs/bin/node -e 'process.exit(42)' \
+if docker run "${run_args[@]}" "$RUNTIME_REF" /usr/bin/node -e 'process.exit(42)' \
   >"$tmp_dir/exit-42.log" 2>&1; then
   fail "entrypoint unexpectedly converted child exit 42 to success"
 else
@@ -742,7 +747,7 @@ process.execve(process.execPath,[
   "gateway","--bind","loopback","--port","18789"
 ],process.env);'
 gateway_container=$(docker run "${gateway_args[@]}" "$RUNTIME_REF" \
-  /nodejs/bin/node -e "$gateway_launcher")
+  /usr/bin/node -e "$gateway_launcher")
 docker inspect "$gateway_container" | jq -e '
   .[0].HostConfig.ReadonlyRootfs == true and
   (.[0].HostConfig.CapDrop | index("ALL")) != null and

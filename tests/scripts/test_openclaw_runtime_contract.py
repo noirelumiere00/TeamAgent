@@ -167,7 +167,7 @@ def test_release_runtime_and_plugin_pins_are_aligned() -> None:
     assert re.fullmatch(r"[0-9a-f]{40}", lock["openclaw"]["releaseCommit"])
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["openclaw"]["imageIndexDigest"])
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["openclaw"]["linuxArm64Digest"])
-    assert lock["runtime"]["nodeVersion"].startswith("24.")
+    assert lock["runtime"]["nodeVersion"].startswith("26.")
     assert lock["runtime"]["uid"] == lock["runtime"]["gid"] == 65532
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["runtime"]["imageIndexDigest"])
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", lock["runtime"]["linuxArm64Digest"])
@@ -192,7 +192,7 @@ def test_release_runtime_and_plugin_pins_are_aligned() -> None:
         assert plugin["integrity"].startswith("sha512-")
 
 
-def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
+def test_dockerfile_uses_exact_arm64_children_and_chainguard_final() -> None:
     lock = json.loads(LOCK.read_text())
     dockerfile = DOCKERFILE.read_text()
     pruner = PRUNER.read_text()
@@ -208,7 +208,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
         lock["openclaw"]["linuxArm64Digest"],
         lock["openclaw"]["linuxArm64Digest"],
     ]
-    assert _docker_arg_values(dockerfile, "DISTROLESS_ARM64_DIGEST") == [
+    assert _docker_arg_values(dockerfile, "RUNTIME_ARM64_DIGEST") == [
         lock["runtime"]["linuxArm64Digest"],
         lock["runtime"]["linuxArm64Digest"],
     ]
@@ -220,7 +220,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert from_lines == [
         "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream-templates",
         "ghcr.io/openclaw/openclaw:${OPENCLAW_VERSION}@${OPENCLAW_ARM64_DIGEST} AS upstream",
-        "gcr.io/distroless/nodejs24-debian13:nonroot@${DISTROLESS_ARM64_DIGEST} AS runtime",
+        "cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime",
     ]
     # Every workspace template directory the runtime resolves must ship, or the
     # gateway starts healthy and then fails on the first message.
@@ -250,7 +250,7 @@ def test_dockerfile_uses_exact_arm64_children_and_distroless_final() -> None:
     assert re.search(r"^USER 65532:65532$", dockerfile, flags=re.MULTILINE)
     assert re.search(r'^VOLUME \["/tmp"\]$', dockerfile, flags=re.MULTILINE)
     assert re.search(
-        r'^ENTRYPOINT \["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"\]$',
+        r'^ENTRYPOINT \["/usr/bin/node", "/opt/teamagent/entrypoint.mjs"\]$',
         dockerfile,
         flags=re.MULTILINE,
     )
@@ -891,7 +891,7 @@ def test_authoritative_deploy_renderer_enforces_real_fargate_contract(
             "readOnly": False,
         },
     ]
-    assert container["healthCheck"]["command"][1] == "/nodejs/bin/node"
+    assert container["healthCheck"]["command"][1] == "/usr/bin/node"
     assert "/readyz" in container["healthCheck"]["command"][3]
     assert container["stopTimeout"] == 120
     assert container["secrets"] == current_task["containerDefinitions"][0]["secrets"]
@@ -1584,7 +1584,7 @@ def test_task_hardening_filter_and_release_boundary_do_not_claim_fargate_nnp() -
     assert "update-service" not in deploy
     assert "terraform apply" not in deploy
     assert ".stopTimeout = 120" in task_filter
-    assert '"/nodejs/bin/node"' in task_filter
+    assert '"/usr/bin/node"' in task_filter
     assert contract["release"]["ready"] is True
     assert contract["release"]["blocked_reason"] == ""
     assert contract["bundle"]["interfaces"]["build"] == "infra/openclaw/build-bundle.sh"

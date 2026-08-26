@@ -18,7 +18,7 @@
     "infra/codebuild/teamagent_runtime_contract.json": "26f45a3d962b5500b69d66dc9f06d52aa5bbe540",
     "infra/codebuild/teamagent_core_media_release_contract.json": "172bb5254987f865861f233a04a2cb151887c007",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
-    "infra/codebuild/openclaw_bundle_contract.json": "b40176dc5defb1c965f195e7cdda94dc9b044663",
+    "infra/codebuild/openclaw_bundle_contract.json": "bb7ee348a5c25efe8a38e7bac378057377edfe6d",
     "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
     "infra/terraform/mcp_approval.tf": "ca9d809d4cc2b3d1ea32aac1c796cd13d6dc98ca"
   },

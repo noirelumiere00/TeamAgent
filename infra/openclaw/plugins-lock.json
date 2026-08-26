@@ -9,11 +9,11 @@
     "nodeVersion": "24.16.0"
   },
   "runtime": {
-    "image": "gcr.io/distroless/nodejs24-debian13",
-    "tag": "nonroot",
-    "imageIndexDigest": "sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212",
-    "linuxArm64Digest": "sha256:029157d80b0b475dbd9e59715bb1cf51cd637f667ca546b3af39d9ad71bcffd5",
-    "nodeVersion": "24.18.0",
+    "image": "cgr.dev/chainguard/node",
+    "tag": "latest",
+    "imageIndexDigest": "sha256:f2a8ed64ec02cef2e53c76d1255d0917e749570af251e32e99f54cda1076cc8d",
+    "linuxArm64Digest": "sha256:827a1a2add4e9566b3ca69a4f98aec1bb0d9eddbb5410382def798fc4024071b",
+    "nodeVersion": "26.7.0",
     "uid": 65532,
     "gid": 65532
   },

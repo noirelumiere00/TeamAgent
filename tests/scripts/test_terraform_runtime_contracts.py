@@ -160,7 +160,7 @@ def test_fargate_preflight_executes_every_distinct_image_contract() -> None:
         'test -f "$TIKTOK_SCRAPER_PATH"',
         "/tmp/teamagent-openclaw/state/preflight",
         "(state.mode & 0o777) !== 0o700",
-        "entry_point_json='[\"/nodejs/bin/node\"]'",
+        "entry_point_json='[\"/usr/bin/node\"]'",
         "environment:$environment",
         '.config.Volumes["/tmp"]',
         'PREFLIGHT_EFS_ROLE_NAME="${PROJECT}-runtime-preflight-${ENVIRONMENT}-$$"',
