@@ -85,7 +85,9 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         "（本人は MCP 境界が解決する）。**まだ連携していないサービスのリンクだけ**を返す"
         "（両方連携済みなら『連携済み』と返る）。連携済みでも機能追加で必要な権限（スコープ）が"
         "増えている場合は自動で*再連携*リンクを返す（『再連携』『連携し直す』と言われた場合もこれで足りる）。"
-        "返した message を本人に提示すること。"
+        "返した message を**一字一句そのまま**本人に提示すること（message 内の [ラベル](URL) "
+        "リンクを崩さない・URL を裸で貼り直さない・コードブロックで包まない・URL 文字列に"
+        "手を加えない）。"
     )
     input_schema: ClassVar[type[BaseModel]] = OAuthConnectInput
     output_schema: ClassVar[type[BaseModel]] = OAuthConnectOutput
@@ -222,18 +224,30 @@ def _compose_message(
     *,
     google_scope_upgrade: bool = False,
 ) -> str:
-    """未連携サービスの案内文を組み立てる（連携済みは省略・両方済みは完了案内）。"""
-    targets: list[tuple[str, str, str]] = []
+    """未連携サービスの案内文を組み立てる（連携済みは省略・両方済みは完了案内）。
+
+    表示契約（OpenClaw 経由の Slack 返信前提・2026-07-13 実機の生URL裸貼り対策）:
+      - リンクは標準 Markdown の `[ラベル](URL)` で書く。OpenClaw(@openclaw/slack) は
+        エージェント返信を markdown→mrkdwn 変換するため `<URL|ラベル>` の装飾リンク
+        （ラベル付き青リンク）として表示される。生 URL の裸貼りは怪しく見えて
+        踏まれないため出さない。
+      - 各リンクはリスト項目（`- `）にする。リストはブロック要素なので、変換器の
+        soft-break の扱いに依存せず確実に1行ずつ分かれて表示される。
+      - 太字は `**…**`（標準 Markdown）。`*…*` は変換で italic になる。
+      - SOUL.md 側で「message を一字一句そのまま返す」を指示しており、ここが
+        Slack 表示の最終形。書式を変えるときは SOUL.md の連携セクションと合わせる。
+    """
+    targets: list[tuple[str, str]] = []  # (リンクラベル, URL)
     if url:
-        desc = "メールの読み取り・下書き作成、カレンダー等"
+        # #188: v0.3 スコープ追加により既連携ユーザーは「連携済みだが権限不足」になる。
+        # その場合は連携リンク自体は出す（google_connected=False）が、ラベルで再連携である旨を示す。
         if google_scope_upgrade:
-            desc = (
-                "機能追加により必要な権限が増えたため *再連携* が必要です"
-                "（カレンダー登録・日程提案など）"
-            )
-        targets.append(("Google", desc, url))
+            g_label = "Google を再連携する（権限追加のため・カレンダー登録/日程提案等）"
+        else:
+            g_label = "Google を連携する（メール・カレンダー等）"
+        targets.append((g_label, url))
     if slack_url:
-        targets.append(("Slack", "本人としての検索・チャンネル巡回", slack_url))
+        targets.append(("Slack を連携する（本人としての検索・チャンネル巡回）", slack_url))
 
     # 出すものが無い＝すべて連携済み。
     if not targets:
@@ -244,32 +258,32 @@ def _compose_message(
             done.append("Slack")
         joined = " と ".join(done) if done else "アカウント"
         return (
-            f"✅ *{requester}* は既に {joined} を連携済みです。追加の操作は不要です。"
+            f"✅ **{requester}** は既に {joined} を連携済みです。追加の操作は不要です。"
             "そのまま話しかけてください。"
         )
 
-    lines = [
-        f"👋 *{requester}* の連携リンクです（1回だけ・所要1分）。\n",
-        "下のリンクは *あなた専用* です（他の人と共有しないでください）。\n",
-    ]
+    lines = [f"👋 **{requester}** の連携リンクです（1回だけ・所要1分）。"]
     already = []
     if google_connected:
         already.append("Google")
     if slack_connected:
         already.append("Slack")
     if already:
-        lines.append(f"（{' と '.join(already)} は連携済みのため省略しています）\n")
-    lines.append("開いて、表示される権限を *許可* してください:\n")
+        lines.append(f"（{' と '.join(already)} は連携済みのため省略しています）")
+    lines.append("下のリンクは **あなた専用** です（他の人と共有しないでください）。")
+    lines.append("")
 
     if len(targets) == 1:
-        label, desc, link = targets[0]
-        lines.append(f"*{label} を連携*（{desc}）\n")
-        lines.append(f"{link}\n")
+        label, link = targets[0]
+        lines.append(f"- [🔗 {label}]({link})")
     else:
         marks = ["①", "②", "③"]
-        for i, (label, desc, link) in enumerate(targets):
-            lines.append(f"\n*{marks[i]} {label} を連携*（{desc}）\n")
-            lines.append(f"{link}\n")
+        for i, (label, link) in enumerate(targets):
+            lines.append(f"- [🔗 {marks[i]} {label}]({link})")
 
-    lines.append("\n「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。")
-    return "".join(lines)
+    lines.append("")
+    lines.append(
+        "リンクを開いて、表示される権限を **許可** してください。"
+        "「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。"
+    )
+    return "\n".join(lines)

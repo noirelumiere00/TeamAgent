@@ -147,6 +147,74 @@ def test_conn_check_failure_is_failopen(monkeypatch: pytest.MonkeyPatch) -> None
     assert out.slack_url is not None
 
 
+def test_message_uses_markdown_links_not_bare_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """表示契約: リンクは `- [ラベル](URL)` 形式で、生 URL の裸貼り行が無い。
+
+    OpenClaw(@openclaw/slack) はエージェント返信を markdown→mrkdwn 変換するため、
+    この形式なら Slack でラベル付き装飾リンクになる（2026-07-13 実機の
+    「生URLがそのまま出て怪しく見える」オンボーディング UX 問題の再発防止）。
+    """
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+    # 2本とも Markdown リンク（リスト項目）として含まれる。
+    assert f"]({out.url})" in out.message
+    assert f"]({out.slack_url})" in out.message
+    assert out.message.count("- [🔗") == 2
+    # 生 URL の裸貼り行（行頭 http）が存在しない。
+    for line in out.message.splitlines():
+        assert not line.strip().startswith("http")
+
+
+def test_single_link_message_is_markdown_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    """単一リンク時も Markdown リンク形式（番号なし）で出る。"""
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False))
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+    assert f"- [🔗 Google を連携する（メール・カレンダー等）]({out.url})" in out.message
+    assert "①" not in out.message
+
+
+def test_bold_uses_double_asterisk_not_single(monkeypatch: pytest.MonkeyPatch) -> None:
+    """太字は `**…**`（標準 Markdown）で書く。
+
+    OpenClaw の markdown→mrkdwn 変換は `**x**`→`*x*`（Slack 太字）だが、`*x*` は
+    emphasis として **italic** に化ける。単独 `*` の太字へ退行すると Slack で
+    見た目が崩れる（強調が効かない）ため、`**…**` を使っていることを固定する。
+    """
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+    assert "**あなた専用**" in out.message  # 誤共有抑止の強調（太字）
+    # `**…**` を全て伏せた残りに、太字を意図した単独 `*` が残っていないこと。
+    without_bold = out.message.replace("**", "")
+    assert "*" not in without_bold
+
+
+def test_oauth_urls_are_markdown_link_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """生成される OAuth URL が `[ラベル](URL)` の宛先として安全であることを固定する。
+
+    markdown-it のリンク宛先は空白や非バランスな `)` で早期終端する。現行の
+    Google/Slack OAuth URL は全パラメータが percent-encode 済み＋state は
+    base64url（`A-Za-z0-9-_=`）で、空白・`)`・`]` を含まない。将来 URL 生成が
+    変わってこれらが混入すると装飾リンクが静かに壊れる（生URLより悪い）ため、
+    実生成 URL に対して不変条件をテストで検知する（本番コードは fail-safe を保つ）。
+    """
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+    for link in (out.url, out.slack_url):
+        assert link is not None
+        assert " " not in link  # 空白は宛先を終端させる
+        assert ")" not in link  # 非バランスな ) は宛先を終端させる
+        assert "]" not in link
+
+
 def test_slack_omitted_when_redirect_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     # SLACK_OAUTH_REDIRECT_URI 未設定なら slack_url=None・Google のみ（後方互換）。
     for k, v in _OAUTH_ENV.items():
