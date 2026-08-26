@@ -4650,13 +4650,18 @@ snapshot_live() {
   # signing used MAIL_ACTION_HMAC_SECRET; preserve that as the effective
   # deployed report primary so the exact legacy version can become previous.
   jq -S -c '
+    # BOOTSTRAP-PIN(legacy-selector): canonical 化前の live は report_link の primary に
+    # teamagent/dev/report-link-hmac を指している（2026-08-21 の out-of-band デプロイ由来）。
+    # 観測できないと snapshot が die して plan が 1 行も作れないため、canonical 化までの間だけ
+    # exact name 1 本の追加を許す。ワイルドカードや任意 secret へは広げない。
+    # canonical 化が完了したらこの選択肢を撤去する。
     def primary_base_arn($purpose):
       . as $value |
       (
         if $purpose == "mail" then
           "(database-url|hmac/mail-action)"
         else
-          "(database-url|hmac/mail-action|hmac/report-link)"
+          "(database-url|hmac/mail-action|hmac/report-link|report-link-hmac)"
         end
       ) as $path |
       (
