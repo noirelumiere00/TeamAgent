@@ -79,6 +79,18 @@ variable "morning_digest_calendar_button" {
   default     = false
 }
 
+variable "morning_digest_ack_button" {
+  description = "☑️確認済みボタンを朝ダイジェストに描画。既定 false。ON は digest_ack tool（USE_DIGEST_ACK_TOOL + toolFilter）が本番有効になってから（先に出すと無反応ボタン）。なお morning_digest_ack_filter=false の間は ack_token 自体が空なのでボタンは 1 つも出ない（二重の安全弁）。"
+  type        = bool
+  default     = false
+}
+
+variable "morning_digest_ack_filter" {
+  description = "確認済みの項目を翌朝以降のダイジェストから除外する（同時に ☑️ボタン用トークンの発行も始まる）。既定 false。隠れるのは『確認済み かつ その後スレッドに新着なし』の間だけで、新しい返信が来れば再表示される。確認済みの記録は 30 日で失効。ボタン描画より先に ON にしてよい（トークンは出るがボタンが描画されないだけ）。"
+  type        = bool
+  default     = false
+}
+
 variable "morning_digest_model_id" {
   description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
   type        = string
@@ -278,6 +290,10 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "MORNING_DIGEST_CALENDAR_BUTTON", value = var.morning_digest_calendar_button ? "true" : "false" },
       # 🗓日程候補提案ボタン（v0.3 Task4・既定OFF）。押下先 schedule_propose tool の有効化とセットで ON。
       { name = "MORNING_DIGEST_SCHEDULE_BUTTON", value = var.morning_digest_schedule_button ? "true" : "false" },
+      # ☑️確認済みボタン（既定OFF）。押下先 digest_ack tool の有効化とセットで ON。
+      { name = "MORNING_DIGEST_ACK_BUTTON", value = var.morning_digest_ack_button ? "true" : "false" },
+      # 確認済み項目の除外＋☑️トークン発行（既定OFF）。ボタンより先に ON にしてよい。
+      { name = "MORNING_DIGEST_ACK_FILTER", value = var.morning_digest_ack_filter ? "true" : "false" },
       # 予定リマインド（v0.3 Task5・既定OFF）。enable_reminders=true で基盤を建ててから ON。
       { name = "MORNING_DIGEST_REMINDERS", value = (var.enable_reminders && var.morning_digest_reminders) ? "true" : "false" },
       { name = "REMINDER_LEAD_MINUTES", value = tostring(var.reminder_lead_minutes) },

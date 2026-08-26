@@ -127,6 +127,9 @@ _ACTION_MAIL_DRAFT = "mail_draft"
 _ACTION_CALENDAR_EVENT = "calendar_event"
 # 🗓 日程候補を提案ボタン（v0.3 Task4）。value は draft_token（同一形式・thread_id 由来）。
 _ACTION_SCHEDULE_PROPOSE = "schedule_propose"
+# ☑️ 確認済みボタン。value は ack_token（HMAC 署名・生 thread_id / channel_id は載らない）。
+# 個別ボタンも「全部確認した」も同じ action_id で、種別は署名済み payload の typ が持つ。
+_ACTION_DIGEST_ACK = "digest_ack"
 
 
 def _schedule_button_enabled() -> bool:
@@ -144,6 +147,20 @@ def _calendar_button_enabled() -> bool:
     ボタンは押下先の calendar_event tool（USE_CALENDAR_EVENT_TOOL + toolFilter.include）が
     本番で有効になってから ON にする（先に出すと無反応ボタンになる）。"""
     return os.environ.get("MORNING_DIGEST_CALENDAR_BUTTON", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _ack_button_enabled() -> bool:
+    """MORNING_DIGEST_ACK_BUTTON=1 のときのみ ☑️ボタンを描画（既定OFF）。
+
+    ボタンは押下先の digest_ack tool（USE_DIGEST_ACK_TOOL + toolFilter.include）が
+    本番で有効になってから ON にする（先に出すと無反応ボタンになる）。なお skill 側の
+    MORNING_DIGEST_ACK_FILTER が OFF なら ack_token 自体が空なので、この flag だけ
+    ON にしてもボタンは 1 つも出ない（二重の安全弁）。"""
+    return os.environ.get("MORNING_DIGEST_ACK_BUTTON", "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -545,6 +562,127 @@ def _slack_handoff_lines(digest: Any) -> list[str]:
     return [_guard_no_raw_ids(ln, known_ids) for ln in lines]
 
 
+def _slack_handoff_card_blocks(digest: Any) -> list[dict[str, Any]]:
+    """💬 セクションを「1 カード = 1 section + ☑️ accessory」で描く（ack ボタン ON 時のみ）。
+
+    ボタン OFF のときは呼ばれない。OFF 時の描画（`_slack_handoff_lines` → 1 つの section）は
+    1 バイトも変えない＝この機能を入れる前と完全に同じ DM が届く。
+
+    ボタンを `actions` ブロックではなく section の `accessory` に載せるのは blocks 予算のため
+    （`actions` を足すと 1 カードにつき 2 ブロック消費する）。バケット見出しは、そのバケット
+    最初のカードの本文へ前置して畳み込む（見出し専用ブロックを立てない）。
+
+    ⚠️ 文面（見出し・件数の言い回し・フッター）は行版と同一に保つこと。ここだけ言葉が
+    変わると、flag の ON/OFF で「昨日と違うことを言う朝ダイジェスト」になる。
+    """
+    items = list(getattr(digest, "slack_unread", []) or [])
+    if not items:
+        line = _HANDOFF_EMPTY_LINE if _slack_was_scanned(digest) else _HANDOFF_UNSCANNED_LINE
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": line}}]
+    names = _handoff_names(items)
+    known_ids = _handoff_known_ids(items)
+    triaged = _handoff.triage_slack_handoff(items, now=_handoff_now(), me_user_id=None)
+    shown = triaged.cards[:_HANDOFF_MAX_ITEMS]
+    total = _slack_handoff_count(digest)
+    truncated = bool(getattr(digest, "slack_unread_truncated", False))
+    counts = {b: triaged.count(b) for b in _handoff.BUCKET_ORDER}
+    summary = "・".join(
+        f"{_handoff.BUCKET_LABELS[b]} {counts[b]}" for b in _handoff.BUCKET_ORDER if counts[b]
+    )
+
+    def _section(text: str, accessory: dict[str, Any] | None = None) -> dict[str, Any]:
+        block: dict[str, Any] = {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": _guard_no_raw_ids(text, known_ids)},
+        }
+        if accessory is not None:
+            block["accessory"] = accessory
+        return block
+
+    blocks: list[dict[str, Any]] = [
+        _section(_handoff_header_line(len(shown), total, truncated, summary))
+    ]
+    for bucket in _handoff.BUCKET_ORDER:
+        cards = [c for c in shown if c.bucket == bucket]
+        if not cards:
+            continue
+        emoji = _HANDOFF_BUCKET_EMOJI[bucket]
+        label = _handoff.BUCKET_LABELS[bucket]
+        head = (
+            f"{label}（{len(cards)}件）"
+            if counts[bucket] == len(cards)
+            else f"{label}（{counts[bucket]}件中{len(cards)}件を表示）"
+        )
+        pending_head: str | None = f"{emoji} *{head}*"
+        for card in cards:
+            body = _handoff_card_line(card, items[card.source_index], names, known_ids)
+            if card.note:
+                body += f"\n　└ {_handoff_display(card.note, names, known_ids)}"
+            if pending_head is not None:
+                body = f"{pending_head}\n{body}"
+                pending_head = None
+            token = getattr(items[card.source_index], "ack_token", "")
+            accessory = (
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "☑️ 確認済み", "emoji": True},
+                    "action_id": _ACTION_DIGEST_ACK,
+                    "value": token,
+                }
+                if token
+                else None
+            )
+            blocks.append(_section(body, accessory))
+    blocks.append(_section(_HANDOFF_FOOTNOTE))
+    return blocks
+
+
+def _slack_handoff_block_section(digest: Any) -> list[dict[str, Any]]:
+    """`_slack_handoff_card_blocks` の **fail-safe 境界**（行版 `_slack_handoff_section` と同役）。
+
+    判定層は 800 行超の決定論ロジックを任意のユーザー本文に対して走らせる。そこで想定外の
+    例外が出たときに、メールも予定も含む DM ごと落とす（`_process_user` の except が
+    `return "error"` ＝ 1 通も届かない）のは割に合わない。ここで受け止めて 💬 の 1 行へ
+    縮退させ、他セクションを巻き添えにしない。
+    """
+    try:
+        return _slack_handoff_card_blocks(digest)
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: 💬 ブロック描画失敗 {type(exc).__name__}",
+            flush=True,
+        )
+        return [{"type": "section", "text": {"type": "mrkdwn", "text": _HANDOFF_FAILED_LINE}}]
+
+
+def _push_slack_handoff(blocks: list[dict[str, Any]], digest: Any) -> None:
+    """💬 セクションを積む。ack ボタン OFF なら従来どおりの行描画に完全に一致させる。"""
+    if _ack_button_enabled():
+        blocks.extend(_slack_handoff_block_section(digest))
+    else:
+        _push_section_lines(blocks, _slack_handoff_section(digest))
+
+
+def _ack_all_blocks(digest: Any) -> list[dict[str, Any]]:
+    """末尾の「☑️ 全部確認した」。token が空なら何も積まない（サイズ超過/機能OFF）。"""
+    token = getattr(digest, "ack_all_token", "")
+    if not token or not _ack_button_enabled():
+        return []
+    return [
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "☑️ 全部確認した", "emoji": True},
+                    "action_id": _ACTION_DIGEST_ACK,
+                    "value": token,
+                }
+            ],
+        }
+    ]
+
+
 def _slack_handoff_section(digest: Any) -> list[str]:
     """💬 セクションの描画（**このセクションだけの fail-safe**）。
 
@@ -672,6 +810,19 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
                 "value": draft_token,
             }
         )
+    # ☑️ 確認済み（既定OFF）。押すと翌朝以降このスレッドを隠す（新着が来れば再表示）。
+    # ⚠️ 同じ行の「✅ 下書きを確認」は Gmail を開く url ボタン。絵文字と語尾（〜にする）で
+    # 「開く」と「状態を変える」を見分けられるようにしている。✅ を再利用しないこと。
+    ack_token = getattr(m, "ack_token", "")
+    if ack_token and _ack_button_enabled():
+        btns.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "☑️ 確認済みにする", "emoji": True},
+                "action_id": _ACTION_DIGEST_ACK,
+                "value": ack_token,
+            }
+        )
     return btns
 
 
@@ -772,7 +923,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
 
     # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
     #     display は本人 DM のみ・ログ厳禁 G3/G7）---
-    _push_section_lines(blocks, _slack_handoff_section(digest))
+    _push_slack_handoff(blocks, digest)
     blocks.append({"type": "divider"})
 
     # --- 📅 当日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
@@ -808,6 +959,9 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 "text": {"type": "mrkdwn", "text": f"📅 *{day_label} の予定*: なし"},
             }
         )
+
+    # --- ☑️ 全部確認した（既定OFF・脚注の前）---
+    blocks.extend(_ack_all_blocks(digest))
 
     # --- 脚注（DLP 注記）---
     blocks.append({"type": "divider"})
@@ -949,7 +1103,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
 
     # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
     #     display は本人 DM のみ・ログ厳禁 G3/G7）---
-    _push_section_lines(blocks, _slack_handoff_section(digest))
+    _push_slack_handoff(blocks, digest)
     blocks.append({"type": "divider"})
 
     # --- 📅 当日の予定（最大10件・1行形式は旧描画と共通・見出しは実日付）---
@@ -987,9 +1141,11 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             }
         )
 
-    # --- 脚注（DLP 注記・旧描画と同一）---
-    blocks.append({"type": "divider"})
-    blocks.append(
+    # --- 末尾（☑️ 全部確認した + 脚注（DLP 注記・旧描画と同一））---
+    # 打ち切りに巻き込ませないため、本文とは別に組んで最後に足す。
+    tail: list[dict[str, Any]] = _ack_all_blocks(digest)
+    tail.append({"type": "divider"})
+    tail.append(
         {
             "type": "context",
             "elements": [
@@ -1005,8 +1161,11 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     )
 
     # blocks 50 個上限の保険（静的上限の積算では起きない想定の最終ガード）。
-    if len(blocks) > _COMPACT_MAX_BLOCKS:
-        blocks = blocks[: _COMPACT_MAX_BLOCKS - 1]
+    # 切るのは本文側だけにする: ☑️一括ボタンが黙って消えると「押したつもりが押せて
+    # いない」という見えない失敗になるため、末尾は常に残す。
+    budget = _COMPACT_MAX_BLOCKS - len(tail)
+    if len(blocks) > budget:
+        blocks = blocks[: budget - 1]
         blocks.append(
             {
                 "type": "context",
@@ -1018,6 +1177,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
                 ],
             }
         )
+    blocks.extend(tail)
     return text, blocks
 
 

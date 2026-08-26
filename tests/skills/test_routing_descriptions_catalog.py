@@ -262,6 +262,10 @@ NON_TOOL_IDENTIFIERS = frozenset(
         "slack_user_id",
         "slack_team_id",
         "thread_id",
+        # Slack interaction の要素キー（digest_ack が「同じ action_id で 3 種が来る」と説明する）
+        "action_id",
+        # digest_ack が DB に保存するハッシュ済み項目鍵（生 ID ではない・ツールでもない）
+        "item_key",
         # 出力に出る URL / S3 キー / DB 列
         "app_url",
         "app_client_url",

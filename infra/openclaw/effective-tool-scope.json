@@ -166,6 +166,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SCHEDULE_PROPOSE_TOOL"] }
     },
     {
+      "name": "digest_ack",
+      "effect": "digest-ack-state-write",
+      "terraformGate": "use_digest_ack_tool",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_DIGEST_ACK_TOOL"] }
+    },
+    {
       "name": "calendar_freebusy",
       "effect": "calendar-freebusy-read-only",
       "terraformGate": "use_calendar_freebusy_tool",
