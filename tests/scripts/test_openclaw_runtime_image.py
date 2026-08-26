@@ -579,6 +579,9 @@ const authenticatedConfigJson = JSON.parse(
 );
 const expectedAuthenticatedConfig = {
   basePath: "",
+  // assistantName は openclaw.config.json5 の identity.name に追随する（改名の実機到達点）。
+  // ⚠️ 別ブランチ 882a9ae が同じ 1 行を "NewsTV AI" に書き換えているためマージ衝突する。
+  //    解決値は "Aico"（本ブランチの改名が最終）。882a9ae の tar CVE 修正は別途取り込むこと。
   assistantName: "Aico",
   assistantAvatar: "🧭",
   assistantAvatarSource: null,

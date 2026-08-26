@@ -91,7 +91,7 @@ resource "aws_cloudwatch_log_metric_filter" "canary_heartbeat" {
 
 resource "aws_cloudwatch_metric_alarm" "canary_unhealthy" {
   alarm_name          = "${var.project_name}-${var.environment}-canary-unhealthy"
-  alarm_description   = "AiLa 主要経路の合成カナリアが失敗（identity 解決等が壊れている＝per-user 機能の無音停止）"
+  alarm_description   = "Aico 主要経路の合成カナリアが失敗（identity 解決等が壊れている＝per-user 機能の無音停止）"
   namespace           = local.metric_namespace
   metric_name         = "CanaryUnhealthy"
   statistic           = "Sum"
@@ -309,7 +309,7 @@ variable "canary_rule_enabled" {
 resource "aws_cloudwatch_event_rule" "canary_hourly" {
   count               = var.enable_canary_health ? 1 : 0
   name                = "${var.project_name}-${var.environment}-canary-hourly"
-  description         = "1時間ごとの AiLa 合成カナリア Fargate 起動トリガ"
+  description         = "1時間ごとの Aico 合成カナリア Fargate 起動トリガ"
   schedule_expression = var.canary_schedule_expression
   state               = var.canary_rule_enabled ? "ENABLED" : "DISABLED"
 

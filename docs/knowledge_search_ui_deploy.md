@@ -1,8 +1,8 @@
-# 社内資料 検索 Web UI を AiLa から配布する — デプロイ手順（人間ゲート）
+# 社内資料 検索 Web UI を Aico から配布する — デプロイ手順（人間ゲート）
 
-AiLa（Slack）が、OAuth「連携して」リンクと同じ要領で **社内資料検索 Web UI の URL** を返す。
+Aico（Slack）が、OAuth「連携して」リンクと同じ要領で **社内資料検索 Web UI の URL** を返す。
 
-- AiLa が検索すると、応答に `web_url`（`{CONNECT_BASE_URL}/search`）と `graph_url`
+- Aico が検索すると、応答に `web_url`（`{CONNECT_BASE_URL}/search`）と `graph_url`
   （`{CONNECT_BASE_URL}/search/graph`）が載り、「ブラウザ/グラフで開く」を案内できる。
 - 「検索ページ教えて」系には専用ツール `knowledge_search_url` が URL ＋一言案内を返す。
 - **`CONNECT_BASE_URL` 未設定なら URL は一切出ない**（壊れた相対リンクを出さない・後方互換）。
@@ -32,7 +32,7 @@ Bedrock（rerank）の IAM が要る（既に tf に配線済み）。
 ### (d) env / secret を設定
 connect-web に以下が要る（(c) の tf で配線済み・値の供給だけ確認）:
 - `CONNECT_BASE_URL` … Web UI の公開 base（例 `https://connect.newstv.co.jp`）。
-  **mcp/openclaw 側にも同じ値を渡す**（AiLa が `web_url`/`graph_url` を組み立てる真実源）。
+  **mcp/openclaw 側にも同じ値を渡す**（Aico が `web_url`/`graph_url` を組み立てる真実源）。
 - `CONNECT_GOOGLE_CLIENT_ID` … 検索 UI の Google ログイン（Web 型クライアント）。
 - `OAUTH_STATE_SECRET`（session/CSRF 署名鍵・secret）/ `CONNECT_GOOGLE_CLIENT_SECRET`（secret）。
 - `CONNECT_SEARCH_SESSION_SECRET` … 検索 cookie の署名鍵（未設定だと再起動毎に全員ログアウト）。
@@ -55,9 +55,9 @@ MCP 側で **`USE_KNOWLEDGE_SEARCH_URL_TOOL=1`** を ON にしてから openclaw
 ---
 
 ## 動作確認
-1. mcp に `CONNECT_BASE_URL` を渡した状態で AiLa に資料検索を依頼 → 応答末尾に
+1. mcp に `CONNECT_BASE_URL` を渡した状態で Aico に資料検索を依頼 → 応答末尾に
    ブラウザ/グラフのリンクが出る。
-2. AiLa に「検索ページ教えて」 → `knowledge_search_url` が `/search`・`/search/graph` を返す。
+2. Aico に「検索ページ教えて」 → `knowledge_search_url` が `/search`・`/search/graph` を返す。
 3. リンクを開く → Google ログイン → 検索 UI が表示される。
 
 > `CONNECT_BASE_URL` 未設定で本番に出しても **壊れたリンクは一切出ない**（リンク無しで動作継続）。

@@ -110,7 +110,7 @@ variable "tiktok_apify_secret_arn" {
 }
 
 variable "tiktok_mcp_task_role_name" {
-  description = "OC/AiLa(MCP)が走るタスクロール名。SQS送信/Dynamo参照/S3署名の権限を付与する対象。空ならスキップ(手動付与)。"
+  description = "OC/Aico(MCP)が走るタスクロール名。SQS送信/Dynamo参照/S3署名の権限を付与する対象。空ならスキップ(手動付与)。"
   type        = string
   default     = ""
 }

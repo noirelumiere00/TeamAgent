@@ -709,7 +709,7 @@ def _compute_chunk_drop():
 CHUNK_DROP: set[str] = set()  # main() で _compute_chunk_drop() を実行して設定
 
 HTML = r"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>connect-web — Obsidian</title>
+<title>Aico Vault</title>
 <style>
 /*FONTFACE*/
 :root{

@@ -149,7 +149,7 @@ fields @timestamp, output_tokens, stop_reason, latency_ms
 
 ### 4.3 二段返しの検証手順（ON にした直後）
 
-1. AiLa 宛 DM で「〇〇の提案資料あったっけ？」→ **第一報が数秒で来る**こと。
+1. Aico 宛 DM で「〇〇の提案資料あったっけ？」→ **第一報が数秒で来る**こと。
 2. 続けて同じスレッド（DM ならそのまま）に**考察本文が後追いで届く**こと。
 3. `search_two_stage_deferred` → `search_followup_done posted=True` がログに並ぶこと。
 4. OpenClaw が第一報で自前の考察を書いていない（＝ SOUL 反映済み）こと。
