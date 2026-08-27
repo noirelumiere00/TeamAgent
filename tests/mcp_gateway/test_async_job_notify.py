@@ -252,3 +252,98 @@ def test_flag_off_does_not_start_thread(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert result is None
     assert created == [], "フラグ OFF ではスレッドを生成してはならない"
+
+
+# ── 見張り時間（C6: 15 分 → 60 分）─────────────────────────────────────────────
+# 実測の所要は proposal_builder / tiktok_acquire とも 40〜50 分帯。実時間で待てないので
+# 仮想時計（_monotonic）と「待たずに時計だけ進める waiter」を差し込んで境界を検査する。
+
+_MEASURED_JOB_SECONDS = 50 * 60.0
+# fixture が短い値へ差し替える前の実値（このモジュールの import 時点＝未パッチ）。
+_REAL_TIMEOUT_SECONDS = notify._TIMEOUT_SECONDS
+
+
+class _VirtualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.steps = 0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def virtual_time(monkeypatch: pytest.MonkeyPatch) -> _VirtualClock:
+    """待たずに仮想時計だけを進める（poll 間隔ぶんずつ）。"""
+
+    clock = _VirtualClock()
+    monkeypatch.setattr(notify, "_monotonic", clock)
+
+    def _advance(deadline: float, interval_seconds: float) -> None:
+        clock.steps += 1
+        # 打ち切りを外すと時計が deadline で止まったまま poll し続ける（無限スレッド）。
+        # 実時間で気づけないので、ここで見切って赤にする。
+        assert clock.steps < 10_000, "見張りが deadline で終わっていない（無限ループ）"
+        clock.now = min(deadline, clock.now + interval_seconds)
+
+    monkeypatch.setattr(notify, "_wait_until_next_poll", _advance)
+    return clock
+
+
+def test_watch_window_outlasts_the_measured_job_duration() -> None:
+    """見張り時間は実測所要より長い（短いと毎回が誤報になる）。"""
+
+    assert _REAL_TIMEOUT_SECONDS >= _MEASURED_JOB_SECONDS
+
+
+def test_forty_five_minute_job_gets_the_completion_notice(
+    immediate_notify: _FakeSlack,
+    virtual_time: _VirtualClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """45 分かかるジョブでも「まだ完了していません」ではなく完了通知が届く。"""
+
+    monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 30.0)
+    monkeypatch.setattr(notify, "_POLL_INTERVAL_SECONDS", 30.0)
+    monkeypatch.setattr(notify, "_TIMEOUT_SECONDS", _REAL_TIMEOUT_SECONDS)
+
+    def _poll() -> tuple[str, str]:
+        if virtual_time.now >= 45 * 60.0:
+            return ("done", "提案書ができました。")
+        return ("running", "処理中")
+
+    notify.schedule_completion_notice(
+        tool="proposal_builder_submit",
+        job_id="pb_slow",
+        user_context={"channel_id": "C123"},
+        request_id="req-45min",
+        poll=_poll,
+    )
+
+    assert len(immediate_notify.posted) == 1
+    assert immediate_notify.posted[0]["text"] == "提案書ができました。"
+    assert virtual_time.now == pytest.approx(45 * 60.0)
+
+
+def test_stuck_job_still_gives_up_at_the_watch_window(
+    immediate_notify: _FakeSlack,
+    virtual_time: _VirtualClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """終わらないジョブは見張り時間ちょうどで打ち切る（無限スレッドを作らない）。"""
+
+    monkeypatch.setattr(notify, "_INITIAL_DELAY_SECONDS", 30.0)
+    monkeypatch.setattr(notify, "_POLL_INTERVAL_SECONDS", 30.0)
+    monkeypatch.setattr(notify, "_TIMEOUT_SECONDS", _REAL_TIMEOUT_SECONDS)
+
+    notify.schedule_completion_notice(
+        tool="tiktok_acquire",
+        job_id="ta_stuck",
+        user_context={"channel_id": "C123"},
+        request_id="req-stuck",
+        poll=lambda: ("running", "処理中"),
+    )
+
+    assert len(immediate_notify.posted) == 1
+    assert "まだ完了していません" in immediate_notify.posted[0]["text"]
+    assert virtual_time.now == pytest.approx(_REAL_TIMEOUT_SECONDS)
