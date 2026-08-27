@@ -7,7 +7,8 @@ proposal_builder の job を照会・破壊できない（逆方向は proposal_
 ``pb_`` プレフィクスガードが守る）。
 
 フロー（確定済みカスタマージャーニー + 2026-08-24 FMT化裁定）:
-  submit → preflight（不足なら needs_input・ジョブを作らない）→ queued
+  submit → preflight（不足なら needs_input・ジョブを作らない）
+  → アドミッション（同時実行が上限なら busy・順番待ち・ジョブを作らない）→ queued
   → daemon thread: 検索軸ごとに tiktok_search 実測（一般KW / ブランド名 / 競合名）
   → 動画解析（DL→フレーム→視覚AIでクラスタ分類+テロップ読取・並列/コスト上限つき）
   → 決定論集計（metrics）→ 契約準拠の計測JSON（deck_plan: deck_meta + slide_plan）
@@ -63,6 +64,7 @@ from teamagent.skills.omiyage_report.metrics import (
 from teamagent.skills.omiyage_report.preflight import (
     CompletionSource,
     build_accepted_message,
+    build_busy_message,
     build_needs_input_message,
     run_preflight,
 )
@@ -92,6 +94,11 @@ _RESULT_INVALID = "RESULT_INVALID"
 _RETRY_SECONDS_DEFAULT = 60
 _HEARTBEAT_SECONDS_DEFAULT = 30
 _STALE_SECONDS_DEFAULT = 180
+
+# 同時に走らせてよいお土産資料ジョブの本数。1 ジョブが検索軸ごとの実スクレイプ＋
+# 動画DL＋Bedrock 視覚推論＋PPTX レンダを daemon thread で回すため、無制限だと
+# mcp タスク（実測 2026-08-27: cpu 1024 / mem 4096・desiredCount=1）を数本で食い潰す。
+_MAX_CONCURRENT_JOBS_DEFAULT = 3
 
 # 深掘り実測（2026-08-24・「シャンプー」120本/47s・ブロックなし・理論上限~216本）に
 # 基づく既定深度。届かなかった軸は取得できた上限で集計し、資料の確認範囲に開示する。
@@ -186,6 +193,56 @@ def _configured_search_timeout_seconds() -> int:
     )
 
 
+def _configured_max_concurrent_jobs() -> int:
+    return _envint(
+        "OMIYAGE_MAX_CONCURRENT_JOBS",
+        _MAX_CONCURRENT_JOBS_DEFAULT,
+        minimum=1,
+        maximum=16,
+    )
+
+
+class JobAdmission:
+    """走行中ジョブ本数の入口制御（プロセス内カウンタ）。
+
+    mcp は desiredCount=1（実測 2026-08-27）なので、プロセス内の
+    ``BoundedSemaphore`` がそのまま系全体の上限になる。DynamoDB の分散カウンタは
+    不要で、増やせば「台帳が読めないと受付できない」fail-closed 面が増えるだけ。
+
+    ``BoundedSemaphore`` を選ぶのは、二重 release（＝上限がじわじわ緩む静かな
+    バグ）をその場で ValueError として顕在化させるため。
+    """
+
+    def __init__(self, limit: int | None = None) -> None:
+        self._limit = _configured_max_concurrent_jobs() if limit is None else max(1, limit)
+        self._semaphore = threading.BoundedSemaphore(self._limit)
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def try_acquire(self) -> bool:
+        """空きがあれば 1 枠取る。**待たない**（submit は即答が契約）。"""
+
+        return self._semaphore.acquire(blocking=False)
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+
+# プロセス共有の既定インスタンス。Skill は呼び出しのたびに instantiate されるので、
+# インスタンス変数に持たせると上限が効かない（media_job の boto3 キャッシュと同型）。
+_ADMISSION = JobAdmission()
+
+
+def reset_job_admission(limit: int | None = None) -> JobAdmission:
+    """共有 admission を作り直す（テスト用・本番経路からは呼ばない）。"""
+
+    global _ADMISSION
+    _ADMISSION = JobAdmission(limit)
+    return _ADMISSION
+
+
 def _safe_failure_code(exc: BaseException) -> str:
     match = _SAFE_ERROR_CODE.search(str(exc))
     return match.group(0) if match else "SEARCH_FAILED"
@@ -264,6 +321,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
         "バックグラウンドで進める。不足時は status=needs_input で不足リストと補完候補・"
         "回答欄を返す（ジョブは作らない）ので、営業の回答で埋めて再submitする。"
+        "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返すので、"
+        "retry_after_seconds を置いてから同じ入力でそのまま再submitする。"
         "進行確認は omiyage_report_status。queued/running中は再submitしない。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
@@ -288,8 +347,12 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         search_depth: int | None = None,
         search_timeout_seconds: int | None = None,
         analysis_per_axis: int | None = None,
+        admission: JobAdmission | None = None,
     ) -> None:
         self._store = store or ProposalJobStore()
+        # None のままにして「呼び出し時点の共有インスタンス」を見る（reset_job_admission
+        # をテストが後から呼んでも効くようにする）。
+        self._admission_override = admission
         self._searcher = searcher or _default_searcher
         self._deck_builder = deck_builder
         self._slack = slack
@@ -321,6 +384,10 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             else max(1, search_timeout_seconds)
         )
 
+    @property
+    def _admission(self) -> JobAdmission:
+        return _ADMISSION if self._admission_override is None else self._admission_override
+
     def run(
         self,
         input: OmiyageReportSubmitInput,
@@ -341,41 +408,63 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 message=build_needs_input_message(input, preflight),
             )
 
-        job_id = new_omiyage_job_id()
-        request_summary = {
-            "kind": OMIYAGE_JOB_KIND,
-            "request_id": ctx.request_id,
-            "brand": input.brand,
-            "competitors": list(input.competitors),
-            "keywords": list(input.keywords),
-            "official_tiktok_account": input.official_tiktok_account,
-            "search_depth": self._search_depth,
-        }
-        self._store.create_job(job_id, request_summary)
-
-        job_input = input.model_copy(deep=True)
-        job_ctx = SkillContext(
-            request_id=ctx.request_id,
-            user_id=ctx.user_id,
-            metadata=copy.deepcopy(ctx.metadata),
-        )
-        try:
-            self._thread_launcher(
-                lambda: self._run_background(job_id, job_input, job_ctx),
-                f"omiyage-report-{job_id}",
-            )
-        except Exception as exc:
-            self._store.mark_failed(job_id, _JOB_START_FAILED, expected_statuses=("queued",))
-            log.warning(
-                "omiyage_report_thread_start_failed",
-                job_id=job_id,
-                error_type=type(exc).__name__,
-            )
+        # 入口で走行本数を絞る。**ジョブを作る前**に判定するので、順番待ちになった
+        # 依頼は台帳にも残らない（status 照会の対象が増えない・掃除も要らない）。
+        admission = self._admission
+        if not admission.try_acquire():
+            log.info("omiyage_report_admission_rejected", limit=admission.limit)
             return OmiyageReportSubmitOutput(
-                status="failed",
-                job_id=job_id,
-                message="お土産資料jobの開始に失敗しました。",
+                status="busy",
+                retry_after_seconds=self._retry_after_seconds,
+                message=build_busy_message(
+                    limit=admission.limit,
+                    retry_after_seconds=self._retry_after_seconds,
+                ),
             )
+
+        # ここから先で背景スレッドの起動に失敗（or 台帳書込で例外）したら、取った枠は
+        # その場で返す。返し損ねると「実行中 0 本なのに永久に順番待ち」になる。
+        handed_off = False
+        try:
+            job_id = new_omiyage_job_id()
+            request_summary = {
+                "kind": OMIYAGE_JOB_KIND,
+                "request_id": ctx.request_id,
+                "brand": input.brand,
+                "competitors": list(input.competitors),
+                "keywords": list(input.keywords),
+                "official_tiktok_account": input.official_tiktok_account,
+                "search_depth": self._search_depth,
+            }
+            self._store.create_job(job_id, request_summary)
+
+            job_input = input.model_copy(deep=True)
+            job_ctx = SkillContext(
+                request_id=ctx.request_id,
+                user_id=ctx.user_id,
+                metadata=copy.deepcopy(ctx.metadata),
+            )
+            try:
+                self._thread_launcher(
+                    lambda: self._run_with_admission(admission, job_id, job_input, job_ctx),
+                    f"omiyage-report-{job_id}",
+                )
+            except Exception as exc:
+                self._store.mark_failed(job_id, _JOB_START_FAILED, expected_statuses=("queued",))
+                log.warning(
+                    "omiyage_report_thread_start_failed",
+                    job_id=job_id,
+                    error_type=type(exc).__name__,
+                )
+                return OmiyageReportSubmitOutput(
+                    status="failed",
+                    job_id=job_id,
+                    message="お土産資料jobの開始に失敗しました。",
+                )
+            handed_off = True
+        finally:
+            if not handed_off:
+                admission.release()
 
         log.info("omiyage_report_submitted", job_id=job_id)
         return OmiyageReportSubmitOutput(
@@ -388,6 +477,20 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
     # ------------------------------------------------------------------
     # background job
     # ------------------------------------------------------------------
+
+    def _run_with_admission(
+        self,
+        admission: JobAdmission,
+        job_id: str,
+        input: OmiyageReportSubmitInput,
+        ctx: SkillContext,
+    ) -> None:
+        """背景実行の外側で枠を必ず返す（``_run_background`` 本体の責務は変えない）。"""
+
+        try:
+            self._run_background(job_id, input, ctx)
+        finally:
+            admission.release()
 
     def _run_background(
         self,
