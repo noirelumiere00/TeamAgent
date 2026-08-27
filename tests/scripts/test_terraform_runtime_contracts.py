@@ -114,6 +114,37 @@ def test_main_media_and_x_writable_cache_contracts_are_exact() -> None:
     assert 'PYTHONPYCACHEPREFIX", value = "/tmp/.pycache"' in x_buzz
 
 
+# CPU 推論（E5 embed / torch）の BLAS・OpenMP スレッド抑制。EC2 base env と揃える。
+BLAS_THREAD_ENV_NAMES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def test_mcp_task_pins_blas_thread_counts_to_one() -> None:
+    """mcp task が BLAS/OpenMP スレッドを 1 に固定する（C5）。
+
+    未設定だと BLAS は cgroup のクォータではなく「見えているコア数」でスレッドを
+    張るため、Fargate の cpu 割り当て（実測 2026-08-27 rev92: 1024 = 1 vCPU）の
+    数倍のワーカーが同じ 1 vCPU を奪い合う。EC2 base env には入っているのに live の
+    mcp task には 1 つも無かった（実測・同日）。
+    """
+    mcp = _block(TF_ROOT / "fargate.tf", "aws_ecs_task_definition", "mcp")
+    for name in BLAS_THREAD_ENV_NAMES:
+        assert f'{{ name = "{name}", value = "1" }}' in mcp, (
+            f"mcp task に {name}=1 が無い（BLAS が 1 vCPU をオーバーサブスクライブする）"
+        )
+        # cpu から導出しない。terraform の既定 cpu と live がずれている時に
+        # 誤った値を焼く事故（ingest_schedule.tf の但し書きと同じ罠）を作らない。
+        assert not re.search(rf'name = "{name}", value = [^"]', mcp), (
+            f"{name} は定数 1 で焼く（var.fargate_mcp_cpu 等から導出しない）"
+        )
+
+
+def test_blas_thread_pinning_matches_the_ec2_base_env() -> None:
+    """EC2 systemd と Fargate で同じ 3 つを pin する（片肺だと torch が素通りする）。"""
+    base_env = (PROJECT_ROOT / "infra" / "deploy" / "ec2.overrides.env").read_text(encoding="utf-8")
+    for name in BLAS_THREAD_ENV_NAMES:
+        assert f"{name}=1" in base_env, f"EC2 base env の {name}=1 が消えている"
+
+
 @pytest.mark.parametrize(
     ("filename", "task_definition"),
     [
