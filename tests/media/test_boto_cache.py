@@ -124,3 +124,26 @@ def test_client_cache_is_bounded() -> None:
 
     assert all(isinstance(item, _FakeClient) for item in produced)
     assert len(media_job._BOTO_CLIENTS) == limit
+
+
+def test_tiktok_task_store_status_path_uses_the_shared_cache() -> None:
+    """完了通知の見張りが叩く一番熱い経路がキャッシュを素通りしないこと。
+
+    ``TikTokTaskStore._session()`` が Session を作って渡すと MediaJobClient から
+    見て「注入 Session」になり、共有キャッシュを丸ごと迂回する。見張りは
+    30 秒間隔・最大 60 分＝最大 120 回このパスを通るので、素通りは効く。
+    """
+
+    import time
+
+    from teamagent.adapters.tiktok_task_store import TikTokTaskStore
+
+    # store 側の MediaJobClient は実時計を使うので、締切も実時刻で置く。
+    deadline = time.time() + 300.0
+    store = TikTokTaskStore()
+
+    first = store._client(store._session())._client("dynamodb", deadline)
+    second = store._client(store._session())._client("dynamodb", deadline)
+
+    assert first is second
+    assert _CountingSession.instances == 1
