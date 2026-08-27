@@ -44,9 +44,18 @@ class TikTokTaskStore:
         self._kms_key_id = os.environ.get("MEDIA_JOB_KMS_KEY_ID", "")
 
     def _session(self) -> Any:
-        import boto3
+        """``MediaJobClient`` へ渡す Session。``None`` = 共有キャッシュに委ねる。
 
-        return boto3.session.Session()
+        ここで ``boto3.session.Session()`` を作ると **override 扱い**になり、
+        media_job 側のプロセス内 Session/client キャッシュを丸ごと素通りする。
+        ``get_status`` は完了通知の見張り（30 秒間隔・最大 60 分）から繰り返し
+        呼ばれる一番熱い経路なので、素通りさせると 1 ポーリングあたり
+        Session+client 生成の約 40ms（実測）を毎回払う。
+
+        テストはこのメソッドを差し替えて偽 Session を注入できる（seam は維持）。
+        """
+
+        return None
 
     def _client(self, session: Any) -> MediaJobClient:
         return MediaJobClient(

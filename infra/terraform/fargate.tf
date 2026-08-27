@@ -603,6 +603,18 @@ resource "aws_ecs_task_definition" "mcp" {
       # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
       # （max=8 で5並行に余裕＝枯渇なし）。
       { name = "PGVECTOR_POOL_MIN", value = "2" },
+      # CPU 推論（E5 embed）の BLAS スレッド抑制。EC2 base env（infra/deploy/ec2.overrides.env）
+      # には入っているが、live の mcp task には 1 つも無い（実測 2026-08-27・rev92）。
+      # 未設定だと BLAS/OpenMP は「見えているコア数」でスレッドを張るが、Fargate の
+      # cpu 制限（実測 1024 = 1 vCPU）は cgroup のクォータであってコア数ではないため、
+      # 割り当ての数倍のワーカーを立てて奪い合う（スループットは上がらず、スレッドごとの
+      # ワークバッファぶんメモリだけ増える）。並列は RequestGate / executor 側で稼ぐ。
+      # ⚠️ 値は cpu から導出しない定数 1。ingest 側が「CLI の task definition で設定する」
+      # としているのは live の cpu に追随させる必要があるからで、1 固定にはその制約が無い。
+      # ⚠️ torch は import 時に読むので、プロセス起動“前”＝task def env でなければ効かない。
+      { name = "OMP_NUM_THREADS", value = "1" },
+      { name = "OPENBLAS_NUM_THREADS", value = "1" },
+      { name = "MKL_NUM_THREADS", value = "1" },
       # §U: per-user OAuth token の復号鍵。これが無いと factory._build_token_store() が
       # InMemoryTokenStore（空＝全員未連携）にフォールバックし、mail_* が「連携してください」で
       # 落ちる（RDS に token があっても見えない）。connect-web/morning-digest と同じ alias を共用。

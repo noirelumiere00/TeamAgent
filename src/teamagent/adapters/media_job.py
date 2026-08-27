@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -50,6 +51,50 @@ _ARTIFACT_TTL_DEFAULT_S = ARTIFACT_RETENTION_SECONDS
 _CONSUMER_RELEASE_RESERVE_SECONDS = 15
 _CREDENTIAL_EXPIRY_SAFETY_SECONDS = 60
 _JOB_ID_RE = re.compile(r"^(?:mj_[0-9a-f]{24}|tk_[0-9a-f]{12})$")
+
+# ── boto3 session/client のプロセス内キャッシュ ────────────────────────────────
+# ``MediaJobClient()`` は 20 箇所以上で「呼ぶたびに新規生成」されるため、インスタンス
+# 変数に持たせても意味がない（proposal_job_store.py の client キャッシュはストアが
+# 長命なので成立している）。同じ流儀のまま置き場所だけモジュールへ引き上げる。
+#
+# 実測（本リポの依存・arm64・20 回平均）:
+#   新規 Session + client 生成 = 39.99 ms / 共有 Session から client = 8.09 ms(s3)
+#   ・1.72 ms(dynamodb) / キャッシュ済み client の再利用 = 0.00001 ms
+# ``wait()`` は 1 秒間隔で ``get_result()`` を回すので、1 ジョブあたりの無駄が
+# core 秒オーダーで積み上がっていた。
+#
+# 排他: botocore の client は呼び出しについてはスレッド安全だが、Session からの
+# client 生成はそうではない。生成だけをロックで囲う（proposal_job_store と同じ）。
+_BOTO_SESSION: Any | None = None
+_BOTO_SESSION_LOCK = threading.Lock()
+# key = (service, region, phase_timeout)。phase_timeout は deadline 由来で
+# ``min(30.0, remaining/2)`` なので、実運用の残予算（既定 180 秒〜）では常に 30.0 に
+# 飽和し、実質 service 数ぶんしか増えない。締切間際だけ端数キーになるので上限を置き、
+# 上限超過時はキャッシュせずその場限りの client を返す（無制限増殖を作らない）。
+_BOTO_CLIENTS: dict[tuple[str, str, float], Any] = {}
+_BOTO_CLIENT_CACHE_MAX = 16
+
+
+def _shared_boto_session() -> Any:
+    """プロセスで 1 つだけの boto3 Session を返す（credential/loader を共有する）。"""
+
+    global _BOTO_SESSION
+    if _BOTO_SESSION is None:
+        with _BOTO_SESSION_LOCK:
+            if _BOTO_SESSION is None:
+                import boto3
+
+                _BOTO_SESSION = boto3.session.Session()
+    return _BOTO_SESSION
+
+
+def reset_boto_cache() -> None:
+    """キャッシュした Session/client を捨てる（テスト用・本番経路からは呼ばない）。"""
+
+    global _BOTO_SESSION
+    with _BOTO_SESSION_LOCK:
+        _BOTO_SESSION = None
+        _BOTO_CLIENTS.clear()
 
 
 def _checksum_sha256_b64(hex_digest: str) -> str:
@@ -166,9 +211,7 @@ class MediaJobClient:
     def _session(self) -> Any:
         if self._session_override is not None:
             return self._session_override
-        import boto3
-
-        return boto3.session.Session()
+        return _shared_boto_session()
 
     def _client(self, service: str, deadline_epoch_s: float) -> Any:
         return self._client_from_session(self._session(), service, deadline_epoch_s)
@@ -184,7 +227,23 @@ class MediaJobClient:
             config = botocore_config(budget)
         except MediaDeadlineExceededError as exc:
             raise MediaJobError("MEDIA_JOB_DEADLINE_EXCEEDED") from exc
-        return session.client(service, region_name=self._region, config=config)
+        if self._session_override is not None:
+            # 注入された Session（テスト/呼び出し側の実体）は共有キャッシュへ混ぜない。
+            return session.client(service, region_name=self._region, config=config)
+        # config は deadline 由来なのでキーに含める＝残予算が変われば別 client になり、
+        # 「短い締切なのに長い timeout の client を掴む」取り違えが起きない。
+        key = (service, self._region, float(config.connect_timeout))
+        cached = _BOTO_CLIENTS.get(key)
+        if cached is not None:
+            return cached
+        with _BOTO_SESSION_LOCK:
+            cached = _BOTO_CLIENTS.get(key)
+            if cached is not None:
+                return cached
+            client = session.client(service, region_name=self._region, config=config)
+            if len(_BOTO_CLIENTS) < _BOTO_CLIENT_CACHE_MAX:
+                _BOTO_CLIENTS[key] = client
+        return client
 
     def _call(
         self,
@@ -1018,4 +1077,4 @@ class MediaJobClient:
         )
 
 
-__all__ = ["MediaJobClient", "MediaJobError"]
+__all__ = ["MediaJobClient", "MediaJobError", "reset_boto_cache"]
