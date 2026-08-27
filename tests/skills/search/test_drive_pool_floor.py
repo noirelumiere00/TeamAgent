@@ -365,7 +365,7 @@ def test_pgvector_source_type_clause(types: list[str] | None, expect_clause: boo
         filter_source_types=types,
     )
 
-    has_clause = "d.source_type::text = ANY(%s)" in captured["sql"]
+    has_clause = "d.source_type::text = ANY(%s::text[])" in captured["sql"]
     assert has_clause is expect_clause
     if expect_clause:
         assert ["gdrive"] in captured["params"]
