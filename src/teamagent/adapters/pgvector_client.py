@@ -509,7 +509,10 @@ class PgVectorClient:
             # 空/空白のみの要素は落とす（全件除外の事故を防ぐ）。全部落ちたら句を足さない。
             clean_types = [t.strip() for t in filter_source_types if t and t.strip()]
             if clean_types:
-                where_parts.append("d.source_type::text = ANY(%s)")
+                # ::text[] を明示するのは、配列の要素型推論に頼ると
+                # 「adapter が黙って落ちる → 呼び側の fail-open が握る → 床が一生効かない」
+                # という**無音の失敗**になるため（例外は出るが検索は成功するので気づけない）。
+                where_parts.append("d.source_type::text = ANY(%s::text[])")
                 params.append(clean_types)
 
         if filter_industry is not None:
