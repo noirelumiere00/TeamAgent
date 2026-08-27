@@ -14,9 +14,9 @@ CLAUDE.md 6-bis Adapter 層。Skill から slack_sdk を直接呼ばない。
   - **fail-open**: `read_thread` / `search` は例外を握って空を返す（下書き生成を絶対に止めない）。
     `get_display_name`（users.info で差出人の実名解決）も同様に失敗は None＝
     「名前が分からなかった」。**推測した名前は絶対に作らない**。
-  - **fail-closed 用の別口**: `read_thread_checked` は Slack の error code を返す
+  - **fail-closed 用の別口**: `read_thread_checked` / `read_channel_checked` は error code を返す
     （not_in_channel / channel_not_found 等）。「空スレッド」と「権限なし」を区別しないと
-    いけない用途（slack_summary）はこちらを使う。既存 2 メソッドの挙動は変えない。
+    いけない用途（slack_summary）はこちらを使う。既存メソッドの挙動は変えない。
   - **G8**: ログは件数・latency・error code のみ。本文 / permalink / channel 名は出さない。
 """
 
@@ -185,6 +185,43 @@ class SlackUserReader:
         msgs = tuple(_message_from_raw(m) for m in raw)
         logger.info(
             "slack_user_read_thread_checked",
+            request_id=request_id,
+            returned=len(msgs),
+            latency_ms=int((time.perf_counter() - start) * 1000),
+        )
+        return SlackThreadRead(messages=msgs)
+
+    def read_channel_checked(
+        self, channel_id: str, request_id: str, *, limit: int = 200
+    ) -> SlackThreadRead:
+        """conversations.history を **error code つき** で取得（1 ページ・読み取り専用）。
+
+        Slack は新しい順で返すため、呼び出し側が時系列順に扱えるよう古い順へ直して返す。
+        `read_thread_checked` と同じく、権限エラーと空の履歴を区別できる fail-closed 用。
+        """
+        if not channel_id:
+            return SlackThreadRead(error="bad_target")
+        start = time.perf_counter()
+        try:
+            resp = _run_sync(
+                lambda: self._client.conversations_history(channel=channel_id, limit=limit)
+            )
+        except Exception as e:  # fail-closed（error code を上へ返す）
+            code = _slack_error_code(e)
+            logger.warning(
+                "slack_user_read_channel_checked_failed",
+                request_id=request_id,
+                error=type(e).__name__,
+                slack_error=code,  # G8: channel 名・本文は出さない
+            )
+            return SlackThreadRead(error=code)
+        # slack_sdk は通常 ok:false で例外を投げるが、ok:false が素通りしても落とさない。
+        if resp.get("ok") is False:
+            return SlackThreadRead(error=str(resp.get("error") or "api_error"))
+        raw: list[dict[str, Any]] = resp.get("messages", []) or []
+        msgs = tuple(_message_from_raw(m) for m in reversed(raw))
+        logger.info(
+            "slack_user_read_channel_checked",
             request_id=request_id,
             returned=len(msgs),
             latency_ms=int((time.perf_counter() - start) * 1000),

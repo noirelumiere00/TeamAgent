@@ -157,6 +157,58 @@ def test_existing_read_thread_stays_fail_open_on_slack_api_error() -> None:
     assert reader.read_thread("C1", "1.1", "req") == []
 
 
+# ── read_channel_checked（fail-closed・古い順へ正規化）──────────────────────
+
+
+def test_read_channel_checked_maps_messages_oldest_first() -> None:
+    """実 API の newest-first 応答を、要約側が使う oldest-first へ直す。"""
+    resp = {
+        "ok": True,
+        "messages": [
+            {"ts": "3.3", "user": "U3", "text": "新しい"},
+            {"ts": "2.2", "user": "U2", "text": "中間", "reply_count": 4},
+            {"ts": "1.1", "user": "U1", "text": "古い"},
+        ],
+        "has_more": True,
+        "response_metadata": {"next_cursor": "ignored-one-page-only"},
+    }
+    history = AsyncMock(return_value=resp)
+    reader = SlackUserReader("xoxp-x", client=_client(conversations_history=history))
+    out = reader.read_channel_checked("C1", "req", limit=77)
+    assert out.error == ""
+    assert [message.text for message in out.messages] == ["古い", "中間", "新しい"]
+    assert out.messages[1].reply_count == 4
+    history.assert_awaited_once_with(channel="C1", limit=77)
+
+
+@pytest.mark.parametrize("code", ["not_in_channel", "channel_not_found", "access_denied"])
+def test_read_channel_checked_surfaces_slack_error_code(code: str) -> None:
+    client = _client(
+        conversations_history=AsyncMock(
+            side_effect=SlackApiError("failed", {"ok": False, "error": code})
+        )
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    out = reader.read_channel_checked("C1", "req")
+    assert out.error == code
+    assert out.messages == ()
+
+
+def test_read_channel_checked_ok_false_without_raise() -> None:
+    client = _client(
+        conversations_history=AsyncMock(return_value={"ok": False, "error": "not_in_channel"})
+    )
+    reader = SlackUserReader("xoxp-x", client=client)
+    assert reader.read_channel_checked("C1", "req").error == "not_in_channel"
+
+
+def test_read_channel_checked_bad_target_no_call() -> None:
+    history = AsyncMock(return_value={"ok": True, "messages": []})
+    reader = SlackUserReader("xoxp-x", client=_client(conversations_history=history))
+    assert reader.read_channel_checked("", "req").error == "bad_target"
+    history.assert_not_awaited()
+
+
 # ── 差出人の実名解決（users.info・24h TTL キャッシュ）──────────────────────
 
 
