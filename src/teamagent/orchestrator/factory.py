@@ -65,6 +65,11 @@ def resolve_search_skill_config() -> dict[str, Any]:
         # QW-4: rerank が返す件数（救済プール幅）。min_relevance の母数を top_k から切り離す。
         # SEARCH_MIN_RELEVANCE=0.0（既定）では最終 [:top_k] が効き従来挙動と完全等価。
         "rerank_return_size": _envint("SEARCH_RERANK_RETURN_SIZE", 100),
+        # Drive 実資料のリコール床。営業 FB（gsheets/slack）が埋め込み空間で巨大な近傍
+        # クラスタを作り、dense 上位 30 件が 100% FB 行になって gdrive が rerank へ 1 件も
+        # 届かない事象への対策（2026-08-27 本番実測: gdrive 最上位 78 位）。プール内の
+        # gdrive がこの件数未満のときだけ gdrive 限定検索を 1 回足す。0 で無効。
+        "drive_pool_floor": _envint("SEARCH_DRIVE_POOL_FLOOR", 15),
         "min_relevance": _envfloat("SEARCH_MIN_RELEVANCE", 0.0),
         # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
         "min_relevance_fallback": _envfloat("SEARCH_MIN_RELEVANCE_FALLBACK", 0.0),
