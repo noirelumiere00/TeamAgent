@@ -26,7 +26,11 @@ TEXT = DOCKERFILE.read_text(encoding="utf-8")
 CHROMIUM_BASE_DIGEST = "ee09ed198c66003a3f15024ca4f8f8613b9a97fdfd0dce8600969fc8a69ecc04"
 NODE_BUILDER_DIGEST = "eef73a25205e27bd016ce672af71560ad6b681142ddf00ff63c7b3098eafcd4d"
 UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
-APK_LOCK_SHA256 = "9451b0527b48e5a9cbd9d21ce738a0d8fd0a08bd021f9cf664b61b151d24dbaf"
+# 2026-08-26 `8c01f9d`（wolfi 上流の ncurses ドリフト3件へ台帳を追随）が
+# media-apk.lock / Dockerfile の ARG / core_media 契約 / 世代 inputs の 4 つは更新した一方、
+# 本定数だけ取り残されて dev tip が赤のままになっていた（3 者一致の不変条件が片肺）。
+# 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
+APK_LOCK_SHA256 = "4e147d1445837415a7d9e9569667b39cedbb3c83de71f9082adbcecb487424e5"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
