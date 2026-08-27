@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from teamagent.skills.base import SkillContext
 from teamagent.skills.knowledge_deliver.schema import KnowledgeDeliverInput
 from teamagent.skills.knowledge_deliver.skill import (
@@ -170,7 +172,8 @@ def test_no_gdrive_hits_returns_answer_only() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="x"), _ctx())
     assert out.delivered_count == 0
-    assert "見つかりません" in out.note
+    # 落ちた段を明示する（FB はあるが Drive 実ファイルに紐づかない）。
+    assert "Drive の実ファイルに紐づきませんでした" in out.note
     slack.upload_file.assert_not_awaited()
 
 
@@ -289,7 +292,8 @@ def test_low_score_hits_not_delivered() -> None:
     skill = KnowledgeDeliverSkill(search=_search_mock(hits), slack=slack, gdrive=_gdrive_mock())
     out = skill.run(KnowledgeDeliverInput(query="サンマルクの資料"), _ctx())
     assert out.delivered_count == 0
-    assert "見つかりません" in out.note
+    # 落ちた段を明示する（実ファイルには紐づいたが関連度基準に届かない）。
+    assert "配信の関連度基準に届きませんでした" in out.note
     slack.upload_file.assert_not_awaited()
 
 
@@ -443,14 +447,56 @@ def test_note_zero_hit_states_filters_and_relaxation() -> None:
 
 
 def test_note_zero_hit_no_filter_keeps_plain_message() -> None:
-    # フィルタ未指定の 0件は従来の素の文言（緩和提案を足さない）。
+    # フィルタ未指定の 0件は素の文言（緩和提案を足さない）。
+    # 2026-08-27: 「FB 行だけがヒットして Drive 実ファイルが 1 件も紐づかなかった」場合に
+    # 「資料が見つかりません」と読める文言を返していたのを、落ちた段を明示する文言へ変更。
     hits = [_hit(source_type="slack", source_uri="slack://C1/1.2", title="FB")]
     skill = KnowledgeDeliverSkill(
         search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
     )
     out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
     assert out.delivered_count == 0
-    assert out.note == "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
+    assert out.note == (
+        "社内のやり取り（Slack / 管理シートの行）は見つかりましたが、"
+        "添付できる Drive の実ファイルに紐づきませんでした（要約のみお返しします）。"
+    )
+
+
+def test_note_zero_hit_distinguishes_no_hits_from_no_drive_file() -> None:
+    """ヒットが 0 件のときと「FB はあるが Drive 実ファイルに紐づかない」ときを別文言にする。
+
+    本番実測（2026-08-27）: hits=2 / candidates=0 / delivered=0 のとき、ユーザーには
+    「資料そのものが存在しない」と読める文言だけが返っていた。実際には資料は Drive に
+    存在し、検索プールに入っていなかっただけ（＝リコールの問題）。段が違えば文言も違う。
+    """
+    empty = KnowledgeDeliverSkill(
+        search=_search_mock([]), slack=_slack_mock(), gdrive=_gdrive_mock()
+    )
+    out_empty = empty.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+    assert out_empty.note == "関連する記録・資料が見つかりませんでした（要約のみお返しします）。"
+
+    fb_only = KnowledgeDeliverSkill(
+        search=_search_mock([_hit(source_type="slack", source_uri="slack://C1/1.2", title="FB")]),
+        slack=_slack_mock(),
+        gdrive=_gdrive_mock(),
+    )
+    out_fb = fb_only.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+    assert out_fb.note != out_empty.note
+    assert "Drive の実ファイル" in out_fb.note
+
+
+def test_note_zero_hit_low_relevance_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive 実ファイルには紐づいたが関連度が基準未満、は「基準に届かなかった」と言う。"""
+    monkeypatch.setenv("KNOWLEDGE_DELIVER_MIN_SCORE", "0.9")
+    hits = [_hit(source_type="gdrive", source_uri="gdrive://FILE1", title="提案書", score=0.4)]
+    skill = KnowledgeDeliverSkill(
+        search=_search_mock(hits), slack=_slack_mock(), gdrive=_gdrive_mock()
+    )
+    out = skill.run(KnowledgeDeliverInput(query="資料出して"), _ctx())
+    assert out.delivered_count == 0
+    assert out.note == (
+        "関連資料は見つかりましたが、配信の関連度基準に届きませんでした（要約のみお返しします）。"
+    )
 
 
 # ── 管理シート行の解決済み Drive 実体配信 ────────────────────────────────

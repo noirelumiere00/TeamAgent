@@ -583,9 +583,12 @@ def test_rerank_calls_bedrock_rerank_and_reorders(
     )
     out = skill.run(input=SearchInput(query="日本ガイシ", top_k=3), ctx=SkillContext())
 
-    # pgvector は pool_size=10 で呼ばれた
-    pg_kwargs = fake_pgvector_rerank_pool.search_similar_new_schema.call_args.kwargs
+    # pgvector は pool_size=10 で呼ばれた（本検索＝1 回目。2 回目以降は Drive リコール床の
+    # 補助検索で filter_source_types=["gdrive"] が付く別クエリなので、先頭を見る）。
+    calls = fake_pgvector_rerank_pool.search_similar_new_schema.call_args_list
+    pg_kwargs = calls[0].kwargs
     assert pg_kwargs["limit"] == 10
+    assert not pg_kwargs.get("filter_source_types")
     # Bedrock rerank が呼ばれた
     fake_bedrock.rerank.assert_called_once()
     rerank_kwargs = fake_bedrock.rerank.call_args.kwargs

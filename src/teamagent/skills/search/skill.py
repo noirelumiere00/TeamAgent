@@ -112,6 +112,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         use_cohere_rerank: bool = False,
         rerank_pool_size: int = 30,
         rerank_return_size: int = 100,
+        drive_pool_floor: int = 15,
         min_relevance: float = 0.0,
         min_relevance_fallback: float = 0.0,
         use_client_boost: bool = False,
@@ -181,6 +182,18 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # [:top_k] する。SEARCH_MIN_RELEVANCE=0.0（既定）では rerank の上位 top_k が変わらず
         # 完全等価（no-regression）。Cohere 課金は結果数非依存のためコスト不変。
         self._rerank_return_size = rerank_return_size
+        # 2026-08-27: Drive 実資料のプール下限（リコール床）。
+        # 実測した障害: 営業 FB（gsheets 809 + slack 559 chunk / 873 document）が埋め込み
+        # 空間で 1 つの巨大な近傍クラスタを作っており、営業の話し言葉クエリでは
+        # **gdrive の最上位が 78 位**（大塚製薬「広告審査について」は 4,422 位）。
+        # rerank プールが 30 件なので Drive 資料は原理的に 1 件も rerank へ届かず、
+        # 生き残るのは「本文に資料名を持たない FB 行」だけ → knowledge_deliver の
+        # 添付候補が 0 件になる（= ユーザー報告「ドライブ資料が検索でヒットしない」）。
+        # 対策は閾値でも ingest でもなく **リコール**: プール内の gdrive が本値に満たない
+        # ときだけ、gdrive 限定の dense 検索を 1 回足して rerank プールへ合流させる。
+        # 順位はあくまで rerank が決めるので、無関係な Drive 資料が上位に出ることはない。
+        # 0 で無効（＝従来挙動と完全一致）。rerank 無効時はプール概念が無いので発火しない。
+        self._drive_pool_floor = drive_pool_floor
         # Sprint 5: 反ハルシネーション閾値。Rerank relevance がこの値未満の hit は
         # 「根拠として弱い」とみなし落とす。全 hit が落ちれば 0 件 = Bot は
         # 「資料に記載がありません」と返し、無い情報を捏造しない。
@@ -531,6 +544,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_recurring: bool = False,
+        source_types: list[str] | None = None,
     ) -> list[SearchHit]:
         """新スキーマの単一ベクトル検索。フィルタ指定で 0 件なら外して再検索（fail-open）。
 
@@ -548,6 +562,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         （env TEMPLATE_EXCLUDE_SEARCH が前提）。exclude_templates は常時 env 値
         （self._exclude_templates）。fail-open 再検索でも両者は維持し、rescue 経路でのみ
         他 exclude と一緒に False へ倒す。
+
+        source_types は d.source_type の許可リスト（既定 None＝制限なし＝従来挙動）。
+        Drive リコール床（_apply_drive_floor）が ["gdrive"] を渡す唯一の呼び側で、
+        fail-open / exclusion_rescue の再検索でも**必ず維持する**（外すと補助検索が
+        FB 行を拾い直し、床を張った意味が消える）。
         """
         hits = self._pgvector.search_similar_new_schema(
             conn=conn,
@@ -564,6 +583,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             exclude_templates=self._exclude_templates,
             exclude_recurring=exclude_recurring,
             embedding_col=self._embedding_column,
+            filter_source_types=source_types,
         )
         if not hits and (metadata_filters or filter_industry):
             hits = self._pgvector.search_similar_new_schema(
@@ -580,6 +600,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 exclude_templates=self._exclude_templates,
                 exclude_recurring=exclude_recurring,
                 embedding_col=self._embedding_column,
+                filter_source_types=source_types,
             )
         # L3: ここまで 0 件 かつ exclude 系が効いている → exclude を全外しで最後の再検索。
         if (
@@ -606,6 +627,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 exclude_templates=False,
                 exclude_recurring=False,
                 embedding_col=self._embedding_column,
+                filter_source_types=source_types,
             )
             if rescued:
                 # frozen dataclass の可変 dict なので in-place 付与（再代入はしない）。
@@ -740,6 +762,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # 定期報告（cls_is_recurring）の除外は「提案書 intent」のときだけ。
                 # env OFF（既定）なら _exclude_templates=False で常に False（後方互換）。
                 excl_recurring = False
+                # 本検索に実際に載ったメタフィルタ（planner 経路は kf・単一クエリ経路は
+                # knowledge_filters）。Drive リコール床の補助検索へ同値で引き回すため、
+                # 分岐の外で型を宣言しておく（両分岐で必ず代入する）。
+                pool_metadata_filters: dict[str, str] | None = None
                 if self._query_planner is not None:
                     # P3: LLM ルーティング + multi-query/HyDE → RRF 融合。
                     plan = self._query_planner.plan(input.query, ctx.request_id)
@@ -804,6 +830,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         for emb in sub_embeddings
                     ]
                     hits = reciprocal_rank_fusion(ranked_lists)[:retrieve_limit]
+                    # Drive リコール床の補助検索へ、本検索と同一のフィルタを引き回す。
+                    pool_metadata_filters = kf
                 else:
                     # 従来: substring ルーティング（資料種別・業界）＋単一クエリ検索。
                     knowledge_filters = (
@@ -840,6 +868,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         request_id=ctx.request_id,
                         exclude_recurring=excl_recurring,
                     )
+                    # Drive リコール床の補助検索へ、本検索と同一のフィルタを引き回す。
+                    pool_metadata_filters = knowledge_filters
                 # Sprint 7: クライアント名ブースト。固有名詞クエリで dense が正解 chunk を
                 # 取りこぼすのを補強（client_name 絞り検索を rerank プールへ合流）。
                 # ただし input.filter_client 明示時はユーザーの絞り込みを優先し boost をスキップ
@@ -857,6 +887,23 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
                         exclude_recurring=excl_recurring,  # 提案書 intent 時のみ（boost も同じ）
                     )
+                # 2026-08-27: Drive 実資料のリコール床。営業 FB クラスタがプールを占有して
+                # gdrive が 1 件も rerank へ届かない事象（実測: gdrive 最上位 78 位）への対策。
+                # dedup / rerank の**前**に噛ませ、near-dup 畳み込みと per-doc cap を
+                # Drive 側にも同じ条件で適用する（同一資料の chunk がプールを食うのを防ぐ）。
+                # 床を満たしていれば 1 クエリも足さない＝既に成功しているクエリは費用ゼロ。
+                hits = self._apply_drive_floor(
+                    conn=conn,
+                    embedding=embedding,
+                    hits=hits,
+                    input=input,
+                    request_id=ctx.request_id,
+                    filter_industry=eff_industry,
+                    metadata_filters=pool_metadata_filters,
+                    sticky_filters=sticky,
+                    metadata_contains=mc,
+                    exclude_recurring=excl_recurring,
+                )
                 # M1 資料の被り対策。**プール段階（rerank の前）**に噛ませる。
                 # 旧実装は rerank→top_k 後段に置いていたため、最良 doc が 2 chunk に圧縮され
                 # 最終件数が top_k 未満に痩せていた。rerank 前に畳む/cap することで、rerank は
@@ -1062,6 +1109,16 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             if cleaned not in seen_names:
                 seen_names.add(cleaned)
                 client_names.append(cleaned)
+            # 2026-08-27 実測: FB の client_name は「シオノギヘルスケア/シナール」のように
+            # 「取引先/ブランド」を区切って持つ行があり、Drive 側 title は
+            # 「シオノギヘルケア様_シナール」と表記ゆれする。全文の ILIKE 部分一致では
+            # 1 文字違いで橋が落ちるため、区切りで割った各要素も候補に足す
+            # （2 文字以上のみ。1 文字は誤爆が大きい）。橋の命中率は実測 131/449 名＝29%。
+            for part in re.split(r"[/／]", cleaned):
+                token = part.strip()
+                if len(token) >= 2 and token not in seen_names:
+                    seen_names.add(token)
+                    client_names.append(token)
 
         if not client_names:
             return []
@@ -1157,6 +1214,81 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 client_name=matched,
                 added=len(added),
                 pool_before=len(hits),
+            )
+        return list(hits) + added
+
+    def _apply_drive_floor(
+        self,
+        *,
+        conn: Any,
+        embedding: list[float],
+        hits: list[SearchHit],
+        input: SearchInput,
+        request_id: str,
+        filter_industry: str | None,
+        metadata_filters: dict[str, str] | None = None,
+        sticky_filters: dict[str, str] | None = None,
+        metadata_contains: dict[str, str] | None = None,
+        exclude_recurring: bool = False,
+    ) -> list[SearchHit]:
+        """rerank プールに Drive 実資料が最低 N 件入ることを保証する（リコール床）。
+
+        **なぜ必要か（2026-08-27 の本番実測）**: 営業 FB（gsheets/slack）のテンプレ同型行が
+        埋め込み空間で 1 つの巨大クラスタを作っており、コーパス全体の類似度分布が
+        min 0.790 / avg 0.876 / max 1.000・σ=0.0196 まで圧縮されている（分離能がほぼ無い）。
+        その結果、営業の話し言葉クエリでは **dense 上位 30 件が 100% FB 行**になり、
+        gdrive の最上位は 78 位。rerank は「与えられた候補の中」しか並べ替えられないので、
+        Drive 資料は最初から土俵に上がっていない。閾値（min_relevance）を下げても
+        候補が FB 行なので添付できる実ファイルは 0 件のまま＝症状は直らない。
+
+        **やること**: プール内の gdrive 件数が床（_drive_pool_floor）未満のときだけ、
+        同じ埋め込み・同じユーザー明示フィルタで **gdrive 限定の dense 検索を 1 回**足し、
+        重複を除いてプールへ合流する。順位は後段の rerank が決めるため、無関係な Drive
+        資料が上位に出ることはない（min_relevance も従来どおり効く）。
+
+        **やらないこと**: 既に床を満たしているクエリでは 1 クエリも足さない（費用ゼロ）。
+        rerank 無効時はプール概念が無い（retrieve_limit=top_k）ので発火しない。
+        失敗しても検索本体は継続する（fail-open）。
+        """
+        if self._drive_pool_floor <= 0 or not self._use_cohere_rerank:
+            return hits
+        present = sum(
+            1 for h in hits if str((h.metadata or {}).get("source_type") or "") == "gdrive"
+        )
+        if present >= self._drive_pool_floor:
+            return hits
+        try:
+            extra = self._pool_search(
+                conn=conn,
+                embedding=embedding,
+                limit=self._drive_pool_floor,
+                filter_industry=filter_industry,
+                strict_industry=input.strict_industry,
+                metadata_filters=metadata_filters,
+                sticky_filters=sticky_filters,
+                metadata_contains=metadata_contains,
+                request_id=request_id,
+                exclude_recurring=exclude_recurring,
+                source_types=["gdrive"],
+            )
+            seen = {h.chunk_id for h in hits}
+            added = [h for h in extra if h.chunk_id not in seen]
+        except Exception as exc:  # 補助検索の失敗で検索本体を壊さない（fail-open）
+            logger.warning(
+                "search_drive_floor_failed",
+                request_id=request_id,
+                error=type(exc).__name__,
+            )
+            return hits
+        if added:
+            logger.info(
+                "search_drive_floor_applied",
+                request_id=request_id,
+                floor=self._drive_pool_floor,
+                present=present,
+                added=len(added),
+                pool_before=len(hits),
+                top_score=added[0].score,
             )
         return list(hits) + added
 

@@ -210,14 +210,30 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
             filt_prefix = f"{applied} で" if applied else ""
 
             if not prepared:
+                # 0 件の理由を分けて出す。2026-08-27 の本番調査で、
+                # 「FB 行だけがヒットして Drive 実ファイルが 1 件も紐づかなかった」場合にも
+                # 「該当する添付可能な資料が見つかりませんでした」と返しており、
+                # ユーザーには**資料そのものが存在しない**と読めていた（実際には資料は在る）。
+                # hits / file_id / 配信基準 のどこで落ちたかを文言に出し、誤読を止める。
+                if not refs:
+                    reason = "関連する記録・資料が見つかりませんでした"
+                elif not ref_by_fid:
+                    reason = (
+                        "社内のやり取り（Slack / 管理シートの行）は見つかりましたが、"
+                        "添付できる Drive の実ファイルに紐づきませんでした"
+                    )
+                elif not candidates:
+                    reason = "関連資料は見つかりましたが、配信の関連度基準に届きませんでした"
+                else:
+                    reason = "該当資料の取得に失敗しました"
                 if applied:
                     note = (
-                        f"{applied} で該当する添付可能な資料が見つかりませんでした"
+                        f"{applied} で{reason}"
                         "（要約のみお返しします）。"
                         "取引先のみ／資料種別を外す等、条件を緩めて再検索しますか。"
                     )
                 else:
-                    note = "該当する添付可能な資料が見つかりませんでした（要約のみお返しします）。"
+                    note = f"{reason}（要約のみお返しします）。"
             elif not channel_id and not requester_email:
                 note = (
                     "資料は見つかりましたが、配信先が分からずお届けできませんでした（要約のみ）。"

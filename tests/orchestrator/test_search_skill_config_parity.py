@@ -41,8 +41,10 @@ def test_resolve_config_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_CLIENT_BOOST", "false")
     monkeypatch.setenv("USE_KNOWLEDGE_FILTERS", "true")
     monkeypatch.setenv("SEARCH_RERANK_RETURN_SIZE", "80")
+    monkeypatch.setenv("SEARCH_DRIVE_POOL_FLOOR", "25")
 
     config = factory.resolve_search_skill_config()
+    assert config["drive_pool_floor"] == 25
     assert config["rerank_pool_size"] == 50
     assert config["min_relevance_fallback"] == pytest.approx(0.3)
     assert config["use_client_boost"] is False
@@ -65,10 +67,15 @@ def test_resolve_config_defaults_are_backward_compatible(
         "USE_CLIENT_BOOST",
         "USE_KNOWLEDGE_FILTERS",
         "USE_COHERE_RERANK",
+        "SEARCH_DRIVE_POOL_FLOOR",
     ):
         monkeypatch.delenv(name, raising=False)
     config = factory.resolve_search_skill_config()
     assert config["rerank_pool_size"] == 30
+    # Drive リコール床は既定 ON（15）。営業 FB クラスタがプールを占有して gdrive が
+    # rerank へ 1 件も届かない本番障害（2026-08-27）への恒久対策で、env で 0 にすると
+    # 障害当時の挙動へ戻る。既定を 0 に戻す変更は本 assert で落ちる。
+    assert config["drive_pool_floor"] == 15
     assert config["rerank_return_size"] == 100
     assert config["min_relevance"] == pytest.approx(0.0)
     assert config["min_relevance_fallback"] == pytest.approx(0.0)
