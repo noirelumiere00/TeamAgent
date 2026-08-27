@@ -1,8 +1,14 @@
 {
   "schema_version": 1,
-  "description": "PR2-A0.x activation の freeze 宣言。口頭合意を機械強制へ格上げするための唯一の宣言ファイル。generation publisher freeze は 2 度破られた（2026-08-20 / 08-21 の 2 波）ため、v1 境界は失効。v2 境界は「最後に変更された時刻」ではなく「変更できない状態を確認した時刻」に置く（2026-08-24 ユーザー裁定）。",
+  "description": "PR2-A0.x activation の freeze 宣言。口頭合意を機械強制へ格上げするための唯一の宣言ファイル。generation publisher freeze は 2 度破られた（2026-08-20 / 08-21 の 2 波）ため、v1 境界は失効。v2 境界は「最後に変更された時刻」ではなく「変更できない状態を確認した時刻」に置く（2026-08-24 ユーザー裁定）。2026-08-26 に v2 の AWS 側 enforcement は全 principal から detach され（裁定②）、その約 1 時間 40 分後に Wave3 の generation publish が発生した（v2.violations に実測記録）。以後 state=active が束縛するのは repo 側ゲートのみ（generation_publisher_freeze.state_semantics を参照）。",
   "generation_publisher_freeze": {
     "state": "active",
+    "state_semantics": {
+      "recorded_at": "2026-08-27",
+      "statement": "state=\"active\" が現に束縛しているのは **repo 側の 2 経路だけ**である: ①CI の assert-frozen-surface（unlock 宣言なしに frozen surface を触る PR を落とす）②guard の desired-state binding（activation_freeze_enabled=true の注入と、plan が freeze リソースを destroy しないことの検査）。AWS 側の mechanical deny は 2026-08-26 に detach 済みで **効いていない**（v2.enforcement_status）。",
+      "why_not_released": "state を \"released\" へ倒すと ①ENFORCING_STATES から外れて frozen surface の CI ゲートが全面無効化される ②desired_freeze_var が \"false\" を返し、次の apply で freeze 11 リソースが destroy 候補になる ③committed 宣言を読む既存テスト 2 件（test_freeze_v2_is_active_with_a_recorded_boundary / test_desired_var_is_true_while_freeze_is_active）が赤になる。裁定③（unlock を相乗りさせて後で畳む）は repo 側ゲートが生きていることを前提にしているため、state は active のまま据え置き、live との差はここに明記する方式を採る（2026-08-27）。",
+      "landmine_next_apply": "state=active のままなので guard は次の apply でも -var=activation_freeze_enabled=true を注入する。terraform 経路で apply すると **detach 済みの 10 attachment が再作成され、デプロイ principal が再び deny される**。Freeze を解除したまま apply する便では、この再 attach を plan で必ず確認すること（外科的 CLI リリースでは発生しない）。"
+    },
     "state_values": [
       "pending_v2",
       "active",
@@ -169,7 +175,121 @@
           "root_mutations": 0,
           "root_status": "break-glass 例外のまま（root は IAM entity ではないため attach 不能）"
         }
-      }
+      },
+      "enforcement_status": {
+        "measured_at": "2026-08-27T03:21:00Z 頃（AIIAdev read-only・list-entities-for-policy）",
+        "aws_attachment": "0 principal（PolicyUsers / PolicyRoles / PolicyGroups がいずれも空）",
+        "policy_object": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze は **削除していない**（policy 本体は残存し、attachment だけが 0）",
+        "user_ruling": "2026-08-26 裁定②: Freeze v2 は役目を終えた扱いとし、解除のまま走る（宣言を live へ合わせる）。2026-08-27 も同方針を継続。",
+        "detach_sequence_measured": [
+          "2026-08-24T08:19:16Z  attach 10（user AIIAdev 1 + role 9）",
+          "2026-08-26T02:01:54Z  DetachUserPolicy AIIAdev OK",
+          "2026-08-26T02:04:10Z  AttachUserPolicy AIIAdev OK（一度戻している）",
+          "2026-08-26T02:05:44Z  DetachUserPolicy AIIAdev OK（確定）",
+          "2026-08-26T02:10:37Z - 02:10:50Z  DetachRolePolicy 9 role すべて OK",
+          "2026-08-26T02:11:03Z / 02:11:50Z  再実行 2 件が NoSuchEntityException（冪等な空振り。attachment は既に 0）"
+        ],
+        "detach_evidence": "CloudTrail us-east-1（IAM は global イベントのため ap-northeast-1 では 0 件に見える。ここで検索先を誤ると『detach の記録が無い』と誤診断する）。principal は user/AIIAdev。",
+        "restore_record": {
+          "backup_file": "scratchpad/freeze_attachments_backup.json（本セッションの scratchpad。repo 外・揮発性）",
+          "roles": [
+            "teamagent-dev-approval-caller",
+            "teamagent-dev-codebuild-launcher",
+            "teamagent-dev-image-deployment-gate",
+            "teamagent-dev-media-cutover-attestor",
+            "teamagent-dev-openclaw-build-publisher",
+            "teamagent-dev-release-control-updater",
+            "teamagent-dev-release-launcher",
+            "teamagent-dev-terraform-runtime-automation",
+            "teamagent-dev-tiktok-build-launcher"
+          ],
+          "users": [
+            "AIIAdev"
+          ],
+          "note": "復元は上記 9 role + 1 user へ同一 policy を再 attach すれば足りる（policy 本体は不変）。terraform 経路なら var.activation_freeze_enabled=true の apply で 10 attachment が再作成される＝**意図せず再 freeze される経路でもある**（state_semantics.landmine_next_apply）。"
+        }
+      },
+      "violations": [
+        {
+          "wave": 3,
+          "published_at": "2026-08-26T03:50:16Z",
+          "project": "teamagent-dev-image-builder",
+          "key_sha256_prefix": "9aaf7facd5283120",
+          "version_id": "qH02EEVmv.__fjXLiV_Lx7pq8H1pYQf3",
+          "tracked_by_manifest": false
+        },
+        {
+          "wave": 3,
+          "published_at": "2026-08-26T03:50:16Z",
+          "project": "teamagent-dev-mcp-source-publisher",
+          "key_sha256_prefix": "db8a6c2b97c36e68",
+          "version_id": "h1CRS9VMm1.oy0XXnTWUrtxJydOlpE0C",
+          "tracked_by_manifest": true
+        },
+        {
+          "wave": 3,
+          "published_at": "2026-08-26T03:50:17Z",
+          "project": "teamagent-dev-image-attestor",
+          "key_sha256_prefix": "1e1906ae37692b12",
+          "version_id": "ZlgfiYPg0Niop6dR5CXgeMw7IXqpTVXP",
+          "tracked_by_manifest": true
+        },
+        {
+          "wave": 3,
+          "published_at": "2026-08-26T03:50:17Z",
+          "project": "teamagent-dev-image-promoter",
+          "key_sha256_prefix": "554ede59c17e3363",
+          "version_id": "fc29cL2MfiSmEDb4Sawa7hYy8qRi77L3",
+          "tracked_by_manifest": true
+        }
+      ],
+      "violation_summary": {
+        "wave": 3,
+        "occurred_at": "2026-08-26T03:50:16Z - 03:50:17Z",
+        "elapsed_after_detach": "最後の成功 detach（02:10:50Z）から 1 時間 39 分 26 秒後",
+        "objects_published": 4,
+        "manifest_tracked_generations_changed": "4 中 3（mcp-source-publisher / image-attestor / image-promoter が変化。approval-publisher は 08-26 に publish されておらず不変）",
+        "untracked_generation_changed": "teamagent-dev-image-builder も世代が変わったが buildspec_generation_inputs.json の expected_generation_sha256 に **入っていない**（v1.violation_count_correction と同じ射程ずれ。監視器が 4 プロジェクトしか見ていない）",
+        "manifest_now_stale": "expected_generation_sha256 は Wave2 の値（00f6dc3a… / dba4ce93… / a624798a…）のまま。live の 3 世代と一致しない＝台帳が stale。",
+        "live_project_references_2026_08_27": {
+          "method": "codebuild batch-get-projects の source.buildspec を read-only で実測",
+          "teamagent-dev-mcp-source-publisher": "db8a6c2b…（Wave3・台帳は 00f6dc3a… ＝不一致）",
+          "teamagent-dev-image-attestor": "1e1906ae…（Wave3・台帳は dba4ce93… ＝不一致）",
+          "teamagent-dev-image-promoter": "554ede59…（Wave3・台帳は a624798a… ＝不一致）",
+          "teamagent-dev-approval-publisher": "33e2a643…（台帳と一致・Wave3 で動いていない）",
+          "teamagent-dev-image-builder": "9aaf7fac…（Wave3・台帳に **項目が存在しない**）"
+        },
+        "actor": "本セッション（Claude executor）のリップル作業。CloudTrail 上の principal は user/AIIAdev。",
+        "authorized": "AWS 側 freeze は既に detach 済み（裁定②）であり、AWS の機械的境界は破っていない。破ったのは **repo 宣言が主張していた generation freeze の不変条件**（世代を動かさない）である。",
+        "root_cause": "infra/terraform/codebuild.tf が契約 JSON を filebase64() で buildspec 本文へ直接埋め込む構造（例: codebuild.tf:3045 teamagent_core_media_release_contract.json / :3040 teamagent_runtime_contract.json）。契約 1 バイトの変更が buildspec 本文の sha256 を動かし、content-addressed key が変わる＝**新世代の publish が構造的に強制される**。",
+        "trigger": "wolfi 乗換（openclaw_bundle_contract.json の binary_probe を /nodejs/bin/node → /usr/bin/node へ）と ncurses ドリフト追随（core_media 契約の apk-lock sha256）が dev に入ったこと。どちらも unlock の scope_paths に宣言済みの変更。",
+        "structural_lesson": "unlock は「その path を触ってよい」という許可であって「世代が動かない」保証ではない。frozen surface の path を 1 つでも触れば、その path を filebase64 で抱えている全 publisher の世代が同時に動く。unlock を切るときは **どの世代が動くか**を同じ宣言に書くべきである（Wave3 では書かれていなかった）。"
+      },
+      "codebuild_update_project_after_boundary": [
+        {
+          "wave": 3,
+          "window_utc": "2026-08-26T03:50:45Z - 03:51:36Z",
+          "calls": 8,
+          "projects": [
+            "teamagent-dev-image-builder",
+            "teamagent-dev-mcp-source-publisher",
+            "teamagent-dev-image-attestor",
+            "teamagent-dev-image-promoter"
+          ],
+          "principal": "user/AIIAdev",
+          "note": "4 プロジェクト × 2 回（新 buildspec key への切替と、その後の再適用）"
+        },
+        {
+          "wave": 3,
+          "window_utc": "2026-08-26T04:07:58Z",
+          "calls": 1,
+          "projects": [
+            "teamagent-dev-openclaw-provenance-builder"
+          ],
+          "principal": "user/AIIAdev",
+          "note": "OpenClaw wolfi 便の provenance builder。codebuild-buildspecs/ prefix の world とは別プロジェクト。"
+        }
+      ]
     }
   },
   "frozen_change_surface": {
@@ -197,8 +317,15 @@
       "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
     "reason": "統合裁定（2026-08-26・両変更とも個別裁定済みの合併）: ① core_media 契約 = wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避（2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED・総数 240→240・追加0・削除0・Chromium 不変）。② openclaw 契約 = runtime base を gcr.io/distroless/nodejs24-debian13 から cgr.dev/chainguard/node (Wolfi) へ乗換え、CVE-2026-14456 (Debian trixie fix_deferred) による scan gate の恒久閉塞を根治するため、binary_probe (path=/nodejs/bin/node, sha256=6bf69d0e…) → (path=/usr/bin/node, sha256=5452461a…) の更新が不可避（scan_gate 0/0・repo 集合・referrer 種別は不変）。",
-    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）",
-    "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。"
+    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）→ 2026-08-27 裁定③により **active のまま維持**（相乗り方針）",
+    "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。",
+    "retention_ruling_2026_08_27": {
+      "decision": "裁定③: unlock は relock せず active のまま維持し、後続の frozen surface 変更を相乗りさせてから最後にまとめて畳む。",
+      "rationale": "APP_HTML ピン整合（core_media 契約）と image-builder 参照のハードコード解消（codebuild.tf）が控えており、いま relock すると同じ宣言を立て直す往復が発生する。世代は Wave3 で既に動いており、相乗りで追加コストは生じない。",
+      "landmine_partial_scope": "assert_frozen_surface は「scope_paths に挙げたのに実際には変更していない path」を『過剰な unlock』として **拒否する**。したがって scope_paths が 2 件のまま、片方（例: core_media 契約）だけを触る PR は CI で落ちる。相乗りさせる PR は 2 path の両方を触るか、その PR で scope_paths を実際の変更集合へ絞り込むこと。",
+      "known_design_red": "この unlock が active である限り tests/scripts/test_activation_freeze.py の 2 件が赤になる（test_unlock_is_inactive_and_empty_by_default = 平時 unlock なしの封印テスト / test_real_generation_input_changes_are_rejected[0eab7f2-d3fe768] = 歴史 diff が片方の path しか触らないため『過剰な unlock』側の例外が出て regex が外れる）。**unlock を畳めば両方とも緑に戻る**。実装バグではない。",
+      "fold_condition": "相乗り対象（B1 APP_HTML ピン整合 / B2 image-builder 参照の導出化）が入り終わった時点で、unlock.active=false・scope_paths=[]・reason=null・gate=null へ戻す（Human Gate ⑤）。"
+    }
   },
   "production_deployment_freeze": {
     "state": "active",
@@ -227,7 +354,23 @@
         }
       }
     ],
-    "enforcement": "repo 側 lock では AWS 直デプロイを止められないことが実証された。persistent explicit-deny は infra/terraform/activation_freeze_policy.tf（var.activation_freeze_enabled）。root は identity policy をバイパスするため SCP が別途必要（本 policy の射程外）。"
+    "enforcement": "repo 側 lock では AWS 直デプロイを止められないことが実証された。persistent explicit-deny は infra/terraform/activation_freeze_policy.tf（var.activation_freeze_enabled）。root は identity policy をバイパスするため SCP が別途必要（本 policy の射程外）。",
+    "deployments_after_freeze_lift": {
+      "recorded_at": "2026-08-27",
+      "status": "違反ではない（2026-08-26 裁定②で freeze を解除したまま走ることが承認されている）。ただし **state と live の乖離は再発している** ため、事実として記録する。",
+      "live_measured_2026_08_27": {
+        "mcp": ":92",
+        "connect_web": ":78",
+        "morning_digest": ":59",
+        "canary": ":29",
+        "ingest": ":61",
+        "openclaw": ":41",
+        "method": "ECS describe-services / EventBridge list-targets-by-rule / Lambda teamagent-dev-ingest-dispatch の TASKDEF_ARN を read-only で実測"
+      },
+      "drift_vs_rebind2": "rebind #2（2026-08-25）で state == live を 5/5 実測した基準値（mcp:88 / connect_web:73 / morning_digest:55 / canary:25 / ingest:57）に対し、**5/5 すべてが乖離**。B3 が 3 度目の再発。",
+      "openclaw_not_in_state": "openclaw:41 は稼働中だが terraform state に該当リソースが無い（ECS + EFS が未取込のまま）。rebind の 5 target にも入っていないため、drift ではなく **管理外**として扱う。",
+      "next_action": "state rebind #3（Human Gate ③）。rebind #2 の手順とスクリプトが再利用可能。"
+    }
   },
   "dev_merge_freeze": {
     "state": "operational_only",

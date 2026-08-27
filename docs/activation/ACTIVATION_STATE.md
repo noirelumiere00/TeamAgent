@@ -75,43 +75,132 @@ PR2-A0.x activation の**現在地だけ**を持つ単一の記録媒体。会�
 
 ## Current phase
 
-**fresh preflight adopt-plan — guard の ingest consumer モデル不整合で停止中（2026-08-25）**
+**Wave3 後の再整合 — Freeze は解除のまま / state rebind #3 待ち（2026-08-27）**
+
+2026-08-26 に幹部公開をゴールとする裁定が出て、AWS 側 freeze を detach したうえで
+mcp / OpenClaw の署名リリースを通した。その結果:
+
+- generation は Wave3 へ動いた（4 object publish・v2.violations に実測記録）
+- live は 5/5 で state を追い越した（B3 の 3 度目の再発）
+- adopt の純粋 4 forget + 4 import はまだ**一度も取れていない**（preflight は blocker 3/4 で停止したまま）
+
+### 体制（2026-08-27 引継）
+
+Activation / Hermes / 製品側を**本セッションが単独で担当**する。
+GOAL は全実装の完了。ユーザー指示により**人間の工数を最小限**にし、個別の確認ゲートを
+increments ごとに作らず自走する（Human Gate 14 種の枠は残す）。
+
+### 2026-08-26 - 27 の裁定 4 件（確定）
+
+| # | 裁定 | 帰結 |
+|---|---|---|
+| ① | **Wave3 へ re-baseline** する（Wave2 契約へ戻さない） | Wave2 契約は `/nodejs/bin/node`＝Debian 版 node を要求し、戻すと CVE-2026-14456（trixie fix_deferred）が復活する。台帳は Wave3 の実測世代へ寄せる |
+| ② | **Freeze は解除のまま走る**（宣言を live へ合わせる） | AWS 側 attachment は 0 principal のまま。repo 側ゲートだけを active で維持し、差分は宣言に明記（下記「Freeze status」） |
+| ③ | **unlock は相乗りさせて後で畳む** | `unlock.active = true` を維持。B1（APP_HTML ピン）/ B2（image-builder 参照の導出化）を同じ unlock に乗せてから一括で relock |
+| ④ | **HMAC 契約は根本から変更** | 現行の source_assertions 方式では report_link を表現できず remediation が構造的に詰む（下記「HMAC remediation は現状の repo 契約では実行不能」）。契約側から作り直す |
 
 直前の完了:
 
-1. State Rebind #2 完了（5 target・state == live を 5/5 実測）
-2. A0.2.2a / A0.2.2b IAM apply（saved plan `1e45a741…`）
-3. A0.2.2c IAM apply（saved plan `25ff4f88…`・serial 212 → 213）
+1. State Rebind #2 完了（5 target・state == live を 5/5 実測・2026-08-25）
+2. A0.2.2a / A0.2.2b / A0.2.2c IAM apply（serial 213）
+3. mcp / OpenClaw の署名リリース（2026-08-26・外科的 CLI 経路）
 
 ## Current execution HEAD
 
 | 項目 | 値 |
 |---|---|
 | branch | `activation-execution-base` |
-| HEAD | `868fcb7`（rebind #2 mapping を 5 target へ確定） |
-| dev HEAD | `e48cf2e`（PR #324 = A0.2.2c merge 済み） |
+| HEAD | `5ef4e8e`（案 B の裁定・正名化 hard blocker・レビュー結果を記録） |
+| allowlist | `execution_base 0eab7f24` + **承認済み 22 commit**・`expected_head = 5ef4e8e9bc30`（`assert-execution-line` 緑・force push なし） |
+| dev HEAD | `efee37c`（SOUL 圧縮 hotfix） |
 
 `0eab7f2` は **Activation Candidate / Execution Base**。正式 Activation Baseline は
 preflight が純粋 4 forget + 4 import を出した時点で確定する（**未確定**）。
 
 ## Freeze status
 
-| freeze | state | 境界 / 備考 |
-|---|---|---|
-| Generation publisher | **ACTIVE** | `2026-08-24T08:24:04Z`（deny を確認した時刻。最後の変更時刻ではない） |
-| Production deployment | **ACTIVE** | 同上の enforcement で機械化 |
-| dev merge | operational_only | 安全性は dev tip の不変性に依存させない |
+| freeze | 宣言 state | AWS 側の実態 | 備考 |
+|---|---|---|---|
+| Generation publisher | **ACTIVE**（repo 側のみ） | **detach 済み・0 principal** | 境界 `2026-08-24T08:24:04Z` は記録として保持 |
+| Production deployment | **ACTIVE**（宣言） | **detach 済み・0 principal** | 裁定②により解除運用。live は 5/5 で先行 |
+| dev merge | operational_only | — | 安全性は dev tip の不変性に依存させない |
 
-**Freeze v2 の定義**（≠ absolute AWS immutability）:
-enumerated non-root deployment principals への mechanical deny
-+ root は break-glass residual risk（freeze 中は使用禁止・CloudTrail で監視）
+### 宣言 ACTIVE が現に束縛しているもの（2026-08-27 時点）
 
-- policy: `arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze`
-- attach: user `AIIAdev` + role 9（計 10 principals・10×12 action が explicitDeny 実測）
-- tfstate への `s3:PutObject` は allowed のまま（state 操作を温存）
-- desired-state binding: `activation_freeze.json.state == "active"` → guard が
-  `-var=activation_freeze_enabled=true` を注入。plan 側でも freeze リソースの
-  delete/replace を拒否（入力と出力の二重化）
+`state = "active"` で今も動いているのは **repo 側の 2 経路だけ**:
+
+1. CI `activation freeze (frozen surface)` — unlock 宣言なしに frozen surface を触る PR を落とす
+2. guard の desired-state binding — `-var=activation_freeze_enabled=true` の注入と、
+   plan が freeze リソースを destroy しないことの検査
+
+AWS 側の mechanical deny は**効いていない**。`state` を `released` へ倒さない理由と
+次回 apply の地雷は `activation_freeze.json` の
+`generation_publisher_freeze.state_semantics` に機械可読で置いた。
+
+### AWS 側 detach の実測（CloudTrail us-east-1）
+
+IAM は global イベントなので **ap-northeast-1 で引くと 0 件に見える**（誤診断の罠）。
+
+```
+2026-08-24T08:19:16Z  attach 10（user AIIAdev 1 + role 9）
+2026-08-26T02:01:54Z  DetachUserPolicy  AIIAdev  OK
+2026-08-26T02:04:10Z  AttachUserPolicy  AIIAdev  OK ← 一度戻している
+2026-08-26T02:05:44Z  DetachUserPolicy  AIIAdev  OK（確定）
+2026-08-26T02:10:37Z - 02:10:50Z  DetachRolePolicy 9 role すべて OK
+2026-08-26T02:11:03Z / 02:11:50Z  再実行 2 件 = NoSuchEntityException（冪等な空振り）
+```
+
+現況（2026-08-27 実測）: `list-entities-for-policy` の
+PolicyUsers / PolicyRoles / PolicyGroups が**いずれも空**。policy 本体は削除していない。
+
+復元用の記録は `scratchpad/freeze_attachments_backup.json`（9 role 名 + user `AIIAdev`）と、
+同内容を `activation_freeze.json` の `v2.enforcement_status.restore_record` に転記済み
+（scratchpad は揮発するため repo 側が正）。
+
+> ⚠️ **次回 apply の地雷**: 宣言が active なので guard は今後も
+> `activation_freeze_enabled=true` を注入する。terraform 経路で apply すると
+> **detach 済みの 10 attachment が再作成され、デプロイ principal が再び deny される**。
+> Freeze を解除したまま apply する便では plan で必ず確認すること
+> （外科的 CLI リリースでは発生しない）。
+
+## Wave3 generation publish（2026-08-26・実測）
+
+detach の **1 時間 39 分後**に、frozen surface の契約 2 ファイルの変更が
+新世代の publish を強制した。
+
+| project | 新 key sha256 (先頭 16) | VersionId | 台帳の監視対象 |
+|---|---|---|---|
+| `teamagent-dev-image-builder` | `9aaf7facd5283120` | `qH02EEVmv.__fjXLiV_Lx7pq8H1pYQf3` | ❌ **対象外** |
+| `teamagent-dev-mcp-source-publisher` | `db8a6c2b97c36e68` | `h1CRS9VMm1.oy0XXnTWUrtxJydOlpE0C` | ✅ |
+| `teamagent-dev-image-attestor` | `1e1906ae37692b12` | `ZlgfiYPg0Niop6dR5CXgeMw7IXqpTVXP` | ✅ |
+| `teamagent-dev-image-promoter` | `554ede59c17e3363` | `fc29cL2MfiSmEDb4Sawa7hYy8qRi77L3` | ✅ |
+
+- publish: `2026-08-26T03:50:16Z - 03:50:17Z`（4 object）
+- CodeBuild `UpdateProject`: `03:50:45Z - 03:51:36Z` に 8 回（4 project × 2）
+  + `04:07:58Z` に `teamagent-dev-openclaw-provenance-builder` 1 回。principal は `user/AIIAdev`
+- **台帳 4 プロジェクトのうち 3 件の世代が変化**（`approval-publisher` は 08-26 に publish 無し＝不変）
+- `buildspec_generation_inputs.json#expected_generation_sha256` は **Wave2 の値のまま**＝ stale
+
+台帳 vs live の突合【実測 2026-08-27・`codebuild batch-get-projects` の `source.buildspec`】:
+
+| project | live の参照 | 台帳の expected | 判定 |
+|---|---|---|---|
+| `mcp-source-publisher` | `db8a6c2b…` | `00f6dc3a…` | ❌ 不一致 |
+| `image-attestor` | `1e1906ae…` | `dba4ce93…` | ❌ 不一致 |
+| `image-promoter` | `554ede59…` | `a624798a…` | ❌ 不一致 |
+| `approval-publisher` | `33e2a643…` | `33e2a643…` | ✅ 一致 |
+| `image-builder` | `9aaf7fac…` | **項目なし** | ⚠️ 監視対象外 |
+
+**構造的原因**: `infra/terraform/codebuild.tf` が契約 JSON を `filebase64()` で
+buildspec 本文へ直接埋め込む（例 `codebuild.tf:3045` = core_media 契約）。
+契約 1 バイトの変更が buildspec 本文の sha256 を動かし、content-addressed key が変わる＝
+**新世代の publish が構造的に強制される**。unlock は「その path を触ってよい」という許可であって
+「世代が動かない」保証ではない。
+
+**射程ずれの再発**: `image-builder` は世代が動いたのに `expected_generation_sha256` の
+監視対象に入っていない（v1 で違反を 6 件と誤報告した原因と同型）。
+`frozen_change_surface.generation_release_chain_projects` は 6 プロジェクトを列挙しているのに
+監視器は 4 プロジェクトしか見ていない。
 
 ## State serial
 
@@ -120,37 +209,34 @@ enumerated non-root deployment principals への mechanical deny
 | rebind #1 完了 | 200 |
 | freeze policy apply 後 | 201 |
 | A0.2.2a/b IAM apply 後 | 212 |
-| A0.2.2c IAM apply 後 | **213**（現在値・lineage `745cf6df…` 不変・tf 1.12.2） |
+| A0.2.2c IAM apply 後 | 213 |
+| 2026-08-27 時点 | **214**【申告・引継値。本記録では tfstate 未再読】 |
 
-### Rebind #2 の結果（state == live を 5/5 実測・2026-08-25）
+### Rebind #2 の結果（2026-08-25 時点では state == live を 5/5 実測）
 
-| address | state | live | 一致 |
+| address | rebind #2 の state | 2026-08-27 の live【実測】 | 一致 |
 |---|---|---|---|
-| `aws_ecs_task_definition.mcp` | `:88` | service `:88` | ✅ |
-| `aws_ecs_task_definition.connect_web` | `:73` | service `:73` | ✅ |
-| `aws_ecs_task_definition.morning_digest` | `:55` | rule ECS target `:55` | ✅ |
-| `aws_ecs_task_definition.canary` | `:25` | rule ECS target `:25` | ✅ |
-| `aws_ecs_task_definition.ingest` | `:57` | dispatch Lambda `TASKDEF_ARN` `:57` | ✅ |
+| `aws_ecs_task_definition.mcp` | `:88` | service `:92` | ❌ |
+| `aws_ecs_task_definition.connect_web` | `:73` | service `:78` | ❌ |
+| `aws_ecs_task_definition.morning_digest` | `:55` | rule ECS target `:59` | ❌ |
+| `aws_ecs_task_definition.canary` | `:25` | rule ECS target `:29` | ❌ |
+| `aws_ecs_task_definition.ingest` | `:57` | dispatch Lambda `TASKDEF_ARN` `:61` | ❌ |
 
-**B3（ECS state drift）= 0。** rebind #2 は成立して保持されている。
+**B3（ECS state drift）が 3 度目の再発。5/5 すべてが乖離。**
+原因は 2026-08-26 の署名リリース便を Freeze 解除下の外科的 CLI 経路で通したこと
+（裁定②の下では違反ではない）。→ **state rebind #3**（Human Gate ③）が必要。
+
+`teamagent-dev-openclaw:41` は稼働中だが **terraform state に該当リソースが無い**
+（ECS + EFS が未取込）。rebind の 5 target にも入らないため drift ではなく **管理外**として扱う。
+取込は Activation 完了後の別便（既知の残宿題）。
 
 ## Approved commits
 
 ### payload（execution line 上）
 
-現在: base `0eab7f2` + 2 commit（P0 session policy / A0.3.2 snapshot injection）
-予定: **base + 10 commit**（下記 8 件を追加）
-
-| # | source PR | dev 側 SHA | 内容 |
-|---|---|---|---|
-| 1 | #315 | `5f539a2` | freeze を機械強制へ（repo lock） |
-| 2 | #315 | `639a1b7` | force push 検出の変異対 |
-| 3 | #316 | `43af628` | A0.2.2a non-secret read |
-| 4 | #318 | `45971f1` | A0.2.2b secret read |
-| 5 | #319 | `8777769` | Freeze v2 policy（AWS deny） |
-| 6 | #320 | `46e6d0f` | Freeze v2 定義 + root 監視 |
-| 7 | #321 | `8a43116` | Freeze v2 ACTIVE 化 + 境界記録 |
-| 8 | #322 | （merge 後に確定） | desired-state binding P0 |
+**現況【実測 2026-08-27】**: base `0eab7f24` + **承認済み 22 commit** = `5ef4e8e9bc30`。
+`activation_freeze_check.py assert-execution-line` が緑（force push / 履歴改変なし）。
+上の「予定: base + 10 commit」は取り込み済みで、以後も allowlist が唯一の台帳。
 
 取り込みは patch-id と touched blob の**二点照合**で同一性を機械確認する。
 
@@ -160,14 +246,21 @@ enumerated non-root deployment principals への mechanical deny
 allowlist を更新する commit は payload に数えない（自己参照を避けるため）。
 
 ⚠️ #315 の patch は allowlist の**コピー**を execution line にも持ち込む。これは stale な
-inert コピーなので、検証は必ず dev 側から実行する（self-reference ガードを追加予定）。
+inert コピーなので、検証は必ず dev 側から実行する（self-reference ガードは実装済み・
+`assert_execution_line` が repo HEAD == execution ref のとき die する）。
 
-## Pending gates
+## Pending gates（2026-08-27 更新）
 
-1. **guard ingest activator 修正 PR の merge GO?** ← 次の停止点（下記「発見」参照）
-2. Gate 5: production adopt-plan GO
-3. adopt-apply GO
-4. Freeze v2 解除 GO（別セッションのリリース便が待機中）
+Freeze 解除は裁定②で済んでいるため、旧「Freeze v2 解除 GO」は**消滅**した。
+残る停止点は次のとおり。
+
+1. **state rebind #3 GO**（Human Gate ③）— 5/5 drift の解消。以後の plan はこれが前提
+2. **台帳の Wave3 再ベースライン**（裁定①）— `expected_generation_sha256` を実測世代へ寄せ、
+   `image-builder` を監視対象へ入れる（射程ずれの根治）
+3. Gate 5: production adopt-plan GO（純粋 4 forget + 4 import の判定到達後）
+4. adopt-apply GO
+5. **unlock relock GO**（Human Gate ⑤）— 裁定③の相乗りが終わってから一括で畳む
+6. **HMAC 契約の作り直し GO**（裁定④）— 幹部公開とは混ぜない
 
 ---
 
@@ -558,9 +651,9 @@ A0.2.2a-d の IAM apply が通ったのは guard を使わない targeted saved-
 | リスク | 状態 |
 |---|---|
 | **root は deny できない** | identity policy をバイパス。SCP と root key 無効化は activation スコープ外。監視のみ（`root_mutation_monitor.py`） |
-| B3（ECS state drift）再発 | **解消済み**（rebind #2 完了・state == live を 5/5 実測） |
+| B3（ECS state drift）再発 | **再発（3 度目・2026-08-27 実測で 5/5 乖離）**。rebind #2 の成立は 08-25 まで。→ rebind #3 待ち |
 | guard の consumer モデルが live トポロジに追随していない | ingest で顕在化（上記「発見」）。**他の consumer にも同種の stale が無いか**は未検査 — 8 consumer 分の activator 実態突合を backlog 化 |
-| freeze 中はリリース経路も停止 | automation role も deny 対象。緊急時は `activation_freeze_enabled=false` の再 apply（human gate） |
+| freeze 中はリリース経路も停止 | **現在は非該当**（08-26 に全 principal detach 済み）。ただし宣言 state=active のため、次の terraform apply で 10 attachment が再作成され再びリリースが止まる。plan で必ず確認する |
 | 誤 action 名 `s3:GetBucketLifecycleConfiguration` | 既存 statement に 2 箇所 inert 残存。件数を pin して backlog 化 |
 | bootstrap closure テストはコメントも走査 | tf のコメントにリソースアドレスやワイルドカード action を書くと誤爆する |
 
@@ -672,43 +765,40 @@ live には **適用済み**（serial 213）だが、execution line `868fcb7` �
 
 ### allowlist の現況
 
-`activation_execution_allowlist.json`（dev 側 authoritative）は
-`execution_base 0eab7f24` + **12 commit**、`expected_head = e40f1c23…`。
-一方 execution line の実 HEAD は `868fcb7` で、`e40f1c23` の先に 4 commit ある:
+**解消済み【実測 2026-08-27】**: `activation_execution_allowlist.json`（dev 側 authoritative）は
+`execution_base 0eab7f24` + **承認済み 22 commit**、`expected_head = 5ef4e8e9bc30`。
+execution line の実 HEAD も `5ef4e8e` で一致し、`assert-execution-line` が緑
+（上表の 4 commit は記録済み）。以後この節は allowlist の実測値だけを持つ。
 
-| SHA | 内容 | allowlist 記載 |
-|---|---|---|
-| `c63e489` | Wave2 1/2 vulkan-loader ドリフト追随 | ❌ |
-| `296720e` | Wave2 2/2 CVE-2026-14456 openssl | ❌ |
-| `f973145` | 世代台帳を execution line 自身の inputs から再生成 | ❌ |
-| `868fcb7` | rebind #2 mapping を 5 target へ確定 | ❌ |
+## Next action（2026-08-27 更新）
 
-→ allowlist 更新時に上記 4 + 本 issue 修正 + `8bfdf16` をまとめて記録し、
-`expected_head` を新 HEAD に更新する。
-
-## Next action
-
-1. guard ingest activator 修正の実装 + 変異テスト（`fix/guard-ingest-lambda-activator`）
-2. CI green → PR 作成 → 🛑 **merge GO?**
-3. merge 後 execution line へ controlled cherry-pick（patch-id + touched blob の二点照合）
-4. fresh preflight adopt-plan 再走 → **純粋 4 forget + 4 import 判定**
-5. 判定到達で 🛑 STOP（STATUS PACKET）→ Activation Baseline 確定
-6. production adopt-plan → adopt-apply → post-apply 検証 → ACTIVATION COMPLETE
+1. **記録の再整合（本更新）** — Wave3 violation / detach 実態 / 5-5 drift / 裁定 4 件を宣言と
+   本ファイルへ反映（完了）
+2. **state rebind #3** — 5 target を live（`:92` / `:78` / `:59` / `:29` / `:61`）へ寄せる
+   → 🛑 Human Gate ③
+3. **台帳の Wave3 再ベースライン**（裁定①）— `expected_generation_sha256` を実測世代へ、
+   `image-builder` を監視対象へ。**Wave2 契約へは戻さない**（CVE-2026-14456 が復活するため）
+4. guard の blocker 3（IAM 不足）/ blocker 4（HMAC selector 未 pin）を片付けて
+   fresh preflight adopt-plan を再走 → **純粋 4 forget + 4 import 判定**
+5. Activation Baseline 確定 → production adopt-plan → adopt-apply → post-apply 検証
+   → ACTIVATION COMPLETE
+6. 正名化（ingest activator type の hard blocker）→ unlock relock（裁定③）
 7. PR2-A1 Hermes supply-chain → PR2-B Hermes dark runtime
 
-### Freeze v2 解除までの残ゲート
+### Freeze 解除ゲートは消滅（2026-08-26 裁定②）
 
-別セッションのリリース便（mail 便 + お土産便1・dev `690a8be`・CI 緑・発射準備済み）が
-Freeze 解除を待っている。解除可能になる条件は以下が**すべて**満たされたとき:
+旧「Freeze v2 解除までの残ゲート」7 条件は、**解除そのものがユーザー裁定で先に行われた**ため
+条件表としては失効した。待機していたリリース便（mail 便 / お土産便1）も 08-26 の
+署名リリースで通っている。
 
-| # | 条件 | 現状 |
+残っているのは解除の可否ではなく **解除下での整合性**である:
+
+| # | 論点 | 現状 |
 |---|---|---|
-| 1 | guard が `snapshot_live` を通る（本 issue の修正） | ❌ 実装中 |
-| 2 | preflight が純粋 4 forget + 4 import | ❌ 1 待ち |
-| 3 | Activation Baseline 確定 | ❌ 2 待ち |
-| 4 | production adopt-apply 完了（state のみ変更・実体不変を機械証明） | ❌ |
-| 5 | post-apply 検証（新 4 address 在 / 旧 4 address 不在 / integrity before==after） | ❌ |
-| 6 | guarded read-only plan が 0 add / 0 change / 0 destroy | ❌ |
-| 7 | 🛑 Freeze 解除 GO（Human Gate ⑤） | ❌ |
-
-**解除の実行はしない。** 上記 1-6 が green になった時点で報告のみ行う。
+| 1 | state と live の乖離（5/5） | ❌ rebind #3 待ち |
+| 2 | 世代台帳が Wave3 に追随していない | ❌ 再ベースライン待ち |
+| 3 | `image-builder` が監視対象外 | ❌ 射程ずれが残存 |
+| 4 | guard が preflight を通らない（blocker 3 / 4） | ❌ |
+| 5 | 純粋 4 forget + 4 import 判定 | ❌ 未到達 |
+| 6 | unlock が立ったまま | ⏸ 裁定③により意図的に維持 |
+| 7 | 次の terraform apply で freeze が再 attach される | ⚠️ plan で要確認（上記地雷） |
