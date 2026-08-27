@@ -19,7 +19,7 @@
     "infra/codebuild/teamagent_core_media_release_contract.json": "172bb5254987f865861f233a04a2cb151887c007",
     "infra/codebuild/tiktok_release_contract.json": "6e65b8e2ff695a89782c8b83647450ce9a4720ad",
     "infra/codebuild/openclaw_bundle_contract.json": "bb7ee348a5c25efe8a38e7bac378057377edfe6d",
-    "infra/terraform/codebuild.tf": "eb3589566c44ad089817e1820d7e898784aee785",
+    "infra/terraform/codebuild.tf": "32516acad25c6adcf200864ed29998e296648be2",
     "infra/terraform/mcp_approval.tf": "ca9d809d4cc2b3d1ea32aac1c796cd13d6dc98ca"
   },
   "kms_keys": {
@@ -43,5 +43,17 @@
     "teamagent-dev-image-attestor": "dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478",
     "teamagent-dev-image-promoter": "a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
-  }
+  },
+  "input_repairs": [
+    {
+      "path": "infra/terraform/codebuild.tf",
+      "before_blob": "eb3589566c44ad089817e1820d7e898784aee785",
+      "after_blob": "32516acad25c6adcf200864ed29998e296648be2",
+      "reason": "image-builder の buildspec 参照が旧世代へハードコードされていたのを承認済み Wave2 へ修復（one-shot repair unlock）",
+      "gate": "UNLOCK GO（2026-08-26）",
+      "generation_publish": 0,
+      "expected_generation_sha256_changed": 0,
+      "invariance_evidence": "生成物 identity 25 件を terraform console で変更前後に採取し全件 before == after"
+    }
+  ]
 }

@@ -196,11 +196,65 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 # ── unlock 宣言 ────────────────────────────────────────────────────────────
 
 
-def test_unlock_is_inactive_and_empty_by_default() -> None:
+def test_unlock_is_inactive_or_fully_declared() -> None:
+    """unlock は既定 inactive。active なら one-shot repair として完全宣言されていること。
+
+    frozen surface を触る PR は **同じ PR 内で** unlock を active にしないと
+    checker が落ちる（宣言が diff に出ることで human gate が効く）。
+    したがって「常に inactive」では、その機構自体が使えなくなる。
+    ここでは代わりに「active なら、いつ誰の承認で・どの path を・
+    どういう保証のもとに開けたか」が全部書かれていることを要求する。
+    """
     unlock = _freeze_doc()["unlock"]
-    assert unlock["active"] is False
-    assert unlock["scope_paths"] == []
-    assert unlock["reason"] is None
+    if unlock["active"] is False:
+        assert unlock["scope_paths"] == []
+        assert unlock["reason"] is None
+        assert unlock.get("gate") is None
+        return
+
+    # active な場合は、誰の承認でどの path を開けたかが必ず書かれていること
+    assert unlock["scope_paths"], "active な unlock に scope_paths が無い"
+    assert unlock["reason"], "active な unlock に reason が無い"
+    assert unlock["gate"], "active な unlock に gate（human 承認の出所）が無い"
+
+    # 複数セッションが同時に開けることがある。その場合は誰がどの path を持ち、
+    # 誰が relock するかを宣言させる（他人の scope を巻き込んで閉じる事故を防ぐ）。
+    # 役目を終えた他セッションの scope は superseded_scopes に退避して記録を残す
+    for item in unlock.get("superseded_scopes") or []:
+        assert item.get("owner") and item.get("paths"), "superseded_scopes の記録が不完全"
+        assert not (set(item["paths"]) & set(unlock["scope_paths"])), (
+            "superseded な path が現行 scope に残っている"
+        )
+
+    concurrent = unlock.get("concurrent_scopes")
+    if concurrent is not None:
+        assert isinstance(concurrent, list) and concurrent
+        declared: set[str] = set()
+        for item in concurrent:
+            assert item.get("owner"), "concurrent_scopes に owner が無い"
+            assert item.get("relock_owner"), "concurrent_scopes に relock_owner が無い"
+            declared |= set(item.get("paths") or [])
+        assert declared == set(unlock["scope_paths"]), (
+            "concurrent_scopes の path 集合が scope_paths と一致しない"
+        )
+        assert unlock.get("relock_policy"), "併走時は relock_policy を明記すること"
+
+    # one_shot_repair は「あるなら完全宣言」。unlock の種類はこれだけではない。
+    repair = unlock.get("one_shot_repair")
+    if repair is None:
+        return
+    assert isinstance(repair, dict)
+    assert repair.get("file") in unlock["scope_paths"], "repair 対象が scope_paths 外"
+    assert repair.get("relock_required") is True, "relock 必須が宣言されていない"
+    # publish を伴わないことが宣言されていること（伴うなら別 gate）
+    for zero_key in (
+        "generation_publish",
+        "s3_buildspec_write",
+        "codebuild_start_build",
+        "aws_workload_mutation",
+        "other_frozen_inputs_changed",
+    ):
+        assert repair.get(zero_key) == 0, f"{zero_key} が 0 と宣言されていない"
 
 
 def test_unlock_requires_scope_reason_and_gate(tmp_path: Path) -> None:

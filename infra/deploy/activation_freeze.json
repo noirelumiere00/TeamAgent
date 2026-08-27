@@ -193,12 +193,40 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/openclaw_bundle_contract.json",
-      "infra/codebuild/teamagent_core_media_release_contract.json"
+      "infra/terraform/codebuild.tf"
     ],
-    "reason": "統合裁定（2026-08-26・両変更とも個別裁定済みの合併）: ① core_media 契約 = wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避（2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED・総数 240→240・追加0・削除0・Chromium 不変）。② openclaw 契約 = runtime base を gcr.io/distroless/nodejs24-debian13 から cgr.dev/chainguard/node (Wolfi) へ乗換え、CVE-2026-14456 (Debian trixie fix_deferred) による scan gate の恒久閉塞を根治するため、binary_probe (path=/nodejs/bin/node, sha256=6bf69d0e…) → (path=/usr/bin/node, sha256=5452461a…) の更新が不可避（scan_gate 0/0・repo 集合・referrer 種別は不変）。",
-    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）",
-    "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。"
+    "reason": "image-builder の buildspec 参照が codebuild.tf に世代 SHA でハードコードされており（他 4 publisher と違い local.*_buildspec_sha256 から導出していない）、2026-08-21 の Wave2 publish 時にこの 1 行だけ取り残されていた。live は承認済み Wave2 の 5b18b710c88167a6… を参照しているのに repo desired は旧世代 8da8944d5354d282… を指しており、guarded plan が live 新 → repo 旧の巻き戻し update を出す（供給網の退行）。one-shot repair としてこの 1 行 1 定数のみを live/Wave2 に合わせる。",
+    "gate": "UNLOCK GO（2026-08-26 ユーザー裁定・one-shot repair unlock・この 1 行 1 定数に限定）",
+    "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。",
+    "one_shot_repair": {
+      "file": "infra/terraform/codebuild.tf",
+      "before": "8da8944d5354d2822e8da18a5c4322bae01adc5331540042b1e100be1d511257",
+      "after": "5b18b710c88167a6e0fb896f5cfdbd5ef2353b1a3c918f98cdeddc5c72f98964",
+      "occurrences": 1,
+      "generation_publish": 0,
+      "s3_buildspec_write": 0,
+      "codebuild_start_build": 0,
+      "aws_workload_mutation": 0,
+      "other_frozen_inputs_changed": 0,
+      "generation_output_invariance": "25 件の生成物 identity（4 publisher の sha256/s3_key・bootstrap・tiktok・image_builder の rendered body sha256・contract 系 sha256）をterraform console で変更前後に採取し全件 before == after を実測",
+      "three_way_match": "approved Wave2（activation_freeze.json 記録）== live image-builder 参照 == repo の sha256(local.image_builder_buildspec) = 5b18b710c88167a6…",
+      "relock_required": true
+    },
+    "superseded_scopes": [
+      {
+        "owner": "openclaw / core_media 契約セッション",
+        "paths": [
+          "infra/codebuild/openclaw_bundle_contract.json",
+          "infra/codebuild/teamagent_core_media_release_contract.json"
+        ],
+        "landed_in_dev": [
+          "6219d24 (2026-08-25)",
+          "8c01f9d (2026-08-26)"
+        ],
+        "note": "当該変更は dev へ merge 済みで、この宣言は役目を終えていた。checker は『実際に変更していない path を scope に入れるな』と拒否するため、本 PR の scope からは外した。再度この面を触る場合は改めて unlock を宣言すること。"
+      }
+    ],
+    "relock_policy": "relock は自分の scope_paths だけを外す。他セッションの path が残っている場合は active を維持する。全 path が外れたときにのみ active=false にする。"
   },
   "production_deployment_freeze": {
     "state": "active",
