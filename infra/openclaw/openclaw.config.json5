@@ -30,8 +30,24 @@
         // §P: ID は list-inference-profiles の実測値で確定（2026-06-11・account 718959508629/東京）。
         model: "amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0",
         identity: { name: "Aico", emoji: "🧭" },
-        // §S: skipBootstrap は v2026.6.1 schema の agents.list[] に無い（config validate で弾かれた）ため削除。
+        // §S: skipBootstrap は agents.list[] に無い（agents.defaults 専用）ため削除。
         // レビュー済み SOUL.md/HEARTBEAT.md は entrypoint が workspace に seed 済み。
+        // ※ 上の「v2026.6.1 schema」という旧記述は誤り。本番は v2026.7.1
+        //   （Dockerfile.openclaw:8 / openclaw-entrypoint.mjs:22 / plugins-lock.json が一致）。
+        // §S2: bootstrap の per-file 上限を既定 20,000 から引き上げる（2026-08-27）。
+        //   背景: 2026-08-25 に SOUL.md が既定 20,000 で切断され本番の全ツールが停止した。
+        //   当時は「上限は動かせない」と判断して SOUL.md を圧縮したが、それは誤りだった。
+        //   実測（openclaw 2026.7.1 の npm tarball を展開して確認）:
+        //     - dist の DEFAULT_BOOTSTRAP_MAX_CHARS = 2e4 / DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 6e4
+        //     - 切断は trimBootstrapContent の `trimmed.length <= maxChars`
+        //       ＝ **UTF-16 コードユニット**（Python の len() とはズレる）
+        //     - 本 config 実物を shipped zod schema に safeParse させ、本キーが受理されることを確認。
+        //       対照実験（存在しないキー）は unrecognized_keys で拒否＝schema は strict。
+        //   総量は既定 60,000 のまま据え置く（現状 3 ファイル合計 20,687 ユニットで余裕十分）。
+        //   ⚠️ 上限は「青天井にしてよい」という意味ではない。bootstrap は毎リクエストの
+        //      system prompt に載るため、伸ばした分だけ恒常的にトークンを食う。
+        //      実際の長さは tests/infra/test_soul_contract.py の MAX_SOUL_UTF16_UNITS で縛る。
+        bootstrapMaxChars: 32000,
       },
     ],
   },
