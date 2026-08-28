@@ -286,7 +286,10 @@ locals {
                   "desired_count",
                   "task_definition_arn",
                 ]) :
-                consumer.activator.type == "eventbridge_rule_ecs_target" ?
+                contains([
+                  "eventbridge_rule_ecs_target",
+                  "eventbridge_rule_lambda_taskdef_arn_environment",
+                ], consumer.activator.type) ?
                 sort(keys(consumer[phase].activation)) == sort([
                   "state",
                   "task_definition_arn",
@@ -364,7 +367,10 @@ locals {
             consumer.activator.type == "ecs_service" ?
             consumer.before.activation.desired_count !=
             consumer.after.activation.desired_count :
-            consumer.activator.type == "eventbridge_rule_ecs_target" ?
+            contains([
+              "eventbridge_rule_ecs_target",
+              "eventbridge_rule_lambda_taskdef_arn_environment",
+            ], consumer.activator.type) ?
             consumer.before.activation.state != consumer.after.activation.state :
             consumer.before.activation.event_source_mapping_enabled !=
             consumer.after.activation.event_source_mapping_enabled

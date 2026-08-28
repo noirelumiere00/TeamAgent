@@ -75,7 +75,7 @@
       "ecs_family": "teamagent-dev-ingest",
       "container_name": "ingest",
       "activator": {
-        "type": "eventbridge_rule_ecs_target",
+        "type": "eventbridge_rule_lambda_taskdef_arn_environment",
         "identity": "teamagent-dev-ingest-weekly"
       },
       "release_repository": "teamagent-mcp",

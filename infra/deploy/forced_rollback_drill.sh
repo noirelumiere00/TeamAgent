@@ -317,7 +317,9 @@ validate_target_file() {
           if $owner.activator.type == "ecs_service" then
             ($resource.activation.state |
               type == "number" and . >= 0 and floor == .)
-          elif $owner.activator.type == "eventbridge_rule_ecs_target" then
+          elif $owner.activator.type == "eventbridge_rule_ecs_target" or
+            $owner.activator.type ==
+              "eventbridge_rule_lambda_taskdef_arn_environment" then
             ($resource.activation.state |
               . == "ENABLED" or . == "DISABLED")
           elif $owner.activator.type ==
@@ -2193,6 +2195,13 @@ activation_fields = {
     "x_buzz_worker": "enable_x_research",
     "tiktok_acquire": "enable_tiktok_acquire",
 }
+# EventBridge rule が実行状態を持つ activator type（taskdef ポインタの在処は問わない）。
+_EVENTBRIDGE_RULE_ACTIVATOR_TYPES = frozenset(
+    {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }
+)
 wanted = set(image_fields) | set(activation_fields.values())
 values = {}
 with open(raw_path, encoding="utf-8") as handle:
@@ -2219,7 +2228,7 @@ def expected_raw(target):
         state = resource["activation"]["state"]
         if resource["activation"]["type"] == "ecs_service":
             state = state > 0
-        elif resource["activation"]["type"] == "eventbridge_rule_ecs_target":
+        elif resource["activation"]["type"] in _EVENTBRIDGE_RULE_ACTIVATOR_TYPES:
             state = state == "ENABLED"
         expected[field] = state
     return expected
@@ -2292,7 +2301,7 @@ for expected in initial["resources"]:
     state = live_activation(expected["consumer_id"])
     if expected["activation"]["type"] == "ecs_service":
         state = state > 0
-    elif expected["activation"]["type"] == "eventbridge_rule_ecs_target":
+    elif expected["activation"]["type"] in _EVENTBRIDGE_RULE_ACTIVATOR_TYPES:
         state = state == "ENABLED"
     observed_raw[field] = state
 if values != observed_raw:

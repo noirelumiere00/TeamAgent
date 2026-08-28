@@ -112,7 +112,7 @@
           "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:10",
           "activation": {
-            "type": "eventbridge_rule_ecs_target",
+            "type": "eventbridge_rule_lambda_taskdef_arn_environment",
             "identity": "teamagent-dev-ingest-weekly",
             "state": "DISABLED"
           }
@@ -248,7 +248,7 @@
           "image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1111111111111111111111111111111111111111111111111111111111111111",
           "task_definition_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:11",
           "activation": {
-            "type": "eventbridge_rule_ecs_target",
+            "type": "eventbridge_rule_lambda_taskdef_arn_environment",
             "identity": "teamagent-dev-ingest-weekly",
             "state": "DISABLED"
           }

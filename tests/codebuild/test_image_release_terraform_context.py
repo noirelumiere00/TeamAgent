@@ -30,7 +30,10 @@ def _load_module() -> Any:
 
 CONTEXT = _load_module()
 REGISTRY = CONTEXT.load_consumer_registry()
-INGEST_DISPATCH_FUNCTION = CONTEXT._ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
+CANONICAL_EVENTBRIDGE_LAMBDA_TYPE = CONTEXT._EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE
+INGEST_DISPATCH_FUNCTION = CONTEXT._eventbridge_lambda_pointer_function(
+    "teamagent-dev-ingest-weekly"
+)
 LEGACY_TIKTOK_IMAGE = (
     "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/"
     f"teamagent-dev-tiktok-acquire@sha256:eb975be{'0' * 57}"
@@ -224,7 +227,10 @@ def _consumer_activation(
             {"desired_count": 1, "task_definition_arn": task_arn},
             address,
         )
-    if activator["type"] == "eventbridge_rule_ecs_target":
+    if activator["type"] in (
+        "eventbridge_rule_ecs_target",
+        CANONICAL_EVENTBRIDGE_LAMBDA_TYPE,
+    ):
         rule_suffix = {
             "canary": "canary_hourly",
             "ingest": "ingest_weekly",
@@ -243,7 +249,7 @@ def _consumer_activation(
             "aws_cloudwatch_event_rule",
             {"name": activator["identity"], "state": state},
         )
-        if consumer_id == "ingest":
+        if activator["type"] == CANONICAL_EVENTBRIDGE_LAMBDA_TYPE:
             function_address = "aws_lambda_function.ingest_dispatch[0]"
             return (
                 [
@@ -469,14 +475,12 @@ def _plan(*, pre_media_cutover: bool = True) -> dict[str, Any]:
             configuration_address = re.sub(r"\[0\]$", "", address)
             configuration: dict[str, Any] = {"address": configuration_address}
             if address == pointer_address:
-                if consumer["consumer_id"] == "ingest":
-                    expression_name = "environment"
-                else:
-                    expression_name = {
-                        "ecs_service": "task_definition",
-                        "eventbridge_rule_ecs_target": "ecs_target",
-                        "lambda_taskdef_arn_environment": "environment",
-                    }[consumer["activator"]["type"]]
+                expression_name = {
+                    "ecs_service": "task_definition",
+                    "eventbridge_rule_ecs_target": "ecs_target",
+                    CANONICAL_EVENTBRIDGE_LAMBDA_TYPE: "environment",
+                    "lambda_taskdef_arn_environment": "environment",
+                }[consumer["activator"]["type"]]
                 configuration["expressions"] = {
                     expression_name: {
                         "references": [f"{consumer['terraform_task_definition_address']}.arn"]
@@ -1816,7 +1820,7 @@ def test_ingest_planned_pointer_requires_dispatch_lambda_environment_expression(
 
 
 @pytest.mark.parametrize("consumer_id", ["canary", "morning_digest"])
-def test_eventbridge_ecs_consumers_do_not_use_ingest_environment_shim(
+def test_eventbridge_ecs_consumers_read_the_target_not_the_lambda_environment(
     consumer_id: str,
 ) -> None:
     consumer = next(item for item in REGISTRY["consumers"] if item["consumer_id"] == consumer_id)

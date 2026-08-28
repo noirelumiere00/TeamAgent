@@ -357,7 +357,10 @@ def _consumer_snapshot(
             "desired_count": execution,
             "task_definition_arn": task_definition_arn,
         }
-    elif activator_type == "eventbridge_rule_ecs_target":
+    elif activator_type in (
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    ):
         activation = {
             "state": execution,
             "task_definition_arn": task_definition_arn,
@@ -438,7 +441,10 @@ def _consumer_manifest(
         default_execution: int | str | bool
         if activator_type == "ecs_service":
             default_execution = 1
-        elif activator_type == "eventbridge_rule_ecs_target":
+        elif activator_type in (
+            "eventbridge_rule_ecs_target",
+            "eventbridge_rule_lambda_taskdef_arn_environment",
+        ):
             default_execution = "ENABLED" if consumer_id == "morning_digest" else "DISABLED"
         else:
             default_execution = True

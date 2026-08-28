@@ -2511,6 +2511,17 @@ def _consumer_manifest_rows(
     return result
 
 
+# EventBridge rule が実行状態を持つ activator type。taskdef ポインタの在処
+# （event target の ecs_target か、dispatch Lambda の environment か）は
+# 実行状態の判定には影響しないため、両者をここで束ねる。
+_EVENTBRIDGE_RULE_ACTIVATOR_TYPES = frozenset(
+    {
+        "eventbridge_rule_ecs_target",
+        "eventbridge_rule_lambda_taskdef_arn_environment",
+    }
+)
+
+
 def _consumer_execution_state(
     consumer: Mapping[str, Any],
     *,
@@ -2540,7 +2551,7 @@ def _consumer_execution_state(
         ):
             raise EvidenceError("consumer ECS desired count is invalid")
         return desired_count
-    if activator_type == "eventbridge_rule_ecs_target":
+    if activator_type in _EVENTBRIDGE_RULE_ACTIVATOR_TYPES:
         rule_state = state.get("state")
         if rule_state not in {
             "ENABLED",
@@ -2567,7 +2578,7 @@ def _consumer_is_executable(consumer: Mapping[str, Any], *, snapshot: str) -> bo
     )
     if activator.get("type") == "ecs_service":
         return isinstance(state, int) and not isinstance(state, bool) and state > 0
-    if activator.get("type") == "eventbridge_rule_ecs_target":
+    if activator.get("type") in _EVENTBRIDGE_RULE_ACTIVATOR_TYPES:
         return state != "DISABLED"
     return state is True
 
@@ -2591,7 +2602,7 @@ def _consumer_execution_increased(consumer: Mapping[str, Any]) -> bool:
             and not isinstance(after, bool)
             and after > before
         )
-    if activator.get("type") == "eventbridge_rule_ecs_target":
+    if activator.get("type") in _EVENTBRIDGE_RULE_ACTIVATOR_TYPES:
         return (before == "DISABLED" and after != "DISABLED") or (
             before == "ENABLED" and after == "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS"
         )

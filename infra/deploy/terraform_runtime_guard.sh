@@ -2118,8 +2118,6 @@ build_sync_image_deployment_consumer_manifest() {
           task_definition_arn:$live[0].targets.canary.task_definition
         }
       }
-      # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-      # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
       elif $id == "ingest" then {
         image:$live[0].taskdefs.ingest.image,
         task_definition_arn:$live[0].taskdefs.ingest.arn,
@@ -2189,7 +2187,9 @@ build_scoped_release_live_contract() {
     def execution_state($consumer; $phase):
       if $consumer.activator.type == "ecs_service" then
         $consumer[$phase].activation.desired_count
-      elif $consumer.activator.type == "eventbridge_rule_ecs_target" then
+      elif $consumer.activator.type == "eventbridge_rule_ecs_target" or
+        $consumer.activator.type ==
+          "eventbridge_rule_lambda_taskdef_arn_environment" then
         $consumer[$phase].activation.state
       elif $consumer.activator.type ==
         "lambda_taskdef_arn_environment" then
@@ -2289,7 +2289,9 @@ build_scoped_release_live_contract() {
     def execution_state($consumer; $phase):
       if $consumer.activator.type == "ecs_service" then
         $consumer[$phase].activation.desired_count
-      elif $consumer.activator.type == "eventbridge_rule_ecs_target" then
+      elif $consumer.activator.type == "eventbridge_rule_ecs_target" or
+        $consumer.activator.type ==
+          "eventbridge_rule_lambda_taskdef_arn_environment" then
         $consumer[$phase].activation.state
       elif $consumer.activator.type ==
         "lambda_taskdef_arn_environment" then
@@ -2358,7 +2360,9 @@ build_scoped_release_live_contract() {
         if .activation.type == "ecs_service" then
           (.activation.state |
             type == "number" and . >= 0 and floor == .)
-        elif .activation.type == "eventbridge_rule_ecs_target" then
+        elif .activation.type == "eventbridge_rule_ecs_target" or
+          .activation.type ==
+            "eventbridge_rule_lambda_taskdef_arn_environment" then
           (.activation.state == "ENABLED" or
             .activation.state == "DISABLED")
         elif .activation.type == "lambda_taskdef_arn_environment" then
@@ -3422,8 +3426,6 @@ validate_migration_source() {
         morning: $live.rules.morning.critical.state,
         canary: $live.rules.canary.critical.state
       } == $m.from.rule_states and
-      # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-      # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
       $live.rule_dispatchers.ingest.task_definition ==
         $live.taskdefs.ingest.arn and
       $live.targets.canary.task_definition == $live.taskdefs.canary.arn and
@@ -3665,8 +3667,6 @@ snapshot_live() {
   local connect_service="${PROJECT}-${ENVIRONMENT}-connect-web"
   local openclaw_service="${PROJECT}-${ENVIRONMENT}-openclaw"
   local ingest_rule="${PROJECT}-${ENVIRONMENT}-ingest-weekly"
-  # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-  # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
   local ingest_dispatch_function="${PROJECT}-${ENVIRONMENT}-ingest-dispatch"
   local morning_rule="${PROJECT}-${ENVIRONMENT}-morning-digest-weekday"
   local canary_rule="${PROJECT}-${ENVIRONMENT}-canary-hourly"
@@ -4174,8 +4174,6 @@ snapshot_live() {
   local ingest_arn morning_arn canary_arn
   local ingest_state morning_state canary_state
 
-  # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-  # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
   local expected_ingest_dispatch_arn
   expected_ingest_dispatch_arn="arn:aws:lambda:${REGION}:${EXPECTED_ACCOUNT_ID}:function:${ingest_dispatch_function}"
   aws_cli events describe-rule --name "$ingest_rule" \
@@ -4215,8 +4213,6 @@ snapshot_live() {
     esac
   done
 
-  # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-  # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
   aws_cli lambda get-function-configuration \
     --function-name "$ingest_dispatch_function" \
     --output json > "$dir/ingest-lambda.json"
@@ -4436,8 +4432,6 @@ snapshot_live() {
           code_sha256: $lambda.CodeSha256,
           critical: ($lambda | guard_lambda_from_aws($concurrency[0]; $tags[0]))
         };
-      # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-      # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
       def rule_dispatcher($doc; $tags):
         $doc[0] as $lambda | {
           task_definition: $lambda.Environment.Variables.TASKDEF_ARN,
@@ -4629,8 +4623,6 @@ snapshot_live() {
             .taskArn
           ] | sort)
         },
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
         rule_dispatchers: {
           ingest: rule_dispatcher($ingest_lambda; $ingest_lambda_tags)
         },
@@ -4793,8 +4785,6 @@ snapshot_live() {
   local openclaw_image="${account_id}.dkr.ecr.${REGION}.amazonaws.com/teamagent-openclaw"
   [[ "$(jq -er '.taskdefs.openclaw.image' "$output")" == "$openclaw_image@sha256:"* ]] ||
     die "OpenClaw live imageは同一account/regionの専用ECR digestである必要があります"
-  # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-  # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
   jq -L "$GUARD_JQ_DIR" -e '
     include "terraform_runtime_guard";
     .taskdefs.connect_web.env.CONNECT_APP_HTML_S3_URI ==
@@ -5228,7 +5218,7 @@ validate_sync_consumer_images() {
           ecs_family:"teamagent-dev-ingest",
           container_name:"ingest",
           activator:{
-            type:"eventbridge_rule_ecs_target",
+            type:"eventbridge_rule_lambda_taskdef_arn_environment",
             identity:"teamagent-dev-ingest-weekly"
           }
         },
@@ -6283,8 +6273,6 @@ validate_runtime_links() {
       include "terraform_runtime_guard";
       . as $plan |
       $plan.resource_changes[] | select(.address == $address) as $change |
-      # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-      # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
       if $component == "ingest" then
         $change.change.actions == ["no-op"] and
         ([$change.change.after_unknown // {} | paths(. == true)] |
@@ -7560,8 +7548,8 @@ validate_plan() {
 
   # ingest の dispatch Lambda は env の TASKDEF_ARN が ingest taskdef の arn を参照するため、
   # mcp release のたびに update として plan に載る。tiktok/x の dispatch と同じ扱いで許可する。
-  # これは 2026-08-06 の ingest 二重起動ガード導入時に入れ漏れた恒久的な不足であり、
-  # ACTIVATION-SHIM ではない（正名化しても残す）。
+  # これは 2026-08-06 の ingest 二重起動ガード導入時に入れ漏れた恒久的な不足の修正で、
+  # トポロジ由来のため activator type の正名化後も残す。
   local allowed_runtime_changes unexpected_changes
     allowed_runtime_changes='[
       "terraform_data.production_image_release_gate",
@@ -7745,8 +7733,6 @@ validate_plan() {
     fi
   done
 
-  # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-  # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
   for spec in \
     'aws_cloudwatch_event_target.ingest_run_task[0]|ingest|aws_cloudwatch_event_target.ingest_run_task|aws_lambda_function.ingest_dispatch[0]' \
     'aws_cloudwatch_event_target.morning_digest_run_task[0]|morning|aws_cloudwatch_event_target.morning_digest_run_task|aws_ecs_task_definition.morning_digest[0]' \
@@ -8434,7 +8420,7 @@ run_activation_task() {
     # ingest の rule は ECS target を持たず dispatch Lambda を起動するため、
     # network 設定は event target ではなく Lambda の env に載っている。
     # 本番の dispatcher（lambda/ingest_dispatch/handler.py:77-83）と同じ組み立てにする。
-    # 恒久的な取得元であり ACTIVATION-SHIM ではない（正名化しても残す）。
+    # トポロジ由来の恒久的な取得元であり、activator type の正名化後も残す。
     network="$(jq -c '
       .rule_dispatchers.ingest.static_environment as $env |
       {

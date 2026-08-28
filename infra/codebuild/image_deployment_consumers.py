@@ -33,6 +33,11 @@ _RECEIPT_KEYS = {"pipeline", "subject"}
 _ACTIVATOR_TYPES = {
     "ecs_service",
     "eventbridge_rule_ecs_target",
+    # EventBridge rule が dispatch Lambda を起動し、taskdef ARN は
+    # その Lambda の environment (TASKDEF_ARN) が持つトポロジ。
+    # ingest の実態であり、2026-08-21 に live で発生した変更を宣言側へ反映したもの
+    # （Activation 中は "eventbridge_rule_ecs_target" + ingest 限定 shim で吸収していた）。
+    "eventbridge_rule_lambda_taskdef_arn_environment",
     "lambda_taskdef_arn_environment",
 }
 _TASK_DEFINITION_ADDRESS_RE = re.compile(r"aws_ecs_task_definition\.[a-z][a-z0-9_]*(?:\[0\])?")

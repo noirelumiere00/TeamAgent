@@ -312,9 +312,11 @@ morning / canary は今も直接 ECS target を持っており（実測 `:55` / 
 - ingest dispatch には `lambda:GetFunctionConfiguration` と `lambda:ListTags` のみ使う。
   `GetFunctionConcurrency` / `ListEventSourceMappings` は simulate 実測で **implicitDeny**、
   かつ EventBridge 起動なので SQS mapping は存在しない。**IAM 追加は不要**。
-- shim は `ACTIVATION-SHIM(ingest)` タグで grep 可能にし、分岐条件を consumer_id /
-  identity の **exact 一致**に限定する。型で束ねる書き方は禁止。
-- 件数と ingest 限定性を contract test（`tests/infra/test_ingest_activation_shim_contract.py`）で pin。
+- shim は `ACTIVATION` + `-SHIM(ingest)` タグ（正名化で全撤去済み）で grep 可能にし、
+  分岐条件を consumer_id / identity の **exact 一致**に限定していた。型で束ねる書き方は禁止だった。
+- 件数と ingest 限定性は contract test で pin していた
+  （正名化後は `tests/infra/test_ingest_canonical_activator_contract.py` が
+  「タグが 1 つも残っていない」「型で分岐している」を逆向きに pin する）。
 
 **案 A（新 activator type の導入）が NO-GO の理由**: canonical registry を変えると
 `release_evidence.py` の追随が原子的に強制され（import 時に registry の activator type を
@@ -351,10 +353,15 @@ Freeze 解除 / 次の通常 generation publish
 正名化の内容（Activation 完了後の PR で原子的に行う）:
 
 1. `image_deployment_consumers.json` の ingest activator type を実態に合わせる
+   → 正名化後の型は `eventbridge_rule_` + `lambda_taskdef_arn_environment`
 2. `release_evidence.py` を新 type に追随させる
-3. `ACTIVATION-SHIM(ingest)` タグの箇所（guard 10 / saga 9 / context 6 = 25）を撤去
+3. shim タグの箇所（guard 10 / saga 9 / context 6 = 25）を撤去し、
+   分岐を consumer_id のリテラル一致から **activator type** へ移す
 4. `buildspec_generation_inputs.json` の expected generation SHA を再導出し、
    新しい approved generation を publish する
+
+**1〜3 は `prep/rename-0828` で先行執筆済み（2026-08-28 夜）。4 は未着手**
+（SHA 再導出は台帳再ベースラインが確定させる入力集合に依存するため分離した）。
 
 **撤去してはいけないもの**（shim ではなく恒久修正）:
 `validate_plan` の allowlist への ingest dispatch Lambda 追加と、

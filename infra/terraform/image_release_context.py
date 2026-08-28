@@ -44,9 +44,23 @@ EXPECTED_BACKEND = {
     "encrypt": True,
 }
 EXPECTED_WORKSPACE = "default"
-# ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-# 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-_ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION = "teamagent-dev-ingest-dispatch"
+# EventBridge rule が dispatch Lambda を起動し、taskdef ARN は Lambda の
+# environment (TASKDEF_ARN) が持つ activator type。分岐は registry が宣言する型で行い、
+# consumer_id のリテラル一致では行わない。
+_EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE = "eventbridge_rule_lambda_taskdef_arn_environment"
+_EVENTBRIDGE_LAMBDA_POINTER_DISPATCH_FUNCTIONS = {
+    "teamagent-dev-ingest-weekly": "teamagent-dev-ingest-dispatch",
+}
+
+
+def _eventbridge_lambda_pointer_function(identity: str) -> str:
+    """宣言された activator identity に対応する dispatch Lambda 名を返す（exact 一致のみ）。"""
+    function_name = _EVENTBRIDGE_LAMBDA_POINTER_DISPATCH_FUNCTIONS.get(identity)
+    if function_name is None:
+        raise ContextError("eventbridge lambda pointer identity is not code-owned")
+    return function_name
+
+
 ALLOWED_EXISTING_LOG_IMPORTS = {
     "aws_cloudwatch_log_group.codebuild_aiia_image_builder": (
         "/aws/codebuild/teamagent-dev-aiia-image-builder"
@@ -446,7 +460,10 @@ def _consumer_snapshot(
                 ),
             ),
         }
-    elif activator_type == "eventbridge_rule_ecs_target":
+    elif activator_type in (
+        "eventbridge_rule_ecs_target",
+        _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+    ):
         _exact_keys(
             activation,
             {"state", "task_definition_arn"},
@@ -521,7 +538,10 @@ def _activation_execution_state(
     activation = _mapping(snapshot["activation"], label="consumer activation")
     if activator_type == "ecs_service":
         return activation["desired_count"]
-    if activator_type == "eventbridge_rule_ecs_target":
+    if activator_type in (
+        "eventbridge_rule_ecs_target",
+        _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+    ):
         return activation["state"]
     if activator_type == "lambda_taskdef_arn_environment":
         return activation["event_source_mapping_enabled"]
@@ -762,15 +782,12 @@ def _require_planned_pointer_reference(
         configuration.get("expressions"),
         label=f"{label} pointer expressions",
     )
-    if activator_type == "eventbridge_rule_ecs_target":
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-        expression_name = "environment" if consumer_id == "ingest" else "ecs_target"
-    else:
-        expression_name = {
-            "ecs_service": "task_definition",
-            "lambda_taskdef_arn_environment": "environment",
-        }[activator_type]
+    expression_name = {
+        "ecs_service": "task_definition",
+        "eventbridge_rule_ecs_target": "ecs_target",
+        _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE: "environment",
+        "lambda_taskdef_arn_environment": "environment",
+    }[activator_type]
     pointer_expression = expressions.get(expression_name)
     if pointer_expression is None:
         raise ContextError(f"{label} planned pointer expression is absent")
@@ -1273,7 +1290,10 @@ def _activation_phase(
                 planned_address=planned_address,
             ),
         }
-    if activator_type == "eventbridge_rule_ecs_target":
+    if activator_type in (
+        "eventbridge_rule_ecs_target",
+        _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+    ):
         if secondary is None:
             raise ContextError(f"{label} EventBridge target is absent")
         state = primary.get("state")
@@ -1283,9 +1303,7 @@ def _activation_phase(
             "ENABLED_WITH_ALL_CLOUDTRAIL_MANAGEMENT_EVENTS",
         }:
             raise ContextError(f"{label} rule state is invalid")
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-        if consumer_id == "ingest":
+        if activator_type == _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE:
             task_definition_arn = _task_definition_from_environment(
                 secondary.get("environment"),
                 label=label,
@@ -1343,19 +1361,18 @@ def _consumer_activation_binding(
         secondary_type = None
         secondary_field = None
         secondary_identity = None
+    elif activator_type == _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE:
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        secondary_type = "aws_lambda_function"
+        secondary_field = "function_name"
+        secondary_identity = _eventbridge_lambda_pointer_function(identity)
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-        if consumer_id == "ingest":
-            secondary_type = "aws_lambda_function"
-            secondary_field = "function_name"
-            secondary_identity = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
-        else:
-            secondary_type = "aws_cloudwatch_event_target"
-            secondary_field = "rule"
-            secondary_identity = identity
+        secondary_type = "aws_cloudwatch_event_target"
+        secondary_field = "rule"
+        secondary_identity = identity
     else:
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
@@ -1506,19 +1523,18 @@ def _consumer_state_activation(
         secondary_type = None
         secondary_field = None
         secondary_identity = None
+    elif activator_type == _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE:
+        primary_type = "aws_cloudwatch_event_rule"
+        primary_field = "name"
+        secondary_type = "aws_lambda_function"
+        secondary_field = "function_name"
+        secondary_identity = _eventbridge_lambda_pointer_function(identity)
     elif activator_type == "eventbridge_rule_ecs_target":
         primary_type = "aws_cloudwatch_event_rule"
         primary_field = "name"
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-        if consumer_id == "ingest":
-            secondary_type = "aws_lambda_function"
-            secondary_field = "function_name"
-            secondary_identity = _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION
-        else:
-            secondary_type = "aws_cloudwatch_event_target"
-            secondary_field = "rule"
-            secondary_identity = identity
+        secondary_type = "aws_cloudwatch_event_target"
+        secondary_field = "rule"
+        secondary_identity = identity
     else:
         primary_type = "aws_lambda_function"
         primary_field = "function_name"
@@ -1566,23 +1582,20 @@ def _consumer_state_activation_is_absent(
     identity = str(activator["identity"])
     if activator_type == "ecs_service":
         resource_contracts = (("aws_ecs_service", "name", identity),)
+    elif activator_type == _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE:
+        resource_contracts = (
+            ("aws_cloudwatch_event_rule", "name", identity),
+            (
+                "aws_lambda_function",
+                "function_name",
+                _eventbridge_lambda_pointer_function(identity),
+            ),
+        )
     elif activator_type == "eventbridge_rule_ecs_target":
-        # ACTIVATION-SHIM(ingest): Activation 完了後に正名化して撤去する一時対応。
-        # 詳細は docs/activation/ACTIVATION_STATE.md 参照。
-        if consumer_id == "ingest":
-            resource_contracts = (
-                ("aws_cloudwatch_event_rule", "name", identity),
-                (
-                    "aws_lambda_function",
-                    "function_name",
-                    _ACTIVATION_SHIM_INGEST_DISPATCH_FUNCTION,
-                ),
-            )
-        else:
-            resource_contracts = (
-                ("aws_cloudwatch_event_rule", "name", identity),
-                ("aws_cloudwatch_event_target", "rule", identity),
-            )
+        resource_contracts = (
+            ("aws_cloudwatch_event_rule", "name", identity),
+            ("aws_cloudwatch_event_target", "rule", identity),
+        )
     else:
         resource_contracts = (
             ("aws_lambda_function", "function_name", identity),
