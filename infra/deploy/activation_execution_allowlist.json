@@ -188,9 +188,23 @@
       "patch_id": "899071c1b12bb23d24dacfaf4f1a62dea0afe9fa",
       "gate": "#328 MERGE GO（2026-08-25・案 B）",
       "source_note": "記録媒体は dev 版を正として衝突解決したため patch-id は dev と一致しない。同一性は docs/activation/ACTIVATION_STATE.md の blob が dev と exact 一致することで担保する。"
+    },
+    {
+      "sha": "fd238bbfd923791d51e8a8ffe61543afc862c86b",
+      "subject": "feat(activation): 契約 2 件を dev へ揃える（W2-b / 世代を Wave3 へ）",
+      "patch_id": "542bf0f2553528b57e96d8a0c3c07a52fadeb826",
+      "gate": "human gate 2026-08-28（ユーザー裁定: 本日中に Freeze 解除→デプロイまで完走する）",
+      "source_note": "cherry-pick ではなく origin/dev の blob を直接取り込んだ（`git checkout origin/dev -- <2 files>`）。exec base と dev の差は generation inputs 18 件のうち **ちょうど 2 件**であることを実測し、本コミット後に **0 件差**になることも実測で確認している。∴ 実行ラインから導出される generation が live の Wave3 と一致する。両 path とも 2026-08-26 の unlock（human gate）で個別に裁定済みの変更（① core_media = ncurses ドリフト追随 / ② openclaw = Wolfi 乗換えによる CVE-2026-14456 恒久閉塞の根治）。"
+    },
+    {
+      "sha": "d14319d23ad1adea2821af83acc9a9f738588242",
+      "subject": "feat(activation): state rebind #3 の台帳（W3-a / live 追随）",
+      "patch_id": "c5a2ba87c104739b89ede8ce54b3be8ed2103209",
+      "gate": "human gate 2026-08-28（ユーザー裁定: 本日中に Freeze 解除→デプロイまで完走する）",
+      "source_note": "exec line 固有の新規成果物（dev に対応コミットは無い）。#2 の 5 値は state serial 214 が保持する ARN と完全一致しており、そのまま precheck を回すと 5/5 とも rebind_precheck:10711 の『既に束縛済みです』で止まる。state を live へ追随させる #3 を新規に起こしたもの。値は live taskdef == consumer reference の 5/5 一致を 2026-08-28 に read-only で実測して確定（mcp:88→92 / connect-web:73→78 / morning-digest:55→59 / canary:25→29 / ingest:57→61）。tiktok-acquire と x-buzz-worker は state==live のため対象外、openclaw は state に resource が無いため対象外。"
     }
   ],
-  "expected_head": "5ef4e8e9bc307f051c112554ccbd73485dc57241",
+  "expected_head": "d14319d23ad1adea2821af83acc9a9f738588242",
   "excluded_commits": [
     {
       "sha": "4f7da58",
