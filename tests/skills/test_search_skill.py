@@ -465,6 +465,52 @@ def test_phase2_fb_drive_match_triggers_secondary_query(
     assert len(out.hits) == 2
 
 
+def test_phase2_splits_composite_client_name_into_tokens(
+    fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
+) -> None:
+    """「取引先/ブランド」形式の client_name は区切りで割った要素も Drive 検索の候補にする。
+
+    2026-08-27 実測の落ち方: FB 側 client_name「シオノギヘルスケア/シナール」に対し
+    Drive 側 title は「シオノギヘル**ケ**ア様_シナール」で、全文の ILIKE 部分一致だと
+    1 文字違いで橋が落ちる。区切った「シナール」が候補にあれば引ける。
+    1 文字トークンは誤爆が大きいので落とす。
+    """
+    hits = fake_pgvector_with_fb_hit.search_similar_new_schema.return_value
+    hits[0].metadata["client_name"] = "シオノギヘルスケア/シナール"
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_with_fb_hit,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_fb_drive_match=True,
+    )
+    skill.run(input=SearchInput(query="シナールの資料"), ctx=SkillContext())
+
+    names = fake_pgvector_with_fb_hit.search_drive_by_client_names.call_args.kwargs["client_names"]
+    # 元の複合名は先頭のまま維持（従来の完全一致経路を壊さない）
+    assert names[0] == "シオノギヘルスケア/シナール"
+    assert "シオノギヘルスケア" in names
+    assert "シナール" in names
+    assert len(names) == len(set(names)), f"重複している: {names}"
+
+
+def test_phase2_does_not_split_plain_client_name(
+    fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
+) -> None:
+    """区切りを含まない client_name は 1 件のまま（従来挙動と完全一致）。"""
+    skill = SearchSkill(
+        bedrock=fake_bedrock,
+        pgvector=fake_pgvector_with_fb_hit,
+        embedder=FakeEmbedder(),
+        use_new_schema=True,
+        use_fb_drive_match=True,
+    )
+    skill.run(input=SearchInput(query="日本ガイシのケイパ"), ctx=SkillContext())
+
+    names = fake_pgvector_with_fb_hit.search_drive_by_client_names.call_args.kwargs["client_names"]
+    assert names == ["日本ガイシ"]
+
+
 def test_phase2_disabled_by_default_no_secondary_query(
     fake_bedrock: MagicMock, fake_pgvector_with_fb_hit: MagicMock
 ) -> None:
@@ -583,9 +629,12 @@ def test_rerank_calls_bedrock_rerank_and_reorders(
     )
     out = skill.run(input=SearchInput(query="日本ガイシ", top_k=3), ctx=SkillContext())
 
-    # pgvector は pool_size=10 で呼ばれた
-    pg_kwargs = fake_pgvector_rerank_pool.search_similar_new_schema.call_args.kwargs
+    # pgvector は pool_size=10 で呼ばれた（本検索＝1 回目。2 回目以降は Drive リコール床の
+    # 補助検索で filter_source_types=["gdrive"] が付く別クエリなので、先頭を見る）。
+    calls = fake_pgvector_rerank_pool.search_similar_new_schema.call_args_list
+    pg_kwargs = calls[0].kwargs
     assert pg_kwargs["limit"] == 10
+    assert not pg_kwargs.get("filter_source_types")
     # Bedrock rerank が呼ばれた
     fake_bedrock.rerank.assert_called_once()
     rerank_kwargs = fake_bedrock.rerank.call_args.kwargs

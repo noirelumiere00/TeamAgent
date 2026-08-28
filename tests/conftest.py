@@ -35,3 +35,18 @@ def _isolate_hmac_rotation_runtime_state() -> Iterator[None]:
     with hmac_keyring_module._rotation_runtime_lock:
         hmac_keyring_module._rotation_runtime_states.clear()
         hmac_keyring_module._purpose_clock_high_water.clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_omiyage_job_admission() -> Iterator[None]:
+    """お土産資料の同時実行枠を各テストへ持ち越さない。
+
+    枠はプロセス共有（Skill は呼び出しごとに作り直されるのでインスタンス変数だと
+    本番で 1 度も効かない）。背景スレッドを故意に堰き止めるテストは枠を返さないので、
+    明示リセットしないと後続テストが `busy` で落ちる。
+    """
+    from teamagent.skills.omiyage_report.skill import reset_job_admission
+
+    reset_job_admission()
+    yield
+    reset_job_admission()

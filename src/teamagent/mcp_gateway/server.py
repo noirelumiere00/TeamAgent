@@ -498,6 +498,8 @@ async def _resolve_metadata(
             "user_email": resolved["user_email"],
             "user_groups": sorted(set(company_meta["user_groups"]) | set(resolved["user_groups"])),
             "identity_verified": True,
+            "verified_slack_user_id": slack_user_id,
+            "verified_slack_team_id": verified_caller.slack_team_id,
         }
         logger.info(
             "identity_resolved",
@@ -545,7 +547,13 @@ async def _resolve_metadata(
             source="resolver",
             domain=_domain_of(strict_meta["user_email"]),
         )
-        return {**strict_meta, "channel_id": channel_id, "thread_ts": thread_ts}, None
+        return {
+            **strict_meta,
+            "verified_slack_user_id": slack_user_id,
+            "verified_slack_team_id": verified_caller.slack_team_id,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+        }, None
 
     # LEGACY モード（resolver 未注入＝テスト/PoC 専用）。本番エントリポイントは resolver 必須。
     email = raw.get("user_email")

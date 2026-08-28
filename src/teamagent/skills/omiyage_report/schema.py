@@ -86,9 +86,13 @@ class OmiyageSuggestion(_StrictModel):
 
 
 class OmiyageReportSubmitOutput(_StrictModel):
-    """受付結果。needs_input のときはジョブを作らない。"""
+    """受付結果。needs_input / busy のときはジョブを作らない。
 
-    status: Literal["queued", "needs_input", "failed"]
+    ``busy`` = 同時実行の上限に達していて受け付けなかった（失敗ではなく順番待ち）。
+    ``retry_after_seconds`` を置いてから同じ入力で再 submit すればよい。
+    """
+
+    status: Literal["queued", "needs_input", "busy", "failed"]
     job_id: str = ""
     retry_after_seconds: int = Field(default=0, ge=0)
     missing: list[MissingField] = Field(default_factory=list)

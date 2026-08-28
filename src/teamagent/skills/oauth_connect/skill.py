@@ -9,7 +9,8 @@
   - Google も Slack も未連携 → 両方のリンク
   - 片方だけ未連携 → その未連携の方だけ
   - 両方連携済み → リンクを出さず「連携済み」と返す
-  連携状態は per-user トークンストア（RdsTokenStore / SlackTokenStore の has()）で判定。
+  連携状態は per-user トークンストアで判定。Slack は保存済み user ID と検証済み caller ID
+  も比較し、不一致なら本人が復旧できるよう再連携リンクを返す。
   判定に失敗した場合は fail-safe で「未連携扱い」＝リンクを出す（連携フローを絶対に塞がない。
   過剰にリンクを出すのは従来挙動と同じで安全側）。
 
@@ -17,9 +18,8 @@
   - 対象は常に「呼び出した本人」。user_email は SkillContext.metadata から取得し、
     無ければ fail-closed（他人分の URL を作らない）。MCP 境界の hybrid identity が
     slack_user_id → 本人 user_email を解決して metadata に載せている前提。
-  - URL の state は本人 email で HMAC 署名済み（make_state）。万一他人がリンクを
-    開いて別アカウントを認可しても、callback は state の email を key に保存するため
-    「あなた専用」である旨を message に明記して誤共有を促さない。
+  - Slack URL の state は MCP 境界で検証済みの Slack user/team ID に束縛する。
+    検証済み ID が無い経路では Slack URL を発行せず、Slack 内の安全な代替導線を案内する。
   - トークンストアは RLS（本人行のみ）越しに has() するだけで、生トークンは扱わない。
 """
 
@@ -95,21 +95,6 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         self._google_store = google_store
         self._slack_store = slack_store
 
-    def _is_connected(
-        self, requester: str, injected: Any, builder: Any, log: Any, kind: str
-    ) -> bool:
-        """本人が該当サービスを連携済みか（store.has）。判定不能は未連携扱い(False)。
-
-        DB/KMS 障害やテーブル未整備で例外が出ても、連携フローは絶対に塞がない
-        （False＝リンクを出す＝従来挙動と同じ安全側）。
-        """
-        try:
-            store = injected if injected is not None else builder()
-            return bool(store.has(requester))
-        except Exception as e:  # fail-safe: 判定不能は未連携扱いに倒す
-            log.warning("oauth_connect_conn_check_failed", kind=kind, error=type(e).__name__)
-            return False
-
     def _google_status(self, requester: str, log: Any) -> tuple[bool, bool]:
         """Google の連携状態を (connected, scope_upgrade_needed) で返す。
 
@@ -141,6 +126,43 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             log.warning("oauth_connect_conn_check_failed", kind="google", error=type(e).__name__)
             return False, False
 
+    def _slack_status(
+        self, requester: str, verified_uid: str | None, log: Any
+    ) -> tuple[bool, bool]:
+        """Slack の連携状態を ``(connected, rebind_needed)`` で返す。
+
+        保存済み Slack user ID と検証済み caller ID がともにあり、不一致なら誤紐付けから
+        本人が復旧できるよう未連携扱いにする。旧テストダブル等で ``slack_user_id()`` が未実装、
+        または判定中に例外が出た場合だけ従来の ``has()`` 判定へフォールバックする。
+        フォールバックも失敗した場合はリンクを出す側（False）に倒す。
+        """
+        try:
+            store = self._slack_store if self._slack_store is not None else _build_slack_store()
+            slack_user_id_fn = getattr(store, "slack_user_id", None)
+            if not callable(slack_user_id_fn):
+                return bool(store.has(requester)), False
+            try:
+                stored = slack_user_id_fn(requester)
+            except Exception as e:
+                log.warning(
+                    "oauth_connect_slack_uid_check_failed",
+                    error=type(e).__name__,
+                )
+                return bool(store.has(requester)), False
+            if stored is None:
+                return False, False
+            stored_uid = stored.strip() if isinstance(stored, str) else ""
+            if not stored_uid:
+                log.info("oauth_connect_slack_rebind_needed", reason="stored_uid_missing")
+                return False, True
+            if verified_uid and stored_uid != verified_uid:
+                log.info("oauth_connect_slack_rebind_needed", reason="uid_mismatch")
+                return False, True
+            return True, False
+        except Exception as e:  # fail-safe: 判定不能は未連携扱い（リンクを出す＝安全側）
+            log.warning("oauth_connect_conn_check_failed", kind="slack", error=type(e).__name__)
+            return False, False
+
     def run(self, _input: OAuthConnectInput, ctx: SkillContext) -> OAuthConnectOutput:
         log = ctx.bind_logger(self.name)
 
@@ -155,9 +177,21 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
 
         # 連携状態（未連携のものだけ案内する）。Google はスコープ不足も「要再連携」として検知。
         google_connected, google_scope_upgrade = self._google_status(requester, log)
+        verified_uid_raw = ctx.metadata.get("verified_slack_user_id")
+        verified_team_raw = ctx.metadata.get("verified_slack_team_id")
+        verified_uid = (
+            verified_uid_raw.strip()
+            if isinstance(verified_uid_raw, str) and verified_uid_raw.strip()
+            else None
+        )
+        verified_team = (
+            verified_team_raw.strip()
+            if isinstance(verified_team_raw, str) and verified_team_raw.strip()
+            else None
+        )
         slack_configured = bool(os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip())
-        slack_connected = slack_configured and self._is_connected(
-            requester, self._slack_store, _build_slack_store, log, "slack"
+        slack_connected, slack_rebind_needed = (
+            self._slack_status(requester, verified_uid, log) if slack_configured else (False, False)
         )
 
         # Google 認可URL（未連携時のみ生成）。
@@ -179,15 +213,31 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         # Slack 個人トークン(xoxp) の認可URL（設定済み & 未連携時のみ生成）。
         # 生成失敗は Google のみで継続（fail-open）。
         slack_url: str | None = None
+        slack_url_suppressed = False
         if slack_configured and not slack_connected:
             slack_redirect = os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip()
-            try:
-                slack_url, _ = SlackOAuthConsentFlow(redirect_uri=slack_redirect).authorization_url(
-                    requester
+            if not verified_uid or not verified_team:
+                slack_url_suppressed = True
+                log.warning(
+                    "oauth_connect_slack_url_suppressed",
+                    reason=(
+                        "no_verified_slack_user_id"
+                        if not verified_uid
+                        else "no_verified_slack_team_id"
+                    ),
                 )
-            except Exception as e:
-                log.warning("oauth_connect_slack_url_failed", error=type(e).__name__)
-                slack_url = None
+            else:
+                try:
+                    slack_url, _ = SlackOAuthConsentFlow(
+                        redirect_uri=slack_redirect
+                    ).authorization_url(
+                        requester,
+                        slack_user_id=verified_uid,
+                        slack_team_id=verified_team,
+                    )
+                except Exception as e:
+                    log.warning("oauth_connect_slack_url_failed", error=type(e).__name__)
+                    slack_url = None
 
         masked = _mask_email(requester)
         message = _compose_message(
@@ -197,6 +247,8 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             google_connected,
             slack_connected,
             google_scope_upgrade=google_scope_upgrade,
+            slack_rebind_needed=slack_rebind_needed,
+            slack_url_suppressed=slack_url_suppressed,
         )
 
         log.info(
@@ -207,6 +259,8 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             google_connected=google_connected,
             slack_connected=slack_connected,
             google_scope_upgrade=google_scope_upgrade,
+            slack_rebind_needed=slack_rebind_needed,
+            slack_url_suppressed=slack_url_suppressed,
         )
         return OAuthConnectOutput(
             url=url, slack_url=slack_url, user_email_masked=masked, message=message
@@ -221,6 +275,8 @@ def _compose_message(
     slack_connected: bool,
     *,
     google_scope_upgrade: bool = False,
+    slack_rebind_needed: bool = False,
+    slack_url_suppressed: bool = False,
 ) -> str:
     """未連携サービスの案内文を組み立てる（連携済みは省略・両方済みは完了案内）。"""
     targets: list[tuple[str, str, str]] = []
@@ -233,10 +289,19 @@ def _compose_message(
             )
         targets.append(("Google", desc, url))
     if slack_url:
-        targets.append(("Slack", "本人としての検索・チャンネル巡回", slack_url))
+        desc = "本人としての検索・チャンネル巡回"
+        if slack_rebind_needed:
+            desc = "現在の Slack アカウントと連携し直す必要があります"
+        targets.append(("Slack", desc, slack_url))
 
     # 出すものが無い＝すべて連携済み。
     if not targets:
+        if slack_url_suppressed:
+            lines = []
+            if google_connected:
+                lines.append(f"✅ *{requester}* の Google は連携済みです。\n")
+            lines.append("Slack で Aico に『連携』と話しかけてください。")
+            return "".join(lines)
         done = []
         if google_connected:
             done.append("Google")
@@ -271,5 +336,7 @@ def _compose_message(
             lines.append(f"\n*{marks[i]} {label} を連携*（{desc}）\n")
             lines.append(f"{link}\n")
 
+    if slack_url_suppressed:
+        lines.append("\nSlack で Aico に『連携』と話しかけてください。\n")
     lines.append("\n「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。")
     return "".join(lines)

@@ -21,6 +21,7 @@ import hmac
 import os
 import secrets
 import time
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
@@ -47,6 +48,15 @@ _DEFAULT_STATE_TTL_S = 1800
 _SEP = "|"
 
 
+@dataclass(frozen=True)
+class SlackConnectState:
+    """署名・TTL 検証済みの Slack OAuth state。"""
+
+    email: str
+    bind_tag: str | None
+    sig: str
+
+
 def _state_secret() -> bytes:
     secret = os.environ.get(_STATE_SECRET_ENV)
     if not secret:
@@ -61,12 +71,33 @@ def _slack_client_id_secret() -> tuple[str | None, str | None]:
     return cid, sec
 
 
+def _reject_state_delimiters(value: str, *, field: str) -> None:
+    if _SEP in value or "~" in value:
+        raise ValueError(f"{field} に state の区切り文字は使用できません")
+
+
+def expected_bind_tag(
+    team_id: str,
+    slack_user_id: str,
+    *,
+    secret: bytes | None = None,
+) -> str:
+    """検証済み Slack workspace/user の組に対する state 束縛タグを返す。"""
+    _reject_state_delimiters(team_id, field="slack_team_id")
+    _reject_state_delimiters(slack_user_id, field="slack_user_id")
+    sec = secret or _state_secret()
+    message = f"slackbind:v1:{team_id}:{slack_user_id}"
+    return hmac.new(sec, message.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
 def make_state(
     user_email: str,
     *,
     secret: bytes | None = None,
     now: int | None = None,
     nonce: str | None = None,
+    slack_user_id: str | None = None,
+    slack_team_id: str | None = None,
 ) -> str:
     """user_email ＋ 発行時刻 ＋ per-request nonce を HMAC 署名して state にする。
 
@@ -74,11 +105,49 @@ def make_state(
     """
     sec = secret or _state_secret()
     email = user_email.strip().lower()
+    _reject_state_delimiters(email, field="user_email")
+    if slack_user_id is not None:
+        _reject_state_delimiters(slack_user_id, field="slack_user_id")
+    if slack_team_id is not None:
+        _reject_state_delimiters(slack_team_id, field="slack_team_id")
     issued = int(now if now is not None else time.time())
     non = nonce or secrets.token_urlsafe(9)
+    if slack_user_id and slack_team_id:
+        tag = expected_bind_tag(slack_team_id, slack_user_id, secret=sec)
+        non = f"{non}~{tag}"
     body = _SEP.join((email, str(issued), non))
     sig = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{body}{_SEP}{sig}".encode()).decode("ascii")
+
+
+def verify_state_detailed(
+    state: str,
+    *,
+    secret: bytes | None = None,
+    now: int | None = None,
+    max_age_s: int = _DEFAULT_STATE_TTL_S,
+) -> SlackConnectState | None:
+    """state を検証し、正しく未失効なら署名済みの詳細を返す。"""
+    sec = secret or _state_secret()
+    try:
+        raw = base64.urlsafe_b64decode(state.encode("ascii")).decode("utf-8")
+        body, sig = raw.rsplit(_SEP, 1)
+    except (UnicodeEncodeError, ValueError, UnicodeDecodeError):
+        return None
+    expect = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expect):
+        return None
+    try:
+        email, issued_s, nonce_field = body.split(_SEP)
+        issued = int(issued_s)
+    except ValueError:
+        return None
+    current = int(now if now is not None else time.time())
+    # 失効（発行から max_age 超過）／発行時刻が未来すぎる（時計ズレ耐性 60s）なら拒否。
+    if current - issued > max_age_s or issued - current > 60:
+        return None
+    _nonce, sep, tag = nonce_field.partition("~")
+    return SlackConnectState(email=email, bind_tag=tag if sep else None, sig=sig)
 
 
 def verify_state(
@@ -89,22 +158,8 @@ def verify_state(
     max_age_s: int = _DEFAULT_STATE_TTL_S,
 ) -> str | None:
     """state を検証し、正しく未失効なら user_email を返す。改竄/CSRF/失効/壊れた値なら None。"""
-    sec = secret or _state_secret()
-    try:
-        raw = base64.urlsafe_b64decode(state.encode("ascii")).decode("utf-8")
-        body, sig = raw.rsplit(_SEP, 1)
-        email, issued_s, _nonce = body.split(_SEP)
-        issued = int(issued_s)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    expect = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expect):
-        return None
-    current = int(now if now is not None else time.time())
-    # 失効（発行から max_age 超過）／発行時刻が未来すぎる（時計ズレ耐性 60s）なら拒否。
-    if current - issued > max_age_s or issued - current > 60:
-        return None
-    return email
+    d = verify_state_detailed(state, secret=secret, now=now, max_age_s=max_age_s)
+    return d.email if d else None
 
 
 class SlackOAuthConsentFlow:
@@ -118,7 +173,13 @@ class SlackOAuthConsentFlow:
         self._redirect_uri = redirect_uri
         self._scopes = scopes
 
-    def authorization_url(self, user_email: str) -> tuple[str, str]:
+    def authorization_url(
+        self,
+        user_email: str,
+        *,
+        slack_user_id: str | None = None,
+        slack_team_id: str | None = None,
+    ) -> tuple[str, str]:
         """本人専用の Slack 認可URLと state を返す。"""
         cid, _ = _slack_client_id_secret()
         if not cid:
@@ -126,7 +187,11 @@ class SlackOAuthConsentFlow:
                 "連携用 Slack OAuth クライアントが未設定です"
                 "（CONNECT_SLACK_CLIENT_ID または SLACK_CLIENT_ID）"
             )
-        state = make_state(user_email)
+        state = make_state(
+            user_email,
+            slack_user_id=slack_user_id,
+            slack_team_id=slack_team_id,
+        )
         params = {
             "client_id": cid,
             "user_scope": ",".join(self._scopes),  # bot scope(scope=) は使わない
@@ -169,7 +234,10 @@ class SlackOAuthConsentFlow:
 
 __all__ = [
     "SLACK_USER_SCOPES",
+    "SlackConnectState",
     "SlackOAuthConsentFlow",
+    "expected_bind_tag",
     "make_state",
     "verify_state",
+    "verify_state_detailed",
 ]

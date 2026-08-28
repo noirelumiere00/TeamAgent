@@ -395,6 +395,7 @@ class PgVectorClient:
         exclude_templates: bool = False,
         exclude_recurring: bool = False,
         embedding_col: str = "embedding",
+        filter_source_types: list[str] | None = None,
     ) -> list[SearchHit]:
         """documents + chunks JOIN で cosine 類似度上位 limit 件を返す。
 
@@ -476,6 +477,15 @@ class PgVectorClient:
             一切足さず現行 SQL と完全一致。exclude_templates / boilerplate / duplicates と
             AND 併用可。
 
+        filter_source_types:
+            ``d.source_type`` の許可リスト（例 ``["gdrive"]``）。指定すると
+            ``d.source_type::text = ANY(%s)`` を AND する。既定 None＝句を一切足さず
+            現行 SQL と完全一致（後方互換）。値は placeholder（配列 bind）なので
+            injection から保護される。**用途**: 営業 FB（gsheets/slack）が埋め込み空間で
+            巨大な近傍クラスタを作り、Drive 実資料が dense 上位に一度も入らない事象
+            （2026-08-27 実測: gdrive の最上位が 78 位）に対して、Drive 限定の
+            補助 retrieval を 1 回だけ足して rerank プールへ合流させる。
+
         embedding_col:
             類似度算出/ORDER BY に使う chunks の embedding 列名。既定 ``"embedding"``
             （e5・従来挙動と完全一致）。Bedrock Cohere 移行時は ``"embedding_cohere"`` を
@@ -493,6 +503,17 @@ class PgVectorClient:
             )
         where_parts: list[str] = []
         params: list[Any] = [embedding]  # score 算出の 1st %s
+
+        if filter_source_types:
+            # source_type は enum 列なので ::text にしてから配列と比較する。
+            # 空/空白のみの要素は落とす（全件除外の事故を防ぐ）。全部落ちたら句を足さない。
+            clean_types = [t.strip() for t in filter_source_types if t and t.strip()]
+            if clean_types:
+                # ::text[] を明示するのは、配列の要素型推論に頼ると
+                # 「adapter が黙って落ちる → 呼び側の fail-open が握る → 床が一生効かない」
+                # という**無音の失敗**になるため（例外は出るが検索は成功するので気づけない）。
+                where_parts.append("d.source_type::text = ANY(%s::text[])")
+                params.append(clean_types)
 
         if filter_industry is not None:
             if strict_industry:
@@ -680,6 +701,7 @@ class PgVectorClient:
             limit=limit,
             hit_count=len(hits),
             top_score=hits[0].score if hits else None,
+            source_types=filter_source_types or None,
         )
         return hits
 

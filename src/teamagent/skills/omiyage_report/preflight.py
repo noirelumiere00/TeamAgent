@@ -160,3 +160,18 @@ def build_accepted_message(input: OmiyageReportSubmitInput) -> str:
         f"一般KW: {'、'.join(input.keywords)}）の作成を受け付けました。"
         "完了までstatusを照会してください。完成したPPTXは依頼元のスレッドへ添付します。"
     )
+
+
+def build_busy_message(*, limit: int, retry_after_seconds: int) -> str:
+    """同時実行の上限で受け付けられなかったときの定型文（LLM を通さない決定論文言）。
+
+    「失敗」ではなく「順番待ち」であること・ジョブを作っていないこと・同じ依頼を
+    そのまま出し直せばよいことを、営業がそのまま読める形で言い切る。
+    """
+
+    return (
+        f"いまお土産資料を{limit}件（同時実行の上限）作成中のため、"
+        "この依頼はまだ受け付けていません（ジョブは作成していません）。"
+        f"{retry_after_seconds}秒ほど置いてから、同じ内容でもう一度お申し付けください。"
+        "作成中のぶんの進み具合は omiyage_report_status で確認できます。"
+    )

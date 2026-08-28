@@ -107,6 +107,7 @@ def consume_state_once(
     now: int | None = None,
     table_name: str | None = None,
     scope: str | None = None,
+    record_prefix: str = _STATE_RECORD_PREFIX,
 ) -> bool:
     """署名・TTL検証済み state を hmac-state テーブルで一度だけ消費する。
 
@@ -129,7 +130,7 @@ def consume_state_once(
             TableName=table,
             Key={
                 "scope": {"S": state_scope},
-                "record": {"S": f"{_STATE_RECORD_PREFIX}{digest}"},
+                "record": {"S": f"{record_prefix}{digest}"},
             },
             UpdateExpression="SET consumed_at = :now, expires_at = :expires",
             ConditionExpression="attribute_not_exists(#record)",

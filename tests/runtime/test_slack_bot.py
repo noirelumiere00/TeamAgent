@@ -7,7 +7,9 @@ Bolt App 自体の起動テストはネットワーク必須なので含めな�
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
+from teamagent.adapters.slack_oauth_flow import expected_bind_tag, verify_state_detailed
 from teamagent.runtime.slack_bot import (
     SkillDispatcher,
     _asyncio_exception_handler,
@@ -113,6 +115,67 @@ def test_mail_draft_quota_counts_per_day() -> None:
         disp._mail_draft_quota_consume(email)
     assert disp._mail_draft_quota_ok(email) is False  # 11 件目は不可
     assert disp._mail_draft_quota_ok("other@vectorinc.co.jp") is True  # 別ユーザーは独立
+
+
+async def test_connect_message_binds_slack_event_user_and_team(monkeypatch: Any) -> None:
+    """bot API で解決した email と event user/team の組に Slack state を束縛する。"""
+    env = {
+        "OAUTH_REDIRECT_URI": "https://connect.example.com/oauth2/callback",
+        "OAUTH_STATE_SECRET": "test-google-state-secret-0123456789",
+        "CONNECT_GOOGLE_CLIENT_ID": "test-client.apps.googleusercontent.com",
+        "CONNECT_GOOGLE_CLIENT_SECRET": "test-google-secret",
+        "SLACK_OAUTH_REDIRECT_URI": "https://connect.example.com/slack/oauth/callback",
+        "SLACK_OAUTH_STATE_SECRET": "test-slack-state-secret-0123456789",
+        "CONNECT_SLACK_CLIENT_ID": "123456789.987654321",
+        "SLACK_TEAM_ID": "T0123456789",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    dispatcher = SkillDispatcher(router=object())  # type: ignore[arg-type]
+
+    async def resolve(_user_id: str | None) -> str:
+        return "taro@vectorinc.co.jp"
+
+    monkeypatch.setattr(dispatcher, "_resolve_user_email", resolve)
+    message = await dispatcher._connect_message("U0123456789", "request-1")
+
+    slack_url = next(
+        line for line in message.splitlines() if line.startswith("https://slack.com/oauth")
+    )
+    state_values = parse_qs(urlparse(slack_url).query).get("state")
+    assert state_values and len(state_values) == 1
+    detailed = verify_state_detailed(state_values[0])
+    assert detailed is not None
+    assert detailed.bind_tag == expected_bind_tag("T0123456789", "U0123456789")
+
+
+async def test_connect_message_suppresses_slack_url_without_verified_team(
+    monkeypatch: Any,
+) -> None:
+    """team ID が無ければ無束縛 Slack URL を出さず、Google URL と説明は残す。"""
+    env = {
+        "OAUTH_REDIRECT_URI": "https://connect.example.com/oauth2/callback",
+        "OAUTH_STATE_SECRET": "test-google-state-secret-0123456789",
+        "CONNECT_GOOGLE_CLIENT_ID": "test-client.apps.googleusercontent.com",
+        "CONNECT_GOOGLE_CLIENT_SECRET": "test-google-secret",
+        "SLACK_OAUTH_REDIRECT_URI": "https://connect.example.com/slack/oauth/callback",
+        "SLACK_OAUTH_STATE_SECRET": "test-slack-state-secret-0123456789",
+        "CONNECT_SLACK_CLIENT_ID": "123456789.987654321",
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("SLACK_TEAM_ID", raising=False)
+    dispatcher = SkillDispatcher(router=object())  # type: ignore[arg-type]
+
+    async def resolve(_user_id: str | None) -> str:
+        return "taro@vectorinc.co.jp"
+
+    monkeypatch.setattr(dispatcher, "_resolve_user_email", resolve)
+    message = await dispatcher._connect_message("U0123456789", "request-2")
+
+    assert "accounts.google.com" in message
+    assert "https://slack.com/oauth" not in message
+    assert "Slack 連携リンクを安全に発行できません" in message
 
 
 def test_build_ack_message_tiktok() -> None:

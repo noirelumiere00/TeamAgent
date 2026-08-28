@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
+from teamagent.adapters.slack_oauth_flow import expected_bind_tag, verify_state_detailed
 from teamagent.skills.base import SkillContext
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput
 from teamagent.skills.oauth_connect.skill import OAuthConnectSkill
@@ -24,6 +27,8 @@ _SLACK_ENV = {
     "CONNECT_SLACK_CLIENT_ID": "123456789.987654321",
     "SLACK_OAUTH_STATE_SECRET": "test-slack-state-secret-0123456789",
 }
+_VERIFIED_SLACK_USER_ID = "U0123456789"
+_VERIFIED_SLACK_TEAM_ID = "T0123456789"
 
 
 class _FakeStore:
@@ -36,9 +41,37 @@ class _FakeStore:
         return self._connected
 
 
-def _ctx(user_email: str | None) -> SkillContext:
+class _FakeSlackIdentityStore:
+    """保存済み uid を平文 token の復号なしで返す SlackTokenStore テストダブル。"""
+
+    def __init__(self, slack_user_id: str | None) -> None:
+        self._slack_user_id = slack_user_id
+
+    def slack_user_id(self, _user_email: str) -> str | None:
+        return self._slack_user_id
+
+    def has(self, _user_email: str) -> bool:
+        return self._slack_user_id is not None
+
+
+def _ctx(
+    user_email: str | None,
+    *,
+    slack_user_id: str | None = _VERIFIED_SLACK_USER_ID,
+    slack_team_id: str | None = _VERIFIED_SLACK_TEAM_ID,
+) -> SkillContext:
     meta = {"user_email": user_email} if user_email is not None else {}
+    if slack_user_id is not None:
+        meta["verified_slack_user_id"] = slack_user_id
+    if slack_team_id is not None:
+        meta["verified_slack_team_id"] = slack_team_id
     return SkillContext(request_id="r", user_id="U1", metadata=meta)
+
+
+def _slack_state(url: str) -> str:
+    values = parse_qs(urlparse(url).query).get("state")
+    assert values and len(values) == 1
+    return values[0]
 
 
 def test_fail_closed_when_user_email_missing() -> None:
@@ -90,6 +123,131 @@ def test_issues_google_and_slack_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "② Slack" in out.message
     assert out.url in out.message  # Google URL を含む
     assert out.slack_url in out.message  # Slack URL を含む
+
+
+def test_no_slack_link_when_verified_uid_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LEGACY metadata では Slack state を無束縛で発行せず、Google と代替導線は残す。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+
+    out = skill.run(
+        OAuthConnectInput(),
+        _ctx("taro@vectorinc.co.jp", slack_user_id=None, slack_team_id=None),
+    )
+
+    assert out.url is not None and out.url in out.message
+    assert out.slack_url is None
+    assert "Slack で Aico に『連携』と話しかけてください" in out.message
+
+
+def test_no_slack_link_when_verified_team_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """検証済み team ID が欠けても Slack URL は fail-closed、Google は維持する。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+
+    out = skill.run(
+        OAuthConnectInput(),
+        _ctx("taro@vectorinc.co.jp", slack_team_id=None),
+    )
+
+    assert out.url is not None and out.url in out.message
+    assert out.slack_url is None
+    assert "Slack で Aico に『連携』と話しかけてください" in out.message
+
+
+def test_connected_user_gets_no_link_when_uid_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """保存済み uid が検証済み caller と一致すれば従来どおり連携済み扱い。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(
+        google_store=_FakeStore(True),
+        slack_store=_FakeSlackIdentityStore(_VERIFIED_SLACK_USER_ID),
+    )
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is None
+    assert out.slack_url is None
+    assert "連携済み" in out.message
+
+
+def test_mismatched_uid_user_gets_a_bound_relink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """誤紐付け行は連携済みで隠さず、現在の検証済み caller に束縛した再連携 URL を出す。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(
+        google_store=_FakeStore(True),
+        slack_store=_FakeSlackIdentityStore("U9999999999"),
+    )
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is None
+    assert out.slack_url is not None
+    assert "連携し直す" in out.message
+    detailed = verify_state_detailed(_slack_state(out.slack_url))
+    assert detailed is not None
+    assert detailed.bind_tag == expected_bind_tag(
+        _VERIFIED_SLACK_TEAM_ID,
+        _VERIFIED_SLACK_USER_ID,
+    )
+
+
+def test_empty_stored_uid_user_gets_a_bound_relink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNIQUE/本人照合の壁の外にいる空 uid の既存行も再連携対象にする。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    skill = OAuthConnectSkill(
+        google_store=_FakeStore(True),
+        slack_store=_FakeSlackIdentityStore(""),
+    )
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.slack_url is not None
+    assert "連携し直す" in out.message
+    detailed = verify_state_detailed(_slack_state(out.slack_url))
+    assert detailed is not None
+    assert detailed.bind_tag == expected_bind_tag(
+        _VERIFIED_SLACK_TEAM_ID,
+        _VERIFIED_SLACK_USER_ID,
+    )
+
+
+def test_llm_supplied_uid_is_ignored_in_favor_of_verified_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """入力 extra に偽 uid を積まれても state は metadata の検証済み uid に束縛される。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    attacker_uid = "U9999999999"
+    forged_input = OAuthConnectInput.model_validate({"slack_user_id": attacker_uid})
+    assert "slack_user_id" not in OAuthConnectInput.model_json_schema()["properties"]
+    assert "slack_team_id" not in OAuthConnectInput.model_json_schema()["properties"]
+    skill = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=_FakeStore(False))
+
+    out = skill.run(forged_input, _ctx("taro@vectorinc.co.jp"))
+
+    assert out.slack_url is not None
+    detailed = verify_state_detailed(_slack_state(out.slack_url))
+    assert detailed is not None
+    assert detailed.bind_tag == expected_bind_tag(
+        _VERIFIED_SLACK_TEAM_ID,
+        _VERIFIED_SLACK_USER_ID,
+    )
+    assert detailed.bind_tag != expected_bind_tag(_VERIFIED_SLACK_TEAM_ID, attacker_uid)
 
 
 def test_only_slack_when_google_already_connected(

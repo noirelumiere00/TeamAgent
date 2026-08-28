@@ -18,7 +18,15 @@ logger = structlog.get_logger(__name__)
 
 _INITIAL_DELAY_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 30.0
-_TIMEOUT_SECONDS = 15 * 60.0
+# 見張り時間。実測の所要（proposal_builder / tiktok_acquire とも 40〜50 分帯）より
+# 短いと、**毎回**「まだ完了していません」の誤報を出したうえで完了通知を落とす。
+# 15 分だった頃はそれが常態だった（打ち切り→数十分後に本当の完了が来る）。
+# 上げても待つのは daemon thread 1 本（30 秒間隔の status 照会）だけで、
+# 増えるのは最大 120 回の DynamoDB get_item = 実質ゼロ課金。
+_TIMEOUT_SECONDS = 60 * 60.0
+# 見張りの時間基準。テストが仮想時計を差し込めるよう 1 箇所に寄せる（実時間で
+# 60 分待つテストは書けないが、打ち切り境界そのものは検査対象にしたい）。
+_monotonic: Callable[[], float] = time.monotonic
 _TERMINAL_STATUSES = frozenset({"done", "failed"})
 _KNOWN_STATUSES = frozenset({"queued", "running", "done", "failed", "unknown"})
 _STATUS_TOOLS = {
@@ -79,10 +87,10 @@ def _run_completion_notice(
     request_id: str,
     poll: Callable[[], tuple[str, str]],
 ) -> None:
-    deadline = time.monotonic() + _TIMEOUT_SECONDS
+    deadline = _monotonic() + _TIMEOUT_SECONDS
     try:
         _wait_until_next_poll(deadline, _INITIAL_DELAY_SECONDS)
-        while time.monotonic() < deadline:
+        while _monotonic() < deadline:
             try:
                 status, message = poll()
             except Exception as exc:
@@ -131,7 +139,7 @@ def _run_completion_notice(
 
 
 def _wait_until_next_poll(deadline: float, interval_seconds: float) -> None:
-    remaining = deadline - time.monotonic()
+    remaining = deadline - _monotonic()
     if remaining > 0:
         threading.Event().wait(min(interval_seconds, remaining))
 
