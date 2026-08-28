@@ -28,10 +28,16 @@
 #
 # 【属性値の出所】各世代の content_type / object_lock_retain_until_date は **実体の値**を
 # 世代ごとに明示する。共通定数でまとめない — 実体は世代ごとに publish イベントが異なり、
-# retain-until も揃っているとは限らない（実測: 2026-08-17 世代は 00:00:00Z、
-# approval-publisher の 08-13 世代は 23:59:59Z）。共通定数への一般化が PR2-A0 初版で
-# 実体との不一致を生み、adopt が Object Lock を短縮する import になりかけた。
-# 各値は adopt 前に supply_chain_adopt_integrity.py の crosscheck が live 実体と照合する。
+# retain-until も content_type も揃っているとは限らない（live head-object 実測 2026-08-28:
+# Wave3 の 3 世代は content_type=text/yaml かつ retain 00:00:00Z、approval-publisher の
+# 08-13 世代だけ content_type=binary/octet-stream かつ retain 23:59:59Z）。共通定数への
+# 一般化が PR2-A0 初版で実体との不一致を生み、adopt が Object Lock を短縮する import に
+# なりかけた。同じ病気が content_type でも起きていた: 初版は 4 世代とも
+# binary/octet-stream を宣言していたが、実体は 3 件が text/yaml で、
+# supply_chain_adopt_validate.py の IMPORT_DIFF_IGNORED_ATTRIBUTES が空である以上、
+# その宣言のままでは import が必ず「実体を変える差分」として拒否された。
+# 各値は adopt 前に supply_chain_adopt_integrity.py の crosscheck が live 実体と照合し、
+# repo 内では tests/scripts/test_supply_chain_adopt.py が実測値との一致を固定する。
 #
 # 【この台帳は短命 manifest】activation 対象の dev HEAD（Generation Baseline）に束縛される。
 # buildspec 入力（infra/deploy/buildspec_generation_inputs.json が列挙）が変わると
@@ -41,25 +47,31 @@
 
 locals {
   mcp_source_publisher_buildspec_generations = {
-    # 2026-08-21 publish 世代（Generation Baseline 202398f の評価値と4点一致）
-    "00f6dc3a2b640498707511aafdf46309c7d72d8f8b351a69123a6f1f65bb8291" = {
-      content_type                  = "binary/octet-stream"
+    # 2026-08-26 03:50 UTC publish 世代（Wave3）。content_type は live 実測の text/yaml。
+    # 値の出所は repo tree からのオフライン導出（infra/deploy/derive_buildspec_generations.py）
+    # で、live からの写経ではない。導出値 == live == 本台帳の 3 点一致を CI が固定する。
+    "db8a6c2b97c36e68f201873660fc5333e27fffb5b34dddf88f498c5db5f6538b" = {
+      content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
 
   image_attestor_buildspec_generations = {
-    # 2026-08-21 publish 世代（Generation Baseline 202398f の評価値と4点一致）
-    "dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478" = {
-      content_type                  = "binary/octet-stream"
+    # 2026-08-26 03:50 UTC publish 世代（Wave3）。content_type は live 実測の text/yaml。
+    # 値の出所は repo tree からのオフライン導出（infra/deploy/derive_buildspec_generations.py）
+    # で、live からの写経ではない。導出値 == live == 本台帳の 3 点一致を CI が固定する。
+    "1e1906ae37692b12e8ac7ca833d43c9c826263728e48cc5fedf625b2f99ee8b6" = {
+      content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
 
   image_promoter_buildspec_generations = {
-    # 2026-08-21 publish 世代（Generation Baseline 202398f の評価値と4点一致）
-    "a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8" = {
-      content_type                  = "binary/octet-stream"
+    # 2026-08-26 03:50 UTC publish 世代（Wave3）。content_type は live 実測の text/yaml。
+    # 値の出所は repo tree からのオフライン導出（infra/deploy/derive_buildspec_generations.py）
+    # で、live からの写経ではない。導出値 == live == 本台帳の 3 点一致を CI が固定する。
+    "554ede59c17e336301ce4aed90cbc6c2171c26faf02df46173fd54c908b621b6" = {
+      content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
   }
@@ -257,18 +269,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["00f6dc3a2b640498707511aafdf46309c7d72d8f8b351a69123a6f1f65bb8291"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/00f6dc3a2b640498707511aafdf46309c7d72d8f8b351a69123a6f1f65bb8291.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["db8a6c2b97c36e68f201873660fc5333e27fffb5b34dddf88f498c5db5f6538b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/db8a6c2b97c36e68f201873660fc5333e27fffb5b34dddf88f498c5db5f6538b.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["1e1906ae37692b12e8ac7ca833d43c9c826263728e48cc5fedf625b2f99ee8b6"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/1e1906ae37692b12e8ac7ca833d43c9c826263728e48cc5fedf625b2f99ee8b6.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["554ede59c17e336301ce4aed90cbc6c2171c26faf02df46173fd54c908b621b6"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/554ede59c17e336301ce4aed90cbc6c2171c26faf02df46173fd54c908b621b6.yml"
 }
 
 import {

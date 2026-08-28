@@ -740,13 +740,50 @@ def _plan_doc(changes: list[dict[str, Any]], var: Any = True) -> dict[str, Any]:
 def test_plan_check_rejects_destroy_of_each_freeze_resource_kind(
     tmp_path: Path, address: str
 ) -> None:
-    """freeze の 3 種のリソースいずれの delete も FATAL（巻き戻しの検出）。"""
+    """freeze の 3 種のリソースいずれの delete も FATAL（巻き戻しの検出）。
+
+    ⚠️ 窓（裁定②=E案）の導入で **拒否の理由が 2 系統に分かれた**。意図は不変で
+    「delete は必ず FATAL」だが、どちらの門で止まるかは対象で変わる:
+
+      * ポリシー本体 → ``FREEZE ROLLBACK``。mode に関係なく**無条件**で拒否する。
+        窓をどう宣言しようと Freeze の実体は消せない、が死守ライン。
+      * attachment → 宣言（mode / attachments 変数）と食い違えば
+        ``FREEZE WINDOW BINDING``。宣言が「窓は閉じる」と明示している時だけ
+        detach が通る＝それが E 案の窓の開閉そのもの。
+
+    したがってここは「FreezeError で止まること」と「止めた門が対象ごとに正しいこと」
+    の両方を固定する。message だけを緩めて素通しにしない。
+    """
     from activation_freeze_check import assert_plan_preserves_freeze
 
     plan = _write(
         tmp_path,
         "p.json",
         _plan_doc([{"address": address, "change": {"actions": ["delete"]}}]),
+    )
+    # attachment 系は「窓の宣言」で守る。ポリシー本体（aws_iam_policy）だけが無条件 FATAL。
+    # ※ role 側のアドレスも `.activation_freeze["…"]` を含むので、資源型で判定すること。
+    is_policy_itself = address.startswith("aws_iam_policy.")
+    expected = "FREEZE ROLLBACK" if is_policy_itself else "FREEZE WINDOW BINDING"
+    with pytest.raises(FreezeError, match=expected):
+        assert_plan_preserves_freeze(FREEZE, plan)
+
+
+def test_freeze_policy_delete_is_fatal_in_every_declared_mode(tmp_path: Path) -> None:
+    """🔴 死守ライン: **窓をどう宣言しても** Freeze ポリシー本体は消せない。
+
+    窓（declaration_only）の導入で attachment の detach は宣言次第で通るようになったが、
+    その緩和がポリシー本体へ波及していないことを固定する。ここが破れると
+    「窓を開ける宣言を書けば Freeze ごと消せる」になり、Freeze が意味を失う。
+    """
+    from activation_freeze_check import assert_plan_preserves_freeze
+
+    plan = _write(
+        tmp_path,
+        "p.json",
+        _plan_doc(
+            [{"address": "aws_iam_policy.activation_freeze[0]", "change": {"actions": ["delete"]}}]
+        ),
     )
     with pytest.raises(FreezeError, match="FREEZE ROLLBACK"):
         assert_plan_preserves_freeze(FREEZE, plan)

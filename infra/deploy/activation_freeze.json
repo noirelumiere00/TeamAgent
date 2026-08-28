@@ -5,9 +5,9 @@
     "state": "active",
     "state_semantics": {
       "recorded_at": "2026-08-27",
-      "statement": "state=\"active\" が現に束縛しているのは **repo 側の 2 経路だけ**である: ①CI の assert-frozen-surface（unlock 宣言なしに frozen surface を触る PR を落とす）②guard の desired-state binding（activation_freeze_enabled=true の注入と、plan が freeze リソースを destroy しないことの検査）。AWS 側の mechanical deny は 2026-08-26 に detach 済みで **効いていない**（v2.enforcement_status）。",
-      "why_not_released": "state を \"released\" へ倒すと ①ENFORCING_STATES から外れて frozen surface の CI ゲートが全面無効化される ②desired_freeze_var が \"false\" を返し、次の apply で freeze 11 リソースが destroy 候補になる ③committed 宣言を読む既存テスト 2 件（test_freeze_v2_is_active_with_a_recorded_boundary / test_desired_var_is_true_while_freeze_is_active）が赤になる。裁定③（unlock を相乗りさせて後で畳む）は repo 側ゲートが生きていることを前提にしているため、state は active のまま据え置き、live との差はここに明記する方式を採る（2026-08-27）。",
-      "landmine_next_apply": "state=active のままなので guard は次の apply でも -var=activation_freeze_enabled=true を注入する。terraform 経路で apply すると **detach 済みの 10 attachment が再作成され、デプロイ principal が再び deny される**。Freeze を解除したまま apply する便では、この再 attach を plan で必ず確認すること（外科的 CLI リリースでは発生しない）。"
+      "statement": "state=\"active\" が現に束縛しているのは **repo 側の 2 経路だけ**である: ①CI の assert-frozen-surface（unlock 宣言なしに frozen surface を触る PR を落とす）②guard の desired-state binding（activation_freeze_enabled=true の注入と、plan が freeze リソースを destroy しないことの検査）。AWS 側の mechanical deny は 2026-08-26 に detach 済みで **効いていない**（v2.enforcement_status）。 2026-08-28: AWS 側の状態は aws_enforcement.mode（declaration_only / attached）で宣言する。state と mode は直交する 2 軸で、mode=declaration_only の間も上記 ①② の repo 側ゲートは効いたままである。",
+      "why_not_released": "state を \"released\" へ倒すと ①ENFORCING_STATES から外れて frozen surface の CI ゲートが全面無効化される ②desired_freeze_var が \"false\" を返し、次の apply で freeze 11 リソースが destroy 候補になる ③committed 宣言を読む既存テスト 2 件（test_freeze_v2_is_active_with_a_recorded_boundary / test_desired_var_is_true_while_freeze_is_active）が赤になる。2026-08-28: この 3 点は「AWS attachment を 0 にしたい」という要求とは無関係だったと判明したため、state は active のまま据え置き、AWS 側は aws_enforcement.mode=declaration_only で表現する（第 3 の状態）。released へ倒す必要は無くなった。",
+      "landmine_next_apply": "【2026-08-27 時点の記述・2026-08-28 に解消】state=active のままなので guard は次の apply でも -var=activation_freeze_enabled=true を注入する。terraform 経路で apply すると detach 済みの 10 attachment が再作成され、デプロイ principal が再び deny される、という地雷があった。現在は attachment が別変数（activation_freeze_attachments_enabled）に分離され、guard は aws_enforcement.mode から導いた値（declaration_only なら false）を注入するため、この経路での意図せぬ再 attach は起きない。さらに assert-plan-preserves-freeze が mode=declaration_only での attachment create を FATAL にする（二重化）。"
     },
     "state_values": [
       "pending_v2",
@@ -207,7 +207,8 @@
             "AIIAdev"
           ],
           "note": "復元は上記 9 role + 1 user へ同一 policy を再 attach すれば足りる（policy 本体は不変）。terraform 経路なら var.activation_freeze_enabled=true の apply で 10 attachment が再作成される＝**意図せず再 freeze される経路でもある**（state_semantics.landmine_next_apply）。"
-        }
+        },
+        "declared_as": "aws_enforcement.mode = declaration_only（2026-08-28 に第 3 の状態として明文化）。本ブロックは **実測**、aws_enforcement は **desired**。両者の一致は activation_freeze_check.py assert-attachment-window が live JSON に対して検査する。"
       },
       "violations": [
         {
@@ -292,6 +293,59 @@
       ]
     }
   },
+  "aws_enforcement": {
+    "mode": "declaration_only",
+    "modes": [
+      "declaration_only",
+      "attached"
+    ],
+    "axis_statement": "generation_publisher_freeze.state（pending_v2/active/released）は **repo 側ゲート** の強度だけを決め、aws_enforcement.mode は **AWS 側 attachment** の存廃だけを決める。2 軸は直交する。state=active + mode=declaration_only が、2026-08-26 の detach 以降ずっと現実だった状態であり、単一 bool しか無かったため宣言できずにいた（2026-08-28 に第 3 の状態として明文化）。",
+    "semantics": {
+      "declaration_only": "policy object は残す（削除すると再 attach が 1 手で済まなくなる）が、principal への attachment は 0。CI の assert-frozen-surface と plan の freeze destroy 検査は state=active のまま効き続ける。terraform の desired も 0 なので、guard 経由の apply が意図せず 10 attachment を再作成することはない。",
+      "attached": "expected_attachments の principal へ policy を attach した状態。AWS 側 mechanical deny が実際に効く。この間は AIIAdev 自身も deny されるため緊急手動 rollback ができない。必ず window ブロック（opened_at / purpose / gate）を伴い、用が済んだら閉じて window_history へ移す。"
+    },
+    "recorded_at": "2026-08-28",
+    "reason": "裁定②E（adopt の窓だけ attach）を宣言可能にするため。2026-08-26 の detach 以降、宣言 state=active / AWS 0 principal という乖離が続いており、単一の activation_freeze_enabled では『policy を残しつつ attachment を 0 にする』を表現できなかった。true 固定なら次の full plan にattachment の create が出て supply_chain_adopt_validate.py が plan ごと拒否し、false へ倒せばpolicy まで destroy 候補になる。第 3 の状態はこの二者択一を解く。",
+    "gate": "human gate 2026-08-27 裁定②（E 案 = adopt の窓だけ attach）/ 裁定③（unlock は相乗りのまま維持）。mode の切替そのものが diff に現れることで、窓の開閉が human gate の対象になる。",
+    "expected_attachments": {
+      "policy_arn": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze",
+      "roles": [
+        "teamagent-dev-approval-caller",
+        "teamagent-dev-codebuild-launcher",
+        "teamagent-dev-image-deployment-gate",
+        "teamagent-dev-media-cutover-attestor",
+        "teamagent-dev-openclaw-build-publisher",
+        "teamagent-dev-release-control-updater",
+        "teamagent-dev-release-launcher",
+        "teamagent-dev-terraform-runtime-automation",
+        "teamagent-dev-tiktok-build-launcher"
+      ],
+      "users": [
+        "AIIAdev"
+      ],
+      "derived_from": "terraform state serial 214（lineage 745cf6df…）の aws_iam_role_policy_attachment.activation_freeze の index_key 9 件 + aws_iam_user_policy_attachment.activation_freeze_aiia_dev 1 件。tf の locals（これから評価される式）ではなく state に実在する index_key から導出している。検証は `activation_freeze_check.py assert-attachment-expectation --state <tfstate.json>`。",
+      "measured_at": "2026-08-28",
+      "live_attachment_count_measured": 0,
+      "live_measured_at": "2026-08-28（aws iam get-policy AttachmentCount=0 / list-entities-for-policy 全空）",
+      "policy_object_measured": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze は存在し DefaultVersionId=v1・UpdateDate=2026-08-24T08:19:15Z（削除されていない）"
+    },
+    "window": null,
+    "window_history": [],
+    "open_close_procedure": {
+      "open": [
+        "1. aws_enforcement.mode を attached へ、window に opened_at / purpose / gate を書いて commit（human gate ④⑤）",
+        "2. `activation_freeze_check.py assert-attachment-expectation --state <fresh tfstate.json>` で attach 集合が state と一致することを確認",
+        "3. `activation_freeze_check.py attachment-commands --action open` が出力する attach コマンドを実行（9 role + 1 user）",
+        "4. `aws iam list-entities-for-policy` を採取し `assert-attachment-window --live <json>` で 10/10 ちょうどを機械証明（STOP 条件 S6）"
+      ],
+      "close": [
+        "1. `attachment-commands --action close` の detach コマンドを実行",
+        "2. `list-entities-for-policy` を採取し、mode を declaration_only へ戻した宣言に対して `assert-attachment-window` が 0 principal で緑になることを確認",
+        "3. window を window_history へ移して commit（closed_at を記録）"
+      ],
+      "ordering_landmine": "窓が開いている間は ecs:RegisterTaskDefinition / codebuild:* / buildspec prefix への s3 書き込みが10 principal すべてで deny される。Bootstrap Pin（RegisterTaskDefinition を伴う apply）は必ず窓を開ける **前** に済ませること。逆に W4 の新世代 publish は窓を閉じた **後** でしか進まない。"
+    }
+  },
   "frozen_change_surface": {
     "generation_inputs_source": "infra/deploy/buildspec_generation_inputs.json#inputs",
     "additional_publisher_paths": [
@@ -354,7 +408,7 @@
         }
       }
     ],
-    "enforcement": "repo 側 lock では AWS 直デプロイを止められないことが実証された。persistent explicit-deny は infra/terraform/activation_freeze_policy.tf（var.activation_freeze_enabled）。root は identity policy をバイパスするため SCP が別途必要（本 policy の射程外）。",
+    "enforcement": "repo 側 lock では AWS 直デプロイを止められないことが実証された。persistent explicit-deny は infra/terraform/activation_freeze_policy.tf（var.activation_freeze_enabled）。root は identity policy をバイパスするため SCP が別途必要（本 policy の射程外）。 2026-08-28: policy の存廃は var.activation_freeze_enabled、principal への attachment は var.activation_freeze_attachments_enabled に分離した（窓が開いているときだけ後者が true）。",
     "deployments_after_freeze_lift": {
       "recorded_at": "2026-08-27",
       "status": "違反ではない（2026-08-26 裁定②で freeze を解除したまま走ることが承認されている）。ただし **state と live の乖離は再発している** ため、事実として記録する。",

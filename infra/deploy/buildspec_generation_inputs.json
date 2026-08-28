@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "00f6dc3a2b640498707511aafdf46309c7d72d8f8b351a69123a6f1f65bb8291",
-    "teamagent-dev-image-attestor": "dba4ce93929bca00cbbc690ecb404182e82e75ce225c0f85a15ac2beb2b81478",
-    "teamagent-dev-image-promoter": "a624798aa0d6721b19002a05d08baee584ee315cfb797aa8da0d1e2b3fbcffc8",
+    "teamagent-dev-mcp-source-publisher": "db8a6c2b97c36e68f201873660fc5333e27fffb5b34dddf88f498c5db5f6538b",
+    "teamagent-dev-image-attestor": "1e1906ae37692b12e8ac7ca833d43c9c826263728e48cc5fedf625b2f99ee8b6",
+    "teamagent-dev-image-promoter": "554ede59c17e336301ce4aed90cbc6c2171c26faf02df46173fd54c908b621b6",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }
