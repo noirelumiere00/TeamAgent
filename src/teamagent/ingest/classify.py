@@ -21,6 +21,7 @@ from typing import Any
 
 import structlog
 
+from teamagent.ingest.industry_taxonomy import INDUSTRY_PROMPT_LIST, normalize_industry
 from teamagent.util.json_salvage import salvage_json_object
 
 logger = structlog.get_logger(__name__)
@@ -194,7 +195,7 @@ def _kind_rules_enabled() -> bool:
     return os.environ.get("USE_DOC_KIND_RULES", "false").strip().lower() in ("1", "true", "yes")
 
 
-_CLASSIFY_SYSTEM_PROMPT = """\
+_CLASSIFY_SYSTEM_PROMPT_TEMPLATE = """\
 あなたは営業資料を分類するアシスタントです。
 
 【最重要・安全規則】
@@ -204,7 +205,8 @@ _CLASSIFY_SYSTEM_PROMPT = """\
 
 【分類項目】
 - project: 案件名または取引先名（会社名）。読み取れなければ空文字 ""。
-- industry: 業界（例: 食品 / 化粧品 / 小売 / IT / 金融 / メーカー 等）。不明なら ""。
+- industry: 業界。次のリストから **1 つだけ** 選ぶ: {industry_list}
+  当てはまるものが無ければ「その他」。読み取れなければ ""。リスト外の語を作らないこと。
 - doc_type: 資料種別。次のいずれか 1 つ: 提案書 / 議事録 / 報告書 / 価格表 / 契約 / その他。
 - phase: 商談フェーズ。次のいずれか 1 つ: ヒアリング / 提案 / 見積 / 受注 / 失注 / 不明。
 - solution: 施策タイプ（例: SNS運用 / 動画広告 / インフルエンサー / SEO / Web制作 /
@@ -231,6 +233,12 @@ _CLASSIFY_SYSTEM_PROMPT = """\
  "solution": "SNS運用", "budget": "100〜500万", "target": "若年女性",
  "is_template": false, "is_recurring": false}
 """
+
+# 業種リストは industry_taxonomy（唯一の真実源）から埋め込む。
+# `.format()` を使わないのは、本文に JSON 例（波括弧）が含まれており format が壊れるため。
+_CLASSIFY_SYSTEM_PROMPT = _CLASSIFY_SYSTEM_PROMPT_TEMPLATE.replace(
+    "{industry_list}", INDUSTRY_PROMPT_LIST
+)
 
 
 @dataclass(frozen=True)
@@ -328,6 +336,20 @@ def _norm_choice(value: Any, allowed: tuple[str, ...], *, default: str = "") -> 
         if a in s or s in a:
             return a
     return default
+
+
+def _norm_industry(value: Any) -> str:
+    """業種を正準値へ寄せる。未知値は生値を残す（`_norm_open` と同じ方針）。
+
+    正準化できないからといって捨てると、リストに無い新業種の情報が失われる。
+    逆に「その他」へ潰すと、soft フィルタ（industry = 値 OR NULL）で
+    本来通るはずの文書が「その他 ≠ 食品」として除外される側に倒れる。
+    ∴ 正準化できたら正準値・できなければ生値、が安全側。
+    """
+    cleaned = _clean(value, max_len=40)
+    if not cleaned:
+        return ""
+    return normalize_industry(cleaned) or cleaned
 
 
 def _norm_open(value: Any, allowed: tuple[str, ...], *, max_len: int = 40) -> str:
@@ -481,7 +503,7 @@ class DocClassifier:
             return self._rules_only(rule_template, rule_recurring)
         cls = DocClassification(
             project=_clean(obj.get("project")),
-            industry=_clean(obj.get("industry")),
+            industry=_norm_industry(obj.get("industry")),
             doc_type=_norm_choice(obj.get("doc_type"), _DOC_TYPES),
             phase=_norm_choice(obj.get("phase"), _PHASES),
             solution=_norm_open(obj.get("solution"), _SOLUTIONS),

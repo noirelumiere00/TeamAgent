@@ -397,6 +397,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 hits=hits,
                 weak_threshold=self._weak_result_threshold,
                 query_client=(probe or {}).get("query_client"),
+                asked_industry=input.filter_industry,
             )
             if guard_header:
                 log.info(
