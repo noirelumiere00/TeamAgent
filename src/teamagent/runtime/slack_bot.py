@@ -1012,19 +1012,35 @@ class SkillDispatcher:
             logger.warning("connect_url_failed", request_id=request_id, user_id=user_id)
             return "🔗 連携リンクの生成に失敗しました（管理者へ: OAuth 系 env をご確認ください）。"
 
-        # Slack 個人トークン(xoxp) の認可URL。未設定時は Slack リンクを出さない。
+        # Slack 個人トークン(xoxp) の認可URL。bot API で解決済みの event user と
+        # workspace に state を束縛できる場合だけ発行する。
         slack_redirect = os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip()
+        slack_team_id = os.environ.get("SLACK_TEAM_ID", "").strip()
+        verified_user_id = user_id.strip() if isinstance(user_id, str) else ""
         url_slack: str | None = None
-        if slack_redirect:
+        if slack_redirect and verified_user_id and slack_team_id:
             try:
                 from teamagent.adapters.slack_oauth_flow import SlackOAuthConsentFlow
 
                 url_slack, _ = SlackOAuthConsentFlow(redirect_uri=slack_redirect).authorization_url(
-                    email
+                    email,
+                    slack_user_id=verified_user_id,
+                    slack_team_id=slack_team_id,
                 )
             except Exception:
                 logger.warning("connect_slack_url_failed", request_id=request_id, user_id=user_id)
                 url_slack = None
+        elif slack_redirect:
+            logger.warning(
+                "connect_slack_url_suppressed",
+                request_id=request_id,
+                user_id=user_id,
+                reason=(
+                    "no_verified_slack_user_id"
+                    if not verified_user_id
+                    else "no_verified_slack_team_id"
+                ),
+            )
 
         logger.info(
             "connect_link_issued",
@@ -1041,10 +1057,15 @@ class SkillDispatcher:
         if url_slack:
             lines.append("\n*② Slack を連携*（本人としての検索・チャンネル巡回）\n")
             lines.append(f"{url_slack}\n")
-        else:
+        elif not slack_redirect:
             lines.append(
                 "\n※ Slack 連携は現在未設定です"
                 "（管理者へ: SLACK_OAUTH_REDIRECT_URI を設定してください）。\n"
+            )
+        else:
+            lines.append(
+                "\n※ Slack 連携リンクを安全に発行できません"
+                "（管理者へ: Slack user ID と SLACK_TEAM_ID を確認してください）。\n"
             )
         lines.append("\n「✅ 連携が完了しました」が出れば成功です。あとは AI に話しかけるだけ。")
         return "".join(lines)

@@ -17,8 +17,10 @@ import pytest
 from pydantic import BaseModel
 
 from teamagent.identity import IdentityResolver, ResolvedIdentity
+from teamagent.mcp_gateway.caller_claim import VerifiedCallerClaim
 from teamagent.mcp_gateway.server import (
     USER_CONTEXT_KEY,
+    _resolve_metadata,
     build_server,
     company_shared_groups_from_env,
     dispatch_tool,
@@ -26,6 +28,7 @@ from teamagent.mcp_gateway.server import (
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
 from tests.caller_claim_testkit import (
+    TEST_SLACK_TEAM_ID,
     TEST_SLACK_USER_ID,
     make_verifier,
     sign_arguments,
@@ -42,6 +45,10 @@ class _Out(BaseModel):
     groups: list[str]
     role: str | None
     verified: bool
+    verified_slack_user_id: str | None
+    verified_slack_team_id: str | None
+    has_verified_slack_user_id: bool
+    has_verified_slack_team_id: bool
 
 
 class _EchoSkill(BaseSkill[_In, _Out]):
@@ -59,6 +66,10 @@ class _EchoSkill(BaseSkill[_In, _Out]):
             groups=list(ctx.metadata.get("user_groups") or []),
             role=ctx.metadata.get("user_role"),
             verified=bool(ctx.metadata.get("identity_verified")),
+            verified_slack_user_id=ctx.metadata.get("verified_slack_user_id"),
+            verified_slack_team_id=ctx.metadata.get("verified_slack_team_id"),
+            has_verified_slack_user_id="verified_slack_user_id" in ctx.metadata,
+            has_verified_slack_team_id="verified_slack_team_id" in ctx.metadata,
         )
 
 
@@ -122,6 +133,8 @@ async def test_strict_resolves_and_drops_all_oc_fields() -> None:
     assert out["groups"] == ["vectorinc.co.jp"]
     assert out["role"] == "member"  # 🔴 admin 破棄
     assert out["verified"] is True
+    assert out["verified_slack_user_id"] == TEST_SLACK_USER_ID
+    assert out["verified_slack_team_id"] == TEST_SLACK_TEAM_ID
 
 
 async def test_strict_downgrade_closed_without_slack_user_id() -> None:
@@ -198,6 +211,59 @@ async def test_legacy_forces_member_role() -> None:
     )
     assert out["role"] == "member"
     assert out["verified"] is False  # legacy は未検証＝OAuth 経路は別途 fail-closed
+    assert out["has_verified_slack_user_id"] is False
+    assert out["has_verified_slack_team_id"] is False
+
+
+async def test_no_access_metadata_never_carries_verified_slack_identity() -> None:
+    """STRICT の no-access 成功経路に未検証／空の identity キーを追加しない。"""
+    metadata, fail = await _resolve_metadata(
+        {},
+        verified_caller=None,
+        require_rls=False,
+        identity_resolver=_OK,
+        allowed_domains=None,
+        company_shared_groups=None,
+        tool="echo",
+    )
+
+    assert fail is None
+    assert "verified_slack_user_id" not in metadata
+    assert "verified_slack_team_id" not in metadata
+
+
+async def test_resolver_miss_no_access_never_carries_verified_slack_identity() -> None:
+    """caller claim が有効でも resolver 失敗時の no-access に identity キーを残さない。"""
+
+    async def resolve_none(_slack_user_id: str) -> None:
+        return None
+
+    caller = VerifiedCallerClaim(
+        slack_user_id=TEST_SLACK_USER_ID,
+        slack_team_id=TEST_SLACK_TEAM_ID,
+        channel_id="C0123456789",
+        thread_ts=None,
+        message_id="1784424000.000001",
+        session_sha256="0" * 64,
+        run_id="11111111-1111-4111-8111-111111111111",
+        tool_call_id="toolu_0123456789abcdef",
+        nonce="test-nonce",
+        issued_at=1,
+        expires_at=2,
+    )
+    metadata, fail = await _resolve_metadata(
+        {},
+        verified_caller=caller,
+        require_rls=False,
+        identity_resolver=resolve_none,
+        allowed_domains=None,
+        company_shared_groups=None,
+        tool="echo",
+    )
+
+    assert fail is None
+    assert "verified_slack_user_id" not in metadata
+    assert "verified_slack_team_id" not in metadata
 
 
 async def test_strict_fuzz_never_admin_and_requires_resolution() -> None:
@@ -252,6 +318,8 @@ async def test_company_shared_ignores_oc_and_uses_company_groups() -> None:
     assert out["groups"] == ["vectorinc.co.jp"]
     assert out["role"] == "member"  # admin 不可
     assert out["verified"] is True
+    assert out["verified_slack_user_id"] == TEST_SLACK_USER_ID
+    assert out["verified_slack_team_id"] == TEST_SLACK_TEAM_ID
 
 
 async def test_company_shared_rejects_without_signed_slack_user() -> None:
