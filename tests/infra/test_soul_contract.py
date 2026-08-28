@@ -11,11 +11,15 @@ SOUL.md はテキストなのでユニットテストで挙動は測れない。
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
 
 SOUL = Path(__file__).resolve().parents[2] / "infra" / "openclaw" / "SOUL.md"
+OPENCLAW_CONFIG = (
+    Path(__file__).resolve().parents[2] / "infra" / "openclaw" / "openclaw.config.json5"
+)
 
 
 @pytest.fixture(scope="module")
@@ -28,28 +32,90 @@ def test_soul_exists(soul: str) -> None:
 
 
 # ── ⓪ 長さ上限（OpenClaw embedded bootstrap の切断防止）─────────────────────
+#
+# 🔴 単位に注意: OpenClaw の切断は JS の `String.length` ＝ **UTF-16 コードユニット**で
+# 測られる（openclaw 2026.7.1 の dist を実測: trimBootstrapContent の
+# `trimmed.length <= maxChars`）。Python の `len()` は**コードポイント**なので、
+# サロゲートペア（絵文字など）1 個につき 1 ユニットぶん過小評価する。
+# 実際 2026-08-27 時点の SOUL.md は codepoint 19,451 に対し UTF-16 は 19,481 で 30 のズレがあり、
+# コードポイントで測るガードは「緑なのにランタイムで切れる」を許してしまう。
+# ここでは必ず UTF-16 ユニットで測る。
 
-MAX_SOUL_CHARS = 19_500
+
+def utf16_units(text: str) -> int:
+    """OpenClaw の切断と同じ単位（UTF-16 コードユニット）で長さを測る。"""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _configured_bootstrap_max_chars() -> int:
+    """openclaw.config.json5 に書いた per-file 上限を読む（真実源は config 側）。
+
+    JSON5 パーサを増やさずに済むよう、キーの行だけを正規表現で拾う。
+    """
+    text = OPENCLAW_CONFIG.read_text(encoding="utf-8")
+    # 行コメント（// …）は除いてから拾う＝コメント内の例示に釣られない
+    stripped = "\n".join(line.split("//")[0] for line in text.splitlines())
+    match = re.search(r"\bbootstrapMaxChars\s*:\s*(\d+)", stripped)
+    assert match, (
+        "openclaw.config.json5 に bootstrapMaxChars が無い。"
+        "既定 20,000 に戻ると SOUL.md が切断され全ツール障害になる（2026-08-25 の実障害）"
+    )
+    return int(match.group(1))
+
+
+# ランタイム上限に対して確保する安全余白（UTF-16 ユニット）。
+# 切断は静かに起きて全ツール障害になるため、ぎりぎりまで使わない。
+SOUL_SAFETY_MARGIN_UNITS = 4_000
 
 
 def test_soul_fits_in_openclaw_embedded_bootstrap(soul: str) -> None:
-    """SOUL.md は 19,500 字以下でなければならない。
+    """SOUL.md は config の bootstrapMaxChars から安全余白を引いた長さ以下であること。
 
-    OpenClaw は embedded bootstrap でファイルを **20,000 字で切断する**
-    （openclaw-entrypoint 実測）。2026-08-26、23,070 字の SOUL.md が実行時に切断され、
-    モデルが最後に見るものがツール呼び出しの JSON 実例＋言いかけの文になった結果、
-    全ツールの引数を ``{"arguments": {...}}`` で二重に包んで生成し、クライアント側
-    検証の required 違反で**本番の全ツールが停止**した。末尾セクション（メール要約
-    フォーマット/訪問前ブリーフィング/時間のかかる処理/次の一手/トーン）も切断で
-    丸ごと消えていた。
+    2026-08-26、23,070 字の SOUL.md が既定 20,000 で切断され、モデルが最後に見るものが
+    ツール呼び出しの JSON 実例＋言いかけの文になった結果、全ツールの引数を
+    ``{"arguments": {...}}`` で二重に包んで生成し、クライアント側検証の required 違反で
+    **本番の全ツールが停止**した。末尾セクションも切断で丸ごと消えていた。
 
-    上限は 19,500 字とし、20,000 字までの余白 500 字は今後の追記用に確保する。
-    ここが赤くなったら**上限を上げるのではなく SOUL.md を圧縮する**こと。
+    当時は「上限は動かせない」と判断して SOUL.md を圧縮したが、それは誤りだった。
+    上限は OpenClaw の設定値 ``agents.list[].bootstrapMaxChars`` で変更できる
+    （2026-08-27 に実 config を shipped zod schema へ通して受理を確認済み）。
+
+    ⚠️ ここが赤くなったときの正しい直し方は 2 つある。**どちらを選ぶかは意識的に決めること**:
+      1. SOUL.md を圧縮する（bootstrap は毎リクエストの system prompt に載るので、
+         短いほど恒常的なトークン費用が下がる）。既定はこちら。
+      2. config の bootstrapMaxChars を上げる（総量 bootstrapTotalMaxChars 既定 60,000 と、
+         他の seed ファイルのぶんも合わせて確認すること）。
     """
-    assert len(soul) <= MAX_SOUL_CHARS, (
-        f"SOUL.md が {len(soul)} 字で上限 {MAX_SOUL_CHARS} 字を超えている。"
-        "OpenClaw は 20,000 字で切断し、切断は全ツール障害になる（2026-08-26 本番実測）。"
-        "上限を上げるのではなく SOUL.md 側を圧縮すること"
+    limit = _configured_bootstrap_max_chars()
+    budget = limit - SOUL_SAFETY_MARGIN_UNITS
+    actual = utf16_units(soul)
+    assert actual <= budget, (
+        f"SOUL.md が {actual} UTF-16 ユニットで、安全枠 {budget} "
+        f"（config の bootstrapMaxChars {limit} − 余白 {SOUL_SAFETY_MARGIN_UNITS}）を超えている。"
+        "OpenClaw は上限で静かに切断し、切断は全ツール障害になる（2026-08-25 本番実測）"
+    )
+
+
+def test_soul_length_guard_measures_in_utf16_not_codepoints(soul: str) -> None:
+    """ガードが UTF-16 ユニットで測っていること自体を固定する（変異で戻されるのを防ぐ）。
+
+    Python の len() へ戻すと、絵文字のぶんだけ実長を過小評価し、
+    「テストは緑なのにランタイムで切れる」という最悪の壊れ方をする。
+    """
+    assert utf16_units(soul) >= len(soul), "UTF-16 ユニットはコードポイント数以上になるはず"
+    emoji_heavy = "🧭🔴🟢"
+    assert utf16_units(emoji_heavy) == 6, "サロゲートペアは 1 文字 2 ユニットで数えること"
+    assert len(emoji_heavy) == 3, "Python の len() はコードポイント＝この差がガードの穴だった"
+
+
+def test_openclaw_config_raises_bootstrap_limit_above_default() -> None:
+    """config が既定 20,000 を明示的に上回っていること。
+
+    キーごと消える / 既定へ戻る事故を検出する。既定に戻ると SOUL.md は再び切断される。
+    """
+    assert _configured_bootstrap_max_chars() > 20_000, (
+        "bootstrapMaxChars が OpenClaw の既定 20,000 以下に戻っている。"
+        "SOUL.md が切断され全ツールが停止する"
     )
 
 

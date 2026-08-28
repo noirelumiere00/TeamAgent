@@ -144,7 +144,7 @@ def _summary_skill(summary_text: str) -> SlackSummarySkill:
 
 def _run_summary(skill: SlackSummarySkill) -> Any:
     return skill.run(
-        SlackSummaryInput(),
+        SlackSummaryInput(scope="thread"),
         SkillContext(
             request_id="r",
             metadata={"user_email": ME, "channel_id": ORIGIN_CH, "thread_ts": ORIGIN_TS},

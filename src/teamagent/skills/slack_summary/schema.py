@@ -1,18 +1,19 @@
 """slack_summary Skill の I/O スキーマ（Pydantic v2）。
 
-read-only（conversations.replies のみ・Slack への書込 API は一切呼ばない）。
+read-only（conversations.replies / history のみ・Slack への書込 API は一切呼ばない）。
 message は LLM がそのまま返す決定的日本語文で、要約の言い換え・補完をさせない。
 
-**ターゲット決定の優先規則**（尋問 fix・skill.py の `_resolve_target` が真実源）:
+**thread / auto のターゲット決定規則**（skill.py の `_resolve_target` が真実源）:
   1. 入力に `thread_ts` の明示があればそれを採用（`channel_id` 省略時は発信元チャンネル）。
   2. 明示が無ければ、MCP gateway が注入する署名済み metadata の channel_id/thread_ts。
 ACL は本人 xoxp が物理担保するため、明示入力を優先しても権限は超えられない。
+channel は thread_ts を使わず、入力 channel_id、次に署名済み metadata の channel_id を使う。
 """
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -49,7 +50,7 @@ def normalize_thread_ts(raw: Any) -> str:
 
 
 class SlackSummaryInput(BaseModel):
-    """「このスレッド要約して」等の自由文依頼の入力（全項目省略可）。"""
+    """Slack のスレッドまたはチャンネル要約依頼の入力（全項目省略可）。"""
 
     @model_validator(mode="before")
     @classmethod
@@ -72,11 +73,20 @@ class SlackSummaryInput(BaseModel):
             out["thread_ts"] = normalize_thread_ts(raw_ts)
         return out
 
+    scope: Literal["auto", "thread", "channel"] = Field(
+        default="auto",
+        description=(
+            "要約対象の範囲。channel は『このチャンネルの要約』『チャンネルの決定事項』"
+            "『ここ最近の流れ』など、スレッドではなくチャンネル全体の直近の流れを指す依頼で使う。"
+            "thread はスレッド単体を要約する。auto は省略時の既定値で、まず現スレッドを読み、"
+            "依頼メッセージだけの 1 件以下なら自動的にチャンネル要約へ切り替える。"
+        ),
+    )
     channel_id: str = Field(
         default="",
         pattern=r"^([CGD][A-Za-z0-9]{1,32})?$",
         description=(
-            "対象スレッドのチャンネル ID（<#C…|name> 由来の C…/G…/D…）。"
+            "対象スレッドまたは対象チャンネルの ID（<#C…|name> 由来の C…/G…/D…）。"
             "**省略時は依頼が行われたチャンネルを自動採用**する。"
             "チャンネル名（#営業）では指定できない＝ID が要る。"
         ),
@@ -86,7 +96,8 @@ class SlackSummaryInput(BaseModel):
         pattern=r"^(\d{6,20}\.\d{1,8})?$",
         description=(
             "対象スレッドの親メッセージ ts（例 1755400000.123456・Slack のスレッドリンク末尾）。"
-            "**明示された場合はこちらを優先**し、省略時は依頼が行われた現スレッドを自動採用する。"
+            "thread/auto では **明示された場合はこちらを優先**し、省略時は依頼が行われた"
+            "現スレッドを自動採用する。channel では不要。"
         ),
     )
     focus: str = Field(
@@ -97,10 +108,13 @@ class SlackSummaryInput(BaseModel):
 
 
 class SlackSummaryOutput(BaseModel):
-    """スレッド要約の結果（読み取りのみ・Slack へは何も書かない）。"""
+    """Slack 要約の結果（読み取りのみ・Slack へは何も書かない）。"""
 
     summary: str = Field(default="", description="LLM が生成した要約本文（生ログは含めない）")
     message_count: int = Field(default=0, ge=0, description="要約対象にしたメッセージ件数")
+    scope: str = Field(
+        default="", description="実際に要約した対象範囲（thread または channel。未実行時は空）"
+    )
     error: str = Field(
         default="",
         description=(

@@ -24,6 +24,7 @@ from teamagent.mcp_gateway.server import (
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
 from tests.caller_claim_testkit import (
+    TEST_SLACK_TEAM_ID,
     TEST_SLACK_USER_ID,
     make_verifier,
     sign_arguments,
@@ -181,6 +182,8 @@ async def test_dispatch_run_agent_company_shared_verified_member(
     assert out["stopped_reason"] == "final"
     assert fake.recorder["require_rls"] is True
     assert fake.recorder["ctx_metadata"]["identity_verified"] is True
+    assert fake.recorder["ctx_metadata"]["verified_slack_user_id"] == TEST_SLACK_USER_ID
+    assert fake.recorder["ctx_metadata"]["verified_slack_team_id"] == TEST_SLACK_TEAM_ID
     assert "vectorinc.co.jp" in fake.recorder["ctx_metadata"].get("user_groups", [])
 
 

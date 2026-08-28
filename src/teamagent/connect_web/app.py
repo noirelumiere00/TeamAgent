@@ -14,6 +14,7 @@ import asyncio
 import base64
 import copy
 import hashlib
+import hmac
 import html
 import importlib
 import json
@@ -31,7 +32,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from psycopg.errors import UndefinedColumn
+from psycopg.errors import UndefinedColumn, UniqueViolation
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -48,9 +49,10 @@ from teamagent.adapters.oauth_token_store import (
 )
 from teamagent.adapters.slack_oauth_flow import (
     SlackOAuthConsentFlow,
+    expected_bind_tag,
 )
 from teamagent.adapters.slack_oauth_flow import (
-    verify_state as slack_verify_state,
+    verify_state_detailed as slack_verify_state_detailed,
 )
 from teamagent.dashboard.auth import (
     Verifier,
@@ -3403,6 +3405,19 @@ def _put_verified_oauth_token(
     )
 
 
+def _put_verified_slack_token(
+    store: Any,
+    user_email: str,
+    token: SlackOAuthToken,
+    *,
+    identity_verified: bool,
+) -> None:
+    """Slack 本人照合済みの callback だけを SlackTokenStore.put へ通す最終ガード。"""
+    if not identity_verified:
+        raise PermissionError("Slack OAuth account identity is not verified")
+    store.put(user_email, token)
+
+
 def create_app(
     *,
     redirect_uri: str | None = None,
@@ -3415,6 +3430,8 @@ def create_app(
     slack_redirect_uri: str | None = None,
     slack_exchange_fn: Callable[[str], SlackOAuthToken] | None = None,
     slack_store: Any | None = None,
+    slack_state_consumer: Callable[[str], bool] | None = None,
+    slack_revoke_fn: Callable[[SlackOAuthToken], None] | None = None,
     search_skill_factory: Callable[[], Any] | None = None,
     search_config: DashboardConfig | None = None,
     search_verifier: Verifier | None = None,
@@ -3445,6 +3462,8 @@ def create_app(
       - slack_redirect_uri: Slack 認可の redirect_uri（未指定時 env SLACK_OAUTH_REDIRECT_URI）。
       - slack_exchange_fn: code→SlackOAuthToken 交換（テストで注入・実 Slack API を排除）。
       - slack_store: xoxp の保管器（未指定時 KMS+RDS に遅延生成した SlackTokenStore）。
+      - slack_state_consumer: 検証済み state 署名のワンタイム消費（テストで DDB を排除）。
+      - slack_revoke_fn: 本人照合拒否時の user token revoke（テストで実 Slack API を排除）。
     """
     redirect = redirect_uri or os.environ.get("OAUTH_REDIRECT_URI", "")
     slack_redirect = slack_redirect_uri or os.environ.get("SLACK_OAUTH_REDIRECT_URI", "")
@@ -3485,6 +3504,11 @@ def create_app(
             return google_state_consumer(state)
         return consume_state_once(state)
 
+    def _consume_slack_state(key: str) -> bool:
+        if slack_state_consumer is not None:
+            return slack_state_consumer(key)
+        return consume_state_once(key, record_prefix="SLACK_OAUTH_STATE#")
+
     def _get_store() -> Any:
         if store is not None:
             return store
@@ -3501,6 +3525,22 @@ def create_app(
         if slack_exchange_fn is not None:
             return slack_exchange_fn(code)
         return SlackOAuthConsentFlow(redirect_uri=slack_redirect).exchange(code)
+
+    def _slack_revoke(token: SlackOAuthToken) -> None:
+        """照合を拒否した user token を best-effort で無効化する。"""
+        try:
+            if slack_revoke_fn is not None:
+                slack_revoke_fn(token)
+                return
+            from slack_sdk.web import WebClient
+
+            WebClient(token=token.access_token).auth_revoke()
+        except Exception as exc:
+            # revoke の障害で本人照合の 403 を別の応答へ変えない。
+            logger.warning(
+                "connect_slack_callback_revoke_failed",
+                error=type(exc).__name__,
+            )
 
     def _get_slack_store() -> Any:
         if slack_store is not None:
@@ -3932,8 +3972,8 @@ def create_app(
                 ),
                 status_code=400,
             )
-        email = slack_verify_state(state)
-        if not email:
+        st = slack_verify_state_detailed(state)
+        if st is None:
             logger.warning("connect_slack_callback_bad_state")
             return HTMLResponse(
                 _page(
@@ -3944,29 +3984,63 @@ def create_app(
                 status_code=400,
             )
         try:
+            state_consumed = _consume_slack_state(st.sig)
+        except RuntimeError as exc:
+            logger.error(
+                "connect_slack_callback_state_store_unconfigured",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return HTMLResponse(
+                _page(
+                    "システム側の設定不備です",
+                    "管理者にご連絡ください。"
+                    "リンクを取り直しても解消しません（連携の設定が未完了です）。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+        except Exception as exc:
+            logger.warning(
+                "connect_slack_callback_state_consume_failed",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return HTMLResponse(
+                _page(
+                    "一時的なエラーが発生しました",
+                    "少し時間をおいて、もう一度リンクを開いてください。"
+                    "繰り返す場合は管理者にご連絡ください。",
+                    accent="#f9667a",
+                ),
+                status_code=503,
+            )
+        if not state_consumed:
+            logger.warning("connect_slack_callback_reused_state")
+            return HTMLResponse(
+                _page(
+                    "検証に失敗しました",
+                    "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=400,
+            )
+        if st.bind_tag is None:
+            logger.warning("connect_slack_state_unbound_rejected")
+            return HTMLResponse(
+                _page(
+                    "検証に失敗しました",
+                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=400,
+            )
+        try:
             token = _slack_exchange(code)
-            # 外部WSの xoxp を他 email に紐付けないよう team_id 照合（設定時のみ）。
-            expected_team = os.environ.get("SLACK_TEAM_ID", "").strip()
-            if expected_team and token.team_id and token.team_id != expected_team:
-                logger.warning(
-                    "connect_slack_callback_team_mismatch",
-                    user_email=email,
-                    got_team=token.team_id,
-                )
-                return HTMLResponse(
-                    _page(
-                        "対象ワークスペースが違います",
-                        "所属ワークスペースの Slack で Aico に「連携」と話しかけてください。",
-                        accent="#f9667a",
-                    ),
-                    status_code=403,
-                )
-            _get_slack_store().put(email, token)
         except Exception as exc:
             # xoxp/code/secret を露出させない。診断は例外型のみ（G8・str(exc) は出さない）。
             logger.warning(
-                "connect_slack_callback_store_failed",
-                user_email=email,
+                "connect_slack_callback_exchange_failed",
                 error=type(exc).__name__,
             )
             return HTMLResponse(
@@ -3977,11 +4051,80 @@ def create_app(
                 ),
                 status_code=500,
             )
-        logger.info("connect_slack_callback_ok", user_email=email, scopes=len(token.scopes))
+        if not token.slack_user_id or not token.team_id:
+            logger.warning("connect_slack_callback_identity_missing")
+            _slack_revoke(token)
+            return HTMLResponse(
+                _page(
+                    "Slackアカウントを確認できませんでした",
+                    "Slack で Aico に「連携」と話しかけ、もう一度許可してください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        # 外部WSの xoxp を他 email に紐付けないよう team_id 照合（設定時のみ）。
+        expected_team = os.environ.get("SLACK_TEAM_ID", "").strip()
+        if expected_team and token.team_id != expected_team:
+            logger.warning("connect_slack_callback_team_mismatch")
+            _slack_revoke(token)
+            return HTMLResponse(
+                _page(
+                    "対象ワークスペースが違います",
+                    "所属ワークスペースの Slack で Aico に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        if not hmac.compare_digest(
+            expected_bind_tag(token.team_id, token.slack_user_id),
+            st.bind_tag,
+        ):
+            logger.warning("connect_slack_callback_identity_mismatch")
+            _slack_revoke(token)
+            return HTMLResponse(
+                _page(
+                    "Slackアカウントが一致しません",
+                    "このリンクに対応する Slack アカウントで許可してください。"
+                    "Slack で Aico に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=403,
+            )
+        try:
+            _put_verified_slack_token(
+                _get_slack_store(),
+                st.email,
+                token,
+                identity_verified=True,
+            )
+        except UniqueViolation:
+            logger.warning("slack_oauth_uid_collision")
+            return HTMLResponse(
+                _page(
+                    "Slackアカウントを連携できませんでした",
+                    "この Slack アカウントはすでに連携されています。管理者にご連絡ください。",
+                    accent="#f9667a",
+                ),
+                status_code=409,
+            )
+        except Exception as exc:
+            logger.warning(
+                "connect_slack_callback_store_failed",
+                error=type(exc).__name__,
+            )
+            return HTMLResponse(
+                _page(
+                    "連携に失敗しました",
+                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                    accent="#f9667a",
+                ),
+                status_code=500,
+            )
+        logger.info("connect_slack_callback_ok", user_email=st.email, scopes=len(token.scopes))
         return HTMLResponse(
             _page(
                 "✅ Slack連携が完了しました",
-                f"{email} の Slack 連携が完了しました。Slack に戻って AI に話しかけてください。"
+                f"{st.email} の Slack 連携が完了しました。Slack に戻って AI に話しかけてください。"
                 "このタブは閉じて大丈夫です。",
             ),
             status_code=200,

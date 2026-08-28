@@ -13,6 +13,7 @@ from teamagent.adapters.oauth_token_store import (
     InMemoryTokenStore,
     OAuthToken,
     RdsTokenStore,
+    SlackTokenStore,
     TokenStore,
 )
 
@@ -73,8 +74,13 @@ class _FakeCipher:
 
 
 class _FakeCursor:
-    def __init__(self, rows: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        rows: dict[str, dict[str, Any]],
+        statements: list[tuple[str, Any]],
+    ) -> None:
         self._rows = rows
+        self._statements = statements
         self._result: dict[str, Any] | None = None
 
     def __enter__(self) -> _FakeCursor:
@@ -85,6 +91,7 @@ class _FakeCursor:
 
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
+        self._statements.append((s, params))
         if s.startswith("SELECT"):
             r = self._rows.get(params[0])
             self._result = dict(r) if r else None
@@ -97,8 +104,13 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        rows: dict[str, dict[str, Any]],
+        statements: list[tuple[str, Any]],
+    ) -> None:
         self._rows = rows
+        self._statements = statements
         self.committed = False
 
     def __enter__(self) -> _FakeConn:
@@ -108,7 +120,7 @@ class _FakeConn:
         return False
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self._rows)
+        return _FakeCursor(self._rows, self._statements)
 
     def commit(self) -> None:
         self.committed = True
@@ -117,12 +129,13 @@ class _FakeConn:
 class _FakePgvector:
     def __init__(self) -> None:
         self.rows: dict[str, dict[str, Any]] = {}
+        self.statements: list[tuple[str, Any]] = []
         self.last_user_email: str | None = None
         self.last_conn: _FakeConn | None = None
 
     def connection(self, *, app_role: str, user_email: str) -> _FakeConn:
         self.last_user_email = user_email  # RLS GUC 用に渡される本人 email
-        self.last_conn = _FakeConn(self.rows)
+        self.last_conn = _FakeConn(self.rows, self.statements)
         return self.last_conn
 
 
@@ -212,3 +225,51 @@ def test_kms_cipher_roundtrip_and_encryption_context() -> None:
 
 def test_rds_token_store_satisfies_protocol() -> None:
     assert isinstance(RdsTokenStore(_FakePgvector(), _FakeCipher()), TokenStore)
+
+
+def test_slack_token_store_reads_existing_token() -> None:
+    """変更前に保存済みの行を、従来どおり復号して読める。"""
+    pg = _FakePgvector()
+    cipher = _FakeCipher()
+    pg.rows["a@x.com"] = {
+        "xoxp_token_enc": cipher.encrypt(
+            "xoxp-existing",
+            context={"user_email": "a@x.com"},
+        ),
+        "scopes": ["search:read", "users:read"],
+        "slack_user_id": "U123",
+        "team_id": "T123",
+    }
+
+    token = SlackTokenStore(pg, cipher).get(" A@X.COM ")
+
+    assert token is not None
+    assert token.access_token == "xoxp-existing"
+    assert token.scopes == ("search:read", "users:read")
+    assert token.slack_user_id == "U123"
+    assert token.team_id == "T123"
+    assert cipher.dec_context == {"user_email": "a@x.com"}
+
+
+def test_slack_token_store_slack_user_id_does_not_decrypt_xoxp() -> None:
+    pg = _FakePgvector()
+    pg.rows["a@x.com"] = {"slack_user_id": "U123"}
+    cipher = _FakeCipher()
+    store = SlackTokenStore(pg, cipher)
+
+    assert store.slack_user_id(" A@X.COM ") == "U123"
+    assert cipher.dec_context is None
+    assert pg.statements[-1] == (
+        "SELECT slack_user_id FROM slack_oauth_tokens WHERE user_email = %s",
+        ("a@x.com",),
+    )
+    assert pg.last_user_email == "a@x.com"
+
+
+def test_slack_token_store_slack_user_id_preserves_empty_and_missing() -> None:
+    pg = _FakePgvector()
+    pg.rows["empty@x.com"] = {"slack_user_id": ""}
+    store = SlackTokenStore(pg, _FakeCipher())
+
+    assert store.slack_user_id("empty@x.com") == ""
+    assert store.slack_user_id("missing@x.com") is None

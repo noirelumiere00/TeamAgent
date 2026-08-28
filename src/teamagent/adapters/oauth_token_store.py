@@ -240,6 +240,20 @@ class SlackTokenStore:
     def _norm(email: str) -> str:
         return email.strip().lower()
 
+    def slack_user_id(self, user_email: str) -> str | None:
+        """保存済み Slack user ID だけを返す（xoxp の KMS 復号は行わない）。"""
+        email = self._norm(user_email)
+        with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT slack_user_id FROM slack_oauth_tokens WHERE user_email = %s",
+                    (email,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        return str(row["slack_user_id"] or "")
+
     def get(self, user_email: str) -> SlackOAuthToken | None:
         email = self._norm(user_email)
         with self._pgvector.connection(app_role=self._app_role, user_email=email) as conn:

@@ -280,7 +280,7 @@
     },
     {
       "name": "slack_summary",
-      "effect": "slack-thread-read-analysis",
+      "effect": "slack-thread-channel-read-analysis",
       "terraformGate": "use_slack_summary_tool",
       "defaultEnabledByTerraform": false,
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SUMMARY_TOOL"] }

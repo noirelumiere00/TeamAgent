@@ -1242,7 +1242,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert "calendar-write-no-invite" in effects
     assert "calendar-freebusy-read-only" in effects
     assert "external-job-submit-s3-write" in effects
-    assert "slack-thread-read-analysis" in effects
+    assert "slack-thread-channel-read-analysis" in effects
     assert "slack-file-read-analysis" in effects
     assert "external-video-read-slack-file-delivery" in effects
     assert "external-web-search-read-only" in effects
