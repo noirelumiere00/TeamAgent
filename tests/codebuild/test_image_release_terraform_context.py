@@ -1854,7 +1854,6 @@ def test_eventbridge_ecs_consumers_read_the_target_not_the_lambda_environment(
         pointer_resource_address=pointer_address,
         task_definition_address=task_definition_address,
         activator_type=consumer["activator"]["type"],
-        consumer_id=consumer_id,
         label=consumer_id,
     )
 

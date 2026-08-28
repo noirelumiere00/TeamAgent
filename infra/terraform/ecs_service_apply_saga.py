@@ -172,7 +172,7 @@ _SAGA_CONSUMER_IDS = frozenset(_ACTIVATOR_RESOURCE_ADDRESSES)
 _EXPECTED_ACTIVATOR_COUNTS = {
     "ecs_service": 3,
     "eventbridge_rule_ecs_target": 2,
-    "eventbridge_rule_lambda_taskdef_arn_environment": 1,
+    _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE: 1,
     "lambda_taskdef_arn_environment": 2,
 }
 

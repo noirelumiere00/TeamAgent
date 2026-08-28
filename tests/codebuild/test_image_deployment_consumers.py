@@ -95,7 +95,9 @@ EXPECTED_CONSUMERS = {
         "ecs_family": "teamagent-dev-ingest",
         "container_name": "ingest",
         "activator": {
-            "type": "eventbridge_rule_ecs_target",
+            # ingest だけ EventBridge rule → dispatch Lambda の env に taskdef ARN がある。
+            # 2026-08-21 の live トポロジ変更を正名化で宣言側へ反映した型。
+            "type": "eventbridge_rule_lambda_taskdef_arn_environment",
             "identity": "teamagent-dev-ingest-weekly",
         },
         "release_repository": "teamagent-mcp",

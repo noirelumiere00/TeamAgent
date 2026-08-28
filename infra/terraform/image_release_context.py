@@ -771,7 +771,6 @@ def _require_planned_pointer_reference(
     pointer_resource_address: str,
     task_definition_address: str,
     activator_type: str,
-    consumer_id: str,
     label: str,
 ) -> None:
     configuration_address = _configuration_address(pointer_resource_address)
@@ -1922,7 +1921,6 @@ def _manifest_plan_binding(
                 pointer_resource_address=pointer_resource_address,
                 task_definition_address=address,
                 activator_type=str(consumer["activator"]["type"]),
-                consumer_id=consumer_id,
                 label=consumer_id,
             )
         comparison.append(
