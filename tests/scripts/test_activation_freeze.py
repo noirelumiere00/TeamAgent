@@ -1002,9 +1002,13 @@ def test_case3_freeze_destroy_is_fatal_regardless_of_the_var(
 
 
 def test_allowlist_counts_only_payload_commits() -> None:
-    """approved_commits は execution line 上の payload のみ（base + 22）。"""
+    """approved_commits は execution line 上の payload のみ（base + 24）。
+
+    2026-08-28 に W2-b（契約 2 件を dev へ揃えて世代を Wave3 に一致させる）と
+    W3-a（state rebind #3 の台帳）を追加して 22 → 24。
+    """
     doc = _allowlist_doc()
-    assert len(doc["approved_commits"]) == 22
+    assert len(doc["approved_commits"]) == 24
     assert doc["expected_head"] == doc["approved_commits"][-1]["sha"]
     boundary = doc["payload_control_boundary"]
     assert "payload に含めない" in boundary
