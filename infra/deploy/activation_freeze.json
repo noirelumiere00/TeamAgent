@@ -365,13 +365,23 @@
     "generation_release_chain_note": "S3 codebuild-buildspecs/ 配下の全 prefix を無条件スキャンして得た release chain の実体。adopt purity（4 forget + 4 import）と generation freeze integrity は別概念で、後者はこの inventory 全体を対象とする（2026-08-24 ユーザー裁定⑦）。"
   },
   "unlock": {
-    "active": true,
-    "scope_paths": [
-      "infra/codebuild/openclaw_bundle_contract.json",
-      "infra/codebuild/teamagent_core_media_release_contract.json"
-    ],
-    "reason": "統合裁定（2026-08-26・両変更とも個別裁定済みの合併）: ① core_media 契約 = wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避（2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED・総数 240→240・追加0・削除0・Chromium 不変）。② openclaw 契約 = runtime base を gcr.io/distroless/nodejs24-debian13 から cgr.dev/chainguard/node (Wolfi) へ乗換え、CVE-2026-14456 (Debian trixie fix_deferred) による scan gate の恒久閉塞を根治するため、binary_probe (path=/nodejs/bin/node, sha256=6bf69d0e…) → (path=/usr/bin/node, sha256=5452461a…) の更新が不可避（scan_gate 0/0・repo 集合・referrer 種別は不変）。",
-    "gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）→ 2026-08-27 裁定③により **active のまま維持**（相乗り方針）",
+    "active": false,
+    "scope_paths": [],
+    "reason": null,
+    "gate": null,
+    "folded_2026_08_28": {
+      "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
+      "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
+      "direction": "締める側の変更である。畳んだ後は unlock 宣言なしに frozen surface を触る PR が CI で落ちる（assert_frozen_surface:253-262）。緩めていない。",
+      "next_declarant": "正名化 PR（prep/rename-0828）が infra/codebuild/release_evidence.py を触るため、その PR 内で scope_paths=[\"infra/codebuild/release_evidence.py\"] を宣言し直す。準備済みのパッチは scratchpad/night/pending-unlock-rename.md。",
+      "prior_scope_paths": [
+        "infra/codebuild/openclaw_bundle_contract.json",
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "prior_scope_status": "両 path とも origin/dev に取り込み済み。2026-08-28 実測で origin/dev..HEAD の diff に現れない＝消化済み。",
+      "prior_reason": "統合裁定（2026-08-26・両変更とも個別裁定済みの合併）: ① core_media 契約 = wolfi 上流の ncurses ドリフト3件（libncursesw / libpanelw / ncurses-terminfo-base が 6.6_p20260516-r0 → 6.6_p20260815-r0）へ media-apk.lock を追随させたため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避（2026-08-26 の mcp 署名リリース段3が final 4/12 の cmp で FAILED・総数 240→240・追加0・削除0・Chromium 不変）。② openclaw 契約 = runtime base を gcr.io/distroless/nodejs24-debian13 から cgr.dev/chainguard/node (Wolfi) へ乗換え、CVE-2026-14456 (Debian trixie fix_deferred) による scan gate の恒久閉塞を根治するため、binary_probe (path=/nodejs/bin/node, sha256=6bf69d0e…) → (path=/usr/bin/node, sha256=5452461a…) の更新が不可避（scan_gate 0/0・repo 集合・referrer 種別は不変）。",
+      "prior_gate": "human gate 2026-08-26（ユーザー裁定: 本日中の幹部公開をゴールに設定 / unlock の 2 path への拡大を明示承認 / AWS 側 freeze は全 principal から detach 済み）→ 2026-08-27 裁定③により **active のまま維持**（相乗り方針）"
+    },
     "note": "frozen surface を変更する PR は、同じ PR 内で本 unlock 宣言に対象 path を明記しなければ CI で落ちる。宣言そのものが diff に現れることで human gate が効く。",
     "retention_ruling_2026_08_27": {
       "decision": "裁定③: unlock は relock せず active のまま維持し、後続の frozen surface 変更を相乗りさせてから最後にまとめて畳む。",
