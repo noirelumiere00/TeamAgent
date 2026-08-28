@@ -1,12 +1,25 @@
 {
   "schema_version": 1,
-  "description": "PR2-A0.4 state rebind #2 の対象台帳。Freeze v2（2026-08-24T08:24:04Z 発効）下で 5 target のみを state-only で付け替える。tiktok_acquire:25 と x_buzz_worker:1 は state==live のため対象外。値は Wave2 approved desired == live taskdef semantics == consumer reference の 5/5 一致を実測して確定。実行時に live 参照が本台帳と異なる場合、guard は STALE MAPPING として停止する（追随しない）。",
-  "frozen_at": "2026-08-24T08:24:04Z",
+  "description": "PR2-A0.4 state rebind #3 の対象台帳。Freeze v2 下で 5 target のみを state-only で付け替える。tiktok_acquire:25 と x_buzz_worker:1 は state==live のため対象外（入れると rebind_precheck が『既に束縛済みです』で止まる）。openclaw は live に :41 が存在するが state に aws_ecs_task_definition.openclaw が無いため rebind の対象にならない（別課題）。値は live taskdef == consumer reference の 5/5 一致を 2026-08-28 に実測して確定。実行時に live 参照が本台帳と異なる場合、guard は STALE MAPPING として停止する（追随しない）。",
+  "frozen_at": "2026-08-28T07:50:00Z",
+  "supersedes": {
+    "rebind": 2,
+    "frozen_at": "2026-08-24T08:24:04Z",
+    "targets": "mcp:88 / connect-web:73 / morning-digest:55 / canary:25 / ingest:57",
+    "why": "#2 の 5 値は state serial 214 が保持する ARN と完全一致しており、そのまま precheck を回すと 5/5 とも『既に <arn> へ束縛済みです』（rebind_precheck:10711）で止まる。#2 実施後に本番リリースが進み live が先行したため、state を live へ追随させる #3 を新規に起こす。"
+  },
+  "measurement_2026_08_28": {
+    "method": "aws ecs describe-task-definition（live の revision と status）／aws ecs describe-services（ECS service の taskDefinition）／aws events list-targets-by-rule（EventBridge target の EcsParameters.TaskDefinitionArn）／aws lambda get-function-configuration（TASKDEF_ARN env）を read-only で実測し、live taskdef と consumer reference の一致を 5/5 で確認した。",
+    "state_source": "terraform state serial 214 / lineage 745cf6df（2026-08-25 取得のスナップショット）",
+    "state_holds": "mcp:88 / connect-web:73 / morning-digest:55 / canary:25 / ingest:57 / tiktok-acquire:25 / x-buzz-worker:1",
+    "all_targets_active": "5 target とも status=ACTIVE を実測",
+    "revalidate_before_apply": "本台帳は 2026-08-28 07:50 UTC 時点の live を凍結している。rebind_precheck を回す前に live revision が :92/:78/:59/:29/:61 から動いていないことを再確認すること。動いていれば STALE MAPPING で停止するので事故にはならないが、台帳を起こし直す必要がある。"
+  },
   "targets": [
     {
       "address": "aws_ecs_task_definition.mcp",
       "family": "teamagent-dev-mcp",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:88",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:92",
       "consumer": {
         "kind": "ecs-service",
         "name": "teamagent-dev-mcp",
@@ -16,7 +29,7 @@
     {
       "address": "aws_ecs_task_definition.connect_web[0]",
       "family": "teamagent-dev-connect-web",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:73",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78",
       "consumer": {
         "kind": "ecs-service",
         "name": "teamagent-dev-connect-web",
@@ -26,7 +39,7 @@
     {
       "address": "aws_ecs_task_definition.morning_digest[0]",
       "family": "teamagent-dev-morning-digest",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:55",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59",
       "consumer": {
         "kind": "events-rule",
         "name": "teamagent-dev-morning-digest-weekday"
@@ -35,7 +48,7 @@
     {
       "address": "aws_ecs_task_definition.canary[0]",
       "family": "teamagent-dev-canary",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:25",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29",
       "consumer": {
         "kind": "events-rule",
         "name": "teamagent-dev-canary-hourly"
@@ -44,7 +57,7 @@
     {
       "address": "aws_ecs_task_definition.ingest[0]",
       "family": "teamagent-dev-ingest",
-      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:57",
+      "target_arn": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61",
       "consumer": {
         "kind": "lambda-env",
         "name": "teamagent-dev-ingest-dispatch"
