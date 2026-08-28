@@ -135,7 +135,10 @@ class ConsumerSpec:
 
     @property
     def rule_arn(self) -> str:
-        if self.activator_type != "eventbridge_rule_ecs_target":
+        if self.activator_type not in (
+            "eventbridge_rule_ecs_target",
+            _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+        ):
             raise SagaError("non-EventBridge consumer has no rule ARN")
         return f"arn:aws:events:{_REGION}:{_ACCOUNT_ID}:rule/{self.activator_identity}"
 
@@ -1734,7 +1737,10 @@ def _read_consumers(
         }
         raw_activations[key] = raw_services[key]
     for key, spec in specs.items():
-        if spec.activator_type == "eventbridge_rule_ecs_target":
+        if spec.activator_type in (
+            "eventbridge_rule_ecs_target",
+            _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+        ):
             activation, raw = _read_eventbridge_activation(cli, spec=spec)
             activations[key] = activation
             raw_activations[key] = raw
@@ -1876,7 +1882,10 @@ def _assert_stable(
         state = expected.get(key)
         if type(raw) is not dict or type(state) is not dict:
             raise SagaError("consumer steady verification is incomplete")
-        if spec.activator_type == "eventbridge_rule_ecs_target":
+        if spec.activator_type in (
+            "eventbridge_rule_ecs_target",
+            _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+        ):
             activation = state.get("activation")
             if (
                 type(activation) is not dict
@@ -2493,7 +2502,10 @@ class EcsServiceApplySaga:
                     or observed_activation.get("desiredCount") != 1
                 ):
                     raise SagaError("planned ECS service activation differs")
-            elif spec.activator_type == "eventbridge_rule_ecs_target":
+            elif spec.activator_type in (
+                "eventbridge_rule_ecs_target",
+                _EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE,
+            ):
                 if (
                     frozenset(expected_activation) != {"state", "taskDefinition"}
                     or expected_activation.get("state") not in _RULE_STATES

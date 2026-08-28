@@ -134,6 +134,7 @@ def _load_module() -> Any:
 
 
 SAGA = _load_module()
+CANONICAL_EVENTBRIDGE_LAMBDA_TYPE = SAGA._EVENTBRIDGE_LAMBDA_POINTER_ACTIVATOR_TYPE
 
 
 def _load_finalizer() -> Any:
@@ -1273,7 +1274,7 @@ def _set_live_consumer_task(
             task_definition=task_definition,
         )
         return
-    if consumer_id == "ingest":
+    if activator_type == CANONICAL_EVENTBRIDGE_LAMBDA_TYPE:
         cli.lambda_configurations[consumer_id]["Environment"]["Variables"]["TASKDEF_ARN"] = (
             task_definition
         )
@@ -1380,16 +1381,21 @@ def test_saga_scope_and_planned_binding_exactly_match_all_eight_registry_consume
     assert {spec.activator_type for spec in specs.values()} == {
         "ecs_service",
         "eventbridge_rule_ecs_target",
+        CANONICAL_EVENTBRIDGE_LAMBDA_TYPE,
         "lambda_taskdef_arn_environment",
     }
 
 
-def test_saga_activator_partition_remains_three_three_two() -> None:
+def test_saga_activator_partition_remains_three_two_one_two() -> None:
+    # ingest の正名化で eventbridge_rule_ecs_target 3 → 2 ＋ 新 type 1 に割れた。
+    # 合計 8 consumer は不変。
     assert SAGA._EXPECTED_ACTIVATOR_COUNTS == {
         "ecs_service": 3,
-        "eventbridge_rule_ecs_target": 3,
+        "eventbridge_rule_ecs_target": 2,
+        CANONICAL_EVENTBRIDGE_LAMBDA_TYPE: 1,
         "lambda_taskdef_arn_environment": 2,
     }
+    assert sum(SAGA._EXPECTED_ACTIVATOR_COUNTS.values()) == 8
 
 
 def test_ingest_plan_uses_dispatch_lambda_environment_as_the_task_pointer() -> None:
@@ -1757,6 +1763,14 @@ def test_begin_baseline_contains_task_digest_and_activation_for_all_consumers() 
                 "desiredCount",
             },
             "eventbridge_rule_ecs_target": {
+                "type",
+                "identity",
+                "ruleArn",
+                "state",
+                "taskDefinition",
+                "target",
+            },
+            CANONICAL_EVENTBRIDGE_LAMBDA_TYPE: {
                 "type",
                 "identity",
                 "ruleArn",
