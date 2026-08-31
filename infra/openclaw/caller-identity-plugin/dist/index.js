@@ -442,7 +442,8 @@ export function createCallerIdentityPlugin({
           ledger.delete(runId);
         }
       }
-      // TTL 内でも上限を超えたら、最も古い記録から落とす（挿入順＝更新順）。
+      // TTL 内でも上限を超えたら、最も古い記録から落とす。
+      // 記録の更新側が delete->set しているので、挿入順が更新順と一致する。
       while (ledger.size > MAX_CONNECT_GUARD_RUNS) {
         const oldest = ledger.keys().next();
         if (oldest.done) break;
@@ -1108,10 +1109,11 @@ export function createCallerIdentityPlugin({
       consumedAtMs: nowMs,
     });
     // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
-    toolCallsByRun.set(eventRunId, {
-      count: (toolCallsByRun.get(eventRunId)?.count ?? 0) + 1,
-      updatedAtMs: nowMs,
-    });
+    const priorToolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
+    // Map の挿入順は既存キーへの再 set では更新されない（実測）。
+    // 退避が「最も古い記録から」になるよう、delete してから set する。
+    toolCallsByRun.delete(eventRunId);
+    toolCallsByRun.set(eventRunId, { count: priorToolCalls + 1, updatedAtMs: nowMs });
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
