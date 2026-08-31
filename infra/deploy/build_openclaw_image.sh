@@ -149,7 +149,7 @@ if [ "$PREASSUMED_PUBLISHER" = "false" ]; then
       --region "$REGION" \
       --role-arn "$PUBLISHER_ROLE_ARN" \
       --role-session-name "$PUBLISHER_SESSION_NAME" \
-      --duration-seconds 10800 \
+      --duration-seconds 3600 \
       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
       --output text
   )" || die "could not assume the dedicated OpenClaw publisher role"
