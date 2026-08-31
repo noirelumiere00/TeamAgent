@@ -2467,3 +2467,119 @@ def test_thread_suffix_removal_stays_narrow_and_fails_closed() -> None:
     for case in ("channel_unknown_suffix", "channel_empty_thread", "dm_with_thread_suffix"):
         assert report[case]["blocked"] is True, case
         assert report[case]["claimChannel"] is None, case
+
+
+# ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
+# 本番実測 2026-08-31: 利用者の「連携」に対し、Aico が 0 tool call のまま
+# https://connect.openclaw.ai/oauth/google?user_id=... を捏造して返した。
+# MCP 境界の決定論分岐(_maybe_redirect_to_connect)は tool 呼び出しが発生して
+# 初めて効くため、この経路には届かない。before_agent_finalize が最後の砦になる。
+
+
+def test_fabricated_connect_url_forces_another_pass_that_calls_the_tool() -> None:
+    """0 tool call で捏造 URL を返そうとしたら、送信させず再パスを要求すること。
+
+    定型文へ置換するのではなく `oauth_connect` を実際に呼ばせる形にしてある。
+    上流の再パス前置き(embedded-agent:1773)は「明示的に要求されない限りツールを
+    再実行するな」と指示するため、instruction 側で明示要求しないと握り潰される。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    assert guarded["intervened"] is True
+    assert guarded["action"] == "revise"
+    assert "明示的にツール実行を要求します" in guarded["instruction"]
+    assert "oauth_connect" in guarded["instruction"]
+    assert guarded["idempotencyKey"] == "connect-url-fabrication"
+    assert guarded["maxAttempts"] == 1
+
+
+def test_plugin_never_writes_a_url_itself() -> None:
+    """plugin 自身は URL を書かない(#352 と同じ規律)。
+
+    instruction は「ツールを呼べ」であって、リンクの代替提示ではない。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    assert "http://" not in guarded["instruction"]
+    assert "https://" not in guarded["instruction"]
+    assert "http" not in (guarded["reason"] or "")
+
+
+def test_ordinary_replies_are_not_touched() -> None:
+    """判定は intent ではなく出力。連携 URL を含まない応答には触れないこと。
+
+    intent 判定を主軸にすると「〇〇社との連携について提案書を」まで奪う
+    (connect_intent.py の残差法が禁じた誤爆)。出力検証はこれを構造的に回避する。
+    """
+    report = _caller_identity_report()
+    assert report["connect_no_url_zero_tool"]["intervened"] is False
+    assert report["connect_other_tool_generic_url"]["intervened"] is False
+
+
+def test_runs_that_actually_called_the_tool_are_excluded() -> None:
+    """oauth_connect を呼んだ run の URL は正規発行。介入しないこと。"""
+    assert _caller_identity_report()["connect_after_oauth_connect"]["intervened"] is False
+
+
+def test_intervention_budget_stops_the_loop_without_relying_on_upstream() -> None:
+    """同一 run の 2 回目は自前予算で打ち切ること。
+
+    上流にも予算はある(runId x idempotencyKey・既定 1 回)が、ループ不在を
+    上流挙動に依存させない。
+    """
+    budget = _caller_identity_report()["connect_budget_exhausted"]
+    assert budget["firstIntervened"] is True
+    assert budget["intervened"] is False
+
+
+def test_recovered_run_is_not_intervened_again() -> None:
+    """再パスで oauth_connect が呼ばれた run には再介入しないこと。
+
+    ループ不在を上流の clientToolCalls ゲートではなく、自前カウンタ(条件 a)で担保する。
+    """
+    recovered = _caller_identity_report()["connect_recovered_after_tool_call"]
+    assert recovered["firstIntervened"] is True
+    assert recovered["recoveredIntervened"] is False
+
+
+def test_missing_assistant_message_fails_open() -> None:
+    """本文が無ければ利用者にも届かない。触らないこと。"""
+    assert _caller_identity_report()["connect_missing_message"]["intervened"] is False
+
+
+def test_authoritative_run_binding_is_enforced_on_finalize() -> None:
+    """event と ctx の runId が食い違う finalize は不介入。
+
+    signToolCall と同じ「権威 run 束縛」の規律を、この hook でも緩めていないこと。
+    """
+    report = _caller_identity_report()
+    assert report["connect_run_mismatch"]["intervened"] is False
+    # 別 run 自体が 0 tool call なら見逃さない(カウンタが run 単位である証明)。
+    assert report["connect_other_run_zero_tool"]["intervened"] is True
+
+
+def test_connect_url_classification_matches_the_single_source_of_truth() -> None:
+    """URL 境界は tests/fixtures/connect_url_patterns.json が単一正本であること。
+
+    実装と期待値が別々に育つとドリフトする。fixture を変えたら必ずここが動く。
+    """
+    matrix = _caller_identity_report()["connect_url_pattern_matrix"]
+    assert matrix, "fixture が空"
+    mismatched = [row for row in matrix if row["expectMatch"] != row["matched"]]
+    assert not mismatched, f"fixture と実装が食い違う: {mismatched}"
+
+
+def test_intervention_log_keeps_the_g7_discipline() -> None:
+    """ログに本文・URL 実体・Slack 識別子を載せないこと(G7)。
+
+    捏造 URL には user_id が埋まっていた実績があるため、URL の素通しは
+    それ自体が G7 違反になる。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    blocked = [log for log in guarded["logs"] if "connect_url_fabrication_blocked" in log]
+    assert blocked, "介入ログが出ていない"
+    for log in blocked:
+        assert "http" not in log
+        assert "openclaw.ai" not in log
+        assert "U09MBDFQ16J" not in log
+        assert "連携リンク" not in log
+        assert "kinds=" in log
+        assert "outcome=revised" in log

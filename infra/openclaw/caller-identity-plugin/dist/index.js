@@ -20,6 +20,35 @@ const MAIL_DRAFT_TOOL = "mail_draft";
 const SLACK_INTERACTION_EVENT_PREFIX = "Slack interaction: ";
 const SLACK_INTERACTION_VALUE_MAX_LENGTH = 160;
 
+// ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
+// 背景（本番実測 2026-08-31）: LLM がツールを 1 つも呼ばないまま
+// https://connect.openclaw.ai/oauth/google?user_id=... を捏造し、利用者へ届いた。
+// MCP 境界の決定論分岐（server.py の _maybe_redirect_to_connect）は tool 呼び出しが
+// 発生して初めて効くため、0 tool call のターンには届かない。ここが最後の砦になる。
+//
+// 判定は intent ではなく出力検証で行う: この run の teamagent tool call が 0 なら
+// oauth_connect は 1 度も URL を発行していない。よって応答本文に現れる連携 URL は
+// 定義上すべて捏造である（推測が入らない）。
+const ASSISTANT_MESSAGE_SCAN_LIMIT = 100000;
+const CONNECT_URL_RE = /https?:\/\/[^\s<>()\[\]"'`|]+/giu;
+const CONNECT_URL_TRAILING_RE = /[)\]}>.,;:!?'"`。、）】」]+$/u;
+const UPSTREAM_VENDOR_HOST_RE = /(?:^|\.)openclaw\.ai$/iu;
+const CONNECT_WEB_HOST_RE = /(?:^|\.)newstv\.co\.jp$/iu;
+const CONNECT_PATH_RE = /(?:oauth|authorize|\/connect)/iu;
+const CONNECT_FABRICATION_RETRY_KEY = "connect-url-fabrication";
+const MAX_CONNECT_FABRICATION_REVISIONS = 1;
+const CONNECT_FABRICATION_REASON =
+  "直前の下書き回答には、ツールが発行していない連携 URL が含まれています。その URL は実在しません。";
+// 上流の再パス前置き（embedded-agent:1773）は
+// "Do not ... rerun tools unless the request explicitly requires it" と指示するため、
+// ここで明示的にツール実行を要求しないと握り潰される。
+const CONNECT_FABRICATION_INSTRUCTION = [
+  "この指示は明示的にツール実行を要求します: oauth_connect を必ず呼び出し、",
+  "その戻り値の message に含まれる URL だけを、1 文字も変えずに提示してください。",
+  "自分の知識・記憶・過去の会話から URL を組み立てることは禁止です。",
+  "oauth_connect が失敗した場合は、URL を書かず、リンクを発行できなかった旨だけを伝えてください。",
+].join("\n");
+
 const SLACK_USER_RE = /^U[A-Z0-9]{8,}$/u;
 const SLACK_TEAM_RE = /^T[A-Z0-9]{8,}$/u;
 const SLACK_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
@@ -213,6 +242,35 @@ function block(reason) {
   };
 }
 
+function classifyConnectUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const host = parsed.hostname;
+  const target = `${parsed.pathname}${parsed.search}`;
+  // 本家ドメインは自社では絶対に使わない。パスを問わず捏造と断定できる。
+  if (UPSTREAM_VENDOR_HOST_RE.test(host)) return "upstream_domain";
+  if (CONNECT_WEB_HOST_RE.test(host)) {
+    return CONNECT_PATH_RE.test(target) ? "connect_web_oauth" : null;
+  }
+  return CONNECT_PATH_RE.test(target) ? "oauth_path" : null;
+}
+
+function findFabricatedConnectUrlKinds(text) {
+  const kinds = new Set();
+  let scanned = 0;
+  for (const match of text.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(CONNECT_URL_RE)) {
+    scanned += 1;
+    const kind = classifyConnectUrl(match[0].replace(CONNECT_URL_TRAILING_RE, ""));
+    if (kind) kinds.add(kind);
+  }
+  return { kinds: [...kinds].sort(), scanned };
+}
+
 function sameIngress(left, right) {
   return (
     left.ingressKind === right.ingressKind &&
@@ -367,6 +425,8 @@ export function createCallerIdentityPlugin({
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
+  const toolCallsByRun = new Map();
+  const connectRevisionsByRun = new Map();
 
   function pruneState(nowMs) {
     for (const [key, ingress] of pendingByMessage) {
@@ -1023,6 +1083,8 @@ export function createCallerIdentityPlugin({
       runId: eventRunId,
       consumedAtMs: nowMs,
     });
+    // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
+    toolCallsByRun.set(eventRunId, (toolCallsByRun.get(eventRunId) ?? 0) + 1);
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
@@ -1037,11 +1099,56 @@ export function createCallerIdentityPlugin({
     };
   }
 
+  // 第3層防御。0 tool call のターンで捏造された連携 URL を、送信前に握り潰して
+  // ハーネスへ「もう 1 パス」を要求する（＝定型文で返さず、実際に oauth_connect を呼ばせる）。
+  // 上流契約: before_agent_finalize は lastAssistantMessage が非空のときだけ走り、
+  // revise は runId x idempotencyKey の予算で必ず打ち切られる（openclaw 2026.7.1 実測）。
+  function guardConnectUrlFabrication(event, ctx, logger) {
+    const eventRunId = canonicalInvocationId(event?.runId);
+    const contextRunId = canonicalInvocationId(ctx?.runId);
+    if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    // (a) teamagent tool call が 1 件でもあれば、URL はツール発行でありうる。触らない。
+    if ((toolCallsByRun.get(eventRunId) ?? 0) > 0) return undefined;
+    // (b) 本文が無ければ利用者にも何も届かない。
+    if (typeof event?.lastAssistantMessage !== "string") return undefined;
+    const reply = event.lastAssistantMessage.trim();
+    if (!reply) return undefined;
+    // (c) 連携 URL が含まれるときだけ介入する。
+    const { kinds } = findFabricatedConnectUrlKinds(reply);
+    if (kinds.length === 0) return undefined;
+    // (d) 自前の予算。上流予算に依存せずループ不在を担保する。
+    const revisions = connectRevisionsByRun.get(eventRunId) ?? 0;
+    if (revisions >= MAX_CONNECT_FABRICATION_REVISIONS) {
+      logger?.warn?.(
+        `${PLUGIN_ID}: connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 ` +
+          `kinds=${kinds.join("+")} outcome=budget_exhausted revise_attempt=${revisions}`,
+      );
+      return undefined;
+    }
+    connectRevisionsByRun.set(eventRunId, revisions + 1);
+    // G7: 本文・URL 実体・Slack 識別子は載せない（捏造 URL には user_id が埋まっていた）。
+    logger?.warn?.(
+      `${PLUGIN_ID}: connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 ` +
+        `kinds=${kinds.join("+")} outcome=revised revise_attempt=${revisions + 1}`,
+    );
+    return {
+      action: "revise",
+      reason: CONNECT_FABRICATION_REASON,
+      retry: {
+        instruction: CONNECT_FABRICATION_INSTRUCTION,
+        idempotencyKey: CONNECT_FABRICATION_RETRY_KEY,
+        maxAttempts: MAX_CONNECT_FABRICATION_REVISIONS,
+      },
+    };
+  }
+
   function releaseAgentRun(event, ctx) {
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
     if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return;
     ingressByRun.delete(eventRunId);
+    toolCallsByRun.delete(eventRunId);
+    connectRevisionsByRun.delete(eventRunId);
     for (const [key, invocation] of consumedInvocations) {
       if (invocation.runId === eventRunId) {
         consumedInvocations.delete(key);
@@ -1072,6 +1179,9 @@ export function createCallerIdentityPlugin({
         bindAgentRun(event, ctx, api.logger);
       });
       api.on("before_tool_call", (event, ctx) => signToolCall(event, ctx));
+      api.on("before_agent_finalize", (event, ctx) =>
+        guardConnectUrlFabrication(event, ctx, api.logger),
+      );
       api.on("agent_end", (event, ctx) => {
         releaseAgentRun(event, ctx);
       });

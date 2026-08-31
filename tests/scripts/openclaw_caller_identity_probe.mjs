@@ -13,6 +13,7 @@
 //   {channel:"slack", messageProvider:"slack", channelId:X, chatId:X, senderId} を返し、
 //   X はセッション鍵由来。チャンネルの app_mention では `:thread:<ts>` が付く。
 //   agent の hook ctx に conversationId は存在しない。
+import { readFileSync } from "node:fs";
 import { createCallerIdentityPlugin } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
@@ -108,6 +109,130 @@ function scenario({ sessionKey, inboundTo, inboundFrom, runRawId, toolChannelId 
   };
 }
 
+// ── 第3層防御（連携 URL 捏造の封鎖）のシナリオ ──────────────────────────
+// 本番実測 2026-08-31: 0 tool call のターンで本家ドメインの連携 URL が捏造され
+// 利用者へ届いた。MCP 境界の決定論分岐は tool 呼び出し後にしか効かないため、
+// before_agent_finalize が最後の砦になる。ここは常に走る形で塞ぐ。
+const CONNECT_URL_PATTERNS = JSON.parse(
+  readFileSync(new URL("../fixtures/connect_url_patterns.json", import.meta.url), "utf8"),
+);
+const FABRICATED_REPLY = [
+  "Google と Slack の連携リンクをお出しします。開いて「許可」を押すと完了です。",
+  "Google 連携: https://connect.openclaw.ai/oauth/google?user_id=U09MBDFQ16J",
+  "Slack 連携: https://connect.openclaw.ai/oauth/slack?user_id=U09MBDFQ16J",
+].join("\n");
+
+function connectGuardScenario({
+  lastAssistantMessage,
+  toolName = null,
+  runId = "run-1",
+  finalizeRunId = "run-1",
+  finalizeCtxRunId = null,
+  repeat = 1,
+} = {}) {
+  const { handlers, logs } = makePlugin();
+  const sessionKey = DM_SESSION_KEY;
+
+  handlers.get("message_received")(
+    {
+      from: `slack:${USER}`,
+      senderId: USER,
+      messageId: TS,
+      metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+    },
+    { channelId: "slack", conversationId: `user:${USER}`, sessionKey, senderId: USER, messageId: TS },
+  );
+  handlers.get("before_model_resolve")(
+    { prompt: "probe" },
+    {
+      runId,
+      agentId: "teamagent",
+      sessionKey,
+      sessionId: "sid",
+      trigger: "user",
+      ...agentCtxFields(USER),
+    },
+  );
+
+  let toolBlocked = null;
+  if (toolName) {
+    const toolResult = handlers.get("before_tool_call")(
+      {
+        toolName,
+        runId,
+        toolCallId: "tc-1",
+        params: { _user_context: { slack_user_id: USER } },
+      },
+      { toolName, runId, toolCallId: "tc-1", sessionKey, channelId: `user:${USER}` },
+    );
+    toolBlocked = Boolean(toolResult?.block);
+  }
+
+  const results = [];
+  for (let i = 0; i < repeat; i += 1) {
+    results.push(
+      handlers.get("before_agent_finalize")(
+        { runId: finalizeRunId, sessionId: "sid", stopHookActive: false, lastAssistantMessage },
+        {
+          runId: finalizeCtxRunId ?? finalizeRunId,
+          agentId: "teamagent",
+          sessionKey,
+          sessionId: "sid",
+        },
+      ) ?? null,
+    );
+  }
+  const last = results[results.length - 1];
+  return {
+    toolBlocked,
+    intervened: last?.action === "revise",
+    action: last?.action ?? null,
+    instruction: last?.retry?.instruction ?? null,
+    idempotencyKey: last?.retry?.idempotencyKey ?? null,
+    maxAttempts: last?.retry?.maxAttempts ?? null,
+    reason: last?.reason ?? null,
+    firstIntervened: results[0]?.action === "revise",
+    logs,
+  };
+}
+
+// fixture（単一正本）の各 URL が、実装の判定と一致すること。
+function connectUrlPatternMatrix() {
+  const check = (entry, expectMatch) => {
+    const reply = `連携はこちら ${entry.url} です`;
+    const { handlers } = makePlugin();
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+      },
+      { channelId: "slack", conversationId: `user:${USER}`, sessionKey: DM_SESSION_KEY, senderId: USER, messageId: TS },
+    );
+    handlers.get("before_model_resolve")(
+      { prompt: "probe" },
+      {
+        runId: "run-1",
+        agentId: "teamagent",
+        sessionKey: DM_SESSION_KEY,
+        sessionId: "sid",
+        trigger: "user",
+        ...agentCtxFields(USER),
+      },
+    );
+    const out = handlers.get("before_agent_finalize")(
+      { runId: "run-1", sessionId: "sid", stopHookActive: false, lastAssistantMessage: reply },
+      { runId: "run-1", agentId: "teamagent", sessionKey: DM_SESSION_KEY, sessionId: "sid" },
+    );
+    return { url: entry.url, expectMatch, matched: out?.action === "revise" };
+  };
+  return [
+    ...CONNECT_URL_PATTERNS.must_match.map((e) => check(e, true)),
+    ...CONNECT_URL_PATTERNS.must_not_match.map((e) => check(e, false)),
+  ];
+}
+
 const CHANNEL_SESSION_KEY =
   `agent:teamagent:slack:channel:${CHANNEL.toLowerCase()}:thread:${TS}`;
 const DM_SESSION_KEY = `agent:teamagent:slack:direct:${USER.toLowerCase()}`;
@@ -164,6 +289,62 @@ const report = {
     runRawId: `${USER.toLowerCase()}:thread:${TS}`,
     toolChannelId: `user:${USER}`,
   }),
+  // ── 第3層防御 ──────────────────────────────────────────────────────
+  // ①0 tool call ＋ 捏造 URL → revise を返し、instruction がツール実行を明示要求する。
+  connect_fabricated_zero_tool: connectGuardScenario({
+    lastAssistantMessage: FABRICATED_REPLY,
+  }),
+  // ②0 tool call ＋ URL 無し（雑談）→ 不介入。intent ではなく出力を見ている証明。
+  connect_no_url_zero_tool: connectGuardScenario({
+    lastAssistantMessage: "こんにちは。今日のご予定について何かお手伝いできますか？",
+  }),
+  // ③tool call あり（search）＋ 一般 URL → 不介入。
+  connect_other_tool_generic_url: connectGuardScenario({
+    lastAssistantMessage: "資料はこちらです https://example.com/help をご覧ください",
+    toolName: "teamagent__search",
+  }),
+  // ④oauth_connect を呼んだ run ＋ 正規 URL → 不介入（条件(a)で除外されること）。
+  connect_after_oauth_connect: connectGuardScenario({
+    lastAssistantMessage:
+      "連携リンクです https://connect.newstv.co.jp/oauth2/callback?state=x を開いてください",
+    toolName: "teamagent__oauth_connect",
+  }),
+  // ⑤同一 run で 2 回目 → 自前予算で不介入（上流予算に依存しないループ不在の担保）。
+  connect_budget_exhausted: connectGuardScenario({
+    lastAssistantMessage: FABRICATED_REPLY,
+    repeat: 2,
+  }),
+  // ⑥lastAssistantMessage 未定義 → 不介入（fail-open）。
+  connect_missing_message: connectGuardScenario({
+    lastAssistantMessage: undefined,
+  }),
+  // ⑦event と ctx の runId が食い違う finalize → 不介入。
+  //   （signToolCall と同じ「権威 run 束縛」の規律を、この hook でも緩めていないこと）
+  connect_run_mismatch: connectGuardScenario({
+    lastAssistantMessage: FABRICATED_REPLY,
+    finalizeRunId: "run-2",
+    finalizeCtxRunId: "run-1",
+  }),
+  // ⑦' 別 run（その run 自身は 0 tool call）の finalize は介入する。
+  //   カウンタが run 単位であることの明示。前段の run が tool を呼んでいても、
+  //   捏造したのは別 run なので見逃さない。
+  connect_other_run_zero_tool: connectGuardScenario({
+    lastAssistantMessage: FABRICATED_REPLY,
+    toolName: "teamagent__search",
+    finalizeRunId: "run-2",
+  }),
+  // ⑧revise 後のパスで oauth_connect が呼ばれ counter>=1 になった run では再介入しない。
+  //   ループ不在を上流挙動でなく自前条件 (a) で担保していることの証明（レビュー指摘）。
+  connect_recovered_after_tool_call: (() => {
+    const first = connectGuardScenario({ lastAssistantMessage: FABRICATED_REPLY });
+    const recovered = connectGuardScenario({
+      lastAssistantMessage: FABRICATED_REPLY,
+      toolName: "teamagent__oauth_connect",
+    });
+    return { firstIntervened: first.intervened, recoveredIntervened: recovered.intervened };
+  })(),
+  // fixture（単一正本）と実装の一致。
+  connect_url_pattern_matrix: connectUrlPatternMatrix(),
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");
