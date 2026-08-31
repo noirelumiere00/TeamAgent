@@ -111,6 +111,20 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     # 汚染エントリを切り離した。再発時はさらに v3 へ回す（中身の修正ではなく隔離が正解）。
     assert "--mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/edge" in TEXT
+    # 2026-08-31 vendored node: 上流が同一版のままバイト差し替え（CodeBuild 実測
+    # 885209fa… ≠ pin b998f239…）。契約 pin の更新は世代 publish 儀式が要るため、
+    # pin と一致する正規 apk を同梱して取得元ドリフトから切り離した。
+    vendored = ROOT / "infra/docker/vendor/nodejs-24.18.1-r0.apk"
+    assert _sha256(vendored) == (
+        "594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850"
+    )
+    assert (
+        "ARG NODE_VENDORED_APK_SHA256="
+        "594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850"
+    ) in TEXT
+    assert "COPY infra/docker/vendor/nodejs-24.18.1-r0.apk" in TEXT
+    assert "add /tmp/vendor/nodejs-24.18.1-r0.apk" in TEXT
+    assert "/tmp/vendor; \\" in TEXT  # 後始末（イメージへ残さない）
     assert "https://dl-cdn.alpinelinux.org/alpine/v3.24" in TEXT
 
 
