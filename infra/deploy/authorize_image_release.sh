@@ -253,7 +253,7 @@ if [ "$PREASSUMED_LAUNCHER" = "false" ]; then
       --region "$REGION" \
       --role-arn "$LAUNCHER_ROLE_ARN" \
       --role-session-name "$SESSION_NAME" \
-      --duration-seconds 10800 \
+      --duration-seconds 3600 \
       --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken,Expiration]' \
       --output text
   )" || die "could not assume the release launcher role"
