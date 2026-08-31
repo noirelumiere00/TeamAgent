@@ -275,6 +275,21 @@ revise が予算切れ（3 回失敗）した場合、現状の設計では**素
 6. `lastAssistantMessage` 未定義 → 不介入（fail-open）
 7. ログに URL 実体・本文が出ない（G7）
 
+### 7-1b. 台帳の寿命（レビュー指摘 2026-08-31）
+
+`toolCallsByRun` / `connectRevisionsByRun` の掃除を `agent_end`（`releaseAgentRun`）だけに
+任せると、agent_end が発火しない run（abort / crash / timeout）が残留し、長寿命プロセスで
+無制限に育つ。他の Map と同じ TTL 掃除（`INBOUND_CONTEXT_TTL_MS`）に加え、
+上限（`MAX_CONNECT_GUARD_RUNS`）超過時は最古から捨てる。
+
+- 掃除は `pruneConnectGuardState` に切り出し、`pruneState` と guard の**両方**から呼ぶ
+  （finalize だけが走る経路でも育たないようにする）
+- guard から `pruneState` 全体は呼ばない。容量超過の `fail` を握り潰して fail-open させないため
+- `MAX_TRACKED_CONTEXTS` の `fail` には**相乗りさせない**。この防御の溢れで署名経路を
+  落とすのは不釣り合いで、脱落しても上流の revise 予算がループを止める
+- ケース 9（上限）とケース 10（TTL）を probe に追加。**両方が独立に必要**——
+  上限退避だけでは「少数 run が長期残留」が緑のまま通る（実測で確認）
+
 ### 7-2. 変異テスト（緑の実質性）
 
 - (a) の tool-call カウンタを常に 0 にする改変 → ケース 3・4 が赤

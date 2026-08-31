@@ -2583,3 +2583,31 @@ def test_intervention_log_keeps_the_g7_discipline() -> None:
         assert "連携リンク" not in log
         assert "kinds=" in log
         assert "outcome=revised" in log
+
+
+def test_connect_guard_ledger_is_bounded_without_agent_end() -> None:
+    """agent_end が発火しない run を大量に流しても台帳が無制限に育たないこと。
+
+    掃除を agent_end(releaseAgentRun)だけに任せると、abort/crash/timeout 経路の
+    run が残留し、長寿命プロセスでリークする(2026-08-31 レビュー指摘)。
+    TTL 掃除に加えて上限超過時に最古から捨てるため、最初の run の予算記録は
+    やがて落ちて再び介入できるようになる。台帳が無制限に育つ実装では
+    `firstEvicted` が False のままになる。
+    """
+    bound = _caller_identity_report()["connect_ledger_bound"]
+    assert bound["firstIntervened"] is True
+    assert bound["secondBlockedByBudget"] is True, "自前予算が効いていない"
+    assert bound["threw"] is None, bound["threw"]
+    assert bound["firstEvicted"] is True, "上限退避が効かず台帳が無制限に育つ"
+
+
+def test_connect_guard_ledger_entries_expire_by_ttl() -> None:
+    """TTL 超過の run 記録が掃除されること。
+
+    上限退避は「上限を超えたとき」しか効かないため、少数 run が長時間残る
+    ケースはこの TTL が守る。上限退避だけでは緑のままになる穴を塞ぐ。
+    """
+    ttl = _caller_identity_report()["connect_ledger_ttl"]
+    assert ttl["firstIntervened"] is True
+    assert ttl["blockedWhileFresh"] is True, "TTL 内なのに予算が効いていない"
+    assert ttl["expiredIntervened"] is True, "TTL 超過の記録が掃除されていない"

@@ -36,6 +36,13 @@ const UPSTREAM_VENDOR_HOST_RE = /(?:^|\.)openclaw\.ai$/iu;
 const CONNECT_WEB_HOST_RE = /(?:^|\.)newstv\.co\.jp$/iu;
 const CONNECT_PATH_RE = /(?:oauth|authorize|\/connect)/iu;
 const CONNECT_FABRICATION_RETRY_KEY = "connect-url-fabrication";
+// 第3層の run 台帳は agent_end だけに掃除を任せない。abort/crash/timeout で
+// agent_end が発火しない run が残留し、長寿命プロセスで無制限に育つため、
+// 他の Map と同じ TTL 掃除に加えて上限で古いものから捨てる。
+// ここでの脱落は「介入を 1 回余分に許す/取りこぼす」だけで、上流の revise 予算
+// (runId x idempotencyKey) が最終的にループを止める。署名経路を落とす
+// MAX_TRACKED_CONTEXTS の fail には意図的に相乗りさせない。
+const MAX_CONNECT_GUARD_RUNS = MAX_TRACKED_CONTEXTS;
 const MAX_CONNECT_FABRICATION_REVISIONS = 1;
 const CONNECT_FABRICATION_REASON =
   "直前の下書き回答には、ツールが発行していない連携 URL が含まれています。その URL は実在しません。";
@@ -428,7 +435,24 @@ export function createCallerIdentityPlugin({
   const toolCallsByRun = new Map();
   const connectRevisionsByRun = new Map();
 
+  function pruneConnectGuardState(nowMs) {
+    for (const ledger of [toolCallsByRun, connectRevisionsByRun]) {
+      for (const [runId, entry] of ledger) {
+        if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
+          ledger.delete(runId);
+        }
+      }
+      // TTL 内でも上限を超えたら、最も古い記録から落とす（挿入順＝更新順）。
+      while (ledger.size > MAX_CONNECT_GUARD_RUNS) {
+        const oldest = ledger.keys().next();
+        if (oldest.done) break;
+        ledger.delete(oldest.value);
+      }
+    }
+  }
+
   function pruneState(nowMs) {
+    pruneConnectGuardState(nowMs);
     for (const [key, ingress] of pendingByMessage) {
       if (nowMs - ingress.receivedAtMs > INBOUND_CONTEXT_TTL_MS) {
         pendingByMessage.delete(key);
@@ -1084,7 +1108,10 @@ export function createCallerIdentityPlugin({
       consumedAtMs: nowMs,
     });
     // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
-    toolCallsByRun.set(eventRunId, (toolCallsByRun.get(eventRunId) ?? 0) + 1);
+    toolCallsByRun.set(eventRunId, {
+      count: (toolCallsByRun.get(eventRunId)?.count ?? 0) + 1,
+      updatedAtMs: nowMs,
+    });
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
@@ -1104,11 +1131,16 @@ export function createCallerIdentityPlugin({
   // 上流契約: before_agent_finalize は lastAssistantMessage が非空のときだけ走り、
   // revise は runId x idempotencyKey の予算で必ず打ち切られる（openclaw 2026.7.1 実測）。
   function guardConnectUrlFabrication(event, ctx, logger) {
+    const nowMs = Date.now();
+    // finalize だけが走る経路でも台帳が育たないよう、ここでも掃除する。
+    // pruneState 全体は呼ばない（容量超過の fail を握り潰して fail-open
+    // させないため。掃除は第3層の台帳に限定する）。
+    pruneConnectGuardState(nowMs);
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
     if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
     // (a) teamagent tool call が 1 件でもあれば、URL はツール発行でありうる。触らない。
-    if ((toolCallsByRun.get(eventRunId) ?? 0) > 0) return undefined;
+    if ((toolCallsByRun.get(eventRunId)?.count ?? 0) > 0) return undefined;
     // (b) 本文が無ければ利用者にも何も届かない。
     if (typeof event?.lastAssistantMessage !== "string") return undefined;
     const reply = event.lastAssistantMessage.trim();
@@ -1117,7 +1149,7 @@ export function createCallerIdentityPlugin({
     const { kinds } = findFabricatedConnectUrlKinds(reply);
     if (kinds.length === 0) return undefined;
     // (d) 自前の予算。上流予算に依存せずループ不在を担保する。
-    const revisions = connectRevisionsByRun.get(eventRunId) ?? 0;
+    const revisions = connectRevisionsByRun.get(eventRunId)?.count ?? 0;
     if (revisions >= MAX_CONNECT_FABRICATION_REVISIONS) {
       logger?.warn?.(
         `${PLUGIN_ID}: connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 ` +
@@ -1125,7 +1157,7 @@ export function createCallerIdentityPlugin({
       );
       return undefined;
     }
-    connectRevisionsByRun.set(eventRunId, revisions + 1);
+    connectRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
     // G7: 本文・URL 実体・Slack 識別子は載せない（捏造 URL には user_id が埋まっていた）。
     logger?.warn?.(
       `${PLUGIN_ID}: connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 ` +

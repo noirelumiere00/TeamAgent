@@ -196,6 +196,64 @@ function connectGuardScenario({
   };
 }
 
+// agent_end が発火しない run（abort/crash/timeout 経路）を大量に流しても、
+// 第3層の run 台帳が無制限に育たないこと。掃除を agent_end だけに任せていると
+// 長寿命プロセスでリークする（レビュー指摘 2026-08-31）。
+function connectGuardLedgerBound({ floodRuns = 1100 } = {}) {
+  const { handlers } = makePlugin();
+  const finalize = (runId) =>
+    handlers.get("before_agent_finalize")(
+      { runId, sessionId: "sid", stopHookActive: false, lastAssistantMessage: FABRICATED_REPLY },
+      { runId, agentId: "teamagent", sessionKey: DM_SESSION_KEY, sessionId: "sid" },
+    ) ?? null;
+
+  const firstRunId = "run-flood-first";
+  const firstIntervened = finalize(firstRunId)?.action === "revise";
+  // 同じ run の 2 回目は自前予算で止まる（台帳が生きている証明）。
+  const secondBlockedByBudget = finalize(firstRunId) === null;
+
+  let threw = null;
+  try {
+    // agent_end を一切呼ばずに上限超の run を流す。
+    for (let i = 0; i < floodRuns; i += 1) finalize(`run-flood-${i}`);
+  } catch (error) {
+    threw = String(error);
+  }
+  // 上限退避で最古の記録が落ちているなら、最初の run は再び介入できる。
+  // 台帳が無制限に育つ実装ではここが false のままになる。
+  const firstEvicted = finalize(firstRunId)?.action === "revise";
+  return { firstIntervened, secondBlockedByBudget, threw, firstEvicted };
+}
+
+// TTL 掃除の駆動。上限退避（connectGuardLedgerBound）は「上限を超えたとき」しか
+// 効かないので、少数 run が長時間残るケースはこちらで守る。時計を進めるだけで
+// 実装側に試験用の seam を足さない。
+function connectGuardTtlEviction({ advanceMs = 11 * 60 * 1000 } = {}) {
+  const { handlers } = makePlugin();
+  const finalize = (runId) =>
+    handlers.get("before_agent_finalize")(
+      { runId, sessionId: "sid", stopHookActive: false, lastAssistantMessage: FABRICATED_REPLY },
+      { runId, agentId: "teamagent", sessionKey: DM_SESSION_KEY, sessionId: "sid" },
+    ) ?? null;
+
+  const runId = "run-ttl";
+  const firstIntervened = finalize(runId)?.action === "revise";
+  const blockedWhileFresh = finalize(runId) === null;
+
+  const realNow = Date.now;
+  let expiredIntervened = null;
+  try {
+    const base = realNow();
+    Date.now = () => base + advanceMs;
+    // 別 run の finalize が掃除を回し、TTL 超過の run-ttl を落とす。
+    finalize("run-ttl-other");
+    expiredIntervened = finalize(runId)?.action === "revise";
+  } finally {
+    Date.now = realNow;
+  }
+  return { firstIntervened, blockedWhileFresh, expiredIntervened };
+}
+
 // fixture（単一正本）の各 URL が、実装の判定と一致すること。
 function connectUrlPatternMatrix() {
   const check = (entry, expectMatch) => {
@@ -343,6 +401,10 @@ const report = {
     });
     return { firstIntervened: first.intervened, recoveredIntervened: recovered.intervened };
   })(),
+  // ⑨agent_end 無しで大量 run を流しても台帳が上限を超えないこと。
+  connect_ledger_bound: connectGuardLedgerBound(),
+  // ⑩TTL 超過の run 記録が掃除されること（少数 run の長期残留）。
+  connect_ledger_ttl: connectGuardTtlEviction(),
   // fixture（単一正本）と実装の一致。
   connect_url_pattern_matrix: connectUrlPatternMatrix(),
 };
