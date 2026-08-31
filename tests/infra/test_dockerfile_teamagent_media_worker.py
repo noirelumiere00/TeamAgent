@@ -126,12 +126,18 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     # 2026-08-31 vendored ncurses trio: edge スナップショット更新（0815→0822）で lock 記載の
     # 3パッケージが取得不能に（r7/r8 二重実測）。lock/契約は不変のまま正規署名 apk を同梱。
     for fname, sha in [
-        ("libncursesw-6.6_p20260815-r0.apk",
-         "6c40fda66e9857034aad409bca928ccaf18260f4ed1b813748d9c247ceb5c4b6"),
-        ("libpanelw-6.6_p20260815-r0.apk",
-         "6f9188bdefbdc9275476827414a92ee2ed343f9a59d1487e092436db89b35cd8"),
-        ("ncurses-terminfo-base-6.6_p20260815-r0.apk",
-         "23d428be5faea2d7364df2a2941b977bb19d2ab7b791960eebe426fe32fcc8cc"),
+        (
+            "libncursesw-6.6_p20260815-r0.apk",
+            "6c40fda66e9857034aad409bca928ccaf18260f4ed1b813748d9c247ceb5c4b6",
+        ),
+        (
+            "libpanelw-6.6_p20260815-r0.apk",
+            "6f9188bdefbdc9275476827414a92ee2ed343f9a59d1487e092436db89b35cd8",
+        ),
+        (
+            "ncurses-terminfo-base-6.6_p20260815-r0.apk",
+            "23d428be5faea2d7364df2a2941b977bb19d2ab7b791960eebe426fe32fcc8cc",
+        ),
     ]:
         assert _sha256(ROOT / "infra/docker/vendor" / fname) == sha
         assert f"/tmp/vendor/{fname}" in TEXT
