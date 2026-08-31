@@ -63,6 +63,16 @@ ARG ALPINE_STABLE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.24
 # 切り離す。撤去条件: 次の世代 publish 便で契約 pin を現行上流へ追随させたとき。
 ARG NODE_VENDORED_APK_SHA256=594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850
 COPY infra/docker/vendor/nodejs-24.18.1-r0.apk /tmp/vendor/nodejs-24.18.1-r0.apk
+# 2026-08-31: edge の ncurses スナップショット更新（0815→0822）で lock 記載の3パッケージが
+# 取得不能に（r7/r8 二重実測・差分は ncurses 系3行のみ）。lock/契約は世代 publish 儀式なしに
+# 変更不可のため、lock と一致する正規署名 apk を同梱。撤去条件: 便γの世代 publish で lock 追随時。
+ARG NCURSESW_VENDORED_APK_SHA256=6c40fda66e9857034aad409bca928ccaf18260f4ed1b813748d9c247ceb5c4b6
+ARG PANELW_VENDORED_APK_SHA256=6f9188bdefbdc9275476827414a92ee2ed343f9a59d1487e092436db89b35cd8
+ARG TERMINFO_VENDORED_APK_SHA256=23d428be5faea2d7364df2a2941b977bb19d2ab7b791960eebe426fe32fcc8cc
+COPY infra/docker/vendor/libncursesw-6.6_p20260815-r0.apk \
+     infra/docker/vendor/libpanelw-6.6_p20260815-r0.apk \
+     infra/docker/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk \
+     /tmp/vendor/
 ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
 ARG CHROMIUM_VERSION=150.0.7871.114
 ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
@@ -96,9 +106,15 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
       "$ALPINE_STABLE_REPOSITORY" "$ALPINE_STABLE_REPOSITORY" \
       > /tmp/teamagent-apk-repositories; \
     printf '%s  %s\n' "$NODE_VENDORED_APK_SHA256" /tmp/vendor/nodejs-24.18.1-r0.apk | sha256sum -c -; \
+    printf '%s  %s\n' "$NCURSESW_VENDORED_APK_SHA256" /tmp/vendor/libncursesw-6.6_p20260815-r0.apk | sha256sum -c -; \
+    printf '%s  %s\n' "$PANELW_VENDORED_APK_SHA256" /tmp/vendor/libpanelw-6.6_p20260815-r0.apk | sha256sum -c -; \
+    printf '%s  %s\n' "$TERMINFO_VENDORED_APK_SHA256" /tmp/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk | sha256sum -c -; \
     SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
       --repositories-file /tmp/teamagent-apk-repositories \
-      add /tmp/vendor/nodejs-24.18.1-r0.apk; \
+      add /tmp/vendor/nodejs-24.18.1-r0.apk \
+        /tmp/vendor/libncursesw-6.6_p20260815-r0.apk \
+        /tmp/vendor/libpanelw-6.6_p20260815-r0.apk \
+        /tmp/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk; \
     SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
       --cache-dir /var/cache/apk \
       --cache-max-age 1440 \
