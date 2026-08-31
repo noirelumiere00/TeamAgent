@@ -56,6 +56,13 @@ USER 0
 
 ARG ALPINE_EDGE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
 ARG ALPINE_STABLE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.24
+# 2026-08-31: alpine edge が同一バージョン（24.18.1-r0）のまま /usr/bin/node のバイトを
+# 差し替え（CodeBuild 実測 885209fa…・pin 不一致で段3 が 4 連続停止）。契約の
+# binary.node.sha256 更新は buildspec 世代 publish 儀式を要するため、pin と一致する
+# 正規署名済み apk（中身 b998f239… を抽出実測）を repo 同梱し、取得元ドリフトから
+# 切り離す。撤去条件: 次の世代 publish 便で契約 pin を現行上流へ追随させたとき。
+ARG NODE_VENDORED_APK_SHA256=594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850
+COPY infra/docker/vendor/nodejs-24.18.1-r0.apk /tmp/vendor/nodejs-24.18.1-r0.apk
 ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
 ARG CHROMIUM_VERSION=150.0.7871.114
 ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
@@ -88,6 +95,10 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
       "$ALPINE_EDGE_REPOSITORY" "$ALPINE_EDGE_REPOSITORY" \
       "$ALPINE_STABLE_REPOSITORY" "$ALPINE_STABLE_REPOSITORY" \
       > /tmp/teamagent-apk-repositories; \
+    printf '%s  %s\n' "$NODE_VENDORED_APK_SHA256" /tmp/vendor/nodejs-24.18.1-r0.apk | sha256sum -c -; \
+    SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
+      --repositories-file /tmp/teamagent-apk-repositories \
+      add /tmp/vendor/nodejs-24.18.1-r0.apk; \
     SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
       --cache-dir /var/cache/apk \
       --cache-max-age 1440 \
@@ -124,7 +135,7 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
     sha256sum /usr/bin/python3 /usr/bin/node /usr/bin/ffmpeg \
       /usr/lib/chromium/chromium \
       > /usr/share/teamagent/provenance/runtime-binaries.sha256; \
-    rm -f /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories; \
+    rm -rf /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories /tmp/vendor; \
     addgroup -g 10001 teamagent; \
     adduser -D -H -h /tmp/teamagent/home -u 10001 -G teamagent teamagent; \
     chmod 1777 /tmp
