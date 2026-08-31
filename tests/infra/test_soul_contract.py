@@ -321,6 +321,33 @@ def test_oauth_connect_delivers_link_in_one_reply(soul: str, label: str, phrase:
     assert phrase in soul, f"1 往復でリンクを届ける規約が欠けている: {label}"
 
 
+# ── ⑪ 連携 URL の捏造禁止（0 tool call でも本家ドメインを使わせない）────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("小見出し", "### 🔴 URL は絶対に自分で書かない"),
+        (
+            "ツールの戻り値だけが正当",
+            "連携リンクとして正当なのは、`oauth_connect` が返した `message` / `url` / `slack_url` の値だけ",
+        ),
+        (
+            "OpenClaw 本家ドメインの禁止",
+            "`openclaw.ai` / `connect.openclaw.ai` など OpenClaw 本家のドメインは自社のものではない。"
+            "ここにつながる URL を書いてはならない",
+        ),
+        ("ツール失敗時は URL を書かない", "ツールを呼べなかった／エラーだったときは、URL を書かない"),
+    ],
+)
+def test_oauth_connect_never_fabricates_urls(soul: str, label: str, phrase: str) -> None:
+    """本番実測（2026-08-31）: 0 tool call で捏造した本家ドメインの URL が利用者に届いた。
+
+    MCP 境界に到達しないターンでも、SOUL が連携 URL の自作を禁止し続けることを契約として固定する。
+    """
+    assert phrase in soul, f"oauth_connect の URL 捏造禁止規約が欠けている: {label}"
+
+
 def test_oauth_connect_section_does_not_soften_the_no_askback_rule(soul: str) -> None:
     """「聞き返す必要は無い」のような**任意に読める**書き方へ後退していないこと。
 
