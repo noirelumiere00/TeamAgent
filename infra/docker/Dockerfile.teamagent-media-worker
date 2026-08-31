@@ -77,7 +77,7 @@ ARG LIBFLAC_PACKAGE_VERSION=1.4.3-r2
 ARG LIBSSH_PACKAGE_VERSION=0.12.2-r0
 ARG MBEDTLS3_PACKAGE_VERSION=3.6.7-r0
 
-RUN --mount=type=cache,id=teamagent-media-apk-arm64,target=/var/cache/apk,sharing=locked \
+RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
     set -eu; \
     cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \

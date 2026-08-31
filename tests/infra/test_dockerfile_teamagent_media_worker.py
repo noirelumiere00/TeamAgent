@@ -106,7 +106,10 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert f"ARG MEDIA_APK_LOCK_SHA256={APK_LOCK_SHA256}" in TEXT
     assert "cmp /tmp/media-apk.lock /tmp/actual-apk.lock" in TEXT
     assert 'io.teamagent.contract.apk-lock-sha256="$MEDIA_APK_LOCK_SHA256"' in TEXT
-    assert "--mount=type=cache,id=teamagent-media-apk-arm64,target=/var/cache/apk" in TEXT
+    # v2: 2026-08-31 に apk キャッシュ汚染を実測（nodejs 24.18.1-r0 の /usr/bin/node が
+    # 上流 apk の実測 sha（pin と一致）と異なるバイトで 2 連続供給された）。id を回して
+    # 汚染エントリを切り離した。再発時はさらに v3 へ回す（中身の修正ではなく隔離が正解）。
+    assert "--mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/edge" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/v3.24" in TEXT
 
