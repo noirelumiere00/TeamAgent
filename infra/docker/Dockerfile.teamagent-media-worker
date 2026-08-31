@@ -289,6 +289,7 @@ COPY infra/docker/media-apk.lock /tmp/media-apk.lock
 RUN set -eu; \
     printf '%s  %s\n' "$MEDIA_APK_LOCK_SHA256" /tmp/media-apk.lock | sha256sum -c -; \
     apk list --installed | awk '{print $1}' | LC_ALL=C sort > /tmp/actual-apk.lock; \
+    diff /tmp/media-apk.lock /tmp/actual-apk.lock || true; \
     cmp /tmp/media-apk.lock /tmp/actual-apk.lock; \
     cp /tmp/media-apk.lock /usr/share/teamagent/provenance/apk-installed.lock; \
     rm /tmp/media-apk.lock /tmp/actual-apk.lock
