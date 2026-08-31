@@ -294,7 +294,7 @@
     }
   },
   "aws_enforcement": {
-    "mode": "attached",
+    "mode": "declaration_only",
     "modes": [
       "declaration_only",
       "attached"
@@ -329,12 +329,16 @@
       "live_measured_at": "2026-08-28（aws iam get-policy AttachmentCount=0 / list-entities-for-policy 全空）",
       "policy_object_measured": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze は存在し DefaultVersionId=v1・UpdateDate=2026-08-24T08:19:15Z（削除されていない）"
     },
-    "window": {
-      "opened_at": "2026-08-31T03:20:00Z",
-      "purpose": "裁定②E: supply-chain adopt の窓。rebind #3 完遂（state の 5 taskdef を live へ・7/7 一致）後、W3-d/W3-e の delta 0 成立条件として 10 attachment を復元した。attach の実行者はユーザー本人（分類器が Claude の IAM 変更を正しく拒否＝E案『attachment-commands は表示のみ』の建て付けどおり）。attach 後の実測 AttachmentCount=10 / list-entities-for-policy = roles 9 + users 1。adopt-apply → detach（W3-g）で閉じて本ブロックを window_history へ移す。",
-      "gate": "human gate 2026-08-31（ユーザーが attach コマンド 10 件を自身の手で実行し AttachmentCount=10 を確認）"
-    },
-    "window_history": [],
+    "window": null,
+    "window_history": [
+      {
+        "opened_at": "2026-08-31T03:20:00Z",
+        "closed_at": "2026-08-31T05:05:00Z",
+        "purpose": "裁定②E: supply-chain adopt の窓。rebind #3 完遂（state の 5 taskdef を live へ・7/7 一致）後、W3-d/W3-e の delta 0 成立条件として 10 attachment を復元した。attach の実行者はユーザー本人（分類器が Claude の IAM 変更を正しく拒否＝E案『attachment-commands は表示のみ』の建て付けどおり）。attach 後の実測 AttachmentCount=10 / list-entities-for-policy = roles 9 + users 1。adopt-apply → detach（W3-g）で閉じて本ブロックを window_history へ移す。",
+        "gate": "human gate 2026-08-31（open: attach 10 件をユーザー実行・AttachmentCount=10 実測 / close: detach 10 件をユーザー実行・AttachmentCount=0 実測）",
+        "outcome": "**未使用のまま close**。窓の目的だった adopt-plan は、guard の HMAC exact/uniform 検査が live に Bootstrap Pin 済み状態を要求することが 4 走の実測で判明し到達不能（run2=HMAC selector 正規表現の樹差 / run3=guard 未初期化変数バグ＝両樹共通・修正済み / run4=exact&uniform＝Pin の構造依存）。ユーザー裁定で adopt+Pin を後日の supply-chain 専用便へ送り、デプロイ便へ直行するルートへ変更。窓の open/close は E 案の初の実運用となり、宣言・checker・実測の 3 点一致（assert-attachment-window 緑）を確認した。"
+      }
+    ],
     "open_close_procedure": {
       "open": [
         "1. aws_enforcement.mode を attached へ、window に opened_at / purpose / gate を書いて commit（human gate ④⑤）",
@@ -396,9 +400,11 @@
     }
   },
   "production_deployment_freeze": {
-    "state": "active",
+    "state": "released",
     "started_at": "2026-08-20T09:15:00Z",
-    "note": "ECS taskdef 登録 / service td 更新 / 承認済み 8 flag / pipeline・admin デプロイ / taskdef ARN 参照 Lambda env / rebind consumer 参照先。state rebind 完了後も activation 完了まで解除しない。",
+    "released_at": "2026-08-31T05:10:00Z",
+    "release_gate": "human gate 2026-08-31（ユーザー裁定: adopt+Pin を後日の supply-chain 専用便へ送り、デプロイ便へ直行する）。runbook activation_freeze.md が『production deployment freeze の解除は generation freeze とは別判断』と明記しており、generation publisher freeze（state=active・unlock は正名化 PR が宣言）と repo 側ゲートは据え置き。解除の前提とした実績: state rebind #3 完遂（7/7 一致）/ 台帳 Wave3 を実行ラインへ取り込み済み / Freeze 窓は open→未使用のまま close（attach 10→detach 0 をユーザー実行・実測）。",
+    "note": "【〜2026-08-31 の凍結対象】ECS taskdef 登録 / service td 更新 / 承認済み 8 flag / pipeline・admin デプロイ / taskdef ARN 参照 Lambda env / rebind consumer 参照先。state rebind 完了後も activation 完了まで解除しない。（release_gate の裁定で解除）",
     "scope_is_operational": true,
     "violations": [
       {
