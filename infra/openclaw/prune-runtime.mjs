@@ -18,6 +18,49 @@ const PLUGIN_ROOTS = [
   path.join(TEAMAGENT_ROOT, "plugins", "teamagent-caller-identity"),
 ];
 const REPORT_PATH = path.join(TEAMAGENT_ROOT, "runtime-prune-report.json");
+
+// BEGIN bundled-skills-pruning
+function listBundledSkillNames(root) {
+  let stat;
+  try {
+    stat = fs.lstatSync(root);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      throw new Error(`bundled skills root is missing: ${root}`);
+    }
+    throw error;
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`bundled skills root must be a real directory: ${root}`);
+  }
+  return fs.readdirSync(root).toSorted();
+}
+
+function pruneBundledSkills(
+  root,
+  removeEntry = (candidate) =>
+    fs.rmSync(candidate, { recursive: true, force: true }),
+) {
+  const removedNames = listBundledSkillNames(root);
+  for (const name of removedNames) {
+    removeEntry(path.join(root, name));
+  }
+  return removedNames;
+}
+
+function assertBundledSkillsPruned(root) {
+  const residualEntries = listBundledSkillNames(root);
+  if (residualEntries.length > 0) {
+    throw new Error(
+      `bundled skills pruning failed: ${JSON.stringify({
+        root,
+        residualEntries,
+      })}`,
+    );
+  }
+}
+// END bundled-skills-pruning
+
 const forbiddenNames = new Set([
   "@openclaw/browser-plugin",
   "@typescript/native-preview",
@@ -837,6 +880,9 @@ const prePruneBareImportContract = collectReachableBareImportContract(
 const productionPackageClosure = computeProductionPackageClosure(
   prePruneBareImportContract.reachableForbiddenPackageNames,
 );
+// The reviewed plugin-operation closure is rooted exclusively in PLUGIN_ROOTS.
+// Strip upstream bundled skills only after that pre-prune closure is fixed.
+const bundledSkillsRemoved = pruneBundledSkills(SKILLS_ROOT);
 const reachableBrowserImplementations = [];
 for (const modulePath of prePruneGraph.reachable) {
   const signals = browserImplementationSignals(
@@ -1298,6 +1344,8 @@ if (
   );
 }
 
+assertBundledSkillsPruned(SKILLS_ROOT);
+
 if (
   forbiddenPackagesRemaining.length > 0 ||
   residualBinDeclarations.length > 0 ||
@@ -1428,5 +1476,11 @@ writeJson(REPORT_PATH, {
   developmentPayload: {
     removedPathCount: developmentPayloadRemoved.length,
     residualPathCount: 0,
+  },
+  skills: {
+    root: toContainerPath(SKILLS_ROOT),
+    removedEntryCount: bundledSkillsRemoved.length,
+    removedNames: bundledSkillsRemoved,
+    residualEntryCount: 0,
   },
 });
