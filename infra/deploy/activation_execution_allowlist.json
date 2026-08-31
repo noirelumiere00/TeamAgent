@@ -224,9 +224,18 @@
       "source_sha": "e2fa258bb2b25505912a2f68b6bcf24571c9a95c",
       "gate": "human gate 2026-08-31（承認済みマスタープランの背骨 S3/S4 前提の充足）",
       "source_note": "adopt-plan 初走が snapshot 段階で die（deployed HMAC primary selector is outside the exact contract）。真因は実行ラインの guard が dev より古く、既知の 4 差分・計 15 行を欠いていたこと: ①report-link-hmac の live selector 正規表現（live の report-link-hmac-RKEHWS を観測できず plan が 1 行も作れない・今回の直接原因）②use_attachment_tools の desired-state binding 2 行（W1-d・欠けたままだと runtime_guard.tf:541 で guarded plan が fail-closed）③④openclaw entrypoint の node path ×3（live openclaw:41 は wolfi＝/usr/bin/node）。dev tip（#347 後）の guard blob を丸ごと取り込み。取り込み前に diff 全量が上記 4 点のみ・E案 checker の新コマンド呼び出しなし（旧 checker 互換）を実測確認。source_sha は use_attachment_tools 修正の dev 側コミット（e2fa258）を錨とし、blob 取り込みのため patch-id は dev と一致しない。"
+    },
+    {
+      "sha": "d603c8c37a7744bb1e3a472eb0bbe884f132f535",
+      "subject": "fix(guard): adopt-plan の未初期化 3 変数を空で束縛（dev 側と同一パッチ）",
+      "patch_id": "aa4f7521f22a89c723574992462df6f0b1d294cb",
+      "source_pr": "#348",
+      "source_sha": "596a810b9ff650a637846436dd365b55dc93dd3b",
+      "gate": "human gate 2026-08-31（承認済みマスタープラン背骨 S4 の前提充足）",
+      "source_note": "adopt-plan run3 が build_live_injection_args 到達時に MIGRATION_ID: unbound variable で die（guard の潜在バグ・両樹共通・adopt 経路が snapshot を通過したのは今回が初）。dev 側修正と同一パッチを git apply で適用。"
     }
   ],
-  "expected_head": "2d5519a8559f8298331737e1aafa6dc931aea0e5",
+  "expected_head": "d603c8c37a7744bb1e3a472eb0bbe884f132f535",
   "excluded_commits": [
     {
       "sha": "4f7da58",
