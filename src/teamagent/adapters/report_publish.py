@@ -312,3 +312,26 @@ def publish_artifact(
         request_id=request_id,
         query=query,
     )
+
+
+def publish_artifact_result(
+    path: str, kind: str, *, request_id: str = "vseo", query: str = ""
+) -> PublishedObject | None:
+    """publish_artifact の PublishedObject 版（短縮URL /r 化用）。
+
+    生の署名付きURLは ECS タスクロールの一時 credential で署名されるため、宣言上の 7 日
+    ではなく**セッション残り（最大1時間）で失効する**（2026-08-31 実測: MaxSessionDuration
+    =3600）。受け手に渡せる寿命が要る呼び出し側は、この結果を
+    ``skills/_shared/report_delivery.delivery_url()`` へ通して /r 短縮URLにすること。
+    """
+    spec = ARTIFACT_KINDS.get(kind)
+    if spec is None:
+        raise ValueError(f"unknown artifact kind: {kind!r} (allowed: {sorted(ARTIFACT_KINDS)})")
+    return publish_file_result(
+        path,
+        content_type=spec.content_type,
+        ext=spec.ext,
+        prefix=spec.prefix,
+        request_id=request_id,
+        query=query,
+    )

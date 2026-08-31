@@ -1420,13 +1420,22 @@ class SkillDispatcher:
             # §M: skill が既に発行済み(out.report_url)ならそれを再利用（二重publish回避）。
             report_url: str | None = out.report_url
             if report_url is None and out.report_html_path:
-                from teamagent.adapters.report_publish import publish_html_file
+                # /r 短縮URLを優先（生 presigned はタスクロールの一時 credential 署名で
+                # 最大1時間で失効し「7日間有効」の案内が嘘になる・2026-08-31 実測）。
+                from teamagent.adapters.report_publish import publish_html_file_result
+                from teamagent.skills._shared.report_delivery import delivery_url
 
                 path = out.report_html_path
-                report_url = await loop.run_in_executor(
-                    None,
-                    lambda: publish_html_file(path, request_id=request_id, query=query or ""),
-                )
+
+                def _publish_short() -> str | None:
+                    result = publish_html_file_result(
+                        path, request_id=request_id, query=query or ""
+                    )
+                    if result is None:
+                        return None
+                    return delivery_url(result, request_id=request_id)
+
+                report_url = await loop.run_in_executor(None, _publish_short)
 
             # HTML レポートを Slack にも添付（オフライン閲覧用・通知文は dispatch 経由で別途投稿）
             if out.report_html_path and reply_channel:

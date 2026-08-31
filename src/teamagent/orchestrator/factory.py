@@ -566,17 +566,24 @@ def build_production_tools() -> list[ToolSpec]:
     # scripts/run_morning_digest_fargate.py 経由で各 user_email ごとに呼ぶ。mention 経由では
     # ないが統一的に ToolSpec 登録（ローカル検証用）。**既定 OFF**（USE_MORNING_DIGEST_TOOL=1）。
     if _envflag("USE_MORNING_DIGEST_TOOL"):
+        from teamagent.skills._shared.slack_unreplied import SlackUnrepliedProvider
         from teamagent.skills.morning_digest.skill import MorningDigestSkill
 
         morning_store = _build_token_store()
         morning_slack = _build_slack_context_provider()
+        # 本番経路（scripts/run_morning_digest_fargate.py:1418-1422）と同じく
+        # slack= を渡す。欠けていると Slack 返信漏れセクションが「走査していない」のに
+        # 空欄＝異常なしの顔で出る（skill.py:840 の注記どおり・台帳 A-3）。
+        morning_unreplied = SlackUnrepliedProvider(slack_store=_build_slack_store())
         specs.append(
             ToolSpec(
                 MorningDigestSkill.name,
                 MorningDigestSkill.description,
                 MorningDigestSkill,
                 factory=lambda: MorningDigestSkill(
-                    token_store=morning_store, deal_provider=morning_slack
+                    token_store=morning_store,
+                    deal_provider=morning_slack,
+                    slack=morning_unreplied,
                 ),
             )
         )

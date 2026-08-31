@@ -1297,15 +1297,29 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             raise
 
     def _publish_artifact(self, path: str, request_id: str, query: str, *, kind: str) -> str | None:
-        """slides/pptx を非公開S3へ発行（publisher 注入優先・bucket未設定なら None）。"""
+        """slides/pptx を非公開S3へ発行（publisher 注入優先・bucket未設定なら None）。
+
+        2026-08-31 から /r 短縮URLを優先する。生の署名付きURLは ECS タスクロールの
+        一時 credential で署名され**最大1時間で失効**する（宣言 7 日は名目）ため、
+        「7日有効」と案内して渡す成果物は必ず delivery_url() を通す。
+        条件未充足時は従来どおり生 presigned へフォールバック（fail-open・配信は止めない）。
+        """
         if self._publisher is not None:
             return self._publisher(path, request_id=request_id, query=query)
         if not os.environ.get("VSEO_REPORT_BUCKET"):
             return None
-        from teamagent.adapters.report_publish import publish_html_file, publish_pptx_file
+        from teamagent.adapters.report_publish import publish_artifact_result
+        from teamagent.skills._shared.report_delivery import delivery_url
 
-        fn = publish_pptx_file if kind == "pptx" else publish_html_file
-        return fn(path, request_id=request_id, query=query)
+        result = publish_artifact_result(
+            path,
+            "pptx" if kind == "pptx" else "slides_html",
+            request_id=request_id,
+            query=query,
+        )
+        if result is None:
+            return None
+        return delivery_url(result, request_id=request_id)
 
     def _write_report(
         self,
