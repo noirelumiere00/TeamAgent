@@ -25,6 +25,9 @@
 !infra/docker/media-apk.lock
 !infra/docker/vendor/
 !infra/docker/vendor/nodejs-24.18.1-r0.apk
+!infra/docker/vendor/libncursesw-6.6_p20260815-r0.apk
+!infra/docker/vendor/libpanelw-6.6_p20260815-r0.apk
+!infra/docker/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk
 **/.env
 **/.env.*
 **/*.pem
