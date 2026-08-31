@@ -764,7 +764,16 @@ def test_plan_check_rejects_destroy_of_each_freeze_resource_kind(
     # attachment 系は「窓の宣言」で守る。ポリシー本体（aws_iam_policy）だけが無条件 FATAL。
     # ※ role 側のアドレスも `.activation_freeze["…"]` を含むので、資源型で判定すること。
     is_policy_itself = address.startswith("aws_iam_policy.")
-    expected = "FREEZE ROLLBACK" if is_policy_itself else "FREEZE WINDOW BINDING"
+    # attachment 系の門は宣言 mode に依存する（2026-08-31 窓開で実測）:
+    #   declaration_only: 宣言（0 件が正）との食い違い → FREEZE WINDOW BINDING
+    #   attached        : 窓が開いている間の削除 → FREEZE ROLLBACK（policy 本体と同格）
+    # どちらの mode でも FreezeError で止まること自体は不変（緩める変更ではない）。
+    committed_mode = _freeze_doc()["aws_enforcement"]["mode"]
+    expected = (
+        "FREEZE ROLLBACK"
+        if (is_policy_itself or committed_mode == "attached")
+        else "FREEZE WINDOW BINDING"
+    )
     with pytest.raises(FreezeError, match=expected):
         assert_plan_preserves_freeze(FREEZE, plan)
 
@@ -1002,13 +1011,13 @@ def test_case3_freeze_destroy_is_fatal_regardless_of_the_var(
 
 
 def test_allowlist_counts_only_payload_commits() -> None:
-    """approved_commits は execution line 上の payload のみ（base + 25）。
+    """approved_commits は execution line 上の payload のみ（base + 27）。
 
     2026-08-28 に W2-b（契約 2 件を dev へ揃えて世代を Wave3 に一致させる）と
-    W3-a（state rebind #3 の台帳）を追加して 22 → 24 → 25。
+    W3-a（state rebind #3 の台帳）を追加して 22 → 24 → 25 → 26 → 27。
     """
     doc = _allowlist_doc()
-    assert len(doc["approved_commits"]) == 25
+    assert len(doc["approved_commits"]) == 27
     assert doc["expected_head"] == doc["approved_commits"][-1]["sha"]
     boundary = doc["payload_control_boundary"]
     assert "payload に含めない" in boundary

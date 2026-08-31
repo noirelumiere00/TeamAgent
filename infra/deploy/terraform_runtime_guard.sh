@@ -10535,6 +10535,13 @@ adopt_plan() {
   snapshot_live "$out_dir/live-before.json"
   chmod 600 "$out_dir/live-before.json"
   sync_live_world_from_snapshot "$out_dir/live-before.json"
+  # 通常 plan 経路は arg-parse がこの 3 変数を設定してから共有実装を呼ぶが、adopt には
+  # 対応する flag が無く未初期化のまま到達し `set -u` で落ちる（MIGRATION_ID: unbound
+  # variable・2026-08-31 に adopt-plan が snapshot を初めて通過して顕在化）。adopt は
+  # sync 相当（migration 分岐・receipt 検査の対象外）なので空で束縛する。
+  MIGRATION_ID=""
+  VERSIONING_RECEIPT_SHA256=""
+  LOG_CUTOVER_CONTRACT_SHA256=""
   build_live_injection_args \
     "$out_dir/live-before.json" "$out_dir/adopt-core.json" \
     "$out_dir/state-backup.json" "$out_dir"
