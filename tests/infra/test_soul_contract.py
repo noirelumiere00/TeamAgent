@@ -337,7 +337,10 @@ def test_oauth_connect_delivers_link_in_one_reply(soul: str, label: str, phrase:
             "`openclaw.ai` / `connect.openclaw.ai` など OpenClaw 本家のドメインは自社のものではない。"
             "ここにつながる URL を書いてはならない",
         ),
-        ("ツール失敗時は URL を書かない", "ツールを呼べなかった／エラーだったときは、URL を書かない"),
+        (
+            "ツール失敗時は URL を書かない",
+            "ツールを呼べなかった／エラーだったときは、URL を書かない",
+        ),
     ],
 )
 def test_oauth_connect_never_fabricates_urls(soul: str, label: str, phrase: str) -> None:
