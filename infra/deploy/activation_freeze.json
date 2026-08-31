@@ -294,7 +294,7 @@
     }
   },
   "aws_enforcement": {
-    "mode": "declaration_only",
+    "mode": "attached",
     "modes": [
       "declaration_only",
       "attached"
@@ -329,7 +329,11 @@
       "live_measured_at": "2026-08-28（aws iam get-policy AttachmentCount=0 / list-entities-for-policy 全空）",
       "policy_object_measured": "arn:aws:iam::718959508629:policy/teamagent-dev-activation-freeze は存在し DefaultVersionId=v1・UpdateDate=2026-08-24T08:19:15Z（削除されていない）"
     },
-    "window": null,
+    "window": {
+      "opened_at": "2026-08-31T03:20:00Z",
+      "purpose": "裁定②E: supply-chain adopt の窓。rebind #3 完遂（state の 5 taskdef を live へ・7/7 一致）後、W3-d/W3-e の delta 0 成立条件として 10 attachment を復元した。attach の実行者はユーザー本人（分類器が Claude の IAM 変更を正しく拒否＝E案『attachment-commands は表示のみ』の建て付けどおり）。attach 後の実測 AttachmentCount=10 / list-entities-for-policy = roles 9 + users 1。adopt-apply → detach（W3-g）で閉じて本ブロックを window_history へ移す。",
+      "gate": "human gate 2026-08-31（ユーザーが attach コマンド 10 件を自身の手で実行し AttachmentCount=10 を確認）"
+    },
     "window_history": [],
     "open_close_procedure": {
       "open": [

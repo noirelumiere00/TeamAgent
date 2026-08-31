@@ -215,9 +215,18 @@
       "source_sha": "76559029e0a4ba06eb2135084ae37c180c46e825",
       "gate": "human gate 2026-08-31（承認済み復旧プランの完遂＝W3-e 前提の充足）",
       "source_note": "rebind #3 apply 中の check 警告で、実行ラインの世代台帳が Wave2 のままと実測判明（attestor 1e1906ae / promoter 554ede59 が台帳未登録）。dev の Wave3 再ベースライン（#343 / 7655902）から台帳 3 ファイル（supply_chain_adopt.tf / supply_chain_adoptions.json / buildspec_generation_inputs.json）を blob 直取り込みし、3/3 とも origin/dev と blob 一致を実測。cherry-pick でないため patch-id は dev と一致しない。frozen surface 外であることは #343 の CI（assert-frozen-surface 無変更）で実証済み。"
+    },
+    {
+      "sha": "2d5519a8559f8298331737e1aafa6dc931aea0e5",
+      "subject": "fix(guard): dev の guard を実行ラインへ追随（W3-d/e の三重ブロッカー解消）",
+      "patch_id": "28cf45bea19298d7f35db412a28455a15230d91a",
+      "source_pr": "dev-commit",
+      "source_sha": "e2fa258bb2b25505912a2f68b6bcf24571c9a95c",
+      "gate": "human gate 2026-08-31（承認済みマスタープランの背骨 S3/S4 前提の充足）",
+      "source_note": "adopt-plan 初走が snapshot 段階で die（deployed HMAC primary selector is outside the exact contract）。真因は実行ラインの guard が dev より古く、既知の 4 差分・計 15 行を欠いていたこと: ①report-link-hmac の live selector 正規表現（live の report-link-hmac-RKEHWS を観測できず plan が 1 行も作れない・今回の直接原因）②use_attachment_tools の desired-state binding 2 行（W1-d・欠けたままだと runtime_guard.tf:541 で guarded plan が fail-closed）③④openclaw entrypoint の node path ×3（live openclaw:41 は wolfi＝/usr/bin/node）。dev tip（#347 後）の guard blob を丸ごと取り込み。取り込み前に diff 全量が上記 4 点のみ・E案 checker の新コマンド呼び出しなし（旧 checker 互換）を実測確認。source_sha は use_attachment_tools 修正の dev 側コミット（e2fa258）を錨とし、blob 取り込みのため patch-id は dev と一致しない。"
     }
   ],
-  "expected_head": "89b9cb81081f5b29f4a5bd113d18b0a4c2e455b3",
+  "expected_head": "2d5519a8559f8298331737e1aafa6dc931aea0e5",
   "excluded_commits": [
     {
       "sha": "4f7da58",
