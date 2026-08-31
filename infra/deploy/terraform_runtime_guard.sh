@@ -3603,7 +3603,7 @@ validate_image_contract() {
     (
       if $profile == "openclaw" then
         .config.Entrypoint ==
-          ["/nodejs/bin/node", "/opt/teamagent/entrypoint.mjs"] and
+          ["/usr/bin/node", "/opt/teamagent/entrypoint.mjs"] and
         .config.Cmd ==
           ["/app/openclaw.mjs", "gateway", "--bind", "loopback", "--port", "18789"]
       else true
@@ -4650,13 +4650,18 @@ snapshot_live() {
   # signing used MAIL_ACTION_HMAC_SECRET; preserve that as the effective
   # deployed report primary so the exact legacy version can become previous.
   jq -S -c '
+    # BOOTSTRAP-PIN(legacy-selector): canonical 化前の live は report_link の primary に
+    # teamagent/dev/report-link-hmac を指している（2026-08-21 の out-of-band デプロイ由来）。
+    # 観測できないと snapshot が die して plan が 1 行も作れないため、canonical 化までの間だけ
+    # exact name 1 本の追加を許す。ワイルドカードや任意 secret へは広げない。
+    # canonical 化が完了したらこの選択肢を撤去する。
     def primary_base_arn($purpose):
       . as $value |
       (
         if $purpose == "mail" then
           "(database-url|hmac/mail-action)"
         else
-          "(database-url|hmac/mail-action|hmac/report-link)"
+          "(database-url|hmac/mail-action|hmac/report-link|report-link-hmac)"
         end
       ) as $path |
       (
@@ -5447,6 +5452,7 @@ core_from_snapshot() {
       use_calendar_event_tool: boolenv($m.USE_CALENDAR_EVENT_TOOL),
       use_schedule_propose_tool: boolenv($m.USE_SCHEDULE_PROPOSE_TOOL),
       use_calendar_freebusy_tool: boolenv($m.USE_CALENDAR_FREEBUSY_TOOL),
+      use_attachment_tools: boolenv($m.USE_ATTACHMENT_TOOLS),
       use_slack_summary_tool: boolenv($m.USE_SLACK_SUMMARY_TOOL),
       use_video_capture_tool: boolenv($m.USE_VIDEO_CAPTURE_TOOL),
       use_web_research_tool: boolenv($m.USE_WEB_RESEARCH_TOOL),
@@ -5549,6 +5555,7 @@ print_hcl_snapshot() {
       line("use_calendar_event_tool"; .use_calendar_event_tool),
       line("use_schedule_propose_tool"; .use_schedule_propose_tool),
       line("use_calendar_freebusy_tool"; .use_calendar_freebusy_tool),
+      line("use_attachment_tools"; .use_attachment_tools),
       line("use_slack_summary_tool"; .use_slack_summary_tool),
       line("use_video_capture_tool"; .use_video_capture_tool),
       line("use_web_research_tool"; .use_web_research_tool),
@@ -6030,7 +6037,7 @@ validate_runtime_task_contracts() {
           $container.stopTimeout == 120 and
           exact_health(
             $container;
-            ["CMD", "/nodejs/bin/node", "-e", $openclaw_health];
+            ["CMD", "/usr/bin/node", "-e", $openclaw_health];
             40
           ) and
           ($env | has("OPENCLAW_CONFIG_PATH") | not)
@@ -8159,7 +8166,7 @@ run_registered_preflight_task() {
   esac
 
   if [ "$profile" = "openclaw" ]; then
-    entry_point_json='["/nodejs/bin/node"]'
+    entry_point_json='["/usr/bin/node"]'
     command_json="$(jq -n -c --arg script "$script" '["-e", $script]')"
   else
     entry_point_json='["/bin/sh","-c"]'
