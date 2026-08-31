@@ -25,6 +25,12 @@ from typing import Any, ClassVar
 
 import structlog
 
+from teamagent.ingest.industry_taxonomy import (
+    INDUSTRY_PROMPT_LIST,
+    match_industry_keyword,
+    normalize_industry,
+)
+
 logger = structlog.get_logger(__name__)
 
 
@@ -45,22 +51,8 @@ class RoutingDecision:
     reason: str  # ログ用
 
 
-# 業界キーワード（メタデータ抽出と整合）
-_INDUSTRY_KEYWORDS = {
-    "飲食": ["飲食", "レストラン", "居酒屋", "カフェ"],
-    "化粧品": ["化粧品", "コスメ", "美容", "スキンケア"],
-    "エネルギー": ["エネルギー", "電力", "ガス", "INPEX", "石油"],
-    "不動産": ["不動産", "森ビル", "マンション", "賃貸", "展覧会"],
-    "自治体": ["自治体", "市役所", "県", "市"],
-    "製造業": ["製造業", "メーカー", "工場"],
-    "教育": ["教育", "学校", "大学", "塾"],
-    "医療": ["医療", "病院", "クリニック", "薬"],
-    "IT": ["IT", "システム", "ソフトウェア", "SaaS"],
-    "小売": ["小売", "EC", "通販", "店舗"],
-    "金融": ["金融", "銀行", "保険", "証券"],
-    "旅行": ["旅行", "観光", "ホテル"],
-    "メディア": ["メディア", "出版", "テレビ", "新聞"],
-}
+# 業界キーワード表は teamagent.ingest.industry_taxonomy が唯一の真実源。
+# ここに別の表を持つと、まさに今回直している「語彙が層ごとに分かれる」問題を再生産する。
 
 # meta クエリ判定パターン
 _META_PATTERNS = [
@@ -84,9 +76,16 @@ _LLM_ROUTER_INSTRUCTION = (
     "- conditional: 特定の業界・顧客・予算で絞り込みたい（「飲食業の事例」）\n"
     "- compare: 比較系（「A と B の違い」「どっちが良い」）\n"
     "- content: 通常の意味検索（上記に当てはまらないもの。デフォルト）\n\n"
-    "業界カテゴリ（リストにあるものから選ぶ、無ければ null）:\n"
-    "飲食 / 化粧品 / エネルギー / 不動産 / 自治体 / 製造業 /\n"
-    "教育 / 医療 / IT / 小売 / 金融 / 旅行 / メディア\n\n"
+    "業界カテゴリ（**次のリストにある語だけ**を使う。当てはまらなければ null）:\n"
+    + INDUSTRY_PROMPT_LIST
+    + "\n\n"
+    "🔴 クエリに商材名・商品カテゴリが出てきたら、それが属する業界へ**変換して**ください。\n"
+    "リストに無い語をそのまま返してはいけません。\n"
+    "  例: 「ヨーグルト」「乳製品」「グラノーラ」 → 食品\n"
+    "  例: 「日本酒」「クラフトビール」 → 飲料\n"
+    "  例: 「日焼け止め」「シャンプー」 → 化粧品 か 日用品（文脈で選ぶ）\n"
+    "  例: 「軽自動車」「EV」 → 自動車\n"
+    "商材が読み取れない、または業界を特定できない場合は **null**（推測で埋めない）。\n\n"
     "クエリ:\n"
     "{query}\n\n"
     "JSON だけを返してください（説明やコードブロック禁止）:\n"
@@ -147,16 +146,17 @@ class SkillRouter:
                     reason=f"meta pattern matched: {pat.pattern}",
                 )
 
-        # 3. conditional 判定（業界キーワードあり）
-        for industry, keywords in _INDUSTRY_KEYWORDS.items():
-            for kw in keywords:
-                if kw in query:
-                    return RoutingDecision(
-                        query_type=QueryType.CONDITIONAL,
-                        confidence=0.8,
-                        extracted_filter={"industry": industry},
-                        reason=f"industry keyword matched: {kw} → {industry}",
-                    )
+        # 3. conditional 判定（業界を名指しする語がある場合の高速路）
+        #    商材語（ヨーグルト等）はここでは拾えず None になり、confidence 0.5 で
+        #    LLM フォールバックへ落ちる。それが設計どおりの経路である。
+        industry = match_industry_keyword(query)
+        if industry:
+            return RoutingDecision(
+                query_type=QueryType.CONDITIONAL,
+                confidence=0.8,
+                extracted_filter={"industry": industry},
+                reason=f"industry keyword matched → {industry}",
+            )
 
         # 4. デフォルト：content（confidence 低）
         return RoutingDecision(
@@ -199,10 +199,22 @@ class SkillRouter:
         except ValueError:
             qt = QueryType.CONTENT
 
-        industry = data.get("industry")
+        # LLM が指示に反してリスト外の語を返しうるため、正準値へ寄せてから採用する。
+        # 正準化できない値は **フィルタを付けない**（誤ったフィルタで本来のヒットを
+        # 取りこぼすより、フィルタ無しで soft に拾うほうが安全側）。
+        raw_industry = data.get("industry")
+        industry = (
+            None if raw_industry in (None, "null", "") else normalize_industry(str(raw_industry))
+        )
         extracted: dict[str, str] = {}
-        if industry and industry != "null":
-            extracted["industry"] = str(industry)
+        if industry:
+            extracted["industry"] = industry
+        elif raw_industry not in (None, "null", ""):
+            logger.warning(
+                "llm_router_industry_out_of_taxonomy",
+                request_id=request_id,
+                returned=str(raw_industry)[:40],
+            )
         reason = f"LLM router: {data.get('reason', '')[:120]}"
         return RoutingDecision(
             query_type=qt,

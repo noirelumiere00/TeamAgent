@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from teamagent.ingest.industry_taxonomy import match_industry_keyword
+
 # 資料種別キーワード → cls_doc_type 正規値（classify._DOC_TYPES と一致させる）。
 # 具体的・複合語を先に評価する（「提案事例」を「提案書」へ寄せる）。
 _DOC_TYPE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -24,22 +26,9 @@ _DOC_TYPE_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-# 業界キーワード → cls_industry 正規値（classify._CLASSIFY_SYSTEM_PROMPT の例語彙に寄せる）。
-# 「飲料系」「飲食」等を業界フィルタに変換。filter_industry は soft（industry=値 OR NULL）で
-# 渡すため、未分類 docs は除外されない＝過剰絞り込みしない安全設計。
-_INDUSTRY_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("飲料", "ドリンク", "飲み物"), "飲料"),
-    (("飲食", "レストラン", "居酒屋", "カフェ", "外食"), "飲食"),
-    (("化粧品", "コスメ", "美容", "スキンケア"), "化粧品"),
-    (("日用品", "トイレタリー"), "日用品"),
-    (("食品", "食料品"), "食品"),
-    (("小売", "EC", "通販", "店舗", "リテール"), "小売"),
-    (("不動産", "賃貸", "マンション"), "不動産"),
-    (("金融", "銀行", "保険", "証券"), "金融"),
-    (("人材", "採用", "求人", "HR"), "人材"),
-    (("メーカー", "製造", "工場"), "メーカー"),
-    (("IT", "SaaS", "ソフトウェア", "システム"), "IT"),
-)
+# 業界キーワード表は teamagent.ingest.industry_taxonomy が唯一の真実源。
+# ここに別の表を持つと、まさに今回直している「語彙が層ごとに分かれる」問題を再生産する。
+# （旧実装はここに 11 語の独自表を持っており、値も "メーカー" のように非正準だった）
 
 
 # 商談フェーズキーワード → cls_phase 正規値（classify._PHASES と一致）。過剰絞り込みを
@@ -146,15 +135,14 @@ def extract_knowledge_filters(query: str) -> dict[str, str] | None:
 
 
 def extract_query_industry(query: str) -> str | None:
-    """クエリから業界（cls_industry 値）を抽出する。該当語が無ければ None。
+    """クエリから業界（cls_industry 正準値）を抽出する。該当語が無ければ None。
 
     soft な filter_industry として使う（industry=値 OR NULL を許容）＋ 配信側の業界不一致
-    スキップにも使う。自動分類が free-text のため exact 一致は保証されないが、soft なので
-    過剰除外はしない（未分類・別表記は通る）。
+    スキップにも使う。soft なので過剰除外はしない（未分類・別表記は通る）。
+
+    🔴 **これは業界を名指しする語だけを拾う高速路である。**
+    「ヨーグルト」「乳製品」のような商材語はここでは None が返る。
+    商材語 → 業界の変換は LLM ルーター（``USE_LLM_ROUTER=true``）の役割で、
+    ここに商材語を足して解決しようとしてはいけない（次の商材で同じ事故が起きる）。
     """
-    if not query:
-        return None
-    for keywords, industry in _INDUSTRY_KEYWORDS:
-        if any(kw in query for kw in keywords):
-            return industry
-    return None
+    return match_industry_keyword(query)

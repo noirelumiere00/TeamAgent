@@ -20,6 +20,7 @@ import re
 from collections.abc import Sequence
 
 from teamagent.adapters.pgvector_client import SearchHit
+from teamagent.ingest.industry_taxonomy import normalize_industry
 
 # ヒットはあるが、どれも質問に直接は答えていない（top1 スコアが閾値未満）。
 WEAK_RESULT_NOTICE = (
@@ -28,6 +29,18 @@ WEAK_RESULT_NOTICE = (
 
 # クライアント名を含むクエリなのに、top1 が別クライアントの資料だった。
 _CLIENT_MISMATCH_TEMPLATE = "⚠️ ご指定のクライアントの資料ではありません（ヒット: {hit}）。"
+
+# 業種を絞ったのに、その業種に分類された資料が 1 件も無かった。
+#
+# 実測された事故（2026-08-28）: 「ヨーグルト 乳製品」の検索で **食品業種の資料は 0 件**
+# だったにもかかわらず、玩具・鉄道・金融の提案書を根拠に
+# 「ヨーグルト向け UGC 施策」の回答が生成された。中身自体は根拠のある記述だったが、
+# **「該当業種の資料が無い」と言わずに答えを作った**点が危険で、
+# 営業がそのまま提案に使うと出典の無い主張になる。
+_INDUSTRY_MISS_TEMPLATE = (
+    "⚠️ 「{industry}」に分類された資料は見つかりませんでした。"
+    "以下は業種が未分類の資料をもとにした参考情報です。"
+)
 
 # 法人格・記号・空白は表記ゆれの主因なので照合前に落とす（名寄せの最小版）。
 _LEGAL_SUFFIX_RE = re.compile(
@@ -40,6 +53,40 @@ _NOISE_RE = re.compile(r"[\s　・･,，.。/／\-‐－―_'\"“”’()（�
 
 # 1 文字のクライアント名は誤爆（部分一致が何にでも当たる）ので照合対象にしない。
 _MIN_CLIENT_LEN = 2
+
+# 自社・自社プロダクトの名前。**「利用者が指定したクライアント」として扱わない。**
+#
+# 実測された事故（2026-08-28）: 営業が
+# 「NewsTV 事例動画 ショート動画 UGC ヨーグルト 乳製品」と検索したところ、
+# クライアント語彙に自社プロダクト名 "NewsTV" が入っていたため
+# query_client="NewsTV" と確定し、top1 が花王の資料だったことで
+# 「⚠️ ご指定のクライアントの資料ではありません（ヒット: 花王…）」が
+# **回答の一番上**に出た。利用者はクライアントを指定していないので、これは誤警告である。
+#
+# 社内クエリはほぼ必ず自社名を含むため、放置すると誤警告が常態化して
+# 「この警告は無視してよい」と学習され、本物の不一致まで効かなくなる。
+_SELF_ORG_NAMES: tuple[str, ...] = (
+    "NewsTV",
+    "ニュースTV",
+    "ニュースティービー",
+    "ベクトル",
+    "Vector",
+    "AiLa",
+    "アイラ",
+    "Aico",
+    "アイコ",
+)
+
+
+def is_self_org_name(name: str | None) -> bool:
+    """``name`` が自社・自社プロダクト名か（＝クライアント指定として扱わない）。
+
+    ``clients_match`` と同じ正規化で比較する（法人格・記号・空白を落として casefold）。
+    """
+    normalized = normalize_client(name)
+    if not normalized:
+        return False
+    return any(normalized == normalize_client(own) for own in _SELF_ORG_NAMES)
 
 
 def normalize_client(name: str | None) -> str:
@@ -78,6 +125,20 @@ def hit_client_name(hit: SearchHit) -> str:
     return ""
 
 
+def _hit_industry(hit: SearchHit) -> str | None:
+    """このヒットの業種（正準値）。未分類・未知値は None。
+
+    保存済みデータには ``旅行`` と ``旅行・観光`` のような表記ゆれが実在するため、
+    比較前に必ず正規化する（再分類バッチを走らせずに揺れを吸収する唯一の手段）。
+    """
+    meta = getattr(hit, "metadata", None) or {}
+    for key in ("industry", "cls_industry"):
+        value = str(meta.get(key) or "").strip()
+        if value:
+            return normalize_industry(value)
+    return None
+
+
 def hit_client_vocabulary(hits: Sequence[SearchHit]) -> list[str]:
     """ヒット集合から観測されたクライアント名の一覧（辞書が引けないときの代替語彙）。"""
     seen: dict[str, None] = {}
@@ -114,6 +175,7 @@ def build_result_header(
     hits: Sequence[SearchHit],
     weak_threshold: float,
     query_client: str | None = None,
+    asked_industry: str | None = None,
 ) -> str:
     """回答本文の先頭へ付ける警告ヘッダ（該当なしなら空文字）。
 
@@ -138,7 +200,20 @@ def build_result_header(
     if weak_threshold > 0.0 and top_score < weak_threshold:
         lines.append(WEAK_RESULT_NOTICE)
 
+    # 業種を絞ったのに、その業種の資料が 1 件も無い（soft フィルタなので
+    # 業種未分類の資料だけが残っている）状態を明示する。
+    # filter_industry は soft（industry = 値 OR NULL）なので「別業種が混ざる」ことは
+    # 起きない。起きるのは「全部 NULL だった」であり、それを黙って要約させない。
+    if asked_industry:
+        wanted = normalize_industry(asked_industry) or asked_industry
+        if not any(_hit_industry(hit) == wanted for hit in hits):
+            lines.append(_INDUSTRY_MISS_TEMPLATE.format(industry=wanted))
+
     asked = query_client or detect_query_client(query, hit_client_vocabulary(hits))
+    # 自社・自社プロダクト名は「利用者が指定したクライアント」ではない。
+    # ここで落とさないと、社内クエリのほぼ全部で誤警告が出る（2026-08-28 実測）。
+    if is_self_org_name(asked):
+        asked = None
     if asked:
         top_client = hit_client_name(top)
         if top_client and not clients_match(asked, top_client):
@@ -169,6 +244,7 @@ __all__ = [
     "detect_query_client",
     "hit_client_name",
     "hit_client_vocabulary",
+    "is_self_org_name",
     "normalize_client",
     "prefix_header",
 ]
