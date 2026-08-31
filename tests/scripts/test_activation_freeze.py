@@ -196,11 +196,24 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 # ── unlock 宣言 ────────────────────────────────────────────────────────────
 
 
-def test_unlock_is_inactive_and_empty_by_default() -> None:
+def test_unlock_matches_the_committed_declaration() -> None:
+    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
+
+    旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
+    要求しており、frozen surface を正当に触る PR が unlock を宣言すると**構造的に
+    赤くなる**設計矛盾があった（#343 で実測・宣言自身の known_design_red にも記録）。
+    2026-08-31 human gate（ユーザー明示承認・パッチ適用もユーザーの手）で unlock 対応化。
+    緩めたのではない: active の間は宣言内容そのものを封印し、scope の拡大・gate の
+    欠落・別内容への差し替えを検出する。畳めば else 分岐が元の封印と同一になる。
+    """
     unlock = _freeze_doc()["unlock"]
-    assert unlock["active"] is False
-    assert unlock["scope_paths"] == []
-    assert unlock["reason"] is None
+    if unlock["active"]:
+        assert unlock["scope_paths"] == ["infra/codebuild/release_evidence.py"]
+        assert "正名化" in unlock["reason"]
+        assert "human gate 2026-08-31" in unlock["gate"]
+    else:
+        assert unlock["scope_paths"] == []
+        assert unlock["reason"] is None
 
 
 def test_unlock_requires_scope_reason_and_gate(tmp_path: Path) -> None:

@@ -369,10 +369,12 @@
     "generation_release_chain_note": "S3 codebuild-buildspecs/ 配下の全 prefix を無条件スキャンして得た release chain の実体。adopt purity（4 forget + 4 import）と generation freeze integrity は別概念で、後者はこの inventory 全体を対象とする（2026-08-24 ユーザー裁定⑦）。"
   },
   "unlock": {
-    "active": false,
-    "scope_paths": [],
-    "reason": null,
-    "gate": null,
+    "active": true,
+    "scope_paths": [
+      "infra/codebuild/release_evidence.py"
+    ],
+    "reason": "正名化（P1-13a）: ingest の activator type を eventbridge_rule_ecs_target から eventbridge_rule_lambda_taskdef_arn_environment へ改め、ACTIVATION-SHIM(ingest) の暫定タグ 25 箇所と consumer_id リテラル分岐を撤去する。infra/codebuild/release_evidence.py は consumer の実行状態を activator type で判定しており（_consumer_execution_state / _consumer_is_executable / _consumer_execution_increased の 3 箇所）、新 type を認識しなければ ingest の実行状態が evidence 上で誤判定される。変更は後方互換で、旧 type を含む frozenset _EVENTBRIDGE_RULE_ACTIVATOR_TYPES への置換のみ（AST 差分は比較演算子 3 箇所と定数定義の追加のみ・旧 type に対する挙動は不変）。本 path は generation inputs 18 件の 1 つであり、変更は新世代の publish を強制する。merge 直後に新世代 publish → Freeze 解除 GO の順で流す（2026-08-31 ルート変更裁定: adopt は Pin とセットで後日便）。",
+    "gate": "human gate 2026-08-31（ユーザー裁定: adopt を後日便へ送り、正名化 merge → 新世代 publish → Freeze 解除 GO へ直行する。unlock 宣言のパッチは 2026-08-28〜29 に scratchpad/night/pending-unlock-rename.md として提示済み・承認済み）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
