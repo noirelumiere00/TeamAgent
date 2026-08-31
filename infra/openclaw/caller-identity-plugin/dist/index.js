@@ -1159,6 +1159,10 @@ export function createCallerIdentityPlugin({
       );
       return undefined;
     }
+    // toolCallsByRun と同じ規律で delete->set する。現状 MAX_CONNECT_FABRICATION_REVISIONS
+    // が 1 なので 1 run につき 1 度しか set されず既存キーの再 set は起きないが、
+    // その値を 2 以上へ上げた瞬間に退避順が壊れる依存を残さない。
+    connectRevisionsByRun.delete(eventRunId);
     connectRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
     // G7: 本文・URL 実体・Slack 識別子は載せない（捏造 URL には user_id が埋まっていた）。
     logger?.warn?.(

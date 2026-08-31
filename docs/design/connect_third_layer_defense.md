@@ -291,6 +291,9 @@ revise が予算切れ（3 回失敗）した場合、現状の設計では**素
   上限退避だけでは「少数 run が長期残留」が緑のまま通る（実測で確認）
 - 退避順: JS の Map は既存キーへの再 set で挿入順が更新されない（実測）。
   そのため記録の更新側で `delete` → `set` して、挿入順を更新順に一致させる
+- 両台帳とも `delete` → `set` で統一する。`connectRevisionsByRun` は
+  `MAX_CONNECT_FABRICATION_REVISIONS` が 1 である限り再 set が起きないため
+  現状は退避順が自明に正しいが、その値を 2 以上へ上げた瞬間に壊れる依存を残さない
 - なお `toolCallsByRun` が自前の上限に達する状況は実際には到達不能である。
   tool call を伴う run は `ingressByRun` / `consumedInvocations` も同時に増やすため、
   1000 run に達する前に既存の `MAX_TRACKED_CONTEXTS` の `fail` が先に飛ぶ。
