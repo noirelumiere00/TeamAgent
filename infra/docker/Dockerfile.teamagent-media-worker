@@ -56,23 +56,6 @@ USER 0
 
 ARG ALPINE_EDGE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/edge
 ARG ALPINE_STABLE_REPOSITORY=https://dl-cdn.alpinelinux.org/alpine/v3.24
-# 2026-08-31: alpine edge が同一バージョン（24.18.1-r0）のまま /usr/bin/node のバイトを
-# 差し替え（CodeBuild 実測 885209fa…・pin 不一致で段3 が 4 連続停止）。契約の
-# binary.node.sha256 更新は buildspec 世代 publish 儀式を要するため、pin と一致する
-# 正規署名済み apk（中身 b998f239… を抽出実測）を repo 同梱し、取得元ドリフトから
-# 切り離す。撤去条件: 次の世代 publish 便で契約 pin を現行上流へ追随させたとき。
-ARG NODE_VENDORED_APK_SHA256=594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850
-COPY infra/docker/vendor/nodejs-24.18.1-r0.apk /tmp/vendor/nodejs-24.18.1-r0.apk
-# 2026-08-31: edge の ncurses スナップショット更新（0815→0822）で lock 記載の3パッケージが
-# 取得不能に（r7/r8 二重実測・差分は ncurses 系3行のみ）。lock/契約は世代 publish 儀式なしに
-# 変更不可のため、lock と一致する正規署名 apk を同梱。撤去条件: 便γの世代 publish で lock 追随時。
-ARG NCURSESW_VENDORED_APK_SHA256=6c40fda66e9857034aad409bca928ccaf18260f4ed1b813748d9c247ceb5c4b6
-ARG PANELW_VENDORED_APK_SHA256=6f9188bdefbdc9275476827414a92ee2ed343f9a59d1487e092436db89b35cd8
-ARG TERMINFO_VENDORED_APK_SHA256=23d428be5faea2d7364df2a2941b977bb19d2ab7b791960eebe426fe32fcc8cc
-COPY infra/docker/vendor/libncursesw-6.6_p20260815-r0.apk \
-     infra/docker/vendor/libpanelw-6.6_p20260815-r0.apk \
-     infra/docker/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk \
-     /tmp/vendor/
 ARG CHROMIUM_PACKAGE_VERSION=150.0.7871.114-r0
 ARG CHROMIUM_VERSION=150.0.7871.114
 ARG CHROMIUM_BINARY_SHA256=13eaa3cbe73f39b5feafcd767db0771c4f25d626a3927ba216ac43cde3abaf79
@@ -81,7 +64,7 @@ ARG FFMPEG_VERSION=8.1.2
 ARG FFMPEG_BINARY_SHA256=43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba
 ARG NODE_PACKAGE_VERSION=24.18.1-r0
 ARG NODE_VERSION=24.18.1
-ARG NODE_BINARY_SHA256=b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2
+ARG NODE_BINARY_SHA256=885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153
 ARG PYTHON_PACKAGE_VERSION=3.14.7-r0
 ARG PYTHON_VERSION=3.14.7
 ARG PYTHON_BINARY_SHA256=cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8
@@ -93,8 +76,13 @@ ARG FONT_NOTO_EMOJI_PACKAGE_VERSION=2.051-r0
 ARG LIBFLAC_PACKAGE_VERSION=1.4.3-r2
 ARG LIBSSH_PACKAGE_VERSION=0.12.2-r0
 ARG MBEDTLS3_PACKAGE_VERSION=3.6.7-r0
+# 2026-09-01 便γ: base(v3.24)同梱の openssl/expat に公開済みCVE（openssl 3.5.7×10件・
+# expat 2.8.2×4件）。apk add は要求が無い限り base 同梱物を上げないため、修正版を明示 pin。
+ARG LIBCRYPTO3_PACKAGE_VERSION=3.5.8-r0
+ARG LIBEXPAT_PACKAGE_VERSION=2.8.4-r0
+ARG LIBSSL3_PACKAGE_VERSION=3.5.8-r0
 
-RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sharing=locked \
+RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
     set -eu; \
     cat /etc/ssl/certs/ca-certificates.crt > /tmp/teamagent-build-ca.pem; \
@@ -105,16 +93,6 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
       "$ALPINE_EDGE_REPOSITORY" "$ALPINE_EDGE_REPOSITORY" \
       "$ALPINE_STABLE_REPOSITORY" "$ALPINE_STABLE_REPOSITORY" \
       > /tmp/teamagent-apk-repositories; \
-    printf '%s  %s\n' "$NODE_VENDORED_APK_SHA256" /tmp/vendor/nodejs-24.18.1-r0.apk | sha256sum -c -; \
-    printf '%s  %s\n' "$NCURSESW_VENDORED_APK_SHA256" /tmp/vendor/libncursesw-6.6_p20260815-r0.apk | sha256sum -c -; \
-    printf '%s  %s\n' "$PANELW_VENDORED_APK_SHA256" /tmp/vendor/libpanelw-6.6_p20260815-r0.apk | sha256sum -c -; \
-    printf '%s  %s\n' "$TERMINFO_VENDORED_APK_SHA256" /tmp/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk | sha256sum -c -; \
-    SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
-      --repositories-file /tmp/teamagent-apk-repositories \
-      add /tmp/vendor/nodejs-24.18.1-r0.apk \
-        /tmp/vendor/libncursesw-6.6_p20260815-r0.apk \
-        /tmp/vendor/libpanelw-6.6_p20260815-r0.apk \
-        /tmp/vendor/ncurses-terminfo-base-6.6_p20260815-r0.apk; \
     SSL_CERT_FILE=/tmp/teamagent-build-ca.pem apk \
       --cache-dir /var/cache/apk \
       --cache-max-age 1440 \
@@ -126,8 +104,11 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
       "font-noto=$FONT_NOTO_PACKAGE_VERSION" \
       "font-noto-cjk=$FONT_NOTO_CJK_PACKAGE_VERSION" \
       "font-noto-emoji=$FONT_NOTO_EMOJI_PACKAGE_VERSION" \
+      "libcrypto3=$LIBCRYPTO3_PACKAGE_VERSION" \
+      "libexpat=$LIBEXPAT_PACKAGE_VERSION" \
       "libflac=$LIBFLAC_PACKAGE_VERSION" \
       "libssh=$LIBSSH_PACKAGE_VERSION" \
+      "libssl3=$LIBSSL3_PACKAGE_VERSION" \
       "mbedtls3=$MBEDTLS3_PACKAGE_VERSION" \
       "nodejs=$NODE_PACKAGE_VERSION" \
       "pyc=$PYTHON_PACKAGE_VERSION" \
@@ -151,7 +132,7 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk,sha
     sha256sum /usr/bin/python3 /usr/bin/node /usr/bin/ffmpeg \
       /usr/lib/chromium/chromium \
       > /usr/share/teamagent/provenance/runtime-binaries.sha256; \
-    rm -rf /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories /tmp/vendor; \
+    rm -f /tmp/teamagent-build-ca.pem /tmp/teamagent-apk-repositories; \
     addgroup -g 10001 teamagent; \
     adduser -D -H -h /tmp/teamagent/home -u 10001 -G teamagent teamagent; \
     chmod 1777 /tmp
@@ -281,7 +262,7 @@ ARG FFMPEG_VERSION=8.1.2
 ARG FFMPEG_BINARY_SHA256=43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba
 ARG NODE_PACKAGE_VERSION=24.18.1-r0
 ARG NODE_VERSION=24.18.1
-ARG NODE_BINARY_SHA256=b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2
+ARG NODE_BINARY_SHA256=885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153
 ARG PYTHON_PACKAGE_VERSION=3.14.7-r0
 ARG PYTHON_VERSION=3.14.7
 ARG PYTHON_BINARY_SHA256=cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8
@@ -295,7 +276,7 @@ ARG YTDLP_SDIST_SHA256=b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d
 ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
 ARG YTDLP_SANITIZED_TREE_SHA256=32a2d7849c3897ae7c28c3e17853b10e3b74a0d280808177c20407496d52e817
 ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
-ARG MEDIA_APK_LOCK_SHA256=4e147d1445837415a7d9e9569667b39cedbb3c83de71f9082adbcecb487424e5
+ARG MEDIA_APK_LOCK_SHA256=12aad439942cb90e3ac6719ce1ef65806d596ef3433783206e5ffb1519d25006
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
 ARG TIKTOK_SCRAPER_SHA256=99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e
