@@ -373,10 +373,12 @@
     "generation_release_chain_note": "S3 codebuild-buildspecs/ 配下の全 prefix を無条件スキャンして得た release chain の実体。adopt purity（4 forget + 4 import）と generation freeze integrity は別概念で、後者はこの inventory 全体を対象とする（2026-08-24 ユーザー裁定⑦）。"
   },
   "unlock": {
-    "active": false,
-    "scope_paths": [],
-    "reason": null,
-    "gate": null,
+    "active": true,
+    "scope_paths": [
+      "infra/codebuild/teamagent_core_media_release_contract.json"
+    ],
+    "reason": "便γ: 契約の node binary pin と MEDIA_APK_LOCK_SHA256 を現行上流へ追随（v3.24 実バイト 3視点一致・lock は実 solver 検証済み 240 行・vendored #356/#358 撤去の前提）。この変更は世代 publish を強制するため、publish 儀式（S3 append→UpdateProject→IAM ピン）とセットで実施する。",
+    "gate": "human gate 2026-09-01（ユーザー明示承認・本パッチ適用もユーザーの手）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
