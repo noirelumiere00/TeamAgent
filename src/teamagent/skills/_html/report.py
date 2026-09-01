@@ -168,7 +168,21 @@ td.th{{width:56px;padding-right:0}}
 .foot{{color:var(--muted);font-size:11px;border-top:1px solid var(--line);padding-top:10px;
   margin-top:26px}}
 .foot .warnline{{color:var(--warn);font-weight:700}}
-@media print{{body{{background:#fff;padding:0}}.tbl,.body{{break-inside:avoid}}}}
+/* 印刷→PDF 保存を実用にする（PDF はサーバ生成せず、ブラウザの印刷で出す方針）。 */
+@media print{{
+  @page{{size:A4;margin:14mm 12mm}}
+  body{{background:#fff;padding:0;font-size:10.5pt}}
+  .wrap{{max-width:none}}
+  /* 表が複数ページに跨っても見出し行を各ページに出す（どの列か分からなくなるのを防ぐ）。 */
+  thead{{display:table-header-group}}
+  tr,.sec,.tbl .cap{{break-inside:avoid}}
+  .body,.secs{{break-inside:auto}}
+  /* 保存率のピルや再生数バーは情報そのもの。印刷でも色を落とさない。 */
+  .pill,.bar,th{{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  a{{text-decoration:none}}
+  .scroll{{overflow:visible}}
+  table{{min-width:0}}
+}}
 """
 
 _H3_RE = re.compile(r"^#{3,6}\s+(.*)$")

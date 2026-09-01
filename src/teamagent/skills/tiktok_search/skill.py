@@ -24,6 +24,7 @@ from teamagent.adapters.tiktok_scraper import TikTokSearchResult, search_tiktok
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._html.thumbs import rehost_many
 from teamagent.skills._shared.report_html import html_reports_enabled, publish_report
+from teamagent.skills._shared.report_pptx import publish_pptx
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.tiktok_search.report import build_report
 from teamagent.skills.tiktok_search.schema import (
@@ -148,12 +149,16 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
             if html_reports_enabled(self.name)
             else {}
         )
+        report = build_report(out, thumbs=thumbs)
         out.report_url = publish_report(
-            build_report(out, thumbs=thumbs),
+            report,
             tool=self.name,
             request_id=ctx.request_id,
             query=input.query,
         )
+        # PPTX は明示要求時のみ（media worker 同期実行で数十秒かかるため既定では作らない）。
+        if "pptx" in [o.strip().lower() for o in input.outputs]:
+            out.report_pptx_url = publish_pptx(report, tool=self.name, request_id=ctx.request_id)
 
         log.info(
             "tiktok_search_skill_done",

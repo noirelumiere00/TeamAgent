@@ -26,6 +26,13 @@ class TikTokSearchInput(BaseModel):
     analyze: bool = Field(
         default=True, description="取得後に Gemini で横断分析するか (false ならデータのみ)"
     )
+    outputs: list[str] = Field(
+        default_factory=lambda: ["html"],
+        description=(
+            "欲しい成果物。'html'(既定・常に作る) / 'pptx'(パワポ。media worker 経由のため"
+            "数十秒かかる。利用者が『パワポで』『スライドで』と言ったときだけ足す)"
+        ),
+    )
 
 
 class TikTokVideoOut(BaseModel):
@@ -63,6 +70,13 @@ class TikTokSearchOutput(BaseModel):
         default=None,
         description=(
             "HTMLレポートの配信URL（USE_HTML_REPORTS 有効時のみ）。"
+            "**このURLは書き換えず、そのまま利用者へ提示すること**"
+        ),
+    )
+    report_pptx_url: str | None = Field(
+        default=None,
+        description=(
+            "PPTX の配信URL（outputs に 'pptx' を含めたときのみ）。"
             "**このURLは書き換えず、そのまま利用者へ提示すること**"
         ),
     )
