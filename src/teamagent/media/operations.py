@@ -114,6 +114,22 @@ def _isolated_child_environment(
     )
 
 
+def _render_child_search_path() -> str:
+    """render_child が `python -m` で解決できる sys.path を明示的に組み立てる。
+
+    親の環境変数は _child_environment で allowlist 化されるため PYTHONPATH は
+    子へ渡らない。media image は teamagent を venv へ install せず PYTHONPATH=
+    /app/src だけで到達させているので、パッケージ実体の位置から復元する。
+    """
+
+    roots: list[str] = []
+    for path in (Path(__file__).resolve().parents[2], *(Path(entry) for entry in sys.path)):
+        candidate = str(path)
+        if candidate and candidate not in roots and (path / "teamagent" / "media").is_dir():
+            roots.append(candidate)
+    return os.pathsep.join(roots)
+
+
 def _remaining(budget: DeadlineBudget, cap_s: float | None = None) -> float:
     try:
         return budget.remaining(cap_s=cap_s)
@@ -514,7 +530,10 @@ def _renderer_json(
         cwd=workdir,
         env=_isolated_child_environment(
             workdir,
-            extra={"PYTHONUNBUFFERED": "1"},
+            extra={
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONPATH": _render_child_search_path(),
+            },
         ),
         budget=budget,
         timeout_s=_remaining(budget),
@@ -524,12 +543,25 @@ def _renderer_json(
     try:
         result = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "media renderer output invalid: kind=%s rc=%s stderr=%s",
+            manifest.get("kind"),
+            completed.returncode,
+            completed.stderr.decode("utf-8", "replace")[-300:],
+        )
         raise MediaOperationError(
             "MEDIA_RENDER_OUTPUT_INVALID",
             "renderer output is invalid",
         ) from exc
     if completed.returncode != 0 or not isinstance(result, dict) or result.get("ok") is not True:
-        code = str(result.get("code", "MEDIA_RENDER_FAILED"))
+        logger.warning(
+            "media renderer failed: kind=%s rc=%s stderr=%s",
+            manifest.get("kind"),
+            completed.returncode,
+            completed.stderr.decode("utf-8", "replace")[-300:],
+        )
+        payload = result if isinstance(result, dict) else {}
+        code = str(payload.get("code", "MEDIA_RENDER_FAILED"))
         if not re.fullmatch(r"MEDIA_[A-Z0-9_]{1,80}", code):
             code = "MEDIA_RENDER_FAILED"
         raise MediaOperationError(code, "media renderer failed")

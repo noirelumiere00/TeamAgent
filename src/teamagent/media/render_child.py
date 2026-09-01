@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -378,6 +379,9 @@ def main() -> int:
         print(json.dumps({"ok": False, "code": exc.code}, sort_keys=True))
         return 2
     except Exception:
+        # stdout は親が JSON として読むため汚さない。原因は stderr へ出して
+        # CloudWatch に残す（無診断の MEDIA_RENDER_* を潰すため）。
+        traceback.print_exc(file=sys.stderr)
         print(json.dumps({"ok": False, "code": "MEDIA_RENDER_FAILED"}, sort_keys=True))
         return 2
 
