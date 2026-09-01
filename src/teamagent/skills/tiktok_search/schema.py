@@ -29,8 +29,10 @@ class TikTokSearchInput(BaseModel):
     outputs: list[str] = Field(
         default_factory=lambda: ["html"],
         description=(
-            "欲しい成果物。'html'(既定・常に作る) / 'pptx'(パワポ。media worker 経由のため"
-            "数十秒かかる。利用者が『パワポで』『スライドで』と言ったときだけ足す)"
+            "欲しい成果物。'html'(既定・常に作る) / "
+            "'frames'(該当秒の実フレーム。動画を実際に視聴するため数十秒〜数分・課金あり。"
+            "利用者が『どの部分が』『該当箇所』『動画も見せて』と言ったときだけ足す) / "
+            "'pptx'(パワポ。media worker 経由のため数十秒かかる)"
         ),
     )
 

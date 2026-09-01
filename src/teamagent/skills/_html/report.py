@@ -80,6 +80,25 @@ class Table:
 
 
 @dataclass(frozen=True)
+class Frame:
+    """動画の 1 コマ（該当秒の実フレーム）。"""
+
+    label: str  # 「0.0秒」など
+    image: str  # https URL か data:image/... （縦横比は変えない）
+    caption: str = ""
+
+
+@dataclass(frozen=True)
+class Filmstrip:
+    """1 動画ぶんのコマ送り。「どの秒が効いているか」を画で示すための塊。"""
+
+    title: str  # 「@author」
+    subtitle: str = ""  # 「フック: 数字提示 — 19時帰宅でも10分」
+    frames: list[Frame] = field(default_factory=list)
+    href: str | None = None  # 元動画へのリンク（safe_href を通ったものだけ）
+
+
+@dataclass(frozen=True)
 class Section:
     """本文を意味のかたまりで割ったブロック（カード表示）。
 
@@ -104,6 +123,8 @@ class Report:
     body_md: str = ""
     #: 本文をブロックに割ったもの（空なら body_md だけを流す）
     sections: list[Section] = field(default_factory=list)
+    #: 該当秒の実フレーム（video_algorithm 由来）。空なら描画しない。
+    filmstrips: list[Filmstrip] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     source_note: str = ""
 
@@ -154,6 +175,20 @@ td.r,th.r{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap
 td a{{color:var(--accent);text-decoration:none;font-weight:700;word-break:break-all}}
 td a:hover{{text-decoration:underline}}
 .sub2{{display:block;color:var(--muted);font-size:11px;margin-top:2px}}
+/* コマ送り: 横スクロールする1本の帯。画像は幅固定・高さ auto＝縦横比そのまま。 */
+.strips{{display:flex;flex-direction:column;gap:14px;margin:0 0 22px}}
+.strip{{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:14px 16px}}
+.strip .who{{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:4px}}
+.strip .who b{{font-size:14px}}
+.strip .who a{{color:var(--accent);text-decoration:none;font-weight:700}}
+.strip .hook{{font-size:12.5px;color:var(--ink2);margin:0 0 10px}}
+.strip .cuts{{display:flex;gap:10px;overflow-x:auto;padding-bottom:4px}}
+.strip figure{{margin:0;flex:none;width:104px}}
+.strip figure img{{width:104px;height:auto;display:block;border-radius:5px;
+  border:1px solid var(--line);background:var(--surface2)}}
+.strip figcaption{{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.45}}
+.strip figcaption b{{color:var(--ink);font-variant-numeric:tabular-nums}}
 /* サムネ: 幅だけ決めて高さは auto＝元の縦横比のまま（9:16 も 1:1 もそのまま出る）。 */
 .thumb{{width:56px;height:auto;display:block;border-radius:4px;border:1px solid var(--line);
   background:var(--surface2)}}
@@ -190,6 +225,8 @@ _H2_RE = re.compile(r"^#{1,2}\s+(.*)$")
 _UL_RE = re.compile(r"^[-*・]\s+(.*)$")
 _OL_RE = re.compile(r"^(\d+)[.)]\s+(.*)$")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+# data URI で許すのは実画像のみ（svg+xml はスクリプトを持てるため除外）。
+_SAFE_DATA_IMAGE = re.compile(r"^data:image/(?:jpeg|png|webp|gif);base64,[A-Za-z0-9+/=]+$")
 
 
 def _esc(s: str) -> str:
@@ -256,12 +293,16 @@ def render_body(md: str) -> str:
     return "".join(out)
 
 
-def _img_html(src: str) -> str:
-    """サムネ img。https のみ・幅固定/高さ auto で**縦横比を保つ**・遅延読み込み。"""
-    if not src.startswith("https://"):
+def _img_html(src: str, klass: str = "thumb") -> str:
+    """画像 img。https と data:image/ のみ・幅固定/高さ auto で**縦横比を保つ**・遅延読み込み。
+
+    ``data:image/svg+xml`` は許さない（SVG は中でスクリプトを実行し得るため）。
+    """
+    if not (src.startswith("https://") or _SAFE_DATA_IMAGE.match(src)):
         return ""
     return (
-        f"<img class='thumb' src='{_esc(src)}' alt='' loading='lazy' referrerpolicy='no-referrer'>"
+        f"<img class='{klass}' src='{_esc(src)}' alt='' loading='lazy' "
+        "referrerpolicy='no-referrer'>"
     )
 
 
@@ -316,6 +357,31 @@ def _table_html(table: Table) -> str:
     )
 
 
+def _filmstrip_html(strip: Filmstrip) -> str:
+    cuts = []
+    for frame in strip.frames:
+        img = _img_html(frame.image, klass="cut")
+        if not img:
+            continue
+        cap = f"<b>{_esc(frame.label)}</b>"
+        if frame.caption:
+            cap += f"<br>{_esc(frame.caption)}"
+        cuts.append(f"<figure>{img}<figcaption>{cap}</figcaption></figure>")
+    if not cuts:
+        return ""
+    href = safe_href(strip.href) if strip.href else None
+    title = (
+        f"<a href='{_esc(href)}' target='_blank' rel='noopener'>{_esc(strip.title)}</a>"
+        if href
+        else f"<b>{_esc(strip.title)}</b>"
+    )
+    sub = f"<p class='hook'>{_esc(strip.subtitle)}</p>" if strip.subtitle else ""
+    return (
+        f"<div class='strip'><div class='who'><b>{title}</b></div>{sub}"
+        f"<div class='cuts'>{''.join(cuts)}</div></div>"
+    )
+
+
 def render_report(report: Report, *, now: _dt.datetime | None = None) -> str:
     """:class:`Report` を自己完結 HTML（1ファイル・外部参照なし）へ変換する。"""
     stamp = (now or _dt.datetime.now(_JST)).astimezone(_JST).strftime("%Y-%m-%d %H:%M")
@@ -331,6 +397,8 @@ def render_report(report: Report, *, now: _dt.datetime | None = None) -> str:
         if sec.body_md and sec.body_md.strip()
     )
     secs_html = f"<div class='secs'>{secs}</div>" if secs else ""
+    strips = "".join(_filmstrip_html(s) for s in report.filmstrips)
+    strips_html = f"<div class='strips'>{strips}</div>" if strips else ""
     tables = "".join(_table_html(t) for t in report.tables)
     lead = f"<p class='lead'>{_esc(report.headline)}</p>" if report.headline else ""
     sub = f"<p class='sub'>{_esc(report.subtitle)}</p>" if report.subtitle else ""
@@ -340,7 +408,7 @@ def render_report(report: Report, *, now: _dt.datetime | None = None) -> str:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex,nofollow'>"
         f"<title>{_esc(report.title)}</title><style>{_CSS}</style></head><body><div class='wrap'>"
-        f"<h1>{_esc(report.title)}</h1>{lead}{sub}{chips_html}{body_html}{secs_html}{tables}"
+        f"<h1>{_esc(report.title)}</h1>{lead}{sub}{chips_html}{body_html}{secs_html}{strips_html}{tables}"
         f"<div class='foot'>{src}生成 {stamp} JST（TeamAgent）"
         "<br><span class='warnline'>社外共有不可。</span></div>"
         "</div></body></html>"
@@ -351,6 +419,8 @@ __all__ = [
     "Cell",
     "Chip",
     "Column",
+    "Filmstrip",
+    "Frame",
     "Report",
     "Section",
     "Table",

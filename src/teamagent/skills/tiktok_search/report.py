@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 
-from teamagent.skills._html.report import Cell, Chip, Column, Report, Section, Table
+from teamagent.skills._html.report import Cell, Chip, Column, Filmstrip, Report, Section, Table
 from teamagent.skills._html.sections import split_sections
 from teamagent.skills.tiktok_search.schema import TikTokSearchOutput, TikTokVideoOut
 
@@ -90,12 +90,17 @@ def _split_analysis(analysis: str) -> tuple[str, list[Section]]:
     return first_body or f"{first_title}", rest
 
 
-def build_report(out: TikTokSearchOutput, thumbs: dict[str, str] | None = None) -> Report:
+def build_report(
+    out: TikTokSearchOutput,
+    thumbs: dict[str, str] | None = None,
+    filmstrips: list[Filmstrip] | None = None,
+) -> Report:
     """検索結果 ＋ Gemini 分析を 1 枚の HTML レポートへ詰め替える。
 
     Args:
         thumbs: ``{cover_url: 再ホスト済みURL}``。I/O は skill 層で済ませて渡す
             （このモジュールは純粋関数のまま保つ）。空なら画像列を出さない。
+        filmstrips: 該当秒の実フレーム（video_algorithm 由来）。空なら描画しない。
     """
     videos = list(out.videos)
     max_play = max((v.play_count for v in videos), default=0)
@@ -160,6 +165,7 @@ def build_report(out: TikTokSearchOutput, thumbs: dict[str, str] | None = None) 
         chips=chips,
         body_md=body,
         sections=sections,
+        filmstrips=list(filmstrips or []),
         tables=[
             Table(
                 columns=columns,
