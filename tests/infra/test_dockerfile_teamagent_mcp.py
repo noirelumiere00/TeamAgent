@@ -204,4 +204,4 @@ def test_core_lock_has_no_bundled_agent_or_media_runtime_dependencies() -> None:
         assert not any(item.startswith(dependency) for item in base)
     assert 'name = "claude-agent-sdk"' not in lock
     assert '"playwright==1.60.0"' in pyproject
-    assert '"yt-dlp==2026.7.4"' in pyproject
+    assert '"yt-dlp==2026.8.19"' in pyproject

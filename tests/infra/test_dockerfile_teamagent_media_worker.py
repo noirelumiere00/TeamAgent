@@ -140,11 +140,11 @@ def test_ytdlp_sources_are_hash_verified_then_secret_bearing_extractors_are_remo
         "4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db"
     )
     for digest in (
-        "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
-        "b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432",
+        "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf",
+        "9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1",
         "f82c1f065f6aa3dd5ce8ee3491d4c49f245d1e7ba921b8cc0cc9c8658a634fbd",
         "ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b",
-        "32a2d7849c3897ae7c28c3e17853b10e3b74a0d280808177c20407496d52e817",
+        "47c027c33b5750234293613987caf3e63ca93823c785580d334c1d29ee733f8f",
     ):
         assert digest in TEXT
     assert TEXT.count("ARG YTDLP_WHEEL_SHA256=") == 2
