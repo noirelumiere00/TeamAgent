@@ -133,3 +133,28 @@ class TestSectionSplit:
         html = render_report(self._report(self._ANALYSIS))
         assert html.count("class='sec'") == 2
         assert "伸びている勝ちパターン" in html
+
+
+class TestThumbnails:
+    def test_thumb_column_appears_only_when_images_exist(self) -> None:
+        out = _out(_video(1, 100, 1, cover_url="https://cdn.example/a.jpg"))
+        assert len(build_report(out).tables[0].columns) == 8
+        with_thumbs = build_report(out, thumbs={"https://cdn.example/a.jpg": "https://r/1.jpg"})
+        assert len(with_thumbs.tables[0].columns) == 9
+
+    def test_missing_thumb_leaves_the_cell_empty(self) -> None:
+        # 1本だけ取得できた場合、他の行は画像なしで崩れず並ぶ。
+        out = _out(
+            _video(1, 100, 1, cover_url="https://cdn.example/a.jpg"),
+            _video(2, 100, 1, cover_url="https://cdn.example/b.jpg"),
+        )
+        report = build_report(out, thumbs={"https://cdn.example/a.jpg": "https://r/1.jpg"})
+        assert report.tables[0].rows[0][1].image == "https://r/1.jpg"
+        assert report.tables[0].rows[1][1].image is None
+
+    def test_rendered_html_has_one_img_per_available_thumb(self) -> None:
+        out = _out(_video(1, 100, 1, cover_url="https://cdn.example/a.jpg"))
+        html = render_report(
+            build_report(out, thumbs={"https://cdn.example/a.jpg": "https://r/1.jpg"})
+        )
+        assert html.count("<img class='thumb'") == 1

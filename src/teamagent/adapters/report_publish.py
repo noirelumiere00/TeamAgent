@@ -205,6 +205,30 @@ def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -
     )
 
 
+def publish_bytes_result(
+    body: bytes,
+    *,
+    content_type: str,
+    ext: str,
+    prefix: str | None = None,
+    request_id: str = "asset",
+    bucket: str | None = None,
+) -> PublishedObject | None:
+    """任意の bytes（画像等）を非公開S3へ置き、PublishedObject を返す。失敗で None。
+
+    レポートに埋める画像アセット用。``query`` はログに残さないため受け取らない。
+    """
+    return _put_and_presign(
+        body,
+        content_type=content_type,
+        ext=ext,
+        prefix=prefix,
+        request_id=request_id,
+        query="",
+        bucket=bucket,
+    )
+
+
 def publish_html_file_result(
     path: str, *, request_id: str = "vseo", query: str = ""
 ) -> PublishedObject | None:

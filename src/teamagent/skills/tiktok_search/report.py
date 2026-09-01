@@ -90,18 +90,29 @@ def _split_analysis(analysis: str) -> tuple[str, list[Section]]:
     return first_body or f"{first_title}", rest
 
 
-def build_report(out: TikTokSearchOutput) -> Report:
-    """検索結果 ＋ Gemini 分析を 1 枚の HTML レポートへ詰め替える。"""
+def build_report(out: TikTokSearchOutput, thumbs: dict[str, str] | None = None) -> Report:
+    """検索結果 ＋ Gemini 分析を 1 枚の HTML レポートへ詰め替える。
+
+    Args:
+        thumbs: ``{cover_url: 再ホスト済みURL}``。I/O は skill 層で済ませて渡す
+            （このモジュールは純粋関数のまま保つ）。空なら画像列を出さない。
+    """
     videos = list(out.videos)
     max_play = max((v.play_count for v in videos), default=0)
     total_play = sum(v.play_count for v in videos)
 
+    thumb_map = thumbs or {}
+    has_thumbs = any(v.cover_url in thumb_map for v in videos)
+
     rows: list[list[Cell]] = []
     for v in videos:
         rate = _save_rate(v)
+        cells = [Cell(str(v.rank))]
+        if has_thumbs:
+            cells.append(Cell("", image=thumb_map.get(v.cover_url)))
         rows.append(
             [
-                Cell(str(v.rank)),
+                *cells,
                 Cell(
                     f"@{v.author}",
                     href=v.url,
@@ -121,6 +132,7 @@ def build_report(out: TikTokSearchOutput) -> Report:
 
     columns = [
         Column("#"),
+        *([Column("")] if has_thumbs else []),
         Column("アカウント"),
         Column("再生数", align="right"),
         Column("保存", align="right"),

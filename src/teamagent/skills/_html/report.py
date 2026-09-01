@@ -58,6 +58,7 @@ class Cell:
         sub: 補助行（フォロワー数など）。
         bar: 0.0-1.0。指定すると数値の左に横棒を描く（大小を目で比べるため）。
         tone: ``"ok" | "warn" | "muted"``。指標の高低を色で示すピル表示にする。
+        image: サムネイル画像の https URL。**縦横比は変えない**（幅だけ指定し高さは auto）。
     """
 
     text: str
@@ -65,6 +66,7 @@ class Cell:
     sub: str | None = None
     bar: float | None = None
     tone: str | None = None
+    image: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,10 @@ td.r,th.r{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap
 td a{{color:var(--accent);text-decoration:none;font-weight:700;word-break:break-all}}
 td a:hover{{text-decoration:underline}}
 .sub2{{display:block;color:var(--muted);font-size:11px;margin-top:2px}}
+/* サムネ: 幅だけ決めて高さは auto＝元の縦横比のまま（9:16 も 1:1 もそのまま出る）。 */
+.thumb{{width:56px;height:auto;display:block;border-radius:4px;border:1px solid var(--line);
+  background:var(--surface2)}}
+td.th{{width:56px;padding-right:0}}
 .barwrap{{display:flex;align-items:center;gap:8px;justify-content:flex-end}}
 .bar{{height:8px;background:var(--accent);border-radius:0 3px 3px 0;flex:none;min-width:2px}}
 .pill{{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:700;
@@ -236,7 +242,20 @@ def render_body(md: str) -> str:
     return "".join(out)
 
 
+def _img_html(src: str) -> str:
+    """サムネ img。https のみ・幅固定/高さ auto で**縦横比を保つ**・遅延読み込み。"""
+    if not src.startswith("https://"):
+        return ""
+    return (
+        f"<img class='thumb' src='{_esc(src)}' alt='' loading='lazy' referrerpolicy='no-referrer'>"
+    )
+
+
 def _cell_html(cell: Cell, align: str) -> str:
+    if cell.image:
+        img = _img_html(cell.image)
+        if img:
+            return f"<td class='th'>{img}</td>"
     text = _esc(cell.text)
     if cell.tone in ("ok", "warn", "muted"):
         inner = f"<span class='pill {cell.tone}'>{text}</span>"

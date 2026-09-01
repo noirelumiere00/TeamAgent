@@ -22,7 +22,8 @@ from pydantic import BaseModel
 from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.adapters.tiktok_scraper import TikTokSearchResult, search_tiktok
 from teamagent.prompts.loader import load_prompt
-from teamagent.skills._shared.report_html import publish_report
+from teamagent.skills._html.thumbs import rehost_many
+from teamagent.skills._shared.report_html import html_reports_enabled, publish_report
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.tiktok_search.report import build_report
 from teamagent.skills.tiktok_search.schema import (
@@ -140,8 +141,15 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
             out.model_id = model_id
 
         # 3. HTML レポート発行（フラグ OFF なら None＝現行どおり構造化結果だけを返す）
+        # サムネは CDN の署名URLが数日で切れるため、自社S3へ再ホストしてから貼る（thumbs.py）。
+        # I/O はここで済ませ、詰め替え（build_report）は純粋関数のままにする。
+        thumbs = (
+            rehost_many([v.cover_url for v in out.videos], request_id=ctx.request_id)
+            if html_reports_enabled(self.name)
+            else {}
+        )
         out.report_url = publish_report(
-            build_report(out),
+            build_report(out, thumbs=thumbs),
             tool=self.name,
             request_id=ctx.request_id,
             query=input.query,
