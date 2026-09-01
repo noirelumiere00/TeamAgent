@@ -92,3 +92,44 @@ class TestCompact:
         assert _compact(1_800_000) == "180万"
         assert _compact(32_400) == "3.2万"
         assert _compact(9_999) == "9,999"
+
+
+class TestSectionSplit:
+    """固定フォーマットの分析文を、見出し単位のカードへ割る。"""
+
+    _ANALYSIS = (
+        "### 1. この検索結果のサマリ\n通底パターンは時短。\n\n"
+        "### 2. 伸びている勝ちパターン（最大 4、頻度/再生順）\n- **時短** — 8/10本\n\n"
+        "### 3. フックの型（説明文から読み取れるもの、最大 3）\n- 手間軽減\n"
+    )
+
+    def _report(self, analysis: str) -> object:
+        out = _out(_video(1, 100, 1))
+        out.analysis = analysis
+        return build_report(out)
+
+    def test_first_section_becomes_body(self) -> None:
+        assert self._report(self._ANALYSIS).body_md.startswith("通底パターンは時短")
+
+    def test_remaining_sections_become_cards(self) -> None:
+        titles = [s.title for s in self._report(self._ANALYSIS).sections]
+        assert titles == ["伸びている勝ちパターン", "フックの型"]
+
+    def test_prompt_hints_are_stripped_from_titles(self) -> None:
+        # 「（最大 4、頻度/再生順）」は生成条件であって読者向けの情報ではない。
+        assert "最大" not in " ".join(s.title for s in self._report(self._ANALYSIS).sections)
+
+    def test_content_parentheses_are_kept(self) -> None:
+        report = self._report("### 1. サマリ\n本文\n\n### 2. 保存率（重要指標）\n- 中身\n")
+        assert report.sections[0].title == "保存率（重要指標）"
+
+    def test_unstructured_analysis_falls_back_to_plain_body(self) -> None:
+        # プロンプト改訂で見出しが消えても、本文が失われないこと。
+        report = self._report("見出しのない素の分析文。")
+        assert report.sections == []
+        assert report.body_md == "見出しのない素の分析文。"
+
+    def test_sections_are_rendered_as_cards(self) -> None:
+        html = render_report(self._report(self._ANALYSIS))
+        assert html.count("class='sec'") == 2
+        assert "伸びている勝ちパターン" in html

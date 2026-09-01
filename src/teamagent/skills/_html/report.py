@@ -78,6 +78,19 @@ class Table:
 
 
 @dataclass(frozen=True)
+class Section:
+    """本文を意味のかたまりで割ったブロック（カード表示）。
+
+    LLM 本文が **固定フォーマット**（例: tiktok_search の system prompt は ①サマリ〜⑤推奨
+    アクションの順序固定）で返る skill 用。ひと続きの本文として流すと「勝ちパターン」も
+    「推奨アクション」も同じ重さで並び、読む側が拾えない。構造を拾うだけで、解釈は足さない。
+    """
+
+    title: str
+    body_md: str
+
+
+@dataclass(frozen=True)
 class Report:
     """レンダラへの唯一の入力。skill 側はこれを組むだけでよい。"""
 
@@ -87,6 +100,8 @@ class Report:
     subtitle: str = ""
     chips: list[Chip] = field(default_factory=list)
     body_md: str = ""
+    #: 本文をブロックに割ったもの（空なら body_md だけを流す）
+    sections: list[Section] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     source_note: str = ""
 
@@ -114,6 +129,14 @@ h1{{font-size:24px;line-height:1.35;margin:0 0 6px;font-weight:700}}
 .body p{{margin:0 0 10px;font-size:14px}}
 .body ul,.body ol{{margin:0 0 12px;padding-left:1.3em}}
 .body li{{font-size:14px;margin-bottom:4px}}
+.secs{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;
+  margin:0 0 22px}}
+.sec{{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:4px 18px 14px}}
+.sec > h4{{font-size:13px;margin:14px 0 6px;color:var(--accent);letter-spacing:.02em}}
+.sec p{{margin:0 0 8px;font-size:13.5px}}
+.sec ul,.sec ol{{margin:0 0 6px;padding-left:1.25em}}
+.sec li{{font-size:13.5px;margin-bottom:5px}}
 .tbl{{background:var(--surface);border:1px solid var(--line);border-radius:10px;
   margin:0 0 22px;overflow:hidden}}
 .tbl .cap{{padding:12px 16px 0;font-size:14px;font-weight:700}}
@@ -269,6 +292,12 @@ def render_report(report: Report, *, now: _dt.datetime | None = None) -> str:
     chips_html = f"<ul class='chips'>{chips}</ul>" if chips else ""
     body = render_body(report.body_md)
     body_html = f"<div class='body'>{body}</div>" if body else ""
+    secs = "".join(
+        f"<div class='sec'><h4>{_esc(sec.title)}</h4>{render_body(sec.body_md)}</div>"
+        for sec in report.sections
+        if sec.body_md and sec.body_md.strip()
+    )
+    secs_html = f"<div class='secs'>{secs}</div>" if secs else ""
     tables = "".join(_table_html(t) for t in report.tables)
     lead = f"<p class='lead'>{_esc(report.headline)}</p>" if report.headline else ""
     sub = f"<p class='sub'>{_esc(report.subtitle)}</p>" if report.subtitle else ""
@@ -278,11 +307,20 @@ def render_report(report: Report, *, now: _dt.datetime | None = None) -> str:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<meta name='robots' content='noindex,nofollow'>"
         f"<title>{_esc(report.title)}</title><style>{_CSS}</style></head><body><div class='wrap'>"
-        f"<h1>{_esc(report.title)}</h1>{lead}{sub}{chips_html}{body_html}{tables}"
+        f"<h1>{_esc(report.title)}</h1>{lead}{sub}{chips_html}{body_html}{secs_html}{tables}"
         f"<div class='foot'>{src}生成 {stamp} JST（TeamAgent）"
         "<br><span class='warnline'>社外共有不可。</span></div>"
         "</div></body></html>"
     )
 
 
-__all__ = ["Cell", "Chip", "Column", "Report", "Table", "render_body", "render_report"]
+__all__ = [
+    "Cell",
+    "Chip",
+    "Column",
+    "Report",
+    "Section",
+    "Table",
+    "render_body",
+    "render_report",
+]
