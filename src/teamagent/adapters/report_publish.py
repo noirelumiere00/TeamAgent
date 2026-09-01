@@ -11,10 +11,12 @@ env:
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -23,6 +25,44 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"
 _DEFAULT_PREFIX = "vseo-reports/"
 _EXPIRES_S = 604800  # 7日（SigV4 署名付きURLの上限）
+
+
+# 「7日有効」と言い切るための最低線。これを下回る presigned は握ったまま渡してはいけない。
+_MIN_ACCEPTABLE_S = 6 * 24 * 3600
+
+
+def presigned_expiry_epoch(url: str) -> int | None:
+    """presigned URL の失効時刻（epoch秒）。判定できなければ None。
+
+    SigV2 は ``Expires``（epoch）、SigV4 は ``X-Amz-Date`` + ``X-Amz-Expires``（相対秒）。
+    """
+    try:
+        q = parse_qs(urlsplit(url).query)
+    except ValueError:
+        return None
+    if "Expires" in q:
+        try:
+            return int(q["Expires"][0])
+        except (ValueError, IndexError):
+            return None
+    if "X-Amz-Date" in q and "X-Amz-Expires" in q:
+        try:
+            start = _dt.datetime.strptime(q["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=_dt.UTC
+            )
+            return int(start.timestamp()) + int(q["X-Amz-Expires"][0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def presigned_lifetime_s(url: str, *, now: int | None = None) -> int | None:
+    """presigned URL の残り寿命（秒）。判定できなければ None。"""
+    expiry = presigned_expiry_epoch(url)
+    if expiry is None:
+        return None
+    current = now if now is not None else int(_dt.datetime.now(_dt.UTC).timestamp())
+    return expiry - current
 
 
 def _bucket_region(s3: Any, bucket: str) -> str:
@@ -79,6 +119,19 @@ def _put_and_presign(
         url: str = s3.generate_presigned_url(
             "get_object", Params={"Bucket": bkt, "Key": key}, ExpiresIn=_EXPIRES_S
         )
+        # ⚠️ ExpiresIn に 7日 を渡しても、**一時認証情報(STS)で署名すると寿命はトークン側で頭打ち**に
+        # なる（実測 2026-09-01: /r のリダイレクト先が約30分で AccessDenied）。黙って短くなると
+        # 「7日有効のつもりのリンク」が数十分で死ぬので、ここで検出して名指しで warning する。
+        # 配信自体は止めない（/r 経路は開くたびに署名し直すため実害が無い）。
+        lifetime = presigned_lifetime_s(url)
+        if lifetime is not None and lifetime < _MIN_ACCEPTABLE_S:
+            logger.warning(
+                "report_presign_shortlived",
+                request_id=request_id,
+                lifetime_s=lifetime,
+                hint="一時認証情報で署名されたため7日に満たない。"
+                "presigned を人へ直接渡さず /r 短縮URL（開く度に再署名）で配布すること",
+            )
         # query（商材/テーマ/keyword＝機密でありうる）は CloudWatch に残さない。key は uuid で
         # 商材名を含まないため bucket/key/region のみ記録する（有無だけ has_query で可観測化）。
         logger.info(
