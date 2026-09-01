@@ -22,7 +22,12 @@ from pydantic import BaseModel
 from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.adapters.tiktok_scraper import TikTokSearchResult, search_tiktok
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._html.thumbs import rehost_many
+from teamagent.skills._shared.report_html import html_reports_enabled, publish_report
+from teamagent.skills._shared.report_pptx import publish_pptx
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.tiktok_search.deep import build_filmstrips
+from teamagent.skills.tiktok_search.report import build_report
 from teamagent.skills.tiktok_search.schema import (
     TikTokSearchInput,
     TikTokSearchOutput,
@@ -137,7 +142,39 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
             out.total_cost_usd = cost
             out.model_id = model_id
 
-        log.info("tiktok_search_skill_done", count=out.count, cost_usd=out.total_cost_usd)
+        # 3. HTML レポート発行（フラグ OFF なら None＝現行どおり構造化結果だけを返す）
+        # サムネは CDN の署名URLが数日で切れるため、自社S3へ再ホストしてから貼る（thumbs.py）。
+        # I/O はここで済ませ、詰め替え（build_report）は純粋関数のままにする。
+        thumbs = (
+            rehost_many([v.cover_url for v in out.videos], request_id=ctx.request_id)
+            if html_reports_enabled(self.name)
+            else {}
+        )
+        # 「該当秒の実フレーム」は明示要求時のみ。video_algorithm を後段で実行する
+        # （分析ロジックは複製せず出力を写す）。重いので既定では走らせない。
+        wanted = [o.strip().lower() for o in input.outputs]
+        filmstrips, frames_cost = (
+            build_filmstrips(input.query, ctx) if "frames" in wanted else ([], 0.0)
+        )
+        # 入れ子で発生した有料分析を親のコストへ合算する（usage 台帳とレポート表示の正確性）。
+        out.total_cost_usd += frames_cost
+        report = build_report(out, thumbs=thumbs, filmstrips=filmstrips)
+        out.report_url = publish_report(
+            report,
+            tool=self.name,
+            request_id=ctx.request_id,
+            query=input.query,
+        )
+        # PPTX は明示要求時のみ（media worker 同期実行で数十秒かかるため既定では作らない）。
+        if "pptx" in wanted:
+            out.report_pptx_url = publish_pptx(report, tool=self.name, request_id=ctx.request_id)
+
+        log.info(
+            "tiktok_search_skill_done",
+            count=out.count,
+            cost_usd=out.total_cost_usd,
+            has_report=bool(out.report_url),
+        )
         return out
 
     def _analyze(

@@ -165,10 +165,22 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     trimmed = _shrink_lists_to_fit(trimmed, max_chars)
     trimmed["offloaded"] = True
     trimmed["full_url"] = url
-    trimmed["offload_note"] = (
-        "本文が長いため全文を退避しました（リンクは最長7日・実行環境により短くなる場合あり。"
-        "社外共有不可）。以下は要点のみの切り詰め版です。"
-    )
+    report_url = data.get("report_url") if isinstance(data, dict) else None
+    if isinstance(report_url, str) and report_url:
+        # HTML レポートは**人が読む用**。ただし表に出ない実数値（いいね/コメント/シェア/タグ等）は
+        # 落ちているので、全文の正本は退避した JSON（full_url）のままにする。
+        # ここを「レポートがあるから JSON は要らない」にすると、切り詰めで消えた値がどこからも
+        # 復元できなくなる（レビュー指摘）。
+        trimmed["offload_note"] = (
+            "本文が長いため要点のみに切り詰めました。"
+            "**利用者にはレポート(report_url)のリンクを提示すること**。"
+            "full_url は全項目を含む生データで、機械的な再取得用（人へ渡さない）。社外共有不可。"
+        )
+    else:
+        trimmed["offload_note"] = (
+            "本文が長いため全文を退避しました（リンクは最長7日・実行環境により短くなる場合あり。"
+            "社外共有不可）。以下は要点のみの切り詰め版です。"
+        )
     logger.info(
         "payload_offloaded",
         request_id=request_id,

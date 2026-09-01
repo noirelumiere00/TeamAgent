@@ -37,6 +37,9 @@ from teamagent.adapters.report_publish import PublishedObject
 
 logger = structlog.get_logger(__name__)
 
+# 「基本7日有効」の最低線（これを下回る配布URLは警告する）。
+_MIN_LINK_LIFETIME_S = 6 * 24 * 3600
+
 
 def short_url_enabled() -> bool:
     """USE_REPORT_SHORTURL: レポートを短縮URL(/r)で配布する段階ゲート（既定 OFF）。
@@ -70,6 +73,25 @@ def _missing_prereqs(base: str, key: str) -> list[str]:
     return missing
 
 
+def _warn_if_shortlived(url: str, *, request_id: str, reason: str) -> None:
+    """presigned へ落ちる時、その URL が実際は短命なら名指しで警告する。
+
+    一時認証情報(STS)で署名した presigned は、ExpiresIn に 7日 を渡してもトークン寿命で
+    頭打ちになる（実測: 約30分）。「7日有効のつもりのリンクが数十分で死ぬ」を無言にしない。
+    """
+    from teamagent.adapters.report_publish import presigned_lifetime_s
+
+    lifetime = presigned_lifetime_s(url)
+    if lifetime is not None and lifetime < _MIN_LINK_LIFETIME_S:
+        logger.warning(
+            "report_delivery_shortlived_url",
+            request_id=request_id,
+            reason=reason,
+            lifetime_s=lifetime,
+            hint="この URL は7日もたない。/r 短縮URLの前提を揃えて配布し直すこと",
+        )
+
+
 def delivery_url(result: PublishedObject, *, request_id: str) -> str:
     """公開済み成果物の配信URLを返す。条件が揃えば /r 短縮URL、揃わなければ presigned。
 
@@ -81,11 +103,13 @@ def delivery_url(result: PublishedObject, *, request_id: str) -> str:
     from teamagent.skills.knowledge_search_url.skill import connect_base_url
 
     if not short_url_enabled():
+        _warn_if_shortlived(result.url, request_id=request_id, reason="short_url_disabled")
         return result.url  # 機能OFF＝意図した無言（後方互換）
 
     base = connect_base_url()
     missing = _missing_prereqs(base, result.key)
     if missing:
+        _warn_if_shortlived(result.url, request_id=request_id, reason="prereq_missing")
         logger.warning(
             "report_short_url_prereq_missing",
             request_id=request_id,

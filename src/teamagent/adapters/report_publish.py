@@ -11,10 +11,12 @@ env:
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import uuid
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -23,6 +25,60 @@ logger = structlog.get_logger(__name__)
 _DEFAULT_BUCKET = "teamagent-dev-raw-files"
 _DEFAULT_PREFIX = "vseo-reports/"
 _EXPIRES_S = 604800  # 7日（SigV4 署名付きURLの上限）
+
+
+# 「7日有効」と言い切るための最低線。これを下回る presigned は握ったまま渡してはいけない。
+_MIN_ACCEPTABLE_S = 6 * 24 * 3600
+
+
+def presigned_expiry_epoch(url: str) -> int | None:
+    """presigned URL の失効時刻（epoch秒）。判定できなければ None。
+
+    SigV2 は ``Expires``（epoch）、SigV4 は ``X-Amz-Date`` + ``X-Amz-Expires``（相対秒）。
+    """
+    try:
+        q = parse_qs(urlsplit(url).query)
+    except ValueError:
+        return None
+    if "Expires" in q:
+        try:
+            return int(q["Expires"][0])
+        except (ValueError, IndexError):
+            return None
+    if "X-Amz-Date" in q and "X-Amz-Expires" in q:
+        try:
+            start = _dt.datetime.strptime(q["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ").replace(
+                tzinfo=_dt.UTC
+            )
+            return int(start.timestamp()) + int(q["X-Amz-Expires"][0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def presigned_lifetime_s(url: str, *, now: int | None = None) -> int | None:
+    """presigned URL の残り寿命（秒）。判定できなければ None。"""
+    expiry = presigned_expiry_epoch(url)
+    if expiry is None:
+        return None
+    current = now if now is not None else int(_dt.datetime.now(_dt.UTC).timestamp())
+    return expiry - current
+
+
+def _warn_if_temporary_credentials(session: Any, *, request_id: str) -> None:
+    """一時認証情報で署名している場合に警告する（presigned の実効寿命がトークン依存になる）。"""
+    try:
+        credentials = session.get_credentials()
+        token = getattr(credentials, "token", None) if credentials else None
+    except Exception:  # 資格情報の取り方は環境依存。判定できないなら黙る。
+        return
+    if token:
+        logger.warning(
+            "report_presign_temporary_credentials",
+            request_id=request_id,
+            hint="一時認証情報(STS)で署名したため、URL の実効寿命はセッション寿命で頭打ちになる"
+            "（X-Amz-Expires の値は当てにならない）。人へは /r 短縮URLを渡すこと",
+        )
 
 
 def _bucket_region(s3: Any, bucket: str) -> str:
@@ -79,6 +135,23 @@ def _put_and_presign(
         url: str = s3.generate_presigned_url(
             "get_object", Params={"Bucket": bkt, "Key": key}, ExpiresIn=_EXPIRES_S
         )
+        # ⚠️ ExpiresIn に 7日 を渡しても、**一時認証情報(STS)で署名すると実効寿命はトークン側で
+        # 頭打ち**になる（実測 2026-09-01: /r のリダイレクト先が約30分で AccessDenied）。
+        # 検出は2段構え:
+        #   (1) 署名クエリから読める寿命（SigV2 の Expires はここで短く出る）
+        #   (2) **一時認証情報かどうか**（SigV4 の X-Amz-Expires は要求値がそのまま書かれ、
+        #       トークン失効は opaque な X-Amz-Security-Token 側なので (1) では見えない）
+        # 配信自体は止めない（/r 経路は開くたびに署名し直すため実害が無い）。
+        _warn_if_temporary_credentials(sess, request_id=request_id)
+        lifetime = presigned_lifetime_s(url)
+        if lifetime is not None and lifetime < _MIN_ACCEPTABLE_S:
+            logger.warning(
+                "report_presign_shortlived",
+                request_id=request_id,
+                lifetime_s=lifetime,
+                hint="一時認証情報で署名されたため7日に満たない。"
+                "presigned を人へ直接渡さず /r 短縮URL（開く度に再署名）で配布すること",
+            )
         # query（商材/テーマ/keyword＝機密でありうる）は CloudWatch に残さない。key は uuid で
         # 商材名を含まないため bucket/key/region のみ記録する（有無だけ has_query で可観測化）。
         logger.info(
@@ -202,6 +275,37 @@ def publish_html_file(path: str, *, request_id: str = "vseo", query: str = "") -
         ext=".html",
         request_id=request_id,
         query=query,
+    )
+
+
+def publish_bytes_result(
+    body: bytes,
+    *,
+    content_type: str,
+    ext: str,
+    prefix: str | None = None,
+    request_id: str = "asset",
+    bucket: str | None = None,
+) -> PublishedObject | None:
+    """任意の bytes（画像等）を非公開S3へ置き、PublishedObject を返す。失敗で None。
+
+    レポートに埋める画像アセット用。``query`` はログに残さないため受け取らない。
+
+    **バケットは明示必須**（引数か ``VSEO_REPORT_BUCKET``）。既定バケットへ暗黙に落とすと、
+    ローカル/設定漏れの環境から本番バケットへサムネや PPTX を書いてしまう。HTML 本体は
+    ``publish_report`` が同じ検査をしているので、アセット側だけ緩いと迂回路になる。
+    """
+    if not (bucket or os.environ.get("VSEO_REPORT_BUCKET")):
+        logger.info("report_asset_skipped_no_bucket", request_id=request_id)
+        return None
+    return _put_and_presign(
+        body,
+        content_type=content_type,
+        ext=ext,
+        prefix=prefix,
+        request_id=request_id,
+        query="",
+        bucket=bucket,
     )
 
 

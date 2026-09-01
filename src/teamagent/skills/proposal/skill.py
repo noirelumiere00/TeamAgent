@@ -17,7 +17,9 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.report_html import publish_report
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.proposal.report import build_report
 from teamagent.skills.proposal.schema import (
     ProposalDraftInput,
     ProposalDraftOutput,
@@ -67,14 +69,27 @@ class ProposalDraftSkill(BaseSkill[ProposalDraftInput, ProposalDraftOutput]):
         draft, cost_usd = self._generate(input.brief, hits, ctx.request_id)
 
         sources = [self._to_source(h) for h in hits]
-        log.info("proposal_draft_done", source_count=len(sources), cost_usd=cost_usd)
-        return ProposalDraftOutput(
+        out = ProposalDraftOutput(
             brief=input.brief,
             draft=draft,
             sources=sources,
             source_count=len(sources),
             total_cost_usd=cost_usd,
         )
+        out.report_url = publish_report(
+            build_report(out),
+            tool=self.name,
+            request_id=ctx.request_id,
+            query=input.brief,
+            rls_derived=True,
+        )
+        log.info(
+            "proposal_draft_done",
+            source_count=len(sources),
+            cost_usd=cost_usd,
+            has_report=bool(out.report_url),
+        )
+        return out
 
     @staticmethod
     def _to_source(hit: SearchHit) -> ProposalSource:

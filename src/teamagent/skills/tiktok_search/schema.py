@@ -26,6 +26,15 @@ class TikTokSearchInput(BaseModel):
     analyze: bool = Field(
         default=True, description="取得後に Gemini で横断分析するか (false ならデータのみ)"
     )
+    outputs: list[str] = Field(
+        default_factory=lambda: ["html"],
+        description=(
+            "欲しい成果物。'html'(既定・常に作る) / "
+            "'frames'(該当秒の実フレーム。動画を実際に視聴するため数十秒〜数分・課金あり。"
+            "利用者が『どの部分が』『該当箇所』『動画も見せて』と言ったときだけ足す) / "
+            "'pptx'(パワポ。media worker 経由のため数十秒かかる)"
+        ),
+    )
 
 
 class TikTokVideoOut(BaseModel):
@@ -59,3 +68,17 @@ class TikTokSearchOutput(BaseModel):
     )
     model_id: str | None = None
     total_cost_usd: float = Field(default=0.0, ge=0.0)
+    report_url: str | None = Field(
+        default=None,
+        description=(
+            "HTMLレポートの配信URL（USE_HTML_REPORTS 有効時のみ）。"
+            "**このURLは書き換えず、そのまま利用者へ提示すること**"
+        ),
+    )
+    report_pptx_url: str | None = Field(
+        default=None,
+        description=(
+            "PPTX の配信URL（outputs に 'pptx' を含めたときのみ）。"
+            "**このURLは書き換えず、そのまま利用者へ提示すること**"
+        ),
+    )
