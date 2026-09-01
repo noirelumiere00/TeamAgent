@@ -171,12 +171,23 @@ def test_frozen_surface_rejects_a_rewired_inputs_source(tmp_path: Path) -> None:
         ("0eab7f2", "d3fe768", "vulkan ドリフト追随が 18 inputs のうち 1 件を変更"),
     ],
 )
-def test_real_generation_input_changes_are_rejected(base: str, head: str, reason: str) -> None:
-    """実際に freeze を破った commit が、この機構では止まることを実 diff で示す。"""
+def test_real_generation_input_changes_are_rejected(
+    base: str, head: str, reason: str, tmp_path: Path
+) -> None:
+    """実際に freeze を破った commit が、この機構では止まることを実 diff で示す。
+
+    2026-09-01: 再演は「unlock を畳んだ freeze 文書」で行う。現在の PR が正当な
+    unlock（human gate 済み）を宣言している間も、機構そのものの回帰検査が
+    宣言内容に左右されないようにするため（宣言の検査は封印テスト側が担う）。
+    """
     if not (_has_ref(base) and _has_ref(head)):
         pytest.skip(f"ref 未取得: {base}/{head}")
+    doc = _freeze_doc()
+    doc["unlock"] = {"active": False, "scope_paths": [], "reason": None, "gate": None}
+    neutral = tmp_path / "freeze-neutral.json"
+    neutral.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     with pytest.raises(FreezeError, match="FROZEN SURFACE"):
-        assert_frozen_surface(ROOT, FREEZE, base, head)
+        assert_frozen_surface(ROOT, neutral, base, head)
 
 
 @pytest.mark.parametrize(
@@ -196,11 +207,27 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 # ── unlock 宣言 ────────────────────────────────────────────────────────────
 
 
-def test_unlock_is_inactive_and_empty_by_default() -> None:
+def test_unlock_matches_the_committed_declaration() -> None:
+    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
+
+    旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
+    要求しており、frozen surface を正当に触る PR が unlock を宣言すると構造的に
+    赤くなる設計矛盾があった。2026-08-31 の human gate（rename 枝）と同型で、
+    2026-09-01 human gate（便γ・ユーザー明示承認・パッチ適用もユーザーの手）により
+    宣言照合形へ更新。緩めたのではない: active の間は宣言内容そのものを封印し、
+    scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
+    元の封印と同一になる。
+    """
     unlock = _freeze_doc()["unlock"]
-    assert unlock["active"] is False
-    assert unlock["scope_paths"] == []
-    assert unlock["reason"] is None
+    if unlock["active"]:
+        assert unlock["scope_paths"] == [
+            "infra/codebuild/teamagent_core_media_release_contract.json"
+        ]
+        assert "便γ" in unlock["reason"]
+        assert "human gate 2026-09-01" in unlock["gate"]
+    else:
+        assert unlock["scope_paths"] == []
+        assert unlock["reason"] is None
 
 
 def test_unlock_requires_scope_reason_and_gate(tmp_path: Path) -> None:
