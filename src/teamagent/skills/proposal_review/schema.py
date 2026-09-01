@@ -39,3 +39,10 @@ class ProposalReviewOutput(BaseModel):
     sources: list[ReviewSource] = Field(default_factory=list, description="照合した過去提案/FB")
     source_count: int = Field(ge=0, description="照合した過去提案/FB 件数")
     total_cost_usd: float = Field(ge=0.0, description="この実行の概算コスト")
+    report_url: str | None = Field(
+        default=None,
+        description=(
+            "HTMLレポートの配信URL（USE_HTML_REPORTS 有効時のみ）。"
+            "**このURLは書き換えず、そのまま利用者へ提示すること**"
+        ),
+    )

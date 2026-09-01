@@ -24,7 +24,9 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.report_html import publish_report
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.video.report import build_report
 from teamagent.skills.video.schema import VideoAnalysisInput, VideoAnalysisOutput
 
 logger = structlog.get_logger(__name__)
@@ -120,11 +122,14 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
         def _hit_output(hit: CachedAnalysis) -> VideoAnalysisOutput:
             # ヒット時は cost 0 を計上（管理画面/Budgets 側の実費と乖離させない・監査指摘）。
             log.info("video_analysis_done", cost_usd=0.0, model_id=hit.model_id, cache_hit=True)
-            return VideoAnalysisOutput(
-                url=input.url,
-                analysis=hit.text,
-                model_id=hit.model_id,
-                total_cost_usd=0.0,
+            return self._with_report(
+                VideoAnalysisOutput(
+                    url=input.url,
+                    analysis=hit.text,
+                    model_id=hit.model_id,
+                    total_cost_usd=0.0,
+                ),
+                ctx,
             )
 
         def _consume_quota_or_raise() -> None:
@@ -188,11 +193,14 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
             )
 
         log.info("video_analysis_done", cost_usd=resp.cost_usd, model_id=resp.model_id)
-        return VideoAnalysisOutput(
-            url=input.url,
-            analysis=resp.text or "（分析結果が空でした。動画 URL を確認してください）",
-            model_id=resp.model_id,
-            total_cost_usd=resp.cost_usd,
+        return self._with_report(
+            VideoAnalysisOutput(
+                url=input.url,
+                analysis=resp.text or "（分析結果が空でした。動画 URL を確認してください）",
+                model_id=resp.model_id,
+                total_cost_usd=resp.cost_usd,
+            ),
+            ctx,
         )
 
     def analyze_bytes(
@@ -221,12 +229,26 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
             system=system,
         )
         log.info("video_analysis_done", cost_usd=resp.cost_usd, model_id=resp.model_id)
-        return VideoAnalysisOutput(
-            url=label,
-            analysis=resp.text or "（分析結果が空でした）",
-            model_id=resp.model_id,
-            total_cost_usd=resp.cost_usd,
+        return self._with_report(
+            VideoAnalysisOutput(
+                url=label,
+                analysis=resp.text or "（分析結果が空でした）",
+                model_id=resp.model_id,
+                total_cost_usd=resp.cost_usd,
+            ),
+            ctx,
         )
+
+    def _with_report(self, out: VideoAnalysisOutput, ctx: SkillContext) -> VideoAnalysisOutput:
+        """HTML レポートを発行して URL を載せる（フラグ OFF・失敗時は out をそのまま返す）。
+
+        キャッシュヒット経路も通す。分析本文が同じでも配信URLは受け手ごとに要るため、
+        「キャッシュだからレポートは出さない」にすると再質問時だけリンクが消える。
+        """
+        out.report_url = publish_report(
+            build_report(out), tool=self.name, request_id=ctx.request_id, query=out.url
+        )
+        return out
 
     def synthesize_batch(self, analyses: list[str], ctx: SkillContext) -> tuple[str, float]:
         """複数動画の個別分析を横断まとめに合成する。(text, cost) を返す。"""

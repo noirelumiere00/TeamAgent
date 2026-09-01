@@ -31,3 +31,10 @@ class VideoAnalysisOutput(BaseModel):
     )
     model_id: str = Field(description="使用した Gemini モデル")
     total_cost_usd: float = Field(ge=0.0, description="この分析の概算コスト")
+    report_url: str | None = Field(
+        default=None,
+        description=(
+            "HTMLレポートの配信URL（USE_HTML_REPORTS 有効時のみ）。"
+            "**このURLは書き換えず、そのまま利用者へ提示すること**"
+        ),
+    )

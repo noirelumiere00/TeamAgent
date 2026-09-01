@@ -148,6 +148,28 @@ def maybe_offload(tool: str, data: dict[str, Any], *, request_id: str) -> dict[s
     if len(raw) <= max_chars:
         return data
 
+    # 既に HTML レポートを発行済みなら .json を二重に置かない。生 JSON の署名付きURLは
+    # 人が開いても読めず（受け手には「壊れたリンク」に見える）、同じ内容の複製を非公開
+    # バケットに増やすだけになる。切り詰めは行い、全文の参照先は HTML レポートを指す。
+    report_url = data.get("report_url") if isinstance(data, dict) else None
+    if isinstance(report_url, str) and report_url:
+        field_chars = _env_int("PAYLOAD_OFFLOAD_FIELD_CHARS", _DEFAULT_FIELD_CHARS)
+        trimmed = _truncate_strings(data, field_chars)
+        trimmed = _shrink_lists_to_fit(trimmed, max_chars)
+        trimmed["offloaded"] = True
+        trimmed["full_url"] = report_url
+        trimmed["offload_note"] = (
+            "本文が長いため要点のみに切り詰めました。全文は HTML レポート（full_url）を"
+            "参照してください（社外共有不可）。"
+        )
+        logger.info(
+            "payload_offloaded_to_report",
+            request_id=request_id,
+            tool=tool,
+            original_chars=len(raw),
+        )
+        return trimmed
+
     from teamagent.adapters.report_publish import publish_text
 
     url = publish_text(

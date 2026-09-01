@@ -15,7 +15,9 @@ from pydantic import BaseModel
 from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.report_html import publish_report
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.proposal_review.report import build_report
 from teamagent.skills.proposal_review.schema import (
     ProposalReviewInput,
     ProposalReviewOutput,
@@ -68,13 +70,26 @@ class ProposalReviewSkill(BaseSkill[ProposalReviewInput, ProposalReviewOutput]):
         review, cost_usd = self._review(input.proposal_text, hits, ctx.request_id)
 
         sources = [self._to_source(h) for h in hits]
-        log.info("proposal_review_done", source_count=len(sources), cost_usd=cost_usd)
-        return ProposalReviewOutput(
+        out = ProposalReviewOutput(
             review=review,
             sources=sources,
             source_count=len(sources),
             total_cost_usd=cost_usd,
         )
+        out.report_url = publish_report(
+            build_report(out),
+            tool=self.name,
+            request_id=ctx.request_id,
+            query="proposal_review",
+            rls_derived=True,
+        )
+        log.info(
+            "proposal_review_done",
+            source_count=len(sources),
+            cost_usd=cost_usd,
+            has_report=bool(out.report_url),
+        )
+        return out
 
     @staticmethod
     def _format_ref(hit: SearchHit) -> str:
