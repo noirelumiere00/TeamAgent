@@ -64,10 +64,15 @@ def _subtitle(analysis: object) -> str:
     return f"冒頭フック: {label or summary}" if (label or summary) else ""
 
 
-def build_filmstrips(query: str, ctx: SkillContext) -> list[Filmstrip]:
-    """``video_algorithm`` を実行し、該当秒のコマ送りを返す。無効・失敗は ``[]``。"""
+def build_filmstrips(query: str, ctx: SkillContext) -> tuple[list[Filmstrip], float]:
+    """``video_algorithm`` を実行し ``(コマ送り, 課金額USD)`` を返す。無効・失敗は ``([], 0.0)``。
+
+    **課金額を必ず返す**のが契約。後段の video_algorithm は Gemini マルチモーダル分析を
+    複数回行う有料処理で、これを捨てると usage 台帳とレポート表示の両方が過少申告になる
+    （呼び出し側が親の ``total_cost_usd`` に加算する）。
+    """
     if not frames_enabled():
-        return []
+        return [], 0.0
     try:
         from teamagent.skills.video_algorithm.schema import VideoAlgorithmInput
         from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
@@ -79,7 +84,7 @@ def build_filmstrips(query: str, ctx: SkillContext) -> list[Filmstrip]:
         )
     except Exception as e:
         logger.warning("report_frames_failed", request_id=ctx.request_id, error=type(e).__name__)
-        return []
+        return [], 0.0
 
     strips: list[Filmstrip] = []
     for video in getattr(result, "videos", [])[:_MAX_VIDEOS]:
@@ -104,8 +109,10 @@ def build_filmstrips(query: str, ctx: SkillContext) -> list[Filmstrip]:
                 href=str(getattr(meta, "url", "") or "") or None,
             )
         )
-    logger.info("report_frames_built", request_id=ctx.request_id, videos=len(strips))
-    return strips
+    # 失敗した動画ぶんも含めて実際に発生した課金を返す（strips が空でもコストは出ている）。
+    cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0)
+    logger.info("report_frames_built", request_id=ctx.request_id, videos=len(strips), cost_usd=cost)
+    return strips, cost
 
 
 __all__ = ["build_filmstrips", "frames_enabled"]

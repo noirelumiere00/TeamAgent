@@ -37,14 +37,29 @@ def _install(monkeypatch: pytest.MonkeyPatch) -> _PublishSpy:
     return spy
 
 
-def test_report_url_present_skips_json_offload(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_report_url_still_keeps_a_lossless_json_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTML レポートがあっても生JSONの退避はやめない。
+
+    レポートは人が読む用で、表に出ない実数値（いいね/コメント/シェア/タグ/説明全文）は
+    落ちている。切り詰めで消えた値の復元先が無くなるため、全文の正本は JSON のまま残す。
+    """
     spy = _install(monkeypatch)
     out = payload_offload.maybe_offload(
         "tiktok_search", _big({"report_url": "https://connect.example/r/abc"}), request_id="r"
     )
-    assert spy.calls == 0
-    assert out["full_url"] == "https://connect.example/r/abc"
+    assert spy.calls == 1
+    assert out["full_url"] == "https://s3.example/offloaded.json"
     assert out["offloaded"] is True
+
+
+def test_note_tells_which_link_to_show_a_human(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install(monkeypatch)
+    out = payload_offload.maybe_offload(
+        "tiktok_search", _big({"report_url": "https://connect.example/r/abc"}), request_id="r"
+    )
+    assert "report_url" in out["offload_note"]
+    assert "人へ渡さない" in out["offload_note"]
+    assert out["report_url"] == "https://connect.example/r/abc"
 
 
 def test_without_report_url_falls_back_to_json_offload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,15 +69,14 @@ def test_without_report_url_falls_back_to_json_offload(monkeypatch: pytest.Monke
     assert out["full_url"] == "https://s3.example/offloaded.json"
 
 
-def test_empty_report_url_is_not_treated_as_a_report(monkeypatch: pytest.MonkeyPatch) -> None:
-    # None / 空文字で「レポートあり」と誤判定すると、全文がどこからも辿れなくなる。
+def test_without_report_url_the_note_is_the_plain_one(monkeypatch: pytest.MonkeyPatch) -> None:
     spy = _install(monkeypatch)
     out = payload_offload.maybe_offload("tiktok_search", _big({"report_url": ""}), request_id="r")
     assert spy.calls == 1
-    assert out["full_url"] == "https://s3.example/offloaded.json"
+    assert "report_url" not in out["offload_note"]
 
 
-def test_short_payload_with_report_url_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_short_payload_is_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     _install(monkeypatch)
     data = {"report_url": "https://connect.example/r/abc", "videos": []}
     assert payload_offload.maybe_offload("tiktok_search", data, request_id="r") == data

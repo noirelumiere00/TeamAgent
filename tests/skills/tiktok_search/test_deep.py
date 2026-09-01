@@ -77,7 +77,7 @@ class TestGate:
     def test_flag_off_does_not_run_the_heavy_skill(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("USE_HTML_REPORT_FRAMES", raising=False)
         calls = _install(monkeypatch, _Result([_Video(frames=[_Frame(0.0, _IMG)])]))
-        assert deep.build_filmstrips("春巻の皮", _Ctx()) == []
+        assert deep.build_filmstrips("春巻の皮", _Ctx()) == ([], 0.0)
         assert calls == []
 
     def test_does_not_ask_video_algorithm_for_its_own_outputs(
@@ -96,7 +96,7 @@ class TestMapping:
             monkeypatch,
             _Result([_Video(frames=[_Frame(0.0, _IMG), _Frame(1.5, _IMG, "テロップ登場")])]),
         )
-        strips = deep.build_filmstrips("春巻の皮", _Ctx())
+        strips, _cost = deep.build_filmstrips("春巻の皮", _Ctx())
         assert len(strips) == 1
         assert strips[0].title == "@yossy"
         assert strips[0].subtitle == "冒頭フック: 数字提示 — 19時帰宅でも10分"
@@ -108,29 +108,29 @@ class TestMapping:
             monkeypatch,
             _Result([_Video(frames=[_Frame(float(i), _IMG) for i in range(20)])]),
         )
-        assert len(deep.build_filmstrips("q", _Ctx())[0].frames) == deep._MAX_FRAMES
+        assert len(deep.build_filmstrips("q", _Ctx())[0][0].frames) == deep._MAX_FRAMES
 
     def test_video_without_frames_is_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, _Result([_Video(frames=[]), _Video(frames=[_Frame(0.0, _IMG)])]))
-        assert len(deep.build_filmstrips("q", _Ctx())) == 1
+        assert len(deep.build_filmstrips("q", _Ctx())[0]) == 1
 
     def test_empty_data_uri_is_dropped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, _Result([_Video(frames=[_Frame(0.0, "")])]))
-        assert deep.build_filmstrips("q", _Ctx()) == []
+        assert deep.build_filmstrips("q", _Ctx()) == ([], 0.0)
 
     def test_missing_analysis_yields_no_subtitle(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, _Result([_Video(analysis=None, frames=[_Frame(0.0, _IMG)])]))
-        assert deep.build_filmstrips("q", _Ctx())[0].subtitle == ""
+        assert deep.build_filmstrips("q", _Ctx())[0][0].subtitle == ""
 
     def test_failure_is_swallowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, RuntimeError("gemini down"))
-        assert deep.build_filmstrips("q", _Ctx()) == []
+        assert deep.build_filmstrips("q", _Ctx()) == ([], 0.0)
 
 
 class TestRendering:
     def _strips(self, monkeypatch: pytest.MonkeyPatch) -> Report:
         _install(monkeypatch, _Result([_Video(frames=[_Frame(0.0, _IMG), _Frame(2.5, _IMG)])]))
-        return Report(title="T", filmstrips=deep.build_filmstrips("q", _Ctx()))
+        return Report(title="T", filmstrips=deep.build_filmstrips("q", _Ctx())[0])
 
     def test_frames_render_with_seconds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         html = render_report(self._strips(monkeypatch))
@@ -160,3 +160,26 @@ class TestRendering:
     def test_link_to_original_video(self, monkeypatch: pytest.MonkeyPatch) -> None:
         html = render_report(self._strips(monkeypatch))
         assert "https://www.tiktok.com/@yossy/video/1" in html
+
+
+class TestCostPropagation:
+    """入れ子の有料分析コストを捨てない（usage台帳とレポート表示の過少申告を防ぐ）。"""
+
+    def test_cost_is_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = _Result([_Video(frames=[_Frame(0.0, _IMG)])])
+        result.total_cost_usd = 0.42  # type: ignore[attr-defined]
+        _install(monkeypatch, result)
+        _strips, cost = deep.build_filmstrips("q", _Ctx())
+        assert cost == 0.42
+
+    def test_cost_is_returned_even_without_frames(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # フレームが1枚も取れなくても課金は発生している。0 と報告してはいけない。
+        result = _Result([_Video(frames=[])])
+        result.total_cost_usd = 0.31  # type: ignore[attr-defined]
+        _install(monkeypatch, result)
+        strips, cost = deep.build_filmstrips("q", _Ctx())
+        assert strips == [] and cost == 0.31
+
+    def test_failure_reports_zero_cost(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _install(monkeypatch, RuntimeError("down"))
+        assert deep.build_filmstrips("q", _Ctx()) == ([], 0.0)

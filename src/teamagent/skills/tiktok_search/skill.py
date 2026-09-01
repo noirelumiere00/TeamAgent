@@ -153,7 +153,11 @@ class TikTokSearchSkill(BaseSkill[TikTokSearchInput, TikTokSearchOutput]):
         # 「該当秒の実フレーム」は明示要求時のみ。video_algorithm を後段で実行する
         # （分析ロジックは複製せず出力を写す）。重いので既定では走らせない。
         wanted = [o.strip().lower() for o in input.outputs]
-        filmstrips = build_filmstrips(input.query, ctx) if "frames" in wanted else []
+        filmstrips, frames_cost = (
+            build_filmstrips(input.query, ctx) if "frames" in wanted else ([], 0.0)
+        )
+        # 入れ子で発生した有料分析を親のコストへ合算する（usage 台帳とレポート表示の正確性）。
+        out.total_cost_usd += frames_cost
         report = build_report(out, thumbs=thumbs, filmstrips=filmstrips)
         out.report_url = publish_report(
             report,

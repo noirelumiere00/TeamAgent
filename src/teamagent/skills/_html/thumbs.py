@@ -100,8 +100,10 @@ def fetch_image(url: str) -> tuple[bytes, str] | None:
         logger.info("thumb_host_rejected", host=parsed.hostname)
         return None
     try:
-        req = Request(url, headers={"User-Agent": "teamagent-report/1.0"})
-        with urlopen(req, timeout=_TIMEOUT_S) as resp:
+        # nosec B310: スキーム(https固定)・ホスト(末尾一致allowlist)・解決先(全てglobal IP)を
+        # 直前に検証済み。file:/ や custom scheme はここへ到達しない。
+        req = Request(url, headers={"User-Agent": "teamagent-report/1.0"})  # nosec B310
+        with urlopen(req, timeout=_TIMEOUT_S) as resp:  # nosec B310
             content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if content_type not in _EXT_BY_TYPE:
                 return None

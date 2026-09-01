@@ -65,6 +65,22 @@ def presigned_lifetime_s(url: str, *, now: int | None = None) -> int | None:
     return expiry - current
 
 
+def _warn_if_temporary_credentials(session: Any, *, request_id: str) -> None:
+    """一時認証情報で署名している場合に警告する（presigned の実効寿命がトークン依存になる）。"""
+    try:
+        credentials = session.get_credentials()
+        token = getattr(credentials, "token", None) if credentials else None
+    except Exception:  # 資格情報の取り方は環境依存。判定できないなら黙る。
+        return
+    if token:
+        logger.warning(
+            "report_presign_temporary_credentials",
+            request_id=request_id,
+            hint="一時認証情報(STS)で署名したため、URL の実効寿命はセッション寿命で頭打ちになる"
+            "（X-Amz-Expires の値は当てにならない）。人へは /r 短縮URLを渡すこと",
+        )
+
+
 def _bucket_region(s3: Any, bucket: str) -> str:
     try:
         loc = s3.get_bucket_location(Bucket=bucket).get("LocationConstraint")
@@ -119,10 +135,14 @@ def _put_and_presign(
         url: str = s3.generate_presigned_url(
             "get_object", Params={"Bucket": bkt, "Key": key}, ExpiresIn=_EXPIRES_S
         )
-        # ⚠️ ExpiresIn に 7日 を渡しても、**一時認証情報(STS)で署名すると寿命はトークン側で頭打ち**に
-        # なる（実測 2026-09-01: /r のリダイレクト先が約30分で AccessDenied）。黙って短くなると
-        # 「7日有効のつもりのリンク」が数十分で死ぬので、ここで検出して名指しで warning する。
+        # ⚠️ ExpiresIn に 7日 を渡しても、**一時認証情報(STS)で署名すると実効寿命はトークン側で
+        # 頭打ち**になる（実測 2026-09-01: /r のリダイレクト先が約30分で AccessDenied）。
+        # 検出は2段構え:
+        #   (1) 署名クエリから読める寿命（SigV2 の Expires はここで短く出る）
+        #   (2) **一時認証情報かどうか**（SigV4 の X-Amz-Expires は要求値がそのまま書かれ、
+        #       トークン失効は opaque な X-Amz-Security-Token 側なので (1) では見えない）
         # 配信自体は止めない（/r 経路は開くたびに署名し直すため実害が無い）。
+        _warn_if_temporary_credentials(sess, request_id=request_id)
         lifetime = presigned_lifetime_s(url)
         if lifetime is not None and lifetime < _MIN_ACCEPTABLE_S:
             logger.warning(
@@ -270,7 +290,14 @@ def publish_bytes_result(
     """任意の bytes（画像等）を非公開S3へ置き、PublishedObject を返す。失敗で None。
 
     レポートに埋める画像アセット用。``query`` はログに残さないため受け取らない。
+
+    **バケットは明示必須**（引数か ``VSEO_REPORT_BUCKET``）。既定バケットへ暗黙に落とすと、
+    ローカル/設定漏れの環境から本番バケットへサムネや PPTX を書いてしまう。HTML 本体は
+    ``publish_report`` が同じ検査をしているので、アセット側だけ緩いと迂回路になる。
     """
+    if not (bucket or os.environ.get("VSEO_REPORT_BUCKET")):
+        logger.info("report_asset_skipped_no_bucket", request_id=request_id)
+        return None
     return _put_and_presign(
         body,
         content_type=content_type,
