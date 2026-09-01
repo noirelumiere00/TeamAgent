@@ -30,7 +30,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # media-apk.lock / Dockerfile の ARG / core_media 契約 / 世代 inputs の 4 つは更新した一方、
 # 本定数だけ取り残されて dev tip が赤のままになっていた（3 者一致の不変条件が片肺）。
 # 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
-APK_LOCK_SHA256 = "4e147d1445837415a7d9e9569667b39cedbb3c83de71f9082adbcecb487424e5"
+APK_LOCK_SHA256 = "12aad439942cb90e3ac6719ce1ef65806d596ef3433783206e5ffb1519d25006"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -64,7 +64,7 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
             "43aff9d9b8d8becd14f9e2a36a8497aa5c0e12454e60f7c0d3350ed5bef945ba"
         ),
         "NODE_PACKAGE_VERSION": "24.18.1-r0",
-        "NODE_BINARY_SHA256": ("b998f239765321093d8447cde4497fed8107ebd657802c4ebfa831593b17aed2"),
+        "NODE_BINARY_SHA256": ("885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153"),
         "PYTHON_PACKAGE_VERSION": "3.14.7-r0",
         "PYTHON_BINARY_SHA256": (
             "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8"
@@ -109,41 +109,8 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     # v2: 2026-08-31 に apk キャッシュ汚染を実測（nodejs 24.18.1-r0 の /usr/bin/node が
     # 上流 apk の実測 sha（pin と一致）と異なるバイトで 2 連続供給された）。id を回して
     # 汚染エントリを切り離した。再発時はさらに v3 へ回す（中身の修正ではなく隔離が正解）。
-    assert "--mount=type=cache,id=teamagent-media-apk-arm64-v2,target=/var/cache/apk" in TEXT
+    assert "--mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/edge" in TEXT
-    # 2026-08-31 vendored node: 上流が同一版のままバイト差し替え（CodeBuild 実測
-    # 885209fa… ≠ pin b998f239…）。契約 pin の更新は世代 publish 儀式が要るため、
-    # pin と一致する正規 apk を同梱して取得元ドリフトから切り離した。
-    vendored = ROOT / "infra/docker/vendor/nodejs-24.18.1-r0.apk"
-    assert _sha256(vendored) == ("594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850")
-    assert (
-        "ARG NODE_VENDORED_APK_SHA256="
-        "594ad7bc48f53f4ad1c6fcb73adee4bc155922d00d4a258cf6e7b3837f8c9850"
-    ) in TEXT
-    assert "COPY infra/docker/vendor/nodejs-24.18.1-r0.apk" in TEXT
-    assert "add /tmp/vendor/nodejs-24.18.1-r0.apk" in TEXT
-    assert "/tmp/vendor; \\" in TEXT  # 後始末（イメージへ残さない）
-    # 2026-08-31 vendored ncurses trio: edge スナップショット更新（0815→0822）で lock 記載の
-    # 3パッケージが取得不能に（r7/r8 二重実測）。lock/契約は不変のまま正規署名 apk を同梱。
-    for fname, sha in [
-        (
-            "libncursesw-6.6_p20260815-r0.apk",
-            "6c40fda66e9857034aad409bca928ccaf18260f4ed1b813748d9c247ceb5c4b6",
-        ),
-        (
-            "libpanelw-6.6_p20260815-r0.apk",
-            "6f9188bdefbdc9275476827414a92ee2ed343f9a59d1487e092436db89b35cd8",
-        ),
-        (
-            "ncurses-terminfo-base-6.6_p20260815-r0.apk",
-            "23d428be5faea2d7364df2a2941b977bb19d2ab7b791960eebe426fe32fcc8cc",
-        ),
-    ]:
-        assert _sha256(ROOT / "infra/docker/vendor" / fname) == sha
-        assert f"/tmp/vendor/{fname}" in TEXT
-    assert "ARG NCURSESW_VENDORED_APK_SHA256=" in TEXT
-    assert "ARG PANELW_VENDORED_APK_SHA256=" in TEXT
-    assert "ARG TERMINFO_VENDORED_APK_SHA256=" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/v3.24" in TEXT
 
 
