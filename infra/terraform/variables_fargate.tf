@@ -238,6 +238,41 @@ variable "use_ailavault_deeplinks" {
   default     = false
 }
 
+variable "html_reports_tools" {
+  description = <<-EOT
+    検索系ツールの結果を HTML レポート化して /r で配布する対象（env USE_HTML_REPORTS）。
+    空文字＝OFF（従来どおり構造化結果のみ）。"tiktok_search" のようにツール名をカンマ区切りで
+    列挙するとそのツールだけ、"1"/"true" なら全ツール。段階的に開けるため既定は空。
+    ON の前提: enable_report_shorturl=true（/r 実機 200 確認済み）であること。
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "enable_html_report_thumbs" {
+  description = "HTML レポートにサムネイルを載せるか（env USE_HTML_REPORT_THUMBS）。TikTok CDN の署名URLは数日で失効するため、取得して自社S3へ再ホストしてから貼る。既定 false。"
+  type        = bool
+  default     = false
+}
+
+variable "enable_html_report_headline" {
+  description = "HTML レポート冒頭の一行見出しを Bedrock で生成するか（env USE_HTML_REPORT_HEADLINE）。入力1800字・max_tokens 80・40字上限で、規約違反の出力は採用しない。既定 false。"
+  type        = bool
+  default     = false
+}
+
+variable "enable_html_report_pptx" {
+  description = "HTML レポートの PPTX 出力を許すか（env USE_HTML_REPORT_PPTX）。media worker の slides 変換を同期実行するため数十秒かかる。skill の outputs に \"pptx\" が明示された時だけ発火する。既定 false。"
+  type        = bool
+  default     = false
+}
+
+variable "enable_html_report_frames" {
+  description = "レポートに該当秒の実フレームを載せるか（env USE_HTML_REPORT_FRAMES）。video_algorithm を後段実行するため数十秒〜数分・Gemini 課金あり。skill の outputs に \"frames\" が明示された時だけ発火する。既定 false。"
+  type        = bool
+  default     = false
+}
+
 variable "enable_report_shorturl" {
   description = "レポート短縮リンク(/r)を発行するか（Part2 段階ゲート＝env USE_REPORT_SHORTURL）。既定 false＝従来 presigned。ON の前提: connect-web が同一新イメージ(/r ルート)＋vseo-s3-read(bootstrap_vseo_s3_iam.sh)を持ち、実機で /r→302 を確認済みであること。揃う前に true にすると受信者側で 404/403 に劣化する。"
   type        = bool
