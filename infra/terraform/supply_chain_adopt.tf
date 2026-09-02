@@ -68,6 +68,13 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-02 publish 世代（Wave6・lock門）。上流 edge の font-noto 2026.08.01-r0→2026.09.01-r0
+    # 追随（media-apk.lock 4行・契約 MEDIA_APK_LOCK_SHA256）による再レンダリング。値の出所は
+    # repo tree からのオフライン導出（Wave3〜5 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "e589897d66207518c415d88d9d34d7045d27b75616751d8e298a2860e672f292" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -92,6 +99,13 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-02 publish 世代（Wave6・lock門）。上流 edge の font-noto 2026.08.01-r0→2026.09.01-r0
+    # 追随（media-apk.lock 4行・契約 MEDIA_APK_LOCK_SHA256）による再レンダリング。値の出所は
+    # repo tree からのオフライン導出（Wave3〜5 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "b5d62e4f6f323e6df351d5fe342687bdf8c8a57c270e9b195960cec4bf50b379" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -113,6 +127,13 @@ locals {
     # 追随（PR #365 派生）による再レンダリング。値の出所は repo tree からのオフライン
     # 導出（Wave3/Wave4 値を完全再現済みのハーネス）。publish 儀式は admin CLI（Wave4 同経路）。
     "f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-09-02 publish 世代（Wave6・lock門）。上流 edge の font-noto 2026.08.01-r0→2026.09.01-r0
+    # 追随（media-apk.lock 4行・契約 MEDIA_APK_LOCK_SHA256）による再レンダリング。値の出所は
+    # repo tree からのオフライン導出（Wave3〜5 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -311,18 +332,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["d5640ae5c3ea39589f07940213652437acfe39a183850be10f86e6f4e46258f8"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/d5640ae5c3ea39589f07940213652437acfe39a183850be10f86e6f4e46258f8.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["e589897d66207518c415d88d9d34d7045d27b75616751d8e298a2860e672f292"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/e589897d66207518c415d88d9d34d7045d27b75616751d8e298a2860e672f292.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["8fc4c113a6696b51677a0dd736f5c7a98580f7d99e4340e0e375f32e660f4fba"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/8fc4c113a6696b51677a0dd736f5c7a98580f7d99e4340e0e375f32e660f4fba.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["b5d62e4f6f323e6df351d5fe342687bdf8c8a57c270e9b195960cec4bf50b379"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/b5d62e4f6f323e6df351d5fe342687bdf8c8a57c270e9b195960cec4bf50b379.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df.yml"
 }
 
 import {
