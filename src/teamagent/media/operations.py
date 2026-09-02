@@ -52,6 +52,9 @@ _EXTERNAL_HTML_REF = re.compile(
     r"""(?is)(?:src|href)\s*=\s*["']\s*(?:https?:)?//|url\(\s*["']?\s*(?:https?:)?//"""
 )
 _PLACEHOLDER = re.compile(r"[｛{]\s*(\d+)\s*[:：]?[^｝}]*[｝}]")
+# renderer 失敗の本体は chromium/weasyprint の多行 traceback。300字だと
+# playwright の後片付けログだけが残り原因が読めない（2026-09-02 実測）。
+_RENDER_STDERR_TAIL = 2000
 _ACTIVE_PROCESS_GROUPS: set[int] = set()
 _ACTIVE_PROCESS_GROUPS_LOCK = threading.Lock()
 _CHILD_ENV_ALLOWLIST = frozenset(
@@ -547,7 +550,7 @@ def _renderer_json(
             "media renderer output invalid: kind=%s rc=%s stderr=%s",
             manifest.get("kind"),
             completed.returncode,
-            completed.stderr.decode("utf-8", "replace")[-300:],
+            completed.stderr.decode("utf-8", "replace")[-_RENDER_STDERR_TAIL:],
         )
         raise MediaOperationError(
             "MEDIA_RENDER_OUTPUT_INVALID",
@@ -558,7 +561,7 @@ def _renderer_json(
             "media renderer failed: kind=%s rc=%s stderr=%s",
             manifest.get("kind"),
             completed.returncode,
-            completed.stderr.decode("utf-8", "replace")[-300:],
+            completed.stderr.decode("utf-8", "replace")[-_RENDER_STDERR_TAIL:],
         )
         payload = result if isinstance(result, dict) else {}
         code = str(payload.get("code", "MEDIA_RENDER_FAILED"))
