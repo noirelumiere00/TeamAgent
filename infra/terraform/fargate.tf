@@ -600,6 +600,13 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "CONNECT_BASE_URL", value = var.connect_base_url },
       # レポート短縮リンク(/r)の段階ゲート。connect-web に /r+vseo-s3-read が揃うまで false=従来 presigned。
       { name = "USE_REPORT_SHORTURL", value = var.enable_report_shorturl ? "1" : "0" },
+      # §レポート配信: 検索系ツールの結果を HTML 化して /r で配る段階ゲート（既定 OFF）。
+      # OFF の間は S3 を一切触らず、従来どおり構造化結果だけを返す（挙動は1バイトも変わらない）。
+      { name = "USE_HTML_REPORTS", value = var.html_reports_tools },
+      { name = "USE_HTML_REPORT_THUMBS", value = var.enable_html_report_thumbs ? "1" : "0" },
+      { name = "USE_HTML_REPORT_HEADLINE", value = var.enable_html_report_headline ? "1" : "0" },
+      { name = "USE_HTML_REPORT_PPTX", value = var.enable_html_report_pptx ? "1" : "0" },
+      { name = "USE_HTML_REPORT_FRAMES", value = var.enable_html_report_frames ? "1" : "0" },
       # §U: 5名運用の pgvector pool ウォームアップ。起動時に2接続確立し初回検索のレイテンシを下げる
       # （max=8 で5並行に余裕＝枯渇なし）。
       { name = "PGVECTOR_POOL_MIN", value = "2" },
