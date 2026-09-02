@@ -61,6 +61,13 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-02 publish 世代（Wave5・media便）。契約の yt-dlp ピン 2026.7.4→2026.8.19
+    # 追随（PR #365 派生）による再レンダリング。値の出所は repo tree からのオフライン
+    # 導出（Wave3/Wave4 値を完全再現済みのハーネス）。publish 儀式は admin CLI（Wave4 同経路）。
+    "d5640ae5c3ea39589f07940213652437acfe39a183850be10f86e6f4e46258f8" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -78,6 +85,13 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-02 publish 世代（Wave5・media便）。契約の yt-dlp ピン 2026.7.4→2026.8.19
+    # 追随（PR #365 派生）による再レンダリング。値の出所は repo tree からのオフライン
+    # 導出（Wave3/Wave4 値を完全再現済みのハーネス）。publish 儀式は admin CLI（Wave4 同経路）。
+    "8fc4c113a6696b51677a0dd736f5c7a98580f7d99e4340e0e375f32e660f4fba" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -92,6 +106,13 @@ locals {
     # 再レンダリング。値の出所は repo tree からのオフライン導出（校正済みハーネスで
     # Wave3 4値の完全再現を確認済み）。publish 儀式は同日 admin CLI（Wave3 と同一経路）。
     "82e30f81d8b766a80b974acf9a141ee7787a5b2bcf40928ee444a0ac12ec5151" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-09-02 publish 世代（Wave5・media便）。契約の yt-dlp ピン 2026.7.4→2026.8.19
+    # 追随（PR #365 派生）による再レンダリング。値の出所は repo tree からのオフライン
+    # 導出（Wave3/Wave4 値を完全再現済みのハーネス）。publish 儀式は admin CLI（Wave4 同経路）。
+    "f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -290,18 +311,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["a20ce391f39d57bfce922f77008a55c1106bbe5d8cd2d1d4e55de7fd71e758cc"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/a20ce391f39d57bfce922f77008a55c1106bbe5d8cd2d1d4e55de7fd71e758cc.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["d5640ae5c3ea39589f07940213652437acfe39a183850be10f86e6f4e46258f8"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/d5640ae5c3ea39589f07940213652437acfe39a183850be10f86e6f4e46258f8.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["cfe30ec490d3561dc50e995f81921069ed00fa822af2c0cf5f3aabaa6e88cb2a"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/cfe30ec490d3561dc50e995f81921069ed00fa822af2c0cf5f3aabaa6e88cb2a.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["8fc4c113a6696b51677a0dd736f5c7a98580f7d99e4340e0e375f32e660f4fba"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/8fc4c113a6696b51677a0dd736f5c7a98580f7d99e4340e0e375f32e660f4fba.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["82e30f81d8b766a80b974acf9a141ee7787a5b2bcf40928ee444a0ac12ec5151"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/82e30f81d8b766a80b974acf9a141ee7787a5b2bcf40928ee444a0ac12ec5151.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/f14c2b862710a21e246f75b99b80f87ba612ca3635bc383d1333ac3476794346.yml"
 }
 
 import {

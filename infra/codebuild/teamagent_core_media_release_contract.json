@@ -207,7 +207,7 @@
         },
         {
           "key": "artifact.yt-dlp-sanitized-tree.sha256",
-          "value": "32a2d7849c3897ae7c28c3e17853b10e3b74a0d280808177c20407496d52e817",
+          "value": "47c027c33b5750234293613987caf3e63ca93823c785580d334c1d29ee733f8f",
           "build_arg": "YTDLP_SANITIZED_TREE_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-sanitized-tree-sha256",
           "dockerfile_uses": [
@@ -225,7 +225,7 @@
         },
         {
           "key": "artifact.yt-dlp-sdist.sha256",
-          "value": "b094813404f87a9dd2186f00815231df32e5fd8a5403be0f807b3bb2d21a4432",
+          "value": "9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86f4e0af1",
           "build_arg": "YTDLP_SDIST_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-sdist-sha256",
           "dockerfile_uses": [
@@ -234,7 +234,7 @@
         },
         {
           "key": "artifact.yt-dlp-wheel.sha256",
-          "value": "f11f2b11d5a8ac4059f9bdf29fa4407dc7c6bb00c5097e95ca22a7a9db518266",
+          "value": "1d57897e94c6665a0a6f9bc54b34e584284e32c034ffab3a7df25d8f7b24eedf",
           "build_arg": "YTDLP_WHEEL_SHA256",
           "oci_label": "io.teamagent.contract.yt-dlp-wheel-sha256",
           "dockerfile_uses": [
@@ -370,7 +370,7 @@
         },
         {
           "key": "component.yt-dlp.version",
-          "value": "2026.7.4",
+          "value": "2026.8.19",
           "build_arg": "YTDLP_VERSION",
           "oci_label": "io.teamagent.contract.yt-dlp-version",
           "dockerfile_uses": [
