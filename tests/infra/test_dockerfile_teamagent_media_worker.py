@@ -236,9 +236,13 @@ def test_media_runtime_is_uid_10001_read_only_ready_and_sandboxed() -> None:
     # フラグは根拠コメント付きの launch-args 1箇所だけに許し、黙った増殖は赤にする。
     assert scraper_text.count("--no-sandbox") == 1
     assert "隔離は実行コンテナ側" in scraper_text
-    assert "chromium_sandbox=True" in (ROOT / "src/teamagent/media/render_child.py").read_text(
-        encoding="utf-8"
-    )
+    # render_child も同じ方針（2026-09-02 Fargate 実測で自前サンドボックス不成立が確定）。
+    # 根拠コメント付き launch-args 1箇所だけ・chromium_sandbox=True の復活は赤。
+    render_child_text = (ROOT / "src/teamagent/media/render_child.py").read_text(encoding="utf-8")
+    assert render_child_text.count("--no-sandbox") == 1
+    assert "隔離は実行コンテナ側" in render_child_text
+    assert "chromium_sandbox=False" in render_child_text
+    assert "chromium_sandbox=True" not in render_child_text
 
 
 def test_tiktok_network_guard_is_attached_to_the_correct_browser_paths() -> None:

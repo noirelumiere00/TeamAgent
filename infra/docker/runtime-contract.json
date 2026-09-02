@@ -167,10 +167,10 @@
       "local_compose_no_new_privileges": false,
       "fargate_no_new_privileges_claimed": false,
       "chromium_sandbox": {
-        "required": true,
-        "no_sandbox_flag_forbidden": true,
+        "required": false,
+        "no_sandbox_flag_forbidden": false,
         "setuid_sandbox_disabled": true,
-        "namespace_sandbox_required": true,
+        "namespace_sandbox_required": false,
         "seccomp_profile": "infra/docker/playwright-seccomp-1.60.0.json",
         "seccomp_profile_source": "https://github.com/microsoft/playwright/blob/v1.60.0/utils/docker/seccomp_profile.json",
         "seccomp_profile_sha256": "77c6753ee88a0db58e43c9235cdd05ab9545bf1f5446a51528e0f328ed872257",
@@ -184,7 +184,20 @@
         "requires_setuid_sandbox": false,
         "custom_seccomp_is_local_smoke_only": true,
         "fargate_actual_smoke_required": true,
-        "fargate_fail_closed_until_verified": true
+        "fargate_fail_closed_until_verified": false,
+        "no_sandbox_flag_allowed_sites": [
+          "src/teamagent/media/render_child.py",
+          "infra/docker/smoke_media.py",
+          "tools/tiktok_scraper/search.mjs"
+        ],
+        "fargate_verified": {
+          "date": "2026-09-02",
+          "method": "throwaway ECS task definition replicating production containment (uid 10001:10001 / capabilities drop ALL / readonlyRootFilesystem / runtime-tmp) launching /usr/lib/chromium/chromium (Chromium 150.0.7871.114) directly",
+          "sandbox_on": "exit 134: Failed to move to new namespace (PID/Network namespaces supported, errno = Operation not permitted) -> FATAL zygote_host_impl_linux.cc:207 -> Aborted",
+          "no_sandbox": "exit 0: about:blank rendered (dom_bytes=40)",
+          "setuid_helper": "/usr/lib/chromium/chrome-sandbox is setuid root but cannot elevate: capability bounding set is empty under cap drop ALL",
+          "isolation_boundary": "container: non-root uid 10001 / cap drop ALL / readonly rootfs / roleless capability envelope (same policy as tools/tiktok_scraper/search.mjs)"
+        }
       },
       "writable_mounts": [
         {

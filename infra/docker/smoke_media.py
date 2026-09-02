@@ -278,8 +278,12 @@ def _assert_python_playwright(work_root: Path) -> int:
         browser = playwright.chromium.launch(
             executable_path=os.environ["CHROMIUM_PATH"],
             headless=True,
-            chromium_sandbox=True,
+            # 本番 render_child と同じ起動プロファイル。Fargate では Chromium 自前サンド
+            # ボックスが成立しないためサンドボックス無効で起動し、隔離は実行コンテナ側が
+            # 担う（根拠は render_child.py の launch-args コメント参照）。
+            chromium_sandbox=False,
             args=[
+                "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
                 "--disable-setuid-sandbox",
