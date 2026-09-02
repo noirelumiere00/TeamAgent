@@ -30,7 +30,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # media-apk.lock / Dockerfile の ARG / core_media 契約 / 世代 inputs の 4 つは更新した一方、
 # 本定数だけ取り残されて dev tip が赤のままになっていた（3 者一致の不変条件が片肺）。
 # 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
-APK_LOCK_SHA256 = "12aad439942cb90e3ac6719ce1ef65806d596ef3433783206e5ffb1519d25006"
+APK_LOCK_SHA256 = "dbc64a58969d4dd87500216c10d052e4800cf37163e30af330784bd1a026090f"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
