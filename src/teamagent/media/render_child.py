@@ -88,6 +88,16 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             executable_path=chromium,
             headless=True,
             args=[
+                # Fargate は unprivileged userns 無効のため Chromium 自前サンドボックスは
+                # 成立しない。2026-09-02 実測（本番封じ込め = uid 10001 / cap drop ALL /
+                # readonly rootfs を複製した使い捨てTDで /usr/lib/chromium/chromium を直接起動）:
+                #   sandbox ON  → "Failed to move to new namespace … errno = Operation not
+                #                 permitted" → FATAL zygote_host_impl_linux.cc:207 → SIGABRT(134)
+                #   サンドボックス無効（下のフラグ）→ exit 0（about:blank 描画成功）
+                # 隔離は実行コンテナ側（非root uid 10001 / cap drop ALL / readonly rootfs /
+                # roleless capability envelope）が担う。search.mjs と同じ方針で、フラグは
+                # この launch-args 1箇所だけに許す（個数はテストで固定・黙った増殖は赤）。
+                "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
                 "--disable-quic",
@@ -95,7 +105,7 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
                 "--host-resolver-rules=MAP * ~NOTFOUND",
                 "--no-proxy-server",
             ],
-            chromium_sandbox=True,
+            chromium_sandbox=False,
         )
         try:
             page = browser.new_page(

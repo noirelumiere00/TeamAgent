@@ -213,12 +213,15 @@ def test_acquire_url_allowlist_is_identical_in_core_dispatcher_python_and_node(
     assert tuple(re.findall(r'"([^"]+)"', match.group(1))) == expected
 
 
-def test_media_sandbox_uses_exact_playwright_profile_and_fargate_is_fail_closed() -> None:
+def test_media_sandbox_is_container_boundary_and_fargate_verified() -> None:
+    # 2026-09-02 実測で Fargate では Chromium 自前サンドボックス（namespace/setuid とも）が
+    # 成立しないことが確定した（EPERM → zygote_host FATAL → SIGABRT）。契約は
+    # 「fail-closed until verified」から「verified: 隔離はコンテナ境界」へ移行する。
     sandbox = CONTRACT["tasks"]["teamagent-media-worker"]["chromium_sandbox"]
-    assert sandbox["required"] is True
-    assert sandbox["no_sandbox_flag_forbidden"] is True
+    assert sandbox["required"] is False
+    assert sandbox["no_sandbox_flag_forbidden"] is False
     assert sandbox["setuid_sandbox_disabled"] is True
-    assert sandbox["namespace_sandbox_required"] is True
+    assert sandbox["namespace_sandbox_required"] is False
     assert sandbox["additional_allowed_syscalls"] == ["chroot", "clone", "setns", "unshare"]
     assert sandbox["required_capability"] is None
     assert sandbox["seccomp_profile_source"] == (
@@ -227,7 +230,23 @@ def test_media_sandbox_uses_exact_playwright_profile_and_fargate_is_fail_closed(
     assert sandbox["requires_setuid_sandbox"] is False
     assert sandbox["custom_seccomp_is_local_smoke_only"] is True
     assert sandbox["fargate_actual_smoke_required"] is True
-    assert sandbox["fargate_fail_closed_until_verified"] is True
+    assert sandbox["fargate_fail_closed_until_verified"] is False
+    verified = sandbox["fargate_verified"]
+    assert verified["date"] == "2026-09-02"
+    assert verified["sandbox_on"].startswith("exit 134")
+    assert verified["no_sandbox"].startswith("exit 0")
+    assert "uid 10001" in verified["isolation_boundary"]
+    # --no-sandbox は許可された launch-site に各1回だけ。黙った増殖・黙った削除は赤。
+    sites = sandbox["no_sandbox_flag_allowed_sites"]
+    assert "src/teamagent/media/render_child.py" in sites
+    assert "infra/docker/smoke_media.py" in sites
+    assert "tools/tiktok_scraper/search.mjs" in sites
+    for site in sites:
+        text = (ROOT / site).read_text(encoding="utf-8")
+        assert text.count("--no-sandbox") == 1, site
+    render_child = (ROOT / "src/teamagent/media/render_child.py").read_text(encoding="utf-8")
+    assert "chromium_sandbox=False" in render_child
+    assert "chromium_sandbox=True" not in render_child
     profile = ROOT / sandbox["seccomp_profile"]
     assert hashlib.sha256(profile.read_bytes()).hexdigest() == sandbox["seccomp_profile_sha256"]
     value = json.loads(profile.read_text(encoding="utf-8"))
@@ -416,7 +435,8 @@ def test_python_smoke_and_scan_helpers_parse() -> None:
 def test_media_smoke_covers_browser_transform_download_and_cleanup() -> None:
     text = (DOCKER / "smoke_media.py").read_text(encoding="utf-8")
     for token in (
-        "chromium_sandbox=True",
+        "chromium_sandbox=False",
+        "--no-sandbox",
         "page.route",
         "ProxyOperation",
         "FrameOperation",
