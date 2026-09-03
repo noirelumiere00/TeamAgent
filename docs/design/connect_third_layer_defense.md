@@ -451,3 +451,173 @@ LLM が従わない残余が消えないため 3 層にする。優先順位は 
 5. 層1 の 3 POST は 15s の全体予算を 1 本の `AbortSignal` で共有（claim TTL 60s と同長にしない）。
 6. 既知事項（記録のみ）: `message.trim()` は末尾改行を落とす。mcp 成功後に応答の読取だけ失敗すると層2 でモデルが再発行し
    リンクが 2 本（1 本目は未使用）になりうる。
+
+---
+
+## 11.【追記 2026-09-03】ツール引数の二重包みと、拒否の観測性
+
+### 11-0. 実測（OpenClaw の EFS 上のセッション記録・読み取り専用 Fargate プローブで集計）
+
+| 観測 | 値 |
+|---|---|
+| セッション記録 | 166 ファイル / tool call 363 件 |
+| `before_tool_call` で block | **83 件（23%）**（toolResult `details.status="blocked"` / `deniedReason="plugin-before-tool-call"`） |
+| 理由の内訳 | `_user_context must be a plain object` **72** / `trusted Slack run identity is missing or stale` 9 / `declared channel_id does not match the bound ingress` 2 |
+| 引数の包み形 | `{"arguments":{"_user_context":{…}}}` **74 件** / `{"name":"teamagent__oauth_connect","arguments":{…}}` 2 件 |
+| 全滅セッション | 7 本以上（14/14, 9/9, 8/8, 7/7, 5/5, 5/5, 4/4）。9/2 の一斉オンボ時に集中し 9/3 も継続 |
+| 発生ツール | oauth_connect 105 / search 95 / calendar_event 19 / tiktok_acquire 16 / tiktok_search 15 / mail_summary 14 / slack_summary 14 … ＝**ツールを問わない** |
+| モデル | Bedrock `jp.anthropic.claude-haiku-4-5-20251001-v1:0` |
+
+ブロックされた toolResult を見たモデルが「技術的な問題」「管理者へお問い合わせ」と自作回答するため、
+利用者には「連携できない」としか見えていなかった。セッションを作り直しても再発するので、
+履歴汚染ではなく**モデル側が引数をもう一段包む癖**と見る。
+
+### 11-1. 決定論の unwrap（`unwrapToolArguments`）
+
+`signToolCall` の**引数検査より前**に 1 度だけ通す。
+
+- (a) トップのキーが `arguments` 1 つだけで、その値がプレーンオブジェクト → その値を採用
+- (b) キー集合が `{name, arguments}` で `name` が呼び出し中のツール名（`teamagent__<tool>` / `<tool>`）と一致し、
+  `arguments` がプレーンオブジェクト → `arguments` を採用
+- (c) 最大 **2 段**まで再帰。2 段剥がしてもまだ包みなら剥がさず元のまま返す（＝3 段以上は従来どおり block・診断 P06）
+- (d) それ以外は無変更（同一参照をそのまま返す＝バイト同一）
+
+剥がしたら warn 1 行 `unwrapped tool arguments (shape=arguments|name_arguments, depth=n)`。
+識別子・本文・URL は載せない（§5 の G7 規律）。
+
+**信頼境界は動かない**: unwrap 後も `_user_context` は `mintCallerClaim` が authoritative な署名済み値で
+上書きするため、利用者・モデル由来の `_user_context` は元々すべて破棄される。ここで変わるのは
+「どの階層を検査するか」だけで、検査は 1 つも緩めない。包みの中で別人を騙った場合に、包まない場合と
+**同じコード（P05）で拒否される**ことをテストで固定した（`test_unwrap_does_not_move_the_trust_boundary`）。
+
+### 11-2. logger 到達性の一次検証（`openclaw@2026.7.1` の実物 dist）
+
+**結論: 条件つき YES。既定構成なら `api.logger.warn` はコンテナのログに到達するが、行き先は
+stdout ではなく `console.warn`（＝stderr）。ECS の awslogs ドライバは stderr も CloudWatch へ送る。
+ただし logger が完全な no-op に差し替わる登録経路が実在するため、console にも直接書く。**
+
+展開物: `npm pack openclaw@2026.7.1` を scratchpad に展開（`occore/package`）。以下は同 package 起点の相対パス。
+
+| # | 事実 | file:line |
+|---|---|---|
+| 1 | `buildPluginApi` が `logger: params.logger` をそのままプラグイン API に載せる | `dist/api-builder-CX43eAAh.js:109,123` |
+| 2 | 実運用の登録経路 `createApi()` が `logger: normalizeLogger(registryParams.logger)` を渡す | `dist/registry-D1_pYg_a.js:4393,4404` |
+| 3 | `normalizeLogger` は `{info,warn,error,debug}` を抜き出すだけ（実装はクロージャ参照なので `this` 喪失なし） | `dist/registry-D1_pYg_a.js:4271-4276` |
+| 4 | 既定 logger は `createSubsystemLogger("plugins")`＝**サブシステム名は `plugins`** | `dist/loader-svIpMF0d.js:646,1497,1570-1571` |
+| 5 | `warn()` → `emitLog("warn", …)` → `writeConsoleLine(...)` | `dist/subsystem-C3fiUGN1.js:205-211,231-233` |
+| 6 | `writeConsoleLine` は warn を `console.warn` に出す（`process.stdout.write` でもファイル直書きでもない）。Node の `console.warn` は **stderr** | `dist/subsystem-C3fiUGN1.js:161-164` |
+| 7 | console level の既定は `"info"`。`warn(4) >= info(3)` なので**既定で通る** | `dist/console-DDSYsaep.js:16,40` / `dist/subsystem-C3fiUGN1.js:16-20` / `dist/logger-DPps3u8A.js:32-42` |
+| 8 | 環境変数は `OPENCLAW_LOG_LEVEL` のみ。未設定ならオーバーライドなし（本 repo に設定箇所なし＝grep 0 件） | `dist/logger-DPps3u8A.js:15-23,46-61` |
+| 9 | subsystem フィルタの既定は `null`＝全通過。設定するのは CLI `run` と TUI だけで gateway 経路では呼ばれない | `dist/state-CZ7QadD1.js:13` / `dist/console-DDSYsaep.js:76-82` / `dist/run-CPf2XxVd.js:1151` |
+| 10 | `forceConsoleToStderr` の既定は `false` | `dist/state-CZ7QadD1.js:11` |
+| 11 | 本番 gateway 経路では `routeLogsToStderr()` が走らない（`ownsProtocolStdout` 既定 false・`--json` なし） | `dist/command-path-policy-NzlS0DJF.js:250-252,720` / `dist/command-startup-policy-Bq9-nxRO.js:19` |
+| 12 | **bundled capability runtime 経由の登録では logger が完全な no-op**（`{info(){},warn(){},error(){},debug(){}}`） | `dist/bundled-capability-runtime-DNfN9uhv.js:85,92-97` |
+
+出ない条件（実物根拠あり）: `OPENCLAW_LOG_LEVEL` を `silent`/`error`/`fatal` に設定 /
+config の `logging.consoleLevel` を同様に設定（現 `openclaw.config.json5` に `logging` ブロックなし）/
+`setConsoleSubsystemFilter` で `plugins` が外れる（gateway では非該当）/ **#12 の no-op logger 経路** /
+`--json` 付き CLI・`acp`・`mcp serve`・`tools stdio` / `VITEST=true`。
+
+**判断**: #7〜#11 だけを見れば logger で足りる。しかし実測では **14 日間 1 行も出ていない**。
+主原因は本 repo 側にあり、`register` が `before_tool_call` にだけ `api.logger` を渡しておらず、
+`signToolCall` の block 経路は 1 行も書いていなかった（本 PR で修正）。加えて #12 の no-op logger 経路が
+実在する以上、拒否の観測を上流の logging 構成に依存させない。したがって
+`emitPluginLog` は **logger と console の両方**へ同じ 1 行を書く。
+本番では logger 側の `[plugins] teamagent-caller-identity: …` と console 側の
+`teamagent-caller-identity: …` の 2 行になるが、**拒否が必ず観測できること**を優先する。
+
+**縮小点（明記）**: 依頼書は「stdout に 1 行」だったが、実装は `console.warn`＝**stderr** に出す。
+上流 logger と同じ経路に揃えるため。ECS の awslogs は stdout / stderr を同じロググループへ送るので
+CloudWatch 上の可観測性は同じ（`harden-task-definition.jq:199-205` が `logDriver == "awslogs"` を要求）。
+
+### 11-3. 診断コード（P 系統）
+
+`block(reason)` が返す文の末尾に、利用者がそのまま転送できる 2 行を付ける。
+
+```
+teamagent-caller-identity: <従来どおりの理由>
+解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:
+診断: CONNECT-P03 2026-09-03 16:35 JST
+```
+
+コード体系は `src/teamagent/connect_diagnostics.py`（`ConnectDiag` / `DIAG_SPECS`）の流儀に合わせた。
+**P 系統の正本は plugin 側の `BLOCK_DIAG`**（Python から発行しないため）。意味・ログの引き方・対処は
+`docs/runbooks/connect_diagnostics.md` の P コード節。user id は載せない（G7）。時刻は `formatJstMinute`
+（第3層の `CONNECT-Z01` と同じ関数）。
+
+### 11-4b.【追記・レビュー指摘 2026-09-03】会話 id / team id の実値をログから外す
+
+本 PR で `emitPluginLog` が console へ**必ず**二重書きするようになったため、
+上流のログレベル抑制が効かなくなった。そこで実値を出していた 2 箇所を形に置換した。
+
+| 箇所 | 旧 | 新 |
+|---|---|---|
+| `bindAgentRun` の会話 id 不一致 | `runChannelId=C0B0PQD83N2 pendingChannelIds=[DM:U09CX1CCBLN]` | `runChannelShape=C pendingChannelShapes=[U] pendingChannelDistinct=1` |
+| `rememberInbound` の他ワークスペース | `foreignTeam=<T…> expected=<T…>` | `foreign_team=true` ＋ `id_shape` の `team:mismatch` |
+
+**なぜ旧実装が誤りだったか**: 「会話 id は Slack のチャンネル/DM 識別子であって caller identity ではない」
+というコメント付きで実値を出していたが、**DM では成り立たない**。`resolveSlackChannel`（`dist/index.js:285-286`）は
+DM を `DM:<senderId>` に解決するため、その実値は **Slack user id そのもの**になる。
+実証ログ: `runChannelId=C0B0PQD83N2 pendingChannelIds=[DM:U09CX1CCBLN]`。
+
+診断能力は落としていない: `matchChannelId=0` と両側の形の不一致で切り分けられる。
+実値が要る調査は Slack 側で行う。
+
+### 11-4. `id_shape`（値を出さずに形だけ出す）
+
+拒否ログには `id_shape=sender:U,channel:D,message:ts,session:thread,team:match` のように
+**先頭 1 文字と構造の有無だけ**を載せる。Enterprise Grid の `W…` user id や、想定外のチャンネル形
+（`user:U…` / `c…:thread:<ts>` / `slack`）で拒否が出ていないかを、本番ログの生値を見ずに切り分けるため。
+実値（Slack user id / channel id / ts）が含まれないことをテストで固定した。
+
+### 11-6.【追記】層1 の脱出経路をすべて観測可能にする（2026-09-03 の事故）
+
+**事故**: OC TD:43（dev `8a1560b`・#381 の層1 入り）が 2026-09-03 16:37 JST に着地した直後、
+DM で「連携」を送ったところ**層1 が発火せずモデル経路になった**（OC ログに
+`[agents/tool-policy] tool policy removed 26 tool(s)` ＝モデル起動。層1 が `handled` を返していれば
+モデルは起動しない）。plugin のログは CloudWatch に 1 行も無く、どの条件で落ちたか判別できなかった。
+
+**原因（コード上）**: `answerShortConnectRequest` は `fallthrough()` を通る 3 経路以外、
+すべて無言の `return undefined` だった。前提条件で落ちた場合と、層1 に入って失敗した場合が
+区別できず、`before_agent_reply` が呼ばれたのかどうかすら判らない。
+
+**対処**: 全脱出経路に理由を付け、`outcome` を 3 語に分けた。
+
+| outcome | 意味 | 既定で出るか |
+|---|---|---|
+| `layer1 entered provider=… trigger=…` | **hook が呼ばれた事実そのもの**。これが無ければ `before_agent_reply` が呼ばれていないと確定できる | trace のみ |
+| `outcome=skipped reason=…` | 前提条件で層1 に入らなかった | trace のみ |
+| `outcome=fallthrough reason=…` | 層1 に入ったが実行できずモデル経路へ渡した | **常時** |
+| `outcome=answered tool_calls=1` | 層1 が handled で応答した | **常時** |
+
+`skipped` の reason は 6 種。`not_slack_provider` / `trigger_not_user`（実 trigger 値を併記）/
+`missing_session_or_sender_or_channel`（どれが欠けたか＋`id_shape`）/
+`no_candidate_ingress`（`pending=` と `bound=` の件数）/ `not_connect_request`（正規化後の**文字数だけ**）/
+`already_attempted`。
+
+`rememberInbound` にも `inbound recorded connect_request=… normalized_len=… pending=… bound=… id_shape=…`
+（trace のみ）と `inbound rejected reason=…`（常時）を入れた。層1 の `no_candidate_ingress` が
+「受信を記録できていない」のか「照合が外れた」のかは、この 2 行の有無で切り分ける。
+
+**トレードオフと env**: `not_connect_request` は通常の会話 1 通ごとに出るためノイズになる。
+そこで詳細は **`TEAMAGENT_CALLER_IDENTITY_TRACE=1`** のときだけ出し、既定は
+block / fallthrough / answered / rejected のみ。env は OC のタスク定義で注入する。
+**挙動は env に依存しない**（`handled` の可否は同じ）ことをテストで固定した
+（`test_trace_is_off_by_default_and_does_not_change_behaviour`）。
+
+### 11-5. 残る弱点
+
+1. `before_tool_call` の ctx には `senderId` が無い（本番実測形状）ため、そこでの `id_shape` は
+   `sender:absent` になる。`W…` の切り分けは `bindAgentRun` 側の 1 行で行う。
+2. logger 側と console 側で本番ログが 2 行になる。片方に寄せる判断は、実際に CloudWatch へ出た形を
+   見てから（デプロイ後に `diagnostic=CONNECT-P` で引ける）。
+3. unwrap は「2 段まで」の固定上限。3 段以上を送るモデルが現れたら P06 の件数として観測できる。
+4. 本 PR は plugin の挙動のみ。モデルが包む癖そのもの（プロンプト側）には触れていない。
+5. 2026-09-03 の層1 不発の**真因はまだ確定していない**。本 PR は「次に起きたら 1 行で判る」ところまで。
+   確定には OC 再ビルド後に `TEAMAGENT_CALLER_IDENTITY_TRACE=1` を入れて再現させる必要がある。
+6. trace ON にすると通常会話 1 通あたり 2〜3 行増える。切り分けが済んだら OFF に戻す運用が前提。
+7. `arguments` という入力フィールドを持つ skill が将来増えると、unwrap 規則 (a) が誤発火して
+   静かに P06 で落ちる。本 PR 時点では 45 skill すべてに存在せず、増えたら
+   `test_no_skill_declares_an_input_field_named_arguments` が赤になる。
+8. 14 スキルの description が「arguments に `_user_context` を含める」と書いている（記録のみ）。
+   block 最多の oauth_connect(105) / search(95) にはこの文言が無いので主因ではない。文言修正は別 PR。

@@ -14,8 +14,28 @@
 //   X はセッション鍵由来。チャンネルの app_mention では `:thread:<ts>` が付く。
 //   agent の hook ctx に conversationId は存在しない。
 import { readFileSync } from "node:fs";
-import { createCallerIdentityPlugin } from
+import { createCallerIdentityPlugin, unwrapToolArguments } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
+
+// ── console の捕捉（2026-09-03）───────────────────────────────────────────
+// plugin は logger（上流の subsystem logger）に加えて console にも同じ 1 行を書く。
+// 上流 logger が no-op に差し替わる経路（bundled-capability-runtime）や
+// consoleLevel=error では logger 側が消えるため、console 側が最後の砦になる。
+// このレポート自身は process.stdout.write で書くので、console を横取りしても JSON は壊れない。
+// 捕捉は import 直後（どのシナリオより前）に張る。
+const consoleLines = [];
+for (const level of ["log", "info", "warn", "error", "debug"]) {
+  const original = console[level]?.bind(console);
+  console[level] = (...args) => {
+    consoleLines.push({ level, text: args.map((a) => String(a)).join(" ") });
+    void original;
+  };
+}
+function captureConsole(run) {
+  const before = consoleLines.length;
+  const value = run();
+  return { value, console: consoleLines.slice(before) };
+}
 
 const TEAM = "T07MU5P2PBR";
 const USER = "U09CX1CCBLN";
@@ -733,6 +753,470 @@ const connectL1NextMessage = await nextMessageAfterDeterministic();
 const connectL1RepeatAfter30s = await repeatConnectAfterDeterministic();
 const connectL1OtherSender = await otherSenderPendingInThread();
 
+// ── ツール引数の二重包み（2026-09-03 実測）─────────────────────────────────
+// EFS のセッション記録 166 ファイル・tool call 363 件のうち 83 件（23%）が
+// before_tool_call で block されており、その 72 件が `_user_context must be a plain object`。
+// 引数の実際の形は {"arguments":{"_user_context":{…}}} が 74 件、
+// {"name":"teamagent__oauth_connect","arguments":{…}} が 2 件だった。
+// ツールを問わず（oauth_connect 105 / search 95 / calendar_event 19 …）発生している。
+function unwrapScenario({ params, toolName = "teamagent__search" }) {
+  const { handlers, logs } = makePlugin();
+  const captured = captureConsole(() => {
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+    handlers.get("before_model_resolve")(
+      { prompt: "probe" },
+      {
+        runId: "run-1",
+        agentId: "teamagent",
+        sessionKey: DM_SESSION_KEY,
+        sessionId: "sid",
+        trigger: "user",
+        ...agentCtxFields(USER),
+      },
+    );
+    return handlers.get("before_tool_call")(
+      { toolName, runId: "run-1", toolCallId: "tc-1", params },
+      {
+        toolName,
+        runId: "run-1",
+        toolCallId: "tc-1",
+        sessionKey: DM_SESSION_KEY,
+        channelId: `user:${USER}`,
+      },
+    );
+  });
+  const result = captured.value;
+  const blocked = Boolean(result?.block);
+  let claimPayload = null;
+  let signedKeys = null;
+  let signedContextKeys = null;
+  let signedTop = null;
+  let signedUserId = null;
+  if (!blocked) {
+    const context = result.params[USER_CONTEXT_KEY_NAME];
+    signedUserId = context.slack_user_id;
+    claimPayload = JSON.parse(
+      Buffer.from(context.caller_claim.split(".")[0], "base64url").toString(),
+    );
+    signedKeys = Object.keys(result.params).toSorted();
+    signedContextKeys = Object.keys(context).toSorted();
+    signedTop = Object.fromEntries(
+      Object.entries(result.params).filter(([key]) => key !== USER_CONTEXT_KEY_NAME),
+    );
+  }
+  return {
+    blocked,
+    blockReason: result?.blockReason ?? null,
+    diagCode: /診断: (CONNECT-P\d\d) /u.exec(result?.blockReason ?? "")?.[1] ?? null,
+    diagLine:
+      (result?.blockReason ?? "").split("\n").find((line) => line.startsWith("診断: ")) ?? null,
+    signedKeys,
+    signedContextKeys,
+    signedTop,
+    claimChannel: claimPayload?.channel ?? null,
+    claimUser: claimPayload?.sub ?? null,
+    signedUserId,
+    claimPayload,
+    warnings: logs,
+    console: captured.console,
+  };
+}
+
+const USER_CONTEXT_KEY_NAME = "_user_context";
+const AUTHENTIC_CONTEXT = { slack_user_id: USER };
+// 利用者（モデル）由来の `_user_context` は authoritative 値で必ず上書きされる。
+// 別人になりすました値を入れておき、署名結果が本物の送信者になることを固定する。
+const SPOOFED_CONTEXT = { slack_user_id: "U00SPOOFED0" };
+
+// unwrap そのものの単体確認（実装の export を直接叩く）。
+function unwrapUnit() {
+  const plain = { query: "q", _user_context: { slack_user_id: USER } };
+  const plainResult = unwrapToolArguments(plain, "teamagent__search");
+  const nested3 = { arguments: { arguments: { arguments: { _user_context: {} } } } };
+  const nested3Result = unwrapToolArguments(nested3, "teamagent__search");
+  const wrongName = {
+    name: "teamagent__mail_summary",
+    arguments: { _user_context: {} },
+  };
+  const wrongNameResult = unwrapToolArguments(wrongName, "teamagent__search");
+  const bareName = { name: "search", arguments: { _user_context: {} } };
+  const bareNameResult = unwrapToolArguments(bareName, "teamagent__search");
+  const extraKey = {
+    arguments: { _user_context: {} },
+    query: "q",
+  };
+  const extraKeyResult = unwrapToolArguments(extraKey, "teamagent__search");
+  const nonObject = { arguments: "not-an-object" };
+  const nonObjectResult = unwrapToolArguments(nonObject, "teamagent__search");
+  const twice = { arguments: { arguments: { _user_context: {}, query: "q" } } };
+  const twiceResult = unwrapToolArguments(twice, "teamagent__search");
+  return {
+    // (d) 通常引数は無変更＝同一参照・バイト同一。
+    plain_identical:
+      plainResult.params === plain &&
+      JSON.stringify(plainResult.params) === JSON.stringify(plain),
+    plain_depth: plainResult.depth,
+    plain_shape: plainResult.shape,
+    // (c) 3 段は剥がさず元のまま（＝従来どおり block）。
+    nested3_identical: nested3Result.params === nested3,
+    nested3_depth: nested3Result.depth,
+    // (c) 2 段は剥がす。
+    twice_depth: twiceResult.depth,
+    twice_shape: twiceResult.shape,
+    twice_keys: Object.keys(twiceResult.params).toSorted(),
+    // (b) name が呼び出し中のツールと違えば剥がさない（別ツールの引数を横流ししない）。
+    wrong_name_identical: wrongNameResult.params === wrongName,
+    // (b) `teamagent__` を外した素の名前も受ける。
+    bare_name_depth: bareNameResult.depth,
+    bare_name_shape: bareNameResult.shape,
+    // (a) `arguments` 以外のキーが同居していたら包みではない。
+    extra_key_identical: extraKeyResult.params === extraKey,
+    // 値がオブジェクトでなければ包みではない。
+    non_object_identical: nonObjectResult.params === nonObject,
+  };
+}
+
+const unwrapReport = {
+  // ①実測の主犯: {"arguments":{"_user_context":{…}}}（74 件）。block されず、
+  //   mcp に届く引数は正規形（top に query、`_user_context` は authoritative 値）。
+  single_arguments: unwrapScenario({
+    params: { arguments: { query: "q", _user_context: AUTHENTIC_CONTEXT } },
+  }),
+  // ①' 信頼境界が動いていないことの固定: 包みの中で別人を騙っても、従来どおり拒否される。
+  //   （unwrap は「どの階層を検査するか」を直すだけで、検査そのものは 1 つも緩めない）
+  single_arguments_spoofed: unwrapScenario({
+    params: { arguments: { query: "q", _user_context: SPOOFED_CONTEXT } },
+  }),
+  // ①'' 包まずに別人を騙った場合と同じ拒否になること（unwrap の有無で差が出ない）。
+  plain_spoofed: unwrapScenario({
+    params: { query: "q", _user_context: SPOOFED_CONTEXT },
+  }),
+  // ②{"name":…,"arguments":{…}}（2 件）。search でも効く＝全ツール共通であること。
+  name_and_arguments: unwrapScenario({
+    params: {
+      name: "teamagent__search",
+      arguments: { query: "q", _user_context: AUTHENTIC_CONTEXT },
+    },
+  }),
+  // ②' oauth_connect でも同じく効く（実測 2 件はこのツール）。
+  name_and_arguments_oauth: unwrapScenario({
+    toolName: "teamagent__oauth_connect",
+    params: {
+      name: "teamagent__oauth_connect",
+      arguments: { _user_context: AUTHENTIC_CONTEXT },
+    },
+  }),
+  // ③2 段包みも剥がす。
+  double_arguments: unwrapScenario({
+    params: { arguments: { arguments: { query: "q", _user_context: AUTHENTIC_CONTEXT } } },
+  }),
+  // ④3 段包みは従来どおり block（診断 P06）。
+  triple_arguments: unwrapScenario({
+    params: { arguments: { arguments: { arguments: { _user_context: AUTHENTIC_CONTEXT } } } },
+  }),
+  // ⑤通常の引数はそのまま通る（回帰なし）。
+  plain_arguments: unwrapScenario({
+    params: { query: "q", _user_context: AUTHENTIC_CONTEXT },
+  }),
+  // ⑥unwrap 単体の性質。
+  unit: unwrapUnit(),
+};
+
+// ── 拒否の観測性（2026-09-03）───────────────────────────────────────────
+// 拒否したのにログが 1 行も出ない状態を作れないことを固定する。
+function blockObservability({ ctxOverrides = {}, eventOverrides = {} } = {}) {
+  const { handlers, logs } = makePlugin();
+  const captured = captureConsole(() =>
+    handlers.get("before_tool_call")(
+      {
+        toolName: "teamagent__search",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        params: { query: "q", _user_context: AUTHENTIC_CONTEXT },
+        ...eventOverrides,
+      },
+      {
+        toolName: "teamagent__search",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        sessionKey: DM_SESSION_KEY,
+        channelId: `user:${USER}`,
+        senderId: USER,
+        ...ctxOverrides,
+      },
+    ),
+  );
+  const result = captured.value;
+  return {
+    blocked: Boolean(result?.block),
+    blockReason: result?.blockReason ?? null,
+    diagCode: /診断: (CONNECT-P\d\d) /u.exec(result?.blockReason ?? "")?.[1] ?? null,
+    consoleWarnCount: captured.console.filter((line) => line.level === "warn").length,
+    console: captured.console,
+    warnings: logs,
+  };
+}
+
+const blockDiagnostics = {
+  // P01 native tool denied
+  native_tool: blockObservability({
+    eventOverrides: { toolName: "read" },
+    ctxOverrides: { toolName: "read" },
+  }),
+  // P02 tool name binding（event と ctx が食い違う）
+  tool_name_mismatch: blockObservability({
+    ctxOverrides: { toolName: "teamagent__mail_summary" },
+  }),
+  // P03 run binding（event と ctx の runId 不一致）
+  run_binding: blockObservability({ ctxOverrides: { runId: "run-2" } }),
+  // P04 invocation binding（toolCallId 不一致）
+  invocation_binding: blockObservability({ ctxOverrides: { toolCallId: "tc-2" } }),
+  // P05 session-or-channel binding（channel を解決できない）
+  session_binding: blockObservability({ ctxOverrides: { channelId: "slack" } }),
+  // P03 実測 9 件: run は束縛されているが trusted ingress が無い。
+  stale_run_identity: blockObservability({}),
+};
+
+// 正常系ではログが 1 行も増えないこと（拒否だけを観測する）。
+const quietOnSuccess = (() => {
+  const before = consoleLines.length;
+  const r = unwrapScenario({ params: { query: "q", _user_context: AUTHENTIC_CONTEXT } });
+  return {
+    blocked: r.blocked,
+    consoleLineCount: r.console.length,
+    warningCount: r.warnings.length,
+    totalConsoleDelta: consoleLines.length - before,
+  };
+})();
+
+// ── 層1 の脱出経路の観測（2026-09-03 事故）─────────────────────────────────
+// OC TD:43 着地直後、DM の「連携」で層1 が発火せずモデル経路になった
+// （OC ログの `[agents/tool-policy] tool policy removed 26 tool(s)` ＝モデル起動）。
+// plugin のログは CloudWatch に 1 行も無く、どの条件で落ちたか判別できなかった。
+// 全脱出経路に理由を付け、trace ON/OFF の両モードを固定する。
+async function layer1Trace({ trace, content = "連携", ctxOverrides = {}, skipInbound = false }) {
+  const env = trace ? { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" } : {};
+  const { handlers, logs, infos } = makeConnectPlugin({ env });
+  const captured = captureConsole(async () => {
+    if (!skipInbound) receiveDm(handlers, content);
+    return (
+      (await handlers.get("before_agent_reply")(
+        { prompt: content },
+        { ...beforeAgentReplyCtx(), ...ctxOverrides },
+      )) ?? null
+    );
+  });
+  const result = await captured.value;
+  const lines = captured.console.map((line) => line.text);
+  return {
+    handled: result?.handled === true,
+    entered: lines.some((line) => line.includes("layer1 entered")),
+    enteredLine: lines.find((line) => line.includes("layer1 entered")) ?? null,
+    skippedReason:
+      lines
+        .find((line) => line.includes("outcome=skipped"))
+        ?.match(/reason=(\S+)/u)?.[1] ?? null,
+    skippedLine: lines.find((line) => line.includes("outcome=skipped")) ?? null,
+    fallthroughReason:
+      lines
+        .find((line) => line.includes("outcome=fallthrough"))
+        ?.match(/reason=(\S+)/u)?.[1] ?? null,
+    inboundRecorded: lines.some((line) => line.includes("inbound recorded")),
+    inboundLine: lines.find((line) => line.includes("inbound recorded")) ?? null,
+    consoleLines: lines,
+    warnings: logs,
+    infos,
+  };
+}
+
+const layer1TraceReport = {
+  // trace ON: hook が呼ばれた事実が 1 行出て、handled まで進む。
+  on_answered: await layer1Trace({ trace: true }),
+  // trace OFF でも handled は変わらない（挙動は env に依存しない）。
+  off_answered: await layer1Trace({ trace: false }),
+  // 無言だった脱出経路 6 種（trace ON）。
+  on_not_slack_provider: await layer1Trace({
+    trace: true,
+    ctxOverrides: { messageProvider: "discord" },
+  }),
+  on_trigger_not_user: await layer1Trace({
+    trace: true,
+    ctxOverrides: { trigger: "heartbeat" },
+  }),
+  on_missing_fields: await layer1Trace({
+    trace: true,
+    ctxOverrides: { sessionKey: "", senderId: "not-a-slack-id" },
+  }),
+  on_no_candidate_ingress: await layer1Trace({ trace: true, skipInbound: true }),
+  on_not_connect_request: await layer1Trace({ trace: true, content: "こんにちは" }),
+  on_already_attempted: await (async () => {
+    // 1 通目で handled → 受信は消費される。同じ ctx で 2 度目を呼ぶ。
+    const env = { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" };
+    const { handlers } = makeConnectPlugin({ env });
+    receiveDm(handlers, "連携");
+    // fetch を失敗させずに 1 度目を通し、消費前の状態で 2 度目を撃つため
+    // mint 済みフラグだけが立つ経路（no_mcp_bearer）を使う。
+    const { handlers: h2 } = makeConnectPlugin({
+      env: { ...env, TEAMAGENT_MCP_BEARER: "" },
+    });
+    receiveDm(h2, "連携");
+    await h2.get("before_agent_reply")({ prompt: "連携" }, beforeAgentReplyCtx());
+    const captured = captureConsole(() =>
+      h2.get("before_agent_reply")({ prompt: "連携" }, beforeAgentReplyCtx()),
+    );
+    await captured.value;
+    const lines = captured.console.map((line) => line.text);
+    return {
+      skippedReason:
+        lines
+          .find((line) => line.includes("outcome=skipped"))
+          ?.match(/reason=(\S+)/u)?.[1] ?? null,
+    };
+  })(),
+  // trace OFF: 無言だった経路は既定でもやはり出さない（ノイズを増やさない）。
+  off_not_connect_request: await layer1Trace({ trace: false, content: "こんにちは" }),
+  off_no_candidate_ingress: await layer1Trace({ trace: false, skipInbound: true }),
+  // trace OFF でも fallthrough（層1 に入ったが実行できなかった）は必ず出る。
+  off_fallthrough: await (async () => {
+    const { handlers } = makeConnectPlugin({ env: { TEAMAGENT_MCP_BEARER: "" } });
+    const captured = captureConsole(() => {
+      receiveDm(handlers, "連携");
+      return handlers.get("before_agent_reply")({ prompt: "連携" }, beforeAgentReplyCtx());
+    });
+    await captured.value;
+    const lines = captured.console.map((line) => line.text);
+    return {
+      fallthroughReason:
+        lines
+          .find((line) => line.includes("outcome=fallthrough"))
+          ?.match(/reason=(\S+)/u)?.[1] ?? null,
+      lineCount: lines.length,
+      lines,
+    };
+  })(),
+};
+
+// ── bind_agent_run / inbound rejected の G7（2026-09-03 レビュー指摘）─────────
+// 旧実装は channelId の実値を両側とも出していた（`runChannelId=C0B0PQD83N2
+// pendingChannelIds=[DM:U09CX1CCBLN]`）。DM では resolveSlackChannel が
+// `DM:<senderId>` に解決するため、これは **Slack user id そのもの**が
+// CloudWatch に落ちることを意味する。emitPluginLog が console へ二重書きする
+// ようになった以上、ログレベルでの抑制も効かない。
+// 同様に inbound 側の `foreignTeam=<T…> expected=<T…>` も実値だった。
+function bindRunChannelMismatch() {
+  const { handlers, logs } = makePlugin();
+  const captured = captureConsole(() => {
+    // DM の受信（pending は channelId=`DM:U09…`）。
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+    // 同じ sessionKey / senderId のまま、run ctx だけチャンネル会話を名乗る。
+    // → candidates=0 かつ matchChannelId=0 で、実値を出していた分岐に入る。
+    handlers.get("before_model_resolve")(
+      { prompt: "probe" },
+      {
+        runId: "run-1",
+        agentId: "teamagent",
+        sessionKey: DM_SESSION_KEY,
+        sessionId: "sid",
+        trigger: "user",
+        ...agentCtxFields(CHANNEL),
+      },
+    );
+  });
+  const line =
+    captured.console.map((entry) => entry.text).find((text) => text.includes("bind_agent_run")) ??
+    null;
+  return { line, warnings: logs, console: captured.console.map((entry) => entry.text) };
+}
+
+function inboundForeignTeam() {
+  const { handlers, logs } = makePlugin();
+  const foreignTeam = "T99FOREIGN0";
+  const captured = captureConsole(() => {
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: {
+          guildId: foreignTeam,
+          to: `user:${USER}`,
+          originatingTo: `user:${USER}`,
+        },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+  });
+  const line =
+    captured.console.map((entry) => entry.text).find((text) => text.includes("inbound rejected")) ??
+    null;
+  return { line, foreignTeam, warnings: logs };
+}
+
+// unwrap が throw しても block へ変換されること（fail-closed・2026-09-03 レビュー指摘 2）。
+// JSON 由来の params では getter を持てないので本番では throw 不能だが、
+// unwrap 呼び出しが try の外に出た瞬間にここが赤くなる。
+function unwrapThrowsIsFailClosed() {
+  const hostile = {};
+  Object.defineProperty(hostile, "arguments", {
+    enumerable: true,
+    get() {
+      throw new Error("hostile getter");
+    },
+  });
+  let threw = null;
+  let result = null;
+  try {
+    result = unwrapScenario({ params: hostile });
+  } catch (error) {
+    threw = String(error);
+  }
+  return {
+    threw,
+    blocked: result?.blocked ?? null,
+    diagCode: result?.diagCode ?? null,
+  };
+}
+
+const g7Report = {
+  unwrap_throws_fail_closed: unwrapThrowsIsFailClosed(),
+  bind_run_channel_mismatch: bindRunChannelMismatch(),
+  inbound_foreign_team: inboundForeignTeam(),
+};
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -918,6 +1402,15 @@ const report = {
   }),
   // fixture（単一正本）と層1 実経路の一致。
   connect_phrase_matrix: connectPhraseRows,
+  // ── ツール引数の二重包みを剥がす（2026-09-03） ────────────────────────
+  unwrap: unwrapReport,
+  // ── 拒否の観測性（診断行 + 必ず 1 行のログ） ──────────────────────────
+  block_diagnostics: blockDiagnostics,
+  block_quiet_on_success: quietOnSuccess,
+  // ── 層1 の脱出経路の観測（trace ON/OFF の両モード） ────────────────────
+  layer1_trace: layer1TraceReport,
+  // ── bind_agent_run / inbound rejected の G7 ────────────────────────────
+  g7: g7Report,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");
