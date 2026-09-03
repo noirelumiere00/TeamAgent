@@ -165,13 +165,13 @@ class ApifyVideoFallback:
             clock=self._clock,
         )
         for staged in outcome.videos:
-            row = by_pid.get(staged.key)
-            if row is None:
+            target = by_pid.get(staged.key)
+            if target is None:
                 continue
-            row["downloaded"] = True
-            row["s3_key"] = staged.ref.key if staged.ref is not None else None
-            row["url"] = staged.url
-            row["acquired_via"] = ACQUIRED_VIA_APIFY
+            target["downloaded"] = True
+            target["s3_key"] = staged.ref.key if staged.ref is not None else None
+            target["url"] = staged.url
+            target["acquired_via"] = ACQUIRED_VIA_APIFY
         warnings.extend(outcome.warnings)
 
         counts = dict(out.get("counts") or {})

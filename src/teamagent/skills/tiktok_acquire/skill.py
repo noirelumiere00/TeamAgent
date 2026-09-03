@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import structlog
 from pydantic import BaseModel
@@ -135,11 +135,11 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
 
     def _apply_apify_fallback(
         self,
-        st: dict[str, object],
+        st: dict[str, Any],
         job_id: str,
         ctx: SkillContext,
-        log: object,
-    ) -> dict[str, object]:
+        log: Any,
+    ) -> dict[str, Any]:
         """worker が落とせなかった動画を mcp 側 Apify で補完する。失敗しても従来結果を返す。"""
 
         fallback = self._apify_fallback

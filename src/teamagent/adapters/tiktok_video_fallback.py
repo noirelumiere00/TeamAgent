@@ -248,13 +248,14 @@ def fill_missing_videos(
         key_by_url = {url: key for key, url in pending}
         done: set[str] = set()
         for item in got:
-            key = key_by_url.get(str(item.post_url))
-            if key is None or key in done:
+            matched = key_by_url.get(str(item.post_url))
+            if matched is None or matched in done:
                 continue
+            key = matched
             body = bytes(item.body)
             content_type = str(getattr(item, "content_type", "") or "video/mp4")
             ref: Any | None = None
-            url: str | None = None
+            signed_url: str | None = None
             if media_client is not None:
                 # worker 取得物と同じ検査（sha256・サイズ上限・content_type）を stage_bytes で通す。
                 # 通らなければ bytes も渡さない（検査を素通りする経路を作らない）。
@@ -272,7 +273,7 @@ def fill_missing_videos(
                         f"{key}:APIFY_FALLBACK_FAILED:S3_STAGE:{safe_reason(exc)}"
                     )
                     continue
-                url = _presign(
+                signed_url = _presign(
                     media_client, ref, deadline_epoch_s=deadline_epoch_s, presign_s=presign_s
                 )
             outcome.videos.append(
@@ -282,7 +283,7 @@ def fill_missing_videos(
                     name=staged_name(key),
                     body=body if keep_body else None,
                     ref=ref,
-                    url=url,
+                    url=signed_url,
                     reused=False,
                     content_type=content_type,
                 )
