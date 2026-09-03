@@ -135,7 +135,13 @@ def _research_slide(notes: str) -> Slide | None:
     if len(adopted) > len(shown):
         tag_text += f"紙面の都合で{len(adopted) - len(shown)}件は監査記録のみ。"
     tag_text += "数値の実測は本資料の各ページで行い、本ページは調査ツールの一次情報への導線。"
-    footnote = _ORGANIC_NOTE if any(_ORGANIC_WORD in note.text for note in shown) else ""
+    # fmt レンダラの pr_labels ゲート（display_texts）は D の全セル＝出典 URL も走査するので、
+    # 要点本文だけでなく URL に含まれる場合も定義注記を付ける（Q2 が無い構成での失敗を防ぐ）。
+    footnote = (
+        _ORGANIC_NOTE
+        if any(_ORGANIC_WORD in note.text or _ORGANIC_WORD in note.source_url for note in shown)
+        else ""
+    )
     return Slide(
         type="D",
         part=1,

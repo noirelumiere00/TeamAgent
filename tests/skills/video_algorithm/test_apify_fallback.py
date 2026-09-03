@@ -157,3 +157,76 @@ def test_apify_zero_result_degrades_to_cover_only(
         VideoAlgorithmInput(query="新宿 ランチ", max_videos=1), ctx=SkillContext()
     )
     assert out.videos[0].error == "動画取得失敗・サムネのみ軽量分析"
+
+
+# ---------------------------------------------------------------------------
+# request 単位の予算: 集約本数上限（TIKTOK_APIFY_FALLBACK_MAX_VIDEOS）と壁時計
+# ---------------------------------------------------------------------------
+
+_URL2 = "https://www.tiktok.com/@a/video/7000000000000000002"
+
+
+def _two_video_skill(tmp_path: object, apify: _FakeApify, gemini: MagicMock) -> VideoAlgorithmSkill:
+    metas = [
+        VideoMeta(rank=1, url=_URL, play_count=1000, cover_url="https://cdn/1.jpg"),
+        VideoMeta(rank=2, url=_URL2, play_count=900, cover_url="https://cdn/2.jpg"),
+    ]
+    return VideoAlgorithmSkill(
+        gemini=gemini,
+        searcher=lambda q, n, r: metas,
+        downloader=_boom,
+        proxy=lambda d, m: (d, m),
+        report_dir=str(tmp_path),
+        apify_fallback=apify,
+    )
+
+
+def test_aggregate_cap_bounds_apify_runs_per_request(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.skills.video_algorithm import thumbnails
+
+    monkeypatch.setenv(ENV_FLAG, "1")
+    monkeypatch.setenv("TIKTOK_APIFY_FALLBACK_MAX_VIDEOS", "1")
+    monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: b"\xff\xd8\xff\xe0jpegdata")
+    apify = _FakeApify({_URL: _MP4, _URL2: _MP4})
+    out = _two_video_skill(tmp_path, apify, _gemini()).run(
+        VideoAlgorithmInput(query="新宿 ランチ", max_videos=2), ctx=SkillContext()
+    )
+    assert (
+        len(apify.calls) == 1
+    )  # DL 経路全滅でも request 全体で 1 run（個別 max_videos=1 の抜け道なし）
+    via = sorted(video.acquired_via for video in out.videos)
+    assert via == ["", "apify"]
+    cover_only = next(video for video in out.videos if video.acquired_via == "")
+    assert cover_only.error == "動画取得失敗・サムネのみ軽量分析"
+
+
+def test_wallclock_budget_skips_fallback_and_degrades(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from teamagent.skills.video_algorithm import thumbnails
+
+    monkeypatch.setenv(ENV_FLAG, "1")
+    # 残り壁時計（30s）< 1 run に要る予算（既定 150s + 余裕）→ Apify を呼ばず cover-only へ
+    monkeypatch.setenv("VIDEO_ALGORITHM_APIFY_WALLCLOCK_S", "30")
+    monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: b"\xff\xd8\xff\xe0jpegdata")
+    apify = _FakeApify({_URL: _MP4, _URL2: _MP4})
+    out = _two_video_skill(tmp_path, apify, _gemini()).run(
+        VideoAlgorithmInput(query="新宿 ランチ", max_videos=2), ctx=SkillContext()
+    )
+    assert apify.calls == []
+    assert all(video.error == "動画取得失敗・サムネのみ軽量分析" for video in out.videos)
+
+
+def test_budget_object_takes_until_cap_then_refuses() -> None:
+    from teamagent.skills.video_algorithm.skill import _ApifyFallbackBudget
+
+    clock = [0.0]
+    budget = _ApifyFallbackBudget(max_videos=2, wallclock_s=240, monotonic=lambda: clock[0])
+    assert budget.try_take(180) == (True, "")
+    assert budget.try_take(180) == (True, "")
+    assert budget.try_take(180) == (False, "cap")
+    clock[0] = 100.0  # 残り 140s < 180s → 壁時計で拒否（cap より先に判定）
+    assert budget.try_take(180) == (False, "wallclock")
+    assert budget.remaining_s() == 140.0

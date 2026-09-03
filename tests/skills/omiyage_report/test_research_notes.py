@@ -300,3 +300,56 @@ def test_submit_carries_research_notes_into_deck_plan_and_audit() -> None:
     assert json.loads(str(row["request_summary"]))["research_notes_chars"] == len(
         OmiyageReportSubmitInput(research_notes=_NOTES).research_notes
     )
+
+
+# ---------------------------------------------------------------------------
+# レビュー指摘（PR #375）: 制御文字で編集用 PPTX の XML が壊れる / 出典 URL 内の「オーガニック」/
+# 120 字切り詰め
+# ---------------------------------------------------------------------------
+
+
+def test_xml_illegal_control_chars_are_stripped_but_tab_is_kept() -> None:
+    raw = "- 要点\x00A\x01\x0b\x0c\x1f https://x.com/a/status/1\r\n- 要点\tB https://x.com/a/status/2\r"
+    cleaned = OmiyageReportSubmitInput(research_notes=raw).research_notes
+    assert cleaned == "- 要点A https://x.com/a/status/1\n- 要点\tB https://x.com/a/status/2"
+    assert not any(ord(ch) < 0x20 and ch not in "\t\n" for ch in cleaned)
+    # 資料の行にも制御文字が残らない（fmt/ooxml の escape は制御文字を通すため、入口で落とす）
+    adopted, _ = parse_research_notes(cleaned)
+    assert adopted[0].text == "要点A"
+
+
+def test_organic_word_only_in_source_url_still_gets_footnote_without_q2() -> None:
+    # 競合軸が取得失敗 → Q2（#PR 比較・定義注記の初出）が無い構成。URL だけに「オーガニック」が
+    # 含まれても fmt の pr_labels ゲート（D の全セル走査）を通ること。
+    notes = "- 検索面の勢力図（上位10件） https://x.com/search?q=オーガニック"
+    plan = build_deck_plan(
+        _measurement(with_failure=True),
+        None,
+        generated_on="2026-09-03",
+        search_depth=120,
+        research_notes=notes,
+    )
+    assert "Q2" not in [slide.q_number for slide in plan.slide_plan]
+    research = next(slide for slide in plan.slide_plan if "先行調査" in slide.heading)
+    assert isinstance(research.data, SlideDataD)
+    assert "オーガニック" not in research.data.rows[0][0]  # 本文には無く URL にだけある
+    assert "#PR等の表記が確認できない投稿" in research.footnote
+    validate_deck_content(json.loads(plan.model_dump_json()), load_fmt_spec())  # 失敗しない
+
+
+def test_research_text_is_truncated_to_120_chars() -> None:
+    long_text = "あ" * 200
+    adopted, dropped = parse_research_notes(f"- {long_text} https://x.com/a/status/1")
+    assert dropped == 0
+    assert len(adopted[0].text) == 120
+    assert adopted[0].text == "あ" * 120
+    plan = build_deck_plan(
+        _measurement(),
+        None,
+        generated_on="2026-09-03",
+        search_depth=120,
+        research_notes=f"- {long_text} https://x.com/a/status/1",
+    )
+    research = next(slide for slide in plan.slide_plan if "先行調査" in slide.heading)
+    assert isinstance(research.data, SlideDataD)
+    assert len(research.data.rows[0][0]) == 120

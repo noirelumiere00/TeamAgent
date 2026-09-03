@@ -54,7 +54,7 @@ from teamagent.skills._shared.connect_intent import (
     ConnectIntent,
     detect_connect_intent_in_args,
 )
-from teamagent.skills.base import SkillContext
+from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
 
 # 二段返しの契約定数だけを持つ軽量モジュール（boto3/psycopg を引かない）。
 from teamagent.skills.search.two_stage import TWO_STAGE_CTX_KEY
@@ -376,10 +376,12 @@ def _build_async_job_poll(
     ctx: SkillContext,
 ) -> Callable[[], tuple[str, str]]:
     """対象 job の status skill を呼ぶ poll closure を作る（初期化も通知 thread 内）。"""
+    # 見張り経路の印を立てる: status skill 側はこの印を見て、課金を伴う補完（Apify）を
+    # 発火させない（LLM 照会との同時発火＝同じ URL の並列 run を作らない）。
     poll_ctx = SkillContext(
         request_id=ctx.request_id,
         user_id=ctx.user_id,
-        metadata=dict(ctx.metadata),
+        metadata={**ctx.metadata, ASYNC_JOB_POLL_METADATA_KEY: True},
     )
     status_skill: Any = None
 

@@ -16,7 +16,12 @@ from pydantic import BaseModel
 
 from teamagent.adapters.tiktok_s3_source import media_audit_principal_hash
 from teamagent.adapters.tiktok_task_store import TikTokTaskStore, new_job_id
-from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.base import (
+    ASYNC_JOB_POLL_METADATA_KEY,
+    BaseSkill,
+    SkillContext,
+    register,
+)
 from teamagent.skills.tiktok_acquire.apify_fallback import (
     ApifyVideoFallback,
     apify_fallback_enabled,
@@ -34,6 +39,12 @@ logger = structlog.get_logger(__name__)
 def _audit_principal_hash(ctx: SkillContext) -> str:
     requested_by = ctx.metadata.get("user_email") or ctx.user_id or "unknown"
     return media_audit_principal_hash(requested_by)
+
+
+def _is_async_poll(ctx: SkillContext) -> bool:
+    """完了見張り（30秒ポーリング）からの照会か。見張り経路では Apify 補完を発火させない。"""
+
+    return bool(ctx.metadata.get(ASYNC_JOB_POLL_METADATA_KEY))
 
 
 def _build_client_config(input: TikTokAcquireInput) -> dict[str, object]:
@@ -180,7 +191,7 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
         status = st.get("status", "unknown")
         log.info("tiktok_acquire_status", job_id=input.job_id, status=status)
         done_msg = "完了しました。posts/サムネ/動画の署名URLを返します。"
-        if status == "done" and apify_fallback_enabled():
+        if status == "done" and apify_fallback_enabled() and not _is_async_poll(ctx):
             st = self._apply_apify_fallback(st, input.job_id, ctx, log)
             counts = st.get("counts")
             apify_count = counts.get("videos_apify") if isinstance(counts, dict) else None

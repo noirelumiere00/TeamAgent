@@ -1,0 +1,52 @@
+{
+  "job_id": "tk_0123456789ab",
+  "status": "done",
+  "progress": null,
+  "counts": {"kw": 2, "posts": 4, "videos": 1, "per_kw": {"x": 2, "y": 2}},
+  "s3_prefix": "media-jobs/tk_0123456789ab/",
+  "posts_json_url": "https://signed/posts",
+  "config_json_url": "https://signed/config",
+  "manifest_url": "https://signed/manifest",
+  "videos": [
+    {
+      "pid": "p01001",
+      "kw": "x",
+      "downloaded": true,
+      "s3_key": "media-jobs/tk_0123456789ab/attempts/1/a/output/videos/p01001.mp4",
+      "url": "https://signed/p01001",
+      "thumb_url": "https://signed/thumb-p01001",
+      "tiktok_url": "https://www.tiktok.com/@a/video/1"
+    },
+    {
+      "pid": "p01002",
+      "kw": "x",
+      "downloaded": false,
+      "s3_key": null,
+      "url": null,
+      "thumb_url": "https://signed/thumb-p01002",
+      "tiktok_url": "https://www.tiktok.com/@a/video/2"
+    },
+    {
+      "pid": "p02001",
+      "kw": "y",
+      "downloaded": false,
+      "s3_key": null,
+      "url": null,
+      "thumb_url": "https://signed/thumb-p02001",
+      "tiktok_url": "https://www.tiktok.com/@b/video/3"
+    },
+    {
+      "pid": "p02002",
+      "kw": "y",
+      "downloaded": false,
+      "s3_key": null,
+      "url": null,
+      "thumb_url": "https://signed/thumb-p02002",
+      "tiktok_url": "https://www.tiktok.com/@b/video/4"
+    }
+  ],
+  "error_code": null,
+  "warnings": ["y:MEDIA_TIKTOK_RESULT_SHORTFALL"],
+  "shortfalls": [{"kw": "y", "requested": 10, "actual": 2}],
+  "message": "完了しました。posts/サムネ/動画の署名URLを返します。"
+}

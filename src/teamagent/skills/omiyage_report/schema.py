@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -17,6 +18,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 OMIYAGE_JOB_ID_PATTERN = r"^omy_[0-9a-f]{32}$"
 # 先行調査メモ（research_notes）の上限文字数（設計C・2026-09-03）。
 RESEARCH_NOTES_MAX_CHARS = 4000
+# XML 1.0 で許されない制御文字（NUL 等）。編集用 PPTX（OOXML）の slide XML を壊すため落とす
+# （実測: NUL 混入で ppt/slides/slide4.xml が ExpatError）。TAB / LF / CR は許容。
+_XML_ILLEGAL_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 MissingField = Literal["brand", "competitors", "keywords"]
 
@@ -81,8 +85,10 @@ class OmiyageReportSubmitInput(_StrictModel):
     @field_validator("research_notes")
     @classmethod
     def _normalize_research_notes(cls, value: str) -> str:
-        # 行単位で扱う（1行1要点 + 出典URL）。空行と行末空白だけ落とし、本文は変えない。
-        lines = [line.strip() for line in str(value).replace("\r\n", "\n").split("\n")]
+        # 行単位で扱う（1行1要点 + 出典URL）。XML 不許可の制御文字・空行・行末空白だけ落とし、
+        # 本文は変えない。
+        cleaned = _XML_ILLEGAL_CONTROL.sub("", str(value)).replace("\r\n", "\n").replace("\r", "\n")
+        lines = [line.strip() for line in cleaned.split("\n")]
         return "\n".join(line for line in lines if line)
 
     @field_validator("competitors")

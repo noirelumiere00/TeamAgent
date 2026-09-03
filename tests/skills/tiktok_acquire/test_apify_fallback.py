@@ -8,16 +8,19 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from teamagent.adapters.apify_client import ApifyError, TikTokVideoBytes
 from teamagent.media.contracts import S3ObjectRef, TikTokAcquireOperation, make_job_request
-from teamagent.skills.base import SkillContext
+from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
 from teamagent.skills.tiktok_acquire.apify_fallback import (
     ENV_FLAG,
     ApifyVideoFallback,
+    _job_lock,
     plan_fallback,
 )
 from teamagent.skills.tiktok_acquire.schema import TikTokAcquireStatusInput
@@ -121,10 +124,15 @@ class _FakeMediaClient:
         return self._request
 
     def find_staged(self, *, job_id: str, name: str, deadline_epoch_s: int) -> S3ObjectRef | None:
+        if name in self.staged:  # 本番同様、自分が置いた object（mp4 / 試行済みマーカー）も見える
+            return _ref(name, self.staged[name])
         return self.existing.get(name)
 
     def stage_bytes(self, *, job_id: str, name: str, body: bytes, content_type: str, **kw: Any):
-        assert job_id == _JOB and content_type == "video/mp4"
+        assert job_id == _JOB
+        # mp4 本体は video/mp4、試行済みマーカー（*.attempted）は text/plain で置かれる
+        expected = "text/plain" if name.endswith(".attempted") else "video/mp4"
+        assert content_type == expected, (name, content_type)
         self.staged[name] = body
         return _ref(name, body)
 
@@ -183,16 +191,36 @@ def _skill(
 # ---------------------------------------------------------------------------
 
 
-def test_flag_off_keeps_legacy_output_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+_LEGACY_FIXTURE = Path(__file__).parent / "fixtures" / "status_done_legacy_origin_dev.json"
+
+
+def test_flag_off_matches_origin_dev_legacy_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """OFF の出力は origin/dev（6da90f9）の status 写像で固定した JSON フィクスチャと完全一致。
+
+    フィクスチャは dev 側の ``TikTokAcquireStatusSkill.run``（store の dict を
+    TikTokAcquireStatusOutput の同名フィールドへそのまま写す・message は done 固定文）から
+    導いたもので、新コード同士の自己参照比較ではない。
+    """
     monkeypatch.delenv(ENV_FLAG, raising=False)
     apify = _FakeApify({url: _MP4 for url in _URL.values()})
     media = _FakeMediaClient(_request())
     skill, _ = _skill(_done_status(), apify=apify, media=media)
-    baseline = TikTokAcquireStatusSkill(store=_FakeStore(_done_status(), media))  # type: ignore[arg-type]
 
     out = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
-    expected = baseline.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
-    assert out.model_dump_json() == expected.model_dump_json()
+    expected = json.loads(_LEGACY_FIXTURE.read_text(encoding="utf-8"))
+    assert json.loads(out.model_dump_json()) == expected
+    assert apify.calls == []
+    assert media.staged == {}
+
+
+def test_flag_off_never_touches_apify_or_s3_and_adds_no_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(ENV_FLAG, raising=False)
+    apify = _FakeApify({url: _MP4 for url in _URL.values()})
+    media = _FakeMediaClient(_request())
+    skill, _ = _skill(_done_status(), apify=apify, media=media)
+    out = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
     assert apify.calls == []
     assert media.staged == {}
     assert all("acquired_via" not in row for row in out.videos)
@@ -228,7 +256,11 @@ def test_flag_on_fills_only_deficit_and_merges_with_provenance(
         )
     assert by_pid["p02002"]["downloaded"] is False
     assert by_pid["p02002"]["acquired_via"] is None
-    assert media.staged == {"apify-p01002.mp4": _MP4, "apify-p02001.mp4": _MP4}
+    assert media.staged["apify-p01002.mp4"] == _MP4
+    assert media.staged["apify-p02001.mp4"] == _MP4
+    # 3 本とも run の前に試行済みマーカーが置かれている（取れなかった p02002 も再試行しない）
+    for pid in ("p01002", "p02001", "p02002"):
+        assert f"apify-{pid}.attempted" in media.staged
     assert out.counts["videos"] == 3
     assert out.counts["videos_apify"] == 2
     assert "y:MEDIA_TIKTOK_RESULT_SHORTFALL" in out.warnings  # 従来の警告は保持
@@ -368,3 +400,62 @@ def test_plan_fallback_orders_by_keyword_then_display_and_caps() -> None:
         "p01002",
         "p02001",
     ]
+
+
+# ---------------------------------------------------------------------------
+# 二重課金の防波堤: 再照会で再試行しない / 見張り経路では発火しない / 同一 job は直列
+# ---------------------------------------------------------------------------
+
+
+def test_second_status_call_does_not_rerun_apify(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_FLAG, "1")
+    apify = _FakeApify({_URL["p01002"]: _MP4, _URL["p02001"]: _MP4})  # p02002 は取れない
+    media = _FakeMediaClient(_request())
+    skill, _ = _skill(_done_status(), apify=apify, media=media)
+
+    first = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
+    second = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
+    assert len(apify.calls) == 1  # 2 回目の status では Apify を呼ばない
+    assert first.counts["videos"] == 3 and second.counts["videos"] == 3
+    assert second.counts["videos_apify"] == 2  # S3 の既存を再利用
+    assert "p02002:APIFY_FALLBACK_SKIPPED:ATTEMPTED" in second.warnings
+    assert "p02002:APIFY_FALLBACK_MISSING" not in second.warnings
+    assert [row["acquired_via"] for row in second.videos] == ["worker", "apify", "apify", None]
+
+
+def test_async_poll_context_never_triggers_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(ENV_FLAG, "1")
+    apify = _FakeApify({url: _MP4 for url in _URL.values()})
+    media = _FakeMediaClient(_request())
+    skill, _ = _skill(_done_status(), apify=apify, media=media)
+    poll_ctx = SkillContext(
+        request_id="req-test",
+        user_id="U123",
+        metadata={"user_email": _EMAIL, ASYNC_JOB_POLL_METADATA_KEY: True},
+    )
+    out = skill.run(TikTokAcquireStatusInput(job_id=_JOB), poll_ctx)
+    assert apify.calls == []  # 見張り（30秒ポーリング）経路では課金を伴う補完を発火させない
+    assert media.staged == {}
+    assert all("acquired_via" not in row for row in out.videos)
+    assert out.counts["videos"] == 1
+
+
+def test_concurrent_apply_for_same_job_is_skipped_while_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ENV_FLAG, "1")
+    apify = _FakeApify({url: _MP4 for url in _URL.values()})
+    media = _FakeMediaClient(_request())
+    skill, _ = _skill(_done_status(), apify=apify, media=media)
+    lock = _job_lock(_JOB)
+    assert lock.acquire(blocking=False)  # 別スレッドの補完が走行中、を再現
+    try:
+        out = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
+    finally:
+        lock.release()
+    assert apify.calls == []
+    assert "APIFY_FALLBACK_SKIPPED:IN_PROGRESS" in out.warnings
+    assert out.counts["videos"] == 1
+    # 解放後は通常どおり補完できる（lock が漏れていない）
+    out2 = skill.run(TikTokAcquireStatusInput(job_id=_JOB), _ctx())
+    assert len(apify.calls) == 1 and out2.counts["videos"] == 4

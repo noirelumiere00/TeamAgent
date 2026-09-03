@@ -28,7 +28,9 @@ from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.adapters.tiktok_video_fallback import (
     ACQUIRED_VIA_APIFY,
     apify_fallback_enabled,
+    fallback_deadline_s,
     fallback_job_id,
+    fallback_max_videos,
     fill_missing_videos,
 )
 from teamagent.adapters.video_algorithm_cache import (
@@ -64,6 +66,54 @@ Proxy = Callable[[bytes, str], tuple[bytes, str]]
 _MAX_FIELD_RESETS = 8  # 寛容パース: 最大何フィールドまで default に戻して動画を救済するか
 _OVERFETCH_BUFFER = 4  # over-fetch: 目標+この本数を検索し DL/分析失敗を後続候補でバックフィル
 _MAX_POOL = 30  # 検索の絶対上限（スクレイパ実証済み。レート制限/遮断を踏み抜かない）
+
+# 二段構え（Apify 補完）の request 単位の予算。失敗 1 本ごとに同期 run（実測 ≈68s）を起こすため、
+# 集約本数（TIKTOK_APIFY_FALLBACK_MAX_VIDEOS）と壁時計（MCP ツール呼び出し 300s 天井の内側）の
+# 両方で頭打ちにし、DL 経路全滅でも tool 呼び出しが天井を超えないようにする。
+_APIFY_WALLCLOCK_ENV = "VIDEO_ALGORITHM_APIFY_WALLCLOCK_S"
+_APIFY_WALLCLOCK_DEFAULT_S = 240
+_APIFY_S3_MARGIN_S = 30
+
+
+def _apify_wallclock_budget_s() -> int:
+    raw = os.environ.get(_APIFY_WALLCLOCK_ENV)
+    try:
+        value = _APIFY_WALLCLOCK_DEFAULT_S if raw is None else int(raw)
+    except ValueError:
+        value = _APIFY_WALLCLOCK_DEFAULT_S
+    return min(900, max(30, value))
+
+
+class _ApifyFallbackBudget:
+    """request 単位の Apify 補完予算（本数の集約上限 + 壁時計）。ThreadPool 共有のため lock。"""
+
+    def __init__(
+        self,
+        *,
+        max_videos: int,
+        wallclock_s: int,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_videos = max(0, max_videos)
+        self._wallclock_s = wallclock_s
+        self._monotonic = monotonic
+        self._started = monotonic()
+        self._used = 0
+        self._lock = Lock()
+
+    def remaining_s(self) -> float:
+        return self._wallclock_s - (self._monotonic() - self._started)
+
+    def try_take(self, needed_s: int) -> tuple[bool, str]:
+        """1 本ぶんの枠を取る。取れなければ (False, 理由: wallclock | cap)。"""
+
+        with self._lock:
+            if self.remaining_s() < needed_s:
+                return False, "wallclock"
+            if self._used >= self._max_videos:
+                return False, "cap"
+            self._used += 1
+            return True, ""
 
 
 class _LeaseHeartbeat:
@@ -443,6 +493,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         request_id: str,
         downloader: Downloader | None = None,
         user_email: str = "",
+        apify_budget: _ApifyFallbackBudget | None = None,
     ) -> AnalyzedVideo:
         acquired_via = ""
         try:
@@ -450,7 +501,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         except Exception as e:  # 取得失敗 → 二段構え（opt-in）→ それでも無理ならサムネ縮退
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
             recovered = (
-                self._apify_fallback_fetch(meta, request_id=request_id, user_email=user_email)
+                self._apify_fallback_fetch(
+                    meta, request_id=request_id, user_email=user_email, budget=apify_budget
+                )
                 if apify_fallback_enabled()
                 else None
             )
@@ -586,15 +639,33 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         )
 
     def _apify_fallback_fetch(
-        self, meta: VideoMeta, *, request_id: str, user_email: str
+        self,
+        meta: VideoMeta,
+        *,
+        request_id: str,
+        user_email: str,
+        budget: _ApifyFallbackBudget | None = None,
     ) -> tuple[bytes, str] | None:
         """二段構え: DL経路の失敗分を mcp 側 Apify（clockworks）で補完する（失敗は None）。
 
-        共有ヘルパー ``fill_missing_videos`` を 1 本分だけ呼ぶ。media job 基盤がある環境では
-        取得物を ``media-jobs/<job>/input/apify-<key>.mp4`` へ置いて検査を通し（再照会時は
-        S3 の既存を再利用）、無い環境（ローカル runtime）では bytes をそのまま使う。
+        共有ヘルパー ``fill_missing_videos`` を 1 本分だけ呼ぶ。request 単位の ``budget``
+        （集約本数上限 TIKTOK_APIFY_FALLBACK_MAX_VIDEOS と壁時計 VIDEO_ALGORITHM_APIFY_WALLCLOCK_S）
+        から枠を取れない時は Apify を呼ばず None（cover-only 縮退へ）。
+        job_id には request_id が入るため、S3 の既存再利用と試行済みマーカーは **同一 request 内**
+        でだけ効く（別 request は毎回 Apify を叩き、費用は request 単位の予算で頭打ち）。
+        media job 基盤がある環境では取得物を ``media-jobs/<job>/input/apify-<key>.mp4`` へ置いて
+        検査を通し、無い環境（ローカル runtime）では bytes をそのまま使う。
         """
         from teamagent.adapters.media_job import MediaJobClient
+
+        needed_s = fallback_deadline_s()
+        deadline_s = needed_s
+        if budget is not None:
+            allowed, reason = budget.try_take(needed_s + _APIFY_S3_MARGIN_S)
+            if not allowed:
+                logger.info("video_algorithm_apify_fallback_skipped", rank=meta.rank, reason=reason)
+                return None
+            deadline_s = max(1, min(needed_s, int(budget.remaining_s()) - _APIFY_S3_MARGIN_S))
 
         media_client: Any | None = None
         try:
@@ -605,6 +676,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 {fingerprint[:16]: meta.url},
                 media_client=media_client,
                 apify=self._apify_fallback,
+                deadline_s=deadline_s,
                 request_id=request_id,
                 user_email=user_email,
                 max_videos=1,
@@ -1073,6 +1145,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # duration が全件 0（取得経路が尺を返さない等）の場合は従来どおり pool を使う＝
         # 「情報が無いだけ」で分析ゼロに落とす方が有害なため fail-open。
         candidates = analyzable or pool
+        # 二段構えの request 単位予算（集約本数 + 壁時計）。バックフィルの波を跨いで共有する。
+        apify_budget = _ApifyFallbackBudget(
+            max_videos=fallback_max_videos(),
+            wallclock_s=_apify_wallclock_budget_s(),
+        )
         # 上位から波状に分析し、成功が target 本に達するか候補が尽きるまで（再検索はしない）
         results: list[AnalyzedVideo] = []
         attempted = 0
@@ -1097,6 +1174,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             request_id=ctx.request_id,
                             downloader=call_downloader,
                             user_email=str(ctx.metadata.get("user_email") or ""),
+                            apify_budget=apify_budget,
                         ),
                         batch,
                     )

@@ -9,6 +9,10 @@
 - 不足の定義: 台帳の当初要求（videos_per_kw）× KW − worker が落とせた本数。候補は表示順で
   ``downloaded=False`` の投稿（worker の sort=save_rate/recent の選抜順は台帳から再現できないため
   表示順で補う・既知の制約）。1ジョブ上限 = 不足本数（最大 videos_per_kw × KW・env で更に頭打ち）。
+- 二重課金の防波堤（3 層）: (1) 見張りポーリング経路（``async_job_poll`` metadata）では発火しない
+  （skill 側）、(2) 同一 job の補完はプロセス内 lock で直列化し、走行中なら
+  ``APIFY_FALLBACK_SKIPPED:IN_PROGRESS`` で即返す、(3) 共有ヘルパーの試行済みマーカーで
+  1 (job, pid) につき Apify run は 1 回だけ（再照会では再試行しない）。
 - 冪等 / fail-open / allowlist / CostGuard / 出所（acquired_via）は共有ヘルパーの規律に従う。
 """
 
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import re
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -39,6 +44,24 @@ logger = structlog.get_logger(__name__)
 
 _S3_MARGIN_S = 30
 _SAFE_PID = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+# job_id ごとのプロセス内 lock。mcp は desiredCount=1（実測 2026-08-27）なので、これが
+# 「見張り（30秒ポーリング）と LLM 照会の同時発火」に対する系全体の排他になる。
+_JOB_LOCKS: dict[str, threading.Lock] = {}
+_JOB_LOCKS_GUARD = threading.Lock()
+_JOB_LOCKS_MAX = 256
+
+
+def _job_lock(job_id: str) -> threading.Lock:
+    with _JOB_LOCKS_GUARD:
+        lock = _JOB_LOCKS.get(job_id)
+        if lock is None:
+            if len(_JOB_LOCKS) >= _JOB_LOCKS_MAX:
+                for stale_id in [k for k, v in _JOB_LOCKS.items() if not v.locked()]:
+                    del _JOB_LOCKS[stale_id]
+            lock = threading.Lock()
+            _JOB_LOCKS[job_id] = lock
+        return lock
 
 
 @dataclass(frozen=True)
@@ -124,6 +147,38 @@ class ApifyVideoFallback:
         warnings: list[str] = list(out.get("warnings") or [])
         out["warnings"] = warnings
 
+        lock = _job_lock(job_id)
+        if not lock.acquire(blocking=False):
+            # 同じ job の補完が走行中（見張り × LLM 照会の同時発火）。待たずに従来結果を返す。
+            warnings.append("APIFY_FALLBACK_SKIPPED:IN_PROGRESS")
+            return out
+        try:
+            self._fill_locked(
+                out,
+                videos,
+                warnings,
+                job_id=job_id,
+                audit_principal_hash=audit_principal_hash,
+                request_id=request_id,
+                user_email=user_email,
+                log=log,
+            )
+        finally:
+            lock.release()
+        return out
+
+    def _fill_locked(
+        self,
+        out: dict[str, Any],
+        videos: list[dict[str, Any]],
+        warnings: list[str],
+        *,
+        job_id: str,
+        audit_principal_hash: str,
+        request_id: str,
+        user_email: str,
+        log: Any,
+    ) -> None:
         deadline_s = fallback_deadline_s()
         hard_cap = fallback_max_videos()
         deadline_epoch_s = int(self._clock()) + deadline_s + _S3_MARGIN_S
@@ -137,19 +192,19 @@ class ApifyVideoFallback:
             )
         except Exception as exc:
             warnings.append(f"APIFY_FALLBACK_SKIPPED:REQUEST_UNAVAILABLE:{safe_reason(exc)}")
-            return out
+            return
         operation = getattr(request, "operation", None)
         videos_per_kw = int(getattr(operation, "videos_per_kw", 0) or 0)
         keywords = [str(kw) for kw in (getattr(operation, "keywords", ()) or ())]
         if request is None or videos_per_kw <= 0 or not keywords:
             warnings.append("APIFY_FALLBACK_SKIPPED:NO_TARGET")
-            return out
+            return
 
         candidates = plan_fallback(
             videos, videos_per_kw=videos_per_kw, keywords=keywords, hard_cap=hard_cap
         )
         if not candidates:
-            return out
+            return
         by_pid = {str(row.get("pid") or ""): row for row in videos}
 
         outcome = fill_missing_videos(
@@ -184,9 +239,9 @@ class ApifyVideoFallback:
             candidates=len(candidates),
             fetched=outcome.fetched,
             reused=outcome.reused,
+            skipped_attempted=outcome.skipped_attempted,
             est_cost_usd=round(outcome.est_cost_usd, 4),
         )
-        return out
 
 
 __all__ = [

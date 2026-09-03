@@ -16,6 +16,9 @@
 - fail-open だが記録: どの段で失敗しても例外を外へ出さず、warnings に理由コードだけを残す
   （URL・トークン等の生文字列は載せない）。
 - 出所の明示: 呼び出し元は ``acquired_via``（worker | apify）を成果物メタに記録する。
+- 再試行上限: 1 (job, key) につき Apify run は **1 回だけ**。run の前に試行済みマーカー
+  ``apify-<key>.attempted`` を S3 に置き、取れなかった key は再照会でも再試行しない
+  （見張りポーリングと LLM 照会が同時に来ても同じ URL を並列 run しない）。
 """
 
 from __future__ import annotations
@@ -49,6 +52,10 @@ PRESIGN_S = 10 * 60
 # S3 操作の締切は Apify の壁時計予算 + presign/stage の余裕。
 _S3_MARGIN_S = 30
 STAGED_NAME_PREFIX = "apify-"
+# 試行済みマーカー（負のキャッシュ）。run の前に置くので、並行呼び出しの後続側は必ずこれを見る。
+ATTEMPTED_MARKER_SUFFIX = ".attempted"
+_ATTEMPTED_MARKER_BODY = b"apify-fallback attempted\n"
+_ATTEMPTED_MARKER_MAX_BYTES = 1024
 
 ACQUIRED_VIA_WORKER = "worker"
 ACQUIRED_VIA_APIFY = "apify"
@@ -103,6 +110,10 @@ def staged_name(key: str) -> str:
     return f"{STAGED_NAME_PREFIX}{key}.mp4"
 
 
+def attempted_name(key: str) -> str:
+    return f"{STAGED_NAME_PREFIX}{key}{ATTEMPTED_MARKER_SUFFIX}"
+
+
 @dataclass(frozen=True)
 class StagedVideo:
     """補完できた1本。``body`` は keep_body=True で取得直後のみ（S3 再利用時は None）。"""
@@ -127,6 +138,7 @@ class FallbackOutcome:
     requested: int = 0
     reused: int = 0
     fetched: int = 0
+    skipped_attempted: int = 0
 
 
 def _default_apify(cost_guard: Any | None) -> Any:
@@ -206,6 +218,18 @@ def fill_missing_videos(
             outcome.warnings.append(f"{key}:APIFY_FALLBACK_FAILED:S3_HEAD:{safe_reason(exc)}")
             continue
         if existing is None:
+            try:
+                attempted = media_client.find_staged(
+                    job_id=job_id, name=attempted_name(key), deadline_epoch_s=deadline_epoch_s
+                )
+            except Exception as exc:
+                outcome.warnings.append(f"{key}:APIFY_FALLBACK_FAILED:S3_HEAD:{safe_reason(exc)}")
+                continue
+            if attempted is not None:
+                # 既に 1 回試して取れなかった key は再試行しない（再照会ごとの二重課金を防ぐ）。
+                outcome.warnings.append(f"{key}:APIFY_FALLBACK_SKIPPED:ATTEMPTED")
+                outcome.skipped_attempted += 1
+                continue
             pending.append((key, url))
             continue
         outcome.videos.append(
@@ -223,6 +247,27 @@ def fill_missing_videos(
             )
         )
         outcome.reused += 1
+
+    if pending and media_client is not None:
+        # run の**前**に試行済みマーカーを置く。置けなかった key は run に含めない（保守側）。
+        fenced: list[tuple[str, str]] = []
+        for key, url in pending:
+            try:
+                media_client.stage_bytes(
+                    job_id=job_id,
+                    name=attempted_name(key),
+                    body=_ATTEMPTED_MARKER_BODY,
+                    content_type="text/plain",
+                    deadline_epoch_s=deadline_epoch_s,
+                    max_bytes=_ATTEMPTED_MARKER_MAX_BYTES,
+                )
+            except Exception as exc:
+                outcome.warnings.append(
+                    f"{key}:APIFY_FALLBACK_SKIPPED:MARKER_WRITE:{safe_reason(exc)}"
+                )
+                continue
+            fenced.append((key, url))
+        pending = fenced
 
     if pending:
         try:
@@ -313,6 +358,7 @@ def fill_missing_videos(
 __all__ = [
     "ACQUIRED_VIA_APIFY",
     "ACQUIRED_VIA_WORKER",
+    "ATTEMPTED_MARKER_SUFFIX",
     "DEADLINE_DEFAULT_S",
     "ENV_DEADLINE",
     "ENV_FLAG",
@@ -324,6 +370,7 @@ __all__ = [
     "FallbackOutcome",
     "StagedVideo",
     "apify_fallback_enabled",
+    "attempted_name",
     "fallback_deadline_s",
     "fallback_job_id",
     "fallback_max_videos",

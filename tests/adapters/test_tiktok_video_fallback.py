@@ -15,6 +15,7 @@ from teamagent.adapters.apify_client import ApifyError, TikTokVideoBytes
 from teamagent.adapters.tiktok_video_fallback import (
     ENV_FLAG,
     apify_fallback_enabled,
+    attempted_name,
     fallback_job_id,
     fill_missing_videos,
     staged_name,
@@ -103,6 +104,8 @@ class _FakeMediaClient:
         assert job_id == _JOB
         if name in self.head_fail:
             raise RuntimeError("MEDIA_ARTIFACT_HEAD_FAILED")
+        if name in self.staged:  # 本番同様、自分が置いた object（mp4 / 試行済みマーカー）も見える
+            return _ref(name, self.staged[name])
         return self.existing.get(name)
 
     def stage_bytes(
@@ -165,7 +168,9 @@ def test_fetches_stages_and_presigns_n_videos() -> None:
     assert apify.calls[0]["max_bytes"] == 30 * 1024 * 1024
     assert apify.calls[0]["deadline_s"] == 120
     assert apify.calls[0]["user_email"] == "a@example.com"
-    assert media.staged == {"apify-p1.mp4": _MP4, "apify-p2.mp4": _MP4}
+    assert media.staged["apify-p1.mp4"] == _MP4 and media.staged["apify-p2.mp4"] == _MP4
+    # run の前に試行済みマーカーが置かれている（再照会・並行呼び出しの二重 run 防止）
+    assert "apify-p1.attempted" in media.staged and "apify-p2.attempted" in media.staged
     for video in outcome.videos:
         assert video.ref is not None and video.ref.key == f"media-jobs/{_JOB}/input/{video.name}"
         assert video.url == f"https://signed.example/{video.ref.key}"
@@ -205,7 +210,11 @@ def test_apify_exception_is_fail_open_with_reason_codes() -> None:
     assert "APIFY_FALLBACK_FAILED:APIFY_RUN_FAILED" in outcome.warnings
     assert "p1:APIFY_FALLBACK_MISSING" in outcome.warnings
     assert "p2:APIFY_FALLBACK_MISSING" in outcome.warnings
-    assert media.stage_calls == []
+    # 置かれるのは試行済みマーカーだけ（mp4 は 1 本も置かれない）
+    assert sorted(call["name"] for call in media.stage_calls) == [
+        "apify-p1.attempted",
+        "apify-p2.attempted",
+    ]
 
 
 def test_zero_results_marks_every_pending_key_missing() -> None:
@@ -296,3 +305,66 @@ def test_env_defaults_bound_deadline_and_cap(monkeypatch: pytest.MonkeyPatch) ->
     assert apify.calls[0]["deadline_s"] == 240
     assert apify.calls[0]["urls"] == [_URL1]
     assert "p2:APIFY_FALLBACK_SKIPPED:CAP" in outcome.warnings
+
+
+# ---------------------------------------------------------------------------
+# 再試行上限（1 (job, key) につき Apify run は 1 回）と並行呼び出しの防波堤
+# ---------------------------------------------------------------------------
+
+
+def test_second_call_never_retries_a_key_already_attempted() -> None:
+    apify = _FakeApify({_URL1: _MP4})  # p2 は取れない
+    media = _FakeMediaClient()
+    first = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    assert [v.key for v in first.videos] == ["p1"]
+    assert "p2:APIFY_FALLBACK_MISSING" in first.warnings
+    assert attempted_name("p2") == "apify-p2.attempted"
+    assert "apify-p2.attempted" in media.staged  # 取れなかった key にも試行済みマーカーが残る
+
+    second = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    assert len(apify.calls) == 1  # 2 回目は Apify を呼ばない（p1 は S3 再利用・p2 は試行済み）
+    assert [(v.key, v.reused) for v in second.videos] == [("p1", True)]
+    assert second.skipped_attempted == 1
+    assert "p2:APIFY_FALLBACK_SKIPPED:ATTEMPTED" in second.warnings
+    assert "p2:APIFY_FALLBACK_MISSING" not in second.warnings
+    assert second.est_cost_usd == 0.0
+
+
+def test_marker_is_placed_before_run_even_when_apify_fails() -> None:
+    apify = _FakeApify({}, raise_exc=ApifyError("APIFY_TIMEOUT: 期限内に完了しませんでした"))
+    media = _FakeMediaClient()
+    fill_missing_videos(_JOB, {"p1": _URL1}, media_client=media, apify=apify, max_videos=10)
+    assert media.stage_calls[0]["name"] == "apify-p1.attempted"  # run より前にマーカー
+    assert media.stage_calls[0]["content_type"] == "text/plain"
+    # 失敗した run も「試行済み」＝再照会で再課金しない
+    again = fill_missing_videos(_JOB, {"p1": _URL1}, media_client=media, apify=apify, max_videos=10)
+    assert len(apify.calls) == 1
+    assert "p1:APIFY_FALLBACK_SKIPPED:ATTEMPTED" in again.warnings
+
+
+def test_marker_write_failure_keeps_key_out_of_the_run() -> None:
+    apify = _FakeApify({_URL1: _MP4, _URL2: _MP4})
+    media = _FakeMediaClient(stage_fail=frozenset({"apify-p1.attempted"}))
+    outcome = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    assert apify.calls[0]["urls"] == [_URL2]  # マーカーを置けない key は run に含めない（保守側）
+    assert "p1:APIFY_FALLBACK_SKIPPED:MARKER_WRITE:MEDIA_INPUT_SIZE_INVALID" in outcome.warnings
+    assert [v.key for v in outcome.videos] == ["p2"]
+
+
+def test_non_numeric_port_url_is_skipped_without_raising() -> None:
+    apify = _FakeApify({_URL1: _MP4})
+    outcome = fill_missing_videos(
+        _JOB,
+        {"p1": "https://www.tiktok.com:abc/@a/video/1", "p2": _URL1},
+        media_client=_FakeMediaClient(),
+        apify=apify,
+        max_videos=10,
+    )
+    assert "p1:APIFY_FALLBACK_SKIPPED:URL_NOT_ALLOWED" in outcome.warnings
+    assert apify.calls[0]["urls"] == [_URL1]  # 1 行の不正 URL でジョブ全体の補完は止まらない

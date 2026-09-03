@@ -96,11 +96,17 @@ def tiktok_post_url_allowed(url: str) -> bool:
     """
     parsed = urlsplit(str(url))
     host = (parsed.hostname or "").rstrip(".").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        # 非数値ポート（"tiktok.com:abc"）は urlsplit が ValueError を出す＝不許可として扱い、
+        # 例外を外へ出さない（不正 URL が 1 行混じってもジョブ全体の補完を止めない）。
+        return False
     if (
         parsed.scheme != "https"
         or parsed.username
         or parsed.password
-        or parsed.port not in (None, 443)
+        or port not in (None, 443)
         or parsed.fragment
     ):
         return False

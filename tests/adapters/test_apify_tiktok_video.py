@@ -94,6 +94,10 @@ def _items(*urls: str) -> list[dict[str, Any]]:
         ("https://vt.tiktok.com/ZSabc/", True),
         ("http://www.tiktok.com/@a/video/1", False),  # 平文
         ("https://www.tiktok.com:8443/@a/video/1", False),  # 非標準ポート
+        (
+            "https://www.tiktok.com:abc/@a/video/1",
+            False,
+        ),  # 非数値ポート（ValueError を外へ出さない）
         ("https://user:pw@www.tiktok.com/@a/video/1", False),  # 資格情報
         ("https://www.tiktok.com/@a/video/1#frag", False),  # fragment
         ("https://www.tiktok.com.evil.example/@a/video/1", False),  # suffix 偽装
