@@ -33,6 +33,11 @@ from typing import Any, ClassVar, Generic, TypeVar
 import structlog
 from pydantic import BaseModel
 
+# 非同期ジョブの完了見張り（mcp_gateway.async_job_notify・30秒ポーリング）が status skill を
+# 呼ぶときに ctx.metadata へ立てる印。見張り経路では課金を伴う外部取得の補完（Apify 等）を
+# 発火させない（LLM の照会と同時発火して同じ URL を並列 run しないため）。
+ASYNC_JOB_POLL_METADATA_KEY = "async_job_poll"
+
 logger = structlog.get_logger(__name__)
 
 TInput = TypeVar("TInput", bound=BaseModel)

@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from teamagent.skills.omiyage_report.contract import (
     CTA_TEXT,
@@ -69,6 +72,92 @@ _QUESTIONS: dict[str, str] = {
 
 class DeckPlanBuildError(RuntimeError):
     """契約準拠の計測JSONを組めない（必須軸が全滅など）。"""
+
+
+# ---------------------------------------------------------------------------
+# 先行調査メモ（research_notes・設計C 2026-09-03）
+# 調査ツール（x_voice_search / search_surface_check / web_research）の材料を、出典URL付きの
+# 行だけ「生活者の声／検索面の勢力図」の章として併記する。出典の無い主張は採用しない。
+# ---------------------------------------------------------------------------
+
+_RESEARCH_URL_RE = re.compile(r"https?://[^\s<>\"'()（）「」]+")
+_RESEARCH_BULLET = "-・*•●▪◦ \t"
+_RESEARCH_MAX_ROWS = 8
+_RESEARCH_MAX_TEXT = 120
+# fmt レンダラの pr_labels ゲートと同じ語彙・注記（「オーガニック」使用時に必須）。
+_ORGANIC_WORD = "オーガニック"
+_ORGANIC_NOTE = (
+    "本資料で「オーガニック」は#PR等の表記が確認できない投稿を指し、広告出稿の有無は断定しない。"
+)
+
+
+@dataclass(frozen=True)
+class ResearchNote:
+    text: str
+    source_url: str
+
+
+def parse_research_notes(notes: str) -> tuple[list[ResearchNote], int]:
+    """行ごとに (要点, 出典URL) を取り出す。出典URL（https）の無い行は落として件数だけ返す。"""
+    adopted: list[ResearchNote] = []
+    dropped = 0
+    for raw in notes.splitlines():
+        line = raw.strip().lstrip(_RESEARCH_BULLET).strip()
+        if not line:
+            continue
+        urls = [
+            url.rstrip(".,;:、。")
+            for url in _RESEARCH_URL_RE.findall(line)
+            if urlsplit(url).scheme == "https" and urlsplit(url).hostname
+        ]
+        if not urls:
+            dropped += 1
+            continue
+        text = _RESEARCH_URL_RE.sub(" ", line)
+        text = re.sub(r"[（(]\s*[)）]", " ", text)
+        text = text.replace("出典：", " ").replace("出典:", " ")
+        text = " ".join(text.split()).strip(" :：|｜-—–")
+        if not text:
+            dropped += 1
+            continue
+        adopted.append(ResearchNote(text=text[:_RESEARCH_MAX_TEXT], source_url=urls[0]))
+    return adopted, dropped
+
+
+def _research_slide(notes: str) -> Slide | None:
+    adopted, dropped = parse_research_notes(notes)
+    shown = adopted[:_RESEARCH_MAX_ROWS]
+    if not shown:
+        return None
+    tag_text = f"先行調査の要点{len(shown)}件（すべて出典URL付き）を併記。"
+    if dropped:
+        tag_text += f"出典URLの無い{dropped}件は採用していない。"
+    if len(adopted) > len(shown):
+        tag_text += f"紙面の都合で{len(adopted) - len(shown)}件は監査記録のみ。"
+    tag_text += "数値の実測は本資料の各ページで行い、本ページは調査ツールの一次情報への導線。"
+    # fmt レンダラの pr_labels ゲート（display_texts）は D の全セル＝出典 URL も走査するので、
+    # 要点本文だけでなく URL に含まれる場合も定義注記を付ける（Q2 が無い構成での失敗を防ぐ）。
+    footnote = (
+        _ORGANIC_NOTE
+        if any(_ORGANIC_WORD in note.text or _ORGANIC_WORD in note.source_url for note in shown)
+        else ""
+    )
+    return Slide(
+        type="D",
+        part=1,
+        q_number="",
+        heading="先行調査で見えた、生活者の声と検索面の勢力図",
+        lead=(
+            "調査ツール（X検索・検索面チェック・Web調査）で裏取りした要点と出典。"
+            "出典URLの無い主張は載せていない"
+        ),
+        footnote=footnote,
+        tag=SlideTag(variant="所見", text=tag_text),
+        data=SlideDataD(
+            columns=["要点（先行調査）", "出典"],
+            rows=[[note.text, note.source_url] for note in shown],
+        ),
+    )
 
 
 def _fmt_pct(value: float | None) -> str:
@@ -525,8 +614,13 @@ def build_deck_plan(
     generated_on: str,
     search_depth: int,
     issuer: str | None = None,
+    research_notes: str = "",
 ) -> DeckPlan:
-    """U1構成の計測JSONを組む。組める材料が無ければ DeckPlanBuildError。"""
+    """U1構成の計測JSONを組む。組める材料が無ければ DeckPlanBuildError。
+
+    ``research_notes``（任意）は出典URL付きの行だけを「先行調査」D スライドとして露出シェア
+    導入の直後に併記する（Q番号なし・H の再掲行には含めない＝U1 の 6 行上限を保つ）。
+    """
     if not measurement.competitors:
         raise DeckPlanBuildError("competitors are required for the deck brand pair")
 
@@ -550,8 +644,12 @@ def build_deck_plan(
         if "EG率" in slide.lead:
             q_slides[index] = slide.model_copy(update={"footnote": EG_RATE_FOOTNOTE})
             break
-    # U2脚注（EG率定義）は「EG率が初出するスライド」に1回だけ付ける。
-    # Q1 固定にしない（Q1 が軸取得失敗で省略されても脚注を失わない）。
+    # 先行調査（research_notes）は露出シェア導入（Q番号なし）の直後、無ければ先頭に置く。
+    content_slides = list(q_slides)
+    research_slide = _research_slide(research_notes) if research_notes else None
+    if research_slide is not None:
+        insert_at = 1 if content_slides[0].q_number == "" else 0
+        content_slides.insert(insert_at, research_slide)
 
     q_list = [
         QListItem(q_number=slide.q_number, question=_QUESTIONS[slide.q_number])
@@ -623,7 +721,7 @@ def build_deck_plan(
                 q_list=q_list or [QListItem(q_number="Q1", question=_QUESTIONS["Q1"])],
             ),
         ),
-        *q_slides,
+        *content_slides,
         _summary_slide(measurement, q_slides),
     ]
     return DeckPlan(
@@ -640,12 +738,24 @@ def build_audit(
     *,
     generated_on: str,
     search_depth: int,
+    research_notes: str = "",
 ) -> dict[str, Any]:
     """案件記録用の監査JSON（取得失敗一覧・解析失敗一覧・コスト・分母定義）。"""
     included = [slide.q_number for slide in (plan.slide_plan if plan else []) if slide.q_number]
     omitted = [q for q in _QUESTIONS if q not in included]
     selected, thumb_dropped = _select_top5_thumbs(measurement, analysis)
+    research_adopted, research_dropped = (
+        parse_research_notes(research_notes) if research_notes else ([], 0)
+    )
     return {
+        "research_notes": {
+            # 先行調査メモの採否（出典URLの無い行は採用しない・紙面超過分は記録のみ）
+            "provided": bool(research_notes),
+            "adopted": len(research_adopted),
+            "shown": min(len(research_adopted), _RESEARCH_MAX_ROWS),
+            "dropped_without_source": research_dropped,
+            "sources": [note.source_url for note in research_adopted],
+        },
         "thumbnails": {
             # Q5/表紙の実フレーム埋め込み状況（budget・未解析で落とした投稿は開示）
             "embedded": len(selected),
@@ -675,4 +785,11 @@ def build_audit(
     }
 
 
-__all__ = ["DeckPlanBuildError", "build_audit", "build_deck_plan", "top5_candidates"]
+__all__ = [
+    "DeckPlanBuildError",
+    "ResearchNote",
+    "build_audit",
+    "build_deck_plan",
+    "parse_research_notes",
+    "top5_candidates",
+]

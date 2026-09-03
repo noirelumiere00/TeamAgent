@@ -38,6 +38,7 @@ from teamagent.media.contracts import (
     TikTokClientConfig,
     artifact_manifest_sha256,
     make_job_request,
+    parse_job_request,
 )
 from teamagent.media.deadline import (
     DeadlineBudget,
@@ -142,6 +143,17 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     except ImportError:  # pragma: no cover - botocore はランタイム必須依存
         return False
     return isinstance(exc, (_BotoConnectionError, _BotoHTTPClientError))
+
+
+def _is_missing_object_error(exc: BaseException) -> bool:
+    """S3 HEAD の「無い」（404 / NoSuchKey / NotFound）か（それ以外は失敗として扱う）。"""
+
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code") or "")
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in ("404", "NoSuchKey", "NotFound") or status == 404
 
 
 class MediaJobError(RuntimeError):
@@ -345,6 +357,95 @@ class MediaJobClient:
         )
         self._verify_artifact_ref(ref, deadline_epoch_s=deadline_epoch_s)
         return ref
+
+    def find_staged(
+        self,
+        *,
+        job_id: str,
+        name: str,
+        deadline_epoch_s: int,
+    ) -> S3ObjectRef | None:
+        """``stage_bytes`` で置いた入力 object が既にあれば検証済み参照を返す（無ければ None）。
+
+        同じ job_id で後工程（status 照会 → 外部取得の補完）が繰り返されても、外部 SaaS を
+        二重実行しないための冪等キー。HEAD 応答から version/sha256/size/content_type を組み、
+        ``_assert_exact_artifact_response`` で core 自身の書き込み（Metadata.sha256）である
+        ことまで検査する。検査に通らない object は「無い」扱い（黙って別物を掴まない）。
+        """
+
+        self._assert_configured()
+        if not _JOB_ID_RE.fullmatch(job_id):
+            raise MediaJobError("MEDIA_JOB_ID_INVALID")
+        if not name or any(char not in "abcdefghijklmnopqrstuvwxyz0123456789-._" for char in name):
+            raise MediaJobError("MEDIA_INPUT_NAME_INVALID")
+        self._remaining(deadline_epoch_s)
+        key = f"media-jobs/{job_id}/input/{name}"
+        try:
+            response = self._call(
+                "s3",
+                deadline_epoch_s,
+                "head_object",
+                Bucket=self._bucket,
+                Key=key,
+                ChecksumMode="ENABLED",
+            )
+        except MediaJobError:
+            raise
+        except Exception as exc:
+            if _is_missing_object_error(exc):
+                return None
+            raise MediaJobError("MEDIA_ARTIFACT_HEAD_FAILED") from exc
+        metadata = response.get("Metadata")
+        digest = str(metadata.get("sha256") or "") if isinstance(metadata, dict) else ""
+        try:
+            ref = S3ObjectRef(
+                bucket=self._bucket,
+                key=key,
+                version_id=str(response.get("VersionId") or ""),
+                sha256=digest,
+                size=int(response.get("ContentLength") or 0),
+                content_type=str(response.get("ContentType") or ""),
+            )
+            self._assert_exact_artifact_response(ref, response)
+        except (ValueError, MediaJobError):
+            return None
+        return ref
+
+    def get_request(
+        self,
+        job_id: str,
+        *,
+        deadline_epoch_s: int,
+        expected_audit_principal_hash: str | None = None,
+    ) -> MediaJobRequest | None:
+        """台帳行の ``request_json``（dispatcher が固定した canonical request）を読む。
+
+        status 照会の後工程（例: tiktok_acquire の Apify フォールバック）が当初要求
+        （videos_per_kw / keywords 等）を知るために使う。所有者検査は get_result と同じ。
+        payload_sha256 の照合は ``parse_job_request`` が行う（改変された行は受け取らない）。
+        """
+
+        self._assert_configured()
+        response = self._call(
+            "dynamodb",
+            deadline_epoch_s,
+            "get_item",
+            TableName=self._table,
+            Key={"job_id": {"S": job_id}},
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if not item:
+            return None
+        self._assert_audit_owner(item, expected_audit_principal_hash)
+        body = item.get("request_json", {}).get("S", "")
+        try:
+            request = parse_job_request(body)
+        except Exception as exc:
+            raise MediaJobError("MEDIA_JOB_REQUEST_INVALID") from exc
+        if request.job_id != job_id:
+            raise MediaJobError("MEDIA_JOB_REQUEST_SCOPE_INVALID")
+        return request
 
     def submit(self, request: MediaJobRequest) -> str:
         """Send one canonical intent; the trusted dispatcher owns all ledger writes."""

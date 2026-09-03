@@ -82,7 +82,10 @@ class TikTokAcquireStatusOutput(BaseModel):
     manifest_url: str | None = Field(default=None, description="videos/manifest.json の署名URL")
     videos: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="各動画 {pid,kw,downloaded,s3_key(機械用),url(人向け),thumb_url,tiktok_url}",
+        description=(
+            "各動画 {pid,kw,downloaded,s3_key(機械用),url(人向け),thumb_url,tiktok_url}。"
+            "二段構え（USE_TIKTOK_APIFY_FALLBACK=1）時は acquired_via=worker|apify で出所を明示"
+        ),
     )
     error_code: str | None = None
     warnings: list[str] = Field(default_factory=list)

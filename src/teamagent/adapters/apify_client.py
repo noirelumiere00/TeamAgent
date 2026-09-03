@@ -25,6 +25,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import structlog
@@ -45,6 +46,8 @@ ACTOR_X_VERIFY = "xtracto~x-post-detail-scraper"
 ACTOR_IG_SEARCH = "apify~instagram-search-scraper"
 ACTOR_IG_HASHTAG = "apify~instagram-hashtag-scraper"
 ACTOR_TIKTOK_COMMENTS = "clockworks~tiktok-comments-scraper"
+# TikTok 投稿URL → mp4 実体（video download add-on）。tiktok_acquire の mcp 側フォールバック専用。
+ACTOR_TIKTOK_VIDEO = "clockworks~tiktok-scraper"
 
 # 概算単価（USD/結果1件）。課金の一次情報は Apify 側。台帳記帳と表示用の概算に使う。
 # 出典: x-reaction-research SKILL.md ＋ SNS検索スクレイパー検証レポート(2026-07-10)実測。
@@ -56,7 +59,18 @@ _ACTOR_PRICE_PER_ITEM: dict[str, float] = {
     ACTOR_IG_SEARCH: 0.0023,
     ACTOR_IG_HASHTAG: 0.0023,
     ACTOR_TIKTOK_COMMENTS: 0.001,
+    # result 0.003 + video download add-on 0.001（BRONZE）。
+    # 2026-09-02 パイロット実測: mp4 実体 5/5・68秒・$0.004/本。
+    ACTOR_TIKTOK_VIDEO: 0.004,
 }
+
+# Key-Value store の id / record key の形（REST パスへ埋めるため fail-close で検査する）。
+_KVS_ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
+_KVS_KEY_RE = re.compile(r"^[A-Za-z0-9!\-_.'()]{1,256}$")
+# clockworks の動画 record key（実測: video-<author>-<createTime>-<videoId>.mp4）。
+_KVS_VIDEO_KEY_RE = re.compile(r"^video-.+\.mp4$")
+_TIKTOK_VIDEO_ID_RE = re.compile(r"/video/(\d+)")
+_KVS_KEYS_PAGE_LIMIT = 1000
 
 # statusMessage にこれらが含まれ結果0件なら「プラン起因の沈黙0件」とみなす。
 _TIER_HINTS = ("plan", "tier", "paid", "subscription", "upgrade", "rental")
@@ -68,6 +82,40 @@ class ApifyError(RuntimeError):
 
 class _DeadlineExceededError(TimeoutError):
     """run_actor_sync の壁時計期限を使い切った（内部制御用）。"""
+
+
+class _RecordTooLargeError(RuntimeError):
+    """KVS record が呼び側の上限サイズを超えた（内部制御用・リトライしない）。"""
+
+
+def tiktok_post_url_allowed(url: str) -> bool:
+    """Apify に渡してよい TikTok 投稿 URL か（canonical HTTPS・tiktok.com 配下のみ）。
+
+    media worker の acquire allowlist（url_policy）より狭く、TikTok 以外は通さない。
+    Apify へ渡す URL は外部 SaaS へ出ていくので、ここで fail-close にする。
+    """
+    parsed = urlsplit(str(url))
+    host = (parsed.hostname or "").rstrip(".").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        # 非数値ポート（"tiktok.com:abc"）は urlsplit が ValueError を出す＝不許可として扱い、
+        # 例外を外へ出さない（不正 URL が 1 行混じってもジョブ全体の補完を止めない）。
+        return False
+    if (
+        parsed.scheme != "https"
+        or parsed.username
+        or parsed.password
+        or port not in (None, 443)
+        or parsed.fragment
+    ):
+        return False
+    return host == "tiktok.com" or host.endswith(".tiktok.com")
+
+
+def _tiktok_video_id(url: str) -> str:
+    m = _TIKTOK_VIDEO_ID_RE.search(url)
+    return m.group(1) if m else ""
 
 
 @dataclass(frozen=True)
@@ -122,6 +170,19 @@ class ApifyRunResult:
     status: str
     estimated_cost_usd: float
     warnings: list[str] = field(default_factory=list)
+    # run の既定 Key-Value store id（video download add-on の mp4 実体はここに置かれる）。
+    kvs_id: str = ""
+
+
+@dataclass(frozen=True)
+class TikTokVideoBytes:
+    """tiktok_download_videos の1本ぶん（mp4 実体 + 突合に使った id/key）。"""
+
+    post_url: str
+    video_id: str
+    kvs_key: str
+    body: bytes
+    content_type: str = "video/mp4"
 
 
 def _is_httpx_retryable(exc: BaseException) -> bool:
@@ -530,6 +591,7 @@ class ApifyClient:
             status = str(run.get("status", ""))
             status_message = ""
             dataset_id = str(run.get("defaultDatasetId", ""))
+            kvs_id = str(run.get("defaultKeyValueStoreId", ""))
             try:
                 while status in ("", "READY", "RUNNING"):
                     remaining = deadline_at - time.monotonic()
@@ -543,6 +605,7 @@ class ApifyClient:
                     status = str(run.get("status", ""))
                     status_message = str(run.get("statusMessage") or "")
                     dataset_id = str(run.get("defaultDatasetId", "")) or dataset_id
+                    kvs_id = str(run.get("defaultKeyValueStoreId", "")) or kvs_id
 
                 if status != "SUCCEEDED":
                     _settle_once(est_cost, 0)  # run は課金済みのことがある＝保守側で est 保持
@@ -598,6 +661,7 @@ class ApifyClient:
                 status=status,
                 estimated_cost_usd=actual_cost,
                 warnings=warnings,
+                kvs_id=kvs_id,
             )
         except ApifyError:
             raise  # 上の各ハンドラで settle 済み
@@ -834,11 +898,229 @@ class ApifyClient:
             )
         return comments, res.estimated_cost_usd
 
+    # ---- 低レベル: Key-Value store（動画 record の取得） -------------------------
+
+    def list_kvs_keys(self, store_id: str, *, deadline_s: int = _DEFAULT_DEADLINE_S) -> list[str]:
+        """Key-Value store のキー一覧（先頭1ページ・最大 1000 件）。"""
+        if not _KVS_ID_RE.fullmatch(store_id):
+            raise ApifyError("APIFY_KVS_ID_INVALID: key-value store id の形式が不正です")
+        deadline_at = time.monotonic() + max(0, deadline_s)
+        try:
+            body = self._request(
+                "GET",
+                f"/key-value-stores/{store_id}/keys",
+                deadline_at=deadline_at,
+                params={"limit": _KVS_KEYS_PAGE_LIMIT},
+            ).json()
+        except _DeadlineExceededError:
+            raise ApifyError(
+                "APIFY_TIMEOUT: key-value store のキー一覧が期限内に取れませんでした"
+            ) from None
+        except httpx.HTTPError as e:
+            raise ApifyError(
+                "APIFY_HTTP: key-value store のキー一覧取得に失敗しました "
+                f"(status={getattr(getattr(e, 'response', None), 'status_code', '?')})"
+            ) from None
+        data = _as_dict(body.get("data") if isinstance(body, dict) else None)
+        items = data.get("items")
+        keys: list[str] = []
+        if isinstance(items, list):
+            for it in items:
+                key = it.get("key") if isinstance(it, dict) else None
+                if isinstance(key, str) and key:
+                    keys.append(key)
+        return keys
+
+    def get_kvs_record(
+        self,
+        store_id: str,
+        key: str,
+        *,
+        max_bytes: int,
+        deadline_s: int = _DEFAULT_DEADLINE_S,
+    ) -> bytes:
+        """Key-Value store の record 本体を GET する（サイズ上限つき・token はヘッダ）。
+
+        ``max_bytes`` を超えたら読むのを止めて APIFY_RECORD_TOO_LARGE（メモリ・転送量の上限）。
+        リトライ方針は他の REST 呼び出しと同じ（_is_httpx_retryable・最大3回・壁時計内）。
+        """
+        if not _KVS_ID_RE.fullmatch(store_id):
+            raise ApifyError("APIFY_KVS_ID_INVALID: key-value store id の形式が不正です")
+        if not _KVS_KEY_RE.fullmatch(key):
+            raise ApifyError("APIFY_KVS_KEY_INVALID: record key の形式が不正です")
+        if max_bytes < 1:
+            raise ApifyError("APIFY_RECORD_BOUND_INVALID: max_bytes は 1 以上が必要です")
+        deadline_at = time.monotonic() + max(0, deadline_s)
+        headers = {"Authorization": f"Bearer {self._token}"}
+        url = f"{_API_BASE}/key-value-stores/{store_id}/records/{key}"
+
+        def _fetch() -> bytes:
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise _DeadlineExceededError
+            timeout = min(30.0, max(0.05, remaining))
+            with self._http.stream("GET", url, headers=headers, timeout=timeout) as resp:
+                resp.raise_for_status()
+                declared = resp.headers.get("content-length", "")
+                if declared.isdigit() and int(declared) > max_bytes:
+                    raise _RecordTooLargeError
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in resp.iter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise _RecordTooLargeError
+                    chunks.append(chunk)
+                    if time.monotonic() >= deadline_at:
+                        raise _DeadlineExceededError
+                return b"".join(chunks)
+
+        def _sleep_with_deadline(delay: float) -> None:
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise _DeadlineExceededError
+            time.sleep(min(delay, remaining))
+
+        try:
+            return call_with_retry(
+                _fetch,
+                is_retryable=_is_httpx_retryable,
+                policy=RetryPolicy(max_attempts=3, base_delay_s=1.0, max_delay_s=8.0),
+                sleep=_sleep_with_deadline,
+            )
+        except _RecordTooLargeError:
+            raise ApifyError(
+                f"APIFY_RECORD_TOO_LARGE: record が上限 {max_bytes} bytes を超えています"
+            ) from None
+        except _DeadlineExceededError:
+            raise ApifyError("APIFY_TIMEOUT: record の取得が期限内に終わりませんでした") from None
+        except httpx.HTTPStatusError as e:
+            raise ApifyError(
+                f"APIFY_HTTP: record の取得に失敗しました (status={e.response.status_code})"
+            ) from None
+        except httpx.HTTPError:
+            raise ApifyError("APIFY_HTTP: record の取得に失敗しました") from None
+
+    # ---- 型付き入口: TikTok 動画実体（tiktok_acquire の mcp 側フォールバック） ------
+
+    def tiktok_download_videos(
+        self,
+        post_urls: list[str],
+        *,
+        max_videos: int,
+        deadline_s: int = _DEFAULT_DEADLINE_S,
+        max_bytes_per_video: int = 30 * 1024 * 1024,
+        request_id: str = "apify",
+        user_email: str = "",
+    ) -> tuple[list[TikTokVideoBytes], float]:
+        """投稿URL群の mp4 実体を clockworks/tiktok-scraper（video download add-on）で取得する。
+
+        media worker（yt-dlp → browser）が落とせなかった分だけを補完する mcp 側フォールバック。
+        URL は tiktok.com 配下の canonical HTTPS のみ受け付け（それ以外は APIFY_URL_NOT_ALLOWED
+        で fail-close・run は起動しない）、件数は ``max_videos`` で打ち切る。run 完了後、
+        dataset items と KVS の ``video-*.mp4`` キーを video_id で突合し、上限サイズ内の
+        mp4（ftyp）だけを返す。CostGuard の記帳は run_actor_sync が行う。
+        戻り値: (取得できた動画, 概算コストUSD)。
+        """
+        if max_videos < 1:
+            return [], 0.0
+        wanted: list[str] = []
+        seen: set[str] = set()
+        for raw_url in post_urls:
+            url = str(raw_url).strip()
+            if not url:
+                continue
+            if not tiktok_post_url_allowed(url):
+                raise ApifyError(
+                    "APIFY_URL_NOT_ALLOWED: tiktok.com 配下の HTTPS URL 以外は Apify に渡せません"
+                )
+            if url in seen:
+                continue
+            seen.add(url)
+            wanted.append(url)
+        wanted = wanted[:max_videos]
+        if not wanted:
+            return [], 0.0
+
+        started = time.monotonic()
+        res = self.run_actor_sync(
+            ACTOR_TIKTOK_VIDEO,
+            {"postURLs": wanted, "shouldDownloadVideos": True, "shouldDownloadCovers": False},
+            max_items=len(wanted),
+            deadline_s=deadline_s,
+            request_id=request_id,
+            user_email=user_email,
+        )
+        if not res.kvs_id:
+            logger.warning(
+                "apify_tiktok_video_kvs_missing", request_id=request_id, run_id=res.run_id
+            )
+            return [], res.estimated_cost_usd
+
+        # dataset items は要求URL→video_id の補助（短縮URL等で正規表現が効かない時）。
+        id_by_url: dict[str, str] = {}
+        for it in res.items:
+            vid = str(_first(it, "id", "videoId", default="") or "")
+            web = str(_first(it, "webVideoUrl", "url", default="") or "")
+            if vid and web:
+                id_by_url[web] = vid
+
+        def _remaining() -> int:
+            return max(1, int(deadline_s - (time.monotonic() - started)))
+
+        keys = [
+            key
+            for key in self.list_kvs_keys(res.kvs_id, deadline_s=_remaining())
+            if _KVS_VIDEO_KEY_RE.match(key)
+        ]
+        videos: list[TikTokVideoBytes] = []
+        for url in wanted:
+            vid = _tiktok_video_id(url) or id_by_url.get(url, "")
+            if not vid:
+                logger.info("apify_tiktok_video_id_unresolved", request_id=request_id)
+                continue
+            key = next((k for k in keys if k.endswith(f"-{vid}.mp4")), None)
+            if key is None:
+                logger.info(
+                    "apify_tiktok_video_record_missing", request_id=request_id, video_id=vid
+                )
+                continue
+            try:
+                body = self.get_kvs_record(
+                    res.kvs_id,
+                    key,
+                    max_bytes=max_bytes_per_video,
+                    deadline_s=_remaining(),
+                )
+            except ApifyError as e:
+                logger.warning(
+                    "apify_tiktok_video_record_failed",
+                    request_id=request_id,
+                    video_id=vid,
+                    error=str(e)[:80],
+                )
+                continue
+            # 取得物は mp4（ISO BMFF: 先頭 box の type が ftyp）だけを採用する＝捏造も混入もしない。
+            if len(body) < 12 or body[4:8] != b"ftyp":
+                logger.warning("apify_tiktok_video_not_mp4", request_id=request_id, video_id=vid)
+                continue
+            videos.append(TikTokVideoBytes(post_url=url, video_id=vid, kvs_key=key, body=body))
+        logger.info(
+            "apify_tiktok_videos_done",
+            request_id=request_id,
+            requested=len(wanted),
+            fetched=len(videos),
+            est_cost_usd=res.estimated_cost_usd,
+            latency_s=round(time.monotonic() - started, 1),
+        )
+        return videos, res.estimated_cost_usd
+
 
 __all__ = [
     "ACTOR_IG_HASHTAG",
     "ACTOR_IG_SEARCH",
     "ACTOR_TIKTOK_COMMENTS",
+    "ACTOR_TIKTOK_VIDEO",
     "ACTOR_X_PERIOD",
     "ACTOR_X_SEARCH",
     "ACTOR_X_SEARCH_FALLBACK",
@@ -847,5 +1129,7 @@ __all__ = [
     "ApifyError",
     "ApifyRunResult",
     "IgPost",
+    "TikTokVideoBytes",
     "XPost",
+    "tiktok_post_url_allowed",
 ]
