@@ -325,10 +325,224 @@ function canonicalInvocationId(value) {
   return normalized && INVOCATION_ID_RE.test(normalized) ? normalized : null;
 }
 
-function block(reason) {
+// ── 拒否の観測性と利用者向け診断行（2026-09-03 実測） ─────────────────────────
+// 実測（OpenClaw の EFS 上のセッション記録 166 ファイル・tool call 363 件を読み取り専用の
+// Fargate プローブで集計）:
+//   83 件（23%）が before_tool_call で block（toolResult details.status="blocked",
+//   deniedReason="plugin-before-tool-call"）。内訳は
+//     `_user_context must be a plain object`                     72
+//     `trusted Slack run identity is missing or stale`             9
+//     `declared channel_id does not match the bound ingress`       2
+//   全滅セッション（その run の tool call が全部 block）が 7 本以上。ツールも問わない
+//   （oauth_connect / search / calendar_event / tiktok_* / mail_summary / slack_summary …）。
+// それでも CloudWatch にはこの plugin の warn が 14 日間 1 行も無かった。理由は単純で、
+// signToolCall だけ logger を受け取っておらず（register の before_tool_call だけが
+// api.logger を渡していなかった）、block 経路は 1 行も書いていなかった。
+// 利用者側にはブロックされた toolResult を見たモデルの自作回答（「技術的な問題」
+// 「管理者へお問い合わせ」）だけが届き、原因が誰にも見えていなかった。
+//
+// ここで直すのは 2 つ:
+//   (1) 利用者へ: block 文の末尾に固定の診断行 `診断: CONNECT-P<nn> <時刻 JST>` を付ける。
+//       SOUL(#380) が「診断: 行は一字も変えず提示」を規定しているのでそのまま転送される。
+//   (2) 管理者へ: 拒否ごとに必ず 1 行ログを出す。値は載せず「形」だけ（id_shape）。
+// コード体系の流儀は src/teamagent/connect_diagnostics.py（ConnectDiag / DIAG_SPECS）に
+// 合わせ、意味・ログの引き方・対処は docs/runbooks/connect_diagnostics.md の P コード節が正本。
+// 系統 P = plugin（OpenClaw の before_tool_call・本人特定 plugin）。
+export const BLOCK_DIAG = Object.freeze({
+  // 母艦ネイティブのツール（message/filesystem/session 系）は署名対象外なので常に拒否。
+  NATIVE_TOOL_DENIED: "CONNECT-P01",
+  // event と ctx のツール名が食い違う / mail_draft の権威が無い。
+  TOOL_NAME_BINDING: "CONNECT-P02",
+  // run の束縛が無い・古い（`trusted Slack run identity is missing or stale` を含む）。
+  RUN_BINDING: "CONNECT-P03",
+  // toolCallId の束縛が無い・再生（replay）。
+  INVOCATION_BINDING: "CONNECT-P04",
+  // session/channel の束縛（`declared channel_id does not match the bound ingress` を含む）。
+  SESSION_OR_CHANNEL_BINDING: "CONNECT-P05",
+  // `_user_context` の形が不正（unwrap しても直らなかった場合）。
+  USER_CONTEXT_SHAPE: "CONNECT-P06",
+  // plugin 内部の署名失敗（nonce 生成・claim 鋳造）。利用者操作では直らない。
+  SIGNING_FAILED: "CONNECT-P07",
+});
+
+// connect_diagnostics.py の admin_name() と同じ既定・同じ env 名。
+const ADMIN_NAME_ENV = "CONNECT_ADMIN_NAME";
+const DEFAULT_ADMIN_NAME = "小俣";
+
+function adminForwardHint(adminName) {
+  return `解決しない場合は、次の 1 行をそのまま管理者（${adminName}）へ送ってください:`;
+}
+
+// 利用者に届く block 文。1 行目は従来どおりの理由、そのあとに転送用の 2 行。
+// user id・本文・URL は載せない（G7）。管理者は runId ではなくコード＋時刻で突合する。
+export function formatBlockReason(reason, code, nowMs, adminName = DEFAULT_ADMIN_NAME) {
+  return (
+    `${PLUGIN_ID}: ${reason}\n` +
+    `${adminForwardHint(adminName)}\n` +
+    `診断: ${code} ${formatJstMinute(nowMs)}`
+  );
+}
+
+function isPlainObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+// ── 拒否ログに載せてよい「形」だけの手掛かり（G7） ───────────────────────────
+// 値（Slack user id・channel id・ts）は出さず、先頭 1 文字や構造の有無だけを出す。
+// Enterprise Grid の `W…` user id など、想定外の id 形で拒否が出ていないかを
+// 本番ログから値を見ずに切り分けるためのもの。
+const ID_SHAPE_TOKEN_RE = /^[A-Za-z][A-Za-z0-9]{8,}$/u;
+
+function shapeOfSlackId(value) {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  const trimmed = value.trim();
+  return ID_SHAPE_TOKEN_RE.test(trimmed) ? trimmed[0].toUpperCase() : "other";
+}
+
+// channel は `C0B0PQD83N2` / `user:U09…` / `c0b0pqd83n2:thread:<ts>` / `slack` の
+// いずれも来る。`:thread:` を落とし、最後のセグメントの先頭 1 文字だけを見る。
+function shapeOfChannel(value) {
+  if (typeof value !== "string" || value.trim() === "") return "absent";
+  const stripped = value.trim().replace(SLACK_SESSION_THREAD_SUFFIX_RE, "");
+  const tail = stripped.split(":").pop() ?? "";
+  return ID_SHAPE_TOKEN_RE.test(tail) ? tail[0].toUpperCase() : "other";
+}
+
+export function idShape(fields) {
+  const parts = [];
+  if (Object.hasOwn(fields, "sender")) {
+    parts.push(`sender:${shapeOfSlackId(fields.sender)}`);
+  }
+  if (Object.hasOwn(fields, "channel")) {
+    parts.push(`channel:${shapeOfChannel(fields.channel)}`);
+  }
+  if (Object.hasOwn(fields, "message")) {
+    const message = fields.message;
+    parts.push(
+      `message:${
+        typeof message !== "string" || message.trim() === ""
+          ? "absent"
+          : SLACK_TS_RE.test(message.trim())
+            ? "ts"
+            : "other"
+      }`,
+    );
+  }
+  if (Object.hasOwn(fields, "session")) {
+    const session = fields.session;
+    parts.push(
+      `session:${
+        typeof session !== "string" || session.trim() === ""
+          ? "absent"
+          : session.includes(":thread:")
+            ? "thread"
+            : "plain"
+      }`,
+    );
+  }
+  if (Object.hasOwn(fields, "team")) {
+    const team = fields.team;
+    parts.push(
+      `team:${
+        typeof team !== "string" || team.trim() === ""
+          ? "absent"
+          : normalizeSlackId(team, SLACK_TEAM_RE) === fields.expectedTeam
+            ? "match"
+            : "mismatch"
+      }`,
+    );
+  }
+  return `id_shape=${parts.join(",")}`;
+}
+
+// この plugin の観測ログはすべてここを通る。
+// 一次検証の結論は docs/design/connect_third_layer_defense.md §11（file:line つき）。
+// logger 側の到達が logging 設定（consoleLevel / OPENCLAW_LOG_LEVEL）に左右されるため、
+// 拒否の観測をその設定に依存させない目的で console にも同じ 1 行を書く。
+// 出してよいのは理由コード・件数・形（id_shape）だけ。本文・URL・Slack user id・
+// channel id・claim・bearer は載せない（G7）。
+// 詳細トレースの env。既定 OFF。ON にすると「hook が呼ばれた事実」と、
+// 従来は無言で return していた全脱出経路が 1 行ずつ出る。
+// 常時出すと通常の会話 1 通ごとに数行増える（not_connect_request が毎回出る）ため、
+// 事故の切り分け中だけ OC のタスク定義で `TEAMAGENT_CALLER_IDENTITY_TRACE=1` を注入する。
+const TRACE_ENV = "TEAMAGENT_CALLER_IDENTITY_TRACE";
+
+export function emitPluginLog(logger, level, message) {
+  const line = `${PLUGIN_ID}: ${message}`;
+  logger?.[level]?.(line);
+  if (level === "warn") console.warn(line);
+  else console.info(line);
+}
+
+// ── ツール引数の二重包みを剥がす（2026-09-03 実測・本 PR の主眼） ─────────────
+// モデル（Bedrock jp.anthropic.claude-haiku-4-5-20251001-v1:0）が tool の引数を
+// もう一段包んで送る癖があり、実測 363 件中 76 件がこの形だった:
+//   {"arguments":{"_user_context":{…}}}                               74 件
+//   {"name":"teamagent__oauth_connect","arguments":{…}}                2 件
+// この形は `_user_context` がトップに無いので `_user_context must be a plain object`
+// で block され、利用者には「連携できない」としか見えていなかった（72 件がこれ）。
+// セッションを作り直しても再発するので履歴汚染ではなくモデル側の癖と見る。
+//
+//   (a) トップのキーが `arguments` 1 つだけで、その値がプレーンオブジェクト → その値を採用
+//   (b) キー集合が {name, arguments} で `name` が呼び出し中のツール名
+//       （`teamagent__<tool>` または `<tool>`）と一致し、`arguments` がプレーンオブジェクト
+//       → `arguments` を採用
+//   (c) 上記を最大 2 段まで再帰。2 段剥がしてもまだ包みなら、剥がさず元のまま返す
+//       （＝3 段以上は従来どおり block。診断 P06）
+//   (d) それ以外は無変更（同じオブジェクト参照をそのまま返す＝バイト同一）
+//
+// 信頼境界は動かない: unwrap したあとも `_user_context` は mintCallerClaim が
+// authoritative な署名済み値で上書きするため、利用者・モデル由来の `_user_context` は
+// 元々すべて破棄される。ここで剥がすのは「どの階層を検査するか」だけ。
+const TOOL_ARGUMENTS_UNWRAP_MAX_DEPTH = 2;
+
+export function unwrapToolArguments(params, toolName) {
+  const acceptedNames = new Set();
+  if (typeof toolName === "string" && toolName !== "") {
+    acceptedNames.add(toolName);
+    const canonical = canonicalToolName(toolName);
+    if (canonical !== null) acceptedNames.add(canonical);
+  }
+  const wrapperOf = value => {
+    if (!isPlainObject(value)) return null;
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === "arguments" && isPlainObject(value.arguments)) {
+      return { kind: "arguments", inner: value.arguments };
+    }
+    if (
+      keys.length === 2 &&
+      keys.includes("name") &&
+      keys.includes("arguments") &&
+      isPlainObject(value.arguments) &&
+      typeof value.name === "string" &&
+      acceptedNames.has(value.name)
+    ) {
+      return { kind: "name_arguments", inner: value.arguments };
+    }
+    return null;
+  };
+
+  let current = params;
+  const kinds = [];
+  for (let depth = 0; depth < TOOL_ARGUMENTS_UNWRAP_MAX_DEPTH; depth += 1) {
+    const wrapper = wrapperOf(current);
+    if (wrapper === null) break;
+    kinds.push(wrapper.kind);
+    current = wrapper.inner;
+  }
+  // 包みでなかった、または 2 段剥がしてもまだ包み（3 段以上）→ 無変更で返す。
+  if (kinds.length === 0 || wrapperOf(current) !== null) {
+    return { params, depth: 0, shape: null };
+  }
   return {
-    block: true,
-    blockReason: `${PLUGIN_ID}: ${reason}`,
+    params: current,
+    depth: kinds.length,
+    shape: [...new Set(kinds)].join("+"),
   };
 }
 
@@ -678,6 +892,16 @@ export function createCallerIdentityPlugin({
   if (!expectedTeamId) {
     fail("SLACK_TEAM_ID must be a canonical Slack T ID");
   }
+  // 診断行の転送先。connect_diagnostics.admin_name() と同じ env 名・同じ既定。
+  const adminName =
+    (typeof env[ADMIN_NAME_ENV] === "string" ? env[ADMIN_NAME_ENV].trim() : "") ||
+    DEFAULT_ADMIN_NAME;
+  // 既定 OFF。ON のときだけ「hook が呼ばれた事実」と無言の脱出経路を 1 行ずつ出す。
+  const traceEnabled = String(env[TRACE_ENV] ?? "").trim() === "1";
+  function emitTrace(logger, message) {
+    if (!traceEnabled) return;
+    emitPluginLog(logger, "warn", message);
+  }
   // 層1 の MCP 接続情報。bearer が無い環境では層1 だけを畳み、層2/3 は生かす
   // （署名経路そのものは bearer に依存しないので fail させない）。
   const rawBearer = env.TEAMAGENT_MCP_BEARER;
@@ -864,11 +1088,19 @@ export function createCallerIdentityPlugin({
       if (!messageId) missing.push("messageId");
       if (suppliedRunIds.length > 0 && !runId) missing.push("runId");
       const mismatch = teamId && teamId !== expectedTeamId;
-      logger?.warn?.(
-        `${PLUGIN_ID}: rejected incomplete, conflicting, or foreign Slack ingress identity` +
-          ` (missing=[${missing.join(",")}]` +
+      emitPluginLog(
+        logger,
+        "warn",
+        "inbound rejected reason=incomplete_or_foreign" +
+          ` missing=[${missing.join(",")}]` +
           `${mismatch ? ` foreignTeam=${teamId} expected=${expectedTeamId}` : ""}` +
-          ` suppliedRunIds=${suppliedRunIds.length})`,
+          ` suppliedRunIds=${suppliedRunIds.length}` +
+          ` ${idShape({
+            sender: senderId,
+            channel: channelId,
+            message: messageId,
+            session: sessionKey,
+          })}`,
       );
       return;
     }
@@ -880,6 +1112,16 @@ export function createCallerIdentityPlugin({
     // 本文そのものは保持せず、判定結果の真偽だけを ingress に載せる（G7）。
     const connectRequest =
       typeof event?.content === "string" && isShortConnectRequest(event.content);
+    // 層1 の `not_connect_request` を切り分けるための「長さだけ」の手掛かり（G7）。
+    // 本文は保持しない。normalizeConnectRequest は走査上限を超える長文で null を返すので、
+    // 正規化後の長さ（null＝上限超）と生の長さの両方を持つ。片方だけだと
+    // 「空だった」と「長すぎて判定対象外だった」が区別できない。
+    const normalizedContent =
+      typeof event?.content === "string" ? normalizeConnectRequest(event.content) : null;
+    const connectNormalizedLength =
+      normalizedContent === null ? null : [...normalizedContent].length;
+    const connectContentLength =
+      typeof event?.content === "string" ? [...event.content].length : null;
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -895,18 +1137,39 @@ export function createCallerIdentityPlugin({
       sessionSha256: createHash("sha256").update(sessionKey, "utf8").digest("hex"),
       receivedAtMs: nowMs,
       connectRequest,
+      connectNormalizedLength,
+      connectContentLength,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
       pendingByMessage.delete(pendingKey);
-      logger?.warn?.(`${PLUGIN_ID}: rejected conflicting Slack message identity`);
+      emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_message_identity");
       return;
     }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
       pendingByMessage.delete(pendingKey);
-      logger?.warn?.(`${PLUGIN_ID}: rejected conflicting Slack run binding`);
+      emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_run_binding");
+      return;
     }
+    // 受理側も観測できないと、層1 の no_candidate_ingress が
+    // 「受信を記録できていない」のか「照合が外れた」のか区別できない（2026-09-03）。
+    emitTrace(
+      logger,
+      `inbound recorded connect_request=${connectRequest}` +
+        ` normalized_len=${connectNormalizedLength === null ? "na" : connectNormalizedLength}` +
+        ` content_len=${connectContentLength === null ? "na" : connectContentLength}` +
+        ` bound_run=${runId ? "yes" : "no"}` +
+        ` pending=${pendingByMessage.size} bound=${ingressByRun.size}` +
+        ` ${idShape({
+          sender: senderId,
+          channel: channelId,
+          message: messageId,
+          session: sessionKey,
+          team: teamId,
+          expectedTeam: expectedTeamId,
+        })}`,
+    );
   }
 
   async function rememberMailDraftAction(ctx, logger) {
@@ -1100,9 +1363,40 @@ export function createCallerIdentityPlugin({
   // ここで短い連携依頼を検出したら、既存の署名 claim を oauth_connect 向けに鋳造して
   // mcp の /mcp へ直接 tools/call し、戻り値の message をそのまま Slack へ返す。
   // 失敗はすべて「次の層へ落とす」（undefined を返す＝モデル経路へ進み層2/3 が受ける）。
+  // ── 層1 の脱出経路をすべて観測可能にする（2026-09-03 実測） ─────────────────
+  // 事故: OC TD:43 着地直後、DM の「連携」で層1 が発火せずモデル経路になった
+  // （OC ログに `[agents/tool-policy] tool policy removed 26 tool(s)` ＝モデル起動）。
+  // 層1 が handled を返していればモデルは起動しない。しかしどの条件で落ちたかは
+  // ログから判別できなかった: fallthrough() を通る 3 経路以外はすべて無言の
+  // `return undefined` だったため。以後、全脱出経路に理由を付ける。
+  //   outcome=skipped     … 前提条件で層1 に入らなかった（trace ON のときだけ出す）
+  //   outcome=fallthrough … 層1 に入ったが実行できずモデル経路へ渡した（常時出す）
+  //   outcome=answered    … 層1 が handled で応答した（常時出す）
+  // `layer1 entered` が 1 行も出なければ、before_agent_reply hook 自体が
+  // 呼ばれていないと確定できる（上流側の問題と切り分けられる）。
   async function answerShortConnectRequest(_event, ctx, logger) {
-    if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") return undefined;
-    if (ctx?.trigger !== "user") return undefined;
+    const invocationId =
+      `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
+    const skipped = (reason, extra = "") => {
+      emitTrace(
+        logger,
+        `connect deterministic path invocation=${invocationId} ` +
+          `outcome=skipped reason=${reason}${extra ? ` ${extra}` : ""}`,
+      );
+      return undefined;
+    };
+    // hook が呼ばれた事実そのもの。provider / trigger は識別子ではないので値を出す。
+    emitTrace(
+      logger,
+      `layer1 entered provider=${String(ctx?.messageProvider ?? "none").toLowerCase()} ` +
+        `trigger=${String(ctx?.trigger ?? "none")}`,
+    );
+    if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") {
+      return skipped("not_slack_provider");
+    }
+    if (ctx?.trigger !== "user") {
+      return skipped("trigger_not_user", `trigger=${String(ctx?.trigger ?? "none")}`);
+    }
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
     // ctx.chatId は identity fields（get-reply:5610-5615）が NativeChannelId ?? ChatId
@@ -1110,7 +1404,20 @@ export function createCallerIdentityPlugin({
     // channelId 側（`user:U…` 由来）と食い違いうる。会話照合には channelId 系だけを使い、
     // chatId は DM の正準 `D…` を得る用途にだけ使う。
     const channelId = consistentSlackChannel([ctx?.conversationId, ctx?.channelId, ctx?.channel]);
-    if (!sessionKey || !senderId || !channelId) return undefined;
+    if (!sessionKey || !senderId || !channelId) {
+      const missing = [];
+      if (!sessionKey) missing.push("sessionKey");
+      if (!senderId) missing.push("senderId");
+      if (!channelId) missing.push("channelId");
+      return skipped(
+        "missing_session_or_sender_or_channel",
+        `missing=[${missing.join(",")}] ${idShape({
+          sender: ctx?.senderId,
+          channel: ctx?.channelId,
+          session: ctx?.sessionKey,
+        })}`,
+      );
+    }
     const nowMs = now();
     pruneState(nowMs);
     // message_received が runId を伴うと ingress は既に run へ束縛され pending から消える
@@ -1123,24 +1430,41 @@ export function createCallerIdentityPlugin({
       seen.add(ingress.pendingKey);
       candidates.push(ingress);
     }
-    const invocationId =
-      `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
     const fallthrough = reason => {
       // G7: 本文・URL・Slack 識別子は載せない。
-      logger?.warn?.(
-        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
+      emitPluginLog(
+        logger,
+        "warn",
+        `connect deterministic path invocation=${invocationId} ` +
           `outcome=fallthrough reason=${reason}`,
       );
       return undefined;
     };
-    if (candidates.length === 0) return undefined;
+    if (candidates.length === 0) {
+      // 受信が 1 件も照合できない。rememberInbound の `inbound recorded` 行の有無で
+      // 「記録できていない」のか「照合が外れた」のかを切り分ける。
+      return skipped(
+        "no_candidate_ingress",
+        `pending=${pendingByMessage.size} bound=${ingressByRun.size}`,
+      );
+    }
     // 同じ会話に新鮮な受信が 2 件以上あると、どの本文が「連携」かを権威的に決められない。
     // 無言で不発にせず、観測可能な理由でモデル経路へ渡す（bindAgentRun も同じ理由で拒否する）。
     if (candidates.length > 1) return fallthrough("ambiguous_ingress");
     const ingress = candidates[0];
-    if (ingress.connectRequest !== true) return undefined;
+    if (ingress.connectRequest !== true) {
+      // 語彙不一致。本文は出さず、正規化後の文字数だけ（G7）。
+      const lengthOf = value => (value === null || value === undefined ? "na" : value);
+      return skipped(
+        "not_connect_request",
+        `normalized_len=${lengthOf(ingress.connectNormalizedLength)}` +
+          ` content_len=${lengthOf(ingress.connectContentLength)}`,
+      );
+    }
     // 同じ受信に対して 2 度は鋳造しない（重複発行・往復の防止）。
-    if (ingress.connectDeterministicAttempted === true) return undefined;
+    if (ingress.connectDeterministicAttempted === true) {
+      return skipped("already_attempted");
+    }
     ingress.connectDeterministicAttempted = true;
     // mcp の claim 検証は channel に実 Slack 会話 id（^[CDG]…）を要求する
     // （caller_claim.py: _SLACK_CHANNEL_RE）。DM の内部別名 `DM:U…` では通らないので、
@@ -1194,8 +1518,10 @@ export function createCallerIdentityPlugin({
       for (const [boundRunId, bound] of ingressByRun) {
         if (bound === ingress) ingressByRun.delete(boundRunId);
       }
-      logger?.info?.(
-        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
+      emitPluginLog(
+        logger,
+        "info",
+        `connect deterministic path invocation=${invocationId} ` +
           `outcome=answered tool_calls=1`,
       );
       return { handled: true, reply: { text: message } };
@@ -1249,16 +1575,29 @@ export function createCallerIdentityPlugin({
             })
             .join(",")}]`
         : "";
-      logger?.warn?.(
-        `${PLUGIN_ID}: rejected incomplete authoritative agent run` +
-          ` (missing=[${missing.join(",")}]${resolution})`,
+      emitPluginLog(
+        logger,
+        "warn",
+        `bind_agent_run rejected reason=incomplete missing=[${missing.join(",")}]${resolution}` +
+          ` ${idShape({
+            sender: ctx?.senderId,
+            channel: ctx?.channelId,
+            session: ctx?.sessionKey,
+            team: ctx?.teamId,
+            expectedTeam: expectedTeamId,
+          })}`,
       );
       return;
     }
     const nowMs = now();
     pruneState(nowMs);
     if (rejectedRuns.has(runId)) {
-      logger?.warn?.(`${PLUGIN_ID}: authoritative agent run was already rejected`);
+      emitPluginLog(
+        logger,
+        "warn",
+        "bind_agent_run rejected reason=already_rejected" +
+          ` ${idShape({ sender: senderId, channel: channelId, session: sessionKey })}`,
+      );
       return;
     }
     const existing = ingressByRun.get(runId);
@@ -1269,7 +1608,12 @@ export function createCallerIdentityPlugin({
         existing.channelId !== channelId
       ) {
         rejectRun(runId, nowMs);
-        logger?.warn?.(`${PLUGIN_ID}: rejected mismatched repeated agent run`);
+        emitPluginLog(
+          logger,
+          "warn",
+          "bind_agent_run rejected reason=mismatched_repeat" +
+            ` ${idShape({ sender: senderId, channel: channelId, session: sessionKey })}`,
+        );
       }
       return;
     }
@@ -1322,10 +1666,13 @@ export function createCallerIdentityPlugin({
           ` matchSessionKey=${sk} matchSenderId=${sd} matchChannelId=${ch} fresh=${fresh}` +
           (ch === 0 ? ` runChannelId=${channelId} pendingChannelIds=[${seen}]` : "");
       }
-      logger?.warn?.(
-        `${PLUGIN_ID}: agent run has no unique fresh Slack message binding` +
-          ` (candidates=${candidates.length} pending=${pendingByMessage.size}` +
-          `${bindFailed ? " bindRunRefused=true" : ""}${mismatch})`,
+      emitPluginLog(
+        logger,
+        "warn",
+        "bind_agent_run rejected reason=no_unique_binding" +
+          ` candidates=${candidates.length} pending=${pendingByMessage.size}` +
+          `${bindFailed ? " bindRunRefused=true" : ""}${mismatch}` +
+          ` ${idShape({ sender: senderId, channel: channelId, session: sessionKey })}`,
       );
     }
   }
@@ -1352,23 +1699,60 @@ export function createCallerIdentityPlugin({
     return null;
   }
 
-  function signToolCall(event, ctx) {
+  // block は必ずここを通す（2026-09-03）。1 回の呼び出しで
+  //   ① 利用者向けの診断行つき blockReason を組み
+  //   ② 管理者向けに 1 行ログを出す（コードと id_shape だけ・値は載せない）
+  // ことを不可分にして、「拒否したのにログが 1 行も無い」状態を構造的に作れなくする。
+  function blockAndLog(reason, code, logger, shape) {
+    emitPluginLog(
+      logger,
+      "warn",
+      `before_tool_call blocked diagnostic=${code} ${shape}`,
+    );
+    return { block: true, blockReason: formatBlockReason(reason, code, now(), adminName) };
+  }
+
+  function signToolCall(event, ctx, logger) {
     const observedToolName = nonBlank(event?.toolName, 256);
     const contextToolName = nonBlank(ctx?.toolName, 256);
+    // 拒否ログに載せる「形」だけの手掛かり。値（user id / channel id / ts）は出さない。
+    const shape = () =>
+      idShape({
+        sender: ctx?.senderId,
+        channel: ctx?.channelId,
+        session: ctx?.sessionKey,
+        team: ctx?.teamId,
+        expectedTeam: expectedTeamId,
+      });
     if ([observedToolName, contextToolName].some(
       name => name && NATIVE_CALLER_BYPASS_TOOLS.has(name.toLowerCase()),
     )) {
-      return block("native message, filesystem, and session tools are denied");
+      return blockAndLog(
+        "native message, filesystem, and session tools are denied",
+        BLOCK_DIAG.NATIVE_TOOL_DENIED,
+        logger,
+        shape(),
+      );
     }
     const tool = canonicalToolName(observedToolName);
     if (tool === null) return undefined;
     if (ctx?.toolName !== event?.toolName) {
-      return block("authoritative tool name binding is missing or mismatched");
+      return blockAndLog(
+        "authoritative tool name binding is missing or mismatched",
+        BLOCK_DIAG.TOOL_NAME_BINDING,
+        logger,
+        shape(),
+      );
     }
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
     if (!eventRunId || !contextRunId || eventRunId !== contextRunId) {
-      return block("authoritative run binding is missing or mismatched");
+      return blockAndLog(
+        "authoritative run binding is missing or mismatched",
+        BLOCK_DIAG.RUN_BINDING,
+        logger,
+        shape(),
+      );
     }
     const eventToolCallId = canonicalInvocationId(event?.toolCallId);
     const contextToolCallId = canonicalInvocationId(ctx?.toolCallId);
@@ -1377,7 +1761,12 @@ export function createCallerIdentityPlugin({
       !contextToolCallId ||
       eventToolCallId !== contextToolCallId
     ) {
-      return block("authoritative tool invocation binding is missing or mismatched");
+      return blockAndLog(
+        "authoritative tool invocation binding is missing or mismatched",
+        BLOCK_DIAG.INVOCATION_BINDING,
+        logger,
+        shape(),
+      );
     }
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     // This is the same OpenClaw 2026.7.1 agent-hook ctx: conversationId is absent,
@@ -1392,7 +1781,12 @@ export function createCallerIdentityPlugin({
       ctx?.channel,
     ]);
     if (!sessionKey || !channelId) {
-      return block("trusted Slack session or channel binding is missing");
+      return blockAndLog(
+        "trusted Slack session or channel binding is missing",
+        BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING,
+        logger,
+        shape(),
+      );
     }
     const nowMs = now();
     pruneState(nowMs);
@@ -1402,33 +1796,77 @@ export function createCallerIdentityPlugin({
         ? ACTION_CONTEXT_TTL_MS
         : INBOUND_CONTEXT_TTL_MS;
     if (!trusted || nowMs - trusted.receivedAtMs > trustedTtl) {
-      return block("trusted Slack run identity is missing or stale");
+      // 実測 2026-09-03 の 9 件。bindAgentRun 側の拒否（run が束縛できなかった）が
+      // ここに落ちてくるので、bindAgentRun の warn と時刻で突き合わせる。
+      return blockAndLog(
+        "trusted Slack run identity is missing or stale",
+        BLOCK_DIAG.RUN_BINDING,
+        logger,
+        shape(),
+      );
     }
     const trustedChannelMatches =
       trusted.channelId === channelId ||
       (Array.isArray(trusted.channelAliases) &&
         trusted.channelAliases.includes(channelId));
     if (!trusted.sessionKey || trusted.sessionKey !== sessionKey || !trustedChannelMatches) {
-      return block("tool context does not match the bound Slack run");
+      return blockAndLog(
+        "tool context does not match the bound Slack run",
+        BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING,
+        logger,
+        shape(),
+      );
     }
     const exactInvocationKey = invocationKey(eventRunId, eventToolCallId);
     if (consumedInvocations.has(exactInvocationKey)) {
-      return block("tool invocation replay rejected");
+      return blockAndLog(
+        "tool invocation replay rejected",
+        BLOCK_DIAG.INVOCATION_BINDING,
+        logger,
+        shape(),
+      );
     }
     if (trusted.ingressKind === "action") {
       if (tool !== MAIL_DRAFT_TOOL) {
-        return block("Slack mail action cannot authorize another tool");
+        return blockAndLog(
+          "Slack mail action cannot authorize another tool",
+          BLOCK_DIAG.TOOL_NAME_BINDING,
+          logger,
+          shape(),
+        );
       }
       if (trusted.actionToolCallId !== null) {
-        return block("Slack mail action was already consumed");
+        return blockAndLog(
+          "Slack mail action was already consumed",
+          BLOCK_DIAG.INVOCATION_BINDING,
+          logger,
+          shape(),
+        );
       }
     } else if (tool === MAIL_DRAFT_TOOL) {
-      return block("mail_draft requires an authoritative Slack button action");
+      return blockAndLog(
+        "mail_draft requires an authoritative Slack button action",
+        BLOCK_DIAG.TOOL_NAME_BINDING,
+        logger,
+        shape(),
+      );
+    }
+    // ── 二重包みの決定論 unwrap（引数検査より前）───────────────────────────
+    // ここより下（assertPlainObject / validateDeclaredContext）が「引数検査」なので、
+    // その手前で 1 度だけ正規化する。剥がせなければ無変更＝従来どおり block。
+    const unwrapped = unwrapToolArguments(event?.params, observedToolName);
+    if (unwrapped.depth > 0) {
+      // 識別子・本文・URL は載せない（G7）。形と段数だけ。
+      emitPluginLog(
+        logger,
+        "warn",
+        `unwrapped tool arguments (shape=${unwrapped.shape}, depth=${unwrapped.depth})`,
+      );
     }
     let params;
     let declaredContext;
     try {
-      const suppliedParams = assertPlainObject(event.params, "tool params");
+      const suppliedParams = assertPlainObject(unwrapped.params, "tool params");
       params =
         trusted.ingressKind === "action"
           ? {
@@ -1441,10 +1879,25 @@ export function createCallerIdentityPlugin({
         USER_CONTEXT_KEY,
       );
     } catch (error) {
-      return block(error instanceof Error ? error.message : "invalid tool params");
+      // 実測 2026-09-03 の 72 件（`_user_context must be a plain object`）はここ。
+      // unwrap を通してもなお直らなかった場合だけが残る。
+      return blockAndLog(
+        error instanceof Error ? error.message : "invalid tool params",
+        BLOCK_DIAG.USER_CONTEXT_SHAPE,
+        logger,
+        shape(),
+      );
     }
     const declarationError = validateDeclaredContext(declaredContext, trusted);
-    if (declarationError) return block(declarationError);
+    if (declarationError) {
+      // 実測 2026-09-03 の 2 件（`declared channel_id does not match the bound ingress`）。
+      return blockAndLog(
+        declarationError,
+        BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING,
+        logger,
+        shape(),
+      );
+    }
 
     const nonceBytes =
       trusted.ingressKind === "action"
@@ -1457,7 +1910,12 @@ export function createCallerIdentityPlugin({
             .subarray(0, 16)
         : randomBytesFn(16);
     if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
-      return block("secure nonce generation failed");
+      return blockAndLog(
+        "secure nonce generation failed",
+        BLOCK_DIAG.SIGNING_FAILED,
+        logger,
+        shape(),
+      );
     }
     let signed;
     try {
@@ -1471,7 +1929,12 @@ export function createCallerIdentityPlugin({
         nonceBytes,
       });
     } catch (error) {
-      return block(error instanceof Error ? error.message : "request binding failed");
+      return blockAndLog(
+        error instanceof Error ? error.message : "request binding failed",
+        BLOCK_DIAG.SIGNING_FAILED,
+        logger,
+        shape(),
+      );
     }
     consumedInvocations.set(exactInvocationKey, {
       runId: eventRunId,
@@ -1690,7 +2153,8 @@ export function createCallerIdentityPlugin({
       api.on("before_model_resolve", (event, ctx) => {
         bindAgentRun(event, ctx, api.logger);
       });
-      api.on("before_tool_call", (event, ctx) => signToolCall(event, ctx));
+      // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
+      api.on("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
       api.on("before_agent_finalize", (event, ctx) =>
         guardConnectUrlFabrication(event, ctx, api.logger),
       );

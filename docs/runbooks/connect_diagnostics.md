@@ -3,7 +3,7 @@
 作成: 2026-09-03。対象: 利用者から転送された **`診断: CONNECT-<系統><番号> <時刻 JST> <識別子> [<request_id>]`** の 1 行から、
 原因の特定 → ログの引き方 → 対処へ直行するための管理者向け手順。
 
-単一情報源はコード側の `src/teamagent/connect_diagnostics.py`（`DIAG_SPECS`）。この runbook の表と食い違ったらコード側が正。
+単一情報源はコード側。**S / I / L / T** 系統は `src/teamagent/connect_diagnostics.py`（`DIAG_SPECS`）、**P** 系統（OpenClaw plugin の `before_tool_call` 拒否）は `infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`。この runbook の表と食い違ったらコード側が正。
 
 > 連携の経路（2 段）: ① Slack で「連携」→ mcp `oauth_connect`（`src/teamagent/skills/oauth_connect/skill.py`）が本人専用リンクを発行
 > → ② 利用者が Google/Slack で許可 → connect-web の `/oauth2/callback` `/slack/oauth/callback`（`src/teamagent/connect_web/app.py`）が state 検証・token 交換・保存。
@@ -144,8 +144,98 @@ EOF
 5. `S06/I01*/I02/L01/T02` は利用者では直らない。ログを引いて env / Slack プロフィール / DB を直す。
 6. 直したら利用者に「連携」をもう一度送ってもらい、`connect_callback_ok` / `connect_slack_callback_ok` を確認して閉じる。
 
+
+## P コード（OpenClaw plugin の `before_tool_call` 拒否・2026-09-03 追加）
+
+**正本は plugin 側**の `infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`。
+P 系統は Python から発行しないため `connect_diagnostics.py` には載せない（体系と文言の流儀だけ揃えてある）。
+診断行に**識別子は付かない**（`診断: CONNECT-P03 2026-09-03 16:35 JST` の 2 要素だけ）。
+
+> なぜできたか（本番実測 2026-09-03）: セッション記録 166 ファイル・tool call 363 件のうち
+> **83 件（23%）**が `before_tool_call` で block されていたのに、この plugin の warn は
+> CloudWatch に 14 日間 1 行も出ていなかった。利用者にはブロックされた toolResult を見た
+> モデルの自作回答（「技術的な問題」「管理者へお問い合わせ」）だけが届いていた。
+> 内訳: `_user_context must be a plain object` 72 / `trusted Slack run identity is missing or stale` 9 /
+> `declared channel_id does not match the bound ingress` 2。
+
+| コード | 意味 | plugin 側の block 理由 | 利用者の対処 | 管理者の対処 |
+|---|---|---|---|---|
+| **P01** | 母艦ネイティブのツール（message / filesystem / session 系）は署名対象外なので常に拒否 | `native message, filesystem, and session tools are denied` | 別の言い方で頼み直す | 設計どおりの拒否。頻発するならモデルが teamagent 以外のツールを選んでいる＝プロンプト側 |
+| **P02** | ツール名の束縛が無い / 食い違う。`mail_draft` を Slack ボタン以外から呼んだ場合も含む | `authoritative tool name binding …` / `Slack mail action cannot authorize another tool` / `mail_draft requires an authoritative Slack button action` | 管理者へ | `mail_draft` はメール下書きのボタン経由でのみ通る。ボタンを押さずに依頼していないか |
+| **P03** | run の束縛が無い / 古い。**実測 9 件** | `authoritative run binding …` / `trusted Slack run identity is missing or stale` | もう一度送ってみる（10 分の TTL 切れなら復帰する） | 同時刻の `bind_agent_run rejected reason=…` を引く。`reason=no_unique_binding` なら受信と run の突合が崩れている |
+| **P04** | tool 呼び出し id の束縛が無い / 再生（replay） | `authoritative tool invocation binding …` / `tool invocation replay rejected` / `Slack mail action was already consumed` | もう一度送ってみる | 同じボタンを 2 回押した・上流が同じ toolCallId を再送した |
+| **P05** | session / channel の束縛が合わない。**実測 2 件** | `trusted Slack session or channel binding is missing` / `tool context does not match the bound Slack run` / `declared … does not match the bound ingress` / `declared Slack caller does not match …` | もう一度送ってみる | `id_shape` の `channel:` を見る。`other` なら会話 id を解決できていない（`bind_agent_run` の `resolve=[…]` と突合） |
+| **P06** | `_user_context` の形が不正（**unwrap しても直らなかった場合**）。**実測 72 件はここだったが、本 PR の unwrap で大半が解消される想定** | `_user_context must be a plain object` / `tool params must be a plain object` | もう一度送ってみる | 直前に `unwrapped tool arguments (…)` が出ているか確認。出ていて P06 なら 3 段以上の包み＝モデル側の新しい癖 |
+| **P07** | plugin 内部の署名失敗（nonce 生成 / claim 鋳造） | `secure nonce generation failed` / `request binding failed` | 利用者操作では直らない。管理者へ | `TEAMAGENT_CALLER_CLAIM_SECRET` / crypto まわり。P07 が出たら即エスカレーション |
+
+### ログの引き方（OpenClaw の CloudWatch ロググループ）
+
+plugin は logger と console の**両方**へ同じ 1 行を書く（console は stderr。awslogs は stdout / stderr を
+同じロググループへ送る）。したがって本番では 1 拒否につき 2 行出ることがある。
+
+```
+fields @timestamp, @message
+| filter @message like /teamagent-caller-identity:/
+| filter @message like /diagnostic=CONNECT-P/
+| sort @timestamp desc
+| limit 100
+```
+
+| 出る 1 行 | 意味 |
+|---|---|
+| `before_tool_call blocked diagnostic=CONNECT-P<nn> id_shape=…` | ツール呼び出しの拒否。診断行の時刻（分まで）と突合する |
+| `bind_agent_run rejected reason=incomplete\|already_rejected\|mismatched_repeat\|no_unique_binding …` | run の束縛失敗。この直後の tool 呼び出しが P03 になる |
+| `unwrapped tool arguments (shape=arguments\|name_arguments, depth=n)` | 二重包みを剥がした（拒否ではない）。件数の推移でモデル側の癖を追う |
+
+### 層1（決定論の連携応答）が発火しなかったときの引き方
+
+2026-09-03: OC TD:43 着地直後、DM の「連携」で層1 が発火せずモデル経路になったが、
+plugin のログが 1 行も無く原因を特定できなかった。以後、全脱出経路が観測できる。
+
+```
+fields @timestamp, @message
+| filter @message like /teamagent-caller-identity:/
+| filter @message like /layer1 entered|connect deterministic path/
+| sort @timestamp desc
+| limit 100
+```
+
+| 出た行 | 読み方 |
+|---|---|
+| （`layer1 entered` が 1 行も無い） | `before_agent_reply` hook 自体が呼ばれていない。plugin の条件分岐ではなく上流側 |
+| `layer1 entered provider=… trigger=…` | hook は呼ばれた。次の行の `outcome=` を見る |
+| `outcome=skipped reason=not_slack_provider` | Slack 以外の provider |
+| `outcome=skipped reason=trigger_not_user trigger=…` | 利用者発話ではない（heartbeat 等）。実 trigger 値が併記される |
+| `outcome=skipped reason=missing_session_or_sender_or_channel missing=[…] id_shape=…` | ctx から会話を特定できない。`missing=` と `id_shape` を見る |
+| `outcome=skipped reason=no_candidate_ingress pending=N bound=M` | 受信と照合できない。**同時刻の `inbound recorded` / `inbound rejected` を見る**（下） |
+| `outcome=skipped reason=not_connect_request normalized_len=N content_len=M` | 語彙不一致。`N` が想定より大きければ本文が長い（層1 は 12 文字以下のみ）。`N=na` は走査上限超の長文で、`M` に生の文字数が出る |
+| `outcome=skipped reason=already_attempted` | 同じ受信に 2 度目。設計どおり |
+| `outcome=fallthrough reason=…` | 層1 に入ったが実行できなかった（`no_canonical_channel` / `no_mcp_bearer` / `no_fetch` / `claim_failed` / HTTP 失敗）。**既定でも出る** |
+| `outcome=answered tool_calls=1` | 層1 が応答した（正常） |
+
+`inbound recorded connect_request=… normalized_len=… pending=… bound=… id_shape=…` が
+出ていて層1 が `no_candidate_ingress` なら**照合**の問題。出ていなければ受信そのものが
+記録できていない（`inbound rejected reason=…` を見る）。
+
+**`skipped` と `inbound recorded` は既定では出ない。** ノイズを避けるため
+`TEAMAGENT_CALLER_IDENTITY_TRACE=1` を OC のタスク定義に注入したときだけ出る
+（block / fallthrough / answered / rejected は常時）。切り分けが済んだら外す。
+
+### `id_shape` の読み方（値は載せない・G7）
+
+| 項目 | 値 | 意味 |
+|---|---|---|
+| `sender:` | `U` / `W` / `other` / `absent` | Slack user id の先頭 1 文字。**`W` は Enterprise Grid の id**（想定外・要調査） |
+| `channel:` | `C` / `D` / `G` / `U` / `other` / `absent` | 会話 id の先頭 1 文字。`U` は DM の別名経路、`other` は解決できていない |
+| `message:` | `ts` / `other` / `absent` | Slack の ts 形式（`1785206176.940189`）かどうか |
+| `session:` | `thread` / `plain` / `absent` | セッション鍵に `:thread:` を含むか（チャンネルの app_mention は必ず含む） |
+| `team:` | `match` / `mismatch` / `absent` | `SLACK_TEAM_ID` と一致するか |
+
+`before_tool_call` の ctx には `senderId` が無い（上流 2026.7.1 の実測形状）ため、そこでは `sender:absent` になる。
+`W…` の切り分けは `bind_agent_run` 側の 1 行で行う。
+
 ## 関連
 
-- コード: `src/teamagent/connect_diagnostics.py`（コード表の正）、`src/teamagent/connect_web/app.py`（`_connect_failure`）、`src/teamagent/mcp_gateway/server.py`（`_identity_rejected`）、`src/teamagent/skills/oauth_connect/skill.py`（`_diag`）
+- コード: `src/teamagent/connect_diagnostics.py`（S/I/L/T のコード表の正）、`infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`（**P コード表の正**）、`src/teamagent/connect_web/app.py`（`_connect_failure`）、`src/teamagent/mcp_gateway/server.py`（`_identity_rejected`）、`src/teamagent/skills/oauth_connect/skill.py`（`_diag`）
 - OpenClaw 指示: `infra/openclaw/SOUL.md`「連携の失敗は『診断:』行をそのまま出す」（OC 再ビルドは別便）
 - 根治側: PR #376 `/oauth2/start/{state}`（path 形式リンク・`USE_OAUTH_START_LINKS` 既定 OFF）

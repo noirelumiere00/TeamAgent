@@ -2838,3 +2838,275 @@ def test_deterministic_path_never_uses_another_senders_inbound() -> None:
     outcome = _caller_identity_report()["connect_l1_other_sender_pending"]
     assert outcome["handled"] is False
     assert outcome["toolCallCount"] == 0
+
+
+# ── ツール引数の二重包みを剥がす（2026-09-03） ──────────────────────────────
+# 本番実測（OpenClaw の EFS 上のセッション記録を読み取り専用の Fargate プローブで集計）:
+#   セッション記録 166 ファイル・tool call 363 件のうち 83 件（23%）が before_tool_call で
+#   block（toolResult details.status="blocked" / deniedReason="plugin-before-tool-call"）。
+#   内訳は `_user_context must be a plain object` 72 / `trusted Slack run identity is missing
+#   or stale` 9 / `declared channel_id does not match the bound ingress` 2。
+#   引数の包み形は {"arguments":{"_user_context":{…}}} が 74 件、
+#   {"name":"teamagent__oauth_connect","arguments":{…}} が 2 件。
+#   ツールを問わず発生（oauth_connect 105 / search 95 / calendar_event 19 / tiktok_* 31 …）で、
+#   その run の tool call が全部 block された「全滅セッション」が 7 本以上あった。
+#   モデル（Bedrock jp.anthropic.claude-haiku-4-5-20251001-v1:0）はブロックされた toolResult を
+#   見て「技術的な問題」「管理者へお問い合わせ」と自作回答するため、利用者には
+#   「連携できない」としか見えていなかった。
+
+
+def test_double_wrapped_tool_arguments_reach_the_tool_in_canonical_form() -> None:
+    """{"arguments":{…}} の二重包みが block されず、mcp へ正規形で届くこと。
+
+    実測 74 件の主犯。剥がしたあとも `_user_context` は authoritative な署名済み値で
+    上書きされるので、信頼境界は動かない（下の spoof テストで固定）。
+    """
+    wrapped = _caller_identity_report()["unwrap"]["single_arguments"]
+    assert wrapped["blocked"] is False, wrapped["blockReason"]
+    # 包みが剥がれ、ツール本来の引数が top に戻っていること。
+    assert wrapped["signedTop"] == {"query": "q"}
+    assert wrapped["signedKeys"] == ["_user_context", "query"]
+    # `_user_context` は plugin が鋳造した authoritative 値。
+    assert wrapped["signedContextKeys"] == [
+        "caller_claim",
+        "channel_id",
+        "slack_team_id",
+        "slack_user_id",
+    ]
+    assert wrapped["signedUserId"] == "U09CX1CCBLN"
+    assert wrapped["claimUser"] == "U09CX1CCBLN"
+
+
+def test_name_and_arguments_wrapper_is_unwrapped_for_any_tool() -> None:
+    """{"name":…,"arguments":{…}} 形も剥がれ、oauth_connect 以外でも効くこと。
+
+    実測 2 件は oauth_connect だったが、block は全ツールに散っている
+    （search 95 / calendar_event 19 / mail_summary 14 …）ので unwrap も全ツール共通。
+    """
+    report = _caller_identity_report()["unwrap"]
+    for case in ("name_and_arguments", "name_and_arguments_oauth"):
+        assert report[case]["blocked"] is False, (case, report[case]["blockReason"])
+        assert report[case]["signedUserId"] == "U09CX1CCBLN", case
+    assert report["name_and_arguments"]["signedTop"] == {"query": "q"}
+    # 2 段包みも剥がす（上限は 2 段）。
+    assert report["double_arguments"]["blocked"] is False
+    assert report["double_arguments"]["signedTop"] == {"query": "q"}
+
+
+def test_triple_wrapped_arguments_still_fail_closed_with_the_p06_diagnostic() -> None:
+    """3 段以上の包みは剥がさず従来どおり block（診断 P06）であること。
+
+    剥がす段数に上限を置かないと、入力面が「任意の深さの任意の構造」まで広がる。
+    """
+    triple = _caller_identity_report()["unwrap"]["triple_arguments"]
+    assert triple["blocked"] is True
+    assert triple["diagCode"] == "CONNECT-P06"
+
+
+def test_unwrap_does_not_move_the_trust_boundary() -> None:
+    """包みの中で別人を騙っても、包まない場合と同じく拒否されること。
+
+    unwrap が直すのは「どの階層を検査するか」だけで、検査そのものは 1 つも緩めない。
+    ここが緑のままでないと、二重包みが検査回避の抜け道になる。
+    """
+    report = _caller_identity_report()["unwrap"]
+    assert report["single_arguments_spoofed"]["blocked"] is True
+    assert report["plain_spoofed"]["blocked"] is True
+    # 包みの有無で拒否理由が変わらないこと（回避経路が生えていない証明）。
+    assert (
+        report["single_arguments_spoofed"]["diagCode"]
+        == report["plain_spoofed"]["diagCode"]
+        == "CONNECT-P05"
+    )
+
+
+def test_ordinary_tool_arguments_pass_through_the_unwrap_byte_identical() -> None:
+    """通常の引数は unwrap 前後でバイト同一（同一参照）であること。
+
+    正常系に触れないことが、この変更を「観測性の追加」に留める根拠になる。
+    """
+    unit = _caller_identity_report()["unwrap"]["unit"]
+    assert unit["plain_identical"] is True
+    assert unit["plain_depth"] == 0
+    assert unit["plain_shape"] is None
+    # 包みに見えるが包みでないものを剥がさないこと。
+    assert unit["wrong_name_identical"] is True, "別ツール名の arguments を横流ししている"
+    assert unit["extra_key_identical"] is True, "`arguments` 以外のキーが同居しても剥がしている"
+    assert unit["non_object_identical"] is True, "値がオブジェクトでないのに剥がしている"
+    assert unit["nested3_identical"] is True
+    assert unit["nested3_depth"] == 0
+    # 剥がす側の性質。
+    assert unit["twice_depth"] == 2
+    assert unit["twice_keys"] == ["_user_context", "query"]
+    assert unit["bare_name_depth"] == 1
+    assert unit["bare_name_shape"] == "name_arguments"
+
+
+# ── 拒否の観測性（2026-09-03） ─────────────────────────────────────────────
+# 14 日間、この plugin の warn は CloudWatch に 1 行も出ていなかった。
+# 原因は register が before_tool_call にだけ api.logger を渡しておらず、
+# signToolCall の block 経路が 1 行も書いていなかったこと。
+# 上流 logger は既定では console.warn へ届くが、no-op logger に差し替わる経路
+# （bundled-capability-runtime）と consoleLevel の設定で消えうるため、console にも直接書く。
+# 一次検証は docs/design/connect_third_layer_defense.md §11（file:line つき）。
+
+_BLOCK_DIAG_CASES = {
+    "native_tool": "CONNECT-P01",
+    "tool_name_mismatch": "CONNECT-P02",
+    "run_binding": "CONNECT-P03",
+    "invocation_binding": "CONNECT-P04",
+    "session_binding": "CONNECT-P05",
+    "stale_run_identity": "CONNECT-P03",
+}
+
+
+def test_every_block_path_writes_exactly_one_console_line() -> None:
+    """block したら必ず 1 行、console に出ること（logger 設定に依存しない）。"""
+    report = _caller_identity_report()["block_diagnostics"]
+    for case, code in _BLOCK_DIAG_CASES.items():
+        outcome = report[case]
+        assert outcome["blocked"] is True, case
+        assert outcome["consoleWarnCount"] == 1, (case, outcome["console"])
+        line = outcome["console"][0]["text"]
+        assert f"diagnostic={code}" in line, (case, line)
+
+
+def test_block_logs_carry_id_shape_but_no_identifiers() -> None:
+    """拒否ログには「形」だけを載せ、識別子の実値は載せないこと（G7）。
+
+    Enterprise Grid の `W…` user id など想定外の形を、値を見ずに切り分けるための情報。
+    """
+    report = _caller_identity_report()["block_diagnostics"]
+    for case in _BLOCK_DIAG_CASES:
+        line = report[case]["console"][0]["text"]
+        assert "id_shape=" in line, case
+        assert "sender:" in line and "channel:" in line and "session:" in line, case
+        # 実値（Slack user id / channel id / ts）が漏れていないこと。
+        assert "U09CX1CCBLN" not in line, case
+        assert "C0B0PQD83N2" not in line, case
+        assert "1785206176.940189" not in line, case
+
+
+def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
+    """利用者に届く block 文の末尾に、そのまま転送できる診断行が付くこと。
+
+    SOUL(#380) が「診断: 行は一字も変えず提示」を規定しているので、利用者の
+    スクリーンショット 1 枚から原因コードが判る。user id は載せない（G7）。
+    """
+    report = _caller_identity_report()["block_diagnostics"]
+    for case, code in _BLOCK_DIAG_CASES.items():
+        reason = report[case]["blockReason"]
+        lines = reason.split("\n")
+        assert len(lines) == 3, (case, reason)
+        assert lines[0].startswith("teamagent-caller-identity: "), case
+        assert lines[1] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
+            case
+        )
+        assert re.fullmatch(
+            rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[2]
+        ), (case, lines[2])
+        assert "U09CX1CCBLN" not in reason, case
+
+
+def test_successful_tool_calls_stay_quiet() -> None:
+    """正常系ではログが 1 行も増えないこと（拒否と unwrap だけを観測する）。"""
+    quiet = _caller_identity_report()["block_quiet_on_success"]
+    assert quiet["blocked"] is False
+    assert quiet["consoleLineCount"] == 0
+    assert quiet["warningCount"] == 0
+    assert quiet["totalConsoleDelta"] == 0
+
+
+# ── 層1 の脱出経路の観測（2026-09-03 の事故） ────────────────────────────────
+# OC TD:43（dev 8a1560b・#381 の層1 入り）着地直後、DM の「連携」で層1 が発火せず
+# モデル経路になった（OC ログに `[agents/tool-policy] tool policy removed 26 tool(s)`
+# ＝モデル起動。層1 が handled を返していればモデルは起動しない）。
+# plugin のログは CloudWatch に 1 行も無く、どの条件で落ちたか判別できなかった。
+# 原因は fallthrough() を通る 3 経路以外がすべて無言の `return undefined` だったこと。
+
+_LAYER1_SKIP_REASONS = {
+    "on_not_slack_provider": "not_slack_provider",
+    "on_trigger_not_user": "trigger_not_user",
+    "on_missing_fields": "missing_session_or_sender_or_channel",
+    "on_no_candidate_ingress": "no_candidate_ingress",
+    "on_not_connect_request": "not_connect_request",
+}
+
+
+def test_layer1_hook_entry_is_observable_under_trace() -> None:
+    """trace ON なら「hook が呼ばれた事実」が 1 行出ること。
+
+    この 1 行が出ないなら before_agent_reply 自体が呼ばれていないと確定でき、
+    plugin 側の条件分岐か上流側の hook 未発火かを切り分けられる。
+    """
+    report = _caller_identity_report()["layer1_trace"]
+    assert report["on_answered"]["entered"] is True
+    assert report["on_answered"]["enteredLine"] is not None
+    # provider / trigger は識別子ではないので実値を出す（切り分けに要る）。
+    assert "provider=slack" in report["on_answered"]["enteredLine"]
+    assert "trigger=user" in report["on_answered"]["enteredLine"]
+    assert report["on_answered"]["handled"] is True
+
+
+def test_every_silent_layer1_exit_now_reports_a_reason() -> None:
+    """無言で return していた 6 経路すべてが理由つきで観測できること。"""
+    report = _caller_identity_report()["layer1_trace"]
+    for case, reason in _LAYER1_SKIP_REASONS.items():
+        assert report[case]["skippedReason"] == reason, (case, report[case]["skippedLine"])
+        assert report[case]["handled"] is False, case
+    # 6 番目（同じ受信への 2 度目の鋳造）。
+    assert report["on_already_attempted"]["skippedReason"] == "already_attempted"
+    # 切り分けに要る付帯情報。値そのものは出さない。
+    assert "trigger=heartbeat" in report["on_trigger_not_user"]["skippedLine"]
+    assert "missing=[sessionKey,senderId]" in report["on_missing_fields"]["skippedLine"]
+    assert "id_shape=" in report["on_missing_fields"]["skippedLine"]
+    # 受信を記録できていないのか照合が外れたのかを、件数で切り分けられること。
+    assert "pending=0 bound=0" in report["on_no_candidate_ingress"]["skippedLine"]
+    # 語彙不一致は本文を出さず正規化後の文字数だけ（G7）。
+    assert "normalized_len=5 content_len=5" in report["on_not_connect_request"]["skippedLine"]
+
+
+def test_inbound_recording_is_observable_under_trace() -> None:
+    """受信を記録した事実も観測できること（層1 の no_candidate_ingress の切り分け）。
+
+    `inbound recorded` が出ていて層1 が `no_candidate_ingress` なら照合の問題、
+    出ていなければ受信そのものが記録できていない（`inbound rejected` を見る）。
+    """
+    report = _caller_identity_report()["layer1_trace"]
+    line = report["on_answered"]["inboundLine"]
+    assert line is not None
+    assert "connect_request=true" in line
+    assert "normalized_len=2" in line
+    assert "pending=1" in line
+    assert "id_shape=" in line
+    # 語彙不一致の受信は connect_request=false で記録される。
+    assert "connect_request=false" in report["on_not_connect_request"]["inboundLine"]
+    # 本文も Slack 識別子も載せない（G7）。
+    assert "こんにちは" not in report["on_not_connect_request"]["inboundLine"]
+    assert "U09CX1CCBLN" not in line
+
+
+def test_trace_is_off_by_default_and_does_not_change_behaviour() -> None:
+    """既定（trace OFF）では詳細を出さないが、挙動は同じであること。
+
+    通常の会話 1 通ごとに not_connect_request が出るとノイズになるため既定 OFF。
+    切り分け中だけ OC のタスク定義で TEAMAGENT_CALLER_IDENTITY_TRACE=1 を注入する。
+    """
+    report = _caller_identity_report()["layer1_trace"]
+    # 挙動は env に依存しない。
+    assert report["off_answered"]["handled"] == report["on_answered"]["handled"] is True
+    # 詳細は出ない。
+    assert report["off_answered"]["entered"] is False
+    assert report["off_answered"]["inboundRecorded"] is False
+    assert report["off_not_connect_request"]["skippedReason"] is None
+    assert report["off_no_candidate_ingress"]["skippedReason"] is None
+
+
+def test_fallthrough_is_always_logged_even_without_trace() -> None:
+    """層1 に入ったのに実行できなかった場合は、trace OFF でも必ず 1 行出ること。
+
+    ここを trace に隠すと「層1 が動いたのに連携できない」事故が既定で無言に戻る。
+    """
+    outcome = _caller_identity_report()["layer1_trace"]["off_fallthrough"]
+    assert outcome["fallthroughReason"] == "no_mcp_bearer"
+    assert outcome["lineCount"] == 1, outcome["lines"]
