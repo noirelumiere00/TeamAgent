@@ -2801,3 +2801,40 @@ def test_short_connect_request_phrases_match_the_single_source_of_truth() -> Non
         or (not row["expectMatch"] and row["toolCallCount"] != 0)
     ]
     assert not mismatched, f"fixture と実装が食い違う: {mismatched}"
+
+
+def test_deterministic_path_consumes_the_inbound_so_the_next_message_still_binds() -> None:
+    """層1 が handled で返した受信を pending に残さないこと（2026-09-03 レビュー指摘 1）。
+
+    handled で返すとモデルが起動せず before_model_resolve が走らない。受信を残すと
+    同じ DM の次の受信で bindAgentRun が candidates=2 で run を拒否し、以後 10 分間
+    すべてのツールが「trusted Slack run identity is missing or stale」でブロックされる。
+    """
+    outcome = _caller_identity_report()["connect_l1_next_message_tools_ok"]
+    assert outcome["l1Handled"] is True
+    assert outcome["nextRunRejected"] is False, "層1 の受信が pending に残り次の run が拒否された"
+    assert outcome["nextToolBlocked"] is False
+
+
+def test_deterministic_path_answers_again_within_the_ttl() -> None:
+    """層1 成功の 30 秒後に再度「連携」が来ても、層1 が再び handled になること（指摘 2）。
+
+    受信が残っていると候補 2 件で不発になり、モデル経路でも run 拒否で oauth_connect が
+    block され層2/3 も届かない＝「必ず」が破れる。不発になる場合も無言にはせず
+    reason=ambiguous_ingress で観測できる。
+    """
+    outcome = _caller_identity_report()["connect_l1_repeat_after_30s"]
+    assert outcome["firstHandled"] is True
+    assert outcome["secondHandled"] is True
+    assert outcome["toolCallCount"] == 2
+    assert outcome["ambiguous"] is False
+
+
+def test_deterministic_path_never_uses_another_senders_inbound() -> None:
+    """スレッドで別送信者 B の「連携」が pending でも、A の before_agent_reply は不発であること（指摘 3）。
+
+    senderId 照合を外すと A に B の claim で B 専用リンクが返る。tools/call は 0 件。
+    """
+    outcome = _caller_identity_report()["connect_l1_other_sender_pending"]
+    assert outcome["handled"] is False
+    assert outcome["toolCallCount"] == 0

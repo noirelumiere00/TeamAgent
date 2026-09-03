@@ -418,13 +418,13 @@ function makeConnectPlugin({ mode, env = {} } = {}) {
 }
 
 // message_received（message-hook-mappers:221-235 の形）。content は封筒無しの生本文。
-function receiveDm(handlers, content, { runId } = {}) {
+function receiveDm(handlers, content, { runId, messageId = TS } = {}) {
   handlers.get("message_received")(
     {
       from: `slack:${USER}`,
       content,
       senderId: USER,
-      messageId: TS,
+      messageId,
       ...(runId ? { runId } : {}),
       metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
     },
@@ -433,8 +433,29 @@ function receiveDm(handlers, content, { runId } = {}) {
       conversationId: `user:${USER}`,
       sessionKey: DM_SESSION_KEY,
       senderId: USER,
-      messageId: TS,
+      messageId,
       ...(runId ? { runId } : {}),
+    },
+  );
+}
+
+// チャンネルスレッドの message_received（別の送信者）。
+function receiveThreadMessage(handlers, content, { senderId, messageId }) {
+  handlers.get("message_received")(
+    {
+      from: `slack:channel:${CHANNEL}`,
+      content,
+      senderId,
+      messageId,
+      threadId: TS,
+      metadata: { guildId: TEAM, to: `channel:${CHANNEL}`, originatingTo: `channel:${CHANNEL}`, threadId: TS },
+    },
+    {
+      channelId: "slack",
+      conversationId: `channel:${CHANNEL}`,
+      sessionKey: CHANNEL_SESSION_KEY,
+      senderId,
+      messageId,
     },
   );
 }
@@ -531,6 +552,79 @@ async function deterministicScenario({
     declaredContext: first?.body.params.arguments?._user_context ?? null,
     logs,
     infos,
+  };
+}
+
+// 層1 成功後の次の受信で run 束縛とツール呼び出しが通ること（レビュー指摘 1）。
+// handled で返すとモデルが起動せず before_model_resolve が走らないため、層1 が受信を
+// pending に残すと次の受信で bindAgentRun が candidates=2 で run を拒否し全ツールが止まる。
+async function nextMessageAfterDeterministic() {
+  const l1 = await deterministicScenario({ content: "連携" });
+  const { handlers, logs } = l1.plugin;
+  const nextTs = "1785206200.000001";
+  receiveDm(handlers, "今日の予定を教えて", { messageId: nextTs });
+  startRun(handlers, "run-2");
+  const blocked = callTool(handlers, "teamagent__search", "run-2");
+  return {
+    l1Handled: l1.handled,
+    nextRunRejected: logs.some((m) => m.includes("no unique fresh Slack message binding")),
+    nextToolBlocked: blocked,
+    logs,
+  };
+}
+
+// 層1 成功後 30 秒以内の再度の「連携」でも層1 が再び handled になること（レビュー指摘 2）。
+async function repeatConnectAfterDeterministic({ advanceMs = 30 * 1000 } = {}) {
+  const l1 = await deterministicScenario({ content: "連携" });
+  const { handlers, logs, calls } = l1.plugin;
+  const realNow = Date.now;
+  let secondHandled = null;
+  try {
+    const base = realNow();
+    Date.now = () => base + advanceMs;
+    receiveDm(handlers, "連携", { messageId: "1785206206.000002" });
+    const second = await handlers.get("before_agent_reply")(
+      { cleanedBody: "連携" },
+      beforeAgentReplyCtx(),
+    );
+    secondHandled = second?.handled === true;
+  } finally {
+    Date.now = realNow;
+  }
+  return {
+    firstHandled: l1.handled,
+    secondHandled,
+    toolCallCount: calls.filter((c) => c.method === "tools/call").length,
+    ambiguous: logs.some((m) => m.includes("reason=ambiguous_ingress")),
+    logs,
+  };
+}
+
+// チャンネルスレッドで別の送信者 B の「連携」が pending のとき、A の before_agent_reply が
+// B の claim で B 専用リンクを A に返さないこと（レビュー指摘 3）。
+async function otherSenderPendingInThread() {
+  const OTHER = "U0AAAAAAAAB";
+  const { handlers, calls, logs } = makeConnectPlugin({});
+  receiveThreadMessage(handlers, "連携", { senderId: OTHER, messageId: "1785206210.000003" });
+  const rawId = `${CHANNEL.toLowerCase()}:thread:${TS}`;
+  const result =
+    (await handlers.get("before_agent_reply")(
+      { cleanedBody: "連携" },
+      {
+        agentId: "teamagent",
+        sessionKey: CHANNEL_SESSION_KEY,
+        sessionId: "sid",
+        workspaceDir: "/w",
+        trigger: "user",
+        ...agentCtxFields(rawId),
+        chatId: CHANNEL,
+        channelContext: { sender: { id: USER }, chat: { id: CHANNEL } },
+      },
+    )) ?? null;
+  return {
+    handled: result?.handled === true,
+    toolCallCount: calls.filter((c) => c.method === "tools/call").length,
+    logs,
   };
 }
 
@@ -635,6 +729,9 @@ const connectL1Failures = {
   no_canonical_channel: await fallthroughThenLayer2({ chatId: USER }),
 };
 const connectPhraseRows = await connectPhraseMatrix();
+const connectL1NextMessage = await nextMessageAfterDeterministic();
+const connectL1RepeatAfter30s = await repeatConnectAfterDeterministic();
+const connectL1OtherSender = await otherSenderPendingInThread();
 
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
@@ -774,6 +871,21 @@ const report = {
   },
   // 層1 ⑥失敗はすべて次の層へ落ちる（fail-open ではなく fail-to-next-layer）。
   connect_l1_failures: connectL1Failures,
+  // 層1 ⑦handled の後、同じ DM の次の受信で run 束縛とツール呼び出しが通る（pending 残留なし）。
+  connect_l1_next_message_tools_ok: {
+    l1Handled: connectL1NextMessage.l1Handled,
+    nextRunRejected: connectL1NextMessage.nextRunRejected,
+    nextToolBlocked: connectL1NextMessage.nextToolBlocked,
+  },
+  // 層1 ⑧handled の 30 秒後に再度「連携」→ 層1 が再び handled（無言で不発にならない）。
+  connect_l1_repeat_after_30s: {
+    firstHandled: connectL1RepeatAfter30s.firstHandled,
+    secondHandled: connectL1RepeatAfter30s.secondHandled,
+    toolCallCount: connectL1RepeatAfter30s.toolCallCount,
+    ambiguous: connectL1RepeatAfter30s.ambiguous,
+  },
+  // 層1 ⑨スレッドで別送信者の「連携」が pending でも、A には B の claim で返さない。
+  connect_l1_other_sender_pending: connectL1OtherSender,
   // 層2 ①0 tool call × 短い連携依頼 → revise（固定 instruction）。
   connect_zero_tool_short_request: zeroToolConnectScenario({ content: "連携" }),
   // 層2 ②長文 × 0 tool call → 不介入（誤爆しない）。

@@ -85,6 +85,15 @@ const CONNECT_REQUEST_SUFFIXES = [
   "して欲しいです",
   "してほしい",
   "して欲しい",
+  "してもらえますか",
+  "してもらえる",
+  "してくれますか",
+  "してくれる",
+  "させてください",
+  "させて下さい",
+  "させて",
+  "できますか",
+  "できる",
   "してください",
   "して下さい",
   "したいです",
@@ -98,6 +107,7 @@ const CONNECT_REQUEST_SUFFIXES = [
   "ください",
   "下さい",
   "です",
+  "する",
   "を",
 ];
 // 前後の空白・句読点・括弧・引用符。
@@ -120,7 +130,9 @@ const CONNECT_DIAGNOSTIC_CODE = "CONNECT-Z01";
 const CONNECT_FALLBACK_CANCEL_REASON = "connect zero-tool fallback already delivered";
 // 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
 const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
-const MCP_REQUEST_TIMEOUT_MS = 20_000;
+// 層1 の 3 POST（initialize / initialized / tools/call）で共有する全体予算。
+// claim TTL（60s）と同長にしない: 超過は fallthrough でモデル経路へ渡す。
+const MCP_REQUEST_TIMEOUT_MS = 15_000;
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MCP_CLIENT_NAME = "teamagent-caller-identity-connect";
 const CONNECT_L1_INVOCATION_PREFIX = "connect-l1";
@@ -404,6 +416,8 @@ function parseJsonRpcPayload(text, contentType, expectedId) {
 // notifications/initialized → tools/call）で、既存の bearer と署名 claim をそのまま使う。
 // 新しい信頼境界は作らない: mcp 側は before_tool_call 経由と同じ検証を通す。
 async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeoutMs }) {
+  // 全体予算を 1 本の signal で共有する（POST ごとに timeoutMs を持たない）。
+  const signal = AbortSignal.timeout(timeoutMs);
   const buildHeaders = sessionId => ({
     Accept: "application/json, text/event-stream",
     Authorization: `Bearer ${bearer}`,
@@ -417,7 +431,7 @@ async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeo
         method: "POST",
         headers: buildHeaders(sessionId),
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal,
       });
     } catch (error) {
       throw error?.name === "TimeoutError" || error?.name === "AbortError"
@@ -1109,7 +1123,20 @@ export function createCallerIdentityPlugin({
       seen.add(ingress.pendingKey);
       candidates.push(ingress);
     }
-    if (candidates.length !== 1) return undefined;
+    const invocationId =
+      `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
+    const fallthrough = reason => {
+      // G7: 本文・URL・Slack 識別子は載せない。
+      logger?.warn?.(
+        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
+          `outcome=fallthrough reason=${reason}`,
+      );
+      return undefined;
+    };
+    if (candidates.length === 0) return undefined;
+    // 同じ会話に新鮮な受信が 2 件以上あると、どの本文が「連携」かを権威的に決められない。
+    // 無言で不発にせず、観測可能な理由でモデル経路へ渡す（bindAgentRun も同じ理由で拒否する）。
+    if (candidates.length > 1) return fallthrough("ambiguous_ingress");
     const ingress = candidates[0];
     if (ingress.connectRequest !== true) return undefined;
     // 同じ受信に対して 2 度は鋳造しない（重複発行・往復の防止）。
@@ -1128,16 +1155,6 @@ export function createCallerIdentityPlugin({
     ) {
       claimChannel = chatChannel;
     }
-    const invocationId =
-      `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
-    const fallthrough = reason => {
-      // G7: 本文・URL・Slack 識別子は載せない。
-      logger?.warn?.(
-        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
-          `outcome=fallthrough reason=${reason}`,
-      );
-      return undefined;
-    };
     if (claimChannel === null) return fallthrough("no_canonical_channel");
     if (mcpBearer === null) return fallthrough("no_mcp_bearer");
     if (typeof fetchFn !== "function") return fallthrough("no_fetch");
@@ -1169,6 +1186,14 @@ export function createCallerIdentityPlugin({
         timeoutMs: MCP_REQUEST_TIMEOUT_MS,
       });
       const message = extractConnectMessage(result);
+      // handled で返すとモデルは起動せず before_model_resolve も走らないため、この受信を
+      // ここで消費する。残すと同じ DM の次の受信で bindAgentRun が candidates=2 で run を拒否し、
+      // 以後 10 分間すべてのツールが「trusted Slack run identity is missing or stale」で
+      // ブロックされる（レビュー実証 2026-09-03）。fallthrough 分岐では残す（モデル経路が束縛に使う）。
+      removePending(ingress);
+      for (const [boundRunId, bound] of ingressByRun) {
+        if (bound === ingress) ingressByRun.delete(boundRunId);
+      }
       logger?.info?.(
         `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
           `outcome=answered tool_calls=1`,

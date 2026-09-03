@@ -437,3 +437,17 @@ LLM が従わない残余が消えないため 3 層にする。優先順位は 
 6. URL 捏造ルール（#353）単独で予算切れした run は従来どおり素通り（層3 は zero-tool 側のみ武装）。
 7. `before_agent_reply` の hook 例外はハーネスが握って次の handler/通常処理へ進む（`hook-runner-global:537-543`）＝
    plugin 内で catch 漏れがあっても fail-to-next-layer は保たれる。
+
+### 10-6. 敵対的レビュー（2026-09-03）で直した点
+
+1. **層1 成功時に受信を消費する**: `handled` で返すとモデルが起動せず `before_model_resolve` が走らないため、
+   受信を `pendingByMessage` に残すと同じ DM の次の受信で `bindAgentRun` が `candidates=2` で run を拒否し、
+   以後 10 分間すべてのツールが「trusted Slack run identity is missing or stale」でブロックされる（レビュー実証）。
+   成功分岐で `removePending(ingress)`＋束縛済み `ingressByRun` の同一オブジェクトを削除。fallthrough 分岐では残す。
+2. **候補 2 件以上は無言にしない**: `reason=ambiguous_ingress` で warn して層2 へ渡す。
+3. **別送信者の受信を使わない**ことをテストで固定（スレッドで B の「連携」が pending でも A には不発）。
+   `matchesConversation` の senderId 照合を外す変異で赤になる。
+4. 語彙: 「する／させて／してくれる／できる（疑問）」を末尾語に追加。「連携解除／連携できない／連携済み／連携やめて」は偽のまま fixture で固定。
+5. 層1 の 3 POST は 15s の全体予算を 1 本の `AbortSignal` で共有（claim TTL 60s と同長にしない）。
+6. 既知事項（記録のみ）: `message.trim()` は末尾改行を落とす。mcp 成功後に応答の読取だけ失敗すると層2 でモデルが再発行し
+   リンクが 2 本（1 本目は未使用）になりうる。
