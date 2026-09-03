@@ -7,9 +7,11 @@ import hashlib
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
+from teamagent.adapters import media_job as media_job_module
 from teamagent.adapters.media_job import MediaJobClient, MediaJobError
-from teamagent.media.contracts import TikTokAcquireOperation, make_job_request
+from teamagent.media.contracts import S3ObjectRef, TikTokAcquireOperation, make_job_request
 
 _BUCKET = "teamagent-media-test"
 _JOB = "tk_0123456789ab"
@@ -25,12 +27,32 @@ class _MissingObjectError(Exception):
 
 
 class _BrokenS3Error(Exception):
+    """HEAD が 5xx で落ちた（権限でも不在でもない＝fail-closed のまま）。"""
+
     def __init__(self) -> None:
-        super().__init__("AccessDenied")
+        super().__init__("InternalError")
         self.response = {
-            "Error": {"Code": "AccessDenied"},
-            "ResponseMetadata": {"HTTPStatusCode": 403},
+            "Error": {"Code": "InternalError"},
+            "ResponseMetadata": {"HTTPStatusCode": 500},
         }
+
+
+class _ForbiddenS3Error(Exception):
+    """本番 mcp タスクロール（s3:ListBucket 無し）で存在しないキーへ HEAD したときの応答。"""
+
+    def __init__(self, *, code: str = "403", status: int | None = 403) -> None:
+        super().__init__("Forbidden")
+        response: dict[str, Any] = {"Error": {"Code": code}}
+        if status is not None:
+            response["ResponseMetadata"] = {"HTTPStatusCode": status}
+        self.response = response
+
+
+_HEAD_FORBIDDEN_EVENT = "media_artifact_head_forbidden_as_absent"
+
+
+def _forbidden_events(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in logs if entry.get("event") == _HEAD_FORBIDDEN_EVENT]
 
 
 def _head(body: bytes, *, metadata: dict[str, str] | None = None) -> dict[str, Any]:
@@ -50,6 +72,7 @@ class _S3:
         self.objects = objects
         self.raise_exc = raise_exc
         self.calls: list[dict[str, Any]] = []
+        self.put_calls: list[dict[str, Any]] = []
 
     def head_object(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
@@ -58,6 +81,11 @@ class _S3:
         if kwargs["Key"] not in self.objects:
             raise _MissingObjectError()
         return self.objects[kwargs["Key"]]
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        # PutObject 自体は通る（本番でも Put/Get は付与済み）。直後の HEAD 再検証で raise_exc。
+        self.put_calls.append(kwargs)
+        return {"VersionId": "version-7"}
 
 
 def _request() -> Any:
@@ -139,9 +167,101 @@ def test_find_staged_rejects_bad_names_and_surfaces_non_404_failures() -> None:
         client.find_staged(job_id=_JOB, name="../x.mp4", deadline_epoch_s=400)
     with pytest.raises(MediaJobError, match="MEDIA_JOB_ID_INVALID"):
         client.find_staged(job_id="nope", name="apify-p.mp4", deadline_epoch_s=400)
+    # 5xx は不在でも権限でもない＝従来どおり MEDIA_ARTIFACT_HEAD_FAILED
     broken = _client(s3=_S3({}, raise_exc=_BrokenS3Error()))
     with pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_HEAD_FAILED"):
         broken.find_staged(job_id=_JOB, name="apify-p.mp4", deadline_epoch_s=400)
+
+
+# ---------------------------------------------------------------------------
+# HEAD 403 を「無い」に読み替える（find_staged 限定・warning は同一プロセスで 1 回だけ）
+#
+# 実測 2026-09-03 (mcp:98): mcp タスクロールは media-jobs/*/input/* の Get/Put のみで
+# s3:ListBucket が無く、存在しないキーへの HEAD が 404 でなく 403 で返る。従来は
+# MEDIA_ARTIFACT_HEAD_FAILED に落ちて全キーが S3_HEAD 失敗＝Apify が一度も走らなかった。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _ForbiddenS3Error(code="403", status=403),
+        _ForbiddenS3Error(code="Forbidden", status=403),
+        _ForbiddenS3Error(code="AccessDenied", status=403),
+        _ForbiddenS3Error(code="403", status=None),  # Code だけ（ResponseMetadata 無し）
+        _ForbiddenS3Error(code="", status=403),  # HTTPStatusCode だけ
+    ],
+    ids=["403", "Forbidden", "AccessDenied", "code-only", "status-only"],
+)
+def test_find_staged_treats_head_403_as_absent(exc: Exception) -> None:
+    media_job_module._reset_head_forbidden_warning()
+    s3 = _S3({}, raise_exc=exc)
+    with capture_logs() as logs:
+        assert (
+            _client(s3=s3).find_staged(job_id=_JOB, name="apify-p01002.mp4", deadline_epoch_s=400)
+            is None
+        )
+    assert s3.calls[0]["Key"] == _KEY  # HEAD は打っている（黙って省略していない）
+    events = _forbidden_events(logs)
+    assert [entry["log_level"] for entry in events] == ["warning"]
+    assert events[0]["job_id"] == _JOB and events[0]["name"] == "apify-p01002.mp4"
+    assert "s3:ListBucket" in str(events[0]["hint"])
+
+
+def test_find_staged_head_403_warns_only_once_per_process() -> None:
+    media_job_module._reset_head_forbidden_warning()
+    client = _client(s3=_S3({}, raise_exc=_ForbiddenS3Error(code="AccessDenied")))
+    with capture_logs() as logs:
+        for name in ("apify-p1.mp4", "apify-p1.attempted", "apify-p2.mp4"):
+            assert client.find_staged(job_id=_JOB, name=name, deadline_epoch_s=400) is None
+    levels = [entry["log_level"] for entry in _forbidden_events(logs)]
+    assert levels.count("warning") == 1  # 最初の 1 回だけ warning
+    assert levels[0] == "warning"
+    assert set(levels) <= {"warning", "debug"}  # 以降は debug（黙らせはしない）
+
+
+def test_find_staged_404_still_returns_none_without_forbidden_warning() -> None:
+    media_job_module._reset_head_forbidden_warning()
+    s3 = _S3({})
+    with capture_logs() as logs:
+        assert (
+            _client(s3=s3).find_staged(job_id=_JOB, name="apify-p01002.mp4", deadline_epoch_s=400)
+            is None
+        )
+    assert _forbidden_events(logs) == []  # 404 は正規の「無い」＝403 の warning は出さない
+
+
+def test_stage_bytes_reverify_head_403_stays_fail_closed() -> None:
+    # stage_bytes → _verify_artifact_ref（HEAD 再検証）の 403 は従来どおり raise。
+    # 403 の吸収は find_staged 限定で、書き込み直後の検証を弱めない。
+    media_job_module._reset_head_forbidden_warning()
+    s3 = _S3({}, raise_exc=_ForbiddenS3Error(code="AccessDenied"))
+    with capture_logs() as logs, pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_HEAD_FAILED"):
+        _client(s3=s3).stage_bytes(
+            job_id=_JOB,
+            name="apify-p01002.mp4",
+            body=_BODY,
+            content_type="video/mp4",
+            deadline_epoch_s=400,
+        )
+    assert len(s3.put_calls) == 1 and s3.put_calls[0]["Key"] == _KEY  # Put は通った後の HEAD
+    assert _forbidden_events(logs) == []
+
+
+def test_presign_get_head_403_stays_fail_closed() -> None:
+    media_job_module._reset_head_forbidden_warning()
+    s3 = _S3({}, raise_exc=_ForbiddenS3Error(code="AccessDenied"))
+    ref = S3ObjectRef(
+        bucket=_BUCKET,
+        key=_KEY,
+        version_id="version-7",
+        sha256=hashlib.sha256(_BODY).hexdigest(),
+        size=len(_BODY),
+        content_type="video/mp4",
+    )
+    with capture_logs() as logs, pytest.raises(MediaJobError, match="MEDIA_ARTIFACT_HEAD_FAILED"):
+        _client(s3=s3).presign_get(ref, deadline_epoch_s=400, expires_s=60)
+    assert _forbidden_events(logs) == []
 
 
 def _item(request: Any, *, body: str | None = None, audit: str = _AUDIT) -> dict[str, Any]:
