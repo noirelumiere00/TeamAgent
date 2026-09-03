@@ -139,8 +139,11 @@ PYTHONPATH=src .venv/bin/python scripts/make_connect_links.py \
 
 ### 有効化の順序（順番を守る）
 1. connect-web を start ルート入りで着陸させる（先）。実機で `GET /oauth2/start/<有効state>` が
-   302 → Google の同意画面まで到達することを確認（`curl -sI` で `location:` が
+   302 → Google の同意画面まで到達することを確認（`curl -s -o /dev/null -D - <url>`（GET）または
+   `curl -sI <url>`（HEAD・start ルートは GET/HEAD 両方を登録済み）で `location:` が
    `https://accounts.google.com/o/oauth2/auth?...` になっていること）。
+   有効 state は Slack で「連携」した本人のリンク末尾から取る（state は本人メールを含むので
+   他人のものを使わない・ログに貼らない）。
 2. mcp taskdef の env に `USE_OAUTH_START_LINKS=1` を足す（`CONNECT_BASE_URL` は既設）。
 3. Slack で「連携」→ 出たリンクが `https://<connect-web>/oauth2/start/...`（`?` 無し）であること、
    開いて「✅ 連携が完了しました」まで通ることを本人で確認。

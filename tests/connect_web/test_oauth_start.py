@@ -400,17 +400,168 @@ def test_access_log_redacts_oauth_start_state() -> None:
 
     g = _record("/oauth2/start/SECRET.STATE?x=1")
     assert flt.filter(g) is True
-    assert g.args[2] == "/oauth2/start/<redacted>"  # type: ignore[index]
+    assert isinstance(g.args, tuple)
+    assert g.args[2] == "/oauth2/start/<redacted>"
     assert "SECRET" not in g.getMessage()
 
     s = _record("/slack/oauth/start/SECRET.STATE")
     flt.filter(s)
-    assert s.args[2] == "/slack/oauth/start/<redacted>"  # type: ignore[index]
+    assert isinstance(s.args, tuple)
+    assert s.args[2] == "/slack/oauth/start/<redacted>"
 
     other = _record("/oauth2/callback?code=abc&state=xyz")
     flt.filter(other)
-    assert other.args[2] == "/oauth2/callback?code=abc&state=xyz"  # type: ignore[index]
+    assert isinstance(other.args, tuple)
+    assert other.args[2] == "/oauth2/callback?code=abc&state=xyz"
 
     cfg = build_uvicorn_log_config()
     assert "redact_oauth_start" in cfg.get("filters", {})
     assert "redact_oauth_start" in cfg["loggers"]["uvicorn.access"].get("filters", [])
+
+
+# ── state の正規化（strict decode → 再エンコード）・HEAD・{state:path} ────────────
+# レビュー指摘: urlsafe_b64decode は非アルファベット文字を黙って捨てるため、``state.`` 等の
+# 変種でも 302 して非正規 state が Google へ渡り、callback の消費キー(sha256(生state)) が
+# 変種ごとに増える。逆に転記で末尾 ``=`` が落ちると Incorrect padding で 400 になる。
+
+
+def test_google_start_accepts_padding_stripped_state_and_canonicalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """転記で末尾 ``=`` が落ちても 302。Location は正規化済み state で発行時と完全一致。"""
+    client, google_consumer, _ = _client(monkeypatch)
+    issued_url, state = OAuthConsentFlow(redirect_uri=_GOOGLE_REDIRECT).authorization_url(_EMAIL)
+    assert state.endswith("=")  # 実物は末尾パディング付き（この email では 148 字・= 1 個）
+    stripped = state.rstrip("=")
+
+    r = client.get(f"/oauth2/start/{stripped}", follow_redirects=False)
+
+    assert r.status_code == 302
+    assert r.headers["location"] == issued_url
+    assert _state_of(r.headers["location"]) == state  # 正規形（= 付き）で Google へ渡る
+    assert google_consumer.calls == []
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        pytest.param("{state}.", id="trailing-dot"),
+        pytest.param("{state}%00", id="trailing-nul"),
+        pytest.param("{state}%20", id="trailing-space"),
+        pytest.param("{head}!{tail}", id="inserted-bang"),
+        pytest.param("{head}.{tail}", id="inserted-dot"),
+        pytest.param("={state}", id="leading-padding"),
+    ],
+)
+def test_google_start_rejects_non_alphabet_variants(
+    monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    """非アルファベット文字の混入は（署名本体が無傷でも）400・Location 無し。"""
+    client, google_consumer, _ = _client(monkeypatch)
+    _, state = OAuthConsentFlow(redirect_uri=_GOOGLE_REDIRECT).authorization_url(_EMAIL)
+    path_state = variant.format(state=state, head=state[:20], tail=state[20:])
+
+    r = client.get(f"/oauth2/start/{path_state}", follow_redirects=False)
+
+    assert r.status_code == 400
+    assert "検証に失敗" in r.text
+    assert "location" not in r.headers
+    assert google_consumer.calls == []
+
+
+def test_google_start_variants_yield_exactly_one_state_for_google(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """通る変種を何通り流しても、Google へ渡る state は正規形 1 つだけ（消費キーが増えない）。"""
+    client, _, _ = _client(monkeypatch)
+    issued_url, state = OAuthConsentFlow(redirect_uri=_GOOGLE_REDIRECT).authorization_url(_EMAIL)
+    accepted = [
+        state,
+        state.rstrip("="),
+        state.replace("_", "/"),  # 転記で _ → / （{state:path} で受ける）
+        state.replace("-", "+"),  # 転記で - → +
+        # 末尾改行はルータの正規表現 ``$`` が改行手前で一致するため handler には届かない
+        # （state から落ちる）。届く側は正規形のみ＝非正規 state が Google へ渡ることはない。
+        state + "%0A",
+    ]
+    seen: set[str] = set()
+    for variant in accepted:
+        r = client.get(f"/oauth2/start/{variant}", follow_redirects=False)
+        assert r.status_code == 302, variant
+        assert r.headers["location"] == issued_url
+        seen.add(_state_of(r.headers["location"]))
+    assert seen == {state}
+
+    rejected = [state + ".", state + "%00", state[:20] + "!" + state[20:]]
+    for variant in rejected:
+        assert client.get(f"/oauth2/start/{variant}", follow_redirects=False).status_code == 400
+
+
+def test_google_start_slash_in_state_gets_guidance_page_not_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``/`` 混じりの壊れた state でも FastAPI 既定の 404 JSON ではなく自前の案内ページ（400）。"""
+    client, _, _ = _client(monkeypatch)
+    r = client.get("/oauth2/start/broken/with/slash", follow_redirects=False)
+    assert r.status_code == 400
+    assert "Slack で Aico に「連携」" in r.text
+    assert "Not Found" not in r.text
+
+
+def test_google_start_answers_head_for_curl_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """運用手順の ``curl -sI``（HEAD）で 302 + location を確認できる（405 にしない）。"""
+    client, google_consumer, _ = _client(monkeypatch)
+    issued_url, state = OAuthConsentFlow(redirect_uri=_GOOGLE_REDIRECT).authorization_url(_EMAIL)
+    r = client.head(f"/oauth2/start/{state}", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == issued_url
+    assert r.headers["cache-control"] == "no-store"
+    assert google_consumer.calls == []
+
+
+def test_slack_start_accepts_padding_stripped_state_and_canonicalizes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, slack_consumer = _client(monkeypatch)
+    issued_url, state = _bound_slack_url()
+    assert state.endswith("=")
+    r = client.get(f"/slack/oauth/start/{state.rstrip('=')}", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == issued_url
+    assert _state_of(r.headers["location"]) == state
+    assert slack_consumer.calls == []
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        pytest.param("{state}.", id="trailing-dot"),
+        pytest.param("{state}%00", id="trailing-nul"),
+        pytest.param("{state}%20", id="trailing-space"),
+        pytest.param("{head}!{tail}", id="inserted-bang"),
+    ],
+)
+def test_slack_start_rejects_non_alphabet_variants(
+    monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    client, _, slack_consumer = _client(monkeypatch)
+    _, state = _bound_slack_url()
+    path_state = variant.format(state=state, head=state[:20], tail=state[20:])
+    r = client.get(f"/slack/oauth/start/{path_state}", follow_redirects=False)
+    assert r.status_code == 400
+    assert "location" not in r.headers
+    assert slack_consumer.calls == []
+
+
+def test_slack_start_slash_in_state_gets_guidance_page_and_head_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, _ = _client(monkeypatch)
+    r = client.get("/slack/oauth/start/broken/with/slash", follow_redirects=False)
+    assert r.status_code == 400
+    assert "Slack で Aico に「連携」" in r.text
+
+    issued_url, state = _bound_slack_url()
+    h = client.head(f"/slack/oauth/start/{state}", follow_redirects=False)
+    assert h.status_code == 302
+    assert h.headers["location"] == issued_url

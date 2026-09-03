@@ -332,6 +332,26 @@ def _strict_urlsafe_b64decode(value: str) -> bytes | None:
         return None
 
 
+def _canonical_oauth_state(state: str) -> str | None:
+    """path で受けた OAuth state を strict に decode し、正規 base64url へ再エンコードして返す。
+
+    不正（非アルファベット文字の混入・壊れた base64）なら None。
+
+    なぜ: adapters の verify_state は ``base64.urlsafe_b64decode`` で、非アルファベット文字を
+    **黙って捨てる**。そのため ``state.`` / ``state%00`` / 途中 ``!`` 混入でも署名検証が通り、
+    非正規の state がそのまま Google/Slack へ渡る。callback は受け取った生 state を sha256 して
+    ワンタイム消費キーにするので、変種ごとに別キー＝同一署名 state を複数回消費できてしまう。
+    逆に、実物の state は末尾 ``=`` パディング付き（例: 148 字）で、転記で ``=`` が落ちると
+    Incorrect padding で 400 になる（本ルートの動機＝転記事故に対して脆い）。
+    → ``/r/<token>`` と同じ strict（非アルファベット拒否）＋自動パディングで decode し、
+    正規形へ再エンコードしたものを verify とリダイレクトの両方に使う。
+    """
+    raw = _strict_urlsafe_b64decode(state)
+    if raw is None:
+        return None
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
 def _verify_report_token_with_remaining_ttl(
     rid: str,
     *,
@@ -3804,7 +3824,7 @@ def create_app(
             status_code=500,
         )
 
-    @app.get("/oauth2/start/{state}")
+    @app.api_route("/oauth2/start/{state:path}", methods=["GET", "HEAD"])
     def oauth2_start(state: str) -> Response:
         """Google 連携の path 形式開始リンク: 署名 state を検証し、mcp と同一の認可 URL へ 302。
 
@@ -3823,18 +3843,30 @@ def create_app(
           - 認可 URL は mcp(oauth_connect) と同じ ``OAuthConsentFlow.authorization_url`` を
             同じ state で呼んで再構成する（scopes/redirect_uri/login_hint/hd/access_type/prompt
             は両サービスの env が一致している前提。ズレると Google 側で拒否される）。
+          - state は strict decode → 正規形へ再エンコードしてから使う
+            （``_canonical_oauth_state``）。転記で末尾 ``=`` が落ちた程度は救い、非アルファベット
+            文字の混入は 400。Google へ渡す state は常に正規形なので、callback の消費キーが
+            変種で増えない。
+          - ``{state:path}`` ＋ GET/HEAD: 転記で ``/`` が混ざっても FastAPI 既定の 404 JSON ではなく
+            自前の案内ページを返す。HEAD は運用手順の ``curl -sI`` 疎通確認用。
         """
         if len(state) > _MAX_OAUTH_START_STATE_CHARS:
             logger.warning("connect_start_bad_state", reason="too_long")
             return _start_bad_state_page()
-        email = verify_state(state)  # 署名＋TTL のみ（消費は callback の責務）
+        canonical = _canonical_oauth_state(state)
+        if canonical is None:
+            logger.warning("connect_start_bad_state", reason="not_base64url")
+            return _start_bad_state_page()
+        email = verify_state(canonical)  # 署名＋TTL のみ（消費は callback の責務）
         if not email:
             logger.warning("connect_start_bad_state")
             return _start_bad_state_page()
         try:
             if not redirect:
                 raise ValueError("OAUTH_REDIRECT_URI が未設定です")
-            url, _ = OAuthConsentFlow(redirect_uri=redirect).authorization_url(email, state=state)
+            url, _ = OAuthConsentFlow(redirect_uri=redirect).authorization_url(
+                email, state=canonical
+            )
         except Exception as exc:
             # client_id/secret・redirect の設定不備。URL/secret は出さず例外型と短い説明のみ。
             logger.error(
@@ -4044,18 +4076,23 @@ def create_app(
             status_code=200,
         )
 
-    @app.get("/slack/oauth/start/{state}")
+    @app.api_route("/slack/oauth/start/{state:path}", methods=["GET", "HEAD"])
     def slack_oauth_start(state: str) -> Response:
         """Slack 連携の path 形式開始リンク（``/oauth2/start`` と対称・検証のみで消費しない）。
 
         署名＋TTL に加え、検証済み Slack user/team への束縛（bind_tag）が無い state はここで
         拒否する。callback は消費後に unbound を拒否するため、通しても Slack の同意画面を
         経てから同じ「検証に失敗しました」に落ちるだけ＝先に止めた方が利用者に優しい。
+        state の正規化（strict decode → 再エンコード）・``{state:path}``・HEAD は Google 版と同じ。
         """
         if len(state) > _MAX_OAUTH_START_STATE_CHARS:
             logger.warning("connect_slack_start_bad_state", reason="too_long")
             return _start_bad_state_page()
-        st = slack_verify_state_detailed(state)  # 署名＋TTL のみ（消費は callback の責務）
+        canonical = _canonical_oauth_state(state)
+        if canonical is None:
+            logger.warning("connect_slack_start_bad_state", reason="not_base64url")
+            return _start_bad_state_page()
+        st = slack_verify_state_detailed(canonical)  # 署名＋TTL のみ（消費は callback の責務）
         if st is None:
             logger.warning("connect_slack_start_bad_state")
             return _start_bad_state_page()
@@ -4066,7 +4103,7 @@ def create_app(
             if not slack_redirect:
                 raise ValueError("SLACK_OAUTH_REDIRECT_URI が未設定です")
             url, _ = SlackOAuthConsentFlow(redirect_uri=slack_redirect).authorization_url(
-                st.email, state=state
+                st.email, state=canonical
             )
         except Exception as exc:
             logger.error(
