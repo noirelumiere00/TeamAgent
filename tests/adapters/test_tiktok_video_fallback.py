@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
+from teamagent.adapters import media_job as media_job_module
 from teamagent.adapters.apify_client import ApifyError, TikTokVideoBytes
+from teamagent.adapters.media_job import MediaJobClient
 from teamagent.adapters.tiktok_video_fallback import (
     ENV_FLAG,
     apify_fallback_enabled,
@@ -368,3 +372,115 @@ def test_non_numeric_port_url_is_skipped_without_raising() -> None:
     )
     assert "p1:APIFY_FALLBACK_SKIPPED:URL_NOT_ALLOWED" in outcome.warnings
     assert apify.calls[0]["urls"] == [_URL1]  # 1 行の不正 URL でジョブ全体の補完は止まらない
+
+
+# ---------------------------------------------------------------------------
+# 本番 IAM の再現: mcp タスクロールは s3:ListBucket を持たず、存在しないキーへの HEAD が
+# 404 でなく 403 で返る（実測 2026-09-03 mcp:98・tk_6df108251c93）。実物の MediaJobClient
+# を通し、「初回 HEAD が 403 でも Apify run が 1 回走り、2 回目の照会では attempted
+# マーカー（HEAD 200）でスキップされる」を固定する。
+# ---------------------------------------------------------------------------
+
+
+class _HeadForbiddenError(Exception):
+    def __init__(self) -> None:
+        super().__init__("Forbidden")
+        self.response = {"Error": {"Code": "403"}, "ResponseMetadata": {"HTTPStatusCode": 403}}
+
+
+class _NoListBucketS3:
+    """Get/Put は通るが ListBucket が無い＝未存在キーの HEAD は 403 を返す S3。"""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, dict[str, Any]] = {}
+        self.head_calls: list[str] = []
+        self.head_forbidden: list[str] = []
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        body = bytes(kwargs["Body"])
+        self.objects[kwargs["Key"]] = {
+            "ContentLength": len(body),
+            "ContentType": kwargs["ContentType"],
+            "ChecksumSHA256": base64.b64encode(hashlib.sha256(body).digest()).decode("ascii"),
+            "ServerSideEncryption": kwargs["ServerSideEncryption"],
+            "VersionId": "v1",
+            "Metadata": dict(kwargs["Metadata"]),
+        }
+        return {"VersionId": "v1"}
+
+    def head_object(self, **kwargs: Any) -> dict[str, Any]:
+        key = kwargs["Key"]
+        self.head_calls.append(key)
+        if key not in self.objects:
+            self.head_forbidden.append(key)
+            raise _HeadForbiddenError()
+        return dict(self.objects[key])
+
+
+class _Session:
+    def __init__(self, s3: Any) -> None:
+        self._s3 = s3
+
+    def client(self, service: str, **_kwargs: Any) -> Any:
+        assert service == "s3"
+        return self._s3
+
+
+def _real_media_client(s3: _NoListBucketS3) -> MediaJobClient:
+    return MediaJobClient(
+        session=_Session(s3), queue_url="queue", table="jobs", bucket=_BUCKET, clock=lambda: 100.0
+    )
+
+
+def test_head_403_from_missing_list_bucket_still_runs_apify_once_and_skips_on_requery() -> None:
+    media_job_module._reset_head_forbidden_warning()
+    s3 = _NoListBucketS3()
+    media = _real_media_client(s3)
+    apify = _FakeApify({_URL1: _MP4})  # p2 は取れない
+
+    with capture_logs() as logs:
+        first = fill_missing_videos(
+            _JOB,
+            {"p1": _URL1, "p2": _URL2},
+            media_client=media,
+            apify=apify,
+            max_videos=10,
+            clock=lambda: 100.0,
+        )
+    # 初回: mp4 / attempted の HEAD は全て 403（ListBucket 無し）だが「無い」に読み替え、Apify は走る
+    assert s3.head_forbidden == [
+        f"media-jobs/{_JOB}/input/apify-p1.mp4",
+        f"media-jobs/{_JOB}/input/apify-p1.attempted",
+        f"media-jobs/{_JOB}/input/apify-p2.mp4",
+        f"media-jobs/{_JOB}/input/apify-p2.attempted",
+    ]
+    assert len(apify.calls) == 1 and apify.calls[0]["urls"] == [_URL1, _URL2]
+    assert [v.key for v in first.videos] == ["p1"]
+    assert first.fetched == 1 and first.reused == 0 and first.requested == 2
+    assert not any("S3_HEAD" in warning for warning in first.warnings)
+    assert "p2:APIFY_FALLBACK_MISSING" in first.warnings
+    # 自分で置いた object（marker / mp4）への HEAD 再検証は 200 で通っている
+    assert f"media-jobs/{_JOB}/input/apify-p1.attempted" in s3.objects
+    assert f"media-jobs/{_JOB}/input/apify-p2.attempted" in s3.objects
+    assert f"media-jobs/{_JOB}/input/apify-p1.mp4" in s3.objects
+    # 403→不在の読み替えは warning 1 回だけ（4 回の 403 に対して）
+    events = [e for e in logs if e.get("event") == "media_artifact_head_forbidden_as_absent"]
+    assert [e["log_level"] for e in events].count("warning") == 1
+
+    second = fill_missing_videos(
+        _JOB,
+        {"p1": _URL1, "p2": _URL2},
+        media_client=media,
+        apify=apify,
+        max_videos=10,
+        clock=lambda: 100.0,
+    )
+    # 2 回目: p1 は HEAD 200 で再利用、p2 は attempted マーカー（HEAD 200）でスキップ＝Apify 不再走
+    assert len(apify.calls) == 1
+    assert [(v.key, v.reused) for v in second.videos] == [("p1", True)]
+    assert second.skipped_attempted == 1
+    assert "p2:APIFY_FALLBACK_SKIPPED:ATTEMPTED" in second.warnings
+    assert not any("S3_HEAD" in warning for warning in second.warnings)
+    assert second.est_cost_usd == 0.0
+    # 2 回目に 403 が返ったのは p2 の mp4 だけ（それ以外は自分で置いた object＝200）
+    assert s3.head_forbidden[4:] == [f"media-jobs/{_JOB}/input/apify-p2.mp4"]

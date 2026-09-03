@@ -161,6 +161,53 @@ def _is_missing_object_error(exc: BaseException) -> bool:
     return code in ("404", "NoSuchKey", "NotFound") or status == 404
 
 
+def _is_forbidden_object_error(exc: BaseException) -> bool:
+    """S3 HEAD の 403（HTTPStatusCode 403 / Code ``403`` ``Forbidden`` ``AccessDenied``）か。
+
+    S3 は ``s3:ListBucket`` を持たない呼び出し元に対し、存在しないキーへの HEAD を 404 で
+    なく 403 で返す。``find_staged`` はこれを「無い」に読み替える（他経路は fail-closed のまま）。
+    """
+
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code") or "")
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in ("403", "Forbidden", "AccessDenied") or status == 403
+
+
+_HEAD_FORBIDDEN_HINT = "s3:ListBucket 未付与のため HEAD 404 が 403 で返る"
+_head_forbidden_warn_lock = threading.Lock()
+_head_forbidden_warned: list[bool] = [False]
+
+
+def _reset_head_forbidden_warning() -> None:
+    """テスト用: 「最初の 1 回だけ warning」のプロセス内状態を戻す。"""
+
+    with _head_forbidden_warn_lock:
+        _head_forbidden_warned[0] = False
+
+
+def _log_head_forbidden_as_absent(*, job_id: str, name: str) -> None:
+    """HEAD 403 を「無い」に読み替えた事実を、同一プロセス内で最初の 1 回だけ warning で残す。
+
+    2 回目以降は debug に落とす（フォールバックはキーごとに HEAD を 2 回打つため、
+    warning を毎回出すと本番ログが同じ行で埋まる）。黙らせはしない＝IAM 側の恒久対応
+    （``s3:ListBucket`` を prefix 条件付きで付与）が済んだかはこの行の有無で分かる。
+    """
+
+    with _head_forbidden_warn_lock:
+        first = not _head_forbidden_warned[0]
+        _head_forbidden_warned[0] = True
+    emit = logger.warning if first else logger.debug
+    emit(
+        "media_artifact_head_forbidden_as_absent",
+        job_id=job_id,
+        name=name,
+        hint=_HEAD_FORBIDDEN_HINT,
+    )
+
+
 class MediaJobError(RuntimeError):
     """media job境界のsubmit/status/integrity失敗。"""
 
@@ -398,6 +445,14 @@ class MediaJobClient:
             raise
         except Exception as exc:
             if _is_missing_object_error(exc):
+                return None
+            if _is_forbidden_object_error(exc):
+                # mcp タスクロールは media-jobs/*/input/* の Get/Put だけで ListBucket が無く、
+                # 存在しないキーへの HEAD は 404 でなく 403 で返る（実測 2026-09-03: 全キーが
+                # S3_HEAD 失敗扱いになり Apify が一度も走らなかった）。自分で置いた object への
+                # HEAD は 200 で通るので、この経路に限り 403 は「無い」と同義。他経路
+                # （_verify_artifact_ref / download 等）の 403 は従来どおり fail-closed。
+                _log_head_forbidden_as_absent(job_id=job_id, name=name)
                 return None
             raise MediaJobError("MEDIA_ARTIFACT_HEAD_FAILED") from exc
         metadata = response.get("Metadata")
