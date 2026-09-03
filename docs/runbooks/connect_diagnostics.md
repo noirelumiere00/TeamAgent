@@ -21,7 +21,7 @@
 | コード | 下表のどれか。**系統**が場所を表す（S/T = connect-web、I/L = mcp） | `ConnectDiag` |
 | 時刻 | 失敗ページ/エラー文を組んだ時刻（JST）。ログ検索の窓は **±5 分** | サーバ時刻 |
 | 識別子 | マスク済みメール（`k***@…`）／Slack user ID（`U…`）／`-`（不明） | 署名検証済みの値のみ。署名不一致(S01)では出さない |
-| request_id | connect-web: ALB の `X-Amzn-Trace-Id` の `Root=` 値。mcp: `req-…`（SkillContext） | ALB アクセスログ / mcp の `request_id` フィールド |
+| request_id | connect-web: ALB の `X-Amzn-Trace-Id` の `Root=` 値（無ければ `X-Request-Id`）。mcp: `req-…`（SkillContext） | **connect-web / mcp 自身の warning ログの `request_id=`**（アクセスログには突合先が無い。下記） |
 
 秘匿値（state / code / token / secret）は**設計上含まれない**。転送文に URL が付いていたら利用者に削除を促す。
 
@@ -30,12 +30,12 @@
 | コード | 意味 | 場所 | ログ event | 利用者の対処 | 管理者の対処 |
 |---|---|---|---|---|---|
 | **S01** | state 署名不一致（リンクが途中で改変された。LLM の再タイプ・コピー欠け） | connect-web Google | `connect_callback_bad_state` (`state_reason=bad_signature\|malformed\|missing_params`) | 「連携」で新しいリンク | 再発なら `USE_OAUTH_START_LINKS`（PR #376・path 形式リンク）を ON に |
-| **S02** | state 期限切れ（発行から 30 分超） | connect-web Google | `connect_callback_bad_state` (`state_reason=expired`) | 「連携」で新しいリンク | 発行→クリックの間隔を確認（DM を後で開いた等） |
+| **S02** | state 期限切れ（発行から 30 分超）。**サーバ時計ズレ（発行時刻が 60 秒超の未来）も同コード** | connect-web Google | `connect_callback_bad_state` (`state_reason=expired`) | 「連携」で新しいリンク | 発行→クリックの間隔を確認（DM を後で開いた等）。発行直後なのに S02 なら mcp / connect-web の時計ズレ（ECS ホスト時刻）を疑う |
 | **S03** | 使用済みリンク | connect-web Google | `connect_callback_reused_state` | 「連携」で新しいリンク | 2 回目が来る原因（リンクスキャナ・ブラウザのプリフェッチ）を確認。1 回目が `connect_callback_ok` なら連携自体は済んでいる |
 | **S04** | Google アカウント不一致 | connect-web Google | `connect_callback_account_mismatch` | 会社アカウントでログインし直して許可 | 個人 Gmail で許可していないか本人に確認 |
 | **S05** | 許可画面で拒否（キャンセル） | connect-web 両方 | `connect_callback_user_denied` / `connect_slack_callback_user_denied` | もう一度「連携」→「許可」 | 権限説明が不安なら口頭で補足 |
 | **S06** | サーバ側障害 | connect-web 両方 | `connect_callback_state_store_unconfigured` / `_state_consume_failed` / `_exchange_failed` / `_store_failed` / `_id_token_missing` / `_id_token_invalid` / `_client_id_missing`（Slack 版は `connect_slack_callback_*`） | 管理者へ | **下の「S06 の切り分け」** |
-| **I01a** | 本人特定失敗: 署名済み Slack caller が無い | mcp gateway | `caller_claim_rejected` / `identity_spoof_rejected reason=missing_verified_caller` | 管理者へ | OpenClaw の caller-identity plugin / `_user_context` 欠落。Slack 以外の経路から呼んでいないか |
+| **I01a** | 本人特定失敗: 署名済み Slack caller が無い（署名 claim 拒否を含む） | mcp gateway | `caller_claim_rejected` / `identity_spoof_rejected reason=missing_verified_caller` | 管理者へ | OpenClaw の caller-identity plugin / `_user_context` 欠落。Slack 以外の経路から呼んでいないか |
 | **I01b** | 本人特定失敗: resolver でエラー | mcp gateway | `identity_spoof_rejected reason=resolver_error` | 管理者へ | Slack `users.info` の失敗（token 失効・rate limit）。mcp ログの直前の例外 |
 | **I01c** | 本人特定失敗: Slack ユーザーを会社メンバーへ解決できない | mcp gateway | `identity_spoof_rejected reason=resolve_none` | 管理者へ | Slack プロフィールのメールが会社ドメイン外／未設定。ゲスト・外部 WS |
 | **I02** | 本人メール未取得（fail-closed） | mcp `oauth_connect` | `oauth_connect_fail_closed reason=no_user_email` | Slack プロフィールのメールを確認・管理者へ | metadata に `user_email` が無い。I01 系と同根のことが多い |
@@ -54,10 +54,7 @@
 
 ```
 fields @timestamp, event, reason, diag, tool, request_id, user_email_masked, error
-| filter event in ["identity_spoof_rejected", "caller_claim_rejected",
-                   "oauth_connect_fail_closed", "oauth_connect_url_failed",
-                   "oauth_connect_slack_url_failed", "oauth_connect_slack_url_suppressed",
-                   "oauth_connect_slack_rebind_needed", "oauth_connect_url_issued"]
+| filter event in ["identity_spoof_rejected", "caller_claim_rejected", "oauth_connect_fail_closed", "oauth_connect_url_failed", "oauth_connect_slack_url_failed", "oauth_connect_slack_url_suppressed", "oauth_connect_slack_rebind_needed", "oauth_connect_url_issued"]
 | sort @timestamp desc
 | limit 50
 ```
@@ -68,20 +65,26 @@ fields @timestamp, event, reason, diag, tool, request_id, user_email_masked, err
 
 ### connect-web（callback）— `@message` を parse して引く
 
-ロググループ: connect-web サービス（`/ecs/teamagent-dev-connect-web` 系）。structlog の console 出力なので event 名を正規表現で抜く。
+ロググループ: connect-web サービス（`/ecs/teamagent-dev-connect-web` 系）。
+
+> connect-web は現状 **console 形式**（`configure_logging` 未呼出）なので `@message` を正規表現で parse する。
+> JSON 化したら `fields event, diag, state_reason, request_id` ＋ `filter request_id = "…"` へ切り替える。
 
 ```
 fields @timestamp, @message
-| parse @message /(?<ev>connect_(slack_)?callback_[a-z_]+|connect_slack_state_unbound_rejected|slack_oauth_uid_collision)/
+| parse @message /(?<ev>connect_(?:slack_)?callback_[a-z_]+|connect_slack_state_unbound_rejected|slack_oauth_uid_collision)/
 | parse @message /diag=(?<diag>CONNECT-[A-Z]\d\d[a-c]?)/
 | parse @message /state_reason=(?<state_reason>[a-z_]+)/
+| parse @message /request_id=(?<request_id>[A-Za-z0-9._:-]+)/
 | filter ispresent(ev)
 | sort @timestamp desc
 | limit 50
 ```
 
-- `diag=` と `state_reason=` は本 PR で warning ログに付けた。**S01 なら `state_reason=bad_signature`（転記事故）か `malformed`（切れた/欠けた）か**まで分かる。
-- request_id は ALB の trace（`Root=1-…`）。ALB アクセスログ（S3）を同じ値で grep すると、UA・送信元 IP・実際のリクエスト URL 長が分かる（＝スキャナ/プリフェッチの判定に使う）。
+- **request_id での突合**: 診断行の末尾（`1-68b7c0de-…` または `req-…`）をそのまま `| filter request_id = "1-68b7c0de-…"` に入れる。全失敗経路の warning/error（成功の `connect_callback_ok` も）に同じ `request_id=` を付けてある。
+  ⚠️ アクセスログ側には突合先が **無い**: 経路は API Gateway → ALB → ECS で、ALB は tf 管理外・access_logs 未設定、API GW のアクセスログは `$context.requestId` のみ（`X-Amzn-Trace-Id` の Root とは別 ID）。突合先は connect-web 自身の warning だけ。
+- `diag=` と `state_reason=` は本 PR で warning ログに付けた。**S01 なら `state_reason=bad_signature`（転記事故）か `malformed`（切れた/欠けた）か `missing_params`**まで分かる。
+- 同じ email で数秒差の `connect_callback_ok` → `connect_callback_reused_state` が並ぶなら、リンクスキャナ/プリフェッチが先に踏んだ S03（本人の連携は済んでいる）。
 
 ### 受信 state の復号診断（利用者が URL そのものを送ってきた場合）
 

@@ -21,17 +21,27 @@ connect-web(callback) の両方がこのモジュールを使い、文言を個�
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
 
 JST = timezone(timedelta(hours=9), name="JST")
 
-# 管理者名（利用者向け定型文に載せる転送先）。
-ADMIN_NAME = "小俣"
+# 管理者名（利用者向け定型文に載せる転送先）。env CONNECT_ADMIN_NAME で差し替え可能。
+ADMIN_NAME_ENV = "CONNECT_ADMIN_NAME"
+DEFAULT_ADMIN_NAME = "小俣"
 
-# 利用者向け定型文（全経路共通・診断行の直前に必ず置く）。
-ADMIN_FORWARD_HINT = f"解決しない場合は、次の 1 行をそのまま管理者（{ADMIN_NAME}）へ送ってください:"
+
+def admin_name() -> str:
+    """転送先の管理者名（mcp / connect-web 共通・``CONNECT_ADMIN_NAME``・既定 ``小俣``）。"""
+    return os.environ.get(ADMIN_NAME_ENV, "").strip() or DEFAULT_ADMIN_NAME
+
+
+def admin_forward_hint() -> str:
+    """利用者向け定型文（全経路共通・診断行の直前に必ず置く）。"""
+    return f"解決しない場合は、次の 1 行をそのまま管理者（{admin_name()}）へ送ってください:"
+
 
 # 「連携」と話しかけて新しいリンクを取り直す、という最も多い対処。
 _REISSUE_ACTION = "Slack で Aico に『連携』と送って、新しいリンクを使ってください。"
@@ -126,9 +136,9 @@ DIAG_SPECS: dict[ConnectDiag, DiagSpec] = {
     ),
     ConnectDiag.I01A: DiagSpec(
         ConnectDiag.I01A,
-        "本人特定失敗: 署名済み Slack caller が無い（missing_verified_caller）",
+        "本人特定失敗: 署名済み Slack caller が無い（missing_verified_caller・署名 claim 拒否）",
         _CONTACT_ADMIN_ACTION,
-        ("identity_spoof_rejected",),
+        ("caller_claim_rejected", "identity_spoof_rejected"),
     ),
     ConnectDiag.I01B: DiagSpec(
         ConnectDiag.I01B,
@@ -264,17 +274,19 @@ def format_user_message(
         masked_email=masked_email,
         extra=extra,
     )
-    return f"{spec.user_action}\n{ADMIN_FORWARD_HINT}\n{line}"
+    return f"{spec.user_action}\n{admin_forward_hint()}\n{line}"
 
 
 __all__ = [
-    "ADMIN_FORWARD_HINT",
-    "ADMIN_NAME",
+    "ADMIN_NAME_ENV",
+    "DEFAULT_ADMIN_NAME",
     "DIAG_SPECS",
     "IDENTITY_REJECT_REASON_CODES",
     "JST",
     "ConnectDiag",
     "DiagSpec",
+    "admin_forward_hint",
+    "admin_name",
     "format_diag_line",
     "format_user_message",
     "format_when",

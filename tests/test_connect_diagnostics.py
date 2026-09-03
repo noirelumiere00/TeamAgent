@@ -15,11 +15,13 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from teamagent.connect_diagnostics import (
-    ADMIN_FORWARD_HINT,
-    ADMIN_NAME,
+    ADMIN_NAME_ENV,
+    DEFAULT_ADMIN_NAME,
     DIAG_SPECS,
     IDENTITY_REJECT_REASON_CODES,
     ConnectDiag,
+    admin_forward_hint,
+    admin_name,
     format_diag_line,
     format_user_message,
     format_when,
@@ -58,8 +60,8 @@ def test_user_message_carries_code_time_masked_email_and_request_id(code: Connec
     )
     lines = msg.splitlines()
     assert lines[0] == DIAG_SPECS[code].user_action
-    assert lines[1] == ADMIN_FORWARD_HINT
-    assert ADMIN_NAME in ADMIN_FORWARD_HINT
+    assert lines[1] == admin_forward_hint()
+    assert DEFAULT_ADMIN_NAME in admin_forward_hint()
     diag = lines[-1]
     assert diag == f"診断: {code.value} {_WHEN_JST_TEXT} t***@vectorinc.co.jp req-abc123"
 
@@ -128,3 +130,19 @@ def test_user_actions_point_to_reissue_or_admin() -> None:
     """利用者の対処は『連携し直す/許可し直す』か『管理者へ』のどれかに必ず着地する。"""
     for spec in DIAG_SPECS.values():
         assert any(w in spec.user_action for w in ("連携", "許可", "管理者")), spec.code
+
+
+def test_admin_name_is_env_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ADMIN_NAME_ENV, raising=False)
+    assert admin_name() == DEFAULT_ADMIN_NAME
+    monkeypatch.setenv(ADMIN_NAME_ENV, "  情シス  ")
+    assert admin_name() == "情シス"
+    msg = format_user_message(ConnectDiag.S06, when=_WHEN)
+    assert "管理者（情シス）へ送ってください" in msg
+    assert DEFAULT_ADMIN_NAME not in msg
+    monkeypatch.setenv(ADMIN_NAME_ENV, "   ")  # 空白だけは既定に戻る
+    assert admin_name() == DEFAULT_ADMIN_NAME
+
+
+def test_i01a_spec_covers_claim_rejection_event() -> None:
+    assert "caller_claim_rejected" in DIAG_SPECS[ConnectDiag.I01A].log_events

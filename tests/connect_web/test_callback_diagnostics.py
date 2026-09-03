@@ -19,7 +19,7 @@ from psycopg.errors import UniqueViolation
 
 from teamagent.adapters import google_oauth_flow, slack_oauth_flow
 from teamagent.adapters.oauth_token_store import OAuthToken, SlackOAuthToken
-from teamagent.connect_diagnostics import ADMIN_FORWARD_HINT, ConnectDiag
+from teamagent.connect_diagnostics import ConnectDiag, admin_forward_hint
 from teamagent.connect_web.app import _request_id_of, create_app
 
 _GSECRET = "unit-test-state-secret"
@@ -114,7 +114,7 @@ def test_google_user_denied_is_s05(monkeypatch: pytest.MonkeyPatch) -> None:
     code, _when, subject = _diag(r.text)
     assert code == ConnectDiag.S05.value
     assert subject == "-"
-    assert ADMIN_FORWARD_HINT in r.text
+    assert admin_forward_hint() in r.text
 
 
 def test_google_missing_params_is_s01(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,3 +456,63 @@ def test_slack_server_side_failures_are_s06(
     assert code == ConnectDiag.S06.value, label
     assert subject == "o***@vectorinc.co.jp", label
     _assert_no_secrets(r.text, state=state)
+
+
+# ───────────────────────── ログ ↔ 診断行の突合キー ─────────────────────────
+
+
+def test_failure_warning_log_carries_request_id_and_diag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """診断行の request_id と同じ値が connect-web の warning ログに request_id= で出る（M1）。
+
+    ALB/API GW のアクセスログには突合先が無いため、connect-web 自身の warning を
+    `request_id` で引けることが運用の前提（docs/runbooks/connect_diagnostics.md）。
+    """
+    from structlog.testing import capture_logs
+
+    client = _google_client(monkeypatch)
+    state = _gstate(now=1, nonce="old")
+    with capture_logs() as logs:
+        r = client.get(
+            "/oauth2/callback",
+            params={"code": "abc", "state": state},
+            headers={"X-Amzn-Trace-Id": "Root=1-68b7c0de-0123456789abcdef01234567"},
+        )
+    assert r.status_code == 400
+    rows = [x for x in logs if x.get("event") == "connect_callback_bad_state"]
+    assert len(rows) == 1
+    assert rows[0]["request_id"] == "1-68b7c0de-0123456789abcdef01234567"
+    assert rows[0]["diag"] == ConnectDiag.S02.value
+    assert rows[0]["state_reason"] == "expired"
+    assert "1-68b7c0de-0123456789abcdef01234567" in r.text
+
+
+def test_slack_failure_warning_log_carries_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    client = _slack_client(monkeypatch, slack_exchange_fn=_slack_other_person)
+    with capture_logs() as logs:
+        r = client.get(
+            "/slack/oauth/callback",
+            params={"code": "abc", "state": _sstate()},
+            headers={"X-Request-Id": "req-slack-1"},
+        )
+    assert r.status_code == 403
+    rows = [x for x in logs if x.get("event") == "connect_slack_callback_identity_mismatch"]
+    assert len(rows) == 1
+    assert rows[0]["request_id"] == "req-slack-1"
+    assert rows[0]["diag"] == ConnectDiag.T02.value
+
+
+def test_success_log_carries_request_id_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    from structlog.testing import capture_logs
+
+    client = _google_client(monkeypatch)
+    with capture_logs() as logs:
+        r = client.get(
+            "/oauth2/callback",
+            params={"code": "abc", "state": _gstate()},
+            headers={"X-Request-Id": "req-ok-1"},
+        )
+    assert r.status_code == 200
+    rows = [x for x in logs if x.get("event") == "connect_callback_ok"]
+    assert rows and rows[0]["request_id"] == "req-ok-1"

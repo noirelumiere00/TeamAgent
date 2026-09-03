@@ -12,7 +12,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel
 
-from teamagent.connect_diagnostics import ADMIN_FORWARD_HINT
+from teamagent.connect_diagnostics import admin_forward_hint
 from teamagent.identity import IdentityResolver, ResolvedIdentity
 from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
@@ -70,7 +70,7 @@ def _diag(out: dict[str, Any]) -> tuple[str, str]:
     assert out["code"] == "CALLER_IDENTITY_REJECTED"
     m = _DIAG_RE.search(out["error"])
     assert m, out["error"]
-    assert ADMIN_FORWARD_HINT in out["error"]
+    assert admin_forward_hint() in out["error"]
     return m.group(1), m.group(2)
 
 

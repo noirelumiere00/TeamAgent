@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from teamagent.connect_diagnostics import ADMIN_FORWARD_HINT
+from teamagent.connect_diagnostics import admin_forward_hint
 from teamagent.skills.base import SkillContext
 from teamagent.skills.oauth_connect.schema import OAuthConnectInput
 from teamagent.skills.oauth_connect.skill import OAuthConnectSkill
@@ -81,7 +81,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, *envs: dict[str, str]) -> None:
 def _diag(text: str) -> tuple[str, str]:
     m = _DIAG_RE.search(text)
     assert m, text
-    assert ADMIN_FORWARD_HINT in text
+    assert admin_forward_hint() in text
     return m.group(1), m.group(2)
 
 
