@@ -125,11 +125,34 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # 2026-08-19: CVE-2026-54876(openssl HIGH)を機にchainguardベースをバンプ。
     # python 3.14.6-r4→3.14.7系で上記2件のfindingが消えるため、08-14のmediaと同じく
     # 例外は同時撤去し core も空へ復帰（残すと stale=fail が発火する）。
+    # 2026-09-03: r16 image-builder 段3 で CVE-2026-15806（MEDIUM・python-3.14 3.14.7-r1）が
+    # 新規検出。08-13 と同型の期限つき例外（stale=fail・expires 2026-09-17）で通す。
+    # 段4 Trivy は C/H ゼロゲートのため MEDIUM は非該当（08-14 media の HIGH とは異なる）。
+    # 恒久対応は chainguard python digest を 3.14.7-r6 以降へバンプする世代 publish で、
+    # 着地時に finding が消えて stale=fail が発火するので本例外の撤去が強制される。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
     assert core_payload == {
         "schema_version": 1,
         "stale_exception_policy": "fail",
-        "exceptions": [],
+        "exceptions": [
+            {
+                "cve": "CVE-2026-15806",
+                "severity": "MEDIUM",
+                "package": "python-3.14",
+                "version": "3.14.7-r1",
+                "owner": "s-komata@vectorinc.co.jp",
+                "reason": (
+                    "2026-09-03 r16 image-builder 段3 で新規検出（MEDIUM・Chainguard python:latest "
+                    "3.14.7-r1）。段4 Trivy は C/H ゼロゲートのため影響なし。恒久対応は Chainguard "
+                    "python digest を 3.14.7-r6 以降へバンプする世代 publish（runtime contract 束縛）で、"
+                    "その着地時に本例外は stale=fail で自動的に撤去を強制される。"
+                ),
+                "expires_on": "2026-09-17",
+            }
+        ],
+    }
+    assert set(gate.load_exceptions(core, today=TODAY)) == {
+        gate.FindingKey("CVE-2026-15806", "MEDIUM", "python-3.14", "3.14.7-r1")
     }
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
