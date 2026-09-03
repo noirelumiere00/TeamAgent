@@ -432,3 +432,191 @@ def test_single_response_carries_both_links_without_a_choice_prompt(
     # 出力自体が聞き返し・選択要求になっていない。
     for banned in ("どちらを", "どちらの", "選んでください", "どれを", "しますか？"):
         assert banned not in out.message, f"案内文が聞き返しになっている: {banned}"
+
+
+# ── path 形式リンク（USE_OAUTH_START_LINKS・既定 OFF）───────────────────────────
+# @Aico の LLM が長い認可 URL(?state=…) を再タイプして state を壊す事故の根治。
+# フラグ ON かつ CONNECT_BASE_URL 設定時だけ connect-web の /oauth2/start/{state} 等へ差し替える。
+
+# Google・Slack 両方未連携（連携済み無し・抑止無し）の案内文。OFF/ON でリンク以外は不変。
+_EXPECTED_DUAL_MESSAGE = (
+    "👋 *taro@vectorinc.co.jp* の連携リンクです（1回だけ・所要1分）。\n"
+    "下のリンクは *あなた専用* です（他の人と共有しないでください）。\n"
+    "開いて、表示される権限を *許可* してください:\n"
+    "\n*① Google を連携*（メールの読み取り・下書き作成、カレンダー等）\n"
+    "{google}\n"
+    "\n*② Slack を連携*（本人としての検索・チャンネル巡回）\n"
+    "{slack}\n"
+    "\n「✅ 連携が完了しました」が出れば成功です。あとは話しかけるだけ。"
+)
+_BASE = "https://connect.example.com"
+
+
+def _google_state(url: str) -> str:
+    values = parse_qs(urlparse(url).query).get("state")
+    assert values and len(values) == 1
+    return values[0]
+
+
+@pytest.mark.parametrize("flag", [None, "", "0", "false", "off"])
+def test_start_links_off_keeps_raw_urls_and_message_bytes(
+    monkeypatch: pytest.MonkeyPatch, flag: str | None
+) -> None:
+    """既定 OFF（未設定/偽値）では認可 URL をそのまま返し、案内文はバイト単位で従来どおり。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("CONNECT_BASE_URL", _BASE)  # 土台があってもフラグ OFF なら使わない
+    if flag is None:
+        monkeypatch.delenv("USE_OAUTH_START_LINKS", raising=False)
+    else:
+        monkeypatch.setenv("USE_OAUTH_START_LINKS", flag)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is not None and out.url.startswith("https://accounts.google.com/o/oauth2/auth?")
+    assert out.slack_url is not None
+    assert out.slack_url.startswith("https://slack.com/oauth/v2/authorize?")
+    assert "/oauth2/start/" not in out.message and "/slack/oauth/start/" not in out.message
+    assert out.message == _EXPECTED_DUAL_MESSAGE.format(google=out.url, slack=out.slack_url)
+
+
+@pytest.mark.parametrize("base", [_BASE, _BASE + "/", "  " + _BASE + "//  "])
+def test_start_links_on_replaces_links_with_path_only(
+    monkeypatch: pytest.MonkeyPatch, base: str
+) -> None:
+    """ON かつ CONNECT_BASE_URL 設定時は path リンク（query 無し）。末尾スラッシュ/空白は正規化。"""
+    from teamagent.adapters.google_oauth_flow import verify_state as google_verify_state
+
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", base)
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is not None and out.slack_url is not None
+    assert out.url.startswith(f"{_BASE}/oauth2/start/")
+    assert out.slack_url.startswith(f"{_BASE}/slack/oauth/start/")
+    for link in (out.url, out.slack_url):
+        assert "?" not in link and "&" not in link  # query 無し・path のみ
+        assert "//oauth2" not in link and "//slack" not in link  # 末尾スラッシュ二重化なし
+    # path の state はそのまま検証可能（署名・本人・Slack 束縛が保たれている）。
+    google_state = out.url.rsplit("/", 1)[1]
+    assert google_verify_state(google_state) == "taro@vectorinc.co.jp"
+    detailed = verify_state_detailed(out.slack_url.rsplit("/", 1)[1])
+    assert detailed is not None and detailed.email == "taro@vectorinc.co.jp"
+    assert detailed.bind_tag == expected_bind_tag(_VERIFIED_SLACK_TEAM_ID, _VERIFIED_SLACK_USER_ID)
+    # 案内文は認可 URL を一切含まず、リンク以外は OFF 時と同一。
+    assert "accounts.google.com" not in out.message
+    assert "slack.com/oauth" not in out.message
+    assert out.message == _EXPECTED_DUAL_MESSAGE.format(google=out.url, slack=out.slack_url)
+
+
+def test_start_links_on_uses_the_same_state_as_the_authorization_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """path に載る state は authorization_url が返した state そのもの（別発行ではない）。"""
+    from teamagent.adapters.google_oauth_flow import OAuthConsentFlow
+
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "true")
+    monkeypatch.setenv("CONNECT_BASE_URL", _BASE)
+    seen: dict[str, str] = {}
+    original = OAuthConsentFlow.authorization_url
+
+    def _spy(self: OAuthConsentFlow, user_email: str, **kw: str) -> tuple[str, str]:
+        url, state = original(self, user_email, **kw)
+        seen["url"], seen["state"] = url, state
+        return url, state
+
+    monkeypatch.setattr(OAuthConsentFlow, "authorization_url", _spy)
+    out = OAuthConnectSkill(google_store=_FakeStore(False)).run(
+        OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+    )
+    assert out.url == f"{_BASE}/oauth2/start/{seen['state']}"
+    assert _google_state(seen["url"]) == seen["state"]
+
+
+def test_start_links_on_without_base_url_falls_back_to_raw_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ON でも CONNECT_BASE_URL が無ければ壊れた相対リンクを出さず、認可 URL を直接返す。"""
+    from structlog.testing import capture_logs
+
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", "   ")
+    skill = OAuthConnectSkill(google_store=_FakeStore(False), slack_store=_FakeStore(False))
+
+    with capture_logs() as logs:
+        out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is not None and out.url.startswith("https://accounts.google.com/")
+    assert out.slack_url is not None and out.slack_url.startswith("https://slack.com/")
+    assert "/oauth2/start/" not in out.message
+    events = {e["event"]: e for e in logs}
+    assert events["oauth_connect_start_links_prereq_missing"]["missing"] == "CONNECT_BASE_URL"
+    assert events["oauth_connect_url_issued"]["start_links"] is False
+
+
+def test_issued_log_reports_start_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    """oauth_connect_url_issued に start_links が載る（ON=True / OFF=False）。"""
+    from structlog.testing import capture_logs
+
+    for k, v in _OAUTH_ENV.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SLACK_OAUTH_REDIRECT_URI", raising=False)
+    monkeypatch.setenv("CONNECT_BASE_URL", _BASE)
+
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
+    with capture_logs() as on_logs:
+        OAuthConnectSkill(google_store=_FakeStore(False)).run(
+            OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+        )
+    monkeypatch.delenv("USE_OAUTH_START_LINKS")
+    with capture_logs() as off_logs:
+        OAuthConnectSkill(google_store=_FakeStore(False)).run(
+            OAuthConnectInput(), _ctx("taro@vectorinc.co.jp")
+        )
+
+    on = [e for e in on_logs if e["event"] == "oauth_connect_url_issued"]
+    off = [e for e in off_logs if e["event"] == "oauth_connect_url_issued"]
+    assert on and on[-1]["start_links"] is True
+    assert off and off[-1]["start_links"] is False
+
+
+def test_start_links_on_slack_only_when_google_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Google 連携済み・Slack 未連携 → Slack だけ path リンク（Google は出さない）。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", _BASE)
+    skill = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=_FakeStore(False))
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is None
+    assert out.slack_url is not None and out.slack_url.startswith(f"{_BASE}/slack/oauth/start/")
+    assert out.slack_url in out.message
+    assert "Slack を連携" in out.message
+
+
+def test_start_links_on_both_connected_emits_no_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    """両方連携済みならフラグ ON でもリンク（path 形式含む）を一切出さない。"""
+    for k, v in {**_OAUTH_ENV, **_SLACK_ENV}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("USE_OAUTH_START_LINKS", "1")
+    monkeypatch.setenv("CONNECT_BASE_URL", _BASE)
+    skill = OAuthConnectSkill(google_store=_FakeStore(True), slack_store=_FakeStore(True))
+
+    out = skill.run(OAuthConnectInput(), _ctx("taro@vectorinc.co.jp"))
+
+    assert out.url is None and out.slack_url is None
+    assert "http" not in out.message

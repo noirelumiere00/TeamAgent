@@ -261,10 +261,36 @@ class _RedactAdminUserAccessLog(logging.Filter):
         return True
 
 
+# path 形式の連携開始ルート（署名 state を path に載せる）。/r/<token> と同じ理由で伏せる。
+_OAUTH_START_PATH_PREFIXES = ("/oauth2/start/", "/slack/oauth/start/")
+
+
+class _RedactOAuthStartAccessLog(logging.Filter):
+    """uvicorn アクセスログの ``/oauth2/start/<state>`` ``/slack/oauth/start/<state>`` を伏せる。
+
+    state は本人メールを含む署名値（base64url）なので、CloudWatch のアクセスログに残すと
+    ログ閲覧者に email が平文相当で見える（G8: PII をログへ持ち込まない）。``/r/<token>`` と
+    同じ流儀でパスだけ伏せ、他ルートのアクセスログは通常どおり残す（観測性は維持）。
+    uvicorn.access のレコードは args=(client, method, full_path, http_version, status) 形式。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            for prefix in _OAUTH_START_PATH_PREFIXES:
+                if args[2].startswith(prefix):
+                    redacted = list(args)
+                    redacted[2] = f"{prefix}<redacted>"
+                    record.args = tuple(redacted)
+                    break
+        return True
+
+
 def build_uvicorn_log_config() -> dict[str, Any]:
     """uvicorn の既定ログ設定に、URL の秘匿対象を伏せるフィルタを足して返す。
 
-    対象は ``/r/<token>``（capability トークン）と ``/admin?user=<email>``（PII）。
+    対象は ``/r/<token>``（capability トークン）・``/admin?user=<email>``（PII）・
+    ``/oauth2/start/<state>`` ``/slack/oauth/start/<state>``（email を含む署名 state）。
     __main__ が ``uvicorn.run(log_config=build_uvicorn_log_config())`` で使う。dictConfig が
     確実にフィルタを登録するよう、uvicorn 起動時の設定として渡す（後付け addFilter は
     uvicorn の dictConfig 適用で消えうるため）。
@@ -275,12 +301,14 @@ def build_uvicorn_log_config() -> dict[str, Any]:
     filters = cfg.setdefault("filters", {})
     filters["redact_shortlink"] = {"()": f"{__name__}._RedactShortLinkAccessLog"}
     filters["redact_admin_user"] = {"()": f"{__name__}._RedactAdminUserAccessLog"}
+    filters["redact_oauth_start"] = {"()": f"{__name__}._RedactOAuthStartAccessLog"}
     access = cfg.get("loggers", {}).get("uvicorn.access")
     if access is not None:
         access["filters"] = [
             *access.get("filters", []),
             "redact_shortlink",
             "redact_admin_user",
+            "redact_oauth_start",
         ]
     return cfg
 
@@ -290,6 +318,9 @@ def build_uvicorn_log_config() -> dict[str, Any]:
 # （長命 presigned を毎回配ると窓が token TTL＋7日 に伸びるため）。
 _SHORTLINK_PRESIGN_TTL_S = 900
 _MAX_SHORTLINK_TOKEN_CHARS = 16_384
+# /oauth2/start/{state} ・ /slack/oauth/start/{state} が受け付ける state の上限文字数。
+# 実物は ~160 字（email|発行時刻|nonce|sha256hex の base64url）。verify 前の cheap な門。
+_MAX_OAUTH_START_STATE_CHARS = 2_048
 
 
 def _strict_urlsafe_b64decode(value: str) -> bytes | None:
@@ -3750,6 +3781,70 @@ def create_app(
             }
         )
 
+    def _start_bad_state_page() -> HTMLResponse:
+        """start ルートの state 不正/期限切れ（callback の bad_state と同じ案内）。"""
+        return HTMLResponse(
+            _page(
+                "検証に失敗しました",
+                "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
+                accent="#f9667a",
+            ),
+            status_code=400,
+        )
+
+    def _start_unconfigured_page() -> HTMLResponse:
+        """start ルートで認可 URL を組めない設定不備（利用者の操作では直らない）。"""
+        return HTMLResponse(
+            _page(
+                "システム側の設定不備です",
+                "管理者にご連絡ください。"
+                "リンクを取り直しても解消しません（連携の設定が未完了です）。",
+                accent="#f9667a",
+            ),
+            status_code=500,
+        )
+
+    @app.get("/oauth2/start/{state}")
+    def oauth2_start(state: str) -> Response:
+        """Google 連携の path 形式開始リンク: 署名 state を検証し、mcp と同一の認可 URL へ 302。
+
+        なぜ: @Aico(openclaw) の LLM は約 600 字の Google 認可 URL（``?state=…&scope=…`` の
+        長大なクエリ）を再タイプして state の一部を変え、callback で HMAC 不一致
+        （``connect_callback_bad_state``）にする（2026-08-31 / 09-02 実測。同じタスクが 1〜2 分後に
+        再発行したリンクは通る＝鍵ではなく転記の事故）。``/r/<token>`` と同じく **署名を ?query
+        から path へ移す**ことで、LLM の「クエリは消してよいトラッキング」ヒューリスティクスを
+        発火させない。
+
+        契約:
+          - state は署名＋TTL を **検証するだけで消費しない**（ワンタイム消費は
+            ``/oauth2/callback`` が一度だけ行う）。何度開いても同じ認可 URL へ飛ぶ。
+          - リダイレクト先はサーバ側で組み立てた Google 認可 URL のみ。state 以外の入力は
+            受け取らない＝open redirect 不可。
+          - 認可 URL は mcp(oauth_connect) と同じ ``OAuthConsentFlow.authorization_url`` を
+            同じ state で呼んで再構成する（scopes/redirect_uri/login_hint/hd/access_type/prompt
+            は両サービスの env が一致している前提。ズレると Google 側で拒否される）。
+        """
+        if len(state) > _MAX_OAUTH_START_STATE_CHARS:
+            logger.warning("connect_start_bad_state", reason="too_long")
+            return _start_bad_state_page()
+        email = verify_state(state)  # 署名＋TTL のみ（消費は callback の責務）
+        if not email:
+            logger.warning("connect_start_bad_state")
+            return _start_bad_state_page()
+        try:
+            if not redirect:
+                raise ValueError("OAUTH_REDIRECT_URI が未設定です")
+            url, _ = OAuthConsentFlow(redirect_uri=redirect).authorization_url(email, state=state)
+        except Exception as exc:
+            # client_id/secret・redirect の設定不備。URL/secret は出さず例外型と短い説明のみ。
+            logger.error(
+                "connect_start_url_failed",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return _start_unconfigured_page()
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
+
     @app.get("/oauth2/callback")
     def oauth2_callback(request: Request) -> Response:
         params = request.query_params
@@ -3948,6 +4043,39 @@ def create_app(
             ),
             status_code=200,
         )
+
+    @app.get("/slack/oauth/start/{state}")
+    def slack_oauth_start(state: str) -> Response:
+        """Slack 連携の path 形式開始リンク（``/oauth2/start`` と対称・検証のみで消費しない）。
+
+        署名＋TTL に加え、検証済み Slack user/team への束縛（bind_tag）が無い state はここで
+        拒否する。callback は消費後に unbound を拒否するため、通しても Slack の同意画面を
+        経てから同じ「検証に失敗しました」に落ちるだけ＝先に止めた方が利用者に優しい。
+        """
+        if len(state) > _MAX_OAUTH_START_STATE_CHARS:
+            logger.warning("connect_slack_start_bad_state", reason="too_long")
+            return _start_bad_state_page()
+        st = slack_verify_state_detailed(state)  # 署名＋TTL のみ（消費は callback の責務）
+        if st is None:
+            logger.warning("connect_slack_start_bad_state")
+            return _start_bad_state_page()
+        if st.bind_tag is None:
+            logger.warning("connect_slack_start_unbound_rejected")
+            return _start_bad_state_page()
+        try:
+            if not slack_redirect:
+                raise ValueError("SLACK_OAUTH_REDIRECT_URI が未設定です")
+            url, _ = SlackOAuthConsentFlow(redirect_uri=slack_redirect).authorization_url(
+                st.email, state=state
+            )
+        except Exception as exc:
+            logger.error(
+                "connect_slack_start_url_failed",
+                error=type(exc).__name__,
+                detail=str(exc)[:200],
+            )
+            return _start_unconfigured_page()
+        return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
 
     @app.get("/slack/oauth/callback")
     def slack_oauth_callback(request: Request) -> Response:

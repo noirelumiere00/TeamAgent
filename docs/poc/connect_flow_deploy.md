@@ -110,4 +110,50 @@ PYTHONPATH=src .venv/bin/python scripts/make_connect_links.py \
    この Mac のブラウザで開く → 許可 → 「✅連携完了」。
 5. 管理画面（localhost:8787）の連携状況が +1名 になれば成功。
 
+---
+
+## G. 連携リンクの path 形式（`/oauth2/start/{state}` ・ `USE_OAUTH_START_LINKS`）
+
+### 何が起きたか（2026-08-31 / 09-02 実測）
+@Aico(openclaw) の LLM は `oauth_connect` が返した約 600 字の Google 認可 URL
+（`https://accounts.google.com/o/oauth2/auth?...&state=<156字>&...`）を Slack へ転記する際に
+**再タイプして state の一部を変える**ことがある。connect-web のアクセスログでは、初回リンクの state が
+「復号可能・email/発行時刻/nonce/署名の構造は無傷」なのに HMAC 不一致で `connect_callback_bad_state`
+になり、同じ mcp タスクが 1〜2 分後に再発行したリンクは通った（＝鍵の不一致ではなく転記の事故）。
+レポート配信の presigned URL で起きた事故（`skills/_shared/report_delivery.py` 冒頭）と同型。
+
+### 対策（署名を ?query から path へ移す）
+- connect-web に **path 形式の開始ルート**を追加:
+  - `GET /oauth2/start/{state}` → `verify_state`（署名＋TTL。**消費はしない**・消費は callback だけ）
+    → mcp と同じ `OAuthConsentFlow.authorization_url(email, state=state)` で認可 URL を再構成 → 302
+  - `GET /slack/oauth/start/{state}` → `verify_state_detailed`（署名＋TTL＋Slack user/team 束縛必須）
+    → `SlackOAuthConsentFlow.authorization_url(email, state=state)` → 302
+  - 不正/期限切れは 400（callback と同じ「検証に失敗しました」ページ）。`Cache-Control: no-store`。
+    リダイレクト先はサーバ側生成のみで、state 以外の入力は受け取らない（open redirect 不可）。
+  - アクセスログでは `/oauth2/start/<redacted>` に伏せる（state は本人メールを含む・G8）。
+- mcp(oauth_connect) は **`USE_OAUTH_START_LINKS` が真かつ `CONNECT_BASE_URL` 設定時だけ**
+  リンクを `{CONNECT_BASE_URL}/oauth2/start/{state}` / `{CONNECT_BASE_URL}/slack/oauth/start/{state}`
+  （query 無し・path のみ）に差し替える。OFF（既定）の出力は従来と同一。ON なのに `CONNECT_BASE_URL`
+  が無い場合は `oauth_connect_start_links_prereq_missing` を warning して従来 URL を返す（fail-open）。
+  `oauth_connect_url_issued` に `start_links=true/false` が載る。
+
+### 有効化の順序（順番を守る）
+1. connect-web を start ルート入りで着陸させる（先）。実機で `GET /oauth2/start/<有効state>` が
+   302 → Google の同意画面まで到達することを確認（`curl -sI` で `location:` が
+   `https://accounts.google.com/o/oauth2/auth?...` になっていること）。
+2. mcp taskdef の env に `USE_OAUTH_START_LINKS=1` を足す（`CONNECT_BASE_URL` は既設）。
+3. Slack で「連携」→ 出たリンクが `https://<connect-web>/oauth2/start/...`（`?` 無し）であること、
+   開いて「✅ 連携が完了しました」まで通ることを本人で確認。
+   逆順（mcp を先に ON）にすると start ルートが無い connect-web で 404 になる。
+
+### 両サービスで揃っていなければならない env（認可 URL を同一に再構成するため）
+`OAUTH_STATE_SECRET` / `SLACK_OAUTH_STATE_SECRET`（既に同一 ARN）、`OAUTH_REDIRECT_URI` /
+`SLACK_OAUTH_REDIRECT_URI`、`CONNECT_GOOGLE_CLIENT_ID(/SECRET)`、`CONNECT_SLACK_CLIENT_ID`、
+`CONNECT_SEARCH_ALLOWED_HD`（または `TEAMAGENT_SHARED_COMPANY_DOMAINS`＝`hd` ヒント）。
+ズレていると start の 302 先が mcp の想定と変わる（scopes/redirect_uri は Google 側で拒否される）。
+
+### 切り戻し
+mcp の `USE_OAUTH_START_LINKS` を外すだけで従来の認可 URL 直貼りに戻る（connect-web 側の
+start ルートは残っていても無害）。
+
 _作成: 2026-06-04 / PoC branch poc/multiskill-orchestrator。リンク配布方式・常時稼働対応版。_

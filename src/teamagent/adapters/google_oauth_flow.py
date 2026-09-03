@@ -201,13 +201,18 @@ class OAuthConsentFlow:
             autogenerate_code_verifier=False,
         )
 
-    def authorization_url(self, user_email: str) -> tuple[str, str]:
+    def authorization_url(self, user_email: str, *, state: str | None = None) -> tuple[str, str]:
         """本人専用の同意URLと state を返す。
 
         access_type=offline + prompt=consent で refresh token を確実に取得する。
+
+        ``state`` を与えると新規発行せずその値で URL を組む。connect-web の
+        ``/oauth2/start/{state}`` が、mcp(oauth_connect) の発行した state から **同一の** 認可
+        URL をサーバ側で再構成するための口（呼び出し側が verify_state 済みであること）。
+        省略時は従来どおり本人メールで署名した state を新規発行する。
         """
         email = user_email.strip().lower()
-        state = make_state(email)
+        state = state if state is not None else make_state(email)
         auth_params = {
             "access_type": "offline",
             "prompt": "consent",
