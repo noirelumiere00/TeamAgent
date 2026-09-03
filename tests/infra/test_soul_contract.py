@@ -389,3 +389,28 @@ def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
     """
     assert "エラー文言の言い換えを禁じる規約であって、連携そのものを避ける規約ではない" in soul
     assert "利用者が自分から連携を求めたら、必ず `oauth_connect` を呼ぶ" in soul
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節がある", "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）"),
+        ("一字も変えず", "**一字も変えず**そのまま利用者に提示する"),
+        ("推測・作文しない", "**原因を自分で推測・作文しない**"),
+        (
+            "発火語で必ず呼ぶ",
+            "「連携」「連携して」「Google連携」「Slack連携」「接続」は **必ず `oauth_connect` を呼ぶ**",
+        ),
+        ("呼ばずに答えない", "呼ばずに答えない"),
+    ],
+)
+def test_connect_diagnostics_rule_is_present(soul: str, label: str, phrase: str) -> None:
+    """連携失敗の診断行（`診断: CONNECT-…`・connect_diagnostics）を LLM が改変しないための規約。
+
+    実害（2026-09-03 実測）: 失敗時に利用者へ届く文言が「検証に失敗しました」等しかなく、
+    管理者へ「うまくいかない」とだけ問い合わせが来る。診断行は利用者がそのまま転送する
+    前提なので、LLM が要約・言い換え・推測で上書きすると価値がゼロになる。
+    ここが赤くなったら、消す前に runbook（docs/runbooks/connect_diagnostics.md）の運用が
+    診断行に依存していないかを確認すること。
+    """
+    assert phrase in soul, f"連携診断の規約が欠けている: {label}"

@@ -35,6 +35,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
+from teamagent.connect_diagnostics import format_user_message, identity_reject_code, now_jst
 from teamagent.identity import (
     IdentityResolver,
     build_rls_metadata,
@@ -444,6 +445,21 @@ def _err(message: str, **extra: Any) -> list[TextContent]:
     return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
 
+def _identity_rejected(reason: str, *, slack_user_id: str | None) -> list[TextContent]:
+    """本人特定失敗（``CALLER_IDENTITY_REJECTED``）を、診断行つきの利用者向け文で返す。
+
+    code は従来どおり ``CALLER_IDENTITY_REJECTED``（attack_mcp / 外殻の判定は code を見る）。
+    message 末尾に ``診断: CONNECT-I01a|b|c <時刻 JST> <slack_user_id>`` を付け、利用者が
+    そのまま管理者へ転送できるようにする（docs/runbooks/connect_diagnostics.md）。
+    """
+    diag = format_user_message(
+        identity_reject_code(reason),
+        when=now_jst(),
+        extra=slack_user_id or None,
+    )
+    return _err(f"Caller authorization failed. {diag}", code="CALLER_IDENTITY_REJECTED")
+
+
 async def _resolve_metadata(
     raw: dict[str, Any],
     *,
@@ -473,27 +489,18 @@ async def _resolve_metadata(
             logger.warning("identity_spoof_rejected", tool=tool, reason="oc_fields_dropped")
         if verified_caller is None or identity_resolver is None or not slack_user_id:
             logger.warning("identity_spoof_rejected", tool=tool, reason="missing_verified_caller")
-            return {}, _err(
-                "Caller authorization failed.",
-                code="CALLER_IDENTITY_REJECTED",
-            )
+            return {}, _identity_rejected("missing_verified_caller", slack_user_id=slack_user_id)
         try:
             identity = await identity_resolver(slack_user_id)
         except Exception:
             logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
-            return {}, _err(
-                "Caller authorization failed.",
-                code="CALLER_IDENTITY_REJECTED",
-            )
+            return {}, _identity_rejected("resolver_error", slack_user_id=slack_user_id)
         resolved = (
             build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
         )
         if not resolved or not resolved.get("user_email"):
             logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
-            return {}, _err(
-                "Caller authorization failed.",
-                code="CALLER_IDENTITY_REJECTED",
-            )
+            return {}, _identity_rejected("resolve_none", slack_user_id=slack_user_id)
         company_meta = company_member_metadata(company_shared_groups)
         meta = {
             **company_meta,
@@ -522,26 +529,24 @@ async def _resolve_metadata(
                     tool=tool,
                     reason="missing_verified_caller",
                 )
-                return {}, _err(
-                    "Caller authorization failed.",
-                    code="CALLER_IDENTITY_REJECTED",
+                return {}, _identity_rejected(
+                    "missing_verified_caller", slack_user_id=slack_user_id
                 )
             return no_access_metadata(), None
+        reject_reason = "resolve_none"
         try:
             identity = await identity_resolver(slack_user_id)
         except Exception:
             logger.warning("identity_spoof_rejected", tool=tool, reason="resolver_error")
             identity = None
+            reject_reason = "resolver_error"  # 診断コードは I01b（ログ event は従来どおり）
         strict_meta = (
             build_rls_metadata(identity, allowed_domains=allowed_domains) if identity else None
         )
         if strict_meta is None:
             if require_rls:
                 logger.warning("identity_spoof_rejected", tool=tool, reason="resolve_none")
-                return {}, _err(
-                    "Caller authorization failed.",
-                    code="CALLER_IDENTITY_REJECTED",
-                )
+                return {}, _identity_rejected(reject_reason, slack_user_id=slack_user_id)
             return no_access_metadata(), None
         logger.info(
             "identity_resolved",
@@ -604,10 +609,10 @@ async def _verify_caller(
             tool=tool,
             reason=str(error),
         )
-        return None, _err(
-            "Caller authorization failed.",
-            code="CALLER_IDENTITY_REJECTED",
-        )
+        # 署名済み claim が無い/不正＝検証済み caller が無い。本番で利用者が最初に踏む
+        # 拒否はここ（_resolve_metadata の missing_verified_caller は claim 検証を通った後の
+        # 同義の防壁）なので、同じ I01a を付けて利用者が転送できるようにする。
+        return None, _identity_rejected("missing_verified_caller", slack_user_id=None)
 
 
 def _log_connect_intent(

@@ -18,7 +18,7 @@ import hmac
 import os
 import secrets
 import time
-from typing import Any
+from typing import Any, Literal
 
 from teamagent.adapters.oauth_token_store import OAuthToken
 from teamagent.hmac_durable_state import HMAC_STATE_SCOPE_ENV, HMAC_STATE_TABLE_ENV
@@ -75,6 +75,44 @@ def make_state(
     return base64.urlsafe_b64encode(f"{body}{_SEP}{sig}".encode()).decode("ascii")
 
 
+StateStatus = Literal["ok", "bad_signature", "expired", "malformed"]
+
+
+def inspect_state(
+    state: str,
+    *,
+    secret: bytes | None = None,
+    now: int | None = None,
+    max_age_s: int = _DEFAULT_STATE_TTL_S,
+) -> tuple[StateStatus, str | None]:
+    """state を検証し、``(status, email)`` で **失敗理由まで** 返す（診断コードの出し分け用）。
+
+    - ``("ok", email)``: 署名一致・未失効。
+    - ``("bad_signature", None)``: 復号はできたが HMAC 不一致（転記・改変）。email は
+      署名未検証なので返さない。
+    - ``("expired", email)``: 署名は一致するが発行から ``max_age_s`` 超（または未来すぎる）。
+      署名済みなので email は信用してよい（期限切れページに本人メールを出せる）。
+    - ``("malformed", None)``: base64/区切り/数値として解釈できない。
+
+    ``verify_state`` はこの関数の薄い包みで、挙動（ok のときだけ email）は従来と同一。
+    """
+    sec = secret or _state_secret()
+    try:
+        raw = base64.urlsafe_b64decode(state.encode("ascii")).decode("utf-8")
+        body, sig = raw.rsplit(_SEP, 1)
+        email, issued_s, _nonce = body.split(_SEP)
+        issued = int(issued_s)
+    except (ValueError, UnicodeDecodeError):
+        return "malformed", None
+    expect = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expect):
+        return "bad_signature", None
+    current = int(now if now is not None else time.time())
+    if current - issued > max_age_s or issued - current > 60:
+        return "expired", email
+    return "ok", email
+
+
 def verify_state(
     state: str,
     *,
@@ -83,21 +121,8 @@ def verify_state(
     max_age_s: int = _DEFAULT_STATE_TTL_S,
 ) -> str | None:
     """state を検証し、正しく未失効なら email を返す。未知・改竄・期限切れは None。"""
-    sec = secret or _state_secret()
-    try:
-        raw = base64.urlsafe_b64decode(state.encode("ascii")).decode("utf-8")
-        body, sig = raw.rsplit(_SEP, 1)
-        email, issued_s, _nonce = body.split(_SEP)
-        issued = int(issued_s)
-    except (ValueError, UnicodeDecodeError):
-        return None
-    expect = hmac.new(sec, body.encode("utf-8"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expect):
-        return None
-    current = int(now if now is not None else time.time())
-    if current - issued > max_age_s or issued - current > 60:
-        return None
-    return email
+    status, email = inspect_state(state, secret=secret, now=now, max_age_s=max_age_s)
+    return email if status == "ok" else None
 
 
 def consume_state_once(
@@ -250,7 +275,9 @@ class OAuthConsentFlow:
 __all__ = [
     "WORKSPACE_SCOPES",
     "OAuthConsentFlow",
+    "StateStatus",
     "consume_state_once",
+    "inspect_state",
     "make_state",
     "verify_state",
 ]

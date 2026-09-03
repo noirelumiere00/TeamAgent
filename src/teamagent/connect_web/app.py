@@ -40,6 +40,7 @@ from teamagent.adapters.google_auth import connect_client_id_secret
 from teamagent.adapters.google_oauth_flow import (
     OAuthConsentFlow,
     consume_state_once,
+    inspect_state,
     verify_state,
 )
 from teamagent.adapters.oauth_token_store import (
@@ -53,6 +54,13 @@ from teamagent.adapters.slack_oauth_flow import (
 )
 from teamagent.adapters.slack_oauth_flow import (
     verify_state_detailed as slack_verify_state_detailed,
+)
+from teamagent.connect_diagnostics import (
+    ConnectDiag,
+    admin_forward_hint,
+    format_diag_line,
+    mask_email,
+    now_jst,
 )
 from teamagent.dashboard.auth import (
     Verifier,
@@ -683,9 +691,20 @@ def _envflag(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes")
 
 
-def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
+def _page(title: str, body: str, *, accent: str = "#36c08a", diag: str | None = None) -> str:
+    """案内ページ。``diag`` を渡すと管理者へ転送する診断行（``診断: CONNECT-…``）を末尾に付ける。
+
+    診断行は ``teamagent.connect_diagnostics.format_diag_line`` が組む固定形式で、state/code/token
+    などの秘匿値は含まない（コード・時刻・マスク済み識別子・request_id のみ）。
+    """
     t = html.escape(title)
     b = html.escape(body)
+    diag_html = ""
+    if diag:
+        diag_html = (
+            f'<p class="diag">{html.escape(admin_forward_hint())}<br>'
+            f"<code>{html.escape(diag)}</code></p>"
+        )
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -697,9 +716,61 @@ def _page(title: str, body: str, *, accent: str = "#36c08a") -> str:
         "padding:36px 40px;max-width:520px;text-align:center}"
         f".card h1{{font-size:22px;margin:0 0 14px;color:{accent}}}"
         ".card p{color:#93a1bd;line-height:1.7;margin:6px 0}"
+        ".card p.diag{margin-top:18px;font-size:13px;border-top:1px solid #283450;padding-top:12px}"
+        ".card code{display:inline-block;margin-top:6px;padding:4px 8px;background:#0f1420;"
+        "border-radius:6px;color:#e8edf7;user-select:all;word-break:break-all}"
         "</style></head><body>"
-        f'<div class="card"><h1>{t}</h1><p>{b}</p></div></body></html>'
+        f'<div class="card"><h1>{t}</h1><p>{b}</p>{diag_html}</div></body></html>'
     )
+
+
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._:\-]{1,128}")
+
+
+def _request_id_of(request: Request) -> str | None:
+    """診断行に載せる request_id（ALB の ``X-Amzn-Trace-Id`` の Root、無ければ ``X-Request-Id``）。
+
+    CloudWatch のアクセスログ/ALB ログと突き合わせる鍵。値は英数と ``._:-`` のみ許し、
+    それ以外（改行・タグ）は載せない。無ければ None（診断行は request_id 無しで組む）。
+    """
+    raw = request.headers.get("x-amzn-trace-id") or request.headers.get("x-request-id") or ""
+    for part in raw.split(";"):
+        part = part.strip()
+        if part.startswith("Root="):
+            raw = part[len("Root=") :]
+            break
+    raw = raw.strip()
+    if not raw or not _REQUEST_ID_RE.fullmatch(raw):
+        return None
+    return raw[:64]
+
+
+def _connect_failure(
+    title: str,
+    body: str,
+    *,
+    code: ConnectDiag,
+    request_id: str | None,
+    status_code: int,
+    email: str | None = None,
+    slack_user_id: str | None = None,
+    accent: str = "#f9667a",
+) -> HTMLResponse:
+    """連携 callback の失敗ページ（本文 ＋ 管理者へ転送できる診断行）。
+
+    全失敗経路がここを通ることで「診断行の無い失敗ページ」を作れなくする。
+    email は必ずマスクして載せる（署名未検証の email は呼び出し側が渡さない）。
+    ``request_id`` は呼び出し側が ``_request_id_of(request)`` で 1 回だけ求め、同じ値を
+    失敗経路の warning ログにも ``request_id=`` で載せる（診断行 ↔ ログの突合キー）。
+    """
+    diag = format_diag_line(
+        code,
+        when=now_jst(),
+        request_id=request_id,
+        masked_email=mask_email(email) if email else None,
+        extra=slack_user_id,
+    )
+    return HTMLResponse(_page(title, body, accent=accent, diag=diag), status_code=status_code)
 
 
 def _js_str(value: str) -> str:
@@ -3879,38 +3950,79 @@ def create_app(
 
     @app.get("/oauth2/callback")
     def oauth2_callback(request: Request) -> Response:
+        # 失敗ページは必ず _connect_failure を通し、診断コード（CONNECT-S0x）と転送用の
+        # 1 行を付ける。warning ログにも同じ diag= と request_id= を付け、利用者の転送文から
+        # ログへ直行できるようにする（docs/runbooks/connect_diagnostics.md）。
+        rid = _request_id_of(request)
         params = request.query_params
         err = params.get("error", "")
         if err:
-            logger.warning("connect_callback_user_denied", error=err)
-            return HTMLResponse(
-                _page(
-                    "認可がキャンセルされました",
-                    "もう一度 Slack で Aico に「連携」と話しかけてください。",
-                ),
+            logger.warning(
+                "connect_callback_user_denied",
+                request_id=rid,
+                error=err,
+                diag=ConnectDiag.S05.value,
+            )
+            return _connect_failure(
+                "認可がキャンセルされました",
+                "もう一度 Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S05,
+                request_id=rid,
                 status_code=400,
+                accent="#36c08a",
             )
         code = params.get("code", "")
         state = params.get("state", "")
         if not code or not state:
-            return HTMLResponse(
-                _page(
-                    "不正なリクエスト",
-                    "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
-                ),
-                status_code=400,
+            logger.warning(
+                "connect_callback_bad_state",
+                request_id=rid,
+                state_reason="missing_params",
+                diag=ConnectDiag.S01.value,
             )
-        email = verify_state(state)
-        if not email:
-            logger.warning("connect_callback_bad_state")
-            return HTMLResponse(
-                _page(
+            return _connect_failure(
+                "不正なリクエスト",
+                "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S01,
+                request_id=rid,
+                status_code=400,
+                accent="#36c08a",
+            )
+        state_status, inspected_email = inspect_state(state)
+        if state_status != "ok" or not inspected_email:
+            # 署名不一致（転記・改変）と期限切れを出し分ける。期限切れは署名済みなので
+            # 本人メール（マスク）を診断行に載せられる。署名不一致の email は信用しない。
+            if state_status == "expired":
+                logger.warning(
+                    "connect_callback_bad_state",
+                    request_id=rid,
+                    state_reason=state_status,
+                    diag=ConnectDiag.S02.value,
+                )
+                return _connect_failure(
                     "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+                    "リンクの有効期限（発行から 30 分）が切れています。"
+                    "Slack で Aico に「連携」と話しかけて、新しいリンクを使ってください。",
+                    code=ConnectDiag.S02,
+                    request_id=rid,
+                    status_code=400,
+                    email=inspected_email,
+                )
+            logger.warning(
+                "connect_callback_bad_state",
+                request_id=rid,
+                state_reason=state_status,
+                diag=ConnectDiag.S01.value,
+            )
+            return _connect_failure(
+                "検証に失敗しました",
+                "リンクが古いか不正です（途中で文字が変わった可能性があります）。"
+                "Slack で Aico に「連携」と話しかけて、新しいリンクをそのまま開いてください。",
+                code=ConnectDiag.S01,
+                request_id=rid,
                 status_code=400,
             )
+        email = inspected_email
         # ⚠️ ワンタイム消費の失敗は **原因別に出し分ける**（2026-08 実害）。
         # 旧実装は全例外を握って ``state_consumed=False`` に倒し、「リンクが古いか
         # 使用済みです」と表示していた。実際には `consume_state_once` は state 保管先の
@@ -3924,45 +4036,54 @@ def create_app(
             # 設定不備（state 保管先の env 未設定など）。利用者側の操作では直らない。
             logger.error(
                 "connect_callback_state_store_unconfigured",
+                request_id=rid,
                 user_email=email,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "システム側の設定不備です",
-                    "管理者にご連絡ください。"
-                    "リンクを取り直しても解消しません（連携の設定が未完了です）。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "システム側の設定不備です",
+                "管理者にご連絡ください。"
+                "リンクを取り直しても解消しません（連携の設定が未完了です）。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=email,
             )
         except Exception as exc:
             # 一時障害（DynamoDB のスロットリング・権限・ネットワーク等）。時間をおけば直りうる。
             logger.warning(
                 "connect_callback_state_consume_failed",
+                request_id=rid,
                 user_email=email,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "一時的なエラーが発生しました",
-                    "少し時間をおいて、もう一度リンクを開いてください。"
-                    "繰り返す場合は管理者にご連絡ください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "一時的なエラーが発生しました",
+                "少し時間をおいて、もう一度リンクを開いてください。"
+                "繰り返す場合は管理者にご連絡ください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=503,
+                email=email,
             )
         if not state_consumed:
-            logger.warning("connect_callback_reused_state", user_email=email)
-            return HTMLResponse(
-                _page(
-                    "検証に失敗しました",
-                    "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_callback_reused_state",
+                request_id=rid,
+                user_email=email,
+                diag=ConnectDiag.S03.value,
+            )
+            return _connect_failure(
+                "検証に失敗しました",
+                "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S03,
+                request_id=rid,
                 status_code=400,
+                email=email,
             )
         try:
             token = _exchange(code)
@@ -3970,40 +4091,52 @@ def create_app(
             # トークン/本文は出さない。診断用に例外の型と短い説明のみ。
             logger.warning(
                 "connect_callback_exchange_failed",
+                request_id=rid,
                 user_email=email,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "連携に失敗しました",
-                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "連携に失敗しました",
+                "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=email,
             )
         id_token = token.id_token
         if not id_token:
-            logger.warning("connect_callback_id_token_missing", user_email=email)
-            return HTMLResponse(
-                _page(
-                    "Googleアカウントを確認できませんでした",
-                    f"{email} でログインし直してください。"
-                    "Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_callback_id_token_missing",
+                request_id=rid,
+                user_email=email,
+                diag=ConnectDiag.S06.value,
+            )
+            return _connect_failure(
+                "Googleアカウントを確認できませんでした",
+                f"{email} でログインし直してください。"
+                "Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=403,
+                email=email,
             )
         client_id, _ = connect_client_id_secret()
         if not client_id:
-            logger.warning("connect_callback_client_id_missing", user_email=email)
-            return HTMLResponse(
-                _page(
-                    "連携に失敗しました",
-                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_callback_client_id_missing",
+                request_id=rid,
+                user_email=email,
+                diag=ConnectDiag.S06.value,
+            )
+            return _connect_failure(
+                "連携に失敗しました",
+                "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=email,
             )
         try:
             claims = verify_google_id_token(
@@ -4014,17 +4147,19 @@ def create_app(
         except Exception as exc:
             logger.warning(
                 "connect_callback_id_token_invalid",
+                request_id=rid,
                 user_email=email,
                 error=type(exc).__name__,
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "Googleアカウントを確認できませんでした",
-                    f"{email} でログインし直してください。"
-                    "Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "Googleアカウントを確認できませんでした",
+                f"{email} でログインし直してください。"
+                "Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=403,
+                email=email,
             )
         consented_email = claims.get("email")
         email_verified = claims.get("email_verified")
@@ -4034,15 +4169,20 @@ def create_app(
             and (email_verified is True or str(email_verified).lower() == "true")
         )
         if not identity_verified:
-            logger.warning("connect_callback_account_mismatch", user_email=email)
-            return HTMLResponse(
-                _page(
-                    "Googleアカウントが一致しません",
-                    f"別のアカウントで許可されました。{email} でログインし直してください。"
-                    "Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_callback_account_mismatch",
+                request_id=rid,
+                user_email=email,
+                diag=ConnectDiag.S04.value,
+            )
+            return _connect_failure(
+                "Googleアカウントが一致しません",
+                f"別のアカウントで許可されました。{email} でログインし直してください。"
+                "Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S04,
+                request_id=rid,
                 status_code=403,
+                email=email,
             )
         try:
             _put_verified_oauth_token(
@@ -4054,19 +4194,23 @@ def create_app(
         except Exception as exc:
             logger.warning(
                 "connect_callback_store_failed",
+                request_id=rid,
                 user_email=email,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "連携に失敗しました",
-                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "連携に失敗しました",
+                "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=email,
             )
-        logger.info("connect_callback_ok", user_email=email, scopes=len(token.scopes))
+        logger.info(
+            "connect_callback_ok", request_id=rid, user_email=email, scopes=len(token.scopes)
+        )
         return HTMLResponse(
             _page(
                 "✅ 連携が完了しました",
@@ -4116,36 +4260,54 @@ def create_app(
 
     @app.get("/slack/oauth/callback")
     def slack_oauth_callback(request: Request) -> Response:
+        # Google 版と同じく、失敗ページは必ず _connect_failure（診断コード CONNECT-T0x/S0x）を
+        # 通し、ログにも diag= / request_id= を付ける。Slack の state は署名不一致/期限切れを
+        # 区別しないため T01 に束ねる。
+        rid = _request_id_of(request)
         params = request.query_params
         err = params.get("error", "")
         if err:
-            logger.warning("connect_slack_callback_user_denied", error=err)
-            return HTMLResponse(
-                _page(
-                    "認可がキャンセルされました",
-                    "もう一度 Slack で Aico に「連携」と話しかけてください。",
-                ),
+            logger.warning(
+                "connect_slack_callback_user_denied",
+                request_id=rid,
+                error=err,
+                diag=ConnectDiag.S05.value,
+            )
+            return _connect_failure(
+                "認可がキャンセルされました",
+                "もう一度 Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S05,
+                request_id=rid,
                 status_code=400,
+                accent="#36c08a",
             )
         code = params.get("code", "")
         state = params.get("state", "")
         if not code or not state:
-            return HTMLResponse(
-                _page(
-                    "不正なリクエスト",
-                    "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
-                ),
+            logger.warning(
+                "connect_slack_callback_bad_state",
+                request_id=rid,
+                state_reason="missing_params",
+                diag=ConnectDiag.T01.value,
+            )
+            return _connect_failure(
+                "不正なリクエスト",
+                "リンクが壊れています。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T01,
+                request_id=rid,
                 status_code=400,
+                accent="#36c08a",
             )
         st = slack_verify_state_detailed(state)
         if st is None:
-            logger.warning("connect_slack_callback_bad_state")
-            return HTMLResponse(
-                _page(
-                    "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_slack_callback_bad_state", request_id=rid, diag=ConnectDiag.T01.value
+            )
+            return _connect_failure(
+                "検証に失敗しました",
+                "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T01,
+                request_id=rid,
                 status_code=400,
             )
         try:
@@ -4153,52 +4315,60 @@ def create_app(
         except RuntimeError as exc:
             logger.error(
                 "connect_slack_callback_state_store_unconfigured",
+                request_id=rid,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "システム側の設定不備です",
-                    "管理者にご連絡ください。"
-                    "リンクを取り直しても解消しません（連携の設定が未完了です）。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "システム側の設定不備です",
+                "管理者にご連絡ください。"
+                "リンクを取り直しても解消しません（連携の設定が未完了です）。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=st.email,
             )
         except Exception as exc:
             logger.warning(
                 "connect_slack_callback_state_consume_failed",
+                request_id=rid,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "一時的なエラーが発生しました",
-                    "少し時間をおいて、もう一度リンクを開いてください。"
-                    "繰り返す場合は管理者にご連絡ください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "一時的なエラーが発生しました",
+                "少し時間をおいて、もう一度リンクを開いてください。"
+                "繰り返す場合は管理者にご連絡ください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=503,
+                email=st.email,
             )
         if not state_consumed:
-            logger.warning("connect_slack_callback_reused_state")
-            return HTMLResponse(
-                _page(
-                    "検証に失敗しました",
-                    "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_slack_callback_reused_state", request_id=rid, diag=ConnectDiag.T01.value
+            )
+            return _connect_failure(
+                "検証に失敗しました",
+                "リンクが古いか使用済みです。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T01,
+                request_id=rid,
                 status_code=400,
+                email=st.email,
             )
         if st.bind_tag is None:
-            logger.warning("connect_slack_state_unbound_rejected")
-            return HTMLResponse(
-                _page(
-                    "検証に失敗しました",
-                    "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            logger.warning(
+                "connect_slack_state_unbound_rejected", request_id=rid, diag=ConnectDiag.T01.value
+            )
+            return _connect_failure(
+                "検証に失敗しました",
+                "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T01,
+                request_id=rid,
                 status_code=400,
+                email=st.email,
             )
         try:
             token = _slack_exchange(code)
@@ -4206,54 +4376,68 @@ def create_app(
             # xoxp/code/secret を露出させない。診断は例外型のみ（G8・str(exc) は出さない）。
             logger.warning(
                 "connect_slack_callback_exchange_failed",
+                request_id=rid,
                 error=type(exc).__name__,
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "連携に失敗しました",
-                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "連携に失敗しました",
+                "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=st.email,
             )
         if not token.slack_user_id or not token.team_id:
-            logger.warning("connect_slack_callback_identity_missing")
+            logger.warning(
+                "connect_slack_callback_identity_missing",
+                request_id=rid,
+                diag=ConnectDiag.T02.value,
+            )
             _slack_revoke(token)
-            return HTMLResponse(
-                _page(
-                    "Slackアカウントを確認できませんでした",
-                    "Slack で Aico に「連携」と話しかけ、もう一度許可してください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "Slackアカウントを確認できませんでした",
+                "Slack で Aico に「連携」と話しかけ、もう一度許可してください。",
+                code=ConnectDiag.T02,
+                request_id=rid,
                 status_code=403,
+                email=st.email,
             )
         # 外部WSの xoxp を他 email に紐付けないよう team_id 照合（設定時のみ）。
         expected_team = os.environ.get("SLACK_TEAM_ID", "").strip()
         if expected_team and token.team_id != expected_team:
-            logger.warning("connect_slack_callback_team_mismatch")
+            logger.warning(
+                "connect_slack_callback_team_mismatch", request_id=rid, diag=ConnectDiag.T02.value
+            )
             _slack_revoke(token)
-            return HTMLResponse(
-                _page(
-                    "対象ワークスペースが違います",
-                    "所属ワークスペースの Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "対象ワークスペースが違います",
+                "所属ワークスペースの Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T02,
+                request_id=rid,
                 status_code=403,
+                email=st.email,
+                slack_user_id=token.slack_user_id,
             )
         if not hmac.compare_digest(
             expected_bind_tag(token.team_id, token.slack_user_id),
             st.bind_tag,
         ):
-            logger.warning("connect_slack_callback_identity_mismatch")
+            logger.warning(
+                "connect_slack_callback_identity_mismatch",
+                request_id=rid,
+                diag=ConnectDiag.T02.value,
+            )
             _slack_revoke(token)
-            return HTMLResponse(
-                _page(
-                    "Slackアカウントが一致しません",
-                    "このリンクに対応する Slack アカウントで許可してください。"
-                    "Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "Slackアカウントが一致しません",
+                "このリンクに対応する Slack アカウントで許可してください。"
+                "Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.T02,
+                request_id=rid,
                 status_code=403,
+                email=st.email,
+                slack_user_id=token.slack_user_id,
             )
         try:
             _put_verified_slack_token(
@@ -4263,29 +4447,37 @@ def create_app(
                 identity_verified=True,
             )
         except UniqueViolation:
-            logger.warning("slack_oauth_uid_collision")
-            return HTMLResponse(
-                _page(
-                    "Slackアカウントを連携できませんでした",
-                    "この Slack アカウントはすでに連携されています。管理者にご連絡ください。",
-                    accent="#f9667a",
-                ),
+            logger.warning("slack_oauth_uid_collision", request_id=rid, diag=ConnectDiag.T02.value)
+            return _connect_failure(
+                "Slackアカウントを連携できませんでした",
+                "この Slack アカウントはすでに連携されています。管理者にご連絡ください。",
+                code=ConnectDiag.T02,
+                request_id=rid,
                 status_code=409,
+                email=st.email,
+                slack_user_id=token.slack_user_id,
             )
         except Exception as exc:
             logger.warning(
                 "connect_slack_callback_store_failed",
+                request_id=rid,
                 error=type(exc).__name__,
+                diag=ConnectDiag.S06.value,
             )
-            return HTMLResponse(
-                _page(
-                    "連携に失敗しました",
-                    "時間をおいて Slack で Aico に「連携」と話しかけてください。",
-                    accent="#f9667a",
-                ),
+            return _connect_failure(
+                "連携に失敗しました",
+                "時間をおいて Slack で Aico に「連携」と話しかけてください。",
+                code=ConnectDiag.S06,
+                request_id=rid,
                 status_code=500,
+                email=st.email,
             )
-        logger.info("connect_slack_callback_ok", user_email=st.email, scopes=len(token.scopes))
+        logger.info(
+            "connect_slack_callback_ok",
+            request_id=rid,
+            user_email=st.email,
+            scopes=len(token.scopes),
+        )
         return HTMLResponse(
             _page(
                 "✅ Slack連携が完了しました",
