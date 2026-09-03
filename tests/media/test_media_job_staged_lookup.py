@@ -212,7 +212,7 @@ def test_find_staged_head_403_warns_only_once_per_process() -> None:
     media_job_module._reset_head_forbidden_warning()
     client = _client(s3=_S3({}, raise_exc=_ForbiddenS3Error(code="AccessDenied")))
     with capture_logs() as logs:
-        for name in ("apify-p01002.mp4", "apify-p01002.attempted", "apify-p01003.mp4"):
+        for name in ("apify-p1.mp4", "apify-p1.attempted", "apify-p2.mp4"):
             assert client.find_staged(job_id=_JOB, name=name, deadline_epoch_s=400) is None
     levels = [entry["log_level"] for entry in _forbidden_events(logs)]
     assert levels.count("warning") == 1  # 最初の 1 回だけ warning
