@@ -21,6 +21,16 @@
   - Slack URL の state は MCP 境界で検証済みの Slack user/team ID に束縛する。
     検証済み ID が無い経路では Slack URL を発行せず、Slack 内の安全な代替導線を案内する。
   - トークンストアは RLS（本人行のみ）越しに has() するだけで、生トークンは扱わない。
+
+リンクの形（USE_OAUTH_START_LINKS・既定 OFF）:
+  @Aico(openclaw) の LLM は約 600 字の Google 認可 URL（``?state=…&scope=…``）を再タイプして
+  state の一部を変え、callback で HMAC 不一致にする（2026-08-31 / 09-02 実測。同じタスクが
+  1〜2 分後に再発行したリンクは通る＝鍵ではなく転記の事故）。skills/_shared/report_delivery.py
+  の ``/r/<token>`` と同じ対策＝**署名を ?query から path へ移す**。フラグ ON かつ
+  ``CONNECT_BASE_URL`` 設定時だけ、Google/Slack のリンクを connect-web の
+  ``/oauth2/start/{state}`` ``/slack/oauth/start/{state}``（query 無し・path のみ）に差し替える。
+  connect-web 側は state を検証（消費はしない）して、ここと同一の認可 URL へ 302 する。
+  既定 OFF の理由: connect-web に start ルートが着陸する前に ON にすると 404 になるため。
 """
 
 from __future__ import annotations
@@ -44,6 +54,32 @@ def _mask_email(email: str) -> str:
         return "***"
     local, _, domain = email.partition("@")
     return f"{local[:1] if local else ''}***@{domain}"
+
+
+def start_links_enabled() -> bool:
+    """USE_OAUTH_START_LINKS: 連携リンクを connect-web の path 形式で出す段階ゲート（既定 OFF）。
+
+    report_delivery.short_url_enabled と同じ真偽値の読み方。connect-web に
+    ``/oauth2/start`` ``/slack/oauth/start`` が着陸し、実機で 302 → 認可画面まで確認した後に ON。
+    """
+    return os.environ.get("USE_OAUTH_START_LINKS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _start_link_base() -> str:
+    """path 形式リンクの土台 URL（``CONNECT_BASE_URL``・末尾スラッシュ無し・未設定は ""）。"""
+    from teamagent.skills.knowledge_search_url.skill import connect_base_url
+
+    return connect_base_url()
+
+
+def google_start_link(base: str, state: str) -> str:
+    """connect-web の Google 連携開始リンク（query 無し・path のみ）。"""
+    return f"{base}/oauth2/start/{state}"
+
+
+def slack_start_link(base: str, state: str) -> str:
+    """connect-web の Slack 連携開始リンク（query 無し・path のみ）。"""
+    return f"{base}/slack/oauth/start/{state}"
 
 
 def _build_google_store() -> Any:
@@ -194,8 +230,9 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             self._slack_status(requester, verified_uid, log) if slack_configured else (False, False)
         )
 
-        # Google 認可URL（未連携時のみ生成）。
+        # Google 認可URL（未連携時のみ生成）。state は path 形式リンクへの差し替えに使う。
         url: str | None = None
+        google_state: str | None = None
         if not google_connected:
             redirect = os.environ.get("OAUTH_REDIRECT_URI", "").strip()
             if not redirect:
@@ -203,7 +240,9 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                     "OAUTH_REDIRECT_URI が未設定です（connect-web の公開 callback URL）"
                 )
             try:
-                url, _state = OAuthConsentFlow(redirect_uri=redirect).authorization_url(requester)
+                url, google_state = OAuthConsentFlow(redirect_uri=redirect).authorization_url(
+                    requester
+                )
             except Exception as e:
                 log.warning("oauth_connect_url_failed", error=type(e).__name__)
                 raise ValueError(
@@ -213,6 +252,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         # Slack 個人トークン(xoxp) の認可URL（設定済み & 未連携時のみ生成）。
         # 生成失敗は Google のみで継続（fail-open）。
         slack_url: str | None = None
+        slack_state: str | None = None
         slack_url_suppressed = False
         if slack_configured and not slack_connected:
             slack_redirect = os.environ.get("SLACK_OAUTH_REDIRECT_URI", "").strip()
@@ -228,7 +268,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                 )
             else:
                 try:
-                    slack_url, _ = SlackOAuthConsentFlow(
+                    slack_url, slack_state = SlackOAuthConsentFlow(
                         redirect_uri=slack_redirect
                     ).authorization_url(
                         requester,
@@ -238,6 +278,29 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                 except Exception as e:
                     log.warning("oauth_connect_slack_url_failed", error=type(e).__name__)
                     slack_url = None
+                    slack_state = None
+
+        # path 形式リンクへの差し替え（USE_OAUTH_START_LINKS=ON かつ CONNECT_BASE_URL 設定時のみ）。
+        # OFF のときは上で組んだ認可 URL をそのまま返す（従来出力と同一）。ON なのに土台 URL が
+        # 無い場合は黙って落とさず名指しで warning し、従来の認可 URL を返す（fail-open）。
+        start_links = False
+        if start_links_enabled() and (url or slack_url):
+            base = _start_link_base()
+            if not base:
+                log.warning(
+                    "oauth_connect_start_links_prereq_missing",
+                    missing="CONNECT_BASE_URL",
+                    hint=(
+                        "USE_OAUTH_START_LINKS=1 だが CONNECT_BASE_URL 未設定のため"
+                        "認可 URL を直接返す"
+                    ),
+                )
+            else:
+                start_links = True
+                if url and google_state:
+                    url = google_start_link(base, google_state)
+                if slack_url and slack_state:
+                    slack_url = slack_start_link(base, slack_state)
 
         masked = _mask_email(requester)
         message = _compose_message(
@@ -261,6 +324,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             google_scope_upgrade=google_scope_upgrade,
             slack_rebind_needed=slack_rebind_needed,
             slack_url_suppressed=slack_url_suppressed,
+            start_links=start_links,
         )
         return OAuthConnectOutput(
             url=url, slack_url=slack_url, user_email_masked=masked, message=message

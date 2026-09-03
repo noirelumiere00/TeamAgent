@@ -24,14 +24,16 @@ class OAuthConnectOutput(BaseModel):
     url: str | None = Field(
         default=None,
         description=(
-            "本人メールで HMAC 署名済みの Google OAuth 認可 URL。"
+            "本人メールで HMAC 署名済みの Google 連携リンク（Google OAuth 認可 URL、または "
+            "USE_OAUTH_START_LINKS 時は connect-web の /oauth2/start/{state}）。"
             "既に Google 連携済みなら None（リンクを出さない）"
         ),
     )
     slack_url: str | None = Field(
         default=None,
         description=(
-            "本人メールで署名済みの Slack OAuth(user_scope) 認可 URL。"
+            "本人メールで署名済みの Slack 連携リンク（Slack OAuth(user_scope) 認可 URL、または "
+            "USE_OAUTH_START_LINKS 時は connect-web の /slack/oauth/start/{state}）。"
             "既に Slack 連携済み / SLACK_OAUTH_REDIRECT_URI 未設定なら None"
         ),
     )

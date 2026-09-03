@@ -179,19 +179,26 @@ class SlackOAuthConsentFlow:
         *,
         slack_user_id: str | None = None,
         slack_team_id: str | None = None,
+        state: str | None = None,
     ) -> tuple[str, str]:
-        """本人専用の Slack 認可URLと state を返す。"""
+        """本人専用の Slack 認可URLと state を返す。
+
+        ``state`` を与えると新規発行せずその値で URL を組む（Google 版と対称）。connect-web の
+        ``/slack/oauth/start/{state}`` が mcp 発行の state から同一の認可 URL を再構成する口で、
+        呼び出し側が verify_state_detailed 済みであること。省略時は従来どおり新規発行する。
+        """
         cid, _ = _slack_client_id_secret()
         if not cid:
             raise ValueError(
                 "連携用 Slack OAuth クライアントが未設定です"
                 "（CONNECT_SLACK_CLIENT_ID または SLACK_CLIENT_ID）"
             )
-        state = make_state(
-            user_email,
-            slack_user_id=slack_user_id,
-            slack_team_id=slack_team_id,
-        )
+        if state is None:
+            state = make_state(
+                user_email,
+                slack_user_id=slack_user_id,
+                slack_team_id=slack_team_id,
+            )
         params = {
             "client_id": cid,
             "user_scope": ",".join(self._scopes),  # bot scope(scope=) は使わない
