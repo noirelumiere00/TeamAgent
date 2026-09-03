@@ -1077,9 +1077,10 @@ export function createCallerIdentityPlugin({
       // missing run id and the real cause stayed invisible in production.
       // Only field names and a boolean-ish shape are logged, never the values:
       // sender and channel ids are caller identity and must not reach logs.
-      // The team id is the sole exception, and only when it is present and
-      // wrong, because operators cannot fix a workspace mismatch without
-      // seeing which workspace actually arrived.
+      // 2026-09-03 レビュー指摘: team id も実値を出さない。かつては「運用者が
+      // どのワークスペースから来たか見えないと直せない」として例外扱いしていたが、
+      // emitPluginLog が console へ二重書きする以上、実値を出す面は最小にする。
+      // 一致/不一致は id_shape の `team:` で判り、実値が要る調査は Slack 側で行う。
       const missing = [];
       if (!sessionKey) missing.push("sessionKey");
       if (!senderId) missing.push("senderId");
@@ -1093,13 +1094,15 @@ export function createCallerIdentityPlugin({
         "warn",
         "inbound rejected reason=incomplete_or_foreign" +
           ` missing=[${missing.join(",")}]` +
-          `${mismatch ? ` foreignTeam=${teamId} expected=${expectedTeamId}` : ""}` +
+          `${mismatch ? " foreign_team=true" : ""}` +
           ` suppliedRunIds=${suppliedRunIds.length}` +
           ` ${idShape({
             sender: senderId,
             channel: channelId,
             message: messageId,
             session: sessionKey,
+            team: teamId,
+            expectedTeam: expectedTeamId,
           })}`,
       );
       return;
@@ -1659,12 +1662,24 @@ export function createCallerIdentityPlugin({
         const fresh = pend.filter(
           i => nowMs - i.receivedAtMs <= INBOUND_CONTEXT_TTL_MS,
         ).length;
-        // channelId だけが合わない場合は、両側の実値を出す。会話 id は Slack の
-        // チャンネル/DM 識別子であって caller identity ではないので出力してよい。
-        const seen = ch === 0 ? [...new Set(pend.map(i => i.channelId))].join(",") : "";
+        // ⚠️ 会話 id の実値は出さない（2026-09-03 レビュー指摘・G7）。
+        // かつてここは「会話 id は Slack のチャンネル/DM 識別子であって caller identity
+        // ではないので出力してよい」として両側の実値を出していたが、**DM では成り立たない**:
+        // resolveSlackChannel は DM を `DM:<senderId>` に解決するため、その実値は
+        // Slack user id そのものになる（実証: `pendingChannelIds=[DM:U09CX1CCBLN]`）。
+        // 本 PR で emitPluginLog が console へ必ず二重書きするようになり、上流の
+        // ログレベル抑制も効かないので、ここは形と件数だけにする。
+        const shapes =
+          ch === 0
+            ? [...new Set(pend.map(i => shapeOfChannel(i.channelId)))].sort().join(",")
+            : "";
+        const distinct = ch === 0 ? new Set(pend.map(i => i.channelId)).size : 0;
         mismatch =
           ` matchSessionKey=${sk} matchSenderId=${sd} matchChannelId=${ch} fresh=${fresh}` +
-          (ch === 0 ? ` runChannelId=${channelId} pendingChannelIds=[${seen}]` : "");
+          (ch === 0
+            ? ` runChannelShape=${shapeOfChannel(channelId)}` +
+              ` pendingChannelShapes=[${shapes}] pendingChannelDistinct=${distinct}`
+            : "");
       }
       emitPluginLog(
         logger,
@@ -1851,21 +1866,24 @@ export function createCallerIdentityPlugin({
         shape(),
       );
     }
-    // ── 二重包みの決定論 unwrap（引数検査より前）───────────────────────────
-    // ここより下（assertPlainObject / validateDeclaredContext）が「引数検査」なので、
-    // その手前で 1 度だけ正規化する。剥がせなければ無変更＝従来どおり block。
-    const unwrapped = unwrapToolArguments(event?.params, observedToolName);
-    if (unwrapped.depth > 0) {
-      // 識別子・本文・URL は載せない（G7）。形と段数だけ。
-      emitPluginLog(
-        logger,
-        "warn",
-        `unwrapped tool arguments (shape=${unwrapped.shape}, depth=${unwrapped.depth})`,
-      );
-    }
     let params;
     let declaredContext;
     try {
+      // ── 二重包みの決定論 unwrap（引数検査より前）─────────────────────────
+      // ここより下（assertPlainObject / validateDeclaredContext）が「引数検査」なので、
+      // その手前で 1 度だけ正規化する。剥がせなければ無変更＝従来どおり block。
+      // try の**内側**に置くこと（2026-09-03 レビュー指摘）: 外に出すと、万一 unwrap が
+      // throw した場合に block へ変換されず上流へ委ねられ、fail-closed が破れる。
+      // （JSON 由来の params では throw 不能だが、規律として例外も block に落とす）
+      const unwrapped = unwrapToolArguments(event?.params, observedToolName);
+      if (unwrapped.depth > 0) {
+        // 識別子・本文・URL は載せない（G7）。形と段数だけ。
+        emitPluginLog(
+          logger,
+          "warn",
+          `unwrapped tool arguments (shape=${unwrapped.shape}, depth=${unwrapped.depth})`,
+        );
+      }
       const suppliedParams = assertPlainObject(unwrapped.params, "tool params");
       params =
         trusted.ingressKind === "action"

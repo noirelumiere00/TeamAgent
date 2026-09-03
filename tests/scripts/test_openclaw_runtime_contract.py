@@ -3110,3 +3110,101 @@ def test_fallthrough_is_always_logged_even_without_trace() -> None:
     outcome = _caller_identity_report()["layer1_trace"]["off_fallthrough"]
     assert outcome["fallthroughReason"] == "no_mcp_bearer"
     assert outcome["lineCount"] == 1, outcome["lines"]
+
+
+# ── bind_agent_run / inbound rejected の G7（2026-09-03 レビュー指摘） ───────
+# 旧実装は会話 id の実値を両側とも出していた:
+#   `runChannelId=C0B0PQD83N2 pendingChannelIds=[DM:U09CX1CCBLN]`
+# DM では resolveSlackChannel が `DM:<senderId>` に解決するため、これは
+# **Slack user id そのもの**が stderr → CloudWatch に落ちることを意味する。
+# 本 PR で emitPluginLog が console へ二重書きするようになり、上流のログレベル
+# 抑制も効かなくなったため、実値を出す面をここで塞ぐ。
+# 既存の G7 テストは `before_tool_call blocked` 行しか見ていなかった。
+
+
+def test_bind_agent_run_log_never_emits_conversation_ids() -> None:
+    """run と pending の会話 id が食い違う拒否ログに、実値が 1 つも出ないこと。
+
+    DM の `DM:U…` は Slack user id そのものなので、形（先頭 1 文字）と件数だけにする。
+    診断能力は落とさない: `matchChannelId=0` と形の不一致で切り分けられる。
+    """
+    outcome = _caller_identity_report()["g7"]["bind_run_channel_mismatch"]
+    line = outcome["line"]
+    assert line is not None, outcome["console"]
+    assert "reason=no_unique_binding" in line
+    # 実値が 1 つも無いこと。
+    assert "U09CX1CCBLN" not in line, line
+    assert "C0B0PQD83N2" not in line, line
+    assert "DM:" not in line, line
+    # 旧フィールド名が復活していないこと（変異の再発検知）。
+    assert "runChannelId=" not in line, line
+    assert "pendingChannelIds=" not in line, line
+    # 形と件数は残っていること（切り分け能力を落としていない証明）。
+    assert "matchChannelId=0" in line, line
+    assert "runChannelShape=C" in line, line
+    assert "pendingChannelShapes=[U]" in line, line
+    assert "pendingChannelDistinct=1" in line, line
+
+
+def test_inbound_rejection_log_never_emits_the_team_id() -> None:
+    """他ワークスペースからの受信拒否ログに、team id の実値が出ないこと。"""
+    outcome = _caller_identity_report()["g7"]["inbound_foreign_team"]
+    line = outcome["line"]
+    assert line is not None
+    assert "reason=incomplete_or_foreign" in line
+    assert outcome["foreignTeam"] not in line, line
+    assert "T07MU5P2PBR" not in line, line
+    assert "foreignTeam=" not in line, line
+    # 真偽と形だけで「他ワークスペースから来た」と判ること。
+    assert "foreign_team=true" in line, line
+    assert "team:mismatch" in line, line
+    # 送信者 id も出さない。
+    assert "U09CX1CCBLN" not in line, line
+
+
+def test_no_skill_declares_an_input_field_named_arguments() -> None:
+    """`arguments` という入力フィールドを持つ skill が現れないこと（2026-09-03）。
+
+    plugin の unwrap 規則 (a) は「トップのキーが `arguments` 1 つだけで、その値が
+    プレーンオブジェクト」なら剥がす。`arguments` という名前のオブジェクト引数を
+    唯一の必須項目に持つ skill が将来 1 個でも増えると、その正当な呼び出しが
+    誤って剥がされ、`_user_context` を失って静かに P06 で落ちる。
+    本 PR 時点では 45 skill すべてに存在しない。増えたらここで赤にして気付く。
+    """
+    import importlib
+    import pkgutil
+
+    import teamagent.skills as skills_pkg
+    from teamagent.skills.base import SkillRegistry
+
+    # 全 skill モジュールを import して registry を埋める（@register は import 時に走る）。
+    for module in pkgutil.walk_packages(skills_pkg.__path__, f"{skills_pkg.__name__}."):
+        importlib.import_module(module.name)
+
+    names = SkillRegistry.list_all()
+    # 検出器が空振りしていないこと（registry が空なら vacuous に緑になる）。
+    assert len(names) >= 40, f"skill registry が {len(names)} 件しか埋まっていない"
+
+    offenders = []
+    for name in names:
+        schema = SkillRegistry.get(name).input_schema.model_json_schema()
+        if "arguments" in schema.get("properties", {}):
+            offenders.append(name)
+    assert offenders == [], (
+        f"入力フィールド `arguments` を持つ skill: {offenders}。"
+        " plugin の単一キー unwrap (a) が誤発火して P06 で静かに落ちる。"
+        " skill 側で改名するか、unwrap 側にツール名の除外を入れること。"
+    )
+
+
+def test_unwrap_failure_is_converted_to_a_block_not_propagated() -> None:
+    """unwrap が throw しても、上流へ委ねず block へ変換すること（fail-closed）。
+
+    JSON 由来の params は getter を持てないので本番で throw は起きないが、
+    unwrap の呼び出しが既存 try の外に出た瞬間にここが赤くなる。
+    署名経路の例外はすべて block に落ちる、という規律を機械で固定する。
+    """
+    outcome = _caller_identity_report()["g7"]["unwrap_throws_fail_closed"]
+    assert outcome["threw"] is None, outcome["threw"]
+    assert outcome["blocked"] is True
+    assert outcome["diagCode"] == "CONNECT-P06"

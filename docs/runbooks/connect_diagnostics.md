@@ -184,7 +184,7 @@ fields @timestamp, @message
 | 出る 1 行 | 意味 |
 |---|---|
 | `before_tool_call blocked diagnostic=CONNECT-P<nn> id_shape=…` | ツール呼び出しの拒否。診断行の時刻（分まで）と突合する |
-| `bind_agent_run rejected reason=incomplete\|already_rejected\|mismatched_repeat\|no_unique_binding …` | run の束縛失敗。この直後の tool 呼び出しが P03 になる |
+| `bind_agent_run rejected reason=incomplete\|already_rejected\|mismatched_repeat\|no_unique_binding …` | run の束縛失敗。この直後の tool 呼び出しが P03 になる。会話 id は形（`runChannelShape` / `pendingChannelShapes`）と件数のみで、実値は出ない（DM の `DM:U…` は Slack user id そのものになるため） |
 | `unwrapped tool arguments (shape=arguments\|name_arguments, depth=n)` | 二重包みを剥がした（拒否ではない）。件数の推移でモデル側の癖を追う |
 
 ### 層1（決定論の連携応答）が発火しなかったときの引き方

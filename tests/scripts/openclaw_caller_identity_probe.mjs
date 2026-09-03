@@ -1110,6 +1110,113 @@ const layer1TraceReport = {
   })(),
 };
 
+// ── bind_agent_run / inbound rejected の G7（2026-09-03 レビュー指摘）─────────
+// 旧実装は channelId の実値を両側とも出していた（`runChannelId=C0B0PQD83N2
+// pendingChannelIds=[DM:U09CX1CCBLN]`）。DM では resolveSlackChannel が
+// `DM:<senderId>` に解決するため、これは **Slack user id そのもの**が
+// CloudWatch に落ちることを意味する。emitPluginLog が console へ二重書きする
+// ようになった以上、ログレベルでの抑制も効かない。
+// 同様に inbound 側の `foreignTeam=<T…> expected=<T…>` も実値だった。
+function bindRunChannelMismatch() {
+  const { handlers, logs } = makePlugin();
+  const captured = captureConsole(() => {
+    // DM の受信（pending は channelId=`DM:U09…`）。
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+    // 同じ sessionKey / senderId のまま、run ctx だけチャンネル会話を名乗る。
+    // → candidates=0 かつ matchChannelId=0 で、実値を出していた分岐に入る。
+    handlers.get("before_model_resolve")(
+      { prompt: "probe" },
+      {
+        runId: "run-1",
+        agentId: "teamagent",
+        sessionKey: DM_SESSION_KEY,
+        sessionId: "sid",
+        trigger: "user",
+        ...agentCtxFields(CHANNEL),
+      },
+    );
+  });
+  const line =
+    captured.console.map((entry) => entry.text).find((text) => text.includes("bind_agent_run")) ??
+    null;
+  return { line, warnings: logs, console: captured.console.map((entry) => entry.text) };
+}
+
+function inboundForeignTeam() {
+  const { handlers, logs } = makePlugin();
+  const foreignTeam = "T99FOREIGN0";
+  const captured = captureConsole(() => {
+    handlers.get("message_received")(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: {
+          guildId: foreignTeam,
+          to: `user:${USER}`,
+          originatingTo: `user:${USER}`,
+        },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+  });
+  const line =
+    captured.console.map((entry) => entry.text).find((text) => text.includes("inbound rejected")) ??
+    null;
+  return { line, foreignTeam, warnings: logs };
+}
+
+// unwrap が throw しても block へ変換されること（fail-closed・2026-09-03 レビュー指摘 2）。
+// JSON 由来の params では getter を持てないので本番では throw 不能だが、
+// unwrap 呼び出しが try の外に出た瞬間にここが赤くなる。
+function unwrapThrowsIsFailClosed() {
+  const hostile = {};
+  Object.defineProperty(hostile, "arguments", {
+    enumerable: true,
+    get() {
+      throw new Error("hostile getter");
+    },
+  });
+  let threw = null;
+  let result = null;
+  try {
+    result = unwrapScenario({ params: hostile });
+  } catch (error) {
+    threw = String(error);
+  }
+  return {
+    threw,
+    blocked: result?.blocked ?? null,
+    diagCode: result?.diagCode ?? null,
+  };
+}
+
+const g7Report = {
+  unwrap_throws_fail_closed: unwrapThrowsIsFailClosed(),
+  bind_run_channel_mismatch: bindRunChannelMismatch(),
+  inbound_foreign_team: inboundForeignTeam(),
+};
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -1302,6 +1409,8 @@ const report = {
   block_quiet_on_success: quietOnSuccess,
   // ── 層1 の脱出経路の観測（trace ON/OFF の両モード） ────────────────────
   layer1_trace: layer1TraceReport,
+  // ── bind_agent_run / inbound rejected の G7 ────────────────────────────
+  g7: g7Report,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");

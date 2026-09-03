@@ -545,6 +545,24 @@ teamagent-caller-identity: <従来どおりの理由>
 `docs/runbooks/connect_diagnostics.md` の P コード節。user id は載せない（G7）。時刻は `formatJstMinute`
 （第3層の `CONNECT-Z01` と同じ関数）。
 
+### 11-4b.【追記・レビュー指摘 2026-09-03】会話 id / team id の実値をログから外す
+
+本 PR で `emitPluginLog` が console へ**必ず**二重書きするようになったため、
+上流のログレベル抑制が効かなくなった。そこで実値を出していた 2 箇所を形に置換した。
+
+| 箇所 | 旧 | 新 |
+|---|---|---|
+| `bindAgentRun` の会話 id 不一致 | `runChannelId=C0B0PQD83N2 pendingChannelIds=[DM:U09CX1CCBLN]` | `runChannelShape=C pendingChannelShapes=[U] pendingChannelDistinct=1` |
+| `rememberInbound` の他ワークスペース | `foreignTeam=<T…> expected=<T…>` | `foreign_team=true` ＋ `id_shape` の `team:mismatch` |
+
+**なぜ旧実装が誤りだったか**: 「会話 id は Slack のチャンネル/DM 識別子であって caller identity ではない」
+というコメント付きで実値を出していたが、**DM では成り立たない**。`resolveSlackChannel`（`dist/index.js:285-286`）は
+DM を `DM:<senderId>` に解決するため、その実値は **Slack user id そのもの**になる。
+実証ログ: `runChannelId=C0B0PQD83N2 pendingChannelIds=[DM:U09CX1CCBLN]`。
+
+診断能力は落としていない: `matchChannelId=0` と両側の形の不一致で切り分けられる。
+実値が要る調査は Slack 側で行う。
+
 ### 11-4. `id_shape`（値を出さずに形だけ出す）
 
 拒否ログには `id_shape=sender:U,channel:D,message:ts,session:thread,team:match` のように
@@ -598,3 +616,8 @@ block / fallthrough / answered / rejected のみ。env は OC のタスク定義
 5. 2026-09-03 の層1 不発の**真因はまだ確定していない**。本 PR は「次に起きたら 1 行で判る」ところまで。
    確定には OC 再ビルド後に `TEAMAGENT_CALLER_IDENTITY_TRACE=1` を入れて再現させる必要がある。
 6. trace ON にすると通常会話 1 通あたり 2〜3 行増える。切り分けが済んだら OFF に戻す運用が前提。
+7. `arguments` という入力フィールドを持つ skill が将来増えると、unwrap 規則 (a) が誤発火して
+   静かに P06 で落ちる。本 PR 時点では 45 skill すべてに存在せず、増えたら
+   `test_no_skill_declares_an_input_field_named_arguments` が赤になる。
+8. 14 スキルの description が「arguments に `_user_context` を含める」と書いている（記録のみ）。
+   block 最多の oauth_connect(105) / search(95) にはこの文言が無いので主因ではない。文言修正は別 PR。
