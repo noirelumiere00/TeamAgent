@@ -19,6 +19,7 @@ from teamagent.adapters.tiktok_scraper import (
     TikTokSearchResult,
     TikTokVideo,
 )
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.base import SkillContext
 from teamagent.skills.omiyage_report.contract import DeckPlan
 from teamagent.skills.omiyage_report.fmt.contract import validate_deck_content
@@ -286,9 +287,11 @@ def test_submit_runs_background_and_delivers_to_request_thread() -> None:
     assert {axis.query for axis in done.axes} == {"ヘアケア", "エムキュア", "ラサーナ"}
     assert all(axis.fetched == 2 and not axis.failed for axis in done.axes)
 
-    # 検索は各軸1回・深度120で実行される
+    # 検索は各軸1回。明示 search_depth=120 でも dispatcher 上限（30）へ clamp されて送られる
+    # （120 を送ると Lambda が n_per_kw を拒否して全軸 TIKTOK_MEDIA_JOB_FAILED になる）
     assert [call["query"] for call in searcher.calls] == ["ヘアケア", "エムキュア", "ラサーナ"]
-    assert all(call["max_videos"] == 120 for call in searcher.calls)
+    assert all(call["max_videos"] == TIKTOK_N_PER_KW_MAX for call in searcher.calls)
+    assert all(1 <= call["max_videos"] <= TIKTOK_N_PER_KW_MAX for call in searcher.calls)
     assert len(builder.calls) == 1
 
     # 配信は画像モード（正・コメント付き）→ 編集用（同スレッド・コメント無し）の2ファイル

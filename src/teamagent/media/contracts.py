@@ -45,6 +45,15 @@ _TIKTOK_SEARCH_WORST_CASE_SECONDS = 120
 _TIKTOK_DEEP_SEARCH_WORST_CASE_SECONDS = 240
 _TIKTOK_DEEP_SEARCH_THRESHOLD_N_PER_KW = 30
 _TIKTOK_MAX_N_PER_KW = 120
+# dispatcher Lambda（infra/terraform/lambda/tiktok_dispatch/handler.py の
+# ``_bounded_int(operation["n_per_kw"], minimum=1, maximum=30)``）が受理する n_per_kw
+# の上限＝core 側が本番へ実際に流してよい単一情報源。契約モデルの le=120 は worker 側
+# の深掘り実装を残しているが、dispatcher を通らない値をここから送ると全軸
+# TIKTOK_MEDIA_JOB_FAILED（TikTok n_per_kw is invalid）になる（2026-09-02 お土産資料
+# 本番事故）。送信側はこの値で clamp／fail-fast し、
+# tests/media/test_tiktok_n_per_kw_contract.py が handler.py の maximum と一致する
+# ことを強制する。上げるときは dispatcher と同じ PR で両方を動かす。
+TIKTOK_N_PER_KW_MAX = 30
 _TIKTOK_THUMBNAIL_WORST_CASE_SECONDS = 50
 _TIKTOK_VIDEO_WORST_CASE_SECONDS = 120
 
@@ -533,6 +542,7 @@ __all__ = [
     "MAX_OUTPUT_BYTES",
     "MAX_PRESIGNED_URL_SECONDS",
     "MAX_PROPOSAL_PPTX_BYTES",
+    "TIKTOK_N_PER_KW_MAX",
     "AcquireOperation",
     "FrameOperation",
     "MediaArtifact",

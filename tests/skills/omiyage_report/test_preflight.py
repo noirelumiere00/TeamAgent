@@ -8,6 +8,7 @@ from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.skills.base import SkillContext
 from teamagent.skills.omiyage_report.preflight import (
     OmiyageSuggestions,
+    build_accepted_message,
     build_needs_input_message,
     run_preflight,
 )
@@ -122,3 +123,19 @@ def test_submit_with_missing_inputs_returns_needs_input_and_creates_no_job() -> 
     assert out.missing == ["competitors", "keywords"]
     assert "まだ着手していません" in out.message
     assert memory == {}  # ジョブ行を作らない
+
+
+def test_accepted_message_states_realistic_duration_not_seconds() -> None:
+    """受付文は実態（10〜30分）を言い切り、「約60秒後」のような秒見込みを含まない。"""
+
+    input = OmiyageReportSubmitInput(
+        brand="エムキュア", competitors=["ラサーナ"], keywords=["ヘアケア"]
+    )
+    message = build_accepted_message(input)
+    assert message.startswith("お土産資料（対象: エムキュア / 競合: ラサーナ / 一般KW: ヘアケア）")
+    assert "の作成を受け付けました。" in message
+    assert "目安 10〜30 分（TikTok 取得と動画分析に時間がかかります）。" in message
+    assert "途中経過は『まだ？』で確認できます。" in message
+    assert "完成したPPTXは依頼元のスレッドへ添付します。" in message
+    assert "秒後" not in message
+    assert "完成予定" not in message
