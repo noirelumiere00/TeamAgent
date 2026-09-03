@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.adapters.tiktok_scraper import TikTokScrapeError, TikTokSearchResult
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.omiyage_report.compose import (
     build_all_failed_message,
@@ -100,9 +101,13 @@ _STALE_SECONDS_DEFAULT = 180
 # mcp タスク（実測 2026-08-27: cpu 1024 / mem 4096・desiredCount=1）を数本で食い潰す。
 _MAX_CONCURRENT_JOBS_DEFAULT = 3
 
-# 深掘り実測（2026-08-24・「シャンプー」120本/47s・ブロックなし・理論上限~216本）に
-# 基づく既定深度。届かなかった軸は取得できた上限で集計し、資料の確認範囲に開示する。
-_SEARCH_DEPTH_DEFAULT = 120
+# 1軸あたりの取得本数。深掘り実測（2026-08-24・「シャンプー」120本/47s）は可能だが、
+# dispatcher Lambda が受理する n_per_kw の上限（TIKTOK_N_PER_KW_MAX）を超える値を
+# 送ると全軸 TIKTOK_MEDIA_JOB_FAILED になる（2026-09-02 本番事故: 既定120で全滅）。
+# 既定・上限とも契約側の単一情報源に揃え、env や明示指定でも上限を超えさせない。
+# 届かなかった軸は取得できた上限で集計し、資料の確認範囲に開示する。
+_SEARCH_DEPTH_DEFAULT = TIKTOK_N_PER_KW_MAX
+_SEARCH_DEPTH_MIN = 10
 _SEARCH_TIMEOUT_SECONDS_DEFAULT = 360
 
 _SAFE_ERROR_CODE = re.compile(r"\b(?:TIKTOK|MEDIA)_[A-Z0-9_]{1,56}\b")
@@ -180,8 +185,18 @@ def _configured_stale_seconds() -> int:
 
 
 def configured_search_depth() -> int:
-    """1軸あたりの取得本数（実測に基づく既定120・media契約の上限と一致）。"""
-    return _envint("OMIYAGE_SEARCH_DEPTH", _SEARCH_DEPTH_DEFAULT, minimum=10, maximum=120)
+    """1軸あたりの取得本数（既定＝dispatcher 上限 TIKTOK_N_PER_KW_MAX・env では下げるだけ）。"""
+    return _envint(
+        "OMIYAGE_SEARCH_DEPTH",
+        _SEARCH_DEPTH_DEFAULT,
+        minimum=_SEARCH_DEPTH_MIN,
+        maximum=TIKTOK_N_PER_KW_MAX,
+    )
+
+
+def clamp_search_depth(search_depth: int) -> int:
+    """明示指定の深度も dispatcher 上限で必ず clamp する（1..TIKTOK_N_PER_KW_MAX）。"""
+    return min(TIKTOK_N_PER_KW_MAX, max(1, search_depth))
 
 
 def _configured_search_timeout_seconds() -> int:
@@ -327,6 +342,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返すので、"
         "retry_after_seconds を置いてから同じ入力でそのまま再submitする。"
         "進行確認は omiyage_report_status。queued/running中は再submitしない。"
+        "所要は目安10〜30分（TikTok取得と動画分析）。queued時の retry_after_seconds は"
+        "status再照会の間隔であって完成予定ではないので、営業へは message の所要目安を"
+        "そのまま伝え、スレッドで『まだ？』と聞かれたら同じjob_idでstatusを照会する。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput
@@ -379,7 +397,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             else max(0, retry_after_seconds)
         )
         self._search_depth = (
-            configured_search_depth() if search_depth is None else max(1, search_depth)
+            configured_search_depth() if search_depth is None else clamp_search_depth(search_depth)
         )
         self._search_timeout_seconds = (
             _configured_search_timeout_seconds()
@@ -1164,6 +1182,7 @@ __all__ = [
     "OMIYAGE_JOB_KIND",
     "OmiyageReportStatusSkill",
     "OmiyageReportSubmitSkill",
+    "clamp_search_depth",
     "configured_search_depth",
     "new_omiyage_job_id",
 ]

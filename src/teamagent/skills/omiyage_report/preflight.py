@@ -155,10 +155,19 @@ def build_needs_input_message(
 
 
 def build_accepted_message(input: OmiyageReportSubmitInput) -> str:
+    """受付の定型文（LLM を通さない決定論文言）。
+
+    所要時間は実測（検索3軸 ≈5分＋動画分析 1本 ≈2.5分×並列2・既定 25 本まで）に
+    合わせて「目安 10〜30 分」と言い切る。retry_after_seconds（既定 60）は status
+    再照会の間隔であって完成予定ではないので、秒単位の見込みはここに書かない
+    （「完成予定: 約 60 秒後」と案内していた本番の食い違いを塞ぐ）。
+    """
+
     return (
         f"お土産資料（対象: {input.brand} / 競合: {'、'.join(input.competitors)} / "
         f"一般KW: {'、'.join(input.keywords)}）の作成を受け付けました。"
-        "完了までstatusを照会してください。完成したPPTXは依頼元のスレッドへ添付します。"
+        "目安 10〜30 分（TikTok 取得と動画分析に時間がかかります）。"
+        "途中経過は『まだ？』で確認できます。完成したPPTXは依頼元のスレッドへ添付します。"
     )
 
 

@@ -15,6 +15,8 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
+import structlog
+
 from teamagent.media.contracts import (
     ARTIFACT_RETENTION_SECONDS,
     MAX_DEADLINE_SECONDS,
@@ -22,6 +24,7 @@ from teamagent.media.contracts import (
     MAX_OUTPUT_BYTES,
     MAX_PRESIGNED_URL_SECONDS,
     MAX_PROPOSAL_PPTX_BYTES,
+    TIKTOK_N_PER_KW_MAX,
     AcquireOperation,
     FrameOperation,
     MediaJobRequest,
@@ -45,6 +48,8 @@ from teamagent.media.deadline import (
     MediaDeadlineExceededError,
     botocore_config,
 )
+
+logger = structlog.get_logger(__name__)
 
 _SYNC_TIMEOUT_DEFAULT_S = 180
 _SYNC_TIMEOUT_MAX_S = 15 * 60
@@ -851,8 +856,25 @@ class MediaJobClient:
         max_videos: int = 10,
         timeout_s: int = _SYNC_TIMEOUT_DEFAULT_S,
     ) -> list[dict[str, Any]]:
-        """既存の同期検索UXをgeneric TikTok media operationで維持する。"""
+        """既存の同期検索UXをgeneric TikTok media operationで維持する。
 
+        ``max_videos`` は dispatcher Lambda の n_per_kw 上限（TIKTOK_N_PER_KW_MAX）を
+        超えると SQS へ乗せる前に ValueError で落とす。上限超えを送ると Lambda 側で
+        「TikTok n_per_kw is invalid」として全ジョブが失敗する（2026-09-02 本番事故）
+        ので、往復させずに要求値と上限をログ・例外文へ残す。
+        """
+
+        if not 1 <= max_videos <= TIKTOK_N_PER_KW_MAX:
+            logger.error(
+                "media_tiktok_n_per_kw_out_of_range",
+                n_per_kw=max_videos,
+                n_per_kw_max=TIKTOK_N_PER_KW_MAX,
+                search_type=search_type,
+            )
+            raise ValueError(
+                f"TikTok n_per_kw={max_videos} is outside the dispatcher limit "
+                f"(1..{TIKTOK_N_PER_KW_MAX})"
+            )
         operation = TikTokAcquireOperation(
             kind="tiktok_acquire",
             search_type=cast(Literal["keyword", "hashtag"], search_type),

@@ -318,7 +318,7 @@ def test_end_to_end_engine_json_through_real_fmt_renderer(monkeypatch: Any) -> N
         analyzer_factory=_analyzer_factory(events),
         plan_uploader=uploader,
         heartbeat_seconds=0,
-        search_depth=120,
+        search_depth=30,
         analysis_per_axis=10,
     )
     job_id = _run_job(skill, launcher)
@@ -406,7 +406,7 @@ def _build_flow_skill(
         analyzer_factory=_analyzer_factory(events),
         plan_uploader=_Uploader(),
         heartbeat_seconds=0,
-        search_depth=120,
+        search_depth=30,
         analysis_per_axis=10,
     )
 
