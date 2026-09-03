@@ -269,6 +269,9 @@ class AnalyzedVideo(BaseModel):
     error: str | None = None
     cost_usd: float = 0.0
     model_id: str | None = None
+    # 動画実体の取得経路。"" = 既定経路（media worker / ブラウザ）、"apify" = 二段構えで補完
+    # （USE_TIKTOK_APIFY_FALLBACK=1）。出所を資料の注記に出せるようにする（捏造ゼロ原則）。
+    acquired_via: str = ""
 
 
 class WinFactor(BaseModel):

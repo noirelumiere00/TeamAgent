@@ -316,6 +316,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
 
     name: ClassVar[str] = "omiyage_report_submit"
     description: ClassVar[str] = (
+        "お土産資料の最終成果物（PPTX）はこのツールでのみ生成する。調査ツール（x_voice_search / "
+        "search_surface_check / web_research / tiktok_acquire）で裏取りした材料は research_notes "
+        "に添えること（任意・1行1要点+出典URL・「生活者の声」「検索面の勢力図」の章に反映）。"
         "「◯◯のお土産資料つくって。競合は△△」を受け付ける。対象ブランド・競合(1社以上)・"
         "一般検索キーワード(1つ以上)がそろえば job_id を即返し、TikTok検索実測→決定論集計"
         "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
@@ -435,6 +438,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
                 "keywords": list(input.keywords),
                 "official_tiktok_account": input.official_tiktok_account,
                 "search_depth": self._search_depth,
+                # 本文は台帳に持たない（小さく保つ）。添付の有無と長さだけ記録する。
+                "research_notes_chars": len(input.research_notes),
             }
             self._store.create_job(job_id, request_summary)
 
@@ -802,6 +807,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             analysis,
             generated_on=generated_on,
             search_depth=self._search_depth,
+            research_notes=input.research_notes,
         )
         plan_json = plan.model_dump_json()
         audit = build_audit(
@@ -810,6 +816,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             plan,
             generated_on=generated_on,
             search_depth=self._search_depth,
+            research_notes=input.research_notes,
         )
         deck_plan_uri, audit_uri = self._store_plan_artifacts(
             f"{generated_on}/{ctx.request_id}",

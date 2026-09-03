@@ -15,6 +15,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 OMIYAGE_JOB_ID_PATTERN = r"^omy_[0-9a-f]{32}$"
+# 先行調査メモ（research_notes）の上限文字数（設計C・2026-09-03）。
+RESEARCH_NOTES_MAX_CHARS = 4000
 
 MissingField = Literal["brand", "competitors", "keywords"]
 
@@ -60,11 +62,28 @@ class OmiyageReportSubmitInput(_StrictModel):
         max_length=200,
         description="対象ブランドの公式TikTokアカウント（URLまたは@ハンドル・任意）",
     )
+    research_notes: str = Field(
+        default="",
+        max_length=RESEARCH_NOTES_MAX_CHARS,
+        description=(
+            "先行調査の要点（任意・最大4000字）。x_voice_search / search_surface_check / "
+            "web_research 等で裏取りした「生活者の声」「検索面の勢力図」を1行1要点で書き、"
+            "各行に出典URL(https://…)を添える。出典URLの無い行は資料に採用しない（捏造防止）。"
+            "無ければ空のまま呼ぶ"
+        ),
+    )
 
     @field_validator("brand", "official_tiktok_account")
     @classmethod
     def _squash_whitespace(cls, value: str) -> str:
         return " ".join(str(value).split())
+
+    @field_validator("research_notes")
+    @classmethod
+    def _normalize_research_notes(cls, value: str) -> str:
+        # 行単位で扱う（1行1要点 + 出典URL）。空行と行末空白だけ落とし、本文は変えない。
+        lines = [line.strip() for line in str(value).replace("\r\n", "\n").split("\n")]
+        return "\n".join(line for line in lines if line)
 
     @field_validator("competitors")
     @classmethod
@@ -167,6 +186,7 @@ class OmiyageReportStatusOutput(_StrictModel):
 
 __all__ = [
     "OMIYAGE_JOB_ID_PATTERN",
+    "RESEARCH_NOTES_MAX_CHARS",
     "MissingField",
     "OmiyageAxisSummary",
     "OmiyageReportResult",

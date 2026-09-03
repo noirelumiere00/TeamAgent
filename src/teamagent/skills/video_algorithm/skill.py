@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,12 @@ import structlog
 from pydantic import BaseModel, ValidationError
 
 from teamagent.adapters.gemini_client import GeminiClient
+from teamagent.adapters.tiktok_video_fallback import (
+    ACQUIRED_VIA_APIFY,
+    apify_fallback_enabled,
+    fallback_job_id,
+    fill_missing_videos,
+)
 from teamagent.adapters.video_algorithm_cache import (
     CachedVideoAlgorithmResult,
     VideoAlgorithmCacheLease,
@@ -271,6 +278,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         overfetch_buffer: int = _OVERFETCH_BUFFER,
         publisher: Callable[..., str | None] | None = None,
         result_cache: VideoAlgorithmResultCache | None = None,
+        apify_fallback: Any | None = None,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
@@ -282,6 +290,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self._overfetch_buffer = overfetch_buffer
         self._publisher = publisher
         self._result_cache = result_cache
+        # 二段構え（USE_TIKTOK_APIFY_FALLBACK=1）で使う ApifyClient。None なら env から生成。
+        self._apify_fallback = apify_fallback
 
     # --- 依存の遅延解決（テスト差し替え可） ---
     def _client(self) -> GeminiClient:
@@ -432,12 +442,33 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         system: str,
         request_id: str,
         downloader: Downloader | None = None,
+        user_email: str = "",
     ) -> AnalyzedVideo:
+        acquired_via = ""
         try:
             data, mime = self._download(meta.url, request_id, downloader=downloader)
-            data, mime = self._shrink(data, mime, request_id)
-        except Exception as e:  # 取得/圧縮失敗 → サムネのみの軽量分析へ縮退（全滅回避）
+        except Exception as e:  # 取得失敗 → 二段構え（opt-in）→ それでも無理ならサムネ縮退
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
+            recovered = (
+                self._apify_fallback_fetch(meta, request_id=request_id, user_email=user_email)
+                if apify_fallback_enabled()
+                else None
+            )
+            if recovered is None:
+                return self._cover_only_analysis(
+                    meta, query=query, system=system, request_id=request_id, cause=type(e).__name__
+                )
+            data, mime = recovered
+            acquired_via = ACQUIRED_VIA_APIFY
+        try:
+            data, mime = self._shrink(data, mime, request_id)
+        except Exception as e:  # 圧縮失敗 → サムネのみの軽量分析へ縮退（全滅回避）
+            logger.warning(
+                "video_algorithm_fetch_failed",
+                rank=meta.rank,
+                error=type(e).__name__,
+                stage="shrink",
+            )
             return self._cover_only_analysis(
                 meta, query=query, system=system, request_id=request_id, cause=type(e).__name__
             )
@@ -551,7 +582,61 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             error=None if analysis else "JSONパース失敗",
             cost_usd=resp.cost_usd,
             model_id=getattr(resp, "model_id", None),
+            acquired_via=acquired_via,
         )
+
+    def _apify_fallback_fetch(
+        self, meta: VideoMeta, *, request_id: str, user_email: str
+    ) -> tuple[bytes, str] | None:
+        """二段構え: DL経路の失敗分を mcp 側 Apify（clockworks）で補完する（失敗は None）。
+
+        共有ヘルパー ``fill_missing_videos`` を 1 本分だけ呼ぶ。media job 基盤がある環境では
+        取得物を ``media-jobs/<job>/input/apify-<key>.mp4`` へ置いて検査を通し（再照会時は
+        S3 の既存を再利用）、無い環境（ローカル runtime）では bytes をそのまま使う。
+        """
+        from teamagent.adapters.media_job import MediaJobClient
+
+        media_client: Any | None = None
+        try:
+            media_client = MediaJobClient() if MediaJobClient.is_configured() else None
+            fingerprint = hashlib.sha256(meta.url.encode("utf-8")).hexdigest()
+            outcome = fill_missing_videos(
+                fallback_job_id(f"{request_id}:apify-fallback:{fingerprint}"),
+                {fingerprint[:16]: meta.url},
+                media_client=media_client,
+                apify=self._apify_fallback,
+                request_id=request_id,
+                user_email=user_email,
+                max_videos=1,
+                keep_body=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "video_algorithm_apify_fallback_failed", rank=meta.rank, error=type(exc).__name__
+            )
+            return None
+        for note in outcome.warnings:
+            logger.info("video_algorithm_apify_fallback_note", rank=meta.rank, note=note)
+        if not outcome.videos:
+            return None
+        staged = outcome.videos[0]
+        body = staged.body
+        if body is None and staged.ref is not None and media_client is not None:
+            try:
+                body = media_client.download(staged.ref, deadline_epoch_s=int(time.time()) + 60)
+            except Exception as exc:
+                logger.warning(
+                    "video_algorithm_apify_fallback_download_failed",
+                    rank=meta.rank,
+                    error=type(exc).__name__,
+                )
+                return None
+        if not body:
+            return None
+        logger.info(
+            "video_algorithm_fetch_recovered_via_apify", rank=meta.rank, reused=staged.reused
+        )
+        return body, staged.content_type
 
     def _cover_only_analysis(
         self, meta: VideoMeta, *, query: str, system: str, request_id: str, cause: str
@@ -1011,6 +1096,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             system=system,
                             request_id=ctx.request_id,
                             downloader=call_downloader,
+                            user_email=str(ctx.metadata.get("user_email") or ""),
                         ),
                         batch,
                     )

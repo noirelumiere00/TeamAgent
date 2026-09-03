@@ -66,6 +66,11 @@ class TikTokTaskStore:
             kms_key_id=self._kms_key_id,
         )
 
+    def media_client(self) -> MediaJobClient:
+        """status の後工程（Apify フォールバック等）が同じ設定で S3/DynamoDB に触る client。"""
+
+        return self._client(self._session())
+
     def submit(self, spec: dict[str, Any]) -> bool:
         """Validate and submit one bounded, content-hashed media request."""
 

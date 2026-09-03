@@ -17,6 +17,10 @@ from pydantic import BaseModel
 from teamagent.adapters.tiktok_s3_source import media_audit_principal_hash
 from teamagent.adapters.tiktok_task_store import TikTokTaskStore, new_job_id
 from teamagent.skills.base import BaseSkill, SkillContext, register
+from teamagent.skills.tiktok_acquire.apify_fallback import (
+    ApifyVideoFallback,
+    apify_fallback_enabled,
+)
 from teamagent.skills.tiktok_acquire.schema import (
     TikTokAcquireInput,
     TikTokAcquireOutput,
@@ -120,8 +124,48 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
     input_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusInput
     output_schema: ClassVar[type[BaseModel]] = TikTokAcquireStatusOutput
 
-    def __init__(self, store: TikTokTaskStore | None = None) -> None:
+    def __init__(
+        self,
+        store: TikTokTaskStore | None = None,
+        apify_fallback: ApifyVideoFallback | None = None,
+    ) -> None:
         self._store = store or TikTokTaskStore()
+        # 二段構え（設計A）。None なら env opt-in 時に遅延生成する（既定 OFF＝一切触らない）。
+        self._apify_fallback = apify_fallback
+
+    def _apply_apify_fallback(
+        self,
+        st: dict[str, object],
+        job_id: str,
+        ctx: SkillContext,
+        log: object,
+    ) -> dict[str, object]:
+        """worker が落とせなかった動画を mcp 側 Apify で補完する。失敗しても従来結果を返す。"""
+
+        fallback = self._apify_fallback
+        if fallback is None:
+            fallback = ApifyVideoFallback(
+                media_client_factory=getattr(self._store, "media_client", None),
+            )
+            self._apify_fallback = fallback
+        try:
+            return fallback.apply(
+                st,
+                job_id=job_id,
+                audit_principal_hash=_audit_principal_hash(ctx),
+                request_id=ctx.request_id,
+                user_email=str(ctx.metadata.get("user_email") or ""),
+                log=log,
+            )
+        except Exception as exc:
+            logger.warning(
+                "tiktok_apify_fallback_unexpected", job_id=job_id, error=type(exc).__name__
+            )
+            out = dict(st)
+            warnings = list(st.get("warnings") or [])
+            warnings.append(f"APIFY_FALLBACK_FAILED:{type(exc).__name__}")
+            out["warnings"] = warnings
+            return out
 
     def run(self, input: TikTokAcquireStatusInput, ctx: SkillContext) -> TikTokAcquireStatusOutput:
         log = ctx.bind_logger(self.name)
@@ -135,13 +179,20 @@ class TikTokAcquireStatusSkill(BaseSkill[TikTokAcquireStatusInput, TikTokAcquire
             )
         status = st.get("status", "unknown")
         log.info("tiktok_acquire_status", job_id=input.job_id, status=status)
+        done_msg = "完了しました。posts/サムネ/動画の署名URLを返します。"
+        if status == "done" and apify_fallback_enabled():
+            st = self._apply_apify_fallback(st, input.job_id, ctx, log)
+            counts = st.get("counts")
+            apify_count = counts.get("videos_apify") if isinstance(counts, dict) else None
+            if isinstance(apify_count, int) and apify_count > 0:
+                done_msg += f"（worker が落とせなかった {apify_count} 本は Apify で補完）"
         fail_msg = (
             f"失敗しました: {st.get('error_code') or ''} {st.get('stop_reason') or ''}".strip()
         )
         msg = {
             "queued": "順番待ちです。少し待って再度照会してください。",
             "running": "取得中です(数分)。",
-            "done": "完了しました。posts/サムネ/動画の署名URLを返します。",
+            "done": done_msg,
             "failed": fail_msg,
         }.get(status, "状態不明です。")
         return TikTokAcquireStatusOutput(
