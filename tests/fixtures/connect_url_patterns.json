@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "description": "第3層防御（連携URL捏造の封鎖）が『連携URL』とみなす境界の単一正本。plugin(dist/index.js の classifyConnectUrl) の実装と、probe の期待値が、この 1 本からずれないための契約。実装を変えるときは必ずここを先に変える。",
+  "background": "本番実測 2026-08-31: 0 tool call のターンで https://connect.openclaw.ai/oauth/google?user_id=... が捏造され利用者へ届いた。",
+  "kinds": {
+    "upstream_domain": "OpenClaw 本家ドメイン。自社では絶対に使わないため、パスを問わず捏造と断定する。",
+    "connect_web_oauth": "自社 connect-web ホスト かつ oauth/authorize/connect 系のパス。",
+    "oauth_path": "その他のホストで oauth/authorize/connect 系のパスを持つもの。"
+  },
+  "must_match": [
+    { "url": "https://connect.openclaw.ai/oauth/google?user_id=U09MBDFQ16J", "kind": "upstream_domain", "note": "本番で実際に捏造された URL" },
+    { "url": "https://connect.openclaw.ai/oauth/slack?user_id=U09MBDFQ16J", "kind": "upstream_domain", "note": "本番で実際に捏造された URL" },
+    { "url": "https://openclaw.ai/", "kind": "upstream_domain", "note": "本家ドメインはパス無しでも捏造" },
+    { "url": "https://docs.openclaw.ai/install", "kind": "upstream_domain", "note": "サブドメインも本家" },
+    { "url": "https://connect.newstv.co.jp/oauth2/callback", "kind": "connect_web_oauth", "note": "自社ホスト＋oauth パス。0 tool call なら発行元が無いので捏造" },
+    { "url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=x", "kind": "oauth_path", "note": "同意画面URLの自作" }
+  ],
+  "must_not_match": [
+    { "url": "https://example.com/help", "note": "一般 URL" },
+    { "url": "https://www.newstv.co.jp/company", "note": "自社ホストでも oauth 系パスでなければ対象外" },
+    { "url": "https://support.google.com/mail/answer/12345", "note": "正当な出典 URL" },
+    { "url": "ftp://connect.openclaw.ai/oauth", "note": "http(s) 以外は対象外" }
+  ]
+}

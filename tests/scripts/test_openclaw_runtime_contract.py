@@ -2467,3 +2467,374 @@ def test_thread_suffix_removal_stays_narrow_and_fails_closed() -> None:
     for case in ("channel_unknown_suffix", "channel_empty_thread", "dm_with_thread_suffix"):
         assert report[case]["blocked"] is True, case
         assert report[case]["claimChannel"] is None, case
+
+
+# ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
+# 本番実測 2026-08-31: 利用者の「連携」に対し、Aico が 0 tool call のまま
+# https://connect.openclaw.ai/oauth/google?user_id=... を捏造して返した。
+# MCP 境界の決定論分岐(_maybe_redirect_to_connect)は tool 呼び出しが発生して
+# 初めて効くため、この経路には届かない。before_agent_finalize が最後の砦になる。
+
+
+def test_fabricated_connect_url_forces_another_pass_that_calls_the_tool() -> None:
+    """0 tool call で捏造 URL を返そうとしたら、送信させず再パスを要求すること。
+
+    定型文へ置換するのではなく `oauth_connect` を実際に呼ばせる形にしてある。
+    上流の再パス前置き(embedded-agent:1773)は「明示的に要求されない限りツールを
+    再実行するな」と指示するため、instruction 側で明示要求しないと握り潰される。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    assert guarded["intervened"] is True
+    assert guarded["action"] == "revise"
+    assert "明示的にツール実行を要求します" in guarded["instruction"]
+    assert "oauth_connect" in guarded["instruction"]
+    assert guarded["idempotencyKey"] == "connect-url-fabrication"
+    assert guarded["maxAttempts"] == 1
+
+
+def test_plugin_never_writes_a_url_itself() -> None:
+    """plugin 自身は URL を書かない(#352 と同じ規律)。
+
+    instruction は「ツールを呼べ」であって、リンクの代替提示ではない。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    assert "http://" not in guarded["instruction"]
+    assert "https://" not in guarded["instruction"]
+    assert "http" not in (guarded["reason"] or "")
+
+
+def test_ordinary_replies_are_not_touched() -> None:
+    """判定は intent ではなく出力。連携 URL を含まない応答には触れないこと。
+
+    intent 判定を主軸にすると「〇〇社との連携について提案書を」まで奪う
+    (connect_intent.py の残差法が禁じた誤爆)。出力検証はこれを構造的に回避する。
+    """
+    report = _caller_identity_report()
+    assert report["connect_no_url_zero_tool"]["intervened"] is False
+    assert report["connect_other_tool_generic_url"]["intervened"] is False
+
+
+def test_runs_that_actually_called_the_tool_are_excluded() -> None:
+    """oauth_connect を呼んだ run の URL は正規発行。介入しないこと。"""
+    assert _caller_identity_report()["connect_after_oauth_connect"]["intervened"] is False
+
+
+def test_intervention_budget_stops_the_loop_without_relying_on_upstream() -> None:
+    """同一 run の 2 回目は自前予算で打ち切ること。
+
+    上流にも予算はある(runId x idempotencyKey・既定 1 回)が、ループ不在を
+    上流挙動に依存させない。
+    """
+    budget = _caller_identity_report()["connect_budget_exhausted"]
+    assert budget["firstIntervened"] is True
+    assert budget["intervened"] is False
+
+
+def test_recovered_run_is_not_intervened_again() -> None:
+    """再パスで oauth_connect が呼ばれた run には再介入しないこと。
+
+    ループ不在を上流の clientToolCalls ゲートではなく、自前カウンタ(条件 a)で担保する。
+    """
+    recovered = _caller_identity_report()["connect_recovered_after_tool_call"]
+    assert recovered["firstIntervened"] is True
+    assert recovered["recoveredIntervened"] is False
+
+
+def test_missing_assistant_message_fails_open() -> None:
+    """本文が無ければ利用者にも届かない。触らないこと。"""
+    assert _caller_identity_report()["connect_missing_message"]["intervened"] is False
+
+
+def test_authoritative_run_binding_is_enforced_on_finalize() -> None:
+    """event と ctx の runId が食い違う finalize は不介入。
+
+    signToolCall と同じ「権威 run 束縛」の規律を、この hook でも緩めていないこと。
+    """
+    report = _caller_identity_report()
+    assert report["connect_run_mismatch"]["intervened"] is False
+    # 別 run 自体が 0 tool call なら見逃さない(カウンタが run 単位である証明)。
+    assert report["connect_other_run_zero_tool"]["intervened"] is True
+
+
+def test_connect_url_classification_matches_the_single_source_of_truth() -> None:
+    """URL 境界は tests/fixtures/connect_url_patterns.json が単一正本であること。
+
+    実装と期待値が別々に育つとドリフトする。fixture を変えたら必ずここが動く。
+    """
+    matrix = _caller_identity_report()["connect_url_pattern_matrix"]
+    assert matrix, "fixture が空"
+    mismatched = [row for row in matrix if row["expectMatch"] != row["matched"]]
+    assert not mismatched, f"fixture と実装が食い違う: {mismatched}"
+
+
+def test_intervention_log_keeps_the_g7_discipline() -> None:
+    """ログに本文・URL 実体・Slack 識別子を載せないこと(G7)。
+
+    捏造 URL には user_id が埋まっていた実績があるため、URL の素通しは
+    それ自体が G7 違反になる。
+    """
+    guarded = _caller_identity_report()["connect_fabricated_zero_tool"]
+    blocked = [log for log in guarded["logs"] if "connect_url_fabrication_blocked" in log]
+    assert blocked, "介入ログが出ていない"
+    for log in blocked:
+        assert "http" not in log
+        assert "openclaw.ai" not in log
+        assert "U09MBDFQ16J" not in log
+        assert "連携リンク" not in log
+        assert "kinds=" in log
+        assert "outcome=revised" in log
+
+
+def test_connect_guard_ledger_is_bounded_without_agent_end() -> None:
+    """agent_end が発火しない run を大量に流しても台帳が無制限に育たないこと。
+
+    掃除を agent_end(releaseAgentRun)だけに任せると、abort/crash/timeout 経路の
+    run が残留し、長寿命プロセスでリークする(2026-08-31 レビュー指摘)。
+    TTL 掃除に加えて上限超過時に最古から捨てるため、最初の run の予算記録は
+    やがて落ちて再び介入できるようになる。台帳が無制限に育つ実装では
+    `firstEvicted` が False のままになる。
+    """
+    bound = _caller_identity_report()["connect_ledger_bound"]
+    assert bound["firstIntervened"] is True
+    assert bound["secondBlockedByBudget"] is True, "自前予算が効いていない"
+    assert bound["threw"] is None, bound["threw"]
+    assert bound["firstEvicted"] is True, "上限退避が効かず台帳が無制限に育つ"
+
+
+def test_connect_guard_ledger_entries_expire_by_ttl() -> None:
+    """TTL 超過の run 記録が掃除されること。
+
+    上限退避は「上限を超えたとき」しか効かないため、少数 run が長時間残る
+    ケースはこの TTL が守る。上限退避だけでは緑のままになる穴を塞ぐ。
+    """
+    ttl = _caller_identity_report()["connect_ledger_ttl"]
+    assert ttl["firstIntervened"] is True
+    assert ttl["blockedWhileFresh"] is True, "TTL 内なのに予算が効いていない"
+    assert ttl["expiredIntervened"] is True, "TTL 超過の記録が掃除されていない"
+
+
+# ── 連携依頼の 3 層防御（2026-09-03） ─────────────────────────────────────
+# 本番実測 2026-09-03: 利用者が DM で「連携」と送っても Aico がツールを一度も呼ばず
+# 「未登録／管理者に問い合わせ」と自作回答する事故が同一 DM で 5 回以上続いた。
+# mcp 側には一切届いていない（mcp_connect_intent がゼロ）ので、MCP 境界の決定論分岐も
+# 上の URL 検出（応答に URL が無い）も効かない。3 層で塞ぐ:
+#   層1: before_agent_reply で短い連携依頼を検出し、モデルを通さず oauth_connect を呼ぶ。
+#   層2: before_agent_finalize で「0 tool call × 短い連携依頼」を revise で再パスさせる。
+#   層3: 再パス後も 0 tool call なら reply_payload_sending で定型文に置換する。
+
+CONNECT_ZERO_TOOL_INSTRUCTION = (
+    "利用者は Google/Slack 連携を依頼しています。`oauth_connect` ツールを必ず呼び、"
+    "その戻り値の message とリンクを一字も変えずに提示してください。"
+    "自分で原因を推測したり、管理者への問い合わせを案内したりしてはいけません。"
+)
+CONNECT_DIAGNOSTIC_RE = re.compile(
+    r"診断: CONNECT-Z01 \d{4}-\d{2}-\d{2} \d{2}:\d{2} JST U09CX1CCBLN$"
+)
+
+
+def test_short_connect_request_is_answered_by_the_tool_without_the_model() -> None:
+    """層1: 短い連携依頼は before_agent_reply で handled され、oauth_connect が 1 回呼ばれること。
+
+    {handled:true, reply} を返すとハーネスは reply をそのまま返してモデルを起動しない
+    （openclaw 2026.7.1 get-reply:5620-5623）。戻り値 message はそのまま Slack へ出る。
+    """
+    guarded = _caller_identity_report()["connect_l1_short_request"]
+    assert guarded["handled"] is True
+    assert guarded["toolCallCount"] == 1
+    assert guarded["toolName"] == "oauth_connect"
+    assert guarded["methods"] == ["initialize", "notifications/initialized", "tools/call"]
+    assert guarded["replyText"].startswith("以下のリンクから連携してください")
+    assert guarded["sessionHeader"] == "sess-1"
+    assert guarded["bearerHeader"].startswith("Bearer ")
+
+
+def test_deterministic_path_reuses_the_existing_signed_claim_contract() -> None:
+    """層1 の tools/call は before_tool_call 経由と同じ claim 契約で署名されること。
+
+    mcp 側（caller_claim.py）の検証をそのまま通す＝新しい信頼境界を作らない。
+    channel は mcp が要求する実 Slack 会話 id（^[CDG]…）で、DM の内部別名 DM:U… ではない。
+    """
+    guarded = _caller_identity_report()["connect_l1_short_request"]
+    claim = guarded["claimPayload"]
+    assert claim["v"] == 2
+    assert claim["iss"] == "teamagent-openclaw"
+    assert claim["aud"] == "teamagent-mcp"
+    assert claim["tool"] == "oauth_connect"
+    assert claim["sub"] == "U09CX1CCBLN"
+    assert claim["team"] == "T07MU5P2PBR"
+    assert re.fullmatch(r"[CDG][A-Z0-9]{8,}", claim["channel"]), claim["channel"]
+    assert claim["run_id"].startswith("connect-l1-")
+    assert claim["tool_call_id"] == claim["run_id"]
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", claim["run_id"])
+    assert claim["exp"] - claim["iat"] == 60
+    declared = guarded["declaredContext"]
+    assert declared["slack_user_id"] == claim["sub"]
+    assert declared["slack_team_id"] == claim["team"]
+    assert declared["channel_id"] == claim["channel"]
+    assert "thread_ts" not in declared
+
+
+def test_long_connect_mention_does_not_take_the_deterministic_path() -> None:
+    """層1 は「〇〇社との連携について提案書を」を通さず通常処理へ流すこと（誤爆しない）。"""
+    report = _caller_identity_report()
+    assert report["connect_l1_long_request"]["handled"] is False
+    assert report["connect_l1_long_request"]["toolCallCount"] == 0
+    assert report["connect_l1_non_user_trigger"]["handled"] is False
+    assert report["connect_l1_non_user_trigger"]["toolCallCount"] == 0
+
+
+def test_deterministic_path_mints_once_per_inbound_and_finds_bound_runs() -> None:
+    """同じ受信に 2 度は鋳造しない。message_received が runId を伴い先に束縛されても見つける。"""
+    report = _caller_identity_report()
+    assert report["connect_l1_repeat_same_message"]["toolCallCount"] == 1
+    assert report["connect_l1_repeat_same_message"]["handled"] is False
+    assert report["connect_l1_bound_run"]["handled"] is True
+    assert report["connect_l1_bound_run"]["toolCallCount"] == 1
+
+
+def test_deterministic_path_failures_fall_to_the_next_layer() -> None:
+    """層1 の失敗は fail-open ではなく fail-to-next-layer であること。
+
+    fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー / message 欠落 /
+    bearer 無し / 正準 channel 無し のいずれでも、同じ受信がモデル経路へ進んだとき
+    層2（0 tool call × 短い連携依頼）が revise を返す。
+    """
+    failures = _caller_identity_report()["connect_l1_failures"]
+    expected_reason = {
+        "fetch_throws": "fetch_failed",
+        "http_500": "mcp_http_500",
+        "rpc_error": "mcp_rpc_error",
+        "tool_error": "mcp_tool_error",
+        "no_message": "mcp_invalid_result",
+        "no_bearer": "no_mcp_bearer",
+        "no_canonical_channel": "no_canonical_channel",
+    }
+    assert set(failures) == set(expected_reason)
+    for case, reason in expected_reason.items():
+        outcome = failures[case]
+        assert outcome["l1Handled"] is False, case
+        assert outcome["fallthroughReason"] == reason, case
+        assert outcome["layer2Intervened"] is True, case
+        assert outcome["layer2Key"] == "connect-zero-tool", case
+
+
+def test_deterministic_path_logs_keep_the_g7_discipline() -> None:
+    """層1 のログに本文・URL・Slack 識別子・bearer を載せないこと。"""
+    report = _caller_identity_report()
+    logs = list(report["connect_l1_short_request"]["infos"])
+    for outcome in report["connect_l1_failures"].values():
+        logs.extend(outcome["logs"])
+    assert logs
+    for log in logs:
+        assert "U09CX1CCBLN" not in log
+        # reason=mcp_http_500 のような理由コードは許す。URL 実体だけを禁じる。
+        assert "http://" not in log
+        assert "https://" not in log
+        assert "連携" not in log
+        assert "b" * 48 not in log
+
+
+def test_zero_tool_reply_to_short_connect_request_forces_another_pass() -> None:
+    """層2: 0 tool call × 短い連携依頼 → revise（固定 instruction・maxAttempts 1）。"""
+    guarded = _caller_identity_report()["connect_zero_tool_short_request"]
+    assert guarded["intervened"] is True
+    assert guarded["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
+    assert guarded["idempotencyKey"] == "connect-zero-tool"
+    assert guarded["maxAttempts"] == 1
+    assert "http" not in guarded["instruction"]
+
+
+def test_zero_tool_rule_does_not_fire_on_long_requests_or_after_a_tool_call() -> None:
+    """層2 は長文で誤爆せず、oauth_connect を呼んだ run には介入しないこと。"""
+    report = _caller_identity_report()
+    assert report["connect_zero_tool_long_request"]["intervened"] is False
+    assert report["connect_zero_tool_with_tool_call"]["toolBlocked"] is False
+    assert report["connect_zero_tool_with_tool_call"]["intervened"] is False
+
+
+def test_exhausted_zero_tool_run_is_replaced_with_the_fixed_text() -> None:
+    """層3: 再パス後も 0 tool call なら送信直前に定型文へ置換し、2 通目は取り消すこと。
+
+    診断行は「CONNECT-Z01 <JST時刻> <Slack user id>」で、URL も秘匿値も含まない。
+    """
+    guarded = _caller_identity_report()["connect_zero_tool_fallback"]
+    assert guarded["firstIntervened"] is True
+    assert guarded["intervened"] is False, "予算切れ後に revise を返している"
+    first, second = guarded["deliveries"]
+    text = first["payload"]["text"]
+    assert text.startswith("連携リンクの発行に失敗しました。もう一度『連携』と送ってください。")
+    assert "管理者（小俣）" in text
+    assert CONNECT_DIAGNOSTIC_RE.search(text), text
+    assert "http" not in text
+    assert "未登録" not in text
+    assert second["cancel"] is True
+    armed = [log for log in guarded["logs"] if "outcome=fallback_armed" in log]
+    replaced = [log for log in guarded["logs"] if "outcome=replaced" in log]
+    assert armed and replaced
+    for log in guarded["logs"]:
+        assert "U09CX1CCBLN" not in log
+        assert "未登録" not in log
+
+
+def test_fixed_text_replacement_is_bound_to_the_run() -> None:
+    """層3 は runId が食い違う配信・武装していない run の配信には触らないこと。"""
+    report = _caller_identity_report()
+    assert report["connect_zero_tool_fallback_run_mismatch"]["deliveries"] == [None]
+    assert report["connect_zero_tool_fallback_not_armed"]["deliveries"] == [None]
+
+
+def test_short_connect_request_phrases_match_the_single_source_of_truth() -> None:
+    """短い連携依頼の境界は tests/fixtures/connect_request_phrases.json が単一正本であること。
+
+    must_match は全件で oauth_connect が 1 回呼ばれ 0 tool の応答が出ない。
+    must_not_match は層1 を通らない（tools/call 0 件）。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    assert len(fixture["must_match"]) >= 20
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    assert len(matrix) == len(fixture["must_match"]) + len(fixture["must_not_match"])
+    mismatched = [
+        row
+        for row in matrix
+        if row["expectMatch"] != row["handled"]
+        or (row["expectMatch"] and (row["toolCallCount"] != 1 or not row["replyIsToolMessage"]))
+        or (not row["expectMatch"] and row["toolCallCount"] != 0)
+    ]
+    assert not mismatched, f"fixture と実装が食い違う: {mismatched}"
+
+
+def test_deterministic_path_consumes_the_inbound_so_the_next_message_still_binds() -> None:
+    """層1 が handled で返した受信を pending に残さないこと（2026-09-03 レビュー指摘 1）。
+
+    handled で返すとモデルが起動せず before_model_resolve が走らない。受信を残すと
+    同じ DM の次の受信で bindAgentRun が candidates=2 で run を拒否し、以後 10 分間
+    すべてのツールが「trusted Slack run identity is missing or stale」でブロックされる。
+    """
+    outcome = _caller_identity_report()["connect_l1_next_message_tools_ok"]
+    assert outcome["l1Handled"] is True
+    assert outcome["nextRunRejected"] is False, "層1 の受信が pending に残り次の run が拒否された"
+    assert outcome["nextToolBlocked"] is False
+
+
+def test_deterministic_path_answers_again_within_the_ttl() -> None:
+    """層1 成功の 30 秒後に再度「連携」が来ても、層1 が再び handled になること（指摘 2）。
+
+    受信が残っていると候補 2 件で不発になり、モデル経路でも run 拒否で oauth_connect が
+    block され層2/3 も届かない＝「必ず」が破れる。不発になる場合も無言にはせず
+    reason=ambiguous_ingress で観測できる。
+    """
+    outcome = _caller_identity_report()["connect_l1_repeat_after_30s"]
+    assert outcome["firstHandled"] is True
+    assert outcome["secondHandled"] is True
+    assert outcome["toolCallCount"] == 2
+    assert outcome["ambiguous"] is False
+
+
+def test_deterministic_path_never_uses_another_senders_inbound() -> None:
+    """スレッドで別送信者 B の「連携」が pending でも、A の before_agent_reply は不発であること（指摘 3）。
+
+    senderId 照合を外すと A に B の claim で B 専用リンクが返る。tools/call は 0 件。
+    """
+    outcome = _caller_identity_report()["connect_l1_other_sender_pending"]
+    assert outcome["handled"] is False
+    assert outcome["toolCallCount"] == 0

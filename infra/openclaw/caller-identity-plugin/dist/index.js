@@ -20,6 +20,125 @@ const MAIL_DRAFT_TOOL = "mail_draft";
 const SLACK_INTERACTION_EVENT_PREFIX = "Slack interaction: ";
 const SLACK_INTERACTION_VALUE_MAX_LENGTH = 160;
 
+// ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
+// 背景（本番実測 2026-08-31）: LLM がツールを 1 つも呼ばないまま
+// https://connect.openclaw.ai/oauth/google?user_id=... を捏造し、利用者へ届いた。
+// MCP 境界の決定論分岐（server.py の _maybe_redirect_to_connect）は tool 呼び出しが
+// 発生して初めて効くため、0 tool call のターンには届かない。ここが最後の砦になる。
+//
+// 判定は intent ではなく出力検証で行う: この run の teamagent tool call が 0 なら
+// oauth_connect は 1 度も URL を発行していない。よって応答本文に現れる連携 URL は
+// 定義上すべて捏造である（推測が入らない）。
+const ASSISTANT_MESSAGE_SCAN_LIMIT = 100000;
+const CONNECT_URL_RE = /https?:\/\/[^\s<>()\[\]"'`|]+/giu;
+const CONNECT_URL_TRAILING_RE = /[)\]}>.,;:!?'"`。、）】」]+$/u;
+const UPSTREAM_VENDOR_HOST_RE = /(?:^|\.)openclaw\.ai$/iu;
+const CONNECT_WEB_HOST_RE = /(?:^|\.)newstv\.co\.jp$/iu;
+const CONNECT_PATH_RE = /(?:oauth|authorize|\/connect)/iu;
+const CONNECT_FABRICATION_RETRY_KEY = "connect-url-fabrication";
+// 第3層の run 台帳は agent_end だけに掃除を任せない。abort/crash/timeout で
+// agent_end が発火しない run が残留し、長寿命プロセスで無制限に育つため、
+// 他の Map と同じ TTL 掃除に加えて上限で古いものから捨てる。
+// ここでの脱落は「介入を 1 回余分に許す/取りこぼす」だけで、上流の revise 予算
+// (runId x idempotencyKey) が最終的にループを止める。署名経路を落とす
+// MAX_TRACKED_CONTEXTS の fail には意図的に相乗りさせない。
+const MAX_CONNECT_GUARD_RUNS = MAX_TRACKED_CONTEXTS;
+const MAX_CONNECT_FABRICATION_REVISIONS = 1;
+const CONNECT_FABRICATION_REASON =
+  "直前の下書き回答には、ツールが発行していない連携 URL が含まれています。その URL は実在しません。";
+// 上流の再パス前置き（embedded-agent:1773）は
+// "Do not ... rerun tools unless the request explicitly requires it" と指示するため、
+// ここで明示的にツール実行を要求しないと握り潰される。
+const CONNECT_FABRICATION_INSTRUCTION = [
+  "この指示は明示的にツール実行を要求します: oauth_connect を必ず呼び出し、",
+  "その戻り値の message に含まれる URL だけを、1 文字も変えずに提示してください。",
+  "自分の知識・記憶・過去の会話から URL を組み立てることは禁止です。",
+  "oauth_connect が失敗した場合は、URL を書かず、リンクを発行できなかった旨だけを伝えてください。",
+].join("\n");
+
+// ── 連携依頼の 3 層防御（2026-09-03） ─────────────────────────────────────
+// 本番実測（2026-09-03）: 利用者が DM で「連携」とだけ送っても、Aico がツールを一度も
+// 呼ばず「未登録／管理者に問い合わせ」と自作回答する事故が同一 DM で 5 回以上続いた。
+// mcp 側には一切届いていない（mcp_connect_intent がゼロ）ため、MCP 境界の決定論分岐も
+// 上の URL 検出（応答に URL が無い）も効かない。ここでは 3 層に分けて塞ぐ:
+//   層1: before_agent_reply で短い連携依頼を検出し、モデルを通さず oauth_connect を呼ぶ。
+//        {handled:true, reply} を返すとハーネスはモデルを起動しない（get-reply:5599-5623）。
+//   層2: before_agent_finalize で「0 tool call × 短い連携依頼」を revise で再パスさせる。
+//   層3: 再パス後も 0 tool call なら reply_payload_sending で定型文に置換する
+//        （event.runId / ctx.runId が agent run と同じ id で渡る: dispatch:2528-2545）。
+// 「短い連携依頼」の判定は誤爆を避けるため厳格にする（設計書 §2 の残差法の教訓）:
+// 正規化後の本文が 12 文字以下で、連携語＋任意の助詞だけで構成されるものに限る。
+// 「〇〇社との連携について提案書を」は長さと構成の両方で外れる。
+const OAUTH_CONNECT_TOOL = "oauth_connect";
+const CONNECT_REQUEST_MAX_LENGTH = 12;
+const CONNECT_REQUEST_SCAN_LIMIT = 512;
+// 正規化後の本文がこの形だけで構成されるときに限り「短い連携依頼」とみなす。
+const CONNECT_REQUEST_CORE_RE =
+  /^(?:再)?(?:google|グーグル|slack|スラック)?[\s\u3000]*(?:再)?(?:連携|接続|connect)[\s\u3000]*[をにのがはへとも]?$/iu;
+// 敬語末尾・依頼末尾。長いものから順に、変化が無くなるまで剥がす。
+const CONNECT_REQUEST_SUFFIXES = [
+  "よろしくお願いいたします",
+  "よろしくお願い致します",
+  "よろしくお願いします",
+  "よろしく",
+  "してほしいです",
+  "して欲しいです",
+  "してほしい",
+  "して欲しい",
+  "してもらえますか",
+  "してもらえる",
+  "してくれますか",
+  "してくれる",
+  "させてください",
+  "させて下さい",
+  "させて",
+  "できますか",
+  "できる",
+  "してください",
+  "して下さい",
+  "したいです",
+  "したい",
+  "して",
+  "お願いいたします",
+  "お願い致します",
+  "おねがいします",
+  "お願いします",
+  "お願い",
+  "ください",
+  "下さい",
+  "です",
+  "する",
+  "を",
+];
+// 前後の空白・句読点・括弧・引用符。
+const CONNECT_REQUEST_EDGE_RE =
+  /^[\s\u3000、。．，,.!！?？…・:：;；「」『』()（）【】\[\]<>"'`~〜]+|[\s\u3000、。．，,.!！?？…・:：;；「」『』()（）【】\[\]<>"'`~〜]+$/gu;
+// 絵文字（Unicode）・Slack の :emoji: コード・Slack マークアップ（<@U…> <!here> <#C…>）。
+const CONNECT_REQUEST_EMOJI_RE =
+  /\p{Extended_Pictographic}|\p{Emoji_Modifier}|\uFE0F|\u200D|[\u{1F1E6}-\u{1F1FF}]/gu;
+const CONNECT_REQUEST_SLACK_EMOJI_RE = /:[a-z0-9_+-]{1,64}:/giu;
+const CONNECT_REQUEST_SLACK_MARKUP_RE = /<[@!#][^>]{0,64}>/gu;
+const CONNECT_ZERO_TOOL_RETRY_KEY = "connect-zero-tool";
+const CONNECT_ZERO_TOOL_REASON =
+  "利用者の短い連携依頼に対し、ツールを 1 つも呼ばずに回答しようとしています。";
+// 固定文（依頼仕様どおり・変更しない）。
+const CONNECT_ZERO_TOOL_INSTRUCTION =
+  "利用者は Google/Slack 連携を依頼しています。`oauth_connect` ツールを必ず呼び、" +
+  "その戻り値の message とリンクを一字も変えずに提示してください。" +
+  "自分で原因を推測したり、管理者への問い合わせを案内したりしてはいけません。";
+const CONNECT_DIAGNOSTIC_CODE = "CONNECT-Z01";
+const CONNECT_FALLBACK_CANCEL_REASON = "connect zero-tool fallback already delivered";
+// 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
+const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
+// 層1 の 3 POST（initialize / initialized / tools/call）で共有する全体予算。
+// claim TTL（60s）と同長にしない: 超過は fallthrough でモデル経路へ渡す。
+const MCP_REQUEST_TIMEOUT_MS = 15_000;
+const MCP_PROTOCOL_VERSION = "2025-03-26";
+const MCP_CLIENT_NAME = "teamagent-caller-identity-connect";
+const CONNECT_L1_INVOCATION_PREFIX = "connect-l1";
+const SLACK_CANONICAL_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
+const SLACK_DM_CHANNEL_RE = /^D[A-Z0-9]{8,}$/u;
+
 const SLACK_USER_RE = /^U[A-Z0-9]{8,}$/u;
 const SLACK_TEAM_RE = /^T[A-Z0-9]{8,}$/u;
 const SLACK_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
@@ -213,6 +332,204 @@ function block(reason) {
   };
 }
 
+function normalizeConnectRequest(text) {
+  if (typeof text !== "string") return null;
+  // 長文は正規化する前に落とす（判定コストを固定し、長文が誤って通る余地も残さない）。
+  if (text.length > CONNECT_REQUEST_SCAN_LIMIT) return null;
+  let value = text
+    .normalize("NFKC")
+    .replace(CONNECT_REQUEST_SLACK_MARKUP_RE, " ")
+    .replace(CONNECT_REQUEST_SLACK_EMOJI_RE, " ")
+    .replace(CONNECT_REQUEST_EMOJI_RE, " ");
+  let previous = null;
+  while (previous !== value) {
+    previous = value;
+    value = value.replace(CONNECT_REQUEST_EDGE_RE, "");
+    for (const suffix of CONNECT_REQUEST_SUFFIXES) {
+      if (value.endsWith(suffix) && value.length > suffix.length) {
+        value = value.slice(0, -suffix.length);
+        break;
+      }
+    }
+  }
+  return value;
+}
+
+// 「短い連携依頼」判定。部分一致ではなく、正規化後の本文全体が
+// 連携語（＋任意の助詞）だけで構成され、かつ 12 文字以下のときに限り真。
+export function isShortConnectRequest(text) {
+  const normalized = normalizeConnectRequest(text);
+  if (normalized === null || normalized.length === 0) return false;
+  if ([...normalized].length > CONNECT_REQUEST_MAX_LENGTH) return false;
+  return CONNECT_REQUEST_CORE_RE.test(normalized);
+}
+
+// JST の "YYYY-MM-DD HH:MM JST"。Intl に依存せず決定論的に組む。
+function formatJstMinute(nowMs) {
+  const jst = new Date(nowMs + 9 * 60 * 60 * 1000);
+  const pad = value => String(value).padStart(2, "0");
+  return (
+    `${jst.getUTCFullYear()}-${pad(jst.getUTCMonth() + 1)}-${pad(jst.getUTCDate())} ` +
+    `${pad(jst.getUTCHours())}:${pad(jst.getUTCMinutes())} JST`
+  );
+}
+
+// 層3 の定型文。URL も秘匿値も含めない。診断行は利用者→管理者へ転記される前提。
+export function buildConnectFallbackText({ senderId, nowMs }) {
+  return (
+    "連携リンクの発行に失敗しました。もう一度『連携』と送ってください。" +
+    "解決しない場合は次の 1 行を管理者（小俣）へ送ってください: " +
+    `診断: ${CONNECT_DIAGNOSTIC_CODE} ${formatJstMinute(nowMs)} ${senderId}`
+  );
+}
+
+class ConnectPathError extends Error {
+  constructor(code) {
+    super(code);
+    this.name = "ConnectPathError";
+    this.code = code;
+  }
+}
+
+function connectPathReason(error) {
+  if (error instanceof ConnectPathError) return error.code;
+  if (error && typeof error === "object" && error.name === "TimeoutError") return "timeout";
+  if (error && typeof error === "object" && error.name === "AbortError") return "timeout";
+  return "unexpected";
+}
+
+function parseJsonRpcPayload(text, contentType, expectedId) {
+  if ((contentType ?? "").toLowerCase().includes("text/event-stream")) {
+    for (const block of text.split(/\r?\n\r?\n/u)) {
+      for (const line of block.split(/\r?\n/u)) {
+        if (!line.startsWith("data:")) continue;
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload?.id === expectedId) return payload;
+      }
+    }
+    throw new ConnectPathError("mcp_sse_missing_id");
+  }
+  return JSON.parse(text);
+}
+
+// 層1 の MCP クライアント。rollout-task-canary.mjs と同じ手順（initialize →
+// notifications/initialized → tools/call）で、既存の bearer と署名 claim をそのまま使う。
+// 新しい信頼境界は作らない: mcp 側は before_tool_call 経由と同じ検証を通す。
+async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeoutMs }) {
+  // 全体予算を 1 本の signal で共有する（POST ごとに timeoutMs を持たない）。
+  const signal = AbortSignal.timeout(timeoutMs);
+  const buildHeaders = sessionId => ({
+    Accept: "application/json, text/event-stream",
+    Authorization: `Bearer ${bearer}`,
+    "Content-Type": "application/json",
+    ...(sessionId ? { "Mcp-Session-Id": sessionId } : {}),
+  });
+  const post = async (body, sessionId) => {
+    let response;
+    try {
+      response = await fetchFn(mcpUrl, {
+        method: "POST",
+        headers: buildHeaders(sessionId),
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (error) {
+      throw error?.name === "TimeoutError" || error?.name === "AbortError"
+        ? new ConnectPathError("timeout")
+        : new ConnectPathError("fetch_failed");
+    }
+    if (!response?.ok) throw new ConnectPathError(`mcp_http_${response?.status ?? "unknown"}`);
+    return response;
+  };
+  const readResult = async (response, expectedId) => {
+    let payload;
+    try {
+      payload = parseJsonRpcPayload(
+        await response.text(),
+        response.headers?.get?.("content-type"),
+        expectedId,
+      );
+    } catch (error) {
+      if (error instanceof ConnectPathError) throw error;
+      throw new ConnectPathError("mcp_invalid_json");
+    }
+    if (payload?.id !== expectedId) throw new ConnectPathError("mcp_rpc_id_mismatch");
+    if (payload.error) throw new ConnectPathError("mcp_rpc_error");
+    return payload.result;
+  };
+  const initialized = await post({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: MCP_CLIENT_NAME, version: "1" },
+    },
+  });
+  const sessionId = initialized.headers?.get?.("mcp-session-id") || null;
+  await readResult(initialized, 1);
+  await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId);
+  const called = await post(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: toolArguments } },
+    sessionId,
+  );
+  return readResult(called, 2);
+}
+
+// tools/call の戻り値（TextContent の JSON 文字列）から oauth_connect の message を取り出す。
+function extractConnectMessage(result) {
+  if (!result || typeof result !== "object" || result.isError === true) {
+    throw new ConnectPathError("mcp_tool_error");
+  }
+  const first = Array.isArray(result.content)
+    ? result.content.find(item => item?.type === "text" && typeof item.text === "string")
+    : null;
+  if (!first) throw new ConnectPathError("mcp_invalid_result");
+  let data;
+  try {
+    data = JSON.parse(first.text);
+  } catch {
+    throw new ConnectPathError("mcp_invalid_result");
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    throw new ConnectPathError("mcp_invalid_result");
+  }
+  if (typeof data.error === "string") throw new ConnectPathError("mcp_tool_error");
+  const message = typeof data.message === "string" ? data.message.trim() : "";
+  if (!message) throw new ConnectPathError("mcp_invalid_result");
+  return message;
+}
+
+function classifyConnectUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  const host = parsed.hostname;
+  const target = `${parsed.pathname}${parsed.search}`;
+  // 本家ドメインは自社では絶対に使わない。パスを問わず捏造と断定できる。
+  if (UPSTREAM_VENDOR_HOST_RE.test(host)) return "upstream_domain";
+  if (CONNECT_WEB_HOST_RE.test(host)) {
+    return CONNECT_PATH_RE.test(target) ? "connect_web_oauth" : null;
+  }
+  return CONNECT_PATH_RE.test(target) ? "oauth_path" : null;
+}
+
+function findFabricatedConnectUrlKinds(text) {
+  const kinds = new Set();
+  let scanned = 0;
+  for (const match of text.slice(0, ASSISTANT_MESSAGE_SCAN_LIMIT).matchAll(CONNECT_URL_RE)) {
+    scanned += 1;
+    const kind = classifyConnectUrl(match[0].replace(CONNECT_URL_TRAILING_RE, ""));
+    if (kind) kinds.add(kind);
+  }
+  return { kinds: [...kinds].sort(), scanned };
+}
+
 function sameIngress(left, right) {
   return (
     left.ingressKind === right.ingressKind &&
@@ -350,6 +667,7 @@ export function createCallerIdentityPlugin({
   env = process.env,
   now = () => Date.now(),
   randomBytesFn = randomBytes,
+  fetchFn = globalThis.fetch,
 } = {}) {
   const rawSecret = env.TEAMAGENT_CALLER_CLAIM_SECRET;
   const secret = typeof rawSecret === "string" ? Buffer.from(rawSecret, "utf8") : null;
@@ -360,6 +678,18 @@ export function createCallerIdentityPlugin({
   if (!expectedTeamId) {
     fail("SLACK_TEAM_ID must be a canonical Slack T ID");
   }
+  // 層1 の MCP 接続情報。bearer が無い環境では層1 だけを畳み、層2/3 は生かす
+  // （署名経路そのものは bearer に依存しないので fail させない）。
+  const rawBearer = env.TEAMAGENT_MCP_BEARER;
+  const mcpBearer =
+    typeof rawBearer === "string" && rawBearer.trim() && !rawBearer.includes("${")
+      ? rawBearer.trim()
+      : null;
+  const rawMcpUrl = env.TEAMAGENT_MCP_URL;
+  const mcpUrl =
+    typeof rawMcpUrl === "string" && /^https?:\/\//u.test(rawMcpUrl.trim())
+      ? rawMcpUrl.trim()
+      : DEFAULT_MCP_URL;
 
   const pendingByMessage = new Map();
   const pendingActions = new Map();
@@ -367,8 +697,32 @@ export function createCallerIdentityPlugin({
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
+  const toolCallsByRun = new Map();
+  const connectRevisionsByRun = new Map();
+  // 層3: revise 予算を使い切っても 0 tool call のままだった run。reply_payload_sending で
+  // 本文を定型文に置換する。agent_end より後に配信が走りうるので releaseAgentRun では消さず、
+  // 他の台帳と同じ TTL/上限掃除に任せる。
+  const connectFallbackByRun = new Map();
+
+  function pruneConnectGuardState(nowMs) {
+    for (const ledger of [toolCallsByRun, connectRevisionsByRun, connectFallbackByRun]) {
+      for (const [runId, entry] of ledger) {
+        if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
+          ledger.delete(runId);
+        }
+      }
+      // TTL 内でも上限を超えたら、最も古い記録から落とす。
+      // 記録の更新側が delete->set しているので、挿入順が更新順と一致する。
+      while (ledger.size > MAX_CONNECT_GUARD_RUNS) {
+        const oldest = ledger.keys().next();
+        if (oldest.done) break;
+        ledger.delete(oldest.value);
+      }
+    }
+  }
 
   function pruneState(nowMs) {
+    pruneConnectGuardState(nowMs);
     for (const [key, ingress] of pendingByMessage) {
       if (nowMs - ingress.receivedAtMs > INBOUND_CONTEXT_TTL_MS) {
         pendingByMessage.delete(key);
@@ -437,8 +791,11 @@ export function createCallerIdentityPlugin({
     const existing = ingressByRun.get(runId);
     if (existing) {
       const matches = sameIngress(existing, ingress);
-      if (matches) removePending(ingress);
-      else rejectRun(runId, now(), ingress);
+      if (matches) {
+        // 同一 ingress の再通知（content を伴う側が後から来る経路）でも判定を失わない。
+        if (ingress.connectRequest === true) existing.connectRequest = true;
+        removePending(ingress);
+      } else rejectRun(runId, now(), ingress);
       return matches;
     }
     for (const bound of ingressByRun.values()) {
@@ -518,6 +875,11 @@ export function createCallerIdentityPlugin({
     const nowMs = now();
     pruneState(nowMs);
     const pendingKey = JSON.stringify([sessionKey, messageId]);
+    // event.content は上流が BodyForCommands ?? RawBody ?? Body から作る利用者の生本文
+    // （message-hook-mappers:23 / Slack は commandBody ?? rawBody = 封筒無しの本文）。
+    // 本文そのものは保持せず、判定結果の真偽だけを ingress に載せる（G7）。
+    const connectRequest =
+      typeof event?.content === "string" && isShortConnectRequest(event.content);
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -532,6 +894,7 @@ export function createCallerIdentityPlugin({
       actionToolCallId: null,
       sessionSha256: createHash("sha256").update(sessionKey, "utf8").digest("hex"),
       receivedAtMs: nowMs,
+      connectRequest,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -717,6 +1080,130 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  // 会話（sessionKey × sender × channel）と鮮度で ingress を照合する。
+  // DM は inbound 側が `DM:<U…>`、run 側が `D…` と名乗るため、送信者で固定した別名を許す。
+  function matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs }) {
+    const dmAlias = SLACK_DM_CHANNEL_RE.test(channelId) ? `DM:${senderId}` : null;
+    const channelMatches =
+      ingress.channelId === channelId || (dmAlias !== null && ingress.channelId === dmAlias);
+    return (
+      ingress.sessionKey === sessionKey &&
+      ingress.senderId === senderId &&
+      channelMatches &&
+      nowMs - ingress.receivedAtMs <= INBOUND_CONTEXT_TTL_MS
+    );
+  }
+
+  // 層1（決定論の最前段）。before_agent_reply は利用者トリガの通常応答経路で、
+  // モデル起動より前に走る（get-reply:5599）。{handled:true, reply} を返すと
+  // ハーネスはその reply をそのまま返し、モデルを起動しない（get-reply:5620-5623）。
+  // ここで短い連携依頼を検出したら、既存の署名 claim を oauth_connect 向けに鋳造して
+  // mcp の /mcp へ直接 tools/call し、戻り値の message をそのまま Slack へ返す。
+  // 失敗はすべて「次の層へ落とす」（undefined を返す＝モデル経路へ進み層2/3 が受ける）。
+  async function answerShortConnectRequest(_event, ctx, logger) {
+    if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") return undefined;
+    if (ctx?.trigger !== "user") return undefined;
+    const sessionKey = nonBlank(ctx?.sessionKey, 2048);
+    const senderId = normalizeSlackId(ctx?.senderId, SLACK_USER_RE);
+    // ctx.chatId は identity fields（get-reply:5610-5615）が NativeChannelId ?? ChatId
+    // （Slack は conversation.id = message.channel、DM では `D…`）で上書きするため、
+    // channelId 側（`user:U…` 由来）と食い違いうる。会話照合には channelId 系だけを使い、
+    // chatId は DM の正準 `D…` を得る用途にだけ使う。
+    const channelId = consistentSlackChannel([ctx?.conversationId, ctx?.channelId, ctx?.channel]);
+    if (!sessionKey || !senderId || !channelId) return undefined;
+    const nowMs = now();
+    pruneState(nowMs);
+    // message_received が runId を伴うと ingress は既に run へ束縛され pending から消える
+    // （rememberInbound → bindRun → removePending）。束縛済み・未束縛の両方を見る。
+    const seen = new Set();
+    const candidates = [];
+    for (const ingress of [...pendingByMessage.values(), ...ingressByRun.values()]) {
+      if (ingress.ingressKind !== "message" || seen.has(ingress.pendingKey)) continue;
+      if (!matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs })) continue;
+      seen.add(ingress.pendingKey);
+      candidates.push(ingress);
+    }
+    const invocationId =
+      `${CONNECT_L1_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
+    const fallthrough = reason => {
+      // G7: 本文・URL・Slack 識別子は載せない。
+      logger?.warn?.(
+        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
+          `outcome=fallthrough reason=${reason}`,
+      );
+      return undefined;
+    };
+    if (candidates.length === 0) return undefined;
+    // 同じ会話に新鮮な受信が 2 件以上あると、どの本文が「連携」かを権威的に決められない。
+    // 無言で不発にせず、観測可能な理由でモデル経路へ渡す（bindAgentRun も同じ理由で拒否する）。
+    if (candidates.length > 1) return fallthrough("ambiguous_ingress");
+    const ingress = candidates[0];
+    if (ingress.connectRequest !== true) return undefined;
+    // 同じ受信に対して 2 度は鋳造しない（重複発行・往復の防止）。
+    if (ingress.connectDeterministicAttempted === true) return undefined;
+    ingress.connectDeterministicAttempted = true;
+    // mcp の claim 検証は channel に実 Slack 会話 id（^[CDG]…）を要求する
+    // （caller_claim.py: _SLACK_CHANNEL_RE）。DM の内部別名 `DM:U…` では通らないので、
+    // ctx.chatId の `D…` を、この送信者の DM に限って正準 id として採る（bindAgentRun と同じ規律）。
+    const chatChannel = resolveSlackChannel(ctx?.chatId);
+    let claimChannel = null;
+    if (SLACK_CANONICAL_CHANNEL_RE.test(ingress.channelId)) claimChannel = ingress.channelId;
+    else if (
+      ingress.channelId === `DM:${senderId}` &&
+      chatChannel !== null &&
+      SLACK_DM_CHANNEL_RE.test(chatChannel)
+    ) {
+      claimChannel = chatChannel;
+    }
+    if (claimChannel === null) return fallthrough("no_canonical_channel");
+    if (mcpBearer === null) return fallthrough("no_mcp_bearer");
+    if (typeof fetchFn !== "function") return fallthrough("no_fetch");
+    try {
+      const nonceBytes = randomBytesFn(16);
+      if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
+        throw new ConnectPathError("nonce_failed");
+      }
+      let signed;
+      try {
+        signed = mintCallerClaim({
+          trusted: { ...ingress, channelId: claimChannel },
+          runId: invocationId,
+          toolCallId: invocationId,
+          tool: OAUTH_CONNECT_TOOL,
+          params: { [USER_CONTEXT_KEY]: {} },
+          nowMs,
+          nonceBytes,
+        });
+      } catch {
+        throw new ConnectPathError("claim_failed");
+      }
+      const result = await callMcpTool({
+        fetchFn,
+        mcpUrl,
+        bearer: mcpBearer,
+        name: OAUTH_CONNECT_TOOL,
+        toolArguments: signed.params,
+        timeoutMs: MCP_REQUEST_TIMEOUT_MS,
+      });
+      const message = extractConnectMessage(result);
+      // handled で返すとモデルは起動せず before_model_resolve も走らないため、この受信を
+      // ここで消費する。残すと同じ DM の次の受信で bindAgentRun が candidates=2 で run を拒否し、
+      // 以後 10 分間すべてのツールが「trusted Slack run identity is missing or stale」で
+      // ブロックされる（レビュー実証 2026-09-03）。fallthrough 分岐では残す（モデル経路が束縛に使う）。
+      removePending(ingress);
+      for (const [boundRunId, bound] of ingressByRun) {
+        if (bound === ingress) ingressByRun.delete(boundRunId);
+      }
+      logger?.info?.(
+        `${PLUGIN_ID}: connect deterministic path invocation=${invocationId} ` +
+          `outcome=answered tool_calls=1`,
+      );
+      return { handled: true, reply: { text: message } };
+    } catch (error) {
+      return fallthrough(connectPathReason(error));
+    }
+  }
+
   function bindAgentRun(_event, ctx, logger) {
     if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") return;
     if (ctx?.trigger === "heartbeat") {
@@ -793,16 +1280,8 @@ export function createCallerIdentityPlugin({
     // conversation, so treat `D…` as equivalent to `DM:<senderId>` — and only
     // for the sender that every other check already pins. A cross-user or
     // cross-channel forgery still fails on senderId / sessionKey.
-    const dmAlias =
-      /^D[A-Z0-9]{8,}$/u.test(channelId) ? `DM:${senderId}` : null;
-    const channelMatches = value =>
-      value === channelId || (dmAlias !== null && value === dmAlias);
-    const candidates = [...pendingByMessage.values()].filter(
-      ingress =>
-        ingress.sessionKey === sessionKey &&
-        ingress.senderId === senderId &&
-        channelMatches(ingress.channelId) &&
-        nowMs - ingress.receivedAtMs <= INBOUND_CONTEXT_TTL_MS,
+    const candidates = [...pendingByMessage.values()].filter(ingress =>
+      matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs }),
     );
     if (candidates.length === 1 && candidates[0].channelId !== channelId) {
       // Remember the run-side name too, so the tool gate can accept either
@@ -967,23 +1446,6 @@ export function createCallerIdentityPlugin({
     const declarationError = validateDeclaredContext(declaredContext, trusted);
     if (declarationError) return block(declarationError);
 
-    const authoritativeContext = {
-      slack_user_id: trusted.senderId,
-      slack_team_id: trusted.teamId,
-      channel_id: trusted.channelId,
-      ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
-    };
-    const adjustedParams = {
-      ...params,
-      [USER_CONTEXT_KEY]: authoritativeContext,
-    };
-    let argumentsSha256;
-    try {
-      argumentsSha256 = canonicalRequestSha256(adjustedParams);
-    } catch (error) {
-      return block(error instanceof Error ? error.message : "request binding failed");
-    }
-    const issuedAt = Math.floor(nowMs / 1000);
     const nonceBytes =
       trusted.ingressKind === "action"
         ? createHmac("sha256", secret)
@@ -997,6 +1459,52 @@ export function createCallerIdentityPlugin({
     if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
       return block("secure nonce generation failed");
     }
+    let signed;
+    try {
+      signed = mintCallerClaim({
+        trusted,
+        runId: eventRunId,
+        toolCallId: eventToolCallId,
+        tool,
+        params,
+        nowMs,
+        nonceBytes,
+      });
+    } catch (error) {
+      return block(error instanceof Error ? error.message : "request binding failed");
+    }
+    consumedInvocations.set(exactInvocationKey, {
+      runId: eventRunId,
+      consumedAtMs: nowMs,
+    });
+    // 第3層の権威条件 (a): この run で teamagent tool call が発生したことの記録。
+    const priorToolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
+    // Map の挿入順は既存キーへの再 set では更新されない（実測）。
+    // 退避が「最も古い記録から」になるよう、delete してから set する。
+    toolCallsByRun.delete(eventRunId);
+    toolCallsByRun.set(eventRunId, { count: priorToolCalls + 1, updatedAtMs: nowMs });
+    if (trusted.ingressKind === "action") {
+      trusted.actionToolCallId = eventToolCallId;
+    }
+    return { params: signed.params };
+  }
+
+  // 署名 claim の鋳造。signToolCall（before_tool_call 経由）と層1（直接 tools/call）が
+  // 同じ関数を使う＝mcp 側の検証契約（caller_claim.py）に対する発行元は 1 箇所のまま。
+  // 例外は呼び出し側が block / fallthrough に変換する。
+  function mintCallerClaim({ trusted, runId, toolCallId, tool, params, nowMs, nonceBytes }) {
+    const authoritativeContext = {
+      slack_user_id: trusted.senderId,
+      slack_team_id: trusted.teamId,
+      channel_id: trusted.channelId,
+      ...(trusted.threadTs === null ? {} : {thread_ts: trusted.threadTs}),
+    };
+    const adjustedParams = {
+      ...params,
+      [USER_CONTEXT_KEY]: authoritativeContext,
+    };
+    const argumentsSha256 = canonicalRequestSha256(adjustedParams);
+    const issuedAt = Math.floor(nowMs / 1000);
     const payload = {
       v: CLAIM_VERSION,
       iss: ISSUER,
@@ -1007,8 +1515,8 @@ export function createCallerIdentityPlugin({
       thread: trusted.threadTs,
       message: trusted.messageId,
       session_sha256: trusted.sessionSha256,
-      run_id: eventRunId,
-      tool_call_id: eventToolCallId,
+      run_id: runId,
+      tool_call_id: toolCallId,
       tool,
       arguments_sha256: argumentsSha256,
       nonce: nonceBytes.toString("base64url"),
@@ -1019,13 +1527,6 @@ export function createCallerIdentityPlugin({
     const signatureSegment = createHmac("sha256", secret)
       .update(payloadSegment, "ascii")
       .digest("base64url");
-    consumedInvocations.set(exactInvocationKey, {
-      runId: eventRunId,
-      consumedAtMs: nowMs,
-    });
-    if (trusted.ingressKind === "action") {
-      trusted.actionToolCallId = eventToolCallId;
-    }
     return {
       params: {
         ...adjustedParams,
@@ -1037,11 +1538,126 @@ export function createCallerIdentityPlugin({
     };
   }
 
+  // 第3層防御。0 tool call のターンで捏造された連携 URL を、送信前に握り潰して
+  // ハーネスへ「もう 1 パス」を要求する（＝定型文で返さず、実際に oauth_connect を呼ばせる）。
+  // 上流契約: before_agent_finalize は lastAssistantMessage が非空のときだけ走り、
+  // revise は runId x idempotencyKey の予算で必ず打ち切られる（openclaw 2026.7.1 実測）。
+  function guardConnectUrlFabrication(event, ctx, logger) {
+    const nowMs = Date.now();
+    // finalize だけが走る経路でも台帳が育たないよう、ここでも掃除する。
+    // pruneState 全体は呼ばない（容量超過の fail を握り潰して fail-open
+    // させないため。掃除は第3層の台帳に限定する）。
+    pruneConnectGuardState(nowMs);
+    const eventRunId = canonicalInvocationId(event?.runId);
+    const contextRunId = canonicalInvocationId(ctx?.runId);
+    if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    // (a) teamagent tool call が 1 件でもあれば、URL はツール発行でありうる。触らない。
+    if ((toolCallsByRun.get(eventRunId)?.count ?? 0) > 0) return undefined;
+    // (b) 本文が無ければ利用者にも何も届かない。
+    if (typeof event?.lastAssistantMessage !== "string") return undefined;
+    const reply = event.lastAssistantMessage.trim();
+    if (!reply) return undefined;
+    // (c) 介入条件は OR: 連携 URL を含む（#353）／利用者の最新メッセージが短い連携依頼（層2）。
+    //     後者は run に束縛済みの ingress（権威的な受信）から読む。本文の推測はしない。
+    const { kinds } = findFabricatedConnectUrlKinds(reply);
+    const zeroToolConnect = ingressByRun.get(eventRunId)?.connectRequest === true;
+    if (kinds.length === 0 && !zeroToolConnect) return undefined;
+    const urlRule = kinds.length > 0;
+    const describe = urlRule
+      ? `connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 kinds=${kinds.join("+")}`
+      : `connect zero-tool revise runId=${eventRunId} tool_calls=0 reason=short_connect_request`;
+    // (d) 自前の予算（両ルール共有＝1 run につき再パスは 1 回）。上流予算に依存せず
+    //     ループ不在を担保する。
+    const revisions = connectRevisionsByRun.get(eventRunId)?.count ?? 0;
+    if (revisions >= MAX_CONNECT_FABRICATION_REVISIONS) {
+      logger?.warn?.(
+        `${PLUGIN_ID}: ${describe} outcome=budget_exhausted revise_attempt=${revisions}`,
+      );
+      if (zeroToolConnect) {
+        // 層3 を武装する: 再パス後も 0 tool call のまま終わった＝モデルが従わなかった。
+        // 送信直前（reply_payload_sending）で本文を定型文へ置換する。
+        const trusted = ingressByRun.get(eventRunId);
+        connectFallbackByRun.delete(eventRunId);
+        connectFallbackByRun.set(eventRunId, {
+          senderId: trusted.senderId,
+          replaced: false,
+          updatedAtMs: nowMs,
+        });
+        logger?.warn?.(
+          `${PLUGIN_ID}: connect zero-tool revise runId=${eventRunId} tool_calls=0 ` +
+            `reason=model_did_not_call_tool outcome=fallback_armed diagnostic=${CONNECT_DIAGNOSTIC_CODE}`,
+        );
+      }
+      return undefined;
+    }
+    // toolCallsByRun と同じ規律で delete->set する。現状 MAX_CONNECT_FABRICATION_REVISIONS
+    // が 1 なので 1 run につき 1 度しか set されず既存キーの再 set は起きないが、
+    // その値を 2 以上へ上げた瞬間に退避順が壊れる依存を残さない。
+    connectRevisionsByRun.delete(eventRunId);
+    connectRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
+    // G7: 本文・URL 実体・Slack 識別子は載せない（捏造 URL には user_id が埋まっていた）。
+    logger?.warn?.(`${PLUGIN_ID}: ${describe} outcome=revised revise_attempt=${revisions + 1}`);
+    // URL 捏造は指示がより厳格（URL を書くな）なので、両方成立時は URL 側を優先する。
+    return urlRule
+      ? {
+          action: "revise",
+          reason: CONNECT_FABRICATION_REASON,
+          retry: {
+            instruction: CONNECT_FABRICATION_INSTRUCTION,
+            idempotencyKey: CONNECT_FABRICATION_RETRY_KEY,
+            maxAttempts: MAX_CONNECT_FABRICATION_REVISIONS,
+          },
+        }
+      : {
+          action: "revise",
+          reason: CONNECT_ZERO_TOOL_REASON,
+          retry: {
+            instruction: CONNECT_ZERO_TOOL_INSTRUCTION,
+            idempotencyKey: CONNECT_ZERO_TOOL_RETRY_KEY,
+            maxAttempts: MAX_CONNECT_FABRICATION_REVISIONS,
+          },
+        };
+  }
+
+  // 層3。層2 の再パス後も 0 tool call のまま終わった run の最終応答を、送信直前に
+  // 定型文へ置換する。event.runId と ctx.runId は agent run と同じ id
+  // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
+  // 同一 run の 2 通目以降（分割 payload）は、置換済みの定型文と重複するので取り消す。
+  function replaceExhaustedConnectReply(event, ctx, logger) {
+    const eventRunId = canonicalInvocationId(event?.runId);
+    const contextRunId = canonicalInvocationId(ctx?.runId);
+    if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    const entry = connectFallbackByRun.get(eventRunId);
+    if (!entry) return undefined;
+    const payload = event?.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    const text = typeof payload.text === "string" ? payload.text.trim() : "";
+    if (!text) return undefined;
+    const nowMs = now();
+    if (entry.replaced) {
+      return { cancel: true, reason: CONNECT_FALLBACK_CANCEL_REASON };
+    }
+    entry.replaced = true;
+    entry.updatedAtMs = nowMs;
+    logger?.warn?.(
+      `${PLUGIN_ID}: connect zero-tool fallback runId=${eventRunId} outcome=replaced ` +
+        `diagnostic=${CONNECT_DIAGNOSTIC_CODE}`,
+    );
+    return {
+      payload: {
+        ...payload,
+        text: buildConnectFallbackText({ senderId: entry.senderId, nowMs }),
+      },
+    };
+  }
+
   function releaseAgentRun(event, ctx) {
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
     if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return;
     ingressByRun.delete(eventRunId);
+    toolCallsByRun.delete(eventRunId);
+    connectRevisionsByRun.delete(eventRunId);
     for (const [key, invocation] of consumedInvocations) {
       if (invocation.runId === eventRunId) {
         consumedInvocations.delete(key);
@@ -1068,10 +1684,19 @@ export function createCallerIdentityPlugin({
       api.on("message_received", (event, ctx) => {
         rememberInbound(event, ctx, api.logger);
       });
+      api.on("before_agent_reply", (event, ctx) =>
+        answerShortConnectRequest(event, ctx, api.logger),
+      );
       api.on("before_model_resolve", (event, ctx) => {
         bindAgentRun(event, ctx, api.logger);
       });
       api.on("before_tool_call", (event, ctx) => signToolCall(event, ctx));
+      api.on("before_agent_finalize", (event, ctx) =>
+        guardConnectUrlFabrication(event, ctx, api.logger),
+      );
+      api.on("reply_payload_sending", (event, ctx) =>
+        replaceExhaustedConnectReply(event, ctx, api.logger),
+      );
       api.on("agent_end", (event, ctx) => {
         releaseAgentRun(event, ctx);
       });
