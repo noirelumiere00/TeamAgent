@@ -295,6 +295,347 @@ const CHANNEL_SESSION_KEY =
   `agent:teamagent:slack:channel:${CHANNEL.toLowerCase()}:thread:${TS}`;
 const DM_SESSION_KEY = `agent:teamagent:slack:direct:${USER.toLowerCase()}`;
 
+// ── 連携依頼の 3 層防御（2026-09-03） ─────────────────────────────────────
+// 本番実測: 利用者が DM で「連携」と送っても Aico がツールを呼ばず自作回答する事故が
+// 同一 DM で 5 回以上。層1（before_agent_reply で oauth_connect を直接呼ぶ）、
+// 層2（0 tool call × 短い連携依頼を revise）、層3（再パス後も 0 tool なら定型文置換）。
+// hook の event/ctx 形状は上流 openclaw 2026.7.1 の実測（get-reply:5599-5617、
+// dispatch:2528-2545、message-hook-mappers:23,221-235）を焼き込む。
+const CONNECT_REQUEST_PHRASES = JSON.parse(
+  readFileSync(new URL("../fixtures/connect_request_phrases.json", import.meta.url), "utf8"),
+);
+// Slack DM の実 conversation id。before_agent_reply の ctx では identity fields が
+// chatId を NativeChannelId ?? ChatId（= Slack の message.channel）で上書きするので `D…` になる。
+const DM_CHANNEL = "D0B0PQD83N3";
+const BEARER = "b".repeat(48);
+const OAUTH_CONNECT_MESSAGE = [
+  "以下のリンクから連携してください（本人専用・1 回限り）。",
+  "Google: https://connect.newstv.co.jp/oauth2/start?token=abc",
+].join("\n");
+const SELF_MADE_REPLY =
+  "アカウントが未登録のようです。管理者にお問い合わせください。";
+const LONG_CONNECT_REQUEST = "〇〇社との連携について提案書を作ってください";
+
+// mcp（streamable-http）の偽物。rollout-task-canary.mjs と同じ手順を受ける。
+// 本番の失敗モード（fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー /
+// message 欠落）をそれぞれ再現できる。
+function makeMcpFake({ mode = "ok" } = {}) {
+  const calls = [];
+  const respond = (payload, headers = {}) =>
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json", ...headers },
+    });
+  const fetchFn = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url, method: body.method, headers: init.headers, body });
+    if (mode === "throw") throw new TypeError("fetch failed");
+    if (mode === "http500") return new Response("boom", { status: 500 });
+    if (body.method === "initialize") {
+      return respond(
+        {
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "x", version: "1" } },
+        },
+        { "mcp-session-id": "sess-1" },
+      );
+    }
+    if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+    if (body.method === "tools/call") {
+      if (mode === "rpc_error") {
+        return respond({ jsonrpc: "2.0", id: body.id, error: { code: -32001, message: "x" } });
+      }
+      if (mode === "tool_error") {
+        return respond({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ error: "Caller authorization failed.", code: "CALLER_IDENTITY_REJECTED" }),
+              },
+            ],
+          },
+        });
+      }
+      if (mode === "no_message") {
+        return respond({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [{ type: "text", text: JSON.stringify({ url: null }) }] },
+        });
+      }
+      // 本番の streamable-http は text/event-stream で返しうる。SSE 形式で読めること。
+      const text = JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                url: "https://connect.newstv.co.jp/oauth2/start?token=abc",
+                slack_url: null,
+                user_email_masked: "u***@example.com",
+                message: OAUTH_CONNECT_MESSAGE,
+              }),
+            },
+          ],
+        },
+      });
+      return new Response(`event: message\ndata: ${text}\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    return new Response("unexpected", { status: 400 });
+  };
+  return { fetchFn, calls };
+}
+
+function makeConnectPlugin({ mode, env = {} } = {}) {
+  const logs = [];
+  const infos = [];
+  const handlers = new Map();
+  const mcp = makeMcpFake({ mode });
+  createCallerIdentityPlugin({
+    env: {
+      TEAMAGENT_CALLER_CLAIM_SECRET: SECRET,
+      SLACK_TEAM_ID: TEAM,
+      TEAMAGENT_MCP_BEARER: BEARER,
+      TEAMAGENT_MCP_URL: "http://mcp.test/mcp",
+      ...env,
+    },
+    fetchFn: mcp.fetchFn,
+  }).register({
+    registerInteractiveHandler() {},
+    logger: { warn: (m) => logs.push(String(m)), info: (m) => infos.push(String(m)) },
+    on: (name, fn) => handlers.set(name, fn),
+  });
+  return { handlers, logs, infos, calls: mcp.calls };
+}
+
+// message_received（message-hook-mappers:221-235 の形）。content は封筒無しの生本文。
+function receiveDm(handlers, content, { runId } = {}) {
+  handlers.get("message_received")(
+    {
+      from: `slack:${USER}`,
+      content,
+      senderId: USER,
+      messageId: TS,
+      ...(runId ? { runId } : {}),
+      metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+    },
+    {
+      channelId: "slack",
+      conversationId: `user:${USER}`,
+      sessionKey: DM_SESSION_KEY,
+      senderId: USER,
+      messageId: TS,
+      ...(runId ? { runId } : {}),
+    },
+  );
+}
+
+// before_agent_reply の ctx（get-reply:5599-5617）。channel fields の後に identity fields が
+// 展開されるため chatId は `D…`、channelId はセッション鍵/`user:U…` 由来の `U…` のまま。
+function beforeAgentReplyCtx({ chatId = DM_CHANNEL, trigger = "user" } = {}) {
+  return {
+    agentId: "teamagent",
+    sessionKey: DM_SESSION_KEY,
+    sessionId: "sid",
+    workspaceDir: "/w",
+    trigger,
+    ...agentCtxFields(USER),
+    chatId,
+    channelContext: { sender: { id: USER }, chat: { id: chatId } },
+  };
+}
+
+function finalizeRun(handlers, { runId = "run-1", ctxRunId = null, lastAssistantMessage } = {}) {
+  return (
+    handlers.get("before_agent_finalize")(
+      { runId, sessionId: "sid", stopHookActive: false, lastAssistantMessage },
+      { runId: ctxRunId ?? runId, agentId: "teamagent", sessionKey: DM_SESSION_KEY, sessionId: "sid" },
+    ) ?? null
+  );
+}
+
+function startRun(handlers, runId = "run-1") {
+  handlers.get("before_model_resolve")(
+    { prompt: "probe" },
+    { runId, agentId: "teamagent", sessionKey: DM_SESSION_KEY, sessionId: "sid", trigger: "user", ...agentCtxFields(USER) },
+  );
+}
+
+function callTool(handlers, toolName, runId = "run-1") {
+  const result = handlers.get("before_tool_call")(
+    { toolName, runId, toolCallId: "tc-1", params: { _user_context: { slack_user_id: USER } } },
+    { toolName, runId, toolCallId: "tc-1", sessionKey: DM_SESSION_KEY, channelId: `user:${USER}` },
+  );
+  return Boolean(result?.block);
+}
+
+// reply_payload_sending（dispatch:2528-2545）。event.runId と ctx.runId に同じ run id が載る。
+function deliverPayload(handlers, payload, { runId = "run-1", ctxRunId = null } = {}) {
+  return (
+    handlers.get("reply_payload_sending")(
+      { payload, kind: "final", channel: "slack", sessionKey: DM_SESSION_KEY, runId },
+      { channelId: "slack", conversationId: `user:${USER}`, sessionKey: DM_SESSION_KEY, runId: ctxRunId ?? runId },
+    ) ?? null
+  );
+}
+
+// 層1 のシナリオ。message_received → before_agent_reply。
+async function deterministicScenario({
+  content,
+  mode = "ok",
+  env,
+  chatId,
+  trigger,
+  runId,
+  repeat = 1,
+} = {}) {
+  const plugin = makeConnectPlugin({ mode, env });
+  const { handlers, logs, infos, calls } = plugin;
+  receiveDm(handlers, content, { runId });
+  const results = [];
+  for (let i = 0; i < repeat; i += 1) {
+    results.push(
+      (await handlers.get("before_agent_reply")(
+        { cleanedBody: content },
+        beforeAgentReplyCtx({ chatId, trigger }),
+      )) ?? null,
+    );
+  }
+  const last = results[results.length - 1];
+  const toolCalls = calls.filter((c) => c.method === "tools/call");
+  const first = toolCalls[0] ?? null;
+  const claim = first?.body.params.arguments?._user_context?.caller_claim ?? null;
+  const claimPayload = claim
+    ? JSON.parse(Buffer.from(claim.split(".")[0], "base64url").toString())
+    : null;
+  return {
+    plugin,
+    handled: last?.handled === true,
+    replyText: last?.reply?.text ?? null,
+    toolCallCount: toolCalls.length,
+    toolName: first?.body.params.name ?? null,
+    methods: calls.map((c) => c.method),
+    url: first?.url ?? null,
+    bearerHeader: first?.headers.Authorization ?? null,
+    sessionHeader: first?.headers["Mcp-Session-Id"] ?? null,
+    claimPayload,
+    declaredContext: first?.body.params.arguments?._user_context ?? null,
+    logs,
+    infos,
+  };
+}
+
+// 層1 が失敗したとき、同じ受信がモデル経路へ進み層2 が受けること（fail-to-next-layer）。
+async function fallthroughThenLayer2({ mode, env, chatId } = {}) {
+  const l1 = await deterministicScenario({ content: "連携", mode, env, chatId });
+  const { handlers } = l1.plugin;
+  startRun(handlers);
+  const finalize = finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  return {
+    l1Handled: l1.handled,
+    toolCallCount: l1.toolCallCount,
+    fallthroughReason:
+      l1.logs.find((m) => m.includes("outcome=fallthrough"))?.match(/reason=(\S+)/u)?.[1] ?? null,
+    layer2Intervened: finalize?.action === "revise",
+    layer2Key: finalize?.retry?.idempotencyKey ?? null,
+    logs: l1.logs,
+  };
+}
+
+// 層2/層3 のシナリオ。message_received(content) → run → (tool) → finalize×N → 配信。
+function zeroToolConnectScenario({
+  content,
+  lastAssistantMessage = SELF_MADE_REPLY,
+  toolName = null,
+  repeat = 1,
+  deliverPayloads = [],
+  deliverCtxRunId = null,
+} = {}) {
+  const { handlers, logs } = makeConnectPlugin({});
+  receiveDm(handlers, content);
+  startRun(handlers);
+  const toolBlocked = toolName ? callTool(handlers, toolName) : null;
+  const results = [];
+  for (let i = 0; i < repeat; i += 1) {
+    results.push(finalizeRun(handlers, { lastAssistantMessage }));
+  }
+  const deliveries = deliverPayloads.map((payload) =>
+    deliverPayload(handlers, payload, { ctxRunId: deliverCtxRunId }),
+  );
+  const last = results[results.length - 1];
+  return {
+    toolBlocked,
+    firstIntervened: results[0]?.action === "revise",
+    intervened: last?.action === "revise",
+    instruction: last?.retry?.instruction ?? null,
+    idempotencyKey: last?.retry?.idempotencyKey ?? null,
+    maxAttempts: last?.retry?.maxAttempts ?? null,
+    reason: last?.reason ?? null,
+    deliveries,
+    logs,
+  };
+}
+
+// fixture（単一正本）の各文言が、層1 の実経路（message_received → before_agent_reply）で
+// 「oauth_connect が 1 回呼ばれ、戻り値 message がそのまま返る」こと。
+// must_not_match は層1 を通らず（tools/call 0 件・handled 無し）通常処理に進むこと。
+async function connectPhraseMatrix() {
+  const rows = [];
+  const check = async (entry, expectMatch) => {
+    const r = await deterministicScenario({ content: entry.text });
+    rows.push({
+      text: entry.text,
+      expectMatch,
+      handled: r.handled,
+      toolCallCount: r.toolCallCount,
+      toolName: r.toolName,
+      replyIsToolMessage: r.replyText === OAUTH_CONNECT_MESSAGE,
+    });
+  };
+  for (const entry of CONNECT_REQUEST_PHRASES.must_match) await check(entry, true);
+  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) await check(entry, false);
+  return rows;
+}
+
+const connectL1Short = await deterministicScenario({ content: "連携" });
+const connectL1Report = {
+  handled: connectL1Short.handled,
+  replyText: connectL1Short.replyText,
+  toolCallCount: connectL1Short.toolCallCount,
+  toolName: connectL1Short.toolName,
+  methods: connectL1Short.methods,
+  url: connectL1Short.url,
+  bearerHeader: connectL1Short.bearerHeader,
+  sessionHeader: connectL1Short.sessionHeader,
+  claimPayload: connectL1Short.claimPayload,
+  declaredContext: connectL1Short.declaredContext,
+  logs: connectL1Short.logs,
+  infos: connectL1Short.infos,
+};
+const connectL1Long = await deterministicScenario({ content: LONG_CONNECT_REQUEST });
+const connectL1Repeat = await deterministicScenario({ content: "連携", repeat: 2 });
+const connectL1BoundRun = await deterministicScenario({ content: "連携", runId: "run-1" });
+const connectL1Heartbeat = await deterministicScenario({ content: "連携", trigger: "heartbeat" });
+const connectL1Failures = {
+  fetch_throws: await fallthroughThenLayer2({ mode: "throw" }),
+  http_500: await fallthroughThenLayer2({ mode: "http500" }),
+  rpc_error: await fallthroughThenLayer2({ mode: "rpc_error" }),
+  tool_error: await fallthroughThenLayer2({ mode: "tool_error" }),
+  no_message: await fallthroughThenLayer2({ mode: "no_message" }),
+  no_bearer: await fallthroughThenLayer2({ env: { TEAMAGENT_MCP_BEARER: "" } }),
+  no_canonical_channel: await fallthroughThenLayer2({ chatId: USER }),
+};
+const connectPhraseRows = await connectPhraseMatrix();
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -407,6 +748,64 @@ const report = {
   connect_ledger_ttl: connectGuardTtlEviction(),
   // fixture（単一正本）と実装の一致。
   connect_url_pattern_matrix: connectUrlPatternMatrix(),
+  // ── 連携依頼の 3 層防御（2026-09-03） ──────────────────────────────────
+  // 層1 ①短い連携依頼 → モデルを通さず oauth_connect を 1 回呼び、message をそのまま返す。
+  connect_l1_short_request: connectL1Report,
+  // 層1 ②長文「〇〇社との連携について提案書を」→ 層1 を通らず通常処理へ。
+  connect_l1_long_request: {
+    handled: connectL1Long.handled,
+    toolCallCount: connectL1Long.toolCallCount,
+    logs: connectL1Long.logs,
+  },
+  // 層1 ③同じ受信に対して 2 度は鋳造しない。
+  connect_l1_repeat_same_message: {
+    handled: connectL1Repeat.handled,
+    toolCallCount: connectL1Repeat.toolCallCount,
+  },
+  // 層1 ④message_received が runId を伴い先に run へ束縛されても層1 が見つけること。
+  connect_l1_bound_run: {
+    handled: connectL1BoundRun.handled,
+    toolCallCount: connectL1BoundRun.toolCallCount,
+  },
+  // 層1 ⑤heartbeat 等の非利用者トリガでは動かない。
+  connect_l1_non_user_trigger: {
+    handled: connectL1Heartbeat.handled,
+    toolCallCount: connectL1Heartbeat.toolCallCount,
+  },
+  // 層1 ⑥失敗はすべて次の層へ落ちる（fail-open ではなく fail-to-next-layer）。
+  connect_l1_failures: connectL1Failures,
+  // 層2 ①0 tool call × 短い連携依頼 → revise（固定 instruction）。
+  connect_zero_tool_short_request: zeroToolConnectScenario({ content: "連携" }),
+  // 層2 ②長文 × 0 tool call → 不介入（誤爆しない）。
+  connect_zero_tool_long_request: zeroToolConnectScenario({ content: LONG_CONNECT_REQUEST }),
+  // 層2 ③短い連携依頼 × oauth_connect 呼び出しあり → 不介入。
+  connect_zero_tool_with_tool_call: zeroToolConnectScenario({
+    content: "連携",
+    toolName: "teamagent__oauth_connect",
+    lastAssistantMessage: OAUTH_CONNECT_MESSAGE,
+  }),
+  // 層3 ①再パス後も 0 tool call → 予算切れで層3 を武装し、送信直前に定型文へ置換。
+  //     2 通目（分割 payload）は取り消す。
+  connect_zero_tool_fallback: zeroToolConnectScenario({
+    content: "連携",
+    repeat: 2,
+    deliverPayloads: [{ text: SELF_MADE_REPLY }, { text: "（続き）" }],
+  }),
+  // 層3 ②event と ctx の runId が食い違う配信には触らない。
+  connect_zero_tool_fallback_run_mismatch: zeroToolConnectScenario({
+    content: "連携",
+    repeat: 2,
+    deliverPayloads: [{ text: SELF_MADE_REPLY }],
+    deliverCtxRunId: "run-2",
+  }),
+  // 層3 ③武装していない run の配信には触らない（雑談の応答が消えない）。
+  connect_zero_tool_fallback_not_armed: zeroToolConnectScenario({
+    content: "こんにちは",
+    lastAssistantMessage: "こんにちは。何かお手伝いできますか？",
+    deliverPayloads: [{ text: "こんにちは。何かお手伝いできますか？" }],
+  }),
+  // fixture（単一正本）と層1 実経路の一致。
+  connect_phrase_matrix: connectPhraseRows,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");

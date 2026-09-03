@@ -2611,3 +2611,193 @@ def test_connect_guard_ledger_entries_expire_by_ttl() -> None:
     assert ttl["firstIntervened"] is True
     assert ttl["blockedWhileFresh"] is True, "TTL 内なのに予算が効いていない"
     assert ttl["expiredIntervened"] is True, "TTL 超過の記録が掃除されていない"
+
+
+# ── 連携依頼の 3 層防御（2026-09-03） ─────────────────────────────────────
+# 本番実測 2026-09-03: 利用者が DM で「連携」と送っても Aico がツールを一度も呼ばず
+# 「未登録／管理者に問い合わせ」と自作回答する事故が同一 DM で 5 回以上続いた。
+# mcp 側には一切届いていない（mcp_connect_intent がゼロ）ので、MCP 境界の決定論分岐も
+# 上の URL 検出（応答に URL が無い）も効かない。3 層で塞ぐ:
+#   層1: before_agent_reply で短い連携依頼を検出し、モデルを通さず oauth_connect を呼ぶ。
+#   層2: before_agent_finalize で「0 tool call × 短い連携依頼」を revise で再パスさせる。
+#   層3: 再パス後も 0 tool call なら reply_payload_sending で定型文に置換する。
+
+CONNECT_ZERO_TOOL_INSTRUCTION = (
+    "利用者は Google/Slack 連携を依頼しています。`oauth_connect` ツールを必ず呼び、"
+    "その戻り値の message とリンクを一字も変えずに提示してください。"
+    "自分で原因を推測したり、管理者への問い合わせを案内したりしてはいけません。"
+)
+CONNECT_DIAGNOSTIC_RE = re.compile(
+    r"診断: CONNECT-Z01 \d{4}-\d{2}-\d{2} \d{2}:\d{2} JST U09CX1CCBLN$"
+)
+
+
+def test_short_connect_request_is_answered_by_the_tool_without_the_model() -> None:
+    """層1: 短い連携依頼は before_agent_reply で handled され、oauth_connect が 1 回呼ばれること。
+
+    {handled:true, reply} を返すとハーネスは reply をそのまま返してモデルを起動しない
+    （openclaw 2026.7.1 get-reply:5620-5623）。戻り値 message はそのまま Slack へ出る。
+    """
+    guarded = _caller_identity_report()["connect_l1_short_request"]
+    assert guarded["handled"] is True
+    assert guarded["toolCallCount"] == 1
+    assert guarded["toolName"] == "oauth_connect"
+    assert guarded["methods"] == ["initialize", "notifications/initialized", "tools/call"]
+    assert guarded["replyText"].startswith("以下のリンクから連携してください")
+    assert guarded["sessionHeader"] == "sess-1"
+    assert guarded["bearerHeader"].startswith("Bearer ")
+
+
+def test_deterministic_path_reuses_the_existing_signed_claim_contract() -> None:
+    """層1 の tools/call は before_tool_call 経由と同じ claim 契約で署名されること。
+
+    mcp 側（caller_claim.py）の検証をそのまま通す＝新しい信頼境界を作らない。
+    channel は mcp が要求する実 Slack 会話 id（^[CDG]…）で、DM の内部別名 DM:U… ではない。
+    """
+    guarded = _caller_identity_report()["connect_l1_short_request"]
+    claim = guarded["claimPayload"]
+    assert claim["v"] == 2
+    assert claim["iss"] == "teamagent-openclaw"
+    assert claim["aud"] == "teamagent-mcp"
+    assert claim["tool"] == "oauth_connect"
+    assert claim["sub"] == "U09CX1CCBLN"
+    assert claim["team"] == "T07MU5P2PBR"
+    assert re.fullmatch(r"[CDG][A-Z0-9]{8,}", claim["channel"]), claim["channel"]
+    assert claim["run_id"].startswith("connect-l1-")
+    assert claim["tool_call_id"] == claim["run_id"]
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", claim["run_id"])
+    assert claim["exp"] - claim["iat"] == 60
+    declared = guarded["declaredContext"]
+    assert declared["slack_user_id"] == claim["sub"]
+    assert declared["slack_team_id"] == claim["team"]
+    assert declared["channel_id"] == claim["channel"]
+    assert "thread_ts" not in declared
+
+
+def test_long_connect_mention_does_not_take_the_deterministic_path() -> None:
+    """層1 は「〇〇社との連携について提案書を」を通さず通常処理へ流すこと（誤爆しない）。"""
+    report = _caller_identity_report()
+    assert report["connect_l1_long_request"]["handled"] is False
+    assert report["connect_l1_long_request"]["toolCallCount"] == 0
+    assert report["connect_l1_non_user_trigger"]["handled"] is False
+    assert report["connect_l1_non_user_trigger"]["toolCallCount"] == 0
+
+
+def test_deterministic_path_mints_once_per_inbound_and_finds_bound_runs() -> None:
+    """同じ受信に 2 度は鋳造しない。message_received が runId を伴い先に束縛されても見つける。"""
+    report = _caller_identity_report()
+    assert report["connect_l1_repeat_same_message"]["toolCallCount"] == 1
+    assert report["connect_l1_repeat_same_message"]["handled"] is False
+    assert report["connect_l1_bound_run"]["handled"] is True
+    assert report["connect_l1_bound_run"]["toolCallCount"] == 1
+
+
+def test_deterministic_path_failures_fall_to_the_next_layer() -> None:
+    """層1 の失敗は fail-open ではなく fail-to-next-layer であること。
+
+    fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー / message 欠落 /
+    bearer 無し / 正準 channel 無し のいずれでも、同じ受信がモデル経路へ進んだとき
+    層2（0 tool call × 短い連携依頼）が revise を返す。
+    """
+    failures = _caller_identity_report()["connect_l1_failures"]
+    expected_reason = {
+        "fetch_throws": "fetch_failed",
+        "http_500": "mcp_http_500",
+        "rpc_error": "mcp_rpc_error",
+        "tool_error": "mcp_tool_error",
+        "no_message": "mcp_invalid_result",
+        "no_bearer": "no_mcp_bearer",
+        "no_canonical_channel": "no_canonical_channel",
+    }
+    assert set(failures) == set(expected_reason)
+    for case, reason in expected_reason.items():
+        outcome = failures[case]
+        assert outcome["l1Handled"] is False, case
+        assert outcome["fallthroughReason"] == reason, case
+        assert outcome["layer2Intervened"] is True, case
+        assert outcome["layer2Key"] == "connect-zero-tool", case
+
+
+def test_deterministic_path_logs_keep_the_g7_discipline() -> None:
+    """層1 のログに本文・URL・Slack 識別子・bearer を載せないこと。"""
+    report = _caller_identity_report()
+    logs = list(report["connect_l1_short_request"]["infos"])
+    for outcome in report["connect_l1_failures"].values():
+        logs.extend(outcome["logs"])
+    assert logs
+    for log in logs:
+        assert "U09CX1CCBLN" not in log
+        # reason=mcp_http_500 のような理由コードは許す。URL 実体だけを禁じる。
+        assert "http://" not in log
+        assert "https://" not in log
+        assert "連携" not in log
+        assert "b" * 48 not in log
+
+
+def test_zero_tool_reply_to_short_connect_request_forces_another_pass() -> None:
+    """層2: 0 tool call × 短い連携依頼 → revise（固定 instruction・maxAttempts 1）。"""
+    guarded = _caller_identity_report()["connect_zero_tool_short_request"]
+    assert guarded["intervened"] is True
+    assert guarded["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
+    assert guarded["idempotencyKey"] == "connect-zero-tool"
+    assert guarded["maxAttempts"] == 1
+    assert "http" not in guarded["instruction"]
+
+
+def test_zero_tool_rule_does_not_fire_on_long_requests_or_after_a_tool_call() -> None:
+    """層2 は長文で誤爆せず、oauth_connect を呼んだ run には介入しないこと。"""
+    report = _caller_identity_report()
+    assert report["connect_zero_tool_long_request"]["intervened"] is False
+    assert report["connect_zero_tool_with_tool_call"]["toolBlocked"] is False
+    assert report["connect_zero_tool_with_tool_call"]["intervened"] is False
+
+
+def test_exhausted_zero_tool_run_is_replaced_with_the_fixed_text() -> None:
+    """層3: 再パス後も 0 tool call なら送信直前に定型文へ置換し、2 通目は取り消すこと。
+
+    診断行は「CONNECT-Z01 <JST時刻> <Slack user id>」で、URL も秘匿値も含まない。
+    """
+    guarded = _caller_identity_report()["connect_zero_tool_fallback"]
+    assert guarded["firstIntervened"] is True
+    assert guarded["intervened"] is False, "予算切れ後に revise を返している"
+    first, second = guarded["deliveries"]
+    text = first["payload"]["text"]
+    assert text.startswith("連携リンクの発行に失敗しました。もう一度『連携』と送ってください。")
+    assert "管理者（小俣）" in text
+    assert CONNECT_DIAGNOSTIC_RE.search(text), text
+    assert "http" not in text
+    assert "未登録" not in text
+    assert second["cancel"] is True
+    armed = [log for log in guarded["logs"] if "outcome=fallback_armed" in log]
+    replaced = [log for log in guarded["logs"] if "outcome=replaced" in log]
+    assert armed and replaced
+    for log in guarded["logs"]:
+        assert "U09CX1CCBLN" not in log
+        assert "未登録" not in log
+
+
+def test_fixed_text_replacement_is_bound_to_the_run() -> None:
+    """層3 は runId が食い違う配信・武装していない run の配信には触らないこと。"""
+    report = _caller_identity_report()
+    assert report["connect_zero_tool_fallback_run_mismatch"]["deliveries"] == [None]
+    assert report["connect_zero_tool_fallback_not_armed"]["deliveries"] == [None]
+
+
+def test_short_connect_request_phrases_match_the_single_source_of_truth() -> None:
+    """短い連携依頼の境界は tests/fixtures/connect_request_phrases.json が単一正本であること。
+
+    must_match は全件で oauth_connect が 1 回呼ばれ 0 tool の応答が出ない。
+    must_not_match は層1 を通らない（tools/call 0 件）。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    assert len(fixture["must_match"]) >= 20
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    assert len(matrix) == len(fixture["must_match"]) + len(fixture["must_not_match"])
+    mismatched = [
+        row
+        for row in matrix
+        if row["expectMatch"] != row["handled"]
+        or (row["expectMatch"] and (row["toolCallCount"] != 1 or not row["replyIsToolMessage"]))
+        or (not row["expectMatch"] and row["toolCallCount"] != 0)
+    ]
+    assert not mismatched, f"fixture と実装が食い違う: {mismatched}"

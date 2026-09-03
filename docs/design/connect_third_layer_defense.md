@@ -346,3 +346,94 @@ probe に**上流バージョン表明**を焼き込む（`openclaw@2026.7.1` �
 | 変異テスト実行・緑の実質性証明 | — | **こちら（検証は委任しない）** |
 | 上流再実測（弱点 1・4） | — | **こちら**（一次検証の性質上） |
 
+
+---
+
+## 10.【追記 2026-09-03】決定論の最前段（層1）と 0 tool call 対策（層2・層3）
+
+（依頼上は「§7 として追記」だが §7 はテスト計画で使用済みのため §10 に置く）
+
+### 10-0. 事故の再定義
+
+2026-09-03 実測: 利用者 u-imai が DM で「連携」とだけ送っても、Aico がツールを一度も呼ばず
+「未登録／管理者に問い合わせ」と**自作回答**する事故が同一 DM で 5 回以上。mcp 側の
+`mcp_connect_intent` はゼロ＝MCP 境界の決定論分岐（`server.py:_maybe_redirect_to_connect`）は
+tool 呼び出しが無いので到達せず、§2 の出力検証（URL 検出）も**応答に URL が無い**ので効かない。
+09-02 の一斉オンボでも複数 DM で「0 tool call の返信」を観測。
+
+裁定（ユーザー指示）: 「③ Aico がツールを呼ばない」を**必ず起きないように**する。revise だけでは
+LLM が従わない残余が消えないため 3 層にする。優先順位は 層1 > 層2 > 層3。
+
+### 10-1. 層1 の手段選定 — 上流 2026.7.1 の一次検証（推測禁止）
+
+候補 (a)(b)(c) を、`npm pack openclaw@2026.7.1` の実物（`dist/` の各ファイル）と
+`@openclaw/slack@2026.7.1`（sha256 `d6ae87…ef46`＝`infra/openclaw/plugins-lock.json` と一致）で検証した。
+
+| 候補 | 判定 | 根拠（file:line） |
+|---|---|---|
+| (a-1) `message_received` で「処理済み・返信はこれ」を返す | **不可** | 型が `Promise<void> \| void`（`hook-types-DQ9eTy2x.d.ts:1108`）。`runVoidHook` は戻り値を捨てる（`hook-runner-global-Cucx8m-W.js:458-477`）。しかも `fireAndForgetHook` で呼ばれる（`dispatch-V82RCNJs.js:1438`） |
+| (a-2) `inbound_claim` で `{handled, reply}` を返す | **本件では不可** | 戻り値型は `PluginHookInboundClaimResult = {handled, reply?}`（`hook-types:551-554`）だが、呼ばれるのは **plugin-owned conversation binding がある会話だけ**（`dispatch:1490-1512` の `pluginOwnedBinding` 分岐・`runInboundClaimForPluginOutcome`）。Slack DM は plugin 所有ではないので発火しない |
+| **(a-3) `before_agent_reply` で `{handled:true, reply}` を返す** | **採用** | 型 `PluginHookBeforeAgentReplyResult = {handled, reply?: ReplyPayload, reason?}`（`hook-types:419-423`）。通常応答経路 `get-reply-CknL88Yv.js:5596-5623` で**モデル起動より前**に走り、`handled` なら `return hookResult.reply ?? {text:"NO_REPLY"}`＝**モデルを起動しない**。first-claim wins（`hook-runner-global:519-544`）。CONVERSATION hook（`command-registration-tKF3dsKu.js:170-178`）だが `openclaw.config.json5:74` で `allowConversationAccess: true` 済み。既定タイムアウト無し（`hook-runner-global:435`・`modifyingHookTimeoutMsByHook` に未登録）→ plugin 側で `AbortSignal.timeout(20s)` を持つ |
+| (b) `before_model_resolve` / `before_prompt_build` で「oauth_connect を今すぐ呼べ」を強制 | **不可（強制にならない）** | `before_model_resolve` の戻り値は `{modelOverride?, providerOverride?}` のみ（`hook-types:44-46`）。`before_prompt_build` は system/prepend/append の文面注入のみ（`hook-types:52-62`）。`tool_choice` / forced tool 相当のフィールドは `hook-types` 全体に存在しない（`grep -n "toolChoice\|tool_choice\|forcedTool"` で 0 件）。文面注入は SOUL（第2層）と同じ「お願い」であり、今回の事故はまさにその「お願い」が無視された事例 |
+| (c-1) plugin API から MCP tool を直接起動する API | **無い** | `OpenClawPluginApi`（`types-DaHgOqFX.d.ts:12078-12147`）に `registerTool` / `registerHook` / `registerCommand` 等はあるが、既登録ツール（MCP 経由の `teamagent__*`）を plugin から呼ぶ `callTool` 相当は無い |
+| **(c-2) plugin が既存の署名 claim で mcp `/mcp` へ `tools/call oauth_connect` を直接 POST** | **採用（層1 の実体）** | 手順は `infra/openclaw/rollout-task-canary.mjs:47-110,140-160`（同イメージ内で `fetch` により `initialize → notifications/initialized → tools/list` 済み＝経路と bearer の実績）と同一。claim は `signToolCall` と同じ鋳造関数 `mintCallerClaim` を使い、mcp 側は `caller_claim.py` の既存検証をそのまま通す＝**新しい信頼境界を作らない** |
+
+**(c-2) の前提条件と実測**:
+
+- 利用者の生本文: `message_received` の `event.content` は `BodyForCommands ?? RawBody ?? Body`
+  （`message-hook-mappers-BK8VuspZ.js:23`）。Slack はこれを `commandBody ?? rawBody`＝**封筒無しの本文**として渡す
+  （`kernel-DIE2bgVW.js:283-285` / `@openclaw/slack pipeline.runtime-rpVpay59.js:3505-3512`）。
+  一方 `before_model_resolve` の `event.prompt` と `before_agent_reply` の `cleanedBody` は封筒付き（`formatInboundEnvelope`・
+  `get-reply:1555-1577`）なので判定には使わない。**本文は保持せず、判定の真偽だけを ingress に載せる（G7）。**
+- `before_agent_reply` の ctx には `runId` が無い（`get-reply:5599-5617`）。会話照合は `sessionKey × senderId × channel`
+  で行い、`bindAgentRun` と同じ `matchesConversation` を使う。`message_received` が `runId` を伴うと ingress は
+  既に run へ束縛され pending から消える（`rememberInbound → bindRun → removePending`）ので、**pending と束縛済みの両方**を見る。
+- mcp の claim 検証は `channel` に `^[CDG][A-Z0-9]{8,}$` を要求する（`caller_claim.py:_SLACK_CHANNEL_RE`）。DM の inbound は
+  `user:U…` → 内部別名 `DM:U…` にしかならない。`before_agent_reply` の ctx は channel fields の**後に** identity fields を展開する
+  （`get-reply:5605-5616`）ため `ctx.chatId` が `NativeChannelId ?? ChatId`＝Slack の `conversation.id = message.channel`
+  （`pipeline.runtime:3487-3489` / `kernel:298`）＝DM では `D…` になる。層1 はこれを**この送信者の DM に限って**正準 id として採る
+  （`bindAgentRun` の `dmAlias` 昇格と同じ規律）。`D…` が取れなければ層1 は鋳造せず層2 へ落とす（`reason=no_canonical_channel`）。
+- 環境: `TEAMAGENT_MCP_BEARER` / `TEAMAGENT_CALLER_CLAIM_SECRET` は gateway タスクの env に注入済み（`infra/terraform/fargate.tf:842,844`）。
+  URL は canary と同じ `http://teamagent-mcp.teamagent.internal:8787/mcp`（`TEAMAGENT_MCP_URL` で上書き可）。
+
+### 10-2. 3 層の確定仕様
+
+| 層 | hook | 発火条件 | 動作 | 失敗時 |
+|---|---|---|---|---|
+| 1 | `before_agent_reply` | messageProvider=slack・trigger=user・会話に一意の ingress・`connectRequest`・未試行・正準 channel・bearer あり | `mintCallerClaim(tool=oauth_connect)` → `tools/call` → 戻り値 `message` を `{handled:true, reply:{text}}` で返す | **次の層へ**（`undefined` を返す。理由コードを warn） |
+| 2 | `before_agent_finalize` | (a) 0 tool call ∧ (b) 本文あり ∧ ((c) URL 捏造 ∨ `ingressByRun[runId].connectRequest`) ∧ (d) 予算内 | `revise`。URL 側は #353 の instruction、zero-tool 側は固定文（§10-3）。予算は両ルール共有・1 run 1 回 | 予算切れ → 層3 を武装 |
+| 3 | `reply_payload_sending` | `event.runId === ctx.runId` ∧ 武装済み ∧ payload.text あり | 1 通目を定型文へ置換、2 通目以降は `cancel` | runId 不一致は触らない |
+
+「短い連携依頼」: 前後の空白・句読点・絵文字・Slack マークアップ・敬語末尾を落として NFKC 正規化した本文が
+**12 文字以下** かつ `^(再)?(Google|グーグル|Slack|スラック)?(再)?(連携|接続|connect)(助詞)?$`。
+単一正本は `tests/fixtures/connect_request_phrases.json`（must_match 26 / must_not_match 12）。
+
+### 10-3. 固定文（変更しない）
+
+- 層2 instruction: 「利用者は Google/Slack 連携を依頼しています。`oauth_connect` ツールを必ず呼び、その戻り値の message とリンクを一字も変えずに提示してください。自分で原因を推測したり、管理者への問い合わせを案内したりしてはいけません。」（`maxAttempts: 1`・`idempotencyKey: connect-zero-tool`）
+- 層3 本文: 「連携リンクの発行に失敗しました。もう一度『連携』と送ってください。解決しない場合は次の 1 行を管理者（小俣）へ送ってください: 診断: CONNECT-Z01 <YYYY-MM-DD HH:MM JST> <Slack user id>」
+
+### 10-4. 観測性（§5 の G7 規律を踏襲）
+
+- 層1: `connect deterministic path invocation=<connect-l1-…> outcome=answered|fallthrough reason=<code>`
+- 層2: `connect zero-tool revise runId=… tool_calls=0 reason=short_connect_request outcome=revised|budget_exhausted`、
+  武装時 `reason=model_did_not_call_tool outcome=fallback_armed diagnostic=CONNECT-Z01`
+- 層3: `connect zero-tool fallback runId=… outcome=replaced diagnostic=CONNECT-Z01`
+- **出さない**: 本文・URL・Slack user_id・bearer。依頼書は「sender id」をログに含める案だったが、§5 と plugin 既存の
+  「caller identity はログに出さない」規律に合わせて**載せない**（縮小点として明記）。診断行の user id は利用者→管理者へ
+  転記される経路で届き、ログ側は runId＋時刻で突合する。
+
+### 10-5. 却下・縮小・残る弱点
+
+1. `inbound_claim` 短絡は plugin-owned binding 前提なので採れない（10-1）。会話を plugin 所有にする案は Slack DM 全体の
+   配線を変えるため見送り。
+2. 層1 が `D…` を取れない ctx 形状（`chatId` が `U…` のまま）では層1 は発火せず層2/3 のみになる。コード上は `ChatId=message.channel`
+   を確認したが、**本番ログでの実測は OC 便の後**（`reason=no_canonical_channel` の有無で判る）。
+3. `before_agent_reply` は `useFastTestBootstrap` 時（テスト用）と `before_agent_reply` を持たない経路では走らない。
+   通常の Slack 応答経路（`get-reply`）では走る。
+4. 層1 で `oauth_connect` が業務エラー（例: `no_user_email` の fail-closed）を返すと層2 へ落ち、モデルが同じ tool を呼んで
+   同じエラーを受ける。利用者には「発行できなかった」旨が届く（定型文ではなくモデル文）。
+5. 層3 は「利用者の応答を plugin が書き換える」初の経路（§4-2）。誤爆面は「短い連携依頼 ∧ revise 後も 0 tool call」に限定。
+6. URL 捏造ルール（#353）単独で予算切れした run は従来どおり素通り（層3 は zero-tool 側のみ武装）。
+7. `before_agent_reply` の hook 例外はハーネスが握って次の handler/通常処理へ進む（`hook-runner-global:537-543`）＝
+   plugin 内で catch 漏れがあっても fail-to-next-layer は保たれる。
