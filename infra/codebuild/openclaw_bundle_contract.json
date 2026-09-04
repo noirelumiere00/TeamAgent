@@ -26,6 +26,10 @@
     },
     "contract_oci_label": "io.teamagent.build.contract-sha256",
     "arm64_subject_media_type": "application/vnd.oci.image.manifest.v1+json",
+    "skills": {
+      "root": "/app/skills",
+      "allowed": []
+    },
     "subjects": [
       {
         "name": "core",
