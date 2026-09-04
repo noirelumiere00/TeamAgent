@@ -45,6 +45,7 @@ from teamagent.skills.omiyage_report.contract import (
     SlideTag,
     SummaryRow,
 )
+from teamagent.skills.omiyage_report.fmt.html import fmt_number
 from teamagent.skills.omiyage_report.metrics import (
     AxisMeasurement,
     OmiyageMeasurement,
@@ -168,6 +169,16 @@ def _fmt_num(value: float | None) -> str:
     return "N/A" if value is None else f"{value}"
 
 
+def _fmt_plays(value: float | None) -> str:
+    """平均再生は Q5 のランキング再生数と同じ 3 桁区切りの整数で出す。
+
+    ``avg_plays`` は小数第1位までの実数（例 14011.6）を返すが、再生数は Q5 側が
+    ``fmt_number`` で 3 桁区切りの整数（例 9,900,000）として描くため、Q1 の表だけ
+    素の float（14011.6）が出ていた。表示の丸めをここで揃える（計測値は不変）。
+    """
+    return "N/A" if value is None else fmt_number(round(value))
+
+
 def _fmt_rank(value: int | None) -> str:
     return "-" if value is None else f"{value}位"
 
@@ -246,10 +257,10 @@ def _tier_slide(measurement: OmiyageMeasurement) -> Slide | None:
         [
             tier_a.label,
             f"{tier_a.videos}本",
-            _fmt_num(tier_a.avg_plays),
+            _fmt_plays(tier_a.avg_plays),
             _fmt_pct(tier_a.avg_eg_rate_pct),
             f"{tier_b.videos}本",
-            _fmt_num(tier_b.avg_plays),
+            _fmt_plays(tier_b.avg_plays),
             _fmt_pct(tier_b.avg_eg_rate_pct),
         ]
         for tier_a, tier_b in zip(tiers_a, tiers_b, strict=True)
