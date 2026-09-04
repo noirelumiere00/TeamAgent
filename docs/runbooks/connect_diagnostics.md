@@ -29,19 +29,19 @@
 
 | コード | 意味 | 場所 | ログ event | 利用者の対処 | 管理者の対処 |
 |---|---|---|---|---|---|
-| **S01** | state 署名不一致（リンクが途中で改変された。LLM の再タイプ・コピー欠け） | connect-web Google | `connect_callback_bad_state` (`state_reason=bad_signature\|malformed\|missing_params`) | 「連携」で新しいリンク | 再発なら `USE_OAUTH_START_LINKS`（PR #376・path 形式リンク）を ON に |
-| **S02** | state 期限切れ（発行から 30 分超）。**サーバ時計ズレ（発行時刻が 60 秒超の未来）も同コード** | connect-web Google | `connect_callback_bad_state` (`state_reason=expired`) | 「連携」で新しいリンク | 発行→クリックの間隔を確認（DM を後で開いた等）。発行直後なのに S02 なら mcp / connect-web の時計ズレ（ECS ホスト時刻）を疑う |
-| **S03** | 使用済みリンク | connect-web Google | `connect_callback_reused_state` | 「連携」で新しいリンク | 2 回目が来る原因（リンクスキャナ・ブラウザのプリフェッチ）を確認。1 回目が `connect_callback_ok` なら連携自体は済んでいる |
+| **S01** | state 署名不一致（リンクが途中で改変された。LLM の再タイプ・コピー欠け） | connect-web Google | `connect_callback_bad_state` / `connect_start_bad_state` (`state_reason=bad_signature\|malformed\|missing_params\|not_base64url\|too_long`) | 「連携」で新しいリンク | 再発なら `USE_OAUTH_START_LINKS`（PR #376・path 形式リンク）を ON に |
+| **S02** | state 期限切れ（発行から 30 分超）。**サーバ時計ズレ（発行時刻が 60 秒超の未来）も同コード** | connect-web Google | `connect_callback_bad_state` / `connect_start_bad_state` (`state_reason=expired`) | 「連携」で新しいリンク | 発行→クリックの間隔を確認（DM を後で開いた等）。発行直後なのに S02 なら mcp / connect-web の時計ズレ（ECS ホスト時刻）を疑う |
+| **S03** | 使用済みリンク（**callback だけが出す**。`/oauth2/start` は state を消費しないので S03 を出さない） | connect-web Google | `connect_callback_reused_state` | 「連携」で新しいリンク | 2 回目が来る原因（リンクスキャナ・ブラウザのプリフェッチ）を確認。1 回目が `connect_callback_ok` なら連携自体は済んでいる |
 | **S04** | Google アカウント不一致 | connect-web Google | `connect_callback_account_mismatch` | 会社アカウントでログインし直して許可 | 個人 Gmail で許可していないか本人に確認 |
 | **S05** | 許可画面で拒否（キャンセル） | connect-web 両方 | `connect_callback_user_denied` / `connect_slack_callback_user_denied` | もう一度「連携」→「許可」 | 権限説明が不安なら口頭で補足 |
-| **S06** | サーバ側障害 | connect-web 両方 | `connect_callback_state_store_unconfigured` / `_state_consume_failed` / `_exchange_failed` / `_store_failed` / `_id_token_missing` / `_id_token_invalid` / `_client_id_missing`（Slack 版は `connect_slack_callback_*`） | 管理者へ | **下の「S06 の切り分け」** |
+| **S06** | サーバ側障害 | connect-web 両方 | `connect_callback_state_store_unconfigured` / `_state_consume_failed` / `_exchange_failed` / `_store_failed` / `_id_token_missing` / `_id_token_invalid` / `_client_id_missing`（Slack 版は `connect_slack_callback_*`）／start ルートは `connect_start_url_failed` / `connect_slack_start_url_failed` | 管理者へ | **下の「S06 の切り分け」** |
 | **I01a** | 本人特定失敗: 署名済み Slack caller が無い（署名 claim 拒否を含む） | mcp gateway | `caller_claim_rejected` / `identity_spoof_rejected reason=missing_verified_caller` | 管理者へ | OpenClaw の caller-identity plugin / `_user_context` 欠落。Slack 以外の経路から呼んでいないか |
 | **I01b** | 本人特定失敗: resolver でエラー | mcp gateway | `identity_spoof_rejected reason=resolver_error` | 管理者へ | Slack `users.info` の失敗（token 失効・rate limit）。mcp ログの直前の例外 |
 | **I01c** | 本人特定失敗: Slack ユーザーを会社メンバーへ解決できない | mcp gateway | `identity_spoof_rejected reason=resolve_none` | 管理者へ | Slack プロフィールのメールが会社ドメイン外／未設定。ゲスト・外部 WS |
 | **I02** | 本人メール未取得（fail-closed） | mcp `oauth_connect` | `oauth_connect_fail_closed reason=no_user_email` | Slack プロフィールのメールを確認・管理者へ | metadata に `user_email` が無い。I01 系と同根のことが多い |
 | **I03** | Slack 再連携が必要 | mcp `oauth_connect` | `oauth_connect_slack_rebind_needed` (`reason=uid_mismatch\|stored_uid_missing`) | 案内文のリンクで Slack を連携し直す | 保存済み Slack ID と現在の ID が違う（アカウント作り直し等）。正常な自己復旧経路 |
 | **L01** | 連携リンク生成失敗 | mcp `oauth_connect` | `oauth_connect_url_failed` / `oauth_connect_slack_url_failed` / `oauth_connect_slack_url_suppressed` | 管理者へ | OAuth 系 env（`OAUTH_REDIRECT_URI` / `CONNECT_GOOGLE_CLIENT_*` / `CONNECT_SLACK_CLIENT_ID` / `*_STATE_SECRET`）の欠落。`suppressed` は検証済み Slack ID が無い経路 |
-| **T01** | Slack 側 state 不正/期限切れ/使用済み | connect-web Slack | `connect_slack_callback_bad_state` / `_reused_state` / `connect_slack_state_unbound_rejected` | 「連携」で新しいリンク | S01〜S03 と同じ切り分け（Slack 版は署名/期限を区別しない） |
+| **T01** | Slack 側 state 不正/期限切れ/使用済み/束縛無し | connect-web Slack | `connect_slack_callback_bad_state` / `_reused_state` / `connect_slack_state_unbound_rejected` / `connect_slack_start_bad_state` / `connect_slack_start_unbound_rejected` | 「連携」で新しいリンク | S01〜S03 と同じ切り分け（Slack 版は署名/期限を区別しない） |
 | **T02** | Slack team 不一致 / 許可したアカウント不一致 / Slack ID 重複 | connect-web Slack | `connect_slack_callback_team_mismatch` / `_identity_mismatch` / `_identity_missing` / `slack_oauth_uid_collision` | 管理者へ | 別 WS・別アカウントで許可。`uid_collision` は同じ Slack ID が別メールに保存済み（DB 側の付け替えが要る） |
 
 ## ログの引き方（CloudWatch Logs Insights）

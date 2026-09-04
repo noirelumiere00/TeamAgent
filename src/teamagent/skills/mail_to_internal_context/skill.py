@@ -42,6 +42,7 @@ from teamagent.skills._shared.mail_connection import (
     REAUTH_NEEDED_MESSAGE,
 )
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_to_internal_context.schema import (
     InternalRef,
@@ -79,9 +80,7 @@ class MailToInternalContextSkill(BaseSkill[MailInternalContextInput, MailInterna
         "『このメール、社内で何か話してた?』に答える。本人が利用するには"
         + CONNECT_SUFFIX
         + "連携済みの時のみ使える。"
-        "呼び出し時は arguments に "
-        "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
-        "必ず含める（mcp 境界の本人解決鍵）。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = MailInternalContextInput
     output_schema: ClassVar[type[BaseModel]] = MailInternalContextOutput

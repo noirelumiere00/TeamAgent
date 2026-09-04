@@ -30,6 +30,7 @@ from teamagent.skills._shared.drive_slack_delivery import (
     prepare_drive_files,
     safe_filename,
 )
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.knowledge_deliver.schema import (
     KnowledgeDeliverInput,
@@ -86,9 +87,7 @@ class KnowledgeDeliverSkill(BaseSkill[KnowledgeDeliverInput, KnowledgeDeliverOut
         "例: 『電通への提案資料』→filter_client=電通, filter_doc_type=提案書 / "
         "『食品業界の提案事例』→filter_industry=食品, filter_doc_type=提案書 / "
         "『動画広告施策のレポート』→filter_solution=動画広告, filter_doc_type=報告書。\n"
-        "query には依頼文全体（自然文）をそのまま入れてよい。"
-        "呼び出し時は arguments に "
-        "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を必ず含める。"
+        "query には依頼文全体（自然文）をそのまま入れてよい。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverInput
     output_schema: ClassVar[type[BaseModel]] = KnowledgeDeliverOutput
