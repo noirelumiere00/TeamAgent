@@ -3279,15 +3279,11 @@ def test_connect_guarantee_never_goes_silent_for_any_user_state() -> None:
         "mcp_http_500",
         "mcp_invalid_result",
     }
-    silent = [
-        (row["state"], row["text"]) for row in rows if not row["delivered"]
-    ]
+    silent = [(row["state"], row["text"]) for row in rows if not row["delivered"]]
     assert silent == [], f"無言になった組み合わせ: {silent}"
     # 二重投稿もしない（同じ受信に対しては 1 通）。
     duplicated = [
-        (row["state"], row["text"], row["postCount"])
-        for row in rows
-        if row["postCount"] != 1
+        (row["state"], row["text"], row["postCount"]) for row in rows if row["postCount"] != 1
     ]
     assert duplicated == [], duplicated
 
