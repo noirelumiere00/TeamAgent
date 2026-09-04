@@ -106,6 +106,9 @@ _WORKER_PROVENANCE_KEY = (
 _RELEASE_TREE_SHA256 = "a" * 64
 _RELEASE_ROOT = f"/opt/teamagent/releases/{_RELEASE_TREE_SHA256}"
 _RUNTIME_EXECUTABLE_SHA256 = "b" * 64
+_STS_ACCOUNT = "123456789012"
+_STS_USER_ID = "AROAEXAMPLEOPERATOR:operator"
+_STS_ARN = f"arn:aws:sts::{_STS_ACCOUNT}:assumed-role/teamagent-dev-operator/operator"
 
 
 def _provenance(**values: str) -> str:
@@ -774,6 +777,15 @@ class _FakeKms:
         }
 
 
+class _FakeSts:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_caller_identity(self, **_kwargs: object) -> dict[str, object]:
+        self.calls += 1
+        return _response(Arn=_STS_ARN, UserId=_STS_USER_ID, Account=_STS_ACCOUNT)
+
+
 class _FakeDdb:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
@@ -891,6 +903,17 @@ class _FakeDdb:
                         if ":next" in values:
                             item["stage"] = copy.deepcopy(values[":next"])
                             item["updated_at"] = copy.deepcopy(values[":now"])
+                        elif expression.startswith("SET #stage = :aborted"):
+                            # abort-epoch: every ``name = :placeholder`` assignment lands exactly
+                            # as DynamoDB SET applies it; ``revision = revision + :one`` is the
+                            # shared increment below.
+                            for attribute, placeholder in re.findall(
+                                r"(#?[A-Za-z_][A-Za-z0-9_]*) = (:[A-Za-z0-9_]+)",
+                                expression,
+                            ):
+                                item[str(names.get(attribute, attribute))] = copy.deepcopy(
+                                    values[placeholder]
+                                )
                         elif expression.startswith("SET #digest"):
                             item[str(names["#digest"])] = copy.deepcopy(values[":digest"])
                         elif expression.startswith("SET #arn"):
@@ -1032,6 +1055,7 @@ class _Factory:
         self.secrets = _FakeSecrets()
         self.ddb = _FakeDdb()
         self.kms = _FakeKms()
+        self.sts = _FakeSts()
 
     def client(self, service_name: str, *, region_name: str) -> object:
         assert region_name == "ap-northeast-1"
@@ -1041,6 +1065,7 @@ class _Factory:
             "secretsmanager": self.secrets,
             "dynamodb": self.ddb,
             "kms": self.kms,
+            "sts": self.sts,
         }[service_name]
 
 
@@ -3264,10 +3289,18 @@ def test_cleanup_deadline_boundary_is_exact_and_retries_hot_clock_cas(
     assert gate._cleanup_proposed_from_ledger(gate._cleanup_ledger(domain)) == expected
 
 
-def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    factory = _Factory()
+def _seed_terminal_prior_epoch(
+    factory: _Factory,
+    *,
+    prior_ledger_stage: str,
+) -> tuple[LiveRolloutGate, dict[str, Any]]:
+    """Seed a settled primary-only prior epoch whose ledger sits in ``prior_ledger_stage``.
+
+    DOMAIN records are already settled (runtime stage complete, previous retired, primary-only
+    live definitions) so ``initialize`` of the next epoch is decided by the prior-LEDGER rule
+    alone. Returns the next-epoch gate plus the seeded values the assertions need.
+    """
+
     retired_generations = {_DB_GENERATION, _SLACK_GENERATION}
     prior_high_water = _NOW + 120
     for domain, primary in (
@@ -3287,14 +3320,26 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
             "stage": {"S": "complete"},
             "retired_generations": {"SS": sorted(retired_generations)},
         }
-    factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")] = {
+    prior_ledger: dict[str, Any] = {
         "scope": {"S": _SCOPE},
         "record": {"S": f"LEDGER#{_EPOCH}"},
         "rotation_epoch": {"S": _EPOCH},
-        "stage": {"S": "complete"},
+        "stage": {"S": prior_ledger_stage},
         "revision": {"N": "5"},
         "updated_at": {"N": str(_NOW)},
     }
+    if prior_ledger_stage == "aborted":
+        prior_ledger.update(
+            {
+                "aborted_at": {"N": str(_NOW)},
+                "aborted_from_stage": {"S": "connect_web_preloaded"},
+                "aborted_by": {"S": _STS_ARN},
+                "aborted_by_user_id": {"S": _STS_USER_ID},
+                "aborted_by_account": {"S": _STS_ACCOUNT},
+                "abort_reason": {"S": "candidate failed canary"},
+            }
+        )
+    factory.ddb.items[(_SCOPE, f"LEDGER#{_EPOCH}")] = prior_ledger
 
     next_epoch = "hmac-2026-08-rotation"
     for task, arn in (
@@ -3378,6 +3423,25 @@ def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
         clients=factory,
         deployment_intent=_TEST_INTENT,
     )
+    return gate, {
+        "next_epoch": next_epoch,
+        "retired_generations": retired_generations,
+        "prior_high_water": prior_high_water,
+        "next_mail": next_mail,
+        "next_report": next_report,
+    }
+
+
+def test_completed_primary_only_epoch_can_initialize_next_rotation_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    gate, seeded = _seed_terminal_prior_epoch(factory, prior_ledger_stage="complete")
+    retired_generations = seeded["retired_generations"]
+    prior_high_water = seeded["prior_high_water"]
+    next_epoch = seeded["next_epoch"]
+    next_mail = seeded["next_mail"]
+    next_report = seeded["next_report"]
     monkeypatch.setattr(rollout_gate_module, "_trusted_epoch", lambda _response: _NOW)
     concurrent_high_water = prior_high_water + 30
 
@@ -3558,3 +3622,197 @@ def test_promotion_bridge_redacts_ordinary_client_exceptions(
     assert captured.out == '{"code":"gate_client_error","ok":false}\n'
     assert captured.err == ""
     assert "sensitive-client-detail" not in captured.out
+
+
+def test_abort_epoch_is_one_way_cas_with_audit_trail() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    gate.initialize()
+    ledger_key = (_SCOPE, f"LEDGER#{_EPOCH}")
+    assert factory.ddb.items[ledger_key]["revision"] == {"N": "1"}
+
+    gate.abort_epoch(reason="  candidate image failed\n canary  ")
+
+    ledger = factory.ddb.items[ledger_key]
+    assert ledger["stage"] == {"S": "aborted"}
+    assert ledger["revision"] == {"N": "2"}
+    assert ledger["updated_at"] == {"N": str(_NOW)}
+    assert ledger["aborted_at"] == {"N": str(_NOW)}
+    assert ledger["aborted_from_stage"] == {"S": "initialized"}
+    assert ledger["aborted_by"] == {"S": _STS_ARN}
+    assert ledger["aborted_by_user_id"] == {"S": _STS_USER_ID}
+    assert ledger["aborted_by_account"] == {"S": _STS_ACCOUNT}
+    assert ledger["abort_reason"] == {"S": "candidate image failed canary"}
+    assert factory.sts.calls == 1
+    transaction = factory.ddb.transactions[-1]
+    assert len(transaction) == 1
+    update = transaction[0]["Update"]
+    assert update["Key"]["record"] == {"S": f"LEDGER#{_EPOCH}"}
+    assert update["ConditionExpression"] == "#stage = :expected AND revision = :revision"
+    assert update["ExpressionAttributeValues"][":expected"] == {"S": "initialized"}
+    assert update["ExpressionAttributeValues"][":revision"] == {"N": "1"}
+    assert "SecretString" not in repr(factory.ddb.transactions)
+    # Only the epoch ledger moves; DOMAIN records are not rewritten by an abort.
+    for domain in ("mail_action", "report_link"):
+        assert factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]["stage"] == {"S": "preload"}
+
+    # One-way: nothing re-aborts, resumes, or stage-advances an aborted epoch, in either mode.
+    snapshot = copy.deepcopy(ledger)
+    with pytest.raises(RolloutGateError, match="epoch_aborted"):
+        gate.abort_epoch(reason="second abort")
+    with pytest.raises(RolloutGateError, match="epoch_aborted"):
+        gate._ledger()
+    with pytest.raises(RolloutGateError, match="epoch_aborted"):
+        gate.terraform_pre_register(task="connect_web", definition=_new_definition("connect_web"))
+    with pytest.raises(RolloutGateError, match="epoch_aborted"):
+        gate.pre_update(
+            task="connect_web",
+            task_definition=_TASK_ARNS["connect_new"],
+            mode="rollback",
+        )
+    assert factory.ddb.items[ledger_key] == snapshot
+    assert factory.sts.calls == 1
+
+
+def test_abort_epoch_rejects_completed_epoch_and_concurrent_ledger_writes() -> None:
+    factory = _Factory()
+    gate = _gate(factory, "0" * 64)
+    gate.initialize()
+    ledger_key = (_SCOPE, f"LEDGER#{_EPOCH}")
+    factory.ddb.items[ledger_key]["stage"] = {"S": "complete"}
+    before = copy.deepcopy(factory.ddb.items[ledger_key])
+    written = len(factory.ddb.transactions)
+
+    with pytest.raises(RolloutGateError, match="epoch_already_complete"):
+        gate.abort_epoch(reason="too late")
+
+    assert factory.ddb.items[ledger_key] == before
+    assert len(factory.ddb.transactions) == written
+    assert factory.sts.calls == 0
+
+    factory.ddb.items[ledger_key]["stage"] = {"S": "worker_verified"}
+
+    def concurrent_ledger_write(items: dict[tuple[str, str], dict[str, Any]]) -> None:
+        items[ledger_key]["revision"] = {"N": "2"}
+
+    factory.ddb.before_transaction_hook = concurrent_ledger_write
+    with pytest.raises(RolloutGateError, match="abort_cas_failed"):
+        gate.abort_epoch(reason="lost the race")
+
+    ledger = factory.ddb.items[ledger_key]
+    assert ledger["stage"] == {"S": "worker_verified"}
+    assert ledger["revision"] == {"N": "2"}
+    assert "abort_reason" not in ledger
+    assert "aborted_at" not in ledger
+
+
+def test_abort_epoch_cli_requires_reason_and_records_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    control_path = tmp_path / "control.json"
+    manifest_path.write_text(json.dumps(_manifest()), encoding="utf-8")
+    control_path.write_text(json.dumps(_control("0" * 64)), encoding="utf-8")
+    factory = _Factory()
+    _gate(factory, "0" * 64).initialize()
+    ledger_key = (_SCOPE, f"LEDGER#{_EPOCH}")
+    base = [
+        "--manifest",
+        str(manifest_path),
+        "--control",
+        str(control_path),
+        "--action",
+        "abort-epoch",
+    ]
+
+    for extra, code in (
+        ([], "missing_action_argument"),
+        (["--reason", " \t\n"], "abort_reason_invalid"),
+        (["--reason", "x" * 513], "abort_reason_invalid"),
+        (["--reason", "bell\x07inside"], "abort_reason_invalid"),
+    ):
+        assert rollout_gate_module.main([*base, *extra], clients=factory) == 2
+        assert capsys.readouterr().out == f'{{"code":"{code}","ok":false}}\n'
+        assert factory.ddb.items[ledger_key]["stage"] == {"S": "initialized"}
+        assert "abort_reason" not in factory.ddb.items[ledger_key]
+    assert factory.sts.calls == 0
+
+    assert (
+        rollout_gate_module.main([*base, "--reason", "candidate failed canary"], clients=factory)
+        == 0
+    )
+    assert capsys.readouterr().out == '{"code":"ok","ok":true}\n'
+    ledger = factory.ddb.items[ledger_key]
+    assert ledger["stage"] == {"S": "aborted"}
+    assert ledger["abort_reason"] == {"S": "candidate failed canary"}
+    assert ledger["aborted_by"] == {"S": _STS_ARN}
+    assert ledger["aborted_from_stage"] == {"S": "initialized"}
+
+
+def test_aborted_prior_epoch_can_initialize_next_rotation_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    gate, seeded = _seed_terminal_prior_epoch(factory, prior_ledger_stage="aborted")
+    prior_key = (_SCOPE, f"LEDGER#{_EPOCH}")
+    prior_before = copy.deepcopy(factory.ddb.items[prior_key])
+    monkeypatch.setattr(rollout_gate_module, "_trusted_epoch", lambda _response: _NOW)
+
+    gate.initialize()
+
+    next_epoch = seeded["next_epoch"]
+    next_ledger = factory.ddb.items[(_SCOPE, f"LEDGER#{next_epoch}")]
+    assert next_ledger["stage"] == {"S": "initialized"}
+    assert next_ledger["previous_rotation_epoch"] == {"S": _EPOCH}
+    assert next_ledger["previous_rotation_epoch_stage"] == {"S": "aborted"}
+    # The aborted prior ledger and its audit trail survive verbatim.
+    assert factory.ddb.items[prior_key] == prior_before
+    check = factory.ddb.transactions[-1][0]["ConditionCheck"]
+    assert check["Key"]["record"] == {"S": f"LEDGER#{_EPOCH}"}
+    assert check["ConditionExpression"] == "#stage = :prior_stage"
+    assert check["ExpressionAttributeValues"] == {":prior_stage": {"S": "aborted"}}
+    for domain, expected_primary in (
+        ("mail_action", seeded["next_mail"]),
+        ("report_link", seeded["next_report"]),
+    ):
+        item = factory.ddb.items[(_SCOPE, f"DOMAIN#{domain}")]
+        assert item["rotation_epoch"] == {"S": next_epoch}
+        assert item["primary_generation"] == {"S": expected_primary}
+        assert (_SCOPE, f"EPOCH_HISTORY#{domain}#{_EPOCH}") in factory.ddb.items
+
+
+@pytest.mark.parametrize(
+    "live_stage",
+    ("initialized", "connect_web_preloaded", "worker_verified", "mcp_stable_and_old_drained"),
+)
+def test_live_prior_epoch_ledger_blocks_next_initialize(
+    monkeypatch: pytest.MonkeyPatch,
+    live_stage: str,
+) -> None:
+    factory = _Factory()
+    gate, seeded = _seed_terminal_prior_epoch(factory, prior_ledger_stage=live_stage)
+    monkeypatch.setattr(rollout_gate_module, "_trusted_epoch", lambda _response: _NOW)
+
+    with pytest.raises(RolloutGateError, match="next_epoch_not_ready"):
+        gate.initialize()
+
+    assert (_SCOPE, f"LEDGER#{seeded['next_epoch']}") not in factory.ddb.items
+    assert factory.ddb.transactions == []
+
+
+def test_next_initialize_cas_fails_closed_when_prior_ledger_drifts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory = _Factory()
+    gate, seeded = _seed_terminal_prior_epoch(factory, prior_ledger_stage="aborted")
+    monkeypatch.setattr(rollout_gate_module, "_trusted_epoch", lambda _response: _NOW)
+
+    def concurrent_prior_write(items: dict[tuple[str, str], dict[str, Any]]) -> None:
+        items[(_SCOPE, f"LEDGER#{_EPOCH}")]["stage"] = {"S": "complete"}
+
+    factory.ddb.before_transaction_hook = concurrent_prior_write
+    with pytest.raises(RolloutGateError, match="durable_initialize_cas_failed"):
+        gate.initialize()
+
+    assert (_SCOPE, f"LEDGER#{seeded['next_epoch']}") not in factory.ddb.items

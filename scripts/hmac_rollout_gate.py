@@ -133,6 +133,12 @@ _LEDGER_STAGES = (
     "mcp_stable_and_old_drained",
     "complete",
 )
+# ``aborted`` is a terminal, one-way epoch ledger stage: no action resumes an aborted epoch and
+# every stage action fails closed on it. The only way forward is ``initialize`` of the next epoch,
+# which accepts a prior ledger in exactly these terminal stages.
+_LEDGER_ABORTED_STAGE = "aborted"
+_LEDGER_PRIOR_ACCEPTED_STAGES = frozenset({"complete", _LEDGER_ABORTED_STAGE})
+_ABORT_REASON_MAX_CHARS = 512
 _CLEANUP_STAGES = frozenset({"aborted", "authorized", "complete"})
 _DEPLOYMENT_INTENT_TABLE = "teamagent-dev-image-deployment-intents"
 _TASK_INVENTORY_LIMIT = 10_000
@@ -558,6 +564,17 @@ def _trusted_epoch(response: object) -> int:
     return epoch
 
 
+def _abort_reason(reason: object) -> str:
+    """Normalize an operator abort reason; empty, oversized, or non-printable text is rejected."""
+
+    if type(reason) is not str:
+        raise RolloutGateError("abort_reason_invalid")
+    normalized = " ".join(reason.split())
+    if not normalized or len(normalized) > _ABORT_REASON_MAX_CHARS or not normalized.isprintable():
+        raise RolloutGateError("abort_reason_invalid")
+    return normalized
+
+
 def _named(entries: object, key: str) -> dict[str, str]:
     if type(entries) is not list:
         raise RolloutGateError("live_task_invalid")
@@ -928,6 +945,20 @@ class LiveRolloutGate:
         if projected_manifest_now is None or abs(projected_manifest_now - now) > _MAX_CLOCK_SKEW_S:
             raise RolloutGateError("manifest_time_stale")
         return now
+
+    def _caller_identity(self) -> dict[str, str]:
+        """Resolve the AWS principal performing an audit-bearing durable write."""
+
+        sts = self._clients.client("sts", region_name=self.control.region)
+        response = sts.get_caller_identity()
+        self._observe(response)
+        identity: dict[str, str] = {}
+        for name in ("Arn", "UserId", "Account"):
+            value = response.get(name) if type(response) is dict else None
+            if type(value) is not str or not value:
+                raise RolloutGateError("caller_identity_unavailable")
+            identity[name] = value
+        return identity
 
     def _version_for_reference(self, reference: str) -> tuple[str, str]:
         resource, pinned = _secret_reference(reference)
@@ -1597,6 +1628,7 @@ class LiveRolloutGate:
         now = self._now()
         transaction: list[dict[str, Any]] = []
         prior_epoch: str | None = None
+        prior_stage: str | None = None
         ledger_updated_at = now
 
         if first_epoch:
@@ -1771,7 +1803,11 @@ class LiveRolloutGate:
                 raise RolloutGateError("next_epoch_not_ready")
             prior_epoch = next(iter(prior_epochs))
             prior_ledger = self._read_item_optional(f"LEDGER#{prior_epoch}")
-            if prior_ledger is None or self._ddb_string(prior_ledger, "stage") != "complete":
+            if prior_ledger is None:
+                raise RolloutGateError("next_epoch_not_ready")
+            prior_stage = self._ddb_string(prior_ledger, "stage")
+            # Only a terminal prior ledger may be superseded: ``complete`` or one-way ``aborted``.
+            if prior_stage not in _LEDGER_PRIOR_ACCEPTED_STAGES:
                 raise RolloutGateError("next_epoch_not_ready")
             transaction.insert(
                 0,
@@ -1782,9 +1818,9 @@ class LiveRolloutGate:
                             "scope": {"S": self.control.scope},
                             "record": {"S": f"LEDGER#{prior_epoch}"},
                         },
-                        "ConditionExpression": "#stage = :complete",
+                        "ConditionExpression": "#stage = :prior_stage",
                         "ExpressionAttributeNames": {"#stage": "stage"},
-                        "ExpressionAttributeValues": {":complete": {"S": "complete"}},
+                        "ExpressionAttributeValues": {":prior_stage": {"S": prior_stage}},
                     }
                 },
             )
@@ -1801,8 +1837,11 @@ class LiveRolloutGate:
                         "revision": {"N": "1"},
                         "updated_at": {"N": str(ledger_updated_at)},
                         **(
-                            {"previous_rotation_epoch": {"S": prior_epoch}}
-                            if prior_epoch is not None
+                            {
+                                "previous_rotation_epoch": {"S": prior_epoch},
+                                "previous_rotation_epoch_stage": {"S": prior_stage},
+                            }
+                            if prior_epoch is not None and prior_stage is not None
                             else {}
                         ),
                     },
@@ -1837,6 +1876,8 @@ class LiveRolloutGate:
             updated_at = int(item["updated_at"]["N"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RolloutGateError("durable_ledger_invalid") from exc
+        if stage == _LEDGER_ABORTED_STAGE:
+            raise RolloutGateError("epoch_aborted")
         if stage not in _LEDGER_STAGES or revision < 1 or updated_at < 0:
             raise RolloutGateError("durable_ledger_invalid")
         return Ledger(
@@ -5325,6 +5366,65 @@ class LiveRolloutGate:
             report_issuers=shared,
         )
 
+    def abort_epoch(self, *, reason: str) -> None:
+        """One-way CAS transition of the current epoch ledger to ``aborted`` with an audit trail.
+
+        A completed epoch is never abortable and an aborted epoch is never resumed or re-aborted.
+        Only the epoch ledger changes: who (STS caller identity), when (trusted AWS time), and why
+        (``--reason``) are recorded on the ledger itself, next to the stage it was aborted from.
+        Live services and DOMAIN records are untouched; the next epoch's ``initialize`` accepts
+        the aborted prior ledger but still requires settled DOMAIN records.
+        """
+
+        normalized_reason = _abort_reason(reason)
+        record = f"LEDGER#{self.control.rotation_epoch}"
+        item = self._read_item(record)
+        stage = self._ddb_string(item, "stage")
+        revision = self._ddb_number(item, "revision")
+        if stage == _LEDGER_ABORTED_STAGE:
+            raise RolloutGateError("epoch_aborted")
+        if stage == "complete":
+            raise RolloutGateError("epoch_already_complete")
+        if stage not in _LEDGER_STAGES or revision is None or revision < 1:
+            raise RolloutGateError("durable_ledger_invalid")
+        identity = self._caller_identity()
+        now = self._now()
+        transaction: list[dict[str, Any]] = [
+            {
+                "Update": {
+                    "TableName": self.control.state_table,
+                    "Key": {
+                        "scope": {"S": self.control.scope},
+                        "record": {"S": record},
+                    },
+                    "UpdateExpression": (
+                        "SET #stage = :aborted, revision = revision + :one, updated_at = :now,"
+                        " aborted_at = :now, aborted_from_stage = :expected,"
+                        " aborted_by = :actor, aborted_by_user_id = :actor_user_id,"
+                        " aborted_by_account = :actor_account, abort_reason = :reason"
+                    ),
+                    "ConditionExpression": "#stage = :expected AND revision = :revision",
+                    "ExpressionAttributeNames": {"#stage": "stage"},
+                    "ExpressionAttributeValues": {
+                        ":aborted": {"S": _LEDGER_ABORTED_STAGE},
+                        ":expected": {"S": stage},
+                        ":revision": {"N": str(revision)},
+                        ":one": {"N": "1"},
+                        ":now": {"N": str(now)},
+                        ":actor": {"S": identity["Arn"]},
+                        ":actor_user_id": {"S": identity["UserId"]},
+                        ":actor_account": {"S": identity["Account"]},
+                        ":reason": {"S": normalized_reason},
+                    },
+                }
+            }
+        ]
+        try:
+            response = self.ddb.transact_write_items(TransactItems=transaction)
+            self._observe(response)
+        except Exception as exc:
+            raise RolloutGateError("abort_cas_failed") from exc
+
     def complete_cleanup(self, *, domain: str) -> None:
         """Finalize a prepared cleanup after every replacement and restart is proven."""
 
@@ -5593,6 +5693,7 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             "worker-verified",
             "mcp-stable-and-old-drained",
             "complete",
+            "abort-epoch",
             "prepare-cleanup",
             "reconcile-cleanup",
             "complete-cleanup",
@@ -5623,6 +5724,10 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
     parser.add_argument("--runtime-executable-sha256")
     parser.add_argument("--restart-outcome", choices=("rolled-back",))
     parser.add_argument("--reconcile-decision", choices=("abort", "rebind"))
+    parser.add_argument(
+        "--reason",
+        help="abort-epoch only: operator reason recorded on the epoch ledger audit trail.",
+    )
     parser.add_argument(
         "--refresh-manifest-now",
         action="store_true",
@@ -5742,6 +5847,10 @@ def main(argv: list[str] | None = None, *, clients: AwsClientFactory | None = No
             gate.mcp_stable_and_old_drained()
         elif args.action == "complete":
             gate.complete()
+        elif args.action == "abort-epoch":
+            if args.reason is None:
+                raise RolloutGateError("missing_action_argument")
+            gate.abort_epoch(reason=args.reason)
         elif args.action == "prepare-cleanup":
             if (
                 args.domain is None
