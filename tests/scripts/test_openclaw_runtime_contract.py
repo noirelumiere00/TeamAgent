@@ -3837,3 +3837,24 @@ def test_ambiguous_connect_forms_never_delete_the_users_other_answer() -> None:
         assert outcome["replyCancelled"] is False, label
         assert outcome["modelAnswerDelivered"] is True, label
         assert outcome["userVisibleMessages"] == 2, label
+
+
+def test_classification_survives_run_binding_before_content_arrives() -> None:
+    """分類結果が run 束縛側の ingress へ引き継がれること（2026-09-04 レビュー指摘）。
+
+    本番には「content 無しの通知が先に来て run へ束縛され、そのあと content つきの
+    再通知が来る」順序がある。bindRun が `connectRequest` だけを複写していたため、
+    束縛側の `connectRequestRule` が null のまま残り、
+    `connectRuleAllowsSuppression(null) === false` で抑止が効かず、
+    **「連携」単独なのに 2 通返る**状態になっていた（実測 userVisible:2）。
+
+    無音にはならない安全側の重複だが、本番でそれを見たときに
+    「run 束縛の問題」か「規則の問題」かを判別できず原因を取り違える。
+    判定・抑止・診断が同じ受信について食い違わないよう、まとめて複写する。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["bind_before_content"]
+    assert outcome["boundRule"] == "whole"
+    assert outcome["guaranteePosts"] == 1
+    # 束縛側にも規則が渡っているので抑止が効き、利用者に届くのは 1 通。
+    assert outcome["replyCancelled"] is True
+    assert outcome["userVisibleMessages"] == 1

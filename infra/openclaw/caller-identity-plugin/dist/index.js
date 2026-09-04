@@ -1407,7 +1407,23 @@ export function createCallerIdentityPlugin({
       const matches = sameIngress(existing, ingress);
       if (matches) {
         // 同一 ingress の再通知（content を伴う側が後から来る経路）でも判定を失わない。
-        if (ingress.connectRequest === true) existing.connectRequest = true;
+        //
+        // ⚠️ 分類結果は **1 組で意味を持つ**（2026-09-04 レビュー指摘）。
+        // 以前は connectRequest だけを複写していたため、
+        // 「content 無しの通知が先に来て run へ束縛 → content つきの再通知」の順序だと
+        // 束縛側の connectRequestRule が null のまま残り、
+        // connectRuleAllowsSuppression(null) === false で抑止が効かなかった
+        // （実測 {posts:1, modelCancelled:false, userVisible:2}）。
+        // 無音にはならない安全側の重複だが、本番で「`連携` 単独なのに 2 通返る」を見たときに
+        // 「run 束縛の問題」か「規則の問題」かを判別できなくなる＝原因を取り違える。
+        // 判定・抑止・診断が同じ受信について食い違わないよう、まとめて複写する。
+        if (ingress.connectRequest === true) {
+          existing.connectRequest = true;
+          existing.connectRequestRule = ingress.connectRequestRule;
+          existing.connectShape = ingress.connectShape;
+          existing.connectNormalizedLength = ingress.connectNormalizedLength;
+          existing.connectContentLength = ingress.connectContentLength;
+        }
         removePending(ingress);
       } else rejectRun(runId, now(), ingress);
       return matches;

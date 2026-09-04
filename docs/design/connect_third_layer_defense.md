@@ -1189,3 +1189,14 @@ revise は「`oauth_connect` を必ず呼べ」とモデルへ要求するもの
 安全側（消しすぎない方向）に倒れるので許容するが、
 本番で「連携」に 2 通返っているのにログへ `suppressed model reply` が無い場合は、
 まず `bind_agent_run` の行を見て束縛が成立しているかを確認すること。
+
+> **同じ症状の別原因を 1 つ潰した（2026-09-04 レビュー指摘）**: 束縛は成立しているのに
+> 抑止が効かない経路があった。`bindRun` が同一 ingress の再通知で `connectRequest` だけを
+> 複写しており、**「content 無しの通知が先に来て run へ束縛 → content つきの再通知」**の
+> 順序だと束縛側の `connectRequestRule` が `null` のまま残り、
+> `connectRuleAllowsSuppression(null) === false` で抑止が落ちていた
+> （実測 `{posts:1, modelCancelled:false, userVisible:2}`）。
+> 分類結果（`connectRequestRule` / `connectShape` / 各長さ）は **1 組で意味を持つ**ので
+> まとめて複写する。`test_classification_survives_run_binding_before_content_arrives` と
+> 変異 `M26` が固定する。
+> したがって現在「2 通返る」の原因は **run 未束縛** に絞り込める。

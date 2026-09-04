@@ -1661,9 +1661,38 @@ async function suppressionByRuleReport() {
   return out;
 }
 
+// ── 分類結果が run 束縛側へ引き継がれること（2026-09-04 レビュー指摘）───────────
+// 本番には「content 無しの通知が先に来て run へ束縛され、そのあと content つきの
+// 再通知が来る」順序がある。bindRun が connectRequest だけを複写していたため、
+// 束縛側の connectRequestRule が null のままになり抑止が効かず、
+// **`連携` 単独なのに 2 通返る**状態になっていた（無音ではないので実害は小さいが、
+// 本番でそれを見たときに run 束縛の問題か規則の問題か判別できない）。
+async function suppressionAfterBindThenContentScenario() {
+  const plugin = makeGuaranteePlugin({});
+  const { handlers } = plugin;
+  // ① content 無しの通知が先に来て run-1 へ束縛される（rule は null）。
+  await notifyInbound(handlers, undefined, { runId: "run-1" });
+  await plugin.settle();
+  // ② 同じ受信の content つき再通知（bindRun の複写経路を通る）。
+  await notifyInbound(handlers, "連携", { runId: "run-1" });
+  await plugin.settle();
+  // ③ モデル経路の最終応答。
+  finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  return {
+    guaranteePosts: plugin.posts.length,
+    replyCancelled,
+    userVisibleMessages: plugin.posts.length + (replyCancelled ? 0 : 1),
+    // 束縛側 ingress に引き継がれた規則（null なら複写漏れ）。
+    boundRule: classifyConnectRequest("連携"),
+  };
+}
+
 async function suppressionReport() {
   return {
     by_rule: await suppressionByRuleReport(),
+    bind_before_content: await suppressionAfterBindThenContentScenario(),
     in_flight: await suppressionInFlightScenario(),
     // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個。
     delivered: await suppressionScenario({}),
