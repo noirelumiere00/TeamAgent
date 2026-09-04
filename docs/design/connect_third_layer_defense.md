@@ -735,6 +735,18 @@ TRACE と無関係に、必ず次の 2 種類を出す。
 12-2 のとおり、上流は登録拒否を無音で行うので、これが唯一の一次証拠になる。
 契約は `test_every_registered_hook_reports_its_first_invocation` が固定する。
 
+バナーは **実際に `api.on` した名前**から組み、期待値 `REGISTERED_HOOKS` と食い違ったら
+起動時に `fail()` する（2026-09-04 レビュー指摘 中2）。定数を直接出していると、
+`observe()` を 1 つ消してもバナーは出続けテストも緑のままで、
+「バナー vs first_fired の差分＝唯一の一次証拠」という**前提そのものが黙って壊れる**。
+`test_registered_hooks_banner_is_derived_from_actual_registrations` と、
+`observe()` を 1 つ削除する変異が赤くなることで固定する。
+
+保証経路が語彙不一致で不発になる場合は既定では黙るが、受信の `content` が
+**文字列ですらない**ときだけは TRACE と無関係に**フックごとに 1 回**警告する
+（同 中3）。上流の `event.content` が別フィールドへ移ると、(A) と同型の
+「設定したのに無音」が再発するため。毎回出すと `content` を持たない受信で騒音になるので初回だけ。
+
 あわせて `emitPluginLog` の console 側を **常に stderr**（`console.warn`）に統一した。
 このプラグインは `node -e` で読み込まれ、同じプロセスの stdout が
 `JSON.stringify(...)` の**データ面**であることがある
@@ -763,18 +775,43 @@ level の意味は logger 側（`logger.info` / `logger.warn`）で保つ。
 門は `dist/registry-D1_pYg_a.js:4224-4235`。`message_received` はこの集合に**入っていない**ので、
 `allowConversationAccess` の設定ミス・上流の仕様変更・config の取り違えのいずれでも落ちない。
 
-「本番で呼ばれる実証」の根拠: mcp が署名済み claim を受理してツールが動いている以上、
-`before_tool_call`→`signToolCall`→`mintCallerClaim` は確実に実行されている。
+「本番で呼ばれる実証」の根拠と、その**限界**: mcp が署名済み claim を受理してツールが
+動いている以上、`before_tool_call`→`signToolCall`→`mintCallerClaim` は確実に実行されている。
 `mintCallerClaim` は `ingressByRun` に載った ingress を要求し、その ingress を作るのは
-`rememberInbound`（= `message_received` / `inbound_claim`）だけである。よって本経路は動いている。
+`rememberInbound` だけである。
 
-#### 実行モデル
+ただし `rememberInbound` は `message_received` **と** `inbound_claim` の両方に繋がっている。
+したがってこの実績が示すのは「**どちらか**が動いている」ことだけで、
+`message_received` **単独**の実証にはならない（2026-09-04 レビュー指摘 重大2）。
+本番で `inbound_claim` だけが発火していた場合、片方にしか保証を載せていなければ
+保証経路は一度も動かず、層1 の二の舞になる。
 
-`message_received` は fire-and-forget で呼ばれる（`dist/dispatch-V82RCNJs.js:1438`）。
-ハンドラ自体は `runVoidHook` が `await` するが（`dist/hook-runner-global-Cucx8m-W.js:458-477`）、
-`message_received` には**既定の void hook タイムアウトが無い**
-（`DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK` は `:248-253` の 4 フックのみ）。
-したがってここで mcp と Slack を叩いても、上流の応答経路を遅らせず、途中で切られもしない。
+→ **保証経路は両方の受信フックに掛ける。** 一回性は下記の台帳が守るので二重投稿しない。
+`test_connect_guarantee_holds_whichever_inbound_hook_fires` が
+「message_received のみ / inbound_claim のみ / 両方」の 3 通りとも投稿 1 で固定する。
+
+#### 実行モデル — 保証経路は hook の await から切り離す
+
+上流実物で両フックの呼ばれ方を確認した（2026-09-04 レビュー指摘の必須確認）。
+
+| フック | 実行 | タイムアウト | 実物 |
+|---|---|---|---|
+| `message_received` | 呼び出し側が fire-and-forget | **無し** | 呼び出し `dist/dispatch-V82RCNJs.js:1438`／`runVoidHook` は `dist/hook-runner-global-Cucx8m-W.js:458-477`／既定表 `:248-253` は `agent_end` `channel_pairing_requested` `before_compaction` `after_compaction` の 4 つだけ |
+| `inbound_claim` | **claiming hook。ハンドラを逐次 `await`** | **無し** | `runClaimingHook` `:689-690` → `runClaimingHooksList`（`for` ループ内で `await`、first-claim wins）／`getClaimingHookTimeoutMs` は `modifyingHookTimeoutMsByHook` を引くが `:254-260` に `inbound_claim` は無い |
+
+`voidHookTimeoutMsByHook` / `modifyingHookTimeoutMsByHook` を上書きする呼び出し元は
+上流 dist に存在しない（唯一の `createHookRunner` 呼び出しは `:1112-1124` で
+`logger` / `catchErrors` / `failurePolicyByHook` しか渡さない）。
+よって **どちらのフックにもタイムアウトは無い**＝保証経路が途中で切られることはない。
+
+しかし `inbound_claim` は**逐次 await される**ので、そこで保証経路
+（最大 MCP 15s + Slack 10s×2）を待つと **受信パイプライン全体をその間止めてしまう**。
+そこで `startConnectGuarantee` で **両方とも hook の await から切り離す**（fire-and-forget）。
+`message_received` 側は待っても実害が無いが、上流が将来タイムアウトを足したら
+配信が切られるため、形を揃えておくほうが安全である。
+
+受信の記録（`rememberInbound`）と一回性の確保は
+`deliverConnectGuarantee` の**最初の `await` より前**に同期で終わるので、切り離しても取りこぼさない。
 
 #### 配信手段の選定（なぜ Slack Web API を直接叩くのか）
 
@@ -799,17 +836,36 @@ Slack は失敗を HTTP 200 + `{"ok": false, "error": …}` で返すので必�
 
 #### 一回性と二重投稿
 
-`connectDeterministicAttempted` を層1 と共有する 1 つの旗にした。
-`message_received` は `before_agent_reply` より先に走るので、通常は保証経路が旗を取り、
+一回性は **`connectAnsweredByMessage`（`pendingKey` = `[sessionKey, messageId]` 基準の台帳）**
+が持つ。層1 と保証経路が同じ台帳を見るので、どちらかが答えたらもう一方は降りる。
+
+> **⚠️ 当初の実装は壊れていた**（2026-09-04 レビュー指摘 重大1）。
+> 旗を ingress **オブジェクトのフィールド**（`connectDeterministicAttempted`）に載せていたが、
+> `bindRun` 成功時に `removePending` で pending から ingress が消えるため、
+> 次の通知は新しいオブジェクトを作り、**旗が毎回リセットされていた**。
+> 実測（実物 dist を駆動）: `message_received` ×2（runId 付き）で**投稿 2・tools/call 2**、
+> `message_received` → `before_model_resolve` → `message_received` でも**投稿 2**。
+> tools/call が 2 回走るということは **state token が 2 個発行される**ということで、
+> 単なる「うるさい」では済まない。
+> 224 組マトリクスがこれを捕らえなかったのは、各行が受信を 1 回しか通知しない
+> 新規プラグインで測っていたため。以後**マトリクスの全行を 2 回通知で測る**。
+> 旗は受信の同一性（`pendingKey`）に紐づけ、**オブジェクトの寿命から切り離す**のが正解。
+
+`message_received` は `before_agent_reply` より先に走るので、通常は保証経路が台帳を取り、
 層1 は `already_attempted` で降りる。
 
 **旗は「実際に配信を試みる」と決めた後にだけ立てる。** 手前で立てると、保証経路が使えない環境
 （bot token 無し＝ローカル/テスト）で層1 まで降りてしまい **誰も答えない穴**ができる。
 これは実装中に実際に踏んだ（mutation `M8` がこの退行を固定する）。
 
-モデル経路そのものは止めない。裁定どおり **「抑制のために保証を犠牲にしない」**＝
-モデルが別途返事をして 2 通に見えることは許容する（無言よりはるかに良い）。
-同じ受信に対して 2 通投稿しないことだけを守る。
+モデル経路そのものは止めない。裁定どおり **「抑制のために保証を犠牲にしない」**。
+同じ受信に対して保証経路が 2 通投稿しないことだけを守る。
+
+⚠️ ただし正確に言うと、モデル経路は止まらないので **`oauth_connect` がもう一度呼ばれうる**。
+これは「返事が 2 通に見える」だけでなく **state token がもう 1 個発行される**ということである
+（token 自体は本人専用・使い捨てなので危険ではないが、無害でもない）。
+層1 は台帳で降りるが、モデルが自分でツールを呼ぶ経路までは塞いでいない。
+塞ぐなら層2/3 を「保証済みの run では畳む」改修が要る（本 PR の範囲外・§12-8 の 2）。
 
 なお、同じ受信が 2 度通知される経路（`inbound_claim` と `message_received` の両方）があるため、
 `rememberInbound` は `sameIngress` で同一と確認できた再通知について**旗を引き継ぐ**。
@@ -857,6 +913,15 @@ mcp へ到達すらできなかった場合（fetch 失敗・5xx・壊れた戻�
 曖昧なのは「どのメッセージか」だけで「**誰か**」ではない。他人・別会話は候補に入る前に落ちている。
 `test_run_binding_prefers_the_newest_inbound_in_the_same_conversation` の③が、
 **より新しい別送信者の受信があっても掴まない**ことを固定する。
+
+> 当初この③は守れていなかった（2026-09-04 レビュー指摘 中1）。別送信者を
+> チャンネル（`CHANNEL_SESSION_KEY` / `channel:C…`）で作る一方、run ctx は DM
+> （`DM_SESSION_KEY` / `user:U…`）で、**sessionKey も channel も違っていた**ため、
+> `senderId` 照合が無くても落ちていた。実測: `matchesConversation` から
+> `ingress.senderId === senderId` を消す変異でこのテストは**緑のまま**だった
+> （赤くなったのは層1 のテスト 1 本だけ）。実装自体は安全だったが、テストが守っていなかった。
+> **同一 channel・同一 sessionKey・別 senderId・別送信者のほうが新しい** に直し、
+> 同じ変異で赤くなることを確認した。
 曖昧化したときは `bind_agent_run disambiguated candidates=N rule=newest_in_conversation` を出す（黙って選ばない）。
 
 #### C2: `declared channel_id does not match the bound ingress`（2 件）
@@ -884,11 +949,15 @@ Slack 識別子・本文・URL・claim・bearer は載せない。
 
 1. **層1 不発の真因は依然として未確定**（12-2）。本 PR は判別可能にしただけ。
    ただし保証経路（層0）が入ったので、真因が何であれ利用者への到達は守られる。
-2. **二重投稿は残る**。保証経路が投稿したうえで、モデル経路が別途返事をしうる。
-   裁定に従い保証を優先した。実運用で耳障りなら、層2/3 を保証済み run で畳む改修を別便で行う。
-3. **Slack 障害時は届かない**。`chat.postMessage` が落ちれば手段が無い。
-   `outcome=post_failed` を必ず残すので事後に検知できるが、その場での救済は無い。
-4. **`conversations.open` の追加コール**が DM の初回「連携」ごとに 1 回入る（送信者単位でキャッシュ）。
+2. **モデル経路は止まらない**。保証経路が投稿したうえで、モデルが別途返事をし、
+   **`oauth_connect` をもう一度呼んで state token をもう 1 個発行しうる**。
+   裁定に従い保証を優先した。塞ぐには層2/3 を「保証済みの run では畳む」改修が要る（別便）。
+3. **Slack が落ち続ければ届かない**。429 / 5xx / 一時的なネットワーク失敗は
+   最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、`thread_ts` 付きが弾かれたら
+   スレッド無しで 1 回投げ直すが、恒久障害では手段が無い。
+   `outcome=post_failed` を必ず残すので事後に検知できる。
+4. **`conversations.open` の追加コール**が DM の初回「連携」ごとに 1 回入る
+   （送信者単位でキャッシュ。キャッシュは `MAX_TRACKED_CONTEXTS` で上限を持つ）。
    Slack のレート制限に当たるほどの頻度ではないが、監視対象ではある。
 5. **保証経路は「短い連携依頼」語彙に依存する**。fixture（`tests/fixtures/connect_request_phrases.json`）
    の外の言い回しは拾えない。誤爆を避けるため厳格側に倒しており、

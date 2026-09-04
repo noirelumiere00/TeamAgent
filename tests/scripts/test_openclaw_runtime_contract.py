@@ -3419,9 +3419,12 @@ def test_run_binding_prefers_the_newest_inbound_in_the_same_conversation() -> No
     assert report["newestWins"]["blocked"] is False
     assert report["newestWins"]["claimMessage"] == "1785206306.000006"
     # ③ 安全側: より新しい **別送信者** の受信があっても掴まない。
+    # ③ 安全側: **同一 channel・同一 sessionKey・別 senderId・より新しい受信** があっても
+    #    掴まない（2026-09-04 レビュー指摘 中1: 旧版は sessionKey も channel も違っており、
+    #    senderId 照合が無くても落ちる＝この分岐を守っていなかった）。
     assert report["otherSender"]["blocked"] is False
     assert report["otherSender"]["claimUser"] == "U09CX1CCBLN"
-    assert report["otherSender"]["claimMessage"] == "1785206303.000003"
+    assert report["otherSender"]["claimMessage"] == report["otherSender"]["expectedMessage"]
 
 
 def test_every_registered_hook_reports_its_first_invocation() -> None:
@@ -3473,3 +3476,98 @@ def test_plugin_diagnostics_never_touch_stdout() -> None:
     levels = _caller_identity_report()["hook_observability"]["consoleLevels"]
     # console.warn / console.error だけが stderr。log / info は stdout。
     assert levels == ["warn"], levels
+
+
+# ══ 2026-09-04 敵対的レビューの指摘に対する固定 ═══════════════════════════════
+
+
+def test_connect_guarantee_answers_once_regardless_of_renotification() -> None:
+    """一回性が「pending から消えた瞬間」に失効しないこと（レビュー指摘 重大1）。
+
+    旧実装は一回性の旗を ingress オブジェクトに載せていた。bindRun 成功時に
+    removePending で pending から ingress が消え、次の通知は新しいオブジェクトを
+    作るため、旗が毎回リセットされていた。実測で 投稿 2 / tools/call 2 になり、
+    **state token が 2 個発行される**。台帳を pendingKey 基準にして断つ。
+
+    224 組マトリクスがこれを捕らえなかったのは、各行が受信を 1 回しか通知しない
+    新規プラグインで測っていたため。以後マトリクスの全行も 2 回通知で測る。
+    """
+    once = _caller_identity_report()["guarantee_once"]
+    for case in (
+        "bound_run_renotify",
+        "both_hooks_renotify",
+        "after_run_binding_renotify",
+    ):
+        assert once[case]["postCount"] == 1, (case, once[case])
+        # oauth_connect を 2 回呼ばない＝state token を 2 個発行しない。
+        assert once[case]["toolCallCount"] == 1, (case, once[case])
+    # 抑制しすぎない: 別の受信（messageId が違う）にはそれぞれ答える。
+    assert once["distinct_inbounds_both_answered"]["postCount"] == 2
+    assert once["distinct_inbounds_both_answered"]["toolCallCount"] == 2
+
+
+def test_connect_guarantee_holds_whichever_inbound_hook_fires() -> None:
+    """message_received / inbound_claim のどちらが発火しても保証が立つこと（重大2）。
+
+    「mcp が署名 claim を受理している ⇒ rememberInbound が動いた」という実績は
+    `message_received` **または** `inbound_claim` を示すだけで、message_received
+    単独の実証にはならない（origin/dev では両方が rememberInbound に繋がっていた）。
+    片方だけに保証を載せると、本番で他方だけが発火していた場合に層1 の二の舞になる。
+    """
+    sources = _caller_identity_report()["guarantee_hook_sources"]
+    for case in ("message_received_only", "inbound_claim_only", "both"):
+        assert sources[case]["postCount"] == 1, (case, sources[case])
+        assert sources[case]["toolCallCount"] == 1, (case, sources[case])
+        assert "https://connect.newstv.co.jp/" in str(sources[case]["postText"]), case
+
+
+def test_registered_hooks_banner_is_derived_from_actual_registrations() -> None:
+    """バナーが実際の `api.on` から導出されていること（レビュー指摘 中2）。
+
+    定数を直接出していると、`observe()` を 1 つ消してもバナーは出続けテストも緑になり、
+    「バナー vs first_fired の差分＝唯一の一次証拠」という設計前提が黙って壊れる。
+    """
+    report = _caller_identity_report()["hook_observability"]
+    # 実登録の順序・内容が期待値と完全一致していること。
+    assert report["handlerKeys"] == report["registeredHooks"]
+    banner = str(report["bannerLine"])
+    assert f"registered hooks=[{','.join(report['handlerKeys'])}]" in banner
+
+
+def test_connect_guarantee_reports_when_inbound_content_is_absent() -> None:
+    """受信に `content` が無い場合を必ず観測できること（レビュー指摘 中3）。
+
+    上流の `event.content` が別フィールドに変わると、(A) と同型の
+    「設定したのに無音」が再発する。TRACE と無関係に、フックごとに 1 回だけ残す
+    （毎回出すと content を持たない受信で会話ごとの騒音になる）。
+    """
+    report = _caller_identity_report()["guarantee_content_absent"]
+    # message_received を 2 回・inbound_claim を 1 回送っても、フックごとに 1 行ずつ。
+    assert report["warnCount"] == 2
+    assert report["sources"] == ["inbound_claim", "message_received"]
+    # content が無いのに投稿はしない（誤爆しない）。
+    assert report["postCount"] == 0
+
+
+def test_connect_guarantee_retries_transient_slack_failures() -> None:
+    """429 / 5xx は再試行で吸収すること（レビュー指摘 小）。
+
+    Slack は保証の **唯一の配信面** なので、一時失敗をそのまま無音にしない。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]["transient_retries"]
+    for mode in ("rate_limited_once", "http500_once"):
+        assert cases[mode]["postCount"] == 1, mode
+        assert cases[mode]["postAttempts"] == 2, mode
+        assert cases[mode]["delivered"] is True, mode
+
+
+def test_connect_guarantee_falls_back_to_a_threadless_post() -> None:
+    """thread_ts 付きが弾かれたら、スレッド無しで投げ直すこと（レビュー指摘 小）。
+
+    スレッドが消えている等で `thread_not_found` になる面がある。
+    **届かないより会話面がずれるほうがまし**なので、1 回だけ投げ直す。
+    """
+    case = _caller_identity_report()["guarantee_cases"]["thread_fallback"]
+    assert case["postCount"] == 1
+    assert case["threadTs"] is None
+    assert re.fullmatch(r"C[A-Z0-9]{8,}", str(case["channel"])), case["channel"]
