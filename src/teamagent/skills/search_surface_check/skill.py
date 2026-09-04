@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills._shared.text_safety import sanitize_llm_text
@@ -169,15 +170,21 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     def _tiktok_direct(
         self, keywords: list[str], max_per_kw: int, request_id: str
     ) -> dict[str, list[SurfacePost]]:
-        """1〜2KWの即席経路（bot プロセス内スクレイプ）。"""
+        """1〜2KWの即席経路（bot プロセス内スクレイプ）。
+
+        ``max_videos`` は dispatcher Lambda の n_per_kw 上限（``TIKTOK_N_PER_KW_MAX``）を
+        超えると ``search_tiktok`` 側で fail-fast する。入力スキーマでも同じ上限を課して
+        いるが、プログラムから直接 skill を組んだ場合の保険として二重に clamp する。
+        """
         search = self._tiktok_search_fn
         if search is None:
             from teamagent.adapters.tiktok_scraper import search_tiktok
 
             search = search_tiktok
+        max_videos = min(max_per_kw, TIKTOK_N_PER_KW_MAX)
         by_kw: dict[str, list[SurfacePost]] = {}
         for kw in keywords:
-            result = search(kw, max_videos=max_per_kw, request_id=request_id)
+            result = search(kw, max_videos=max_videos, request_id=request_id)
             posts: list[SurfacePost] = []
             for i, v in enumerate(result.videos, 1):
                 author = getattr(getattr(v, "author", None), "unique_id", "") or ""

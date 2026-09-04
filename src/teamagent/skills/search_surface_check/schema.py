@@ -10,6 +10,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
+
 # 直スクレイプ(tiktok_search経路)を許すKW数の上限。これを超えたら tiktok_acquire 経由必須
 # （MCP同期300s天井の保護。descriptionにも明記して二重に強制する）。
 MAX_DIRECT_KEYWORDS = 2
@@ -36,7 +38,18 @@ class SearchSurfaceCheckInput(BaseModel):
             "（本人所有ジョブのimmutable成果物だけを読む）"
         ),
     )
-    max_posts_per_kw: int = Field(default=30, ge=5, le=50)
+    # 上限は TikTok 取得 dispatcher の n_per_kw 上限（TIKTOK_N_PER_KW_MAX=30）と同一。
+    # 31〜50 を受理していた頃は _tiktok_direct → search_tiktok の fail-fast で
+    # TIKTOK_MEDIA_JOB_FAILED: ValueError になり、面の取得が丸ごと落ちていた。
+    max_posts_per_kw: int = Field(
+        default=TIKTOK_N_PER_KW_MAX,
+        ge=5,
+        le=TIKTOK_N_PER_KW_MAX,
+        description=(
+            f"KWあたりの取得本数（5〜{TIKTOK_N_PER_KW_MAX}）。"
+            "上限は TikTok 取得 dispatcher の n_per_kw 上限と同一"
+        ),
+    )
     ig_surface: Literal["search", "hashtag"] | None = Field(
         default=None,
         description="IG面の取得方式（未指定=環境既定。search=検索面/hashtag=タグ面）",
