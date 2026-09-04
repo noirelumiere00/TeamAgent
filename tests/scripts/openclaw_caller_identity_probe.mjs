@@ -14,7 +14,12 @@
 //   X はセッション鍵由来。チャンネルの app_mention では `:thread:<ts>` が付く。
 //   agent の hook ctx に conversationId は存在しない。
 import { readFileSync } from "node:fs";
-import { createCallerIdentityPlugin, unwrapToolArguments, REGISTERED_HOOKS } from
+import {
+  createCallerIdentityPlugin,
+  unwrapToolArguments,
+  REGISTERED_HOOKS,
+  connectRequestShape,
+} from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
 // ── console の捕捉（2026-09-03）───────────────────────────────────────────
@@ -781,6 +786,13 @@ async function connectPhraseMatrix() {
   };
   for (const entry of CONNECT_REQUEST_PHRASES.must_match) await check(entry, true);
   for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) await check(entry, false);
+  // Slack が機械的に付ける送信通知つきの実形（2026-09-04 本番実測）。
+  for (const entry of CONNECT_REQUEST_PHRASES.must_match_with_slack_boilerplate) {
+    await check(entry, true);
+  }
+  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match_with_slack_boilerplate) {
+    await check(entry, false);
+  }
   return rows;
 }
 
@@ -1000,11 +1012,20 @@ const GUARANTEE_STATES = {
 
 async function guaranteeMatrix() {
   const rows = [];
+  // 素の表現と、Slack の送信通知が付いた実形の両方を全状態に掛ける（2026-09-04）。
+  const variants = [
+    ...CONNECT_REQUEST_PHRASES.must_match.map((e) => ({ ...e, variant: "plain" })),
+    ...CONNECT_REQUEST_PHRASES.must_match_with_slack_boilerplate.map((e) => ({
+      ...e,
+      variant: "slack_boilerplate",
+    })),
+  ];
   for (const [state, options] of Object.entries(GUARANTEE_STATES)) {
-    for (const entry of CONNECT_REQUEST_PHRASES.must_match) {
+    for (const entry of variants) {
       const r = await guaranteeScenario({ content: entry.text, ...options });
       rows.push({
         state,
+        variant: entry.variant,
         text: entry.text,
         postCount: r.postCount,
         postText: r.postText,
@@ -1546,12 +1567,65 @@ async function contentAbsentReport() {
   };
 }
 
+// ── 受信本文の「形」だけを出す診断（2026-09-04 本番実測・レビュー指摘 1）─────
+// 本番 OC TD:45 で「連携」が content_len=16 で届き not_connect_request で落ちたが、
+// **16 文字の内訳がログから判らなかった**。本文は出せない（G7）ので、形だけを出す。
+// ここでは (a) 指標そのものの正しさ (b) それが実ログ行に載ること (c) 本文が漏れないこと を固定する。
+function connectShapeReport() {
+  const units = [
+    // 素の「連携」。全規則で通る。
+    { label: "plain", text: "連携" },
+    // 注記が別行・装飾つき。whole では落ち、除去後に通る。
+    { label: "notice_line_decorated", text: "連携\n_Slack を使用して送信されました_" },
+    // 注記が別行・装飾なし（本番の normalized_len==content_len と整合する形）。
+    { label: "notice_line_plain", text: "連携\nSlack ワークフローを使用して送信されました" },
+    // 長文。どの規則でも通らない。
+    { label: "long_request", text: "〇〇社との連携について提案書を作ってください" },
+    // 中身のある行が 2 本。混在は通さない。
+    { label: "mixed_lines", text: "〇〇社との連携について提案書を\n連携" },
+    // 語彙に無い未知の定型。通知除去では救えず、先頭行規則だけが救う。
+    { label: "unknown_boilerplate", text: "連携\n-- Acme Slack Bridge --" },
+    // 連携語を含まない通常の会話。
+    { label: "unrelated", text: "今日の予定を教えて" },
+  ].map((unit) => ({ ...unit, shape: connectRequestShape(unit.text) }));
+
+  // 実ログ行に載ること（inbound recorded / not_connect_request の両方）。
+  const logged = (() => {
+    const { handlers } = makeConnectPlugin({
+      env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+    });
+    const captured = captureConsole(() => {
+      receiveDm(handlers, "〇〇社との連携について提案書を作ってください");
+      return handlers.get("before_agent_reply")(
+        { cleanedBody: "〇〇社との連携について提案書を作ってください" },
+        beforeAgentReplyCtx(),
+      );
+    });
+    const lines = captured.console.map((line) => line.text);
+    return {
+      inboundLine: lines.find((line) => line.includes("inbound recorded")) ?? null,
+      notConnectLine:
+        lines.find((line) => line.includes("reason=not_connect_request")) ?? null,
+      allLines: lines,
+    };
+  })();
+
+  return { units, logged };
+}
+
 // 「短い連携依頼ではない」文言では保証経路を起動しない（誤爆しない）。
 async function guaranteeNegativeMatrix() {
   const rows = [];
-  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) {
+  const negatives = [
+    ...CONNECT_REQUEST_PHRASES.must_not_match.map((e) => ({ ...e, variant: "plain" })),
+    ...CONNECT_REQUEST_PHRASES.must_not_match_with_slack_boilerplate.map((e) => ({
+      ...e,
+      variant: "slack_boilerplate",
+    })),
+  ];
+  for (const entry of negatives) {
     const r = await guaranteeScenario({ content: entry.text });
-    rows.push({ text: entry.text, postCount: r.postCount });
+    rows.push({ text: entry.text, variant: entry.variant, postCount: r.postCount });
   }
   return rows;
 }
@@ -1575,6 +1649,7 @@ const guaranteeCases = await guaranteeCaseReport();
 const guaranteeOnce = await guaranteeOnceCases();
 const guaranteeHookSources = await guaranteeHookSourceMatrix();
 const contentAbsent = await contentAbsentReport();
+const connectShape = connectShapeReport();
 const hookObservability = hookObservabilityReport();
 const bindNewest = bindNewestReport();
 const connectL1NextMessage = await nextMessageAfterDeterministic();
@@ -2266,6 +2341,8 @@ const report = {
   guarantee_hook_sources: guaranteeHookSources,
   // 受信に content が無い場合の観測（フックごとに 1 回だけ）。
   guarantee_content_absent: contentAbsent,
+  // 受信本文の「形」だけを出す診断（本文は 1 文字も出さない）。
+  connect_shape: connectShape,
   // 各フックの入口 1 行と register バナー（本番でどのフックが呼ばれるかの一次証拠）。
   hook_observability: hookObservability,
   // (C1) 同じ会話の候補が複数でも run を落とさない。

@@ -2830,8 +2830,19 @@ def test_short_connect_request_phrases_match_the_single_source_of_truth() -> Non
     """
     fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
     assert len(fixture["must_match"]) >= 20
+    # 2026-09-04: Slack が機械的に付ける送信通知つきの実形も同じ正本で縛る。
+    assert len(fixture["must_match_with_slack_boilerplate"]) >= 5
+    assert len(fixture["must_not_match_with_slack_boilerplate"]) >= 5
     matrix = _caller_identity_report()["connect_phrase_matrix"]
-    assert len(matrix) == len(fixture["must_match"]) + len(fixture["must_not_match"])
+    assert len(matrix) == sum(
+        len(fixture[key])
+        for key in (
+            "must_match",
+            "must_not_match",
+            "must_match_with_slack_boilerplate",
+            "must_not_match_with_slack_boilerplate",
+        )
+    )
     mismatched = [
         row
         for row in matrix
@@ -3592,3 +3603,93 @@ def test_connect_guarantee_falls_back_to_a_threadless_post() -> None:
     assert case["postCount"] == 1
     assert case["threadTs"] is None
     assert re.fullmatch(r"C[A-Z0-9]{8,}", str(case["channel"])), case["channel"]
+
+
+# ══ Slack の送信通知つき本文（2026-09-04 本番実測 OC TD:45） ═══════════════════
+# 利用者が Slack 連携機能経由で「連携」（2 文字）と送ったのに、プラグインには
+# content_len=16 / normalized_len=16 で届き、12 文字上限に当たって
+# not_connect_request で落ちた。normalized_len == content_len ＝ 正規化で 1 文字も
+# 減っていないため、その 16 文字には Slack マークアップも絵文字も端の約物も無く、
+# 素のテキストが混ざっていると判る。
+#
+# ⚠️ これがテスト経路固有か、通常の利用者経路でも起きるかは **まだ未確定**。
+# connect_shape=… の指標を足したので、次の実機テストのログ 1 行で内訳が判る。
+
+
+def test_slack_boilerplate_does_not_swallow_a_connect_request() -> None:
+    """Slack の送信通知が付いても連携依頼として認識すること（本番実測の再現）。
+
+    文字数上限だけに頼るのを止め、(a) 全体一致 (b) 通知除去後の全体一致
+    (c) 除去後に中身のある行が 1 本だけならその行、のいずれかで通す。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    for entry in fixture["must_match_with_slack_boilerplate"]:
+        row = by_text[entry["text"]]
+        assert row["handled"] is True, entry
+        assert row["toolCallCount"] == 1, entry
+        assert row["replyIsToolMessage"] is True, entry
+
+
+def test_slack_boilerplate_does_not_open_a_false_positive() -> None:
+    """通知が付いていても、連携依頼でない本文は通さないこと（誤爆側）。
+
+    「連携解除」「連携できない」は通知を落としても依頼ではない。
+    中身のある行が 2 本ある混在（「〇〇社との連携について提案書を\\n連携」）も、
+    どちらが依頼か決められないので通さない（行のどれかが一致では通さない）。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    for entry in fixture["must_not_match_with_slack_boilerplate"]:
+        row = by_text[entry["text"]]
+        assert row["handled"] is False, entry
+        assert row["toolCallCount"] == 0, entry
+
+
+def test_connect_request_shape_is_logged_without_leaking_the_body() -> None:
+    """本文を出さずに「16 文字の内訳」が判る指標が、実ログ行に載ること（レビュー指摘 1）。
+
+    本番では content_len だけが出ており、中身が判らないため原因を特定できなかった。
+    行数・通知を落とせたか・どの規則なら通るか・連携語を含むかを出す。
+    """
+    report = _caller_identity_report()["connect_shape"]
+    units = {unit["label"]: unit["shape"] for unit in report["units"]}
+
+    # 素の「連携」は全規則で通る。
+    assert "whole:yes" in units["plain"]
+    # 通知が別行（装飾あり／なし）はどちらも「除去後に通る」と判る。
+    for label, kind in (
+        ("notice_line_decorated", "decorated_notice"),
+        ("notice_line_plain", "notice_line"),
+    ):
+        shape = units[label]
+        assert "lines:2" in shape, label
+        assert "content_lines:1" in shape, label
+        assert "whole:no" in shape, label
+        assert "stripped:yes" in shape, label
+        assert f"boiler:[{kind}]" in shape, label
+    # 長文・混在は通らないことが指標からも判る。
+    assert "stripped:no" in units["long_request"]
+    assert "content_lines:2" in units["mixed_lines"]
+    assert "leading_line:no" in units["mixed_lines"]
+    # 語彙に無い未知の定型は、通知除去では救えず先頭行規則だけが救う
+    # （＝この 2 行が「除去に頼りきりでない」ことの証拠）。
+    assert "boiler:[]" in units["unknown_boilerplate"]
+    assert "stripped:no" in units["unknown_boilerplate"]
+    assert "leading_line:yes" in units["unknown_boilerplate"]
+    # 連携語を含まない通常会話は word:no。
+    assert "word:no" in units["unrelated"]
+
+    # 実ログ行に載っていること（受理側と層1 の両方）。
+    for line in (report["logged"]["inboundLine"], report["logged"]["notConnectLine"]):
+        assert line is not None
+        assert "connect_shape=" in line
+        assert "content_lines:" in line
+
+    # G7: 本文・識別子が 1 文字も漏れないこと。
+    for line in report["logged"]["allLines"]:
+        assert "〇〇社" not in line
+        assert "提案書" not in line
+        assert "U09CX1CCBLN" not in line

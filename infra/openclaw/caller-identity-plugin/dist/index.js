@@ -628,13 +628,130 @@ function normalizeConnectRequest(text) {
   return value;
 }
 
-// 「短い連携依頼」判定。部分一致ではなく、正規化後の本文全体が
-// 連携語（＋任意の助詞）だけで構成され、かつ 12 文字以下のときに限り真。
-export function isShortConnectRequest(text) {
-  const normalized = normalizeConnectRequest(text);
+// ── Slack が機械的に付ける定型注記の除去（2026-09-04 本番実測）─────────────
+// 本番 OC TD:45 の実測ログ: 利用者が「連携」（2 文字）と送ったのに、プラグインには
+// `content_len=16 / normalized_len=16` で届き、12 文字上限に当たって
+// `not_connect_request` で落ちていた。Slack 側が本文へ定型の注記を混ぜるため。
+//
+// ⚠️ normalized_len == content_len == 16（正規化で 1 文字も減っていない）という事実から、
+// その 16 文字には Slack マークアップ（`<@U…>` 等）も絵文字も端の約物も**無い**ことが判る。
+// つまり素のテキストが混ざっている。中身はログに出せない（G7）ので、
+// 下の connectRequestShape() で「形」だけを出し、次の実機で内訳を確定する。
+//
+// 除去は保守的に行う: **送信通知の語彙**を含み、かつ**連携語を含まない**部分だけを落とす。
+// 連携語を含む行・装飾は絶対に落とさない（本文を消してしまわないため）。
+const CONNECT_WORD_RE = /(?:連携|接続|connect)/iu;
+const CONNECT_NOTICE_RE =
+  /(?:使用して送信|送信されました|経由で送信|より送信|Sent via|sent via|Sent from|sent using|posted via|Sent with)/iu;
+// Slack の装飾（`_…_` / `*…*`）。注記はこの中に入って届くことが多い。
+const CONNECT_DECORATION_RE = /(_{1,2}|\*{1,2})([^\n]{0,200}?)\1/gu;
+
+export function stripConnectBoilerplate(text) {
+  if (typeof text !== "string") return { text: "", kinds: [] };
+  const kinds = new Set();
+  // ① 装飾で囲まれた注記を落とす（連携語を含むものは触らない）。
+  let value = text.replace(CONNECT_DECORATION_RE, (match, _marker, inner) => {
+    if (!CONNECT_NOTICE_RE.test(inner) || CONNECT_WORD_RE.test(inner)) return match;
+    kinds.add("decorated_notice");
+    return " ";
+  });
+  // ② 装飾が無い素の注記行を落とす（連携語を含む行は絶対に落とさない）。
+  const lines = value.split(/\r?\n/u);
+  const kept = lines.filter(line => {
+    if (CONNECT_NOTICE_RE.test(line) && !CONNECT_WORD_RE.test(line)) {
+      kinds.add("notice_line");
+      return false;
+    }
+    return true;
+  });
+  if (kept.length !== lines.length) value = kept.join("\n");
+  return { text: value, kinds: [...kinds].sort() };
+}
+
+function matchesConnectCore(normalized) {
   if (normalized === null || normalized.length === 0) return false;
   if ([...normalized].length > CONNECT_REQUEST_MAX_LENGTH) return false;
   return CONNECT_REQUEST_CORE_RE.test(normalized);
+}
+
+// 「短い連携依頼」判定。次のいずれかを満たすときだけ真（誤爆は従来どおり避ける）:
+//   (a) 正規化後の**本文全体**が連携語＋助詞・敬語末尾だけ（従来の判定・維持）
+//   (b) Slack の定型注記を除去したあとの**全体**が (a) を満たす（同一行に注記が付く形）
+//   (c) **最初の中身のある行**が (a) を満たし、かつ**後続の行に連携語が無い**
+//       （(b) の語彙に無い未知の定型が付いた場合の受け皿。語彙に依存しないのが要点）
+//
+// (c) を「行のどれかが一致」にしないのは誤爆を避けるため。利用者の本文が先に来て
+// クライアントの定型が後ろに付く、という実際の並びだけを救う。
+// 「今日の予定を教えて\n連携」は先頭行が一致しないので通さないし、
+// 「〇〇社との連携について提案書を\n連携」は先頭行が一致せず、かつ後続に連携語があるので通さない。
+export function isShortConnectRequest(text) {
+  if (matchesConnectCore(normalizeConnectRequest(text))) return true;
+  const stripped = stripConnectBoilerplate(text);
+  if (
+    stripped.kinds.length > 0 &&
+    matchesConnectCore(normalizeConnectRequest(stripped.text))
+  ) {
+    return true;
+  }
+  return matchesLeadingConnectLine(stripped.text);
+}
+
+// (c) 未知の定型が後ろに付いた形の受け皿。
+// 先頭の中身のある行だけが連携依頼で、後続行のどこにも連携語が無いときに限り真。
+// 後続に連携語があると「どれが依頼か」を権威的に決められないので通さない。
+function matchesLeadingConnectLine(text) {
+  if (typeof text !== "string") return false;
+  let leading = null;
+  const trailing = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const normalized = normalizeConnectRequest(line);
+    // 走査上限を超える行が混じったら判定しない（従来どおり保守的に落とす）。
+    if (normalized === null) return false;
+    if (normalized.length === 0) continue;
+    if (leading === null) leading = normalized;
+    else trailing.push(line);
+  }
+  if (leading === null || !matchesConnectCore(leading)) return false;
+  return !trailing.some(line => CONNECT_WORD_RE.test(line));
+}
+
+// ── 受信本文の「形」だけを出す診断（G7: 本文は 1 文字も出さない）───────────────
+// 本番で `content_len=16` の内訳が判らず「連携」が落ちた原因を特定できなかったため、
+// **本文を出さずに内訳が判る指標**を足す（2026-09-04 レビュー指摘 1）。
+// ここで判るのは「何行か」「注記を落とせたか」「どの規則なら通るか」「連携語を含むか」だけ。
+export function connectRequestShape(text) {
+  if (typeof text !== "string") return "connect_shape=absent";
+  const rawLines = text.split(/\r?\n/u);
+  const stripped = stripConnectBoilerplate(text);
+  const strippedNormalized = normalizeConnectRequest(stripped.text);
+  const lineNormalized = [];
+  for (const line of stripped.text.split(/\r?\n/u)) {
+    const normalized = normalizeConnectRequest(line);
+    if (normalized !== null && normalized.length > 0) lineNormalized.push(normalized);
+  }
+  const leadingLineMatches = matchesLeadingConnectLine(stripped.text);
+  const yn = value => (value ? "yes" : "no");
+  const lengthOf = value => (value === null ? "na" : [...value].length);
+  return (
+    "connect_shape=" +
+    [
+      // 何行で届いたか（注記が別行で付いているかの一次判定）。
+      `lines:${rawLines.length}`,
+      // 注記を落としたあと「中身のある行」が何本残るか。
+      `content_lines:${lineNormalized.length}`,
+      // どの規則で通る（通らない）のか。
+      `whole:${yn(matchesConnectCore(normalizeConnectRequest(text)))}`,
+      `stripped:${yn(matchesConnectCore(strippedNormalized))}`,
+      `leading_line:${yn(leadingLineMatches)}`,
+      // 連携語がそもそも含まれているか／先頭にあるか。
+      `word:${yn(CONNECT_WORD_RE.test(text))}`,
+      `head_word:${yn(CONNECT_WORD_RE.test((normalizeConnectRequest(text) ?? "").slice(0, 8)))}`,
+      // 落とせた注記の種類（語彙は固定・本文は出さない）。
+      `boiler:[${stripped.kinds.join("+")}]`,
+      // 正規化後の長さ（注記除去前 / 除去後）。
+      `stripped_len:${lengthOf(strippedNormalized)}`,
+    ].join(",")
+  );
 }
 
 // JST の "YYYY-MM-DD HH:MM JST"。Intl に依存せず決定論的に組む。
@@ -1337,6 +1454,9 @@ export function createCallerIdentityPlugin({
       normalizedContent === null ? null : [...normalizedContent].length;
     const connectContentLength =
       typeof event?.content === "string" ? [...event.content].length : null;
+    // 本文は保持しない。「形」だけを 1 本の文字列にして持つ（G7）。
+    // 本番で `content_len=16` の内訳が判らず原因を特定できなかったため（2026-09-04）。
+    const connectShape = connectRequestShape(event?.content);
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -1354,6 +1474,7 @@ export function createCallerIdentityPlugin({
       connectRequest,
       connectNormalizedLength,
       connectContentLength,
+      connectShape,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -1381,6 +1502,7 @@ export function createCallerIdentityPlugin({
       `inbound recorded connect_request=${connectRequest}` +
         ` normalized_len=${connectNormalizedLength === null ? "na" : connectNormalizedLength}` +
         ` content_len=${connectContentLength === null ? "na" : connectContentLength}` +
+        ` ${connectShape}` +
         ` bound_run=${runId ? "yes" : "no"}` +
         ` pending=${pendingByMessage.size} bound=${ingressByRun.size}` +
         ` ${idShape({
@@ -1900,7 +2022,8 @@ export function createCallerIdentityPlugin({
       return skipped(
         "not_connect_request",
         `normalized_len=${lengthOf(ingress.connectNormalizedLength)}` +
-          ` content_len=${lengthOf(ingress.connectContentLength)}`,
+          ` content_len=${lengthOf(ingress.connectContentLength)}` +
+          ` ${ingress.connectShape ?? "connect_shape=absent"}`,
       );
     }
     // 同じ受信に対して 2 度は鋳造しない（重複発行・往復の防止）。
