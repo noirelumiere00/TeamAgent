@@ -229,7 +229,7 @@ https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/Working-with-log-groups
 `reviewed_inputs.image_deployment_intent_id`も同じcommitへ含めます。
 
 1. connect/ingest/morning/canaryを含む全live task definition ARNと完全image digest。
-2. `0ff2ca8c…`（#255まで）とHMAC契約 `2de3b156…` の両方を含むWolfi coreの完全digest、
+2. `0ff2ca8c…`（#255まで）とHMAC契約 `6dd96817…`（origin/dev 側。旧 `2de3b156…` は fix/hmac-secret-separation 側の同一パッチで origin/dev の祖先ではない）の両方を含むWolfi coreの完全digest、
    40桁source commit、固定KMS key ARN。
 3. 独立したOpenClaw、TikTok、x-buzzの完全digest。
 4. dispatcherのlive/from code hashとreview済みdestination archive code hash、legacy alarm
@@ -605,7 +605,7 @@ rolloutは次の順序を固定し、後段を先行させません。
 
 1. PR #238/#252のruntime interfaceとstate ownership前提を取り込む。
 2. HMAC separation commit
-   `2de3b15632bb2d671a4836d5cf3f252dd9b25727`とworker側durable stateをrebaseし、
+   `6dd968177ac1636158ab16cab160bbf633a3e034`（origin/dev 側 SHA。旧 pin `2de3b156…` は非祖先）とworker側durable stateをrebaseし、
    用途別secret/T0/table/address/import/lock契約を満たす。
 3. `/app`のexact VersionId/SHA/Vault manifest/build inputs provenanceを固定する。
 4. ingestの実行中taskが0であることと、morning/canaryを含むruntime interfaceを確定する。

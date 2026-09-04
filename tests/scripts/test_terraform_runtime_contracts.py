@@ -280,7 +280,7 @@ def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None
     }
     assert migration["to"]["main_signature"] == {
         "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
-        "required_hmac_contract_commit": ("2de3b15632bb2d671a4836d5cf3f252dd9b25727"),
+        "required_hmac_contract_commit": ("6dd968177ac1636158ab16cab160bbf633a3e034"),
         "kms_key_arn": "",
         "annotation_name": "org.opencontainers.image.revision",
         "rekor_transparency_log_required": True,
@@ -304,7 +304,7 @@ def test_divergent_live_allowlist_and_signed_core_gate_are_fail_closed() -> None
     for required in (
         "validate_signed_main_image",
         "required_hmac_contract_commit",
-        "HMAC separation 2de3b156",
+        "HMAC contract 6dd96817",
         "cosign verify",
         "--insecure-ignore-tlog=false",
         "awskms:///$kms_key_arn",
@@ -1830,3 +1830,180 @@ def test_triage_dead_alarm_fires_on_a_single_occurrence() -> None:
     assert "matched=matched," in skill
     assert '$.event = \\"morning_digest_triage_id_mismatch\\"' in filt
     assert "$.matched = 0" in filt
+
+
+HMAC_CONTRACT_COMMIT = "6dd968177ac1636158ab16cab160bbf633a3e034"
+# 旧 pin。fix/hmac-secret-separation 側の SHA で origin/dev の祖先ではない（同一パッチの別 SHA）。
+STALE_HMAC_CONTRACT_COMMIT = "2de3b15632bb2d671a4836d5cf3f252dd9b25727"
+HMAC_DELTA_RUNTIME_MIGRATIONS = (
+    "2026-09-hmac-bootstrap-pin-v1",
+    "2026-09-hmac-legacy-migration-v1",
+)
+HMAC_DELTA_ACTIVATION_MIGRATION = "2026-09-hmac-digest-reenable-v1"
+ECR_PREFIX = r"718959508629\.dkr\.ecr\.ap-northeast-1\.amazonaws\.com/"
+UUID4_PATTERN = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+
+
+def test_hmac_contract_pin_is_single_sourced_and_an_ancestor_of_head() -> None:
+    """便δ-0a PR-A: HMAC contract pin は guard 2 箇所と ledger の全 runtime entry で同値かつ HEAD の祖先。
+
+    旧 pin 2de3b156 は origin/dev の祖先ではなく、validate_signed_main_image の
+    `merge-base --is-ancestor` が live source commit に対して常に偽になっていた。
+    guard 側の固定値と ledger 側の宣言がずれると同じ事故が再発するので、両者を機械で縛る。
+    """
+    guard = GUARD.read_text(encoding="utf-8")
+    shell_pins = re.findall(r'\[ "\$required_hmac_commit" = "([0-9a-f]{40})" \]', guard)
+    assert shell_pins == [HMAC_CONTRACT_COMMIT]
+    jq_pins = re.findall(r'required_hmac_contract_commit:\s*\n?\s*"([0-9a-f]{40})"', guard)
+    assert jq_pins == [HMAC_CONTRACT_COMMIT]
+    assert "HMAC contract 6dd96817" in guard
+    assert STALE_HMAC_CONTRACT_COMMIT not in guard
+
+    ledger_text = MIGRATIONS.read_text(encoding="utf-8")
+    assert STALE_HMAC_CONTRACT_COMMIT not in ledger_text
+    manifest = json.loads(ledger_text)
+    ledger_pins = {
+        migration["to"]["main_signature"]["required_hmac_contract_commit"]
+        for migration in manifest["migrations"].values()
+        if migration["kind"] == "runtime"
+    }
+    assert ledger_pins == {HMAC_CONTRACT_COMMIT}
+
+    exists = subprocess.run(
+        ["git", "-C", str(PROJECT_ROOT), "cat-file", "-e", f"{HMAC_CONTRACT_COMMIT}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if exists.returncode != 0:
+        pytest.skip("shallow checkout: HMAC contract commit object is unavailable")
+    ancestor = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(PROJECT_ROOT),
+            "merge-base",
+            "--is-ancestor",
+            HMAC_CONTRACT_COMMIT,
+            "HEAD",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ancestor.returncode == 0, ancestor.stderr
+
+
+def test_hmac_delta_migration_entries_are_disabled_candidates_with_kind_rules() -> None:
+    """便δ-0a PR-G: HMAC migration 3 entry は enabled=false / reviewed_plan=null の candidate で kind 別契約を満たす。
+
+    kind=runtime: requires_migration=null（prior-apply 拒否）、to.*_image 4 件が exact digest、
+    morning は DISABLED（HMAC rollout 契約）。kind=activation: requires_migration で第 2 段へ依存し、
+    image を運ばず rule_states だけを変える（morning DISABLED→ENABLED）。
+    """
+    manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
+    migrations = manifest["migrations"]
+    names = (*HMAC_DELTA_RUNTIME_MIGRATIONS, HMAC_DELTA_ACTIVATION_MIGRATION)
+    for name in names:
+        migration = migrations[name]
+        assert migration["enabled"] is False, name
+        assert migration["reviewed_plan"] is None, name
+        assert migration["expires_at"] == "2026-10-31T00:00:00Z", name
+        assert set(migration["reviewed_inputs"]) == {"image_deployment_intent_id"}, name
+        assert re.fullmatch(
+            UUID4_PATTERN, migration["reviewed_inputs"]["image_deployment_intent_id"]
+        ), name
+        assert "allowed_changes" not in migration, name
+        assert "D-day 前に再実測" in migration["description"], name
+    intent_ids = [
+        migration["reviewed_inputs"]["image_deployment_intent_id"]
+        for migration in migrations.values()
+    ]
+    assert len(intent_ids) == len(set(intent_ids))
+
+    workloads = {
+        "canary",
+        "connect_web",
+        "ingest",
+        "mcp",
+        "morning",
+        "openclaw",
+        "tiktok",
+        "x_buzz",
+    }
+    for name in HMAC_DELTA_RUNTIME_MIGRATIONS:
+        migration = migrations[name]
+        assert migration["kind"] == "runtime", name
+        assert migration["requires_migration"] is None, name
+        assert migration["requires_versioning_stage"] == manifest["log_versioning_stage"]["id"], (
+            name
+        )
+        source = migration["from"]
+        assert set(source["task_definition_arns"]) == workloads, name
+        assert set(source["images"]) == workloads, name
+        assert all(
+            re.fullmatch(
+                r"arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-[a-z-]+:[0-9]+",
+                arn,
+            )
+            for arn in source["task_definition_arns"].values()
+        ), name
+        assert source["active_task_counts"] == {"ingest_active": 0}, name
+        destination = migration["to"]
+        assert re.fullmatch(
+            ECR_PREFIX + r"teamagent-openclaw@sha256:[0-9a-f]{64}", destination["openclaw_image"]
+        ), name
+        assert re.fullmatch(
+            ECR_PREFIX + r"teamagent-mcp@sha256:[0-9a-f]{64}", destination["mcp_image"]
+        ), name
+        assert re.fullmatch(
+            ECR_PREFIX + r"teamagent-mcp@sha256:[0-9a-f]{64}", destination["x_buzz_image"]
+        ), name
+        assert re.fullmatch(
+            ECR_PREFIX + r"teamagent-media-worker@sha256:[0-9a-f]{64}",
+            destination["tiktok_image"],
+        ), name
+        # 便δ は image を変えない: destination digest は live（from）と同値でなければならない。
+        for component in ("openclaw", "mcp", "x_buzz", "tiktok"):
+            assert destination[f"{component}_image"] == source["images"][component], (
+                name,
+                component,
+            )
+        assert destination["dispatcher_code_sha256"] == source["dispatcher_code_sha256"], name
+        assert destination["connect_app_html"] == source["connect_app_html"], name
+        assert re.fullmatch(r"[0-9a-f]{40}", destination["main_source_commit"]), name
+        assert destination["main_signature"] == {
+            "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
+            "required_hmac_contract_commit": HMAC_CONTRACT_COMMIT,
+            "kms_key_arn": "",
+            "annotation_name": "org.opencontainers.image.revision",
+            "rekor_transparency_log_required": True,
+        }, name
+        assert destination["rule_states"] == {
+            "ingest": "ENABLED",
+            "morning": "DISABLED",
+            "canary": "DISABLED",
+        }, name
+        assert sorted(migration["required_preflight_profiles"]) == [
+            "main",
+            "openclaw",
+            "tiktok",
+            "x_buzz",
+        ], name
+
+    activation = migrations[HMAC_DELTA_ACTIVATION_MIGRATION]
+    assert activation["kind"] == "activation"
+    assert activation["requires_migration"] == "2026-09-hmac-legacy-migration-v1"
+    assert migrations[activation["requires_migration"]]["kind"] == "runtime"
+    assert set(activation["from"]["task_definition_arns"]) == {"ingest", "canary"}
+    assert set(activation["from"]["images"]) == {"ingest", "canary"}
+    assert activation["from"]["rule_states"] == {
+        "ingest": "ENABLED",
+        "morning": "DISABLED",
+        "canary": "DISABLED",
+    }
+    assert activation["to"] == {
+        "rule_states": {"ingest": "ENABLED", "morning": "ENABLED", "canary": "DISABLED"}
+    }
+    assert not any(key.endswith("_image") for key in activation["to"])
+    assert activation["required_preflight_profiles"] == ["activation-morning-digest"]

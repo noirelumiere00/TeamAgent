@@ -3005,7 +3005,7 @@ migration_to_file() {
           minimum_source_commit:
             "0ff2ca8c7ca9b556cf590f531896055f962780fd",
           required_hmac_contract_commit:
-            "2de3b15632bb2d671a4836d5cf3f252dd9b25727",
+            "6dd968177ac1636158ab16cab160bbf633a3e034",
           kms_key_arn: .migrations[$id].to.main_signature.kms_key_arn,
           annotation_name: "org.opencontainers.image.revision",
           rekor_transparency_log_required: true
@@ -3477,6 +3477,10 @@ split_ecr_image() {
 # 新coreはdigest pinだけでなく、固定KMS keyによるCosign署名、Rekor inclusion、
 # exact source revisionの3点を同時に満たす必要がある。署名payload自体はreceiptへ
 # 複製せず、その検証件数とhashだけを残す。
+# HMAC contract pin は 6dd96817（origin/dev 上の "fix: close HMAC rotation audit gaps"）。
+# 旧 pin 2de3b156 は同一パッチの fix/hmac-secret-separation 側 SHA で origin/dev の
+# 祖先ではなく、merge-base --is-ancestor が live source commit に対して常に偽になる
+# （便δ-0a PR-A で是正）。migrations.json の to.main_signature と同値であること。
 validate_signed_main_image() {
   local image="$1" source_commit="$2" minimum_source_commit="$3"
   local required_hmac_commit="$4" kms_key_arn="$5"
@@ -3485,7 +3489,7 @@ validate_signed_main_image() {
     die "main source commitは完全40桁SHAが必要です"
   [ "$minimum_source_commit" = "0ff2ca8c7ca9b556cf590f531896055f962780fd" ] ||
     die "main signed imageのminimum source commitが固定値と一致しません"
-  [ "$required_hmac_commit" = "2de3b15632bb2d671a4836d5cf3f252dd9b25727" ] ||
+  [ "$required_hmac_commit" = "6dd968177ac1636158ab16cab160bbf633a3e034" ] ||
     die "main signed imageのHMAC contract commitが固定値と一致しません"
   [[ "$kms_key_arn" =~ ^arn:aws:kms:ap-northeast-1:718959508629:key/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] ||
     die "main image署名KMS key ARNはexact account/region/key IDが必要です"
@@ -3498,7 +3502,7 @@ validate_signed_main_image() {
     die "main image source commitが監査済みorigin/dev 0ff2ca8c以降ではありません"
   git -C "$REPO_ROOT" merge-base --is-ancestor \
     "$required_hmac_commit" "$source_commit" ||
-    die "main image source commitにHMAC separation 2de3b156が含まれません"
+    die "main image source commitにHMAC contract 6dd96817が含まれません"
   git -C "$REPO_ROOT" merge-base --is-ancestor \
     "$source_commit" "$(git_commit)" ||
     die "main image source commitがrollout commitの祖先ではありません"

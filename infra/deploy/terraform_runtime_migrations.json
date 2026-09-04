@@ -145,7 +145,7 @@
         "main_source_commit": "",
         "main_signature": {
           "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
-          "required_hmac_contract_commit": "2de3b15632bb2d671a4836d5cf3f252dd9b25727",
+          "required_hmac_contract_commit": "6dd968177ac1636158ab16cab160bbf633a3e034",
           "kms_key_arn": "",
           "annotation_name": "org.opencontainers.image.revision",
           "rekor_transparency_log_required": true
@@ -346,6 +346,556 @@
       ],
       "reviewed_inputs": {
         "image_deployment_intent_id": "dc0db656-b306-41cd-9832-dc91a17eab69"
+      },
+      "reviewed_plan": null
+    },
+    "2026-09-hmac-bootstrap-pin-v1": {
+      "kind": "runtime",
+      "enabled": false,
+      "expires_at": "2026-10-31T00:00:00Z",
+      "requires_migration": null,
+      "requires_versioning_stage": "2026-07-log-versioning-cutover-v4",
+      "description": "便δ 第1段（Bootstrap Pin）。live の HMAC secret valueFrom（mcp / connect_web / morning_digest の MAIL_ACTION_HMAC_SECRET と、mcp / connect_web の REPORT_LINK_HMAC_SECRET）を素の ARN から `ARN:::<AWSCURRENT VersionId>` へ固定する semantic no-op（infra/deploy/bootstrap_pin_semantic_diff.py）。image / rule / secret material は一切変えない（rule_states.morning=DISABLED は HMAC rollout 契約の morning DISABLED 要件に合わせた desired。live は ENABLED なので apply 時に morning-digest rule を止める）。to.*_image は 2026-09-02 実測 live と同値（mcp:94=388f0d19 / connect-web:78・morning-digest:59・ingest:61・canary:29=cd439683 / openclaw:42=74f205ea / tiktok-acquire:26=9cfb380b / x-buzz-worker:1=1747d2d0）。注意: kind=runtime は guard で connect_web/ingest/morning/canary の desired image を to.mcp_image へ収斂させるため、live の cd439683 系 4 taskdef は 388f0d19 へ更新される。据え置くなら to.mcp_image を裁定で決める。reviewed_inputs.image_deployment_intent_id は candidate 用の固定 UUID（ledger 未登録）。【D-day 前に再実測】from.task_definition_arns / from.images / to.*_image（ECS describe-services + describe-task-definition）、from.dispatcher_code_sha256（lambda get-function-configuration）、from.connect_app_html（/app は夜間再生成されるため version_id/sha256 は必ず陳腐化する。s3api head-object の app-sha256 / manifest-sha256 / build-inputs-sha256 metadata 由来の暫定値）、from.alarm_delivery.subscription_inventory_sha256 / confirmed_subscription_metadata_sha256（evidence helper inventory で採取。現在は空の placeholder）、to.main_signature.kms_key_arn（署名 KMS key。現在は空の placeholder）、to.main_source_commit（live mcp image の org.opencontainers.image.revision と cosign で突合）。",
+      "from": {
+        "task_definition_arns": {
+          "openclaw": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:42",
+          "mcp": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:94",
+          "connect_web": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78",
+          "ingest": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61",
+          "morning": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59",
+          "canary": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29",
+          "tiktok": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:26",
+          "x_buzz": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "images": {
+          "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:74f205ea63e0fa1eb6369a97e81d98371357f677d5253ff14a4771cdf19d1baf",
+          "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:388f0d19fc15d88ac1bd9ea9b51bfa75d694eefa4cb09d97341bebc7d797a216",
+          "connect_web": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "ingest": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "morning": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+          "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:9cfb380bbc8a6083e1f3b380e224ec1150cf90b4968ba590ccee2fe67be6a8ee"
+        },
+        "dispatcher_code_sha256": {
+          "tiktok": "dWHRNMdYfn/yLE+fMPK8AfHSZkeOtGSpyzzCAxOZBYU=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "event_mapping_function_response_types": {
+          "tiktok": [],
+          "x_buzz": []
+        },
+        "active_task_counts": {
+          "ingest_active": 0
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi",
+          "sha256": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872",
+          "vault_manifest_sha256": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1",
+          "build_inputs_sha256": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+        },
+        "api_gateway": {
+          "api_id": "esk97z9grh",
+          "name": "teamagent-connectweb-api",
+          "protocol_type": "HTTP",
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "stage_name": "$default",
+            "auto_deploy": true,
+            "access_log_enabled": false,
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "canonical_topic_exists": true,
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "subscription_inventory_sha256": "",
+          "confirmed_subscription_metadata_sha256": "",
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_topic_exists": false,
+          "legacy_action_reference_count": 0
+        }
+      },
+      "to": {
+        "openclaw_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:74f205ea63e0fa1eb6369a97e81d98371357f677d5253ff14a4771cdf19d1baf",
+        "mcp_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:388f0d19fc15d88ac1bd9ea9b51bfa75d694eefa4cb09d97341bebc7d797a216",
+        "x_buzz_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+        "tiktok_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:9cfb380bbc8a6083e1f3b380e224ec1150cf90b4968ba590ccee2fe67be6a8ee",
+        "dispatcher_code_sha256": {
+          "tiktok": "dWHRNMdYfn/yLE+fMPK8AfHSZkeOtGSpyzzCAxOZBYU=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "main_source_commit": "e2c3b9e7879ff979f677996468100deeeba96c9d",
+        "main_signature": {
+          "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
+          "required_hmac_contract_commit": "6dd968177ac1636158ab16cab160bbf633a3e034",
+          "kms_key_arn": "",
+          "annotation_name": "org.opencontainers.image.revision",
+          "rekor_transparency_log_required": true
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi",
+          "sha256": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872",
+          "vault_manifest_sha256": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1",
+          "build_inputs_sha256": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+        },
+        "required_contract_labels": {
+          "main": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "tiktok": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "openclaw": {
+            "io.teamagent.runtime.architecture": "linux/arm64",
+            "io.teamagent.runtime.readonly-rootfs-required": "true"
+          }
+        },
+        "rule_states": {
+          "ingest": "ENABLED",
+          "morning": "DISABLED",
+          "canary": "DISABLED"
+        },
+        "api_gateway": {
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "access_log_enabled": false,
+            "access_log_destination_arn": "",
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_maximum_percent": 200,
+            "deployment_minimum_healthy_percent": 100,
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "require_alarm_delivery": true,
+          "minimum_configured_destinations": 1,
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_owner_action": "retire-without-import-after-reference-count-zero"
+        }
+      },
+      "required_preflight_profiles": [
+        "main",
+        "openclaw",
+        "tiktok",
+        "x_buzz"
+      ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "897399d3-4441-4569-954b-287c43dc4b21"
+      },
+      "reviewed_plan": null
+    },
+    "2026-09-hmac-legacy-migration-v1": {
+      "kind": "runtime",
+      "enabled": false,
+      "expires_at": "2026-10-31T00:00:00Z",
+      "requires_migration": null,
+      "requires_versioning_stage": "2026-07-log-versioning-cutover-v4",
+      "description": "便δ 第2段（legacy_migration）。MAIL_ACTION_HMAC の primary を legacy `teamagent/dev/database-url` から 専用 canonical secret `teamagent/dev/hmac/mail-action-XXXXXX` へ移し、previous=database-url で hmac_rollout_phase=legacy_migration を回す（src/teamagent/hmac_keyring.py の primary_changed_without_previous / previous_generation_mismatch 契約を満たす形）。REPORT_LINK 側は現行契約で表現不能（docs/activation/ACTIVATION_STATE.md『HMAC remediation は現状の repo 契約では実行不能』）のため本 entry の対象外。kind=runtime は requires_migration=null が guard の必須契約（terraform_runtime_guard.sh の runtime 分岐）なので依存は宣言できないが、前提は 2026-09-hmac-bootstrap-pin-v1 の apply 完了。from.task_definition_arns / from.images は bootstrap-pin apply 後に **必ず** 新 revision へ再実測する（現値は 2026-09-02 実測 live＝bootstrap-pin 前）。morning は第1段で DISABLED にしたまま維持し、再有効化は 2026-09-hmac-digest-reenable-v1 が担う。reviewed_inputs.image_deployment_intent_id は candidate 用の固定 UUID（ledger 未登録）。【D-day 前に再実測】from.task_definition_arns / from.images / to.*_image（ECS describe-services + describe-task-definition）、from.dispatcher_code_sha256（lambda get-function-configuration）、from.connect_app_html（/app は夜間再生成されるため version_id/sha256 は必ず陳腐化する。s3api head-object の app-sha256 / manifest-sha256 / build-inputs-sha256 metadata 由来の暫定値）、from.alarm_delivery.subscription_inventory_sha256 / confirmed_subscription_metadata_sha256（evidence helper inventory で採取。現在は空の placeholder）、to.main_signature.kms_key_arn（署名 KMS key。現在は空の placeholder）、to.main_source_commit（live mcp image の org.opencontainers.image.revision と cosign で突合）。",
+      "from": {
+        "task_definition_arns": {
+          "openclaw": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:42",
+          "mcp": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:94",
+          "connect_web": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:78",
+          "ingest": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61",
+          "morning": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:59",
+          "canary": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29",
+          "tiktok": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:26",
+          "x_buzz": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:1"
+        },
+        "images": {
+          "openclaw": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:74f205ea63e0fa1eb6369a97e81d98371357f677d5253ff14a4771cdf19d1baf",
+          "mcp": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:388f0d19fc15d88ac1bd9ea9b51bfa75d694eefa4cb09d97341bebc7d797a216",
+          "connect_web": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "ingest": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "morning": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "x_buzz": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+          "tiktok": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:9cfb380bbc8a6083e1f3b380e224ec1150cf90b4968ba590ccee2fe67be6a8ee"
+        },
+        "dispatcher_code_sha256": {
+          "tiktok": "dWHRNMdYfn/yLE+fMPK8AfHSZkeOtGSpyzzCAxOZBYU=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "event_mapping_function_response_types": {
+          "tiktok": [],
+          "x_buzz": []
+        },
+        "active_task_counts": {
+          "ingest_active": 0
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi",
+          "sha256": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872",
+          "vault_manifest_sha256": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1",
+          "build_inputs_sha256": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+        },
+        "api_gateway": {
+          "api_id": "esk97z9grh",
+          "name": "teamagent-connectweb-api",
+          "protocol_type": "HTTP",
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "stage_name": "$default",
+            "auto_deploy": true,
+            "access_log_enabled": false,
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "canonical_topic_exists": true,
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "subscription_inventory_sha256": "",
+          "confirmed_subscription_metadata_sha256": "",
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_topic_exists": false,
+          "legacy_action_reference_count": 0
+        }
+      },
+      "to": {
+        "openclaw_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-openclaw@sha256:74f205ea63e0fa1eb6369a97e81d98371357f677d5253ff14a4771cdf19d1baf",
+        "mcp_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:388f0d19fc15d88ac1bd9ea9b51bfa75d694eefa4cb09d97341bebc7d797a216",
+        "x_buzz_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:1747d2d0729d2c30ae04ab4d21dc9dc10c1351553684eb10303e157f58a227e8",
+        "tiktok_image": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-media-worker@sha256:9cfb380bbc8a6083e1f3b380e224ec1150cf90b4968ba590ccee2fe67be6a8ee",
+        "dispatcher_code_sha256": {
+          "tiktok": "dWHRNMdYfn/yLE+fMPK8AfHSZkeOtGSpyzzCAxOZBYU=",
+          "x_buzz": "JiirdLXChG81fmIdt8BIRXc55RR8CoRrZxgDbwdYSBc="
+        },
+        "main_source_commit": "e2c3b9e7879ff979f677996468100deeeba96c9d",
+        "main_signature": {
+          "minimum_source_commit": "0ff2ca8c7ca9b556cf590f531896055f962780fd",
+          "required_hmac_contract_commit": "6dd968177ac1636158ab16cab160bbf633a3e034",
+          "kms_key_arn": "",
+          "annotation_name": "org.opencontainers.image.revision",
+          "rekor_transparency_log_required": true
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi",
+          "sha256": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872",
+          "vault_manifest_sha256": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1",
+          "build_inputs_sha256": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+        },
+        "required_contract_labels": {
+          "main": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "tiktok": {
+            "io.teamagent.runtime.uid": "10001",
+            "io.teamagent.runtime.gid": "10001",
+            "io.teamagent.runtime.volume": "/tmp",
+            "io.teamagent.runtime.contract": "fargate-readonly-v1"
+          },
+          "openclaw": {
+            "io.teamagent.runtime.architecture": "linux/arm64",
+            "io.teamagent.runtime.readonly-rootfs-required": "true"
+          }
+        },
+        "rule_states": {
+          "ingest": "ENABLED",
+          "morning": "DISABLED",
+          "canary": "DISABLED"
+        },
+        "api_gateway": {
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "access_log_enabled": false,
+            "access_log_destination_arn": "",
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_maximum_percent": 200,
+            "deployment_minimum_healthy_percent": 100,
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "require_alarm_delivery": true,
+          "minimum_configured_destinations": 1,
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_owner_action": "retire-without-import-after-reference-count-zero"
+        }
+      },
+      "required_preflight_profiles": [
+        "main",
+        "openclaw",
+        "tiktok",
+        "x_buzz"
+      ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "06820072-d789-4d8b-bdfc-eaf782e9e58b"
+      },
+      "reviewed_plan": null
+    },
+    "2026-09-hmac-digest-reenable-v1": {
+      "kind": "activation",
+      "enabled": false,
+      "expires_at": "2026-10-31T00:00:00Z",
+      "description": "便δ 第3段（morning-digest 再有効化）。legacy_migration 完了・steady 復帰後に morning-digest rule を ENABLED へ戻す activation。requires_migration で第2段の apply receipt（--prior-apply-receipt）を要求する。ingest / canary は 2026-09-02 実測 live（ingest=ENABLED / canary=DISABLED）を据え置き、morning だけ DISABLED→ENABLED。required_preflight_profiles の activation-morning-digest は guard 未実装（run_activation_task は activation-ingest-acl-quarantine / activation-canary のみ）で、未知 profile は fail-closed に die する＝便δ本体で morning-digest 用 dry-run profile を実装するまで実行不能。guard の activation 分岐（migration_to_file）は requires_migration=2026-07-wolfi-runtime-v1 と rule_states 3 件 ENABLED を hard-code しているため、そちらの一般化も便δ本体の対象。【D-day 前に再実測】from.task_definition_arns.ingest/canary と from.images（第2段 apply 後の revision）、from.rule_states（第2段完了時点の live）、from.connect_app_html（夜間再生成で陳腐化）、from.api_gateway.default_stage.access_log_destination_arn（live は access log 無効。snapshot が null を返すなら追随）。reviewed_inputs.image_deployment_intent_id は candidate 用の固定 UUID（ledger 未登録）。",
+      "requires_migration": "2026-09-hmac-legacy-migration-v1",
+      "from": {
+        "task_definition_arns": {
+          "ingest": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:61",
+          "canary": "arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:29"
+        },
+        "images": {
+          "ingest": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078",
+          "canary": "718959508629.dkr.ecr.ap-northeast-1.amazonaws.com/teamagent-mcp@sha256:cd43968333de9a343020438af021e7e016ca0b5e59ede3b0776e29d2bcd82078"
+        },
+        "connect_app_html": {
+          "bucket": "teamagent-dev-raw-files",
+          "key": "codebuild/connect-web-app.html",
+          "version_id": "QCqb751F5Xo391e23YhcqpT6BKCBqZZi",
+          "sha256": "cb93112ed8754855f1d92b9880fc9cde5d71aeaa9f077c4bd6638d2190d20872",
+          "vault_manifest_sha256": "1196228818d4162c275f302421b926415123063b39e86b5839fcf0a1eae3c4f1",
+          "build_inputs_sha256": "bd58ccb0eeeb776fdd4deb97f29b5c94aa69a7135e3553f4555071f19c2d6fe1"
+        },
+        "rule_states": {
+          "ingest": "ENABLED",
+          "morning": "DISABLED",
+          "canary": "DISABLED"
+        },
+        "api_gateway": {
+          "disable_execute_api_endpoint": false,
+          "default_stage": {
+            "access_log_enabled": false,
+            "access_log_destination_arn": "",
+            "detailed_metrics_enabled": false
+          },
+          "custom_domain_mappings": [
+            {
+              "domain_name": "connect.newstv.co.jp",
+              "api_id": "esk97z9grh",
+              "stage": "$default",
+              "api_mapping_key": ""
+            }
+          ]
+        },
+        "service_contracts": {
+          "mcp": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "connect_web": {
+            "availability_zone_rebalancing": "DISABLED",
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          },
+          "openclaw": {
+            "availability_zone_rebalancing": "ENABLED",
+            "deployment_maximum_percent": 200,
+            "deployment_minimum_healthy_percent": 100,
+            "deployment_circuit_breaker": {
+              "enable": false,
+              "rollback": false
+            }
+          }
+        },
+        "monitoring": {
+          "container_insights": "disabled"
+        },
+        "alarm_delivery": {
+          "canonical_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-openclaw-alarms",
+          "confirmed_email_endpoint_sha256": [
+            "88c6452f9db04017250aa5728b4815bccb55b5ecc0b35b50a5234170dc08d1e6"
+          ],
+          "subscription_inventory_count": 1,
+          "pending_subscription_count": 0,
+          "subscription_protocols": [
+            "email"
+          ],
+          "destination_state_sha256": "c942dbb7b97da1f4d9debb1ba241ee89bf8c1d951d8d75bdea3056850838ddc9",
+          "attached_chatbot_configuration_arns": [],
+          "legacy_topic_arn": "arn:aws:sns:ap-northeast-1:718959508629:teamagent-dev-alarms",
+          "legacy_topic_exists": false,
+          "legacy_action_reference_count": 0
+        }
+      },
+      "to": {
+        "rule_states": {
+          "ingest": "ENABLED",
+          "morning": "ENABLED",
+          "canary": "DISABLED"
+        }
+      },
+      "required_preflight_profiles": [
+        "activation-morning-digest"
+      ],
+      "reviewed_inputs": {
+        "image_deployment_intent_id": "0368b317-edd0-4935-9f2b-2056a807d407"
       },
       "reviewed_plan": null
     }
