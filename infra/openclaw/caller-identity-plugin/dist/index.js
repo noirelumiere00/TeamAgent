@@ -686,16 +686,48 @@ function matchesConnectCore(normalized) {
 // クライアントの定型が後ろに付く、という実際の並びだけを救う。
 // 「今日の予定を教えて\n連携」は先頭行が一致しないので通さないし、
 // 「〇〇社との連携について提案書を\n連携」は先頭行が一致せず、かつ後続に連携語があるので通さない。
-export function isShortConnectRequest(text) {
-  if (matchesConnectCore(normalizeConnectRequest(text))) return true;
+// ── どの規則で一致したかを返す（2026-09-04 レビュー指摘 重大1・重大2）───────────
+// 「一致したか」だけでなく **どの規則で一致したか** を返すのが要点。
+// 規則ごとに確度が違い、確度によって後続の扱い（モデル応答を消してよいか）を変えるため。
+//
+//   "whole"        … 正規化後の本文全体が連携語だけ。最も確実。
+//   "stripped"     … Slack の送信通知を除いた全体が連携語だけ。ほぼ確実。
+//   "leading_line" … 先頭行だけが連携依頼で、後続行に連携語が無い。**曖昧**。
+//
+// ⚠️ `leading_line` は「後続行に連携語が無い」しか見ていないので、
+// 「連携\n今日の予定を教えて」のように **後続行が別の依頼** でも真になる。
+// トリガーとしては妥当（利用者は確かに連携を求めている）だが、
+// この確度でモデルの最終応答を消すと **別の依頼への回答が消える**。
+// 実測でその回帰を出した（本番相当の end-to-end で「予定の回答」が消滅）。
+// よって抑止は `leading_line` では効かせない（replaceExhaustedConnectReply を参照）。
+export const CONNECT_RULE_WHOLE = "whole";
+export const CONNECT_RULE_STRIPPED = "stripped";
+export const CONNECT_RULE_LEADING_LINE = "leading_line";
+
+export function classifyConnectRequest(text) {
+  // (a) 最も保守的な全体一致。
+  if (matchesConnectCore(normalizeConnectRequest(text))) return CONNECT_RULE_WHOLE;
   const stripped = stripConnectBoilerplate(text);
+  // (b) 既知の送信通知を除去したうえでの全体一致。
   if (
     stripped.kinds.length > 0 &&
     matchesConnectCore(normalizeConnectRequest(stripped.text))
   ) {
-    return true;
+    return CONNECT_RULE_STRIPPED;
   }
-  return matchesLeadingConnectLine(stripped.text);
+  // (c) 未知の定型が後ろに付いた形の受け皿。確度は最も低い。
+  if (matchesLeadingConnectLine(stripped.text)) return CONNECT_RULE_LEADING_LINE;
+  return null;
+}
+
+// 抑止（モデルの最終応答を消す）を許してよい確度か。
+// `leading_line` は後続行が「別の依頼」でありうるので許さない。
+export function connectRuleAllowsSuppression(rule) {
+  return rule === CONNECT_RULE_WHOLE || rule === CONNECT_RULE_STRIPPED;
+}
+
+export function isShortConnectRequest(text) {
+  return classifyConnectRequest(text) !== null;
 }
 
 // (c) 未知の定型が後ろに付いた形の受け皿。
@@ -745,6 +777,8 @@ export function connectRequestShape(text) {
       `whole:${yn(matchesConnectCore(normalizeConnectRequest(text)))}`,
       `stripped:${yn(matchesConnectCore(strippedNormalized))}`,
       `leading_line:${yn(leadingLineMatches)}`,
+      // どの規則で通ったか（抑止の可否はこれで決まる）。
+      `rule:${classifyConnectRequest(text) ?? "none"}`,
       // 連携語がそもそも含まれているか／先頭にあるか。
       `word:${yn(CONNECT_WORD_RE.test(text))}`,
       `head_word:${yn(CONNECT_WORD_RE.test((normalizeConnectRequest(text) ?? "").slice(0, 8)))}`,
@@ -1469,8 +1503,9 @@ export function createCallerIdentityPlugin({
     // event.content は上流が BodyForCommands ?? RawBody ?? Body から作る利用者の生本文
     // （message-hook-mappers:23 / Slack は commandBody ?? rawBody = 封筒無しの本文）。
     // 本文そのものは保持せず、判定結果の真偽だけを ingress に載せる（G7）。
-    const connectRequest =
-      typeof event?.content === "string" && isShortConnectRequest(event.content);
+    const connectRequestRule =
+      typeof event?.content === "string" ? classifyConnectRequest(event.content) : null;
+    const connectRequest = connectRequestRule !== null;
     // 層1 の `not_connect_request` を切り分けるための「長さだけ」の手掛かり（G7）。
     // 本文は保持しない。normalizeConnectRequest は走査上限を超える長文で null を返すので、
     // 正規化後の長さ（null＝上限超）と生の長さの両方を持つ。片方だけだと
@@ -1499,6 +1534,8 @@ export function createCallerIdentityPlugin({
       sessionSha256: createHash("sha256").update(sessionKey, "utf8").digest("hex"),
       receivedAtMs: nowMs,
       connectRequest,
+      // どの規則で一致したか。抑止（モデル応答の cancel）の可否をこれで決める。
+      connectRequestRule,
       connectNormalizedLength,
       connectContentLength,
       connectShape,
@@ -2787,8 +2824,19 @@ export function createCallerIdentityPlugin({
     // connectAnsweredByMessage（一回性）は投稿失敗時に解放されるので、
     // それを根拠にすると「届いていないのにモデルも黙る」＝完全な無音を作りうる。
     // 保証は絶対に落とさない、という原則をここでも守る。
+    // ⚠️ 抑止は **確度の高い規則で一致した受信だけ**に効かせる（2026-09-04 レビュー指摘 重大1）。
+    // `leading_line` は「先頭行が連携依頼・後続行に連携語が無い」しか見ないので、
+    // 「連携\n今日の予定を教えて」のように **後続行が別の依頼** でも真になる。
+    // その確度でモデルの最終応答を消すと、**別の依頼への回答が消える**
+    // （実測: guaranteePosted:1 / modelAnswerCancelled:true / 予定の回答が消滅）。
+    // 曖昧な形では従来どおり「保証 1 通 + モデル 1 通」に留める＝
+    // 「無言より 2 通」の原則をここでも守る。トリガーと抑止は別の判断である。
     const answered = ingressByRun.get(eventRunId);
-    if (answered && connectDeliveredByMessage.has(answered.pendingKey)) {
+    if (
+      answered &&
+      connectDeliveredByMessage.has(answered.pendingKey) &&
+      connectRuleAllowsSuppression(answered.connectRequestRule)
+    ) {
       if (!connectSuppressedRuns.has(eventRunId)) {
         connectSuppressedRuns.set(eventRunId, now());
         emitPluginLog(

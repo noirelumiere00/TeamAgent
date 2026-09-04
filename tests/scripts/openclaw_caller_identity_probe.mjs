@@ -19,6 +19,7 @@ import {
   unwrapToolArguments,
   REGISTERED_HOOKS,
   connectRequestShape,
+  classifyConnectRequest,
 } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
@@ -782,6 +783,9 @@ async function connectPhraseMatrix() {
       toolCallCount: r.toolCallCount,
       toolName: r.toolName,
       replyIsToolMessage: r.replyText === OAUTH_CONNECT_MESSAGE,
+      // どの規則で一致したか（抑止の可否を決める）。
+      rule: classifyConnectRequest(entry.text),
+      expectRule: entry.rule ?? null,
     });
   };
   for (const entry of CONNECT_REQUEST_PHRASES.must_match) await check(entry, true);
@@ -792,6 +796,10 @@ async function connectPhraseMatrix() {
   }
   for (const entry of CONNECT_REQUEST_PHRASES.must_not_match_with_slack_boilerplate) {
     await check(entry, false);
+  }
+  // 曖昧な形（先頭行だけが連携依頼・後続行は別の依頼）。トリガーは立てる。
+  for (const entry of CONNECT_REQUEST_PHRASES.must_match_ambiguous_do_not_suppress) {
+    await check(entry, true);
   }
   return rows;
 }
@@ -1624,8 +1632,38 @@ async function suppressionInFlightScenario() {
   };
 }
 
+// ── 規則の確度ごとの抑止可否（2026-09-04 レビュー指摘 重大1）─────────────────
+// 曖昧な規則（leading_line）で一致した受信では、モデルの最終応答を**消さない**。
+// 消すと「連携\n今日の予定を教えて」の **予定の回答が消える**（実測した回帰）。
+async function suppressionByRuleReport() {
+  const cases = {
+    // (a) 全体一致。最も確実 → 抑止してよい。
+    whole: "連携",
+    // (b) 送信通知を除いた全体一致 → 抑止してよい。
+    stripped: "連携\n_Slack を使用して送信されました_",
+    // (c) 先頭行のみ一致・後続行は **別の依頼** → 抑止してはいけない。
+    leading_line_other_request: "連携\n今日の予定を教えて",
+    // (c) 先頭行のみ一致・後続行は未知の定型 → これも確度は低いので抑止しない。
+    leading_line_unknown_boilerplate: "連携\n-- Acme Slack Bridge --",
+  };
+  const out = {};
+  for (const [label, content] of Object.entries(cases)) {
+    const r = await suppressionScenario({ content });
+    out[label] = {
+      rule: classifyConnectRequest(content),
+      guaranteePosts: r.guaranteePosts,
+      replyCancelled: r.replyCancelled,
+      // 利用者が「自分の別の依頼への回答」を受け取れたか。
+      modelAnswerDelivered: !r.replyCancelled,
+      userVisibleMessages: r.userVisibleMessages,
+    };
+  }
+  return out;
+}
+
 async function suppressionReport() {
   return {
+    by_rule: await suppressionByRuleReport(),
     in_flight: await suppressionInFlightScenario(),
     // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個。
     delivered: await suppressionScenario({}),

@@ -2841,6 +2841,7 @@ def test_short_connect_request_phrases_match_the_single_source_of_truth() -> Non
             "must_not_match",
             "must_match_with_slack_boilerplate",
             "must_not_match_with_slack_boilerplate",
+            "must_match_ambiguous_do_not_suppress",
         )
     )
     mismatched = [
@@ -3763,3 +3764,76 @@ def test_suppression_never_wins_over_an_unfinished_delivery() -> None:
     assert outcome["modelReplyDelivered"] is True
     # 最終的に保証経路も届く（この場合だけ 2 通になるが、無言よりはるかに良い）。
     assert outcome["guaranteePosts"] == 1
+
+
+# ══ 規則の確度と抑止の分離（2026-09-04 レビュー指摘 重大1・重大2） ═══════════
+# トリガー（連携リンクを出す）と抑止（モデルの最終応答を消す）は**別の判断**である。
+# 一致規則 (c) leading_line は「先頭行が連携依頼・後続行に連携語が無い」しか見ないので、
+# 「連携\n今日の予定を教えて」のように後続行が別の依頼でも真になる。
+# その確度でモデル応答を消すと **別の依頼への回答が消える**（実測した回帰）。
+
+
+def test_each_matching_rule_is_recorded_as_declared_in_the_fixture() -> None:
+    """どの規則で一致したかが fixture の宣言どおりであること。
+
+    これにより 3 規則がそれぞれ意味を持つ（どれか 1 つを無効化すると、
+    その規則で一致するはずの本文が別の規則へ落ちて rule が変わり赤くなる）。
+    以前は (a)(b) が (c) に完全に包含され、無効化しても緑のままだった。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    declared = 0
+    for key in (
+        "must_match",
+        "must_match_with_slack_boilerplate",
+        "must_match_ambiguous_do_not_suppress",
+    ):
+        for entry in fixture[key]:
+            row = by_text[entry["text"]]
+            assert row["rule"] == entry["rule"], (key, entry["text"], row["rule"])
+            declared += 1
+    assert declared >= 40
+    # 3 規則すべてが実際に使われていること（どれかが死んでいたら気付ける）。
+    used = {
+        by_text[e["text"]]["rule"]
+        for k in (
+            "must_match",
+            "must_match_with_slack_boilerplate",
+            "must_match_ambiguous_do_not_suppress",
+        )
+        for e in fixture[k]
+    }
+    assert used == {"whole", "stripped", "leading_line"}
+
+
+def test_precise_connect_forms_are_fully_deduplicated() -> None:
+    """確度の高い規則（whole / stripped）では、利用者に届くのは 1 通であること。"""
+    by_rule = _caller_identity_report()["guarantee_suppression"]["by_rule"]
+    for label in ("whole", "stripped"):
+        outcome = by_rule[label]
+        assert outcome["rule"] == label
+        assert outcome["guaranteePosts"] == 1, label
+        assert outcome["replyCancelled"] is True, label
+        assert outcome["userVisibleMessages"] == 1, label
+
+
+def test_ambiguous_connect_forms_never_delete_the_users_other_answer() -> None:
+    """曖昧な規則（leading_line）ではモデルの応答を消さないこと（回帰の再発防止）。
+
+    「連携\\n今日の予定を教えて」で抑止を効かせると、**予定の回答が消える**。
+    実測: guaranteePosted:1 / modelAnswerCancelled:true / userGetsTheirAnswer:false。
+    origin/dev では普通に回答していたので、これは PR による回帰だった。
+
+    曖昧な形では「保証 1 通 + モデル 1 通」に留める＝「無言より 2 通」の原則を守る。
+    """
+    by_rule = _caller_identity_report()["guarantee_suppression"]["by_rule"]
+    for label in ("leading_line_other_request", "leading_line_unknown_boilerplate"):
+        outcome = by_rule[label]
+        assert outcome["rule"] == "leading_line", label
+        # 連携リンクは届く（トリガーは従来どおり立つ）。
+        assert outcome["guaranteePosts"] == 1, label
+        # 利用者自身の別の依頼への回答は消さない。
+        assert outcome["replyCancelled"] is False, label
+        assert outcome["modelAnswerDelivered"] is True, label
+        assert outcome["userVisibleMessages"] == 2, label
