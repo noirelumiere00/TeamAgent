@@ -6111,17 +6111,70 @@ validate_runtime_task_contracts() {
   ' "$plan_json" >/dev/null ||
     die "planned exact task definitionsがUID/GID/read-only/cap-drop/tmp/EFS/cache/image契約を満たしません"
 
-  local spec address component expected_name allowed_env allowed_secrets
+  validate_runtime_task_field_allowlist "$plan_json" "$snapshot"
+}
+
+# live exact source と planned taskdef の environment / secrets の差分は、runtime field
+# （HOME 等）と契約B（infra/terraform/hmac_keyrings.tf）が taskdef へ描画する HMAC キーの
+# 全集合以外を一切許さない。HMAC consumer（mcp / connect_web / morning_digest）へ許す
+# HMAC キー集合は下の hmac_contract_env / hmac_contract_secrets の 1 か所だけで持ち、
+# tests/scripts/test_terraform_runtime_guard_hmac_allowlist.py が tf の描画キー集合との
+# 1:1 一致（過不足ゼロ）と consumer 集合の一致を強制する（片側だけ編集すると CI が赤になる）。
+# consumer ごとに purpose で絞らないのは、plan は tf 描画そのものであり purpose 別の一致は
+# validate_planned_hmac_consumers が担うため。加えて live には契約B以前の残留キー
+# （例: connect-web の MAIL_ACTION_HMAC_SECRET）があり、初回 migration でその撤去も許す。
+validate_runtime_task_field_allowlist() {
+  local plan_json="$1" snapshot="$2"
+  local hmac_contract_env='[
+    "TEAMAGENT_HMAC_STATE_REQUIRED",
+    "TEAMAGENT_HMAC_STATE_TABLE",
+    "TEAMAGENT_HMAC_STATE_SCOPE",
+    "TEAMAGENT_HMAC_ROTATION_EPOCH",
+    "TEAMAGENT_HMAC_PROVENANCE",
+    "MAIL_ACTION_HMAC_PRIMARY_GENERATION",
+    "MAIL_ACTION_TTL_S",
+    "MAIL_ACTION_HMAC_PREVIOUS_GENERATION",
+    "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "MAIL_ACTION_HMAC_PREVIOUS_IS_LEGACY",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_GENERATION",
+    "REPORT_LINK_HMAC_PRIMARY_GENERATION",
+    "REPORT_LINK_TTL_S",
+    "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
+    "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
+    "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY"
+  ]'
+  local hmac_contract_secrets='[
+    "MAIL_ACTION_HMAC_SECRET",
+    "MAIL_ACTION_HMAC_PREVIOUS_SECRET",
+    "MAIL_ACTION_HMAC_LEGACY_WORKER_SECRET",
+    "REPORT_LINK_HMAC_SECRET",
+    "REPORT_LINK_HMAC_PREVIOUS_SECRET"
+  ]'
+
+  local spec address component expected_name runtime_env hmac_consumer
+  local allowed_env allowed_secrets
   for spec in \
-    'aws_ecs_task_definition.openclaw[0]|openclaw|openclaw|["OPENCLAW_CONFIG_PATH","TMPDIR"]|[]' \
-    'aws_ecs_task_definition.mcp|mcp|teamagent-mcp|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","UV_CACHE_DIR","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT","REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET","REPORT_LINK_HMAC_SECRET","REPORT_LINK_HMAC_PREVIOUS_SECRET"]' \
-    'aws_ecs_task_definition.connect_web[0]|connect_web|connect-web|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT","REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET","REPORT_LINK_HMAC_SECRET","REPORT_LINK_HMAC_PREVIOUS_SECRET"]' \
-    'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
-    'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET"]' \
-    'aws_ecs_task_definition.canary[0]|canary|canary|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
-    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \
-    'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]'; do
-    IFS='|' read -r address component expected_name allowed_env allowed_secrets <<< "$spec"
+    'aws_ecs_task_definition.openclaw[0]|openclaw|openclaw|["OPENCLAW_CONFIG_PATH","TMPDIR"]|' \
+    'aws_ecs_task_definition.mcp|mcp|teamagent-mcp|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","UV_CACHE_DIR"]|hmac' \
+    'aws_ecs_task_definition.connect_web[0]|connect_web|connect-web|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|hmac' \
+    'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|' \
+    'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|hmac' \
+    'aws_ecs_task_definition.canary[0]|canary|canary|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|' \
+    'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|' \
+    'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|'; do
+    IFS='|' read -r address component expected_name runtime_env hmac_consumer <<< "$spec"
+    case "$hmac_consumer" in
+      hmac)
+        allowed_env="$(jq -n -c --argjson runtime "$runtime_env" \
+          --argjson hmac "$hmac_contract_env" '$runtime + $hmac')"
+        allowed_secrets="$hmac_contract_secrets"
+        ;;
+      "")
+        allowed_env="$runtime_env"
+        allowed_secrets='[]'
+        ;;
+      *) die "runtime task allowlist specが不正です: $spec" ;;
+    esac
     jq -L "$GUARD_JQ_DIR" -e \
       --arg address "$address" \
       --arg component "$component" \
