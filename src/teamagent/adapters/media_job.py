@@ -176,6 +176,21 @@ def _is_forbidden_object_error(exc: BaseException) -> bool:
     return code in ("403", "Forbidden", "AccessDenied") or status == 403
 
 
+def _is_precondition_failed_error(exc: BaseException) -> bool:
+    """S3 条件付き PUT の 412（``IfNoneMatch="*"`` が既存 object に当たった）か。
+
+    条件付き PUT は「先着 1 回だけ成功する」ので、412 は失敗ではなく
+    「他プロセスが先に置いた」という**成功と等価な事実**として扱う。
+    """
+
+    response = getattr(exc, "response", None)
+    if not isinstance(response, dict):
+        return False
+    code = str(response.get("Error", {}).get("Code") or "")
+    status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return code in ("412", "PreconditionFailed") or status == 412
+
+
 _HEAD_FORBIDDEN_HINT = "s3:ListBucket 未付与のため HEAD 404 が 403 で返る"
 _head_forbidden_warn_lock = threading.Lock()
 _head_forbidden_warned: list[bool] = [False]
@@ -210,6 +225,14 @@ def _log_head_forbidden_as_absent(*, job_id: str, name: str) -> None:
 
 class MediaJobError(RuntimeError):
     """media job境界のsubmit/status/integrity失敗。"""
+
+
+class MediaMarkerExistsError(MediaJobError):
+    """``stage_marker`` の条件付き PUT が 412 で弾かれた（＝同じ marker が既にある）。
+
+    「置けなかった」ではなく「他プロセスが先に置いた」ので、呼び出し元は
+    自分が置いた場合と同じ**排他の勝者以外**として扱う（= 処理を進めない）。
+    """
 
 
 class MediaJobClient:
@@ -367,6 +390,63 @@ class MediaJobClient:
         ttl_s: int | None = None,
         max_bytes: int = MAX_INPUT_BYTES,
     ) -> S3ObjectRef:
+        """入力 object を無条件 PUT で置く（同名があれば上書き）。従来どおりの staging。"""
+
+        return self._stage_input_object(
+            job_id=job_id,
+            name=name,
+            body=body,
+            content_type=content_type,
+            deadline_epoch_s=deadline_epoch_s,
+            ttl_s=ttl_s,
+            max_bytes=max_bytes,
+            if_none_match=False,
+        )
+
+    def stage_marker(
+        self,
+        *,
+        job_id: str,
+        name: str,
+        body: bytes,
+        content_type: str,
+        deadline_epoch_s: int,
+        ttl_s: int | None = None,
+        max_bytes: int = MAX_INPUT_BYTES,
+    ) -> S3ObjectRef:
+        """入力 object を条件付き PUT（``If-None-Match: *``）で置く＝**先着 1 回だけ**成功する。
+
+        既に同名 object があれば S3 は 412 PreconditionFailed を返し、ここでは
+        ``MediaMarkerExistsError`` にして返す。「HEAD で無いことを確かめてから PUT」の
+        窓（read-modify-write）で 2 プロセスが並走しても、PUT に勝てるのは 1 つだけになる。
+
+        マーカー（負のキャッシュ）専用。動画本体など上書きを許す staging は
+        ``stage_bytes`` を使う（挙動不変）。
+        """
+
+        return self._stage_input_object(
+            job_id=job_id,
+            name=name,
+            body=body,
+            content_type=content_type,
+            deadline_epoch_s=deadline_epoch_s,
+            ttl_s=ttl_s,
+            max_bytes=max_bytes,
+            if_none_match=True,
+        )
+
+    def _stage_input_object(
+        self,
+        *,
+        job_id: str,
+        name: str,
+        body: bytes,
+        content_type: str,
+        deadline_epoch_s: int,
+        ttl_s: int | None,
+        max_bytes: int,
+        if_none_match: bool,
+    ) -> S3ObjectRef:
         self._assert_configured()
         if not _JOB_ID_RE.fullmatch(job_id):
             raise MediaJobError("MEDIA_JOB_ID_INVALID")
@@ -385,20 +465,29 @@ class MediaJobClient:
         digest = hashlib.sha256(body).hexdigest()
         key = f"media-jobs/{job_id}/input/{name}"
         expires = datetime.fromtimestamp(int(self._clock()) + resolved_ttl_s, tz=UTC)
-        put_response = self._call(
-            "s3",
-            deadline_epoch_s,
-            "put_object",
-            Bucket=self._bucket,
-            Key=key,
-            Body=body,
-            ContentType=content_type,
-            ChecksumSHA256=_checksum_sha256_b64(digest),
-            Expires=expires,
-            Metadata={"sha256": digest, "job-id": job_id, "schema-version": "1"},
-            Tagging=f"teamagent-ttl-epoch={int(expires.timestamp())}",
+        put_kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "Body": body,
+            "ContentType": content_type,
+            "ChecksumSHA256": _checksum_sha256_b64(digest),
+            "Expires": expires,
+            "Metadata": {"sha256": digest, "job-id": job_id, "schema-version": "1"},
+            "Tagging": f"teamagent-ttl-epoch={int(expires.timestamp())}",
             **self._sse_args(),
-        )
+        }
+        if not if_none_match:
+            put_response = self._call("s3", deadline_epoch_s, "put_object", **put_kwargs)
+        else:
+            put_kwargs["IfNoneMatch"] = "*"
+            try:
+                put_response = self._call("s3", deadline_epoch_s, "put_object", **put_kwargs)
+            except MediaJobError:
+                raise
+            except Exception as exc:
+                if _is_precondition_failed_error(exc):
+                    raise MediaMarkerExistsError("MEDIA_INPUT_MARKER_EXISTS") from exc
+                raise
         ref = S3ObjectRef(
             bucket=self._bucket,
             key=key,
@@ -1255,4 +1344,4 @@ class MediaJobClient:
         )
 
 
-__all__ = ["MediaJobClient", "MediaJobError", "reset_boto_cache"]
+__all__ = ["MediaJobClient", "MediaJobError", "MediaMarkerExistsError", "reset_boto_cache"]

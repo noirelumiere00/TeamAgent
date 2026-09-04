@@ -15,7 +15,7 @@ from structlog.testing import capture_logs
 
 from teamagent.adapters import media_job as media_job_module
 from teamagent.adapters.apify_client import ApifyError, TikTokVideoBytes
-from teamagent.adapters.media_job import MediaJobClient
+from teamagent.adapters.media_job import MediaJobClient, MediaMarkerExistsError
 from teamagent.adapters.tiktok_video_fallback import (
     ENV_FLAG,
     apify_fallback_enabled,
@@ -96,10 +96,15 @@ class _FakeMediaClient:
         *,
         stage_fail: frozenset[str] = frozenset(),
         head_fail: frozenset[str] = frozenset(),
+        marker_taken: frozenset[str] = frozenset(),
     ) -> None:
         self.existing = existing or {}
         self.stage_fail = stage_fail
         self.head_fail = head_fail
+        # 「HEAD には見えないが PUT では 412 になる」名前。HEAD→PUT の窓で他プロセスが
+        # 先に置いた状態（と、ListBucket 無しロールで HEAD 403 が「無い」に読み替わる
+        # PR #379 の経路）の再現。
+        self.marker_taken = marker_taken
         self.staged: dict[str, bytes] = {}
         self.stage_calls: list[dict[str, Any]] = []
         self.presigned: list[str] = []
@@ -127,6 +132,33 @@ class _FakeMediaClient:
         self.stage_calls.append({"name": name, "content_type": content_type, "size": len(body)})
         if name in self.stage_fail:
             raise RuntimeError("MEDIA_INPUT_SIZE_INVALID")
+        self.staged[name] = body
+        return _ref(name, body)
+
+    def stage_marker(
+        self,
+        *,
+        job_id: str,
+        name: str,
+        body: bytes,
+        content_type: str,
+        deadline_epoch_s: int,
+        max_bytes: int,
+    ) -> S3ObjectRef:
+        """本番の条件付き PUT（If-None-Match: *）を再現する。
+
+        既に同名があれば S3 は 412 を返す＝``MediaMarkerExistsError``。
+        無条件 PUT だった頃はここが黙って上書きし、並走した 2 プロセスが両方
+        Apify run へ進めていた。
+        """
+
+        assert job_id == _JOB
+        assert 0 < len(body) <= max_bytes
+        self.stage_calls.append({"name": name, "content_type": content_type, "size": len(body)})
+        if name in self.stage_fail:
+            raise RuntimeError("MEDIA_INPUT_SIZE_INVALID")
+        if name in self.staged or name in self.existing or name in self.marker_taken:
+            raise MediaMarkerExistsError("MEDIA_INPUT_MARKER_EXISTS")
         self.staged[name] = body
         return _ref(name, body)
 
@@ -484,3 +516,86 @@ def test_head_403_from_missing_list_bucket_still_runs_apify_once_and_skips_on_re
     assert second.est_cost_usd == 0.0
     # 2 回目に 403 が返ったのは p2 の mp4 だけ（それ以外は自分で置いた object＝200）
     assert s3.head_forbidden[4:] == [f"media-jobs/{_JOB}/input/apify-p2.mp4"]
+
+
+# ---------------------------------------------------------------------------
+# 試行済みマーカーの排他: HEAD→PUT の窓で並走しても Apify run は 1 プロセスだけ
+# ---------------------------------------------------------------------------
+
+
+def test_head_miss_then_put_412_skips_apify_like_an_existing_marker() -> None:
+    """HEAD が「無い」でも条件付き PUT が 412 なら Apify を呼ばない（二重課金の防止）。
+
+    無条件 PUT だった頃は、HEAD(attempted)→PUT の窓で並走した 2 プロセスが両方とも
+    マーカーを書けてしまい、同じ URL で Apify run が 2 回走りえた。
+    """
+    apify = _FakeApify({_URL1: _MP4, _URL2: _MP4})
+    # p1 のマーカーは「他プロセスが先に置いた」＝HEAD には見えないが PUT で 412
+    media = _FakeMediaClient(marker_taken=frozenset({attempted_name("p1")}))
+    outcome = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    # 負けた p1 は HEAD で見つけた時と同じ扱い
+    assert "p1:APIFY_FALLBACK_SKIPPED:ATTEMPTED" in outcome.warnings
+    assert outcome.skipped_attempted == 1
+    assert "p1:APIFY_FALLBACK_SKIPPED:MARKER_WRITE:MediaMarkerExistsError" not in outcome.warnings
+    # 通常経路（p2）は従来どおり 1 回だけ走る
+    assert len(apify.calls) == 1
+    assert apify.calls[0]["urls"] == [_URL2]
+    assert [v.key for v in outcome.videos] == ["p2"]
+    assert attempted_name("p2") in media.staged
+
+
+def test_marker_race_lost_on_every_key_calls_apify_zero_times() -> None:
+    apify = _FakeApify({_URL1: _MP4, _URL2: _MP4})
+    media = _FakeMediaClient(marker_taken=frozenset({attempted_name("p1"), attempted_name("p2")}))
+    outcome = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    assert apify.calls == []  # run は 0 回＝課金なし
+    assert outcome.skipped_attempted == 2
+    assert outcome.videos == [] and outcome.est_cost_usd == 0.0
+    assert sorted(w for w in outcome.warnings if "ATTEMPTED" in w) == [
+        "p1:APIFY_FALLBACK_SKIPPED:ATTEMPTED",
+        "p2:APIFY_FALLBACK_SKIPPED:ATTEMPTED",
+    ]
+
+
+def test_non_412_marker_write_failure_still_reports_marker_write() -> None:
+    """412 以外の PUT 失敗は「試行済み」ではない＝従来どおり MARKER_WRITE 警告のまま。"""
+    apify = _FakeApify({_URL1: _MP4, _URL2: _MP4})
+    media = _FakeMediaClient(stage_fail=frozenset({attempted_name("p1")}))
+    outcome = fill_missing_videos(
+        _JOB, {"p1": _URL1, "p2": _URL2}, media_client=media, apify=apify, max_videos=10
+    )
+    assert "p1:APIFY_FALLBACK_SKIPPED:MARKER_WRITE:MEDIA_INPUT_SIZE_INVALID" in outcome.warnings
+    assert "p1:APIFY_FALLBACK_SKIPPED:ATTEMPTED" not in outcome.warnings
+    assert outcome.skipped_attempted == 0  # 試行済みとして数えない
+    assert apify.calls[0]["urls"] == [_URL2]
+
+
+def test_video_body_staging_still_uses_unconditional_stage_bytes() -> None:
+    """動画本体の staging は無条件 PUT のまま（同名の上書きが要る＝条件付きにしない）。"""
+    apify = _FakeApify({_URL1: _MP4})
+    media = _FakeMediaClient()
+    fill_missing_videos(_JOB, {"p1": _URL1}, media_client=media, apify=apify, max_videos=10)
+    # 同じ job/key でもう一度 stage_bytes を呼べば通る（412 にならない）
+    ref = media.stage_bytes(
+        job_id=_JOB,
+        name=staged_name("p1"),
+        body=_MP4,
+        content_type="video/mp4",
+        deadline_epoch_s=400,
+        max_bytes=len(_MP4),
+    )
+    assert ref.key.endswith(staged_name("p1"))
+    # 一方、マーカーの再 PUT は 412
+    with pytest.raises(MediaMarkerExistsError):
+        media.stage_marker(
+            job_id=_JOB,
+            name=attempted_name("p1"),
+            body=b"x",
+            content_type="text/plain",
+            deadline_epoch_s=400,
+            max_bytes=1024,
+        )
