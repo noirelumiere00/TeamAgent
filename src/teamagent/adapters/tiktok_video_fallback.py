@@ -17,8 +17,9 @@
   （URL・トークン等の生文字列は載せない）。
 - 出所の明示: 呼び出し元は ``acquired_via``（worker | apify）を成果物メタに記録する。
 - 再試行上限: 1 (job, key) につき Apify run は **1 回だけ**。run の前に試行済みマーカー
-  ``apify-<key>.attempted`` を S3 に置き、取れなかった key は再照会でも再試行しない
-  （見張りポーリングと LLM 照会が同時に来ても同じ URL を並列 run しない）。
+  ``apify-<key>.attempted`` を S3 へ ``stage_marker``（条件付き PUT ``If-None-Match: *``）
+  で置き、取れなかった key は再照会でも再試行しない。条件付きなので「HEAD で無いことを
+  確かめてから PUT」の窓で並走しても勝つのは 1 プロセスだけ（412 = 既に試行済み）。
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from typing import Any
 import structlog
 
 from teamagent.adapters.apify_client import tiktok_post_url_allowed
+from teamagent.adapters.media_job import MediaMarkerExistsError
 
 logger = structlog.get_logger(__name__)
 
@@ -250,10 +252,13 @@ def fill_missing_videos(
 
     if pending and media_client is not None:
         # run の**前**に試行済みマーカーを置く。置けなかった key は run に含めない（保守側）。
+        # 条件付き PUT（If-None-Match: *）なので、上の HEAD(attempted) と この PUT の窓で
+        # 2 プロセスが並走しても勝つのは 1 つだけ。負けた側の 412 は「既に試行済み」と
+        # 同義なので、HEAD で見つけた時と同じ ATTEMPTED として扱い Apify を呼ばない。
         fenced: list[tuple[str, str]] = []
         for key, url in pending:
             try:
-                media_client.stage_bytes(
+                media_client.stage_marker(
                     job_id=job_id,
                     name=attempted_name(key),
                     body=_ATTEMPTED_MARKER_BODY,
@@ -261,6 +266,10 @@ def fill_missing_videos(
                     deadline_epoch_s=deadline_epoch_s,
                     max_bytes=_ATTEMPTED_MARKER_MAX_BYTES,
                 )
+            except MediaMarkerExistsError:
+                outcome.warnings.append(f"{key}:APIFY_FALLBACK_SKIPPED:ATTEMPTED")
+                outcome.skipped_attempted += 1
+                continue
             except Exception as exc:
                 outcome.warnings.append(
                     f"{key}:APIFY_FALLBACK_SKIPPED:MARKER_WRITE:{safe_reason(exc)}"

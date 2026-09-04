@@ -10,7 +10,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from teamagent.adapters import media_job as media_job_module
-from teamagent.adapters.media_job import MediaJobClient, MediaJobError
+from teamagent.adapters.media_job import (
+    MediaJobClient,
+    MediaJobError,
+    MediaMarkerExistsError,
+)
 from teamagent.media.contracts import S3ObjectRef, TikTokAcquireOperation, make_job_request
 
 _BUCKET = "teamagent-media-test"
@@ -292,3 +296,126 @@ def test_get_request_rejects_tampered_request_json() -> None:
     client = _client(ddb=_Dynamo(_item(request, body=tampered)))
     with pytest.raises(MediaJobError, match="MEDIA_JOB_REQUEST_INVALID"):
         client.get_request(_JOB, deadline_epoch_s=400, expected_audit_principal_hash=_AUDIT)
+
+
+# ---------------------------------------------------------------------------
+# stage_marker: 条件付き PUT（If-None-Match: *）で先着 1 回だけ成功する
+# ---------------------------------------------------------------------------
+
+_MARKER_NAME = "apify-p01002.attempted"
+_MARKER_KEY = f"media-jobs/{_JOB}/input/{_MARKER_NAME}"
+_MARKER_BODY = b"apify-fallback attempted\n"
+
+
+class _PreconditionFailedError(Exception):
+    """S3 の条件付き PUT が既存 object に当たったときの応答（412）。"""
+
+    def __init__(self) -> None:
+        super().__init__("At least one of the pre-conditions you specified did not hold")
+        self.response = {
+            "Error": {"Code": "PreconditionFailed"},
+            "ResponseMetadata": {"HTTPStatusCode": 412},
+        }
+
+
+class _ConditionalS3(_S3):
+    """PUT で object を実際に持ち、``IfNoneMatch="*"`` を本番同様に評価する S3。"""
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        self.put_calls.append(kwargs)
+        key = kwargs["Key"]
+        if kwargs.get("IfNoneMatch") == "*" and key in self.objects:
+            raise _PreconditionFailedError()
+        body = kwargs["Body"]
+        digest = hashlib.sha256(body).hexdigest()
+        self.objects[key] = {
+            "ContentLength": len(body),
+            "ContentType": kwargs["ContentType"],
+            "ChecksumSHA256": base64.b64encode(bytes.fromhex(digest)).decode("ascii"),
+            "ServerSideEncryption": "AES256",
+            "VersionId": "version-7",
+            "Metadata": dict(kwargs["Metadata"]),
+        }
+        return {"VersionId": "version-7"}
+
+
+def _stage_marker(client: MediaJobClient) -> Any:
+    return client.stage_marker(
+        job_id=_JOB,
+        name=_MARKER_NAME,
+        body=_MARKER_BODY,
+        content_type="text/plain",
+        deadline_epoch_s=400,
+        max_bytes=1024,
+    )
+
+
+def test_stage_marker_sends_if_none_match_and_stage_bytes_does_not() -> None:
+    s3 = _ConditionalS3({})
+    client = _client(s3=s3)
+    ref = _stage_marker(client)
+    assert ref.key == _MARKER_KEY and ref.content_type == "text/plain"
+    assert s3.put_calls[0]["IfNoneMatch"] == "*"
+    # 動画本体など通常の staging は条件を付けない（上書き可のまま＝挙動不変）
+    client.stage_bytes(
+        job_id=_JOB,
+        name="apify-p01002.mp4",
+        body=_BODY,
+        content_type="video/mp4",
+        deadline_epoch_s=400,
+    )
+    assert "IfNoneMatch" not in s3.put_calls[1]
+
+
+def test_stage_marker_second_writer_gets_marker_exists_and_stage_bytes_overwrites() -> None:
+    s3 = _ConditionalS3({})
+    client = _client(s3=s3)
+    _stage_marker(client)
+    with pytest.raises(MediaMarkerExistsError, match="MEDIA_INPUT_MARKER_EXISTS"):
+        _stage_marker(client)
+    assert len(s3.put_calls) == 2  # 2 回目も PUT は打つが S3 側で 412
+    # 同じキーへの無条件 PUT（stage_bytes）は従来どおり通る
+    client.stage_bytes(
+        job_id=_JOB,
+        name=_MARKER_NAME,
+        body=_MARKER_BODY,
+        content_type="text/plain",
+        deadline_epoch_s=400,
+        max_bytes=1024,
+    )
+    assert "IfNoneMatch" not in s3.put_calls[2]
+
+
+def test_stage_marker_non_412_put_failure_is_not_swallowed() -> None:
+    class _FailingS3(_ConditionalS3):
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            self.put_calls.append(kwargs)
+            raise _BrokenS3Error()
+
+    client = _client(s3=_FailingS3({}))
+    with pytest.raises(_BrokenS3Error):
+        _stage_marker(client)
+
+
+def test_stage_marker_validates_inputs_before_any_aws_write() -> None:
+    s3 = _ConditionalS3({})
+    client = _client(s3=s3)
+    with pytest.raises(MediaJobError, match="MEDIA_INPUT_NAME_INVALID"):
+        client.stage_marker(
+            job_id=_JOB,
+            name="../escape.attempted",
+            body=_MARKER_BODY,
+            content_type="text/plain",
+            deadline_epoch_s=400,
+            max_bytes=1024,
+        )
+    with pytest.raises(MediaJobError, match="MEDIA_INPUT_SIZE_INVALID"):
+        client.stage_marker(
+            job_id=_JOB,
+            name=_MARKER_NAME,
+            body=b"",
+            content_type="text/plain",
+            deadline_epoch_s=400,
+            max_bytes=1024,
+        )
+    assert s3.put_calls == []

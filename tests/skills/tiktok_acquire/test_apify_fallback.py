@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.apify_client import ApifyError, TikTokVideoBytes
+from teamagent.adapters.media_job import MediaMarkerExistsError
 from teamagent.media.contracts import S3ObjectRef, TikTokAcquireOperation, make_job_request
 from teamagent.skills.base import ASYNC_JOB_POLL_METADATA_KEY, SkillContext
 from teamagent.skills.tiktok_acquire.apify_fallback import (
@@ -130,9 +131,18 @@ class _FakeMediaClient:
 
     def stage_bytes(self, *, job_id: str, name: str, body: bytes, content_type: str, **kw: Any):
         assert job_id == _JOB
-        # mp4 本体は video/mp4、試行済みマーカー（*.attempted）は text/plain で置かれる
-        expected = "text/plain" if name.endswith(".attempted") else "video/mp4"
-        assert content_type == expected, (name, content_type)
+        # mp4 本体は video/mp4 で無条件 PUT（上書き可）
+        assert content_type == "video/mp4", (name, content_type)
+        self.staged[name] = body
+        return _ref(name, body)
+
+    def stage_marker(self, *, job_id: str, name: str, body: bytes, content_type: str, **kw: Any):
+        """試行済みマーカーは text/plain の条件付き PUT（既にあれば 412 = 先着に負け）。"""
+
+        assert job_id == _JOB
+        assert content_type == "text/plain", (name, content_type)
+        if name in self.staged or name in self.existing:
+            raise MediaMarkerExistsError("MEDIA_INPUT_MARKER_EXISTS")
         self.staged[name] = body
         return _ref(name, body)
 
