@@ -44,6 +44,7 @@ from teamagent.skills._shared.next_step import (
     append_suggestion,
     suggestions_enabled,
 )
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.attachment_assist.aggregate import compute_xlsx_stats, format_stats_ja
 from teamagent.skills.attachment_assist.discover import (
     REASON_BAD_URL,
@@ -125,9 +126,7 @@ class AttachmentAssistSkill(BaseSkill[AttachmentAssistInput, AttachmentAssistOut
         "Excel/テキスト）を読んで、要約・修正案・議事録フォーマット化・集計・英訳を返す"
         "読み取り専用ツール。ファイルが実際に添付されている時だけ使う。"
         "Drive 内の資料を探して取り出す依頼は knowledge_deliver を使うこと（別ツール）。"
-        "ファイルの書き換え・生成・再配信はしない。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        "ファイルの書き換え・生成・再配信はしない。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = AttachmentAssistInput
     output_schema: ClassVar[type[BaseModel]] = AttachmentAssistOutput

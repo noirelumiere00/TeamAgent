@@ -32,6 +32,7 @@ import structlog
 from pydantic import BaseModel
 
 from teamagent.media.url_policy import acquire_host_allowed
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.video_capture.attachment import attachment_download_url, select_video_file
 from teamagent.skills.video_capture.schema import (
@@ -154,9 +155,7 @@ class VideoCaptureSkill(BaseSkill[VideoCaptureInput, VideoCaptureOutput]):
         "秒への換算はサーバがやるので自分で計算しないこと）。最大12点。"
         "『なぜ勝ってるか分析して』は video_algorithm、"
         "『◯秒のシーンを切り出して・画像にして』が本ツール。"
-        "返ってきた message はそのまま返すこと（枚数・時刻を言い換えない）。"
-        "呼び出し時は arguments に "
-        "`_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を必ず含める。"
+        "返ってきた message はそのまま返すこと（枚数・時刻を言い換えない）。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = VideoCaptureInput
     output_schema: ClassVar[type[BaseModel]] = VideoCaptureOutput

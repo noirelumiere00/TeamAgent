@@ -25,6 +25,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.morning_digest.draft_token import decode_draft_token
 from teamagent.skills.morning_digest.event_token import stable_event_id
@@ -63,9 +64,7 @@ class ScheduleProposeSkill(BaseSkill[ScheduleProposeInput, ScheduleProposeOutput
         "その value（署名トークン）を schedule_token に渡して呼ぶ。"
         "本人カレンダーの空き枠から候補日を計算し、候補入りの返信下書きを Gmail に作成"
         "（送信はしない）、カレンダーに仮予定（他予定を邪魔しない透明ホールド）を置く。"
-        "自由文の日程調整相談は対象外（このツールはボタン専用）。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<押した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        "自由文の日程調整相談は対象外（このツールはボタン専用）。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = ScheduleProposeInput
     output_schema: ClassVar[type[BaseModel]] = ScheduleProposeOutput

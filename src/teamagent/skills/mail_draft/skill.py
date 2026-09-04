@@ -51,6 +51,7 @@ from teamagent.skills._shared.mail_connection import (
     classify_gmail_failure,
     resolve_gmail_for_user,
 )
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_draft.schema import DraftedMail, MailDraftInput, MailDraftOutput
 from teamagent.skills.mail_followup.skill import (
@@ -166,8 +167,7 @@ class MailDraftSkill(BaseSkill[MailDraftInput, MailDraftOutput]):
         "message をそのまま出し、次の呼び出しには戻り値の candidate_refs をそのまま渡す。"
         "成功時は drafts[] の本文と open_url を原文のまま併記する。"
         "候補の一覧を出すのは mail_followup、条件を指定した返信起草は mail_reply。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = MailDraftInput
     output_schema: ClassVar[type[BaseModel]] = MailDraftOutput

@@ -41,7 +41,6 @@ from teamagent.adapters.google_oauth_flow import (
     OAuthConsentFlow,
     consume_state_once,
     inspect_state,
-    verify_state,
 )
 from teamagent.adapters.oauth_token_store import (
     OAuthToken,
@@ -3872,31 +3871,65 @@ def create_app(
             }
         )
 
-    def _start_bad_state_page() -> HTMLResponse:
-        """start ルートの state 不正/期限切れ（callback の bad_state と同じ案内）。"""
-        return HTMLResponse(
-            _page(
-                "検証に失敗しました",
-                "リンクが古いか不正です。Slack で Aico に「連携」と話しかけてください。",
-                accent="#f9667a",
-            ),
+    def _start_bad_state_page(
+        *,
+        code: ConnectDiag,
+        request_id: str | None,
+        email: str | None = None,
+    ) -> HTMLResponse:
+        """start ルートの state 不正/期限切れ（callback の bad_state と同じ案内＋診断行）。
+
+        callback と同じく **必ず ``_connect_failure`` を通す**＝診断行の無い失敗ページを
+        作れなくする（PR #380 で callback には付いたが、PR #376 で足した start ルートは
+        ``Request`` を受けていなかったため付いていなかった）。
+
+        コードの出し分けは ``inspect_state`` の結果に従う:
+          - ``expired`` → **S02**。署名は一致しているので ``email`` を診断行へ載せられる。
+          - それ以外（``bad_signature`` / ``malformed`` / 長すぎ / 非 base64url）→ **S01**。
+            署名未検証なので ``email`` は渡さない（診断行の識別子は ``-`` になる）。
+          - Slack 版は callback と同じく署名/期限を区別しないので **T01** 一本。
+
+        ⚠️ **S03（使用済み）はここでは出さない**。start は署名と TTL を検証するだけで
+        ワンタイム消費をしない（消費は ``/oauth2/callback`` の責務）ため、``inspect_state``
+        からは「使用済み」を知れない。判定するには DynamoDB の消費記録を毎回読む必要があり、
+        「消費済み state でも start は 302 する」という既存契約
+        （``test_google_start_does_not_consume_state_even_after_callback``）を壊す。
+        使用済みは callback 側で S03 として出る。
+        """
+        if code is ConnectDiag.S02:
+            body = (
+                "リンクの有効期限（発行から 30 分）が切れています。"
+                "Slack で Aico に「連携」と話しかけて、新しいリンクを使ってください。"
+            )
+        else:
+            body = (
+                "リンクが古いか不正です（途中で文字が変わった可能性があります）。"
+                "Slack で Aico に「連携」と話しかけて、新しいリンクをそのまま開いてください。"
+            )
+        return _connect_failure(
+            "検証に失敗しました",
+            body,
+            code=code,
+            request_id=request_id,
             status_code=400,
+            email=email,
         )
 
-    def _start_unconfigured_page() -> HTMLResponse:
-        """start ルートで認可 URL を組めない設定不備（利用者の操作では直らない）。"""
-        return HTMLResponse(
-            _page(
-                "システム側の設定不備です",
-                "管理者にご連絡ください。"
-                "リンクを取り直しても解消しません（連携の設定が未完了です）。",
-                accent="#f9667a",
-            ),
+    def _start_unconfigured_page(
+        *, request_id: str | None, email: str | None = None
+    ) -> HTMLResponse:
+        """start ルートで認可 URL を組めない設定不備（利用者の操作では直らない・S06）。"""
+        return _connect_failure(
+            "システム側の設定不備です",
+            "管理者にご連絡ください。リンクを取り直しても解消しません（連携の設定が未完了です）。",
+            code=ConnectDiag.S06,
+            request_id=request_id,
             status_code=500,
+            email=email,
         )
 
     @app.api_route("/oauth2/start/{state:path}", methods=["GET", "HEAD"])
-    def oauth2_start(state: str) -> Response:
+    def oauth2_start(state: str, request: Request) -> Response:
         """Google 連携の path 形式開始リンク: 署名 state を検証し、mcp と同一の認可 URL へ 302。
 
         なぜ: @Aico(openclaw) の LLM は約 600 字の Google 認可 URL（``?state=…&scope=…`` の
@@ -3920,18 +3953,51 @@ def create_app(
             変種で増えない。
           - ``{state:path}`` ＋ GET/HEAD: 転記で ``/`` が混ざっても FastAPI 既定の 404 JSON ではなく
             自前の案内ページを返す。HEAD は運用手順の ``curl -sI`` 疎通確認用。
+          - 失敗ページは callback と同じく必ず ``_connect_failure`` を通し、診断コード
+            （S01/S02/S06）と転送用の 1 行を付ける。warning ログにも同じ ``request_id=`` /
+            ``diag=`` / ``state_reason=`` を載せ、利用者の転送文からログへ直行できるようにする
+            （docs/runbooks/connect_diagnostics.md）。
         """
+        rid = _request_id_of(request)
         if len(state) > _MAX_OAUTH_START_STATE_CHARS:
-            logger.warning("connect_start_bad_state", reason="too_long")
-            return _start_bad_state_page()
+            logger.warning(
+                "connect_start_bad_state",
+                request_id=rid,
+                state_reason="too_long",
+                diag=ConnectDiag.S01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.S01, request_id=rid)
         canonical = _canonical_oauth_state(state)
         if canonical is None:
-            logger.warning("connect_start_bad_state", reason="not_base64url")
-            return _start_bad_state_page()
-        email = verify_state(canonical)  # 署名＋TTL のみ（消費は callback の責務）
-        if not email:
-            logger.warning("connect_start_bad_state")
-            return _start_bad_state_page()
+            logger.warning(
+                "connect_start_bad_state",
+                request_id=rid,
+                state_reason="not_base64url",
+                diag=ConnectDiag.S01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.S01, request_id=rid)
+        # 署名＋TTL のみ（消費は callback の責務）。失敗理由まで取って S01/S02 を出し分ける。
+        state_status, inspected_email = inspect_state(canonical)
+        if state_status != "ok" or not inspected_email:
+            if state_status == "expired":
+                # 署名は一致しているので email は信用してよい＝診断行に本人（マスク）を載せる。
+                logger.warning(
+                    "connect_start_bad_state",
+                    request_id=rid,
+                    state_reason=state_status,
+                    diag=ConnectDiag.S02.value,
+                )
+                return _start_bad_state_page(
+                    code=ConnectDiag.S02, request_id=rid, email=inspected_email
+                )
+            logger.warning(
+                "connect_start_bad_state",
+                request_id=rid,
+                state_reason=state_status,
+                diag=ConnectDiag.S01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.S01, request_id=rid)
+        email = inspected_email
         try:
             if not redirect:
                 raise ValueError("OAUTH_REDIRECT_URI が未設定です")
@@ -3942,10 +4008,12 @@ def create_app(
             # client_id/secret・redirect の設定不備。URL/secret は出さず例外型と短い説明のみ。
             logger.error(
                 "connect_start_url_failed",
+                request_id=rid,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return _start_unconfigured_page()
+            return _start_unconfigured_page(request_id=rid, email=email)
         return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
 
     @app.get("/oauth2/callback")
@@ -4221,28 +4289,55 @@ def create_app(
         )
 
     @app.api_route("/slack/oauth/start/{state:path}", methods=["GET", "HEAD"])
-    def slack_oauth_start(state: str) -> Response:
+    def slack_oauth_start(state: str, request: Request) -> Response:
         """Slack 連携の path 形式開始リンク（``/oauth2/start`` と対称・検証のみで消費しない）。
 
         署名＋TTL に加え、検証済み Slack user/team への束縛（bind_tag）が無い state はここで
         拒否する。callback は消費後に unbound を拒否するため、通しても Slack の同意画面を
         経てから同じ「検証に失敗しました」に落ちるだけ＝先に止めた方が利用者に優しい。
         state の正規化（strict decode → 再エンコード）・``{state:path}``・HEAD は Google 版と同じ。
+
+        失敗ページは Slack callback と同じ流儀で **T01**（署名不一致/期限切れ/束縛無し）と
+        **S06**（設定不備）を出し分け、診断行とログの ``request_id=`` / ``diag=`` /
+        ``state_reason=`` を Google 版と揃える。``verify_state_detailed`` は Slack 版では
+        署名不一致と期限切れを区別しないため（callback も同じ）、T01 に寄せる。
         """
+        rid = _request_id_of(request)
         if len(state) > _MAX_OAUTH_START_STATE_CHARS:
-            logger.warning("connect_slack_start_bad_state", reason="too_long")
-            return _start_bad_state_page()
+            logger.warning(
+                "connect_slack_start_bad_state",
+                request_id=rid,
+                state_reason="too_long",
+                diag=ConnectDiag.T01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.T01, request_id=rid)
         canonical = _canonical_oauth_state(state)
         if canonical is None:
-            logger.warning("connect_slack_start_bad_state", reason="not_base64url")
-            return _start_bad_state_page()
+            logger.warning(
+                "connect_slack_start_bad_state",
+                request_id=rid,
+                state_reason="not_base64url",
+                diag=ConnectDiag.T01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.T01, request_id=rid)
         st = slack_verify_state_detailed(canonical)  # 署名＋TTL のみ（消費は callback の責務）
         if st is None:
-            logger.warning("connect_slack_start_bad_state")
-            return _start_bad_state_page()
+            logger.warning(
+                "connect_slack_start_bad_state",
+                request_id=rid,
+                state_reason="bad_signature_or_expired",
+                diag=ConnectDiag.T01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.T01, request_id=rid)
         if st.bind_tag is None:
-            logger.warning("connect_slack_start_unbound_rejected")
-            return _start_bad_state_page()
+            # 署名は一致している＝email は信用してよい（診断行にマスクして載せる）。
+            logger.warning(
+                "connect_slack_start_unbound_rejected",
+                request_id=rid,
+                state_reason="unbound",
+                diag=ConnectDiag.T01.value,
+            )
+            return _start_bad_state_page(code=ConnectDiag.T01, request_id=rid, email=st.email)
         try:
             if not slack_redirect:
                 raise ValueError("SLACK_OAUTH_REDIRECT_URI が未設定です")
@@ -4252,10 +4347,12 @@ def create_app(
         except Exception as exc:
             logger.error(
                 "connect_slack_start_url_failed",
+                request_id=rid,
                 error=type(exc).__name__,
                 detail=str(exc)[:200],
+                diag=ConnectDiag.S06.value,
             )
-            return _start_unconfigured_page()
+            return _start_unconfigured_page(request_id=rid, email=st.email)
         return RedirectResponse(url, status_code=302, headers={"Cache-Control": "no-store"})
 
     @app.get("/slack/oauth/callback")
