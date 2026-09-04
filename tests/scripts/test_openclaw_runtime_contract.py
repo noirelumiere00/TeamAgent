@@ -2830,8 +2830,20 @@ def test_short_connect_request_phrases_match_the_single_source_of_truth() -> Non
     """
     fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
     assert len(fixture["must_match"]) >= 20
+    # 2026-09-04: Slack が機械的に付ける送信通知つきの実形も同じ正本で縛る。
+    assert len(fixture["must_match_with_slack_boilerplate"]) >= 5
+    assert len(fixture["must_not_match_with_slack_boilerplate"]) >= 5
     matrix = _caller_identity_report()["connect_phrase_matrix"]
-    assert len(matrix) == len(fixture["must_match"]) + len(fixture["must_not_match"])
+    assert len(matrix) == sum(
+        len(fixture[key])
+        for key in (
+            "must_match",
+            "must_not_match",
+            "must_match_with_slack_boilerplate",
+            "must_not_match_with_slack_boilerplate",
+            "must_match_ambiguous_do_not_suppress",
+        )
+    )
     mismatched = [
         row
         for row in matrix
@@ -3592,3 +3604,257 @@ def test_connect_guarantee_falls_back_to_a_threadless_post() -> None:
     assert case["postCount"] == 1
     assert case["threadTs"] is None
     assert re.fullmatch(r"C[A-Z0-9]{8,}", str(case["channel"])), case["channel"]
+
+
+# ══ Slack の送信通知つき本文（2026-09-04 本番実測 OC TD:45） ═══════════════════
+# 利用者が Slack 連携機能経由で「連携」（2 文字）と送ったのに、プラグインには
+# content_len=16 / normalized_len=16 で届き、12 文字上限に当たって
+# not_connect_request で落ちた。normalized_len == content_len ＝ 正規化で 1 文字も
+# 減っていないため、その 16 文字には Slack マークアップも絵文字も端の約物も無く、
+# 素のテキストが混ざっていると判る。
+#
+# ⚠️ これがテスト経路固有か、通常の利用者経路でも起きるかは **まだ未確定**。
+# connect_shape=… の指標を足したので、次の実機テストのログ 1 行で内訳が判る。
+
+
+def test_slack_boilerplate_does_not_swallow_a_connect_request() -> None:
+    """Slack の送信通知が付いても連携依頼として認識すること（本番実測の再現）。
+
+    文字数上限だけに頼るのを止め、(a) 全体一致 (b) 通知除去後の全体一致
+    (c) 除去後に中身のある行が 1 本だけならその行、のいずれかで通す。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    for entry in fixture["must_match_with_slack_boilerplate"]:
+        row = by_text[entry["text"]]
+        assert row["handled"] is True, entry
+        assert row["toolCallCount"] == 1, entry
+        assert row["replyIsToolMessage"] is True, entry
+
+
+def test_slack_boilerplate_does_not_open_a_false_positive() -> None:
+    """通知が付いていても、連携依頼でない本文は通さないこと（誤爆側）。
+
+    「連携解除」「連携できない」は通知を落としても依頼ではない。
+    中身のある行が 2 本ある混在（「〇〇社との連携について提案書を\\n連携」）も、
+    どちらが依頼か決められないので通さない（行のどれかが一致では通さない）。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    for entry in fixture["must_not_match_with_slack_boilerplate"]:
+        row = by_text[entry["text"]]
+        assert row["handled"] is False, entry
+        assert row["toolCallCount"] == 0, entry
+
+
+def test_connect_request_shape_is_logged_without_leaking_the_body() -> None:
+    """本文を出さずに「16 文字の内訳」が判る指標が、実ログ行に載ること（レビュー指摘 1）。
+
+    本番では content_len だけが出ており、中身が判らないため原因を特定できなかった。
+    行数・通知を落とせたか・どの規則なら通るか・連携語を含むかを出す。
+    """
+    report = _caller_identity_report()["connect_shape"]
+    units = {unit["label"]: unit["shape"] for unit in report["units"]}
+
+    # 素の「連携」は全規則で通る。
+    assert "whole:yes" in units["plain"]
+    # 通知が別行（装飾あり／なし）はどちらも「除去後に通る」と判る。
+    for label, kind in (
+        ("notice_line_decorated", "decorated_notice"),
+        ("notice_line_plain", "notice_line"),
+    ):
+        shape = units[label]
+        assert "lines:2" in shape, label
+        assert "content_lines:1" in shape, label
+        assert "whole:no" in shape, label
+        assert "stripped:yes" in shape, label
+        assert f"boiler:[{kind}]" in shape, label
+    # 長文・混在は通らないことが指標からも判る。
+    assert "stripped:no" in units["long_request"]
+    assert "content_lines:2" in units["mixed_lines"]
+    assert "leading_line:no" in units["mixed_lines"]
+    # 語彙に無い未知の定型は、通知除去では救えず先頭行規則だけが救う
+    # （＝この 2 行が「除去に頼りきりでない」ことの証拠）。
+    assert "boiler:[]" in units["unknown_boilerplate"]
+    assert "stripped:no" in units["unknown_boilerplate"]
+    assert "leading_line:yes" in units["unknown_boilerplate"]
+    # 連携語を含まない通常会話は word:no。
+    assert "word:no" in units["unrelated"]
+
+    # 実ログ行に載っていること（受理側と層1 の両方）。
+    for line in (report["logged"]["inboundLine"], report["logged"]["notConnectLine"]):
+        assert line is not None
+        assert "connect_shape=" in line
+        assert "content_lines:" in line
+
+    # G7: 本文・識別子が 1 文字も漏れないこと。
+    for line in report["logged"]["allLines"]:
+        assert "〇〇社" not in line
+        assert "提案書" not in line
+        assert "U09CX1CCBLN" not in line
+
+
+# ══ 二重返信の抑止（2026-09-04 本番実測 OC TD:45） ═══════════════════════════
+# 実測ログ: 保証経路が outcome=delivered で 1 通配信したあと、層2 の revise を経て
+# モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
+#
+# 上流は reply_payload_sending の結果が {cancel:true} なら、その payload の配信を
+# 丸ごと飛ばす（実物で確認: deliver-DGDN_7sT.js:36 で null 化 → :852 で cancelled →
+# :1329-1334 で suppressedPayloadOutcome → continue）。
+#
+# ⚠️ 抑止の根拠は「**配信に成功した**」ことだけに置く。一回性の台帳
+# （投稿失敗時に解放される）を根拠にすると、届いていないのにモデルも黙る
+# ＝完全な無音を作りうる。保証は絶対に落とさない。
+
+
+def test_successful_guarantee_suppresses_the_duplicate_model_reply() -> None:
+    """保証経路が配信成功したら、利用者に届くのは 1 通・state token も 1 個であること。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["delivered"]
+    assert outcome["guaranteePosts"] == 1
+    # モデル側の最終応答は送られない。
+    assert outcome["replyCancelled"] is True
+    assert outcome["cancelReason"] == "connect guarantee already delivered this inbound"
+    assert outcome["userVisibleMessages"] == 1
+    # 層2 が「oauth_connect を呼べ」と再要求しない＝もう 1 個 token を出させない。
+    assert outcome["layer2Revised"] is False
+    assert outcome["toolCallCount"] == 1
+    # 抑止したことは必ず観測できる（黙って落とさない）。
+    assert outcome["suppressionLogged"] is True
+
+
+def test_failed_guarantee_lets_the_model_reply_through() -> None:
+    """保証経路が配信失敗したら、従来どおりモデル経路が返すこと（無言にしない）。
+
+    抑止を一回性の台帳に紐づけると、ここで **誰も答えない** 状態を作ってしまう。
+    根拠を「配信成功」に限定していることの確認。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["post_failed"]
+    assert outcome["guaranteePosts"] == 0
+    assert outcome["replyCancelled"] is False
+    # 利用者には少なくとも 1 通届く。
+    assert outcome["userVisibleMessages"] == 1
+    # 保証が届いていないので、層2 の再要求は従来どおり働く。
+    assert outcome["layer2Revised"] is True
+    assert outcome["suppressionLogged"] is False
+
+
+def test_unrelated_turns_are_untouched_by_the_suppression() -> None:
+    """保証経路が未発火のターン（連携依頼でない）は一切影響を受けないこと。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["not_connect_request"]
+    assert outcome["guaranteePosts"] == 0
+    assert outcome["replyCancelled"] is False
+    assert outcome["layer2Revised"] is False
+    assert outcome["toolCallCount"] == 0
+    assert outcome["userVisibleMessages"] == 1
+    assert outcome["suppressionLogged"] is False
+
+
+def test_suppression_never_wins_over_an_unfinished_delivery() -> None:
+    """保証経路が配信中（成否未確定）のあいだはモデル応答を落とさないこと。
+
+    ここで落とすと、その後に投稿が失敗した場合 **誰も答えない** 状態になる。
+    抑止の根拠を「一回性の台帳」ではなく「配信成功の台帳」に置いていることの検証。
+    配信失敗のシナリオでは一回性の台帳も解放済みなので両者の違いが出ず、
+    この競合ケースだけが 2 つの台帳を区別できる。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["in_flight"]
+    assert outcome["replyCancelled"] is False
+    assert outcome["modelReplyDelivered"] is True
+    # 最終的に保証経路も届く（この場合だけ 2 通になるが、無言よりはるかに良い）。
+    assert outcome["guaranteePosts"] == 1
+
+
+# ══ 規則の確度と抑止の分離（2026-09-04 レビュー指摘 重大1・重大2） ═══════════
+# トリガー（連携リンクを出す）と抑止（モデルの最終応答を消す）は**別の判断**である。
+# 一致規則 (c) leading_line は「先頭行が連携依頼・後続行に連携語が無い」しか見ないので、
+# 「連携\n今日の予定を教えて」のように後続行が別の依頼でも真になる。
+# その確度でモデル応答を消すと **別の依頼への回答が消える**（実測した回帰）。
+
+
+def test_each_matching_rule_is_recorded_as_declared_in_the_fixture() -> None:
+    """どの規則で一致したかが fixture の宣言どおりであること。
+
+    これにより 3 規則がそれぞれ意味を持つ（どれか 1 つを無効化すると、
+    その規則で一致するはずの本文が別の規則へ落ちて rule が変わり赤くなる）。
+    以前は (a)(b) が (c) に完全に包含され、無効化しても緑のままだった。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    matrix = _caller_identity_report()["connect_phrase_matrix"]
+    by_text = {row["text"]: row for row in matrix}
+    declared = 0
+    for key in (
+        "must_match",
+        "must_match_with_slack_boilerplate",
+        "must_match_ambiguous_do_not_suppress",
+    ):
+        for entry in fixture[key]:
+            row = by_text[entry["text"]]
+            assert row["rule"] == entry["rule"], (key, entry["text"], row["rule"])
+            declared += 1
+    assert declared >= 40
+    # 3 規則すべてが実際に使われていること（どれかが死んでいたら気付ける）。
+    used = {
+        by_text[e["text"]]["rule"]
+        for k in (
+            "must_match",
+            "must_match_with_slack_boilerplate",
+            "must_match_ambiguous_do_not_suppress",
+        )
+        for e in fixture[k]
+    }
+    assert used == {"whole", "stripped", "leading_line"}
+
+
+def test_precise_connect_forms_are_fully_deduplicated() -> None:
+    """確度の高い規則（whole / stripped）では、利用者に届くのは 1 通であること。"""
+    by_rule = _caller_identity_report()["guarantee_suppression"]["by_rule"]
+    for label in ("whole", "stripped"):
+        outcome = by_rule[label]
+        assert outcome["rule"] == label
+        assert outcome["guaranteePosts"] == 1, label
+        assert outcome["replyCancelled"] is True, label
+        assert outcome["userVisibleMessages"] == 1, label
+
+
+def test_ambiguous_connect_forms_never_delete_the_users_other_answer() -> None:
+    """曖昧な規則（leading_line）ではモデルの応答を消さないこと（回帰の再発防止）。
+
+    「連携\\n今日の予定を教えて」で抑止を効かせると、**予定の回答が消える**。
+    実測: guaranteePosted:1 / modelAnswerCancelled:true / userGetsTheirAnswer:false。
+    origin/dev では普通に回答していたので、これは PR による回帰だった。
+
+    曖昧な形では「保証 1 通 + モデル 1 通」に留める＝「無言より 2 通」の原則を守る。
+    """
+    by_rule = _caller_identity_report()["guarantee_suppression"]["by_rule"]
+    for label in ("leading_line_other_request", "leading_line_unknown_boilerplate"):
+        outcome = by_rule[label]
+        assert outcome["rule"] == "leading_line", label
+        # 連携リンクは届く（トリガーは従来どおり立つ）。
+        assert outcome["guaranteePosts"] == 1, label
+        # 利用者自身の別の依頼への回答は消さない。
+        assert outcome["replyCancelled"] is False, label
+        assert outcome["modelAnswerDelivered"] is True, label
+        assert outcome["userVisibleMessages"] == 2, label
+
+
+def test_classification_survives_run_binding_before_content_arrives() -> None:
+    """分類結果が run 束縛側の ingress へ引き継がれること（2026-09-04 レビュー指摘）。
+
+    本番には「content 無しの通知が先に来て run へ束縛され、そのあと content つきの
+    再通知が来る」順序がある。bindRun が `connectRequest` だけを複写していたため、
+    束縛側の `connectRequestRule` が null のまま残り、
+    `connectRuleAllowsSuppression(null) === false` で抑止が効かず、
+    **「連携」単独なのに 2 通返る**状態になっていた（実測 userVisible:2）。
+
+    無音にはならない安全側の重複だが、本番でそれを見たときに
+    「run 束縛の問題」か「規則の問題」かを判別できず原因を取り違える。
+    判定・抑止・診断が同じ受信について食い違わないよう、まとめて複写する。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["bind_before_content"]
+    assert outcome["boundRule"] == "whole"
+    assert outcome["guaranteePosts"] == 1
+    # 束縛側にも規則が渡っているので抑止が効き、利用者に届くのは 1 通。
+    assert outcome["replyCancelled"] is True
+    assert outcome["userVisibleMessages"] == 1

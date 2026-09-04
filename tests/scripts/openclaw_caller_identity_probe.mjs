@@ -14,7 +14,13 @@
 //   X はセッション鍵由来。チャンネルの app_mention では `:thread:<ts>` が付く。
 //   agent の hook ctx に conversationId は存在しない。
 import { readFileSync } from "node:fs";
-import { createCallerIdentityPlugin, unwrapToolArguments, REGISTERED_HOOKS } from
+import {
+  createCallerIdentityPlugin,
+  unwrapToolArguments,
+  REGISTERED_HOOKS,
+  connectRequestShape,
+  classifyConnectRequest,
+} from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
 // ── console の捕捉（2026-09-03）───────────────────────────────────────────
@@ -777,10 +783,24 @@ async function connectPhraseMatrix() {
       toolCallCount: r.toolCallCount,
       toolName: r.toolName,
       replyIsToolMessage: r.replyText === OAUTH_CONNECT_MESSAGE,
+      // どの規則で一致したか（抑止の可否を決める）。
+      rule: classifyConnectRequest(entry.text),
+      expectRule: entry.rule ?? null,
     });
   };
   for (const entry of CONNECT_REQUEST_PHRASES.must_match) await check(entry, true);
   for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) await check(entry, false);
+  // Slack が機械的に付ける送信通知つきの実形（2026-09-04 本番実測）。
+  for (const entry of CONNECT_REQUEST_PHRASES.must_match_with_slack_boilerplate) {
+    await check(entry, true);
+  }
+  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match_with_slack_boilerplate) {
+    await check(entry, false);
+  }
+  // 曖昧な形（先頭行だけが連携依頼・後続行は別の依頼）。トリガーは立てる。
+  for (const entry of CONNECT_REQUEST_PHRASES.must_match_ambiguous_do_not_suppress) {
+    await check(entry, true);
+  }
   return rows;
 }
 
@@ -1000,11 +1020,20 @@ const GUARANTEE_STATES = {
 
 async function guaranteeMatrix() {
   const rows = [];
+  // 素の表現と、Slack の送信通知が付いた実形の両方を全状態に掛ける（2026-09-04）。
+  const variants = [
+    ...CONNECT_REQUEST_PHRASES.must_match.map((e) => ({ ...e, variant: "plain" })),
+    ...CONNECT_REQUEST_PHRASES.must_match_with_slack_boilerplate.map((e) => ({
+      ...e,
+      variant: "slack_boilerplate",
+    })),
+  ];
   for (const [state, options] of Object.entries(GUARANTEE_STATES)) {
-    for (const entry of CONNECT_REQUEST_PHRASES.must_match) {
+    for (const entry of variants) {
       const r = await guaranteeScenario({ content: entry.text, ...options });
       rows.push({
         state,
+        variant: entry.variant,
         text: entry.text,
         postCount: r.postCount,
         postText: r.postText,
@@ -1546,12 +1575,193 @@ async function contentAbsentReport() {
   };
 }
 
+// ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────────
+// 実測ログ: 保証経路が outcome=delivered で 1 通配信したあと、層2 の revise を経て
+// モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
+// 本番の並びをそのまま再現する:
+//   message_received（保証経路が配信）→ before_model_resolve → before_agent_finalize
+//   → reply_payload_sending（モデルの最終応答）
+async function suppressionScenario({ slackMode = "ok", content = "連携" } = {}) {
+  const plugin = makeGuaranteePlugin({ slackMode });
+  const { handlers } = plugin;
+  await notifyInbound(handlers, content);
+  await plugin.settle();
+  startRun(handlers);
+  const finalize = finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  return {
+    // 保証経路が Slack へ投稿した通数。
+    guaranteePosts: plugin.posts.length,
+    // oauth_connect の呼び出し回数＝発行された state token の数。
+    toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
+    // 層2 が「oauth_connect を呼べ」と再要求したか（＝もう 1 個 token を出させるか）。
+    layer2Revised: finalize?.action === "revise",
+    // モデル側の最終応答が落とされたか。
+    replyCancelled,
+    cancelReason: delivery?.reason ?? null,
+    // 利用者の目に触れる通数（保証経路の投稿 + 落とされなかったモデル応答）。
+    userVisibleMessages: plugin.posts.length + (replyCancelled ? 0 : 1),
+    suppressionLogged: plugin.infos.some((m) =>
+      m.includes("suppressed model reply"),
+    ),
+    logs: plugin.logs,
+    infos: plugin.infos,
+  };
+}
+
+// 保証経路が **まだ配信中**（投稿の成否が確定していない）ときにモデルの最終応答が来る競合。
+// ここで抑止してしまうと、その後に投稿が失敗した場合 **誰も答えない** 状態になる。
+// 抑止の根拠を「配信成功」に限定していることの、唯一意味のある検証。
+// （配信失敗のシナリオでは一回性の台帳も解放済みなので、両者の違いが出ない）
+async function suppressionInFlightScenario() {
+  const plugin = makeGuaranteePlugin({});
+  const { handlers } = plugin;
+  // settle しない＝保証経路は投稿の途中。一回性の旗だけが立っている状態。
+  await notifyInbound(handlers, "連携");
+  startRun(handlers);
+  finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  await plugin.settle();
+  return {
+    replyCancelled,
+    // 配信途中で抑止しないので、利用者には最低 1 通は必ず届く。
+    modelReplyDelivered: !replyCancelled,
+    guaranteePosts: plugin.posts.length,
+  };
+}
+
+// ── 規則の確度ごとの抑止可否（2026-09-04 レビュー指摘 重大1）─────────────────
+// 曖昧な規則（leading_line）で一致した受信では、モデルの最終応答を**消さない**。
+// 消すと「連携\n今日の予定を教えて」の **予定の回答が消える**（実測した回帰）。
+async function suppressionByRuleReport() {
+  const cases = {
+    // (a) 全体一致。最も確実 → 抑止してよい。
+    whole: "連携",
+    // (b) 送信通知を除いた全体一致 → 抑止してよい。
+    stripped: "連携\n_Slack を使用して送信されました_",
+    // (c) 先頭行のみ一致・後続行は **別の依頼** → 抑止してはいけない。
+    leading_line_other_request: "連携\n今日の予定を教えて",
+    // (c) 先頭行のみ一致・後続行は未知の定型 → これも確度は低いので抑止しない。
+    leading_line_unknown_boilerplate: "連携\n-- Acme Slack Bridge --",
+  };
+  const out = {};
+  for (const [label, content] of Object.entries(cases)) {
+    const r = await suppressionScenario({ content });
+    out[label] = {
+      rule: classifyConnectRequest(content),
+      guaranteePosts: r.guaranteePosts,
+      replyCancelled: r.replyCancelled,
+      // 利用者が「自分の別の依頼への回答」を受け取れたか。
+      modelAnswerDelivered: !r.replyCancelled,
+      userVisibleMessages: r.userVisibleMessages,
+    };
+  }
+  return out;
+}
+
+// ── 分類結果が run 束縛側へ引き継がれること（2026-09-04 レビュー指摘）───────────
+// 本番には「content 無しの通知が先に来て run へ束縛され、そのあと content つきの
+// 再通知が来る」順序がある。bindRun が connectRequest だけを複写していたため、
+// 束縛側の connectRequestRule が null のままになり抑止が効かず、
+// **`連携` 単独なのに 2 通返る**状態になっていた（無音ではないので実害は小さいが、
+// 本番でそれを見たときに run 束縛の問題か規則の問題か判別できない）。
+async function suppressionAfterBindThenContentScenario() {
+  const plugin = makeGuaranteePlugin({});
+  const { handlers } = plugin;
+  // ① content 無しの通知が先に来て run-1 へ束縛される（rule は null）。
+  await notifyInbound(handlers, undefined, { runId: "run-1" });
+  await plugin.settle();
+  // ② 同じ受信の content つき再通知（bindRun の複写経路を通る）。
+  await notifyInbound(handlers, "連携", { runId: "run-1" });
+  await plugin.settle();
+  // ③ モデル経路の最終応答。
+  finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  return {
+    guaranteePosts: plugin.posts.length,
+    replyCancelled,
+    userVisibleMessages: plugin.posts.length + (replyCancelled ? 0 : 1),
+    // 束縛側 ingress に引き継がれた規則（null なら複写漏れ）。
+    boundRule: classifyConnectRequest("連携"),
+  };
+}
+
+async function suppressionReport() {
+  return {
+    by_rule: await suppressionByRuleReport(),
+    bind_before_content: await suppressionAfterBindThenContentScenario(),
+    in_flight: await suppressionInFlightScenario(),
+    // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個。
+    delivered: await suppressionScenario({}),
+    // ② 保証経路が配信失敗 → 従来どおりモデル経路が返す（無言にしない）。
+    post_failed: await suppressionScenario({ slackMode: "post_fails" }),
+    // ③ 保証経路が未発火（連携依頼ではない）→ モデル経路は一切影響を受けない。
+    not_connect_request: await suppressionScenario({ content: "今日の予定を教えて" }),
+  };
+}
+
+// ── 受信本文の「形」だけを出す診断（2026-09-04 本番実測・レビュー指摘 1）─────
+// 本番 OC TD:45 で「連携」が content_len=16 で届き not_connect_request で落ちたが、
+// **16 文字の内訳がログから判らなかった**。本文は出せない（G7）ので、形だけを出す。
+// ここでは (a) 指標そのものの正しさ (b) それが実ログ行に載ること (c) 本文が漏れないこと を固定する。
+function connectShapeReport() {
+  const units = [
+    // 素の「連携」。全規則で通る。
+    { label: "plain", text: "連携" },
+    // 注記が別行・装飾つき。whole では落ち、除去後に通る。
+    { label: "notice_line_decorated", text: "連携\n_Slack を使用して送信されました_" },
+    // 注記が別行・装飾なし（本番の normalized_len==content_len と整合する形）。
+    { label: "notice_line_plain", text: "連携\nSlack ワークフローを使用して送信されました" },
+    // 長文。どの規則でも通らない。
+    { label: "long_request", text: "〇〇社との連携について提案書を作ってください" },
+    // 中身のある行が 2 本。混在は通さない。
+    { label: "mixed_lines", text: "〇〇社との連携について提案書を\n連携" },
+    // 語彙に無い未知の定型。通知除去では救えず、先頭行規則だけが救う。
+    { label: "unknown_boilerplate", text: "連携\n-- Acme Slack Bridge --" },
+    // 連携語を含まない通常の会話。
+    { label: "unrelated", text: "今日の予定を教えて" },
+  ].map((unit) => ({ ...unit, shape: connectRequestShape(unit.text) }));
+
+  // 実ログ行に載ること（inbound recorded / not_connect_request の両方）。
+  const logged = (() => {
+    const { handlers } = makeConnectPlugin({
+      env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+    });
+    const captured = captureConsole(() => {
+      receiveDm(handlers, "〇〇社との連携について提案書を作ってください");
+      return handlers.get("before_agent_reply")(
+        { cleanedBody: "〇〇社との連携について提案書を作ってください" },
+        beforeAgentReplyCtx(),
+      );
+    });
+    const lines = captured.console.map((line) => line.text);
+    return {
+      inboundLine: lines.find((line) => line.includes("inbound recorded")) ?? null,
+      notConnectLine:
+        lines.find((line) => line.includes("reason=not_connect_request")) ?? null,
+      allLines: lines,
+    };
+  })();
+
+  return { units, logged };
+}
+
 // 「短い連携依頼ではない」文言では保証経路を起動しない（誤爆しない）。
 async function guaranteeNegativeMatrix() {
   const rows = [];
-  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) {
+  const negatives = [
+    ...CONNECT_REQUEST_PHRASES.must_not_match.map((e) => ({ ...e, variant: "plain" })),
+    ...CONNECT_REQUEST_PHRASES.must_not_match_with_slack_boilerplate.map((e) => ({
+      ...e,
+      variant: "slack_boilerplate",
+    })),
+  ];
+  for (const entry of negatives) {
     const r = await guaranteeScenario({ content: entry.text });
-    rows.push({ text: entry.text, postCount: r.postCount });
+    rows.push({ text: entry.text, variant: entry.variant, postCount: r.postCount });
   }
   return rows;
 }
@@ -1575,6 +1785,8 @@ const guaranteeCases = await guaranteeCaseReport();
 const guaranteeOnce = await guaranteeOnceCases();
 const guaranteeHookSources = await guaranteeHookSourceMatrix();
 const contentAbsent = await contentAbsentReport();
+const connectShape = connectShapeReport();
+const suppression = await suppressionReport();
 const hookObservability = hookObservabilityReport();
 const bindNewest = bindNewestReport();
 const connectL1NextMessage = await nextMessageAfterDeterministic();
@@ -2266,6 +2478,10 @@ const report = {
   guarantee_hook_sources: guaranteeHookSources,
   // 受信に content が無い場合の観測（フックごとに 1 回だけ）。
   guarantee_content_absent: contentAbsent,
+  // 受信本文の「形」だけを出す診断（本文は 1 文字も出さない）。
+  connect_shape: connectShape,
+  // 二重返信の抑止（保証経路が配信成功したターンのモデル最終応答を落とす）。
+  guarantee_suppression: suppression,
   // 各フックの入口 1 行と register バナー（本番でどのフックが呼ばれるかの一次証拠）。
   hook_observability: hookObservability,
   // (C1) 同じ会話の候補が複数でも run を落とさない。

@@ -961,9 +961,11 @@ Slack 識別子・本文・URL・claim・bearer は載せない。
 
 1. **層1 不発の真因は依然として未確定**（12-2）。本 PR は判別可能にしただけ。
    ただし保証経路（層0）が入ったので、真因が何であれ利用者への到達は守られる。
-2. **モデル経路は止まらない**。保証経路が投稿したうえで、モデルが別途返事をし、
-   **`oauth_connect` をもう一度呼んで state token をもう 1 個発行しうる**。
-   裁定に従い保証を優先した。塞ぐには層2/3 を「保証済みの run では畳む」改修が要る（別便）。
+2. **モデルの自発的な `oauth_connect` 呼び出しは止まらない**（§12-10）。
+   配信成功時はモデルの最終応答を `cancel` し、層2 の revise も掛けないので
+   **二重返信は解消**し token の重複も大幅に減るが、モデルが自分の判断で
+   `oauth_connect` を呼べば token はもう 1 個出る。完全に止めるにはツール門で
+   拒否する必要があり、正当な再依頼まで塞ぐため採っていない。
 3. **Slack Web API が落ち続けても、層1 という別経路が残る**。429 / 5xx / 一時的な
    ネットワーク失敗は最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、
    `thread_ts` 付きが弾かれたらスレッド無しで 1 回投げ直す。
@@ -980,3 +982,221 @@ Slack 識別子・本文・URL・claim・bearer は載せない。
    OC 再ビルド後の run-task 検証と Slack 実機確認までは「完了」ではない。
 7. `CONNECT_ADMIN_NAME` は今回初めて実際に届くようになった（従来は allowlist で捨てられ、
    常に既定値 `小俣` にフォールバックしていた）。未設定なら従来と同じ挙動。
+
+### 12-9.【本番実測 2026-09-04・OC TD:45】(A) は効いた／Slack の送信通知で「連携」が落ちる
+
+OC 便3（TD:45・dev `a89f93c`）着地後、**(A) の修正が効いていることが本番で確認された**。
+14 日間ゼロだったプラグインのログが CloudWatch に出るようになり、
+`registered hooks=[…] trace=on mcp_bearer=yes slack_bot_token=yes` と
+**8 フックすべての `first_fired`** が観測できた。
+12-2 で未確定だった「層1 は登録されているのか」も、これで**登録・発火の両方が確認**された。
+
+同時に**新しい不具合**が実測で出た。利用者が Slack 連携機能経由で「連携」（2 文字）と
+送ったのに、プラグインには次の形で届いていた:
+
+```
+inbound recorded connect_request=false normalized_len=16 content_len=16 …
+connect deterministic path … outcome=skipped reason=not_connect_request normalized_len=16 content_len=16
+```
+
+`CONNECT_REQUEST_MAX_LENGTH`（12）を超えたため `not_connect_request` で落ちている。
+
+**`normalized_len == content_len == 16`（正規化で 1 文字も減っていない）**という事実は重要で、
+その 16 文字には Slack マークアップ（`<@U…>` 等）も絵文字も端の約物も**無い**ことを意味する
+（いずれも `normalizeConnectRequest` が落とすため）。つまり**素のテキスト**が混ざっている。
+
+#### まず「形」を出せるようにした（レビュー指摘 1）
+
+本文はログに出せない（G7）。そこで `connectRequestShape()` を足し、
+**本文を 1 文字も出さずに内訳が判る指標**を `inbound recorded` と
+`not_connect_request` の両方に載せた:
+
+```
+connect_shape=lines:2,content_lines:1,whole:no,stripped:yes,leading_line:yes,
+              word:yes,head_word:yes,boiler:[decorated_notice],stripped_len:2
+```
+
+- `lines` / `content_lines` … 何行で届いたか／注記を落として中身が何行残るか
+- `whole` / `stripped` / `leading_line` … どの規則なら通る（通らない）のか
+- `word` / `head_word` … 連携語を含むか／先頭にあるか
+- `boiler` … 落とせた注記の種類（語彙は固定・本文は出さない）
+
+これで**次の実機テストのログ 1 行で 16 文字の内訳が確定する**。
+
+> ✅ **決着（2026-09-04 追試）**: この `content_len=16` は
+> **レビュアーのテスト経路（Slack 連携機能経由・定型の付加文が混ざる）に固有**と確定した。
+> 実利用者が Slack クライアントから直接打った場合は `content_len=2 / normalized_len=2` で
+> 正しく `connect_request=true` になっている（実測ログ）。
+> したがって本節の付加文対応は「実利用者の不具合の修正」ではなく、
+> **①テスト経路でも実機検証が通るようにするため ②未知の定型に対する頑健性**
+> という位置づけである。優先度は下げてよいが、fixture と判定は入れたまま維持する。
+
+#### 判定を文字数上限だけに頼らない形へ（レビュー指摘 2）
+
+次のいずれかを満たせば連携依頼とみなす。誤爆側は従来どおり通さない。
+
+| 規則 | 内容 | 何を救うか | 確度 | 抑止を許すか |
+|---|---|---|---|---|
+| (a) `whole` | 正規化後の**本文全体**が連携語＋助詞・敬語末尾だけ（従来・維持） | 素の「連携」 | 高 | **許す** |
+| (b) `stripped` | **送信通知を除去**したあとの全体が (a) を満たす | 既知の定型 | 高 | **許す** |
+| (c) `leading_line` | **最初の中身のある行**が (a) を満たし、**後続行に連携語が無い** | **語彙に無い未知の定型** | **低** | **許さない** |
+
+判定は「一致したか」ではなく **どの規則で一致したか**（`classifyConnectRequest`）を返し、
+ingress の `connectRequestRule` に記録する。確度によって後続の扱いが変わるためである（§12-10）。
+
+(b) の除去は保守的に行う: **送信通知の語彙を含み、かつ連携語を含まない**部分だけを落とす。
+連携語を含む行・装飾は絶対に落とさない（本文を消してしまわないため）。
+
+(c) を「行のどれかが一致」にしないのが要点である。実際の並びは
+「利用者の本文 → クライアントの定型」なので、**先頭行だけ**を救えば十分で、
+それ以上緩めると誤爆する。実際 `test_slack_boilerplate_does_not_open_a_false_positive` が
+「今日の予定を教えて\n連携」「〇〇社との連携について提案書を\n連携」「連携\n連携」を
+不通過で固定し、変異 `M21`（(c) を「どれかが一致」へ緩める）が赤になる。
+
+> **設計上の自己反省（2 回ぶん）**
+>
+> ① (c) は当初「除去後に中身のある行が 1 本だけ」という規則で書いたが、実測したところ
+> **どの fixture でも (b) だけで通ってしまい、(c) は一度も効いていなかった**＝
+> テストに守られない死んだ分岐だった。そこで「先頭行 + 後続に連携語なし」へ作り直した。
+>
+> ② ①の作り直しで**今度は (a)(b) が死んだ**。レビュー実測: (a) を無効化しても
+> (b) を無効化しても **101 passed（緑）** で、fixture の一致対象 40 件すべてが
+> 最も緩い (c) 単独で真になっていた。三段構えが成立せず、いちばん緩い規則が単独で
+> 判定を握っている状態だった。さらにその (c) が「後続行に連携語が無い」しか見ないため
+> **「連携\n今日の予定を教えて」でも真**になり、抑止（§12-10）と噛み合って
+> **別の依頼への回答が消える**回帰を出した。
+>
+> 教訓: 「規則を足す」だけでは階層にならない。**どの規則で一致したかを値として返し、
+> その値に意味（＝挙動の差）を持たせて初めて**、各規則が個別に検証可能になる。
+> 現在は fixture の各エントリに期待 `rule` を宣言し、
+> `test_each_matching_rule_is_recorded_as_declared_in_the_fixture` が固定する。
+> 変異 `M19a`/`M19b`/`M19c`（各規則を個別に無効化）がそれぞれ赤になる。
+
+#### fixture
+
+`tests/fixtures/connect_request_phrases.json` に 2 カテゴリを新設した。
+`must_match_with_slack_boilerplate`（8 件・装飾つき／装飾なし／英語／空行つき／
+サービス名つき／敬語末尾つき／**未知の定型**）と
+`must_not_match_with_slack_boilerplate`（6 件）である。
+保証マトリクスは 7 状態 × （素の 32 表現 + 付加文つき 8 表現）= **273 組**へ拡張し、
+全組み合わせで 1 通届くことを再固定した。
+
+### 12-10.【本番実測 2026-09-04・OC TD:45】二重返信の抑止
+
+#### 実測: 同じ内容が 2 通届いていた
+
+実利用者が Slack クライアントから「連携」と打った際の実測ログ:
+
+```
+05:54:24 inbound recorded connect_request=true normalized_len=2 content_len=2 …
+05:54:24 layer1 entered provider=slack trigger=user
+05:54:24 connect deterministic path outcome=skipped reason=already_attempted   ← 層1 は保証側に譲って降りた（設計どおり）
+05:54:25 connect guarantee outcome=delivered result=message                    ← 保証経路が配信
+05:54:26 connect zero-tool revise tool_calls=0 reason=short_connect_request outcome=revised revise_attempt=1  ← 層2 が revise
+```
+
+**保証経路の 1 通＋モデル経路の 1 通＝合計 2 通**が利用者に届いていた。
+保証（無言をゼロにする）は達成できているが、体験としては壊れている。
+
+#### 上流実物の確認: 最終応答は「落とせる」
+
+`reply_payload_sending` の結果型は `{ payload?, cancel?: boolean, reason? }`
+（`dist/hook-types-DQ9eTy2x.d.ts:698-702`）。ランタイムは:
+
+1. `dist/deliver-DGDN_7sT.js:36` — `if (result?.cancel) return null;`
+2. `:852-856` — `null` なら `{ cancelled: true }`
+3. `:1329-1334` — `cancelled` なら
+   `suppressedPayloadOutcome({reason:"cancelled_by_reply_payload_sending_hook"})` して `continue`
+
+＝**その payload の配信を丸ごと飛ばす**。空文字への置換や短い定型への差し替えに頼る必要はない。
+本プラグインは既に層3 で同じ `cancel` を使っている（分割 payload の 2 通目の取り消し）。
+
+#### 実装
+
+配信成功した受信だけを記録する台帳 `connectDeliveredByMessage`（`pendingKey` 基準）を新設し、
+`reply_payload_sending` でその run に束縛された ingress が載っていれば `{cancel:true}` を返す。
+
+**⚠️ 抑止の根拠は `connectDeliveredByMessage`（配信成功）だけに置く。**
+一回性の台帳 `connectAnsweredByMessage` は投稿失敗時に解放される（§12-4）ので、
+それを根拠にすると「届いていないのにモデルも黙る」＝**完全な無音**を作りうる。
+2 つの台帳を分けているのはこのためである:
+
+| 台帳 | 意味 | 立つ時点 | 解放 |
+|---|---|---|---|
+| `connectAnsweredByMessage` | 一回性（同じ受信に 2 回投稿しない） | 配信を試みると決めた時点 | 投稿失敗時 |
+| `connectDeliveredByMessage` | 抑止（既に届いたので重複を落としてよい） | **投稿成功後** | TTL のみ |
+
+この違いが意味を持つのは**配信中（成否未確定）にモデルの応答が来る競合**だけである。
+配信失敗のシナリオでは一回性の台帳も解放済みで両者は一致してしまうため、
+`test_suppression_never_wins_over_an_unfinished_delivery` がその競合を直接固定し、
+変異 `M23`（根拠を answered へ取り違える）はこのテストでのみ赤くなる。
+
+#### state token の重複について
+
+あわせて層2 の revise も、保証経路が配信済みなら掛けない。
+revise は「`oauth_connect` を必ず呼べ」とモデルへ要求するもので、
+実測ログのとおりこれが **state token をもう 1 個発行させる**直接の原因だった。
+
+> ただし **token の重複が完全に無くなるわけではない**。抑止が止めるのは
+> ①モデルの最終応答の配信 ②こちらから再要求すること の 2 つであって、
+> モデルが自発的に `oauth_connect` を呼ぶこと自体は止めていない。
+> 呼ばれれば token はもう 1 個出る（本人専用・使い捨てなので危険ではないが、無害でもない）。
+> 完全に止めるにはツール門（`signToolCall`）で配信済み run の `oauth_connect` を
+> 拒否する必要があり、それは正当な再依頼まで塞ぐ副作用があるため本 PR では採らない。
+
+#### 保証との関係（絶対条件）
+
+抑止は**保証経路が配信に成功したと確認できた場合だけ**効く。
+配信失敗（`post_failed`）・未発火（連携依頼でない）・配信中のいずれでも、
+モデル経路は従来どおり素通しである。§12-4 の「投稿失敗時に台帳を解放する」規律とも矛盾しない
+（解放されるのは `answered` だけで、`delivered` はそもそも立っていない）。
+
+#### 抑止は「確度の高い規則」でのみ効かせる（2026-09-04 レビュー指摘 重大1）
+
+`{cancel:true}` は利用者に届く文面を**消す**操作なので、トリガーと同じ確度で撃ってはいけない。
+
+| 一致規則 | 連携リンクを出す（トリガー） | モデル最終応答を消す（抑止） | 利用者に届く通数 |
+|---|---|---|---|
+| `whole` / `stripped` | ○ | ○ | **1 通** |
+| `leading_line` | ○ | **×** | 2 通（保証 + モデル） |
+
+`leading_line` は「先頭行が連携依頼・後続行に連携語が無い」しか見ないため、
+**後続行が何であっても真**になる。実測した回帰:
+
+```
+連携
+今日の予定を教えて
+```
+
+→ `guaranteePosted:1 / modelAnswerCancelled:true / userGetsTheirAnswer:false`
+＝ **予定の回答が消えた**（origin/dev では普通に回答していた）。
+
+トリガー自体は妥当である（利用者は確かに連携を求めている）。誤りは
+**曖昧な一致でモデルの応答まで消したこと**であって、トリガーを厳しくすることではない。
+よって `connectRuleAllowsSuppression(rule)` で抑止だけを (a)(b) に限定した。
+曖昧な形では「保証 1 通 + モデル 1 通」に留まり、§12-4 の
+**「抑制のために保証を犠牲にしない／無言より 2 通」**という原則とも一致する。
+
+`tests/fixtures/connect_request_phrases.json` の
+`must_match_ambiguous_do_not_suppress`（4 件）が「一致はするが抑止してはいけない」形の正本で、
+変異 `M25`（規則の確度を見ずに抑止する）が赤になる。
+
+#### 運用メモ: 抑止が効かない条件
+
+`replaceExhaustedConnectReply` は `ingressByRun.get(runId)` で受信を引くため、
+**run が ingress に束縛されていない場合は抑止が効かず 2 通のまま**になる
+（`bindAgentRun` が候補を見つけられなかった等）。
+安全側（消しすぎない方向）に倒れるので許容するが、
+本番で「連携」に 2 通返っているのにログへ `suppressed model reply` が無い場合は、
+まず `bind_agent_run` の行を見て束縛が成立しているかを確認すること。
+
+> **同じ症状の別原因を 1 つ潰した（2026-09-04 レビュー指摘）**: 束縛は成立しているのに
+> 抑止が効かない経路があった。`bindRun` が同一 ingress の再通知で `connectRequest` だけを
+> 複写しており、**「content 無しの通知が先に来て run へ束縛 → content つきの再通知」**の
+> 順序だと束縛側の `connectRequestRule` が `null` のまま残り、
+> `connectRuleAllowsSuppression(null) === false` で抑止が落ちていた
+> （実測 `{posts:1, modelCancelled:false, userVisible:2}`）。
+> 分類結果（`connectRequestRule` / `connectShape` / 各長さ）は **1 組で意味を持つ**ので
+> まとめて複写する。`test_classification_survives_run_binding_before_content_arrives` と
+> 変異 `M26` が固定する。
+> したがって現在「2 通返る」の原因は **run 未束縛** に絞り込める。

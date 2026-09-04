@@ -2,135 +2,167 @@
   "schema_version": 1,
   "description": "連携依頼の 3 層防御（層1: before_agent_reply で oauth_connect を直接呼ぶ／層2: 0 tool call の revise）が『短い連携依頼』とみなす境界の単一正本。plugin(dist/index.js の isShortConnectRequest) の実装と、probe の期待値が、この 1 本からずれないための契約。実装を変えるときは必ずここを先に変える。",
   "background": "本番実測 2026-09-03: 利用者が DM で「連携」と送っても Aico がツールを呼ばず「未登録／管理者に問い合わせ」と自作回答する事故が同一 DM で 5 回以上。mcp 側の mcp_connect_intent はゼロ。",
-  "rule": "前後の空白・句読点・絵文字・Slack マークアップ・敬語末尾（して/したい/する/させて/してくれる/できる（疑問）/お願いします/してください/を 等）を落として正規化した本文が、全体で 12 文字以下 かつ『(再)?(Google|Slack|グーグル|スラック)?(連携|接続|connect)(助詞)?』だけで構成されるときに限り真。部分一致はしない。",
+  "rule": "前後の空白・句読点・絵文字・Slack マークアップ・敬語末尾を落として正規化した本文が、全体で 12 文字以下 かつ『(再)?(Google|Slack|グーグル|スラック)?(連携|接続|connect)(助詞)?』だけで構成されるときに真。部分一致はしない。一致は 3 規則のいずれかで、**どの規則で一致したかを rule として記録する**: (a) whole=本文全体が一致 / (b) stripped=Slack の送信通知（`_…を使用して送信されました_` 等・送信通知の語彙を含みかつ連携語を含まない部分）を除去した全体が一致 / (c) leading_line=先頭の中身のある行が一致し、後続行に連携語が無い。(c) は未知の定型への受け皿で **確度が最も低い**: 後続行が別の依頼でも真になるため、この規則で一致した受信では **モデルの最終応答を消さない**（保証1通＋モデル1通に留める）。",
   "must_match": [
     {
       "text": "連携",
-      "note": "本番で実際に送られた一語"
+      "note": "本番で実際に送られた一語",
+      "rule": "whole"
     },
     {
       "text": "連携して",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携したい",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携したいです",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携してください",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携して下さい",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携お願いします",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携をお願いします",
-      "note": "助詞＋敬語末尾"
+      "note": "助詞＋敬語末尾",
+      "rule": "whole"
     },
     {
       "text": "連携をお願いいたします",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "連携よろしくお願いします",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "Google連携",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "Google 連携して",
-      "note": "空白入り"
+      "note": "空白入り",
+      "rule": "whole"
     },
     {
       "text": "グーグル連携",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "Slack連携お願いします",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "スラック連携して下さい",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "接続",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "接続したい",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "connect",
-      "note": ""
+      "note": "",
+      "rule": "whole"
     },
     {
       "text": "Connect",
-      "note": "大文字始まり"
+      "note": "大文字始まり",
+      "rule": "whole"
     },
     {
       "text": "再連携",
-      "note": "oauth_connect の説明にある再連携"
+      "note": "oauth_connect の説明にある再連携",
+      "rule": "whole"
     },
     {
       "text": "連携！",
-      "note": "全角記号"
+      "note": "全角記号",
+      "rule": "whole"
     },
     {
       "text": "🙏連携お願いします🙏",
-      "note": "絵文字"
+      "note": "絵文字",
+      "rule": "whole"
     },
     {
       "text": ":pray: 連携 :pray:",
-      "note": "Slack の絵文字コード"
+      "note": "Slack の絵文字コード",
+      "rule": "whole"
     },
     {
       "text": "「連携」",
-      "note": "括弧"
+      "note": "括弧",
+      "rule": "whole"
     },
     {
       "text": "Ｇｏｏｇｌｅ連携",
-      "note": "全角英字（NFKC）"
+      "note": "全角英字（NFKC）",
+      "rule": "whole"
     },
     {
       "text": "連携は",
-      "note": "助詞のみ"
+      "note": "助詞のみ",
+      "rule": "whole"
     },
     {
       "text": "連携する",
-      "note": "レビュー指摘 4"
+      "note": "レビュー指摘 4",
+      "rule": "whole"
     },
     {
       "text": "連携させて",
-      "note": "レビュー指摘 4"
+      "note": "レビュー指摘 4",
+      "rule": "whole"
     },
     {
       "text": "連携させてください",
-      "note": "レビュー指摘 4"
+      "note": "レビュー指摘 4",
+      "rule": "whole"
     },
     {
       "text": "連携してくれる？",
-      "note": "レビュー指摘 4"
+      "note": "レビュー指摘 4",
+      "rule": "whole"
     },
     {
       "text": "連携できる？",
-      "note": "レビュー指摘 4（疑問形）"
+      "note": "レビュー指摘 4（疑問形）",
+      "rule": "whole"
     },
     {
       "text": "連携できますか",
-      "note": "疑問形"
+      "note": "疑問形",
+      "rule": "whole"
     }
   ],
   "must_not_match": [
@@ -193,6 +225,98 @@
     {
       "text": "連携やめて",
       "note": "取り消し"
+    }
+  ],
+  "background_2026_09_04": "本番実測 OC TD:45: 利用者が Slack 連携機能経由で「連携」（2 文字）と送ったのに、プラグインには content_len=16 / normalized_len=16 で届き、12 文字上限に当たって not_connect_request で落ちた。normalized_len == content_len ＝ 正規化で 1 文字も減っていないため、その 16 文字には Slack マークアップも絵文字も端の約物も無く、素のテキストが混ざっていると判る。実際の内訳は connect_shape=… の指標で次回の実機から確定する。⚠️ これがテスト経路固有か通常の利用者経路でも起きるかは未確定。",
+  "must_match_with_slack_boilerplate": [
+    {
+      "text": "連携\n_Slack を使用して送信されました_",
+      "note": "注記が別行・装飾つき（最も素直な形）",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携 _Slack を使用して送信されました_",
+      "note": "注記が同一行・装飾つき",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携\nSlack ワークフローを使用して送信されました",
+      "note": "注記が別行・装飾なし（素のテキスト。本番の normalized_len==content_len と整合）",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携して\n_Sent via Slack_",
+      "note": "英語の注記",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携\n\n_このメッセージは Slack ワークフローを使用して送信されました_",
+      "note": "空行 + 長い注記",
+      "rule": "stripped"
+    },
+    {
+      "text": "Google連携\n_Slack を使用して送信されました_",
+      "note": "サービス名つき + 注記",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携お願いします\n_Slack を使用して送信されました_",
+      "note": "敬語末尾 + 注記",
+      "rule": "stripped"
+    },
+    {
+      "text": "連携\n-- Acme Slack Bridge --",
+      "note": "語彙に無い**未知**の定型が後ろに付いた形。通知除去では救えず、先頭行規則だけが救う",
+      "rule": "leading_line"
+    }
+  ],
+  "must_not_match_with_slack_boilerplate": [
+    {
+      "text": "連携解除\n_Slack を使用して送信されました_",
+      "note": "注記を落としても本文が連携依頼ではない"
+    },
+    {
+      "text": "連携できない\n_Slack を使用して送信されました_",
+      "note": "同上（不具合報告）"
+    },
+    {
+      "text": "〇〇社との連携について提案書を\n連携",
+      "note": "中身のある行が 2 本＝どちらが依頼か決められない。行のどれかが一致では通さない"
+    },
+    {
+      "text": "〇〇社との連携について提案書を作ってください\n_Slack を使用して送信されました_",
+      "note": "注記を落としても長文のまま"
+    },
+    {
+      "text": "今日の予定を教えて\n連携",
+      "note": "先頭行が依頼ではない。『行のどれかが一致』では通さない"
+    },
+    {
+      "text": "連携\n連携",
+      "note": "後続行にも連携語＝どれが依頼か権威的に決められない"
+    }
+  ],
+  "background_2026_09_04_rule_confidence": "レビュー実測 2026-09-04: (c) は「後続行に連携語が無い」しか見ないため 『連携\\n今日の予定を教えて』でも真になり、抑止（cancel）と噛み合って **別の依頼への回答が消える**回帰を出した。トリガー（連携リンクを出す）と 抑止（モデル応答を消す）は別の判断であり、抑止は確度の高い (a)(b) に限る。",
+  "must_match_ambiguous_do_not_suppress": [
+    {
+      "text": "連携\n今日の予定を教えて",
+      "rule": "leading_line",
+      "note": "後続行が別の依頼。連携リンクは出すが、予定の回答を消してはいけない（回帰の実例）"
+    },
+    {
+      "text": "連携して\n明日の会議の議事録まとめて",
+      "rule": "leading_line",
+      "note": "同上（敬語末尾つき）"
+    },
+    {
+      "text": "連携\n@channel 至急対応お願いします",
+      "rule": "leading_line",
+      "note": "後続行がメンション付きの別件"
+    },
+    {
+      "text": "接続\nWi-Fi が切れました",
+      "rule": "leading_line",
+      "note": "『接続』が連携語に当たるが、後続行は不具合報告"
     }
   ]
 }
