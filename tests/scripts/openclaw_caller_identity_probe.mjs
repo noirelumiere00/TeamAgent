@@ -1182,26 +1182,40 @@ async function guaranteeCaseReport() {
     return { blocked: Boolean(result?.block), postCount: plugin.posts.length };
   })();
 
-  // ④ Slack への投稿そのものが失敗したときも、無言では終わらせない（理由を必ず残す）。
-  const slackPostFails = await (async () => {
-    const plugin = makeGuaranteePlugin({ slackMode: "post_fails" });
-    await notifyInbound(plugin.handlers, "連携");
-    await plugin.settle();
-    return {
-      postCount: plugin.posts.length,
-      postFailedLogged: plugin.logs.some((m) => m.includes("outcome=post_failed")),
-    };
-  })();
-
-  // ⑤ conversations.open が失敗しても同じ（黙って消えない）。
-  const slackOpenFails = await (async () => {
-    const plugin = makeGuaranteePlugin({ slackMode: "open_fails" });
-    await notifyInbound(plugin.handlers, "連携");
-    await plugin.settle();
-    return {
-      postCount: plugin.posts.length,
-      postFailedLogged: plugin.logs.some((m) => m.includes("outcome=post_failed")),
-    };
+  // ④/⑤ Slack 側の投稿が失敗したときは、無言で終わらせないだけでは足りない。
+  //      **台帳を解放して層1 に救済させる**こと（2026-09-04 レビュー指摘）。
+  //      層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+  //      別の故障ドメインなので、ここで降りるのは救済機会の放棄になる。
+  const slackFailureRescue = await (async () => {
+    const out = {};
+    for (const mode of ["post_fails", "open_fails"]) {
+      // TRACE ON で測る。`already_attempted` は emitTrace 依存の行なので、
+      // OFF のままだと「出ていない」が stand down していない証拠にならない。
+      const plugin = makeGuaranteePlugin({
+        slackMode: mode,
+        env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+      });
+      await notifyInbound(plugin.handlers, "連携");
+      await plugin.settle();
+      const beforeLayer1 = {
+        postCount: plugin.posts.length,
+        postFailedLogged: plugin.logs.some((m) => m.includes("outcome=post_failed")),
+      };
+      // 保証経路が失敗した同じ受信に対して、層1 が答えられること。
+      const l1 =
+        (await plugin.handlers.get("before_agent_reply")(
+          { cleanedBody: "連携" },
+          beforeAgentReplyCtx(),
+        )) ?? null;
+      out[mode] = {
+        ...beforeLayer1,
+        layer1Handled: l1?.handled === true,
+        layer1ReplyIsToolMessage: l1?.reply?.text === OAUTH_CONNECT_MESSAGE,
+        // 層1 が `already_attempted` で降りていないこと。
+        standDown: plugin.logs.some((m) => m.includes("reason=already_attempted")),
+      };
+    }
+    return out;
   })();
 
   // ⑥ 一回性: 同じ受信が 2 度通知されても投稿は 1 通だけ。
@@ -1216,7 +1230,10 @@ async function guaranteeCaseReport() {
 
   // ⑦ 保証経路が答えたら層1 は降りる（同じ受信に 2 回答えない）。
   const layer1StandsDown = await (async () => {
-    const plugin = makeGuaranteePlugin({});
+    // TRACE ON。降りたことを `already_attempted` の 1 行で積極的に確認する。
+    const plugin = makeGuaranteePlugin({
+      env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+    });
     const { handlers, infos } = plugin;
     await notifyInbound(handlers, "連携");
     await plugin.settle();
@@ -1226,9 +1243,13 @@ async function guaranteeCaseReport() {
         beforeAgentReplyCtx(),
       )) ?? null;
     return {
+      // 投稿成功時は従来どおり層1 が降り、投稿は 1 通のまま（過剰解放していない）。
       postCount: plugin.posts.length,
       layer1Handled: l1?.handled === true,
       guaranteeDelivered: infos.some((m) => m.includes("outcome=delivered")),
+      standDown: plugin.logs.some((m) => m.includes("reason=already_attempted")),
+      // 層1 が再度 oauth_connect を呼んでいないこと（state token の重複発行なし）。
+      toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
     };
   })();
 
@@ -1325,8 +1346,7 @@ async function guaranteeCaseReport() {
     run_binding_lost: runBindingLost,
     declared_channel_mismatch: declaredChannelMismatch,
     polluted_history_double_wrapped: pollutedHistory,
-    slack_post_fails: slackPostFails,
-    slack_open_fails: slackOpenFails,
+    slack_failure_rescue: slackFailureRescue,
     once_per_inbound: oncePerInbound,
     layer1_stands_down: layer1StandsDown,
     channel_thread: channelThread,

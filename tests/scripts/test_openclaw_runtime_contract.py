@@ -3356,12 +3356,28 @@ def test_declared_conversation_fields_are_discarded_not_blocked() -> None:
     assert case["discardedLogged"] is True
 
 
-def test_connect_guarantee_never_dies_silently_when_slack_rejects() -> None:
-    """Slack への投稿自体が失敗したときも、理由を必ず 1 行残すこと（無言終了ゼロ）。"""
-    cases = _caller_identity_report()["guarantee_cases"]
-    for name in ("slack_post_fails", "slack_open_fails"):
-        assert cases[name]["postCount"] == 0, name
-        assert cases[name]["postFailedLogged"] is True, name
+def test_slack_delivery_failure_hands_the_inbound_back_to_layer1() -> None:
+    """Slack 側の投稿が失敗したら台帳を解放し、層1 に救済させること。
+
+    2026-09-04 レビュー指摘。台帳は投稿の**前**に押さえている（同時に走る再通知で
+    二重投稿しないため）。その状態で失敗のまま抜けると、層1 まで
+    `already_attempted` で降りてしまい **利用者に何も届かない**。
+    実測: slackMode=post_fails で posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音。
+
+    層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+    **別の故障ドメイン**なので、ここで降りるのは救済機会の放棄になる。
+    解放しても二重投稿にはならない（投稿は 0 通で終わっている）。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]["slack_failure_rescue"]
+    for mode in ("post_fails", "open_fails"):
+        outcome = cases[mode]
+        # 保証経路は届かず、理由は必ず 1 行残る（無言終了ゼロ）。
+        assert outcome["postCount"] == 0, mode
+        assert outcome["postFailedLogged"] is True, mode
+        # 台帳が解放され、層1 が同じ受信に答えられる。
+        assert outcome["standDown"] is False, mode
+        assert outcome["layer1Handled"] is True, mode
+        assert outcome["layer1ReplyIsToolMessage"] is True, mode
 
 
 def test_connect_guarantee_posts_once_and_layer1_stands_down() -> None:
@@ -3372,9 +3388,14 @@ def test_connect_guarantee_posts_once_and_layer1_stands_down() -> None:
     """
     cases = _caller_identity_report()["guarantee_cases"]
     assert cases["once_per_inbound"]["postCount"] == 1
-    assert cases["layer1_stands_down"]["guaranteeDelivered"] is True
-    assert cases["layer1_stands_down"]["layer1Handled"] is False
-    assert cases["layer1_stands_down"]["postCount"] == 1
+    stands_down = cases["layer1_stands_down"]
+    assert stands_down["guaranteeDelivered"] is True
+    assert stands_down["layer1Handled"] is False
+    # 投稿成功時は台帳を解放しない（過剰解放していないこと）。
+    assert stands_down["standDown"] is True
+    assert stands_down["postCount"] == 1
+    # 層1 が再度 oauth_connect を呼ばない＝state token を重複発行しない。
+    assert stands_down["toolCallCount"] == 1
 
 
 def test_connect_guarantee_uses_a_canonical_slack_conversation_id() -> None:

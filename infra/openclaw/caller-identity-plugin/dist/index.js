@@ -1473,7 +1473,19 @@ export function createCallerIdentityPlugin({
     try {
       await postConnectMessage({ ingress, text });
     } catch (error) {
-      // ここだけは届けようが無い。管理者が気付けるよう理由を残す（G7: 値は載せない）。
+      // 投稿できなかったので、**この受信は誰にも答えられていない**。台帳を解放して
+      // 層1／層2 に救済させる（2026-09-04 レビュー指摘）。
+      //
+      // 台帳は投稿の前に押さえている（同時に走る再通知で二重投稿しないため）。
+      // その状態で失敗のまま抜けると、層1 まで `already_attempted` で降りてしまい
+      // **利用者に何も届かない**。実測: slackMode=post_fails で
+      // posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音だった。
+      //
+      // 層1 はハーネスの reply 経路で返すので、bot token も Slack Web API も使わない
+      // ＝**別の故障ドメイン**である。ここで降りるのは救済機会の放棄になる。
+      // 解放しても二重投稿にはならない: 投稿は 0 通で終わっている。
+      connectAnsweredByMessage.delete(ingress.pendingKey);
+      // 管理者が気付けるよう理由を残す（G7: 値は載せない）。
       done("post_failed", ` result=${kind} reason=${connectPathReason(error)}`);
       return;
     }

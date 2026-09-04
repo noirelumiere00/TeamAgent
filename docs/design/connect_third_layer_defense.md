@@ -797,9 +797,9 @@ level の意味は logger 側（`logger.info` / `logger.warn`）で保つ。
 | フック | 実行 | タイムアウト | 実物 |
 |---|---|---|---|
 | `message_received` | 呼び出し側が fire-and-forget | **無し** | 呼び出し `dist/dispatch-V82RCNJs.js:1438`／`runVoidHook` は `dist/hook-runner-global-Cucx8m-W.js:458-477`／既定表 `:248-253` は `agent_end` `channel_pairing_requested` `before_compaction` `after_compaction` の 4 つだけ |
-| `inbound_claim` | **claiming hook。ハンドラを逐次 `await`** | **無し** | `runClaimingHook` `:689-690` → `runClaimingHooksList`（`for` ループ内で `await`、first-claim wins）／`getClaimingHookTimeoutMs` は `modifyingHookTimeoutMsByHook` を引くが `:254-260` に `inbound_claim` は無い |
+| `inbound_claim` | **claiming hook。ハンドラを逐次 `await`** | **無し** | `runClaimingHook` `:689-690` → `runClaimingHooksList`（`for` ループ内で `await`、first-claim wins）／`getClaimingHookTimeoutMs` が引く `DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK`（`:254-260`）に `inbound_claim` は無い |
 
-`voidHookTimeoutMsByHook` / `modifyingHookTimeoutMsByHook` を上書きする呼び出し元は
+`voidHookTimeoutMsByHook` / `modifyingHookTimeoutMsByHook` の既定表（`DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK` / `DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK`）を上書きする呼び出し元は
 上流 dist に存在しない（唯一の `createHookRunner` 呼び出しは `:1112-1124` で
 `logger` / `catchErrors` / `failurePolicyByHook` しか渡さない）。
 よって **どちらのフックにもタイムアウトは無い**＝保証経路が途中で切られることはない。
@@ -853,6 +853,18 @@ Slack は失敗を HTTP 200 + `{"ok": false, "error": …}` で返すので必�
 
 `message_received` は `before_agent_reply` より先に走るので、通常は保証経路が台帳を取り、
 層1 は `already_attempted` で降りる。
+
+**台帳は投稿の前に押さえるが、投稿に失敗したら必ず解放する**（2026-09-04 レビュー指摘）。
+前に押さえるのは、同時に走る再通知で二重投稿しないため。しかし失敗のまま抜けると
+層1 まで `already_attempted` で降り、**利用者に何も届かない**。
+実測: `slackMode=post_fails` で posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音だった。
+層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+**別の故障ドメイン**なので、ここで降りるのは救済機会の放棄になる。
+解放しても二重投稿にはならない（投稿は 0 通で終わっている）。
+`test_slack_delivery_failure_hands_the_inbound_back_to_layer1` が
+「投稿失敗 → 層1 が同じ受信に答える」を、
+`test_connect_guarantee_posts_once_and_layer1_stands_down` が
+「投稿成功 → 層1 は降り、tools/call は 1 回のまま」（過剰解放していないこと）を固定する。
 
 **旗は「実際に配信を試みる」と決めた後にだけ立てる。** 手前で立てると、保証経路が使えない環境
 （bot token 無し＝ローカル/テスト）で層1 まで降りてしまい **誰も答えない穴**ができる。
@@ -952,10 +964,12 @@ Slack 識別子・本文・URL・claim・bearer は載せない。
 2. **モデル経路は止まらない**。保証経路が投稿したうえで、モデルが別途返事をし、
    **`oauth_connect` をもう一度呼んで state token をもう 1 個発行しうる**。
    裁定に従い保証を優先した。塞ぐには層2/3 を「保証済みの run では畳む」改修が要る（別便）。
-3. **Slack が落ち続ければ届かない**。429 / 5xx / 一時的なネットワーク失敗は
-   最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、`thread_ts` 付きが弾かれたら
-   スレッド無しで 1 回投げ直すが、恒久障害では手段が無い。
-   `outcome=post_failed` を必ず残すので事後に検知できる。
+3. **Slack Web API が落ち続けても、層1 という別経路が残る**。429 / 5xx / 一時的な
+   ネットワーク失敗は最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、
+   `thread_ts` 付きが弾かれたらスレッド無しで 1 回投げ直す。
+   それでも投稿できなければ台帳を解放し、層1（ハーネスの reply 経路＝bot token も
+   Slack Web API も使わない別の故障ドメイン）が同じ受信に答える。
+   両方が同時に落ちている場合だけ届かず、その場合も `outcome=post_failed` が残る。
 4. **`conversations.open` の追加コール**が DM の初回「連携」ごとに 1 回入る
    （送信者単位でキャッシュ。キャッシュは `MAX_TRACKED_CONTEXTS` で上限を持つ）。
    Slack のレート制限に当たるほどの頻度ではないが、監視対象ではある。
