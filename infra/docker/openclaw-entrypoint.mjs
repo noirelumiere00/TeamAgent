@@ -66,6 +66,28 @@ const PASSTHROUGH_ENV = [
   "http_proxy",
   "no_proxy",
 ];
+// 診断・運用のための非秘密 env。**この一覧に無い env は子プロセスへ一切届かない。**
+//
+// 事故（2026-09-03〜09-04 実測・本 PR の主眼）: 事故調査のため ECS のタスク定義へ
+// `TEAMAGENT_CALLER_IDENTITY_TRACE=1` を注入したのに、caller-identity plugin の
+// トレース行が CloudWatch に 1 行も出なかった。原因は plugin 側ではなくここ:
+// buildChildEnvironment は process.env を継承せず allowlist で childEnv を組み立て、
+// run() が `process.execve(..., childEnv)` でプロセスを置換する。TRACE は
+// REQUIRED_SECRETS でも PASSTHROUGH_ENV でも無かったため **黙って捨てられていた**。
+// plugin 側の `traceEnabled` は常に false で、emitTrace は全て no-op だった。
+//
+// 「plugin のログが届かない」は誤診だった。上流 openclaw 2026.7.1 を実機で検証した
+// 結果（docs/design/connect_third_layer_defense.md §12）、gateway プロセスでは
+// plugin の console.warn は stderr、console.info は stdout、api.logger.warn/info は
+// `[plugins] …` として stderr/stdout に確かに出る＝CloudWatch に届く。
+// 届いていなかったのは「出力経路」ではなく「トレースが最初から無効だった」ため。
+const DIAGNOSTIC_ENV = [
+  // caller-identity plugin の詳細トレース。既定 OFF で、値が 1 のときだけ ON になる。
+  "TEAMAGENT_CALLER_IDENTITY_TRACE",
+  // 利用者へ案内する管理者名（connect_diagnostics.admin_name() と同じ env 名）。
+  // 未設定なら plugin 側の既定にフォールバックするので、無くても壊れない。
+  "CONNECT_ADMIN_NAME",
+];
 
 function fail(message) {
   process.stderr.write(
@@ -183,6 +205,7 @@ function buildChildEnvironment({
   copyDefined(process.env, childEnv, REQUIRED_SECRETS);
   copyDefined(process.env, childEnv, ["SLACK_DM_ALLOWLIST", "SLACK_TEAM_ID"]);
   copyDefined(process.env, childEnv, PASSTHROUGH_ENV);
+  copyDefined(process.env, childEnv, DIAGNOSTIC_ENV);
   return childEnv;
 }
 
