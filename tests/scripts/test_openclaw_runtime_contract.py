@@ -480,6 +480,18 @@ def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> Non
             "OPENCLAW_SKIP_CHANNELS",
         }
     )
+    # 診断 env は allowlist に載っていないと execve で黙って捨てられる（2026-09-04 実測）。
+    # TEAMAGENT_CALLER_IDENTITY_TRACE がここから漏れていたため、タスク定義へ注入しても
+    # plugin の traceEnabled が常に false になり、トレース行が 14 日間 1 行も出なかった。
+    diagnostic = set(_js_string_array(entrypoint, "DIAGNOSTIC_ENV"))
+    assert diagnostic == {
+        "TEAMAGENT_CALLER_IDENTITY_TRACE",
+        "CONNECT_ADMIN_NAME",
+    }
+    # 秘密値の受け皿にしない（allowlist の意味が消える）。
+    assert diagnostic.isdisjoint(passthrough)
+    assert diagnostic.isdisjoint(required_secrets)
+    assert "copyDefined(process.env, childEnv, DIAGNOSTIC_ENV)" in entrypoint
     assert "env: process.env" not in entrypoint
     assert "env: childEnv" in entrypoint
     assert 'NODE_ENV: "production"' in entrypoint
@@ -2693,18 +2705,21 @@ def test_deterministic_path_mints_once_per_inbound_and_finds_bound_runs() -> Non
 
 
 def test_deterministic_path_failures_fall_to_the_next_layer() -> None:
-    """層1 の失敗は fail-open ではなく fail-to-next-layer であること。
+    """層1 の「到達できなかった」失敗は fail-open ではなく fail-to-next-layer であること。
 
-    fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー / message 欠落 /
-    bearer 無し / 正準 channel 無し のいずれでも、同じ受信がモデル経路へ進んだとき
+    fetch 失敗 / HTTP 5xx / JSON-RPC error / message 欠落 / bearer 無し /
+    正準 channel 無し のいずれでも、同じ受信がモデル経路へ進んだとき
     層2（0 tool call × 短い連携依頼）が revise を返す。
+
+    ⚠️ mcp が **利用者向けに整形した失敗文面** を返してきたケース（`{"error": …}`）は
+    ここに含めない。それは「到達できなかった」ではなく「到達して答えが返った」であり、
+    2026-09-04 以降は利用者へそのまま届ける（下の test_... _user_error 参照）。
     """
     failures = _caller_identity_report()["connect_l1_failures"]
     expected_reason = {
         "fetch_throws": "fetch_failed",
         "http_500": "mcp_http_500",
         "rpc_error": "mcp_rpc_error",
-        "tool_error": "mcp_tool_error",
         "no_message": "mcp_invalid_result",
         "no_bearer": "no_mcp_bearer",
         "no_canonical_channel": "no_canonical_channel",
@@ -2716,6 +2731,30 @@ def test_deterministic_path_failures_fall_to_the_next_layer() -> None:
         assert outcome["fallthroughReason"] == reason, case
         assert outcome["layer2Intervened"] is True, case
         assert outcome["layer2Key"] == "connect-zero-tool", case
+
+
+def test_mcp_user_facing_error_is_delivered_verbatim_not_discarded() -> None:
+    """mcp が返す利用者向けの失敗文面を、捨てずにそのまま届けること（(E) の本体）。
+
+    実測の代表例が新規ユーザーの CONNECT-I02（Slack プロフィールに会社メールが無い）。
+    mcp は失敗も成功と同じ TextContent の JSON で返し（server.py:442-445,819）、
+    その `error` 文面は既に「何をすればよいか」＋転送用の診断行まで整形済み
+    （skill.py:228-236 / connect_diagnostics.py:260-277）。
+
+    旧実装はこれを一律 `mcp_tool_error` に潰してモデル経路へ落としていたため、
+    新規ユーザーには「無言」かモデルの自作回答（「管理者へお問い合わせください」）
+    しか届かなかった。これが「誰でも連携できる」を破っていた中心的な穴。
+    """
+    outcome = _caller_identity_report()["connect_l1_user_facing_error"]
+    # 層1 が handled で答える＝モデルは起動しない。
+    assert outcome["handled"] is True
+    assert outcome["toolCallCount"] == 1
+    # 文面は mcp の error をそのまま（要約も言い換えもしない）。
+    assert outcome["replyText"] == outcome["mcpErrorText"]
+    assert "CONNECT-I02" in outcome["replyText"]
+    assert "Slack プロフィール" in outcome["replyText"]
+    # 観測ログには結果の種別だけを出す（本文・識別子は載せない＝G7）。
+    assert any("result=user_error" in line for line in outcome["infos"])
 
 
 def test_deterministic_path_logs_keep_the_g7_discipline() -> None:
@@ -3208,3 +3247,348 @@ def test_unwrap_failure_is_converted_to_a_block_not_propagated() -> None:
     assert outcome["threw"] is None, outcome["threw"]
     assert outcome["blocked"] is True
     assert outcome["diagCode"] == "CONNECT-P06"
+
+
+# ══ (D)(E) 保証経路: 「連携」と言ったら必ず何かが届く（2026-09-04） ═══════════
+# ゴール: 新規／既存／過去のテストユーザーを問わず、「連携して」と言ったら
+# 漏れなく連携リンク（または次の一手が分かる診断つき案内）が届くこと。
+#
+# 設計の核心（上流実物での比較・docs/design/connect_third_layer_defense.md §12）:
+#   保証は `message_received`（非 conversation hook）に載せる。非 bundled plugin でも
+#   `hooks.allowConversationAccess` の可否に依存せず登録される。層1 が載っている
+#   `before_agent_reply` は conversation hook で、設定が 1 つ欠けるだけで
+#   **診断も出ないまま黙って登録が捨てられる**（registry-D1_pYg_a.js:4224-4235）ため、
+#   「必ず」の土台にはできない。
+
+
+def test_connect_guarantee_never_goes_silent_for_any_user_state() -> None:
+    """利用者状態 × 言い回し の全組み合わせで、必ず 1 通届くこと。
+
+    無言になる組み合わせが 1 つでもあれば赤。これが「誰でも連携できる」の本体。
+    """
+    rows = _caller_identity_report()["guarantee_matrix"]
+    # 7 状態 × fixture の must_match 全件。
+    assert len(rows) >= 200, len(rows)
+    states = {row["state"] for row in rows}
+    assert states == {
+        "new_user_without_email",
+        "new_user_with_email",
+        "existing_fully_connected",
+        "existing_partially_connected",
+        "mcp_unreachable",
+        "mcp_http_500",
+        "mcp_invalid_result",
+    }
+    silent = [(row["state"], row["text"]) for row in rows if not row["delivered"]]
+    assert silent == [], f"無言になった組み合わせ: {silent}"
+    # 二重投稿もしない（同じ受信に対しては 1 通）。
+    duplicated = [
+        (row["state"], row["text"], row["postCount"]) for row in rows if row["postCount"] != 1
+    ]
+    assert duplicated == [], duplicated
+
+
+def test_connect_guarantee_states_deliver_the_right_kind_of_message() -> None:
+    """状態ごとに「届く中身」が正しいこと（リンク／連携済み／診断つき案内）。"""
+    rows = _caller_identity_report()["guarantee_matrix"]
+    by_state: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        by_state.setdefault(str(row["state"]), []).append(row)
+
+    # 新規（メール無し）は mcp の CONNECT-I02 文面がそのまま届く。
+    for row in by_state["new_user_without_email"]:
+        assert "CONNECT-I02" in str(row["postText"]), row["text"]
+        assert "Slack プロフィール" in str(row["postText"]), row["text"]
+    # 新規（メール有り）はリンクが届く。
+    for row in by_state["new_user_with_email"]:
+        assert "https://connect.newstv.co.jp/" in str(row["postText"]), row["text"]
+    # 既に両方連携済みならその旨が届く（リンクは出さない）。
+    for row in by_state["existing_fully_connected"]:
+        assert "既に" in str(row["postText"]), row["text"]
+    # 片方だけなら残りのリンクだけが届く。
+    for row in by_state["existing_partially_connected"]:
+        assert "省略しています" in str(row["postText"]), row["text"]
+        assert "slack/oauth/start" in str(row["postText"]), row["text"]
+    # mcp へ届かなかった場合は、必ず転送用の診断行つきの案内が届く（無言にしない）。
+    for state in ("mcp_unreachable", "mcp_http_500", "mcp_invalid_result"):
+        for row in by_state[state]:
+            assert row["hasDiagnostic"] is True, (state, row["text"])
+            assert "CONNECT-Z02" in str(row["postText"]), (state, row["text"])
+            assert "もう一度" in str(row["postText"]), (state, row["text"])
+
+
+def test_connect_guarantee_does_not_fire_on_non_connect_phrases() -> None:
+    """短い連携依頼でない文言では保証経路を起動しないこと（誤爆しない）。
+
+    「連携解除」「連携できない」「〇〇社との連携について提案書を」等で
+    勝手にリンクを投げ始めたら、保証は成立しても製品として壊れる。
+    """
+    rows = _caller_identity_report()["guarantee_negative_matrix"]
+    assert rows
+    fired = [row["text"] for row in rows if row["postCount"] != 0]
+    assert fired == [], f"誤爆した文言: {fired}"
+
+
+def test_connect_guarantee_is_independent_of_the_broken_layers() -> None:
+    """run 束縛切れ・channel 申告不一致・履歴汚染のいずれでも保証経路は影響を受けないこと。"""
+    cases = _caller_identity_report()["guarantee_cases"]
+    # run が束縛できずツールが block されても、投稿は既に済んでいる。
+    assert cases["run_binding_lost"]["toolBlocked"] is True
+    assert cases["run_binding_lost"]["postCount"] == 1
+    # 二重包み（過去のテストユーザーの履歴汚染）でも同じ。
+    assert cases["polluted_history_double_wrapped"]["blocked"] is False
+    assert cases["polluted_history_double_wrapped"]["postCount"] == 1
+
+
+def test_declared_conversation_fields_are_discarded_not_blocked() -> None:
+    """(C2) モデルの `channel_id` 申告違いで落とさず、authoritative 値で続行すること。
+
+    実測 2 件の `declared channel_id does not match the bound ingress` がこれ。
+    mintCallerClaim は `_user_context` を authoritative 値で丸ごと置き換えてから
+    署名するので、申告値は元々 100% 捨てられている。拒否は 1 ビットも安全を稼がず、
+    純粋な失敗モードだった。
+    """
+    case = _caller_identity_report()["guarantee_cases"]["declared_channel_mismatch"]
+    assert case["blocked"] is False
+    # 申告値は 1 文字も残らない（捨てて上書き）。
+    assert case["declaredValueSurvived"] is False
+    # 捨てたことは必ず観測できる（黙って捨てない）。
+    assert case["discardedLogged"] is True
+
+
+def test_slack_delivery_failure_hands_the_inbound_back_to_layer1() -> None:
+    """Slack 側の投稿が失敗したら台帳を解放し、層1 に救済させること。
+
+    2026-09-04 レビュー指摘。台帳は投稿の**前**に押さえている（同時に走る再通知で
+    二重投稿しないため）。その状態で失敗のまま抜けると、層1 まで
+    `already_attempted` で降りてしまい **利用者に何も届かない**。
+    実測: slackMode=post_fails で posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音。
+
+    層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+    **別の故障ドメイン**なので、ここで降りるのは救済機会の放棄になる。
+    解放しても二重投稿にはならない（投稿は 0 通で終わっている）。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]["slack_failure_rescue"]
+    for mode in ("post_fails", "open_fails"):
+        outcome = cases[mode]
+        # 保証経路は届かず、理由は必ず 1 行残る（無言終了ゼロ）。
+        assert outcome["postCount"] == 0, mode
+        assert outcome["postFailedLogged"] is True, mode
+        # 台帳が解放され、層1 が同じ受信に答えられる。
+        assert outcome["standDown"] is False, mode
+        assert outcome["layer1Handled"] is True, mode
+        assert outcome["layer1ReplyIsToolMessage"] is True, mode
+
+
+def test_connect_guarantee_posts_once_and_layer1_stands_down() -> None:
+    """同じ受信に 2 回投稿しないこと・保証経路が答えたら層1 は降りること。
+
+    一回性の旗は「実際に配信を試みる」と決めた後にだけ立てる。手前で立てると、
+    保証経路が使えない環境で層1 まで降りてしまい **誰も答えない** 穴ができる。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]
+    assert cases["once_per_inbound"]["postCount"] == 1
+    stands_down = cases["layer1_stands_down"]
+    assert stands_down["guaranteeDelivered"] is True
+    assert stands_down["layer1Handled"] is False
+    # 投稿成功時は台帳を解放しない（過剰解放していないこと）。
+    assert stands_down["standDown"] is True
+    assert stands_down["postCount"] == 1
+    # 層1 が再度 oauth_connect を呼ばない＝state token を重複発行しない。
+    assert stands_down["toolCallCount"] == 1
+
+
+def test_connect_guarantee_uses_a_canonical_slack_conversation_id() -> None:
+    """DM でも mcp が要求する正準 `D…` で claim を鋳造すること。
+
+    mcp の caller_claim は `^[CDG][A-Z0-9]{8,}$` を要求する
+    （caller_claim.py:39,385）。受信側は DM を内部別名 `DM:U…` にしか解決できないため、
+    conversations.open で正準 id を得てから署名する。
+    チャンネルは既に正準なので open を呼ばない（余計な API を叩かない）。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]
+    dm = cases["dm_canonical_channel"]
+    assert dm["toolName"] == "oauth_connect"
+    assert re.fullmatch(r"[CDG][A-Z0-9]{8,}", str(dm["claimChannel"])), dm["claimChannel"]
+    assert dm["postChannel"] == dm["claimChannel"]
+    thread = cases["channel_thread"]
+    assert thread["openCount"] == 0
+    assert re.fullmatch(r"C[A-Z0-9]{8,}", str(thread["channel"])), thread["channel"]
+    # スレッドで訊かれたらスレッドへ返す（会話面を移さない）。
+    assert thread["threadTs"] is not None
+
+
+def test_run_binding_prefers_the_newest_inbound_in_the_same_conversation() -> None:
+    """(C1) 同じ会話の候補が複数でも run を落とさないこと。
+
+    実測 9 件の `trusted Slack run identity is missing or stale` の源。従来は
+    `candidates !== 1` で run を拒否し、rejectedRuns に 10 分間登録していたため、
+    その run の **すべてのツール** が block された。連続してメッセージを送るだけで再現する。
+
+    安全側は崩れない: matchesConversation は sessionKey・senderId・channel・TTL を
+    すべて満たしたものだけを残すので、候補は全員「同じ人の同じ会話」。曖昧なのは
+    「どのメッセージか」だけで「誰か」ではない。
+    """
+    report = _caller_identity_report()["bind_newest"]
+    # ① 連続 2 通のあとの run でもツールが通る。
+    assert report["consecutive"]["toolBlocked"] is False
+    assert report["consecutive"]["rejected"] is False
+    # 曖昧化したことは必ず観測できる（黙って選ばない）。
+    assert report["consecutive"]["disambiguated"] is True
+    assert "rule=newest_in_conversation" in str(report["consecutive"]["disambiguatedLine"])
+    # ② 最新が選ばれる。
+    assert report["newestWins"]["blocked"] is False
+    assert report["newestWins"]["claimMessage"] == "1785206306.000006"
+    # ③ 安全側: より新しい **別送信者** の受信があっても掴まない。
+    # ③ 安全側: **同一 channel・同一 sessionKey・別 senderId・より新しい受信** があっても
+    #    掴まない（2026-09-04 レビュー指摘 中1: 旧版は sessionKey も channel も違っており、
+    #    senderId 照合が無くても落ちる＝この分岐を守っていなかった）。
+    assert report["otherSender"]["blocked"] is False
+    assert report["otherSender"]["claimUser"] == "U09CX1CCBLN"
+    assert report["otherSender"]["claimMessage"] == report["otherSender"]["expectedMessage"]
+
+
+def test_every_registered_hook_reports_its_first_invocation() -> None:
+    """本番でどのフックが実際に呼ばれるかを、ログだけで列挙できること。
+
+    2 便かけて「層1 が発火しているのか」を判別できなかった原因は、発火の事実を
+    出す行が TRACE 依存で、その TRACE が entrypoint の env allowlist に落とされて
+    いたこと（openclaw-entrypoint.mjs の DIAGNOSTIC_ENV で解決）。
+    以後、register の 1 行と各フック初回の 1 行は TRACE と無関係に必ず出す。
+    バナー（登録要求）と first_fired（実際に呼ばれた）の差分が、そのまま
+    「登録はしたが本番では呼ばれないフック」の一覧になる。
+    """
+    report = _caller_identity_report()["hook_observability"]
+    assert report["registeredHooks"] == [
+        "inbound_claim",
+        "message_received",
+        "before_agent_reply",
+        "before_model_resolve",
+        "before_tool_call",
+        "before_agent_finalize",
+        "reply_payload_sending",
+        "agent_end",
+    ]
+    banner = str(report["bannerLine"])
+    assert "registered hooks=[" in banner
+    for hook in report["registeredHooks"]:
+        assert hook in banner, hook
+    # 呼んだフックだけが first_fired を出す。
+    assert report["firstFired"] == [
+        "message_received",
+        "before_model_resolve",
+        "before_tool_call",
+    ]
+    # 初回だけ（2 回目以降は 1 行も増えない＝会話ごとの騒音にならない）。
+    assert report["secondPassConsoleDelta"] == 0
+
+
+def test_plugin_diagnostics_never_touch_stdout() -> None:
+    """プラグインの診断行は必ず stderr へ出すこと（stdout はデータ面）。
+
+    このプラグインは `node -e` で読み込まれ、同じプロセスが
+    `process.stdout.write(JSON.stringify(...))` の結果を返すことがある
+    （tests/test_mcp_gateway_caller_claim.py の 3 本のハーネス）。
+    診断行を stdout に混ぜるとその JSON が壊れる。実際、register バナーを
+    console.info（= stdout）で出した瞬間に 3 本が赤くなった（2026-09-04 実測）。
+
+    CloudWatch は stdout/stderr を同じロググループへ入れるので、到達性は変わらない。
+    """
+    levels = _caller_identity_report()["hook_observability"]["consoleLevels"]
+    # console.warn / console.error だけが stderr。log / info は stdout。
+    assert levels == ["warn"], levels
+
+
+# ══ 2026-09-04 敵対的レビューの指摘に対する固定 ═══════════════════════════════
+
+
+def test_connect_guarantee_answers_once_regardless_of_renotification() -> None:
+    """一回性が「pending から消えた瞬間」に失効しないこと（レビュー指摘 重大1）。
+
+    旧実装は一回性の旗を ingress オブジェクトに載せていた。bindRun 成功時に
+    removePending で pending から ingress が消え、次の通知は新しいオブジェクトを
+    作るため、旗が毎回リセットされていた。実測で 投稿 2 / tools/call 2 になり、
+    **state token が 2 個発行される**。台帳を pendingKey 基準にして断つ。
+
+    224 組マトリクスがこれを捕らえなかったのは、各行が受信を 1 回しか通知しない
+    新規プラグインで測っていたため。以後マトリクスの全行も 2 回通知で測る。
+    """
+    once = _caller_identity_report()["guarantee_once"]
+    for case in (
+        "bound_run_renotify",
+        "both_hooks_renotify",
+        "after_run_binding_renotify",
+    ):
+        assert once[case]["postCount"] == 1, (case, once[case])
+        # oauth_connect を 2 回呼ばない＝state token を 2 個発行しない。
+        assert once[case]["toolCallCount"] == 1, (case, once[case])
+    # 抑制しすぎない: 別の受信（messageId が違う）にはそれぞれ答える。
+    assert once["distinct_inbounds_both_answered"]["postCount"] == 2
+    assert once["distinct_inbounds_both_answered"]["toolCallCount"] == 2
+
+
+def test_connect_guarantee_holds_whichever_inbound_hook_fires() -> None:
+    """message_received / inbound_claim のどちらが発火しても保証が立つこと（重大2）。
+
+    「mcp が署名 claim を受理している ⇒ rememberInbound が動いた」という実績は
+    `message_received` **または** `inbound_claim` を示すだけで、message_received
+    単独の実証にはならない（origin/dev では両方が rememberInbound に繋がっていた）。
+    片方だけに保証を載せると、本番で他方だけが発火していた場合に層1 の二の舞になる。
+    """
+    sources = _caller_identity_report()["guarantee_hook_sources"]
+    for case in ("message_received_only", "inbound_claim_only", "both"):
+        assert sources[case]["postCount"] == 1, (case, sources[case])
+        assert sources[case]["toolCallCount"] == 1, (case, sources[case])
+        assert "https://connect.newstv.co.jp/" in str(sources[case]["postText"]), case
+
+
+def test_registered_hooks_banner_is_derived_from_actual_registrations() -> None:
+    """バナーが実際の `api.on` から導出されていること（レビュー指摘 中2）。
+
+    定数を直接出していると、`observe()` を 1 つ消してもバナーは出続けテストも緑になり、
+    「バナー vs first_fired の差分＝唯一の一次証拠」という設計前提が黙って壊れる。
+    """
+    report = _caller_identity_report()["hook_observability"]
+    # 実登録の順序・内容が期待値と完全一致していること。
+    assert report["handlerKeys"] == report["registeredHooks"]
+    banner = str(report["bannerLine"])
+    assert f"registered hooks=[{','.join(report['handlerKeys'])}]" in banner
+
+
+def test_connect_guarantee_reports_when_inbound_content_is_absent() -> None:
+    """受信に `content` が無い場合を必ず観測できること（レビュー指摘 中3）。
+
+    上流の `event.content` が別フィールドに変わると、(A) と同型の
+    「設定したのに無音」が再発する。TRACE と無関係に、フックごとに 1 回だけ残す
+    （毎回出すと content を持たない受信で会話ごとの騒音になる）。
+    """
+    report = _caller_identity_report()["guarantee_content_absent"]
+    # message_received を 2 回・inbound_claim を 1 回送っても、フックごとに 1 行ずつ。
+    assert report["warnCount"] == 2
+    assert report["sources"] == ["inbound_claim", "message_received"]
+    # content が無いのに投稿はしない（誤爆しない）。
+    assert report["postCount"] == 0
+
+
+def test_connect_guarantee_retries_transient_slack_failures() -> None:
+    """429 / 5xx は再試行で吸収すること（レビュー指摘 小）。
+
+    Slack は保証の **唯一の配信面** なので、一時失敗をそのまま無音にしない。
+    """
+    cases = _caller_identity_report()["guarantee_cases"]["transient_retries"]
+    for mode in ("rate_limited_once", "http500_once"):
+        assert cases[mode]["postCount"] == 1, mode
+        assert cases[mode]["postAttempts"] == 2, mode
+        assert cases[mode]["delivered"] is True, mode
+
+
+def test_connect_guarantee_falls_back_to_a_threadless_post() -> None:
+    """thread_ts 付きが弾かれたら、スレッド無しで投げ直すこと（レビュー指摘 小）。
+
+    スレッドが消えている等で `thread_not_found` になる面がある。
+    **届かないより会話面がずれるほうがまし**なので、1 回だけ投げ直す。
+    """
+    case = _caller_identity_report()["guarantee_cases"]["thread_fallback"]
+    assert case["postCount"] == 1
+    assert case["threadTs"] is None
+    assert re.fullmatch(r"C[A-Z0-9]{8,}", str(case["channel"])), case["channel"]

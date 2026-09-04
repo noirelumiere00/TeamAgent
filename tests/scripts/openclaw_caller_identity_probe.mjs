@@ -14,7 +14,7 @@
 //   X はセッション鍵由来。チャンネルの app_mention では `:thread:<ts>` が付く。
 //   agent の hook ctx に conversationId は存在しない。
 import { readFileSync } from "node:fs";
-import { createCallerIdentityPlugin, unwrapToolArguments } from
+import { createCallerIdentityPlugin, unwrapToolArguments, REGISTERED_HOOKS } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
 // ── console の捕捉（2026-09-03）───────────────────────────────────────────
@@ -56,6 +56,22 @@ function makePlugin() {
   return { handlers, logs };
 }
 
+// フックごとの `hook first_fired` は **プロセス内で 1 回だけ**出る観測行であって、
+// 呼び出しごとの騒音ではない。拒否/正常系の「1 行だけ」を測る前に、その 1 回を
+// 消費しておく（= 定常状態を測る）。
+// どの呼び出しも最初のガードで即 return する形にしてあるので、初回消費以外の副作用は無い:
+//   message_received      … ctx.channelId が "slack" でないので rememberInbound が即 return
+//   before_model_resolve  … messageProvider が slack でないので即 return
+//   before_tool_call      … teamagent__ 接頭辞が無く canonicalToolName が null で即 return
+function warmUpHooks(handlers) {
+  handlers.get("message_received")?.({}, { channelId: "warmup" });
+  handlers.get("before_model_resolve")?.({}, { messageProvider: "warmup" });
+  handlers.get("before_tool_call")?.(
+    { toolName: "chitchat", runId: "warm", toolCallId: "warm", params: {} },
+    { toolName: "chitchat", runId: "warm", toolCallId: "warm" },
+  );
+}
+
 // 本番の実測形状。channelId と chatId は同一文字列であることが要点。
 function agentCtxFields(conversationRawId) {
   return {
@@ -73,6 +89,8 @@ function scenario({ sessionKey, inboundTo, inboundFrom, runRawId, toolChannelId 
   handlers.get("message_received")(
     {
       from: inboundFrom,
+      // 実際の受信は本文を持つ（連携依頼ではない通常の会話）。
+      content: "テスト",
       senderId: USER,
       messageId: TS,
       metadata: { guildId: TEAM, to: inboundTo, originatingTo: inboundTo },
@@ -328,12 +346,33 @@ const CONNECT_REQUEST_PHRASES = JSON.parse(
 // chatId を NativeChannelId ?? ChatId（= Slack の message.channel）で上書きするので `D…` になる。
 const DM_CHANNEL = "D0B0PQD83N3";
 const BEARER = "b".repeat(48);
+// plugin が叩く Slack Web API の基底（実装の SLACK_API_BASE と一致させる）。
+const SLACK_API_BASE_URL = "https://slack.com/api";
+// 既に両方連携済み / 片方だけ連携済み のときに mcp が返す message（skill.py:460-492）。
+const OAUTH_ALREADY_CONNECTED_MESSAGE =
+  "✅ *u***@example.com* は既に Google と Slack を連携済みです。追加の操作は不要です。そのまま話しかけてください。";
+const OAUTH_PARTIAL_MESSAGE = [
+  "👋 *u***@example.com* の連携リンクです（1回だけ・所要1分）。",
+  "（Google は連携済みのため省略しています）",
+  "*Slack を連携*（本人としての検索・チャンネル巡回）",
+  "https://connect.newstv.co.jp/slack/oauth/start/abc",
+].join("\n");
 const OAUTH_CONNECT_MESSAGE = [
   "以下のリンクから連携してください（本人専用・1 回限り）。",
   "Google: https://connect.newstv.co.jp/oauth2/start?token=abc",
 ].join("\n");
 const SELF_MADE_REPLY =
   "アカウントが未登録のようです。管理者にお問い合わせください。";
+// mcp が新規ユーザー（Slack プロフィールに会社メールが無い）に返す実物の形。
+// 失敗も成功と同じ TextContent の JSON で返り（server.py:442-445,819）、
+// `error` の中身は既に利用者向けに整形済み（skill.py:228-236 /
+// connect_diagnostics.py:260-277）。plugin はこれを一字も変えずに届ける。
+const MCP_USER_FACING_ERROR = [
+  "PermissionError: oauth_connect は本人 user_email が必須です（本人専用リンク）",
+  "Slack プロフィールのメールアドレスが会社メールになっているか確認し、管理者へご連絡ください。",
+  "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:",
+  `診断: CONNECT-I02 2026-09-04 10:23 JST ${USER} req-1`,
+].join("\n");
 const LONG_CONNECT_REQUEST = "〇〇社との連携について提案書を作ってください";
 
 // mcp（streamable-http）の偽物。rollout-task-canary.mjs と同じ手順を受ける。
@@ -366,7 +405,8 @@ function makeMcpFake({ mode = "ok" } = {}) {
       if (mode === "rpc_error") {
         return respond({ jsonrpc: "2.0", id: body.id, error: { code: -32001, message: "x" } });
       }
-      if (mode === "tool_error") {
+      if (mode === "user_error") {
+        // 利用者向けに整形済みの失敗文面（新規ユーザーの CONNECT-I02）。
         return respond({
           jsonrpc: "2.0",
           id: body.id,
@@ -374,7 +414,31 @@ function makeMcpFake({ mode = "ok" } = {}) {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ error: "Caller authorization failed.", code: "CALLER_IDENTITY_REJECTED" }),
+                text: JSON.stringify({ error: MCP_USER_FACING_ERROR, request_id: "req-1" }),
+              },
+            ],
+          },
+        });
+      }
+      if (mode === "already_connected" || mode === "partially_connected") {
+        const connected = mode === "already_connected";
+        return respond({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  url: null,
+                  slack_url: connected
+                    ? null
+                    : "https://connect.newstv.co.jp/slack/oauth/start/abc",
+                  user_email_masked: "u***@example.com",
+                  message: connected
+                    ? OAUTH_ALREADY_CONNECTED_MESSAGE
+                    : OAUTH_PARTIAL_MESSAGE,
+                }),
               },
             ],
           },
@@ -743,12 +807,776 @@ const connectL1Failures = {
   fetch_throws: await fallthroughThenLayer2({ mode: "throw" }),
   http_500: await fallthroughThenLayer2({ mode: "http500" }),
   rpc_error: await fallthroughThenLayer2({ mode: "rpc_error" }),
-  tool_error: await fallthroughThenLayer2({ mode: "tool_error" }),
   no_message: await fallthroughThenLayer2({ mode: "no_message" }),
   no_bearer: await fallthroughThenLayer2({ env: { TEAMAGENT_MCP_BEARER: "" } }),
   no_canonical_channel: await fallthroughThenLayer2({ chatId: USER }),
 };
+// ══ (D)(E) 保証マトリクス ═══════════════════════════════════════════════════
+// ゴール（2026-09-04）: 新規／既存／過去のテストユーザーを問わず、「連携して」と
+// 言ったら **漏れなく** 連携リンク（または次の一手が分かる診断つき案内）が届くこと。
+//
+// 保証経路は message_received に載っている。これは非 conversation hook で、
+// 非 bundled plugin でも `hooks.allowConversationAccess` の可否に依存せず登録される
+// （registry-D1_pYg_a.js:4224-4235 の門は CONVERSATION_HOOK_NAMES にしか掛からない）。
+// 層1（before_agent_reply）は conversation hook なので、設定が 1 つ欠けるだけで
+// **診断も出ないまま黙って捨てられる**＝保証の土台には使えない。
+//
+// ここで固定するのは 1 点だけ:
+//   どの利用者状態 × どの言い回し でも、Slack への投稿が **必ず 1 通** 起きること。
+// 無言になる組み合わせが 1 つでもあれば赤。
+const SLACK_BOT_TOKEN = "xoxb-probe-token";
+
+// Slack Web API の偽物。conversations.open と chat.postMessage だけを受ける。
+// 本番の失敗モード（HTTP 200 + {"ok":false,"error":…}）を再現する。
+function makeSlackFake({ mode = "ok" } = {}) {
+  const posts = [];
+  const opens = [];
+  const respond = (payload) =>
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  const attempts = [];
+  let postCalls = 0;
+  const handle = async (url, init) => {
+    const method = String(url).slice(`${SLACK_API_BASE_URL}/`.length);
+    const body = JSON.parse(init.body);
+    attempts.push(method);
+    if (method === "conversations.open") {
+      opens.push(body);
+      if (mode === "open_fails") return respond({ ok: false, error: "user_not_found" });
+      return respond({ ok: true, channel: { id: DM_CHANNEL } });
+    }
+    if (method === "chat.postMessage") {
+      postCalls += 1;
+      if (mode === "post_fails") return respond({ ok: false, error: "channel_not_found" });
+      // 本番の一時失敗: 1 回目だけ 429（Retry-After 付き）で弾き、再試行で通す。
+      if (mode === "rate_limited_once" && postCalls === 1) {
+        return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+          status: 429,
+          headers: { "content-type": "application/json", "retry-after": "1" },
+        });
+      }
+      // 本番の一時失敗: 1 回目だけ 5xx。
+      if (mode === "http500_once" && postCalls === 1) {
+        return new Response("boom", { status: 503 });
+      }
+      // スレッドが消えている等で thread_ts 付きだけが弾かれる面。
+      if (mode === "thread_rejected" && body.thread_ts !== undefined) {
+        return respond({ ok: false, error: "thread_not_found" });
+      }
+      posts.push({ ...body, authorization: init.headers.Authorization });
+      return respond({ ok: true, ts: "1785206176.940190" });
+    }
+    return respond({ ok: false, error: "unknown_method" });
+  };
+  return { handle, posts, opens, attempts };
+}
+
+// mcp と Slack の両方を 1 つの fetchFn で受ける（plugin は fetchFn を 1 つしか持たない）。
+function makeGuaranteePlugin({ mcpMode = "ok", slackMode = "ok", env = {} } = {}) {
+  const logs = [];
+  const infos = [];
+  const handlers = new Map();
+  const mcp = makeMcpFake({ mode: mcpMode });
+  const slack = makeSlackFake({ mode: slackMode });
+  const fetchFn = async (url, init) =>
+    String(url).startsWith(SLACK_API_BASE_URL)
+      ? slack.handle(url, init)
+      : mcp.fetchFn(url, init);
+  // 保証経路は hook の await から切り離されている（実装の startConnectGuarantee）。
+  // 本番では「受信パイプラインを止めない」ためにそうしており、テストからは
+  // この注入口で切り離した仕事を回収して待つ。
+  const tasks = [];
+  createCallerIdentityPlugin({
+    env: {
+      TEAMAGENT_CALLER_CLAIM_SECRET: SECRET,
+      SLACK_TEAM_ID: TEAM,
+      TEAMAGENT_MCP_BEARER: BEARER,
+      TEAMAGENT_MCP_URL: "http://mcp.test/mcp",
+      SLACK_BOT_TOKEN,
+      ...env,
+    },
+    fetchFn,
+    onBackgroundTask: (task) => tasks.push(task),
+    // 再試行の待ちはテストでは 0（挙動だけを見る）。
+    sleepFn: async () => {},
+  }).register({
+    registerInteractiveHandler() {},
+    logger: { warn: (m) => logs.push(String(m)), info: (m) => infos.push(String(m)) },
+    on: (name, fn) => handlers.set(name, fn),
+  });
+  const settle = async () => {
+    // 背景タスクが別の背景タスクを生むことは無いが、増えなくなるまで待つ。
+    while (tasks.length > 0) await Promise.all(tasks.splice(0));
+  };
+  return {
+    handlers,
+    logs,
+    infos,
+    settle,
+    posts: slack.posts,
+    opens: slack.opens,
+    attempts: slack.attempts,
+    mcpCalls: mcp.calls,
+  };
+}
+
+// 受信フックへ 1 通流す。hook 名を選べるようにして、本番でどちらが発火しても
+// 保証が立つこと（レビュー指摘 重大2）を測れるようにする。
+function notifyInbound(handlers, content, { runId, messageId = TS, hook = "message_received" } = {}) {
+  return handlers.get(hook)(
+    {
+      from: `slack:${USER}`,
+      content,
+      senderId: USER,
+      messageId,
+      ...(runId ? { runId } : {}),
+      metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+    },
+    {
+      channelId: "slack",
+      conversationId: `user:${USER}`,
+      sessionKey: DM_SESSION_KEY,
+      senderId: USER,
+      messageId,
+      ...(runId ? { runId } : {}),
+    },
+  );
+}
+
+async function guaranteeScenario({
+  content = "連携",
+  mcpMode = "ok",
+  slackMode = "ok",
+  messageId = TS,
+  // 本番では同じ受信が 2 度通知されうる（inbound_claim と message_received の両方、
+  // run 束縛後の再通知）。マトリクスの全行でそれを再現し、
+  // 「必ず 1 通・多くても 1 通」を同時に測る（2026-09-04 レビュー指摘 重大1）。
+  notifyTwice = true,
+} = {}) {
+  const plugin = makeGuaranteePlugin({ mcpMode, slackMode });
+  await notifyInbound(plugin.handlers, content, { messageId });
+  await plugin.settle();
+  if (notifyTwice) {
+    await notifyInbound(plugin.handlers, content, { messageId });
+    await plugin.settle();
+  }
+  const post = plugin.posts[0] ?? null;
+  return {
+    postCount: plugin.posts.length,
+    postText: post?.text ?? null,
+    postChannel: post?.channel ?? null,
+    // 保証経路が使う claim は署名済み（mcp が before_tool_call 経由と同じ検証を通す）。
+    claimChannel: (() => {
+      const call = plugin.mcpCalls.find((c) => c.method === "tools/call");
+      const claim = call?.body.params.arguments?._user_context?.caller_claim ?? null;
+      return claim
+        ? JSON.parse(Buffer.from(claim.split(".")[0], "base64url").toString()).channel
+        : null;
+    })(),
+    toolName:
+      plugin.mcpCalls.find((c) => c.method === "tools/call")?.body.params.name ?? null,
+    logs: plugin.logs,
+    infos: plugin.infos,
+    plugin,
+  };
+}
+
+// 利用者の状態差 × 言い回し の全組み合わせ。どれでも「必ず 1 通」届くこと。
+const GUARANTEE_STATES = {
+  // 新規（Slack プロフィールにメールが無い / 会社ドメイン外）→ mcp が I02 を返す。
+  new_user_without_email: { mcpMode: "user_error" },
+  // 新規（メールあり・未連携）→ 両方のリンク。
+  new_user_with_email: { mcpMode: "ok" },
+  // 既存（両方連携済み）／既存（片方のみ）→ mcp の message にその旨が入って返る。
+  existing_fully_connected: { mcpMode: "already_connected" },
+  existing_partially_connected: { mcpMode: "partially_connected" },
+  // mcp 障害（到達不能・5xx・壊れた戻り値）→ 診断つき案内。
+  mcp_unreachable: { mcpMode: "throw" },
+  mcp_http_500: { mcpMode: "http500" },
+  mcp_invalid_result: { mcpMode: "no_message" },
+};
+
+async function guaranteeMatrix() {
+  const rows = [];
+  for (const [state, options] of Object.entries(GUARANTEE_STATES)) {
+    for (const entry of CONNECT_REQUEST_PHRASES.must_match) {
+      const r = await guaranteeScenario({ content: entry.text, ...options });
+      rows.push({
+        state,
+        text: entry.text,
+        postCount: r.postCount,
+        postText: r.postText,
+        // 「必ず何かが届く」の判定: 空でない本文が 1 通だけ出ていること。
+        delivered: r.postCount === 1 && typeof r.postText === "string" && r.postText.length > 0,
+        // 到達できなかった場合は必ず転送用の診断行が付く（無言でも空文でもない）。
+        hasDiagnostic: (r.postText ?? "").includes("診断: "),
+      });
+    }
+  }
+  return rows;
+}
+
+// ── 一回性が「pending から消えた瞬間」に失効しないこと（レビュー指摘 重大1）──────
+// 旧実装は一回性の旗を ingress オブジェクトに載せていた。bindRun 成功時に
+// removePending で pending から ingress が消え、次の通知は新しいオブジェクトを作るため、
+// 旗が毎回リセットされて **同じ受信に何通も投稿し、oauth_connect も複数回呼ばれていた**
+// （= state token が複数発行される）。台帳を pendingKey 基準にして断つ。
+async function guaranteeOnceCases() {
+  const toolCalls = (plugin) =>
+    plugin.mcpCalls.filter((c) => c.method === "tools/call").length;
+
+  // ① message_received ×2（event に runId 有り＝初回で run へ束縛され pending から消える）。
+  const boundRunRenotify = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携", { runId: "run-1" });
+    await plugin.settle();
+    await notifyInbound(plugin.handlers, "連携", { runId: "run-1" });
+    await plugin.settle();
+    return { postCount: plugin.posts.length, toolCallCount: toolCalls(plugin) };
+  })();
+
+  // ② inbound_claim → message_received ×2（両フックが同じ受信を運ぶ経路）。
+  const bothHooksRenotify = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携", { hook: "inbound_claim" });
+    await plugin.settle();
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    return { postCount: plugin.posts.length, toolCallCount: toolCalls(plugin) };
+  })();
+
+  // ③ message_received → before_model_resolve → message_received。
+  //    最も現実的な経路。runId が無くても run 束縛で pending から消えるため、
+  //    旧実装では再通知のたびに投稿していた。
+  const afterRunBindingRenotify = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    startRun(plugin.handlers, "run-1");
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    return { postCount: plugin.posts.length, toolCallCount: toolCalls(plugin) };
+  })();
+
+  // ④ 別の受信（messageId が違う）なら、それぞれ 1 通ずつ届く（抑制しすぎない）。
+  const distinctInboundsBothAnswered = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携", { messageId: "1785206401.000001" });
+    await plugin.settle();
+    await notifyInbound(plugin.handlers, "連携", { messageId: "1785206402.000002" });
+    await plugin.settle();
+    return { postCount: plugin.posts.length, toolCallCount: toolCalls(plugin) };
+  })();
+
+  return {
+    bound_run_renotify: boundRunRenotify,
+    both_hooks_renotify: bothHooksRenotify,
+    after_run_binding_renotify: afterRunBindingRenotify,
+    distinct_inbounds_both_answered: distinctInboundsBothAnswered,
+  };
+}
+
+// ── どちらの受信フックが発火しても保証が立つこと（レビュー指摘 重大2）──────────
+// 「mcp が署名 claim を受理している」という実績は message_received **または**
+// inbound_claim のどちらかを示すだけで、message_received 単独の実証にはならない。
+// 本番で inbound_claim だけが発火していた場合でも保証が成立することを固定する。
+async function guaranteeHookSourceMatrix() {
+  const run = async (hooks) => {
+    const plugin = makeGuaranteePlugin({});
+    for (const hook of hooks) {
+      await notifyInbound(plugin.handlers, "連携", { hook });
+      await plugin.settle();
+    }
+    return {
+      hooks,
+      postCount: plugin.posts.length,
+      toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
+      postText: plugin.posts[0]?.text ?? null,
+    };
+  };
+  return {
+    message_received_only: await run(["message_received"]),
+    inbound_claim_only: await run(["inbound_claim"]),
+    both: await run(["inbound_claim", "message_received"]),
+  };
+}
+
+// 保証経路が「他の層の失敗から独立している」ことと、無言終了を作らないことの固定。
+async function guaranteeCaseReport() {
+  // ① run 束縛が無い（＝従来 9 件の `trusted Slack run identity is missing or stale`）
+  //    状態でツールが block されても、保証経路の投稿は既に済んでいること。
+  const runBindingLost = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    // before_model_resolve を通していない run のツール呼び出しは従来どおり block される。
+    const blocked = callTool(plugin.handlers, "teamagent__oauth_connect", "run-unbound");
+    return { postCount: plugin.posts.length, toolBlocked: blocked };
+  })();
+
+  // ② モデルが `_user_context.channel_id` に別の値を申告しても、
+  //    もう block しない（authoritative 値で上書きして続行する）。
+  const declaredChannelMismatch = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    const { handlers, logs } = plugin;
+    await notifyInbound(handlers, "連携");
+    await plugin.settle();
+    startRun(handlers);
+    const result = handlers.get("before_tool_call")(
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-9",
+        params: {
+          _user_context: { slack_user_id: USER, channel_id: "C0000000OTHER" },
+        },
+      },
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-9",
+        sessionKey: DM_SESSION_KEY,
+        channelId: `user:${USER}`,
+      },
+    );
+    const context = result?.block ? null : result.params._user_context;
+    return {
+      blocked: Boolean(result?.block),
+      // authoritative 値で上書きされていること（申告値は 1 文字も残らない）。
+      // 値そのものは束縛された受信の会話 id（DM は内部別名）で、ここでの論点ではない。
+      // 論点は「申告値が残らないこと」と「もう block しないこと」。
+      signedChannel: context?.channel_id ?? null,
+      declaredValueSurvived: context?.channel_id === "C0000000OTHER",
+      discardedLogged: logs.some((m) => m.includes("discarded declared user_context fields")),
+      postCount: plugin.posts.length,
+    };
+  })();
+
+  // ③ 過去のテストユーザー: セッション履歴が汚染され、モデルが引数を二重に包む。
+  //    unwrap で引数は救えるが、そもそも保証経路はモデル経路と独立に投稿を終えている。
+  const pollutedHistory = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    const { handlers } = plugin;
+    await notifyInbound(handlers, "連携");
+    await plugin.settle();
+    startRun(handlers);
+    const result = handlers.get("before_tool_call")(
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-8",
+        params: { arguments: { _user_context: { slack_user_id: USER } } },
+      },
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-8",
+        sessionKey: DM_SESSION_KEY,
+        channelId: `user:${USER}`,
+      },
+    );
+    return { blocked: Boolean(result?.block), postCount: plugin.posts.length };
+  })();
+
+  // ④/⑤ Slack 側の投稿が失敗したときは、無言で終わらせないだけでは足りない。
+  //      **台帳を解放して層1 に救済させる**こと（2026-09-04 レビュー指摘）。
+  //      層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+  //      別の故障ドメインなので、ここで降りるのは救済機会の放棄になる。
+  const slackFailureRescue = await (async () => {
+    const out = {};
+    for (const mode of ["post_fails", "open_fails"]) {
+      // TRACE ON で測る。`already_attempted` は emitTrace 依存の行なので、
+      // OFF のままだと「出ていない」が stand down していない証拠にならない。
+      const plugin = makeGuaranteePlugin({
+        slackMode: mode,
+        env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+      });
+      await notifyInbound(plugin.handlers, "連携");
+      await plugin.settle();
+      const beforeLayer1 = {
+        postCount: plugin.posts.length,
+        postFailedLogged: plugin.logs.some((m) => m.includes("outcome=post_failed")),
+      };
+      // 保証経路が失敗した同じ受信に対して、層1 が答えられること。
+      const l1 =
+        (await plugin.handlers.get("before_agent_reply")(
+          { cleanedBody: "連携" },
+          beforeAgentReplyCtx(),
+        )) ?? null;
+      out[mode] = {
+        ...beforeLayer1,
+        layer1Handled: l1?.handled === true,
+        layer1ReplyIsToolMessage: l1?.reply?.text === OAUTH_CONNECT_MESSAGE,
+        // 層1 が `already_attempted` で降りていないこと。
+        standDown: plugin.logs.some((m) => m.includes("reason=already_attempted")),
+      };
+    }
+    return out;
+  })();
+
+  // ⑥ 一回性: 同じ受信が 2 度通知されても投稿は 1 通だけ。
+  const oncePerInbound = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    await notifyInbound(plugin.handlers, "連携");
+    await plugin.settle();
+    return { postCount: plugin.posts.length };
+  })();
+
+  // ⑦ 保証経路が答えたら層1 は降りる（同じ受信に 2 回答えない）。
+  const layer1StandsDown = await (async () => {
+    // TRACE ON。降りたことを `already_attempted` の 1 行で積極的に確認する。
+    const plugin = makeGuaranteePlugin({
+      env: { TEAMAGENT_CALLER_IDENTITY_TRACE: "1" },
+    });
+    const { handlers, infos } = plugin;
+    await notifyInbound(handlers, "連携");
+    await plugin.settle();
+    const l1 =
+      (await handlers.get("before_agent_reply")(
+        { cleanedBody: "連携" },
+        beforeAgentReplyCtx(),
+      )) ?? null;
+    return {
+      // 投稿成功時は従来どおり層1 が降り、投稿は 1 通のまま（過剰解放していない）。
+      postCount: plugin.posts.length,
+      layer1Handled: l1?.handled === true,
+      guaranteeDelivered: infos.some((m) => m.includes("outcome=delivered")),
+      standDown: plugin.logs.some((m) => m.includes("reason=already_attempted")),
+      // 層1 が再度 oauth_connect を呼んでいないこと（state token の重複発行なし）。
+      toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
+    };
+  })();
+
+  // ⑧ チャンネルのスレッドで訊かれたらスレッドへ返す（会話面を移さない）。
+  const channelThread = await (async () => {
+    const plugin = makeGuaranteePlugin({});
+    await plugin.handlers.get("message_received")(
+      {
+        from: `slack:channel:${CHANNEL}`,
+        content: "連携",
+        senderId: USER,
+        messageId: "1785206299.000009",
+        threadId: TS,
+        metadata: {
+          guildId: TEAM,
+          to: `channel:${CHANNEL}`,
+          originatingTo: `channel:${CHANNEL}`,
+          threadId: TS,
+        },
+      },
+      {
+        channelId: "slack",
+        conversationId: `channel:${CHANNEL}`,
+        sessionKey: CHANNEL_SESSION_KEY,
+        senderId: USER,
+        messageId: "1785206299.000009",
+      },
+    );
+    await plugin.settle();
+    const post = plugin.posts[0] ?? null;
+    return {
+      postCount: plugin.posts.length,
+      channel: post?.channel ?? null,
+      threadTs: post?.thread_ts ?? null,
+      // チャンネルは既に正準 id なので conversations.open は呼ばない。
+      openCount: plugin.opens.length,
+    };
+  })();
+
+  // ⑩ 一時失敗（429 / 5xx）は再試行で吸収する（保証の唯一の配信面なので無音にしない）。
+  const transientRetries = await (async () => {
+    const out = {};
+    for (const mode of ["rate_limited_once", "http500_once"]) {
+      const plugin = makeGuaranteePlugin({ slackMode: mode });
+      await notifyInbound(plugin.handlers, "連携");
+      await plugin.settle();
+      out[mode] = {
+        postCount: plugin.posts.length,
+        postAttempts: plugin.attempts.filter((m) => m === "chat.postMessage").length,
+        delivered: plugin.infos.some((m) => m.includes("outcome=delivered")),
+      };
+    }
+    return out;
+  })();
+
+  // ⑪ thread_ts 付きが弾かれたら、スレッド無しで投げ直す（届かないより会話面のずれを取る）。
+  const threadFallback = await (async () => {
+    const plugin = makeGuaranteePlugin({ slackMode: "thread_rejected" });
+    await plugin.handlers.get("message_received")(
+      {
+        from: `slack:channel:${CHANNEL}`,
+        content: "連携",
+        senderId: USER,
+        messageId: "1785206500.000001",
+        threadId: TS,
+        metadata: {
+          guildId: TEAM,
+          to: `channel:${CHANNEL}`,
+          originatingTo: `channel:${CHANNEL}`,
+          threadId: TS,
+        },
+      },
+      {
+        channelId: "slack",
+        conversationId: `channel:${CHANNEL}`,
+        sessionKey: CHANNEL_SESSION_KEY,
+        senderId: USER,
+        messageId: "1785206500.000001",
+      },
+    );
+    await plugin.settle();
+    return {
+      postCount: plugin.posts.length,
+      threadTs: plugin.posts[0]?.thread_ts ?? null,
+      channel: plugin.posts[0]?.channel ?? null,
+    };
+  })();
+
+  // ⑨ DM は conversations.open で正準 `D…` を得てから claim を鋳造する
+  //    （mcp の caller_claim は `^[CDG][A-Z0-9]{8,}$` を要求する）。
+  const dmCanonicalChannel = await guaranteeScenario({ content: "連携" });
+
+  return {
+    run_binding_lost: runBindingLost,
+    declared_channel_mismatch: declaredChannelMismatch,
+    polluted_history_double_wrapped: pollutedHistory,
+    slack_failure_rescue: slackFailureRescue,
+    once_per_inbound: oncePerInbound,
+    layer1_stands_down: layer1StandsDown,
+    channel_thread: channelThread,
+    transient_retries: transientRetries,
+    thread_fallback: threadFallback,
+    dm_canonical_channel: {
+      postChannel: dmCanonicalChannel.postChannel,
+      claimChannel: dmCanonicalChannel.claimChannel,
+      toolName: dmCanonicalChannel.toolName,
+      postCount: dmCanonicalChannel.postCount,
+    },
+  };
+}
+
+// ── (C1) run 束縛: 同じ会話の候補が複数でも落とさない ──────────────────────
+// 本番実測 9 件の `trusted Slack run identity is missing or stale` の源。
+// 従来は候補が 2 件以上あると run 全体を拒否し、以後 10 分間その run の
+// すべてのツールが block されていた（連続送信・並行 run で普通に起きる）。
+function bindNewestReport() {
+  // ① 同じ DM で 2 通続けて送ってから run が始まる（＝候補 2 件）。
+  const consecutive = (() => {
+    const { handlers, logs } = makePlugin();
+    // 曖昧化の 1 行は info で出る（makePlugin の logger は warn しか拾わないので console を見る）。
+    const captured = captureConsole(() => {
+      receiveDm(handlers, "今日の予定は？", { messageId: "1785206301.000001" });
+      receiveDm(handlers, "やっぱり明日の予定を教えて", { messageId: "1785206302.000002" });
+      startRun(handlers, "run-1");
+      return callTool(handlers, "teamagent__search", "run-1");
+    });
+    const lines = captured.console.map((line) => line.text);
+    return {
+      toolBlocked: captured.value,
+      rejected: logs.some((m) => m.includes("bind_agent_run rejected")),
+      disambiguated: lines.some((line) => line.includes("bind_agent_run disambiguated")),
+      disambiguatedLine:
+        lines.find((line) => line.includes("bind_agent_run disambiguated")) ?? null,
+    };
+  })();
+
+  // ② 安全側: 別の送信者 B の受信が pending にあっても、A の run は A の受信にしか
+  //    束縛されない。matchesConversation が senderId で先に落とすため、B の受信は
+  //    そもそも候補に入らない（＝最新を選ぶ規則は「誰か」を曖昧にしない）。
+  const otherSender = (() => {
+    const OTHER = "U0AAAAAAAAB";
+    const { handlers } = makePlugin();
+    const A_TS = "1785206303.000003";
+    // ⚠️ senderId **だけ**が違う状況を作る（2026-09-04 レビュー指摘 中1）。
+    // 旧版は B を receiveThreadMessage（CHANNEL_SESSION_KEY / channel:C…）で作る一方、
+    // run ctx は DM（DM_SESSION_KEY / user:U…）だったため、sessionKey も channel も
+    // 食い違っており **senderId 照合が無くても落ちた**＝この分岐を守っていなかった。
+    // 実測: matchesConversation から senderId 照合を消す変異でこのテストは緑のままだった。
+    // 同じチャンネル・同じ sessionKey・別 senderId・**B のほうが新しい** に揃えることで、
+    // 「最新優先」が senderId を跨いだ瞬間に赤くなるようにする。
+    receiveThreadMessage(handlers, "連携", { senderId: USER, messageId: A_TS });
+    receiveThreadMessage(handlers, "連携", { senderId: OTHER, messageId: "1785206304.000004" });
+    const rawId = `${CHANNEL.toLowerCase()}:thread:${TS}`;
+    handlers.get("before_model_resolve")(
+      { prompt: "probe" },
+      {
+        runId: "run-1",
+        agentId: "teamagent",
+        sessionKey: CHANNEL_SESSION_KEY,
+        sessionId: "sid",
+        trigger: "user",
+        ...agentCtxFields(rawId),
+        senderId: USER,
+      },
+    );
+    const result = handlers.get("before_tool_call")(
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        params: { _user_context: { slack_user_id: USER } },
+      },
+      {
+        toolName: "teamagent__oauth_connect",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        sessionKey: CHANNEL_SESSION_KEY,
+        channelId: rawId,
+      },
+    );
+    const claim = result?.block
+      ? null
+      : JSON.parse(
+          Buffer.from(
+            result.params._user_context.caller_claim.split(".")[0],
+            "base64url",
+          ).toString(),
+        );
+    return {
+      blocked: Boolean(result?.block),
+      // 署名された送信者が A のままであること（B の受信を掴んでいない）。
+      claimUser: claim?.sub ?? null,
+      claimMessage: claim?.message ?? null,
+      expectedMessage: A_TS,
+    };
+  })();
+
+  // ③ 最新が選ばれること（束縛された受信の messageId が新しい方）。
+  const newestWins = (() => {
+    const { handlers } = makePlugin();
+    receiveDm(handlers, "古い方", { messageId: "1785206305.000005" });
+    receiveDm(handlers, "新しい方", { messageId: "1785206306.000006" });
+    startRun(handlers, "run-1");
+    const result = handlers.get("before_tool_call")(
+      {
+        toolName: "teamagent__search",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        params: { _user_context: { slack_user_id: USER } },
+      },
+      {
+        toolName: "teamagent__search",
+        runId: "run-1",
+        toolCallId: "tc-1",
+        sessionKey: DM_SESSION_KEY,
+        channelId: `user:${USER}`,
+      },
+    );
+    const claim = result?.block
+      ? null
+      : JSON.parse(
+          Buffer.from(
+            result.params._user_context.caller_claim.split(".")[0],
+            "base64url",
+          ).toString(),
+        );
+    return { blocked: Boolean(result?.block), claimMessage: claim?.message ?? null };
+  })();
+
+  return { consecutive, otherSender, newestWins };
+}
+
+// ── フックの観測性（本番でどのフックが呼ばれるかの一次証拠）─────────────────
+// register の 1 行バナーと、各フック初回の `hook first_fired` を固定する。
+// この 2 つの差分が「登録はしたが本番では呼ばれないフック」の一覧になる。
+function hookObservabilityReport() {
+  const captured = captureConsole(() => {
+    const created = makePlugin();
+    warmUpHooks(created.handlers);
+    return created;
+  });
+  const lines = captured.console.map((line) => line.text);
+  const firstFired = lines
+    .map((line) => /hook first_fired name=(\S+)/u.exec(line)?.[1] ?? null)
+    .filter((name) => name !== null);
+  // 2 回目の呼び出しでは増えないこと（初回だけの行であること）。
+  const before = consoleLines.length;
+  warmUpHooks(captured.value.handlers);
+  return {
+    registeredHooks: [...REGISTERED_HOOKS],
+    // 実際に api.on された名前（バナーがハードコード定数と非結合にならないことの固定）。
+    handlerKeys: [...captured.value.handlers.keys()],
+    bannerLine: lines.find((line) => line.includes("registered hooks=")) ?? null,
+    firstFired,
+    secondPassConsoleDelta: consoleLines.length - before,
+    // 診断は stderr（console.warn）だけを使う。stdout は node ハーネスのデータ面で、
+    // 混ぜると JSON.parse が壊れる（test_mcp_gateway_caller_claim.py の 3 本で実証）。
+    consoleLevels: [...new Set(captured.console.map((line) => line.level))].sort(),
+  };
+}
+
+// 受信に `content` が無い（上流の形が変わった疑い）ときは、TRACE と無関係に
+// フックごとに 1 回だけ warn を残す。毎回出すと会話ごとの騒音になるので初回だけ。
+async function contentAbsentReport() {
+  const plugin = makeGuaranteePlugin({});
+  const send = (hook) =>
+    plugin.handlers.get(hook)(
+      {
+        from: `slack:${USER}`,
+        senderId: USER,
+        messageId: TS,
+        metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
+      },
+      {
+        channelId: "slack",
+        conversationId: `user:${USER}`,
+        sessionKey: DM_SESSION_KEY,
+        senderId: USER,
+        messageId: TS,
+      },
+    );
+  await send("message_received");
+  await send("message_received");
+  await send("inbound_claim");
+  await plugin.settle();
+  const warned = plugin.logs.filter((m) => m.includes("reason=inbound_content_absent"));
+  return {
+    warnCount: warned.length,
+    sources: warned
+      .map((m) => /source=(\S+)/u.exec(m)?.[1] ?? null)
+      .filter((v) => v !== null)
+      .sort(),
+    postCount: plugin.posts.length,
+  };
+}
+
+// 「短い連携依頼ではない」文言では保証経路を起動しない（誤爆しない）。
+async function guaranteeNegativeMatrix() {
+  const rows = [];
+  for (const entry of CONNECT_REQUEST_PHRASES.must_not_match) {
+    const r = await guaranteeScenario({ content: entry.text });
+    rows.push({ text: entry.text, postCount: r.postCount });
+  }
+  return rows;
+}
+
+// (E) mcp の利用者向け失敗文面（CONNECT-I02）が、そのまま利用者へ届くこと。
+const connectL1UserFacingError = await (async () => {
+  const r = await deterministicScenario({ content: "連携", mode: "user_error" });
+  return {
+    handled: r.handled,
+    replyText: r.replyText,
+    toolCallCount: r.toolCallCount,
+    mcpErrorText: MCP_USER_FACING_ERROR,
+    infos: r.infos,
+    logs: r.logs,
+  };
+})();
 const connectPhraseRows = await connectPhraseMatrix();
+const guaranteeMatrixRows = await guaranteeMatrix();
+const guaranteeNegativeRows = await guaranteeNegativeMatrix();
+const guaranteeCases = await guaranteeCaseReport();
+const guaranteeOnce = await guaranteeOnceCases();
+const guaranteeHookSources = await guaranteeHookSourceMatrix();
+const contentAbsent = await contentAbsentReport();
+const hookObservability = hookObservabilityReport();
+const bindNewest = bindNewestReport();
 const connectL1NextMessage = await nextMessageAfterDeterministic();
 const connectL1RepeatAfter30s = await repeatConnectAfterDeterministic();
 const connectL1OtherSender = await otherSenderPendingInThread();
@@ -760,11 +1588,21 @@ const connectL1OtherSender = await otherSenderPendingInThread();
 // {"name":"teamagent__oauth_connect","arguments":{…}} が 2 件だった。
 // ツールを問わず（oauth_connect 105 / search 95 / calendar_event 19 …）発生している。
 function unwrapScenario({ params, toolName = "teamagent__search" }) {
-  const { handlers, logs } = makePlugin();
+  // register の 1 行バナー（`registered hooks=[…]`）とフック初回の
+  // `hook first_fired` は、いずれもプロセス内 1 回だけの観測行。定常状態の騒音と
+  // 混ぜないよう、セットアップ窓としてまとめて捕捉する。
+  const setup = captureConsole(() => {
+    const created = makePlugin();
+    warmUpHooks(created.handlers);
+    return created;
+  });
+  const { handlers, logs } = setup.value;
   const captured = captureConsole(() => {
     handlers.get("message_received")(
       {
         from: `slack:${USER}`,
+        // 実際の受信は本文を持つ（連携依頼ではない通常の会話）。
+        content: "テスト",
         senderId: USER,
         messageId: TS,
         metadata: { guildId: TEAM, to: `user:${USER}`, originatingTo: `user:${USER}` },
@@ -833,6 +1671,7 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
     claimPayload,
     warnings: logs,
     console: captured.console,
+    warmUpConsole: setup.console,
   };
 }
 
@@ -940,6 +1779,7 @@ const unwrapReport = {
 // 拒否したのにログが 1 行も出ない状態を作れないことを固定する。
 function blockObservability({ ctxOverrides = {}, eventOverrides = {} } = {}) {
   const { handlers, logs } = makePlugin();
+  warmUpHooks(handlers);
   const captured = captureConsole(() =>
     handlers.get("before_tool_call")(
       {
@@ -999,7 +1839,11 @@ const quietOnSuccess = (() => {
     blocked: r.blocked,
     consoleLineCount: r.console.length,
     warningCount: r.warnings.length,
-    totalConsoleDelta: consoleLines.length - before,
+    // `hook first_fired` はプロセス内 1 回だけの観測行なので定常状態の騒音には数えない。
+    // 実際に「1 回だけ」であることは hook_observability 側で別に固定する。
+    totalConsoleDelta:
+      consoleLines.length - before - r.warmUpConsole.length,
+    warmUpConsole: r.warmUpConsole,
   };
 })();
 
@@ -1022,17 +1866,21 @@ async function layer1Trace({ trace, content = "連携", ctxOverrides = {}, skipI
   });
   const result = await captured.value;
   const lines = captured.console.map((line) => line.text);
+  // (D) 保証経路も `outcome=` を書くようになったので、層1 の行だけを見る。
+  // 両者を混ぜると `outcome=skipped reason=no_slack_bot_token`（保証経路）を
+  // 層1 の skip 理由と読み違える。
+  const l1 = lines.filter((line) => line.includes("connect deterministic path"));
   return {
     handled: result?.handled === true,
     entered: lines.some((line) => line.includes("layer1 entered")),
     enteredLine: lines.find((line) => line.includes("layer1 entered")) ?? null,
     skippedReason:
-      lines
+      l1
         .find((line) => line.includes("outcome=skipped"))
         ?.match(/reason=(\S+)/u)?.[1] ?? null,
-    skippedLine: lines.find((line) => line.includes("outcome=skipped")) ?? null,
+    skippedLine: l1.find((line) => line.includes("outcome=skipped")) ?? null,
     fallthroughReason:
-      lines
+      l1
         .find((line) => line.includes("outcome=fallthrough"))
         ?.match(/reason=(\S+)/u)?.[1] ?? null,
     inboundRecorded: lines.some((line) => line.includes("inbound recorded")),
@@ -1093,18 +1941,22 @@ const layer1TraceReport = {
   // trace OFF でも fallthrough（層1 に入ったが実行できなかった）は必ず出る。
   off_fallthrough: await (async () => {
     const { handlers } = makeConnectPlugin({ env: { TEAMAGENT_MCP_BEARER: "" } });
+    warmUpHooks(handlers);
     const captured = captureConsole(() => {
       receiveDm(handlers, "連携");
       return handlers.get("before_agent_reply")({ prompt: "連携" }, beforeAgentReplyCtx());
     });
     await captured.value;
     const lines = captured.console.map((line) => line.text);
+    // 層1 の行だけを数える。(D) 保証経路も同じ窓で 1 行書くので、混ぜると
+    // 「層1 が fallthrough を 1 行だけ書く」という性質が測れなくなる。
+    const l1 = lines.filter((line) => line.includes("connect deterministic path"));
     return {
       fallthroughReason:
-        lines
+        l1
           .find((line) => line.includes("outcome=fallthrough"))
           ?.match(/reason=(\S+)/u)?.[1] ?? null,
-      lineCount: lines.length,
+      lineCount: l1.length,
       lines,
     };
   })(),
@@ -1353,8 +2205,10 @@ const report = {
     handled: connectL1Heartbeat.handled,
     toolCallCount: connectL1Heartbeat.toolCallCount,
   },
-  // 層1 ⑥失敗はすべて次の層へ落ちる（fail-open ではなく fail-to-next-layer）。
+  // 層1 ⑥「到達できなかった」失敗はすべて次の層へ落ちる（fail-open ではなく fail-to-next-layer）。
   connect_l1_failures: connectL1Failures,
+  // 層1 ⑥' mcp が利用者向けに整形した失敗文面は、捨てずにそのまま届ける（(E)）。
+  connect_l1_user_facing_error: connectL1UserFacingError,
   // 層1 ⑦handled の後、同じ DM の次の受信で run 束縛とツール呼び出しが通る（pending 残留なし）。
   connect_l1_next_message_tools_ok: {
     l1Handled: connectL1NextMessage.l1Handled,
@@ -1402,6 +2256,20 @@ const report = {
   }),
   // fixture（単一正本）と層1 実経路の一致。
   connect_phrase_matrix: connectPhraseRows,
+  // ── (D)(E) 保証マトリクス（2026-09-04） ────────────────────────────────
+  guarantee_matrix: guaranteeMatrixRows,
+  guarantee_negative_matrix: guaranteeNegativeRows,
+  guarantee_cases: guaranteeCases,
+  // 一回性が pending の寿命に依存しないこと。
+  guarantee_once: guaranteeOnce,
+  // どちらの受信フックが発火しても保証が立つこと。
+  guarantee_hook_sources: guaranteeHookSources,
+  // 受信に content が無い場合の観測（フックごとに 1 回だけ）。
+  guarantee_content_absent: contentAbsent,
+  // 各フックの入口 1 行と register バナー（本番でどのフックが呼ばれるかの一次証拠）。
+  hook_observability: hookObservability,
+  // (C1) 同じ会話の候補が複数でも run を落とさない。
+  bind_newest: bindNewest,
   // ── ツール引数の二重包みを剥がす（2026-09-03） ────────────────────────
   unwrap: unwrapReport,
   // ── 拒否の観測性（診断行 + 必ず 1 行のログ） ──────────────────────────

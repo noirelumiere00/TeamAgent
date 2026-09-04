@@ -628,3 +628,355 @@ block / fallthrough / answered / rejected のみ。env は OC のタスク定義
    「`arguments に` が 1 本も無い」ことを固定する。SOUL.md の同趣旨の 1 行も同時に直した。
    なお block 最多の oauth_connect(105) / search(95) にはこの文言が無いので、
    **これが唯一の主因とは言えない**（プロンプト側の対策として実施）。
+
+---
+
+## 12.【追記 2026-09-04】ログ不達の真因・保証経路（層0）・残ブロックの根治
+
+前節（§11）の弱点 5 に「2026-09-03 の層1 不発の真因はまだ確定していない」と書いた。
+本節でそれを確定させ、あわせて **「誰が言っても『連携』が必ず届く」** ための経路を追加する。
+
+一次検証はすべて上流 `openclaw@2026.7.1` の**実物**に対して行った。
+`npm pack openclaw@2026.7.1` を展開したうえで、読むだけでなく**実際に gateway を起動して観測**している。
+以下の `file:line` はその展開物（`<pkg>/dist/...`）に対応する。
+
+### 12-1.【真因】プラグインのログは壊れていない。トレース env が捨てられていた
+
+PR #383 では「plugin のログが CloudWatch に 1 行も出ない」を前提に、
+`api.logger` に加えて `console` へも二重書きする対策を入れた。**この前提は誤診だった。**
+
+実機検証（gateway を起動し、プラグインの register 内から 4 種類の出力を出して stdout/stderr を分離捕捉）:
+
+| 出力 | 行き先 | 実測 |
+|---|---|---|
+| `console.warn` | stderr | 出る |
+| `console.info` | stdout | 出る |
+| `api.logger.warn` | stderr（`[plugins] …`） | 出る |
+| `api.logger.info` | stdout（`[plugins] …`） | 出る |
+
+つまり **gateway プロセスでプラグインのログは stdout/stderr に確かに届く＝CloudWatch に届く**。
+根拠となる上流の経路:
+
+- `console.*` は起動時に `enableConsoleCapture()` が差し替えるが、差し替え先は
+  ファイルロガーへ転送した**うえで元の console へも書く**
+  （`dist/console-DDSYsaep.js:111-186`、抑制されるのは `SUPPRESSED_CONSOLE_PREFIXES` の
+  5 文言だけ＝`:83-94`。本プラグインの文言は該当しない）。
+- subsystem logger は `writeConsoleLine` を通り、`loggingState.rawConsole ?? console` へ書く
+  （`dist/subsystem-C3fiUGN1.js:157-165`）。console 既定レベルは `info`
+  （`dist/console-DDSYsaep.js:13-16`）で、抑制されていない。
+- `bundled-capability-runtime-DNfN9uhv.js:92-96` の **no-op logger は本プラグインの経路ではない**。
+  あれは `createCapturedPluginRegistration`（capability の**発見**パス）専用で、
+  実行時のフックはここを通らない。
+
+では何が起きていたのか。**トレース env がプラグインに届いていなかった。**
+
+`infra/docker/openclaw-entrypoint.mjs` は `process.env` を継承しない。
+`buildChildEnvironment()` が allowlist だけで `childEnv` を組み立て、`run()` が
+`process.execve(process.execPath, [...], childEnv)` でプロセスを置換する
+（本 PR 前の `:156-186` と `:369-375`）。
+`TEAMAGENT_CALLER_IDENTITY_TRACE` は `REQUIRED_SECRETS` にも `PASSTHROUGH_ENV` にも無かったため、
+**ECS のタスク定義へ注入しても黙って捨てられていた**。
+プラグイン側の `traceEnabled` は常に `false`、`emitTrace()` は全て no-op。
+だから `layer1 entered` も `inbound recorded` も、TRACE=1 を入れたつもりでも 1 行も出なかった。
+
+**修正**: `openclaw-entrypoint.mjs` に `DIAGNOSTIC_ENV`（非秘密の診断 env 専用の allowlist）を新設し、
+`TEAMAGENT_CALLER_IDENTITY_TRACE` と `CONNECT_ADMIN_NAME` を通す。
+`PASSTHROUGH_ENV`（資格情報・trust store・proxy）とは意図が違うので混ぜない。
+契約は `test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted` が固定する
+（両 allowlist の完全一致・互いに素・秘密を含まないこと）。
+
+> **教訓**: 「ログが出ない」を見たら、出力経路を疑う前に **その行が実行される条件**を疑う。
+> env の allowlist は「設定したのに効かない」を完全に無音で作る。
+
+### 12-2.【層1 の発火可否】上流の制約ではない。ただし「発火した」証拠も無かった
+
+`before_agent_reply` の呼び出し側は通常応答経路にあり、条件は
+`!useFastTestBootstrap && hookRunner.hasHooks("before_agent_reply")` だけで、
+DM・socket mode・trigger による除外は無い（`dist/get-reply-CknL88Yv.js:5588-5624`）。
+`handled` を返せばモデルは起動しない（`:5620-5623`）。
+
+登録側にはもう 1 つ門がある。`before_agent_reply` は **conversation hook**
+（`dist/command-registration-tKF3dsKu.js:170-180`）で、**非 bundled プラグインは
+`plugins.entries.<id>.hooks.allowConversationAccess=true` が無いと登録が捨てられる**
+（`dist/registry-D1_pYg_a.js:4224-4235`）。しかも捨てたことは `registry.diagnostics` に
+積まれるだけで**ログには一切出ない**（`pushDiagnostic` は `dist/registry-D1_pYg_a.js:2503-2505`）。
+
+本番相当の設定（`infra/openclaw/openclaw.config.json5:70-75`）でローカルに実機再現したところ、
+`openclaw plugins inspect teamagent-caller-identity --runtime --json` は
+**`hookCount: 8` / `diagnostics: []`**（8 フックすべて登録成功）を返した。
+つまり **層1 が上流の制約で発火しない、という事実は確認できなかった。**
+
+一方で「発火した」証拠も無い。層1 の脱出経路のうち `skipped(...)` はすべて `emitTrace` 依存で、
+12-1 のとおりその TRACE が届いていなかったからである。
+本番ログの `[agents/tool-policy] tool policy removed 26 tool(s)`（＝モデル起動）は、
+**層1 が呼ばれなかった**場合とも、**層1 が呼ばれて `skipped` で静かに降りた**場合とも整合する。
+両者を区別する情報は、当時のログには存在しなかった。
+
+したがって本 PR は「(B) 層1 が発火しない」を**確定した不具合として修正しない**。
+そもそも前提が実証されていない。代わりに次の 2 つを行う。
+
+1. **判別可能にする**（12-3）。次に起きたら 1 行で判る。
+2. **層1 の発火可否に依存しない保証経路を作る**（12-4）。これが本題。
+
+> ⚠️ 明記: **(B) は「上流の制約で不可能」ではない。** 層1 は実機で登録・呼び出しの両方が可能である。
+> 未確定なのは「本番の特定の会話でなぜ答えなかったか」であり、それは 12-3 の観測で次回に確定する。
+> ただし後述のとおり、**確定を待たずに保証は成立させる**。
+
+### 12-3. どのフックが本番で呼ばれるかを、ログだけで列挙できるようにする
+
+TRACE と無関係に、必ず次の 2 種類を出す。
+
+- `register` 時に 1 行: `registered hooks=[...] trace=on|off mcp_bearer=… slack_bot_token=…`
+- 各フックが**初めて呼ばれたとき**に 1 行: `hook first_fired name=<hook>`
+
+初回だけにするのは、通常会話 1 通ごとに数行増えるのを避けるため。知りたいのは回数ではなく可否である。
+**バナー（登録を要求した）と first_fired（実際に呼ばれた）の差分が、そのまま
+「登録はしたが本番では呼ばれないフック」の一覧**になる。
+12-2 のとおり、上流は登録拒否を無音で行うので、これが唯一の一次証拠になる。
+契約は `test_every_registered_hook_reports_its_first_invocation` が固定する。
+
+バナーは **実際に `api.on` した名前**から組み、期待値 `REGISTERED_HOOKS` と食い違ったら
+起動時に `fail()` する（2026-09-04 レビュー指摘 中2）。定数を直接出していると、
+`observe()` を 1 つ消してもバナーは出続けテストも緑のままで、
+「バナー vs first_fired の差分＝唯一の一次証拠」という**前提そのものが黙って壊れる**。
+`test_registered_hooks_banner_is_derived_from_actual_registrations` と、
+`observe()` を 1 つ削除する変異が赤くなることで固定する。
+
+保証経路が語彙不一致で不発になる場合は既定では黙るが、受信の `content` が
+**文字列ですらない**ときだけは TRACE と無関係に**フックごとに 1 回**警告する
+（同 中3）。上流の `event.content` が別フィールドへ移ると、(A) と同型の
+「設定したのに無音」が再発するため。毎回出すと `content` を持たない受信で騒音になるので初回だけ。
+
+あわせて `emitPluginLog` の console 側を **常に stderr**（`console.warn`）に統一した。
+このプラグインは `node -e` で読み込まれ、同じプロセスの stdout が
+`JSON.stringify(...)` の**データ面**であることがある
+（`tests/test_mcp_gateway_caller_claim.py` の 3 本のハーネス）。
+バナーを `console.info`（= stdout）で出した瞬間にその 3 本が壊れたのが実測である。
+**診断は stderr、データは stdout** ——この分離は破らない。
+CloudWatch は stdout/stderr を同じロググループへ入れるので到達性は変わらず、
+level の意味は logger 側（`logger.info` / `logger.warn`）で保つ。
+契約は `test_plugin_diagnostics_never_touch_stdout` が固定する。
+
+### 12-4.【保証経路 = 層0】`message_received` から Slack へ直接届ける
+
+**ゴール**: 新規・既存・過去のテストユーザーを問わず、「連携して」と言ったら
+**漏れなく**リンク（または次の一手が分かる診断つき案内）が届くこと。
+
+#### なぜ `message_received` なのか（フック選定の一次比較）
+
+| フック | 種別 | 非 bundled での登録 | 本番で呼ばれる実証 | 保証の土台に使えるか |
+|---|---|---|---|---|
+| `message_received` | 非 conversation | 設定に依存せず必ず登録 | あり（下記） | **使える** |
+| `inbound_claim` | 非 conversation | 同上 | あり | 使える（同経路） |
+| `before_agent_reply` | **conversation** | `allowConversationAccess` 必須・欠けると無音で消える | 無し（12-2） | 使えない |
+| `before_model_resolve` / `before_agent_finalize` / `agent_end` | **conversation** | 同上 | — | 使えない |
+
+`CONVERSATION_HOOK_NAMES` は `dist/command-registration-tKF3dsKu.js:170-178`、
+門は `dist/registry-D1_pYg_a.js:4224-4235`。`message_received` はこの集合に**入っていない**ので、
+`allowConversationAccess` の設定ミス・上流の仕様変更・config の取り違えのいずれでも落ちない。
+
+「本番で呼ばれる実証」の根拠と、その**限界**: mcp が署名済み claim を受理してツールが
+動いている以上、`before_tool_call`→`signToolCall`→`mintCallerClaim` は確実に実行されている。
+`mintCallerClaim` は `ingressByRun` に載った ingress を要求し、その ingress を作るのは
+`rememberInbound` だけである。
+
+ただし `rememberInbound` は `message_received` **と** `inbound_claim` の両方に繋がっている。
+したがってこの実績が示すのは「**どちらか**が動いている」ことだけで、
+`message_received` **単独**の実証にはならない（2026-09-04 レビュー指摘 重大2）。
+本番で `inbound_claim` だけが発火していた場合、片方にしか保証を載せていなければ
+保証経路は一度も動かず、層1 の二の舞になる。
+
+→ **保証経路は両方の受信フックに掛ける。** 一回性は下記の台帳が守るので二重投稿しない。
+`test_connect_guarantee_holds_whichever_inbound_hook_fires` が
+「message_received のみ / inbound_claim のみ / 両方」の 3 通りとも投稿 1 で固定する。
+
+#### 実行モデル — 保証経路は hook の await から切り離す
+
+上流実物で両フックの呼ばれ方を確認した（2026-09-04 レビュー指摘の必須確認）。
+
+| フック | 実行 | タイムアウト | 実物 |
+|---|---|---|---|
+| `message_received` | 呼び出し側が fire-and-forget | **無し** | 呼び出し `dist/dispatch-V82RCNJs.js:1438`／`runVoidHook` は `dist/hook-runner-global-Cucx8m-W.js:458-477`／既定表 `:248-253` は `agent_end` `channel_pairing_requested` `before_compaction` `after_compaction` の 4 つだけ |
+| `inbound_claim` | **claiming hook。ハンドラを逐次 `await`** | **無し** | `runClaimingHook` `:689-690` → `runClaimingHooksList`（`for` ループ内で `await`、first-claim wins）／`getClaimingHookTimeoutMs` が引く `DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK`（`:254-260`）に `inbound_claim` は無い |
+
+`voidHookTimeoutMsByHook` / `modifyingHookTimeoutMsByHook` の既定表（`DEFAULT_VOID_HOOK_TIMEOUT_MS_BY_HOOK` / `DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK`）を上書きする呼び出し元は
+上流 dist に存在しない（唯一の `createHookRunner` 呼び出しは `:1112-1124` で
+`logger` / `catchErrors` / `failurePolicyByHook` しか渡さない）。
+よって **どちらのフックにもタイムアウトは無い**＝保証経路が途中で切られることはない。
+
+しかし `inbound_claim` は**逐次 await される**ので、そこで保証経路
+（最大 MCP 15s + Slack 10s×2）を待つと **受信パイプライン全体をその間止めてしまう**。
+そこで `startConnectGuarantee` で **両方とも hook の await から切り離す**（fire-and-forget）。
+`message_received` 側は待っても実害が無いが、上流が将来タイムアウトを足したら
+配信が切られるため、形を揃えておくほうが安全である。
+
+受信の記録（`rememberInbound`）と一回性の確保は
+`deliverConnectGuarantee` の**最初の `await` より前**に同期で終わるので、切り離しても取りこぼさない。
+
+#### 配信手段の選定（なぜ Slack Web API を直接叩くのか）
+
+上流にも送信面はある（`api.runtime.channel` の `outbound.loadAdapter` / `reply.dispatch*` /
+`inbound.dispatchReply`、型は `dist/types-DaHgOqFX.d.ts:8228-8352`）。しかしこれらは
+gateway の request context と account 解決に依存し、フックから単独で正しく駆動する契約が
+公開されていない（多くが `@deprecated` か、channel plugin 内部からの利用を前提にしている）。
+
+対して `SLACK_BOT_TOKEN` は `REQUIRED_SECRETS` として**確実に子プロセスへ渡っている**
+（`openclaw-entrypoint.mjs:15-21` と `buildChildEnvironment`）。
+本プラグインは既に mcp へ生 `fetch` している（層1 の `callMcpTool`）ので、同じ流儀で済む。
+**「確実に届く」ことを最優先し、依存の少ない方を選ぶ。**
+
+使う API は 2 つだけ:
+
+- `conversations.open` — DM の正準 `D…` を得る。mcp の caller claim は
+  `^[CDG][A-Z0-9]{8,}$` を要求する（`src/teamagent/mcp_gateway/caller_claim.py:39,385`）が、
+  受信側は DM を内部別名 `DM:U…` にしか解決できないため。チャンネルは既に正準なので呼ばない。
+- `chat.postMessage` — 本文の投稿。スレッド受信ならそのスレッドへ返す。
+
+Slack は失敗を HTTP 200 + `{"ok": false, "error": …}` で返すので必ず `ok` を見る。
+
+#### 一回性と二重投稿
+
+一回性は **`connectAnsweredByMessage`（`pendingKey` = `[sessionKey, messageId]` 基準の台帳）**
+が持つ。層1 と保証経路が同じ台帳を見るので、どちらかが答えたらもう一方は降りる。
+
+> **⚠️ 当初の実装は壊れていた**（2026-09-04 レビュー指摘 重大1）。
+> 旗を ingress **オブジェクトのフィールド**（`connectDeterministicAttempted`）に載せていたが、
+> `bindRun` 成功時に `removePending` で pending から ingress が消えるため、
+> 次の通知は新しいオブジェクトを作り、**旗が毎回リセットされていた**。
+> 実測（実物 dist を駆動）: `message_received` ×2（runId 付き）で**投稿 2・tools/call 2**、
+> `message_received` → `before_model_resolve` → `message_received` でも**投稿 2**。
+> tools/call が 2 回走るということは **state token が 2 個発行される**ということで、
+> 単なる「うるさい」では済まない。
+> 224 組マトリクスがこれを捕らえなかったのは、各行が受信を 1 回しか通知しない
+> 新規プラグインで測っていたため。以後**マトリクスの全行を 2 回通知で測る**。
+> 旗は受信の同一性（`pendingKey`）に紐づけ、**オブジェクトの寿命から切り離す**のが正解。
+
+`message_received` は `before_agent_reply` より先に走るので、通常は保証経路が台帳を取り、
+層1 は `already_attempted` で降りる。
+
+**台帳は投稿の前に押さえるが、投稿に失敗したら必ず解放する**（2026-09-04 レビュー指摘）。
+前に押さえるのは、同時に走る再通知で二重投稿しないため。しかし失敗のまま抜けると
+層1 まで `already_attempted` で降り、**利用者に何も届かない**。
+実測: `slackMode=post_fails` で posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音だった。
+層1 はハーネスの reply 経路で返す＝bot token も Slack Web API も使わない
+**別の故障ドメイン**なので、ここで降りるのは救済機会の放棄になる。
+解放しても二重投稿にはならない（投稿は 0 通で終わっている）。
+`test_slack_delivery_failure_hands_the_inbound_back_to_layer1` が
+「投稿失敗 → 層1 が同じ受信に答える」を、
+`test_connect_guarantee_posts_once_and_layer1_stands_down` が
+「投稿成功 → 層1 は降り、tools/call は 1 回のまま」（過剰解放していないこと）を固定する。
+
+**旗は「実際に配信を試みる」と決めた後にだけ立てる。** 手前で立てると、保証経路が使えない環境
+（bot token 無し＝ローカル/テスト）で層1 まで降りてしまい **誰も答えない穴**ができる。
+これは実装中に実際に踏んだ（mutation `M8` がこの退行を固定する）。
+
+モデル経路そのものは止めない。裁定どおり **「抑制のために保証を犠牲にしない」**。
+同じ受信に対して保証経路が 2 通投稿しないことだけを守る。
+
+⚠️ ただし正確に言うと、モデル経路は止まらないので **`oauth_connect` がもう一度呼ばれうる**。
+これは「返事が 2 通に見える」だけでなく **state token がもう 1 個発行される**ということである
+（token 自体は本人専用・使い捨てなので危険ではないが、無害でもない）。
+層1 は台帳で降りるが、モデルが自分でツールを呼ぶ経路までは塞いでいない。
+塞ぐなら層2/3 を「保証済みの run では畳む」改修が要る（本 PR の範囲外・§12-8 の 2）。
+
+なお、同じ受信が 2 度通知される経路（`inbound_claim` と `message_received` の両方）があるため、
+`rememberInbound` は `sameIngress` で同一と確認できた再通知について**旗を引き継ぐ**。
+引き継がないと旗が毎回リセットされ、同じ受信に何通も投稿する（mutation `M7`）。
+
+### 12-5.【(E)】利用者の状態差は mcp の単一正本に委ねる
+
+mcp は**失敗も成功と同じ `TextContent` の JSON** で返す
+（`src/teamagent/mcp_gateway/server.py:442-445`、例外は `:797,819` で `{"error": …}` に畳まれる）。
+`isError` も JSON-RPC error も使わない。しかもその `error` 文面は**既に利用者向けに整形済み**で、
+「何をすればよいか」＋転送用の `診断: CONNECT-Ixx <時刻> <識別子>` 行まで含む
+（`src/teamagent/connect_diagnostics.py:260-277`）。
+
+代表例が新規ユーザーの **CONNECT-I02**（Slack プロフィールに会社メールが無い／会社ドメイン外）:
+`src/teamagent/skills/oauth_connect/skill.py:228-236` が
+「Slack プロフィールのメールアドレスが会社メールになっているか確認し、管理者へご連絡ください。」
+を含む文面を返す。
+
+旧実装（`extractConnectMessage`）はこれを一律 `mcp_tool_error` に潰して捨てていた。
+その結果、新規ユーザーには**無言**か、ブロックされた toolResult を見たモデルの自作回答
+（「技術的な問題」「管理者へお問い合わせ」）しか届かなかった。
+**これが「誰でも連携できる」を破っていた中心的な穴である。**
+
+`extractConnectOutcome` に置き換え、`{kind:"user_error"|"message", text}` を返す。
+保証経路も層1 も、この `text` を**一字も変えずに**利用者へ届ける。
+既に連携済み／片方だけ連携済みは元々成功側の `message` に入って返る
+（`skill.py:460-492`）ので、追加の分岐は要らない＝**状態差の判断は mcp 側の単一正本に集約**される。
+
+mcp へ到達すらできなかった場合（fetch 失敗・5xx・壊れた戻り値）だけ、プラグイン側の最終文面
+`CONNECT-Z02` を出す。「もう一度『連携』と送ってください」＋管理者へ転送する 1 行で、
+**無言終了を作らない**。
+
+### 12-6.【(C)】残ブロック 11 件の根治
+
+#### C1: `trusted Slack run identity is missing or stale`（9 件）
+
+`bindAgentRun` が `candidates !== 1` で run を拒否し、`rejectedRuns` に 10 分間登録していた。
+以後その run の**すべてのツール**が block される。連続してメッセージを送る、あるいは
+並行 run が走るだけで候補は 2 件以上になるので、正常な使い方で再現する。
+
+**修正**: 同じ会話の候補が複数あるときは**最新の受信**を選ぶ。
+
+安全側は崩れない。`matchesConversation` は `sessionKey` / `senderId` / channel（DM 別名込み）/ TTL を
+**すべて**満たしたものだけを残す。つまり候補は全員「同じ人の同じ会話の受信」であり、
+曖昧なのは「どのメッセージか」だけで「**誰か**」ではない。他人・別会話は候補に入る前に落ちている。
+`test_run_binding_prefers_the_newest_inbound_in_the_same_conversation` の③が、
+**より新しい別送信者の受信があっても掴まない**ことを固定する。
+
+> 当初この③は守れていなかった（2026-09-04 レビュー指摘 中1）。別送信者を
+> チャンネル（`CHANNEL_SESSION_KEY` / `channel:C…`）で作る一方、run ctx は DM
+> （`DM_SESSION_KEY` / `user:U…`）で、**sessionKey も channel も違っていた**ため、
+> `senderId` 照合が無くても落ちていた。実測: `matchesConversation` から
+> `ingress.senderId === senderId` を消す変異でこのテストは**緑のまま**だった
+> （赤くなったのは層1 のテスト 1 本だけ）。実装自体は安全だったが、テストが守っていなかった。
+> **同一 channel・同一 sessionKey・別 senderId・別送信者のほうが新しい** に直し、
+> 同じ変異で赤くなることを確認した。
+曖昧化したときは `bind_agent_run disambiguated candidates=N rule=newest_in_conversation` を出す（黙って選ばない）。
+
+#### C2: `declared channel_id does not match the bound ingress`（2 件）
+
+`validateDeclaredContext` がモデルの申告違いで block していた。
+しかしこの拒否は**セキュリティ上 1 ビットも稼いでいない**: `mintCallerClaim` は
+`_user_context` を authoritative 値で丸ごと置き換えてから署名するため、申告値は元々 100% 捨てられる。
+拒否は「捨てる前に落とす」だけの純粋な失敗モードだった。
+
+**修正**: 会話面 3 フィールド（`slack_team_id` / `channel_id` / `thread_ts`）は
+**破棄して続行**し、`discarded declared user_context fields fields=[…]` を 1 行出す。
+`caller_claim`（持ち込み署名＝replay）と `slack_user_id`（唯一の明示的ななりすまし申告）は
+引き続き block する＝fail-closed は維持。
+
+### 12-7. G7 の維持
+
+追加した行が出すのはフック名・理由コード・件数・`id_shape` だけ。
+Slack 識別子・本文・URL・claim・bearer は載せない。
+利用者へ**届く**文面（mcp の `error` や `CONNECT-Z02`）には従来どおり本人の識別子が入るが、
+それは利用者本人と管理者の突合用であり、ログには出さない。
+`test_deterministic_path_logs_keep_the_g7_discipline` / `test_block_logs_carry_id_shape_but_no_identifiers`
+が引き続き固定する。
+
+### 12-8. セルフFB（反対尋問）— 残る弱点
+
+1. **層1 不発の真因は依然として未確定**（12-2）。本 PR は判別可能にしただけ。
+   ただし保証経路（層0）が入ったので、真因が何であれ利用者への到達は守られる。
+2. **モデル経路は止まらない**。保証経路が投稿したうえで、モデルが別途返事をし、
+   **`oauth_connect` をもう一度呼んで state token をもう 1 個発行しうる**。
+   裁定に従い保証を優先した。塞ぐには層2/3 を「保証済みの run では畳む」改修が要る（別便）。
+3. **Slack Web API が落ち続けても、層1 という別経路が残る**。429 / 5xx / 一時的な
+   ネットワーク失敗は最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、
+   `thread_ts` 付きが弾かれたらスレッド無しで 1 回投げ直す。
+   それでも投稿できなければ台帳を解放し、層1（ハーネスの reply 経路＝bot token も
+   Slack Web API も使わない別の故障ドメイン）が同じ受信に答える。
+   両方が同時に落ちている場合だけ届かず、その場合も `outcome=post_failed` が残る。
+4. **`conversations.open` の追加コール**が DM の初回「連携」ごとに 1 回入る
+   （送信者単位でキャッシュ。キャッシュは `MAX_TRACKED_CONTEXTS` で上限を持つ）。
+   Slack のレート制限に当たるほどの頻度ではないが、監視対象ではある。
+5. **保証経路は「短い連携依頼」語彙に依存する**。fixture（`tests/fixtures/connect_request_phrases.json`）
+   の外の言い回しは拾えない。誤爆を避けるため厳格側に倒しており、
+   `must_not_match`（「連携解除」「連携できない」等）で誤爆しないことを固定している。
+6. **本番実機での確認が未了**。本 PR はローカル実機（上流 gateway 起動）と probe までで、
+   OC 再ビルド後の run-task 検証と Slack 実機確認までは「完了」ではない。
+7. `CONNECT_ADMIN_NAME` は今回初めて実際に届くようになった（従来は allowlist で捨てられ、
+   常に既定値 `小俣` にフォールバックしていた）。未設定なら従来と同じ挙動。

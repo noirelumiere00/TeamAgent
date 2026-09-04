@@ -139,6 +139,55 @@ const CONNECT_L1_INVOCATION_PREFIX = "connect-l1";
 const SLACK_CANONICAL_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
 const SLACK_DM_CHANNEL_RE = /^D[A-Z0-9]{8,}$/u;
 
+// ── (D) 保証経路: 「連携」と言われたら必ず何かが届く ────────────────────────
+// 目的（2026-09-04 のゴール）: 新規／既存／過去のテストユーザーを問わず、「連携して」と
+// 言ったら漏れなく連携リンク（または「次に何をすればよいか分かる案内」）が届くこと。
+//
+// なぜ message_received に載せるのか（上流実物での比較・§12 に file:line）:
+//   - `message_received` は非 conversation hook。非 bundled plugin でも
+//     `hooks.allowConversationAccess` の可否に関係なく登録される
+//     （registry-D1_pYg_a.js:4224-4235 の門は CONVERSATION_HOOK_NAMES だけに掛かる）。
+//     本番で確実に呼ばれていることは、署名済み claim を mcp が受理している事実
+//     （= before_tool_call → signToolCall が動く = その前提の ingress 記録が動く）で実証済み。
+//   - `before_agent_reply`（層1）は conversation hook。設定が 1 つ欠けるだけで
+//     **診断も出ないまま黙って登録が捨てられる**。保証の土台には使えない。
+//   - `message_received` は fire-and-forget（dispatch-V82RCNJs.js:1438）で、
+//     void hook の既定タイムアウトも無い（hook-runner-global:248-253）ので、
+//     ここで MCP と Slack を叩いても上流の応答経路を遅らせない。
+//
+// 配信手段に Slack Web API（chat.postMessage）を直接使う理由:
+//   上流の送信面 `api.runtime.channel.outbound.loadAdapter` / `reply.dispatch*`
+//   （types-DaHgOqFX.d.ts:8228-8352）は gateway の request context と account 解決に
+//   依存し、hook から単独で正しく駆動する契約が公開されていない。対して bot token は
+//   entrypoint の REQUIRED_SECRETS で確実に子プロセスへ渡っており
+//   （openclaw-entrypoint.mjs:15-21,184）、この plugin は既に MCP へ生 fetch している。
+//   「確実に届く」ことを最優先し、依存の少ない方を選ぶ。
+const SLACK_API_BASE = "https://slack.com/api";
+const SLACK_API_TIMEOUT_MS = 10_000;
+// 一時失敗の再試行（保証の唯一の配信面なので、429/5xx で無音にしない）。
+const SLACK_MAX_RETRIES = 2;
+const SLACK_RETRY_BACKOFF_MS = 500;
+const SLACK_DEFAULT_RETRY_AFTER_MS = 1_000;
+// Slack が返す Retry-After を鵜呑みにして何分も待たない（保証の遅延に上限を置く）。
+const SLACK_MAX_RETRY_AFTER_SECONDS = 5;
+// 保証経路の 1 回性キー。同じ受信に対して 2 回投稿しない。
+const CONNECT_GUARANTEE_INVOCATION_PREFIX = "connect-d1";
+// 保証経路が MCP にも Slack にも届かなかったときの最終文面。無言終了を作らない。
+const CONNECT_GUARANTEE_DIAGNOSTIC_CODE = "CONNECT-Z02";
+// 本番でどのフックを登録要求するかの**期待値**（単一正本）。
+// register() は実際に api.on した名前でバナーを出し、両者が食い違ったら起動時に fail する
+// （下の register 末尾）。定数とコードが黙って乖離しないようにするための二重化。
+export const REGISTERED_HOOKS = Object.freeze([
+  "inbound_claim",
+  "message_received",
+  "before_agent_reply",
+  "before_model_resolve",
+  "before_tool_call",
+  "before_agent_finalize",
+  "reply_payload_sending",
+  "agent_end",
+]);
+
 const SLACK_USER_RE = /^U[A-Z0-9]{8,}$/u;
 const SLACK_TEAM_RE = /^T[A-Z0-9]{8,}$/u;
 const SLACK_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
@@ -475,8 +524,18 @@ const TRACE_ENV = "TEAMAGENT_CALLER_IDENTITY_TRACE";
 export function emitPluginLog(logger, level, message) {
   const line = `${PLUGIN_ID}: ${message}`;
   logger?.[level]?.(line);
-  if (level === "warn") console.warn(line);
-  else console.info(line);
+  // console 側は **常に stderr**（level に関わらず console.warn）。
+  //
+  // 理由（2026-09-04 実証）: このプラグインが読み込まれる node プロセスでは、
+  // stdout が「データ面」であることがある。tests/test_mcp_gateway_caller_claim.py の
+  // ハーネスは `node -e` で plugin を読み込み、`process.stdout.write(JSON.stringify(...))`
+  // の結果を `json.loads` する。診断行を stdout に混ぜると **その JSON が壊れる**。
+  // 実際、register バナーを console.info（= stdout）で出した瞬間に 3 本が赤くなった。
+  //
+  // 診断は stderr、データは stdout ——この分離は破らない。
+  // CloudWatch は stdout/stderr を同じロググループへ入れるので、到達性は変わらない
+  // （上流 gateway 実機で確認済み: §12-1 の表）。level の意味は logger 側で保つ。
+  console.warn(line);
 }
 
 // ── ツール引数の二重包みを剥がす（2026-09-03 実測・本 PR の主眼） ─────────────
@@ -691,8 +750,23 @@ async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeo
   return readResult(called, 2);
 }
 
-// tools/call の戻り値（TextContent の JSON 文字列）から oauth_connect の message を取り出す。
-function extractConnectMessage(result) {
+// ── (E) 利用者の状態差を「必ず届く 1 通」に畳む ────────────────────────────
+// mcp は失敗も **成功と同じ TextContent の JSON** で返す（server.py:442-445,819）。
+// 形は `{"error": "<利用者向けの文面>", "request_id": "…"}` で、`isError` も
+// JSON-RPC error も使わない。しかもその `error` 文面は既に利用者向けに整形済みで、
+// 「何をすればよいか」＋`診断: CONNECT-Ixx <時刻> <識別子>` の行まで含んでいる
+// （connect_diagnostics.py:260-277）。代表例が新規ユーザーの
+//   CONNECT-I02「Slack プロフィールのメールアドレスが会社メールになっているか確認し…」
+// （skill.py:228-236）。
+//
+// 従来の extractConnectMessage はこれを一律 `mcp_tool_error` に潰して捨てていた。
+// その結果、新規ユーザーには「何も届かない」か、モデルの自作回答だけが届いていた。
+// 保証経路では **潰さずそのまま利用者へ渡す**。ここが「新規ユーザーにも必ず
+// 次の一手が届く」ことの本体になる。
+//
+// 成功時（既に連携済み／片方だけ）は `message` にその旨が入って返る
+// （skill.py:460-492）ので、追加の分岐は要らない＝状態差は mcp 側の単一正本に委ねる。
+export function extractConnectOutcome(result) {
   if (!result || typeof result !== "object" || result.isError === true) {
     throw new ConnectPathError("mcp_tool_error");
   }
@@ -709,10 +783,98 @@ function extractConnectMessage(result) {
   if (!data || typeof data !== "object" || Array.isArray(data)) {
     throw new ConnectPathError("mcp_invalid_result");
   }
-  if (typeof data.error === "string") throw new ConnectPathError("mcp_tool_error");
+  // 利用者向けに整形済みの失敗文面。捨てずに届ける。
+  if (typeof data.error === "string") {
+    const text = data.error.trim();
+    if (!text) throw new ConnectPathError("mcp_invalid_result");
+    return { kind: "user_error", text };
+  }
   const message = typeof data.message === "string" ? data.message.trim() : "";
   if (!message) throw new ConnectPathError("mcp_invalid_result");
-  return message;
+  return { kind: "message", text: message };
+}
+
+// ── Slack Web API の最小クライアント（保証経路の配信面） ──────────────────
+// 使うのは 2 つだけ:
+//   conversations.open … DM の正準 conversation id（`D…`）を得る。mcp の claim 検証が
+//                        `^[CDG][A-Z0-9]{8,}$` を要求する（caller_claim.py:39,385）ため、
+//                        受信側で `DM:U…` にしか解決できない DM ではこれが必須。
+//   chat.postMessage   … 本文の投稿。
+// Slack は HTTP 200 + `{"ok": false, "error": "…"}` で失敗を返すので、必ず ok を見る。
+async function callSlackApiOnce({ fetchFn, botToken, method, body, timeoutMs }) {
+  let response;
+  try {
+    response = await fetchFn(`${SLACK_API_BASE}/${method}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    throw error?.name === "TimeoutError" || error?.name === "AbortError"
+      ? new ConnectPathError("slack_timeout")
+      : new ConnectPathError("slack_fetch_failed");
+  }
+  // 429 は Retry-After（秒）で待てば通ることが多い。ここだけ待ち時間を持ち帰る。
+  if (response.status === 429) {
+    const header = response.headers?.get?.("retry-after");
+    const seconds = Number.parseInt(typeof header === "string" ? header : "", 10);
+    const error = new ConnectPathError("slack_rate_limited");
+    error.retryAfterMs =
+      Number.isFinite(seconds) && seconds >= 0
+        ? Math.min(seconds, SLACK_MAX_RETRY_AFTER_SECONDS) * 1000
+        : SLACK_DEFAULT_RETRY_AFTER_MS;
+    throw error;
+  }
+  if (!response?.ok) {
+    const error = new ConnectPathError(`slack_http_${response?.status ?? "unknown"}`);
+    // 5xx は一時障害として 1 回だけ再試行してよい。4xx は再試行しても同じ。
+    error.retryable = typeof response?.status === "number" && response.status >= 500;
+    throw error;
+  }
+  let payload;
+  try {
+    payload = JSON.parse(await response.text());
+  } catch {
+    throw new ConnectPathError("slack_invalid_json");
+  }
+  if (!payload || payload.ok !== true) {
+    // Slack の error コードは識別子ではないので、切り分けのために形だけ残す。
+    const code = typeof payload?.error === "string" ? payload.error : "unknown";
+    const error = new ConnectPathError(`slack_api_${code.slice(0, 64)}`);
+    // HTTP 200 + {"ok":false,"error":"ratelimited"} で返ってくる面もある。
+    if (code === "ratelimited") error.retryAfterMs = SLACK_DEFAULT_RETRY_AFTER_MS;
+    throw error;
+  }
+  return payload;
+}
+
+// 保証経路の **唯一の配信面** なので、一時失敗（429 / 5xx / ネットワーク）で
+// 黙って無音にしない。短い固定回数だけ再試行する（2026-09-04 レビュー指摘 小）。
+// 全体予算は呼び出し側の timeoutMs × 試行回数を超えないよう、待ちも上限で刈る。
+async function callSlackApi({ fetchFn, botToken, method, body, timeoutMs, sleepFn }) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= SLACK_MAX_RETRIES; attempt += 1) {
+    try {
+      return await callSlackApiOnce({ fetchFn, botToken, method, body, timeoutMs });
+    } catch (error) {
+      lastError = error;
+      const waitMs =
+        typeof error?.retryAfterMs === "number"
+          ? error.retryAfterMs
+          : error?.retryable === true ||
+              error?.code === "slack_timeout" ||
+              error?.code === "slack_fetch_failed"
+            ? SLACK_RETRY_BACKOFF_MS
+            : null;
+      if (waitMs === null || attempt === SLACK_MAX_RETRIES) throw error;
+      await sleepFn(waitMs);
+    }
+  }
+  throw lastError;
 }
 
 function classifyConnectUrl(rawUrl) {
@@ -882,6 +1044,11 @@ export function createCallerIdentityPlugin({
   now = () => Date.now(),
   randomBytesFn = randomBytes,
   fetchFn = globalThis.fetch,
+  // 保証経路は hook から切り離して走らせる（下の startConnectGuarantee を参照）。
+  // その「切り離した仕事」をテストから待てるようにするための注入口。既定は捨てるだけ。
+  onBackgroundTask = () => {},
+  // Slack 再試行の待ち。テストでは即時に潰す。
+  sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
 } = {}) {
   const rawSecret = env.TEAMAGENT_CALLER_CLAIM_SECRET;
   const secret = typeof rawSecret === "string" ? Buffer.from(rawSecret, "utf8") : null;
@@ -909,12 +1076,39 @@ export function createCallerIdentityPlugin({
     typeof rawBearer === "string" && rawBearer.trim() && !rawBearer.includes("${")
       ? rawBearer.trim()
       : null;
+  // (D) 保証経路の配信面。entrypoint の REQUIRED_SECRETS に入っているので本番では必ず届く
+  // （openclaw-entrypoint.mjs:15-21・buildChildEnvironment:184）。無い環境では保証経路だけを
+  // 畳み、層1/2/3 と署名経路はそのまま生かす（bearer と同じ規律）。
+  const rawSlackBotToken = env.SLACK_BOT_TOKEN;
+  const slackBotToken =
+    typeof rawSlackBotToken === "string" &&
+    rawSlackBotToken.trim() &&
+    !rawSlackBotToken.includes("${")
+      ? rawSlackBotToken.trim()
+      : null;
   const rawMcpUrl = env.TEAMAGENT_MCP_URL;
   const mcpUrl =
     typeof rawMcpUrl === "string" && /^https?:\/\//u.test(rawMcpUrl.trim())
       ? rawMcpUrl.trim()
       : DEFAULT_MCP_URL;
 
+  // 送信者 → DM の正準 conversation id（`D…`）。conversations.open は冪等だが、
+  // 「連携」1 通ごとに Slack を叩かないための素朴なキャッシュ。値は不変。
+  const dmChannelBySender = new Map();
+  // ── 保証経路と層1 が共有する「この受信にはもう答えた」台帳（2026-09-04 レビュー指摘 重大1）──
+  // key は pendingKey（= [sessionKey, messageId]）、値は記録時刻。
+  //
+  // 当初は ingress オブジェクトの `connectDeterministicAttempted` フィールドに持たせていたが、
+  // **これは壊れていた**。bindRun 成功時に removePending で pending から ingress が消え、
+  // 次の通知は新しい ingress オブジェクトを作るため、旗が毎回リセットされていた。
+  // 実測（実物 dist を駆動）: message_received ×2（runId 付き）で投稿 2・tools/call 2、
+  // message_received → before_model_resolve → message_received でも投稿 2。
+  // 「同じ受信に 1 通」を保つには、旗を **オブジェクトの寿命から切り離す**必要がある。
+  // pendingKey は受信そのものの同一性なので、pending に残っていようが run へ束縛済みだろうが
+  // 同じ値になる。TTL 掃除は pruneState に相乗りする。
+  const connectAnsweredByMessage = new Map();
+  // 「受信に content が無い」警告をフックごとに 1 回だけ出すための記録（騒音防止）。
+  const contentAbsentWarned = new Set();
   const pendingByMessage = new Map();
   const pendingActions = new Map();
   const seenActions = new Map();
@@ -980,6 +1174,24 @@ export function createCallerIdentityPlugin({
       if (nowMs - invocation.consumedAtMs > INBOUND_CONTEXT_TTL_MS) {
         consumedInvocations.delete(key);
       }
+    }
+    for (const [key, answeredAtMs] of connectAnsweredByMessage) {
+      if (nowMs - answeredAtMs > INBOUND_CONTEXT_TTL_MS) {
+        connectAnsweredByMessage.delete(key);
+      }
+    }
+    // 署名経路を落とす MAX_TRACKED_CONTEXTS の fail には相乗りさせない（第3層の台帳と同じ規律）。
+    // ここでの脱落は「同じ受信にもう 1 通出しうる」だけで、無言にはならない。
+    while (connectAnsweredByMessage.size > MAX_CONNECT_GUARD_RUNS) {
+      const oldest = connectAnsweredByMessage.keys().next();
+      if (oldest.done) break;
+      connectAnsweredByMessage.delete(oldest.value);
+    }
+    // DM の正準 id は不変なので TTL は要らないが、無制限には育てない。
+    while (dmChannelBySender.size > MAX_TRACKED_CONTEXTS) {
+      const oldest = dmChannelBySender.keys().next();
+      if (oldest.done) break;
+      dmChannelBySender.delete(oldest.value);
     }
     if (
       pendingByMessage.size +
@@ -1105,7 +1317,7 @@ export function createCallerIdentityPlugin({
             expectedTeam: expectedTeamId,
           })}`,
       );
-      return;
+      return null;
     }
     const nowMs = now();
     pruneState(nowMs);
@@ -1147,13 +1359,20 @@ export function createCallerIdentityPlugin({
     if (existing && !sameIngress(existing, ingress)) {
       pendingByMessage.delete(pendingKey);
       emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_message_identity");
-      return;
+      return null;
+    }
+    if (existing && Array.isArray(existing.channelAliases)) {
+      // 同じ受信が 2 度通知される経路がある（inbound_claim と message_received の両方、
+      // および上流の再通知）。解決済みの会話 id 別名だけは引き継ぐ。
+      // 一回性は ingress オブジェクトではなく connectAnsweredByMessage が持つ
+      // （pending から消えても失効しないようにするため。上の定義を参照）。
+      ingress.channelAliases = existing.channelAliases;
     }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
       pendingByMessage.delete(pendingKey);
       emitPluginLog(logger, "warn", "inbound rejected reason=conflicting_run_binding");
-      return;
+      return null;
     }
     // 受理側も観測できないと、層1 の no_candidate_ingress が
     // 「受信を記録できていない」のか「照合が外れた」のか区別できない（2026-09-03）。
@@ -1173,6 +1392,226 @@ export function createCallerIdentityPlugin({
           expectedTeam: expectedTeamId,
         })}`,
     );
+    // (D) 保証経路が「今記録した受信」をそのまま使えるように返す。
+    // 既存の呼び出し元（inbound_claim）は戻り値を無視するので挙動は変わらない。
+    return ingress;
+  }
+
+  // ── (D) 保証経路の本体 ───────────────────────────────────────────────────
+  // 「連携」と言われたら、モデル・層1/2/3・run 束縛・channel 一致の成否と無関係に、
+  // 必ず 1 通（リンク or 診断つき案内）を Slack へ直接届ける。
+  //
+  // 一回性: 同じ受信に対して 2 回投稿しない。台帳 `connectAnsweredByMessage` を
+  // **await より前に同期で**押さえることで層1 と 1 つの旗を共有する。message_received は
+  // before_agent_reply より先に走る（dispatch → getReply）ので、通常はこちらが旗を取り、
+  // 層1 は `already_attempted` で降りる＝二重投稿にならない。
+  // ただし「抑制のために保証を犠牲にしない」ため、モデル経路そのものは止めない。
+  // モデルが別途返事をして 2 通に見えることは許容する（無言よりはるかに良い）。
+  async function deliverConnectGuarantee(event, ctx, logger, source = "unknown") {
+    const ingress = rememberInbound(event, ctx, logger);
+    if (!ingress || ingress.ingressKind !== "message") return;
+    if (ingress.connectRequest !== true) {
+      // 語彙不一致は通常の会話なので黙る。ただし `content` が **文字列ですらない**のは
+      // 上流の形が変わった疑いがあり、そのままだと (A) と同型の「設定したのに無音」に
+      // なる（2026-09-04 レビュー指摘 中3）。TRACE と無関係に、**フックごとに 1 回だけ**
+      // 残す。毎回出すと content を持たない受信（inbound_claim 等）で会話ごとの騒音になる。
+      if (ingress.connectContentLength === null && !contentAbsentWarned.has(source)) {
+        contentAbsentWarned.add(source);
+        emitPluginLog(
+          logger,
+          "warn",
+          `connect guarantee cannot evaluate reason=inbound_content_absent source=${source}` +
+            " content_len=na (upstream event.content shape may have changed)",
+        );
+      }
+      return;
+    }
+    if (connectAnsweredByMessage.has(ingress.pendingKey)) return;
+    const invocationId =
+      `${CONNECT_GUARANTEE_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
+    const nowMs = now();
+    const done = (outcome, extra = "") =>
+      emitPluginLog(
+        logger,
+        outcome === "delivered" ? "info" : "warn",
+        `connect guarantee invocation=${invocationId} outcome=${outcome}${extra}`,
+      );
+    // ⚠️ 1 回性の旗は「実際に配信を試みる」と決めた後にだけ立てる。
+    // 手前で立てると、保証経路が使えない環境（bot token 無し＝ローカル/テスト）で
+    // 層1 まで `already_attempted` で降りてしまい、**誰も答えない**状態を作る。
+    // 旗は「この受信にはもう誰かが答えた（or 答えている）」の意味に限定する。
+    if (slackBotToken === null) {
+      // 配信面が無い環境。層1/2/3 に委ねる（旗は立てない）。
+      done("skipped", " reason=no_slack_bot_token");
+      return;
+    }
+    if (typeof fetchFn !== "function") {
+      done("skipped", " reason=no_fetch");
+      return;
+    }
+    connectAnsweredByMessage.set(ingress.pendingKey, nowMs);
+    let text;
+    let kind;
+    try {
+      // kind は "message"（リンク or 連携済みの案内）か "user_error"
+      // （mcp が返した利用者向けの失敗文面。新規ユーザーの CONNECT-I02 等）。
+      // 運用側で「リンクを出した」と「何が足りないかを伝えた」を区別できるようにする。
+      const outcome = await requestConnectMessage({ ingress, invocationId, nowMs });
+      text = outcome.text;
+      kind = outcome.kind;
+    } catch (error) {
+      // mcp まで届かなかった／壊れた戻り値だった。無言では終わらせず、
+      // 「もう一度言えばよい」＋管理者へ転送する 1 行を必ず届ける。
+      kind = connectPathReason(error);
+      text = buildConnectGuaranteeFallbackText({
+        senderId: ingress.senderId,
+        nowMs,
+        reason: kind,
+        adminName,
+      });
+    }
+    try {
+      await postConnectMessage({ ingress, text });
+    } catch (error) {
+      // 投稿できなかったので、**この受信は誰にも答えられていない**。台帳を解放して
+      // 層1／層2 に救済させる（2026-09-04 レビュー指摘）。
+      //
+      // 台帳は投稿の前に押さえている（同時に走る再通知で二重投稿しないため）。
+      // その状態で失敗のまま抜けると、層1 まで `already_attempted` で降りてしまい
+      // **利用者に何も届かない**。実測: slackMode=post_fails で
+      // posts 0 / 層1 stand down / fallthrough 0 ＝ 完全な無音だった。
+      //
+      // 層1 はハーネスの reply 経路で返すので、bot token も Slack Web API も使わない
+      // ＝**別の故障ドメイン**である。ここで降りるのは救済機会の放棄になる。
+      // 解放しても二重投稿にはならない: 投稿は 0 通で終わっている。
+      connectAnsweredByMessage.delete(ingress.pendingKey);
+      // 管理者が気付けるよう理由を残す（G7: 値は載せない）。
+      done("post_failed", ` result=${kind} reason=${connectPathReason(error)}`);
+      return;
+    }
+    done("delivered", ` result=${kind}`);
+  }
+
+  // ── 保証経路を hook の await から切り離す（2026-09-04 レビュー指摘 重大2）─────
+  // `inbound_claim` は **claiming hook** で、上流は各ハンドラを
+  // **逐次 await** する（hook-runner-global-Cucx8m-W.js の runClaimingHooksList）。
+  // しかも `inbound_claim` は modifyingHookTimeoutMsByHook に無いので **タイムアウトが無い**。
+  // ここで保証経路（最大で MCP 15s + Slack 10s×2）を await すると、
+  // **受信パイプライン全体をその間止めてしまう**。
+  //
+  // `message_received` 側は fire-and-forget（dispatch-V82RCNJs.js:1438）かつ
+  // void hook のタイムアウトも無い（hook-runner-global:248-253・実物で確認）ので
+  // await しても実害は無いが、上流が将来タイムアウトを足したら配信が切られる。
+  // どちらのフックから来ても同じ形にしておくほうが安全なので、**両方とも切り離す**。
+  //
+  // 受信の記録（rememberInbound）と一回性の確保は deliverConnectGuarantee の
+  // **最初の await より前**に同期で終わるので、切り離しても取りこぼさない。
+  function startConnectGuarantee(event, ctx, logger, source) {
+    const task = deliverConnectGuarantee(event, ctx, logger, source).catch(error => {
+      // ここに来るのは想定外（内部で握っている）。無言にはしない。
+      emitPluginLog(
+        logger,
+        "warn",
+        `connect guarantee crashed reason=${connectPathReason(error)}`,
+      );
+    });
+    onBackgroundTask(task);
+  }
+
+  // 保証経路が MCP へ辿り着けなかったときの最終文面。URL も秘匿値も含めない。
+  function buildConnectGuaranteeFallbackText({ senderId, nowMs, reason, adminName }) {
+    return (
+      "連携リンクをお出しできませんでした。恐れ入りますが、もう一度『連携』と送ってください。\n" +
+      `${adminForwardHint(adminName)}\n` +
+      `診断: ${CONNECT_GUARANTEE_DIAGNOSTIC_CODE} ${formatJstMinute(nowMs)} ${senderId} ${reason}`
+    );
+  }
+
+  // 受信から oauth_connect を直接呼ぶ。層1 と同じ claim・同じ mcp 手順を使い、
+  // 新しい信頼境界は作らない。DM は `DM:U…` にしか解決できないため、mcp の
+  // `^[CDG][A-Z0-9]{8,}$`（caller_claim.py:39,385）を満たす正準 id を Slack へ問い合わせる。
+  async function requestConnectMessage({ ingress, invocationId, nowMs }) {
+    if (mcpBearer === null) throw new ConnectPathError("no_mcp_bearer");
+    const claimChannel = await resolveCanonicalChannel(ingress);
+    const nonceBytes = randomBytesFn(16);
+    if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
+      throw new ConnectPathError("nonce_failed");
+    }
+    let signed;
+    try {
+      signed = mintCallerClaim({
+        trusted: { ...ingress, channelId: claimChannel },
+        runId: invocationId,
+        toolCallId: invocationId,
+        tool: OAUTH_CONNECT_TOOL,
+        params: { [USER_CONTEXT_KEY]: {} },
+        nowMs,
+        nonceBytes,
+      });
+    } catch {
+      throw new ConnectPathError("claim_failed");
+    }
+    const result = await callMcpTool({
+      fetchFn,
+      mcpUrl,
+      bearer: mcpBearer,
+      name: OAUTH_CONNECT_TOOL,
+      toolArguments: signed.params,
+      timeoutMs: MCP_REQUEST_TIMEOUT_MS,
+    });
+    return extractConnectOutcome(result);
+  }
+
+  // 正準 conversation id。チャンネルはそのまま、DM は conversations.open で `D…` を得る。
+  // 解決した `D…` は ingress.channelId を **書き換えず** alias にだけ足す。
+  // 書き換えると matchesConversation の DM 別名照合（`DM:<sender>` 側）が崩れ、
+  // 後続の bindAgentRun が候補を見失う（＝ C1 の再発）ため。
+  async function resolveCanonicalChannel(ingress) {
+    if (SLACK_CANONICAL_CHANNEL_RE.test(ingress.channelId)) return ingress.channelId;
+    if (ingress.channelId !== `DM:${ingress.senderId}`) {
+      throw new ConnectPathError("no_canonical_channel");
+    }
+    const cached = dmChannelBySender.get(ingress.senderId);
+    if (cached) return cached;
+    const payload = await callSlackApi({
+      fetchFn,
+      botToken: slackBotToken,
+      method: "conversations.open",
+      body: { users: ingress.senderId },
+      timeoutMs: SLACK_API_TIMEOUT_MS,
+      sleepFn,
+    });
+    const opened = normalizeSlackId(payload?.channel?.id, SLACK_DM_CHANNEL_RE);
+    if (!opened) throw new ConnectPathError("slack_no_dm_channel");
+    dmChannelBySender.set(ingress.senderId, opened);
+    const aliases = new Set(ingress.channelAliases ?? [ingress.channelId]);
+    aliases.add(opened);
+    ingress.channelAliases = [...aliases];
+    return opened;
+  }
+
+  async function postConnectMessage({ ingress, text }) {
+    const channel = await resolveCanonicalChannel(ingress);
+    const post = body =>
+      callSlackApi({
+        fetchFn,
+        botToken: slackBotToken,
+        method: "chat.postMessage",
+        body: { channel, text, ...body },
+        timeoutMs: SLACK_API_TIMEOUT_MS,
+        sleepFn,
+      });
+    // チャンネルのスレッドで訊かれたらスレッドへ返す（会話面を移さない）。
+    if (ingress.threadTs === null) return post({});
+    try {
+      return await post({ thread_ts: ingress.threadTs });
+    } catch (error) {
+      // スレッドが消えている・thread_ts が無効といった理由で弾かれることがある
+      // （2026-09-04 レビュー指摘 小）。**届かないより会話面がずれるほうがまし**なので、
+      // スレッド無しで 1 回だけ投げ直す。それも失敗したら呼び出し側が post_failed を残す。
+      if (error?.code === "slack_timeout") throw error;
+      return post({});
+    }
   }
 
   async function rememberMailDraftAction(ctx, logger) {
@@ -1465,10 +1904,12 @@ export function createCallerIdentityPlugin({
       );
     }
     // 同じ受信に対して 2 度は鋳造しない（重複発行・往復の防止）。
-    if (ingress.connectDeterministicAttempted === true) {
+    // 台帳は pendingKey 基準なので、保証経路が既に答えていれば ingress オブジェクトが
+    // 差し替わっていても確実に降りる（2026-09-04 レビュー指摘 重大1）。
+    if (connectAnsweredByMessage.has(ingress.pendingKey)) {
       return skipped("already_attempted");
     }
-    ingress.connectDeterministicAttempted = true;
+    connectAnsweredByMessage.set(ingress.pendingKey, nowMs);
     // mcp の claim 検証は channel に実 Slack 会話 id（^[CDG]…）を要求する
     // （caller_claim.py: _SLACK_CHANNEL_RE）。DM の内部別名 `DM:U…` では通らないので、
     // ctx.chatId の `D…` を、この送信者の DM に限って正準 id として採る（bindAgentRun と同じ規律）。
@@ -1512,7 +1953,9 @@ export function createCallerIdentityPlugin({
         toolArguments: signed.params,
         timeoutMs: MCP_REQUEST_TIMEOUT_MS,
       });
-      const message = extractConnectMessage(result);
+      // (E) 失敗も mcp が利用者向けに整形した文面で返る（新規ユーザーの CONNECT-I02 等）。
+      // 捨ててモデル経路へ落とすと「無言」か「自作回答」になるので、そのまま返す。
+      const outcome = extractConnectOutcome(result);
       // handled で返すとモデルは起動せず before_model_resolve も走らないため、この受信を
       // ここで消費する。残すと同じ DM の次の受信で bindAgentRun が candidates=2 で run を拒否し、
       // 以後 10 分間すべてのツールが「trusted Slack run identity is missing or stale」で
@@ -1525,9 +1968,9 @@ export function createCallerIdentityPlugin({
         logger,
         "info",
         `connect deterministic path invocation=${invocationId} ` +
-          `outcome=answered tool_calls=1`,
+          `outcome=answered tool_calls=1 result=${outcome.kind}`,
       );
-      return { handled: true, reply: { text: message } };
+      return { handled: true, reply: { text: outcome.text } };
     } catch (error) {
       return fallthrough(connectPathReason(error));
     }
@@ -1627,9 +2070,37 @@ export function createCallerIdentityPlugin({
     // conversation, so treat `D…` as equivalent to `DM:<senderId>` — and only
     // for the sender that every other check already pins. A cross-user or
     // cross-channel forgery still fails on senderId / sessionKey.
-    const candidates = [...pendingByMessage.values()].filter(ingress =>
+    const matching = [...pendingByMessage.values()].filter(ingress =>
       matchesConversation(ingress, { sessionKey, senderId, channelId, nowMs }),
     );
+    // ── C1: 候補が複数でも run を落とさない（2026-09-04） ──────────────────
+    // 本番実測 9 件の `trusted Slack run identity is missing or stale` の源はここだった。
+    // 従来は `candidates.length !== 1` で run を拒否し、rejectedRuns に 10 分間登録して
+    // いたため、その run の **すべてのツール** が block された（signToolCall の
+    // `!trusted` 分岐）。連続してメッセージを送る／並行 run が走るだけで再現する。
+    //
+    // 安全側は崩れない: matchesConversation は sessionKey・senderId・channel
+    // （DM の `DM:<sender>` 別名込み）・TTL を **すべて** 満たしたものだけを残す。
+    // つまり候補は全員「同じ人の同じ会話の受信」であり、曖昧なのは「どのメッセージか」
+    // だけで「誰か」ではない。よって最新の受信を選んでも、他人の受信を掴むことは
+    // 原理的に起こらない（他人・別会話は候補になる前に落ちている）。
+    // 最新を選ぶのは、run を起こした本人の直近の発話が最も蓋然性が高いため。
+    const candidates =
+      matching.length > 1
+        ? [
+            matching.reduce((newest, ingress) =>
+              ingress.receivedAtMs >= newest.receivedAtMs ? ingress : newest,
+            ),
+          ]
+        : matching;
+    if (matching.length > 1) {
+      emitPluginLog(
+        logger,
+        "info",
+        `bind_agent_run disambiguated candidates=${matching.length} rule=newest_in_conversation` +
+          ` ${idShape({ sender: senderId, channel: channelId, session: sessionKey })}`,
+      );
+    }
     if (candidates.length === 1 && candidates[0].channelId !== channelId) {
       // Remember the run-side name too, so the tool gate can accept either
       // representation without re-deriving the sender-based alias.
@@ -1692,13 +2163,31 @@ export function createCallerIdentityPlugin({
     }
   }
 
+  // ── C2: 会話面の申告不一致は「破棄」であって「拒否」ではない（2026-09-04） ──
+  // 本番実測 2 件の `declared channel_id does not match the bound ingress` はここ。
+  // モデルが `_user_context.channel_id` に別の値を書いてくると、その run のツールが
+  // block され、利用者には「連携できない」としか見えなかった。
+  //
+  // しかしこの拒否は **セキュリティ上 1 ビットも稼いでいない**。mintCallerClaim は
+  // `_user_context` を authoritativeContext で丸ごと置き換えてから署名し、mcp へは
+  // その値しか渡らない（この直下の mintCallerClaim を参照）。つまり申告値は
+  // 元々 100% 捨てられている。拒否は「捨てる前に落とす」だけの純粋な失敗モードだった。
+  // よって会話面 3 フィールドは **黙って捨てず・落とさず・観測して続行** に変える。
+  //
+  // 一方 `caller_claim` と `slack_user_id` は引き続き block する。前者は署名の持ち込み
+  // （replay）で、後者は「自分は別人だ」という唯一の明示的ななりすまし申告であり、
+  // 捨てて続行してよい類のものではない（fail-closed を維持する）。
   function validateDeclaredContext(declaredContext, trusted) {
     if (declaredContext[CLAIM_FIELD] !== undefined) {
-      return "model-supplied or replayed caller claim is forbidden";
+      return { error: "model-supplied or replayed caller claim is forbidden", discarded: [] };
     }
     if (declaredContext.slack_user_id !== trusted.senderId) {
-      return "declared Slack caller does not match the bound ingress";
+      return {
+        error: "declared Slack caller does not match the bound ingress",
+        discarded: [],
+      };
     }
+    const discarded = [];
     for (const [field, expected] of [
       ["slack_team_id", trusted.teamId],
       ["channel_id", trusted.channelId],
@@ -1708,10 +2197,10 @@ export function createCallerIdentityPlugin({
         Object.hasOwn(declaredContext, field) &&
         declaredContext[field] !== expected
       ) {
-        return `declared ${field} does not match the bound ingress`;
+        discarded.push(field);
       }
     }
-    return null;
+    return { error: null, discarded };
   }
 
   // block は必ずここを通す（2026-09-03）。1 回の呼び出しで
@@ -1906,14 +2395,23 @@ export function createCallerIdentityPlugin({
         shape(),
       );
     }
-    const declarationError = validateDeclaredContext(declaredContext, trusted);
-    if (declarationError) {
-      // 実測 2026-09-03 の 2 件（`declared channel_id does not match the bound ingress`）。
+    const declaration = validateDeclaredContext(declaredContext, trusted);
+    if (declaration.error) {
       return blockAndLog(
-        declarationError,
+        declaration.error,
         BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING,
         logger,
         shape(),
+      );
+    }
+    if (declaration.discarded.length > 0) {
+      // 実測 2026-09-03 の 2 件（`declared channel_id …`）はここで落ちていた。
+      // 今は落とさず、authoritative 値で上書きして続行する。フィールド名だけ残す（G7）。
+      emitPluginLog(
+        logger,
+        "warn",
+        "discarded declared user_context fields" +
+          ` fields=[${declaration.discarded.join(",")}] (overwritten with authoritative values)`,
       );
     }
 
@@ -2159,29 +2657,82 @@ export function createCallerIdentityPlugin({
         namespace: MAIL_DRAFT_ACTION_ID,
         handler: ctx => rememberMailDraftAction(ctx, api.logger),
       });
-      api.on("inbound_claim", (event, ctx) => {
-        rememberInbound(event, ctx, api.logger);
+      // ── 「本番でどのフックが実際に呼ばれるか」を必ず観測できるようにする（2026-09-04） ──
+      // 事故の教訓: 層1（before_agent_reply）が発火しているのかどうかを 2 便かけて判別
+      // できなかった。理由は「発火した事実」を出す行が TRACE 依存で、その TRACE が
+      // entrypoint の env allowlist に落とされていたため（openclaw-entrypoint.mjs:43-67）。
+      // 以後、次の 2 つは **TRACE と無関係に必ず 1 行ずつ**出す:
+      //   ① register 時に「登録を要求したフック名の一覧」
+      //   ② 各フックが **最初に呼ばれたとき**に 1 行だけ `hook first_fired name=<hook>`
+      // ②を「毎回」ではなく「初回だけ」にするのは、通常の会話 1 通ごとに数行増えるのを
+      // 避けるため。知りたいのは「呼ばれるか否か」であって回数ではない。
+      // ①と②の差分がそのまま「登録はしたが本番では呼ばれないフック」の一覧になる。
+      // 上流は conversation hook（before_model_resolve / before_agent_reply /
+      // before_agent_finalize / agent_end 等）を非 bundled plugin に対して
+      // `hooks.allowConversationAccess=true` が無ければ **診断だけ積んで黙って捨てる**
+      // （registry-D1_pYg_a.js:4224-4235・診断はログに出ない registry.diagnostics 行き）。
+      // ①だけでは登録成功を意味しないので、②が唯一の一次証拠になる。
+      const firedHooks = new Set();
+      // バナーは **実際に api.on した名前**から組む（2026-09-04 レビュー指摘 中2）。
+      // 定数を直接出すと、observe() を 1 つ消してもバナーは出続けテストも緑になり、
+      // 「バナー vs first_fired の差分＝唯一の一次証拠」という前提そのものが壊れる。
+      const registeredHooks = [];
+      const observe = (name, handler) => {
+        registeredHooks.push(name);
+        api.on(name, (event, ctx) => {
+          if (!firedHooks.has(name)) {
+            firedHooks.add(name);
+            // G7: フック名だけ。識別子・本文・URL は載せない。
+            emitPluginLog(api.logger, "info", `hook first_fired name=${name}`);
+          }
+          return handler(event, ctx);
+        });
+      };
+      // (D) 保証経路は **両方の受信フック**に掛ける（2026-09-04 レビュー指摘 重大2）。
+      // 「mcp が署名 claim を受理している ⇒ rememberInbound が動いている」という実績は
+      // `message_received` **または** `inbound_claim` のどちらかを示すだけで、
+      // `message_received` 単独の実証にはならない（origin/dev では両方が
+      // rememberInbound に繋がっていたため、実績から区別できない）。
+      // 本番で `inbound_claim` だけが発火していた場合、片方だけに掛けると保証は
+      // 一度も動かず層1 の二の舞になる。両方に掛け、一回性は
+      // connectAnsweredByMessage（pendingKey 基準）が保証する＝二重投稿しない。
+      observe("inbound_claim", (event, ctx) => {
+        startConnectGuarantee(event, ctx, api.logger, "inbound_claim");
       });
-      api.on("message_received", (event, ctx) => {
-        rememberInbound(event, ctx, api.logger);
+      observe("message_received", (event, ctx) => {
+        startConnectGuarantee(event, ctx, api.logger, "message_received");
       });
-      api.on("before_agent_reply", (event, ctx) =>
+      observe("before_agent_reply", (event, ctx) =>
         answerShortConnectRequest(event, ctx, api.logger),
       );
-      api.on("before_model_resolve", (event, ctx) => {
+      observe("before_model_resolve", (event, ctx) => {
         bindAgentRun(event, ctx, api.logger);
       });
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
-      api.on("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
-      api.on("before_agent_finalize", (event, ctx) =>
+      observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
+      observe("before_agent_finalize", (event, ctx) =>
         guardConnectUrlFabrication(event, ctx, api.logger),
       );
-      api.on("reply_payload_sending", (event, ctx) =>
+      observe("reply_payload_sending", (event, ctx) =>
         replaceExhaustedConnectReply(event, ctx, api.logger),
       );
-      api.on("agent_end", (event, ctx) => {
+      observe("agent_end", (event, ctx) => {
         releaseAgentRun(event, ctx);
       });
+      // 実登録と期待値の乖離は起動時に落とす（テストが緑のまま前提が壊れるのを防ぐ）。
+      if (registeredHooks.join(",") !== REGISTERED_HOOKS.join(",")) {
+        fail(
+          `registered hooks drifted from REGISTERED_HOOKS: [${registeredHooks.join(",")}]`,
+        );
+      }
+      emitPluginLog(
+        api.logger,
+        "info",
+        `registered hooks=[${registeredHooks.join(",")}]` +
+          ` trace=${traceEnabled ? "on" : "off"}` +
+          ` mcp_bearer=${mcpBearer === null ? "no" : "yes"}` +
+          ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}`,
+      );
     },
   };
 }
