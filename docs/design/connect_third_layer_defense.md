@@ -961,9 +961,11 @@ Slack 識別子・本文・URL・claim・bearer は載せない。
 
 1. **層1 不発の真因は依然として未確定**（12-2）。本 PR は判別可能にしただけ。
    ただし保証経路（層0）が入ったので、真因が何であれ利用者への到達は守られる。
-2. **モデル経路は止まらない**。保証経路が投稿したうえで、モデルが別途返事をし、
-   **`oauth_connect` をもう一度呼んで state token をもう 1 個発行しうる**。
-   裁定に従い保証を優先した。塞ぐには層2/3 を「保証済みの run では畳む」改修が要る（別便）。
+2. **モデルの自発的な `oauth_connect` 呼び出しは止まらない**（§12-10）。
+   配信成功時はモデルの最終応答を `cancel` し、層2 の revise も掛けないので
+   **二重返信は解消**し token の重複も大幅に減るが、モデルが自分の判断で
+   `oauth_connect` を呼べば token はもう 1 個出る。完全に止めるにはツール門で
+   拒否する必要があり、正当な再依頼まで塞ぐため採っていない。
 3. **Slack Web API が落ち続けても、層1 という別経路が残る**。429 / 5xx / 一時的な
    ネットワーク失敗は最大 2 回まで再試行し（`Retry-After` は 5 秒で刈る）、
    `thread_ts` 付きが弾かれたらスレッド無しで 1 回投げ直す。
@@ -1021,10 +1023,13 @@ connect_shape=lines:2,content_lines:1,whole:no,stripped:yes,leading_line:yes,
 
 これで**次の実機テストのログ 1 行で 16 文字の内訳が確定する**。
 
-> ⚠️ この `content_len=16` が**レビュアーのテスト経路（Slack 連携機能からの送信）に固有**なのか、
-> **通常の利用者が Slack クライアントから打った場合にも起きる**のかは、現時点のログでは
-> **区別できない**。上の指標で次回判別する。通常経路でも起きているなら、
-> それは別件（今井さんの事象）の一因である可能性がある。**テスト経路固有と決めつけない。**
+> ✅ **決着（2026-09-04 追試）**: この `content_len=16` は
+> **レビュアーのテスト経路（Slack 連携機能経由・定型の付加文が混ざる）に固有**と確定した。
+> 実利用者が Slack クライアントから直接打った場合は `content_len=2 / normalized_len=2` で
+> 正しく `connect_request=true` になっている（実測ログ）。
+> したがって本節の付加文対応は「実利用者の不具合の修正」ではなく、
+> **①テスト経路でも実機検証が通るようにするため ②未知の定型に対する頑健性**
+> という位置づけである。優先度は下げてよいが、fixture と判定は入れたまま維持する。
 
 #### 判定を文字数上限だけに頼らない形へ（レビュー指摘 2）
 
@@ -1061,3 +1066,73 @@ connect_shape=lines:2,content_lines:1,whole:no,stripped:yes,leading_line:yes,
 `must_not_match_with_slack_boilerplate`（6 件）である。
 保証マトリクスは 7 状態 × （素の 32 表現 + 付加文つき 8 表現）= **273 組**へ拡張し、
 全組み合わせで 1 通届くことを再固定した。
+
+### 12-10.【本番実測 2026-09-04・OC TD:45】二重返信の抑止
+
+#### 実測: 同じ内容が 2 通届いていた
+
+実利用者が Slack クライアントから「連携」と打った際の実測ログ:
+
+```
+05:54:24 inbound recorded connect_request=true normalized_len=2 content_len=2 …
+05:54:24 layer1 entered provider=slack trigger=user
+05:54:24 connect deterministic path outcome=skipped reason=already_attempted   ← 層1 は保証側に譲って降りた（設計どおり）
+05:54:25 connect guarantee outcome=delivered result=message                    ← 保証経路が配信
+05:54:26 connect zero-tool revise tool_calls=0 reason=short_connect_request outcome=revised revise_attempt=1  ← 層2 が revise
+```
+
+**保証経路の 1 通＋モデル経路の 1 通＝合計 2 通**が利用者に届いていた。
+保証（無言をゼロにする）は達成できているが、体験としては壊れている。
+
+#### 上流実物の確認: 最終応答は「落とせる」
+
+`reply_payload_sending` の結果型は `{ payload?, cancel?: boolean, reason? }`
+（`dist/hook-types-DQ9eTy2x.d.ts:698-702`）。ランタイムは:
+
+1. `dist/deliver-DGDN_7sT.js:36` — `if (result?.cancel) return null;`
+2. `:852-856` — `null` なら `{ cancelled: true }`
+3. `:1329-1334` — `cancelled` なら
+   `suppressedPayloadOutcome({reason:"cancelled_by_reply_payload_sending_hook"})` して `continue`
+
+＝**その payload の配信を丸ごと飛ばす**。空文字への置換や短い定型への差し替えに頼る必要はない。
+本プラグインは既に層3 で同じ `cancel` を使っている（分割 payload の 2 通目の取り消し）。
+
+#### 実装
+
+配信成功した受信だけを記録する台帳 `connectDeliveredByMessage`（`pendingKey` 基準）を新設し、
+`reply_payload_sending` でその run に束縛された ingress が載っていれば `{cancel:true}` を返す。
+
+**⚠️ 抑止の根拠は `connectDeliveredByMessage`（配信成功）だけに置く。**
+一回性の台帳 `connectAnsweredByMessage` は投稿失敗時に解放される（§12-4）ので、
+それを根拠にすると「届いていないのにモデルも黙る」＝**完全な無音**を作りうる。
+2 つの台帳を分けているのはこのためである:
+
+| 台帳 | 意味 | 立つ時点 | 解放 |
+|---|---|---|---|
+| `connectAnsweredByMessage` | 一回性（同じ受信に 2 回投稿しない） | 配信を試みると決めた時点 | 投稿失敗時 |
+| `connectDeliveredByMessage` | 抑止（既に届いたので重複を落としてよい） | **投稿成功後** | TTL のみ |
+
+この違いが意味を持つのは**配信中（成否未確定）にモデルの応答が来る競合**だけである。
+配信失敗のシナリオでは一回性の台帳も解放済みで両者は一致してしまうため、
+`test_suppression_never_wins_over_an_unfinished_delivery` がその競合を直接固定し、
+変異 `M23`（根拠を answered へ取り違える）はこのテストでのみ赤くなる。
+
+#### state token の重複について
+
+あわせて層2 の revise も、保証経路が配信済みなら掛けない。
+revise は「`oauth_connect` を必ず呼べ」とモデルへ要求するもので、
+実測ログのとおりこれが **state token をもう 1 個発行させる**直接の原因だった。
+
+> ただし **token の重複が完全に無くなるわけではない**。抑止が止めるのは
+> ①モデルの最終応答の配信 ②こちらから再要求すること の 2 つであって、
+> モデルが自発的に `oauth_connect` を呼ぶこと自体は止めていない。
+> 呼ばれれば token はもう 1 個出る（本人専用・使い捨てなので危険ではないが、無害でもない）。
+> 完全に止めるにはツール門（`signToolCall`）で配信済み run の `oauth_connect` を
+> 拒否する必要があり、それは正当な再依頼まで塞ぐ副作用があるため本 PR では採らない。
+
+#### 保証との関係（絶対条件）
+
+抑止は**保証経路が配信に成功したと確認できた場合だけ**効く。
+配信失敗（`post_failed`）・未発火（連携依頼でない）・配信中のいずれでも、
+モデル経路は従来どおり素通しである。§12-4 の「投稿失敗時に台帳を解放する」規律とも矛盾しない
+（解放されるのは `answered` だけで、`delivered` はそもそも立っていない）。

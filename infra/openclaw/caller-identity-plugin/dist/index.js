@@ -128,6 +128,8 @@ const CONNECT_ZERO_TOOL_INSTRUCTION =
   "自分で原因を推測したり、管理者への問い合わせを案内したりしてはいけません。";
 const CONNECT_DIAGNOSTIC_CODE = "CONNECT-Z01";
 const CONNECT_FALLBACK_CANCEL_REASON = "connect zero-tool fallback already delivered";
+// 保証経路が既に同じ内容を配信したターンで、モデル側の最終応答を落とすときの理由。
+const CONNECT_GUARANTEE_CANCEL_REASON = "connect guarantee already delivered this inbound";
 // 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
 const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
 // 層1 の 3 POST（initialize / initialized / tools/call）で共有する全体予算。
@@ -1012,6 +1014,11 @@ function classifyConnectUrl(rawUrl) {
   return CONNECT_PATH_RE.test(target) ? "oauth_path" : null;
 }
 
+// 捏造 URL ルールが立っているか（層2 の抑止判断で「連携依頼ルールだけ」を切り分ける）。
+function urlRuleApplies(kinds) {
+  return kinds.length > 0;
+}
+
 function findFabricatedConnectUrlKinds(text) {
   const kinds = new Set();
   let scanned = 0;
@@ -1224,6 +1231,16 @@ export function createCallerIdentityPlugin({
   // pendingKey は受信そのものの同一性なので、pending に残っていようが run へ束縛済みだろうが
   // 同じ値になる。TTL 掃除は pruneState に相乗りする。
   const connectAnsweredByMessage = new Map();
+  // ── 保証経路が「実際に配信できた」受信（2026-09-04 本番実測 TD:45）─────────────
+  // connectAnsweredByMessage は「誰かが答えた（or 答えている）」で、投稿失敗時は解放する。
+  // こちらは **配信に成功した**ときだけ立てる別の台帳で、モデル側の最終応答を落として
+  // よいかの判定に使う。両者を分けるのが要点:
+  //   answered  … 一回性（同じ受信に 2 回投稿しない）
+  //   delivered … 抑止（利用者に既に届いたので、モデルの重複返信を落としてよい）
+  // 失敗時に answered を解放しても delivered は立たないため、抑止が誤って効くことはない。
+  const connectDeliveredByMessage = new Map();
+  // 抑止のログを run ごとに 1 回だけ出すための記録（payload ごとに出すと騒音になる）。
+  const connectSuppressedRuns = new Map();
   // 「受信に content が無い」警告をフックごとに 1 回だけ出すための記録（騒音防止）。
   const contentAbsentWarned = new Set();
   const pendingByMessage = new Map();
@@ -1303,6 +1320,16 @@ export function createCallerIdentityPlugin({
       const oldest = connectAnsweredByMessage.keys().next();
       if (oldest.done) break;
       connectAnsweredByMessage.delete(oldest.value);
+    }
+    for (const ledger of [connectDeliveredByMessage, connectSuppressedRuns]) {
+      for (const [key, atMs] of ledger) {
+        if (nowMs - atMs > INBOUND_CONTEXT_TTL_MS) ledger.delete(key);
+      }
+      while (ledger.size > MAX_CONNECT_GUARD_RUNS) {
+        const oldest = ledger.keys().next();
+        if (oldest.done) break;
+        ledger.delete(oldest.value);
+      }
     }
     // DM の正準 id は不変なので TTL は要らないが、無制限には育てない。
     while (dmChannelBySender.size > MAX_TRACKED_CONTEXTS) {
@@ -1611,6 +1638,8 @@ export function createCallerIdentityPlugin({
       done("post_failed", ` result=${kind} reason=${connectPathReason(error)}`);
       return;
     }
+    // 配信できた受信だけを記録する。これがモデル側の最終応答を落としてよい唯一の根拠。
+    connectDeliveredByMessage.set(ingress.pendingKey, nowMs);
     done("delivered", ` result=${kind}`);
   }
 
@@ -2662,8 +2691,23 @@ export function createCallerIdentityPlugin({
     // (c) 介入条件は OR: 連携 URL を含む（#353）／利用者の最新メッセージが短い連携依頼（層2）。
     //     後者は run に束縛済みの ingress（権威的な受信）から読む。本文の推測はしない。
     const { kinds } = findFabricatedConnectUrlKinds(reply);
-    const zeroToolConnect = ingressByRun.get(eventRunId)?.connectRequest === true;
+    const trustedIngress = ingressByRun.get(eventRunId);
+    const zeroToolConnect = trustedIngress?.connectRequest === true;
     if (kinds.length === 0 && !zeroToolConnect) return undefined;
+    // 保証経路が既に配信済みなら、モデルへ「oauth_connect を呼べ」と要求しない。
+    // 要求すると **state token がもう 1 個発行される**（本番実測 TD:45 の層2 revise がこれ）。
+    // 捏造 URL ルール（kinds）は別問題なので、そちらが立っているときは従来どおり介入する。
+    if (
+      !urlRuleApplies(kinds) &&
+      trustedIngress &&
+      connectDeliveredByMessage.has(trustedIngress.pendingKey)
+    ) {
+      logger?.info?.(
+        `${PLUGIN_ID}: connect zero-tool revise runId=${eventRunId} outcome=skipped ` +
+          "reason=already_delivered_by_guarantee",
+      );
+      return undefined;
+    }
     const urlRule = kinds.length > 0;
     const describe = urlRule
       ? `connect_url_fabrication_blocked runId=${eventRunId} tool_calls=0 kinds=${kinds.join("+")}`
@@ -2729,6 +2773,33 @@ export function createCallerIdentityPlugin({
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
     if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────
+    // 実測ログ: 保証経路が `outcome=delivered` で 1 通配信したあと、層2 の revise を経て
+    // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
+    //
+    // 保証経路が **配信に成功した**受信のターンでは、モデル側の最終応答を送らない。
+    // 上流は `reply_payload_sending` の結果が `{cancel:true}` なら
+    // その payload の配信を丸ごと飛ばす（実物で確認:
+    // deliver-DGDN_7sT.js:36 で null 化 → :852 で cancelled → :1329-1334 で
+    // `suppressedPayloadOutcome(reason:"cancelled_by_reply_payload_sending_hook")` → continue）。
+    //
+    // ⚠️ 抑止の根拠は connectDeliveredByMessage（**配信成功**）だけに置く。
+    // connectAnsweredByMessage（一回性）は投稿失敗時に解放されるので、
+    // それを根拠にすると「届いていないのにモデルも黙る」＝完全な無音を作りうる。
+    // 保証は絶対に落とさない、という原則をここでも守る。
+    const answered = ingressByRun.get(eventRunId);
+    if (answered && connectDeliveredByMessage.has(answered.pendingKey)) {
+      if (!connectSuppressedRuns.has(eventRunId)) {
+        connectSuppressedRuns.set(eventRunId, now());
+        emitPluginLog(
+          logger,
+          "info",
+          `connect guarantee suppressed model reply runId=${eventRunId} ` +
+            "reason=already_delivered_by_guarantee",
+        );
+      }
+      return { cancel: true, reason: CONNECT_GUARANTEE_CANCEL_REASON };
+    }
     const entry = connectFallbackByRun.get(eventRunId);
     if (!entry) return undefined;
     const payload = event?.payload;

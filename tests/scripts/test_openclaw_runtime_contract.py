@@ -3693,3 +3693,73 @@ def test_connect_request_shape_is_logged_without_leaking_the_body() -> None:
         assert "〇〇社" not in line
         assert "提案書" not in line
         assert "U09CX1CCBLN" not in line
+
+
+# ══ 二重返信の抑止（2026-09-04 本番実測 OC TD:45） ═══════════════════════════
+# 実測ログ: 保証経路が outcome=delivered で 1 通配信したあと、層2 の revise を経て
+# モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
+#
+# 上流は reply_payload_sending の結果が {cancel:true} なら、その payload の配信を
+# 丸ごと飛ばす（実物で確認: deliver-DGDN_7sT.js:36 で null 化 → :852 で cancelled →
+# :1329-1334 で suppressedPayloadOutcome → continue）。
+#
+# ⚠️ 抑止の根拠は「**配信に成功した**」ことだけに置く。一回性の台帳
+# （投稿失敗時に解放される）を根拠にすると、届いていないのにモデルも黙る
+# ＝完全な無音を作りうる。保証は絶対に落とさない。
+
+
+def test_successful_guarantee_suppresses_the_duplicate_model_reply() -> None:
+    """保証経路が配信成功したら、利用者に届くのは 1 通・state token も 1 個であること。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["delivered"]
+    assert outcome["guaranteePosts"] == 1
+    # モデル側の最終応答は送られない。
+    assert outcome["replyCancelled"] is True
+    assert outcome["cancelReason"] == "connect guarantee already delivered this inbound"
+    assert outcome["userVisibleMessages"] == 1
+    # 層2 が「oauth_connect を呼べ」と再要求しない＝もう 1 個 token を出させない。
+    assert outcome["layer2Revised"] is False
+    assert outcome["toolCallCount"] == 1
+    # 抑止したことは必ず観測できる（黙って落とさない）。
+    assert outcome["suppressionLogged"] is True
+
+
+def test_failed_guarantee_lets_the_model_reply_through() -> None:
+    """保証経路が配信失敗したら、従来どおりモデル経路が返すこと（無言にしない）。
+
+    抑止を一回性の台帳に紐づけると、ここで **誰も答えない** 状態を作ってしまう。
+    根拠を「配信成功」に限定していることの確認。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["post_failed"]
+    assert outcome["guaranteePosts"] == 0
+    assert outcome["replyCancelled"] is False
+    # 利用者には少なくとも 1 通届く。
+    assert outcome["userVisibleMessages"] == 1
+    # 保証が届いていないので、層2 の再要求は従来どおり働く。
+    assert outcome["layer2Revised"] is True
+    assert outcome["suppressionLogged"] is False
+
+
+def test_unrelated_turns_are_untouched_by_the_suppression() -> None:
+    """保証経路が未発火のターン（連携依頼でない）は一切影響を受けないこと。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["not_connect_request"]
+    assert outcome["guaranteePosts"] == 0
+    assert outcome["replyCancelled"] is False
+    assert outcome["layer2Revised"] is False
+    assert outcome["toolCallCount"] == 0
+    assert outcome["userVisibleMessages"] == 1
+    assert outcome["suppressionLogged"] is False
+
+
+def test_suppression_never_wins_over_an_unfinished_delivery() -> None:
+    """保証経路が配信中（成否未確定）のあいだはモデル応答を落とさないこと。
+
+    ここで落とすと、その後に投稿が失敗した場合 **誰も答えない** 状態になる。
+    抑止の根拠を「一回性の台帳」ではなく「配信成功の台帳」に置いていることの検証。
+    配信失敗のシナリオでは一回性の台帳も解放済みなので両者の違いが出ず、
+    この競合ケースだけが 2 つの台帳を区別できる。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["in_flight"]
+    assert outcome["replyCancelled"] is False
+    assert outcome["modelReplyDelivered"] is True
+    # 最終的に保証経路も届く（この場合だけ 2 通になるが、無言よりはるかに良い）。
+    assert outcome["guaranteePosts"] == 1

@@ -1567,6 +1567,75 @@ async function contentAbsentReport() {
   };
 }
 
+// ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────────
+// 実測ログ: 保証経路が outcome=delivered で 1 通配信したあと、層2 の revise を経て
+// モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
+// 本番の並びをそのまま再現する:
+//   message_received（保証経路が配信）→ before_model_resolve → before_agent_finalize
+//   → reply_payload_sending（モデルの最終応答）
+async function suppressionScenario({ slackMode = "ok", content = "連携" } = {}) {
+  const plugin = makeGuaranteePlugin({ slackMode });
+  const { handlers } = plugin;
+  await notifyInbound(handlers, content);
+  await plugin.settle();
+  startRun(handlers);
+  const finalize = finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  return {
+    // 保証経路が Slack へ投稿した通数。
+    guaranteePosts: plugin.posts.length,
+    // oauth_connect の呼び出し回数＝発行された state token の数。
+    toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
+    // 層2 が「oauth_connect を呼べ」と再要求したか（＝もう 1 個 token を出させるか）。
+    layer2Revised: finalize?.action === "revise",
+    // モデル側の最終応答が落とされたか。
+    replyCancelled,
+    cancelReason: delivery?.reason ?? null,
+    // 利用者の目に触れる通数（保証経路の投稿 + 落とされなかったモデル応答）。
+    userVisibleMessages: plugin.posts.length + (replyCancelled ? 0 : 1),
+    suppressionLogged: plugin.infos.some((m) =>
+      m.includes("suppressed model reply"),
+    ),
+    logs: plugin.logs,
+    infos: plugin.infos,
+  };
+}
+
+// 保証経路が **まだ配信中**（投稿の成否が確定していない）ときにモデルの最終応答が来る競合。
+// ここで抑止してしまうと、その後に投稿が失敗した場合 **誰も答えない** 状態になる。
+// 抑止の根拠を「配信成功」に限定していることの、唯一意味のある検証。
+// （配信失敗のシナリオでは一回性の台帳も解放済みなので、両者の違いが出ない）
+async function suppressionInFlightScenario() {
+  const plugin = makeGuaranteePlugin({});
+  const { handlers } = plugin;
+  // settle しない＝保証経路は投稿の途中。一回性の旗だけが立っている状態。
+  await notifyInbound(handlers, "連携");
+  startRun(handlers);
+  finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const replyCancelled = delivery?.cancel === true;
+  await plugin.settle();
+  return {
+    replyCancelled,
+    // 配信途中で抑止しないので、利用者には最低 1 通は必ず届く。
+    modelReplyDelivered: !replyCancelled,
+    guaranteePosts: plugin.posts.length,
+  };
+}
+
+async function suppressionReport() {
+  return {
+    in_flight: await suppressionInFlightScenario(),
+    // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個。
+    delivered: await suppressionScenario({}),
+    // ② 保証経路が配信失敗 → 従来どおりモデル経路が返す（無言にしない）。
+    post_failed: await suppressionScenario({ slackMode: "post_fails" }),
+    // ③ 保証経路が未発火（連携依頼ではない）→ モデル経路は一切影響を受けない。
+    not_connect_request: await suppressionScenario({ content: "今日の予定を教えて" }),
+  };
+}
+
 // ── 受信本文の「形」だけを出す診断（2026-09-04 本番実測・レビュー指摘 1）─────
 // 本番 OC TD:45 で「連携」が content_len=16 で届き not_connect_request で落ちたが、
 // **16 文字の内訳がログから判らなかった**。本文は出せない（G7）ので、形だけを出す。
@@ -1650,6 +1719,7 @@ const guaranteeOnce = await guaranteeOnceCases();
 const guaranteeHookSources = await guaranteeHookSourceMatrix();
 const contentAbsent = await contentAbsentReport();
 const connectShape = connectShapeReport();
+const suppression = await suppressionReport();
 const hookObservability = hookObservabilityReport();
 const bindNewest = bindNewestReport();
 const connectL1NextMessage = await nextMessageAfterDeterministic();
@@ -2343,6 +2413,8 @@ const report = {
   guarantee_content_absent: contentAbsent,
   // 受信本文の「形」だけを出す診断（本文は 1 文字も出さない）。
   connect_shape: connectShape,
+  // 二重返信の抑止（保証経路が配信成功したターンのモデル最終応答を落とす）。
+  guarantee_suppression: suppression,
   // 各フックの入口 1 行と register バナー（本番でどのフックが呼ばれるかの一次証拠）。
   hook_observability: hookObservability,
   // (C1) 同じ会話の候補が複数でも run を落とさない。
