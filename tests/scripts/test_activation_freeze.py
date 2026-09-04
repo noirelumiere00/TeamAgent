@@ -208,7 +208,7 @@ def test_unrelated_changes_still_pass(base: str, head: str, reason: str) -> None
 
 
 def test_unlock_matches_the_committed_declaration() -> None:
-    """unlock は「無し」か「本 PR が宣言した 1 path ちょうど」のどちらかに固定する。
+    """unlock は「無し」か「本 PR が宣言した 2 path ちょうど」のどちらかに固定する。
 
     旧テスト（test_unlock_is_inactive_and_empty_by_default）は inactive を無条件に
     要求しており、frozen surface を正当に触る PR が unlock を宣言すると構造的に
@@ -217,14 +217,25 @@ def test_unlock_matches_the_committed_declaration() -> None:
     宣言照合形へ更新。緩めたのではない: active の間は宣言内容そのものを封印し、
     scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
     元の封印と同一になる。
+
+    2026-09-04 human gate（ユーザー明示承認）で scope を 2 path へ拡大した。
+    Chainguard python ベースを 3.14.7-r1→r6 へバンプすると、runtime 契約の base
+    digest と release 契約の core ``binary.python.sha256`` probe が**必ず同時に**
+    変わる（python バイナリ実体が変わるため。片方だけ更新すると
+    test_teamagent_bundle_provenance が 15 件赤になる）。相乗り規約
+    ``retention_ruling_2026_08_27.landmine_partial_scope`` のとおり、scope はこの
+    PR の変更集合ちょうどへ絞り込んである。**この 2 path 以外への拡大は、この
+    assert が引き続き検出する。**
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json"
+            "infra/codebuild/teamagent_core_media_release_contract.json",
+            "infra/codebuild/teamagent_runtime_contract.json",
         ]
-        assert "便γ" in unlock["reason"]
-        assert "human gate 2026-09-01" in unlock["gate"]
+        assert "Chainguard" in unlock["reason"]
+        assert "CVE-2026-15806" in unlock["reason"]
+        assert "human gate 2026-09-04" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

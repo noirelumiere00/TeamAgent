@@ -75,6 +75,14 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-04 publish 世代（Wave7・CVE-2026-15806 恒久対応）。chainguard python の
+    # arm64 digest を python-3.14 3.14.7-r1→3.14.7-r6 のベースへバンプ（runtime 契約 3 値）
+    # したことによる再レンダリング。値の出所は repo tree からのオフライン導出（Wave3〜6 を
+    # 完全再現済みのハーネス）。publish 儀式は admin CLI（Wave6 と同一経路）。
+    "1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -106,6 +114,14 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-04 publish 世代（Wave7・CVE-2026-15806 恒久対応）。chainguard python の
+    # arm64 digest を python-3.14 3.14.7-r1→3.14.7-r6 のベースへバンプ（runtime 契約 3 値）
+    # したことによる再レンダリング。値の出所は repo tree からのオフライン導出（Wave3〜6 を
+    # 完全再現済みのハーネス）。publish 儀式は admin CLI（Wave6 と同一経路）。
+    "64e6435bf78edf51c8b02268f6c5d7b9e4ef10680b40f49d4b7a0195ef1aaed9" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -134,6 +150,14 @@ locals {
     # 追随（media-apk.lock 4行・契約 MEDIA_APK_LOCK_SHA256）による再レンダリング。値の出所は
     # repo tree からのオフライン導出（Wave3〜5 を完全再現済みのハーネス）。publish 儀式は admin CLI。
     "4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-09-04 publish 世代（Wave7・CVE-2026-15806 恒久対応）。chainguard python の
+    # arm64 digest を python-3.14 3.14.7-r1→3.14.7-r6 のベースへバンプ（runtime 契約 3 値）
+    # したことによる再レンダリング。値の出所は repo tree からのオフライン導出（Wave3〜6 を
+    # 完全再現済みのハーネス）。publish 儀式は admin CLI（Wave6 と同一経路）。
+    "32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -332,18 +356,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["e589897d66207518c415d88d9d34d7045d27b75616751d8e298a2860e672f292"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/e589897d66207518c415d88d9d34d7045d27b75616751d8e298a2860e672f292.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["b5d62e4f6f323e6df351d5fe342687bdf8c8a57c270e9b195960cec4bf50b379"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/b5d62e4f6f323e6df351d5fe342687bdf8c8a57c270e9b195960cec4bf50b379.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["64e6435bf78edf51c8b02268f6c5d7b9e4ef10680b40f49d4b7a0195ef1aaed9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/64e6435bf78edf51c8b02268f6c5d7b9e4ef10680b40f49d4b7a0195ef1aaed9.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/4d8fd8d8982da9e163397241b5dbc03bfdbec64a8891b43c22bb59b5533240df.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96.yml"
 }
 
 import {
