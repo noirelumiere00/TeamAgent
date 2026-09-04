@@ -1,15 +1,5 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": [
-    {
-      "cve": "CVE-2026-15806",
-      "severity": "MEDIUM",
-      "package": "python-3.14",
-      "version": "3.14.7-r1",
-      "owner": "s-komata@vectorinc.co.jp",
-      "reason": "2026-09-03 r16 image-builder 段3 で新規検出（MEDIUM・Chainguard python:latest 3.14.7-r1）。段4 Trivy は C/H ゼロゲートのため影響なし。恒久対応は Chainguard python digest を 3.14.7-r6 以降へバンプする世代 publish（runtime contract 束縛）で、その着地時に本例外は stale=fail で自動的に撤去を強制される。",
-      "expires_on": "2026-09-17"
-    }
-  ]
+  "exceptions": []
 }
