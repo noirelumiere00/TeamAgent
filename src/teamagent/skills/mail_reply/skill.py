@@ -52,6 +52,7 @@ from teamagent.skills._shared.mail_history import (
     counterpart_history_section,
     fetch_counterpart_history,
 )
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.mail_reply.schema import MailReplyInput, MailReplyOutput
 
@@ -94,9 +95,7 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
         "保存する（送信はしない＝本人が確認して送信）。利用前に"
         + CONNECT_SUFFIX
         + "gmail.modify を認可済みの時のみ使える。"
-        "呼び出し時は arguments に "
-        "`_user_context: {slack_user_id: '<Slack相手のuser_id>'}` を"
-        "必ず含める（mcp 境界の本人解決鍵）。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = MailReplyInput
     output_schema: ClassVar[type[BaseModel]] = MailReplyOutput

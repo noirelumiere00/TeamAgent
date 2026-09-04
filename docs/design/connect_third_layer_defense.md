@@ -612,15 +612,22 @@ block / fallthrough / answered / rejected のみ。env は OC のタスク定義
 2. logger 側と console 側で本番ログが 2 行になる。片方に寄せる判断は、実際に CloudWatch へ出た形を
    見てから（デプロイ後に `diagnostic=CONNECT-P` で引ける）。
 3. unwrap は「2 段まで」の固定上限。3 段以上を送るモデルが現れたら P06 の件数として観測できる。
-4. 本 PR は plugin の挙動のみ。モデルが包む癖そのもの（プロンプト側）には触れていない。
+4. 本 PR は plugin の挙動のみ。モデルが包む癖そのもの（プロンプト側）には触れていない
+   → 後続 PR（`fix/skill-descriptions-and-start-diagnostics`）で description / SOUL を修正済み。
 5. 2026-09-03 の層1 不発の**真因はまだ確定していない**。本 PR は「次に起きたら 1 行で判る」ところまで。
    確定には OC 再ビルド後に `TEAMAGENT_CALLER_IDENTITY_TRACE=1` を入れて再現させる必要がある。
 6. trace ON にすると通常会話 1 通あたり 2〜3 行増える。切り分けが済んだら OFF に戻す運用が前提。
 7. `arguments` という入力フィールドを持つ skill が将来増えると、unwrap 規則 (a) が誤発火して
    静かに P06 で落ちる。本 PR 時点では 45 skill すべてに存在せず、増えたら
    `test_no_skill_declares_an_input_field_named_arguments` が赤になる。
-8. 14 スキルの description が「arguments に `_user_context` を含める」と書いている（記録のみ）。
-   block 最多の oauth_connect(105) / search(95) にはこの文言が無いので主因ではない。文言修正は別 PR。
+8. ~~14 スキルの description が「arguments に `_user_context` を含める」と書いている（記録のみ）。~~
+   → **解消済み**（後続 PR）。実際は 15 スキル。文言を
+   `teamagent.skills._shared.user_context.USER_CONTEXT_RULE`
+   （「他の引数と同じ**トップレベル**に並べて渡す・入れ子のオブジェクトで包み直さない」）へ統一し、
+   `tests/skills/test_user_context_description_contract.py` が全スキル横断で
+   「`arguments に` が 1 本も無い」ことを固定する。SOUL.md の同趣旨の 1 行も同時に直した。
+   なお block 最多の oauth_connect(105) / search(95) にはこの文言が無いので、
+   **これが唯一の主因とは言えない**（プロンプト側の対策として実施）。
 
 ---
 

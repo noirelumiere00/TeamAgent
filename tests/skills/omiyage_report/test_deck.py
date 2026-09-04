@@ -594,3 +594,60 @@ def test_engine_plan_passes_fmt_renderer_contract() -> None:
     ]
     # U2脚注（EG率定義）がレンダラ側 Slide にも到達する
     assert any(slide.footnote == EG_RATE_FOOTNOTE for slide in content.slides)
+
+
+# ---------------------------------------------------------------------------
+# 階層比較（Q1）: 平均再生は Q5 と同じ 3 桁区切りの整数で出す
+# ---------------------------------------------------------------------------
+
+
+def _tier_format_measurement() -> OmiyageMeasurement:
+    """ナノ帯の平均再生が割り切れない（14011.666…）実測を組む。"""
+    nano = tuple(
+        _post(video_id, "エムキュアの検証", rank=rank, plays=plays, followers=5_000)
+        for video_id, rank, plays in (("11", 1, 14_000), ("12", 2, 14_012), ("13", 3, 14_023))
+    )
+    mega = (_post("14", "エムキュア紹介", rank=4, plays=1_300_000, followers=800_000),)
+    axes = [
+        AxisData(
+            role="brand",
+            label="ブランド名「エムキュア」検索",
+            query="エムキュア",
+            requested=120,
+            posts=(*nano, *mega),
+        ),
+        AxisData(
+            role="competitor",
+            label="競合「ラサーナ」検索",
+            query="ラサーナ",
+            requested=120,
+            posts=(_post("15", "ラサーナ検証", rank=1, plays=88_722, followers=5_000),),
+        ),
+    ]
+    return measure(axes, brand="エムキュア", competitors=["ラサーナ"], keywords=["ヘアケア"])
+
+
+def test_tier_slide_avg_plays_use_thousands_separator_and_integer_rounding() -> None:
+    plan = build_deck_plan(
+        _tier_format_measurement(),
+        None,
+        generated_on="2026-08-24",
+        search_depth=120,
+    )
+    q1 = next(slide for slide in plan.slide_plan if slide.q_number == "Q1")
+    assert isinstance(q1.data, SlideDataD)
+    by_tier = {row[0]: row for row in q1.data.rows}
+    # 自社側の平均再生（列2）: 14011.666… は「14,012」、1300000.0 は「1,300,000」
+    assert by_tier["ナノ（〜1万）"][2] == "14,012"
+    assert by_tier["メガ（50万〜）"][2] == "1,300,000"
+    # 競合側の平均再生（列5）も同じ整形
+    assert by_tier["ナノ（〜1万）"][5] == "88,722"
+    # 0本の帯は 0 本 / N/A（捏造しない）
+    assert by_tier["マイクロ（1〜10万）"][1:4] == ["0本", "N/A", "N/A"]
+    # 平均EG率は従来どおり小数付きの % 表記を維持する
+    assert by_tier["ナノ（〜1万）"][3].endswith("%")
+    assert "." in by_tier["ナノ（〜1万）"][3]
+    # 素の float（14011.6 / 1300000.0）が表へ出ない
+    flat = [cell for row in q1.data.rows for cell in row]
+    assert not any(cell.replace(",", "").endswith(".0") for cell in flat)
+    assert "14011.7" not in flat

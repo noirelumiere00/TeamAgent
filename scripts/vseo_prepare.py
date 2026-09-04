@@ -31,6 +31,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.vseo.dataprep import utc_now_ts
 from teamagent.skills.vseo.prepare import prepare_vseo_data
 
@@ -40,7 +41,15 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True, help="出力ディレクトリ")
     ap.add_argument("--kw", action="append", default=[], help="検索KW (複数指定可)")
     ap.add_argument("--kws", default="", help="検索KW をカンマ区切りで一括指定")
-    ap.add_argument("--max", type=int, default=30, help="各KWの最大取得本数 (既定30)")
+    ap.add_argument(
+        "--max",
+        type=int,
+        default=TIKTOK_N_PER_KW_MAX,
+        help=(
+            f"各KWの最大取得本数 (1〜{TIKTOK_N_PER_KW_MAX}・既定{TIKTOK_N_PER_KW_MAX})。"
+            "上限は TikTok 取得 dispatcher の n_per_kw 上限と同一"
+        ),
+    )
     ap.add_argument("--no-thumbnails", action="store_true", help="サムネ画像DLをスキップ")
     args = ap.parse_args()
 
@@ -61,6 +70,14 @@ def main() -> None:
         sys.exit(1)
     if len(keywords) > 10:
         print(f"エラー: KWが多すぎます ({len(keywords)}個)。最大10個まで", file=sys.stderr)
+        sys.exit(1)
+    # dispatcher の n_per_kw 上限を超えた --max は search_tiktok の fail-fast で
+    # 実行後に落ちる。取得を始める前にここで弾く。
+    if not 1 <= args.max <= TIKTOK_N_PER_KW_MAX:
+        print(
+            f"エラー: --max={args.max} は範囲外です (1〜{TIKTOK_N_PER_KW_MAX})",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print(f"[VSEO] {len(keywords)} KW を検索: {keywords}", file=sys.stderr)

@@ -5,7 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from teamagent.adapters.apify_client import ApifyError, IgPost
+from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
@@ -206,3 +210,51 @@ def test_ig_surface_env_default(monkeypatch: Any) -> None:
         _ctx(),
     )
     assert apify.calls == [("セブン", "hashtag")]  # 検証ゲートの切替は env 一発
+
+
+# ---------------------------------------------------------------------------
+# max_posts_per_kw の上限 = TikTok 取得 dispatcher の n_per_kw 上限
+# ---------------------------------------------------------------------------
+
+
+def test_max_posts_per_kw_upper_bound_equals_dispatcher_limit() -> None:
+    assert TIKTOK_N_PER_KW_MAX == 30
+    # 30 は通る（境界の内側）
+    assert SearchSurfaceCheckInput(keywords=["セブン"], max_posts_per_kw=30).max_posts_per_kw == 30
+    # 既定も dispatcher 上限に揃っている
+    assert SearchSurfaceCheckInput(keywords=["セブン"]).max_posts_per_kw == TIKTOK_N_PER_KW_MAX
+    # 31 以上は入口で拒否（旧 le=50 では 31〜50 が通り、取得時に丸ごと落ちていた）
+    for over in (TIKTOK_N_PER_KW_MAX + 1, 50):
+        with pytest.raises(ValidationError):
+            SearchSurfaceCheckInput(keywords=["セブン"], max_posts_per_kw=over)
+    # 下限（ge=5）は据え置き
+    with pytest.raises(ValidationError):
+        SearchSurfaceCheckInput(keywords=["セブン"], max_posts_per_kw=4)
+
+
+def test_tiktok_direct_clamps_max_videos_to_dispatcher_limit() -> None:
+    """スキーマを迂回して直接組んでも dispatcher 上限を超えて要求しない（二重の保険）。"""
+    seen: list[int] = []
+
+    def fake_search(kw: str, *, max_videos: int, request_id: str) -> Any:
+        # 本番の失敗モード（media_job.search_tiktok の fail-fast → TIKTOK_MEDIA_JOB_FAILED）を再現
+        if not 1 <= max_videos <= TIKTOK_N_PER_KW_MAX:
+            raise ValueError(
+                f"TikTok n_per_kw={max_videos} is outside the dispatcher limit "
+                f"(1..{TIKTOK_N_PER_KW_MAX})"
+            )
+        seen.append(max_videos)
+        return type("R", (), {"videos": ()})()
+
+    skill = SearchSurfaceCheckSkill(
+        apify=_FakeApify(),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(),
+        publisher=_publisher,
+        tiktok_search_fn=fake_search,
+    )
+    skill._tiktok_direct(["セブン"], 50, "req-test")
+    assert seen == [TIKTOK_N_PER_KW_MAX]
+    # 上限以下はそのまま通す（無条件に 30 を押し付けない）
+    seen.clear()
+    skill._tiktok_direct(["セブン"], 10, "req-test")
+    assert seen == [10]

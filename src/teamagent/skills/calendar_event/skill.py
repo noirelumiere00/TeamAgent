@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import DuplicateEventError, GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.calendar_event.schema import CalendarEventInput, CalendarEventOutput
 from teamagent.skills.morning_digest.event_token import decode_event_token, stable_event_id
@@ -118,8 +119,7 @@ class CalendarEventSkill(BaseSkill[CalendarEventInput, CalendarEventOutput]):
         "空き時間の照会は calendar_freebusy、相手との日程調整は schedule_propose を使う。"
         "**予定の確認・一覧（『明日の予定は？』『今日なにがある？』）は "
         "calendar_freebusy(mode='agenda')**＝このツールは登録専用で、読み取りには使わない。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = CalendarEventInput
     output_schema: ClassVar[type[BaseModel]] = CalendarEventOutput

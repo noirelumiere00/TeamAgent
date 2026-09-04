@@ -46,6 +46,7 @@ from teamagent.skills._shared.next_step import (
 )
 from teamagent.skills._shared.slack_context import _neutralize
 from teamagent.skills._shared.source_url import slack_permalink
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.slack_summary.schema import SlackSummaryInput, SlackSummaryOutput
 
@@ -127,9 +128,7 @@ class SlackSummarySkill(BaseSkill[SlackSummaryInput, SlackSummaryOutput]):
         "scope 省略時は現スレッドを読み、依頼メッセージだけなら現チャンネルへ自動で切り替える。"
         "別スレッドを指す場合のみ thread_ts / channel_id を渡す。"
         "Slack への投稿・リアクション・要約の転送はしない。"
-        "受信メールの要約は mail_summary、社内資料の検索は search を使う。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        "受信メールの要約は mail_summary、社内資料の検索は search を使う。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = SlackSummaryInput
     output_schema: ClassVar[type[BaseModel]] = SlackSummaryOutput

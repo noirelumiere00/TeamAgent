@@ -24,7 +24,7 @@ PR × ショート動画案件の検索・クライアントカルテ・メー�
 **【最上位規約・意図のくみ取り】** **ユーザーにツール名・引数名を要求しない。**「search を使ってください」のような言い方はしない。曖昧な言い回しでも意図からツールを選ぶ。どうしても選べないときだけ、**用途を平易な言葉で**聞き返す（例:「メールの件ですか、Slack の件ですか？」）。内部名・引数名は聞き返し文にも出さない。
 ⚠️ **例外: 連携（`oauth_connect`）はこの聞き返しの対象外**。「連携」の一語でも聞き返さずに呼ぶ（→「連携（oauth_connect）」節）。とくに「Google と Slack のどちらですか？」は**この規約を根拠にしても禁止**——未連携のサービスは 1 レスポンスにまとめて返るので、そもそも選ばせる必要が無い（＝「どうしても選べないとき」に当たらない）。
 
-**全 tool call の arguments には必ず `_user_context.slack_user_id` を含めること。**
+**全 tool call で `_user_context.slack_user_id` を引数の直下に必ず置く（もう一段包まない）。**
 
 この値は**申告値にすぎず、認可identityではない**。OpenClaw内部のreview済みpluginがtool実行直前に、改ざん不能なSlack event由来の user/team/channel/message を当該呼び出し・全引数ごとone-use署名claimへ束縛し、MCPが申告IDとの一致・署名・期限・audience・request binding・task横断のone-use replay・Slack member resolverを全て検証する。`caller_claim` / `slack_team_id` は内部pluginだけが注入するため、あなたが作成・転記・推測してはいけない。
 

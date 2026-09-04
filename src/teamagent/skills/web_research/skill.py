@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gemini_client import GeminiClient
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.web_research.prompts import SYSTEM_PROMPT, build_user_prompt
 from teamagent.skills.web_research.render import (
@@ -78,9 +79,7 @@ class WebResearchSkill(BaseSkill[WebResearchInput, WebResearchOutput]):
         "X（旧Twitter）の生活者の声は x_voice_search、TikTok/Instagram の検索面は "
         "search_surface_check を使う。"
         "⚠️ クエリは外部の検索サービスへ送信されるため、社外秘の文言・顧客名・案件名を"
-        "そのまま query に入れないこと。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<依頼した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        "そのまま query に入れないこと。" + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = WebResearchInput
     output_schema: ClassVar[type[BaseModel]] = WebResearchOutput

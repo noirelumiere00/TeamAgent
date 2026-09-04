@@ -132,6 +132,8 @@ DIAG_SPECS: dict[ConnectDiag, DiagSpec] = {
             "connect_slack_callback_state_consume_failed",
             "connect_slack_callback_exchange_failed",
             "connect_slack_callback_store_failed",
+            "connect_start_url_failed",
+            "connect_slack_start_url_failed",
         ),
     ),
     ConnectDiag.I01A: DiagSpec(
@@ -184,6 +186,7 @@ DIAG_SPECS: dict[ConnectDiag, DiagSpec] = {
             "connect_slack_callback_reused_state",
             "connect_slack_state_unbound_rejected",
             "connect_slack_start_bad_state",
+            "connect_slack_start_unbound_rejected",
         ),
     ),
     ConnectDiag.T02: DiagSpec(

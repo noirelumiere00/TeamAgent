@@ -23,6 +23,7 @@ from typing import Any, ClassVar
 import structlog
 from pydantic import BaseModel
 
+from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.digest_ack.schema import DigestAckInput, DigestAckOutput
 from teamagent.skills.morning_digest.ack_token import decode_ack_token, encode_unack_token
@@ -55,8 +56,7 @@ class DigestAckSkill(BaseSkill[DigestAckInput, DigestAckOutput]):
         "隠れるのは『確認済みかつ、その後スレッドに新着が無い』間だけで、新しい返信が来れば"
         "翌朝また表示される。確認済みの記録は 30 日で自動的に消える。"
         "メールの送信・下書き作成・カレンダー登録は一切しない（引数が存在しない）。"
-        "呼び出し時は arguments に `_user_context: {slack_user_id: '<押した本人のuser_id>'}` を"
-        "必ず含める（本人解決鍵）。"
+        + USER_CONTEXT_RULE
     )
     input_schema: ClassVar[type[BaseModel]] = DigestAckInput
     output_schema: ClassVar[type[BaseModel]] = DigestAckOutput
