@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SearchInput(BaseModel):
@@ -186,6 +188,47 @@ class SearchHitOut(BaseModel):
         default=False,
         description="低信頼ヒット（fallback しきい値で救出された borderline）。配信は控える",
     )
+    updated_at: str | None = Field(
+        default=None,
+        description=(
+            "更新日（取込元の最終更新・JST・YYYY-MM-DD）。documents.modified_at 由来で、"
+            "Drive は modifiedTime / Slack はスレッド ts / シート行はフォームのタイムスタンプ。"
+            "None は『更新日が登録されていない』＝日付を書かない"
+        ),
+    )
+    title_date: str | None = Field(
+        default=None,
+        description=(
+            "資料名（title / file_name）に含まれる日付（YYYY-MM-DD または YYYY-MM）。"
+            "提案日に最も近い値。無ければ None"
+        ),
+    )
+    date_basis: Literal["modified_at", "title_date", "none"] = Field(
+        default="none",
+        description=(
+            "日付の根拠。'title_date'＝資料名の日付を優先／'modified_at'＝更新日のみ／"
+            "'none'＝根拠となる日付が無い（このとき updated_at・title_date は両方 None。"
+            "推測で日付を書かない）"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _blank_dates_without_basis(self) -> SearchHitOut:
+        """date_basis と日付フィールドの整合を出口で強制する。
+
+        - date_basis='none' なら updated_at / title_date を必ず空にする
+          （「根拠不明の日付」を返さない契約を型で担保）
+        - title_date があるのに basis が modified_at のまま等の食い違いは basis を直す
+        """
+        if self.title_date:
+            self.date_basis = "title_date"
+        elif self.updated_at:
+            self.date_basis = "modified_at"
+        else:
+            self.date_basis = "none"
+            self.updated_at = None
+            self.title_date = None
+        return self
 
     @field_validator("url")
     @classmethod

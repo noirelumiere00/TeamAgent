@@ -629,7 +629,8 @@ class PgVectorClient:
                 d.metadata->>'cls_phase' AS cls_phase,
                 d.metadata->>'cls_solution' AS cls_solution,
                 d.metadata->>'cls_budget' AS cls_budget,
-                d.metadata->>'cls_target' AS cls_target
+                d.metadata->>'cls_target' AS cls_target,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             {where_clause}
@@ -686,6 +687,12 @@ class PgVectorClient:
             ):
                 if r.get(cls_key):
                     meta[cls_key] = r[cls_key]
+            # 便A-3: 更新日（documents.modified_at・JST・YYYY-MM-DD）。値があるときだけ
+            # 詰め、由来を date_basis="modified_at" で明示する（NULL 行はキー自体を
+            # 持たない＝呼び側が「根拠不明の日付」を作らない）。
+            if r.get("updated_at"):
+                meta["updated_at"] = str(r["updated_at"])
+                meta["date_basis"] = "modified_at"
             hits.append(
                 SearchHit(
                     chunk_id=int(r["chunk_id"]),
@@ -1177,7 +1184,7 @@ class PgVectorClient:
                 d.source_uri,
                 d.source_type::text AS source_type,
                 d.title,
-                d.modified_at
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE {where} AND c.chunk_idx = 0
@@ -1204,6 +1211,10 @@ class PgVectorClient:
             }
             if r.get("page_num") is not None:
                 meta["page_num"] = r["page_num"]
+            # 便A-3: 関連 Drive 資料にも更新日を添える（主検索ヒットと同じ契約）。
+            if r.get("updated_at"):
+                meta["updated_at"] = str(r["updated_at"])
+                meta["date_basis"] = "modified_at"
             hits.append(
                 SearchHit(
                     chunk_id=cid,
