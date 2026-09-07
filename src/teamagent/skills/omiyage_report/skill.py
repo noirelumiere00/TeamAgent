@@ -224,9 +224,15 @@ def _configured_max_concurrent_jobs() -> int:
     )
 
 
-# 順番待ちの人を数える窓。最後に依頼してからこの秒数を過ぎた人は「諦めた」とみなして
-# 順番から外す（外さないと、二度と来ない人が他の営業の順番を 1 つずつ押し下げ続ける）。
+# 順番待ちの失効窓の最低値（秒）。失効時刻は waiter ごとに
+# 「断った時刻 + max(この最低窓, 案内した M 分 × 余裕係数)」で持つ。固定 15 分だと、
+# busy 文で案内する「約 M 分後にもう一度」（既定で M≈40）より短く、案内どおりに待った
+# 人が必ず失効して後から来た人に繰り上がられる（PR #395 レビュー指摘）。失効時刻を過ぎても
+# 再送が無い人だけを「諦めた」とみなして順番から外す（外さないと、二度と来ない人が他の
+# 営業の順番を 1 つずつ押し下げ続ける）。
 _WAITER_TTL_SECONDS = 900.0
+# 案内した M 分に掛ける余裕係数。M ちょうどに再送しても失効していないことを保証する。
+_WAITER_GRACE_FACTOR = 1.5
 
 
 @dataclass(frozen=True)
@@ -249,7 +255,9 @@ class JobAdmission:
     バグ）をその場で ValueError として顕在化させるため。
 
     順番待ちの案内（何番目・あと何分）のために、走行中ジョブの開始時刻と所要目安、
-    および断られた依頼者（waiter_key）を最初に断った順で覚えておく。台帳には書かない
+    および断られた依頼者（waiter_key）を最初に断った順で失効時刻付きで覚えておく。
+    失効時刻は案内した「約 M 分後」を必ず内側に含める（案内と矛盾する失効を作らない）。
+    台帳には書かない
     （queued 受付＝台帳ベースの順番待ちは便B-8）。release は FIFO 近似で最古の走行
     行を落とす（ジョブの所要は同程度なので案内の目安としては十分）。
     """
@@ -266,7 +274,7 @@ class JobAdmission:
         self._lock = threading.Lock()
         # (開始時刻 monotonic, 所要目安 分)
         self._running: list[tuple[float, float]] = []
-        # waiter_key → 最後に断った時刻（並びは最初に断った順）
+        # waiter_key → 失効時刻 monotonic（並びは最初に断った順）
         self._waiters: dict[str, float] = {}
 
     @property
@@ -277,7 +285,9 @@ class JobAdmission:
         """空きがあれば 1 枠取る。**待たない**（submit は即答が契約）。
 
         取れたら走行行を記録し、その依頼者を順番待ちから外す。取れなければ順番待ちに
-        登録する（既に並んでいれば位置は変えず、最終依頼時刻だけ更新）。
+        登録する（既に並んでいれば位置は変えず、失効時刻だけ更新）。失効時刻は、この時点で
+        案内する「約 M 分後」（``busy_info`` と同じ計算。``eta_minutes`` を目安の代替に
+        使う）を必ず内側に含めた ``now + max(最低窓, M 分 × 余裕係数)``。
         """
 
         acquired = self._semaphore.acquire(blocking=False)
@@ -287,7 +297,14 @@ class JobAdmission:
                 self._running.append((now, max(0.0, eta_minutes)))
                 self._waiters.pop(waiter_key, None)
             elif waiter_key:
-                self._waiters[waiter_key] = now
+                self._expire_waiters_locked(now)
+                # 初めて断る人は末尾に並べる（値は直後に上書きする仮の失効時刻）。
+                self._waiters.setdefault(waiter_key, now + _WAITER_TTL_SECONDS)
+                info = self._busy_info_locked(waiter_key, now=now, fallback_eta_minutes=eta_minutes)
+                self._waiters[waiter_key] = now + max(
+                    _WAITER_TTL_SECONDS,
+                    info.wait_minutes * 60.0 * _WAITER_GRACE_FACTOR,
+                )
         return acquired
 
     def release(self) -> None:
@@ -301,19 +318,26 @@ class JobAdmission:
 
         now = self._clock()
         with self._lock:
-            expired = [
-                key
-                for key, last_seen in self._waiters.items()
-                if now - last_seen > _WAITER_TTL_SECONDS
-            ]
-            for key in expired:
-                del self._waiters[key]
-            keys = list(self._waiters)
-            position = keys.index(waiter_key) + 1 if waiter_key in self._waiters else len(keys) + 1
-            remaining = sorted(
-                max(0.0, eta - (now - started) / 60.0) for started, eta in self._running
+            self._expire_waiters_locked(now)
+            return self._busy_info_locked(
+                waiter_key, now=now, fallback_eta_minutes=fallback_eta_minutes
             )
-            running = len(self._running)
+
+    def _expire_waiters_locked(self, now: float) -> None:
+        """失効時刻を過ぎても再送が無い人だけを順番から落とす（``_lock`` 保持中に呼ぶ）。"""
+
+        for key in [key for key, expires_at in self._waiters.items() if now > expires_at]:
+            del self._waiters[key]
+
+    def _busy_info_locked(
+        self, waiter_key: str, *, now: float, fallback_eta_minutes: float
+    ) -> BusyInfo:
+        """``_lock`` 保持中に案内値を計算する（失効処理はしない）。"""
+
+        keys = list(self._waiters)
+        position = keys.index(waiter_key) + 1 if waiter_key in self._waiters else len(keys) + 1
+        remaining = sorted(max(0.0, eta - (now - started) / 60.0) for started, eta in self._running)
+        running = len(self._running)
         fallback = max(1.0, fallback_eta_minutes)
         if remaining:
             slot = position - 1

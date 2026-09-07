@@ -6,6 +6,8 @@
   3. needs_input の末尾に骨子（文章）へ切り替える逃げ道 1 行がある
   4. 受付文の所要目安は固定の「10〜30 分」でなく依頼内容と環境から算出した分数
   5. 順番待ちの N 番目は最初に断られた順（同じ人の再送で位置は動かない・受付で外れる）
+  6. 順番待ちの失効は案内した「約 M 分後」を必ず内側に含む（M 分後に再送した人が失効して
+     後から来た人に繰り上がられる「できない約束」を作らない）
 """
 
 from __future__ import annotations
@@ -203,11 +205,53 @@ def test_busy_wait_minutes_follow_oldest_running_job_and_retry_after_matches() -
 
 
 def test_stale_waiters_drop_out_of_the_queue() -> None:
+    """失効窓は「案内した M 分 × 1.5」と最低 15 分の大きい方。M 以内の再送では失効しない。"""
+
     now = [0.0]
     admission = JobAdmission(1, clock=lambda: now[0])
     skill = _skill(admission, _NeverRunLauncher())
 
     assert skill.run(_input("A"), _ctx("U1")).status == "queued"
-    assert "順番待ち 1 番目" in skill.run(_input("B"), _ctx("U2")).message
-    now[0] += 16 * 60  # U2 は 15 分以上再送していない＝諦めた扱い
+    first = skill.run(_input("B"), _ctx("U2"))
+    assert "順番待ち 1 番目" in first.message
+    assert "約 40 分後に同じ内容でもう一度" in first.message  # 案内した M = 40
+
+    now[0] = 16 * 60  # 固定 15 分窓なら U2 が落ちていた時点。案内した 40 分の内側なので残る
+    assert "順番待ち 2 番目" in skill.run(_input("C"), _ctx("U3")).message
+    now[0] = 60 * 60  # ちょうど M × 1.5 はまだ残る（境界は内側）
+    assert "順番待ち 2 番目" in skill.run(_input("C"), _ctx("U3")).message
+    now[0] = 60 * 60 + 1  # M × 1.5 を超えて再送が無い U2 だけが落ち、U3 が繰り上がる
     assert "順番待ち 1 番目" in skill.run(_input("C"), _ctx("U3")).message
+
+
+def test_waiter_who_returns_as_instructed_keeps_first_position() -> None:
+    """PR #395 レビューの再現（U2@0 → U3@5 → U3@20 → U2@40）で U2 が 1 番目のまま。
+
+    修正前は失効 15 分固定だったため U3@20 で U2 が落ちて U3 が「1 番目」になり、
+    U2@40 では U3 が落ちて U2 が「1 番目」に戻る（案内どおり待った人が必ず失効）。
+    U3@30 の再送を 1 つ足しているのは、U3 が失効しない状態で U2@40 が「1 番目」で
+    あること自体を判定にするため（これが無いと修正前でも U3 の失効で偶然 1 番目になる）。
+    """
+
+    now = [0.0]
+    admission = JobAdmission(1, clock=lambda: now[0])
+    skill = _skill(admission, _NeverRunLauncher())
+
+    assert skill.run(_input("A"), _ctx("U1")).status == "queued"  # 目安 39.5 分
+    u2 = skill.run(_input("B"), _ctx("U2"))
+    assert "順番待ち 1 番目" in u2.message
+    assert "目安あと約 40 分" in u2.message
+
+    now[0] = 5 * 60
+    u3 = skill.run(_input("C"), _ctx("U3"))
+    assert "順番待ち 2 番目" in u3.message
+    assert "目安あと約 74 分" in u3.message  # 34.5（最古の残り）+ 39.5（1 ジョブぶん）
+
+    now[0] = 20 * 60  # 修正前はここで U2 が失効し U3 が「1 番目」になっていた
+    assert "順番待ち 2 番目" in skill.run(_input("C"), _ctx("U3")).message
+    now[0] = 30 * 60
+    assert "順番待ち 2 番目" in skill.run(_input("C"), _ctx("U3")).message
+
+    now[0] = 40 * 60  # 案内どおり約 40 分後に再送した U2 は 1 番目のまま
+    assert "順番待ち 1 番目" in skill.run(_input("B"), _ctx("U2")).message
+    assert "順番待ち 2 番目" in skill.run(_input("C"), _ctx("U3")).message
