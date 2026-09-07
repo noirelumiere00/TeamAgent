@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-import structlog
 from structlog.testing import capture_logs
 
 from teamagent.adapters.gmail_client import DraftNotOwnedError
@@ -495,8 +494,14 @@ def test_candidate_scan_uses_metadata_and_refetches_only_the_chosen_message() ->
 
 
 def test_resolution_log_has_counts_and_hint_flags_but_no_subject_text() -> None:
+    """⚠️ ここで ``structlog.configure(processors=[...])`` を呼ばないこと。
+
+    ``capture_logs`` は設定済みの processors **リストを in-place で差し替える**設計で、
+    ``configure()`` で新しいリストに置き換えると、``cache_logger_on_first_use=True`` 下で
+    キャッシュ済みのロガーが旧リストを参照し続け、**以降の全テストの capture_logs が 0 件**
+    になる（CI で oauth_connect / search / x_research 等が連鎖して赤くなった実測）。
+    """
     gmail = FakeGmail(_two_threads())
-    structlog.configure(processors=[structlog.testing.LogCapture()])
     with capture_logs() as logs:
         _skill(gmail).run(
             MailReplyInput(client_name="日本教育財団", subject_contains=SUBJECT_TOKUNO), _ctx()
@@ -515,7 +520,6 @@ def test_resolution_log_has_counts_and_hint_flags_but_no_subject_text() -> None:
 
 def test_ambiguous_outcome_is_logged() -> None:
     gmail = FakeGmail(_two_threads())
-    structlog.configure(processors=[structlog.testing.LogCapture()])
     with capture_logs() as logs:
         _skill(gmail).run(MailReplyInput(client_name="日本教育財団"), _ctx())
     rec = next(r for r in logs if r.get("event") == "mail_reply_thread_resolution")
