@@ -410,3 +410,46 @@ def test_search_similar_new_schema_h3_guards_invalid_duplicate_of_uuid() -> None
     # 正規表現に uuid 形状（8-4-4-4-12 の hex）が含まれる
     assert "[0-9a-fA-F]{8}-" in sql
     assert "[0-9a-fA-F]{12}$" in sql
+
+
+def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None:
+    """cls_entities（取引先/ブランドの多値タグ・CSV）を SELECT し metadata に詰める。
+
+    2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は本番で
+    死んだコードだった（便A-1 client_guard）。無い行（None）は metadata に載せない。
+    """
+    base = {
+        "chunk_id": 42,
+        "content": "本文",
+        "score": 0.9,
+        "page_num": None,
+        "document_id": "11111111-2222-3333-4444-555555555555",
+        "source_uri": "gdrive://doc",
+        "source_type": "gdrive",
+        "title": "提案書",
+        "channel_name": None,
+        "is_sales_fb": None,
+        "client_name": None,
+        "deal_phase": None,
+        "bant_score": None,
+        "channel_type": None,
+        "cls_project": "SOMARCA",
+        "cls_industry": None,
+        "cls_doc_type": None,
+        "cls_phase": None,
+        "cls_solution": None,
+        "cls_budget": None,
+        "cls_target": None,
+    }
+    rows = [
+        {**base, "cls_entities": "ホーユー,SOMARCA"},
+        {**base, "chunk_id": 43, "cls_entities": None},
+    ]
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn_with_rows(rows)
+    hits = client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
+    sql: str = cur.execute.call_args.args[0]
+    assert "d.metadata->>'cls_entities' AS cls_entities" in sql
+    assert hits[0].metadata["cls_entities"] == "ホーユー,SOMARCA"
+    assert hits[0].metadata["cls_project"] == "SOMARCA"
+    assert "cls_entities" not in hits[1].metadata

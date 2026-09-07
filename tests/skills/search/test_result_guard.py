@@ -22,9 +22,12 @@ from teamagent.skills._shared.next_step import DELIVER_SUGGESTION
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search.result_guard import (
     WEAK_RESULT_NOTICE,
+    aliases,
     build_result_header,
     clients_match,
     detect_query_client,
+    explain_client_guard,
+    find_client_mention,
     hit_client_name,
     normalize_client,
     prefix_header,
@@ -41,6 +44,11 @@ MISMATCH_HEAD = "⚠️ ご指定のクライアントの資料ではありま�
 
 def _hit(score: float, **meta: Any) -> SearchHit:
     return SearchHit(chunk_id=1, content="本文", score=score, metadata=dict(meta))
+
+
+def _hit_full(score: float, *, content: str, **meta: Any) -> SearchHit:
+    """本文を指定できる版（content は metadata でなく SearchHit.content に入る）。"""
+    return SearchHit(chunk_id=1, content=content, score=score, metadata=dict(meta))
 
 
 @pytest.fixture
@@ -361,3 +369,415 @@ def test_suggestion_does_not_execute_anything(
     slack.upload_file.assert_not_called()
     # 検索以外の SQL は 1 本も走らない（配信は起きていない）。
     pg.list_by_metadata.assert_not_called()
+
+
+# ── 便A-1: クライアント不一致警告の誤爆停止 ───────────────────────────────────
+#
+# 本番実測（2026-09-02〜04）の警告 4 件を fixture 化する。いずれも利用者は正しい依頼を
+# しており、警告は誤り。本物の不一致（「資生堂の提案書」で top1 が花王の資料）は残す。
+
+FUKUDA_QUERY = "過去案件でユニークユーザー数について触れている案件の資料を出して"
+SUGINAKA_QUERY = "「（アース製薬）」の社内資料を最大3件。資料名・種別・日付・出典リンクを一覧で。"
+KAWAKAMI_QUERY = "ホーユー株式会社"
+NISHIKAWA_QUERY = "『エリスショーツ』の提案に必要だと思う情報を収集してください"
+SHIMADA_QUERY = "Slackにある、NewsTVの事例の動画の中から探して"
+
+
+# ── 段1: クエリ内クライアント検出の語境界（guard の asked 検出だけ）────────────
+
+
+def test_find_client_mention_strict_rejects_katakana_internal_match() -> None:
+    """「ユニークユーザー」の途中に語彙「ユニー」を当てない（福田 09-04 の真因）。"""
+    vocab = ["ユニー", "エスエス製薬"]
+    assert find_client_mention(FUKUDA_QUERY, vocab, strict=True) is None
+    # boost / sort が使う緩い経路は現行維持（再現率を落とさない）
+    assert find_client_mention(FUKUDA_QUERY, vocab, strict=False) == "ユニー"
+
+
+def test_find_client_mention_strict_prefers_longest_at_boundary() -> None:
+    assert find_client_mention("ユニーの2回目提案", ["ユニ", "ユニー"], strict=True) == "ユニー"
+    assert detect_query_client("ユニーの2回目提案", ["ユニ", "ユニー"]) == "ユニー"
+
+
+def test_find_client_mention_strict_treats_kanji_and_honorifics_as_boundary() -> None:
+    """漢字 2 文字規則は撤回: 「花王様」「花王向け」「株式会社明治」「電通に」は成立する。"""
+    assert (
+        find_client_mention("花王様限定の縦型ソリューションパッケージ", ["花王"], strict=True)
+        == "花王"
+    )
+    assert find_client_mention("花王向けの提案資料を1件探して", ["花王"], strict=True) == "花王"
+    assert find_client_mention("株式会社明治のR-1に提案していて", ["明治"], strict=True) == "明治"
+    assert find_client_mention("電通に提案した飲料系の資料", ["電通"], strict=True) == "電通"
+    assert (
+        find_client_mention("「（アース製薬）」の社内資料", ["アース製薬"], strict=True)
+        == "アース製薬"
+    )
+
+
+def test_find_client_mention_strict_ascii_needs_three_chars_and_boundary() -> None:
+    """「IR」は当てない（小倉 09-03）。英数字は英数字の隣で切れない。大文字小文字は畳む。"""
+    assert (
+        find_client_mention(
+            "IR関連の提案をしている資料を5つピックアップして", ["IR", "アルコニックス"], strict=True
+        )
+        is None
+    )
+    assert find_client_mention("NGKXの資料", ["NGK"], strict=True) is None
+    assert find_client_mention("NGK の資料", ["NGK"], strict=True) == "NGK"
+    assert find_client_mention("somarcaの資料", ["SOMARCA"], strict=True) == "SOMARCA"
+
+
+def test_find_client_mention_strict_uses_legal_suffix_stripped_surface() -> None:
+    """語彙「株式会社資生堂」はクエリ「資生堂の提案書」に当たる（法人格を剥いだ表層）。"""
+    assert (
+        find_client_mention("資生堂の提案書", ["株式会社資生堂"], strict=True) == "株式会社資生堂"
+    )
+    assert find_client_mention("Aの資料", ["A"], strict=True) is None
+
+
+def test_find_client_mention_does_not_crash_on_regex_metacharacters() -> None:
+    """DB 由来の語彙に正規表現メタ文字があっても落ちない（str.find 実装）。"""
+    vocab = ["(株)P&G+", "A[B]", "C++", ")("]
+    assert find_client_mention("P&G+の資料", vocab, strict=True) == "(株)P&G+"
+    assert find_client_mention("C++の資料", vocab, strict=True) == "C++"
+    assert find_client_mention("何かの資料", vocab, strict=True) is None
+    assert find_client_mention("何かの資料", vocab, strict=False) is None
+
+
+def test_find_client_mention_strict_is_fast_for_large_vocabulary() -> None:
+    import time as _time
+
+    vocab = [f"クライアント{i}株式会社" for i in range(1000)] + ["ユニー"]
+    query = "ユニーの提案書と" + "ユニークユーザー数の資料" * 4
+    started = _time.perf_counter()
+    for _ in range(5):
+        assert find_client_mention(query, vocab, strict=True) == "ユニー"
+    assert (_time.perf_counter() - started) / 5 < 0.5  # 1 クエリあたり（CI 余裕込み）
+
+
+# ── 段2: ヒット側判定（cls_project / client_name / title / entities / 別名）───────
+
+
+def test_alias_seed_is_symmetric_and_static() -> None:
+    assert aliases("アース製薬") == {"ハビットプロ"}
+    assert aliases("ハビットプロ") == {"アース製薬"}
+    assert aliases("エリスショーツ") == {"大王製紙"}  # キー照合は双方向部分一致
+    assert aliases("花王") == {"花王グループカスタマーマーケティング"}
+    # 競合ペアは seed に無い（title / cls_entities の共起から作らない）
+    assert "資生堂" not in aliases("花王")
+    assert aliases("資生堂") == set()
+    assert aliases(None) == set()
+
+
+def test_guard_silences_when_title_names_the_asked_client() -> None:
+    top = _hit(0.8, cls_project="ハビットプロ", title="提案_アース製薬様_ハビットプロ.pptx")
+    assert explain_client_guard("アース製薬", top) == ("title", False)
+    header = build_result_header(
+        query=SUGINAKA_QUERY, hits=[top], weak_threshold=0.3, query_client="アース製薬"
+    )
+    assert header == ""
+
+
+def test_guard_silences_via_static_alias_seed() -> None:
+    """title も本文も無くても、seed（アース製薬↔ハビットプロ）で沈黙する。"""
+    top = _hit(0.8, cls_project="ハビットプロ")
+    assert explain_client_guard("アース製薬", top) == ("alias", False)
+    assert (
+        build_result_header(
+            query=SUGINAKA_QUERY, hits=[top], weak_threshold=0.3, query_client="アース製薬"
+        )
+        == ""
+    )
+    # 対称: 「ハビットプロの資料」で top1 が cls_project=アース製薬
+    assert explain_client_guard("ハビットプロ", _hit(0.8, cls_project="アース製薬")) == (
+        "alias",
+        False,
+    )
+
+
+def test_guard_silences_hoyu_somarca_via_entities_or_seed() -> None:
+    top = _hit(0.8, cls_project="SOMARCA", cls_entities="ホーユー,SOMARCA")
+    assert explain_client_guard("ホーユー株式会社", top) == ("entities", False)
+    assert (
+        build_result_header(
+            query=KAWAKAMI_QUERY, hits=[top], weak_threshold=0.3, query_client="ホーユー株式会社"
+        )
+        == ""
+    )
+    # entities が無くても seed で沈黙
+    assert explain_client_guard("ホーユー株式会社", _hit(0.8, cls_project="SOMARCA")) == (
+        "alias",
+        False,
+    )
+
+
+def test_guard_entities_gate_can_be_switched_off() -> None:
+    """SEARCH_CLIENT_GUARD_ENTITIES=false 相当（use_entities=False）では entities を見ない。"""
+    top = _hit(0.8, cls_project="ABC商事", cls_entities="ホーユー")
+    assert explain_client_guard("ホーユー", top, use_entities=True) == ("entities", False)
+    assert explain_client_guard("ホーユー", top, use_entities=False) == ("none", True)
+
+
+def test_guard_silences_elis_shorts_via_alias_key_match() -> None:
+    """asked が「エリスショーツ」でも seed キー「エリス」が引ける（exact 照合ではない）。"""
+    top = _hit(0.8, cls_project="大王製紙株式会社")
+    assert explain_client_guard("エリスショーツ", top) == ("alias", False)
+    assert explain_client_guard("エリス", top) == ("alias", False)
+
+
+def test_guard_ignores_chunk_content_and_keeps_real_mismatch() -> None:
+    """本文に asked が何回出ても沈黙しない（content 判定を戻すと赤）。"""
+    top = _hit_full(0.8, content="競合の資生堂は…資生堂の施策…資生堂は", cls_project="花王")
+    assert explain_client_guard("資生堂", top) == ("none", True)
+    header = build_result_header(
+        query="資生堂の提案書", hits=[top], weak_threshold=0.3, query_client="資生堂"
+    )
+    assert header == MISMATCH_HEAD + "花王）。"
+    # 別名の無い取引先も同様（本文 2 回でも沈黙しない）
+    other = _hit_full(0.8, content="エリス エリス", cls_project="ABC商事")
+    assert explain_client_guard("エリス", other) == ("none", True)
+
+
+def test_guard_undetermined_cases_never_warn() -> None:
+    assert explain_client_guard("A", _hit(0.8, cls_project="花王")) == ("undetermined", False)
+    assert explain_client_guard("資生堂", _hit(0.8, cls_project="A")) == ("undetermined", False)
+    assert explain_client_guard("資生堂", _hit(0.8)) == ("unknown_hit", False)
+
+
+def test_guard_does_not_synthesize_competitor_alias_from_title_cooccurrence() -> None:
+    """(花王, 資生堂) を title 共起から作らない。title に無い競合名は本物の不一致のまま。"""
+    kao_doc = _hit(0.8, cls_project="花王", title="花王_提案")
+    assert explain_client_guard("資生堂", kao_doc) == ("none", True)
+    assert "資生堂" not in aliases("花王") and "花王" not in aliases("資生堂")
+
+
+def test_decision_records_reason_without_strings_from_query_or_title() -> None:
+    decision: dict[str, Any] = {}
+    build_result_header(
+        query=SUGINAKA_QUERY,
+        hits=[_hit(0.8, cls_project="ハビットプロ", title="提案_アース製薬様_ハビットプロ.pptx")],
+        weak_threshold=0.3,
+        query_client="アース製薬",
+        decision=decision,
+    )
+    assert decision == {"asked_source": "caller", "matched_via": "title", "warned": False}
+    detected: dict[str, Any] = {}
+    build_result_header(
+        query="資生堂の提案書",
+        hits=[_hit(0.8, client_name="花王"), _hit(0.7, client_name="資生堂")],
+        weak_threshold=0.3,
+        decision=detected,
+    )
+    assert detected == {"asked_source": "hits", "matched_via": "none", "warned": True}
+    self_org: dict[str, Any] = {}
+    build_result_header(
+        query=SHIMADA_QUERY,
+        hits=[_hit(0.8, client_name="花王")],
+        weak_threshold=0.3,
+        query_client="NewsTV",
+        decision=self_org,
+    )
+    assert self_org == {"asked_source": "caller", "matched_via": "self_org", "warned": False}
+
+
+# ── run レベル（本番実例 4 件 + 自社名 + 本物の不一致維持）────────────────────
+
+
+def _pgvector_new_schema(hits: list[SearchHit], *, vocab: list[str] | None = None) -> MagicMock:
+    mock = _pgvector(hits, vocab=vocab)
+    mock.search_similar_new_schema.return_value = hits
+    mock.search_drive_by_client_names.return_value = []
+    return mock
+
+
+def _skill_new_schema(bedrock: MagicMock, pgvector: MagicMock) -> SearchSkill:
+    return SearchSkill(
+        bedrock=bedrock, pgvector=pgvector, embedder=FakeEmbedder(), use_new_schema=True
+    )
+
+
+def test_run_fukuda_unique_users_query_gets_no_client_warning(fake_bedrock: MagicMock) -> None:
+    """福田 09-04: クライアント無指定の依頼に「ユニー」誤検出で警告が付いていた。"""
+    pg = _pgvector(
+        [_hit(0.8, cls_project="エスエス製薬株式会社")], vocab=["ユニー", "エスエス製薬"]
+    )
+    out = _skill(fake_bedrock, pg).run(input=SearchInput(query=FUKUDA_QUERY), ctx=SkillContext())
+    assert not out.answer.startswith("⚠️ ご指定")
+
+
+def test_run_suginaka_filter_client_with_brackets_is_normalized_and_silent(
+    fake_bedrock: MagicMock,
+) -> None:
+    """杉中 09-03: filter_client=「（アース製薬）」→ ILIKE は「アース製薬」で引き、
+    top1 が cls_project=ハビットプロ（同社ブランド）でも警告しない。"""
+    pg = _pgvector_new_schema([_hit(0.8, cls_project="ハビットプロ")], vocab=[])
+    out = _skill_new_schema(fake_bedrock, pg).run(
+        input=SearchInput(query=SUGINAKA_QUERY, filter_client="（アース製薬）"),
+        ctx=SkillContext(),
+    )
+    assert not out.answer.startswith("⚠️")
+    first = pg.search_similar_new_schema.call_args_list[0]
+    assert first.kwargs["metadata_contains"] == {"__client__": "アース製薬"}
+
+
+def test_run_kawakami_hoyu_query_top_somarca_is_silent(fake_bedrock: MagicMock) -> None:
+    """川上 09-02: 「ホーユー株式会社」→ top1 SOMARCA（ホーユーのブランド）。"""
+    pg = _pgvector([_hit(0.8, cls_project="SOMARCA")], vocab=["ホーユー", "SOMARCA"])
+    out = _skill(fake_bedrock, pg).run(input=SearchInput(query=KAWAKAMI_QUERY), ctx=SkillContext())
+    assert not out.answer.startswith("⚠️")
+
+
+def test_run_nishikawa_elis_shorts_top_daio_is_silent(fake_bedrock: MagicMock) -> None:
+    """西河 09-02: filter_client=エリスショーツ → top1 大王製紙株式会社（エリスは同社ブランド）。"""
+    pg = _pgvector(
+        [_hit(0.8, cls_project="大王製紙株式会社")], vocab=["エリス", "大王製紙株式会社"]
+    )
+    out = _skill(fake_bedrock, pg).run(
+        input=SearchInput(query=NISHIKAWA_QUERY, filter_client="エリスショーツ"),
+        ctx=SkillContext(),
+    )
+    assert not out.answer.startswith("⚠️")
+
+
+def test_run_self_org_name_in_query_is_not_a_client(fake_bedrock: MagicMock) -> None:
+    """嶋田 08-28: 自社プロダクト名 NewsTV はクライアント指定ではない（run レベル固定）。"""
+    pg = _pgvector([_hit(0.8, client_name="花王")], vocab=["NewsTV", "花王"])
+    out = _skill(fake_bedrock, pg).run(input=SearchInput(query=SHIMADA_QUERY), ctx=SkillContext())
+    assert not out.answer.startswith("⚠️")
+
+
+def test_run_real_mismatch_still_warns_even_if_content_mentions_asked(
+    fake_bedrock: MagicMock,
+) -> None:
+    """本物の不一致は残す: 「資生堂の提案書」で top1 が花王資料（本文に資生堂が何度出ても）。"""
+    top = _hit_full(0.81, content="競合の資生堂は…資生堂…資生堂", client_name="花王")
+    pg = _pgvector([top], vocab=["花王", "資生堂"])
+    out = _skill(fake_bedrock, pg).run(
+        input=SearchInput(query="資生堂の提案書ある？"), ctx=SkillContext()
+    )
+    assert out.answer.startswith(MISMATCH_HEAD + "花王）。")
+
+
+def test_run_entities_env_gate_off_disables_entities_route(
+    fake_bedrock: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hits = [_hit(0.8, cls_project="ABC商事", cls_entities="ホーユー")]
+    monkeypatch.setenv("SEARCH_CLIENT_GUARD_ENTITIES", "false")
+    out_off = _skill(fake_bedrock, _pgvector(hits, vocab=["ホーユー"])).run(
+        input=SearchInput(query="ホーユーの資料"), ctx=SkillContext()
+    )
+    assert out_off.answer.startswith(MISMATCH_HEAD + "ABC商事）。")
+    monkeypatch.delenv("SEARCH_CLIENT_GUARD_ENTITIES", raising=False)  # 既定 ON
+    out_on = _skill(fake_bedrock, _pgvector(hits, vocab=["ホーユー"])).run(
+        input=SearchInput(query="ホーユーの資料"), ctx=SkillContext()
+    )
+    assert not out_on.answer.startswith("⚠️")
+
+
+def test_match_client_lenient_path_keeps_boost_recall(fake_bedrock: MagicMock) -> None:
+    """boost / sort の緩い substring は現行維持（strict は guard の asked 検出だけ）。"""
+    skill = _skill(fake_bedrock, _pgvector([], vocab=["ユニー", "エリス"]))
+    conn = MagicMock()
+    assert skill._match_client(FUKUDA_QUERY, conn, "r1") == "ユニー"
+    assert skill._match_client(FUKUDA_QUERY, conn, "r1", strict=True) is None
+    assert skill._match_client("エリスショーツの提案", conn, "r1") == "エリス"
+    assert skill._match_client("エリスショーツの提案", conn, "r1", strict=True) is None
+
+
+def test_client_vocabulary_cache_is_keyed_by_groups_and_role(fake_bedrock: MagicMock) -> None:
+    """語彙キャッシュは (user_groups, user_role) 単位（利用者横断の共有をやめる）＋TTL。"""
+    pg = _pgvector([_hit(0.8, client_name="花王")], vocab=["花王"])
+    skill = _skill(fake_bedrock, pg)
+    ctx_a = SkillContext(metadata={"user_groups": ["sales"], "user_role": "member"})
+    ctx_b = SkillContext(metadata={"user_groups": ["exec"], "user_role": "admin"})
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
+    assert pg.list_client_names.call_count == 1  # 同じキーは再取得しない
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_b)
+    assert pg.list_client_names.call_count == 2  # 別キーは別取得
+    skill._client_vocab_ttl_s = 0.0
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
+    assert pg.list_client_names.call_count == 3  # TTL 切れで再取得
+
+
+def test_client_vocabulary_failure_is_cached_and_logged_with_exc_type_only(
+    fake_bedrock: MagicMock,
+) -> None:
+    from structlog.testing import capture_logs
+
+    pg = _pgvector([_hit(0.8, client_name="花王")], vocab=[])
+    pg.list_client_names.side_effect = RuntimeError("SELECT ... FROM documents failed: 秘密")
+    skill = _skill(fake_bedrock, pg)
+    with capture_logs() as logs:
+        out = skill.run(input=SearchInput(query="資生堂の提案書"), ctx=SkillContext())
+        skill.run(input=SearchInput(query="資生堂の提案書"), ctx=SkillContext())
+    assert not out.answer.startswith("⚠️ ご指定")  # 語彙が引けなければ警告しない（fail-open）
+    assert pg.list_client_names.call_count == 1  # 失敗も固定（毎リクエスト再試行しない）
+    failed = [e for e in logs if e.get("event") == "search_client_vocab_failed"]
+    assert len(failed) == 1
+    assert failed[0]["exc_type"] == "RuntimeError"
+    assert "秘密" not in repr(failed[0]) and "SELECT" not in repr(failed[0])
+
+
+def test_client_guard_decision_log_contract(fake_bedrock: MagicMock) -> None:
+    """search_client_guard_decision は asked 非 None の全リクエストで出る。kwargs は固定 4 つ。
+    クエリ原文・資料名・クライアント名は載せない（G8）。"""
+    from structlog.testing import capture_logs
+
+    title = "提案_アース製薬様_ハビットプロ.pptx"
+    pg = _pgvector([_hit(0.8, cls_project="ハビットプロ", title=title)], vocab=["アース製薬"])
+    skill = _skill(fake_bedrock, pg)
+    with capture_logs() as logs:
+        skill.run(
+            input=SearchInput(query=SUGINAKA_QUERY, filter_client="アース製薬"),
+            ctx=SkillContext(request_id="req-guard-1"),
+        )
+        skill.run(
+            input=SearchInput(query="アース製薬の資料"), ctx=SkillContext(request_id="req-guard-2")
+        )
+        skill.run(input=SearchInput(query="何かの資料"), ctx=SkillContext(request_id="req-guard-3"))
+    events = [e for e in logs if e.get("event") == "search_client_guard_decision"]
+    assert [e["request_id"] for e in events] == ["req-guard-1", "req-guard-2"]  # 指定なしは出ない
+    for e in events:
+        keys = set(e) - {"event", "log_level", "skill", "user_id"}
+        assert keys == {"request_id", "asked_source", "matched_via", "warned"}
+        assert e["matched_via"] == "title" and e["warned"] is False
+        blob = repr(e)
+        assert SUGINAKA_QUERY not in blob and title not in blob and "アース製薬" not in blob
+    assert events[0]["asked_source"] == "filter"
+    assert events[1]["asked_source"] == "vocab"
+    # 警告が無いので search_result_guard_header は出ない（既存の契約）
+    assert not [e for e in logs if e.get("event") == "search_result_guard_header"]
+
+
+def test_knowledge_deliver_fukuda_initial_comment_has_no_client_warning(
+    fake_bedrock: MagicMock,
+) -> None:
+    """福田 09-04 の実表示面: knowledge_deliver のファイルコメントに誤警告が載らない。"""
+    from unittest.mock import AsyncMock
+
+    from teamagent.skills.knowledge_deliver.schema import KnowledgeDeliverInput
+    from teamagent.skills.knowledge_deliver.skill import KnowledgeDeliverSkill
+
+    top = _hit(
+        0.8,
+        cls_project="エスエス製薬株式会社",
+        source_type="gdrive",
+        source_uri="gdrive://F1",
+        title="エスエス製薬_提案.pdf",
+    )
+    search = _skill(fake_bedrock, _pgvector([top], vocab=["ユニー", "エスエス製薬"]))
+    slack = MagicMock()
+    slack.lookup_user_id_by_email = AsyncMock(return_value="U1")
+    slack.open_dm = AsyncMock(return_value="D1")
+    slack.upload_file = AsyncMock(return_value=True)
+    gdrive = MagicMock()
+    gdrive.download_file_bytes.return_value = b"%PDF-1.4 fake"
+    out = KnowledgeDeliverSkill(search=search, slack=slack, gdrive=gdrive).run(
+        KnowledgeDeliverInput(query=FUKUDA_QUERY),
+        SkillContext(metadata={"user_email": "u@vectorinc.co.jp"}),
+    )
+    assert out.delivered_count == 1
+    comment = slack.upload_file.await_args.kwargs.get("initial_comment") or ""
+    assert not comment.startswith("⚠️ ご指定")
+    assert not out.answer.startswith("⚠️ ご指定")
