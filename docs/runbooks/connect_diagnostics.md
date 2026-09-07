@@ -234,6 +234,34 @@ fields @timestamp, @message
 `before_tool_call` の ctx には `senderId` が無い（上流 2026.7.1 の実測形状）ため、そこでは `sender:absent` になる。
 `W…` の切り分けは `bind_agent_run` 側の 1 行で行う。
 
+### 「連携」に 2 通返ったときの引き方（2026-09-07・TD:46 の根治）
+
+2026-09-04 17:11 JST: 保証経路が delivered なのにモデル応答も届き 2 通になったが、抑止の否定経路の行が
+1 本も無く「行が無い」しか証拠にできなかった。真因は上流の発火順（`agent_end` → `reply_payload_sending`）で
+抑止の台帳が消えていたこと（設計書 §12-11）。以後、抑止した／しなかった理由は **hook × run × 理由ごとに 1 回・TRACE 非依存**で出る。
+
+```
+fields @timestamp, @message
+| filter @message like /teamagent-caller-identity:/
+| filter @message like /connect guarantee|connect suppression|connect zero-tool revise|bind_agent_run|hook first_fired/
+| sort @timestamp asc
+| limit 200
+```
+
+| 出た行 | 読み方 |
+|---|---|
+| `connect guarantee suppressed model reply runId=… reason=already_delivered_by_guarantee rule=whole\|stripped delivered=true …` | 抑止した。利用者に届くのは保証の 1 通（正常） |
+| `connect suppression skipped runId=… reason=no_run_binding …` | この run に束縛された受信が無い。同時刻の `bind_agent_run rejected …` を見る（束縛失敗）。無ければ TTL 超過 |
+| `connect suppression skipped runId=… reason=not_delivered connect_request=true …` | 保証がまだ／結局配信していない。`connect guarantee invocation=… outcome=delivered\|post_failed\|skipped` を見る。`post_failed` ならモデル応答が唯一の返事（設計どおり無言にしない） |
+| `connect suppression skipped runId=… reason=rule_disallows rule=leading_line\|leading_phrase …` | 曖昧な形（「連携＋別依頼」）。設計どおり保証 1 通＋モデル 1 通 |
+| `connect suppression skipped runId=… reason=not_connect_request …` | 連携依頼ではない通常の会話（抑止の対象外） |
+| `connect suppression hook=reply_payload_sending runId=… outcome=skipped reason=run_mismatch` | event/ctx の runId が食い違う（上流の形が変わった疑い） |
+| `connect zero-tool revise runId=… outcome=skipped reason=model_called_tool tool_calls=N …` | 層2 は不介入（モデルが `oauth_connect` を自ら呼んだ）。mcp の `oauth_connect_url_issued` が 2 回ならこれ。token 2 個目は本設計では止めない |
+| `connect zero-tool revise runId=… outcome=skipped reason=already_delivered_by_guarantee …` | 層2 は不介入（保証が配信済み・再要求しない） |
+| （上のどれも無い） | `reply_payload_sending` / `before_agent_finalize` 自体が呼ばれていない。`hook first_fired name=…` の一覧と突き合わせる |
+
+`id_shape` は §「`id_shape` の読み方」と同じ。`connect_request` / `rule` / `delivered` は真偽と規則名だけで本文は載らない。
+
 ## 関連
 
 - コード: `src/teamagent/connect_diagnostics.py`（S/I/L/T のコード表の正）、`infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`（**P コード表の正**）、`src/teamagent/connect_web/app.py`（`_connect_failure`）、`src/teamagent/mcp_gateway/server.py`（`_identity_rejected`）、`src/teamagent/skills/oauth_connect/skill.py`（`_diag`）

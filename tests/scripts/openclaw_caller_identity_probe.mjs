@@ -599,6 +599,43 @@ function deliverPayload(handlers, payload, { runId = "run-1", ctxRunId = null } 
   );
 }
 
+// agent_end（selection-8ixiqbew.js:14591-14617 の形）。event は messages/success/durationMs、
+// ctx は runId ＋ agent hook の channel/identity fields。上流の hook-runner は
+// withAgentRunId が ctx.runId を event.runId へ複写する（hook-runner-global:573-579,638-640）。
+//
+// ⚠️ 本番では **agent_end が reply_payload_sending より先に発火する**（2026-09-04 17:11 JST 実測・
+// TD:46）。runEmbeddedAttempt が finalize の後に agent_end を起動し（selection:14591）、
+// 最終応答の配信＝reply_payload_sending は run が返った後に dispatch が行う
+// （dispatch-V82RCNJs.js:1994-1996 → :1716 sendFinalReply → :2533）。
+// 以前の probe は agent_end を一度も呼ばずに配信していたため、この順序で消える台帳に
+// 依存した抑止が緑のまま本番で効かなかった。以後、配信のシナリオは本番の順で呼ぶ。
+function endRun(handlers, runId = "run-1") {
+  handlers.get("agent_end")(
+    { runId, messages: [], success: true, durationMs: 1 },
+    {
+      runId,
+      agentId: "teamagent",
+      sessionKey: DM_SESSION_KEY,
+      sessionId: "sid",
+      trigger: "user",
+      ...agentCtxFields(USER),
+    },
+  );
+}
+
+// 判定行（抑止した／しなかった理由）を infos から抜く。runId 単位・理由つき。
+function connectDecisionLines(infos, runId = "run-1") {
+  const lines = infos.filter((m) => m.includes(`runId=${runId}`));
+  const reasonOf = (prefix) =>
+    lines.find((m) => m.includes(prefix))?.match(/reason=(\S+)/u)?.[1] ?? null;
+  return {
+    finalizeSkipReason: reasonOf("connect zero-tool revise runId="),
+    suppressionSkipReason: reasonOf("connect suppression skipped runId="),
+    suppressedReason: reasonOf("connect guarantee suppressed model reply runId="),
+    lines,
+  };
+}
+
 // 層1 のシナリオ。message_received → before_agent_reply。
 async function deterministicScenario({
   content,
@@ -743,8 +780,10 @@ function zeroToolConnectScenario({
   repeat = 1,
   deliverPayloads = [],
   deliverCtxRunId = null,
+  // 本番の順（finalize → agent_end → reply_payload_sending）で配信するか。
+  agentEndBeforeDelivery = false,
 } = {}) {
-  const { handlers, logs } = makeConnectPlugin({});
+  const { handlers, logs, infos } = makeConnectPlugin({});
   receiveDm(handlers, content);
   startRun(handlers);
   const toolBlocked = toolName ? callTool(handlers, toolName) : null;
@@ -752,6 +791,7 @@ function zeroToolConnectScenario({
   for (let i = 0; i < repeat; i += 1) {
     results.push(finalizeRun(handlers, { lastAssistantMessage }));
   }
+  if (agentEndBeforeDelivery) endRun(handlers);
   const deliveries = deliverPayloads.map((payload) =>
     deliverPayload(handlers, payload, { ctxRunId: deliverCtxRunId }),
   );
@@ -765,7 +805,10 @@ function zeroToolConnectScenario({
     maxAttempts: last?.retry?.maxAttempts ?? null,
     reason: last?.reason ?? null,
     deliveries,
+    agentEndBeforeDelivery,
+    decision: connectDecisionLines(infos),
     logs,
+    infos,
   };
 }
 
@@ -1578,23 +1621,68 @@ async function contentAbsentReport() {
 // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────────
 // 実測ログ: 保証経路が outcome=delivered で 1 通配信したあと、層2 の revise を経て
 // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
-// 本番の並びをそのまま再現する:
-//   message_received（保証経路が配信）→ before_model_resolve → before_agent_finalize
-//   → reply_payload_sending（モデルの最終応答）
-async function suppressionScenario({ slackMode = "ok", content = "連携" } = {}) {
+//
+// 本番の並び（2026-09-04 17:11 JST・TD:46 の実測ログ）をそのまま再現する:
+//   message_received（保証経路が配信開始）→ before_agent_reply（層1 は already_attempted で降りる）
+//   → before_model_resolve（run 束縛）→ 保証 delivered → [before_tool_call: モデルが oauth_connect を
+//   自ら呼ぶ] → before_agent_finalize → **agent_end** → reply_payload_sending（モデルの最終応答）
+//
+// ⚠️ agent_end が reply_payload_sending より **先** に来るのが要点。以前の probe は agent_end を
+// 呼ばずに配信していたため、agent_end が掃除する台帳に依存した抑止が緑のまま本番で効かなかった
+// （実測: guarantee delivered なのに cancel されず 2 通・suppressed の行も skipped の行も無い）。
+async function suppressionScenario({
+  slackMode = "ok",
+  content = "連携",
+  // モデルが oauth_connect を自ら呼ぶ（本番 08:11:06.968 の before_tool_call）。
+  modelCallsTool = false,
+  // 層1（before_agent_reply）も呼ぶ（本番 08:11:00.947）。保証側が旗を取っているので降りる。
+  layer1 = false,
+  // agent_end を配信の前に呼ぶ（本番の順）。false は旧 probe の順（配信後に agent_end）。
+  agentEndBeforeDelivery = true,
+  // run を束縛する（before_model_resolve を呼ぶ）。false は束縛失敗の再現。
+  bindRun = true,
+} = {}) {
   const plugin = makeGuaranteePlugin({ slackMode });
   const { handlers } = plugin;
-  await notifyInbound(handlers, content);
-  await plugin.settle();
-  startRun(handlers);
-  const finalize = finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
-  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  const hookOrder = [];
+  const step = async (name, fn) => {
+    hookOrder.push(name);
+    return fn();
+  };
+  await step("message_received", () => notifyInbound(handlers, content));
+  let layer1Result = null;
+  if (layer1) {
+    layer1Result = await step("before_agent_reply", () =>
+      handlers.get("before_agent_reply")({ cleanedBody: content }, beforeAgentReplyCtx()),
+    );
+  }
+  if (bindRun) await step("before_model_resolve", () => startRun(handlers));
+  await step("guarantee_settled", () => plugin.settle());
+  let toolBlocked = null;
+  if (modelCallsTool) {
+    toolBlocked = await step("before_tool_call", () =>
+      callTool(handlers, "teamagent__oauth_connect"),
+    );
+  }
+  const finalize = await step("before_agent_finalize", () =>
+    finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY }),
+  );
+  if (agentEndBeforeDelivery) await step("agent_end", () => endRun(handlers));
+  const delivery = await step("reply_payload_sending", () =>
+    deliverPayload(handlers, { text: SELF_MADE_REPLY }),
+  );
+  if (!agentEndBeforeDelivery) await step("agent_end", () => endRun(handlers));
   const replyCancelled = delivery?.cancel === true;
   return {
+    hookOrder,
     // 保証経路が Slack へ投稿した通数。
     guaranteePosts: plugin.posts.length,
-    // oauth_connect の呼び出し回数＝発行された state token の数。
+    // plugin 自身が mcp へ発行した oauth_connect（＝保証・層1 由来の state token 数）。
+    // モデルが自ら呼ぶ tool call はハーネス側で実行されるため、この数には現れない。
     toolCallCount: plugin.mcpCalls.filter((c) => c.method === "tools/call").length,
+    layer1Handled: layer1Result?.handled === true,
+    // モデルの oauth_connect 呼び出しが門で block されなかったか（fail-closed の門は触らない）。
+    modelToolBlocked: toolBlocked,
     // 層2 が「oauth_connect を呼べ」と再要求したか（＝もう 1 個 token を出させるか）。
     layer2Revised: finalize?.action === "revise",
     // モデル側の最終応答が落とされたか。
@@ -1605,6 +1693,8 @@ async function suppressionScenario({ slackMode = "ok", content = "連携" } = {}
     suppressionLogged: plugin.infos.some((m) =>
       m.includes("suppressed model reply"),
     ),
+    // 抑止した／しなかった理由の行（否定経路も必ず 1 行出る）。
+    decision: connectDecisionLines(plugin.infos),
     logs: plugin.logs,
     infos: plugin.infos,
   };
@@ -1621,6 +1711,7 @@ async function suppressionInFlightScenario() {
   await notifyInbound(handlers, "連携");
   startRun(handlers);
   finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  endRun(handlers);
   const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
   const replyCancelled = delivery?.cancel === true;
   await plugin.settle();
@@ -1629,6 +1720,8 @@ async function suppressionInFlightScenario() {
     // 配信途中で抑止しないので、利用者には最低 1 通は必ず届く。
     modelReplyDelivered: !replyCancelled,
     guaranteePosts: plugin.posts.length,
+    decision: connectDecisionLines(plugin.infos),
+    infos: plugin.infos,
   };
 }
 
@@ -1645,6 +1738,10 @@ async function suppressionByRuleReport() {
     leading_line_other_request: "連携\n今日の予定を教えて",
     // (c) 先頭行のみ一致・後続行は未知の定型 → これも確度は低いので抑止しない。
     leading_line_unknown_boilerplate: "連携\n-- Acme Slack Bridge --",
+    // (d) 改行が落ちて 1 行になった「連携＋別依頼」（2026-09-07・送信経路で改行が落ちる形）。
+    //     トリガーは立てる（リンクは出す）が、別依頼への回答は消さない。
+    leading_phrase_other_request: "連携 今日の予定を教えて",
+    leading_phrase_comma: "連携して、あと明日の予定も",
   };
   const out = {};
   for (const [label, content] of Object.entries(cases)) {
@@ -1656,6 +1753,8 @@ async function suppressionByRuleReport() {
       // 利用者が「自分の別の依頼への回答」を受け取れたか。
       modelAnswerDelivered: !r.replyCancelled,
       userVisibleMessages: r.userVisibleMessages,
+      // 抑止しなかった理由（曖昧な規則では rule_disallows が必ず出る）。
+      suppressionSkipReason: r.decision.suppressionSkipReason,
     };
   }
   return out;
@@ -1676,8 +1775,9 @@ async function suppressionAfterBindThenContentScenario() {
   // ② 同じ受信の content つき再通知（bindRun の複写経路を通る）。
   await notifyInbound(handlers, "連携", { runId: "run-1" });
   await plugin.settle();
-  // ③ モデル経路の最終応答。
+  // ③ モデル経路の最終応答（本番の順: finalize → agent_end → 配信）。
   finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  endRun(handlers);
   const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
   const replyCancelled = delivery?.cancel === true;
   return {
@@ -1689,13 +1789,53 @@ async function suppressionAfterBindThenContentScenario() {
   };
 }
 
+// ── agent_end が先に来ても台帳が生き残ること（2026-09-07・TD:46 の根治）───────────
+// 本番と同じ順（finalize → agent_end → reply_payload_sending）で、抑止用の台帳だけが
+// agent_end を生き延び、署名の門が使う台帳（ingressByRun）は従来どおり掃除されること。
+// 後者は「agent_end の後に同じ run の tool call が来ても署名しない」＝fail-closed の門を
+// 緩めていない証拠として固定する。
+async function suppressionLedgerSurvivesAgentEnd() {
+  const plugin = makeGuaranteePlugin({});
+  const { handlers } = plugin;
+  await notifyInbound(handlers, "連携");
+  startRun(handlers);
+  await plugin.settle();
+  finalizeRun(handlers, { lastAssistantMessage: SELF_MADE_REPLY });
+  endRun(handlers);
+  // agent_end の後の tool call は署名されない（門は緩んでいない）。
+  const toolBlockedAfterAgentEnd = callTool(handlers, "teamagent__search");
+  const delivery = deliverPayload(handlers, { text: SELF_MADE_REPLY });
+  // 分割 payload（2 通目）も同じ理由で落ちる。判定行は run × 理由で 1 回だけ。
+  const second = deliverPayload(handlers, { text: "（続き）" });
+  return {
+    replyCancelled: delivery?.cancel === true,
+    secondPayloadCancelled: second?.cancel === true,
+    toolBlockedAfterAgentEnd,
+    decisionLineCount: plugin.infos.filter((m) =>
+      m.includes("connect guarantee suppressed model reply runId=run-1"),
+    ).length,
+    guaranteePosts: plugin.posts.length,
+  };
+}
+
 async function suppressionReport() {
   return {
     by_rule: await suppressionByRuleReport(),
     bind_before_content: await suppressionAfterBindThenContentScenario(),
     in_flight: await suppressionInFlightScenario(),
-    // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個。
+    // ① 保証経路が配信成功 → 利用者に届くのは 1 通・token 1 個（本番の順: agent_end → 配信）。
     delivered: await suppressionScenario({}),
+    // ①' 本番実測 2026-09-04 17:11 JST（TD:46）の並びをそのまま:
+    //     層1 skip → run 束縛 → 保証 delivered → モデルが oauth_connect を自ら呼ぶ →
+    //     finalize（tool_calls=1 で層2 は不介入）→ agent_end → reply_payload_sending。
+    //     旧実装ではここで cancel が返らず 2 通届いていた。
+    production_order: await suppressionScenario({ modelCallsTool: true, layer1: true }),
+    // ①'' 旧 probe の順（配信の後に agent_end）でも抑止は効く（順序に依存しない）。
+    legacy_order: await suppressionScenario({ agentEndBeforeDelivery: false }),
+    // ①''' run が束縛できなかった → 抑止は効かない（安全側の 2 通）が、理由は必ず出る。
+    unbound_run: await suppressionScenario({ bindRun: false }),
+    // ①'''' 抑止用台帳は agent_end を生き延び、署名の門の台帳は生き延びない。
+    ledger_after_agent_end: await suppressionLedgerSurvivesAgentEnd(),
     // ② 保証経路が配信失敗 → 従来どおりモデル経路が返す（無言にしない）。
     post_failed: await suppressionScenario({ slackMode: "post_fails" }),
     // ③ 保証経路が未発火（連携依頼ではない）→ モデル経路は一切影響を受けない。
@@ -2452,6 +2592,15 @@ const report = {
     content: "連携",
     repeat: 2,
     deliverPayloads: [{ text: SELF_MADE_REPLY }, { text: "（続き）" }],
+  }),
+  // 層3 ①' 本番の順（finalize → **agent_end** → reply_payload_sending）でも置換されること。
+  //     層3 の武装台帳（connectFallbackByRun）は agent_end で消さない設計だが、
+  //     以前の probe は agent_end を呼んでいなかったので、それが検証されていなかった。
+  connect_zero_tool_fallback_after_agent_end: zeroToolConnectScenario({
+    content: "連携",
+    repeat: 2,
+    deliverPayloads: [{ text: SELF_MADE_REPLY }, { text: "（続き）" }],
+    agentEndBeforeDelivery: true,
   }),
   // 層3 ②event と ctx の runId が食い違う配信には触らない。
   connect_zero_tool_fallback_run_mismatch: zeroToolConnectScenario({

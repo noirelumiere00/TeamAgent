@@ -66,6 +66,9 @@ const CONNECT_FABRICATION_INSTRUCTION = [
 //   層2: before_agent_finalize で「0 tool call × 短い連携依頼」を revise で再パスさせる。
 //   層3: 再パス後も 0 tool call なら reply_payload_sending で定型文に置換する
 //        （event.runId / ctx.runId が agent run と同じ id で渡る: dispatch:2528-2545）。
+//        ⚠️ reply_payload_sending は **agent_end の後** に走る（本番実測 2026-09-04 17:11 JST・
+//        上流実物 selection-8ixiqbew.js:14591 / dispatch-V82RCNJs.js:1994-1996,1716,2533）。
+//        ここで読む台帳（connectFallbackByRun / connectIngressByRun）は agent_end で消さない。
 // 「短い連携依頼」の判定は誤爆を避けるため厳格にする（設計書 §2 の残差法の教訓）:
 // 正規化後の本文が 12 文字以下で、連携語＋任意の助詞だけで構成されるものに限る。
 // 「〇〇社との連携について提案書を」は長さと構成の両方で外れる。
@@ -690,19 +693,25 @@ function matchesConnectCore(normalized) {
 // 「一致したか」だけでなく **どの規則で一致したか** を返すのが要点。
 // 規則ごとに確度が違い、確度によって後続の扱い（モデル応答を消してよいか）を変えるため。
 //
-//   "whole"        … 正規化後の本文全体が連携語だけ。最も確実。
-//   "stripped"     … Slack の送信通知を除いた全体が連携語だけ。ほぼ確実。
-//   "leading_line" … 先頭行だけが連携依頼で、後続行に連携語が無い。**曖昧**。
+//   "whole"          … 正規化後の本文全体が連携語だけ。最も確実。
+//   "stripped"       … Slack の送信通知を除いた全体が連携語だけ。ほぼ確実。
+//   "leading_line"   … 先頭行だけが連携依頼で、後続行に連携語が無い。**曖昧**。
+//   "leading_phrase" … 1 行の**先頭の句**だけが連携依頼で、同じ行の残りが別の依頼
+//                      （「連携 今日の予定を教えて」「連携して、あと明日の予定も」）。**曖昧**。
+//                      利用者の送信経路によっては改行が落ちて 1 行になるため、
+//                      `leading_line` の 1 行版として同じ扱いにする（2026-09-07）。
 //
-// ⚠️ `leading_line` は「後続行に連携語が無い」しか見ていないので、
-// 「連携\n今日の予定を教えて」のように **後続行が別の依頼** でも真になる。
+// ⚠️ `leading_line` / `leading_phrase` は「後続に連携語が無い」しか見ていないので、
+// 「連携\n今日の予定を教えて」「連携 今日の予定を教えて」のように
+// **後続が別の依頼** でも真になる。
 // トリガーとしては妥当（利用者は確かに連携を求めている）だが、
 // この確度でモデルの最終応答を消すと **別の依頼への回答が消える**。
 // 実測でその回帰を出した（本番相当の end-to-end で「予定の回答」が消滅）。
-// よって抑止は `leading_line` では効かせない（replaceExhaustedConnectReply を参照）。
+// よって抑止は曖昧な 2 規則では効かせない（replaceExhaustedConnectReply を参照）。
 export const CONNECT_RULE_WHOLE = "whole";
 export const CONNECT_RULE_STRIPPED = "stripped";
 export const CONNECT_RULE_LEADING_LINE = "leading_line";
+export const CONNECT_RULE_LEADING_PHRASE = "leading_phrase";
 
 export function classifyConnectRequest(text) {
   // (a) 最も保守的な全体一致。
@@ -715,13 +724,15 @@ export function classifyConnectRequest(text) {
   ) {
     return CONNECT_RULE_STRIPPED;
   }
-  // (c) 未知の定型が後ろに付いた形の受け皿。確度は最も低い。
+  // (c) 未知の定型が後ろに付いた形の受け皿。確度は低い。
   if (matchesLeadingConnectLine(stripped.text)) return CONNECT_RULE_LEADING_LINE;
+  // (d) 改行が落ちて 1 行になった「連携＋別依頼」。確度は (c) と同じく低い。
+  if (matchesLeadingConnectPhrase(stripped.text)) return CONNECT_RULE_LEADING_PHRASE;
   return null;
 }
 
 // 抑止（モデルの最終応答を消す）を許してよい確度か。
-// `leading_line` は後続行が「別の依頼」でありうるので許さない。
+// `leading_line` / `leading_phrase` は後続が「別の依頼」でありうるので許さない。
 export function connectRuleAllowsSuppression(rule) {
   return rule === CONNECT_RULE_WHOLE || rule === CONNECT_RULE_STRIPPED;
 }
@@ -749,6 +760,40 @@ function matchesLeadingConnectLine(text) {
   return !trailing.some(line => CONNECT_WORD_RE.test(line));
 }
 
+// (d) 1 行の中で「連携語＋別依頼」が続く形（2026-09-07）。
+// 「連携 今日の予定を教えて」「連携して、あと明日の予定も」のように、利用者の送信経路で
+// 改行が落ちると (c) の 2 行が 1 行に潰れる。先頭の句（空白・句読点までの部分）だけが
+// (a) を満たし、残りが空でなく・連携語を含まず・否定/解除/助詞で始まらないときに限り真。
+// 「連携解除」「連携できない」「〇〇社との連携について」は先頭の句が (a) を満たさないか、
+// そもそも区切りが無いので通らない。「連携 解除」「連携 できない」は残りの先頭語で落とす。
+const CONNECT_PHRASE_SPLIT_RE = /[\s　、。，．,.!！?？・:：;；…]+/u;
+// 残りが助詞で始まる（「連携 の設計を説明して」「連携 が切れた」）＝連携語がその文の主語/目的語で、
+// 「連携＋別依頼」ではない。保守的に落とす（落ちても従来どおりモデル経路が答える）。
+const CONNECT_PHRASE_TRAILING_DENY_RE =
+  /^(?:解除|やめ|止め|停止|取り?消|不要|できない|出来ない|しない|切れ|済み|失敗|エラー|について|とは|[のがはをにへとも])/u;
+function matchesLeadingConnectPhrase(text) {
+  if (typeof text !== "string") return false;
+  let leadingLine = null;
+  const trailing = [];
+  for (const line of text.split(/\r?\n/u)) {
+    const normalized = normalizeConnectRequest(line);
+    if (normalized === null) return false;
+    if (normalized.length === 0) continue;
+    if (leadingLine === null) leadingLine = line;
+    else trailing.push(line);
+  }
+  if (leadingLine === null) return false;
+  const line = leadingLine.normalize("NFKC").replace(CONNECT_REQUEST_EDGE_RE, "");
+  const separator = CONNECT_PHRASE_SPLIT_RE.exec(line);
+  if (separator === null || separator.index === 0) return false;
+  const head = line.slice(0, separator.index);
+  const rest = line.slice(separator.index + separator[0].length).replace(CONNECT_REQUEST_EDGE_RE, "");
+  if (rest.length === 0) return false;
+  if (!matchesConnectCore(normalizeConnectRequest(head))) return false;
+  if (CONNECT_WORD_RE.test(rest) || CONNECT_PHRASE_TRAILING_DENY_RE.test(rest)) return false;
+  return !trailing.some(other => CONNECT_WORD_RE.test(other));
+}
+
 // ── 受信本文の「形」だけを出す診断（G7: 本文は 1 文字も出さない）───────────────
 // 本番で `content_len=16` の内訳が判らず「連携」が落ちた原因を特定できなかったため、
 // **本文を出さずに内訳が判る指標**を足す（2026-09-04 レビュー指摘 1）。
@@ -764,6 +809,7 @@ export function connectRequestShape(text) {
     if (normalized !== null && normalized.length > 0) lineNormalized.push(normalized);
   }
   const leadingLineMatches = matchesLeadingConnectLine(stripped.text);
+  const leadingPhraseMatches = matchesLeadingConnectPhrase(stripped.text);
   const yn = value => (value ? "yes" : "no");
   const lengthOf = value => (value === null ? "na" : [...value].length);
   return (
@@ -777,6 +823,7 @@ export function connectRequestShape(text) {
       `whole:${yn(matchesConnectCore(normalizeConnectRequest(text)))}`,
       `stripped:${yn(matchesConnectCore(strippedNormalized))}`,
       `leading_line:${yn(leadingLineMatches)}`,
+      `leading_phrase:${yn(leadingPhraseMatches)}`,
       // どの規則で通ったか（抑止の可否はこれで決まる）。
       `rule:${classifyConnectRequest(text) ?? "none"}`,
       // 連携語がそもそも含まれているか／先頭にあるか。
@@ -1273,8 +1320,26 @@ export function createCallerIdentityPlugin({
   //   delivered … 抑止（利用者に既に届いたので、モデルの重複返信を落としてよい）
   // 失敗時に answered を解放しても delivered は立たないため、抑止が誤って効くことはない。
   const connectDeliveredByMessage = new Map();
-  // 抑止のログを run ごとに 1 回だけ出すための記録（payload ごとに出すと騒音になる）。
-  const connectSuppressedRuns = new Map();
+  // ── 抑止・層2 判定用の run→ingress 台帳（2026-09-07 本番実測 TD:46）────────────
+  // 本番実測（2026-09-04 17:11 JST）: 保証経路が delivered なのに `reply_payload_sending` が
+  // cancel を返さず 2 通届いた。原因は **`agent_end` が `reply_payload_sending` より先に
+  // 発火する**こと（上流実物: runEmbeddedAttempt が finalize 後に agent_end を起動し
+  // (selection-8ixiqbew.js:14591)、最終応答の配信＝reply_payload_sending は run が返った
+  // **後**に dispatch 側で走る (dispatch-V82RCNJs.js:1994-1996 → :1716 → :2533)）。
+  // 従来は `agent_end`（releaseAgentRun）が `ingressByRun` を掃除しており、
+  // `reply_payload_sending` で `ingressByRun.get(runId)` が引けなくなっていた。
+  //
+  // `ingressByRun` は署名の門（signToolCall）の権威台帳なので、その寿命は延ばさない
+  // （延ばすと agent_end 後の tool call も署名できてしまい fail-closed が緩む）。
+  // 代わりに **抑止と層2 の判定にだけ使う別台帳**を持つ。中身は bindRun が束縛したのと
+  // 同じ ingress オブジェクト（分類結果の複写もそのまま見える）。設定は bindRun だけ
+  // （＝新しい信頼境界は作らない。他人の run を掴めないのは ingressByRun と同じ理由）。
+  // agent_end では消さず、TTL と上限（pruneConnectGuardState）に任せる。
+  // 署名には一切使わない（signToolCall は従来どおり ingressByRun を見る）。
+  const connectIngressByRun = new Map();
+  // 抑止判定のログを「hook × run × 理由」ごとに 1 回だけ出すための記録
+  // （分割 payload ごとに出すと騒音になる。理由が変われば別の行として出す）。
+  const connectDecisionLogged = new Map();
   // 「受信に content が無い」警告をフックごとに 1 回だけ出すための記録（騒音防止）。
   const contentAbsentWarned = new Set();
   const pendingByMessage = new Map();
@@ -1304,6 +1369,25 @@ export function createCallerIdentityPlugin({
         if (oldest.done) break;
         ledger.delete(oldest.value);
       }
+    }
+    // run→ingress 台帳は受信時刻で TTL を切る（ingressByRun と同じ寿命規律・agent_end 非依存）。
+    for (const [runId, ingress] of connectIngressByRun) {
+      if (nowMs - ingress.receivedAtMs > INBOUND_CONTEXT_TTL_MS) {
+        connectIngressByRun.delete(runId);
+      }
+    }
+    while (connectIngressByRun.size > MAX_CONNECT_GUARD_RUNS) {
+      const oldest = connectIngressByRun.keys().next();
+      if (oldest.done) break;
+      connectIngressByRun.delete(oldest.value);
+    }
+    for (const [key, atMs] of connectDecisionLogged) {
+      if (nowMs - atMs > INBOUND_CONTEXT_TTL_MS) connectDecisionLogged.delete(key);
+    }
+    while (connectDecisionLogged.size > MAX_CONNECT_GUARD_RUNS) {
+      const oldest = connectDecisionLogged.keys().next();
+      if (oldest.done) break;
+      connectDecisionLogged.delete(oldest.value);
     }
   }
 
@@ -1355,15 +1439,13 @@ export function createCallerIdentityPlugin({
       if (oldest.done) break;
       connectAnsweredByMessage.delete(oldest.value);
     }
-    for (const ledger of [connectDeliveredByMessage, connectSuppressedRuns]) {
-      for (const [key, atMs] of ledger) {
-        if (nowMs - atMs > INBOUND_CONTEXT_TTL_MS) ledger.delete(key);
-      }
-      while (ledger.size > MAX_CONNECT_GUARD_RUNS) {
-        const oldest = ledger.keys().next();
-        if (oldest.done) break;
-        ledger.delete(oldest.value);
-      }
+    for (const [key, atMs] of connectDeliveredByMessage) {
+      if (nowMs - atMs > INBOUND_CONTEXT_TTL_MS) connectDeliveredByMessage.delete(key);
+    }
+    while (connectDeliveredByMessage.size > MAX_CONNECT_GUARD_RUNS) {
+      const oldest = connectDeliveredByMessage.keys().next();
+      if (oldest.done) break;
+      connectDeliveredByMessage.delete(oldest.value);
     }
     // DM の正準 id は不変なので TTL は要らないが、無制限には育てない。
     while (dmChannelBySender.size > MAX_TRACKED_CONTEXTS) {
@@ -1397,7 +1479,17 @@ export function createCallerIdentityPlugin({
     if (existing) removePending(existing);
     if (ingress) removePending(ingress);
     ingressByRun.delete(runId);
+    // 拒否した run の束縛は抑止にも使わない（拒否＝この run の受信を権威的に決められない）。
+    connectIngressByRun.delete(runId);
     rejectedRuns.set(runId, rejectedAtMs);
+  }
+
+  // 抑止・層2 用の run→ingress 記録。bindRun が束縛を確定した直後にだけ呼ぶ。
+  // delete→set で挿入順を更新順に保つ（上限退避が「最も古い記録から」になるように）。
+  function rememberConnectIngress(runId, ingress) {
+    if (ingress.ingressKind !== "message") return;
+    connectIngressByRun.delete(runId);
+    connectIngressByRun.set(runId, ingress);
   }
 
   function bindRun(runId, ingress) {
@@ -1424,6 +1516,9 @@ export function createCallerIdentityPlugin({
           existing.connectNormalizedLength = ingress.connectNormalizedLength;
           existing.connectContentLength = ingress.connectContentLength;
         }
+        // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
+        // 同じ受信の再通知が来る順序でも判定が失われないように）。
+        rememberConnectIngress(runId, existing);
         removePending(ingress);
       } else rejectRun(runId, now(), ingress);
       return matches;
@@ -1432,6 +1527,7 @@ export function createCallerIdentityPlugin({
       if (sameIngress(bound, ingress)) return false;
     }
     ingressByRun.set(runId, ingress);
+    rememberConnectIngress(runId, ingress);
     removePending(ingress);
     return true;
   }
@@ -2169,6 +2265,9 @@ export function createCallerIdentityPlugin({
       for (const [boundRunId, bound] of ingressByRun) {
         if (bound === ingress) ingressByRun.delete(boundRunId);
       }
+      for (const [boundRunId, bound] of connectIngressByRun) {
+        if (bound === ingress) connectIngressByRun.delete(boundRunId);
+      }
       emitPluginLog(
         logger,
         "info",
@@ -2726,40 +2825,127 @@ export function createCallerIdentityPlugin({
   // ハーネスへ「もう 1 パス」を要求する（＝定型文で返さず、実際に oauth_connect を呼ばせる）。
   // 上流契約: before_agent_finalize は lastAssistantMessage が非空のときだけ走り、
   // revise は runId x idempotencyKey の予算で必ず打ち切られる（openclaw 2026.7.1 実測）。
+  // ── 抑止・層2 の判定（唯一の入口・2026-09-07）──────────────────────────────
+  // 署名の門とは独立に、抑止用の run→ingress 台帳（connectIngressByRun）だけを見る。
+  // 判定は「抑止してよい」か「なぜ抑止しないか」を **必ず理由つきで** 返す。
+  //   no_run_binding      … この run に束縛された受信が無い（束縛失敗・TTL 超過・掃除済み）
+  //   not_connect_request … 受信は連携依頼ではない（通常の会話）
+  //   not_delivered       … 保証経路が（まだ／結局）配信していない。配信中・失敗・未発火
+  //   rule_disallows      … 配信済みだが一致規則が曖昧（leading_line / leading_phrase）
+  function resolveConnectSuppression(runId) {
+    const ingress = connectIngressByRun.get(runId) ?? null;
+    if (!ingress) return { suppress: false, reason: "no_run_binding", ingress };
+    if (ingress.connectRequest !== true) {
+      return { suppress: false, reason: "not_connect_request", ingress };
+    }
+    if (!connectDeliveredByMessage.has(ingress.pendingKey)) {
+      return { suppress: false, reason: "not_delivered", ingress };
+    }
+    if (!connectRuleAllowsSuppression(ingress.connectRequestRule)) {
+      return { suppress: false, reason: "rule_disallows", ingress };
+    }
+    return { suppress: true, reason: "already_delivered_by_guarantee", ingress };
+  }
+
+  // 判定行の共通末尾。G7: 真偽・規則名・形だけ。本文・URL・Slack 識別子・claim は載せない。
+  function describeConnectDecision(decision, ctx) {
+    const ingress = decision.ingress;
+    return (
+      ` connect_request=${ingress ? String(ingress.connectRequest === true) : "na"}` +
+      ` rule=${ingress?.connectRequestRule ?? "none"}` +
+      ` delivered=${ingress ? String(connectDeliveredByMessage.has(ingress.pendingKey)) : "na"}` +
+      ` ${idShape({
+        sender: ingress?.senderId ?? ctx?.senderId,
+        channel: ingress?.channelId ?? ctx?.channelId,
+        message: ingress?.messageId,
+        session: ingress?.sessionKey ?? ctx?.sessionKey,
+      })}`
+    );
+  }
+
+  // 「hook × run × 理由」ごとに 1 回だけ出す。TRACE とは無関係に必ず出す
+  // （2026-09-07 の教訓: 否定経路の行が無いと「行が無い」しか証拠にできない）。
+  function logConnectDecisionOnce(logger, level, hook, runId, reason, line) {
+    const key = `${hook}|${runId}|${reason}`;
+    if (connectDecisionLogged.has(key)) return false;
+    connectDecisionLogged.set(key, now());
+    emitPluginLog(logger, level, line);
+    return true;
+  }
+
+  // event.runId / ctx.runId の権威 run 束縛。食い違い・欠落は理由つきで観測してから触らない。
+  // run id が両方欠けるのは run に紐づかない配信（層1 handled の応答・コマンド応答等）で、
+  // run 単位の去重ができないため TRACE のときだけ出す。不一致は常時 1 回出す。
+  function authoritativeRunId(event, ctx, logger, hook) {
+    const eventRunId = canonicalInvocationId(event?.runId);
+    const contextRunId = canonicalInvocationId(ctx?.runId);
+    if (eventRunId && contextRunId && eventRunId === contextRunId) return eventRunId;
+    if (eventRunId && contextRunId) {
+      logConnectDecisionOnce(
+        logger,
+        "warn",
+        hook,
+        eventRunId,
+        "run_mismatch",
+        `connect suppression hook=${hook} runId=${eventRunId} outcome=skipped reason=run_mismatch`,
+      );
+    } else {
+      emitTrace(logger, `connect suppression hook=${hook} outcome=skipped reason=no_run_id`);
+    }
+    return null;
+  }
+
   function guardConnectUrlFabrication(event, ctx, logger) {
     const nowMs = Date.now();
     // finalize だけが走る経路でも台帳が育たないよう、ここでも掃除する。
     // pruneState 全体は呼ばない（容量超過の fail を握り潰して fail-open
     // させないため。掃除は第3層の台帳に限定する）。
     pruneConnectGuardState(nowMs);
-    const eventRunId = canonicalInvocationId(event?.runId);
-    const contextRunId = canonicalInvocationId(ctx?.runId);
-    if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    const eventRunId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
+    if (!eventRunId) return undefined;
+    const toolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
+    // 介入しない理由を必ず 1 行残す（run × 理由ごとに 1 回）。
+    // 本番実測 2026-09-04 17:11: モデルが oauth_connect を自ら呼んだ run では (a) で黙って
+    // 抜けており、「層2 が skip した行が無い」ことしか判らなかった。
+    const skip = (reason, decision) => {
+      logConnectDecisionOnce(
+        logger,
+        "info",
+        "before_agent_finalize",
+        eventRunId,
+        reason,
+        `connect zero-tool revise runId=${eventRunId} outcome=skipped reason=${reason}` +
+          ` tool_calls=${toolCalls}` +
+          describeConnectDecision(decision ?? resolveConnectSuppression(eventRunId), ctx),
+      );
+      return undefined;
+    };
     // (a) teamagent tool call が 1 件でもあれば、URL はツール発行でありうる。触らない。
-    if ((toolCallsByRun.get(eventRunId)?.count ?? 0) > 0) return undefined;
+    if (toolCalls > 0) return skip("model_called_tool");
     // (b) 本文が無ければ利用者にも何も届かない。
-    if (typeof event?.lastAssistantMessage !== "string") return undefined;
+    if (typeof event?.lastAssistantMessage !== "string") return skip("no_assistant_message");
     const reply = event.lastAssistantMessage.trim();
-    if (!reply) return undefined;
+    if (!reply) return skip("empty_assistant_message");
     // (c) 介入条件は OR: 連携 URL を含む（#353）／利用者の最新メッセージが短い連携依頼（層2）。
     //     後者は run に束縛済みの ingress（権威的な受信）から読む。本文の推測はしない。
     const { kinds } = findFabricatedConnectUrlKinds(reply);
-    const trustedIngress = ingressByRun.get(eventRunId);
+    const decision = resolveConnectSuppression(eventRunId);
+    const trustedIngress = decision.ingress;
     const zeroToolConnect = trustedIngress?.connectRequest === true;
-    if (kinds.length === 0 && !zeroToolConnect) return undefined;
+    if (kinds.length === 0 && !zeroToolConnect) {
+      return skip(trustedIngress ? "not_connect_request" : "no_run_binding", decision);
+    }
     // 保証経路が既に配信済みなら、モデルへ「oauth_connect を呼べ」と要求しない。
     // 要求すると **state token がもう 1 個発行される**（本番実測 TD:45 の層2 revise がこれ）。
     // 捏造 URL ルール（kinds）は別問題なので、そちらが立っているときは従来どおり介入する。
+    // 規則の確度は問わない（曖昧な一致でも「再要求しない」のは安全側: 別依頼への回答は
+    // 抑止側が消さないので届く）。
     if (
       !urlRuleApplies(kinds) &&
       trustedIngress &&
       connectDeliveredByMessage.has(trustedIngress.pendingKey)
     ) {
-      logger?.info?.(
-        `${PLUGIN_ID}: connect zero-tool revise runId=${eventRunId} outcome=skipped ` +
-          "reason=already_delivered_by_guarantee",
-      );
-      return undefined;
+      return skip("already_delivered_by_guarantee", decision);
     }
     const urlRule = kinds.length > 0;
     const describe = urlRule
@@ -2775,10 +2961,10 @@ export function createCallerIdentityPlugin({
       if (zeroToolConnect) {
         // 層3 を武装する: 再パス後も 0 tool call のまま終わった＝モデルが従わなかった。
         // 送信直前（reply_payload_sending）で本文を定型文へ置換する。
-        const trusted = ingressByRun.get(eventRunId);
+        // 武装の台帳（connectFallbackByRun）は agent_end で消さない（層3 は agent_end の後に走る）。
         connectFallbackByRun.delete(eventRunId);
         connectFallbackByRun.set(eventRunId, {
-          senderId: trusted.senderId,
+          senderId: trustedIngress.senderId,
           replaced: false,
           updatedAtMs: nowMs,
         });
@@ -2823,9 +3009,8 @@ export function createCallerIdentityPlugin({
   // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
   // 同一 run の 2 通目以降（分割 payload）は、置換済みの定型文と重複するので取り消す。
   function replaceExhaustedConnectReply(event, ctx, logger) {
-    const eventRunId = canonicalInvocationId(event?.runId);
-    const contextRunId = canonicalInvocationId(ctx?.runId);
-    if (!eventRunId || !contextRunId || eventRunId !== contextRunId) return undefined;
+    const eventRunId = authoritativeRunId(event, ctx, logger, "reply_payload_sending");
+    if (!eventRunId) return undefined;
     // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────
     // 実測ログ: 保証経路が `outcome=delivered` で 1 通配信したあと、層2 の revise を経て
     // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
@@ -2841,29 +3026,42 @@ export function createCallerIdentityPlugin({
     // それを根拠にすると「届いていないのにモデルも黙る」＝完全な無音を作りうる。
     // 保証は絶対に落とさない、という原則をここでも守る。
     // ⚠️ 抑止は **確度の高い規則で一致した受信だけ**に効かせる（2026-09-04 レビュー指摘 重大1）。
-    // `leading_line` は「先頭行が連携依頼・後続行に連携語が無い」しか見ないので、
-    // 「連携\n今日の予定を教えて」のように **後続行が別の依頼** でも真になる。
+    // `leading_line` / `leading_phrase` は「先頭が連携依頼・後続に連携語が無い」しか見ないので、
+    // 「連携\n今日の予定を教えて」のように **後続が別の依頼** でも真になる。
     // その確度でモデルの最終応答を消すと、**別の依頼への回答が消える**
     // （実測: guaranteePosted:1 / modelAnswerCancelled:true / 予定の回答が消滅）。
     // 曖昧な形では従来どおり「保証 1 通 + モデル 1 通」に留める＝
     // 「無言より 2 通」の原則をここでも守る。トリガーと抑止は別の判断である。
-    const answered = ingressByRun.get(eventRunId);
-    if (
-      answered &&
-      connectDeliveredByMessage.has(answered.pendingKey) &&
-      connectRuleAllowsSuppression(answered.connectRequestRule)
-    ) {
-      if (!connectSuppressedRuns.has(eventRunId)) {
-        connectSuppressedRuns.set(eventRunId, now());
-        emitPluginLog(
-          logger,
-          "info",
-          `connect guarantee suppressed model reply runId=${eventRunId} ` +
-            "reason=already_delivered_by_guarantee",
-        );
-      }
+    //
+    // ⚠️ 受信は `ingressByRun` ではなく `connectIngressByRun` から引く（2026-09-07 本番実測 TD:46）。
+    // このフックは **agent_end の後** に走り、agent_end（releaseAgentRun）は ingressByRun を
+    // 掃除する。従来はここで受信が引けず、保証が delivered でも抑止が 1 度も効いていなかった
+    // （本番: guarantee delivered → agent_end 08:11:08.488 → reply_payload_sending 08:11:09.171 → 2 通）。
+    const decision = resolveConnectSuppression(eventRunId);
+    if (decision.suppress) {
+      logConnectDecisionOnce(
+        logger,
+        "info",
+        "reply_payload_sending",
+        eventRunId,
+        decision.reason,
+        `connect guarantee suppressed model reply runId=${eventRunId} ` +
+          `reason=${decision.reason}` +
+          describeConnectDecision(decision, ctx),
+      );
       return { cancel: true, reason: CONNECT_GUARANTEE_CANCEL_REASON };
     }
+    // 抑止しなかった理由を必ず 1 行残す（run × 理由ごとに 1 回・TRACE 非依存）。
+    // 「行が無い」を証拠にせざるを得ない状態を作らない（2026-09-07）。
+    logConnectDecisionOnce(
+      logger,
+      "info",
+      "reply_payload_sending",
+      eventRunId,
+      decision.reason,
+      `connect suppression skipped runId=${eventRunId} reason=${decision.reason}` +
+        describeConnectDecision(decision, ctx),
+    );
     const entry = connectFallbackByRun.get(eventRunId);
     if (!entry) return undefined;
     const payload = event?.payload;
@@ -2888,6 +3086,14 @@ export function createCallerIdentityPlugin({
     };
   }
 
+  // agent_end。署名の門が使う台帳（ingressByRun / consumedInvocations）と層2 の run 記録を
+  // 掃除する。ここで **消してはいけない**もの（2026-09-07 本番実測 TD:46）:
+  //   - connectIngressByRun … 抑止（reply_payload_sending）が agent_end の **後** に読む。
+  //   - connectFallbackByRun … 層3 の置換も同じく agent_end の後に読む（従来どおり）。
+  // 上流実物: runEmbeddedAttempt は finalize の後で agent_end を起動し
+  // (selection-8ixiqbew.js:14591)、最終応答の配信（reply_payload_sending）は run が返った
+  // 後に dispatch が行う (dispatch-V82RCNJs.js:1994-1996 → :1716 → :2533)。
+  // つまり最終応答については **agent_end → reply_payload_sending** の順が常に成り立つ。
   function releaseAgentRun(event, ctx) {
     const eventRunId = canonicalInvocationId(event?.runId);
     const contextRunId = canonicalInvocationId(ctx?.runId);
