@@ -1040,6 +1040,7 @@ connect_shape=lines:2,content_lines:1,whole:no,stripped:yes,leading_line:yes,
 | (a) `whole` | 正規化後の**本文全体**が連携語＋助詞・敬語末尾だけ（従来・維持） | 素の「連携」 | 高 | **許す** |
 | (b) `stripped` | **送信通知を除去**したあとの全体が (a) を満たす | 既知の定型 | 高 | **許す** |
 | (c) `leading_line` | **最初の中身のある行**が (a) を満たし、**後続行に連携語が無い** | **語彙に無い未知の定型** | **低** | **許さない** |
+| (d) `leading_phrase` | 1 行の**先頭の句**（空白・句読点まで）が (a) を満たし、残りが空でなく・連携語を含まず・否定/解除/助詞で始まらない（§12-11・2026-09-07） | **改行が落ちて 1 行になった「連携＋別依頼」**（「連携 今日の予定を教えて」） | **低** | **許さない** |
 
 判定は「一致したか」ではなく **どの規則で一致したか**（`classifyConnectRequest`）を返し、
 ingress の `connectRequestRule` に記録する。確度によって後続の扱いが変わるためである（§12-10）。
@@ -1183,6 +1184,12 @@ revise は「`oauth_connect` を必ず呼べ」とモデルへ要求するもの
 
 #### 運用メモ: 抑止が効かない条件
 
+> ⚠️ **本節の結論は 2026-09-07 に覆った（§12-11）。** ここに書いた「`ingressByRun.get(runId)` で
+> 受信を引く」実装そのものが真因だった: `reply_payload_sending` は **`agent_end` の後** に走り、
+> `agent_end` が `ingressByRun` を掃除するため、run が束縛されていても **常に** 引けなかった。
+> 現在は抑止専用の台帳 `connectIngressByRun` から引き、抑止しなかった理由を必ず 1 行出す。
+> 以下は当時の記述として残す。
+
 `replaceExhaustedConnectReply` は `ingressByRun.get(runId)` で受信を引くため、
 **run が ingress に束縛されていない場合は抑止が効かず 2 通のまま**になる
 （`bindAgentRun` が候補を見つけられなかった等）。
@@ -1199,4 +1206,135 @@ revise は「`oauth_connect` を必ず呼べ」とモデルへ要求するもの
 > 分類結果（`connectRequestRule` / `connectShape` / 各長さ）は **1 組で意味を持つ**ので
 > まとめて複写する。`test_classification_survives_run_binding_before_content_arrives` と
 > 変異 `M26` が固定する。
-> したがって現在「2 通返る」の原因は **run 未束縛** に絞り込める。
+> ~~したがって現在「2 通返る」の原因は **run 未束縛** に絞り込める。~~
+> → **誤り**。真因は `agent_end` の発火順（§12-11）。run は束縛されていた。
+
+### 12-11.【本番実測 2026-09-04 17:11 JST・OC TD:46】`agent_end` が `reply_payload_sending` より先に発火し、抑止は本番で一度も効いていなかった
+
+#### 実測（TD:46 ＝ dev `726ab95` ＝ PR #390 マージ後・TRACE=on）
+
+DM に「連携」（送信経路の付加文つき 16 文字・規則 `stripped`＝抑止対象）を送った結果:
+
+```
+08:11:00.483 hook first_fired name=message_received
+08:11:00.488 inbound recorded connect_request=true … rule:stripped … bound_run=no pending=1 bound=0
+08:11:00.947 hook first_fired name=before_agent_reply
+08:11:00.953 connect deterministic path … outcome=skipped reason=already_attempted
+08:11:02.294 hook first_fired name=before_model_resolve
+08:11:02.764 connect guarantee … outcome=delivered result=message          ← 保証が 1 通配信（token 1 個目）
+08:11:06.968 hook first_fired name=before_tool_call                        ← モデルが oauth_connect を自ら呼ぶ（token 2 個目）
+08:11:08.362 hook first_fired name=before_agent_finalize
+08:11:08.488 hook first_fired name=agent_end                               ← ★ reply_payload_sending より先
+08:11:09.171 hook first_fired name=reply_payload_sending
+08:11:09.419 [slack] delivered reply to channel:D…                         ← モデル応答も届く＝2 通
+```
+
+- `reply_payload_sending` で cancel されず **2 通**。mcp 側の `oauth_connect_url_issued` は 2 回。
+- `before_agent_finalize` の revise-skip 行も、`reply_payload_sending` の suppressed 行も **無い**。
+  TRACE=on なのに抑止の否定経路が 1 行も出ず、「行が無い」以外の証拠が無かった。
+
+#### 真因（一次検証・上流 `openclaw@2026.7.1` 実物 dist・file:line）
+
+| 段 | 何が起きるか | file:line |
+|---|---|---|
+| ① | 埋め込みハーネスの 1 attempt（`runEmbeddedAttempt`）が `before_agent_finalize` を呼ぶ。`revise` ならここで再パスへ戻り、この attempt では agent_end を起こさない | `selection-8ixiqbew.js:13337-13376`（`beforeAgentFinalizeRevisionReason`） |
+| ② | 同じ attempt の末尾で `runAgentEndSideEffects` → `runAgentHarnessAgentEndHook` → `hookRunner.runAgentEnd`。fire-and-forget だが handler の同期部分（本 plugin の `releaseAgentRun`）は **その場で** 走る | `selection-8ixiqbew.js:14591-14617` → `context-engine-lifecycle-CFkTgH-T.js:108-111` → `lifecycle-hook-helpers-BIb1q90h.js:87-95` → `hook-runner-global-Cucx8m-W.js:638-640`（`runVoidHook` は `:458-477`） |
+| ③ | attempt が返る → `getReplyFromConfig`（`replyResolver`）が最終応答を返す → dispatch が `sendFinalReply` | `dispatch-V82RCNJs.js:1994-1996`（`await … replyResolver(ctx, …)`）→ `:1716`（`dispatcher.sendFinalReply(normalizedPayload)`） |
+| ④ | dispatcher の beforeDeliver（`installReplyPayloadSendingBeforeDeliver`）が `runReplyPayloadSendingHook` を呼ぶ＝**ここが `reply_payload_sending`** | `dispatch-V82RCNJs.js:2628`（設置）/ `:2528-2545`（`runState.runId` を event と ctx の両方へ）→ `deliver-DGDN_7sT.js:25-36` |
+
+つまり **最終応答については `agent_end`（②）→ `reply_payload_sending`（④）の順が常に成り立つ**
+（②は attempt の内側、④は attempt が返った後の dispatch 側）。例外は block streaming の途中 payload
+（`kind:"block"`・run の途中で配信）だけで、本番の症状は最終応答である。
+
+plugin 側: `agent_end`（`releaseAgentRun`）が `ingressByRun.delete(runId)` していた。
+`replaceExhaustedConnectReply` は `ingressByRun.get(runId)` で受信を引いていたので **常に undefined** になり、
+層3 の武装も無いので **無言で `return undefined`**（否定経路の行が 1 本も無い理由）。
+run 束縛は成立していた（`before_model_resolve` が発火し、`before_tool_call` の署名が mcp に受理されている）。
+
+**再現（origin/dev `726ab95` の dist を、本 PR の probe＝本番の順で駆動）:**
+
+| シナリオ | 旧 dist | 新 dist |
+|---|---|---|
+| `production_order`（層1 skip → 束縛 → 保証 delivered → モデルが tool 呼び → finalize → **agent_end** → 配信） | `replyCancelled:false / userVisible:2 / 判定行 0 本` ＝ 本番と同じ | `replyCancelled:true / userVisible:1` |
+| `legacy_order`（旧 probe の順: 配信 → agent_end） | `replyCancelled:true` ＝ **旧 probe が緑だった理由** | `replyCancelled:true` |
+| `connect_zero_tool_fallback_after_agent_end`（層3・agent_end → 配信） | 置換 + 2 通目 cancel | 同左 |
+
+なお `before_agent_finalize` に revise-skip の行が無かったのは agent_end とは別の理由で、
+モデルが `oauth_connect` を自ら呼び `tool_calls=1` だったため条件 (a) で **黙って** 抜けていた
+（§12-10 の「モデルが自発的に `oauth_connect` を呼ぶこと自体は止めていない」がそのまま起きた。
+token 2 個目はここから出ている。`signToolCall` の門は本 PR でも触らない）。
+
+#### 層3（CONNECT-Z01 定型文置換）は同じ順序で壊れていたか → **構造上は壊れていない**
+
+層3 が `reply_payload_sending` で読む台帳は `connectFallbackByRun` で、これは当初から
+「agent_end より後に配信が走りうるので releaseAgentRun では消さない」と明記されており、実際
+`releaseAgentRun` は触っていない。武装（finalize・agent_end より前）は `ingressByRun` を読むが、その時点では
+まだ生きている。旧 dist を本番の順で駆動しても置換と 2 通目 cancel が成立した（上表）。
+**同じ失敗を抑止側だけが再発させていた**（2026-09-04 の抑止実装が、層3 の注意書きを読まずに
+`ingressByRun` に依存した）。
+
+ただし「本番で層3 が一度でも発火したか」は本セッションでは確認できない（ログ非接触）。
+TD:45 以降は保証経路が配信できた run では finalize が `already_delivered_by_guarantee` で降りるため
+層2/3 は武装されず、層3 が動くのは「保証が配信できず・かつ revise 後もモデルが tool を呼ばない」run だけである。
+
+#### 修正
+
+1. **抑止・層2 判定専用の run→ingress 台帳 `connectIngressByRun`**（案 b）。`bindRun` が束縛を確定した
+   直後にだけ設定し（新しい信頼境界は作らない・他人の run を掴めないのは `ingressByRun` と同じ理由）、
+   `rejectRun` と層1 handled では消し、`agent_end` では消さず TTL（受信時刻＋10 分）と上限で掃除する。
+   `ingressByRun` の寿命は延ばさない（案 a を採らない理由: 延ばすと agent_end 後の tool call も
+   署名できてしまい fail-closed の門が緩む。`test_suppression_ledger_outlives_agent_end_but_the_signing_gate_does_not`
+   が「agent_end 後の tool call は block・同じ run の配信は cancel」を固定）。
+2. **判定の唯一の入口 `resolveConnectSuppression(runId)`** が「抑止してよい」か「なぜ抑止しないか」を
+   必ず理由つきで返す（`no_run_binding` / `not_connect_request` / `not_delivered` / `rule_disallows`）。
+   `before_agent_finalize` と `reply_payload_sending` の両方がこれを使う。
+3. **否定経路の可観測化**。両フックで抑止／介入しなかった理由を **hook × run × 理由ごとに 1 回・TRACE 非依存**で出す
+   （分割 payload では増えない）。G7 維持: 真偽・規則名・`id_shape` だけ。
+
+   | 行 | 意味 |
+   |---|---|
+   | `connect guarantee suppressed model reply runId=… reason=already_delivered_by_guarantee connect_request=true rule=whole\|stripped delivered=true id_shape=…` | 抑止した（利用者に届くのは保証の 1 通） |
+   | `connect suppression skipped runId=… reason=no_run_binding …` | この run に束縛された受信が無い（束縛失敗／TTL 超過）。`bind_agent_run` の行を見る |
+   | `… reason=not_delivered connect_request=true …` | 保証が（まだ／結局）配信していない。`connect guarantee … outcome=` を見る |
+   | `… reason=rule_disallows rule=leading_line\|leading_phrase …` | 曖昧な形。設計どおり 2 通（別依頼への回答を消さない） |
+   | `… reason=not_connect_request …` | 通常の会話（抑止の対象外） |
+   | `connect suppression hook=… runId=… outcome=skipped reason=run_mismatch` | event/ctx の runId 不一致（上流の形が変わった疑い） |
+   | `connect zero-tool revise runId=… outcome=skipped reason=model_called_tool tool_calls=N …` | 層2: モデルが tool を自ら呼んだ（token 2 個目はここ） |
+   | `connect zero-tool revise runId=… outcome=skipped reason=no_assistant_message\|empty_assistant_message\|not_connect_request\|no_run_binding\|already_delivered_by_guarantee …` | 層2 の各不介入理由 |
+
+   `no_run_id`（run に紐づかない配信: 層1 handled の応答・コマンド応答）だけは run 単位の去重ができないため TRACE のときだけ出す。
+4. **probe を本番の順に直す**。`agent_end` を呼ぶ `endRun` を足し、配信のシナリオはすべて
+   finalize → **agent_end** → reply_payload_sending の順で駆動する（`production_order` は TD:46 の 8 フックを
+   そのまま並べ、`hookOrder` を報告に載せてテストが順序を固定する）。
+5. **(d) `leading_phrase`**（優先度低・同 PR）: 報告者の送信経路では改行が落ちて 1 行になるため、
+   「連携 今日の予定を教えて」「連携して、あと明日の予定も」を `leading_line` の 1 行版として
+   トリガーだけ立てる（抑止しない）。誤爆側「連携解除」「連携できない」「〇〇社との連携について」
+   「連携 解除」「連携 できない」「連携 の設計を説明して」を `must_not_match` で固定。
+
+#### テスト（+8・105 → 113）
+
+| テスト | 固定するもの |
+|---|---|
+| `test_suppression_survives_agent_end_firing_before_delivery` | TD:46 の 8 フック順そのままで cancel・投稿 1・plugin 由来 token 1・門は block しない・理由行 2 本 |
+| `test_suppression_does_not_depend_on_hook_order` | 旧順（配信 → agent_end）でも cancel |
+| `test_suppression_ledger_outlives_agent_end_but_the_signing_gate_does_not` | 抑止台帳は生き残り、agent_end 後の tool call は block・2 通目も cancel・判定行は 1 本 |
+| `test_unbound_run_is_not_suppressed_but_reports_why` | 未束縛は 2 通（安全側）＋ `no_run_binding` が両フックで出る |
+| `test_every_non_suppressed_reply_reports_a_reason` | 全否定経路の理由（not_delivered / not_connect_request / rule_disallows / no_run_binding） |
+| `test_suppression_decision_lines_keep_the_g7_discipline` | 判定行に本文・URL・Slack 識別子・claim・ts が無い |
+| `test_layer3_replacement_survives_agent_end` | 層3 は agent_end 後も置換＋2 通目 cancel |
+| `test_single_line_connect_plus_other_request_triggers_but_never_suppresses` | (d) の正負 fixture・保証 1 通・抑止なし |
+
+#### 変異（緑の実質性）
+
+| 変異 | 内容 | 赤くなるテスト |
+|---|---|---|
+| `M27` | `releaseAgentRun` で `connectIngressByRun` も消す（＝旧実装の掃除に戻す） | `test_suppression_survives_agent_end_firing_before_delivery` ほか |
+| `M28` | 否定経路の判定行（`connect suppression skipped …`）を出さない | `test_every_non_suppressed_reply_reports_a_reason` ほか |
+| `M29` | (d) `leading_phrase` を外す | `test_single_line_connect_plus_other_request_triggers_but_never_suppresses` ほか |
+
+#### 残る弱点・未解決
+
+- 判定行は **1 ターンあたり最大 2 行**（finalize + reply）増える。騒音なら `not_connect_request` だけ TRACE 配下に落とす余地がある。
+- token 2 個目（モデルの自発的な `oauth_connect`）は本 PR でも止めない（§12-10 の裁定どおり・門は触らない）。
+- 本番での確認は次の OC 便で: 「連携」→ 1 通、`connect guarantee suppressed model reply … reason=already_delivered_by_guarantee` が 1 行、
+  `oauth_connect_url_issued` はモデルが呼べば 2 回のまま。

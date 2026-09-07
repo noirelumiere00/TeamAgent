@@ -3712,6 +3712,10 @@ def test_connect_request_shape_is_logged_without_leaking_the_body() -> None:
 def test_successful_guarantee_suppresses_the_duplicate_model_reply() -> None:
     """保証経路が配信成功したら、利用者に届くのは 1 通・state token も 1 個であること。"""
     outcome = _caller_identity_report()["guarantee_suppression"]["delivered"]
+    # 本番の順（agent_end が reply_payload_sending より先）で駆動していること。
+    # 旧 probe は agent_end を呼ばずに配信していたため、本番で効かない抑止が緑だった。
+    order = outcome["hookOrder"]
+    assert order.index("agent_end") < order.index("reply_payload_sending"), order
     assert outcome["guaranteePosts"] == 1
     # モデル側の最終応答は送られない。
     assert outcome["replyCancelled"] is True
@@ -3793,8 +3797,8 @@ def test_each_matching_rule_is_recorded_as_declared_in_the_fixture() -> None:
             row = by_text[entry["text"]]
             assert row["rule"] == entry["rule"], (key, entry["text"], row["rule"])
             declared += 1
-    assert declared >= 40
-    # 3 規則すべてが実際に使われていること（どれかが死んでいたら気付ける）。
+    assert declared >= 44
+    # 4 規則すべてが実際に使われていること（どれかが死んでいたら気付ける）。
     used = {
         by_text[e["text"]]["rule"]
         for k in (
@@ -3804,7 +3808,7 @@ def test_each_matching_rule_is_recorded_as_declared_in_the_fixture() -> None:
         )
         for e in fixture[k]
     }
-    assert used == {"whole", "stripped", "leading_line"}
+    assert used == {"whole", "stripped", "leading_line", "leading_phrase"}
 
 
 def test_precise_connect_forms_are_fully_deduplicated() -> None:
@@ -3828,15 +3832,23 @@ def test_ambiguous_connect_forms_never_delete_the_users_other_answer() -> None:
     曖昧な形では「保証 1 通 + モデル 1 通」に留める＝「無言より 2 通」の原則を守る。
     """
     by_rule = _caller_identity_report()["guarantee_suppression"]["by_rule"]
-    for label in ("leading_line_other_request", "leading_line_unknown_boilerplate"):
+    for label, rule in (
+        ("leading_line_other_request", "leading_line"),
+        ("leading_line_unknown_boilerplate", "leading_line"),
+        # 2026-09-07: 改行が落ちて 1 行になった形も同じ扱い（§12-11）。
+        ("leading_phrase_other_request", "leading_phrase"),
+        ("leading_phrase_comma", "leading_phrase"),
+    ):
         outcome = by_rule[label]
-        assert outcome["rule"] == "leading_line", label
+        assert outcome["rule"] == rule, label
         # 連携リンクは届く（トリガーは従来どおり立つ）。
         assert outcome["guaranteePosts"] == 1, label
         # 利用者自身の別の依頼への回答は消さない。
         assert outcome["replyCancelled"] is False, label
         assert outcome["modelAnswerDelivered"] is True, label
         assert outcome["userVisibleMessages"] == 2, label
+        # 消さなかった理由は必ず 1 行出る（「行が無い」を証拠にしない）。
+        assert outcome["suppressionSkipReason"] == "rule_disallows", label
 
 
 def test_classification_survives_run_binding_before_content_arrives() -> None:
@@ -3858,3 +3870,196 @@ def test_classification_survives_run_binding_before_content_arrives() -> None:
     # 束縛側にも規則が渡っているので抑止が効き、利用者に届くのは 1 通。
     assert outcome["replyCancelled"] is True
     assert outcome["userVisibleMessages"] == 1
+
+
+# ══ agent_end が reply_payload_sending より先に発火する（2026-09-04 17:11 JST・OC TD:46 本番実測） ═══
+# 保証経路が delivered（規則 stripped＝抑止対象）なのに reply_payload_sending で cancel されず
+# 2 通届き、before_agent_finalize にも reply_payload_sending にも抑止の否定経路の行が 1 行も無かった。
+# 真因は上流の発火順: runEmbeddedAttempt が finalize の後に agent_end を起動し
+# （selection-8ixiqbew.js:14591）、最終応答の配信（reply_payload_sending）は run が返った後に
+# dispatch が行う（dispatch-V82RCNJs.js:1994-1996 → :1716 → :2533）。agent_end（releaseAgentRun）が
+# ingressByRun を掃除するため、reply_payload_sending で受信が引けず抑止が効かなかった。
+# 旧 probe は agent_end を呼ばずに配信していたので緑のままだった（origin/dev の dist を本テストの
+# 順で駆動すると replyCancelled:false / userVisible:2 / 判定行 0 本＝本番と同じ症状になる）。
+
+PRODUCTION_HOOK_ORDER_TD46 = [
+    "message_received",
+    "before_agent_reply",
+    "before_model_resolve",
+    "guarantee_settled",
+    "before_tool_call",
+    "before_agent_finalize",
+    "agent_end",
+    "reply_payload_sending",
+]
+
+
+def test_suppression_survives_agent_end_firing_before_delivery() -> None:
+    """本番 TD:46 の並びそのままで、cancel が返り・投稿 1 通・plugin 由来の token 1 個であること。
+
+    層1 は保証側に譲って降り、モデルは oauth_connect を自ら呼び（門は block しない）、
+    層2 は tool_calls=1 で介入せず、agent_end の後の reply_payload_sending で抑止が効く。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["production_order"]
+    assert outcome["hookOrder"] == PRODUCTION_HOOK_ORDER_TD46
+    assert outcome["guaranteePosts"] == 1
+    assert outcome["layer1Handled"] is False
+    # fail-closed の門（signToolCall）には触れていない: モデルの tool call は署名されて通る。
+    assert outcome["modelToolBlocked"] is False
+    assert outcome["layer2Revised"] is False
+    assert outcome["replyCancelled"] is True
+    assert outcome["cancelReason"] == "connect guarantee already delivered this inbound"
+    assert outcome["userVisibleMessages"] == 1
+    # plugin 自身が発行した state token は保証経路の 1 個だけ（層1 は鋳造していない）。
+    assert outcome["toolCallCount"] == 1
+    assert outcome["suppressionLogged"] is True
+    # 否定経路も肯定経路も理由つきで 1 行ずつ出る。
+    assert outcome["decision"]["finalizeSkipReason"] == "model_called_tool"
+    assert outcome["decision"]["suppressedReason"] == "already_delivered_by_guarantee"
+
+
+def test_suppression_does_not_depend_on_hook_order() -> None:
+    """旧 probe の順（配信の後に agent_end）でも抑止は効くこと（順序に依存しない実装）。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["legacy_order"]
+    order = outcome["hookOrder"]
+    assert order.index("reply_payload_sending") < order.index("agent_end"), order
+    assert outcome["replyCancelled"] is True
+    assert outcome["userVisibleMessages"] == 1
+
+
+def test_suppression_ledger_outlives_agent_end_but_the_signing_gate_does_not() -> None:
+    """抑止用の台帳だけが agent_end を生き延び、署名の門の台帳は従来どおり掃除されること。
+
+    ingressByRun の寿命を延ばす修正（案 a）は、agent_end の後の tool call も署名できてしまい
+    fail-closed の門を緩める。別台帳（案 b）にした理由をここで固定する。
+    """
+    outcome = _caller_identity_report()["guarantee_suppression"]["ledger_after_agent_end"]
+    assert outcome["guaranteePosts"] == 1
+    assert outcome["replyCancelled"] is True
+    # 分割 payload の 2 通目も落ちる。判定行は run × 理由で 1 回だけ（騒音にしない）。
+    assert outcome["secondPayloadCancelled"] is True
+    assert outcome["decisionLineCount"] == 1
+    # agent_end の後の tool call は署名されない（門は緩んでいない）。
+    assert outcome["toolBlockedAfterAgentEnd"] is True
+
+
+def test_unbound_run_is_not_suppressed_but_reports_why() -> None:
+    """run が束縛できなかったときは抑止しない（安全側の 2 通）が、理由は必ず出ること。"""
+    outcome = _caller_identity_report()["guarantee_suppression"]["unbound_run"]
+    assert "before_model_resolve" not in outcome["hookOrder"]
+    assert outcome["guaranteePosts"] == 1
+    assert outcome["replyCancelled"] is False
+    assert outcome["userVisibleMessages"] == 2
+    assert outcome["decision"]["suppressionSkipReason"] == "no_run_binding"
+    assert outcome["decision"]["finalizeSkipReason"] == "no_run_binding"
+
+
+def test_every_non_suppressed_reply_reports_a_reason() -> None:
+    """抑止しなかった全経路で理由が 1 行出ること（「行が無い」を証拠にせざるを得ない状態を無くす）。"""
+    report = _caller_identity_report()["guarantee_suppression"]
+    assert report["post_failed"]["decision"]["suppressionSkipReason"] == "not_delivered"
+    assert report["in_flight"]["decision"]["suppressionSkipReason"] == "not_delivered"
+    assert (
+        report["not_connect_request"]["decision"]["suppressionSkipReason"] == "not_connect_request"
+    )
+    assert report["not_connect_request"]["decision"]["finalizeSkipReason"] == "not_connect_request"
+    assert report["unbound_run"]["decision"]["suppressionSkipReason"] == "no_run_binding"
+    for label in (
+        "leading_line_other_request",
+        "leading_line_unknown_boilerplate",
+        "leading_phrase_other_request",
+        "leading_phrase_comma",
+    ):
+        assert report["by_rule"][label]["suppressionSkipReason"] == "rule_disallows", label
+    # 抑止した側も理由つき。
+    assert report["delivered"]["decision"]["suppressedReason"] == "already_delivered_by_guarantee"
+    assert report["delivered"]["decision"]["finalizeSkipReason"] == "already_delivered_by_guarantee"
+
+
+def test_suppression_decision_lines_keep_the_g7_discipline() -> None:
+    """判定行は理由・真偽・規則名・id_shape だけで、本文・URL・Slack 識別子・claim を含まないこと。"""
+    report = _caller_identity_report()["guarantee_suppression"]
+    seen = 0
+    for label in (
+        "production_order",
+        "delivered",
+        "unbound_run",
+        "post_failed",
+        "not_connect_request",
+    ):
+        lines = report[label]["decision"]["lines"]
+        assert lines, label
+        for line in lines:
+            seen += 1
+            assert "reason=" in line, line
+            assert "id_shape=" in line, line
+            assert "U09CX1CCBLN" not in line, line
+            assert "D0B0PQD83N3" not in line, line
+            assert "http" not in line, line
+            assert "連携" not in line, line
+            assert "caller_claim" not in line, line
+            assert "1785206176.940189" not in line, line
+    assert seen >= 8
+
+
+def test_layer3_replacement_survives_agent_end() -> None:
+    """層3（CONNECT-Z01 定型文置換）は agent_end の後の配信でも効くこと。
+
+    層3 の武装台帳（connectFallbackByRun）は agent_end で消さない設計だったが、旧 probe は
+    agent_end を呼ばずに配信していたので検証されていなかった。origin/dev の dist でも本テストは
+    通る＝発火順で壊れていたのは抑止だけで、層3 は構造上この順序の影響を受けない。
+    """
+    guarded = _caller_identity_report()["connect_zero_tool_fallback_after_agent_end"]
+    assert guarded["agentEndBeforeDelivery"] is True
+    assert guarded["firstIntervened"] is True
+    assert guarded["intervened"] is False
+    first, second = guarded["deliveries"]
+    assert CONNECT_DIAGNOSTIC_RE.search(first["payload"]["text"])
+    assert second == {"cancel": True, "reason": "connect zero-tool fallback already delivered"}
+    # 層3 は保証未配信の run なので、抑止側は not_delivered で降りて置換に進む。
+    assert guarded["decision"]["suppressionSkipReason"] == "not_delivered"
+
+
+def test_single_line_connect_plus_other_request_triggers_but_never_suppresses() -> None:
+    """1 行内で先頭が連携語＋別依頼（改行が落ちた形）は leading_line と同じ扱いであること。
+
+    「連携 今日の予定を教えて」「連携して、あと明日の予定も」は保証（リンク）を出し、
+    抑止（別依頼への回答を消す）はしない。誤爆側（「連携解除」「連携できない」
+    「〇〇社との連携について」「連携 解除」「連携 できない」）は fixture で固定する。
+    """
+    fixture = json.loads((ROOT / "tests/fixtures/connect_request_phrases.json").read_text())
+    positives = [
+        e for e in fixture["must_match_ambiguous_do_not_suppress"] if e["rule"] == "leading_phrase"
+    ]
+    assert len(positives) >= 4
+    assert {e["text"] for e in positives} >= {
+        "連携 今日の予定を教えて",
+        "連携して、あと明日の予定も",
+    }
+    negatives = {e["text"] for e in fixture["must_not_match"]}
+    assert negatives >= {
+        "連携解除",
+        "連携できない",
+        "〇〇社との連携について",
+        "連携 解除",
+        "連携 できない",
+    }
+
+    report = _caller_identity_report()
+    by_text = {row["text"]: row for row in report["connect_phrase_matrix"]}
+    for entry in positives:
+        row = by_text[entry["text"]]
+        assert row["rule"] == "leading_phrase", entry
+        assert row["handled"] is True, entry
+        assert row["toolCallCount"] == 1, entry
+    fired = [row["text"] for row in report["guarantee_negative_matrix"] if row["postCount"] != 0]
+    assert fired == [], fired
+    for label in ("leading_phrase_other_request", "leading_phrase_comma"):
+        outcome = report["guarantee_suppression"]["by_rule"][label]
+        assert outcome["rule"] == "leading_phrase"
+        assert outcome["guaranteePosts"] == 1
+        assert outcome["replyCancelled"] is False
+        assert outcome["userVisibleMessages"] == 2
+    # 形の指標にも (d) が載る（本文は出さない）。
+    shape_units = {u["label"]: u["shape"] for u in report["connect_shape"]["units"]}
+    assert "leading_phrase:no" in shape_units["plain"]
