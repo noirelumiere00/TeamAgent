@@ -294,6 +294,36 @@ def test_stage_two_query_drops_operators_when_gmail_returns_nothing() -> None:
     assert gmail.queries[1] == '"日本教育財団" newer_than:30d -in:sent in:inbox'
 
 
+def test_stage_two_query_drops_operators_when_gmail_returns_a_subset() -> None:
+    """subject: 演算子が 0 件ではなく **部分集合**（CJK 分かち書きで石川だけ・徳野を落とす）を
+    返しても、ローカル照合で 0 件なら演算子なしで引き直し、件名で指された徳野に確定して作る。
+    （レビュー指摘: 旧条件 ``not refs`` では 2 段目が発火せず、石川しか候補に出なかった）"""
+
+    def hook(query: str) -> list[str] | None:
+        return ["m-ishikawa"] if "subject:" in query else None
+
+    gmail = FakeGmail(_two_threads(), list_hook=hook)
+    with capture_logs() as logs:
+        out = _skill(gmail).run(
+            MailReplyInput(client_name="日本教育財団", subject_contains=SUBJECT_TOKUNO), _ctx()
+        )
+
+    assert out.created is True and out.error == ""
+    assert out.thread_id == TH_TOKUNO
+    assert out.ambiguous_threads == []
+    assert len(gmail.create_draft_calls) == 1
+    assert gmail.create_draft_calls[0]["thread_id"] == TH_TOKUNO
+    assert gmail.create_draft_calls[0]["to"] == "tokuno@vectorinc.co.jp"
+    assert len(gmail.queries) == 2
+    assert "subject:" in gmail.queries[0] and "subject:" not in gmail.queries[1]
+    # 1 段目で見た石川は 2 段目で取り直さない（metadata は 2 通・full は確定した 1 通だけ）
+    assert gmail.get_formats.count("metadata") == 2
+    assert gmail.get_formats.count("full") == 1
+    rec = next(r for r in logs if r.get("event") == "mail_reply_thread_resolution")
+    assert rec["stage"] == 2 and rec["outcome"] == "target"
+    assert rec["threads_total"] == 2 and rec["threads_matched"] == 1
+
+
 # ── 曖昧: 作らずに候補を返す ────────────────────────────────────────────────
 
 

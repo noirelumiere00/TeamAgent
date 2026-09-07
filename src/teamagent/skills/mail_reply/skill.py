@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -469,10 +470,25 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             with_hint_operators=True,
         )
         refs, _ = gmail.list_messages(query, ctx.request_id, max_results=self._search_max)
+        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
+        # list が返した id → metadata（一斉配信として飛ばした通は None）。段をまたいで同じ id は
+        # 取り直さない。
+        scanned: dict[str, ThreadCandidateMeta | None] = {}
+        excluded = self._scan_candidates(
+            gmail, refs, ctx, scanned=scanned, exclude_bulk=exclude_bulk
+        )
+        threads, matched = self._group_and_match(
+            scanned,
+            subject_hint=subject_hint,
+            from_hint=from_hint,
+            received_after=input.received_after,
+        )
         stage = 1
-        if not refs and hinted:
-            # Gmail の CJK 分かち書きで subject:/from: が空振りしうる → 演算子なしで引き直し、
-            # 絞り込みはローカル照合（filter_by_hints）に委ねる。
+        if hinted and (not refs or not matched):
+            # Gmail の CJK 分かち書きで subject:/from: は「0 件」だけでなく「部分集合」
+            # （別スレッドだけ返して、指されたスレッドを落とす）にもなりうる。どちらも演算子なしで
+            # 引き直し、絞り込みはローカル照合（filter_by_hints）に委ねる。1 段目で見た通も候補に
+            # 残す（2 段目が空でも「近い候補」を失わない）。
             stage = 2
             query = build_search_query(
                 client_phrase=search_term,
@@ -483,34 +499,21 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
                 with_hint_operators=False,
             )
             refs, _ = gmail.list_messages(query, ctx.request_id, max_results=self._search_max)
-
-        excluded = 0
-        metas: list[ThreadCandidateMeta] = []
-        exclude_bulk = env_bool("MAIL_EXCLUDE_BULK", True)
-        for ref in refs:
-            candidate = gmail.get_message(ref.id, ctx.request_id, format="metadata")
-            if exclude_bulk and should_skip_mail(candidate.headers):
-                excluded += 1
-                continue
-            # 取り直しの鍵は list が返した id（fake でも本番でも「頼んだ id」が正）。
-            metas.append(_meta_of(candidate, message_id=ref.id))
-        threads = group_newest_per_thread(metas)
-        matched = (
-            filter_by_hints(
-                threads,
+            excluded += self._scan_candidates(
+                gmail, refs, ctx, scanned=scanned, exclude_bulk=exclude_bulk
+            )
+            threads, matched = self._group_and_match(
+                scanned,
                 subject_hint=subject_hint,
                 from_hint=from_hint,
                 received_after=input.received_after,
             )
-            if hinted or input.received_after
-            else threads
-        )
 
         log.info(
             "mail_bulk_excluded",
             skill=self.name,
             excluded=excluded,
-            kept=len(metas),
+            kept=sum(1 for meta in scanned.values() if meta is not None),
             request_id=ctx.request_id,
         )
 
@@ -545,6 +548,55 @@ class MailReplySkill(BaseSkill[MailReplyInput, MailReplyOutput]):
             chosen_thread_hash=thread_hash(matched[0].thread_id) if outcome == "target" else "",
         )
         return resolution
+
+    def _scan_candidates(
+        self,
+        gmail: GmailClient,
+        refs: Sequence[Any],
+        ctx: SkillContext,
+        *,
+        scanned: dict[str, ThreadCandidateMeta | None],
+        exclude_bulk: bool,
+    ) -> int:
+        """list が返した各通を metadata で取り直して ``scanned`` に積む。
+
+        既に見た id は取り直さない。一斉配信として飛ばした通は None で記録し、その数を返す。
+        """
+        excluded = 0
+        for ref in refs:
+            if ref.id in scanned:
+                continue
+            candidate = gmail.get_message(ref.id, ctx.request_id, format="metadata")
+            if exclude_bulk and should_skip_mail(candidate.headers):
+                excluded += 1
+                scanned[ref.id] = None
+                continue
+            # 取り直しの鍵は list が返した id（fake でも本番でも「頼んだ id」が正）。
+            scanned[ref.id] = _meta_of(candidate, message_id=ref.id)
+        return excluded
+
+    @staticmethod
+    def _group_and_match(
+        scanned: Mapping[str, ThreadCandidateMeta | None],
+        *,
+        subject_hint: str,
+        from_hint: str,
+        received_after: str,
+    ) -> tuple[list[ThreadCandidateMeta], list[ThreadCandidateMeta]]:
+        """スレッドごとに最新の受信通へ束ね、手がかりがあればローカル照合で絞る。
+
+        戻り値は ``(threads, matched)``。手がかりが無ければ両者は同じ。
+        """
+        threads = group_newest_per_thread(m for m in scanned.values() if m is not None)
+        if not (subject_hint or from_hint or received_after):
+            return threads, threads
+        matched = filter_by_hints(
+            threads,
+            subject_hint=subject_hint,
+            from_hint=from_hint,
+            received_after=received_after,
+        )
+        return threads, matched
 
     def _newest_counterpart_in_thread(
         self, gmail: GmailClient, thread_id: str, requester: str, ctx: SkillContext
