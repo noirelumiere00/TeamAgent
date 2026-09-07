@@ -15,6 +15,7 @@ from teamagent.skills.search.client_match import (
     hit_entities,
     hit_is_about_client,
     names_overlap,
+    normalize_client,
     normalize_filter_client,
 )
 
@@ -49,6 +50,46 @@ def test_normalize_filter_client_strips_brackets_honorific_and_legal_suffix() ->
     assert normalize_filter_client("花王様") == "花王"
     assert normalize_filter_client("ホーユー株式会社") == "ホーユー"
     assert normalize_filter_client("  資生堂 ") == "資生堂"
+
+
+def test_normalize_filter_client_keeps_ascii_names_containing_legal_suffix_letters() -> None:
+    """レビュー指摘（PR #397）: ASCII 法人格は語境界つき。「Vincent」の中の inc を削らない。
+
+    境界なしだと 'Vincent'→'Vent'、'Prince Hotel'→'Pre Hotel' になり、ILIKE が 0 件 →
+    fail-open 再検索 → 無関係 top1 → 「本物っぽい」不一致警告、の連鎖が ASCII 名で新たに起きる。
+    """
+    assert normalize_filter_client("Vincent") == "Vincent"
+    assert normalize_filter_client("Principal") == "Principal"
+    assert normalize_filter_client("Lincoln") == "Lincoln"
+    assert normalize_filter_client("Corpus") == "Corpus"
+    assert normalize_filter_client("Scorpion") == "Scorpion"
+    assert normalize_filter_client("Prince Hotel") == "Prince Hotel"
+    # 独立語の法人格は従来どおり剥がす
+    assert normalize_filter_client("Prince Hotel Inc.") == "Prince Hotel"
+    assert normalize_filter_client("Shiseido Co., Ltd.") == "Shiseido"
+    assert normalize_filter_client("Kao Corporation") == "Kao"
+    assert normalize_filter_client("Acme Incorporated") == "Acme"
+
+
+def test_normalize_filter_client_strips_bracketed_kabu_abbreviation() -> None:
+    """レビュー指摘（PR #397）: 「（株）」「(株)」は括弧より先に法人格として剥がす。
+
+    括弧を先に剥ぐと「株」だけが残り、ILIKE '%日本ガイシ株%' が cls_project='日本ガイシ' に
+    当たらない（§3-6「法人格除去」の最頻出略記）。
+    """
+    assert normalize_filter_client("日本ガイシ（株）") == "日本ガイシ"
+    assert normalize_filter_client("(株)P&G") == "P&G"
+    assert normalize_filter_client("㈱明治") == "明治"
+    # 括弧の内側に法人格が残る形（括弧の後の 2 回目の適用で剥がれる）
+    assert normalize_filter_client("（株式会社ホーユー）") == "ホーユー"
+
+
+def test_normalize_client_does_not_eat_legal_suffix_letters_inside_ascii_words() -> None:
+    """両側正規化でも「Vincent」と「Vent」を同一視しない（境界なしでは両方 'vent' だった）。"""
+    assert normalize_client("Vincent") == "vincent"
+    assert normalize_client("Prince Hotel Inc.") == "princehotel"
+    assert names_overlap("Vincent", "Vent") is False
+    assert names_overlap("Prince Hotel", "Prince Hotel Inc.") is True
 
 
 def test_normalize_filter_client_keeps_value_when_result_is_too_short() -> None:

@@ -21,9 +21,14 @@ from collections.abc import Iterable
 from teamagent.adapters.pgvector_client import SearchHit
 
 # 法人格・記号・空白は表記ゆれの主因なので照合前に落とす（名寄せの最小版）。
+# ⚠️ ASCII 側（inc / corp / ltd / co.,ltd / k.k.）は **語境界つき**。境界なし＋IGNORECASE だと
+# 「Vincent」→「Vent」「Prince」→「Pre」「Lincoln」→「Loln」「Scorpion」→「Sion」と社名の
+# 中身を削る（両側正規化の clients_match では相殺されるが、DB 側を正規化しない ILIKE
+# パターン生成（normalize_filter_client）と語彙表層（result_guard._surfaces）では退行になる）。
 _LEGAL_SUFFIX_RE = re.compile(
     r"(株式会社|有限会社|合同会社|一般社団法人|公益社団法人|\(株\)|（株）|㈱|\(有\)|（有）|㈲"
-    r"|co\.,?\s*ltd\.?|corporation|corp\.?|inc\.?|k\.k\.|ltd\.?)",
+    r"|(?<![A-Za-z])(?:co\.,?\s*ltd\.?|corporation|corp\.?|incorporated|inc\.?|k\.k\.|ltd\.?)"
+    r"(?![A-Za-z]))",
     re.IGNORECASE,
 )
 # ⚠️ 長音記号「ー」は落とさない（「ユニー」と「ユニ」は別会社になりうる）。
@@ -87,7 +92,12 @@ def normalize_filter_client(value: str | None) -> str | None:
     raw = value.strip()
     if not raw:
         return None
-    out = _BRACKETS_RE.sub("", raw)
+    # 法人格 → 括弧 → 法人格 の順。括弧を先に剥ぐと「（株）」「(株)」の括弧だけが消えて
+    # 「株」が残り、ILIKE '%日本ガイシ株%' が cls_project='日本ガイシ' に当たらない。
+    # 括弧の後にもう 1 回当てるのは「（株式会社ホーユー）」のように括弧の内側に
+    # 法人格が残る形のため（冪等なので 2 回で足りる）。
+    out = _LEGAL_SUFFIX_RE.sub("", raw)
+    out = _BRACKETS_RE.sub("", out)
     out = _LEGAL_SUFFIX_RE.sub("", out)
     out = out.strip(" 　")
     out = _HONORIFIC_TAIL_RE.sub("", out).strip(" 　")

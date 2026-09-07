@@ -435,6 +435,21 @@ def test_find_client_mention_strict_uses_legal_suffix_stripped_surface() -> None
     assert find_client_mention("Aの資料", ["A"], strict=True) is None
 
 
+def test_find_client_mention_strict_surface_does_not_strip_inside_ascii_words() -> None:
+    """レビュー指摘（PR #397）: 語彙「Prince」の照合表層に「Pre」を加えない。
+
+    境界なし regex だと _surfaces('Prince') に 'Pre' が入り、クエリに独立語 'Pre' が出ただけで
+    asked='Prince' が立って警告が増える（仕様と逆方向）。
+    """
+    assert find_client_mention("Preの資料", ["Prince"], strict=True) is None
+    assert find_client_mention("Ventの資料", ["Vincent"], strict=True) is None
+    # 独立語の法人格を剥いだ表層は従来どおり当たる
+    assert (
+        find_client_mention("Prince Hotel の資料", ["Prince Hotel Inc."], strict=True)
+        == "Prince Hotel Inc."
+    )
+
+
 def test_find_client_mention_does_not_crash_on_regex_metacharacters() -> None:
     """DB 由来の語彙に正規表現メタ文字があっても落ちない（str.find 実装）。"""
     vocab = ["(株)P&G+", "A[B]", "C++", ")("]
