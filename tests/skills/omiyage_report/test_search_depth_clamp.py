@@ -133,7 +133,8 @@ def test_accepted_message_states_realistic_duration() -> None:
     searcher = _RecordingSearcher()
     accepted = _skill(searcher).run(_input(), SkillContext(request_id="req-eta", user_id="U1"))
     assert accepted.status == "queued"
-    assert "目安 10〜30 分" in accepted.message
-    assert "TikTok 取得と動画分析に時間がかかります" in accepted.message
+    assert "目安 約 " in accepted.message
+    assert "TikTok 取得 3 軸＋動画分析 最大 " in accepted.message
     assert "『まだ？』で確認できます" in accepted.message
+    assert "10〜30" not in accepted.message
     assert "秒後" not in accepted.message

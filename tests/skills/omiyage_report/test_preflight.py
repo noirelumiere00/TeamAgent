@@ -10,6 +10,7 @@ from teamagent.skills.omiyage_report.preflight import (
     OmiyageSuggestions,
     build_accepted_message,
     build_needs_input_message,
+    estimate_duration,
     run_preflight,
 )
 from teamagent.skills.omiyage_report.schema import OmiyageReportSubmitInput
@@ -93,7 +94,11 @@ def test_needs_input_message_structure() -> None:
     assert "以下をコピーしてご返信ください。" in message
     assert "競合ブランド：" in message
     assert "一般検索キーワード：" in message
-    assert message.rstrip().endswith("指示：この内容で資料を作成してください")
+    # 回答欄の末尾は「指示」行で、その後ろに骨子へ切り替える逃げ道 1 行だけが続く
+    lines = message.rstrip().split("\n")
+    assert lines[-3] == "指示：この内容で資料を作成してください"
+    assert lines[-2] == ""
+    assert "『骨子で』とだけ返信してください" in lines[-1]
 
 
 def test_needs_input_message_without_suggestions_has_no_suggestion_block() -> None:
@@ -125,17 +130,20 @@ def test_submit_with_missing_inputs_returns_needs_input_and_creates_no_job() -> 
     assert memory == {}  # ジョブ行を作らない
 
 
-def test_accepted_message_states_realistic_duration_not_seconds() -> None:
-    """受付文は実態（10〜30分）を言い切り、「約60秒後」のような秒見込みを含まない。"""
+def test_accepted_message_states_computed_duration_not_seconds() -> None:
+    """受付文は依頼内容から算出した目安（約 M 分）を言い切り、秒見込みや固定の「10〜30 分」を含まない。"""
 
     input = OmiyageReportSubmitInput(
         brand="エムキュア", competitors=["ラサーナ"], keywords=["ヘアケア"]
     )
-    message = build_accepted_message(input)
+    estimate = estimate_duration(axes=3, analysis_videos=25, analysis_concurrency=2)
+    message = build_accepted_message(input, estimate)
     assert message.startswith("お土産資料（対象: エムキュア / 競合: ラサーナ / 一般KW: ヘアケア）")
     assert "の作成を受け付けました。" in message
-    assert "目安 10〜30 分（TikTok 取得と動画分析に時間がかかります）。" in message
+    assert "目安 約 40 分（TikTok 取得 3 軸＋動画分析 最大 25 本）。" in message
     assert "途中経過は『まだ？』で確認できます。" in message
-    assert "完成したPPTXは依頼元のスレッドへ添付します。" in message
+    assert "完成したPPTXは依頼元のスレッド（DM ならこの DM）へ添付します。" in message
+    assert "10〜30" not in message
     assert "秒後" not in message
     assert "完成予定" not in message
+    assert "omiyage_" not in message

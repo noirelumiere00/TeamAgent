@@ -272,6 +272,16 @@ def _chunked(items: Sequence[PostRecord], size: int) -> Iterable[Sequence[PostRe
         yield items[start : start + size]
 
 
+def configured_max_videos() -> int:
+    """1 ジョブで解析する動画本数の上限（env・受付文の所要目安と analyzer で共用）。"""
+    return _envint("OMIYAGE_VA_MAX_VIDEOS", 25, minimum=1, maximum=60)
+
+
+def configured_concurrency() -> int:
+    """動画解析の並列度（env・上限 4 で clamp・受付文の所要目安と analyzer で共用）。"""
+    return _envint("OMIYAGE_VA_CONCURRENCY", 2, minimum=1, maximum=4)
+
+
 @dataclass
 class OmiyageVideoAnalyzer:
     """便1の動画解析実行体（media client と視覚AIは注入可能）。"""
@@ -281,12 +291,8 @@ class OmiyageVideoAnalyzer:
     vision_caller: VisionCaller = _default_vision_caller
     rules: ClusterRules = DEFAULT_CLUSTER_RULES
     # 既定25 = ブランド10 + 競合10 + TOP5サムネ用5（skill._analysis_targets と対）
-    max_videos: int = field(
-        default_factory=lambda: _envint("OMIYAGE_VA_MAX_VIDEOS", 25, minimum=1, maximum=60)
-    )
-    concurrency: int = field(
-        default_factory=lambda: _envint("OMIYAGE_VA_CONCURRENCY", 2, minimum=1, maximum=4)
-    )
+    max_videos: int = field(default_factory=configured_max_videos)
+    concurrency: int = field(default_factory=configured_concurrency)
     cost_cap_usd: float = field(
         default_factory=lambda: _envfloat(
             "OMIYAGE_VA_COST_CAP_USD", 1.0, minimum=0.01, maximum=20.0
