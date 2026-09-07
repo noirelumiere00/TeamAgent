@@ -21,6 +21,9 @@
 ※ connect は **`gmail.modify` 1 本**を取得（読み＋下書き作成）。送信/削除は GmailClient の
 adapter denylist（`users.messages.send`/`users.drafts.send`/delete/trash 等）で**物理封鎖**し、
 `drafts.create`（下書き）だけ許可＝「AI は要約・提案・下書きまで、送信は人間」をコードで強制。
+例外は `drafts.delete` のみで、**TeamAgent が作った下書き**（`X-TeamAgent-Draft` ヘッダ付き）を
+`mail_reply` の `discard_draft_id`（「それじゃない」への作り直し）で片付けるときだけ、
+`drafts.get` で目印を確認した上で一時的に通す（人が書いた下書きは削除しない）。
 
 > ⚠️ **公開＝Bot が営業の個人受信箱を読む**。プライバシー重大ゲートのため本番反映は管理者承認で実施。
 > 返信ドラフトは Gmail の「下書き」に入るだけで送信はしない（本人が確認して送信）。
