@@ -38,6 +38,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.dates import extract_title_date, resolve_date_basis
 from teamagent.skills.search.dedup import cap_per_document, collapse_near_duplicates
 from teamagent.skills.search.fusion import reciprocal_rank_fusion
 from teamagent.skills.search.knowledge_query import (
@@ -90,7 +91,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
     name: ClassVar[str] = "search"
     description: ClassVar[str] = (
         "営業16名が過去の提案書・議事録・メールを自然文で検索する一次窓口。"
-        "『探して/あったっけ/どれ?/見つけて』など“あるか/どれが該当するか”の探索・列挙はここ"
+        "『探して/あったっけ/どれ?/見つけて』など“あるか/どれが該当するか”の探索・列挙はここ。"
+        "各ヒットに updated_at（更新日・取込元の最終更新）/ title_date（資料名の日付）/ "
+        "date_basis を返す。日付は返った値だけを書き、date_basis=none の資料に日付を付けない"
     )
     input_schema: ClassVar[type[BaseModel]] = SearchInput
     output_schema: ClassVar[type[BaseModel]] = SearchOutput
@@ -462,6 +465,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 url = resolved_file_ref[1]
             if not url:
                 url = self._doc_url({"source_uri": meta.get("source_uri")})
+            # 便A-3: 日付は tool が根拠を持つ値だけを返す。
+            #   updated_at = documents.modified_at（adapter が JST 文字列化済み）
+            #   title_date = 資料名（title / 実ファイル名 / file_name）に埋まった日付
+            #   date_basis = title_date 優先 → modified_at → none（両方 None）
+            updated_at = str(meta["updated_at"]) if meta.get("updated_at") else None
+            title_date = self._title_date_of(meta, resolved_file_ref)
 
             search_hits.append(
                 SearchHitOut(
@@ -487,6 +496,9 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                     doc_type=(str(meta["cls_doc_type"]) if meta.get("cls_doc_type") else None),
                     budget=(str(meta["cls_budget"]) if meta.get("cls_budget") else None),
                     is_low_confidence=bool(meta.get("is_low_confidence", False)),
+                    updated_at=updated_at,
+                    title_date=title_date,
+                    date_basis=resolve_date_basis(updated_at, title_date),
                 )
             )
 
@@ -1463,6 +1475,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         primary_block = "\n\n".join(
             f"[chunk_id: {h.chunk_id}, score: {h.score:.3f}"
             + ("（関連度低・参考）" if (h.metadata or {}).get("is_low_confidence") else "")
+            + self._date_header(h)
             + f"]\n{h.content}"
             for h in primary_hits
         )
@@ -1476,7 +1489,8 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             )
         if related_hits:
             related_block = "\n\n".join(
-                f"[chunk_id: {h.chunk_id}] {(h.metadata or {}).get('title', '')}\n{h.content}"
+                f"[chunk_id: {h.chunk_id}{self._date_header(h)}] "
+                f"{(h.metadata or {}).get('title', '')}\n{h.content}"
                 for h in related_hits
             )
             sections.append(
@@ -1495,6 +1509,39 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             max_tokens=self._summary_max_tokens,
         )
         return _strip_internal_markers(resp.text), resp.usage.cost_usd
+
+    @staticmethod
+    def _title_date_of(
+        meta: dict[str, Any], resolved_file_ref: tuple[str, str] | None
+    ) -> str | None:
+        """資料名に埋まった日付を、確からしい順（title → 実ファイル名 → file_name）で 1 つ返す。"""
+        candidates: list[Any] = [meta.get("title")]
+        if resolved_file_ref:
+            candidates.append(resolved_file_ref[0])
+        candidates.append(meta.get("file_name"))
+        for raw in candidates:
+            found = extract_title_date(str(raw) if raw else None)
+            if found:
+                return found
+        return None
+
+    @staticmethod
+    def _date_header(hit: SearchHit) -> str:
+        """要約 LLM に渡す chunk ヘッダの日付部分（根拠のある値だけ・無ければ空文字）。
+
+        例: ``, 更新日: 2026-08-28, 資料名の日付: 2026-02-27``。
+        prompt 側は「日付はこのヘッダの値だけを書く」契約なので、ここに載らない日付
+        （本文中の日付）は更新日として扱われない。
+        """
+        meta = hit.metadata or {}
+        parts: list[str] = []
+        updated_at = meta.get("updated_at")
+        if updated_at:
+            parts.append(f"更新日: {updated_at}")
+        title_date = SearchSkill._title_date_of(meta, None)
+        if title_date:
+            parts.append(f"資料名の日付: {title_date}")
+        return "".join(f", {p}" for p in parts)
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:
