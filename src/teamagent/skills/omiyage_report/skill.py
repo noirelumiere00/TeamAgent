@@ -22,13 +22,16 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 import os
 import re
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -64,9 +67,11 @@ from teamagent.skills.omiyage_report.metrics import (
 )
 from teamagent.skills.omiyage_report.preflight import (
     CompletionSource,
+    DurationEstimate,
     build_accepted_message,
     build_busy_message,
     build_needs_input_message,
+    estimate_duration,
     run_preflight,
 )
 from teamagent.skills.omiyage_report.schema import (
@@ -81,6 +86,8 @@ from teamagent.skills.omiyage_report.schema import (
 from teamagent.skills.omiyage_report.video_analysis import (
     OmiyageVideoAnalyzer,
     VideoAnalysisReport,
+    configured_concurrency,
+    configured_max_videos,
 )
 
 OMIYAGE_JOB_KIND = "omiyage_report"
@@ -217,6 +224,20 @@ def _configured_max_concurrent_jobs() -> int:
     )
 
 
+# 順番待ちの人を数える窓。最後に依頼してからこの秒数を過ぎた人は「諦めた」とみなして
+# 順番から外す（外さないと、二度と来ない人が他の営業の順番を 1 つずつ押し下げ続ける）。
+_WAITER_TTL_SECONDS = 900.0
+
+
+@dataclass(frozen=True)
+class BusyInfo:
+    """順番待ちの案内に使う実測値（作成中の本数・何番目か・順番が来るまでの分）。"""
+
+    running: int
+    position: int
+    wait_minutes: int
+
+
 class JobAdmission:
     """走行中ジョブ本数の入口制御（プロセス内カウンタ）。
 
@@ -226,23 +247,84 @@ class JobAdmission:
 
     ``BoundedSemaphore`` を選ぶのは、二重 release（＝上限がじわじわ緩む静かな
     バグ）をその場で ValueError として顕在化させるため。
+
+    順番待ちの案内（何番目・あと何分）のために、走行中ジョブの開始時刻と所要目安、
+    および断られた依頼者（waiter_key）を最初に断った順で覚えておく。台帳には書かない
+    （queued 受付＝台帳ベースの順番待ちは便B-8）。release は FIFO 近似で最古の走行
+    行を落とす（ジョブの所要は同程度なので案内の目安としては十分）。
     """
 
-    def __init__(self, limit: int | None = None) -> None:
+    def __init__(
+        self,
+        limit: int | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._limit = _configured_max_concurrent_jobs() if limit is None else max(1, limit)
         self._semaphore = threading.BoundedSemaphore(self._limit)
+        self._clock = clock
+        self._lock = threading.Lock()
+        # (開始時刻 monotonic, 所要目安 分)
+        self._running: list[tuple[float, float]] = []
+        # waiter_key → 最後に断った時刻（並びは最初に断った順）
+        self._waiters: dict[str, float] = {}
 
     @property
     def limit(self) -> int:
         return self._limit
 
-    def try_acquire(self) -> bool:
-        """空きがあれば 1 枠取る。**待たない**（submit は即答が契約）。"""
+    def try_acquire(self, *, eta_minutes: float = 0.0, waiter_key: str = "") -> bool:
+        """空きがあれば 1 枠取る。**待たない**（submit は即答が契約）。
 
-        return self._semaphore.acquire(blocking=False)
+        取れたら走行行を記録し、その依頼者を順番待ちから外す。取れなければ順番待ちに
+        登録する（既に並んでいれば位置は変えず、最終依頼時刻だけ更新）。
+        """
+
+        acquired = self._semaphore.acquire(blocking=False)
+        now = self._clock()
+        with self._lock:
+            if acquired:
+                self._running.append((now, max(0.0, eta_minutes)))
+                self._waiters.pop(waiter_key, None)
+            elif waiter_key:
+                self._waiters[waiter_key] = now
+        return acquired
 
     def release(self) -> None:
         self._semaphore.release()
+        with self._lock:
+            if self._running:
+                self._running.pop(0)
+
+    def busy_info(self, waiter_key: str, *, fallback_eta_minutes: float) -> BusyInfo:
+        """順番待ちの案内値。走行行が無い（＝理論上起きない）ときは目安をそのまま使う。"""
+
+        now = self._clock()
+        with self._lock:
+            expired = [
+                key
+                for key, last_seen in self._waiters.items()
+                if now - last_seen > _WAITER_TTL_SECONDS
+            ]
+            for key in expired:
+                del self._waiters[key]
+            keys = list(self._waiters)
+            position = keys.index(waiter_key) + 1 if waiter_key in self._waiters else len(keys) + 1
+            remaining = sorted(
+                max(0.0, eta - (now - started) / 60.0) for started, eta in self._running
+            )
+            running = len(self._running)
+        fallback = max(1.0, fallback_eta_minutes)
+        if remaining:
+            slot = position - 1
+            wait = remaining[slot % len(remaining)] + (slot // len(remaining)) * fallback
+        else:
+            wait = position * fallback
+        return BusyInfo(
+            running=running,
+            position=position,
+            wait_minutes=max(1, math.ceil(wait)),
+        )
 
 
 # プロセス共有の既定インスタンス。Skill は呼び出しのたびに instantiate されるので、
@@ -339,12 +421,14 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
         "バックグラウンドで進める。不足時は status=needs_input で不足リストと補完候補・"
         "回答欄を返す（ジョブは作らない）ので、営業の回答で埋めて再submitする。"
-        "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返すので、"
-        "retry_after_seconds を置いてから同じ入力でそのまま再submitする。"
+        "同時実行の上限に達している時は status=busy（順番待ち・ジョブは作らない）を返す。"
+        "message に『順番待ち N 番目・目安あと約 M 分』が入っているのでそのまま営業へ伝え、"
+        "retry_after_seconds（≈M分）を置いてから同じ入力でそのまま再submitする。"
         "進行確認は omiyage_report_status。queued/running中は再submitしない。"
-        "所要は目安10〜30分（TikTok取得と動画分析）。queued時の retry_after_seconds は"
-        "status再照会の間隔であって完成予定ではないので、営業へは message の所要目安を"
-        "そのまま伝え、スレッドで『まだ？』と聞かれたら同じjob_idでstatusを照会する。"
+        "所要目安（約M分・依頼内容から算出）は message に書いてあるので、営業へは message を"
+        "そのまま伝える（ツール名や見込み時間を自分で作らない）。queued時の retry_after_seconds は"
+        "status再照会の間隔であって完成予定ではない。スレッドで『まだ？』と聞かれたら"
+        "同じjob_idでstatusを照会する。"
     )
     input_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitInput
     output_schema: ClassVar[type[BaseModel]] = OmiyageReportSubmitOutput
@@ -431,15 +515,25 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
 
         # 入口で走行本数を絞る。**ジョブを作る前**に判定するので、順番待ちになった
         # 依頼は台帳にも残らない（status 照会の対象が増えない・掃除も要らない）。
+        estimate = self._duration_estimate(input)
+        waiter_key = ctx.user_id or ctx.request_id
         admission = self._admission
-        if not admission.try_acquire():
-            log.info("omiyage_report_admission_rejected", limit=admission.limit)
+        if not admission.try_acquire(eta_minutes=estimate.minutes, waiter_key=waiter_key):
+            busy = admission.busy_info(waiter_key, fallback_eta_minutes=estimate.minutes)
+            log.info(
+                "omiyage_report_admission_rejected",
+                limit=admission.limit,
+                position=busy.position,
+                wait_minutes=busy.wait_minutes,
+            )
             return OmiyageReportSubmitOutput(
                 status="busy",
-                retry_after_seconds=self._retry_after_seconds,
+                # 60 秒後に再送しても枠は空かない。順番が来る目安（分）を秒に直して返す。
+                retry_after_seconds=max(self._retry_after_seconds, busy.wait_minutes * 60),
                 message=build_busy_message(
-                    limit=admission.limit,
-                    retry_after_seconds=self._retry_after_seconds,
+                    running=busy.running,
+                    position=busy.position,
+                    wait_minutes=busy.wait_minutes,
                 ),
             )
 
@@ -494,7 +588,18 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             status="queued",
             job_id=job_id,
             retry_after_seconds=self._retry_after_seconds,
-            message=build_accepted_message(input),
+            message=build_accepted_message(input, estimate),
+        )
+
+    def _duration_estimate(self, input: OmiyageReportSubmitInput) -> DurationEstimate:
+        """受付文・順番待ち案内に使う所要目安（依頼内容の軸数＋環境の分析本数・並列度）。"""
+        axes = len(self._axis_plan(input))
+        # 解析対象 = ブランド軸+競合第1軸の上位 N ＋ TOP5 候補（_analysis_targets と対）。
+        planned_videos = self._analysis_per_axis * (2 if input.competitors else 1) + 5
+        return estimate_duration(
+            axes=axes,
+            analysis_videos=min(configured_max_videos(), planned_videos),
+            analysis_concurrency=configured_concurrency(),
         )
 
     # ------------------------------------------------------------------
