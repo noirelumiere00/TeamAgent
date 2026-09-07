@@ -32,8 +32,10 @@ Usage:
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,7 +99,9 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
         "users.messages.insert",  # 受信箱へメール注入
         "users.threads.modify",  # スレッドのラベル改竄（本 Bot は messages.modify のみ使用）
         "users.drafts.update",  # 下書き改竄（作成のみ許可）
-        "users.drafts.delete",  # 下書き削除
+        # 下書き削除。denylist には残すが、TeamAgent 製の目印を drafts.get で確認した
+        # delete_draft() だけが armed() で一時的に通せる（_GATED_METHODS）。
+        "users.drafts.delete",
         # ── 情報持ち出し（exfiltration）系の設定変更 ──
         "users.settings.updateAutoForwarding",  # 全メール自動転送（最重要・漏洩）
         "users.settings.forwardingAddresses.create",  # 転送先追加
@@ -117,6 +121,25 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
     }
 )
 
+# denylist に**残したまま**、本人確認を済ませた 1 経路（:meth:`GmailClient.delete_draft`）
+# だけが :meth:`_GmailSafePolicy.armed` で一時的に通せるメソッド。ここに無いものは
+# armed でも開かない（送信・受信メール削除は永久に封鎖）。
+#
+# 背景（2026-09-07 本番実測）: 返信下書きを別スレッドに作ってしまった際、Aico 自身が
+# その誤下書きを片付けられず利用者に手作業を強いた。削除対象は **TeamAgent が作った
+# 下書きだけ**（:data:`TEAMAGENT_DRAFT_HEADER` を持つもの）に限り、人が書いた下書きは
+# 同じ API でも削除しない（drafts.get で確認してから armed する）。
+_GATED_METHODS: frozenset[str] = frozenset({"users.drafts.delete"})
+
+#: TeamAgent が作った下書きに必ず付ける目印ヘッダ。:meth:`GmailClient.delete_draft` は
+#: この目印が **無い** 下書きを削除しない（人が Gmail で書いた下書きを消さないため）。
+TEAMAGENT_DRAFT_HEADER = "X-TeamAgent-Draft"
+TEAMAGENT_DRAFT_HEADER_VALUE = "1"
+
+
+class DraftNotOwnedError(ValueError):
+    """削除を求められた下書きに TeamAgent の目印ヘッダが無い（＝人が書いた可能性）。"""
+
 
 class _GmailSafePolicy:
     """Gmail API method path を denylist 評価する policy。
@@ -135,9 +158,36 @@ class _GmailSafePolicy:
         denylist: frozenset[str] = _GMAIL_DESTRUCTIVE_METHODS,
     ) -> None:
         self._denylist = denylist
+        # ``armed()`` で一時的に通す 1 メソッド。denylist そのものは 1 バイトも変えない。
+        self._armed: str | None = None
+
+    @contextlib.contextmanager
+    def armed(self, method_path: str) -> Iterator[None]:
+        """denylist 該当メソッドを **この with ブロックの中だけ** 通す（一度きり・自動解除）。
+
+        使ってよいのは :data:`_GATED_METHODS` に列挙した「本人確認を済ませた上でだけ呼ぶ」
+        メソッドのみ（例: TeamAgent 自身が作った下書きの削除）。それ以外を渡すと
+        ``ValueError`` で拒む＝送信・受信メール削除は armed でも絶対に開かない。
+        ネストした場合は外側の武装を保存し、抜けるときに戻す。
+        """
+        if method_path not in _GATED_METHODS:
+            raise ValueError(f"'{method_path}' は armed() で開けるメソッドではありません")
+        previous = self._armed
+        self._armed = method_path
+        try:
+            yield
+        finally:
+            self._armed = previous
 
     def assert_safe(self, method_path: str) -> None:
         if method_path not in self._denylist:
+            return
+        if method_path == self._armed:
+            logger.info(
+                "gmail_gated_call_allowed",
+                method_path=method_path,
+                policy="GmailSafePolicy",
+            )
             return
         logger.error(
             "gmail_destructive_call_blocked",
@@ -642,6 +692,67 @@ class GmailClient:
         )
         return draft
 
+    def get_draft(
+        self, draft_id: str, request_id: str, *, user_id: str = "me"
+    ) -> tuple[GmailDraft, dict[str, str]]:
+        """drafts.get（format='metadata'）で下書きの ID とヘッダだけを取る（本文は取らない）。
+
+        :meth:`delete_draft` の所有確認用。戻り値は (draft, headers)。
+        """
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        resp = (
+            service.users().drafts().get(userId=user_id, id=draft_id, format="metadata").execute()
+        )
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        msg = resp.get("message", {}) or {}
+        parsed = _message_from_resp(msg)
+        draft = GmailDraft(
+            id=str(resp.get("id", "")),
+            message_id=parsed.id,
+            thread_id=parsed.thread_id or None,
+        )
+        logger.info(
+            "gmail_get_draft", request_id=request_id, draft_id=draft.id, latency_ms=latency_ms
+        )
+        return draft, parsed.headers
+
+    def delete_draft(self, draft_id: str, request_id: str, *, user_id: str = "me") -> GmailDraft:
+        """TeamAgent 自身が作った下書き **だけ** を削除する（drafts.delete・送信はしない）。
+
+        手順（fail-closed）:
+          1. drafts.get で目印ヘッダ :data:`TEAMAGENT_DRAFT_HEADER` を確認する。
+             無ければ :class:`DraftNotOwnedError`（人が書いた下書きは触らない）。
+          2. 目印があるときだけ、denylist を :meth:`_GmailSafePolicy.armed` で
+             **この呼び出しの間だけ** 開いて ``users.drafts.delete`` を実行する。
+
+        ``users.drafts.delete`` は denylist に残っているので、この経路以外（生 Resource 経由・
+        別メソッド）からは従来どおり RuntimeError で物理封鎖される。
+        """
+        draft, headers = self.get_draft(draft_id, request_id, user_id=user_id)
+        if not draft_has_teamagent_marker(headers):
+            logger.warning(
+                "gmail_delete_draft_refused_not_owned",
+                request_id=request_id,
+                draft_id=draft_id,
+            )
+            raise DraftNotOwnedError(
+                "この下書きは TeamAgent が作成したものではないため削除しません"
+            )
+        service = self._ensure_safe_service()
+        start = time.perf_counter()
+        with self._safe_policy.armed("users.drafts.delete"):
+            service.users().drafts().delete(userId=user_id, id=draft_id).execute()
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        logger.info(
+            "gmail_delete_draft",
+            request_id=request_id,
+            draft_id=draft_id,
+            thread_id=draft.thread_id,
+            latency_ms=latency_ms,
+        )
+        return draft
+
     def list_drafts(
         self,
         request_id: str,
@@ -941,5 +1052,13 @@ def _build_raw_email(
     if in_reply_to_message_id:
         msg["In-Reply-To"] = in_reply_to_message_id
         msg["References"] = in_reply_to_message_id
+    # TeamAgent 製の目印。:meth:`GmailClient.delete_draft` はこれが無い下書きを消さない。
+    msg[TEAMAGENT_DRAFT_HEADER] = TEAMAGENT_DRAFT_HEADER_VALUE
     msg.set_content(body_text)
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+
+
+def draft_has_teamagent_marker(headers: dict[str, str]) -> bool:
+    """ヘッダ dict に TeamAgent の目印（大小文字を区別しない）があるか。"""
+    wanted = TEAMAGENT_DRAFT_HEADER.lower()
+    return any(str(k).lower() == wanted and str(v or "").strip() for k, v in headers.items())
