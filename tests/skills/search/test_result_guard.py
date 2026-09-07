@@ -700,19 +700,33 @@ def test_match_client_lenient_path_keeps_boost_recall(fake_bedrock: MagicMock) -
 
 
 def test_client_vocabulary_cache_is_keyed_by_groups_and_role(fake_bedrock: MagicMock) -> None:
-    """語彙キャッシュは (user_groups, user_role) 単位（利用者横断の共有をやめる）＋TTL。"""
+    """語彙キャッシュは (user_groups, user_role, user_email) 単位（利用者横断の共有をやめる）＋TTL。
+    documents の RLS（0010）は owner_email / acl_emails を app.user_email で判定するため、
+    同じ groups/role でも email が違えば別取得（本人限定文書の名前を他人の語彙に混ぜない）。"""
     pg = _pgvector([_hit(0.8, client_name="花王")], vocab=["花王"])
     skill = _skill(fake_bedrock, pg)
-    ctx_a = SkillContext(metadata={"user_groups": ["sales"], "user_role": "member"})
+    ctx_a = SkillContext(
+        metadata={"user_groups": ["sales"], "user_role": "member", "user_email": "a@x.jp"}
+    )
     ctx_b = SkillContext(metadata={"user_groups": ["exec"], "user_role": "admin"})
+    ctx_a2 = SkillContext(  # groups/role は ctx_a と同じ・email だけ違う
+        metadata={"user_groups": ["sales"], "user_role": "member", "user_email": "b@x.jp"}
+    )
+    ctx_a_upper = SkillContext(  # email の大文字小文字は RLS 同様に同一視（lower）
+        metadata={"user_groups": ["sales"], "user_role": "member", "user_email": "A@X.JP"}
+    )
     skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
     skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
     assert pg.list_client_names.call_count == 1  # 同じキーは再取得しない
     skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_b)
     assert pg.list_client_names.call_count == 2  # 別キーは別取得
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a2)
+    assert pg.list_client_names.call_count == 3  # 同 groups/role でも email 違いは別取得
+    skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a_upper)
+    assert pg.list_client_names.call_count == 3  # email は lower で同一視（再取得しない）
     skill._client_vocab_ttl_s = 0.0
     skill.run(input=SearchInput(query="花王の提案書"), ctx=ctx_a)
-    assert pg.list_client_names.call_count == 3  # TTL 切れで再取得
+    assert pg.list_client_names.call_count == 4  # TTL 切れで再取得
 
 
 def test_client_vocabulary_failure_is_cached_and_logged_with_exc_type_only(

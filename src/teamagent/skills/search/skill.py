@@ -64,6 +64,11 @@ from teamagent.skills.search.two_stage import (
 
 logger = structlog.get_logger(__name__)
 
+# クライアント語彙キャッシュのキー。documents の RLS（0010 documents_user_acl）が可視範囲を
+# 決める属性は user_groups / user_role に加えて user_email（owner_email・acl_emails を
+# lower(app.user_email) で判定）なので、この 3 つを鍵にする。
+_VocabKey = tuple[tuple[str, ...], str | None, str]
+
 # ユーザー向け回答から内部マーカー（chunk_id 引用・低信頼タグ）を除去する。
 # v2d プロンプトでも chunk_id を出さない指示にしたが、Bedrock が入力チャンクの
 # `[chunk_id: N]` を echo することがあるため後段でも保険で落とす（営業に技術IDを見せない）。
@@ -216,13 +221,11 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 既定 OFF（USE_CLIENT_BOOST）。語彙は初回に1度だけ取得しキャッシュする。
         self._use_client_boost = use_client_boost
         self._client_boost_limit = client_boost_limit
-        # 語彙キャッシュは (user_groups, user_role) キー＋TTL。かつてインスタンス 1 つに
+        # 語彙キャッシュは (user_groups, user_role, user_email) キー＋TTL。かつてインスタンス 1 つに
         # 永続キャッシュしていたため「最初の呼び出し者の RLS 可視範囲」の語彙を全利用者が
         # 共有していた（閲覧制限付き文書のクライアント名が他人の boost/guard 語彙に漏れる）。
         # 失敗も同じキーで [] を固定する（重い SELECT を毎リクエスト再試行しない）。
-        self._client_vocab_cache: dict[
-            tuple[tuple[str, ...], str | None], tuple[float, list[str]]
-        ] = {}
+        self._client_vocab_cache: dict[_VocabKey, tuple[float, list[str]]] = {}
         self._client_vocab_lock = threading.Lock()
         # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」等を検出したら
         # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
@@ -729,8 +732,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         user_groups_raw = ctx.metadata.get("user_groups")
         user_groups = list(user_groups_raw) if isinstance(user_groups_raw, (list, tuple)) else None
         user_role = ctx.metadata.get("user_role")
-        # クライアント語彙キャッシュのキー（RLS 可視範囲を決める属性と同じ粒度）。
-        vocab_key = self._vocab_cache_key(user_groups, user_role)
+        # クライアント語彙キャッシュのキー。RLS（documents_user_acl）は groups / role だけでなく
+        # owner_email / acl_emails を app.user_email で判定するため email も鍵に含める
+        # （同じ groups/role の別利用者が「本人にしか見えない文書」の名前を共有しない）。
+        vocab_key = self._vocab_cache_key(user_groups, user_role, user_email)
 
         with self._pgvector.connection(
             app_role=self._app_role,
@@ -1184,20 +1189,22 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
 
     @staticmethod
     def _vocab_cache_key(
-        user_groups: list[str] | None, user_role: Any
-    ) -> tuple[tuple[str, ...], str | None]:
+        user_groups: list[str] | None, user_role: Any, user_email: Any
+    ) -> _VocabKey:
         groups = tuple(sorted(str(g) for g in (user_groups or [])))
         role = str(user_role) if user_role is not None else None
-        return (groups, role)
+        # RLS は lower(app.user_email) で比較する（0010）ので同じ正規化で鍵にする（未注入は ""）。
+        email = str(user_email).lower() if user_email else ""
+        return (groups, role, email)
 
     def _client_vocabulary(
         self,
         conn: Any,
         request_id: str,
-        vocab_key: tuple[tuple[str, ...], str | None] | None,
+        vocab_key: _VocabKey | None,
     ) -> list[str]:
-        """既知クライアント語彙（(user_groups, user_role) キー・TTL キャッシュ・失敗も固定）。"""
-        key = vocab_key if vocab_key is not None else ((), None)
+        """既知クライアント語彙（(groups, role, email) キー・TTL キャッシュ・失敗も固定）。"""
+        key = vocab_key if vocab_key is not None else ((), None, "")
         now = time.monotonic()
         with self._client_vocab_lock:
             cached = self._client_vocab_cache.get(key)
@@ -1223,7 +1230,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         request_id: str,
         *,
         strict: bool = False,
-        vocab_key: tuple[tuple[str, ...], str | None] | None = None,
+        vocab_key: _VocabKey | None = None,
     ) -> str | None:
         """クエリ文字列に既知クライアント名が含まれれば最長一致を返す。
 
@@ -1245,7 +1252,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_recurring: bool = False,
-        vocab_key: tuple[tuple[str, ...], str | None] | None = None,
+        vocab_key: _VocabKey | None = None,
     ) -> list[SearchHit]:
         """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
 
