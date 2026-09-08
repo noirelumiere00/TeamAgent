@@ -38,6 +38,7 @@ from teamagent.skills._shared.next_step import (
 from teamagent.skills._shared.source_url import slack_thread_permalink
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search.aggregation import extract_aggregation_filter
+from teamagent.skills.search.client_match import normalize_filter_client
 from teamagent.skills.search.dates import extract_title_date, resolve_date_basis
 from teamagent.skills.search.dedup import cap_per_document, collapse_near_duplicates
 from teamagent.skills.search.fusion import reciprocal_rank_fusion
@@ -47,7 +48,11 @@ from teamagent.skills.search.knowledge_query import (
 )
 from teamagent.skills.search.query_planner import QueryPlanner
 from teamagent.skills.search.rerank import sort_by_budget_proximity, sort_by_client_match
-from teamagent.skills.search.result_guard import build_result_header, prefix_header
+from teamagent.skills.search.result_guard import (
+    build_result_header,
+    find_client_mention,
+    prefix_header,
+)
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 from teamagent.skills.search.two_stage import (
     TWO_STAGE_CTX_KEY,
@@ -59,6 +64,11 @@ from teamagent.skills.search.two_stage import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# クライアント語彙キャッシュのキー。documents の RLS（0010 documents_user_acl）が可視範囲を
+# 決める属性は user_groups / user_role に加えて user_email（owner_email・acl_emails を
+# lower(app.user_email) で判定）なので、この 3 つを鍵にする。
+_VocabKey = tuple[tuple[str, ...], str | None, str]
 
 # ユーザー向け回答から内部マーカー（chunk_id 引用・低信頼タグ）を除去する。
 # v2d プロンプトでも chunk_id を出さない指示にしたが、Bedrock が入力チャンクの
@@ -214,7 +224,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 既定 OFF（USE_CLIENT_BOOST）。語彙は初回に1度だけ取得しキャッシュする。
         self._use_client_boost = use_client_boost
         self._client_boost_limit = client_boost_limit
-        self._client_vocab: list[str] | None = None
+        # 語彙キャッシュは (user_groups, user_role, user_email) キー＋TTL。かつてインスタンス 1 つに
+        # 永続キャッシュしていたため「最初の呼び出し者の RLS 可視範囲」の語彙を全利用者が
+        # 共有していた（閲覧制限付き文書のクライアント名が他人の boost/guard 語彙に漏れる）。
+        # 失敗も同じキーで [] を固定する（重い SELECT を毎リクエスト再試行しない）。
+        self._client_vocab_cache: dict[_VocabKey, tuple[float, list[str]]] = {}
+        self._client_vocab_lock = threading.Lock()
         # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」等を検出したら
         # 意味検索ではなくメタデータフィルタ列挙 (list_by_metadata) で答える。
         # USE_AGGREGATION_MODE=true で有効化 (既定 OFF)。new_schema 前提。
@@ -307,6 +322,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         # 関連資料の顔で出る」事故が起きたのはプロンプト側に任せていたため）。
         self._result_guard = self._envflag("SEARCH_RESULT_GUARD", default="true")
         self._weak_result_threshold = self._envfloat("SEARCH_WEAK_RESULT_THRESHOLD", 0.3)
+        # クライアント不一致警告のヒット側判定で cls_entities を見るか（既定 ON）。
+        # cls_entities は「実際に登場する取引先・ブランド」を LLM が列挙したタグで競合を
+        # 除外しないため、沈黙し過ぎたときに entities 判定だけ切れるようにしておく。
+        self._client_guard_entities = self._envflag("SEARCH_CLIENT_GUARD_ENTITIES", default="true")
+        # クライアント語彙キャッシュの TTL（秒・既定 10 分）。
+        self._client_vocab_ttl_s = self._envfloat("SEARCH_CLIENT_VOCAB_TTL_S", 600.0)
 
     @property
     def embedder(self) -> Any:
@@ -395,13 +416,30 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         #        LLM に判断させない（プロンプトは守られないことがある／ここは無い）。
         guard_header = ""
         if self._result_guard:
+            guard_decision: dict[str, Any] = {}
             guard_header = build_result_header(
                 query=input.query,
                 hits=hits,
                 weak_threshold=self._weak_result_threshold,
                 query_client=(probe or {}).get("query_client"),
                 asked_industry=input.filter_industry,
+                use_entities=self._client_guard_entities,
+                decision=guard_decision,
             )
+            if guard_decision:
+                # クライアント指定があった全リクエストで 1 行（警告の有無に依らず）。
+                # 「沈黙させた件数」を数えるため。kwargs は固定 4 つ（G8: クエリ原文・
+                # 資料名・クライアント名は載せない。契約テストでキー集合を固定）。
+                asked_source = (probe or {}).get("asked_source") or str(
+                    guard_decision.get("asked_source") or "unknown"
+                )
+                log.info(
+                    "search_client_guard_decision",
+                    request_id=ctx.request_id,
+                    asked_source=asked_source,
+                    matched_via=str(guard_decision.get("matched_via") or "unknown"),
+                    warned=bool(guard_decision.get("warned")),
+                )
             if guard_header:
                 log.info(
                     "search_result_guard_header",  # G8: クエリ原文・資料名は出さない
@@ -706,6 +744,10 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         user_groups_raw = ctx.metadata.get("user_groups")
         user_groups = list(user_groups_raw) if isinstance(user_groups_raw, (list, tuple)) else None
         user_role = ctx.metadata.get("user_role")
+        # クライアント語彙キャッシュのキー。RLS（documents_user_acl）は groups / role だけでなく
+        # owner_email / acl_emails を app.user_email で判定するため email も鍵に含める
+        # （同じ groups/role の別利用者が「本人にしか見えない文書」の名前を共有しない）。
+        vocab_key = self._vocab_cache_key(user_groups, user_role, user_email)
 
         with self._pgvector.connection(
             app_role=self._app_role,
@@ -714,15 +756,21 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             user_role=user_role,
         ) as conn:
             # result_guard 用: 「利用者はどのクライアントの資料を求めたか」をここで確定させる。
-            # 明示 filter_client が最優先、無ければ既知クライアント語彙への substring 一致
-            # （_match_client。語彙は初回 1 度だけ取得しインスタンスにキャッシュ）。
+            # 明示 filter_client が最優先、無ければ既知クライアント語彙への **語境界つき**
+            # 一致（_match_client strict。「ユニークユーザー数」に「ユニー」を当てない）。
+            # boost / sort の緩い substring とは別（あちらは再現率優先・こちらは警告の根拠）。
             # 語彙取得に失敗しても _match_client が握って None を返す＝検索本体は継続。
             if probe is not None:
-                matched_client = input.filter_client or self._match_client(
-                    input.query, conn, ctx.request_id
-                )
-                if matched_client:
-                    probe["query_client"] = matched_client
+                if input.filter_client:
+                    probe["query_client"] = input.filter_client
+                    probe["asked_source"] = "filter"
+                else:
+                    matched_client = self._match_client(
+                        input.query, conn, ctx.request_id, strict=True, vocab_key=vocab_key
+                    )
+                    if matched_client:
+                        probe["query_client"] = matched_client
+                        probe["asked_source"] = "vocab"
             if self._use_new_schema:
                 # Sprint 5: 集約・一覧クエリモード。「BANT A の案件一覧」「失注案件」等は
                 # 意味検索では答えられないため、メタデータフィルタで FB を列挙する。
@@ -751,8 +799,12 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # budget は sticky（fail-open でも外さない）。include_unknown_budget=True なら
                 # 専用キー __budget_or_unknown__ で (cls_budget=値 OR '不明') の soft 化、
                 # 既定（False）は strict（指定バンドのみ）。
+                # LLM が「（アース製薬）」「花王様」のまま渡す filter_client は ILIKE の
+                # パターンにする前に括弧・敬称・法人格を剥がす（0 件→fail-open 再検索→
+                # 無関係ヒットで「本物っぽい」不一致警告、の連鎖を断つ）。
+                normalized_filter_client = normalize_filter_client(input.filter_client)
                 mc: dict[str, str] | None = (
-                    {"__client__": input.filter_client} if input.filter_client else None
+                    {"__client__": normalized_filter_client} if normalized_filter_client else None
                 )
                 # NL client 配線: query_planner が抽出した client 名を、ユーザーが明示的に
                 # filter_client を指定していないときだけ __client__ に昇格する（plan 取得後）。
@@ -899,6 +951,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                         sticky_filters=sticky,  # 明示 doc_type/solution/budget を boost でも保持
                         metadata_contains=mc,  # 通常 None（filter_client 未指定時のみ boost）
                         exclude_recurring=excl_recurring,  # 提案書 intent 時のみ（boost も同じ）
+                        vocab_key=vocab_key,
                     )
                 # 2026-08-27: Drive 実資料のリコール床。営業 FB クラスタがプールを占有して
                 # gdrive が 1 件も rerank へ届かない事象（実測: gdrive 最上位 78 位）への対策。
@@ -1006,7 +1059,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 # を基準にする。env-gate SEARCH_CLIENT_MATCH_SORT（既定 OFF・恒等）。
                 if self._client_match_sort and hits:
                     client_for_sort = input.filter_client or self._match_client(
-                        input.query, conn, ctx.request_id
+                        input.query, conn, ctx.request_id, vocab_key=vocab_key
                     )
                     if client_for_sort:
                         before_top = hits[0].chunk_id if hits else None
@@ -1146,18 +1199,58 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         )
         return related
 
-    def _match_client(self, query: str, conn: Any, request_id: str) -> str | None:
-        """クエリ文字列に既知クライアント名が substring で含まれれば最長一致を返す。"""
-        if self._client_vocab is None:
-            try:
-                self._client_vocab = self._pgvector.list_client_names(
-                    conn=conn, request_id=request_id
-                )
-            except Exception:  # 語彙取得失敗時はブースト無効（検索本体は継続）
-                self._client_vocab = []
-        # 長い名前を優先（短い部分名の誤爆を避ける）
-        matched = [n for n in self._client_vocab if n and n in query]
-        return max(matched, key=len) if matched else None
+    @staticmethod
+    def _vocab_cache_key(
+        user_groups: list[str] | None, user_role: Any, user_email: Any
+    ) -> _VocabKey:
+        groups = tuple(sorted(str(g) for g in (user_groups or [])))
+        role = str(user_role) if user_role is not None else None
+        # RLS は lower(app.user_email) で比較する（0010）ので同じ正規化で鍵にする（未注入は ""）。
+        email = str(user_email).lower() if user_email else ""
+        return (groups, role, email)
+
+    def _client_vocabulary(
+        self,
+        conn: Any,
+        request_id: str,
+        vocab_key: _VocabKey | None,
+    ) -> list[str]:
+        """既知クライアント語彙（(groups, role, email) キー・TTL キャッシュ・失敗も固定）。"""
+        key = vocab_key if vocab_key is not None else ((), None, "")
+        now = time.monotonic()
+        with self._client_vocab_lock:
+            cached = self._client_vocab_cache.get(key)
+            if cached is not None and now - cached[0] < self._client_vocab_ttl_s:
+                return cached[1]
+        try:
+            vocab = list(self._pgvector.list_client_names(conn=conn, request_id=request_id))
+        except Exception as exc:  # 語彙取得失敗時はブースト/警告無効（検索本体は継続）
+            logger.warning(
+                "search_client_vocab_failed",
+                request_id=request_id,
+                exc_type=type(exc).__name__,
+            )
+            vocab = []
+        with self._client_vocab_lock:
+            self._client_vocab_cache[key] = (now, vocab)
+        return vocab
+
+    def _match_client(
+        self,
+        query: str,
+        conn: Any,
+        request_id: str,
+        *,
+        strict: bool = False,
+        vocab_key: _VocabKey | None = None,
+    ) -> str | None:
+        """クエリ文字列に既知クライアント名が含まれれば最長一致を返す。
+
+        strict=False（boost / sort）は現行の緩い substring。strict=True（result_guard の
+        asked 検出）は語境界つき（カタカナ・英数字の途中で切れる一致を取らない）。
+        """
+        vocab = self._client_vocabulary(conn, request_id, vocab_key)
+        return find_client_mention(query, vocab, strict=strict)
 
     def _apply_client_boost(
         self,
@@ -1171,6 +1264,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         sticky_filters: dict[str, str] | None = None,
         metadata_contains: dict[str, str] | None = None,
         exclude_recurring: bool = False,
+        vocab_key: _VocabKey | None = None,
     ) -> list[SearchHit]:
         """固有名詞クエリで client_name 絞り検索を追加し rerank プールへ合流する。
 
@@ -1187,7 +1281,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
         boost 経路だけ素通しになる（boilerplate/duplicates で過去 2 回検出済みの取りこぼしと
         同型の穴）。exclude_recurring は _retrieve が判定した提案書 intent の値。
         """
-        matched = self._match_client(query, conn, request_id)
+        matched = self._match_client(query, conn, request_id, vocab_key=vocab_key)
         if not matched:
             return hits
         # 絞り込みは __client__（cls_project / client_name / title の OR-ILIKE）で行う。

@@ -19,6 +19,10 @@ from typing import TYPE_CHECKING
 
 from teamagent.ingest.classify import _BUDGETS  # 単一の真実源
 
+# _hit_matches_client は client_match（純関数）へ移設。挙動不変。外部からの
+# `rerank._hit_matches_client` 参照を壊さないため再エクスポートする。
+from teamagent.skills.search.client_match import _hit_matches_client
+
 if TYPE_CHECKING:
     from teamagent.adapters.pgvector_client import SearchHit
 
@@ -52,45 +56,6 @@ def sort_by_budget_proximity(hits: list[SearchHit], target_band: str) -> list[Se
         return (band_dist, low_conf, -float(h.score))
 
     return sorted(hits, key=key)  # Python sorted は安定ソート
-
-
-def _hit_matches_client(h: SearchHit, client: str) -> bool:
-    """hit が client（取引先/ブランド/コラボ名）に一致するかを広く判定する。
-
-    2026-07-14 拡張（C・親クライアントで子コラボが出ない問題の即効対策）:
-    従来は cls_project / client_name の単一メタだけを見ていたため、「サンマルクカフェ×
-    祇園辻利コラボ」の資料が cls_project='祇園辻利' 側に分類されるとサンマルクカフェ検索で
-    ブーストされず沈んだ。以下も一致対象に加える:
-    - ``cls_entities``: Agent が抽出する取引先/代理店/ブランド/コラボ名の多値タグ（資料単位・
-      名寄せ本体。まだ無い資料もあるので存在時のみ・list/CSV 両対応）
-    - ``title``: 資料タイトル（DB フィルタ側は既に title を OR に含む・rerank と整合）
-    - ``content``: chunk 本文に取引先名が出現（例: 本文が「サンマルクカフェ×祇園辻利」）
-
-    メタ系は双方向部分一致、content は誤爆抑制のため片方向（needle in content）かつ 2 文字以上。
-    """
-    needle = client.strip()
-    if not needle:
-        return False
-
-    def _bidi(s: str | None) -> bool:
-        s = str(s or "").strip()
-        return bool(s) and (needle in s or s in needle)
-
-    # 単値メタ + タイトル（双方向部分一致）
-    for k in ("cls_project", "client_name", "title"):
-        if _bidi(h.metadata.get(k)):
-            return True
-    # 多値エンティティタグ（名寄せ本体・list または CSV）
-    ents = h.metadata.get("cls_entities")
-    if isinstance(ents, str):
-        ents = [e for e in ents.split(",")]
-    if isinstance(ents, list | tuple):
-        if any(_bidi(e) for e in ents):
-            return True
-    # 本文出現（片方向・2 文字以上でノイズ抑制）
-    if len(needle) >= 2 and needle in (h.content or ""):
-        return True
-    return False
 
 
 def sort_by_client_match(hits: list[SearchHit], client: str) -> list[SearchHit]:

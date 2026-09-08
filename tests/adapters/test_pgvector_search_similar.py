@@ -503,3 +503,26 @@ def test_search_drive_by_client_names_exposes_updated_at() -> None:
     assert hits[0].metadata["updated_at"] == "2026-05-05"
     assert hits[0].metadata["date_basis"] == "modified_at"
     assert "updated_at" not in hits[1].metadata
+
+
+# ── 便A-1: cls_entities（取引先/ブランドの多値タグ）の射影 ─────────────────
+
+
+def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None:
+    """cls_entities（取引先/ブランドの多値タグ・CSV）を SELECT し metadata に詰める。
+
+    2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は本番で
+    死んだコードだった（便A-1 client_guard）。無い行（None）は metadata に載せない。
+    """
+    rows = [
+        _row(cls_project="SOMARCA", cls_entities="ホーユー,SOMARCA"),
+        _row(chunk_id=43, cls_project="SOMARCA", cls_entities=None),
+    ]
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn_with_rows(rows)
+    hits = client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
+    sql: str = cur.execute.call_args.args[0]
+    assert "d.metadata->>'cls_entities' AS cls_entities" in sql
+    assert hits[0].metadata["cls_entities"] == "ホーユー,SOMARCA"
+    assert hits[0].metadata["cls_project"] == "SOMARCA"
+    assert "cls_entities" not in hits[1].metadata

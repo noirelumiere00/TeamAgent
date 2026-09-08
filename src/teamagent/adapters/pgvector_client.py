@@ -630,6 +630,7 @@ class PgVectorClient:
                 d.metadata->>'cls_solution' AS cls_solution,
                 d.metadata->>'cls_budget' AS cls_budget,
                 d.metadata->>'cls_target' AS cls_target,
+                d.metadata->>'cls_entities' AS cls_entities,
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -676,6 +677,9 @@ class PgVectorClient:
             # ナレッジ自動分類タグ（ingest.classify が付与・案件/業界/種別/フェーズ、
             # および第2世代の解決策/予算/ターゲット軸）。
             # is_sales_fb と独立に常に拾う（Drive 資料は FB ではないが分類対象）。
+            # cls_entities（取引先/ブランド/代理店の多値タグ・CSV）も射影する。
+            # 2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は
+            # 本番で死んだコードだった（ingest 側の USE_ENTITY_TAGS が OFF なら NULL のまま）。
             for cls_key in (
                 "cls_project",
                 "cls_industry",
@@ -684,6 +688,7 @@ class PgVectorClient:
                 "cls_solution",
                 "cls_budget",
                 "cls_target",
+                "cls_entities",
             ):
                 if r.get(cls_key):
                     meta[cls_key] = r[cls_key]
