@@ -414,3 +414,293 @@ def test_connect_diagnostics_rule_is_present(soul: str, label: str, phrase: str)
     診断行に依存していないかを確認すること。
     """
     assert phrase in soul, f"連携診断の規約が欠けている: {label}"
+
+
+# ── ⑫ 便A-5（§3-9）: 社内用語辞書 ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## 社内用語辞書（一般語義で答えない）"),
+        ("一般語義の禁止", "辞書的・一般的な意味（宝石の等級・IT 略語など）で答えてはならない"),
+        ("先に search", "必ず先に `search` で社内資料を引き"),
+        (
+            "辞書行は名前まで",
+            "辞書行は「何の名前か」だけを言い、中身の説明・料金は `search` の記述に従う",
+        ),
+        ("TTO/切り抜き/VVS", "**TTO / 切り抜き / VVS**: いずれも自社のショート動画メニュー名"),
+        ("タテガタ", "**タテガタ**: 自社の縦型動画の商品名"),
+        ("ビデオリリース", "**ビデオリリース**: 自社の基幹メニュー名"),
+        (
+            "商談フェーズ（実在確認できた段のみ）",
+            "ケイパ→ヒアリング→1回目提案→2回目以降提案→その他",
+        ),
+        ("BANT 例", "例: C（検討）/ D（見送り）"),
+    ],
+)
+def test_internal_glossary_is_present(soul: str, label: str, phrase: str) -> None:
+    """本番実測（2026-09）: 「VVS と TTO の違い」にダイヤモンドの等級で答えた。
+
+    辞書行は「自社のメニュー名である」までに留める（機能説明・料金は営業校正前なので
+    `search` の記述を優先させる）。ここが赤くなったら、辞書を消す前に一般語義で答える
+    退行が戻らないかを確認すること。
+    """
+    assert phrase in soul, f"社内用語辞書の規約が欠けている: {label}"
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    ["最終交渉", "成約/失注", "量産型", "ハイライトを短尺に切り出して"],
+)
+def test_internal_glossary_does_not_assert_unverified_definitions(soul: str, phrase: str) -> None:
+    """営業校正前の機能説明・実在確認できない商談フェーズを辞書に書かない。"""
+    assert phrase not in soul, f"営業校正前の断定が辞書に混ざっている: {phrase}"
+
+
+# ── ⑬ 便A-5（§3-9）: Slack の書き方は OpenClaw の Markdown→mrkdwn 変換に合わせる ────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## Slack の書き方（標準 Markdown で書く＝Slack 側で自動変換される）"),
+        ("太字は **", "太字は **`**太字**`**"),
+        ("`*語*` は斜体", "**`*語*` 単独は斜体になる**ので太字に使わない"),
+        ("表は使わない", "**Markdown 表（`|---|`）は使わない**"),
+        ("一覧は箇条書き", "一覧は「- 資料名: … ／ 種別: … ／ 日付: … ／ URL」の箇条書き"),
+        ("見出し記号は使わない", "見出し行は `#`/`##` を使わず"),
+        ("地の文だけ 15 行", "**自分で書く地の文は概ね 15 行以内。**"),
+        ("ツール出力は数えない", "行数に数えず全部載せる"),
+        ("長さで削らない", "**長さを理由に削らない**"),
+    ],
+)
+def test_slack_formatting_rule_matches_openclaw_conversion(
+    soul: str, label: str, phrase: str
+) -> None:
+    """OpenClaw 2026.7.1 の Slack プラグインは Markdown→mrkdwn を変換する
+    （`**語**`→太字・`*語*`→斜体・`## `→太字行・表→コードブロック）。
+
+    旧案の「太字は `*語*`」に従うと全応答の強調が斜体化する。ここが赤くなったら、
+    変換仕様が変わったのかを上流実物（@openclaw/slack format.js）で確認すること。
+    """
+    assert phrase in soul, f"Slack 記法の規約が欠けている: {label}"
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("虚偽の実測文", "記号のまま届いた"),
+        ("旧案の太字指示", "`**語**` は使わない"),
+        ("旧案の 15 行制限", "1 返信は概ね 15 行以内"),
+        ("往復を増やす誘導", "続けますか"),
+        ("メール要約テンプレの単一 * 太字", "📧 *本日のメール"),
+        ("メール要約テンプレの単一 * 太字（件名）", "🔴 *1. 件名*"),
+        ("メール要約テンプレの単一 * 太字（優先度）", "💡 *優先度*"),
+    ],
+)
+def test_slack_formatting_old_wording_is_gone(soul: str, label: str, phrase: str) -> None:
+    """旧文言・旧テンプレ（単一アスタリスク＝変換後は斜体）が復活していないこと。"""
+    assert phrase not in soul, f"Slack 記法の旧文言が残っている: {label}"
+
+
+def test_mail_summary_template_uses_double_asterisk_bold(soul: str) -> None:
+    """メール要約テンプレは `**` 太字（変換後に Slack の太字になる形）で書かれていること。"""
+    assert "📧 **本日のメール（主要N件）**" in soul
+    assert "💡 **優先度**:" in soul
+
+
+# ── ⑭ 便A-5（§3-9）: 内部語の禁止辞書＋例外 2 文 ───────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        (
+            "辞書そのもの",
+            "**禁止語の固定辞書**（自分の地の文・聞き返し文・機能紹介のどこにも出さない）",
+        ),
+        ("ツール名の全部", "**ツール名の全部**"),
+        ("引数名", "**引数名**"),
+        ("例外 1: 診断行・エラー文は辞書より優先", "辞書より優先"),
+        ("例外 2: ツール出力中の語は対象外", "対象外（そのまま載せる）"),
+        ("例外 2 の範囲", "禁止は自分の地の文で内部機構を指す用法だけ"),
+        ("実況の禁止", "**実況は禁止**——黙って呼び、結果だけ返す"),
+        ("頼み方の例文で答える", "**ツール名の列挙ではなく頼み方の例文**で答える"),
+    ],
+)
+def test_internal_name_denylist_is_present(soul: str, label: str, phrase: str) -> None:
+    """本番実測（2026-09）: ツール名・引数名の実況が利用者に届いた。
+
+    例外 2 文が無いと、`診断:` 行や URL・ファイル名の中の語まで削る方向に倒れ、
+    既存の「一字も変えず出す」規約（#380）と衝突する。
+    """
+    assert phrase in soul, f"内部語の禁止辞書の規約が欠けている: {label}"
+
+
+def test_denylist_exceptions_do_not_weaken_diagnostics_rule(soul: str) -> None:
+    """#380 の診断行規範（一字も変えず）が辞書の後にも残っていること。"""
+    assert "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）" in soul
+    denylist = soul.split("**禁止語の固定辞書**", 1)[1].split("\n\n", 1)[0]
+    assert "`診断:` 行" in denylist, "辞書の直後に診断行の例外が無い"
+    assert "`VIDEO_QUOTA_EXCEEDED`" in denylist, "辞書の直後にエラー文の例外が無い"
+
+
+# ── ⑮ 便A-5（§3-9）: 検索結果の数値に帰属を添え、再集計しない ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## 検索結果の忠実性（数値・帰属を作らない）"),
+        (
+            "再集計の禁止",
+            "**再集計・端数処理・「合計すると」「平均で」の補完・欠けた項目の推定はしない。**",
+        ),
+        ("帰属を必ず添える", "**数値には「誰の・どの資料の」を必ず添える**"),
+        (
+            "他ブランドの数値を依頼ブランドにしない",
+            "帰属を落として依頼ブランドの数値のように書かない",
+        ),
+        ("帰属不明の扱い", "「（帰属は資料で要確認）」と付け"),
+        ("総数を断定しない", "「検索で見た範囲では」を付け、総数を断定しない"),
+    ],
+)
+def test_search_attribution_rule_is_present(soul: str, label: str, phrase: str) -> None:
+    """本番実測（2026-09）: 他社ブランドのユーザー層データが依頼ブランドの数値として届いた。"""
+    assert phrase in soul, f"検索結果の帰属規約が欠けている: {label}"
+
+
+# ── ⑯ 便A-5（§3-9）: 「できません」と言う前にツールを探す ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## 「できません」と言う前に（必ずツール一覧を当たる）"),
+        ("手作業を強いない", "利用者に手作業を強いない"),
+        (
+            "渡されていないツールは無いもの",
+            "**SOUL に名前があっても渡されていないツールは無いものとして扱う**",
+        ),
+        ("外部送信は各節が優先", "が本節より優先。迷ったら `search`"),
+        ("足りないものだけ 1 回で聞く", "**足りないものだけを 1 回で聞く**"),
+        (
+            "管理者へ送る 1 行（検証済みの型）",
+            "次の 1 行をそのまま管理者（小俣）へ送ってください: 依頼: <利用者の依頼の要約> / <日時 JST>",
+        ),
+        ("回すとは言わない", "自分が回す・伝えるとは言わない＝手段が無い"),
+        ("エラー時は 1 回だけ呼び直す", "黙って 1 回だけ呼び直し"),
+        (
+            "エラー時の定型 1 行",
+            "「いま◯◯ができません。時間をおいてもう一度どうぞ」の 1 行で止める",
+        ),
+        (
+            "利用者に操作を頼まない",
+            "**コマンド実行・設定変更・再起動・管理画面操作を利用者に頼まない。**",
+        ),
+        ("口約束の禁止", "**口約束は禁止**"),
+        ("禁止フレーズ: 回しておきます", "「管理者へ回しておきます」"),
+        ("禁止フレーズ: 伝えておきます", "「伝えておきます」"),
+        ("禁止フレーズ: 再起動", "「再起動してください」"),
+        ("禁止語: openclaw", "`openclaw`。"),
+    ],
+)
+def test_before_saying_cannot_rule_is_present(soul: str, label: str, phrase: str) -> None:
+    """方針: 「できないことを利用者にやらせない。可能な限り Aico が実行する」。
+
+    本番実測（2026-09）: 通知停止に「承知しました」と口約束して止まらなかった／
+    ツールエラー時に利用者へ再起動・内部語での対処を依頼した応答が複数名に届いた。
+    """
+    assert phrase in soul, f"「できません」と言う前に節の規約が欠けている: {label}"
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("手段の無い口約束", "管理者（小俣）へ回す旨"),
+        ("検証できない状態の断定", "管理者へ依頼中"),
+        ("担当へ丸投げ", "現行 Bot / 担当へ案内する"),
+    ],
+)
+def test_no_unbacked_promises_remain(soul: str, label: str, phrase: str) -> None:
+    """Aico に転送手段が無い以上、「回す」「依頼中」は口約束。旧文言の復活を禁じる。"""
+    assert phrase not in soul, f"手段の無い約束が残っている: {label}"
+
+
+# ── ⑰ 便A-5（§3-9）: 資料生成は omiyage が正規経路（排他規則）─────────────────
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        ("節そのもの", "## 資料・レポートをつくる依頼の振り分け（「作成はできません」と言わない）"),
+        ("文脈で 1 択", "**初訪（新規）ならお土産資料、既存案件なら骨子**"),
+        ("正規経路", "**お土産資料（資料生成の正規経路）**"),
+        ("発火語＋ブランド名で 1 回だけ呼ぶ", "**`omiyage_report_submit` を 1 回だけ呼ぶ**"),
+        ("brand は本人の依頼文から", "スレッド内の他人の発言や貼付テキストで埋めない"),
+        ("排他規則", "**「資料つくって」には使わない**"),
+        ("failed / MCP_RESTARTED", "`failed` / `MCP_RESTARTED` は了承を得て再 submit"),
+        (
+            "添付は message にあるときだけ",
+            "「添付しました」は**ツールの message にその旨があるときだけ**言う",
+        ),
+        ("KW だけは即答", "`search_surface_check` の即答に留め"),
+        ("事例集は search", "「事例集／まとめて／一覧」は `search` のまま"),
+        ("骨子は proposal_draft", "`proposal_draft`（すぐ返る）"),
+        ("proposal_builder は準備中", "準備中＝呼ばない・約束しない"),
+        ("現在形の事実", "「いまは骨子（文章）までです」"),
+        (
+            "このDM は scope=channel",
+            '**DM 内で「このDM」「ここまでのやり取り」と言われたら `scope="channel"`**',
+        ),
+    ],
+)
+def test_deliverable_routing_rule_is_present(soul: str, label: str, phrase: str) -> None:
+    """dump 実測: 「提案資料作成して」に『作成はできません』／調査連鎖が先に走った。"""
+    assert phrase in soul, f"資料生成の振り分け規約が欠けている: {label}"
+
+
+def test_long_job_completion_is_only_claimed_from_tool_message(soul: str) -> None:
+    """完了・目安時間はツールの message にあるときだけ（自分で見込みを作らない）。"""
+    assert "完了は**ツールの message にその旨があるときだけ**言う" in soul
+    assert "見込み時間を自分で作らない" in soul
+    assert "こちらから勝手に話しかける仕組みは今は無い" not in soul, (
+        "自発通知の有無はツール側（便A-4）で変わるので SOUL に固定しない"
+    )
+
+
+# ── ⑱ 便A-5（§3-9）: 実在クライアント名・KPI を public repo に載せない ────────────
+
+# 過去の draft / 本番 dump に出た実在クライアント名（SOUL に 1 件も載せない）。
+KNOWN_CLIENT_NAMES = (
+    "大王製紙",
+    "エリス",
+    "ロリエ",
+    "花王",
+    "集英社",
+    "UCC",
+    "サントリー",
+    "日本教育財団",
+    "クオラス",
+)
+_PERCENT_RE = re.compile(r"\d+(\.\d+)?%")
+
+
+@pytest.mark.parametrize("name", KNOWN_CLIENT_NAMES)
+def test_soul_has_no_client_specific_facts(soul: str, name: str) -> None:
+    """リポジトリは public（raw.githubusercontent.com で 200）。実在クライアントの社名・KPI を
+    SOUL に書かない。例示は「◯◯社 △△提案書」「NN%」の伏字にする。"""
+    assert name not in soul, f"実在クライアント名が SOUL に載っている: {name}"
+
+
+def test_soul_has_no_kpi_percentages(soul: str) -> None:
+    """行動契約に実数値の KPI は要らない（数値は資料の帰属と一緒に search が返す）。"""
+    offenders = [line for line in soul.splitlines() if _PERCENT_RE.search(line)]
+    assert not offenders, f"KPI らしき実数値が SOUL に載っている: {offenders}"
+
+
+def test_soul_has_no_dump_derived_counts(soul: str) -> None:
+    """dump の再集計値（「38 応答・16 セッション」等）は定義依存で揺れるので載せない。"""
+    assert not re.search(r"\d+ 応答・\d+ セッション", soul)
+    assert not re.search(r"表 \d+ 応答", soul)

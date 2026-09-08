@@ -412,13 +412,20 @@ def test_search_similar_new_schema_h3_guards_invalid_duplicate_of_uuid() -> None
     assert "[0-9a-fA-F]{12}$" in sql
 
 
-def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None:
-    """cls_entities（取引先/ブランドの多値タグ・CSV）を SELECT し metadata に詰める。
+# ── 便A-3: 更新日（documents.modified_at）の射影と meta 露出 ──────────────
 
-    2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は本番で
-    死んだコードだった（便A-1 client_guard）。無い行（None）は metadata に載せない。
-    """
-    base = {
+
+def test_search_similar_new_schema_selects_updated_at_jst() -> None:
+    """SELECT に modified_at の JST 日付文字列（既存流儀 to_char）が updated_at として並ぶ。"""
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, cur = _mock_conn()
+    client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
+    sql: str = cur.execute.call_args.args[0]
+    assert "to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at" in sql
+
+
+def _row(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
         "chunk_id": 42,
         "content": "本文",
         "score": 0.9,
@@ -433,7 +440,7 @@ def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None
         "deal_phase": None,
         "bant_score": None,
         "channel_type": None,
-        "cls_project": "SOMARCA",
+        "cls_project": None,
         "cls_industry": None,
         "cls_doc_type": None,
         "cls_phase": None,
@@ -441,9 +448,75 @@ def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None
         "cls_budget": None,
         "cls_target": None,
     }
+    row.update(overrides)
+    return row
+
+
+def test_search_similar_new_schema_updated_at_lands_in_metadata_with_basis() -> None:
+    """行に updated_at があれば meta に updated_at と date_basis='modified_at' が入る。"""
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, _cur = _mock_conn_with_rows([_row(updated_at="2026-08-28")])
+    hits = client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
+    assert hits[0].metadata["updated_at"] == "2026-08-28"
+    assert hits[0].metadata["date_basis"] == "modified_at"
+
+
+def test_search_similar_new_schema_null_modified_at_leaves_no_date_keys() -> None:
+    """modified_at NULL（to_char → NULL）の行は meta に日付キー自体を持たない。
+
+    呼び側（SearchSkill）が「根拠不明の日付」を作らないための契約。
+    """
+    client = PgVectorClient(dsn="postgresql://stub")
+    conn, _cur = _mock_conn_with_rows([_row(updated_at=None)])
+    hits = client.search_similar_new_schema(conn=conn, embedding=[0.1] * 1024, limit=5)
+    assert "updated_at" not in hits[0].metadata
+    assert "date_basis" not in hits[0].metadata
+
+
+def test_search_drive_by_client_names_exposes_updated_at() -> None:
+    """関連 Drive 資料（search_drive_by_client_names）も同じ契約で updated_at を返す。"""
+    client = PgVectorClient(dsn="postgresql://stub")
     rows = [
-        {**base, "cls_entities": "ホーユー,SOMARCA"},
-        {**base, "chunk_id": 43, "cls_entities": None},
+        {
+            "chunk_id": 7,
+            "content": "関連資料",
+            "page_num": None,
+            "source_uri": "gdrive://rel",
+            "source_type": "gdrive",
+            "title": "関連提案書.pdf",
+            "updated_at": "2026-05-05",
+        },
+        {
+            "chunk_id": 8,
+            "content": "日付なし",
+            "page_num": None,
+            "source_uri": "gdrive://rel2",
+            "source_type": "gdrive",
+            "title": "旧資料.pdf",
+            "updated_at": None,
+        },
+    ]
+    conn, cur = _mock_conn_with_rows(rows)
+    hits = client.search_drive_by_client_names(conn=conn, client_names=["花王"], limit=3)
+    sql: str = cur.execute.call_args.args[0]
+    assert "to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at" in sql
+    assert hits[0].metadata["updated_at"] == "2026-05-05"
+    assert hits[0].metadata["date_basis"] == "modified_at"
+    assert "updated_at" not in hits[1].metadata
+
+
+# ── 便A-1: cls_entities（取引先/ブランドの多値タグ）の射影 ─────────────────
+
+
+def test_search_similar_new_schema_projects_cls_entities_into_metadata() -> None:
+    """cls_entities（取引先/ブランドの多値タグ・CSV）を SELECT し metadata に詰める。
+
+    2026-09 まで SELECT に無く、rerank / result_guard の cls_entities 判定は本番で
+    死んだコードだった（便A-1 client_guard）。無い行（None）は metadata に載せない。
+    """
+    rows = [
+        _row(cls_project="SOMARCA", cls_entities="ホーユー,SOMARCA"),
+        _row(chunk_id=43, cls_project="SOMARCA", cls_entities=None),
     ]
     client = PgVectorClient(dsn="postgresql://stub")
     conn, cur = _mock_conn_with_rows(rows)
