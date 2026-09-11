@@ -165,8 +165,11 @@ def test_slack_section_is_handoff_cards_not_body_excerpts() -> None:
     # バケット内訳は取得できた全件で数え、並べた件数は分けて言う（表示 5 件の内訳を
     # 母数の内訳と誤読させない）。
     assert "🔴 *あなたの番（6件中5件を表示）*" in dump
-    assert "・#ch-0 ・" in dump  # チャンネル（C）にだけ # を付ける
-    assert "※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。" in dump
+    assert "— #ch-0・" in dump  # チャンネル（C）にだけ # を付ける
+    assert (
+        "※ 「」内は相手の原文そのままです。囲みの無い見出しは Aico が付けた定型の言い換えです（要約文は作りません）。"
+        in dump
+    )
     assert "|開く>" in dump  # permalink リンクは維持
     assert "C08CHAN0001" not in dump.replace(  # URL の外に生 ID を出さない
         "https://vector.slack.com/archives/C08CHAN0001/", ""
