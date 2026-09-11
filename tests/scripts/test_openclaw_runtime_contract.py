@@ -2916,7 +2916,12 @@ def test_double_wrapped_tool_arguments_reach_the_tool_in_canonical_form() -> Non
     assert wrapped["blocked"] is False, wrapped["blockReason"]
     # 包みが剥がれ、ツール本来の引数が top に戻っていること。
     assert wrapped["signedTop"] == {"query": "q"}
-    assert wrapped["signedKeys"] == ["_user_context", "query"]
+    # 返り値には「元の包みキーを消す」ための墓標（値 undefined）が載る。上流は hook の
+    # 返り値を置換せず浅くマージする（:1735 / :938-947）ので、これが無いと `arguments`
+    # が実行引数に残り、mcp が請求結合の不一致で拒否する（2026-09-11 実測の I01a）。
+    assert wrapped["signedKeys"] == ["_user_context", "arguments", "query"]
+    # 実際に mcp へ届くのは JSON 化後なので、墓標は消えて正規形になる。
+    assert wrapped["wireKeys"] == ["_user_context", "query"]
     # `_user_context` は plugin が鋳造した authoritative 値。
     assert wrapped["signedContextKeys"] == [
         "caller_claim",
@@ -2993,6 +2998,137 @@ def test_ordinary_tool_arguments_pass_through_the_unwrap_byte_identical() -> Non
     assert unit["bare_name_shape"] == "name_arguments"
 
 
+# ══ `_user_context` をモデルに要求しない（2026-09-11 の本番実測 P06）════════════
+# 実測（EFS のセッション記録から tool call の実物を読んだ・読み取り専用 Fargate プローブ）:
+#   2026-09-11 10:27 4 件 … knowledge_deliver / search。引数は
+#     {query, top_k, filter_doc_type} のみで `_user_context` が**そもそも無い**
+#     （包みではない。wrapDepth=0）。
+#   2026-09-10 12:40 1 件 … slack_summary。引数は {"arguments":{}}（1 段包み・中身が空）。
+# CloudWatch の P06 は 09-04 以降この 5 件だけで、すべて同じ id_shape だった。
+#   `id_shape=sender:absent,team:absent` は異常ではない: 上流 2026.7.1 の
+#   before_tool_call ctx は buildToolContext
+#   （dist/agent-tools.before-tool-call-84fX7TrL.js:1604-1614）が組み、
+#   senderId / teamId を**そもそも含まない**。全 P コードで常に absent になる。
+#
+# 申告値は mintCallerClaim が authoritativeContext で丸ごと置き換えてから署名するため、
+# 「モデルが正しい形で `_user_context` を渡すこと」への依存は
+# セキュリティを 1 ビットも稼いでいない純粋な失敗モードだった。依存を切る。
+_MISSING_UC_PASSING_CASES = (
+    "absent",
+    "wrapped_empty",
+    "empty_object",
+    "partial",
+    "null_context",
+    "string_context",
+    "array_context",
+)
+
+
+def test_tool_calls_without_a_declared_user_context_are_signed_not_blocked() -> None:
+    """モデルが `_user_context` を付けてこなくても claim が組めること（P06 根治）。
+
+    本番実測 5 件の形をそのまま入力にしている。ここが赤い＝利用者に
+    「連携に問題が発生しています」が出る状態に戻ったということ。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    for case in _MISSING_UC_PASSING_CASES:
+        outcome = report[case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        # 署名済みの `_user_context` は ingress の authoritative 値になる。
+        assert outcome["signedUserId"] == "U09CX1CCBLN", case
+        assert outcome["claimUser"] == "U09CX1CCBLN", case
+        assert outcome["signedContextKeys"] == [
+            "caller_claim",
+            "channel_id",
+            "slack_team_id",
+            "slack_user_id",
+        ], case
+
+
+def test_missing_user_context_does_not_move_the_trust_boundary() -> None:
+    """申告が「無い」を通しても、「別人だと申告した」は従来どおり拒否されること。
+
+    ここが緑でないと、`_user_context` を省くことが検査回避の抜け道になる。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    assert report["spoofed_still_blocked"]["blocked"] is True
+    assert report["spoofed_still_blocked"]["diagCode"] == "CONNECT-P05"
+    assert report["claim_still_blocked"]["blocked"] is True
+    assert report["claim_still_blocked"]["diagCode"] == "CONNECT-P05"
+    # params 自体がオブジェクトでない／3 段以上の包みは fail-closed のまま。
+    assert report["non_object_params"]["blocked"] is True
+    assert report["non_object_params"]["diagCode"] == "CONNECT-P06"
+    assert report["triple_wrapped_still_blocked"]["blocked"] is True
+    assert report["triple_wrapped_still_blocked"]["diagCode"] == "CONNECT-P06"
+
+
+# ══ 署名した引数と実行される引数が一致すること（2026-09-11・I01a 根治）═══════════
+# 上流は hook の返り値を**置換せず浅くマージ**する:
+#   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+#     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(...)`
+#   同 :938-947  `(o, a) => ({ ...o, ...a })`
+# そのため 2026-09-04 の unwrap（包みを剥がして中身に署名して返す）は、元の
+# `arguments` キーが実行引数に残り、mcp が
+# `caller claim request binding does not match` で拒否していた。
+# 本番相関は 1:1（同一秒）:
+#   unwrap 成功 09-09 15:12:36 / 15:12:51、09-10 12:40:32 / :34 / :39 / :41
+#   caller_claim_rejected 09-09 15:12:36 / 15:12:51、09-10 12:40:32 / :34 / :39 / :41
+# ＝ unwrap 救済は本番で一度も成立していなかった。
+_UNWRAPPED_CASES = (
+    "single_arguments",
+    "name_and_arguments",
+    "name_and_arguments_oauth",
+    "double_arguments",
+)
+
+
+def test_signed_arguments_match_what_upstream_actually_executes() -> None:
+    """上流の浅いマージを通した実行引数が、署名した結合と一致すること。
+
+    probe 側で上流の 3 行（merge → JSON-RPC 化）を再現し、mcp の
+    ``canonical_request_sha256`` と同じ前処理で突き合わせている。
+    ここが赤い＝利用者に `診断: CONNECT-I01a` が出る状態。
+    """
+    report = _caller_identity_report()
+    for case in _UNWRAPPED_CASES:
+        outcome = report["unwrap"][case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        assert outcome["bindingMatches"] is True, (
+            f"{case}: 署名した引数と実行される引数が食い違う"
+            " → mcp が caller claim request binding does not match で拒否する"
+        )
+        # 包みのキーが実行引数に残っていないこと（残ると tool 側の schema も壊れる）。
+        assert outcome["wireHasWrapperKey"] is False, (case, outcome["wireKeys"])
+    for case in _MISSING_UC_PASSING_CASES:
+        outcome = report["missing_user_context"][case]
+        assert outcome["bindingMatches"] is True, case
+        assert outcome["wireHasWrapperKey"] is False, (case, outcome["wireKeys"])
+
+
+def test_unwrapped_calls_are_reconciled_with_one_observable_line() -> None:
+    """包みを剥がした呼び出しだけが reconcile され、その事実が 1 行残ること。
+
+    包みが無い通常の呼び出しでは返り値に一切触らない（バイト同一を保つ）。
+    """
+    report = _caller_identity_report()
+    lines = [
+        entry["text"]
+        for entry in report["unwrap"]["single_arguments"]["console"]
+        if "reconciled unwrapped tool arguments" in entry["text"]
+    ]
+    assert len(lines) == 1, report["unwrap"]["single_arguments"]["console"]
+    assert "removed=[arguments]" in lines[0]
+    # G7: キー名だけで、値・識別子は載せない。
+    assert "U09CX1CCBLN" not in lines[0]
+    assert "C0B0PQD83N2" not in lines[0]
+    # 包みが無い場合は reconcile しない。
+    assert not [
+        entry
+        for entry in report["unwrap"]["plain_arguments"]["console"]
+        if "reconciled" in entry["text"]
+    ]
+
+
 # ── 拒否の観測性（2026-09-03） ─────────────────────────────────────────────
 # 14 日間、この plugin の warn は CloudWatch に 1 行も出ていなかった。
 # 原因は register が before_tool_call にだけ api.logger を渡しておらず、
@@ -3039,23 +3175,40 @@ def test_block_logs_carry_id_shape_but_no_identifiers() -> None:
 
 
 def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
-    """利用者に届く block 文の末尾に、そのまま転送できる診断行が付くこと。
+    """利用者に届く block 文が、正しい日本語の案内 → 転送定型文 → 診断行であること。
 
     SOUL(#380) が「診断: 行は一字も変えず提示」を規定しているので、利用者の
     スクリーンショット 1 枚から原因コードが判る。user id は載せない（G7）。
+
+    2026-09-11 の本番事故で 1 行目を英語の技術理由から日本語の案内へ変えた。
+    当時の 1 行目は ``_user_context must be a plain object`` で、モデルがそれを
+    読み解けず「Google 連携をリセットすることで解決する可能性があります」と
+    **自分で原因を作文**し、利用者を無関係な操作へ誘導した（連携は成立していた）。
+    技術理由は最終行へ落とし、モデル宛の禁止事項を 2 行目に固定する。
     """
     report = _caller_identity_report()["block_diagnostics"]
     for case, code in _BLOCK_DIAG_CASES.items():
         reason = report[case]["blockReason"]
         lines = reason.split("\n")
-        assert len(lines) == 3, (case, reason)
-        assert lines[0].startswith("teamagent-caller-identity: "), case
-        assert lines[1] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
+        assert len(lines) == 5, (case, reason)
+        # 1 行目は利用者向け（日本語・行動だけ・英語の内部語を出さない）。
+        assert lines[0], case
+        assert "_user_context" not in lines[0], case
+        assert not lines[0].startswith("teamagent-caller-identity: "), case
+        assert re.search(r"[ぁ-んァ-ヶ一-龯]", lines[0]), (case, lines[0])
+        # 2 行目はモデル宛。推測して別の操作を勧めることの明示的な禁止。
+        assert "推測" in lines[1] and "リセット" in lines[1], (case, lines[1])
+        assert lines[2] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
             case
         )
         assert re.fullmatch(
-            rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[2]
-        ), (case, lines[2])
+            rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[3]
+        ), (case, lines[3])
+        # 技術理由は最終行。接頭辞は 1 回だけ（本番実測では 2 回並んでいた）。
+        assert lines[4].startswith("teamagent-caller-identity: "), case
+        assert not lines[4].startswith(
+            "teamagent-caller-identity: teamagent-caller-identity: "
+        ), (case, lines[4])
         assert "U09CX1CCBLN" not in reason, case
 
 

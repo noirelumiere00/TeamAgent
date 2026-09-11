@@ -427,13 +427,70 @@ function adminForwardHint(adminName) {
   return `解決しない場合は、次の 1 行をそのまま管理者（${adminName}）へ送ってください:`;
 }
 
-// 利用者に届く block 文。1 行目は従来どおりの理由、そのあとに転送用の 2 行。
+// ── 利用者向けの正しい 1 行（2026-09-11 実測の誤誘導対策）───────────────────
+// 本番実測 2026-09-11 10:27: P06 の block 文の 1 行目が英語の技術理由
+// （`_user_context must be a plain object`）だったため、モデルがそれを読み解けず
+// 「Google 連携をリセットすることで解決する可能性があります」「『連携』と返して
+// いただければリセットリンクをお出しします」と**自分で原因を作文**し、
+// 利用者を無意味な操作へ誘導した（連携は成立しており、リセットは無関係）。
+//
+// 直し方は 2 つ同時に:
+//   (1) ここ: block 文の 1 行目を **日本語の正しい 1 行**にし、その直後に
+//       「推測して別の操作を勧めるな」というモデル宛の 1 行を必ず差し込む。
+//       （python 側 connect_diagnostics.format_user_message の user_action と同じ流儀）
+//   (2) SOUL: 「診断: 行つきのブロック文」全般へ規則の適用範囲を広げる
+//       （従来は oauth_connect / CALLER_IDENTITY_REJECTED だけを名指ししていたため、
+//        plugin の before_tool_call block はどの規則にも当たらなかった）。
+// コードごとの文面は「利用者が取れる行動」だけを書く。原因の説明はしない
+// （原因は診断コードで管理者が runbook を引く）。
+const USER_ACTION_BY_CODE = Object.freeze({
+  [BLOCK_DIAG.NATIVE_TOOL_DENIED]:
+    "このツールはこの環境では使えません。依頼の内容を変えてもう一度お試しください。",
+  [BLOCK_DIAG.TOOL_NAME_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.RUN_BINDING]:
+    "受付の有効時間が切れました。お手数ですが、もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.INVOCATION_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.USER_CONTEXT_SHAPE]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.SIGNING_FAILED]:
+    "利用者側の操作では直りません。管理者のサポートが必要です。",
+});
+
+// モデル宛の 1 行。利用者へはこの行自体を見せない前提で書く（SOUL 側で規定）。
+const BLOCK_MODEL_INSTRUCTION =
+  "この案内と診断行をそのまま利用者へ提示してください。原因を推測して" +
+  "連携のリセット・再ログイン・ブラウザ変更などの別の操作を勧めてはいけません。";
+
+export function userActionForBlockCode(code) {
+  return (
+    USER_ACTION_BY_CODE[code] ??
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。"
+  );
+}
+
+// 利用者に届く block 文。
+//   1 行目 利用者向けの正しい案内（日本語・行動だけ）
+//   2 行目 モデル宛の禁止事項（推測して別の操作を勧めない）
+//   3 行目 転送の定型文
+//   4 行目 診断行
+//   5 行目 技術理由（管理者・モデルの切り分け用。利用者向けではない）
 // user id・本文・URL は載せない（G7）。管理者は runId ではなくコード＋時刻で突合する。
 export function formatBlockReason(reason, code, nowMs, adminName = DEFAULT_ADMIN_NAME) {
+  // `fail()` 由来の理由は既に `teamagent-caller-identity: ` が付いている。
+  // 本番実測 2026-09-11 の block 文は接頭辞が 2 回並んでいた（利用者に見えていた）。
+  const detail = String(reason).startsWith(`${PLUGIN_ID}: `)
+    ? String(reason).slice(`${PLUGIN_ID}: `.length)
+    : String(reason);
   return (
-    `${PLUGIN_ID}: ${reason}\n` +
+    `${userActionForBlockCode(code)}\n` +
+    `${BLOCK_MODEL_INSTRUCTION}\n` +
     `${adminForwardHint(adminName)}\n` +
-    `診断: ${code} ${formatJstMinute(nowMs)}`
+    `診断: ${code} ${formatJstMinute(nowMs)}\n` +
+    `${PLUGIN_ID}: ${detail}`
   );
 }
 
@@ -600,13 +657,23 @@ export function unwrapToolArguments(params, toolName) {
     current = wrapper.inner;
   }
   // 包みでなかった、または 2 段剥がしてもまだ包み（3 段以上）→ 無変更で返す。
-  if (kinds.length === 0 || wrapperOf(current) !== null) {
-    return { params, depth: 0, shape: null };
+  //
+  // `stillWrapped`（2026-09-11 追加）: 「包みでなかった」と「上限まで剥がしてもまだ包み」を
+  // 呼び出し側が区別できるようにする。従来は両方 depth:0 で返しており、
+  // 「まだ包み」は `_user_context` が見つからないことを経由して結果的に block されていた。
+  // 本 PR で `_user_context` の欠落を block しなくなるため、その間接的な fail-closed が
+  // 消える。3 段以上は**明示的に**block する（＝入力面を任意の深さへ広げない）。
+  if (kinds.length === 0) {
+    return { params, depth: 0, shape: null, stillWrapped: false };
+  }
+  if (wrapperOf(current) !== null) {
+    return { params, depth: 0, shape: null, stillWrapped: true };
   }
   return {
     params: current,
     depth: kinds.length,
     shape: [...new Set(kinds)].join("+"),
+    stillWrapped: false,
   };
 }
 
@@ -2485,7 +2552,18 @@ export function createCallerIdentityPlugin({
     if (declaredContext[CLAIM_FIELD] !== undefined) {
       return { error: "model-supplied or replayed caller claim is forbidden", discarded: [] };
     }
-    if (declaredContext.slack_user_id !== trusted.senderId) {
+    // ── 申告が「無い」ことは「別人だと申告した」ことではない（2026-09-11）──────
+    // 従来は `declaredContext.slack_user_id !== trusted.senderId` だったため、
+    // モデルが `_user_context` を空 `{}` で送った／`slack_user_id` を省いただけで
+    // P05 block になっていた（本番実測の P05 経路）。しかし送信者は ingress 側の
+    // authoritative 値で確定しており、申告値は mintCallerClaim が丸ごと捨てる。
+    // 「申告しなかった」は矛盾ではないので通す。
+    // **明示的に別人を名乗った場合（キーがあって値が違う）だけ**は従来どおり block。
+    // ここが唯一の明示的ななりすまし申告なので fail-closed を維持する。
+    if (
+      Object.hasOwn(declaredContext, "slack_user_id") &&
+      declaredContext.slack_user_id !== trusted.senderId
+    ) {
       return {
         error: "declared Slack caller does not match the bound ingress",
         discarded: [],
@@ -2511,6 +2589,45 @@ export function createCallerIdentityPlugin({
   //   ① 利用者向けの診断行つき blockReason を組み
   //   ② 管理者向けに 1 行ログを出す（コードと id_shape だけ・値は載せない）
   // ことを不可分にして、「拒否したのにログが 1 行も無い」状態を構造的に作れなくする。
+  // ── 上流は hook の返り値を「置換」ではなく「浅いマージ」する（2026-09-11 確定）──
+  // 一次検証（openclaw@2026.7.1 の実物）:
+  //   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+  //     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(finalParams, hookResult.params);`
+  //   同 :938-947  `mergeParamsWithApprovalOverrides = (o, a) => ({ ...o, ...a })`
+  // つまり **元の params のトップレベルキーは消えない**。
+  //
+  // 事故（本番実測）: 2026-09-04 に入れた unwrap は、`{"arguments":{…}}` を剥がして
+  // 中身に署名して返していた。上流のマージで元の `arguments` キーが残るため、
+  // 実際に mcp へ届く引数は `{arguments:{…}, …剥がした中身}` になり、署名した
+  // `arguments_sha256`（剥がした中身だけ）と一致しない。結果 mcp が
+  // `caller claim request binding does not match` で拒否し、利用者には
+  // `診断: CONNECT-I01a` が出ていた。
+  // 相関は 1:1 で確定: 09-04 以降の unwrap 成功 6 件（09-09 15:12:36 / 15:12:51、
+  // 09-10 12:40:32 / :34 / :39 / :41）と caller_claim_rejected 6 件が**同一秒**で一致。
+  // つまり unwrap 救済は本番で一度も成立していなかった。
+  //
+  // 直し方: 署名した集合に無い**元のトップレベルキー**を `undefined` で返し、
+  // マージ後の実行引数を署名対象と一致させる。JSON 化（JSON-RPC の tools/call）で
+  // `undefined` のキーは落ちるため、mcp が受け取るのは署名した集合そのものになる。
+  // 包みが無かった場合（depth 0）は**返り値を一切変えない**（バイト同一を保つ）。
+  function reconcileReturnedParams(originalParams, signedParams, unwrapDepth, logger) {
+    if (unwrapDepth === 0 || !isPlainObject(originalParams)) return signedParams;
+    const removed = Object.keys(originalParams).filter(
+      key => !Object.hasOwn(signedParams, key),
+    );
+    if (removed.length === 0) return signedParams;
+    const reconciled = { ...signedParams };
+    for (const key of removed) reconciled[key] = undefined;
+    // キー名だけ（値は載せない・G7）。本番では `arguments` / `name` のはず。
+    emitPluginLog(
+      logger,
+      "warn",
+      `reconciled unwrapped tool arguments removed=[${removed.join(",")}]` +
+        " (upstream merges hook params instead of replacing them)",
+    );
+    return reconciled;
+  }
+
   function blockAndLog(reason, code, logger, shape) {
     emitPluginLog(
       logger,
@@ -2661,6 +2778,7 @@ export function createCallerIdentityPlugin({
     }
     let params;
     let declaredContext;
+    let unwrapDepth = 0;
     try {
       // ── 二重包みの決定論 unwrap（引数検査より前）─────────────────────────
       // ここより下（assertPlainObject / validateDeclaredContext）が「引数検査」なので、
@@ -2669,6 +2787,12 @@ export function createCallerIdentityPlugin({
       // throw した場合に block へ変換されず上流へ委ねられ、fail-closed が破れる。
       // （JSON 由来の params では throw 不能だが、規律として例外も block に落とす）
       const unwrapped = unwrapToolArguments(event?.params, observedToolName);
+      if (unwrapped.stillWrapped) {
+        // 3 段以上。従来は `_user_context` が見つからないことを経由して block に
+        // なっていたが、本 PR で欠落を通すようにしたので**明示的に**落とす。
+        fail("tool arguments are nested deeper than the unwrap limit");
+      }
+      unwrapDepth = unwrapped.depth;
       if (unwrapped.depth > 0) {
         // 識別子・本文・URL は載せない（G7）。形と段数だけ。
         emitPluginLog(
@@ -2685,13 +2809,38 @@ export function createCallerIdentityPlugin({
               draft_token: trusted.actionValue,
             }
           : suppliedParams;
-      declaredContext = assertPlainObject(
-        params[USER_CONTEXT_KEY],
-        USER_CONTEXT_KEY,
-      );
+      // ── `_user_context` はモデルに要求しない（2026-09-11 の根治）─────────────
+      // 本番実測 2026-09-10 / 09-11 の P06 全 5 件は、モデルが `_user_context` を
+      // **そもそも付けてこなかった**ケースだった（EFS の tool call 実物で確認。
+      // 09-11 は knowledge_deliver / search が `{query, top_k, filter_doc_type}` のみ、
+      // 09-10 は `{"arguments":{}}`）。二重包みではない。
+      //
+      // 申告値は mintCallerClaim が authoritativeContext で丸ごと置き換えるため、
+      // モデルが何を書いても（書かなくても）mcp へ渡る値は変わらない。
+      // つまり「モデルが正しい形で `_user_context` を渡すこと」への依存は
+      // **セキュリティを 1 ビットも稼いでいない純粋な失敗モード**だった。
+      // 依存を切る: 欠落は `{}` とみなし、プレーンオブジェクトでない申告は
+      // 捨てて（観測して）続行する。落とすのは「明示的ななりすまし申告」だけ
+      // （validateDeclaredContext の caller_claim / slack_user_id）。
+      const rawDeclared = params[USER_CONTEXT_KEY];
+      if (rawDeclared === undefined) {
+        declaredContext = {};
+      } else if (isPlainObject(rawDeclared)) {
+        declaredContext = rawDeclared;
+      } else {
+        // 値・型名だけ出す（G7: 中身は載せない）。
+        emitPluginLog(
+          logger,
+          "warn",
+          "discarded non-object declared user_context" +
+            ` shape=${Array.isArray(rawDeclared) ? "array" : rawDeclared === null ? "null" : typeof rawDeclared}` +
+            " (overwritten with authoritative values)",
+        );
+        declaredContext = {};
+      }
     } catch (error) {
-      // 実測 2026-09-03 の 72 件（`_user_context must be a plain object`）はここ。
-      // unwrap を通してもなお直らなかった場合だけが残る。
+      // 実測 2026-09-03 の 72 件（`_user_context must be a plain object`）はここだった。
+      // いまここに残るのは「params 自体がオブジェクトでない」「3 段以上の包み」だけ。
       return blockAndLog(
         error instanceof Error ? error.message : "invalid tool params",
         BLOCK_DIAG.USER_CONTEXT_SHAPE,
@@ -2769,7 +2918,7 @@ export function createCallerIdentityPlugin({
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
-    return { params: signed.params };
+    return { params: reconcileReturnedParams(event?.params, signed.params, unwrapDepth, logger) };
   }
 
   // 署名 claim の鋳造。signToolCall（before_tool_call 経由）と層1（直接 tools/call）が
