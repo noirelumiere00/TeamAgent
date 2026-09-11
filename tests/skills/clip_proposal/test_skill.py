@@ -405,6 +405,38 @@ def test_duplicate_submit_returns_the_same_job_without_burning_a_slot() -> None:
     assert "もう一度送っていただく必要はありません" in second.message
 
 
+def test_concurrent_submits_of_the_same_material_create_one_job() -> None:
+    """検査と確保が分かれていると、同時 submit で 2 本作ってしまう（枠も費用も倍）。"""
+
+    store = _MemoryStore()
+    quota = DailyQuota()
+    index = ActiveJobIndex()
+    launcher = _BlockingLauncher()
+    lock = threading.Lock()
+    skill = _submit_skill(
+        store, analyzer=_StubAnalyzer(), quota=quota, launcher=launcher, active_jobs=index
+    )
+    outputs: list[Any] = []
+    barrier = threading.Barrier(4)
+
+    def submit() -> None:
+        barrier.wait(timeout=5)
+        result = skill.run(ClipProposalSubmitInput(file_id="F1"), _ctx())
+        with lock:
+            outputs.append(result)
+
+    threads = [threading.Thread(target=submit) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(outputs) == 4
+    assert len({output.job_id for output in outputs}) == 1
+    assert len(store.rows) == 1
+    assert quota.snapshot(requester_fingerprint(_ME))[0] == 1
+
+
 def test_a_different_material_is_not_treated_as_a_duplicate() -> None:
     store = _MemoryStore()
     launcher = _BlockingLauncher()

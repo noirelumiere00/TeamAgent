@@ -189,9 +189,19 @@ class ActiveJobIndex:
         with self._lock:
             return self._active.get(key)
 
-    def claim(self, key: str, job_id: str) -> None:
+    def claim_if_free(self, key: str, job_id: str) -> str | None:
+        """空いていれば ``job_id`` で押さえて None、埋まっていれば先客の job_id を返す。
+
+        **検査と確保を 1 つのロックで行う**（find → claim の二段だと、同じ人の 2 本の
+        submit が同時に走ったとき両方とも「空いている」を見てジョブを 2 本作る）。
+        """
+
         with self._lock:
+            existing = self._active.get(key)
+            if existing is not None:
+                return existing
             self._active[key] = job_id
+            return None
 
     def release(self, key: str) -> None:
         with self._lock:
@@ -303,8 +313,10 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         requester = verify_requester(ctx)
 
         # 重複 submit は **日次枠を消費する前** に弾く（連打で枠と費用が倍にならない）。
+        # 枠の確保もここで同時に行う（検査と確保を分けると同時 submit で 2 本作る）。
+        job_id = new_clip_job_id()
         dedupe_key = ActiveJobIndex.key(requester.fingerprint, input)
-        running = self._active_jobs.find(dedupe_key)
+        running = self._active_jobs.claim_if_free(dedupe_key, job_id)
         if running is not None:
             log.info("clip_proposal_duplicate_submit", job_id=running)
             return ClipProposalSubmitOutput(
@@ -318,6 +330,8 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         # 日次上限は **ジョブを作る前**に判定し、受理時に加算する（失敗しても戻さない）。
         decision = self._quota.try_reserve(requester.fingerprint)
         if not decision.accepted:
+            # 受け付けられなかった依頼で走行枠を塞がない（明日また送れる）。
+            self._active_jobs.release(dedupe_key)
             log.info(
                 "clip_proposal_deferred",
                 reason=decision.reason,
@@ -330,7 +344,6 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
                 message=decision.message,
             )
 
-        job_id = new_clip_job_id()
         request_summary = {
             "kind": CLIP_JOB_KIND,
             "request_id": ctx.request_id,
@@ -343,6 +356,7 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         try:
             self._store.create_job(job_id, request_summary)
         except Exception as exc:
+            self._active_jobs.release(dedupe_key)
             log.warning("clip_proposal_job_create_failed", error_type=type(exc).__name__)
             return ClipProposalSubmitOutput(
                 status="failed",
@@ -356,7 +370,6 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             metadata=copy.deepcopy(ctx.metadata),
         )
         job_input = input.model_copy(deep=True)
-        self._active_jobs.claim(dedupe_key, job_id)
         try:
             self._thread_launcher(
                 lambda: self._run_background(
