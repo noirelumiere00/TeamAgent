@@ -1461,11 +1461,53 @@ def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
     return compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
 
 
+#: カレンダー未連携の人へ **週 1 回（月曜のみ）** 出す 1 行（PLAN §2-1）。
+#: ⚠️ 認可 URL を文面に貼らない。長い URL は取り違え・再タイプ事故の実績がある
+#:    （2026-09-03）。代わりに「この DM で『連携』」＝ Aico 側が正規のリンクを出す
+#:    既存経路へ寄せる（「できません」で終わらせず、Aico が続きを引き受ける）。
+CALENDAR_UNLINKED_LINE = (
+    "📅 カレンダーが未連携のため、本日のアポ前ブリーフはお出しできません。"
+    "この DM で「連携」と送っていただければ、Aico が連携リンクをお出しします。"
+)
+
+
+def _is_weekly_notice_day(day: _dt.date) -> bool:
+    """未連携のお知らせを出す日か（**月曜のみ**）。毎日送らない。"""
+    return day.weekday() == 0
+
+
+def _notify_calendar_unlinked(email: str, day: _dt.date) -> bool:
+    """カレンダー未連携の 1 行 DM（月曜のみ・事例ブリーフ ON のときだけ）。
+
+    fail-open: 送れなくても planner の戻り値は変えない（お知らせの失敗で配信予約
+    そのものを落とさない）。ログにメールアドレスは出さない。
+    """
+    # ⚠️ ゲートは skill 側と **同じ関数** を使う（2 箇所が別々の env 解釈を持たない）。
+    from teamagent.skills.morning_digest.skill import _brief_enabled
+
+    if not _brief_enabled() or not _is_weekly_notice_day(day):
+        return False
+    blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": CALENDAR_UNLINKED_LINE}}]
+    try:
+        delivered, _ = asyncio.run(_deliver_to_slack(email, CALENDAR_UNLINKED_LINE, blocks))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} 未連携通知失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return False
+    return bool(delivered)
+
+
 def run_planner(users: list[str]) -> int:
     """04:00 JST の planner。利用者ごとに 1 回きりの配信予約を作る。
 
     - 予約が作れなかった / カレンダー未連携の人は **何もしない**＝既定時刻の一括実行に残る
       （現行動作の維持）。
+    - 送信時刻が既定時刻のまま（時刻つき予定なし／最初の予定が遅い）の人も
+      **予約を作らない**。一括実行が拾うので 1 通は必ず出るし、予約を作ると
+      一括実行と同時刻に 1 人 1 タスクの Fargate が余分に立つ。
     - 予約名は決定的なので planner を再実行しても当日分を作り直さない（冪等）。
     - Scheduler への書込は **既存のリマインド生成が持つ権限経路だけ** を使う
       （skill 側には書込権限を渡さない）。
@@ -1486,10 +1528,15 @@ def run_planner(users: list[str]) -> int:
     day_compact = day.strftime("%Y%m%d")
     planned = 0
     skipped = 0
+    notified = 0
     for email in users:
         request_id = f"digest-plan-{uuid.uuid4().hex[:8]}"
         calendar = _read_only_calendar(token_store, email)
         if calendar is None:
+            # PLAN §2-1: 未連携の人が「自分はブリーフの対象外」だと永久に気づけない
+            # 状態を作らない。週 1 回（月曜）だけ 1 行で知らせる。
+            if _notify_calendar_unlinked(email, day):
+                notified += 1
             skipped += 1
             continue
         try:
@@ -1500,6 +1547,14 @@ def run_planner(users: list[str]) -> int:
                 f"{type(exc).__name__}",
                 file=sys.stderr,
             )
+            skipped += 1
+            continue
+        if plan.no_timed_event or plan.clamped_to_default:
+            # ⚠️ 既定時刻のままの人は **予約を作らない**（DELTA §1「予定が 1 件も無い日＝
+            #   既定時刻」「予約が作れなかった利用者は既定時刻の一括実行に残す」）。
+            #   ここで予約を作ると (a) 一括配信が走らない土曜にも DM が出る
+            #   (b) 平日は bulk と同時刻に 1 人 1 タスクの Fargate が余分に立ち、claim
+            #   競合でどちらかが無駄走りする、の 2 つが同時に起きる。
             skipped += 1
             continue
         ref = user_ref(email)
@@ -1518,11 +1573,13 @@ def run_planner(users: list[str]) -> int:
         else:
             skipped += 1
     # ⚠️ 件数のみ。メールアドレス・予定タイトル・時刻の個人分布は出さない。
-    print(
-        f"[run_morning_digest_fargate] planner done "
-        f"{json.dumps({'users': len(users), 'planned': planned, 'skipped': skipped})}",
-        flush=True,
-    )
+    summary = {
+        "users": len(users),
+        "planned": planned,
+        "skipped": skipped,
+        "notified": notified,
+    }
+    print(f"[run_morning_digest_fargate] planner done {json.dumps(summary)}", flush=True)
     return 0
 
 

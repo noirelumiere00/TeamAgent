@@ -273,6 +273,104 @@ def test_planner_skips_users_without_calendar(monkeypatch: pytest.MonkeyPatch) -
     assert created == []
 
 
+def test_planner_does_not_reserve_when_the_time_is_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既定時刻のままの人は予約を作らない＝一括実行に残す（DELTA §1-3）。
+
+    予約を作ると (a) 一括配信が走らない土曜にも DM が出る (b) 平日は bulk と同時刻に
+    1 人 1 タスクの Fargate が余分に立つ、が同時に起きる。
+
+    変異: ``run_planner`` の ``no_timed_event or clamped_to_default`` 分岐を外すと
+    予約が 2 件作られて赤。
+    """
+    created: list[dict[str, Any]] = []
+
+    class _Sched:
+        def schedule_digest(self, **kw: Any) -> bool:
+            created.append(kw)
+            return True
+
+    monkeypatch.setenv("MORNING_DIGEST_PERSONALIZED", "true")
+    monkeypatch.setenv("MORNING_DIGEST_DEFAULT_TIME", "09:30")
+    monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
+    monkeypatch.setattr(mod, "_build_token_store", lambda: object())
+    import teamagent.adapters.scheduler_client as sched_mod
+
+    monkeypatch.setattr(sched_mod.SchedulerClient, "from_env", classmethod(lambda cls: _Sched()))
+
+    cals = {
+        # 時刻つき予定なし（終日のみ）→ 既定時刻
+        "a@vectorinc.co.jp": _Cal([_Ev("2026-09-11", all_day=True)]),
+        # 最初の予定が 15:00 → 14:00 は上限を超える（＝既定時刻のまま）
+        "b@vectorinc.co.jp": _Cal([_Ev("2026-09-11T15:00:00+09:00")]),
+        # 最初の予定が 10:00 → 09:00（＝個人別配信の対象）
+        USER: _Cal([_Ev("2026-09-11T10:00:00+09:00")]),
+    }
+    monkeypatch.setattr(mod, "_read_only_calendar", lambda store, email: cals[email])
+
+    assert mod.run_planner(["a@vectorinc.co.jp", "b@vectorinc.co.jp", USER]) == 0
+    assert [c["name"] for c in created] == [
+        digest_schedule_name(user_ref(USER, pepper="p"), "20260911")
+    ]
+
+
+def test_planner_cron_matches_the_bulk_schedule_weekdays() -> None:
+    """planner の既定 cron は一括配信と同じ稼働日（＝土日に個人別配信だけが出ない）。
+
+    変異: tf の既定を ``cron(0 19 * * ? *)``（毎日）へ戻すと赤。
+    """
+    tf = (PROJECT_ROOT / "infra" / "terraform" / "morning_digest_schedule.tf").read_text(
+        encoding="utf-8"
+    )
+    assert 'default     = "cron(0 19 ? * SUN-THU *)"' in tf
+    assert 'default     = "cron(30 0 ? * MON-FRI *)"' in tf
+
+
+# ── カレンダー未連携者への週 1 回のお知らせ（PLAN §2-1）──────────────
+def test_unlinked_user_is_notified_on_monday_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """未連携の人が「自分は対象外」だと永久に気づけない状態を作らない。
+
+    変異: ``run_planner`` の ``_notify_calendar_unlinked`` 呼び出しを外すと赤。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    sent = _patch_delivery(monkeypatch, ok=True)
+    monday = _dt.date(2026, 9, 14)
+    assert monday.weekday() == 0
+    assert mod._notify_calendar_unlinked(USER, monday) is True
+    assert sent == [USER]
+
+
+def test_unlinked_user_is_not_notified_on_other_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """毎日は送らない（週 1 回）。
+
+    変異: ``_is_weekly_notice_day`` を ``True`` 固定にすると赤。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    sent = _patch_delivery(monkeypatch, ok=True)
+    friday = _dt.date(2026, 9, 11)
+    assert friday.weekday() == 4
+    assert mod._notify_calendar_unlinked(USER, friday) is False
+    assert sent == []
+
+
+def test_unlinked_notice_is_silent_when_brief_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定 OFF: ブリーフが点いていない環境では 1 通も出さない。"""
+    monkeypatch.delenv("MORNING_DIGEST_BRIEF", raising=False)
+    sent = _patch_delivery(monkeypatch, ok=True)
+    assert mod._notify_calendar_unlinked(USER, _dt.date(2026, 9, 14)) is False
+    assert sent == []
+
+
+def test_unlinked_notice_never_contains_a_raw_auth_url() -> None:
+    """認可 URL は文面に貼らない（長い URL の再タイプ事故の実績がある）。
+
+    代わりに「この DM で『連携』」＝ Aico が続きを引き受ける導線にする。
+    """
+    assert "http" not in mod.CALENDAR_UNLINKED_LINE
+    assert "連携" in mod.CALENDAR_UNLINKED_LINE
+
+
 # ── モード判定 ────────────────────────────────────────────────────────
 def test_mode_defaults_to_bulk(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "argv", ["run_morning_digest_fargate.py"])
@@ -317,9 +415,9 @@ def _digest_with_brief(**kw: Any) -> MorningDigestOutput:
             PreMeetingBriefItem(
                 start_at="2026-09-11T14:00:00+09:00",
                 end_at="2026-09-11T15:00:00+09:00",
-                title_display="【社外】電通吉田様",
-                clients_display=["富士急"],
-                cases=[CaseRef(company_display="ジャングリア沖縄", owner_display="清水")],
+                title_display="【社外】青葉広告山田様",
+                clients_display=["北都リゾート"],
+                cases=[CaseRef(company_display="南島リゾートパーク", owner_display="田中")],
             )
         ],
         **kw,
@@ -343,7 +441,7 @@ def test_brief_section_is_rendered_in_both_layouts(
     _text, blocks = fmt(digest, USER)
     dumped = str(blocks)
     assert "アポ前 事例ブリーフィング" in dumped
-    assert "ジャングリア沖縄" in dumped
+    assert "南島リゾートパーク" in dumped
 
 
 @pytest.mark.parametrize("compact", [True, False])
@@ -416,3 +514,55 @@ def test_early_notice_never_on_the_bulk_run(monkeypatch: pytest.MonkeyPatch) -> 
     digest = _digest_with_first_event("2026-09-11T06:30:00+09:00")
     _text, blocks = mod._format_block_kit_compact(digest, USER)
     assert "最初の予定が近いため" not in str(blocks)
+
+
+# ── pepper は平文 env ではなく Secrets Manager 経由 ──────────────────
+def _schedule_tf() -> str:
+    return (PROJECT_ROOT / "infra" / "terraform" / "morning_digest_schedule.tf").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_pepper_is_injected_as_a_secret_not_a_plain_env() -> None:
+    """pepper が taskdef の environment に平文で入っていたら脅威モデルが成立しない。
+
+    pepper が守る相手は「Scheduler/SQS のペイロードを読める者」だが、その主体は
+    同一 AWS アカウントで ecs:DescribeTaskDefinition も持つのが普通で、environment に
+    置くと pepper ごと読めて総当たりが依然成立する。terraform state / tfvars にも
+    平文が残る（CLAUDE.md「シークレットは設定ファイルに平文で書かない」）。
+
+    変異: environment へ ``{ name = "DIGEST_USER_REF_PEPPER", value = ... }`` を戻すと赤。
+    """
+    tf = _schedule_tf()
+    assert '{ name = "DIGEST_USER_REF_PEPPER", value =' not in tf
+    assert 'name = "DIGEST_USER_REF_PEPPER", valueFrom = s.arn' in tf
+    assert "local.digest_user_ref_pepper_secrets" in tf
+    # 値そのものを受け取る変数を残さない（tfvars に平文で書けてしまうため）。
+    assert 'variable "digest_user_ref_pepper" {' not in tf
+    assert 'variable "digest_user_ref_pepper_secret_name" {' in tf
+
+
+def test_pepper_secret_is_readable_by_the_execution_role() -> None:
+    """secrets(valueFrom) は実行ロールに GetSecretValue が無いと起動時に落ちる。"""
+    tf = _schedule_tf()
+    assert "local.digest_user_ref_pepper_iam_arns" in tf
+
+
+def test_runtime_guard_lists_the_pepper_as_a_secret() -> None:
+    """guard の allowlist も env ではなく secrets 側へ移す。
+
+    変異: allowed_env 側へ戻すと（secrets の差分が許可されず）guard が落ちる構図を
+    ここで固定する。
+    """
+    guard = (PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh").read_text(
+        encoding="utf-8"
+    )
+    line = next(
+        ln
+        for ln in guard.splitlines()
+        if ln.strip().startswith("'aws_ecs_task_definition.morning_digest[0]|morning|")
+    )
+    fields = line.split("|")
+    allowed_env, allowed_secrets = fields[3], fields[4]
+    assert "DIGEST_USER_REF_PEPPER" not in allowed_env
+    assert "DIGEST_USER_REF_PEPPER" in allowed_secrets

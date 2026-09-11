@@ -104,7 +104,7 @@ def _run_single_user_digest(body: dict[str, Any]) -> bool:
 
     import boto3
 
-    boto3.client("ecs").run_task(
+    resp = boto3.client("ecs").run_task(
         cluster=cluster,
         taskDefinition=task_def,
         launchType="FARGATE",
@@ -129,6 +129,16 @@ def _run_single_user_digest(body: dict[str, Any]) -> bool:
             ]
         },
     )
+    # ⚠️ RunTask は HTTP 200 を返しつつ failures[] に起動失敗（容量不足・ENI 枯渇等）を
+    #    載せる。戻り値を見ずに成功扱いにすると SQS メッセージが消え、拾い手のいない
+    #    日に 1 通が無音で落ちる（planner が既定時刻の人を bulk に残すようになった今、
+    #    予約発火ぶんの拾い直しは他に無い）。raise → SQS リトライ → DLQ へ載せる。
+    failures = resp.get("failures") or []
+    if failures:
+        # reason は AWS 由来の定型文（PII なし）。個人は依然として出さない。
+        reasons = sorted({str(f.get("reason") or "unknown") for f in failures})
+        print(json.dumps({"event": "digest_task_failed", "reasons": reasons}))
+        raise RuntimeError(f"ecs run_task failed: {','.join(reasons)}")
     # ⚠️ user_ref も date も出さない（ログから個人を追えないようにする）。件数だけ。
     print(json.dumps({"event": "digest_task_started"}))
     return True
@@ -139,7 +149,10 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     for record in records:
         body = json.loads(record["body"])
         if str(body.get("kind") or "") == "digest":
-            _run_single_user_digest(body)
+            # False は「起動しなかった」（env 未設定・payload 不正）。起動失敗は
+            # _run_single_user_digest が raise するので、ここには来ない。
+            if not _run_single_user_digest(body):
+                print(json.dumps({"event": "digest_not_started"}))
             continue
         channel = str(body.get("channel") or "")
         if not channel.startswith("D"):

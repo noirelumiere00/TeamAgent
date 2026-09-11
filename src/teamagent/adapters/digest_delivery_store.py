@@ -34,6 +34,12 @@ _RELEASE_SQL = """
 DELETE FROM digest_delivery WHERE user_email = %(email)s AND digest_date = %(day)s
 """
 
+# 期限切れ行の掃除。claim と **同じトランザクション** で流す（掃除ジョブ・cron を
+# 増やさない）。RLS が効いているので消えるのは本人行だけ＝他人の印を落とさない。
+_PURGE_SQL = """
+DELETE FROM digest_delivery WHERE expires_at < NOW()
+"""
+
 
 def _normalise_email(user_email: str) -> str:
     return (user_email or "").strip().lower()
@@ -63,6 +69,9 @@ class DigestDeliveryStore:
         """その日の配信権を取る。**取れたときだけ True**（＝送ってよい）。
 
         ⚠️ 例外は False（fail-closed）。「確認できないから送っておく」は二重配信の道。
+
+        同一トランザクションで期限切れ行（14 日）も掃除する。掃除の経路がどこにも
+        無いと、SQL のコメントが宣言している保持期間が実装されていないことになる。
         """
         email = _normalise_email(user_email)
         if not email or "@" not in email or origin not in ("scheduled", "bulk"):
@@ -82,6 +91,9 @@ class DigestDeliveryStore:
                     },
                 )
                 claimed = int(cur.rowcount) == 1
+                # ⚠️ rowcount を読んでから掃除する（順序を入れ替えると claim の
+                #   判定が DELETE の rowcount になり、毎回 False＝1 通も出なくなる）。
+                cur.execute(_PURGE_SQL)
                 conn.commit()
             logger.info(
                 "digest_delivery_claim", request_id=request_id, claimed=claimed, origin=origin

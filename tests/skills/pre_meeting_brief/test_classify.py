@@ -30,7 +30,7 @@ def _sig(**kw: object) -> BriefSignals:
 
 # ── S1: タイトルの強シグナル ──────────────────────────────────────────
 def test_s1_bracket_gaishutsu_is_external() -> None:
-    sig = _sig(title="【社外（外出）】初田製作所様_新卒採用")
+    sig = _sig(title="【社外（外出）】東光製作所様_新卒採用")
     assert classify_external(sig, internal_domains=INTERNAL) == "external"
 
 
@@ -126,8 +126,8 @@ def test_p1_description_beats_title() -> None:
 
 
 def test_p2_underscore_suffix() -> None:
-    sig = _sig(title="【社外（外出）】初田様_初田製作所")
-    assert extract_client(sig).clients == ("初田製作所",)
+    sig = _sig(title="【社外（外出）】初田様_東光製作所")
+    assert extract_client(sig).clients == ("東光製作所",)
 
 
 def test_p3_before_honorific() -> None:
@@ -141,43 +141,64 @@ def test_no_signal_yields_nothing() -> None:
 
 
 def test_agency_is_kept_with_person_name() -> None:
-    """「代理店：電通（吉田様）」は担当者名まで残す（DELTA §3 差分 2）。"""
+    """「代理店：青葉広告（山田様）」は担当者名まで残す（DELTA §3 差分 2）。"""
     raw = {
         "id": "e3",
-        "summary": "【社外】電通吉田様",
+        "summary": "【社外】青葉広告山田様",
         "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
         "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
-        "description": "クライアント：富士急／代理店：電通（吉田様）",
+        "description": "クライアント：北都リゾート／代理店：青葉広告（山田様）",
     }
     (detail,) = extract_events([raw], want_description=True)
     hint = extract_client(build_signal_input(detail))
-    assert hint.clients == ("富士急",)
-    assert hint.agency_display == "電通(吉田様)"
+    assert hint.clients == ("北都リゾート",)
+    assert hint.agency_display == "青葉広告(山田様)"
 
 
 def test_multiple_clients_up_to_two() -> None:
     raw = {
         "id": "e4",
-        "summary": "【外出】電通浦部さま",
+        "summary": "【外出】青葉広告鈴木さま",
         "start": {"dateTime": "2026-09-11T15:00:00+09:00"},
         "end": {"dateTime": "2026-09-11T16:00:00+09:00"},
-        "description": "クライアント：すかいらーく・ヤクルト／代理店：電通（浦部さま）",
+        "description": "クライアント：緑川フーズ／白水飲料／代理店：青葉広告（鈴木さま）",
     }
     (detail,) = extract_events([raw], want_description=True)
     hint = extract_client(build_signal_input(detail))
-    assert hint.clients == ("すかいらーく", "ヤクルト")
+    assert hint.clients == ("緑川フーズ", "白水飲料")
+
+
+def test_middle_dot_is_not_a_client_separator() -> None:
+    """中黒は社名そのものに出る（ingest 側と同じ流儀）。
+
+    変異: ``_CLIENT_SPLIT_CHARS`` へ「・」を戻すと、社名が 2 社に割れて赤。
+    """
+    from teamagent.skills.pre_meeting_brief.signals import split_clients
+
+    assert split_clients("中央・製紙") == ["中央・製紙"]
+    assert split_clients("中央・製紙／白水飲料") == ["中央・製紙", "白水飲料"]
+
+
+def test_paren_notes_do_not_split_the_company_name() -> None:
+    """括弧の中の「/」で社名が割れない。
+
+    変異: ``_split_top_level`` を素朴な split に戻すと ('白水飲料(飲料', '健康)') で赤。
+    """
+    from teamagent.skills.pre_meeting_brief.signals import split_clients
+
+    assert split_clients("白水飲料（飲料/健康）") == ["白水飲料(飲料/健康)"]
 
 
 # ── 名寄せ ────────────────────────────────────────────────────────────
 def test_normalize_company_strips_corp_forms_and_notes() -> None:
-    assert normalize_company("株式会社初田製作所様（代理店：電通）") == "初田製作所"
+    assert normalize_company("株式会社東光製作所様（代理店：青葉広告）") == "東光製作所"
     assert normalize_company("㈱花王") == "花王"
 
 
 def test_kao_two_chars_is_not_usable_as_partial_but_exact_is_allowed() -> None:
     """「花王」は 2 文字。部分一致だけに最小長を掛ける（完全一致は長さを問わない）。"""
     assert is_usable_partial("花王") is False
-    assert is_usable_partial("初田製作所") is True
+    assert is_usable_partial("東光製作所") is True
 
 
 def test_stoplist_blocks_short_generic_words() -> None:

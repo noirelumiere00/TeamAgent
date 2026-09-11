@@ -52,8 +52,20 @@ def test_no_event_uses_default() -> None:
     assert plan.no_timed_event is True
 
 
-def test_exactly_at_floor_is_flagged() -> None:
+def test_exactly_at_floor_is_not_flagged() -> None:
+    """最初の予定がちょうど 07:00 の日は **通常どおり 60 分前**。嘘の注記を付けない。
+
+    変異: ``compute_send_time`` の境界を ``target <= floor_at`` に戻すと
+    ``clamped_to_floor`` が True になり赤（冒頭に「通常より短い間隔で」が出る）。
+    """
     plan = compute_send_time(DAY, _at(7, 0), default_hhmm=DEFAULT)
+    assert plan.fire_at == _at(6, 0)
+    assert plan.clamped_to_floor is False
+
+
+def test_below_floor_is_flagged() -> None:
+    """06:59 始まりの日は 06:00 へ張り付く＝リードが短いので注記を出す。"""
+    plan = compute_send_time(DAY, _at(6, 59), default_hhmm=DEFAULT)
     assert plan.fire_at == _at(6, 0)
     assert plan.clamped_to_floor is True
 

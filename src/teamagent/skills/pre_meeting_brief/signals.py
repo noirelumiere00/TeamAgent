@@ -26,16 +26,28 @@ from typing import Any
 
 # 説明欄の「クライアント行」。全角/半角コロン・「得意先」表記ゆれを吸収する。
 _CLIENT_LINE_RE = re.compile(r"^[\s　]*(?:クライアント|得意先|顧客|CL)[\s　]*[:：](?P<body>.*)$")
-# 「代理店：電通（吉田様）」「代理店: 博報堂」。
+# 「代理店：青葉広告（山田様）」「代理店: 桜通エージェンシー」。
 _AGENCY_LINE_RE = re.compile(r"^[\s　]*(?:代理店|代理店名|AG)[\s　]*[:：](?P<body>.*)$")
 
 # クライアント行の中に「／代理店：…」が同居する書き方（9/11 実物のテスト送信で確認済み）。
 _INLINE_AGENCY_RE = re.compile(r"[／/]\s*(?:代理店|AG)\s*[:：]\s*(?P<agency>.+)$")
 
-# 複数社の連記に使われる区切り。読点は社名内に出うるので使わない。
-_CLIENT_SPLIT_RE = re.compile(r"[／/・･,、]+")
+# 複数社の連記に使われる区切り。
+# ⚠️ 「・」「･」は **入れない**。中黒は社名そのものに出る（ingest 側の
+# ``derive_knowledge_client_name``（adapters/form_mappings.py）も同じ理由で中黒を
+# 分割しない）。ここだけ流儀を変えると、中黒入りの社名が 2 社に割れたまま SQL の
+# client_name / ILIKE パラメタと表示用社名に流れる。DELTA §3 の「・」は **表示側の
+# 連記記号** であって入力側の区切りではない。
+_CLIENT_SPLIT_CHARS = "／/,、"
+
+#: 社名トークンの打ち切り位置。ここから後ろは「注記・自由文」とみなして捨てる。
+#: 予定の説明欄は社外の主催者（代理店/クライアント）が書ける **第三者入力** なので、
+#: 「クライアント：A社 ※値引き条件は社外秘。資料 https://…」の後半が丸ごと
+#: agency_hint に入ると、本人 DM に任意テキストと任意クリック先が差し込める。
+_NAME_CUT_RE = re.compile(r"[\s　※＊*。｡｜|]")
 
 _MAX_CLIENTS = 2  # 名寄せ・引き当ての対象にする最大社数（表示は全社）
+_MAX_NAME = 40  # 社名・代理店名 1 トークンの上限
 _MAX_TEXT = 200  # 派生値の字数上限（description 全文を持ち回らせない）
 
 
@@ -66,13 +78,61 @@ class BriefSignals:
     all_day: bool = False
     has_client_line: bool = False
     client_hint: str = ""  # クライアント行 / タイトルから読めた企業名（連記のまま）
-    agency_hint: str = ""  # 「電通（吉田様）」等の表示用（担当者名まで含む）
+    agency_hint: str = ""  # 「青葉広告（山田様）」等の表示用（担当者名まで含む）
     attendee_domains: tuple[str, ...] = field(default_factory=tuple)
     attendee_list_available: bool = False
 
 
 def _lines(text: str) -> list[str]:
     return [ln for ln in text.split("\n") if ln.strip()]
+
+
+def tighten_name(raw: str) -> str:
+    """自由文の断片 → **社名 1 トークン**（抽出直後に必ず通す）。
+
+    死守ラインの実装: 生 ``description`` から捕った文字列は、この関数を通してから
+    しか外へ出さない。表示の直前で絞るのでは遅い（schema・ログ・Scheduler 入力に
+    自由文が載ってから消すことになる）。
+
+    - 空白（半角/全角）・``※`` ``＊`` ``。`` ``｜`` 以降は注記とみなして捨てる
+    - ``http`` / ``://`` を含むものは **丸ごと破棄**（裸 URL は Slack が自動リンク化
+      するため、1 文字も通さない）
+    - 40 字上限
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    cut = _NAME_CUT_RE.search(text)
+    if cut:
+        text = text[: cut.start()]
+    text = text.strip()
+    lowered = text.lower()
+    if "http" in lowered or "://" in lowered:
+        return ""
+    return text[:_MAX_NAME]
+
+
+def _split_top_level(text: str) -> list[str]:
+    """区切り文字で切る。ただし **括弧の中では切らない**。
+
+    「白水飲料（飲料/健康）」のように括弧注記へ ``/`` が入る書き方があり、素朴に
+    split すると「白水飲料(飲料」「健康)」という壊れた社名が SQL と表示へ流れる。
+    """
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "（(［[【":
+            depth += 1
+        elif ch in "）)］]】":
+            depth = max(0, depth - 1)
+        if depth == 0 and ch in _CLIENT_SPLIT_CHARS:
+            out.append("".join(buf))
+            buf = []
+            continue
+        buf.append(ch)
+    out.append("".join(buf))
+    return out
 
 
 def _from_description(description: str) -> tuple[bool, str, str]:
@@ -90,14 +150,15 @@ def _from_description(description: str) -> tuple[bool, str, str]:
             body = m.group("body").strip()
             inline = _INLINE_AGENCY_RE.search(body)
             if inline:
-                agency = agency or inline.group("agency").strip()
+                agency = agency or tighten_name(inline.group("agency"))
                 body = body[: inline.start()].strip()
-            client = body
+            # ⚠️ 抽出 **直後** に社名トークンへ絞る（schema にも載らなくなる）。
+            client = "／".join(split_clients(body))
             continue
         a = _AGENCY_LINE_RE.match(line)
         if a and not agency:
-            agency = a.group("body").strip()
-    return (has_line, client[:_MAX_TEXT], agency[:_MAX_TEXT])
+            agency = tighten_name(a.group("body"))
+    return (has_line, client[:_MAX_TEXT], agency[:_MAX_NAME])
 
 
 def build_signal_input(event: Any) -> BriefSignals:
@@ -143,12 +204,17 @@ def signals_from_item(item: Any) -> BriefSignals:
 
 
 def split_clients(raw: str) -> list[str]:
-    """連記された企業名を最大 2 社まで切り出す（表示は呼び出し側で全社を使う）。"""
+    """連記された企業名を最大 2 社まで切り出す（各社は ``tighten_name`` 済み）。
+
+    冪等: ``split_clients("／".join(split_clients(x))) == split_clients(x)``。
+    ``_from_description`` が結果を「／」で連結して持ち回るので、ここが冪等でないと
+    経路によって社名が変わる。
+    """
     if not raw:
         return []
     out: list[str] = []
-    for part in _CLIENT_SPLIT_RE.split(normalize_text(raw)):
-        name = part.strip()
+    for part in _split_top_level(normalize_text(raw)):
+        name = tighten_name(part)
         if name and name not in out:
             out.append(name)
     return out[:_MAX_CLIENTS]
@@ -160,4 +226,5 @@ __all__ = [
     "normalize_text",
     "signals_from_item",
     "split_clients",
+    "tighten_name",
 ]

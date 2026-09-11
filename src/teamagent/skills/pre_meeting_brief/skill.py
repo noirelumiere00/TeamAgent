@@ -248,16 +248,21 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
         industries: list[str] = []
         cases: list[CaseRef] = []
         no_exact = ""
+        # ⚠️ 社ごとの枠を切る。全社を max_cases で引いて連結してから先頭で切ると、
+        #   1 社目が枠を食い尽くして **2 社目が丸ごと消える**（利用者は落ちたことにも
+        #   気づけない）。PLAN「複数社連記は…事例は各1件」・DELTA §3 の実物例
+        #   （[A系]1行＋[B系]1行）は、この枠が無いと構造的に再現できない。
+        per_client = max(1, input.max_cases // max(1, len(clients)))
         for client in clients:
             industry = pg.get_industry_for_client(conn, client, ctx.request_id)
             industries.append(industry or "")
-            found, exact = self._lookup(conn, pg, client, industry, input.max_cases, ctx)
+            found, exact, stage = self._lookup(conn, pg, client, industry, per_client, ctx)
             if not exact and found and industry:
                 no_exact = (
                     f"「{client}」自体の実施事例はDrive上で確認できず（{industry}で近い実績）。"
                 )
             for row in found:
-                cases.append(self._to_case(row, client=client, group=client))
+                cases.append(self._to_case(row, client=client, group=client, stage=stage))
         # ⚠️ 出典は **実際に描く事例** だけを載せる（切り詰めた先の資料名を出典に並べると、
         #    利用者は本文に無い資料名を見て「どこに出ているのか」を探すことになる）。
         shown = cases[: input.max_cases]
@@ -288,27 +293,29 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
         industry: str | None,
         limit: int,
         ctx: SkillContext,
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, int]:
         """段1 → 段2 → 段3 → 段4。当たった段で **打ち切る**（下の段の SQL を発行しない）。
 
-        戻り値の 2 つ目は「完全一致/部分一致（＝その会社自身の事例）で当たったか」。
+        戻り値: (行, 完全一致/部分一致で当たったか, 当たった段)。
+        ⚠️ 段は ``CaseRef.match_stage`` へそのまま載せる。段を捨てると「段3/4 に落ちて
+        精度が悪化している」が出力にも監視にも残らず、後追いできない。
         """
         if not client:
-            return ([], False)
+            return ([], False, 0)
         rows = pg.list_case_studies(
             conn, client_name=client, limit=limit, stage=1, request_id=ctx.request_id
         )
         if rows:
-            return (rows, True)
+            return (rows, True, 1)
         if is_usable_partial(client):
             rows = pg.list_case_studies(
                 conn, client_name=client, limit=limit, stage=2, request_id=ctx.request_id
             )
             if rows:
-                return (rows, True)
+                return (rows, True, 2)
         # ⚠️ 業種が金庫に無ければ段3/4 を **実行しない**（業種を推測しない）。
         if not industry:
-            return ([], False)
+            return ([], False, 0)
         rows = pg.list_case_studies(
             conn,
             industry=industry,
@@ -318,13 +325,13 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
             request_id=ctx.request_id,
         )
         if rows:
-            return (rows, False)
+            return (rows, False, 3)
         rows = pg.list_case_studies(
             conn, industry=industry, limit=limit, stage=4, request_id=ctx.request_id
         )
-        return (rows, False)
+        return (rows, False, 4 if rows else 0)
 
-    def _to_case(self, row: dict[str, Any], *, client: str, group: str) -> CaseRef:
+    def _to_case(self, row: dict[str, Any], *, client: str, group: str, stage: int) -> CaseRef:
         """マスター表の構造化列だけから 1 件を組む（pptx の chunk 本文を使わない）。"""
         company = str(row.get("case_client") or row.get("title") or "")
         owner = str(row.get("case_owner") or "").strip()
@@ -349,7 +356,7 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
             source_title=harden(row.get("title"), 120),
             # URL は source_uri の実値のみ（文字列連結で作らない）。
             source_uri=str(row.get("source_uri") or "")[:600],
-            match_stage=0,
+            match_stage=stage,
             client_group=harden(group, 40),
             same_client=same,
         )

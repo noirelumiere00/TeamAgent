@@ -102,7 +102,10 @@ def compute_send_time(
         )
     lead = _dt.timedelta(minutes=lead_minutes)
     target = _floor_to_step(first_start.astimezone(_calwin.JST) - lead)
-    if target <= floor_at:
+    # ⚠️ 境界は **厳密不等号**。最初の予定がちょうど 07:00 の日は target == floor_at
+    #   ＝リードタイムは通常どおり 60 分なので、「通常より短い間隔で」の 1 行を
+    #   付けてはいけない（嘘の注記になる）。張り付き扱いは target < floor_at だけ。
+    if target < floor_at:
         return SendPlan(fire_at=floor_at, clamped_to_floor=True)
     if target >= default_at:
         return SendPlan(fire_at=default_at, clamped_to_default=True)

@@ -116,17 +116,16 @@ variable "morning_digest_default_time" {
   default     = "09:30"
 }
 
-variable "digest_user_ref_pepper" {
-  description = "予約ペイロードに載せる user_ref（不可逆 hash）の pepper。空でも動くが、空だとドメイン既知の相手にメールアドレスを総当たりされ得る。本番では必ず設定する。"
+variable "digest_user_ref_pepper_secret_name" {
+  description = "予約ペイロードに載せる user_ref（不可逆 hash）の pepper を保持する Secrets Manager シークレット **名**。空なら pepper 無し（ドメイン既知の相手にメールアドレスを総当たりされ得るので本番では必ず設定する）。⚠️ 値そのものを tfvars / terraform state に平文で置かないこと。pepper の脅威モデルは『予約ペイロードを読める者に総当たりさせない』だが、その主体は同一 AWS アカウントで ecs:DescribeTaskDefinition も持つのが普通で、taskdef の environment に平文で置くと pepper ごと読めて前提が崩れる。DATABASE_URL / HMAC と同じく secrets(valueFrom) 経由にする。"
   type        = string
   default     = ""
-  sensitive   = true
 }
 
 variable "morning_digest_planner_schedule_expression" {
-  description = "planner の EventBridge cron 式（既定: 毎日 19:00 UTC = 翌 04:00 JST）。配信当日の 04:00 に当日カレンダーを読んで予約を作る。"
+  description = "planner の EventBridge cron 式（既定: 日〜木 19:00 UTC = 月〜金 04:00 JST）。配信当日の 04:00 に当日カレンダーを読んで予約を作る。⚠️ 一括配信 morning_digest_schedule_expression と **同じ稼働日** に揃えること。毎日実行にすると、これまで一通も来なかった土日に個人別配信だけが届く。"
   type        = string
-  default     = "cron(0 19 * * ? *)"
+  default     = "cron(0 19 ? * SUN-THU *)"
 }
 
 variable "morning_digest_schedule_expression" {
@@ -241,6 +240,22 @@ data "aws_secretsmanager_secret" "morning_digest_google_oauth" {
   name  = "teamagent/dev/google_oauth"
 }
 
+# user_ref の pepper。名前が空なら data を 1 件も引かない（pepper 無しで動く）。
+data "aws_secretsmanager_secret" "digest_user_ref_pepper" {
+  count = var.enable_morning_digest && var.digest_user_ref_pepper_secret_name != "" ? 1 : 0
+  name  = var.digest_user_ref_pepper_secret_name
+}
+
+locals {
+  # ⚠️ 三項演算子は両辺を評価するため、count=0 の data を参照すると plan が落ちる。
+  #    splat（for 内包）で「在るぶんだけ」畳む。
+  digest_user_ref_pepper_secrets = [
+    for s in data.aws_secretsmanager_secret.digest_user_ref_pepper :
+    { name = "DIGEST_USER_REF_PEPPER", valueFrom = s.arn }
+  ]
+  digest_user_ref_pepper_iam_arns = data.aws_secretsmanager_secret.digest_user_ref_pepper[*].arn
+}
+
 # --- 実行ロール（launch 時 secrets 注入用） ---
 resource "aws_iam_role" "ecs_execution_morning_digest" {
   count              = var.enable_morning_digest ? 1 : 0
@@ -265,7 +280,7 @@ data "aws_iam_policy_document" "ecs_execution_morning_digest_secrets" {
       data.aws_secretsmanager_secret.morning_digest_google_oauth[0].arn,
       # per-user token refresh 用の connect(web 型)クライアント secret（CONNECT_GOOGLE_CLIENT_SECRET）。
       data.aws_secretsmanager_secret.connect_google_client_secret[0].arn,
-    ], local.hmac_mail_secret_iam_arns)
+    ], local.hmac_mail_secret_iam_arns, local.digest_user_ref_pepper_iam_arns)
   }
 }
 
@@ -429,7 +444,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # （予約を作れないのに一括実行だけが claim する状態を作らない）。
       { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
-      { name = "DIGEST_USER_REF_PEPPER", value = var.digest_user_ref_pepper },
+      # ⚠️ DIGEST_USER_REF_PEPPER は environment に置かない（下の secrets を参照）。
     ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
@@ -441,7 +456,7 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # connect-web / fargate と同じ connect_google_client_secret を使う。欠落すると mail/calendar
       # 収集が build_user_credentials で失敗し全 0 件になる（2026-06-25 回帰）。
       { name = "CONNECT_GOOGLE_CLIENT_SECRET", valueFrom = data.aws_secretsmanager_secret.connect_google_client_secret[0].arn },
-    ], local.mail_action_hmac_secrets)
+    ], local.mail_action_hmac_secrets, local.digest_user_ref_pepper_secrets)
     logConfiguration = {
       logDriver = "awslogs"
       options = {

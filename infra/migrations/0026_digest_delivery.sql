@@ -34,6 +34,9 @@ CREATE TABLE IF NOT EXISTS digest_delivery (
 );
 
 -- 期限切れ掃除用（14 日保持。診断の猶予だけ取り、長期保持はしない）。
+-- 掃除の実行者は claim（adapters/digest_delivery_store.py）。claim と同じ
+-- トランザクションで `DELETE FROM digest_delivery WHERE expires_at < NOW()` を流すため、
+-- 掃除ジョブ・cron を別に建てない（RLS で消えるのは本人行のみ）。
 CREATE INDEX IF NOT EXISTS idx_digest_delivery_date ON digest_delivery (expires_at);
 
 -- RLS: 本人行のみ（app.user_email GUC・0025 と同型）。FORCE で owner にも適用。

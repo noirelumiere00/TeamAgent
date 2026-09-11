@@ -52,7 +52,7 @@ def test_population_is_pinned_to_case_corpus_in_every_stage() -> None:
     client = _client()
     for stage, kwargs in (
         (1, {"client_name": "花王"}),
-        (2, {"client_name": "初田製作所"}),
+        (2, {"client_name": "東光製作所"}),
         (3, {"industry": "食品", "product": "クイックディナー"}),
         (4, {"industry": "食品"}),
     ):

@@ -14,10 +14,10 @@
     🌞 9/11(金) アポ前 事例ブリーフィング
     本日の社外MTG：2件
 
-    ▶️ 14:00–15:00  【社外】電通吉田様
-      クライアント：富士急（レジャー・テーマパーク）／代理店：電通（吉田様）
-      └ ジャングリア沖縄（観光・テーマパーク）— …。 社内担当: 清水  ⚠口頭紹介のみ
-      ※「富士急」自体の実施事例はDrive上で確認できず（観光・テーマパークで近い実績）。
+    ▶️ 14:00–15:00  【社外】青葉広告山田様
+      クライアント：北都リゾート（レジャー・テーマパーク）／代理店：青葉広告（山田様）
+      └ 南島リゾートパーク（観光・テーマパーク）— …。 社内担当: 田中  ⚠口頭紹介のみ
+      ※「北都リゾート」自体の実施事例はDrive上で確認できず（観光・テーマパークで近い実績）。
 
     — 出典 —
     • 📍ショート動画施策事例集（マスター表・営業担当列より）
@@ -68,7 +68,7 @@ def _fmt_time_range(start_at: str | None, end_at: str | None) -> str:
 
 
 def _client_line(item: Any) -> str:
-    """``クライアント：富士急（レジャー・テーマパーク）／代理店：電通（吉田様）``。"""
+    """``クライアント：北都リゾート（レジャー・テーマパーク）／代理店：青葉広告（山田様）``。"""
     names = list(getattr(item, "clients_display", []) or [])
     industries = list(getattr(item, "client_industries", []) or [])
     parts: list[str] = []
@@ -130,7 +130,12 @@ def render_brief_lines(output: Any, day: _dt.date, *, early_notice: bool = False
     if not items:
         lines.append(NO_EXTERNAL_LINE)
         return lines
-    lines.append(f"本日の社外MTG：{len(items)}件")
+    # ⚠️ 見出しは **切り詰める前** の真の件数。len(items) を出すと、社外 8 件の日に
+    #   「5件」と表示され、残り 3 件は行も注記も出ないまま消える（当日のアポを
+    #   取りこぼす）。真の件数は external_count + uncertain_count が持っている。
+    total = int(getattr(output, "external_count", 0)) + int(getattr(output, "uncertain_count", 0))
+    total = max(total, len(items))
+    lines.append(f"本日の社外MTG：{total}件")
     for item in items:
         lines.append("")
         when = _fmt_time_range(getattr(item, "start_at", None), getattr(item, "end_at", None))
@@ -150,7 +155,18 @@ def render_brief_lines(output: Any, day: _dt.date, *, early_notice: bool = False
         if note:
             lines.append(f"  ※{note}")
 
-    sources = [harden(s, 120) for s in (getattr(output, "source_lines", []) or [])]
+    hidden = total - len(items)
+    if hidden > 0:
+        # 黙って縮小しない。落ちた MTG があることは必ず 1 行で告げる。
+        lines.append("")
+        lines.append(f"…ほか {hidden} 件（表示上限）")
+
+    # ⚠️ harden は **データ由来の行だけ** に掛ける。コード定数（MASTER_SHEET_SOURCE）へ
+    #   掛けると NFKC がリテラルの全角括弧まで半角化し、DELTA §3 の実物例と字面がズレる。
+    sources = [
+        s if s == MASTER_SHEET_SOURCE else harden(s, 120)
+        for s in (getattr(output, "source_lines", []) or [])
+    ]
     sources = [s for s in sources if s]
     if sources:
         lines.append("")

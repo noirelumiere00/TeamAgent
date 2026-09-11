@@ -29,13 +29,13 @@ USER = "komata@vectorinc.co.jp"
 # domain 共有（acl_groups）でしか見えない事例。user_groups を落とすと返らない。
 CASE_ROWS: list[dict[str, Any]] = [
     {
-        "title": "260706_NewsTV事業本部ショート動画事例_v2.pptx",
+        "title": "260706_事業本部ショート動画事例_v2.pptx",
         "source_uri": "https://drive.google.com/file/d/abc/view",
         "owner_email": "mochizuki@vectorinc.co.jp",
-        "case_client": "JCB×USJ",
+        "case_client": "北都カード×みなとランド",
         "case_product": "切り抜き165本",
         "case_effect": "視聴800万回、指名検索が前月比5倍。",
-        "case_owner": "望月",
+        "case_owner": "佐藤",
         "case_external_use": "NG",
         "case_external_use_note": "対外利用NG（事例集フォルダが展開NG）",
         "case_industry": "金融／テーマパーク文脈",
@@ -47,10 +47,10 @@ CASE_ROWS: list[dict[str, Any]] = [
         "title": "施策事例集",
         "source_uri": "https://docs.google.com/spreadsheets/d/xyz",
         "owner_email": "shimizu@vectorinc.co.jp",
-        "case_client": "初田製作所",
+        "case_client": "東光製作所",
         "case_product": "新卒採用ショート",
         "case_effect": "指名検索+180%。",
-        "case_owner": "高杉",
+        "case_owner": "高橋",
         "case_external_use": "OK",
         "case_external_use_note": "",
         "case_industry": "防災機器",
@@ -170,8 +170,8 @@ def _ctx(**meta: Any) -> SkillContext:
 
 def _event_item(**kw: Any) -> CalendarEventItem:
     base: dict[str, Any] = {
-        "summary_display": "【社外】初田様_初田製作所",
-        "summary_scrubbed": "【社外】初田様_初田製作所",
+        "summary_display": "【社外】初田様_東光製作所",
+        "summary_scrubbed": "【社外】初田様_東光製作所",
         "start_at": "2026-09-11T14:00:00+09:00",
         "end_at": "2026-09-11T15:00:00+09:00",
         "attendee_list_available": True,
@@ -253,7 +253,7 @@ def test_corpus_population_is_limited_to_case_corpus() -> None:
 
 def test_like_metacharacters_in_company_name_do_not_match_everything() -> None:
     pg = _FakePg()
-    item = _event_item(summary_display="【社外】100%_電通様 打合せ")
+    item = _event_item(summary_display="【社外】100%_青葉広告様 打合せ")
     out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
     assert out.items[0].cases == []
 
@@ -268,7 +268,7 @@ def test_case_without_effect_uses_fixed_text_not_chunk_body() -> None:
 
 def test_ng_case_carries_reason_note() -> None:
     pg = _FakePg()
-    item = _event_item(summary_display="【社外】JCB×USJ様 打合せ")
+    item = _event_item(summary_display="【社外】北都カード×みなとランド様 打合せ")
     out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
     note = out.items[0].cases[0].external_use_note
     assert note.startswith("⚠")
@@ -286,8 +286,8 @@ def test_corpus_missing_reports_unavailable() -> None:
 def test_client_direct_lookup_does_not_touch_calendar() -> None:
     pg = _FakePg()
     skill = PreMeetingBriefSkill(pg=pg)  # calendar=None
-    out = skill.run(PreMeetingBriefInput(client="初田製作所"), _ctx())
-    assert out.items and out.items[0].cases[0].company_display == "初田製作所"
+    out = skill.run(PreMeetingBriefInput(client="東光製作所"), _ctx())
+    assert out.items and out.items[0].cases[0].company_display == "東光製作所"
 
 
 # ── 2 経路の一致（構造で止めた事故の証明）────────────────────────────
@@ -298,10 +298,10 @@ def test_runner_and_tool_paths_produce_identical_items() -> None:
     """
     raw = {
         "id": "e9",
-        "summary": "【社外】電通吉田様",
+        "summary": "【社外】青葉広告山田様",
         "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
         "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
-        "description": "クライアント：初田製作所／代理店：電通（吉田様）",
+        "description": "クライアント：東光製作所／代理店：青葉広告（山田様）",
         "organizer": {"email": "boss@vectorinc.co.jp"},
         "attendees": [
             {"email": "me@vectorinc.co.jp", "self": True},
@@ -337,8 +337,8 @@ def test_runner_and_tool_paths_produce_identical_items() -> None:
     )
 
     assert tool_out.items == runner_out.items
-    assert tool_out.items[0].clients_display == ["初田製作所"]
-    assert tool_out.items[0].agency_display == "電通(吉田様)"
+    assert tool_out.items[0].clients_display == ["東光製作所"]
+    assert tool_out.items[0].agency_display == "青葉広告(山田様)"
 
 
 # ── ログ ─────────────────────────────────────────────────────────────
@@ -370,3 +370,189 @@ def test_done_log_kwargs_are_exactly_the_allowed_set(monkeypatch: pytest.MonkeyP
         "cases",
         "corpus",
     }
+
+
+# ── 複数クライアント: 2 社目が丸ごと消えない（社ごとの枠）───────────────
+MULTI_ROWS: list[dict[str, Any]] = [
+    {
+        "title": "施策事例集",
+        "source_uri": "https://docs.google.com/spreadsheets/d/xyz",
+        "owner_email": "a@vectorinc.co.jp",
+        "case_client": "緑川フーズ",
+        "case_product": f"施策{i}",
+        "case_effect": "目標再生数120%超で着地。",
+        "case_owner": "中村",
+        "case_external_use": "NG",
+        "case_external_use_note": "数値は開示NG",
+        "case_industry": "外食",
+        "updated_at": "2026-07-08",
+        "acl_groups": ["vectorinc.co.jp"],
+        "case_corpus": "true",
+    }
+    for i in range(3)
+] + [
+    {
+        "title": "施策事例集",
+        "source_uri": "https://docs.google.com/spreadsheets/d/xyz",
+        "owner_email": "b@vectorinc.co.jp",
+        "case_client": "白水飲料",
+        "case_product": "長尺＋切り抜き30本",
+        "case_effect": "ゼロだった指名検索を期間中継続的に創出。",
+        "case_owner": "小林",
+        "case_external_use": "confidential",
+        "case_external_use_note": "開示NG（confidential）",
+        "case_industry": "飲料/健康",
+        "updated_at": "2026-07-08",
+        "acl_groups": ["vectorinc.co.jp"],
+        "case_corpus": "true",
+    }
+]
+
+
+def test_second_client_is_never_dropped_entirely() -> None:
+    """1 社目が枠を食い尽くして 2 社目が丸ごと消える、が起きない。
+
+    実測の欠陥: 緑川フーズ 3 件・白水飲料 1 件のとき、社ごとの枠が無いと
+    [緑川フーズ系] 3 行だけになり、白水飲料の事例も接頭辞も出ない。
+
+    変異: ``_build_item`` の ``per_client`` を ``input.max_cases`` に戻すと赤。
+    """
+    pg = _FakePg(MULTI_ROWS)
+    item = _event_item(
+        summary_display="【外出】青葉広告鈴木さま",
+        summary_scrubbed="【外出】青葉広告鈴木さま",
+        has_client_line=True,
+        client_hint_display="緑川フーズ／白水飲料",
+    )
+    out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
+    (brief,) = out.items
+    assert brief.clients_display == ["緑川フーズ", "白水飲料"]
+    groups = [c.client_group for c in brief.cases]
+    assert "緑川フーズ" in groups
+    assert "白水飲料" in groups
+    # 既定 max_cases=3・2 社 → 各 1 件（DELTA §3 の実物例と同じ形）
+    assert len(brief.cases) == 2
+
+
+def test_single_client_still_gets_the_full_quota() -> None:
+    """1 社だけの MTG は従来どおり max_cases まで並ぶ（枠の導入で減らさない）。"""
+    pg = _FakePg(MULTI_ROWS)
+    item = _event_item(
+        summary_display="【社外】緑川フーズ様",
+        summary_scrubbed="【社外】緑川フーズ様",
+        has_client_line=True,
+        client_hint_display="緑川フーズ",
+    )
+    out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
+    (brief,) = out.items
+    assert len(brief.cases) == 3
+
+
+# ── match_stage（どの段で当たったかを出力に残す）──────────────────────
+def test_match_stage_records_the_stage_that_hit() -> None:
+    """段3/4 に落ちて精度が悪化したことを後追いできるようにする。
+
+    変異: ``_to_case`` の ``match_stage=stage`` を ``0`` に戻すと赤。
+    """
+    pg = _FakePg()
+    item = _event_item(has_client_line=True, client_hint_display="東光製作所")
+    out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
+    (brief,) = out.items
+    assert [c.match_stage for c in brief.cases] == [1]
+
+
+def test_match_stage_marks_industry_fallback() -> None:
+    rows = [dict(r) for r in CASE_ROWS]
+    pg = _FakePg(rows)
+    # 「防災機器」業種は引けるが、その社名自身の事例は無い状況を作る
+    item = _event_item(has_client_line=True, client_hint_display="東光製作所")
+    original = pg.list_case_studies
+
+    def _no_direct_hit(conn: Any, **kw: Any) -> list[dict[str, Any]]:
+        if kw.get("stage") in (1, 2):
+            pg.stage_calls.append(int(kw["stage"]))
+            return []
+        return original(conn, **kw)
+
+    pg.list_case_studies = _no_direct_hit  # type: ignore[method-assign]
+    pg.get_industry_for_client = lambda conn, client_name, request_id=None: "防災機器"  # type: ignore[method-assign]
+    out = PreMeetingBriefSkill(pg=pg, events=[item]).run(PreMeetingBriefInput(), _ctx())
+    (brief,) = out.items
+    assert brief.cases
+    assert {c.match_stage for c in brief.cases} == {4}
+
+
+# ── 第三者入力（説明欄）の封じ込め ────────────────────────────────────
+HOSTILE_DESCRIPTION = (
+    "クライアント：北都リゾート／代理店：青葉広告（山田様） "
+    "※値引き条件は社外秘。資料 https://drive.google.com/file/d/PRIVATE/view"
+)
+
+
+def test_hostile_description_never_reaches_the_schema() -> None:
+    """予定の説明欄は第三者が書ける自由文。社名 1 トークン以外は schema に載らない。
+
+    実測の欠陥: agency_hint が
+    「青葉広告(山田様) ※値引き条件は社外秘。資料 https://drive.google.com/file/d/PRIVAT」
+    となり、本人 DM の「／代理店：…」行として裸 URL つきで描画されていた。
+
+    変異: ``signals.tighten_name`` を素通し（``return raw``）にすると赤。
+    """
+    raw = {
+        "id": "e9",
+        "summary": "【社外】青葉広告山田様",
+        "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+        "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        "description": HOSTILE_DESCRIPTION,
+    }
+    (detail,) = extract_events([raw], want_description=True)
+    sig = build_signal_input(detail)
+    assert sig.client_hint == "北都リゾート"
+    assert sig.agency_hint == "青葉広告(山田様)"
+    for value in (sig.client_hint, sig.agency_hint):
+        assert "http" not in value
+        assert "社外秘" not in value
+        assert "※" not in value
+
+
+def test_hostile_description_never_reaches_the_rendered_line() -> None:
+    """描画（本人 DM の本文）にも自由文・URL が出ない。"""
+    import datetime as _dt
+
+    from teamagent.skills.pre_meeting_brief.render import render_brief_lines
+
+    raw = {
+        "id": "e9",
+        "summary": "【社外】青葉広告山田様",
+        "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+        "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        "description": HOSTILE_DESCRIPTION,
+    }
+    (detail,) = extract_events([raw], want_description=True)
+    sig = build_signal_input(detail)
+    item = _event_item(
+        summary_display="【社外】青葉広告山田様",
+        summary_scrubbed="【社外】青葉広告山田様",
+        has_client_line=True,
+        client_hint_display=sig.client_hint,
+        agency_display=sig.agency_hint,
+    )
+    out = PreMeetingBriefSkill(pg=_FakePg(), events=[item]).run(PreMeetingBriefInput(), _ctx())
+    text = "\n".join(render_brief_lines(out, _dt.date(2026, 9, 11)))
+    assert "http" not in text
+    assert "社外秘" not in text
+    assert "／代理店：青葉広告(山田様)" in text
+
+
+def test_url_only_agency_is_discarded_entirely() -> None:
+    """空白を挟まず URL を書いた説明欄は、代理店ごと捨てる（1 文字も通さない）。"""
+    raw = {
+        "id": "e10",
+        "summary": "打合せ",
+        "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+        "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        "description": "クライアント：北都リゾート\n代理店：https://evil.example/steal",
+    }
+    (detail,) = extract_events([raw], want_description=True)
+    sig = build_signal_input(detail)
+    assert sig.agency_hint == ""

@@ -44,12 +44,19 @@ def _event(body: dict[str, Any]) -> dict[str, Any]:
 
 
 class _FakeEcs:
-    def __init__(self) -> None:
+    """⚠️ 本番の失敗モードを再現する: RunTask は **HTTP 200 のまま** failures[] に
+    起動失敗（容量不足・サブネット/ENI 枯渇）を載せる。例外は投げない。
+    """
+
+    def __init__(self, failures: list[dict[str, Any]] | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._failures = failures or []
 
     def run_task(self, **kw: Any) -> dict[str, Any]:
         self.calls.append(kw)
-        return {"tasks": [{}]}
+        if self._failures:
+            return {"tasks": [], "failures": self._failures}
+        return {"tasks": [{}], "failures": []}
 
 
 @pytest.fixture
@@ -154,3 +161,57 @@ def test_non_dm_channel_reminder_is_still_blocked(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(mod, "_post_message", lambda ch, text: posted.append((ch, text)))
     mod.handler(_event({"v": 1, "channel": "C001", "start_hm": "14:00"}), None)
     assert posted == []
+
+
+def test_run_task_failure_is_raised_so_sqs_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RunTask の failures[] を握り潰すと、拾い手のいない日に 1 通が無音で落ちる。
+
+    planner が「既定時刻の人は bulk に残す」ようになった今、予約発火ぶんを
+    拾い直す経路は他に無い。raise して SQS リトライ → DLQ へ載せる。
+
+    変異: handler.py の ``failures`` チェックを外すと raise されず赤。
+    """
+    fake = _FakeEcs(failures=[{"reason": "RESOURCE:MEMORY", "arn": "arn:aws:ecs:..."}])
+
+    class _Boto:
+        @staticmethod
+        def client(name: str) -> Any:
+            return fake
+
+    monkeypatch.setitem(sys.modules, "boto3", _Boto)
+    monkeypatch.setenv("DIGEST_CLUSTER_ARN", "arn:aws:ecs:ap-northeast-1:1:cluster/c")
+    monkeypatch.setenv(
+        "DIGEST_TASK_DEFINITION_ARN", "arn:aws:ecs:ap-northeast-1:1:task-definition/t:7"
+    )
+    monkeypatch.setenv("DIGEST_SUBNET_IDS", "subnet-a")
+    monkeypatch.setenv("DIGEST_SECURITY_GROUP_IDS", "sg-1")
+
+    with pytest.raises(RuntimeError, match="RESOURCE:MEMORY"):
+        mod.handler(_event({"v": 1, "kind": "digest", "user_ref": REF, "date": "2026-09-11"}), None)
+
+
+def test_run_task_failure_log_carries_no_user_ref(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """失敗ログにも user_ref / date を出さない（ログから個人を追えないようにする）。"""
+    fake = _FakeEcs(failures=[{"reason": "RESOURCE:MEMORY"}])
+
+    class _Boto:
+        @staticmethod
+        def client(name: str) -> Any:
+            return fake
+
+    monkeypatch.setitem(sys.modules, "boto3", _Boto)
+    monkeypatch.setenv("DIGEST_CLUSTER_ARN", "arn:aws:ecs:ap-northeast-1:1:cluster/c")
+    monkeypatch.setenv(
+        "DIGEST_TASK_DEFINITION_ARN", "arn:aws:ecs:ap-northeast-1:1:task-definition/t:7"
+    )
+    monkeypatch.setenv("DIGEST_SUBNET_IDS", "subnet-a")
+    monkeypatch.setenv("DIGEST_SECURITY_GROUP_IDS", "sg-1")
+
+    with pytest.raises(RuntimeError):
+        mod.handler(_event({"v": 1, "kind": "digest", "user_ref": REF, "date": "2026-09-11"}), None)
+    out = capsys.readouterr().out
+    assert "digest_task_failed" in out
+    assert REF not in out
+    assert "2026-09-11" not in out

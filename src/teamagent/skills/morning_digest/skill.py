@@ -84,7 +84,13 @@ def _brief_enabled() -> bool:
 
 # events.list の取得上限。20 では「20 件超の日に午後のアポが丸ごと落ちる」欠陥が残る
 # （個人別配信は最初の 1 件で送信時刻が決まるため、取りこぼしは時刻の狂いに直結する）。
+# ⚠️ ただし引き上げは **事例ブリーフと同じ env ゲートの内側**。100 は見出しの
+#   「📅{件数}」「残り N 件」の数字を変え、MORNING_DIGEST_REMINDERS=1 の環境では
+#   21 件目以降にも予定リマインド DM の予約を作る＝「env 未設定なら利用者の画面は
+#   1 バイトも変わらない」が崩れる。恒久的な引き上げは別便・別フラグで行う。
 _CALENDAR_MAX_RESULTS = 100
+#: ゲート OFF のときの従来値（この便より前の挙動）。
+_CALENDAR_MAX_RESULTS_LEGACY = 20
 
 #: Slack 返信漏れとして下流（判定層・描画層）へ渡すアイテム数の上限。
 #: Provider 側は max_thread_checks で構造的に有界だが、下流は全件を舐める
@@ -799,17 +805,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         window_start, window_end = _calwin.jst_day_window(
             _calwin.now_jst(), input.calendar_horizon_hours
         )
-        # ⚠️ max_results は 20 → 100。20 件の日に「午後のアポが丸ごと落ちる」のは
-        #   欠陥であり、事例ブリーフ（最初の予定の 1 時間前に配る）は最初の 1 件を
-        #   取り違えると配信時刻そのものが狂う。張り付きは飽和フラグで観測する。
+        # ⚠️ max_results は 20 → 100 だが **ゲートの内側**。20 件の日に「午後のアポが
+        #   丸ごと落ちる」のは欠陥であり、事例ブリーフ（最初の予定の 1 時間前に配る）は
+        #   最初の 1 件を取り違えると配信時刻そのものが狂う。とはいえ OFF の環境で
+        #   件数・リマインド対象が変わってはならないので、OFF は従来の 20 のまま。
+        #   want_description も同じ（OFF の間は description を 1 度も取りに行かない）。
+        brief_on = _brief_enabled()
+        max_results = _CALENDAR_MAX_RESULTS if brief_on else _CALENDAR_MAX_RESULTS_LEGACY
         events = gcal.list_events(
             ctx.request_id,
             time_min=window_start.isoformat(),
             time_max=window_end.isoformat(),
-            max_results=_CALENDAR_MAX_RESULTS,
-            want_description=True,
+            max_results=max_results,
+            want_description=brief_on,
         )
-        self._calendar_saturated = len(events) >= _CALENDAR_MAX_RESULTS
+        self._calendar_saturated = len(events) >= max_results
         # ⚠️ CalendarEvent の属性は start / end（start_at/end_at ではない）。
         # 旧コードは start_at を読んでいたため予定の時刻が常に空だった（本番バグ）。
         items: list[CalendarEventItem] = []

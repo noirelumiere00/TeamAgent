@@ -11,7 +11,12 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from teamagent.skills.pre_meeting_brief.signals import BriefSignals, normalize_text, split_clients
+from teamagent.skills.pre_meeting_brief.signals import (
+    BriefSignals,
+    normalize_text,
+    split_clients,
+    tighten_name,
+)
 
 Verdict = Literal["external", "uncertain", "internal"]
 
@@ -19,10 +24,19 @@ Verdict = Literal["external", "uncertain", "internal"]
 #   S1 強シグナル（タイトルの角括弧語）
 #   S2 強シグナル（説明欄のクライアント行）
 #   S3 強シグナル（社外ドメインの参加者）
-#   W1 弱シグナル（「様」/参加者リスト不可視）
-#   X  除外語（社内定例）
-# X を W1 より先に評価すると「週次ヨミ会」に社外ドメイン参加者がいる回まで落ちる。
+#   W1a 弱シグナル①（タイトルの「様」）
+#   X   除外語（社内定例）
+#   W1b 弱シグナル②（参加者リストが取れない）
 # X を S1..S3 より先に評価すると「【社外】◯◯様 提出物確認」が消える。
+# X を W1a より先に評価すると「◯◯様 提出物確認」が消える。
+#
+# ⚠️ PLAN の表は W1 を 1 段（「様」または 参加者リスト不可視）として X の **前** に
+#   置いている。実装はそれを W1a / W1b に割り、W1b だけを X の後ろへ回す（明示的な
+#   逸脱・PR 本文の「縮小した点」に記載）。理由: ゲストリスト非表示は社内定例でも
+#   日常的に起きるため、PLAN どおりだと「週次ヨミ会」「部会」の毎回が uncertain に
+#   なり、社内定例に対して毎朝 SQL を撃って事例を並べることになる。逆に社外ドメインの
+#   参加者が見えている回は S3 で先に external になるので、この並びで落ちるのは
+#   「除外語つき × 参加者不明」の回だけ。
 _STRONG_TITLE_WORDS: tuple[str, ...] = (
     "【社外】",
     "【外出】",
@@ -55,7 +69,7 @@ def classify_external(
 ) -> Verdict:
     """社外 MTG かを決定論で判定する。
 
-    評価順は S1 → S2 → S3 → W1 → X（モジュール冒頭の表と同一）。終日予定は対象外。
+    評価順は S1 → S2 → S3 → W1a → X → W1b（モジュール冒頭の表と同一）。終日予定は対象外。
     """
     if sig.all_day:
         return "internal"
@@ -75,7 +89,7 @@ def classify_external(
             if dom and dom.lower() not in internal_domains:
                 return "external"
 
-    # --- W1: 弱シグナル①「様」。除外語より **先**（「田中様 提出物確認」を捨てない） ---
+    # --- W1a: 弱シグナル①「様」。除外語より **先**（「◯◯様 提出物確認」を捨てない） ---
     if _HONORIFIC_RE.search(title):
         return "uncertain"
 
@@ -83,7 +97,8 @@ def classify_external(
     if any(w in title for w in _INTERNAL_WORDS):
         return "internal"
 
-    # --- W1: 弱シグナル②「参加者リストが見えない」＝判らない（internal と断じない） ---
+    # --- W1b: 弱シグナル②「参加者リストが見えない」＝判らない（internal と断じない） ---
+    #     ⚠️ PLAN の表では X より前。ここだけ後ろに置いている（冒頭の表を参照）。
     if not sig.attendee_list_available:
         return "uncertain"
     return "internal"
@@ -124,7 +139,7 @@ class ClientHint:
 def normalize_company(raw: str) -> str:
     """会社形態語と装飾を落とした照合用の社名。空なら空文字。
 
-    ⚠️ 「（代理店：博報堂）」のような括弧注記は **呼び出し前に** 退避済みである前提
+    ⚠️ 「（代理店：桜通エージェンシー）」のような括弧注記は **呼び出し前に** 退避済みである前提
     （``signals`` 側が agency へ分離する）。ここでは括弧の中身を捨てる。
     """
     name = normalize_text(raw).strip()
@@ -142,8 +157,8 @@ def normalize_company(raw: str) -> str:
 def is_usable_partial(name: str) -> bool:
     """部分一致（段2）に使ってよい社名か。完全一致（段1）は長さを問わない。
 
-    「花王」は 2 文字。一律に最小長 3 で落とすと永久に引けないため、長さ制限は
-    **部分一致だけ** に掛ける。
+    2 文字の社名は実在する。一律に最小長 3 で落とすと永久に引けないため、長さ制限は
+    **部分一致だけ** に掛ける（完全一致は 2 文字でも撃つ）。
     """
     if not name:
         return False
@@ -154,7 +169,7 @@ def is_usable_partial(name: str) -> bool:
 
 def extract_client(sig: BriefSignals) -> ClientHint:
     """P1 説明欄 → P2 タイトルの `_` 以降 → P3 「○○様」の直前 → P4 ドメイン。"""
-    agency = normalize_text(sig.agency_hint).strip()
+    agency = tighten_name(normalize_text(sig.agency_hint))
 
     # P1: 説明欄のクライアント行（最優先。タイトルと食い違っても説明欄が勝つ）。
     if sig.client_hint:
@@ -163,17 +178,19 @@ def extract_client(sig: BriefSignals) -> ClientHint:
             return ClientHint(clients=clients, agency_display=agency)
 
     title = normalize_text(sig.title)
+    # ⚠️ P2..P4 も第三者が書ける自由文（予定タイトル）由来。捕った直後に
+    #    tighten_name を通す＝社名 1 トークン以外を schema へ載せない。
     # P2: タイトル末尾の `_クライアント名`
     m = _TITLE_UNDERSCORE_RE.search(title)
     if m:
-        name = m.group("name").strip()
+        name = tighten_name(m.group("name"))
         if name:
             return ClientHint(clients=(name,), agency_display=agency)
 
     # P3: 「○○様」の直前
     m2 = _BEFORE_HONORIFIC_RE.search(_BRACKET_STRIP_RE.sub("", title))
     if m2:
-        name = m2.group("name").strip()
+        name = tighten_name(m2.group("name"))
         if name:
             return ClientHint(clients=(name,), agency_display=agency)
 
@@ -181,7 +198,7 @@ def extract_client(sig: BriefSignals) -> ClientHint:
     if sig.attendee_list_available:
         for dom in sig.attendee_domains:
             if dom:
-                return ClientHint(clients=(dom,), agency_display=agency)
+                return ClientHint(clients=(tighten_name(dom),), agency_display=agency)
     return ClientHint(clients=(), agency_display=agency)
 
 
