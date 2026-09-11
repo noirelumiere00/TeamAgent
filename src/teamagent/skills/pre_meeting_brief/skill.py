@@ -258,7 +258,10 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
                 )
             for row in found:
                 cases.append(self._to_case(row, client=client, group=client))
-        for case in cases:
+        # ⚠️ 出典は **実際に描く事例** だけを載せる（切り詰めた先の資料名を出典に並べると、
+        #    利用者は本文に無い資料名を見て「どこに出ているのか」を探すことになる）。
+        shown = cases[: input.max_cases]
+        for case in shown:
             if case.source_title:
                 sources.append(case.source_title)
         return PreMeetingBriefItem(
@@ -273,7 +276,7 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
             agency_display=harden(hint.agency_display, 60),
             agency_scrubbed=str(scrub_value(hint.agency_display))[:60],
             attendee_domains=list(sig.attendee_domains)[:10],
-            cases=cases[: input.max_cases],
+            cases=shown,
             no_exact_note=no_exact,
         )
 
