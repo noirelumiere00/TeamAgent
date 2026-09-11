@@ -1476,16 +1476,43 @@ def _is_weekly_notice_day(day: _dt.date) -> bool:
     return day.weekday() == 0
 
 
+def _notice_store() -> Any | None:
+    """お知らせの重複を止める claim ストア（``None`` なら印を取らない＝テスト用）。
+
+    ⚠️ 本番経路では必ず実体を返す。``None`` を返す分岐を足すと F5（2 通配信）へ戻る。
+    """
+    from teamagent.adapters.digest_notice_store import DigestNoticeStore
+
+    return DigestNoticeStore()
+
+
 def _notify_calendar_unlinked(email: str, day: _dt.date) -> bool:
-    """カレンダー未連携の 1 行 DM（月曜のみ・事例ブリーフ ON のときだけ）。
+    """カレンダー未連携の 1 行 DM（月曜のみ・事例ブリーフ ON・**その日 1 通だけ**）。
 
     fail-open: 送れなくても planner の戻り値は変えない（お知らせの失敗で配信予約
     そのものを落とさない）。ログにメールアドレスは出さない。
+
+    ⚠️ 冪等の担保は DB の一意制約（migration 0027 ``digest_notice``）。planner の
+    Scheduler ターゲットは ``retry_policy { maximum_retry_attempts = 1 }``
+    （infra/terraform/morning_digest_schedule.tf）なので、途中で落ちて再実行されると
+    未連携者 **全員** に同じ DM が 2 通届く。配信予約の方は schedule 名が決定的で
+    ConflictException を成功扱いにするため再実行に耐えるが、ここには何も無かった。
+    claim は **配信の前** に取る（送ってから印を付けると、印の書込に失敗した再実行で
+    もう 1 通出る）。取れなければ送らない＝fail-closed。
     """
     # ⚠️ ゲートは skill 側と **同じ関数** を使う（2 箇所が別々の env 解釈を持たない）。
+    from teamagent.adapters.digest_notice_store import NOTICE_CALENDAR_UNLINKED
     from teamagent.skills.morning_digest.skill import _brief_enabled
 
     if not _brief_enabled() or not _is_weekly_notice_day(day):
+        return False
+    store = _notice_store()
+    if store is not None and not store.claim(
+        email,
+        day,
+        kind=NOTICE_CALENDAR_UNLINKED,
+        request_id=f"digest-notice-{uuid.uuid4().hex[:8]}",
+    ):
         return False
     blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": CALENDAR_UNLINKED_LINE}}]
     try:

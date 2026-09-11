@@ -95,6 +95,36 @@ class _Store:
         return True
 
 
+class _NoticeStore:
+    """``digest_notice`` の claim を **本番の失敗モードごと** 再現するフェイク。
+
+    本番は DB の一意制約（migration 0027）が調停者なので、同じ (email, kind, day) の
+    2 回目は 0 行＝False。ここを「毎回 True」にすると planner 再実行の 2 通目が
+    見えなくなるため、set で実際に 1 回だけ通す。
+    """
+
+    def __init__(self, *, available: bool = True) -> None:
+        self.available = available
+        self.claimed: set[tuple[str, str, _dt.date]] = set()
+        self.calls: list[tuple[str, str, _dt.date]] = []
+
+    def claim(self, email: str, day: _dt.date, *, kind: str, request_id: str) -> bool:
+        self.calls.append((email, kind, day))
+        if not self.available:  # DB 障害 → fail-closed（送らない）
+            return False
+        key = (email, kind, day)
+        if key in self.claimed:
+            return False
+        self.claimed.add(key)
+        return True
+
+
+def _patch_notice_store(monkeypatch: pytest.MonkeyPatch, *, available: bool = True) -> _NoticeStore:
+    store = _NoticeStore(available=available)
+    monkeypatch.setattr(mod, "_notice_store", lambda: store)
+    return store
+
+
 def _patch_delivery(monkeypatch: pytest.MonkeyPatch, *, ok: bool) -> list[str]:
     sent: list[str] = []
 
@@ -335,10 +365,77 @@ def test_unlinked_user_is_notified_on_monday_only(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
     sent = _patch_delivery(monkeypatch, ok=True)
+    _patch_notice_store(monkeypatch)
     monday = _dt.date(2026, 9, 14)
     assert monday.weekday() == 0
     assert mod._notify_calendar_unlinked(USER, monday) is True
     assert sent == [USER]
+
+
+def test_unlinked_notice_is_sent_once_even_if_the_planner_reruns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """同じ日に 2 回走らせても DM は 1 通（F5）。
+
+    事故の形: planner の Scheduler ターゲットは
+    ``retry_policy { maximum_retry_attempts = 1 }`` なので、途中で落ちて再実行されると
+    未連携者 **全員** に同じ DM が 2 通届く。配信予約の方は schedule 名が決定的で
+    ConflictException を成功扱いにするため再実行に耐えるが、お知らせには何も無かった。
+    実測（修正前）: ``sent == [USER, USER]``。
+
+    変異: ``_notify_calendar_unlinked`` の ``store.claim`` 分岐を外すと 2 通目が出て赤。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    sent = _patch_delivery(monkeypatch, ok=True)
+    store = _patch_notice_store(monkeypatch)
+    monday = _dt.date(2026, 9, 14)
+
+    assert mod._notify_calendar_unlinked(USER, monday) is True
+    assert mod._notify_calendar_unlinked(USER, monday) is False  # planner 再実行
+    assert sent == [USER]
+    assert store.calls == [(USER, "calendar_unlinked", monday)] * 2
+    # 翌週分は別の印なので出る（印が「永久に黙る」側へ倒れていない）。
+    assert mod._notify_calendar_unlinked(USER, monday + _dt.timedelta(days=7)) is True
+    assert sent == [USER, USER]
+
+
+def test_unlinked_notice_is_fail_closed_when_the_mark_cannot_be_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """印が取れない（DB 障害・migration 未適用）ときは **送らない**。
+
+    「確認できないから送っておく」に倒すと、障害の日に未連携者へ 2 通届く。
+    お知らせは週 1 回なので、1 回落ちても翌週に出る。
+    変異: ``claim`` が False のときに送るよう倒すと赤。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    sent = _patch_delivery(monkeypatch, ok=True)
+    _patch_notice_store(monkeypatch, available=False)
+    assert mod._notify_calendar_unlinked(USER, _dt.date(2026, 9, 14)) is False
+    assert sent == []
+
+
+def test_unlinked_notice_does_not_borrow_the_digest_delivery_mark() -> None:
+    """お知らせの印は ``digest_delivery``（0026）に **相乗りしない**。
+
+    0026 の主キーは (user_email, digest_date)＝その日の **本文** を送る権。未連携者も
+    ダイジェスト本文は一括実行で受け取るので、お知らせが先に claim を取ると
+    その人のその日のダイジェストが丸ごと消える。加えて 0026 の origin は
+    ``CHECK (origin IN ('scheduled','bulk'))`` で ``'unlinked_notice'`` は INSERT できない。
+    """
+    src = SCRIPT_PATH.read_text(encoding="utf-8")
+    body = src[src.index("def _notify_calendar_unlinked") : src.index("def run_planner")]
+    assert "digest_notice_store" in body
+    assert "digest_delivery" not in body
+    ddl = (PROJECT_ROOT / "infra" / "migrations" / "0026_digest_delivery.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "CHECK (origin IN ('scheduled', 'bulk'))" in ddl
+    assert "PRIMARY KEY (user_email, digest_date)" in ddl
+    notice_ddl = (PROJECT_ROOT / "infra" / "migrations" / "0027_digest_notice.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "PRIMARY KEY (user_email, notice_kind, notice_date)" in notice_ddl
 
 
 def test_unlinked_user_is_not_notified_on_other_days(monkeypatch: pytest.MonkeyPatch) -> None:
