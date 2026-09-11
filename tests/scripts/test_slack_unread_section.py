@@ -63,6 +63,9 @@ _FILLER = "経緯は前回の議事録に記載しています。" * 90
 #:      **相手を先頭**に出し、区切りを 2 種類（`—`／`・`）へ減らした。中黒の連打は
 #:      見出しも相手も時間も所要も同列に見せていて、重要度が読めなかった。
 #:   ⑤ 裸の `15分` は単位の意味が伝わらないので `対応に約15分`。数字は固定表のまま。
+#:   ⑥ 脚注を `「」` の読み分け（囲みは相手の原文／囲み無しは Aico のラベル）に変更。
+#:      ここ 5 件の見出しは全部「話題が使えた」＝Aico のラベルなので **囲まれない**
+#:      （裁定3 の逐語フォールバックがこの 5 件を横取りしていないことの確認にもなる）。
 _MOCK_SECTION = """💬 *Slack 返信漏れ 5件* ｜ あなたの番 3・様子見 1・見るだけ 1
 
 🔴 *あなたの番（3件）*
@@ -77,7 +80,7 @@ _MOCK_SECTION = """💬 *Slack 返信漏れ 5件* ｜ あなたの番 3・様子
 👁 *見るだけ（1件）*
 5. *情シスの承認後にあなたから再依頼*　— DM・1日経過・いま返信不要　〔<https://vector.slack.com/archives/D08JOUSHIS1/p1755568800|開く>〕
 
-※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。"""
+※ 「」内は相手の原文そのままです。囲みの無い見出しは Aico が付けた定型の言い換えです（要約文は作りません）。"""
 
 #: 生 ID の「形」（U/W=ユーザー・B=bot・C/D/G=会話・T=WS ＋ 英数8文字以上）。
 #: ⚠️ **検査用**。実装はこの形で総当たり置換しない（"CONFIDENTIAL" "@BUZZFEEDJAPAN" の
@@ -1033,13 +1036,13 @@ def _observed_items() -> list[SlackUnreadItem]:
 _OBSERVED_SECTION = """💬 *Slack 返信漏れ 5件* ｜ あなたの番 5
 
 🔴 *あなたの番（5件）*
-1. *NTV様の件、本日 9/11(金) の社内MTGまでに状況をまとめておきます*　— 江畑 未来さん（DM）・2日経過　〔<https://vector.slack.com/archives/D08EBATA001/p1|開く>〕
-2. *日程を返す*　— 西海翔さん（DM）・1日経過・対応に約1分　〔<https://vector.slack.com/archives/D08NISHIU01/p2|開く>〕
-3. *今後の新体制 にともない、見直し 必要でしょうか*　— Arimaさん（DM）・1日経過　〔<https://vector.slack.com/archives/D08ARIMA001/p3|開く>〕
-4. *先ほどの資料、フォルダに入れておきました*　— 江畑 未来さん（DM）・1日経過・対応に約2分　〔<https://vector.slack.com/archives/D08EBATA001/p4|開く>〕
-5. *Aicoと連携できるか*　— #proj-ナレッジ共有・今日・他2名も名指し　〔<https://vector.slack.com/archives/C08KNOWLEDGE/p5|開く>〕
+1. *「NTV様の件、本日 9/11(金) の社内MTGまでに状況をまとめておきます」*　— 江畑 未来さん（DM）・2日経過　〔<https://vector.slack.com/archives/D08EBATA001/p1|開く>〕
+2. *「この後のMTGリスケでもよいでしょうか？」*　— 西海翔さん（DM）・1日経過・対応に約1分　〔<https://vector.slack.com/archives/D08NISHIU01/p2|開く>〕
+3. *「今後の新体制 にともない、見直し 必要でしょうか」*　— Arimaさん（DM）・1日経過　〔<https://vector.slack.com/archives/D08ARIMA001/p3|開く>〕
+4. *「先ほどの資料、フォルダに入れておきました」*　— 江畑 未来さん（DM）・1日経過・対応に約2分　〔<https://vector.slack.com/archives/D08EBATA001/p4|開く>〕
+5. *「Aicoと連携できるか？」*　— #proj-ナレッジ共有・今日・他2名も名指し　〔<https://vector.slack.com/archives/C08KNOWLEDGE/p5|開く>〕
 
-※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。"""
+※ 「」内は相手の原文そのままです。囲みの無い見出しは Aico が付けた定型の言い換えです（要約文は作りません）。"""
 
 
 def _freeze_0911(monkeypatch: Any) -> None:
@@ -1233,3 +1236,82 @@ def test_hidden_line_also_appears_in_the_button_blocks(monkeypatch: Any) -> None
     )
     assert "（表示していない2件は 〔<https://vector.slack.com/" in dump
     assert dump.count("（表示していない") == 1
+
+
+# ── 裁定2（2026-09-11）: DM 実物の上で `「」` の読み分けが成立していること ─────────
+
+
+def test_observed_0911_headlines_are_all_quoted(monkeypatch: Any) -> None:
+    """実物 5 行は全部が相手の言葉＝すべて `「」` で囲まれている（自分の宿題と読ませない）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    heads = [
+        ln.split("*")[1]
+        for ln in runner._slack_handoff_lines(d)
+        if ln[:2] in ("1.", "2.", "3.", "4.", "5.")
+    ]
+    assert len(heads) == 5
+    assert all(h.startswith("「") and h.endswith("」") for h in heads), heads
+
+
+def test_quoted_and_label_headlines_are_distinguishable_in_the_dm(monkeypatch: Any) -> None:
+    """相手の言葉と Aico のラベルが同じ 🔴 に混在しても `「」` だけで見分けられる。
+
+    ここが裁定2の実効性。DM の実物（描画済み文字列）の上で機械的に分離できることを固定する。
+    """
+    _freeze_0911(monkeypatch)
+    items = [
+        _observed_items()[1],  # 相手の言葉（話題が述語 → 依頼文そのもの）
+        SlackUnreadItem(  # Aico のラベル（話題が使えて固定語尾が接がる）
+            excerpt_display=f"<@{_ME_UID}> NTVカードの受け渡しの件、来社日を教えてください。",
+            occurred_at="2026-09-10T09:00:00+09:00",
+            channel_id="D08LABEL001",
+            channel_kind="dm",
+            from_user_id="U08LABEL001",
+            from_display_name="森田",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08LABEL001/p1",
+        ),
+    ]
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=items,
+        slack_unread_total=2,
+        slack_unread_scanned=True,
+    )
+    lines = [ln for ln in runner._slack_handoff_lines(d) if ln[:2] in ("1.", "2.")]
+    heads = [ln.split("*")[1] for ln in lines]
+    assert heads == ["「この後のMTGリスケでもよいでしょうか？」", "来社日を返す"]
+
+
+def test_footnote_tells_the_user_what_the_brackets_mean(monkeypatch: Any) -> None:
+    """`「」` の規約は **利用者に伝わって初めて** 誤読を止める（囲むだけでは足りない）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    footnote = runner._slack_handoff_lines(d)[-1]
+    assert "「」内は相手の原文そのまま" in footnote
+    assert "囲みの無い見出し" in footnote
+
+
+def test_the_dm_keeps_the_question_mark_the_sender_typed(monkeypatch: Any) -> None:
+    """`「…でしょうか？」` の全角 `？` が NFKC で半角に倒れていない（逐語の 1 文字）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items()[1:2],
+        slack_unread_total=1,
+        slack_unread_scanned=True,
+    )
+    line = next(ln for ln in runner._slack_handoff_lines(d) if ln.startswith("1."))
+    assert "「この後のMTGリスケでもよいでしょうか？」" in line
+    assert "でしょうか?" not in line

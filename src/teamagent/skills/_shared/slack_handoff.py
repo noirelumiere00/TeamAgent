@@ -17,6 +17,14 @@ fargate.py``）はこの層の出力をそのまま並べるだけで済むよ�
     ※ 差出人が本文に「対応不要」と書いている場合の *検知* は別問題なので
       :data:`_CLOSED_RE` に入っている。禁止しているのは **出力語彙** の方。
   - **補足行（``note``）は「原文を見る価値が本当にある件」だけ**。既定は空。
+  - **`「…」` で囲まれた見出しは相手の言葉（原文の逐語）**。囲まれていない見出しは
+    Aico が付けたラベル（固定語彙の言い換え）。この読み分けを 1 本だけ持ち、崩さない。
+    ※ なぜ要るか: 相手が「〜しておきます」と書いている件が囲み無しで 🔴 に並ぶと、
+      利用者は **自分の宿題** だと読む。毎朝届くものでこの誤読が起きると、やらなくて
+      よい仕事を抱えるか、逆に「相手がやる」と思って自分の宿題を落とす。
+    ※ 囲むのは :func:`headline_from_body`（相手の冒頭一文）と
+      :func:`verbatim_headline`（依頼文そのもの）の 2 経路だけ。
+      :data:`KIND_FALLBACK_HEADLINES` と watch/fyi の見出しは Aico のラベルなので囲まない。
 
 この層は純関数の集まり（I/O 無し・時刻は ``now`` 引数で注入）。``now`` を渡す設計に
 しているのは、日付解決と経過日数がテストで固定できないと検証にならないため。
@@ -87,6 +95,20 @@ REASON_AMBIGUOUS_ADDRESSEE = "他{count}名も名指しで、あなた宛の依�
 NOTE_DUE_UNRESOLVED = "原文の日付と曜日が食い違うため、期限は空欄にしています"
 NOTE_BODY_TRUNCATED = "本文が途中で切れており、未取得の部分があります"
 
+#: 相手の言葉であることを示す括弧。**囲まれていたら原文の逐語・囲まれていなければ
+#: Aico が付けたラベル**、という読み分けを利用者へ一貫して見せる唯一の記法
+#: （囲みが無いと「〜しておきます」が自分の宿題に読める。2026-09-11 裁定）。
+QUOTE_OPEN = "「"
+QUOTE_CLOSE = "」"
+
+#: 依頼の型ごとの既定文言（話題も逐語も使えないときの落とし先）。
+#: **Aico が付けたラベル**なので `「」` で囲まない。
+KIND_FALLBACK_HEADLINES: dict[str, str] = {
+    KIND_TAKEOVER: "作業の引き取りを返す",
+    KIND_SCHEDULE: "日程を返す",
+    KIND_REPLY: "返信する",
+}
+
 #: 依頼文も手掛かりの一文も取れなかったときの見出し（**利用者の視点**で書く）。
 #:
 #: 旧実装は「返信する」と断定しつつ補足行で「依頼文を特定できませんでした」と言っており、
@@ -103,6 +125,16 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 #: 連続する空白（半角・全角・タブ・改行）。
 _WHITESPACE_RE = re.compile(r"[\s　]+")
 
+#: NFKC に **触らせない**文字（全角の疑問符・感嘆符）と、その退避先。
+#:
+#: NFKC は `？`→`?` `！`→`!` と半角へ倒す。`「…でしょうか？」` が `「…でしょうか?」` に
+#: なると、**逐語と名乗る引用の中で原文の 1 文字が変わる**（`「」` は「相手の原文そのまま」
+#: の印なので、ここが崩れると印の意味が無くなる）。判定側は全角・半角のどちらの形も辞書に
+#: 持っている（`sentences` の区切り・`_TAIL_STRIP_PATTERNS`・`_REQUEST_RE`）ので、
+#: 倒さなくても文の分割・語尾剥がしは同じに効く。
+#: 退避先は私用領域（U+E000〜）。NFKC も制御文字除去も空白圧縮も触らない。
+_NFKC_PRESERVED: tuple[tuple[str, str], ...] = (("？", "\ue000"), ("！", "\ue001"))
+
 
 def normalize_text(text: str) -> str:
     """表記ゆれを吸収する入口の正規化（**NFKC → 制御文字除去 → 空白圧縮** の順）。
@@ -115,9 +147,15 @@ def normalize_text(text: str) -> str:
     NFKC は全角記号を半角へ倒すので、後ろに置くと本文の ``＜`` が escape をすり抜けてから
     ``<`` へ戻り、無害化を貫通する（描画側 ``_handoff_display`` も同じ順序で固定してある）。
     """
-    s = unicodedata.normalize("NFKC", str(text or ""))
+    s = str(text or "")
+    for ch, holder in _NFKC_PRESERVED:  # 全角の ？ ！ は倒さない（逐語の 1 文字を守る）
+        s = s.replace(ch, holder)
+    s = unicodedata.normalize("NFKC", s)
     s = _CONTROL_RE.sub("", s)
-    return _WHITESPACE_RE.sub(" ", s).strip()
+    s = _WHITESPACE_RE.sub(" ", s).strip()
+    for ch, holder in _NFKC_PRESERVED:
+        s = s.replace(holder, ch)
+    return s
 
 
 # ── 正規表現辞書 ────────────────────────────────────────────────────────────
@@ -596,24 +634,56 @@ def extract_topic(sentence: str) -> str:
     return extract_topic_and_context(sentence)[0]
 
 
+def quote_wrap(text: str) -> str:
+    """相手の言葉を `「…」` で囲む（空なら空のまま）。
+
+    **この括弧が「原文の逐語」と「Aico のラベル」の唯一の見分け**（モジュール docstring）。
+    省略の ``…`` は必ず括弧の **内側**へ置く（`「本文の冒頭…」`）。
+    """
+    return f"{QUOTE_OPEN}{text}{QUOTE_CLOSE}" if text else ""
+
+
+def _bare_sentence(text: str) -> str:
+    """見出しへ載せる前の下ごしらえ: 宛先トークン除去 → NFKC → 末尾の句読点だけ落とす。
+
+    ``？`` ``！`` は **残す**（`「この後のMTGリスケでもよいでしょうか？」` のように
+    疑問であることが用件そのものなので、落とすと意味が変わる）。落とすのは括弧の中で
+    据わりの悪い ``。`` ``、`` だけ。
+    """
+    return normalize_text(_strip_mentions(text)).rstrip("。．、，, 　").strip()
+
+
+def verbatim_headline(quote: str) -> str:
+    """依頼文そのものを見出しにする（**相手の言葉なので `「」` で囲む**）。
+
+    上限 :data:`_MAX_QUOTE_HEADLINE_LEN`(48・括弧の内側で数える) を超えたら **空**を返し、
+    呼び出し側が固定語彙へ落とす（途中で切って捏造しない）。
+    """
+    bare = _bare_sentence(quote)
+    if not bare or len(bare) > _MAX_QUOTE_HEADLINE_LEN:
+        return ""
+    return quote_wrap(bare)
+
+
 def headline_from_body(text: str) -> str:
     """依頼文が取れなかったとき、**相手の直近メッセージの冒頭一文**を見出しに使う。
 
     依頼文として選ばれなかっただけで、用件の手掛かりにはなる。「返信する」と断定するのも
     「原文を見る」と Aico の動作を出すのも、利用者にとっては何の件か分からない（実物 D3・D4）。
+    **相手の言葉なので `「」` で囲む**（囲みが無いと「〜しておきます」が自分の宿題に読める）。
 
-    挨拶だけの文は飛ばす（:data:`_PLEASANTRY_RE`）。``40`` 字を超える一文は末尾を ``…`` に
-    して切る。**切ったことが見える切り方**であって、原文に無い述語を足す捏造とは別問題
-    （固定語尾を接いで文を作らないという既存方針は変えていない）。
-    手掛かりが 1 文も取れなければ :data:`HEADLINE_NO_REQUEST`。
+    挨拶だけの文は飛ばす（:data:`_PLEASANTRY_RE`）。``40`` 字を超える一文は括弧の内側で
+    ``…`` にして切る。**切ったことが見える切り方**であって、原文に無い述語を足す捏造とは
+    別問題（固定語尾を接いで文を作らないという既存方針は変えていない）。
+    手掛かりが 1 文も取れなければ :data:`HEADLINE_NO_REQUEST`（＝Aico のラベル・囲まない）。
     """
     for raw in sentences(normalize_text(text)):
-        bare = _strip_mentions(raw).strip(" 　").rstrip("。．！!？?、，,").strip()
+        bare = _bare_sentence(raw)
         if not bare or _PLEASANTRY_RE.match(bare):
             continue
         if len(bare) > _MAX_BODY_HEADLINE_LEN:
-            return bare[: _MAX_BODY_HEADLINE_LEN - 1] + "…"
-        return bare
+            bare = bare[: _MAX_BODY_HEADLINE_LEN - 1] + "…"
+        return quote_wrap(bare)
     return HEADLINE_NO_REQUEST
 
 
@@ -908,18 +978,16 @@ def build_headline(
         return headline_from_body(text)
     # 型が判らなかった件に固定語尾（「〜を確認」）を足すと、原文に無い述語を作ってしまう
     # （「請求書だけ送ってください」→「請求書だけを確認」）。型が判らないときは
-    # **依頼文をそのまま**出す（宛先トークンだけ落とした逐語）。長すぎるなら定型文言へ。
+    # **依頼文をそのまま**出す（宛先トークンだけ落とした逐語を `「」` で囲む）。
+    # 長すぎるなら本文の冒頭一文へ、それも無ければ「読み取れなかった」と言う。
     if kind == KIND_UNKNOWN:
-        verbatim = normalize_text(_strip_mentions(quote)).rstrip("。．！!？?、，,").strip()
-        if verbatim and len(verbatim) <= _MAX_QUOTE_HEADLINE_LEN:
-            return verbatim
-        return topic or headline_from_body(text)
+        return verbatim_headline(quote) or headline_from_body(text)
     if not topic:
-        return {
-            KIND_TAKEOVER: "作業の引き取りを返す",
-            KIND_SCHEDULE: "日程を返す",
-            KIND_REPLY: "返信する",
-        }[kind]
+        # 話題が名詞句として使えない（述語で終わる）／長すぎる。ここで kind の固定語彙へ
+        # 直行すると「日程を返す」までしか言えず、用件が消える（2026-09-11 裁定）。
+        # **固定語彙へ落ちる前に、依頼文そのものを `「」` で出せないか先に試す**
+        # ＝「この後のMTGリスケでもよいでしょうか？」。48 字を超えるなら固定語彙へ。
+        return verbatim_headline(quote) or KIND_FALLBACK_HEADLINES[kind]
     if _SAHEN_TAIL_RE.search(topic):
         return f"{topic}する"
     if kind == KIND_TAKEOVER:
@@ -1066,12 +1134,15 @@ __all__ = [
     "CHANNEL_LABELS",
     "EFFORT_BY_KIND",
     "HEADLINE_NO_REQUEST",
+    "KIND_FALLBACK_HEADLINES",
     "KIND_REPLY",
     "KIND_SCHEDULE",
     "KIND_TAKEOVER",
     "KIND_UNKNOWN",
     "NOTE_BODY_TRUNCATED",
     "NOTE_DUE_UNRESOLVED",
+    "QUOTE_CLOSE",
+    "QUOTE_OPEN",
     "REASON_AMBIGUOUS_ADDRESSEE",
     "REASON_ANSWERED_BY_OTHER",
     "REASON_BLOCKED",
@@ -1101,9 +1172,11 @@ __all__ = [
     "is_closed_declaration",
     "is_deadline_context",
     "normalize_text",
+    "quote_wrap",
     "resolve_due",
     "sentences",
     "sort_key",
     "source_from_item",
     "triage_slack_handoff",
+    "verbatim_headline",
 ]
