@@ -480,7 +480,13 @@ def sanitize_output(
         # 出力を開き直す段でこけても、配達可能な場所にファイルを残さない
         # （この計算を try の外へ出すと、開けない PPTX が残って次段へ流れる）。
         allowed = set(inventory.allowed_media_sha256) | set(inserted_media_sha256)
-        allowed |= _referenced_media_sha256(output_path, inventory=inventory)
+        if not inventory.allowed_media_sha256:
+            # v1（テンプレ資産が repo に無く allowlist が空）の暫定則。
+            # 「台帳の画像スロットが実際に参照している画像」だけを許す。
+            # ⚠ これは *正規スロットに第三者の画像が入っていても通る* ことを意味する
+            # （寸法さえ合えば validate_template も通る）。台帳へ SHA256 を列挙した
+            # 時点でこの暫定則は自動的に外れ、allowlist だけが唯一の根拠になる。
+            allowed |= _referenced_media_sha256(output_path, inventory=inventory)
 
         with zipfile.ZipFile(output_path) as source:
             names = source.namelist()

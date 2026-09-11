@@ -497,3 +497,45 @@ def test_a_broken_output_is_not_left_behind(
         apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
     assert not output.exists()
     assert not (tmp_path / "out.pptx.sanitized").exists()
+
+
+def test_a_populated_allowlist_stops_trusting_the_slot_reference(tmp_path: Path) -> None:
+    """台帳へ SHA256 を列挙したら、暫定則（スロット参照は無条件で許す）が外れる。
+
+    v1 の暫定則は「正規スロットに第三者の画像が入っていても通る」。消毒済みテンプレが
+    届いて allowlist が埋まったら、allowlist だけが唯一の根拠にならないといけない。
+    """
+
+    import dataclasses
+
+    strict = dataclasses.replace(INVENTORY, allowed_media_sha256=frozenset({"0" * 64}))
+    template = tmp_path / "clean.pptx"
+    build_synthetic_template(str(template))
+    output = tmp_path / "out.pptx"
+    with pytest.raises(ClipTemplateInvalidError) as excinfo:
+        apply_fill_plan(
+            str(template), build_fill_plan(sample_analysis()), str(output), inventory=strict
+        )
+    assert "unexpected media part" in excinfo.value.detail
+    assert not output.exists()
+
+
+def test_a_populated_allowlist_accepts_exactly_what_it_lists(tmp_path: Path) -> None:
+    import dataclasses
+    import hashlib
+    import zipfile as zf
+
+    template = tmp_path / "clean.pptx"
+    build_synthetic_template(str(template))
+    with zf.ZipFile(template) as archive:
+        digests = {
+            hashlib.sha256(archive.read(name)).hexdigest()
+            for name in archive.namelist()
+            if name.startswith("ppt/media/")
+        }
+    strict = dataclasses.replace(INVENTORY, allowed_media_sha256=frozenset(digests))
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(
+        str(template), build_fill_plan(sample_analysis()), str(output), inventory=strict
+    )
+    assert output.exists()
