@@ -36,8 +36,6 @@ from teamagent.skills.clip_proposal.inventory import (
 )
 
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
-_CP = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
-_DC = "http://purl.org/dc/elements/1.1/"
 _THUMBNAIL_REL = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"
 
 #: 台帳が要求する shape が欠けている / 段落数や枠寸法が違う（＝テンプレ改竄）。
@@ -396,38 +394,66 @@ def _referenced_media_sha256(path: str, *, inventory: TemplateInventory) -> set[
     return referenced
 
 
-def _clean_core_properties(raw: bytes) -> bytes:
-    """``docProps/core.xml`` の人名欄を固定値へ潰す（実在社員名を出力へ残さない）。
+#: 出力の ``docProps/core.xml`` で空か固定値でなければならない欄（ローカル名）。
+#: 値は ``scrub_core_properties`` が python-pptx 経由で書き、V6 がバイト照合で確かめる。
+CORE_PROPERTY_EXPECTATIONS: tuple[tuple[str, str], ...] = (
+    ("creator", OUTPUT_DOC_AUTHOR),  # dc:creator
+    ("lastModifiedBy", OUTPUT_DOC_AUTHOR),  # cp:lastModifiedBy
+    ("description", OUTPUT_DOC_DESCRIPTION),  # dc:description
+    ("subject", ""),  # dc:subject
+    ("keywords", ""),  # cp:keywords
+    ("category", ""),  # cp:category
+)
 
-    lxml ではなく stdlib の ElementTree を使う（``lxml`` は型スタブが無く strict mypy を
-    通らない上、この 3 要素の書き換えに追加依存を増やす理由が無い）。OOXML の標準
-    prefix を登録してから直列化するので、PowerPoint が読む形は変わらない。
+
+def scrub_core_properties(presentation: Any) -> None:
+    """保存 **前** に docProps の人名欄を固定値へ潰す（python-pptx 経由）。
+
+    書き込みは python-pptx に任せる。XML を自前で ``fromstring`` すると、**信用できない
+    テンプレ由来の XML を自前パーサへ食わせる**ことになる（bandit B314・XXE / 実体展開）。
+    消毒漏れテンプレを食うのがこの層の仕事なので、その入力に自前パーサを向けない。
+    実際に消えたかどうかは ``_assert_core_properties_clean`` がバイト照合で確かめる。
     """
 
-    import xml.etree.ElementTree as ET
+    properties = presentation.core_properties
+    properties.author = OUTPUT_DOC_AUTHOR
+    properties.last_modified_by = OUTPUT_DOC_AUTHOR
+    properties.comments = OUTPUT_DOC_DESCRIPTION  # dc:description
+    properties.subject = ""
+    properties.keywords = ""
+    properties.category = ""
 
-    for prefix, uri in (
-        ("cp", _CP),
-        ("dc", _DC),
-        ("dcterms", "http://purl.org/dc/terms/"),
-        ("dcmitype", "http://purl.org/dc/dcmitype/"),
-        ("xsi", "http://www.w3.org/2001/XMLSchema-instance"),
-    ):
-        ET.register_namespace(prefix, uri)
 
-    root = ET.fromstring(raw)
-    fixed = {
-        f"{{{_DC}}}creator": OUTPUT_DOC_AUTHOR,
-        f"{{{_CP}}}lastModifiedBy": OUTPUT_DOC_AUTHOR,
-        f"{{{_DC}}}description": OUTPUT_DOC_DESCRIPTION,
-    }
-    for tag, value in fixed.items():
-        node = root.find(tag)
-        if node is None:
-            node = ET.SubElement(root, tag)
-        node.text = value
-    cleaned: bytes = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
-    return cleaned
+def _core_property_text(raw: bytes, local_name: str) -> str:
+    """``<ns:local>text</ns:local>`` の中身（要素ごと無い / 自己終端なら空文字）。
+
+    **パースしない**（正規表現で 1 要素だけ見る）。ここへ来る XML は信用できない
+    テンプレ由来なので、自前のパーサに解釈させないこと自体が要件。
+    """
+
+    pattern = re.compile(
+        rb"<(?:[A-Za-z0-9_.-]+:)?"
+        + local_name.encode()
+        + rb"\b[^>/]*>(.*?)</(?:[A-Za-z0-9_.-]+:)?"
+        + local_name.encode()
+        + rb">",
+        re.DOTALL,
+    )
+    match = pattern.search(raw)
+    return "" if match is None else match.group(1).decode("utf-8", "replace").strip()
+
+
+def _assert_core_properties_clean(raw: bytes) -> None:
+    """docProps に人名が残っていないことを **バイトで** 確かめる（fail-closed）。
+
+    ``scrub_core_properties`` が効かないテンプレ（想定外の core.xml 構造）を、黙って
+    通さない。ここで落ちた出力は ``sanitize_output`` が消す。
+    """
+
+    for local_name, expected in CORE_PROPERTY_EXPECTATIONS:
+        actual = _core_property_text(raw, local_name)
+        if actual != expected:
+            raise ClipTemplateInvalidError(f"docProps {local_name} not scrubbed")
 
 
 def _drop_thumbnail_refs(raw: bytes) -> bytes:
@@ -463,8 +489,10 @@ def sanitize_output(
     得意先へ出てしまうので、**出力側でもう一度** 見る。
 
     (1) ``docProps/core.xml`` の ``dc:creator`` / ``cp:lastModifiedBy`` /
-        ``dc:description`` を固定値へ上書きし、``docProps/thumbnail.*`` を
-        ``[Content_Types].xml`` と ``_rels/.rels`` の参照ごと物理削除する。
+        ``dc:description``（＋ subject / keywords / category）が固定値へ潰れていることを
+        バイトで確かめ（書き込み自体は保存前の ``scrub_core_properties``）、
+        ``docProps/thumbnail.*`` を ``[Content_Types].xml`` と ``_rels/.rels`` の
+        参照ごと物理削除する。
     (2) ``ppt/media/*`` を列挙し、台帳の allowlist ＋ 今回差し込んだ分 ＋
         台帳スロットが実際に参照している画像のどれでもない媒体が 1 つでもあれば、
         **出力を消してから** ``MEDIA_CLIP_TEMPLATE_INVALID`` を上げる。
@@ -496,7 +524,7 @@ def sanitize_output(
                         continue
                     raw = source.read(name)
                     if name == "docProps/core.xml":
-                        raw = _clean_core_properties(raw)
+                        _assert_core_properties_clean(raw)
                     elif name in ("[Content_Types].xml", "_rels/.rels"):
                         raw = _drop_thumbnail_refs(raw)
                     elif name.startswith("ppt/media/"):
@@ -546,6 +574,7 @@ def apply_fill_plan(
         if shape is None:  # validate_template を通っていれば起きない
             raise ClipTemplateInvalidError(f"missing shape {op.shape_id} ({op.role})")
         apply_shape_text(shape, op.paragraphs)
+    scrub_core_properties(presentation)
     presentation.save(output_path)
     return sanitize_output(
         output_path, inventory=inventory, inserted_media_sha256=inserted_media_sha256
@@ -571,6 +600,7 @@ def resolve_image_slots(
 
 
 __all__ = [
+    "CORE_PROPERTY_EXPECTATIONS",
     "TEMPLATE_INVALID",
     "ClipTemplateInvalidError",
     "FillPlan",
@@ -581,6 +611,7 @@ __all__ = [
     "build_fill_plan",
     "resolve_image_slots",
     "sanitize_output",
+    "scrub_core_properties",
     "truncate_for_frame",
     "validate_template",
 ]

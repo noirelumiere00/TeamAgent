@@ -21,6 +21,7 @@ from teamagent.skills.clip_proposal.analysis import CELL_COUNT
 from teamagent.skills.clip_proposal.inventory import CLIP_TEMPLATE_INVENTORY_V1 as INVENTORY
 from teamagent.skills.clip_proposal.inventory import PROPOSAL_SLIDE_INDEX
 from teamagent.skills.clip_proposal.template_fill import (
+    CORE_PROPERTY_EXPECTATIONS,
     ClipTemplateInvalidError,
     apply_fill_plan,
     apply_shape_text,
@@ -539,3 +540,48 @@ def test_a_populated_allowlist_accepts_exactly_what_it_lists(tmp_path: Path) -> 
         str(template), build_fill_plan(sample_analysis()), str(output), inventory=strict
     )
     assert output.exists()
+
+
+def test_docprops_are_verified_by_bytes_not_only_rewritten(tmp_path: Path) -> None:
+    """消毒が効かないテンプレを黙って通さない（書いたあと必ずバイトで確かめる）。
+
+    書き込みは python-pptx に任せる（信用できないテンプレ由来の XML を自前パーサへ
+    食わせない＝bandit B314 / XXE を避ける）。効いたかどうかは別に確かめる。
+    """
+
+    import teamagent.skills.clip_proposal.template_fill as module
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr(module, "scrub_core_properties", lambda presentation: None)
+        template = tmp_path / "unsanitized.pptx"
+        build_synthetic_template(str(template), author="高林 拓也")
+        output = tmp_path / "out.pptx"
+        with pytest.raises(ClipTemplateInvalidError) as excinfo:
+            apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    finally:
+        monkey.undo()
+    assert "not scrubbed" in excinfo.value.detail
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("local_name", "expected"),
+    [(name, value) for name, value in CORE_PROPERTY_EXPECTATIONS],
+)
+def test_every_core_property_on_the_list_is_scrubbed(
+    tmp_path: Path, local_name: str, expected: str
+) -> None:
+    """creator / lastModifiedBy / description / subject / keywords / category を全部見る。"""
+
+    import zipfile as zf
+
+    from teamagent.skills.clip_proposal.template_fill import _core_property_text
+
+    template = tmp_path / "named.pptx"
+    build_synthetic_template(str(template), author="高林 拓也")
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    with zf.ZipFile(output) as archive:
+        raw = archive.read("docProps/core.xml")
+    assert _core_property_text(raw, local_name) == expected
