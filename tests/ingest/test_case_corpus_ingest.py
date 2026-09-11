@@ -20,6 +20,10 @@
 - env に既存シートの sheet_id / gid を貼ってしまった状態（external_id 完全衝突）
 - CASE_CORPUS_SHEET_GID の typo（「#gid=…」等）→ gid 0 のタブを掴む事故
 - 0 行のタブ / 数百行のタブ（同一 warning の洪水）
+- 可否不明セルの自由記述に他社名・担当者名（「田中太郎（株式会社ミライ食品 広報部）に
+  確認中」）＝note へ載せると朝の DM に漏れる（2026-09-11 レビュー指摘 G1）
+- "ng" を部分文字列に含むだけの値（Wang / pending / Sharing OK / ongoing）＝ng は
+  sticky なので誤判定すると恒久的に ⚠ が貼られる（同 G2）
 """
 
 from __future__ import annotations
@@ -259,6 +263,60 @@ def test_confidential_and_pending_phrases_never_become_ok(raw: str) -> None:
     assert normalize_case_external_use(raw) != "ok"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Wang",  # 修正前は "ng" 部分一致で ng
+        "Ang Lee 様",
+        "pending",
+        "確認中（pending）",
+        "Sharing OK",  # 空白除去で "sharingok" → "ng" を含む
+        "ongoing",
+        "Strong Point 社",
+        "secretary に確認",  # "secret" の部分一致だった
+    ],
+)
+def test_ascii_ng_marker_requires_a_word_boundary(raw: str) -> None:
+    """素の "ng" 部分一致で無関係な値を ng に倒さない（2026-09-11 レビュー指摘 G2）。
+
+    実測（修正前）: "Wang" / "Ang Lee 様" / "pending" / "Sharing OK" / "ongoing" が
+    すべて ng。ng は resolve_case_external_use の経路 1 で **sticky** なので、一度
+    この誤判定で保存されるとセルを直しても二度と降格せず、恒久的に ⚠ が貼られる。
+    語境界を課しても fail-OPEN しない（外れた値は unknown へ落ち、ok 白名簿 10 語は
+    いずれも "ng" を部分文字列に含まないので ok へは構造的に倒れない）。
+    単独トークンの "Ng" は NG 表記と区別できないため対象外（安全側で ng のまま）。
+    変異: _CASE_NG_VALUE_WORD_RE を素の部分一致へ戻すと赤。
+    """
+    assert normalize_case_external_use(raw) == "unknown"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "NG",
+        "ng",
+        "ＮＧ",  # 全角（NFKC）
+        "NG（社外秘のため）",
+        "クライアント展開NG",
+        "社外提示NG",
+        "NG です",
+        "NG https://drive.example/x 要相談",  # 空白を消すと "nghttps" になり落ちる
+        "confidential",
+        "top secret",
+        "Ng",  # 単独トークンは NG 表記と区別できない＝安全側で ng
+        "confidentialのため要相談",
+    ],
+)
+def test_ascii_ng_marker_still_fires_on_real_ng_values(raw: str) -> None:
+    """語境界を課しても本物の NG 表記は取りこぼさない（G2 修正の逆向き固定）。
+
+    変異: _CASE_NG_VALUE_WORD_RE を削ると「NG」「confidential」等が unknown になり赤。
+    変異: 語境界の照合先を _normalize_case_value（空白除去）へ戻すと
+    「NG https://…」「top secret」が unknown になり赤。
+    """
+    assert normalize_case_external_use(raw) == "ng"
+
+
 # ===========================================================
 # 名前（フォルダ名 / ファイル名 / シート名）由来の NG
 # ===========================================================
@@ -395,12 +453,15 @@ def test_scrub_case_external_use_note_returns_none_when_nothing_left() -> None:
     assert scrub_case_external_use_note("https://example.com/x") is None
 
 
-def test_resolve_returns_scrubbed_note_on_every_path() -> None:
-    """3 経路（column / 名前 / sticky）すべてでスクラブ済みの note が返る。
+def test_resolve_returns_scrubbed_note_on_every_ng_path() -> None:
+    """note を返す 3 経路（column / 名前 / sticky）すべてでスクラブ済みの note が返る。
 
+    note を持てるのは **ng だけ**（2026-09-11 レビュー指摘 G1）なので、検査対象も
+    ng の 3 経路に限る。
     変異: resolve_case_external_use のどれか 1 経路で scrub を外すと赤。
     """
     from_column = resolve_case_external_use(column_value="NG https://x.example/doc 要相談")
+    assert from_column.value == "ng"
     assert from_column.note is not None and "http" not in from_column.note
 
     from_name = resolve_case_external_use(
@@ -414,6 +475,38 @@ def test_resolve_returns_scrubbed_note_on_every_path() -> None:
     )
     assert from_previous.value == "ng"
     assert from_previous.note is not None and "http" not in from_previous.note
+
+
+def test_resolve_returns_no_note_for_ok_and_unknown() -> None:
+    """ok / unknown は note を持たない（2026-09-11 レビュー指摘 G1）。
+
+    spec_delta §3 差分 4 が理由表示を求めているのは ng だけで、可否不明は固定文言
+    「（対外利用可否は資料で確認）」・ok は注記なし。ok / unknown にも生セル由来の
+    note を載せると、scrub が落とせない **他社名・担当者名** が朝の DM に出る。
+    変異: 最終 return を無条件 `scrub_case_external_use_note(column_value)` に戻すと赤。
+    """
+    assert resolve_case_external_use(column_value="OK") == ("ok", None)
+    assert resolve_case_external_use(column_value="社外提示OK") == ("ok", None)
+    assert resolve_case_external_use(column_value="要相談") == ("unknown", None)
+    assert resolve_case_external_use(column_value="未公開") == ("unknown", None)
+
+
+def test_resolve_unknown_free_text_cell_leaks_no_company_or_person_name() -> None:
+    """可否不明の自由記述セルから他社名・担当者名が note へ漏れない（G1 回帰）。
+
+    修正前の実測: value='unknown' /
+    note='田中太郎（株式会社ミライ食品 広報部）に確認中'（＝朝の DM にそのまま出る）。
+    スクラブは URL とメールしか落とさないので、閉じない語彙は note を作らないことで防ぐ。
+    変異: ok / unknown で note を返すよう戻すと赤。
+    """
+    result = resolve_case_external_use(
+        column_value=(
+            "田中太郎（株式会社ミライ食品 広報部）に確認中 "
+            "https://drive.google.com/x tanaka@mirai.example.co.jp"
+        )
+    )
+    assert result.value == "unknown"
+    assert result.note is None
 
 
 # ===========================================================

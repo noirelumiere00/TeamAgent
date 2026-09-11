@@ -342,8 +342,9 @@ _CASE_MIN_CORE_HITS = 3
 #   「未公開」（"公開" を含む）/「公開前」/「可否未定」（"可" を含む）/「可否確認中」
 # が全て ok になっていた＝まだ出せない事例が ⚠ なしで朝の DM に載る fail-OPEN。
 # ok に当たらない語は **unknown**（＝「資料で確認」表示）へ倒す。unknown は安全側。
+#
+# 日本語・記号のマーカーは **部分一致**でよい（自由記述の中に現れたら NG 意図で確実）。
 _CASE_NG_VALUE_MARKERS: tuple[str, ...] = (
-    "ng",
     "不可",
     "×",
     "✕",
@@ -351,8 +352,28 @@ _CASE_NG_VALUE_MARKERS: tuple[str, ...] = (
     "社外秘",
     "非公開",
     "禁止",
-    "confidential",
-    "secret",
+)
+# ASCII のマーカーだけは **英数字の語境界**を要求する（2026-09-11 レビュー指摘 G2）。
+# 素の "ng" を部分一致にしていたため、_normalize_case_value（NFKC → 空白除去 → casefold）
+# 後に "ng" を含むだけの値が ng へ倒れていた。実測した誤判定:
+#   "Wang" / "Ang Lee 様" / "pending" / "Sharing OK" / "ongoing" → すべて ng
+# ng は **sticky**（resolve_case_external_use の経路 1）なので、一度この誤判定で ng が
+# 保存されると、後でセルを直しても二度と降格しない＝恒久的に ⚠ が貼られる。
+#
+# 照合は **_normalize_case_value_spaced**（空白を消さない側）に当てる。空白除去後の
+# 文字列に当てると語が繋がって境界が壊れ、本物の NG を落とす（実測: 「NG https://…」
+# 「top secret」が unknown になった）。
+#
+# 語境界を課しても fail-OPEN にはならない: ここを外れた値は次の ok 完全一致
+# （_CASE_OK_VALUE_EXACT）へ進むが、白名簿の 10 語はいずれも "ng" / "confidential" /
+# "secret" を部分文字列として含まないため、ng の取りこぼしは必ず **unknown**
+# （＝「対外利用可否は資料で確認」）へ落ちる。ok へは構造的に倒れない。
+#
+# 単独トークンの "ng"（例: セル値が "Ng" だけ）は仕様上 NG 表記と区別できないので
+# ng のまま（安全側）。落とすのは **他の語の一部として現れた ng** だけ。
+_CASE_NG_VALUE_WORD_MARKERS: tuple[str, ...] = ("ng", "confidential", "secret")
+_CASE_NG_VALUE_WORD_RE = re.compile(
+    r"(?<![0-9a-z])(?:" + "|".join(_CASE_NG_VALUE_WORD_MARKERS) + r")(?![0-9a-z])"
 )
 # ⚠️ **完全一致**（_normalize_case_value 後の値そのもの）でのみ ok。語を足すときは
 # 「その語を含む否定・保留表現が存在しないか」ではなく「その語**そのもの**が
@@ -421,6 +442,18 @@ def _normalize_case_value(value: str | None) -> str:
     return normalized.casefold()
 
 
+def _normalize_case_value_spaced(value: str | None) -> str:
+    """_normalize_case_value と同じだが **空白を 1 個に潰すだけで消さない**。
+
+    ASCII マーカーの語境界判定専用。空白を消してしまうと語が繋がって境界が壊れ、
+    本物の NG を取りこぼす（実測: 「NG https://…」→"nghttps://…" / 「top secret」→
+    "topsecret" が両方 unknown になった）。
+    """
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = re.sub(r"\s+", " ", normalized.replace("　", " ")).strip()
+    return normalized.casefold()
+
+
 def map_case_fields(fields: Mapping[str, str]) -> dict[str, str]:
     """事例集マスター表の ヘッダ → 値 を metadata JSONB 用 dict へ写像する。
 
@@ -464,7 +497,10 @@ def normalize_case_external_use(value: str | None) -> str:
     空セル・未知語は **unknown**（「列が無い/書かれていない」を ng にも ok にも倒さない）。
 
     判定は非対称:
-      1. ng マーカーの **部分一致**（「NG（社外秘）」等の自由記述を拾う）
+      1. ng マーカーの **部分一致**（「NG（社外秘）」等の自由記述を拾う）。
+         ただし ASCII の語（ng / confidential / secret）は **英数字の語境界**を要求する
+         （素の "ng" 部分一致だと "Wang" / "pending" / "Sharing OK" が ng に倒れ、
+         ng は sticky なので二度と戻らない）。
       2. ok は **完全一致ホワイトリスト**のみ
       3. どちらでもなければ unknown
 
@@ -476,6 +512,8 @@ def normalize_case_external_use(value: str | None) -> str:
     if not normalized:
         return CASE_EXTERNAL_USE_UNKNOWN
     if any(marker in normalized for marker in _CASE_NG_VALUE_MARKERS):
+        return CASE_EXTERNAL_USE_NG
+    if _CASE_NG_VALUE_WORD_RE.search(_normalize_case_value_spaced(value)):
         return CASE_EXTERNAL_USE_NG
     if normalized in _CASE_OK_VALUE_EXACT:
         return CASE_EXTERNAL_USE_OK
@@ -510,8 +548,19 @@ def scrub_case_external_use_note(raw: str | None) -> str | None:
       2. 改行・タブ・連続空白を 1 個の半角空白へ潰す
       3. CASE_EXTERNAL_USE_NOTE_MAX_LEN 文字で打ち切り（末尾に「…」）
 
-    他社名・担当者名は語彙が閉じないので機械的には落とせない。落とせない分は
-    B-9 側の表示で「事例の出典名」として扱う（PR 本文に明記）。
+    他社名・担当者名は語彙が閉じないので機械的には落とせない。そのため **note を作る
+    のは ng のときだけ**に絞った（2026-09-11 レビュー指摘 G1）。ok / unknown は
+    resolve_case_external_use が None を返すので、この関数を通らない。
+
+    ⚠️ 残存リスク（未対応・要裁定）: ng の note には依然として他社名・担当者名が
+    残りうる。実測（2026-09-11）:
+      - 列経路   : 「NG（社外秘のため）田中太郎（株式会社ミライ食品 広報部）判断」
+      - 名前経路 : 「20250618_フラットベース社の共有（取扱注意）」
+                   （case_corpus_columns_20260911.md:34 の実フォルダ名）
+      - sticky   : 前回 note をそのまま再スクラブするので同じ
+    spec_delta §3 差分 4 の例（`⚠対外利用NG（事例集フォルダが展開NG）` /
+    `⚠開示NG（confidential）`）はいずれも **定型の理由句**であって生の名前ではない。
+    定型文へ寄せる案は PR へ申し送り（勝手に仕様を変えない）。
     空になったら None（＝注記なし）。
     """
     text = (raw or "").strip()
@@ -531,8 +580,16 @@ class CaseExternalUse(NamedTuple):
     """対外利用可否の判定結果。
 
     value: ok / ng / unknown
-    note:  表示用の理由（スクラブ済み）。理由が無ければ None。
+    note:  表示用の理由（スクラブ済み）。**ng のときだけ** 入りうる。
            **生セルそのものではない**（scrub_case_external_use_note を必ず通す）。
+
+    ⚠️ note を持てるのが ng だけである理由（2026-09-11 レビュー指摘 G1）:
+    spec_delta_20260911.md §3 差分 4 が表示を定めているのは ng の理由だけで、
+    可否不明は固定文言「（対外利用可否は資料で確認）」・ok は注記なし。
+    ＝ ok / unknown の note は **仕様が要求していない出力**。にもかかわらず
+    生セルのスクラブ結果を載せていたため、scrub_case_external_use_note が
+    落とせない他社名・担当者名（実測:「田中太郎（株式会社ミライ食品 広報部）に
+    確認中」）が朝の DM にそのまま出ていた。閉じない語彙は出力面に載せない。
     """
 
     value: str
@@ -557,6 +614,11 @@ def resolve_case_external_use(
       4. 列が無い / 空 → unknown
 
     ok は sticky にしない（unknown へ落ちるのは安全側の劣化なので許す）。
+
+    **note は ng のときだけ返す**（レビュー指摘 G1）。ok / unknown は必ず None。
+    仕様（spec_delta §3 差分 4）が理由表示を要求しているのは ng だけで、unknown は
+    固定文言「（対外利用可否は資料で確認）」。ok / unknown にも生セル由来の note を
+    載せていたため、スクラブで落とせない他社名・担当者名が朝の DM に出ていた。
     """
     if normalize_case_external_use(previous) == CASE_EXTERNAL_USE_NG:
         # previous_note は前回この関数がスクラブして書いた値だが、DB 由来の入力なので
@@ -568,4 +630,7 @@ def resolve_case_external_use(
         return CaseExternalUse(CASE_EXTERNAL_USE_NG, scrub_case_external_use_note(ng_name))
 
     value = normalize_case_external_use(column_value)
-    return CaseExternalUse(value, scrub_case_external_use_note(column_value))
+    if value == CASE_EXTERNAL_USE_NG:
+        return CaseExternalUse(value, scrub_case_external_use_note(column_value))
+    # ok / unknown は note を持たない（表示は仕様の固定文言 or 無注記）。
+    return CaseExternalUse(value, None)
