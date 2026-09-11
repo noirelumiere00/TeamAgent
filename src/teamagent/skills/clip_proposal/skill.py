@@ -606,9 +606,13 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         # 走行スロットが空くまで待ってから着手する（受付時の「順番が来たら自動で始めます」）。
         # 待っている間 job は queued のまま＝status が「作成中」と嘘をつかない。
         self._slots.start()
-        self._store.mark_running(job_id)
-        workdir = tempfile.mkdtemp(prefix="clip-proposal-")
+        workdir = ""
         try:
+            # mark_running（DB）と mkdtemp も try の内側に置く。ここで例外が出たとき
+            # finally を通らないと **走行スロットが永久に 1 つ減る**。積み重なると
+            # すべての依頼が空かないスロットを待ち続けて、mcp 再起動まで止まる。
+            self._store.mark_running(job_id)
+            workdir = tempfile.mkdtemp(prefix="clip-proposal-")
             analysis = self._analyze(input, ctx)
             self._quota.add_cost(analysis.cost_usd)
             path = self._deck_builder(analysis, workdir, ctx.request_id)
@@ -647,13 +651,18 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             if spent > 0:
                 self._quota.add_cost(spent)
             code = _safe_failure_code(exc)
-            self._store.mark_failed(job_id, code, expected_statuses=("queued", "running"))
+            try:
+                self._store.mark_failed(job_id, code, expected_statuses=("queued", "running"))
+            except Exception:
+                # 台帳が落ちている回でも finally（スロット返却）まで必ず到達させる。
+                log.warning("clip_proposal_mark_failed_failed", job_id=job_id)
             log.warning(
                 "clip_proposal_failed", job_id=job_id, error_code=code, spent_usd=round(spent, 6)
             )
         finally:
             # workdir（原本動画・抽出フレーム・生成 PPTX）は必ず消す。
-            shutil.rmtree(workdir, ignore_errors=True)
+            if workdir:
+                shutil.rmtree(workdir, ignore_errors=True)
             if dedupe_key:
                 self._active_jobs.release(dedupe_key)
             self._slots.finish()

@@ -992,3 +992,58 @@ def test_the_background_job_waits_for_a_slot_before_it_analyses() -> None:
     for thread in threads:
         thread.join(timeout=5)
     assert analyzer.peak == 1
+
+
+def test_a_store_failure_mid_job_still_gives_the_slot_back() -> None:
+    """mark_running（DB）が落ちても走行スロットを返す。
+
+    返さないと走行枠が 1 つずつ永久に減り、積み重なるとすべての依頼が
+    空かないスロットを待ち続けて mcp 再起動まで止まる。
+    """
+
+    class _FlakyStore(_MemoryStore):
+        def mark_running(self, job_id: str) -> bool:
+            raise RuntimeError("db down")
+
+    slots = JobSlots(limit=1)
+    store = _FlakyStore()
+    skill = _submit_skill(
+        store,
+        analyzer=_StubAnalyzer(),
+        quota=DailyQuota(),
+        active_jobs=ActiveJobIndex(),
+        job_slots=slots,
+    )
+    skill.run(ClipProposalSubmitInput(file_id="F1"), _ctx())
+    assert slots.snapshot() == (0, 0)
+
+    # 次の依頼は待たされずに着手できる（枠が食い潰されていない）。
+    healthy = _submit_skill(
+        _MemoryStore(),
+        analyzer=_StubAnalyzer(),
+        quota=DailyQuota(),
+        active_jobs=ActiveJobIndex(),
+        job_slots=slots,
+    )
+    assert healthy.run(ClipProposalSubmitInput(file_id="F2"), _ctx()).status == "queued"
+
+
+def test_a_dead_store_does_not_wedge_the_slot_on_the_failure_path() -> None:
+    """解析も mark_failed も落ちる回（台帳ごと落ちている）でもスロットを返す。"""
+
+    class _DeadStore(_MemoryStore):
+        def mark_failed(
+            self, job_id: str, error_code: str, *, expected_statuses: tuple[str, ...] = ()
+        ) -> bool:
+            raise RuntimeError("db down")
+
+    slots = JobSlots(limit=1)
+    skill = _submit_skill(
+        _DeadStore(),
+        analyzer=_StubAnalyzer(raises=RuntimeError("CLIP_TEMPLATE_UNAVAILABLE")),
+        quota=DailyQuota(),
+        active_jobs=ActiveJobIndex(),
+        job_slots=slots,
+    )
+    skill.run(ClipProposalSubmitInput(file_id="F1"), _ctx())
+    assert slots.snapshot() == (0, 0)
