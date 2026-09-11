@@ -146,18 +146,28 @@ assert_generation_manifest_fresh() {
 # $1: 読み取り自体に失敗したときの扱い。die（既定・本番）/ warn（dry-run）。
 # 「読めた上で不一致」は dry-run でも必ず落とす（それが本件の再発防止そのもの）。
 assert_published_generation() {
-  local on_read_error="${1:-die}" names pins
+  local on_read_error="${1:-die}" names pins errfile reason
   names="$(python3 -c "
 import json
 print(' '.join(sorted(json.load(open('$GENERATION_MANIFEST'))['expected_generation_sha256'])))")"
   [ -n "$names" ] || die "generation manifest に expected_generation_sha256 がありません"
+  # 認証の出どころは呼び出し時点で変わる。dry-run は MFA 前なので他の読み取り
+  # （kms list-aliases）と同じく --profile を明示し、本番は MFA セッションの
+  # 環境変数を使う（AWS_PROFILE は unset 済みなので --profile を付けてはいけない）。
+  local -a profile_args=()
+  [ "${DRY_RUN:-0}" = 1 ] && profile_args=(--profile "$PROFILE")
+  # stderr を stdout へ混ぜない（混ぜると警告 1 行で JSON が壊れる）。
+  errfile="$(mktemp)"
   # shellcheck disable=SC2086
   if ! pins="$(aws codebuild batch-get-projects --names $names --region "$REGION" \
-      --query 'projects[].{name:name,buildspec:source.buildspec}' --output json 2>&1)"; then
-    [ "$on_read_error" = warn ] || die "CodeBuild の buildspec ピンを読めません: ${pins%%$'\n'*}"
-    info "警告: buildspec ピンを読めませんでした（dry-run のため続行）: ${pins%%$'\n'*}"
+      "${profile_args[@]}" \
+      --query 'projects[].{name:name,buildspec:source.buildspec}' --output json 2>"$errfile")"; then
+    reason="$(head -1 "$errfile")"; rm -f "$errfile"
+    [ "$on_read_error" = warn ] || die "CodeBuild の buildspec ピンを読めません: $reason"
+    info "警告: buildspec ピンを読めませんでした（dry-run のため続行）: $reason"
     return 0
   fi
+  rm -f "$errfile"
   python3 "$REPO_ROOT/infra/deploy/assert_published_generation.py" \
     --manifest "$GENERATION_MANIFEST" --pins-json "$pins" \
     || die "公開済み buildspec の世代が repo の期待値と一致しません（上の対処に従うこと。撃っても段2 で必ず落ちます）"
@@ -205,9 +215,11 @@ start_and_wait() { # $1=project $2=env json $3=source-version("-"で無指定) $
         # 2026-09-11 r20 段2（build 679b024e）では、これで無関係な 3 行が出て
         # 「stderr が 1 行も出ていない」という誤った所見を生んだ。本物の
         # `FATAL: embedded release contract hash mismatch` は 363 イベント中の 238 番目にあった。
-        # 全件を先頭から取り、エコーを timestamp で除いた実出力だけを出す。
+        # 失敗出力は必ずストリーム末尾側にあるので、--start-from-head は付けず
+        # 末尾から最大 10000 件（API 上限）を取る。ログが巨大でも失敗区間を必ず含む。
+        # そのうえでエコーを timestamp で除いた実出力だけを出す。
         aws logs get-log-events --log-group-name "$lg" --log-stream-name "$ls" --region "$REGION" \
-          --start-from-head --limit 10000 --output json 2>/dev/null | \
+          --limit 10000 --output json 2>/dev/null | \
           python3 "$REPO_ROOT/scripts/aws/codebuild_failure_excerpt.py" --limit 20 || true
         echo "  （全文: aws logs get-log-events --log-group-name $lg --log-stream-name $ls --start-from-head）" >&2
         exit 1;;

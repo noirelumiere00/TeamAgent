@@ -242,4 +242,7 @@ def test_launcher_no_longer_greps_the_echoed_tail() -> None:
     code = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
     assert "--limit 40" not in code
     assert "codebuild_failure_excerpt.py" in code
-    assert "--start-from-head" in code
+    # 失敗出力は末尾側にあるので、取得窓は API 上限まで広げる。
+    assert "--limit 10000" in code
+    # 生ログを grep して「それらしい行」を出す経路が戻っていないこと。
+    assert 'grep -iE "FATAL|error|fail"' not in code
