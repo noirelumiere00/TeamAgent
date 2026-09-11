@@ -13,6 +13,7 @@ from typing import Literal
 
 from teamagent.skills.pre_meeting_brief.signals import (
     BriefSignals,
+    domain_label,
     normalize_text,
     split_clients,
     tighten_name,
@@ -195,10 +196,16 @@ def extract_client(sig: BriefSignals) -> ClientHint:
             return ClientHint(clients=(name,), agency_display=agency)
 
     # P4: 社外ドメイン（企業名は確定できないのでドメインをそのまま置く＝「要確認」扱い）
+    # ⚠️ ここだけ ``tighten_name`` ではなく ``domain_label``。tighten_name は
+    #    「ホスト名らしい文字列」を丸ごと捨てる（説明欄の自由文に混ぜられた
+    #    ``evil.example.com/steal`` を止めるため）ので、そのまま使うと P4 が常に空になる。
+    #    domain_label は Google の参加者リスト由来の **素のドメイン** だけを通し、
+    #    パス・クエリ・記号が 1 文字でも混ざれば捨てる。
     if sig.attendee_list_available:
         for dom in sig.attendee_domains:
-            if dom:
-                return ClientHint(clients=(tighten_name(dom),), agency_display=agency)
+            name = domain_label(dom)
+            if name:
+                return ClientHint(clients=(name,), agency_display=agency)
     return ClientHint(clients=(), agency_display=agency)
 
 

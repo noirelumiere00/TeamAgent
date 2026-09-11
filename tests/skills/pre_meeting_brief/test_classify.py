@@ -189,6 +189,144 @@ def test_paren_notes_do_not_split_the_company_name() -> None:
     assert split_clients("白水飲料（飲料/健康）") == ["白水飲料(飲料/健康)"]
 
 
+# ── スキーム無しのホスト名（第三者が書いたクリック先）────────────────────
+#: 説明欄は社外の主催者が書ける **第三者入力**。裸のホスト名も Slack が自動リンク化する
+#: ので、``http`` / ``://`` だけを見ていた旧実装は
+#: ``代理店：evil.example.com/steal-this-token`` を素通りさせていた（2026-09-11 実証）。
+#: ``harden`` は ``<`` ``>`` ``@`` ``&`` しか潰さないため無害化の当てにならない。
+HOSTLIKE_MUST_BE_DISCARDED = [
+    "evil.example.com/steal-this-token",
+    "evil.example.com/x",
+    "bit.ly/xYz9",
+    "drive.google.com",
+    "www.a.jp",
+    "evil.example.com)",  # 閉じ括弧付き
+    "a@b.com,",  # 読点付き
+    "https://evil.example/steal",  # 旧実装でも止まっていた形（退行させない）
+]
+
+#: 捨てすぎていないことの担保。ここが全部空になると機能が死ぬ。
+#: repo 内の実クライアント名 227 件（``株式会社``/``㈱`` を含む表記）を通して
+#: 捨てられたのは 0 件（2026-09-11 実測）。
+LEGITIMATE_NAMES_MUST_SURVIVE = [
+    "北都リゾート",
+    "青葉広告（山田様）",
+    "株式会社A.B.C",  # ドットの後ろが 1 文字なのでホスト名に見えない
+    "ドコモ.com",  # ドットの直前が非 ASCII
+    "Co.,Ltd.",
+    "No.1",
+    "中央・製紙",
+    "白水飲料(飲料/健康)",
+    "花王株式会社",
+    "ユニ・チャーム",
+]
+
+
+def test_hostlike_strings_are_discarded_entirely() -> None:
+    """スキーム無しのホスト名は **1 文字も通さない**（丸ごと破棄）。
+
+    変異: ``signals.py`` の ``if _HOSTLIKE_RE.search(text): return ""`` を落とすと、
+    ``evil.example.com/steal-this-token`` がそのまま返って赤。
+    """
+    from teamagent.skills.pre_meeting_brief.signals import tighten_name
+
+    assert [tighten_name(s) for s in HOSTLIKE_MUST_BE_DISCARDED] == [""] * len(
+        HOSTLIKE_MUST_BE_DISCARDED
+    )
+
+
+def test_legitimate_company_names_survive_the_hostname_filter() -> None:
+    """正規の社名まで巻き込んでいないこと（捨てすぎると機能が死ぬ）。"""
+    from teamagent.skills.pre_meeting_brief.signals import tighten_name
+
+    # ⚠️ ``tighten_name`` は NFKC しない（正規化は ``normalize_text`` の役目）。
+    #    全角括弧はそのまま残るのが正（半角化は呼び出し側の normalize_text 経由）。
+    assert [tighten_name(s) for s in LEGITIMATE_NAMES_MUST_SURVIVE] == [
+        "北都リゾート",
+        "青葉広告（山田様）",
+        "株式会社A.B.C",
+        "ドコモ.com",
+        "Co.,Ltd.",
+        "No.1",
+        "中央・製紙",
+        "白水飲料(飲料/健康)",
+        "花王株式会社",
+        "ユニ・チャーム",
+    ]
+
+
+def test_scheme_less_host_in_agency_line_never_reaches_the_hint() -> None:
+    """説明欄 → ``agency_hint`` → ``agency_display`` の経路で丸ごと消える。
+
+    旧実装の実測: ``sig.agency_hint == 'evil.example.com/steal-this-token'``、
+    描画結果 ``  クライアント：北都リゾート／代理店：evil.example.com/steal-this-token``。
+    """
+    raw = {
+        "id": "e-host",
+        "summary": "打合せ",
+        "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+        "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        "description": "クライアント：北都リゾート\n代理店：evil.example.com/steal-this-token",
+    }
+    (detail,) = extract_events([raw], want_description=True)
+    sig = build_signal_input(detail)
+    assert sig.agency_hint == ""
+    hint = extract_client(sig)
+    assert hint.agency_display == ""
+    assert hint.clients == ("北都リゾート",)
+
+
+def test_scheme_less_host_in_client_line_never_reaches_the_hint() -> None:
+    """代理店行だけでなく **クライアント行・インライン代理店** も同じ扱い。
+
+    ⚠️ ``bit.ly/xYz9`` は「``/`` が社名の連記区切りでもある」ため、素朴に
+    ``tighten_name`` だけ直すと ``bit.ly``（捨てる）と ``xYz9``（**社名として残る**）に
+    割れて、第三者の文字列が ``クライアント：xYz9`` として本人 DM に出る（実測）。
+    変異: ``split_clients`` の ``_URLISH_RE.sub`` を落とすと ``'xYz9'`` が残って赤。
+    """
+    raw = {
+        "id": "e-host2",
+        "summary": "打合せ",
+        "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+        "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        "description": "クライアント：bit.ly/xYz9／代理店：drive.google.com",
+    }
+    (detail,) = extract_events([raw], want_description=True)
+    sig = build_signal_input(detail)
+    assert sig.client_hint == ""
+    assert sig.agency_hint == ""
+    hint = extract_client(sig)
+    assert hint.clients == ()
+    assert hint.agency_display == ""
+
+
+def test_url_strip_does_not_eat_the_company_next_to_it() -> None:
+    """URL を消しても、区切りの反対側にある正当な社名は残る（捨てすぎない）。"""
+    from teamagent.skills.pre_meeting_brief.signals import split_clients
+
+    assert split_clients("北都リゾート／evil.example.com/steal") == ["北都リゾート"]
+    assert split_clients("北都リゾート ※資料 https://drive.google.com/a 参照") == ["北都リゾート"]
+    # 冪等（``_from_description`` が「／」で連結して持ち回る）。
+    joined = "／".join(split_clients("緑川フーズ／白水飲料"))
+    assert split_clients(joined) == split_clients("緑川フーズ／白水飲料")
+
+
+def test_attendee_domain_path_still_works() -> None:
+    """P4（参加者ドメイン）は ``domain_label`` を通るので生き残る。
+
+    ``tighten_name`` へ寄せると ``aoba-ad.co.jp`` まで捨てられて P4 が永久に空になる。
+    変異: ``classify.py`` の ``domain_label`` を ``tighten_name`` へ戻すと赤。
+    """
+    from teamagent.skills.pre_meeting_brief.signals import domain_label
+
+    sig = _sig(attendee_domains=("aoba-ad.co.jp",), attendee_list_available=True)
+    assert extract_client(sig).clients == ("aoba-ad.co.jp",)
+    # 自由文が 1 文字でも混ざれば捨てる（ここを緩めると説明欄の穴に戻る）。
+    assert domain_label("evil.example.com/steal") == ""
+    assert domain_label("evil.example.com steal") == ""
+    assert domain_label("aoba-ad.co.jp") == "aoba-ad.co.jp"
+
+
 # ── 名寄せ ────────────────────────────────────────────────────────────
 def test_normalize_company_strips_corp_forms_and_notes() -> None:
     assert normalize_company("株式会社東光製作所様（代理店：青葉広告）") == "東光製作所"
