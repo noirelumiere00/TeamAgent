@@ -474,12 +474,14 @@ def sanitize_output(
     import os
     import zipfile
 
-    allowed = set(inventory.allowed_media_sha256) | set(inserted_media_sha256)
-    allowed |= _referenced_media_sha256(output_path, inventory=inventory)
-
     staging = f"{output_path}.sanitized"
     orphan = ""
     try:
+        # 出力を開き直す段でこけても、配達可能な場所にファイルを残さない
+        # （この計算を try の外へ出すと、開けない PPTX が残って次段へ流れる）。
+        allowed = set(inventory.allowed_media_sha256) | set(inserted_media_sha256)
+        allowed |= _referenced_media_sha256(output_path, inventory=inventory)
+
         with zipfile.ZipFile(output_path) as source:
             names = source.namelist()
             with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as target:

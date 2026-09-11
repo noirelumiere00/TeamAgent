@@ -477,3 +477,23 @@ def _inject_thumbnail(path: Path) -> None:
                 raw = raw.replace(b"</Types>", override.encode() + b"</Types>")
             target.writestr(source.getinfo(name), raw)
     shutil.move(str(staging), str(path))
+
+
+def test_a_broken_output_is_not_left_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """消毒の途中でこけても、配達可能な場所に PPTX を残さない。"""
+
+    import teamagent.skills.clip_proposal.template_fill as module
+
+    def boom(path: str, *, inventory: object) -> set[str]:
+        raise RuntimeError("cannot reopen")
+
+    monkeypatch.setattr(module, "_referenced_media_sha256", boom)
+    template = tmp_path / "clean.pptx"
+    build_synthetic_template(str(template))
+    output = tmp_path / "out.pptx"
+    with pytest.raises(RuntimeError):
+        apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    assert not output.exists()
+    assert not (tmp_path / "out.pptx.sanitized").exists()
