@@ -165,6 +165,15 @@ class CalendarEventItem(BaseModel):
             "bool(attendees) では判定できない"
         ),
     )
+    title_signal: str = Field(
+        default="",
+        max_length=200,
+        description=(
+            "判定用の予定名（build_signal_input が作った派生値をそのまま写したもの）。"
+            "⚠️ 表示用の summary_display（生・120字）とは別物。ここを display から"
+            "作り直すと、切り位置と NFKC の順序が経路ごとに変わり同じ予定の判定がズレる"
+        ),
+    )
     has_client_line: bool = Field(
         default=False, description="説明欄に「クライアント：」行があったか（本文は持たない）"
     )

@@ -852,6 +852,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
                     attendee_domains=list(sig.attendee_domains)[:10],
                     attendee_list_available=sig.attendee_list_available,
+                    # ⚠️ 判定用の予定名も **派生値として写す**（display から作り直さない）。
+                    #   summary_display は「生のまま 120 字」、build_signal_input は
+                    #   「NFKC してから 200 字」。display 経由で復元すると切り位置も順序も
+                    #   違うため、121 字目以降に除外語や「様」がある予定が定期便と
+                    #   on-demand で別判定になる（実測: internal / uncertain）。
+                    title_signal=sig.title,
                     has_client_line=sig.has_client_line,
                     client_hint_display=sig.client_hint[:200],
                     client_hint_scrubbed=str(scrub_value(sig.client_hint))[:200],

@@ -153,6 +153,80 @@ def test_derived_signal_fields_are_copied_into_items(monkeypatch: pytest.MonkeyP
     assert "クライアント：北都リゾート／代理店" not in dumped
 
 
+# ── 2 経路の判定一致（切り位置・正規化の順序を揃える）────────────────
+#: 120 字を超え、**121 字目以降に除外語** を置いた予定名。
+#: 生のまま 120 字で切ると「ヨミ会」が消えて別判定になる。
+LONG_TITLE_WITH_TRAILING_EXCLUSION = "案件Ａ" * 45 + "ヨミ会"
+
+
+def test_long_title_is_judged_the_same_on_both_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """150 字超の予定名でも 定期便経路 と tool 経路 の判定が一致する。
+
+    事故の形: ``build_signal_input`` は **NFKC してから 200 字**、
+    ``summary_display`` は **生のまま 120 字**。切り位置も順序も違うので、
+    121 字目以降に除外語や「様」がある予定は経路で判定が割れる
+    （実測: tool=internal / 定期便=uncertain → 朝の DM にだけ社内定例が並ぶ）。
+
+    変異（どちらでも赤になることを実測済み）:
+      - ``morning_digest/skill.py`` の ``title_signal=sig.title`` を落とす
+        → ``signals_from_item`` が display（120 字）へフォールバックして判定が割れる
+      - ``signals_from_item`` を ``normalize_text(summary_display)`` へ戻す → 同上
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    from teamagent.adapters.gcalendar_client import extract_events
+    from teamagent.skills.pre_meeting_brief.classify import classify_external
+    from teamagent.skills.pre_meeting_brief.signals import build_signal_input, signals_from_item
+
+    assert len(LONG_TITLE_WITH_TRAILING_EXCLUSION) > 120
+    raw = [
+        {
+            "id": "long-1",
+            "summary": LONG_TITLE_WITH_TRAILING_EXCLUSION,
+            "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+            "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+            "organizer": {"email": "boss@vectorinc.co.jp"},
+            "attendees": [{"email": "me@vectorinc.co.jp", "self": True}],
+        }
+    ]
+    internal = frozenset({"vectorinc.co.jp"})
+
+    # tool 経路: 生 item から直接
+    (detail,) = extract_events(raw, want_description=True)
+    tool_sig = build_signal_input(detail)
+
+    # 定期便経路: morning_digest の **実物の写し替え** を通す（手組みしない）
+    (item,) = _skill(_FakeGcal(raw))._collect_calendar(None, _input(), _ctx())
+    runner_sig = signals_from_item(item)
+
+    assert runner_sig.title == tool_sig.title
+    assert "ヨミ会" in runner_sig.title  # 120 字で切られていない
+    assert classify_external(runner_sig, internal_domains=internal) == classify_external(
+        tool_sig, internal_domains=internal
+    )
+    assert classify_external(tool_sig, internal_domains=internal) == "internal"
+
+
+def test_display_title_stays_raw_and_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """判定用の写し（title_signal）と **表示用**（summary_display）は別物のまま。
+
+    判定を揃えるために display の上限を 200 字へ広げると、朝の DM の予定行が
+    長くなる／NFKC で字面が変わる。分けていることをここで固定する。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_BRIEF", "true")
+    raw = [
+        {
+            "id": "long-2",
+            "summary": LONG_TITLE_WITH_TRAILING_EXCLUSION,
+            "start": {"dateTime": "2026-09-11T14:00:00+09:00"},
+            "end": {"dateTime": "2026-09-11T15:00:00+09:00"},
+        }
+    ]
+    (item,) = _skill(_FakeGcal(raw))._collect_calendar(None, _input(), _ctx())
+    assert len(item.summary_display) == 120
+    assert item.summary_display == LONG_TITLE_WITH_TRAILING_EXCLUSION[:120]
+    assert len(item.title_signal) == len(LONG_TITLE_WITH_TRAILING_EXCLUSION)
+
+
 # ── 既定 OFF（呼び出し側のゲートを固定する） ──────────────────────────
 def test_brief_enabled_helper_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MORNING_DIGEST_BRIEF", raising=False)
