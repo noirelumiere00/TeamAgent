@@ -49,8 +49,15 @@ def test_reported_answer_keeps_numbers_and_proper_nouns() -> None:
     assert "高速様採用向け切り抜き" in out
 
 
-def test_bold_becomes_slack_bold() -> None:
-    assert strip_ai_decoration("これは**太字**です") == "これは*太字*です"
+def test_bold_markers_are_removed_not_moved() -> None:
+    """`**強調**` は別記号へ移さず落とす（配信面が 2 つあり `*` も安全でないため）。
+
+    slack_bot / two_stage の直接投稿は mrkdwn なので `*語*` が太字だが、OpenClaw 経由は
+    Markdown→mrkdwn 変換が入り `*語*` は斜体になる（infra/openclaw/SOUL.md:351 と
+    tests/infra/test_soul_contract.py:469 が repo 内の一次記述としてこの変換を固定）。
+    どちらでも誤解釈されないのは記号を持たない地の文だけ。
+    """
+    assert strip_ai_decoration("これは**太字**です") == "これは太字です"
 
 
 def test_existing_slack_bold_is_untouched() -> None:
@@ -62,15 +69,36 @@ def test_existing_slack_bold_is_untouched() -> None:
 @pytest.mark.parametrize(
     ("src", "want"),
     [
-        ("a***x***b", "a*x*b"),  # bold+italic
-        ("a****x****b", "a*x*b"),
-        ("a**x*y**b", "a*x*y*b"),  # 入れ子まがい
-        ("**", "*"),  # 中身なし（例外にならないこと）
+        ("a***x***b", "axb"),  # bold+italic
+        ("a****x****b", "axb"),
+        ("a**x*y**b", "ax*yb"),  # 入れ子まがい（単独 `*` は中身として残す）
+        ("**", "**"),  # 対になっていない＝触らない（例外にならないこと）
     ],
 )
 def test_asterisk_runs_do_not_explode(src: str, want: str) -> None:
     """`***` `****` のような並びでも決定的に潰れ、例外にならない。"""
     assert strip_ai_decoration(src) == want
+
+
+def test_unpaired_bold_is_left_alone_and_counted() -> None:
+    """対になっていない `**` は消さない（片側だけ消えると入力より壊れる）。
+
+    生成が max_tokens で切れた時だけ出る形。消す代わりに残数をログへ出す。
+    """
+    from structlog.testing import capture_logs
+
+    src = "結論は**1日密着型"
+    with capture_logs() as logs:
+        out = strip_ai_decoration(src, request_id="req-unpaired")
+    assert out == src
+    events = [e for e in logs if e.get("event") == "llm_text_residual_decoration"]
+    assert events and events[0]["unpaired_bold_count"] == 1
+
+
+def test_power_operator_is_not_folded() -> None:
+    """対になっていない `**`（べき乗など）を勝手に 1 個へ畳まない（意味が変わる）。"""
+    src = "計算式は 2**3 です"
+    assert strip_ai_decoration(src) == src
 
 
 def test_em_dash_midline_becomes_comma() -> None:
@@ -107,9 +135,43 @@ def test_no_double_punctuation_after_substitution() -> None:
 
 
 def test_urls_are_never_rewritten() -> None:
-    """URL の中の `**` `--` `—` は無加工で通す（リンクが壊れる）。"""
-    src = "詳細は https://ex.test/a**b**c--d と https://ex.test/x?q=a--b を参照"
+    """URL の中の `--` `—` `、、` は無加工で通す（リンクが壊れる）。"""
+    src = "詳細は https://ex.test/a--b—c と https://ex.test/x?q=a、、b を参照"
     assert strip_ai_decoration(src) == src
+
+
+def test_decoration_touching_a_url_is_still_removed() -> None:
+    r"""URL のある行でも、URL の外の装飾は落ちる（過剰保護で後処理が無効化されない）。
+
+    和文は URL の直後に空白を置かないため、裸 URL を `\S+` で貪欲に取ると行末までが
+    保護領域になり、その行だけ `**` が Slack へ素通しで届いていた（実測）。
+    """
+    assert (
+        strip_ai_decoration("詳細は https://drive.test/file/d/AAA/viewの**要点**は3つ。")
+        == "詳細は https://drive.test/file/d/AAA/viewの要点は3つ。"
+    )
+    assert (
+        strip_ai_decoration("参考: https://ex.test/a、**結論**は価格。")
+        == "参考: https://ex.test/a、結論は価格。"
+    )
+
+
+@pytest.mark.parametrize(
+    ("src", "want"),
+    [
+        ("**詳細は https://drive.test/file/d/1Ab**", "詳細は https://drive.test/file/d/1Ab"),
+        ("資料は **https://example.test/x** を参照", "資料は https://example.test/x を参照"),
+        ("**A <https://x.test/y|y> B**", "A <https://x.test/y|y> B"),
+    ],
+)
+def test_bold_spanning_a_url_never_becomes_asymmetric(src: str, want: str) -> None:
+    """強調が URL を含む/URL で終わるとき、開きだけ変換して `*…**` にしない。
+
+    貪欲な裸 URL 保護が閉じ `**` を URL の一部として飲み込むと、開きだけが畳まれて
+    入力より壊れたマークアップ（リテラルのアスタリスクが残る）になっていた。
+    """
+    assert strip_ai_decoration(src) == want
+    assert "*" not in strip_ai_decoration(src)
 
 
 def test_slack_link_syntax_is_never_rewritten() -> None:
@@ -147,6 +209,82 @@ def test_single_hyphen_ranges_survive() -> None:
     assert strip_ai_decoration(src) == src
 
 
+@pytest.mark.parametrize(
+    "delim",
+    [
+        "| --- | --- |",
+        "|---|---|",
+        "| :--- | ---: |",
+        "| :---: | --- | ---: |",
+        "｜ --- ｜ --- ｜",  # 全角の縦棒（和文 LLM が書く形）
+        "|　---　|　---　|",  # 全角空白
+    ],
+)
+def test_markdown_table_delimiter_row_survives(delim: str) -> None:
+    """表の区切り行を読点にしない（`|、|、|` に化けて表が壊れる。実測）。
+
+    新しい v2d は固定テンプレを廃し表を禁じていないので、比較質問で 2 列表が返るのは自然。
+    answer は connect_web が textContent で、slack_bot が mrkdwn でそのまま出す。
+    """
+    src = f"| 項目 | 内容 |\n{delim}\n| 予算 | 300万円 |"
+    assert strip_ai_decoration(src) == src
+
+
+def test_fenced_code_block_keeps_japanese_punctuation() -> None:
+    """フェンスの中の `、、`（CSV の空列など）を畳まない。
+
+    句読点の整形を join 後の全文にかけると、行単位の保護を通らずフェンスの中まで
+    書き換わり、CSV 見本が別物になっていた（実測）。
+    """
+    src = "サンプル:\n\n```\n名前、、金額\n山田、、1000\n```\n\n以上"
+    assert strip_ai_decoration(src) == src
+
+
+def test_inline_code_keeps_japanese_punctuation() -> None:
+    src = "コードは `a、、b` です"
+    assert strip_ai_decoration(src) == src
+
+
+def test_url_query_keeps_japanese_punctuation() -> None:
+    """URL のクエリの `、、` を畳まない（畳むとリンク先が変わる）。"""
+    src = "資料 https://ex.test/x?q=a、、b を参照"
+    assert strip_ai_decoration(src) == src
+
+
+def test_untouched_line_keeps_author_punctuation() -> None:
+    """置換が起きていない行の `、、` は書き手の意図なので触らない。"""
+    src = "見本は 名前、、金額 の形です。"
+    assert strip_ai_decoration(src) == src
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "再生数は 80—100 万でした。",
+        "参考は 2024—2025 年の実績です。",
+        "提案書—A社版.pptx を見てください。",
+    ],
+)
+def test_em_dash_ranges_and_names_survive(src: str) -> None:
+    """空白を伴わず英数字/固有名詞に接する `—` は範囲・名前なので読点にしない。
+
+    `80—100` を `80、100` にするのは意味を変える置換で、モジュール冒頭の掟に反する。
+    """
+    assert strip_ai_decoration(src) == src
+
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        "コマンドは uv run -- pytest です",  # 引数終端トークン
+        "期間は 2024 -- 2025 です",  # 年レンジ
+    ],
+)
+def test_spaced_double_hyphen_in_ascii_context_survives(src: str) -> None:
+    """空白で囲まれた `--` でも、両側が和文でないものは触らない。"""
+    assert strip_ai_decoration(src) == src
+
+
 # ── 意味を変える置換をしないこと ────────────────────────────────────────────
 
 
@@ -178,6 +316,18 @@ def test_clean_text_logs_nothing() -> None:
 
 
 # ── 端のケース ──────────────────────────────────────────────────────────────
+
+
+def test_control_characters_do_not_raise() -> None:
+    """保護領域の退避に使う制御文字が入力に混じっていても例外にしない。
+
+    ここで例外を出すと、装飾を直すための層が回答そのものを落とすことになる。
+    """
+    src = "資料 https://ex.test/a \x001\x01 と **太字**"
+    out = strip_ai_decoration(src)
+    assert "https://ex.test/a" in out
+    assert "太字" in out
+    assert "**" not in out
 
 
 @pytest.mark.parametrize("src", ["", "  ", "普通の営業向け文章です。"])

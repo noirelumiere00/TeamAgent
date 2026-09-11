@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import teamagent.skills.search.skill as skill_mod
 from teamagent.adapters.bedrock_client import ConverseResponse, TokenUsage
 from teamagent.adapters.pgvector_client import SearchHit
 from teamagent.skills.base import SkillContext
@@ -114,11 +115,7 @@ def test_answer_keeps_numbers_and_proper_nouns_after_run() -> None:
 def test_source_links_markdown_survives_postprocessing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """本番 env（SEARCH_ANSWER_SOURCE_LINKS=1）で付く `[label](url)` を壊さない。
-
-    後処理は `_source_links_block` より上流に入っているので、リンクは後から付く＝無傷。
-    ここが赤くなったら、差し込み位置が下流にずれている。
-    """
+    """本番 env（SEARCH_ANSWER_SOURCE_LINKS=1）で付く `[label](url)` を壊さない。"""
     monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "1")
     out = _skill(_bedrock(DECORATED_LLM_TEXT)).run(
         input=SearchInput(query="採用動画の勝ち筋"), ctx=SkillContext()
@@ -127,6 +124,39 @@ def test_source_links_markdown_survives_postprocessing(
     assert "📎 *資料リンク*" in out.answer
     # リンクを付けても本文側の装飾は戻らない
     assert "**" not in out.answer
+
+
+def test_postprocess_runs_upstream_of_source_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """後処理が `_source_links_block` の付与より上流にあることを、実際に固定する。
+
+    出力側の assert（リンクが壊れていない）だけでは順序を固定できない。リンクは
+    `](url)` と `📎 *資料リンク*` のどちらも後処理の保護領域か単独 `*` なので、
+    差し込みを下流へ移しても結果が同じで緑のまま通る（変異テストで実測）。
+    そこで後処理に渡された「入力」を覗き、リンクブロックがまだ付いていないことを見る。
+    """
+    monkeypatch.setenv("SEARCH_ANSWER_SOURCE_LINKS", "1")
+    seen: list[str] = []
+    real = skill_mod.strip_ai_decoration
+
+    def _spy(text: str, **kwargs: object) -> str:
+        seen.append(text)
+        return real(text, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(skill_mod, "strip_ai_decoration", _spy)
+    out = _skill(_bedrock(DECORATED_LLM_TEXT)).run(
+        input=SearchInput(query="採用動画の勝ち筋"), ctx=SkillContext()
+    )
+    assert seen, "後処理が要約本文を一度も通っていない"
+    for text in seen:
+        assert "📎 *資料リンク*" not in text, (
+            "後処理がリンク付与より下流にある。リンクの markdown を後処理に通すと"
+            "壊れ得るので、差し込みは `_summarize` の直後（_strip_internal_markers）に置く"
+        )
+        assert "](" not in text
+    # 上流にあるからこそ、リンクは無傷で残る。
+    assert "[採用提案](https://drive.google.com/file/d/AAA/view)" in out.answer
 
 
 def test_plain_answer_is_unchanged() -> None:
