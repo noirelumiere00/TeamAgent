@@ -10,6 +10,7 @@ Sprint 3 / PR-6 で導入。pipeline.py / scripts/ingest_sources.py から呼ば
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,12 @@ class GDriveFolderSpec:
 
 @dataclass(frozen=True)
 class GSheetsTabSpec:
-    """gsheets[].tabs[] の 1 件。"""
+    """gsheets[].tabs[] の 1 件。
+
+    ``gid_env``（yaml で gid を env 後入れにする宣言）は **loader 内で解決しきる**ため
+    ここには持たない。解決できなかったタブは spec に現れない（_parse_gsheet_tab）ので、
+    読み出し側は「gid は常に確定値」として扱ってよい。
+    """
 
     gid: int
     tab_name: str
@@ -65,6 +71,10 @@ class GSheetSpec:
     tabs: tuple[GSheetsTabSpec, ...]
     row_unit: bool = True
     extra_metadata: dict[str, Any] = field(default_factory=dict)
+    # ID 後入れ（2026-09-11・B-10）: sheet_id/gid が未確定のソースを yaml に置けるようにする。
+    # yaml の sheet_id がプレースホルダのときだけ env を見る（実 ID を env で黙って
+    # 差し替えられる口は作らない）。解決後は普通の spec と区別が無い＝取込経路は不変。
+    sheet_id_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -301,22 +311,93 @@ def _parse_gdrive_folders(
     return tuple(out)
 
 
+def _resolve_env_id(env_name: str | None) -> str | None:
+    """``sheet_id_env`` / ``gid_env`` の env を読む（未設定・空・プレースホルダは None）。
+
+    「env で後入れ」の唯一の読み口。値そのものがプレースホルダ（REPLACE_… 等）の場合も
+    未設定と同じ扱いにする（tfvars に雛形をそのまま貼った事故を取り込みへ通さない）。
+    """
+    if not env_name:
+        return None
+    raw = os.environ.get(env_name, "")
+    value = raw.strip()
+    if not value or _is_placeholder(value):
+        return None
+    return value
+
+
 def _parse_gsheets(raw: list[dict[str, Any]], *, skip_placeholder: bool) -> tuple[GSheetSpec, ...]:
     out: list[GSheetSpec] = []
+    # 既に使われた sheet_id。env で後入れした ID が既存エントリと衝突したら採用しない。
+    # 衝突すると external_id = build_external_id(sheet_id, gid, row_idx) が完全に重なり、
+    # documents の ON CONFLICT DO UPDATE（metadata = EXCLUDED.metadata の全置換）で
+    # 既存 document の metadata が丸ごと差し替わる（cls_doc_type / cls_project が
+    # spec の並び順だけで黙って変わる）＋ ingest_source_health の行も衝突する。
+    # 「事例集の母集団は既に取り込み済みのナレッジ共有シートで足りる」という実見メモ
+    # （case_corpus_columns_20260911.md）があるため、その sheet_id が
+    # CASE_CORPUS_SHEET_ID に貼られる確率は現実的に高い。
+    claimed: set[str] = set()
     for item in raw:
         sheet_id = str(item.get("sheet_id", ""))
+        sheet_id_env = str(item.get("sheet_id_env", "") or "").strip() or None
         if _is_placeholder(sheet_id):
-            if skip_placeholder:
+            # ID 後入れ（2026-09-11・B-10）: env が入っていればそれを実 ID として採用する。
+            resolved = _resolve_env_id(sheet_id_env)
+            if resolved is not None:
+                sheet_id = resolved
+            elif sheet_id_env:
+                # 「env で後から入れる」と yaml で宣言済のソースは、既定（skip_placeholder=
+                # True・本番 scripts/ingest_sources.py:95 が使う経路）では warning + skip。
+                # strict mode（skip_placeholder=False）は **tests からしか呼ばれない検査
+                # モード**（tests/ingest/test_loader.py）なので、ここは従来どおり raise に
+                # 戻す。sheet_id_env を 1 行足すだけで貼り忘れプレースホルダが永久に
+                # strict 検査を素通りする逃げ道を yaml 側に作らない（逃げ道はテスト側に置く）。
+                if not skip_placeholder:
+                    raise ValueError(
+                        "gsheets entry declares sheet_id_env but it is unset: "
+                        f"{sheet_id_env!r} (sheet_name={item.get('sheet_name')!r})"
+                    )
+                logger.warning(
+                    "ingest_sources_skip_unconfigured_env",
+                    section="gsheets",
+                    sheet_name=item.get("sheet_name"),
+                    sheet_id_env=sheet_id_env,
+                )
+                continue
+            elif skip_placeholder:
                 logger.warning(
                     "ingest_sources_skip_placeholder", section="gsheets", sheet_id=sheet_id
                 )
                 continue
-            raise ValueError(f"gsheets entry has placeholder sheet_id: {sheet_id!r}")
+            else:
+                raise ValueError(f"gsheets entry has placeholder sheet_id: {sheet_id!r}")
+        if sheet_id in claimed:
+            # 重複は **採用しない**（既存エントリを勝たせる）。env 由来の貼り間違いが
+            # 既存 document を書き潰す唯一の経路なので、ここで fail-closed にする。
+            logger.error(
+                "ingest_sources_duplicate_sheet_id",
+                section="gsheets",
+                sheet_name=item.get("sheet_name"),
+                sheet_id_env=sheet_id_env,
+                sheet_id_ref=f"{sheet_id[:6]}…",
+            )
+            if not skip_placeholder:
+                raise ValueError(f"gsheets entry has duplicate sheet_id: {sheet_id!r}")
+            continue
+        claimed.add(sheet_id)
         tabs_raw: list[dict[str, Any]] = item.get("tabs", []) or []
-        tabs = tuple(
-            GSheetsTabSpec(gid=int(t.get("gid", 0)), tab_name=str(t.get("tab_name", "")))
-            for t in tabs_raw
-        )
+        tabs = tuple(t for t in (_parse_gsheet_tab(r) for r in tabs_raw) if t is not None)
+        if tabs_raw and not tabs:
+            # 宣言された全タブが未確定 / 不正で落ちた＝どのタブを読むか決まっていない。
+            # gid 0（= 先頭タブ）へ黙って fallback するとマスター表ではないタブが
+            # case_corpus として丸ごと取り込まれるので、spec ごと採用しない。
+            logger.error(
+                "ingest_sources_skip_spec_no_resolvable_tab",
+                section="gsheets",
+                sheet_name=item.get("sheet_name"),
+            )
+            claimed.discard(sheet_id)
+            continue
         out.append(
             GSheetSpec(
                 sheet_id=sheet_id,
@@ -325,6 +406,38 @@ def _parse_gsheets(raw: list[dict[str, Any]], *, skip_placeholder: bool) -> tupl
                 tabs=tabs,
                 row_unit=bool(item.get("row_unit", True)),
                 extra_metadata=dict(item.get("extra_metadata", {}) or {}),
+                sheet_id_env=sheet_id_env,
             )
         )
     return tuple(out)
+
+
+def _parse_gsheet_tab(raw: dict[str, Any]) -> GSheetsTabSpec | None:
+    """gsheets[].tabs[] の 1 件。``gid_env`` を宣言したタブは env が唯一の gid 源。
+
+    ``gid_env`` を宣言している場合、env 未設定 / 非数値なら yaml の gid へ **fallback
+    しない**（None を返してタブごと落とす）。fallback すると CASE_CORPUS_SHEET_GID の
+    typo（例「#gid=123」を貼る）で gid 0 のタブ＝マスター表ではないタブが case_corpus
+    として丸ごと取り込まれ、事例として朝の DM に出る。
+    """
+    gid_env = str(raw.get("gid_env", "") or "").strip() or None
+    gid = int(raw.get("gid", 0))
+    if gid_env:
+        resolved = _resolve_env_id(gid_env)
+        if resolved is None:
+            logger.warning(
+                "ingest_sources_skip_unconfigured_gid_env",
+                gid_env=gid_env,
+                tab_name=raw.get("tab_name"),
+            )
+            return None
+        try:
+            gid = int(resolved)
+        except ValueError:
+            logger.error(
+                "ingest_sources_invalid_gid_env",
+                gid_env=gid_env,
+                tab_name=raw.get("tab_name"),
+            )
+            return None
+    return GSheetsTabSpec(gid=gid, tab_name=str(raw.get("tab_name", "")))

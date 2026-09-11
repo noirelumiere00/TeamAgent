@@ -498,6 +498,56 @@ class IngestRepository:
             str(row["external_id"]): str(row["content_hash"]) for row in rows if row["content_hash"]
         }
 
+    def get_document_metadata_values(
+        self,
+        source_type: str,
+        external_ids: Sequence[str],
+        keys: Sequence[str],
+    ) -> dict[str, dict[str, str]]:
+        """保存済み ``documents.metadata`` から指定キーだけを一括で引く。
+
+        事例集 corpus（B-10）の ``case_external_use`` sticky 判定に使う。
+        ``documents`` の ON CONFLICT DO UPDATE は ``metadata = EXCLUDED.metadata`` の
+        **全置換** なので、再取込時に「前回 ng だった」を知るには取り込み前に読むしかない。
+
+        ``get_document_content_hashes`` と同じく source あたり 1 クエリ。射影は SQL 側で
+        キーを絞る（metadata 全体を取り出さない＝大きな doc が混ざっても転送量が増えない）。
+
+        Returns:
+            ``{external_id: {key: value}}``。該当キーを 1 つも持たない doc は空 dict で入る。
+            未登録 external_id はキー自体が存在しない。
+        """
+        ids = [stripped for e in external_ids if (stripped := _strip_nul(e))]
+        wanted = [k for k in keys if k]
+        if not ids or not wanted:
+            return {}
+        sql = """
+            SELECT
+                d.external_id,
+                COALESCE(
+                    (
+                        SELECT jsonb_object_agg(kv.key, kv.value)
+                        FROM jsonb_each_text(d.metadata) AS kv
+                        WHERE kv.key = ANY(%s)
+                    ),
+                    '{}'::jsonb
+                ) AS picked
+            FROM documents AS d
+            WHERE d.source_type = %s::document_source_type
+              AND d.external_id = ANY(%s)
+        """
+        with self._ops_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, (wanted, source_type, ids))
+                rows = cur.fetchall()
+        out: dict[str, dict[str, str]] = {}
+        for row in rows:
+            picked = row["picked"] or {}
+            out[str(row["external_id"])] = {
+                str(k): str(v) for k, v in picked.items() if v is not None
+            }
+        return out
+
     def find_invalid_source_reason(
         self,
         source_type: str,
