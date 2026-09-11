@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import {
   createCallerIdentityPlugin,
   unwrapToolArguments,
+  canonicalRequestSha256,
   REGISTERED_HOOKS,
   connectRequestShape,
   classifyConnectRequest,
@@ -1996,6 +1997,10 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
   let signedContextKeys = null;
   let signedTop = null;
   let signedUserId = null;
+  // 上流のマージ後に実際へ実行される引数と、mcp が検証する結合の一致。
+  let wireKeys = null;
+  let bindingMatches = null;
+  let wireHasWrapperKey = null;
   if (!blocked) {
     const context = result.params[USER_CONTEXT_KEY_NAME];
     signedUserId = context.slack_user_id;
@@ -2007,6 +2012,10 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
     signedTop = Object.fromEntries(
       Object.entries(result.params).filter(([key]) => key !== USER_CONTEXT_KEY_NAME),
     );
+    const wire = onWireArguments(upstreamMergeHookParams(params, result.params));
+    wireKeys = Object.keys(wire).toSorted();
+    wireHasWrapperKey = wireKeys.includes("arguments") || wireKeys.includes("name");
+    bindingMatches = wireBindingSha256(wire) === claimPayload.arguments_sha256;
   }
   return {
     blocked,
@@ -2017,6 +2026,9 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
     signedKeys,
     signedContextKeys,
     signedTop,
+    wireKeys,
+    wireHasWrapperKey,
+    bindingMatches,
     claimChannel: claimPayload?.channel ?? null,
     claimUser: claimPayload?.sub ?? null,
     signedUserId,
@@ -2028,6 +2040,36 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
 }
 
 const USER_CONTEXT_KEY_NAME = "_user_context";
+
+// ── 上流の「浅いマージ」の再現（2026-09-11）──────────────────────────────
+// openclaw@2026.7.1 の実物:
+//   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+//     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(finalParams, hookResult.params);`
+//   同 :938-947  `(o, a) => ({ ...o, ...a })`
+// hook が返した params は元の params を**置換しない**。この 3 行を焼き込んでおくことで、
+// plugin の返り値が本番でどう実行されるかを上流依存なしに再現できる。
+function upstreamMergeHookParams(originalParams, hookParams) {
+  const isPlain = value =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isPlain(hookParams)) return originalParams;
+  if (!isPlain(originalParams)) return hookParams;
+  return { ...originalParams, ...hookParams };
+}
+
+// JSON-RPC の tools/call に載る形（`undefined` のキーは JSON 化で落ちる）。
+function onWireArguments(executedParams) {
+  return JSON.parse(JSON.stringify({ arguments: executedParams })).arguments;
+}
+
+// mcp 側 caller_claim.canonical_request_sha256 と同じ前処理（claim を外して hash）。
+function wireBindingSha256(wireArguments) {
+  const sanitized = { ...wireArguments };
+  const context = { ...sanitized[USER_CONTEXT_KEY_NAME] };
+  delete context.caller_claim;
+  sanitized[USER_CONTEXT_KEY_NAME] = context;
+  return canonicalRequestSha256(sanitized);
+}
+
 const AUTHENTIC_CONTEXT = { slack_user_id: USER };
 // 利用者（モデル）由来の `_user_context` は authoritative 値で必ず上書きされる。
 // 別人になりすました値を入れておき、署名結果が本物の送信者になることを固定する。
@@ -2125,6 +2167,56 @@ const unwrapReport = {
   }),
   // ⑥unwrap 単体の性質。
   unit: unwrapUnit(),
+};
+
+// ── `_user_context` をモデルに要求しない（2026-09-11 の本番実測 P06 5 件）────────
+// EFS のセッション記録から取った tool call の実物:
+//   2026-09-11 10:27 knowledge_deliver / search … 引数は {query, top_k, filter_doc_type}
+//     のみで `_user_context` が**そもそも無い**（包みでもない・wrapDepth=0）。
+//   2026-09-10 12:40 slack_summary … 引数は {"arguments":{}}（1 段包みで中身が空）。
+// いずれも「モデルが正しい形で `_user_context` を渡すこと」に依存していたために
+// block されていた。申告値は mintCallerClaim が authoritative 値で丸ごと置き換えるので、
+// この依存はセキュリティを 1 ビットも稼いでいない。
+const missingUserContextReport = {
+  // ①本番 09-11 の実物と同じ形。block されず、署名済み `_user_context` が付く。
+  absent: unwrapScenario({
+    params: { query: "q", top_k: 5, filter_doc_type: "pdf" },
+  }),
+  // ②本番 09-10 の実物と同じ形（1 段包み・中身が空）。
+  wrapped_empty: unwrapScenario({
+    params: { arguments: {} },
+    toolName: "teamagent__slack_summary",
+  }),
+  // ③空オブジェクトの申告（従来は P05 で落ちていた）。
+  empty_object: unwrapScenario({ params: { query: "q", _user_context: {} } }),
+  // ④部分申告（slack_user_id なし・channel_id だけ）。従来は P05。
+  partial: unwrapScenario({
+    params: { query: "q", _user_context: { channel_id: CHANNEL } },
+  }),
+  // ⑤オブジェクトですらない申告は捨てて続行する（値は mintCallerClaim が上書きする）。
+  null_context: unwrapScenario({ params: { query: "q", _user_context: null } }),
+  string_context: unwrapScenario({ params: { query: "q", _user_context: USER } }),
+  array_context: unwrapScenario({
+    params: { query: "q", _user_context: [AUTHENTIC_CONTEXT] },
+  }),
+  // ⑥信頼境界は動かさない: 申告が**あって**別人なら従来どおり拒否（P05）。
+  spoofed_still_blocked: unwrapScenario({
+    params: { query: "q", _user_context: SPOOFED_CONTEXT },
+  }),
+  // ⑥' claim の持ち込み（replay）も従来どおり拒否（P05）。
+  claim_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: USER, caller_claim: "forged.claim" },
+    },
+  }),
+  // ⑦params 自体がオブジェクトでない場合は fail-closed（P06）のまま。
+  non_object_params: unwrapScenario({ params: null }),
+  // ⑧3 段以上の包みは、`_user_context` 欠落を通すようになった後も明示的に block（P06）。
+  //   `stillWrapped` の判定を消すと、包みごと署名してしまいここが緑に変わる。
+  triple_wrapped_still_blocked: unwrapScenario({
+    params: { arguments: { arguments: { arguments: { query: "q" } } } },
+  }),
 };
 
 // ── 拒否の観測性（2026-09-03）───────────────────────────────────────────
@@ -2637,6 +2729,8 @@ const report = {
   bind_newest: bindNewest,
   // ── ツール引数の二重包みを剥がす（2026-09-03） ────────────────────────
   unwrap: unwrapReport,
+  // ── `_user_context` をモデルに要求しない（2026-09-11） ──────────────────
+  missing_user_context: missingUserContextReport,
   // ── 拒否の観測性（診断行 + 必ず 1 行のログ） ──────────────────────────
   block_diagnostics: blockDiagnostics,
   block_quiet_on_success: quietOnSuccess,

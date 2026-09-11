@@ -394,7 +394,7 @@ def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
 @pytest.mark.parametrize(
     ("label", "phrase"),
     [
-        ("節がある", "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）"),
+        ("節がある", "### 🔴「診断:」行を含むツール結果は、そのまま出す（推測しない）"),
         ("一字も変えず", "**一字も変えず**そのまま利用者に提示する"),
         ("推測・作文しない", "**原因を自分で推測・作文しない**"),
         (
@@ -402,6 +402,32 @@ def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
             "「連携」「連携して」「Google連携」「Slack連携」「接続」は **必ず `oauth_connect` を呼ぶ**",
         ),
         ("呼ばずに答えない", "呼ばずに答えない"),
+        # ── 2026-09-11 の本番実測（CONNECT-P06）で足した 4 点 ───────────────
+        # 実害: block された tool call の拒否理由に `診断: CONNECT-P06` が付いていたのに、
+        # 旧規約は適用範囲を「`oauth_connect` / `CALLER_IDENTITY_REJECTED`」に限っていた
+        # ため、モデルはこの節を自分に無関係と見なし「Google 連携をリセットすることで
+        # 解決する可能性があります」「『連携』と返せばリセットリンクを出します」と作文して、
+        # 利用者を無関係な操作へ誘導した（連携は成立していた）。
+        (
+            "適用範囲がどのツールでも",
+            "**どのツールの結果でも**",
+        ),
+        (
+            "ブロックされた拒否理由も対象",
+            "**ブロックされたツール呼び出しの拒否理由**",
+        ),
+        (
+            "別操作の提案を禁止",
+            "**そこから導いた別の操作の提案は禁止**",
+        ),
+        (
+            "連携やり直しを促さない",
+            "**利用者に連携のやり直しを促さない**",
+        ),
+        (
+            "英語の技術理由は管理者向け",
+            "`teamagent-caller-identity:` で始まる行（英語の技術理由）",
+        ),
     ],
 )
 def test_connect_diagnostics_rule_is_present(soul: str, label: str, phrase: str) -> None:
@@ -540,7 +566,7 @@ def test_internal_name_denylist_is_present(soul: str, label: str, phrase: str) -
 
 def test_denylist_exceptions_do_not_weaken_diagnostics_rule(soul: str) -> None:
     """#380 の診断行規範（一字も変えず）が辞書の後にも残っていること。"""
-    assert "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）" in soul
+    assert "### 🔴「診断:」行を含むツール結果は、そのまま出す（推測しない）" in soul
     denylist = soul.split("**禁止語の固定辞書**", 1)[1].split("\n\n", 1)[0]
     assert "`診断:` 行" in denylist, "辞書の直後に診断行の例外が無い"
     assert "`VIDEO_QUOTA_EXCEEDED`" in denylist, "辞書の直後にエラー文の例外が無い"
