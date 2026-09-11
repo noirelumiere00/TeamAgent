@@ -233,6 +233,39 @@ def test_launcher_calls_the_preflight_before_stage_one() -> None:
     assert preflight < stage_one
 
 
+def _preflight_function_body() -> str:
+    """release_mcp.sh から assert_published_generation() の本体を切り出す。"""
+    body = LAUNCHER.read_text(encoding="utf-8")
+    start = body.index("assert_published_generation() {")
+    end = body.index("\n}\n", start)
+    return body[start:end]
+
+
+def test_preflight_picks_the_right_credential_source() -> None:
+    """dry-run は MFA 前なので --profile を明示し、本番は環境変数を使うこと。
+
+    本番側で --profile を付けると、MFA セッションを exported env で持っている
+    状態と衝突する（スクリプトは AWS_PROFILE を unset 済み）。逆に dry-run で
+    --profile を付けないと、他の事前読み取りと別 identity になる。
+    """
+    function = _preflight_function_body()
+    assert 'profile_args=(--profile "$PROFILE")' in function
+    # 条件が DRY_RUN であること（無条件に付けたら本番が壊れる）。
+    guard = [
+        line for line in function.splitlines() if 'profile_args=(--profile "$PROFILE")' in line
+    ]
+    assert len(guard) == 1
+    assert "DRY_RUN" in guard[0], guard[0]
+    assert '"${profile_args[@]}"' in function
+
+
+def test_preflight_does_not_merge_stderr_into_json() -> None:
+    """aws CLI の stderr を stdout へ混ぜない（警告 1 行で JSON が壊れる）。"""
+    function = _preflight_function_body()
+    assert "2>&1" not in function
+    assert '2>"$errfile"' in function
+
+
 def test_launcher_no_longer_greps_the_echoed_tail() -> None:
     """`--limit 40` 末尾 grep（誤診断の元）が復活していないこと。
 
