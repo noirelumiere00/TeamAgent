@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import os
 from email.utils import getaddresses
 from typing import Any, ClassVar
 
@@ -71,8 +72,25 @@ from teamagent.skills.morning_digest.schema import (
     MorningDigestOutput,
     SlackUnreadItem,
 )
+from teamagent.skills.pre_meeting_brief.signals import build_signal_input
 
 logger = structlog.get_logger(__name__)
+
+
+def _brief_enabled() -> bool:
+    """``MORNING_DIGEST_BRIEF`` が真のときだけ事例ブリーフを呼ぶ（既定 OFF）。"""
+    return os.environ.get("MORNING_DIGEST_BRIEF", "").strip().lower() in {"1", "true", "yes"}
+
+
+# events.list の取得上限。20 では「20 件超の日に午後のアポが丸ごと落ちる」欠陥が残る
+# （個人別配信は最初の 1 件で送信時刻が決まるため、取りこぼしは時刻の狂いに直結する）。
+# ⚠️ ただし引き上げは **事例ブリーフと同じ env ゲートの内側**。100 は見出しの
+#   「📅{件数}」「残り N 件」の数字を変え、MORNING_DIGEST_REMINDERS=1 の環境では
+#   21 件目以降にも予定リマインド DM の予約を作る＝「env 未設定なら利用者の画面は
+#   1 バイトも変わらない」が崩れる。恒久的な引き上げは別便・別フラグで行う。
+_CALENDAR_MAX_RESULTS = 100
+#: ゲート OFF のときの従来値（この便より前の挙動）。
+_CALENDAR_MAX_RESULTS_LEGACY = 20
 
 #: Slack 返信漏れとして下流（判定層・描画層）へ渡すアイテム数の上限。
 #: Provider 側は max_thread_checks で構造的に有界だが、下流は全件を舐める
@@ -226,6 +244,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         self._token_store = token_store
         self._gmail = gmail
         self._gcalendar = gcalendar
+        # events.list が上限に張り付いたか（＝取り切れていない可能性）。出力へ持ち上げる。
+        self._calendar_saturated = False
         self._slack = slack
         self._bedrock = bedrock
         self._deal_provider = deal_provider
@@ -350,6 +370,22 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 "morning_digest_calendar_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
             out.errors.append(f"calendar: {type(exc).__name__}")
+
+        out.calendar_saturated = self._calendar_saturated
+
+        # --- 2-bis. 事例ブリーフ（既定 OFF・独立 try/except） ---
+        # ⚠️ 落ちても errors に積むだけ。📅/📧 は通常どおり配信する（節のためだけに
+        #   digest 全体を落とさない）。env 未設定なら skill を **1 度も呼ばない**。
+        if _brief_enabled():
+            try:
+                self._collect_brief(out, ctx)
+            except Exception as exc:
+                logger.warning(
+                    "morning_digest_brief_failed",
+                    request_id=ctx.request_id,
+                    err=type(exc).__name__,
+                )
+                out.errors.append(f"brief: {type(exc).__name__}")
 
         # --- 3. Slack 未返信メンション ---
         ack_mark = len(ack.items) if ack is not None else 0
@@ -769,12 +805,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         window_start, window_end = _calwin.jst_day_window(
             _calwin.now_jst(), input.calendar_horizon_hours
         )
+        # ⚠️ max_results は 20 → 100 だが **ゲートの内側**。20 件の日に「午後のアポが
+        #   丸ごと落ちる」のは欠陥であり、事例ブリーフ（最初の予定の 1 時間前に配る）は
+        #   最初の 1 件を取り違えると配信時刻そのものが狂う。とはいえ OFF の環境で
+        #   件数・リマインド対象が変わってはならないので、OFF は従来の 20 のまま。
+        #   want_description も同じ（OFF の間は description を 1 度も取りに行かない）。
+        brief_on = _brief_enabled()
+        max_results = _CALENDAR_MAX_RESULTS if brief_on else _CALENDAR_MAX_RESULTS_LEGACY
         events = gcal.list_events(
             ctx.request_id,
             time_min=window_start.isoformat(),
             time_max=window_end.isoformat(),
-            max_results=20,
+            max_results=max_results,
+            want_description=brief_on,
         )
+        self._calendar_saturated = len(events) >= max_results
         # ⚠️ CalendarEvent の属性は start / end（start_at/end_at ではない）。
         # 旧コードは start_at を読んでいたため予定の時刻が常に空だった（本番バグ）。
         items: list[CalendarEventItem] = []
@@ -791,6 +836,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             if bounds is not None and not _calwin.overlaps_window(bounds, window_start, window_end):
                 dropped += 1
                 continue
+            # 事例ブリーフ用の派生値は **必ず** build_signal_input を通す（唯一の変換点）。
+            # ここで独自に description を読むと、on-demand 経路と判定がズレる。
+            sig = build_signal_input(ev)
             items.append(
                 CalendarEventItem(
                     summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
@@ -802,6 +850,13 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
                     location_display=str(getattr(ev, "location", "") or "")[:120],
                     meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
+                    attendee_domains=list(sig.attendee_domains)[:10],
+                    attendee_list_available=sig.attendee_list_available,
+                    has_client_line=sig.has_client_line,
+                    client_hint_display=sig.client_hint[:200],
+                    client_hint_scrubbed=str(scrub_value(sig.client_hint))[:200],
+                    agency_display=sig.agency_hint[:200],
+                    agency_scrubbed=str(scrub_value(sig.agency_hint))[:200],
                 )
             )
         # 窓と件数だけを記録（PII ゼロ）。日付ずれの再調査で「窓が分からない」を繰り返さない。
@@ -813,8 +868,31 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             returned=len(events),
             kept=len(items),
             dropped=dropped,
+            saturated=self._calendar_saturated,
         )
         return items
+
+    # ── 2-bis. 事例ブリーフ ─────────────────────────────────────────────
+
+    def _collect_brief(self, out: MorningDigestOutput, ctx: SkillContext) -> None:
+        """pre_meeting_brief を **注入経路** で呼ぶ（Google API 呼び出しを増やさない）。
+
+        skill には ``GCalendarClient`` を渡さない。渡すのは既に取得済みの
+        ``CalendarEventItem`` だけ＝この経路にカレンダー書込の口が構造として無い。
+        """
+        from teamagent.skills.pre_meeting_brief.schema import PreMeetingBriefInput
+        from teamagent.skills.pre_meeting_brief.skill import (
+            CORPUS_MISSING_REASON,
+            PreMeetingBriefSkill,
+        )
+
+        skill = PreMeetingBriefSkill(events=list(out.calendar_events))
+        result = skill.run(PreMeetingBriefInput(relative_day="today"), ctx)
+        out.pre_meeting_brief = result
+        out.brief_scanned = bool(result.scanned and result.corpus_available)
+        if result.scanned and not result.corpus_available:
+            # 利用者へは配信しない（「できません」の定期配信を作らない）。運用ログだけ。
+            out.brief_skip_reason = CORPUS_MISSING_REASON
 
     # ── 3. Slack 未返信メンション ────────────────────────────────────────
 

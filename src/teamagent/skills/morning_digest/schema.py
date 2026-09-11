@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -146,6 +148,36 @@ class CalendarEventItem(BaseModel):
     meeting_url: str = Field(
         default="", max_length=600, description="会議リンク（Meet/Zoom等・本人DM表示用）"
     )
+    # --- 事例ブリーフ用の派生値（pre_meeting_brief/signals.build_signal_input の出力）---
+    # ⚠️ **生 description のフィールドは作らない**。ここに載せるのは「クライアント行が
+    #    あったか」「そこから読めた企業名/代理店」だけ。最大 4000 字の自由文を全消費者へ
+    #    同乗させると、ログ・LLM プロンプト・Slack 描画のどこかへ第三者の文が黙って乗る。
+    attendee_domains: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="参加者のドメインのみ（ローカル部は持たない＝情報最小化）",
+    )
+    attendee_list_available: bool = Field(
+        default=False,
+        description=(
+            "参加者リストが見えているか。False は「社外参加者ゼロ」ではなく「判らない」。"
+            "⚠️ Google はゲストリスト非表示時に空配列を返さず本人＋主催者を返すため、"
+            "bool(attendees) では判定できない"
+        ),
+    )
+    has_client_line: bool = Field(
+        default=False, description="説明欄に「クライアント：」行があったか（本文は持たない）"
+    )
+    client_hint_display: str = Field(
+        default="", max_length=200, description="説明欄から読めた取引先（表示用・未マスク）"
+    )
+    client_hint_scrubbed: str = Field(
+        default="", max_length=200, description="同（マスク後・ログ用）"
+    )
+    agency_display: str = Field(
+        default="", max_length=200, description="代理店（担当者名まで・表示用・未マスク）"
+    )
+    agency_scrubbed: str = Field(default="", max_length=200, description="同（マスク後・ログ用）")
 
 
 class SlackUnreadItem(BaseModel):
@@ -284,4 +316,31 @@ class MorningDigestOutput(BaseModel):
     errors: list[str] = Field(
         default_factory=list,
         description="部分失敗の構造化メッセージ（mail/calendar/slack のどれが落ちたか）",
+    )
+    # --- 事例ブリーフ（pre_meeting_brief の結果。既定 OFF なら常に None/False）---
+    pre_meeting_brief: Any | None = Field(
+        default=None,
+        description=(
+            "PreMeetingBriefOutput（節の描画材料）。None は「呼んでいない」。"
+            "型を Any にしているのは skills 間の循環 import を避けるため"
+        ),
+    )
+    brief_scanned: bool = Field(
+        default=False,
+        description=(
+            "事例ブリーフを実際に走査できたか。False は「見ていない」であって"
+            "「社外MTGが 0 件だった」ではない（描画側が『社外MTGなし』と書いてはいけない）"
+        ),
+    )
+    brief_skip_reason: str = Field(
+        default="",
+        max_length=60,
+        description="節を出さなかった理由（運用ログ用。利用者へは配信しない）",
+    )
+    calendar_saturated: bool = Field(
+        default=False,
+        description=(
+            "events.list が max_results に張り付いたか＝取り切れていない可能性。"
+            "True の日は午後のアポが丸ごと落ちている恐れがある（観測用）"
+        ),
     )
