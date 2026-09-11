@@ -11,13 +11,19 @@
 利用者の画面は一切変わらない。
 
 安全装置（計画 §2-2 の表）:
+- 既定 OFF: ``run()`` の先頭（本人確認より前）で ``enabled()`` を見る。``@register``
+  していないことだけに頼ると、便C で registry へ載せた瞬間に env フラグ抜きで走る。
 - 本人限定: ``identity_verified`` と ``verified_slack_user_id`` が無ければ PermissionError。
   ``CLIP_PROPOSAL_USERS`` 未設定・空文字は **全員拒否**。
 - 素材の同意: 候補は「依頼スレッド内、かつ ``file.user == verified_slack_user_id``」のみ。
 - 配達: verified 由来の ``channel_id`` と ``thread_ts`` が **両方**揃ったスレッドのみ。
-  揃わなければ本人 DM 固定へ倒す（チャンネル直投稿はしない）。
+  揃わなければ本人 DM 固定へ倒す（チャンネル直投稿はしない）。宛先は ``_deliver`` が
+  ``resolve_delivery_target`` で決めて deliverer へ **引数で渡す**（deliverer 側に
+  宛先を決めさせない）。
 - ジョブの覗き見: ジョブ行に ``sha256(user_email + salt)`` を持ち、不一致なら
   ``JOB_NOT_FOUND``（存在も漏らさない）。**transcript はジョブ行に保存しない**。
+- 同時走行: ``JobSlots`` で本数を絞る。溢れた依頼は **断らず** 順番待ちに入れ、
+  背景スレッドがスロットの空きを待ってから着手する（``status=busy`` の約束の実体）。
 """
 
 from __future__ import annotations
@@ -37,7 +43,11 @@ from pydantic import BaseModel
 
 from teamagent.adapters.proposal_job_store import ProposalJobStore
 from teamagent.skills.base import BaseSkill, SkillContext
-from teamagent.skills.clip_proposal.analysis import ClipAnalysisError, ClipProposalAnalysis
+from teamagent.skills.clip_proposal.analysis import (
+    ClipAnalysisError,
+    ClipProposalAnalysis,
+    spend_of,
+)
 from teamagent.skills.clip_proposal.limits import (
     DailyQuota,
     build_busy_message,
@@ -69,6 +79,8 @@ ETA_MINUTES_DEFAULT = 15
 RETRY_AFTER_SECONDS_DEFAULT = 60
 #: 添付動画のサイズ上限（バイト）。取りに行く前に弾く。
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
+#: 同時に走らせてよい解析の本数。mcp は desiredCount=1 なのでプロセス内で絞る。
+MAX_CONCURRENT_JOBS_DEFAULT = 2
 
 _SAFE_ERROR_CODE = re.compile(r"\b(?:CLIP|MEDIA|GEMINI)_[A-Z0-9_]{1,56}\b")
 
@@ -84,6 +96,18 @@ def enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def require_enabled() -> None:
+    """既定 OFF を **構造で** 効かせる（``@register`` していないことに頼らない）。
+
+    便C で registry へ載せた瞬間、env フラグが無くても ``run()`` が走ってしまう。
+    台帳テスト（``test_tool_scope_registry_contract``）は登録の有無しか見ないので、
+    この抜けは検出されない。``run()`` の先頭・本人確認より前で止める。
+    """
+
+    if not enabled():
+        raise PermissionError("clip_proposal is disabled (USE_CLIP_PROPOSAL_TOOLS)")
 
 
 def allowed_users() -> frozenset[str]:
@@ -142,10 +166,19 @@ def verify_requester(ctx: SkillContext) -> VerifiedRequester:
 def resolve_delivery_target(metadata: dict[str, Any]) -> tuple[DeliveryTarget, str, str]:
     """配達先を決める純関数。返り値 ``(target, channel_id, thread_ts)``。
 
-    スレッド配達は **``channel_id`` と ``thread_ts`` が両方揃っているときだけ**。
-    ``thread_ts`` が無い（＝チャンネル直投稿になる）ときは本人 DM 固定へ倒す。
+    スレッド配達は次の **3 つが揃っているときだけ**:
+
+    1. ``identity_verified is True``。``mcp_gateway/server.py:482`` は
+       ``channel_id = verified_caller.channel_id if verified_caller else raw.get(...)``
+       で、``identity_verified=True`` を立てる経路だけが ``verified_caller`` 由来。
+       つまりこの 1 行が「raw 由来の channel_id は使わない」の実体になる。
+       未検証の metadata で呼ばれたら、値が入っていても DM へ倒す。
+    2. ``channel_id`` が非空。
+    3. ``thread_ts`` が非空（無いとチャンネル直投稿になる）。
     """
 
+    if metadata.get("identity_verified") is not True:
+        return "dm", "", ""
     channel = metadata.get("channel_id")
     channel = channel.strip() if isinstance(channel, str) else ""
     thread_ts = metadata.get("thread_ts")
@@ -179,11 +212,24 @@ class ActiveJobIndex:
         self._active: dict[str, str] = {}
 
     @staticmethod
-    def key(fingerprint: str, input: ClipProposalSubmitInput) -> str:
-        """依頼者 × 素材の識別子。素材が特定できないときはクライアント名で寄せる。"""
+    def key(fingerprint: str, input: ClipProposalSubmitInput, *, thread_ts: str = "") -> str:
+        """依頼者 × スレッド × 素材の識別子。**寄せてはいけないものを寄せない**。
 
-        material = input.file_id or input.video_url or input.client_name
-        return f"{fingerprint}:{material.strip().lower()}"
+        ``client_name`` は素材の識別子ではない。同じクライアント向けの 2 本目の動画を
+        1 本目と同一視して握り潰すため、鍵に入れない。``thread_ts`` は必ず入れる
+        （最も自然な入口 ＝ 動画を貼って「切り抜き提案作って」では ``file_id`` も
+        ``client_name`` も空になりうるので、スレッドが唯一の区別になる）。
+
+        素材もスレッドも特定できないときは **空文字を返して重複判定から外す**。
+        鍵を潰して同一視すると、2 本目の依頼はジョブも背景タスクも作られないまま
+        「受け付けています」とだけ答えることになり、利用者は永久に待つ。
+        """
+
+        material = (input.file_id or input.video_url).strip().lower()
+        thread = thread_ts.strip()
+        if not material and not thread:
+            return ""
+        return f"{fingerprint}:{thread}:{material}"
 
     def find(self, key: str) -> str | None:
         with self._lock:
@@ -194,8 +240,11 @@ class ActiveJobIndex:
 
         **検査と確保を 1 つのロックで行う**（find → claim の二段だと、同じ人の 2 本の
         submit が同時に走ったとき両方とも「空いている」を見てジョブを 2 本作る）。
+        空鍵（＝素材もスレッドも特定できない依頼）は押さえずに素通しする。
         """
 
+        if not key:
+            return None
         with self._lock:
             existing = self._active.get(key)
             if existing is not None:
@@ -204,6 +253,8 @@ class ActiveJobIndex:
             return None
 
     def release(self, key: str) -> None:
+        if not key:
+            return
         with self._lock:
             self._active.pop(key, None)
 
@@ -223,6 +274,88 @@ def reset_active_jobs() -> ActiveJobIndex:
     return _ACTIVE_JOBS
 
 
+def configured_max_concurrent_jobs() -> int:
+    """同時に走らせてよい解析の本数（``CLIP_MAX_CONCURRENT_JOBS`` 既定 2）。"""
+
+    raw = os.environ.get("CLIP_MAX_CONCURRENT_JOBS", "").strip()
+    try:
+        value = MAX_CONCURRENT_JOBS_DEFAULT if not raw else int(raw)
+    except ValueError:
+        value = MAX_CONCURRENT_JOBS_DEFAULT
+    return min(8, max(1, value))
+
+
+class JobSlots:
+    """走行本数の門（順番待ちつき・プロセス内）。
+
+    description が約束する ``status=busy``（順番待ち・自動着手・再依頼は不要）の
+    **実体**。これが無いと日次枠 20 本が同時に走り、各々が 18MB の proxy を載せて
+    メモリを食う。mcp は desiredCount=1 なので、タスクが落ちると走行中のジョブが
+    全部消える一方で日次枠は消費済みのまま戻らない。
+
+    順番待ちは「受け付けてから待たせる」。断って再送させない（計画 §2-2）。
+    """
+
+    def __init__(self, limit: int | None = None) -> None:
+        self._cv = threading.Condition()
+        self._limit = max(1, configured_max_concurrent_jobs() if limit is None else limit)
+        self._running = 0
+        self._waiting = 0
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def enqueue(self) -> int:
+        """受付時に呼ぶ。返り値は **自分の前にいる本数**（0 なら即着手できる）。"""
+
+        with self._cv:
+            position = max(0, self._running + self._waiting - self._limit + 1)
+            self._waiting += 1
+            return position
+
+    def cancel(self) -> None:
+        """``enqueue`` したが着手させない（ジョブ作成やスレッド起動に失敗した）。"""
+
+        with self._cv:
+            self._waiting = max(0, self._waiting - 1)
+            self._cv.notify_all()
+
+    def start(self, timeout: float | None = None) -> bool:
+        """背景スレッドから呼ぶ。スロットが空くまで待ってから着手する。"""
+
+        with self._cv:
+            if not self._cv.wait_for(lambda: self._running < self._limit, timeout=timeout):
+                return False
+            self._waiting = max(0, self._waiting - 1)
+            self._running += 1
+            return True
+
+    def finish(self) -> None:
+        with self._cv:
+            self._running = max(0, self._running - 1)
+            self._cv.notify_all()
+
+    def snapshot(self) -> tuple[int, int]:
+        with self._cv:
+            return self._running, self._waiting
+
+
+_JOB_SLOTS = JobSlots()
+
+
+def shared_job_slots() -> JobSlots:
+    return _JOB_SLOTS
+
+
+def reset_job_slots(limit: int | None = None) -> JobSlots:
+    """共有の走行スロットを作り直す（テスト用・本番経路からは呼ばない）。"""
+
+    global _JOB_SLOTS
+    _JOB_SLOTS = JobSlots(limit)
+    return _JOB_SLOTS
+
+
 def build_duplicate_message(job_id: str) -> str:
     """重複 submit への返し。**やり直しをさせない**。"""
 
@@ -235,8 +368,13 @@ def build_duplicate_message(job_id: str) -> str:
 
 #: (analysis, out_dir, request_id) -> pptx path。テンプレ差し替えの実体。
 DeckBuilder = Callable[[ClipProposalAnalysis, str, str], str]
-#: (path, comment, ctx) -> (delivered, target)
-Deliverer = Callable[[str, str, SkillContext], tuple[bool, DeliveryTarget]]
+#: (path, comment, ctx, target, channel_id, thread_ts) -> delivered
+#:
+#: 宛先は ``_deliver`` が ``resolve_delivery_target`` で決めて **引数で渡す**。
+#: deliverer に ctx だけ渡して自分で決めさせると、便C で実 deliverer
+#: （``SlackClient.upload_file``）を足す担当が resolve を呼び忘れた瞬間に、
+#: C/G 始まりのチャンネルへ資料を直投稿する経路が開く。
+Deliverer = Callable[[str, str, SkillContext, DeliveryTarget, str, str], bool]
 ThreadLauncher = Callable[[Callable[[], None], str], None]
 
 
@@ -287,6 +425,7 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         deliverer: Deliverer | None = None,
         thread_launcher: ThreadLauncher = _launch_daemon_thread,
         active_jobs: ActiveJobIndex | None = None,
+        job_slots: JobSlots | None = None,
         eta_minutes: int = ETA_MINUTES_DEFAULT,
         retry_after_seconds: int = RETRY_AFTER_SECONDS_DEFAULT,
     ) -> None:
@@ -297,6 +436,7 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         self._deliverer = deliverer
         self._thread_launcher = thread_launcher
         self._active_override = active_jobs
+        self._slots_override = job_slots
         self._eta_minutes = max(1, eta_minutes)
         self._retry_after_seconds = max(0, retry_after_seconds)
 
@@ -308,14 +448,24 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
     def _active_jobs(self) -> ActiveJobIndex:
         return shared_active_jobs() if self._active_override is None else self._active_override
 
+    @property
+    def _slots(self) -> JobSlots:
+        return shared_job_slots() if self._slots_override is None else self._slots_override
+
     def run(self, input: ClipProposalSubmitInput, ctx: SkillContext) -> ClipProposalSubmitOutput:
         log = ctx.bind_logger(self.name)
+        require_enabled()
         requester = verify_requester(ctx)
 
         # 重複 submit は **日次枠を消費する前** に弾く（連打で枠と費用が倍にならない）。
         # 枠の確保もここで同時に行う（検査と確保を分けると同時 submit で 2 本作る）。
         job_id = new_clip_job_id()
-        dedupe_key = ActiveJobIndex.key(requester.fingerprint, input)
+        thread_ts = ctx.metadata.get("thread_ts") if ctx.metadata else ""
+        dedupe_key = ActiveJobIndex.key(
+            requester.fingerprint,
+            input,
+            thread_ts=thread_ts if isinstance(thread_ts, str) else "",
+        )
         running = self._active_jobs.claim_if_free(dedupe_key, job_id)
         if running is not None:
             log.info("clip_proposal_duplicate_submit", job_id=running)
@@ -344,6 +494,10 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
                 message=decision.message,
             )
 
+        # 走行スロットの順番待ちへ入れる（断らない）。position>0 なら status=busy を返すが、
+        # ジョブも背景スレッドも作る。着手はスロットが空いたとき背景側で自動的に起きる。
+        position = self._slots.enqueue()
+
         request_summary = {
             "kind": CLIP_JOB_KIND,
             "request_id": ctx.request_id,
@@ -357,6 +511,7 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             self._store.create_job(job_id, request_summary)
         except Exception as exc:
             self._active_jobs.release(dedupe_key)
+            self._slots.cancel()
             log.warning("clip_proposal_job_create_failed", error_type=type(exc).__name__)
             return ClipProposalSubmitOutput(
                 status="failed",
@@ -379,6 +534,7 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             )
         except Exception as exc:
             self._active_jobs.release(dedupe_key)
+            self._slots.cancel()
             self._store.mark_failed(job_id, _JOB_START_FAILED, expected_statuses=("queued",))
             log.warning("clip_proposal_thread_start_failed", error_type=type(exc).__name__)
             return ClipProposalSubmitOutput(
@@ -386,6 +542,15 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
                 job_id=job_id,
                 client_name=input.client_name,
                 message="切り抜き提案jobの開始に失敗しました。",
+            )
+
+        if position > 0:
+            log.info("clip_proposal_queued_behind", job_id=job_id, position=position)
+            return self.busy_output(
+                job_id=job_id,
+                position=position,
+                wait_minutes=position * self._eta_minutes,
+                client_name=input.client_name,
             )
 
         log.info("clip_proposal_submitted", job_id=job_id)
@@ -399,12 +564,25 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             ),
         )
 
-    def busy_output(self, *, position: int, wait_minutes: int) -> ClipProposalSubmitOutput:
-        """順番待ちの返り（**再依頼を求めない**）。"""
+    def busy_output(
+        self,
+        *,
+        position: int,
+        wait_minutes: int,
+        job_id: str = "",
+        client_name: str = "",
+    ) -> ClipProposalSubmitOutput:
+        """順番待ちの返り（**再依頼を求めない**）。
+
+        ジョブは既に作ってあり、背景スレッドがスロットの空きを待っている。
+        ``job_id`` を返すので、待っている間も ``clip_proposal_status`` で進行が引ける。
+        """
 
         return ClipProposalSubmitOutput(
             status="busy",
+            job_id=job_id,
             retry_after_seconds=max(self._retry_after_seconds, wait_minutes * 60),
+            client_name=client_name,
             message=build_busy_message(position=position, wait_minutes=wait_minutes),
         )
 
@@ -425,6 +603,9 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         import tempfile
 
         log = ctx.bind_logger(self.name)
+        # 走行スロットが空くまで待ってから着手する（受付時の「順番が来たら自動で始めます」）。
+        # 待っている間 job は queued のまま＝status が「作成中」と嘘をつかない。
+        self._slots.start()
         self._store.mark_running(job_id)
         workdir = tempfile.mkdtemp(prefix="clip-proposal-")
         try:
@@ -459,14 +640,23 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
             self._store.mark_done(job_id, result.model_dump_json())
             log.info("clip_proposal_done", job_id=job_id, clips=analysis.clip_count)
         except Exception as exc:
+            # 失敗しても **そこまでに課金された分は計上する**。戻さないのが規律
+            # （limits.py:9-10）だが、本数カウンタだけ守って費用カウンタを素通りさせると、
+            # 出力が壊れ続ける日は CLIP_DAILY_COST_CAP_USD が一度も発火しない。
+            spent = spend_of(exc)
+            if spent > 0:
+                self._quota.add_cost(spent)
             code = _safe_failure_code(exc)
             self._store.mark_failed(job_id, code, expected_statuses=("queued", "running"))
-            log.warning("clip_proposal_failed", job_id=job_id, error_code=code)
+            log.warning(
+                "clip_proposal_failed", job_id=job_id, error_code=code, spent_usd=round(spent, 6)
+            )
         finally:
             # workdir（原本動画・抽出フレーム・生成 PPTX）は必ず消す。
             shutil.rmtree(workdir, ignore_errors=True)
             if dedupe_key:
                 self._active_jobs.release(dedupe_key)
+            self._slots.finish()
 
     def _analyze(self, input: ClipProposalSubmitInput, ctx: SkillContext) -> ClipProposalAnalysis:
         if self._analyzer is None:
@@ -474,9 +664,13 @@ class ClipProposalSubmitSkill(BaseSkill[ClipProposalSubmitInput, ClipProposalSub
         return cast("ClipProposalAnalysis", self._analyzer.run_for_request(input, ctx))
 
     def _deliver(self, path: str, comment: str, ctx: SkillContext) -> tuple[bool, DeliveryTarget]:
+        """**宛先をここで決めて** deliverer へ引数で渡す（deliverer に決めさせない）。"""
+
         if self._deliverer is None:
             return False, "none"
-        return self._deliverer(path, comment, ctx)
+        target, channel_id, thread_ts = resolve_delivery_target(ctx.metadata or {})
+        delivered = self._deliverer(path, comment, ctx, target, channel_id, thread_ts)
+        return bool(delivered), target
 
 
 class ClipProposalStatusSkill(BaseSkill[ClipProposalStatusInput, ClipProposalStatusOutput]):
@@ -505,6 +699,7 @@ class ClipProposalStatusSkill(BaseSkill[ClipProposalStatusInput, ClipProposalSta
         self._recent_lookup = recent_lookup
 
     def run(self, input: ClipProposalStatusInput, ctx: SkillContext) -> ClipProposalStatusOutput:
+        require_enabled()
         requester = verify_requester(ctx)
         job_id = input.job_id
         if not job_id and self._recent_lookup is not None:
@@ -592,14 +787,23 @@ __all__ = [
     "CLIP_JOB_KIND",
     "ETA_MINUTES_DEFAULT",
     "MAX_ATTACHMENT_BYTES",
+    "MAX_CONCURRENT_JOBS_DEFAULT",
+    "ActiveJobIndex",
     "ClipProposalStatusSkill",
     "ClipProposalSubmitSkill",
     "DeliveryTarget",
+    "JobSlots",
     "VerifiedRequester",
     "allowed_users",
+    "configured_max_concurrent_jobs",
     "enabled",
     "new_clip_job_id",
     "requester_fingerprint",
+    "require_enabled",
+    "reset_active_jobs",
+    "reset_job_slots",
     "resolve_delivery_target",
+    "shared_active_jobs",
+    "shared_job_slots",
     "verify_requester",
 ]

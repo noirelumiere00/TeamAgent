@@ -7,11 +7,22 @@
 
 数値の出どころ（実見・2026-09-11）:
 - **shape_id と段落数**は配布された黒版テンプレ実物から読んだ値。
-- **枠 EMU と ``vert``** は記入例（初田製作所）から読んだ値。黒版テンプレは
+- **テキスト枠の EMU と ``vert``** は記入例から読んだ値。黒版テンプレは
   縦書きフック枠に ``vert`` 属性が無く（横書き・指示文のみ）、帯とフック枠も
   記入例側で手動リサイズされている。計画 §2-2 消毒 4 の裁定どおり **v1 は記入例の
   寸法を焼き込む**（autofit は全枠 none ＝自動縮小が効かないため、字数上限は
   この実寸から計算する）。
+- **画像スロットの EMU（``_HOOK_SLOT_EMU`` / ``_CLIP_SLOT_EMU`` / ``_MAIN_SLOT_EMU``）は
+  黒版テンプレ由来**。記入例では該当枠が実 MP4 に置き換わっており shape 自体が存在しない
+  （実見で MISSING を確認）ため、記入例からは読めない。**帯は記入例サイズ・画像枠は黒版
+  サイズという混成**になっているので、消毒済みテンプレが届いたら「帯を広げた状態で画像枠が
+  レイアウト上成立するか」を目視で確認すること（計画 §4 論点 6 の確認リスト）。
+
+配達前の出力側照合（``template_fill.sanitize_output`` / V6）が使う媒体 allowlist:
+- ``ALLOWED_MEDIA_SHA256`` は **消毒済みテンプレが正規に持ってよい媒体の SHA256**。
+  テンプレ資産がまだ repo に無いので v1 は空＝「提案スライドの台帳スロットが実際に
+  参照している画像」以外の媒体を 1 つでも見つけたら出力を破棄する（fail-closed）。
+  消毒済みテンプレが届いたら、その媒体の SHA256 をここへ列挙する。
 """
 
 from __future__ import annotations
@@ -20,6 +31,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 PROPOSAL_SLIDE_INDEX = 0  # 提案 1 枚目（10 セル＋訴求軸＋界隈ブロック）
+
+#: 消毒済みテンプレが正規に持ってよい媒体の SHA256（hex・小文字）。
+#: v1 は空。テンプレ資産の受入時にここへ列挙する（docstring の V6 節を参照）。
+ALLOWED_MEDIA_SHA256: frozenset[str] = frozenset()
+
+#: 出力 PPTX の docProps へ焼き込む固定値（実在社員名を残さない）。
+OUTPUT_DOC_AUTHOR = "Aico"
+OUTPUT_DOC_DESCRIPTION = ""
 
 CellKind = Literal["community", "insight"]
 
@@ -91,6 +110,8 @@ class TemplateInventory:
     axes: TextFrameSpec
     main_video_slot: ImageSlotSpec
     cells: tuple[CellSpec, ...]
+    #: 消毒済みテンプレが正規に持ってよい媒体の SHA256（v1 は空 ＝ 台帳スロット参照分のみ許す）。
+    allowed_media_sha256: frozenset[str] = ALLOWED_MEDIA_SHA256
 
     def text_frames(self) -> tuple[TextFrameSpec, ...]:
         frames: list[TextFrameSpec] = [self.axes]
@@ -282,7 +303,10 @@ CLIP_TEMPLATE_INVENTORY_V1 = TemplateInventory(
 
 
 __all__ = [
+    "ALLOWED_MEDIA_SHA256",
     "CLIP_TEMPLATE_INVENTORY_V1",
+    "OUTPUT_DOC_AUTHOR",
+    "OUTPUT_DOC_DESCRIPTION",
     "PROPOSAL_SLIDE_INDEX",
     "CellKind",
     "CellSpec",

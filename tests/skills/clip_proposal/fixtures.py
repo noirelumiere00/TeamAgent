@@ -1,19 +1,28 @@
 """clip_proposal テストの共通フィクスチャ。
 
 **テンプレ実物は repo に置かない**（他社名・第三者の顔写真・社員実名を含む）。代わりに
-台帳 ``CLIP_TEMPLATE_INVENTORY_V1`` から**同じ構造の合成テンプレ**を組み立てる。
-台帳の数値は配布テンプレ実物と記入例（初田製作所）から実見して起こしたものなので、
-「記入例 pptx の構造を期待値に使う」という要求はこの台帳経由で満たしている。
+``golden_template_shapes.json``（shape_id / 段落数 / 枠 EMU / vert のダンプ）から
+**同じ構造の合成テンプレ**を組み立てる。
+
+⚠ 合成テンプレを ``CLIP_TEMPLATE_INVENTORY_V1`` から組むと、台帳が実在資産と食い違って
+いても受入テストは永久に緑になる（自己言及）。情報源を 2 本に分け、**ダンプ側を
+「実物の写し」・台帳側を「実装が期待する契約」**として突き合わせる。台帳だけを
+書き換えると ``test_validate_template_accepts_the_golden_dump`` が赤くなる。
 
 合成テンプレは段落ごとに異なる ``sz``（文字サイズ）を持たせてある。差し替え後も
 段落ごとの書式が残ることを検査するため（``_replace_placeholders`` 相当の実装に
 差し替えると全段落が段落 0 へ潰れて必ず赤くなる）。
+
+``build_unsanitized_template`` は **消毒漏れのテンプレ**（docProps に実在社員名・
+shape を消しても残る孤児 media part）を再現する。V6（``sanitize_output``）の回帰用。
 """
 
 from __future__ import annotations
 
+import json
 import struct
 import zlib
+from pathlib import Path
 from typing import Any
 
 from teamagent.skills.clip_proposal.analysis import (
@@ -25,17 +34,49 @@ from teamagent.skills.clip_proposal.analysis import (
     CommunityTerm,
     Insight,
 )
-from teamagent.skills.clip_proposal.inventory import (
-    CLIP_TEMPLATE_INVENTORY_V1,
-    ImageSlotSpec,
-    TemplateInventory,
-    TextFrameSpec,
-)
+from teamagent.skills.clip_proposal.inventory import ImageSlotSpec, TextFrameSpec
 
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 #: 段落番号 → ``sz``。差し替え後も段落ごとに保たれることを検査する。
 PARAGRAPH_SIZES = (500, 700, 750, 900, 1000, 1100, 1200)
+
+GOLDEN_DUMP_PATH = Path(__file__).with_name("golden_template_shapes.json")
+
+
+def load_golden_dump() -> dict[str, Any]:
+    """消毒済みテンプレの受入ダンプ（台帳とは独立した情報源）。"""
+
+    return json.loads(GOLDEN_DUMP_PATH.read_text(encoding="utf-8"))
+
+
+def golden_text_frames() -> tuple[TextFrameSpec, ...]:
+    """ダンプ側のテキスト枠。``max_chars`` は差し替え対象外なので 0 のまま。"""
+
+    return tuple(
+        TextFrameSpec(
+            shape_id=int(entry["shape_id"]),
+            role=str(entry["role"]),
+            template_paragraphs=int(entry["paragraphs"]),
+            width_emu=int(entry["width_emu"]),
+            height_emu=int(entry["height_emu"]),
+            vert=str(entry.get("vert") or ""),
+        )
+        for entry in load_golden_dump()["text_frames"]
+    )
+
+
+def golden_image_slots() -> tuple[ImageSlotSpec, ...]:
+    return tuple(
+        ImageSlotSpec(
+            shape_id=int(entry["shape_id"]),
+            role=str(entry["role"]),
+            kind=str(entry["kind"]),  # type: ignore[arg-type]
+            width_emu=int(entry["width_emu"]),
+            height_emu=int(entry["height_emu"]),
+        )
+        for entry in load_golden_dump()["image_slots"]
+    )
 
 
 def _qn(tag: str) -> str:
@@ -118,14 +159,16 @@ def _add_image_slot(slide: Any, spec: ImageSlotSpec) -> Any:
 def build_synthetic_template(
     path: str,
     *,
-    inventory: TemplateInventory = CLIP_TEMPLATE_INVENTORY_V1,
     omit_shape_id: int | None = None,
     paragraph_delta: dict[int, int] | None = None,
+    author: str = "",
+    orphan_media: bytes | None = None,
 ) -> str:
-    """台帳と同じ構造の合成テンプレを作る。
+    """受入ダンプと同じ構造の合成テンプレを作る（**台帳は参照しない**）。
 
     ``omit_shape_id`` で 1 枠だけ落とす / ``paragraph_delta`` で段落数をずらすことで、
-    テンプレ改竄検知（fail-closed）のテストが書ける。
+    テンプレ改竄検知（fail-closed）のテストが書ける。``author`` / ``orphan_media`` は
+    消毒漏れ（docProps の実在社員名・shape を消しても残る media part）の再現用。
     """
 
     from pptx import Presentation
@@ -133,7 +176,7 @@ def build_synthetic_template(
     presentation = Presentation()
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     deltas = paragraph_delta or {}
-    for spec in inventory.text_frames():
+    for spec in golden_text_frames():
         if spec.shape_id == omit_shape_id:
             continue
         delta = deltas.get(spec.shape_id, 0)
@@ -148,12 +191,39 @@ def build_synthetic_template(
                 max_chars=spec.max_chars,
             )
         _add_text_frame(slide, spec)
-    for slot in inventory.image_slots():
+    for slot in golden_image_slots():
         if slot.shape_id == omit_shape_id:
             continue
         _add_image_slot(slide, slot)
+
+    if author:
+        presentation.core_properties.author = author
+        presentation.core_properties.last_modified_by = author
+        presentation.core_properties.comments = f"{author} が編集"
+    if orphan_media is not None:
+        # 画像を足してから shape だけ消す。part（ppt/media/imageN.png）は残る
+        # ＝ 消毒スクリプトが shape を消しただけで終わったときの実際の形。
+        import io
+
+        from pptx.util import Emu
+
+        picture = slide.shapes.add_picture(
+            io.BytesIO(orphan_media), Emu(0), Emu(0), Emu(914400), Emu(914400)
+        )
+        picture._element.getparent().remove(picture._element)
+
     presentation.save(path)
     return path
+
+
+def build_unsanitized_template(
+    path: str, *, author: str = "高林 拓也", orphan_long_edge: int = 8
+) -> str:
+    """消毒漏れテンプレ（docProps に実在社員名 ＋ 孤児 media part）。"""
+
+    return build_synthetic_template(
+        path, author=author, orphan_media=make_png_bytes(orphan_long_edge, orphan_long_edge)
+    )
 
 
 def sample_community(index: int) -> Community:
@@ -221,8 +291,13 @@ def sample_analysis(
 
 
 __all__ = [
+    "GOLDEN_DUMP_PATH",
     "PARAGRAPH_SIZES",
     "build_synthetic_template",
+    "build_unsanitized_template",
+    "golden_image_slots",
+    "golden_text_frames",
+    "load_golden_dump",
     "make_png_bytes",
     "sample_analysis",
     "sample_clip",

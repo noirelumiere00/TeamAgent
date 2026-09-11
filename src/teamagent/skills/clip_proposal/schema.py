@@ -48,7 +48,7 @@ class ClipProposalSubmitInput(_StrictModel):
         default="",
         max_length=120,
         description=(
-            "誰向けの提案か（クライアント名・例: 初田製作所）。"
+            "誰向けの提案か（クライアント名・例: 〇〇製作所）。"
             "不明なら空のまま呼ぶ。ファイル名やスレッド文脈から推定し受付文でエコーバックする"
         ),
     )

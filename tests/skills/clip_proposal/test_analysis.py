@@ -17,6 +17,7 @@ from teamagent.skills.clip_proposal.analysis import (
     CELL_COUNT,
     CLIP_SECONDS_MIN,
     LONG_EDGE_LADDER,
+    PROXY_LIMIT_BYTES,
     ClipAnalysisError,
     ClipCostGateError,
     ClipProposalAnalyzer,
@@ -29,8 +30,10 @@ from teamagent.skills.clip_proposal.analysis import (
     is_safe_output_text,
     parse_clips_payload,
     parse_transcript_payload,
+    plan_long_edge_ladder,
     quality_note_for,
     select_own_video,
+    spend_of,
 )
 
 _SEGMENTS = [
@@ -390,7 +393,45 @@ def test_truncated_output_is_not_handed_to_a_lenient_parser() -> None:
 
 def test_estimate_input_tokens_uses_duration_and_bytes() -> None:
     assert estimate_input_tokens(duration_sec=60.0, size_bytes=0) == 18_000
-    assert estimate_input_tokens(duration_sec=0.0, size_bytes=1024 * 1024) == 1024
+    # 1KiB ≒ 4 tokens（proxy 実測から導出・estimate_input_tokens の docstring 参照）。
+    assert estimate_input_tokens(duration_sec=0.0, size_bytes=1024 * 1024) == 4096
+
+
+def test_unknown_duration_is_fail_closed_before_any_paid_call() -> None:
+    """本番の失敗モード: media client 未配線で尺が 0.0 のまま渡ってくる。
+
+    ゲートは実質「尺のみ」で効いていて、バイト項は解析用 proxy 上限 18MB でも
+    閾値の 1/15 にしかならない。素通しすると 100MB の素材でもゲートが 1 度も
+    発火しないまま有料コールへ入る。
+    """
+
+    analyzer, _t, _p = _analyzer()
+    with pytest.raises(ClipCostGateError) as excinfo:
+        analyzer.preflight_cost_gate(duration_sec=0.0, size_bytes=100 * 1024 * 1024)
+    assert excinfo.value.code == "CLIP_DURATION_UNKNOWN"
+
+    with pytest.raises(ClipCostGateError):
+        analyzer.preflight_cost_gate(duration_sec=-1.0, size_bytes=1024)
+
+    # 尺が取れていれば従来どおり（既定ゲート 1,100,000 の内側）通す。
+    analyzer.preflight_cost_gate(duration_sec=60.0, size_bytes=18 * 1024 * 1024)
+
+
+def test_unknown_duration_never_reaches_the_transcript_call() -> None:
+    """1 コールも打たない（ゲートの意味）。"""
+
+    caller = _RecordingCaller([GeminiCall(text="{}", cost_usd=0.4)])
+    analyzer = ClipProposalAnalyzer(
+        request_id="req-1", transcript_caller=caller, text_caller=caller
+    )
+    with pytest.raises(ClipCostGateError):
+        analyzer.run(
+            video_bytes=b"x" * 1024,
+            mime_type="video/mp4",
+            duration_sec=0.0,
+            client_name="テスト商事",
+        )
+    assert caller.calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +441,29 @@ def test_estimate_input_tokens_uses_duration_and_bytes() -> None:
 
 def test_degradation_ladder_reaches_the_lowest_rung() -> None:
     assert LONG_EDGE_LADDER == (1280, 720, 480, 360, 240)
+
+
+def test_ladder_keeps_every_rung_when_the_source_already_fits() -> None:
+    assert plan_long_edge_ladder(size_bytes=0) == LONG_EDGE_LADDER
+    assert plan_long_edge_ladder(size_bytes=1024) == LONG_EDGE_LADDER
+    assert plan_long_edge_ladder(size_bytes=PROXY_LIMIT_BYTES) == LONG_EDGE_LADDER
+
+
+def test_ladder_skips_rungs_that_cannot_fit() -> None:
+    """入らないと分かっている段を再エンコードしない（バイトは面積にほぼ比例）。
+
+    100MB の素材を長辺 1280 起点で見ると 1280（100MB）・720（31.6MB）は上限 18MB を
+    超え、480（14.1MB）で初めて収まる。
+    """
+
+    assert plan_long_edge_ladder(size_bytes=100 * 1024 * 1024) == (480, 360, 240)
+    assert plan_long_edge_ladder(size_bytes=40 * 1024 * 1024) == (720, 480, 360, 240)
+
+
+def test_ladder_always_offers_the_lowest_rung() -> None:
+    """どの段でも入らない見積りでも **手作業へ突き返さない**（最下段は必ず返す）。"""
+
+    assert plan_long_edge_ladder(size_bytes=100 * 1024 * 1024 * 1024) == (240,)
 
 
 def test_quality_note_only_when_degraded() -> None:
@@ -466,3 +530,225 @@ def test_transcript_prompt_text_is_passed_to_call2_not_the_video() -> None:
         duration_sec=3.0,
     )
     assert "[0.0-3.0] はじめまして" in transcript.as_prompt_text()
+
+
+# ---------------------------------------------------------------------------
+# untrusted 扱いの抜け（安全装置2 の残り面）
+#
+# clip 直下のコピーだけでなく、界隈 / インサイト側の文字列も
+# ``render_detail_lines()`` 経由で資料本文の段落へ入る。ここが素通りすると、
+# quote_evidence が確定 transcript に実在する「正規の」clip に対して、
+# 第三者が仕込んだ URL とメンションが得意先向け PPTX に載る。
+# ---------------------------------------------------------------------------
+
+
+def _injected_community(**overrides: object) -> dict[str, object]:
+    item: dict[str, object] = {
+        "name": "界隈1",
+        "is_primary": True,
+        "terms": [{"term": "観測語1", "observed_on_web": True}],
+        "scale_note": "約1万人",
+        "description": "説明1",
+    }
+    item.update(overrides)
+    return item
+
+
+@pytest.mark.parametrize(
+    ("field", "payload"),
+    [
+        ("scale_note", "詳しくは https://evil.example/pwn を見てください"),
+        ("description", "この界隈は <!channel> で盛り上がっている"),
+        ("description", "連絡は @admin まで"),
+        ("scale_note", "制御\x07文字入り"),
+        ("name", "<@U12345> の界隈"),
+    ],
+)
+def test_community_injection_drops_the_cell_not_just_the_clip_copy(
+    field: str, payload: str
+) -> None:
+    raw = _plan_json(
+        communities=[
+            _injected_community(**{field: payload}),
+            *[_injected_community(name=f"界隈{i}") for i in range(2, 6)],
+        ]
+    )
+    _axes, clips, dropped = parse_clips_payload(raw, _transcript())
+
+    # quote_evidence は実在するので clip 自体は「正しい」。落ちるのは界隈側の検査。
+    assert [clip.cell_index for clip in clips] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert [d.cell_index for d in dropped] == [0]
+    assert dropped[0].reason == "unsafe_source_text"
+    assert dropped[0].marker  # どの語で止まったかを必ず出す
+    assert payload.startswith(dropped[0].marker[:8])
+
+    # 資料本文（detail_lines）に仕込みが 1 文字も残っていないこと。
+    rendered = "\n".join("\n".join(clip.detail_lines) for clip in clips)
+    assert "evil.example" not in rendered
+    assert "<!channel>" not in rendered
+    assert "@admin" not in rendered
+
+
+def test_community_injection_does_not_shift_other_communities_into_the_wrong_cell() -> None:
+    """落とした界隈を詰めると、界隈 2 の説明が界隈 1 のセルへ繰り上がる。"""
+
+    raw = _plan_json(
+        communities=[
+            _injected_community(name="界隈1", description="https://evil.example/pwn"),
+            *[_injected_community(name=f"界隈{i}", description=f"説明{i}") for i in range(2, 6)],
+        ]
+    )
+    _axes, clips, _dropped = parse_clips_payload(raw, _transcript())
+    community_cells = {clip.cell_index: clip for clip in clips if clip.kind == "community"}
+    assert community_cells[1].label.startswith("界隈2")
+    assert "・説明2" in community_cells[1].detail_lines
+
+
+@pytest.mark.parametrize(
+    "hint",
+    [
+        "http://evil.example/leak",
+        "www.evil.example",
+        "<!here> を見て",
+        "連絡は @komata まで",
+    ],
+)
+def test_insight_evidence_hint_injection_drops_the_cell(hint: str) -> None:
+    raw = _plan_json(
+        insights=[
+            {"target": "属性1", "insight": "本音1", "evidence_hint": hint},
+            *[
+                {"target": f"属性{i}", "insight": f"本音{i}", "evidence_hint": f"材料{i}"}
+                for i in range(2, 6)
+            ],
+        ]
+    )
+    _axes, clips, dropped = parse_clips_payload(raw, _transcript())
+
+    # インサイトの 1 枠目 ＝ セル index 5（界隈 5 枠の次）。
+    assert [d.cell_index for d in dropped] == [5]
+    assert dropped[0].reason == "unsafe_source_text"
+    rendered = "\n".join("\n".join(clip.detail_lines) for clip in clips)
+    assert "evil.example" not in rendered
+    assert "<!here>" not in rendered
+    assert "@komata" not in rendered
+
+
+def test_community_term_injection_is_also_refused() -> None:
+    raw = _plan_json(
+        communities=[
+            _injected_community(terms=[{"term": "https://evil.example", "observed_on_web": True}]),
+            *[_injected_community(name=f"界隈{i}") for i in range(2, 6)],
+        ]
+    )
+    _axes, clips, dropped = parse_clips_payload(raw, _transcript())
+    assert dropped[0].reason == "unsafe_source_text"
+    assert "evil.example" not in "\n".join("\n".join(c.detail_lines) for c in clips)
+
+
+def test_clean_sources_are_still_adopted() -> None:
+    """検査を足したことで正規の界隈 / インサイトまで落としていないこと。"""
+
+    _axes, clips, dropped = parse_clips_payload(_plan_json(), _transcript())
+    assert len(clips) == CELL_COUNT
+    assert dropped == ()
+    assert clips[0].detail_lines[2] == "・説明1"
+    assert clips[5].detail_lines[1] == "・判断材料：材料1"
+
+
+# ---------------------------------------------------------------------------
+# 失敗しても実課金分は計上する（安全装置5 の残り面）
+# ---------------------------------------------------------------------------
+
+
+def test_failed_parse_still_reports_what_was_actually_charged() -> None:
+    """本番の失敗モード: 2 コール課金したあとコール2 の出力が JSON でない。
+
+    費用カウンタが成功時にしか動かないと、プロンプト事故やモデル側の出力崩れが
+    続く日は CLIP_DAILY_COST_CAP_USD が一度も発火しない。
+    """
+
+    caller = _RecordingCaller(
+        [
+            GeminiCall(text=_transcript_json(), cost_usd=0.40),
+            GeminiCall(text="ごめん", cost_usd=0.40),
+        ]
+    )
+    analyzer = ClipProposalAnalyzer(
+        request_id="req-1",
+        transcript_caller=caller,
+        text_caller=caller,
+        cost_cap_usd=5.0,
+    )
+    with pytest.raises(ClipAnalysisError) as excinfo:
+        analyzer.run(
+            video_bytes=b"x",
+            mime_type="video/mp4",
+            duration_sec=60.0,
+            client_name="テスト商事",
+        )
+    assert excinfo.value.code == "CLIP_PLAN_INVALID"
+    assert spend_of(excinfo.value) == pytest.approx(0.80)
+    assert excinfo.value.calls == 2
+
+
+def test_truncated_output_reports_the_call_it_already_paid_for() -> None:
+    caller = _RecordingCaller(
+        [GeminiCall(text=_transcript_json(), cost_usd=0.25, finish_reason="MAX_TOKENS")]
+    )
+    analyzer = ClipProposalAnalyzer(
+        request_id="req-1", transcript_caller=caller, text_caller=caller, cost_cap_usd=5.0
+    )
+    with pytest.raises(ClipAnalysisError) as excinfo:
+        analyzer.run(
+            video_bytes=b"x",
+            mime_type="video/mp4",
+            duration_sec=60.0,
+            client_name="テスト商事",
+        )
+    assert excinfo.value.code == "CLIP_OUTPUT_TRUNCATED"
+    assert spend_of(excinfo.value) == pytest.approx(0.25)
+
+
+def test_gate_failure_reports_zero_spend() -> None:
+    """1 コールも打っていない失敗は 0.0（払っていない分を計上しない）。"""
+
+    caller = _RecordingCaller([GeminiCall(text="{}", cost_usd=0.4)])
+    analyzer = ClipProposalAnalyzer(
+        request_id="req-1", transcript_caller=caller, text_caller=caller
+    )
+    with pytest.raises(ClipCostGateError) as excinfo:
+        analyzer.run(
+            video_bytes=b"x",
+            mime_type="video/mp4",
+            duration_sec=0.0,
+            client_name="テスト商事",
+        )
+    assert spend_of(excinfo.value) == 0.0
+
+
+def test_caller_exception_carries_the_spend_so_far() -> None:
+    """注入された caller が任意の例外を上げても、直前までの実課金は伝わる。"""
+
+    class _Boom:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, *args: object, **kwargs: object) -> GeminiCall:
+            self.calls += 1
+            if self.calls == 1:
+                return GeminiCall(text=_transcript_json(), cost_usd=0.33)
+            raise RuntimeError("vertex unavailable")
+
+    caller = _Boom()
+    analyzer = ClipProposalAnalyzer(
+        request_id="req-1", transcript_caller=caller, text_caller=caller, cost_cap_usd=5.0
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        analyzer.run(
+            video_bytes=b"x",
+            mime_type="video/mp4",
+            duration_sec=60.0,
+            client_name="テスト商事",
+        )
+    assert spend_of(excinfo.value) == pytest.approx(0.33)

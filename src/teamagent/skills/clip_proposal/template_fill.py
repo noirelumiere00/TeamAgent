@@ -16,6 +16,7 @@ python-pptx は media extra にしか無いので **遅延 import** する（mcp
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -26,6 +27,8 @@ from teamagent.skills.clip_proposal.analysis import (
 )
 from teamagent.skills.clip_proposal.inventory import (
     CLIP_TEMPLATE_INVENTORY_V1,
+    OUTPUT_DOC_AUTHOR,
+    OUTPUT_DOC_DESCRIPTION,
     PROPOSAL_SLIDE_INDEX,
     ImageSlotSpec,
     TemplateInventory,
@@ -33,8 +36,12 @@ from teamagent.skills.clip_proposal.inventory import (
 )
 
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_CP = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+_DC = "http://purl.org/dc/elements/1.1/"
+_THUMBNAIL_REL = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"
 
 #: 台帳が要求する shape が欠けている / 段落数や枠寸法が違う（＝テンプレ改竄）。
+#: 出力側（V6）の消毒漏れ検知も同じコードで返す（利用者へ出すのはこのマーカーだけ）。
 TEMPLATE_INVALID = "MEDIA_CLIP_TEMPLATE_INVALID"
 
 
@@ -365,18 +372,158 @@ def apply_shape_text(shape: Any, paragraphs: Sequence[str]) -> None:
         _set_paragraph_text(paragraph, text)
 
 
+def _referenced_media_sha256(path: str, *, inventory: TemplateInventory) -> set[str]:
+    """提案スライドで **台帳の画像スロットが実際に参照している** 画像の SHA256。
+
+    「slide に居る picture」ではなく「台帳に載っている shape_id の picture」に限る。
+    台帳に無い shape がぶら下げた画像は、消毒漏れとして落としたい対象そのもの。
+    """
+
+    import hashlib
+
+    from pptx import Presentation
+
+    allowed_ids = {slot.shape_id for slot in inventory.image_slots()}
+    presentation = Presentation(path)
+    referenced: set[str] = set()
+    for shape in presentation.slides[PROPOSAL_SLIDE_INDEX].shapes:
+        if int(shape.shape_id) not in allowed_ids:
+            continue
+        image = getattr(shape, "image", None)
+        if image is None:
+            continue
+        referenced.add(hashlib.sha256(image.blob).hexdigest())
+    return referenced
+
+
+def _clean_core_properties(raw: bytes) -> bytes:
+    """``docProps/core.xml`` の人名欄を固定値へ潰す（実在社員名を出力へ残さない）。
+
+    lxml ではなく stdlib の ElementTree を使う（``lxml`` は型スタブが無く strict mypy を
+    通らない上、この 3 要素の書き換えに追加依存を増やす理由が無い）。OOXML の標準
+    prefix を登録してから直列化するので、PowerPoint が読む形は変わらない。
+    """
+
+    import xml.etree.ElementTree as ET
+
+    for prefix, uri in (
+        ("cp", _CP),
+        ("dc", _DC),
+        ("dcterms", "http://purl.org/dc/terms/"),
+        ("dcmitype", "http://purl.org/dc/dcmitype/"),
+        ("xsi", "http://www.w3.org/2001/XMLSchema-instance"),
+    ):
+        ET.register_namespace(prefix, uri)
+
+    root = ET.fromstring(raw)
+    fixed = {
+        f"{{{_DC}}}creator": OUTPUT_DOC_AUTHOR,
+        f"{{{_CP}}}lastModifiedBy": OUTPUT_DOC_AUTHOR,
+        f"{{{_DC}}}description": OUTPUT_DOC_DESCRIPTION,
+    }
+    for tag, value in fixed.items():
+        node = root.find(tag)
+        if node is None:
+            node = ET.SubElement(root, tag)
+        node.text = value
+    cleaned: bytes = ET.tostring(root, encoding="UTF-8", xml_declaration=True)
+    return cleaned
+
+
+def _drop_thumbnail_refs(raw: bytes) -> bytes:
+    """``docProps/thumbnail.*`` を指す 1 要素を丸ごと落とす。
+
+    ``[Content_Types].xml`` の ``<Override>`` と ``_rels/.rels`` の ``<Relationship>``
+    はどちらも属性だけを持つ自己完結要素なので、要素単位で削る。XML を組み直さない
+    ので、**他の part の参照はバイト単位で無傷**のまま残る。
+    """
+
+    pattern = re.compile(rb"<(?:Override|Relationship)\b[^>]*?/>")
+    needles = (b"docProps/thumbnail", _THUMBNAIL_REL.encode())
+    return pattern.sub(
+        lambda match: (
+            b"" if any(needle in match.group(0) for needle in needles) else match.group(0)
+        ),
+        raw,
+    )
+
+
+def sanitize_output(
+    output_path: str,
+    *,
+    inventory: TemplateInventory = CLIP_TEMPLATE_INVENTORY_V1,
+    inserted_media_sha256: frozenset[str] = frozenset(),
+) -> str:
+    """V6: **配達前に出力 PPTX を開き直して**消毒漏れを機械照合する。
+
+    ``validate_template`` は入力テンプレの shape / EMU / 段落数 / vert しか見ない。
+    docProps に残った実在社員名も、shape を消しただけで part が残った第三者画像
+    （孤児 media part）も、そこは通り抜ける。消毒漏れのテンプレを
+    ``CLIP_TEMPLATE_PATH`` に置いた瞬間、実在社員名と第三者の画像を含む PPTX が
+    得意先へ出てしまうので、**出力側でもう一度** 見る。
+
+    (1) ``docProps/core.xml`` の ``dc:creator`` / ``cp:lastModifiedBy`` /
+        ``dc:description`` を固定値へ上書きし、``docProps/thumbnail.*`` を
+        ``[Content_Types].xml`` と ``_rels/.rels`` の参照ごと物理削除する。
+    (2) ``ppt/media/*`` を列挙し、台帳の allowlist ＋ 今回差し込んだ分 ＋
+        台帳スロットが実際に参照している画像のどれでもない媒体が 1 つでもあれば、
+        **出力を消してから** ``MEDIA_CLIP_TEMPLATE_INVALID`` を上げる。
+    """
+
+    import hashlib
+    import os
+    import zipfile
+
+    allowed = set(inventory.allowed_media_sha256) | set(inserted_media_sha256)
+    allowed |= _referenced_media_sha256(output_path, inventory=inventory)
+
+    staging = f"{output_path}.sanitized"
+    orphan = ""
+    try:
+        with zipfile.ZipFile(output_path) as source:
+            names = source.namelist()
+            with zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as target:
+                for name in names:
+                    if name.startswith("docProps/thumbnail"):
+                        continue
+                    raw = source.read(name)
+                    if name == "docProps/core.xml":
+                        raw = _clean_core_properties(raw)
+                    elif name in ("[Content_Types].xml", "_rels/.rels"):
+                        raw = _drop_thumbnail_refs(raw)
+                    elif name.startswith("ppt/media/"):
+                        digest = hashlib.sha256(raw).hexdigest()
+                        if digest not in allowed:
+                            orphan = orphan or f"{name} sha256={digest[:12]}"
+                    target.writestr(source.getinfo(name), raw)
+        if orphan:
+            raise ClipTemplateInvalidError(f"unexpected media part {orphan}")
+        os.replace(staging, output_path)
+    except BaseException:
+        # 破棄しきる。消毒に失敗した PPTX を配達可能な場所へ残さない。
+        for path in (staging, output_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        raise
+    return output_path
+
+
 def apply_fill_plan(
     template_path: str,
     plan: FillPlan,
     output_path: str,
     *,
     inventory: TemplateInventory = CLIP_TEMPLATE_INVENTORY_V1,
+    inserted_media_sha256: frozenset[str] = frozenset(),
 ) -> str:
     """テンプレを開き、``plan`` の差し替えを適用して ``output_path`` へ保存する。
 
     ``validate_template`` を先に通す。台帳と合わなければ **1 バイトも書かない**。
-    画像スロットの差し込み（静止画）は本 PR の範囲外で、``plan.image_slots`` の
-    解決結果だけを返す（実差し込みは消毒済みテンプレ到着後の便で入れる）。
+    保存後は ``sanitize_output``（V6）で開き直し、docProps の人名と孤児 media part を
+    落とす／検出する。画像スロットの差し込み（静止画）は本 PR の範囲外で、
+    ``plan.image_slots`` の解決結果だけを返す（実差し込みは消毒済みテンプレ到着後の便）。
     """
 
     validate_template(template_path, inventory=inventory)
@@ -392,7 +539,9 @@ def apply_fill_plan(
             raise ClipTemplateInvalidError(f"missing shape {op.shape_id} ({op.role})")
         apply_shape_text(shape, op.paragraphs)
     presentation.save(output_path)
-    return output_path
+    return sanitize_output(
+        output_path, inventory=inventory, inserted_media_sha256=inserted_media_sha256
+    )
 
 
 def resolve_image_slots(
@@ -423,6 +572,7 @@ __all__ = [
     "apply_shape_text",
     "build_fill_plan",
     "resolve_image_slots",
+    "sanitize_output",
     "truncate_for_frame",
     "validate_template",
 ]

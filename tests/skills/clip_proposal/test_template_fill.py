@@ -1,6 +1,6 @@
 """テンプレ差し替え層。**一から作らず**、台帳で解決した枠だけを埋める。
 
-期待値の出どころは記入例（初田製作所）から起こした台帳 ``CLIP_TEMPLATE_INVENTORY_V1``。
+期待値の出どころは記入例から起こした台帳 ``CLIP_TEMPLATE_INVENTORY_V1``。
 テンプレ実物は repo に置かないので、台帳から同じ構造の合成テンプレを組んで検査する。
 
 本番の失敗モードを再現する:
@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from teamagent.skills.clip_proposal.analysis import CELL_COUNT
 from teamagent.skills.clip_proposal.inventory import CLIP_TEMPLATE_INVENTORY_V1 as INVENTORY
+from teamagent.skills.clip_proposal.inventory import PROPOSAL_SLIDE_INDEX
 from teamagent.skills.clip_proposal.template_fill import (
     ClipTemplateInvalidError,
     apply_fill_plan,
@@ -28,7 +30,14 @@ from teamagent.skills.clip_proposal.template_fill import (
     validate_template,
 )
 
-from .fixtures import PARAGRAPH_SIZES, build_synthetic_template, sample_analysis
+from .fixtures import (
+    PARAGRAPH_SIZES,
+    build_synthetic_template,
+    build_unsanitized_template,
+    load_golden_dump,
+    make_png_bytes,
+    sample_analysis,
+)
 
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
@@ -278,3 +287,193 @@ def test_empty_paragraph_gets_a_run_that_keeps_the_format(template: Path) -> Non
     apply_shape_text(shape, ["a", "b", "c", "d", "e"])
     assert _paragraph_texts(shape)[1] == "b"
     assert _paragraph_sizes(shape)[1] == "3300"
+
+
+# ---------------------------------------------------------------------------
+# 受入ダンプと台帳の突合（自己言及を断つ）
+# ---------------------------------------------------------------------------
+
+
+def test_validate_template_accepts_the_golden_dump() -> None:
+    """合成テンプレは **台帳ではなく受入ダンプ** から組む。
+
+    どちらか片方だけを書き換えると赤くなる。台帳から合成して台帳で検証すると、
+    台帳が実在資産と食い違っていても受入テストは永久に緑になる。
+    """
+
+    dump = load_golden_dump()
+    assert dump["profile"] == INVENTORY.version
+    assert dump["slide_index"] == PROPOSAL_SLIDE_INDEX
+
+    dumped = {
+        (
+            int(e["shape_id"]),
+            e["role"],
+            int(e["paragraphs"]),
+            int(e["width_emu"]),
+            int(e["height_emu"]),
+            str(e.get("vert") or ""),
+        )
+        for e in dump["text_frames"]
+    }
+    expected = {
+        (s.shape_id, s.role, s.template_paragraphs, s.width_emu, s.height_emu, s.vert)
+        for s in INVENTORY.text_frames()
+    }
+    assert dumped == expected
+
+    dumped_slots = {
+        (int(e["shape_id"]), e["role"], e["kind"], int(e["width_emu"]), int(e["height_emu"]))
+        for e in dump["image_slots"]
+    }
+    assert dumped_slots == {
+        (s.shape_id, s.role, s.kind, s.width_emu, s.height_emu) for s in INVENTORY.image_slots()
+    }
+
+
+def test_image_slot_emu_comes_from_the_black_template_not_the_filled_example() -> None:
+    """台帳 docstring の但し書きを固定する（記入例には画像枠の shape が無い）。
+
+    帯は記入例サイズ・画像枠は黒版サイズという混成なので、両者が一致しないことを
+    明示的に検査して「いつの間にか片方に寄せた」が起きたら気づけるようにする。
+    """
+
+    hook_slot = INVENTORY.cell(0).hook_slot
+    band_top = INVENTORY.cell(0).band_top
+    assert (hook_slot.width_emu, hook_slot.height_emu) == (560618, 909282)
+    assert (band_top.width_emu, band_top.height_emu) == (1096804, 427936)
+    assert hook_slot.aspect_ratio < 1.0  # 9:16 寄り（フック）
+    assert INVENTORY.cell(0).clip_slot.aspect_ratio > 1.5  # 16:9（切り抜き）
+
+
+# ---------------------------------------------------------------------------
+# V6: 配達前に出力を開き直す（消毒漏れテンプレの検知）
+# ---------------------------------------------------------------------------
+
+
+def _docprops(path: Path) -> tuple[str, str, str]:
+    presentation = _open(path)
+    props = presentation.core_properties
+    return (props.author or "", props.last_modified_by or "", props.comments or "")
+
+
+def _media_names(path: Path) -> list[str]:
+    with zipfile.ZipFile(path) as archive:
+        return [name for name in archive.namelist() if name.startswith("ppt/media/")]
+
+
+def test_output_docprops_never_carry_a_real_employee_name(tmp_path: Path) -> None:
+    """消毒漏れテンプレ（docProps に実在社員名）を食っても、出力に名前を残さない。"""
+
+    template = tmp_path / "unsanitized.pptx"
+    build_synthetic_template(str(template), author="高林 拓也")
+    assert _docprops(template)[0] == "高林 拓也"
+
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+
+    author, last_modified_by, comments = _docprops(output)
+    assert author == "Aico"
+    assert last_modified_by == "Aico"
+    assert comments == ""
+    with zipfile.ZipFile(output) as archive:
+        blob = b"".join(archive.read(name) for name in archive.namelist())
+    assert "高林".encode() not in blob
+
+
+def test_orphan_media_part_discards_the_output(tmp_path: Path) -> None:
+    """shape を消しても part が残った第三者画像を検知して、出力ごと捨てる。
+
+    validate_template は shape / EMU / 段落数 / vert しか見ないのでここを通り抜ける。
+    """
+
+    template = tmp_path / "orphan.pptx"
+    build_unsanitized_template(str(template))
+    # 消毒漏れの実体: 台帳スロットの数より media part が 1 つ多い。
+    assert len(_media_names(template)) == len(_media_names_of_inventory_slots()) + 1
+
+    output = tmp_path / "out.pptx"
+    with pytest.raises(ClipTemplateInvalidError) as excinfo:
+        apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    assert excinfo.value.code == "MEDIA_CLIP_TEMPLATE_INVALID"
+    assert "unexpected media part" in excinfo.value.detail
+    assert not output.exists()  # 配達可能な場所に残さない
+
+
+def _media_names_of_inventory_slots() -> list[str]:
+    """台帳の picture スロットが持つ画像の本数（合成テンプレでは 1 種類に重複排除される）。"""
+
+    return ["ppt/media/image1.png"]
+
+
+def test_sanitize_output_accepts_media_the_ledger_slots_reference(tmp_path: Path) -> None:
+    """正規の画像（台帳スロットが参照している分）は落とさない。"""
+
+    template = tmp_path / "clean.pptx"
+    build_synthetic_template(str(template))
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    assert output.exists()
+    assert _media_names(output)  # 画像は残っている（全消しではない）
+
+
+def test_sanitize_output_allows_media_inserted_this_run(tmp_path: Path) -> None:
+    """今回差し込んだ分は SHA256 を渡せば通る（画像差し込みを足す便の受け口）。"""
+
+    import hashlib
+
+    orphan = make_png_bytes(8, 8)
+    template = tmp_path / "with-extra.pptx"
+    build_synthetic_template(str(template), orphan_media=orphan)
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(
+        str(template),
+        build_fill_plan(sample_analysis()),
+        str(output),
+        inserted_media_sha256=frozenset({hashlib.sha256(orphan).hexdigest()}),
+    )
+    assert output.exists()
+
+
+def test_thumbnail_part_is_removed_with_its_references(tmp_path: Path) -> None:
+    template = tmp_path / "thumb.pptx"
+    build_synthetic_template(str(template))
+    _inject_thumbnail(template)
+    with zipfile.ZipFile(template) as archive:
+        assert "docProps/thumbnail.jpeg" in archive.namelist()
+        assert b"thumbnail" in archive.read("_rels/.rels")
+        assert b"thumbnail" in archive.read("[Content_Types].xml")
+
+    output = tmp_path / "out.pptx"
+    apply_fill_plan(str(template), build_fill_plan(sample_analysis()), str(output))
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+        rels = archive.read("_rels/.rels").decode("utf-8")
+        content_types = archive.read("[Content_Types].xml").decode("utf-8")
+    assert not any(name.startswith("docProps/thumbnail") for name in names)
+    assert "thumbnail" not in rels
+    assert "thumbnail" not in content_types
+
+
+def _inject_thumbnail(path: Path) -> None:
+    """``[Content_Types].xml`` 側の Override も足す（PowerPoint が実際に付ける形）。
+
+    python-pptx の既定パッケージは ``docProps/thumbnail.jpeg`` と ``_rels/.rels`` の
+    参照を最初から持っているが Override は持たない。3 経路すべてを消すことを
+    固定したいので、足りない 1 本をここで補う。
+    """
+
+    import shutil
+
+    staging = path.with_suffix(".staging.pptx")
+    override = '<Override PartName="/docProps/thumbnail.jpeg" ContentType="image/jpeg"/>'
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(staging, "w", zipfile.ZIP_DEFLATED) as target,
+    ):
+        for name in source.namelist():
+            raw = source.read(name)
+            if name == "[Content_Types].xml":
+                raw = raw.replace(b"</Types>", override.encode() + b"</Types>")
+            target.writestr(source.getinfo(name), raw)
+    shutil.move(str(staging), str(path))

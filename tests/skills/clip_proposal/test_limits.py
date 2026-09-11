@@ -124,8 +124,8 @@ def test_busy_message_does_not_ask_for_a_resubmission() -> None:
 
 
 def test_queued_message_echoes_the_client_name_back() -> None:
-    message = build_queued_message(client_name="初田製作所", eta_minutes=15)
-    assert "「初田製作所」" in message
+    message = build_queued_message(client_name="〇〇製作所", eta_minutes=15)
+    assert "「〇〇製作所」" in message
     assert "違っていればこのスレッドで教えてください" in message
 
 

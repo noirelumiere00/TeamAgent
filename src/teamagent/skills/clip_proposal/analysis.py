@@ -17,6 +17,11 @@ untrusted 扱い（同 安全装置「出力の untrusted 扱い」）:
 - 動画の音声・テロップは第三者が用意した内容。採用テキストは ``is_safe_output_text``
   で検査し、制御文字・URL・``@mention``・``<!channel>``・Slack markup・連続改行を
   含む clip は **不採用**（資料にもコメントにも出さない）。
+- 検査対象は clip 直下のコピーだけではない。``Community.scale_note`` /
+  ``Community.description`` / ``CommunityTerm.term`` / ``Insight.evidence_hint`` も
+  ``render_detail_lines()`` 経由で **資料本文の段落へ入る**ため、同じ検査を通す。
+  1 つでも外れたらその界隈 / インサイトを採らず、それを載せる予定だったセルごと
+  落とす（``reason="unsafe_source_text"``・どの語で止まったかを marker に残す）。
 """
 
 from __future__ import annotations
@@ -60,6 +65,8 @@ MAX_GEMINI_CALLS_DEFAULT = 5
 INPUT_TOKEN_GATE_DEFAULT = 1_100_000
 #: 動画 1 秒あたりの概算入力トークン（Gemini の video tokenization 実測に基づく概算）。
 TOKENS_PER_VIDEO_SECOND = 300
+#: proxy 1KiB あたりの概算入力トークン（``estimate_input_tokens`` の導出を参照）。
+TOKENS_PER_PROXY_KIB = 4
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -71,16 +78,49 @@ _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 
 
 class ClipAnalysisError(RuntimeError):
-    """解析の失敗。``code`` は利用者へ出してよい安全なマーカーのみ。"""
+    """解析の失敗。``code`` は利用者へ出してよい安全なマーカーのみ。
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    ``spent_usd`` / ``calls`` は **失敗するまでに実際に課金された分**。失敗経路でも
+    日次の費用カウンタへ計上させるために載せる（載せないと「失敗し続ける日は費用 cap が
+    一度も発火しない」経路になる）。
+    """
+
+    def __init__(
+        self, code: str, detail: str = "", *, spent_usd: float = 0.0, calls: int = 0
+    ) -> None:
         super().__init__(code if not detail else f"{code}: {detail}")
         self.code = code
         self.detail = detail
+        self.spent_usd = float(spent_usd)
+        self.calls = int(calls)
 
 
 class ClipCostGateError(ClipAnalysisError):
     """課金前ゲート / cap による停止。**1 コールも打っていない**ことを含意する場合がある。"""
+
+
+def annotate_spend(exc: BaseException, *, spent_usd: float, calls: int) -> BaseException:
+    """例外へ実測課金額を貼る（貼れない例外型でも落とさない）。
+
+    注入された caller（本番は Vertex クライアント）が上げる任意の例外にも貼るので、
+    ``setattr`` が通らない型（``__slots__`` 付き等）では黙って諦める。
+    """
+
+    try:
+        exc.spent_usd = max(float(getattr(exc, "spent_usd", 0.0) or 0.0), float(spent_usd))  # type: ignore[attr-defined]
+        exc.calls = max(int(getattr(exc, "calls", 0) or 0), int(calls))  # type: ignore[attr-defined]
+    except Exception:  # pragma: no cover - 貼れない例外型の保険
+        pass
+    return exc
+
+
+def spend_of(exc: BaseException) -> float:
+    """例外に貼られた実測課金額（無ければ 0.0）。"""
+
+    try:
+        return max(0.0, float(getattr(exc, "spent_usd", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _envint(name: str, default: int, *, minimum: int, maximum: int) -> int:
@@ -463,54 +503,82 @@ def parse_axes(payload: dict[str, Any], transcript: Transcript) -> tuple[AppealA
     return tuple(axes)
 
 
-def _parse_communities(payload: dict[str, Any]) -> list[Community]:
-    communities: list[Community] = []
+def _first_unsafe(*values: str) -> str:
+    """資料本文へ入る文字列のうち、最初に検査を外れたもの（無ければ空文字）。"""
+
+    return next((value for value in values if value and not is_safe_output_text(value)), "")
+
+
+def _parse_communities(
+    payload: dict[str, Any],
+) -> tuple[list[Community | None], dict[int, str]]:
+    """界隈を index 保存で採る。**採れなかった枠は ``None`` で場所を残す**。
+
+    落とした分を詰めると、界隈 2 の内容が界隈 1 のセルへ繰り上がって
+    「別の界隈の説明が別のセルへ入る」取り違えになる。検査対象は ``name`` だけでなく
+    ``render_detail_lines()`` が資料へ流す ``terms`` / ``scale_note`` / ``description``
+    を全部含む（1 つでも外れたらその界隈ごと不採用）。
+    """
+
+    communities: list[Community | None] = []
+    rejected: dict[int, str] = {}
     for item in payload.get("communities") or []:
         if not isinstance(item, dict):
             continue
+        index = len(communities)
         name = str(item.get("name", "")).strip()
-        if not name or not is_safe_output_text(name):
-            continue
-        terms: list[CommunityTerm] = []
+        scale_note = str(item.get("scale_note", "")).strip()
+        description = str(item.get("description", "")).strip()
+        raw_terms: list[tuple[str, bool]] = []
         for term_item in item.get("terms") or []:
             if isinstance(term_item, dict):
                 term = str(term_item.get("term", "")).strip()
                 verified = bool(term_item.get("observed_on_web"))
             else:
                 term, verified = str(term_item).strip(), False
-            if term and is_safe_output_text(term):
-                terms.append(CommunityTerm(term=term, verified=verified))
+            if term:
+                raw_terms.append((term, verified))
+
+        unsafe = _first_unsafe(name, scale_note, description, *(term for term, _ in raw_terms))
+        if not name or unsafe:
+            communities.append(None)
+            if unsafe:
+                rejected[index] = unsafe[:24]
+            continue
         communities.append(
             Community(
                 name=name,
-                terms=tuple(terms),
-                scale_note=str(item.get("scale_note", "")).strip(),
-                description=str(item.get("description", "")).strip(),
+                terms=tuple(
+                    CommunityTerm(term=term, verified=verified) for term, verified in raw_terms
+                ),
+                scale_note=scale_note,
+                description=description,
                 is_primary=bool(item.get("is_primary")),
             )
         )
-    return communities
+    return communities, rejected
 
 
-def _parse_insights(payload: dict[str, Any]) -> list[Insight]:
-    insights: list[Insight] = []
+def _parse_insights(payload: dict[str, Any]) -> tuple[list[Insight | None], dict[int, str]]:
+    """インサイトを index 保存で採る（``evidence_hint`` も資料本文なので検査対象）。"""
+
+    insights: list[Insight | None] = []
+    rejected: dict[int, str] = {}
     for item in payload.get("insights") or []:
         if not isinstance(item, dict):
             continue
+        index = len(insights)
         target = str(item.get("target", "")).strip()
         insight = str(item.get("insight", "")).strip()
-        if not target or not insight:
+        evidence_hint = str(item.get("evidence_hint", "")).strip()
+        unsafe = _first_unsafe(target, insight, evidence_hint)
+        if not target or not insight or unsafe:
+            insights.append(None)
+            if unsafe:
+                rejected[index] = unsafe[:24]
             continue
-        if not is_safe_output_text(target) or not is_safe_output_text(insight):
-            continue
-        insights.append(
-            Insight(
-                target=target,
-                insight=insight,
-                evidence_hint=str(item.get("evidence_hint", "")).strip(),
-            )
-        )
-    return insights
+        insights.append(Insight(target=target, insight=insight, evidence_hint=evidence_hint))
+    return insights, rejected
 
 
 def parse_clips_payload(
@@ -528,8 +596,8 @@ def parse_clips_payload(
 
     payload = _load_json_object(raw, code="CLIP_PLAN_INVALID")
     axes = parse_axes(payload, transcript)
-    communities = _parse_communities(payload)
-    insights = _parse_insights(payload)
+    communities, rejected_communities = _parse_communities(payload)
+    insights, rejected_insights = _parse_insights(payload)
 
     clips: list[ClipPlan] = []
     dropped: list[DroppedClip] = []
@@ -583,9 +651,19 @@ def parse_clips_payload(
             dropped.append(DroppedClip(cell_index=index, reason=exc.code))
             continue
 
+        # 界隈 / インサイト側が untrusted 検査で落ちていたら、そのセルごと採らない
+        # （フォールバック文言で描くと「何の界隈でもないセル」が資料へ残る）。
+        slot = index if kind == "community" else index - COMMUNITY_CELLS
+        rejected = rejected_communities if kind == "community" else rejected_insights
+        if slot in rejected:
+            dropped.append(
+                DroppedClip(cell_index=index, reason="unsafe_source_text", marker=rejected[slot])
+            )
+            continue
+
         detail: tuple[str, ...]
         if kind == "community":
-            source = communities[index] if index < len(communities) else None
+            source = communities[slot] if slot < len(communities) else None
             label = source.render_name() if source else "界隈（要確認）"
             detail = (
                 source.render_detail_lines()
@@ -593,7 +671,6 @@ def parse_clips_payload(
                 else ("・界隈言語：（未検証）", "・規模：未算出（仮定値）", "・要確認")
             )
         else:
-            slot = index - COMMUNITY_CELLS
             insight_source = insights[slot] if slot < len(insights) else None
             label = insight_source.target if insight_source else "ターゲット（要確認）"
             detail = (
@@ -626,17 +703,30 @@ def parse_clips_payload(
 
 
 def plan_long_edge_ladder(
-    *, size_bytes: int, limit_bytes: int = PROXY_LIMIT_BYTES
+    *,
+    size_bytes: int,
+    limit_bytes: int = PROXY_LIMIT_BYTES,
+    source_long_edge: int = LONG_EDGE_LADDER[0],
 ) -> tuple[int, ...]:
-    """解析用 proxy の長辺候補。既に上限内でも、劣化が要る場合に備えて全段返す。
+    """解析用 proxy の長辺候補。**最初から入りそうにない段は飛ばす**。
 
     「1280 で入らなければ 720→480→360→240 へ落ちて **必ず解析まで到達させる**」
-    （計画 §2-2「できないことを手作業へ突き返さない」）。
+    （計画 §2-2「できないことを手作業へ突き返さない」）。入らないと分かっている段を
+    律儀に再エンコードすると、上限 18MB に対して 100MB の素材で 2〜3 回ぶんの
+    無駄な変換時間を使う。バイト数は解像度の面積にほぼ比例するので、
+    ``size_bytes × (rung / source_long_edge)²`` が上限を下回る最初の段から始める。
+
+    尺が分からない・サイズが取れない（``size_bytes <= 0``）回は削らず全段返す。
+    どの段でも入らない見積りでも **最下段だけは必ず返す**（手作業へ突き返さない）。
     """
 
-    if size_bytes <= 0:
+    if size_bytes <= 0 or size_bytes <= limit_bytes:
         return LONG_EDGE_LADDER
-    return LONG_EDGE_LADDER
+    base = max(1, int(source_long_edge))
+    for position, rung in enumerate(LONG_EDGE_LADDER):
+        if size_bytes * (rung / base) ** 2 <= limit_bytes:
+            return LONG_EDGE_LADDER[position:]
+    return LONG_EDGE_LADDER[-1:]
 
 
 def quality_note_for(long_edge: int) -> str:
@@ -651,10 +741,17 @@ def quality_note_for(long_edge: int) -> str:
 
 
 def estimate_input_tokens(*, duration_sec: float, size_bytes: int) -> int:
-    """課金前ゲート用の入力トークン見積り（proxy の尺とバイト数から）。"""
+    """課金前ゲート用の入力トークン見積り（proxy の尺とバイト数から）。
+
+    バイト項は「尺が取れない回の粗い下限」でしかない。長辺 1280 の proxy は
+    概ね 1.2Mbps 前後＝ 1 秒あたり約 150KB なので、1 秒 300 tokens から逆算すると
+    1KiB ≒ 2 tokens。実測ばらつきに対して安全側（過大評価側）へ 2 倍を取り
+    ``TOKENS_PER_PROXY_KIB = 4`` とする。旧実装の 1KiB = 1 token は 18MB の proxy で
+    18,432 tokens ＝ ゲート既定の約 1/60 で、バイト側が事実上無効だった。
+    """
 
     by_duration = int(max(0.0, duration_sec) * TOKENS_PER_VIDEO_SECOND)
-    by_bytes = int(max(0, size_bytes) / 1024)
+    by_bytes = int(max(0, size_bytes) / 1024 * TOKENS_PER_PROXY_KIB)
     return max(by_duration, by_bytes)
 
 
@@ -755,8 +852,16 @@ class ClipProposalAnalyzer:
     input_token_gate: int = field(default_factory=configured_input_token_gate)
 
     def preflight_cost_gate(self, *, duration_sec: float, size_bytes: int) -> None:
-        """課金前ゲート。閾値超なら **1 コールも打たずに** 失敗させる。"""
+        """課金前ゲート。閾値超なら **1 コールも打たずに** 失敗させる。
 
+        **尺が取れない回は素通りさせない**（``CLIP_DURATION_UNKNOWN``）。ゲートは実質
+        尺で効いていて、バイト項は 18MB の proxy でも閾値の 1/15 にしかならない。
+        ``duration_sec=0.0`` を許すと、100MB の素材でもゲートが 1 度も発火しないまま
+        有料コールへ入る。media client の配線が入るまで本番で現実に起きうる失敗モード。
+        """
+
+        if duration_sec <= 0:
+            raise ClipCostGateError("CLIP_DURATION_UNKNOWN")
         estimated = estimate_input_tokens(duration_sec=duration_sec, size_bytes=size_bytes)
         if estimated > self.input_token_gate:
             raise ClipCostGateError("CLIP_INPUT_TOO_LARGE", f"tokens~{estimated}")
@@ -776,24 +881,32 @@ class ClipProposalAnalyzer:
         self.preflight_cost_gate(duration_sec=duration_sec, size_bytes=len(video_bytes))
         ledger = CostLedger(cap_usd=self.cost_cap_usd)
 
-        call1 = self._call(
-            ledger, lambda: self.transcript_caller(video_bytes, mime_type, TRANSCRIPT_PROMPT)
-        )
-        ledger = ledger.add(call1.cost_usd)
-        self._raise_if_capped(ledger)
-        transcript = parse_transcript_payload(call1.text, duration_sec=duration_sec)
+        try:
+            call1 = self._call(
+                ledger, lambda: self.transcript_caller(video_bytes, mime_type, TRANSCRIPT_PROMPT)
+            )
+            ledger = ledger.add(call1.cost_usd)
+            self._raise_if_capped(ledger)
+            transcript = parse_transcript_payload(call1.text, duration_sec=duration_sec)
 
-        prompt = build_clips_prompt(transcript, client_name=client_name)
-        call2 = self._call(ledger, lambda: self.text_caller(prompt, f"{self.request_id}:clip-plan"))
-        ledger = ledger.add(call2.cost_usd)
-        self._raise_if_capped(ledger)
+            prompt = build_clips_prompt(transcript, client_name=client_name)
+            call2 = self._call(
+                ledger, lambda: self.text_caller(prompt, f"{self.request_id}:clip-plan")
+            )
+            ledger = ledger.add(call2.cost_usd)
+            self._raise_if_capped(ledger)
 
-        axes, clips, dropped = parse_clips_payload(
-            call2.text,
-            transcript,
-            client_name=client_name,
-            search_word=search_word,
-        )
+            axes, clips, dropped = parse_clips_payload(
+                call2.text,
+                transcript,
+                client_name=client_name,
+                search_word=search_word,
+            )
+        except Exception as exc:
+            # 失敗しても **そこまでに実課金した分**を呼び出し側へ渡す。
+            # 渡さないと、出力が壊れ続ける日は日次の費用 cap が一度も発火しない。
+            annotate_spend(exc, spent_usd=ledger.spent_usd, calls=ledger.calls)
+            raise
         return ClipProposalAnalysis(
             client_name=client_name,
             axes=axes,
@@ -814,7 +927,12 @@ class ClipProposalAnalyzer:
         call = invoke()
         if call.finish_reason == "MAX_TOKENS":
             # 寛容パースに渡さない（途中で切れた JSON を「読めた」ことにしない）。
-            raise ClipAnalysisError("CLIP_OUTPUT_TRUNCATED")
+            # このコールは **既に課金されている**ので、その分も載せて上げる。
+            raise ClipAnalysisError(
+                "CLIP_OUTPUT_TRUNCATED",
+                spent_usd=ledger.spent_usd + max(0.0, call.cost_usd),
+                calls=ledger.calls + 1,
+            )
         return call
 
     def _raise_if_capped(self, ledger: CostLedger) -> None:
@@ -870,6 +988,7 @@ __all__ = [
     "INSIGHT_CELLS",
     "LONG_EDGE_LADDER",
     "PROXY_LIMIT_BYTES",
+    "TOKENS_PER_PROXY_KIB",
     "TRANSCRIPT_PROMPT",
     "AppealAxis",
     "ClipAnalysisError",
@@ -885,6 +1004,7 @@ __all__ = [
     "Insight",
     "Transcript",
     "TranscriptSegment",
+    "annotate_spend",
     "build_clips_prompt",
     "clamp_window",
     "estimate_input_tokens",
@@ -896,4 +1016,5 @@ __all__ = [
     "plan_long_edge_ladder",
     "quality_note_for",
     "select_own_video",
+    "spend_of",
 ]
