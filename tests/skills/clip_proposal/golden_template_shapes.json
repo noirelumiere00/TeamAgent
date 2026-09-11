@@ -1,0 +1,731 @@
+{
+  "_comment": [
+    "消毒済みテンプレの受入ダンプ（shape_id / 段落数 / 枠 EMU / vert）。",
+    "inventory.py とは独立に維持する第二の情報源。fixtures.py の合成テンプレは",
+    "このダンプから組み立てるので、台帳だけを書き換えると受入テストが赤くなる。",
+    "TODO(便C): 消毒スクリプトが出力した消毒済みテンプレ実物のダンプへ差し替える。",
+    "現行の値は 2026-09-11 に黒版テンプレ（shape_id / 段落数）と記入例（テキスト枠の",
+    "EMU / vert）から起こしたもので、画像スロットの EMU は黒版テンプレ由来。"
+  ],
+  "profile": "clip-proposal-v1",
+  "slide_index": 0,
+  "text_frames": [
+    {
+      "shape_id": 142,
+      "role": "axes",
+      "paragraphs": 17,
+      "width_emu": 2071282,
+      "height_emu": 4960820,
+      "vert": ""
+    },
+    {
+      "shape_id": 102,
+      "role": "community.band_top",
+      "paragraphs": 1,
+      "width_emu": 1096804,
+      "height_emu": 427936,
+      "vert": ""
+    },
+    {
+      "shape_id": 104,
+      "role": "community.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 348942,
+      "vert": ""
+    },
+    {
+      "shape_id": 106,
+      "role": "community.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 146,
+      "role": "community.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 148,
+      "role": "community.detail",
+      "paragraphs": 3,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 5,
+      "role": "community.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 132,
+      "role": "community.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 108,
+      "role": "community.band_top",
+      "paragraphs": 1,
+      "width_emu": 1096804,
+      "height_emu": 427936,
+      "vert": ""
+    },
+    {
+      "shape_id": 110,
+      "role": "community.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 348942,
+      "vert": ""
+    },
+    {
+      "shape_id": 112,
+      "role": "community.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 152,
+      "role": "community.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 154,
+      "role": "community.detail",
+      "paragraphs": 3,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 9,
+      "role": "community.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 134,
+      "role": "community.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 114,
+      "role": "community.band_top",
+      "paragraphs": 1,
+      "width_emu": 1096804,
+      "height_emu": 427936,
+      "vert": ""
+    },
+    {
+      "shape_id": 116,
+      "role": "community.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 348942,
+      "vert": ""
+    },
+    {
+      "shape_id": 118,
+      "role": "community.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 156,
+      "role": "community.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 158,
+      "role": "community.detail",
+      "paragraphs": 3,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 13,
+      "role": "community.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 136,
+      "role": "community.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 120,
+      "role": "community.band_top",
+      "paragraphs": 1,
+      "width_emu": 1096804,
+      "height_emu": 427936,
+      "vert": ""
+    },
+    {
+      "shape_id": 122,
+      "role": "community.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 348942,
+      "vert": ""
+    },
+    {
+      "shape_id": 124,
+      "role": "community.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 160,
+      "role": "community.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 162,
+      "role": "community.detail",
+      "paragraphs": 3,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 17,
+      "role": "community.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 138,
+      "role": "community.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 126,
+      "role": "community.band_top",
+      "paragraphs": 1,
+      "width_emu": 1096804,
+      "height_emu": 427936,
+      "vert": ""
+    },
+    {
+      "shape_id": 128,
+      "role": "community.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 348942,
+      "vert": ""
+    },
+    {
+      "shape_id": 130,
+      "role": "community.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 164,
+      "role": "community.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 166,
+      "role": "community.detail",
+      "paragraphs": 3,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 21,
+      "role": "community.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 140,
+      "role": "community.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 182,
+      "role": "insight.band_top",
+      "paragraphs": 1,
+      "width_emu": 1100406,
+      "height_emu": 452832,
+      "vert": ""
+    },
+    {
+      "shape_id": 183,
+      "role": "insight.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 395682,
+      "vert": ""
+    },
+    {
+      "shape_id": 184,
+      "role": "insight.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 202,
+      "role": "insight.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 203,
+      "role": "insight.detail",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 25,
+      "role": "insight.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 197,
+      "role": "insight.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 185,
+      "role": "insight.band_top",
+      "paragraphs": 1,
+      "width_emu": 1100406,
+      "height_emu": 452832,
+      "vert": ""
+    },
+    {
+      "shape_id": 186,
+      "role": "insight.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 395682,
+      "vert": ""
+    },
+    {
+      "shape_id": 187,
+      "role": "insight.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 213,
+      "role": "insight.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 215,
+      "role": "insight.detail",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 30,
+      "role": "insight.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 198,
+      "role": "insight.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 188,
+      "role": "insight.band_top",
+      "paragraphs": 1,
+      "width_emu": 1100406,
+      "height_emu": 452832,
+      "vert": ""
+    },
+    {
+      "shape_id": 189,
+      "role": "insight.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 395682,
+      "vert": ""
+    },
+    {
+      "shape_id": 190,
+      "role": "insight.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 217,
+      "role": "insight.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 219,
+      "role": "insight.detail",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 34,
+      "role": "insight.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 199,
+      "role": "insight.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 191,
+      "role": "insight.band_top",
+      "paragraphs": 1,
+      "width_emu": 1100406,
+      "height_emu": 452832,
+      "vert": ""
+    },
+    {
+      "shape_id": 192,
+      "role": "insight.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 395682,
+      "vert": ""
+    },
+    {
+      "shape_id": 193,
+      "role": "insight.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 221,
+      "role": "insight.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 223,
+      "role": "insight.detail",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 38,
+      "role": "insight.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 200,
+      "role": "insight.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    },
+    {
+      "shape_id": 194,
+      "role": "insight.band_top",
+      "paragraphs": 1,
+      "width_emu": 1100406,
+      "height_emu": 452832,
+      "vert": ""
+    },
+    {
+      "shape_id": 195,
+      "role": "insight.band_bottom",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 395682,
+      "vert": ""
+    },
+    {
+      "shape_id": 196,
+      "role": "insight.search_word",
+      "paragraphs": 1,
+      "width_emu": 1022010,
+      "height_emu": 331128,
+      "vert": ""
+    },
+    {
+      "shape_id": 227,
+      "role": "insight.label",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 164179,
+      "vert": ""
+    },
+    {
+      "shape_id": 229,
+      "role": "insight.detail",
+      "paragraphs": 1,
+      "width_emu": 1744258,
+      "height_emu": 609162,
+      "vert": ""
+    },
+    {
+      "shape_id": 42,
+      "role": "insight.note",
+      "paragraphs": 5,
+      "width_emu": 596983,
+      "height_emu": 870708,
+      "vert": ""
+    },
+    {
+      "shape_id": 201,
+      "role": "insight.hook_copy",
+      "paragraphs": 1,
+      "width_emu": 376164,
+      "height_emu": 933497,
+      "vert": "eaVert"
+    }
+  ],
+  "image_slots": [
+    {
+      "shape_id": 6,
+      "role": "main_video",
+      "kind": "picture",
+      "width_emu": 2071283,
+      "height_emu": 1169590
+    },
+    {
+      "shape_id": 4,
+      "role": "community.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 10,
+      "role": "community.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 43,
+      "role": "community.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 12,
+      "role": "community.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 48,
+      "role": "community.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 14,
+      "role": "community.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 53,
+      "role": "community.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 16,
+      "role": "community.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 56,
+      "role": "community.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 18,
+      "role": "community.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 58,
+      "role": "insight.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 20,
+      "role": "insight.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 60,
+      "role": "insight.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 22,
+      "role": "insight.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 62,
+      "role": "insight.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 24,
+      "role": "insight.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 64,
+      "role": "insight.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 26,
+      "role": "insight.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    },
+    {
+      "shape_id": 66,
+      "role": "insight.hook_slot",
+      "kind": "shape",
+      "width_emu": 560618,
+      "height_emu": 909282
+    },
+    {
+      "shape_id": 28,
+      "role": "insight.clip_slot",
+      "kind": "picture",
+      "width_emu": 1008454,
+      "height_emu": 569443
+    }
+  ]
+}
