@@ -55,7 +55,9 @@ is_knowledge_share=True を付ける。
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+import unicodedata
+from collections.abc import Mapping, Sequence
+from typing import NamedTuple
 
 # ヘッダ (canonical 形) → metadata JSONB key の写像。実ヘッダ 2026-07-03 確認。
 # 新規列が追加されたらここに足すだけ。lookup 前に _normalize_form_label を通すこと。
@@ -211,3 +213,273 @@ def derive_knowledge_client_name(company: str) -> str | None:
         s = stripped
 
     return s or None
+
+
+# ============================================================
+# 事例集 corpus（📍ショート動画施策事例集・マスター表）の列写像 — B-10
+# ============================================================
+# 2026-09-11 追加。アポ前 事例ブリーフィング（pre_meeting_brief）が引く母集団を作る。
+#
+# ⚠️ 母集団の定義は **「yaml で case_corpus: "true" を宣言した gsheets spec の行」** であって
+# 「ヘッダが事例っぽい行」ではない。pipeline 側は spec のフラグでしか本経路へ入らないので、
+# 既存 2 シート（ナレッジ共有 / 営業 FB）には構造的に副作用が無い。下のコアヘッダ閾値は
+# 「フラグ付きシートのヘッダが運用で差し替わったとき黙って誤写像しない」ための二次防御。
+#
+# 実ヘッダは未確定（マスター表の sheet_id 自体がユーザー探索中）。要望原文が名指しした
+# 列は カテゴリ／企業名／商材／効果／営業担当 の 5 つで、「対外利用可否」列は追加可否を
+# ユーザーが検討中。したがって:
+#  - 列名は **表記ゆれを吸収して** 照合する（NFKC で全角/半角・丸数字・記号を潰し、
+#    末尾の括弧注記を落としてから alias 表を引く）
+#  - 「対外利用可否」列が**無い**ことを正常系として扱う（→ unknown。列が無いだけで
+#    毎朝 ⚠ を全件に付けると狼少年化して本命の ⚠ が効かなくなる）
+#
+# 相互排他: 事例集のコアヘッダは FB（商流/顧客名/商談フェーズ…）ともナレッジ共有
+# （正式社名/案件名/クライアント種別/提案プロダクト/資料の概要）とも 3 つ以上は交差しない。
+# 「正式社名」だけは 企業名 の別名として受けるが、ナレッジ共有シートのコア一致数は 1 に
+# とどまり閾値 3 に届かない（テストで固定）。
+CASE_CORPUS_METADATA_KEY = "case_corpus"
+
+# 3 値。ここ以外で文字列リテラルを増やさない。
+CASE_EXTERNAL_USE_OK = "ok"
+CASE_EXTERNAL_USE_NG = "ng"
+CASE_EXTERNAL_USE_UNKNOWN = "unknown"
+
+# canonical ラベル → metadata JSONB key。
+# case_external_use_source は **生セル** で、pipeline が resolve_case_external_use を
+# 通して case_external_use（3 値）＋ case_external_use_note（表示用の理由）へ置換する
+# ＝ document の metadata に生セルがそのまま残ることはない。
+_CASE_LABEL_TO_METADATA_KEY: dict[str, str] = {
+    "企業名": "case_company",
+    "カテゴリ": "case_category",
+    "商材": "case_product",
+    "効果": "case_effect",
+    "営業担当": "case_owner",
+    "対外利用可否": "case_external_use_source",
+    "資料名": "case_asset_name",
+}
+
+# 実ヘッダのゆれ → canonical ラベル。NFKC 正規化＋括弧注記除去の **後** に引く。
+_CASE_LABEL_ALIASES: dict[str, str] = {
+    # 企業名
+    "会社名": "企業名",
+    "社名": "企業名",
+    "正式社名": "企業名",
+    "クライアント": "企業名",
+    "クライアント名": "企業名",
+    "得意先": "企業名",
+    "得意先名": "企業名",
+    "企業": "企業名",
+    # カテゴリ（業種）
+    "カテゴリー": "カテゴリ",
+    "業種": "カテゴリ",
+    "業界": "カテゴリ",
+    "ジャンル": "カテゴリ",
+    # 商材
+    "商材名": "商材",
+    "商品": "商材",
+    "商品名": "商材",
+    "プロダクト": "商材",
+    "サービス": "商材",
+    "施策名": "商材",
+    # 効果
+    "成果": "効果",
+    "実績": "効果",
+    "結果": "効果",
+    "効果・成果": "効果",
+    "効果/成果": "効果",
+    "効果測定": "効果",
+    # 営業担当
+    "営業担当者": "営業担当",
+    "担当": "営業担当",
+    "担当者": "営業担当",
+    "担当営業": "営業担当",
+    "社内担当": "営業担当",
+    # 対外利用可否
+    "対外利用": "対外利用可否",
+    "対外可否": "対外利用可否",
+    "展開可否": "対外利用可否",
+    "外部展開": "対外利用可否",
+    "外部利用": "対外利用可否",
+    "開示可否": "対外利用可否",
+    "公開可否": "対外利用可否",
+    "クライアント展開": "対外利用可否",
+    "クライアント展開可否": "対外利用可否",
+    # 資料名（NG 判定の名前シグナル源にもなる）
+    "ファイル名": "資料名",
+    "資料": "資料名",
+    "保管先フォルダ": "資料名",
+    "フォルダ名": "資料名",
+}
+
+# 事例集らしさのコア（FB / ナレッジ共有とは 3 つ以上交差しない）。
+_CASE_CORE_LABELS = frozenset({"企業名", "カテゴリ", "商材", "効果", "営業担当"})
+_CASE_MIN_CORE_HITS = 3
+
+# 「対外利用可否」セルの値域。NFKC + casefold 後の **部分一致** で見る。
+# ⚠️ ng を先に見る（「不可」は「可」を含む・「非公開」は「公開」を含む）。
+_CASE_NG_VALUE_MARKERS: tuple[str, ...] = (
+    "ng",
+    "不可",
+    "×",
+    "✕",
+    "口頭",
+    "社外秘",
+    "非公開",
+    "禁止",
+    "confidential",
+    "secret",
+)
+_CASE_OK_VALUE_MARKERS: tuple[str, ...] = (
+    "ok",
+    "可",
+    "○",
+    "〇",
+    "◯",
+    "yes",
+    "公開",
+    "true",
+)
+
+# フォルダ名・ファイル名・シート名に現れたら対外利用 NG と断じる語（要望原文の 3 語）。
+# 例: 「20260708_各社成功事例集★クライアント展開NG」「03｜事例（開示NG）」「口頭のみ」。
+_CASE_NG_NAME_MARKERS: tuple[str, ...] = ("展開ng", "開示ng", "口頭")
+
+# 末尾の括弧注記（「効果（数値）」「営業担当（社内）」等）。ヘッダ正規化で落とす。
+_CASE_LABEL_PAREN_RE = re.compile(r"[（(][^（()）]*[）)]\s*$")
+
+
+def _normalize_case_label(label: str) -> str:
+    """事例集シートのヘッダを canonical ラベルへ正規化する。
+
+    ナレッジ共有（_normalize_form_label）と違い **NFKC を通す**。マスター表は人手で
+    作られた表で、全角英数・全角スペース・半角カナ・丸括弧のゆれが列名に入りうるため。
+    正規化順: NFKC → 全角/半角スペース除去 → 末尾括弧注記除去 → alias。
+    """
+    normalized = unicodedata.normalize("NFKC", label or "")
+    normalized = normalized.replace("　", " ").strip()
+    # 「効果（数値）」→「効果」。入れ子なし前提・複数回適用。
+    while True:
+        trimmed = _CASE_LABEL_PAREN_RE.sub("", normalized).strip()
+        if trimmed == normalized:
+            break
+        normalized = trimmed
+    # 内部の空白・中黒は列名のゆれなので潰す（「営業 担当」「効果 ・ 成果」）。
+    normalized = re.sub(r"\s+", "", normalized)
+    return _CASE_LABEL_ALIASES.get(normalized, normalized)
+
+
+def _normalize_case_value(value: str | None) -> str:
+    """セル値を照合用に正規化する（NFKC → 空白除去 → casefold）。"""
+    normalized = unicodedata.normalize("NFKC", value or "")
+    normalized = re.sub(r"\s+", "", normalized.replace("　", " "))
+    return normalized.casefold()
+
+
+def map_case_fields(fields: Mapping[str, str]) -> dict[str, str]:
+    """事例集マスター表の ヘッダ → 値 を metadata JSONB 用 dict へ写像する。
+
+    Returns:
+        - 正規化後のコアヘッダが _CASE_MIN_CORE_HITS 個以上あれば
+          metadata key → 非空値 の dict（空セルの列は含めない）
+        - コアヘッダ不足（= 事例集マスター表ではない）なら空 dict {}
+          → ナレッジ共有 / 営業 FB / 任意シートへの副作用ゼロ（テストで固定）
+
+    ``case_external_use_source`` は生セル。3 値化は resolve_case_external_use が行う。
+    """
+    if not fields:
+        return {}
+
+    normalized: dict[str, str] = {}
+    for label, value in fields.items():
+        canonical = _normalize_case_label(label)
+        # 表記ゆれで同一 canonical に潰れた場合は非空値を優先（空値で上書きしない）
+        if canonical not in normalized or (value or "").strip():
+            normalized[canonical] = value or ""
+
+    core_hits = len(normalized.keys() & _CASE_CORE_LABELS)
+    if core_hits < _CASE_MIN_CORE_HITS:
+        return {}
+
+    out: dict[str, str] = {}
+    for canonical, value in normalized.items():
+        key = _CASE_LABEL_TO_METADATA_KEY.get(canonical)
+        if key is None:
+            continue
+        cleaned = (value or "").strip()
+        if not cleaned:
+            continue
+        out[key] = cleaned
+    return out
+
+
+def normalize_case_external_use(value: str | None) -> str:
+    """「対外利用可否」セルを 3 値（ok / ng / unknown）へ正規化する。
+
+    空セル・未知語は **unknown**（「列が無い/書かれていない」を ng にも ok にも倒さない）。
+    ng を先に見るので「不可」が「可」に、「非公開」が「公開」に誤って当たることはない。
+    """
+    normalized = _normalize_case_value(value)
+    if not normalized:
+        return CASE_EXTERNAL_USE_UNKNOWN
+    if any(marker in normalized for marker in _CASE_NG_VALUE_MARKERS):
+        return CASE_EXTERNAL_USE_NG
+    if any(marker in normalized for marker in _CASE_OK_VALUE_MARKERS):
+        return CASE_EXTERNAL_USE_OK
+    return CASE_EXTERNAL_USE_UNKNOWN
+
+
+def find_case_ng_name(names: Sequence[str | None]) -> str | None:
+    """フォルダ名 / ファイル名 / シート名に NG 語（展開NG・開示NG・口頭）があれば返す。
+
+    返り値は **マッチした名前そのもの**（表示用の理由文言に使う）。無ければ None。
+    """
+    for name in names:
+        if not name:
+            continue
+        haystack = _normalize_case_value(name)
+        if any(marker in haystack for marker in _CASE_NG_NAME_MARKERS):
+            return name.strip()
+    return None
+
+
+class CaseExternalUse(NamedTuple):
+    """対外利用可否の判定結果。
+
+    value: ok / ng / unknown
+    note:  表示用の理由（生セル文言 or NG を検知した名前）。理由が無ければ None。
+    """
+
+    value: str
+    note: str | None
+
+
+def resolve_case_external_use(
+    *,
+    column_value: str | None = None,
+    names: Sequence[str | None] = (),
+    previous: str | None = None,
+    previous_note: str | None = None,
+) -> CaseExternalUse:
+    """対外利用可否を決める（**単調**: 一度 ng になったら降格しない）。
+
+    評価順を固定する:
+      1. 保存済みが ng → ng（**sticky**。再取込で列が消えても・名前が変わっても戻さない。
+         documents.metadata は upsert で全置換されるため、ここで持ち上げないと
+         「⚠なしの NG 事例」が翌朝の DM に載る）
+      2. 名前（シート名 / タブ名 / 資料名）に 展開NG・開示NG・口頭 → ng
+      3. 列の値 → ok / ng / unknown
+      4. 列が無い / 空 → unknown
+
+    ok は sticky にしない（unknown へ落ちるのは安全側の劣化なので許す）。
+    """
+    if normalize_case_external_use(previous) == CASE_EXTERNAL_USE_NG:
+        note = (previous_note or "").strip() or None
+        return CaseExternalUse(CASE_EXTERNAL_USE_NG, note)
+
+    ng_name = find_case_ng_name(names)
+    if ng_name is not None:
+        return CaseExternalUse(CASE_EXTERNAL_USE_NG, ng_name)
+
+    value = normalize_case_external_use(column_value)
+    note = (column_value or "").strip() or None
+    return CaseExternalUse(value, note)

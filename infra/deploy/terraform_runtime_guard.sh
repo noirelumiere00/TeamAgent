@@ -6112,11 +6112,16 @@ validate_runtime_task_contracts() {
     die "planned exact task definitionsがUID/GID/read-only/cap-drop/tmp/EFS/cache/image契約を満たしません"
 
   local spec address component expected_name allowed_env allowed_secrets
+  # allowed_env は「この TD で plan 上 変更してよい env キー」の allowlist。
+  # 載っていないキーを terraform で足すと changed_keys - allowed_env != 0 で plan が die する。
+  # ingest 行の CASE_CORPUS_SHEET_ID / CASE_CORPUS_SHEET_GID は事例集 corpus（B-10）の
+  # sheet_id 後入れ用。**足しただけでは何も点かない**（env 未設定なら loader が当該ソースを
+  # skip する＝取り込み対象は従来どおり）。点灯時に plan が死なないようにするための先置き。
   for spec in \
     'aws_ecs_task_definition.openclaw[0]|openclaw|openclaw|["OPENCLAW_CONFIG_PATH","TMPDIR"]|[]' \
     'aws_ecs_task_definition.mcp|mcp|teamagent-mcp|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","UV_CACHE_DIR","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT","REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET","REPORT_LINK_HMAC_SECRET","REPORT_LINK_HMAC_PREVIOUS_SECRET"]' \
     'aws_ecs_task_definition.connect_web[0]|connect_web|connect-web|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT","REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET","REPORT_LINK_HMAC_SECRET","REPORT_LINK_HMAC_PREVIOUS_SECRET"]' \
-    'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
+    'aws_ecs_task_definition.ingest[0]|ingest|ingest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","CASE_CORPUS_SHEET_ID","CASE_CORPUS_SHEET_GID"]|[]' \
     'aws_ecs_task_definition.morning_digest[0]|morning|morning-digest|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET"]' \
     'aws_ecs_task_definition.canary[0]|canary|canary|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]' \
     'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \

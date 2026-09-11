@@ -136,6 +136,43 @@ gsheets:
       structure: "form-response"
       use_case: "顧客温度感の経時追跡 + 検索"
 
+  # ---- 📍ショート動画施策事例集（マスター表）2026-09-11 追加・B-10 ----
+  # アポ前 事例ブリーフィング（pre_meeting_brief）が引く **唯一の母集団**。
+  #
+  # ⚠️ sheet_id は 2026-09-11 時点で未確定（ユーザーが Drive 上で探索中）。実 ID が
+  # 分かるまで yaml にはプレースホルダを置き、実運用では env で後入れする:
+  #     CASE_CORPUS_SHEET_ID=<spreadsheet id>     （必須・未設定ならこのソースごと skip）
+  #     CASE_CORPUS_SHEET_GID=<マスター表タブの gid>（任意・未設定なら下の gid を使う）
+  # env 未設定のときは loader が ingest_sources_skip_unconfigured_env を出して
+  # **この 1 エントリだけ**を落とす。strict mode でも例外にしない＝slack/gdrive/既存
+  # gsheets の取り込みは一切変わらない（貼り忘れで ingest 全断させない）。
+  #
+  # ⚠️ 事例 pptx フォルダ（「20260708_各社成功事例集★クライアント展開NG」「03｜事例」）は
+  # **ここに足さない**。Drive のファイルは複数フォルダから辿れるため、NG フォルダと通常
+  # フォルダの双方に属する 1 ファイルは external_id=file.id の UPSERT
+  # （metadata = EXCLUDED.metadata の全置換）で後勝ちになり、NG 印が黙って消える。
+  # v1 の対外利用可否の真実源はこのマスター表の列だけ（計画 §4 論点 2 の推奨 B）。
+  # pptx フォルダ取込は C-11（Drive parents 実測 + 2 spec 跨ぎ 0 件の確認が前提）。
+  - sheet_id: "REPLACE_WITH_CASE_CORPUS_SHEET_ID"
+    sheet_id_env: "CASE_CORPUS_SHEET_ID"
+    sheet_name: "📍ショート動画施策事例集"
+    description: |
+      ショート動画施策の実施事例マスター表。列は カテゴリ / 企業名 / 商材 / 効果 /
+      営業担当（＋「対外利用可否」列は追加を検討中）。1 行 = 1 事例 = 1 document。
+      アポ前 事例ブリーフィングが「相手企業 → 実施事例」を引くときの母集団。
+    tabs:
+      - gid: 0
+        gid_env: "CASE_CORPUS_SHEET_GID"
+        tab_name: "マスター表"
+    row_unit: true
+    extra_metadata:
+      # この 1 行が母集団の定義。pipeline はこのフラグでしか事例集経路に入らないので、
+      # 上 2 シートには構造的に副作用が無い（cls_doc_type / cls_project は不変）。
+      case_corpus: "true"
+      topic: "ショート動画施策事例集"
+      structure: "case-master-table"
+      use_case: "アポ前 事例ブリーフィングの事例引き当て"
+
 # ============================================================
 # 共有ドライブ全自動 crawl (Day 7 = 2026-05-27 追加)
 # ============================================================

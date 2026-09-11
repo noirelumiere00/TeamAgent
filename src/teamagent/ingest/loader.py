@@ -10,6 +10,7 @@ Sprint 3 / PR-6 で導入。pipeline.py / scripts/ingest_sources.py から呼ば
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,8 @@ class GSheetsTabSpec:
 
     gid: int
     tab_name: str
+    # gid も後入れできる（sheet_id_env と同じ運用。env 未設定なら yaml の gid を使う）。
+    gid_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,10 @@ class GSheetSpec:
     tabs: tuple[GSheetsTabSpec, ...]
     row_unit: bool = True
     extra_metadata: dict[str, Any] = field(default_factory=dict)
+    # ID 後入れ（2026-09-11・B-10）: sheet_id/gid が未確定のソースを yaml に置けるようにする。
+    # yaml の sheet_id がプレースホルダのときだけ env を見る（実 ID を env で黙って
+    # 差し替えられる口は作らない）。解決後は普通の spec と区別が無い＝取込経路は不変。
+    sheet_id_env: str | None = None
 
 
 @dataclass(frozen=True)
@@ -301,22 +308,53 @@ def _parse_gdrive_folders(
     return tuple(out)
 
 
+def _resolve_env_id(env_name: str | None) -> str | None:
+    """``sheet_id_env`` / ``gid_env`` の env を読む（未設定・空・プレースホルダは None）。
+
+    「env で後入れ」の唯一の読み口。値そのものがプレースホルダ（REPLACE_… 等）の場合も
+    未設定と同じ扱いにする（tfvars に雛形をそのまま貼った事故を取り込みへ通さない）。
+    """
+    if not env_name:
+        return None
+    raw = os.environ.get(env_name, "")
+    value = raw.strip()
+    if not value or _is_placeholder(value):
+        return None
+    return value
+
+
 def _parse_gsheets(raw: list[dict[str, Any]], *, skip_placeholder: bool) -> tuple[GSheetSpec, ...]:
     out: list[GSheetSpec] = []
     for item in raw:
         sheet_id = str(item.get("sheet_id", ""))
+        sheet_id_env = str(item.get("sheet_id_env", "") or "").strip() or None
         if _is_placeholder(sheet_id):
-            if skip_placeholder:
+            # ID 後入れ（2026-09-11・B-10）: env が入っていればそれを実 ID として採用する。
+            resolved = _resolve_env_id(sheet_id_env)
+            if resolved is not None:
+                sheet_id = resolved
+            elif sheet_id_env:
+                # 「env で後から入れる」と yaml で宣言済のソースは、未設定でも **例外にしない**。
+                # strict mode（skip_placeholder=False）は「貼り忘れたプレースホルダ」を
+                # 検知するための検査であって、意図的な未確定 ID を全断させる口ではない。
+                # ここを raise にすると sheet_id 未確定の 1 エントリだけで
+                # scripts/ingest_sources.py が起動時に死に、slack/gdrive ごと ingest が止まる。
+                logger.warning(
+                    "ingest_sources_skip_unconfigured_env",
+                    section="gsheets",
+                    sheet_name=item.get("sheet_name"),
+                    sheet_id_env=sheet_id_env,
+                )
+                continue
+            elif skip_placeholder:
                 logger.warning(
                     "ingest_sources_skip_placeholder", section="gsheets", sheet_id=sheet_id
                 )
                 continue
-            raise ValueError(f"gsheets entry has placeholder sheet_id: {sheet_id!r}")
+            else:
+                raise ValueError(f"gsheets entry has placeholder sheet_id: {sheet_id!r}")
         tabs_raw: list[dict[str, Any]] = item.get("tabs", []) or []
-        tabs = tuple(
-            GSheetsTabSpec(gid=int(t.get("gid", 0)), tab_name=str(t.get("tab_name", "")))
-            for t in tabs_raw
-        )
+        tabs = tuple(_parse_gsheet_tab(t) for t in tabs_raw)
         out.append(
             GSheetSpec(
                 sheet_id=sheet_id,
@@ -325,6 +363,24 @@ def _parse_gsheets(raw: list[dict[str, Any]], *, skip_placeholder: bool) -> tupl
                 tabs=tabs,
                 row_unit=bool(item.get("row_unit", True)),
                 extra_metadata=dict(item.get("extra_metadata", {}) or {}),
+                sheet_id_env=sheet_id_env,
             )
         )
     return tuple(out)
+
+
+def _parse_gsheet_tab(raw: dict[str, Any]) -> GSheetsTabSpec:
+    """gsheets[].tabs[] の 1 件。``gid_env`` があれば env の gid を優先する。"""
+    gid_env = str(raw.get("gid_env", "") or "").strip() or None
+    gid = int(raw.get("gid", 0))
+    resolved = _resolve_env_id(gid_env)
+    if resolved is not None:
+        try:
+            gid = int(resolved)
+        except ValueError:
+            logger.warning(
+                "ingest_sources_invalid_gid_env",
+                gid_env=gid_env,
+                fallback_gid=gid,
+            )
+    return GSheetsTabSpec(gid=gid, tab_name=str(raw.get("tab_name", "")), gid_env=gid_env)
