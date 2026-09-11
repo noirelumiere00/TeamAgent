@@ -201,6 +201,9 @@ _HANDOFF_FAILED_LINE = "💬 *Slack 返信漏れ*: 表示できませんでし�
 #: ここで「原文のみ」と言い切ると、その真横で作った述語が嘘になる。
 _HANDOFF_FOOTNOTE = "※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。"
 
+#: 既に敬称が付いている表示名（「田中さん」）へ「さん」を重ねないための検査。
+_HONORIFIC_TAIL_RE = re.compile(r"(?:さん|サン|様|さま|氏|君|くん|ちゃん|先生|部長|課長|社長)$")
+
 #: 実名が引けなかったときの表記。**架空の名前を作らない**＝空欄だと明示する。
 _NAME_UNRESOLVED = "（表示名なし）"
 _MENTION_UNRESOLVED = f"@{_NAME_UNRESOLVED}"
@@ -370,11 +373,18 @@ def _scrub_slack_ids(s: str, known_ids: frozenset[str] = frozenset()) -> str:
 def _handoff_display(
     raw: str, names: dict[str, str], known_ids: frozenset[str] = frozenset()
 ) -> str:
-    """表示テキストの共通経路: 実名解決 → 生 ID 除去 → mrkdwn エスケープ。
+    """表示テキストの共通経路: **NFKC 正規化 → 実名解決 → 生 ID 除去 → mrkdwn エスケープ**。
 
     順序が要（escape を先にやると `<@U…>` が `&lt;@U…&gt;` になって実名解決が効かない）。
+
+    ⚠️ **`_handoff.normalize_text`（NFKC）は必ず先頭**。NFKC は全角記号を半角へ倒すので、
+    `_slack_escape` の後ろへ移すと本文の `＜@U08…＞` が escape をすり抜けてから `<@U08…>`
+    へ戻り、実名解決も生 ID 検査も飛ばして **Slack の生メンションとして描画される**
+    （＝無害化の貫通）。この 1 行の並びが不変条件で、順序テストで固定してある。
     """
-    return _slack_escape(_scrub_slack_ids(_flatten_slack_text(raw, names), known_ids))
+    return _slack_escape(
+        _scrub_slack_ids(_flatten_slack_text(_handoff.normalize_text(raw), names), known_ids)
+    )
 
 
 def _handoff_link(url: str) -> str:
@@ -425,13 +435,20 @@ def _handoff_channel_kind(item: Any) -> str:
     return _CHANNEL_ID_PREFIX_KIND.get(cid[:1], "unknown") if cid else "unknown"
 
 
+def _with_honorific(name: str) -> str:
+    """差出人名に「さん」を付ける（既に敬称が付いている名前へ重ねない）。"""
+    return name if _HONORIFIC_TAIL_RE.search(name) else f"{name}さん"
+
+
 def _handoff_channel_chip(item: Any, names: dict[str, str], known_ids: frozenset[str]) -> str:
-    """会話の chip（**戻り値は display 済み**＝呼び出し側で二重に通さないこと）。
+    """**誰から・どこで**の chip（**戻り値は display 済み**＝呼び出し側で二重に通さない）。
+
+    **相手を先頭に出す**（`江畑 未来さん（DM）`）。DM が 3 件並んだとき、利用者が最初に
+    知りたいのは「誰が待っているか」であって会話の種別ではない（2026-09-11 実物の指摘）。
 
     **`#` はチャンネル（C）のときだけ**付ける。DM / グループDM の `channel.name` は
     user_id そのものなので、`#` を無条件に前置すると本人に意味の無い生 ID が出る
-    （旧描画の実害）。DM 系は種別ラベル＋**差出人の実名**を出す
-    （DM が 3 件並ぶと「・DM」だけでは誰が待っているのか分からないため）。
+    （旧描画の実害）。実名が引けなければ種別ラベルまでしか言わない（架空の名前を作らない）。
     """
     kind = _handoff_channel_kind(item)
     # "DM" / "グループDM" / "チャンネル" / ""（unknown＝判定できなかった＝空欄）
@@ -451,13 +468,27 @@ def _handoff_channel_chip(item: Any, names: dict[str, str], known_ids: frozenset
     who = _truncate(who.strip(), _HANDOFF_SENDER_NAME_LEN)
     if not who or _NAME_UNRESOLVED in who:
         return base  # 実名が引けなかった＝架空の名前を作らず種別だけ
-    return f"{base}（{who}）" if base else who
+    named = _with_honorific(who)
+    return f"{named}（{base}）" if base else named
+
+
+def _handoff_effort_chip(effort_label: str) -> str:
+    """所要時間の chip。**単位だけを置いた「1分」は意味が伝わらない**ので何の時間か言う。
+
+    数字（`EFFORT_BY_KIND` の固定表）は判定層の値をそのまま使い、ここで新しい推定はしない。
+    """
+    return f"対応に約{effort_label}" if effort_label else ""
 
 
 def _handoff_card_line(
     card: Any, item: Any, names: dict[str, str], known_ids: frozenset[str]
 ) -> str:
     """カード 1 件 = 1 行。chip は判定層が確定済みのものを非空だけ並べる。
+
+    行の形は `N. *見出し*（文脈）　— 相手（場所）・時間情報　〔開く〕`。
+    **区切りは 2 種類だけ**（`—` が見出しと状況を割り、`・` が状況の中を割る）。旧描画は
+    見出しも相手も時間も所要も全部 `・` で同列に並べており、重要度が読めなかった
+    （2026-09-11 実物の指摘）。全角スペースで 3 つの塊（見出し／状況／導線）を離す。
 
     時間の chip は **期限として書かれていれば期限・無ければ経過日数**（1 行に時間軸を
     2 つ出さない）。期限ではない日付語は `date_mention_label` として別に添える
@@ -475,19 +506,37 @@ def _handoff_card_line(
         for raw in (
             card.due_label or card.elapsed_label,
             card.date_mention_label,
-            card.effort_label,
+            _handoff_effort_chip(card.effort_label),
             f"他{card.mentioned_others}名も名指し" if card.mentioned_others >= 1 else "",
             card.fold_reason,
         )
         if raw
     ]
-    for chip in chips:
-        if chip:
-            line += f" ・{chip}"
+    body = "・".join(chip for chip in chips if chip)
+    if body:
+        line += f"　— {body}"
     url = _handoff_link(card.permalink)
     if url:
-        line += f" 〔<{url}|開く>〕"  # permalink は実 URL なのでエスケープしない
+        line += f"　〔<{url}|開く>〕"  # permalink は実 URL なのでエスケープしない
     return line
+
+
+def _handoff_hidden_line(cards: list[Any], hidden: int) -> str:
+    """表示から漏れた件への導線を 1 行（`（表示していない2件は 〔…〕）`）。
+
+    見出しの「7件中5件を表示」だけでは、残りに触れる手段が無く見落とす。
+    ⚠️ **URL は既存のものしか使わない**。この digest が持っている URL は各件の permalink
+    だけなので、隠れた先頭 1 件の permalink をそのまま導線にする（検索ビューの URL を
+    組み立てたりはしない）。使える permalink が無ければ **この行は出さない**（捏造しない）。
+    ラベルも実際に開くもの（次の 1 件）を名乗る。
+    """
+    if hidden <= 0:
+        return ""
+    for card in cards:
+        url = _handoff_link(getattr(card, "permalink", ""))
+        if url:
+            return f"（表示していない{hidden}件は 〔<{url}|次の1件を開く>〕）"
+    return ""
 
 
 def _handoff_header_line(shown: int, total: int, truncated: bool, summary: str) -> str:
@@ -553,6 +602,12 @@ def _slack_handoff_lines(digest: Any) -> list[str]:
         )
         lines.append("")
         lines.append(f"{emoji} *{head}*")
+        # shown はカード列の先頭ぶん、カード列はバケット順に並んでいる＝表示された cards は
+        # 必ず cards_in(bucket) の先頭。残りはその続き（この前提が崩れたら導線も崩れる）。
+        rest = list(triaged.cards_in(bucket))[len(cards) :]
+        hidden_line = _handoff_hidden_line(rest, counts[bucket] - len(cards))
+        if hidden_line:
+            lines.append(hidden_line)
         for card in cards:
             lines.append(_handoff_card_line(card, items[card.source_index], names, known_ids))
             if card.note:  # 補足行は「原文を見る価値が本当にある件」だけ（判定層が印を付ける）
@@ -613,7 +668,13 @@ def _slack_handoff_card_blocks(digest: Any) -> list[dict[str, Any]]:
             if counts[bucket] == len(cards)
             else f"{label}（{counts[bucket]}件中{len(cards)}件を表示）"
         )
+        # shown はカード列の先頭ぶん、カード列はバケット順に並んでいる＝表示された cards は
+        # 必ず cards_in(bucket) の先頭。残りはその続き（この前提が崩れたら導線も崩れる）。
+        rest = list(triaged.cards_in(bucket))[len(cards) :]
+        hidden_line = _handoff_hidden_line(rest, counts[bucket] - len(cards))
         pending_head: str | None = f"{emoji} *{head}*"
+        if hidden_line:
+            pending_head += f"\n{hidden_line}"
         for card in cards:
             body = _handoff_card_line(card, items[card.source_index], names, known_ids)
             if card.note:

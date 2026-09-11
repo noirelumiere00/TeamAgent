@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -72,6 +73,9 @@ _MAX_TOPIC_LEN = 24
 #: 依頼文をそのまま見出しに出せる最大長（型が判らなかったときの逐語フォールバック）。
 _MAX_QUOTE_HEADLINE_LEN = _MAX_TOPIC_LEN * 2
 
+#: 依頼文が取れなかったときに、相手の本文の冒頭一文を見出しへ出せる最大長。
+_MAX_BODY_HEADLINE_LEN = 40
+
 # ── 畳んだ理由（固定文言・ここでしか作らない）──────────────────────────────────
 REASON_ANSWERED_BY_OTHER = "他の人が先に答えています"
 REASON_CLOSED = "この件は終了と書かれています"
@@ -82,7 +86,39 @@ REASON_AMBIGUOUS_ADDRESSEE = "他{count}名も名指しで、あなた宛の依�
 # ── 補足行（固定文言・「原文を見る価値が本当にある件」だけに付ける）──────────────
 NOTE_DUE_UNRESOLVED = "原文の日付と曜日が食い違うため、期限は空欄にしています"
 NOTE_BODY_TRUNCATED = "本文が途中で切れており、未取得の部分があります"
-NOTE_NO_REQUEST = "依頼文を特定できませんでした"
+
+#: 依頼文も手掛かりの一文も取れなかったときの見出し（**利用者の視点**で書く）。
+#:
+#: 旧実装は「返信する」と断定しつつ補足行で「依頼文を特定できませんでした」と言っており、
+#: 同じ 1 件の中で矛盾していた（2026-09-11 実物 D3）。「原文を見る」も **Aico の動作**で
+#: あって利用者の用件ではないので出さない（同 D4）。読めなかったことは見出し側で 1 回だけ
+#: 名乗り、補足行では繰り返さない。
+HEADLINE_NO_REQUEST = "用件を読み取れませんでした"
+
+# ── 入口の正規化（表記ゆれを判定と表示の前に 1 か所で吸収する）─────────────────
+
+#: 制御文字（改行・タブは空白圧縮側で潰す）。表示にも判定にも意味が無いので落とす。
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+#: 連続する空白（半角・全角・タブ・改行）。
+_WHITESPACE_RE = re.compile(r"[\s　]+")
+
+
+def normalize_text(text: str) -> str:
+    """表記ゆれを吸収する入口の正規化（**NFKC → 制御文字除去 → 空白圧縮** の順）。
+
+    NFKC が半角カナ読点 ``､`` を ``、`` へ、半角カナ・全角英数を通常形へ倒す。実物
+    「今後の新体制 にともない､見直し 必要でしょうか」はこれを通さないと読点で文が割れず、
+    連続空白もそのまま見出しへ流れていた（2026-09-11 実物 D2）。
+
+    ⚠️ **NFKC は「Slack マークアップとして解釈されうる文字を潰す処理」より必ず前**に置く。
+    NFKC は全角記号を半角へ倒すので、後ろに置くと本文の ``＜`` が escape をすり抜けてから
+    ``<`` へ戻り、無害化を貫通する（描画側 ``_handoff_display`` も同じ順序で固定してある）。
+    """
+    s = unicodedata.normalize("NFKC", str(text or ""))
+    s = _CONTROL_RE.sub("", s)
+    return _WHITESPACE_RE.sub(" ", s).strip()
+
 
 # ── 正規表現辞書 ────────────────────────────────────────────────────────────
 
@@ -186,12 +222,28 @@ _TAIL_STRIP_PATTERNS: tuple[re.Pattern[str], ...] = (
 #: 助詞 + 漢字1字で終わる＝て形の動詞を途中で切った痕跡（「見積を出」「資料を送」）。
 _DANGLING_STEM_RE = re.compile(r"[をにへ][一-龥]$")
 
-#: 話題の末尾がこの形なら **名詞句として使えない**（条件節・否定・活用の途中）。
-#: 固定語尾（「〜を確認」）を足すと日本語が壊れるので、話題ごと捨てて定型文言へ落とす
-#: （長すぎる話題を切り詰めずに捨てるのと同じ扱い＝途中で切って捏造しない）。
+#: 話題の末尾がこの形なら **名詞句として使えない**（条件節・否定・活用の途中・述語）。
+#: 固定語尾（「〜を確認」「〜を返す」）を足すと日本語が壊れるので、話題ごと捨てて定型文言
+#: へ落とす（長すぎる話題を切り詰めずに捨てるのと同じ扱い＝途中で切って捏造しない）。
+#:
+#: ⚠️ ここは「**を＋動詞** を接続できない末尾」の辞書であって、意味の辞書ではない。
+#: 実物「この後のMTGリスケでもよいでしょうか？」は `でもよい` が残って
+#: 「この後のMTGリスケでもよい**を返す**」になり、「見直し 必要」は「必要**を返す**」に
+#: なっていた（2026-09-11 実物 D1・D2）。い形容詞・名詞述語・助動詞をここへ足して、
+#: **新しい述語を作らない**（定型文言へ落とす）方針のまま接続だけを安全にする。
 _UNUSABLE_TOPIC_TAIL_RE = re.compile(
-    r"(?:たら|れば|なら|ので|のに|から|けれど|けど|ながら|つつ|ないで|ない|ません|ます"
-    r"|です|して|され|られ|せず|ず|でも|ても|たり|そう|よう|べき)$"
+    r"(?:"
+    # 条件節・接続・活用の途中（従来ぶん）
+    r"たら|れば|なら|ので|のに|から|けれど|けど|ながら|つつ|ないで|ない|ません|ます"
+    r"|です|して|され|られ|せず|ず|でも|ても|たり|そう|よう|べき"
+    # い形容詞（「よいを返す」が作れてしまう形）。`たい` は希望の助動詞。
+    r"|よい|良い|いい|悪い|無い|多い|少ない|早い|速い|遅い|高い|低い|長い|短い"
+    r"|強い|弱い|欲しい|ほしい|難しい|易しい|正しい|新しい|古い|近い|遠い|たい"
+    # 名詞述語・形容動詞（語幹のままでは「〜を確認」に繋がらない）
+    r"|必要|不要|可能|不可|不明|未定|未確認|同じ|大丈夫|困難|重要|急ぎ|至急"
+    # 助動詞・終助詞
+    r"|だ|である|でしょう|ましょう|かも|はず|つもり|そうです|らしい"
+    r")$"
 )
 
 #: 話題の末尾から落とす飾り（「〜の件」等）。
@@ -516,8 +568,11 @@ def extract_topic_and_context(sentence: str) -> tuple[str, str]:
     「日付だけではない最後の断片」を話題に採る → ③その 1 つ手前の断片を文脈に採る
     （「NTVカードの受け渡しの件、来社日を教えて」→ 話題「来社日」／文脈「NTVカードの受け渡し」）。
     ④「〜の件」等の飾りを落とす。**どちらも逐語の切り出しで、要約はしない。**
+
+    ⓪ その手前に :func:`normalize_text`（NFKC＋空白圧縮）を通す。半角カナ読点 ``､`` の
+    ままだと読点で割れず、連続空白がそのまま見出しへ出る（実物 D2）。
     """
-    s = _strip_request_tail(sentence)
+    s = _strip_request_tail(normalize_text(sentence))
     s = _strip_mentions(s).strip()
     segments = [x.strip() for x in re.split(r"[、，,]", s) if x.strip()]
     if not segments:
@@ -539,6 +594,27 @@ def extract_topic_and_context(sentence: str) -> tuple[str, str]:
 def extract_topic(sentence: str) -> str:
     """:func:`extract_topic_and_context` の話題だけを返す薄いラッパ。"""
     return extract_topic_and_context(sentence)[0]
+
+
+def headline_from_body(text: str) -> str:
+    """依頼文が取れなかったとき、**相手の直近メッセージの冒頭一文**を見出しに使う。
+
+    依頼文として選ばれなかっただけで、用件の手掛かりにはなる。「返信する」と断定するのも
+    「原文を見る」と Aico の動作を出すのも、利用者にとっては何の件か分からない（実物 D3・D4）。
+
+    挨拶だけの文は飛ばす（:data:`_PLEASANTRY_RE`）。``40`` 字を超える一文は末尾を ``…`` に
+    して切る。**切ったことが見える切り方**であって、原文に無い述語を足す捏造とは別問題
+    （固定語尾を接いで文を作らないという既存方針は変えていない）。
+    手掛かりが 1 文も取れなければ :data:`HEADLINE_NO_REQUEST`。
+    """
+    for raw in sentences(normalize_text(text)):
+        bare = _strip_mentions(raw).strip(" 　").rstrip("。．！!？?、，,").strip()
+        if not bare or _PLEASANTRY_RE.match(bare):
+            continue
+        if len(bare) > _MAX_BODY_HEADLINE_LEN:
+            return bare[: _MAX_BODY_HEADLINE_LEN - 1] + "…"
+        return bare
+    return HEADLINE_NO_REQUEST
 
 
 def _weekday_ja(day: _dt.date) -> str:
@@ -793,8 +869,14 @@ def classify_bucket(
     return (BUCKET_YOURS, "")
 
 
-def build_headline(*, bucket: str, fold_reason: str, kind: str, quote: str, others: int) -> str:
-    """見出しを **固定語彙 × 原文からの切り出し** で組む（自由文生成をしない）。"""
+def build_headline(
+    *, bucket: str, fold_reason: str, kind: str, quote: str, others: int, text: str = ""
+) -> str:
+    """見出しを **固定語彙 × 原文からの切り出し** で組む（自由文生成をしない）。
+
+    ``text`` は相手の直近メッセージ本文。依頼文（``quote``）が取れなかったときの
+    手掛かり（:func:`headline_from_body`）としてだけ使う。
+    """
     if bucket == BUCKET_FYI and fold_reason == REASON_BLOCKED:
         parts = _blocked_parts(quote)
         if parts is not None:
@@ -819,14 +901,19 @@ def build_headline(*, bucket: str, fold_reason: str, kind: str, quote: str, othe
         return f"{topic}は宛先が絞れていない" if topic else "宛先が絞れていない"
 
     # ── あなたの番 ──
+    # 依頼文が取れていない件に kind の既定文言（「返信する」）を断定すると、補足行の
+    # 「依頼文を特定できませんでした」と同じ 1 件の中で矛盾する（実物 D3）。断定せず、
+    # 相手の本文の冒頭一文を手掛かりとして出す（それも無ければ「読み取れなかった」と言う）。
+    if not quote:
+        return headline_from_body(text)
     # 型が判らなかった件に固定語尾（「〜を確認」）を足すと、原文に無い述語を作ってしまう
     # （「請求書だけ送ってください」→「請求書だけを確認」）。型が判らないときは
     # **依頼文をそのまま**出す（宛先トークンだけ落とした逐語）。長すぎるなら定型文言へ。
     if kind == KIND_UNKNOWN:
-        verbatim = _strip_mentions(quote).strip(" 　").rstrip("。．！!？?、，,")
+        verbatim = normalize_text(_strip_mentions(quote)).rstrip("。．！!？?、，,").strip()
         if verbatim and len(verbatim) <= _MAX_QUOTE_HEADLINE_LEN:
             return verbatim
-        return topic or "原文を見る"
+        return topic or headline_from_body(text)
     if not topic:
         return {
             KIND_TAKEOVER: "作業の引き取りを返す",
@@ -842,14 +929,17 @@ def build_headline(*, bucket: str, fold_reason: str, kind: str, quote: str, othe
     return f"{topic}を確認"
 
 
-def build_note(*, bucket: str, due: DueResolution, body_truncated: bool, quote: str) -> str:
-    """補足行。**「原文を見る価値が本当にある件」だけ**（既定は空）。"""
+def build_note(*, due: DueResolution, body_truncated: bool) -> str:
+    """補足行。**「原文を見る価値が本当にある件」だけ**（既定は空）。
+
+    「依頼文を特定できませんでした」は **出さない**。見出し側（:func:`headline_from_body`）が
+    手掛かりの一文か :data:`HEADLINE_NO_REQUEST` を既に出しており、補足行で重ねると
+    「返信する ／ 依頼文を特定できませんでした」のような自己矛盾になる（実物 D3）。
+    """
     if due.unresolved:
         return NOTE_DUE_UNRESOLVED
     if body_truncated:
         return NOTE_BODY_TRUNCATED
-    if bucket == BUCKET_YOURS and not quote:
-        return NOTE_NO_REQUEST
     return ""
 
 
@@ -888,11 +978,20 @@ def build_card(
         src, quote=quote, due=due_for_fold, others=others, today=today
     )
     headline = build_headline(
-        bucket=bucket, fold_reason=fold_reason, kind=kind, quote=quote, others=others
+        bucket=bucket,
+        fold_reason=fold_reason,
+        kind=kind,
+        quote=quote,
+        others=others,
+        text=src.text,
     )
     date_chip = due.label
     # 見出しが既にその日付を含んでいるなら chip では繰り返さない（1 件 1 行・重複させない）。
-    if due.source_text and (due.source_text in headline or format_date_ja_in(headline, due)):
+    # ⚠️ 見出しは NFKC 済み・``due.source_text`` は原文逐語なので、突合は正規化して行う
+    #    （全角数字の「８/２８」が見出しでは「8/28」になり、素の in が外れる）。
+    if due.source_text and (
+        normalize_text(due.source_text) in headline or format_date_ja_in(headline, due)
+    ):
         date_mention_chip = ""
     else:
         date_mention_chip = date_chip
@@ -930,7 +1029,7 @@ def build_card(
         # 畳んだ件に「あなたの作業」は無いので所要時間も出さない。
         effort_label=effort_for_kind(kind) if bucket == BUCKET_YOURS else "",
         mentioned_others=others,
-        note=build_note(bucket=bucket, due=due, body_truncated=truncated, quote=quote),
+        note=build_note(due=due, body_truncated=truncated),
         fold_reason=fold_reason,
         permalink=src.permalink or "",
         from_display_name=src.from_display_name,
@@ -966,13 +1065,13 @@ __all__ = [
     "BUCKET_YOURS",
     "CHANNEL_LABELS",
     "EFFORT_BY_KIND",
+    "HEADLINE_NO_REQUEST",
     "KIND_REPLY",
     "KIND_SCHEDULE",
     "KIND_TAKEOVER",
     "KIND_UNKNOWN",
     "NOTE_BODY_TRUNCATED",
     "NOTE_DUE_UNRESOLVED",
-    "NOTE_NO_REQUEST",
     "REASON_AMBIGUOUS_ADDRESSEE",
     "REASON_ANSWERED_BY_OTHER",
     "REASON_BLOCKED",
@@ -998,8 +1097,10 @@ __all__ = [
     "extract_topic_and_context",
     "format_date_ja",
     "format_date_ja_in",
+    "headline_from_body",
     "is_closed_declaration",
     "is_deadline_context",
+    "normalize_text",
     "resolve_due",
     "sentences",
     "sort_key",
