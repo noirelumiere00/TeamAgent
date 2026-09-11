@@ -30,7 +30,7 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # media-apk.lock / Dockerfile の ARG / core_media 契約 / 世代 inputs の 4 つは更新した一方、
 # 本定数だけ取り残されて dev tip が赤のままになっていた（3 者一致の不変条件が片肺）。
 # 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
-APK_LOCK_SHA256 = "dbc64a58969d4dd87500216c10d052e4800cf37163e30af330784bd1a026090f"
+APK_LOCK_SHA256 = "4978f9bba8526955f4a6860601dad3b96fa1cfab13147f62b011cd213aeed9c4"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -112,6 +112,58 @@ def test_apk_inventory_is_exact_and_hash_pinned() -> None:
     assert "--mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/edge" in TEXT
     assert "https://dl-cdn.alpinelinux.org/alpine/v3.24" in TEXT
+
+
+def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
+    """base 同梱物の CVE は「例外」ではなく修正版の明示 pin で塞ぐ。
+
+    apk add は要求が無い限り base 同梱物を上げない（2026-09-01 便γ の openssl/expat
+    で実証済み）。そのため CVE を踏んだ同梱パッケージは名指しで pin する必要がある。
+
+    2026-09-11: mcp 便 r20 の段3 が media の ECR 脆弱性ゲートで停止した
+    （util-linux 2.42.1-r0 に対する unapproved finding 5 件 = CVE-2026-27456 MEDIUM
+    ＋ CVE-2026-76642 / 78408 / 78409 / 78410 HIGH）。ECR は origin 名 "util-linux" で
+    報告するが、最終イメージに実在するのは副パッケージ 3 つ（libblkid / libmount /
+    libuuid）だけで、いずれも chromium→glib→so:libmount.so.1→so:libblkid.so.1 と
+    libxt→libsm→so:libuuid.so.1 の依存なので削除は不可。Alpine secdb（v3.24 main）は
+    2.42.3-r0 で 27456/76642/78409/78410 を、2.42.3-r1 で 78408 を fixed としている。
+    HIGH を期限付き例外へ逃がさないための封印なので、pin を外したらここが赤くなる。
+    """
+    fixed = {
+        "LIBBLKID_PACKAGE_VERSION": ("libblkid", "2.42.3-r1"),
+        "LIBMOUNT_PACKAGE_VERSION": ("libmount", "2.42.3-r1"),
+        "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),
+        "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.8-r0"),
+        "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.4-r0"),
+        "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.8-r0"),
+    }
+    lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
+    for arg, (package, version) in fixed.items():
+        assert f"ARG {arg}={version}" in TEXT, f"{package} の修正版 pin が無い"
+        assert f'"{package}=${arg}"' in TEXT, f"{package} が apk add の明示 pin に無い"
+        assert f"{package}-{version}" in lock, f"{package} の実版が lock と食い違う"
+    # 便 r20 で踏んだ 5 件は、根拠として Dockerfile に残す（例外レジストリではなく pin で解消）。
+    for cve in (
+        "CVE-2026-27456",
+        "CVE-2026-76642",
+        "CVE-2026-78408",
+        "CVE-2026-78409",
+        "CVE-2026-78410",
+    ):
+        assert cve in TEXT
+    # 旧版が lock に残っていたら pin が効いていない。
+    assert not [line for line in lock if line.endswith("-2.42.1-r0")]
+
+
+def test_high_severity_findings_are_never_parked_in_the_media_exception_registry() -> None:
+    """HIGH/CRITICAL は期限付き例外にせずバンプで直す（MEDIUM 以下のみ例外可）。"""
+    registry = json.loads(
+        (ROOT / "infra/codebuild/ecr_scan_exceptions_media.json").read_text(encoding="utf-8")
+    )
+    for entry in registry.get("exceptions", []):
+        assert entry.get("severity") not in {"HIGH", "CRITICAL"}, entry
+        # util-linux の 5 件は pin で解消済み。例外へ逃がし直したらここで落ちる。
+        assert "util-linux" != entry.get("package_name")
 
 
 def test_python_and_js_playwright_are_same_exact_version_and_hashed() -> None:

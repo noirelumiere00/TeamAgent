@@ -375,11 +375,10 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_core_media_release_contract.json",
-      "infra/codebuild/teamagent_runtime_contract.json"
+      "infra/codebuild/teamagent_core_media_release_contract.json"
     ],
-    "reason": "Chainguard python ベース（builder/runtime の arm64 digest）を 3.14.7-r1→r6 へバンプし、CVE-2026-15806（MEDIUM・PR #378 で 2026-09-17 期限の ECR 例外として通していたもの）を根治する。python バイナリ実体が変わるため release 契約の core binary.python.sha256 probe と runtime 契約の base digest を同時に更新する必要があり、世代 publish（Wave7）を強制する。publish 儀式（S3 append→UpdateProject→IAM ピン）とセットで実施する。",
-    "gate": "human gate 2026-09-04（ユーザー明示承認: scope_paths を core_media 契約 + runtime 契約の 2 path へ拡大することを承認）",
+    "reason": "media base(v3.24) 同梱の util-linux 系 3 パッケージ（libblkid / libmount / libuuid = 2.42.1-r0）を修正版 2.42.3-r1 へ明示 pin し、CVE-2026-27456（MEDIUM）と CVE-2026-76642 / CVE-2026-78408 / CVE-2026-78409 / CVE-2026-78410（HIGH 4件）を根治する。media-apk.lock の 3 行が動くため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避で、世代 publish（Wave8）を強制する。HIGH は期限付き例外にせずバンプで直すという既存規律に従い、ecr_scan_exceptions_media.json は触らない。publish 儀式（S3 append→UpdateProject→IAM ピン）は本 PR のスコープ外（admin CLI）。",
+    "gate": "human gate 2026-09-11（ユーザー指示: mcp 便 r20 段3 で media が util-linux 5 CVE の ECR ゲートに落ちた件を「HIGH は例外にせずバンプで直す」方針で解消し draft PR を作ること。scope_paths は本 PR の変更集合ちょうど＝core_media 契約 1 path へ絞り込み済み。draft のままで、merge 前に本宣言そのものの承認を要する）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
