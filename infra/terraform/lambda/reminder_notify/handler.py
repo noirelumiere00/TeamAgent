@@ -4,7 +4,21 @@ EventBridge Scheduler が「予定開始 N 分前」に SQS へ投げた payload
 本人の Slack DM へ chat.postMessage する。stdlib + boto3 のみ（依存パッケージ無し）。
 
 payload（adapters/scheduler_client.py が唯一の生成元）:
-  {"v": 1, "channel": "D…", "start_hm": "14:00", "url": "https://…", "title": "定例MTG"}
+  リマインド: {"v": 1, "channel": "D…", "start_hm": "14:00", "url": "https://…", "title": "定例MTG"}
+  朝ダイジェスト: {"v": 1, "kind": "digest", "user_ref": "<不可逆hash>", "date": "YYYY-MM-DD"}
+
+kind=digest の分岐（個人別配信時刻・DELTA §1）:
+  新しい Lambda は作らない。既存の発火経路にここで 1 分岐足し、morning-digest の
+  ECS Scheduled Task を **その 1 人分だけ** RunTask する（digest 本体は Fargate 側の
+  scripts/run_morning_digest_fargate.py が既存のまま実行する）。
+  ⚠️ payload に channel は入っていない。宛先は Fargate 側が user_ref → 本人 email →
+  users.lookupByEmail → conversations.open で **解決し直す**（Scheduler 由来の値を
+  宛先として信用する経路を作らない）。
+  ⚠️ user_ref は不可逆 hash。ここでは形式検証だけして env としてそのまま渡す
+  （Lambda はメールアドレスを一度も見ない）。
+  必要な env（未設定なら何もせず skip＝既定 OFF）:
+    DIGEST_CLUSTER_ARN / DIGEST_TASK_DEFINITION_ARN / DIGEST_SUBNET_IDS /
+    DIGEST_SECURITY_GROUP_IDS / DIGEST_CONTAINER_NAME
 
 設計:
   - batch_size=1（部分失敗の複雑さを持たない）。失敗は raise → SQS リトライ → DLQ
@@ -60,10 +74,73 @@ def _post_message(channel: str, text: str) -> None:
         raise RuntimeError(f"slack post failed: {payload.get('error', 'unknown')}")
 
 
+_USER_REF_LEN = 32
+
+
+def _run_single_user_digest(body: dict[str, Any]) -> bool:
+    """kind=digest: morning-digest task を 1 人分だけ起動する。
+
+    戻り値は「起動した」か。env 未設定・payload 不正は False（何もしない）。
+    """
+    user_ref = str(body.get("user_ref") or "").strip().lower()
+    date = str(body.get("date") or "").strip()
+    # 形式検証（fail-closed）。hex 32 桁・YYYY-MM-DD 以外は捨てる。
+    if len(user_ref) != _USER_REF_LEN or any(c not in "0123456789abcdef" for c in user_ref):
+        print(json.dumps({"event": "digest_skip_invalid", "reason": "bad_user_ref"}))
+        return False
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        print(json.dumps({"event": "digest_skip_invalid", "reason": "bad_date"}))
+        return False
+
+    cluster = os.environ.get("DIGEST_CLUSTER_ARN", "").strip()
+    task_def = os.environ.get("DIGEST_TASK_DEFINITION_ARN", "").strip()
+    subnets = [s for s in os.environ.get("DIGEST_SUBNET_IDS", "").split(",") if s.strip()]
+    groups = [g for g in os.environ.get("DIGEST_SECURITY_GROUP_IDS", "").split(",") if g.strip()]
+    container = os.environ.get("DIGEST_CONTAINER_NAME", "morning-digest").strip()
+    if not (cluster and task_def and subnets and groups):
+        # 既定 OFF: 個人別配信が点いていない環境では何もしない（予約自体も作られない）。
+        print(json.dumps({"event": "digest_skip_disabled"}))
+        return False
+
+    import boto3
+
+    boto3.client("ecs").run_task(
+        cluster=cluster,
+        taskDefinition=task_def,
+        launchType="FARGATE",
+        count=1,
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": subnets,
+                "securityGroups": groups,
+                "assignPublicIp": "ENABLED",
+            }
+        },
+        overrides={
+            "containerOverrides": [
+                {
+                    "name": container,
+                    "environment": [
+                        {"name": "MORNING_DIGEST_MODE", "value": "single"},
+                        {"name": "MORNING_DIGEST_USER_REF", "value": user_ref},
+                        {"name": "MORNING_DIGEST_DATE", "value": date},
+                    ],
+                }
+            ]
+        },
+    )
+    # ⚠️ user_ref も date も出さない（ログから個人を追えないようにする）。件数だけ。
+    print(json.dumps({"event": "digest_task_started"}))
+    return True
+
+
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     records = event.get("Records") or []
     for record in records:
         body = json.loads(record["body"])
+        if str(body.get("kind") or "") == "digest":
+            _run_single_user_digest(body)
+            continue
         channel = str(body.get("channel") or "")
         if not channel.startswith("D"):
             # DM channel（D…）以外へは投稿しない（defense-in-depth・レビュー L1）。

@@ -926,6 +926,9 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
     _push_slack_handoff(blocks, digest)
     blocks.append({"type": "divider"})
 
+    # --- 📌 本日の社外MTG 事例ブリーフ（既定OFF・節ごと消える設計）---
+    _push_brief_section(blocks, digest)
+
     # --- 📅 当日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
     # 見出しは「今日」ではなく実日付を出す（2026-08-20 の日付ずれで「今日」表記が誤りを
     # 隠したため。行側も対象日と違う予定には日付を前置する）。
@@ -1106,6 +1109,9 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     _push_slack_handoff(blocks, digest)
     blocks.append({"type": "divider"})
 
+    # --- 📌 本日の社外MTG 事例ブリーフ（既定OFF・節ごと消える設計）---
+    _push_brief_section(blocks, digest)
+
     # --- 📅 当日の予定（最大10件・1行形式は旧描画と共通・見出しは実日付）---
     if cal_items:
         lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
@@ -1179,6 +1185,43 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         )
     blocks.extend(tail)
     return text, blocks
+
+
+def _push_brief_section(blocks: list[dict[str, Any]], digest: Any) -> None:
+    """📌 事例ブリーフ節を積む（**このセクションだけの fail-safe**）。
+
+    - 事例集が未取込 / 走査できていない → ``render_brief_lines`` が空を返す＝節ごと出ない
+      （「事例集が未取込のためスキップしました」を毎朝 29 名へ送るのは「できません」の
+      定期配信になるため、運用ログにだけ落とす）
+    - 社外 0 件 → ``📌 本日は社外MTGなし`` の 1 行（予定が無い日と区別できる）
+    - 例外 → 何も積まない（📅/📧 は通常配信）
+    """
+    from teamagent.skills.pre_meeting_brief.render import render_brief_lines
+
+    brief = getattr(digest, "pre_meeting_brief", None)
+    if brief is None:
+        return
+    try:
+        lines = render_brief_lines(
+            brief,
+            _digest_date(digest),
+            early_notice=_early_notice_enabled(),
+        )
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: brief 描画失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return
+    if not lines:
+        return
+    _push_section_lines(blocks, [_guard_no_raw_ids(ln) for ln in lines])
+    blocks.append({"type": "divider"})
+
+
+def _early_notice_enabled() -> bool:
+    """送信時刻が下限 06:00 に張り付いた回か（planner が env で印を渡す）。"""
+    return os.environ.get("MORNING_DIGEST_EARLY_NOTICE", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _reminders_enabled() -> bool:
@@ -1326,18 +1369,214 @@ async def _open_im_channel(slack: Any, user_id: str) -> str | None:
         return None
 
 
-def _process_user(skill: Any, skill_input: Any, email: str) -> str:
+# ===========================================================================
+# 個人別配信時刻（DELTA §1）— planner / 単独利用者モード / 二重配信の防止
+# ===========================================================================
+# 全体像:
+#   04:00 JST  planner モード（本スクリプトを --mode=planner で起動）
+#              → 連携済み利用者ごとに当日カレンダーを読み、送信時刻を決めて
+#                EventBridge Scheduler（既存のリマインドと同じ group）へ 1 回きりの
+#                予約 digest-<user_ref>-<YYYYMMDD> を作る
+#   各人の時刻  予約が SQS へ → 既存 reminder_notify Lambda の kind=digest 分岐が
+#              本スクリプトを ECS RunTask で **その 1 人分だけ** 起動
+#   既定時刻    従来どおりの一括実行。ただし「その日すでに送った人」は必ず除外する
+#
+# 既定 OFF: MORNING_DIGEST_PERSONALIZED が未設定なら planner は 1 件も予約せず、
+# 一括実行は claim を 1 度も呼ばない＝現行動作と 1 バイトも変わらない。
+
+
+def _personalized_enabled() -> bool:
+    """個人別配信（予約＋二重配信防止）を使うか。既定 OFF。"""
+    return os.environ.get("MORNING_DIGEST_PERSONALIZED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _default_send_hhmm() -> tuple[int, int]:
+    """上限＝現行の既定時刻。``MORNING_DIGEST_DEFAULT_TIME``（HH:MM）・既定 09:30。"""
+    from teamagent.skills.morning_digest.send_window import parse_hhmm
+
+    return parse_hhmm(os.environ.get("MORNING_DIGEST_DEFAULT_TIME"), (9, 30))
+
+
+def _read_only_calendar(token_store: Any, email: str) -> Any | None:
+    """本人トークンから **読み取り専用 facade** を作る（GCalendarClient を外へ出さない）。"""
+    from teamagent.adapters.gcalendar_client import GCalendarClient
+    from teamagent.adapters.gcalendar_readonly import ReadOnlyCalendar
+
+    try:
+        token = token_store.get(email) if token_store is not None else None
+    except Exception:
+        token = None
+    if token is None:
+        return None
+    try:
+        return ReadOnlyCalendar(GCalendarClient.from_user_token(token))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: {_mask_email(email)} calendar 構築失敗 "
+            f"{type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _plan_send_time(calendar: Any, day: _dt.date, request_id: str) -> Any:
+    """当日の最初の「時刻つき」予定から送信時刻を決める（終日は除外）。"""
+    from teamagent.skills.morning_digest.send_window import compute_send_time, first_timed_start
+
+    window_start = _dt.datetime.combine(day, _dt.time.min, tzinfo=_JST)
+    window_end = window_start + _dt.timedelta(days=1)
+    events = calendar.list_events(
+        request_id,
+        time_min=window_start.isoformat(),
+        time_max=window_end.isoformat(),
+        max_results=100,
+    )
+    starts = [
+        str(getattr(ev, "start", "") or "")
+        # ⚠️ 終日予定は「最初の予定」の計算から除外（終日だけの日は予定なし扱い）。
+        for ev in events
+        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start", "") or "")
+    ]
+    return compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
+
+
+def run_planner(users: list[str]) -> int:
+    """04:00 JST の planner。利用者ごとに 1 回きりの配信予約を作る。
+
+    - 予約が作れなかった / カレンダー未連携の人は **何もしない**＝既定時刻の一括実行に残る
+      （現行動作の維持）。
+    - 予約名は決定的なので planner を再実行しても当日分を作り直さない（冪等）。
+    - Scheduler への書込は **既存のリマインド生成が持つ権限経路だけ** を使う
+      （skill 側には書込権限を渡さない）。
+    """
+    from teamagent.adapters.scheduler_client import SchedulerClient
+    from teamagent.digest_user_ref import digest_schedule_name, user_ref
+
+    if not _personalized_enabled():
+        print("[run_morning_digest_fargate] planner: disabled (default OFF)", flush=True)
+        return 0
+    try:
+        scheduler = SchedulerClient.from_env()
+    except ValueError as exc:
+        print(f"[run_morning_digest_fargate] planner: 設定不備 {exc}", file=sys.stderr)
+        return 0
+    token_store = _build_token_store()
+    day = _dt.datetime.now(tz=_JST).date()
+    day_compact = day.strftime("%Y%m%d")
+    planned = 0
+    skipped = 0
+    for email in users:
+        request_id = f"digest-plan-{uuid.uuid4().hex[:8]}"
+        calendar = _read_only_calendar(token_store, email)
+        if calendar is None:
+            skipped += 1
+            continue
+        try:
+            plan = _plan_send_time(calendar, day, request_id)
+        except Exception as exc:
+            print(
+                f"[run_morning_digest_fargate] WARN: {_mask_email(email)} planner 失敗 "
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+            )
+            skipped += 1
+            continue
+        ref = user_ref(email)
+        if not ref:
+            skipped += 1
+            continue
+        ok = scheduler.schedule_digest(
+            name=digest_schedule_name(ref, day_compact),
+            user_ref=ref,
+            date_iso=day.isoformat(),
+            fire_at=plan.fire_at,
+            request_id=request_id,
+        )
+        if ok:
+            planned += 1
+        else:
+            skipped += 1
+    # ⚠️ 件数のみ。メールアドレス・予定タイトル・時刻の個人分布は出さない。
+    print(
+        f"[run_morning_digest_fargate] planner done "
+        f"{json.dumps({'users': len(users), 'planned': planned, 'skipped': skipped})}",
+        flush=True,
+    )
+    return 0
+
+
+def _resolve_single_user(users: list[str]) -> str | None:
+    """``MORNING_DIGEST_USER_REF`` を連携済み利用者へ解決する（fail-closed）。
+
+    ⚠️ Scheduler / SQS 由来の値を宛先として信用しない。ペイロードに channel は入って
+    おらず、ここで解決した email から配信側が本人 DM を **解決し直す**。
+    """
+    from teamagent.digest_user_ref import resolve_user_ref
+
+    ref = os.environ.get("MORNING_DIGEST_USER_REF", "").strip()
+    if not ref:
+        return None
+    email = resolve_user_ref(ref, users)
+    if email is None:
+        print("[run_morning_digest_fargate] WARN: user_ref 未解決（配信しない）", file=sys.stderr)
+    return email
+
+
+def _digest_day() -> _dt.date:
+    """対象日（``MORNING_DIGEST_DATE`` があればそれ・無ければ JST の今日）。"""
+    raw = os.environ.get("MORNING_DIGEST_DATE", "").strip()
+    if raw:
+        parsed = _calwin.parse_jst_date(raw)
+        if parsed is not None:
+            return parsed
+    return _dt.datetime.now(tz=_JST).date()
+
+
+def _delivery_store() -> Any | None:
+    """二重配信を止める claim ストア（個人別配信が OFF なら None＝現行動作のまま）。"""
+    if not _personalized_enabled():
+        return None
+    from teamagent.adapters.digest_delivery_store import DigestDeliveryStore
+
+    return DigestDeliveryStore()
+
+
+def _process_user(
+    skill: Any,
+    skill_input: Any,
+    email: str,
+    *,
+    store: Any | None = None,
+    day: _dt.date | None = None,
+    origin: str = "bulk",
+) -> str:
     """1 ユーザー分を処理し "delivered"/"skipped"/"error" を返す（例外は内側で封じ込め）。
 
     スレッドから呼ぶため副作用は print（stderr・マスク済）と Slack 配信のみ・共有状態を書かない。
+
+    ``store`` を渡すと **その日の配信権を DB の一意制約で 1 回だけ取る**（二重配信の防止）。
+    - 取れなければ "skipped"（既に別経路が送っている／障害で確認できない＝fail-closed）
+    - 配信に失敗したら印を戻す（次の経路に再挑戦させる）
+    ⚠️ 例外を「たぶん送ってよい」側に倒さないこと。倒すと 29 名に 2 通届く。
     """
     from teamagent.skills.base import SkillContext
 
     request_id = f"morning-{uuid.uuid4().hex[:10]}"
+    target_day = day or _dt.datetime.now(tz=_JST).date()
+    if store is not None and not store.claim(
+        email, target_day, origin=origin, request_id=request_id
+    ):
+        return "skipped"
     ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
     try:
         digest = skill.run(skill_input, ctx)
     except PermissionError:
+        if store is not None:
+            store.release(email, target_day, request_id=request_id)
         return "skipped"  # 未連携
     except Exception as exc:
         print(
@@ -1345,6 +1584,8 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
             f"{type(exc).__name__}",
             file=sys.stderr,
         )
+        if store is not None:
+            store.release(email, target_day, request_id=request_id)
         return "error"
     # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
     try:
@@ -1359,6 +1600,8 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
             f"{type(exc).__name__}",
             file=sys.stderr,
         )
+        if store is not None:
+            store.release(email, target_day, request_id=request_id)
         return "error"
     if delivered:
         digest.delivered = True
@@ -1375,7 +1618,29 @@ def _process_user(skill: Any, skill_input: Any, email: str) -> str:
                     file=sys.stderr,
                 )
         return "delivered"
+    if store is not None:
+        # Slack が受け付けなかった（未解決・DM 不可等）＝送れていないので印を戻す。
+        store.release(email, target_day, request_id=request_id)
     return "error"
+
+
+def _mode() -> str:
+    """実行モード: ``bulk``（既定時刻の一括・従来）/ ``planner`` / ``single``。
+
+    ``--mode=planner`` か ``MORNING_DIGEST_MODE=planner`` で planner。
+    ``MORNING_DIGEST_USER_REF`` があれば単独利用者モード（予約発火時）。
+    """
+    for arg in sys.argv[1:]:
+        if arg.startswith("--mode="):
+            value = arg.split("=", 1)[1].strip().lower()
+            if value in ("planner", "single", "bulk"):
+                return value
+    env_mode = os.environ.get("MORNING_DIGEST_MODE", "").strip().lower()
+    if env_mode in ("planner", "single", "bulk"):
+        return env_mode
+    if os.environ.get("MORNING_DIGEST_USER_REF", "").strip():
+        return "single"
+    return "bulk"
 
 
 def main() -> int:
@@ -1384,6 +1649,19 @@ def main() -> int:
     if not users:
         print("[run_morning_digest_fargate] no target users (env+RDS empty)", flush=True)
         return 0
+
+    mode = _mode()
+    if mode == "planner":
+        # 04:00 JST: 予約を作るだけ。digest は 1 通も配信しない。
+        return run_planner(users)
+    if mode == "single":
+        # 予約発火: user_ref を連携済み利用者へ解決し、その 1 人分だけ実行する。
+        resolved = _resolve_single_user(users)
+        if resolved is None:
+            return 0
+        users = [resolved]
+        print("[run_morning_digest_fargate] single-user run", flush=True)
+
     print(f"[run_morning_digest_fargate] start users={len(users)}", flush=True)
 
     from teamagent.skills.morning_digest.schema import MorningDigestInput
@@ -1429,15 +1707,25 @@ def main() -> int:
     max_drafts = min(10, max(0, max_drafts))
     skill_input = MorningDigestInput(max_drafts=max_drafts)
 
+    # 二重配信の防止。既定 OFF（store=None）のときは claim を 1 度も呼ばない＝現行動作。
+    # ⚠️ 既定時刻の一括実行は「その日すでに送った人」を必ず除外する。ここが壊れると
+    #    予約で受け取った人へ 9:30 にもう 1 通届く。
+    store = _delivery_store()
+    day = _digest_day()
+    origin = "scheduled" if mode == "single" else "bulk"
+
+    def _run_one(email: str) -> str:
+        return _process_user(skill, skill_input, email, store=store, day=day, origin=origin)
+
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:
         from concurrent.futures import ThreadPoolExecutor
 
         print(f"[run_morning_digest_fargate] concurrency={concurrency}", flush=True)
         with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            results = list(ex.map(lambda e: _process_user(skill, skill_input, e), users))
+            results = list(ex.map(_run_one, users))
     else:
-        results = [_process_user(skill, skill_input, e) for e in users]
+        results = [_run_one(e) for e in users]
 
     summary = {"users": len(users), "delivered": 0, "skipped": 0, "errors": 0}
     for r in results:

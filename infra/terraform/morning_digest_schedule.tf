@@ -97,6 +97,38 @@ variable "morning_digest_model_id" {
   default     = "jp.anthropic.claude-haiku-4-5-20251001-v1:0"
 }
 
+# ---------- 個人別配信時刻 ＋ 事例ブリーフ（DELTA・いずれも既定 false） ----------
+variable "morning_digest_brief" {
+  description = "朝ダイジェストに「アポ前 事例ブリーフ」節を足す。既定 false。事例集（case_corpus）が金庫に無い間は、true にしても節そのものが出ない（「できません」を毎朝配信しないため）。"
+  type        = bool
+  default     = false
+}
+
+variable "morning_digest_personalized" {
+  description = "朝ダイジェストを「その人の最初の予定の 1 時間前」に個人別配信する。既定 false＝全員これまでどおり既定時刻の一括配信。true にする前に migration 0026（digest_delivery）を適用すること（二重配信の止め口が無いと 1 通も送られない fail-closed になる）。enable_reminders=true が前提（Scheduler group / SQS / Lambda を共用する）。"
+  type        = bool
+  default     = false
+}
+
+variable "morning_digest_default_time" {
+  description = "個人別配信の上限＝現行の既定時刻（HH:MM・JST）。予定が無い日・最初の予定が遅い日はこの時刻のまま。morning_digest_schedule_expression と必ず一致させること。"
+  type        = string
+  default     = "09:30"
+}
+
+variable "digest_user_ref_pepper" {
+  description = "予約ペイロードに載せる user_ref（不可逆 hash）の pepper。空でも動くが、空だとドメイン既知の相手にメールアドレスを総当たりされ得る。本番では必ず設定する。"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "morning_digest_planner_schedule_expression" {
+  description = "planner の EventBridge cron 式（既定: 毎日 19:00 UTC = 翌 04:00 JST）。配信当日の 04:00 に当日カレンダーを読んで予約を作る。"
+  type        = string
+  default     = "cron(0 19 * * ? *)"
+}
+
 variable "morning_digest_schedule_expression" {
   description = "EventBridge cron 式（既定: 平日 0:30 UTC = 9:30 JST）"
   type        = string
@@ -162,6 +194,41 @@ resource "aws_cloudwatch_metric_alarm" "morning_digest_triage_dead" {
   treat_missing_data = "notBreaching"
   alarm_actions      = [aws_sns_topic.alarms.arn]
   ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
+# 事例ブリーフの「静かな死」を拾う専用計。
+# ⚠️ RLS の穴（user_groups を落とす等）を踏んだときの症状は例外ではなく
+# 「社外MTGはあるのに事例が毎朝 0 件で正常終了」＝既存の error alarm には合流しない。
+# 事実（external>0 かつ cases=0）で拾い、1 件から鳴らす。
+resource "aws_cloudwatch_log_metric_filter" "pre_meeting_brief_no_cases" {
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  name           = "${var.project_name}-${var.environment}-pre-meeting-brief-no-cases"
+  pattern        = "{ $.event = \"pre_meeting_brief_done\" && $.cases = 0 && $.external > 0 }"
+
+  metric_transformation {
+    name          = "PreMeetingBriefNoCases"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "pre_meeting_brief_no_cases" {
+  alarm_name        = "${var.project_name}-${var.environment}-pre-meeting-brief-no-cases"
+  alarm_description = "社外MTGはあるのに事例が 0 件（RLS/母集団/取込のいずれかが壊れている疑い）"
+  namespace         = local.metric_namespace
+  metric_name       = "PreMeetingBriefNoCases"
+  statistic         = "Sum"
+  period            = 86400
+  # 1 日の揺らぎ（本当に該当事例が無い日）で鳴らさず、3 日続いたら鳴らす。
+  evaluation_periods  = 3
+  datapoints_to_alarm = 3
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
 }
 
 # ---------- 以降は enable_morning_digest ゲート ----------
@@ -355,6 +422,14 @@ resource "aws_ecs_task_definition" "morning_digest" {
       { name = "REMINDER_SCHEDULER_GROUP", value = var.enable_reminders ? aws_scheduler_schedule_group.reminders[0].name : "" },
       { name = "REMINDER_QUEUE_ARN", value = var.enable_reminders ? aws_sqs_queue.reminders[0].arn : "" },
       { name = "REMINDER_SCHEDULER_ROLE_ARN", value = var.enable_reminders ? aws_iam_role.reminder_scheduler[0].arn : "" },
+      # アポ前 事例ブリーフ（既定OFF）。OFF の間は skill が 1 度も呼ばれない。
+      { name = "MORNING_DIGEST_BRIEF", value = var.morning_digest_brief ? "true" : "false" },
+      # 個人別配信時刻（既定OFF）。OFF の間は claim を 1 度も呼ばず現行動作のまま。
+      # enable_reminders=false のときは Scheduler 基盤が無いので強制 false にする
+      # （予約を作れないのに一括実行だけが claim する状態を作らない）。
+      { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
+      { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
+      { name = "DIGEST_USER_REF_PEPPER", value = var.digest_user_ref_pepper },
     ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([
       { name = "DATABASE_URL", valueFrom = data.aws_secretsmanager_secret.database_url.arn },
@@ -509,6 +584,62 @@ resource "aws_cloudwatch_event_target" "morning_digest_run_task" {
 
   lifecycle {
     prevent_destroy = true
+  }
+}
+
+# ---------- planner（毎日 04:00 JST・当日ぶんの個人別予約を作るだけ） ----------
+# ⚠️ 同じ task definition を command override で起動する（新 Lambda も新 taskdef も作らない）。
+#    planner 実行では digest を 1 通も配信しない（予約を作って終わり）。
+resource "aws_cloudwatch_event_rule" "morning_digest_planner" {
+  count               = var.enable_morning_digest ? 1 : 0
+  name                = "${var.project_name}-${var.environment}-morning-digest-planner"
+  description         = "04:00 JST に当日カレンダーを読み、個人別の配信予約を作る"
+  schedule_expression = var.morning_digest_planner_schedule_expression
+  # 個人別配信が OFF の間はルール自体を DISABLED（走っても即 return するが、
+  # 「点いていないのに毎日タスクが起きる」状態を作らない）。
+  state = (var.enable_reminders && var.morning_digest_personalized) ? "ENABLED" : "DISABLED"
+
+  depends_on = [terraform_data.runtime_guard]
+}
+
+resource "aws_cloudwatch_event_target" "morning_digest_planner_run_task" {
+  count     = var.enable_morning_digest && var.mcp_image != "" ? 1 : 0
+  rule      = aws_cloudwatch_event_rule.morning_digest_planner[0].name
+  target_id = "morning-planner"
+  arn       = aws_ecs_cluster.main.arn
+  role_arn  = aws_iam_role.events_morning_digest_invoke[0].arn
+  input = jsonencode({
+    containerOverrides = [{
+      name    = "morning-digest"
+      command = [local.teamagent_python, "/app/scripts/run_morning_digest_fargate.py", "--mode=planner"]
+    }]
+  })
+
+  depends_on = [
+    terraform_data.runtime_guard,
+    terraform_data.hmac_morning_digest_pre_update,
+  ]
+
+  ecs_target {
+    task_definition_arn = (
+      var.hmac_gate_mode == "rollback"
+      ? local.hmac_rollback_task_definition_arns.morning_digest
+      : aws_ecs_task_definition.morning_digest[0].arn
+    )
+    task_count       = 1
+    launch_type      = "FARGATE"
+    platform_version = "LATEST"
+
+    network_configuration {
+      subnets          = sort(data.aws_subnets.default.ids)
+      security_groups  = [aws_security_group.morning_digest[0].id]
+      assign_public_ip = true
+    }
+  }
+
+  retry_policy {
+    maximum_event_age_in_seconds = 3600
+    maximum_retry_attempts       = 1
   }
 }
 
