@@ -358,17 +358,24 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         return os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 
     @staticmethod
-    def _consume_quota_or_raise(ctx: SkillContext, count: int) -> None:
-        """Gemini 分析を開始する batch 本数を事前消費する（既定OFFなら完全 no-op）。
+    def _reserve_quota(ctx: SkillContext, count: int, *, allow_partial: bool) -> int:
+        """Gemini 分析を開始する batch 本数を事前確保し、**実際に確保できた本数**を返す。
 
         事後消費では並行リクエストが上限をすり抜けるため、失敗試行も含めて開始前に確保する。
         取得失敗後の cover-only 縮退も同じ「分析試行」1本として数える。
+
+        断らずに進める方針:
+          - `allow_partial=True`（＝すでに何本か分析できている波）で残数が足りなければ、
+            **残数に丸めて確保**し、それも無理なら 0 を返して打ち切る（成果は捨てない）。
+          - `allow_partial=False`（1波目＝まだ 1 本も分析していない）で足りなければ、
+            残数と選択肢を書いた文面で raise する（残 0 のときだけ「上限に達しました」）。
+        既定OFF（VIDEO_QUOTA_ENABLED 未設定）なら完全 no-op で count をそのまま返す。
         """
 
-        from teamagent.adapters.quota_store import VideoQuotaStore
+        from teamagent.adapters.quota_store import VideoQuotaStore, quota_block_message
 
         if count <= 0 or not VideoQuotaStore.enabled():
-            return
+            return max(0, count)
         email = str(ctx.metadata.get("user_email", "") or "").strip().lower()
         if not email:
             # quota ON なのに主体不明を allowed no-op にするとコスト上限を迂回できる。
@@ -376,13 +383,33 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             raise RuntimeError(
                 "VIDEO_QUOTA_IDENTITY_REQUIRED: 動画分析クォータの利用者メールを解決できません"
             )
-        result = VideoQuotaStore().try_consume(email, count, request_id=ctx.request_id)
-        if not result.allowed:
-            raise RuntimeError(
-                f"VIDEO_QUOTA_EXCEEDED: 今月の動画分析上限（{result.limit}本）に達しました"
-                f"（使用 {result.used}本）。リセットは来月1日（JST）です。"
-                "お急ぎの場合は管理者に上限引き上げを依頼してください。"
+        store = VideoQuotaStore()
+        result = store.try_consume(email, count, request_id=ctx.request_id)
+        if result.allowed:
+            return count
+        remaining = result.remaining
+        if allow_partial and remaining > 0:
+            # 残数に丸めてもう一度だけ確保を試す（並行消費で外れたらそこで打ち切る）。
+            rounded = store.try_consume(email, remaining, request_id=ctx.request_id)
+            if rounded.allowed:
+                logger.info(
+                    "video_algorithm_quota_rounded",
+                    request_id=ctx.request_id,
+                    requested=count,
+                    reserved=remaining,
+                    limit=result.limit,
+                )
+                return remaining
+        if allow_partial:
+            logger.info(
+                "video_algorithm_quota_truncated",
+                request_id=ctx.request_id,
+                requested=count,
+                remaining=remaining,
+                limit=result.limit,
             )
+            return 0
+        raise RuntimeError(quota_block_message(result))
 
     def _posts_to_metas(self, posts: list[dict[str, Any]]) -> list[VideoMeta]:
         """tiktok_acquire の posts.normalized.json item を VideoMeta へ写像（S3委譲経路）。"""
@@ -1153,15 +1180,22 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # 上位から波状に分析し、成功が target 本に達するか候補が尽きるまで（再検索はしない）
         results: list[AnalyzedVideo] = []
         attempted = 0
+        quota_truncated = False
         while sum(1 for v in results if v.analysis) < target and attempted < len(candidates):
             need = target - sum(1 for v in results if v.analysis)
             batch = candidates[attempted : attempted + need]
-            attempted += len(batch)
             # 事前 consume: DL/Gemini/parse の失敗もコスト試行として数え、上限の並行すり抜けを防ぐ。
             # バックフィル batch もここを通るため、実際に開始した分析本数が台帳へ乗る。
             if assert_lease_owned is not None:
                 assert_lease_owned()
-            self._consume_quota_or_raise(ctx, len(batch))
+            # 1波目（まだ 0 本）で足りなければ残数と選択肢を出して止める＝利用者に選ばせる。
+            # 2波目以降は残数に丸めて進め、0 なら打ち切って**そこまでの成果を返す**。
+            reserved = self._reserve_quota(ctx, len(batch), allow_partial=bool(results))
+            if reserved <= 0:
+                quota_truncated = True
+                break
+            batch = batch[:reserved]
+            attempted += len(batch)
             workers = max(1, min(self._max_workers, len(batch)))
             with ThreadPoolExecutor(max_workers=workers) as ex:
                 results.extend(
@@ -1218,6 +1252,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             model_id=model_id,
             search_volume=input.search_volume,
             kw_set=list(input.kw_set or []),
+            quota_note=(
+                f"今月の残り本数の都合で{len(ok)}本までで止めました"
+                f"（ご依頼は{target}本）。リセットは来月1日（JST）です。"
+                if quota_truncated
+                else None
+            ),
         )
         if result_cache is not None and cache_key is not None and lease is not None:
             # Gemini/横断 synthesis の課金済み core を成果物生成より先に commit する。
@@ -1559,10 +1599,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         volume_line = (
             f"📈 月間検索量(手動実測): {out.search_volume:,}\n" if out.search_volume else ""
         )
+        quota_line = f"ℹ️ {out.quota_note}\n" if out.quota_note else ""
         return (
             f"🔎 *VSEO動画アルゴリズム分析* 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
-            f"{c.summary}{top}\n{volume_line}"
+            f"{c.summary}{top}\n{quota_line}{volume_line}"
             f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。{proposal_lines}\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
         )
