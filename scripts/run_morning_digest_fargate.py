@@ -1205,7 +1205,7 @@ def _push_brief_section(blocks: list[dict[str, Any]], digest: Any) -> None:
         lines = render_brief_lines(
             brief,
             _digest_date(digest),
-            early_notice=_early_notice_enabled(),
+            early_notice=_early_notice(digest),
         )
     except Exception as exc:
         print(
@@ -1219,9 +1219,26 @@ def _push_brief_section(blocks: list[dict[str, Any]], digest: Any) -> None:
     blocks.append({"type": "divider"})
 
 
-def _early_notice_enabled() -> bool:
-    """送信時刻が下限 06:00 に張り付いた回か（planner が env で印を渡す）。"""
-    return os.environ.get("MORNING_DIGEST_EARLY_NOTICE", "").strip().lower() in {"1", "true", "yes"}
+def _early_notice(digest: Any) -> bool:
+    """送信時刻が下限 06:00 に張り付いた回か（＝冒頭に 1 行添える回か）。
+
+    ⚠️ 予約ペイロードにフラグを載せない。発火した側が **planner と同じ純関数**
+    （``compute_send_time``）で計算し直す＝2 箇所が別々の式を持たない。
+    予約発火でない回（既定時刻の一括実行）は常に False（通常どおりの時刻で届いている）。
+    """
+    if _mode() != "single":
+        return False
+    from teamagent.skills.morning_digest.send_window import compute_send_time, first_timed_start
+
+    day = _digest_date(digest)
+    starts = [
+        str(getattr(ev, "start_at", "") or "")
+        # 終日は「最初の予定」の計算から除外（planner と同じ扱い）。
+        for ev in (getattr(digest, "calendar_events", []) or [])
+        if not bool(getattr(ev, "all_day", False)) and "T" in str(getattr(ev, "start_at", "") or "")
+    ]
+    plan = compute_send_time(day, first_timed_start(starts, day), default_hhmm=_default_send_hhmm())
+    return plan.clamped_to_floor
 
 
 def _reminders_enabled() -> bool:

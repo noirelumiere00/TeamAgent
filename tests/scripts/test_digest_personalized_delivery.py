@@ -368,3 +368,51 @@ def test_no_brief_object_renders_nothing(monkeypatch: pytest.MonkeyPatch) -> Non
     digest = MorningDigestOutput(user_email_masked="k***@x.co.jp", calendar_date=DAY.isoformat())
     _text, blocks = mod._format_block_kit_compact(digest, USER)
     assert "アポ前 事例ブリーフィング" not in str(blocks)
+
+
+# ── 下限に張り付いた回の 1 行（ペイロードにフラグを載せない証明）────────
+def _digest_with_first_event(start_iso: str) -> MorningDigestOutput:
+    from teamagent.skills.morning_digest.schema import CalendarEventItem
+
+    digest = _digest_with_brief()
+    digest.calendar_events = [
+        CalendarEventItem(summary_display="朝会", start_at=start_iso, end_at=start_iso)
+    ]
+    return digest
+
+
+def test_early_notice_appears_only_on_a_floor_clamped_scheduled_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """06:30 の予定 → 06:00 送信（下限に張り付き）→ 冒頭に 1 行。
+
+    ⚠️ 予約ペイロードにフラグは載っていない。発火側が planner と同じ純関数で
+    計算し直している。変異: 計算を落として常に False にすると赤。
+    """
+    monkeypatch.setattr(sys, "argv", ["x"])
+    monkeypatch.setenv("MORNING_DIGEST_MODE", "single")
+    monkeypatch.setenv("MORNING_DIGEST_DEFAULT_TIME", "09:30")
+    monkeypatch.setenv("MORNING_DIGEST_COMPACT", "true")
+    digest = _digest_with_first_event("2026-09-11T06:30:00+09:00")
+    _text, blocks = mod._format_block_kit_compact(digest, USER)
+    assert "最初の予定が近いため" in str(blocks)
+
+
+def test_early_notice_absent_on_a_normal_scheduled_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["x"])
+    monkeypatch.setenv("MORNING_DIGEST_MODE", "single")
+    monkeypatch.setenv("MORNING_DIGEST_DEFAULT_TIME", "09:30")
+    monkeypatch.setenv("MORNING_DIGEST_COMPACT", "true")
+    digest = _digest_with_first_event("2026-09-11T10:00:00+09:00")
+    _text, blocks = mod._format_block_kit_compact(digest, USER)
+    assert "最初の予定が近いため" not in str(blocks)
+
+
+def test_early_notice_never_on_the_bulk_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定時刻の一括実行は通常どおりの時刻で届いている＝1 行を添えない。"""
+    monkeypatch.setattr(sys, "argv", ["x"])
+    monkeypatch.setenv("MORNING_DIGEST_MODE", "bulk")
+    monkeypatch.setenv("MORNING_DIGEST_COMPACT", "true")
+    digest = _digest_with_first_event("2026-09-11T06:30:00+09:00")
+    _text, blocks = mod._format_block_kit_compact(digest, USER)
+    assert "最初の予定が近いため" not in str(blocks)
