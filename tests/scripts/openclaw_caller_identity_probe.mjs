@@ -2203,6 +2203,35 @@ const missingUserContextReport = {
   spoofed_still_blocked: unwrapScenario({
     params: { query: "q", _user_context: SPOOFED_CONTEXT },
   }),
+  // ⑥''本人 ID の表記ゆれ（2026-09-11 レビュー実測）。いずれも「なりすまし」ではない。
+  //   従来はここだけが生値の厳密一致だったため 3 種とも P05 で落ちていた。
+  lowercase_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: USER.toLowerCase() } },
+  }),
+  mention_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: `<@${USER}>` } },
+  }),
+  padded_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: ` ${USER} ` } },
+  }),
+  // ⑥'''なりすましは表記を変えても弾かれる（正規化が検査回避の穴にならないこと）。
+  spoofed_lowercase_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: SPOOFED_CONTEXT.slack_user_id.toLowerCase() },
+    },
+  }),
+  spoofed_mention_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: `<@${SPOOFED_CONTEXT.slack_user_id}>` },
+    },
+  }),
+  // ⑥''''Slack ID として解釈できない申告は team / channel と同じ「破棄して続行」。
+  //   拒否しても 1 ビットも稼がない（mintCallerClaim が丸ごと上書きするため）。
+  uninterpretable_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: "小俣" } },
+  }),
   // ⑥' claim の持ち込み（replay）も従来どおり拒否（P05）。
   claim_still_blocked: unwrapScenario({
     params: {

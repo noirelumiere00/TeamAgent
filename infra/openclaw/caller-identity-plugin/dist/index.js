@@ -301,6 +301,18 @@ function normalizeSlackId(value, pattern) {
   return pattern.test(normalized) ? normalized : null;
 }
 
+// モデルが `_user_context.slack_user_id` に書いてくる**申告値**の正規化。
+// 本人の ID を指しているのに形だけ違う書き方（メンション表記 `<@U…>` /
+// `<@U…|name>`）を、素の ID へ寄せてから `normalizeSlackId` に渡す。
+// 解釈できなければ null（＝呼び出し側で「破棄して続行」）。
+const SLACK_MENTION_RE = /^<@([^>|]+)(?:\|[^>]*)?>$/u;
+function normalizeDeclaredSlackUserId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const mention = SLACK_MENTION_RE.exec(trimmed);
+  return normalizeSlackId(mention ? mention[1] : trimmed, SLACK_USER_RE);
+}
+
 // OpenClaw がセッション鍵の末尾に付ける唯一の構造サフィックス。
 // 実測 2026-08-07（本番 image sha256:144e4edd… の上流コードを実行）:
 //   app/dist/hook-agent-context-DPPRzCBU.js:40-62
@@ -460,7 +472,15 @@ const USER_ACTION_BY_CODE = Object.freeze({
     "利用者側の操作では直りません。管理者のサポートが必要です。",
 });
 
-// モデル宛の 1 行。利用者へはこの行自体を見せない前提で書く（SOUL 側で規定）。
+// モデル宛の 1 行。利用者へはこの行自体を見せない。
+// ── 行そのものを識別可能にする（2026-09-11 レビュー指摘）────────────────────
+// 従来この行は接頭辞が無く、SOUL の「提示せよ」（1 行目・転送定型文・診断行）にも
+// 「出すな」（`teamagent-caller-identity:` 付きの行）にも当たらなかった。拒否理由を
+// 一字も変えず出すと、利用者の画面に「連携のリセット・再ログイン・ブラウザ変更」の
+// 語がそのまま並ぶ＝この PR が潰した誤誘導が別の入口で再現していた。
+// SOUL の記述に頼らず**行自体で判別できる**よう、他の管理者向け行と同じ接頭辞を付け、
+// 既存の「接頭辞付きの行は利用者に出さない」規則で自動的に除外されるようにする。
+// 接頭辞付きでも指示には従うことは SOUL 側（「診断:」行の節）で明記している。
 const BLOCK_MODEL_INSTRUCTION =
   "この案内と診断行をそのまま利用者へ提示してください。原因を推測して" +
   "連携のリセット・再ログイン・ブラウザ変更などの別の操作を勧めてはいけません。";
@@ -474,10 +494,10 @@ export function userActionForBlockCode(code) {
 
 // 利用者に届く block 文。
 //   1 行目 利用者向けの正しい案内（日本語・行動だけ）
-//   2 行目 モデル宛の禁止事項（推測して別の操作を勧めない）
+//   2 行目 モデル宛の禁止事項（推測して別の操作を勧めない）※接頭辞つき＝利用者に出さない
 //   3 行目 転送の定型文
 //   4 行目 診断行
-//   5 行目 技術理由（管理者・モデルの切り分け用。利用者向けではない）
+//   5 行目 技術理由（管理者・モデルの切り分け用。利用者向けではない）※接頭辞つき
 // user id・本文・URL は載せない（G7）。管理者は runId ではなくコード＋時刻で突合する。
 export function formatBlockReason(reason, code, nowMs, adminName = DEFAULT_ADMIN_NAME) {
   // `fail()` 由来の理由は既に `teamagent-caller-identity: ` が付いている。
@@ -487,7 +507,7 @@ export function formatBlockReason(reason, code, nowMs, adminName = DEFAULT_ADMIN
     : String(reason);
   return (
     `${userActionForBlockCode(code)}\n` +
-    `${BLOCK_MODEL_INSTRUCTION}\n` +
+    `${PLUGIN_ID}: ${BLOCK_MODEL_INSTRUCTION}\n` +
     `${adminForwardHint(adminName)}\n` +
     `診断: ${code} ${formatJstMinute(nowMs)}\n` +
     `${PLUGIN_ID}: ${detail}`
@@ -2560,16 +2580,30 @@ export function createCallerIdentityPlugin({
     // 「申告しなかった」は矛盾ではないので通す。
     // **明示的に別人を名乗った場合（キーがあって値が違う）だけ**は従来どおり block。
     // ここが唯一の明示的ななりすまし申告なので fail-closed を維持する。
-    if (
-      Object.hasOwn(declaredContext, "slack_user_id") &&
-      declaredContext.slack_user_id !== trusted.senderId
-    ) {
-      return {
-        error: "declared Slack caller does not match the bound ingress",
-        discarded: [],
-      };
-    }
+    //
+    // ── 比較は正規化してから行う（2026-09-11 レビュー指摘）──────────────────
+    // 従来はここだけが**生値の厳密一致**だった。ingress 側の senderId は
+    // `normalizeSlackId`（trim + 大文字化）を通った値なので、モデルが本人の ID を
+    // `u09cx1ccbln`（小文字）・`<@U09CX1CCBLN>`（メンション表記）・前後空白つきで
+    // 書いただけで P05 block になっていた。これはなりすましではなく**表記ゆれ**。
+    // 正規化して一致すれば通し、そもそも Slack ID として解釈できない値は
+    // team / channel と同じ「破棄して続行」に倒す（申告値は mintCallerClaim が
+    // authoritative 値で丸ごと置き換えるので、緩めてもなりすましは成立しない）。
+    // 解釈できて**別人**なら従来どおり block＝信頼境界は 1 ビットも動かない。
     const discarded = [];
+    if (Object.hasOwn(declaredContext, "slack_user_id")) {
+      const declaredUserId = normalizeDeclaredSlackUserId(
+        declaredContext.slack_user_id,
+      );
+      if (declaredUserId === null) {
+        discarded.push("slack_user_id");
+      } else if (declaredUserId !== trusted.senderId) {
+        return {
+          error: "declared Slack caller does not match the bound ingress",
+          discarded: [],
+        };
+      }
+    }
     for (const [field, expected] of [
       ["slack_team_id", trusted.teamId],
       ["channel_id", trusted.channelId],

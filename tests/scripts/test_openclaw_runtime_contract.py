@@ -3045,12 +3045,61 @@ def test_tool_calls_without_a_declared_user_context_are_signed_not_blocked() -> 
         ], case
 
 
+_SELF_VARIANT_CASES = ("lowercase_self", "mention_self", "padded_self")
+_SPOOF_VARIANT_CASES = (
+    "spoofed_still_blocked",
+    "spoofed_lowercase_still_blocked",
+    "spoofed_mention_still_blocked",
+)
+
+
+def test_declared_slack_user_id_tolerates_self_spelling_variants() -> None:
+    """本人 ID の表記ゆれで block されないこと（2026-09-11 レビュー実測）。
+
+    ingress 側の senderId は `normalizeSlackId`（trim + 大文字化）を通った値なのに、
+    申告値との比較だけが**生値の厳密一致**だった。そのため本人が自分の ID を
+    `u09cx1ccbln` / `<@U09CX1CCBLN>` / 前後空白つきで書いただけで P05 block になり、
+    利用者には「連携に問題が発生しています」としか見えなかった。
+    これらはなりすましではなく表記ゆれで、申告値は mintCallerClaim が
+    authoritative 値で丸ごと捨てるため、通してもなりすましは成立しない。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    for case in _SELF_VARIANT_CASES:
+        outcome = report[case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        # 署名される値は表記ゆれではなく ingress の authoritative 値。
+        assert outcome["signedUserId"] == "U09CX1CCBLN", case
+        assert outcome["claimUser"] == "U09CX1CCBLN", case
+        assert outcome["bindingMatches"] is True, case
+
+
+def test_uninterpretable_declared_user_id_is_discarded_not_blocked() -> None:
+    """Slack ID として解釈できない申告は team / channel と同じ「破棄して続行」。"""
+    outcome = _caller_identity_report()["missing_user_context"]["uninterpretable_self"]
+    assert outcome["blocked"] is False, outcome["blockReason"]
+    assert outcome["signedUserId"] == "U09CX1CCBLN"
+    discard_lines = [
+        entry["text"]
+        for entry in outcome["console"]
+        if "discarded declared user_context fields" in entry["text"]
+    ]
+    assert discard_lines, outcome["console"]
+    assert "slack_user_id" in discard_lines[0], discard_lines[0]
+    # 値そのものはログに載せない（G7）。
+    assert "小俣" not in discard_lines[0], discard_lines[0]
+
+
 def test_missing_user_context_does_not_move_the_trust_boundary() -> None:
     """申告が「無い」を通しても、「別人だと申告した」は従来どおり拒否されること。
 
     ここが緑でないと、`_user_context` を省くことが検査回避の抜け道になる。
+    表記ゆれを許す正規化を入れた後も、**実在しない別人の ID**は表記を変えても
+    弾かれること（正規化が検査回避の穴にならないこと）をここで固定する。
     """
     report = _caller_identity_report()["missing_user_context"]
+    for case in _SPOOF_VARIANT_CASES:
+        assert report[case]["blocked"] is True, case
+        assert report[case]["diagCode"] == "CONNECT-P05", case
     assert report["spoofed_still_blocked"]["blocked"] is True
     assert report["spoofed_still_blocked"]["diagCode"] == "CONNECT-P05"
     assert report["claim_still_blocked"]["blocked"] is True
@@ -3185,6 +3234,12 @@ def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
     読み解けず「Google 連携をリセットすることで解決する可能性があります」と
     **自分で原因を作文**し、利用者を無関係な操作へ誘導した（連携は成立していた）。
     技術理由は最終行へ落とし、モデル宛の禁止事項を 2 行目に固定する。
+
+    2026-09-11 のレビュー指摘で 2 行目にも `teamagent-caller-identity: ` 接頭辞を付けた。
+    それまで 2 行目は SOUL の「提示せよ」（1 行目・転送定型文・診断行）にも
+    「出すな」（接頭辞つきの行）にも当たらず、拒否理由を一字も変えず出すと
+    利用者の画面に「連携のリセット・再ログイン・ブラウザ変更」の語が並んでいた。
+    接頭辞を付けたことで、利用者に見せる行 = 接頭辞の無い行、と行だけで判別できる。
     """
     report = _caller_identity_report()["block_diagnostics"]
     for case, code in _BLOCK_DIAG_CASES.items():
@@ -3198,9 +3253,16 @@ def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
         assert re.search(r"[ぁ-んァ-ヶ一-龯]", lines[0]), (case, lines[0])
         # 2 行目はモデル宛。推測して別の操作を勧めることの明示的な禁止。
         assert "推測" in lines[1] and "リセット" in lines[1], (case, lines[1])
+        # モデル宛なので接頭辞つき＝SOUL の「接頭辞つきの行は利用者に出さない」で除外される。
+        # ここを外すと「連携のリセット・再ログイン・ブラウザ変更」が利用者の画面に並ぶ。
+        assert lines[1].startswith("teamagent-caller-identity: "), (case, lines[1])
         assert lines[2] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
             case
         )
+        # 利用者に見せる行（1 行目・転送定型文・診断行）には接頭辞が無いこと。
+        # 「接頭辞の有無」だけで利用者向けかどうかが決まる＝SOUL の記述に頼らない。
+        for index in (0, 2, 3):
+            assert not lines[index].startswith("teamagent-caller-identity: "), (case, index)
         assert re.fullmatch(
             rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[3]
         ), (case, lines[3])
