@@ -28,6 +28,7 @@ from teamagent.adapters.bedrock_client import BedrockClient
 from teamagent.adapters.embeddings_client import Embedder
 from teamagent.adapters.pgvector_client import PgVectorClient, SearchHit
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.deai_text import strip_ai_decoration
 from teamagent.skills._shared.next_step import (
     DELIVER_SUGGESTION,
     append_suggestion,
@@ -76,11 +77,19 @@ _VocabKey = tuple[tuple[str, ...], str | None, str]
 _CHUNK_ID_RE = re.compile(r"\s*[\[(][^\[\]()]*chunk_id[^\[\]()]*[\])]")
 
 
-def _strip_internal_markers(text: str) -> str:
+def _strip_internal_markers(text: str, *, request_id: str | None = None) -> str:
+    """内部マーカーを落とし、続けて「AI が書いた感じ」の装飾を正規化する。
+
+    ここは要約本文が必ず 1 度だけ通る唯一の関門（同期パス :471 と後追いパス :1471 の
+    両方が ``_summarize`` を経由し、``SearchOutput.answer`` への代入は :544 の 1 箇所だけ）。
+    ``_source_links_block`` の ``[label](url)`` 付与より**上流**なので、意図的に出している
+    markdown リンクには触れない。
+    """
     if not text:
         return text
     out = _CHUNK_ID_RE.sub("", text)
     out = out.replace("（関連度低・参考）", "")
+    out = strip_ai_decoration(out, request_id=request_id)
     return out.strip()
 
 
@@ -1602,7 +1611,7 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
             cache_system=True,  # 同じ system prompt を頻繁に呼ぶのでキャッシュで input cost 1/10
             max_tokens=self._summary_max_tokens,
         )
-        return _strip_internal_markers(resp.text), resp.usage.cost_usd
+        return _strip_internal_markers(resp.text, request_id=request_id), resp.usage.cost_usd
 
     @staticmethod
     def _title_date_of(
