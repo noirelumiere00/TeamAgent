@@ -17,10 +17,21 @@ BRIEF_DIR = (
     Path(__file__).resolve().parents[3] / "src" / "teamagent" / "skills" / "pre_meeting_brief"
 )
 
+#: 動的呼び出しで名前を隠す口（``getattr(mod, "invoke")`` 等）。第 1 引数以降の
+#: 文字列定数も禁止語として見る。
+_DYNAMIC_CALLS = ("getattr", "setattr", "import_module", "__import__")
+
 #: この経路に現れてはいけない語（LLM・外部送信・カレンダー書込）。
+#: 判定は **小文字化した部分一致**（``_hit``）なので、``Bedrock`` / ``bedrock`` のような
+#: 大文字小文字違いを並べる必要は無い（歴史的な並びは残してある）。
+#: ``invoke`` / ``converse`` は LLM クライアントの呼び出し面。モジュールを別名 import
+#: して隠しても、呼び出し側のメソッド名で引っかかるようにここへ置く
+#: （2026-09-11 時点で pre_meeting_brief 配下に出現 0 件であることを確認済み）。
 FORBIDDEN_TOKENS = (
     "bedrock",
     "Bedrock",
+    "invoke",
+    "converse",
     "gemini",
     "Gemini",
     "embedder",
@@ -45,28 +56,72 @@ def _sources() -> list[tuple[Path, str]]:
 
 
 def test_no_llm_or_write_references_anywhere_in_brief_package() -> None:
-    """LLM 非経由・外部送信ゼロ・カレンダー書込ゼロを AST とテキストの両方で固定。
+    """LLM 非経由・外部送信ゼロ・カレンダー書込ゼロを AST で固定。
 
-    変異: skill.py に ``from teamagent.adapters.bedrock_client import BedrockClient`` を
-    1 行足すと赤。
+    ⚠️ 旧実装は 3 つの穴で **迂回できた**（2026-09-11 に実証済み）:
+      1. ``ImportFrom`` 分岐が ``node.module`` しか見ず、``alias.name`` /
+         ``alias.asname`` を無視していた
+         → ``from teamagent.adapters import bedrock_client as _bc`` が素通り
+      2. ``Name`` / ``Attribute`` が ``name == token`` の **完全一致**
+         → ``_bc.BedrockClient`` の ``BedrockClient`` は拾えても ``.invoke`` 等の
+           別名経由の識別子は素通り（大文字小文字・部分一致を見ていない）
+      3. ``getattr(mod, "invoke")`` のような文字列定数経由の呼び出しを見ていない
+
+    実証（2026-09-11・HEAD 55d0d42 のテストで再現）: ``classify.py`` に
+    ``from teamagent.adapters import bedrock_client as _bc`` と
+    ``_bc.BedrockClient.from_env().invoke(text)`` を足しても
+    **``25 passed``＝全部緑のまま** だった。
+
+    変異（現在の実装で **実際に赤になることを確認済み**）:
+      - 上の 2 行を ``classify.py`` へ足す
+        → ``['classify.py:import teamagent.adapters.bedrock_client',
+             'classify.py:BedrockClient']`` で赤
+      - ``render.py`` に ``getattr(x, "post_message")``
+        → ``["render.py:getattr('post_message')"]`` で赤
+      - ``classify.py`` に ``client.invoke(text)``（import は無害な名前のまま）
+        → ``['classify.py:invoke']`` で赤
     """
+    lowered_tokens = frozenset(t.lower() for t in FORBIDDEN_TOKENS)
+
+    def _hit(text: str | None) -> str:
+        """小文字化した **部分一致**（別名・属性・モジュール名の綴り替えを許さない）。"""
+        if not text:
+            return ""
+        low = text.lower()
+        return next((t for t in sorted(lowered_tokens) if t in low), "")
+
     offenders: list[str] = []
     for path, src in _sources():
-        for token in FORBIDDEN_TOKENS:
-            # docstring 中の「GCalendarClient を渡さない」等は説明なので、
-            # **コード（識別子・文字列リテラル・import）** だけを見る。
-            tree = ast.parse(src)
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Name | ast.Attribute):
-                    name = node.id if isinstance(node, ast.Name) else node.attr
-                    if name == token:
-                        offenders.append(f"{path.name}:{name}")
-                elif isinstance(node, ast.ImportFrom) and token in (node.module or ""):
-                    offenders.append(f"{path.name}:import {node.module}")
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        if token in alias.name:
-                            offenders.append(f"{path.name}:import {alias.name}")
+        # docstring 中の「GCalendarClient を渡さない」等は説明なので、
+        # **コード（識別子・import・getattr の文字列定数）** だけを見る。
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name | ast.Attribute):
+                name = node.id if isinstance(node, ast.Name) else node.attr
+                if _hit(name):
+                    offenders.append(f"{path.name}:{name}")
+            elif isinstance(node, ast.ImportFrom):
+                if _hit(node.module):
+                    offenders.append(f"{path.name}:import from {node.module}")
+                for alias in node.names:
+                    # ⚠️ ここが旧実装の穴。``from … import bedrock_client as _bc`` は
+                    #   module 名に token を含まないので、alias 側を見ないと素通りする。
+                    if _hit(alias.name) or _hit(alias.asname):
+                        offenders.append(f"{path.name}:import {node.module}.{alias.name}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _hit(alias.name) or _hit(alias.asname):
+                        offenders.append(f"{path.name}:import {alias.name}")
+            elif isinstance(node, ast.Call):
+                # getattr(mod, "invoke") / getattr(mod, "post_message") の文字列定数。
+                func = node.func
+                fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+                if fname not in _DYNAMIC_CALLS:
+                    continue
+                for arg in node.args:
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                        if _hit(arg.value):
+                            offenders.append(f"{path.name}:{fname}({arg.value!r})")
     assert offenders == [], offenders
 
 
