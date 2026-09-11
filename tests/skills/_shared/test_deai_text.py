@@ -1,8 +1,10 @@
 """LLM 出力の装飾正規化（strip_ai_decoration）テスト。
 
 利用者指摘（2026-09-11）: Slack に届く回答が `**太字**` と `—` だらけで AI 生成感が強い。
-このテストは「装飾は落ちる」だけでなく「壊してはいけないものが無傷である」ことを固定する。
-後者が本体で、URL・コードブロック・Slack リンク記法を壊した時点でこの後処理は失格になる。
+このテストは「ダッシュ類は読点になる」だけでなく「壊してはいけないものが無傷である」ことを
+固定する。後者が本体で、URL・コードブロック・Slack リンク記法を壊した時点でこの後処理は
+失格になる。`**強調**` も壊してはいけない側に入る: 配信側の Markdown→mrkdwn 変換が
+strong を Slack の太字へ描画するため、ここで畳む/落とすと送信面を毀損する。
 """
 
 from __future__ import annotations
@@ -30,15 +32,15 @@ REPORTED_ANSWER = """:clipboard: **直接回答**
 """
 
 
-# ── 装飾が落ちること ────────────────────────────────────────────────────────
+# ── ダッシュ類が読点になること / 強調は残ること ─────────────────────────────
 
 
-def test_reported_answer_loses_bold_and_dashes() -> None:
-    """実例テキストから `**` `—` `--` が 0 件になる（利用者指摘の直接の受け入れ条件）。"""
+def test_reported_answer_loses_dashes_but_keeps_bold() -> None:
+    """実例テキストから `—` `--` が 0 件になる。`**` は上流が太字へ変換するので残す。"""
     out = strip_ai_decoration(REPORTED_ANSWER)
-    assert "**" not in out
     assert "—" not in out
     assert "--" not in out
+    assert "**直接回答**" in out
 
 
 def test_reported_answer_keeps_numbers_and_proper_nouns() -> None:
@@ -49,15 +51,16 @@ def test_reported_answer_keeps_numbers_and_proper_nouns() -> None:
     assert "高速様採用向け切り抜き" in out
 
 
-def test_bold_markers_are_removed_not_moved() -> None:
-    """`**強調**` は別記号へ移さず落とす（配信面が 2 つあり `*` も安全でないため）。
+def test_bold_markers_are_left_untouched() -> None:
+    """`**強調**` は畳まない・落とさない（上流が strong を Slack の太字へ変換するため）。
 
-    slack_bot / two_stage の直接投稿は mrkdwn なので `*語*` が太字だが、OpenClaw 経由は
-    Markdown→mrkdwn 変換が入り `*語*` は斜体になる（infra/openclaw/SOUL.md:351 と
-    tests/infra/test_soul_contract.py:469 が repo 内の一次記述としてこの変換を固定）。
-    どちらでも誤解釈されないのは記号を持たない地の文だけ。
+    配信側の Markdown→mrkdwn 変換は bold=`*` / italic=`_` のマーカーで描画する
+    （@openclaw/slack 2026.7.1 の buildSlackRenderOptions。repo 内では
+    infra/openclaw/SOUL.md と tests/infra/test_soul_contract.py が同じ仕様を固定）。
+    `**` を 1 個へ畳めば太字が斜体に化け、記号ごと落とせば太字が地の文に潰れる。
     """
-    assert strip_ai_decoration("これは**太字**です") == "これは太字です"
+    src = "これは**太字**です"
+    assert strip_ai_decoration(src) == src
 
 
 def test_existing_slack_bold_is_untouched() -> None:
@@ -67,32 +70,40 @@ def test_existing_slack_bold_is_untouched() -> None:
 
 
 @pytest.mark.parametrize(
-    ("src", "want"),
+    "src",
     [
-        ("a***x***b", "axb"),  # bold+italic
-        ("a****x****b", "axb"),
-        ("a**x*y**b", "ax*yb"),  # 入れ子まがい（単独 `*` は中身として残す）
-        ("**", "**"),  # 対になっていない＝触らない（例外にならないこと）
+        "a***x***b",  # bold+italic（上流では `*_x_*`）
+        "a****x****b",
+        "a**x*y**b",  # 入れ子まがい
+        "**",  # 対になっていない
     ],
 )
-def test_asterisk_runs_do_not_explode(src: str, want: str) -> None:
-    """`***` `****` のような並びでも決定的に潰れ、例外にならない。"""
-    assert strip_ai_decoration(src) == want
+def test_asterisk_runs_pass_through_unchanged(src: str) -> None:
+    """`***` `****` も素通しする（変換しないので対の有無で挙動が分岐しない）。
+
+    上流が strong/em を解釈して描画するため、記号の数を repo 側で解釈し直さない。
+    """
+    assert strip_ai_decoration(src) == src
 
 
-def test_unpaired_bold_is_left_alone_and_counted() -> None:
-    """対になっていない `**` は消さない（片側だけ消えると入力より壊れる）。
+def test_asterisk_only_line_is_still_a_horizontal_rule() -> None:
+    """記号しか無い行（`***`）は水平線なので落とす。強調ではないのでここだけは例外。"""
+    assert strip_ai_decoration("前段\n\n***\n\n後段") == "前段\n\n後段"
 
-    生成が max_tokens で切れた時だけ出る形。消す代わりに残数をログへ出す。
+
+def test_bold_markers_are_counted_not_converted() -> None:
+    """`**` は変換しない代わりに残数をログへ出す（プロンプト指示の効き目を測る指標）。
+
+    毀損ではないので警告ではなく観測。対になっているものも数に含める。
     """
     from structlog.testing import capture_logs
 
-    src = "結論は**1日密着型"
+    src = "結論は**1日密着型**が効く"
     with capture_logs() as logs:
-        out = strip_ai_decoration(src, request_id="req-unpaired")
+        out = strip_ai_decoration(src, request_id="req-bold")
     assert out == src
     events = [e for e in logs if e.get("event") == "llm_text_residual_decoration"]
-    assert events and events[0]["unpaired_bold_count"] == 1
+    assert events and events[0]["bold_marker_count"] == 2
 
 
 def test_power_operator_is_not_folded() -> None:
@@ -140,38 +151,38 @@ def test_urls_are_never_rewritten() -> None:
     assert strip_ai_decoration(src) == src
 
 
-def test_decoration_touching_a_url_is_still_removed() -> None:
-    r"""URL のある行でも、URL の外の装飾は落ちる（過剰保護で後処理が無効化されない）。
+def test_dashes_touching_a_url_are_still_normalized() -> None:
+    r"""URL のある行でも、URL の外の `—` `--` は読点になる（過剰保護で後処理が無効化されない）。
 
     和文は URL の直後に空白を置かないため、裸 URL を `\S+` で貪欲に取ると行末までが
-    保護領域になり、その行だけ `**` が Slack へ素通しで届いていた（実測）。
+    保護領域になり、その行だけ後処理が素通しになる（実測）。保護は URL の範囲に留める。
     """
     assert (
-        strip_ai_decoration("詳細は https://drive.test/file/d/AAA/viewの**要点**は3つ。")
-        == "詳細は https://drive.test/file/d/AAA/viewの要点は3つ。"
+        strip_ai_decoration("詳細は https://drive.test/file/d/AAA/view — 要点は3つ。")
+        == "詳細は https://drive.test/file/d/AAA/view、要点は3つ。"
     )
     assert (
-        strip_ai_decoration("参考: https://ex.test/a、**結論**は価格。")
-        == "参考: https://ex.test/a、結論は価格。"
+        strip_ai_decoration("参考: https://ex.test/a、**結論**は価格 -- 以上。")
+        == "参考: https://ex.test/a、**結論**は価格、以上。"
     )
 
 
 @pytest.mark.parametrize(
-    ("src", "want"),
+    "src",
     [
-        ("**詳細は https://drive.test/file/d/1Ab**", "詳細は https://drive.test/file/d/1Ab"),
-        ("資料は **https://example.test/x** を参照", "資料は https://example.test/x を参照"),
-        ("**A <https://x.test/y|y> B**", "A <https://x.test/y|y> B"),
+        "**詳細は https://drive.test/file/d/1Ab**",
+        "資料は **https://example.test/x** を参照",
+        "**A <https://x.test/y|y> B**",
     ],
 )
-def test_bold_spanning_a_url_never_becomes_asymmetric(src: str, want: str) -> None:
-    """強調が URL を含む/URL で終わるとき、開きだけ変換して `*…**` にしない。
+def test_bold_spanning_a_url_never_becomes_asymmetric(src: str) -> None:
+    """強調が URL を含む/URL で終わっても、開きだけ書き換えて `*…**` にしない。
 
-    貪欲な裸 URL 保護が閉じ `**` を URL の一部として飲み込むと、開きだけが畳まれて
-    入力より壊れたマークアップ（リテラルのアスタリスクが残る）になっていた。
+    以前は貪欲な裸 URL 保護が閉じ `**` を URL の一部として飲み込み、開きだけが畳まれて
+    入力より壊れたマークアップになっていた。いまは `**` を一切変換しないので、
+    この非対称な壊れ方が構造的に起こり得ない（＝入力がそのまま残る）。
     """
-    assert strip_ai_decoration(src) == want
-    assert "*" not in strip_ai_decoration(src)
+    assert strip_ai_decoration(src) == src
 
 
 def test_slack_link_syntax_is_never_rewritten() -> None:
@@ -323,11 +334,11 @@ def test_control_characters_do_not_raise() -> None:
 
     ここで例外を出すと、装飾を直すための層が回答そのものを落とすことになる。
     """
-    src = "資料 https://ex.test/a \x001\x01 と **太字**"
+    src = "資料 https://ex.test/a \x001\x01 と **太字** — 以上"
     out = strip_ai_decoration(src)
     assert "https://ex.test/a" in out
-    assert "太字" in out
-    assert "**" not in out
+    assert "**太字**" in out
+    assert "、以上" in out
 
 
 @pytest.mark.parametrize("src", ["", "  ", "普通の営業向け文章です。"])

@@ -3,7 +3,8 @@
 単体（tests/skills/_shared/test_deai_text.py）が関数の写像を固定するのに対し、
 ここは「差し込み位置が正しいか」を固定する。具体的には:
 
-  1. LLM が `**` / `—` / `---` を返しても、SearchOutput.answer には残らない。
+  1. LLM が `—` / `--` / `---` を返しても、SearchOutput.answer には残らない。
+     （`**` は配信側が Slack の太字へ変換する正規の記法なので、ここでは落とさない。）
   2. 後処理は `_source_links_block` の `[label](url)` 付与より**上流**にあるため、
      本番 env（SEARCH_ANSWER_SOURCE_LINKS=1）で付く markdown リンクは無傷で残る。
      ここが逆順になるとリンクが壊れるので、経路の順序をテストで固定する。
@@ -92,13 +93,16 @@ def _skill(bedrock: MagicMock) -> SearchSkill:
 
 
 def test_answer_has_no_ai_decoration_after_run() -> None:
-    """run() を通った answer に `**` `—` `--` `---` が残らない。"""
+    """run() を通った answer に `—` `--` `---` が残らない。
+
+    `**` は上流が strong を Slack の太字へ変換するため落とさない（残ることを固定する）。
+    """
     out = _skill(_bedrock(DECORATED_LLM_TEXT)).run(
         input=SearchInput(query="採用動画の勝ち筋"), ctx=SkillContext()
     )
-    assert "**" not in out.answer
     assert "—" not in out.answer
     assert "--" not in out.answer
+    assert "**直接回答**" in out.answer
     # 内部マーカー除去（従来の契約）も併存している
     assert "chunk_id" not in out.answer
 
@@ -122,8 +126,9 @@ def test_source_links_markdown_survives_postprocessing(
     )
     assert "[採用提案](https://drive.google.com/file/d/AAA/view)" in out.answer
     assert "📎 *資料リンク*" in out.answer
-    # リンクを付けても本文側の装飾は戻らない
-    assert "**" not in out.answer
+    # リンクを付けても本文側のダッシュは戻らない（`**` は上流が太字にするので残る）
+    assert "—" not in out.answer
+    assert "**直接回答**" in out.answer
 
 
 def test_postprocess_runs_upstream_of_source_links(
