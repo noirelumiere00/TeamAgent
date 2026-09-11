@@ -3206,9 +3206,10 @@ def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
         ), (case, lines[3])
         # 技術理由は最終行。接頭辞は 1 回だけ（本番実測では 2 回並んでいた）。
         assert lines[4].startswith("teamagent-caller-identity: "), case
-        assert not lines[4].startswith(
-            "teamagent-caller-identity: teamagent-caller-identity: "
-        ), (case, lines[4])
+        assert not lines[4].startswith("teamagent-caller-identity: teamagent-caller-identity: "), (
+            case,
+            lines[4],
+        )
         assert "U09CX1CCBLN" not in reason, case
 
 
