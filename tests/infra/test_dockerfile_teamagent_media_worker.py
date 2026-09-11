@@ -160,10 +160,13 @@ def test_high_severity_findings_are_never_parked_in_the_media_exception_registry
     registry = json.loads(
         (ROOT / "infra/codebuild/ecr_scan_exceptions_media.json").read_text(encoding="utf-8")
     )
-    for entry in registry.get("exceptions", []):
-        assert entry.get("severity") not in {"HIGH", "CRITICAL"}, entry
-        # util-linux の 5 件は pin で解消済み。例外へ逃がし直したらここで落ちる。
-        assert "util-linux" != entry.get("package_name")
+    for entry in registry["exceptions"]:
+        # 実スキーマの key は package/cve（fixture の package_name ではない）。綴りを
+        # 間違えると None 比較で常に通る空振り assert になるため、存在を先に固定する。
+        assert {"cve", "severity", "package", "version"} <= entry.keys(), entry
+        assert entry["severity"] not in {"HIGH", "CRITICAL"}, entry
+        # util-linux 由来の 5 件は pin で解消済み。例外へ逃がし直したらここで落ちる。
+        assert entry["package"] not in {"util-linux", "libblkid", "libmount", "libuuid"}, entry
 
 
 def test_python_and_js_playwright_are_same_exact_version_and_hashed() -> None:
