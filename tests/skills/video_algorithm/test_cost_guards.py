@@ -181,6 +181,82 @@ def test_quota_block_stops_before_analysis(
     assert gemini.video_calls == 0
 
 
+def _install_fake_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    used: int,
+    limit: int,
+) -> list[int]:
+    """使用数を持つ台帳フェイクを差し込み、try_consume の要求本数列を返す。
+
+    本番と同じ失敗モード（残数を超える要求は消費せずブロックし、現在値を返す）を再現する。
+    """
+
+    import teamagent.adapters.quota_store as quota_store
+
+    state = {"used": used}
+    requested: list[int] = []
+
+    def _consume(self: Any, email: str, count: int, *, request_id: str) -> QuotaResult:
+        requested.append(count)
+        if state["used"] + count <= limit:
+            state["used"] += count
+            return QuotaResult(allowed=True, used=state["used"], limit=limit, requested=count)
+        return QuotaResult(allowed=False, used=state["used"], limit=limit, requested=count)
+
+    monkeypatch.setattr(quota_store.VideoQuotaStore, "try_consume", _consume)
+    return requested
+
+
+def test_quota_first_wave_offers_the_remainder_instead_of_refusing(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """残 6・要求 10: 1波目は勝手に丸めず、残数と選択肢を出して止まる（上限到達とは書かない）。"""
+
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+    requested = _install_fake_ledger(monkeypatch, used=14, limit=20)
+    gemini = _FakeGemini()
+    skill = _skill(tmp_path, gemini, count=10)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        skill.run(_input(max_videos=10), _ctx())
+
+    message = str(excinfo.value)
+    assert "VIDEO_QUOTA_PARTIAL_AVAILABLE" in message
+    assert "上限に達しました" not in message  # 14/20 で使い切っていない（本番実測の食い違い）
+    assert "今月の残りは6本です" in message and "6本で進めますか？" in message
+    assert gemini.video_calls == 0  # 課金前に止まる
+    assert requested == [10]  # 1波目で勝手に 6 本へ丸めない（選ぶのは利用者）
+
+
+def test_quota_mid_run_rounds_to_remainder_and_keeps_partial_results(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2波目以降は残数に丸めて進み、尽きたらそこまでの成果を返す（全部捨てない）。"""
+
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+    requested = _install_fake_ledger(monkeypatch, used=16, limit=20)
+    gemini = _FakeGemini()
+    skill = _skill(tmp_path, gemini, count=5)
+
+    def _analyze(meta: VideoMeta, **kwargs: Any) -> AnalyzedVideo:
+        # rank1/rank4 だけ成功。rank2,3 の失敗でバックフィルの波が走る。
+        analysis = VideoVSEOAnalysis() if meta.rank in (1, 4) else None
+        return AnalyzedVideo(meta=meta, analysis=analysis, error=None if analysis else "failed")
+
+    monkeypatch.setattr(skill, "_analyze_one", _analyze)
+    output = skill.run(_input(max_videos=3), _ctx())
+
+    # 3本確保 → 残1に対して2本要求 → 1本へ丸めて続行 → 残0で打ち切り。
+    assert requested == [3, 2, 1, 1]
+    assert sum(1 for v in output.videos if v.analysis) == 2
+    assert output.quota_note is not None
+    assert "2本までで止めました" in output.quota_note and "ご依頼は3本" in output.quota_note
+    assert output.quota_note in output.slack_summary
+
+
 class _FakeS3:
     def __init__(self) -> None:
         self.store: dict[str, bytes] = {}

@@ -135,19 +135,18 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
         def _consume_quota_or_raise() -> None:
             # v0.3 Task10: 月間クォータ（既定OFF・キャッシュヒットは消費しない＝裁定）。
             # 実際に Gemini へ投げる直前に 1 本消費。超過は構造化エラーで OC が本人へ伝える。
-            from teamagent.adapters.quota_store import VideoQuotaStore
+            from teamagent.adapters.quota_store import VideoQuotaStore, quota_block_message
 
             if not VideoQuotaStore.enabled():
                 return
             email = str(ctx.metadata.get("user_email", "") or "")
             result = VideoQuotaStore().try_consume(email, 1, request_id=ctx.request_id)
             if not result.allowed:
+                # 文面は quota_block_message が事実で書き分ける
+                # （「上限に達しました」と書くのは残 0 のときだけ）。
+                # 1 本要求でブロック＝残 0 なので、ここは実質 VIDEO_QUOTA_EXCEEDED 側に落ちる。
                 # SOUL.md 側に「上限エラーは再試行しない」を指示済み（リトライループ防止）。
-                raise RuntimeError(
-                    f"VIDEO_QUOTA_EXCEEDED: 今月の動画分析上限（{result.limit}本）に達しました"
-                    f"（使用 {result.used}本）。リセットは来月1日（JST）です。"
-                    "お急ぎの場合は管理者に上限引き上げを依頼してください。"
-                )
+                raise RuntimeError(quota_block_message(result))
 
         if is_youtube:
             key = None

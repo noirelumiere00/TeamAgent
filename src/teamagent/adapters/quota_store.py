@@ -47,8 +47,53 @@ def current_month_jst(now: _dt.datetime | None = None) -> str:
 @dataclass(frozen=True)
 class QuotaResult:
     allowed: bool
-    used: int  # 消費後の使用数（blocked 時は現在値）
+    used: int  # 消費後の使用数（blocked 時は現在値・-1 は「台帳を読めず不明」）
     limit: int
+    requested: int = 0  # 要求本数（blocked の文面で「残数 vs 要求」を書き分けるため）
+
+    @property
+    def used_known(self) -> bool:
+        """台帳から使用数を読めたか（fail-open/peek 失敗時は False）。"""
+
+        return self.used >= 0
+
+    @property
+    def remaining(self) -> int:
+        """今月あと何本ぶん消費できるか。不明なら 0（＝数字を語らない側に倒す）。"""
+
+        if not self.used_known:
+            return 0
+        return max(0, self.limit - self.used)
+
+
+_RESET_NOTE = "リセットは来月1日（JST）です。"
+
+
+def quota_block_message(result: QuotaResult) -> str:
+    """ブロック時の利用者向け文面。**事実に合わせて 2 通りに書き分ける**。
+
+    - 残数 0: 本当に使い切った＝「上限に達しました」。
+    - 残数 1 以上: 使い切ってはいない。要求本数が残数を超えただけなので、
+      「残り N 本です。N 本で進めますか？」と**残数と選択肢**を出す（断らない）。
+      2026-09-11 本番実測: 使用 14/上限 20 で「上限に達しました」と出て事実と食い違った。
+    """
+
+    remaining = result.remaining
+    if remaining <= 0:
+        usage = f"（使用 {result.used}本）" if result.used_known else ""
+        return (
+            f"VIDEO_QUOTA_EXCEEDED: 今月の動画分析上限（{result.limit}本）に達しました"
+            f"{usage}。{_RESET_NOTE}"
+            "お急ぎの場合は管理者に上限引き上げを依頼してください。"
+        )
+    requested = max(0, result.requested)
+    asked = f"今回のご依頼は{requested}本でした。" if requested > remaining else ""
+    return (
+        f"VIDEO_QUOTA_PARTIAL_AVAILABLE: 今月の残りは{remaining}本です"
+        f"（{result.limit}本中 {result.used}本使用）。{asked}"
+        f"{remaining}本で進めますか？「{remaining}本で」とお答えいただければ、そのまま分析します。"
+        f"{_RESET_NOTE}"
+    )
 
 
 class VideoQuotaStore:
@@ -78,10 +123,28 @@ class VideoQuotaStore:
         email = (user_email or "").strip().lower()
         limit = self._limit
         if not email or count <= 0:
-            return QuotaResult(allowed=True, used=0, limit=limit)
-        if count > limit:
-            return QuotaResult(allowed=False, used=0, limit=limit)
+            return QuotaResult(allowed=True, used=0, limit=limit, requested=max(0, count))
         month = current_month_jst()
+        if count > limit:
+            # 月初回の INSERT は ON CONFLICT の WHERE が効かないため DB へ出す前に弾く。
+            # ただし残数の実測は返す（文面が「残り N 本で進めますか？」を出せるように）。
+            used = self._peek_used(email, month, request_id=request_id)
+            result = QuotaResult(
+                allowed=False,
+                used=used if used is not None else -1,
+                limit=limit,
+                requested=count,
+            )
+            logger.info(
+                "video_quota_blocked",
+                request_id=request_id,
+                count=count,
+                requested=count,
+                used=result.used,
+                limit=limit,
+                remaining=result.remaining,
+            )
+            return result
         start = time.perf_counter()
         try:
             with (
@@ -104,24 +167,45 @@ class VideoQuotaStore:
                         limit=limit,
                         latency_ms=int((time.perf_counter() - start) * 1000),
                     )
-                    return QuotaResult(allowed=True, used=used, limit=limit)
-                # 上限超過: 現在値を読んで返す（メッセージ用）。
+                    return QuotaResult(allowed=True, used=used, limit=limit, requested=count)
+                # 上限超過: 現在値を読んで返す（メッセージ用＝残数と要求の書き分けに使う）。
                 cur.execute(_PEEK_SQL, {"email": email, "month": month})
                 peek = cur.fetchone()
                 conn.commit()
                 used = int((peek["used"] if isinstance(peek, dict) else peek[0]) if peek else limit)
+                result = QuotaResult(allowed=False, used=used, limit=limit, requested=count)
                 logger.info(
                     "video_quota_blocked",
                     request_id=request_id,
                     count=count,
+                    requested=count,
                     used=used,
                     limit=limit,
+                    remaining=result.remaining,
                 )
-                return QuotaResult(allowed=False, used=used, limit=limit)
+                return result
         except Exception as e:
             # fail-open（裁定）: コスト制御で業務を止めない。ops はこの WARN を監視する。
             logger.warning("video_quota_failed", request_id=request_id, error=type(e).__name__)
-            return QuotaResult(allowed=True, used=-1, limit=limit)
+            return QuotaResult(allowed=True, used=-1, limit=limit, requested=count)
+
+    def _peek_used(self, email: str, month: str, *, request_id: str) -> int | None:
+        """当月の使用数を読むだけ（消費しない）。読めなければ None＝不明。"""
+
+        try:
+            with (
+                self._ensure_pg().connection(app_role="teamagent_app", user_email=email) as conn,
+                conn.cursor() as cur,
+            ):
+                cur.execute(_PEEK_SQL, {"email": email, "month": month})
+                row = cur.fetchone()
+                conn.commit()
+                if row is None:
+                    return 0
+                return int(row["used"] if isinstance(row, dict) else row[0])
+        except Exception as e:
+            logger.warning("video_quota_peek_failed", request_id=request_id, error=type(e).__name__)
+            return None
 
 
 def _env_limit() -> int:
@@ -131,4 +215,9 @@ def _env_limit() -> int:
         return 20
 
 
-__all__ = ["QuotaResult", "VideoQuotaStore", "current_month_jst"]
+__all__ = [
+    "QuotaResult",
+    "VideoQuotaStore",
+    "current_month_jst",
+    "quota_block_message",
+]
