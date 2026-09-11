@@ -1009,6 +1009,98 @@ def require_report_link_hmac_keyring(*, now: int | None = None) -> HmacKeyring:
     return keyring
 
 
+# ---------------------------------------------------------------------------
+# Non-secret operational diagnostics
+# ---------------------------------------------------------------------------
+# Every loader above fails closed by returning ``None``. That is correct for the request path but
+# leaves operators with no way to tell a missing key from a rejected one, which is how a production
+# misconfiguration (the mail-action primary pointed at the database credential) stayed invisible
+# while every confirmation button silently stopped being issued.
+#
+# These helpers re-run the *same* predicates the loader uses and attribute the refusal to a coarse
+# reason code. They deliberately emit no key material, no environment variable names, and no
+# environment values, so the result is safe to print in CI, in a one-off ECS task, and in logs.
+
+PRIMARY_OK = "ok"
+PRIMARY_MISSING = "missing"
+PRIMARY_NOT_A_STRING = "not_a_string"
+PRIMARY_NOT_STRIPPED = "not_stripped"
+PRIMARY_TOO_SHORT = "too_short"
+PRIMARY_TOO_LONG = "too_long"
+PRIMARY_MALFORMED_UNICODE = "malformed_unicode"
+PRIMARY_REUSES_PROCESS_CREDENTIAL = "reuses_process_credential"
+PRIMARY_LOOKS_LIKE_CREDENTIAL = "looks_like_credential"
+PRIMARY_REUSES_OTHER_PURPOSE = "reuses_other_purpose"
+
+
+def _diagnose_primary(
+    *,
+    primary_env: str,
+    other_primary_env: str,
+    other_previous_env: str,
+) -> str:
+    """Attribute one purpose's issuance-primary refusal to a non-secret reason code.
+
+    The checks run in the loader's own order so that a reported ``ok`` means the primary itself is
+    acceptable for issuance. ``ok`` does not promise the keyring loads: rotation metadata and the
+    durable-state contract are evaluated separately and reported alongside this code.
+    """
+    raw = os.environ.get(primary_env)
+    if raw is None:
+        return PRIMARY_MISSING
+    if type(raw) is not str:
+        return PRIMARY_NOT_A_STRING
+    if not raw:
+        return PRIMARY_MISSING
+    if raw != raw.strip():
+        # Surrounding whitespace is the classic `--secret-string "$(cat key.txt)"` trailing newline.
+        return PRIMARY_NOT_STRIPPED
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeError:
+        return PRIMARY_MALFORMED_UNICODE
+    if len(encoded) < _MIN_SECRET_BYTES:
+        return PRIMARY_TOO_SHORT
+    if len(encoded) > _MAX_SECRET_BYTES:
+        return PRIMARY_TOO_LONG
+    # Reuse is reported ahead of shape because it names the actionable root cause: the value was
+    # copied from another variable in this process rather than generated for this purpose. A
+    # database URL trips both predicates, and "stop sharing the credential" is the useful half.
+    if _reuses_process_credential(encoded):
+        return PRIMARY_REUSES_PROCESS_CREDENTIAL
+    if _looks_like_credential(raw):
+        return PRIMARY_LOOKS_LIKE_CREDENTIAL
+    if _same_secret(encoded, os.environ.get(other_primary_env)) or _same_secret(
+        encoded, os.environ.get(other_previous_env)
+    ):
+        return PRIMARY_REUSES_OTHER_PURPOSE
+    return PRIMARY_OK
+
+
+def diagnose_mail_action_primary() -> str:
+    """Return the non-secret reason code for the mail-action issuance primary."""
+    try:
+        return _diagnose_primary(
+            primary_env=MAIL_ACTION_HMAC_SECRET,
+            other_primary_env=REPORT_LINK_HMAC_SECRET,
+            other_previous_env=REPORT_LINK_HMAC_PREVIOUS_SECRET,
+        )
+    except Exception:
+        return PRIMARY_MISSING
+
+
+def diagnose_report_link_primary() -> str:
+    """Return the non-secret reason code for the report-link issuance primary."""
+    try:
+        return _diagnose_primary(
+            primary_env=REPORT_LINK_HMAC_SECRET,
+            other_primary_env=MAIL_ACTION_HMAC_SECRET,
+            other_previous_env=MAIL_ACTION_HMAC_PREVIOUS_SECRET,
+        )
+    except Exception:
+        return PRIMARY_MISSING
+
+
 __all__ = [
     "HMAC_MAX_FUTURE_T0_SKEW_S",
     "HMAC_MAX_ROLLOUT_OVERLAP_S",
@@ -1026,6 +1118,16 @@ __all__ = [
     "MAIL_ACTION_HMAC_SECRET",
     "MAIL_ACTION_MAX_TOKEN_TTL_S",
     "MAIL_ACTION_TTL_S",
+    "PRIMARY_LOOKS_LIKE_CREDENTIAL",
+    "PRIMARY_MALFORMED_UNICODE",
+    "PRIMARY_MISSING",
+    "PRIMARY_NOT_A_STRING",
+    "PRIMARY_NOT_STRIPPED",
+    "PRIMARY_OK",
+    "PRIMARY_REUSES_OTHER_PURPOSE",
+    "PRIMARY_REUSES_PROCESS_CREDENTIAL",
+    "PRIMARY_TOO_LONG",
+    "PRIMARY_TOO_SHORT",
     "REPORT_LINK_HMAC_PREVIOUS_GENERATION",
     "REPORT_LINK_HMAC_PREVIOUS_IS_LEGACY",
     "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
@@ -1039,6 +1141,8 @@ __all__ = [
     "HmacRotationContractResult",
     "add_token_ttl",
     "coerce_epoch_seconds",
+    "diagnose_mail_action_primary",
+    "diagnose_report_link_primary",
     "hmac_previous_key_deadline",
     "load_mail_action_hmac_keyring",
     "load_mail_action_token_ttl_s",
