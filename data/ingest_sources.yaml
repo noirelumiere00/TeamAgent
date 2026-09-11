@@ -140,12 +140,33 @@ gsheets:
   # アポ前 事例ブリーフィング（pre_meeting_brief）が引く **唯一の母集団**。
   #
   # ⚠️ sheet_id は 2026-09-11 時点で未確定（ユーザーが Drive 上で探索中）。実 ID が
-  # 分かるまで yaml にはプレースホルダを置き、実運用では env で後入れする:
-  #     CASE_CORPUS_SHEET_ID=<spreadsheet id>     （必須・未設定ならこのソースごと skip）
-  #     CASE_CORPUS_SHEET_GID=<マスター表タブの gid>（任意・未設定なら下の gid を使う）
+  # 分かるまで yaml にはプレースホルダを置き、実運用では env で後入れする。
+  # **2 つとも必須**（どちらか欠けるとこのエントリは読み込まれない）:
+  #     CASE_CORPUS_SHEET_ID=<spreadsheet id>
+  #     CASE_CORPUS_SHEET_GID=<マスター表タブの gid>
+  # GID を必須にしているのは、typo（例「#gid=123」を貼る）のときに下の gid: 0 へ
+  # 黙って fallback すると、マスター表ではない先頭タブが case_corpus として丸ごと
+  # 取り込まれ事例として朝の DM に出るため（loader は非数値なら error + タブ skip）。
   # env 未設定のときは loader が ingest_sources_skip_unconfigured_env を出して
-  # **この 1 エントリだけ**を落とす。strict mode でも例外にしない＝slack/gdrive/既存
-  # gsheets の取り込みは一切変わらない（貼り忘れで ingest 全断させない）。
+  # **この 1 エントリだけ**を落とす（既定の skip_placeholder=True・本番
+  # scripts/ingest_sources.py が使う経路）。slack/gdrive/既存 gsheets の取り込みは
+  # 一切変わらない。なお strict mode（tests 専用の検査モード）では raise する
+  # ＝貼り忘れプレースホルダの検知に穴を開けない。
+  #
+  # ⚠️ CASE_CORPUS_SHEET_ID に **既存エントリと同じ sheet_id** を貼ってはいけない。
+  # external_id = sheet_id:gid:row_idx なので完全衝突し、documents の
+  # ON CONFLICT DO UPDATE（metadata 全置換）で既存 document の cls_doc_type /
+  # cls_project が spec の並び順だけで黙って書き換わる。loader は重複 sheet_id を
+  # 検知したら ingest_sources_duplicate_sheet_id を error 出力して **当該エントリを
+  # 採用しない**（既存が勝つ）が、貼る前に必ず別シートであることを確認すること。
+  #
+  # ⚠️ 事例の「取り下げ」は **行削除ではなく対外利用可否セルを NG にする**（行は消さない）。
+  # gsheets には stale 検出が無く（上のファイル記録タブの注記 3 と同じ理由）、
+  # external_id が行番号ベースなので:
+  #   - 行を消しても既存 document は残り、翌朝の DM に載り続ける
+  #   - 行を空にしても pipeline は空行を skip するので古い doc が更新されない
+  #   - 行の挿入・削除で全行の external_id がずれ、sticky（前回の ng）が別の事例へ付き替わる
+  # ＝ セルを NG にするのが唯一の確実な取り下げ手段（B-9 の受入条件に含める）。
   #
   # ⚠️ 事例 pptx フォルダ（「20260708_各社成功事例集★クライアント展開NG」「03｜事例」）は
   # **ここに足さない**。Drive のファイルは複数フォルダから辿れるため、NG フォルダと通常
@@ -153,6 +174,13 @@ gsheets:
   # （metadata = EXCLUDED.metadata の全置換）で後勝ちになり、NG 印が黙って消える。
   # v1 の対外利用可否の真実源はこのマスター表の列だけ（計画 §4 論点 2 の推奨 B）。
   # pptx フォルダ取込は C-11（Drive parents 実測 + 2 spec 跨ぎ 0 件の確認が前提）。
+  #
+  # ⚠️ 母集団の選択はユーザー裁定待ち（2026-09-11）。実見メモ
+  # Artifacts/aico-inputs-20260911/case_corpus_columns_20260911.md は「専用の事例集
+  # スプレッドシートは不要。取り込み済みのナレッジ共有フォーム回答（上の 1 件目）が
+  # そのまま母集団に使える」と結論しており、本エントリと正面衝突している。
+  # メモ案を採る場合は **このエントリを消して上の 1 件目に case_corpus を足す**
+  # （同一 sheet_id の 2 重エントリにしない＝上の重複 sheet_id 注記のとおり）。
   - sheet_id: "REPLACE_WITH_CASE_CORPUS_SHEET_ID"
     sheet_id_env: "CASE_CORPUS_SHEET_ID"
     sheet_name: "📍ショート動画施策事例集"

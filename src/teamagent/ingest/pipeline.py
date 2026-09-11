@@ -35,7 +35,13 @@ from teamagent.ingest.content_hash import (
     compute_document_content_hash,
 )
 from teamagent.ingest.docdedup import mark_duplicate_documents
-from teamagent.ingest.form_mappings import CASE_CORPUS_METADATA_KEY, _normalize_form_label
+from teamagent.ingest.form_mappings import (
+    CASE_CATEGORY_METADATA_KEY,
+    CASE_CLS_INDUSTRY_METADATA_KEY,
+    CASE_CORPUS_METADATA_KEY,
+    CASE_INDUSTRY_METADATA_KEY,
+    _normalize_form_label,
+)
 from teamagent.ingest.gsheet_classification_overrides import (
     apply_gsheet_industry_override,
 )
@@ -4091,6 +4097,8 @@ def _ingest_gsheet(
                     error_type=type(exc.__cause__ or exc).__name__,
                 )
                 continue
+        # ヘッダ不一致 warning は **タブ単位**（行ループの外で 1 回だけ立てるフラグ）。
+        case_headers_warned = False
         for row_idx, row in enumerate(tab_rows.rows, start=2):  # 1=headers, 2 から data
             text = format_row_as_document(tab_rows.headers, row)
             if not text.strip():
@@ -4133,10 +4141,14 @@ def _ingest_gsheet(
             case_doc_metadata: dict[str, Any] = {}
             if case_corpus:
                 case_fields = map_case_fields(row_fields)
-                if not case_fields:
+                if not case_fields and not case_headers_warned:
                     # フラグは立っているのにコアヘッダが揃わない＝運用で列名が変わった疑い。
                     # 取り込みは止めない（行は case_corpus として残る）が、対外利用可否は
                     # 名前シグナルと sticky だけで決まるので必ず気づけるようログに出す。
+                    # 判定はタブ内で不変（ヘッダが同一なので全行同じ結果）なので、
+                    # **タブにつき 1 回だけ**出す（数百行のタブで同一 warning を数百行
+                    # 出すと CloudWatch のコストと本命の警告の可読性を損なう）。
+                    case_headers_warned = True
                     logger.warning(
                         "ingest_case_corpus_headers_unmatched",
                         request_id=request_id,
@@ -4164,6 +4176,15 @@ def _ingest_gsheet(
                 case_doc_metadata["case_external_use"] = external_use.value
                 if external_use.note:
                     case_doc_metadata["case_external_use_note"] = external_use.note
+                # 計画 §120「カテゴリ → 業種」。既存の業種絞り込み規約（classify が
+                # cls_industry と industry の 2 本を書き、検索 / 集計は industry を引く）
+                # に人手のカテゴリ列を載せる。これをやらないと B-9 の
+                # list_case_studies(industry=...) が Haiku 推定値に当たり、分類 OFF /
+                # 失敗の run では industry が 1 件も載らず同業種フォールバックが 0 件になる。
+                case_category = case_fields.get(CASE_CATEGORY_METADATA_KEY, "").strip()
+                if case_category:
+                    case_doc_metadata[CASE_INDUSTRY_METADATA_KEY] = case_category
+                    case_doc_metadata[CASE_CLS_INDUSTRY_METADATA_KEY] = case_category
 
             # 営業FB/ナレッジ共有フォームは実列「タイムスタンプ」を持つ。従来は本文から
             # 運用列として外したうえ modified_at=None にしていたため、正しい日時が DB へ
@@ -4290,6 +4311,19 @@ def _ingest_gsheet(
                     client_name=derived_knowledge_client,
                     classification_metadata=cls_metadata,
                 )
+                # 事例集だけは業種キーで人間入力 > Haiku（合成順は cls が後勝ちなので、
+                # ここで cls 側から industry/cls_industry を落として人手の値を残す）。
+                # 既存 2 シートは case_doc_metadata が空＝この分岐に入らない。
+                if case_doc_metadata.get(CASE_INDUSTRY_METADATA_KEY):
+                    cls_metadata = {
+                        k: v
+                        for k, v in cls_metadata.items()
+                        if k
+                        not in (
+                            CASE_INDUSTRY_METADATA_KEY,
+                            CASE_CLS_INDUSTRY_METADATA_KEY,
+                        )
+                    }
 
             # 差分取り込み: 次回 run の照合用に content hash を metadata へ保存する
             # （OFF なら一切書かない＝従来とバイト等価の metadata）。

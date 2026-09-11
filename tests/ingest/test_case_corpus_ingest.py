@@ -3,16 +3,23 @@
 対象:
 - ``form_mappings.map_case_fields`` / ``normalize_case_external_use`` /
   ``find_case_ng_name`` / ``resolve_case_external_use``
-- ``loader`` の ID 後入れ（``sheet_id_env`` / ``gid_env``・未設定なら skip）
-- ``pipeline._ingest_gsheet`` の事例集経路（metadata 付与・sticky・fail-closed）
+- ``form_mappings.scrub_case_external_use_note``（表示 note は必ずスクラブ済み）
+- ``loader`` の ID 後入れ（``sheet_id_env`` / ``gid_env``・未設定なら skip）と
+  **重複 sheet_id の拒否**（env 誤貼りで既存 document を書き潰さない）
+- ``pipeline._ingest_gsheet`` の事例集経路（metadata 付与・sticky・fail-closed・
+  カテゴリ → industry）
 - **既存 2 シートへの副作用ゼロ**（cls_doc_type / cls_project が動かないこと）
 
 フェイクは本番の失敗モードを再現する:
 - 「対外利用可否」列が **存在しない** シート（列追加はユーザー検討中＝v1 の正常系）
 - 空セル（未記入）・全角/半角の揺れた列名
+- 否定・保留表現（未公開 / 公開前 / 可否未定 / 可否確認中）＝ok へ倒すと fail-OPEN
+- 実データの注意書き（取扱注意 / confidential / 社外秘）がフォルダ名にしか無い行
 - 再取込で列が消えた行（前回 ng）→ metadata 全置換で ⚠ が消える事故
 - sticky 読み出しが例外（RDS 一時障害）→ ⚠ を降格させずタブごと見送る
-- 0 行のタブ
+- env に既存シートの sheet_id / gid を貼ってしまった状態（external_id 完全衝突）
+- CASE_CORPUS_SHEET_GID の typo（「#gid=…」等）→ gid 0 のタブを掴む事故
+- 0 行のタブ / 数百行のタブ（同一 warning の洪水）
 """
 
 from __future__ import annotations
@@ -23,13 +30,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from teamagent.ingest import pipeline as pipeline_module
 from teamagent.ingest.form_mappings import (
+    CASE_EXTERNAL_USE_NOTE_MAX_LEN,
+    CASE_INDUSTRY_METADATA_KEY,
     derive_knowledge_client_name,
     find_case_ng_name,
     map_case_fields,
     map_knowledge_fields,
     normalize_case_external_use,
     resolve_case_external_use,
+    scrub_case_external_use_note,
 )
 from teamagent.ingest.loader import GSheetSpec, GSheetsTabSpec, load_ingest_sources
 from teamagent.ingest.slack_fb_parser import map_fb_fields
@@ -183,12 +194,17 @@ def test_map_case_fields_returns_empty_for_arbitrary_sheet() -> None:
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
+        # ok は **完全一致ホワイトリスト**のみ
         ("可", "ok"),
         ("OK", "ok"),
         ("○", "ok"),
         ("〇", "ok"),
-        ("展開可", "ok"),
         ("ＯＫ", "ok"),  # 全角（NFKC）
+        ("社外提示OK", "ok"),
+        ("公開可", "ok"),
+        ("対外利用可", "ok"),
+        ("  可  ", "ok"),  # 前後空白は正規化で落ちる
+        # ng は部分一致
         ("NG", "ng"),
         ("ng", "ng"),
         ("不可", "ng"),  # 「可」を含むが ng が勝つ
@@ -197,11 +213,13 @@ def test_map_case_fields_returns_empty_for_arbitrary_sheet() -> None:
         ("クライアント展開NG", "ng"),
         ("confidential", "ng"),
         ("非公開", "ng"),  # 「公開」を含むが ng が勝つ
+        # どちらでもない＝unknown（＝「資料で確認」表示。ok へ倒さない）
         ("", "unknown"),
         ("   ", "unknown"),
         (None, "unknown"),
         ("要確認", "unknown"),
         ("営業に確認", "unknown"),
+        ("展開可", "unknown"),  # 肯定的だが白名簿外＝安全側の unknown
     ],
 )
 def test_normalize_case_external_use(raw: str | None, expected: str) -> None:
@@ -211,11 +229,34 @@ def test_normalize_case_external_use(raw: str | None, expected: str) -> None:
 def test_normalize_case_external_use_checks_ng_before_ok() -> None:
     """ng を先に評価する（順序が安全装置そのもの）。
 
-    変異: ok マーカーを先に見るようにすると「不可」「非公開」が ok になり赤。
+    変異: ok を先に見るようにすると「不可」「非公開」が ok になり赤。
     """
     assert normalize_case_external_use("不可") == "ng"
     assert normalize_case_external_use("非公開") == "ng"
     assert normalize_case_external_use("口頭のみ可") == "ng"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "未公開",  # 部分一致時代は「公開」を含むので ok だった
+        "公開前",
+        "※プレゼン前です。公開前",
+        "可否未定",  # 「可」を含むので ok だった
+        "可否確認中",
+        "社外提示可否",
+        "確認中（公開は要相談）",
+    ],
+)
+def test_confidential_and_pending_phrases_never_become_ok(raw: str) -> None:
+    """否定・保留表現を ok に倒さない（この PR の唯一の安全装置が fail-OPEN しない）。
+
+    実測（修正前）: 「未公開」「公開前」「可否未定」「可否確認中」がすべて ok になり、
+    まだ出せない事例が ⚠ なしで朝の DM に載っていた。ng マーカーは「不可 / 非公開」
+    しか救っておらず、「未」「前」「否」系を素通ししていた。
+    変異: ok を部分一致（_CASE_OK_VALUE_EXACT を「いずれかを含む」）に戻すと赤。
+    """
+    assert normalize_case_external_use(raw) != "ok"
 
 
 # ===========================================================
@@ -230,6 +271,28 @@ def test_find_case_ng_name_detects_markers() -> None:
     assert find_case_ng_name(["口頭紹介のみ_事例"]) == "口頭紹介のみ_事例"
     # 全角 NG / 小文字 ng も拾う
     assert find_case_ng_name(["展開ｎｇ資料"]) == "展開ｎｇ資料"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # 実見メモ case_corpus_columns_20260911.md が実データで挙げた注意書き
+        "20250618_フラットベース社の共有（取扱注意）",
+        "20250618_フラットベース社の共有（取り扱い注意）",
+        "03｜事例（confidential）",
+        "03｜事例（Confidential）",
+        "社外秘_事例集",
+        "非公開_事例まとめ",
+    ],
+)
+def test_find_case_ng_name_detects_confidential_markers_in_names(name: str) -> None:
+    """値マーカー側にしか無かった語を名前でも効かせる（資料名列が names に渡る）。
+
+    実測（修正前）: 名前由来 NG は 展開NG / 開示NG / 口頭 の 3 語だけで、実データで
+    最も多い「取扱注意」も confidential / 社外秘 / 非公開 も None だった。
+    変異: _CASE_NG_NAME_MARKERS から追加分を外すと赤。
+    """
+    assert find_case_ng_name([name]) == name
 
 
 def test_find_case_ng_name_returns_none_for_safe_names() -> None:
@@ -298,6 +361,62 @@ def test_resolve_previous_ok_is_not_sticky() -> None:
 
 
 # ===========================================================
+# note は必ずスクラブ済み（表示文言としてそのまま人目に出る）
+# ===========================================================
+def test_scrub_case_external_use_note_removes_urls_and_emails() -> None:
+    """URL・メールアドレス・改行は note に残さない。
+
+    spec_delta §3-4 は note を「表示文言（スクラブ済み）」と定義しており、朝の DM の
+    ⚠ 注記としてそのまま出る。セルに URL や担当者メールが書かれていても無加工で
+    metadata に入れない。
+    変異: scrub_case_external_use_note を「生値をそのまま返す」に戻すと赤。
+    """
+    note = scrub_case_external_use_note(
+        "NG\n担当 sato@example.co.jp に確認\nhttps://drive.google.com/file/d/abc?usp=sharing"
+    )
+    assert note is not None
+    assert "http" not in note
+    assert "@" not in note
+    assert "\n" not in note
+    assert note.startswith("NG")
+
+
+def test_scrub_case_external_use_note_truncates_long_text() -> None:
+    """長文セルは 80 文字で打ち切る（DM の ⚠ 行が壊れない）。"""
+    note = scrub_case_external_use_note("あ" * 300)
+    assert note is not None
+    assert len(note) == CASE_EXTERNAL_USE_NOTE_MAX_LEN
+    assert note.endswith("…")
+
+
+def test_scrub_case_external_use_note_returns_none_when_nothing_left() -> None:
+    assert scrub_case_external_use_note(None) is None
+    assert scrub_case_external_use_note("   ") is None
+    assert scrub_case_external_use_note("https://example.com/x") is None
+
+
+def test_resolve_returns_scrubbed_note_on_every_path() -> None:
+    """3 経路（column / 名前 / sticky）すべてでスクラブ済みの note が返る。
+
+    変異: resolve_case_external_use のどれか 1 経路で scrub を外すと赤。
+    """
+    from_column = resolve_case_external_use(column_value="NG https://x.example/doc 要相談")
+    assert from_column.note is not None and "http" not in from_column.note
+
+    from_name = resolve_case_external_use(
+        names=["03｜事例（取扱注意）https://drive.example/folder"]
+    )
+    assert from_name.value == "ng"
+    assert from_name.note is not None and "http" not in from_name.note
+
+    from_previous = resolve_case_external_use(
+        previous="ng", previous_note="展開NG\nhttps://drive.example/folder"
+    )
+    assert from_previous.value == "ng"
+    assert from_previous.note is not None and "http" not in from_previous.note
+
+
+# ===========================================================
 # loader — ID 後入れ（sheet_id_env / gid_env）
 # ===========================================================
 def _real_case_entry(sources: Any) -> GSheetSpec | None:
@@ -326,19 +445,76 @@ def test_real_yaml_case_entry_is_skipped_when_env_unset(
     assert all(s.extra_metadata.get("case_corpus") is None for s in sources.gsheets)
 
 
-def test_real_yaml_case_entry_does_not_break_strict_mode(
+def test_strict_mode_raises_for_unconfigured_sheet_id_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """strict mode（skip_placeholder=False）でも例外にしない。
+    """strict mode（skip_placeholder=False）は未設定の sheet_id_env で raise する。
 
-    scripts/ingest_sources.py は起動時にこの loader を通す単一プロセスなので、
-    ここで raise すると sheet_id 未確定の 1 エントリだけで slack/gdrive/既存 gsheets
-    ごと ingest が全断する。
-    変異: sheet_id_env 宣言済でも strict で raise させると赤。
+    strict は **tests からしか呼ばれない検査モード**（本番 scripts/ingest_sources.py:95 は
+    既定の skip_placeholder=True）。sheet_id_env を宣言すれば strict を素通りできる、に
+    してしまうと「貼り忘れプレースホルダ」の検知に永久の穴が空く。逃げ道は yaml では
+    なくテスト側（下の test_real_yaml_strict_mode_* が env を入れて通す）に置く。
+    変異: strict で warning + skip に戻すと raise せず赤。
     """
     monkeypatch.delenv("CASE_CORPUS_SHEET_ID", raising=False)
-    sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
+    monkeypatch.delenv("CASE_CORPUS_SHEET_GID", raising=False)
+    with pytest.raises(ValueError, match="sheet_id_env"):
+        load_ingest_sources(REAL_YAML, skip_placeholder=False)
+
+
+def test_default_mode_skips_only_the_unconfigured_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """本番経路（既定 skip_placeholder=True）は当該 1 エントリだけ落として続行する。
+
+    sheet_id 未確定の 1 エントリで slack/gdrive/既存 gsheets ごと ingest を全断させない。
+    """
+    monkeypatch.delenv("CASE_CORPUS_SHEET_ID", raising=False)
+    monkeypatch.delenv("CASE_CORPUS_SHEET_GID", raising=False)
+    sources = load_ingest_sources(REAL_YAML)
     assert len(sources.gsheets) == 2
+    assert len(sources.slack_channels) >= 1
+    assert len(sources.gdrive_folders) >= 1
+
+
+def test_case_sheet_id_colliding_with_an_existing_sheet_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """env に **既存シートの sheet_id** を貼っても事例集エントリは採用されない。
+
+    実証していた事故: CASE_CORPUS_SHEET_ID=1jRmoUPo…（ナレッジ共有）を入れると
+    gsheets が 3 件になり 1 件目と 3 件目の sheet_id / gid が同一になる。
+    external_id = sheet_id:gid:row_idx なので完全衝突し、documents の
+    ON CONFLICT DO UPDATE（metadata = EXCLUDED.metadata の全置換）で既存 document の
+    metadata が case_* 付きに丸ごと差し替わる（cls_doc_type / cls_project が spec の
+    並び順だけで黙って変わる）＋ ingest_source_health の行も衝突する。
+    実見メモ case_corpus_columns_20260911.md が「そのシートを母集団に使え」と結論して
+    いるため、この ID が貼られる確率は現実的に高い。
+    変異: loader の重複 sheet_id 検査を外すと gsheets が 3 件になって赤。
+    """
+    knowledge_sheet_id = "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo"
+    monkeypatch.setenv("CASE_CORPUS_SHEET_ID", knowledge_sheet_id)
+    monkeypatch.setenv("CASE_CORPUS_SHEET_GID", "278789217")  # 同一 gid まで揃える
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
+
+    assert [s.sheet_id for s in sources.gsheets] == [
+        knowledge_sheet_id,
+        "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
+    ]
+    assert _real_case_entry(sources) is None
+    # 既存エントリが勝つ＝case_corpus フラグは 1 つも立たない
+    assert all(s.extra_metadata.get("case_corpus") is None for s in sources.gsheets)
+    # 同一 (sheet_id, gid) を 2 回名乗る spec が存在しない＝external_id は衝突し得ない
+    pairs = [(s.sheet_id, t.gid) for s in sources.gsheets for t in s.tabs]
+    assert len(pairs) == len(set(pairs))
+
+
+def test_duplicate_sheet_id_raises_in_strict_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """strict mode では重複 sheet_id を raise で止める（検査モードとして黙らない）。"""
+    monkeypatch.setenv("CASE_CORPUS_SHEET_ID", "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo")
+    monkeypatch.setenv("CASE_CORPUS_SHEET_GID", "278789217")
+    with pytest.raises(ValueError, match="duplicate sheet_id"):
+        load_ingest_sources(REAL_YAML, skip_placeholder=False)
 
 
 def test_real_yaml_case_entry_resolves_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,24 +534,36 @@ def test_real_yaml_case_entry_resolves_from_env(monkeypatch: pytest.MonkeyPatch)
     ]
 
 
-def test_case_entry_gid_falls_back_to_yaml_when_env_absent_or_invalid(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("bad_gid", ["", "not-a-number", "#gid=278789217", " 12 34 "])
+def test_case_entry_is_dropped_when_gid_env_is_unset_or_invalid(
+    monkeypatch: pytest.MonkeyPatch, bad_gid: str
 ) -> None:
-    """gid_env は任意。未設定・非数値なら yaml の gid を使う（起動失敗させない）。"""
-    monkeypatch.setenv("CASE_CORPUS_SHEET_ID", CASE_SHEET_ID)
-    monkeypatch.delenv("CASE_CORPUS_SHEET_GID", raising=False)
-    spec = _real_case_entry(load_ingest_sources(REAL_YAML, skip_placeholder=True))
-    assert spec is not None and [t.gid for t in spec.tabs] == [0]
+    """gid_env は **fallback しない**。未設定・非数値なら当該タブごと落とす。
 
-    monkeypatch.setenv("CASE_CORPUS_SHEET_GID", "not-a-number")
-    spec = _real_case_entry(load_ingest_sources(REAL_YAML, skip_placeholder=True))
-    assert spec is not None and [t.gid for t in spec.tabs] == [0]
+    yaml の gid: 0 へ黙って fallback すると、CASE_CORPUS_SHEET_GID の typo（「#gid=…」を
+    そのまま貼る等）でマスター表ではない先頭タブが case_corpus として丸ごと取り込まれ、
+    事例として朝の DM に出る。読めるタブが 1 つも無くなった spec は採用しない。
+    変異: 非数値時に yaml の gid へ fallback させると gid 0 の spec が返って赤。
+    """
+    monkeypatch.setenv("CASE_CORPUS_SHEET_ID", CASE_SHEET_ID)
+    if bad_gid:
+        monkeypatch.setenv("CASE_CORPUS_SHEET_GID", bad_gid)
+    else:
+        monkeypatch.delenv("CASE_CORPUS_SHEET_GID", raising=False)
+    sources = load_ingest_sources(REAL_YAML, skip_placeholder=True)
+    assert _real_case_entry(sources) is None
+    assert [s.sheet_id for s in sources.gsheets] == [
+        "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
+        "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
+    ]
 
 
 def test_case_entry_env_holding_a_placeholder_is_treated_as_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """env に雛形文字列がそのまま入っていた場合も「未設定」扱いで skip する。"""
+    # gid 側は正しく入っている状況を作り、落ちる理由が sheet_id だけであることを固定する。
+    monkeypatch.setenv("CASE_CORPUS_SHEET_GID", str(CASE_GID))
     monkeypatch.setenv("CASE_CORPUS_SHEET_ID", "REPLACE_WITH_CASE_CORPUS_SHEET_ID")
     assert _real_case_entry(load_ingest_sources(REAL_YAML, skip_placeholder=True)) is None
     monkeypatch.setenv("CASE_CORPUS_SHEET_ID", "   ")
@@ -747,13 +935,14 @@ def test_knowledge_sheet_metadata_is_byte_identical_without_case_keys(
     assert repo.metadata_lookup_calls == []
 
 
-def test_case_sheet_external_ids_cannot_collide_with_existing_documents(
+def test_case_sheet_external_ids_touch_only_the_case_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """事例集の external_id は別 sheet_id 名前空間なので既存 document を UPSERT しない。
+    """事例集の取込は自分の (sheet_id, gid) 名前空間の external_id しか触らない。
 
-    ＝ 取込前後で既存 document の cls_doc_type / cls_project は 1 件も動かない
-    （同じ (source_type, external_id) に当たらない限り ON CONFLICT が発火しないため）。
+    ⚠️ これは「衝突し得ない」の証明ではない（別 sheet_id を渡している以上、自明に真）。
+    衝突し得る唯一の経路＝env に既存 sheet_id が入る場合の検査は loader 側の
+    test_case_sheet_id_colliding_with_an_existing_sheet_is_rejected が受け持つ。
     """
     _install_fake_sheets(
         monkeypatch,
@@ -768,11 +957,94 @@ def test_case_sheet_external_ids_cannot_collide_with_existing_documents(
 
     touched = {c["external_id"] for c in repo.upsert_calls}
     assert touched == {f"{CASE_SHEET_ID}:{CASE_GID}:2", f"{CASE_SHEET_ID}:{CASE_GID}:3"}
-    for existing_sheet in (
-        "1jRmoUPo0kAhOGA6secGcwGHILH5LHt7lYvEuxJ5uupo",
-        "1VukC1Qv0MRqxSvgxuSqDwzpPsM_K1FJNTpTXs10KQhY",
-    ):
-        assert not any(eid.startswith(existing_sheet) for eid in touched)
+
+
+def test_case_category_lands_on_the_industry_filter_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """カテゴリ列の値が既存の業種絞り込みキー（industry）に載る。
+
+    計画 §120 は「カテゴリ → 業種」。既存規約は classify.as_metadata が cls_industry と
+    industry の 2 本を書き、検索（pgvector_client の filter_industry）も集計も
+    ``metadata->>'industry'`` を引く。case_category にしか書かないと B-9 の
+    list_case_studies(industry=...) が当たらない。
+    変異: pipeline の industry 書き込みを外すと赤。
+    """
+    _install_fake_sheets(
+        monkeypatch,
+        headers=_CASE_HEADERS_NO_USE_COLUMN,
+        rows=(("観光・テーマパーク", "ジャングリア沖縄", "TTO", "ネガ比率改善", "清水"),),
+    )
+    repo = _FakeCaseRepository()
+    _run_ingest(_case_spec(), repo)
+
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["case_category"] == "観光・テーマパーク"  # 生の列値も残す
+    assert md[CASE_INDUSTRY_METADATA_KEY] == "観光・テーマパーク"
+    assert CASE_INDUSTRY_METADATA_KEY == "industry"
+
+
+def test_case_category_beats_haiku_industry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """分類が動く run でも、人手のカテゴリ列が Haiku 推定の業種に勝つ。
+
+    合成順は cls_* が後勝ちなので、対策しないと industry / cls_industry が推定値に
+    書き換わり、同業種フォールバックが人手の値で引けなくなる。
+    変異: cls 側から industry/cls_industry を落とす処理を外すと「日用品」になって赤。
+    """
+    from teamagent.ingest.classify import DocClassification
+
+    class _StubClassifier:
+        def classify(self, *, title: str, text: str, request_id: str, **kw: Any) -> Any:
+            return DocClassification(
+                project="アース製薬", industry="日用品", doc_type="提案書", phase="提案"
+            )
+
+    monkeypatch.setattr(
+        "teamagent.ingest.classify.build_classifier_from_env", lambda: _StubClassifier()
+    )
+    _install_fake_sheets(
+        monkeypatch,
+        headers=_CASE_HEADERS_NO_USE_COLUMN,
+        rows=(("金融", "JCB", "JCB×USJ", "指名検索5倍", "望月"),),
+    )
+    repo = _FakeCaseRepository()
+    _run_ingest(_case_spec(), repo)
+
+    md = repo.upsert_calls[0]["metadata"]
+    assert md["industry"] == "金融"
+    assert md["cls_industry"] == "金融"
+    # 業種以外の分類結果は従来どおり併存する（分類を殺していない）
+    assert md["cls_doc_type"] == "提案書"
+    assert md["cls_project"] == "アース製薬"
+
+
+def test_headers_unmatched_warning_is_emitted_once_per_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ヘッダ不一致 warning はタブにつき 1 回（行数ぶん出さない）。
+
+    判定はタブ内で不変（ヘッダが同一なので全行同じ結果）。数百行のマスター表で同一
+    warning を数百行出すと CloudWatch のコストと本命の警告の可読性を損なう。
+    変異: フラグを消して行ループ内で毎回出すと 5 になって赤。
+    """
+    _install_fake_sheets(
+        monkeypatch,
+        headers=("col1", "col2", "col3"),
+        rows=tuple((f"a{i}", f"b{i}", f"c{i}") for i in range(5)),
+    )
+    repo = _FakeCaseRepository()
+    warned: list[str] = []
+    real_warning = pipeline_module.logger.warning
+
+    def _record(event: str, **kw: Any) -> None:
+        warned.append(event)
+        real_warning(event, **kw)
+
+    monkeypatch.setattr(pipeline_module.logger, "warning", _record)
+    docs_n, _ = _run_ingest(_case_spec(), repo)
+
+    assert docs_n == 5  # 取り込みは止めない
+    assert warned.count("ingest_case_corpus_headers_unmatched") == 1
 
 
 def test_derive_knowledge_client_name_is_unchanged() -> None:

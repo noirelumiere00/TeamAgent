@@ -244,6 +244,25 @@ CASE_EXTERNAL_USE_OK = "ok"
 CASE_EXTERNAL_USE_NG = "ng"
 CASE_EXTERNAL_USE_UNKNOWN = "unknown"
 
+# 事例集の「カテゴリ」列（＝計画 §120 の業種）を載せる metadata key。
+# 既存の業種フィルタは classify.as_metadata が cls_industry と industry の 2 本を書き、
+# 検索側（adapters/pgvector_client.py の filter_industry）と slack_fb_parser の
+# 集計はどちらも ``metadata->>'industry'`` を引く。事例集の同業種フォールバック
+# （B-9 の list_case_studies(industry=...)）がこの既存規約に乗れるよう、
+# 人手で書かれたカテゴリ列の値を **industry へも** 書く。B-9 は case_category を
+# 直接知らなくてよい（この定数を import して使う契約）。
+CASE_INDUSTRY_METADATA_KEY = "industry"
+# 同値を Haiku 推定の cls_industry へも上書きする（人間入力 > 推定）。分類が OFF /
+# 失敗した run でも industry が載ることを保証するのは pipeline 側の責務。
+CASE_CLS_INDUSTRY_METADATA_KEY = "cls_industry"
+CASE_CATEGORY_METADATA_KEY = "case_category"
+
+# 表示用 note（朝の DM の ⚠ 注記にそのまま出る）の上限。
+# spec_delta §3-4 は内部表現を「external_use_note（表示文言・スクラブ済み）」と
+# 定義している。生セルには担当者名・他社名・URL が書かれうるので、metadata へ
+# 入る時点で必ずスクラブする（消費側の善意に依存しない）。
+CASE_EXTERNAL_USE_NOTE_MAX_LEN = 80
+
 # canonical ラベル → metadata JSONB key。
 # case_external_use_source は **生セル** で、pipeline が resolve_case_external_use を
 # 通して case_external_use（3 値）＋ case_external_use_note（表示用の理由）へ置換する
@@ -315,8 +334,14 @@ _CASE_LABEL_ALIASES: dict[str, str] = {
 _CASE_CORE_LABELS = frozenset({"企業名", "カテゴリ", "商材", "効果", "営業担当"})
 _CASE_MIN_CORE_HITS = 3
 
-# 「対外利用可否」セルの値域。NFKC + casefold 後の **部分一致** で見る。
-# ⚠️ ng を先に見る（「不可」は「可」を含む・「非公開」は「公開」を含む）。
+# 「対外利用可否」セルの値域。
+# ⚠️ 非対称に見るのが安全装置の本体（2026-09-11 レビュー指摘 #1 の修正）:
+#   - ng は **部分一致**（「NG（社外秘のため）」のような自由記述を拾う）
+#   - ok は **完全一致ホワイトリスト**（部分一致だと否定・保留表現が ok へ倒れる）
+# 旧実装は ok も部分一致だったため、ng マーカーに当たらない
+#   「未公開」（"公開" を含む）/「公開前」/「可否未定」（"可" を含む）/「可否確認中」
+# が全て ok になっていた＝まだ出せない事例が ⚠ なしで朝の DM に載る fail-OPEN。
+# ok に当たらない語は **unknown**（＝「資料で確認」表示）へ倒す。unknown は安全側。
 _CASE_NG_VALUE_MARKERS: tuple[str, ...] = (
     "ng",
     "不可",
@@ -329,20 +354,41 @@ _CASE_NG_VALUE_MARKERS: tuple[str, ...] = (
     "confidential",
     "secret",
 )
-_CASE_OK_VALUE_MARKERS: tuple[str, ...] = (
-    "ok",
-    "可",
-    "○",
-    "〇",
-    "◯",
-    "yes",
-    "公開",
-    "true",
+# ⚠️ **完全一致**（_normalize_case_value 後の値そのもの）でのみ ok。語を足すときは
+# 「その語を含む否定・保留表現が存在しないか」ではなく「その語**そのもの**が
+# 肯定か」だけ考えればよい＝部分一致時代の語彙事故が構造的に起きない。
+_CASE_OK_VALUE_EXACT: frozenset[str] = frozenset(
+    {
+        "ok",
+        "可",
+        "○",
+        "〇",
+        "◯",
+        "yes",
+        "true",
+        "社外提示ok",
+        "公開可",
+        "対外利用可",
+    }
 )
 
-# フォルダ名・ファイル名・シート名に現れたら対外利用 NG と断じる語（要望原文の 3 語）。
+# フォルダ名・ファイル名・シート名に現れたら対外利用 NG と断じる語。
 # 例: 「20260708_各社成功事例集★クライアント展開NG」「03｜事例（開示NG）」「口頭のみ」。
-_CASE_NG_NAME_MARKERS: tuple[str, ...] = ("展開ng", "開示ng", "口頭")
+# 2026-09-11 追加（実見メモ case_corpus_columns_20260911.md）: 実データで最も多い
+# 注意書きは「取扱注意」（例「20250618_フラットベース社の共有（取扱注意）」）で、
+# 値マーカー側にしか無かった 社外秘 / confidential / 非公開 も名前で効かせる。
+# 名前シグナルは ng 側にしか無い（ok へ倒す名前判定は存在しない）ので、語を足しても
+# 単調性（ng は降格しない）は壊れない。
+_CASE_NG_NAME_MARKERS: tuple[str, ...] = (
+    "展開ng",
+    "開示ng",
+    "口頭",
+    "取扱注意",
+    "取り扱い注意",
+    "confidential",
+    "社外秘",
+    "非公開",
+)
 
 # 末尾の括弧注記（「効果（数値）」「営業担当（社内）」等）。ヘッダ正規化で落とす。
 _CASE_LABEL_PAREN_RE = re.compile(r"[（(][^（()）]*[）)]\s*$")
@@ -416,14 +462,22 @@ def normalize_case_external_use(value: str | None) -> str:
     """「対外利用可否」セルを 3 値（ok / ng / unknown）へ正規化する。
 
     空セル・未知語は **unknown**（「列が無い/書かれていない」を ng にも ok にも倒さない）。
-    ng を先に見るので「不可」が「可」に、「非公開」が「公開」に誤って当たることはない。
+
+    判定は非対称:
+      1. ng マーカーの **部分一致**（「NG（社外秘）」等の自由記述を拾う）
+      2. ok は **完全一致ホワイトリスト**のみ
+      3. どちらでもなければ unknown
+
+    2 を部分一致に緩めると「未公開」「公開前」「可否未定」「可否確認中」が ok へ倒れる
+    （いずれも ng マーカーに当たらない）。この関数はこの PR の唯一の安全装置なので、
+    判定不能は必ず unknown（＝「資料で確認」）へ落とす。
     """
     normalized = _normalize_case_value(value)
     if not normalized:
         return CASE_EXTERNAL_USE_UNKNOWN
     if any(marker in normalized for marker in _CASE_NG_VALUE_MARKERS):
         return CASE_EXTERNAL_USE_NG
-    if any(marker in normalized for marker in _CASE_OK_VALUE_MARKERS):
+    if normalized in _CASE_OK_VALUE_EXACT:
         return CASE_EXTERNAL_USE_OK
     return CASE_EXTERNAL_USE_UNKNOWN
 
@@ -442,11 +496,43 @@ def find_case_ng_name(names: Sequence[str | None]) -> str | None:
     return None
 
 
+_CASE_NOTE_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+_CASE_NOTE_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def scrub_case_external_use_note(raw: str | None) -> str | None:
+    """表示用 note を作る（**必ずスクラブ済み**であることがこの関数の不変条件）。
+
+    note は朝の DM の ⚠ 注記としてそのまま人目に出る。生セル／フォルダ名には
+    URL・メールアドレス・改行混じりの長文が入りうるので、metadata へ載せる前に:
+
+      1. URL（https?:// … / www. …）とメールアドレスを除去
+      2. 改行・タブ・連続空白を 1 個の半角空白へ潰す
+      3. CASE_EXTERNAL_USE_NOTE_MAX_LEN 文字で打ち切り（末尾に「…」）
+
+    他社名・担当者名は語彙が閉じないので機械的には落とせない。落とせない分は
+    B-9 側の表示で「事例の出典名」として扱う（PR 本文に明記）。
+    空になったら None（＝注記なし）。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    text = _CASE_NOTE_URL_RE.sub("", text)
+    text = _CASE_NOTE_EMAIL_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text.replace("　", " ")).strip()
+    if not text:
+        return None
+    if len(text) > CASE_EXTERNAL_USE_NOTE_MAX_LEN:
+        text = text[: CASE_EXTERNAL_USE_NOTE_MAX_LEN - 1].rstrip() + "…"
+    return text or None
+
+
 class CaseExternalUse(NamedTuple):
     """対外利用可否の判定結果。
 
     value: ok / ng / unknown
-    note:  表示用の理由（生セル文言 or NG を検知した名前）。理由が無ければ None。
+    note:  表示用の理由（スクラブ済み）。理由が無ければ None。
+           **生セルそのものではない**（scrub_case_external_use_note を必ず通す）。
     """
 
     value: str
@@ -473,13 +559,13 @@ def resolve_case_external_use(
     ok は sticky にしない（unknown へ落ちるのは安全側の劣化なので許す）。
     """
     if normalize_case_external_use(previous) == CASE_EXTERNAL_USE_NG:
-        note = (previous_note or "").strip() or None
-        return CaseExternalUse(CASE_EXTERNAL_USE_NG, note)
+        # previous_note は前回この関数がスクラブして書いた値だが、DB 由来の入力なので
+        # ここでももう一度通す（「note は常にスクラブ済み」を単一地点で保証する）。
+        return CaseExternalUse(CASE_EXTERNAL_USE_NG, scrub_case_external_use_note(previous_note))
 
     ng_name = find_case_ng_name(names)
     if ng_name is not None:
-        return CaseExternalUse(CASE_EXTERNAL_USE_NG, ng_name)
+        return CaseExternalUse(CASE_EXTERNAL_USE_NG, scrub_case_external_use_note(ng_name))
 
     value = normalize_case_external_use(column_value)
-    note = (column_value or "").strip() or None
-    return CaseExternalUse(value, note)
+    return CaseExternalUse(value, scrub_case_external_use_note(column_value))
