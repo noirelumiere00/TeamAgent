@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from teamagent.adapters.gcalendar_client import extract_events
+from teamagent.identity import KEY_IDENTITY_VERIFIED
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest.schema import CalendarEventItem
 from teamagent.skills.pre_meeting_brief.schema import PreMeetingBriefInput
@@ -163,7 +164,18 @@ class _FakePg:
 
 
 def _ctx(**meta: Any) -> SkillContext:
-    base: dict[str, Any] = {"user_email": USER, "channel_id": "D001"}
+    """正規の呼び出し元と同じ metadata（``identity_verified`` を **明示** する）。
+
+    ⚠️ 本物の gateway は True/False を必ず明示して渡す（mcp_gateway/server.py:509 / :578）。
+    ここでフェイクが省略すると、skill 側の既定が fail-open でも気づけない
+    （実際に既定 True のまま通っていた）。省略した場合の挙動は
+    ``test_identity_unverified_metadata_blocks_the_body`` が別に固定する。
+    """
+    base: dict[str, Any] = {
+        "user_email": USER,
+        "channel_id": "D001",
+        KEY_IDENTITY_VERIFIED: True,
+    }
     base.update(meta)
     return SkillContext(request_id="req-test", metadata=base)
 
@@ -199,6 +211,56 @@ def test_tool_path_blocks_non_dm_surfaces(channel_id: str) -> None:
     assert out.external_count == 0
     assert out.scanned is False
     assert pg.connect_kwargs == []  # 金庫にも触らない
+
+
+def test_identity_unverified_metadata_blocks_the_body() -> None:
+    """``identity_verified`` が **metadata に無い** 呼び出しは定型文だけ（deny-by-default）。
+
+    ``channel_id='D…'`` で DM に見えていても、本人がサーバ側で確定していなければ
+    社名も件数も出さない。identity.py の ``no_access_metadata``(:77) /
+    ``company_member_metadata``(:111) はどちらも ``identity_verified=False`` を明示して
+    おり、private_surface の docstring も deny-by-default を宣言している。
+
+    変異: ``skill.py`` の ``verified`` を ``bool(meta.get(KEY_IDENTITY_VERIFIED, True))``
+    （既定 True）へ戻すと、本人未確認のまま本文が描かれて赤。
+    """
+    pg = _FakePg()
+    skill = PreMeetingBriefSkill(pg=pg)
+    ctx = SkillContext(
+        request_id="req-test",
+        metadata={"user_email": USER, "channel_id": "D001"},  # identity_verified なし
+    )
+    out = skill.run(PreMeetingBriefInput(), ctx)
+    assert out.message == SURFACE_BLOCKED_MESSAGE
+    assert out.items == []
+    assert out.external_count == 0
+    assert out.scanned is False
+    assert pg.connect_kwargs == []
+
+
+def test_identity_verified_false_blocks_the_body() -> None:
+    """``identity_verified=False`` を明示した経路も同じく定型文だけ。"""
+    pg = _FakePg()
+    out = PreMeetingBriefSkill(pg=pg).run(
+        PreMeetingBriefInput(), _ctx(**{KEY_IDENTITY_VERIFIED: False})
+    )
+    assert out.message == SURFACE_BLOCKED_MESSAGE
+    assert pg.connect_kwargs == []
+
+
+@pytest.mark.parametrize("value", ["true", 1, "1", "yes"])
+def test_identity_verified_must_be_a_real_bool(value: Any) -> None:
+    """真偽値でない「それっぽい値」を True と読まない（``is True`` で固定）。
+
+    OpenClaw 由来の metadata は JSON 文字列で来ることがある。``bool("false")`` は
+    True なので、``bool(...)`` で受けると文字列 ``"false"`` すら通ってしまう。
+    """
+    pg = _FakePg()
+    out = PreMeetingBriefSkill(pg=pg).run(
+        PreMeetingBriefInput(), _ctx(**{KEY_IDENTITY_VERIFIED: value})
+    )
+    assert out.message == SURFACE_BLOCKED_MESSAGE
+    assert pg.connect_kwargs == []
 
 
 # ── RLS ───────────────────────────────────────────────────────────────
@@ -328,6 +390,7 @@ def test_runner_and_tool_paths_produce_identical_items() -> None:
         all_day=detail.all_day,
         attendee_domains=list(sig.attendee_domains),
         attendee_list_available=sig.attendee_list_available,
+        title_signal=sig.title,
         has_client_line=sig.has_client_line,
         client_hint_display=sig.client_hint,
         agency_display=sig.agency_hint,

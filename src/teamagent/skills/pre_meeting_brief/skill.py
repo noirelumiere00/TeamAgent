@@ -116,7 +116,13 @@ class PreMeetingBriefSkill(BaseSkill[PreMeetingBriefInput, PreMeetingBriefOutput
 
         # 宛先ガード（deny-by-default）。channel_id が無い／DM でないなら定型文だけ。
         channel_id = str(meta.get("channel_id") or "")
-        verified = bool(meta.get(KEY_IDENTITY_VERIFIED, True))
+        # ⚠️ 既定は **False**（deny-by-default）。既定 True にすると
+        #   ``identity_verified`` を metadata に入れない呼び出し元では「本人未確認のまま
+        #   社名と事例を描く」になり、private_surface の docstring・identity.py の
+        #   ``no_access_metadata`` / ``company_member_metadata``（どちらも False 明示）と
+        #   食い違う。本物の gateway は True/False を必ず明示して渡す
+        #   （mcp_gateway/server.py:509 / :578）ので、既定を締めても正規経路は変わらない。
+        verified = meta.get(KEY_IDENTITY_VERIFIED) is True
         # 定期便（runner）は channel を metadata に持たず、配信側で本人 DM を解決し直す。
         # そのため「注入経路（events あり）」は面ガードの対象外＝本人 DM 固定。
         if self._injected_events is None and not is_private_surface(channel_id, verified):
