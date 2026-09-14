@@ -284,7 +284,11 @@ def test_old_freebusy_only_restrictions_are_gone(soul: str) -> None:
         ("聞き返さない", "聞き返さず `oauth_connect` を呼ぶ"),
         ("発火語", "connect / reconnect"),
         ("毎回呼ぶ", "「連携」と言われた回数だけ毎回呼ぶ"),
-        ("空引数の禁止", "`{}` では ingress plugin が黙って block する"),
+        # PR #405 以降、`{}` も `_user_context` 欠落も block されない（ingress が補う）。
+        # 旧文言「`{}` では ingress plugin が黙って block する」は事実でなくなったので、
+        # 「それでも規約どおり付けて呼ぶ」という残った規範のほうを固定する。
+        ("引数は _user_context だけ", "呼び方: 引数は `_user_context` **だけ**"),
+        ("それでも付けて呼ぶ", "それでも規約どおり付けて呼ぶこと"),
         ("message そのまま", "ツールが返した **`message` をそのまま出す**"),
         ("原因を推測しない", "自分で原因を推測して"),
         ("必須リストに載っている", "`oauth_connect` — 全ての tool で同様"),
@@ -394,7 +398,7 @@ def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
 @pytest.mark.parametrize(
     ("label", "phrase"),
     [
-        ("節がある", "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）"),
+        ("節がある", "### 🔴「診断:」行を含むツール結果は、そのまま出す（推測しない）"),
         ("一字も変えず", "**一字も変えず**そのまま利用者に提示する"),
         ("推測・作文しない", "**原因を自分で推測・作文しない**"),
         (
@@ -402,6 +406,62 @@ def test_slack_user_id_rule_does_not_forbid_connecting(soul: str) -> None:
             "「連携」「連携して」「Google連携」「Slack連携」「接続」は **必ず `oauth_connect` を呼ぶ**",
         ),
         ("呼ばずに答えない", "呼ばずに答えない"),
+        # ── 2026-09-11 の本番実測（CONNECT-P06）で足した 4 点 ───────────────
+        # 実害: block された tool call の拒否理由に `診断: CONNECT-P06` が付いていたのに、
+        # 旧規約は適用範囲を「`oauth_connect` / `CALLER_IDENTITY_REJECTED`」に限っていた
+        # ため、モデルはこの節を自分に無関係と見なし「Google 連携をリセットすることで
+        # 解決する可能性があります」「『連携』と返せばリセットリンクを出します」と作文して、
+        # 利用者を無関係な操作へ誘導した（連携は成立していた）。
+        (
+            "適用範囲がどのツールでも",
+            "**どのツールの結果でも**",
+        ),
+        (
+            "ブロックされた拒否理由も対象",
+            "**ブロックされたツール呼び出しの拒否理由**",
+        ),
+        (
+            "別操作の提案を禁止",
+            "**そこから導いた別の操作の提案は禁止**",
+        ),
+        (
+            "連携やり直しを促さない",
+            "**利用者に連携のやり直しを促さない**",
+        ),
+        # ── 2026-09-11 のレビュー指摘で足した 4 点 ─────────────────────────────
+        # ①接頭辞つきの行は「英語の技術理由」に限らない。plugin の block 文 2 行目
+        #   （モデル宛の日本語の禁止事項）にも接頭辞を付けたので、規約側も
+        #   「接頭辞で始まる行はすべて」に広げる。旧文言のままだと日本語の 2 行目が
+        #   除外規則に当たらず、「連携のリセット・再ログイン・ブラウザ変更」が
+        #   利用者の画面にそのまま並ぶ。
+        (
+            "接頭辞つきの行はすべて管理者・モデル宛",
+            "`teamagent-caller-identity:` で始まる行はすべて",
+        ),
+        ("接頭辞つきは 1 行も出さない", "利用者への文面には 1 行も含めない"),
+        # ②接頭辞つきでも「あなたへの指示」には従う（管理者向けと誤解して
+        #   2 行目の禁止事項を読み飛ばさないための明示）。
+        (
+            "接頭辞つきの指示には従う",
+            "利用者には見せずに指示のほうには従う",
+        ),
+        # ③禁止語辞書の例外 1（「エラー文は一字も変えずに出す」）との優先順位。
+        #   同じ 1 行について 48 行目と正反対の指示になっていた。
+        (
+            "例外 1 より優先",
+            "この除外は「ツールのエラー文は一字も変えずに出す」（禁止語辞書の例外 1）より優先する",
+        ),
+        # ④「エラーなら 1 回呼び直して 1 行で止める」フォールバックとの優先順位。
+        #   block された回は両方に当たり、フォールバックを選ぶと診断コードが消えて
+        #   「画面の写真 1 枚で原因が分かる」という設計が成立しない。
+        (
+            "1 行フォールバックより優先",
+            "の 1 行で止める」フォールバックより優先する",
+        ),
+        (
+            "診断コードを落とさない",
+            "その 1 行に丸めず下記のとおり提示する（診断コードを落とさない）",
+        ),
     ],
 )
 def test_connect_diagnostics_rule_is_present(soul: str, label: str, phrase: str) -> None:
@@ -540,10 +600,45 @@ def test_internal_name_denylist_is_present(soul: str, label: str, phrase: str) -
 
 def test_denylist_exceptions_do_not_weaken_diagnostics_rule(soul: str) -> None:
     """#380 の診断行規範（一字も変えず）が辞書の後にも残っていること。"""
-    assert "### 🔴 連携の失敗は「診断:」行をそのまま出す（推測しない）" in soul
+    assert "### 🔴「診断:」行を含むツール結果は、そのまま出す（推測しない）" in soul
     denylist = soul.split("**禁止語の固定辞書**", 1)[1].split("\n\n", 1)[0]
     assert "`診断:` 行" in denylist, "辞書の直後に診断行の例外が無い"
     assert "`VIDEO_QUOTA_EXCEEDED`" in denylist, "辞書の直後にエラー文の例外が無い"
+
+
+def test_denylist_exception_defers_to_the_admin_only_prefix(soul: str) -> None:
+    """例外 1（一字も変えず出す）が、接頭辞つきの行を巻き込まないこと。
+
+    block 文の最終行と 2 行目は `teamagent-caller-identity:` で始まる管理者・モデル宛の行で、
+    「診断:」行の節は「利用者に 1 行も出すな」と言う。例外 1 はそれと同じ 1 行について
+    正反対の指示になりうるので、例外 1 の側にも除外を書いて優先順位を一意にする。
+    ここが赤い＝英語の技術理由と「連携のリセット…」の一文が利用者に届く状態。
+    """
+    denylist = soul.split("**禁止語の固定辞書**", 1)[1].split("\n\n", 1)[0]
+    exception_one = next(line for line in denylist.splitlines() if "**例外 1**" in line)
+    assert "`teamagent-caller-identity:` で始まる行だけは例外 1 の対象外" in exception_one, (
+        "例外 1 に接頭辞つきの行の除外が無い（「診断:」行の節と正面衝突する）"
+    )
+
+
+def test_oauth_connect_argument_rule_matches_the_plugin(soul: str) -> None:
+    """`{}` や `_user_context` 欠落はもう block されない（PR #405）という事実に合わせる。
+
+    SOUL は本番 system prompt なので、旧記述（「`{}` では ingress plugin が黙って
+    block する」）を残すとモデルが偽の前提で振る舞い続ける。
+    docs/runbooks/connect_diagnostics.md は更新済みで、ここだけ取り残されていた。
+    ここが赤くなったら、plugin 側の validateDeclaredContext / readDeclaredContext が
+    本当に block へ戻っていないかを先に確認すること。
+    """
+    assert "`{}` では ingress plugin が黙って block する" not in soul, (
+        "PR #405 で事実でなくなった旧記述が SOUL に残っている"
+    )
+    assert (
+        "`_user_context` を省いても `{}` でも block はされず、"
+        "ingress plugin が正しい値を入れて通す" in soul
+    )
+    # それでも規約どおり付けて呼ばせる（申告を止める規約変更ではない）。
+    assert "それでも規約どおり付けて呼ぶこと" in soul
 
 
 # ── ⑮ 便A-5（§3-9）: 検索結果の数値に帰属を添え、再集計しない ──────────────────
