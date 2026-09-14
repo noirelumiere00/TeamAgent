@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any
 
 import pytest
@@ -17,6 +18,21 @@ from teamagent.skills.morning_digest.schema import MorningDigestInput
 from teamagent.skills.morning_digest.skill import MorningDigestSkill, _brief_enabled
 
 ME = "komata@vectorinc.co.jp"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """「今日」を予定と同じ 2026-09-11 に固定する。
+
+    本番は ``calendar_window.now_jst()`` の壁時計で今日を決めるため、固定しないと
+    09-11 以外の日は予定が対象外になり全件空で落ちる（#401 CI・09-14 に顕在化）。
+    """
+    from teamagent.skills.morning_digest import calendar_window as calwin
+
+    monkeypatch.setattr(
+        calwin, "now_jst", lambda: _dt.datetime(2026, 9, 11, 7, 0, tzinfo=calwin.JST)
+    )
+
 
 RAW_EVENTS: list[dict[str, Any]] = [
     {

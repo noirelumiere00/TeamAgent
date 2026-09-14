@@ -41,6 +41,20 @@ USER = "komata@vectorinc.co.jp"
 DAY = _dt.date(2026, 9, 11)
 
 
+@pytest.fixture(autouse=True)
+def _freeze_today(monkeypatch: pytest.MonkeyPatch) -> None:
+    """「今日」を予定と同じ 2026-09-11 に固定する。
+
+    本番は ``calendar_window.now_jst()`` の壁時計で今日を決めるため、固定しないと
+    09-11 以外の日は予定が対象外になり全件空で落ちる（#401 CI・09-14 に顕在化）。
+    """
+    from teamagent.skills.morning_digest import calendar_window as calwin
+
+    monkeypatch.setattr(
+        calwin, "now_jst", lambda: _dt.datetime(2026, 9, 11, 7, 0, tzinfo=calwin.JST)
+    )
+
+
 # ── user_ref（不可逆・メールを復元できない）──────────────────────────
 def test_user_ref_is_stable_and_does_not_contain_the_email() -> None:
     ref = user_ref(USER, pepper="p")
@@ -273,6 +287,45 @@ def test_planner_creates_one_idempotent_reservation_per_user(
     assert "@" not in payload["user_ref"]
     assert set(payload) == {"name", "user_ref", "date_iso", "fire_at", "request_id"}
     assert payload["name"] == digest_schedule_name(user_ref(USER, pepper="p"), "20260911")
+
+
+def test_planner_honors_operator_date_over_the_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``MORNING_DIGEST_DATE`` があれば planner もその日を対象にする（配信側 ``run_digest`` と同じ）。
+
+    変異: ``run_planner`` の ``day = _digest_day()`` を壁時計に戻すと、09-14 の時計では
+    09-11 の予定が対象外になり予約 0 件で落ちる（運用者の再実行日指定が効かない状態）。
+    """
+    created: list[dict[str, Any]] = []
+
+    class _Sched:
+        def schedule_digest(self, **kw: Any) -> bool:
+            created.append(kw)
+            return True
+
+    from teamagent.skills.morning_digest import calendar_window as calwin
+
+    monkeypatch.setattr(
+        calwin, "now_jst", lambda: _dt.datetime(2026, 9, 14, 7, 0, tzinfo=calwin.JST)
+    )
+    monkeypatch.setenv("MORNING_DIGEST_DATE", "2026-09-11")
+    monkeypatch.setenv("MORNING_DIGEST_PERSONALIZED", "true")
+    monkeypatch.setenv("MORNING_DIGEST_DEFAULT_TIME", "09:30")
+    monkeypatch.setenv("DIGEST_USER_REF_PEPPER", "p")
+    monkeypatch.setattr(mod, "_build_token_store", lambda: object())
+    monkeypatch.setattr(
+        mod, "_read_only_calendar", lambda store, email: _Cal([_Ev("2026-09-11T10:00:00+09:00")])
+    )
+    import teamagent.adapters.scheduler_client as sched_mod
+
+    monkeypatch.setattr(sched_mod.SchedulerClient, "from_env", classmethod(lambda cls: _Sched()))
+
+    assert mod.run_planner([USER]) == 0
+    assert [c["name"] for c in created] == [
+        digest_schedule_name(user_ref(USER, pepper="p"), "20260911")
+    ]
+    assert created[0]["date_iso"] == "2026-09-11"
 
 
 def test_planner_does_nothing_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

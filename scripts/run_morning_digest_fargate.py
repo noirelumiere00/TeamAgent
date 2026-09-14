@@ -1551,7 +1551,7 @@ def run_planner(users: list[str]) -> int:
         print(f"[run_morning_digest_fargate] planner: 設定不備 {exc}", file=sys.stderr)
         return 0
     token_store = _build_token_store()
-    day = _dt.datetime.now(tz=_JST).date()
+    day = _digest_day()  # 配信側（run_digest）と同じ対象日: MORNING_DIGEST_DATE が効く
     day_compact = day.strftime("%Y%m%d")
     planned = 0
     skipped = 0
@@ -1634,7 +1634,7 @@ def _digest_day() -> _dt.date:
         parsed = _calwin.parse_jst_date(raw)
         if parsed is not None:
             return parsed
-    return _dt.datetime.now(tz=_JST).date()
+    return _calwin.now_jst().date()  # テストはこの関数を差し替えて「今日」を固定する
 
 
 def _delivery_store() -> Any | None:
