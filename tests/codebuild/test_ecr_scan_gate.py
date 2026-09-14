@@ -132,13 +132,42 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # URL scheme」の cherry-pick）。現在の chainguard python:latest / latest-dev は
     # 3.14.7-r6 で、本 PR が base digest をバンプしたため finding は消える。例外を残すと
     # stale=fail が発火するので、期限（09-17）を待たず core を空へ復帰させる。
+    # 2026-09-14: mcp 便 r22 image-builder 段3 で CVE-2026-18374（MEDIUM・glibc 2.44-r4 の
+    # 3 サブパッケージ: glibc-2.44 / ld-linux-2.44 / glibc-2.44-locale-posix）が新規検出。
+    # 段4 Trivy は契約が Critical/High ゼロを固定しており MEDIUM は通るため、08-13 / 09-03 と
+    # 同型の期限つき例外（stale=fail・expires 2026-09-28）で段3 だけを通す。
+    # 同時に検出された CVE-2026-85091（HIGH・zlib 1.3.2-r5）は「HIGH は期限付き例外にせず
+    # バンプで直す」規律（activation_freeze.json の 09-11 宣言）に従い例外へ載せず、
+    # Chainguard python base digest のバンプ（別 PR・世代 publish）で根治する。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
-    assert core_payload == {
-        "schema_version": 1,
-        "stale_exception_policy": "fail",
-        "exceptions": [],
+    glibc_exception_common = {
+        "cve": "CVE-2026-18374",
+        "severity": "MEDIUM",
+        "version": "2.44-r4",
+        "owner": "s-komata@vectorinc.co.jp",
+        "expires_on": "2026-09-28",
     }
-    assert gate.load_exceptions(core, today=TODAY) == {}
+    assert core_payload["schema_version"] == 1
+    assert core_payload["stale_exception_policy"] == "fail"
+    assert [
+        {k: v for k, v in entry.items() if k != "reason"} for entry in core_payload["exceptions"]
+    ] == [
+        {**glibc_exception_common, "package": "glibc-2.44"},
+        {**glibc_exception_common, "package": "ld-linux-2.44"},
+        {**glibc_exception_common, "package": "glibc-2.44-locale-posix"},
+    ]
+    for entry in core_payload["exceptions"]:
+        assert len(entry["reason"]) >= 20
+        assert "2026-09-14" in entry["reason"]
+    loaded_core = gate.load_exceptions(core, today=TODAY)
+    assert {key.package for key in loaded_core} == {
+        "glibc-2.44",
+        "ld-linux-2.44",
+        "glibc-2.44-locale-posix",
+    }
+    assert all(key.cve == "CVE-2026-18374" and key.severity == "MEDIUM" for key in loaded_core)
+    # zlib HIGH を黙って例外に載せる変更は必ずここで赤にする。
+    assert not any(key.package == "zlib" for key in loaded_core)
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
