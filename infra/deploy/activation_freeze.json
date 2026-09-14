@@ -375,10 +375,11 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_core_media_release_contract.json"
+      "infra/codebuild/teamagent_core_media_release_contract.json",
+      "infra/codebuild/teamagent_runtime_contract.json"
     ],
-    "reason": "media base(v3.24) 同梱の util-linux 系 3 パッケージ（libblkid / libmount / libuuid = 2.42.1-r0）を修正版 2.42.3-r1 へ明示 pin し、CVE-2026-27456（MEDIUM）と CVE-2026-76642 / CVE-2026-78408 / CVE-2026-78409 / CVE-2026-78410（HIGH 4件）を根治する。media-apk.lock の 3 行が動くため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避で、世代 publish（Wave8）を強制する。HIGH は期限付き例外にせずバンプで直すという既存規律に従い、ecr_scan_exceptions_media.json は触らない。publish 儀式（S3 append→UpdateProject→IAM ピン）は本 PR のスコープ外（admin CLI）。",
-    "gate": "human gate 2026-09-11（ユーザー明示承認: mcp 便 r20 段3 で media が util-linux 5 CVE の ECR ゲートに落ちた件を、HIGH は期限付き例外にせずバンプで直す既存規律で解消することを承認。scope_paths は本 PR の変更集合ちょうど＝core_media 契約 1 path へ絞り込み済み＝前宣言の 2 path から縮小しており拡大ではない）",
+    "reason": "Chainguard python ベース（builder/runtime の arm64 digest）を zlib 1.3.2-r5 の修正版を含む世代へバンプし、CVE-2026-85091（HIGH・r22 段3 ECR ゲートで検出）を根治する。段4 Trivy は契約が Critical/High ゼロを固定し例外不可、かつ 09-11 宣言の「HIGH は期限付き例外にせずバンプで直す」規律に従う。python バイナリ実体と base digest が動くため release 契約の core binary.python.sha256 probe と source_runtime_contract.sha256、runtime 契約の base digest 2 値を同時に更新する必要があり、世代 publish を強制する。同時検出の glibc 2.44-r4（CVE-2026-18374 MEDIUM ×3）は PR #408 の期限つき例外で段3 を通し、本バンプで finding が消えた時点で stale=fail が撤去を強制する。publish 儀式（S3 append→UpdateProject→ロール読み取りピン→launcher 契約ピン）は本 PR のスコープ外（admin CLI）。",
+    "gate": "human gate 2026-09-14（ユーザー明示指示「OK実装して」「早く実行してよ」に基づく。r22 段3 で core が zlib 1.3.2-r5 HIGH と glibc 2.44-r4 MEDIUM の ECR ゲートに落ちた件を、09-11 宣言の『HIGH は期限付き例外にせずバンプで直す』規律で解消する。scope_paths は #386 と同型の 2 path＝本 PR の変更集合ちょうど。zlib は上流未修正のため本バンプでは消えず、別途裁定）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",

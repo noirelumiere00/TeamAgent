@@ -87,7 +87,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb" = {
+    # 2026-09-14 publish 世代（CVE-2026-85091 恒久対応）。chainguard python の arm64 digest を
+    # zlib 1.3.2-r5 の修正版を含むベースへバンプ（runtime 契約 3 値）したことによる再レンダリング。
+    # 値の出所は repo tree からのオフライン導出（09-11 に live とバイト一致を確認したハーネス）。
+    # publish 儀式は admin CLI（Wave6/7/8 と同一経路）。
+    "b86b517eaf0d6f43d5562b3e0128dd03778fd086072a258b9cf59853d2e1d6b8" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -134,7 +138,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb" = {
+    # 2026-09-14 publish 世代（CVE-2026-85091 恒久対応）。chainguard python の arm64 digest を
+    # zlib 1.3.2-r5 の修正版を含むベースへバンプ（runtime 契約 3 値）したことによる再レンダリング。
+    # 値の出所は repo tree からのオフライン導出（09-11 に live とバイト一致を確認したハーネス）。
+    # publish 儀式は admin CLI（Wave6/7/8 と同一経路）。
+    "92520f9ea578136fd73ee10db92784ca1e55525570c5022c333c04571f9235ad" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -181,7 +189,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9" = {
+    # 2026-09-14 publish 世代（CVE-2026-85091 恒久対応）。chainguard python の arm64 digest を
+    # zlib 1.3.2-r5 の修正版を含むベースへバンプ（runtime 契約 3 値）したことによる再レンダリング。
+    # 値の出所は repo tree からのオフライン導出（09-11 に live とバイト一致を確認したハーネス）。
+    # publish 儀式は admin CLI（Wave6/7/8 と同一経路）。
+    "28f36818ef27ca0246977695b459ad63f9af46fff381115cc9b12d649ea0bf99" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -380,18 +392,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["b86b517eaf0d6f43d5562b3e0128dd03778fd086072a258b9cf59853d2e1d6b8"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/b86b517eaf0d6f43d5562b3e0128dd03778fd086072a258b9cf59853d2e1d6b8.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["92520f9ea578136fd73ee10db92784ca1e55525570c5022c333c04571f9235ad"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/92520f9ea578136fd73ee10db92784ca1e55525570c5022c333c04571f9235ad.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["28f36818ef27ca0246977695b459ad63f9af46fff381115cc9b12d649ea0bf99"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/28f36818ef27ca0246977695b459ad63f9af46fff381115cc9b12d649ea0bf99.yml"
 }
 
 import {
