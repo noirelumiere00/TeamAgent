@@ -55,8 +55,16 @@ def test_load_real_yaml_has_all_sources() -> None:
     assert len(sources.gsheets) >= 1
 
 
-def test_load_real_yaml_strict_mode_passes_after_rulebook_cleanup() -> None:
+def test_load_real_yaml_strict_mode_passes_after_rulebook_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """strict mode（skip_placeholder=False）が通ること。
+
+    2026-09-11: 事例集エントリ（sheet_id_env: CASE_CORPUS_SHEET_ID）は **意図的な未確定**。
+    strict は「貼り忘れプレースホルダ」を検知する検査モードなので、未設定の sheet_id_env は
+    loader 側で raise する設計（緩めると sheet_id_env を 1 行足すだけで検査を素通りできる）。
+    その逃げ道は yaml ではなく **このテスト**に置く: 意図的な未確定エントリだけ env で
+    解決してから strict を通し、他のプレースホルダ混入は従来どおり検知させる。
 
     2026-07-10〜07-15: ルールブック 01〜06 のプレースホルダエントリを宣言していた間は
     strict mode が必ず ValueError になり、この検証経路自体が使えなかった。実 Drive 計測で
@@ -67,8 +75,11 @@ def test_load_real_yaml_strict_mode_passes_after_rulebook_cleanup() -> None:
     _parse_rulebook_root_folder_id が warning + None に落として例外にしない（実 ID を貼ると
     preflight が全断するため、placeholder のままが正しい状態）。
     """
+    monkeypatch.setenv("CASE_CORPUS_SHEET_ID", "1StrictModeCaseCorpusSheetIdXXXXXXXXXXXXXXX")
+    monkeypatch.setenv("CASE_CORPUS_SHEET_GID", "424242")
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
     assert not any("REPLACE_WITH_" in f.folder_id for f in sources.gdrive_folders)
+    assert not any("REPLACE_WITH_" in s.sheet_id for s in sources.gsheets)
     assert sources.gdrive_rulebook_root_folder_id is None  # placeholder → 無効（＝preflight OFF）
 
 
