@@ -30,11 +30,20 @@ DARK_SKILL_ALLOWLIST = frozenset(
         "proposal_builder",
         # お土産資料 便1 の omiyage_report_submit/status は 2026-08-25 の点灯便で
         # scope 台帳 + OC toolFilter include へ移動済み（本番点灯は enable_omiyage_report の tf apply）。
+        #
+        # pre_meeting_brief（アポ前 事例ブリーフ）は **本便では意図的に dark**。
+        # 本便の入口は朝ダイジェストの注入経路 1 本だけで、MCP 面にも OC の
+        # toolFilter にも出さない（ToolSpec 登録・scope 台帳 5 キー・toolFilter
+        # include・SOUL 節の 4 点セットは便C）。つまり factory にも載らないため
+        # NON_FACTORY_SKILL_ALLOWLIST にも同時に入れる。便C でオンデマンド露出する
+        # ときは、この 2 箇所から外して台帳へ移すこと。
+        "pre_meeting_brief",
     }
 )
 
 # chitchat は Socket Mode 専用。同期proposal_builderはPython互換用で、MCPはsubmit/statusだけ。
-NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat", "proposal_builder"})
+# pre_meeting_brief は本便では ToolSpec を登録しない（上記の裁定・入口は朝ダイジェストのみ）。
+NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat", "proposal_builder", "pre_meeting_brief"})
 
 # ToolSpec を経由せず server.py が直接 MCP に追加できる dark tool。
 MCP_ONLY_DARK_ALLOWLIST = {"run_agent": "USE_AGENT_ORCHESTRATOR"}

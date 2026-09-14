@@ -914,6 +914,156 @@ class PgVectorClient:
         )
         return hits
 
+    # ------------------------------------------------------------------
+    # 事例集（case_corpus）— pre_meeting_brief の引き当て（read-only）
+    # ------------------------------------------------------------------
+    # 母集団は **必ず** metadata->>'case_corpus' = 'true' に固定する。外すと全社資料が
+    # 返り、朝の DM に事例でない提案書が「事例」として並ぶ（変異テストで固定）。
+    # RLS は connection(app_role='teamagent_app', user_email=…, user_groups=…) 側で有効化
+    # 済みの前提。⚠️ user_groups を落とすと _apply_session が GUC を立てず、Drive の
+    # domain 共有資料は policy 0010 の acl_groups 分岐に当たらず **誰にも 0 件** になる。
+
+    _CASE_COLUMNS = """
+                d.title,
+                d.source_uri,
+                d.owner_email,
+                d.metadata->>'client_name'          AS case_client,
+                d.metadata->>'case_product'         AS case_product,
+                d.metadata->>'case_effect'          AS case_effect,
+                d.metadata->>'case_owner'           AS case_owner,
+                d.metadata->>'case_external_use'    AS case_external_use,
+                d.metadata->>'case_external_use_note' AS case_external_use_note,
+                COALESCE(d.metadata->>'case_industry',
+                         d.metadata->>'cls_industry') AS case_industry,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
+    """
+
+    @staticmethod
+    def _escape_like(value: str) -> str:
+        r"""ILIKE のメタ文字を潰す（``\`` を先に！ 順序を変えると二重エスケープになる）。"""
+        return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def case_corpus_available(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        request_id: str | None = None,
+    ) -> bool:
+        """事例集が 1 件でも取り込まれているか。False なら節そのものを出さない。"""
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM documents d WHERE d.metadata->>'case_corpus' = 'true' LIMIT 1"
+            )
+            row = cur.fetchone()
+        available = row is not None
+        logger.info("pgvector_case_corpus", request_id=request_id, available=available)
+        return available
+
+    def get_industry_for_client(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        client_name: str,
+        request_id: str | None = None,
+    ) -> str | None:
+        """取引先の業種を金庫から引く。**無ければ None**（推測しない＝段3/4 を走らせない）。"""
+        name = (client_name or "").strip()
+        if not name:
+            return None
+        sql = """
+            SELECT COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') AS industry
+            FROM documents d
+            WHERE d.metadata->>'client_name' = %(name)s
+              AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') IS NOT NULL
+              AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry') <> ''
+            ORDER BY d.modified_at DESC NULLS LAST
+            LIMIT 1
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql, {"name": name})
+            row = cur.fetchone()
+        if not row:
+            return None
+        industry = str(row.get("industry") or "").strip()
+        return industry or None
+
+    def list_case_studies(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        client_name: str = "",
+        industry: str | None = None,
+        product: str | None = None,
+        limit: int = 3,
+        stage: int = 1,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """事例集から 1 段ぶんの候補を返す（段は呼び出し側が 1→2→3→4 と進める）。
+
+        段の意味:
+          1. 完全一致（``client_name`` 等価）— **長さを問わず採用**（「花王」は 2 文字）
+          2. 部分一致（ILIKE・``%`` ``_`` ``\\`` はエスケープ）— 最小長は呼び出し側が担保
+          3. 同業種 AND 商材一致
+          4. 同業種のみ
+
+        段3/4 は ``industry`` が None なら **呼ばれても空を返す**（業種を推測しない）。
+        """
+        limit = max(1, min(5, int(limit)))
+        base = f"""
+            SELECT
+{self._CASE_COLUMNS}
+            FROM documents d
+            WHERE d.metadata->>'case_corpus' = 'true'
+        """  # nosec B608 - 列リストは定数、条件は全てバインド
+        params: dict[str, Any] = {"limit": limit}
+        if stage == 1:
+            if not client_name.strip():
+                return []
+            where = " AND d.metadata->>'client_name' = %(client)s"
+            params["client"] = client_name.strip()
+        elif stage == 2:
+            if not client_name.strip():
+                return []
+            where = " AND d.metadata->>'client_name' ILIKE %(client_like)s ESCAPE '\\'"
+            params["client_like"] = f"%{self._escape_like(client_name.strip())}%"
+        elif stage == 3:
+            if not industry or not product:
+                return []
+            where = (
+                " AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry')"
+                " = %(industry)s"
+                " AND d.metadata->>'case_product' ILIKE %(product_like)s ESCAPE '\\'"
+            )
+            params["industry"] = industry
+            params["product_like"] = f"%{self._escape_like(product)}%"
+        elif stage == 4:
+            if not industry:
+                return []
+            where = (
+                " AND COALESCE(d.metadata->>'case_industry', d.metadata->>'cls_industry')"
+                " = %(industry)s"
+            )
+            params["industry"] = industry
+        else:
+            return []
+
+        sql = (
+            base
+            + where
+            + "\n            ORDER BY d.modified_at DESC NULLS LAST\n            LIMIT %(limit)s"
+        )
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        out = [dict(r) for r in rows]
+        # ⚠️ ログは件数と段だけ。社名・URL・担当者名は出さない（G3）。
+        logger.info(
+            "pgvector_list_case_studies",
+            request_id=request_id,
+            stage=stage,
+            hit_count=len(out),
+            has_industry=bool(industry),
+        )
+        return out
+
     def list_client_names(
         self,
         conn: psycopg.Connection[dict[str, Any]],

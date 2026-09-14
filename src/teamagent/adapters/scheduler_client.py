@@ -155,5 +155,60 @@ class SchedulerClient:
         )
         return True
 
+    def schedule_digest(
+        self,
+        *,
+        name: str,
+        user_ref: str,
+        date_iso: str,
+        fire_at: _dt.datetime,
+        request_id: str,
+    ) -> bool:
+        """個人別の朝ダイジェスト配信をワンタイム予約する（冪等・fail-open）。
+
+        ⚠️ payload は ``{"v":1,"kind":"digest","user_ref":…,"date":…}`` **だけ**。
+        メールアドレス・社名・channel・本文は 1 文字も載せない（``user_ref`` は不可逆
+        hash＝``teamagent.digest_user_ref``）。発火側は user_ref から本人の DM を
+        解決し直すので、Scheduler 由来の値を宛先として信用する経路が存在しない。
+
+        ``ActionAfterCompletion=DELETE`` で発火後に予約が自動消滅する（掃除不要）。
+        名前は ``digest-<user_ref>-<YYYYMMDD>`` で決定的＝planner 再実行は
+        ConflictException → 冪等成功（当日分の古い予約を作り直さない）。
+        """
+        if not (name and user_ref and date_iso):
+            return False
+        fire_jst = fire_at.astimezone(_JST)
+        payload = {"v": 1, "kind": "digest", "user_ref": user_ref, "date": date_iso}
+        started = time.perf_counter()
+        try:
+            self._ensure_client().create_schedule(
+                Name=name,
+                GroupName=self._group,
+                ScheduleExpression=f"at({fire_jst.strftime('%Y-%m-%dT%H:%M:%S')})",
+                ScheduleExpressionTimezone="Asia/Tokyo",
+                FlexibleTimeWindow={"Mode": "OFF"},
+                ActionAfterCompletion="DELETE",
+                Target={
+                    "Arn": self._queue_arn,
+                    "RoleArn": self._role_arn,
+                    "Input": json.dumps(payload, ensure_ascii=False),
+                    "SqsParameters": {"MessageGroupId": user_ref},
+                    "RetryPolicy": {"MaximumRetryAttempts": 3},
+                },
+            )
+        except Exception as e:
+            if type(e).__name__ == "ConflictException":
+                # 同名予約が既にある＝当日分は作成済み（planner 再実行）→ 冪等成功。
+                logger.info("digest_schedule_exists", request_id=request_id)
+                return True
+            logger.warning("digest_schedule_failed", request_id=request_id, error=type(e).__name__)
+            return False
+        logger.info(
+            "digest_scheduled",
+            request_id=request_id,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+        )
+        return True
+
 
 __all__ = ["SchedulerClient", "reminder_schedule_name"]

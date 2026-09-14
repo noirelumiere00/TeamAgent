@@ -164,8 +164,56 @@ resource "aws_iam_role" "reminder_notify" {
   assume_role_policy = data.aws_iam_policy_document.tiktok_dispatch_assume.json
 }
 
+# 個人別の朝ダイジェスト予約（kind=digest）の発火で、morning-digest task を 1 人分だけ
+# RunTask する権限。⚠️ 新 Lambda は作らず既存 consumer に 1 分岐だけ足す（DELTA §1）。
+# morning_digest_personalized が false の間は付与しない（＝発火しても env が無く skip）。
+locals {
+  digest_runtask_enabled = (
+    var.enable_reminders && var.enable_morning_digest && var.morning_digest_personalized
+    && var.mcp_image != ""
+  ) ? 1 : 0
+
+  # ⚠️ 三項演算子は **両辺が評価される**（reminders.tf:「enable_reminders 単独 true だと
+  #    Invalid index で plan が死ぬ・レビュー M1」と同じ罠）。したがって
+  #    `aws_ecs_task_definition.morning_digest[0]` を分岐の中に直接書かない。
+  #    splat + one() なら count=0 のとき null になるだけで plan は死なない。
+  digest_task_arn     = one(aws_ecs_task_definition.morning_digest[*].arn)
+  digest_exec_role    = one(aws_iam_role.ecs_execution_morning_digest[*].arn)
+  digest_task_role    = one(aws_iam_role.morning_digest_task[*].arn)
+  digest_security_grp = one(aws_security_group.morning_digest[*].id)
+}
+
 data "aws_iam_policy_document" "reminder_notify_policy" {
   count = local.rem_enabled
+  dynamic "statement" {
+    for_each = local.digest_runtask_enabled == 1 ? [1] : []
+    content {
+      sid       = "RunMorningDigestForOneUser"
+      actions   = ["ecs:RunTask"]
+      resources = [replace(local.digest_task_arn, "/:[0-9]+$/", ":*")]
+      condition {
+        test     = "ArnEquals"
+        variable = "ecs:cluster"
+        values   = [aws_ecs_cluster.main.arn]
+      }
+    }
+  }
+  dynamic "statement" {
+    for_each = local.digest_runtask_enabled == 1 ? [1] : []
+    content {
+      sid     = "PassMorningDigestRoles"
+      actions = ["iam:PassRole"]
+      resources = [
+        local.digest_exec_role,
+        local.digest_task_role,
+      ]
+      condition {
+        test     = "StringEquals"
+        variable = "iam:PassedToService"
+        values   = ["ecs-tasks.amazonaws.com"]
+      }
+    }
+  }
   statement {
     sid       = "SqsConsume"
     actions   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
@@ -206,9 +254,17 @@ resource "aws_lambda_function" "reminder_notify" {
   ]
 
   environment {
-    variables = {
-      SLACK_BOT_TOKEN_SECRET_NAME = var.slack_bot_token_secret_name
-    }
+    variables = merge(
+      { SLACK_BOT_TOKEN_SECRET_NAME = var.slack_bot_token_secret_name },
+      # kind=digest の起動先。**未設定なら handler は何もしない**（既定 OFF の実体）。
+      local.digest_runtask_enabled == 1 ? {
+        DIGEST_CLUSTER_ARN         = aws_ecs_cluster.main.arn
+        DIGEST_TASK_DEFINITION_ARN = coalesce(local.digest_task_arn, "")
+        DIGEST_SUBNET_IDS          = join(",", sort(data.aws_subnets.default.ids))
+        DIGEST_SECURITY_GROUP_IDS  = coalesce(local.digest_security_grp, "")
+        DIGEST_CONTAINER_NAME      = "morning-digest"
+      } : {}
+    )
   }
 
   lifecycle {
