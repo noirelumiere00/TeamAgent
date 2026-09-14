@@ -30,6 +30,16 @@ _EXPECTED_TOKEN_CALLERS = {
     "src/teamagent/skills/mail_draft/skill.py": {"decode_draft_token"},
 }
 
+# connect-web の閉包に現れたら、mail-action 鍵が connect-web へ渡っていることを意味する local 名。
+_LOCALS_CARRYING_MAIL_ACTION: frozenset[str] = frozenset(
+    {
+        "hmac_mail_secret_iam_arns",
+        "hmac_secret_iam_arns",
+        "mail_action_hmac_secrets",
+        "mail_action_hmac_environment",
+    }
+)
+
 
 def _terraform_block(path: Path, resource_type: str, resource_name: str) -> str:
     body = path.read_text(encoding="utf-8")
@@ -239,6 +249,111 @@ def test_execution_roles_have_only_the_hmac_domains_their_tasks_need() -> None:
         assert "dynamodb:GetItem" in policy
         assert "dynamodb:UpdateItem" in policy
     assert "dynamodb:TransactWriteItems" in worker_policy
+
+
+def test_connect_web_terraform_closure_never_reaches_a_mail_action_local() -> None:
+    """connect-web の Terraform 配線から mail-action 鍵へ到達しないことを守る。
+    task definition と execution policy の local 参照を推移的に追跡し、
+    間接 local を介した MAIL_ACTION の再配線も検出する。
+    """
+    locals_by_name: dict[str, str] = {}
+    locals_marker = re.compile(r"^locals\s*\{", re.MULTILINE)
+    assignment_marker = re.compile(r"^  ([a-z0-9_]+)\s*=", re.MULTILINE)
+    for path in sorted(TF_ROOT.glob("*.tf")):
+        source = path.read_text(encoding="utf-8")
+        for marker in locals_marker.finditer(source):
+            opening = marker.end() - 1
+            depth = 0
+            closing: int | None = None
+            for index in range(opening, len(source)):
+                if source[index] == "{":
+                    depth += 1
+                elif source[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        closing = index
+                        break
+            if closing is None:
+                raise AssertionError(f"unterminated Terraform locals block: {path.name}")
+
+            locals_body = source[opening + 1 : closing]
+            assignments = list(assignment_marker.finditer(locals_body))
+            for assignment_index, assignment in enumerate(assignments):
+                local_name = assignment.group(1)
+                if local_name in locals_by_name:
+                    raise AssertionError(f"duplicate Terraform local: {local_name}")
+                next_start = (
+                    assignments[assignment_index + 1].start()
+                    if assignment_index + 1 < len(assignments)
+                    else len(locals_body)
+                )
+                locals_by_name[local_name] = locals_body[assignment.start() : next_start]
+
+    connect_web_tf = TF_ROOT / "connect_web.tf"
+    start_blocks = {
+        "aws_ecs_task_definition.connect_web": _terraform_block(
+            connect_web_tf,
+            'resource "aws_ecs_task_definition"',
+            "connect_web",
+        ),
+        "aws_iam_policy_document.ecs_execution_connect_web_secrets": _terraform_block(
+            connect_web_tf,
+            'data "aws_iam_policy_document"',
+            "ecs_execution_connect_web_secrets",
+        ),
+    }
+    mail_action_key = re.compile(r'name\s*=\s*"MAIL_ACTION_')
+    mail_action_value_from = re.compile(
+        r"valueFrom\s*=\s*(?:var\.mail_action_hmac|local\.(?:hmac_mail|mail_action_hmac))"
+    )
+    local_reference = re.compile(r"local\.([a-z0-9_]+)")
+    paths: dict[str, tuple[str, ...]] = {}
+    pending: list[str] = []
+
+    for block_name, block in start_blocks.items():
+        key_match = mail_action_key.search(block)
+        assert key_match is None, (
+            f"mail-action key name reached directly via {block_name}: {key_match.group(0)}"
+        )
+        value_from_match = mail_action_value_from.search(block)
+        assert value_from_match is None, (
+            f"mail-action valueFrom reached directly via {block_name}: {value_from_match.group(0)}"
+        )
+        for local_name in local_reference.findall(block):
+            reference_path: tuple[str, ...] = (block_name, f"local.{local_name}")
+            assert local_name not in _LOCALS_CARRYING_MAIL_ACTION, (
+                "mail-action carrying local name reached via "
+                f"{' -> '.join(reference_path)}: local.{local_name}"
+            )
+            if local_name not in paths:
+                paths[local_name] = reference_path
+                pending.append(local_name)
+
+    while pending:
+        local_name = pending.pop()
+        reference_path = paths[local_name]
+        assert local_name not in _LOCALS_CARRYING_MAIL_ACTION, (
+            f"mail-action carrying local name reached via {' -> '.join(reference_path)}: local.{local_name}"
+        )
+        local_body = locals_by_name.get(local_name)
+        if local_body is None:
+            raise AssertionError(
+                f"undefined Terraform local reached via {' -> '.join(reference_path)}"
+            )
+        key_match = mail_action_key.search(local_body)
+        assert key_match is None, (
+            f"mail-action key name reached via {' -> '.join(reference_path)}: {key_match.group(0)}"
+        )
+        value_from_match = mail_action_value_from.search(local_body)
+        assert value_from_match is None, (
+            f"mail-action valueFrom reached via {' -> '.join(reference_path)}: {value_from_match.group(0)}"
+        )
+        for referenced_name in local_reference.findall(local_body):
+            if referenced_name not in paths:
+                paths[referenced_name] = (*reference_path, f"local.{referenced_name}")
+                pending.append(referenced_name)
+
+    assert "report_link_hmac_secrets" in paths
 
 
 def test_full_saved_plan_owns_candidate_rollback_worker_and_event_mutations() -> None:
