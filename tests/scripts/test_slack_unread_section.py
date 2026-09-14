@@ -57,21 +57,30 @@ _FILLER = "経緯は前回の議事録に記載しています。" * 90
 #:   ② 3件目 `・期限 8/28(金)` → `・2日経過`。「28(金)の条件変更」の日付は **期限として
 #:      書かれていない**（「の」で名詞に係る）。期限を騙ると本物の滞留時間を押し出す。
 #:   ③ 脚注。見出しは逐語ではなく「切り出し＋定型語尾」なので、そう名乗る。
+#:
+#: 2026-09-11 実物の「わかりづらい」指摘で、メタ行の形を変えている:
+#:   ④ `・DM（森田） ・2日経過 ・15分` → `　— 森田さん（DM）・2日経過・対応に約15分`。
+#:      **相手を先頭**に出し、区切りを 2 種類（`—`／`・`）へ減らした。中黒の連打は
+#:      見出しも相手も時間も所要も同列に見せていて、重要度が読めなかった。
+#:   ⑤ 裸の `15分` は単位の意味が伝わらないので `対応に約15分`。数字は固定表のまま。
+#:   ⑥ 脚注を `「」` の読み分け（囲みは相手の原文／囲み無しは Aico のラベル）に変更。
+#:      ここ 5 件の見出しは全部「話題が使えた」＝Aico のラベルなので **囲まれない**
+#:      （裁定3 の逐語フォールバックがこの 5 件を横取りしていないことの確認にもなる）。
 _MOCK_SECTION = """💬 *Slack 返信漏れ 5件* ｜ あなたの番 3・様子見 1・見るだけ 1
 
 🔴 *あなたの番（3件）*
-1. *引継ぎタスク3件を引き取る* ・DM（森田） ・2日経過 ・15分 〔<https://vector.slack.com/archives/D08MORITA01/p1755478320|開く>〕
-2. *来社日を返す*（NTVカードの受け渡し） ・DM ・3日経過 ・1分 〔<https://vector.slack.com/archives/D08NTVDESK9/p1755410520|開く>〕
-3. *28(金)の条件変更を確認* ・グループDM ・2日経過 ・2分 〔<https://vector.slack.com/archives/G08COND1234/p1755509000|開く>〕
+1. *引継ぎタスク3件を引き取る*　— 森田さん（DM）・2日経過・対応に約15分　〔<https://vector.slack.com/archives/D08MORITA01/p1755478320|開く>〕
+2. *来社日を返す*（NTVカードの受け渡し）　— DM・3日経過・対応に約1分　〔<https://vector.slack.com/archives/D08NTVDESK9/p1755410520|開く>〕
+3. *28(金)の条件変更を確認*　— グループDM・2日経過・対応に約2分　〔<https://vector.slack.com/archives/G08COND1234/p1755509000|開く>〕
 　└ 本文が途中で切れており、未取得の部分があります
 
 ⏸ *様子見（1件）*
-4. *AI相談は当日が過ぎている* ・グループDM ・2日経過 ・他1名も名指し ・相談日 8/17(月) を過ぎています 〔<https://vector.slack.com/archives/G08AISOUDAN/p1755475200|開く>〕
+4. *AI相談は当日が過ぎている*　— グループDM・2日経過・他1名も名指し・相談日 8/17(月) を過ぎています　〔<https://vector.slack.com/archives/G08AISOUDAN/p1755475200|開く>〕
 
 👁 *見るだけ（1件）*
-5. *情シスの承認後にあなたから再依頼* ・DM ・1日経過 ・いま返信不要 〔<https://vector.slack.com/archives/D08JOUSHIS1/p1755568800|開く>〕
+5. *情シスの承認後にあなたから再依頼*　— DM・1日経過・いま返信不要　〔<https://vector.slack.com/archives/D08JOUSHIS1/p1755568800|開く>〕
 
-※ 見出しは原文からの切り出し＋定型の語尾です（要約文は作りません）。"""
+※ 「」内は相手の原文そのままです。囲みの無い見出しは Aico が付けた定型の言い換えです（要約文は作りません）。"""
 
 #: 生 ID の「形」（U/W=ユーザー・B=bot・C/D/G=会話・T=WS ＋ 英数8文字以上）。
 #: ⚠️ **検査用**。実装はこの形で総当たり置換しない（"CONFIDENTIAL" "@BUZZFEEDJAPAN" の
@@ -227,10 +236,10 @@ def test_slack_handoff_hash_only_for_channels(monkeypatch: Any) -> None:
     d = MorningDigestOutput(user_email_masked="m***@x", slack_unread=items, slack_unread_total=3)
     lines = runner._slack_handoff_lines(d)
     cards = [ln for ln in lines if ln.startswith(("1.", "2.", "3."))]
-    assert "・#sales-acme ・" in cards[0]
-    assert "・DM ・" in cards[1] and "U08SOMEONE1" not in cards[1] and "#" not in cards[1]
+    assert "　— #sales-acme・" in cards[0]
+    assert "　— DM・" in cards[1] and "U08SOMEONE1" not in cards[1] and "#" not in cards[1]
     # unknown は「チャンネル」とも「DM」とも書かない＝会話の chip ごと出さない。
-    assert "・DM" not in cards[2] and "チャンネル" not in cards[2] and "#" not in cards[2]
+    assert "DM" not in cards[2] and "チャンネル" not in cards[2] and "#" not in cards[2]
 
 
 def test_slack_handoff_channel_name_falls_back_when_it_is_an_id(monkeypatch: Any) -> None:
@@ -251,7 +260,7 @@ def test_slack_handoff_channel_name_falls_back_when_it_is_an_id(monkeypatch: Any
         slack_unread_total=1,
     )
     line = runner._slack_handoff_lines(d)[3]
-    assert "・チャンネル ・" in line and "C091ZSVTKF1" not in line
+    assert "　— チャンネル・" in line and "C091ZSVTKF1" not in line
 
 
 def test_slack_handoff_zero_state_says_none_only_when_actually_scanned(
@@ -448,7 +457,7 @@ def test_handoff_channel_chip_is_escaped_exactly_once(monkeypatch: Any) -> None:
         slack_unread_scanned=True,
     )
     line = runner._slack_handoff_lines(d)[3]
-    assert "・#r&amp;d-team ・" in line
+    assert "　— #r&amp;d-team・" in line
     assert "&amp;amp;" not in line
 
 
@@ -507,8 +516,8 @@ def test_handoff_dm_chip_shows_who_is_waiting(monkeypatch: Any) -> None:
         slack_unread_scanned=True,
     )
     cards = [ln for ln in runner._slack_handoff_lines(d) if ln.startswith(("1.", "2."))]
-    assert "・DM（森田） ・" in cards[0]
-    assert "・DM ・" in cards[1] and "U08UNKNOWN1" not in cards[1]
+    assert "　— 森田さん（DM）・" in cards[0]
+    assert "　— DM・" in cards[1] and "U08UNKNOWN1" not in cards[1]
 
 
 def test_handoff_channel_name_is_truncated(monkeypatch: Any) -> None:
@@ -530,7 +539,7 @@ def test_handoff_channel_name_is_truncated(monkeypatch: Any) -> None:
         slack_unread_scanned=True,
     )
     line = runner._slack_handoff_lines(d)[3]
-    assert "・#" + "a" * 23 + "… ・" in line
+    assert "　— #" + "a" * 23 + "…・" in line
 
 
 def test_flatten_folds_channel_and_usergroup_tokens_without_labels() -> None:
@@ -597,7 +606,7 @@ def test_time_chip_keeps_elapsed_days_when_the_date_is_not_a_deadline(
         slack_unread_scanned=True,
     )
     line = runner._slack_handoff_lines(d)[3]
-    assert "・2日経過 ・8/17(月) の記載あり ・" in line
+    assert "・2日経過・8/17(月) の記載あり・" in line
     assert "期限" not in line
 
 
@@ -955,3 +964,354 @@ def test_schedule_button_rendered_when_flag_on(monkeypatch: Any) -> None:
         counterpart_masked="a***@x", importance="high", to_self=True, draft_token="DTOK"
     )
     assert not [b for b in runner._reply_buttons(m2) if b.get("action_id") == "schedule_propose"]
+
+
+# ── 2026-09-11 実物の「わかりづらい」指摘（F2 順序 / F4 メタ行 / F5 導線）──────────
+
+
+def _observed_items() -> list[SlackUnreadItem]:
+    """小俣さん本人へ 9/11 朝に届いた 🔴 5 行と同じ形の入力（宛先 ID だけ fixture 化）。"""
+    return [
+        SlackUnreadItem(  # ① 依頼文が取れない（旧: 「原文を見る」＋「依頼文を特定できませんでした」）
+            excerpt_display=(
+                f"<@{_ME_UID}> お疲れさまです。NTV様の件、本日 9/11(金) の社内MTGまでに"
+                "状況をまとめておきます。"
+            ),
+            occurred_at="2026-09-09T10:00:00+09:00",
+            channel_id="D08EBATA001",
+            channel_kind="dm",
+            from_user_id="U08EBATA001",
+            from_display_name="江畑 未来",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08EBATA001/p1",
+        ),
+        SlackUnreadItem(  # ② い形容詞（旧: 「この後のMTGリスケでもよいを返す」）
+            excerpt_display=f"<@{_ME_UID}> この後のMTGリスケでもよいでしょうか？",
+            occurred_at="2026-09-10T11:00:00+09:00",
+            channel_id="D08NISHIU01",
+            channel_kind="dm",
+            from_user_id="U08NISHIU01",
+            from_display_name="西海翔",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08NISHIU01/p2",
+        ),
+        SlackUnreadItem(  # ③ 半角カナ読点＋連続空白＋名詞述語（旧: 「…必要を返す」）
+            excerpt_display=f"<@{_ME_UID}> 今後の新体制 にともない､見直し 必要でしょうか",
+            occurred_at="2026-09-10T12:00:00+09:00",
+            channel_id="D08ARIMA001",
+            channel_kind="dm",
+            from_user_id="U08ARIMA001",
+            from_display_name="Arima",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08ARIMA001/p3",
+        ),
+        SlackUnreadItem(  # ④ 依頼文が取れない（旧: 「返信する」＋「依頼文を特定できませんでした」）
+            excerpt_display=(
+                f"<@{_ME_UID}> 先ほどの資料、フォルダに入れておきました。ご連絡まで。"
+            ),
+            occurred_at="2026-09-10T13:00:00+09:00",
+            channel_id="D08EBATA001",
+            channel_kind="dm",
+            from_user_id="U08EBATA001",
+            from_display_name="江畑 未来",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08EBATA001/p4",
+        ),
+        SlackUnreadItem(  # ⑤ チャンネル・他2名も名指し
+            excerpt_display=f"<@{_ME_UID}> <@U08SHAREA01> <@U08SHAREB01> Aicoと連携できるか？",
+            occurred_at="2026-09-11T07:00:00+09:00",
+            channel_id="C08KNOWLEDGE",
+            channel_kind="channel",
+            channel_name_display="proj-ナレッジ共有",
+            from_user_id="U08SHARE001",
+            from_display_name="共有太郎",
+            mentioned_user_ids=[_ME_UID, "U08SHAREA01", "U08SHAREB01"],
+            permalink="https://vector.slack.com/archives/C08KNOWLEDGE/p5",
+        ),
+    ]
+
+
+#: 実物 5 行の **修正後**の実寸（before は docstring と PR 本文に残してある）。
+#: 変えるときは必ず人間の目で日本語として読んでからにする。
+_OBSERVED_SECTION = """💬 *Slack 返信漏れ 5件* ｜ あなたの番 5
+
+🔴 *あなたの番（5件）*
+1. *「NTV様の件、本日 9/11(金) の社内MTGまでに状況をまとめておきます」*　— 江畑 未来さん（DM）・2日経過　〔<https://vector.slack.com/archives/D08EBATA001/p1|開く>〕
+2. *「この後のMTGリスケでもよいでしょうか？」*　— 西海翔さん（DM）・1日経過・対応に約1分　〔<https://vector.slack.com/archives/D08NISHIU01/p2|開く>〕
+3. *「今後の新体制 にともない、見直し 必要でしょうか」*　— Arimaさん（DM）・1日経過　〔<https://vector.slack.com/archives/D08ARIMA001/p3|開く>〕
+4. *「先ほどの資料、フォルダに入れておきました」*　— 江畑 未来さん（DM）・1日経過・対応に約2分　〔<https://vector.slack.com/archives/D08EBATA001/p4|開く>〕
+5. *「Aicoと連携できるか？」*　— #proj-ナレッジ共有・今日・他2名も名指し　〔<https://vector.slack.com/archives/C08KNOWLEDGE/p5|開く>〕
+
+※ 「」内は相手の原文そのままです。囲みの無い見出しは Aico が付けた定型の言い換えです（要約文は作りません）。"""
+
+
+def _freeze_0911(monkeypatch: Any) -> None:
+    """2026-09-11(金) 08:00 JST に固定（実物が届いた朝）。"""
+    monkeypatch.setattr(runner, "_handoff_now", lambda: dt.datetime(2026, 9, 11, 8, 0, tzinfo=_JST))
+
+
+def test_observed_0911_section_is_readable(monkeypatch: Any) -> None:
+    """実物 5 行の **修正後**を実寸で固定する（F1〜F4 の受け入れ条件）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    assert "\n".join(runner._slack_handoff_lines(d)) == _OBSERVED_SECTION
+
+
+def test_observed_0911_section_drops_the_old_broken_wording(monkeypatch: Any) -> None:
+    """旧実装の壊れた文言・Aico 視点の文言が 1 つも残っていない。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    dump = "\n".join(runner._slack_handoff_lines(d))
+    for broken in (
+        "この後のMTGリスケでもよいを返す",
+        "必要を返す",
+        "原文を見る",
+        "依頼文を特定できませんでした",
+        "､",
+    ):
+        assert broken not in dump, f"旧実装の文言が残っている: {broken}"
+    # 中黒の連打（`・` で全部を同列に並べる）をやめている。
+    assert " ・" not in dump
+    assert "　— " in dump
+
+
+def test_meta_line_puts_the_person_first(monkeypatch: Any) -> None:
+    """相手を先頭に出す（`DM（江畑 未来）` ではなく `江畑 未来さん（DM）`）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items()[:1],
+        slack_unread_total=1,
+        slack_unread_scanned=True,
+    )
+    line = next(ln for ln in runner._slack_handoff_lines(d) if ln.startswith("1."))
+    assert "　— 江畑 未来さん（DM）・" in line
+    assert "DM（江畑 未来）" not in line
+
+
+def test_effort_chip_says_what_the_minutes_are_for(monkeypatch: Any) -> None:
+    """裸の「1分」は単位の意味が伝わらない。数字は固定表のまま、何の時間かを言う。"""
+    assert runner._handoff_effort_chip("15分") == "対応に約15分"
+    assert runner._handoff_effort_chip("") == ""
+
+
+def test_honorific_is_not_doubled() -> None:
+    """表示名に既に敬称が付いていたら「さん」を重ねない。"""
+    assert runner._with_honorific("森田") == "森田さん"
+    assert runner._with_honorific("田中さん") == "田中さん"
+    assert runner._with_honorific("鈴木部長") == "鈴木部長"
+
+
+# ── F2: NFKC は無害化より **前**（順序が逆だと escape を貫通する）──────────────
+
+
+def test_nfkc_runs_before_slack_escape(monkeypatch: Any) -> None:
+    """全角 `＜@U…＞` が **生のメンションとして描画されない**（無害化の貫通を止める）。
+
+    ⚠️ `_handoff_display` は `NFKC → 実名解決 → 生 ID 除去 → escape` の 1 本道。
+    NFKC を escape の後ろへ移すと、全角のままだと `_flatten_slack_text` にも
+    `_scrub_slack_ids` にも `_slack_escape` にも掛からず、最後の NFKC で `<@U08LEAK001>`
+    へ戻って Slack が生メンションとして解釈する。この順序を固定するテスト。
+    """
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=[
+            SlackUnreadItem(
+                excerpt_display="＜@U08LEAK001＞ ＜https://evil.example|クリック＞ の件です。",
+                occurred_at="2026-09-10T09:00:00+09:00",
+                channel_id="C08LEAK0001",
+                channel_kind="channel",
+                # chip は判定層を通らず `_handoff_display` へ直行する＝この経路だけが
+                # 描画側の順序を実証できる（見出しは判定層の NFKC を先に通るため）。
+                channel_name_display="＜@U08LEAK001＞team",
+                from_user_id="U08LEAK001",
+                mentioned_user_ids=[_ME_UID],
+                permalink="https://vector.slack.com/archives/C08LEAK0001/p1",
+            )
+        ],
+        slack_unread_total=1,
+        slack_unread_scanned=True,
+    )
+    line = next(ln for ln in runner._slack_handoff_lines(d) if ln.startswith("1."))
+    # 全角のまま残っていない（＝NFKC は走っている）。
+    assert "＜" not in line
+    assert "＞" not in line
+    # かつ、生のメンション記法・生 ID・偽装リンクとしては出ていない。
+    assert "<@U08LEAK001>" not in line
+    assert "U08LEAK001" not in line
+    assert "evil.example" not in line
+    # permalink 以外の `<` は全て escape 済み。
+    assert line.count("<") == line.count("<https://vector.slack.com")
+
+
+# ── F5: 表示から漏れた件への導線 ───────────────────────────────────────────────
+
+
+def _many_items(n: int) -> list[SlackUnreadItem]:
+    return [
+        SlackUnreadItem(
+            excerpt_display=f"<@{_ME_UID}> 見積{i}の条件をご確認ください。",
+            occurred_at="2026-09-10T09:00:00+09:00",
+            channel_id=f"D08MANY{i:04d}",
+            channel_kind="dm",
+            from_user_id=f"U08MANY{i:04d}",
+            mentioned_user_ids=[_ME_UID],
+            permalink=f"https://vector.slack.com/archives/D08MANY{i:04d}/p{i}",
+        )
+        for i in range(n)
+    ]
+
+
+def test_hidden_cards_get_one_link_line(monkeypatch: Any) -> None:
+    """「7件中5件を表示」の隠れた件に触れる導線をバケット見出しの直後へ 1 行だけ置く。"""
+    _freeze_0911(monkeypatch)
+    items = _many_items(7)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=items,
+        slack_unread_total=7,
+        slack_unread_scanned=True,
+    )
+    lines = runner._slack_handoff_lines(d)
+    head_at = next(i for i, ln in enumerate(lines) if ln.startswith("🔴"))
+    assert "7件中5件を表示" in lines[head_at]
+    hidden = lines[head_at + 1]
+    assert hidden.startswith("（表示していない2件は 〔<https://vector.slack.com/")
+    assert hidden.endswith("|次の1件を開く>〕）")
+    # 導線は 1 行だけ（カードの間に挟まない）。
+    assert sum(1 for ln in lines if ln.startswith("（表示していない")) == 1
+    assert lines[head_at + 2].startswith("1.")
+
+
+def test_hidden_line_is_omitted_when_no_existing_url_is_available(monkeypatch: Any) -> None:
+    """**URL を組み立てない**。隠れた件に permalink が無ければ導線の行ごと出さない。"""
+    _freeze_0911(monkeypatch)
+    items = _many_items(7)
+    for it in items[5:]:
+        it.permalink = None
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=items,
+        slack_unread_total=7,
+        slack_unread_scanned=True,
+    )
+    lines = runner._slack_handoff_lines(d)
+    assert not any(ln.startswith("（表示していない") for ln in lines)
+    assert any("7件中5件を表示" in ln for ln in lines)  # 件数の申告は残す
+
+
+def test_hidden_line_is_absent_when_everything_is_shown(monkeypatch: Any) -> None:
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_many_items(3),
+        slack_unread_total=3,
+        slack_unread_scanned=True,
+    )
+    assert not any(ln.startswith("（表示していない") for ln in runner._slack_handoff_lines(d))
+
+
+def test_hidden_line_also_appears_in_the_button_blocks(monkeypatch: Any) -> None:
+    """行版とブロック版で文面を割らない（flag の ON/OFF で言うことを変えない）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_many_items(7),
+        slack_unread_total=7,
+        slack_unread_scanned=True,
+    )
+    dump = "\n".join(
+        b["text"]["text"] for b in runner._slack_handoff_card_blocks(d) if b.get("text")
+    )
+    assert "（表示していない2件は 〔<https://vector.slack.com/" in dump
+    assert dump.count("（表示していない") == 1
+
+
+# ── 裁定2（2026-09-11）: DM 実物の上で `「」` の読み分けが成立していること ─────────
+
+
+def test_observed_0911_headlines_are_all_quoted(monkeypatch: Any) -> None:
+    """実物 5 行は全部が相手の言葉＝すべて `「」` で囲まれている（自分の宿題と読ませない）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    heads = [
+        ln.split("*")[1]
+        for ln in runner._slack_handoff_lines(d)
+        if ln[:2] in ("1.", "2.", "3.", "4.", "5.")
+    ]
+    assert len(heads) == 5
+    assert all(h.startswith("「") and h.endswith("」") for h in heads), heads
+
+
+def test_quoted_and_label_headlines_are_distinguishable_in_the_dm(monkeypatch: Any) -> None:
+    """相手の言葉と Aico のラベルが同じ 🔴 に混在しても `「」` だけで見分けられる。
+
+    ここが裁定2の実効性。DM の実物（描画済み文字列）の上で機械的に分離できることを固定する。
+    """
+    _freeze_0911(monkeypatch)
+    items = [
+        _observed_items()[1],  # 相手の言葉（話題が述語 → 依頼文そのもの）
+        SlackUnreadItem(  # Aico のラベル（話題が使えて固定語尾が接がる）
+            excerpt_display=f"<@{_ME_UID}> NTVカードの受け渡しの件、来社日を教えてください。",
+            occurred_at="2026-09-10T09:00:00+09:00",
+            channel_id="D08LABEL001",
+            channel_kind="dm",
+            from_user_id="U08LABEL001",
+            from_display_name="森田",
+            mentioned_user_ids=[_ME_UID],
+            permalink="https://vector.slack.com/archives/D08LABEL001/p1",
+        ),
+    ]
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=items,
+        slack_unread_total=2,
+        slack_unread_scanned=True,
+    )
+    lines = [ln for ln in runner._slack_handoff_lines(d) if ln[:2] in ("1.", "2.")]
+    heads = [ln.split("*")[1] for ln in lines]
+    assert heads == ["「この後のMTGリスケでもよいでしょうか？」", "来社日を返す"]
+
+
+def test_footnote_tells_the_user_what_the_brackets_mean(monkeypatch: Any) -> None:
+    """`「」` の規約は **利用者に伝わって初めて** 誤読を止める（囲むだけでは足りない）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items(),
+        slack_unread_total=5,
+        slack_unread_scanned=True,
+    )
+    footnote = runner._slack_handoff_lines(d)[-1]
+    assert "「」内は相手の原文そのまま" in footnote
+    assert "囲みの無い見出し" in footnote
+
+
+def test_the_dm_keeps_the_question_mark_the_sender_typed(monkeypatch: Any) -> None:
+    """`「…でしょうか？」` の全角 `？` が NFKC で半角に倒れていない（逐語の 1 文字）。"""
+    _freeze_0911(monkeypatch)
+    d = MorningDigestOutput(
+        user_email_masked="m***@x",
+        slack_unread=_observed_items()[1:2],
+        slack_unread_total=1,
+        slack_unread_scanned=True,
+    )
+    line = next(ln for ln in runner._slack_handoff_lines(d) if ln.startswith("1."))
+    assert "「この後のMTGリスケでもよいでしょうか？」" in line
+    assert "でしょうか?" not in line

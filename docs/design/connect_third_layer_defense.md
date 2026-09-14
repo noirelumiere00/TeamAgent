@@ -1338,3 +1338,132 @@ TD:45 以降は保証経路が配信できた run では finalize が `already_d
 - token 2 個目（モデルの自発的な `oauth_connect`）は本 PR でも止めない（§12-10 の裁定どおり・門は触らない）。
 - 本番での確認は次の OC 便で: 「連携」→ 1 通、`connect guarantee suppressed model reply … reason=already_delivered_by_guarantee` が 1 行、
   `oauth_connect_url_issued` はモデルが呼べば 2 回のまま。
+
+---
+
+## 14.【追記 2026-09-11】P06 の根治と、unwrap 救済が本番で不発だったこと
+
+### 14-1. 実測
+
+| いつ | 何が出たか | 件数 |
+|---|---|---|
+| 2026-09-10 12:40 / 2026-09-11 10:27 | `before_tool_call blocked diagnostic=CONNECT-P06 id_shape=sender:absent,channel:D,session:plain,team:absent` | 5（CloudWatch の 10 行は logger + console の二重出力） |
+| 2026-09-09 15:12 / 2026-09-10 12:40 | mcp `caller_claim_rejected reason="caller claim request binding does not match"` | 6 |
+
+09-04（unwrap 着地）以降、`/teamagent/dev/openclaw` の `before_tool_call blocked` は
+**この 5 件だけ**。`bind_agent_run rejected` と `discarded declared user_context fields` は 0 行。
+
+### 14-2. P06 の根因 — `_user_context` の欠落
+
+EFS のセッション記録から **tool call の引数の実物**を読み取り専用 Fargate プローブで取った:
+
+| 時刻 | ツール | 引数の形 | `_user_context` |
+|---|---|---|---|
+| 09-11 10:27:30 | `knowledge_deliver` ×2 | `{query, top_k, filter_doc_type}`・包みなし | **無い** |
+| 09-11 10:27:33 | `search` ×2 | `{query, top_k, filter_doc_type}`・包みなし | **無い** |
+| 09-10 12:40:26 | `slack_summary` | `{"arguments":{}}`（1 段包み・中身が空） | **無い** |
+
+つまり 5/5 が「モデルが `_user_context` をそもそも付けてこなかった」。09-03 の主犯だった
+二重包み（`unwrapToolArguments` で救済済み）とは**別の失敗**である。
+
+`id_shape` の `sender:absent,team:absent` は**異常ではない**。上流 2026.7.1 の
+`before_tool_call` の ctx は `buildToolContext`
+（`dist/agent-tools.before-tool-call-84fX7TrL.js:1604-1614`）が組み、`senderId` / `teamId` を
+**そもそも含まない**。全 P コードで常に `absent` になる（§11-5 の弱点 1 と同じ）。
+
+**根治**: 申告値は `mintCallerClaim` が `authoritativeContext` で丸ごと置き換えてから署名するので、
+「モデルが正しい形で `_user_context` を渡すこと」への依存は**セキュリティを 1 ビットも稼いでいない
+純粋な失敗モード**だった。よって依存を切る:
+
+- `_user_context` の**欠落**は `{}` とみなす。
+- プレーンオブジェクトでない申告（`null` / 文字列 / 配列）は**捨てて観測**して続行する
+  （`discarded non-object declared user_context shape=…`）。
+- `validateDeclaredContext` の `slack_user_id` は「キーがあって値が違う」ときだけ拒否する
+  （申告が「無い」ことは「別人だと申告した」ことではない）。
+- 落とすのは従来どおり **明示的ななりすまし申告のみ**: `caller_claim` の持ち込み（replay）と
+  別人の `slack_user_id`。どちらも P05 のまま。
+- `params` 自体がオブジェクトでない場合と、**3 段以上の包み**は fail-closed のまま P06。
+  後者は従来「`_user_context` が見つからない」を経由して間接的に落ちていたので、
+  `unwrapToolArguments` に `stillWrapped` を足して**明示的に**落とすようにした。
+
+### 14-3. unwrap 救済は本番で一度も成立していなかった（I01a の根因）
+
+上流は hook の返り値を**置換せず浅くマージ**する:
+
+```
+dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+  if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(finalParams, hookResult.params);
+同 :938-947
+  mergeParamsWithApprovalOverrides = (o, a) => ({ ...o, ...a })
+```
+
+`{"arguments":{…}}` を剥がして**中身に署名して返す**と、元の `arguments` キーは実行引数に残る。
+実際に mcp へ届くのは `{arguments:{…}, …剥がした中身}` で、署名した `arguments_sha256`
+（剥がした中身だけ）と一致しない。結果 mcp が
+`caller claim request binding does not match` で拒否し、利用者には `診断: CONNECT-I01a` が出ていた。
+
+相関は **1:1・同一秒**で確定した:
+
+| unwrap 成功（OC ログ） | caller_claim_rejected（mcp ログ） |
+|---|---|
+| 09-09 15:12:36 | 09-09 15:12:36 `oauth_connect` |
+| 09-09 15:12:51 | 09-09 15:12:51 `oauth_connect` |
+| 09-10 12:40:32 | 09-10 12:40:32 `slack_summary` |
+| 09-10 12:40:34 | 09-10 12:40:34 `slack_summary` |
+| 09-10 12:40:39 | 09-10 12:40:39 `slack_summary` |
+| 09-10 12:40:41 | 09-10 12:40:41 `slack_summary` |
+
+09-04 以降の unwrap 成功は 6 件（7 件目は 09-10 12:40:26 の中身が空で P06）。**6/6 が拒否**。
+つまり unwrap の救済は本番で一度も通っていない。
+
+**根治**: `reconcileReturnedParams` — 署名した集合に無い**元のトップレベルキー**を `undefined` で
+返し、マージ後の実行引数を署名対象と一致させる。JSON-RPC の `tools/call` を組む時点で
+`undefined` のキーは落ちるので、mcp が受け取るのは署名した集合そのものになる。
+包みが無かった場合（`depth === 0`）は**返り値を一切変えない**（バイト同一を保つ）。
+
+これは P06 の根治と不可分である。`_user_context` の欠落を通すようにすると、09-10 の
+`{"arguments":{}}` は unwrap を通って署名され、そのまま I01a に化けるだけだったため。
+
+### 14-4. 利用者への文面（誤誘導の封鎖）
+
+本番実測 2026-09-11 10:27、block 文の 1 行目が英語の技術理由
+（`teamagent-caller-identity: teamagent-caller-identity: _user_context must be a plain object`
+＝接頭辞が 2 回並んでいた）だったため、モデルがそれを読み解けず
+
+> 現在、ファイル添付やデータベース検索の機能が一時的に利用できない状態です。
+> Google 連携をリセットすることで解決する可能性があります。「連携」と返していただければ、
+> リセットリンクをお出しします。
+
+と**自分で原因を作文**し、利用者を無関係な操作へ誘導した（連携は成立していた）。
+SOUL の既存規約（#380「原因を自分で推測・作文しない」）は適用範囲を
+「`oauth_connect` / `CALLER_IDENTITY_REJECTED`」に限っていたため、plugin の
+`before_tool_call` block はどの規則にも当たらなかった。
+
+直したのは 2 箇所:
+
+1. `formatBlockReason` を 5 行にした。
+   1 行目=利用者向けの日本語の案内（行動だけ）、2 行目=モデル宛の禁止事項
+   （推測して連携リセット等を勧めない）、3 行目=転送の定型文、4 行目=診断行、
+   5 行目=技術理由（管理者向け・接頭辞は 1 回だけ）。
+2. SOUL の節見出しと適用範囲を「`診断:` 行を含む**どのツールの結果でも**」へ広げ、
+   「拒否理由に書いていない別の操作を勧めない」「ツールのブロックを連携切れと解釈して
+   やり直しを促さない」を明文化した。
+
+### 14-5. 変異（緑の実質性）
+
+| 変異 | 内容 | 赤くなるテスト |
+|---|---|---|
+| `M30` | `_user_context` 欠落を再び block に戻す（`declaredContext = assertPlainObject(...)`） | `test_tool_calls_without_a_declared_user_context_are_signed_not_blocked` |
+| `M31` | `reconcileReturnedParams` を素通し（`return signedParams`）にする | `test_signed_arguments_match_what_upstream_actually_executes` ほか |
+| `M32` | `slack_user_id` の照合を `Object.hasOwn` 無しに戻す（＝申告の欠落も拒否） | `test_tool_calls_without_a_declared_user_context_are_signed_not_blocked` |
+| `M33` | なりすまし申告（別人の `slack_user_id`）も捨てて続行する | `test_missing_user_context_does_not_move_the_trust_boundary` |
+| `M34` | `stillWrapped` の block を外す（3 段以上を通す） | `test_missing_user_context_does_not_move_the_trust_boundary` ほか |
+
+### 14-6. 残る弱点
+
+- `reconcileReturnedParams` は上流のマージ規則（`{...o, ...a}`）に依存する。上流が置換へ変わると
+  墓標キーが無害な余剰になるだけで壊れはしないが、probe 側の `upstreamMergeHookParams` は
+  上流の 3 行を焼き込んでいるので、上流更新時はここを一次ソースで引き直すこと。
+- モデルが `_user_context` を落とす癖そのものには触れていない（触る必要が無くなった）。
+  頻度は `discarded non-object declared user_context` と P06 の件数で観測する。
+- 3 段以上の包みは引き続き P06。本番で観測されたら unwrap 上限を上げるかを判断する。

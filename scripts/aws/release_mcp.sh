@@ -126,6 +126,53 @@ json.dump(env, open(sys.argv[1], 'w'), ensure_ascii=False)
 " "$1"
 }
 
+# ---------- buildspec 世代のプリフライト（2026-09-11 r20 段2 の再発防止） ----------
+# 契約 JSON は buildspec に base64 で焼かれるので、契約を変えた PR は buildspec 世代の
+# content-addressed key を動かす。repo 側 manifest は PR で更新されるが、
+# S3 publish と UpdateProject は admin CLI の別儀式なので取り残されうる。
+# 取り残されたまま撃つと、段1（契約を焼いていないので世代が動かない）は SUCCEEDED し、
+# 段2 だけが "FATAL: embedded release contract hash mismatch" で落ちる。
+# 承認レコードと MFA セッションを 1 本無駄にしてから落ちるので、撃つ前に止める。
+GENERATION_MANIFEST="$REPO_ROOT/infra/deploy/buildspec_generation_inputs.json"
+
+# repo 内で完結する側: manifest が worktree から陳腐化していないか（認証不要）。
+assert_generation_manifest_fresh() {
+  python3 "$REPO_ROOT/infra/deploy/verify_generation_inputs.py" \
+    --manifest "$GENERATION_MANIFEST" --repo-root "$REPO_ROOT" \
+    || die "generation manifest が worktree から陳腐化しています（manifest を再生成すること）"
+}
+
+# live 側: 公開済み buildspec の世代が manifest の expected と一致するか（要認証）。
+# $1: 読み取り自体に失敗したときの扱い。die（既定・本番）/ warn（dry-run）。
+# 「読めた上で不一致」は dry-run でも必ず落とす（それが本件の再発防止そのもの）。
+assert_published_generation() {
+  local on_read_error="${1:-die}" names pins errfile reason
+  names="$(python3 -c "
+import json
+print(' '.join(sorted(json.load(open('$GENERATION_MANIFEST'))['expected_generation_sha256'])))")"
+  [ -n "$names" ] || die "generation manifest に expected_generation_sha256 がありません"
+  # 認証の出どころは呼び出し時点で変わる。dry-run は MFA 前なので他の読み取り
+  # （kms list-aliases）と同じく --profile を明示し、本番は MFA セッションの
+  # 環境変数を使う（AWS_PROFILE は unset 済みなので --profile を付けてはいけない）。
+  local -a profile_args=()
+  [ "${DRY_RUN:-0}" = 1 ] && profile_args=(--profile "$PROFILE")
+  # stderr を stdout へ混ぜない（混ぜると警告 1 行で JSON が壊れる）。
+  errfile="$(mktemp)"
+  # shellcheck disable=SC2086
+  if ! pins="$(aws codebuild batch-get-projects --names $names --region "$REGION" \
+      "${profile_args[@]}" \
+      --query 'projects[].{name:name,buildspec:source.buildspec}' --output json 2>"$errfile")"; then
+    reason="$(head -1 "$errfile")"; rm -f "$errfile"
+    [ "$on_read_error" = warn ] || die "CodeBuild の buildspec ピンを読めません: $reason"
+    info "警告: buildspec ピンを読めませんでした（dry-run のため続行）: $reason"
+    return 0
+  fi
+  rm -f "$errfile"
+  python3 "$REPO_ROOT/infra/deploy/assert_published_generation.py" \
+    --manifest "$GENERATION_MANIFEST" --pins-json "$pins" \
+    || die "公開済み buildspec の世代が repo の期待値と一致しません（上の対処に従うこと。撃っても段2 で必ず落ちます）"
+}
+
 s3_version_id() { # $1=key → 最新 VersionId
   aws s3api list-object-versions --bucket "$EVIDENCE_BUCKET" --prefix "$1" \
     --query "Versions[?Key=='$1' && IsLatest].VersionId | [0]" --output text
@@ -158,13 +205,23 @@ start_and_wait() { # $1=project $2=env json $3=source-version("-"で無指定) $
       SUCCEEDED) info "$project SUCCEEDED"; LAST_BUILD_ID="$bid"; return 0;;
       IN_PROGRESS) ;;
       *)
-        echo "FATAL: $project が $st で終了しました。失敗ログ:" >&2
+        echo "FATAL: $project が $st で終了しました。失敗ログ（buildspec のエコーを除いた実出力）:" >&2
         local lg ls
         lg="$(aws codebuild batch-get-builds --ids "$bid" --region "$REGION" --query 'builds[0].logs.groupName' --output text)"
         ls="$(aws codebuild batch-get-builds --ids "$bid" --region "$REGION" --query 'builds[0].logs.streamName' --output text)"
+        # --limit 40（末尾 40 件）で grep してはいけない。CodeBuild は失敗時に
+        # commands ブロック全文をもう一度エコーするので、末尾 40 件はエコーの中身であり、
+        # grep が拾うのは本文中の `|| { echo "FATAL: ..."; }` というソース断片だけになる。
+        # 2026-09-11 r20 段2（build 679b024e）では、これで無関係な 3 行が出て
+        # 「stderr が 1 行も出ていない」という誤った所見を生んだ。本物の
+        # `FATAL: embedded release contract hash mismatch` は 363 イベント中の 238 番目にあった。
+        # 失敗出力は必ずストリーム末尾側にあるので、--start-from-head は付けず
+        # 末尾から最大 10000 件（API 上限）を取る。ログが巨大でも失敗区間を必ず含む。
+        # そのうえでエコーを timestamp で除いた実出力だけを出す。
         aws logs get-log-events --log-group-name "$lg" --log-stream-name "$ls" --region "$REGION" \
-          --limit 40 --query 'events[].message' --output text 2>/dev/null | tr '\t' '\n' | \
-          grep -iE "FATAL|error|fail" | tail -12 >&2 || true
+          --limit 10000 --output json 2>/dev/null | \
+          python3 "$REPO_ROOT/scripts/aws/codebuild_failure_excerpt.py" --limit 20 || true
+        echo "  （全文: aws logs get-log-events --log-group-name $lg --log-stream-name $ls --start-from-head）" >&2
         exit 1;;
     esac
   done
@@ -192,6 +249,8 @@ info "契約: MANIFEST=$SOURCE_MANIFEST_CONTRACT_SHA256"
 # ---------- dry-run: 5 段全部の env 名集合を許可集合と照合 ----------
 if [ "$DRY_RUN" = 1 ]; then
   info "=== dry-run: 各段の環境変数を許可集合と照合します（MFA 不要・何も起動しません） ==="
+  assert_generation_manifest_fresh
+  assert_published_generation warn
   D=DUMMY
   mkenv "$WORK/s1.json" <<EOF
 APPROVAL_DECISION=APPROVED: dry-run
@@ -334,6 +393,13 @@ CRED_L="$(assume "$ROLE_LAUNCHER" "$SESS_LAUNCHER")" || die "起動ロールの 
 AWS_ACCESS_KEY_ID="$BASE_AK"; AWS_SECRET_ACCESS_KEY="$BASE_SK"; AWS_SESSION_TOKEN="$BASE_TK"
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 unset AWS_PROFILE 2>/dev/null || true
+
+# ---------- プリフライト: 撃つ前に buildspec 世代を照合する ----------
+# 段1 より前に置く。段1 を通してしまうと承認レコードが 1 本焼かれ、
+# 段2 で落ちた後の再走で余計な承認が積み上がるため。
+info "buildspec 世代を照合中..."
+assert_generation_manifest_fresh
+assert_published_generation die
 
 # ---------- 段1: 承認発行 ----------
 FORCED_ROLLBACK_EVIDENCE_JSON='{"gate_version":1,"state":"PROVISIONAL_INITIAL_RELEASE","provisional":true}'

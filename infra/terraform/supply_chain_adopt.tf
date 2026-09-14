@@ -83,6 +83,14 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-11 publish 世代（Wave8・util-linux CVE 5件の恒久対応）。media base(v3.24)
+    # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
+    # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
+    # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_attestor_buildspec_generations = {
@@ -122,6 +130,14 @@ locals {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
+    # 2026-09-11 publish 世代（Wave8・util-linux CVE 5件の恒久対応）。media base(v3.24)
+    # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
+    # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
+    # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
   }
 
   image_promoter_buildspec_generations = {
@@ -158,6 +174,14 @@ locals {
     # したことによる再レンダリング。値の出所は repo tree からのオフライン導出（Wave3〜6 を
     # 完全再現済みのハーネス）。publish 儀式は admin CLI（Wave6 と同一経路）。
     "32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96" = {
+      content_type                  = "text/yaml"
+      object_lock_retain_until_date = "2099-12-31T00:00:00Z"
+    }
+    # 2026-09-11 publish 世代（Wave8・util-linux CVE 5件の恒久対応）。media base(v3.24)
+    # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
+    # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
+    # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
+    "5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -356,18 +380,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["64e6435bf78edf51c8b02268f6c5d7b9e4ef10680b40f49d4b7a0195ef1aaed9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/64e6435bf78edf51c8b02268f6c5d7b9e4ef10680b40f49d4b7a0195ef1aaed9.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/32c4e42177a7483b54385a4cc280c879f7c571905cefed212b81bb0e9d21cb96.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9.yml"
 }
 
 import {

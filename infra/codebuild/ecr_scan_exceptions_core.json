@@ -1,5 +1,33 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": []
+  "exceptions": [
+    {
+      "cve": "CVE-2026-18374",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44",
+      "version": "2.44-r4",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-09-14 mcp 便 r22 image-builder 段3 で新規検出（MEDIUM・Chainguard python:latest 同梱 glibc 2.44-r4）。段4 Trivy は契約が Critical/High ゼロを固定しており MEDIUM は通るため、本例外で段3 だけを通す。恒久対応は Chainguard python base digest を glibc 修正版へバンプする世代 publish（runtime 契約束縛・#386 と同型）で、その着地時に本例外は stale=fail で自動的に撤去を強制される。",
+      "expires_on": "2026-09-28"
+    },
+    {
+      "cve": "CVE-2026-18374",
+      "severity": "MEDIUM",
+      "package": "ld-linux-2.44",
+      "version": "2.44-r4",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-09-14 mcp 便 r22 image-builder 段3 で新規検出（MEDIUM・glibc 2.44-r4 の動的ローダ部分。同一 CVE の 3 サブパッケージのうちの 1 つ）。段4 Trivy は MEDIUM を通す。恒久対応は glibc-2.44 と同じ base digest バンプで、着地時に stale=fail が撤去を強制する。",
+      "expires_on": "2026-09-28"
+    },
+    {
+      "cve": "CVE-2026-18374",
+      "severity": "MEDIUM",
+      "package": "glibc-2.44-locale-posix",
+      "version": "2.44-r4",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-09-14 mcp 便 r22 image-builder 段3 で新規検出（MEDIUM・glibc 2.44-r4 の locale-posix 部分。同一 CVE の 3 サブパッケージのうちの 1 つ）。段4 Trivy は MEDIUM を通す。恒久対応は glibc-2.44 と同じ base digest バンプで、着地時に stale=fail が撤去を強制する。",
+      "expires_on": "2026-09-28"
+    }
+  ]
 }

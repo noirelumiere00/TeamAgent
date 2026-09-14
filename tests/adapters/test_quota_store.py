@@ -12,7 +12,12 @@ from typing import Any
 
 import pytest
 
-from teamagent.adapters.quota_store import QuotaResult, VideoQuotaStore, current_month_jst
+from teamagent.adapters.quota_store import (
+    QuotaResult,
+    VideoQuotaStore,
+    current_month_jst,
+    quota_block_message,
+)
 from teamagent.skills.base import SkillContext
 from teamagent.skills.video.schema import VideoAnalysisInput
 from teamagent.skills.video.skill import VideoAnalysisSkill
@@ -119,6 +124,84 @@ def test_db_failure_fail_open() -> None:
 
     r = VideoQuotaStore(_Boom(), limit=3).try_consume(ME, 1, request_id="r")
     assert r.allowed  # 裁定: コスト制御はfail-open（分析を止めない・WARNはops監視）
+
+
+# ── 文面の書き分け（2026-09-11 本番実測の不具合: 使用14/上限20 で「上限に達しました」） ──
+
+
+def test_remaining_six_requested_ten_offers_the_remainder() -> None:
+    """残 6・要求 10: 上限到達ではない。残数と「6本で進めますか？」を出す。"""
+
+    store, _ = _store(limit=20)
+    for _ in range(14):
+        store.try_consume(ME, 1, request_id="r")
+    r = store.try_consume(ME, 10, request_id="r")
+
+    assert not r.allowed
+    assert (r.used, r.limit, r.requested, r.remaining) == (14, 20, 10, 6)
+    msg = quota_block_message(r)
+    # 本番実測の食い違いを固定: 残数が 1 本以上あるとき「上限に達しました」と書かない。
+    assert "上限に達しました" not in msg
+    assert "VIDEO_QUOTA_PARTIAL_AVAILABLE" in msg
+    assert "今月の残りは6本です" in msg
+    assert "20本中 14本使用" in msg
+    assert "今回のご依頼は10本でした" in msg
+    assert "6本で進めますか？" in msg
+    assert "リセットは来月1日（JST）です" in msg
+
+
+def test_remaining_zero_requested_one_says_limit_reached() -> None:
+    """残 0・要求 1: ここだけが本当の「上限に達しました」。"""
+
+    store, _ = _store(limit=20)
+    for _ in range(20):
+        store.try_consume(ME, 1, request_id="r")
+    r = store.try_consume(ME, 1, request_id="r")
+
+    assert not r.allowed and r.remaining == 0 and r.requested == 1
+    msg = quota_block_message(r)
+    assert msg.startswith("VIDEO_QUOTA_EXCEEDED:")
+    assert "今月の動画分析上限（20本）に達しました（使用 20本）" in msg
+    assert "進めますか" not in msg  # 残 0 で選択肢を出さない（空手形にしない）
+    assert "リセットは来月1日（JST）です" in msg
+
+
+def test_remaining_twenty_requested_three_passes_through() -> None:
+    """残 20・要求 3: 素通り（消費後の残は 17）。"""
+
+    store, _ = _store(limit=20)
+    r = store.try_consume(ME, 3, request_id="r")
+
+    assert r.allowed and r.used == 3 and r.requested == 3 and r.remaining == 17
+
+
+def test_over_limit_request_reports_measured_remainder() -> None:
+    """要求が月上限そのものを超える場合も、残数は実測して返す（事前拒否は維持）。"""
+
+    store, pg = _store(limit=20)
+    for _ in range(14):
+        store.try_consume(ME, 1, request_id="r")
+    r = store.try_consume(ME, 25, request_id="r")
+
+    assert not r.allowed and r.used == 14 and r.remaining == 6
+    assert pg.store[(ME, current_month_jst())] == 14  # 事前拒否＝消費しない
+    assert "今月の残りは6本です" in quota_block_message(r)
+
+
+def test_ledger_failure_message_omits_unknown_numbers() -> None:
+    """台帳障害（fail-open）: 使用数が不明なら数字を語らない。"""
+
+    class _Boom:
+        def connection(self, **kw: Any) -> Any:
+            raise RuntimeError("db down")
+
+    store = VideoQuotaStore(_Boom(), limit=20)
+    assert store.try_consume(ME, 3, request_id="r").allowed  # 分析は止めない（裁定）
+    # 台帳が読めないまま上限超過を弾く経路（count>limit）は、残数不明として扱う。
+    blocked = store.try_consume(ME, 25, request_id="r")
+    assert not blocked.allowed and not blocked.used_known and blocked.remaining == 0
+    msg = quota_block_message(blocked)
+    assert "使用 -1本" not in msg and "-1" not in msg
 
 
 def test_month_is_jst() -> None:

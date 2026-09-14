@@ -218,24 +218,22 @@ def test_unlock_matches_the_committed_declaration() -> None:
     scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
     元の封印と同一になる。
 
-    2026-09-04 human gate（ユーザー明示承認）で scope を 2 path へ拡大した。
-    Chainguard python ベースを 3.14.7-r1→r6 へバンプすると、runtime 契約の base
-    digest と release 契約の core ``binary.python.sha256`` probe が**必ず同時に**
-    変わる（python バイナリ実体が変わるため。片方だけ更新すると
-    test_teamagent_bundle_provenance が 15 件赤になる）。相乗り規約
-    ``retention_ruling_2026_08_27.landmine_partial_scope`` のとおり、scope はこの
-    PR の変更集合ちょうどへ絞り込んである。**この 2 path 以外への拡大は、この
-    assert が引き続き検出する。**
+    2026-09-11 human gate で scope を 1 path へ絞り直した（前回の 2 path 宣言は
+    PR #386 で消化済み）。media base 同梱の util-linux 系 3 パッケージを
+    2.42.1-r0 → 2.42.3-r1 へ pin すると media-apk.lock の 3 行が動き、同 lock の
+    sha256 を焼いている release 契約の ``artifact.apk-lock.sha256`` が**必ず同時に**
+    変わる。相乗り規約 ``retention_ruling_2026_08_27.landmine_partial_scope`` の
+    とおり、scope はこの PR の変更集合ちょうどへ絞り込んである。**この 1 path
+    以外への拡大は、この assert が引き続き検出する。**
     """
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
-            "infra/codebuild/teamagent_runtime_contract.json",
         ]
-        assert "Chainguard" in unlock["reason"]
-        assert "CVE-2026-15806" in unlock["reason"]
-        assert "human gate 2026-09-04" in unlock["gate"]
+        assert "util-linux" in unlock["reason"]
+        assert "CVE-2026-78408" in unlock["reason"]
+        assert "human gate 2026-09-11" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

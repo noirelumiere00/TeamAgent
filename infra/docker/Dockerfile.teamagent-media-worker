@@ -81,6 +81,17 @@ ARG MBEDTLS3_PACKAGE_VERSION=3.6.7-r0
 ARG LIBCRYPTO3_PACKAGE_VERSION=3.5.8-r0
 ARG LIBEXPAT_PACKAGE_VERSION=2.8.4-r0
 ARG LIBSSL3_PACKAGE_VERSION=3.5.8-r0
+# 2026-09-11 便r20 段3: base(v3.24)同梱の util-linux 系 3 つ（libblkid / libmount /
+# libuuid = 2.42.1-r0）に公開済みCVE 5件。ECR scan は origin 名で報告するため
+# "util-linux 2.42.1-r0" として出る（unapproved: CVE-2026-27456 MEDIUM /
+# CVE-2026-76642・CVE-2026-78408・CVE-2026-78409・CVE-2026-78410 HIGH）。
+# 3 つとも chromium→glib→so:libmount.so.1→so:libblkid.so.1 と libxt→libsm→so:libuuid.so.1
+# の依存で最終イメージから外せないため、上と同じ型で修正版を明示 pin。
+# 修正版 2.42.3-r1（v3.24 / edge 双方に同版が存在）: secdb v3.24 main の util-linux
+# secfixes で 2.42.3-r0 が 27456/76642/78409/78410 を、2.42.3-r1 が 78408 を fixed。
+ARG LIBBLKID_PACKAGE_VERSION=2.42.3-r1
+ARG LIBMOUNT_PACKAGE_VERSION=2.42.3-r1
+ARG LIBUUID_PACKAGE_VERSION=2.42.3-r1
 
 RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sharing=locked \
     --mount=type=secret,id=teamagent_ca,required=false \
@@ -104,11 +115,14 @@ RUN --mount=type=cache,id=teamagent-media-apk-arm64-v3,target=/var/cache/apk,sha
       "font-noto=$FONT_NOTO_PACKAGE_VERSION" \
       "font-noto-cjk=$FONT_NOTO_CJK_PACKAGE_VERSION" \
       "font-noto-emoji=$FONT_NOTO_EMOJI_PACKAGE_VERSION" \
+      "libblkid=$LIBBLKID_PACKAGE_VERSION" \
       "libcrypto3=$LIBCRYPTO3_PACKAGE_VERSION" \
       "libexpat=$LIBEXPAT_PACKAGE_VERSION" \
       "libflac=$LIBFLAC_PACKAGE_VERSION" \
+      "libmount=$LIBMOUNT_PACKAGE_VERSION" \
       "libssh=$LIBSSH_PACKAGE_VERSION" \
       "libssl3=$LIBSSL3_PACKAGE_VERSION" \
+      "libuuid=$LIBUUID_PACKAGE_VERSION" \
       "mbedtls3=$MBEDTLS3_PACKAGE_VERSION" \
       "nodejs=$NODE_PACKAGE_VERSION" \
       "pyc=$PYTHON_PACKAGE_VERSION" \
@@ -276,7 +290,7 @@ ARG YTDLP_SDIST_SHA256=9e213e48cea35c66b378e4447903f118f6392a5fa380a2b6d7070ec86
 ARG YTDLP_REMOVED_EXTRACTOR_SET_SHA256=ea414688b508a2a77bf006e5928536603a51e7ab3b8664c13dd6d21b1140b80b
 ARG YTDLP_SANITIZED_TREE_SHA256=47c027c33b5750234293613987caf3e63ca93823c785580d334c1d29ee733f8f
 ARG YTDLP_SANITIZER_SHA256=4e7464710094be2eb6205fdc1ea207cfe62b99db1b34f9d31691e9a606bcb5db
-ARG MEDIA_APK_LOCK_SHA256=dbc64a58969d4dd87500216c10d052e4800cf37163e30af330784bd1a026090f
+ARG MEDIA_APK_LOCK_SHA256=4978f9bba8526955f4a6860601dad3b96fa1cfab13147f62b011cd213aeed9c4
 ARG TIKTOK_PACKAGE_JSON_SHA256=c9aafff461749b7591c810d698736fe33461965d238ed2cfd283229612a7fe28
 ARG TIKTOK_PACKAGE_LOCK_SHA256=f0fe7ac3f992960d12dfdaddb14fa06e0b44ed92386c2a7d3fc74cbb98784dc2
 ARG TIKTOK_SCRAPER_SHA256=99c1955010a99be0f2921d8b107f849c3fce216f76eaa2ba342531e98407816e

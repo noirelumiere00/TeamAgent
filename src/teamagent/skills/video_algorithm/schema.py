@@ -480,7 +480,16 @@ class VideoAlgorithmInput(BaseModel):
 
     query: str
     # 深掘り分析（DL+Gemini）する本数。env VIDEO_ALGO_MAX_VIDEOS（5・clamp1〜10）。重い。
-    max_videos: int = Field(default_factory=_default_max_videos, ge=1, le=10)
+    # 利用者が本数を言ったら（「6本で」「3本だけ」）必ずここに入れる＝指定が既定より優先。
+    max_videos: int = Field(
+        default_factory=_default_max_videos,
+        ge=1,
+        le=10,
+        description=(
+            "深掘り分析する動画の本数。利用者が本数を指定したら（例:「6本で」）その数を入れる。"
+            "未指定なら既定値のまま。"
+        ),
+    )
     # 取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（30・clamp5〜30）。軽い。
     board_size: int = Field(default_factory=_default_board_size, ge=5, le=30)
     client_name: str | None = None  # brand_relation 判定用（任意）
@@ -516,6 +525,8 @@ class VideoAlgorithmOutput(BaseModel):
     slides_url: str | None = None  # 編集可スライドHTML（営業がブラウザで直接編集）
     pptx_url: str | None = None  # 提案用 PPTX（16:9・そのまま提案資料に差し込む）
     slack_summary: str = ""
+    # 今月の残数に丸めて途中で打ち切ったときの一言（断らずに出せる分だけ出した事実を明示）。
+    quota_note: str | None = None
     total_cost_usd: float = Field(default=0.0, ge=0.0)
     model_id: str | None = None
     # 入力の echo（⑥: OC が5KW分の結果からKW優先度を会話で合成する際に参照）

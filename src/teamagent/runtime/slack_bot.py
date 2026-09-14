@@ -1404,7 +1404,8 @@ class SkillDispatcher:
                 return "🔎 同じ条件の動画分析がまだ処理中です。完了通知を待ってください。"
             if "VIDEO_QUOTA_IDENTITY_REQUIRED" in str(e):
                 return "🔎 利用者を確認できないため動画分析を開始できませんでした。"
-            if "VIDEO_QUOTA_EXCEEDED" in str(e):
+            if "VIDEO_QUOTA_EXCEEDED" in str(e) or "VIDEO_QUOTA_PARTIAL_AVAILABLE" in str(e):
+                # 残数超過（残 1 本以上）は「上限」ではなく残数と選択肢を出す文面が入っている。
                 return str(e).split(":", 1)[-1].strip()
             if "VIDEO_ALGORITHM_CACHE_UNAVAILABLE" in str(e):
                 return "🔎 二重課金防止を確認できないため、動画分析を開始しませんでした。"

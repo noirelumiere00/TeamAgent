@@ -22,18 +22,23 @@ from teamagent.skills._shared.slack_handoff import (
     BUCKET_WATCH,
     BUCKET_YOURS,
     EFFORT_BY_KIND,
+    HEADLINE_NO_REQUEST,
+    KIND_FALLBACK_HEADLINES,
     KIND_REPLY,
     KIND_SCHEDULE,
     KIND_TAKEOVER,
     KIND_UNKNOWN,
     NOTE_BODY_TRUNCATED,
     NOTE_DUE_UNRESOLVED,
-    NOTE_NO_REQUEST,
+    QUOTE_CLOSE,
+    QUOTE_OPEN,
+    REASON_AMBIGUOUS_ADDRESSEE,
     REASON_ANSWERED_BY_OTHER,
     REASON_BLOCKED,
     REASON_CLOSED,
     HandoffCard,
     build_card,
+    build_headline,
     channel_label,
     classify_request_kind,
     count_mentioned_others,
@@ -43,10 +48,13 @@ from teamagent.skills._shared.slack_handoff import (
     extract_request_quote,
     extract_topic,
     extract_topic_and_context,
+    headline_from_body,
+    normalize_text,
     resolve_due,
     sentences,
     source_from_item,
     triage_slack_handoff,
+    verbatim_headline,
 )
 
 _JST = dt.timezone(dt.timedelta(hours=9))
@@ -452,12 +460,16 @@ def test_request_quote_skips_pleasantries() -> None:
 
 
 def test_no_request_sentence_leaves_everything_empty() -> None:
+    """依頼文が無い件は「返信する」とも「原文を見る」とも断定せず、本文の冒頭一文を出す。
+
+    補足行で「依頼文を特定できませんでした」を重ねない（見出しと矛盾するため・実物 D3）。
+    """
     c = _card(f"<@{_ME}> 明日の資料、こちらです。", channel_kind="dm", mentioned_user_ids=[_ME])
     assert c.request_quote == ""
     assert c.request_kind == KIND_UNKNOWN
     assert c.effort_label == ""  # 推測で数字を作らない
-    assert c.headline == "原文を見る"
-    assert c.note == NOTE_NO_REQUEST
+    assert c.headline == "「明日の資料、こちらです」"  # 相手の言葉なので囲む
+    assert c.note == ""
     assert c.bucket == BUCKET_YOURS
 
 
@@ -503,7 +515,7 @@ def test_topic_is_a_verbatim_slice_of_the_body() -> None:
     [
         # 「送る」を「確認」に化けさせない。型が判らない依頼は **依頼文をそのまま** 出す。
         ("<@U_ME> 請求書だけ送ってください。", "請求書だけ送ってください"),
-        ("<@U_ME> B社案で見積を出してもらえますか？", "B社案で見積を出してもらえますか"),
+        ("<@U_ME> B社案で見積を出してもらえますか？", "B社案で見積を出してもらえますか？"),
         # 「触るな・待て」を「あなたの番」の語尾で上書きしない。
         (
             "<@U_ME> この案件は今は動かさないでください。",
@@ -512,11 +524,14 @@ def test_topic_is_a_verbatim_slice_of_the_body() -> None:
     ],
 )
 def test_unknown_kind_headline_is_the_request_verbatim(body: str, expected: str) -> None:
-    """型が判らない依頼に固定語尾を足すと、原文に無い述語を作ってしまう（生成＝禁止）。"""
+    """型が判らない依頼に固定語尾を足すと、原文に無い述語を作ってしまう（生成＝禁止）。
+
+    **相手の言葉なので `「」` で囲む**（囲みの有無が原文かラベルかの唯一の見分け）。
+    """
     c = _card(body, channel_kind="dm")
     assert c.request_kind == KIND_UNKNOWN
-    assert c.headline == expected
-    assert c.headline in body  # 逐語（宛先トークンと句点だけ落とす）
+    assert c.headline == f"「{expected}」"
+    assert expected in body  # 逐語（宛先トークンと文末の句点だけ落とす）
 
 
 def test_headline_never_ends_with_a_broken_verb_stem() -> None:
@@ -525,9 +540,14 @@ def test_headline_never_ends_with_a_broken_verb_stem() -> None:
 
 
 def test_conjunctive_topic_falls_back_instead_of_gluing_a_suffix() -> None:
-    """「確認したら」+「を確認」のような壊れた見出しを作らない（定型文言へ落とす）。"""
+    """「確認したら」+「を確認」のような壊れた見出しを作らない。
+
+    2026-09-11 裁定で、固定語彙へ落ちる **前に依頼文そのもの**（48 字以内）を試す。
+    「返信する」より用件が分かるため。相手の言葉なので `「」` で囲む。
+    """
     c = _card(f"<@{_ME}> 確認したら教えてください。", channel_kind="dm")
-    assert c.headline == "返信する"
+    assert c.headline == "「確認したら教えてください」"
+    assert "を確認" not in c.headline  # 壊れた接続は作らない（ここが主眼）
 
 
 def test_long_topic_falls_back_to_fixed_wording_instead_of_truncating() -> None:
@@ -702,7 +722,7 @@ def test_source_from_item_accepts_provider_field_names() -> None:
 def test_missing_fields_stay_blank_instead_of_being_guessed() -> None:
     c = build_card(source_from_item(_item()), now=_NOW, me_user_id=_ME, index=0)
     assert (c.channel_label, c.elapsed_label, c.due_label, c.request_quote) == ("", "", "", "")
-    assert c.headline == "原文を見る"
+    assert c.headline == HEADLINE_NO_REQUEST
 
 
 def test_empty_input_has_no_summary() -> None:
@@ -771,3 +791,396 @@ def test_deadline_prefers_the_date_inside_the_request_over_an_earlier_one() -> N
     assert c.due_label == "期限 8/28(金)"
     assert c.due_date == dt.date(2026, 8, 28)
     assert c.bucket == BUCKET_YOURS
+
+
+# ── 2026-09-11 実物の「わかりづらい」指摘（F1〜F3 の受け入れ条件）────────────────
+#
+# 小俣さん本人へ届いた 🔴 5 行をそのまま入力にする。ここが緑でも「読める日本語か」は
+# 人間が読むしかないので、**修正前の実文言を否定形で固定**して後退を機械的に止める。
+
+#: 実物 5 行の本文（宛先トークンは fixture の `_ME` 形式に置き換えただけ）。
+_OBSERVED_BODIES: tuple[tuple[str, str], ...] = (
+    # ① 依頼文が取れない（旧: 見出し「原文を見る」＋補足「依頼文を特定できませんでした」）
+    (
+        "no_request_with_date",
+        "お疲れさまです。NTV様の件、本日 9/11(金) の社内MTGまでに状況をまとめておきます。",
+    ),
+    # ② い形容詞（旧: 「この後のMTGリスケでもよいを返す」）
+    ("i_adjective", "この後のMTGリスケでもよいでしょうか？"),
+    # ③ 半角カナ読点＋連続空白＋名詞述語（旧: 「…必要を返す」・`､` がそのまま）
+    ("halfwidth_comma", "今後の新体制 にともない､見直し 必要でしょうか"),
+    # ④ 依頼文が取れない（旧: 見出し「返信する」＋補足「依頼文を特定できませんでした」）
+    ("no_request_plain", "先ほどの資料、フォルダに入れておきました。ご連絡まで。"),
+    # ⑤ 型が判らない依頼（旧もこの形＝後退していないことの確認）
+    ("unknown_kind", "Aicoと連携できるか？"),
+)
+
+#: 旧実装が出していた「壊れた見出し」「Aico の動作」の実文言。**二度と出さない**。
+_REGRESSED_HEADLINES: tuple[str, ...] = (
+    "この後のMTGリスケでもよいを返す",
+    "必要を返す",
+    "原文を見る",
+    "依頼文を特定できませんでした",
+)
+
+
+@pytest.mark.parametrize(("name", "body"), _OBSERVED_BODIES, ids=[n for n, _ in _OBSERVED_BODIES])
+def test_observed_lines_are_readable_japanese(name: str, body: str) -> None:
+    """実物 5 行が「日本語として成立し、Aico 視点の文言が消えている」ことを固定する。"""
+    c = _card(f"<@{_ME}> {body}", channel_kind="dm", mentioned_user_ids=[_ME])
+    assert c.headline, f"{name}: 見出しが空"
+    for broken in _REGRESSED_HEADLINES:
+        assert broken not in c.headline, f"{name}: 旧実装の壊れた見出しが残っている"
+        assert broken not in c.note, f"{name}: 旧実装の補足行が残っている"
+    # 半角カナ読点・連続空白は入口の NFKC で消える（原文のまま見出しへ流さない）。
+    assert "､" not in c.headline
+    assert "  " not in c.headline
+    # 「を＋動詞」を接げない述語へ固定語尾を接いでいない。
+    for tail in ("よい", "必要", "でしょう"):
+        assert f"{tail}を返す" not in c.headline
+        assert f"{tail}を確認" not in c.headline
+
+
+def test_observed_lines_headlines_are_exactly_these() -> None:
+    """実物 5 行の見出しを実寸で固定する（ここを変えるときは人間が読んでから）。"""
+    got = [
+        _card(f"<@{_ME}> {body}", channel_kind="dm", mentioned_user_ids=[_ME]).headline
+        for _, body in _OBSERVED_BODIES
+    ]
+    assert got == [
+        "「NTV様の件、本日 9/11(金) の社内MTGまでに状況をまとめておきます」",
+        "「この後のMTGリスケでもよいでしょうか？」",
+        "「今後の新体制 にともない、見直し 必要でしょうか」",
+        "「先ほどの資料、フォルダに入れておきました」",
+        "「Aicoと連携できるか？」",
+    ]
+    # 5 行とも相手の言葉＝すべて `「」` で囲まれている（自分の宿題と読ませない）。
+    assert all(h.startswith("「") and h.endswith("」") for h in got)
+
+
+# ── F1: 「を＋動詞」を接続できない述語末尾 ─────────────────────────────────────
+
+#: い形容詞・名詞述語・助動詞の全パターン（`_UNUSABLE_TOPIC_TAIL_RE` に足したぶん）。
+_UNUSABLE_TAILS: tuple[str, ...] = (
+    # い形容詞
+    "よい",
+    "良い",
+    "いい",
+    "悪い",
+    "無い",
+    "多い",
+    "少ない",
+    "早い",
+    "速い",
+    "遅い",
+    "高い",
+    "低い",
+    "長い",
+    "短い",
+    "強い",
+    "弱い",
+    "欲しい",
+    "ほしい",
+    "難しい",
+    "易しい",
+    "正しい",
+    "新しい",
+    "古い",
+    "近い",
+    "遠い",
+    "たい",
+    # 名詞述語・形容動詞
+    "必要",
+    "不要",
+    "可能",
+    "不可",
+    "不明",
+    "未定",
+    "未確認",
+    "同じ",
+    "大丈夫",
+    "困難",
+    "重要",
+    "急ぎ",
+    "至急",
+    # 助動詞・終助詞
+    "だ",
+    "である",
+    "でしょう",
+    "ましょう",
+    "かも",
+    "はず",
+    "つもり",
+    "そうです",
+    "らしい",
+)
+
+
+@pytest.mark.parametrize("tail", _UNUSABLE_TAILS)
+@pytest.mark.parametrize("kind", [KIND_TAKEOVER, KIND_SCHEDULE, KIND_REPLY])
+def test_unusable_predicate_tail_never_gets_a_fixed_suffix(tail: str, kind: str) -> None:
+    """述語で終わる話題に「を返す」「を確認」「を引き取る」を接がない（定型文言へ落とす）。"""
+    quote = f"来週の運用は{tail}ですか"
+    headline = build_headline(
+        bucket=BUCKET_YOURS, fold_reason="", kind=kind, quote=quote, others=0, text=quote
+    )
+    assert f"{tail}を" not in headline
+    assert f"{tail}する" not in headline
+    if extract_topic(quote).endswith(tail):
+        # 末尾剥がし（`_TAIL_STRIP_PATTERNS`）を通り抜けて述語のまま残った形。
+        # 固定語尾は接がず、依頼文そのものを `「」` で出す（2026-09-11 裁定3）。
+        # 「欲しい」「である」等は末尾剥がしが先に消して名詞で終わるので、
+        # 普通に「〜を引き取る」へ繋がってよい（過剰にフォールバックさせない）。
+        assert headline == f"「{quote}」"
+
+
+@pytest.mark.parametrize(
+    ("quote", "kind", "expected"),
+    [
+        ("請求書の送付をご確認ください。", KIND_REPLY, "請求書の送付を確認"),
+        ("来社日を教えてください。", KIND_SCHEDULE, "来社日を返す"),
+        ("引継ぎタスク3件を引き取ってもらえますか？", KIND_TAKEOVER, "引継ぎタスク3件を引き取る"),
+        ("最終確認をお願いします。", KIND_REPLY, "最終確認する"),
+        ("NTVカードの受け渡しの件、来社日を教えてください。", KIND_SCHEDULE, "来社日を返す"),
+    ],
+)
+def test_normal_topics_still_connect(quote: str, kind: str, expected: str) -> None:
+    """**過剰にフォールバックへ落ちていない**こと（F1 の語彙追加が普通の話題を壊さない）。"""
+    assert (
+        build_headline(
+            bucket=BUCKET_YOURS, fold_reason="", kind=kind, quote=quote, others=0, text=quote
+        )
+        == expected
+    )
+
+
+# ── F2: 入口の正規化（NFKC → 空白圧縮）────────────────────────────────────────
+
+
+def test_normalize_text_folds_halfwidth_kana_comma_and_runs_of_spaces() -> None:
+    assert (
+        normalize_text("今後の新体制 にともない､見直し　　必要")
+        == "今後の新体制 にともない、見直し 必要"
+    )
+    assert normalize_text("  ﾃｽﾄ  ４月  ") == "テスト 4月"
+    assert normalize_text("行頭\tと\n末尾 ") == "行頭 と 末尾"
+
+
+def test_normalize_text_runs_nfkc_before_anything_that_could_be_bypassed() -> None:
+    """**NFKC が先頭**。全角 `＜` を半角へ倒してから無害化に渡す（貫通させない）。
+
+    ⚠️ これが逆順だと `＜@U…＞` は escape をすり抜けてから `<@U…>` に戻る。
+    描画側 `_handoff_display` の順序テストと対（そちらが本番経路での実証）。
+    """
+    assert normalize_text("＜@U08LEAK001＞") == "<@U08LEAK001>"
+    # NFKC 済みなので判定層のメンション辞書（半角 `<@…>` 前提）が実際に効く。
+    assert extract_topic("＜@U08LEAK001＞ 請求書の送付をご確認ください。") == "請求書の送付"
+
+
+def test_topic_extraction_normalizes_before_splitting_on_commas() -> None:
+    """半角カナ読点 `､` のままだと読点で割れず、末尾の述語ごと見出しへ流れる（実物 D2）。"""
+    assert extract_topic("今後の新体制 にともない､見直し 必要でしょうか") == "見直し 必要"
+
+
+# ── F3: 依頼文が取れないときの一本化 ───────────────────────────────────────────
+
+
+def test_headline_from_body_skips_pleasantries() -> None:
+    assert headline_from_body("お疲れさまです。請求書の件です。") == "「請求書の件です」"
+
+
+def test_headline_from_body_truncates_visibly_at_forty() -> None:
+    """省略の `…` は括弧の **内側**（`「本文の冒頭…」`）。"""
+    body = "あ" * 60 + "。"
+    got = headline_from_body(body)
+    assert got.startswith("「")
+    assert got.endswith("…」")
+    assert len(got) == 42  # 「 + 本文40字（末尾は …）+ 」
+
+
+def test_headline_from_body_says_it_could_not_read_when_there_is_nothing() -> None:
+    assert headline_from_body("") == HEADLINE_NO_REQUEST
+    assert headline_from_body("よろしくお願いします。") == HEADLINE_NO_REQUEST
+
+
+def test_note_never_contradicts_the_headline() -> None:
+    """見出しが「読めなかった」と言っている横で補足行が同じことを言わない（実物 D3）。"""
+    c = _card(f"<@{_ME}> ", channel_kind="dm", mentioned_user_ids=[_ME])
+    assert c.headline == HEADLINE_NO_REQUEST
+    assert c.note == ""
+
+
+def test_folded_buckets_still_name_their_reason_without_a_quote() -> None:
+    """畳んだ側（watch/fyi）は依頼文が無くても理由を名乗る（F3 で潰していない）。"""
+    c = _card(
+        f"<@{_ME}> <@U_TANAKA> 明日の資料、こちらです。",
+        channel_kind="group_dm",
+        mentioned_user_ids=[_ME, "U_TANAKA"],
+    )
+    assert c.bucket == BUCKET_WATCH
+    assert c.headline == "宛先が絞れていない"
+    assert c.fold_reason == REASON_AMBIGUOUS_ADDRESSEE.format(count=1)
+
+
+# ── 既存の規律が保たれていること（上限）────────────────────────────────────────
+
+
+def test_length_caps_are_unchanged() -> None:
+    """topic 24 / 逐語 48 の上限は動かさない（切り詰めて捏造しない側の担保）。"""
+    from teamagent.skills._shared import slack_handoff as _h
+
+    assert (_h._MAX_TOPIC_LEN, _h._MAX_QUOTE_HEADLINE_LEN) == (24, 48)
+    # 話題 26 字（＞24）かつ依頼文 55 字（＞48）＝どちらの上限も超える。
+    # 話題も逐語も使えないので **固定語彙**（Aico のラベル・囲まない）まで落ちる。
+    long_topic = "とても長い前置きが延々と続く案件名" * 2 + "の扱い"
+    quote = f"{long_topic}を引き取ってもらえますか？"
+    assert len(long_topic) > _h._MAX_TOPIC_LEN
+    assert len(quote) > _h._MAX_QUOTE_HEADLINE_LEN
+    headline = build_headline(
+        bucket=BUCKET_YOURS, fold_reason="", kind=KIND_TAKEOVER, quote=quote, others=0, text=""
+    )
+    assert headline == "作業の引き取りを返す"
+    assert not headline.startswith("「")  # ラベルは囲まない
+
+
+# ── 裁定2（2026-09-11）: `「」` が「相手の言葉」と「Aico のラベル」の唯一の見分け ──────
+#
+# 実例 #1「…状況をまとめておきます」は **相手がやると言っている**。囲み無しで 🔴 に並ぶと
+# 自分の宿題として読め、やらなくてよい仕事を抱えるか、逆に自分の宿題を落とす。
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "明日の資料、こちらです。",  # 依頼文なし → 冒頭一文
+        "お疲れさまです。先ほどの資料、フォルダに入れておきました。ご連絡まで。",
+        "請求書だけ送ってください。",  # 型不明 → 依頼文そのもの
+        "この後のMTGリスケでもよいでしょうか？",  # 話題が述語 → 依頼文そのもの
+        "確認したら教えてください。",  # 条件節 → 依頼文そのもの
+    ],
+)
+def test_headlines_made_of_the_other_persons_words_are_always_quoted(body: str) -> None:
+    """相手の言葉から作った見出しは **必ず** `「` で始まり `」` で終わる。"""
+    c = _card(f"<@{_ME}> {body}", channel_kind="dm", mentioned_user_ids=[_ME])
+    assert c.headline.startswith(QUOTE_OPEN), c.headline
+    assert c.headline.endswith(QUOTE_CLOSE), c.headline
+    # 括弧の中身は原文（NFKC 済み）に実在する＝Aico が足した語ではない。
+    inner = c.headline[1:-1].rstrip("…")
+    assert inner and inner in normalize_text(body)
+
+
+@pytest.mark.parametrize("label", [*KIND_FALLBACK_HEADLINES.values(), HEADLINE_NO_REQUEST])
+def test_aico_labels_are_never_quoted(label: str) -> None:
+    """Aico が付けたラベル（固定語彙）は囲まない＝原文と取り違えさせない。"""
+    assert QUOTE_OPEN not in label
+    assert QUOTE_CLOSE not in label
+
+
+def test_quoted_and_unquoted_headlines_are_distinguishable_in_one_list() -> None:
+    """同じ🔴に相手の言葉とラベルが混ざっても、`「」` の有無だけで見分けられる。
+
+    これが裁定2の実効性そのもの。混在リストで機械的に分離できることを固定する。
+    """
+    items = [
+        _item(  # 相手の言葉（依頼文が取れない → 冒頭一文）
+            excerpt_display=f"<@{_ME}> 明日の資料、こちらです。",
+            occurred_at="2026-08-19T09:00:00+09:00",
+            channel_kind="dm",
+            mentioned_user_ids=[_ME],
+        ),
+        _item(  # Aico のラベル（話題が使えて固定語尾が接がる）
+            excerpt_display=f"<@{_ME}> 来社日を教えてください。",
+            occurred_at="2026-08-19T09:00:00+09:00",
+            channel_kind="dm",
+            mentioned_user_ids=[_ME],
+        ),
+        _item(  # 相手の言葉（話題が述語 → 依頼文そのもの・裁定3）
+            excerpt_display=f"<@{_ME}> この後のMTGリスケでもよいでしょうか？",
+            occurred_at="2026-08-19T09:00:00+09:00",
+            channel_kind="dm",
+            mentioned_user_ids=[_ME],
+        ),
+        _item(  # Aico のラベル（話題も逐語も使えない）
+            excerpt_display=f"<@{_ME}> ",
+            occurred_at="2026-08-19T09:00:00+09:00",
+            channel_kind="dm",
+            mentioned_user_ids=[_ME],
+        ),
+    ]
+    heads = [c.headline for c in triage_slack_handoff(items, now=_NOW, me_user_id=_ME).cards]
+    quoted = [h for h in heads if h.startswith(QUOTE_OPEN)]
+    plain = [h for h in heads if not h.startswith(QUOTE_OPEN)]
+    assert quoted == ["「明日の資料、こちらです」", "「この後のMTGリスケでもよいでしょうか？」"]
+    assert plain == ["来社日を返す", HEADLINE_NO_REQUEST]
+
+
+def test_quote_wrap_puts_the_ellipsis_inside_the_brackets() -> None:
+    """`「本文の冒頭…」` であって `「本文の冒頭」…` ではない（裁定2）。"""
+    got = headline_from_body("あ" * 60 + "。")
+    assert got.endswith("…" + QUOTE_CLOSE)
+    assert not got.endswith(QUOTE_CLOSE + "…")
+
+
+def test_verbatim_quote_keeps_the_question_mark_the_sender_typed() -> None:
+    """`「」` は逐語を名乗る以上、NFKC で `？` を `?` に倒さない（原文の 1 文字を守る）。"""
+    assert verbatim_headline("この後のMTGリスケでもよいでしょうか？") == (
+        "「この後のMTGリスケでもよいでしょうか？」"
+    )
+    assert normalize_text("よいですか？　急ぎ！") == "よいですか？ 急ぎ！"
+    # 全角の ？ ！ 以外は従来どおり NFKC で倒す（半角カナ読点・全角英数）。
+    assert normalize_text("ﾃｽﾄ４月") == "テスト4月"
+
+
+# ── 裁定3（2026-09-11）: 逐語フォールバックを固定語彙より先に試す ──────────────
+
+
+def test_verbatim_is_tried_before_the_kind_label() -> None:
+    """実例 #2 が `日程を返す` で止まらず、用件そのものが出る。"""
+    c = _card(f"<@{_ME}> この後のMTGリスケでもよいでしょうか？", channel_kind="dm")
+    assert c.request_kind == KIND_SCHEDULE  # 型は判っている（＝旧実装なら固定語彙）
+    assert c.headline == "「この後のMTGリスケでもよいでしょうか？」"
+
+
+@pytest.mark.parametrize("kind", [KIND_TAKEOVER, KIND_SCHEDULE, KIND_REPLY])
+def test_long_request_still_falls_back_to_the_kind_label(kind: str) -> None:
+    """**誤爆確認**: 依頼文が 48 字を超えたら逐語を諦めて固定語彙へ（切り詰めない）。"""
+    quote = "とても長い前置きが延々と続く案件名" * 3 + "はこれでよいですか"
+    assert len(quote) > 48
+    headline = build_headline(
+        bucket=BUCKET_YOURS, fold_reason="", kind=kind, quote=quote, others=0, text=""
+    )
+    assert headline == KIND_FALLBACK_HEADLINES[kind]
+    assert QUOTE_OPEN not in headline
+
+
+def test_no_request_still_uses_the_body_not_the_kind_label() -> None:
+    """**誤爆確認**: 依頼文が取れない経路は裁定3で変わらない（本文の冒頭一文のまま）。"""
+    c = _card(f"<@{_ME}> 明日の資料、こちらです。", channel_kind="dm", mentioned_user_ids=[_ME])
+    assert c.request_quote == ""
+    assert c.headline == "「明日の資料、こちらです」"
+    assert c.headline not in KIND_FALLBACK_HEADLINES.values()
+
+
+def test_usable_topics_are_not_replaced_by_the_verbatim_path() -> None:
+    """**誤爆確認**: 話題が使える件は従来どおりラベル（囲まない）＝逐語に置き換わらない。"""
+    for quote, kind, expected in (
+        ("請求書の送付をご確認ください。", KIND_REPLY, "請求書の送付を確認"),
+        ("来社日を教えてください。", KIND_SCHEDULE, "来社日を返す"),
+        ("引継ぎタスク3件を引き取ってもらえますか？", KIND_TAKEOVER, "引継ぎタスク3件を引き取る"),
+    ):
+        headline = build_headline(
+            bucket=BUCKET_YOURS, fold_reason="", kind=kind, quote=quote, others=0, text=quote
+        )
+        assert headline == expected
+        assert QUOTE_OPEN not in headline
+
+
+def test_folded_buckets_are_not_quoted() -> None:
+    """畳んだ側（watch/fyi）の見出しは Aico のラベルなので囲まない（裁定3の波及なし）。"""
+    c = _card(
+        f"<@{_ME}> <@U_TANAKA> 明日の資料、こちらです。",
+        channel_kind="group_dm",
+        mentioned_user_ids=[_ME, "U_TANAKA"],
+    )
+    assert c.bucket == BUCKET_WATCH
+    assert QUOTE_OPEN not in c.headline
