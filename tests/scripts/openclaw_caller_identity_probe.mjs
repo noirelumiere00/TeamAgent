@@ -2542,6 +2542,24 @@ const g7Report = {
   inbound_foreign_team: inboundForeignTeam(),
 };
 
+// ── AI 生成感の除去（送信直前の正規化・2026-09-14） ─────────────────────────────
+// reply_payload_sending は run に束縛されない配信でも本文を正規化する（抑止・層3 は先に判定）。
+async function deaiCases() {
+  const { handlers } = makePlugin();
+  const run = async (name, text) => ({
+    input: text,
+    result: await deliverPayload(handlers, { text }, { runId: `deai-${name}` }),
+  });
+  return {
+    heading: await run("heading", "*1. ロリエ「さらピュア吸水」— 想定の2倍以上の露出実現*\n• 本文 -- 補足"),
+    link_untouched: await run("link", "<https://example.com/a—b|開く> 詳細—説明"),
+    range_untouched: await run("range", "売上は 80—100 万円"),
+    fence_untouched: await run("fence", "```\nA — B\n```"),
+    plain: await run("plain", "こんにちは。何かお手伝いできますか？"),
+  };
+}
+const deaiReport = await deaiCases();
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -2767,6 +2785,8 @@ const report = {
   layer1_trace: layer1TraceReport,
   // ── bind_agent_run / inbound rejected の G7 ────────────────────────────
   g7: g7Report,
+  // ── 送信直前の em ダッシュ / -- 読点化（2026-09-14） ────────────────────────
+  deai: deaiReport,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");

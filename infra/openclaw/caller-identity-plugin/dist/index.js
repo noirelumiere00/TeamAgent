@@ -3191,9 +3191,81 @@ export function createCallerIdentityPlugin({
   // 定型文へ置換する。event.runId と ctx.runId は agent run と同じ id
   // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
   // 同一 run の 2 通目以降（分割 payload）は、置換済みの定型文と重複するので取り消す。
+  // ── AI 生成感の除去・送信直前の安全網（2026-09-14）──────────────────────────────
+  // mcp 側（skills/_shared/deai_text.py strip_ai_decoration）は tool 結果の em ダッシュ「—」と
+  // 「--」を読点にして返すが、最終応答はモデルが文面を組み直すため再び入る
+  // （2026-09-14 本番実測: 検索回答の見出し 3 か所。mcp の投稿は進捗 1 行だけで、最終回答の
+  // 投稿主は OpenClaw）。ここは配信直前（reply_payload_sending）で本文だけを正規化する。
+  // Python 側と同じ規則: URL・Slack リンク <url|label>・インラインコード・コードフェンス内・
+  // 表の区切り行・範囲表記（80—100）は触らない。抑止（cancel）と層3 の定型文置換が先。
+  // ログは件数だけ（本文は載せない・G7）。
+  const DEAI_PROTECTED_RE = /`[^`\n]*`|<[^<>\s|]+(?:\|[^<>\n]*)?>|\]\([^()\s]*\)|https?:\/\/[^\s<>*]+/g;
+  const DEAI_EM_DASH_RE = /([ \t　]*)(—+)([ \t　]*)/g;
+  const DEAI_SPACED_HYPHENS_RE =
+    /(?<=[^\x00-\x7F])[ \t　]+-{2,}[ \t　]+|[ \t　]+-{2,}[ \t　]+(?=[^\x00-\x7F])/g;
+  const DEAI_CJK_HYPHENS_RE = /(?<=[^\x00-\x7F])-{2,}(?=[^\x00-\x7F])/g;
+  const DEAI_FENCE_RE = /^[ \t]*(?:```|~~~)/;
+  const DEAI_TABLE_DELIM_RE =
+    /^[ \t　]*[|｜][ \t　]*:?-{2,}:?[ \t　]*(?:[|｜][ \t　]*:?-{2,}:?[ \t　]*)*[|｜]?[ \t　]*$/;
+  const DEAI_DASH_COUNT_RE = /—|-{2,}/g;
+  // 退避の番兵は ASCII（Python 側の \x00/\x01 と同じく「和文ではない」扱いになる）。
+  const DEAI_SENTINEL_RE = /@@DEAI(\d+)@@/g;
+  const isNonAscii = (ch) => typeof ch === "string" && ch.length > 0 && ch.charCodeAt(0) > 0x7f;
+  function deaiNormalizeLine(line) {
+    const kept = [];
+    const masked = line.replace(DEAI_PROTECTED_RE, (m) => {
+      kept.push(m);
+      return `@@DEAI${kept.length - 1}@@`;
+    });
+    let out = masked.replace(DEAI_EM_DASH_RE, (m, lead, _dash, trail, offset, whole) => {
+      if (offset === 0) return "";
+      if (offset + m.length === whole.length) return "";
+      if (lead || trail) return "、";
+      if (isNonAscii(whole[offset - 1]) && isNonAscii(whole[offset + m.length])) return "、";
+      return m;
+    });
+    out = out.replace(DEAI_SPACED_HYPHENS_RE, "、").replace(DEAI_CJK_HYPHENS_RE, "、");
+    if (out !== masked) {
+      out = out
+        .replace(/、{2,}/g, "、")
+        .replace(/([。、！？，：・])、/g, "$1")
+        .replace(/、(?=[。！？）」』])/g, "");
+    }
+    return out.replace(DEAI_SENTINEL_RE, (_, i) => kept[Number(i)]);
+  }
+  function deaiNormalizeText(text) {
+    let inFence = false;
+    return text
+      .split("\n")
+      .map((line) => {
+        if (DEAI_FENCE_RE.test(line)) {
+          inFence = !inFence;
+          return line;
+        }
+        if (inFence || DEAI_TABLE_DELIM_RE.test(line)) return line;
+        return deaiNormalizeLine(line);
+      })
+      .join("\n");
+  }
+  function normalizeOutgoingText(event, logger, runId) {
+    const payload = event?.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    if (typeof payload.text !== "string" || !payload.text) return undefined;
+    const text = deaiNormalizeText(payload.text);
+    if (text === payload.text) return undefined;
+    const before = (payload.text.match(DEAI_DASH_COUNT_RE) ?? []).length;
+    const after = (text.match(DEAI_DASH_COUNT_RE) ?? []).length;
+    emitPluginLog(
+      logger,
+      "info",
+      `deai normalized outgoing text runId=${runId ?? "none"} dashes_removed=${before - after}`,
+    );
+    return { payload: { ...payload, text } };
+  }
+
   function replaceExhaustedConnectReply(event, ctx, logger) {
     const eventRunId = authoritativeRunId(event, ctx, logger, "reply_payload_sending");
-    if (!eventRunId) return undefined;
+    if (!eventRunId) return normalizeOutgoingText(event, logger, null);
     // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────
     // 実測ログ: 保証経路が `outcome=delivered` で 1 通配信したあと、層2 の revise を経て
     // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
@@ -3246,7 +3318,7 @@ export function createCallerIdentityPlugin({
         describeConnectDecision(decision, ctx),
     );
     const entry = connectFallbackByRun.get(eventRunId);
-    if (!entry) return undefined;
+    if (!entry) return normalizeOutgoingText(event, logger, eventRunId);
     const payload = event?.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const text = typeof payload.text === "string" ? payload.text.trim() : "";
