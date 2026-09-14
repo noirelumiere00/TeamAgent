@@ -4279,3 +4279,29 @@ def test_single_line_connect_plus_other_request_triggers_but_never_suppresses() 
     # 形の指標にも (d) が載る（本文は出さない）。
     shape_units = {u["label"]: u["shape"] for u in report["connect_shape"]["units"]}
     assert "leading_phrase:no" in shape_units["plain"]
+
+
+def test_outgoing_text_drops_em_dashes_but_keeps_links_ranges_and_code() -> None:
+    """送信直前（reply_payload_sending）で em ダッシュ「—」と「--」を読点にする（2026-09-14）。
+
+    mcp 側は tool 結果を読点化済みだが、最終応答はモデルが組み直すため本番で
+    検索回答の見出しに「—」が 3 か所残った。投稿主は OpenClaw なので、ここが最後の砦。
+    変異: plugin の ``normalizeOutgoingText`` を ``return undefined`` にすると heading が
+    None になり赤。保護（リンク・範囲・コードフェンス）を外すと untouched 系が赤。
+    """
+    deai = _caller_identity_report()["deai"]
+    heading = deai["heading"]["result"]
+    assert heading is not None and "cancel" not in heading
+    assert (
+        heading["payload"]["text"]
+        == "*1. ロリエ「さらピュア吸水」、想定の2倍以上の露出実現*\n• 本文、補足"
+    )
+    # Slack リンクの中の「—」は URL の一部。外側だけ読点になる。
+    assert (
+        deai["link_untouched"]["result"]["payload"]["text"]
+        == "<https://example.com/a—b|開く> 詳細、説明"
+    )
+    # 範囲表記・コードフェンス・記号の無い本文は触らない（戻り値なし＝上流がそのまま配信）。
+    assert deai["range_untouched"]["result"] is None
+    assert deai["fence_untouched"]["result"] is None
+    assert deai["plain"]["result"] is None
