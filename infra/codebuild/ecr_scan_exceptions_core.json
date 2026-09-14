@@ -28,6 +28,15 @@
       "owner": "s-komata@vectorinc.co.jp",
       "reason": "2026-09-14 mcp 便 r22 image-builder 段3 で新規検出（MEDIUM・glibc 2.44-r4 の locale-posix 部分。同一 CVE の 3 サブパッケージのうちの 1 つ）。段4 Trivy は MEDIUM を通す。恒久対応は glibc-2.44 と同じ base digest バンプで、着地時に stale=fail が撤去を強制する。",
       "expires_on": "2026-09-28"
+    },
+    {
+      "cve": "CVE-2026-85091",
+      "severity": "HIGH",
+      "package": "zlib",
+      "version": "1.3.2-r5",
+      "owner": "s-komata@vectorinc.co.jp",
+      "reason": "2026-09-14 mcp 便 r22 image-builder 段3 で新規検出（HIGH・Chainguard python:latest 同梱 zlib 1.3.2-r5・gz_vacate() の heap overflow、gzprintf/gzvprintf 経由）。規律『HIGH は期限付き例外にせずバンプで直す』の 1 件限りの例外。2026-09-14 夕方の小俣さん裁定「期限付き例外で今日発射」による。根拠 3 点: (1) バンプ先が存在しない: Wolfi secdb は修正版を 1.3.3-r0 と宣言しているが aarch64 APKINDEX の最新は 1.3.2-r6（パッチ無しリビルド）、upstream madler/zlib も未修正。(2) 到達性なし: runtime イメージ内 ELF 73 本の DT_NEEDED 解析で OS の libz.so.1 を参照するのは CPython の zlib・binascii モジュールのみ、import シンボルは deflate/inflate/crc32/adler32 系で gz* はゼロ、lxml は zlib を静的同梱。脆弱関数 gzprintf/gzvprintf への経路が無い。(3) 段4 Trivy は本 CVE を MEDIUM 判定（NVD 未解析）で通る。NVD が HIGH に格上げした時点で段4 が止まるため、例外の効力は事実上そこまで。恒久対応は Wolfi が zlib 1.3.3-r0 を publish し Chainguard python:latest に載った時点での base digest バンプ（PR #410 の更新）。着地時に stale=fail が撤去を強制する。",
+      "expires_on": "2026-09-28"
     }
   ]
 }

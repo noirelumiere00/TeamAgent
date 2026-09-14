@@ -23,6 +23,7 @@ REPOSITORY = "teamagent-mcp"
 TODAY = date(2026, 7, 16)
 # 2026-09-14 に core へ登録した glibc 2.44-r4 の例外（3 サブパッケージ共通の CVE）。
 GLIBC_2_44_CVE = "CVE-2026-18374"
+ZLIB_1_3_2_CVE = "CVE-2026-85091"
 SYNTHETIC_EXCEPTIONS = {
     ("CVE-2099-10001", "CRITICAL", "fixture-libc", "1.0.0"),
     ("CVE-2099-10002", "HIGH", "fixture-db", "2.0.0"),
@@ -138,9 +139,12 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # 3 サブパッケージ: glibc-2.44 / ld-linux-2.44 / glibc-2.44-locale-posix）が新規検出。
     # 段4 Trivy は契約が Critical/High ゼロを固定しており MEDIUM は通るため、08-13 / 09-03 と
     # 同型の期限つき例外（stale=fail・expires 2026-09-28）で段3 だけを通す。
-    # 同時に検出された CVE-2026-85091（HIGH・zlib 1.3.2-r5）は「HIGH は期限付き例外にせず
-    # バンプで直す」規律（activation_freeze.json の 09-11 宣言）に従い例外へ載せず、
-    # Chainguard python base digest のバンプ（別 PR・世代 publish）で根治する。
+    # 同時に検出された CVE-2026-85091（HIGH・zlib 1.3.2-r5）は当初「HIGH は期限付き例外にせず
+    # バンプで直す」規律（activation_freeze.json の 09-11 宣言）に従い例外へ載せなかったが、
+    # 2026-09-14 夕方の裁定「期限付き例外で今日発射」で 1 件限りの例外として登録した。
+    # 根拠: バンプ先が存在しない（Wolfi は 1.3.3-r0 を宣言のみ・upstream 未修正）／runtime の
+    # ELF 73 本に脆弱関数 gzprintf/gzvprintf への経路が無い／段4 Trivy は MEDIUM 判定で通る。
+    # 失効日は glibc と同じ 09-28（同じ base digest バンプで一括撤去・stale=fail が強制）。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
     # gitleaks(generic-api-key) は識別子 `key` の隣にある引用文字列を秘密と誤判定するため、
     # CVE ID は定数へ逃がし、レコード変数名にも `key` を使わない。
@@ -161,6 +165,14 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
         {**glibc_exception_common, "package": "glibc-2.44"},
         {**glibc_exception_common, "package": "ld-linux-2.44"},
         {**glibc_exception_common, "package": "glibc-2.44-locale-posix"},
+        {
+            "cve": ZLIB_1_3_2_CVE,
+            "severity": "HIGH",
+            "package": "zlib",
+            "version": "1.3.2-r5",
+            "owner": "s-komata@vectorinc.co.jp",
+            "expires_on": "2026-09-28",
+        },
     ]
     for entry in core_payload["exceptions"]:
         assert len(entry["reason"]) >= 20
@@ -170,10 +182,20 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
         "glibc-2.44",
         "ld-linux-2.44",
         "glibc-2.44-locale-posix",
+        "zlib",
     }
-    assert all(record.cve == glibc_cve and record.severity == "MEDIUM" for record in loaded_core)
-    # zlib HIGH を黙って例外に載せる変更は必ずここで赤にする。
-    assert not any(record.package == "zlib" for record in loaded_core)
+    glibc_records = [record for record in loaded_core if record.package != "zlib"]
+    assert all(record.cve == glibc_cve and record.severity == "MEDIUM" for record in glibc_records)
+    # HIGH/CRITICAL の例外は 09-14 夕方に裁定した zlib の 1 件だけ。これ以外を黙って載せる
+    # 変更、および zlib の失効日を glibc からずらす変更は必ずここで赤にする。
+    elevated = [record for record in loaded_core if record.severity in {"HIGH", "CRITICAL"}]
+    assert [(record.cve, record.package, record.version) for record in elevated] == [
+        (ZLIB_1_3_2_CVE, "zlib", "1.3.2-r5")
+    ]
+    expires_by_package = {
+        finding.package: record.expires_on for finding, record in loaded_core.items()
+    }
+    assert expires_by_package["zlib"] == expires_by_package["glibc-2.44"]
 
     # 2026-08-14: media の CVE-2026-7210（python3 3.14.5-r2）は一時的に例外登録したが、
     # Trivy 側では HIGH 判定（4サブパッケージに計上）で attestor の C/H ゼロゲートを
