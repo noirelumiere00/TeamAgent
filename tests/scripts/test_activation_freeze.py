@@ -218,6 +218,8 @@ def test_unlock_matches_the_committed_declaration() -> None:
     scope の拡大・gate の欠落・別内容への差し替えを検出する。畳めば else 分岐が
     元の封印と同一になる。
 
+    2026-09-14 human gate で scope を再び 2 path へ広げた（#386 と同型: chainguard python
+    ベースの arm64 digest バンプは runtime 契約と release 契約を必ず同時に動かす）。
     2026-09-11 human gate で scope を 1 path へ絞り直した（前回の 2 path 宣言は
     PR #386 で消化済み）。media base 同梱の util-linux 系 3 パッケージを
     2.42.1-r0 → 2.42.3-r1 へ pin すると media-apk.lock の 3 行が動き、同 lock の
@@ -230,10 +232,11 @@ def test_unlock_matches_the_committed_declaration() -> None:
     if unlock["active"]:
         assert unlock["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
+            "infra/codebuild/teamagent_runtime_contract.json",
         ]
-        assert "util-linux" in unlock["reason"]
-        assert "CVE-2026-78408" in unlock["reason"]
-        assert "human gate 2026-09-11" in unlock["gate"]
+        assert "zlib 1.3.2-r5" in unlock["reason"]
+        assert "CVE-2026-85091" in unlock["reason"]
+        assert "human gate 2026-09-14" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None
