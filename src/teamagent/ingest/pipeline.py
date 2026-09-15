@@ -301,6 +301,94 @@ class CaseCorpusStickyLookupError(RuntimeError):
     """事例集 corpus の ``case_external_use`` 既存値が読めなかった（fail-closed の合図）。"""
 
 
+def _is_campaign_aggregate_spec(spec: Any) -> bool:
+    """gsheets spec が「案件単位の集計」（ショート動画データベース・2026-09-15）を宣言しているか。
+
+    宣言は **yaml の ``extra_metadata.campaign_aggregate: "true"`` 1 本**。既存シート
+    （ナレッジ共有 / 営業 FB / 事例集）はこの経路に構造的に到達しない＝行単位の取込は不変。
+    """
+    extra = getattr(spec, "extra_metadata", None) or {}
+    return str(extra.get("campaign_aggregate", "") or "").strip().lower() == "true"
+
+
+def _ingest_campaign_aggregate_tab(
+    spec: Any,
+    tab: Any,
+    tab_rows: Any,
+    *,
+    embedder: _EmbedderProto,
+    repository: IngestRepository,
+    owner_email: str,
+    dry_run: bool,
+    request_id: str,
+) -> tuple[int, int]:
+    """1 タブを案件（広告主名 × 案件名）ごとに 1 document へ集計して upsert する。
+
+    - 広告主名 / 案件名の無い行は案件に結びつけない（campaign_aggregate 参照）。
+    - external_id は案件キーのハッシュ（行の挿入・削除で付け替わらない）。
+    - 差分取込の content hash は使わない（集計文書は常に upsert・冪等）。
+    """
+    from teamagent.ingest.campaign_aggregate import (
+        aggregate_campaigns,
+        campaign_external_id,
+        campaign_metadata,
+        campaign_title,
+        format_campaign_document,
+    )
+
+    aggregates = aggregate_campaigns(tab_rows.headers, tab_rows.rows)
+    tab_name = str(getattr(tab_rows, "tab_name", "") or tab.tab_name)
+    source_uri = f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit#gid={tab.gid}"
+    base_metadata = {str(k): str(v) for k, v in (spec.extra_metadata or {}).items()}
+    base_metadata.update(
+        {
+            "sheet_id": spec.sheet_id,
+            "sheet_name": spec.sheet_name,
+            "tab_name": tab_name,
+            "gid": str(tab.gid),
+        }
+    )
+    docs_n = 0
+    chunks_n = 0
+    for agg in aggregates:
+        external_id = campaign_external_id(spec.sheet_id, tab.gid, agg.advertiser, agg.campaign)
+        text = format_campaign_document(agg)
+        doc = DocumentUpsert(
+            source_type="gsheets",
+            external_id=external_id,
+            source_uri=source_uri,
+            title=campaign_title(agg),
+            owner_email=owner_email,
+            acl_emails=[owner_email],
+            acl_groups=_company_acl_groups(),
+            metadata={**base_metadata, **campaign_metadata(agg)},
+            modified_at=None,
+        )
+        chunks = [
+            ChunkUpsert(
+                chunk_idx=0,
+                content=text,
+                embedding=embedder.embed_passage(text),
+                metadata={},
+            )
+        ]
+        docs_n += 1
+        chunks_n += len(chunks)
+        if not dry_run:
+            repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+    # 件数のみ（広告主名・案件名・本文は載せない）。
+    logger.info(
+        "ingest_gsheet_campaign_aggregate_done",
+        sheet_id=spec.sheet_id,
+        tab_name=tab_name,
+        gid=tab.gid,
+        rows=len(tab_rows.rows),
+        campaigns=docs_n,
+        dry_run=dry_run,
+    )
+    return docs_n, chunks_n
+
+
 def _is_case_corpus_spec(spec: Any) -> bool:
     """gsheets spec が事例集 corpus（B-10）として宣言されているか。
 
@@ -4059,6 +4147,21 @@ def _ingest_gsheet(
             sheet_id=spec.sheet_id, tab_name=tab_title, request_id=request_id
         )
         if not tab_rows.headers:
+            continue
+        if _is_campaign_aggregate_spec(spec):
+            # 案件単位の集計（2026-09-15）。行単位の経路（下）には入らない。
+            _d, _c = _ingest_campaign_aggregate_tab(
+                spec,
+                tab,
+                tab_rows,
+                embedder=embedder,
+                repository=repository,
+                owner_email=owner_email,
+                dry_run=dry_run,
+                request_id=request_id,
+            )
+            docs_n += _d
+            chunks_n += _c
             continue
         # 差分取り込み: この tab の候補行（external_id は gid×row_idx で決定論）の
         # 保存済み content hash を 1 クエリで先読みする（fail-open＝失敗時は全件再処理）。

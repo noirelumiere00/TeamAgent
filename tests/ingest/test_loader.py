@@ -77,6 +77,9 @@ def test_load_real_yaml_strict_mode_passes_after_rulebook_cleanup(
     """
     monkeypatch.setenv("CASE_CORPUS_SHEET_ID", "1StrictModeCaseCorpusSheetIdXXXXXXXXXXXXXXX")
     monkeypatch.setenv("CASE_CORPUS_SHEET_GID", "424242")
+    # 2026-09-15: ショート動画データベース（案件集計）も同じ「意図的な未確定」型。
+    monkeypatch.setenv("SHORT_VIDEO_DB_SHEET_ID", "1StrictModeShortVideoDbSheetIdXXXXXXXXXXXX")
+    monkeypatch.setenv("SHORT_VIDEO_DB_SHEET_GID", "386118222")
     sources = load_ingest_sources(REAL_YAML, skip_placeholder=False)
     assert not any("REPLACE_WITH_" in f.folder_id for f in sources.gdrive_folders)
     assert not any("REPLACE_WITH_" in s.sheet_id for s in sources.gsheets)
