@@ -19,10 +19,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from teamagent.ingest.campaign_aggregate import (
+    account_external_id,
+    aggregate_accounts,
     aggregate_campaigns,
+    build_post_date_index,
     campaign_external_id,
     campaign_metadata,
     campaign_title,
+    format_account_document,
     format_campaign_document,
     is_missing,
     to_number,
@@ -114,7 +118,54 @@ ROWS: tuple[tuple[str, ...], ...] = (
 )
 
 
+RAW_HEADERS = ("authorMeta.name", "text", "playCount", "createTimeISO", "webVideoUrl")
+RAW_ROWS: tuple[tuple[str, ...], ...] = (
+    ("acct_a", "…", "1125", "2024-07-19T09:00:00.000Z", "https://t/v/1"),
+    ("acct_b", "…", "9999", "2025-01-05T09:00:00.000Z", "https://t/v/2"),
+    ("acct_c", "…", "2892", "2024-09-01T09:00:00.000Z", "https://t/v/4"),
+    ("acct_a", "…", "300", "2024-08-15T09:00:00.000Z", "https://t/v/6"),
+)
+
+
 # ── 純関数 ─────────────────────────────────────────────────────────────
+
+
+def test_post_dates_join_by_url_and_period_is_derived() -> None:
+    dates = build_post_date_index(RAW_HEADERS, RAW_ROWS)
+    assert dates == {
+        "https://t/v/1": "2024-07-19",
+        "https://t/v/2": "2025-01-05",
+        "https://t/v/4": "2024-09-01",
+        "https://t/v/6": "2024-08-15",
+    }
+    earth = aggregate_campaigns(HEADERS, ROWS, dates)[0]
+    assert earth.period == ("2024-07-19", "2024-09-01")
+    assert "投稿期間: 2024-07-19 〜 2024-09-01" in format_campaign_document(earth)
+    assert campaign_metadata(earth)["last_posted_on"] == "2024-09-01"
+    # 列が無いタブでは空（期間の行が出ないだけで集計は続く）。
+    assert build_post_date_index(("a", "b"), (("1", "2"),)) == {}
+    assert aggregate_campaigns(HEADERS, ROWS)[0].period is None
+
+
+def test_accounts_are_aggregated_including_posts_without_a_campaign() -> None:
+    """投稿アカウントは営業上の要素なので、案件の無い通常投稿も含めて 1 文書にする。"""
+    accounts = aggregate_accounts(HEADERS, ROWS, build_post_date_index(RAW_HEADERS, RAW_ROWS))
+    assert [a.account for a in accounts] == ["acct_a", "acct_b", "acct_c"]
+    a = accounts[0]
+    assert a.video_count == 4  # 案件付き 3 本（うち 1 本はサラヤ）＋ 広告主名なし 1 本
+    assert a.campaign_video_count == 3
+    assert a.campaigns == ("アース製薬 / みんなのシリカ", "サラヤ / ラカントsシロップ")
+    b = accounts[1]  # #N/A 行だけのアカウントも文書になる
+    assert b.video_count == 1 and b.campaign_video_count == 0 and b.campaigns == ()
+    text = format_account_document(a)
+    assert text.startswith("投稿アカウント実績: acct_a")
+    assert "投稿本数: 4 本（案件付き 3 本、通常投稿 1 本）" in text
+    assert "関わった案件: アース製薬 / みんなのシリカ、サラヤ / ラカントsシロップ" in text
+    assert "通常投稿" in format_account_document(b)
+    assert account_external_id(SHEET_ID, GID, "acct_a") == account_external_id(
+        SHEET_ID, GID, " ACCT_A "
+    )
+    assert ":account:" in account_external_id(SHEET_ID, GID, "acct_a")
 
 
 def test_missing_and_number_parsing() -> None:
@@ -223,9 +274,21 @@ def _install_fake_sheets(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
     fake_client = MagicMock()
     fake_client.get_sheet_metadata.side_effect = RuntimeError("no metadata in test")
-    fake_client.get_tab_rows.return_value = TabRows(
-        sheet_id=SHEET_ID, tab_name="データベース", headers=HEADERS, rows=ROWS, row_count=len(ROWS)
-    )
+
+    def _rows(*, sheet_id: str, tab_name: str, request_id: str, **_: Any) -> TabRows:
+        if tab_name == "全体Raw":
+            return TabRows(
+                sheet_id=sheet_id,
+                tab_name=tab_name,
+                headers=RAW_HEADERS,
+                rows=RAW_ROWS,
+                row_count=4,
+            )
+        return TabRows(
+            sheet_id=sheet_id, tab_name=tab_name, headers=HEADERS, rows=ROWS, row_count=len(ROWS)
+        )
+
+    fake_client.get_tab_rows.side_effect = _rows
     monkeypatch.setattr(
         "teamagent.adapters.gsheets_client.GSheetsClient.from_env",
         classmethod(lambda cls, **kwargs: fake_client),
@@ -264,10 +327,15 @@ def test_pipeline_upserts_one_document_per_campaign(monkeypatch: pytest.MonkeyPa
     _install_fake_sheets(monkeypatch)
     repo = _FakeRepository()
     docs, chunks = _run(_spec(aggregate=True), repo)
-    assert (docs, chunks) == (2, 2)
+    # 案件 2 件 ＋ 投稿アカウント 3 件（acct_a / acct_b / acct_c）。行単位の文書は作らない。
+    assert (docs, chunks) == (5, 5)
     ids = [c["external_id"] for c in repo.upsert_calls]
-    assert all(":campaign:" in i for i in ids)
+    assert sum(":campaign:" in i for i in ids) == 2 and sum(":account:" in i for i in ids) == 3
+    assert not any(i.endswith(":2") or i.endswith(":3") for i in ids)
     assert ids[0] == campaign_external_id(SHEET_ID, GID, "アース製薬", "みんなのシリカ")
+    account_doc = next(c for c in repo.upsert_calls if ":account:" in c["external_id"])
+    assert account_doc["metadata"]["cls_doc_type"] == "投稿アカウント実績"
+    assert "投稿期間: " in repo.upsert_calls[0]["content"]  # 全体Raw から投稿日を結合
     first = repo.upsert_calls[0]
     assert first["title"] == "施策実績 アース製薬 みんなのシリカ"
     assert first["metadata"]["campaign_aggregate"] == "true"
