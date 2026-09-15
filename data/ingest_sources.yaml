@@ -209,6 +209,32 @@ gsheets:
 # - sales_relevance_filter=true: mime_type whitelist + ノイズ除外 + 更新日制限
 # - max_files_per_drive: 1 ドライブあたりの安全上限
 # - modified_within_days: 過去 N 日以内に更新されたファイルのみ（古い案件除外）
+
+  # ---- ショート動画データベース（案件単位の集計）2026-09-15 追加 ----
+  # 動画 1 行 × 40 列の実績表。1 行 = 1 document ではなく、**広告主名 × 案件名ごとに 1 document**
+  # へ集計して入れる（extra_metadata.campaign_aggregate: "true" が唯一の宣言）。
+  # 広告主名が #N/A の行（自社メディアの通常投稿）は案件に結びつけない（推測結合はしない）。
+  # ID は env 後入れ（事例集と同じ型・2 つとも必須）:
+  #     SHORT_VIDEO_DB_SHEET_ID=<spreadsheet id>
+  #     SHORT_VIDEO_DB_SHEET_GID=<「データベース」タブの gid>
+  # 前提: シートが取込アカウント（社内ドメイン）から閲覧できること。
+  - sheet_id: "REPLACE_WITH_SHORT_VIDEO_DB_SHEET_ID"
+    sheet_id_env: "SHORT_VIDEO_DB_SHEET_ID"
+    sheet_name: "ショート動画データベース"
+    description: |
+      TikTok 投稿の実績データベース（動画 URL・アカウント・広告主名・案件名・再生/いいね/
+      シェア/コメント/保存・投稿文・広告費/インプレッション/CTR/視聴率）。案件ごとに
+      「どんな投稿を何本出し、どういう結果だったか」を 1 文書で引けるように集計して入れる。
+    tabs:
+      - gid: 0
+        gid_env: "SHORT_VIDEO_DB_SHEET_GID"
+        tab_name: "データベース"
+    row_unit: false
+    extra_metadata:
+      campaign_aggregate: "true"
+      topic: "施策実績"
+      structure: "campaign-aggregate"
+
 shared_drives_crawl:
   # 2026-08-17 ユーザー裁定: 全共有ドライブ横断は停止する。
   # ナレッジの実体（01_提案〜08_AI活用）は gdrive_folders の
