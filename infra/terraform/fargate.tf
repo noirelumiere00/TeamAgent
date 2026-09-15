@@ -592,6 +592,15 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "SLACK_TEAM_ID", value = var.slack_team_id },
       # Slack出典の内部識別子を開けるpermalinkへ変換するworkspace名。空ならURLを出さない。
       { name = "SLACK_WORKSPACE", value = var.slack_workspace },
+      # 2026-09-15: live にだけあった 8 key を tf に取り込む（variables_fargate.tf 末尾）。
+      { name = "SLACK_WORKSPACE_DOMAIN", value = var.slack_workspace },
+      { name = "USE_LLM_ROUTER", value = var.use_llm_router },
+      { name = "USE_OAUTH_START_LINKS", value = var.use_oauth_start_links },
+      { name = "OMIYAGE_SEARCH_DEPTH", value = var.omiyage_search_depth },
+      { name = "SEARCH_MIN_RELEVANCE_FALLBACK", value = var.search_min_relevance_fallback },
+      { name = "USE_TIKTOK_APIFY_FALLBACK", value = var.use_tiktok_apify_fallback },
+      { name = "VIDEO_ALGORITHM_APIFY_WALLCLOCK_S", value = var.video_algorithm_apify_wallclock_s },
+      { name = "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED", value = var.video_algorithm_result_cache_enabled },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が

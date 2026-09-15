@@ -489,3 +489,52 @@ variable "enable_vpc_endpoints" {
   type        = bool
   default     = true
 }
+
+# ============================================================
+# 2026-09-15: live（CLI 直登録の mcp TD）にだけ存在し tf に描画元が無かった env 8 key の取り込み
+# ============================================================
+# 2026-07-11 監査で見つかった「CLI 直登録 taskdef にだけ存在する env が apply で剥がれる」の再発防止。
+# 既定値は 2026-09-15 の live（mcp TD:104）の実値に合わせる（tf 描画の TD が live と等価になる）。
+# ⚠️ SLACK_WORKSPACE_DOMAIN は var.slack_workspace から描画する（live の値は同一・アプリ側は
+#   SLACK_WORKSPACE へ fallback する。skills/_shared/source_url.py）。
+variable "use_llm_router" {
+  description = "検索の語彙統合ルーター（USE_LLM_ROUTER）。2026-08-31 便で live に投入済み。"
+  type        = string
+  default     = "true"
+}
+
+variable "use_oauth_start_links" {
+  description = "連携リンクを path 形式（/oauth2/start）で出す（USE_OAUTH_START_LINKS・#376）。live は 1。"
+  type        = string
+  default     = "1"
+}
+
+variable "omiyage_search_depth" {
+  description = "お土産資料の TikTok 検索深度（OMIYAGE_SEARCH_DEPTH）。dispatcher の n_per_kw 上限 30 と同値（#377）。"
+  type        = string
+  default     = "30"
+}
+
+variable "search_min_relevance_fallback" {
+  description = "検索の足切り fallback（SEARCH_MIN_RELEVANCE_FALLBACK）。live は 0.05。"
+  type        = string
+  default     = "0.05"
+}
+
+variable "use_tiktok_apify_fallback" {
+  description = "TikTok 取得失敗分の Apify 補完（USE_TIKTOK_APIFY_FALLBACK・#375/#379）。live は 1。"
+  type        = string
+  default     = "1"
+}
+
+variable "video_algorithm_apify_wallclock_s" {
+  description = "動画分析の Apify 経路の壁時計上限秒（VIDEO_ALGORITHM_APIFY_WALLCLOCK_S）。live は 150。"
+  type        = string
+  default     = "150"
+}
+
+variable "video_algorithm_result_cache_enabled" {
+  description = "動画分析の結果キャッシュ（VIDEO_ALGORITHM_RESULT_CACHE_ENABLED）。live は true。"
+  type        = string
+  default     = "true"
+}
