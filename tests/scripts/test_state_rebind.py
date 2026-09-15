@@ -64,7 +64,7 @@ def test_mapping_accepts_a_valid_target(tmp_path: Path) -> None:
     assert len(load_targets(_mapping_file(tmp_path, [_target()]))) == 1
 
 
-def test_production_mapping_is_frozen_with_the_approved_six_targets() -> None:
+def test_production_mapping_is_frozen_with_the_approved_seven_targets() -> None:
     """freeze 後に確定した production mapping の改竄封印。
 
     値の由来: PRODUCTION DEPLOYMENT FREEZE（2026-08-20 18:15 JST）後の fresh 再解決。
@@ -73,21 +73,23 @@ def test_production_mapping_is_frozen_with_the_approved_six_targets() -> None:
     human gate の再承認が必要。
     """
     raw = json.loads(MAPPING.read_text(encoding="utf-8"))
-    assert raw["frozen_at"] == "2026-08-20T09:15:00Z"
+    # 2026-09-15: rebind #4 用に fresh 再解決（mcp 便 r23 で mcp と consumer 4 つを揃えた直後・OpenClaw を追加）
+    assert raw["frozen_at"] == "2026-09-15T10:15:00Z"
     expected = {
-        "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:86",
-        "aws_ecs_task_definition.connect_web[0]": "teamagent-dev-connect-web:71",
-        "aws_ecs_task_definition.morning_digest[0]": "teamagent-dev-morning-digest:53",
-        "aws_ecs_task_definition.canary[0]": "teamagent-dev-canary:23",
-        "aws_ecs_task_definition.ingest[0]": "teamagent-dev-ingest:55",
-        "aws_ecs_task_definition.tiktok_acquire[0]": "teamagent-dev-tiktok-acquire:25",
+        "aws_ecs_task_definition.mcp": "teamagent-dev-mcp:104",
+        "aws_ecs_task_definition.connect_web[0]": "teamagent-dev-connect-web:82",
+        "aws_ecs_task_definition.morning_digest[0]": "teamagent-dev-morning-digest:61",
+        "aws_ecs_task_definition.canary[0]": "teamagent-dev-canary:30",
+        "aws_ecs_task_definition.ingest[0]": "teamagent-dev-ingest:62",
+        "aws_ecs_task_definition.tiktok_acquire[0]": "teamagent-dev-tiktok-acquire:31",
+        "aws_ecs_task_definition.openclaw": "teamagent-dev-openclaw:47",
     }
     actual = {t["address"]: t["target_arn"].split("/")[-1] for t in raw["targets"]}
     assert actual == expected
     # x_buzz_worker は state == live (:1) のため対象外（含まれていたら誤り）
     assert "aws_ecs_task_definition.x_buzz_worker" not in actual
     # loader の厳密検証も通ること（consumer 宣言含む）
-    assert len(load_targets(MAPPING, require_targets=True)) == 6
+    assert len(load_targets(MAPPING, require_targets=True)) == 7
 
 
 def test_empty_targets_are_rejected_when_required(tmp_path: Path) -> None:
