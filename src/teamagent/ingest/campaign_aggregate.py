@@ -337,7 +337,10 @@ def aggregate_accounts(
 
 
 def account_external_id(sheet_id: str, gid: int, account: str) -> str:
-    digest = hashlib.sha1(_norm_key_part(account).encode("utf-8")).hexdigest()[:16]
+    # ID の安定化のためのハッシュ（セキュリティ用途ではない）。
+    digest = hashlib.sha1(
+        _norm_key_part(account).encode("utf-8"), usedforsecurity=False
+    ).hexdigest()[:16]
     return f"{sheet_id}:{gid}:account:{digest}"
 
 
@@ -348,7 +351,8 @@ def account_title(agg: AccountAggregate) -> str:
 def campaign_external_id(sheet_id: str, gid: int, advertiser: str, campaign: str) -> str:
     """行番号に依存しない external_id（案件キーのハッシュ）。"""
     key = _campaign_key(advertiser, campaign).encode("utf-8")
-    digest = hashlib.sha1(key).hexdigest()[:16]
+    # ID の安定化のためのハッシュ（セキュリティ用途ではない）。
+    digest = hashlib.sha1(key, usedforsecurity=False).hexdigest()[:16]
     return f"{sheet_id}:{gid}:campaign:{digest}"
 
 
