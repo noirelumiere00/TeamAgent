@@ -599,8 +599,8 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             "根拠検証の直し方:",
             "1. 「quantitative claim … no matching evidence citation」の ID には、その数量を支える"
             " URL を下の一覧から一字一句そのまま citations_per_placeholder に付ける。",
-            "2. 「not present in source-backed input evidence」または下の『引用できる数量』に無い数量"
-            "（年代・本数・週数・日数・件数を含む）は、その数を消して定性的な表現へ言い換える。",
+            "2. 「not present in source-backed input evidence」、または下の『引用できる数量』に"
+            "無い数量（年代・本数・週数・日数・件数を含む）は、その数を消して定性的な表現へ言い換える。",
             "3. 「citation is not present in the input evidence URLs」は URL の転記ミス。"
             "一覧の文字列だけを使う。",
         ]
