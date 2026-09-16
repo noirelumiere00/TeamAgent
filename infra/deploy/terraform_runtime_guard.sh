@@ -14,7 +14,7 @@
 set -euo pipefail
 umask 077
 
-GUARD_VERSION="25"
+GUARD_VERSION="26"
 EXPECTED_ACCOUNT_ID="718959508629"
 REGION="ap-northeast-1"
 PROJECT="teamagent"
@@ -123,6 +123,16 @@ plan:
   --prior-apply-receipt FILE activationが要求する直前runtime migration成功apply receipt
   --media-cutover-receipt FILE legacy→generic media切替の独立KMS署名済みreceipt
   --receipt FILE           receipt 出力先（default: PLAN.runtime-guard.json）
+
+config migration (kind: "config"):
+  - 画像・EventBridge rule・dispatcher・monitoring を一切変えない構成変更
+    （KMS 鍵新設 / IAM statement 追加 / task definition env 追加）専用の migration kind。
+  - preflight は Fargate task を起動せず、live fingerprint と contract SHA を receipt に焼く。
+  - review-plan / plan は --preflight-receipt だけを取り、--alarm-delivery-receipt /
+    --versioning-receipt / --log-readiness-receipt / --alarm-migration-receipt を受け付けない。
+  - create は manifest の to.allowed_resource_changes に列挙した address だけ、
+    task definition の env 差分は to.allowed_env_changes[<component>] のキーだけを許す。
+    画像は from == to == live、rule は no-op、secrets は不変を要求する。
 
 review-plan:
   - migrationはenabled=false/reviewed_plan=nullのcandidateであること。
@@ -2870,7 +2880,11 @@ migration_to_file() {
     candidate|final|preflight) ;;
     *) die "未知のmigration review phaseです: $review_phase" ;;
   esac
+  # 注意: jq の and は boolean を返すため、条件列の末尾に .migrations[$id] を置いても
+  # migration object は出力されない（true が書かれ、後段の .kind 参照が壊れる）。
+  # 条件全体を $valid に束ねてから object を選ぶ。
   jq -e -S -c --arg id "$migration_id" --arg review_phase "$review_phase" '
+    (
     .schema_version == 1 and
     .external_state_handoffs["2026-07-alarm-topic-consolidation-v1"] == {
       canonical_topic_arn:
@@ -2896,7 +2910,7 @@ migration_to_file() {
         dual_publish:
           "every inventoried publisher targets canonical and legacy",
         publisher_checkpoint:
-          "one durable postcondition checkpoint per exact publisher",
+          "move one exact publisher from dual-publish to canonical-only and durably checkpoint the mixed post-state",
         canonical_delivery_confirmed:
           "fresh SNS challenge and managed-KMS recipient acknowledgement after every publisher is canonical-only",
         legacy_reference_zero:
@@ -3235,12 +3249,129 @@ migration_to_file() {
           legacy_topic_exists: false,
           legacy_action_reference_count: 0
         }
+      elif .migrations[$id].kind == "config" then
+        # config: 画像・rule・dispatcher・monitoring を一切変えない構成変更（KMS/IAM/TD env）
+        # 専用。変更してよい resource address と TD env key は manifest 側の allowlist で持ち、
+        # 画像と rule は from == to を schema で強制する（live との一致は validate_migration_source）。
+        .migrations[$id].requires_migration == null and
+        .migrations[$id].required_preflight_profiles == [] and
+        (.migrations[$id].from | keys | sort) == [
+          "dispatcher_code_sha256", "images", "monitoring", "rule_states",
+          "task_definition_arns"
+        ] and
+        (.migrations[$id].to | keys | sort) == [
+          "allowed_env_changes", "allowed_resource_changes", "images",
+          "rule_states"
+        ] and
+        (.migrations[$id].from.task_definition_arns | keys | sort) == [
+          "canary", "connect_web", "ingest", "mcp", "morning",
+          "openclaw", "tiktok", "x_buzz"
+        ] and
+        (.migrations[$id].from.task_definition_arns |
+          (.openclaw | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-openclaw:[0-9]+$")) and
+          (.mcp | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-mcp:[0-9]+$")) and
+          (.connect_web | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-connect-web:[0-9]+$")) and
+          (.ingest | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-ingest:[0-9]+$")) and
+          (.morning | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-morning-digest:[0-9]+$")) and
+          (.canary | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-canary:[0-9]+$")) and
+          (.x_buzz | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-x-buzz-worker:[0-9]+$")) and
+          (.tiktok | test("^arn:aws:ecs:ap-northeast-1:718959508629:task-definition/teamagent-dev-tiktok-acquire:[0-9]+$"))) and
+        (.migrations[$id].from.images | keys | sort) == [
+          "canary", "connect_web", "ingest", "mcp", "morning",
+          "openclaw", "tiktok", "x_buzz"
+        ] and
+        ([
+          .migrations[$id].from.images.mcp,
+          .migrations[$id].from.images.connect_web,
+          .migrations[$id].from.images.ingest,
+          .migrations[$id].from.images.morning,
+          .migrations[$id].from.images.canary,
+          .migrations[$id].from.images.x_buzz
+        ] | all(test(
+          "^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-mcp@sha256:[0-9a-f]{64}$"
+        ))) and
+        (.migrations[$id].from.images.openclaw |
+          test("^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-openclaw@sha256:[0-9a-f]{64}$")) and
+        (.migrations[$id].from.images.tiktok |
+          test("^718959508629[.]dkr[.]ecr[.]ap-northeast-1[.]amazonaws[.]com/teamagent-media-worker@sha256:[0-9a-f]{64}$")) and
+        .migrations[$id].to.images == .migrations[$id].from.images and
+        (.migrations[$id].from.rule_states | keys | sort) ==
+          ["canary", "ingest", "morning"] and
+        (.migrations[$id].from.rule_states | to_entries |
+          all(.value == "ENABLED" or .value == "DISABLED")) and
+        .migrations[$id].to.rule_states == .migrations[$id].from.rule_states and
+        (.migrations[$id].from.dispatcher_code_sha256 | keys | sort) ==
+          ["tiktok", "x_buzz"] and
+        (.migrations[$id].from.dispatcher_code_sha256 |
+          to_entries | all(.value | test("^[A-Za-z0-9+/]{43}=$"))) and
+        (.migrations[$id].from.monitoring | keys) == ["container_insights"] and
+        (.migrations[$id].from.monitoring.container_insights |
+          . == "enabled" or . == "disabled") and
+        (.migrations[$id].to.allowed_resource_changes |
+          type == "array" and length > 0 and
+          length == (unique | length) and
+          all(
+            type == "string" and
+            test("^[a-z][a-z0-9_]*[.][A-Za-z0-9_-]+(\\[[0-9]+\\]|\\[\"[A-Za-z0-9_.:/-]+\"\\])?$") and
+            (test("^(terraform_data|data)[.]") | not)
+          )) and
+        (.migrations[$id].to.allowed_env_changes |
+          type == "object" and
+          ((keys - [
+            "canary", "connect_web", "ingest", "mcp", "morning",
+            "openclaw", "tiktok", "x_buzz"
+          ]) == []) and
+          (to_entries | all(.value |
+            type == "array" and
+            length == (unique | length) and
+            all(type == "string" and test("^[A-Z][A-Z0-9_]*$")))))
       else false
       end
-    ) and
-    .migrations[$id]
+    )
+    ) as $valid |
+    if $valid then .migrations[$id] else false end
   ' "$MIGRATION_FILE" > "$output" ||
     die "migrationが未登録・review phase不一致・期限切れ、またはdestination digestがexactではありません: $migration_id"
+}
+
+# migration kind の先読み。plan/review-plan の引数検査で「config kind は外部 receipt 4 種を
+# 受け付けない」を判定するためだけに使う。契約の完全検査は migration_to_file が行うので、
+# 未登録・不正な manifest はここでは空文字（= runtime/activation 相当の必須検査）に倒す。
+migration_kind_hint() {
+  local migration_id="$1"
+  need_cmd jq
+  jq -r --arg id "$migration_id" '
+    .migrations[$id].kind // "" | if type == "string" then . else "" end
+  ' "$MIGRATION_FILE" 2>/dev/null || printf ''
+}
+
+# plan/review-plan の --runtime-migration に伴う外部 receipt 引数の必須/禁止を kind で分ける。
+# runtime/activation: preflight + alarm-delivery + versioning + log-readiness + alarm-migration
+# が必須（従来どおり）。config: preflight だけ必須で、残り 4 種は指定できない（画像不変で
+# log/alarm cutover を伴わないため、束縛対象が存在しない）。
+assert_migration_receipt_arguments() {
+  local migration_id="$1" preflight_receipt="$2" alarm_delivery_receipt="$3"
+  local versioning_receipt="$4" log_readiness_receipt="$5"
+  local alarm_migration_receipt="$6" kind
+  [ -n "$preflight_receipt" ] ||
+    die "--runtime-migration には --preflight-receipt が必須です"
+  kind="$(migration_kind_hint "$migration_id")"
+  if [ "$kind" = "config" ]; then
+    [ -z "$alarm_delivery_receipt" ] &&
+      [ -z "$versioning_receipt" ] &&
+      [ -z "$log_readiness_receipt" ] &&
+      [ -z "$alarm_migration_receipt" ] ||
+      die "config migrationは --alarm-delivery-receipt / --versioning-receipt / --log-readiness-receipt / --alarm-migration-receipt を受け付けません"
+    return 0
+  fi
+  [ -n "$alarm_delivery_receipt" ] ||
+    die "--runtime-migration には --alarm-delivery-receipt が必須です"
+  [ -n "$versioning_receipt" ] ||
+    die "--runtime-migration には --versioning-receipt が必須です"
+  [ -n "$log_readiness_receipt" ] ||
+    die "--runtime-migration には --log-readiness-receipt が必須です"
+  [ -n "$alarm_migration_receipt" ] ||
+    die "--runtime-migration には --alarm-migration-receipt が必須です"
 }
 
 media_migration_binding_to_file() {
@@ -3457,6 +3588,33 @@ validate_migration_source() {
         $m.from.alarm_delivery.legacy_topic_exists
       and $live.alarm_delivery.legacy_action_reference_count ==
         $m.from.alarm_delivery.legacy_action_reference_count
+    elif $m.kind == "config" then
+      # config: live の TD ARN / image / dispatcher / rule / monitoring が from と完全一致し、
+      # to は from と同値（画像・rule 不変）であること。
+      ($live.taskdefs | with_entries(.value = .value.arn)) ==
+        $m.from.task_definition_arns and
+      {
+        openclaw: $live.taskdefs.openclaw.image,
+        mcp: $live.taskdefs.mcp.image,
+        connect_web: $live.taskdefs.connect_web.image,
+        ingest: $live.taskdefs.ingest.image,
+        morning: $live.taskdefs.morning.image,
+        canary: $live.taskdefs.canary.image,
+        x_buzz: $live.taskdefs.x_buzz.image,
+        tiktok: $live.taskdefs.tiktok.image
+      } == $m.from.images and
+      $m.to.images == $m.from.images and
+      {
+        tiktok: $live.dispatchers.tiktok.code_sha256,
+        x_buzz: $live.dispatchers.x_buzz.code_sha256
+      } == $m.from.dispatcher_code_sha256 and
+      {
+        ingest: $live.rules.ingest.critical.state,
+        morning: $live.rules.morning.critical.state,
+        canary: $live.rules.canary.critical.state
+      } == $m.from.rule_states and
+      $m.to.rule_states == $m.from.rule_states and
+      $live.monitoring == $m.from.monitoring
     else false
     end
   ' "$snapshot" >/dev/null ||
@@ -5902,7 +6060,7 @@ validate_manifest_change_allowlist() {
 }
 
 validate_runtime_task_contracts() {
-  local plan_json="$1" snapshot="$2" core="$3"
+  local plan_json="$1" snapshot="$2" core="$3" env_overlay="${4:-}"
 
   jq -e \
     --arg mcp_health \
@@ -5912,6 +6070,8 @@ validate_runtime_task_contracts() {
     --arg openclaw_health \
       "fetch('http://127.0.0.1:18789/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
     --slurpfile core "$core" '
+    # all(f) の入力は配列要素（spec）になるため、plan 本体は $plan に束ねてから参照する。
+    . as $plan |
     def envmap:
       (.environment // []) | map({key: .name, value: .value}) | from_entries;
     def plain_tmp_volume:
@@ -5946,13 +6106,13 @@ validate_runtime_task_contracts() {
     def no_health($container):
       (($container.healthCheck // {}) | length) == 0;
     def task($address; $name):
-      [.resource_changes[] |
+      [$plan.resource_changes[] |
         select(.address == $address) |
         .change.after.container_definitions | fromjson |
         .[] | select(.name == $name)] |
       if length == 1 then .[0] else error("task container is not unique") end;
     def resource($address):
-      [.resource_changes[] | select(.address == $address)] |
+      [$plan.resource_changes[] | select(.address == $address)] |
       if length == 1 then .[0].change.after else error("task resource missing") end;
     [
       {
@@ -6028,11 +6188,11 @@ validate_runtime_task_contracts() {
             (.efs_volume_configuration[0].authorization_config | length) == 1 and
             .efs_volume_configuration[0].authorization_config[0].iam == "ENABLED"
           )] | length) == 1 and
-          [($container.mountPoints // [])[] | select(
+          ([($container.mountPoints // [])[] | select(
             .sourceVolume == "state" and
             .containerPath == "/tmp/teamagent-openclaw/state" and
             .readOnly == false
-          )] | length == 1 and
+          )] | length) == 1 and
           exact_command($container; []) and
           $container.stopTimeout == 120 and
           exact_health(
@@ -6117,6 +6277,8 @@ validate_runtime_task_contracts() {
   # ingest 行の CASE_CORPUS_SHEET_ID / CASE_CORPUS_SHEET_GID は事例集 corpus（B-10）の
   # sheet_id 後入れ用。**足しただけでは何も点かない**（env 未設定なら loader が当該ソースを
   # skip する＝取り込み対象は従来どおり）。点灯時に plan が死なないようにするための先置き。
+  # config kind（env_overlay 指定時）は固定 allowlist を使わず、manifest の
+  # to.allowed_env_changes[<component>] だけを allowed_env にする。secrets の差分は一切許さない。
   for spec in \
     'aws_ecs_task_definition.openclaw[0]|openclaw|openclaw|["OPENCLAW_CONFIG_PATH","TMPDIR"]|[]' \
     'aws_ecs_task_definition.mcp|mcp|teamagent-mcp|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","UV_CACHE_DIR","MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT","REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"]|["MAIL_ACTION_HMAC_SECRET","MAIL_ACTION_HMAC_PREVIOUS_SECRET","REPORT_LINK_HMAC_SECRET","REPORT_LINK_HMAC_PREVIOUS_SECRET"]' \
@@ -6127,6 +6289,13 @@ validate_runtime_task_contracts() {
     'aws_ecs_task_definition.tiktok_acquire[0]|tiktok|acquire|["AWS_REGION","HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX","MEDIA_JOB_BUCKET","MEDIA_JOBS_TABLE","MEDIA_ARTIFACT_TTL_SECONDS","MEDIA_BLOCKED_VPC_CIDRS"]|[]' \
     'aws_ecs_task_definition.x_buzz_worker[0]|x_buzz|worker|["HOME","TMPDIR","XDG_CACHE_HOME","PYTHONPYCACHEPREFIX"]|[]'; do
     IFS='|' read -r address component expected_name allowed_env allowed_secrets <<< "$spec"
+    if [ -n "$env_overlay" ]; then
+      allowed_env="$(
+        jq -c --arg component "$component" '.[$component] // []' \
+          <<< "$env_overlay"
+      )" || die "config migrationのallowed_env_changesを読めません: $component"
+      allowed_secrets='[]'
+    fi
     jq -L "$GUARD_JQ_DIR" -e \
       --arg address "$address" \
       --arg component "$component" \
@@ -7446,6 +7615,81 @@ validate_runtime_migration_plan() {
     die "dispatcher queue retention/redrive/partial-batch contractが不正です"
 }
 
+# config kind 固有の検査。画像・rule・dispatcher を一切変えない構成変更（KMS 鍵新設 /
+# IAM statement 追加 / TD env 追加）だけを通す。ここを通った後、validate_plan は sync と
+# 同じ strict body を manifest allowlist（to.allowed_resource_changes / to.allowed_env_changes）
+# 付きで実行する。allowlist 外の update/replace/drift は sync と同じ文面で die する。
+validate_config_migration_plan() {
+  local plan_json="$1" snapshot="$2" core="$3" migration="$4"
+  local contract_mode="${5:-verify}" contract_output="${6:-}"
+  local unexpected_creates
+  validate_manifest_change_allowlist \
+    "$plan_json" "$migration" "$contract_mode" "$contract_output"
+
+  # 画像不変: manifest の from == to、live == from（validate_migration_source 済み）に加え、
+  # plan へ注入した desired が live と完全一致し、外部 receipt 束縛が空であることを core 側でも
+  # 束縛する（画像が 1 consumer でも動く plan は config kind では作れない）。
+  jq -e --slurpfile migration "$migration" --slurpfile live "$snapshot" '
+    $migration[0].kind == "config" and
+    $migration[0].to.images == $migration[0].from.images and
+    $migration[0].to.rule_states == $migration[0].from.rule_states and
+    {
+      openclaw: $live[0].taskdefs.openclaw.image,
+      mcp: $live[0].taskdefs.mcp.image,
+      connect_web: $live[0].taskdefs.connect_web.image,
+      ingest: $live[0].taskdefs.ingest.image,
+      morning: $live[0].taskdefs.morning.image,
+      canary: $live[0].taskdefs.canary.image,
+      x_buzz: $live[0].taskdefs.x_buzz.image,
+      tiktok: $live[0].taskdefs.tiktok.image
+    } == $migration[0].to.images and
+    .mode == "migration" and
+    .desired_consumer_images == .live_consumer_images and
+    .desired_openclaw_image == .live_openclaw_image and
+    .desired_mcp_image == .live_mcp_image and
+    .desired_x_image == .live_x_image and
+    .desired_tiktok_image == .live_tiktok_image and
+    .ingest_rule_enabled ==
+      ($migration[0].to.rule_states.ingest == "ENABLED") and
+    .morning_digest_rule_enabled ==
+      ($migration[0].to.rule_states.morning == "ENABLED") and
+    .canary_rule_enabled ==
+      ($migration[0].to.rule_states.canary == "ENABLED") and
+    .versioning_pre_cutover_receipt_sha256 == "" and
+    .log_cutover_contract_sha256 == "" and
+    .required_migration_id == "" and
+    .required_migration_apply_receipt_sha256 == ""
+  ' "$core" >/dev/null ||
+    die "config migrationはimage/rule/receiptの不変契約（from==to==live）を満たしません"
+
+  # create は manifest の to.allowed_resource_changes に列挙した address だけ。
+  # HMAC live gate の terraform_data create は sync と同じ別枠で許す（allowlist に書けない）。
+  unexpected_creates="$(jq -r --slurpfile migration "$migration" '
+    .resource_changes[]? |
+    select(.mode == "managed") |
+    select(.change.actions == ["create"]) |
+    .address as $address |
+    select(
+      ($address |
+        test(
+          "^terraform_data\\.hmac_live_task_gate\\[\\\"(mcp|connect_web|morning_digest)\\\"\\]$|^terraform_data\\.hmac_(mcp|connect_web|morning_digest)_(pre|post)_update\\[0\\]$"
+        )) | not
+    ) |
+    select(
+      ($migration[0].to.allowed_resource_changes | index($address)) == null
+    ) |
+    "create \($address)"
+  ' "$plan_json")"
+  [ -z "$unexpected_creates" ] ||
+    die "config migrationのallowed_resource_changes外のcreateを検出しました（planは破棄）:\n$unexpected_creates"
+
+  # TD は before == live、after は live と同じ security contract、env 差分は
+  # to.allowed_env_changes[<component>] のキーだけ、secrets は不変。
+  validate_runtime_task_contracts \
+    "$plan_json" "$snapshot" "$core" \
+    "$(jq -c '.to.allowed_env_changes' "$migration")"
+}
+
 validate_plan() {
   local plan_json="$1"
   local snapshot="$2"
@@ -7459,6 +7703,9 @@ validate_plan() {
 
   validate_common_plan_schema "$plan_json" "$core"
   validate_hmac_runtime_mutation_gates "$plan_json"
+  # config kind だけが manifest 側 allowlist（resource address / TD env key）を strict body へ
+  # 持ち込む。sync は常に空（= live と完全一致）。
+  local config_allowed_resources='[]' config_allowed_env='{}'
   if [ "$(jq -er '.mode' "$core")" = "migration" ]; then
     [ -n "$migration" ] && [ -n "$proposed_hmac" ] ||
       die "migration plan validator内部bindingが不足しています"
@@ -7467,18 +7714,31 @@ validate_plan() {
         validate_runtime_migration_plan \
           "$plan_json" "$snapshot" "$core" "$migration" "$proposed_hmac" \
           "$state_contract" "$contract_mode" "$contract_output"
+        return 0
         ;;
       activation)
         validate_activation_plan \
           "$plan_json" "$snapshot" "$migration" \
           "$contract_mode" "$contract_output"
+        return 0
+        ;;
+      config)
+        # 画像不変の構成変更。config 固有検査の後、sync と同じ strict body を
+        # manifest allowlist 付きで通す（allowlist 外は sync と同じ文面で die）。
+        validate_config_migration_plan \
+          "$plan_json" "$snapshot" "$core" "$migration" \
+          "$contract_mode" "$contract_output"
+        config_allowed_resources="$(
+          jq -c '.to.allowed_resource_changes' "$migration"
+        )"
+        config_allowed_env="$(jq -c '.to.allowed_env_changes' "$migration")"
         ;;
       *) die "未知のmigration kindです" ;;
     esac
-    return 0
   fi
 
-  jq -e --arg desired_image "$desired_image" --slurpfile expected_core "$core" '
+  jq -e --arg desired_image "$desired_image" --slurpfile expected_core "$core" \
+    --argjson allowed_creates "$config_allowed_resources" '
     def pre_media_cutover_sync:
       $expected_core[0].mode == "sync" and
       $expected_core[0].live_tiktok_image ==
@@ -7518,10 +7778,13 @@ validate_plan() {
           .change.actions == ["create", "delete"] or
           (
             .change.actions == ["create"] and
-            (.address |
-              test(
-                "^terraform_data\\.hmac_live_task_gate\\[\\\"(mcp|connect_web|morning_digest)\\\"\\]$|^terraform_data\\.hmac_(mcp|connect_web|morning_digest)_(pre|post)_update\\[0\\]$"
-              ))
+            (
+              (.address |
+                test(
+                  "^terraform_data\\.hmac_live_task_gate\\[\\\"(mcp|connect_web|morning_digest)\\\"\\]$|^terraform_data\\.hmac_(mcp|connect_web|morning_digest)_(pre|post)_update\\[0\\]$"
+                )) or
+              (($allowed_creates | index(.address)) != null)
+            )
           ))
        end)
     )) and
@@ -7602,7 +7865,14 @@ validate_plan() {
       "aws_lambda_event_source_mapping.tiktok_dispatch[0]",
       "aws_lambda_event_source_mapping.x_dispatch[0]"
     ]'
-    unexpected_changes="$(jq -r --argjson allowed "$allowed_runtime_changes" '
+    # config kind は manifest の to.allowed_resource_changes を変更 allowlist にだけ足す。
+    # drift の allowlist には足さない（config kind は drift 取り込み経路ではない）。
+    local allowed_plan_changes
+    allowed_plan_changes="$(
+      jq -c --argjson extra "$config_allowed_resources" '. + $extra | unique' \
+        <<< "$allowed_runtime_changes"
+    )" || die "内部error: 変更allowlistを構築できません"
+    unexpected_changes="$(jq -r --argjson allowed "$allowed_plan_changes" '
       .resource_changes[]? |
       select(.mode == "managed") |
       select(.change.actions != ["no-op"]) |
@@ -7623,7 +7893,7 @@ validate_plan() {
   [ -z "$unexpected_drift" ] ||
     die "runtime planに許可外resourceのdriftを検出しました（planは破棄）:\n$unexpected_drift"
 
-  jq -e --argjson allowed "$allowed_runtime_changes" '
+  jq -e --argjson allowed "$allowed_plan_changes" '
     .resource_changes | all(
       .address as $address |
       if .mode == "data" then
@@ -7670,19 +7940,29 @@ validate_plan() {
       ' "$plan_json" >/dev/null ||
         die "$address は期待container ${expected_name}・候補image・unknown allowlistを満たしません"
 
-      local parity_diff
+      # config kind は to.allowed_env_changes[<component>] のキーだけを parity から除外する
+      # （除外したキーの差分は validate_runtime_task_contracts の allowlist 検査が受け持つ）。
+      # sync は空 allowlist で従来どおり完全一致。secrets は kind に関係なく完全一致。
+      local parity_diff allowed_env_keys
+      allowed_env_keys="$(
+        jq -c --arg component "$component" '.[$component] // []' \
+          <<< "$config_allowed_env"
+      )" || die "内部error: env allowlistを構築できません: $component"
       parity_diff="$(jq -r --arg address "$address" --arg component "$component" \
-        --arg expected_name "$expected_name" --slurpfile live "$snapshot" '
+        --arg expected_name "$expected_name" --slurpfile live "$snapshot" \
+        --argjson allowed_env_keys "$allowed_env_keys" '
         def envmap: map({key: .name, value: .value}) | from_entries;
         def secmap: map({key: .name, value: .valueFrom}) | from_entries;
-        ($live[0].taskdefs[$component].env) as $live_env |
+        ($live[0].taskdefs[$component].env) as $live_env_full |
         ($live[0].taskdefs[$component].secrets) as $live_secrets |
         (.resource_changes[] | select(.address == $address) |
           .change.after.container_definitions | fromjson |
           [.[] | select(.name == $expected_name)][0]) as $planned |
-        ($planned.environment // [] | envmap) as $planned_env |
+        ($planned.environment // [] | envmap) as $planned_env_full |
         ($planned.secrets // [] | secmap) as $planned_secrets |
-        if (($planned.environment // [] | length) == ($planned_env | length)) and
+        ($live_env_full | del(.[$allowed_env_keys[]])) as $live_env |
+        ($planned_env_full | del(.[$allowed_env_keys[]])) as $planned_env |
+        if (($planned.environment // [] | length) == ($planned_env_full | length)) and
            (($planned.secrets // [] | length) == ($planned_secrets | length)) and
            ($planned_env == $live_env) and ($planned_secrets == $live_secrets)
         then empty
@@ -7691,7 +7971,7 @@ validate_plan() {
             .[1][] as $key | select($live_env[$key] != $planned_env[$key]) | .[0] + ":" + $key),
           (["secret", (($live_secrets | keys_unsorted) + ($planned_secrets | keys_unsorted) | unique)] |
             .[1][] as $key | select($live_secrets[$key] != $planned_secrets[$key]) | .[0] + ":" + $key),
-          (if (($planned.environment // [] | length) != ($planned_env | length)) then "env:<duplicate-name>" else empty end),
+          (if (($planned.environment // [] | length) != ($planned_env_full | length)) then "env:<duplicate-name>" else empty end),
           (if (($planned.secrets // [] | length) != ($planned_secrets | length)) then "secret:<duplicate-name>" else empty end)
         end
       ' "$plan_json")"
@@ -8887,7 +9167,9 @@ write_preflight_receipt() {
           mcp:$migration[0].to.mcp_image,
           x_buzz:$migration[0].to.x_buzz_image,
           tiktok:$migration[0].to.tiktok_image
-        } else {
+        } elif $migration[0].kind == "config" then
+          $migration[0].from.images
+        else {
           ingest:$migration[0].from.images.ingest,
           canary:$migration[0].from.images.canary
         } end
@@ -8956,6 +9238,11 @@ verify_preflight_receipt() {
           . >= 1 and floor == .) and
         (.supply_chain.main.verified_claims_sha256 |
           test("^[0-9a-f]{64}$"))
+      elif $migration[0].kind == "config" then
+        # config: Fargate profile も supply chain 検証も無い。画像 8 種の束縛だけを持つ。
+        .supply_chain == {} and
+        .profiles == {} and
+        .images == $migration[0].from.images
       else .supply_chain == {}
       end
     ) and
@@ -9764,40 +10051,58 @@ verify_receipt() {
         .media_cutover_receipt_sha256 == ""
       else
         (.migration_id | length) > 0 and
-        (.migration_kind == "runtime" or .migration_kind == "activation") and
         (.preflight_receipt_sha256 | test("^[0-9a-f]{64}$")) and
-        (.alarm_delivery_receipt_path | type) == "string" and
-        (.alarm_delivery_receipt_path | length) > 0 and
-        (.alarm_delivery_receipt_sha256 | test("^[0-9a-f]{64}$")) and
-        (.versioning_receipt_path | type) == "string" and
-        (.versioning_receipt_path | length) > 0 and
-        (.versioning_receipt_sha256 | test("^[0-9a-f]{64}$")) and
-        (.log_readiness_receipt_path | type) == "string" and
-        (.log_readiness_receipt_path | length) > 0 and
-        (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
-        (.alarm_migration_receipt_path | type) == "string" and
-        (.alarm_migration_receipt_path | length) > 0 and
-        (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
         (
-          (
+          if .migration_kind == "config" then
+            # config: preflight 以外の外部 receipt は存在しない（束縛も空）。
+            .alarm_delivery_receipt_path == "" and
+            .alarm_delivery_receipt_sha256 == "" and
+            .versioning_receipt_path == "" and
+            .versioning_receipt_sha256 == "" and
+            .log_readiness_receipt_path == "" and
+            .log_readiness_receipt_sha256 == "" and
+            .alarm_migration_receipt_path == "" and
+            .alarm_migration_receipt_sha256 == "" and
+            .prior_apply_receipt_path == "" and
+            .prior_apply_receipt_sha256 == "" and
             .media_cutover_receipt_path == "" and
             .media_cutover_receipt_sha256 == ""
-          ) or
-          (
-            (.media_cutover_receipt_path | type) == "string" and
-            (.media_cutover_receipt_path | length) > 0 and
-            (.media_cutover_receipt_sha256 |
-              test("^[0-9a-f]{64}$"))
-          )
-        ) and
-        (
-          if .migration_kind == "activation" then
-            (.prior_apply_receipt_path | type) == "string" and
-            (.prior_apply_receipt_path | length) > 0 and
-            (.prior_apply_receipt_sha256 | test("^[0-9a-f]{64}$"))
           else
-            .prior_apply_receipt_path == "" and
-            .prior_apply_receipt_sha256 == ""
+            (.migration_kind == "runtime" or .migration_kind == "activation") and
+            (.alarm_delivery_receipt_path | type) == "string" and
+            (.alarm_delivery_receipt_path | length) > 0 and
+            (.alarm_delivery_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+            (.versioning_receipt_path | type) == "string" and
+            (.versioning_receipt_path | length) > 0 and
+            (.versioning_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+            (.log_readiness_receipt_path | type) == "string" and
+            (.log_readiness_receipt_path | length) > 0 and
+            (.log_readiness_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+            (.alarm_migration_receipt_path | type) == "string" and
+            (.alarm_migration_receipt_path | length) > 0 and
+            (.alarm_migration_receipt_sha256 | test("^[0-9a-f]{64}$")) and
+            (
+              (
+                .media_cutover_receipt_path == "" and
+                .media_cutover_receipt_sha256 == ""
+              ) or
+              (
+                (.media_cutover_receipt_path | type) == "string" and
+                (.media_cutover_receipt_path | length) > 0 and
+                (.media_cutover_receipt_sha256 |
+                  test("^[0-9a-f]{64}$"))
+              )
+            ) and
+            (
+              if .migration_kind == "activation" then
+                (.prior_apply_receipt_path | type) == "string" and
+                (.prior_apply_receipt_path | length) > 0 and
+                (.prior_apply_receipt_sha256 | test("^[0-9a-f]{64}$"))
+              else
+                .prior_apply_receipt_path == "" and
+                .prior_apply_receipt_sha256 == ""
+              end
+            )
           end
         )
       end
@@ -10368,6 +10673,33 @@ build_live_injection_args() {
       stat_identity "$SYNC_DERIVED_VAR_FILE"
     )"
   fi
+  if [ "$MODE" = "migration" ] && [ "$MIGRATION_KIND" = "config" ]; then
+    # config kind は画像不変なので、sync と同じ exact-8 no-image-transition consumer manifest を
+    # live Terraform state から生成して注入する（validate_common_plan_schema が要求する
+    # image_deployment_consumer_manifest を tfvars へ永続化させないため）。
+    # HMAC deployed 世代は live から導出しない（migration 経路の契約どおり tfvars 側の値を使う）。
+    build_sync_image_deployment_consumer_manifest \
+      "$state_full" "$live" \
+      "$core_out" \
+      "$TMP_ROOT/config-consumer-manifest.json"
+    SYNC_DERIVED_VAR_FILE="$derived_dir/config-derived.tfvars.json"
+    jq -n -S \
+      --slurpfile manifest "$TMP_ROOT/config-consumer-manifest.json" '
+      {
+        image_deployment_consumer_manifest:$manifest[0],
+        image_release_receipt_catalog:{},
+        image_release_consumer_receipt_bindings:{}
+      }
+    ' > "$SYNC_DERIVED_VAR_FILE" ||
+      die "config migration用live-derived Terraform variable overlayを生成できません"
+    chmod 600 "$SYNC_DERIVED_VAR_FILE"
+    SYNC_DERIVED_VAR_SHA256="$(
+      sha256_file "$SYNC_DERIVED_VAR_FILE"
+    )"
+    SYNC_DERIVED_VAR_IDENTITY="$(
+      stat_identity "$SYNC_DERIVED_VAR_FILE"
+    )"
+  fi
   select_terraform_media_image_inputs \
     "$MODE" "$LIVE_TIKTOK_IMAGE" "$DESIRED_TIKTOK_IMAGE"
   freeze_desired_state_binding
@@ -10388,7 +10720,7 @@ build_live_injection_args() {
     "-var=image_deployment_intent_id=$IMAGE_DEPLOYMENT_INTENT_ID"
     "-var=hmac_preflight_epoch_s=$TRANSITION_EPOCH"
   )
-  if [ "$MODE" = "sync" ]; then
+  if [ -n "$SYNC_DERIVED_VAR_FILE" ]; then
     LIVE_INJECTION_TF_ARGS+=(
       "-var-file=$SYNC_DERIVED_VAR_FILE"
     )
@@ -11572,6 +11904,11 @@ case "$COMMAND" in
           mv "$TMP_ROOT/profiles.next" "$TMP_ROOT/profiles.json"
         done
         ;;
+      config)
+        # 画像不変の構成変更。Fargate task も Cosign/Rekor 検証も不要で、live fingerprint と
+        # contract SHA を receipt に焼くだけ（profiles / supply_chain は空のまま）。
+        echo "   config migration: 画像不変のためFargate preflight taskは起動しません"
+        ;;
       *) die "未知のmigration kindです" ;;
     esac
 
@@ -11641,20 +11978,12 @@ case "$COMMAND" in
     if [ "$RUNTIME_SYNC" = "true" ] && [ -n "$MIGRATION_ID" ]; then
       die "--runtime-sync と --runtime-migration は併用できません"
     fi
-    if [ -n "$MIGRATION_ID" ] && [ -z "$PREFLIGHT_RECEIPT" ]; then
-      die "--runtime-migration には --preflight-receipt が必須です"
-    fi
-    if [ -n "$MIGRATION_ID" ] && [ -z "$ALARM_DELIVERY_RECEIPT" ]; then
-      die "--runtime-migration には --alarm-delivery-receipt が必須です"
-    fi
-    if [ -n "$MIGRATION_ID" ] && [ -z "$VERSIONING_RECEIPT" ]; then
-      die "--runtime-migration には --versioning-receipt が必須です"
-    fi
-    if [ -n "$MIGRATION_ID" ] && [ -z "$LOG_READINESS_RECEIPT" ]; then
-      die "--runtime-migration には --log-readiness-receipt が必須です"
-    fi
-    if [ -n "$MIGRATION_ID" ] && [ -z "$ALARM_MIGRATION_RECEIPT" ]; then
-      die "--runtime-migration には --alarm-migration-receipt が必須です"
+    if [ -n "$MIGRATION_ID" ]; then
+      # runtime/activation は外部 receipt 5 種が必須、config は preflight だけ（他 4 種は禁止）。
+      assert_migration_receipt_arguments \
+        "$MIGRATION_ID" "$PREFLIGHT_RECEIPT" "$ALARM_DELIVERY_RECEIPT" \
+        "$VERSIONING_RECEIPT" "$LOG_READINESS_RECEIPT" \
+        "$ALARM_MIGRATION_RECEIPT"
     fi
     if [ "$RUNTIME_SYNC" = "true" ] &&
        { [ -n "$PREFLIGHT_RECEIPT" ] ||
@@ -11868,6 +12197,21 @@ case "$COMMAND" in
           "$PRIOR_APPLY_RECEIPT" "$REQUIRED_MIGRATION_ID" \
           "$TMP_ROOT/live-before.json" "$TMP_ROOT/state-before.json"
         REQUIRED_MIGRATION_APPLY_RECEIPT_SHA256="$PRIOR_APPLY_RECEIPT_SHA256"
+      elif [ "$MIGRATION_KIND" = "config" ]; then
+        # 画像不変: desired は manifest の to.images（schema で from と同値、
+        # validate_migration_source で live と同値を確認済み）。
+        [ -z "$PRIOR_APPLY_RECEIPT" ] ||
+          die "config migrationはprior apply receiptを受け付けません"
+        jq -e '.requires_migration == null' "$MIGRATION_JSON" >/dev/null ||
+          die "config migrationのrequires_migration契約が不正です"
+        DESIRED_OPENCLAW_IMAGE="$(jq -er '.to.images.openclaw' "$MIGRATION_JSON")"
+        DESIRED_MCP_IMAGE="$(jq -er '.to.images.mcp' "$MIGRATION_JSON")"
+        DESIRED_X_IMAGE="$(jq -er '.to.images.x_buzz' "$MIGRATION_JSON")"
+        DESIRED_TIKTOK_IMAGE="$(jq -er '.to.images.tiktok' "$MIGRATION_JSON")"
+        DESIRED_CONNECT_WEB_IMAGE="$(jq -er '.to.images.connect_web' "$MIGRATION_JSON")"
+        DESIRED_INGEST_IMAGE="$(jq -er '.to.images.ingest' "$MIGRATION_JSON")"
+        DESIRED_MORNING_DIGEST_IMAGE="$(jq -er '.to.images.morning' "$MIGRATION_JSON")"
+        DESIRED_CANARY_IMAGE="$(jq -er '.to.images.canary' "$MIGRATION_JSON")"
       else
         die "未知のmigration kindです"
       fi
@@ -11895,7 +12239,7 @@ case "$COMMAND" in
       "${LIVE_INJECTION_TF_ARGS[@]}"
     )
     terraform -chdir="$TF_DIR" "${TF_ARGS[@]}"
-    if [ "$MODE" = "sync" ]; then
+    if [ -n "$SYNC_DERIVED_VAR_FILE" ]; then
       [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \
         "$SYNC_DERIVED_VAR_SHA256" ] &&
         [ "$(stat_identity "$SYNC_DERIVED_VAR_FILE")" = \
@@ -11951,7 +12295,7 @@ case "$COMMAND" in
     [ "$(sha256_file "$VAR_FILE")" = "$VAR_SHA" ] || die "plan作成中にvar-fileが変化しました"
     [ "$(stat_identity "$VAR_FILE")" = "$VAR_IDENTITY" ] || die "plan作成中にvar-file pathが差替えられました"
     [ "$(sha256_file "$STAGE_VAR")" = "$VAR_SHA" ] || die "private var-file copyが変化しました"
-    if [ "$MODE" = "sync" ]; then
+    if [ -n "$SYNC_DERIVED_VAR_FILE" ]; then
       [ "$(sha256_file "$SYNC_DERIVED_VAR_FILE")" = \
         "$SYNC_DERIVED_VAR_SHA256" ] &&
         [ "$(stat_identity "$SYNC_DERIVED_VAR_FILE")" = \

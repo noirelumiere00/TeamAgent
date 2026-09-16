@@ -6261,3 +6261,812 @@ def test_plan_tamper_pair_swap_live_drift_and_apply_are_rejected(tmp_path: Path)
         command == "apply" or command.startswith("apply ")
         for command in tf_log.read_text(encoding="utf-8").splitlines()
     )
+
+
+# ── config migration kind（画像不変の構成変更）────────────────────────────────
+# runtime/activation と違い Fargate preflight も外部 receipt 4 種も持たない。
+# 検査の芯は (1) manifest から live まで画像・rule・dispatcher が完全一致すること、
+# (2) create は to.allowed_resource_changes だけ、(3) TD env 差分は
+# to.allowed_env_changes[<component>] だけ、(4) plan 引数検査が外部 receipt 4 種を
+# 要求しない／受け付けないこと。各関数を guard 本体から抽出して敵対 fixture で固定する。
+
+CONFIG_MIGRATION_ID = "2026-09-config-fixture-v1"
+CONFIG_INTENT_ID = "0f4c1d2e-3a4b-4c5d-8e6f-0123456789ab"
+MIGRATIONS_FILE = PROJECT_ROOT / "infra" / "deploy" / "terraform_runtime_migrations.json"
+CONFIG_ALLOWED_RESOURCE_CHANGES = [
+    "aws_kms_key.proposal_builder_assets",
+    "aws_kms_alias.proposal_builder_assets",
+    "aws_iam_role_policy.mcp_task",
+    "aws_ecs_task_definition.mcp",
+    "aws_ecs_service.mcp[0]",
+]
+CONFIG_ALLOWED_ENV_CHANGES = {
+    "mcp": ["USE_PROPOSAL_BUILDER_TOOLS", "PROPOSAL_BUILDER_ASSETS_KMS_KEY_ARN"],
+}
+RUNTIME_CONTRACT_COMMANDS = {
+    "openclaw": [],
+    "tiktok": [],
+    "mcp": ["/app/.venv/bin/python", "/app/scripts/run_mcp_vertex_entrypoint.py"],
+    "connect_web": ["/app/.venv/bin/python", "-m", "teamagent.connect_web"],
+    "ingest": ["/app/.venv/bin/python", "/app/scripts/run_ingest_fargate.py"],
+    "morning": ["/app/.venv/bin/python", "/app/scripts/run_morning_digest_fargate.py"],
+    "canary": ["/app/.venv/bin/python", "/app/scripts/run_canary_health.py"],
+    "x_buzz": ["/app/.venv/bin/python", "-m", "teamagent.workers.x_buzz_job"],
+}
+RUNTIME_CONTRACT_HEALTH = {
+    "mcp": (
+        "import urllib.request; "
+        "urllib.request.urlopen('http://127.0.0.1:8787/healthz', timeout=4).close()",
+        40,
+    ),
+    "connect_web": (
+        "import urllib.request; "
+        "urllib.request.urlopen('http://127.0.0.1:8788/healthz', timeout=4).close()",
+        30,
+    ),
+}
+OPENCLAW_CONTRACT_HEALTH = (
+    "fetch('http://127.0.0.1:18789/readyz')"
+    ".then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+)
+
+
+def _guard_function(name: str) -> str:
+    """guard 本体から関数定義 1 つを抽出する（関数末尾は列 0 の `}`）。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    match = re.search(
+        rf"^{re.escape(name)}\(\) \{{\n.*?\n\}}\n", guard, flags=re.DOTALL | re.MULTILINE
+    )
+    assert match is not None, name
+    return match.group(0)
+
+
+def _run_guard_functions(
+    functions: list[str],
+    body: str,
+    args: list[str],
+    *,
+    prelude: list[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f"GUARD_JQ_DIR={str(GUARD.parent)!r}",
+            'die() { echo "★ $*" >&2; return 1; }',
+            'need_cmd() { command -v "$1" >/dev/null 2>&1 || die "$1 が必要です"; }',
+            *(prelude or []),
+            *(_guard_function(name) for name in functions),
+            body,
+        )
+    )
+    return subprocess.run(
+        ["bash", "-c", script, "validator", *args],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _config_live_images() -> dict[str, str]:
+    return {component: _container(component)["image"] for component in COMPONENTS}
+
+
+def _config_migration_entry() -> dict[str, Any]:
+    images = _config_live_images()
+    rule_states = {component: RULES[component][2] for component in RULES}
+    return {
+        "kind": "config",
+        "enabled": False,
+        "expires_at": "2099-01-01T00:00:00Z",
+        "requires_migration": None,
+        "description": "fixture: KMS key + IAM statement + mcp env（画像・rule 不変）",
+        "from": {
+            "task_definition_arns": {component: _task_arn(component) for component in COMPONENTS},
+            "images": images,
+            "rule_states": rule_states,
+            "dispatcher_code_sha256": {
+                component: DISPATCHERS[component]["code_sha256"] for component in DISPATCHERS
+            },
+            "monitoring": {"container_insights": "enabled"},
+        },
+        "to": {
+            "images": copy.deepcopy(images),
+            "rule_states": copy.deepcopy(rule_states),
+            "allowed_resource_changes": list(CONFIG_ALLOWED_RESOURCE_CHANGES),
+            "allowed_env_changes": copy.deepcopy(CONFIG_ALLOWED_ENV_CHANGES),
+        },
+        "required_preflight_profiles": [],
+        "reviewed_inputs": {"image_deployment_intent_id": CONFIG_INTENT_ID},
+        "reviewed_plan": None,
+    }
+
+
+def _write_config_manifest(path: Path, entry: dict[str, Any]) -> Path:
+    manifest = json.loads(MIGRATIONS_FILE.read_text(encoding="utf-8"))
+    manifest["migrations"][CONFIG_MIGRATION_ID] = entry
+    path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _config_live_snapshot(entry: dict[str, Any]) -> dict[str, Any]:
+    source = entry["from"]
+    return {
+        "taskdefs": {
+            component: {"arn": arn, "image": source["images"][component]}
+            for component, arn in source["task_definition_arns"].items()
+        },
+        "dispatchers": {
+            component: {"code_sha256": sha}
+            for component, sha in source["dispatcher_code_sha256"].items()
+        },
+        "rules": {
+            component: {"critical": {"state": state}}
+            for component, state in source["rule_states"].items()
+        },
+        "monitoring": copy.deepcopy(source["monitoring"]),
+    }
+
+
+def _run_migration_to_file(
+    tmp_path: Path, entry: dict[str, Any], phase: str = "candidate"
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    manifest = _write_config_manifest(tmp_path / "migrations.json", entry)
+    output = tmp_path / f"migration-{phase}.json"
+    result = _run_guard_functions(
+        ["migration_to_file"],
+        'migration_to_file "$1" "$2" "$3"',
+        [CONFIG_MIGRATION_ID, str(output), phase],
+        prelude=[f"MIGRATION_FILE={str(manifest)!r}"],
+    )
+    return result, output
+
+
+def _run_validate_migration_source(
+    tmp_path: Path, snapshot: dict[str, Any], entry: dict[str, Any]
+) -> subprocess.CompletedProcess[str]:
+    snapshot_path = tmp_path / "live.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    migration_path = tmp_path / "migration.json"
+    migration_path.write_text(json.dumps(entry), encoding="utf-8")
+    return _run_guard_functions(
+        ["validate_migration_source"],
+        'validate_migration_source "$1" "$2"',
+        [str(snapshot_path), str(migration_path)],
+    )
+
+
+def test_config_migration_manifest_is_accepted_and_bound_to_exact_live(tmp_path: Path) -> None:
+    entry = _config_migration_entry()
+    result, output = _run_migration_to_file(tmp_path, entry, "candidate")
+    assert result.returncode == 0, result.stderr
+    # `and` は boolean を返す。object が書けていること自体を固定する（true が書かれると
+    # 後段の .kind 参照が壊れ、runtime/activation kind もろとも migration 経路が死ぬ）。
+    assert json.loads(output.read_text(encoding="utf-8")) == entry
+
+    preflight, _ = _run_migration_to_file(tmp_path, entry, "preflight")
+    assert preflight.returncode == 0, preflight.stderr
+    final, _ = _run_migration_to_file(tmp_path, entry, "final")
+    assert final.returncode == 1
+    assert "review phase不一致" in final.stderr
+
+    live = _config_live_snapshot(entry)
+    assert _run_validate_migration_source(tmp_path, live, entry).returncode == 0
+
+    for mutate in (
+        lambda s: s["taskdefs"]["mcp"].update(arn=_task_arn("mcp") + "0"),
+        lambda s: s["taskdefs"]["mcp"].update(image=f"{REPOSITORY}@sha256:{'d' * 64}"),
+        lambda s: s["dispatchers"]["tiktok"].update(code_sha256="Q" * 43 + "="),
+        lambda s: s["rules"]["canary"]["critical"].update(state="ENABLED"),
+        lambda s: s["monitoring"].update(container_insights="disabled"),
+    ):
+        drifted = copy.deepcopy(live)
+        mutate(drifted)
+        rejected = _run_validate_migration_source(tmp_path, drifted, entry)
+        assert rejected.returncode == 1
+        assert "liveはmigrationのexact one-time source allowlistと一致しません" in rejected.stderr
+
+
+CONFIG_MANIFEST_REJECTIONS = {
+    "to_image_digest": lambda e: e["to"]["images"].update(mcp=f"{REPOSITORY}@sha256:{'d' * 64}"),
+    "from_image_digest": lambda e: e["from"]["images"].update(
+        mcp=f"{REPOSITORY}@sha256:{'d' * 64}"
+    ),
+    "to_image_missing": lambda e: e["to"]["images"].pop("tiktok"),
+    "legacy_tiktok_repository": lambda e: (
+        e["from"]["images"].update(tiktok=LEGACY_TIKTOK_IMAGE),
+        e["to"]["images"].update(tiktok=LEGACY_TIKTOK_IMAGE),
+    ),
+    "rule_state_change": lambda e: e["to"]["rule_states"].update(canary="ENABLED"),
+    "preflight_profiles": lambda e: e.update(required_preflight_profiles=["main"]),
+    "requires_migration": lambda e: e.update(requires_migration="2026-07-wolfi-runtime-v1"),
+    "guard_gate_in_allowlist": lambda e: e["to"]["allowed_resource_changes"].append(
+        "terraform_data.runtime_guard"
+    ),
+    "empty_allowlist": lambda e: e["to"].update(allowed_resource_changes=[]),
+    "unknown_env_component": lambda e: e["to"]["allowed_env_changes"].update(worker=["X"]),
+    "lowercase_env_key": lambda e: e["to"]["allowed_env_changes"].update(mcp=["use_tools"]),
+    "extra_to_key": lambda e: e["to"].update(mcp_image=f"{REPOSITORY}@sha256:{'a' * 64}"),
+    "missing_from_monitoring": lambda e: e["from"].pop("monitoring"),
+    "expired": lambda e: e.update(expires_at="2026-08-31T00:00:00Z"),
+}
+
+
+@pytest.mark.parametrize(
+    "scenario", tuple(CONFIG_MANIFEST_REJECTIONS), ids=tuple(CONFIG_MANIFEST_REJECTIONS)
+)
+def test_config_migration_manifest_rejects_image_rule_and_contract_drift(
+    tmp_path: Path, scenario: str
+) -> None:
+    entry = _config_migration_entry()
+    CONFIG_MANIFEST_REJECTIONS[scenario](entry)
+    result, output = _run_migration_to_file(tmp_path, entry, "candidate")
+    assert result.returncode == 1
+    assert "migrationが未登録・review phase不一致・期限切れ" in result.stderr
+    assert not output.exists() or output.read_text(encoding="utf-8").strip() in ("", "false")
+
+
+def _config_runtime_container(component: str) -> dict[str, Any]:
+    name, _, _ = COMPONENTS[component]
+    volume = "tmp" if component == "openclaw" else "runtime-tmp"
+    environment = [{"name": "TMPDIR", "value": "/tmp"}]
+    container: dict[str, Any] = {
+        "name": name,
+        "image": _config_live_images()[component],
+        "cpu": 0,
+        "memory": 0,
+        "essential": True,
+        "command": list(RUNTIME_CONTRACT_COMMANDS[component]),
+        "user": "65532:65532" if component == "openclaw" else "10001:10001",
+        "readonlyRootFilesystem": True,
+        "linuxParameters": {
+            "initProcessEnabled": True,
+            "capabilities": {"drop": ["ALL"], "add": []},
+        },
+        "mountPoints": [{"sourceVolume": volume, "containerPath": "/tmp", "readOnly": False}],
+        "environment": environment,
+        "secrets": [],
+        "portMappings": [],
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": f"/teamagent/dev/{name}",
+                "awslogs-region": REGION,
+                "awslogs-stream-prefix": "runtime",
+            },
+        },
+    }
+    if component == "openclaw":
+        container["mountPoints"].append(
+            {
+                "sourceVolume": "state",
+                "containerPath": "/tmp/teamagent-openclaw/state",
+                "readOnly": False,
+            }
+        )
+        container["stopTimeout"] = 120
+        container["healthCheck"] = {
+            "command": ["CMD", "/usr/bin/node", "-e", OPENCLAW_CONTRACT_HEALTH],
+            "interval": 30,
+            "timeout": 5,
+            "retries": 5,
+            "startPeriod": 40,
+        }
+        return container
+    environment.extend(
+        [
+            {"name": "HOME", "value": "/tmp/home"},
+            {"name": "XDG_CACHE_HOME", "value": "/tmp/.cache"},
+            {"name": "PYTHONPYCACHEPREFIX", "value": "/tmp/.pycache"},
+        ]
+    )
+    if component == "tiktok":
+        container["stopTimeout"] = 30
+        environment.extend(
+            [
+                {"name": "MEDIA_JOB_BUCKET", "value": "teamagent-dev-media-jobs-718959508629"},
+                {"name": "MEDIA_JOBS_TABLE", "value": "teamagent-dev-tiktok-acquire-jobs"},
+                {"name": "MEDIA_ARTIFACT_TTL_SECONDS", "value": "2592000"},
+                {"name": "MEDIA_BLOCKED_VPC_CIDRS", "value": "10.0.0.0/16"},
+            ]
+        )
+        return container
+    if component in RUNTIME_CONTRACT_HEALTH:
+        probe, start_period = RUNTIME_CONTRACT_HEALTH[component]
+        container["healthCheck"] = {
+            "command": ["CMD", "/app/.venv/bin/python", "-c", probe],
+            "interval": 30,
+            "timeout": 5,
+            "retries": 5,
+            "startPeriod": start_period,
+        }
+    if component == "mcp":
+        container["environment"].append({"name": "USE_VIDEO_TOOLS", "value": "0"})
+        container["secrets"].append(
+            {"name": "MAIL_ACTION_HMAC_SECRET", "valueFrom": MAIL_HMAC_VALUE_FROM}
+        )
+    return container
+
+
+def _config_runtime_task(component: str) -> dict[str, Any]:
+    _, family, _ = COMPONENTS[component]
+    plain = {
+        "configure_at_launch": False,
+        "docker_volume_configuration": [],
+        "efs_volume_configuration": [],
+        "fsx_windows_file_server_volume_configuration": [],
+    }
+    if component == "openclaw":
+        volumes = [
+            {"name": "tmp", **plain},
+            {
+                "name": "state",
+                "configure_at_launch": False,
+                "docker_volume_configuration": [],
+                "fsx_windows_file_server_volume_configuration": [],
+                "efs_volume_configuration": [
+                    {
+                        "file_system_id": "fs-0123456789abcdef0",
+                        "root_directory": "/",
+                        "transit_encryption": "ENABLED",
+                        "transit_encryption_port": 0,
+                        "authorization_config": [
+                            {"access_point_id": "fsap-0123456789abcdef0", "iam": "ENABLED"}
+                        ],
+                    }
+                ],
+            },
+        ]
+    else:
+        volumes = [{"name": "runtime-tmp", **plain}]
+    return {
+        "family": family,
+        "task_role_arn": f"arn:aws:iam::{ACCOUNT}:role/{family}-task",
+        "execution_role_arn": f"arn:aws:iam::{ACCOUNT}:role/{family}-exec",
+        "cpu": "512",
+        "memory": "1024",
+        "network_mode": "awsvpc",
+        "requires_compatibilities": ["FARGATE"],
+        "skip_destroy": True,
+        "runtime_platform": [{"cpu_architecture": "ARM64", "operating_system_family": "LINUX"}],
+        "ephemeral_storage": [],
+        "ipc_mode": "",
+        "pid_mode": "",
+        "placement_constraints": [],
+        "proxy_configuration": [],
+        "inference_accelerator": [],
+        "volume": volumes,
+        "container_definitions": json.dumps([_config_runtime_container(component)]),
+    }
+
+
+def _guard_task_critical(task: dict[str, Any]) -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "jq",
+            "-L",
+            str(GUARD.parent),
+            'include "terraform_runtime_guard"; guard_task_from_tf',
+        ],
+        input=json.dumps(task),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def _config_task_contract_fixture(
+    mutate_after: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """8 TD すべてが Wolfi runtime contract を満たす plan と、それに一致する live snapshot。"""
+    changes = []
+    taskdefs: dict[str, Any] = {}
+    for component, address in TASK_ADDRESSES.items():
+        before = _config_runtime_task(component)
+        after = copy.deepcopy(before)
+        actions = ["no-op"]
+        if mutate_after and component in mutate_after:
+            containers = json.loads(after["container_definitions"])
+            mutate_after[component](containers[0])
+            after["container_definitions"] = json.dumps(containers)
+            actions = ["create", "delete"]
+        changes.append(_change(address, "aws_ecs_task_definition", actions, before, after))
+        container = json.loads(before["container_definitions"])[0]
+        taskdefs[component] = {
+            "critical": _guard_task_critical(before),
+            "env": {item["name"]: item["value"] for item in container["environment"]},
+            "secrets": {item["name"]: item["valueFrom"] for item in container["secrets"]},
+        }
+    plan = {"resource_changes": changes}
+    snapshot = {"taskdefs": taskdefs}
+    images = _config_live_images()
+    core = {
+        "desired_consumer_images": {
+            consumer_id: images[component] for consumer_id, component in CONSUMER_COMPONENTS.items()
+        }
+    }
+    return plan, snapshot, core
+
+
+def _run_task_contracts(
+    tmp_path: Path,
+    mutate_after: dict[str, Any] | None,
+    env_overlay: dict[str, list[str]] | None,
+) -> subprocess.CompletedProcess[str]:
+    plan, snapshot, core = _config_task_contract_fixture(mutate_after)
+    paths = []
+    for name, value in (("plan", plan), ("snapshot", snapshot), ("core", core)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        paths.append(str(path))
+    overlay = json.dumps(env_overlay) if env_overlay is not None else ""
+    return _run_guard_functions(
+        ["validate_runtime_task_contracts"],
+        'validate_runtime_task_contracts "$1" "$2" "$3" "$4"',
+        [*paths, overlay],
+    )
+
+
+def _append_env(name: str, value: str = "1") -> Any:
+    def mutate(container: dict[str, Any]) -> None:
+        container["environment"].append({"name": name, "value": value})
+
+    return mutate
+
+
+def _append_secret(name: str) -> Any:
+    def mutate(container: dict[str, Any]) -> None:
+        container["secrets"].append({"name": name, "valueFrom": f"{MAIL_HMAC_SECRET}:::x"})
+
+    return mutate
+
+
+def test_config_migration_env_allowlist_is_manifest_scoped(tmp_path: Path) -> None:
+    unchanged = _run_task_contracts(tmp_path, None, CONFIG_ALLOWED_ENV_CHANGES)
+    assert unchanged.returncode == 0, unchanged.stderr
+
+    allowed = _run_task_contracts(
+        tmp_path,
+        {"mcp": _append_env("USE_PROPOSAL_BUILDER_TOOLS")},
+        CONFIG_ALLOWED_ENV_CHANGES,
+    )
+    assert allowed.returncode == 0, allowed.stderr
+
+    expected = "aws_ecs_task_definition.mcp はlive exact sourceから許可されたruntime/HMAC field以外も変更します"
+    unlisted = _run_task_contracts(
+        tmp_path, {"mcp": _append_env("PROPOSAL_UNLISTED_FLAG")}, CONFIG_ALLOWED_ENV_CHANGES
+    )
+    assert unlisted.returncode == 1
+    assert expected in unlisted.stderr
+
+    # runtime kind の固定 allowlist（UV_CACHE_DIR 等）は config kind に継承されない。
+    # 変異: env_overlay の分岐を外すと fixed_runtime_key が緑になり、ここで赤くなる。
+    fixed_runtime_key = _run_task_contracts(
+        tmp_path, {"mcp": _append_env("UV_CACHE_DIR", "/tmp/uv")}, CONFIG_ALLOWED_ENV_CHANGES
+    )
+    assert fixed_runtime_key.returncode == 1
+    assert expected in fixed_runtime_key.stderr
+    runtime_kind = _run_task_contracts(
+        tmp_path, {"mcp": _append_env("UV_CACHE_DIR", "/tmp/uv")}, None
+    )
+    assert runtime_kind.returncode == 0, runtime_kind.stderr
+
+    # secrets は kind に関係なく不変。
+    secret = _run_task_contracts(
+        tmp_path, {"mcp": _append_secret("PROPOSAL_SECRET")}, CONFIG_ALLOWED_ENV_CHANGES
+    )
+    assert secret.returncode == 1
+    assert expected in secret.stderr
+
+    # allowlist に無い TD の env 追加はその TD の文面で die する。
+    other = _run_task_contracts(
+        tmp_path,
+        {"connect_web": _append_env("USE_PROPOSAL_BUILDER_TOOLS")},
+        CONFIG_ALLOWED_ENV_CHANGES,
+    )
+    assert other.returncode == 1
+    assert (
+        "aws_ecs_task_definition.connect_web[0] はlive exact sourceから許可されたruntime/HMAC field以外も変更します"
+        in other.stderr
+    )
+
+
+def _config_plan_core(entry: dict[str, Any]) -> dict[str, Any]:
+    images = _config_live_images()
+    consumers = {
+        consumer_id: images[component] for consumer_id, component in CONSUMER_COMPONENTS.items()
+    }
+    return {
+        "mode": "migration",
+        "live_consumer_images": copy.deepcopy(consumers),
+        "desired_consumer_images": copy.deepcopy(consumers),
+        "live_openclaw_image": images["openclaw"],
+        "desired_openclaw_image": images["openclaw"],
+        "live_mcp_image": images["mcp"],
+        "desired_mcp_image": images["mcp"],
+        "live_x_image": images["x_buzz"],
+        "desired_x_image": images["x_buzz"],
+        "live_tiktok_image": images["tiktok"],
+        "desired_tiktok_image": images["tiktok"],
+        "ingest_rule_enabled": entry["to"]["rule_states"]["ingest"] == "ENABLED",
+        "morning_digest_rule_enabled": entry["to"]["rule_states"]["morning"] == "ENABLED",
+        "canary_rule_enabled": entry["to"]["rule_states"]["canary"] == "ENABLED",
+        "versioning_pre_cutover_receipt_sha256": "",
+        "log_cutover_contract_sha256": "",
+        "required_migration_id": "",
+        "required_migration_apply_receipt_sha256": "",
+    }
+
+
+def _run_config_migration_plan(
+    tmp_path: Path,
+    entry: dict[str, Any],
+    changes: list[dict[str, Any]],
+    *,
+    core_mutation: Any = None,
+) -> subprocess.CompletedProcess[str]:
+    core = _config_plan_core(entry)
+    if core_mutation is not None:
+        core_mutation(core)
+    paths = []
+    for name, value in (
+        ("plan", {"resource_changes": changes}),
+        ("snapshot", _config_live_snapshot(entry)),
+        ("core", core),
+        ("migration", entry),
+    ):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        paths.append(str(path))
+    # reviewed_plan 契約と TD 契約は別テストが受け持つので stub にし、create allowlist と
+    # 画像不変契約だけを孤立させる。
+    return _run_guard_functions(
+        ["validate_config_migration_plan"],
+        "\n".join(
+            (
+                "validate_manifest_change_allowlist() { :; }",
+                "validate_runtime_task_contracts() { :; }",
+                'validate_config_migration_plan "$1" "$2" "$3" "$4" extract /dev/null',
+            )
+        ),
+        paths,
+    )
+
+
+def _config_plan_changes(*extra: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        _change(
+            "terraform_data.runtime_guard",
+            "terraform_data",
+            ["no-op"],
+            {"input": {"verified": True}},
+            {"input": {"verified": True}},
+        ),
+        _change(
+            'terraform_data.hmac_live_task_gate["mcp"]',
+            "terraform_data",
+            ["create"],
+            None,
+            {"input": {"gate": "mcp"}},
+        ),
+        _change(
+            "aws_iam_role_policy.mcp_task",
+            "aws_iam_role_policy",
+            ["update"],
+            {"policy": "{}"},
+            {"policy": "{}"},
+        ),
+        *extra,
+    ]
+
+
+def test_config_migration_rejects_create_outside_allowlist(tmp_path: Path) -> None:
+    entry = _config_migration_entry()
+    kms_key = _change(
+        "aws_kms_key.proposal_builder_assets",
+        "aws_kms_key",
+        ["create"],
+        None,
+        {"description": "proposal builder assets"},
+    )
+    accepted = _run_config_migration_plan(tmp_path, entry, _config_plan_changes(kms_key))
+    assert accepted.returncode == 0, accepted.stderr
+
+    narrowed = copy.deepcopy(entry)
+    narrowed["to"]["allowed_resource_changes"] = ["aws_iam_role_policy.mcp_task"]
+    rejected = _run_config_migration_plan(tmp_path, narrowed, _config_plan_changes(kms_key))
+    assert rejected.returncode == 1
+    assert "config migrationのallowed_resource_changes外のcreateを検出しました" in rejected.stderr
+    assert "create aws_kms_key.proposal_builder_assets" in rejected.stderr
+
+    stray = _change(
+        "aws_iam_role_policy.terraform_runtime_automation",
+        "aws_iam_role_policy",
+        ["create"],
+        None,
+        {"policy": "{}"},
+    )
+    stray_rejected = _run_config_migration_plan(
+        tmp_path, entry, _config_plan_changes(kms_key, stray)
+    )
+    assert stray_rejected.returncode == 1
+    assert "create aws_iam_role_policy.terraform_runtime_automation" in stray_rejected.stderr
+    assert "create aws_kms_key.proposal_builder_assets" not in stray_rejected.stderr
+
+
+@pytest.mark.parametrize(
+    "core_mutation",
+    [
+        lambda c: c["desired_consumer_images"].update(mcp=f"{REPOSITORY}@sha256:{'d' * 64}"),
+        lambda c: c.update(desired_mcp_image=f"{REPOSITORY}@sha256:{'d' * 64}"),
+        lambda c: c.update(desired_tiktok_image=LEGACY_TIKTOK_IMAGE),
+        lambda c: c.update(canary_rule_enabled=True),
+        lambda c: c.update(versioning_pre_cutover_receipt_sha256="e" * 64),
+        lambda c: c.update(required_migration_id="2026-07-wolfi-runtime-v1"),
+        lambda c: c.update(mode="sync"),
+    ],
+    ids=[
+        "consumer_image",
+        "mcp_image",
+        "tiktok_image",
+        "rule_state",
+        "versioning_receipt",
+        "required_migration",
+        "mode",
+    ],
+)
+def test_config_migration_plan_requires_image_rule_and_receipt_invariance(
+    tmp_path: Path, core_mutation: Any
+) -> None:
+    entry = _config_migration_entry()
+    result = _run_config_migration_plan(
+        tmp_path, entry, _config_plan_changes(), core_mutation=core_mutation
+    )
+    assert result.returncode == 1
+    assert "config migrationはimage/rule/receiptの不変契約（from==to==live）を満たしません" in (
+        result.stderr
+    )
+
+
+def test_config_migration_plan_arguments_do_not_require_external_receipts(
+    tmp_path: Path,
+) -> None:
+    manifest = _write_config_manifest(tmp_path / "migrations.json", _config_migration_entry())
+    functions = ["migration_kind_hint", "assert_migration_receipt_arguments"]
+    prelude = [f"MIGRATION_FILE={str(manifest)!r}"]
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return _run_guard_functions(
+            functions,
+            'assert_migration_receipt_arguments "$@"',
+            list(args),
+            prelude=prelude,
+        )
+
+    preflight_only = run(CONFIG_MIGRATION_ID, "preflight.json", "", "", "", "")
+    assert preflight_only.returncode == 0, preflight_only.stderr
+
+    no_preflight = run(CONFIG_MIGRATION_ID, "", "", "", "", "")
+    assert no_preflight.returncode == 1
+    assert "--runtime-migration には --preflight-receipt が必須です" in no_preflight.stderr
+
+    for extra in range(4):
+        args = ["", "", "", ""]
+        args[extra] = "receipt.json"
+        rejected = run(CONFIG_MIGRATION_ID, "preflight.json", *args)
+        assert rejected.returncode == 1
+        assert "config migrationは --alarm-delivery-receipt" in rejected.stderr
+
+    # runtime kind と未登録 id は従来どおり外部 receipt 4 種が必須。
+    for migration_id in ("2026-07-wolfi-runtime-v1", "unregistered"):
+        runtime_like = run(migration_id, "preflight.json", "", "", "", "")
+        assert runtime_like.returncode == 1
+        assert "--runtime-migration には --alarm-delivery-receipt が必須です" in runtime_like.stderr
+        full = run(migration_id, "p", "a", "v", "l", "m")
+        assert full.returncode == 0, full.stderr
+
+
+def _sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_config_preflight_receipt_binds_live_and_images_without_profiles(tmp_path: Path) -> None:
+    entry = _config_migration_entry()
+    manifest = _write_config_manifest(tmp_path / "migrations.json", entry)
+    migration = tmp_path / "migration.json"
+    migration.write_text(json.dumps(entry), encoding="utf-8")
+    snapshot = tmp_path / "live.json"
+    snapshot.write_text(json.dumps(_config_live_snapshot(entry)), encoding="utf-8")
+    normalized = subprocess.run(
+        [
+            "jq",
+            "-e",
+            "-S",
+            "-c",
+            "--arg",
+            "id",
+            CONFIG_MIGRATION_ID,
+            "del(.migrations[$id].enabled, .migrations[$id].reviewed_plan)",
+            str(manifest),
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    guard_version = re.search(
+        r'^GUARD_VERSION="(\d+)"$', GUARD.read_text(encoding="utf-8"), re.MULTILINE
+    )
+    assert guard_version is not None
+    now = int(time.time())
+    receipt_body = {
+        "kind": "runtime-preflight-receipt",
+        "guard_version": guard_version.group(1),
+        "migration_id": CONFIG_MIGRATION_ID,
+        "migration_kind": "config",
+        "account_id": ACCOUNT,
+        "region": REGION,
+        "created_at_epoch": now - 60,
+        "expires_at_epoch": now - 60 + 7200,
+        "git_commit": "a" * 40,
+        "guard_script_sha256": _sha256_of(GUARD),
+        "guard_jq_sha256": _sha256_of(GUARD.parent / "terraform_runtime_guard.jq"),
+        "migration_manifest_sha256": _sha256_of(manifest),
+        "migration_contract_sha256": hashlib.sha256(normalized).hexdigest(),
+        "config_manifest_sha256": hashlib.sha256(b"").hexdigest(),
+        "live_fingerprint_sha256": _sha256_of(snapshot),
+        "images": copy.deepcopy(entry["from"]["images"]),
+        "supply_chain": {},
+        "profiles": {},
+    }
+    prelude = [
+        f"GUARD_VERSION={guard_version.group(1)!r}",
+        f"EXPECTED_ACCOUNT_ID={ACCOUNT!r}",
+        f"REGION={REGION!r}",
+        f"SCRIPT_PATH={str(GUARD)!r}",
+        f"GUARD_JQ={str(GUARD.parent / 'terraform_runtime_guard.jq')!r}",
+        f"MIGRATION_FILE={str(manifest)!r}",
+        f"TMP_ROOT={str(tmp_path)!r}",
+        'write_config_manifest() { : > "$1"; }',
+        "assert_review_commit_transition() { :; }",
+    ]
+
+    def run(body: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+        receipt = tmp_path / "preflight-receipt.json"
+        receipt.write_text(json.dumps(body), encoding="utf-8")
+        return _run_guard_functions(
+            [
+                "sha256_file",
+                "sha256_text",
+                "normalized_migration_manifest_sha256",
+                "verify_preflight_receipt",
+            ],
+            'verify_preflight_receipt "$1" "$2" "$3" "$4"',
+            [str(receipt), CONFIG_MIGRATION_ID, str(migration), str(snapshot)],
+            prelude=prelude,
+        )
+
+    accepted = run(receipt_body)
+    assert accepted.returncode == 0, accepted.stderr
+
+    expected = "preflight receiptが期限・live・review transition・hash・profile契約と不一致です"
+    for mutate in (
+        lambda r: r.update(
+            profiles={
+                "main": {
+                    "exit_code": 0,
+                    "stopped_reason_code": "EssentialContainerExited",
+                    "image": LIVE_IMAGE,
+                    "image_digest": LIVE_IMAGE.split("@")[1],
+                }
+            }
+        ),
+        lambda r: r["images"].update(mcp=f"{REPOSITORY}@sha256:{'d' * 64}"),
+        lambda r: r.update(migration_kind="runtime"),
+        lambda r: r.update(supply_chain={"main": {}}),
+        lambda r: r.update(live_fingerprint_sha256="f" * 64),
+        lambda r: r.update(expires_at_epoch=now - 1),
+    ):
+        mutated = copy.deepcopy(receipt_body)
+        mutate(mutated)
+        rejected = run(mutated)
+        assert rejected.returncode == 1
+        assert expected in rejected.stderr

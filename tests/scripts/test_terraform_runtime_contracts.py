@@ -1830,3 +1830,90 @@ def test_triage_dead_alarm_fires_on_a_single_occurrence() -> None:
     assert "matched=matched," in skill
     assert '$.event = \\"morning_digest_triage_id_mismatch\\"' in filt
     assert "$.matched = 0" in filt
+
+
+def test_config_migration_kind_is_wired_through_guard_and_terraform() -> None:
+    """kind=config（画像不変の構成変更）が guard と runtime_guard.tf の両方に通っていること。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    runtime = (TF_ROOT / "runtime_guard.tf").read_text(encoding="utf-8")
+    assert 'GUARD_VERSION="26"' in guard
+    for expected in (
+        # manifest schema / live 照合 / plan 検査 / 引数検査 / preflight / receipt の各分岐
+        'elif .migrations[$id].kind == "config" then',
+        'elif $m.kind == "config" then',
+        "validate_config_migration_plan() {",
+        "assert_migration_receipt_arguments() {",
+        "migration_kind_hint() {",
+        'elif $migration[0].kind == "config" then',
+        'if .migration_kind == "config" then',
+        'elif [ "$MIGRATION_KIND" = "config" ]; then',
+        '[ "$MODE" = "migration" ] && [ "$MIGRATION_KIND" = "config" ]',
+        "config-derived.tfvars.json",
+        "config migrationのallowed_resource_changes外のcreateを検出しました",
+        "config migrationはimage/rule/receiptの不変契約（from==to==live）を満たしません",
+        "config migrationは --alarm-delivery-receipt / --versioning-receipt / "
+        "--log-readiness-receipt / --alarm-migration-receipt を受け付けません",
+        # to.allowed_env_changes が固定 allowlist を置き換える（secrets は不変）
+        'allowed_env="$(\n        jq -c --arg component "$component" \'.[$component] // []\'',
+        "allowed_secrets='[]'",
+    ):
+        assert expected in guard
+    # preflight は config kind で Fargate task を起動しない
+    assert re.search(
+        r"\n      config\)\n(?:\s*#.*\n)*\s*echo \"   config migration: 画像不変のためFargate preflight taskは起動しません\"\n\s*;;\n",
+        guard,
+    )
+    # 変更 allowlist にだけ manifest の address を足し、drift の allowlist には足さない
+    assert (
+        'allowed_plan_changes="$(\n      jq -c --argjson extra "$config_allowed_resources"' in guard
+    )
+    assert 'unexpected_drift="$(jq -r --argjson allowed "$allowed_runtime_changes"' in guard
+    for expected in (
+        "runtime_is_config_migration",
+        'try(local.runtime_selected_migration.kind, "") == "config"',
+        "try(local.runtime_selected_migration.to.images.mcp, null) == var.runtime_guard_live.desired_mcp_image",
+        'try(local.runtime_selected_migration.from.monitoring.container_insights, "")',
+        'var.runtime_guard_live.mode == "migration" && !local.runtime_is_config_migration ?',
+    ):
+        assert expected in runtime
+    # config kind は versioning / log cutover receipt を空で要求する（sync と同じ側）
+    assert re.search(
+        r"local\.runtime_is_config_migration &&\s*\n\s*var\.runtime_guard_live\.versioning_pre_cutover_receipt_sha256 == \"\" &&\s*\n\s*var\.runtime_guard_live\.log_cutover_contract_sha256 == \"\"",
+        runtime,
+    )
+
+
+def test_guard_external_state_handoff_pin_matches_manifest() -> None:
+    """migration_to_file が固定する handoff object は manifest 実体と一致していること。
+
+    2026-07-19（240aef1）以降 phase_contracts.publisher_checkpoint の文言が guard と manifest で
+    食い違っており、どの migration も schema 検査を通れなかった。literal を jq で評価して突合する。
+    """
+    guard = GUARD.read_text(encoding="utf-8")
+    match = re.search(
+        r'\.external_state_handoffs\["2026-07-alarm-topic-consolidation-v1"\] == (\{.*?\n    \}) and\n'
+        r'    \(\.migrations\[\$id\] \| type == "object"\)',
+        guard,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    pinned = json.loads(
+        subprocess.run(
+            ["jq", "-n", "-S", match.group(1)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    manifest = json.loads(MIGRATIONS.read_text(encoding="utf-8"))
+    assert pinned == manifest["external_state_handoffs"]["2026-07-alarm-topic-consolidation-v1"]
+
+
+def test_migration_to_file_emits_the_migration_object_not_a_boolean() -> None:
+    """jq の and は boolean を返す。条件列の末尾に object を置く形へ戻すと true が書かれて壊れる。"""
+    guard = GUARD.read_text(encoding="utf-8")
+    assert (
+        "    ) as $valid |\n    if $valid then .migrations[$id] else false end\n"
+        '  \' "$MIGRATION_FILE" > "$output" ||'
+    ) in guard
+    assert '    ) and\n    .migrations[$id]\n  \' "$MIGRATION_FILE"' not in guard
