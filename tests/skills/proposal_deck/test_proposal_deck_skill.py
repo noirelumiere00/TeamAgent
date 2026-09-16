@@ -266,3 +266,61 @@ def test_publish_failure_falls_back_to_none(
         out = skill.run(_input(template, tmp_path / "out"), ctx=SkillContext())
     assert out.pptx_url is None
     assert out.coverage_ratio == 1.0  # skill 自体は成功
+
+
+def test_prompt_v2_assigns_two_ids_per_short_video_plan() -> None:
+    """2026-09-16 本番: モデルが案A〜Dを {96}〜{99} に 1 枠ずつ書き {100}〜{103} が未被覆で 5 回失敗。
+    プロンプトが案ごとの 2 ID 割りを明示していることを固定する。"""
+    from teamagent.prompts.loader import load_prompt
+
+    system = load_prompt("proposal_deck", "v2", "system")
+    for pair in (
+        "`{96}`/`{97}`=案A",
+        "`{98}`/`{99}`=案B",
+        "`{100}`/`{101}`=案C",
+        "`{102}`/`{103}`=案D",
+    ):
+        assert pair in system
+    assert "8IDすべてを埋め" in system
+
+
+def test_exhausted_repair_logs_error_summary_without_model_text(tmp_path: Path) -> None:
+    """失敗理由の要約は warning ログに残り、pydantic の input_value（モデル出力本文）は含めない。"""
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp('{"placeholders": {"1": "SECRET-MODEL-TEXT"}}')
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    ctx = SkillContext()
+    logger = MagicMock()
+    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    with pytest.raises(ValueError):
+        skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=ctx)
+    calls = [
+        c
+        for c in logger.warning.call_args_list
+        if c.args and c.args[0] == "proposal_deck_compose_failed"
+    ]
+    assert len(calls) == 1
+    kwargs = calls[0].kwargs
+    assert kwargs["attempts"] == 1
+    assert "uncovered placeholders" in kwargs["error_summary"]
+    assert "SECRET-MODEL-TEXT" not in kwargs["error_summary"]
+    assert "[type=" not in kwargs["error_summary"]
+
+
+def test_merged_ids_48_to_55_in_model_output_are_dropped_before_validation(tmp_path: Path) -> None:
+    """モデルが {48}〜{55} を skipped（または placeholders）へ書いても repair を浪費せず通す（2026-09-16 実走）。"""
+    import json
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    payload = json.loads(_full_composer_json())
+    payload.setdefault("skipped_placeholders", []).append(
+        {"id": 50, "reason": "出力対象外（{47}に統合済み）"}
+    )
+    payload["placeholders"]["49"] = "統合済みのはずの本文"
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    out = skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=SkillContext())
+    assert bedrock.converse.call_count == 1
+    assert out.coverage_ratio == 1.0

@@ -46,6 +46,35 @@ def _envflag(name: str) -> bool:
     return os.environ.get(name, "false").lower() in ("1", "true", "yes")
 
 
+_MERGED_PLACEHOLDER_IDS = frozenset(
+    range(48, 56)
+)  # {47} の 1 セルへ統合済み・contract の VALID_IDS 外
+
+
+def _drop_merged_placeholder_ids(data: dict[str, Any]) -> None:
+    """モデル出力から {48}〜{55} への言及を検証前に取り除く（in place）。"""
+
+    placeholders = data.get("placeholders")
+    if isinstance(placeholders, dict):
+        for key in list(placeholders):
+            try:
+                if int(key) in _MERGED_PLACEHOLDER_IDS:
+                    del placeholders[key]
+            except (TypeError, ValueError):
+                continue
+    skipped = data.get("skipped_placeholders")
+    if isinstance(skipped, list):
+        data["skipped_placeholders"] = [
+            item
+            for item in skipped
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), int)
+                and item["id"] in _MERGED_PLACEHOLDER_IDS
+            )
+        ]
+
+
 def _extract_json(text: str) -> str:
     """converse のテキストから JSON オブジェクトを取り出す（コードフェンス/前後文許容）。"""
     fenced = _JSON_FENCE.search(text)
@@ -409,6 +438,10 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 # 不正な model-supplied path/key で repair を浪費させない。
                 if isinstance(data, dict):
                     data["evidence_images"] = input.evidence_images
+                    # {48}〜{55} は {47} に統合済みの非対象 ID。モデルが律儀に skipped へ
+                    # 列挙すると contract で弾かれ repair を 1 回浪費するので、検証前に落とす
+                    # （2026-09-16 実走で発生。placeholders 側の 48〜55 も同様に無視する）。
+                    _drop_merged_placeholder_ids(data)
                 composer_out = ComposerOutput.model_validate(data)
                 forced_skips = set(input.forced_skipped_ids)
                 placeholders = {
@@ -537,6 +570,15 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                         ],
                     }
                 )
+        # 失敗理由の要約だけをログに残す（pydantic の input_value 断片＝モデル出力本文は含めない）。
+        # 2026-09-16 本番: 5 回とも {100}〜{103} 未被覆で失敗したが、ログには error_type しか無く
+        # 原因特定にローカル再現（Bedrock 課金）が要った。
+        ctx.bind_logger(self.name).warning(
+            "proposal_deck_compose_failed",
+            attempts=input.max_repair + 1,
+            total_cost_usd=round(total_cost, 4),
+            error_summary=(last_error or "").split("[type=", 1)[0].strip()[:300],
+        )
         raise ValueError(
             f"proposal_deck compose failed after {input.max_repair + 1} attempts: {last_error}"
         )
