@@ -324,3 +324,29 @@ def test_merged_ids_48_to_55_in_model_output_are_dropped_before_validation(tmp_p
     out = skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=SkillContext())
     assert bedrock.converse.call_count == 1
     assert out.coverage_ratio == 1.0
+
+
+def test_repair_turn_includes_allowed_urls_and_citable_claims(tmp_path: Path) -> None:
+    """2 ターン目の repair メッセージに、引用してよい URL と引用できる数量の一覧が入る（2026-09-16 実走の収束対策）。"""
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = [
+        _resp('{"placeholders": {"1": "x"}}'),
+        _resp(_full_composer_json()),
+    ]
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    deck_input = _input(template, tmp_path / "out", max_repair=1)
+    deck_input = deck_input.model_copy(
+        update={
+            "urls": ["https://example.com/lp"],
+            "quantitative_evidence": {"1,200億円": ["https://example.com/lp"]},
+        }
+    )
+    skill.run(deck_input, ctx=SkillContext())
+    second_call_messages = bedrock.converse.call_args_list[1].kwargs["messages"]
+    repair_text = second_call_messages[-1]["content"][0]["text"]
+    assert "根拠検証の直し方" in repair_text
+    assert "https://example.com/lp" in repair_text
+    assert "1,200億円" in repair_text
+    assert "数を消して定性的な表現" in repair_text

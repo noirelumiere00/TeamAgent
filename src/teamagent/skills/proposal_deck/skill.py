@@ -31,6 +31,7 @@ from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_te
 from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
 from teamagent.skills.proposal_deck.provenance import (
     ProvenanceValidationError,
+    extract_evidence_urls,
     validate_composer_provenance,
 )
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
@@ -564,7 +565,8 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                                     "前回の出力が ComposerOutput スキーマまたは"
                                     f"根拠検証に合いませんでした: {last_error}\n"
                                     "指摘の ID/文字数/網羅/citation の不足を直し、"
-                                    "JSON のみ（前後の説明文なし）で再送してください。"
+                                    "JSON のみ（前後の説明文なし）で再送してください。\n"
+                                    + self._repair_hint(input)
                                 )
                             }
                         ],
@@ -582,6 +584,35 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
         raise ValueError(
             f"proposal_deck compose failed after {input.max_repair + 1} attempts: {last_error}"
         )
+
+    @staticmethod
+    def _repair_hint(input: ProposalDeckInput) -> str:
+        """self-repair の 2 ターン目以降に渡す、根拠検証の直し方の具体指示。
+
+        2026-09-16 実走: 汎用の「直して再送」だけでは provenance（数量に citation 無し）で
+        5 回とも収束しないことがあった。引用してよい URL と、引用できる数量の一覧を明示し、
+        「引用できない数量は数を消して言い換える」を直接指示する。
+        """
+
+        allowed = sorted(extract_evidence_urls(input.urls, input.research_material))
+        lines = [
+            "根拠検証の直し方:",
+            "1. 「quantitative claim … no matching evidence citation」の ID には、その数量を支える"
+            " URL を下の一覧から一字一句そのまま citations_per_placeholder に付ける。",
+            "2. 「not present in source-backed input evidence」または下の『引用できる数量』に無い数量"
+            "（年代・本数・週数・日数・件数を含む）は、その数を消して定性的な表現へ言い換える。",
+            "3. 「citation is not present in the input evidence URLs」は URL の転記ミス。"
+            "一覧の文字列だけを使う。",
+        ]
+        if allowed:
+            lines.append("引用してよい URL（これ以外は不可）:")
+            lines.extend(f"- {url}" for url in allowed[:40])
+        if input.quantitative_evidence:
+            claims = sorted(input.quantitative_evidence)
+            lines.append(
+                "引用できる数量（これ以外の数量は本文に残さない）: " + "、".join(claims[:60])
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _build_user_message(input: ProposalDeckInput) -> str:
