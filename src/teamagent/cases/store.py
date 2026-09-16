@@ -65,8 +65,9 @@ _SCALAR_COLUMNS: Final[tuple[str, ...]] = (
 )
 RECORD_COLUMNS: Final[tuple[str, ...]] = _SCALAR_COLUMNS + _JSONB_COLUMNS
 
-_UPSERT_SQL: Final = f"""
-INSERT INTO {TABLE} (
+# テーブル名・列名は固定リテラル、値はすべて %(name)s バインド（f-string にしない・B608 非該当）。
+_UPSERT_SQL: Final = """
+INSERT INTO case_records (
     case_id, case_group, client_internal, client_masked, sector, product_state,
     product, scale, result_masked, winpattern, external_use, confidence, reviewed,
     purpose, channel, traits, period, metrics, similar_keys, competitors, sources,
@@ -83,11 +84,11 @@ ON CONFLICT (case_id) DO UPDATE SET
     case_group = EXCLUDED.case_group,
     client_internal = EXCLUDED.client_internal,
     -- 人が確定した行（reviewed）では masked 表記と対外可否を再抽出で上書きしない（sticky）
-    client_masked = CASE WHEN {TABLE}.reviewed THEN {TABLE}.client_masked
+    client_masked = CASE WHEN case_records.reviewed THEN case_records.client_masked
                          ELSE EXCLUDED.client_masked END,
-    external_use = CASE WHEN {TABLE}.reviewed THEN {TABLE}.external_use
+    external_use = CASE WHEN case_records.reviewed THEN case_records.external_use
                         ELSE EXCLUDED.external_use END,
-    reviewed = {TABLE}.reviewed,
+    reviewed = case_records.reviewed,
     sector = EXCLUDED.sector,
     product_state = EXCLUDED.product_state,
     product = EXCLUDED.product,
@@ -103,8 +104,8 @@ ON CONFLICT (case_id) DO UPDATE SET
     similar_keys = EXCLUDED.similar_keys,
     competitors = EXCLUDED.competitors,
     sources = EXCLUDED.sources,
-    embedding = COALESCE(EXCLUDED.embedding, {TABLE}.embedding),
-    embedding_backend = COALESCE(EXCLUDED.embedding_backend, {TABLE}.embedding_backend),
+    embedding = COALESCE(EXCLUDED.embedding, case_records.embedding),
+    embedding_backend = COALESCE(EXCLUDED.embedding_backend, case_records.embedding_backend),
     schema_version = EXCLUDED.schema_version,
     updated_at = NOW()
 """
