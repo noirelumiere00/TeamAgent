@@ -350,3 +350,30 @@ def test_repair_turn_includes_allowed_urls_and_citable_claims(tmp_path: Path) ->
     assert "https://example.com/lp" in repair_text
     assert "1,200億円" in repair_text
     assert "数を消して定性的な表現" in repair_text
+
+
+def test_final_attempt_autoskips_uncited_quantity_placeholders(tmp_path: Path) -> None:
+    """最終試行でも数量に出典が付かない ID だけが残るなら、その ID を『要確認』skip にして通す（2026-09-16）。"""
+    import json
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    payload = json.loads(_full_composer_json())
+    # {4}（ターゲット）は文字数規則が無い ID。citation 無しの数量だけが違反になる。
+    payload["placeholders"]["4"] = "30代の働く女性。市場規模は1,200億円に達し、拡大が続く"
+    payload.setdefault("citations_per_placeholder", {}).pop("4", None)
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    deck_input = _input(template, tmp_path / "out", max_repair=0).model_copy(
+        update={"enforce_provenance": True, "urls": ["https://example.com/lp"]}
+    )
+    ctx = SkillContext()
+    logger = MagicMock()
+    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    out = skill.run(deck_input, ctx=ctx)
+    assert bedrock.converse.call_count == 1
+    assert out.skipped_ids == [4]
+    assert out.filled_count == 94 and out.skipped_count == 1  # 95 枠は skip 込みで被覆
+    events = [c.args[0] for c in logger.warning.call_args_list]
+    assert "proposal_deck_provenance_autoskip" in events
+    assert "proposal_deck_compose_failed" not in events
