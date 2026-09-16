@@ -31,6 +31,7 @@ from teamagent.skills.proposal_deck.confidentiality import contains_forbidden_te
 from teamagent.skills.proposal_deck.contract import ComposerOutput, SkippedPlaceholder
 from teamagent.skills.proposal_deck.provenance import (
     ProvenanceValidationError,
+    extract_evidence_urls,
     validate_composer_provenance,
 )
 from teamagent.skills.proposal_deck.schema import ProposalDeckInput, ProposalDeckOutput
@@ -44,6 +45,73 @@ _MAX_RENDER_EVIDENCE = 20
 
 def _envflag(name: str) -> bool:
     return os.environ.get(name, "false").lower() in ("1", "true", "yes")
+
+
+_MERGED_PLACEHOLDER_IDS = frozenset(
+    range(48, 56)
+)  # {47} の 1 セルへ統合済み・contract の VALID_IDS 外
+
+
+def _drop_merged_placeholder_ids(data: dict[str, Any]) -> None:
+    """モデル出力から {48}〜{55} への言及を検証前に取り除く（in place）。"""
+
+    placeholders = data.get("placeholders")
+    if isinstance(placeholders, dict):
+        for key in list(placeholders):
+            try:
+                if int(key) in _MERGED_PLACEHOLDER_IDS:
+                    del placeholders[key]
+            except (TypeError, ValueError):
+                continue
+    skipped = data.get("skipped_placeholders")
+    if isinstance(skipped, list):
+        data["skipped_placeholders"] = [
+            item
+            for item in skipped
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("id"), int)
+                and item["id"] in _MERGED_PLACEHOLDER_IDS
+            )
+        ]
+
+
+_PROVENANCE_PLACEHOLDER_ID = re.compile(r"placeholder \{(\d+)\}")
+_AUTOSKIP_REASON = "要確認（データ未検出）: 数量の出典が取れないため自動スキップ"
+
+
+def _autoskip_uncited_placeholders(
+    data: dict[str, Any], exc: ProvenanceValidationError
+) -> tuple[dict[str, Any], list[int]] | None:
+    """provenance 違反が特定 ID の数量/citation だけなら、その ID を skip に落とした data を返す。
+
+    守秘語の残存（placeholder ID を braces で示さない）など ID に紐づかない違反が 1 つでも
+    あれば None（自動スキップしない）。
+    """
+
+    ids: set[int] = set()
+    for error in exc.errors:
+        found = _PROVENANCE_PLACEHOLDER_ID.findall(error)
+        if not found:
+            return None
+        ids.update(int(value) for value in found)
+    if not ids:
+        return None
+    result = json.loads(json.dumps(data, ensure_ascii=False))
+    placeholders = result.get("placeholders")
+    citations = result.get("citations_per_placeholder")
+    skipped = result.get("skipped_placeholders")
+    if not isinstance(placeholders, dict):
+        return None
+    if not isinstance(skipped, list):
+        skipped = []
+        result["skipped_placeholders"] = skipped
+    for placeholder_id in sorted(ids):
+        placeholders.pop(str(placeholder_id), None)
+        if isinstance(citations, dict):
+            citations.pop(str(placeholder_id), None)
+        skipped.append({"id": placeholder_id, "reason": _AUTOSKIP_REASON})
+    return result, sorted(ids)
 
 
 def _extract_json(text: str) -> str:
@@ -403,116 +471,18 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                 max_tokens=self._max_tokens,
             )
             total_cost += resp.usage.cost_usd
+            data: Any = None
             try:
                 data = json.loads(_extract_json(resp.text))
                 # evidence は上流フィーダだけを信頼し、モデルが出した値は検証前に破棄する。
                 # 不正な model-supplied path/key で repair を浪費させない。
                 if isinstance(data, dict):
                     data["evidence_images"] = input.evidence_images
-                composer_out = ComposerOutput.model_validate(data)
-                forced_skips = set(input.forced_skipped_ids)
-                placeholders = {
-                    placeholder_id: text
-                    for placeholder_id, text in composer_out.placeholders.items()
-                    if placeholder_id not in forced_skips
-                }
-                citations = {
-                    placeholder_id: values
-                    for placeholder_id, values in composer_out.citations_per_placeholder.items()
-                    if placeholder_id not in forced_skips
-                }
-                skipped = [
-                    item
-                    for item in composer_out.skipped_placeholders
-                    if item.id not in forced_skips
-                ]
-                skipped.extend(
-                    SkippedPlaceholder(
-                        id=placeholder_id,
-                        reason=("要確認（データ未検出）: proposal-builderの依存入力がありません"),
-                    )
-                    for placeholder_id in sorted(forced_skips)
-                )
-                resolved_auxiliary = dict(input.auxiliary_placeholders)
-                for key, placeholder_id in input.derived_auxiliary_placeholders.items():
-                    resolved_auxiliary[key] = placeholders.get(
-                        placeholder_id,
-                        "要確認（データ未検出）",
-                    )
-                # LLMには95枠本文だけを生成させる。事例・アカウント・D起点日付と
-                # template profile は検証済みの決定論的入力を後付けし、モデルに改変させない。
-                composer_out = ComposerOutput.model_validate(
-                    {
-                        **composer_out.model_dump(mode="python"),
-                        "placeholders": placeholders,
-                        "citations_per_placeholder": citations,
-                        "skipped_placeholders": skipped,
-                        "evidence_images": input.evidence_images,
-                        "auxiliary_placeholders": resolved_auxiliary,
-                        "posting_start_date": input.posting_start_date,
-                        "template_profile": input.template_profile,
-                    }
-                )
-                forbidden_ids = sorted(
-                    placeholder_id
-                    for placeholder_id, text in composer_out.placeholders.items()
-                    if contains_forbidden_term(text, input.forbidden_output_terms)
-                )
-                forbidden_citation_ids = sorted(
-                    placeholder_id
-                    for placeholder_id, citations in composer_out.citations_per_placeholder.items()
-                    if any(
-                        contains_forbidden_term(citation, input.forbidden_output_terms)
-                        for citation in citations
-                    )
-                )
-                forbidden_skip_ids = sorted(
-                    item.id
-                    for item in composer_out.skipped_placeholders
-                    if contains_forbidden_term(item.reason, input.forbidden_output_terms)
-                )
-                forbidden_evidence_ids = sorted(
-                    placeholder_id
-                    for placeholder_id, images in composer_out.evidence_images.items()
-                    if any(
-                        contains_forbidden_term(
-                            " ".join(
-                                value
-                                for value in (
-                                    image.keyword,
-                                    image.source_url,
-                                    image.image_path,
-                                    image.video_url,
-                                )
-                                if value
-                            ),
-                            input.forbidden_output_terms,
-                        )
-                        for image in images
-                    )
-                )
-                if (
-                    forbidden_ids
-                    or forbidden_citation_ids
-                    or forbidden_skip_ids
-                    or forbidden_evidence_ids
-                ):
-                    raise ProvenanceValidationError(
-                        [
-                            "confidential term remains in placeholder IDs "
-                            f"{forbidden_ids}, citation IDs {forbidden_citation_ids}, "
-                            f"skip IDs {forbidden_skip_ids}, or evidence IDs "
-                            f"{forbidden_evidence_ids}"
-                        ]
-                    )
-                if input.enforce_provenance:
-                    validate_composer_provenance(
-                        composer_out,
-                        input_urls=input.urls,
-                        research_material=input.research_material,
-                        quantitative_evidence=input.quantitative_evidence,
-                    )
-                return composer_out, total_cost
+                    # {48}〜{55} は {47} に統合済みの非対象 ID。モデルが律儀に skipped へ
+                    # 列挙すると contract で弾かれ repair を 1 回浪費するので、検証前に落とす
+                    # （2026-09-16 実走で発生。placeholders 側の 48〜55 も同様に無視する）。
+                    _drop_merged_placeholder_ids(data)
+                return self._finalize_composer(data, input), total_cost
             except (
                 json.JSONDecodeError,
                 ValidationError,
@@ -520,6 +490,26 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
             ) as exc:
                 last_error = str(exc)
                 if attempt >= input.max_repair:
+                    # 最終試行でも「数量に出典が付かない」だけが残る場合、その ID を
+                    # 『要確認』として skip に落として通す（数を捏造も laundering もしない）。
+                    # 2026-09-16 実走: 具体的な repair 指示を渡しても 5 回目に 1 ID だけ残り、
+                    # ジョブ全体が失敗していた。
+                    if isinstance(exc, ProvenanceValidationError) and isinstance(data, dict):
+                        autoskipped = _autoskip_uncited_placeholders(data, exc)
+                        if autoskipped is not None:
+                            skipped_data, skipped_ids = autoskipped
+                            try:
+                                composer_out = self._finalize_composer(skipped_data, input)
+                            except (ValidationError, ProvenanceValidationError) as retry_exc:
+                                last_error = str(retry_exc)
+                            else:
+                                ctx.bind_logger(self.name).warning(
+                                    "proposal_deck_provenance_autoskip",
+                                    attempts=input.max_repair + 1,
+                                    skipped_ids=skipped_ids,
+                                    total_cost_usd=round(total_cost, 4),
+                                )
+                                return composer_out, total_cost
                     break
                 messages.append({"role": "assistant", "content": [{"text": resp.text[:4000]}]})
                 messages.append(
@@ -531,15 +521,156 @@ class ProposalDeckSkill(BaseSkill[ProposalDeckInput, ProposalDeckOutput]):
                                     "前回の出力が ComposerOutput スキーマまたは"
                                     f"根拠検証に合いませんでした: {last_error}\n"
                                     "指摘の ID/文字数/網羅/citation の不足を直し、"
-                                    "JSON のみ（前後の説明文なし）で再送してください。"
+                                    "JSON のみ（前後の説明文なし）で再送してください。\n"
+                                    + self._repair_hint(input)
                                 )
                             }
                         ],
                     }
                 )
+        # 失敗理由の要約だけをログに残す（pydantic の input_value 断片＝モデル出力本文は含めない）。
+        # 2026-09-16 本番: 5 回とも {100}〜{103} 未被覆で失敗したが、ログには error_type しか無く
+        # 原因特定にローカル再現（Bedrock 課金）が要った。
+        ctx.bind_logger(self.name).warning(
+            "proposal_deck_compose_failed",
+            attempts=input.max_repair + 1,
+            total_cost_usd=round(total_cost, 4),
+            error_summary=(last_error or "").split("[type=", 1)[0].strip()[:300],
+        )
         raise ValueError(
             f"proposal_deck compose failed after {input.max_repair + 1} attempts: {last_error}"
         )
+
+    @staticmethod
+    def _finalize_composer(data: Any, input: ProposalDeckInput) -> ComposerOutput:
+        """モデル出力を契約検証し、決定論的入力を後付けして根拠検証まで通す。"""
+
+        composer_out = ComposerOutput.model_validate(data)
+        forced_skips = set(input.forced_skipped_ids)
+        placeholders = {
+            placeholder_id: text
+            for placeholder_id, text in composer_out.placeholders.items()
+            if placeholder_id not in forced_skips
+        }
+        citations = {
+            placeholder_id: values
+            for placeholder_id, values in composer_out.citations_per_placeholder.items()
+            if placeholder_id not in forced_skips
+        }
+        skipped = [
+            item for item in composer_out.skipped_placeholders if item.id not in forced_skips
+        ]
+        skipped.extend(
+            SkippedPlaceholder(
+                id=placeholder_id,
+                reason=("要確認（データ未検出）: proposal-builderの依存入力がありません"),
+            )
+            for placeholder_id in sorted(forced_skips)
+        )
+        resolved_auxiliary = dict(input.auxiliary_placeholders)
+        for key, placeholder_id in input.derived_auxiliary_placeholders.items():
+            resolved_auxiliary[key] = placeholders.get(
+                placeholder_id,
+                "要確認（データ未検出）",
+            )
+        # LLMには95枠本文だけを生成させる。事例・アカウント・D起点日付と
+        # template profile は検証済みの決定論的入力を後付けし、モデルに改変させない。
+        composer_out = ComposerOutput.model_validate(
+            {
+                **composer_out.model_dump(mode="python"),
+                "placeholders": placeholders,
+                "citations_per_placeholder": citations,
+                "skipped_placeholders": skipped,
+                "evidence_images": input.evidence_images,
+                "auxiliary_placeholders": resolved_auxiliary,
+                "posting_start_date": input.posting_start_date,
+                "template_profile": input.template_profile,
+            }
+        )
+        forbidden_ids = sorted(
+            placeholder_id
+            for placeholder_id, text in composer_out.placeholders.items()
+            if contains_forbidden_term(text, input.forbidden_output_terms)
+        )
+        forbidden_citation_ids = sorted(
+            placeholder_id
+            for placeholder_id, citations in composer_out.citations_per_placeholder.items()
+            if any(
+                contains_forbidden_term(citation, input.forbidden_output_terms)
+                for citation in citations
+            )
+        )
+        forbidden_skip_ids = sorted(
+            item.id
+            for item in composer_out.skipped_placeholders
+            if contains_forbidden_term(item.reason, input.forbidden_output_terms)
+        )
+        forbidden_evidence_ids = sorted(
+            placeholder_id
+            for placeholder_id, images in composer_out.evidence_images.items()
+            if any(
+                contains_forbidden_term(
+                    " ".join(
+                        value
+                        for value in (
+                            image.keyword,
+                            image.source_url,
+                            image.image_path,
+                            image.video_url,
+                        )
+                        if value
+                    ),
+                    input.forbidden_output_terms,
+                )
+                for image in images
+            )
+        )
+        if forbidden_ids or forbidden_citation_ids or forbidden_skip_ids or forbidden_evidence_ids:
+            raise ProvenanceValidationError(
+                [
+                    "confidential term remains in placeholder IDs "
+                    f"{forbidden_ids}, citation IDs {forbidden_citation_ids}, "
+                    f"skip IDs {forbidden_skip_ids}, or evidence IDs "
+                    f"{forbidden_evidence_ids}"
+                ]
+            )
+        if input.enforce_provenance:
+            validate_composer_provenance(
+                composer_out,
+                input_urls=input.urls,
+                research_material=input.research_material,
+                quantitative_evidence=input.quantitative_evidence,
+            )
+        return composer_out
+
+    @staticmethod
+    def _repair_hint(input: ProposalDeckInput) -> str:
+        """self-repair の 2 ターン目以降に渡す、根拠検証の直し方の具体指示。
+
+        2026-09-16 実走: 汎用の「直して再送」だけでは provenance（数量に citation 無し）で
+        5 回とも収束しないことがあった。引用してよい URL と、引用できる数量の一覧を明示し、
+        「引用できない数量は数を消して言い換える」を直接指示する。
+        """
+
+        allowed = sorted(extract_evidence_urls(input.urls, input.research_material))
+        lines = [
+            "根拠検証の直し方:",
+            "1. 「quantitative claim … no matching evidence citation」の ID には、その数量を支える"
+            " URL を下の一覧から一字一句そのまま citations_per_placeholder に付ける。",
+            "2. 「not present in source-backed input evidence」、または下の『引用できる数量』に"
+            "無い数量（年代・本数・週数・日数・件数を含む）は、その数を消して定性的な表現へ言い換える。",
+            "3. 「citation is not present in the input evidence URLs」は URL の転記ミス。"
+            "一覧の文字列だけを使う。",
+        ]
+        if allowed:
+            lines.append("引用してよい URL（これ以外は不可）:")
+            lines.extend(f"- {url}" for url in allowed[:40])
+        if input.quantitative_evidence:
+            claims = sorted(input.quantitative_evidence)
+            lines.append(
+                "引用できる数量（これ以外の数量は本文に残さない）: " + "、".join(claims[:60])
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def _build_user_message(input: ProposalDeckInput) -> str:

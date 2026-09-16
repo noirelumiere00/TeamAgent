@@ -266,3 +266,114 @@ def test_publish_failure_falls_back_to_none(
         out = skill.run(_input(template, tmp_path / "out"), ctx=SkillContext())
     assert out.pptx_url is None
     assert out.coverage_ratio == 1.0  # skill 自体は成功
+
+
+def test_prompt_v2_assigns_two_ids_per_short_video_plan() -> None:
+    """2026-09-16 本番: モデルが案A〜Dを {96}〜{99} に 1 枠ずつ書き {100}〜{103} が未被覆で 5 回失敗。
+    プロンプトが案ごとの 2 ID 割りを明示していることを固定する。"""
+    from teamagent.prompts.loader import load_prompt
+
+    system = load_prompt("proposal_deck", "v2", "system")
+    for pair in (
+        "`{96}`/`{97}`=案A",
+        "`{98}`/`{99}`=案B",
+        "`{100}`/`{101}`=案C",
+        "`{102}`/`{103}`=案D",
+    ):
+        assert pair in system
+    assert "8IDすべてを埋め" in system
+
+
+def test_exhausted_repair_logs_error_summary_without_model_text(tmp_path: Path) -> None:
+    """失敗理由の要約は warning ログに残り、pydantic の input_value（モデル出力本文）は含めない。"""
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp('{"placeholders": {"1": "SECRET-MODEL-TEXT"}}')
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    ctx = SkillContext()
+    logger = MagicMock()
+    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    with pytest.raises(ValueError):
+        skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=ctx)
+    calls = [
+        c
+        for c in logger.warning.call_args_list
+        if c.args and c.args[0] == "proposal_deck_compose_failed"
+    ]
+    assert len(calls) == 1
+    kwargs = calls[0].kwargs
+    assert kwargs["attempts"] == 1
+    assert "uncovered placeholders" in kwargs["error_summary"]
+    assert "SECRET-MODEL-TEXT" not in kwargs["error_summary"]
+    assert "[type=" not in kwargs["error_summary"]
+
+
+def test_merged_ids_48_to_55_in_model_output_are_dropped_before_validation(tmp_path: Path) -> None:
+    """モデルが {48}〜{55} を skipped（または placeholders）へ書いても repair を浪費せず通す（2026-09-16 実走）。"""
+    import json
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    payload = json.loads(_full_composer_json())
+    payload.setdefault("skipped_placeholders", []).append(
+        {"id": 50, "reason": "出力対象外（{47}に統合済み）"}
+    )
+    payload["placeholders"]["49"] = "統合済みのはずの本文"
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    out = skill.run(_input(template, tmp_path / "out", max_repair=0), ctx=SkillContext())
+    assert bedrock.converse.call_count == 1
+    assert out.coverage_ratio == 1.0
+
+
+def test_repair_turn_includes_allowed_urls_and_citable_claims(tmp_path: Path) -> None:
+    """2 ターン目の repair メッセージに、引用してよい URL と引用できる数量の一覧が入る（2026-09-16 実走の収束対策）。"""
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    bedrock = MagicMock()
+    bedrock.converse.side_effect = [
+        _resp('{"placeholders": {"1": "x"}}'),
+        _resp(_full_composer_json()),
+    ]
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    deck_input = _input(template, tmp_path / "out", max_repair=1)
+    deck_input = deck_input.model_copy(
+        update={
+            "urls": ["https://example.com/lp"],
+            "quantitative_evidence": {"1,200億円": ["https://example.com/lp"]},
+        }
+    )
+    skill.run(deck_input, ctx=SkillContext())
+    second_call_messages = bedrock.converse.call_args_list[1].kwargs["messages"]
+    repair_text = second_call_messages[-1]["content"][0]["text"]
+    assert "根拠検証の直し方" in repair_text
+    assert "https://example.com/lp" in repair_text
+    assert "1,200億円" in repair_text
+    assert "数を消して定性的な表現" in repair_text
+
+
+def test_final_attempt_autoskips_uncited_quantity_placeholders(tmp_path: Path) -> None:
+    """最終試行でも数量に出典が付かない ID だけが残るなら、その ID を『要確認』skip にして通す（2026-09-16）。"""
+    import json
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    payload = json.loads(_full_composer_json())
+    # {4}（ターゲット）は文字数規則が無い ID。citation 無しの数量だけが違反になる。
+    payload["placeholders"]["4"] = "30代の働く女性。市場規模は1,200億円に達し、拡大が続く"
+    payload.setdefault("citations_per_placeholder", {}).pop("4", None)
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    deck_input = _input(template, tmp_path / "out", max_repair=0).model_copy(
+        update={"enforce_provenance": True, "urls": ["https://example.com/lp"]}
+    )
+    ctx = SkillContext()
+    logger = MagicMock()
+    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    out = skill.run(deck_input, ctx=ctx)
+    assert bedrock.converse.call_count == 1
+    assert out.skipped_ids == [4]
+    assert out.filled_count == 94 and out.skipped_count == 1  # 95 枠は skip 込みで被覆
+    events = [c.args[0] for c in logger.warning.call_args_list]
+    assert "proposal_deck_provenance_autoskip" in events
+    assert "proposal_deck_compose_failed" not in events
