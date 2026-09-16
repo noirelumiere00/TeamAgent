@@ -9,12 +9,17 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from teamagent.cases.schema import CaseRecord
+from teamagent.cases.store import MAX_STRUCTURE_SCORE, CaseSearchHit, search_case_records
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search.schema import SearchHitOut, SearchInput, SearchOutput
 
 _GENERAL_NEWS_TV = "general_news-tv"
 _MAX_CASES = 3
 _DEFAULT_SEARCH_POOL = 12
+#: 既存 RAG 候補の先頭に差し込む事例レコード候補の上限（設計 §4.1「少なくとも 1 枠」）。
+_MAX_CASE_RECORD_SLOTS = 2
+_REGULATION_TRAIT = "薬機・景表規制"
 _SAFE_CASE_LABELS = (
     "■施策",
     "■結果",
@@ -95,7 +100,7 @@ class SelectedAccount(_StrictModel):
 class CaseCandidate(_StrictModel):
     """A safe-to-render case reference sourced from existing RAG."""
 
-    source: Literal["report_rag", "general_news-tv"]
+    source: Literal["report_rag", "general_news-tv", "case_record"]
     title: str = Field(min_length=1)
     url: str = Field(min_length=1)
     excerpt: str = Field(min_length=1)
@@ -358,17 +363,171 @@ def search_case_candidates(
     )
 
 
+class CaseRecordRepository(Protocol):
+    """``case_records`` 検索の DI seam（store.search_case_records と同じ引数）。"""
+
+    def search_case_records(
+        self,
+        *,
+        sector: str | None,
+        purpose: Sequence[str] | None,
+        product_state: str | None,
+        traits: Sequence[str] | None,
+        query_embedding: Sequence[float] | None,
+        exclude_client: str | None,
+        limit: int,
+    ) -> Sequence[CaseSearchHit]:
+        """Return structure-scored case records."""
+
+        ...
+
+
+def _is_http_url(value: str) -> bool:
+    return value.strip().lower().startswith(("http://", "https://"))
+
+
+def _product_meta_value(meta: Any, key: str) -> Any:
+    if isinstance(meta, Mapping):
+        return meta.get(key)
+    return getattr(meta, key, None)
+
+
+def product_meta_traits(product_meta: Any) -> list[str]:
+    """Gemini product_meta から traits を組む（現状 regulation → 薬機・景表規制 のみ）。"""
+    return [_REGULATION_TRAIT] if bool(_product_meta_value(product_meta, "regulation")) else []
+
+
+def case_record_excerpt(record: CaseRecord) -> str:
+    """result_masked＋winpattern＋出典つき metrics（社名は含めない・masked のみ）。"""
+    parts: list[str] = []
+    if record.result_masked.strip():
+        parts.append(f"結果: {record.result_masked.strip()}")
+    if record.winpattern.strip():
+        parts.append(f"勝ち筋: {record.winpattern.strip()}")
+    cited = [
+        f"{metric.name} {metric.value}{metric.unit}（出典: {metric.source_url}）"
+        for metric in record.metrics
+        if _is_http_url(metric.source_url)
+    ]
+    if cited:
+        parts.append("実績値: " + "／".join(cited[:6]))
+    if record.external_use == "unknown":
+        parts.append("対外利用可否: 未確認（原典で確認）")
+    return "\n".join(parts)
+
+
+def case_candidate_from_hit(hit: CaseSearchHit) -> CaseCandidate | None:
+    """検索ヒット → 描画可能な候補。出典 URL が http(s) でなければ None（fail-closed）。"""
+    record = hit.record
+    if record.external_use == "ng" or not record.sources:
+        return None
+    url = record.sources[0].url.strip()
+    if not _is_http_url(url):
+        return None
+    excerpt = case_record_excerpt(record)
+    if not excerpt:
+        return None
+    title = record.client_masked.strip()
+    if record.product.strip():
+        title = f"{title}｜{record.product.strip()}"
+    score = min(1.0, max(0.0, hit.structure_score / MAX_STRUCTURE_SCORE))
+    return CaseCandidate(
+        source="case_record",
+        title=title,
+        url=url,
+        excerpt=excerpt,
+        score=score,
+    )
+
+
+def search_case_record_candidates(
+    conn_or_repo: Any,
+    product_meta: Any,
+    *,
+    max_cases: int = _MAX_CASE_RECORD_SLOTS,
+    exclude_client: str | None = None,
+    query_embedding: Sequence[float] | None = None,
+) -> list[CaseCandidate]:
+    """``case_records`` から product_meta（sector / purpose / product_state / regulation）で引く。
+
+    ``conn_or_repo`` は psycopg 接続（store.search_case_records を直接呼ぶ）か、
+    ``search_case_records`` メソッドを持つリポジトリ（テスト用フェイク等）。
+    """
+    if not 1 <= max_cases <= _MAX_CASE_RECORD_SLOTS:
+        raise ValueError(f"max_cases must be between 1 and {_MAX_CASE_RECORD_SLOTS}")
+    sector = str(_product_meta_value(product_meta, "sector") or "").strip() or None
+    purpose_raw = _product_meta_value(product_meta, "purpose") or []
+    purpose = [str(p).strip() for p in purpose_raw if str(p).strip()]
+    product_state = str(_product_meta_value(product_meta, "product_state") or "").strip() or None
+    traits = product_meta_traits(product_meta)
+    kwargs: dict[str, Any] = {
+        "sector": sector,
+        "purpose": purpose,
+        "product_state": product_state,
+        "traits": traits,
+        "query_embedding": query_embedding,
+        "exclude_client": exclude_client,
+        # 出典欠落・ng で落ちる分を見込んで多めに引く
+        "limit": max_cases * 3,
+    }
+    repo_search = getattr(conn_or_repo, "search_case_records", None)
+    hits: Sequence[CaseSearchHit]
+    if callable(repo_search):
+        hits = repo_search(**kwargs)
+    else:
+        hits = search_case_records(conn_or_repo, **kwargs)
+    candidates: list[CaseCandidate] = []
+    seen: set[str] = set()
+    for hit in hits:
+        candidate = case_candidate_from_hit(hit)
+        if candidate is None or candidate.url in seen:
+            continue
+        seen.add(candidate.url)
+        candidates.append(candidate)
+        if len(candidates) == max_cases:
+            break
+    return candidates
+
+
+def merge_case_candidates(
+    record_candidates: Sequence[CaseCandidate],
+    rag_candidates: Sequence[CaseCandidate],
+    *,
+    max_records: int = _MAX_CASE_RECORD_SLOTS,
+) -> list[CaseCandidate]:
+    """事例レコード候補を **先頭** に最大 ``max_records`` 件差し込み、URL 重複は後ろ側を落とす。"""
+    merged: list[CaseCandidate] = []
+    seen: set[str] = set()
+    for candidate in list(record_candidates)[: max(0, max_records)]:
+        if candidate.url in seen:
+            continue
+        seen.add(candidate.url)
+        merged.append(candidate)
+    for candidate in rag_candidates:
+        if candidate.url in seen:
+            continue
+        seen.add(candidate.url)
+        merged.append(candidate)
+    return merged
+
+
 __all__ = [
     "AccountDatabase",
     "AccountDatabaseMeta",
     "AccountProspect",
     "AccountRecord",
     "CaseCandidate",
+    "CaseRecordRepository",
     "SearchRunner",
     "SelectedAccount",
+    "case_candidate_from_hit",
+    "case_record_excerpt",
     "format_case_candidates",
     "load_account_database",
     "load_and_select_accounts",
+    "merge_case_candidates",
+    "product_meta_traits",
     "search_case_candidates",
+    "search_case_record_candidates",
     "select_top_accounts",
 ]

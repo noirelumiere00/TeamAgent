@@ -47,7 +47,9 @@ from teamagent.skills.proposal_builder.selectors import (
     CaseCandidate,
     SelectedAccount,
     load_and_select_accounts,
+    merge_case_candidates,
     search_case_candidates,
+    search_case_record_candidates,
 )
 from teamagent.skills.proposal_campaign.adapters import Searcher
 from teamagent.skills.proposal_campaign.feeder import build_evidence_images
@@ -101,6 +103,10 @@ class _TikTokEnrichment:
 
 _CampaignFactory = Callable[[Searcher], ProposalCampaignSkill]
 _TikTokSearcher = Callable[..., TikTokSearchResult]
+# (product_meta, *, max_cases, exclude_client) -> 事例レコード候補（DI seam・既定は DB 直結）
+_CaseRecordSearcher = Callable[..., list[CaseCandidate]]
+#: 事例レコード候補を既存 RAG 候補の先頭に差し込む上限（USE_CASE_RECORDS=1 のときだけ）。
+_CASE_RECORD_SLOTS = 2
 _ProposalBuilderFactory = Callable[[], "ProposalBuilderSkill"]
 _ProposalInputValidator = Callable[[ProposalBuilderInput], None]
 _ThreadLauncher = Callable[[Callable[[], None], str], None]
@@ -530,6 +536,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         account_db_path: str | None = None,
         tiktok_searcher: _TikTokSearcher | None = None,
         campaign_factory: _CampaignFactory | None = None,
+        case_record_searcher: _CaseRecordSearcher | None = None,
     ) -> None:
         self._search = search
         self._deck = deck or self._build_deck()
@@ -537,6 +544,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
         self._account_db_path = account_db_path
         self._tiktok_searcher = tiktok_searcher or search_tiktok
         self._campaign_factory = campaign_factory or self._build_campaign
+        self._case_record_searcher = case_record_searcher or self._search_case_records_db
         self._owned_outputs: dict[str, ProposalDeckOutput] = {}
         self._owned_outputs_lock = threading.Lock()
 
@@ -566,6 +574,49 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
     @staticmethod
     def _build_campaign(searcher: Searcher) -> ProposalCampaignSkill:
         return ProposalCampaignSkill(searcher=searcher)
+
+    @staticmethod
+    def _search_case_records_db(
+        product_meta: Any, *, max_cases: int, exclude_client: str | None
+    ) -> list[CaseCandidate]:
+        """既定の事例レコード検索（DB 直結）。USE_CASE_RECORDS=1 のときだけ呼ばれる。"""
+        # 重い import（psycopg / pool）を遅延させ、フラグ off の本番経路に影響させない。
+        from teamagent.adapters.pgvector_client import PgVectorClient
+
+        pg = PgVectorClient.from_env()
+        try:
+            with pg.connection(app_role="teamagent_app") as conn:
+                return search_case_record_candidates(
+                    conn,
+                    product_meta,
+                    max_cases=max_cases,
+                    exclude_client=exclude_client,
+                )
+        finally:
+            pg.close()
+
+    def _collect_case_record_candidates(
+        self, product_meta: Any, *, exclude_client: str, log: Any
+    ) -> list[CaseCandidate]:
+        """env ``USE_CASE_RECORDS`` が真のときだけ事例レコードを引く（既定 off・失敗は fail-open）。
+
+        失敗時は空リスト（既存 RAG 候補だけで続行）。
+        """
+        if not _envflag("USE_CASE_RECORDS"):
+            return []
+        try:
+            return self._case_record_searcher(
+                product_meta,
+                max_cases=_CASE_RECORD_SLOTS,
+                exclude_client=exclude_client,
+            )
+        except Exception as exc:
+            # レコード検索の障害で提案書生成を止めない（既存 RAG 候補だけで続行）。
+            log.warning(
+                "proposal_builder_case_records_failed",
+                error_type=type(exc).__name__,
+            )
+            return []
 
     def _collect_tiktok_enrichment(
         self,
@@ -782,6 +833,12 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 "proposal_builder_case_rag_failed",
                 error_type=type(exc).__name__,
             )
+        # 事例レコード（case_records）は USE_CASE_RECORDS=1 のときだけ先頭に最大 2 件差し込む。
+        record_cases = self._collect_case_record_candidates(
+            meta, exclude_client=research.brand, log=log
+        )
+        if record_cases:
+            cases = merge_case_candidates(record_cases, cases, max_records=_CASE_RECORD_SLOTS)
 
         safe_research = dict(sanitized.sanitized)
         if input.confidential_product_name:
