@@ -95,8 +95,8 @@ INITIAL_RELEASE_EXEMPT_STATES: dict[str, frozenset[str]] = {
     "build": frozenset({FORCED_ROLLBACK_PROVISIONAL}),
     "authorize": frozenset({FORCED_ROLLBACK_PROVISIONAL}),
 }
-INITIAL_RELEASE_EXEMPTION_SUNSET_UTC = "2026-09-15T00:00:00Z"
-INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC = "2026-09-22T00:00:00Z"
+INITIAL_RELEASE_EXEMPTION_SUNSET_UTC = "2026-10-15T00:00:00Z"
+INITIAL_RELEASE_EXEMPTION_CAMPAIGN_EXPIRES_AT_UTC = "2026-10-22T00:00:00Z"
 INITIAL_RELEASE_EXEMPTION_CAMPAIGN_ID = "initial-release-exemption-no-charter-object"
 # The campaign locators are deliberately unresolvable: no drill charter object
 # exists yet, and inventing a plausible locator would be a fabricated citation.

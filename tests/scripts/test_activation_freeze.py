@@ -229,11 +229,11 @@ def test_unlock_matches_the_committed_declaration() -> None:
     unlock = _freeze_doc()["unlock"]
     if unlock["active"]:
         assert unlock["scope_paths"] == [
-            "infra/codebuild/teamagent_core_media_release_contract.json",
+            "infra/codebuild/release_evidence.py",
         ]
-        assert "util-linux" in unlock["reason"]
-        assert "CVE-2026-78408" in unlock["reason"]
-        assert "human gate 2026-09-11" in unlock["gate"]
+        assert "INITIAL_RELEASE_EXEMPTION_SUNSET_UTC" in unlock["reason"]
+        assert "2026-10-15" in unlock["reason"]
+        assert "human gate 2026-09-16" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None
