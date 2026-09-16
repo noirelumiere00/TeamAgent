@@ -87,7 +87,7 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb" = {
+    "faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -134,7 +134,7 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb" = {
+    "a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -181,7 +181,7 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9" = {
+    "0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -380,18 +380,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6.yml"
 }
 
 import {

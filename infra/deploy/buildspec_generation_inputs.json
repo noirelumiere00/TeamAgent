@@ -7,7 +7,7 @@
     "infra/codebuild/image-attestor-buildspec.yml": "d9b2573bd11f57914941be000b996d2afbc2ea32",
     "infra/codebuild/image-promoter-buildspec.yml": "adaf16dd1ebd090007f1ba9e16dc667f28a7406b",
     "infra/codebuild/source_provenance.py": "61884d2f820c8484f1bbd76f6a12ce8887a801ad",
-    "infra/codebuild/release_evidence.py": "d5e6e8288a2a4be478b80378c29f825a88906c8f",
+    "infra/codebuild/release_evidence.py": "407238d934184c3c8100b977979b3c98cc7def38",
     "infra/codebuild/teamagent_bundle_provenance.py": "fb379e6999566de8f6588c20f141c71ff414dda8",
     "infra/codebuild/teamagent_schema_versions.py": "1e100f61fa15c4ae6eb4bcc4f054de849149d8cb",
     "infra/codebuild/teamagent_release_approval.py": "fd8f442f68f75bafdd6a239a378547050658d404",
@@ -39,9 +39,9 @@
     "evaluated_at": "2026-08-21T07:15:42Z"
   },
   "expected_generation_sha256": {
-    "teamagent-dev-mcp-source-publisher": "8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb",
-    "teamagent-dev-image-attestor": "9d4668f9d39f72df12558e3c9fcd5ade203f5628fb6ad25719c8c9e12dddc7cb",
-    "teamagent-dev-image-promoter": "5d3871a6b2e580e1cd742cfbf52531de8214f61dc49063416e0e168542b1f5a9",
+    "teamagent-dev-mcp-source-publisher": "faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a",
+    "teamagent-dev-image-attestor": "a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57",
+    "teamagent-dev-image-promoter": "0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6",
     "teamagent-dev-approval-publisher": "33e2a64353969f75e941a9524fcd76919c2dfcc7d192aabb67ecc09c9921ddf4"
   }
 }

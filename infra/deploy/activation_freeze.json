@@ -375,10 +375,10 @@
   "unlock": {
     "active": true,
     "scope_paths": [
-      "infra/codebuild/teamagent_core_media_release_contract.json"
+      "infra/codebuild/release_evidence.py"
     ],
-    "reason": "media base(v3.24) 同梱の util-linux 系 3 パッケージ（libblkid / libmount / libuuid = 2.42.1-r0）を修正版 2.42.3-r1 へ明示 pin し、CVE-2026-27456（MEDIUM）と CVE-2026-76642 / CVE-2026-78408 / CVE-2026-78409 / CVE-2026-78410（HIGH 4件）を根治する。media-apk.lock の 3 行が動くため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避で、世代 publish（Wave8）を強制する。HIGH は期限付き例外にせずバンプで直すという既存規律に従い、ecr_scan_exceptions_media.json は触らない。publish 儀式（S3 append→UpdateProject→IAM ピン）は本 PR のスコープ外（admin CLI）。",
-    "gate": "human gate 2026-09-11（ユーザー明示承認: mcp 便 r20 段3 で media が util-linux 5 CVE の ECR ゲートに落ちた件を、HIGH は期限付き例外にせずバンプで直す既存規律で解消することを承認。scope_paths は本 PR の変更集合ちょうど＝core_media 契約 1 path へ絞り込み済み＝前宣言の 2 path から縮小しており拡大ではない）",
+    "reason": "初回リリース免除（強制ロールバック drill 未実施でも build/authorize の承認を PROVISIONAL で通す）の期限 INITIAL_RELEASE_EXEMPTION_SUNSET_UTC 2026-09-15 が切れ、mcp 便 r24 が段 2 で 'approval forced rollback state mismatch' で停止した。drill の本番実走は runbook が NO-GO（finalize の caller 切替）のため、期限を 2026-10-15、campaign expiry を 2026-10-22 へ 1 ヶ月延長する。コード注記どおりこの期限は安全管理ではなく PASSED 経路を作らせる催促。延長中に drill の NO-GO 解消をタスク化する",
+    "gate": "human gate 2026-09-16（小俣さん裁定「期限を 10/15 まで延長して r24 を撃ち直す」。scope_paths は本 PR の frozen surface 変更集合ちょうど＝release_evidence.py 1 path）",
     "folded_2026_08_28": {
       "decision": "裁定③（relock せず相乗り）を打ち切り、本 PR で unlock を畳む。Human Gate ⑤ を 2026-08-28 にユーザーが通した。",
       "why_now": "①本 PR は frozen surface を 1 path も変更していない（assert-frozen-surface --base origin/dev --head HEAD が「frozen surface 無変更（監視対象 21 path）」を返す実測）。∴ この unlock は本 PR には不要。②active のままだと test_unlock_is_inactive_and_empty_by_default が落ち、CI が 1 failed / 7,474 passed で恒常的に赤になる（3.11 / 3.13 / 3.14 すべてで実測）。本物の失敗と見分けがつかなくなる。③裁定③の rationale「いま relock すると同じ宣言を立て直す往復が発生する」は成立しない。retention_ruling_2026_08_27.landmine_partial_scope のとおり、相乗り PR は scope_paths を自分の変更集合へ絞り込まねばならず、**どのみち書き直しが必須**だから。",
@@ -399,6 +399,14 @@
       "landmine_partial_scope": "assert_frozen_surface は「scope_paths に挙げたのに実際には変更していない path」を『過剰な unlock』として **拒否する**。したがって scope_paths が 2 件のまま、片方（例: core_media 契約）だけを触る PR は CI で落ちる。相乗りさせる PR は 2 path の両方を触るか、その PR で scope_paths を実際の変更集合へ絞り込むこと。",
       "known_design_red": "この unlock が active である限り tests/scripts/test_activation_freeze.py の 2 件が赤になる（test_unlock_is_inactive_and_empty_by_default = 平時 unlock なしの封印テスト / test_real_generation_input_changes_are_rejected[0eab7f2-d3fe768] = 歴史 diff が片方の path しか触らないため『過剰な unlock』側の例外が出て regex が外れる）。**unlock を畳めば両方とも緑に戻る**。実装バグではない。",
       "fold_condition": "相乗り対象（B1 APP_HTML ピン整合 / B2 image-builder 参照の導出化）が入り終わった時点で、unlock.active=false・scope_paths=[]・reason=null・gate=null へ戻す（Human Gate ⑤）。"
+    },
+    "previous_scope_20260911": {
+      "scope_paths": [
+        "infra/codebuild/teamagent_core_media_release_contract.json"
+      ],
+      "reason": "media base(v3.24) 同梱の util-linux 系 3 パッケージ（libblkid / libmount / libuuid = 2.42.1-r0）を修正版 2.42.3-r1 へ明示 pin し、CVE-2026-27456（MEDIUM）と CVE-2026-76642 / CVE-2026-78408 / CVE-2026-78409 / CVE-2026-78410（HIGH 4件）を根治する。media-apk.lock の 3 行が動くため、同 lock の sha256 を焼いている source_assertions（artifact.apk-lock.sha256）の更新が不可避で、世代 publish（Wave8）を強制する。HIGH は期限付き例外にせずバンプで直すという既存規律に従い、ecr_scan_exceptions_media.json は触らない。publish 儀式（S3 append→UpdateProject→IAM ピン）は本 PR のスコープ外（admin CLI）。",
+      "gate": "human gate 2026-09-11（ユーザー明示承認: mcp 便 r20 段3 で media が util-linux 5 CVE の ECR ゲートに落ちた件を、HIGH は期限付き例外にせずバンプで直す既存規律で解消することを承認。scope_paths は本 PR の変更集合ちょうど＝core_media 契約 1 path へ絞り込み済み＝前宣言の 2 path から縮小しており拡大ではない）",
+      "note": "09-11 の util-linux 例外宣言。core_media 契約は dev 取り込み済みで本 PR では触らないため scope から外す（過剰 unlock の禁止）"
     }
   },
   "production_deployment_freeze": {
