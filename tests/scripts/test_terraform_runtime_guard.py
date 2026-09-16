@@ -6610,7 +6610,10 @@ def _config_runtime_task(component: str) -> dict[str, Any]:
                         "transit_encryption": "ENABLED",
                         "transit_encryption_port": 0,
                         "authorization_config": [
-                            {"access_point_id": "fsap-0123456789abcdef0", "iam": "ENABLED"}
+                            {
+                                "access_point_id": "fsap-0123456789abcdef0",  # gitleaks:allow 合成フィクスチャID
+                                "iam": "ENABLED",
+                            }
                         ],
                     }
                 ],
