@@ -276,7 +276,7 @@ phases:
             --output json > "/tmp/openclaw-$NAME-scan.json"
           python3 infra/codebuild/verify_ecr_scan.py \
             --scan "/tmp/openclaw-$NAME-scan.json" \
-            --deny-all \
+            --exceptions "infra/codebuild/ecr_scan_exceptions_openclaw.json" \
             --expected-image-digest "$ARM64_DIGEST" \
             --expected-repository "$QUARANTINE_REPOSITORY"
         done < /tmp/openclaw-verified-subjects.tsv

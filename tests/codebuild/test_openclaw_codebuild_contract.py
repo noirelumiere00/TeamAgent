@@ -162,7 +162,9 @@ def test_buildspec_is_quarantine_only_and_attestor_owns_actual_image_signatures(
     assert "teamagent-openclaw-quarantine:candidate-${SOURCE_COMMIT}-core" in body
     assert "teamagent-openclaw-media-quarantine:candidate-${SOURCE_COMMIT}-media" in body
     assert "aws ecr wait image-scan-complete" in body
-    assert "--deny-all" in body
+    # 2026-09-16 裁定②: OpenClaw も mcp と同じ期限付き例外レジストリ（openclaw 用）を通す。
+    assert '--exceptions "infra/codebuild/ecr_scan_exceptions_openclaw.json"' in body
+    assert "--deny-all" not in body
     assert "teamagent-openclaw-verified-candidates" not in body
     assert "oras cp" not in body
     assert "list-image-referrers" not in body
