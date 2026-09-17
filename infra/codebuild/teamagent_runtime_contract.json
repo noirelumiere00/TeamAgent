@@ -89,7 +89,7 @@
         "build_arg": "PYTHON_VERSION",
         "oci_label": "io.teamagent.contract.python-version",
         "dockerfile_uses": [
-          "test \"$(python --version)\" = \"Python ${PYTHON_VERSION}\""
+          "test \"$(python --version | tr -d +)\" = \"Python ${PYTHON_VERSION}\""
         ]
       },
       {

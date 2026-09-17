@@ -53,7 +53,7 @@ COPY --from=uv /uv /usr/bin/uv
 RUN set -eu; \
     test "$(uv --version)" = "uv ${UV_VERSION} (aarch64-unknown-linux-musl)"; \
     printf '%s  %s\n' "$UV_BINARY_SHA256" /usr/bin/uv | sha256sum -c -; \
-    test "$(python --version)" = "Python ${PYTHON_VERSION}"; \
+    test "$(python --version | tr -d +)" = "Python ${PYTHON_VERSION}"; \
     printf '%s  %s\n' "$PYTHON_BINARY_SHA256" /usr/bin/python3.14 | sha256sum -c -
 
 COPY infra/codebuild/teamagent_runtime_contract.json /tmp/teamagent_runtime_contract.json
