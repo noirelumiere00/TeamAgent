@@ -8,6 +8,7 @@ import json
 import os
 import re
 import threading
+import traceback
 import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -261,6 +262,22 @@ def _is_tiktok_video_url(value: str) -> bool:
         and port in {None, 443}
         and _TIKTOK_VIDEO_PATH.fullmatch(parsed.path) is not None
     )
+
+
+def _error_summary(exc: BaseException) -> str:
+    """失敗ログ用の短い要約。pydantic の input_value（モデル出力本文）は含めない。"""
+
+    return str(exc).split("[type=", 1)[0].strip()[:300]
+
+
+def _error_location(exc: BaseException) -> str:
+    """例外の発生箇所（最内フレームの file:line）。本文を含まず原因特定に足りる。"""
+
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return ""
+    last = frames[-1]
+    return f"{os.path.basename(last.filename)}:{last.lineno}:{last.name}"
 
 
 def _safe_error_code(exc: BaseException) -> str:
@@ -1358,10 +1375,14 @@ class ProposalBuilderSubmitSkill(
                 else:
                     log.warning("proposal_builder_terminal_write_rejected", job_id=job_id)
         except Exception as exc:
+            # 2026-09-16 本番: error_type=TypeError だけでは原因が分からず、ログ再読とローカル
+            # 再現に半日を要した。要約（本文なし）と発生箇所を残す。
             log.warning(
                 "proposal_builder_job_failed",
                 job_id=job_id,
                 error_type=type(exc).__name__,
+                error_summary=_error_summary(exc),
+                error_at=_error_location(exc),
             )
             try:
                 self._store.mark_failed(

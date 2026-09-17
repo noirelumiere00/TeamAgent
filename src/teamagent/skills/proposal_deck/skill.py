@@ -11,6 +11,7 @@ self-repair（最大 input.max_repair 回）。converse は tool を使わず、
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -91,13 +92,16 @@ def _autoskip_uncited_placeholders(
 
     ids: set[int] = set()
     for error in exc.errors:
-        found = _PROVENANCE_PLACEHOLDER_ID.findall(error)
+        found = _PROVENANCE_PLACEHOLDER_ID.findall(str(error))
         if not found:
             return None
         ids.update(int(value) for value in found)
     if not ids:
         return None
-    result = json.loads(json.dumps(data, ensure_ascii=False))
+    # data には検証前に後付けした evidence_images（EvidenceImage の pydantic オブジェクト）が
+    # 入っているので json 往復では複製できない（2026-09-16 本番: 5 回目の直後に
+    # TypeError "Object of type EvidenceImage is not JSON serializable" でジョブ全体が失敗）。
+    result = copy.deepcopy(data)
     placeholders = result.get("placeholders")
     citations = result.get("citations_per_placeholder")
     skipped = result.get("skipped_placeholders")
