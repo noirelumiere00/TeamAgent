@@ -44,7 +44,7 @@ def test_core_uses_exact_arm64_child_digests_and_binary_hashes() -> None:
     assert f"ARG UV_ARM64_DIGEST=sha256:{UV_DIGEST}" in TEXT
     assert f"ARG PYTHON_BINARY_SHA256={PYTHON_BINARY_SHA256}" in TEXT
     assert f"ARG UV_BINARY_SHA256={UV_BINARY_SHA256}" in TEXT
-    assert "ARG PYTHON_VERSION=3.14.7" in TEXT
+    assert "ARG PYTHON_VERSION=3.14.7+" in TEXT
     assert "cgr.dev/chainguard/python:latest-dev@${PYTHON_BUILDER_ARM64_DIGEST}" in TEXT
     assert "cgr.dev/chainguard/python:latest@${PYTHON_RUNTIME_ARM64_DIGEST}" in TEXT
     assert "ghcr.io/astral-sh/uv:latest@${UV_ARM64_DIGEST}" in TEXT
