@@ -87,7 +87,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a" = {
+    # 2026-09-17 publish 世代。chainguard python の arm64 digest を zlib / glibc の修正版を含む
+    # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
+    # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
+    # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
+    "2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -134,7 +138,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57" = {
+    # 2026-09-17 publish 世代。chainguard python の arm64 digest を zlib / glibc の修正版を含む
+    # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
+    # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
+    # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
+    "99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -181,7 +189,11 @@ locals {
     # 同梱の libblkid / libmount / libuuid を 2.42.1-r0→2.42.3-r1 へ明示 pin（media-apk.lock
     # 3行・契約 MEDIA_APK_LOCK_SHA256）したことによる再レンダリング。値の出所は repo tree
     # からのオフライン導出（Wave3〜7 を完全再現済みのハーネス）。publish 儀式は admin CLI。
-    "0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6" = {
+    # 2026-09-17 publish 世代。chainguard python の arm64 digest を zlib / glibc の修正版を含む
+    # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
+    # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
+    # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
+    "c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -380,18 +392,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/a51c033cd7cb88ef71dd7b68f0d31cdbd6594e85aeeabd84f8184f82fea16a57.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/0f9bd8ba7995cb110e739a4d9202171ebd9a4fd1b33f5a6eb5436114f33e5ce6.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4.yml"
 }
 
 import {
