@@ -144,3 +144,41 @@ async def test_update_message_swallows_errors(fake_web_client: AsyncMock) -> Non
         request_id="req-up-4",
     )
     assert result.ok is False
+
+
+@pytest.mark.asyncio
+async def test_upload_file_passes_filename_and_title(fake_web_client: AsyncMock) -> None:
+    """filename を渡すと files_upload_v2 にそのまま届く（ダウンロード名に反映させるため）。"""
+    fake_web_client.files_upload_v2.return_value = {"ok": True}
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    ok = await client.upload_file(
+        "C123",
+        "/tmp/req-abc_商材.pptx",
+        "req-1",
+        title="DRAFT_裏取り前_商材_v1.pptx",
+        filename="DRAFT_裏取り前_商材_v1.pptx",
+        initial_comment="⚠️ ドラフト",
+        thread_ts="1.2",
+    )
+
+    assert ok is True
+    kwargs = fake_web_client.files_upload_v2.await_args.kwargs
+    assert kwargs["file"] == "/tmp/req-abc_商材.pptx"
+    assert kwargs["title"] == "DRAFT_裏取り前_商材_v1.pptx"
+    assert kwargs["filename"] == "DRAFT_裏取り前_商材_v1.pptx"
+    assert kwargs["initial_comment"] == "⚠️ ドラフト"
+    assert kwargs["thread_ts"] == "1.2"
+
+
+@pytest.mark.asyncio
+async def test_upload_file_omits_filename_when_not_given(fake_web_client: AsyncMock) -> None:
+    """filename 省略時は従来どおり file の basename に任せる（既存呼び出し元の挙動を変えない）。"""
+    fake_web_client.files_upload_v2.return_value = {"ok": True}
+    client = SlackClient(bot_token="xoxb-test", client=fake_web_client)
+
+    await client.upload_file("C123", "/tmp/report.html", "req-2", title="レポート")
+
+    kwargs = fake_web_client.files_upload_v2.await_args.kwargs
+    assert "filename" not in kwargs
+    assert kwargs["title"] == "レポート"
