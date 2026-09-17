@@ -327,3 +327,58 @@ def test_unset_ddb_env_uses_process_shared_fallback(
     )
     assert done.status == "done"
     assert done.version_id == "pb-version-1"
+
+
+def _run_failing_job(error: BaseException) -> list[dict[str, Any]]:
+    """error を投げる builder でジョブを走らせ、proposal_builder_job_failed のログ entry を返す。
+
+    submit はバックグラウンド用に SkillContext を作り直すので ctx.bind_logger の差し替えは
+    届かない。structlog の capture_logs で別スレッドの出力ごと拾う。
+    """
+    from structlog.testing import capture_logs
+
+    store = ProposalJobStore(table_name="", memory={})
+    launcher = _GateThreadLauncher(released=True)
+    builder = _FakeBuilder(error=error)
+    submit = ProposalBuilderSubmitSkill(
+        builder_factory=lambda: builder,  # type: ignore[return-value]
+        store=store,
+        thread_launcher=launcher,
+        input_validator=lambda _: None,
+        heartbeat_seconds=0,
+    )
+    with capture_logs() as logs:
+        submit.run(_proposal_input(), _ctx())
+        assert launcher.finished.wait(timeout=10)
+    return [entry for entry in logs if entry.get("event") == "proposal_builder_job_failed"]
+
+
+def test_background_failure_log_carries_summary_and_location() -> None:
+    """失敗ログに error_type だけでなく要約と発生箇所（file:line:func）が残る。
+
+    2026-09-16 本番: proposal_builder_job_failed に error_type=TypeError しか無く、原因特定に
+    ログ再読とローカル再現（Bedrock 課金）が要った。
+    """
+    entries = _run_failing_job(TypeError("Object of type EvidenceImage is not JSON serializable"))
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["error_type"] == "TypeError"
+    assert "EvidenceImage is not JSON serializable" in entry["error_summary"]
+    assert entry["error_at"].startswith("test_async_jobs.py:")
+    assert entry["error_at"].endswith(":run")
+
+
+def test_background_failure_summary_excludes_model_output_fragments() -> None:
+    """pydantic 形式の input_value（モデル出力本文）は失敗ログの要約に含めない。"""
+    entries = _run_failing_job(
+        ValueError(
+            "proposal_deck compose failed after 5 attempts: 1 validation error for ComposerOutput\n"
+            "  uncovered placeholders [100, 101] [type=value_error, "
+            "input_value='SECRET-MODEL-TEXT', input_type=str]"
+        )
+    )
+    summary = entries[0]["error_summary"]
+    assert "uncovered placeholders [100, 101]" in summary
+    assert "SECRET-MODEL-TEXT" not in summary
+    assert "[type=" not in summary
+    assert len(summary) <= 300

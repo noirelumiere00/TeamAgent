@@ -377,3 +377,73 @@ def test_final_attempt_autoskips_uncited_quantity_placeholders(tmp_path: Path) -
     events = [c.args[0] for c in logger.warning.call_args_list]
     assert "proposal_deck_provenance_autoskip" in events
     assert "proposal_deck_compose_failed" not in events
+
+
+def test_autoskip_keeps_feeder_evidence_images_without_json_roundtrip() -> None:
+    """evidence_images（フィーダ後付けの pydantic オブジェクト）を含む data でも自動スキップできる。
+
+    2026-09-16 本番: json.dumps 往復で TypeError（EvidenceImage is not JSON serializable）となり、
+    5 回目の直後にジョブ全体が失敗した。ローカル再現とテストは evidence_images が空で見逃していた。
+    """
+    from teamagent.skills.proposal_deck.contract import EvidenceImage
+    from teamagent.skills.proposal_deck.provenance import ProvenanceValidationError
+    from teamagent.skills.proposal_deck.skill import _autoskip_uncited_placeholders
+
+    image = EvidenceImage(
+        placeholder_id=4, rank=1, keyword="青汁", source_url="https://ex.com/a.jpg"
+    )
+    data = {
+        "placeholders": {"4": "市場規模は1,200億円", "5": "b"},
+        "citations_per_placeholder": {"4": ["https://ex.com/lp"]},
+        "skipped_placeholders": [],
+        "evidence_images": {4: [image]},
+    }
+    exc = ProvenanceValidationError(
+        ["placeholder {4}: quantitative claim '1,200億円' has no matching evidence citation"]
+    )
+    result = _autoskip_uncited_placeholders(data, exc)
+    assert result is not None
+    skipped_data, skipped_ids = result
+    assert skipped_ids == [4]
+    assert "4" not in skipped_data["placeholders"]
+    assert "4" not in skipped_data["citations_per_placeholder"]
+    assert skipped_data["evidence_images"][4][0] is not image  # 深複製（元 data は不変）
+    assert skipped_data["evidence_images"][4][0] == image
+    assert "4" in data["placeholders"]  # 呼び出し元の data は書き換えない
+
+
+def test_final_attempt_autoskip_works_when_feeder_placed_evidence_images(tmp_path: Path) -> None:
+    """本番同様に evidence_images が置かれた状態でも、最終試行の自動スキップで通る（2026-09-16 実走の再現）。"""
+    import json
+
+    from teamagent.skills.proposal_deck.contract import EvidenceImage
+
+    template = _dummy_template(tmp_path / "t.pptx")
+    payload = json.loads(_full_composer_json())
+    payload["placeholders"]["4"] = "30代の働く女性。市場規模は1,200億円に達し、拡大が続く"
+    payload.setdefault("citations_per_placeholder", {}).pop("4", None)
+    bedrock = MagicMock()
+    bedrock.converse.return_value = _resp(json.dumps(payload, ensure_ascii=False))
+    skill = ProposalDeckSkill(bedrock=bedrock)
+    deck_input = _input(template, tmp_path / "out", max_repair=0).model_copy(
+        update={
+            "enforce_provenance": True,
+            "urls": ["https://example.com/lp"],
+            "evidence_images": {
+                6: [
+                    EvidenceImage(
+                        placeholder_id=6, rank=1, keyword="青汁", source_url="https://ex.com/a.jpg"
+                    )
+                ]
+            },
+        }
+    )
+    ctx = SkillContext()
+    logger = MagicMock()
+    ctx.bind_logger = lambda _name: logger  # type: ignore[method-assign]
+    out = skill.run(deck_input, ctx=ctx)
+    assert bedrock.converse.call_count == 1
+    assert out.skipped_ids == [4]
+    assert out.filled_count == 94 and out.skipped_count == 1
+    events = [c.args[0] for c in logger.warning.call_args_list]
+    assert "proposal_deck_provenance_autoskip" in events
