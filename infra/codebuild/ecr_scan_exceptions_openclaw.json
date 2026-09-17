@@ -1,15 +1,5 @@
 {
   "schema_version": 1,
   "stale_exception_policy": "fail",
-  "exceptions": [
-    {
-      "cve": "CVE-2026-85091",
-      "severity": "HIGH",
-      "package": "zlib",
-      "version": "1.3.2-r4",
-      "owner": "s-komata@vectorinc.co.jp",
-      "reason": "2026-09-16 OpenClaw 便（#405 連携根治・#412 em ダッシュ読点化）が段 3 相当の ECR ゲート（--deny-all）で CVE-2026-85091（HIGH・Chainguard node:latest 同梱 zlib 1.3.2-r4）に止まる件。上流 Wolfi は修正版を 1.3.3-r0 と宣言したまま node:latest には未同梱（09-16 実測: node:latest は 1.3.2-r7・python:latest は 1.3.2.1_rc20260601-r0 だが secdb 宣言と不一致で脆弱判定）。mcp 便の core 例外（同 CVE・09-14 裁定・9/28 失効）と同じ扱いにする小俣さん裁定（2026-09-16「②に」）。到達性の注記: node は OS の libz.so.1 を動的リンクしており python と違って未使用とは言えない。露出は gzip 応答の展開など zlib を通る入力に限る。失効は core と同日で、上流の修正版が node:latest に載り次第バンプで一括撤去する。",
-      "expires_on": "2026-09-28"
-    }
-  ]
+  "exceptions": []
 }
