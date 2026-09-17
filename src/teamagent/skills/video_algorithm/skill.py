@@ -355,7 +355,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         model_id = getattr(self._gemini, "model_id", None)
         if isinstance(model_id, str) and model_id.strip():
             return model_id.strip()
-        return os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+        from teamagent.adapters.gemini_client import DEFAULT_MODEL_ID
+
+        return os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
 
     @staticmethod
     def _reserve_quota(ctx: SkillContext, count: int, *, allow_partial: bool) -> int:
