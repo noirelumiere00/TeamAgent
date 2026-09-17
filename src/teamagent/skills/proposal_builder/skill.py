@@ -1385,10 +1385,13 @@ class ProposalBuilderSubmitSkill(
                 error_at=_error_location(exc),
             )
             try:
+                # 利用者向けの理由も台帳に残す。status が返さないと OC 側のモデルが原因を
+                # 推測して誤説明する（2026-09-16 15:55 実測「gemini_json の構造の問題」）。
                 self._store.mark_failed(
                     job_id,
                     _PROPOSAL_JOB_ERROR_CODE,
                     expected_statuses=("running",),
+                    error_summary=_error_summary(exc),
                 )
             except Exception as write_exc:
                 log.warning(
@@ -1540,11 +1543,19 @@ class ProposalBuilderStatusSkill(
             return self._done_output(input.job_id, row)
         if status == "failed":
             error_code = row.get("error_code")
+            raw_summary = row.get("error_summary")
+            error_summary = raw_summary if isinstance(raw_summary, str) and raw_summary else None
+            message = (
+                f"提案書生成に失敗しました。理由: {error_summary}"
+                if error_summary
+                else "提案書生成に失敗しました。error_codeを確認してください。"
+            )
             return ProposalBuilderStatusOutput(
                 job_id=input.job_id,
                 status="failed",
                 error_code=error_code if isinstance(error_code, str) else "JOB_STATE_INVALID",
-                message="提案書生成に失敗しました。error_codeを確認してください。",
+                error_summary=error_summary,
+                message=message,
             )
         if status in ("queued", "running"):
             message = (
