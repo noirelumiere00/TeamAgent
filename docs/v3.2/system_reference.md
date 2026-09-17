@@ -93,9 +93,9 @@ Adapter 層   外部I/Oを隠蔽（全て差し替え可能＝テストはモッ
 | Secrets Manager | `teamagent/dev/*`（DBパス/Slackトークン/Google OAuth/Vertex SA） |
 | DynamoDB | `teamagent-tflock`（terraform lock） |
 
-### GCP（project ntv-ai）
-- **Vertex AI**: Gemini 2.5 Flash（動画分析=GCP課金 ⚠️ 請求先は会社アカウント化推奨）
-- **Drive / Sheets / Gmail API**（個人OAuth・drive.readonly 等）
+### GCP（2 プロジェクト）
+- **Vertex AI**（project `newstv-508906`・会社）: Gemini 2.5 Flash（動画分析=GCP課金）。2026-09-17 に個人課金の `ntv-ai` から移行（SA `geminiapi@newstv-508906`・Secrets Manager `teamagent/dev/vertex_sa`）
+- **Drive / Sheets / Gmail API**（project `ntv-ai`・個人OAuth・drive.readonly 等）: OAuth クライアントは `ntv-ai` に残る（課金なし）。`ntv-ai` を削除・請求解除すると Google 連携が止まるので触らない
 
 ### Slack
 - App `A0B51FGQ8JK`（TeamAgent Ver.2）/ **Socket Mode** / Workspace vectorinc

@@ -153,7 +153,7 @@ flowchart TB
         tf["S3 tfstate + DynamoDB lock"]
         worker --> sm & s3b & br
     end
-    subgraph GCP["GCP (project ntv-ai)"]
+    subgraph GCP["GCP (Vertex: newstv-508906 / OAuth: ntv-ai)"]
         vx["Vertex AI<br/>Gemini 2.5 Flash"]
         gapi["Drive / Sheets / Gmail API<br/>(個人OAuth)"]
     end
