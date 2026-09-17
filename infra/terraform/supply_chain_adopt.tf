@@ -91,7 +91,9 @@ locals {
     # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
     # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
     # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
-    "2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005" = {
+    # 2026-09-17 第 2 弾の publish 世代。core の python 版検証式を "3.14.7+"（git スナップショット版の
+    # 表記）に耐える形へ変えた（runtime 契約の dockerfile_uses 1 値）ことによる再レンダリング。
+    "f60c1ed91ef0520b0491671561c3cdb1731cd468b6f6fb1e1cf1d3bcad3a929a" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -142,7 +144,9 @@ locals {
     # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
     # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
     # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
-    "99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b" = {
+    # 2026-09-17 第 2 弾の publish 世代。core の python 版検証式を "3.14.7+"（git スナップショット版の
+    # 表記）に耐える形へ変えた（runtime 契約の dockerfile_uses 1 値）ことによる再レンダリング。
+    "71c4999310a748c179928b23e923feef6dff11a690931021608abc88814e648c" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -193,7 +197,9 @@ locals {
     # 2026-09-16 世代へバンプ（runtime 契約 3 値・release 契約 2 値）し、OpenClaw バンドル契約の
     # /usr/bin/node probe を node:latest 2026-09-16 世代の実測値へ更新したことによる再レンダリング。
     # 値の出所は live 本体（S3・sha 一致確認済み）への base64 / sha 置換によるオフライン導出。
-    "c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4" = {
+    # 2026-09-17 第 2 弾の publish 世代。core の python 版検証式を "3.14.7+"（git スナップショット版の
+    # 表記）に耐える形へ変えた（runtime 契約の dockerfile_uses 1 値）ことによる再レンダリング。
+    "8f9ed69d7b625f2b6de1b8cb2e1e3ec2b01f413f0bb1fa0298d0ca6af5e9b8be" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -392,18 +398,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/2fd635a76c9ac3232480e4a13ea376a43918eb5d1c38fc76a06dea99234c8005.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["f60c1ed91ef0520b0491671561c3cdb1731cd468b6f6fb1e1cf1d3bcad3a929a"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/f60c1ed91ef0520b0491671561c3cdb1731cd468b6f6fb1e1cf1d3bcad3a929a.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/99a2b595066d0d3fd7bf24eb0cee8fba8a3d215bd3ecda08c180bf32ecbbfb4b.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["71c4999310a748c179928b23e923feef6dff11a690931021608abc88814e648c"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/71c4999310a748c179928b23e923feef6dff11a690931021608abc88814e648c.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/c45ee1030c30bd7450b34450e6d6fe7671a569987cd5497ccc4f35d5176870d4.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["8f9ed69d7b625f2b6de1b8cb2e1e3ec2b01f413f0bb1fa0298d0ca6af5e9b8be"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/8f9ed69d7b625f2b6de1b8cb2e1e3ec2b01f413f0bb1fa0298d0ca6af5e9b8be.yml"
 }
 
 import {
