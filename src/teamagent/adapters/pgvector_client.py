@@ -1538,3 +1538,74 @@ class PgVectorClient:
             doc_count=len(docs),
         )
         return docs
+
+    def list_documents_with_text(
+        self,
+        conn: psycopg.Connection[dict[str, Any]],
+        *,
+        doc_types: list[str],
+        since: str | None = None,
+        limit: int = 100,
+        request_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """事例抽出（scripts/extract_cases.py）用に、種別で絞った documents を全文つきで列挙する。
+
+        既存メソッドは抜粋 160 字（graph / client）か chunk 単位（search）しか返さず、
+        「1 文書 → n 事例」の抽出には全文が要るため、chunks を chunk_idx 順に結合して返す。
+        テンプレ chunk（``metadata.boilerplate``）は結合から外す（表紙・会社紹介を事例に
+        読ませない）。dedup 非正本（suppressed）・stale・テンプレ文書（cls_is_template）は除外。
+
+        - ``doc_types``: ``metadata.cls_doc_type`` の一致集合（例 提案書 / 報告書 / 施策実績）。
+          空なら [] を即返す（全件抽出＝費用事故を防ぐ）。
+        - ``since``: ``YYYY-MM-DD``。modified_at がこの日以降の文書だけ。
+        - 値はすべて placeholder bind。列・テーブルは固定リテラル。
+        RLS は呼び出し側の ``connection(...)`` の設定に従う（管理 DSN なら全件）。
+        """
+        wanted = list(dict.fromkeys(t.strip() for t in doc_types if t and t.strip()))
+        if not wanted:
+            return []
+        params: dict[str, Any] = {"doc_types": wanted, "limit": max(1, int(limit))}
+        since_clause = ""
+        if since and since.strip():
+            since_clause = "AND d.modified_at >= %(since)s::date"
+            params["since"] = since.strip()
+        sql = f"""
+            SELECT
+                d.id::text AS document_id,
+                d.external_id,
+                d.source_uri,
+                d.source_type::text AS source_type,
+                d.title,
+                to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS modified_at,
+                d.metadata->>'cls_doc_type' AS cls_doc_type,
+                d.metadata->>'cls_project' AS cls_project,
+                d.metadata->>'cls_industry' AS cls_industry,
+                d.metadata->>'client_name' AS client_name,
+                d.metadata->>'case_external_use' AS case_external_use,
+                COALESCE(string_agg(c.content, E'\\n' ORDER BY c.chunk_idx ASC), '') AS full_text
+            FROM documents d
+            LEFT JOIN chunks c
+              ON c.document_id = d.id
+             AND COALESCE((c.metadata->>'boilerplate')::bool, false) = false
+            WHERE d.metadata->>'cls_doc_type' = ANY(%(doc_types)s)
+              AND d.metadata->>'suppressed' IS DISTINCT FROM 'true'
+              AND d.metadata->>'stale' IS DISTINCT FROM 'true'
+              AND d.metadata->>'cls_is_template' IS DISTINCT FROM 'true'
+              {since_clause}
+            GROUP BY d.id
+            ORDER BY d.modified_at DESC NULLS LAST, d.id ASC
+            LIMIT %(limit)s
+        """  # nosec B608 - 節は固定リテラル・値はすべてバインド
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        docs = [dict(r) for r in rows]
+        logger.info(
+            "pgvector_list_documents_with_text",
+            request_id=request_id,
+            doc_types=wanted,
+            since=params.get("since"),
+            limit=params["limit"],
+            doc_count=len(docs),
+        )
+        return docs

@@ -69,6 +69,11 @@ EXEMPT_PROMPTS = {
     "search/v2e/system.md": "本番既定は v2d（v2e は env 切替時のみ・別便で扱う）",
     # 出力が enum / ID / 真偽値の JSON だけで、自由記述が人の目に触れない分類器。
     "query_planner/v1/system.md": "内部 JSON（検索語の再構成・人に見えない）",
+    "case_extract/v1/system.md": (
+        "内部 JSON（事例レコード抽出・scripts/extract_cases.py が読む）。自由記述 "
+        "result_masked/winpattern は proposal_deck の研究素材に入るだけで、人に届く本文は "
+        "proposal_deck の system 契約で生成される"
+    ),
     "search_surface_check/v1/classify.md": "内部 JSON 分類器（enum 検証のみ読む）",
     "tiktok_comment_mining/v1/classify.md": "内部 JSON 分類器",
     "x_research/v1/needs.md": "内部 JSON 分類器（値は enum とスコア）",
