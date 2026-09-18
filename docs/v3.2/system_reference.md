@@ -1,10 +1,13 @@
 # TeamAgent システム全体リファレンス（v3.2）
 
+> **鮮度注記（2026-09-18）**: §4 実行基盤・§7 運用の EC2 worker / `slack_bot.py`（Socket Mode）に関する記述は 2026-08-03 の EC2 停止・OpenClaw 移行より前の構成です。現行の実行系（OpenClaw 外殻 → TeamAgent MCP Gateway on ECS Fargate、connect-web、media worker、署名リリース鎖）は [README](../../README.md) と [architecture/hermes_migration_design.md](../architecture/hermes_migration_design.md) §2 を正としてください。公開ツールは 38 本（2026-09-18 照合）。
+
+
 > ベクトル社・営業16名向け **Slack マルチスキル AI エージェント**の決定版リファレンス。
 > Skill / 技術スタック / アーキテクチャ / インフラ / 運用 / 品質 / セキュリティ / コスト / 設計判断を一望する。
 > 図解・データフローは [`architecture_and_flows.md`](architecture_and_flows.md) を併読。
 
-最終更新: 2026-06-05 ／ Python 3.11+ ／ main: 全機能マージ済 ／ テスト 831 passed
+最終更新: 2026-06-05（2026-09-18 に鮮度注記を追加）／ Python 3.14（本番コンテナ・Chainguard python）／ main: 全機能マージ済 ／ テスト 831 passed
 
 ---
 
@@ -29,13 +32,13 @@
 ## 2. 技術スタック / フレームワーク
 
 ### 言語 / 中核
-- **Python 3.11+**、**Pydantic v2**（全I/Oスキーマ）、pydantic-settings、**structlog**（構造化ログ）、tenacity（リトライ）、rich、pyyaml
+- **Python 3.14**（本番コンテナ。2026-06 時点の記述は 3.11+）、**Pydantic v2**（全I/Oスキーマ）、pydantic-settings、**structlog**（構造化ログ）、tenacity（リトライ）、rich、pyyaml
 - **Node.js**（TikTokスクレイパ `tools/tiktok_scraper`：Puppeteer/Playwright）、**ffmpeg**（動画圧縮/フレーム抽出）
 
 ### LLM / AI
 - **claude-agent-sdk** / **anthropic**（Claude）
 - **boto3 → AWS Bedrock**: Claude Sonnet 4.6 / Haiku 4.5（テキスト）・**Cohere Rerank v3.5**
-- **google-genai → GCP Vertex AI**: **Gemini 2.5 Flash**（動画マルチモーダル）
+- **google-genai → GCP Vertex AI**: **Gemini 2.5 Flash**（動画マルチモーダル）。Vertex では 2026-10-16 に廃止のため、既定は `gemini-3.5-flash-lite`（location `global`）へ移行済み（#431・2026-09-18）
 - **Embedding**: LocalE5Embedder（**multilingual-e5-large**, 1024次元・sentence-transformers）
 
 ### データ / RAG

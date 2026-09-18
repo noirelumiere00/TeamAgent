@@ -12,7 +12,7 @@
 
 | Skill | 役割 | 主な技術 |
 |---|---|---|
-| **search** | 営業ナレッジ横断検索（Slack＋Drive）。RRF ハイブリッド＋Cohere Rerank＋Contextual Retrieval | pgvector / BM25(pg_bigm) / Bedrock |
+| **search** | 営業ナレッジ横断検索（Slack＋Drive＋Sheets）。dense（e5）＋Cohere Rerank＋Contextual Retrieval。※RRF ハイブリッド／BM25(pg_bigm) は未実装（system_reference §検索 参照・2026-09-18 注記） | pgvector / Bedrock |
 | **clientkarte** | クライアント別の時系列カルテ生成 | pgvector timeline |
 | **proposal_draft** | 提案書ドラフト自動生成（検索基盤を再利用） | Bedrock Claude |
 | **proposal_review** | 提案書のレビュー・改善提案 | Bedrock Claude |
