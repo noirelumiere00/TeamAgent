@@ -30,7 +30,9 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # media-apk.lock / Dockerfile の ARG / core_media 契約 / 世代 inputs の 4 つは更新した一方、
 # 本定数だけ取り残されて dev tip が赤のままになっていた（3 者一致の不変条件が片肺）。
 # 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
-APK_LOCK_SHA256 = "4978f9bba8526955f4a6860601dad3b96fa1cfab13147f62b011cd213aeed9c4"
+# 2026-09-18: 上流で ca-certificates 20260611-r0 が索引から消え 20260909-r0 へ（r27 段 3 で停止）。
+# 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（bundle は据え置き・240 行不変）。
+APK_LOCK_SHA256 = "089458818b215e9a1fb8cfab3b110a6041737f05f31871a35221963c817f1f0f"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
