@@ -191,11 +191,47 @@ def _parse_grounding(
     return (tuple(sources), tuple(supports), queries)
 
 
-# Gemini 2.5 Flash 料金（2026/5 時点、USD per 1M tokens）
-# https://ai.google.dev/pricing
+# 既定モデルと Vertex ロケーション（2026-09-17 更新）。
+# Vertex の gemini-2.5-pro / 2.5-flash / 2.5-flash-lite は 2026-10-16 に廃止
+# （Vertex AI release notes 2026-04-02）。後継は gemini-3.5-flash-lite
+# （入出力 0.30 / 2.50 USD per 1M tokens ＝ 2.5 Flash と同額）。
+# Gemini 3 系は Vertex では location="global" でのみ応答する
+# （us-central1 では一覧に出るが 404・2026-09-17 実測）。逆に 2.5 系は global では
+# 応答しないので、モデルと location は resolve_location で対にして決める。
+DEFAULT_MODEL_ID = "gemini-3.5-flash-lite"
+DEFAULT_LOCATION = "global"
+_GLOBAL_ONLY_MODEL_PREFIXES = ("gemini-3",)
+
+
+def resolve_location(model_id: str, location: str | None) -> str:
+    """モデルに合う Vertex location を返す。
+
+    3 系（global 専用）に regional が指定されていたら global に読み替えて警告ログを出す。
+    TD env の GEMINI_VERTEX_LOCATION が regional のまま 3 系へ切り替えても 404 で
+    止まらないための保険。
+    それ以外は指定をそのまま返す（未指定は DEFAULT_LOCATION）。
+    """
+    loc = (location or "").strip() or DEFAULT_LOCATION
+    if model_id.startswith(_GLOBAL_ONLY_MODEL_PREFIXES) and loc != "global":
+        logger.warning(
+            "gemini_location_overridden_to_global", model_id=model_id, requested_location=loc
+        )
+        return "global"
+    return loc
+
+
+# 料金（2026-09-16 更新の公式 pricing・USD per 1M tokens・入力/出力）
+# https://ai.google.dev/gemini-api/docs/pricing  ※3.8 / 3.7 / 3.6 Flash は 2026-12-31 までの価格
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
-    "gemini-2.5-flash": (0.15, 0.60),
-    "gemini-2.5-pro": (1.25, 5.00),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.5-flash": (1.50, 9.00),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-pro": (1.25, 10.00),
 }
 
 
@@ -230,18 +266,18 @@ class GeminiClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model_id: str = "gemini-2.5-flash",
+        model_id: str = DEFAULT_MODEL_ID,
         *,
         use_vertex: bool = False,
         project: str | None = None,
-        location: str = "us-central1",
+        location: str = DEFAULT_LOCATION,
         client: Any | None = None,
     ) -> None:
         self.api_key = api_key
         self.model_id = model_id
         self.use_vertex = use_vertex
         self.project = project
-        self.location = location
+        self.location = resolve_location(model_id, location)
         # 遅延 import：google-genai は heavy & 一部環境で SSL 問題が出るため
         # client を渡すと遅延生成をスキップする（テストのフェイク注入口）。
         self._client: Any | None = client
@@ -249,7 +285,7 @@ class GeminiClient:
     @classmethod
     def from_env(cls) -> GeminiClient:
         """環境変数から認証経路とモデルを読む。Vertex を優先する。"""
-        model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
+        model_id = os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
 
         use_vertex = os.environ.get("GEMINI_USE_VERTEX", "false").lower() in ("1", "true", "yes")
         if use_vertex:
@@ -261,7 +297,7 @@ class GeminiClient:
                     "GEMINI_USE_VERTEX=true ですが GEMINI_VERTEX_PROJECT (GCP プロジェクト ID) "
                     "が未設定です。Vertex AI を有効化した GCP プロジェクト ID を設定してください"
                 )
-            location = os.environ.get("GEMINI_VERTEX_LOCATION", "us-central1")
+            location = os.environ.get("GEMINI_VERTEX_LOCATION", DEFAULT_LOCATION)
             return cls(model_id=model_id, use_vertex=True, project=project, location=location)
 
         api_key = os.environ.get("GEMINI_API_KEY")

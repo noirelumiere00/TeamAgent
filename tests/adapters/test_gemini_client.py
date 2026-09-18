@@ -7,9 +7,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from teamagent.adapters.gemini_client import (
+    DEFAULT_LOCATION,
+    DEFAULT_MODEL_ID,
     GeminiClient,
     _estimate_cost,
     _is_retryable_vertex,
+    resolve_location,
 )
 
 
@@ -44,9 +47,15 @@ def test_is_retryable_vertex(exc: BaseException, expected: bool) -> None:
 
 
 def test_estimate_cost_flash() -> None:
-    # gemini-2.5-flash: in $0.15 / out $0.60 per 1M tokens
+    # gemini-2.5-flash: in $0.30 / out $2.50 per 1M tokens（2026-09 の公式 pricing）
     cost = _estimate_cost("gemini-2.5-flash", 1_000_000, 1_000_000)
-    assert cost == pytest.approx(0.75)
+    assert cost == pytest.approx(2.80)
+
+
+def test_estimate_cost_default_model_is_priced() -> None:
+    """既定モデル（2.5 Flash 廃止後の後継）が価格表に載っていること。載っていないと費用が 0 で記録される。"""
+    cost = _estimate_cost(DEFAULT_MODEL_ID, 1_000_000, 1_000_000)
+    assert cost == pytest.approx(2.80)
 
 
 def test_estimate_cost_unknown_model_is_zero() -> None:
@@ -83,11 +92,38 @@ def test_from_env_vertex_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GEMINI_USE_VERTEX", "true")
     monkeypatch.setenv("GEMINI_VERTEX_PROJECT", "teamagent-gcp")
     monkeypatch.setenv("GEMINI_VERTEX_LOCATION", "asia-northeast1")
+    monkeypatch.setenv("GEMINI_MODEL_ID", "gemini-2.5-flash")  # 2.5 系は regional をそのまま使う
     client = GeminiClient.from_env()
     assert client.use_vertex is True
     assert client.project == "teamagent-gcp"
     assert client.location == "asia-northeast1"
     assert client.api_key is None
+
+
+def test_from_env_defaults_to_3_5_flash_lite_on_global(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GEMINI_MODEL_ID / GEMINI_VERTEX_LOCATION 未指定なら 3.5 Flash-Lite ＋ global（2.5 Flash 廃止対応）。"""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_MODEL_ID", raising=False)
+    monkeypatch.delenv("GEMINI_VERTEX_LOCATION", raising=False)
+    monkeypatch.setenv("GEMINI_USE_VERTEX", "true")
+    monkeypatch.setenv("GEMINI_VERTEX_PROJECT", "teamagent-gcp")
+    client = GeminiClient.from_env()
+    assert client.model_id == DEFAULT_MODEL_ID == "gemini-3.5-flash-lite"
+    assert client.location == DEFAULT_LOCATION == "global"
+
+
+def test_resolve_location_forces_global_for_gemini_3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """3 系に regional（TD env の us-central1 が残った状態）を渡しても global に読み替える。2.5 系は触らない。"""
+    assert resolve_location("gemini-3.5-flash-lite", "us-central1") == "global"
+    assert resolve_location("gemini-3.8-flash", "asia-northeast1") == "global"
+    assert resolve_location("gemini-3.5-flash-lite", "global") == "global"
+    assert resolve_location("gemini-2.5-flash", "us-central1") == "us-central1"
+    assert resolve_location("gemini-2.5-flash", "") == DEFAULT_LOCATION
+    monkeypatch.setenv("GEMINI_USE_VERTEX", "true")
+    monkeypatch.setenv("GEMINI_VERTEX_PROJECT", "teamagent-gcp")
+    monkeypatch.setenv("GEMINI_VERTEX_LOCATION", "us-central1")
+    monkeypatch.setenv("GEMINI_MODEL_ID", "gemini-3.5-flash-lite")
+    assert GeminiClient.from_env().location == "global"
 
 
 def test_from_env_vertex_requires_project(monkeypatch: pytest.MonkeyPatch) -> None:
