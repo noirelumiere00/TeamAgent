@@ -36,7 +36,7 @@ v3.2 はこの訂正を **取り込んだ後の正しい設計**を提示する�
 | LLM | AWS Bedrock 経由 Claude Sonnet 4.6（メイン） / Claude Haiku 4.5（軽量タスク） |
 | データ層 | Amazon RDS for PostgreSQL 16.14 + pgvector 0.8.2（東京リージョン稼働中） |
 | Embedding | `multilingual-e5-large`（1024 次元、ローカル sentence-transformers） |
-| Skill 実装言語 | Python 3.12（pydantic v2 + boto3 + psycopg） |
+| Skill 実装言語 | Python 3.14（pydantic v2 + boto3 + psycopg） |
 | Skill オーケストレータ | **OpenClaw v2026.5.20（Node.js 24 / TypeScript）** — B 案採用時 |
 | ホスティング | EC2 t3.medium（4 GB, ap-northeast-1） + IAM Role 経由 Bedrock |
 | Secrets | AWS Secrets Manager（Slack bot/app token、DB 認証情報） |
@@ -76,7 +76,7 @@ v3.2 ドラフトは **B 案（HTTP 橋渡し）** を前提に書き下ろす�
 └───────────────┘                │  │  - openclaw.json     │   ┌──────────────────────┐    │
                                  │  │  - SKILL.md (search) │   │  FastAPI             │    │
                                  │  │  - Slack connector   │   │  teamagent-skills    │    │
-                                 │  └──────────┬───────────┘   │  (Python 3.12)       │    │
+                                 │  └──────────┬───────────┘   │  (Python 3.14)       │    │
                                  │             │               │  port :8000          │    │
                                  │             │ IAM Role      │  POST /skills/       │    │
                                  │             │ (IMDSv2)      │       {name}/invoke  │    │
@@ -110,9 +110,9 @@ EC2 1 台に **OpenClaw Gateway（Node）** と **FastAPI Skill サーバ（Pyth
 |---|---|---|---|
 | Channel | Slack Workspace | ユーザーからの mention / DM 受信、応答表示 | — |
 | Gateway / Orchestrator | OpenClaw Gateway | Slack Socket Mode の張り付け、LLM の Tool 呼び出し制御、Bedrock provider 経由の Claude 呼び出し、SKILL.md 解釈 | TypeScript / Node.js |
-| Skill API | FastAPI `teamagent-skills` | 既存 Python Skill（`src/teamagent/skills/`）を HTTP 公開、`POST /skills/{name}/invoke` を提供 | Python 3.12 |
-| Business Logic | `teamagent.skills.search.SearchSkill` ほか | クエリ理解、embedding、pgvector 検索、Bedrock 要約、引用組み立て | Python 3.12 |
-| Adapter | `teamagent.adapters.*` | Bedrock / pgvector / Slack / Embedder の薄いラッパー | Python 3.12 |
+| Skill API | FastAPI `teamagent-skills` | 既存 Python Skill（`src/teamagent/skills/`）を HTTP 公開、`POST /skills/{name}/invoke` を提供 | Python 3.14 |
+| Business Logic | `teamagent.skills.search.SearchSkill` ほか | クエリ理解、embedding、pgvector 検索、Bedrock 要約、引用組み立て | Python 3.14 |
+| Adapter | `teamagent.adapters.*` | Bedrock / pgvector / Slack / Embedder の薄いラッパー | Python 3.14 |
 | Data | RDS pg16 + pgvector | チャンク本文 + JSONB メタデータ + HNSW index | — |
 | LLM | Amazon Bedrock | Converse API（Claude Sonnet 4.6 / Haiku 4.5、prompt caching 対応） | — |
 | Secret | AWS Secrets Manager | Slack bot/app token、DB 認証情報のローテーション管理 | — |

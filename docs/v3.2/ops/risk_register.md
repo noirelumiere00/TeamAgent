@@ -7,7 +7,7 @@
 
 | ID | リスク | status | mitigation（実装/運用） | owner |
 |---|---|---|---|---|
-| **R16** | 依存 CVE（OpenClaw/MCP SDK/OS）の見落とし | 緩和中 | OpenClaw base を digest pin（2026.6.5）・MCP SDK CVE-2026-52869/52870 対応で 1.27.2 固定・GHSA 手動確認（2026-06-09 実施）・bandit/gitleaks CI 常設。**trivy fs（uv.lock 依存 CVE）＋ config（IaC misconfig）を CI 必須化（2026-07-10・CRITICAL/HIGH で fail・例外は `.trivyignore` に理由/期限付き）**。残: image スキャン（ECR scan_on_push の gate 接続 or CodeBuild post_build）は別チケット | 小俣 / DevOps |
+| **R16** | 依存 CVE（OpenClaw/MCP SDK/OS）の見落とし | 緩和中 | OpenClaw base を digest pin（2026.7.1（2026-09-18 現在・TD:48。台帳作成時は 2026.6.5））・MCP SDK CVE-2026-52869/52870 対応で 1.27.2 固定・GHSA 手動確認（2026-06-09 実施）・bandit/gitleaks CI 常設。**trivy fs（uv.lock 依存 CVE）＋ config（IaC misconfig）を CI 必須化（2026-07-10・CRITICAL/HIGH で fail・例外は `.trivyignore` に理由/期限付き）**。残: image スキャン（ECR scan_on_push の gate 接続 or CodeBuild post_build）は別チケット | 小俣 / DevOps |
 | **R17** | ClawHub 等 外部プラグイン供給網汚染（ClawHavoc） | 回避済 | 外部 Skill マーケットを**使わない方針**＝公式プラグインのみ digest pin。`tools.exec:deny`/`fs.workspaceOnly`/toolFilter で攻撃面縮小 | OpenClaw maintainer |
 | **R18** | 露出トークン（Slack bot/app・Google・MCP bearer・caller claim HMAC 等）の失効/漏洩 | 緩和中 | `docs/v3.2/ops/secrets_rotation_policy.md` に10 secretを棚卸し。OpenClaw/MCPはfresh signed rotation authorization＋one-use full saved planの正準rotation flow完成まで本番rotation停止。**実rotationはパイロット前ゲート（人手・未実行）** | Slack admin / 小俣 |
 | **R19** | LLM/インフラ単一障害（Bedrock/RDS/Slack 障害） | 緩和中 | OpenClaw rollback は正準 `docs/openclaw/deploy_runbook.md` の **durable previous task revision + ECS deployment circuit breaker + fresh signed rollback authorization + one-use full saved plan** のみ。直接の desired-count 変更を rollback として使わない。MCP rollback=mcp:5。**RDS スナップ復旧/LLM 主副切替の DR 訓練は Sprint14（未実施）**・副経路 runbook 化（監視#26）も未 | 小俣 / DevOps |
