@@ -201,12 +201,47 @@ def test_ddb_conditional_state_transitions_preserve_terminal_state() -> None:
 
     store.create_job("pb_failed", {"request_id": "failed"})
     assert store.mark_running("pb_failed") is True
-    assert store.mark_failed("pb_failed", "PROPOSAL_BUILD_FAILED") is True
+    assert (
+        store.mark_failed(
+            "pb_failed",
+            "PROPOSAL_BUILD_FAILED",
+            error_summary="proposal_deck compose failed after 5 attempts: uncovered placeholders",
+        )
+        is True
+    )
     failed = store.get_job("pb_failed")
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["error_code"] == "PROPOSAL_BUILD_FAILED"
+    assert failed["error_summary"].startswith("proposal_deck compose failed")
     assert "result_json" not in failed
+
+    # 理由なしの failed は error_summary を持たない（古い理由を残さない）
+    store.create_job("pb_failed_plain", {"request_id": "failed-plain"})
+    assert store.mark_running("pb_failed_plain") is True
+    assert store.mark_failed("pb_failed_plain", "MCP_RESTARTED") is True
+    plain = store.get_job("pb_failed_plain")
+    assert plain is not None
+    assert "error_summary" not in plain
+
+
+def test_memory_mark_failed_keeps_error_summary_only_when_given() -> None:
+    store = ProposalJobStore(table_name="", memory={})
+    store.create_job("pb_mem", {"request_id": "mem"})
+    assert store.mark_running("pb_mem") is True
+    assert (
+        store.mark_failed("pb_mem", "PROPOSAL_BUILD_FAILED", error_summary="TypeError: x") is True
+    )
+    row = store.get_job("pb_mem")
+    assert row is not None
+    assert row["error_summary"] == "TypeError: x"
+
+    store.create_job("pb_mem2", {"request_id": "mem2"})
+    assert store.mark_running("pb_mem2") is True
+    assert store.mark_failed("pb_mem2", "MCP_RESTARTED", error_summary="") is True
+    row2 = store.get_job("pb_mem2")
+    assert row2 is not None
+    assert "error_summary" not in row2
 
 
 def test_ddb_stale_failure_compares_the_observed_updated_at() -> None:

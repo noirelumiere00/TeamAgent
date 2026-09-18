@@ -486,6 +486,7 @@ class ProposalBuilderStatusOutput(_StrictModel):
     delivery_target: Literal["thread", "dm", "none"] = "none"
     total_cost_usd: float = Field(default=0.0, ge=0.0)
     error_code: str | None = None
+    error_summary: str | None = None
     message: str = ""
 
 
