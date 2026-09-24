@@ -237,6 +237,34 @@ def test_skill_run_full_pipeline(tmp_path: object) -> None:
     assert "ユニクロ" in html and 'class="nle"' in html
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, 3),
+        ("2", 2),
+        ("abc", 3),
+        ("", 3),
+        ("0", 1),
+        ("99", 8),
+    ],
+)
+def test_max_workers_from_env(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: int
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("VIDEO_ALGORITHM_MAX_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("VIDEO_ALGORITHM_MAX_WORKERS", env_value)
+
+    assert VideoAlgorithmSkill()._max_workers == expected
+
+
+def test_explicit_max_workers_takes_priority_over_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VIDEO_ALGORITHM_MAX_WORKERS", "2")
+
+    assert VideoAlgorithmSkill(max_workers=6)._max_workers == 6
+
+
 def test_default_report_dir_uses_writable_temp_volume(
     tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
