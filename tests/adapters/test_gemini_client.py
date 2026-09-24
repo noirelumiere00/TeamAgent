@@ -30,6 +30,48 @@ class _CodedError(Exception):
         self.code = code
 
 
+_MISSING = object()
+
+
+def _fake_client(response: Any) -> GeminiClient:
+    fake = MagicMock()
+    fake.models.generate_content.return_value = response
+    return GeminiClient(api_key="test-key", client=fake)
+
+
+def _video_response(thoughts: int | None | object = _MISSING) -> SimpleNamespace:
+    usage_fields: dict[str, object] = {
+        "prompt_token_count": 400,
+        "candidates_token_count": 297,
+    }
+    if thoughts is not _MISSING:
+        usage_fields["thoughts_token_count"] = thoughts
+    return SimpleNamespace(
+        text="analysis",
+        usage_metadata=SimpleNamespace(**usage_fields),
+    )
+
+
+def _grounded_response(thoughts: int | None | object = _MISSING) -> dict[str, Any]:
+    usage: dict[str, object] = {
+        "promptTokenCount": 400,
+        "candidatesTokenCount": 297,
+    }
+    if thoughts is not _MISSING:
+        usage["thoughtsTokenCount"] = thoughts
+    return {
+        "text": "grounded analysis",
+        "candidates": [
+            {
+                "groundingMetadata": {
+                    "groundingChunks": [{"web": {"title": "source", "uri": "https://example.com"}}]
+                }
+            }
+        ],
+        "usageMetadata": usage,
+    }
+
+
 class _StatusCodedError(Exception):
     """status_code 属性つきの疑似 Vertex エラー。"""
 
@@ -131,6 +173,50 @@ def test_estimate_cost_default_model_is_priced() -> None:
 
 def test_estimate_cost_unknown_model_is_zero() -> None:
     assert _estimate_cost("unknown-model", 1000, 1000) == 0.0
+
+
+def test_video_cost_includes_thinking_tokens() -> None:
+    pytest.importorskip("google.genai")
+    result = _fake_client(_video_response(thoughts=1000))._generate_video(
+        [], "req-video", system=None
+    )
+
+    assert result.output_tokens == 297
+    assert result.thoughts_tokens == 1000
+    assert result.cost_usd == pytest.approx(0.012273)
+
+
+@pytest.mark.parametrize("thoughts", [_MISSING, None], ids=["missing", "none"])
+def test_video_cost_treats_missing_thinking_tokens_as_zero(thoughts: object) -> None:
+    pytest.importorskip("google.genai")
+    result = _fake_client(_video_response(thoughts))._generate_video([], "req-video", system=None)
+
+    assert result.output_tokens == 297
+    assert result.thoughts_tokens == 0
+    assert result.cost_usd == pytest.approx(0.003273)
+
+
+def test_grounded_cost_includes_thinking_tokens_and_search_surcharge() -> None:
+    pytest.importorskip("google.genai")
+    result = _fake_client(_grounded_response(thoughts=1000)).generate_with_google_search(
+        "prompt", "req-grounded"
+    )
+
+    assert result.output_tokens == 297
+    assert result.thoughts_tokens == 1000
+    assert result.cost_usd == pytest.approx(0.047273)
+
+
+@pytest.mark.parametrize("thoughts", [_MISSING, None], ids=["missing", "none"])
+def test_grounded_cost_treats_missing_thinking_tokens_as_zero(thoughts: object) -> None:
+    pytest.importorskip("google.genai")
+    result = _fake_client(_grounded_response(thoughts)).generate_with_google_search(
+        "prompt", "req-grounded"
+    )
+
+    assert result.output_tokens == 297
+    assert result.thoughts_tokens == 0
+    assert result.cost_usd == pytest.approx(0.038273)
 
 
 def test_from_env_raises_without_any_auth(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -97,6 +97,7 @@ class GeminiResponse:
     cost_usd: float
     model_id: str
     latency_ms: int
+    thoughts_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class GeminiGroundedResponse:
     cost_usd: float
     model_id: str
     latency_ms: int
+    thoughts_tokens: int = 0
 
 
 def _pick(obj: Any, *names: str) -> Any:
@@ -497,9 +499,10 @@ class GeminiClient:
         usage = _pick(response, "usage_metadata", "usageMetadata")
         input_tokens = int(_pick(usage, "prompt_token_count", "promptTokenCount") or 0)
         output_tokens = int(_pick(usage, "candidates_token_count", "candidatesTokenCount") or 0)
+        thoughts_tokens = int(_pick(usage, "thoughts_token_count", "thoughtsTokenCount") or 0)
         grounded = any(s.uri for s in sources)
         cost_usd = round(
-            _estimate_cost(self.model_id, input_tokens, output_tokens)
+            _estimate_cost(self.model_id, input_tokens, output_tokens + thoughts_tokens)
             + (_GROUNDING_REQUEST_USD if grounded else 0.0),
             6,
         )
@@ -514,6 +517,7 @@ class GeminiClient:
             query_count=len(queries),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            thoughts_tokens=thoughts_tokens,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
             text_len=len(text),
@@ -529,6 +533,7 @@ class GeminiClient:
             cost_usd=cost_usd,
             model_id=self.model_id,
             latency_ms=latency_ms,
+            thoughts_tokens=thoughts_tokens,
         )
 
     def _generate_video(
@@ -592,7 +597,8 @@ class GeminiClient:
         usage = getattr(response, "usage_metadata", None)
         input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
         output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens)
+        thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens + thoughts_tokens)
 
         logger.info(
             "gemini_analyze_video",
@@ -600,6 +606,7 @@ class GeminiClient:
             model_id=self.model_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            thoughts_tokens=thoughts_tokens,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
             text_len=len(text),
@@ -611,6 +618,7 @@ class GeminiClient:
             cost_usd=cost_usd,
             model_id=self.model_id,
             latency_ms=latency_ms,
+            thoughts_tokens=thoughts_tokens,
         )
 
     def health_check(self) -> bool:
