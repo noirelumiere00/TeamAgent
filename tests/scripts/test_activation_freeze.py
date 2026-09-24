@@ -235,7 +235,9 @@ def test_unlock_matches_the_committed_declaration() -> None:
         assert "tr -d +" in unlock["reason"]
         assert "ca-certificates 20260611-r0" in unlock["reason"]
         assert "20260909-r0" in unlock["reason"]
-        assert "human gate 2026-09-18" in unlock["gate"]
+        assert "libexpat 2.8.4-r0" in unlock["reason"]
+        assert "2.8.5-r0" in unlock["reason"]
+        assert "human gate 2026-09-24" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

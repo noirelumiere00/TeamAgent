@@ -32,7 +32,9 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 実測: media-apk.lock の sha256 = Dockerfile の ARG MEDIA_APK_LOCK_SHA256 = 下記。
 # 2026-09-18: 上流で ca-certificates 20260611-r0 が索引から消え 20260909-r0 へ（r27 段 3 で停止）。
 # 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（bundle は据え置き・240 行不変）。
-APK_LOCK_SHA256 = "089458818b215e9a1fb8cfab3b110a6041737f05f31871a35221963c817f1f0f"
+# 2026-09-24: 上流で libexpat 2.8.4-r0 が索引から消え 2.8.5-r0 へ（r28 段 3 で停止）。
+# 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（240 行不変）。
+APK_LOCK_SHA256 = "aeb05fd26952141e38689c523d845c1027b5cd9ea77f7f995fe175d4b6f5a129"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -136,7 +138,8 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBMOUNT_PACKAGE_VERSION": ("libmount", "2.42.3-r1"),
         "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),
         "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.8-r0"),
-        "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.4-r0"),
+        # 2026-09-24: 2.8.4-r0 が上流索引から消え 2.8.5-r0 へ（Alpine secdb: CVE-2026-93990 の修正版）。
+        "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.5-r0"),
         "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.8-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
