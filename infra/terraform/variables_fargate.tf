@@ -479,7 +479,7 @@ variable "gemini_vertex_project" {
 }
 
 variable "gemini_vertex_location" {
-  description = "Vertex AI ロケーション。Gemini 3 系（既定 gemini-3.5-flash-lite・2026-09-17）は Vertex では global でのみ応答する。2.5 系（2026-10-16 廃止）へ戻すときは us-central1"
+  description = "Vertex AI ロケーション。Gemini 3 系（既定 gemini-3.5-flash・2026-09-24 裁定）は Vertex では global でのみ応答する。2.5 系（2026-10-16 廃止）へ戻すときは us-central1"
   type        = string
   default     = "global"
 }
