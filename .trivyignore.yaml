@@ -1,4 +1,5 @@
 # .trivyignore.yaml — Trivy ゲート（.github/workflows/ci.yml の trivy ジョブ）の例外管理
+# 2026-09-24 再判定: IaC 例外 5 件の対象存続と現況を確認（次回期限 2026-10-29）。
 #
 # 運用ルール:
 #   - 例外は必ず paths でリソース単位にスコープし（ID グローバル抑制は将来の新規検出まで
@@ -22,36 +23,36 @@ misconfigurations:
       - "terraform/rds.tf"
       - "terraform/vpc_endpoints.tf"
       - "terraform/worker.tf"
-    expired_at: 2026-10-01
-    statement: "egress は VPC endpoints + IAM/toolFilter で担保（試験環境の設計判断）"
+    expired_at: 2026-10-29
+    statement: "2026-09-24: 対象 5 ファイルの 6 SG が全 protocol・0.0.0.0/0 egress のままと確認。外部宛先の棚卸しが未了で、制限には稼働 SG への apply が必要なためコード先行せず、IaC/DevOps 担当が 2026-10-29 までに再判定する"
 
   # bastion の IMDSv2（http_tokens=required）未強制: 修正は 1 行だが terraform apply
   # （人間ゲート）が必要なためコード先行変更を保留。次回 bastion を触る apply に同乗させる。
   - id: AVD-AWS-0028
     paths:
       - "terraform/bastion.tf"
-    expired_at: 2026-10-01
-    statement: "IMDSv2 強制は次回 bastion apply に同乗（コードだけ先行させない）"
+    expired_at: 2026-10-29
+    statement: "2026-09-24: aws_instance.bastion に metadata_options/http_tokens がないことを確認。IMDSv2 強制は稼働 EC2 への apply が必要なためコード先行せず、IaC/DevOps 担当が 2026-10-29 までに次回 bastion apply への同乗可否を再判定する"
 
   # bastion の EBS 未暗号化: 試験環境・bastion にデータを置かない運用（DB 接続の踏み台のみ）。
   - id: AVD-AWS-0131
     paths:
       - "terraform/bastion.tf"
-    expired_at: 2026-10-01
-    statement: "bastion は SSM 踏み台のみ・データ非保持"
+    expired_at: 2026-10-29
+    statement: "2026-09-24: aws_instance.bastion に root_block_device.encrypted がなく、追加データ EBS もないことを確認。SSM/psql 専用踏み台だが、暗号化修正は EBS/EC2 への apply が必要なためコード先行せず、IaC/DevOps 担当が 2026-10-29 までに適用手順を再判定する"
 
   # SNS topic 未暗号化（アラート通知）: 通知本文に機密を載せない運用
   # （構造化ログ側で request_id のみ・CLAUDE.md §3 Don't）。KMS 化はコストと相談。
   - id: AVD-AWS-0095
     paths:
       - "terraform/cloudwatch.tf"
-    expired_at: 2026-10-01
-    statement: "通知本文に機密を載せない運用・KMS 化はコスト判断待ち"
+    expired_at: 2026-10-29
+    statement: "2026-09-24: canonical alarms topic の存続と kms_master_key_id 未設定を確認。KMS 化は既存 topic への apply と鍵・配信影響・コスト判断が必要なためコード先行せず、IaC/DevOps 担当が 2026-10-29 までに再判定する"
 
   # S3 の SSE-KMS(CMK) 未使用: SSE-S3 で暗号化自体は有効。CMK 化は KMS コスト・
   # 鍵ローテ運用が伴うため試験環境では見送り。
   - id: AVD-AWS-0132
     paths:
       - "terraform/lambda_iam.tf"
-    expired_at: 2026-10-01
-    statement: "SSE-S3 で暗号化済み・CMK 化は試験環境では見送り"
+    expired_at: 2026-10-29
+    statement: "2026-09-24: raw_files bucket の存続と SSE-S3（AES256）有効・CMK 未使用を確認。CMK 化は既存 bucket への apply と鍵・IAM・コスト判断が必要なためコード先行せず、IaC/DevOps 担当が 2026-10-29 までに再判定する"
