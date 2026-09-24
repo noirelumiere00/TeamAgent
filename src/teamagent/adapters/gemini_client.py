@@ -191,14 +191,17 @@ def _parse_grounding(
     return (tuple(sources), tuple(supports), queries)
 
 
-# 既定モデルと Vertex ロケーション（2026-09-17 更新）。
+# 既定モデルと Vertex ロケーション（2026-09-24 更新）。
 # Vertex の gemini-2.5-pro / 2.5-flash / 2.5-flash-lite は 2026-10-16 に廃止
-# （Vertex AI release notes 2026-04-02）。後継は gemini-3.5-flash-lite
-# （入出力 0.30 / 2.50 USD per 1M tokens ＝ 2.5 Flash と同額）。
+# （Vertex AI release notes 2026-04-02）。後継は gemini-3.5-flash
+# （入出力 1.50 / 9.00 USD per 1M tokens）。09-17 に一度 3.5-flash-lite を既定にしたが、
+# web_research の Google 検索グラウンディングが本番で退行した（09-18）。09-24 の裁定で
+# Lite ではなく 3.5 Flash を使うと決め、sysfix（#435）の上で本番同等パス 9/9 の grounding を
+# 実測した。本番 TD の GEMINI_MODEL_ID が剥がれても裁定どおりになるよう既定を揃える。
 # Gemini 3 系は Vertex では location="global" でのみ応答する
 # （us-central1 では一覧に出るが 404・2026-09-17 実測）。逆に 2.5 系は global では
 # 応答しないので、モデルと location は resolve_location で対にして決める。
-DEFAULT_MODEL_ID = "gemini-3.5-flash-lite"
+DEFAULT_MODEL_ID = "gemini-3.5-flash"
 DEFAULT_LOCATION = "global"
 _GLOBAL_ONLY_MODEL_PREFIXES = ("gemini-3",)
 

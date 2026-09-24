@@ -54,8 +54,9 @@ def test_estimate_cost_flash() -> None:
 
 def test_estimate_cost_default_model_is_priced() -> None:
     """既定モデル（2.5 Flash 廃止後の後継）が価格表に載っていること。載っていないと費用が 0 で記録される。"""
+    # gemini-3.5-flash: in $1.50 / out $9.00 per 1M tokens
     cost = _estimate_cost(DEFAULT_MODEL_ID, 1_000_000, 1_000_000)
-    assert cost == pytest.approx(2.80)
+    assert cost == pytest.approx(10.50)
 
 
 def test_estimate_cost_unknown_model_is_zero() -> None:
@@ -101,14 +102,14 @@ def test_from_env_vertex_mode(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_from_env_defaults_to_3_5_flash_lite_on_global(monkeypatch: pytest.MonkeyPatch) -> None:
-    """GEMINI_MODEL_ID / GEMINI_VERTEX_LOCATION 未指定なら 3.5 Flash-Lite ＋ global（2.5 Flash 廃止対応）。"""
+    """GEMINI_MODEL_ID / GEMINI_VERTEX_LOCATION 未指定なら 3.5 Flash ＋ global（2.5 Flash 廃止対応・09-24 裁定）。"""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_MODEL_ID", raising=False)
     monkeypatch.delenv("GEMINI_VERTEX_LOCATION", raising=False)
     monkeypatch.setenv("GEMINI_USE_VERTEX", "true")
     monkeypatch.setenv("GEMINI_VERTEX_PROJECT", "teamagent-gcp")
     client = GeminiClient.from_env()
-    assert client.model_id == DEFAULT_MODEL_ID == "gemini-3.5-flash-lite"
+    assert client.model_id == DEFAULT_MODEL_ID == "gemini-3.5-flash"
     assert client.location == DEFAULT_LOCATION == "global"
 
 

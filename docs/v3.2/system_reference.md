@@ -38,7 +38,7 @@
 ### LLM / AI
 - **claude-agent-sdk** / **anthropic**（Claude）
 - **boto3 → AWS Bedrock**: Claude Sonnet 4.6 / Haiku 4.5（テキスト）・**Cohere Rerank v3.5**
-- **google-genai → GCP Vertex AI**: **Gemini 2.5 Flash**（動画マルチモーダル）。Vertex では 2026-10-16 に廃止のため、既定は `gemini-3.5-flash-lite`（location `global`）へ移行済み（#431・2026-09-18）
+- **google-genai → GCP Vertex AI**: **Gemini 2.5 Flash**（動画マルチモーダル）。Vertex では 2026-10-16 に廃止のため、既定は `gemini-3.5-flash`（location `global`）。#431（2026-09-18）で一度 `gemini-3.5-flash-lite` にしたが Web リサーチのグラウンディングが退行したため、2026-09-24 の裁定で 3.5 Flash（Lite ではない）に変更
 - **Embedding**: LocalE5Embedder（**multilingual-e5-large**, 1024次元・sentence-transformers）
 
 ### データ / RAG
