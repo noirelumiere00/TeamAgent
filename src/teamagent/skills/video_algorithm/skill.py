@@ -67,12 +67,27 @@ _MAX_FIELD_RESETS = 8  # 寛容パース: 最大何フィールドまで default
 _OVERFETCH_BUFFER = 4  # over-fetch: 目標+この本数を検索し DL/分析失敗を後続候補でバックフィル
 _MAX_POOL = 30  # 検索の絶対上限（スクレイパ実証済み。レート制限/遮断を踏み抜かない）
 
+# gemini-3.5-flash@global での 429 実測を受け、並列数を本番 env で調整可能にする。
+_MAX_WORKERS_ENV = "VIDEO_ALGORITHM_MAX_WORKERS"
+_MAX_WORKERS_DEFAULT = 3
+_MAX_WORKERS_MIN = 1
+_MAX_WORKERS_MAX = 8
+
 # 二段構え（Apify 補完）の request 単位の予算。失敗 1 本ごとに同期 run（実測 ≈68s）を起こすため、
 # 集約本数（TIKTOK_APIFY_FALLBACK_MAX_VIDEOS）と壁時計（MCP ツール呼び出し 300s 天井の内側）の
 # 両方で頭打ちにし、DL 経路全滅でも tool 呼び出しが天井を超えないようにする。
 _APIFY_WALLCLOCK_ENV = "VIDEO_ALGORITHM_APIFY_WALLCLOCK_S"
 _APIFY_WALLCLOCK_DEFAULT_S = 240
 _APIFY_S3_MARGIN_S = 30
+
+
+def _max_workers_from_env() -> int:
+    raw = os.environ.get(_MAX_WORKERS_ENV)
+    try:
+        value = _MAX_WORKERS_DEFAULT if raw is None else int(raw)
+    except ValueError:
+        value = _MAX_WORKERS_DEFAULT
+    return min(_MAX_WORKERS_MAX, max(_MAX_WORKERS_MIN, value))
 
 
 def _apify_wallclock_budget_s() -> int:
@@ -324,7 +339,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         downloader: Downloader | None = None,
         proxy: Proxy | None = None,
         report_dir: str | None = None,
-        max_workers: int = 3,
+        max_workers: int | None = None,
         overfetch_buffer: int = _OVERFETCH_BUFFER,
         publisher: Callable[..., str | None] | None = None,
         result_cache: VideoAlgorithmResultCache | None = None,
@@ -336,7 +351,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self._downloader = downloader
         self._proxy = proxy
         self._report_dir = report_dir
-        self._max_workers = max_workers
+        self._max_workers = _max_workers_from_env() if max_workers is None else max_workers
         self._overfetch_buffer = overfetch_buffer
         self._publisher = publisher
         self._result_cache = result_cache
