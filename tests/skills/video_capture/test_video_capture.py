@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from typing import Any
 
@@ -326,6 +327,92 @@ def test_youtube_can_be_reopened_by_env(monkeypatch: pytest.MonkeyPatch) -> None
     # env を開けると実際に取りに行き、本番同様 bot 判定で落ちる。
     assert media.acquire_calls
     assert out.error == "MEDIA_ACQUIRE_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# ツール説明: YouTube の制限は切り出しだけ（2026-09-24 本番）
+# ---------------------------------------------------------------------------
+# 本番で「この動画を分析して <YouTube URL>」に Aico がツールを一度も呼ばず
+# 「YouTube は取得元にブロックされるため分析できません」と断った。ここの説明文と SOUL の
+# 「YouTube はブロック」を動画分析全般に広げて読んだため（SOUL 側は PR #441 で限定済み）。
+# video_analysis は Gemini に file_uri で URL を渡す経路（DL 不要）で YouTube を分析できる。
+
+# 「YouTube … ブロック／未対応」から、読点・句点・閉じ括弧までを 1 節として拾う。
+_YOUTUBE_BLOCK_CLAUSE_RE = re.compile(r"YouTube[^。]*?(?:ブロック|未対応)[^。、）]*")
+
+
+def _unscoped_youtube_block_clauses(text: str) -> list[str]:
+    """YouTube のブロック言及のうち、切り出し限定か video_analysis の但し書きを欠くものを返す。"""
+    clauses = [m.group(0) for m in _YOUTUBE_BLOCK_CLAUSE_RE.finditer(text)]
+    has_carve_out = any(
+        "YouTube" in s and "分析" in s and "video_analysis" in s for s in text.split("。")
+    )
+    return [c for c in clauses if "切り出" not in c or not has_carve_out]
+
+
+def _exposed_texts() -> dict[str, str]:
+    """モデルが毎ターン読む文面（ツール説明＋各引数の説明）。"""
+    texts = {"description": VideoCaptureSkill.description}
+    for name, field in VideoCaptureInput.model_fields.items():
+        if field.description:
+            texts[f"field:{name}"] = field.description
+    return texts
+
+
+def test_youtube_block_mentions_are_scoped_to_capture() -> None:
+    """YouTube のブロック言及は「切り出しだけ」と書き、分析は video_analysis と同居させる。"""
+    offenders = {
+        where: bad
+        for where, text in _exposed_texts().items()
+        if (bad := _unscoped_youtube_block_clauses(text))
+    }
+    assert not offenders, f"YouTube ブロックの言及が切り出し限定になっていない: {offenders}"
+
+
+def test_youtube_carve_out_names_the_real_analysis_tool() -> None:
+    """但し書きの指し先が実在の動画分析ツール名であること（改名で幽霊を指さない）。"""
+    from teamagent.skills.video.skill import VideoAnalysisSkill
+
+    assert VideoAnalysisSkill.name == "video_analysis"
+    for where in ("description", "field:url"):
+        assert "video_analysis" in _exposed_texts()[where], f"{where} に分析側の但し書きが無い"
+
+
+def test_youtube_capture_is_called_not_refused_by_the_router() -> None:
+    """YouTube の切り出しも、ルーターが自分で断らずに呼ぶ（サーバが決定論の案内を返す）。
+
+    ルーティングシミュ（tests/routing/README.md R5）で、この 2 文が無い説明文では
+    「YouTube の 0:30 を画像にして」を 4 本中 4 本がツールを呼ばずに断った
+    （description だけ足した R5b は 2 本中 1 本、url 側も足した R5c で 2 本中 2 本が呼んだ）。
+    """
+    assert "断らずにそのまま呼べば" in VideoCaptureSkill.description
+    assert "YouTube の URL もそのまま入れて呼べば" in _exposed_texts()["field:url"]
+
+
+_CARVE_OUT = "YouTube 動画の分析は video_analysis で可能。"
+
+
+@pytest.mark.parametrize(
+    "pre_fix",
+    [
+        "(2) この会話に添付された動画なら url を空にして slack_file=true にする"
+        "（YouTube は取得元にブロックされるため、ファイル添付でお願いする）。",
+        "切り出す動画の URL（https のみ・TikTok / Instagram に対応。"
+        "YouTube は取得元にブロックされるため未対応）。",
+    ],
+)
+def test_youtube_scope_detector_flags_unscoped_clause_even_with_carve_out(pre_fix: str) -> None:
+    """修正前の節（切り出し限定なし）は、但し書きが別にあっても捕まえる。"""
+    assert _unscoped_youtube_block_clauses(pre_fix + _CARVE_OUT)
+
+
+def test_youtube_scope_detector_flags_missing_carve_out() -> None:
+    """切り出し限定の節だけで video_analysis の但し書きが無ければ捕まえる。"""
+    scoped_only = (
+        "YouTube の URL は取得元にブロックされるため切り出せず、ファイル添付でお願いする。"
+    )
+    assert _unscoped_youtube_block_clauses(scoped_only)
+    assert not _unscoped_youtube_block_clauses(scoped_only + _CARVE_OUT)
 
 
 @pytest.mark.parametrize(

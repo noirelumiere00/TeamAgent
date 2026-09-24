@@ -139,7 +139,9 @@ class VideoCaptureInput(BaseModel):
         max_length=2048,
         description=(
             "切り出す動画の URL（https のみ・TikTok / Instagram に対応。"
-            "YouTube は取得元にブロックされるため未対応）。"
+            "YouTube は取得元にブロックされるため切り出しは未対応だが、"
+            "YouTube の URL もそのまま入れて呼べばサーバが添付の案内を返す。"
+            "YouTube 動画の分析は video_analysis で可能）。"
             "会話に添付された動画を使うときは空のままにして slack_file=true にする。"
         ),
     )
