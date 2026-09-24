@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-from teamagent.adapters.retry import RetryPolicy, call_with_retry
+from teamagent.adapters.retry import RateLimitPolicy, RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
 
@@ -65,6 +65,26 @@ def _is_retryable_vertex(exc: BaseException) -> bool:
     if code in (429, 500, 503):
         return True
     return any(marker in msg for marker in _VERTEX_RETRYABLE_MARKERS)
+
+
+_VERTEX_RATE_LIMIT_MARKERS = (
+    "resource_exhausted",
+    "resource exhausted",
+    "resourceexhausted",
+    "rate limit",
+    "too many requests",
+)
+
+
+def _is_rate_limited_vertex(exc: BaseException) -> bool:
+    """429 / RESOURCE_EXHAUSTED に限って True を返す。"""
+    msg = str(exc).lower()
+    # code=429 を伴う場合でも、URL 側の恒久エラーは長いリトライへ送らない。
+    if not _is_retryable_vertex(exc) and ("cannot fetch content" in msg or "roboted" in msg):
+        return False
+    if getattr(exc, "code", None) == 429 or getattr(exc, "status_code", None) == 429:
+        return True
+    return any(marker in msg for marker in _VERTEX_RATE_LIMIT_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -245,6 +265,10 @@ _GROUNDING_REQUEST_USD = 0.035
 # grounded 呼び出しのリトライ上限（動画分析の 3 とは別値。理由は
 # generate_with_google_search の docstring）。
 _GROUNDED_RETRY_ATTEMPTS = 2
+# 既存の最悪所要（試行 timeout の合計 + バックオフ cap）を deadline として維持する。
+_GROUNDED_RETRY_BACKOFF_BUDGET_S = 4.0
+# 429 は GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS（既定 8）まで別枠で粘る。
+_RATE_LIMIT_RETRY_ATTEMPTS = 8
 
 
 def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
@@ -396,10 +420,11 @@ class GeminiClient:
 
         grounded=False は「検索の裏付けが無い応答」＝呼び出し側は fail-closed にする。
 
-        timeout_s は **1 回の HTTP 試行あたり** の上限。リトライは既定 2 回までに絞ってあり
-        （_GROUNDED_RETRY_ATTEMPTS）、最悪でも timeout_s×2＋バックオフで頭打ちになる。
-        動画分析と同じ 3 回にすると 3×deadline で OpenClaw のターン制限（実測 ~181s）を
-        突き抜け、ターンごと応答全損する。
+        timeout_s は **1 回の HTTP 試行あたり** の上限。通常のリトライは既定 2 回までに
+        絞り、最悪でも timeout_s×2＋バックオフ 4 秒で頭打ちになる。429 は即返るため、
+        この包絡の内側で GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS（既定 8）まで粘る。
+        動画分析と同じ通常 3 回にすると 3×deadline で OpenClaw のターン制限（実測
+        ~181s）を突き抜け、ターンごと応答全損する。
         """
         from google.genai import types
 
@@ -417,6 +442,18 @@ class GeminiClient:
 
         start = time.perf_counter()
         try:
+            grounded_policy = RetryPolicy(
+                max_attempts=_env_int(
+                    "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                ),
+                base_delay_s=0.6,
+                max_delay_s=_GROUNDED_RETRY_BACKOFF_BUDGET_S,
+            )
+            deadline_s = (
+                timeout_s * grounded_policy.max_attempts + _GROUNDED_RETRY_BACKOFF_BUDGET_S
+                if timeout_s is not None
+                else None
+            )
             response = call_with_retry(
                 lambda: client.models.generate_content(
                     model=self.model_id,
@@ -424,19 +461,25 @@ class GeminiClient:
                     config=config,
                 ),
                 is_retryable=_is_retryable_vertex,
-                policy=RetryPolicy(
+                policy=grounded_policy,
+                is_rate_limited=_is_rate_limited_vertex,
+                rate_limit_policy=RateLimitPolicy(
                     max_attempts=_env_int(
-                        "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                        "GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS
                     ),
                     base_delay_s=0.6,
-                    max_delay_s=4.0,
+                    max_delay_s=_GROUNDED_RETRY_BACKOFF_BUDGET_S,
+                    min_delay_s=0.5,
                 ),
+                deadline_s=deadline_s,
+                attempt_timeout_s=timeout_s,
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_grounded_retry",
                     request_id=request_id,
                     attempt=n,
                     delay_s=round(d, 2),
                     error=type(e).__name__,
+                    rate_limited=_is_rate_limited_vertex(e),
                 ),
             )
         except Exception as e:
@@ -514,12 +557,22 @@ class GeminiClient:
                     base_delay_s=0.6,
                     max_delay_s=8.0,
                 ),
+                is_rate_limited=_is_rate_limited_vertex,
+                rate_limit_policy=RateLimitPolicy(
+                    max_attempts=_env_int(
+                        "GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS
+                    ),
+                    base_delay_s=1.0,
+                    max_delay_s=12.0,
+                    min_delay_s=0.5,
+                ),
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_retry",
                     request_id=request_id,
                     attempt=n,
                     delay_s=round(d, 2),
                     error=type(e).__name__,
+                    rate_limited=_is_rate_limited_vertex(e),
                 ),
             )
         except Exception as e:

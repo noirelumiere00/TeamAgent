@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from teamagent.adapters.retry import RetryPolicy, backoff_cap, call_with_retry
+from teamagent.adapters.retry import RateLimitPolicy, RetryPolicy, backoff_cap, call_with_retry
 
 
 class _TransientError(Exception):
@@ -16,6 +16,10 @@ class _TransientError(Exception):
 
 class _PermanentError(Exception):
     """テスト用の恒久エラー（リトライ非対象）。"""
+
+
+class _RateLimitError(_TransientError):
+    """テスト用の 429 相当エラー。"""
 
 
 def _retryable(exc: BaseException) -> bool:
@@ -71,6 +75,194 @@ def test_retries_then_succeeds() -> None:
     assert out == "done"
     assert calls == 3
     assert slept == [0.5, 1.0]  # base*2^0, base*2^1
+
+
+def test_omitting_new_options_preserves_legacy_attempt_series() -> None:
+    """429/deadline 引数を省略すれば従来の通し番号と待ち系列を維持する。"""
+    slept, sleep = _recorder()
+    policy = RetryPolicy(max_attempts=4, base_delay_s=0.25, max_delay_s=10.0)
+    calls = 0
+    retries: list[tuple[int, float]] = []
+
+    def fn() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < 4:
+            raise _TransientError(f"fail-{calls}")
+        return "ok"
+
+    out = call_with_retry(
+        fn,
+        is_retryable=_retryable,
+        policy=policy,
+        sleep=sleep,  # type: ignore[arg-type]
+        jitter=lambda cap: cap,
+        on_retry=lambda attempt, delay, exc: retries.append((attempt, delay)),
+    )
+
+    assert out == "ok"
+    assert calls == 4
+    assert slept == [0.25, 0.5, 1.0]
+    assert retries == [(1, 0.25), (2, 0.5), (3, 1.0)]
+
+
+def test_rate_limit_failures_can_outlive_regular_policy_then_succeed() -> None:
+    """429 は通常上限3回を越え、429用の総試行上限8回まで再試行できる。"""
+    slept, sleep = _recorder()
+    calls = 0
+
+    def fn() -> str:
+        nonlocal calls
+        calls += 1
+        if calls < 8:
+            raise _RateLimitError("busy")
+        return "ok"
+
+    out = call_with_retry(
+        fn,
+        is_retryable=_retryable,
+        policy=RetryPolicy(max_attempts=3, base_delay_s=0.1, max_delay_s=1.0),
+        sleep=sleep,  # type: ignore[arg-type]
+        jitter=lambda cap: cap,
+        is_rate_limited=lambda exc: isinstance(exc, _RateLimitError),
+        rate_limit_policy=RateLimitPolicy(max_attempts=8),
+    )
+
+    assert out == "ok"
+    assert calls == 8
+    assert slept == [1.0, 2.0, 4.0, 8.0, 12.0, 12.0, 12.0]
+
+
+def test_rate_limit_delay_never_falls_below_minimum() -> None:
+    """ジッタが0秒を返しても429は最小待ち時間を確保する。"""
+    slept, sleep = _recorder()
+    calls = 0
+
+    def fn() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _RateLimitError("busy")
+        return "ok"
+
+    out = call_with_retry(
+        fn,
+        is_retryable=_retryable,
+        sleep=sleep,  # type: ignore[arg-type]
+        jitter=lambda cap: 0.0,
+        is_rate_limited=lambda exc: isinstance(exc, _RateLimitError),
+        rate_limit_policy=RateLimitPolicy(min_delay_s=0.5),
+    )
+
+    assert out == "ok"
+    assert calls == 2
+    assert slept == [0.5]
+
+
+def test_regular_failure_limit_ignores_interleaved_rate_limits() -> None:
+    """429が混ざっても、非429は非429だけを数えて通常上限で停止する。"""
+    slept, sleep = _recorder()
+    failures = iter(
+        [
+            _RateLimitError("rate-1"),
+            _TransientError("other-1"),
+            _RateLimitError("rate-2"),
+            _TransientError("other-2"),
+            _TransientError("other-3"),
+        ]
+    )
+    calls = 0
+
+    def fn() -> None:
+        nonlocal calls
+        calls += 1
+        raise next(failures)
+
+    with pytest.raises(_TransientError, match="other-3"):
+        call_with_retry(
+            fn,
+            is_retryable=_retryable,
+            policy=RetryPolicy(max_attempts=3, base_delay_s=0.1, max_delay_s=1.0),
+            sleep=sleep,  # type: ignore[arg-type]
+            jitter=lambda cap: cap,
+            is_rate_limited=lambda exc: isinstance(exc, _RateLimitError),
+            rate_limit_policy=RateLimitPolicy(max_attempts=8),
+        )
+
+    assert calls == 5
+    assert slept == [1.0, 0.1, 2.0, 0.2]
+
+
+def test_deadline_stops_before_another_worst_case_attempt() -> None:
+    """次の試行が deadline を越えるなら、待機も次の試行も行わない。"""
+    now = 0.0
+    calls = 0
+
+    def clock() -> float:
+        return now
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def fn() -> None:
+        nonlocal calls
+        calls += 1
+        advance(60.0)
+        raise _RateLimitError("busy")
+
+    with pytest.raises(_RateLimitError):
+        call_with_retry(
+            fn,
+            is_retryable=_retryable,
+            policy=RetryPolicy(max_attempts=3),
+            sleep=advance,
+            jitter=lambda cap: cap,
+            is_rate_limited=lambda exc: isinstance(exc, _RateLimitError),
+            rate_limit_policy=RateLimitPolicy(max_attempts=8),
+            deadline_s=124.0,
+            attempt_timeout_s=60.0,
+            clock=clock,
+        )
+
+    assert calls == 2
+    assert now <= 124.0
+
+
+def test_deadline_allows_fast_rate_limit_failures_to_reach_rate_limit_cap() -> None:
+    """429が即返る場合は同じ deadline 内で429用上限8回まで粘る。"""
+    now = 0.0
+    calls = 0
+
+    def clock() -> float:
+        return now
+
+    def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def fn() -> None:
+        nonlocal calls
+        calls += 1
+        advance(1.5)
+        raise _RateLimitError("busy")
+
+    with pytest.raises(_RateLimitError):
+        call_with_retry(
+            fn,
+            is_retryable=_retryable,
+            policy=RetryPolicy(max_attempts=3),
+            sleep=advance,
+            jitter=lambda cap: cap,
+            is_rate_limited=lambda exc: isinstance(exc, _RateLimitError),
+            rate_limit_policy=RateLimitPolicy(max_attempts=8),
+            deadline_s=124.0,
+            attempt_timeout_s=60.0,
+            clock=clock,
+        )
+
+    assert calls == 8
+    assert now <= 124.0
 
 
 def test_non_retryable_raises_immediately() -> None:
@@ -148,3 +340,9 @@ def test_invalid_policy_rejected() -> None:
         RetryPolicy(max_attempts=0)
     with pytest.raises(ValueError):
         RetryPolicy(base_delay_s=-1.0)
+    with pytest.raises(ValueError):
+        RateLimitPolicy(max_attempts=0)
+    with pytest.raises(ValueError):
+        RateLimitPolicy(min_delay_s=-1.0)
+    with pytest.raises(ValueError):
+        RateLimitPolicy(min_delay_s=2.0, max_delay_s=1.0)

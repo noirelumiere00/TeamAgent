@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
+from teamagent.adapters import gemini_client as gemini_module
+from teamagent.adapters import retry as retry_module
 from teamagent.adapters.gemini_client import (
     DEFAULT_LOCATION,
     DEFAULT_MODEL_ID,
     GeminiClient,
     _estimate_cost,
+    _is_rate_limited_vertex,
     _is_retryable_vertex,
     resolve_location,
 )
@@ -22,6 +28,51 @@ class _CodedError(Exception):
     def __init__(self, message: str, code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+class _StatusCodedError(Exception):
+    """status_code 属性つきの疑似 Vertex エラー。"""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _FakeClock:
+    """API 試行時間とリトライ待ちを実時間なしで進める時計。"""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+    def sleep(self, seconds: float) -> None:
+        self.advance(seconds)
+
+
+def _install_fake_retry_clock(monkeypatch: pytest.MonkeyPatch, clock: _FakeClock) -> None:
+    """Gemini adapter の retry 呼び出しへ決定論的な時計を注入する。"""
+    real_call_with_retry = retry_module.call_with_retry
+
+    def fake_call_with_retry(fn: Callable[[], Any], **kwargs: Any) -> Any:
+        return real_call_with_retry(
+            fn,
+            sleep=clock.sleep,
+            jitter=lambda cap: cap,
+            clock=clock,
+            **kwargs,
+        )
+
+    monkeypatch.setattr(gemini_module, "call_with_retry", fake_call_with_retry)
+
+
+def _successful_response(text: str = "ok") -> SimpleNamespace:
+    usage = SimpleNamespace(prompt_token_count=10, candidates_token_count=5)
+    return SimpleNamespace(text=text, candidates=[], usage_metadata=usage)
 
 
 @pytest.mark.parametrize(
@@ -44,6 +95,25 @@ class _CodedError(Exception):
 )
 def test_is_retryable_vertex(exc: BaseException, expected: bool) -> None:
     assert _is_retryable_vertex(exc) is expected
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (_CodedError("capacity", code=429), True),
+        (_StatusCodedError("capacity", status_code=429), True),
+        (Exception("429 RESOURCE_EXHAUSTED. Please try again later."), True),
+        (Exception("Resource exhausted"), True),
+        (Exception("rate limit exceeded"), True),
+        (Exception("too many requests"), True),
+        (_CodedError("Service Unavailable", code=503), False),
+        (TimeoutError("request timeout"), False),
+        (RuntimeError("Cannot fetch content from the provided URL"), False),
+        (_CodedError("Cannot fetch content from the provided URL", code=429), False),
+    ],
+)
+def test_is_rate_limited_vertex(exc: BaseException, expected: bool) -> None:
+    assert _is_rate_limited_vertex(exc) is expected
 
 
 def test_estimate_cost_flash() -> None:
@@ -149,12 +219,106 @@ def test_analyze_video_unfetchable_url_maps_to_marker() -> None:
         client.analyze_video_url("https://www.tiktok.com/@x/video/1", "p", "req-1")
 
 
-def test_analyze_video_other_error_generic_message() -> None:
+def test_analyze_video_other_error_generic_message(monkeypatch: pytest.MonkeyPatch) -> None:
     """その他のエラーは汎用メッセージ (マーカー無し)。"""
     pytest.importorskip("google.genai")  # CI に未導入なら skip
+    _install_fake_retry_clock(monkeypatch, _FakeClock())
     client = GeminiClient(api_key="AIzaReal-key-123")
     fake = MagicMock()
     fake.models.generate_content.side_effect = Exception("500 internal")
     client._client = fake
     with pytest.raises(RuntimeError, match="動画分析に失敗"):
         client.analyze_video_url("https://youtube.com/shorts/x", "p", "req-2")
+
+
+def test_grounded_search_retries_five_rate_limits_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """通常上限 2 回を超えても、429 は専用上限の内側なら成功まで粘る。"""
+    pytest.importorskip("google.genai")
+    monkeypatch.delenv("GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", raising=False)
+    clock = _FakeClock()
+    _install_fake_retry_clock(monkeypatch, clock)
+
+    calls = 0
+
+    def generate_content(**_: Any) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            raise _CodedError("429 RESOURCE_EXHAUSTED", code=429)
+        return _successful_response("grounded retry succeeded")
+
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = generate_content
+    client = GeminiClient(api_key="AIzaReal-key-123", client=fake)
+
+    result = client.generate_with_google_search("query", "req-grounded")
+
+    assert result.text == "grounded retry succeeded"
+    assert calls == 6
+
+
+def test_grounded_search_rate_limit_respects_existing_timeout_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """各試行が 60 秒かかる最悪ケースでも 124 秒の deadline 内で停止する。"""
+    pytest.importorskip("google.genai")
+    monkeypatch.delenv("GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", raising=False)
+    clock = _FakeClock()
+    _install_fake_retry_clock(monkeypatch, clock)
+
+    calls = 0
+
+    def generate_content(**_: Any) -> None:
+        nonlocal calls
+        calls += 1
+        clock.advance(60.0)
+        raise _CodedError("429 RESOURCE_EXHAUSTED", code=429)
+
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = generate_content
+    client = GeminiClient(api_key="AIzaReal-key-123", client=fake)
+
+    with pytest.raises(RuntimeError, match="Gemini Web 検索に失敗"):
+        client.generate_with_google_search("query", "req-deadline", timeout_s=60.0)
+
+    assert calls == 2
+    assert clock.value <= 60.0 * 2 + 4.0
+    assert clock.value < 181.0  # OpenClaw の実測ターン制限
+
+
+def test_analyze_video_bytes_retries_five_rate_limits_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """動画分析の通常上限 3 回を超えても、429 専用上限まで再試行できる。"""
+    pytest.importorskip("google.genai")
+    monkeypatch.delenv("GEMINI_RETRY_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", raising=False)
+    clock = _FakeClock()
+    _install_fake_retry_clock(monkeypatch, clock)
+
+    calls = 0
+
+    def generate_content(**_: Any) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        if calls <= 5:
+            raise _CodedError("429 RESOURCE_EXHAUSTED", code=429)
+        return _successful_response("video retry succeeded")
+
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = generate_content
+    client = GeminiClient(api_key="AIzaReal-key-123", client=fake)
+
+    result = client.analyze_video_bytes(
+        data=b"video",
+        mime_type="video/mp4",
+        prompt="analyze",
+        request_id="req-video",
+    )
+
+    assert result.text == "video retry succeeded"
+    assert calls == 6
