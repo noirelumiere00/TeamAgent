@@ -799,3 +799,95 @@ def test_soul_has_no_dump_derived_counts(soul: str) -> None:
     """dump の再集計値（「38 応答・16 セッション」等）は定義依存で揺れるので載せない。"""
     assert not re.search(r"\d+ 応答・\d+ セッション", soul)
     assert not re.search(r"表 \d+ 応答", soul)
+
+
+# ── ⑲ YouTube の「通らない」は切り出し（video_capture）だけ（2026-09-24 本番）────────
+#
+# 本番実測（mcp:115 / openclaw:48）: DM で「この動画を分析して <YouTube URL>」に対し、
+# ツールを一度も呼ばず（tool_calls=0）6 秒で「YouTube は取得元にブロックされるため分析できません」
+# と断った。根拠は video_capture 節の注意書き（切り出しは DL が要り YouTube 不可）で、
+# モデルがそれを動画全般へ広げて読んだ。video_analysis は Gemini に file_uri で URL を
+# 直接渡す経路（DL 不要）で、同日 12 秒で成功している。
+
+_YOUTUBE_BLOCK_RE = re.compile(r"YouTube.*(ブロック|通らない|未対応|できません|できない)")
+_VIDEO_CAPTURE_HEADING = "## 動画のシーン切出し（video_capture）"
+
+
+def _youtube_block_lines(text: str) -> list[tuple[str, str]]:
+    """「YouTube は通らない」系の断定文を (所属する ## 見出し, 行) で返す。"""
+    heading = ""
+    found: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line
+            continue
+        if _YOUTUBE_BLOCK_RE.search(line):
+            found.append((heading, line))
+    return found
+
+
+def _outside_capture_section(found: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    return [(h, line) for h, line in found if h != _VIDEO_CAPTURE_HEADING]
+
+
+def _unscoped_block_lines(found: list[tuple[str, str]]) -> list[str]:
+    """切り出し限定の明示と、分析は対象外の但し書きを欠く行。"""
+    return [
+        line
+        for _, line in found
+        if not (
+            "**切り出し（`video_capture`）に限り**" in line
+            and "対象外" in line
+            and "`video_analysis`" in line
+        )
+    ]
+
+
+def test_youtube_block_statement_lives_only_in_video_capture_section(soul: str) -> None:
+    """YouTube の取得ブロックの断定は video_capture 節の中にだけ置く。
+
+    他の節（「できません」と言う前に・PRリサーチ等）へ一般化して書くと、動画分析まで
+    ツールを呼ばずに断る事故が再発する。
+    """
+    offenders = _outside_capture_section(_youtube_block_lines(soul))
+    assert not offenders, f"video_capture 節の外に YouTube ブロックの断定文がある: {offenders}"
+
+
+def test_youtube_block_statement_is_explicitly_capture_only(soul: str) -> None:
+    """節の中でも、行そのものに「切り出しに限る／分析は対象外」を書く。
+
+    2026-09-24 の事故は節の中に置いてあっても起きた＝節見出しだけでは限定が効かない。
+    """
+    offenders = _unscoped_block_lines(_youtube_block_lines(soul))
+    assert not offenders, f"YouTube ブロックの断定が切り出し限定になっていない: {offenders}"
+
+
+def test_youtube_video_analysis_route_is_present(soul: str) -> None:
+    """「この動画を分析して＋YouTube URL」は video_analysis を呼ぶ、と動画分析側にも書く。"""
+    routes: list[tuple[str, str]] = []
+    heading = ""
+    for line in soul.splitlines():
+        if line.startswith("## "):
+            heading = line
+            continue
+        if "→ `video_analysis`" in line and "YouTube" in line:
+            routes.append((heading, line))
+    assert routes, "YouTube URL の動画分析を video_analysis へ振る行が無い"
+    for h, line in routes:
+        assert h != _VIDEO_CAPTURE_HEADING, "分析の振り先は切り出し節の外（動画分析側）に置く"
+        assert "断らずに呼ぶ" in line, f"断らずに呼ぶ旨が欠けている: {line}"
+
+
+def test_youtube_scope_detector_catches_the_pre_fix_wording() -> None:
+    """検出器が空振りしないこと（修正前の文面を与えると必ず赤になる）。"""
+    pre_fix = (
+        "- YouTube の URL は取得元にブロックされるため通らない。ツールが返す案内文を"
+        "そのまま伝え、**動画ファイルをスレッドに添付してもらう**よう促す。"
+    )
+    in_capture = f"{_VIDEO_CAPTURE_HEADING}\n\n{pre_fix}\n"
+    assert _unscoped_block_lines(_youtube_block_lines(in_capture)) == [pre_fix]
+
+    generalized = f"## 「できません」と言う前に（必ずツール一覧を当たる）\n\n{pre_fix}\n"
+    assert _outside_capture_section(_youtube_block_lines(generalized)), (
+        "節の外へ一般化した断定を検出できていない"
+    )

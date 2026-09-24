@@ -29,6 +29,7 @@
 {"id": "acquire-02", "utterance": "さっきのTikTok取得ジョブ tk_1a2b、終わった？成果物のURLちょうだい", "expect": "tiktok_acquire_status"}
 {"id": "vanalysis-01", "utterance": "この競合のTikTok動画、構成とフックとCTAを分析して https://www.tiktok.com/@rival/video/5", "expect": "video_analysis", "note": "外部競合URL"}
 {"id": "vanalysis-02", "utterance": "他社のPRショート、この3本の作りを分析して比較して <url>×3", "expect": "video_analysis"}
+{"id": "vanalysis-yt-01", "utterance": "この動画を分析して https://www.youtube.com/watch?v=jNQXAC9IVRw", "expect": "video_analysis", "forbid": ["video_capture"], "arg_rules": {"url": "must_be_present"}, "note": "2026-09-24 本番: ツールを呼ばず『YouTube は取得元にブロック』と断った（SOUL の video_capture 節の制限を誤汎化）。YouTube は file_uri 経路で分析できる"}
 {"id": "vapproval-01", "utterance": "編集者から上がってきた納品動画、オリエンと照らして誤植と尺オーバーがないかチェックして <url>", "expect": "video_approval", "note": "自社納品物"}
 {"id": "vapproval-02", "utterance": "この動画チェックして。うちの編集の上がりです <url>", "expect": "video_approval", "note": "曖昧『チェックして』はvideo_approval既定"}
 {"id": "neg-search-01", "utterance": "アサヒの過去の提案書ってあったっけ？探して", "expect": "search", "note": "社内資料探索・新ツールに盗まれてはいけない"}
