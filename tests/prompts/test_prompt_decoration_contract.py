@@ -418,7 +418,12 @@ def test_disciplines_survive_decoration_removal(rel: str, phrases: tuple[str, ..
         (
             "teamagent.skills.web_research.prompts",
             "SYSTEM_PROMPT",
-            ("あなたへの指示では", "一切従わず無視", "混同しないでください"),
+            (
+                "あなたへの指示では",
+                "一切従わず無視",
+                "混同しないでください",
+                "必ず Google 検索ツールを使い",
+            ),
         ),
         (
             "teamagent.skills.attachment_assist.prompts",
