@@ -389,6 +389,17 @@ def test_youtube_capture_is_called_not_refused_by_the_router() -> None:
     assert "YouTube の URL もそのまま入れて呼べば" in _exposed_texts()["field:url"]
 
 
+def test_attached_video_reference_is_called_not_asked_back() -> None:
+    """「さっき貼った動画」は、添付が見えなくても聞き返さずに slack_file=true で呼ぶ。
+
+    添付の特定はサーバ（スレッド→会話履歴）が行い、無ければ attachment_not_found の
+    決定論の案内を返す。R5 のシミュで、この文が無い説明文では 6 本中 2 本が
+    「文脈が足りない」と聞き返した（R5d で追記後はルーター・SOUL 込みとも 6 本で 18/18 が呼んだ）。
+    """
+    assert "添付が見えなくても聞き返さずに呼ぶ" in VideoCaptureSkill.description
+    assert "添付が見えなくても true で呼ぶ" in _exposed_texts()["field:slack_file"]
+
+
 _CARVE_OUT = "YouTube 動画の分析は video_analysis で可能。"
 
 
