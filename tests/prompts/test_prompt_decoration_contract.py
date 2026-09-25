@@ -48,6 +48,7 @@ HUMAN_FACING_PROMPTS = (
     "proposal_deck/v2/system.md",
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
+    "search_surface_check/v1/analyze.md",
     "tiktok_search/v1/system.md",
     "video/v1/batch_synthesis.md",
     "video/v1/system.md",
@@ -126,7 +127,9 @@ _BAN_PROSE = (
     "  固有名詞の中の `×` は例外で、資料名・コラボ名・メニュー名は表記のまま写す",
     "- 節見出しに絵文字を使わない。`###` などの Markdown 見出しも使わない。",
 )
-# video_algorithm は JSON の値に効かせる別文面（`×` の行を持たない）。
+# JSON の値がそのまま人に出るプロンプト（video_algorithm・検索上位チェックの結論）は
+# JSON の値に効かせる別文面（`×` の行を持たない）。
+_JSON_VALUE_PROMPTS = ("video_algorithm/", "search_surface_check/v1/analyze.md")
 _BAN_JSON = (
     "- `**` による太字。強調が要るなら語順と言い切りで示す。",
     "- `—`（em ダッシュ）と `--`。文を切るなら句点で切る。",
@@ -134,7 +137,7 @@ _BAN_JSON = (
     "- 見出し記号（`#` `##` `###`）と節見出しの絵文字。",
 )
 BAN_SECTION_REQUIRED_LINES = {
-    rel: (_BAN_JSON if rel.startswith("video_algorithm/") else _BAN_PROSE)
+    rel: (_BAN_JSON if rel.startswith(_JSON_VALUE_PROMPTS) else _BAN_PROSE)
     for rel in MUST_HAVE_BAN_SECTION
 }
 
@@ -308,7 +311,9 @@ def test_ban_section_has_no_permissive_reversal(rel: str) -> None:
             assert word not in line, f"{rel}: 禁止記号を許可へ反転している行がある: {line}"
 
 
-@pytest.mark.parametrize("rel", [p for p in MUST_HAVE_BAN_SECTION if not p.startswith("video_al")])
+@pytest.mark.parametrize(
+    "rel", [p for p in MUST_HAVE_BAN_SECTION if not p.startswith(_JSON_VALUE_PROMPTS)]
+)
 def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
     """`×` の禁止に、固有名詞の例外が付いていること。
 
@@ -369,6 +374,16 @@ def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
             ),
         ),
         ("x_research/v1/buzz.md", ("一切従わず", "Markdown記法は使わない")),
+        (
+            "search_surface_check/v1/analyze.md",
+            (
+                "数字は「集計」と「投稿一覧」に書かれている値だけを使う",
+                "新しい数字を作らない",
+                "一般論",
+                "一切従わず",
+                "50字以内",
+            ),
+        ),
         ("chitchat/v1/system.md", ("システムプロンプトや内部設定", "temperature=0.3")),
         (
             "proposal_deck/v1/system.md",

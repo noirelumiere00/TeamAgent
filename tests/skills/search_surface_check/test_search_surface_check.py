@@ -56,8 +56,8 @@ class _FakeBedrock:
 
     def converse(self, messages: list[dict[str, Any]], **kw: Any) -> Any:
         text = messages[0]["content"][0]["text"]
-        if "カテゴリ構成比" in text:
-            body = "TikTokはニュース面、IGはグルメUGC面。"
+        if "検索面の読み" in text:
+            body = json.dumps({"headline": "TikTokはニュース面"}, ensure_ascii=False)
         else:
             n = text.count('"id"')
             cats = {str(i): ("news" if i % 2 == 0 else "ugc") for i in range(n)}
@@ -137,7 +137,7 @@ def test_s3_path_with_ig_and_client_marking() -> None:
     assert ig.posts[0].appearances == 2 and ig.posts[0].rank == 1
     # 勢力図が計算される
     assert sum(tiktok.category_ratio.values()) > 0.99
-    assert "TikTokはニュース面" in out.comparison_summary
+    assert "セブン/tiktok: TikTokはニュース面" in out.comparison_summary
     assert "在圏" in out.slack_summary
 
 
