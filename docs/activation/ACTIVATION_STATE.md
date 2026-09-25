@@ -54,7 +54,11 @@ MCP Gateway / RLS / per-user OAuth / HITL write boundary / OpenClaw security res
 production user traffic 0・minimal permissions・explicit network/tool boundary・rollback 可能。
 mega-agent にしない。Hermes Slack Pilot は別 MISSION。
 
+> **2026-09-25 裁定（決裁者: 小俣）**: `production user traffic 0` は一般則として維持する。ただし **DM 本人メモ v1 の学習係**に限り例外とし、Human Gate ⑩の後、小俣さん 1 名から実トラフィックを流してよい。対象は `^D[A-Z0-9]{8,}$` に fullmatch する 1 対 1 DM の学習・本人メモ適用だけで、mpim・チャンネル・汎用 Hermes specialist には広げない。
+
 ### Hermes supply-chain（PR2-A1 の既定 upstream）
+
+> **注記（2026-09-25）**: 下の表は v2（汎用 Hermes・PR2-A1）用の既定値である。v1（DM 本人メモ）の Hermes は M2 で repo 直下の `hermes_runtime/`（Python 3.13・upstream を commit 固定・独立 lock）として自前でビルドし、固定する tag/commit は M2 の PR で本表の下に追記する。
 | 項目 | 値 |
 |---|---|
 | tag | `v2026.8.18` / release `v0.20.4` |
@@ -98,6 +102,20 @@ increments ごとに作らず自走する（Human Gate 14 種の枠は残す）�
 | ② | **Freeze は解除のまま走る**（宣言を live へ合わせる） | AWS 側 attachment は 0 principal のまま。repo 側ゲートだけを active で維持し、差分は宣言に明記（下記「Freeze status」） |
 | ③ | **unlock は相乗りさせて後で畳む** | `unlock.active = true` を維持。B1（APP_HTML ピン）/ B2（image-builder 参照の導出化）を同じ unlock に乗せてから一括で relock |
 | ④ | **HMAC 契約は根本から変更** | 現行の source_assertions 方式では report_link を表現できず remediation が構造的に詰む（下記「HMAC remediation は現状の repo 契約では実行不能」）。契約側から作り直す |
+
+### 2026-09-25 の Hermes 便裁定（確定）
+
+裁定番号は Human Gate の ①〜⑭ と混同しないよう H1〜H3 とする。v1 の工程番号は M0〜M11（`docs/architecture/hermes_implementation_plan.md`）。
+
+決裁者: **小俣**。
+
+| # | 裁定 | 適用範囲 / 帰結 |
+|---|---|---|
+| H1 | adopt + Pin 完了を A1 より先とする既存順序を外す | **DM 本人メモ v1 の Hermes 独立 pipeline 便だけ**。一般の Activation/A1 順序は維持 |
+| H2 | 正名化の禁止事項 2 つ（「正名化をしないまま次の generation release へ進まない」「Hermes A1 が generation publisher を必要とするなら、その前に正名化を片付ける」）を外す | **同 Hermes 便だけ**。正名化の hard blocker と禁止事項本文は削除せず、他の generation release には引き続き適用 |
+| H3 | `production user traffic 0` の例外を認める | **学習係だけ**。Human Gate ⑩、小俣さん 1 名、1 対 1 DM から点灯。汎用 Hermes routing には適用しない |
+
+この裁定は scope の免除であって Human Gate、署名 release、provenance、IAM 最小権限、rollback、監査を免除しない。
 
 直前の完了:
 
@@ -347,6 +365,8 @@ Freeze 解除 / 次の通常 generation publish
 - 正名化をしないまま **Freeze を解除しない**
 - 正名化をしないまま **次の generation release へ進まない**
 - **Hermes A1 が generation publisher を必要とするなら、その前に正名化を片付ける**
+
+> **Hermes 便に限る例外（2026-09-25・決裁者 小俣）**: 上の禁止事項本文は一般則として維持するが、DM 本人メモ v1 の独立 Hermes pipeline 便（M3）には、adopt+Pin→A1 の順序、「正名化をしないまま次の generation release へ進まない」、「A1 の前に正名化」の 3 つを適用しない（裁定 H1・H2）。例外はこの便だけで失効し、他の generation release、汎用 Hermes、正名化そのものの完了義務には波及しない。
 
 正名化の内容（Activation 完了後の PR で原子的に行う）:
 
