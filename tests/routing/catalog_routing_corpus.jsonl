@@ -75,3 +75,10 @@
 {"id": "r4neg-mail-02", "utterance": "アサヒの直近メールを要約して", "expect": "mail_summary", "arg_rules": {"client_name": "must_be_present"}, "note": "R4 対照: 顧客名がある正常系"}
 {"id": "r4neg-search-01", "utterance": "今日の会議資料どこ？", "expect": "search", "forbid": ["calendar_freebusy", "calendar_event"], "note": "R4 対照: 『今日』語をカレンダーに横取りさせない（資料探索）"}
 {"id": "r4neg-karte-01", "utterance": "花王の温度感まとめて", "expect": "clientkarte", "forbid": ["mail_summary"], "note": "R4 対照: 顧客名つきカルテ依頼はメール要約に流れない"}
+{"id": "vcapture-01", "utterance": "このTikTokの0:05と0:12のシーン、画像で出して https://www.tiktok.com/@a/video/7", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"timecodes": "must_be_present"}, "note": "R5 切り出しの正例（SOUL の頼み方の例そのまま）"}
+{"id": "vcapture-02", "utterance": "さっき貼った動画の1:20あたり切り出して", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5 添付動画の切り出し（url は空・slack_file=true）"}
+{"id": "vcapture-yt-01", "utterance": "このYouTube動画の0:30のシーンを画像にして https://www.youtube.com/watch?v=jNQXAC9IVRw", "expect": "video_capture", "forbid": ["video_analysis"], "note": "R5 YouTube の切り出しは video_capture を呼んで決定論の案内（ファイル添付のお願い）を返す。呼ばずに断る・分析へ流すのは不合格"}
+{"id": "vanalysis-yt-02", "utterance": "このYouTubeショートの冒頭3秒のフックとCTA、どう作ってるか見て https://www.youtube.com/shorts/abc123", "expect": "video_analysis", "forbid": ["video_capture"], "arg_rules": {"url": "must_be_present"}, "note": "R5 敵対: 秒数があっても分析依頼は video_analysis"}
+{"id": "vanalysis-yt-03", "utterance": "YouTubeのこの動画、構成を分析して。1:20あたりの見せ方も気になる https://youtu.be/jNQXAC9IVRw", "expect": "video_analysis", "forbid": ["video_capture"], "arg_rules": {"url": "must_be_present"}, "note": "R5 敵対: 時刻の言及＋YouTube でも『分析して』は video_analysis"}
+{"id": "vcapture-03", "utterance": "上の動画の0:10のところ画像にして", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5d 添付動画の言い換え。添付が見えなくても聞き返さず slack_file=true で呼ぶ"}
+{"id": "vcapture-04", "utterance": "このスレに貼った動画、2:05あたりをサムネ用に切り出して", "expect": "video_capture", "forbid": ["video_analysis"], "arg_rules": {"url": "must_be_absent"}, "note": "R5d 添付動画の言い換え（サムネ用）"}

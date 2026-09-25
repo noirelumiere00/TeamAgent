@@ -139,7 +139,9 @@ class VideoCaptureInput(BaseModel):
         max_length=2048,
         description=(
             "切り出す動画の URL（https のみ・TikTok / Instagram に対応。"
-            "YouTube は取得元にブロックされるため未対応）。"
+            "YouTube は取得元にブロックされるため切り出しは未対応だが、"
+            "YouTube の URL もそのまま入れて呼べばサーバが添付の案内を返す。"
+            "YouTube 動画の分析は video_analysis で可能）。"
             "会話に添付された動画を使うときは空のままにして slack_file=true にする。"
         ),
     )
@@ -148,7 +150,8 @@ class VideoCaptureInput(BaseModel):
         description=(
             "この会話（スレッド / DM）に添付された動画ファイルを対象にするなら true。"
             "url とは排他（どちらか一方だけ）。添付動画の特定はサーバ側が行うので"
-            "ファイル名や ID を推測して書かないこと。"
+            "ファイル名や ID を推測して書かないこと。「さっき貼った動画」のように会話内の動画を"
+            "指されたら、添付が見えなくても true で呼ぶ（無ければサーバが案内を返す）。"
         ),
     )
     slack_file_id: str = Field(
