@@ -182,7 +182,9 @@ def _run(
 
     reasons: Counter[str] = Counter()
     accepted: list[tuple[Target, str]] = []
-    for target, content in candidates:
+    for target, raw_content in candidates:
+        # Hermes の項目は複数行でありうる。1 行に畳んでから検査する（改行は保存しない）
+        content = " ".join(raw_content.split())
         if not valid_content(content):
             reasons["bad_entry"] += 1
             continue

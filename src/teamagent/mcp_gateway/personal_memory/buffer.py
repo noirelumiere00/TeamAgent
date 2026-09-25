@@ -35,6 +35,10 @@ MAX_JOBS_ENV: Final = "PERSONAL_MEMORY_MAX_JOBS"
 JST: Final = timezone(timedelta(hours=9))
 
 
+class StaleGenerationError(Exception):
+    """読み始めた後に凍結・全削除でバッファが捨てられた（その発話も捨てる）。"""
+
+
 @dataclass(frozen=True, slots=True)
 class Batch:
     """取り出した発話の束（学習ジョブ 1 本ぶん）。repr に中身を出さない。"""
@@ -67,13 +71,30 @@ class VolatileUtteranceBuffer:
         self._pending: dict[str, _Pending] = {}
         # 同じ Slack メッセージの再送（plugin の再試行）を二重に数えない。値は Slack の ts だけ
         self._recent: dict[str, deque[str]] = {}
+        # discard のたびに進める。observe は読み始めの世代を渡し、途中で進んでいたら入れない
+        self._generation: dict[str, int] = {}
+
+    def generation(self, principal: Principal) -> int:
+        with self._lock:
+            return self._generation.get(principal.key, 0)
 
     def add(
-        self, principal: Principal, utterance: str, message_id: str, now: float
+        self,
+        principal: Principal,
+        utterance: str,
+        message_id: str,
+        now: float,
+        *,
+        generation: int | None = None,
     ) -> Batch | None:
-        """発話を 1 件入れる。5 件目でちょうど取り出して返す。入れなかった場合も None。"""
+        """発話を 1 件入れる。5 件目でちょうど取り出して返す。入れなかった場合も None。
+
+        ``generation`` を渡すと、その後に discard されていたら ``StaleGenerationError`` を投げる。
+        """
         key = principal.key
         with self._lock:
+            if generation is not None and self._generation.get(key, 0) != generation:
+                raise StaleGenerationError
             recent = self._recent.setdefault(key, deque(maxlen=RECENT_MESSAGE_IDS))
             if message_id in recent:
                 return None
@@ -100,9 +121,10 @@ class VolatileUtteranceBuffer:
         return out
 
     def discard(self, principal: Principal) -> None:
-        """凍結・全削除のときに、その人の未処理の発話を捨てる。"""
+        """凍結・全削除のときに、その人の未処理の発話を捨てる（世代も進める）。"""
         with self._lock:
             self._pending.pop(principal.key, None)
+            self._generation[principal.key] = self._generation.get(principal.key, 0) + 1
 
     def pending_principals(self) -> int:
         with self._lock:
@@ -251,6 +273,7 @@ __all__ = [
     "Batch",
     "DailyJobQuota",
     "JobSlots",
+    "StaleGenerationError",
     "Sweeper",
     "ThreadLauncher",
     "VolatileUtteranceBuffer",

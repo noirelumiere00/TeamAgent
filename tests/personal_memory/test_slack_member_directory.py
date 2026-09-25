@@ -72,6 +72,12 @@ def test_collects_active_members_across_pages() -> None:
     assert slack.calls == [None, "1"]
 
 
+def test_short_tokens_are_not_used() -> None:
+    slack = _Slack([[_member("U0000000A1", "林 実"), _member("U0000000B1", "Al Smith")]])
+    names = SlackMemberDirectory(team_id=TEAM, fetch_page=slack, clock=_Clock()).refresh_if_stale()
+    assert names == {"Smith"}
+
+
 def test_cached_names_do_no_io_and_expire() -> None:
     clock = _Clock()
     slack = _Slack([[_member("U0000000A1", "田中 太郎")]])

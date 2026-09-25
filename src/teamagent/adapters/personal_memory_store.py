@@ -47,6 +47,8 @@ STATEMENT_TIMEOUT_MS: Final = 800
 _TEAM_RE: Final = re.compile(r"T[A-Z0-9]{8,}")
 _USER_RE: Final = re.compile(r"U[A-Z0-9]{8,}")
 _REASON_RE: Final = re.compile(r"[a-z][a-z0-9_]{0,39}")
+# 0029 の CHECK と同じ集合（C0/C1 制御文字と行・段落区切り）
+_LINE_BREAK_RE: Final = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 Target = Literal["user", "memory"]
 State = Literal["active", "frozen"]
@@ -105,18 +107,20 @@ class Snapshot:
     admin_view_count: int
     erase_confirm_until: _dt.datetime | None
     entries: tuple[EntryRow, ...]
+    noticed_at: _dt.datetime | None = None
 
     def contents(self, target: Target) -> tuple[str, ...]:
         return tuple(e.content for e in self.entries if e.target == target)
 
 
 def valid_content(content: object) -> bool:
-    """DB の CHECK と同じ規則（1〜200 字・前後に空白なし・§ を含まない）。"""
+    """DB の CHECK と同じ規則（1〜200 字・前後に空白なし・§ と改行・制御文字を含まない）。"""
     return (
         isinstance(content, str)
         and 1 <= len(content) <= MAX_ENTRY_CHARS
         and content == content.strip()
         and "§" not in content
+        and _LINE_BREAK_RE.search(content) is None
     )
 
 
@@ -132,7 +136,8 @@ def within_limits(entries: Sequence[tuple[str, str]]) -> bool:
 
 
 _SELECT_PROFILE_SQL = """
-SELECT state, noticed_at IS NOT NULL AS noticed, version, admin_view_count, erase_confirm_until
+SELECT state, noticed_at IS NOT NULL AS noticed, version, admin_view_count, erase_confirm_until,
+       noticed_at
   FROM personal_memory_profiles
  WHERE team_id = %(team)s AND slack_user_id = %(user)s
 """
@@ -315,7 +320,7 @@ class PersonalMemoryStore:
             row = cur.fetchone()
             if row is None:
                 return None
-            state, noticed, version, views, erase_until = (
+            state, noticed, version, views, erase_until, noticed_at = (
                 tuple(row.values()) if isinstance(row, dict) else tuple(row)
             )
             return Snapshot(
@@ -325,6 +330,7 @@ class PersonalMemoryStore:
                 admin_view_count=int(views),
                 erase_confirm_until=erase_until,
                 entries=self._entries(cur, principal),
+                noticed_at=noticed_at,
             )
 
     # --- 書き ---------------------------------------------------------------------------
@@ -350,7 +356,7 @@ class PersonalMemoryStore:
             if target not in TARGET_CHAR_LIMIT or not valid_content(content):
                 raise PersonalMemoryStoreError("bad_entry")
         with self._txn(principal, "apply_learned") as (_conn, cur):
-            state, noticed, version, _views, _erase = self._lock(cur, principal)
+            state, noticed, version, _views, _erase, _noticed_at = self._lock(cur, principal)
             if state != "active" or not noticed:
                 raise PersonalMemoryStoreError("not_active")
             if int(version) != expected_version:
@@ -385,7 +391,7 @@ class PersonalMemoryStore:
         ``version_conflict`` にする（番号がずれた一覧で別の項目を消さない）。
         """
         with self._txn(principal, "forget") as (_conn, cur):
-            _state, _noticed, version, _views, _erase = self._lock(cur, principal)
+            _state, _noticed, version, _views, _erase, _noticed_at = self._lock(cur, principal)
             if expected_version is not None and int(version) != expected_version:
                 raise PersonalMemoryStoreError("version_conflict")
             known = {e.entry_id for e in self._entries(cur, principal)}
@@ -417,7 +423,9 @@ class PersonalMemoryStore:
     def confirm_erase(self, principal: Principal) -> int:
         """確認が期限内なら全項目を消して凍結する。消した件数を返す。"""
         with self._txn(principal, "confirm_erase") as (_conn, cur):
-            _state, _noticed, _version, _views, erase_until = self._lock(cur, principal)
+            _state, _noticed, _version, _views, erase_until, _noticed_at = self._lock(
+                cur, principal
+            )
             cur.execute("SELECT NOW()")
             row = cur.fetchone()
             now = next(iter(row.values())) if isinstance(row, dict) else row[0]

@@ -92,7 +92,9 @@ CREATE TABLE IF NOT EXISTS public.personal_memory_entries (
   -- 本文ではなく 200 字以内の要約。§ は Hermes の項目区切り（"\n§\n"）を壊すので入れない
   content       TEXT NOT NULL CHECK (char_length(content) BETWEEN 1 AND 200
                                      AND content = btrim(content)
-                                     AND position('§' IN content) = 0),
+                                     AND position('§' IN content) = 0
+                                     -- 1 行だけ（改行で返信前の枠の終わりを偽装させない）
+                                     AND content !~ '[\x01-\x1f\x7f-\x9f\u2028\u2029]'),
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   FOREIGN KEY (team_id, slack_user_id)

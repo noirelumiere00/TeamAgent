@@ -73,6 +73,7 @@ def test_notice_then_learn_then_load(store: PersonalMemoryStore, pm_db: PmDb) ->
     store.mark_noticed(p)
     snap = store.load(p)
     assert snap is not None and snap.noticed and snap.state == "active" and snap.entries == ()
+    assert snap.noticed_at is not None and snap.noticed_at.tzinfo is not None
     version = store.apply_learned(
         p,
         expected_version=snap.version,
@@ -126,7 +127,9 @@ def test_version_conflict_rejects_stale_learning(store: PersonalMemoryStore) -> 
     assert exc.value.code == "version_conflict"
 
 
-@pytest.mark.parametrize("content", ["区切り§入り", "x" * 201, " 前後に空白 ", ""])
+@pytest.mark.parametrize(
+    "content", ["区切り§入り", "x" * 201, " 前後に空白 ", "", "改行\n入り", "a\u2028b", "a\x85b"]
+)
 def test_bad_content_rejected_before_db(store: PersonalMemoryStore, content: str) -> None:
     p = _principal("U0BADC0001")
     store.mark_noticed(p)
@@ -282,3 +285,34 @@ def test_concurrent_profile_creation_is_absorbed_by_savepoint(
     snap = store.load(p)
     assert snap is not None and snap.noticed
     assert [a for _, a, _ in _audit_actions(pm_db, p)] == ["notice_ack"]
+
+
+def test_production_connection_path_uses_the_app_role(
+    pm_db: PmDb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本番の接続経路（専用の小さいプール → PgVectorClient.connection → SET ROLE）で動く。
+
+    CI の postgres:16-alpine には pgvector が無いので、物理接続の型登録（register_vector）
+    だけを外す。プール・SET ROLE・返却時の RESET ROLE・txn ローカルの principal は本物。
+    """
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from teamagent.adapters import pgvector_client
+
+    def connect_without_vector(dsn: str) -> Any:
+        return psycopg.connect(dsn, row_factory=dict_row, **pgvector_client._connect_kwargs())
+
+    monkeypatch.setattr(pgvector_client, "_connect_pg", connect_without_vector)
+    monkeypatch.setenv("DATABASE_URL", pm_db.migrator_dsn)
+    store = PersonalMemoryStore()  # 既定の接続（本番と同じ組み立て）
+    a, b = _principal("U0PROD0001"), _principal("U0PROD0002")
+    for p, text in ((a, "A の好み"), (b, "B の好み")):
+        store.mark_noticed(p)
+        snap = store.load(p)
+        assert snap is not None
+        store.apply_learned(p, expected_version=snap.version, adds=[("user", text)], remove_ids=[])
+    # 同じプールの接続を使い回しても、本人の行しか見えない（principal は txn ローカル）
+    for _ in range(3):
+        assert store.load(a).contents("user") == ("A の好み",)  # type: ignore[union-attr]
+        assert store.load(b).contents("user") == ("B の好み",)  # type: ignore[union-attr]

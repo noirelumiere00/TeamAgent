@@ -6,7 +6,9 @@
 その名簿を Slack の ``users.list`` から作る。
 
 - 在籍の人間だけを数える（削除済み・bot・アプリ・ゲスト・外部・別ワークスペースは除く）
-- 名前は real_name・display_name・first_name・last_name を空白（半角・全角）で分けた語の集合
+- 名前は real_name・display_name・first_name・last_name を空白（半角・全角）で分けた語の集合。
+  1 文字の語（林・実 など）と 2 文字以下の英字の語は入れない（一般語と重なって先方の人名まで
+  通してしまうため。1 文字の姓の同僚は覚えない側に倒れる）
 - 取得は learner と掃除スレッドからだけ（``refresh_if_stale``）。context の再検査は I/O をしない
   ``cached_member_names`` を使う
 - 取得に失敗したら直前の成功結果を ``stale_max_s`` まで使い、その後は空集合にする
@@ -79,8 +81,11 @@ def _name_tokens(member: Mapping[str, Any]) -> set[str]:
             continue
         for part in _SPLIT_RE.split(value.strip()):
             part = part.strip()
-            if part and len(part) <= 30:
-                tokens.add(part)
+            if len(part) < 2 or len(part) > 30:
+                continue
+            if part.isascii() and len(part) < 3:
+                continue
+            tokens.add(part)
     return tokens
 
 

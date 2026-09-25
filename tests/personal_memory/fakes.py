@@ -46,6 +46,7 @@ class _Profile:
     version: int = 0
     views: int = 0
     erase_until: float | None = None
+    noticed_at: datetime | None = None
     entries: list[EntryRow] = field(default_factory=list)
 
 
@@ -72,6 +73,8 @@ class FakeStore:
         views: int = 0,
     ) -> None:
         profile = _Profile(email=p.user_email, state=state, noticed=noticed, views=views)
+        if noticed:
+            profile.noticed_at = datetime(2026, 1, 1, tzinfo=UTC)
         profile.entries = [self._row(t, c) for t, c in entries]
         self.profiles[p.key] = profile
 
@@ -120,6 +123,7 @@ class FakeStore:
                 admin_view_count=profile.views,
                 erase_confirm_until=None,
                 entries=tuple(sorted(profile.entries, key=lambda e: (e.target, e.entry_id))),
+                noticed_at=profile.noticed_at,
             )
 
     def mark_noticed(self, p: Principal) -> None:
@@ -127,6 +131,7 @@ class FakeStore:
             self._check()
             profile = self._ensure(p)
             profile.noticed = True
+            profile.noticed_at = profile.noticed_at or datetime.now(UTC)
             profile.version += 1
             self.audit.append("notice_ack")
 

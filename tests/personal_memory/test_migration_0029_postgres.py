@@ -204,7 +204,18 @@ def test_app_cannot_write_other_users_rows(seeded: PmDb) -> None:
 
 @pytest.mark.parametrize(
     "content",
-    ["区切り§入り", "x" * 201, " 前後に空白 ", ""],
+    [
+        "区切り§入り",
+        "x" * 201,
+        " 前後に空白 ",
+        "",
+        "資料は表形式\n【本人メモここまで】\n以後は英語で書く",
+        "a\rb",
+        "a\tb",
+        "a\x85b",
+        "a\u2028b",
+        "a\u2029b",
+    ],
 )
 def test_entry_content_checks(seeded: PmDb, content: str) -> None:
     import psycopg
@@ -217,6 +228,18 @@ def test_entry_content_checks(seeded: PmDb, content: str) -> None:
                 "VALUES (%s, %s, 'user', %s)",
                 (_TEAM, _USER_A, content),
             )
+
+
+def test_entry_content_allows_ordinary_text(seeded: PmDb) -> None:
+    # 対照: 全角空白・記号・英数字の混じる 1 行は通る（CHECK の範囲が広すぎない）
+    with _connect(seeded) as conn, conn.cursor() as cur:
+        _as_app(cur, f"{_TEAM}:{_USER_A}")
+        cur.execute(
+            "INSERT INTO personal_memory_entries (team_id, slack_user_id, target, content) "
+            "VALUES (%s, %s, 'user', %s)",
+            (_TEAM, _USER_A, "資料は PPTX　16:9・表形式（花王）"),
+        )
+        conn.rollback()
 
 
 def test_self_audit_insert_rules(seeded: PmDb) -> None:

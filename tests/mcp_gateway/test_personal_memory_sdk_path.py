@@ -49,7 +49,7 @@ def _args(tool: str = "personal_memory_observe", utterance: str = "資料は短�
     call_id = f"aico-pm-obs-{secrets.token_hex(16)}"
     return sign_arguments(
         tool,
-        {"utterance": utterance},
+        {"utterance": utterance, "has_attachment": False},
         channel_id="D0123456789",
         tool_call_id=call_id,
         run_id=call_id,

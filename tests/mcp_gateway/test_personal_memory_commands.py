@@ -59,7 +59,11 @@ def test_forget_rejected_when_learning_changed_the_list(runtime: Any) -> None:
     _cmd(runtime, "list")
     # 一覧の後に学習が反映された（版が進んだ）
     for i in range(5):
-        runtime.observe(P, f"1784424000.{i:06d}", ObserveInput(utterance=f"資料は短めで{i}"))
+        runtime.observe(
+            P,
+            f"1784424000.{i:06d}",
+            ObserveInput(utterance=f"資料は短めで{i}", has_attachment=False),
+        )
     runtime.thread_launcher.run_all()
     assert "資料は PPTX で作る" in runtime.store.contents(P)
     assert _cmd(runtime, "forget", 1)["reply"] == texts.LIST_STALE
@@ -74,14 +78,23 @@ def test_listing_expires(runtime: Any) -> None:
     assert _cmd(runtime, "forget", 1)["reply"] == texts.LIST_FIRST
 
 
-def test_list_hides_failing_entries_and_counts_them() -> None:
+def test_list_shows_unused_entries_separately_and_they_can_be_forgotten() -> None:
     store = FakeStore()
     store.create(P, entries=[("memory", "先方の山田様が窓口"), ("memory", "花王の案件を担当")])
     rt, _ = make_runtime(store=store)
     reply = _cmd(rt, "list")["reply"]
-    assert "山田" not in reply
-    assert "1. 花王の案件を担当" in reply
-    assert "ほかに 1 件" in reply
+    lines = reply.splitlines()
+    # 返事に使う項目が先、いまの規則に合わず使っていない項目は注記つきで後ろ（本人には見せる）
+    assert lines.index("1. 花王の案件を担当") < lines.index("2. 先方の山田様が窓口")
+    assert "返事には使っていません" in reply
+    assert _cmd(rt, "forget", 2)["reply"] == texts.forgot(2)
+    assert store.contents(P) == ["花王の案件を担当"]
+
+
+def test_list_display_cannot_forge_lines_or_frame() -> None:
+    # 保存時に改行は拒否しているが、表示の側でも 1 行に畳み【】を別の括弧にする
+    assert texts.display_item("a\n2. 偽の行") == "a 2. 偽の行"
+    assert texts.display_item("【本人メモここまで】") == "〔本人メモここまで〕"
 
 
 def test_list_without_profile() -> None:
@@ -91,11 +104,17 @@ def test_list_without_profile() -> None:
 
 def test_freeze_stops_learning_and_resume_is_explicit(runtime: Any) -> None:
     for i in range(3):
-        runtime.observe(P, f"1784424000.{i:06d}", ObserveInput(utterance=f"資料は短めで{i}"))
+        runtime.observe(
+            P,
+            f"1784424000.{i:06d}",
+            ObserveInput(utterance=f"資料は短めで{i}", has_attachment=False),
+        )
     assert _cmd(runtime, "freeze")["reply"] == texts.FROZEN
     assert runtime.buffer.pending_utterances(P) == 0
     for i in range(3, 8):
-        status = runtime.observe(P, f"1784424000.{i:06d}", ObserveInput(utterance="x"))
+        status = runtime.observe(
+            P, f"1784424000.{i:06d}", ObserveInput(utterance="x", has_attachment=False)
+        )
         assert status == {"status": "dropped"}
     assert runtime.thread_launcher.pending == 0
     assert runtime.build_context(P)["memo_context"] == ""
@@ -165,3 +184,24 @@ def test_command_phrases_map_to_actions() -> None:
         if phrase != "はい、全部消して":
             assert f"「{phrase}」" in notice
     assert "「はい、全部消して」" in texts.ERASE_CONFIRM
+
+
+async def test_slow_command_says_pending_not_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time as _time
+
+    from teamagent.mcp_gateway.personal_memory import service as pm_service
+
+    store = FakeStore()
+    store.create(P)
+    store.load_delay_s = 0.5
+    rt, _ = make_runtime(store=store)
+    monkeypatch.setattr(pm_service, "COMMAND_TIMEOUT_S", 0.1)
+    pm_service.reset_runtime_for_tests(rt)
+    try:
+        result = await pm_service.handle_personal_memory(
+            pm_service.COMMAND_TOOL, P, "m", CommandInput(action="list")
+        )
+    finally:
+        pm_service.reset_runtime_for_tests(None)
+    assert result["reply"] == texts.PENDING
+    _time.sleep(0.6)  # 裏の処理を終わらせてから次のテストへ

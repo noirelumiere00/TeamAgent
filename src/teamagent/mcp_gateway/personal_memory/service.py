@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -37,6 +38,7 @@ from teamagent.mcp_gateway.personal_memory.buffer import (
     Batch,
     DailyJobQuota,
     JobSlots,
+    StaleGenerationError,
     Sweeper,
     ThreadLauncher,
     VolatileUtteranceBuffer,
@@ -54,7 +56,7 @@ logger = structlog.get_logger(__name__)
 
 CONTEXT_TIMEOUT_S: Final = 1.0
 OBSERVE_TIMEOUT_S: Final = 2.0
-COMMAND_TIMEOUT_S: Final = 5.0
+COMMAND_TIMEOUT_S: Final = 8.0
 CONTEXT_MAX_CHARS: Final = 3600
 LISTING_TTL_S: Final = 600.0
 
@@ -164,16 +166,29 @@ class PersonalMemoryRuntime:
             return self._observed(principal, "dropped", reason=str(verdict.reasons[0]))
         if self.client is None:
             return self._observed(principal, "dropped", reason="learner_disabled")
+        sent_at = _slack_ts(message_id)
+        if sent_at is None:
+            return self._observed(principal, "dropped", reason="bad_message_id")
+        # 読み始めの世代。読んでいる間に凍結・全削除されたら、この発話も入れない
+        generation = self.buffer.generation(principal)
         try:
             snapshot = self.store.load(principal)
         except PersonalMemoryStoreError as exc:
             return self._observed(principal, "dropped", reason=f"store_{exc.code}")
         if snapshot is None or not snapshot.noticed:
             return self._observed(principal, "dropped", reason="not_noticed")
+        if snapshot.noticed_at is not None and sent_at <= snapshot.noticed_at.timestamp():
+            # 告知を記録する前のメッセージ（1 通目）は学習しない。plugin の呼び順に頼らない
+            return self._observed(principal, "dropped", reason="before_notice")
         if snapshot.state != "active":
             return self._observed(principal, "dropped", reason="frozen")
         self._ensure_sweeper()
-        batch = self.buffer.add(principal, payload.utterance, message_id, self.clock())
+        try:
+            batch = self.buffer.add(
+                principal, payload.utterance, message_id, self.clock(), generation=generation
+            )
+        except StaleGenerationError:
+            return self._observed(principal, "dropped", reason="discarded")
         if batch is None:
             return self._observed(principal, "buffered")
         status = self._launch(batch)
@@ -306,16 +321,21 @@ class PersonalMemoryRuntime:
                 return texts.NOT_STARTED
             names = self._cached_names()
             shown = [e for e in snapshot.entries if check_entry(e.content, member_names=names).ok]
-            self.listing.put(key, snapshot.version, [e.entry_id for e in shown])
+            # いまの規則に合わず返事に使っていない項目も、本人には見せて番号で消せるようにする
+            # （見えない・消せないまま件数と字数の枠だけを使い続けないため）
+            hidden = [e for e in snapshot.entries if e not in shown]
+            self.listing.put(key, snapshot.version, [e.entry_id for e in [*shown, *hidden]])
             return texts.listing(
                 [e.content for e in shown],
-                hidden=len(snapshot.entries) - len(shown),
+                hidden_items=[e.content for e in hidden],
                 admin_views=snapshot.admin_view_count,
                 frozen=snapshot.state != "active",
             )
         if action == "forget":
             return self._forget(principal, payload.item_no or 0)
         if action == "freeze":
+            # DB への書き込みが失敗しても、ためていた発話は先に捨てる（止めたのに学習させない）
+            self.buffer.discard(principal)
             self.store.set_state(principal, "frozen")
             self.buffer.discard(principal)
             self.listing.drop(key)
@@ -367,6 +387,17 @@ class PersonalMemoryRuntime:
         return texts.forgot(item_no)
 
 
+_SLACK_TS_RE: Final = re.compile(r"([0-9]{9,11})\.([0-9]{6})")
+
+
+def _slack_ts(message_id: str) -> float | None:
+    """署名済み claim の message（Slack の ts）を秒に直す。形が違えば None。"""
+    match = _SLACK_TS_RE.fullmatch(message_id)
+    if match is None:
+        return None
+    return int(match.group(1)) + int(match.group(2)) / 1_000_000
+
+
 def _empty_context() -> dict[str, Any]:
     return {"memo_context": "", "notice_required": False, "notice_text": "", "items": 0}
 
@@ -381,7 +412,7 @@ def _frame(sections: Sequence[tuple[str, Sequence[str]]]) -> tuple[str, int]:
         heading_cost = len(heading) + 1
         first = True
         for item in items:
-            line = f"- {item}"
+            line = f"- {texts.display_item(item)}"
             cost = len(line) + 1 + (heading_cost if first else 0)
             if used + cost > CONTEXT_MAX_CHARS:
                 break
@@ -445,15 +476,16 @@ async def handle_personal_memory(
     payload: ObserveInput | ContextInput | CommandInput,
 ) -> dict[str, Any]:
     """門を通った呼び出しを処理する。例外は呼び出し側（server）で固定コードにする。"""
-    runtime = get_runtime()
     if tool == CONTEXT_TOOL:
         try:
+            runtime = get_runtime()
             return await _in_executor(lambda: runtime.build_context(principal), CONTEXT_TIMEOUT_S)
         except Exception as exc:  # 時間切れ・DB 障害でもメモなしで返事をさせる
             logger.info(
                 "personal_memory_context_empty", sha16=principal.sha16, error=type(exc).__name__
             )
             return _empty_context()
+    runtime = get_runtime()
     if tool == OBSERVE_TOOL and isinstance(payload, ObserveInput):
         try:
             return await _in_executor(
@@ -469,6 +501,10 @@ async def handle_personal_memory(
             return await _in_executor(
                 lambda: runtime.command(principal, payload), COMMAND_TIMEOUT_S
             )
+        except TimeoutError:
+            # 処理は裏で続いていて、あとで成功しうる（結果は personal_memory_command のログに残る）
+            logger.warning("personal_memory_command_slow", sha16=principal.sha16)
+            return {"action": payload.action, "ok": False, "reply": texts.PENDING}
         except Exception as exc:
             logger.warning(
                 "personal_memory_command_failed", sha16=principal.sha16, error=type(exc).__name__

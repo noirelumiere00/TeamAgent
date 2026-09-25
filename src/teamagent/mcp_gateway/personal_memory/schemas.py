@@ -40,7 +40,8 @@ class ObserveInput(_Strict):
     """DM の 1 発話（本人の発言だけ・bot の発言は送らない）。"""
 
     utterance: str = Field(min_length=1, max_length=MAX_UTTERANCE_CHARS)
-    has_attachment: StrictBool = False
+    # 必須（渡し忘れで添付つきの発話を本文だけとして学習しない）
+    has_attachment: StrictBool
 
 
 class ContextInput(_Strict):

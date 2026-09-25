@@ -142,6 +142,7 @@ def test_sweeper_starts_once_and_swallows_errors() -> None:
 
 
 def _observe(runtime: Any, p: Principal, i: int, text: str | None = None, **kw: Any) -> str:
+    kw.setdefault("has_attachment", False)
     payload = ObserveInput(utterance=text or f"資料は短めが好き{i}", **kw)
     return runtime.observe(p, f"1784424000.{i:06d}", payload)["status"]
 
@@ -253,3 +254,49 @@ def active_runtime() -> tuple[Any, ManualLauncher]:
     store.create(A)
     store.create(B)
     return make_runtime(store=store, client=HermesFake())
+
+
+# --- レビューで見つけた穴 -------------------------------------------------------------------
+
+
+def test_freeze_discards_buffer_even_if_db_write_fails(active_runtime: Any) -> None:
+    runtime, launcher = active_runtime
+    for i in range(4):
+        _observe(runtime, A, i)
+    runtime.store.fail = True
+    result = runtime.command(A, CommandInput(action="freeze"))
+    assert result["ok"] is False
+    # DB が失敗しても、ためていた発話は捨てる（あとで掃除スレッドに学習させない）
+    assert runtime.buffer.pending_utterances(A) == 0
+    runtime.store.fail = False
+    runtime.clock = lambda: 10_000.0
+    runtime.sweep_tick()
+    assert launcher.pending == 0
+
+
+def test_utterance_racing_with_freeze_is_not_buffered(active_runtime: Any) -> None:
+    runtime, _ = active_runtime
+    original_load = runtime.store.load
+
+    def load_then_freeze(p: Principal) -> Any:
+        snapshot = original_load(p)  # 読み終えた直後に、本人の「止めて」が割り込む
+        runtime.command(p, CommandInput(action="freeze"))
+        return snapshot
+
+    runtime.store.load = load_then_freeze
+    assert _observe(runtime, A, 0) == "dropped"
+    runtime.store.load = original_load
+    assert runtime.buffer.pending_utterances(A) == 0
+
+
+def test_messages_before_notice_are_dropped_by_timestamp() -> None:
+    store = FakeStore()
+    store.create(A)
+    store.profiles[A.key].noticed_at = datetime(2026, 7, 19, 1, 20, tzinfo=UTC)  # 1784424000
+    runtime, _ = make_runtime(store=store)
+    payload = ObserveInput(utterance="資料は短めが好き", has_attachment=False)
+    assert runtime.observe(A, "1784423999.000001", payload)["status"] == "dropped"
+    assert runtime.observe(A, "1784424000.000001", payload)["status"] == "buffered"
+    for bad in ["m", "1784424001", "1784424001.1", "x1784424001.000001"]:
+        assert runtime.observe(A, bad, payload)["status"] == "dropped", bad
+    assert runtime.buffer.pending_utterances(A) == 1

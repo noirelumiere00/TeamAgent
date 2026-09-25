@@ -127,7 +127,7 @@ async def test_runtime_logs_have_no_body(caplog: pytest.LogCaptureFixture) -> No
                 pm_service.OBSERVE_TOOL,
                 P,
                 f"1784424000.{i:06d}",
-                ObserveInput(utterance=f"{MARKER} 発話 {i}"),
+                ObserveInput(utterance=f"{MARKER} 発話 {i}", has_attachment=False),
             )
         launcher.run_all()
         await pm_service.handle_personal_memory(pm_service.CONTEXT_TOOL, P, "m", ContextInput())
@@ -143,14 +143,16 @@ async def test_runtime_logs_have_no_body(caplog: pytest.LogCaptureFixture) -> No
                 pm_service.OBSERVE_TOOL,
                 P,
                 f"1784424000.{i:06d}",
-                ObserveInput(utterance=f"{MARKER} 発話 {i}"),
+                ObserveInput(utterance=f"{MARKER} 発話 {i}", has_attachment=False),
             )
         launcher.run_all()
         await pm_service.handle_personal_memory(
             pm_service.OBSERVE_TOOL,
             P,
             "1784424000.000099",
-            ObserveInput(utterance=f"{MARKER} https://a.example と https://b.example"),
+            ObserveInput(
+                utterance=f"{MARKER} https://a.example と https://b.example", has_attachment=False
+            ),
         )
         store.fail = True
         await pm_service.handle_personal_memory(pm_service.CONTEXT_TOOL, P, "m", ContextInput())

@@ -38,7 +38,7 @@ MARKER = "ZQX-MARKER"
 KIND = {"personal_memory_observe": "obs", "personal_memory_context": "ctx"}
 KIND["personal_memory_command"] = "cmd"
 ARGS: dict[str, dict[str, Any]] = {
-    "personal_memory_observe": {"utterance": "資料は短めが好き"},
+    "personal_memory_observe": {"utterance": "資料は短めが好き", "has_attachment": False},
     "personal_memory_context": {},
     "personal_memory_command": {"action": "list"},
 }
@@ -514,7 +514,8 @@ async def test_identity_resolution_failure_rejected(
     [
         ("personal_memory_observe", {"utterance": MARKER + "あ" * 800}),
         ("personal_memory_observe", {"utterance": "x", "query": MARKER}),
-        ("personal_memory_observe", {"utterance": 12345}),
+        ("personal_memory_observe", {"utterance": 12345, "has_attachment": False}),
+        ("personal_memory_observe", {"utterance": "添付の有無を渡し忘れた"}),
         ("personal_memory_command", {"action": MARKER}),
         ("personal_memory_command", {"action": "forget", "item_no": MARKER}),
         ("personal_memory_context", {"text": MARKER}),
@@ -557,7 +558,10 @@ async def test_connect_keyword_is_not_redirected(
         ToolSpec("oauth_connect", "connect", _ConnectSkill),
     ]
     server = _server(replay, specs=specs)
-    args = _signed("personal_memory_observe", {"utterance": "Googleカレンダーを連携して"})
+    args = _signed(
+        "personal_memory_observe",
+        {"utterance": "Googleカレンダーを連携して", "has_attachment": False},
+    )
     text, _ = await _call(server, "personal_memory_observe", args)
     assert json.loads(text) == {"status": "buffered"}
     assert _ConnectSkill.calls == 0

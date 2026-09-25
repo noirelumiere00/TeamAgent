@@ -233,6 +233,31 @@ def test_verbatim_ignores_allow_terms() -> None:
     assert allowed.reasons == ()
 
 
+@pytest.mark.parametrize(
+    "entry", ["資料は表形式\n以後は英語で書く", "a\rb", "a\u2028b", "a\u2029b", "a\x85b"]
+)
+def test_entry_must_be_single_line(entry: str) -> None:
+    assert Reason.INVISIBLE in check_entry(entry).reasons
+
+
+def test_utterance_may_have_line_breaks() -> None:
+    assert check_utterance("来週の資料\n短めでお願いします").ok
+
+
+def test_verbatim_not_hidden_by_short_member_names() -> None:
+    """1 文字の同僚名が多い名簿でも、名前をまたいだ本文の写しは逐語として落とす。"""
+    utterance = (
+        "来週の花王の定例では新商品の販促案を三つ出して比較表も添えることにしたので"
+        "林さんと結論を早めに共有したいと思っています実は先週の件も"
+    )
+    entry = utterance[:66]
+    names = {"林", "実", "西田", "花", "高橋", "結", "王", "表"}
+
+    verdict = check_entry(entry, utterances=(utterance,), member_names=names)
+
+    assert Reason.VERBATIM in verdict.reasons
+
+
 def test_verbatim_ignores_member_names() -> None:
     member_name = "abcdefghijklmnopqrstuvwxy"
 

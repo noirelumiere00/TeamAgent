@@ -79,7 +79,8 @@ M3 の Hermes 便に限り、ACTIVATION の「adopt+Pin 完了後に A1」とい
 | DB ロール | 本人の読み書きは専用の `personal_memory_app`（NOLOGIN NOBYPASSRLS）で行う。master には INHERIT FALSE・SET TRUE で付け、master 直結（BYPASSRLS の有無にかかわらず）・`teamagent_app`・`teamagent_dashboard` からは表が読めない。表と関数の所有者は `personal_memory_definer`。migration の最後で「master が本人メモのロールを継承していない」ことを検査し、満たさなければ中止する |
 | 環境変数（mcp） | `USE_PERSONAL_MEMORY`（既定 off）／`PERSONAL_MEMORY_ALLOWED_EMAILS`（空＝全員拒否）／`PERSONAL_MEMORY_MAX_JOBS`（1〜2・既定 1）／`HERMES_SERVICE_URL`（https・8790）／`TEAMAGENT_HERMES_INGRESS_BEARER`／`HERMES_TLS_CA_PEM`（自己署名 CA をトラストアンカーにしてホスト名も検証）／`PERSONAL_MEMORY_NOTICE_RETENTION`・`PERSONAL_MEMORY_NOTICE_CONTACT`（告知文の「〇〇」。**未設定なら告知を出さず、告知済みにもしない＝学習が始まらない**）。在籍者名簿は既存の `SLACK_TEAM_ID`・`SLACK_BOT_TOKEN` で `users.list` を読む |
 | 点灯前の確認（M9） | bot token に `users:read` があること（`users.list` を読み取りで 1 回）／Hermes 証明書の SAN が `HERMES_SERVICE_URL` のホスト名と一致すること／告知の 2 値の確定／mcp では Sentry が未初期化なので「Sentry に無い」確認は実質的な確認にならないこと |
-| guard の訂正 | 「〜を担当する」（目的語が仕事）を人名扱いしていた誤検知を直した。「田中が担当」「花王担当」「山田を担当に推す」は引き続き落とす |
+| guard の訂正 | 「〜を担当する」（目的語が仕事）を人名扱いしていた誤検知を直した。「田中が担当」「花王担当」「山田を担当に推す」は引き続き落とす。逐語の検査は許可語で文を切らず 1 文字に畳んで比べる（1 文字の同僚名で写しを見逃さない）。メモは 1 行だけ（改行・制御文字は guard・保存前検査・DB の CHECK の 3 か所で拒否し、表示でも【】を別の括弧に替える） |
+| 既知の限界（M5 では直さない） | ① DB の分離はアプリの不具合への防壁で、master の資格情報を持つ者には効かない（全タスクが同じ `DATABASE_URL`。master は本人メモのロールへ SET ROLE でき、PG16 の作成者 ADMIN で定義者ロールも自分に付けられる。管理者閲覧関数の `p_admin_email` も呼び出し側の申告）。専用のログインロールと secret に分けるか、閲覧者をセッションから取るかは M6 で決める ② 「〜を担当する」の例外により、敬称の無い「鈴木を担当している」は通る（敬称の無い人名はもともと通る。敬称ベースの限界の範囲） ③ context の 1.0 秒は MCP 内の処理だけで、署名検証・resolver・SDK の一覧作り直しは含まない。全体の上限は plugin の 1.2 秒（M8）で守る |
 
 ## 人の作業と目安
 

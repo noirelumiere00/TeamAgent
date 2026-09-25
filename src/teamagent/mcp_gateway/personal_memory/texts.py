@@ -110,6 +110,20 @@ ERASE_EXPIRED: Final = (
 )
 NOTICE_RECORDED: Final = ""
 UNAVAILABLE: Final = "いま本人メモの操作ができません。少し時間をおいて、もう一度送ってください。"
+PENDING: Final = (
+    "処理に時間がかかっています。少し待ってから「何を覚えてる？」で結果を確かめてください。"
+)
+
+
+_FRAME_BRACKETS: Final = str.maketrans({"【": "〔", "】": "〕"})
+
+
+def display_item(item: str) -> str:
+    """本人メモの項目を表示用に整える（1 行に畳み、枠の見出しに使う【】を別の括弧に替える）。
+
+    保存時にも改行は拒否しているが、表示の側でも枠や番号付きの行を偽装させない。
+    """
+    return " ".join(item.split()).translate(_FRAME_BRACKETS)
 
 
 def forgot(item_no: int) -> str:
@@ -126,22 +140,30 @@ def erased(count: int) -> str:
 def listing(
     items: Sequence[str],
     *,
-    hidden: int,
+    hidden_items: Sequence[str] = (),
     admin_views: int,
     frozen: bool,
 ) -> str:
-    """「何を覚えてる？」への返答。items は番号順の本人メモ（再検査に合格したものだけ）。"""
+    """「何を覚えてる？」への返答。
+
+    items は返事に使っている項目（再検査に合格したもの）、hidden_items はいまの規則に
+    合わず使っていない項目。番号は items → hidden_items の順に通しで振る。
+    """
     lines: list[str] = []
     if frozen:
         lines.append("（いまは停止中です。「記憶を再開して」で再開します）")
-    if items:
+    if items or hidden_items:
         lines.append("いま覚えていること:")
-        lines.extend(f"{i}. {item}" for i, item in enumerate(items, start=1))
+        lines.extend(f"{i}. {display_item(item)}" for i, item in enumerate(items, start=1))
+        if hidden_items:
+            lines.append("（次の項目は、表示の規則に合わないため返事には使っていません）")
+            start = len(items) + 1
+            lines.extend(
+                f"{i}. {display_item(item)}" for i, item in enumerate(hidden_items, start=start)
+            )
         lines.append("消したい項目は「3番を忘れて」のように番号で送ってください。")
     else:
         lines.append(LIST_EMPTY)
-    if hidden:
-        lines.append(f"ほかに {hidden} 件は、表示の規則に合わないため表示も利用もしていません。")
     lines.append(f"管理者に閲覧された回数: {admin_views} 回")
     return "\n".join(lines)
 

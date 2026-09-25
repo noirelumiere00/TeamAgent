@@ -109,6 +109,7 @@ _WORD_BOUNDARY_PARTICLES: Final[tuple[str, ...]] = (
 )
 
 _INVISIBLE_CATEGORIES: Final[frozenset[str]] = frozenset({"Cf", "Co", "Cn"})
+_LINE_BREAKING_CATEGORIES: Final[frozenset[str]] = frozenset({"Cc", "Zl", "Zp"})
 _INVISIBLE_CODEPOINTS: Final[frozenset[int]] = frozenset(
     {
         *range(0xE0000, 0xE0080),
@@ -190,8 +191,13 @@ def _is_too_long(context: _Context) -> bool:
 
 
 def _has_invisible(context: _Context) -> bool:
+    # メモは 1 行。改行・制御文字・行/段落区切りを許すと、返信前の「参考情報」枠の
+    # 終わりを偽装して枠の外に指示を置ける（発話には改行があってよい）
+    line_breaking = _LINE_BREAKING_CATEGORIES if context.scope == "entry" else frozenset()
     return any(
-        ord(char) in _INVISIBLE_CODEPOINTS or unicodedata.category(char) in _INVISIBLE_CATEGORIES
+        ord(char) in _INVISIBLE_CODEPOINTS
+        or unicodedata.category(char) in _INVISIBLE_CATEGORIES
+        or unicodedata.category(char) in line_breaking
         for char in context.raw
     )
 
@@ -221,13 +227,20 @@ def _has_long_digits(context: _Context) -> bool:
     return _LONG_DIGITS_RE.search(context.normalized) is not None
 
 
-def _without_allow_terms(text: str, allow_terms: frozenset[str]) -> tuple[str, ...]:
-    """許可語を比較不能な境界として除き、残った文字列を返す。"""
+# 許可語（顧客名・商材名・同僚名）を 1 文字に畳むときの記号
+_TERM_MASK: Final[str] = "\ufffc"
+
+
+def _mask_allow_terms(text: str, allow_terms: frozenset[str]) -> str:
+    """許可語をそれぞれ 1 文字の記号に置き換える。
+
+    長い許可語そのものの一致は逐語扱いしない一方、許可語をまたいだ本文の写しは
+    連続したまま比べる（許可語で文を切ると、1 文字の同僚名が多い名簿で写しを見逃す）。
+    """
     if not allow_terms:
-        return (text,)
+        return text
     alternatives = (re.escape(term) for term in sorted(allow_terms, key=len, reverse=True))
-    pattern = re.compile("|".join(alternatives))
-    return tuple(pattern.split(text))
+    return re.sub("|".join(alternatives), _TERM_MASK, text)
 
 
 def _has_common_run(left: str, right: str) -> bool:
@@ -247,16 +260,11 @@ def _has_common_run(left: str, right: str) -> bool:
 
 def _has_verbatim(context: _Context) -> bool:
     excluded_terms = context.allow_terms | context.member_names
-    entry_parts = _without_allow_terms(context.normalized, excluded_terms)
-    for utterance in context.utterances:
-        utterance_parts = _without_allow_terms(normalize(utterance), excluded_terms)
-        if any(
-            _has_common_run(entry_part, utterance_part)
-            for entry_part in entry_parts
-            for utterance_part in utterance_parts
-        ):
-            return True
-    return False
+    entry = _mask_allow_terms(context.normalized, excluded_terms)
+    return any(
+        _has_common_run(entry, _mask_allow_terms(normalize(utterance), excluded_terms))
+        for utterance in context.utterances
+    )
 
 
 def _has_complete_suffix(text: str, term: str) -> bool:
