@@ -1,0 +1,76 @@
+# syntax=docker/dockerfile:1
+# Aico DM 本人メモ v1 の Hermes「覚える係」イメージ（docs/architecture/hermes_migration_design.md §10b）。
+# - Hermes 本体は v2026.9.21 の commit を tarball の sha256 で固定し、ビルドはせず source を PYTHONPATH で使う
+#   （upstream は wheel を配布していない。requires-python は >=3.11,<3.14 なので Python 3.13 で動かす）
+# - 依存は hermes_runtime/requirements-hermes.lock（ハッシュ固定・anyio は CVE 修正版）を --no-deps で入れる
+# - OS 部分は公開 Wolfi（packages.wolfi.dev/os）の python-3.13 だけ。コンパイラや git は入れない
+# - 実行は非 root（uid 10001）。ジョブの作業場は /tmp の下に毎回作って消す（aico_hermes.runner）
+
+ARG WOLFI_BASE_DIGEST=sha256:fac38d12efdb4bf43ac9e599a31db10a27ad5dd71e5f1618790962eda8d66180
+ARG PYTHON_APK_VERSION=3.13.15_git20260918-r2
+ARG HERMES_COMMIT=d337b736aa1e8ebecfab043842d13e4a2d2f48a3
+ARG HERMES_TARBALL_SHA256=ba21ce727bcd05bfc60eedfbfcb63b260af99cb5c902d37efa31daa97227da4e
+ARG WOLFI_SIGNER_PUB_SHA256=f0031424cf46f7db780ce63a45f0fd6aa6f85f601e6bb3b7a91fe3d4d5b7d2cc
+
+FROM cgr.dev/chainguard/wolfi-base@${WOLFI_BASE_DIGEST} AS wolfi
+ARG WOLFI_SIGNER_PUB_SHA256
+USER 0
+COPY infra/docker/hermes/wolfi-signing.rsa.pub /etc/apk/keys/wolfi-signing.rsa.pub
+RUN set -eu; \
+    printf '%s  %s\n' "$WOLFI_SIGNER_PUB_SHA256" /etc/apk/keys/wolfi-signing.rsa.pub | sha256sum -c -; \
+    printf '%s\n' https://packages.wolfi.dev/os > /etc/apk/repositories
+
+FROM wolfi AS builder
+ARG PYTHON_APK_VERSION
+ARG HERMES_COMMIT
+ARG HERMES_TARBALL_SHA256
+RUN --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    cp /etc/ssl/certs/ca-certificates.crt /tmp/build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then cat /run/secrets/teamagent_ca >> /tmp/build-ca.pem; fi; \
+    SSL_CERT_FILE=/tmp/build-ca.pem apk add --no-cache "python-3.13=${PYTHON_APK_VERSION}" uv
+ADD --checksum=sha256:${HERMES_TARBALL_SHA256} \
+    https://codeload.github.com/NousResearch/hermes-agent/tar.gz/${HERMES_COMMIT} /tmp/hermes.tar.gz
+RUN set -eu; \
+    mkdir -p /opt/hermes/src; \
+    tar -xzf /tmp/hermes.tar.gz -C /opt/hermes/src --strip-components=1; \
+    test -f /opt/hermes/src/run_agent.py; \
+    test -f /opt/hermes/src/tools/memory_tool.py; \
+    cd /opt/hermes/src; \
+    rm -rf tests apps website evals contributors docker .github; \
+    find . \( -name package.json -o -name package-lock.json -o -name node_modules \) -prune -exec rm -rf {} +; \
+    test -f run_agent.py
+COPY hermes_runtime/requirements-hermes.lock /tmp/requirements-hermes.lock
+RUN --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    cp /etc/ssl/certs/ca-certificates.crt /tmp/build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then cat /run/secrets/teamagent_ca >> /tmp/build-ca.pem; fi; \
+    uv venv --python /usr/bin/python3.13 /opt/hermes/.venv; \
+    SSL_CERT_FILE=/tmp/build-ca.pem UV_PYTHON_DOWNLOADS=never VIRTUAL_ENV=/opt/hermes/.venv \
+      uv pip install --no-deps --require-hashes --no-cache -r /tmp/requirements-hermes.lock; \
+    /opt/hermes/.venv/bin/python -c "from importlib.metadata import version as v; assert v('anyio') == '4.14.2', v('anyio')"
+COPY hermes_runtime/aico_hermes /opt/aico/aico_hermes
+
+FROM wolfi
+ARG PYTHON_APK_VERSION
+RUN --mount=type=secret,id=teamagent_ca,required=false \
+    set -eu; \
+    cp /etc/ssl/certs/ca-certificates.crt /tmp/build-ca.pem; \
+    if [ -f /run/secrets/teamagent_ca ]; then cat /run/secrets/teamagent_ca >> /tmp/build-ca.pem; fi; \
+    SSL_CERT_FILE=/tmp/build-ca.pem apk add --no-cache "python-3.13=${PYTHON_APK_VERSION}"; \
+    rm -f /tmp/build-ca.pem; \
+    adduser -D -u 10001 hermes; \
+    apk info -v | sort > /opt/apk-installed.txt
+COPY --from=builder /opt/hermes/.venv /opt/hermes/.venv
+COPY --from=builder /opt/hermes/src /opt/hermes/src
+COPY --from=builder /opt/aico /opt/aico
+ENV PATH=/opt/hermes/.venv/bin:/usr/bin:/bin \
+    PYTHONPATH=/opt/aico:/opt/hermes/src \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONSAFEPATH=1 \
+    PYTHONUNBUFFERED=1 \
+    HERMES_PORT=8790
+USER 10001:10001
+WORKDIR /tmp
+EXPOSE 8790
+ENTRYPOINT ["python", "-m", "aico_hermes.server"]
