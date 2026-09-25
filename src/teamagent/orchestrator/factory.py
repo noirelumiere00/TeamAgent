@@ -703,14 +703,17 @@ def build_production_tools() -> list[ToolSpec]:
     # TikTok面は tiktok_acquire 成果物のS3読込が正（3KW以上は必須・descriptionで誘導）、
     # IG面は Apify（APIFY_API_TOKEN）。IG_SURFACE_DEFAULT=search|hashtag で既定面を切替
     # （日本語KWカバレッジの検証ゲート用）。
+    # 結果の金庫への記録は他のカタログと同じ USE_RESEARCH_PERSIST（既定 OFF）で有効になる。
     if _envflag("USE_SEARCH_SURFACE_TOOL"):
         from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 
+        _persist_s = _research_persister  # lambda キャプチャ用（None なら no-op）
         specs.append(
             ToolSpec(
                 SearchSurfaceCheckSkill.name,
                 SearchSurfaceCheckSkill.description,
                 SearchSurfaceCheckSkill,
+                factory=lambda: SearchSurfaceCheckSkill(persister=_persist_s),
             )
         )
 
