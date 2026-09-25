@@ -159,10 +159,13 @@ class ProposalJobStore:
             row["_updated_at_invalid"] = True
         result_json = string_value("result_json")
         error_code = string_value("error_code")
+        error_summary = string_value("error_summary")
         if result_json is not None:
             row["result_json"] = result_json
         if error_code is not None:
             row["error_code"] = error_code
+        if error_summary is not None:
+            row["error_summary"] = error_summary
         return row
 
     def mark_running(self, job_id: str) -> bool:
@@ -224,7 +227,10 @@ class ProposalJobStore:
         expected_updated_at: str | None = None,
         expected_updated_at_missing: bool = False,
         expected_updated_at_invalid: bool = False,
+        error_summary: str | None = None,
     ) -> bool:
+        """failed へ遷移する。error_summary は利用者に見せてよい短い理由（本文断片を含めない）。"""
+
         return self._transition(
             job_id,
             expected_statuses=expected_statuses,
@@ -233,6 +239,7 @@ class ProposalJobStore:
             expected_updated_at_invalid=expected_updated_at_invalid,
             next_status="failed",
             error_code=error_code,
+            error_summary=error_summary,
         )
 
     def _transition(
@@ -246,6 +253,7 @@ class ProposalJobStore:
         expected_updated_at_invalid: bool = False,
         result_json: str | None = None,
         error_code: str | None = None,
+        error_summary: str | None = None,
     ) -> bool:
         timestamp_conditions = sum(
             (
@@ -274,10 +282,13 @@ class ProposalJobStore:
                 row["updated_at"] = now_text
                 row.pop("result_json", None)
                 row.pop("error_code", None)
+                row.pop("error_summary", None)
                 if result_json is not None:
                     row["result_json"] = result_json
                 if error_code is not None:
                     row["error_code"] = error_code
+                if error_summary:
+                    row["error_summary"] = error_summary
                 return True
 
         status_conditions: list[str] = []
@@ -316,6 +327,11 @@ class ProposalJobStore:
             values[":error_code"] = {"S": error_code}
         else:
             removes.append("#error_code")
+        if error_summary:
+            sets.append("#error_summary = :error_summary")
+            values[":error_summary"] = {"S": error_summary}
+        else:
+            removes.append("#error_summary")
 
         update_expression = "SET " + ", ".join(sets)
         if removes:
@@ -331,6 +347,7 @@ class ProposalJobStore:
                     "#updated_at": "updated_at",
                     "#result_json": "result_json",
                     "#error_code": "error_code",
+                    "#error_summary": "error_summary",
                 },
                 ExpressionAttributeValues=values,
             )
