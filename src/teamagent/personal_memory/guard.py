@@ -80,6 +80,18 @@ _COMPOUND_STARTING_WITH_HONORIFIC: Final[tuple[str, ...]] = (
     "担当者",
     "担当部署",
 )
+# 「〜を担当」の直後がこれなら動詞（担当する）として使っている
+_TANTO_VERB_FOLLOWERS: Final[tuple[str, ...]] = (
+    "する",
+    "して",
+    "した",
+    "しな",
+    "しま",
+    "中",
+    "予定",
+    "。",
+    "、",
+)
 _WORD_BOUNDARY_PARTICLES: Final[tuple[str, ...]] = (
     "から",
     "まで",
@@ -279,6 +291,12 @@ def _has_person_name(context: _Context) -> bool:
             continue
         if any(_has_complete_suffix(prefix, term) for term in allowed_names):
             continue
+        # 「花王の案件を担当」「資料作成を担当している」: 動詞の「を担当する」の目的語は仕事。
+        # 「山田を担当に推す」（名詞の担当）・「田中が担当」・「花王担当」は人名を含みうるので落とす
+        if honorific == "担当" and prefix.endswith("を"):
+            after = text[start + len(honorific) :]
+            if not after or after.startswith(_TANTO_VERB_FOLLOWERS):
+                continue
         if _NAME_BEFORE_HONORIFIC_RE.search(prefix):
             return True
     return False

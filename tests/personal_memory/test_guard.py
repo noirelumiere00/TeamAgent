@@ -301,6 +301,24 @@ def test_compound_words_with_honorific_chars_pass(entry: str) -> None:
     assert verdict.ok, verdict.reasons
 
 
+@pytest.mark.parametrize(
+    "entry", ["花王の案件を担当", "資料作成を担当している", "来期は販促を担当予定", "集計を担当。"]
+)
+def test_task_object_of_tanto_passes(entry: str) -> None:
+    verdict = check_entry(entry)
+
+    assert verdict.ok, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "entry", ["田中が担当", "花王担当の窓口", "山田を担当に推す", "佐藤を担当として紹介"]
+)
+def test_tanto_with_possible_name_still_rejected(entry: str) -> None:
+    verdict = check_entry(entry)
+
+    assert Reason.PERSON_NAME in verdict.reasons
+
+
 @pytest.mark.parametrize("entry", ["山田様の仕様確認は表で", "同様に佐藤部長へ確認"])
 def test_name_still_rejected_next_to_compound_words(entry: str) -> None:
     verdict = check_entry(entry)
