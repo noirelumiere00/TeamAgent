@@ -2,7 +2,8 @@
 
 本人メモには「社内の同僚の名前は覚えてよい・先方担当者の名前は覚えない」（09-25 裁定）。
 書き込み前の検査（teamagent.personal_memory.guard）は、
-敬称の前の語が ``member_names`` に完全一致すれば同僚として通す。その名簿を Slack の ``users.list`` から作る。
+敬称の前の語が ``member_names`` に完全一致すれば同僚として通す。
+その名簿を Slack の ``users.list`` から作る。
 
 - 在籍の人間だけを数える（削除済み・bot・アプリ・ゲスト・外部・別ワークスペースは除く）
 - 名前は real_name・display_name・first_name・last_name を空白（半角・全角）で分けた語の集合

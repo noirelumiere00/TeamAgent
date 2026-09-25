@@ -24,6 +24,7 @@ import datetime as _dt
 import hashlib
 import os
 import re
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -219,13 +220,15 @@ class PersonalMemoryStore:
         self, connection_factory: Callable[[], AbstractContextManager[Any]] | None = None
     ) -> None:
         self._factory = connection_factory
+        self._factory_lock = threading.Lock()
 
     # --- 接続とトランザクション -------------------------------------------------------------
 
     @contextmanager
     def _txn(self, principal: Principal, op: str) -> Iterator[Any]:
-        if self._factory is None:
-            self._factory = _default_connection_factory()
+        with self._factory_lock:
+            if self._factory is None:
+                self._factory = _default_connection_factory()
         try:
             with self._factory() as conn, conn.cursor() as cur:
                 cur.execute("SELECT set_config('app.pm_principal', %s, true)", (principal.key,))
@@ -373,17 +376,25 @@ class PersonalMemoryStore:
             )
             return int(version) + 1
 
-    def forget(self, principal: Principal, entry_id: str) -> bool:
-        """1 項目を消す。見つからなければ False。"""
+    def forget(
+        self, principal: Principal, entry_id: str, *, expected_version: int | None = None
+    ) -> int | None:
+        """1 項目を消して新しい版を返す。見つからなければ None。
+
+        ``expected_version`` を渡すと、一覧を出した時点から版が進んでいれば
+        ``version_conflict`` にする（番号がずれた一覧で別の項目を消さない）。
+        """
         with self._txn(principal, "forget") as (_conn, cur):
-            self._lock(cur, principal)
+            _state, _noticed, version, _views, _erase = self._lock(cur, principal)
+            if expected_version is not None and int(version) != expected_version:
+                raise PersonalMemoryStoreError("version_conflict")
             known = {e.entry_id for e in self._entries(cur, principal)}
             if entry_id not in known:
-                return False
+                return None
             cur.execute(_DELETE_ENTRIES_SQL, self._params(principal, ids=[entry_id]))
             cur.execute(_BUMP_SQL, self._params(principal, email=principal.user_email.lower()))
             self._audit(cur, principal, "forget", 1, "user_command")
-            return True
+            return int(version) + 1
 
     def set_state(self, principal: Principal, state: State) -> None:
         """「覚えるのを止めて」（frozen）と「記憶を再開して」（active）。"""

@@ -169,7 +169,7 @@ def test_cannot_remove_other_users_entries(store: PersonalMemoryStore) -> None:
             a, expected_version=snap_a.version, adds=[], remove_ids=[b_entry.entry_id]
         )
     assert exc.value.code == "unknown_entry"
-    assert store.forget(a, b_entry.entry_id) is False
+    assert store.forget(a, b_entry.entry_id) is None
     assert store.load(b).contents("user") == ("B の癖",)  # type: ignore[union-attr]
 
 
@@ -181,8 +181,15 @@ def test_forget_and_freeze_and_resume(store: PersonalMemoryStore, pm_db: PmDb) -
     store.apply_learned(
         p, expected_version=snap.version, adds=[("user", "a"), ("user", "b")], remove_ids=[]
     )
-    target = next(e for e in store.load(p).entries if e.content == "a")  # type: ignore[union-attr]
-    assert store.forget(p, target.entry_id) is True
+    listed = store.load(p)
+    assert listed is not None
+    target = next(e for e in listed.entries if e.content == "a")
+    other = next(e for e in listed.entries if e.content == "b")
+    assert store.forget(p, target.entry_id, expected_version=listed.version) == listed.version + 1
+    # 一覧の版から進んでいたら消さない（番号のずれた一覧で別の項目を消さない）
+    with pytest.raises(PersonalMemoryStoreError) as exc:
+        store.forget(p, other.entry_id, expected_version=listed.version)
+    assert exc.value.code == "version_conflict"
     assert store.load(p).contents("user") == ("b",)  # type: ignore[union-attr]
     store.set_state(p, "frozen")
     store.set_state(p, "active")
@@ -231,3 +238,47 @@ def test_store_errors_hide_database_details(pm_db: PmDb) -> None:
         store.load(_principal("U0DOWN0001"))
     assert exc.value.code == "store_unavailable"
     assert exc.value.__cause__ is None and "password" not in str(exc.value)
+
+
+def test_concurrent_profile_creation_is_absorbed_by_savepoint(
+    store: PersonalMemoryStore, pm_db: PmDb
+) -> None:
+    """別の接続が profile を INSERT して未コミットの間に mark_noticed が走っても壊れない。
+
+    こちらの INSERT は一意索引で待たされ、相手のコミット後に UniqueViolation になる。
+    SAVEPOINT で受け止めて既存行を更新する（ON CONFLICT は使わない）。
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    p = _principal("U0RACE0001")
+    other = psycopg.connect(pm_db.admin_dsn)
+    try:
+        with other.cursor() as cur:
+            cur.execute(
+                "INSERT INTO personal_memory_profiles (team_id, slack_user_id, user_email) "
+                "VALUES (%s, %s, %s)",
+                (p.team_id, p.slack_user_id, p.user_email),
+            )
+        errors: list[BaseException] = []
+
+        def notice() -> None:
+            try:
+                store.mark_noticed(p)
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=notice)
+        worker.start()
+        time.sleep(0.2)  # こちらの INSERT が一意索引で待っている間に相手がコミットする
+        other.commit()
+        worker.join(timeout=5)
+    finally:
+        other.close()
+    assert not worker.is_alive()
+    assert errors == []
+    snap = store.load(p)
+    assert snap is not None and snap.noticed
+    assert [a for _, a, _ in _audit_actions(pm_db, p)] == ["notice_ack"]
