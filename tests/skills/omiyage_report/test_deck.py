@@ -751,9 +751,7 @@ def test_keyword_slide_never_says_highest_is_zero() -> None:
             posts=(_post("r1", "エスビー食品 #PR"),),
         ),
     ]
-    measurement = measure(
-        axes, brand="GABAN", competitors=["エスビー食品"], keywords=["時短 夕飯"]
-    )
+    measurement = measure(axes, brand="GABAN", competitors=["エスビー食品"], keywords=["時短 夕飯"])
     plan = build_deck_plan(measurement, None, generated_on="2026-09-25", search_depth=30)
     q4 = next(slide for slide in plan.slide_plan if slide.q_number == "Q4")
     assert q4.tag is not None
