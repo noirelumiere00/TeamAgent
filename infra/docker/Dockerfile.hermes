@@ -10,14 +10,14 @@ ARG WOLFI_BASE_DIGEST=sha256:fac38d12efdb4bf43ac9e599a31db10a27ad5dd71e5f1618790
 ARG PYTHON_APK_VERSION=3.13.15_git20260918-r2
 ARG HERMES_COMMIT=d337b736aa1e8ebecfab043842d13e4a2d2f48a3
 ARG HERMES_TARBALL_SHA256=ba21ce727bcd05bfc60eedfbfcb63b260af99cb5c902d37efa31daa97227da4e
-ARG WOLFI_KEY_SHA256=f0031424cf46f7db780ce63a45f0fd6aa6f85f601e6bb3b7a91fe3d4d5b7d2cc
+ARG WOLFI_SIGNER_PUB_SHA256=f0031424cf46f7db780ce63a45f0fd6aa6f85f601e6bb3b7a91fe3d4d5b7d2cc
 
 FROM cgr.dev/chainguard/wolfi-base@${WOLFI_BASE_DIGEST} AS wolfi
-ARG WOLFI_KEY_SHA256
+ARG WOLFI_SIGNER_PUB_SHA256
 USER 0
 COPY infra/docker/hermes/wolfi-signing.rsa.pub /etc/apk/keys/wolfi-signing.rsa.pub
 RUN set -eu; \
-    printf '%s  %s\n' "$WOLFI_KEY_SHA256" /etc/apk/keys/wolfi-signing.rsa.pub | sha256sum -c -; \
+    printf '%s  %s\n' "$WOLFI_SIGNER_PUB_SHA256" /etc/apk/keys/wolfi-signing.rsa.pub | sha256sum -c -; \
     printf '%s\n' https://packages.wolfi.dev/os > /etc/apk/repositories
 
 FROM wolfi AS builder
