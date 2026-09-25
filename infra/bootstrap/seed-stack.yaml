@@ -326,6 +326,20 @@ Resources:
                 Resource:
                   - arn:aws:codeconnections:ap-northeast-1:718959508629:connection/*
                   - arn:aws:codestar-connections:ap-northeast-1:718959508629:connection/*
+                  - arn:aws:codeconnections:ap-northeast-1:718959508629:*
+                  - arn:aws:codestar-connections:ap-northeast-1:718959508629:*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: TeamAgent
+                    aws:RequestTag/Environment: dev
+                    aws:RequestTag/ManagedBy: Terraform
+                    aws:RequestTag/Version: v3.0
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Environment
+                      - ManagedBy
+                      - Project
+                      - Version
               - Sid: CB
                 Effect: Allow
                 Action: codebuild:CreateProject
