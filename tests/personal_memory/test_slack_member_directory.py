@@ -104,6 +104,24 @@ def test_failure_keeps_previous_until_stale_max(mode: str) -> None:
     assert directory.refresh_if_stale() == frozenset()
 
 
+def test_failure_backs_off_before_retrying() -> None:
+    clock = _Clock()
+    slack = _Slack([[_member("U0000000A1", "田中 太郎")]])
+    slack.raise_error = True
+    directory = SlackMemberDirectory(
+        team_id=TEAM, fetch_page=slack, clock=clock, ttl_s=10, retry_s=600
+    )
+    assert directory.refresh_if_stale() == frozenset()
+    calls = len(slack.calls)
+    clock.now = 599  # 失敗から retry_s 未満は取り直さない（15 秒ごとの掃除で連打しない）
+    directory.refresh_if_stale()
+    assert len(slack.calls) == calls
+    slack.raise_error = False
+    clock.now = 600
+    assert "田中" in directory.refresh_if_stale()
+    assert len(slack.calls) == calls + 1
+
+
 def test_truncated_listing_is_not_used() -> None:
     pages = [[_member(f"U{i:09d}", f"名前{i} 姓{i}")] for i in range(25)]
     slack = _Slack(pages)

@@ -7,10 +7,11 @@
 
 - 在籍の人間だけを数える（削除済み・bot・アプリ・ゲスト・外部・別ワークスペースは除く）
 - 名前は real_name・display_name・first_name・last_name を空白（半角・全角）で分けた語の集合
-- 取得は learner のスレッドからだけ（``refresh_if_stale``）。context の再検査は I/O をしない
+- 取得は learner と掃除スレッドからだけ（``refresh_if_stale``）。context の再検査は I/O をしない
   ``cached_member_names`` を使う
 - 取得に失敗したら直前の成功結果を ``stale_max_s`` まで使い、その後は空集合にする
-  （空なら guard は敬称付きの人名をすべて落とす＝fail-closed）
+  （空なら guard は敬称付きの人名をすべて落とす＝fail-closed）。失敗後は ``retry_s`` 空けて
+  取り直す（掃除スレッドが 15 秒ごとに呼んでも users.list を連打しない）
 - ログは件数・ページ数・型名だけ（名前は出さない）
 """
 
@@ -92,6 +93,7 @@ class SlackMemberDirectory:
         fetch_page: FetchPage | None = None,
         ttl_s: float = 6 * 3600,
         stale_max_s: float = 24 * 3600,
+        retry_s: float = 600,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if fetch_page is None:
@@ -102,10 +104,12 @@ class SlackMemberDirectory:
         self._team_id = team_id
         self._ttl_s = ttl_s
         self._stale_max_s = stale_max_s
+        self._retry_s = retry_s
         self._clock = clock
         self._lock = threading.Lock()
         self._names: frozenset[str] = frozenset()
         self._fetched_at: float | None = None
+        self._failed_at: float | None = None
 
     def cached_member_names(self) -> frozenset[str]:
         """I/O をしない。古すぎる名簿は空集合を返す（guard が人名を落とす側に倒れる）。"""
@@ -117,10 +121,12 @@ class SlackMemberDirectory:
             return self._names
 
     def refresh_if_stale(self) -> frozenset[str]:
-        """TTL を過ぎていれば取り直す（learner のスレッドからだけ呼ぶ）。"""
+        """TTL を過ぎていれば取り直す（I/O あり。learner と掃除スレッドからだけ呼ぶ）。"""
         with self._lock:
-            fresh = self._fetched_at is not None and self._clock() - self._fetched_at <= self._ttl_s
-        if not fresh:
+            now = self._clock()
+            fresh = self._fetched_at is not None and now - self._fetched_at <= self._ttl_s
+            backing_off = self._failed_at is not None and now - self._failed_at < self._retry_s
+        if not fresh and not backing_off:
             self._refresh()
         return self.cached_member_names()
 
@@ -147,8 +153,11 @@ class SlackMemberDirectory:
             logger.warning(
                 "slack_member_directory_refresh_failed", error_type=type(exc).__name__, pages=pages
             )
+            with self._lock:
+                self._failed_at = self._clock()
             return
         with self._lock:
             self._names = frozenset(names)
             self._fetched_at = self._clock()
+            self._failed_at = None
         logger.info("slack_member_directory_refreshed", names=len(names), pages=pages)

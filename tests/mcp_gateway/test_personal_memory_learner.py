@@ -113,21 +113,39 @@ def test_entries_failing_recheck_are_not_sent_nor_removed() -> None:
     assert "先方の山田様が窓口" in s.contents(P)  # 自動では消さない
 
 
+def _during_hermes(store: FakeStore, action) -> HermesFake:  # type: ignore[no-untyped-def]
+    """Hermes の処理中（読んだ後・書く前）に本人の操作が入った状況を作る。"""
+    inner = append(memory=["新しいメモ"])
+
+    def respond(user, memory, utterances):  # type: ignore[no-untyped-def]
+        action()
+        return inner(user, memory, utterances)
+
+    return HermesFake(respond)
+
+
 def test_version_conflict_discards(store: FakeStore) -> None:
     # Hermes の処理中に本人が「3番を忘れて」等を使った（版が進む）
-    def bump() -> None:
-        store.profiles[P.key].version += 1
-
-    store.before_apply = bump
-    outcome = _run(store, HermesFake(append(memory=["新しいメモ"])))
+    forgotten = store.profiles[P.key].entries[0].entry_id
+    outcome = _run(store, _during_hermes(store, lambda: store.forget(P, forgotten)))
     assert outcome.outcome == "store_version_conflict"
     assert "新しいメモ" not in store.contents(P)
 
 
 def test_freeze_during_job_discards(store: FakeStore) -> None:
-    store.before_apply = lambda: store.set_state(P, "frozen")
-    outcome = _run(store, HermesFake(append(memory=["新しいメモ"])))
+    outcome = _run(store, _during_hermes(store, lambda: store.set_state(P, "frozen")))
     assert outcome.outcome == "store_not_active"
+    assert "新しいメモ" not in store.contents(P)
+
+
+def test_resume_during_job_still_discards(store: FakeStore) -> None:
+    # 止めて→再開 が学習中に挟まっても、版が進んでいるので古い学習結果は捨てる
+    def freeze_and_resume() -> None:
+        store.set_state(P, "frozen")
+        store.set_state(P, "active")
+
+    outcome = _run(store, _during_hermes(store, freeze_and_resume))
+    assert outcome.outcome == "store_version_conflict"
     assert "新しいメモ" not in store.contents(P)
 
 

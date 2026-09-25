@@ -353,6 +353,24 @@ async def test_missing_or_wrong_tool_claim_rejected(
     assert recorder.calls == []
 
 
+async def test_verifier_returning_none_is_rejected(
+    replay: _CountingReplayStore, recorder: _Recorder
+) -> None:
+    # 本物の検証器は claim を返すか例外を投げるが、None が返っても素通りさせない（多重防御）
+    class _NoneVerifier:
+        async def verify(self, *, tool: str, arguments: dict[str, Any]) -> None:
+            return None
+
+    server = build_server(
+        [ToolSpec("echo", "echo", _EchoSkill)],
+        identity_resolver=_resolver(),
+        caller_claim_verifier=_NoneVerifier(),  # type: ignore[arg-type]
+    )
+    text, _ = await _call(server, "personal_memory_context", _signed("personal_memory_context"))
+    assert _code(text) == "PM_CALLER_REQUIRED"
+    assert recorder.calls == []
+
+
 async def test_user_context_must_be_object(
     replay: _CountingReplayStore, recorder: _Recorder
 ) -> None:

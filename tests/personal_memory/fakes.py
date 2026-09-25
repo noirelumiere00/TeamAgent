@@ -57,7 +57,6 @@ class FakeStore:
         self.loads = 0
         self.fail = False
         self.load_delay_s = 0.0
-        self.before_apply: Callable[[], None] | None = None
         self._ids = itertools.count(1)
         self._lock = threading.RLock()
 
@@ -139,8 +138,6 @@ class FakeStore:
         adds: Sequence[tuple[Target, str]],
         remove_ids: Sequence[str],
     ) -> int:
-        if self.before_apply is not None:
-            self.before_apply()
         for target, content in adds:
             if target not in ("user", "memory") or not valid_content(content):
                 raise PersonalMemoryStoreError("bad_entry")
