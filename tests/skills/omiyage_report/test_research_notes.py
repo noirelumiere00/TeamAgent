@@ -54,6 +54,40 @@ def test_parse_keeps_only_https_sourced_lines() -> None:
     assert dropped == 2
 
 
+def test_url_only_line_attaches_to_previous_point() -> None:
+    """9/17 GABAN 版: 要点と「URL: https://…」が 2 行に分かれ、要点欄が「URL」になっていた。"""
+    notes = "\n".join(
+        [
+            "- 生活者の声: 「スパイスは使い切れない」の投稿が多い",
+            "  URL: https://www.tiktok.com/@a/video/111",
+            "・検索面: 「スパイスカレー」上位はレシピ系クリエイター",
+            "出典URL：https://www.tiktok.com/search?q=spice",
+            "URL: https://www.tiktok.com/@orphan/video/222",
+            "- 出典の無い主張",
+        ]
+    )
+    adopted, dropped = parse_research_notes(notes)
+    assert [(n.text, n.source_url) for n in adopted] == [
+        (
+            "生活者の声: 「スパイスは使い切れない」の投稿が多い",
+            "https://www.tiktok.com/@a/video/111",
+        ),
+        (
+            "検索面: 「スパイスカレー」上位はレシピ系クリエイター",
+            "https://www.tiktok.com/search?q=spice",
+        ),
+    ]
+    assert all(n.text not in {"URL", "出典URL"} for n in adopted)
+    # 前の要点が無い出典だけの行と、出典の無い主張は落とす
+    assert dropped == 2
+
+
+def test_label_word_never_becomes_the_point() -> None:
+    adopted, dropped = parse_research_notes("URL: https://www.tiktok.com/@x/video/1")
+    assert adopted == []
+    assert dropped == 1
+
+
 def test_research_slide_is_inserted_after_exposure_and_kept_out_of_summary() -> None:
     plan = build_deck_plan(
         _measurement(),
@@ -91,7 +125,7 @@ def test_research_slide_is_inserted_after_exposure_and_kept_out_of_summary() -> 
     # 章扉の Q一覧と H の再掲行は従来どおり（先行調査は Q でも再掲でもない）
     h_slide = plan.slide_plan[-1]
     assert isinstance(h_slide.data, SlideDataH)
-    assert len(h_slide.data.summary_rows) == 6
+    assert len(h_slide.data.summary_rows) == 4  # 総括は 4 行まで
     assert not any("先行調査" in row.pattern for row in h_slide.data.summary_rows)
     # レンダラ入力契約（fmt）をそのまま通る
     content = validate_deck_content(json.loads(plan.model_dump_json()), load_fmt_spec())

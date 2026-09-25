@@ -299,8 +299,9 @@ def test_h_slide_has_cta_and_summary_rows_from_findings() -> None:
     assert CTA_TEXT == (
         "上位10本の冒頭・価格・商品説明まで詳しく比較した事例が必要な方はご連絡ください。"
     )
-    assert len(h_slide.data.summary_rows) == 6  # 現状 + Q1〜Q5
-    assert [row.number for row in h_slide.data.summary_rows] == [1, 2, 3, 4, 5, 6]
+    # 総括は 4 行まで（5 行以上は結論帯に潜る・描画で確認）。現状 + Q1〜Q3
+    assert len(h_slide.data.summary_rows) == 4
+    assert [row.number for row in h_slide.data.summary_rows] == [1, 2, 3, 4]
 
 
 def test_eg_rate_footnote_appears_once_at_first_eg_slide() -> None:
@@ -390,10 +391,14 @@ def test_cluster_slide_discloses_analyzed_denominator_and_failures() -> None:
     assert "推定" in q3.tag.text
     # 失敗1 + スキップ1 = 2本は分母に混ぜず監査へ回す旨を開示
     assert "2本は分母に混ぜず" in q3.tag.text
-    # 語彙全件が行になり、件数はラベルに明記される
-    labels = [group.label for group in q3.data.groups]
-    assert len(labels) == len(_VOCAB)
-    assert any("正直レビュー/検証系（エムキュア 1本 / ラサーナ 1本）" in label for label in labels)
+    # ラベルは界隈名だけ。本数は左右それぞれの欄に入る（両側に同じ「A 1本 / B 1本」を出さない）
+    groups = {group.label: group for group in q3.data.groups}
+    assert set(groups) <= set(_VOCAB)
+    review = groups["正直レビュー/検証系"]
+    assert (review.count_a, review.count_b) == (1, 1)
+    assert all("本 /" not in label for label in groups)
+    # 両側とも 0 本の界隈は行にしない
+    assert all(group.count_a or group.count_b for group in q3.data.groups)
 
 
 def test_cluster_and_top5_omitted_without_analysis_and_disclosed() -> None:
@@ -651,3 +656,104 @@ def test_tier_slide_avg_plays_use_thousands_separator_and_integer_rounding() -> 
     flat = [cell for row in q1.data.rows for cell in row]
     assert not any(cell.replace(",", "").endswith(".0") for cell in flat)
     assert "14011.7" not in flat
+
+
+# --- 9/17 GABAN 版で出た「中身の無いページ・意味の無い文」を出さない ---------------------------
+
+
+def _gaban_like(*, brand_posts: tuple[PostRecord, ...], rival_posts: tuple[PostRecord, ...]):
+    axes = [
+        AxisData(
+            role="general",
+            label="一般KW「スパイスカレー」検索",
+            query="スパイスカレー",
+            requested=30,
+            posts=(_post("g1", "スパイスカレー作り", rank=1), _post("g2", "カレー", rank=2)),
+        ),
+        AxisData(
+            role="brand",
+            label="ブランド名「GABAN」検索",
+            query="GABAN",
+            requested=30,
+            posts=brand_posts,
+        ),
+        AxisData(
+            role="competitor",
+            label="競合「エスビー食品」検索",
+            query="エスビー食品",
+            requested=30,
+            posts=rival_posts,
+        ),
+    ]
+    return measure(axes, brand="GABAN", competitors=["エスビー食品"], keywords=["スパイスカレー"])
+
+
+def test_pr_slide_omitted_when_neither_side_has_pr() -> None:
+    measurement = _gaban_like(
+        brand_posts=(_post("b1", "GABANで作る"), _post("b2", "GABAN")),
+        rival_posts=(_post("r1", "エスビー食品のカレー粉"),),
+    )
+    plan = build_deck_plan(measurement, None, generated_on="2026-09-25", search_depth=30)
+    assert "Q2" not in [slide.q_number for slide in plan.slide_plan]
+
+
+def test_tier_and_pr_slides_omitted_for_zero_post_axis() -> None:
+    measurement = _gaban_like(
+        brand_posts=(_post("b1", "GABAN #PR"),),
+        rival_posts=(),  # 取得は成功したが 0 本
+    )
+    plan = build_deck_plan(measurement, None, generated_on="2026-09-25", search_depth=30)
+    q_numbers = [slide.q_number for slide in plan.slide_plan]
+    assert "Q1" not in q_numbers
+    assert "Q2" not in q_numbers
+    assert all(
+        "0本で最多" not in (slide.tag.text if slide.tag else "") for slide in plan.slide_plan
+    )
+
+
+def test_exposure_sentence_never_says_top_rival_with_zero() -> None:
+    measurement = _gaban_like(
+        brand_posts=(_post("b1", "GABAN"),),
+        rival_posts=(_post("r1", "エスビー食品"),),
+    )
+    plan = build_deck_plan(measurement, None, generated_on="2026-09-25", search_depth=30)
+    texts = [slide.tag.text for slide in plan.slide_plan if slide.tag]
+    assert not any("競合最多" in text and "の0本" in text for text in texts)
+    assert any("競合の露出は上位2本中0本" in text for text in texts)
+    from teamagent.skills.omiyage_report.compose import build_summary_lines
+
+    lines = build_summary_lines(measurement)
+    assert not any("競合最多" in line and " 0本" in line for line in lines)
+    assert not any("競合最多" in line and "の0本" in line for line in lines)
+
+
+def test_keyword_slide_never_says_highest_is_zero() -> None:
+    axes = [
+        AxisData(
+            role="general",
+            label="一般KW「時短 夕飯」検索",
+            query="時短 夕飯",
+            requested=30,
+            posts=(_post("g1", "今日のごはん", rank=1), _post("g2", "おうちカフェ", rank=2)),
+        ),
+        AxisData(
+            role="brand",
+            label="ブランド名「GABAN」検索",
+            query="GABAN",
+            requested=30,
+            posts=(_post("b1", "GABAN #PR"),),
+        ),
+        AxisData(
+            role="competitor",
+            label="競合「エスビー食品」検索",
+            query="エスビー食品",
+            requested=30,
+            posts=(_post("r1", "エスビー食品 #PR"),),
+        ),
+    ]
+    measurement = measure(axes, brand="GABAN", competitors=["エスビー食品"], keywords=["時短 夕飯"])
+    plan = build_deck_plan(measurement, None, generated_on="2026-09-25", search_depth=30)
+    q4 = next(slide for slide in plan.slide_plan if slide.q_number == "Q4")
+    assert q4.tag is not None
+    assert "最も高いのは" not in q4.tag.text
+    assert "どの検索軸の上位にもキャプション・ハッシュタグで登場しなかった" in q4.tag.text

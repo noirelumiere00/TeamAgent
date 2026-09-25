@@ -17,6 +17,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from teamagent.skills.omiyage_report.input_check import InputProblem, find_input_problems
 from teamagent.skills.omiyage_report.schema import (
     MissingField,
     OmiyageReportSubmitInput,
@@ -109,10 +110,19 @@ CompletionSource = Callable[[str], OmiyageSuggestions | None]
 class PreflightResult:
     missing: tuple[MissingField, ...]
     suggestions: tuple[OmiyageSuggestion, ...] = ()
+    # 埋まってはいるが、このままでは比べられない入力（品質の門・段 1）
+    problems: tuple[InputProblem, ...] = ()
 
     @property
     def ready(self) -> bool:
-        return not self.missing
+        return not self.missing and not self.problems
+
+    @property
+    def fields_to_fill(self) -> tuple[MissingField, ...]:
+        """営業に返してもらう欄（不足＋見直し。順序は brand→competitors→keywords）。"""
+        wanted = set(self.missing) | {problem.field for problem in self.problems}
+        order: tuple[MissingField, ...] = ("brand", "competitors", "keywords")
+        return tuple(name for name in order if name in wanted)
 
 
 @dataclass(frozen=True)
@@ -133,8 +143,9 @@ def run_preflight(
         missing.append("competitors")
     if not input.keywords:
         missing.append("keywords")
+    problems = tuple(find_input_problems(input.brand, input.competitors, input.keywords))
     if not missing:
-        return PreflightResult(missing=())
+        return PreflightResult(missing=(), problems=problems)
 
     suggestions: list[OmiyageSuggestion] = []
     if completion_source is not None:
@@ -159,7 +170,9 @@ def run_preflight(
                         source=candidates.source,
                     )
                 )
-    return PreflightResult(missing=tuple(missing), suggestions=tuple(suggestions))
+    return PreflightResult(
+        missing=tuple(missing), suggestions=tuple(suggestions), problems=problems
+    )
 
 
 def build_needs_input_message(
@@ -167,9 +180,14 @@ def build_needs_input_message(
     result: PreflightResult,
 ) -> str:
     """intake-response-schema の初回応答構造に沿った決定論文言。"""
+    reason = (
+        "不足している必須情報があるため、まだ着手していません。"
+        if result.missing
+        else "見直してほしい入力があるため、まだ着手していません。"
+    )
     lines: list[str] = [
         "判定：お土産資料（TikTok検索データ確認資料）を作成します。",
-        "不足している必須情報があるため、まだ着手していません。",
+        reason,
         "",
     ]
 
@@ -187,9 +205,18 @@ def build_needs_input_message(
         lines.extend(f"- {item.label}：{item.value}" for item in received)
         lines.append("")
 
-    lines.append("不足している必須情報：")
-    lines.extend(f"- {_FIELD_LABELS[name]}" for name in result.missing)
-    lines.append("")
+    if result.missing:
+        lines.append("不足している必須情報：")
+        lines.extend(f"- {_FIELD_LABELS[name]}" for name in result.missing)
+        lines.append("")
+
+    if result.problems:
+        lines.append("見直してほしい入力：")
+        lines.extend(
+            f"- {_REPLY_FIELD_LABELS[problem.field]}「{problem.value}」：{problem.reason}"
+            for problem in result.problems
+        )
+        lines.append("")
 
     if result.suggestions:
         lines.append("補完候補（カルテ・金庫から）：")
@@ -204,7 +231,7 @@ def build_needs_input_message(
         lines.append("")
 
     lines.append("以下をコピーしてご返信ください。")
-    lines.extend(f"{_REPLY_FIELD_LABELS[name]}：" for name in result.missing)
+    lines.extend(f"{_REPLY_FIELD_LABELS[name]}：" for name in result.fields_to_fill)
     if not input.official_tiktok_account:
         lines.append("公式TikTokアカウントURL：（任意）")
     lines.append("指示：この内容で資料を作成してください")

@@ -30,8 +30,8 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -58,6 +58,15 @@ from teamagent.skills.omiyage_report.deck_plan import (
 )
 from teamagent.skills.omiyage_report.fmt.build import build_delivery_comment
 from teamagent.skills.omiyage_report.fmt.editable import EDIT_MARKER
+from teamagent.skills.omiyage_report.input_check import (
+    COMPETITOR_REASONS,
+    CompetitorCheck,
+    InputProblem,
+    RelevanceCheck,
+    check_competitors,
+    check_relevance,
+    llm_checks_enabled,
+)
 from teamagent.skills.omiyage_report.metrics import (
     AxisData,
     AxisRole,
@@ -68,6 +77,7 @@ from teamagent.skills.omiyage_report.metrics import (
 from teamagent.skills.omiyage_report.preflight import (
     CompletionSource,
     DurationEstimate,
+    PreflightResult,
     build_accepted_message,
     build_busy_message,
     build_needs_input_message,
@@ -86,9 +96,26 @@ from teamagent.skills.omiyage_report.schema import (
 from teamagent.skills.omiyage_report.video_analysis import (
     OmiyageVideoAnalyzer,
     VideoAnalysisReport,
+    cluster_rules_for,
     configured_concurrency,
     configured_max_videos,
 )
+
+# (brand, competitors, category, request_id) -> CompetitorCheck
+_CompetitorChecker = Callable[[str, Sequence[str], str, str], CompetitorCheck]
+# 関連性の点検（1 軸ずつ・キーワード引数は input_check.check_relevance と同じ）
+_RelevanceChecker = Callable[..., RelevanceCheck]
+
+
+@dataclass(frozen=True)
+class RelevanceSummary:
+    """関連性の点検の結果（資料の「対象」欄と監査記録に書く）。"""
+
+    excluded: int = 0
+    excluded_by_axis: tuple[tuple[str, int], ...] = ()
+    unchecked_axes: tuple[str, ...] = ()
+    enabled: bool = False
+
 
 OMIYAGE_JOB_KIND = "omiyage_report"
 _JOB_ID_PREFIX = "omy_"
@@ -400,6 +427,12 @@ def _default_deck_builder(deck_plan_json: str, out_dir: str, request_id: str) ->
     return str(image_path), str(editable_path)
 
 
+def _default_competitor_checker(
+    brand: str, competitors: Sequence[str], category: str, request_id: str
+) -> CompetitorCheck:
+    return check_competitors(brand, competitors, category, request_id)
+
+
 def _default_analyzer_factory(request_id: str) -> OmiyageVideoAnalyzer | None:
     """media job 基盤が使える環境でだけ動画解析を実行する（無い環境は未実施を開示）。"""
     from teamagent.adapters.media_job import MediaJobClient
@@ -440,7 +473,10 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         "お土産資料の最終成果物（PPTX）はこのツールでのみ生成する。調査ツール（x_voice_search / "
         "search_surface_check / web_research / tiktok_acquire）で裏取りした材料は research_notes "
         "に添えること（任意・1行1要点+出典URL・「生活者の声」「検索面の勢力図」の章に反映）。"
-        "「◯◯のお土産資料つくって。競合は△△」を受け付ける。対象ブランド・競合(1社以上)・"
+        "「◯◯のお土産資料つくって。競合は△△」を受け付ける。競合は依頼者が名前を出した"
+        "ものだけを入れる（推測で埋めない。親会社・飲食店・小売は競合にしない）。"
+        "商材カテゴリ（category・例: スパイス・調味料）が分かれば入れる。"
+        "対象ブランド・競合(1社以上)・"
         "一般検索キーワード(1つ以上)がそろえば job_id を即返し、TikTok検索実測→決定論集計"
         "（露出シェア/キーワード登場率/#PR比較）→PPTX生成→依頼元スレッド添付まで"
         "バックグラウンドで進める。不足時は status=needs_input で不足リストと補完候補・"
@@ -477,6 +513,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         search_timeout_seconds: int | None = None,
         analysis_per_axis: int | None = None,
         admission: JobAdmission | None = None,
+        competitor_checker: _CompetitorChecker | None = None,
+        relevance_checker: _RelevanceChecker | None = None,
     ) -> None:
         self._store = store or ProposalJobStore()
         # None のままにして「呼び出し時点の共有インスタンス」を見る（reset_job_admission
@@ -486,6 +524,12 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         self._deck_builder = deck_builder
         self._slack = slack
         self._completion_source = completion_source
+        # 品質の門（LLM）: 注入が無ければ本番（BEDROCK_MODEL_ID あり）でだけ既定の点検を使う
+        llm_on = llm_checks_enabled()
+        self._competitor_checker = competitor_checker or (
+            _default_competitor_checker if llm_on else None
+        )
+        self._relevance_checker = relevance_checker or (check_relevance if llm_on else None)
         self._thread_launcher = thread_launcher
         self._analyzer_factory = analyzer_factory
         self._plan_uploader = plan_uploader
@@ -513,6 +557,30 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             else max(1, search_timeout_seconds)
         )
 
+    def _competitor_problems(
+        self, input: OmiyageReportSubmitInput, ctx: SkillContext, log: Any
+    ) -> list[InputProblem]:
+        """競合の妥当性（LLM）。点検できなければ止めない（fail-open・ログだけ残す）。"""
+        if self._competitor_checker is None:
+            return []
+        try:
+            check = self._competitor_checker(
+                input.brand, input.competitors, input.category, ctx.request_id
+            )
+        except Exception as exc:
+            log.warning("omiyage_report_competitor_check_failed", error_type=type(exc).__name__)
+            return []
+        log.info(
+            "omiyage_report_competitor_checked",
+            checked=check.checked,
+            invalid=len(check.invalid),
+        )
+        return [
+            InputProblem("competitors", name, COMPETITOR_REASONS[reason])
+            for name, reason in check.invalid.items()
+            if reason in COMPETITOR_REASONS
+        ]
+
     @property
     def _admission(self) -> JobAdmission:
         return _ADMISSION if self._admission_override is None else self._admission_override
@@ -524,15 +592,20 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
     ) -> OmiyageReportSubmitOutput:
         log = ctx.bind_logger(self.name)
         preflight = run_preflight(input, self._completion_source)
+        if preflight.ready:
+            competitor_problems = self._competitor_problems(input, ctx, log)
+            if competitor_problems:
+                preflight = PreflightResult(missing=(), problems=tuple(competitor_problems))
         if not preflight.ready:
             log.info(
                 "omiyage_report_needs_input",
                 missing=list(preflight.missing),
+                problems=[problem.field for problem in preflight.problems],
                 suggestion_fields=[s.field for s in preflight.suggestions],
             )
             return OmiyageReportSubmitOutput(
                 status="needs_input",
-                missing=list(preflight.missing),
+                missing=list(preflight.fields_to_fill),
                 suggestions=list(preflight.suggestions),
                 message=build_needs_input_message(input, preflight),
             )
@@ -761,6 +834,62 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         )
         return plan
 
+    def _filter_unrelated(
+        self,
+        input: OmiyageReportSubmitInput,
+        axes: list[AxisData],
+        ctx: SkillContext,
+        log: Any,
+    ) -> tuple[list[AxisData], RelevanceSummary]:
+        """検索結果から商材と関係の無い動画を外す（軸ごとに LLM 1 回・失敗した軸は外さない）。"""
+        if self._relevance_checker is None:
+            return axes, RelevanceSummary()
+        kept_axes: list[AxisData] = []
+        by_axis: list[tuple[str, int]] = []
+        unchecked: list[str] = []
+        for axis in axes:
+            if axis.failed or not axis.posts:
+                kept_axes.append(axis)
+                continue
+            try:
+                check = self._relevance_checker(
+                    query=axis.query,
+                    brand=input.brand,
+                    category=input.category,
+                    competitors=input.competitors,
+                    keywords=input.keywords,
+                    posts=axis.posts,
+                    request_id=ctx.request_id,
+                )
+            except Exception as exc:
+                log.warning(
+                    "omiyage_report_relevance_check_failed",
+                    role=axis.role,
+                    error_type=type(exc).__name__,
+                )
+                check = RelevanceCheck(excluded_ids=frozenset(), checked=False)
+            if not check.checked:
+                unchecked.append(axis.label)
+                kept_axes.append(axis)
+                continue
+            kept = tuple(post for post in axis.posts if post.video_id not in check.excluded_ids)
+            excluded = len(axis.posts) - len(kept)
+            if excluded:
+                by_axis.append((axis.label, excluded))
+            kept_axes.append(replace(axis, posts=kept))
+        summary = RelevanceSummary(
+            excluded=sum(count for _label, count in by_axis),
+            excluded_by_axis=tuple(by_axis),
+            unchecked_axes=tuple(unchecked),
+            enabled=True,
+        )
+        log.info(
+            "omiyage_report_relevance_filtered",
+            excluded=summary.excluded,
+            unchecked_axes=len(summary.unchecked_axes),
+        )
+        return kept_axes, summary
+
     def _search_axes(
         self,
         input: OmiyageReportSubmitInput,
@@ -856,6 +985,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         measurement: OmiyageMeasurement,
         ctx: SkillContext,
         log: Any,
+        *,
+        input: OmiyageReportSubmitInput | None = None,
     ) -> VideoAnalysisReport | None:
         """動画解析（best-effort）。失敗・未実施でも資料生成は止めず開示に回す。"""
         try:
@@ -869,6 +1000,9 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         if analyzer is None:
             log.info("omiyage_report_video_analysis_unavailable")
             return None
+        if isinstance(analyzer, OmiyageVideoAnalyzer) and input is not None:
+            # 界隈の分類表を商材カテゴリで選ぶ（カレーに美容の分類表を当てない）
+            analyzer.rules = cluster_rules_for(input.category, input.brand, input.keywords)
         targets = self._analysis_targets(measurement)
         if not targets:
             return None
@@ -939,6 +1073,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
         axes = self._search_axes(input, ctx, log)
         if all(axis.failed for axis in axes):
             raise _OmiyageAllSearchesFailedError(build_all_failed_message())
+        axes, relevance = self._filter_unrelated(input, axes, ctx, log)
 
         measurement = measure(
             axes,
@@ -947,7 +1082,7 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             keywords=input.keywords,
             official_account=input.official_tiktok_account,
         )
-        analysis = self._run_video_analysis(measurement, ctx, log)
+        analysis = self._run_video_analysis(measurement, ctx, log, input=input)
         generated_on = _utc_now().strftime("%Y-%m-%d")
         plan = build_deck_plan(
             measurement,
@@ -955,6 +1090,8 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             generated_on=generated_on,
             search_depth=self._search_depth,
             research_notes=input.research_notes,
+            excluded_unrelated=relevance.excluded,
+            relevance_checked=relevance.enabled and not relevance.unchecked_axes,
         )
         plan_json = plan.model_dump_json()
         audit = build_audit(
@@ -965,6 +1102,13 @@ class OmiyageReportSubmitSkill(BaseSkill[OmiyageReportSubmitInput, OmiyageReport
             search_depth=self._search_depth,
             research_notes=input.research_notes,
         )
+        audit["relevance"] = {
+            # 関係の無い動画（同名の別作品など）を集計から外した数（品質の門・段 1）
+            "enabled": relevance.enabled,
+            "excluded": relevance.excluded,
+            "excluded_by_axis": dict(relevance.excluded_by_axis),
+            "unchecked_axes": list(relevance.unchecked_axes),
+        }
         deck_plan_uri, audit_uri = self._store_plan_artifacts(
             f"{generated_on}/{ctx.request_id}",
             plan_json,

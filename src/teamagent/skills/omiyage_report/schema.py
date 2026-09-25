@@ -66,6 +66,14 @@ class OmiyageReportSubmitInput(_StrictModel):
         max_length=200,
         description="対象ブランドの公式TikTokアカウント（URLまたは@ハンドル・任意）",
     )
+    category: str = Field(
+        default="",
+        max_length=60,
+        description=(
+            "商材カテゴリ（任意・例: スパイス・調味料／スキンケア／格安SIM）。"
+            "検索結果から関係の無い動画を除くのと、界隈の分類表を選ぶのに使う。不明なら空のまま呼ぶ"
+        ),
+    )
     research_notes: str = Field(
         default="",
         max_length=RESEARCH_NOTES_MAX_CHARS,
@@ -77,7 +85,7 @@ class OmiyageReportSubmitInput(_StrictModel):
         ),
     )
 
-    @field_validator("brand", "official_tiktok_account")
+    @field_validator("brand", "official_tiktok_account", "category")
     @classmethod
     def _squash_whitespace(cls, value: str) -> str:
         return " ".join(str(value).split())
