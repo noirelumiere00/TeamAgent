@@ -48,6 +48,16 @@ NON_FACTORY_SKILL_ALLOWLIST = frozenset({"chitchat", "proposal_builder", "pre_me
 # ToolSpec を経由せず server.py が直接 MCP に追加できる dark tool。
 MCP_ONLY_DARK_ALLOWLIST = {"run_agent": "USE_AGENT_ORCHESTRATOR"}
 
+# list_tools に一切出さず、OpenClaw plugin が予約 tool_call_id で直接呼ぶ MCP tool（DM 本人メモ v1）。
+# ToolSpec にも Tool() 定義にも OC の toolFilter.include にも載せない＝LLM のツール面に出ない。
+# server._call が dispatch_tool より前に振り分け、フラグ off なら未登録ツールと同じ応答を返す。
+PLUGIN_ONLY_HIDDEN_TOOLS = {
+    "personal_memory_observe": "USE_PERSONAL_MEMORY",
+    "personal_memory_context": "USE_PERSONAL_MEMORY",
+    "personal_memory_command": "USE_PERSONAL_MEMORY",
+}
+OPENCLAW_CONFIG = ROOT / "infra/openclaw/openclaw.config.json5"
+
 # Drive→Slack の実ファイル配信共通部品（_shared/drive_slack_delivery.py）。
 # これを使う skill は「読むだけ」ではなく**利用者の Slack にファイルを投下する**。
 DELIVERY_MODULE = "teamagent.skills._shared.drive_slack_delivery"
@@ -599,6 +609,24 @@ def test_server_only_mcp_tools_are_explicitly_dark_allowlisted() -> None:
     server_source = MCP_SERVER.read_text(encoding="utf-8")
     for tool_name, env_gate in MCP_ONLY_DARK_ALLOWLIST.items():
         assert f'"{tool_name}"' in server_source
+        assert f'_envflag("{env_gate}")' in server_source
+
+
+def test_plugin_only_hidden_tools_are_never_listed() -> None:
+    """本人メモの 3 ツールは Tool() 定義・factory・scope 台帳・OC toolFilter のどこにも無い。"""
+    from teamagent.mcp_gateway.personal_memory import PERSONAL_MEMORY_TOOL_NAMES
+
+    hidden = set(PLUGIN_ONLY_HIDDEN_TOOLS)
+    assert hidden == set(PERSONAL_MEMORY_TOOL_NAMES)
+    assert not hidden & _mcp_only_tool_names()
+    assert not hidden & _factory_tool_names(_registered_skills())
+    assert not hidden & _scope_names()
+    assert not hidden & set(_registered_skills())
+    oc_config = OPENCLAW_CONFIG.read_text(encoding="utf-8")
+    for tool_name in hidden:
+        assert tool_name not in oc_config
+    server_source = MCP_SERVER.read_text(encoding="utf-8")
+    for env_gate in set(PLUGIN_ONLY_HIDDEN_TOOLS.values()):
         assert f'_envflag("{env_gate}")' in server_source
 
 

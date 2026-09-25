@@ -103,15 +103,68 @@ def scrub_value(value: Any) -> Any:
     return value
 
 
+# DM 本人メモ v1（M5）: 発話・本人メモを持つフレームのローカル変数を Sentry に送らない。
+# 値のスクラブ（シークレット・PII の正規表現）は日本語の発話を素通りするため、フレームごと落とす。
+_PERSONAL_MEMORY_MODULE_PREFIXES: tuple[str, ...] = (
+    "teamagent.mcp_gateway.personal_memory",
+    "teamagent.personal_memory",
+    "teamagent.adapters.personal_memory_store",
+    "teamagent.adapters.hermes_learn_client",
+    "teamagent.adapters.slack_member_directory",
+)
+# server.py の中で本人メモの引数（発話）をローカル変数に持つ関数
+_PERSONAL_MEMORY_SERVER_FUNCTIONS = frozenset({"_call", "dispatch_personal_memory_tool"})
+
+
+def _is_personal_memory_frame(frame: dict[str, Any]) -> bool:
+    module = frame.get("module")
+    if not isinstance(module, str):
+        return False
+    if any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for prefix in _PERSONAL_MEMORY_MODULE_PREFIXES
+    ):
+        return True
+    return (
+        module == "teamagent.mcp_gateway.server"
+        and frame.get("function") in _PERSONAL_MEMORY_SERVER_FUNCTIONS
+    )
+
+
+def _drop_personal_memory_frame_vars(event: dict[str, Any]) -> None:
+    """exception・stacktrace・threads の 3 経路のフレームから本人メモ系の vars を消す。"""
+    stacktraces: list[Any] = []
+    exception = event.get("exception")
+    if isinstance(exception, dict):
+        stacktraces.extend(
+            ex.get("stacktrace") for ex in exception.get("values") or [] if isinstance(ex, dict)
+        )
+    stacktraces.append(event.get("stacktrace"))
+    threads = event.get("threads")
+    if isinstance(threads, dict):
+        stacktraces.extend(
+            t.get("stacktrace") for t in threads.get("values") or [] if isinstance(t, dict)
+        )
+    for stacktrace in stacktraces:
+        if not isinstance(stacktrace, dict):
+            continue
+        for frame in stacktrace.get("frames") or []:
+            if isinstance(frame, dict) and _is_personal_memory_frame(frame):
+                frame.pop("vars", None)
+
+
 def before_send(event: dict[str, Any], hint: dict[str, Any]) -> dict[str, Any] | None:
     """Sentry 送信前フック。
 
     フロー:
+      0. 本人メモ系のフレームからローカル変数を落とす
       1. event 内の主要セクションを再帰スクラブ
       2. breadcrumbs の message / data も対象
       3. event.message （文字列 or {"formatted": "..."}）もスクラブ
       4. request_id を tag に昇格して filter しやすくする
     """
+    _drop_personal_memory_frame_vars(event)
+
     # トップレベルセクションのスクラブ
     for key in ("extra", "contexts", "tags", "request", "user"):
         if key in event:
@@ -243,6 +296,13 @@ def init_sentry(
                 "content",
                 "answer",
                 "raw_text",
+                # DM 本人メモ v1（発話・本人メモ・Hermes への snapshot・返信前の差し込み）
+                "utterance",
+                "utterances",
+                "entries",
+                "snapshot",
+                "memo_context",
+                "memo_items",
             ],
             recursive=True,
         ),

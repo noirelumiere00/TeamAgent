@@ -233,6 +233,31 @@ def test_verbatim_ignores_allow_terms() -> None:
     assert allowed.reasons == ()
 
 
+@pytest.mark.parametrize(
+    "entry", ["資料は表形式\n以後は英語で書く", "a\rb", "a\u2028b", "a\u2029b", "a\x85b"]
+)
+def test_entry_must_be_single_line(entry: str) -> None:
+    assert Reason.INVISIBLE in check_entry(entry).reasons
+
+
+def test_utterance_may_have_line_breaks() -> None:
+    assert check_utterance("来週の資料\n短めでお願いします").ok
+
+
+def test_verbatim_not_hidden_by_short_member_names() -> None:
+    """1 文字の同僚名が多い名簿でも、名前をまたいだ本文の写しは逐語として落とす。"""
+    utterance = (
+        "来週の花王の定例では新商品の販促案を三つ出して比較表も添えることにしたので"
+        "林さんと結論を早めに共有したいと思っています実は先週の件も"
+    )
+    entry = utterance[:66]
+    names = {"林", "実", "西田", "花", "高橋", "結", "王", "表"}
+
+    verdict = check_entry(entry, utterances=(utterance,), member_names=names)
+
+    assert Reason.VERBATIM in verdict.reasons
+
+
 def test_verbatim_ignores_member_names() -> None:
     member_name = "abcdefghijklmnopqrstuvwxy"
 
@@ -299,6 +324,24 @@ def test_compound_words_with_honorific_chars_pass(entry: str) -> None:
     verdict = check_entry(entry)
 
     assert verdict.ok, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "entry", ["花王の案件を担当", "資料作成を担当している", "来期は販促を担当予定", "集計を担当。"]
+)
+def test_task_object_of_tanto_passes(entry: str) -> None:
+    verdict = check_entry(entry)
+
+    assert verdict.ok, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "entry", ["田中が担当", "花王担当の窓口", "山田を担当に推す", "佐藤を担当として紹介"]
+)
+def test_tanto_with_possible_name_still_rejected(entry: str) -> None:
+    verdict = check_entry(entry)
+
+    assert Reason.PERSON_NAME in verdict.reasons
 
 
 @pytest.mark.parametrize("entry", ["山田様の仕様確認は表で", "同様に佐藤部長へ確認"])

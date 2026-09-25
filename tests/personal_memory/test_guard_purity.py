@@ -1,4 +1,4 @@
-"""personal_memory の依存純度と未配線状態を固定する。"""
+"""personal_memory（guard）の依存純度と、配線先を固定する。"""
 
 from __future__ import annotations
 
@@ -43,14 +43,31 @@ def _is_allowed_import(node: ast.Import | ast.ImportFrom) -> bool:
 
 
 def _imports_personal_memory(node: ast.Import | ast.ImportFrom) -> bool:
-    """import 文が personal_memory パッケージを参照するかを返す。"""
-    if isinstance(node, ast.Import):
-        return any("personal_memory" in alias.name.split(".") for alias in node.names)
+    """import 文が guard パッケージ（teamagent.personal_memory）を参照するかを返す。
 
-    module_parts = (node.module or "").split(".")
-    return "personal_memory" in module_parts or any(
-        alias.name.split(".", maxsplit=1)[0] == "personal_memory" for alias in node.names
-    )
+    名前の前方一致で判定する（teamagent.mcp_gateway.personal_memory は別パッケージ）。
+    """
+    if isinstance(node, ast.Import):
+        return any(_is_guard_module(alias.name) for alias in node.names)
+    if node.level:
+        return False
+    module = node.module or ""
+    if _is_guard_module(module):
+        return True
+    return module == "teamagent" and any(alias.name == "personal_memory" for alias in node.names)
+
+
+def _is_guard_module(module: str) -> bool:
+    return module == _PACKAGE or module.startswith(f"{_PACKAGE}.")
+
+
+# guard を import してよいのは、書き込み前（learner）と読み出し時（service）の再検査だけ
+_WIRED_TO = frozenset(
+    {
+        "src/teamagent/mcp_gateway/personal_memory/learner.py",
+        "src/teamagent/mcp_gateway/personal_memory/service.py",
+    }
+)
 
 
 def _location(path: Path, node: ast.Import | ast.ImportFrom) -> str:
@@ -72,14 +89,48 @@ def test_personal_memory_uses_only_allowed_imports() -> None:
     assert not violations, "許可されていない import があります:\n" + "\n".join(violations)
 
 
-def test_personal_memory_is_not_imported_elsewhere_in_src() -> None:
-    """dark 機能として src 内の既存コードへ未配線であることを保証する。"""
-    violations = [
-        _location(path, node)
+def test_personal_memory_is_wired_only_to_learner_and_service() -> None:
+    """guard の配線先を固定集合に限る（ほかの経路から本人メモの規則を迂回・流用させない）。"""
+    importers = {
+        str(path.relative_to(_REPOSITORY_ROOT)): [
+            node for node in _import_nodes(path) if _imports_personal_memory(node)
+        ]
         for path in sorted(_SOURCE_ROOT.rglob("*.py"))
         if not path.is_relative_to(_PERSONAL_MEMORY_ROOT)
-        for node in _import_nodes(path)
-        if _imports_personal_memory(node)
+    }
+    violations = [
+        f"{path}: {ast.unparse(node)}"
+        for path, nodes in importers.items()
+        if path not in _WIRED_TO
+        for node in nodes
     ]
 
-    assert not violations, "personal_memory が配線されています:\n" + "\n".join(violations)
+    assert not violations, "personal_memory が許可外に配線されています:\n" + "\n".join(violations)
+    # 許可リストが古びない（配線先が実際に import している）
+    for path in _WIRED_TO:
+        assert importers.get(path), f"{path} が guard を import していません"
+
+
+def test_guard_module_detection() -> None:
+    """判定が別パッケージ（teamagent.mcp_gateway.personal_memory）を誤検出しない。"""
+    positives = [
+        "import teamagent.personal_memory",
+        "import teamagent.personal_memory.guard",
+        "from teamagent.personal_memory import guard",
+        "from teamagent.personal_memory.guard import check_entry",
+        "from teamagent import personal_memory",
+    ]
+    negatives = [
+        "from teamagent.mcp_gateway.personal_memory import gate",
+        "import teamagent.mcp_gateway.personal_memory.service",
+        "from teamagent.adapters.personal_memory_store import Principal",
+        "from . import guard",
+    ]
+    for source in positives:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.Import | ast.ImportFrom)
+        assert _imports_personal_memory(node), source
+    for source in negatives:
+        node = ast.parse(source).body[0]
+        assert isinstance(node, ast.Import | ast.ImportFrom)
+        assert not _imports_personal_memory(node), source
