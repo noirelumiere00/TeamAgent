@@ -1,0 +1,10 @@
+**
+!hermes_runtime/
+!hermes_runtime/requirements-hermes.lock
+!hermes_runtime/aico_hermes/
+!hermes_runtime/aico_hermes/**
+!infra/
+!infra/docker/
+!infra/docker/hermes/
+!infra/docker/hermes/wolfi-signing.rsa.pub
+**/__pycache__
