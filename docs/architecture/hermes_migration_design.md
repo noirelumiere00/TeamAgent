@@ -424,7 +424,7 @@ DM 本人メモ v1 の決定済み順序は `M0 → M1 → M2 → M3 → M4 → 
 | M1 | `personal_memory.guard` 純粋関数（未配線） | — | 境界/NFKC/純粋性/ablation/変異テストが緑 |
 | M2 | Python 3.13 Hermes 学習ランナー + image（dark） | — | job 間 HOME 非共有・crash 時削除・config fail-closed・Trivy C0/H0 |
 | M3 | 独立 Hermes pipeline と初回署名 release | — | release ECR digest、receipt/attestation、承認必須、未登録値 FATAL |
-| M4 | Hermes ECS dark runtime（desired_count=0） | — | healthz→Bedrock→合成 1 job→本文非記録→終了、IAM/SG 契約緑 |
+| M4 | Hermes ECS dark runtime（Terraform で常駐 0 台と宣言） | — | healthz→Bedrock→合成 1 job→本文非記録→終了、IAM/SG 契約緑 |
 | M5 | MCP 保存・揮発 buffer・learner client・本人コマンド | `USE_PERSONAL_MEMORY=0` | RLS 分離、書込/読出し guard、DM gate、version race、本文非記録が緑 |
 | M6 | connect_web 管理者閲覧・退職時削除 | — | 非管理者 403、監査失敗 503/非表示、deleted/API 失敗/guest の分岐が緑 |
 | M7 | PR-R 最小版（実流量前の必須 Gate） | — | admission control、構造化 overload、in-flight、1.2 秒 fallback が緑 |
