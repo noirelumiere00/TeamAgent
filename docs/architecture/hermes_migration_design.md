@@ -261,7 +261,7 @@ Hermes の役割は**覚える係だけ**である。返事は現行 Aico（Open
 
 ### 10b.3 対象 DM と流れ
 
-対象は本人との 1 対 1 DM だけである。`D…` は送信者から導出できるため、`^D[A-Z0-9]{8,}$` の fullmatch だけでは 1 対 1 だった証明にならない。plugin は次の 3 つがすべて成り立つときだけ DM と判定し、`conversations.open` の fallback は使わない: ① ingress の channelId が `DM:<sender>` に等しい（OpenClaw が `user:<U…>` から DM と判定した結果）② ctx.chatId が `^D[A-Z0-9]{8,}$` に fullmatch ③ chat 種別が direct。mpim・Slack Connect・スレッドの試験を M8 に入れる。`C…` のチャンネル、`G…`、mpim は学習も適用もコマンド処理もしない。OpenClaw 側の正準 DM 解決点は `infra/openclaw/caller-identity-plugin/dist/index.js:1952-1977`、MCP 呼出しの既存起点は同 `:975-980` にある。
+対象は本人との 1 対 1 DM だけである。`D…` は送信者から導出できるため、`^D[A-Z0-9]{8,}$` の fullmatch だけでは 1 対 1 だった証明にならない。plugin は次の 3 つがすべて成り立つときだけ DM と判定し、`conversations.open` の fallback は使わない: ① ingress の channelId が `DM:<sender>` に等しい（OpenClaw が `user:<U…>` から DM と判定した結果）② ctx.chatId が `^D[A-Z0-9]{8,}$` に fullmatch ③ chat 種別が direct。mpim・Slack Connect・スレッドの試験を M8 に入れる。`C…` のチャンネル、`G…`、mpim は学習も適用もコマンド処理もしない。OpenClaw 側の正準 DM 解決点は `infra/openclaw/caller-identity-plugin/dist/index.js:2050-2072`（`resolveCanonicalChannel`）、MCP 呼出しの既存起点は同 `:1048`（`callMcpTool`）にある（行番号は dev @ 6c3fb53）。
 
 ```text
 1:1 DM の本人発話
@@ -276,7 +276,14 @@ Hermes の役割は**覚える係だけ**である。返事は現行 Aico（Open
   → 1.2 秒で諦め、メモなしで現行 Aico が返信
 ```
 
-OpenClaw の登録 hook は現在 8 本（`infra/openclaw/caller-identity-plugin/dist/index.js:185-194`）であり、M8 で `before_prompt_build` を加えて 9 本にする。`personal_memory_*` は LLM の tool 面へ公開せず、plugin が予約 `tool_call_id` で直接呼ぶ。toolFilter.include はクライアント側のゲートなので、**サーバ側で次を不変条件として強制する**（M5・各項目を変異テストで固定）: ① MCP の list_tools に `personal_memory_*` を載せない ② 実行は「署名済み caller claim の channel が `^D` に fullmatch」かつ「tool_call_id が予約 prefix」かつ「flag と allowlist が有効」の場合だけ受け付ける（予約 prefix の検査は現在 plugin 側にしか無いため MCP 側に新設する）③ 引数名に `query` を使わない（usage_events が `query` を本文として記録するため。`src/teamagent/mcp_gateway/server.py:159-160`）
+OpenClaw の登録 hook は現在 8 本（`infra/openclaw/caller-identity-plugin/dist/index.js:255-264`・dev @ 6c3fb53）であり、M8 で `before_prompt_build` を加えて 9 本にする。`personal_memory_*` は LLM の tool 面へ公開せず、plugin が予約 `tool_call_id` で直接呼ぶ。toolFilter.include はクライアント側のゲートなので、**サーバ側で次を不変条件として強制する**（M5・各項目を変異テストで固定）: ① MCP の list_tools に `personal_memory_*` を載せない ② 実行は「署名済み caller claim の channel が `^D` に fullmatch」かつ「tool_call_id が予約 prefix」かつ「flag と allowlist が有効」の場合だけ受け付ける ③ 引数名に `query` を使わない（usage_events が `query` を本文として記録するため。`src/teamagent/mcp_gateway/server.py:159-160`）。
+
+**訂正（2026-09-25・M5 実装時）**: 旧記述の「予約 prefix の検査は現在 plugin 側にしか無い」は誤りで、**検査はどこにも無かった**。plugin は `connect-l1` / `connect-d1` の prefix で自分の直接呼出しの ID を作っているだけ（`index.js:1910,2302`・dev @ 6c3fb53）で、モデル経由の `before_tool_call` は ID の書式しか見ない。M5 で MCP 側に新設し、M8 で plugin の LLM 経路でも予約 prefix を名乗る toolCallId を拒否する（二重化）。M5 の実装（`src/teamagent/mcp_gateway/personal_memory/gate.py`、`server.dispatch_personal_memory_tool`）は次のとおり:
+
+- 予約の形は `aico-pm-(obs|ctx|cmd)-<32 桁 hex>` の fullmatch。kind はツール名（observe/context/command）と一致し、`run_id == tool_call_id`（plugin の直接呼出しの印。connect-l1/d1 と同じ形）
+- 判定の順は フラグ → 署名済み claim（LEGACY と `verified_caller=None` は拒否）→ DM → 予約 ID → スレッド（`thread_ts` があれば拒否）→ resolver → allowlist（`PERSONAL_MEMORY_ALLOWED_EMAILS`。**空なら全員拒否**。resolver が解決した email で照合し、申告値は使わない）→ 入力検証
+- `dispatch_tool` を通さない。「連携」振り替え（`query`・`goal`・`text`・`message`・`prompt` を走査）、usage_events、進捗投稿、長文退避、非同期通知はどれも走らない。引数名は `utterance` / `has_attachment` / `action` / `item_no` だけ
+- 拒否と内部エラーは `{"error":"personal_memory_rejected","code":"PM_…"}` の固定コードだけを返す（pydantic の input_value や例外文を返さない）。フラグ off は未登録ツールと同じ応答で、claim の nonce も消費しない
 
 ### 10b.4 G7 の限定例外
 
@@ -380,7 +387,7 @@ Connect RAG（connect.newstv.co.jp/app）は同一 repo の connect_web サー�
 
 - 各 Phase は env flag 1 個で完全 rollback: `USE_HERMES_ORCHESTRATOR=0` → list_tools から消滅（run_agent と同機構）
 - Hermes down → run_hermes_agent は構造化エラー（既存 `_err` 契約）→ OpenClaw は既存 L1 で応答継続（SOUL の「境界が拒否したら素直に伝える」規範に接続）
-- DM 本人メモ v1 は `USE_PERSONAL_MEMORY=0` と `PERSONAL_MEMORY_ENABLED=0` で学習・適用・コマンドを閉じる。context 取得失敗または 1.2 秒超過時はメモなしで返信を続け、Hermes 学習失敗時は既存メモを変更しない
+- DM 本人メモ v1 は `USE_PERSONAL_MEMORY=0`（MCP 側・M5）と `PERSONAL_MEMORY_ENABLED=0`（OpenClaw plugin 側・M8）で学習・適用・コマンドを閉じる。context 取得失敗または 1.2 秒超過時はメモなしで返信を続け（MCP 側は 1.0 秒で空を返す）、Hermes 学習失敗時は既存メモを変更しない
 - 凍結・全削除・退職を学習ジョブより優先する。ジョブ開始後でも profile version が変わった場合は Hermes の結果を破棄し、古い結果を復活させない
 
 ### 20.1 PR2 を 3 本へ分割した理由（監査で確定）
