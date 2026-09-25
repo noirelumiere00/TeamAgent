@@ -4305,3 +4305,99 @@ def test_outgoing_text_drops_em_dashes_but_keeps_links_ranges_and_code() -> None
     assert deai["range_untouched"]["result"] is None
     assert deai["fence_untouched"]["result"] is None
     assert deai["plain"]["result"] is None
+
+
+# ── 動画 URL × 0 tool call の層2（2026-09-25） ─────────────────────────────
+# 本番実測 2026-09-24〜25: DM「この動画を分析して <YouTube URL>」に Aico がツールを一度も呼ばず
+# 「YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。」と 4 回返した。
+# SOUL（#441/#445）とツール説明（#444）は反映済みで、/new 後の新しいセッションでは video_analysis が
+# 呼ばれた。断り続けた原因は同じ DM セッションの履歴（初回の誤った断りと自分の「今後は即座にお断りします」）
+# で、SOUL の文言では上書きできない＝連携（2026-09-03）と同じ失敗クラス。層2 の revise で塞ぐ。
+
+VIDEO_ZERO_TOOL_INSTRUCTION = (
+    "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、"
+    "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。"
+    "YouTube の URL も `video_analysis` でそのまま分析できます。"
+    "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。"
+)
+VIDEO_ZERO_TOOL_REASON = (
+    "利用者が動画の URL を送っているのに、ツールを 1 つも呼ばずに回答しようとしています。"
+)
+
+
+def test_zero_tool_reply_to_video_url_forces_another_pass() -> None:
+    """層2: 動画 URL × 0 tool call → revise（固定 instruction・maxAttempts 1）。
+
+    本番の本文（Slack が URL を ``<url|label>`` で包む形）と、本番で 4 回返った断り文そのもので駆動する。
+    変異: 登録を ``guardConnectUrlFabrication`` だけに戻すと intervened が False になり赤。
+    """
+    report = _caller_identity_report()
+    for case in ("video_zero_tool_youtube", "video_zero_tool_shorts", "video_zero_tool_tiktok"):
+        guarded = report[case]
+        assert guarded["intervened"] is True, case
+        assert guarded["instruction"] == VIDEO_ZERO_TOOL_INSTRUCTION, case
+        assert guarded["reason"] == VIDEO_ZERO_TOOL_REASON, case
+        assert guarded["idempotencyKey"] == "video-zero-tool", case
+        assert guarded["maxAttempts"] == 1, case
+        assert "http" not in guarded["instruction"], case
+
+
+def test_video_rule_does_not_fire_after_a_tool_call_or_without_a_video_url() -> None:
+    """層2 は tool を呼んだ run・動画 URL の無い受信には介入せず、理由を 1 行残すこと。"""
+    report = _caller_identity_report()
+    expected_reason = {
+        "video_zero_tool_with_tool_call": "model_called_tool",
+        "video_zero_tool_no_url": "no_video_url",
+        "video_zero_tool_non_video_url": "no_video_url",
+    }
+    for case, reason in expected_reason.items():
+        outcome = report[case]
+        assert outcome["intervened"] is False, case
+        assert outcome["videoSkipReason"] == reason, case
+
+
+def test_video_rule_revises_at_most_once_per_run() -> None:
+    """同じ run の 2 回目の finalize には介入しない（ループしない）。予算切れは warn で残す。"""
+    outcome = _caller_identity_report()["video_zero_tool_budget"]
+    assert [p["intervened"] for p in outcome["passes"]] == [True, False]
+    assert outcome["videoBudgetExhausted"] is True
+
+
+def test_connect_rule_takes_precedence_over_the_video_rule() -> None:
+    """連携依頼は連携の revise が返り、動画側の指示は重ならないこと（連携の挙動を変えない）。"""
+    outcome = _caller_identity_report()["video_zero_tool_connect_precedence"]
+    assert outcome["intervened"] is True
+    assert outcome["idempotencyKey"] == "connect-zero-tool"
+    assert outcome["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
+    assert not any("outcome=revised" in line for line in outcome["videoLines"])
+
+
+def test_video_url_classification_matrix() -> None:
+    """受信時の動画 URL の種類判定（YouTube・Shorts・youtu.be・TikTok・Instagram・非動画・紛らわしいホスト）。"""
+    rows = _caller_identity_report()["video_url_classification"]
+    assert len(rows) >= 15
+    mismatches = [row for row in rows if row["actual"] != row["expected"]]
+    assert not mismatches, mismatches
+
+
+def test_video_rule_logs_keep_the_g7_discipline() -> None:
+    """層2 のログに URL・動画 ID・Slack 識別子を載せないこと（url_kind は種類名・識別子は id_shape の形だけ）。"""
+    report = _caller_identity_report()
+    lines: list[str] = []
+    for case in (
+        "video_zero_tool_youtube",
+        "video_zero_tool_tiktok",
+        "video_zero_tool_budget",
+        "video_zero_tool_with_tool_call",
+        "video_zero_tool_no_url",
+    ):
+        lines.extend(report[case]["videoLines"])
+    assert lines
+    assert any("url_kind=youtube" in line for line in lines)
+    for line in lines:
+        assert "id_shape=" in line, line
+        assert "http://" not in line
+        assert "https://" not in line
+        assert "youtube.com" not in line
+        assert "jNQXAC9IVRw" not in line
+        assert "U09CX1CCBLN" not in line

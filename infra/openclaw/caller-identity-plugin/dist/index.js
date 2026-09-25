@@ -133,6 +133,50 @@ const CONNECT_DIAGNOSTIC_CODE = "CONNECT-Z01";
 const CONNECT_FALLBACK_CANCEL_REASON = "connect zero-tool fallback already delivered";
 // 保証経路が既に同じ内容を配信したターンで、モデル側の最終応答を落とすときの理由。
 const CONNECT_GUARANTEE_CANCEL_REASON = "connect guarantee already delivered this inbound";
+
+// ── 動画 URL × 0 tool call の層2（2026-09-25）────────────────────────────────
+// 本番実測 2026-09-24〜25: DM「この動画を分析して <YouTube URL>」に Aico がツールを一度も
+// 呼ばず「YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。」と
+// 4 回返した。SOUL（#441/#445）とツール説明（#444）は本番に反映済みで、履歴の無いセッション
+// （/new 後）では video_analysis が呼ばれて分析結果が返った。断り続けた原因は同じ DM セッションの
+// 履歴（初回の誤った断りと「今後は即座にお断りします」という自分の約束）で、SOUL の文言では
+// 上書きできなかった＝連携（2026-09-03）と同じ失敗クラス。連携と同じ作りの層2 だけを置く。
+//   層1（モデルを通さず呼ぶ）は置かない: 分析か切り出しか、引数（focus / timecodes）をモデルが決める。
+//   層3（定型文へ置換）は置かない: 定型文では分析結果を出せない（再パスでも断るならそのまま届く）。
+// 判定は受信時に URL の「種類」だけを ingress に載せる（URL・本文は保持しない＝G7）。
+const VIDEO_URL_SCAN_LIMIT = 2048;
+// 種類ごとの検出規則。Slack は URL を `<https://…|label>` で包んで届ける（本番実測）ので、
+// 区切りに `<` `>` `|` を含めない。YouTube のトップページ等の動画でない URL は拾わない。
+const VIDEO_URL_RULES = [
+  ["youtube", /https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:watch\?|shorts\/[^\s<>|])/iu],
+  ["youtube", /https?:\/\/youtu\.be\/[^\s<>|]/iu],
+  ["tiktok", /https?:\/\/(?:[a-z0-9-]+\.)?tiktok\.com\/[^\s<>|]/iu],
+  ["instagram", /https?:\/\/(?:www\.)?instagram\.com\/(?:reels?|p)\/[^\s<>|]/iu],
+];
+const VIDEO_ZERO_TOOL_RETRY_KEY = "video-zero-tool";
+const MAX_VIDEO_ZERO_TOOL_REVISIONS = 1;
+const VIDEO_ZERO_TOOL_REASON =
+  "利用者が動画の URL を送っているのに、ツールを 1 つも呼ばずに回答しようとしています。";
+// 固定文（契約テストが完全一致で検証する）。
+const VIDEO_ZERO_TOOL_INSTRUCTION =
+  "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、" +
+  "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。" +
+  "YouTube の URL も `video_analysis` でそのまま分析できます。" +
+  "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。";
+
+// 本文に含まれる動画 URL の種類（最初に現れたもの）。無ければ null。
+export function classifyVideoUrl(text) {
+  if (typeof text !== "string") return null;
+  const head = text.slice(0, VIDEO_URL_SCAN_LIMIT);
+  let first = null;
+  for (const [kind, rule] of VIDEO_URL_RULES) {
+    const match = rule.exec(head);
+    if (match && (first === null || match.index < first.index)) {
+      first = { kind, index: match.index };
+    }
+  }
+  return first?.kind ?? null;
+}
 // 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
 const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
 // 層1 の 3 POST（initialize / initialized / tools/call）で共有する全体予算。
@@ -1198,6 +1242,8 @@ function findFabricatedConnectUrlKinds(text) {
   return { kinds: [...kinds].sort(), scanned };
 }
 
+// 同一受信かどうかは識別子だけで決める。本文由来の判定結果（connectRequest / videoUrlKind）は
+// 比較に含めない: content の有無が違う同じ受信の再通知を「別の受信」と誤判定しないため。
 function sameIngress(left, right) {
   return (
     left.ingressKind === right.ingressKind &&
@@ -1437,13 +1483,20 @@ export function createCallerIdentityPlugin({
   const consumedInvocations = new Map();
   const toolCallsByRun = new Map();
   const connectRevisionsByRun = new Map();
+  // 動画 URL × 0 tool call の層2 の予算（1 run につき revise は 1 回）。連携とは別の台帳。
+  const videoRevisionsByRun = new Map();
   // 層3: revise 予算を使い切っても 0 tool call のままだった run。reply_payload_sending で
   // 本文を定型文に置換する。agent_end より後に配信が走りうるので releaseAgentRun では消さず、
   // 他の台帳と同じ TTL/上限掃除に任せる。
   const connectFallbackByRun = new Map();
 
   function pruneConnectGuardState(nowMs) {
-    for (const ledger of [toolCallsByRun, connectRevisionsByRun, connectFallbackByRun]) {
+    for (const ledger of [
+      toolCallsByRun,
+      connectRevisionsByRun,
+      connectFallbackByRun,
+      videoRevisionsByRun,
+    ]) {
       for (const [runId, entry] of ledger) {
         if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
           ledger.delete(runId);
@@ -1603,6 +1656,10 @@ export function createCallerIdentityPlugin({
           existing.connectNormalizedLength = ingress.connectNormalizedLength;
           existing.connectContentLength = ingress.connectContentLength;
         }
+        // 動画 URL の種類も同じ理由で引き継ぐ（content 無しの通知が先に束縛された順序でも層2 が効くように）。
+        if (ingress.videoUrlKind && !existing.videoUrlKind) {
+          existing.videoUrlKind = ingress.videoUrlKind;
+        }
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -1718,6 +1775,8 @@ export function createCallerIdentityPlugin({
     // 本文は保持しない。「形」だけを 1 本の文字列にして持つ（G7）。
     // 本番で `content_len=16` の内訳が判らず原因を特定できなかったため（2026-09-04）。
     const connectShape = connectRequestShape(event?.content);
+    // 動画 URL × 0 tool call の層2 用。種類だけを持つ（URL・本文は保持しない＝G7）。
+    const videoUrlKind = classifyVideoUrl(event?.content);
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -1738,6 +1797,7 @@ export function createCallerIdentityPlugin({
       connectNormalizedLength,
       connectContentLength,
       connectShape,
+      videoUrlKind,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -1751,6 +1811,10 @@ export function createCallerIdentityPlugin({
       // 一回性は ingress オブジェクトではなく connectAnsweredByMessage が持つ
       // （pending から消えても失効しないようにするため。上の定義を参照）。
       ingress.channelAliases = existing.channelAliases;
+    }
+    // 動画 URL の判定は本文から決まる。本文を伴わない再通知が後から来ても、先に分かった種類を落とさない。
+    if (existing?.videoUrlKind && !ingress.videoUrlKind) {
+      ingress.videoUrlKind = existing.videoUrlKind;
     }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
@@ -3187,6 +3251,72 @@ export function createCallerIdentityPlugin({
         };
   }
 
+  // 動画 URL × 0 tool call の層2（定数の説明は冒頭の VIDEO_ZERO_TOOL_* を参照）。
+  // 連携側（guardConnectUrlFabrication）が何もしなかったときだけ呼ばれる。連携側の挙動は変えない。
+  function guardVideoZeroTool(event, ctx, logger) {
+    const nowMs = Date.now();
+    pruneConnectGuardState(nowMs);
+    const eventRunId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
+    if (!eventRunId) return undefined;
+    const toolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
+    // run に束縛された権威 ingress（連携の抑止・層2 と同じ台帳）。本文の推測はしない。
+    const ingress = connectIngressByRun.get(eventRunId) ?? null;
+    const urlKind = ingress?.videoUrlKind ?? "none";
+    // 判定行の末尾は連携の判定行と同じく id_shape（識別子の「形」だけ）で揃える。
+    const describe =
+      `video zero-tool revise runId=${eventRunId} tool_calls=${toolCalls} url_kind=${urlKind}` +
+      ` ${idShape({
+        sender: ingress?.senderId ?? ctx?.senderId,
+        channel: ingress?.channelId ?? ctx?.channelId,
+        message: ingress?.messageId,
+        session: ingress?.sessionKey ?? ctx?.sessionKey,
+      })}`;
+    // 介入しない理由を run × 理由ごとに 1 回だけ残す（連携の判定行とキーが衝突しないよう接頭辞を付ける）。
+    // G7: URL・本文・Slack 識別子は載せない（url_kind は種類名だけ）。
+    const skip = (reason) => {
+      logConnectDecisionOnce(
+        logger,
+        "info",
+        "before_agent_finalize",
+        eventRunId,
+        `video:${reason}`,
+        `${describe} outcome=skipped reason=${reason}`,
+      );
+      return undefined;
+    };
+    if (toolCalls > 0) return skip("model_called_tool");
+    if (typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim()) {
+      return skip("empty_assistant_message");
+    }
+    if (!ingress) return skip("no_run_binding");
+    if (!ingress.videoUrlKind) return skip("no_video_url");
+    // 連携依頼が優先（連携側が予算切れで何も返さなかった run にも、動画の指示は重ねない）。
+    if (ingress.connectRequest === true) return skip("connect_request");
+    // 自前の予算（1 run につき再パスは 1 回）。上流予算に依存せずループ不在を担保する。
+    const revisions = videoRevisionsByRun.get(eventRunId)?.count ?? 0;
+    if (revisions >= MAX_VIDEO_ZERO_TOOL_REVISIONS) {
+      logger?.warn?.(
+        `${PLUGIN_ID}: ${describe} outcome=budget_exhausted reason=model_did_not_call_tool` +
+          ` revise_attempt=${revisions}`,
+      );
+      return undefined;
+    }
+    videoRevisionsByRun.delete(eventRunId);
+    videoRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
+    logger?.warn?.(
+      `${PLUGIN_ID}: ${describe} outcome=revised reason=video_url_zero_tool revise_attempt=${revisions + 1}`,
+    );
+    return {
+      action: "revise",
+      reason: VIDEO_ZERO_TOOL_REASON,
+      retry: {
+        instruction: VIDEO_ZERO_TOOL_INSTRUCTION,
+        idempotencyKey: VIDEO_ZERO_TOOL_RETRY_KEY,
+        maxAttempts: MAX_VIDEO_ZERO_TOOL_REVISIONS,
+      },
+    };
+  }
+
   // 層3。層2 の再パス後も 0 tool call のまま終わった run の最終応答を、送信直前に
   // 定型文へ置換する。event.runId と ctx.runId は agent run と同じ id
   // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
@@ -3429,8 +3559,12 @@ export function createCallerIdentityPlugin({
       });
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
       observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
-      observe("before_agent_finalize", (event, ctx) =>
-        guardConnectUrlFabrication(event, ctx, api.logger),
+      // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
+      observe(
+        "before_agent_finalize",
+        (event, ctx) =>
+          guardConnectUrlFabrication(event, ctx, api.logger) ??
+          guardVideoZeroTool(event, ctx, api.logger),
       );
       observe("reply_payload_sending", (event, ctx) =>
         replaceExhaustedConnectReply(event, ctx, api.logger),

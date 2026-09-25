@@ -21,6 +21,7 @@ import {
   REGISTERED_HOOKS,
   connectRequestShape,
   classifyConnectRequest,
+  classifyVideoUrl,
 } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
@@ -381,6 +382,12 @@ const MCP_USER_FACING_ERROR = [
   `診断: CONNECT-I02 2026-09-04 10:23 JST ${USER} req-1`,
 ].join("\n");
 const LONG_CONNECT_REQUEST = "〇〇社との連携について提案書を作ってください";
+// 動画 URL × 0 tool call の層2（2026-09-25）。本番の DM で届いた本文（Slack が URL を <url|label> で包む）と、
+// 同じ会話の履歴に引っ張られて Aico が 4 回返した断り文そのもの。
+const YOUTUBE_ANALYSIS_REQUEST =
+  "この動画を分析して <https://www.youtube.com/watch?v=jNQXAC9IVRw|youtube.com/watch?v=jNQXAC9IVRw>";
+const YOUTUBE_REFUSAL_REPLY =
+  "YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。";
 
 // mcp（streamable-http）の偽物。rollout-task-canary.mjs と同じ手順を受ける。
 // 本番の失敗モード（fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー /
@@ -811,6 +818,70 @@ function zeroToolConnectScenario({
     logs,
     infos,
   };
+}
+
+// 動画 URL × 0 tool call の層2。受信 → run 開始 → 任意で tool 呼び出し → finalize（repeat 回）。
+function videoZeroToolScenario({
+  content,
+  lastAssistantMessage = YOUTUBE_REFUSAL_REPLY,
+  toolName = null,
+  repeat = 1,
+} = {}) {
+  const { handlers, logs, infos } = makeConnectPlugin({});
+  receiveDm(handlers, content);
+  startRun(handlers);
+  const toolBlocked = toolName ? callTool(handlers, toolName) : null;
+  const results = [];
+  for (let i = 0; i < repeat; i += 1) {
+    results.push(finalizeRun(handlers, { lastAssistantMessage }));
+  }
+  const pick = (result) => ({
+    intervened: result?.action === "revise",
+    instruction: result?.retry?.instruction ?? null,
+    idempotencyKey: result?.retry?.idempotencyKey ?? null,
+    maxAttempts: result?.retry?.maxAttempts ?? null,
+    reason: result?.reason ?? null,
+  });
+  const last = results[results.length - 1];
+  const videoLines = [...infos, ...logs].filter((m) => m.includes("video zero-tool revise"));
+  return {
+    toolBlocked,
+    firstIntervened: results[0]?.action === "revise",
+    ...pick(last),
+    passes: results.map(pick),
+    videoSkipReason:
+      videoLines.find((m) => m.includes("outcome=skipped"))?.match(/reason=(\S+)/u)?.[1] ?? null,
+    videoBudgetExhausted: videoLines.some((m) => m.includes("outcome=budget_exhausted")),
+    videoLines,
+    logs,
+    infos,
+  };
+}
+
+// 動画 URL の種類判定（受信時に ingress へ種類だけを載せる）の行列。
+function videoUrlClassificationMatrix() {
+  const cases = [
+    ["youtube_watch", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "youtube"],
+    ["youtube_slack_wrapped", YOUTUBE_ANALYSIS_REQUEST, "youtube"],
+    ["youtube_shorts", "このショート見て https://youtube.com/shorts/abc123", "youtube"],
+    ["youtube_mobile", "http://m.youtube.com/watch?v=abc", "youtube"],
+    ["youtu_be", "https://youtu.be/jNQXAC9IVRw の構成", "youtube"],
+    ["tiktok", "https://www.tiktok.com/@rival/video/5 を分析", "tiktok"],
+    ["tiktok_short_link", "https://vt.tiktok.com/ZSabc/", "tiktok"],
+    ["instagram_reel", "https://www.instagram.com/reel/CzTWjU5K8Hl/", "instagram"],
+    ["instagram_post", "https://instagram.com/p/Cabc/", "instagram"],
+    ["first_wins", "https://www.tiktok.com/@a/video/1 と https://youtu.be/x", "tiktok"],
+    ["non_video_url", "https://example.com/page を要約して", null],
+    ["youtube_top_only", "https://www.youtube.com/ を開いて", null],
+    ["lookalike_host", "https://notyoutube.com/watch?v=1", null],
+    ["no_url", "この動画を分析して", null],
+    ["not_string", 42, null],
+  ];
+  return cases.map(([name, input, expected]) => ({
+    name,
+    expected,
+    actual: classifyVideoUrl(input),
+  }));
 }
 
 // fixture（単一正本）の各文言が、層1 の実経路（message_received → before_agent_reply）で
@@ -2725,6 +2796,36 @@ const report = {
     toolName: "teamagent__oauth_connect",
     lastAssistantMessage: OAUTH_CONNECT_MESSAGE,
   }),
+  // 動画 URL × 0 tool call の層2（2026-09-25）。
+  // ①本番の本文（YouTube・Slack 形式）× 本番の断り文 → revise（固定 instruction）。
+  video_zero_tool_youtube: videoZeroToolScenario({ content: YOUTUBE_ANALYSIS_REQUEST }),
+  // ②Shorts / TikTok も同じく介入。
+  video_zero_tool_shorts: videoZeroToolScenario({
+    content: "このショートのフック見て https://youtube.com/shorts/abc123",
+  }),
+  video_zero_tool_tiktok: videoZeroToolScenario({
+    content: "この競合のTikTok動画、構成を分析して https://www.tiktok.com/@rival/video/5",
+  }),
+  // ③video_analysis を呼んだ run → 不介入。
+  video_zero_tool_with_tool_call: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    toolName: "teamagent__video_analysis",
+    lastAssistantMessage: "この動画の構成と狙いです。",
+  }),
+  // ④URL 無し・動画でない URL → 不介入（誤爆しない）。
+  video_zero_tool_no_url: videoZeroToolScenario({ content: "この動画を分析して" }),
+  video_zero_tool_non_video_url: videoZeroToolScenario({
+    content: "https://example.com/page を要約して",
+  }),
+  // ⑤予算: 同じ run の 2 回目の finalize には介入しない（ループしない）。
+  video_zero_tool_budget: videoZeroToolScenario({ content: YOUTUBE_ANALYSIS_REQUEST, repeat: 2 }),
+  // ⑥連携依頼が優先（連携の revise が返り、動画側の指示は返らない）。
+  video_zero_tool_connect_precedence: videoZeroToolScenario({
+    content: "連携",
+    lastAssistantMessage: SELF_MADE_REPLY,
+  }),
+  // ⑦URL の種類判定の行列。
+  video_url_classification: videoUrlClassificationMatrix(),
   // 層3 ①再パス後も 0 tool call → 予算切れで層3 を武装し、送信直前に定型文へ置換。
   //     2 通目（分割 payload）は取り消す。
   connect_zero_tool_fallback: zeroToolConnectScenario({
