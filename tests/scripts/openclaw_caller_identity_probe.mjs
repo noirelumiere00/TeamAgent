@@ -22,6 +22,8 @@ import {
   connectRequestShape,
   classifyConnectRequest,
   classifyVideoUrl,
+  hasVideoRequestIntent,
+  looksLikeVideoRefusal,
 } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
@@ -821,19 +823,24 @@ function zeroToolConnectScenario({
 }
 
 // 動画 URL × 0 tool call の層2。受信 → run 開始 → 任意で tool 呼び出し → finalize（repeat 回）。
+// receives: 受信の順序を変えたいときの [{ content, runId? }]（content 省略＝本文無しの再通知）。
 function videoZeroToolScenario({
   content,
+  receives = null,
   lastAssistantMessage = YOUTUBE_REFUSAL_REPLY,
   toolName = null,
   repeat = 1,
+  ctxRunId = null,
 } = {}) {
   const { handlers, logs, infos } = makeConnectPlugin({});
-  receiveDm(handlers, content);
+  for (const step of receives ?? [{ content }]) {
+    receiveDm(handlers, step.content, step.runId ? { runId: step.runId } : {});
+  }
   startRun(handlers);
   const toolBlocked = toolName ? callTool(handlers, toolName) : null;
   const results = [];
   for (let i = 0; i < repeat; i += 1) {
-    results.push(finalizeRun(handlers, { lastAssistantMessage }));
+    results.push(finalizeRun(handlers, { lastAssistantMessage, ctxRunId }));
   }
   const pick = (result) => ({
     intervened: result?.action === "revise",
@@ -871,6 +878,14 @@ function videoUrlClassificationMatrix() {
     ["instagram_reel", "https://www.instagram.com/reel/CzTWjU5K8Hl/", "instagram"],
     ["instagram_post", "https://instagram.com/p/Cabc/", "instagram"],
     ["first_wins", "https://www.tiktok.com/@a/video/1 と https://youtu.be/x", "tiktok"],
+    ["youtube_live", "https://www.youtube.com/live/abc123", "youtube"],
+    ["youtube_music", "https://music.youtube.com/watch?v=abc", "youtube"],
+    ["youtube_upper", "HTTPS://WWW.YOUTUBE.COM/WATCH?V=abc", "youtube"],
+    ["tiktok_t_link", "https://www.tiktok.com/t/ZSabc/", "tiktok"],
+    ["instagram_tv", "https://www.instagram.com/tv/CzTW/", "instagram"],
+    ["tiktok_profile", "https://www.tiktok.com/@brand", null],
+    ["tiktok_ads", "https://ads.tiktok.com/business/creativecenter/inspiration/", null],
+    ["tiktok_tag", "https://www.tiktok.com/tag/コンビニ", null],
     ["non_video_url", "https://example.com/page を要約して", null],
     ["youtube_top_only", "https://www.youtube.com/ を開いて", null],
     ["lookalike_host", "https://notyoutube.com/watch?v=1", null],
@@ -882,6 +897,25 @@ function videoUrlClassificationMatrix() {
     expected,
     actual: classifyVideoUrl(input),
   }));
+}
+
+// 誤爆を避ける手掛かり（依頼語・断りの下書き）の行列。
+function videoTriggerMatrix() {
+  const intent = [
+    ["analysis", YOUTUBE_ANALYSIS_REQUEST, true],
+    ["hook", "このショートのフック見て https://youtube.com/shorts/abc123", true],
+    ["timecode", "https://youtu.be/abc の 0:30 を画像にして", true],
+    ["share_only", "この動画、明日の会議で使います https://youtu.be/abc", false],
+    ["not_string", undefined, false],
+  ].map(([name, input, expected]) => ({ name, expected, actual: hasVideoRequestIntent(input) }));
+  const refusal = [
+    ["production_refusal", YOUTUBE_REFUSAL_REPLY, true],
+    ["cannot", "YouTube の動画は分析できません。", true],
+    ["attach", "動画ファイルを添付いただければ対応します。", true],
+    ["ack", "承知しました。明日の会議の資料に入れておきますね。", false],
+    ["analysis_result", "この動画の構成と狙いです。", false],
+  ].map(([name, input, expected]) => ({ name, expected, actual: looksLikeVideoRefusal(input) }));
+  return { intent, refusal };
 }
 
 // fixture（単一正本）の各文言が、層1 の実経路（message_received → before_agent_reply）で
@@ -2826,6 +2860,47 @@ const report = {
   }),
   // ⑦URL の種類判定の行列。
   video_url_classification: videoUrlClassificationMatrix(),
+  // ⑧誤爆を避ける: 共有だけ（依頼語なし）× 断りでない下書き → 不介入。
+  video_zero_tool_share_only: videoZeroToolScenario({
+    content: "この動画、明日の会議で使います https://youtu.be/abc",
+    lastAssistantMessage: "承知しました。明日の会議の資料に入れておきますね。",
+  }),
+  // ⑨共有だけでも、下書きが断りの形なら介入（誤った断りは直す）。
+  video_zero_tool_share_refusal: videoZeroToolScenario({
+    content: "この動画、明日の会議で使います https://youtu.be/abc",
+  }),
+  // ⑩依頼語あり × 断りでない下書き（聞き返し）→ 介入。
+  video_zero_tool_intent_ask_back: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    lastAssistantMessage: "どの観点で分析しましょうか？",
+  }),
+  // ⑪連携依頼＋動画 URL: 連携の予算切れ後の 2 回目にも動画側は重ならない。
+  video_zero_tool_connect_plus_video: videoZeroToolScenario({
+    content: "連携して https://youtu.be/abc",
+    lastAssistantMessage: SELF_MADE_REPLY,
+    repeat: 2,
+  }),
+  // ⑫動画 URL の受信で連携 URL を捏造: 連携側が先に revise し、1 run の再パスは全体で 1 回。
+  video_zero_tool_fabricated_plus_video: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    lastAssistantMessage: FABRICATED_REPLY,
+    repeat: 3,
+  }),
+  // ⑬通知の順序: 本文無しの通知が先に run へ束縛 → 本文つきの再通知（bindRun の引き継ぎ）。
+  video_zero_tool_bindrun_merge: videoZeroToolScenario({
+    receives: [{ runId: "run-1" }, { content: YOUTUBE_ANALYSIS_REQUEST, runId: "run-1" }],
+  }),
+  // ⑭通知の順序: 本文つき → 本文無しの再通知 → run 開始（pending の引き継ぎ）。
+  video_zero_tool_pending_merge: videoZeroToolScenario({
+    receives: [{ content: YOUTUBE_ANALYSIS_REQUEST }, {}],
+  }),
+  // ⑮event.runId と ctx.runId が食い違う run には触らない。
+  video_zero_tool_run_mismatch: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    ctxRunId: "run-X",
+  }),
+  // ⑯依頼語・断りの手掛かりの行列。
+  video_trigger_matrix: videoTriggerMatrix(),
   // 層3 ①再パス後も 0 tool call → 予算切れで層3 を武装し、送信直前に定型文へ置換。
   //     2 通目（分割 payload）は取り消す。
   connect_zero_tool_fallback: zeroToolConnectScenario({

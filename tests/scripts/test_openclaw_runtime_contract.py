@@ -4313,26 +4313,39 @@ def test_outgoing_text_drops_em_dashes_but_keeps_links_ranges_and_code() -> None
 # SOUL（#441/#445）とツール説明（#444）は反映済みで、/new 後の新しいセッションでは video_analysis が
 # 呼ばれた。断り続けた原因は同じ DM セッションの履歴（初回の誤った断りと自分の「今後は即座にお断りします」）
 # で、SOUL の文言では上書きできない＝連携（2026-09-03）と同じ失敗クラス。層2 の revise で塞ぐ。
+# 誤爆（URL を共有しただけの会話に再パス→頼んでいない分析＝Gemini 課金）を避けるため、
+# 「依頼語がある」か「下書きが断りの形」のときだけ介入する（独立レビュー 2026-09-25 の指摘）。
 
 VIDEO_ZERO_TOOL_INSTRUCTION = (
     "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、"
     "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。"
     "YouTube の URL も `video_analysis` でそのまま分析できます。"
     "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。"
+    "どちらの依頼でもない（URL を共有しただけ等）なら、ツールを呼ばずにそのまま答えてください。"
 )
 VIDEO_ZERO_TOOL_REASON = (
-    "利用者が動画の URL を送っているのに、ツールを 1 つも呼ばずに回答しようとしています。"
+    "利用者が動画の URL つきで依頼しているのに、ツールを 1 つも呼ばずに回答しようとしています。"
 )
+
+
+def _video_pass_keys(outcome: dict[str, Any]) -> list[str | None]:
+    return [p["idempotencyKey"] for p in outcome["passes"]]
 
 
 def test_zero_tool_reply_to_video_url_forces_another_pass() -> None:
-    """層2: 動画 URL × 0 tool call → revise（固定 instruction・maxAttempts 1）。
+    """層2: 動画 URL × 依頼語 × 0 tool call → revise（固定 instruction・maxAttempts 1）。
 
     本番の本文（Slack が URL を ``<url|label>`` で包む形）と、本番で 4 回返った断り文そのもので駆動する。
     変異: 登録を ``guardConnectUrlFabrication`` だけに戻すと intervened が False になり赤。
     """
     report = _caller_identity_report()
-    for case in ("video_zero_tool_youtube", "video_zero_tool_shorts", "video_zero_tool_tiktok"):
+    for case in (
+        "video_zero_tool_youtube",
+        "video_zero_tool_shorts",
+        "video_zero_tool_tiktok",
+        "video_zero_tool_intent_ask_back",
+        "video_zero_tool_share_refusal",
+    ):
         guarded = report[case]
         assert guarded["intervened"] is True, case
         assert guarded["instruction"] == VIDEO_ZERO_TOOL_INSTRUCTION, case
@@ -4342,40 +4355,88 @@ def test_zero_tool_reply_to_video_url_forces_another_pass() -> None:
         assert "http" not in guarded["instruction"], case
 
 
-def test_video_rule_does_not_fire_after_a_tool_call_or_without_a_video_url() -> None:
-    """層2 は tool を呼んだ run・動画 URL の無い受信には介入せず、理由を 1 行残すこと。"""
+def test_video_rule_does_not_fire_on_share_only_after_a_tool_call_or_without_a_video_url() -> None:
+    """層2 は誤爆しない: tool を呼んだ run・共有だけ（依頼語なし×断りでない下書き）には介入せず理由を残し、
+    動画 URL の無い受信（大半の会話）では判定行も出さない（騒音にしない）。"""
     report = _caller_identity_report()
     expected_reason = {
         "video_zero_tool_with_tool_call": "model_called_tool",
-        "video_zero_tool_no_url": "no_video_url",
-        "video_zero_tool_non_video_url": "no_video_url",
+        "video_zero_tool_share_only": "not_a_request",
     }
     for case, reason in expected_reason.items():
         outcome = report[case]
         assert outcome["intervened"] is False, case
         assert outcome["videoSkipReason"] == reason, case
+    for case in ("video_zero_tool_no_url", "video_zero_tool_non_video_url"):
+        outcome = report[case]
+        assert outcome["intervened"] is False, case
+        assert outcome["videoLines"] == [], case
 
 
 def test_video_rule_revises_at_most_once_per_run() -> None:
     """同じ run の 2 回目の finalize には介入しない（ループしない）。予算切れは warn で残す。"""
     outcome = _caller_identity_report()["video_zero_tool_budget"]
-    assert [p["intervened"] for p in outcome["passes"]] == [True, False]
+    assert _video_pass_keys(outcome) == ["video-zero-tool", None]
     assert outcome["videoBudgetExhausted"] is True
 
 
 def test_connect_rule_takes_precedence_over_the_video_rule() -> None:
-    """連携依頼は連携の revise が返り、動画側の指示は重ならないこと（連携の挙動を変えない）。"""
-    outcome = _caller_identity_report()["video_zero_tool_connect_precedence"]
-    assert outcome["intervened"] is True
-    assert outcome["idempotencyKey"] == "connect-zero-tool"
-    assert outcome["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
-    assert not any("outcome=revised" in line for line in outcome["videoLines"])
+    """連携依頼は連携の revise が返り、動画側の指示は重ならないこと（連携の挙動を変えない）。
+
+    「連携して <YouTube URL>」で連携の予算が尽きた 2 回目にも、動画側は revise しない
+    （層3 が武装済みなので、重ねると再パスの結果が連携の定型文に置き換わって消える）。
+    変異: ``connect_request`` の skip を消すと 2 回目が ``video-zero-tool`` になり赤。
+    """
+    report = _caller_identity_report()
+    plain = report["video_zero_tool_connect_precedence"]
+    assert plain["idempotencyKey"] == "connect-zero-tool"
+    assert plain["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
+    both = report["video_zero_tool_connect_plus_video"]
+    assert _video_pass_keys(both) == ["connect-zero-tool", None]
+    assert both["videoSkipReason"] == "connect_request"
+    assert not any("outcome=revised" in line for line in both["videoLines"])
+
+
+def test_one_revision_per_run_across_the_connect_and_video_rules() -> None:
+    """動画 URL の受信で連携 URL を捏造した run: 連携側が先に revise し、動画側は重ねない（1 run 1 回）。
+
+    変異: 登録順を ``guardVideoZeroTool ?? guardConnectUrlFabrication`` に入れ替えると 1 回目が
+    ``video-zero-tool`` になり赤。``connect_revised`` の skip を消すと 2 回目が ``video-zero-tool`` になり赤。
+    """
+    outcome = _caller_identity_report()["video_zero_tool_fabricated_plus_video"]
+    assert _video_pass_keys(outcome) == ["connect-url-fabrication", None, None]
+    assert outcome["videoSkipReason"] == "connect_revised"
+
+
+def test_video_rule_survives_both_notification_orders() -> None:
+    """本文無しの通知が先に run へ束縛される順（bindRun）・本文つきの後に本文無しが来る順（pending）の
+    どちらでも、動画 URL の判定を落とさずに介入すること。"""
+    report = _caller_identity_report()
+    for case in ("video_zero_tool_bindrun_merge", "video_zero_tool_pending_merge"):
+        assert report[case]["intervened"] is True, case
+
+
+def test_video_rule_ignores_mismatched_runs() -> None:
+    """event.runId と ctx.runId が食い違う run には触らない（run 束縛の権威性）。"""
+    outcome = _caller_identity_report()["video_zero_tool_run_mismatch"]
+    assert outcome["intervened"] is False
+    assert outcome["videoLines"] == []
 
 
 def test_video_url_classification_matrix() -> None:
-    """受信時の動画 URL の種類判定（YouTube・Shorts・youtu.be・TikTok・Instagram・非動画・紛らわしいホスト）。"""
+    """受信時の動画 URL の種類判定（YouTube・Shorts・live・youtu.be・TikTok 動画・Instagram・
+    非動画 URL（TikTok のプロフィール・広告管理画面・タグ）・紛らわしいホスト）。"""
     rows = _caller_identity_report()["video_url_classification"]
-    assert len(rows) >= 15
+    assert len(rows) >= 23
+    mismatches = [row for row in rows if row["actual"] != row["expected"]]
+    assert not mismatches, mismatches
+
+
+def test_video_trigger_matrix() -> None:
+    """誤爆を避ける手掛かり: 本文の依頼語と、下書きの断りの形。"""
+    matrix = _caller_identity_report()["video_trigger_matrix"]
+    rows = [*matrix["intent"], *matrix["refusal"]]
+    assert len(rows) >= 10
     mismatches = [row for row in rows if row["actual"] != row["expected"]]
     assert not mismatches, mismatches
 
@@ -4389,7 +4450,8 @@ def test_video_rule_logs_keep_the_g7_discipline() -> None:
         "video_zero_tool_tiktok",
         "video_zero_tool_budget",
         "video_zero_tool_with_tool_call",
-        "video_zero_tool_no_url",
+        "video_zero_tool_share_only",
+        "video_zero_tool_fabricated_plus_video",
     ):
         lines.extend(report[case]["videoLines"])
     assert lines
@@ -4401,3 +4463,4 @@ def test_video_rule_logs_keep_the_g7_discipline() -> None:
         assert "youtube.com" not in line
         assert "jNQXAC9IVRw" not in line
         assert "U09CX1CCBLN" not in line
+        assert "会議" not in line

@@ -143,26 +143,38 @@ const CONNECT_GUARANTEE_CANCEL_REASON = "connect guarantee already delivered thi
 // 上書きできなかった＝連携（2026-09-03）と同じ失敗クラス。連携と同じ作りの層2 だけを置く。
 //   層1（モデルを通さず呼ぶ）は置かない: 分析か切り出しか、引数（focus / timecodes）をモデルが決める。
 //   層3（定型文へ置換）は置かない: 定型文では分析結果を出せない（再パスでも断るならそのまま届く）。
-// 判定は受信時に URL の「種類」だけを ingress に載せる（URL・本文は保持しない＝G7）。
+// 判定は受信時に URL の「種類」と依頼語の有無（真偽）だけを ingress に載せる（URL・本文は保持しない＝G7）。
+// 誤爆を避けるため、動画 URL があっても「依頼の語がある」か「下書きが断りの形」のときだけ介入する
+// （URL を共有しただけの会話に再パスを掛けて、頼んでいない分析＝Gemini 課金・月の利用枠を誘わない）。
 const VIDEO_URL_SCAN_LIMIT = 2048;
 // 種類ごとの検出規則。Slack は URL を `<https://…|label>` で包んで届ける（本番実測）ので、
-// 区切りに `<` `>` `|` を含めない。YouTube のトップページ等の動画でない URL は拾わない。
+// 区切りに `<` `>` `|` を含めない。動画でない URL（YouTube のトップ・TikTok のプロフィールや
+// 広告管理画面など）は拾わない。
 const VIDEO_URL_RULES = [
-  ["youtube", /https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:watch\?|shorts\/[^\s<>|])/iu],
+  ["youtube", /https?:\/\/(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?|(?:shorts|live)\/[^\s<>|])/iu],
   ["youtube", /https?:\/\/youtu\.be\/[^\s<>|]/iu],
-  ["tiktok", /https?:\/\/(?:[a-z0-9-]+\.)?tiktok\.com\/[^\s<>|]/iu],
-  ["instagram", /https?:\/\/(?:www\.)?instagram\.com\/(?:reels?|p)\/[^\s<>|]/iu],
+  ["tiktok", /https?:\/\/(?:www\.|m\.)?tiktok\.com\/(?:@[^\s<>|/]+\/(?:video|photo)\/|[tv]\/)[^\s<>|]/iu],
+  ["tiktok", /https?:\/\/(?:vt|vm)\.tiktok\.com\/[^\s<>|]/iu],
+  ["instagram", /https?:\/\/(?:www\.)?instagram\.com\/(?:reels?|p|tv)\/[^\s<>|]/iu],
 ];
+// 本文の依頼語（分析・切り出しを頼んでいる手掛かり）。真偽だけを ingress に載せる。
+const VIDEO_REQUEST_RE =
+  /(分析|構成|フック|CTA|解説|要約|まとめ|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ|シーン|\d{1,2}:\d{2}|\d+\s?秒|見て|みて|教えて|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
+// 下書きが断りの形か（本番の断り「取得不可です…ファイル添付でお願いします」を含む）。
+// 下書きは判定にだけ使い、保持も記録もしない。
+const VIDEO_REFUSAL_RE =
+  /(取得(?:でき(?:ません|ない)|不可|元)|でき(?:ません|ない)|対応して(?:い)?ません|未対応|非対応|ブロック|添付(?:して|で|を|いただ))/u;
 const VIDEO_ZERO_TOOL_RETRY_KEY = "video-zero-tool";
 const MAX_VIDEO_ZERO_TOOL_REVISIONS = 1;
 const VIDEO_ZERO_TOOL_REASON =
-  "利用者が動画の URL を送っているのに、ツールを 1 つも呼ばずに回答しようとしています。";
-// 固定文（契約テストが完全一致で検証する）。
+  "利用者が動画の URL つきで依頼しているのに、ツールを 1 つも呼ばずに回答しようとしています。";
+// 固定文（契約テストが完全一致で検証する）。最後の 1 文は誤爆時の逃げ道。
 const VIDEO_ZERO_TOOL_INSTRUCTION =
   "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、" +
   "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。" +
   "YouTube の URL も `video_analysis` でそのまま分析できます。" +
-  "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。";
+  "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。" +
+  "どちらの依頼でもない（URL を共有しただけ等）なら、ツールを呼ばずにそのまま答えてください。";
 
 // 本文に含まれる動画 URL の種類（最初に現れたもの）。無ければ null。
 export function classifyVideoUrl(text) {
@@ -176,6 +188,16 @@ export function classifyVideoUrl(text) {
     }
   }
   return first?.kind ?? null;
+}
+
+// 本文に分析・切り出しの依頼語があるか（真偽だけ）。
+export function hasVideoRequestIntent(text) {
+  return typeof text === "string" && VIDEO_REQUEST_RE.test(text.slice(0, VIDEO_URL_SCAN_LIMIT));
+}
+
+// 下書きが断りの形か（真偽だけ）。
+export function looksLikeVideoRefusal(text) {
+  return typeof text === "string" && VIDEO_REFUSAL_RE.test(text);
 }
 // 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
 const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
@@ -1659,6 +1681,7 @@ export function createCallerIdentityPlugin({
         // 動画 URL の種類も同じ理由で引き継ぐ（content 無しの通知が先に束縛された順序でも層2 が効くように）。
         if (ingress.videoUrlKind && !existing.videoUrlKind) {
           existing.videoUrlKind = ingress.videoUrlKind;
+          existing.videoRequestIntent = ingress.videoRequestIntent === true;
         }
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
@@ -1775,8 +1798,9 @@ export function createCallerIdentityPlugin({
     // 本文は保持しない。「形」だけを 1 本の文字列にして持つ（G7）。
     // 本番で `content_len=16` の内訳が判らず原因を特定できなかったため（2026-09-04）。
     const connectShape = connectRequestShape(event?.content);
-    // 動画 URL × 0 tool call の層2 用。種類だけを持つ（URL・本文は保持しない＝G7）。
+    // 動画 URL × 0 tool call の層2 用。種類と依頼語の有無だけを持つ（URL・本文は保持しない＝G7）。
     const videoUrlKind = classifyVideoUrl(event?.content);
+    const videoRequestIntent = videoUrlKind !== null && hasVideoRequestIntent(event?.content);
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -1798,6 +1822,7 @@ export function createCallerIdentityPlugin({
       connectContentLength,
       connectShape,
       videoUrlKind,
+      videoRequestIntent,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -1815,6 +1840,7 @@ export function createCallerIdentityPlugin({
     // 動画 URL の判定は本文から決まる。本文を伴わない再通知が後から来ても、先に分かった種類を落とさない。
     if (existing?.videoUrlKind && !ingress.videoUrlKind) {
       ingress.videoUrlKind = existing.videoUrlKind;
+      ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
@@ -3258,21 +3284,22 @@ export function createCallerIdentityPlugin({
     pruneConnectGuardState(nowMs);
     const eventRunId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
     if (!eventRunId) return undefined;
-    const toolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
     // run に束縛された権威 ingress（連携の抑止・層2 と同じ台帳）。本文の推測はしない。
+    // 動画 URL の無い受信（大半の会話）は行を出さずに抜ける（騒音にしない）。
     const ingress = connectIngressByRun.get(eventRunId) ?? null;
-    const urlKind = ingress?.videoUrlKind ?? "none";
+    if (!ingress?.videoUrlKind) return undefined;
+    const toolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
     // 判定行の末尾は連携の判定行と同じく id_shape（識別子の「形」だけ）で揃える。
+    // G7: URL・本文・下書き・Slack 識別子は載せない（url_kind は種類名だけ）。
     const describe =
-      `video zero-tool revise runId=${eventRunId} tool_calls=${toolCalls} url_kind=${urlKind}` +
+      `video zero-tool revise runId=${eventRunId} tool_calls=${toolCalls} url_kind=${ingress.videoUrlKind}` +
       ` ${idShape({
-        sender: ingress?.senderId ?? ctx?.senderId,
-        channel: ingress?.channelId ?? ctx?.channelId,
-        message: ingress?.messageId,
-        session: ingress?.sessionKey ?? ctx?.sessionKey,
+        sender: ingress.senderId ?? ctx?.senderId,
+        channel: ingress.channelId ?? ctx?.channelId,
+        message: ingress.messageId,
+        session: ingress.sessionKey ?? ctx?.sessionKey,
       })}`;
     // 介入しない理由を run × 理由ごとに 1 回だけ残す（連携の判定行とキーが衝突しないよう接頭辞を付ける）。
-    // G7: URL・本文・Slack 識別子は載せない（url_kind は種類名だけ）。
     const skip = (reason) => {
       logConnectDecisionOnce(
         logger,
@@ -3285,13 +3312,15 @@ export function createCallerIdentityPlugin({
       return undefined;
     };
     if (toolCalls > 0) return skip("model_called_tool");
-    if (typeof event?.lastAssistantMessage !== "string" || !event.lastAssistantMessage.trim()) {
-      return skip("empty_assistant_message");
-    }
-    if (!ingress) return skip("no_run_binding");
-    if (!ingress.videoUrlKind) return skip("no_video_url");
+    const draft = event?.lastAssistantMessage;
+    if (typeof draft !== "string" || !draft.trim()) return skip("empty_assistant_message");
     // 連携依頼が優先（連携側が予算切れで何も返さなかった run にも、動画の指示は重ねない）。
     if (ingress.connectRequest === true) return skip("connect_request");
+    // 1 run につき再パスは全体で 1 回（連携側が既に revise した run には重ねない）。
+    if (connectRevisionsByRun.has(eventRunId)) return skip("connect_revised");
+    // 誤爆を避ける: 依頼の語がある、または下書きが断りの形のときだけ介入する。
+    const refusal = looksLikeVideoRefusal(draft);
+    if (ingress.videoRequestIntent !== true && !refusal) return skip("not_a_request");
     // 自前の予算（1 run につき再パスは 1 回）。上流予算に依存せずループ不在を担保する。
     const revisions = videoRevisionsByRun.get(eventRunId)?.count ?? 0;
     if (revisions >= MAX_VIDEO_ZERO_TOOL_REVISIONS) {
@@ -3303,8 +3332,10 @@ export function createCallerIdentityPlugin({
     }
     videoRevisionsByRun.delete(eventRunId);
     videoRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
+    const trigger = ingress.videoRequestIntent === true ? "request_intent" : "refusal_draft";
     logger?.warn?.(
-      `${PLUGIN_ID}: ${describe} outcome=revised reason=video_url_zero_tool revise_attempt=${revisions + 1}`,
+      `${PLUGIN_ID}: ${describe} outcome=revised reason=video_url_zero_tool trigger=${trigger}` +
+        ` revise_attempt=${revisions + 1}`,
     );
     return {
       action: "revise",
