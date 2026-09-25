@@ -81,6 +81,103 @@ DEFAULT_CLUSTER_RULES = ClusterRules(
 )
 
 
+FOOD_CLUSTER_RULES = ClusterRules(
+    vocabulary=(
+        "レシピ/作り方系",
+        "時短・節約系",
+        "食レポ/正直レビュー系",
+        "アレンジ/ちょい足し系",
+        "料理人・専門家系",
+        "PR/タイアップ明記",
+    ),
+    guidance=(
+        "動画のフレーム列から投稿の性格を1つだけ選ぶ。"
+        "手順を追って作り方を見せていればレシピ/作り方系、"
+        "手軽さ・時短・節約が主題なら時短・節約系、"
+        "食べて味や使用感を率直に語っていれば食レポ/正直レビュー系、"
+        "既製品へのひと手間・組み合わせが主題ならアレンジ/ちょい足し系、"
+        "料理人・栄養士など専門家の立場からの解説なら料理人・専門家系、"
+        "画面上にPR・タイアップの明記が見えるならPR/タイアップ明記。"
+    ),
+)
+
+GENERAL_CLUSTER_RULES = ClusterRules(
+    vocabulary=(
+        "使ってみた/正直レビュー系",
+        "ハウツー/解説系",
+        "比較・ランキング系",
+        "日常・Vlog系",
+        "専門家・プロ系",
+        "PR/タイアップ明記",
+    ),
+    guidance=(
+        "動画のフレーム列から投稿の性格を1つだけ選ぶ。"
+        "商品やサービスを実際に使って率直に語っていれば使ってみた/正直レビュー系、"
+        "やり方・選び方の説明が主ならハウツー/解説系、"
+        "複数の比較・ランキングなら比較・ランキング系、"
+        "日常の一場面として登場するなら日常・Vlog系、"
+        "専門家・プロの立場からの解説なら専門家・プロ系、"
+        "画面上にPR・タイアップの明記が見えるならPR/タイアップ明記。"
+    ),
+)
+
+_BEAUTY_WORDS = (
+    "美容",
+    "化粧",
+    "コスメ",
+    "スキンケア",
+    "ヘアケア",
+    "シャンプー",
+    "トリートメント",
+    "香水",
+    "メイク",
+    "ネイル",
+    "美容液",
+    "ボディケア",
+    "ハンドクリーム",
+    "日焼け止め",
+    "洗顔",
+)
+_FOOD_WORDS = (
+    "食品",
+    "食べ",
+    "料理",
+    "レシピ",
+    "調味料",
+    "スパイス",
+    "カレー",
+    "菓子",
+    "おやつ",
+    "飲料",
+    "ドリンク",
+    "お酒",
+    "ビール",
+    "コーヒー",
+    "お茶",
+    "グルメ",
+    "弁当",
+    "麺",
+    "パン",
+    "スイーツ",
+)
+
+
+def cluster_rules_for(category: str, brand: str, keywords: Sequence[str]) -> ClusterRules:
+    """商材カテゴリ（無ければブランド名・一般キーワード）から界隈の分類表を選ぶ。
+
+    9/17 の GABAN 版で、カレーに美容の分類表（成分オタク系・メンズ美容系…）が当たっていた。
+    美容・食品のどちらとも言えなければ汎用の分類表にする（美容の表は既定にしない）。
+    """
+    for text in (category, " ".join([brand, *keywords])):
+        if not text:
+            continue
+        if any(word in text for word in _FOOD_WORDS):
+            return FOOD_CLUSTER_RULES
+        if any(word in text for word in _BEAUTY_WORDS):
+            return DEFAULT_CLUSTER_RULES
+    return GENERAL_CLUSTER_RULES
+
+
 @dataclass(frozen=True)
 class VideoAnalysisSuccess:
     video_id: str

@@ -37,11 +37,13 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         own_text = (
             f"{measurement.brand}関連は{own.videos}本（{_pct(own.share_pct)}）" if own else ""
         )
-        if top_competitor is not None:
+        if top_competitor is not None and top_competitor.videos > 0:
             own_text += (
                 f"、競合最多は{top_competitor.brand} "
                 f"{top_competitor.videos}本（{_pct(top_competitor.share_pct)}）"
             )
+        elif competitor_exposures:
+            own_text += "、競合の露出は0本"
         lines.append(f"{axis.label}の上位{len(axis.posts)}本中、{own_text}でした。")
     else:
         lines.append("一般キーワード検索は取得できなかったため、露出シェアは未計測です。")
@@ -59,7 +61,7 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
             f"{brand_axis.axis.label}で{brand_rate}"
             f"（分母{brand_axis.keyword.denominator}本）"
         )
-        if competitor_best is not None:
+        if competitor_best is not None and competitor_best[1] > 0:
             line += f"、競合最高は{competitor_best[0]}の{competitor_best[1]}%"
         lines.append(line + "でした。")
     else:
@@ -76,8 +78,10 @@ def build_summary_lines(measurement: OmiyageMeasurement) -> list[str]:
         count = axis_measurement.pr.pr_videos
         if competitor_pr_max is None or count > competitor_pr_max[1]:
             competitor_pr_max = (axis_measurement.axis.label, count)
-    if competitor_pr_max is not None:
+    if competitor_pr_max is not None and competitor_pr_max[1] > 0:
         pr_parts.append(f"競合最多は{competitor_pr_max[0]}の{competitor_pr_max[1]}本")
+    elif competitor_pr_max is not None:
+        pr_parts.append("競合は0本")
     if pr_parts:
         lines.append("#PR表記ありは" + "、".join(pr_parts) + "でした。")
     else:
