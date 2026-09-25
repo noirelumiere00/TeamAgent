@@ -2,12 +2,16 @@
 
 - Status: **Accepted for docs（PR1）— 実装は PR ごとに個別承認**
 - 作成日: 2026-08-18（Session 1 監査 + Session 2 再検証・敵対審査を反映した補正版）
-- 基準: dev @ 95d45a8。本文中の file:line は同 commit 時点
+- 改訂履歴: **2026-09-25 v1 本人メモ（決裁者承認）** — Hermes を「覚える係」に限定し、機械検査後の自動反映、記録つき管理者閲覧、1 対 1 DM 限定、凍結・削除を裁定
+- 基準: dev @ 95d45a8。本文中の file:line は同 commit 時点。**2026-09-25 改訂分（§9・§10・§10b・§21 ほか v1 の記述）の file:line は dev @ a8f2416 時点**。同じ PR で改訂した文書どうしは行番号でなく見出しで参照する
+- 番号の読み方: **v1（DM 本人メモ）の工程は M0〜M11**。旧番号 `PR1 / PR2-A0 / PR2-A1 / PR2-B / PR3〜PR8 / PR-R` は v2（汎用 Hermes）の番号で、v1 の工程には使わない
 - 関連: [hermes_implementation_plan.md](hermes_implementation_plan.md)（PR 分割・テスト戦略）
 
 ---
 
 ## 1. Executive Summary
+
+> **v1（DM 本人メモ）の注記**: 本節から §8、§11〜§18 の `run_hermes_agent`・delegated claim・Hermes の MCP client 利用・既存 ECS task role での実行は v2（汎用 Hermes）の記述である。v1 の Hermes は別タスク・最小 IAM・MCP へ届かない「覚える係」で、境界は §10b を正とする。
 
 TeamAgent は現在、**Slack → OpenClaw（外殻）→ TeamAgent MCP Gateway（信頼境界）→ Skill Registry → 会社データ/API → AWS Bedrock Claude** という構成で本番稼働している。本 ADR は、この構成を**一切壊さず**、Hermes Agent（NousResearch 製・**OpenClaw からの移行を公式サポートする** agent runtime）を **`run_hermes_agent` という dark な MCP tool** として境界の内側に段階導入する設計を定める。
 
@@ -54,6 +58,8 @@ TeamAgent は現在、**Slack → OpenClaw（外殻）→ TeamAgent MCP Gateway�
 
 ## 6. Target Architecture
 
+> **2026-09-25 v1 の優先境界**: 下図は後続の汎用 Hermes 構想を含む。最初に提供する「DM 本人メモ v1」では Hermes は学習専用であり、`run_hermes_agent`、callback、delegated claim、MCP client は使わない。v1 の実効構成は §10b の図を正とする。
+
 ```
 Slack (Socket Mode)
    ↓
@@ -87,10 +93,13 @@ Hermes 専用 Callback Boundary（/mcp とは別 route・別 bearer・別鍵）
 |---|---|---|---|
 | OpenClaw | Edge / Slack shell / fast path | Slack tokens・MCP bearer・claim 署名鍵 | 会社データ・DB・Google token |
 | MCP Gateway | **Security Authority** | RLS・identity・claim 検証・監査・tool policy | — |
-| Hermes | Personal Agent / Memory / Experience | 本人スコープ memory・短命 session claim + K_session | RDS/pgvector・OAuth token・Secrets・Slack token・既存 MCP bearer |
+| Hermes（DM 本人メモ v1） | 学習係（本家 memory tool で清書） | ingress bearer・TLS 鍵 | MCP・RDS/pgvector・DynamoDB・Slack・OAuth token・既存 bearer・callback/delegated claim |
+| Hermes（後続） | Personal Agent / Memory / Experience | 本人スコープ memory・短命 session claim + K_session | RDS/pgvector・OAuth token・Slack token・既存 MCP bearer |
 | Bedrock Claude | Intelligence | — | — |
 
 ## 7. Security Boundary — Delegated Session Claim 設計（敵対審査反映版）
+
+**v1 適用外**: DM 本人メモ v1 は MCP への戻り経路を持たず、delegated claim、callback、`HMAC_PURPOSE_HERMES_DELEGATION`、K_session、専用 DynamoDB を実装しない。これらは v2（汎用 Hermes）で再レビューしてから導入する。v1 の M0〜M11 には含まれない。v1 の Hermes task role は jp. Haiku 推論プロファイルへの `bedrock:InvokeModel` と logs だけを Allow し、secretsmanager・kms・rds・dynamodb・s3 は明示 Deny とする。execution role が読める secret は ingress bearer と TLS 鍵の 2 本だけである。
 
 ### 7.1 既存 caller claim から**退行させない**不変条件
 
@@ -212,16 +221,110 @@ claim.sub（principal_id = team_id:slack_user_id・stable principal）
 
 | 領域 | 内容 | scope |
 |---|---|---|
-| Personal Memory | 好み・定型フォーマット・作業パターン・過去の修正・優先順位 | 本人のみ（profile_id 単位・RLS） |
-| Personal Sessions | Hermes セッション履歴（FTS5 検索） | 本人のみ |
+| Personal Memory（v1） | 返事の長さ・言い回し・顧客名/商材名・資料の型・仕事の進め方 | 本人 + 管理者（管理者は表示前の監査 INSERT が成功した場合のみ。v1 は小俣さん 1 名） |
+| Personal Sessions | **v1 では使わない**。FTS5 に会話本文を残さない | — |
 | Company Shared | Skills・MCP tool 面・ポリシー・承認済み workflow | 全社（review 必須） |
+
+本人の RLS 分離は維持する。**本人メモの表の RLS には既存定型の `OR app.user_role = 'admin'` を入れない**（既存定型は `infra/migrations/0025_digest_ack.sql:44-53`。admin を立てる経路が connect_web 以外にもあるため: `scripts/run_morning_digest_fargate.py:91`、`src/teamagent/ingest/repository.py:429,446`、`src/teamagent/connect_web/app.py:5094`、`scripts/backfill_entities.py:79`）。管理者閲覧は §10b.6 の DB 関数だけで行う。本人の「何を覚えてる？」には項目と管理者閲覧回数を返す。
 
 ## 10. Memory Governance
 
 - **禁止**: Slack/Gmail/Salesforce/RAG/Drive 本文の Memory へのコピー（Source of Truth 側で都度検索）。Hermes には検索結果の永続化 API を渡さない＝構造で禁止
 - Memory に書けるのは再利用可能な個人知識のみ（preferences / formatting / repeated corrections / workflow habits / preferred terminology / approved personal context）
-- 書込は propose → pending → approve。Company Skill への昇格は Owner/Admin review 必須
-- memory_read / memory_write は監査ログへ（§18）
+- **DM 本人メモ v1** の書込は `propose → pending → approve` を採らず、`personal_memory.guard` の機械検査 → 自動反映 + 本文を持たない監査とする。Company Skill への昇格は引き続き Owner/Admin review 必須
+- memory_read / memory_write は本文を含めず監査ログへ。管理者閲覧は表示より先に監査を確定する（§10b）
+
+## 10b. DM 本人メモ v1（Hermes 学習係）
+
+### 10b.1 目的と分離境界
+
+Hermes の役割は**覚える係だけ**である。返事は現行 Aico（OpenClaw の Haiku）が本人メモを参考情報として作り、Hermes は返信生成、MCP tool 実行、Slack 操作、永続化を行わない。
+
+| 境界 | v1 の決定 |
+|---|---|
+| Hermes が持つ secret | ingress bearer、TLS 鍵だけ |
+| Hermes task role の Allow | jp. Haiku 推論プロファイルに限定した `bedrock:InvokeModel`、logs |
+| 明示 Deny | secretsmanager、kms、rds、dynamodb、s3。RDS SG とインターネットへの経路も与えない |
+| 到達できないもの | MCP、RDS、DynamoDB、Slack、既存 MCP bearer、既存 HMAC 鍵、OAuth token |
+| 後続へ送るもの | callback、delegated claim、`HMAC_PURPOSE_HERMES_DELEGATION`、K_session、Hermes からの MCP 利用（v2 で再レビュー。v1 の M0〜M11 には含めない） |
+
+同居案は採らない。現行 MCP task role は database URL と既存 bearer を読むため（`infra/terraform/fargate.tf:375-383`）、同じ task role を Hermes と共有するとこの境界を壊す。
+
+### 10b.2 保存原則とデータ最小化
+
+- 「Hermes に永続化 API を渡さない」原則を維持する。Hermes はジョブごとの使い捨て `HERMES_HOME` に本家 memory tool で書くだけで、`finally` で作業場を削除する
+- MCP が Hermes の差分を受け取り、書込前に `personal_memory.guard` を通し、合格した項目だけを RDS へ保存する。読み出し時にも同じ検査をかけ直す
+- Personal Sessions / FTS5 は使わない。会話本文、session 履歴、逐語の引用を保存しない
+- 保存できるのは 200 字以内の再利用可能な要約だけ。本文の 25 字以上の逐語一致、URL、連絡先、秘密情報、不可視文字、prompt injection は落とす
+- 顧客名・商材名・社内の同僚名は保存してよい。先方担当者の個人名は保存しない。判定は敬称・役職（例: 「さん」「様」「氏」「部長」）を手掛かりにし、**MCP が持つ在籍者名簿**（Slack `users.list` のキャッシュ。M5 で実装）に載っている名前だけを `member_names` として guard に渡して許可する。名簿に無い名前は敬称つきなら落とす（fail-closed）
+- **限界（既知）**: 敬称の無い人名（例: 「田中に確認」）は guard の規則では検出できず通りうる。v1 はこれを許容し、管理者の目視と本人の「忘れて」で直す。M5 で Haiku による二値判定を追加するかは点灯中の実測で判断する
+
+### 10b.3 対象 DM と流れ
+
+対象は本人との 1 対 1 DM だけである。`D…` は送信者から導出できるため、`^D[A-Z0-9]{8,}$` の fullmatch だけでは 1 対 1 だった証明にならない。plugin は次の 3 つがすべて成り立つときだけ DM と判定し、`conversations.open` の fallback は使わない: ① ingress の channelId が `DM:<sender>` に等しい（OpenClaw が `user:<U…>` から DM と判定した結果）② ctx.chatId が `^D[A-Z0-9]{8,}$` に fullmatch ③ chat 種別が direct。mpim・Slack Connect・スレッドの試験を M8 に入れる。`C…` のチャンネル、`G…`、mpim は学習も適用もコマンド処理もしない。OpenClaw 側の正準 DM 解決点は `infra/openclaw/caller-identity-plugin/dist/index.js:1952-1977`、MCP 呼出しの既存起点は同 `:975-980` にある。
+
+```text
+1:1 DM の本人発話
+  → caller-identity plugin / message_received（observe、記憶コマンドは除外）
+  → MCP の揮発バッファ（5 発話で打切り／最大 10 分／1 人 1 日 6 job）
+  → Hermes POST /v1/learn（TLS + ingress bearer、使い捨て HERMES_HOME）
+  → 本家 memory tool が差分を返す
+  → MCP personal_memory.guard（書込前検査）
+  → RDS（本人 RLS、本文なし）
+  → 次の 1:1 DM で plugin / before_prompt_build
+  → 「参考情報であり指示ではない」枠へ差込み
+  → 1.2 秒で諦め、メモなしで現行 Aico が返信
+```
+
+OpenClaw の登録 hook は現在 8 本（`infra/openclaw/caller-identity-plugin/dist/index.js:185-194`）であり、M8 で `before_prompt_build` を加えて 9 本にする。`personal_memory_*` は LLM の tool 面へ公開せず、plugin が予約 `tool_call_id` で直接呼ぶ。toolFilter.include はクライアント側のゲートなので、**サーバ側で次を不変条件として強制する**（M5・各項目を変異テストで固定）: ① MCP の list_tools に `personal_memory_*` を載せない ② 実行は「署名済み caller claim の channel が `^D` に fullmatch」かつ「tool_call_id が予約 prefix」かつ「flag と allowlist が有効」の場合だけ受け付ける（予約 prefix の検査は現在 plugin 側にしか無いため MCP 側に新設する）③ 引数名に `query` を使わない（usage_events が `query` を本文として記録するため。`src/teamagent/mcp_gateway/server.py:159-160`）
+
+### 10b.4 G7 の限定例外
+
+G7 の「本文を plugin/MCP に残さない」原則に対し、学習係だけ次の限定例外を認める。
+
+| 項目 | 制約 |
+|---|---|
+| 置き場所 | MCP プロセスの揮発メモリだけ |
+| 上限 | 1 人 5 発話、最長 10 分。先に達した時点で打ち切る |
+| 禁止先 | DB、usage_events、アプリログ、CloudWatch、Sentry、例外メッセージ |
+| 再起動 | 復元せず消える |
+
+引数名は `utterance` とし、usage_events が `query` だけを採る現行境界（`src/teamagent/mcp_gateway/server.py:153-160`）を利用する。Sentry の key denylist に `utterance` / `utterances` / `entries` / `snapshot` を追加する。key 名の一致でしか効かない（`src/teamagent/observability/sentry.py:230-247`）ため、personal_memory 系のコードでは Sentry へのローカル変数の送信も止める。
+
+**Bedrock の呼出しログは既定で有効で、本文も記録し、60 日以上残る**。Terraform の既定は `enable_bedrock_invocation_logging` / `enable_bedrock_invocation_log_delivery` とも true（`infra/terraform/variables.tf:183-193`）、`text_data_delivery_enabled = true`（`infra/terraform/security.tf:372`）、保持は最低 60 日の固定契約（`infra/terraform/variables.tf:195-198`）。Hermes の学習呼出し（5 発話＋既存メモ）もここに残り、本人の削除要求では消せない。本番で実際に配送されているかは点灯前に読み取りで確認するが、告知には「最低 60 日残り、削除要求では消えない」と書く。
+
+本人メモを返事へ差し込むのは system 側（appendSystemContext 相当）に限り、利用者発話側（prepend）には入れない。OpenClaw の会話記録（EFS）に本人メモが毎ターン書き込まれるのを避けるため。M8 で「EFS に目印が残らない」試験を行う。
+
+### 10b.5 本人操作、凍結、削除、退職
+
+| 操作・事象 | 定義 |
+|---|---|
+| 「何を覚えてる？」 | 本人メモの番号つき一覧と、管理者に閲覧された累計回数を返す |
+| 「○番を忘れて」 | 指定項目を物理削除する |
+| 「覚えるのを止めて」 | `state=frozen`。新規学習も prompt への適用も止めるが、内容は残す |
+| 「記憶を再開して」 | 明示操作で `state=active` に戻す。自動再開しない。普段の依頼と衝突しないよう全文一致で受け付ける |
+| 「覚えたことを全部消して」 | 10 分以内の確認を要求し、確認後に本人メモを物理削除して `frozen` にする。再開は本人の「記憶を再開して」だけ |
+| Slack `users.info deleted=true` | 本人メモを自動で物理削除する。API 失敗を退職と見なさない。ゲスト化は凍結だけ |
+
+profile のキーは `team_id:U…`（Slack user_id）とし、email は属性として持つ。退職の確認は保存した `U…` で `users.info` を直接引く（email からの逆引きは無効化されたユーザーで失敗しうるため使わない）。§8 の「email をメモのキーにしない」と整合する。
+
+resolver が `None` を返す原因には API 失敗も含まれる（`src/teamagent/adapters/slack_client.py:392-408`）ため、退職削除は `deleted=true` を直接確認した場合に限る。
+
+「全部消して」の直後にも、次は即時には消えない。
+
+| 残存先 | 期間・扱い |
+|---|---|
+| RDS 自動バックアップ | 最長 7 日（`infra/terraform/rds.tf:115`）。手動スナップショットは期限なく残る |
+| RDS の遅いクエリログ | `log_min_duration_statement=1000` で bind 値ごと記録されうる（`infra/terraform/rds.tf:34-37`）。CloudWatch の保持期間に従う |
+| Bedrock の呼出しログ | 既定で有効・本文を含む・最低 60 日（§10b.4）。削除要求では消えない |
+| OpenClaw の会話記録（EFS） | 本人メモとは別の既存記録。Terraform に保持期限の設定が無い（`infra/terraform/openclaw_state.tf:9-18`）。本人メモを system 側に差し込むことで、メモ自体はここに書かない |
+| Slack の DM 履歴 | 「何を覚えてる？」への返答（一覧）が Slack と会話記録に残る |
+| Hermes の一時 HOME | ジョブ中だけ本文が存在する（本家の session DB を含む）。ジョブ終了時に削除。HOME の外（/tmp・キャッシュ）への書き込みも M2 の試験で目印検索する |
+| plugin のキャッシュ | 最大 60 秒。凍結・削除のコマンドを受けたら即時に捨てる |
+
+### 10b.6 管理者閲覧と監査
+
+管理者閲覧口は connect_web の `/admin` 型画面だけとする。表示トランザクションでは、本文を持たない `personal_memory_audit` への INSERT を**表示前**に確定する。INSERT が失敗した場合は 503 を返し、項目、件数、断片を一切表示しない。閲覧は「監査 INSERT → 行を返す」を 1 本にした DB 関数（SECURITY DEFINER）だけで行い、EXECUTE は専用ロールにだけ与える。退職削除も DELETE 専用の DB 関数にする。M5/M6 の出口条件に「`app.user_role='admin'` を立てた接続でも本人メモの表は 0 行」の試験を入れる。v1 の管理者は小俣さん 1 名で、**本人メモ専用の allowlist（`PERSONAL_MEMORY_ADMIN_EMAILS`）**で管理する。利用状況画面の `CONNECT_ADMIN_EMAILS`（`src/teamagent/connect_web/app.py:660-664`）とは共用しない（後で利用状況を見せる人を足したときに本人メモまで見えるのを防ぐ）。「ちょうど 1 名」を契約テストで固定し、拡大は決裁を条件とする。監査には管理者 email、対象 profile の SHA-256 先頭 16 hex、件数、理由コードを記録し、メモ本文は記録しない。
 
 ## 11. Specialist Hermes
 
@@ -277,6 +380,8 @@ Connect RAG（connect.newstv.co.jp/app）は同一 repo の connect_web サー�
 
 - 各 Phase は env flag 1 個で完全 rollback: `USE_HERMES_ORCHESTRATOR=0` → list_tools から消滅（run_agent と同機構）
 - Hermes down → run_hermes_agent は構造化エラー（既存 `_err` 契約）→ OpenClaw は既存 L1 で応答継続（SOUL の「境界が拒否したら素直に伝える」規範に接続）
+- DM 本人メモ v1 は `USE_PERSONAL_MEMORY=0` と `PERSONAL_MEMORY_ENABLED=0` で学習・適用・コマンドを閉じる。context 取得失敗または 1.2 秒超過時はメモなしで返信を続け、Hermes 学習失敗時は既存メモを変更しない
+- 凍結・全削除・退職を学習ジョブより優先する。ジョブ開始後でも profile version が変わった場合は Hermes の結果を破棄し、古い結果を復活させない
 
 ### 20.1 PR2 を 3 本へ分割した理由（監査で確定）
 
@@ -307,28 +412,28 @@ Hermes upstream image（Docker Hub `nousresearch/hermes-agent` の release tag �
 
 PR2-A1 が生成した **release digest** を使って ECS/Fargate に載せる。
 
-- **dark runtime 形態（裁定済み）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言・手動の ECS 直接操作ではない）を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に Terraform 変更として desired_count を 1 へ上げる（それでも flag OFF なら tool 面に出ない）
+- **dark runtime 形態（裁定済み）**: 常駐タスク 0（Terraform で desired_count を 0 と宣言・手動の ECS 直接操作ではない）を採る。受け入れ試験は **ECS RunTask で 1 タスクだけ起動し、startup → /healthz → Bedrock client 初期化 → CloudWatch logs を確認して終了**する形（本 repo の「run-task 検証」標準と同型）。常駐ゼロなので idle コストゼロ・外部 routing ゼロ・MCP exposure ゼロが自明に成立する。PR3 で接続する際に Terraform 変更として desired_count を 1 へ上げる（それでも flag OFF なら tool 面に出ない）。**v1 では M9（点灯）で tfvars の変更と `-var-file` 付き apply（Gate ②）により 0→1 にする**。ECS を手で直接操作しない
 
 ## 21. Migration Phases
 
-順序は `PR1 → PR2-A0 → PR2-A1 → PR2-B → PR3 → PR-R → PR4 → PR5 → PR6 → PR7 → PR8`。
+DM 本人メモ v1 の決定済み順序は `M0 → M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → M9 → M10 → M11`。旧 `PR1 / PR2-A0 / PR2-A1 / PR2-B / PR3…` 表は汎用 Hermes 構想の履歴であり、v1 の実施順には使わない。M3 の Hermes 便に限り、ACTIVATION の adopt+Pin 完了後に A1 とする順序および「A1 の generation publisher より前に正名化」の禁止事項を外す（2026-09-25 決裁者承認）。M3 は generation 18 入力を更新して publish するため、「正名化をしないまま次の generation release へ進まない」という禁止事項にも当たる。**この禁止事項も Hermes 便に限り適用しない**（同じ裁定の範囲）。禁止事項の本文は維持し、ACTIVATION_STATE.md の「禁止事項」節に例外を注記する。
 
 | Phase / PR | 内容 | flag | 出口条件 |
 |---|---|---|---|
-| PR1 | docs only（本 ADR + README 全面更新） | — | CI 緑・code diff 0 |
-| **PR2-A0** | **Supply-Chain Adopt**: content-addressed buildspec を hash-keyed append-only generation model へ移行し、取り残された Terraform state を adopt（**Hermes は登場しない**） | — | dev HEAD の plan が prevent_destroy 停止なしに通る・新世代を出せる承認済み apply 経路が実在（§20.2） |
-| **PR2-A1** | **Hermes Supply-Chain Onboarding**: upstream image を digest 固定 → 薄い derived image → 署名リリース鎖（quarantine → SBOM/Trivy/attestation → verified-candidates → promoter → release ECR）。**ECS は作らない** | — | release ECR に Hermes digest 1 本・receipt/attestation が既存と同基準（§20.3） |
-| **PR2-B** | **Hermes dark runtime**: PR2-A1 の release digest で ECS/Fargate（**常駐タスク 0**）・IAM 最小・healthz | — | RunTask 受け入れ試験（§20.4） |
-| PR3 | run_hermes_agent + delegated claim + callback boundary + Security Tests | USE_HERMES_ORCHESTRATOR=0 のまま | マージブロッカーテスト 8 本（§25）全緑・OC include 非掲載の契約テスト |
-| **PR-R** | **容量制御（必須 Gate・§22）** | — | admission control + in-flight metrics + heavy-tool semaphore + 明示 overload 応答 |
-| PR4 | Proposal Specialist を限定ユーザーへ | HERMES_ALLOWED_EMAILS | 既存フローとの A/B（quality/latency/cost/citation） |
-| PR5 | Personal Profile（profile store） | USE_HERMES_PROFILES | profile 分離テスト緑 |
-| PR6 | Personal Memory（approval 付き） | USE_HERMES_MEMORY | memory 隔離テスト緑 |
-| PR7 | Multi source（GWS/Slack/RAG/Salesforce・全て MCP 経由・policy version 更新を含む） | tool 別 | 各 tool の監査ログ確認 |
-| PR8 | AI General / Router | SOUL+config | fast path の latency 劣化なし |
-| Phase 7 | OpenClaw role review: **KEEP / THIN / REPLACE** をここで初めて判断 | — | Hermes 成熟度評価 |
+| M0 | docs: ADR・計画・ACTIVATION・利用者向け 1 枚 | — | 決裁内容、境界、M0〜M11、告知文が docs に一致し、code diff 0 |
+| M1 | `personal_memory.guard` 純粋関数（未配線） | — | 境界/NFKC/純粋性/ablation/変異テストが緑 |
+| M2 | Python 3.13 Hermes 学習ランナー + image（dark） | — | job 間 HOME 非共有・crash 時削除・config fail-closed・Trivy C0/H0 |
+| M3 | 独立 Hermes pipeline と初回署名 release | — | release ECR digest、receipt/attestation、承認必須、未登録値 FATAL |
+| M4 | Hermes ECS dark runtime（Terraform で常駐 0 台と宣言） | — | healthz→Bedrock→合成 1 job→本文非記録→終了、IAM/SG 契約緑 |
+| M5 | MCP 保存・揮発 buffer・learner client・本人コマンド | `USE_PERSONAL_MEMORY=0` | RLS 分離、書込/読出し guard、DM gate、version race、本文非記録が緑 |
+| M6 | connect_web 管理者閲覧・退職時削除 | — | 非管理者 403、監査失敗 503/非表示、deleted/API 失敗/guest の分岐が緑 |
+| M7 | PR-R 最小版（実流量前の必須 Gate） | — | admission control、構造化 overload、in-flight、1.2 秒 fallback が緑 |
+| M8 | OpenClaw plugin の observe/context/commands | `PERSONAL_MEMORY_ENABLED=0` | 1:1 DM 限定、LLM 経路拒否、timeout fallback、include 不掲載が緑 |
+| M9 | 小俣さん 1 名へ点灯 | allowlist 1 名 | 告知、5 発話学習、次 turn 適用、5 コマンド、監査、凍結/削除、ログ非残存を実機確認 |
+| M10 | 2〜3 名、5 営業日観察後に 16 名へ展開 | allowlist 拡大 | 法務/総務確認、決裁者 GO、件数/理由/p95/費用が許容範囲 |
+| M11 | 便δ後の terraform import と guard 整合 | — | import 後 plan 差分 0、runtime guard 契約緑、台帳 close |
 
-**PR-R は PR4（実ユーザー routing 開始）前の必須 Gate**。PR1〜PR3（PR2-A0 / PR2-A1 / PR2-B を含む）は dark のためブロッカーではない。
+**M7 は M9（production user traffic 開始）前の必須 Gate**。M9 の点灯は「production user traffic 0」の原則に対する学習係だけの例外で、小俣さん 1 名から始める。詳細なファイル、試験、人の関門は [hermes_implementation_plan.md](hermes_implementation_plan.md) を正とする。
 
 ## 22. Capacity Control（検証で確定した現状と PR-R）
 
@@ -349,7 +454,17 @@ PR-R の必要条件（PR4 前の必須 Gate）:
 | toolFilter がクライアント側ゲートであることの誤解 | HIGH | §6 の禁止形を明文化・callback は別 route + server-side policy |
 | 会社共有モードで per-user OAuth 面が開く | HIGH | §7.5 v1 hard deny + 将来は policy version + G1 強化 |
 | Memory への会社データ混入 | HIGH | 永続化 API 非公開 + 監査 job |
+| DM 本文が Sentry/CloudWatch/Bedrock/OpenClaw に残る | HIGH | MCP 揮発バッファだけを例外化し key scrub、合成目印で確認。Bedrock/OpenClaw の保持は点灯前確認と告知 |
+| 先方担当者名・貼付文面・prompt injection が記憶を汚染 | HIGH | 敬称ベースで迷ったら落とす、長文/引用/転送/URL/25 字逐語を guard、読出し時も再検査 |
+| 管理者が監査前にメモを見る | HIGH | connect_web だけに限定し、監査 INSERT を表示前に確定。失敗時 503 で無表示 |
+| 全削除後に遅延 job が項目を復活させる | HIGH | profile version 楽観 lock、凍結/削除後の結果を破棄、削除後は frozen |
 | Hermes runtime の CVE/供給網 | MED | digest 固定・SBOM・署名リリース鎖に載せる（OpenClaw と同水準） |
+| Python 3.13 image が Trivy C0/H0 を通らない | HIGH | M2 初日に候補 2 基盤を実測。依存を手動列挙しても不可なら方針を再裁定（現時点は未実測） |
+| `before_prompt_build` が本番で発火しない | HIGH | M8 便で banner と初回発火を確認し、失敗時は M9 を止める |
+| vpce SG への Hermes SG 追加漏れ | HIGH | `infra/terraform/vpc_endpoints.tf:21` の警告どおり 443 が落ちるため M4 の契約テストで必須化 |
+| 本人が監視と受け取る | MED | 学習前の 1 回告知、用途/管理者/閲覧記録/評価非利用/削除後残存を明示し、本人に閲覧回数を返す |
+| DM 返信が遅くなる | MED | context は 60 秒 cache（凍結・削除のコマンドで即時に破棄）、1.2 秒で諦めてメモなしで返信 |
+| email 変更で RLS 行が見えなくなる | MED | v1 は email 判定。管理者修正の運用を用意し、将来 stable principal へ移行 |
 | 二重オーケストレーション暴走 | MED | meta-tool 恒久 deny・max_calls/cost cap/absolute_deadline |
 | 容量（実流量開始後） | MED | PR-R を必須 Gate 化（§22） |
 | コスト超過 | MED | per-session cap + 既存コストアラーム |
@@ -365,7 +480,7 @@ PR-R の必要条件（PR4 前の必須 Gate）:
 
 ## 25. Implementation Backlog / マージブロッカーテスト
 
-詳細は [hermes_implementation_plan.md](hermes_implementation_plan.md)。PR3 のマージブロッカー（これが緑でなければマージ不可）:
+詳細は [hermes_implementation_plan.md](hermes_implementation_plan.md) の「付録: v2（汎用 Hermes）の旧計画」。以下は v2 の旧 PR3 のマージブロッカー（v1 の M0〜M11 には適用しない）（これが緑でなければマージ不可）:
 
 1. **cross-user session race**: 同一 Hermes プロセスに A/B の session が並存しても claim/K_session が混線しない（既存 `test_same_session_cross_user_race…` の同型）
 2. **予算ストア障害時に skill が実行されない**（fail-closed・resolver より前）
