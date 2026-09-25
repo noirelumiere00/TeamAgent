@@ -53,8 +53,10 @@ _ALLOWLIST_ENV = "SEARCH_SURFACE_ALLOWED_EMAILS"
 _VALID_CATEGORIES = {"brand_official", "media", "news", "creator", "influencer", "ugc", "other"}
 # 旧版の語彙（プロンプト改訂前の出力やモデルの取り違え）を新しい語彙へ寄せる。
 _LEGACY_CATEGORIES = {"gourmet": "creator"}
-# フォロワーがこれ以上の個人を「一般」にしない（15万人の料理家が ugc になっていた実例）。
-_UGC_FOLLOWER_CEILING = 50_000
+# フォロワーがこれ以上の個人を「一般」にしない。分類プロンプトの「一般＝1万人未満が目安」と
+# 同じ線。プロンプトだけでは守られない（旧版で15万人の料理家、改訂後の実機でも2.8万人の
+# 専門アカウントが ugc になった）のでコードで直す。
+_UGC_FOLLOWER_CEILING = 10_000
 _DESC_KEEP = 300
 _HASHTAGS_KEEP = 20
 _CLASSIFY_TAGS = 5

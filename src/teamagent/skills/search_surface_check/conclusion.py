@@ -27,12 +27,26 @@ from teamagent.skills.search_surface_check.schema import (
 )
 
 _HEADLINE_MAX = 60
-_TEXT_MAX = 140
+_TEXT_MAX = 180  # プロンプトは100字以内を指示。はみ出しても文の途中で切らない余裕を持たせる
 _ANGLE_MAX = 24
 _MAX_ACTIONS = 2
 _MAX_ANGLES = 4
 _POST_TEXT_MAX = 80
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+# 誇張語の言い換え（プロンプトで禁じても実機の Haiku が「検索面を支配」と書いた）。
+# 長い語から順に当てる（「を支配」を「支配」より先に）。
+_TONE_DOWN: tuple[tuple[str, str], ...] = (
+    ("を支配", "の中心"),
+    ("支配的", "中心的"),
+    ("支配", "中心"),
+    ("を独占", "の多くを占める"),
+    ("独占", "多数"),
+    ("圧倒的な", "大きな"),
+    ("圧倒的に", "大きく"),
+    ("圧倒", "上回"),
+    ("爆発的な", "大きな"),
+    ("爆発的に", "大きく"),
+)
 # 数えなくても書ける小さい数（「2つ」「1万人未満」の 1 など）と、帯・期間の境目の数。
 _ALWAYS_ALLOWED = frozenset({str(i) for i in range(11)} | {"90", "100"})
 
@@ -141,6 +155,12 @@ def rule_conclusion(facts: SurfaceFacts) -> SurfaceConclusion | None:
     return SurfaceConclusion(headline=headline, generated_by="rule")
 
 
+def tone_down(text: str) -> str:
+    for word, plain in _TONE_DOWN:
+        text = text.replace(word, plain)
+    return text
+
+
 def _parse(text: str) -> dict[str, Any] | None:
     cleaned = re.sub(r"```(?:json)?", "", text).strip()
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
@@ -188,12 +208,14 @@ def ground_conclusion(
     def point(field: str, value: Any, key: str = "text", max_len: int = _TEXT_MAX) -> Any:
         if not isinstance(value, dict):
             return None
-        text = sanitize_llm_text(str(value.get(key) or "").strip(), max_len=max_len)
+        text = tone_down(sanitize_llm_text(str(value.get(key) or "").strip(), max_len=max_len))
         if not text or not grounded(field, text):
             return None
         return ConclusionPoint(text=text, ranks=ranks_of(value.get("ranks")))
 
-    headline = sanitize_llm_text(str(raw.get("headline") or "").strip(), max_len=_HEADLINE_MAX)
+    headline = tone_down(
+        sanitize_llm_text(str(raw.get("headline") or "").strip(), max_len=_HEADLINE_MAX)
+    )
     if headline and not grounded("headline", headline):
         headline = ""  # 見出しだけ捨てる（呼び出し側が集計の見出しで埋める）
     actions = [
@@ -296,4 +318,5 @@ __all__ = [
     "ground_conclusion",
     "posts_payload",
     "rule_conclusion",
+    "tone_down",
 ]

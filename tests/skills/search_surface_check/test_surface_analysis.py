@@ -18,6 +18,7 @@ from teamagent.skills.search_surface_check.conclusion import (
     build_prompt,
     conclude,
     ground_conclusion,
+    tone_down,
 )
 from teamagent.skills.search_surface_check.display import fmt_age, fmt_count
 from teamagent.skills.search_surface_check.insights import (
@@ -138,8 +139,9 @@ def test_s3_rows_with_broken_numbers_do_not_crash() -> None:
     ("raw", "followers", "expected"),
     [
         ("ugc", 150_000, "creator"),  # 15 万人の料理家が「一般」になっていた実例
-        ("ugc", 50_000, "creator"),
-        ("ugc", 49_999, "ugc"),
+        ("ugc", 28_000, "creator"),  # 改訂後の実機でも 2.8 万人の専門アカウントが ugc に
+        ("ugc", 10_000, "creator"),
+        ("ugc", 9_999, "ugc"),
         ("ugc", 0, "ugc"),  # フォロワー不明（IG）は直さない
         ("gourmet", 0, "creator"),  # 旧語彙
         ("media", 5_200_000, "media"),
@@ -348,6 +350,18 @@ def test_unparseable_reply_falls_back_to_rule(reply: str) -> None:
         now_epoch=NOW,
     )
     assert c is not None and c.generated_by == "rule"
+
+
+def test_hype_words_are_toned_down() -> None:
+    # 実機の Haiku が「誇張語を使わない」の指示のあとでも書いた文
+    assert tone_down("10万人前後のアカウントが検索面を支配。") == (
+        "10万人前後のアカウントが検索面の中心。"
+    )
+    assert tone_down("クリエイターが再生を独占") == "クリエイターが再生の多くを占める"
+    allowed, ranks, _, _ = _allowed()
+    raw = dict(GROUNDED_CONCLUSION, headline="クリエイターが検索面を支配する面")
+    c = ground_conclusion(raw, allowed_numbers=allowed, valid_ranks=ranks)
+    assert c is not None and "支配" not in c.headline
 
 
 def test_non_list_fields_do_not_crash() -> None:
