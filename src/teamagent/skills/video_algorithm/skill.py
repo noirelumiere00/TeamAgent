@@ -1618,7 +1618,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         )
         quota_line = f"ℹ️ {out.quota_note}\n" if out.quota_note else ""
         return (
-            f"🔎 *VSEO動画アルゴリズム分析* 完了「{out.query}」"
+            f"🔎 **VSEO動画アルゴリズム分析** 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
             f"{c.summary}{top}\n{quota_line}{volume_line}"
             f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。{proposal_lines}\n"

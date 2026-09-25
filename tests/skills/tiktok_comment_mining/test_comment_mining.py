@@ -105,6 +105,8 @@ def test_chromium_primary_path() -> None:
     assert "爆食" in out.cross_vocabulary
     assert out.report_url == "https://s3.example/comments"
     assert "コメント欄マイニング" in out.slack_summary
+    # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
+    assert out.slack_summary.startswith("💬 **コメント欄マイニング** 完了（1動画・2コメント）")
 
 
 def test_comment_dedup_key_order_independent_and_batch_sensitive() -> None:

@@ -231,6 +231,8 @@ def test_skill_run_full_pipeline(tmp_path: object) -> None:
     assert out.total_cost_usd == pytest.approx(0.0042, abs=1e-4)  # 3 * 0.0014
     assert out.report_html_path is not None
     assert "VSEO動画アルゴリズム分析" in out.slack_summary
+    # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
+    assert out.slack_summary.startswith("🔎 **VSEO動画アルゴリズム分析** 完了「新宿 ランチ」")
     # HTML が実際に書き出されている
     with open(out.report_html_path, encoding="utf-8") as f:
         html = f.read()

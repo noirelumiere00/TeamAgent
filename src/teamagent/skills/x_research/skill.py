@@ -611,7 +611,7 @@ class XVoiceSearchSkill(_XSyncBase, BaseSkill[XVoiceSearchInput, XVoiceSearchOut
 
     def _slack_summary(self, out: XVoiceSearchOutput) -> str:
         lines = [
-            f"🗣️ *Xの声集め* 完了「{out.product_name}」"
+            f"🗣️ **Xの声集め** 完了「{out.product_name}」"
             f"（取得{out.searched}件 → 厳選{out.selected}件・実在検証済み{out.verified_count}件）"
         ]
         for i, p in enumerate(out.posts[:3], 1):
@@ -782,7 +782,7 @@ class XNeedsMiningSkill(_XSyncBase, BaseSkill[XNeedsMiningInput, XNeedsMiningOut
 
     def _slack_summary(self, out: XNeedsMiningOutput) -> str:
         lines = [
-            f"💡 *ニーズ発掘* 完了「{out.theme}」"
+            f"💡 **ニーズ発掘** 完了「{out.theme}」"
             f"（厳選{len(out.posts)}件・{len(out.clusters)}分類）"
         ]
         if out.hypothesis_summary:

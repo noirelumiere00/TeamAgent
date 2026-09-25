@@ -298,6 +298,16 @@ def _first_line(analysis: str) -> str:
     return (analysis.strip()[:90]) or "（要約なし）"
 
 
+# 標準 Markdown の太字 `**語**`。skill の slack_summary は OpenClaw 経由（Markdown→mrkdwn 変換あり）
+# を正として `**` で書くが、この Bot は chat.postMessage へ直接 mrkdwn で出すため変換が掛からない。
+_MARKDOWN_BOLD_PATTERN = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
+
+
+def _markdown_bold_to_mrkdwn(text: str) -> str:
+    """`**語**` を Slack mrkdwn の太字 `*語*` へ直す（直接投稿の経路専用・他の記法は素通し）。"""
+    return _MARKDOWN_BOLD_PATTERN.sub(r"*\1*", text)
+
+
 def _fmt_count(n: int) -> str:
     """再生数等を 1.2万 / 3.4M 風に短縮表示する。"""
     if n >= 10000:
@@ -1454,7 +1464,7 @@ class SkillDispatcher:
                 except Exception:
                     logger.warning("video_algorithm_report_upload_failed", request_id=request_id)
 
-            summary = out.slack_summary
+            summary = _markdown_bold_to_mrkdwn(out.slack_summary)
             if report_url:
                 summary += f"\n🔗 *レポートURL*（7日間有効・ブラウザで開けます）: {report_url}"
             return summary

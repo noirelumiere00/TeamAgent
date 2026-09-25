@@ -118,7 +118,7 @@ class KnowledgeSearchUrlSkill(BaseSkill[KnowledgeSearchUrlInput, KnowledgeSearch
         web_url = links["web_url"]
         graph_url = links["graph_url"]
         message = (
-            "🔎 *社内ナレッジの検索ページ* です（Google ログインが必要）。\n"
+            "🔎 **社内ナレッジの検索ページ** です（Google ログインが必要）。\n"
             f"・ブラウザで検索: {web_url}\n"
             f"・グラフで閲覧: {graph_url}\n"
             f"{_INSTRUCTION}"

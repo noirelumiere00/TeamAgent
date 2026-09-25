@@ -646,3 +646,36 @@ async def test_socket_mode_resolves_email_only_when_quota_is_enabled(
     assert result == "ok"
     assert resolver_calls == (["U123"] if quota_enabled else [])
     assert contexts[0].metadata == ({"user_email": ME} if quota_enabled else {})
+
+
+@pytest.mark.asyncio
+async def test_socket_mode_direct_post_renders_summary_bold_as_mrkdwn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """slack_summary は OpenClaw 経由を正として `**` 太字で書く（`*語*` は変換で斜体になる）。
+
+    旧 Socket Mode Bot は chat.postMessage へ直接 mrkdwn で出すので変換が掛からない。
+    ここで `**` を Slack の太字 `*` に直さないと、見出しが `**…**` のまま届く。
+    """
+    monkeypatch.delenv("VIDEO_QUOTA_ENABLED", raising=False)
+    summary = VideoAlgorithmSkill._slack_summary(
+        object.__new__(VideoAlgorithmSkill), VideoAlgorithmOutput(query="新宿 ランチ")
+    )
+    assert summary.startswith("🔎 **VSEO動画アルゴリズム分析** 完了「新宿 ランチ」")
+
+    class _FakeSkill:
+        def run(self, input: VideoAlgorithmInput, ctx: SkillContext) -> VideoAlgorithmOutput:
+            return VideoAlgorithmOutput(query=input.query, slack_summary=summary)
+
+        def cleanup_output(self, output: VideoAlgorithmOutput) -> None:
+            return None
+
+    dispatcher = object.__new__(SkillDispatcher)
+    monkeypatch.setattr(dispatcher, "get_video_algorithm_skill", lambda: _FakeSkill())
+
+    result = await dispatcher.run_video_algorithm("新宿 ランチ", "r", "U123")
+
+    assert result.startswith("🔎 *VSEO動画アルゴリズム分析* 完了「新宿 ランチ」")
+    assert "**" not in result
+    # 太字以外（概算コストの斜体 `_…_`）は素通し。
+    assert result.rstrip().endswith("（相関≠因果）_")
