@@ -4362,6 +4362,8 @@ def test_video_rule_does_not_fire_on_share_only_after_a_tool_call_or_without_a_v
     expected_reason = {
         "video_zero_tool_with_tool_call": "model_called_tool",
         "video_zero_tool_share_only": "not_a_request",
+        # 時刻入りの共有（相互検証 2026-09-25 で誤介入していた形）。
+        "video_zero_tool_meeting_share": "not_a_request",
     }
     for case, reason in expected_reason.items():
         outcome = report[case]
@@ -4408,6 +4410,17 @@ def test_one_revision_per_run_across_the_connect_and_video_rules() -> None:
     assert outcome["videoSkipReason"] == "connect_revised"
 
 
+def test_fabrication_guard_still_fires_after_a_video_revision() -> None:
+    """逆順: 動画が revise した後の再パスで連携 URL を捏造したら、連携の捏造ガード（安全側）が
+    もう 1 回 revise する。3 回目は両方とも予算切れ＝1 run で最大 2 回・ループしない。
+
+    変異: 連携側に「動画が revise 済みなら退く」を足すと 2 回目が None になり赤（捏造リンクが
+    利用者に届く方向の変更を落とす）。
+    """
+    outcome = _caller_identity_report()["video_then_fabrication"]
+    assert _video_pass_keys(outcome) == ["video-zero-tool", "connect-url-fabrication", None]
+
+
 def test_video_rule_survives_both_notification_orders() -> None:
     """本文無しの通知が先に run へ束縛される順（bindRun）・本文つきの後に本文無しが来る順（pending）の
     どちらでも、動画 URL の判定を落とさずに介入すること。"""
@@ -4436,7 +4449,7 @@ def test_video_trigger_matrix() -> None:
     """誤爆を避ける手掛かり: 本文の依頼語と、下書きの断りの形。"""
     matrix = _caller_identity_report()["video_trigger_matrix"]
     rows = [*matrix["intent"], *matrix["refusal"]]
-    assert len(rows) >= 10
+    assert len(rows) >= 20
     mismatches = [row for row in rows if row["actual"] != row["expected"]]
     assert not mismatches, mismatches
 

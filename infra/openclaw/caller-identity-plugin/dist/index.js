@@ -158,12 +158,16 @@ const VIDEO_URL_RULES = [
   ["instagram", /https?:\/\/(?:www\.)?instagram\.com\/(?:reels?|p|tv)\/[^\s<>|]/iu],
 ];
 // 本文の依頼語（分析・切り出しを頼んでいる手掛かり）。真偽だけを ingress に載せる。
+// 共有でもよく出る語（時刻「10:00」・「◯秒」・「見て」・「教えて」・「まとめ」）は入れない
+// （相互検証 2026-09-25: 「明日10:00の会議で使います＋URL」で差し戻していた）。
+// 切り出しの依頼は「切り出し」「画像に」「キャプチャ」「シーン」「サムネ用」で拾う。
 const VIDEO_REQUEST_RE =
-  /(分析|構成|フック|CTA|解説|要約|まとめ|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ|シーン|\d{1,2}:\d{2}|\d+\s?秒|見て|みて|教えて|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
+  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
 // 下書きが断りの形か（本番の断り「取得不可です…ファイル添付でお願いします」を含む）。
+// 「できない」単独は拾わない（「明日は参加できない」等）。動画の取得・分析・切り出しに掛かる形に限る。
 // 下書きは判定にだけ使い、保持も記録もしない。
 const VIDEO_REFUSAL_RE =
-  /(取得(?:でき(?:ません|ない)|不可|元)|でき(?:ません|ない)|対応して(?:い)?ません|未対応|非対応|ブロック|添付(?:して|で|を|いただ))/u;
+  /((?:取得|分析|解析|切り出し?|再生|視聴|アクセス)(?:でき(?:ません|ない)|不可)|未対応|非対応|対応して(?:い)?ません|ブロックされ|(?:ファイル|動画)を?(?:添付|アップロード)(?:して|で|を|いただ))/u;
 const VIDEO_ZERO_TOOL_RETRY_KEY = "video-zero-tool";
 const MAX_VIDEO_ZERO_TOOL_REVISIONS = 1;
 const VIDEO_ZERO_TOOL_REASON =
@@ -3316,7 +3320,9 @@ export function createCallerIdentityPlugin({
     if (typeof draft !== "string" || !draft.trim()) return skip("empty_assistant_message");
     // 連携依頼が優先（連携側が予算切れで何も返さなかった run にも、動画の指示は重ねない）。
     if (ingress.connectRequest === true) return skip("connect_request");
-    // 1 run につき再パスは全体で 1 回（連携側が既に revise した run には重ねない）。
+    // 連携側が既に revise した run には重ねない。逆順（動画が revise した後の再パスで連携 URL を
+    // 捏造）は、連携の捏造ガード（安全側）を抑えずにもう 1 回 revise させる＝1 run で最大 2 回
+    // （上流の上限 3 回の内側・どちらも自前予算 1 回なのでループしない。相互検証 2026-09-25）。
     if (connectRevisionsByRun.has(eventRunId)) return skip("connect_revised");
     // 誤爆を避ける: 依頼の語がある、または下書きが断りの形のときだけ介入する。
     const refusal = looksLikeVideoRefusal(draft);

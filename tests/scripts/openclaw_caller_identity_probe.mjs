@@ -824,10 +824,12 @@ function zeroToolConnectScenario({
 
 // 動画 URL × 0 tool call の層2。受信 → run 開始 → 任意で tool 呼び出し → finalize（repeat 回）。
 // receives: 受信の順序を変えたいときの [{ content, runId? }]（content 省略＝本文無しの再通知）。
+// drafts: パスごとに下書きを変えたいときの配列（指定時は repeat より優先）。
 function videoZeroToolScenario({
   content,
   receives = null,
   lastAssistantMessage = YOUTUBE_REFUSAL_REPLY,
+  drafts = null,
   toolName = null,
   repeat = 1,
   ctxRunId = null,
@@ -839,8 +841,8 @@ function videoZeroToolScenario({
   startRun(handlers);
   const toolBlocked = toolName ? callTool(handlers, toolName) : null;
   const results = [];
-  for (let i = 0; i < repeat; i += 1) {
-    results.push(finalizeRun(handlers, { lastAssistantMessage, ctxRunId }));
+  for (const draft of drafts ?? Array.from({ length: repeat }, () => lastAssistantMessage)) {
+    results.push(finalizeRun(handlers, { lastAssistantMessage: draft, ctxRunId }));
   }
   const pick = (result) => ({
     intervened: result?.action === "revise",
@@ -906,6 +908,13 @@ function videoTriggerMatrix() {
     ["hook", "このショートのフック見て https://youtube.com/shorts/abc123", true],
     ["timecode", "https://youtu.be/abc の 0:30 を画像にして", true],
     ["share_only", "この動画、明日の会議で使います https://youtu.be/abc", false],
+    // 共有でもよく出る語（時刻・秒・見て・教えて・まとめ）は依頼とみなさない（相互検証 2026-09-25）。
+    ["meeting_time", "明日10:00の会議で使います https://youtu.be/abc", false],
+    ["look", "これ見て https://youtu.be/abc", false],
+    ["seconds", "30秒の動画です https://youtu.be/abc", false],
+    ["tell_later", "あとで感想教えて https://youtu.be/abc", false],
+    ["summary_folder", "まとめフォルダに入れておいて https://youtu.be/abc", false],
+    ["capture", "https://youtu.be/abc の1:20あたり切り出して", true],
     ["not_string", undefined, false],
   ].map(([name, input, expected]) => ({ name, expected, actual: hasVideoRequestIntent(input) }));
   const refusal = [
@@ -913,6 +922,10 @@ function videoTriggerMatrix() {
     ["cannot", "YouTube の動画は分析できません。", true],
     ["attach", "動画ファイルを添付いただければ対応します。", true],
     ["ack", "承知しました。明日の会議の資料に入れておきますね。", false],
+    ["ack_ryokai", "了解しました。", false],
+    ["cannot_attend", "明日は参加できないので、代わりに見ておきます。", false],
+    ["blocked", "YouTube の URL は取得元にブロックされるため、このツールでは分析できません。", true],
+    ["analysis_cannot", "分析できません。", true],
     ["analysis_result", "この動画の構成と狙いです。", false],
   ].map(([name, input, expected]) => ({ name, expected, actual: looksLikeVideoRefusal(input) }));
   return { intent, refusal };
@@ -2901,6 +2914,17 @@ const report = {
   }),
   // ⑯依頼語・断りの手掛かりの行列。
   video_trigger_matrix: videoTriggerMatrix(),
+  // ⑰逆順: 動画が revise した後の再パスで連携 URL を捏造 → 連携の捏造ガード（安全側）がもう 1 回 revise。
+  //    3 回目は両方とも予算切れで介入しない（1 run で最大 2 回・ループしない）。
+  video_then_fabrication: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    drafts: [YOUTUBE_REFUSAL_REPLY, FABRICATED_REPLY, FABRICATED_REPLY],
+  }),
+  // ⑱共有（時刻入り）× 断りでない下書き → 不介入。
+  video_zero_tool_meeting_share: videoZeroToolScenario({
+    content: "明日10:00の会議で使います https://youtu.be/abc",
+    lastAssistantMessage: "承知しました。",
+  }),
   // 層3 ①再パス後も 0 tool call → 予算切れで層3 を武装し、送信直前に定型文へ置換。
   //     2 通目（分割 payload）は取り消す。
   connect_zero_tool_fallback: zeroToolConnectScenario({
