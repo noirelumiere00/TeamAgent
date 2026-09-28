@@ -1069,10 +1069,10 @@ def test_missing_report_url_does_not_promise_an_attachment() -> None:
     assert text.startswith("🔎 *VSEO動画アルゴリズム分析*")
 
 
-async def test_slack_control_sequences_are_escaped_but_urls_stay_bare(
+async def test_slack_control_sequences_are_escaped_and_urls_are_explicit(
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
 ) -> None:
-    """第三者のキャプション由来の `<!channel>`・`<@U…>`・偽装リンクをメンション/リンクにしない。"""
+    """第三者のキャプション由来の `<!channel>`・`<@U…>`・偽装リンクをメンション/表示名つきリンクにしない。"""
     monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
     skill = _GateSkill()
     skill.summary = (
@@ -1083,11 +1083,38 @@ async def test_slack_control_sequences_are_escaped_but_urls_stay_bare(
     skill.release.set()
     await _eventually(lambda: len(slack.posts) == 1)
     text = slack.posts[0]["text"]
-    assert "<!" not in text and "<@" not in text and "<http" not in text
+    assert "<!" not in text and "<@" not in text
     assert "&lt;!channel&gt;" in text and "&lt;@U0EVIL0001&gt;" in text
+    # 偽装リンクは表示名つきのリンクにならない（見えている URL だけが <URL> になる）
+    assert "|公式サイト" in text and "<https://evil.invalid|" not in text
+    assert "&lt;<https://evil.invalid>|公式サイト&gt;" in text
     assert "A&amp;B" in text
-    assert "https://example.invalid/r/abc" in text  # URL は裸のまま
+    assert "<https://example.invalid/r/abc>" in text
     assert text.startswith("🔎 *分析* 完了")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # 09-28 本番: URL の直後の全角の文字まで Slack が URL に含めて 404 になった
+        (
+            "詳細: https://connect.example/r/eyJ.abc_-X（タイムライン/テロップ位置）。",
+            "詳細: <https://connect.example/r/eyJ.abc_-X>（タイムライン/テロップ位置）。",
+        ),
+        ("見る https://a.example/x.html。次", "見る <https://a.example/x.html>。次"),
+        ("(https://a.example/p?q=1&r=2).", "(<https://a.example/p?q=1&amp;r=2>)."),
+        ("行末 https://a.example/r/abc", "行末 <https://a.example/r/abc>"),
+        ("<https://a.example/x>", "&lt;<https://a.example/x>&gt;"),
+        ("http:// だけ", "http:// だけ"),
+        ("*https://a.example/r/x*", "*<https://a.example/r/x>*"),
+        # base64url の末尾の _ と - は URL の一部
+        ("署名 https://a.example/r/eyJ.ab_ 次", "署名 <https://a.example/r/eyJ.ab_> 次"),
+        ("署名 https://a.example/r/eyJ.ab-", "署名 <https://a.example/r/eyJ.ab->"),
+        ("URL なし & < >", "URL なし &amp; &lt; &gt;"),
+    ],
+)
+def test_slack_escape_stops_urls_at_the_first_non_url_character(raw: str, expected: str) -> None:
+    assert detached_jobs.slack_escape(raw) == expected
 
 
 # ── 起動の配線 ─────────────────────────────────────────────────────────────

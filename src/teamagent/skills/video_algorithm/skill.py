@@ -1862,8 +1862,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             proposal_lines += f"\n📊 提案用パワポ（7日有効・そのまま提案資料へ）: {out.pptx_url}"
         if out.slides_url:
             proposal_lines += f"\n✏️ 編集用スライド（ブラウザで直接編集）: {out.slides_url}"
+        # URL は必ず行末に置く。直後に全角の文字が続くと、Slack がその文字まで URL に含めて
+        # リンクが 404 になる（09-28 本番「（タイムライン/…）」で発生）。
         report_line = (
-            f"📄 詳細レポート（7日有効）: {out.report_url}"
+            "📄 詳細レポート（タイムライン/テロップ位置/ブランド検出/勝ち筋・7日有効）: "
+            f"{out.report_url}"
             if out.report_url
             else "📄 詳細は添付の HTML レポートをご覧ください"
         )
@@ -1875,6 +1878,6 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             f"🔎 **VSEO動画アルゴリズム分析** 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
             f"{c.summary}{top}\n{quota_line}{volume_line}"
-            f"{report_line}（タイムライン/テロップ位置/ブランド検出/勝ち筋）。{proposal_lines}\n"
+            f"{report_line}{proposal_lines}\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
         )
