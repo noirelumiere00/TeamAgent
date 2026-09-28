@@ -24,6 +24,7 @@ from teamagent.skills.search_surface_check.video_notes import (
     build_notes_prompt,
     conclude_notes,
     ground_notes,
+    notes_max_tokens,
     structure_payload,
 )
 from teamagent.skills.search_surface_check.video_render import render_video_chapter
@@ -39,6 +40,7 @@ from tests.skills.search_surface_check.structure_fakes import (
     TINY_JPEG,
     rich_videos,
 )
+from tests.skills.search_surface_check.video_fakes import FAKE_TOKENS_PER_CHAR
 
 KW = "スパイスカレー"
 
@@ -246,6 +248,73 @@ def test_brand_grade_names_client_or_competitor() -> None:
     assert g.reason == "A（競合）・初出 2秒・合計 4秒・目立つ"
 
 
+def _brand(name: str, sec: float, total: float, prominence: str, relation: str) -> dict[str, Any]:
+    return {
+        "brand_name": name,
+        "appear_sec": [sec],
+        "total_screen_time_sec": total,
+        "prominence": prominence,
+        "brand_relation": relation,
+    }
+
+
+def test_brand_name_relation_and_seconds_come_from_the_same_brand() -> None:
+    """他社が主役で 0.5 秒・クライアントが背景で 5 秒。他社を「（クライアント）」と書かず、秒も混ぜない。"""
+    brands = [
+        _brand("他社X", 1.0, 0.5, "hero", "neutral_third_party"),
+        _brand("花王Y", 4.0, 5.0, "background", "client"),
+    ]
+    video = _video({"brand_detections": brands})
+    k = vs.video_keys(video)
+    assert k is not None
+    assert (k.brand_name, k.brand_relation, k.brand_prominence) == ("花王Y", "client", "background")
+    assert (k.brand_first_sec, k.brand_total_sec, k.brand_others) == (4.0, 5.0, ("他社X",))
+    g = _grade({"brand_detections": brands}, "商品の見せ方")
+    assert g.mark == "○"  # 背景なので ◎ にしない（他社の「主役」と混ぜない）
+    assert g.reason == "花王Y（クライアント）・初出 4秒・合計 5秒・背景・ほかに他社Xも映る"
+
+
+def test_brand_picks_client_then_competitor_then_most_prominent() -> None:
+    comp_vs_neutral = [
+        _brand("N", 0.0, 9.0, "hero", "unknown"),
+        _brand("C", 2.0, 1.0, "incidental", "competitor"),
+    ]
+    k = vs.video_keys(_video({"brand_detections": comp_vs_neutral}))
+    assert k is not None and (k.brand_name, k.brand_relation, k.brand_others) == (
+        "C",
+        "competitor",
+        ("N",),
+    )
+    no_relation = [
+        _brand("A", 0.0, 2.0, "incidental", "unknown"),
+        _brand("B", 3.0, 1.0, "prominent", "neutral_third_party"),
+        _brand("D", 5.0, 4.0, "prominent", "unknown"),
+    ]
+    k = vs.video_keys(_video({"brand_detections": no_relation}))
+    # 目立つ（prominent）が 2 つなら長く映る方。関係の無いブランドは「クライアント」と書かない
+    assert k is not None and (k.brand_name, k.brand_relation) == ("D", "")
+    assert k.brand_others == ("B", "A")
+
+
+def test_detections_of_one_brand_are_merged() -> None:
+    """同じブランドの看板とパッケージ（2 つの検出）は 1 つにまとめ、秒を足す。"""
+    brands = [
+        _brand("A", 6.0, 2.0, "hero", "unknown"),
+        _brand("a ", 1.0, 2.0, "background", "client"),
+    ]
+    k = vs.video_keys(_video({"brand_detections": brands}))
+    assert k is not None
+    assert (k.brand_name, k.brand_relation, k.brand_prominence) == ("A", "client", "hero")
+    assert (k.brand_first_sec, k.brand_total_sec, k.brand_others) == (1.0, 4.0, ())
+    assert _grade({"brand_detections": brands}, "商品の見せ方").mark == "◎"
+
+
+def test_brand_others_are_capped_in_the_reason_and_panel() -> None:
+    brands = [_brand(n, 1.0, 1.0, "incidental", "unknown") for n in ("A", "B", "C", "D")]
+    g = _grade({"brand_detections": brands}, "商品の見せ方")
+    assert g.reason.endswith("ほかにB・Cほか1も映る")
+
+
 @pytest.mark.parametrize(
     ("value", "mark"), [(80, "◎"), (79, "○"), (60, "○"), (59, "△"), (None, "—")]
 )
@@ -374,6 +443,35 @@ def test_rows_fall_back_to_timed_telops_and_are_capped_at_twelve() -> None:
     assert vs.omitted_scenes(videos[3]) == 2
 
 
+def test_scene_timecodes_stay_inside_the_real_duration() -> None:
+    """Gemini の尺が 0 や実尺より長くても、コマの秒は実尺（検索結果の尺）の内側に収める。"""
+    scenes = [{"start_sec": 0, "end_sec": 40}, {"start_sec": 40, "end_sec": 90}]
+    no_gemini_duration = VideoVSEOAnalysis.model_validate({"duration_sec": 0, "scenes": scenes})
+    assert [s for s, _ in scene_timecodes(no_gemini_duration, duration_sec=58.0)] == [20.0, 57.95]
+    longer = VideoVSEOAnalysis.model_validate({"duration_sec": 90, "scenes": scenes})
+    assert [s for s, _ in scene_timecodes(longer, duration_sec=58.0)] == [20.0, 57.95]
+    assert [s for s, _ in scene_timecodes(longer)] == [20.0, 65.0]  # 実尺が無ければ Gemini の尺
+    # どちらの尺も分からなければ出さない（尺の外の秒で media job を丸ごと落とさない）
+    assert scene_timecodes(no_gemini_duration) == []
+    # 場面が無いとき（pick_timecodes に倒す）も実尺に収める
+    no_scenes = VideoVSEOAnalysis.model_validate({"duration_sec": 90, "cta_sec": 80})
+    secs = [s for s, _ in scene_timecodes(no_scenes, duration_sec=30.0)]
+    assert secs and max(secs) <= 29.95
+
+
+def test_rows_match_frames_taken_inside_the_real_duration() -> None:
+    """構成表のコマ選びも、コマを抜いた秒と同じ収め方（実尺）で探す。"""
+    scenes = [{"start_sec": 0, "end_sec": 10}, {"start_sec": 10, "end_sec": 90}]
+    frames = [FrameShot(sec=s, data_uri=f"{TINY_JPEG}#{s}") for s in (5.0, 29.95, 50.0)]
+    video = AnalyzedVideo(
+        meta=VideoMeta(rank=1, duration_sec=30.0),
+        analysis=VideoVSEOAnalysis.model_validate({"duration_sec": 0, "scenes": scenes}),
+        frames=frames,
+    )
+    rows = vs.scene_rows(video)
+    assert [r.frame.sec if r.frame else None for r in rows] == [5.0, 29.95]
+
+
 def test_scene_timecodes_follow_the_rows_and_fit_the_media_job() -> None:
     a = VideoVSEOAnalysis.model_validate(RICH_ANALYSES[4])
     tcs = scene_timecodes(a)
@@ -444,6 +542,19 @@ def test_notes_keep_grounded_items_and_drop_numbers_from_other_videos() -> None:
     assert dropped == [("learn:1", "number:12"), ("storyboard:1:show", "number:71")]
 
 
+@pytest.mark.parametrize("n", [1, 5, 10])
+def test_notes_max_tokens_fit_the_longest_accepted_output(n: int) -> None:
+    """受け取る最大の量（本数 × 3 項目 × 120 字＋絵コンテ 4 段 × 80・40 字）の JSON が、1 字 1.5
+    トークンで見積もっても出力の上限に収まる（2 段目の本数の上限は 10 本）。"""
+    item = "あ" * 120
+    longest = {
+        "videos": [{"rank": r, "learn": [item, item], "weak": [item]} for r in range(1, n + 1)],
+        "storyboard": [{"show": "い" * 80, "telop": "う" * 40} for _ in STORYBOARD_STAGES],
+    }
+    text = json.dumps(longest, ensure_ascii=False, indent=2)
+    assert len(text) * FAKE_TOKENS_PER_CHAR <= notes_max_tokens(n)
+
+
 def test_notes_llm_failure_or_garbage_returns_none() -> None:
     videos = rich_videos()
     dropped: list[tuple[str, str]] = []
@@ -496,7 +607,24 @@ def test_common_points_are_counted_by_code() -> None:
     points = vs.common_points(rich_videos())
     assert points[0] == "フックの型はそろっていない（数字・問いかけ・ビジュアル・その他）"
     assert "検索 KW を3秒以内にテロップか発話で出す: 2/4本" in points
-    assert any(p.startswith("CTA あり: 3/4本") for p in points)
+    # CTA の型は上位 2 種類で切らず、全部並べる（購入が抜けない）
+    assert "CTA あり: 3/4本（保存 1本・フォロー 1本・購入 1本）" in points
+
+
+def test_most_good_axis_is_named_only_when_it_leads_alone() -> None:
+    """◎の数が同数なら、先頭の軸を「いちばん多い」と書かない（LLM の入力にもなる）。"""
+    points = vs.common_points(rich_videos())
+    assert not any(p.startswith("◎がいちばん多い評価軸") for p in points)
+    tie = next(p for p in points if p.startswith("◎が多い評価軸は並んでいる"))
+    assert tie == (
+        "◎が多い評価軸は並んでいる: 冒頭3秒の掴み・テンポ・KWの露出・保存の仕掛け・CTA・一致度"
+        "（各2/4本）"
+    )
+    videos = rich_videos()
+    assert videos[1].analysis is not None
+    videos[1].analysis.message_coherence = 95  # 2 位の一致度も ◎ にして一致度だけ 3 本
+    points = vs.common_points(videos)
+    assert "◎がいちばん多い評価軸: 一致度（3/4本）" in points
 
 
 def test_panels_are_all_readable_without_js() -> None:
@@ -511,6 +639,35 @@ def test_panels_are_all_readable_without_js() -> None:
     assert html.count("<table class='dads-table scenes'>") == 4
     assert "場面が多いため、最初の11場面と最後の場面を出しています（2場面を省略）" in html
     assert "（推定）" in html  # 2 位の役割は推定
+
+
+def test_other_brands_are_noted_in_the_panel_and_the_llm_input() -> None:
+    """見出しのブランド（クライアント）以外に映るブランドは、パネルと LLM の入力に注記する。"""
+    from teamagent.skills.video_algorithm.schema import BrandDetection
+
+    videos = rich_videos()
+    assert videos[2].analysis is not None
+    videos[2].analysis.brand_detections.append(
+        BrandDetection(
+            brand_name="他社X", appear_sec=[1.0], total_screen_time_sec=0.5, prominence="hero"
+        )
+    )
+    html = _chapter(videos=videos)
+    panel3 = html[html.index("id='vp-3'") : html.index("id='vp-4'")]
+    assert "〇〇カレー粉・合計 6秒・主役・クライアント・ほかに他社X" in panel3
+    payload = structure_payload(videos[2])
+    assert payload is not None
+    assert payload["商品"]["名前"] == "〇〇カレー粉"
+    assert payload["商品"]["ほかに映るブランド"] == "他社X"
+
+
+def test_tabs_follow_hash_changes_after_load() -> None:
+    """開いた後に #vp-N へ移っても（ページ内リンク・戻る）タブを切り替える。"""
+    from teamagent.skills.search_surface_check.video_chapter import TABS_JS
+
+    assert "addEventListener('hashchange'" in TABS_JS
+    handler = TABS_JS[TABS_JS.index("addEventListener('hashchange'") :]
+    assert "select(k,false)" in handler[: handler.index("});")]
 
 
 def test_client_brand_and_inferred_roles_show_in_the_panel() -> None:

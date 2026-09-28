@@ -40,6 +40,7 @@ from teamagent.skills.search_surface_check.video_digest import (
     post_to_meta,
     select_followup_videos,
 )
+from teamagent.skills.search_surface_check.video_notes import notes_max_tokens
 from teamagent.skills.search_surface_check.video_render import (
     ALL_FAILED_TEXT,
     COVER_ONLY_NOTE,
@@ -699,6 +700,52 @@ def test_detailed_structure_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     # Slack は 1 本 1 行のまま（構成表は出さない）
     assert "構成表" not in result.slack_text
     assert result.total_cost_usd == pytest.approx(0.05 + 0.003 + 0.004)
+
+
+def test_longest_accepted_notes_are_not_cut_off_by_max_tokens() -> None:
+    """受け取る最大の量のメモ（5 本 × 3 項目 × 120 字＋絵コンテ 4 段）でも、出力の上限で JSON が
+    途中で切れて、メモと絵コンテ案が丸ごと消えることがない。"""
+    item = ("材料を並べてテロップで少なさを見せ、" * 10)[:120]
+    notes = {
+        "videos": [{"rank": r, "learn": [item, item], "weak": [item]} for r in range(1, 6)],
+        "storyboard": [
+            {
+                "show": ("完成した料理の寄りから入る" * 10)[:80],
+                "telop": ("材料はこれだけ" * 10)[:40],
+            }
+            for _ in range(4)
+        ],
+    }
+    skill, _g, _d, pub, bed = _skill(bedrock=VideoBedrock(notes=notes))
+    result = _followup(skill, _first_stage(skill))
+    assert result.digest is not None and result.digest.watched == 5
+    assert bed.notes_max_tokens == [notes_max_tokens(5)]
+    html = pub.htmls[-1]
+    assert "AI のメモを作れませんでした" not in html
+    assert "AI の絵コンテ案を作れませんでした" not in html
+
+
+def test_scene_frames_stay_inside_the_search_result_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini が尺を 0 と返し、場面が実尺を超えても、media job へ渡す秒は検索結果の尺の内側。"""
+    from teamagent.skills.video_algorithm import frames
+
+    calls: list[list[float]] = []
+
+    def _frames(data: bytes, mime: str, secs: list[float], **k: Any) -> list[tuple[float, str]]:
+        calls.append(list(secs))
+        return [(s, "data:image/jpeg;base64,QUJD") for s in secs]
+
+    monkeypatch.setattr(frames, "extract_frames", _frames)
+    scenes = [{"start_sec": 0, "end_sec": 40}, {"start_sec": 40, "end_sec": 200}]
+    analyses = {r: {**a, "duration_sec": 0, "scenes": scenes} for r, a in ANALYSES.items()}
+    skill, *_ = _skill(gemini=FakeGemini(analyses))
+    result = _followup(skill, _first_stage(skill))
+    assert result.digest is not None and result.digest.watched == 5
+    # 検索結果の尺は 58・45・62・75・90 秒（fixtures）。最後の場面の中央（120 秒）は尺の内側へ
+    assert sorted(max(c) for c in calls) == [44.95, 57.95, 61.95, 74.95, 89.95]
+    assert all(min(c) == 20.0 for c in calls)
 
 
 def test_notes_failure_keeps_the_chapter() -> None:

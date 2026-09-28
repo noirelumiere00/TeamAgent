@@ -77,9 +77,9 @@ from teamagent.skills.search_surface_check.video_digest import (
     rule_digest_conclusion,
 )
 from teamagent.skills.search_surface_check.video_notes import (
-    NOTES_MAX_TOKENS,
     StructureNotes,
     conclude_notes,
+    notes_max_tokens,
 )
 from teamagent.skills.search_surface_check.video_render import (
     CHAPTER_CSS,
@@ -953,7 +953,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
                 request_id=request_id,
                 temperature=0.2,
-                max_tokens=NOTES_MAX_TOKENS,
+                max_tokens=notes_max_tokens(len(videos)),
             )
             return resp.text, float(resp.usage.cost_usd)
 

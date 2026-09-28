@@ -14,6 +14,7 @@ LLM（Bedrock）は 1 回だけ呼び、5 本分のメモと絵コンテ案を�
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from teamagent.skills.search_surface_check.video_digest import (
 )
 from teamagent.skills.search_surface_check.video_structure import (
     grade_video,
+    others_text,
     prominence_label,
     relation_label,
     scene_rows,
@@ -44,12 +46,17 @@ STORYBOARD_STAGES: tuple[str, ...] = (
     "10秒〜終盤",
     "最後の数秒（CTA）",
 )
-NOTES_MAX_TOKENS = 2000
 _ITEM_MAX = 120
 _SHOW_MAX = 80
 _TELOP_MAX = 40
 _MAX_LEARN = 2
 _MAX_WEAK = 1
+# 出力の上限（notes_max_tokens）の見積もり: 日本語 1 字あたりのトークン（多めに）と、JSON の骨組み
+# （キー・順位・括弧）の分。途中で切れると JSON が壊れ、メモと絵コンテ案が丸ごと消えるので、受け取る
+# 最大の量より小さくしない（Haiku なので増える費用はわずか）。
+_TOKENS_PER_CHAR = 1.5
+_JSON_TOKENS_PER_VIDEO = 200
+_JSON_TOKENS_BASE = 500
 _CELL_MAX = 60
 _MAX_TELOPS = 12
 
@@ -72,6 +79,20 @@ class StoryboardStep:
 class StructureNotes:
     videos: dict[int, VideoNote] = field(default_factory=dict)
     storyboard: list[StoryboardStep] = field(default_factory=list)
+
+
+def notes_max_tokens(n_videos: int) -> int:
+    """メモの出力の上限（本数に応じる）。受け取る最大の字数（本数 × 3 項目 × 120 字＋絵コンテ
+    4 段 × 120 字）に 1 字 1.5 トークンと JSON の骨組みを足す。
+
+    5 本で約 2,300 字（4,920 トークン）・10 本（上限）で約 4,100 字（8,620 トークン）。
+    字下げつきの JSON（Haiku がよく返す形）でも収まる。
+    """
+    n = max(1, n_videos)
+    chars = n * (_MAX_LEARN + _MAX_WEAK) * _ITEM_MAX + len(STORYBOARD_STAGES) * (
+        _SHOW_MAX + _TELOP_MAX
+    )
+    return math.ceil(chars * _TOKENS_PER_CHAR) + n * _JSON_TOKENS_PER_VIDEO + _JSON_TOKENS_BASE
 
 
 def _clip(text: str, n: int = _CELL_MAX) -> str:
@@ -138,6 +159,8 @@ def structure_payload(video: AnalyzedVideo) -> dict[str, Any] | None:
             "目立ち方": prominence_label(keys.brand_prominence),
             "関係": relation_label(keys.brand_relation),
         }
+        if keys.brand_others:
+            row["商品"]["ほかに映るブランド"] = others_text(keys.brand_others)
     if video.meta.play_count > 0 and video.meta.collect_count > 0:
         row["保存率%"] = round(video.meta.save_rate(), 1)
         row["再生"] = fmt_count(video.meta.play_count)
@@ -284,7 +307,6 @@ def conclude_notes(
 
 
 __all__ = [
-    "NOTES_MAX_TOKENS",
     "STORYBOARD_STAGES",
     "NotesPrompt",
     "StoryboardStep",
@@ -293,5 +315,6 @@ __all__ = [
     "build_notes_prompt",
     "conclude_notes",
     "ground_notes",
+    "notes_max_tokens",
     "structure_payload",
 ]

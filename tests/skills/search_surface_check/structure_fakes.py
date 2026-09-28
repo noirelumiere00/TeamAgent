@@ -15,7 +15,7 @@ import base64
 from itertools import pairwise
 from typing import Any
 
-from teamagent.skills.video_algorithm.frames import scene_time
+from teamagent.skills.video_algorithm.frames import scene_timecodes
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     FrameShot,
@@ -184,13 +184,11 @@ RICH_ANALYSES: dict[int, dict[str, Any]] = {
 FAILED_RANKS = frozenset({5})
 
 
-def scene_frames(analysis: VideoVSEOAnalysis) -> list[FrameShot]:
-    """media job と同じく、場面の中央の秒（最大 12）でコマを返す。"""
-    from teamagent.skills.video_algorithm.frames import pick_scene_rows
-
+def scene_frames(analysis: VideoVSEOAnalysis, duration_sec: float = 0.0) -> list[FrameShot]:
+    """本番（video_algorithm の _extract_frames）と同じ秒の選び方（scene_timecodes）でコマを返す。"""
     return [
-        FrameShot(sec=scene_time(sc, analysis.duration_sec), caption="", data_uri=TINY_JPEG)
-        for sc in pick_scene_rows(analysis.scenes)
+        FrameShot(sec=sec, caption=caption, data_uri=TINY_JPEG)
+        for sec, caption in scene_timecodes(analysis, duration_sec=duration_sec)
     ]
 
 
@@ -205,7 +203,8 @@ def rich_videos() -> list[AnalyzedVideo]:
             follower_count=10_000 * rank,
             play_count=100_000 // rank,
             collect_count=2_000 // rank,
-            duration_sec=30.0 + rank,
+            # 検索結果の尺（TikTok は整数の秒）。分析できた本は Gemini の尺と同じにする。
+            duration_sec=float(int(RICH_ANALYSES.get(rank, {}).get("duration_sec", 30.0 + rank))),
         )
         if rank in FAILED_RANKS:
             videos.append(AnalyzedVideo(meta=meta, error="分析失敗: RuntimeError"))
@@ -215,7 +214,7 @@ def rich_videos() -> list[AnalyzedVideo]:
             AnalyzedVideo(
                 meta=meta,
                 analysis=analysis,
-                frames=scene_frames(analysis),
+                frames=scene_frames(analysis, meta.duration_sec),
                 cover_data_uri=TINY_JPEG,
             )
         )

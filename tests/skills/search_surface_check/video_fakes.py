@@ -6,6 +6,7 @@
 - 取得（downloader）は URL ごとに失敗させられる（本番の MEDIA_ACQUIRE 失敗）。Event で止められる
   （再デプロイ中に走っているジョブの再現）。
 - Bedrock は 1 段目（分類・結論）を fixtures.FakeBedrock に任せ、2 段目の読みだけ差し替える。
+  構成メモは本番どおり maxTokens で出力が途中で切れる（日本語 1 字 ≈ 1.5 トークンで見積もる）。
 """
 
 from __future__ import annotations
@@ -224,6 +225,10 @@ GROUNDED_NOTES: dict[str, Any] = {
 }
 
 
+# 偽の Bedrock が出力の長さを見積もる、日本語 1 字あたりのトークン数。
+FAKE_TOKENS_PER_CHAR = 1.5
+
+
 class VideoBedrock(FakeBedrock):
     """1 段目は FakeBedrock のまま、2 段目の読み（動画の中身の読み）と構成メモだけ差し替える。"""
 
@@ -243,11 +248,14 @@ class VideoBedrock(FakeBedrock):
         self.notes = GROUNDED_NOTES if notes is None else notes
         self.notes_error = notes_error
         self.notes_prompts: list[str] = []
+        self.notes_max_tokens: list[int] = []
 
     def converse(self, messages: list[dict[str, Any]], **kw: Any) -> _Resp:
         text = messages[0]["content"][0]["text"]
         if "上位動画の構成メモ" in text:
             self.notes_prompts.append(text)
+            max_tokens = int(kw.get("max_tokens", 4096))
+            self.notes_max_tokens.append(max_tokens)
             if self.notes_error is not None:
                 raise self.notes_error
             body = (
@@ -255,7 +263,8 @@ class VideoBedrock(FakeBedrock):
                 if isinstance(self.notes, str)
                 else json.dumps(self.notes, ensure_ascii=False)
             )
-            return _Resp(body, 0.004)
+            # 本番の Bedrock は maxTokens に達すると途中で切った文を返す（stop_reason=max_tokens）。
+            return _Resp(body[: int(max_tokens / FAKE_TOKENS_PER_CHAR)], 0.004)
         if "上位の動画の中身の読み" in text:
             self.digest_prompts.append(text)
             if self.digest_error is not None:

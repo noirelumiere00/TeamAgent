@@ -49,6 +49,7 @@ from teamagent.skills.search_surface_check.video_structure import (
     fmt_sec,
     grade_video,
     omitted_scenes,
+    others_text,
     prominence_label,
     relation_label,
     role_flow,
@@ -180,9 +181,10 @@ t.addEventListener('keydown',function(e){var n=tabs.length,j=null;
 if(e.key==='ArrowRight'){j=(i+1)%n;}else if(e.key==='ArrowLeft'){j=(i-1+n)%n;}
 else if(e.key==='Home'){j=0;}else if(e.key==='End'){j=n-1;}
 if(j!==null){e.preventDefault();select(j,true);}});});
-var start=0,h=location.hash.slice(1);
-tabs.forEach(function(t,i){if(t.getAttribute('aria-controls')===h){start=i;}});
-select(start,false);})();
+function fromHash(){var h=location.hash.slice(1),k=-1;
+tabs.forEach(function(t,i){if(t.getAttribute('aria-controls')===h){k=i;}});return k;}
+window.addEventListener('hashchange',function(){var k=fromHash();if(k>=0){select(k,false);}});
+select(Math.max(0,fromHash()),false);})();
 """
 
 
@@ -328,6 +330,7 @@ def _key_tiles(k: VideoKeys) -> str:
                 f"合計 {fmt_sec(k.brand_total_sec)}",
                 prominence_label(k.brand_prominence),
                 relation_label(k.brand_relation),
+                f"ほかに{others_text(k.brand_others)}" if k.brand_others else "",
             )
             if p
         )

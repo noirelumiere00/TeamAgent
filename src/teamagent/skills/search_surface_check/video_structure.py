@@ -22,9 +22,15 @@ from teamagent.skills.search_surface_check.video_digest import (
     hook_label,
     is_watched,
 )
-from teamagent.skills.video_algorithm.frames import MAX_SCENE_FRAMES, pick_scene_rows, scene_time
+from teamagent.skills.video_algorithm.frames import (
+    MAX_SCENE_FRAMES,
+    frame_duration,
+    pick_scene_rows,
+    scene_time,
+)
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
+    BrandDetection,
     FrameShot,
     Scene,
     VideoVSEOAnalysis,
@@ -120,6 +126,9 @@ _NUMBERED_TELOP = re.compile(
     r"^\s*(?:[①-⑳]|\d+\s*[.)．、:：]|STEP|Step|step|手順|ステップ|\d+つ目)"
 )
 _PROMINENT = ("hero", "prominent")
+_PROMINENCE_RANK = {"hero": 0, "prominent": 1, "incidental": 2, "background": 3}
+_RELATION_RANK = {"client": 0, "competitor": 1}
+_UNIDENTIFIED_LOGO = "unidentified_logo"
 _PROMINENCE_LABEL = {
     "hero": "主役",
     "prominent": "目立つ",
@@ -210,6 +219,7 @@ def scene_rows(video: AnalyzedVideo, limit: int = MAX_SCENE_FRAMES) -> list[Scen
     if a is None:
         return []
     roles = dict(zip(map(id, _ordered(a)), infer_roles(a), strict=True))
+    clip = frame_duration(a.duration_sec, video.meta.duration_sec)  # コマを抜いた秒と同じ収め方
     rows: list[SceneRow] = []
     for sc in pick_scene_rows(a.scenes, limit):
         role, inferred = roles[id(sc)]
@@ -223,7 +233,7 @@ def scene_rows(video: AnalyzedVideo, limit: int = MAX_SCENE_FRAMES) -> list[Scen
                 telop=(sc.telop or _telops_in(a, sc.start_sec, sc.end_sec)).strip(),
                 speech=(sc.speech or "").strip(),
                 intent=(sc.intent or "").strip(),
-                frame=nearest_frame(video.frames, scene_time(sc, a.duration_sec)),
+                frame=nearest_frame(video.frames, scene_time(sc, clip)),
             )
         )
     return rows
@@ -298,6 +308,7 @@ class VideoKeys:
     has_cta: bool = False
     narration: bool = False
     trending: str = "unknown"
+    brand_others: tuple[str, ...] = ()  # 見出しのブランド以外に映るブランド（名前だけ）
 
 
 def _kw_first(a: VideoVSEOAnalysis) -> tuple[float | None, str, bool]:
@@ -324,6 +335,55 @@ def _kw_first(a: VideoVSEOAnalysis) -> tuple[float | None, str, bool]:
     return None, "", matched_no_sec
 
 
+@dataclass(frozen=True)
+class BrandSummary:
+    """1 つのブランドの検出をまとめたもの（名前・関係・目立ち方・秒は同じブランドから取る）。"""
+
+    name: str
+    relation: str  # client / competitor / ""（それ以外）
+    prominence: str  # そのブランドの検出のうち最も目立つもの
+    first_sec: float | None
+    total_sec: float
+
+
+def _brand_name(b: BrandDetection) -> str:
+    name = b.brand_name.strip()
+    return "ロゴ（不明）" if not name or name == _UNIDENTIFIED_LOGO else name
+
+
+def brand_summaries(a: VideoVSEOAnalysis) -> list[BrandSummary]:
+    """ブランドごとにまとめ、見出しにする順（クライアント→競合→目立つ→長く映る→先に出た）に並べる。
+
+    検出はブランドの名前でまとめる（同じブランドが看板とパッケージで 2 つ出ることがある）。
+    関係・目立ち方・初出・合計秒はそのブランドの検出だけから取り、ほかのブランドと混ぜない。
+    """
+    groups: dict[str, list[BrandDetection]] = {}
+    for b in a.brand_detections:
+        groups.setdefault(_brand_name(b).casefold(), []).append(b)
+    out: list[tuple[tuple[int, int, float, int], BrandSummary]] = []
+    for order, dets in enumerate(groups.values()):
+        relations = [d.brand_relation for d in dets if d.brand_relation in _RELATION_RANK]
+        relation = min(relations, key=lambda r: _RELATION_RANK[r], default="")
+        prominence = min((d.prominence for d in dets), key=lambda p: _PROMINENCE_RANK.get(p, 4))
+        firsts = [s for d in dets for s in d.appear_sec]
+        total = round(sum(d.total_screen_time_sec for d in dets), 1)
+        summary = BrandSummary(
+            name=_brand_name(dets[0]),
+            relation=relation,
+            prominence=prominence,
+            first_sec=min(firsts) if firsts else None,
+            total_sec=total,
+        )
+        rank = (
+            _RELATION_RANK.get(relation, len(_RELATION_RANK)),
+            _PROMINENCE_RANK.get(prominence, 4),
+            -total,
+            order,
+        )
+        out.append((rank, summary))
+    return [summary for _rank, summary in sorted(out, key=lambda x: x[0])]
+
+
 def video_keys(video: AnalyzedVideo) -> VideoKeys | None:
     a = video.analysis
     if a is None:
@@ -333,14 +393,8 @@ def video_keys(video: AnalyzedVideo) -> VideoKeys | None:
     telop_secs = [t.sec for t in a.telops if t.text.strip()]
     kw_sec, kw_layer, kw_no_sec = _kw_first(a)
     kw_caption = any(k.matched and k.layer in ("caption", "hashtag") for k in a.keyword_matches)
-    brands = a.brand_detections
-    firsts = [s for b in brands for s in b.appear_sec]
-    rank_of = {"hero": 0, "prominent": 1, "incidental": 2, "background": 3}
-    best = min(brands, key=lambda b: rank_of.get(b.prominence, 4), default=None)
-    relation = next((b.brand_relation for b in brands if b.brand_relation in _RELATION_LABEL), "")
-    name = ""
-    if best is not None:
-        name = best.brand_name if best.brand_name != "unidentified_logo" else "ロゴ（不明）"
+    brands = brand_summaries(a)
+    best = brands[0] if brands else None
     return VideoKeys(
         duration_sec=dur,
         cut_count=a.cut_count,
@@ -350,12 +404,13 @@ def video_keys(video: AnalyzedVideo) -> VideoKeys | None:
         kw_first_layer=kw_layer,
         kw_matched_no_sec=kw_no_sec,
         kw_in_caption=kw_caption,
-        has_brand=bool(brands),
-        brand_name=name.strip(),
-        brand_first_sec=min(firsts) if firsts else None,
-        brand_total_sec=round(sum(b.total_screen_time_sec for b in brands), 1),
+        has_brand=best is not None,
+        brand_name=best.name if best is not None else "",
+        brand_first_sec=best.first_sec if best is not None else None,
+        brand_total_sec=best.total_sec if best is not None else 0.0,
         brand_prominence=best.prominence if best is not None else "",
-        brand_relation=relation,
+        brand_relation=best.relation if best is not None else "",
+        brand_others=tuple(b.name for b in brands[1:]),
         cta_sec=a.cta_sec,
         cta_types=[cta_label(c) for c in dict.fromkeys(a.cta_type)],
         cta_text=(a.cta_text or "").strip(),
@@ -371,6 +426,16 @@ def prominence_label(value: str) -> str:
 
 def relation_label(value: str) -> str:
     return _RELATION_LABEL.get(value, "")
+
+
+_OTHERS_SHOWN = 2
+
+
+def others_text(names: tuple[str, ...]) -> str:
+    """見出し以外のブランドの名前（2 つまで・残りは「ほかN」）。"""
+    shown = "・".join(names[:_OTHERS_SHOWN])
+    rest = len(names) - _OTHERS_SHOWN
+    return f"{shown}ほか{rest}" if rest > 0 else shown
 
 
 # ── 評価 ─────────────────────────────────────────────────────────────
@@ -468,6 +533,8 @@ def _grade_brand(k: VideoKeys) -> Grade:
     parts.append(f"合計 {fmt_sec(k.brand_total_sec)}")
     if prominence_label(k.brand_prominence):
         parts.append(prominence_label(k.brand_prominence))
+    if k.brand_others:
+        parts.append(f"ほかに{others_text(k.brand_others)}も映る")
     return Grade("商品の見せ方", MARK_GOOD if good else MARK_OK, "・".join(parts))
 
 
@@ -520,7 +587,7 @@ def common_points(videos: list[AnalyzedVideo]) -> list[str]:
         points.append(f"平均カット秒の中央値: {fmt_sec(statistics.median(avgs))}")
     with_cta = [k for k in keys if k.has_cta]
     if with_cta:
-        kinds = Counter(t for k in with_cta for t in k.cta_types).most_common(2)
+        kinds = Counter(t for k in with_cta for t in k.cta_types).most_common()
         kind_text = "（" + "・".join(f"{t} {c}本" for t, c in kinds) + "）" if kinds else ""
         points.append(f"CTA あり: {len(with_cta)}/{n}本{kind_text}")
     flows = Counter(
@@ -532,8 +599,14 @@ def common_points(videos: list[AnalyzedVideo]) -> list[str]:
     grades = [grade_video(v) for v in watched]
     goods = Counter(g.axis for gs in grades for g in gs if g.mark == MARK_GOOD)
     if goods:
-        axis, count = goods.most_common(1)[0]
-        points.append(f"{MARK_GOOD}がいちばん多い評価軸: {axis}（{count}/{n}本）")
+        top = max(goods.values())
+        leaders = [axis for axis in AXES if goods.get(axis) == top]
+        if len(leaders) == 1:
+            points.append(f"{MARK_GOOD}がいちばん多い評価軸: {leaders[0]}（{top}/{n}本）")
+        else:  # 同数なら 1 つを「いちばん」とは書かない（並んでいる軸を全部書く）
+            points.append(
+                f"{MARK_GOOD}が多い評価軸は並んでいる: {'・'.join(leaders)}（各{top}/{n}本）"
+            )
     return points
 
 
@@ -557,16 +630,19 @@ __all__ = [
     "STEPS_MIN_SCENES",
     "TEMPO_GOOD_SEC",
     "TEMPO_OK_SEC",
+    "BrandSummary",
     "Grade",
     "RoleShare",
     "SceneRow",
     "VideoKeys",
+    "brand_summaries",
     "common_points",
     "fmt_sec",
     "grade_video",
     "infer_roles",
     "nearest_frame",
     "omitted_scenes",
+    "others_text",
     "prominence_label",
     "relation_label",
     "role_flow",

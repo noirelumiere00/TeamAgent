@@ -672,6 +672,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     request_id=request_id,
                     scene_frames=scene_frames,
                     width=frame_width,
+                    duration_sec=meta.duration_sec,
                 )
             except Exception as exc:
                 if strict_extras:
@@ -725,8 +726,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         request_id: str,
         scene_frames: bool,
         width: int,
+        duration_sec: float = 0.0,
     ) -> list[FrameShot]:
-        """proxy 後の検証済み bytes を使い回して実フレームを抽出する。"""
+        """proxy 後の検証済み bytes を使い回して実フレームを抽出する。
+
+        ``duration_sec`` は検索結果の実尺（場面ごとのコマを尺の内側に収めるのに使う）。
+        """
         with _stage("frames", request_id, rank):
             from teamagent.skills.video_algorithm.frames import (
                 extract_frames,
@@ -735,7 +740,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             )
 
             tcs = (
-                scene_timecodes(analysis)
+                scene_timecodes(analysis, duration_sec=duration_sec)
                 if scene_frames
                 else pick_timecodes(analysis, max_frames=6)
             )

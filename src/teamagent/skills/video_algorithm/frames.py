@@ -92,6 +92,17 @@ def pick_scene_rows(scenes: list[Scene], limit: int = MAX_SCENE_FRAMES) -> list[
     return [*ordered[: limit - 1], ordered[-1]]
 
 
+def frame_duration(*durations: float) -> float:
+    """コマを抜ける尺（正の値のうち最も短いもの・どれも無ければ 0）。
+
+    Gemini の尺（analysis.duration_sec）は 0 や実尺より長いことがある。media job の _frames は
+    尺の外の秒を 1 枚でも渡すと空のコマでジョブごと失敗する（MEDIA_FRAME_EMPTY）ので、検索結果の
+    尺（meta.duration_sec・整数に切り捨て）とも比べて短い方に収める。
+    """
+    positive = [d for d in durations if d > 0]
+    return min(positive) if positive else 0.0
+
+
 def scene_time(scene: Scene, duration_sec: float = 0.0) -> float:
     """場面を代表する秒（場面の中央。尺があれば尺の内側に収める）。"""
     end = max(scene.end_sec, scene.start_sec)
@@ -102,16 +113,25 @@ def scene_time(scene: Scene, duration_sec: float = 0.0) -> float:
 
 
 def scene_timecodes(
-    a: VideoVSEOAnalysis, *, max_frames: int = MAX_SCENE_FRAMES
+    a: VideoVSEOAnalysis, *, max_frames: int = MAX_SCENE_FRAMES, duration_sec: float = 0.0
 ) -> list[tuple[float, str]]:
-    """構成表の場面ごとに 1 コマ（場面の中央の秒）。場面が無ければ pick_timecodes に倒す。"""
+    """構成表の場面ごとに 1 コマ（場面の中央の秒）。場面が無ければ pick_timecodes に倒す。
+
+    秒は ``frame_duration(Gemini の尺, duration_sec)`` の内側に収める（``duration_sec`` は
+    検索結果の実尺）。どちらの尺も分からなければ、pick_timecodes と同じくコマを出さない。
+    """
+    limit = frame_duration(a.duration_sec, duration_sec)
+    if limit <= 0:
+        return []
     rows = pick_scene_rows(a.scenes, min(max_frames, MAX_SCENE_FRAMES))
     picked: dict[float, str] = {}
     for sc in rows:
-        sec = scene_time(sc, a.duration_sec)
+        sec = scene_time(sc, limit)
         picked.setdefault(sec, f"場面 {sc.start_sec:.0f}s")
     if not picked:
-        return pick_timecodes(a, max_frames=min(max_frames, MAX_SCENE_FRAMES))
+        fallback = pick_timecodes(a, max_frames=min(max_frames, MAX_SCENE_FRAMES))
+        for sec, cap in fallback:
+            picked.setdefault(round(min(sec, max(0.0, limit - 0.05)), 2), cap)
     return sorted(picked.items())
 
 
