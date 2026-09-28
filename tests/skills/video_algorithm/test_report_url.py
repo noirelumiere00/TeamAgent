@@ -42,3 +42,26 @@ def test_slack_summary_falls_back_without_url() -> None:
     out = VideoAlgorithmOutput(query="kw")  # report_url None
     summary = VideoAlgorithmSkill()._slack_summary(out)
     assert "添付の HTML レポート" in summary
+
+
+def test_slack_summary_puts_every_url_at_the_end_of_its_line() -> None:
+    """URL の直後に文字を続けない（09-28 本番: 「（タイムライン/…）」まで URL にされ 404）。"""
+    import re
+
+    out = VideoAlgorithmOutput(
+        query="kw",
+        report_url="https://signed.example/r/eyJ.abc",
+        slides_url="https://signed.example/r/eyJ.def",
+        pptx_url="https://signed.example/r/eyJ.ghi",
+    )
+    summary = VideoAlgorithmSkill()._slack_summary(out)
+    urls = re.findall(r"https://\S+", summary)
+    assert urls == [
+        "https://signed.example/r/eyJ.abc",
+        "https://signed.example/r/eyJ.ghi",
+        "https://signed.example/r/eyJ.def",
+    ]
+    for line in summary.splitlines():
+        if "https://" in line:
+            assert re.search(r"https://[\x21-\x7e]+$", line), line
+    assert "（タイムライン/テロップ位置/ブランド検出/勝ち筋・7日有効）: https://" in summary

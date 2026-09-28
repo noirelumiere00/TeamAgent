@@ -354,13 +354,38 @@ def completion_text(output: Any, query: str) -> str:
 
 
 def slack_escape(text: str) -> str:
-    """Slack の制御文字（& < >）をエスケープする（直接投稿の直前に 1 回だけ掛ける）。
+    """Slack の制御文字（& < >）をエスケープし、裸の URL を ``<URL>`` で囲む。
+
+    直接投稿の直前に 1 回だけ掛ける。
 
     本文には第三者のキャプションを読んだ Gemini の出力が入るため、``<!channel>``・``<@U…>``・
-    ``<https://…|偽の表示名>`` がそのまま描画されないようにする。URL は裸のまま残る
-    （Slack が自動でリンクにする）。
+    ``<https://…|偽の表示名>`` がそのまま描画されないようにする。
+
+    裸の URL は、エスケープの後で ASCII の範囲だけを ``<URL>`` で囲む。Slack の自動リンクは
+    URL の直後に続く全角の文字（「（タイムライン/…）」など）まで URL に含めることがあり、
+    09-28 の本番でレポートのリンクが 404 になった。囲むのは本文に見えている URL そのもの
+    だけなので、表示名の偽装（``|名前``）は作れない。
     """
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return _BARE_URL.sub(_wrap_bare_url, escaped)
+
+
+# URL に使える ASCII の文字だけ（``|`` と ``<`` ``>`` は含めない）。全角の文字で必ず止まる。
+_BARE_URL = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+# 文末の句読点・太字の ``*``・エスケープ済みの ``&gt;`` などは URL に含めない。
+# ``_`` と ``-`` は署名つき短縮 URL（base64url）の末尾に来るので削らない。
+_URL_TRAILER = re.compile(r"(?:&gt;|&lt;|&amp;|[.,;:!?'\")\]*])+$")
+
+
+def _wrap_bare_url(match: re.Match[str]) -> str:
+    url = match.group(0)
+    trailer = _URL_TRAILER.search(url)
+    tail = ""
+    if trailer is not None:
+        url, tail = url[: trailer.start()], url[trailer.start() :]
+    if "://" not in url or url.endswith("://"):
+        return match.group(0)
+    return f"<{url}>{tail}"
 
 
 # ── Slack 投稿（既存の直接配信と同じ SlackClient.from_env(timeout_seconds=...)）──────
