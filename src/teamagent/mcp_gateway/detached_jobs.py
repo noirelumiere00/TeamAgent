@@ -23,7 +23,14 @@
   第 1 段階は小俣さん本人だけを入れる想定）。
 - ``VIDEO_ALGORITHM_DETACH_DM_ONLY``: 既定 1＝1 対 1 DM（D…）だけ。
 - ``VIDEO_ALGORITHM_DETACH_AFTER_S``: 既定 30・5〜240 に丸める。
-- ``VIDEO_ALGORITHM_MAX_BACKGROUND``: 既定 2。超えたら同期のまま（今と同じ挙動）に落とす。
+- ``VIDEO_ALGORITHM_MAX_BACKGROUND``: 既定 2（全利用者の合計）。超えた分は**順番待ち**にする
+  （同期には戻さない。戻すと 360 秒の打ち切りが再発する）。受付文は「順番待ちです」で返し、
+  ジョブの thread の中で空きを待ってから skill.run を始める（待っている間は quota を使わない）。
+  待ち行列も ``DEFAULT_MAX_QUEUED``（10）件で満杯なら、quota を使う前に「混み合っています」と返す。
+
+終了処理（SIGTERM）: 初回の ``notify_interrupted`` で登録簿に closing の印を立てる。以降の
+新しい依頼・切り離しは受付文の代わりに中断文を返し、順番待ちのジョブは始めずに終える。
+登録簿の項目は実行開始から ``STALE_AFTER_S``（45 分）を超えたら、次の依頼時に掃除して枠を返す。
 
 利用者向けの文には内部語（job_id・error_code・S3 URL・ツール名）を出さない（SOUL.md の禁止語）。
 """
@@ -34,7 +41,9 @@ import asyncio
 import os
 import re
 import threading
+import time
 import unicodedata
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -59,6 +68,10 @@ MIN_DETACH_AFTER_S = 5.0
 MAX_DETACH_AFTER_S = 240.0
 DEFAULT_MAX_BACKGROUND = 2
 MAX_MAX_BACKGROUND = 10
+# 同時実行の上限を超えた分の待ち行列の上限（全利用者の合計）。超えたら「混み合っています」。
+DEFAULT_MAX_QUEUED = 10
+# 登録簿の項目の寿命（実行開始から）。処理中リース（既定 1800 秒）より長くとる。
+STALE_AFTER_S = 45 * 60.0
 
 # 受付文の目安（5 本で 9 分前後の実測に合わせた概算）。
 ETA_MINUTES = 10
@@ -110,6 +123,8 @@ class DetachPolicy:
     allowed_emails: frozenset[str] = frozenset()
     dm_only: bool = True
     max_background: int = DEFAULT_MAX_BACKGROUND
+    # 待ち行列の上限（env では変えない）。
+    max_queued: int = DEFAULT_MAX_QUEUED
 
     @classmethod
     def from_env(cls) -> DetachPolicy:
@@ -232,6 +247,22 @@ def receipt_text(query: str) -> str:
     )
 
 
+def queued_receipt_text(query: str) -> str:
+    """同時実行の上限に当たった依頼の受付文（順番待ち・quota はまだ使っていない）。"""
+    return (
+        f"🔎 「{query}」の動画分析は順番待ちです。"
+        "始まり次第分析し、終わったらこの会話にお届けします。"
+    )
+
+
+def busy_text(query: str) -> str:
+    """待ち行列も満杯のときの文（分析は始めていない＝quota は使っていない）。"""
+    return (
+        f"🔎 「{query}」の動画分析は、いま混み合っています。"
+        "まだ始めていない（分析の回数も使っていない）ので、数分後にもう一度依頼してください。"
+    )
+
+
 def in_progress_text(query: str, *, same_conversation: bool) -> str:
     where = "この会話" if same_conversation else "最初にご依頼いただいた会話"
     return f"🔎 「{query}」はまだ分析中です。終わったら{where}にお届けします。"
@@ -294,12 +325,33 @@ def error_text(query: str, error: BaseException) -> str:
     return f"🔎 「{query}」の動画分析: {user_message_for_error(error)}"
 
 
+# skill の _slack_summary が report_url 無しのときに出す行。直接投稿ではファイルを添付しないので
+# 事実と違う案内になる。キャッシュ済みの結果からレポートを作り直す経路（Gemini・quota を使わない）
+# があるので、再依頼を案内する。
+_ATTACHED_REPORT_LINE = "📄 詳細は添付の HTML レポートをご覧ください"
+_REPORT_PUBLISH_FAILED_LINE = (
+    "📄 レポートの発行に失敗しました。同じ内容でもう一度依頼すると、課金なしで再発行します"
+)
+
+
 def completion_text(output: Any, query: str) -> str:
     """完了投稿の本文。Slack API へ直接出すので `**語**` を mrkdwn の `*語*` に直す。"""
     summary = getattr(output, "slack_summary", "")
     if not isinstance(summary, str) or not summary.strip():
         summary = f"🔎 「{query}」の動画分析が完了しました。"
+    if not getattr(output, "report_url", None):
+        summary = summary.replace(_ATTACHED_REPORT_LINE, _REPORT_PUBLISH_FAILED_LINE)
     return markdown_bold_to_mrkdwn(summary)
+
+
+def slack_escape(text: str) -> str:
+    """Slack の制御文字（& < >）をエスケープする（直接投稿の直前に 1 回だけ掛ける）。
+
+    本文には第三者のキャプションを読んだ Gemini の出力が入るため、``<!channel>``・``<@U…>``・
+    ``<https://…|偽の表示名>`` がそのまま描画されないようにする。URL は裸のまま残る
+    （Slack が自動でリンクにする）。
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 # ── Slack 投稿（既存の直接配信と同じ SlackClient.from_env(timeout_seconds=...)）──────
@@ -319,7 +371,7 @@ async def _post_once(
     result = await asyncio.wait_for(
         slack.post_message(
             channel=destination.channel_id,
-            text=text,
+            text=slack_escape(text),
             request_id=request_id,
             thread_ts=destination.thread_ts,
         ),
@@ -328,8 +380,34 @@ async def _post_once(
     return bool(getattr(result, "ok", False))
 
 
-def post_to_origin(text: str, destination: Destination, *, request_id: str) -> bool:
-    """依頼元の会話へ投稿する（ジョブの thread から呼ぶ・新しい event loop で 1 回だけ再試行）。"""
+async def _post_to_user_dm(text: str, *, user_id: str, request_id: str, timeout_s: int) -> bool:
+    """検証済み slack_user_id の DM へ退避投稿する（omiyage_report の本人 DM 退避と同じ型）。"""
+    slack = _slack_client(timeout_s)
+    channel = await asyncio.wait_for(slack.open_dm(user_id, request_id), timeout=timeout_s + 1)
+    if not isinstance(channel, str) or not channel:
+        return False
+    return await _post_once(
+        text,
+        Destination(channel_id=channel, thread_ts=None),
+        request_id=request_id,
+        timeout_s=timeout_s,
+    )
+
+
+def post_to_origin(
+    text: str,
+    destination: Destination,
+    *,
+    request_id: str,
+    fallback_user_id: str | None = None,
+) -> bool:
+    """依頼元の会話へ投稿する（ジョブの thread から呼ぶ・新しい event loop で 1 回だけ再試行）。
+
+    - ok=False や接続エラーのときだけ再試行する。タイムアウト系（``TimeoutError``。aiohttp の
+      ServerTimeoutError も含む）は Slack 側で届いている可能性があるので、再試行も退避もしない
+      （完了投稿が 2 通になるのを避ける）。
+    - 2 回とも届かなければ、``fallback_user_id``（署名検証済みの slack_user_id）の DM へ退避する。
+    """
     for attempt in range(1, _POST_ATTEMPTS + 1):
         try:
             if asyncio.run(
@@ -345,6 +423,14 @@ def post_to_origin(text: str, destination: Destination, *, request_id: str) -> b
             logger.warning(
                 "video_algorithm_detach_post_not_ok", request_id=request_id, attempt=attempt
             )
+        except TimeoutError:
+            logger.warning(
+                "video_algorithm_detach_post_uncertain",
+                request_id=request_id,
+                attempt=attempt,
+                error="TimeoutError",
+            )
+            return False
         except Exception as exc:
             logger.warning(
                 "video_algorithm_detach_post_failed",
@@ -354,7 +440,23 @@ def post_to_origin(text: str, destination: Destination, *, request_id: str) -> b
             )
         if attempt < _POST_ATTEMPTS:
             threading.Event().wait(_POST_RETRY_WAIT_S)
-    return False
+    if not fallback_user_id:
+        return False
+    try:
+        ok = asyncio.run(
+            _post_to_user_dm(
+                text, user_id=fallback_user_id, request_id=request_id, timeout_s=_POST_TIMEOUT_S
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "video_algorithm_detach_dm_fallback_failed",
+            request_id=request_id,
+            error=type(exc).__name__,
+        )
+        return False
+    logger.info("video_algorithm_detach_dm_fallback", request_id=request_id, ok=ok)
+    return ok
 
 
 # ── ジョブと登録簿 ─────────────────────────────────────────────────────────
@@ -363,8 +465,24 @@ def post_to_origin(text: str, destination: Destination, *, request_id: str) -> b
 DetachedDone = Callable[[Any, BaseException | None, bool], None]
 
 
+class DetachInterruptedError(RuntimeError):
+    """終了処理（closing）に入ったため、順番待ちのジョブを始めずに終えた（skill.run は未実行）。"""
+
+    def __init__(self) -> None:
+        super().__init__("VIDEO_ALGORITHM_INTERRUPTED: shutting down before the job started")
+
+
+# detach() の結果
+DETACH_DONE = "done"  # 既に完了していた（呼び出し側が結果を扱う）
+DETACH_DETACHED = "detached"  # 切り離した（完了時にジョブの thread が届ける）
+DETACH_INTERRUPTED = "interrupted"  # 終了処理中に切り離した（受付文の代わりに中断文を返す）
+
+
 class DetachedJob:
-    """1 回の video_algorithm 実行。状態の出入りはすべて lock の下で行う。"""
+    """1 回の video_algorithm 実行。状態の出入りはすべて lock の下で行う。
+
+    lock の順序は「ジョブ → 登録簿」。登録簿の lock を持ったままジョブの lock は取らない。
+    """
 
     def __init__(
         self,
@@ -387,6 +505,7 @@ class DetachedJob:
         self._target = target
         self._on_detached_done = on_detached_done
         self._lock = threading.Lock()
+        self._running = False
         self._done = False
         self._detached = False
         self._interrupted = False
@@ -406,6 +525,12 @@ class DetachedJob:
         with self._lock:
             return self._detached
 
+    @property
+    def queued(self) -> bool:
+        """まだ順番待ち（skill.run を始めていない）なら True。"""
+        with self._lock:
+            return not self._running and not self._done
+
     def start(self) -> None:
         thread = threading.Thread(
             target=self._run,
@@ -418,17 +543,23 @@ class DetachedJob:
         result: Any = None
         error: BaseException | None = None
         try:
-            result = self._target()
-        except BaseException as exc:  # thread の外へ漏らさず、結果として扱う
-            error = exc
-        with self._lock:
-            self._done = True
-            self._result = result
-            self._error = error
-            detached = self._detached
-            wakers = list(self._wakers)
-            self._wakers.clear()
-        try:
+            # 同時実行の枠が空くまで待つ（順番待ち）。終了処理に入ったら始めずに終える。
+            if self._registry.acquire_slot(self):
+                with self._lock:
+                    self._running = True
+                try:
+                    result = self._target()
+                except BaseException as exc:  # thread の外へ漏らさず、結果として扱う
+                    error = exc
+            else:
+                error = DetachInterruptedError()
+            with self._lock:
+                self._done = True
+                self._result = result
+                self._error = error
+                detached = self._detached
+                wakers = list(self._wakers)
+                self._wakers.clear()
             if detached:
                 self._finish_detached()
             else:
@@ -452,16 +583,22 @@ class DetachedJob:
                 return
         wake()
 
-    def detach(self) -> bool:
+    def detach(self) -> str:
         """切り離す。
 
-        まだ終わっていなければ True（完了時に thread が届ける）。終わっていれば False。
+        - まだ終わっていなければ ``DETACH_DETACHED``（完了時に thread が届ける）。
+        - 終了処理（closing）に入っていれば ``DETACH_INTERRUPTED``。中断扱いにするので、完了しても
+          投稿はしない（後始末と usage 記録だけ行う）。呼び出し側は受付文の代わりに中断文を返す。
+        - 既に終わっていれば ``DETACH_DONE``。
         """
         with self._lock:
             if self._done:
-                return False
+                return DETACH_DONE
             self._detached = True
-            return True
+            if self._registry.closing and not self._interrupted:
+                self._interrupted = True
+                return DETACH_INTERRUPTED
+            return DETACH_DETACHED
 
     def outcome(self) -> Any:
         """完了済みジョブの結果を返す（失敗なら skill の例外をそのまま送出する）。"""
@@ -481,6 +618,17 @@ class DetachedJob:
         thread = threading.Thread(
             target=self._finish_detached,
             name=f"{self.tool}-detach-deliver-{self.request_id}",
+            daemon=True,
+        )
+        thread.start()
+
+    def post_interrupted_in_background(self) -> None:
+        """終了処理中に打ち切られた（返す相手が居ない）ときに、中断文を別 thread で投稿する。"""
+        thread = threading.Thread(
+            target=post_to_origin,
+            args=(interrupted_text(self.query), self.destination),
+            kwargs={"request_id": self.request_id},
+            name=f"{self.tool}-detach-interrupt-{self.request_id}",
             daemon=True,
         )
         thread.start()
@@ -512,19 +660,55 @@ class DetachedJob:
 
 
 class DetachedJobRegistry:
-    """プロセス内の in-flight 登録簿（キー＝検証済み slack_user_id＋正規化 query）。"""
+    """プロセス内の in-flight 登録簿（キー＝検証済み slack_user_id＋正規化 query）。
+
+    実行中（枠を持つ）と順番待ちの両方を載せる。二重依頼の判定・同時実行の上限・待ち行列の上限・
+    終了処理（closing）の印・古い項目の掃除をここで行う。
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._cond = threading.Condition(self._lock)
         self._jobs: dict[str, DetachedJob] = {}
+        self._waiting: deque[DetachedJob] = deque()
+        # 枠を持っているジョブ → 実行開始の monotonic 時刻（寿命の判定に使う）
+        self._running: dict[DetachedJob, float] = {}
+        self._limit = DEFAULT_MAX_BACKGROUND
+        self._closing = False
+
+    @property
+    def closing(self) -> bool:
+        with self._lock:
+            return self._closing
 
     def get(self, key: str) -> DetachedJob | None:
         with self._lock:
+            self._sweep_stale_locked()
             return self._jobs.get(key)
 
     def active_count(self) -> int:
         with self._lock:
             return len(self._jobs)
+
+    def queued_count(self) -> int:
+        with self._lock:
+            return len(self._waiting)
+
+    def _sweep_stale_locked(self) -> None:
+        """実行開始から STALE_AFTER_S を超えた項目を外して枠を返す（skill.run が戻らない保険）。"""
+        now = time.monotonic()
+        stale = [job for job, began in self._running.items() if now - began > STALE_AFTER_S]
+        for job in stale:
+            del self._running[job]
+            if self._jobs.get(job.key) is job:
+                del self._jobs[job.key]
+            logger.warning(
+                "video_algorithm_detach_stale_swept",
+                request_id=job.request_id,
+                stale_after_s=STALE_AFTER_S,
+            )
+        if stale:
+            self._cond.notify_all()
 
     def start(
         self,
@@ -537,17 +721,23 @@ class DetachedJobRegistry:
         destination: Destination,
         target: Callable[[], Any],
         on_detached_done: DetachedDone,
+        max_queued: int = DEFAULT_MAX_QUEUED,
     ) -> tuple[DetachedJob | None, str]:
-        """登録して開始する。
+        """登録して開始する（枠が空いていなければ、ジョブの thread の中で順番を待つ）。
 
-        返り値は ``(job, "started")`` / ``(既存 job, "duplicate")`` / ``(None, "capacity")``。
+        返り値は ``(job, "started")`` / ``(既存 job, "duplicate")`` /
+        ``(None, "busy")``（実行中＋待ちが上限まで埋まっている）/
+        ``(None, "closing")``（終了処理中）。
         """
         with self._lock:
+            if self._closing:
+                return None, "closing"
+            self._sweep_stale_locked()
             existing = self._jobs.get(key)
             if existing is not None:
                 return existing, "duplicate"
-            if len(self._jobs) >= max_background:
-                return None, "capacity"
+            if len(self._jobs) >= max(0, max_background) + max(0, max_queued):
+                return None, "busy"
             job = DetachedJob(
                 registry=self,
                 key=key,
@@ -559,6 +749,8 @@ class DetachedJobRegistry:
                 on_detached_done=on_detached_done,
             )
             self._jobs[key] = job
+            self._waiting.append(job)
+            self._limit = max_background
         try:
             job.start()
         except BaseException:
@@ -566,14 +758,45 @@ class DetachedJobRegistry:
             raise
         return job, "started"
 
+    def acquire_slot(self, job: DetachedJob) -> bool:
+        """ジョブの thread から呼ぶ。
+
+        先頭の順番が来て枠が空いたら True、終了処理に入ったら False。
+        """
+        with self._cond:
+            while True:
+                if self._closing or job not in self._waiting:
+                    if job in self._waiting:
+                        self._waiting.remove(job)
+                    self._cond.notify_all()
+                    return False
+                if self._waiting[0] is job and len(self._running) < self._limit:
+                    self._waiting.popleft()
+                    self._running[job] = time.monotonic()
+                    self._cond.notify_all()
+                    return True
+                # 掃除（寿命切れ）でも枠が空くので、たまに起きて確かめる。
+                self._cond.wait(timeout=5.0)
+                self._sweep_stale_locked()
+
     def release(self, job: DetachedJob) -> None:
-        with self._lock:
+        with self._cond:
+            self._running.pop(job, None)
+            if job in self._waiting:
+                self._waiting.remove(job)
             if self._jobs.get(job.key) is job:
                 del self._jobs[job.key]
+            self._cond.notify_all()
 
     def interrupt_all(self) -> list[DetachedJob]:
-        with self._lock:
+        """終了処理に入る印を立て、切り離し済みで未完了のジョブを中断扱いにして返す。
+
+        印を立てた後の新しい依頼・切り離しは中断文を返し、順番待ちのジョブは始めずに終わる。
+        """
+        with self._cond:
+            self._closing = True
             jobs = list(self._jobs.values())
+            self._cond.notify_all()
         return [job for job in jobs if job.mark_interrupted()]
 
 
@@ -622,11 +845,16 @@ async def notify_interrupted(
 
 __all__ = [
     "DETACHABLE_TOOLS",
+    "DETACH_DETACHED",
+    "DETACH_DONE",
+    "DETACH_INTERRUPTED",
     "REGISTRY",
     "Destination",
+    "DetachInterruptedError",
     "DetachPolicy",
     "DetachedJob",
     "DetachedJobRegistry",
+    "busy_text",
     "completion_text",
     "decide",
     "destination_from_claim",
@@ -639,6 +867,8 @@ __all__ = [
     "load_policy",
     "notify_interrupted",
     "post_to_origin",
+    "queued_receipt_text",
     "receipt_text",
+    "slack_escape",
     "user_message_for_error",
 ]

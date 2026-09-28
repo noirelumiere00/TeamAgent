@@ -544,39 +544,43 @@ variable "video_algorithm_result_cache_enabled" {
 # ============================================================
 # mcp が 30 秒で受付を返し、完了時に依頼元の会話へ直接届ける（OpenClaw の約 6 分の打ち切り対策）。
 # 段階公開は TD の env 差し替えで進める（第 1 段階＝小俣さん本人の DM だけ）。
-# ⚠️ TD 差し替えで ON にしたら、実運用の tfvars にも同じ値を入れること（apply で OFF に戻さない）。
+# ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本・
+#    ~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記する。
+#    terraform_runtime_guard.sh の live→tfvars 導出はこの 6 変数を列挙していないので、guard 経由の
+#    apply（次の mcp便など）で既定（OFF・allowlist 空・LEASE 1800）に黙って戻る。
+#    有効化の手順は docs/runbooks/video_algorithm_detach.md。
 variable "use_video_algorithm_detach" {
-  description = "動画分析の切り離し（USE_VIDEO_ALGORITHM_DETACH）。既定 0＝同期のまま（今と同じ）。"
+  description = "動画分析の切り離し（USE_VIDEO_ALGORITHM_DETACH）。既定 0＝同期のまま（今と同じ）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = "0"
 }
 
 variable "video_algorithm_detach_after_s" {
-  description = "受付を返すまでの待ち秒（VIDEO_ALGORITHM_DETACH_AFTER_S）。アプリ側で 5〜240 に丸める。"
+  description = "受付を返すまでの待ち秒（VIDEO_ALGORITHM_DETACH_AFTER_S）。アプリ側で 5〜240 に丸める。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = "30"
 }
 
 variable "video_algorithm_detach_allowed_emails" {
-  description = "切り離しを使う人（VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。"
+  description = "切り離しを使う人（VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = ""
 }
 
 variable "video_algorithm_detach_dm_only" {
-  description = "切り離しを 1 対 1 DM だけに限る（VIDEO_ALGORITHM_DETACH_DM_ONLY）。既定 1。"
+  description = "切り離しを 1 対 1 DM だけに限る（VIDEO_ALGORITHM_DETACH_DM_ONLY）。既定 1。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = "1"
 }
 
 variable "video_algorithm_max_background" {
-  description = "切り離した動画分析の同時実行上限（VIDEO_ALGORITHM_MAX_BACKGROUND）。超えたら同期のまま。"
+  description = "切り離した動画分析の同時実行上限（VIDEO_ALGORITHM_MAX_BACKGROUND）。超えた分は順番待ち（最大 10 件・満杯なら「混み合っています」）。0 なら切り離さない。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = "2"
 }
 
 variable "video_algorithm_cache_lease_seconds" {
-  description = "動画分析の処理中リース秒（VIDEO_ALGORITHM_CACHE_LEASE_SECONDS）。既定 1800＝コード既定と同じ。切り離しの第 1 段階で 600 に下げる想定。"
+  description = "動画分析の処理中リース秒（VIDEO_ALGORITHM_CACHE_LEASE_SECONDS）。既定 1800＝コード既定と同じ。切り離しの第 1 段階で 600 に下げる想定。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため（手順: docs/runbooks/video_algorithm_detach.md）。"
   type        = string
   default     = "1800"
 }

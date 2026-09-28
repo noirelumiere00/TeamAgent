@@ -90,10 +90,18 @@ def _resolver_for(email: str) -> Callable[[str], Any]:
 class _FakeSlack:
     """SlackClient.post_message の代わり。失敗回数を指定すると最初の n 回は例外（本番の一過性障害）。"""
 
-    def __init__(self, fail_first: int = 0) -> None:
+    def __init__(self, fail_first: int = 0, timeout: bool = False) -> None:
         self.posts: list[dict[str, Any]] = []
         self.fail_first = fail_first
+        self.timeout = timeout
+        self.attempts = 0
+        self.opened: list[str] = []
         self.lock = threading.Lock()
+
+    async def open_dm(self, user_id: str, request_id: str) -> str | None:
+        with self.lock:
+            self.opened.append(user_id)
+        return "D0FALLBACK01"
 
     async def post_message(
         self,
@@ -104,6 +112,10 @@ class _FakeSlack:
         blocks: list[dict[str, Any]] | None = None,
     ) -> SlackPostResult:
         with self.lock:
+            self.attempts += 1
+            if self.timeout:
+                # aiohttp の ServerTimeoutError は TimeoutError の子（届いたかは分からない）
+                raise TimeoutError("slack read timeout")
             if self.fail_first > 0:
                 self.fail_first -= 1
                 raise ConnectionError("slack temporarily unavailable")
@@ -131,6 +143,7 @@ class _GateSkill(BaseSkill[VideoAlgorithmInput, _Out]):
         self.runs = 0
         self.cleanups = 0
         self.error: BaseException | None = None
+        self.summary: str | None = None
 
     def run(self, input: VideoAlgorithmInput, ctx: SkillContext) -> _Out:
         self.runs += 1
@@ -139,6 +152,8 @@ class _GateSkill(BaseSkill[VideoAlgorithmInput, _Out]):
             assert self.release.wait(10), "test forgot to release the skill"
         if self.error is not None:
             raise self.error
+        if self.summary is not None:
+            return _Out(query=input.query, slack_summary=self.summary)
         return _Out(
             query=input.query,
             slack_summary=(
@@ -462,17 +477,94 @@ async def test_legacy_mode_without_verified_caller_stays_synchronous(
     assert "status" not in out and slack.posts == []
 
 
-async def test_capacity_full_falls_back_to_synchronous(
+async def test_capacity_full_queues_and_returns_within_detach_after_s(
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
+    """上限に当たっても同期に戻さない（戻すと 360 秒の打ち切りで結果が消え、quota だけ減る）。
+
+    2 本目も長く止まる偽物にして、同期に戻ったら返りが遅れる（＝打ち切られる）ことで検出する。
+    """
     monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy(max_background=1))
     skill = _GateSkill()
     first = await _call(_spec(skill), {"query": "遅い 新宿ランチ"})
     assert first["status"] == "running"
-    second = await _call(_spec(skill), {"query": "渋谷カフェ"})  # 別 KW・上限超え＝同期
-    assert "status" not in second and second["query"] == "渋谷カフェ"
+
+    started = time.monotonic()
+    second = await _call(_spec(skill), {"query": "遅い 渋谷カフェ"})  # 別 KW・上限超え
+    assert time.monotonic() - started < 3  # detach_after_s（0.05 秒）程度で返る
+    assert second["status"] == "running"
+    assert "順番待ちです" in second["message"]
+    assert "終わったらこの会話にお届けします" in second["message"]
+    _assert_no_internal_words(json.dumps(second, ensure_ascii=False))
+    await asyncio.sleep(0.1)
+    assert skill.runs == 1  # 2 本目は始まっていない＝quota（skill.run の中で消費）も使っていない
+    assert detached_jobs.REGISTRY.queued_count() == 1
+
     skill.release.set()
-    await _eventually(lambda: len(slack.posts) == 1 and len(usage) == 2)
+    await _eventually(lambda: len(slack.posts) == 2 and len(usage) == 2)
+    assert skill.runs == 2 and skill.cleanups == 2
+    assert {p["channel"] for p in slack.posts} == {DM}
+    assert detached_jobs.REGISTRY.active_count() == 0
+
+
+async def test_queue_full_says_busy_before_using_quota(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """待ち行列も満杯なら「混み合っています」を返し、skill.run（＝quota の消費）を呼ばない。"""
+    monkeypatch.setattr(
+        detached_jobs, "load_policy", lambda: _policy(max_background=1, max_queued=1)
+    )
+    skill = _GateSkill()
+    assert (await _call(_spec(skill), {"query": "遅い A"}))["status"] == "running"
+    assert "順番待ち" in (await _call(_spec(skill), {"query": "遅い B"}))["message"]
+
+    started = time.monotonic()
+    busy = await _call(_spec(skill), {"query": "遅い C"})
+    assert time.monotonic() - started < 3
+    assert busy["status"] == "busy"
+    assert "混み合っています" in busy["message"] and "数分後にもう一度" in busy["message"]
+    _assert_no_internal_words(json.dumps(busy, ensure_ascii=False))
+
+    skill.release.set()
+    await _eventually(lambda: len(slack.posts) == 2 and len(usage) == 2)
+    await asyncio.sleep(0.05)
+    assert skill.runs == 2  # C は一度も走っていない
+
+
+def test_stale_entries_are_swept_on_next_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """skill.run が戻らなくなっても、寿命を超えた項目は次の依頼で外れて枠が返る。"""
+    monkeypatch.setattr(detached_jobs, "STALE_AFTER_S", 0.05)
+    reg = detached_jobs.DetachedJobRegistry()
+    stuck = threading.Event()
+    second_ran = threading.Event()
+    dest = detached_jobs.Destination(channel_id=DM, thread_ts=None)
+
+    def _start(key: str, target: Callable[[], Any]) -> tuple[Any, str]:
+        return reg.start(
+            key=key,
+            max_background=1,
+            max_queued=0,
+            tool=TOOL,
+            query=key,
+            request_id=key,
+            destination=dest,
+            target=target,
+            on_detached_done=lambda *a: None,
+        )
+
+    first, state = _start("k1", lambda: stuck.wait(10))
+    assert state == "started" and first is not None
+    deadline = time.monotonic() + 5
+    while first.queued and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not first.queued
+    time.sleep(0.1)  # 寿命（0.05 秒）を超える
+
+    assert reg.get("k1") is None  # 掃除された（「まだ分析中です」を返し続けない）
+    _second, state = _start("k2", second_ran.set)
+    assert state == "started"
+    assert second_ran.wait(5)  # 枠が返っている（止まったジョブの解放を待たずに始まる）
+    stuck.set()
 
 
 # ── 再デプロイ（プロセス終了）────────────────────────────────────────────────
@@ -804,3 +896,225 @@ def test_inflight_key_ignores_case_width_and_spacing() -> None:
     )
     assert detached_jobs.inflight_key(USER_ID, "ABC") == detached_jobs.inflight_key(USER_ID, "abc")
     assert detached_jobs.inflight_key(USER_ID, "a") != detached_jobs.inflight_key("U999", "a")
+
+
+# ── 終了処理の窓（closing の印）────────────────────────────────────────────────
+
+
+async def test_new_request_after_shutdown_notice_gets_interrupted_text(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """中断通知の後に届いた依頼へ「お届けします」を約束しない（skill も quota も使わない）。"""
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
+    assert await detached_jobs.notify_interrupted() == 0  # 印だけ立つ
+
+    def _must_not_start(self: detached_jobs.DetachedJob) -> None:
+        raise AssertionError("no job thread may start after the shutdown notice")
+
+    monkeypatch.setattr(detached_jobs.DetachedJob, "start", _must_not_start)
+    skill = _GateSkill()
+    out = await _call(_spec(skill), {"query": "遅い 新宿ランチ"})
+    assert out["status"] == "interrupted"
+    assert "システム更新で中断されました" in out["message"]
+    _assert_no_internal_words(json.dumps(out, ensure_ascii=False))
+    assert skill.runs == 0 and usage == [] and slack.posts == []
+
+
+async def test_job_detaching_after_shutdown_notice_returns_interrupted_not_receipt(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """SIGTERM の直前に始まってまだ切り離していないジョブは、受付文の代わりに中断文を返す。"""
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy(detach_after_s=0.3))
+    skill = _GateSkill()
+    task = asyncio.create_task(_call(_spec(skill), {"query": "遅い 新宿ランチ"}))
+    await _eventually(skill.started.is_set)
+    assert await detached_jobs.notify_interrupted() == 0  # まだ切り離していない＝通知の対象外
+    out = await task
+    assert out["status"] == "interrupted"
+    assert "システム更新で中断されました" in out["message"]
+    assert "お届けします" not in out["message"]
+
+    # 完了しても矛盾する投稿はしない。後始末と usage 記録は 1 回ずつ行う。
+    skill.release.set()
+    await _eventually(lambda: len(usage) == 1)
+    await asyncio.sleep(0.05)
+    assert slack.posts == [] and skill.cleanups == 1
+
+
+async def test_queued_job_is_interrupted_and_never_runs(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """順番待ちのまま終了処理に入ったジョブは始めない（quota を使わない）。中断は 1 通だけ届く。"""
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy(max_background=1))
+    skill = _GateSkill()
+    await _call(_spec(skill), {"query": "遅い A"})
+    queued = await _call(_spec(skill), {"query": "遅い B"})
+    assert "順番待ち" in queued["message"]
+
+    assert await detached_jobs.notify_interrupted() == 2
+    skill.release.set()
+    await _eventually(lambda: len(usage) == 1 and detached_jobs.REGISTRY.active_count() == 0)
+    await asyncio.sleep(0.05)
+    assert skill.runs == 1  # B は走っていない
+    assert len(slack.posts) == 2  # A と B の中断通知だけ（完了投稿は出ない）
+    assert all("システム更新で中断されました" in p["text"] for p in slack.posts)
+    assert skill.cleanups == 1
+
+
+async def test_uvicorn_shutdown_stops_listening_before_notifying(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    """通知の前に listen を閉じ、新しい接続を止める。"""
+    import uvicorn
+
+    module = _load_http_server_module()
+    events: list[str] = []
+
+    class _Listener:
+        def close(self) -> None:
+            events.append("close")
+
+    async def _notify(**kwargs: Any) -> int:
+        events.append("notify")
+        return 0
+
+    async def _base_shutdown(self: Any, sockets: Any = None) -> None:
+        events.append("base")
+
+    monkeypatch.setattr(module, "notify_interrupted", _notify)
+    monkeypatch.setattr(uvicorn.Server, "shutdown", _base_shutdown)
+    srv = module._DetachAwareServer(uvicorn.Config(app=lambda *a: None))
+    srv.servers = [_Listener()]
+    await srv.shutdown()
+    assert events == ["close", "notify", "base"]
+
+
+# ── 打ち切りと完了の競合 ─────────────────────────────────────────────────────
+
+
+async def test_cancel_after_job_already_finished_still_delivers_once(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    """完了済みで waker が走る前に打ち切られても、結果・後始末・usage が黙って消えない。"""
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy(detach_after_s=30.0))
+    # waker が届かない（完了と打ち切りが競合した）状況を作る。
+    monkeypatch.setattr(detached_jobs.DetachedJob, "add_waker", lambda self, wake: None)
+    skill = _GateSkill()
+    task = asyncio.create_task(_call(_spec(skill), {"query": "新宿ランチ"}))
+    await _eventually(lambda: skill.runs == 1)
+    await _eventually(lambda: detached_jobs.REGISTRY.active_count() == 0)  # ジョブは完了済み
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await _eventually(lambda: len(slack.posts) == 1 and len(usage) == 1)
+    await asyncio.sleep(0.05)
+    assert len(slack.posts) == 1 and len(usage) == 1 and skill.cleanups == 1
+    assert slack.posts[0]["channel"] == DM
+    assert usage[0]["status"] == "ok"
+
+
+# ── 完了投稿の失敗 ─────────────────────────────────────────────────────────
+
+
+async def test_completion_falls_back_to_requesters_dm_when_origin_fails(
+    monkeypatch: pytest.MonkeyPatch, usage: list[dict[str, Any]]
+) -> None:
+    """依頼元へ 2 回とも届かなければ、検証済み slack_user_id の DM へ退避する。"""
+    fake = _FakeSlack(fail_first=2)
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: fake)
+    monkeypatch.setattr(detached_jobs, "_POST_RETRY_WAIT_S", 0.0)
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
+    skill = _GateSkill()
+    await _call(
+        _spec(skill),
+        {"query": "遅い 新宿ランチ"},
+        raw={"slack_user_id": "UXSPOOFED1"},  # 申告値ではなく検証済み claim の人へ退避する
+    )
+    skill.release.set()
+    await _eventually(lambda: len(fake.posts) == 1 and len(usage) == 1)
+    assert fake.opened == [USER_ID]
+    assert fake.posts[0]["channel"] == "D0FALLBACK01"
+    assert fake.posts[0]["thread_ts"] is None
+    assert "VSEO動画アルゴリズム分析" in fake.posts[0]["text"]
+
+
+def test_timeout_is_not_retried_to_avoid_double_posts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """タイムアウトは届いている可能性があるので、再試行も DM 退避もしない。"""
+    fake = _FakeSlack(timeout=True)
+    monkeypatch.setattr(detached_jobs, "_slack_client", lambda timeout_seconds: fake)
+    monkeypatch.setattr(detached_jobs, "_POST_RETRY_WAIT_S", 0.0)
+    dest = detached_jobs.Destination(channel_id=DM, thread_ts=None)
+    assert (
+        detached_jobs.post_to_origin("hi", dest, request_id="r", fallback_user_id=USER_ID) is False
+    )
+    assert fake.attempts == 1 and fake.opened == []
+
+
+# ── 本文（レポート無し・Slack の制御文字）────────────────────────────────────
+
+
+def test_missing_report_url_does_not_promise_an_attachment() -> None:
+    attached = "📄 詳細は添付の HTML レポートをご覧ください"
+    summary = f"🔎 **VSEO動画アルゴリズム分析** 完了「新宿」\n{attached}\n_概算_"
+
+    class _NoReport(BaseModel):
+        slack_summary: str
+        report_url: str | None = None
+
+    text = detached_jobs.completion_text(_NoReport(slack_summary=summary), "新宿")
+    assert attached not in text
+    assert "レポートの発行に失敗しました" in text
+    assert "同じ内容でもう一度依頼すると、課金なしで再発行します" in text
+    assert text.startswith("🔎 *VSEO動画アルゴリズム分析*")
+
+
+async def test_slack_control_sequences_are_escaped_but_urls_stay_bare(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    """第三者のキャプション由来の `<!channel>`・`<@U…>`・偽装リンクをメンション/リンクにしない。"""
+    monkeypatch.setattr(detached_jobs, "load_policy", lambda: _policy())
+    skill = _GateSkill()
+    skill.summary = (
+        "🔎 **分析** 完了 <!channel> <@U0EVIL0001> <https://evil.invalid|公式サイト> A&B\n"
+        "📄 詳細レポート（7日有効）: https://example.invalid/r/abc"
+    )
+    await _call(_spec(skill), {"query": "遅い 新宿ランチ"})
+    skill.release.set()
+    await _eventually(lambda: len(slack.posts) == 1)
+    text = slack.posts[0]["text"]
+    assert "<!" not in text and "<@" not in text and "<http" not in text
+    assert "&lt;!channel&gt;" in text and "&lt;@U0EVIL0001&gt;" in text
+    assert "A&amp;B" in text
+    assert "https://example.invalid/r/abc" in text  # URL は裸のまま
+    assert text.startswith("🔎 *分析* 完了")
+
+
+# ── 起動の配線 ─────────────────────────────────────────────────────────────
+
+
+def test_main_runs_the_detach_aware_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """main() が uvicorn.run（入口で通知しない）ではなく _DetachAwareServer を使うこと。"""
+    import uvicorn
+
+    import teamagent.observability.logging_config as logging_config
+
+    module = _load_http_server_module()
+    ran: list[type] = []
+
+    def _run(self: Any, sockets: Any = None) -> None:
+        ran.append(type(self))
+        self.started = True
+
+    def _uvicorn_run(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("main() must not use uvicorn.run")
+
+    monkeypatch.setattr(logging_config, "configure_logging", lambda: None)
+    monkeypatch.setattr(module, "require_runtime_startup", lambda *a, **k: None)
+    monkeypatch.setattr(module.CallerClaimVerifier, "from_env", classmethod(lambda cls: None))
+    monkeypatch.setattr(module, "build_app", lambda **kwargs: object())
+    monkeypatch.setattr(uvicorn.Server, "run", _run)
+    monkeypatch.setattr(uvicorn, "run", _uvicorn_run)
+    monkeypatch.setenv("TEAMAGENT_MCP_BEARER", "x" * 32)
+    module.main()
+    assert ran == [module._DetachAwareServer]

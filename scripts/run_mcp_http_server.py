@@ -105,9 +105,18 @@ class _DetachAwareServer(uvicorn.Server):
     （timeout_graceful_shutdown 未設定では無期限）。OpenClaw の SSE 接続が開いたままだと
     lifespan の終了処理に届く前に ECS の stopTimeout（30 秒）で SIGKILL されうるため、
     shutdown の入口で先に送る。接続の待ち方そのものは変えない。
+
+    通知の前に listen を閉じて新しい接続を止める（基底の shutdown の冒頭と同じ処理。
+    close は冪等なので基底で 2 回目が走っても害はない）。通知は登録簿に closing の印も立てるので、
+    既存の接続で届いた依頼にも以後は「お届けします」を約束しない。
     """
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        # servers は startup で作られる（起動前の shutdown では未設定）。
+        for server in getattr(self, "servers", []):
+            server.close()
+        for sock in sockets or []:
+            sock.close()
         await notify_detached_jobs_interrupted()
         await super().shutdown(sockets=sockets)
 

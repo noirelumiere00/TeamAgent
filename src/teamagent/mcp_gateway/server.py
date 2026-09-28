@@ -706,15 +706,21 @@ def _maybe_redirect_to_connect(
     return name, spec, skill_args
 
 
-def _detach_response(query: str, text: str) -> list[TextContent]:
-    """切り離し中・二重依頼の返答。内部語（job_id・コード名）は載せない。"""
-    payload = {"status": "running", "query": query, "message": text, "slack_summary": text}
+def _detach_response(query: str, text: str, *, status: str = "running") -> list[TextContent]:
+    """切り離し中・二重依頼・順番待ち・混雑・中断の返答。内部語（job_id・コード名）は載せない。
+
+    status は running（受付・順番待ち・二重依頼）/ busy（混み合っていて始めていない）/
+    interrupted（システム更新で中断）。
+    """
+    payload = {"status": status, "query": query, "message": text, "slack_summary": text}
     return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
 
 
-async def _wait_or_detach(job: detached_jobs.DetachedJob, timeout_s: float) -> bool:
-    """ジョブの完了を最大 ``timeout_s`` 秒待つ。完了なら True、切り離したら False。
+async def _wait_or_detach(job: detached_jobs.DetachedJob, timeout_s: float) -> str:
+    """ジョブの完了を最大 ``timeout_s`` 秒待つ。
 
+    返り値は ``DETACH_DONE``（完了＝同期で返す）/ ``DETACH_DETACHED``（切り離した）/
+    ``DETACH_INTERRUPTED``（終了処理中に切り離した＝受付文の代わりに中断文を返す）。
     待っている間に OpenClaw が打ち切っても（CancelledError）ジョブには伝えない（shield 相当）。
     切り離して完了時に依頼元の会話へ届ける。既に完了していた場合も別 thread で届ける。
     """
@@ -734,12 +740,16 @@ async def _wait_or_detach(job: detached_jobs.DetachedJob, timeout_s: float) -> b
     job.add_waker(_wake)
     try:
         await asyncio.wait_for(waiter, timeout=timeout_s)
-        return True
+        return detached_jobs.DETACH_DONE
     except TimeoutError:
-        return not job.detach()
+        return job.detach()
     except asyncio.CancelledError:
-        if not job.detach():
+        state = job.detach()
+        if state == detached_jobs.DETACH_DONE:
             job.deliver_in_background()
+        elif state == detached_jobs.DETACH_INTERRUPTED:
+            # 終了処理中で、返す相手（OpenClaw の実行）も居ない＝中断をその場で投稿する。
+            job.post_interrupted_in_background()
         logger.info("video_algorithm_detach_caller_cancelled", request_id=job.request_id)
         raise
 
@@ -760,8 +770,22 @@ def _complete_detached(
     user_email: str | None,
     usage_user_id: str | None,
     skill_args: dict[str, Any],
+    fallback_user_id: str | None = None,
 ) -> None:
     """切り離したジョブの完了処理（ジョブの thread で走る）: 投稿 → cleanup_output → usage 記録。"""
+    if isinstance(error, detached_jobs.DetachInterruptedError):
+        # 順番待ちのまま終了処理に入った＝skill.run は走っていない（quota も Gemini も未使用）。
+        # 後始末も usage 記録も無い。中断通知がまだなら（通知の印より先に終わった）ここで送る。
+        logger.warning(
+            "video_algorithm_detach_queued_job_interrupted",
+            request_id=request_id,
+            notified=interrupted,
+        )
+        if not interrupted:
+            detached_jobs.post_to_origin(
+                detached_jobs.interrupted_text(query), destination, request_id=request_id
+            )
+        return
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     delivered = False
     try:
@@ -775,7 +799,9 @@ def _complete_detached(
                 if error is None
                 else detached_jobs.error_text(query, error)
             )
-            delivered = detached_jobs.post_to_origin(text, destination, request_id=request_id)
+            delivered = detached_jobs.post_to_origin(
+                text, destination, request_id=request_id, fallback_user_id=fallback_user_id
+            )
     finally:
         if result is not None:
             try:
@@ -907,7 +933,8 @@ async def dispatch_tool(
         if detach_policy.enabled and verified_caller is not None:
             detach_key = detached_jobs.inflight_key(verified_caller.slack_user_id, detach_query)
             running = detached_jobs.REGISTRY.get(detach_key)
-            if running is not None:
+            # 終了処理中は「お届けします」を約束しない（start が中断文を返す）。
+            if running is not None and not detached_jobs.REGISTRY.closing:
                 # 同じ人・同じ KW の分析が走っている（本数など引数違いも含む）。
                 # quota も Gemini も使わずに返す。
                 logger.info(
@@ -955,6 +982,7 @@ async def dispatch_tool(
         detached_job, start_state = detached_jobs.REGISTRY.start(
             key=detach_key,
             max_background=detach_policy.max_background,
+            max_queued=detach_policy.max_queued,
             tool=name,
             query=detach_query,
             request_id=ctx.request_id,
@@ -973,6 +1001,7 @@ async def dispatch_tool(
                 user_email=metadata.get("user_email"),
                 usage_user_id=usage_user_id,
                 skill_args=skill_args,
+                fallback_user_id=verified_caller.slack_user_id,
             ),
         )
         if start_state == "duplicate" and detached_job is not None:
@@ -987,29 +1016,65 @@ async def dispatch_tool(
                 detached_jobs.in_progress_text(detach_query, same_conversation=same),
             )
         if detached_job is None:
-            # 同時実行の上限。今と同じ同期実行に落とす（quota は skill 側のまま）。
+            # 同期には戻さない（戻すと 360 秒の打ち切りで結果が消え、quota だけ減る）。
+            # skill.run の前なので quota は使っていない。
+            await clear_progress(_progress, request_id=ctx.request_id)
+            if start_state == "closing":
+                logger.warning("video_algorithm_detach_closing", request_id=ctx.request_id)
+                return _detach_response(
+                    detach_query,
+                    detached_jobs.interrupted_text(detach_query),
+                    status="interrupted",
+                )
             logger.warning(
-                "video_algorithm_detach_capacity_full",
+                "video_algorithm_detach_queue_full",
                 request_id=ctx.request_id,
                 max_background=detach_policy.max_background,
+                max_queued=detach_policy.max_queued,
+            )
+            return _detach_response(
+                detach_query, detached_jobs.busy_text(detach_query), status="busy"
             )
     try:
         if detached_job is not None and detach_policy is not None:
-            if not await _wait_or_detach(detached_job, detach_policy.detach_after_s):
+            wait_state = await _wait_or_detach(detached_job, detach_policy.detach_after_s)
+            if wait_state == detached_jobs.DETACH_INTERRUPTED:
+                # 終了処理中＝届けられない約束はしない。完了しても投稿はせず、後始末と記録だけ行う。
+                logger.warning(
+                    "video_algorithm_detach_interrupted_at_detach", request_id=ctx.request_id
+                )
+                return _detach_response(
+                    detach_query,
+                    detached_jobs.interrupted_text(detach_query),
+                    status="interrupted",
+                )
+            if wait_state == detached_jobs.DETACH_DETACHED:
+                queued = detached_job.queued
                 logger.info(
                     "video_algorithm_detached",
                     request_id=ctx.request_id,
                     after_ms=int((time.perf_counter() - _started) * 1000),
                     dm=detached_job.destination.is_dm,
+                    queued=queued,
                 )
                 # 完了時の投稿・cleanup_output・usage 記録はジョブの thread が 1 回だけ行う。
-                return _detach_response(detach_query, detached_jobs.receipt_text(detach_query))
+                return _detach_response(
+                    detach_query,
+                    detached_jobs.queued_receipt_text(detach_query)
+                    if queued
+                    else detached_jobs.receipt_text(detach_query),
+                )
             # 待ち時間内に終わった＝今までどおり同期で返す（失敗なら skill の例外がここで出る）。
             output = detached_job.outcome()
         else:
             # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
             output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
+    except detached_jobs.DetachInterruptedError:
+        # 順番待ちのまま終了処理に入った（skill.run は走っていない＝usage も quota も無し）。
+        return _detach_response(
+            detach_query, detached_jobs.interrupted_text(detach_query), status="interrupted"
+        )
     except Exception as e:
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
         logger.warning(
