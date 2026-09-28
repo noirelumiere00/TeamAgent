@@ -609,6 +609,11 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "VIDEO_ALGORITHM_DETACH_DM_ONLY", value = var.video_algorithm_detach_dm_only },
       { name = "VIDEO_ALGORITHM_MAX_BACKGROUND", value = var.video_algorithm_max_background },
       { name = "VIDEO_ALGORITHM_CACHE_LEASE_SECONDS", value = var.video_algorithm_cache_lease_seconds },
+      # 2026-09-28: 検索上位チェックの 2 段目（既定 OFF＝今と同じ・mcp_gateway/surface_video_followup.py）。
+      # ON にしても allowlist が空なら誰にも適用しない。同時実行の上限は上の MAX_BACKGROUND と共有。
+      { name = "USE_SURFACE_VIDEO_FOLLOWUP", value = var.use_surface_video_followup },
+      { name = "SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS", value = var.surface_video_followup_allowed_emails },
+      { name = "SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS", value = var.surface_video_followup_max_videos },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が
