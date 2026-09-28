@@ -69,6 +69,7 @@ from teamagent.skills.search_surface_check.schema import (
     VideoDigest,
     VideoDigestConclusion,
 )
+from teamagent.skills.search_surface_check.slack_render import followup_rows
 from teamagent.skills.search_surface_check.summary import build_slack_summary
 from teamagent.skills.search_surface_check.video_digest import (
     conclude_digest,
@@ -884,6 +885,9 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             report_url=report_url,
             slack_text=text,
             total_cost_usd=total,
+            # 直接投稿の Block Kit（slack_render.followup_message）が 1 本 1 行に使う。
+            videos=followup_rows(analyzed),
+            measured_epoch=out.measured_epoch,
         )
 
     @staticmethod

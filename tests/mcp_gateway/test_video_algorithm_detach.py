@@ -119,7 +119,9 @@ class _FakeSlack:
             if self.fail_first > 0:
                 self.fail_first -= 1
                 raise ConnectionError("slack temporarily unavailable")
-            self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+            self.posts.append(
+                {"channel": channel, "text": text, "thread_ts": thread_ts, "blocks": blocks}
+            )
         return SlackPostResult(channel=channel, ts="1784424999.000100", ok=True)
 
 

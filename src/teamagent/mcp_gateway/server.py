@@ -799,8 +799,18 @@ def _complete_detached(
                 if error is None
                 else detached_jobs.error_text(query, error)
             )
+            # 完了は Block Kit で出す（描けなければ None＝今の文字だけの投稿）。
+            rich = (
+                detached_jobs.completion_message(result, request_id=request_id)
+                if error is None
+                else None
+            )
             delivered = detached_jobs.post_to_origin(
-                text, destination, request_id=request_id, fallback_user_id=fallback_user_id
+                text,
+                destination,
+                request_id=request_id,
+                fallback_user_id=fallback_user_id,
+                rich=rich,
             )
     finally:
         if result is not None:
@@ -1180,7 +1190,11 @@ async def dispatch_tool(
         )
         if direct_destination is not None:
             direct_status = await asyncio.to_thread(
-                direct_summary.deliver, data, direct_destination, request_id=ctx.request_id
+                direct_summary.deliver,
+                data,
+                direct_destination,
+                request_id=ctx.request_id,
+                skill_input=skill_input,
             )
             if direct_status != direct_summary.FAILED:
                 return direct_summary.posted_response(direct_status)

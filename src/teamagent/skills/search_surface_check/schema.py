@@ -203,6 +203,13 @@ class SearchSurfaceCheckOutput(BaseModel):
         default=0,
         description="実測の時刻（epoch 秒・0=未実測）。2 段目がレポートを作り直すときに使う",
     )
+    followup_note: str = Field(
+        default="",
+        description=(
+            "2 段目（動画の中身）の予告など、mcp が slack_summary に足した 1 行。"
+            "直接投稿の Block Kit で同じ行を出すために持つ（Aico へは返さない）"
+        ),
+    )
 
 
 # ── 2 段目: 上位の動画の中身（video_algorithm の分析エンジンで見る） ──────────────
@@ -260,6 +267,24 @@ class VideoDigestConclusion(BaseModel):
     )
 
 
+class FollowupVideo(BaseModel):
+    """2 段目の 1 本（直接投稿の「1本ずつ」の行に使う）。数えた値だけ（LLM の文は持たない）。"""
+
+    rank: int
+    author: str = ""
+    url: str = ""
+    state: Literal["watched", "cover_only", "failed"] = "failed"
+    hook: str = Field(default="", description="フックの和名（hook_label）。動画を見たときだけ")
+    opening_telop: bool = False
+    telop_kw: bool = False
+    spoken_kw: bool = False
+    duration_sec: int = 0
+    cut_count: int | None = None
+    pacing: str = Field(default="", description="テンポの和名（不明は空）")
+    has_cta: bool = False
+    narration: bool = False
+
+
 class SurfaceVideoFollowupOutput(BaseModel):
     """2 段目の結果（会話へ追記する文面と、章を足したレポート）。"""
 
@@ -270,3 +295,9 @@ class SurfaceVideoFollowupOutput(BaseModel):
     report_url: str | None = None
     slack_text: str = ""
     total_cost_usd: float = 0.0
+    videos: list[FollowupVideo] = Field(
+        default_factory=list, description="分析した上位 N 本（順位順・直接投稿の 1 本 1 行）"
+    )
+    measured_epoch: int = Field(
+        default=0, description="1 段目の実測の時刻（同じ検索回の続きと示す）"
+    )

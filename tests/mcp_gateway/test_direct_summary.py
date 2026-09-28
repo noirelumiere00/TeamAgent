@@ -3,8 +3,9 @@
 本物の SearchSurfaceCheckSkill・dispatch_tool・post_to_origin を通す。Slack だけ偽物。
 09-28 本番: 「そのまま返す」規約と MCP 返却の絞り込みの後も、Aico が文面を組み直して
 詳細レポートの URL を落とした（「上記リンクで確認できます」とだけ残った）。確かめること:
-- 対象（ON・allowlist 内・署名検証済み・1 対 1 DM）なら、slack_summary が URL つきでそのまま DM に届き、
-  Aico への返却には集計も URL も載らない（組み直しの材料を渡さない）
+- 対象（ON・allowlist 内・署名検証済み・1 対 1 DM）なら、結果が Block Kit（見出し・結論・数字の欄・
+  1 本 1 行・レポートの文字リンク）で DM に届き、Aico への返却には集計も URL も載らない
+  （組み直しの材料を渡さない）。通知文には結論とレポートの URL が入る
 - 対象外（OFF・allowlist 外・空の allowlist・チャンネル・LEGACY）は今と同じ返却で、投稿しない
 - 投稿に失敗したら今と同じ返却に戻す（結果を消さない）。タイムアウトは届いた可能性があるので戻さない
 - 2 段目（動画の中身）の予告行も直接投稿に入り、追記はその後に届く
@@ -21,18 +22,21 @@ import pytest
 from teamagent.adapters.slack_client import SlackPostResult
 from teamagent.mcp_gateway import detached_jobs, direct_summary, server, surface_video_followup
 from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
+from teamagent.skills._shared.slack_blocks import validate
 from teamagent.skills.search_surface_check.summary import followup_notice_line
 from teamagent.skills.video_algorithm import thumbnails
 from tests.mcp_gateway.test_surface_video_followup import (
     ARGS,
     CHANNEL,
     DM,
+    KEYWORD,
     ME,
     OTHER,
     RELAY_KEYS,
     TOOL,
     USER_ID,
     _baseline_summary,
+    _blocks_text,
     _call,
     _claim,
     _eventually,
@@ -87,7 +91,7 @@ def usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
 # ── 対象なら DM へそのまま届き、Aico には中身を渡さない ─────────────────────
 
 
-async def test_eligible_posts_summary_verbatim_and_returns_no_material(
+async def test_eligible_posts_blocks_and_returns_no_material(
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
     _direct(monkeypatch)
@@ -98,16 +102,24 @@ async def test_eligible_posts_summary_verbatim_and_returns_no_material(
     post = slack.posts[0]
     assert post["channel"] == DM and post["thread_ts"] is None
     baseline = _baseline_summary()
-    # 見出しは mrkdwn の太字へ、URL は <URL> へ（本文の中身は 1 段目の文面そのまま）
-    assert "**" not in post["text"]
-    assert "*検索上位チェック*" in post["text"]
+    blocks = post["blocks"]
+    validate(blocks)  # Block Kit の上限の内側
+    body = _blocks_text(blocks)
+    assert blocks[0]["text"]["text"] == f"検索上位チェック「{KEYWORD}」"
+    # 標準 Markdown（**太字**・[@id](<url>)・行頭の「- 」）は Block Kit に出ない
+    assert "**" not in body and "](" not in body
+    assert not any(line.startswith("- ") for line in body.splitlines())
     report_url = "https://s3.example/surface-1"
     assert report_url in baseline
-    assert f"<{report_url}>" in post["text"]
-    for line in baseline.splitlines():
-        plain = line.replace("**", "").replace("*", "").strip()
-        if plain and "http" not in plain and "&" not in plain and "<" not in plain:
-            assert plain in post["text"].replace("*", ""), plain
+    assert f"<{report_url}|レポートを開く>" in body
+    # 通知文（プレビュー）: 結論の 1 行とレポートの URL
+    headline = next(
+        line.removeprefix("**結論** ")
+        for line in baseline.splitlines()
+        if line.startswith("**結論**")
+    )
+    assert headline in post["text"] and f"<{report_url}>" in post["text"]
+    assert headline in body
 
     # Aico への返却: 投稿済みの一言だけ。集計・URL・本文を載せない
     assert out["status"] == "posted" and out["delivered"] is True
@@ -224,12 +236,11 @@ async def test_followup_notice_is_in_the_direct_post_and_followup_comes_after(
     skill, _g, _d = _skill()
     out = await _call(_spec(skill))
     assert out["status"] == "posted"
-    first = slack.posts[0]["text"]
-    notice = followup_notice_line(5).replace("**", "*")
-    assert notice.split("（")[0] in first
+    first = _blocks_text(slack.posts[0]["blocks"])
+    assert followup_notice_line(5) in first  # 予告の行も Block Kit の注記に入る
     await _eventually(lambda: len(slack.posts) == 2, timeout=10.0)
     assert slack.posts[1]["channel"] == DM
-    assert slack.posts[1]["text"] != first
+    assert slack.posts[1]["blocks"] and _blocks_text(slack.posts[1]["blocks"]) != first
 
 
 # ── 決め方（単体）──────────────────────────────────────────────────────
