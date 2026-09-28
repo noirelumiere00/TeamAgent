@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
 
 # リンク化を許すホスト（サブドメイン含む末尾一致）。SNSの投稿/リール/動画URLのみ。
 _ALLOWED_LINK_HOSTS = (
@@ -23,24 +24,33 @@ _ALLOWED_LINK_HOSTS = (
 )
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_HOST_RE = re.compile(r"^https://([^/]+)/", re.IGNORECASE)
+# ホストは英数字・ハイフン・ドットだけ（最初の `/` まで）。`#` `?` `\\` などを含めると、ブラウザが
+# 実際に開くホスト（`https://evil.example#.tiktok.com/` なら evil.example）と、ここで末尾一致を
+# 見たホストが食い違う（B5 レビュー指摘）。
+_HOST_RE = re.compile(r"^https://([A-Za-z0-9.-]+)/", re.IGNORECASE)
 
 
 def safe_href(url: str) -> str | None:
     """https かつ既知SNSホストの URL だけを返す。危険/不明スキームは None（=非リンク化）。
 
-    末尾一致でサブドメインを許容（www.instagram.com 等）。ポート・認証情報付きは弾く。
+    末尾一致でサブドメインを許容（www.instagram.com 等）。ポート・認証情報付き・ホストに
+    `#` `?` `\\` などを含むもの（ブラウザの解釈と食い違うもの）は弾く。
     """
     if not url:
         return None
-    m = _HOST_RE.match(url.strip())
+    url = url.strip()
+    m = _HOST_RE.match(url)
     if not m:
         return None
     host = m.group(1).lower()
-    if "@" in host or ":" in host:  # userinfo / port は許可しない
+    try:
+        parsed_host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return None
+    if parsed_host != host:  # URL の解釈で別のホストになるもの（念のため二重に見る）
         return None
     if any(host == h or host.endswith("." + h) for h in _ALLOWED_LINK_HOSTS):
-        return url.strip()
+        return url
     return None
 
 

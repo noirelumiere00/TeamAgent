@@ -456,6 +456,10 @@ def test_handle_link_escapes_the_handle_and_only_links_safe_urls() -> None:
     assert handle_link("[x](y)", url) == f"[@［x］(y)]({url})"  # 表示名の記法は崩す
     assert handle_link("", url) == "不明"
     assert post_href("https://www.tiktok.com/@a/video/1 x") is None
+    # ホストの取り違え（IG の URL は取得段の検査を通らないので、ここで弾く）
+    for sep in ("#", "?", "\\"):
+        evil = f"https://evil.example{sep}.tiktok.com/@a/video/1"
+        assert handle_link("a", evil) == "@a"
 
 
 def test_client_accounts_in_surface() -> None:

@@ -9,6 +9,11 @@
   （共通部品 _shared/grounding.py の NumberGrounder）。2 段目の本数は 0〜N（N≤10）に収まるので、
   1 段目のように小さい数（0〜10・90・100）を無条件に通すと「5/5本」「100%」がそのまま通って照合が
   効かない。2 段目は**常に許す数を使わず**、入力の値（項目名は除く）に現れる数字だけを許す。
+  それでも「順位」1〜N と分母 N が必ず入力に入るので、本数の主張（「X/Y本」「N本中M本」「M本」
+  「すべて」）は数字の照合だけでは止まらない（B5 レビュー指摘: 作り話の「5/5本」が通った）。
+  そこで本数は ``CountGrounder`` が別に見る: 分母は分析できた本数、分子は**近くに書かれた項目**
+  （冒頭テロップ・CTA・フックの型…）の集計の本数と一致するときだけ通す。項目が近くに無ければ
+  いずれかの集計の本数と一致すること。「すべて」は近くの項目の本数が分母と同じときだけ通す。
   誇張語は言い換える。
 """
 
@@ -17,8 +22,10 @@ from __future__ import annotations
 import json
 import re
 import statistics
+import unicodedata
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from teamagent.skills._shared.grounding import DropSink, NumberGrounder, tone_down
@@ -353,16 +360,198 @@ def _leaf_values(obj: Any) -> list[str]:
     return [str(obj)]
 
 
+# ── 本数の照合 ───────────────────────────────────────────────────────
+
+# 「3/5本」「3/5」。日付（9/28）はこの読みの文に出てこない前提。
+_FRACTION_RE = re.compile(r"(?<![\d.])(\d+)\s*/\s*(\d+)(?![\d.])(?:\s*本)?")
+# 「5本中3本」「5本のうち3本」。
+_OF_RE = re.compile(r"(?<![\d.])(\d+)\s*本\s*(?:中|のうち)\s*(\d+)\s*本")
+# 「3本」（本文・本数などの熟語は除く）。
+_COUNT_RE = re.compile(r"(?<![\d./])(\d+)\s*本(?![文数日当来格])")
+# 「すべて」の主張。
+_ALL_RE = re.compile(r"すべて|全て|全部|どの動画も|全\s*\d+\s*本")
+# 「上位5本」「5本の」「5本とも」のように、分析した本数そのもの（範囲）を指す書き方。
+_SCOPE_BEFORE = ("上位", "全", "計", "合計")
+_SCOPE_AFTER = re.compile(r"\s*(?:の|中|とも|すべて|全て|全部|を分析|を視聴)")
+# 数字の近くを見る幅（文字数）。句点・読点・改行で切る。
+_WINDOW_BEFORE = 24
+_WINDOW_AFTER = 16
+_CLAUSE_BREAK = re.compile(r"[。！？!?\n、，,／]")
+
+
+def _norm(text: str) -> str:
+    return unicodedata.normalize("NFKC", text or "")
+
+
+@dataclass(frozen=True)
+class CountTerm:
+    """本数の主張の近くに書かれる項目（冒頭テロップ・CTA など）と、その集計の本数。"""
+
+    pattern: re.Pattern[str]
+    counts: frozenset[int]
+
+
+def _terms(digest: VideoDigest) -> tuple[CountTerm, ...]:
+    def t(pattern: str, counts: Iterable[int]) -> CountTerm:
+        return CountTerm(re.compile(pattern), frozenset(counts))
+
+    hook_counts = [h.count for h in digest.hook_types]
+    cta_counts = [digest.cta, *(c.count for c in digest.cta_types)]
+    terms = [
+        t(r"冒頭.{0,8}テロップ|テロップ.{0,4}冒頭", [digest.opening_telop]),
+        t(
+            r"テロップ.{0,6}(?:KW|キーワード|検索語)|(?:KW|キーワード|検索語).{0,6}テロップ",
+            [digest.telop_kw],
+        ),
+        t(
+            r"(?:発話|話し|声|ナレーション).{0,6}(?:KW|キーワード|検索語)"
+            r"|(?:KW|キーワード|検索語).{0,8}(?:発話|話し|声)",
+            [digest.spoken_kw],
+        ),
+        t(r"テロップ", [digest.opening_telop, digest.telop_kw]),
+        t(r"CTA|呼びかけ|促", cta_counts),
+        t(r"ナレーション", [digest.narration]),
+        t(r"(?:流行|トレンド|人気).{0,4}(?:音源|音楽|曲|サウンド)", [digest.trending_sound]),
+        t(r"フック", hook_counts),
+        t(r"テンポ", [p.count for p in digest.pacing]),
+        t(r"保存率の高い|保存率が高い", [len(digest.save_top_ranks)]),
+        t(r"サムネ", [len(digest.cover_only_ranks)]),
+    ]
+    for h in digest.hook_types:
+        if h.label != HOOK_LABEL["other"]:
+            terms.append(t(re.escape(h.label), [h.count]))
+    for label in CTA_LABEL.values():
+        n = next((c.count for c in digest.cta_types if c.label == label), 0)
+        terms.append(t(re.escape(label) + r"を(?:促|呼びかけ|誘)", [n]))
+    return tuple(terms)
+
+
+@dataclass(frozen=True)
+class CountGrounder:
+    """数字の照合（NumberGrounder）に、本数の主張の照合を重ねる（2 段目の読み専用）。"""
+
+    base: NumberGrounder
+    watched: int
+    denominators: frozenset[int]
+    scope: frozenset[int]
+    terms: tuple[CountTerm, ...]
+
+    @property
+    def always_allowed(self) -> frozenset[str]:
+        return self.base.always_allowed
+
+    @property
+    def valid_ranks(self) -> frozenset[int] | None:
+        return self.base.valid_ranks
+
+    def filter_ranks(self, values: Any) -> list[int]:
+        return self.base.filter_ranks(values)
+
+    def stray(self, text: str) -> set[str]:
+        return self.base.stray(text)
+
+    @property
+    def all_counts(self) -> frozenset[int]:
+        out: set[int] = {self.watched}
+        for term in self.terms:
+            out |= term.counts
+        return frozenset(out)
+
+    def _near(self, text: str, start: int, end: int) -> frozenset[int] | None:
+        """数字の近く（同じ節）に書かれた項目の本数。項目が無ければ None。"""
+        before = text[max(0, start - _WINDOW_BEFORE) : start]
+        after = text[end : end + _WINDOW_AFTER]
+        before = _CLAUSE_BREAK.split(before)[-1]
+        after = _CLAUSE_BREAK.split(after)[0]
+        window = before + " " + after
+        found: set[int] = set()
+        hit = False
+        for term in self.terms:
+            if term.pattern.search(window):
+                hit = True
+                found |= term.counts
+        return frozenset(found) if hit else None
+
+    def _numerator_ok(self, text: str, value: int, start: int, end: int) -> bool:
+        near = self._near(text, start, end)
+        return value in (near if near is not None else self.all_counts)
+
+    def count_issues(self, text: str) -> list[str]:
+        """本数の主張のうち、集計と合わないもの（理由の文字列・本文は含めない）。"""
+        norm = _norm(text)
+        issues: list[str] = []
+        taken: list[tuple[int, int]] = []
+        for m in _OF_RE.finditer(norm):
+            total, part = int(m.group(1)), int(m.group(2))
+            taken.append(m.span())
+            if total not in self.denominators or part > total:
+                issues.append(f"{total}本中{part}本")
+            elif not self._numerator_ok(norm, part, *m.span()):
+                issues.append(f"{total}本中{part}本")
+        for m in _FRACTION_RE.finditer(norm):
+            if any(s <= m.start() < e for s, e in taken):
+                continue
+            part, total = int(m.group(1)), int(m.group(2))
+            taken.append(m.span())
+            if total not in self.denominators or part > total:
+                issues.append(f"{part}/{total}")
+            elif not self._numerator_ok(norm, part, *m.span()):
+                issues.append(f"{part}/{total}")
+        for m in _COUNT_RE.finditer(norm):
+            if any(s <= m.start() < e for s, e in taken):
+                continue
+            value = int(m.group(1))
+            near = self._near(norm, *m.span())
+            if near is not None and value in near:
+                continue
+            head = norm[: m.start()]
+            is_scope = value in self.scope and (
+                head.rstrip().endswith(_SCOPE_BEFORE) or _SCOPE_AFTER.match(norm, m.end())
+            )
+            if is_scope or (near is None and value in self.all_counts):
+                continue
+            issues.append(f"{value}本")
+        for m in _ALL_RE.finditer(norm):
+            near = self._near(norm, *m.span())
+            pool = near if near is not None else self.all_counts - {self.watched}
+            if self.watched not in pool:
+                issues.append("すべて")
+        return issues
+
+    def reason(self, text: str, *, deny: Iterable[str] = ()) -> str | None:
+        parts: list[str] = []
+        base = self.base.reason(text, deny=deny)
+        if base:
+            parts.append(base)
+        issues = self.count_issues(text)
+        if issues:
+            parts.append("count:" + ",".join(dict.fromkeys(issues)))
+        return ";".join(parts) or None
+
+    def ok(self, text: str) -> bool:
+        return self.reason(text) is None
+
+
 def digest_grounder(
     digest: VideoDigest, videos: list[AnalyzedVideo], *, keyword: str
-) -> NumberGrounder:
-    """2 段目の照合器: 入力の値に現れる数字と、動画を見て分析できた順位だけを許す。"""
+) -> CountGrounder:
+    """2 段目の照合器: 入力の値に現れる数字・動画を見て分析できた順位・集計と合う本数だけを許す。"""
     values = _leaf_values(digest_payload(digest)) + _leaf_values(videos_payload(videos))
-    return NumberGrounder.from_inputs(
+    base = NumberGrounder.from_inputs(
         *values,
         keyword,
         valid_ranks=digest.watched_ranks,
         always_allowed=STRICT_ALWAYS_ALLOWED,
+    )
+    denominators = {digest.watched}
+    if digest.save_top_ranks:
+        denominators.add(len(digest.save_top_ranks))
+    return CountGrounder(
+        base=base,
+        watched=digest.watched,
+        denominators=frozenset(denominators),
+        scope=frozenset({digest.watched, digest.requested, digest.reserved}),
+        terms=_terms(digest),
     )
 
 
@@ -373,8 +562,8 @@ def build_digest_prompt(
     client_name: str | None,
     digest: VideoDigest,
     videos: list[AnalyzedVideo],
-) -> tuple[str, NumberGrounder]:
-    """プロンプトと、照合器（入力の値に現れる数字・実在する順位）を返す。"""
+) -> tuple[str, CountGrounder]:
+    """プロンプトと、照合器（入力の値に現れる数字・実在する順位・集計と合う本数）を返す。"""
     facts_json = json.dumps(digest_payload(digest), ensure_ascii=False)
     videos_json = json.dumps(videos_payload(videos), ensure_ascii=False)
     prompt = template.format(
@@ -401,12 +590,13 @@ def _parse(text: str) -> dict[str, Any] | None:
 def ground_digest_conclusion(
     raw: dict[str, Any],
     *,
-    grounder: NumberGrounder,
+    grounder: CountGrounder,
     on_drop: DropSink | None = None,
 ) -> VideoDigestConclusion | None:
     """LLM の出力を検査して採用する。
 
-    入力に無い数字・実在しない順位（本文中の「N位」「#N」も）を含む項目は丸ごと捨て、欄名と理由
+    入力に無い数字・実在しない順位（本文中の「N位」「#N」も）・集計と合わない本数を含む項目は
+    丸ごと捨て、欄名と理由
     （数字・順位だけ・本文は渡さない）を ``on_drop`` へ渡す。ranks 欄は実在する順位だけに絞る。
     誇張語は言い換える。
     """
@@ -484,6 +674,7 @@ __all__ = [
     "HOOK_LABEL",
     "PACING_LABEL",
     "STRICT_ALWAYS_ALLOWED",
+    "CountGrounder",
     "build_digest_prompt",
     "conclude_digest",
     "cta_label",

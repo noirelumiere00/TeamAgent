@@ -23,7 +23,8 @@
   達しているため分析しません（残り 0 本）」を 1 行足して 2 段目を登録しない（結果が予告より先に
   届いて食い違うのを防ぐ）。上限 ON で依頼者のメールが無いときも登録しない。
 - 使い回し: 同じ人・同じ KW（正規化）・同じ上位 N 本の URL 集合の 2 段目が 24 時間以内に成功して
-  いれば、分析し直さず前回の追記文（章を足したレポートの URL つき）を先頭に「（24 時間以内の同じ
+  いれば（全本を動画で分析でき、レポートも出せたときだけ覚える＝``is_reusable``）、
+  分析し直さず前回の追記文（章を足したレポートの URL つき）を先頭に「（24 時間以内の同じ
   分析の結果です）」を付けて届ける。月間上限も Gemini も使わない。**プロセス内の TTL キャッシュ**
   なので、再デプロイ・タスクの入れ替わりで消える（消えたら分析し直す）。
 - 待ち行列では、利用者が明示的に頼んだ動画分析（video_algorithm の切り離し）を、この自動の
@@ -78,7 +79,9 @@ REUSE_TTL_S = 24 * 60 * 60
 REUSE_MAX_ENTRIES = 256
 REUSED_PREFIX = "（24 時間以内の同じ分析の結果です）"
 # 使い回しの追記を投稿するまで待つ秒数。すぐ投稿すると、Aico が返す 1 段目の文面（予告つき）より
-# 先に届いてしまうので、少し置く。
+# 先に届いてしまうので、少し置く。待ちは threading.Timer で登録簿の終了処理と無関係なので、
+# この秒数のうちに再デプロイされると追記は黙って消える
+# （予告だけ届く。もう一度依頼すれば分析し直す）。
 REUSE_POST_DELAY_S = 15.0
 
 
@@ -210,6 +213,24 @@ class FollowupCache:
 CACHE = FollowupCache()
 
 
+def is_reusable(result: Any) -> bool:
+    """使い回してよい結果か＝全本を動画で分析でき、章つきレポートを出せたときだけ。
+
+    一部だけの結果（月間上限で予約が足りない・一部を取得できない・サムネだけの分析に落ちた・
+    レポートを出せなかった）を覚えると、一時的な失敗が 24 時間固定される（B5 レビュー指摘）。
+    """
+    if getattr(result, "status", None) != "ok" or not getattr(result, "report_url", None):
+        return False
+    digest = getattr(result, "digest", None)
+    return (
+        digest is not None
+        and digest.requested > 0
+        and digest.watched == digest.requested
+        and not digest.cover_only_ranks
+        and not digest.failed_ranks
+    )
+
+
 def reused_text(entry: CachedFollowup) -> str:
     """使い回しの追記文。先頭に断り書きを付け、概算は今回の費用（0）に置き換える。"""
     lines = entry.slack_text.split("\n")
@@ -315,7 +336,7 @@ def _complete(
                 request_id=request_id,
                 fallback_user_id=fallback_user_id,
             )
-    if cache_key is not None and error is None and getattr(result, "status", None) == "ok":
+    if cache_key is not None and error is None and is_reusable(result):
         # 中断文を送った後に完了した分も覚える（もう一度依頼されたら回数を使わずに届けられる）。
         CACHE.put(
             cache_key,
@@ -574,6 +595,7 @@ __all__ = [
     "followup_key",
     "in_progress_line",
     "interrupted_text",
+    "is_reusable",
     "load_policy",
     "maybe_schedule",
     "quota_gate",

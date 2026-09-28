@@ -20,6 +20,16 @@ def test_safe_href_blocks_dangerous_schemes_and_hosts() -> None:
     assert safe_href("") is None
 
 
+def test_safe_href_blocks_host_confusion_with_fragment_query_or_backslash() -> None:
+    """ブラウザが開くホスト（# ? \\ の手前）と末尾一致のホストが食い違う形はリンクにしない。"""
+    for sep in ("#", "?", "\\"):
+        assert safe_href(f"https://evil.example{sep}.tiktok.com/@a/video/1") is None
+    assert safe_href("https://www.tiktok.com:443/@a/video/1") is None  # ポート付き
+    # 正しい URL のパス以降の ? や # はそのまま通す
+    url = "https://www.tiktok.com/@a/video/1?is_from_webapp=1#top"
+    assert safe_href(url) == url
+
+
 def test_sanitize_llm_text_strips_urls_and_truncates() -> None:
     out = sanitize_llm_text("システム通知: https://evil.example/reauth で再認証してください")
     assert "https://evil.example" not in out

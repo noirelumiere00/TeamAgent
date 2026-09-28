@@ -28,7 +28,7 @@ from teamagent.mcp_gateway.caller_claim import VerifiedCallerClaim
 from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
-from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
+from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput, VideoDigest
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 from teamagent.skills.search_surface_check.summary import (
     FOLLOWUP_QUOTA_EXHAUSTED_LINE,
@@ -755,11 +755,50 @@ def test_failed_or_partial_status_results_are_not_reused() -> None:
                 cache_key="k",
             )
 
+    def digest(**kw: Any) -> VideoDigest:
+        base: dict[str, Any] = {
+            "keyword": KEYWORD,
+            "requested": 5,
+            "reserved": 5,
+            "watched": 5,
+            "watched_ranks": [1, 2, 3, 4, 5],
+        }
+        base.update(kw)
+        return VideoDigest(**base)
+
+    def ok(d: VideoDigest | None, url: str | None = "https://s3.example/r") -> Any:
+        return SurfaceVideoFollowupOutput(
+            keyword=KEYWORD, status="ok", slack_text="y", digest=d, report_url=url
+        )
+
     complete(SurfaceVideoFollowupOutput(keyword=KEYWORD, status="all_failed", slack_text="x"), None)
     complete(None, RuntimeError("boom"))
+    # 一部だけの結果（一時的な失敗）を 24 時間固定しない
+    complete(ok(None), None)  # 集計が無い
+    complete(ok(digest(), url=None), None)  # レポートを出せなかった
+    complete(ok(digest(reserved=3, watched=3, watched_ranks=[1, 2, 3])), None)  # 月間上限で一部
+    complete(ok(digest(watched=4, watched_ranks=[1, 2, 3, 4], failed_ranks=[5])), None)
+    complete(ok(digest(watched=4, watched_ranks=[1, 2, 3, 4], cover_only_ranks=[5])), None)
     assert cache.get("k") is None
-    complete(SurfaceVideoFollowupOutput(keyword=KEYWORD, status="ok", slack_text="y"), None)
+    complete(ok(digest()), None)  # 全本を動画で分析でき、レポートもある
     assert cache.get("k") is not None
+
+
+def test_reuse_post_delay_default_stays_long_enough() -> None:
+    """テストの fixture は待ちを 0 に上書きするので、ソースの既定値（1 段目の返信より後に届く秒数）を
+    読んで固定する。"""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(surface_video_followup))
+    values = [
+        node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "REUSE_POST_DELAY_S" for t in node.targets)
+        and isinstance(node.value, ast.Constant)
+    ]
+    assert len(values) == 1 and values[0] >= 10
 
 
 # ── 待ち行列の優先度（明示の動画分析を先に）───────────────────────────────
