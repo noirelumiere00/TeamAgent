@@ -250,4 +250,35 @@ def build_slack_summary(
     return "\n".join(lines).strip()
 
 
-__all__ = ["build_slack_summary", "rho_words", "slack_safe"]
+# 1 段目の文面の末尾の行（build_slack_summary が出す順）。予告行はこの手前に入れる。
+_TAIL_PREFIXES = ("レポート（全", "注意: ", "_概算 $")
+
+
+def followup_notice_line(count: int) -> str:
+    """2 段目（上位の動画の中身）を裏で始めたことを知らせる 1 行。"""
+    return (
+        f"上位{count}本の動画の中身（フック・テロップ・構成・CTA など）を分析しています。"
+        "終わったらこの会話に追記します（目安 5〜9 分）"
+    )
+
+
+def insert_before_report_line(summary: str, line: str) -> str:
+    """1 段目の文面の末尾（レポート行の前）に 1 行足す。
+
+    レポート行が無い（発行に失敗した）ときは注意書き・概算の行の前に、どれも無ければ末尾に足す。
+    """
+    lines = summary.split("\n")
+    for prefix in _TAIL_PREFIXES:
+        for i, existing in enumerate(lines):
+            if existing.startswith(prefix):
+                return "\n".join([*lines[:i], line, *lines[i:]])
+    return "\n".join([*lines, line]) if summary else line
+
+
+__all__ = [
+    "build_slack_summary",
+    "followup_notice_line",
+    "insert_before_report_line",
+    "rho_words",
+    "slack_safe",
+]

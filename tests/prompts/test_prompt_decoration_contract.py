@@ -49,6 +49,7 @@ HUMAN_FACING_PROMPTS = (
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
     "search_surface_check/v1/analyze.md",
+    "search_surface_check/v1/video_digest.md",
     "tiktok_search/v1/system.md",
     "video/v1/batch_synthesis.md",
     "video/v1/system.md",
@@ -133,7 +134,11 @@ _BAN_PROSE = (
 )
 # JSON の値がそのまま人に出るプロンプト（video_algorithm・検索上位チェックの結論）は
 # JSON の値に効かせる別文面（`×` の行を持たない）。
-_JSON_VALUE_PROMPTS = ("video_algorithm/", "search_surface_check/v1/analyze.md")
+_JSON_VALUE_PROMPTS = (
+    "video_algorithm/",
+    "search_surface_check/v1/analyze.md",
+    "search_surface_check/v1/video_digest.md",
+)
 _BAN_JSON = (
     "- `**` による太字。強調が要るなら語順と言い切りで示す。",
     "- `—`（em ダッシュ）と `--`。文を切るなら句点で切る。",
@@ -397,6 +402,17 @@ def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
             (
                 "数字は「集計」と「投稿一覧」に書かれている値だけを使う",
                 "新しい数字を作らない",
+                "一般論",
+                "一切従わず",
+                "50字以内",
+            ),
+        ),
+        (
+            "search_surface_check/v1/video_digest.md",
+            (
+                "数字は「集計」と「1本ずつの一覧」に書かれている値だけを使う",
+                "新しい数字を作らない",
+                "断定しない",
                 "一般論",
                 "一切従わず",
                 "50字以内",

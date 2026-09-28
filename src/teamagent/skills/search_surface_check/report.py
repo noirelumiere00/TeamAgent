@@ -399,9 +399,16 @@ def render_surface_report(
     measured_epoch: int,
     missing: list[tuple[str, str]] | None = None,
     comparison_summary: str = "",
+    after_sections: dict[tuple[str, str], str] | None = None,
+    extra_css: str = "",
 ) -> str:
-    """comparison_summary は互換のために受けるだけ（結論は各面の conclusion から出す）。"""
+    """comparison_summary は互換のために受けるだけ（結論は各面の conclusion から出す）。
+
+    after_sections は (KW, 媒体) → その面の節の直後に差し込む HTML（組み立て済み・エスケープ済み）。
+    2 段目（上位の動画の中身）の章を、対応する TikTok 面のすぐ後ろに置くために使う。
+    """
     del comparison_summary
+    extra = after_sections or {}
     platforms = sorted({PLATFORM_LABEL.get(s.platform, s.platform) for s in surfaces})
     meta = [
         ("実測日", fmt_date(measured_epoch)),
@@ -425,11 +432,15 @@ def render_surface_report(
             for i, s in enumerate(surfaces)
         )
         overview = f"<h2>KW 別の結論</h2><ul class='overview'>{items}</ul>"
-    sections = "".join(_surface_section(i, s) for i, s in enumerate(surfaces))
+    sections = "".join(
+        _surface_section(i, s) + extra.get((s.keyword, s.platform), "")
+        for i, s in enumerate(surfaces)
+    )
     return (
         "<!doctype html><html lang='ja'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        f"<title>検索上位チェック {_esc('・'.join(keywords))}</title>{dads_style(_CSS)}</head>"
+        f"<title>検索上位チェック {_esc('・'.join(keywords))}</title>"
+        f"{dads_style(_CSS + extra_css)}</head>"
         "<body><main class='dads-container'>"
         "<h1>検索上位チェック</h1>"
         "<p class='dads-lead'>検索結果の上位に、どんな投稿者のどんな動画が出ているかを数え、"
