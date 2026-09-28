@@ -148,12 +148,14 @@ def test_output_echoes_roster_and_generated_at(tmp_path: object) -> None:
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+09:00", out.generated_at)
     # 名簿は横断シンセシスの入力まで届く（区分はコード。Gemini の client ではなく名簿の client）
     prompt = gemini.generate_text.call_args.args[0]
-    assert "ユニクロ(クライアント・目立つ)" in prompt
+    assert '"名前": "ユニクロ", "区分": "クライアント", "目立ち方": "目立つ"' in prompt
+    assert "- クライアント: ユニクロ" in prompt and "- 避けたい訴求: ルー卒業" in prompt
 
 
 def test_without_roster_the_ai_client_guess_does_not_reach_the_llm(tmp_path: object) -> None:
-    """壊し方: _video_brief で Gemini の brand_relation を渡す → 「(client)」が入り赤。"""
+    """壊し方: 個票で Gemini の brand_relation を渡す → 「client」が入り赤。"""
     out, gemini = _run(tmp_path)
     assert out.client_name is None and out.competitors == [] and out.avoid_terms == []
     prompt = gemini.generate_text.call_args.args[0]
-    assert "ユニクロ(未指定・目立つ)" in prompt and "client" not in prompt
+    assert '"名前": "ユニクロ", "区分": "未指定", "目立ち方": "目立つ"' in prompt
+    assert "client" not in prompt and "- クライアント: 未指定" in prompt

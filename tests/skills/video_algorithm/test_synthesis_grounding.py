@@ -1,5 +1,8 @@
 """横断シンセシスの数字の照合（synthesis.ground_synthesis）のテスト。
 
+ここは旧版（v2・VIDEO_ALGO_SYNTHESIS_VERSION=v2 の戻し先）の経路を固定する。既定の v3 の検査
+（常時・タグの除去・refs の照合など）は test_synthesis_v3.py。
+
 偽の Gemini に「入力に無い数字・実在しない順位・ρ 入りの見出し」を返させ、
 - shadow（既定）: 出力は照合前と同一（確信度を含む）で、ログ grounding_dropped だけが出る
 - enforce: 欄ごとに捨てられ、report の既存の代替（仮説 1 本目・次の一手）に代わる
@@ -33,12 +36,13 @@ from teamagent.skills.video_algorithm.schema import (
 )
 from teamagent.skills.video_algorithm.synthesis import (
     COUNTER_EXAMPLE_MARK,
+    SYNTHESIS_VERSION,
     _enforce_confidence,
     build_grounder,
-    build_prompt,
     parse_synthesis,
     synthesize,
 )
+from teamagent.skills.video_algorithm.synthesis import build_prompt_v2 as build_prompt
 
 QUERY = "新宿 ランチ"
 _REASON_RE = re.compile(
@@ -150,6 +154,7 @@ def _run(
     cross = cross_analyze(vids, QUERY)
     gem = _gemini(payload)
     dropped: list[tuple[str, str]] = []
+    kw.setdefault("prompt_version", "v2")  # 旧版の経路（戻し先）
     syn, _ = synthesize(
         gem,
         vids,
@@ -270,7 +275,16 @@ def test_grounding_input_excludes_the_system_prompt(monkeypatch: pytest.MonkeyPa
     assert "冒頭0.5秒" in gem.generate_text.call_args.kwargs["system"]
 
 
-def test_default_prompt_is_v2() -> None:
+def test_default_synthesis_version_is_v3() -> None:
+    """既定は v3。旧版（v2）は prompt_version か env で選んだときだけ。"""
+    assert SYNTHESIS_VERSION == "v3"
+    vids = _videos()
+    gem = _gemini(_FABRICATED)
+    synthesize(gem, vids, QUERY, request_id="r-default")
+    assert "system prompt v3" in gem.generate_text.call_args.kwargs["system"]
+
+
+def test_legacy_prompt_is_v2() -> None:
     _, _, gem = _run(_FABRICATED)
     system = gem.generate_text.call_args.kwargs["system"]
     assert "system prompt v2" in system
@@ -606,6 +620,7 @@ def test_real_shinjuku_synthesis_drops_nothing(monkeypatch: pytest.MonkeyPatch, 
         vids,
         "新宿",
         request_id="r-shinjuku",
+        prompt_version="v2",
         stats=stats,
         on_drop=lambda f, r: dropped.append((f, r)),
     )

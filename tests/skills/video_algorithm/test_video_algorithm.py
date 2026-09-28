@@ -563,7 +563,7 @@ def test_render_report_planner_strategy_summary() -> None:
 def test_synthesis_prompt_injects_computed_stats() -> None:
     """v3.6: 計算済み統計(StatsAnalysis)が synthesis プロンプトに注入され、根拠にできる。"""
     from teamagent.skills.video_algorithm.schema import CorrItem, KwCoverage, StatsAnalysis
-    from teamagent.skills.video_algorithm.synthesis import build_prompt
+    from teamagent.skills.video_algorithm.synthesis import build_prompt_v2 as build_prompt
 
     st = StatsAnalysis(
         sample_size=3,

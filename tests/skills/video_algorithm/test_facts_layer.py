@@ -32,7 +32,7 @@ from teamagent.skills.video_algorithm.schema import (
     VideoMeta,
     WinRange,
 )
-from teamagent.skills.video_algorithm.synthesis import build_prompt
+from teamagent.skills.video_algorithm.synthesis import build_prompt, build_prompt_v2
 from tests.skills.video_algorithm.prod_shape import (
     CLIENT,
     COMPETITORS,
@@ -118,12 +118,18 @@ def test_llm_input_and_screen_have_no_top_band_range() -> None:
     """
     videos = prod_videos()
     cross = cross_analyze(videos, QUERY, board=prod_board())
-    prompt = build_prompt(videos, QUERY, cross.stats)
-    stats_block = prompt[prompt.index("## 横断統計") : prompt.index("# 上位 5 本の構造分析")]
+    legacy = build_prompt_v2(
+        videos, QUERY, cross.stats
+    )  # 戻し先（VIDEO_ALGO_SYNTHESIS_VERSION=v2）
+    stats_block = legacy[legacy.index("## 横断統計") : legacy.index("# 上位 5 本の構造分析")]
     assert "以上" not in stats_block and "勝ち筋レンジ" not in stats_block
-    assert "46-59" not in prompt and re.search(
-        r"分布\[尺\(秒\)\]: 中央値60\.0 範囲46\.0–89\.0", prompt
+    assert "46-59" not in legacy and re.search(
+        r"分布\[尺\(秒\)\]: 中央値60\.0 範囲46\.0–89\.0", legacy
     )
+    prompt = build_prompt(videos, QUERY, cross.stats, board=prod_board())  # 既定（v3）
+    assert not re.search(r"\d+(?:\.\d+)?% ?以上|\d+枚以上|\d+秒以上|46-59", prompt)
+    assert "勝ち筋" not in prompt
+    assert "尺（TikTokのメタ・全5本）: 中央値60秒（46〜89秒）" in prompt
     out = VideoAlgorithmOutput(query=QUERY, videos=videos, board=prod_board(), cross=cross)
     html = render_report(out)
     assert not re.search(r"\d+(?:\.\d+)?% 以上|\d+枚以上|46-59秒", html)
@@ -186,9 +192,12 @@ def test_kw_per_term_reaches_stats_and_llm_input() -> None:
     assert per[(KW2, "telop")].exact_ranks == [] and per[(KW2, "telop")].synonym_ranks == [2]
     assert (per[(KW1, "hashtag")].board_hits, per[(KW1, "hashtag")].board_size) == (23, 30)
     assert dict(st.kw_coverage.layer_fill)["テロップ"] == "5/5"
-    prompt = build_prompt(prod_videos(), QUERY, st)
-    assert "「作り方」テロップ0/5・言い換え1/5（#2）" in prompt
-    assert "「スパイスカレー」テロップ5/5" in prompt and "上位30本では26/30" in prompt
+    legacy = build_prompt_v2(prod_videos(), QUERY, st)
+    assert "「作り方」テロップ0/5・言い換え1/5（#2）" in legacy
+    assert "「スパイスカレー」テロップ5/5" in legacy and "上位30本では26/30" in legacy
+    prompt = build_prompt(prod_videos(), QUERY, st, board=prod_board())
+    assert "- 「作り方」: テロップ 完全一致0/5・言い換え1/5（#2）" in prompt
+    assert "キャプション 完全一致4/5（#1・#2・#3・#4）・上位30本では26/30" in prompt
 
 
 # ── T12 ハッシュタグ ──────────────────────────────────────────────────────
@@ -218,9 +227,12 @@ def test_pr_is_detected_from_the_full_caption() -> None:
     cross = cross_analyze(prod_videos(), QUERY, board=prod_board())
     assert cross.stats is not None
     assert any("タイアップ表記2本（#1・#4）" in c for c in cross.stats.caveats)
-    assert "タイアップ表記: あり（キャプション @ハーブ専科 #PR" in build_prompt(
+    assert "タイアップ表記: あり（キャプション @ハーブ専科 #PR" in build_prompt_v2(
         prod_videos(), QUERY, cross.stats
     )
+    prompt = build_prompt(prod_videos(), QUERY, cross.stats, board=prod_board())
+    assert '"タイアップ表記": "キャプション @ハーブ専科 #PR' in prompt
+    assert '"タイアップ表記": "キャプション #PR"' in prompt  # 1 位（720 字より後の #PR）
 
 
 @pytest.mark.parametrize(
@@ -299,10 +311,13 @@ def test_without_a_roster_every_brand_is_unspecified() -> None:
     assert not any(
         ft.id == "brand_category_prominent" for ft in vf.feature_table(_facts(), [], QUERY)
     )
-    prompt = build_prompt(prod_videos(), QUERY)
-    brief4 = prompt[prompt.index("#4（") : prompt.index("#5（")]
+    legacy = build_prompt_v2(prod_videos(), QUERY)
+    brief4 = legacy[legacy.index("#4（") : legacy.index("#5（")]
     assert "ハーブ専科(未指定・主役)" in brief4
-    assert "client" not in prompt and "クライアント" not in prompt
+    assert "client" not in legacy and "クライアント" not in legacy
+    prompt = build_prompt(prod_videos(), QUERY)
+    assert '"名前": "ハーブ専科", "区分": "未指定", "目立ち方": "主役"' in prompt
+    assert "client" not in prompt and '"区分": "クライアント"' not in prompt
 
 
 def test_roster_decides_client_and_competitors_with_aliases() -> None:
@@ -317,8 +332,11 @@ def test_roster_decides_client_and_competitors_with_aliases() -> None:
     assert f[3].brands[1].in_caption is True  # キャプションは全角「T＆K」
     ft = _feature("brand_category_prominent", ROSTER)
     assert ft.ranks == (1, 2, 4) and ft.tier == TIER_MAJORITY  # #3 は付随なので数えない
+    legacy = build_prompt_v2(prod_videos(), QUERY, roster=ROSTER)
+    assert "SPICIA(クライアント・目立つ)" in legacy and "ハーブ専科(競合・主役)" in legacy
     prompt = build_prompt(prod_videos(), QUERY, roster=ROSTER)
-    assert "SPICIA(クライアント・目立つ)" in prompt and "ハーブ専科(競合・主役)" in prompt
+    assert '"名前": "SPICIA", "区分": "クライアント", "目立ち方": "目立つ"' in prompt
+    assert '"名前": "ハーブ専科", "区分": "競合", "目立ち方": "主役"' in prompt
 
 
 def test_brand_facts_of_the_tieup_video() -> None:

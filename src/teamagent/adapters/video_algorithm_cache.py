@@ -157,6 +157,7 @@ class VideoAlgorithmResultCache:
         requester: str = "",
         competitors: Sequence[str] | None = None,
         avoid_terms: Sequence[str] | None = None,
+        synthesis_version: str | None = None,
     ) -> str:
         """全結果決定要素を canonical JSON 化した sha256 キー。
 
@@ -165,13 +166,17 @@ class VideoAlgorithmResultCache:
         ``requester`` は acquire_job_id の所有者検査をキャッシュで迂回させないための境界。
         competitors / avoid_terms（区分の名簿・避けたい訴求）は横断の解釈を変えるので含める。
         どちらも空なら欄ごと入れない（既存のキャッシュのキーを変えない）。
+        synthesis_version（統合の版・skill は常に渡す）は、版を変えたら旧い synthesis を返さない
+        ために含める（渡さない呼び出しだけ従来のキー）。
         """
 
-        extra: dict[str, list[str]] = {}
+        extra: dict[str, list[str] | str] = {}
         if competitors:
             extra["competitors"] = [c for c in competitors if c]
         if avoid_terms:
             extra["avoid_terms"] = [t for t in avoid_terms if t]
+        if synthesis_version:
+            extra["synthesis_version"] = synthesis_version
         raw = json.dumps(
             {
                 **extra,

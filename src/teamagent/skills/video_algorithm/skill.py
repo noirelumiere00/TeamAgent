@@ -58,6 +58,7 @@ from teamagent.skills.video_algorithm.schema import (
     VideoMeta,
     VideoVSEOAnalysis,
 )
+from teamagent.skills.video_algorithm.synthesis import synthesis_version_from_env
 
 logger = structlog.get_logger(__name__)
 
@@ -417,9 +418,13 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         publisher: Callable[..., str | None] | None = None,
         result_cache: VideoAlgorithmResultCache | None = None,
         apify_fallback: Any | None = None,
+        synthesis_version: str | None = None,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
+        # 統合（横断シンセシス）の版。None なら env VIDEO_ALGO_SYNTHESIS_VERSION（既定 v3・v2 で
+        # 旧版へ戻す）。MCP（factory）と Slack（slack_bot）はどちらも引数なしで作るので env が効く。
+        self._synthesis_version = synthesis_version or synthesis_version_from_env()
         self._searcher = searcher
         self._downloader = downloader
         self._proxy = proxy
@@ -1194,6 +1199,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 requester=requested_by,
                 competitors=input.competitors,
                 avoid_terms=input.avoid_terms,
+                # 統合の版が違えば同じ KW でも作り直す（旧版の synthesis を返さない）。
+                synthesis_version=self._synthesis_version,
             )
             with _stage("cache_lookup", ctx.request_id):
                 cached = self._read_cached_output(result_cache, cache_key, ctx)
@@ -1552,10 +1559,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     analyzed,
                     input.query,
                     request_id=ctx.request_id,
-                    prompt_version=self._prompt_version,
+                    prompt_version=self._synthesis_version,
                     stats=cross.stats,
                     extra_context=self._kw_context(input),
                     roster=roster,
+                    board=pool,
+                    avoid_terms=input.avoid_terms,
                 )
             cross.synthesis = syn
             total_cost = round(total_cost + syn_cost, 6)

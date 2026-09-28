@@ -358,6 +358,8 @@ def test_active_result_cache_lease_stops_retry_before_quota_and_gemini(
         acquire_job_id=input_obj.acquire_job_id,
         search_volume=input_obj.search_volume,
         requester=ME,
+        # 統合の版（既定 v3）もキーに入る（版を変えたら旧い synthesis を返さない）
+        synthesis_version="v3",
     )
     assert cache.acquire_lease(cache_key, request_id="original") is not None
 

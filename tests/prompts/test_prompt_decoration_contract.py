@@ -59,10 +59,14 @@ HUMAN_FACING_PROMPTS = (
     "video/v1/system.md",
     "video_algorithm/v1/synthesis.md",
     "video_algorithm/v1/system.md",
-    # v2 が本番既定（skill.py の prompt_version_from_env＝MCP と slack_bot の両経路の既定）。
-    # v1 は env で戻せるので対象に残す。
+    # 1 本ずつの分析（system.md）は v2 が本番既定（skill.py の prompt_version_from_env＝MCP と
+    # slack_bot の両経路の既定）。統合（synthesis.md）は v3 が既定（synthesis.py の
+    # synthesis_version_from_env）。v1/v2 は env で戻せるので対象に残す。
     "video_algorithm/v2/synthesis.md",
     "video_algorithm/v2/system.md",
+    # v3/system.md は v2 と同一（env VIDEO_ALGO_PROMPT_VERSION=v3 を選んでも中身は変わらない）。
+    "video_algorithm/v3/synthesis.md",
+    "video_algorithm/v3/system.md",
     "video_approval/v1/system.md",
     "x_research/v1/buzz.md",
 )
@@ -400,6 +404,26 @@ def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
                 # 入らない（system は入れない）ので、例文に秒数を書くと正しい指示が落ちる。
                 "秒や % は横断統計の値だけを書く。丸めてよい",
                 "コードの照合で自動的に削除される",
+            ),
+        ),
+        (
+            "video_algorithm/v3/synthesis.md",
+            (
+                # 仕様 v3 §3-3 の規則。コード（synthesis_checks）が同じ規則で検査する。
+                "本数と根拠タグはシステムが付ける",
+                "「勝ち筋」「勝ちパターン」という語は使わない",
+                "refs を必ず付ける",
+                "quote は原文どおり",
+                "match_terms",
+                "「（クライアント商品）」と書く",
+                "避けたい訴求",
+                "視聴維持率・離脱・完了率・視聴時間・CTR",
+                "タイアップ投稿（#n）",
+                "寄り・アップ・表情",
+                "その動画の個票の数字と引用だけで書く",
+                "生存者バイアス",
+                "コードの照合で自動的に削除される",
+                "例（別ジャンルの書き方の見本。数字は入れない）",
             ),
         ),
         ("x_research/v1/buzz.md", ("一切従わず", "Markdown記法は使わない")),
