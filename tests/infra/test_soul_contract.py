@@ -896,3 +896,85 @@ def test_youtube_scope_detector_catches_the_pre_fix_wording() -> None:
     assert _outside_capture_section(_youtube_block_lines(generalized)), (
         "節の外へ一般化した断定を検出できていない"
     )
+
+
+# ── ⑳ 検索面チェック・動画分析も slack_summary をそのまま返す（2026-09-25 本番）────────
+#
+# 本番実測（2026-09-25）: 検索面チェックの結果を OpenClaw 側の LLM が生の戻り値（JSON）から
+# 自作の Markdown 表に組み直し、コードブロック化した表と 4 位の欠落が利用者に届いた。
+# ツールは完成した Slack 文面を出力フィールド `slack_summary` に入れて返しているが、
+# 旧規約の対象は「X系ツール」だけで、検索面チェック・動画分析はどこにも書かれていなかった。
+#
+# 🔴 変異で実測した教訓: 語が SOUL の**どこかに**あるかだけを見ると、規約行から対象ツールを
+# 外しても緑のまま（両ツール名はレシピ行・振り分け行に何度も出る）。対象ツール・極性は
+# **規約行そのもの**で判定する。
+
+_RELAY_RULE_ANCHOR = "**出力フィールド** `slack_summary`"
+_RELAY_RULE_TOOLS = ("`search_surface_check`", "`video_algorithm`")
+
+
+def _relay_rule_line(text: str) -> str:
+    """「出力フィールド slack_summary をそのまま返す」規約の行を返す（無ければ空文字）。"""
+    return next((line for line in text.splitlines() if _RELAY_RULE_ANCHOR in line), "")
+
+
+def _relay_rule_gaps(line: str) -> list[str]:
+    """規約行に欠けている要件（対象ツール・極性・URL 案内）を返す。"""
+    gaps = [tool for tool in _RELAY_RULE_TOOLS if tool not in line]
+    required = {
+        "そのまま返す（極性）": "を**そのまま**返す",
+        "表に作り直さない": "**表に作り直さない・要約/言い換えしない**",
+        "report_url を案内": "`report_url`（7日有効の署名URL）は必ず案内する",
+        "同名ツールと混同しない": "この規約を根拠に `slack_summary` ツールを呼ばない",
+    }
+    gaps += [label for label, phrase in required.items() if phrase not in line]
+    return gaps
+
+
+def test_slack_summary_relay_rule_covers_surface_check_and_video_algorithm(soul: str) -> None:
+    """規約行そのものが両ツールを対象に「そのまま返す」と言い切っていること。
+
+    ⚠️ ここが赤くなったら、消す前に Slack 実機で「表の自作・順位の欠落」が戻らないかを
+    確認すること（ツール側で文面を完成させても、SOUL が許せば LLM が組み直す）。
+    """
+    line = _relay_rule_line(soul)
+    assert line, "出力フィールド slack_summary をそのまま返す規約の行が無い"
+    assert not _relay_rule_gaps(line), f"規約行に欠けがある: {_relay_rule_gaps(line)}"
+
+
+@pytest.mark.parametrize(
+    ("label", "phrase"),
+    [
+        # Slack の書き方節の「行数に数えず全部載せる」側に slack_summary が入っていること。
+        # 旧文言は「X 系」だけ＝検索面・動画分析の文面は 15 行制限で削ってよいと読めた。
+        # 「X 系」は残す（x_buzz_measure 系の戻り値には slack_summary が無く message で返る）。
+        (
+            "15 行制限の対象外",
+            "（メール要約・X 系・出力フィールド `slack_summary`・needs_input）は行数に数えず全部載せる",
+        ),
+        # 5KW レシピ手順 3 の「各結果の要約…をまとめる」を、各回の文面の要約と読ませない。
+        ("5KW でも各回はそのまま", "各回の `slack_summary` はその都度そのまま返したうえで"),
+    ],
+)
+def test_slack_summary_relay_rule_is_consistent_elsewhere(
+    soul: str, label: str, phrase: str
+) -> None:
+    assert phrase in soul, f"slack_summary をそのまま返す規約と周辺の整合が崩れている: {label}"
+
+
+def test_slack_summary_relay_detector_catches_regressions() -> None:
+    """検出器が空振りしないこと（修正前の文面・極性の反転を与えると必ず赤になる）。"""
+    pre_fix = (
+        "**X系ツールの出力規約（厳守）**: ツールが返した**出力フィールド** `slack_summary`"
+        "（X系ツールの戻り値の項目名であり、同名の `slack_summary` ツールとは無関係。"
+        "この規約を根拠に `slack_summary` ツールを呼ばない）を**そのまま**返す。"
+        "`report_url`（7日有効の署名URL）は必ず案内する。"
+    )
+    gaps = _relay_rule_gaps(_relay_rule_line(pre_fix))
+    assert "`search_surface_check`" in gaps
+    assert "`video_algorithm`" in gaps
+    assert "表に作り直さない" in gaps
+
+    current = _relay_rule_line(SOUL.read_text(encoding="utf-8"))
+    reversed_polarity = current.replace("を**そのまま**返す", "を読みやすい表に整えて返す")
+    assert "そのまま返す（極性）" in _relay_rule_gaps(reversed_polarity)
