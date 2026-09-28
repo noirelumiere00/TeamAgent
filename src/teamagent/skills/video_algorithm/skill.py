@@ -579,12 +579,21 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         user_email: str = "",
         apify_budget: _ApifyFallbackBudget | None = None,
         media_extras: bool = True,
+        scene_frames: bool = False,
+        frame_width: int = 320,
+        preview: bool = True,
+        strict_extras: bool = True,
     ) -> AnalyzedVideo:
         """1 本を取得→圧縮→Gemini で分析する。
 
         ``media_extras=False`` はレポート用の付属物（実フレーム・サムネ色・Web プレビュー動画）を
-        作らない（media job を呼ばない）。分析の中身（Gemini の JSON）は同じ。検索上位チェックの
-        2 段目のように、文字だけの章を作る呼び出し元が時間と失敗点を減らすために使う。
+        作らない（media job を呼ばない）。分析の中身（Gemini の JSON）は同じ。
+        以下は検索上位チェックの 2 段目（場面ごとの構成表）が使う。既定は run と同じ動き:
+        - ``scene_frames=True``: フレームを場面ごと（場面の中央の秒・最大 12 コマ）に抜く。
+        - ``frame_width``: フレームの幅（px）。構成表の小さいコマは 180 で足りる。
+        - ``preview=False``: Web プレビュー動画（1 本最大 6MB の data URI）を作らない。
+        - ``strict_extras=False``: フレーム・サムネの media job が失敗しても、分析（課金済み）を
+          捨てずに付属物なしで返す。
         """
         acquired_via = ""
         try:
@@ -607,6 +616,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     request_id=request_id,
                     cause=type(e).__name__,
                     media_extras=media_extras,
+                    strict_extras=strict_extras,
                 )
             data, mime = recovered
             acquired_via = ACQUIRED_VIA_APIFY
@@ -627,6 +637,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 request_id=request_id,
                 cause=type(e).__name__,
                 media_extras=media_extras,
+                strict_extras=strict_extras,
             )
 
         user_prompt = (
@@ -652,98 +663,45 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analysis = parse_analysis(resp.text)
         frames: list[FrameShot] = []
         if analysis is not None and media_extras:
-            with _stage("frames", request_id, meta.rank):
-                # proxy 後の検証済み bytes を使い回して実フレームを抽出（graceful）
-                from teamagent.skills.video_algorithm.frames import extract_frames, pick_timecodes
-
-                tcs = pick_timecodes(analysis, max_frames=6)
-                if tcs:
-                    cap_by_sec = {round(s, 1): c for s, c in tcs}
-                    from teamagent.adapters.media_job import MediaJobClient
-
-                    if MediaJobClient.is_configured():
-                        import base64
-                        import hashlib
-
-                        fingerprint = hashlib.sha256(data).hexdigest()
-                        try:
-                            media_shots = MediaJobClient().extract_frames(
-                                data,
-                                mime,
-                                [s for s, _ in tcs],
-                                width=320,
-                                request_fingerprint=f"{request_id}:frames:{fingerprint}",
-                            )
-                            shots = [
-                                (
-                                    second,
-                                    "data:image/jpeg;base64,"
-                                    + base64.b64encode(image).decode("ascii"),
-                                )
-                                for second, image in media_shots
-                            ]
-                        except Exception as exc:
-                            logger.warning(
-                                "video_algorithm_frames_failed",
-                                rank=meta.rank,
-                                error=type(exc).__name__,
-                            )
-                            raise RuntimeError("MEDIA_FRAME_JOB_FAILED") from exc
-                    elif MediaJobClient.local_runtime_enabled():
-                        shots = extract_frames(
-                            data, mime, [s for s, _ in tcs], width=320, request_id=request_id
-                        )
-                    else:
-                        MediaJobClient.require_configured()
-                        raise AssertionError("unreachable")
-                    frames = [
-                        FrameShot(
-                            sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri
-                        )
-                        for s, uri in shots
-                    ]
+            try:
+                frames = self._extract_frames(
+                    analysis,
+                    data,
+                    mime,
+                    rank=meta.rank,
+                    request_id=request_id,
+                    scene_frames=scene_frames,
+                    width=frame_width,
+                )
+            except Exception as exc:
+                if strict_extras:
+                    raise
+                logger.warning(
+                    "video_algorithm_frames_skipped", rank=meta.rank, error=type(exc).__name__
+                )
+                frames = []
         # サムネ色（検索一覧タイル）: cover_url を取得、失敗時は先頭フレームを流用
         cover_uri: str = ""
         thumb: ThumbColor | None = None
         if media_extras:
             with _stage("thumbnail", request_id, meta.rank):
-                cover_uri, thumb = self._build_thumb(meta.cover_url, frames, request_id)
+                # 場面ごとのコマ（scene_frames）は小さく、先頭の場面は表紙と限らないので、
+                # そのときは表紙の URL から作る（失敗したら描画側が先頭のコマで代える）。
+                head = [] if scene_frames else frames
+                try:
+                    cover_uri, thumb = self._build_thumb(meta.cover_url, head, request_id)
+                except Exception as exc:
+                    if strict_extras:
+                        raise
+                    logger.warning(
+                        "video_algorithm_thumbnail_skipped",
+                        rank=meta.rank,
+                        error=type(exc).__name__,
+                    )
         # タイムラインで実再生する軽量Webプレビュー動画（~480p・graceful。失敗時は静止フレーム）
         video_uri = ""
-        if analysis is not None and media_extras:
-            with _stage("preview", request_id, meta.rank):
-                from teamagent.adapters.media_job import MediaJobClient
-
-                if MediaJobClient.is_configured():
-                    import base64
-                    import hashlib
-
-                    fingerprint = hashlib.sha256(data).hexdigest()
-                    try:
-                        preview, _preview_mime = MediaJobClient().proxy_video(
-                            data,
-                            mime,
-                            request_fingerprint=f"{request_id}:preview:{fingerprint}",
-                            limit_bytes=6 * 1024 * 1024,
-                            preview=True,
-                        )
-                        video_uri = "data:video/mp4;base64," + base64.b64encode(preview).decode(
-                            "ascii"
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "video_algorithm_preview_failed",
-                            rank=meta.rank,
-                            error=type(exc).__name__,
-                        )
-                        raise RuntimeError("MEDIA_PREVIEW_JOB_FAILED") from exc
-                elif MediaJobClient.local_runtime_enabled():
-                    from teamagent.adapters.video_proxy import make_web_preview
-
-                    video_uri = make_web_preview(data, mime, request_id=request_id)
-                else:
-                    MediaJobClient.require_configured()
-                    raise AssertionError("unreachable")
+        if analysis is not None and media_extras and preview:
+            video_uri = self._build_preview(data, mime, rank=meta.rank, request_id=request_id)
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -756,6 +714,108 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             model_id=getattr(resp, "model_id", None),
             acquired_via=acquired_via,
         )
+
+    def _extract_frames(
+        self,
+        analysis: VideoVSEOAnalysis,
+        data: bytes,
+        mime: str,
+        *,
+        rank: int,
+        request_id: str,
+        scene_frames: bool,
+        width: int,
+    ) -> list[FrameShot]:
+        """proxy 後の検証済み bytes を使い回して実フレームを抽出する。"""
+        with _stage("frames", request_id, rank):
+            from teamagent.skills.video_algorithm.frames import (
+                extract_frames,
+                pick_timecodes,
+                scene_timecodes,
+            )
+
+            tcs = (
+                scene_timecodes(analysis)
+                if scene_frames
+                else pick_timecodes(analysis, max_frames=6)
+            )
+            if not tcs:
+                return []
+            cap_by_sec = {round(s, 1): c for s, c in tcs}
+            from teamagent.adapters.media_job import MediaJobClient
+
+            if MediaJobClient.is_configured():
+                import base64
+                import hashlib
+
+                fingerprint = hashlib.sha256(data).hexdigest()
+                try:
+                    media_shots = MediaJobClient().extract_frames(
+                        data,
+                        mime,
+                        [s for s, _ in tcs],
+                        width=width,
+                        request_fingerprint=f"{request_id}:frames:{fingerprint}",
+                    )
+                    shots = [
+                        (
+                            second,
+                            "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+                        )
+                        for second, image in media_shots
+                    ]
+                except Exception as exc:
+                    logger.warning(
+                        "video_algorithm_frames_failed",
+                        rank=rank,
+                        error=type(exc).__name__,
+                    )
+                    raise RuntimeError("MEDIA_FRAME_JOB_FAILED") from exc
+            elif MediaJobClient.local_runtime_enabled():
+                shots = extract_frames(
+                    data, mime, [s for s, _ in tcs], width=width, request_id=request_id
+                )
+            else:
+                MediaJobClient.require_configured()
+                raise AssertionError("unreachable")
+            return [
+                FrameShot(sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri)
+                for s, uri in shots
+            ]
+
+    def _build_preview(self, data: bytes, mime: str, *, rank: int, request_id: str) -> str:
+        """タイムラインで実再生する軽量 Web プレビュー動画（~480p）の data URI。"""
+        with _stage("preview", request_id, rank):
+            from teamagent.adapters.media_job import MediaJobClient
+
+            if MediaJobClient.is_configured():
+                import base64
+                import hashlib
+
+                fingerprint = hashlib.sha256(data).hexdigest()
+                try:
+                    preview, _preview_mime = MediaJobClient().proxy_video(
+                        data,
+                        mime,
+                        request_fingerprint=f"{request_id}:preview:{fingerprint}",
+                        limit_bytes=6 * 1024 * 1024,
+                        preview=True,
+                    )
+                    return "data:video/mp4;base64," + base64.b64encode(preview).decode("ascii")
+                except Exception as exc:
+                    logger.warning(
+                        "video_algorithm_preview_failed",
+                        rank=rank,
+                        error=type(exc).__name__,
+                    )
+                    raise RuntimeError("MEDIA_PREVIEW_JOB_FAILED") from exc
+            elif MediaJobClient.local_runtime_enabled():
+                from teamagent.adapters.video_proxy import make_web_preview
+
+                return make_web_preview(data, mime, request_id=request_id)
+            else:
+                MediaJobClient.require_configured()
+                raise AssertionError("unreachable")
 
     def _apify_fallback_fetch(
         self,
@@ -838,6 +898,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         request_id: str,
         cause: str,
         media_extras: bool = True,
+        strict_extras: bool = True,
     ) -> AnalyzedVideo:
         """動画DL全滅時の縮退: cover(サムネ静止画)1枚だけを Gemini に渡す軽量分析。
 
@@ -888,9 +949,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             logger.warning("video_algorithm_cover_failed", rank=meta.rank, error=type(e).__name__)
             return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
         analysis = parse_analysis(resp.text)
-        cover_uri, thumb = (
-            self._build_thumb(meta.cover_url, [], request_id) if media_extras else ("", None)
-        )
+        cover_uri: str = ""
+        thumb: ThumbColor | None = None
+        if media_extras:
+            try:
+                cover_uri, thumb = self._build_thumb(meta.cover_url, [], request_id)
+            except Exception as exc:
+                if strict_extras:
+                    raise
+                logger.warning(
+                    "video_algorithm_thumbnail_skipped", rank=meta.rank, error=type(exc).__name__
+                )
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -990,17 +1059,29 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         request_id: str,
         user_email: str = "",
         media_extras: bool = False,
+        scene_frames: bool = False,
+        frame_width: int = 320,
+        preview: bool = True,
+        system_addendum: str = "",
     ) -> list[AnalyzedVideo]:
         """選び済みの動画を分析して順位順で返す（検索も quota の予約もしない）。
 
         run と同じ部品（``_analyze_one``: 取得→圧縮→Gemini。取得できなければサムネだけの分析へ
         縮退）を、run と同じ並列数（VIDEO_ALGORITHM_MAX_WORKERS・既定 3）で回す。
         run と違い、1 本の例外（media job の失敗など）はその 1 本だけの失敗カードにして、
-        ほかの動画の分析（課金済み）を捨てない。quota は呼び出し側が先に予約しておくこと。
+        ほかの動画の分析（課金済み）を捨てない。フレーム・サムネの media job の失敗は、付属物なしで
+        分析を返す（``strict_extras=False``）。quota は呼び出し側が先に予約しておくこと。
+
+        ``system_addendum`` は 1 本ずつの system プロンプト（video_algorithm の v1/v2）の末尾に足す
+        指示（検索上位チェックの 2 段目が場面ごとの役割・テロップ・発話・狙いを頼むのに使う）。
+        video_algorithm の run はこれを使わないので、run の出力と結果キャッシュは変わらない。
+        ``scene_frames``・``frame_width``・``preview`` は ``_analyze_one`` と同じ。
         """
         if not metas:
             return []
         system = load_prompt("video_algorithm", self._prompt_version, "system")
+        if system_addendum.strip():
+            system = system.rstrip() + "\n\n" + system_addendum.strip() + "\n"
         apify_budget = _ApifyFallbackBudget(
             max_videos=fallback_max_videos(),
             wallclock_s=_apify_wallclock_budget_s(),
@@ -1017,6 +1098,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     user_email=user_email,
                     apify_budget=apify_budget,
                     media_extras=media_extras,
+                    scene_frames=scene_frames,
+                    frame_width=frame_width,
+                    preview=preview,
+                    strict_extras=False,
                 )
             except Exception as exc:  # 1 本の失敗で他の分析を捨てない
                 logger.warning(
