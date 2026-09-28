@@ -27,6 +27,7 @@ from teamagent.adapters.tiktok_scraper import (
     TikTokVideo,
     search_tiktok,
 )
+from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.proposal_builder.research import (
     build_quantitative_evidence,
@@ -1387,10 +1388,13 @@ class ProposalBuilderSubmitSkill(
                 error_at=_error_location(exc),
             )
             try:
+                # 利用者向けの理由も台帳に残す。status が返さないと OC 側のモデルが原因を
+                # 推測して誤説明する（2026-09-16 15:55 実測「gemini_json の構造の問題」）。
                 self._store.mark_failed(
                     job_id,
                     _PROPOSAL_JOB_ERROR_CODE,
                     expected_statuses=("running",),
+                    error_summary=_error_summary(exc),
                 )
             except Exception as write_exc:
                 log.warning(
@@ -1542,11 +1546,25 @@ class ProposalBuilderStatusSkill(
             return self._done_output(input.job_id, row)
         if status == "failed":
             error_code = row.get("error_code")
+            raw_summary = row.get("error_summary")
+            # 台帳の要約は例外文そのもの（運用の手がかり）。利用者へ返す前に URL を伏せる
+            # （署名付き URL や内部のエンドポイントが例外文に載ることがあるため）。
+            error_summary = (
+                sanitize_llm_text(raw_summary, max_len=300)
+                if isinstance(raw_summary, str) and raw_summary.strip()
+                else None
+            )
+            message = (
+                f"提案書生成に失敗しました。理由: {error_summary}"
+                if error_summary
+                else "提案書生成に失敗しました。error_codeを確認してください。"
+            )
             return ProposalBuilderStatusOutput(
                 job_id=input.job_id,
                 status="failed",
                 error_code=error_code if isinstance(error_code, str) else "JOB_STATE_INVALID",
-                message="提案書生成に失敗しました。error_codeを確認してください。",
+                error_summary=error_summary,
+                message=message,
             )
         if status in ("queued", "running"):
             message = (

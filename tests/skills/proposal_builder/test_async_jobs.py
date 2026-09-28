@@ -157,6 +157,24 @@ def test_background_exception_becomes_failed_with_error_code() -> None:
     )
     assert failed.status == "failed"
     assert failed.error_code == "PROPOSAL_BUILD_FAILED"
+    # 利用者向けの理由が status に載る（OC 側のモデルが原因を推測しなくて済む）
+    assert failed.error_summary == "synthetic production failure"
+    assert failed.message == "提案書生成に失敗しました。理由: synthetic production failure"
+
+
+def test_failed_status_without_summary_keeps_generic_message() -> None:
+    store = ProposalJobStore(table_name="", memory={})
+    store.create_job("pb_plain", {"request_id": "plain"})
+    assert store.mark_running("pb_plain") is True
+    assert store.mark_failed("pb_plain", "MCP_RESTARTED") is True
+    failed = ProposalBuilderStatusSkill(store=store).run(
+        ProposalBuilderStatusInput(job_id="pb_plain"),
+        _ctx(),
+    )
+    assert failed.status == "failed"
+    assert failed.error_code == "MCP_RESTARTED"
+    assert failed.error_summary is None
+    assert failed.message == "提案書生成に失敗しました。error_codeを確認してください。"
 
 
 def test_thread_start_failure_is_persisted() -> None:
@@ -382,3 +400,22 @@ def test_background_failure_summary_excludes_model_output_fragments() -> None:
     assert "SECRET-MODEL-TEXT" not in summary
     assert "[type=" not in summary
     assert len(summary) <= 300
+
+
+def test_failed_status_masks_urls_in_error_summary() -> None:
+    """例外文に載った URL（署名付き URL など）を利用者向けの理由に出さない。"""
+    store = ProposalJobStore(table_name="", memory={})
+    store.create_job("pb_url", {"request_id": "url"})
+    assert store.mark_running("pb_url") is True
+    assert store.mark_failed(
+        "pb_url",
+        "PROPOSAL_BUILD_FAILED",
+        error_summary="upload failed: https://bucket.s3.amazonaws.com/deck.pptx?X-Amz-Signature=abc",
+    )
+    failed = ProposalBuilderStatusSkill(store=store).run(
+        ProposalBuilderStatusInput(job_id="pb_url"),
+        _ctx(),
+    )
+    assert failed.error_summary is not None
+    assert "https://" not in failed.error_summary and "X-Amz-Signature" not in failed.message
+    assert failed.message.startswith("提案書生成に失敗しました。理由: upload failed:")
