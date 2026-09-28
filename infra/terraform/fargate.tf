@@ -601,6 +601,14 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_TIKTOK_APIFY_FALLBACK", value = var.use_tiktok_apify_fallback },
       { name = "VIDEO_ALGORITHM_APIFY_WALLCLOCK_S", value = var.video_algorithm_apify_wallclock_s },
       { name = "VIDEO_ALGORITHM_RESULT_CACHE_ENABLED", value = var.video_algorithm_result_cache_enabled },
+      # 2026-09-28: 動画分析の切り離し（既定 OFF＝今と同じ・mcp_gateway/detached_jobs.py）。
+      # ON にしても allowlist が空なら誰にも適用しない。段階は TD の env 差し替えで進める。
+      { name = "USE_VIDEO_ALGORITHM_DETACH", value = var.use_video_algorithm_detach },
+      { name = "VIDEO_ALGORITHM_DETACH_AFTER_S", value = var.video_algorithm_detach_after_s },
+      { name = "VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS", value = var.video_algorithm_detach_allowed_emails },
+      { name = "VIDEO_ALGORITHM_DETACH_DM_ONLY", value = var.video_algorithm_detach_dm_only },
+      { name = "VIDEO_ALGORITHM_MAX_BACKGROUND", value = var.video_algorithm_max_background },
+      { name = "VIDEO_ALGORITHM_CACHE_LEASE_SECONDS", value = var.video_algorithm_cache_lease_seconds },
       # Conditional PutItemでrolling taskを跨いだnonce one-useを保証。障害時は認可fail-closed。
       { name = "TEAMAGENT_CALLER_CLAIM_REPLAY_TABLE", value = aws_dynamodb_table.mcp_caller_claim_nonces.name },
       # v0.3 Task6: AiLaVault リンク注入の発火条件（未設定だと build_search_web_links が

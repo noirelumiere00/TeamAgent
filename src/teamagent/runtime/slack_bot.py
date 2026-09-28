@@ -47,6 +47,13 @@ from teamagent.runtime.request_gate import (
 )
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder, UsageTrace
 from teamagent.skills._shared.mail_connection import CONNECT_SUFFIX, NOT_CONNECTED_MESSAGE
+
+# skill の slack_summary は OpenClaw 経由（Markdown→mrkdwn 変換あり）を正として `**` で書くが、
+# この Bot は chat.postMessage へ直接 mrkdwn で出すため変換が掛からない
+# （mcp の detach 完了投稿と共用）。
+from teamagent.skills._shared.slack_mrkdwn import (
+    markdown_bold_to_mrkdwn as _markdown_bold_to_mrkdwn,
+)
 from teamagent.skills._shared.source_url import slack_thread_permalink as _slack_thread_permalink
 from teamagent.skills.base import SkillContext
 from teamagent.skills.router import SkillRouter
@@ -296,16 +303,6 @@ def _first_line(analysis: str) -> str:
         if ln and not ln.startswith("#"):
             return ln[:90]
     return (analysis.strip()[:90]) or "（要約なし）"
-
-
-# 標準 Markdown の太字 `**語**`。skill の slack_summary は OpenClaw 経由（Markdown→mrkdwn 変換あり）
-# を正として `**` で書くが、この Bot は chat.postMessage へ直接 mrkdwn で出すため変換が掛からない。
-_MARKDOWN_BOLD_PATTERN = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
-
-
-def _markdown_bold_to_mrkdwn(text: str) -> str:
-    """`**語**` を Slack mrkdwn の太字 `*語*` へ直す（直接投稿の経路専用・他の記法は素通し）。"""
-    return _MARKDOWN_BOLD_PATTERN.sub(r"*\1*", text)
 
 
 def _fmt_count(n: int) -> str:

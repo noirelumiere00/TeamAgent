@@ -16,8 +16,9 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Event, Lock, Thread
 from typing import Any, ClassVar, Literal
 
@@ -56,6 +57,32 @@ from teamagent.skills.video_algorithm.schema import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+@contextmanager
+def _stage(stage: str, request_id: str, rank: int | None = None) -> Iterator[None]:
+    """工程ごとの所要時間を ``video_algorithm_stage`` として出す（計測のみ・処理は変えない）。
+
+    2026-09-25 の 555 秒の内訳（media の Fargate 起動待ち・Gemini・仕上げ）を推測でなく
+    実測で分けるための計器。失敗した工程も outcome=error で所要を残し、例外はそのまま流す。
+    """
+    started = time.perf_counter()
+    outcome = "ok"
+    try:
+        yield
+    except BaseException:
+        outcome = "error"
+        raise
+    finally:
+        logger.info(
+            "video_algorithm_stage",
+            stage=stage,
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            rank=rank,
+            outcome=outcome,
+            request_id=request_id,
+        )
+
 
 _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 
@@ -541,7 +568,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     ) -> AnalyzedVideo:
         acquired_via = ""
         try:
-            data, mime = self._download(meta.url, request_id, downloader=downloader)
+            with _stage("download", request_id, meta.rank):
+                data, mime = self._download(meta.url, request_id, downloader=downloader)
         except Exception as e:  # 取得失敗 → 二段構え（opt-in）→ それでも無理ならサムネ縮退
             logger.warning("video_algorithm_fetch_failed", rank=meta.rank, error=type(e).__name__)
             recovered = (
@@ -558,7 +586,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             data, mime = recovered
             acquired_via = ACQUIRED_VIA_APIFY
         try:
-            data, mime = self._shrink(data, mime, request_id)
+            with _stage("shrink", request_id, meta.rank):
+                data, mime = self._shrink(data, mime, request_id)
         except Exception as e:  # 圧縮失敗 → サムネのみの軽量分析へ縮退（全滅回避）
             logger.warning(
                 "video_algorithm_fetch_failed",
@@ -578,9 +607,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             "この動画を実際に視聴し、システム指示のJSON形式で VSEO 構造分析を出力してください。"
         )
         try:
-            resp = self._client().analyze_video_bytes(
-                data=data, mime_type=mime, prompt=user_prompt, request_id=request_id, system=system
-            )
+            with _stage("gemini", request_id, meta.rank):
+                resp = self._client().analyze_video_bytes(
+                    data=data,
+                    mime_type=mime,
+                    prompt=user_prompt,
+                    request_id=request_id,
+                    system=system,
+                )
         except Exception as e:
             logger.warning("video_algorithm_gemini_failed", rank=meta.rank, error=type(e).__name__)
             return AnalyzedVideo(meta=meta, error=f"分析失敗: {type(e).__name__}")
@@ -588,12 +622,63 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analysis = parse_analysis(resp.text)
         frames: list[FrameShot] = []
         if analysis is not None:
-            # proxy 後の検証済み bytes を使い回して実フレームを抽出（graceful）
-            from teamagent.skills.video_algorithm.frames import extract_frames, pick_timecodes
+            with _stage("frames", request_id, meta.rank):
+                # proxy 後の検証済み bytes を使い回して実フレームを抽出（graceful）
+                from teamagent.skills.video_algorithm.frames import extract_frames, pick_timecodes
 
-            tcs = pick_timecodes(analysis, max_frames=6)
-            if tcs:
-                cap_by_sec = {round(s, 1): c for s, c in tcs}
+                tcs = pick_timecodes(analysis, max_frames=6)
+                if tcs:
+                    cap_by_sec = {round(s, 1): c for s, c in tcs}
+                    from teamagent.adapters.media_job import MediaJobClient
+
+                    if MediaJobClient.is_configured():
+                        import base64
+                        import hashlib
+
+                        fingerprint = hashlib.sha256(data).hexdigest()
+                        try:
+                            media_shots = MediaJobClient().extract_frames(
+                                data,
+                                mime,
+                                [s for s, _ in tcs],
+                                width=320,
+                                request_fingerprint=f"{request_id}:frames:{fingerprint}",
+                            )
+                            shots = [
+                                (
+                                    second,
+                                    "data:image/jpeg;base64,"
+                                    + base64.b64encode(image).decode("ascii"),
+                                )
+                                for second, image in media_shots
+                            ]
+                        except Exception as exc:
+                            logger.warning(
+                                "video_algorithm_frames_failed",
+                                rank=meta.rank,
+                                error=type(exc).__name__,
+                            )
+                            raise RuntimeError("MEDIA_FRAME_JOB_FAILED") from exc
+                    elif MediaJobClient.local_runtime_enabled():
+                        shots = extract_frames(
+                            data, mime, [s for s, _ in tcs], width=320, request_id=request_id
+                        )
+                    else:
+                        MediaJobClient.require_configured()
+                        raise AssertionError("unreachable")
+                    frames = [
+                        FrameShot(
+                            sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri
+                        )
+                        for s, uri in shots
+                    ]
+        # サムネ色（検索一覧タイル）: cover_url を取得、失敗時は先頭フレームを流用
+        with _stage("thumbnail", request_id, meta.rank):
+            cover_uri, thumb = self._build_thumb(meta.cover_url, frames, request_id)
+        # タイムラインで実再生する軽量Webプレビュー動画（~480p・graceful。失敗時は静止フレーム）
+        video_uri = ""
+        if analysis is not None:
+            with _stage("preview", request_id, meta.rank):
                 from teamagent.adapters.media_job import MediaJobClient
 
                 if MediaJobClient.is_configured():
@@ -602,73 +687,30 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
                     fingerprint = hashlib.sha256(data).hexdigest()
                     try:
-                        media_shots = MediaJobClient().extract_frames(
+                        preview, _preview_mime = MediaJobClient().proxy_video(
                             data,
                             mime,
-                            [s for s, _ in tcs],
-                            width=320,
-                            request_fingerprint=f"{request_id}:frames:{fingerprint}",
+                            request_fingerprint=f"{request_id}:preview:{fingerprint}",
+                            limit_bytes=6 * 1024 * 1024,
+                            preview=True,
                         )
-                        shots = [
-                            (
-                                second,
-                                "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
-                            )
-                            for second, image in media_shots
-                        ]
+                        video_uri = "data:video/mp4;base64," + base64.b64encode(preview).decode(
+                            "ascii"
+                        )
                     except Exception as exc:
                         logger.warning(
-                            "video_algorithm_frames_failed",
+                            "video_algorithm_preview_failed",
                             rank=meta.rank,
                             error=type(exc).__name__,
                         )
-                        raise RuntimeError("MEDIA_FRAME_JOB_FAILED") from exc
+                        raise RuntimeError("MEDIA_PREVIEW_JOB_FAILED") from exc
                 elif MediaJobClient.local_runtime_enabled():
-                    shots = extract_frames(
-                        data, mime, [s for s, _ in tcs], width=320, request_id=request_id
-                    )
+                    from teamagent.adapters.video_proxy import make_web_preview
+
+                    video_uri = make_web_preview(data, mime, request_id=request_id)
                 else:
                     MediaJobClient.require_configured()
                     raise AssertionError("unreachable")
-                frames = [
-                    FrameShot(sec=s, caption=cap_by_sec.get(round(s, 1), f"{s:.0f}s"), data_uri=uri)
-                    for s, uri in shots
-                ]
-        # サムネ色（検索一覧タイル）: cover_url を取得、失敗時は先頭フレームを流用
-        cover_uri, thumb = self._build_thumb(meta.cover_url, frames, request_id)
-        # タイムラインで実再生する軽量Webプレビュー動画（~480p・graceful。失敗時は静止フレーム）
-        video_uri = ""
-        if analysis is not None:
-            from teamagent.adapters.media_job import MediaJobClient
-
-            if MediaJobClient.is_configured():
-                import base64
-                import hashlib
-
-                fingerprint = hashlib.sha256(data).hexdigest()
-                try:
-                    preview, _preview_mime = MediaJobClient().proxy_video(
-                        data,
-                        mime,
-                        request_fingerprint=f"{request_id}:preview:{fingerprint}",
-                        limit_bytes=6 * 1024 * 1024,
-                        preview=True,
-                    )
-                    video_uri = "data:video/mp4;base64," + base64.b64encode(preview).decode("ascii")
-                except Exception as exc:
-                    logger.warning(
-                        "video_algorithm_preview_failed",
-                        rank=meta.rank,
-                        error=type(exc).__name__,
-                    )
-                    raise RuntimeError("MEDIA_PREVIEW_JOB_FAILED") from exc
-            elif MediaJobClient.local_runtime_enabled():
-                from teamagent.adapters.video_proxy import make_web_preview
-
-                video_uri = make_web_preview(data, mime, request_id=request_id)
-            else:
-                MediaJobClient.require_configured()
-                raise AssertionError("unreachable")
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -914,7 +956,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 search_volume=input.search_volume,
                 requester=requested_by,
             )
-            cached = self._read_cached_output(result_cache, cache_key, ctx)
+            with _stage("cache_lookup", ctx.request_id):
+                cached = self._read_cached_output(result_cache, cache_key, ctx)
             if cached is not None and self._cache_has_requested_artifacts(
                 cached[0], cached[1], input
             ):
@@ -930,7 +973,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         lease: VideoAlgorithmCacheLease | None = None
         if result_cache is not None and cache_key is not None:
             try:
-                lease = result_cache.acquire_lease(cache_key, request_id=ctx.request_id)
+                with _stage("lease", ctx.request_id):
+                    lease = result_cache.acquire_lease(cache_key, request_id=ctx.request_id)
             except VideoAlgorithmCacheLeaseHeldError as error:
                 # acquire 直前に元実行が core を commit した race を一度だけ再確認する。
                 cached = self._read_cached_output(result_cache, cache_key, ctx)
@@ -976,14 +1020,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             heartbeat.assert_owned if heartbeat is not None else None
                         ),
                     )
-            return self._run_uncached(
-                input,
-                ctx,
-                result_cache=result_cache,
-                cache_key=cache_key,
-                lease=lease,
-                assert_lease_owned=heartbeat.assert_owned if heartbeat is not None else None,
-            )
+            with _stage("total", ctx.request_id):
+                return self._run_uncached(
+                    input,
+                    ctx,
+                    result_cache=result_cache,
+                    cache_key=cache_key,
+                    lease=lease,
+                    assert_lease_owned=heartbeat.assert_owned if heartbeat is not None else None,
+                )
         except VideoAlgorithmCacheLeaseLostError as error:
             raise RuntimeError(
                 "VIDEO_ALGORITHM_LEASE_LOST: 処理中リースの所有権を失ったため、"
@@ -1151,7 +1196,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             call_downloader = _src.download
             log.info("video_algorithm_s3_source", job_id=input.acquire_job_id)
 
-        pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
+        with _stage("search", ctx.request_id):
+            pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
         if not pool:
             empty = VideoAlgorithmOutput(
                 query=input.query,
@@ -1207,14 +1253,18 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 assert_lease_owned()
             # 1波目（まだ 0 本）で足りなければ残数と選択肢を出して止める＝利用者に選ばせる。
             # 2波目以降は残数に丸めて進め、0 なら打ち切って**そこまでの成果を返す**。
-            reserved = self._reserve_quota(ctx, len(batch), allow_partial=bool(results))
+            with _stage("quota", ctx.request_id):
+                reserved = self._reserve_quota(ctx, len(batch), allow_partial=bool(results))
             if reserved <= 0:
                 quota_truncated = True
                 break
             batch = batch[:reserved]
             attempted += len(batch)
             workers = max(1, min(self._max_workers, len(batch)))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
+            with (
+                _stage("analyze_wave", ctx.request_id),
+                ThreadPoolExecutor(max_workers=workers) as ex,
+            ):
                 results.extend(
                     ex.map(
                         lambda m: self._analyze_one(
@@ -1240,7 +1290,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analyzed.sort(key=lambda v: v.meta.rank)
         backfilled = sum(1 for v in analyzed if v.analysis and v.meta.rank > target)
 
-        cross = cross_analyze(analyzed, input.query, board=pool)
+        with _stage("cross", ctx.request_id):
+            cross = cross_analyze(analyzed, input.query, board=pool)
         total_cost = round(sum(v.cost_usd for v in results), 6)  # 全試行の課金を計上
         # 横断シンセシス（Gemini 2nd pass・概念の関連性）。≥2本でのみ実行
         if sum(1 for v in analyzed if v.analysis) >= 2:
@@ -1248,14 +1299,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
             if assert_lease_owned is not None:
                 assert_lease_owned()
-            syn, syn_cost = synthesize(
-                self._client(),
-                analyzed,
-                input.query,
-                request_id=ctx.request_id,
-                stats=cross.stats,
-                extra_context=self._kw_context(input),
-            )
+            with _stage("synthesis", ctx.request_id):
+                syn, syn_cost = synthesize(
+                    self._client(),
+                    analyzed,
+                    input.query,
+                    request_id=ctx.request_id,
+                    stats=cross.stats,
+                    extra_context=self._kw_context(input),
+                )
             cross.synthesis = syn
             total_cost = round(total_cost + syn_cost, 6)
         model_id = next((v.model_id for v in analyzed if v.model_id), None)
@@ -1298,10 +1350,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         owns_request_dir = self._report_dir is None
         handed_off = False
         try:
-            out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
-            if out.report_html_path:
-                # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して署名URLを出力に載せる。
-                out.report_url = self._publish(out.report_html_path, ctx.request_id, input.query)
+            with _stage("report", ctx.request_id):
+                out.report_html_path = self._write_report(out, ctx.request_id, report_dir)
+                if out.report_html_path:
+                    # §M: 金庫外の OpenClaw 等が読めるよう、非公開S3へ発行して
+                    # 署名URLを出力に載せる。
+                    out.report_url = self._publish(
+                        out.report_html_path, ctx.request_id, input.query
+                    )
             if result_cache is not None and cache_key is not None and lease is not None:
                 # 後続slides/pptxだけが失敗しても、発行済みの高品質report URLは
                 # coreへcheckpointし、sanitized結果から再生成しない。
@@ -1319,7 +1375,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     ),
                 )
             if "slides" in input.outputs or "pptx" in input.outputs:
-                self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
+                with _stage("slides", ctx.request_id):
+                    self._build_proposal_outputs(out, input, ctx.request_id, report_dir)
             out.slack_summary = self._slack_summary(out, backfilled)
             if out.report_html_path is None and owns_request_dir and os.path.exists(report_dir):
                 # report生成失敗後にslidesだけが残っても、配送済みならここで回収する。
