@@ -54,7 +54,7 @@ P1 パイロット実測で確定する想定。
 | **MCP サービス可用性**（Slack メンションが応答を返す月次率） | **≥ 99.0%** | CloudWatch ECS `RunningTaskCount`（desired との比率を 1 分粒度で集計） |
 | **エラー率**（5xx + ハンドラ例外 / 全 mention） | ≤ 1% / 24h 移動窓 | `usage_events.status` で `error` / `failed` を集計 |
 | **Bedrock 失敗率**（throttle/timeout）| ≤ 0.5% / 24h | structlog の `bedrock_converse_failed` 件数 / 全 converse |
-| **ingest 連続失敗** | 2 週連続失敗で **P0** | `teamagent-ingest.service` の status + #ops Slack alert（Wave1-③）|
+| **ingest 連続失敗** | 2 週連続失敗で **P0** | ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`）の実行結果と CloudWatch Logs `/${project_name}/${environment}/ingest`。#ops Slack alert（Wave1-③）は Fargate のタスク定義に `OPS_SLACK_WEBHOOK_URL` が無いため現状は出ない（§6 注記）|
 
 **エラー予算**: 月次 99.0% → 月内 7.3h までのダウンタイム許容。
 超過時は次月の新規機能リリース凍結・運用安定化を優先する（バーンレート2倍超で**緊急レビュー**）。
@@ -67,7 +67,7 @@ P1 パイロット実測で確定する想定。
 |---|---|---|
 | **検索 gold set top-1 hit rate** | ≥ 60% | `tests/eval/` の月次手動実行（v2d prompt + Cohere Rerank 後の実測 64% を SLO 基準に固定） |
 | **1検索あたりコスト** | ≤ $0.02 | `usage_events.cost_usd` の 24h 移動窓 p50（prompt caching の cache_read 反映後） |
-| **ingest 鮮度**（週次 ingest の last_success） | last_success ≤ 8 日 | `usage_events.created_at where skill='ingest'` または `journalctl -u teamagent-ingest` |
+| **ingest 鮮度**（週次 ingest の last_success） | last_success ≤ 8 日 | `usage_events.created_at where skill='ingest'` または CloudWatch Logs `/${project_name}/${environment}/ingest`（EC2 worker の journald は退役で使えない） |
 | **operation_log の BANT 抽出成功率** | ≥ 80% | Skill 戻り値の `parse_ok` フラグ集計（Wave1-② 配線済） |
 
 ---
@@ -94,7 +94,9 @@ P1 パイロット実測で確定する想定。
 
 **Wave1-③ で追加した ingest #ops 通知** が P1 / P0 の初期検知経路。
 webhook を Secrets Manager (`teamagent/prod/ops-slack-webhook`) に投入することで有効化。
-未投入なら ingest 失敗時は `journalctl -u teamagent-ingest.service` で人手検知。
+未投入なら ingest 失敗時は人手検知（下の注記）。
+
+> **2026-09-28 注記**: 上の 2 文は EC2 worker の systemd ユニットで ingest を回していた時代の記述。EC2 worker は退役を決め、ユニットは repo から削除した（worker.tf の EC2・IAM・SG は terraform に残っており、destroy は保留中）。本番の ingest は ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`）で動き、失敗は CloudWatch Logs `/${project_name}/${environment}/ingest` で人手検知する。現在の ingest タスク定義は `OPS_SLACK_WEBHOOK_URL` を渡していないため、Secret を投入しても #ops 通知は出ない（`src/teamagent/ingest/ops_alert.py` は未設定なら no-op）。
 
 ---
 
