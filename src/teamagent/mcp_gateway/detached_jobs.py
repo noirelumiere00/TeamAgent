@@ -33,6 +33,10 @@
 登録簿の項目は実行開始から ``STALE_AFTER_S``（45 分）を超えたら、次の依頼時に掃除して枠を返す。
 
 利用者向けの文には内部語（job_id・error_code・S3 URL・ツール名）を出さない（SOUL.md の禁止語）。
+
+登録簿（``REGISTRY``）は検索上位チェックの 2 段目（``surface_video_followup.py``）も使う。
+同時実行の上限・待ち行列・終了処理の中断通知を共有し、中断文はジョブごとに登録時に渡せる
+（``interrupted_message``。無ければ動画分析の中断文）。
 """
 
 from __future__ import annotations
@@ -495,12 +499,15 @@ class DetachedJob:
         destination: Destination,
         target: Callable[[], Any],
         on_detached_done: DetachedDone,
+        interrupted_message: str | None = None,
     ) -> None:
         self.key = key
         self.tool = tool
         self.query = query
         self.request_id = request_id
         self.destination = destination
+        # 再デプロイで中断したときの文（None なら動画分析の中断文）。
+        self.interrupted_message = interrupted_message
         self._registry = registry
         self._target = target
         self._on_detached_done = on_detached_done
@@ -622,11 +629,15 @@ class DetachedJob:
         )
         thread.start()
 
+    def interrupted_notice(self) -> str:
+        """このジョブの中断文（登録時に指定が無ければ動画分析の中断文）。"""
+        return self.interrupted_message or interrupted_text(self.query)
+
     def post_interrupted_in_background(self) -> None:
         """終了処理中に打ち切られた（返す相手が居ない）ときに、中断文を別 thread で投稿する。"""
         thread = threading.Thread(
             target=post_to_origin,
-            args=(interrupted_text(self.query), self.destination),
+            args=(self.interrupted_notice(), self.destination),
             kwargs={"request_id": self.request_id},
             name=f"{self.tool}-detach-interrupt-{self.request_id}",
             daemon=True,
@@ -722,6 +733,7 @@ class DetachedJobRegistry:
         target: Callable[[], Any],
         on_detached_done: DetachedDone,
         max_queued: int = DEFAULT_MAX_QUEUED,
+        interrupted_message: str | None = None,
     ) -> tuple[DetachedJob | None, str]:
         """登録して開始する（枠が空いていなければ、ジョブの thread の中で順番を待つ）。
 
@@ -747,6 +759,7 @@ class DetachedJobRegistry:
                 destination=destination,
                 target=target,
                 on_detached_done=on_detached_done,
+                interrupted_message=interrupted_message,
             )
             self._jobs[key] = job
             self._waiting.append(job)
@@ -821,7 +834,7 @@ async def notify_interrupted(
     async def _one(job: DetachedJob) -> None:
         try:
             ok = await _post_once(
-                interrupted_text(job.query),
+                job.interrupted_notice(),
                 job.destination,
                 request_id=job.request_id,
                 timeout_s=_INTERRUPT_POST_TIMEOUT_S,

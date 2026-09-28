@@ -44,7 +44,7 @@ from teamagent.identity import (
     no_access_metadata,
     shared_company_domains_from_env,
 )
-from teamagent.mcp_gateway import detached_jobs
+from teamagent.mcp_gateway import detached_jobs, surface_video_followup
 from teamagent.mcp_gateway.caller_claim import (
     CALLER_CLAIM_FIELD,
     CallerClaimError,
@@ -1109,6 +1109,20 @@ async def dispatch_tool(
         if _progress is not None:
             await clear_progress(_progress, request_id=ctx.request_id)
 
+    # ── 検索上位チェックの 2 段目（USE_SURFACE_VIDEO_FOLLOWUP 既定OFF＝素通り）──────────
+    # 対象なら上位の動画の中身の分析を裏で登録し、slack_summary に予告を 1 行足す（fail-open）。
+    if name == surface_video_followup.TOOL:
+        surface_video_followup.maybe_schedule(
+            skill=skill,
+            output=output,
+            skill_input=skill_input,
+            ctx=ctx,
+            verified_caller=verified_caller,
+            metadata=metadata,
+            usage_user_id=usage_user_id,
+            record_usage=_record_usage,
+            loop=asyncio.get_running_loop(),
+        )
     try:
         data = output.model_dump() if hasattr(output, "model_dump") else {"result": str(output)}
     finally:
@@ -1146,10 +1160,14 @@ async def dispatch_tool(
         skill_args=skill_args,
     )
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
+    # (0.5) 返す欄の絞り込み（skill の mcp_relay_fields・None＝全体）: usage 記録（total_cost_usd
+    #     を読む）より後、退避・注入より前。Aico に生データを渡さず文面をそのまま返させる。
     # (1) 長文退避（Task8・USE_PAYLOAD_OFFLOAD 既定OFF）: 切り詰めは注入キーに触れない
     #     よう **リンク注入より先** に行う（逆順だと注入したURLごと切り詰め対象になる）。
     # (2) リンク注入（Task6）: search 応答にだけ Web UI/Aico Vault リンクを差し込む。
     # usage DB/ログ記録は (0)。将来 quota を強制する場合もこの順序契約を保つ。
+    if isinstance(data, dict):
+        data = _relay_fields(spec, data)
     if isinstance(data, dict):
         from teamagent.mcp_gateway.payload_offload import maybe_offload
 
@@ -1157,6 +1175,14 @@ async def dispatch_tool(
     if name == SEARCH_TOOL_NAME and isinstance(data, dict):
         _inject_search_web_links(data)
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
+
+
+def _relay_fields(spec: ToolSpec, data: dict[str, Any]) -> dict[str, Any]:
+    """skill が宣言した欄（``mcp_relay_fields``）だけを残す。宣言が無ければそのまま返す。"""
+    fields = getattr(spec.skill_cls, "mcp_relay_fields", None)
+    if fields is None:
+        return data
+    return {key: data[key] for key in fields if key in data}
 
 
 def _pm_err(code: str) -> list[TextContent]:
