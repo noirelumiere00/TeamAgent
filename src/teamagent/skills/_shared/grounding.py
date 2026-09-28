@@ -10,6 +10,14 @@
     grounder.keep_sentences("A。B71%。")  # -> ("A。", ["number:71"])
     grounder.filter_ranks([1, 9, 1])     # -> [1]
 
+数字の読み方（入力側・出力側で同じ規則）:
+    - 全角は半角に、桁区切りのカンマは外す。先頭ゼロと小数の末尾ゼロは揃える（05→5・2.50→2.5）
+    - 「万」「億」は展開する（1.2万→12000）。単位の違う「1.2%」とは一致しない
+    - 画面比（9:16・16:9・1:1・4:5・3:4・4:3）は数字として扱わない
+    - 「0:05」のようなタイムコード（分が 1 桁）は秒に直す（0:05→5・1:30→90）
+    - from_inputs(rounding=True) は入力の小数の切り捨て・切り上げ・四捨五入（整数と小数 1 桁）と、
+      1 万以上の整数の「万」単位の丸め（12,345→1.2万=12000 など）も入力にあったものとみなす
+
 捨てた記録（DropSink）には欄名と「入力に無い数字」だけを渡し、本文は渡さない
 （ログに LLM の文をそのまま出さないため）。
 
@@ -25,6 +33,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 import structlog
@@ -42,6 +51,11 @@ RHO_TERMS: tuple[str, ...] = ("ρ", "相関係数")
 
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _SUFFIX_RE = re.compile(r"\s*(倍|%|万|億)")
+_SCALE = {"万": Decimal(10_000), "億": Decimal(100_000_000)}
+# 画面比。数字として照合しない（プロンプトが 9:16 の記載を許している）。
+_RATIO_RE = re.compile(r"(?<![\d.:])(?:9:16|16:9|1:1|4:5|3:4|4:3)(?![\d.:])")
+# 「0:05」「1:30」のタイムコード（分が 1 桁）。時刻の「18:00」は対象外。
+_TIMECODE_RE = re.compile(r"(?<![\d.:])(\d):([0-5]\d)(?![\d.:])")
 _RANK_REF_RE = re.compile(r"(?:#|rank\s*)(\d+)", re.IGNORECASE)
 _RANK_POS_RE = re.compile(r"(?<![\d.])(\d+)\s*位(?!以内|以下|以上|まで|圏)")
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]*(?:[。！？!?\n]+|$)")
@@ -73,27 +87,78 @@ def _normalize(text: str) -> str:
     return unicodedata.normalize("NFKC", text).replace(",", "")
 
 
+def _canonical(raw: str) -> str:
+    """先頭ゼロと小数の末尾ゼロを揃える（05→5・2.50→2.5・10.0→10）。"""
+    if "." in raw:
+        whole, frac = raw.split(".", 1)
+        whole = whole.lstrip("0") or "0"
+        frac = frac.rstrip("0")
+        return f"{whole}.{frac}" if frac else whole
+    return raw.lstrip("0") or "0"
+
+
+def _decimal_text(value: Decimal) -> str:
+    return _canonical(format(value, "f"))
+
+
 @dataclass(frozen=True)
 class NumberToken:
-    """文中の数字 1 つ。``values`` は照合に使う表記（「2.50」と「2.5」など）。"""
+    """文中の数字 1 つ。
 
+    key: 照合に使う正規形（先頭ゼロ・末尾ゼロを揃え、万・億は展開、タイムコードは秒）。
+    values: extract_numbers が返す表記（書かれたままの形と正規形）。
+    suffix: 直後の単位（倍・%・万・億）。無ければ空。
+    """
+
+    key: str
     values: tuple[str, ...]
-    suffix: str = ""  # 直後の単位（倍・%・万・億）。無ければ空
+    suffix: str = ""
 
 
 def extract_tokens(text: str) -> list[NumberToken]:
     """文中の数字を、単位つきで取り出す。"""
-    normalized = _normalize(text)
+    normalized = _RATIO_RE.sub(" ", _normalize(text))
     tokens: list[NumberToken] = []
+
+    def timecode(m: re.Match[str]) -> str:
+        seconds = str(int(m.group(1)) * 60 + int(m.group(2)))
+        tokens.append(NumberToken(key=seconds, values=(seconds,)))
+        return " "
+
+    normalized = _TIMECODE_RE.sub(timecode, normalized)
     for m in _NUM_RE.finditer(normalized):
         raw = m.group(0)
         sm = _SUFFIX_RE.match(normalized, m.end())
         suffix = sm.group(1) if sm else ""
+        if suffix in _SCALE:
+            expanded = _decimal_text(Decimal(raw) * _SCALE[suffix])
+            tokens.append(NumberToken(key=expanded, values=(expanded,), suffix=suffix))
+            continue
+        key = _canonical(raw)
         values = [raw]
         if "." in raw:
             values.append(raw.rstrip("0").rstrip("."))
-        tokens.append(NumberToken(values=tuple(dict.fromkeys(values)), suffix=suffix))
+        values.append(key)
+        tokens.append(NumberToken(key=key, values=tuple(dict.fromkeys(values)), suffix=suffix))
     return tokens
+
+
+def _rounded(key: str) -> set[str]:
+    """入力の数字から、丸めて書いてよい形（小数→整数・小数 1 桁、1 万以上→万単位）。"""
+    value = Decimal(key)
+    if "." in key:
+        base, scale = value, Decimal(1)
+    elif value >= _SCALE["万"]:
+        base, scale = value / _SCALE["万"], _SCALE["万"]
+    else:
+        return set()
+    candidates = (
+        base.to_integral_value(rounding=ROUND_FLOOR),
+        base.to_integral_value(rounding=ROUND_CEILING),
+        base.quantize(Decimal(1), rounding=ROUND_HALF_UP),
+        base.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP),
+    )
+    return {_decimal_text(c * scale) for c in candidates}
 
 
 def extract_numbers(text: str) -> set[str]:
@@ -136,12 +201,16 @@ class NumberGrounder:
         cls,
         *texts: str,
         valid_ranks: Iterable[int] | None = None,
+        rounding: bool = False,
         always_allowed: frozenset[str] = ALWAYS_ALLOWED,
         strict_suffixes: frozenset[str] = frozenset(),
     ) -> NumberGrounder:
         allowed: set[str] = set()
         for text in texts:
-            allowed |= extract_numbers(text)
+            for token in extract_tokens(text):
+                allowed.update(token.values)
+                if rounding:
+                    allowed |= _rounded(token.key)
         return cls(
             allowed=frozenset(allowed),
             valid_ranks=frozenset(valid_ranks) if valid_ranks is not None else None,
@@ -155,10 +224,8 @@ class NumberGrounder:
         return suffix not in self.strict_suffixes and value in self.always_allowed
 
     def stray(self, text: str) -> set[str]:
-        """入力に無い数字。"""
-        return {
-            v for t in extract_tokens(text) for v in t.values if not self._value_ok(v, t.suffix)
-        }
+        """入力に無い数字（正規形）。"""
+        return {t.key for t in extract_tokens(text) if not self._value_ok(t.key, t.suffix)}
 
     def bad_rank_refs(self, text: str) -> set[int]:
         """「#N」「rankN」「N位」の N のうち、実在しない順位。valid_ranks が無ければ検査しない。"""

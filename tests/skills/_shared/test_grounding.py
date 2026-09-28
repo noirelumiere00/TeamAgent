@@ -19,7 +19,9 @@ from teamagent.skills._shared.grounding import (
 )
 
 # 付け替え前の search_surface_check/conclusion.py:54-61 の _numbers を写したもの。
-# 付け替えで照合結果が変わっていないことを、同じ文の集合で突き合わせる。
+# 付け替えで照合結果が変わっていないことを、同じ文の集合で突き合わせる（読み方の改良 4 点
+# ＝先頭ゼロ・画面比・タイムコード・万/億に当たらない文。当たる文の変化は
+# tests/skills/search_surface_check/test_grounding_impact.py が固定する）。
 _LEGACY_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 
 
@@ -167,3 +169,41 @@ def test_drop_ledger_logs_field_and_reason_without_body(
             },
         )
     ]
+
+
+# ── 数字の読み方の改良（先頭ゼロ・画面比・タイムコード・万/億・丸め）─────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("冒頭0:05", {"5"}),
+        ("1:30で締める", {"90"}),
+        ("縦型9:16と16:9", set()),
+        ("投稿は18:00", {"18", "00", "0"}),  # 時刻はタイムコードとして読まない
+        ("1.2万回", {"12000"}),
+        ("3億", {"300000000"}),
+        ("05本", {"05", "5"}),
+    ],
+)
+def test_extract_numbers_reads_units(text: str, expected: set[str]) -> None:
+    assert extract_numbers(text) == expected
+
+
+def test_man_unit_does_not_collide_with_percent() -> None:
+    g = NumberGrounder.from_inputs("保存率1.2%")
+    assert g.stray("検索量1.2万") == {"12000"}
+    assert g.ok("保存率1.2%")
+
+
+def test_rounding_allows_rounded_input_values_only() -> None:
+    """実物（新宿 20260617）の「範囲5.2–20.3」→「5秒から20秒」を通す。作った値は通さない。"""
+    g = NumberGrounder.from_inputs("範囲5.2–20.3・保存率2.35%・検索量12,345", rounding=True)
+    assert g.ok("5秒から20秒に収める")
+    assert g.ok("21秒以内")  # 20.3 の切り上げ
+    assert g.ok("保存率2.4%前後")  # 小数 1 桁の四捨五入
+    assert g.ok("月間約1.2万回の検索")  # 12,345 の万単位の丸め
+    assert g.stray("尺は17秒") == {"17"}
+    assert g.stray("保存率2.9%") == {"2.9"}
+    strict = NumberGrounder.from_inputs("範囲5.2–20.3")
+    assert strict.stray("5秒から20秒") == {"20"}  # 丸めを許さない既定（検索上位チェック）
