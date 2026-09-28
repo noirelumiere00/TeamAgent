@@ -129,7 +129,7 @@ def test_persist_is_scheduled_with_labels_owner_and_report() -> None:
     assert call["cls_doc_type"] == "報告書"
     assert call["cls_solution"] == "SEO"
     assert call["source_uri"] == out.report_url == _REPORT
-    assert call["dedup_key"] == _surface_dedup_key([KEYWORD], NOW)
+    assert call["dedup_key"] == _surface_dedup_key([KEYWORD], ["tiktok"], NOW)
     # 題名に媒体名を入れて build_app_html の 媒体/ タグを付ける
     assert call["title"] == "GABAN 検索上位チェック「スパイスカレー 作り方」（TikTok）"
 
@@ -241,24 +241,34 @@ def test_third_party_text_is_neutralized_in_the_body() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 重複排除キー（同じ KW 群・同じ日・同じ利用者は 1 doc）
+# 重複排除キー（同じ KW 群・同じ媒体の組・同じ週・同じ利用者は 1 doc）
 # ---------------------------------------------------------------------------
 
+_TT = ["tiktok"]
 
-def test_dedup_key_same_kw_set_same_day_is_one_record() -> None:
-    a = _surface_dedup_key(["スパイスカレー 作り方", "カレー"], NOW)
-    # 並び順・全角空白・連続空白・大文字小文字は同じ調査
-    b = _surface_dedup_key(["カレー", "スパイスカレー　 作り方"], NOW + 3600)
+
+def test_dedup_key_same_kw_set_same_week_is_one_record() -> None:
+    a = _surface_dedup_key(["スパイスカレー 作り方", "カレー"], _TT, NOW)
+    # 並び順・全角空白・連続空白・大文字小文字は同じ調査。同じ週の別の日も同じ記録
+    b = _surface_dedup_key(["カレー", "スパイスカレー　 作り方"], _TT, NOW + 86_400)
     assert a == b
-    assert _surface_dedup_key(["TikTok 料理"], NOW) == _surface_dedup_key(["tiktok 料理"], NOW)
+    assert _surface_dedup_key(["TikTok 料理"], _TT, NOW) == _surface_dedup_key(
+        ["tiktok 料理"], _TT, NOW
+    )
 
 
-def test_dedup_key_changes_with_day_and_kw_set() -> None:
-    a = _surface_dedup_key(["カレー"], NOW)
-    assert a != _surface_dedup_key(["カレー"], NOW + 86_400)  # 別の日の実測は別の記録
-    assert a != _surface_dedup_key(["カレー", "スパイス"], NOW)  # KW 群が違えば別の記録
+def test_dedup_key_changes_with_week_kw_set_and_platforms() -> None:
+    a = _surface_dedup_key(["カレー"], _TT, NOW)
+    assert a != _surface_dedup_key(["カレー"], _TT, NOW + 7 * 86_400)  # 別の週は別の記録
+    assert a != _surface_dedup_key(["カレー", "スパイス"], _TT, NOW)  # KW 群が違えば別
     # 区切りを入れて連結する（「ab」+「c」と「a」+「bc」を同じキーにしない）
-    assert _surface_dedup_key(["ab", "c"], NOW) != _surface_dedup_key(["a", "bc"], NOW)
+    assert _surface_dedup_key(["ab", "c"], _TT, NOW) != _surface_dedup_key(["a", "bc"], _TT, NOW)
+    # TikTok だけの記録を、IG だけの実行（または TikTok の取得に失敗した再実行）が
+    # 上書きしない（09-28 レビュー指摘）
+    assert a != _surface_dedup_key(["カレー"], ["instagram"], NOW)
+    both = _surface_dedup_key(["カレー"], ["instagram", "tiktok"], NOW)
+    assert both == _surface_dedup_key(["カレー"], ["tiktok", "instagram", "tiktok"], NOW)
+    assert both != a
 
 
 def test_real_persister_external_id_collapses_rerun_and_splits_users(
@@ -316,3 +326,39 @@ def test_factory_injects_persister_only_when_flag_is_on(
     assert spec.factory is not None
     skill = spec.factory()
     assert isinstance(skill._persister, ResearchPersister) is expect_persister
+
+
+def test_hashtags_in_llm_text_do_not_become_obsidian_tags() -> None:
+    """結論プロンプトは #タグ名 を書いてよいとしているので、本文では全角にする（09-28 指摘）。"""
+    from teamagent.skills.search_surface_check.persist_body import _txt
+
+    assert _txt("#スパイスカレー が多い", max_len=100) == "＃スパイスカレー が多い"
+    assert "#" not in _txt("@a#b #c", max_len=100)
+
+
+def test_many_surfaces_keep_the_body_short() -> None:
+    """面が 3 つ以上なら上位は 5 本まで（1 chunk に収める）。2 つまでは 10 本。"""
+    from teamagent.skills.search_surface_check.persist_body import build_surface_summary_md
+    from teamagent.skills.search_surface_check.schema import (
+        KwSurface,
+        SearchSurfaceCheckOutput,
+        SurfacePost,
+    )
+
+    def surface(kw: str) -> KwSurface:
+        posts = [
+            SurfacePost(platform="tiktok", keyword=kw, rank=i, author=f"u{i}", play_count=1000)
+            for i in range(1, 13)
+        ]
+        return KwSurface(keyword=kw, platform="tiktok", posts=posts)
+
+    def rank_lines(n_surfaces: int) -> int:
+        out = SearchSurfaceCheckOutput(
+            keywords=[f"kw{i}" for i in range(n_surfaces)],
+            surfaces=[surface(f"kw{i}") for i in range(n_surfaces)],
+        )
+        md = build_surface_summary_md(out, client_name="X", measured_epoch=NOW, missing=[])
+        return sum(1 for line in md.splitlines() if line.startswith("- ") and "位 @" in line)
+
+    assert rank_lines(2) == 20
+    assert rank_lines(3) == 15

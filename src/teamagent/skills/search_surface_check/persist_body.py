@@ -7,7 +7,11 @@
 - 第三者の文字列（@ID・表示名）と、第三者の本文を読んだ LLM の結論は、x_research と同じ
   ``_clean``（URL 伏字＋改行畳み＋Markdown 記法の無害化）を通す。投稿 URL も同じ
   ``_safe_provenance_url`` を通し、さらに既知 SNS ホストだけに絞る（``safe_href``）。
-- Obsidian のタグにならないよう、ハッシュタグの一覧は載せない（``#語`` はタグとして拾われる）。
+- Obsidian のタグにならないよう、ハッシュタグの一覧は載せず、第三者の文字列と LLM の結論に
+  残った ``#`` も全角 ``＃`` にする（結論プロンプトは ``#タグ名`` をそのまま書いてよいとしており、
+  ``_clean`` は ``#`` を退避しないため。09-28 レビュー指摘）。
+- 1 document = 1 chunk なので、面が 3 つ以上ある実行は上位の本数を 5 本に絞って本文を短くする
+  （埋め込みに効くのは先頭だけで、長い本文は検索回答のプロンプト費用を増やす）。
 """
 
 from __future__ import annotations
@@ -35,6 +39,13 @@ from teamagent.skills.x_research.persist_body import _clean, _safe_provenance_ur
 
 _FOOTER = "\n---\n（@Aico の検索上位チェックが自動生成した実測の記録）"
 _TOP_N = 10  # 1 面あたりノートに載せる上位の本数（仕様: 上位 10 本）
+_TOP_N_MANY = 5  # 面が 3 つ以上あるとき（本文を 1 chunk に収めるため）
+_MANY_SURFACES = 3
+
+
+def _txt(text: str, *, max_len: int) -> str:
+    """第三者の文字列・LLM の結論を本文用にする（x_research と同じ安全化＋ ``#`` の全角化）。"""
+    return _clean(text, max_len=max_len).replace("#", "＃")
 
 
 def _platforms(out: SearchSurfaceCheckOutput) -> list[str]:
@@ -55,7 +66,7 @@ def build_surface_title(client_name: str, out: SearchSurfaceCheckOutput) -> str:
 
 def _point(label: str, p: ConclusionPoint) -> str:
     ranks = f"（{fmt_ranks(p.ranks)}）" if p.ranks else ""
-    return f"- {label}: {_clean(p.text, max_len=200)}{ranks}"
+    return f"- {label}: {_txt(p.text, max_len=200)}{ranks}"
 
 
 def _conclusion_lines(surface: KwSurface) -> list[str]:
@@ -63,7 +74,7 @@ def _conclusion_lines(surface: KwSurface) -> list[str]:
     if c is None:
         return ["結論: なし（分析を行わなかった）"]
     note = "（AI の読みを作れず、集計だけの見出し）" if c.generated_by == "rule" else ""
-    lines = [f"結論: {_clean(c.headline, max_len=200)}{note}"]
+    lines = [f"結論: {_txt(c.headline, max_len=200)}{note}"]
     if c.winning:
         lines.append(_point("勝ち筋", c.winning))
     if c.gap:
@@ -71,7 +82,7 @@ def _conclusion_lines(surface: KwSurface) -> list[str]:
     lines += [_point("打ち手", a) for a in c.actions]
     if c.angles:
         angles = "／".join(
-            f"「{_clean(a.text, max_len=60)}」{fmt_ranks(a.ranks, limit=4)}" for a in c.angles
+            f"「{_txt(a.text, max_len=60)}」{fmt_ranks(a.ranks, limit=4)}" for a in c.angles
         )
         lines.append(f"- 上位に共通する切り口: {angles}")
     return lines
@@ -87,7 +98,7 @@ def _facts_lines(facts: SurfaceFacts, *, keyword: str, client_name: str) -> list
         lines.append("- 投稿者の構成: " + "／".join(parts))
     if facts.holders:
         parts = [
-            f"{_clean(account_label(h.author, h.author_name), max_len=80)} {len(h.ranks)}枠"
+            f"{_txt(account_label(h.author, h.author_name), max_len=80)} {len(h.ranks)}枠"
             f"（{fmt_ranks(h.ranks)}）"
             for h in facts.holders[:5]
         ]
@@ -104,7 +115,7 @@ def _facts_lines(facts: SurfaceFacts, *, keyword: str, client_name: str) -> list
         line = f"- 保存率の中央値 {facts.median_save_rate_pct:g}%"
         if facts.save_leaders:
             top = facts.save_leaders[0]
-            who = _clean(f"@{top.author}", max_len=64)
+            who = _txt(f"@{top.author}", max_len=64)
             line += f"（最高は{top.rank}位 {who} {top.save_rate_pct:g}%）"
         lines.append(line)
     timing: list[str] = []
@@ -116,7 +127,7 @@ def _facts_lines(facts: SurfaceFacts, *, keyword: str, client_name: str) -> list
         lines.append("- 投稿時期: " + "／".join(timing))
     if facts.kw_in_text is not None:
         lines.append(
-            f"- 本文かタグに「{_clean(keyword, max_len=60)}」の語をすべて含む: "
+            f"- 本文かタグに「{_txt(keyword, max_len=60)}」の語をすべて含む: "
             f"{facts.kw_in_text}/{facts.n}本"
         )
     if facts.pr_ranks:
@@ -124,7 +135,7 @@ def _facts_lines(facts: SurfaceFacts, *, keyword: str, client_name: str) -> list
     if facts.client_ranks:
         lines.append(f"- クライアントの投稿: {fmt_ranks(facts.client_ranks)}に在圏")
     # 取引先のノートに付く記録なので、触れた投稿が無いことも残す（「無かった」も事実）。
-    name = _clean(client_name, max_len=60)
+    name = _txt(client_name, max_len=60)
     mentioned = fmt_ranks(facts.mention_ranks) if facts.mention_ranks else "無し"
     lines.append(f"- 「{name}」に触れた投稿: {mentioned}")
     return lines
@@ -132,7 +143,7 @@ def _facts_lines(facts: SurfaceFacts, *, keyword: str, client_name: str) -> list
 
 def _post_line(surface: KwSurface, index: int) -> str:
     p = surface.posts[index]
-    who = _clean(f"@{p.author}", max_len=64) if p.author else "不明"
+    who = _txt(f"@{p.author}", max_len=64) if p.author else "不明"
     url = _safe_provenance_url(safe_href(p.url) or "")
     src = f" 〈{url}〉" if url else ""
     return f"- {p.rank}位 {who}（{category_label(p.category)}） {fmt_count(p.play_count)}回{src}"
@@ -149,27 +160,28 @@ def build_surface_summary_md(
 
     KW・媒体・実測日・結論・主要な集計・上位 10 本・レポート URL を載せる。
     """
-    kws = "・".join(f"「{_clean(k, max_len=60)}」" for k in out.keywords)
+    kws = "・".join(f"「{_txt(k, max_len=60)}」" for k in out.keywords)
     lines = [
-        f"# {_clean(client_name, max_len=120)} 検索上位チェック",
+        f"# {_txt(client_name, max_len=120)} 検索上位チェック",
         "",
         f"KW: {kws}／媒体: {'・'.join(_platforms(out))}／実測 {fmt_date(measured_epoch)}",
     ]
     for keyword, platform in missing:
         lines.append(
             f"取得できなかった面: {PLATFORM_LABEL.get(platform, platform)}"
-            f"「{_clean(keyword, max_len=60)}」"
+            f"「{_txt(keyword, max_len=60)}」"
         )
+    top_n = _TOP_N_MANY if len(out.surfaces) >= _MANY_SURFACES else _TOP_N
     for s in out.surfaces:
         platform = PLATFORM_LABEL.get(s.platform, s.platform)
-        lines += ["", f"## 「{_clean(s.keyword, max_len=60)}」{platform} 上位{len(s.posts)}本", ""]
+        lines += ["", f"## 「{_txt(s.keyword, max_len=60)}」{platform} 上位{len(s.posts)}本", ""]
         lines += _conclusion_lines(s)
         if s.facts is not None:
             lines += ["", "### 主要な集計"]
             lines += _facts_lines(s.facts, keyword=s.keyword, client_name=client_name)
         if s.posts:
-            lines += ["", f"### 上位{min(_TOP_N, len(s.posts))}本（順位・@ID・タイプ・再生・URL）"]
-            lines += [_post_line(s, i) for i in range(min(_TOP_N, len(s.posts)))]
+            lines += ["", f"### 上位{min(top_n, len(s.posts))}本（順位・@ID・タイプ・再生・URL）"]
+            lines += [_post_line(s, i) for i in range(min(top_n, len(s.posts)))]
     report = _safe_provenance_url(out.report_url or "")
     if report:
         lines += ["", f"レポート（署名URL・7日有効。期限後もこのノートに要点が残る）: 〈{report}〉"]

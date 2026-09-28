@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
 import json
 import os
@@ -39,7 +40,7 @@ from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.conclusion import conclude, rule_conclusion
-from teamagent.skills.search_surface_check.display import fmt_date
+from teamagent.skills.search_surface_check.display import JST
 from teamagent.skills.search_surface_check.insights import compute_facts, is_pr_post, mentions
 from teamagent.skills.search_surface_check.persist_body import (
     build_surface_summary_md,
@@ -111,20 +112,21 @@ def _parse_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _surface_dedup_key(keywords: list[str], measured_epoch: int) -> str:
-    """検索上位チェックの永続化 external_id 用 dedup キー（KW 群＋実測日のハッシュ）。
+def _surface_dedup_key(keywords: list[str], platforms: list[str], measured_epoch: int) -> str:
+    """検索上位チェックの永続化 external_id 用 dedup キー（KW 群＋取れた媒体＋実測週のハッシュ）。
 
-    「同じ KW 群・同じ日・同じ利用者」の再実行は 1 doc に集約（最新の実測で UPDATE）し、
-    それ以外は別 doc にする:
+    「同じ KW 群・同じ媒体の組・同じ週・同じ利用者」の再実行は 1 doc に集約（最新の実測で
+    UPDATE）し、それ以外は別 doc にする:
     - 利用者と取引先は ResearchPersister が external_id に owner ハッシュ・商材キーとして
       自前で入れるので、ここでは持たない（別の営業の同じ調査を上書きしない）。
     - KW 群は順不同・NFKC・空白の畳み・大文字小文字を同一視する（並べ替えや全角空白の違いは
       同じ調査）。区切りを入れて連結する（「ab」+「c」と「a」+「bc」を同じキーにしない）。
-    - 実測日（JST）を入れる。x_voice（声集め）は検索定義だけをキーにして同じ検索を 1 doc に
-      集約するが、検索上位は日々入れ替わるので、別の日の実測は別の記録として残す
-      （先週の上位を今日の実測で上書きすると、面の移り変わりを振り返れなくなる）。
-    - 媒体や取得本数はキーに入れない。同じ日に同じ KW 群で媒体を足して撮り直したら、
-      最新の実測で置き換えるのが自然なため（x_voice が max_selected を入れないのと同じ扱い）。
+    - 実際にデータが取れた媒体の組を入れる。入れないと、TikTok だけの実行のあとに IG だけを
+      実行すると TikTok 面の記録が消え、TikTok の取得に失敗した再実行が同じ週の完全な記録を
+      上書きする（09-28 レビュー指摘）。
+    - 実測の週（JST の ISO 週）を入れる。検索上位は入れ替わるので別の週は別の記録として残し
+      （定点比較）、日ごとにしないのは、毎日増えるノートが export_vault の取引先ごとの件数上限
+      （新しい順）で本物の資料を一覧から押し出さないようにするため。
     """
     norm = sorted(
         {
@@ -133,7 +135,8 @@ def _surface_dedup_key(keywords: list[str], measured_epoch: int) -> str:
             if k and k.strip()
         }
     )
-    seed = "\x1f".join(norm) + "\x1e" + fmt_date(measured_epoch)
+    week = _dt.datetime.fromtimestamp(measured_epoch, JST).strftime("%G-W%V")
+    seed = "\x1f".join(norm) + "\x1e" + ",".join(sorted(set(platforms))) + "\x1e" + week
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
 
 
@@ -682,7 +685,9 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 cls_doc_type="報告書",
                 # 7 日で切れる署名 URL。本文に要点が全部入るので、切れても記録は残る。
                 source_uri=out.report_url,
-                dedup_key=_surface_dedup_key(input.keywords, measured_epoch),
+                dedup_key=_surface_dedup_key(
+                    input.keywords, [s.platform for s in out.surfaces], measured_epoch
+                ),
             )
         except Exception as e:  # 記録の失敗で本体の応答を落とさない（fail-open）
             logger.warning("surface_persist_failed", request_id=request_id, error=type(e).__name__)

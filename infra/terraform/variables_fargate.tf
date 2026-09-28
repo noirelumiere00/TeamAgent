@@ -304,7 +304,7 @@ variable "enable_kaiwai_classify" {
 }
 
 variable "enable_research_persist" {
-  description = "施策研究(x_voice/コメント分析)を pgvector→AiLaVault へ永続記録するか（Part1・env USE_RESEARCH_PERSIST）。既定 false＝完全 no-op。ON の前提: ローカルRDS(SSMトンネル)で admin INSERT した doc を owner/別社員/社外の3者の**通常検索(member接続)**で引き、ACL(会社横断可視・社外不可)が正しいことを実証済みであること（export_vault は admin 接続なので dry-run では RLS 検証にならない）。"
+  description = "施策研究(x_voice/コメント分析/検索上位チェック)を pgvector→AiLaVault へ永続記録するか（Part1・env USE_RESEARCH_PERSIST。検索上位チェックはクライアント名つきの実行だけを記録）。既定 false＝完全 no-op。ON の前提: ローカルRDS(SSMトンネル)で admin INSERT した doc を owner/別社員/社外の3者の**通常検索(member接続)**で引き、ACL(会社横断可視・社外不可)が正しいことを実証済みであること（export_vault は admin 接続なので dry-run では RLS 検証にならない）。"
   type        = bool
   default     = false
 }
