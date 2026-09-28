@@ -5,8 +5,11 @@
   分母は「動画を見て分析できた本数」。サムネだけの分析は集計に入れない（テロップ・構成・音を
   静止画から判定できないため）。n=5 の観測なので、保存率との関係は「保存率の高い 2 本に共通する
   こと」に留め、相関は出さない。
-- 読む: 集計と 1 本ずつの一覧を LLM に渡し、入力に無い数字を含む文は捨てる（conclusion.py と同じ
-  照合：数字は入力の文字列に同じ数字が現れるかで見る）。誇張語は言い換える。
+- 読む: 集計と 1 本ずつの一覧を LLM に渡し、入力に無い数字・実在しない順位を含む項目は捨てる
+  （共通部品 _shared/grounding.py の NumberGrounder）。2 段目の本数は 0〜N（N≤10）に収まるので、
+  1 段目のように小さい数（0〜10・90・100）を無条件に通すと「5/5本」「100%」がそのまま通って照合が
+  効かない。2 段目は**常に許す数を使わず**、入力の値（項目名は除く）に現れる数字だけを許す。
+  誇張語は言い換える。
 """
 
 from __future__ import annotations
@@ -18,10 +21,8 @@ from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
+from teamagent.skills._shared.grounding import DropSink, NumberGrounder, tone_down
 from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
-
-# 数字の取り出しと誇張語の言い換えは 1 段目の結論と同じ実装を使う（照合の作法をそろえる）。
-from teamagent.skills.search_surface_check.conclusion import _numbers, tone_down
 from teamagent.skills.search_surface_check.display import fmt_count
 from teamagent.skills.search_surface_check.schema import (
     ConclusionPoint,
@@ -71,8 +72,9 @@ OPENING_SEC = 3.0
 _HEADLINE_MAX = 60
 _TEXT_MAX = 180
 _ROW_TEXT_MAX = 60
-# 数えなくても書ける小さい数（「2本」「上位5本」など）と、一致度の尺度の上限。
-_ALWAYS_ALLOWED = frozenset({str(i) for i in range(11)} | {"100"})
+# 2 段目の照合で無条件に通す数（無し）。本数がすべて 0〜N に収まるため、小さい数を通すと
+# 作り話の「5/5本」「上位5本すべて」「100%」を止められない（B5 レビュー指摘）。
+STRICT_ALWAYS_ALLOWED: frozenset[str] = frozenset()
 _TIKTOK_VIDEO_PATH = re.compile(r"/video/\d+")
 
 
@@ -340,6 +342,30 @@ def videos_payload(videos: list[AnalyzedVideo]) -> list[dict[str, Any]]:
     return rows
 
 
+def _leaf_values(obj: Any) -> list[str]:
+    """JSON にした入力の値だけ（項目名は除く）。項目名の数字（「冒頭3秒」など）を許さないため。"""
+    if isinstance(obj, dict):
+        return [v for value in obj.values() for v in _leaf_values(value)]
+    if isinstance(obj, list):
+        return [v for value in obj for v in _leaf_values(value)]
+    if obj is None or isinstance(obj, bool):
+        return []
+    return [str(obj)]
+
+
+def digest_grounder(
+    digest: VideoDigest, videos: list[AnalyzedVideo], *, keyword: str
+) -> NumberGrounder:
+    """2 段目の照合器: 入力の値に現れる数字と、動画を見て分析できた順位だけを許す。"""
+    values = _leaf_values(digest_payload(digest)) + _leaf_values(videos_payload(videos))
+    return NumberGrounder.from_inputs(
+        *values,
+        keyword,
+        valid_ranks=digest.watched_ranks,
+        always_allowed=STRICT_ALWAYS_ALLOWED,
+    )
+
+
 def build_digest_prompt(
     template: str,
     *,
@@ -347,8 +373,8 @@ def build_digest_prompt(
     client_name: str | None,
     digest: VideoDigest,
     videos: list[AnalyzedVideo],
-) -> tuple[str, set[str]]:
-    """プロンプトと、照合に使う「入力に現れる数字」の集合を返す。"""
+) -> tuple[str, NumberGrounder]:
+    """プロンプトと、照合器（入力の値に現れる数字・実在する順位）を返す。"""
     facts_json = json.dumps(digest_payload(digest), ensure_ascii=False)
     videos_json = json.dumps(videos_payload(videos), ensure_ascii=False)
     prompt = template.format(
@@ -357,7 +383,7 @@ def build_digest_prompt(
         facts_json=facts_json,
         videos_json=videos_json,
     )
-    return prompt, _numbers(facts_json) | _numbers(videos_json) | _numbers(keyword)
+    return prompt, digest_grounder(digest, videos, keyword=keyword)
 
 
 def _parse(text: str) -> dict[str, Any] | None:
@@ -375,26 +401,23 @@ def _parse(text: str) -> dict[str, Any] | None:
 def ground_digest_conclusion(
     raw: dict[str, Any],
     *,
-    allowed_numbers: set[str],
-    valid_ranks: set[int],
-    on_drop: Callable[[str, str], None] | None = None,
+    grounder: NumberGrounder,
+    on_drop: DropSink | None = None,
 ) -> VideoDigestConclusion | None:
-    """LLM の出力を検査して採用する。入力に無い数字を含む文は捨て、誇張語は言い換える。"""
+    """LLM の出力を検査して採用する。
+
+    入力に無い数字・実在しない順位（本文中の「N位」「#N」も）を含む項目は丸ごと捨て、欄名と理由
+    （数字・順位だけ・本文は渡さない）を ``on_drop`` へ渡す。ranks 欄は実在する順位だけに絞る。
+    誇張語は言い換える。
+    """
 
     def grounded(field: str, text: str) -> bool:
-        stray = _numbers(text) - allowed_numbers - _ALWAYS_ALLOWED
-        if stray:
+        why = grounder.reason(text)
+        if why is not None:
             if on_drop is not None:
-                on_drop(field, "number:" + ",".join(sorted(stray)))
+                on_drop(field, why)
             return False
         return True
-
-    def ranks_of(value: Any) -> list[int]:
-        out: list[int] = []
-        for r in value if isinstance(value, list) else []:
-            if isinstance(r, int) and not isinstance(r, bool) and r in valid_ranks and r not in out:
-                out.append(r)
-        return out
 
     def point(field: str, value: Any) -> ConclusionPoint | None:
         if not isinstance(value, dict):
@@ -402,7 +425,7 @@ def ground_digest_conclusion(
         text = tone_down(sanitize_llm_text(str(value.get("text") or "").strip(), max_len=_TEXT_MAX))
         if not text or not grounded(field, text):
             return None
-        return ConclusionPoint(text=text, ranks=ranks_of(value.get("ranks")))
+        return ConclusionPoint(text=text, ranks=grounder.filter_ranks(value.get("ranks")))
 
     headline = tone_down(
         sanitize_llm_text(str(raw.get("headline") or "").strip(), max_len=_HEADLINE_MAX)
@@ -413,7 +436,13 @@ def ground_digest_conclusion(
     save_reason = point("save_reason", raw.get("save_reason"))
     if not (headline or winning or save_reason):
         return None
-    return VideoDigestConclusion(headline=headline, winning=winning, save_reason=save_reason)
+    return VideoDigestConclusion(
+        headline=headline,
+        winning=winning,
+        save_reason=save_reason,
+        # 照合が実際に効いている（常に許す数が無く、順位も検査した）ときだけ「照合済み」と書く。
+        grounded=not grounder.always_allowed and grounder.valid_ranks is not None,
+    )
 
 
 def conclude_digest(
@@ -424,23 +453,18 @@ def conclude_digest(
     client_name: str | None,
     digest: VideoDigest,
     videos: list[AnalyzedVideo],
-    on_drop: Callable[[str, str], None] | None = None,
+    on_drop: DropSink | None = None,
 ) -> tuple[VideoDigestConclusion | None, float]:
     """LLM で読みを作る。使えなければ集計だけの見出しに縮退する（例外は呼び出し側）。"""
     if digest.watched <= 0:
         return None, 0.0
-    prompt, allowed = build_digest_prompt(
+    prompt, grounder = build_digest_prompt(
         template, keyword=keyword, client_name=client_name, digest=digest, videos=videos
     )
     text, cost = converse(prompt)
     raw = _parse(text)
     conclusion = (
-        ground_digest_conclusion(
-            raw,
-            allowed_numbers=allowed,
-            valid_ranks=set(digest.watched_ranks),
-            on_drop=on_drop,
-        )
+        ground_digest_conclusion(raw, grounder=grounder, on_drop=on_drop)
         if raw is not None
         else None
     )
@@ -459,9 +483,11 @@ __all__ = [
     "CTA_LABEL",
     "HOOK_LABEL",
     "PACING_LABEL",
+    "STRICT_ALWAYS_ALLOWED",
     "build_digest_prompt",
     "conclude_digest",
     "cta_label",
+    "digest_grounder",
     "digest_payload",
     "digest_videos",
     "duration_of",

@@ -254,6 +254,10 @@ class VideoDigestConclusion(BaseModel):
     winning: ConclusionPoint | None = None
     save_reason: ConclusionPoint | None = None
     generated_by: Literal["llm", "rule"] = "llm"
+    grounded: bool = Field(
+        default=False,
+        description="数字と順位を入力と照合した（常に許す数なし）。True のときだけ照合済みと書く",
+    )
 
 
 class SurfaceVideoFollowupOutput(BaseModel):

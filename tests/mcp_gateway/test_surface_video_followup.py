@@ -30,7 +30,11 @@ from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
-from teamagent.skills.search_surface_check.summary import followup_notice_line
+from teamagent.skills.search_surface_check.summary import (
+    FOLLOWUP_QUOTA_EXHAUSTED_LINE,
+    followup_notice_line,
+    followup_reused_line,
+)
 from teamagent.skills.video_algorithm import thumbnails
 from tests.skills.search_surface_check.fixtures import KEYWORD, NOW, s3_rows
 from tests.skills.search_surface_check.video_fakes import (
@@ -47,7 +51,14 @@ TEAM_ID = "T0123456789"
 DM = "D0123456789"
 CHANNEL = "C0123456789"
 TOOL = "search_surface_check"
-RELAY_KEYS = {"slack_summary", "report_url", "warnings", "total_cost_usd"}
+RELAY_KEYS = {
+    "slack_summary",
+    "report_url",
+    "warnings",
+    "total_cost_usd",
+    "keywords",
+    "measured_epoch",
+}
 ARGS = {"keywords": [KEYWORD], "platforms": ["tiktok"], "acquire_job_id": "tk_0123456789ab"}
 
 
@@ -208,6 +219,8 @@ def usage(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
     monkeypatch.setattr(thumbnails, "fetch_cover", lambda *a, **k: None)
     monkeypatch.setattr(detached_jobs, "REGISTRY", detached_jobs.DetachedJobRegistry())
+    monkeypatch.setattr(surface_video_followup, "CACHE", surface_video_followup.FollowupCache())
+    monkeypatch.setattr(surface_video_followup, "REUSE_POST_DELAY_S", 0.0)
     records: list[dict[str, Any]] = []
     monkeypatch.setattr(server, "_record_usage", lambda **kw: records.append(kw))
     return records
@@ -337,6 +350,7 @@ async def test_eligible_dm_gets_notice_then_followup_post(
 
     # 1 段目: 予告はレポート行の直前。それ以外は今と同じ。
     notice = followup_notice_line(5)
+    assert "（動画分析の回数を最大 5 本使います）" in notice
     lines = out["slack_summary"].splitlines()
     assert lines[lines.index(notice) + 1].startswith("レポート（全")
     assert out["slack_summary"].replace(notice + "\n", "") == _baseline_summary()
@@ -396,6 +410,7 @@ async def test_redeploy_sends_one_interrupt_notice(
     assert len(slack.posts) == 1
     assert slack.posts[0]["text"] == surface_video_followup.interrupted_text(KEYWORD)
     assert "システム更新で中断されました" in slack.posts[0]["text"]
+    assert "もう一度依頼すると、動画分析の回数を使い直します" in slack.posts[0]["text"]
 
     gate.set()  # 中断を知らせた後に完了しても 2 通目は出さない
     await _eventually(lambda: any(u["skill"] == surface_video_followup.USAGE_SKILL for u in usage))
@@ -486,8 +501,12 @@ async def test_mcp_returns_only_the_slack_text_fields_and_usage_reads_cost(
     skill, _g, _d = _skill()
     out = await _call(_spec(skill))
     assert set(out) == RELAY_KEYS
-    assert "surfaces" not in out and "keywords" not in out
+    assert "surfaces" not in out
+    assert out["keywords"] == [KEYWORD] and out["measured_epoch"] == NOW
     assert out["report_url"] == "https://s3.example/surface-1"
+    # 投稿の URL は文面の上位の行に Markdown リンクで入っている（フラグに関係なく全員）
+    for row in s3_rows()[:10]:
+        assert f"[@{row['account_id']}]({row['url']})" in out["slack_summary"]
     assert out["total_cost_usd"] > 0
     assert usage[0]["skill"] == TOOL
     assert usage[0]["cost_usd"] == out["total_cost_usd"]
@@ -515,3 +534,286 @@ async def test_other_tools_return_everything(
     out = await _call(_spec(_PlainSkill(), "plain_tool"), tool="plain_tool")
     assert out == {"slack_summary": "ok", "total_cost_usd": 0.5, "rows": [1, 2, 3]}
     assert usage[0]["cost_usd"] == 0.5
+
+
+# ── 月間上限（1 段目の時点で残りを読む）─────────────────────────────────
+
+
+def _peek(monkeypatch: pytest.MonkeyPatch, remaining: int | None) -> list[str]:
+    from teamagent.adapters import quota_store
+
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+    asked: list[str] = []
+
+    def _fake(self: Any, user_email: str, *, request_id: str) -> int | None:
+        # DB を読むので event loop（main thread）の外で呼ばれていること
+        assert threading.current_thread() is not threading.main_thread()
+        asked.append(user_email)
+        return remaining
+
+    def _no_consume(self: Any, *a: Any, **k: Any) -> Any:
+        raise AssertionError("1 段目の時点では消費しない")
+
+    monkeypatch.setattr(quota_store.VideoQuotaStore, "peek_remaining", _fake)
+    monkeypatch.setattr(quota_store.VideoQuotaStore, "try_consume", _no_consume)
+    return asked
+
+
+async def test_zero_quota_says_so_instead_of_the_notice_and_registers_nothing(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    _enable(monkeypatch)
+    asked = _peek(monkeypatch, 0)
+    skill, gem, _d = _skill()
+    out = await _call(_spec(skill))
+    summary = out["slack_summary"]
+    assert asked == [ME]
+    assert FOLLOWUP_QUOTA_EXHAUSTED_LINE == (
+        "今月の動画分析の上限に達しているため、動画の中身は分析しません（残り 0 本）"
+    )
+    lines = summary.splitlines()
+    assert lines[lines.index(FOLLOWUP_QUOTA_EXHAUSTED_LINE) + 1].startswith("レポート（全")
+    assert followup_notice_line(5) not in summary
+    assert detached_jobs.REGISTRY.active_count() == 0
+    await asyncio.sleep(0.05)
+    assert gem.calls == [] and slack.posts == []  # 予告と食い違う「上限です」を後から送らない
+
+
+async def test_quota_left_keeps_the_notice(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    from teamagent.adapters import quota_store
+    from teamagent.adapters.quota_store import QuotaResult
+
+    _enable(monkeypatch)
+    asked = _peek(monkeypatch, None)  # 台帳を読めない＝止めない側に倒す（予約は 2 段目で）
+    monkeypatch.setattr(
+        quota_store.VideoQuotaStore,
+        "try_consume",
+        lambda self, email, count, *, request_id: QuotaResult(allowed=True, used=count, limit=50),
+    )
+    skill, gem, _d = _skill()
+    out = await _call(_spec(skill))
+    assert asked == [ME]
+    assert followup_notice_line(5) in out["slack_summary"]
+    await _eventually(lambda: len(slack.posts) == 1)
+    assert slack.posts[0]["text"].startswith("*上位5本の動画の中身*")
+    assert gem.ranks == [1, 2, 3, 4, 5]
+
+
+def test_quota_on_without_email_registers_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+    skill, gem, _d = _skill()
+    ctx = SkillContext(request_id="r", metadata={})
+    output = skill.run(SearchSurfaceCheckInput(**ARGS), ctx)
+    before = output.slack_summary
+    reason = surface_video_followup.maybe_schedule(
+        skill=skill,
+        output=output,
+        skill_input=SearchSurfaceCheckInput(**ARGS),
+        ctx=ctx,
+        verified_caller=_claim(),
+        metadata={"identity_verified": True, "user_email": ME},
+        usage_user_id=USER_ID,
+        record_usage=lambda **kw: None,
+        loop=asyncio.new_event_loop(),
+    )
+    assert reason == "no_identity"
+    assert output.slack_summary == before
+    assert detached_jobs.REGISTRY.active_count() == 0 and gem.calls == []
+
+
+def test_quota_gate_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.adapters import quota_store
+
+    ctx = SkillContext(request_id="r", metadata={"user_email": ME})
+    assert surface_video_followup.quota_gate(ctx) == ("off", None)
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+    assert surface_video_followup.quota_gate(SkillContext(request_id="r", metadata={})) == (
+        "no_identity",
+        None,
+    )
+    for remaining, state in ((0, "exhausted"), (7, "available"), (None, "unknown")):
+        monkeypatch.setattr(
+            quota_store.VideoQuotaStore,
+            "peek_remaining",
+            lambda self, email, *, request_id, _r=remaining: _r,
+        )
+        assert surface_video_followup.quota_gate(ctx) == (state, remaining)
+
+
+# ── 24 時間の使い回し ────────────────────────────────────────────────
+
+
+async def _first_full_run(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> tuple[SearchSurfaceCheckSkill, FakeGemini]:
+    _enable(monkeypatch)
+    skill, gem, _d = _skill()
+    await _call(_spec(skill))
+    await _eventually(lambda: len(slack.posts) == 1)
+    await _eventually(lambda: len(surface_video_followup.CACHE) == 1)
+    return skill, gem
+
+
+async def test_same_request_within_24h_reuses_the_result_without_quota_or_gemini(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
+) -> None:
+    skill, gem = await _first_full_run(monkeypatch, slack)
+    first_post = slack.posts[0]["text"]
+    calls_before, usage_before = len(gem.calls), len(usage)
+
+    from teamagent.adapters import quota_store
+
+    monkeypatch.setenv("VIDEO_QUOTA_ENABLED", "1")
+
+    def _never(*a: Any, **k: Any) -> Any:
+        raise AssertionError("使い回しでは月間上限を読まない・使わない")
+
+    monkeypatch.setattr(quota_store.VideoQuotaStore, "peek_remaining", _never)
+    monkeypatch.setattr(quota_store.VideoQuotaStore, "try_consume", _never)
+
+    again = await _call(_spec(skill))
+    assert followup_reused_line(5) in again["slack_summary"]
+    assert followup_notice_line(5) not in again["slack_summary"]
+    await _eventually(lambda: len(slack.posts) == 2)
+    reused = slack.posts[1]["text"]
+    assert reused.startswith("（24 時間以内の同じ分析の結果です）\n*上位5本の動画の中身*")
+    body = first_post.split("\n")
+    assert reused.split("\n")[1:-1] == body[:-1]  # 章つきレポートの URL を含む追記文はそのまま
+    assert "https://s3.example/surface-2" in reused
+    assert reused.split("\n")[-1] == "_概算 $0.0000（前回の分析を使い回しました）_"
+    assert (slack.posts[1]["channel"], slack.posts[1]["thread_ts"]) == (DM, None)
+    assert len(gem.calls) == calls_before  # Gemini を呼ばない
+    assert detached_jobs.REGISTRY.active_count() == 0
+    await asyncio.sleep(0.05)
+    assert len(usage) == usage_before + 1  # 1 段目の記録だけ（2 段目の費用は無い）
+
+
+async def test_reused_post_waits_for_the_first_stage_reply(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    """使い回しはすぐ終わるので、Aico の 1 段目の返信より先に届かないよう少し置いて投稿する。"""
+    skill, _gem = await _first_full_run(monkeypatch, slack)
+    monkeypatch.setattr(surface_video_followup, "REUSE_POST_DELAY_S", 0.3)
+    await _call(_spec(skill))
+    await asyncio.sleep(0.1)
+    assert len(slack.posts) == 1
+    await _eventually(lambda: len(slack.posts) == 2)
+    assert slack.posts[1]["text"].startswith(surface_video_followup.REUSED_PREFIX)
+
+
+async def test_different_top_videos_or_person_are_analyzed_again(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    await _first_full_run(monkeypatch, slack)
+    key = surface_video_followup.reuse_key
+    urls = [r["url"] for r in s3_rows()[:5]]
+    assert key(USER_ID, KEYWORD, urls) == key(USER_ID, f" {KEYWORD.upper()} ", urls[::-1])
+    assert key(USER_ID, KEYWORD, urls) != key("U999", KEYWORD, urls)
+    assert key(USER_ID, KEYWORD, urls) != key(USER_ID, KEYWORD, [*urls[:4], "https://x/1"])
+    assert surface_video_followup.CACHE.get(key(USER_ID, KEYWORD, urls)) is not None
+    assert surface_video_followup.CACHE.get(key(USER_ID, KEYWORD, urls[:4])) is None
+
+
+def test_cache_expires_after_24h_and_keeps_only_the_newest() -> None:
+    now = [1000.0]
+    cache = surface_video_followup.FollowupCache(max_entries=2, clock=lambda: now[0])
+    cache.put("a", slack_text="A", report_url="https://s3.example/a")
+    now[0] += surface_video_followup.REUSE_TTL_S - 1
+    assert cache.get("a") is not None
+    now[0] += 1
+    assert cache.get("a") is None  # 24 時間で消える
+    for k in ("b", "c", "d"):
+        cache.put(k, slack_text=k, report_url=None)
+    assert cache.get("b") is None and cache.get("d") is not None and len(cache) == 2
+
+
+def test_failed_or_partial_status_results_are_not_reused() -> None:
+    from teamagent.skills.search_surface_check.schema import SurfaceVideoFollowupOutput
+
+    cache = surface_video_followup.FollowupCache()
+
+    def complete(result: Any, error: BaseException | None) -> None:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(surface_video_followup, "CACHE", cache)
+            mp.setattr(detached_jobs, "post_to_origin", lambda *a, **k: True)
+            surface_video_followup._complete(
+                result,
+                error,
+                False,
+                keyword=KEYWORD,
+                destination=detached_jobs.Destination(channel_id=DM, thread_ts=None),
+                request_id="r",
+                started=0.0,
+                user_email=ME,
+                usage_user_id=USER_ID,
+                fallback_user_id=USER_ID,
+                record_usage=lambda **kw: None,
+                loop=asyncio.new_event_loop(),
+                cache_key="k",
+            )
+
+    complete(SurfaceVideoFollowupOutput(keyword=KEYWORD, status="all_failed", slack_text="x"), None)
+    complete(None, RuntimeError("boom"))
+    assert cache.get("k") is None
+    complete(SurfaceVideoFollowupOutput(keyword=KEYWORD, status="ok", slack_text="y"), None)
+    assert cache.get("k") is not None
+
+
+# ── 待ち行列の優先度（明示の動画分析を先に）───────────────────────────────
+
+
+def test_explicit_video_algorithm_starts_before_the_automatic_followup() -> None:
+    registry = detached_jobs.DetachedJobRegistry()
+    order: list[str] = []
+    hold = threading.Event()
+    dest = detached_jobs.Destination(channel_id=DM, thread_ts=None)
+
+    def start(key: str, target: Callable[[], Any], priority: int) -> None:
+        job, state = registry.start(
+            key=key,
+            max_background=1,
+            tool="t",
+            query=key,
+            request_id=key,
+            destination=dest,
+            target=target,
+            on_detached_done=lambda *a: None,
+            priority=priority,
+        )
+        assert state == "started" and job is not None
+
+    start("running", lambda: hold.wait(5), detached_jobs.PRIORITY_EXPLICIT)
+    start("auto-1", lambda: order.append("auto-1"), detached_jobs.PRIORITY_AUTO)
+    start("auto-2", lambda: order.append("auto-2"), detached_jobs.PRIORITY_AUTO)
+    start("explicit", lambda: order.append("explicit"), detached_jobs.PRIORITY_EXPLICIT)
+    deadline = time.monotonic() + 5
+    while registry.queued_count() < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    hold.set()
+    deadline = time.monotonic() + 5
+    while len(order) < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert order == ["explicit", "auto-1", "auto-2"]
+
+
+async def test_followup_is_queued_with_the_automatic_priority(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    seen: list[int] = []
+    real_start = detached_jobs.DetachedJobRegistry.start
+
+    def spy(self: Any, **kw: Any) -> Any:
+        seen.append(kw.get("priority", detached_jobs.PRIORITY_EXPLICIT))
+        return real_start(self, **kw)
+
+    monkeypatch.setattr(detached_jobs.DetachedJobRegistry, "start", spy)
+    _enable(monkeypatch)
+    gate = threading.Event()
+    skill, _g, _d = _skill(downloader=FakeDownloader(gate=gate))
+    await _call(_spec(skill))
+    assert seen == [detached_jobs.PRIORITY_AUTO]
+    detached_jobs.REGISTRY.interrupt_all()
+    gate.set()

@@ -18,6 +18,16 @@
   Gemini を使う重い処理なので、別枠にすると同時に 4 本走ってメモリと Gemini の 429 を踏む。
 - 再デプロイ時は ``notify_interrupted`` がこのジョブの宛先にも中断文を送る（登録時に文を渡す）。
 - 二重依頼（同じ人・同じ KW の 2 段目が走っている）は登録しない。
+- 月間上限（1 人月の動画分析の本数）: 予告に「最大 N 本使います」と書く。1 段目の時点で残りを
+  読み（``VideoQuotaStore.peek_remaining``・消費しない）、残り 0 本なら予告の代わりに「上限に
+  達しているため分析しません（残り 0 本）」を 1 行足して 2 段目を登録しない（結果が予告より先に
+  届いて食い違うのを防ぐ）。上限 ON で依頼者のメールが無いときも登録しない。
+- 使い回し: 同じ人・同じ KW（正規化）・同じ上位 N 本の URL 集合の 2 段目が 24 時間以内に成功して
+  いれば、分析し直さず前回の追記文（章を足したレポートの URL つき）を先頭に「（24 時間以内の同じ
+  分析の結果です）」を付けて届ける。月間上限も Gemini も使わない。**プロセス内の TTL キャッシュ**
+  なので、再デプロイ・タスクの入れ替わりで消える（消えたら分析し直す）。
+- 待ち行列では、利用者が明示的に頼んだ動画分析（video_algorithm の切り離し）を、この自動の
+  2 段目より先に始める（``detached_jobs.PRIORITY_AUTO``）。
 
 段階公開のための env（TD の env で変えられる）:
 - ``USE_SURFACE_VIDEO_FOLLOWUP``: 既定 OFF＝今と完全に同じ。
@@ -33,7 +43,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -60,6 +72,14 @@ MAX_MAX_VIDEOS = 10
 
 # 登録簿のキーの接頭辞（video_algorithm の切り離しのキーと衝突させない）。
 _KEY_PREFIX = "surface_video"
+
+# 使い回しの有効期間と、キャッシュに置く件数の上限（古いものから捨てる）。
+REUSE_TTL_S = 24 * 60 * 60
+REUSE_MAX_ENTRIES = 256
+REUSED_PREFIX = "（24 時間以内の同じ分析の結果です）"
+# 使い回しの追記を投稿するまで待つ秒数。すぐ投稿すると、Aico が返す 1 段目の文面（予告つき）より
+# 先に届いてしまうので、少し置く。
+REUSE_POST_DELAY_S = 15.0
 
 
 def _truthy(raw: str | None) -> bool:
@@ -130,13 +150,105 @@ def followup_key(slack_user_id: str, keyword: str) -> str:
     return f"{_KEY_PREFIX}\x1f" + detached_jobs.inflight_key(slack_user_id, keyword)
 
 
+def reuse_key(slack_user_id: str, keyword: str, urls: list[str]) -> str:
+    """使い回しのキー＝同じ人・同じ KW（正規化）・同じ上位 N 本の URL 集合。"""
+    return followup_key(slack_user_id, keyword) + "\x1f" + "\x1e".join(sorted(set(urls)))
+
+
+# ── 使い回し（プロセス内の TTL キャッシュ）─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CachedFollowup:
+    """前回の 2 段目の結果（追記の文面と、章を足したレポートの URL）。"""
+
+    slack_text: str
+    report_url: str | None
+    stored_at: float
+
+
+class FollowupCache:
+    """2 段目の結果を 24 時間だけ覚えておく（プロセス内・再起動で消える）。"""
+
+    def __init__(
+        self,
+        *,
+        ttl_s: float = REUSE_TTL_S,
+        max_entries: int = REUSE_MAX_ENTRIES,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._ttl_s = ttl_s
+        self._max_entries = max_entries
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[str, CachedFollowup] = OrderedDict()
+
+    def get(self, key: str) -> CachedFollowup | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            if self._clock() - entry.stored_at >= self._ttl_s:
+                del self._entries[key]
+                return None
+            return entry
+
+    def put(self, key: str, *, slack_text: str, report_url: str | None) -> None:
+        with self._lock:
+            self._entries.pop(key, None)
+            self._entries[key] = CachedFollowup(
+                slack_text=slack_text, report_url=report_url, stored_at=self._clock()
+            )
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+
+CACHE = FollowupCache()
+
+
+def reused_text(entry: CachedFollowup) -> str:
+    """使い回しの追記文。先頭に断り書きを付け、概算は今回の費用（0）に置き換える。"""
+    lines = entry.slack_text.split("\n")
+    if lines and lines[-1].startswith("_概算 $"):
+        lines[-1] = "_概算 $0.0000（前回の分析を使い回しました）_"
+    return "\n".join([REUSED_PREFIX, *lines])
+
+
+# ── 月間上限の残り（予告の前に読む・消費しない）──────────────────────────────
+
+
+def quota_gate(ctx: SkillContext) -> tuple[str, int | None]:
+    """``(状態, 残り本数)``。状態は off / no_identity / unknown / exhausted / available。
+
+    - off: 上限を使わない設定（VIDEO_QUOTA_ENABLED 未設定）。
+    - no_identity: 上限 ON で依頼者のメールが無い（2 段目の予約が必ず失敗するので登録しない）。
+    - unknown: 台帳を読めない（予約と同じく止めない側に倒す）。
+    """
+    from teamagent.adapters.quota_store import VideoQuotaStore
+
+    if not VideoQuotaStore.enabled():
+        return "off", None
+    email = str(ctx.metadata.get("user_email") or "").strip().lower()
+    if not email:
+        return "no_identity", None
+    remaining = VideoQuotaStore().peek_remaining(email, request_id=ctx.request_id)
+    if remaining is None:
+        return "unknown", None
+    return ("exhausted" if remaining <= 0 else "available"), remaining
+
+
 # ── 利用者向けの文（内部語を出さない）──────────────────────────────────────
 
 
 def interrupted_text(keyword: str) -> str:
     return (
         f"「{keyword}」上位の動画の中身の分析は、システム更新で中断されました。"
-        "お手数ですが、検索上位チェックをもう一度依頼してください。"
+        "お手数ですが、検索上位チェックをもう一度依頼してください"
+        "（もう一度依頼すると、動画分析の回数を使い直します）。"
     )
 
 
@@ -176,8 +288,9 @@ def _complete(
     fallback_user_id: str | None,
     record_usage: Callable[..., None],
     loop: asyncio.AbstractEventLoop,
+    cache_key: str | None = None,
 ) -> None:
-    """追記の投稿 → usage 記録。順番待ちのまま中断したら（run 前）中断文だけ送る。"""
+    """追記の投稿 → 使い回し用に覚える → usage 記録。順番待ちのまま中断したら中断文だけ送る。"""
     if isinstance(error, detached_jobs.DetachInterruptedError):
         logger.warning("surface_video_followup_queued_interrupted", request_id=request_id)
         if not interrupted:
@@ -202,6 +315,13 @@ def _complete(
                 request_id=request_id,
                 fallback_user_id=fallback_user_id,
             )
+    if cache_key is not None and error is None and getattr(result, "status", None) == "ok":
+        # 中断文を送った後に完了した分も覚える（もう一度依頼されたら回数を使わずに届けられる）。
+        CACHE.put(
+            cache_key,
+            slack_text=str(getattr(result, "slack_text", "") or ""),
+            report_url=getattr(result, "report_url", None),
+        )
     cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0) if result is not None else 0.0
     status = "ok" if error is None else "error"
     logger.info(
@@ -290,7 +410,9 @@ def _maybe_schedule(
     )
     from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
     from teamagent.skills.search_surface_check.summary import (
+        FOLLOWUP_QUOTA_EXHAUSTED_LINE,
         followup_notice_line,
+        followup_reused_line,
         insert_before_report_line,
     )
     from teamagent.skills.search_surface_check.video_digest import select_followup_videos
@@ -312,13 +434,41 @@ def _maybe_schedule(
             "surface_video_followup_decision", request_id=ctx.request_id, reason="no_videos"
         )
         return "no_videos"
+    keyword = videos[0].keyword
+    slack_user_id = str(verified_caller.slack_user_id)
+    cache_key = reuse_key(slack_user_id, keyword, [p.url for p in videos])
+    cached = CACHE.get(cache_key)
+    if cached is not None:
+        _post_reused_later(
+            cached,
+            destination=destination,
+            request_id=f"{ctx.request_id}-video",
+            fallback_user_id=slack_user_id,
+        )
+        output.slack_summary = insert_before_report_line(
+            output.slack_summary, followup_reused_line(len(videos))
+        )
+        logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason="reused")
+        return "reused"
+    quota_state, remaining = quota_gate(ctx)
+    if quota_state == "no_identity":
+        logger.info(
+            "surface_video_followup_decision", request_id=ctx.request_id, reason="no_identity"
+        )
+        return "no_identity"
+    if quota_state == "exhausted":
+        output.slack_summary = insert_before_report_line(
+            output.slack_summary, FOLLOWUP_QUOTA_EXHAUSTED_LINE
+        )
+        logger.info(
+            "surface_video_followup_decision", request_id=ctx.request_id, reason="quota_exhausted"
+        )
+        return "quota_exhausted"
     shared = detached_jobs.load_policy()  # 同時実行の上限・待ち行列は動画分析の切り離しと共有
     if shared.max_background <= 0:
         logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason="capacity")
         return "capacity"
     registry = detached_jobs.REGISTRY
-    keyword = videos[0].keyword
-    slack_user_id = str(verified_caller.slack_user_id)
     job_ctx = SkillContext(
         request_id=f"{ctx.request_id}-video",
         user_id=ctx.user_id,
@@ -347,8 +497,10 @@ def _maybe_schedule(
             fallback_user_id=slack_user_id,
             record_usage=record_usage,
             loop=loop,
+            cache_key=cache_key,
         ),
         interrupted_message=interrupted_text(keyword),
+        priority=detached_jobs.PRIORITY_AUTO,
     )
     line: str | None
     if state == "duplicate" and job is not None:
@@ -374,16 +526,47 @@ def _maybe_schedule(
         reason=state,
         videos=len(videos),
         queued=will_wait,
+        quota_remaining=remaining,
     )
     return state
 
 
+def _post_reused_later(
+    entry: CachedFollowup,
+    *,
+    destination: detached_jobs.Destination,
+    request_id: str,
+    fallback_user_id: str,
+) -> None:
+    """使い回しの追記を、1 段目の返信が届くころに別 thread で投稿する（登録簿は使わない）。"""
+
+    def _post() -> None:
+        delivered = detached_jobs.post_to_origin(
+            markdown_bold_to_mrkdwn(reused_text(entry)),
+            destination,
+            request_id=request_id,
+            fallback_user_id=fallback_user_id,
+        )
+        logger.info("surface_video_followup_reused", request_id=request_id, delivered=delivered)
+
+    timer = threading.Timer(REUSE_POST_DELAY_S, _post)
+    timer.name = f"{USAGE_SKILL}-reuse-{request_id}"
+    timer.daemon = True
+    timer.start()
+
+
 __all__ = [
     "ALLOWED_EMAILS_ENV",
+    "CACHE",
     "ENABLED_ENV",
     "MAX_VIDEOS_ENV",
+    "REUSED_PREFIX",
+    "REUSE_POST_DELAY_S",
+    "REUSE_TTL_S",
     "TOOL",
     "USAGE_SKILL",
+    "CachedFollowup",
+    "FollowupCache",
     "FollowupPolicy",
     "busy_line",
     "decide",
@@ -393,4 +576,7 @@ __all__ = [
     "interrupted_text",
     "load_policy",
     "maybe_schedule",
+    "quota_gate",
+    "reuse_key",
+    "reused_text",
 ]

@@ -17,9 +17,10 @@
 - 2 段目（上位の動画の中身）= ``run_video_followup``。mcp の切り離しの登録簿（mcp_gateway/
   surface_video_followup.py）が 1 段目の返却後に裏で呼ぶ。1 段目の上位（SurfacePost）をそのまま
   video_algorithm の分析エンジン（analyze_videos）へ渡し、検索し直さない。
-- MCP の返却は slack_summary・report_url・warnings・total_cost_usd だけ（mcp_relay_fields）。
-  上位 30 本の生データを Aico（OpenClaw）に渡すと、文面をそのまま返さずに組み直すため
-  （2026-09-28 本番 DM で実測）。
+- MCP の返却は slack_summary・report_url・warnings・total_cost_usd・keywords・measured_epoch だけ
+  （mcp_relay_fields・フラグに関係なく全員）。上位 30 本の生データを Aico（OpenClaw）に渡すと、
+  文面をそのまま返さずに組み直すため（2026-09-28 本番 DM で実測）。投稿の URL は slack_summary の
+  上位 N 本の各行の @ID を Markdown リンクにして渡す（summary.handle_link）。
 """
 
 from __future__ import annotations
@@ -41,8 +42,10 @@ from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
+from teamagent.adapters.quota_store import VideoQuotaStore
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.grounding import DropLedger
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.conclusion import conclude, rule_conclusion
@@ -180,11 +183,14 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     output_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckOutput
     # MCP の返却に載せる欄（mcp_gateway.server の返却前ミドルウェアが絞る）。文面は
     # slack_summary に全部入っているので、上位の生データ（surfaces）は Aico に渡さない。
+    # 投稿の URL は slack_summary の上位 N 本の行に Markdown リンクで入っている。
     mcp_relay_fields: ClassVar[tuple[str, ...] | None] = (
         "slack_summary",
         "report_url",
         "warnings",
         "total_cost_usd",
+        "keywords",
+        "measured_epoch",
     )
 
     def __init__(
@@ -788,7 +794,11 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 status="all_failed",
                 digest=digest,
                 slack_text=build_all_failed_text(
-                    keyword, count=len(chosen), total_cost_usd=round(cost, 4)
+                    keyword,
+                    videos=analyzed,
+                    reserved=reserved,
+                    quota_on=VideoQuotaStore.enabled(),
+                    total_cost_usd=round(cost, 4),
                 ),
                 total_cost_usd=round(cost, 4),
             )
@@ -881,13 +891,10 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             )
             return resp.text, float(resp.usage.cost_usd)
 
-        def on_drop(field: str, reason: str) -> None:
-            logger.info(
-                "surface_video_conclusion_dropped",
-                request_id=request_id,
-                field=field,
-                reason=reason,
-            )
+        # 捨てた項目はログへ（欄名と理由＝入力に無い数字・順位だけ。本文は出さない）。
+        on_drop = DropLedger(
+            skill="search_surface_check_video", mode="enforce", request_id=request_id
+        )
 
         try:
             return conclude_digest(

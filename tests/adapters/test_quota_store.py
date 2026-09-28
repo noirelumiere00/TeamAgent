@@ -126,6 +126,25 @@ def test_db_failure_fail_open() -> None:
     assert r.allowed  # 裁定: コスト制御はfail-open（分析を止めない・WARNはops監視）
 
 
+def test_peek_remaining_reads_without_consuming() -> None:
+    store, pg = _store(limit=3)
+    assert store.peek_remaining(ME, request_id="r") == 3  # 今月まだ行が無い
+    store.try_consume(ME, 2, request_id="r")
+    assert store.peek_remaining(ME.upper(), request_id="r") == 1
+    store.try_consume(ME, 1, request_id="r")
+    assert store.peek_remaining(ME, request_id="r") == 0
+    assert pg.store[(ME, current_month_jst())] == 3  # 読むだけで消費しない
+    assert store.peek_remaining("", request_id="r") is None
+
+
+def test_peek_remaining_unknown_when_ledger_fails() -> None:
+    class _Boom:
+        def connection(self, **kw: Any) -> Any:
+            raise RuntimeError("db down")
+
+    assert VideoQuotaStore(_Boom(), limit=3).peek_remaining(ME, request_id="r") is None
+
+
 # ── 文面の書き分け（2026-09-11 本番実測の不具合: 使用14/上限20 で「上限に達しました」） ──
 
 

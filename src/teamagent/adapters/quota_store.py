@@ -189,6 +189,20 @@ class VideoQuotaStore:
             logger.warning("video_quota_failed", request_id=request_id, error=type(e).__name__)
             return QuotaResult(allowed=True, used=-1, limit=limit, requested=count)
 
+    def peek_remaining(self, user_email: str, *, request_id: str) -> int | None:
+        """今月あと何本使えるかを読むだけ（消費しない）。メールが無い・台帳を読めなければ None。
+
+        検索上位チェックの 2 段目が、予告の前に残り 0 本かどうかを確かめるのに使う。読めないときは
+        None（呼び出し側は try_consume と同じく止めない側に倒す）。
+        """
+        email = (user_email or "").strip().lower()
+        if not email:
+            return None
+        used = self._peek_used(email, current_month_jst(), request_id=request_id)
+        if used is None:
+            return None
+        return max(0, self._limit - used)
+
     def _peek_used(self, email: str, month: str, *, request_id: str) -> int | None:
         """当月の使用数を読むだけ（消費しない）。読めなければ None＝不明。"""
 

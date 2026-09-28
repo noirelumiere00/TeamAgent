@@ -1111,8 +1111,10 @@ async def dispatch_tool(
 
     # ── 検索上位チェックの 2 段目（USE_SURFACE_VIDEO_FOLLOWUP 既定OFF＝素通り）──────────
     # 対象なら上位の動画の中身の分析を裏で登録し、slack_summary に予告を 1 行足す（fail-open）。
+    # 対象のときは月間上限の残りを DB から読むので、event loop を塞がないよう thread で呼ぶ。
     if name == surface_video_followup.TOOL:
-        surface_video_followup.maybe_schedule(
+        await asyncio.to_thread(
+            surface_video_followup.maybe_schedule,
             skill=skill,
             output=output,
             skill_input=skill_input,

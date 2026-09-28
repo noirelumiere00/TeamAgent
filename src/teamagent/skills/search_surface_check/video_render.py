@@ -42,7 +42,12 @@ QUOTA_EXHAUSTED_TEXT = (
     "今月の動画分析の上限に達したため、動画の中身は分析しませんでした（残り 0 本）。"
     "リセットは来月1日（JST）です。"
 )
-ALL_FAILED_TEXT = "動画を取得できず分析できませんでした。"
+ALL_FAILED_TEXT = "動画の中身を分析できませんでした"
+# 取得の失敗（video_algorithm の AnalyzedVideo.error）。これ以外の失敗は分析（Gemini など）の失敗。
+FETCH_FAILED_PREFIX = "取得失敗"
+LLM_READING_NOTE = "AI が下の集計と 1 本ずつの分析だけを根拠に書いた読みです。"
+# 照合が実際に効いている（VideoDigestConclusion.grounded）ときだけ足す。
+GROUNDED_NOTE = "文中の数字と順位は集計・一覧と照合済みです。"
 
 
 def _mark(flag: bool) -> str:
@@ -200,9 +205,29 @@ def build_quota_exhausted_text(keyword: str) -> str:
     return f"**上位の動画の中身**「{slack_safe(keyword)}」TikTok\n{QUOTA_EXHAUSTED_TEXT}"
 
 
-def build_all_failed_text(keyword: str, *, count: int, total_cost_usd: float) -> str:
+def build_all_failed_text(
+    keyword: str,
+    *,
+    videos: list[AnalyzedVideo],
+    reserved: int,
+    quota_on: bool,
+    total_cost_usd: float,
+) -> str:
+    """全滅したときの文。取得の失敗と分析の失敗を分けて書き、予約した回数が戻らないことも書く。"""
+    fetch = [v.meta.rank for v in videos if (v.error or "").startswith(FETCH_FAILED_PREFIX)]
+    analysis = [v.meta.rank for v in videos if v.meta.rank not in fetch]
+    causes: list[str] = []
+    if fetch:
+        causes.append(f"動画を取得できなかった: {fmt_ranks(fetch, limit=10)}")
+    if analysis:
+        causes.append(f"動画は取得できたが分析に失敗した: {fmt_ranks(analysis, limit=10)}")
+    body = ALL_FAILED_TEXT + (f"（{'／'.join(causes)}）" if causes else "") + "。"
+    if quota_on and reserved > 0:
+        body += (
+            f"予約した動画分析の回数（{reserved}本）は戻りません（失敗した分も 1 本と数えます）。"
+        )
     return (
-        f"**上位{count}本の動画の中身**「{slack_safe(keyword)}」TikTok\n{ALL_FAILED_TEXT}\n"
+        f"**上位{len(videos)}本の動画の中身**「{slack_safe(keyword)}」TikTok\n{body}\n"
         f"_概算 ${total_cost_usd:.4f}_"
     )
 
@@ -211,7 +236,7 @@ def build_all_failed_text(keyword: str, *, count: int, total_cost_usd: float) ->
 
 CHAPTER_ID = "top-videos"
 CHAPTER_CSS = """
-.vcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;
+.vcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:16px;
   margin:16px 0 0;padding:0;list-style:none}
 .vcard{border:1px solid var(--color-neutral-solid-gray-420);border-radius:var(--border-radius-8);
   padding:16px}
@@ -246,11 +271,12 @@ def _chapter_conclusion(c: VideoDigestConclusion | None) -> str:
         + "</dd>"
         for label, text, ranks in points
     )
-    by = (
-        "AI が下の集計と 1 本ずつの分析だけを根拠に書いた読みです。文中の数字は集計と照合済みです。"
-        if c.generated_by == "llm"
-        else "AI の読みを作れなかったため、集計から自動で作った見出しだけを出しています。"
-    )
+    if c.generated_by != "llm":
+        by = "AI の読みを作れなかったため、集計から自動で作った見出しだけを出しています。"
+    elif c.grounded:
+        by = f"{LLM_READING_NOTE}{GROUNDED_NOTE}"
+    else:
+        by = LLM_READING_NOTE
     return (
         "<div class='conclusion'><p class='label'>動画の中身から見た結論</p>"
         f"<p class='headline'>{_clean(c.headline, 80)}</p>"
@@ -418,6 +444,7 @@ __all__ = [
     "CHAPTER_CSS",
     "CHAPTER_ID",
     "COVER_ONLY_NOTE",
+    "GROUNDED_NOTE",
     "QUOTA_EXHAUSTED_TEXT",
     "REPORT_FAILED_LINE",
     "build_all_failed_text",

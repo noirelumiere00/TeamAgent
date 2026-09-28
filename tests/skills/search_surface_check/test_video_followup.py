@@ -19,10 +19,12 @@ import pytest
 
 from teamagent.adapters import quota_store
 from teamagent.adapters.quota_store import QuotaResult
+from teamagent.skills._shared.grounding import NumberGrounder
 from teamagent.skills.base import SkillContext
 from teamagent.skills.search_surface_check.schema import (
     SearchSurfaceCheckInput,
     SearchSurfaceCheckOutput,
+    VideoDigest,
 )
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
 from teamagent.skills.search_surface_check.summary import (
@@ -30,6 +32,8 @@ from teamagent.skills.search_surface_check.summary import (
     insert_before_report_line,
 )
 from teamagent.skills.search_surface_check.video_digest import (
+    STRICT_ALWAYS_ALLOWED,
+    digest_grounder,
     digest_videos,
     ground_digest_conclusion,
     is_analyzable,
@@ -39,6 +43,7 @@ from teamagent.skills.search_surface_check.video_digest import (
 from teamagent.skills.search_surface_check.video_render import (
     ALL_FAILED_TEXT,
     COVER_ONLY_NOTE,
+    GROUNDED_NOTE,
     REPORT_FAILED_LINE,
 )
 from teamagent.skills.video_algorithm import thumbnails
@@ -307,8 +312,32 @@ def test_all_videos_failing_posts_cannot_analyze() -> None:
     result = _followup(skill, out)
     assert result.status == "all_failed"
     assert ALL_FAILED_TEXT in result.slack_text
+    # 取得の失敗として書く（分析の失敗と取り違えない）。上限 OFF なので回数には触れない
+    assert "（動画を取得できなかった: 1・2・3・4・5位）" in result.slack_text
+    assert "分析に失敗" not in result.slack_text and "戻りません" not in result.slack_text
     assert len(pub.htmls) == before
     assert gem.calls == []  # サムネも無い＝Gemini を呼ばない（捏造しない）
+
+
+def test_all_analysis_failures_are_not_called_fetch_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """動画は取れたが Gemini が全部失敗した（500 など）。取得の失敗とは書かず、回数は戻らないと書く。"""
+    _quota(monkeypatch, remaining=50)
+    gem = FakeGemini(fail_ranks=frozenset({1, 2, 3, 4, 5}))
+    skill, *_ = _skill(gemini=gem)
+    result = _followup(skill, _first_stage(skill))
+    assert result.status == "all_failed"
+    assert "（動画は取得できたが分析に失敗した: 1・2・3・4・5位）" in result.slack_text
+    assert "動画を取得できなかった" not in result.slack_text
+    assert "予約した動画分析の回数（5本）は戻りません" in result.slack_text
+
+
+def test_video_cards_do_not_overflow_narrow_screens() -> None:
+    from teamagent.skills.search_surface_check.video_render import CHAPTER_CSS
+
+    assert "minmax(min(300px,100%),1fr)" in CHAPTER_CSS
+    assert "minmax(300px" not in CHAPTER_CSS
 
 
 def test_media_extras_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,10 +384,107 @@ def test_sentences_with_numbers_not_in_the_input_are_dropped() -> None:
     assert c.save_reason is not None and c.save_reason.text == "配合の比率を保存したくなる"
 
 
+def _grounder(numbers: str, ranks: set[int]) -> NumberGrounder:
+    return NumberGrounder.from_inputs(
+        numbers, valid_ranks=ranks, always_allowed=STRICT_ALWAYS_ALLOWED
+    )
+
+
 def test_ground_digest_conclusion_rejects_stray_numbers_directly() -> None:
     raw = {"headline": "カット数12の動画", "winning": {"text": "尺は37秒が勝ち", "ranks": [1]}}
-    c = ground_digest_conclusion(raw, allowed_numbers={"12"}, valid_ranks={1})
+    c = ground_digest_conclusion(raw, grounder=_grounder("12", {1}))
     assert c is not None and c.headline == "カット数12の動画" and c.winning is None
+
+
+def test_small_numbers_are_not_always_allowed_in_the_second_stage() -> None:
+    """B5 レビューの再現: 入力が {1,2,3} なら「5/5本」「5本すべて」「100%」「7位」は通さない。"""
+    raw = {
+        "headline": "上位5本すべてが問いかけフックで冒頭テロップも5/5本",
+        "winning": {
+            "text": "5本中5本がCTAで保存を促し、3位と7位が100%テロップにKW",
+            "ranks": [3, 7],
+        },
+        "save_reason": {"text": "2本が材料のメモとして保存（1・2位）", "ranks": [1, 2]},
+    }
+    drops: list[tuple[str, str]] = []
+    c = ground_digest_conclusion(
+        raw, grounder=_grounder("1 2 3", {1, 2, 3}), on_drop=lambda f, r: drops.append((f, r))
+    )
+    assert c is not None
+    assert c.headline == "" and c.winning is None
+    assert c.save_reason is not None and c.save_reason.ranks == [1, 2]
+    assert [f for f, _ in drops] == ["headline", "winning"]
+    assert drops[0][1] == "number:5"
+    assert drops[1][1] == "number:100,5,7;rank:7"
+    # ログへ渡すのは欄名と理由だけ（本文を渡さない）
+    assert all("問いかけ" not in r and "CTA" not in r for _, r in drops)
+
+
+def test_rank_reference_in_the_text_must_be_a_watched_rank() -> None:
+    """数字は入力にあっても、動画を見て分析していない順位（本文中の N位）は通さない。"""
+    raw = {"headline": "4位の問いかけフックが目立つ", "winning": {"text": "2位の数字フック"}}
+    c = ground_digest_conclusion(raw, grounder=_grounder("2 4", {1, 2}))
+    assert c is not None and c.headline == "" and c.winning is not None
+
+
+def test_digest_grounder_ignores_digits_in_field_names() -> None:
+    """項目名の「冒頭3秒」「0〜100」の数字は入力の値ではないので、許す数に入れない。"""
+    digest = VideoDigest(
+        keyword="x", requested=2, reserved=2, watched=2, watched_ranks=[1, 2], opening_telop=1
+    )
+    grounder = digest_grounder(digest, [], keyword="x")
+    assert grounder.stray("2本中1本") == set()
+    assert grounder.stray("冒頭3秒") == {"3"}
+    assert grounder.stray("一致度100") == {"100"}
+    assert grounder.always_allowed == frozenset()
+
+
+def test_drops_are_logged_with_field_and_reason_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    from teamagent.skills._shared import grounding
+
+    logged: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        grounding.logger, "info", lambda event, **kw: logged.append({"event": event, **kw})
+    )
+    fabricated = {"headline": "上位の71%が数字フック", "winning": None}
+    skill, *_ = _skill(bedrock=VideoBedrock(digest=fabricated))
+    _followup(skill, _first_stage(skill))
+    drops = [e for e in logged if e["event"] == "grounding_dropped"]
+    assert drops == [
+        {
+            "event": "grounding_dropped",
+            "skill": "search_surface_check_video",
+            "field": "headline",
+            "reason": "number:71",
+            "mode": "enforce",
+            "request_id": "req-video",
+        }
+    ]
+
+
+def test_report_says_grounded_only_when_grounding_is_effective() -> None:
+    skill, _g, _d, pub, _b = _skill()
+    result = _followup(skill, _first_stage(skill))
+    assert result.conclusion is not None and result.conclusion.grounded
+    assert GROUNDED_NOTE in pub.htmls[-1]
+
+    skill, _g, _d, pub, _b = _skill(bedrock=VideoBedrock(digest_error=RuntimeError("throttled")))
+    _followup(skill, _first_stage(skill))
+    assert GROUNDED_NOTE not in pub.htmls[-1]  # 集計だけの見出し（照合していない）
+
+
+def test_llm_reading_without_effective_grounding_does_not_claim_it() -> None:
+    from teamagent.skills.search_surface_check.schema import VideoDigestConclusion
+    from teamagent.skills.search_surface_check.video_render import render_video_chapter
+
+    digest = VideoDigest(keyword="x", requested=1, reserved=1, watched=1, watched_ranks=[1])
+    loose = VideoDigestConclusion(headline="見出し", generated_by="llm", grounded=False)
+    html = render_video_chapter(keyword="x", digest=digest, conclusion=loose, videos=[])
+    assert GROUNDED_NOTE not in html
+    # 常に許す数を持つ照合器（1 段目と同じ作法）では grounded にならない
+    lax = NumberGrounder.from_inputs("1", valid_ranks={1})
+    c = ground_digest_conclusion({"headline": "見出し"}, grounder=lax)
+    assert c is not None and not c.grounded
 
 
 def test_llm_failure_falls_back_to_counts_only() -> None:

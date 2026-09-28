@@ -36,7 +36,9 @@
 
 登録簿（``REGISTRY``）は検索上位チェックの 2 段目（``surface_video_followup.py``）も使う。
 同時実行の上限・待ち行列・終了処理の中断通知を共有し、中断文はジョブごとに登録時に渡せる
-（``interrupted_message``。無ければ動画分析の中断文）。
+（``interrupted_message``。無ければ動画分析の中断文）。待ち行列は優先度つきで、利用者が明示的に
+頼んだ動画分析（``PRIORITY_EXPLICIT``・既定）を、自動の 2 段目（``PRIORITY_AUTO``）より先に
+始める（同じ優先度は来た順）。
 """
 
 from __future__ import annotations
@@ -74,6 +76,9 @@ DEFAULT_MAX_BACKGROUND = 2
 MAX_MAX_BACKGROUND = 10
 # 同時実行の上限を超えた分の待ち行列の上限（全利用者の合計）。超えたら「混み合っています」。
 DEFAULT_MAX_QUEUED = 10
+# 待ち行列の優先度（大きいほど先に始める）。明示の依頼を、自動で始めた 2 段目に押し出させない。
+PRIORITY_EXPLICIT = 1
+PRIORITY_AUTO = 0
 # 登録簿の項目の寿命（実行開始から）。処理中リース（既定 1800 秒）より長くとる。
 STALE_AFTER_S = 45 * 60.0
 
@@ -500,8 +505,10 @@ class DetachedJob:
         target: Callable[[], Any],
         on_detached_done: DetachedDone,
         interrupted_message: str | None = None,
+        priority: int = PRIORITY_EXPLICIT,
     ) -> None:
         self.key = key
+        self.priority = priority
         self.tool = tool
         self.query = query
         self.request_id = request_id
@@ -734,6 +741,7 @@ class DetachedJobRegistry:
         on_detached_done: DetachedDone,
         max_queued: int = DEFAULT_MAX_QUEUED,
         interrupted_message: str | None = None,
+        priority: int = PRIORITY_EXPLICIT,
     ) -> tuple[DetachedJob | None, str]:
         """登録して開始する（枠が空いていなければ、ジョブの thread の中で順番を待つ）。
 
@@ -760,9 +768,10 @@ class DetachedJobRegistry:
                 target=target,
                 on_detached_done=on_detached_done,
                 interrupted_message=interrupted_message,
+                priority=priority,
             )
             self._jobs[key] = job
-            self._waiting.append(job)
+            self._enqueue_locked(job)
             self._limit = max_background
         try:
             job.start()
@@ -770,6 +779,14 @@ class DetachedJobRegistry:
             self.release(job)
             raise
         return job, "started"
+
+    def _enqueue_locked(self, job: DetachedJob) -> None:
+        """優先度の高い順（同じ優先度は来た順）に待ち行列へ入れる。"""
+        for i, waiting in enumerate(self._waiting):
+            if waiting.priority < job.priority:
+                self._waiting.insert(i, job)
+                return
+        self._waiting.append(job)
 
     def acquire_slot(self, job: DetachedJob) -> bool:
         """ジョブの thread から呼ぶ。
@@ -861,6 +878,8 @@ __all__ = [
     "DETACH_DETACHED",
     "DETACH_DONE",
     "DETACH_INTERRUPTED",
+    "PRIORITY_AUTO",
+    "PRIORITY_EXPLICIT",
     "REGISTRY",
     "Destination",
     "DetachInterruptedError",
