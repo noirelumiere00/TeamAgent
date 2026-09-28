@@ -1350,11 +1350,12 @@ class SkillDispatcher:
         """VideoAlgorithmSkill をキャッシュして返す。"""
         if "video_algorithm" in self._skill_cache:
             return self._skill_cache["video_algorithm"]
-        from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
-
-        instance = VideoAlgorithmSkill(
-            prompt_version=os.environ.get("VIDEO_ALGO_PROMPT_VERSION", "v1")
+        from teamagent.skills.video_algorithm.skill import (
+            VideoAlgorithmSkill,
+            prompt_version_from_env,
         )
+
+        instance = VideoAlgorithmSkill(prompt_version=prompt_version_from_env())
         logger.info("video_algorithm_skill_initialized")
         self._skill_cache["video_algorithm"] = instance
         return instance

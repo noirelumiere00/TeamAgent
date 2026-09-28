@@ -8,10 +8,16 @@ from __future__ import annotations
 
 import json
 import re
-import unicodedata
 from collections.abc import Callable
 from typing import Any
 
+from teamagent.skills._shared.grounding import (
+    ALWAYS_ALLOWED,
+    DropSink,
+    NumberGrounder,
+    tone_down,
+)
+from teamagent.skills._shared.grounding import extract_numbers as _numbers
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.search_surface_check.display import (
     PLATFORM_LABEL,
@@ -19,6 +25,7 @@ from teamagent.skills.search_surface_check.display import (
     fmt_count,
     fmt_pct,
 )
+from teamagent.skills.search_surface_check.insights import FOLLOWER_TIERS
 from teamagent.skills.search_surface_check.schema import (
     ConclusionPoint,
     SurfaceConclusion,
@@ -32,33 +39,18 @@ _ANGLE_MAX = 24
 _MAX_ACTIONS = 2
 _MAX_ANGLES = 4
 _POST_TEXT_MAX = 80
-_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
-# 誇張語の言い換え（プロンプトで禁じても実機の Haiku が「検索面を支配」と書いた）。
-# 長い語から順に当てる（「を支配」を「支配」より先に）。
-_TONE_DOWN: tuple[tuple[str, str], ...] = (
-    ("を支配", "の中心"),
-    ("支配的", "中心的"),
-    ("支配", "中心"),
-    ("を独占", "の多くを占める"),
-    ("独占", "多数"),
-    ("圧倒的な", "大きな"),
-    ("圧倒的に", "大きく"),
-    ("圧倒", "上回"),
-    ("爆発的な", "大きな"),
-    ("爆発的に", "大きく"),
+# 数字の照合・誇張語の言い換えは _shared/grounding.py（video_algorithm と共通）。
+# _numbers と tone_down は既存の呼び出し・テストのためにここからも import できる。
+# 無条件に通す数。付け替え前（単位を見ない _numbers）は「1万人未満」「10万〜100万人」
+# 「100万再生」の 1・10・100 が ALWAYS_ALLOWED で通っていた。万・億を展開する今もこれを保つため、
+# ALWAYS_ALLOWED に「万」「億」を付けた値と、フォロワー帯の境目（10000・100000・1000000）を足す。
+# 面にその帯が無くても「100万人以上は上位に無い」は正しい文なので落とさない。
+# 単位違いの偶然一致（入力の 1.2% と文の 1.2万）は引き続き通さない。
+_SURFACE_ALWAYS_ALLOWED: frozenset[str] = (
+    ALWAYS_ALLOWED
+    | frozenset(n for v in ALWAYS_ALLOWED for unit in ("万", "億") for n in _numbers(v + unit))
+    | frozenset(str(floor) for floor, _ in FOLLOWER_TIERS)
 )
-# 数えなくても書ける小さい数（「2つ」「1万人未満」の 1 など）と、帯・期間の境目の数。
-_ALWAYS_ALLOWED = frozenset({str(i) for i in range(11)} | {"90", "100"})
-
-
-def _numbers(text: str) -> set[str]:
-    normalized = unicodedata.normalize("NFKC", text).replace(",", "")
-    out: set[str] = set()
-    for raw in _NUM_RE.findall(normalized):
-        out.add(raw)
-        if "." in raw:
-            out.add(raw.rstrip("0").rstrip("."))
-    return out
 
 
 def facts_payload(facts: SurfaceFacts) -> dict[str, Any]:
@@ -155,12 +147,6 @@ def rule_conclusion(facts: SurfaceFacts) -> SurfaceConclusion | None:
     return SurfaceConclusion(headline=headline, generated_by="rule")
 
 
-def tone_down(text: str) -> str:
-    for word, plain in _TONE_DOWN:
-        text = text.replace(word, plain)
-    return text
-
-
 def _parse(text: str) -> dict[str, Any] | None:
     cleaned = re.sub(r"```(?:json)?", "", text).strip()
     m = re.search(r"\{.*\}", cleaned, re.DOTALL)
@@ -182,28 +168,28 @@ def ground_conclusion(
     *,
     allowed_numbers: set[str],
     valid_ranks: set[int],
-    on_drop: Callable[[str, str], None] | None = None,
+    on_drop: DropSink | None = None,
 ) -> SurfaceConclusion | None:
     """LLM の出力を検査して採用する。入力に無い数字・実在しない順位を含む項目は捨てる。"""
+    grounder = NumberGrounder(
+        allowed=frozenset(allowed_numbers),
+        valid_ranks=frozenset(valid_ranks),
+        always_allowed=_SURFACE_ALWAYS_ALLOWED,
+    )
 
     def drop(field: str, reason: str) -> None:
         if on_drop is not None:
             on_drop(field, reason)
 
     def grounded(field: str, text: str) -> bool:
-        stray = _numbers(text) - allowed_numbers - _ALWAYS_ALLOWED
+        stray = grounder.stray(text)
         if stray:
             drop(field, "number:" + ",".join(sorted(stray)))
             return False
         return True
 
     def ranks_of(value: Any) -> list[int]:
-        ranks: list[int] = []
-        for r in _as_list(value):
-            if isinstance(r, int) and not isinstance(r, bool) and r in valid_ranks:
-                if r not in ranks:
-                    ranks.append(r)
-        return ranks
+        return grounder.filter_ranks(value)
 
     def point(field: str, value: Any, key: str = "text", max_len: int = _TEXT_MAX) -> Any:
         if not isinstance(value, dict):
@@ -277,7 +263,7 @@ def conclude(
     facts: SurfaceFacts,
     posts: list[SurfacePost],
     now_epoch: int,
-    on_drop: Callable[[str, str], None] | None = None,
+    on_drop: DropSink | None = None,
 ) -> tuple[SurfaceConclusion | None, float]:
     """LLM で結論を作る。使えなければ集計だけの見出しに縮退する（例外は呼び出し側）。"""
     prompt, allowed = build_prompt(

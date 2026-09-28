@@ -348,7 +348,8 @@ def test_active_result_cache_lease_stops_retry_before_quota_and_gemini(
     cache_key = cache.cache_key(
         query=input_obj.query,
         max_videos=input_obj.max_videos,
-        prompt_version="v1",
+        # 既定は v2（横断シンセシスの数字の照合と同時に上げた。v1 のキーは当たらない）
+        prompt_version="v2",
         model_id=gemini.model_id,
         board_size=input_obj.board_size,
         outputs=input_obj.outputs,
