@@ -578,7 +578,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         downloader: Downloader | None = None,
         user_email: str = "",
         apify_budget: _ApifyFallbackBudget | None = None,
+        media_extras: bool = True,
     ) -> AnalyzedVideo:
+        """1 本を取得→圧縮→Gemini で分析する。
+
+        ``media_extras=False`` はレポート用の付属物（実フレーム・サムネ色・Web プレビュー動画）を
+        作らない（media job を呼ばない）。分析の中身（Gemini の JSON）は同じ。検索上位チェックの
+        2 段目のように、文字だけの章を作る呼び出し元が時間と失敗点を減らすために使う。
+        """
         acquired_via = ""
         try:
             with _stage("download", request_id, meta.rank):
@@ -594,7 +601,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             )
             if recovered is None:
                 return self._cover_only_analysis(
-                    meta, query=query, system=system, request_id=request_id, cause=type(e).__name__
+                    meta,
+                    query=query,
+                    system=system,
+                    request_id=request_id,
+                    cause=type(e).__name__,
+                    media_extras=media_extras,
                 )
             data, mime = recovered
             acquired_via = ACQUIRED_VIA_APIFY
@@ -609,7 +621,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 stage="shrink",
             )
             return self._cover_only_analysis(
-                meta, query=query, system=system, request_id=request_id, cause=type(e).__name__
+                meta,
+                query=query,
+                system=system,
+                request_id=request_id,
+                cause=type(e).__name__,
+                media_extras=media_extras,
             )
 
         user_prompt = (
@@ -634,7 +651,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
         analysis = parse_analysis(resp.text)
         frames: list[FrameShot] = []
-        if analysis is not None:
+        if analysis is not None and media_extras:
             with _stage("frames", request_id, meta.rank):
                 # proxy 後の検証済み bytes を使い回して実フレームを抽出（graceful）
                 from teamagent.skills.video_algorithm.frames import extract_frames, pick_timecodes
@@ -686,11 +703,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                         for s, uri in shots
                     ]
         # サムネ色（検索一覧タイル）: cover_url を取得、失敗時は先頭フレームを流用
-        with _stage("thumbnail", request_id, meta.rank):
-            cover_uri, thumb = self._build_thumb(meta.cover_url, frames, request_id)
+        cover_uri: str = ""
+        thumb: ThumbColor | None = None
+        if media_extras:
+            with _stage("thumbnail", request_id, meta.rank):
+                cover_uri, thumb = self._build_thumb(meta.cover_url, frames, request_id)
         # タイムラインで実再生する軽量Webプレビュー動画（~480p・graceful。失敗時は静止フレーム）
         video_uri = ""
-        if analysis is not None:
+        if analysis is not None and media_extras:
             with _stage("preview", request_id, meta.rank):
                 from teamagent.adapters.media_job import MediaJobClient
 
@@ -810,7 +830,14 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         return body, staged.content_type
 
     def _cover_only_analysis(
-        self, meta: VideoMeta, *, query: str, system: str, request_id: str, cause: str
+        self,
+        meta: VideoMeta,
+        *,
+        query: str,
+        system: str,
+        request_id: str,
+        cause: str,
+        media_extras: bool = True,
     ) -> AnalyzedVideo:
         """動画DL全滅時の縮退: cover(サムネ静止画)1枚だけを Gemini に渡す軽量分析。
 
@@ -861,7 +888,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             logger.warning("video_algorithm_cover_failed", rank=meta.rank, error=type(e).__name__)
             return AnalyzedVideo(meta=meta, error=f"取得失敗: {cause}")
         analysis = parse_analysis(resp.text)
-        cover_uri, thumb = self._build_thumb(meta.cover_url, [], request_id)
+        cover_uri, thumb = (
+            self._build_thumb(meta.cover_url, [], request_id) if media_extras else ("", None)
+        )
         return AnalyzedVideo(
             meta=meta,
             analysis=analysis,
@@ -939,6 +968,70 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 except Exception:
                     res = None
         return res if res is not None else ("", None)
+
+    # --- 外から使う薄い入口（検索上位チェックの 2 段目など・検索しない） ---
+    @staticmethod
+    def reserve_video_quota(ctx: SkillContext, count: int) -> int:
+        """動画分析の月間上限を ``count`` 本ぶん予約し、**確保できた本数**を返す（0 もある）。
+
+        skill.run の 2 波目以降と同じ ``allow_partial=True``（残数に丸める・足りなければ 0）。
+        上限を使わない設定（VIDEO_QUOTA_ENABLED 未設定）なら ``count`` をそのまま返す。
+        上限を使う設定で依頼者のメールが無いときは、run と同じく RuntimeError で止める。
+        予約は返却しない（run と同じ。失敗した試行も 1 本と数える）。
+        """
+        return VideoAlgorithmSkill._reserve_quota(ctx, count, allow_partial=True)
+
+    def analyze_videos(
+        self,
+        metas: list[VideoMeta],
+        *,
+        query: str,
+        client_name: str | None,
+        request_id: str,
+        user_email: str = "",
+        media_extras: bool = False,
+    ) -> list[AnalyzedVideo]:
+        """選び済みの動画を分析して順位順で返す（検索も quota の予約もしない）。
+
+        run と同じ部品（``_analyze_one``: 取得→圧縮→Gemini。取得できなければサムネだけの分析へ
+        縮退）を、run と同じ並列数（VIDEO_ALGORITHM_MAX_WORKERS・既定 3）で回す。
+        run と違い、1 本の例外（media job の失敗など）はその 1 本だけの失敗カードにして、
+        ほかの動画の分析（課金済み）を捨てない。quota は呼び出し側が先に予約しておくこと。
+        """
+        if not metas:
+            return []
+        system = load_prompt("video_algorithm", self._prompt_version, "system")
+        apify_budget = _ApifyFallbackBudget(
+            max_videos=fallback_max_videos(),
+            wallclock_s=_apify_wallclock_budget_s(),
+        )
+
+        def _one(meta: VideoMeta) -> AnalyzedVideo:
+            try:
+                return self._analyze_one(
+                    meta,
+                    query=query,
+                    client_name=client_name,
+                    system=system,
+                    request_id=request_id,
+                    user_email=user_email,
+                    apify_budget=apify_budget,
+                    media_extras=media_extras,
+                )
+            except Exception as exc:  # 1 本の失敗で他の分析を捨てない
+                logger.warning(
+                    "video_algorithm_analyze_one_failed",
+                    request_id=request_id,
+                    rank=meta.rank,
+                    error=type(exc).__name__,
+                )
+                return AnalyzedVideo(meta=meta, error=f"分析失敗: {type(exc).__name__}")
+
+        workers = max(1, min(self._max_workers, len(metas)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_one, metas))
+        results.sort(key=lambda v: v.meta.rank)
+        return results
 
     def run(self, input: VideoAlgorithmInput, ctx: SkillContext) -> VideoAlgorithmOutput:
         log = ctx.bind_logger(self.name)
