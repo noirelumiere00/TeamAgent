@@ -49,7 +49,11 @@ HUMAN_FACING_PROMPTS = (
     "proposal_review/v1/system.md",
     "search/v2d/system.md",
     "search_surface_check/v1/analyze.md",
+    # 2 段目: 1 本ずつの動画分析（Gemini）の system への追記（場面の telop/speech/intent が
+    # 構成表に出る）と、学べること・弱点・絵コンテ案（Bedrock）。
+    "search_surface_check/v1/scene_detail.md",
     "search_surface_check/v1/video_digest.md",
+    "search_surface_check/v1/video_notes.md",
     "tiktok_search/v1/system.md",
     "video/v1/batch_synthesis.md",
     "video/v1/system.md",
@@ -137,7 +141,9 @@ _BAN_PROSE = (
 _JSON_VALUE_PROMPTS = (
     "video_algorithm/",
     "search_surface_check/v1/analyze.md",
+    "search_surface_check/v1/scene_detail.md",
     "search_surface_check/v1/video_digest.md",
+    "search_surface_check/v1/video_notes.md",
 )
 _BAN_JSON = (
     "- `**` による太字。強調が要るなら語順と言い切りで示す。",

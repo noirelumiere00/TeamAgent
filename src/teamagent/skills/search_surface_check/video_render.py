@@ -4,23 +4,30 @@ Slack の文面は 1 段目（summary.py）と同じ標準 Markdown（太字は 
 直接投稿するので、投稿の直前に `**語**`→`*語*` へ直す（呼び出し側）。表は使わず、1 行 1 事実・
 1 本 1 行。第三者の文字列（アカウント名・AI が要約した動画の中身）は slack_safe で無害化する。
 
-レポートの章は report.py と同じ DADS の部品（結論ブロック・KPI タイル・表・カード）で組む。
+レポートの章は report.py と同じ DADS の部品（結論ブロック・KPI タイル・表）で組み、1 本ずつの
+詳しい構成（サムネのタブ・場面ごとの構成表・評価・比較）は video_chapter.py が組む。Slack の追記は
+1 本 1 行のまま（詳しい構成はレポートだけ）。
 """
 
 from __future__ import annotations
 
 import html as _html
-from collections.abc import Callable
 
-from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
+from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.search_surface_check.display import fmt_duration, fmt_ranks
 from teamagent.skills.search_surface_check.report import _kpi
 from teamagent.skills.search_surface_check.schema import (
     LabelCount,
+    SurfacePost,
     VideoDigest,
     VideoDigestConclusion,
 )
 from teamagent.skills.search_surface_check.summary import slack_safe
+from teamagent.skills.search_surface_check.video_chapter import (
+    CHAPTER_CSS,
+    IMAGE_BUDGET_CHARS,
+    render_tabs,
+)
 from teamagent.skills.search_surface_check.video_digest import (
     PACING_LABEL,
     cta_label,
@@ -29,10 +36,11 @@ from teamagent.skills.search_surface_check.video_digest import (
     has_spoken_kw,
     has_telop_kw,
     hook_label,
-    is_cover_only,
     is_watched,
 )
-from teamagent.skills.video_algorithm.schema import AnalyzedVideo, VideoVSEOAnalysis
+from teamagent.skills.search_surface_check.video_notes import StructureNotes
+from teamagent.skills.search_surface_check.video_structure import common_points
+from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 _QUOTE_MAX = 20
 REPORT_FAILED_LINE = "レポートの発行に失敗しました（上の要約は分析結果どおりです）"
@@ -235,18 +243,6 @@ def build_all_failed_text(
 # ── レポートの章（DADS）─────────────────────────────────────────────────
 
 CHAPTER_ID = "top-videos"
-CHAPTER_CSS = """
-.vcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(300px,100%),1fr));gap:16px;
-  margin:16px 0 0;padding:0;list-style:none}
-.vcard{border:1px solid var(--color-neutral-solid-gray-420);border-radius:var(--border-radius-8);
-  padding:16px}
-.vcard h4{margin:0 0 8px;font-size:16px}
-.vcard dl{margin:0;display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;font-size:14px}
-.vcard dt{color:var(--color-neutral-solid-gray-600)}
-.vcard dd{margin:0}
-.vcard .note{font-size:14px;color:var(--color-neutral-solid-gray-700);margin:8px 0 0}
-table.axes td.agg{font-weight:700;white-space:nowrap}
-"""
 
 
 def _esc(s: object) -> str:
@@ -302,121 +298,27 @@ def _chapter_kpis(d: VideoDigest) -> str:
     return f"<dl class='kpis'>{''.join(tiles)}</dl>"
 
 
-def _cell(video: AnalyzedVideo, value: str) -> str:
-    return f"<td>{_esc(value) if is_watched(video) else '—'}</td>"
-
-
-def _axes_table(d: VideoDigest, videos: list[AnalyzedVideo]) -> str:
-    n = d.watched
-
-    def row(axis: str, agg: str, per: list[str]) -> str:
-        cells = "".join(_cell(v, text) for v, text in zip(videos, per, strict=True))
-        return f"<tr><th scope='row'>{_esc(axis)}</th><td class='agg'>{_esc(agg)}</td>{cells}</tr>"
-
-    def per(fn: Callable[[AnalyzedVideo, VideoVSEOAnalysis], str]) -> list[str]:
-        return [fn(v, v.analysis) if v.analysis is not None else "" for v in videos]
-
-    cta_agg = f"{d.cta}/{n}本"
-    rows = [
-        row(
-            "フック",
-            "・".join(f"{h.label}{h.count}" for h in d.hook_types) or "—",
-            per(lambda v, a: hook_label(a.hook_type)),
-        ),
-        row(
-            "冒頭テロップ",
-            f"{d.opening_telop}/{n}本",
-            per(lambda v, a: _mark(has_opening_telop(a))),
-        ),
-        row("テロップに KW", f"{d.telop_kw}/{n}本", per(lambda v, a: _mark(has_telop_kw(a)))),
-        row("発話に KW", f"{d.spoken_kw}/{n}本", per(lambda v, a: _mark(has_spoken_kw(a)))),
-        row(
-            "尺",
-            fmt_duration(round(d.median_duration_sec)) if d.median_duration_sec else "—",
-            per(lambda v, a: fmt_duration(round(duration_of(v))) or "—"),
-        ),
-        row(
-            "カット数",
-            f"{d.median_cut_count:g}" if d.median_cut_count is not None else "—",
-            per(lambda v, a: str(a.cut_count) if a.cut_count is not None else "—"),
-        ),
-        row(
-            "テンポ",
-            "・".join(f"{p.label}{p.count}" for p in d.pacing) or "—",
-            per(lambda v, a: PACING_LABEL.get(a.pacing, a.pacing)),
-        ),
-        row("CTA", cta_agg, per(lambda v, a: _cta(v))),
-        row("ナレーション", f"{d.narration}/{n}本", per(lambda v, a: _mark(a.has_narration))),
-        row(
-            "流行の音源",
-            f"{d.trending_sound}/{n}本",
-            per(
-                lambda v, a: {"yes": "○", "no": "×"}.get(a.is_trending_sound, "不明"),
-            ),
-        ),
-        row(
-            "一致度",
-            f"{d.median_coherence:g}" if d.median_coherence is not None else "—",
-            per(lambda v, a: str(a.message_coherence) if a.message_coherence is not None else "—"),
-        ),
-        row(
-            "保存の理由",
-            "—",
-            per(lambda v, a: sanitize_llm_text(a.save_share_motivation, max_len=60) or "—"),
-        ),
-    ]
-    head = "".join(f"<th scope='col'>{v.meta.rank}位</th>" for v in videos)
-    return (
-        "<h3>評価軸ごとの比較</h3>"
-        "<p>集計の列は「動画を見て分析できた本数」を分母にしています。"
-        "— は、動画を取得できず判定できなかった項目です。</p>"
-        "<div class='dads-table-wrap'><table class='dads-table axes'><thead><tr>"
-        f"<th scope='col'>評価軸</th><th scope='col'>集計</th>{head}</tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table></div>"
-    )
-
-
-def _video_card(v: AnalyzedVideo) -> str:
-    handle = f"@{v.meta.author}" if v.meta.author else "不明"
-    href = safe_href(v.meta.url)
-    title = f"{v.meta.rank}位 " + (
-        f"<a href='{_esc(href)}'>{_esc(handle)}</a>" if href else _esc(handle)
-    )
-    a = v.analysis
-    if a is None:
-        return (
-            f"<li class='vcard'><h4>{title}</h4>"
-            f"<p class='note'>{_esc(FAILED_NOTE)}（{_esc(v.error or '理由不明')}）。</p></li>"
-        )
-    rows: list[tuple[str, str]] = [
-        ("フック", f"{hook_label(a.hook_type)}：{sanitize_llm_text(a.hook_summary, max_len=120)}"),
-        ("主なメッセージ", sanitize_llm_text(a.main_message, max_len=160)),
-        ("勝因", " ／ ".join(sanitize_llm_text(w, max_len=60) for w in a.win_factors[:3])),
-        ("保存の理由", sanitize_llm_text(a.save_share_motivation, max_len=160)),
-    ]
-    body = "".join(
-        f"<dt>{_esc(label)}</dt><dd>{_esc(' '.join(text.split()))}</dd>"
-        for label, text in rows
-        if text.strip()
-    )
-    note = f"<p class='note'>{_esc(COVER_ONLY_NOTE)}。</p>" if is_cover_only(v) else ""
-    return f"<li class='vcard'><h4>{title}</h4><dl>{body}</dl>{note}</li>"
-
-
 def render_video_chapter(
     *,
     keyword: str,
     digest: VideoDigest,
     conclusion: VideoDigestConclusion | None,
     videos: list[AnalyzedVideo],
+    posts: dict[int, SurfacePost] | None = None,
+    notes: StructureNotes | None = None,
+    image_budget: int = IMAGE_BUDGET_CHARS,
 ) -> str:
-    """レポートに足す章（TikTok 面の節の直後に置く）。"""
+    """レポートに足す章（TikTok 面の節の直後に置く）。
+
+    上から: 結論（LLM・照合済み）→ 集計のタイル → 1 本ずつの構成（サムネのタブ・動画ごとの
+    パネル・N 本の比較）→ 評価の基準。posts は 1 段目の投稿（順位 → SurfacePost・見出しの数字）。
+    """
     parts = [
         f"<section id='{CHAPTER_ID}' aria-labelledby='{CHAPTER_ID}-h'>"
         f"<h2 id='{CHAPTER_ID}-h'>「{_esc(keyword)}」TikTok 上位{len(videos)}本の動画の中身</h2>"
-        "<p>検索上位の動画を、動画分析 AI が 1 本ずつ実際に視聴して、フック・テロップ・構成・"
-        "CTA などショート動画の評価軸で分析しました。数本の観測なので、傾向として読んでください"
-        "（順位の理由の断定ではありません）。</p>",
+        "<p>検索上位の動画を、動画分析 AI が 1 本ずつ実際に視聴して、場面ごとの構成（役割・"
+        "テロップ・発話・狙い）とフック・テンポ・KW・CTA などショート動画の評価軸で分析しました。"
+        "数本の観測なので、傾向として読んでください（順位の理由の断定ではありません）。</p>",
         _chapter_conclusion(conclusion),
     ]
     if digest.watched > 0:
@@ -426,15 +328,21 @@ def render_video_chapter(
             "<div class='dads-notice' role='note'><b>動画を取得できませんでした。</b>"
             "サムネイルだけの分析のため、テロップ・構成・音は判定していません。</div>"
         )
-    parts.append(_axes_table(digest, videos))
     if digest.save_top_ranks:
         common = "・".join(digest.save_top_common) or "目立った共通点はありません"
         parts.append(
             f"<p>保存率の高い 2 本（{_esc(fmt_ranks(digest.save_top_ranks))}）に共通すること: "
             f"{_esc(common)}。</p>"
         )
-    parts.append("<h3>1 本ずつ</h3>")
-    parts.append(f"<ul class='vcards'>{''.join(_video_card(v) for v in videos)}</ul>")
+    parts.append(
+        render_tabs(
+            videos,
+            posts=posts,
+            notes=notes,
+            common=common_points(videos),
+            image_budget=image_budget,
+        )
+    )
     parts.append("</section>")
     return "".join(parts)
 

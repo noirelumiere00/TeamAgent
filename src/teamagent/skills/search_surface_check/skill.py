@@ -16,7 +16,9 @@
   fire-and-forget で渡す（persist_body.py）。USE_RESEARCH_PERSIST=1 のときだけ factory が注入する。
 - 2 段目（上位の動画の中身）= ``run_video_followup``。mcp の切り離しの登録簿（mcp_gateway/
   surface_video_followup.py）が 1 段目の返却後に裏で呼ぶ。1 段目の上位（SurfacePost）をそのまま
-  video_algorithm の分析エンジン（analyze_videos）へ渡し、検索し直さない。
+  video_algorithm の分析エンジン（analyze_videos）へ渡し、検索し直さない。場面ごとの役割・テロップ・
+  発話・狙いはプロンプトの追記（prompts/search_surface_check/v1/scene_detail.md）で頼み、構成表の
+  コマ（場面ごと）と表紙を作る。学べること・弱点と絵コンテ案は Bedrock 1 回（video_notes.py）。
 - MCP の返却は slack_summary・report_url・warnings・total_cost_usd・keywords・measured_epoch だけ
   （mcp_relay_fields・フラグに関係なく全員）。上位 30 本の生データを Aico（OpenClaw）に渡すと、
   文面をそのまま返さずに組み直すため（2026-09-28 本番 DM で実測）。投稿の URL は slack_summary の
@@ -74,6 +76,11 @@ from teamagent.skills.search_surface_check.video_digest import (
     post_to_meta,
     rule_digest_conclusion,
 )
+from teamagent.skills.search_surface_check.video_notes import (
+    NOTES_MAX_TOKENS,
+    StructureNotes,
+    conclude_notes,
+)
 from teamagent.skills.search_surface_check.video_render import (
     CHAPTER_CSS,
     build_all_failed_text,
@@ -81,9 +88,13 @@ from teamagent.skills.search_surface_check.video_render import (
     build_quota_exhausted_text,
     render_video_chapter,
 )
+from teamagent.skills.search_surface_check.video_structure import common_points
 from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 logger = structlog.get_logger(__name__)
+
+# 構成表のコマの幅（px）。レポートでは 96〜120px で出すので 180 で足りる（1 枚 1 万字前後）。
+SCENE_FRAME_WIDTH = 180
 
 _ALLOWLIST_ENV = "SEARCH_SURFACE_ALLOWED_EMAILS"
 _VALID_CATEGORIES = {"brand_official", "media", "news", "creator", "influencer", "ugc", "other"}
@@ -783,7 +794,13 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             client_name=input.client_name,
             request_id=ctx.request_id,
             user_email=str(ctx.metadata.get("user_email") or ""),
-            media_extras=False,
+            # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大 6MB）は
+            # 使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの追記で頼む。
+            media_extras=True,
+            scene_frames=True,
+            frame_width=SCENE_FRAME_WIDTH,
+            preview=False,
+            system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
         )
         cost = sum(float(v.cost_usd or 0.0) for v in analyzed)
         digest = digest_videos(analyzed, keyword=keyword, requested=requested, reserved=reserved)
@@ -810,8 +827,17 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             request_id=ctx.request_id,
         )
         cost += llm_cost
+        notes, notes_cost = self._structure_notes(
+            analyzed, keyword=keyword, client_name=input.client_name, request_id=ctx.request_id
+        )
+        cost += notes_cost
         chapter = render_video_chapter(
-            keyword=keyword, digest=digest, conclusion=conclusion, videos=analyzed
+            keyword=keyword,
+            digest=digest,
+            conclusion=conclusion,
+            videos=analyzed,
+            posts={p.rank: p for p in chosen},
+            notes=notes,
         )
         report_url: str | None = None
         try:
@@ -911,6 +937,44 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 "surface_video_conclusion_failed", request_id=request_id, error=type(e).__name__
             )
             return rule_digest_conclusion(digest), 0.0
+
+    def _structure_notes(
+        self,
+        videos: list[AnalyzedVideo],
+        *,
+        keyword: str,
+        client_name: str | None,
+        request_id: str,
+    ) -> tuple[StructureNotes | None, float]:
+        """1 本ずつの学べること・弱点と、絵コンテ案（LLM 1 回・数字は照合）。失敗は None。"""
+
+        def converse(prompt: str) -> tuple[str, float]:
+            resp = self._get_bedrock().converse(
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                request_id=request_id,
+                temperature=0.2,
+                max_tokens=NOTES_MAX_TOKENS,
+            )
+            return resp.text, float(resp.usage.cost_usd)
+
+        on_drop = DropLedger(
+            skill="search_surface_check_video_notes", mode="enforce", request_id=request_id
+        )
+        try:
+            return conclude_notes(
+                converse,
+                load_prompt("search_surface_check", "v1", "video_notes"),
+                keyword=keyword,
+                client_name=client_name,
+                videos=videos,
+                common=common_points(videos),
+                on_drop=on_drop,
+            )
+        except Exception as e:
+            logger.warning(
+                "surface_video_notes_failed", request_id=request_id, error=type(e).__name__
+            )
+            return None, 0.0
 
     def _conclude(
         self, surface: KwSurface, client_name: str | None, now_epoch: int, request_id: str

@@ -46,6 +46,7 @@ from teamagent.skills.search_surface_check.video_render import (
     GROUNDED_NOTE,
     REPORT_FAILED_LINE,
 )
+from teamagent.skills.search_surface_check.video_structure import AXES
 from teamagent.skills.video_algorithm import thumbnails
 from tests.skills.search_surface_check.fixtures import KEYWORD, NOW, s3_rows
 from tests.skills.search_surface_check.video_fakes import (
@@ -333,25 +334,50 @@ def test_all_analysis_failures_are_not_called_fetch_failures(
     assert "予約した動画分析の回数（5本）は戻りません" in result.slack_text
 
 
-def test_video_cards_do_not_overflow_narrow_screens() -> None:
+def test_chapter_grids_do_not_overflow_narrow_screens() -> None:
+    """格子の最小幅は画面幅で頭打ちにする（390px の画面で横にはみ出さない）。"""
     from teamagent.skills.search_surface_check.video_render import CHAPTER_CSS
 
-    assert "minmax(min(300px,100%),1fr)" in CHAPTER_CSS
-    assert "minmax(300px" not in CHAPTER_CSS
+    mins = re.findall(r"minmax\((min\([^)]*\)|[^,]+),", CHAPTER_CSS)
+    assert mins and all(m == "0" or (m.startswith("min(") and m.endswith("100%)")) for m in mins)
 
 
-def test_media_extras_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """文字だけの章なので、実フレーム・サムネ色・プレビュー動画（media job）を作らない。"""
+def test_scene_frames_and_cover_are_made_but_not_the_preview_video(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（最大 6MB）は作らない。"""
+    from teamagent.adapters import video_proxy
     from teamagent.skills.video_algorithm import frames
 
-    def _no(*a: Any, **k: Any) -> Any:
-        raise AssertionError("media extras must not run")
+    calls: list[tuple[list[float], int]] = []
 
-    monkeypatch.setattr(frames, "extract_frames", _no)
-    monkeypatch.setattr(thumbnails, "build_thumb", _no)
+    def _frames(data: bytes, mime: str, secs: list[float], **k: Any) -> list[tuple[float, str]]:
+        calls.append((list(secs), k["width"]))
+        return [(s, "data:image/jpeg;base64,QUJD") for s in secs]
+
+    def _no(*a: Any, **k: Any) -> Any:
+        raise AssertionError("preview must not run")
+
+    monkeypatch.setattr(frames, "extract_frames", _frames)
+    monkeypatch.setattr(video_proxy, "make_web_preview", _no)
     skill, *_ = _skill()
     result = _followup(skill, _first_stage(skill))
-    assert result.digest.watched == 5
+    assert result.digest is not None and result.digest.watched == 5
+    assert len(calls) == 5 and all(width == 180 for _secs, width in calls)
+
+
+def test_frame_failure_keeps_the_paid_analysis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """コマの抽出（media job）が落ちても、分析（課金済み）は捨てずにコマなしで出す。"""
+    from teamagent.skills.video_algorithm import frames
+
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise RuntimeError("MEDIA_FRAME_JOB_FAILED")
+
+    monkeypatch.setattr(frames, "extract_frames", _boom)
+    skill, *_ = _skill()
+    result = _followup(skill, _first_stage(skill))
+    assert result.digest is not None and result.digest.watched == 5
+    assert result.digest.failed_ranks == []
 
 
 # ── LLM の読みの照合 ─────────────────────────────────────────────────
@@ -559,19 +585,14 @@ def test_report_gets_the_chapter_and_a_new_url() -> None:
     assert "top-videos" not in first
     assert "id='top-videos'" in second
     assert second.index("id='surface-1'") < second.index("id='top-videos'")
-    for axis in (
-        "フック",
-        "冒頭テロップ",
-        "テロップに KW",
-        "発話に KW",
-        "カット数",
-        "テンポ",
-        "CTA",
-    ):
+    for axis in AXES:
         assert f"<th scope='row'>{axis}</th>" in second
-    for axis in ("ナレーション", "流行の音源", "一致度", "保存の理由"):
-        assert f"<th scope='row'>{axis}</th>" in second
-    assert "class='vcard'" in second and "材料4つのメモとして見返す" in second
+    for rank in (1, 2, 3, 4, 5):
+        assert f"id='vp-{rank}'" in second and f"href='#vp-{rank}'" in second
+    assert "id='vp-compare'" in second
+    assert "材料4つのメモとして見返す" in second
+    assert "0.5秒で「4つでいい」とテロップを出し" in second  # 学べること（照合済み）
+    assert "30分で作れる" in second  # 絵コンテ案
     assert "2026-09-25" in second  # 1 段目と同じ実測日
 
 
@@ -631,3 +652,80 @@ def test_report_chapter_escapes_the_llm_reading() -> None:
     _followup(skill, _first_stage(skill))
     assert "<img src=x" not in pub.htmls[-1]
     assert "&lt;img src=x" in pub.htmls[-1]
+
+
+# ── 詳しい構成（B6）────────────────────────────────────────────────────
+
+
+def test_detailed_structure_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """場面の欄をプロンプトの追記で頼み、場面ごとのコマつきの構成表・評価・メモが章に出る。"""
+    from teamagent.prompts.loader import load_prompt
+    from teamagent.skills.video_algorithm import frames
+    from tests.skills.search_surface_check.structure_fakes import RICH_ANALYSES, TINY_JPEG
+
+    systems: list[str] = []
+
+    class _Gem(FakeGemini):
+        def analyze_video_bytes(self, **kw: Any) -> Any:
+            systems.append(kw["system"])
+            return super().analyze_video_bytes(**kw)
+
+    def _frames(data: bytes, mime: str, secs: list[float], **k: Any) -> list[tuple[float, str]]:
+        return [(s, TINY_JPEG) for s in secs]
+
+    monkeypatch.setattr(frames, "extract_frames", _frames)
+    analyses = {**RICH_ANALYSES, 5: {**ANALYSES[5]}}
+    notes = {
+        "videos": [
+            {
+                "rank": 1,
+                "learn": ["0.5秒で「スパイスカレーは4つでいい」と出して止める"],
+                "weak": ["33秒の呼びかけまで長い"],
+            }
+        ],
+        "storyboard": [{"show": "完成品の寄り", "telop": "4つでいい"}],
+    }
+    skill, _g, _d, pub, bed = _skill(gemini=_Gem(analyses), bedrock=VideoBedrock(notes=notes))
+    result = _followup(skill, _first_stage(skill))
+    addendum = load_prompt("search_surface_check", "v1", "scene_detail").strip()
+    assert systems and all(s.rstrip().endswith(addendum) for s in systems)
+    html = pub.htmls[-1]
+    panel1 = html[html.index("id='vp-1'") : html.index("id='vp-2'")]
+    assert panel1.count(f"src='{TINY_JPEG}'") >= 12  # 表紙がなければ先頭のコマ＋12 場面
+    assert "（推定）" not in panel1  # 役割は分析の欄から
+    assert "0.5秒で「スパイスカレーは4つでいい」と出して止める" in panel1
+    assert "材料の少なさで止める" in panel1  # 場面の狙い
+    assert bed.notes_prompts and "スパイスカレーは4つでいい" in bed.notes_prompts[0]
+    # Slack は 1 本 1 行のまま（構成表は出さない）
+    assert "構成表" not in result.slack_text
+    assert result.total_cost_usd == pytest.approx(0.05 + 0.003 + 0.004)
+
+
+def test_notes_failure_keeps_the_chapter() -> None:
+    skill, _g, _d, pub, _b = _skill(bedrock=VideoBedrock(notes_error=RuntimeError("throttled")))
+    result = _followup(skill, _first_stage(skill))
+    assert result.status == "ok" and result.report_url
+    assert "AI のメモを作れませんでした" in pub.htmls[-1]
+    assert "AI の絵コンテ案を作れませんでした" in pub.htmls[-1]
+
+
+def test_cover_comes_from_the_cover_url_not_a_small_scene_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """場面のコマ（幅 180px・先頭は表紙と限らない）から表紙を作らない。表紙の URL だけを使う。"""
+    from teamagent.skills.video_algorithm import frames
+    from tests.skills.search_surface_check.structure_fakes import TINY_JPEG
+
+    monkeypatch.setattr(
+        frames, "extract_frames", lambda d, m, secs, **k: [(s, TINY_JPEG) for s in secs]
+    )
+    monkeypatch.setattr(thumbnails, "build_thumb", lambda url, **k: None)
+
+    from_frames: list[bytes] = []
+    monkeypatch.setattr(
+        thumbnails, "analyze_cover", lambda data, **k: from_frames.append(data) or None
+    )
+    skill, *_ = _skill(gemini=FakeGemini())
+    result = _followup(skill, _first_stage(skill))
+    assert result.digest is not None and result.digest.watched == 5
+    assert from_frames == []  # 失敗は例外で握られるので、呼ばれたかどうかで見る

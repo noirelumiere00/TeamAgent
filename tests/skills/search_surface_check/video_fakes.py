@@ -205,23 +205,57 @@ GROUNDED_DIGEST: dict[str, Any] = {
 }
 
 
+# 2 段目の構成メモ（学べること・弱点・絵コンテ案）。数字はその動画の構成表にあるものだけ。
+GROUNDED_NOTES: dict[str, Any] = {
+    "videos": [
+        {
+            "rank": 1,
+            "learn": ["0.5秒で「4つでいい」とテロップを出し、材料の少なさで止める"],
+            "weak": ["CTAの秒が分からず、最後の呼びかけが弱い"],
+        },
+        {"rank": 2, "learn": ["1秒でKWのテロップを出す"], "weak": []},
+    ],
+    "storyboard": [
+        {"show": "完成した料理の寄り", "telop": "4つでいい"},
+        {"show": "材料を並べる", "telop": "材料はこれだけ"},
+        {"show": "手順を早送りで見せる", "telop": "30分で作れる"},
+        {"show": "保存を呼びかける", "telop": "保存して見返してね"},
+    ],
+}
+
+
 class VideoBedrock(FakeBedrock):
-    """1 段目は FakeBedrock のまま、2 段目の読み（動画の中身の読み）だけ差し替える。"""
+    """1 段目は FakeBedrock のまま、2 段目の読み（動画の中身の読み）と構成メモだけ差し替える。"""
 
     def __init__(
         self,
         *,
         digest: dict[str, Any] | str | None = None,
         digest_error: Exception | None = None,
+        notes: dict[str, Any] | str | None = None,
+        notes_error: Exception | None = None,
         **kw: Any,
     ) -> None:
         super().__init__(**kw)
         self.digest = GROUNDED_DIGEST if digest is None else digest
         self.digest_error = digest_error
         self.digest_prompts: list[str] = []
+        self.notes = GROUNDED_NOTES if notes is None else notes
+        self.notes_error = notes_error
+        self.notes_prompts: list[str] = []
 
     def converse(self, messages: list[dict[str, Any]], **kw: Any) -> _Resp:
         text = messages[0]["content"][0]["text"]
+        if "上位動画の構成メモ" in text:
+            self.notes_prompts.append(text)
+            if self.notes_error is not None:
+                raise self.notes_error
+            body = (
+                self.notes
+                if isinstance(self.notes, str)
+                else json.dumps(self.notes, ensure_ascii=False)
+            )
+            return _Resp(body, 0.004)
         if "上位の動画の中身の読み" in text:
             self.digest_prompts.append(text)
             if self.digest_error is not None:
