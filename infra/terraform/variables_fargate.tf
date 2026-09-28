@@ -538,3 +538,45 @@ variable "video_algorithm_result_cache_enabled" {
   type        = string
   default     = "true"
 }
+
+# ============================================================
+# 2026-09-28: 動画分析（video_algorithm）の切り離し（detach）。既定はすべて「今と同じ」。
+# ============================================================
+# mcp が 30 秒で受付を返し、完了時に依頼元の会話へ直接届ける（OpenClaw の約 6 分の打ち切り対策）。
+# 段階公開は TD の env 差し替えで進める（第 1 段階＝小俣さん本人の DM だけ）。
+# ⚠️ TD 差し替えで ON にしたら、実運用の tfvars にも同じ値を入れること（apply で OFF に戻さない）。
+variable "use_video_algorithm_detach" {
+  description = "動画分析の切り離し（USE_VIDEO_ALGORITHM_DETACH）。既定 0＝同期のまま（今と同じ）。"
+  type        = string
+  default     = "0"
+}
+
+variable "video_algorithm_detach_after_s" {
+  description = "受付を返すまでの待ち秒（VIDEO_ALGORITHM_DETACH_AFTER_S）。アプリ側で 5〜240 に丸める。"
+  type        = string
+  default     = "30"
+}
+
+variable "video_algorithm_detach_allowed_emails" {
+  description = "切り離しを使う人（VIDEO_ALGORITHM_DETACH_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。"
+  type        = string
+  default     = ""
+}
+
+variable "video_algorithm_detach_dm_only" {
+  description = "切り離しを 1 対 1 DM だけに限る（VIDEO_ALGORITHM_DETACH_DM_ONLY）。既定 1。"
+  type        = string
+  default     = "1"
+}
+
+variable "video_algorithm_max_background" {
+  description = "切り離した動画分析の同時実行上限（VIDEO_ALGORITHM_MAX_BACKGROUND）。超えたら同期のまま。"
+  type        = string
+  default     = "2"
+}
+
+variable "video_algorithm_cache_lease_seconds" {
+  description = "動画分析の処理中リース秒（VIDEO_ALGORITHM_CACHE_LEASE_SECONDS）。既定 1800＝コード既定と同じ。切り離しの第 1 段階で 600 に下げる想定。"
+  type        = string
+  default     = "1800"
+}
