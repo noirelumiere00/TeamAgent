@@ -32,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import hmac
 import os
+import socket
 import sys
 from collections.abc import AsyncIterator
 from typing import Any
@@ -45,6 +46,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 from starlette.types import Receive, Scope, Send
+from uvicorn.main import STARTUP_FAILURE
 
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import (
@@ -52,6 +54,7 @@ from teamagent.hmac_keyring import (
     REPORT_LINK_MAX_TOKEN_TTL_S,
 )
 from teamagent.mcp_gateway.caller_claim import CallerClaimError, CallerClaimVerifier
+from teamagent.mcp_gateway.detached_jobs import DEFAULT_INTERRUPT_BUDGET_S, notify_interrupted
 from teamagent.mcp_gateway.server import build_production_server
 
 logger = structlog.get_logger(__name__)
@@ -87,6 +90,28 @@ class BearerAuthMiddleware:
         await send({"type": "http.response.body", "body": b'{"error":"unauthorized"}'})
 
 
+async def notify_detached_jobs_interrupted() -> None:
+    """処理中の切り離しジョブへ中断を通知する（全体 20 秒以内・失敗しても終了処理を止めない）。"""
+    try:
+        await notify_interrupted(budget_s=DEFAULT_INTERRUPT_BUDGET_S)
+    except Exception as exc:
+        logger.warning("video_algorithm_detach_interrupt_hook_failed", error=type(exc).__name__)
+
+
+class _DetachAwareServer(uvicorn.Server):
+    """SIGTERM を受けたら、接続の片付けを待つ前に中断通知を送る uvicorn.Server。
+
+    uvicorn は終了時に「開いている接続が閉じるまで」待ってから lifespan を閉じる
+    （timeout_graceful_shutdown 未設定では無期限）。OpenClaw の SSE 接続が開いたままだと
+    lifespan の終了処理に届く前に ECS の stopTimeout（30 秒）で SIGKILL されうるため、
+    shutdown の入口で先に送る。接続の待ち方そのものは変えない。
+    """
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        await notify_detached_jobs_interrupted()
+        await super().shutdown(sockets=sockets)
+
+
 def build_app(*, bearer: str, path: str) -> Starlette:
     """streamable-http の ASGI アプリを組む（RLS+本人解決 resolver 必須＝STRICT で起動）。"""
     server = build_production_server()  # SLACK_BOT_TOKEN 未設定なら起動拒否（fail-closed）
@@ -100,9 +125,14 @@ def build_app(*, bearer: str, path: str) -> Starlette:
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
-        async with session_manager.run():
-            logger.info("mcp_http_started", path=path)
-            yield
+        try:
+            async with session_manager.run():
+                logger.info("mcp_http_started", path=path)
+                yield
+        finally:
+            # 再デプロイ等の終了時: 切り離して処理中の動画分析の宛先へ「中断」を知らせる
+            # （_DetachAwareServer が先に送っていれば何もしない＝1 回だけ）。
+            await notify_detached_jobs_interrupted()
 
     return Starlette(
         routes=[Route("/healthz", healthz), Mount(path, app=handle_mcp)],
@@ -142,7 +172,13 @@ def main() -> None:
     path = os.environ.get("TEAMAGENT_MCP_PATH", "/mcp")
 
     app = build_app(bearer=bearer, path=path)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # uvicorn.run と同じ設定で、終了の入口で中断通知を送る Server を使う。
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    server = _DetachAwareServer(config)
+    server.run()
+    if not server.started:
+        # uvicorn.run と同じく、起動に失敗したら非 0 で終わる（ECS に失敗を見せる）。
+        sys.exit(STARTUP_FAILURE)
 
 
 if __name__ == "__main__":

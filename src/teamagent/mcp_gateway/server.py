@@ -23,6 +23,7 @@ tool として叩くための境界。RLS 行権限・per-user OAuth・fail-clos
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import time
@@ -43,6 +44,7 @@ from teamagent.identity import (
     no_access_metadata,
     shared_company_domains_from_env,
 )
+from teamagent.mcp_gateway import detached_jobs
 from teamagent.mcp_gateway.caller_claim import (
     CALLER_CLAIM_FIELD,
     CallerClaimError,
@@ -704,6 +706,120 @@ def _maybe_redirect_to_connect(
     return name, spec, skill_args
 
 
+def _detach_response(query: str, text: str) -> list[TextContent]:
+    """切り離し中・二重依頼の返答。内部語（job_id・コード名）は載せない。"""
+    payload = {"status": "running", "query": query, "message": text, "slack_summary": text}
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+
+async def _wait_or_detach(job: detached_jobs.DetachedJob, timeout_s: float) -> bool:
+    """ジョブの完了を最大 ``timeout_s`` 秒待つ。完了なら True、切り離したら False。
+
+    待っている間に OpenClaw が打ち切っても（CancelledError）ジョブには伝えない（shield 相当）。
+    切り離して完了時に依頼元の会話へ届ける。既に完了していた場合も別 thread で届ける。
+    """
+    loop = asyncio.get_running_loop()
+    waiter: asyncio.Future[None] = loop.create_future()
+
+    def _set() -> None:
+        if not waiter.done():
+            waiter.set_result(None)
+
+    def _wake() -> None:
+        try:
+            loop.call_soon_threadsafe(_set)
+        except RuntimeError:  # loop が閉じている（打ち切り後）＝待ち手は居ない
+            pass
+
+    job.add_waker(_wake)
+    try:
+        await asyncio.wait_for(waiter, timeout=timeout_s)
+        return True
+    except TimeoutError:
+        return not job.detach()
+    except asyncio.CancelledError:
+        if not job.detach():
+            job.deliver_in_background()
+        logger.info("video_algorithm_detach_caller_cancelled", request_id=job.request_id)
+        raise
+
+
+def _complete_detached(
+    result: Any,
+    error: BaseException | None,
+    interrupted: bool,
+    *,
+    loop: asyncio.AbstractEventLoop,
+    skill: Any,
+    tool: str,
+    query: str,
+    destination: detached_jobs.Destination,
+    request_id: str,
+    started: float,
+    gateway_ms: int,
+    user_email: str | None,
+    usage_user_id: str | None,
+    skill_args: dict[str, Any],
+) -> None:
+    """切り離したジョブの完了処理（ジョブの thread で走る）: 投稿 → cleanup_output → usage 記録。"""
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    delivered = False
+    try:
+        if interrupted:
+            # 再デプロイの中断通知を送った後に完了した分は、矛盾する 2 通目を出さない
+            # （結果は complete としてキャッシュ済みなので、再依頼は課金なしで即返る）。
+            logger.warning("video_algorithm_detach_done_after_interrupt", request_id=request_id)
+        else:
+            text = (
+                detached_jobs.completion_text(result, query)
+                if error is None
+                else detached_jobs.error_text(query, error)
+            )
+            delivered = detached_jobs.post_to_origin(text, destination, request_id=request_id)
+    finally:
+        if result is not None:
+            try:
+                skill.cleanup_output(result)
+            except Exception as exc:
+                logger.warning(
+                    "video_algorithm_detach_cleanup_failed",
+                    request_id=request_id,
+                    error=type(exc).__name__,
+                )
+    tool_cost_usd = (
+        float(getattr(result, "total_cost_usd", 0.0) or 0.0) if result is not None else 0.0
+    )
+    logger.info(
+        "mcp_tool_usage",
+        tool=tool,
+        request_id=request_id,
+        latency_ms=elapsed_ms,
+        gateway_ms=gateway_ms,
+        total_ms=gateway_ms + elapsed_ms,
+        tool_cost_usd=tool_cost_usd,
+        detached=True,
+        delivered=delivered,
+        status="ok" if error is None else "error",
+    )
+    # usage_events の記録は本体の event loop へ渡す（recorder は loop に紐づく接続を使う）。
+    record = functools.partial(
+        _record_usage,
+        request_id=request_id,
+        skill=tool,
+        user_email=user_email,
+        user_id=usage_user_id,
+        cost_usd=tool_cost_usd,
+        latency_ms=elapsed_ms,
+        skill_args=skill_args,
+        status="ok" if error is None else "error",
+        error_code=None if error is None else type(error).__name__,
+    )
+    try:
+        loop.call_soon_threadsafe(record)
+    except RuntimeError:
+        logger.warning("usage_event_schedule_failed", request_id=request_id, error="LoopClosed")
+
+
 async def dispatch_tool(
     by_name: dict[str, ToolSpec],
     name: str,
@@ -779,6 +895,44 @@ async def dispatch_tool(
         metadata[TWO_STAGE_CTX_KEY] = True
 
     ctx = SkillContext(user_id=metadata.get("user_email"), metadata=metadata)
+
+    # ── video_algorithm の切り離し（USE_VIDEO_ALGORITHM_DETACH 既定OFF＝以下は素通り）─────
+    # 宛先・対象者・二重依頼の判定は、署名検証済み claim と resolver が解決した email だけで行う。
+    detach_policy: detached_jobs.DetachPolicy | None = None
+    detach_destination: detached_jobs.Destination | None = None
+    detach_key: str | None = None
+    detach_query = str(getattr(skill_input, "query", "") or "")
+    if name in detached_jobs.DETACHABLE_TOOLS:
+        detach_policy = detached_jobs.load_policy()
+        if detach_policy.enabled and verified_caller is not None:
+            detach_key = detached_jobs.inflight_key(verified_caller.slack_user_id, detach_query)
+            running = detached_jobs.REGISTRY.get(detach_key)
+            if running is not None:
+                # 同じ人・同じ KW の分析が走っている（本数など引数違いも含む）。
+                # quota も Gemini も使わずに返す。
+                logger.info(
+                    "video_algorithm_detach_duplicate", request_id=ctx.request_id, stage="precheck"
+                )
+                return _detach_response(
+                    detach_query,
+                    detached_jobs.in_progress_text(
+                        detach_query,
+                        same_conversation=running.destination.channel_id
+                        == verified_caller.channel_id,
+                    ),
+                )
+            detach_destination, detach_reason = detached_jobs.decide(
+                detach_policy,
+                tool=name,
+                verified_caller=verified_caller,
+                metadata=metadata,
+            )
+            logger.info(
+                "video_algorithm_detach_decision",
+                request_id=ctx.request_id,
+                reason=detach_reason,
+            )
+
     # ── 進捗表示（v0.3.1 Task7・ENABLE_PROGRESS_NOTIFY 既定OFF・fail-open）───────────
     # 重いツールの実行前に「📂 資料を検索しています…」等を Slack へ投稿し、成功/失敗
     # どちらも返却前に削除する。宛先は raw の channel_id → 無ければ slack_user_id DM。
@@ -791,9 +945,70 @@ async def dispatch_tool(
     # 受信 → skill 開始 の内訳（身元検証・resolver・入力検証・進捗投稿の合計）。
     _gateway_ms = int((_started - _received) * 1000)
     skill = spec.instantiate()
+    detached_job: detached_jobs.DetachedJob | None = None
+    if (
+        detach_policy is not None
+        and detach_destination is not None
+        and detach_key is not None
+        and verified_caller is not None
+    ):
+        detached_job, start_state = detached_jobs.REGISTRY.start(
+            key=detach_key,
+            max_background=detach_policy.max_background,
+            tool=name,
+            query=detach_query,
+            request_id=ctx.request_id,
+            destination=detach_destination,
+            target=functools.partial(skill.run, skill_input, ctx),
+            on_detached_done=functools.partial(
+                _complete_detached,
+                loop=asyncio.get_running_loop(),
+                skill=skill,
+                tool=name,
+                query=detach_query,
+                destination=detach_destination,
+                request_id=ctx.request_id,
+                started=_started,
+                gateway_ms=_gateway_ms,
+                user_email=metadata.get("user_email"),
+                usage_user_id=usage_user_id,
+                skill_args=skill_args,
+            ),
+        )
+        if start_state == "duplicate" and detached_job is not None:
+            # precheck と start の間に同じキーが登録された（同時に 2 通届いた）。
+            logger.info(
+                "video_algorithm_detach_duplicate", request_id=ctx.request_id, stage="start"
+            )
+            same = detached_job.destination.channel_id == verified_caller.channel_id
+            await clear_progress(_progress, request_id=ctx.request_id)
+            return _detach_response(
+                detach_query,
+                detached_jobs.in_progress_text(detach_query, same_conversation=same),
+            )
+        if detached_job is None:
+            # 同時実行の上限。今と同じ同期実行に落とす（quota は skill 側のまま）。
+            logger.warning(
+                "video_algorithm_detach_capacity_full",
+                request_id=ctx.request_id,
+                max_background=detach_policy.max_background,
+            )
     try:
-        # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
-        output = await asyncio.to_thread(skill.run, skill_input, ctx)
+        if detached_job is not None and detach_policy is not None:
+            if not await _wait_or_detach(detached_job, detach_policy.detach_after_s):
+                logger.info(
+                    "video_algorithm_detached",
+                    request_id=ctx.request_id,
+                    after_ms=int((time.perf_counter() - _started) * 1000),
+                    dm=detached_job.destination.is_dm,
+                )
+                # 完了時の投稿・cleanup_output・usage 記録はジョブの thread が 1 回だけ行う。
+                return _detach_response(detach_query, detached_jobs.receipt_text(detach_query))
+            # 待ち時間内に終わった＝今までどおり同期で返す（失敗なら skill の例外がここで出る）。
+            output = detached_job.outcome()
+        else:
+            # 同期 skill.run（DB I/O 等でブロックする）を thread に逃がしイベントループを塞がない。
+            output = await asyncio.to_thread(skill.run, skill_input, ctx)
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
     except Exception as e:
         _elapsed_ms = int((time.perf_counter() - _started) * 1000)
@@ -820,6 +1035,10 @@ async def dispatch_tool(
             status="error",
             error_code=type(e).__name__,
         )
+        if detached_job is not None and detached_jobs.is_in_progress_error(e):
+            # 同じ引数の処理中リース（別プロセス・同期経路の実行など）。
+            # コード名を出さずに言い換える。
+            return _detach_response(detach_query, detached_jobs.error_text(detach_query, e))
         return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
     finally:
         if _progress is not None:
