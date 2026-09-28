@@ -735,7 +735,9 @@ def test_lambda_log_groups_are_bounded_and_always_present(
 
 
 def test_hmac_consumers_and_rotation_deadlines_are_purpose_exact() -> None:
-    hmac = (TF_ROOT / "hmac_rotation.tf").read_text(encoding="utf-8")
+    # purpose 別の env/secrets 配線は hmac_keyrings.tf が正本。
+    # hmac_rotation.tf は変数・rotation 契約・IAM ARN 集合だけを持つ。
+    hmac_keyrings = (TF_ROOT / "hmac_keyrings.tf").read_text(encoding="utf-8")
     guard = GUARD.read_text(encoding="utf-8")
     runtime = (TF_ROOT / "runtime_guard.tf").read_text(encoding="utf-8")
     for name in (
@@ -746,7 +748,7 @@ def test_hmac_consumers_and_rotation_deadlines_are_purpose_exact() -> None:
         "REPORT_LINK_HMAC_PREVIOUS_SECRET",
         "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT",
     ):
-        assert name in hmac
+        assert name in hmac_keyrings
     assert "mail   = 87300" in runtime
     assert "report = 605700" in runtime
     assert 'validate("mail"; 86400)' in guard

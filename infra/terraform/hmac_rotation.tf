@@ -137,40 +137,10 @@ locals {
     var.mail_action_hmac_secret_arn != var.report_link_hmac_secret_arn
   )
 
-  hmac_mail_environment = local.hmac_mail_previous_present ? [
-    {
-      name  = "MAIL_ACTION_HMAC_PREVIOUS_ROTATION_STARTED_AT"
-      value = tostring(var.mail_action_hmac_previous_rotation_started_at)
-    },
-  ] : []
-  hmac_report_environment = local.hmac_report_previous_present ? [
-    {
-      name  = "REPORT_LINK_HMAC_PREVIOUS_ROTATION_STARTED_AT"
-      value = tostring(var.report_link_hmac_previous_rotation_started_at)
-    },
-  ] : []
-
-  hmac_mail_secrets = concat(
-    [{ name = "MAIL_ACTION_HMAC_SECRET", valueFrom = var.mail_action_hmac_secret_arn }],
-    local.hmac_mail_previous_present ? [{
-      name      = "MAIL_ACTION_HMAC_PREVIOUS_SECRET"
-      valueFrom = var.mail_action_hmac_previous_secret_arn
-    }] : [],
-  )
-  hmac_report_secrets = concat(
-    [{ name = "REPORT_LINK_HMAC_SECRET", valueFrom = var.report_link_hmac_secret_arn }],
-    local.hmac_report_previous_present ? [{
-      name      = "REPORT_LINK_HMAC_PREVIOUS_SECRET"
-      valueFrom = var.report_link_hmac_previous_secret_arn
-    }] : [],
-  )
-
-  hmac_mcp_environment     = concat(local.hmac_mail_environment, local.hmac_report_environment)
-  hmac_connect_environment = concat(local.hmac_mail_environment, local.hmac_report_environment)
-  hmac_morning_environment = local.hmac_mail_environment
-  hmac_mcp_secrets         = concat(local.hmac_mail_secrets, local.hmac_report_secrets)
-  hmac_connect_secrets     = concat(local.hmac_mail_secrets, local.hmac_report_secrets)
-  hmac_morning_secrets     = local.hmac_mail_secrets
+  # task へ渡す env/secrets の正本は hmac_keyrings.tf 側
+  # （mail_action_hmac_* / report_link_hmac_*）。purpose ごとに consumer が異なり
+  # （connect-web は report_link のみ・morning-digest は mail_action のみ）、
+  # 全 workload 共通の配線 local をここに置くと purpose 分離が崩れるため持たない。
 
   hmac_mail_secret_iam_arns = compact([
     var.mail_action_hmac_secret_arn,
