@@ -471,9 +471,9 @@ def _synthesis_block(out: VideoAlgorithmOutput) -> str:
         for ac in s.angle_clusters
     )
     angle_block = (
-        '<div class="th">訴求角度のクラスタ</div><table class="tbl">'
+        '<div class="th">訴求角度のクラスタ</div><div class="tblwrap"><table class="tbl">'
         "<thead><tr><th>角度</th><th>該当</th><th>効く理由（観測）</th></tr></thead>"
-        f"<tbody>{angles}</tbody></table>"
+        f"<tbody>{angles}</tbody></table></div>"
         if angles
         else ""
     )
@@ -586,9 +586,9 @@ def _matrix_block(out: VideoAlgorithmOutput) -> str:
     )
     return (
         '<section><div class="th big">一貫性マトリクス（テロップ↔キャプション↔映像中身・検索KW）</div>'
-        '<table class="tbl matrix2"><thead><tr><th>順</th><th>テロップ↔KW</th><th>キャプ↔KW</th>'
-        "<th>音声↔KW</th><th>メッセージ一貫性</th><th>補強 / ズレ（一言）</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table>"
+        '<div class="tblwrap"><table class="tbl matrix2"><thead><tr><th>順</th><th>テロップ↔KW</th>'
+        "<th>キャプ↔KW</th><th>音声↔KW</th><th>メッセージ一貫性</th><th>補強 / ズレ（一言）</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table></div>"
         f'<div class="muted small mtop">共通解: {_esc(consensus)}。{read}</div>'
         "</section>"
     )
@@ -670,10 +670,13 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
     # ルーラ（タイムコード）＋抽出フレーム位置◆
     step = _nice_step(dur)
     n_ticks = int(dur / step) + 1
+    tick_secs = [i * step for i in range(n_ticks + 1) if i * step <= dur + 0.001]
+    # 最後の目盛りはラベルを左側へ寄せる（尺が目盛り間隔の倍数だと右端 100% に来て、
+    # 中央寄せのラベルが枠の外へはみ出し、PC 幅でもタイムラインに横スクロールが出るため）
     ticks = "".join(
-        f'<span class="ntick" style="left:{_pct(i * step, dur):.2f}%">{_tc(i * step)}</span>'
-        for i in range(n_ticks + 1)
-        if i * step <= dur + 0.001
+        f'<span class="ntick{" nend" if i == len(tick_secs) - 1 and i > 0 else ""}" '
+        f'style="left:{_pct(s, dur):.2f}%">{_tc(s)}</span>'
+        for i, s in enumerate(tick_secs)
     )
     fticks = "".join(
         f'<span class="nftick" style="left:{_pct(f.sec, dur):.2f}%" title="抽出フレーム {f.sec:.1f}s"></span>'
@@ -728,7 +731,8 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
     legend = (
         '<div class="nlegend"><span class="lg c-hook"></span>フック'
         '<span class="lg c-telop"></span>テロップ<span class="lg c-telop kw"></span>KW一致'
-        '<span class="lg c-brand"></span>ブランド<span class="lg c-scene"></span>シーン'
+        '<span class="lg c-brand"></span>ブランド<span class="lg c-brand comp"></span>競合ブランド（縞）'
+        '<span class="lg c-scene"></span>シーン'
         '<span class="nft">◆</span>抽出フレーム'
         '<span class="muted">　ルーラ/トラックをクリック・ドラッグで再生ヘッドを移動→該当フレーム表示</span></div>'
     )
@@ -776,9 +780,9 @@ def _tabs(v: AnalyzedVideo, idx: int) -> str:
         for b in a.brand_detections
     )
     brand_tbl = (
-        f'{comp}<table class="tbl"><thead><tr><th>秒</th><th>名称</th><th>場所</th><th>目立ち</th>'
-        "<th>意図</th></tr></thead>"
-        f"<tbody>{brand_rows or '<tr><td colspan=5 class=muted>検出なし</td></tr>'}</tbody></table>"
+        f'{comp}<div class="tblwrap"><table class="tbl"><thead><tr><th>秒</th><th>名称</th><th>場所</th>'
+        "<th>目立ち</th><th>意図</th></tr></thead>"
+        f"<tbody>{brand_rows or '<tr><td colspan=5 class=muted>検出なし</td></tr>'}</tbody></table></div>"
     )
     # 数値KPI・勝因は pane 上部に移したので、ここは解説テキストのみ
     metrics_pane = (
@@ -935,9 +939,9 @@ def _stats_block(s: StatsAnalysis | None) -> str:
         )
         corr_tbl = (
             '<div class="th">特徴量 × 順位の効き（Spearman ρ・点推定／有意性なし）</div>'
-            '<table class="tbl"><thead><tr><th>特徴</th><th>ρ</th><th>効きの方向</th>'
+            '<div class="tblwrap"><table class="tbl"><thead><tr><th>特徴</th><th>ρ</th><th>効きの方向</th>'
             "<th>単調性</th></tr></thead>"
-            f"<tbody>{corr_rows}</tbody></table>"
+            f"<tbody>{corr_rows}</tbody></table></div>"
         )
     else:
         corr_tbl = (
@@ -952,7 +956,7 @@ def _stats_block(s: StatsAnalysis | None) -> str:
     )
     dist_tbl = (
         '<div class="th">分布と外れ値（中央値中心）</div>'
-        f'<table class="tbl"><tbody>{dist_rows}</tbody></table>'
+        f'<div class="tblwrap"><table class="tbl"><tbody>{dist_rows}</tbody></table></div>'
     )
     kc = s.kw_coverage
     fill_bars = "".join(
@@ -1009,18 +1013,18 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
  position:sticky;top:0;background:var(--va-white);z-index:20;padding-top:8px}
 .toptab{background:none;border:none;border-bottom:4px solid transparent;padding:8px 16px;font-size:16px;
  font-weight:700;color:var(--va-sub);cursor:pointer;border-radius:var(--border-radius-8) var(--border-radius-8) 0 0;
- display:inline-flex;align-items:center;gap:8px}
+ display:inline-flex;align-items:center;gap:8px;min-width:0;max-width:100%;overflow-wrap:anywhere;text-align:left}
 .toptab:hover{background:var(--va-soft);color:var(--va-ink)}
 .toptab.on{color:var(--va-accent);border-bottom-color:var(--va-accent);background:var(--color-primitive-blue-50)}
 .toptab .ttrank{font-weight:700;background:var(--va-sub);color:var(--va-white);
- border-radius:var(--border-radius-4);padding:0 6px;font-size:14px}
+ border-radius:var(--border-radius-4);padding:0 6px;font-size:14px;flex:none;white-space:nowrap}
 .toptab.on .ttrank{background:var(--va-accent)}
 .ttpane{display:none}.ttpane.show{display:block;animation:ttfade .18s ease}
 @keyframes ttfade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .vpane{margin:0 0 8px}
 .vphead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-bottom:12px;margin-bottom:16px;
  border-bottom:1px solid var(--va-line)}
-.vphead a{font-weight:700;font-size:20px}
+.vphead a{font-weight:700;font-size:20px;min-width:0;overflow-wrap:anywhere}
 .vpmsg{color:var(--va-sub);font-size:16px;flex:1;min-width:160px}
 .vpwins{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}
 .wchip{background:var(--va-white);border:1px solid var(--va-line);border-radius:999px;padding:2px 12px;
@@ -1080,13 +1084,14 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
 .sbauth a{font-weight:700;white-space:nowrap}
 .sbnum{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
 .sbcap{color:var(--va-sub);min-width:200px;max-width:320px}
-/* C Top5ボード（行の高さを揃え、ラベル列と値を横一列にそろえる。狭い画面は枠内で横スクロール） */
+/* C Top5ボード（ラベル列と各動画の列を subgrid で同じ 9 行に載せ、どこかのセルが 2 行に
+   折り返しても横一列の高さがそろう。狭い画面は枠内で横スクロール） */
 .board{display:grid;gap:0;border:1px solid var(--va-line);border-radius:var(--border-radius-8);overflow-x:auto}
-.blab,.bcol{display:flex;flex-direction:column;min-width:112px}
+.blab,.bcol{display:grid;grid-row:span 9;grid-template-rows:subgrid;min-width:112px}
 .blab{background:var(--va-soft)}
 .bcol{border-left:1px solid var(--va-line);text-align:center}
 .bcol.is-top{box-shadow:inset 0 4px 0 var(--va-accent)}
-.blab>div,.bcol>div{padding:8px;border-bottom:1px solid var(--va-line-soft);height:44px;display:flex;
+.blab>div,.bcol>div{padding:8px;border-bottom:1px solid var(--va-line-soft);min-height:44px;display:flex;
  align-items:center;justify-content:center}
 .blab>div:last-child,.bcol>div:last-child{border-bottom:0}
 .blab .rl{justify-content:flex-end;color:var(--va-ink);font-size:14px;font-weight:700;text-align:right}
@@ -1101,7 +1106,7 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
  display:block!important;line-height:28px}
 .bm{font-size:14px;gap:8px}.bv{font-weight:700;white-space:nowrap}
 .btag{background:var(--va-soft);border:1px solid var(--va-line-soft);border-radius:var(--border-radius-4);
- padding:0 8px;font-size:14px;color:var(--va-ink)}
+ padding:0 8px;font-size:14px;color:var(--va-ink);min-width:0;overflow-wrap:anywhere}
 .miniba{position:relative;width:46px;height:8px;background:var(--color-neutral-solid-gray-100);
  border-radius:var(--border-radius-4);overflow:hidden}
 .miniba>i{position:absolute;left:0;top:0;bottom:0;background:var(--va-line);border-radius:var(--border-radius-4)}
@@ -1191,8 +1196,9 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
 .nruler{position:relative;height:30px;background:var(--va-soft);border-radius:0 var(--border-radius-4) 0 0;
  border-left:1px solid var(--va-line)}
 .ntick{position:absolute;top:2px;transform:translateX(-50%);font:14px/1.2 ui-monospace,monospace;color:var(--va-sub)}
-.ntick:first-child{transform:none;padding-left:4px}.ntick:first-child:after{left:0}
 .ntick:after{content:'';position:absolute;left:50%;top:19px;width:1px;height:7px;background:var(--va-line)}
+.ntick:first-child{transform:none;padding-left:4px}.ntick:first-child:after{left:0}
+.ntick.nend{transform:translateX(-100%);padding-right:4px}.ntick.nend:after{left:auto;right:0}
 .nftick{position:absolute;bottom:0;width:0;transform:translateX(-50%)}
 .nftick:after{content:'◆';position:absolute;left:0;bottom:-2px;transform:translateX(-50%);font-size:14px;
  color:var(--va-accent)}
@@ -1249,6 +1255,7 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
 .warn{font-size:16px;margin:0 0 12px;padding:12px 16px;background:var(--color-primitive-yellow-50);
  border:1px solid var(--color-primitive-yellow-900);border-left-width:8px;border-radius:var(--border-radius-8);
  color:var(--va-ink-strong)}
+.tblwrap{overflow-x:auto}
 .tbl{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5;margin-bottom:4px}
 .tbl th,.tbl td{border-bottom:1px solid var(--va-line-soft);padding:8px 12px;text-align:left;vertical-align:top}
 .tbl th{background:var(--va-soft);color:var(--va-ink);font-weight:700;font-size:14px;
@@ -1278,9 +1285,9 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
  .nmon{grid-template-columns:minmax(0,1fr)}.nscreen{width:100%}}
 @media(max-width:640px){body{padding:24px 16px 64px}h1{font-size:28px}
  .vbig,.verdict.planner .vbig{font-size:24px}.verdict{padding:16px;gap:16px}.th.big{font-size:20px}
- table.tbl{display:block;overflow-x:auto}.toptab{padding:8px 12px}.appendix{padding:4px 16px}}
+ .toptab{padding:8px 12px}.appendix{padding:4px 16px}}
 @media(prefers-reduced-motion:reduce){.nplayhead{transition:none}.ttpane.show{animation:none}}
-@media print{.toptabs{position:static}.board,.tbrow,.nle{overflow:visible}}
+@media print{.toptabs{position:static}.board,.tbrow,.nle,.tblwrap{overflow:visible}}
 """
 
 _IMAGE_POST_STYLE = """
@@ -1291,7 +1298,7 @@ _IMAGE_POST_STYLE = """
 .imagepostpane{max-width:980px;margin:0 auto}
 .iphead{border-bottom-color:var(--color-primitive-yellow-900)}
 .iprank{background:var(--va-warn-ink)}
-.ipauthor{font-size:20px}.ipauthor b{font-size:14px;color:var(--va-sub);margin-right:8px}
+.ipauthor{font-size:20px;min-width:0;overflow-wrap:anywhere}.ipauthor b{font-size:14px;color:var(--va-sub);margin-right:8px}
 .ipcover{display:flex;align-items:center;justify-content:center;min-height:360px;max-height:680px;
  background:var(--va-ink-strong);border:1px solid var(--va-line);border-radius:var(--border-radius-8);overflow:hidden;
  margin-bottom:16px}

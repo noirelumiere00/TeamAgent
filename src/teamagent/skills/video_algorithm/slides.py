@@ -15,7 +15,7 @@ report.py の自己完結ダッシュボード（縦長・動画base64埋込・6
 
 from __future__ import annotations
 
-from teamagent.skills._html.dads import DADS_TOKENS_CSS
+from teamagent.skills._html.dads import DADS_LICENSE_COMMENT, DADS_TOKENS_CSS
 from teamagent.skills.video_algorithm.report import (
     _analyzed,
     _conf_dot,
@@ -36,8 +36,11 @@ SLIDE_H = 720
 
 # 配色はデジタル庁デザインシステム（DADS）のトークンに寄せる（キーカラー blue-900）。
 # 画面サイズ（1280x720 の撮影）前提のため、文字サイズ・余白・レイアウトは変えない。
+# dads_style() は基本部品（body の余白など）まで入れて撮影結果が変わるので使わず、
+# トークンと MIT の出典コメントだけを載せる。
 _STYLE = (
-    DADS_TOKENS_CSS
+    DADS_LICENSE_COMMENT
+    + DADS_TOKENS_CSS
     + f"""
 :root{{--w:{SLIDE_W}px;--h:{SLIDE_H}px;--ink:var(--color-neutral-solid-gray-900);
   --mut:var(--color-neutral-solid-gray-600);--line:var(--color-neutral-solid-gray-420);
