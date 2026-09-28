@@ -11,7 +11,12 @@ import re
 from collections.abc import Callable
 from typing import Any
 
-from teamagent.skills._shared.grounding import DropSink, NumberGrounder, tone_down
+from teamagent.skills._shared.grounding import (
+    ALWAYS_ALLOWED,
+    DropSink,
+    NumberGrounder,
+    tone_down,
+)
 from teamagent.skills._shared.grounding import extract_numbers as _numbers
 from teamagent.skills._shared.text_safety import sanitize_llm_text
 from teamagent.skills.search_surface_check.display import (
@@ -20,6 +25,7 @@ from teamagent.skills.search_surface_check.display import (
     fmt_count,
     fmt_pct,
 )
+from teamagent.skills.search_surface_check.insights import FOLLOWER_TIERS
 from teamagent.skills.search_surface_check.schema import (
     ConclusionPoint,
     SurfaceConclusion,
@@ -35,6 +41,16 @@ _MAX_ANGLES = 4
 _POST_TEXT_MAX = 80
 # 数字の照合・誇張語の言い換えは _shared/grounding.py（video_algorithm と共通）。
 # _numbers と tone_down は既存の呼び出し・テストのためにここからも import できる。
+# 無条件に通す数。付け替え前（単位を見ない _numbers）は「1万人未満」「10万〜100万人」
+# 「100万再生」の 1・10・100 が ALWAYS_ALLOWED で通っていた。万・億を展開する今もこれを保つため、
+# ALWAYS_ALLOWED に「万」「億」を付けた値と、フォロワー帯の境目（10000・100000・1000000）を足す。
+# 面にその帯が無くても「100万人以上は上位に無い」は正しい文なので落とさない。
+# 単位違いの偶然一致（入力の 1.2% と文の 1.2万）は引き続き通さない。
+_SURFACE_ALWAYS_ALLOWED: frozenset[str] = (
+    ALWAYS_ALLOWED
+    | frozenset(n for v in ALWAYS_ALLOWED for unit in ("万", "億") for n in _numbers(v + unit))
+    | frozenset(str(floor) for floor, _ in FOLLOWER_TIERS)
+)
 
 
 def facts_payload(facts: SurfaceFacts) -> dict[str, Any]:
@@ -156,7 +172,9 @@ def ground_conclusion(
 ) -> SurfaceConclusion | None:
     """LLM の出力を検査して採用する。入力に無い数字・実在しない順位を含む項目は捨てる。"""
     grounder = NumberGrounder(
-        allowed=frozenset(allowed_numbers), valid_ranks=frozenset(valid_ranks)
+        allowed=frozenset(allowed_numbers),
+        valid_ranks=frozenset(valid_ranks),
+        always_allowed=_SURFACE_ALWAYS_ALLOWED,
     )
 
     def drop(field: str, reason: str) -> None:

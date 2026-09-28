@@ -3,7 +3,9 @@
 改良は 4 点（先頭ゼロ・画面比・タイムコード・万/億の展開）。付け替え前の _numbers
 （conclusion.py:54-61 の写し）での結果と並べ、何が変わったかを 1 件ずつ書く。
 正しい文を落とさない方向の変化（0:05・9:16・2.50）と、単位の取り違えを通さない方向の変化
-（1.2万 と 1.2% の偶然一致・入力に無い「1万人」）の両方がある。
+（1.2万 と 1.2% の偶然一致）の両方がある。帯の境目（1万・10万・100万）と ALWAYS_ALLOWED に
+万・億を付けた数（5万 など）は付け替え前どおり無条件に通す（検索上位チェックは常に enforce
+なので、本番で出ていた正しい文を落とさない）。
 """
 
 from __future__ import annotations
@@ -52,7 +54,10 @@ def _kept_now(text: str, input_text: str) -> bool:
         ("1:30の尺で締める", '{"sec": 90}', False, True),  # タイムコードは秒で照合
         # 単位の取り違えを通さなくなった
         ("検索量1.2万のKW", '{"保存率の中央値%": 1.2}', True, False),  # 1.2% と偶然一致していた
-        ("フォロワー1万人未満が中心", '{"本数": 3}', True, False),  # 入力に 1万 が無い
+        # 変わらない（帯の境目 1万・10万・100万は、入力に無くても付け替え前どおり通す）
+        ("フォロワー1万人未満が中心", '{"本数": 3}', True, True),
+        ("フォロワー100万人以上は上位に無い", '{"本数": 3}', True, True),
+        ("5万再生前後が中心", '{"本数": 3}', True, True),  # 5万 は付け替え前も 5 で通っていた
         # 変わらない
         ("再生の中央値は8.2万", '{"再生の中央値": "8.2万"}', True, True),
         ("再生の中央値は82,000", '{"再生の中央値": "8.2万"}', False, True),  # 万の展開で一致
@@ -93,3 +98,78 @@ def test_real_fixture_conclusion_still_grounds_after_the_change() -> None:
     # 捨てるのは実在しない順位だけの切り口 1 件（数字では 1 件も捨てない）
     assert dropped == [("angles", "ranks<2")]
     assert "10万" in c.actions[0].text
+
+
+def _surface_inputs(followers: list[int] | None) -> tuple[str, set[str], set[int]]:
+    """実物再現の面（15 本）。followers を渡すとフォロワー数だけ差し替える。"""
+    from teamagent.skills.search_surface_check.conclusion import build_prompt
+    from tests.skills.search_surface_check.test_surface_analysis import _posts
+
+    posts = _posts()
+    if followers is not None:
+        posts = [
+            p.model_copy(update={"author_followers": f})
+            for p, f in zip(posts, followers, strict=True)
+        ]
+    facts = compute_facts(posts, keyword=KEYWORD, client_name="GABAN", now_epoch=NOW)
+    prompt, allowed = build_prompt(
+        "{keyword}{platform}{client_name}{facts_json}{posts_json}",
+        keyword=KEYWORD,
+        platform="tiktok",
+        client_name="GABAN",
+        facts=facts,
+        posts=posts,
+        now_epoch=NOW,
+    )
+    return prompt, allowed, {p.rank for p in posts}
+
+
+# 09-28 の本番の実出力に近い文（帯の境目・万の概数・KW 明記の本数と割合）。
+_PROD_LIKE_SENTENCES = (
+    "フォロワー10万〜100万人のインフルエンサーと組む",
+    "1万人未満のアカウントが上位10本中4本",
+    "本文やタグに検索KWを明記した投稿は9本で30%",
+    "フォロワー100万人以上のアカウントは上位に無い",
+    "100万再生超えは無い",
+    "10万回再生を超える投稿が多い",
+    "フォロワー1万〜10万人の料理系が中心",
+    "5万再生前後の投稿が中心",
+)
+
+
+@pytest.mark.parametrize(
+    "followers",
+    [
+        None,  # 実物再現（4 帯すべてある面）
+        [
+            5_000 + i * 1_000 for i in range(15)
+        ],  # 1万未満と1万〜10万だけの面（10万・100万の帯が無い）
+    ],
+    ids=["all_tiers", "small_only"],
+)
+@pytest.mark.parametrize("sentence", _PROD_LIKE_SENTENCES)
+def test_prod_like_sentences_are_kept_as_before_the_change(
+    followers: list[int] | None, sentence: str
+) -> None:
+    """付け替え前に通っていた本番の型の文は、面にその帯が無くても付け替え後も通る。"""
+    prompt, allowed, ranks = _surface_inputs(followers)
+    assert _legacy_kept(sentence, prompt), sentence  # 付け替え前に通っていた（前提）
+    dropped: list[tuple[str, str]] = []
+    for field in ("winning", "gap"):
+        raw: dict[str, Any] = {field: {"text": sentence, "ranks": [1]}}
+        c = ground_conclusion(
+            raw,
+            allowed_numbers=allowed,
+            valid_ranks=ranks,
+            on_drop=lambda f, r: dropped.append((f, r)),
+        )
+        assert c is not None and getattr(c, field) is not None, (field, sentence)
+    assert dropped == []
+
+
+def test_unit_mixup_is_still_dropped_on_the_real_surface() -> None:
+    """境目を足しても、入力に無い万の数（23万など）は落とす（無条件に通すのは境目と小さい数だけ）。"""
+    _, allowed, ranks = _surface_inputs(None)
+    raw: dict[str, Any] = {"winning": {"text": "上位は平均23万再生", "ranks": [1]}}
+    c = ground_conclusion(raw, allowed_numbers=allowed, valid_ranks=ranks)
+    assert c is None or c.winning is None
