@@ -3,9 +3,14 @@
 # Terraform state and the release intent.
 
 variable "enable_hmac_worker_deploy" {
-  description = "Run the signed, atomic EC2 worker deployment from the trusted saved-plan apply."
+  description = "Retired 2026-09-28 with the EC2 worker (worker.tf destroyed). Must stay false."
   type        = bool
   default     = false
+
+  validation {
+    condition     = !var.enable_hmac_worker_deploy
+    error_message = "The EC2 worker was retired on 2026-09-28; the worker HMAC deploy path is sealed and enable_hmac_worker_deploy must stay false."
+  }
 }
 
 variable "hmac_worker_deploy_mode" {

@@ -127,7 +127,7 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 | 目的 | ドキュメント |
 |---|---|
 | 一括デプロイ（dev→live, MCP 再ビルド, JSON ログ） | `docs/v3.2/bundled_deploy_2026-06-16.md` |
-| （退役決定済み・実行しない）旧 EC2 worker へ Bot を移す手順。EC2 worker は 2026-08-03 から停止中で、2026-09-28 に退役を決めた。worker.tf の EC2・IAM・SG は terraform に残り、destroy は保留中。Slack 面は OpenClaw | `docs/v3.2/ec2_cutover_runbook.md` |
+| （退役済み・実行しない）旧 EC2 worker へ Bot を移す手順。EC2 worker は 2026-08-03 から停止し、2026-09-28 に撤去した（`infra/terraform/worker.tf` を削除し、EC2・IAM・SG を terraform で destroy。ディスクはスナップショットで保存）。worker の HMAC 配布経路は `enable_hmac_worker_deploy` の validation（常に false）で封じてあり、経路そのものの撤去は便δを再開する前の別 PR。Slack 面は OpenClaw | `docs/v3.2/ec2_cutover_runbook.md` |
 | 観測/セキュリティ基盤 apply（SNS/CloudWatch/KMS/CloudTrail/Sentry） | `docs/v3.2/ops/observability_and_security.md` |
 | Secrets ローテーション（9 secrets・周期） | `docs/v3.2/ops/secrets_rotation_policy.md` |
 | CloudWatch Logs Insights クエリ集（8本・JSON ログ前提） | `docs/v3.2/ops/cloudwatch_queries.md` |
