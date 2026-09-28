@@ -12,15 +12,20 @@
 - 結論（勝ち筋/空白/打ち手/共通する切り口）= Bedrock（KW×媒体ごとに1コール）。数字は集計と
   照合し、入力に無い数字を含む項目は捨てる（conclusion.py）。失敗は集計だけの見出しで縮退。
 - Slack 文面はツールが組む（summary.py）。OpenClaw はそれをそのまま返す。
+- 金庫（documents → Aico Vault）への記録 = x_research の声集めと同じ ResearchPersister に
+  fire-and-forget で渡す（persist_body.py）。USE_RESEARCH_PERSIST=1 のときだけ factory が注入する。
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
 import json
 import os
 import re
 import tempfile
 import time
+import unicodedata
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, ClassVar
@@ -35,7 +40,12 @@ from teamagent.prompts.loader import load_prompt
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.conclusion import conclude, rule_conclusion
+from teamagent.skills.search_surface_check.display import JST
 from teamagent.skills.search_surface_check.insights import compute_facts, is_pr_post, mentions
+from teamagent.skills.search_surface_check.persist_body import (
+    build_surface_summary_md,
+    build_surface_title,
+)
 from teamagent.skills.search_surface_check.report import render_surface_report
 from teamagent.skills.search_surface_check.schema import (
     MAX_DIRECT_KEYWORDS,
@@ -102,6 +112,34 @@ def _parse_json_block(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _surface_dedup_key(keywords: list[str], platforms: list[str], measured_epoch: int) -> str:
+    """検索上位チェックの永続化 external_id 用 dedup キー（KW 群＋取れた媒体＋実測週のハッシュ）。
+
+    「同じ KW 群・同じ媒体の組・同じ週・同じ利用者」の再実行は 1 doc に集約（最新の実測で
+    UPDATE）し、それ以外は別 doc にする:
+    - 利用者と取引先は ResearchPersister が external_id に owner ハッシュ・商材キーとして
+      自前で入れるので、ここでは持たない（別の営業の同じ調査を上書きしない）。
+    - KW 群は順不同・NFKC・空白の畳み・大文字小文字を同一視する（並べ替えや全角空白の違いは
+      同じ調査）。区切りを入れて連結する（「ab」+「c」と「a」+「bc」を同じキーにしない）。
+    - 実際にデータが取れた媒体の組を入れる。入れないと、TikTok だけの実行のあとに IG だけを
+      実行すると TikTok 面の記録が消え、TikTok の取得に失敗した再実行が同じ週の完全な記録を
+      上書きする（09-28 レビュー指摘）。
+    - 実測の週（JST の ISO 週）を入れる。検索上位は入れ替わるので別の週は別の記録として残し
+      （定点比較）、日ごとにしないのは、毎日増えるノートが export_vault の取引先ごとの件数上限
+      （新しい順）で本物の資料を一覧から押し出さないようにするため。
+    """
+    norm = sorted(
+        {
+            " ".join(unicodedata.normalize("NFKC", k).casefold().split())
+            for k in keywords
+            if k and k.strip()
+        }
+    )
+    week = _dt.datetime.fromtimestamp(measured_epoch, JST).strftime("%G-W%V")
+    seed = "\x1f".join(norm) + "\x1e" + ",".join(sorted(set(platforms))) + "\x1e" + week
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+
+
 @register
 class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCheckOutput]):
     """③ 検索面チェック: TikTok×IGで「誰が上位に出てるか」の勢力図と在圏判定。"""
@@ -126,6 +164,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         tiktok_source_factory: Any | None = None,
         tiktok_search_fn: Any | None = None,
         clock: Any | None = None,
+        persister: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock
@@ -134,6 +173,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         self._tiktok_source_factory = tiktok_source_factory
         self._tiktok_search_fn = tiktok_search_fn  # 直スクレイプ経路（テスト注入用）
         self._clock = clock or time.time  # 投稿時期の「何日前」と実測日の基準
+        self._persister = persister  # ResearchPersister（None なら金庫への記録は no-op）
 
     # ---- 依存の遅延生成 -------------------------------------------------------
 
@@ -599,7 +639,58 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             cost_usd=out.total_cost_usd,
             latency_s=round(time.monotonic() - start, 1),
         )
+        self._persist(
+            out,
+            input,
+            user=user,
+            request_id=ctx.request_id,
+            measured_epoch=now_epoch,
+            missing=missing,
+        )
         return out
+
+    def _persist(
+        self,
+        out: SearchSurfaceCheckOutput,
+        input: SearchSurfaceCheckInput,
+        *,
+        user: str,
+        request_id: str,
+        measured_epoch: int,
+        missing: list[tuple[str, str]],
+    ) -> None:
+        """結果を金庫へ記録する（fire-and-forget・ホットパス外・失敗しても応答は返す）。
+
+        取引先名（client_name）が無いときは記録しない。cls_project は Vault の取引先 anchor で、
+        KW をそこへ入れると取引先の一覧を汚す（x_research が任意テーマの needs/buzz を記録
+        しないのと同じ理由。コメント分析も client_name がある時だけ記録している）。
+        分類ラベルは ingest/classify.py の固定表から選ぶ: 資料種別は _DOC_TYPES の「報告書」
+        （検索の「レポート」も 報告書 に寄る）、施策は _SOLUTIONS の「SEO」
+        （search/knowledge_query.py で「検索面」「検索対策」が SEO に寄る）。
+        """
+        client = (input.client_name or "").strip()
+        if self._persister is None or not client:
+            return
+        try:
+            self._persister.schedule(
+                tool="search_surface",
+                product_name=client,
+                title=build_surface_title(client, out),
+                body_md=build_surface_summary_md(
+                    out, client_name=client, measured_epoch=measured_epoch, missing=missing
+                ),
+                owner_email=user,
+                request_id=request_id,
+                cls_solution="SEO",
+                cls_doc_type="報告書",
+                # 7 日で切れる署名 URL。本文に要点が全部入るので、切れても記録は残る。
+                source_uri=out.report_url,
+                dedup_key=_surface_dedup_key(
+                    input.keywords, [s.platform for s in out.surfaces], measured_epoch
+                ),
+            )
+        except Exception as e:  # 記録の失敗で本体の応答を落とさない（fail-open）
+            logger.warning("surface_persist_failed", request_id=request_id, error=type(e).__name__)
 
     def _conclude(
         self, surface: KwSurface, client_name: str | None, now_epoch: int, request_id: str
