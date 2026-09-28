@@ -35,6 +35,8 @@ def test_returns_urls_when_base_url_set(monkeypatch: pytest.MonkeyPatch) -> None
     # 案内文に両 URL と「Googleログイン」の文言が入る。
     assert "https://connect.example.co.jp/search" in out.message  # type: ignore[attr-defined]
     assert "Googleログイン" in out.message  # type: ignore[attr-defined]
+    # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
+    assert out.message.startswith("🔎 **社内ナレッジの検索ページ** です")  # type: ignore[attr-defined]
 
 
 def test_trailing_slash_normalized(monkeypatch: pytest.MonkeyPatch) -> None:

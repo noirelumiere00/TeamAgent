@@ -375,7 +375,7 @@ class TikTokCommentMiningSkill(BaseSkill[CommentMiningInput, CommentMiningOutput
 
     def _slack_summary(self, out: CommentMiningOutput) -> str:
         lines = [
-            f"💬 *コメント欄マイニング* 完了"
+            f"💬 **コメント欄マイニング** 完了"
             f"（{len(out.videos)}動画・{out.scraped_comments}コメント）"
         ]
         for ins in out.videos:

@@ -125,6 +125,8 @@ def test_voice_search_happy_path() -> None:
     assert out.noise_note == "料理文脈が混入"
     assert out.report_url == "https://s3.example/signed"
     assert "白湯" in out.slack_summary and out.total_cost_usd > 0
+    # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
+    assert out.slack_summary.startswith("🗣️ **Xの声集め** 完了「白湯」")
     assert len(apify.verify_calls) == 1  # 厳選分のみ検証
 
 
@@ -395,6 +397,8 @@ def test_needs_mining_clusters_and_min_faves() -> None:
     assert out.clusters[1].post_ids == ["2"]  # 実在しないIDは落とす
     assert out.hypothesis_summary.startswith("商品より")
     assert out.report_url
+    # 見出しの太字は `**`（OpenClaw の Markdown→mrkdwn 変換で `*語*` 単独は斜体になる）。
+    assert out.slack_summary.startswith("💡 **ニーズ発掘** 完了「コンビニ」（厳選2件・2分類）")
 
 
 def test_needs_mining_classify_failure_degrades() -> None:
