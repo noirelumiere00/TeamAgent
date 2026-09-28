@@ -414,9 +414,12 @@ class CrossSynthesis(BaseModel):
     differentiators: list[Differentiator] = Field(default_factory=list)
     win_hypotheses: list[WinHypothesis] = Field(default_factory=list)
     caveat: str = ""  # n小・相関≠因果の定型
-    # --- 数字の照合（_shared/grounding.py）。LLM の値ではなくコードが上書きする ---
-    grounding_mode: str = ""  # enforce（捨てた）/ shadow（捨てずに記録だけ）
-    grounding_dropped: int = 0  # 捨てた（shadow では捨てるはずだった）件数
+    # --- 数字の照合（_shared/grounding.py）。コードだけが書く（LLM の値は parse で捨てる）---
+    # exclude=True: model_dump（MCP の返却 JSON・結果キャッシュ）に載せない。Aico が「N 件照合
+    # できず」と言い換えないよう、件数はログ grounding_dropped でだけ測る。enforce のときだけ
+    # 書く（shadow では照合前と同じ出力に保つため書かない）。
+    grounding_mode: str = Field(default="", exclude=True)  # enforce のときだけ "enforce"
+    grounding_dropped: int = Field(default=0, exclude=True)  # enforce で捨てた件数
 
 
 class CrossAnalysis(BaseModel):

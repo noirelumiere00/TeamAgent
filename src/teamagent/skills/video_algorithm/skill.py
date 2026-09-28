@@ -108,6 +108,19 @@ _APIFY_WALLCLOCK_DEFAULT_S = 240
 _APIFY_S3_MARGIN_S = 30
 
 
+PROMPT_VERSION_ENV = "VIDEO_ALGO_PROMPT_VERSION"
+DEFAULT_PROMPT_VERSION = "v2"
+
+
+def prompt_version_from_env() -> str:
+    """env VIDEO_ALGO_PROMPT_VERSION（未設定・空なら v2）。
+
+    MCP（orchestrator/factory.py）と Slack（runtime/slack_bot.py）の両経路がこれで版を決める
+    （v1 に戻す手段を片方の経路だけにしないため）。
+    """
+    return os.environ.get(PROMPT_VERSION_ENV, "").strip() or DEFAULT_PROMPT_VERSION
+
+
 def _max_workers_from_env() -> int:
     raw = os.environ.get(_MAX_WORKERS_ENV)
     try:
@@ -361,7 +374,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self,
         gemini: GeminiClient | None = None,
         *,
-        prompt_version: str = "v2",
+        prompt_version: str = DEFAULT_PROMPT_VERSION,
         searcher: Searcher | None = None,
         downloader: Downloader | None = None,
         proxy: Proxy | None = None,

@@ -217,13 +217,22 @@ def build_production_tools() -> list[ToolSpec]:
     # 取得（実スクレイプ Puppeteer/yt-dlp/ffmpeg は金庫内で実行）。依存は run() で遅延生成。
     if _envflag("USE_VIDEO_TOOLS"):
         from teamagent.skills.video.skill import VideoAnalysisSkill
-        from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+        from teamagent.skills.video_algorithm.skill import (
+            VideoAlgorithmSkill,
+            prompt_version_from_env,
+        )
 
         specs.append(
             ToolSpec(VideoAnalysisSkill.name, VideoAnalysisSkill.description, VideoAnalysisSkill)
         )
+        # プロンプトの版は slack_bot 経路と同じ env VIDEO_ALGO_PROMPT_VERSION（既定 v2）で決める。
         specs.append(
-            ToolSpec(VideoAlgorithmSkill.name, VideoAlgorithmSkill.description, VideoAlgorithmSkill)
+            ToolSpec(
+                VideoAlgorithmSkill.name,
+                VideoAlgorithmSkill.description,
+                VideoAlgorithmSkill,
+                factory=lambda: VideoAlgorithmSkill(prompt_version=prompt_version_from_env()),
+            )
         )
 
     if _envflag("USE_TIKTOK_TOOLS"):

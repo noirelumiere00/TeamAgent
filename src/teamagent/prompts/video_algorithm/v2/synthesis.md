@@ -61,7 +61,7 @@ JSON の文字列値はそのまま HTML レポートと PPTX に出る。値の
 1. KWカバレッジ層別＝検索面の穴。テロップ満充足でキャプ/音声が薄ければ「キャプ1行目と発話冒頭にKW」を `posting_design`/`creative_brief` に入れる。全員充足の層は前提条件、0の層は「不要かも」と両面で。
 2. フック分布＝最頻フックが過半数(>n/2)の時だけ `creative_brief` の第一フック型に指定。過半数未満なら型を断定せず「強フックであること」を指示し具体型はA/B両建て。
 3. 勝ち筋レンジ（尺/テロップ枚数/保存率）＝指示値はこのレンジに固定。レンジが無い指標は中央値で「○○前後」（断定しない）。保存率レンジは `client_pitch` のKPIに。
-4. 相関ρ＝方向の裏取り専用。rankは小さいほど上位＝ρ<0が「値が大きいほど上位」。〔ρ=−0.x, n=k〕の併記は `win_hypotheses` と `common_concepts` の中だけにする（`headline`/`strategy`/`creative_brief`/`posting_design`/`client_pitch` に ρ を書いた文はコードで削除される）。ρが判定不能(N/A)の特徴は数字を引用せず caveat で触れる。相関だけを根拠に新しい指示を作らない。
+4. 相関ρ＝方向の裏取り専用。rankは小さいほど上位＝ρ<0が「値が大きいほど上位」。〔ρ=−0.x, n=k〕の併記は `win_hypotheses` と `common_concepts` の中だけにする（`headline`/`strategy`/`creative_brief`/`posting_design`/`client_pitch`/`shared_funnel` に ρ を書いた文はコードで削除される）。ρが判定不能(N/A)の特徴は数字を引用せず caveat で触れる。相関だけを根拠に新しい指示を作らない。
 5. 分布・外れ値＝median=基準値。突出1本(外れ値)は `differentiators` に隔離し、汎用 `creative_brief` に昇格させない。
 - 各主張の末尾に統計根拠を角括弧で併記：`〔指標 値, n=k〕` か `〔上位 c/n〕`（仮説と概念では `〔ρ=…, n=…〕` も可）。裏付けが無い主張は書かない（空の角括弧を出さない＝沈黙）。
 

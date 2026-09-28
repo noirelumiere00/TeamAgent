@@ -1,7 +1,7 @@
 """横断シンセシスの数字の照合（synthesis.ground_synthesis）のテスト。
 
 偽の Gemini に「入力に無い数字・実在しない順位・ρ 入りの見出し」を返させ、
-- shadow（既定）: 文はそのまま残り、ログ grounding_dropped だけが出る
+- shadow（既定）: 出力は照合前と同一（確信度を含む）で、ログ grounding_dropped だけが出る
 - enforce: 欄ごとに捨てられ、report の既存の代替（仮説 1 本目・次の一手）に代わる
 を確かめる。正しい文を落とさない回帰として、実物レポート（新宿 20260617・n=2）の
 シンセシス文と、統計ブロックの値を丸めた文で落ちる件数 0 を固定する。
@@ -36,12 +36,14 @@ from teamagent.skills.video_algorithm.synthesis import (
     _enforce_confidence,
     build_grounder,
     build_prompt,
+    parse_synthesis,
     synthesize,
 )
 
 QUERY = "新宿 ランチ"
 _REASON_RE = re.compile(
-    r"^(?:number:[\d.,]+|rank:[\d,]+|deny:[^;]+|rank_dup|no_valid_rank|prevalence_rebuilt)"
+    r"^(?:number:[\d.,]+|rank:[\d,]+|deny:[^;]+|rank_dup|no_valid_rank|prevalence_rebuilt"
+    r"|confidence_capped)"
     r"(?:;(?:number:[\d.,]+|rank:[\d,]+|deny:[^;]+|rank_dup))*$"
 )
 
@@ -179,7 +181,8 @@ def test_shadow_keeps_everything_and_logs_only(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(grounding, "logger", _Log())
     syn, dropped, _ = _run(_FABRICATED)
     assert syn is not None
-    assert syn.grounding_mode == "shadow"
+    # shadow では記録欄を書かない（件数はログだけ）
+    assert syn.grounding_mode == "" and syn.grounding_dropped == 0
     # 文は 1 つも捨てていない
     assert syn.headline == _FABRICATED["headline"]
     assert syn.strategy == _FABRICATED["strategy"]
@@ -192,8 +195,8 @@ def test_shadow_keeps_everything_and_logs_only(monkeypatch: pytest.MonkeyPatch) 
     assert syn.win_hypotheses[0].counter_example == "#3は保存率88%で例外"
     # ログは出る（欄名と理由だけ）
     logged = [kw for ev, kw in events if ev == "grounding_dropped"]
-    assert len(logged) == len(dropped) == syn.grounding_dropped
-    assert syn.grounding_dropped >= 12
+    assert len(logged) == len(dropped)
+    assert len(dropped) >= 12
     fields = {kw["field"] for kw in logged}
     assert {"headline", "strategy", "creative_brief", "client_pitch"} <= fields
     assert {"win_hypotheses", "differentiators", "angle_clusters"} <= fields
@@ -281,30 +284,194 @@ def test_skill_default_prompt_version_is_v2() -> None:
     assert VideoAlgorithmSkill(gemini=MagicMock())._prompt_version == "v2"
 
 
-@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+_CONFIDENCE_PAYLOAD: dict[str, Any] = {
+    "win_hypotheses": [
+        {"hypothesis": "型A", "supported_by": [1, 1, 1, 1, 1], "confidence": "高"},
+        {"hypothesis": "型B", "supported_by": [1, 2, 3, 4, 9], "confidence": "高"},
+        {"hypothesis": "型C", "supported_by": [5, 4, 3, 2, 1], "confidence": "高"},
+    ]
+}
+
+
 def test_enforce_confidence_counts_existing_unique_ranks(
-    monkeypatch: pytest.MonkeyPatch, mode: str
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[1,1,1,1,1] や実在しない順位で「全数支持」に見せかけても「高」にしない（mode に依らない）。"""
-    monkeypatch.setenv("GROUNDING_MODE_VIDEO_ALGORITHM", mode)
-    payload = {
-        "win_hypotheses": [
-            {"hypothesis": "型A", "supported_by": [1, 1, 1, 1, 1], "confidence": "高"},
-            {"hypothesis": "型B", "supported_by": [1, 2, 3, 4, 9], "confidence": "高"},
-            {"hypothesis": "型C", "supported_by": [5, 4, 3, 2, 1], "confidence": "高"},
-        ]
-    }
-    syn, _, _ = _run(payload)
+    """enforce: [1,1,1,1,1] や実在しない順位で「全数支持」に見せかけても「高」にしない。"""
+    monkeypatch.setenv("GROUNDING_MODE_VIDEO_ALGORITHM", "enforce")
+    syn, _, _ = _run(_CONFIDENCE_PAYLOAD)
     assert syn is not None
     assert [h.confidence for h in syn.win_hypotheses] == ["中", "中", "高"]
 
 
-def test_enforce_confidence_without_valid_ranks_still_dedupes() -> None:
+def test_shadow_confidence_keeps_the_legacy_count_and_logs_the_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """shadow: 確信度は従来の len(supported_by) で決め（表示を変えない）、差はログにだけ出す。"""
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Log:
+        def info(self, event: str, **kw: Any) -> None:
+            events.append((event, kw))
+
+    monkeypatch.setattr(grounding, "logger", _Log())
+    syn, dropped, _ = _run(_CONFIDENCE_PAYLOAD)
+    assert syn is not None
+    assert [h.confidence for h in syn.win_hypotheses] == ["高", "高", "高"]
+    assert [h.supported_by for h in syn.win_hypotheses] == [
+        [1, 1, 1, 1, 1],
+        [1, 2, 3, 4, 9],
+        [5, 4, 3, 2, 1],
+    ]
+    capped = [d for d in dropped if d[0] == "win_hypotheses.confidence"]
+    assert capped == [("win_hypotheses.confidence", "confidence_capped")] * 2  # 型A と型B
+    logged = [
+        kw
+        for ev, kw in events
+        if ev == "grounding_dropped" and kw["field"] == "win_hypotheses.confidence"
+    ]
+    assert [(kw["mode"], kw["reason"]) for kw in logged] == [("shadow", "confidence_capped")] * 2
+
+
+def test_enforce_confidence_without_valid_ranks_is_the_legacy_count() -> None:
+    """valid_ranks を渡さないときは従来どおり len(supported_by) で数える（shadow の表示用）。"""
     s = CrossSynthesis(
         win_hypotheses=[WinHypothesis(hypothesis="h", confidence="高", supported_by=[1] * 5)]
     )
     _enforce_confidence(s, 5)
+    assert s.win_hypotheses[0].confidence == "高"
+    _enforce_confidence(s, 5, valid_ranks=[1, 2, 3, 4, 5])
     assert s.win_hypotheses[0].confidence == "中"
+
+
+def _pre_grounding_confidence(syn: CrossSynthesis, n: int) -> None:
+    """照合を入れる前（3b8eff21）の _enforce_confidence の写し。shadow の比較の基準。"""
+    order = {"高": 2, "中": 1, "低": 0}
+    for h in syn.win_hypotheses:
+        full = len(h.supported_by) >= n
+        lvl = order.get(h.confidence, 1)
+        if h.counter_example and lvl > 0:
+            lvl -= 1
+        if n < 3:
+            lvl = 0
+        else:
+            if not full and lvl > 1:
+                lvl = 1
+            if lvl == 2 and not (full and n >= 5):
+                lvl = 1
+        h.confidence = "高" if lvl == 2 else "中" if lvl == 1 else "低"
+
+
+# 照合前との同一性を見る入力: 作り話の数字・順位に加え、「実在順位の重複なし」で数えると
+# 「高」から下がる仮説（[1,2,3,4,4]）と、LLM が勝手に書いた記録欄を入れる。
+_SHADOW_PAYLOAD: dict[str, Any] = dict(
+    _FABRICATED,
+    win_hypotheses=[
+        *_FABRICATED["win_hypotheses"],
+        {"hypothesis": "型D", "supported_by": [1, 2, 3, 4, 4], "confidence": "高"},
+    ],
+    grounding_mode="enforce",
+    grounding_dropped=99,
+)
+
+
+def test_shadow_output_is_identical_to_pre_grounding() -> None:
+    """shadow の出力オブジェクト全体（確信度を含む）が、照合を入れる前と同じ。"""
+    syn, dropped, gem = _run(_SHADOW_PAYLOAD)
+    assert syn is not None and dropped  # 照合は走っている（ログは出ている）
+    expected = parse_synthesis(gem.generate_text.return_value.text)
+    assert expected is not None
+    _pre_grounding_confidence(expected, 5)
+    assert syn.model_dump() == expected.model_dump()
+    assert syn.model_dump(mode="json") == expected.model_dump(mode="json")
+    assert [h.confidence for h in syn.win_hypotheses][-1] == "高"
+    # 記録欄は LLM の値を使わず、shadow では書かない
+    assert (syn.grounding_mode, syn.grounding_dropped) == ("", 0)
+
+
+@pytest.mark.parametrize("mode", ["shadow", "enforce"])
+def test_grounding_fields_never_reach_the_returned_json(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """記録欄は MCP の返却 JSON（model_dump）に載せない。Aico が件数を言い換えないように。"""
+    monkeypatch.setenv("GROUNDING_MODE_VIDEO_ALGORITHM", mode)
+    syn, dropped, _ = _run(_SHADOW_PAYLOAD)
+    assert syn is not None and dropped
+    for dumped in (
+        syn.model_dump(),
+        syn.model_dump(mode="json"),
+        json.loads(syn.model_dump_json()),
+    ):
+        assert "grounding_mode" not in dumped and "grounding_dropped" not in dumped
+    if mode == "enforce":  # enforce はプロセス内（テスト・計測）でだけ件数が読める
+        assert syn.grounding_mode == "enforce" and syn.grounding_dropped == len(dropped)
+
+
+# ρ・相関係数を書いた文（数字は入れない＝deny だけで落ちることを確かめる）。
+_RHO_PAYLOAD: dict[str, Any] = {
+    "headline": "『新宿 ランチ』面は価格テロップで勝つ",
+    "strategy": "上位は価格テロップを冒頭に置く。ρで見ても尺が短いほど上位。",
+    "creative_brief": ["冒頭で価格を大テロップ", "相関係数が高い尺で撮る"],
+    "posting_design": "キャプション1行目にKWを入れる。ρが負なので短尺で出す。",
+    "client_pitch": "御社も同じ面を狙える可能性があります。相関係数でも裏付けがあります。",
+    "shared_funnel": {
+        "pattern": "保存を促す。ρの向きどおり短尺で締める。",
+        "cta_consensus": ["save"],
+        "save_logic": "再訪用。",
+    },
+}
+
+
+def test_enforce_drops_only_the_rho_sentences(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GROUNDING_MODE_VIDEO_ALGORITHM", "enforce")
+    syn, dropped, _ = _run(_RHO_PAYLOAD)
+    assert syn is not None
+    assert syn.headline == _RHO_PAYLOAD["headline"]
+    assert syn.strategy == "上位は価格テロップを冒頭に置く。"
+    assert syn.creative_brief == ["冒頭で価格を大テロップ"]
+    assert syn.posting_design == "キャプション1行目にKWを入れる。"
+    assert syn.client_pitch == "御社も同じ面を狙える可能性があります。"
+    assert syn.shared_funnel is not None
+    assert syn.shared_funnel.pattern == "保存を促す。"
+    assert syn.shared_funnel.save_logic == "再訪用。"
+    assert sorted(dropped) == sorted(
+        [
+            ("strategy", "deny:ρ"),
+            ("creative_brief", "deny:相関係数"),
+            ("posting_design", "deny:ρ"),
+            ("client_pitch", "deny:相関係数"),
+            ("shared_funnel", "deny:ρ"),
+        ]
+    )
+
+
+def test_shadow_keeps_the_rho_sentences_and_logs_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class _Log:
+        def info(self, event: str, **kw: Any) -> None:
+            events.append((event, kw))
+
+    monkeypatch.setattr(grounding, "logger", _Log())
+    syn, dropped, _ = _run(_RHO_PAYLOAD)
+    assert syn is not None
+    assert syn.strategy == _RHO_PAYLOAD["strategy"]
+    assert syn.creative_brief == _RHO_PAYLOAD["creative_brief"]
+    assert syn.posting_design == _RHO_PAYLOAD["posting_design"]
+    assert syn.client_pitch == _RHO_PAYLOAD["client_pitch"]
+    assert syn.shared_funnel is not None
+    assert syn.shared_funnel.pattern == _RHO_PAYLOAD["shared_funnel"]["pattern"]
+    logged = {(kw["field"], kw["reason"]) for ev, kw in events if ev == "grounding_dropped"}
+    assert (
+        logged
+        == set(dropped)
+        == {
+            ("strategy", "deny:ρ"),
+            ("creative_brief", "deny:相関係数"),
+            ("posting_design", "deny:ρ"),
+            ("client_pitch", "deny:相関係数"),
+            ("shared_funnel", "deny:ρ"),
+        }
+    )
 
 
 # ── 正しい文を落とさない回帰 ─────────────────────────────────────────────────

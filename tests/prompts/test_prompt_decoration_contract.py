@@ -54,7 +54,7 @@ HUMAN_FACING_PROMPTS = (
     "video/v1/system.md",
     "video_algorithm/v1/synthesis.md",
     "video_algorithm/v1/system.md",
-    # v2 が本番既定（skill.py と slack_bot.py の VIDEO_ALGO_PROMPT_VERSION 既定）。
+    # v2 が本番既定（skill.py の prompt_version_from_env＝MCP と slack_bot の両経路の既定）。
     # v1 は env で戻せるので対象に残す。
     "video_algorithm/v2/synthesis.md",
     "video_algorithm/v2/system.md",

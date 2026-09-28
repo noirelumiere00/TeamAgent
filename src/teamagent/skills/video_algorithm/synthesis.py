@@ -8,6 +8,9 @@ CrossSynthesis を JSON 生成させる。決定的統計(stats)とは別の「�
 出る。入力（build_prompt の本文＋extra_context。system は入れない）に無い数字・実在しない
 順位・相関係数（ρ）を含む文や項目を欄ごとに捨てる。既定は shadow（捨てずにログ
 grounding_dropped だけ）で、env GROUNDING_MODE_VIDEO_ALGORITHM=enforce で捨てる。
+shadow では出力（確信度を含む）を照合前と同じに保つ。確信度の天井も enforce のときだけ
+新しい数え方（実在する順位・重複なし）にし、shadow では従来の len(supported_by) で決めて、
+新しい数え方との差はログ（欄 win_hypotheses.confidence）にだけ出す。
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
+from typing import Literal
 
 import structlog
 from pydantic import ValidationError
@@ -44,6 +48,8 @@ _STRICT_SUFFIXES = frozenset({"倍", "%", "万"})
 # 反例の本文を捨てても「反例あり」の印は残す（空にすると _enforce_confidence の 1 段下げが
 # 外れて確信度が上がってしまう）。
 COUNTER_EXAMPLE_MARK = "反例あり（本文は入力に無い数値を含むため省略）"
+Confidence = Literal["高", "中", "低"]
+_CODE_ONLY_FIELDS = ("grounding_mode", "grounding_dropped")
 
 
 def _video_brief(v: AnalyzedVideo) -> str:
@@ -145,6 +151,9 @@ def parse_synthesis(text: str) -> CrossSynthesis | None:
         return None
     if not isinstance(data, dict):
         return None
+    # 照合の記録欄はコードだけが書く（LLM が JSON に書いた値は使わない）。
+    for key in _CODE_ONLY_FIELDS:
+        data.pop(key, None)
     try:
         return CrossSynthesis.model_validate(data)
     except ValidationError:
@@ -152,23 +161,27 @@ def parse_synthesis(text: str) -> CrossSynthesis | None:
         return None
 
 
-def _enforce_confidence(
+def _capped_confidences(
     syn: CrossSynthesis, n: int, valid_ranks: Iterable[int] | None = None
-) -> None:
+) -> list[Confidence]:
     """確信度の天井を n・支持本数・反例に機械的に連動（n小の誠実さ・敵対レビュー反映）。
 
     - n<3: 全仮説『低』（相関すら出ない領域＝共通点メモ扱い）
     - 『高』は「全数支持 ∧ 反例なし ∧ n≥5」を全て満たす時のみ。それ以外の高→中
     - 全数支持でない（過半数止まり）は中止まり
     - 反例ありは更に1段下げる
-    - 支持本数は実在する順位の重複なしで数える（[1,1,1,1,1] や実在しない順位で
-      全数支持に見せかけない）。valid_ranks を渡さないときは重複だけ除く。
+    - 支持本数: valid_ranks を渡すと実在する順位の重複なしで数える（[1,1,1,1,1] や実在しない
+      順位で全数支持に見せかけない）。渡さないときは従来どおり len(supported_by)。
     """
     order = {"高": 2, "中": 1, "低": 0}
     real = set(valid_ranks) if valid_ranks is not None else None
+    out: list[Confidence] = []
     for h in syn.win_hypotheses:
-        supported = {r for r in h.supported_by if real is None or r in real}
-        full = len(supported) >= n
+        if real is None:
+            supported = len(h.supported_by)
+        else:
+            supported = len({r for r in h.supported_by if r in real})
+        full = supported >= n
         lvl = order.get(h.confidence, 1)
         if h.counter_example and lvl > 0:
             lvl -= 1  # 反例ありは1段下げる（先に適用）
@@ -179,7 +192,28 @@ def _enforce_confidence(
                 lvl = 1  # 部分支持(過半数止まり)は中止まり
             if lvl == 2 and not (full and n >= 5):
                 lvl = 1  # 高は全数支持かつn≥5のときのみ
-        h.confidence = "高" if lvl == 2 else "中" if lvl == 1 else "低"
+        out.append("高" if lvl == 2 else "中" if lvl == 1 else "低")
+    return out
+
+
+def _enforce_confidence(
+    syn: CrossSynthesis, n: int, valid_ranks: Iterable[int] | None = None
+) -> None:
+    """_capped_confidences の結果で確信度を上書きする。"""
+    for h, level in zip(syn.win_hypotheses, _capped_confidences(syn, n, valid_ranks), strict=True):
+        h.confidence = level
+
+
+def _apply_confidence(syn: CrossSynthesis, n: int, ranks: list[int], ledger: DropLedger) -> None:
+    """enforce は新しい数え方で確信度を決める。shadow は従来の数え方で決め、差をログだけに出す。"""
+    if ledger.enforce:
+        _enforce_confidence(syn, n, valid_ranks=ranks)
+        return
+    strict = _capped_confidences(syn, n, valid_ranks=ranks)
+    _enforce_confidence(syn, n)  # 従来の数え方（len(supported_by)）＝照合前と同じ表示
+    for h, level in zip(syn.win_hypotheses, strict, strict=True):
+        if level != h.confidence:
+            ledger("win_hypotheses.confidence", "confidence_capped")
 
 
 def build_grounder(prompt: str, valid_ranks: Iterable[int]) -> NumberGrounder:
@@ -211,6 +245,9 @@ def ground_synthesis(
     syn: CrossSynthesis, grounder: NumberGrounder, n: int, ledger: DropLedger
 ) -> CrossSynthesis:
     """欄ごとに照合する。enforce なら捨てた版を、shadow なら元のまま返す（どちらもログは出す）。
+
+    記録欄 grounding_mode / grounding_dropped は enforce のときだけ書く（どちらも
+    model_dump に載らない＝MCP の返却 JSON・キャッシュには出ない。件数はログで測る）。
 
     - headline: 入力に無い数字・実在しない順位・ρ があれば空（report の既存の代替で埋まる）
     - strategy / posting_design / client_pitch / shared_funnel: 文単位で捨てる（ρ の文も）
@@ -309,10 +346,11 @@ def ground_synthesis(
         hyps.append(h)
     g.win_hypotheses = hyps
 
-    out = g if ledger.enforce else syn
-    out.grounding_mode = ledger.mode
-    out.grounding_dropped = ledger.count
-    return out
+    if not ledger.enforce:
+        return syn  # shadow: 照合前と同じオブジェクト（記録欄も書かない。件数はログだけ）
+    g.grounding_mode = ledger.mode
+    g.grounding_dropped = ledger.count
+    return g
 
 
 def synthesize(
@@ -362,6 +400,7 @@ def synthesize(
         )
         if ledger.enforce:
             return None, cost
+    _apply_confidence(syn, len(ok), ranks, ledger)
     if ledger.count:
         logger.info(
             "video_synthesis_grounding_summary",
@@ -370,5 +409,4 @@ def synthesize(
             dropped=ledger.count,
             fields=sorted(set(ledger.fields)),
         )
-    _enforce_confidence(syn, len(ok), valid_ranks=ranks)
     return syn, cost

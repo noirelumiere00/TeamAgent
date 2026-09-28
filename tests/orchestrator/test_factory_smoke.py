@@ -7,7 +7,10 @@ import は軽量）。実 search を繋いだ E2E は full env + SSMトンネル
 
 from __future__ import annotations
 
+import pytest
+
 import teamagent.orchestrator.factory as factory
+from teamagent.orchestrator.tools import ToolSpec
 
 
 def test_factory_module_imports_light() -> None:
@@ -95,3 +98,29 @@ def test_proposal_deck_envflag_gated() -> None:
     # 初期 specs（常時 ON 群）に proposal_deck が混ざっていない＝gate ブロック側にあること。
     # 「ProposalDeckSkill」の初出が USE_PROPOSAL_DECK_TOOLS 分岐より後にあることで担保する。
     assert src.index("USE_PROPOSAL_DECK_TOOLS") < src.index("ProposalDeckSkill")
+
+
+def _video_algorithm_spec(monkeypatch: pytest.MonkeyPatch) -> ToolSpec:
+    """重い search を偽物に差し替えて、USE_VIDEO_TOOLS=1 の video_algorithm ToolSpec を取る。"""
+    monkeypatch.setattr(factory, "_build_search_skill", lambda: object())
+    monkeypatch.setenv("USE_VIDEO_TOOLS", "1")
+    specs = factory.build_production_tools()
+    return next(s for s in specs if s.name == "video_algorithm")
+
+
+def test_video_algorithm_mcp_path_reads_prompt_version_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MCP 経路（factory の ToolSpec）でも VIDEO_ALGO_PROMPT_VERSION で版を戻せる（slack_bot と同じ）.
+    from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+    spec = _video_algorithm_spec(monkeypatch)
+    monkeypatch.setenv("VIDEO_ALGO_PROMPT_VERSION", "v1")
+    skill = spec.instantiate()
+    assert isinstance(skill, VideoAlgorithmSkill) and skill._prompt_version == "v1"
+    monkeypatch.delenv("VIDEO_ALGO_PROMPT_VERSION")
+    skill = spec.instantiate()
+    assert isinstance(skill, VideoAlgorithmSkill) and skill._prompt_version == "v2"
+    monkeypatch.setenv("VIDEO_ALGO_PROMPT_VERSION", " ")
+    skill = spec.instantiate()
+    assert isinstance(skill, VideoAlgorithmSkill) and skill._prompt_version == "v2"
