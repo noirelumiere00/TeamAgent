@@ -30,7 +30,7 @@ from teamagent.skills.search_surface_check.insights import (
 from teamagent.skills.search_surface_check.report import render_surface_report
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput, SurfacePost
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill, _category
-from teamagent.skills.search_surface_check.summary import slack_safe
+from teamagent.skills.search_surface_check.summary import handle_link, post_href, slack_safe
 from tests.skills.search_surface_check.fixtures import (
     CLASSIFY_BY_ACCOUNT,
     GROUNDED_CONCLUSION,
@@ -413,18 +413,53 @@ def test_slack_summary_is_readable_bullets_not_tables() -> None:
     assert "- PR表記あり: 6位" in text
     assert "「GABAN」に触れた投稿は無し" in text
     assert "**上位10本**（再生・保存率・投稿時期）" in text
-    post_lines = [ln for ln in text.splitlines() if re.match(r"^- \d+位 @", ln)]
+    post_lines = [ln for ln in text.splitlines() if re.match(r"^- \d+位 \[@", ln)]
     assert len(post_lines) == 10
+    # @ID はその投稿への Markdown リンク（MCP の返却を文面に絞っても Aico が URL を使える）
     assert post_lines[0].startswith(
-        "- 1位 @gonosara（クリエイター・12.3万人） 35.1万回・保存3.2%・4か月前"
+        "- 1位 [@gonosara](https://www.tiktok.com/@gonosara/video/7400000000000000001)"
+        "（クリエイター・12.3万人） 35.1万回・保存3.2%・4か月前"
     )
     assert "［PR表記］" in post_lines[5]
-    assert "@kurashiru.com（メディア・520万人）" in post_lines[7]  # 100 万以上は小数を付けない
+    assert "@kurashiru.com](" in post_lines[7] and "（メディア・520万人）" in post_lines[7]
     # 表・コードブロックを使わない
     assert "```" not in text and "|" not in text
     # IG は取れなかったことを 1 行で（空の列は出さない）
     assert "Instagram「スパイスカレー 作り方」はデータを取得できませんでした" in text
     assert "レポート（全15本の一覧つき・7日有効）: https://s3.example/surface" in text
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)//www.tiktok.com/@a/video/1",
+        "https://evil.example/@a/video/1",
+        "http://www.tiktok.com/@a/video/1",
+        "https://www.tiktok.com/@a/video/1) [罠](https://evil.example",
+        "https://www.tiktok.com/@a/video/1>|<!channel>",
+        "https://www.tiktok.com:8443/@a/video/1",
+    ],
+)
+def test_unsafe_post_url_is_not_linked(url: str) -> None:
+    rows = s3_rows()
+    rows[0]["url"] = url
+    skill, _ = _skill(FakeBedrock(), rows)
+    out = skill.run(SearchSurfaceCheckInput(keywords=[KEYWORD], acquire_job_id=_JOB_ID), _ctx())
+    line = next(ln for ln in out.slack_summary.splitlines() if ln.startswith("- 1位 "))
+    assert line.startswith("- 1位 @gonosara（")
+    assert "](" not in line and "evil" not in line
+
+
+def test_handle_link_escapes_the_handle_and_only_links_safe_urls() -> None:
+    url = "https://www.tiktok.com/@a/video/1"
+    assert handle_link("a", url) == f"[@a]({url})"
+    assert handle_link("[x](y)", url) == f"[@［x］(y)]({url})"  # 表示名の記法は崩す
+    assert handle_link("", url) == "不明"
+    assert post_href("https://www.tiktok.com/@a/video/1 x") is None
+    # ホストの取り違え（IG の URL は取得段の検査を通らないので、ここで弾く）
+    for sep in ("#", "?", "\\"):
+        evil = f"https://evil.example{sep}.tiktok.com/@a/video/1"
+        assert handle_link("a", evil) == "@a"
 
 
 def test_client_accounts_in_surface() -> None:

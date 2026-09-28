@@ -100,6 +100,9 @@ class BaseSkill(ABC, Generic[TInput, TOutput]):
       （現状は空既定で no-op＝従来挙動）。openclaw.config.json5 の toolFilter
       手書きとの二重定義をここへ寄せていく出発点。
     - audit_tag: 監査ログ用の分類タグ（空可）。
+    - mcp_relay_fields: MCP（Aico）へ返す出力の欄。None＝出力全体（既定・従来どおり）。
+      文面（slack_summary）をそのまま返させたい skill が、生データを渡さないために絞る
+      （mcp_gateway.server.dispatch_tool の返却前ミドルウェアが usage 記録の後で適用する）。
     """
 
     name: ClassVar[str]
@@ -111,6 +114,7 @@ class BaseSkill(ABC, Generic[TInput, TOutput]):
     owner: ClassVar[str] = ""
     required_scope: ClassVar[tuple[str, ...]] = ()
     audit_tag: ClassVar[str] = ""
+    mcp_relay_fields: ClassVar[tuple[str, ...] | None] = None
 
     @abstractmethod
     def run(self, input: TInput, ctx: SkillContext) -> TOutput:

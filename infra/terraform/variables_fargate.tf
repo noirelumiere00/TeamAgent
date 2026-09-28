@@ -584,3 +584,30 @@ variable "video_algorithm_cache_lease_seconds" {
   type        = string
   default     = "1800"
 }
+
+# ============================================================
+# 2026-09-28: 検索上位チェックの 2 段目（上位の動画の中身を裏で分析して会話へ追記）。既定 OFF。
+# ============================================================
+# mcp_gateway/surface_video_followup.py。1 段目（約 2 分）は今どおり返し、同じ上位 N 本を
+# video_algorithm の分析エンジンで裏で分析して 5〜9 分後に同じ DM へ追記する。
+# 同時実行の上限と順番待ちは動画分析の切り離し（VIDEO_ALGORITHM_MAX_BACKGROUND）と共有。
+# 1 回で動画分析の月間上限（1 人月 50 本）を最大 MAX_VIDEOS 本使う・+$0.05〜0.3/回。
+# ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本）へ同じ値を必ず追記する
+#    （terraform_runtime_guard.sh の live→tfvars 導出はこの 3 変数を列挙していない）。
+variable "use_surface_video_followup" {
+  description = "検索上位チェックの 2 段目（USE_SURFACE_VIDEO_FOLLOWUP）。既定 0＝今と同じ（2 段目なし）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "0"
+}
+
+variable "surface_video_followup_allowed_emails" {
+  description = "2 段目を使う人（SURFACE_VIDEO_FOLLOWUP_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。DM・署名検証済みの依頼だけが対象。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = ""
+}
+
+variable "surface_video_followup_max_videos" {
+  description = "2 段目で分析する上位の動画の本数（SURFACE_VIDEO_FOLLOWUP_MAX_VIDEOS）。既定 5・アプリ側で 1〜10 に丸める。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "5"
+}

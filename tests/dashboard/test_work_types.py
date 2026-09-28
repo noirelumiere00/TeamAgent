@@ -132,6 +132,14 @@ def test_mapping_matches_the_specified_core() -> None:
             assert work_type_of(tool) == work_type, tool
 
 
+def test_mcp_side_usage_skills_have_a_work_type() -> None:
+    """factory 登録のツールではないが、mcp が usage_events に書く skill 名も分類する。"""
+    from teamagent.mcp_gateway.surface_video_followup import USAGE_SKILL
+
+    assert USAGE_SKILL == "search_surface_check_video"
+    assert work_type_of(USAGE_SKILL) == WORK_TYPE_INVESTIGATE
+
+
 @pytest.mark.parametrize("tool", ["not_a_real_tool", "run_agent", "chitchat", "", None])
 def test_unknown_tool_falls_back_to_other(tool: str | None) -> None:
     """未知ツール・空・None は例外を投げず「その他」へ落ちる（fail-open）。"""

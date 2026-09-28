@@ -12,10 +12,16 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -67,12 +73,54 @@ class BrandDetection(BaseModel):
     brand_relation: Literal["client", "competitor", "neutral_third_party", "unknown"] = "unknown"
 
 
+# 場面の役割（検索上位チェックの 2 段目の構成表）。順番はレポートの凡例の順。
+SCENE_ROLES: tuple[str, ...] = ("hook", "problem", "steps", "result", "proof", "cta", "other")
+# 任意の欄（場面ごとの詳しい構成）。無ければ出力（model_dump）にも出さない＝既存の出力と同じ。
+SCENE_DETAIL_FIELDS: tuple[str, ...] = ("role", "telop", "speech", "intent")
+_SCENE_TEXT_MAX = 120
+
+
 class Scene(BaseModel):
-    """シーン（ショット）1 区間。実視聴の担保（時刻参照）。"""
+    """シーン（ショット）1 区間。実視聴の担保（時刻参照）。
+
+    role / telop / speech / intent は任意（検索上位チェックの 2 段目が、場面ごとの構成表のために
+    プロンプトの追記で頼むときだけ埋まる）。video_algorithm の既定のプロンプト（v1/v2）では出ず、
+    None のときは model_dump にも出さないので、既存の出力と結果キャッシュの形は変わらない。
+    role は SCENE_ROLES 以外を None にする（コードが推定し直す）。
+    """
 
     start_sec: float = 0.0
     end_sec: float = 0.0
     desc: str = ""
+    role: str | None = None
+    telop: str | None = None
+    speech: str | None = None
+    intent: str | None = None
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _role_in_vocabulary(cls, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        role = value.strip().lower()
+        return role if role in SCENE_ROLES else None
+
+    @field_validator("telop", "speech", "intent", mode="before")
+    @classmethod
+    def _optional_text(cls, value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        text = " ".join(value.split())
+        return text[:_SCENE_TEXT_MAX] if text else None
+
+    @model_serializer(mode="wrap")
+    def _omit_missing_detail(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in SCENE_DETAIL_FIELDS:
+                if data.get(key) is None:
+                    data.pop(key, None)
+        return data
 
 
 ColorRole = Literal["dominant", "accent", "background"]

@@ -16,7 +16,7 @@ from collections import Counter
 
 import structlog
 
-from teamagent.skills.video_algorithm.schema import VideoVSEOAnalysis
+from teamagent.skills.video_algorithm.schema import Scene, VideoVSEOAnalysis
 
 logger = structlog.get_logger(__name__)
 
@@ -76,6 +76,63 @@ def pick_timecodes(a: VideoVSEOAnalysis, *, max_frames: int = 6) -> list[tuple[f
             break
     picked.sort(key=lambda x: x[0])
     return picked
+
+
+# media job 1 回で抜けるフレームの上限（media/contracts.FrameOperation.timecodes の上限）。
+MAX_SCENE_FRAMES = 12
+
+
+def pick_scene_rows(scenes: list[Scene], limit: int = MAX_SCENE_FRAMES) -> list[Scene]:
+    """構成表に出す場面（開始秒の順）。多ければ先頭 ``limit-1`` 個と最後の 1 個（CTA が多い）。"""
+    ordered = sorted(scenes, key=lambda sc: (sc.start_sec, sc.end_sec))
+    if limit <= 0:
+        return []
+    if len(ordered) <= limit:
+        return ordered
+    return [*ordered[: limit - 1], ordered[-1]]
+
+
+def frame_duration(*durations: float) -> float:
+    """コマを抜ける尺（正の値のうち最も短いもの・どれも無ければ 0）。
+
+    Gemini の尺（analysis.duration_sec）は 0 や実尺より長いことがある。media job の _frames は
+    尺の外の秒を 1 枚でも渡すと空のコマでジョブごと失敗する（MEDIA_FRAME_EMPTY）ので、検索結果の
+    尺（meta.duration_sec・整数に切り捨て）とも比べて短い方に収める。
+    """
+    positive = [d for d in durations if d > 0]
+    return min(positive) if positive else 0.0
+
+
+def scene_time(scene: Scene, duration_sec: float = 0.0) -> float:
+    """場面を代表する秒（場面の中央。尺があれば尺の内側に収める）。"""
+    end = max(scene.end_sec, scene.start_sec)
+    sec = (scene.start_sec + end) / 2
+    if duration_sec > 0:
+        sec = min(sec, max(0.0, duration_sec - 0.05))
+    return round(max(0.0, sec), 2)
+
+
+def scene_timecodes(
+    a: VideoVSEOAnalysis, *, max_frames: int = MAX_SCENE_FRAMES, duration_sec: float = 0.0
+) -> list[tuple[float, str]]:
+    """構成表の場面ごとに 1 コマ（場面の中央の秒）。場面が無ければ pick_timecodes に倒す。
+
+    秒は ``frame_duration(Gemini の尺, duration_sec)`` の内側に収める（``duration_sec`` は
+    検索結果の実尺）。どちらの尺も分からなければ、pick_timecodes と同じくコマを出さない。
+    """
+    limit = frame_duration(a.duration_sec, duration_sec)
+    if limit <= 0:
+        return []
+    rows = pick_scene_rows(a.scenes, min(max_frames, MAX_SCENE_FRAMES))
+    picked: dict[float, str] = {}
+    for sc in rows:
+        sec = scene_time(sc, limit)
+        picked.setdefault(sec, f"場面 {sc.start_sec:.0f}s")
+    if not picked:
+        fallback = pick_timecodes(a, max_frames=min(max_frames, MAX_SCENE_FRAMES))
+        for sec, cap in fallback:
+            picked.setdefault(round(min(sec, max(0.0, limit - 0.05)), 2), cap)
+    return sorted(picked.items())
 
 
 def extract_frames(

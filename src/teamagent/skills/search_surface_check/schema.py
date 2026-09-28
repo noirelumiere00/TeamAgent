@@ -199,3 +199,74 @@ class SearchSurfaceCheckOutput(BaseModel):
     slack_summary: str = ""
     total_cost_usd: float = 0.0
     warnings: list[str] = Field(default_factory=list)
+    measured_epoch: int = Field(
+        default=0,
+        description="実測の時刻（epoch 秒・0=未実測）。2 段目がレポートを作り直すときに使う",
+    )
+
+
+# ── 2 段目: 上位の動画の中身（video_algorithm の分析エンジンで見る） ──────────────
+
+
+class LabelCount(BaseModel):
+    label: str
+    count: int
+
+
+class VideoDigest(BaseModel):
+    """上位 N 本の動画の中身を決定的に数えた結果（LLM を通さない）。
+
+    集計の分母は「動画を見て分析できた本数」（watched）。サムネだけの分析（動画を取得できず
+    静止画 1 枚で見たもの）はテロップ・構成・音を判定できないので、集計に入れない。
+    """
+
+    keyword: str
+    requested: int = Field(description="分析しようとした本数（quota で丸める前）")
+    reserved: int = Field(description="月間上限から確保できた本数")
+    watched: int = Field(description="動画を見て分析できた本数（集計の分母）")
+    watched_ranks: list[int] = Field(default_factory=list)
+    cover_only_ranks: list[int] = Field(default_factory=list)
+    failed_ranks: list[int] = Field(default_factory=list)
+    hook_types: list[LabelCount] = Field(default_factory=list)
+    opening_telop: int = 0
+    telop_kw: int = 0
+    spoken_kw: int = 0
+    median_duration_sec: float | None = None
+    median_cut_count: float | None = None
+    pacing: list[LabelCount] = Field(default_factory=list)
+    cta: int = 0
+    cta_types: list[LabelCount] = Field(default_factory=list)
+    narration: int = 0
+    trending_sound: int = 0
+    median_coherence: float | None = None
+    save_top_ranks: list[int] = Field(
+        default_factory=list, description="保存率の高い 2 本の順位（動画を見て分析できたものから）"
+    )
+    save_top_common: list[str] = Field(
+        default_factory=list, description="その 2 本に共通すること（相関の断定はしない）"
+    )
+
+
+class VideoDigestConclusion(BaseModel):
+    """動画の中身から見た勝ち筋（LLM）。数字は集計と 1 本ずつの一覧にあるものだけ。"""
+
+    headline: str
+    winning: ConclusionPoint | None = None
+    save_reason: ConclusionPoint | None = None
+    generated_by: Literal["llm", "rule"] = "llm"
+    grounded: bool = Field(
+        default=False,
+        description="数字と順位を入力と照合した（常に許す数なし）。True のときだけ照合済みと書く",
+    )
+
+
+class SurfaceVideoFollowupOutput(BaseModel):
+    """2 段目の結果（会話へ追記する文面と、章を足したレポート）。"""
+
+    keyword: str
+    status: Literal["ok", "quota_exhausted", "all_failed", "no_videos"]
+    digest: VideoDigest | None = None
+    conclusion: VideoDigestConclusion | None = None
+    report_url: str | None = None
+    slack_text: str = ""
+    total_cost_usd: float = 0.0

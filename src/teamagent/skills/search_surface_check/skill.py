@@ -14,6 +14,15 @@
 - Slack 文面はツールが組む（summary.py）。OpenClaw はそれをそのまま返す。
 - 金庫（documents → Aico Vault）への記録 = x_research の声集めと同じ ResearchPersister に
   fire-and-forget で渡す（persist_body.py）。USE_RESEARCH_PERSIST=1 のときだけ factory が注入する。
+- 2 段目（上位の動画の中身）= ``run_video_followup``。mcp の切り離しの登録簿（mcp_gateway/
+  surface_video_followup.py）が 1 段目の返却後に裏で呼ぶ。1 段目の上位（SurfacePost）をそのまま
+  video_algorithm の分析エンジン（analyze_videos）へ渡し、検索し直さない。場面ごとの役割・テロップ・
+  発話・狙いはプロンプトの追記（prompts/search_surface_check/v1/scene_detail.md）で頼み、構成表の
+  コマ（場面ごと）と表紙を作る。学べること・弱点と絵コンテ案は Bedrock 1 回（video_notes.py）。
+- MCP の返却は slack_summary・report_url・warnings・total_cost_usd・keywords・measured_epoch だけ
+  （mcp_relay_fields・フラグに関係なく全員）。上位 30 本の生データを Aico（OpenClaw）に渡すと、
+  文面をそのまま返さずに組み直すため（2026-09-28 本番 DM で実測）。投稿の URL は slack_summary の
+  上位 N 本の各行の @ID を Markdown リンクにして渡す（summary.handle_link）。
 """
 
 from __future__ import annotations
@@ -35,8 +44,10 @@ from pydantic import BaseModel
 
 from teamagent.adapters.apify_client import ApifyClient, ApifyError
 from teamagent.adapters.cost_guard import CostGuard, CostLimitExceededError
+from teamagent.adapters.quota_store import VideoQuotaStore
 from teamagent.media.contracts import TIKTOK_N_PER_KW_MAX
 from teamagent.prompts.loader import load_prompt
+from teamagent.skills._shared.grounding import DropLedger
 from teamagent.skills._shared.rollout import ROLLOUT_DENIED_MESSAGE, rollout_allowed
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.search_surface_check.conclusion import conclude, rule_conclusion
@@ -54,10 +65,36 @@ from teamagent.skills.search_surface_check.schema import (
     SearchSurfaceCheckOutput,
     SurfaceConclusion,
     SurfacePost,
+    SurfaceVideoFollowupOutput,
+    VideoDigest,
+    VideoDigestConclusion,
 )
 from teamagent.skills.search_surface_check.summary import build_slack_summary
+from teamagent.skills.search_surface_check.video_digest import (
+    conclude_digest,
+    digest_videos,
+    post_to_meta,
+    rule_digest_conclusion,
+)
+from teamagent.skills.search_surface_check.video_notes import (
+    StructureNotes,
+    conclude_notes,
+    notes_max_tokens,
+)
+from teamagent.skills.search_surface_check.video_render import (
+    CHAPTER_CSS,
+    build_all_failed_text,
+    build_followup_slack_text,
+    build_quota_exhausted_text,
+    render_video_chapter,
+)
+from teamagent.skills.search_surface_check.video_structure import common_points
+from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 logger = structlog.get_logger(__name__)
+
+# 構成表のコマの幅（px）。レポートでは 96〜120px で出すので 180 で足りる（1 枚 1 万字前後）。
+SCENE_FRAME_WIDTH = 180
 
 _ALLOWLIST_ENV = "SEARCH_SURFACE_ALLOWED_EMAILS"
 _VALID_CATEGORIES = {"brand_official", "media", "news", "creator", "influencer", "ugc", "other"}
@@ -155,6 +192,17 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
     )
     input_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckInput
     output_schema: ClassVar[type[BaseModel]] = SearchSurfaceCheckOutput
+    # MCP の返却に載せる欄（mcp_gateway.server の返却前ミドルウェアが絞る）。文面は
+    # slack_summary に全部入っているので、上位の生データ（surfaces）は Aico に渡さない。
+    # 投稿の URL は slack_summary の上位 N 本の行に Markdown リンクで入っている。
+    mcp_relay_fields: ClassVar[tuple[str, ...] | None] = (
+        "slack_summary",
+        "report_url",
+        "warnings",
+        "total_cost_usd",
+        "keywords",
+        "measured_epoch",
+    )
 
     def __init__(
         self,
@@ -165,6 +213,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         tiktok_search_fn: Any | None = None,
         clock: Any | None = None,
         persister: Any | None = None,
+        video_engine: Any | None = None,
     ) -> None:
         self._apify = apify
         self._bedrock = bedrock
@@ -174,6 +223,8 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
         self._tiktok_search_fn = tiktok_search_fn  # 直スクレイプ経路（テスト注入用）
         self._clock = clock or time.time  # 投稿時期の「何日前」と実測日の基準
         self._persister = persister  # ResearchPersister（None なら金庫への記録は no-op）
+        # 2 段目の動画分析エンジン（VideoAlgorithmSkill の analyze_videos / reserve_video_quota）。
+        self._video_engine = video_engine
 
     # ---- 依存の遅延生成 -------------------------------------------------------
 
@@ -188,6 +239,13 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
 
             self._bedrock = BedrockClient.from_env()
         return self._bedrock
+
+    def _get_video_engine(self) -> Any:
+        if self._video_engine is None:
+            from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
+
+            self._video_engine = VideoAlgorithmSkill()
+        return self._video_engine
 
     def _publish_html(self, html: str, *, request_id: str, query: str) -> str | None:
         try:
@@ -251,6 +309,8 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                     save_count=_int(p.get("saves")),
                     posted_at=_int(p.get("create_time")),
                     duration_sec=_int(p.get("duration")),
+                    # 2 段目で動画を取得できないときのサムネ分析（video_algorithm の縮退）に使う。
+                    thumb_url=str(p.get("cover_url") or ""),
                 )
             )
         return by_kw
@@ -294,6 +354,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                         save_count=_int(getattr(v, "collect_count", 0)),
                         posted_at=_int(getattr(v, "create_time", 0)),
                         duration_sec=_int(getattr(v, "duration", 0)),
+                        thumb_url=str(getattr(v, "cover_url", "") or ""),
                     )
                 )
             by_kw[kw] = posts
@@ -624,6 +685,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             report_url=report_url,
             total_cost_usd=round(total_cost, 4),
             warnings=warnings,
+            measured_epoch=now_epoch,
         )
         out.slack_summary = build_slack_summary(
             out, input, now_epoch=now_epoch, missing_platforms=missing
@@ -691,6 +753,228 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             )
         except Exception as e:  # 記録の失敗で本体の応答を落とさない（fail-open）
             logger.warning("surface_persist_failed", request_id=request_id, error=type(e).__name__)
+
+    # ---- 2 段目: 上位の動画の中身 ---------------------------------------------------
+
+    def run_video_followup(
+        self,
+        out: SearchSurfaceCheckOutput,
+        input: SearchSurfaceCheckInput,
+        ctx: SkillContext,
+        *,
+        videos: list[SurfacePost],
+    ) -> SurfaceVideoFollowupOutput:
+        """1 段目で選んだ上位の動画（順位順・検索し直さない）を分析し、追記文とレポートを作る。
+
+        mcp の切り離しの登録簿の thread で走る（5〜9 分）。流れは video_algorithm の run に倣う:
+        月間上限を先に予約（部分可・返却なし）→ 3 並列で取得・分析（取得できなければサムネだけの
+        分析へ縮退）→ 決定的に数える → LLM の読み（数字は照合）→ レポートを作り直して公開。
+        月間上限の主体が分からない（quota ON でメール無し）ときは例外で止める（呼び出し側が
+        失敗文を投稿する）。
+        """
+        log = ctx.bind_logger(self.name)
+        started = time.monotonic()
+        keyword = videos[0].keyword if videos else (out.keywords[0] if out.keywords else "")
+        if not videos:
+            return SurfaceVideoFollowupOutput(keyword=keyword, status="no_videos")
+        engine = self._get_video_engine()
+        requested = len(videos)
+        reserved = min(requested, max(0, int(engine.reserve_video_quota(ctx, requested))))
+        if reserved <= 0:
+            log.info("surface_video_followup_quota_exhausted", requested=requested)
+            return SurfaceVideoFollowupOutput(
+                keyword=keyword,
+                status="quota_exhausted",
+                slack_text=build_quota_exhausted_text(keyword),
+            )
+        chosen = videos[:reserved]
+        analyzed: list[AnalyzedVideo] = engine.analyze_videos(
+            [post_to_meta(p) for p in chosen],
+            query=keyword,
+            client_name=input.client_name,
+            request_id=ctx.request_id,
+            user_email=str(ctx.metadata.get("user_email") or ""),
+            # 構成表のコマ（場面ごと・幅 180px）と表紙は作る。Web プレビュー動画（1 本最大 6MB）は
+            # 使わないので作らない。場面ごとの役割・テロップ・発話・狙いはプロンプトの追記で頼む。
+            media_extras=True,
+            scene_frames=True,
+            frame_width=SCENE_FRAME_WIDTH,
+            preview=False,
+            system_addendum=load_prompt("search_surface_check", "v1", "scene_detail"),
+        )
+        cost = sum(float(v.cost_usd or 0.0) for v in analyzed)
+        digest = digest_videos(analyzed, keyword=keyword, requested=requested, reserved=reserved)
+        if digest.watched == 0 and not digest.cover_only_ranks:
+            log.warning("surface_video_followup_all_failed", attempted=len(chosen))
+            return SurfaceVideoFollowupOutput(
+                keyword=keyword,
+                status="all_failed",
+                digest=digest,
+                slack_text=build_all_failed_text(
+                    keyword,
+                    videos=analyzed,
+                    reserved=reserved,
+                    quota_on=VideoQuotaStore.enabled(),
+                    total_cost_usd=round(cost, 4),
+                ),
+                total_cost_usd=round(cost, 4),
+            )
+        conclusion, llm_cost = self._conclude_videos(
+            digest,
+            analyzed,
+            keyword=keyword,
+            client_name=input.client_name,
+            request_id=ctx.request_id,
+        )
+        cost += llm_cost
+        notes, notes_cost = self._structure_notes(
+            analyzed, keyword=keyword, client_name=input.client_name, request_id=ctx.request_id
+        )
+        cost += notes_cost
+        chapter = render_video_chapter(
+            keyword=keyword,
+            digest=digest,
+            conclusion=conclusion,
+            videos=analyzed,
+            posts={p.rank: p for p in chosen},
+            notes=notes,
+        )
+        report_url: str | None = None
+        try:
+            html = render_surface_report(
+                keywords=input.keywords,
+                surfaces=out.surfaces,
+                client_name=input.client_name,
+                measured_epoch=out.measured_epoch or int(self._clock()),
+                missing=self._missing(input, out),
+                after_sections={(keyword, "tiktok"): chapter},
+                extra_css=CHAPTER_CSS,
+            )
+            report_url = self._publish_html(
+                html, request_id=ctx.request_id, query="・".join(input.keywords)
+            )
+        except Exception as e:  # レポートの発行に失敗しても、分析の要約は届ける
+            log.warning("surface_video_followup_report_failed", error=type(e).__name__)
+        total = round(cost, 4)
+        text = build_followup_slack_text(
+            keyword=keyword,
+            digest=digest,
+            conclusion=conclusion,
+            videos=analyzed,
+            report_url=report_url,
+            total_cost_usd=total,
+        )
+        log.info(
+            "surface_video_followup_done",
+            requested=requested,
+            reserved=reserved,
+            watched=digest.watched,
+            cover_only=len(digest.cover_only_ranks),
+            failed=len(digest.failed_ranks),
+            conclusion=conclusion.generated_by if conclusion else None,
+            report=bool(report_url),
+            cost_usd=total,
+            latency_s=round(time.monotonic() - started, 1),
+        )
+        return SurfaceVideoFollowupOutput(
+            keyword=keyword,
+            status="ok",
+            digest=digest,
+            conclusion=conclusion,
+            report_url=report_url,
+            slack_text=text,
+            total_cost_usd=total,
+        )
+
+    @staticmethod
+    def _missing(
+        input: SearchSurfaceCheckInput, out: SearchSurfaceCheckOutput
+    ) -> list[tuple[str, str]]:
+        """取得できなかった (KW, 媒体)。1 段目の run と同じ条件（面が作られなかった組）。"""
+        got = {(s.keyword, s.platform) for s in out.surfaces}
+        return [
+            (kw, platform)
+            for kw in input.keywords
+            for platform in ("tiktok", "instagram")
+            if platform in input.platforms and (kw, platform) not in got
+        ]
+
+    def _conclude_videos(
+        self,
+        digest: VideoDigest,
+        videos: list[AnalyzedVideo],
+        *,
+        keyword: str,
+        client_name: str | None,
+        request_id: str,
+    ) -> tuple[VideoDigestConclusion | None, float]:
+        def converse(prompt: str) -> tuple[str, float]:
+            resp = self._get_bedrock().converse(
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                request_id=request_id,
+                temperature=0.2,
+                max_tokens=1200,
+            )
+            return resp.text, float(resp.usage.cost_usd)
+
+        # 捨てた項目はログへ（欄名と理由＝入力に無い数字・順位だけ。本文は出さない）。
+        on_drop = DropLedger(
+            skill="search_surface_check_video", mode="enforce", request_id=request_id
+        )
+
+        try:
+            return conclude_digest(
+                converse,
+                load_prompt("search_surface_check", "v1", "video_digest"),
+                keyword=keyword,
+                client_name=client_name,
+                digest=digest,
+                videos=videos,
+                on_drop=on_drop,
+            )
+        except Exception as e:
+            logger.warning(
+                "surface_video_conclusion_failed", request_id=request_id, error=type(e).__name__
+            )
+            return rule_digest_conclusion(digest), 0.0
+
+    def _structure_notes(
+        self,
+        videos: list[AnalyzedVideo],
+        *,
+        keyword: str,
+        client_name: str | None,
+        request_id: str,
+    ) -> tuple[StructureNotes | None, float]:
+        """1 本ずつの学べること・弱点と、絵コンテ案（LLM 1 回・数字は照合）。失敗は None。"""
+
+        def converse(prompt: str) -> tuple[str, float]:
+            resp = self._get_bedrock().converse(
+                messages=[{"role": "user", "content": [{"text": prompt}]}],
+                request_id=request_id,
+                temperature=0.2,
+                max_tokens=notes_max_tokens(len(videos)),
+            )
+            return resp.text, float(resp.usage.cost_usd)
+
+        on_drop = DropLedger(
+            skill="search_surface_check_video_notes", mode="enforce", request_id=request_id
+        )
+        try:
+            return conclude_notes(
+                converse,
+                load_prompt("search_surface_check", "v1", "video_notes"),
+                keyword=keyword,
+                client_name=client_name,
+                videos=videos,
+                common=common_points(videos),
+                on_drop=on_drop,
+            )
+        except Exception as e:
+            logger.warning(
+                "surface_video_notes_failed", request_id=request_id, error=type(e).__name__
+            )
+            return None, 0.0
 
     def _conclude(
         self, surface: KwSurface, client_name: str | None, now_epoch: int, request_id: str

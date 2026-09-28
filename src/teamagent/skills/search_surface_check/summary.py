@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from teamagent.skills._shared.text_safety import sanitize_llm_text
+from teamagent.skills._shared.text_safety import safe_href, sanitize_llm_text
 from teamagent.skills.search_surface_check.display import (
     PLATFORM_LABEL,
     account_label,
@@ -53,6 +53,32 @@ def slack_safe(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").translate(_SLACK_TRANSLATE)).strip()
 
 
+# Markdown のリンク ``[文字](URL)`` を壊す（または Slack の記法として効く）文字。
+# これを含む URL はリンクにしない。
+_LINK_BREAKERS = re.compile(r"[\s()<>\[\]|`*]")
+
+
+def post_href(url: str) -> str | None:
+    """投稿へのリンク先（https・既知 SNS ホストだけ・リンク記法を壊す文字を含まないもの）。"""
+    href = safe_href(url)
+    if not href or _LINK_BREAKERS.search(href):
+        return None
+    return href
+
+
+def handle_link(author: str, url: str) -> str:
+    """``@ID`` をその投稿への Markdown リンク ``[@id](url)`` にする（安全でない URL は文字だけ）。
+
+    MCP の返却は文面だけに絞っているので、Aico が「1位の動画を分析して」「上位の URL」に答えられる
+    よう、上位の各行に投稿の URL を持たせる。
+    """
+    if not author:
+        return "不明"
+    handle = slack_safe(f"@{author}")
+    href = post_href(url)
+    return f"[{handle}]({href})" if href else handle
+
+
 def rho_words(rho: float) -> str:
     if rho >= 0.5:
         return "再生の多い順にほぼ並ぶ"
@@ -84,7 +110,7 @@ def _post_line(post: SurfacePost, *, now_epoch: int) -> str:
         marks += "［クライアント］"
     if post.is_pr:
         marks += "［PR表記］"
-    handle = slack_safe(f"@{post.author}") if post.author else "不明"
+    handle = handle_link(post.author, post.url)
     return (
         f"- {post.rank}位 {handle}（{'・'.join(who)}）{marks} "
         f"{'・'.join(metrics)} {_title(post)}".rstrip()
@@ -250,4 +276,54 @@ def build_slack_summary(
     return "\n".join(lines).strip()
 
 
-__all__ = ["build_slack_summary", "rho_words", "slack_safe"]
+# 1 段目の文面の末尾の行（build_slack_summary が出す順）。予告行はこの手前に入れる。
+_TAIL_PREFIXES = ("レポート（全", "注意: ", "_概算 $")
+
+
+def followup_notice_line(count: int) -> str:
+    """2 段目（上位の動画の中身）を裏で始めたことを知らせる 1 行（月間上限を使うことも書く）。"""
+    return (
+        f"上位{count}本の動画の中身（フック・テロップ・構成・CTA など）を分析しています"
+        f"（動画分析の回数を最大 {count} 本使います）。"
+        "終わったらこの会話に追記します（目安 5〜9 分）"
+    )
+
+
+def followup_reused_line(count: int) -> str:
+    """24 時間以内の同じ分析を使い回すときの 1 行（回数も費用も使わない）。"""
+    return (
+        f"上位{count}本の動画の中身は、24 時間以内に同じ分析をしているため、その結果をこの会話に"
+        "追記します（動画分析の回数は使いません）"
+    )
+
+
+# 月間上限が残り 0 本のとき、予告の代わりに出す 1 行（2 段目は登録しない）。
+FOLLOWUP_QUOTA_EXHAUSTED_LINE = (
+    "今月の動画分析の上限に達しているため、動画の中身は分析しません（残り 0 本）"
+)
+
+
+def insert_before_report_line(summary: str, line: str) -> str:
+    """1 段目の文面の末尾（レポート行の前）に 1 行足す。
+
+    レポート行が無い（発行に失敗した）ときは注意書き・概算の行の前に、どれも無ければ末尾に足す。
+    """
+    lines = summary.split("\n")
+    for prefix in _TAIL_PREFIXES:
+        for i, existing in enumerate(lines):
+            if existing.startswith(prefix):
+                return "\n".join([*lines[:i], line, *lines[i:]])
+    return "\n".join([*lines, line]) if summary else line
+
+
+__all__ = [
+    "FOLLOWUP_QUOTA_EXHAUSTED_LINE",
+    "build_slack_summary",
+    "followup_notice_line",
+    "followup_reused_line",
+    "handle_link",
+    "insert_before_report_line",
+    "post_href",
+    "rho_words",
+    "slack_safe",
+]
