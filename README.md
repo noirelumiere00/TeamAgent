@@ -15,7 +15,7 @@ OpenClaw 2026.7.1（外殻: Slack shell・Haiku 4.5 外側ループ・tool 選�
   ↓  streamable-http :8787 + Bearer + one-use HMAC caller claim
 TeamAgent MCP Gateway（信頼境界: identity 解決・RLS・fail-closed・監査）
   ↓
-Skill Registry（ToolSpec 最大 40 本・OpenClaw へは toolFilter で 35 本公開）
+Skill Registry（スキル 40 種・OpenClaw へは toolFilter で 38 本公開。2026-09-18 に openclaw.config.json5 と effective-tool-scope.json で照合）
   ↓
 Company Data / APIs（RDS+pgvector / S3 / Google Workspace / Slack / TikTok / X）
   ↓
@@ -45,7 +45,7 @@ AWS Bedrock Claude（Haiku 4.5 = ルーティング / Sonnet 4.6 = 重い合成�
 
 ### Skill Registry / ToolSpec
 
-- [src/teamagent/skills/](src/teamagent/skills/)（search / clientkarte / proposal_* / mail_* / calendar_* / knowledge_* / tiktok_* / x_research / video_* / slack_summary / attachment_assist / web_research ほか 42 クラス）
+- [src/teamagent/skills/](src/teamagent/skills/)（search / clientkarte / proposal_* / mail_* / calendar_* / knowledge_* / tiktok_* / x_research / video_* / slack_summary / attachment_assist / web_research ほか 40 ディレクトリ・登録クラス約 42）
 - [orchestrator/factory.py](src/teamagent/orchestrator/factory.py) の `build_production_tools()` が `USE_*` フラグで組み立て。skill は Pydantic 入出力 + `run()`、外部 I/O は [adapters/](src/teamagent/adapters/) に隔離（3 層分離）
 
 ### Security Boundary / Identity
@@ -88,7 +88,7 @@ Slack user_id（署名claim内・改ざん不可）
 src/teamagent/
   mcp_gateway/   # 信頼境界（server / caller_claim / progress / offload）
   identity.py    # 身元→RLSメタの単一変換点
-  skills/        # L1 Skill（42クラス）
+  skills/        # L1 Skill（40 ディレクトリ・登録クラス約 42）
   orchestrator/  # ToolSpec factory / 自前 agent loop / eval
   adapters/      # 外部I/O（bedrock / pgvector / google / slack / apify …）
   ingest/        # 取り込みパイプライン

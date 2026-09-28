@@ -343,3 +343,80 @@ def test_init_with_dummy_dsn_actually_initializes(monkeypatch: pytest.MonkeyPatc
     client = sentry_sdk.get_client()
     if client is not None:
         client.close(timeout=0.0)
+
+
+# -----------------------------------------------------------
+# DM 本人メモ v1（M5）: 本人メモ系フレームのローカル変数を送らない
+# -----------------------------------------------------------
+_PM_MARKER = "ZQX-MARKER 来週の花王の資料"
+
+
+def _frames() -> list[dict[str, Any]]:
+    return [
+        {
+            "module": "teamagent.mcp_gateway.personal_memory.service",
+            "function": "observe",
+            "vars": {"payload": _PM_MARKER},
+        },
+        {
+            "module": "teamagent.personal_memory.guard",
+            "function": "check_entry",
+            "vars": {"entry": _PM_MARKER},
+        },
+        {
+            "module": "teamagent.adapters.personal_memory_store",
+            "function": "apply_learned",
+            "vars": {"adds": _PM_MARKER},
+        },
+        {
+            "module": "teamagent.adapters.hermes_learn_client",
+            "function": "learn",
+            "vars": {"body": _PM_MARKER},
+        },
+        {
+            "module": "teamagent.mcp_gateway.server",
+            "function": "dispatch_personal_memory_tool",
+            "vars": {"arguments": _PM_MARKER},
+        },
+        {"module": "teamagent.mcp_gateway.server", "function": "_call", "vars": {"a": _PM_MARKER}},
+        # 対照: 本人メモと無関係なフレームの vars は残す
+        {"module": "teamagent.mcp_gateway.server", "function": "dispatch_tool", "vars": {"k": "v"}},
+        {"module": "teamagent.personal_memory_other", "function": "f", "vars": {"k": "v"}},
+    ]
+
+
+@pytest.mark.parametrize("path", ["exception", "stacktrace", "threads"])
+def test_before_send_drops_personal_memory_frame_vars(path: str) -> None:
+    frames = _frames()
+    event: dict[str, Any]
+    if path == "exception":
+        event = {
+            "exception": {"values": [{"type": "ValueError", "stacktrace": {"frames": frames}}]}
+        }
+    elif path == "stacktrace":
+        event = {"stacktrace": {"frames": frames}}
+    else:
+        event = {"threads": {"values": [{"id": 1, "stacktrace": {"frames": frames}}]}}
+    out = before_send(event, {})
+    assert out is not None
+    assert _PM_MARKER not in repr(out)
+    kept = [f for f in frames if "vars" in f]
+    assert [f["function"] for f in kept] == ["dispatch_tool", "f"]
+
+
+def test_init_denylist_includes_personal_memory_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sentry_sdk
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(sentry_sdk, "init", lambda **kwargs: captured.update(kwargs))
+    monkeypatch.setenv("SENTRY_DSN", _FAKE_SENTRY_DSN)
+    assert init_sentry() is True
+    denylist = set(captured["event_scrubber"].denylist)
+    assert {
+        "utterance",
+        "utterances",
+        "entries",
+        "snapshot",
+        "memo_context",
+        "memo_items",
+    } <= denylist

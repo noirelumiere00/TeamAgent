@@ -133,6 +133,76 @@ const CONNECT_DIAGNOSTIC_CODE = "CONNECT-Z01";
 const CONNECT_FALLBACK_CANCEL_REASON = "connect zero-tool fallback already delivered";
 // 保証経路が既に同じ内容を配信したターンで、モデル側の最終応答を落とすときの理由。
 const CONNECT_GUARANTEE_CANCEL_REASON = "connect guarantee already delivered this inbound";
+
+// ── 動画 URL × 0 tool call の層2（2026-09-25）────────────────────────────────
+// 本番実測 2026-09-24〜25: DM「この動画を分析して <YouTube URL>」に Aico がツールを一度も
+// 呼ばず「YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。」と
+// 4 回返した。SOUL（#441/#445）とツール説明（#444）は本番に反映済みで、履歴の無いセッション
+// （/new 後）では video_analysis が呼ばれて分析結果が返った。断り続けた原因は同じ DM セッションの
+// 履歴（初回の誤った断りと「今後は即座にお断りします」という自分の約束）で、SOUL の文言では
+// 上書きできなかった＝連携（2026-09-03）と同じ失敗クラス。連携と同じ作りの層2 だけを置く。
+//   層1（モデルを通さず呼ぶ）は置かない: 分析か切り出しか、引数（focus / timecodes）をモデルが決める。
+//   層3（定型文へ置換）は置かない: 定型文では分析結果を出せない（再パスでも断るならそのまま届く）。
+// 判定は受信時に URL の「種類」と依頼語の有無（真偽）だけを ingress に載せる（URL・本文は保持しない＝G7）。
+// 誤爆を避けるため、動画 URL があっても「依頼の語がある」か「下書きが断りの形」のときだけ介入する
+// （URL を共有しただけの会話に再パスを掛けて、頼んでいない分析＝Gemini 課金・月の利用枠を誘わない）。
+const VIDEO_URL_SCAN_LIMIT = 2048;
+// 種類ごとの検出規則。Slack は URL を `<https://…|label>` で包んで届ける（本番実測）ので、
+// 区切りに `<` `>` `|` を含めない。動画でない URL（YouTube のトップ・TikTok のプロフィールや
+// 広告管理画面など）は拾わない。
+const VIDEO_URL_RULES = [
+  ["youtube", /https?:\/\/(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?|(?:shorts|live)\/[^\s<>|])/iu],
+  ["youtube", /https?:\/\/youtu\.be\/[^\s<>|]/iu],
+  ["tiktok", /https?:\/\/(?:www\.|m\.)?tiktok\.com\/(?:@[^\s<>|/]+\/(?:video|photo)\/|[tv]\/)[^\s<>|]/iu],
+  ["tiktok", /https?:\/\/(?:vt|vm)\.tiktok\.com\/[^\s<>|]/iu],
+  ["instagram", /https?:\/\/(?:www\.)?instagram\.com\/(?:reels?|p|tv)\/[^\s<>|]/iu],
+];
+// 本文の依頼語（分析・切り出しを頼んでいる手掛かり）。真偽だけを ingress に載せる。
+// 共有でもよく出る語（時刻「10:00」・「◯秒」・「見て」・「教えて」・「まとめ」）は入れない
+// （相互検証 2026-09-25: 「明日10:00の会議で使います＋URL」で差し戻していた）。
+// 切り出しの依頼は「切り出し」「画像に」「キャプチャ」「シーン」「サムネ用」で拾う。
+const VIDEO_REQUEST_RE =
+  /(分析|構成|フック|CTA|解説|要約|切り出|切出|キャプチャ|画像に|画像で|静止画|サムネ用|シーン|評価|比較|読み解|勝ち筋|どう作|作りを|内容を)/iu;
+// 下書きが断りの形か（本番の断り「取得不可です…ファイル添付でお願いします」を含む）。
+// 「できない」単独は拾わない（「明日は参加できない」等）。動画の取得・分析・切り出しに掛かる形に限る。
+// 下書きは判定にだけ使い、保持も記録もしない。
+const VIDEO_REFUSAL_RE =
+  /((?:取得|分析|解析|切り出し?|再生|視聴|アクセス)(?:でき(?:ません|ない)|不可)|未対応|非対応|対応して(?:い)?ません|ブロックされ|(?:ファイル|動画)を?(?:添付|アップロード)(?:して|で|を|いただ))/u;
+const VIDEO_ZERO_TOOL_RETRY_KEY = "video-zero-tool";
+const MAX_VIDEO_ZERO_TOOL_REVISIONS = 1;
+const VIDEO_ZERO_TOOL_REASON =
+  "利用者が動画の URL つきで依頼しているのに、ツールを 1 つも呼ばずに回答しようとしています。";
+// 固定文（契約テストが完全一致で検証する）。最後の 1 文は誤爆時の逃げ道。
+const VIDEO_ZERO_TOOL_INSTRUCTION =
+  "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、" +
+  "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。" +
+  "YouTube の URL も `video_analysis` でそのまま分析できます。" +
+  "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。" +
+  "どちらの依頼でもない（URL を共有しただけ等）なら、ツールを呼ばずにそのまま答えてください。";
+
+// 本文に含まれる動画 URL の種類（最初に現れたもの）。無ければ null。
+export function classifyVideoUrl(text) {
+  if (typeof text !== "string") return null;
+  const head = text.slice(0, VIDEO_URL_SCAN_LIMIT);
+  let first = null;
+  for (const [kind, rule] of VIDEO_URL_RULES) {
+    const match = rule.exec(head);
+    if (match && (first === null || match.index < first.index)) {
+      first = { kind, index: match.index };
+    }
+  }
+  return first?.kind ?? null;
+}
+
+// 本文に分析・切り出しの依頼語があるか（真偽だけ）。
+export function hasVideoRequestIntent(text) {
+  return typeof text === "string" && VIDEO_REQUEST_RE.test(text.slice(0, VIDEO_URL_SCAN_LIMIT));
+}
+
+// 下書きが断りの形か（真偽だけ）。
+export function looksLikeVideoRefusal(text) {
+  return typeof text === "string" && VIDEO_REFUSAL_RE.test(text);
+}
 // 層1 が叩く MCP。本番は Cloud Map（rollout-task-canary.mjs と同じ定数）、ローカルは env で上書き。
 const DEFAULT_MCP_URL = "http://teamagent-mcp.teamagent.internal:8787/mcp";
 // 層1 の 3 POST（initialize / initialized / tools/call）で共有する全体予算。
@@ -301,6 +371,18 @@ function normalizeSlackId(value, pattern) {
   return pattern.test(normalized) ? normalized : null;
 }
 
+// モデルが `_user_context.slack_user_id` に書いてくる**申告値**の正規化。
+// 本人の ID を指しているのに形だけ違う書き方（メンション表記 `<@U…>` /
+// `<@U…|name>`）を、素の ID へ寄せてから `normalizeSlackId` に渡す。
+// 解釈できなければ null（＝呼び出し側で「破棄して続行」）。
+const SLACK_MENTION_RE = /^<@([^>|]+)(?:\|[^>]*)?>$/u;
+function normalizeDeclaredSlackUserId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const mention = SLACK_MENTION_RE.exec(trimmed);
+  return normalizeSlackId(mention ? mention[1] : trimmed, SLACK_USER_RE);
+}
+
 // OpenClaw がセッション鍵の末尾に付ける唯一の構造サフィックス。
 // 実測 2026-08-07（本番 image sha256:144e4edd… の上流コードを実行）:
 //   app/dist/hook-agent-context-DPPRzCBU.js:40-62
@@ -427,13 +509,78 @@ function adminForwardHint(adminName) {
   return `解決しない場合は、次の 1 行をそのまま管理者（${adminName}）へ送ってください:`;
 }
 
-// 利用者に届く block 文。1 行目は従来どおりの理由、そのあとに転送用の 2 行。
+// ── 利用者向けの正しい 1 行（2026-09-11 実測の誤誘導対策）───────────────────
+// 本番実測 2026-09-11 10:27: P06 の block 文の 1 行目が英語の技術理由
+// （`_user_context must be a plain object`）だったため、モデルがそれを読み解けず
+// 「Google 連携をリセットすることで解決する可能性があります」「『連携』と返して
+// いただければリセットリンクをお出しします」と**自分で原因を作文**し、
+// 利用者を無意味な操作へ誘導した（連携は成立しており、リセットは無関係）。
+//
+// 直し方は 2 つ同時に:
+//   (1) ここ: block 文の 1 行目を **日本語の正しい 1 行**にし、その直後に
+//       「推測して別の操作を勧めるな」というモデル宛の 1 行を必ず差し込む。
+//       （python 側 connect_diagnostics.format_user_message の user_action と同じ流儀）
+//   (2) SOUL: 「診断: 行つきのブロック文」全般へ規則の適用範囲を広げる
+//       （従来は oauth_connect / CALLER_IDENTITY_REJECTED だけを名指ししていたため、
+//        plugin の before_tool_call block はどの規則にも当たらなかった）。
+// コードごとの文面は「利用者が取れる行動」だけを書く。原因の説明はしない
+// （原因は診断コードで管理者が runbook を引く）。
+const USER_ACTION_BY_CODE = Object.freeze({
+  [BLOCK_DIAG.NATIVE_TOOL_DENIED]:
+    "このツールはこの環境では使えません。依頼の内容を変えてもう一度お試しください。",
+  [BLOCK_DIAG.TOOL_NAME_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.RUN_BINDING]:
+    "受付の有効時間が切れました。お手数ですが、もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.INVOCATION_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.SESSION_OR_CHANNEL_BINDING]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.USER_CONTEXT_SHAPE]:
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。",
+  [BLOCK_DIAG.SIGNING_FAILED]:
+    "利用者側の操作では直りません。管理者のサポートが必要です。",
+});
+
+// モデル宛の 1 行。利用者へはこの行自体を見せない。
+// ── 行そのものを識別可能にする（2026-09-11 レビュー指摘）────────────────────
+// 従来この行は接頭辞が無く、SOUL の「提示せよ」（1 行目・転送定型文・診断行）にも
+// 「出すな」（`teamagent-caller-identity:` 付きの行）にも当たらなかった。拒否理由を
+// 一字も変えず出すと、利用者の画面に「連携のリセット・再ログイン・ブラウザ変更」の
+// 語がそのまま並ぶ＝この PR が潰した誤誘導が別の入口で再現していた。
+// SOUL の記述に頼らず**行自体で判別できる**よう、他の管理者向け行と同じ接頭辞を付け、
+// 既存の「接頭辞付きの行は利用者に出さない」規則で自動的に除外されるようにする。
+// 接頭辞付きでも指示には従うことは SOUL 側（「診断:」行の節）で明記している。
+const BLOCK_MODEL_INSTRUCTION =
+  "この案内と診断行をそのまま利用者へ提示してください。原因を推測して" +
+  "連携のリセット・再ログイン・ブラウザ変更などの別の操作を勧めてはいけません。";
+
+export function userActionForBlockCode(code) {
+  return (
+    USER_ACTION_BY_CODE[code] ??
+    "この操作は受け付けられませんでした。もう一度同じ依頼を送ってください。"
+  );
+}
+
+// 利用者に届く block 文。
+//   1 行目 利用者向けの正しい案内（日本語・行動だけ）
+//   2 行目 モデル宛の禁止事項（推測して別の操作を勧めない）※接頭辞つき＝利用者に出さない
+//   3 行目 転送の定型文
+//   4 行目 診断行
+//   5 行目 技術理由（管理者・モデルの切り分け用。利用者向けではない）※接頭辞つき
 // user id・本文・URL は載せない（G7）。管理者は runId ではなくコード＋時刻で突合する。
 export function formatBlockReason(reason, code, nowMs, adminName = DEFAULT_ADMIN_NAME) {
+  // `fail()` 由来の理由は既に `teamagent-caller-identity: ` が付いている。
+  // 本番実測 2026-09-11 の block 文は接頭辞が 2 回並んでいた（利用者に見えていた）。
+  const detail = String(reason).startsWith(`${PLUGIN_ID}: `)
+    ? String(reason).slice(`${PLUGIN_ID}: `.length)
+    : String(reason);
   return (
-    `${PLUGIN_ID}: ${reason}\n` +
+    `${userActionForBlockCode(code)}\n` +
+    `${PLUGIN_ID}: ${BLOCK_MODEL_INSTRUCTION}\n` +
     `${adminForwardHint(adminName)}\n` +
-    `診断: ${code} ${formatJstMinute(nowMs)}`
+    `診断: ${code} ${formatJstMinute(nowMs)}\n` +
+    `${PLUGIN_ID}: ${detail}`
   );
 }
 
@@ -600,13 +747,23 @@ export function unwrapToolArguments(params, toolName) {
     current = wrapper.inner;
   }
   // 包みでなかった、または 2 段剥がしてもまだ包み（3 段以上）→ 無変更で返す。
-  if (kinds.length === 0 || wrapperOf(current) !== null) {
-    return { params, depth: 0, shape: null };
+  //
+  // `stillWrapped`（2026-09-11 追加）: 「包みでなかった」と「上限まで剥がしてもまだ包み」を
+  // 呼び出し側が区別できるようにする。従来は両方 depth:0 で返しており、
+  // 「まだ包み」は `_user_context` が見つからないことを経由して結果的に block されていた。
+  // 本 PR で `_user_context` の欠落を block しなくなるため、その間接的な fail-closed が
+  // 消える。3 段以上は**明示的に**block する（＝入力面を任意の深さへ広げない）。
+  if (kinds.length === 0) {
+    return { params, depth: 0, shape: null, stillWrapped: false };
+  }
+  if (wrapperOf(current) !== null) {
+    return { params, depth: 0, shape: null, stillWrapped: true };
   }
   return {
     params: current,
     depth: kinds.length,
     shape: [...new Set(kinds)].join("+"),
+    stillWrapped: false,
   };
 }
 
@@ -1111,6 +1268,8 @@ function findFabricatedConnectUrlKinds(text) {
   return { kinds: [...kinds].sort(), scanned };
 }
 
+// 同一受信かどうかは識別子だけで決める。本文由来の判定結果（connectRequest / videoUrlKind）は
+// 比較に含めない: content の有無が違う同じ受信の再通知を「別の受信」と誤判定しないため。
 function sameIngress(left, right) {
   return (
     left.ingressKind === right.ingressKind &&
@@ -1350,13 +1509,20 @@ export function createCallerIdentityPlugin({
   const consumedInvocations = new Map();
   const toolCallsByRun = new Map();
   const connectRevisionsByRun = new Map();
+  // 動画 URL × 0 tool call の層2 の予算（1 run につき revise は 1 回）。連携とは別の台帳。
+  const videoRevisionsByRun = new Map();
   // 層3: revise 予算を使い切っても 0 tool call のままだった run。reply_payload_sending で
   // 本文を定型文に置換する。agent_end より後に配信が走りうるので releaseAgentRun では消さず、
   // 他の台帳と同じ TTL/上限掃除に任せる。
   const connectFallbackByRun = new Map();
 
   function pruneConnectGuardState(nowMs) {
-    for (const ledger of [toolCallsByRun, connectRevisionsByRun, connectFallbackByRun]) {
+    for (const ledger of [
+      toolCallsByRun,
+      connectRevisionsByRun,
+      connectFallbackByRun,
+      videoRevisionsByRun,
+    ]) {
       for (const [runId, entry] of ledger) {
         if (nowMs - entry.updatedAtMs > INBOUND_CONTEXT_TTL_MS) {
           ledger.delete(runId);
@@ -1516,6 +1682,11 @@ export function createCallerIdentityPlugin({
           existing.connectNormalizedLength = ingress.connectNormalizedLength;
           existing.connectContentLength = ingress.connectContentLength;
         }
+        // 動画 URL の種類も同じ理由で引き継ぐ（content 無しの通知が先に束縛された順序でも層2 が効くように）。
+        if (ingress.videoUrlKind && !existing.videoUrlKind) {
+          existing.videoUrlKind = ingress.videoUrlKind;
+          existing.videoRequestIntent = ingress.videoRequestIntent === true;
+        }
         // 再通知でも抑止用台帳を確実に持つ（agent_end 後に ingressByRun 側が消えた後、
         // 同じ受信の再通知が来る順序でも判定が失われないように）。
         rememberConnectIngress(runId, existing);
@@ -1631,6 +1802,9 @@ export function createCallerIdentityPlugin({
     // 本文は保持しない。「形」だけを 1 本の文字列にして持つ（G7）。
     // 本番で `content_len=16` の内訳が判らず原因を特定できなかったため（2026-09-04）。
     const connectShape = connectRequestShape(event?.content);
+    // 動画 URL × 0 tool call の層2 用。種類と依頼語の有無だけを持つ（URL・本文は保持しない＝G7）。
+    const videoUrlKind = classifyVideoUrl(event?.content);
+    const videoRequestIntent = videoUrlKind !== null && hasVideoRequestIntent(event?.content);
     const ingress = {
       ingressKind: "message",
       pendingKey,
@@ -1651,6 +1825,8 @@ export function createCallerIdentityPlugin({
       connectNormalizedLength,
       connectContentLength,
       connectShape,
+      videoUrlKind,
+      videoRequestIntent,
     };
     const existing = pendingByMessage.get(pendingKey);
     if (existing && !sameIngress(existing, ingress)) {
@@ -1664,6 +1840,11 @@ export function createCallerIdentityPlugin({
       // 一回性は ingress オブジェクトではなく connectAnsweredByMessage が持つ
       // （pending から消えても失効しないようにするため。上の定義を参照）。
       ingress.channelAliases = existing.channelAliases;
+    }
+    // 動画 URL の判定は本文から決まる。本文を伴わない再通知が後から来ても、先に分かった種類を落とさない。
+    if (existing?.videoUrlKind && !ingress.videoUrlKind) {
+      ingress.videoUrlKind = existing.videoUrlKind;
+      ingress.videoRequestIntent = existing.videoRequestIntent === true;
     }
     pendingByMessage.set(pendingKey, ingress);
     if (runId && !bindRun(runId, ingress)) {
@@ -2485,13 +2666,38 @@ export function createCallerIdentityPlugin({
     if (declaredContext[CLAIM_FIELD] !== undefined) {
       return { error: "model-supplied or replayed caller claim is forbidden", discarded: [] };
     }
-    if (declaredContext.slack_user_id !== trusted.senderId) {
-      return {
-        error: "declared Slack caller does not match the bound ingress",
-        discarded: [],
-      };
-    }
+    // ── 申告が「無い」ことは「別人だと申告した」ことではない（2026-09-11）──────
+    // 従来は `declaredContext.slack_user_id !== trusted.senderId` だったため、
+    // モデルが `_user_context` を空 `{}` で送った／`slack_user_id` を省いただけで
+    // P05 block になっていた（本番実測の P05 経路）。しかし送信者は ingress 側の
+    // authoritative 値で確定しており、申告値は mintCallerClaim が丸ごと捨てる。
+    // 「申告しなかった」は矛盾ではないので通す。
+    // **明示的に別人を名乗った場合（キーがあって値が違う）だけ**は従来どおり block。
+    // ここが唯一の明示的ななりすまし申告なので fail-closed を維持する。
+    //
+    // ── 比較は正規化してから行う（2026-09-11 レビュー指摘）──────────────────
+    // 従来はここだけが**生値の厳密一致**だった。ingress 側の senderId は
+    // `normalizeSlackId`（trim + 大文字化）を通った値なので、モデルが本人の ID を
+    // `u09cx1ccbln`（小文字）・`<@U09CX1CCBLN>`（メンション表記）・前後空白つきで
+    // 書いただけで P05 block になっていた。これはなりすましではなく**表記ゆれ**。
+    // 正規化して一致すれば通し、そもそも Slack ID として解釈できない値は
+    // team / channel と同じ「破棄して続行」に倒す（申告値は mintCallerClaim が
+    // authoritative 値で丸ごと置き換えるので、緩めてもなりすましは成立しない）。
+    // 解釈できて**別人**なら従来どおり block＝信頼境界は 1 ビットも動かない。
     const discarded = [];
+    if (Object.hasOwn(declaredContext, "slack_user_id")) {
+      const declaredUserId = normalizeDeclaredSlackUserId(
+        declaredContext.slack_user_id,
+      );
+      if (declaredUserId === null) {
+        discarded.push("slack_user_id");
+      } else if (declaredUserId !== trusted.senderId) {
+        return {
+          error: "declared Slack caller does not match the bound ingress",
+          discarded: [],
+        };
+      }
+    }
     for (const [field, expected] of [
       ["slack_team_id", trusted.teamId],
       ["channel_id", trusted.channelId],
@@ -2511,6 +2717,45 @@ export function createCallerIdentityPlugin({
   //   ① 利用者向けの診断行つき blockReason を組み
   //   ② 管理者向けに 1 行ログを出す（コードと id_shape だけ・値は載せない）
   // ことを不可分にして、「拒否したのにログが 1 行も無い」状態を構造的に作れなくする。
+  // ── 上流は hook の返り値を「置換」ではなく「浅いマージ」する（2026-09-11 確定）──
+  // 一次検証（openclaw@2026.7.1 の実物）:
+  //   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+  //     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(finalParams, hookResult.params);`
+  //   同 :938-947  `mergeParamsWithApprovalOverrides = (o, a) => ({ ...o, ...a })`
+  // つまり **元の params のトップレベルキーは消えない**。
+  //
+  // 事故（本番実測）: 2026-09-04 に入れた unwrap は、`{"arguments":{…}}` を剥がして
+  // 中身に署名して返していた。上流のマージで元の `arguments` キーが残るため、
+  // 実際に mcp へ届く引数は `{arguments:{…}, …剥がした中身}` になり、署名した
+  // `arguments_sha256`（剥がした中身だけ）と一致しない。結果 mcp が
+  // `caller claim request binding does not match` で拒否し、利用者には
+  // `診断: CONNECT-I01a` が出ていた。
+  // 相関は 1:1 で確定: 09-04 以降の unwrap 成功 6 件（09-09 15:12:36 / 15:12:51、
+  // 09-10 12:40:32 / :34 / :39 / :41）と caller_claim_rejected 6 件が**同一秒**で一致。
+  // つまり unwrap 救済は本番で一度も成立していなかった。
+  //
+  // 直し方: 署名した集合に無い**元のトップレベルキー**を `undefined` で返し、
+  // マージ後の実行引数を署名対象と一致させる。JSON 化（JSON-RPC の tools/call）で
+  // `undefined` のキーは落ちるため、mcp が受け取るのは署名した集合そのものになる。
+  // 包みが無かった場合（depth 0）は**返り値を一切変えない**（バイト同一を保つ）。
+  function reconcileReturnedParams(originalParams, signedParams, unwrapDepth, logger) {
+    if (unwrapDepth === 0 || !isPlainObject(originalParams)) return signedParams;
+    const removed = Object.keys(originalParams).filter(
+      key => !Object.hasOwn(signedParams, key),
+    );
+    if (removed.length === 0) return signedParams;
+    const reconciled = { ...signedParams };
+    for (const key of removed) reconciled[key] = undefined;
+    // キー名だけ（値は載せない・G7）。本番では `arguments` / `name` のはず。
+    emitPluginLog(
+      logger,
+      "warn",
+      `reconciled unwrapped tool arguments removed=[${removed.join(",")}]` +
+        " (upstream merges hook params instead of replacing them)",
+    );
+    return reconciled;
+  }
+
   function blockAndLog(reason, code, logger, shape) {
     emitPluginLog(
       logger,
@@ -2661,6 +2906,7 @@ export function createCallerIdentityPlugin({
     }
     let params;
     let declaredContext;
+    let unwrapDepth = 0;
     try {
       // ── 二重包みの決定論 unwrap（引数検査より前）─────────────────────────
       // ここより下（assertPlainObject / validateDeclaredContext）が「引数検査」なので、
@@ -2669,6 +2915,12 @@ export function createCallerIdentityPlugin({
       // throw した場合に block へ変換されず上流へ委ねられ、fail-closed が破れる。
       // （JSON 由来の params では throw 不能だが、規律として例外も block に落とす）
       const unwrapped = unwrapToolArguments(event?.params, observedToolName);
+      if (unwrapped.stillWrapped) {
+        // 3 段以上。従来は `_user_context` が見つからないことを経由して block に
+        // なっていたが、本 PR で欠落を通すようにしたので**明示的に**落とす。
+        fail("tool arguments are nested deeper than the unwrap limit");
+      }
+      unwrapDepth = unwrapped.depth;
       if (unwrapped.depth > 0) {
         // 識別子・本文・URL は載せない（G7）。形と段数だけ。
         emitPluginLog(
@@ -2685,13 +2937,38 @@ export function createCallerIdentityPlugin({
               draft_token: trusted.actionValue,
             }
           : suppliedParams;
-      declaredContext = assertPlainObject(
-        params[USER_CONTEXT_KEY],
-        USER_CONTEXT_KEY,
-      );
+      // ── `_user_context` はモデルに要求しない（2026-09-11 の根治）─────────────
+      // 本番実測 2026-09-10 / 09-11 の P06 全 5 件は、モデルが `_user_context` を
+      // **そもそも付けてこなかった**ケースだった（EFS の tool call 実物で確認。
+      // 09-11 は knowledge_deliver / search が `{query, top_k, filter_doc_type}` のみ、
+      // 09-10 は `{"arguments":{}}`）。二重包みではない。
+      //
+      // 申告値は mintCallerClaim が authoritativeContext で丸ごと置き換えるため、
+      // モデルが何を書いても（書かなくても）mcp へ渡る値は変わらない。
+      // つまり「モデルが正しい形で `_user_context` を渡すこと」への依存は
+      // **セキュリティを 1 ビットも稼いでいない純粋な失敗モード**だった。
+      // 依存を切る: 欠落は `{}` とみなし、プレーンオブジェクトでない申告は
+      // 捨てて（観測して）続行する。落とすのは「明示的ななりすまし申告」だけ
+      // （validateDeclaredContext の caller_claim / slack_user_id）。
+      const rawDeclared = params[USER_CONTEXT_KEY];
+      if (rawDeclared === undefined) {
+        declaredContext = {};
+      } else if (isPlainObject(rawDeclared)) {
+        declaredContext = rawDeclared;
+      } else {
+        // 値・型名だけ出す（G7: 中身は載せない）。
+        emitPluginLog(
+          logger,
+          "warn",
+          "discarded non-object declared user_context" +
+            ` shape=${Array.isArray(rawDeclared) ? "array" : rawDeclared === null ? "null" : typeof rawDeclared}` +
+            " (overwritten with authoritative values)",
+        );
+        declaredContext = {};
+      }
     } catch (error) {
-      // 実測 2026-09-03 の 72 件（`_user_context must be a plain object`）はここ。
-      // unwrap を通してもなお直らなかった場合だけが残る。
+      // 実測 2026-09-03 の 72 件（`_user_context must be a plain object`）はここだった。
+      // いまここに残るのは「params 自体がオブジェクトでない」「3 段以上の包み」だけ。
       return blockAndLog(
         error instanceof Error ? error.message : "invalid tool params",
         BLOCK_DIAG.USER_CONTEXT_SHAPE,
@@ -2769,7 +3046,7 @@ export function createCallerIdentityPlugin({
     if (trusted.ingressKind === "action") {
       trusted.actionToolCallId = eventToolCallId;
     }
-    return { params: signed.params };
+    return { params: reconcileReturnedParams(event?.params, signed.params, unwrapDepth, logger) };
   }
 
   // 署名 claim の鋳造。signToolCall（before_tool_call 経由）と層1（直接 tools/call）が
@@ -3004,13 +3281,158 @@ export function createCallerIdentityPlugin({
         };
   }
 
+  // 動画 URL × 0 tool call の層2（定数の説明は冒頭の VIDEO_ZERO_TOOL_* を参照）。
+  // 連携側（guardConnectUrlFabrication）が何もしなかったときだけ呼ばれる。連携側の挙動は変えない。
+  function guardVideoZeroTool(event, ctx, logger) {
+    const nowMs = Date.now();
+    pruneConnectGuardState(nowMs);
+    const eventRunId = authoritativeRunId(event, ctx, logger, "before_agent_finalize");
+    if (!eventRunId) return undefined;
+    // run に束縛された権威 ingress（連携の抑止・層2 と同じ台帳）。本文の推測はしない。
+    // 動画 URL の無い受信（大半の会話）は行を出さずに抜ける（騒音にしない）。
+    const ingress = connectIngressByRun.get(eventRunId) ?? null;
+    if (!ingress?.videoUrlKind) return undefined;
+    const toolCalls = toolCallsByRun.get(eventRunId)?.count ?? 0;
+    // 判定行の末尾は連携の判定行と同じく id_shape（識別子の「形」だけ）で揃える。
+    // G7: URL・本文・下書き・Slack 識別子は載せない（url_kind は種類名だけ）。
+    const describe =
+      `video zero-tool revise runId=${eventRunId} tool_calls=${toolCalls} url_kind=${ingress.videoUrlKind}` +
+      ` ${idShape({
+        sender: ingress.senderId ?? ctx?.senderId,
+        channel: ingress.channelId ?? ctx?.channelId,
+        message: ingress.messageId,
+        session: ingress.sessionKey ?? ctx?.sessionKey,
+      })}`;
+    // 介入しない理由を run × 理由ごとに 1 回だけ残す（連携の判定行とキーが衝突しないよう接頭辞を付ける）。
+    const skip = (reason) => {
+      logConnectDecisionOnce(
+        logger,
+        "info",
+        "before_agent_finalize",
+        eventRunId,
+        `video:${reason}`,
+        `${describe} outcome=skipped reason=${reason}`,
+      );
+      return undefined;
+    };
+    if (toolCalls > 0) return skip("model_called_tool");
+    const draft = event?.lastAssistantMessage;
+    if (typeof draft !== "string" || !draft.trim()) return skip("empty_assistant_message");
+    // 連携依頼が優先（連携側が予算切れで何も返さなかった run にも、動画の指示は重ねない）。
+    if (ingress.connectRequest === true) return skip("connect_request");
+    // 連携側が既に revise した run には重ねない。逆順（動画が revise した後の再パスで連携 URL を
+    // 捏造）は、連携の捏造ガード（安全側）を抑えずにもう 1 回 revise させる＝1 run で最大 2 回
+    // （上流の上限 3 回の内側・どちらも自前予算 1 回なのでループしない。相互検証 2026-09-25）。
+    if (connectRevisionsByRun.has(eventRunId)) return skip("connect_revised");
+    // 誤爆を避ける: 依頼の語がある、または下書きが断りの形のときだけ介入する。
+    const refusal = looksLikeVideoRefusal(draft);
+    if (ingress.videoRequestIntent !== true && !refusal) return skip("not_a_request");
+    // 自前の予算（1 run につき再パスは 1 回）。上流予算に依存せずループ不在を担保する。
+    const revisions = videoRevisionsByRun.get(eventRunId)?.count ?? 0;
+    if (revisions >= MAX_VIDEO_ZERO_TOOL_REVISIONS) {
+      logger?.warn?.(
+        `${PLUGIN_ID}: ${describe} outcome=budget_exhausted reason=model_did_not_call_tool` +
+          ` revise_attempt=${revisions}`,
+      );
+      return undefined;
+    }
+    videoRevisionsByRun.delete(eventRunId);
+    videoRevisionsByRun.set(eventRunId, { count: revisions + 1, updatedAtMs: nowMs });
+    const trigger = ingress.videoRequestIntent === true ? "request_intent" : "refusal_draft";
+    logger?.warn?.(
+      `${PLUGIN_ID}: ${describe} outcome=revised reason=video_url_zero_tool trigger=${trigger}` +
+        ` revise_attempt=${revisions + 1}`,
+    );
+    return {
+      action: "revise",
+      reason: VIDEO_ZERO_TOOL_REASON,
+      retry: {
+        instruction: VIDEO_ZERO_TOOL_INSTRUCTION,
+        idempotencyKey: VIDEO_ZERO_TOOL_RETRY_KEY,
+        maxAttempts: MAX_VIDEO_ZERO_TOOL_REVISIONS,
+      },
+    };
+  }
+
   // 層3。層2 の再パス後も 0 tool call のまま終わった run の最終応答を、送信直前に
   // 定型文へ置換する。event.runId と ctx.runId は agent run と同じ id
   // （dispatch:2528-2545 が runState.runId を両方に載せる）。食い違えば触らない。
   // 同一 run の 2 通目以降（分割 payload）は、置換済みの定型文と重複するので取り消す。
+  // ── AI 生成感の除去・送信直前の安全網（2026-09-14）──────────────────────────────
+  // mcp 側（skills/_shared/deai_text.py strip_ai_decoration）は tool 結果の em ダッシュ「—」と
+  // 「--」を読点にして返すが、最終応答はモデルが文面を組み直すため再び入る
+  // （2026-09-14 本番実測: 検索回答の見出し 3 か所。mcp の投稿は進捗 1 行だけで、最終回答の
+  // 投稿主は OpenClaw）。ここは配信直前（reply_payload_sending）で本文だけを正規化する。
+  // Python 側と同じ規則: URL・Slack リンク <url|label>・インラインコード・コードフェンス内・
+  // 表の区切り行・範囲表記（80—100）は触らない。抑止（cancel）と層3 の定型文置換が先。
+  // ログは件数だけ（本文は載せない・G7）。
+  const DEAI_PROTECTED_RE = /`[^`\n]*`|<[^<>\s|]+(?:\|[^<>\n]*)?>|\]\([^()\s]*\)|https?:\/\/[^\s<>*]+/g;
+  const DEAI_EM_DASH_RE = /([ \t　]*)(—+)([ \t　]*)/g;
+  const DEAI_SPACED_HYPHENS_RE =
+    /(?<=[^\x00-\x7F])[ \t　]+-{2,}[ \t　]+|[ \t　]+-{2,}[ \t　]+(?=[^\x00-\x7F])/g;
+  const DEAI_CJK_HYPHENS_RE = /(?<=[^\x00-\x7F])-{2,}(?=[^\x00-\x7F])/g;
+  const DEAI_FENCE_RE = /^[ \t]*(?:```|~~~)/;
+  const DEAI_TABLE_DELIM_RE =
+    /^[ \t　]*[|｜][ \t　]*:?-{2,}:?[ \t　]*(?:[|｜][ \t　]*:?-{2,}:?[ \t　]*)*[|｜]?[ \t　]*$/;
+  const DEAI_DASH_COUNT_RE = /—|-{2,}/g;
+  // 退避の番兵は ASCII（Python 側の \x00/\x01 と同じく「和文ではない」扱いになる）。
+  const DEAI_SENTINEL_RE = /@@DEAI(\d+)@@/g;
+  const isNonAscii = (ch) => typeof ch === "string" && ch.length > 0 && ch.charCodeAt(0) > 0x7f;
+  function deaiNormalizeLine(line) {
+    const kept = [];
+    const masked = line.replace(DEAI_PROTECTED_RE, (m) => {
+      kept.push(m);
+      return `@@DEAI${kept.length - 1}@@`;
+    });
+    let out = masked.replace(DEAI_EM_DASH_RE, (m, lead, _dash, trail, offset, whole) => {
+      if (offset === 0) return "";
+      if (offset + m.length === whole.length) return "";
+      if (lead || trail) return "、";
+      if (isNonAscii(whole[offset - 1]) && isNonAscii(whole[offset + m.length])) return "、";
+      return m;
+    });
+    out = out.replace(DEAI_SPACED_HYPHENS_RE, "、").replace(DEAI_CJK_HYPHENS_RE, "、");
+    if (out !== masked) {
+      out = out
+        .replace(/、{2,}/g, "、")
+        .replace(/([。、！？，：・])、/g, "$1")
+        .replace(/、(?=[。！？）」』])/g, "");
+    }
+    return out.replace(DEAI_SENTINEL_RE, (_, i) => kept[Number(i)]);
+  }
+  function deaiNormalizeText(text) {
+    let inFence = false;
+    return text
+      .split("\n")
+      .map((line) => {
+        if (DEAI_FENCE_RE.test(line)) {
+          inFence = !inFence;
+          return line;
+        }
+        if (inFence || DEAI_TABLE_DELIM_RE.test(line)) return line;
+        return deaiNormalizeLine(line);
+      })
+      .join("\n");
+  }
+  function normalizeOutgoingText(event, logger, runId) {
+    const payload = event?.payload;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+    if (typeof payload.text !== "string" || !payload.text) return undefined;
+    const text = deaiNormalizeText(payload.text);
+    if (text === payload.text) return undefined;
+    const before = (payload.text.match(DEAI_DASH_COUNT_RE) ?? []).length;
+    const after = (text.match(DEAI_DASH_COUNT_RE) ?? []).length;
+    emitPluginLog(
+      logger,
+      "info",
+      `deai normalized outgoing text runId=${runId ?? "none"} dashes_removed=${before - after}`,
+    );
+    return { payload: { ...payload, text } };
+  }
+
   function replaceExhaustedConnectReply(event, ctx, logger) {
     const eventRunId = authoritativeRunId(event, ctx, logger, "reply_payload_sending");
-    if (!eventRunId) return undefined;
+    if (!eventRunId) return normalizeOutgoingText(event, logger, null);
     // ── 二重返信の抑止（2026-09-04 本番実測 TD:45）───────────────────────────
     // 実測ログ: 保証経路が `outcome=delivered` で 1 通配信したあと、層2 の revise を経て
     // モデル経路も同じ内容を 1 通返し、**利用者に同じ内容が 2 通**届いていた。
@@ -3063,7 +3485,7 @@ export function createCallerIdentityPlugin({
         describeConnectDecision(decision, ctx),
     );
     const entry = connectFallbackByRun.get(eventRunId);
-    if (!entry) return undefined;
+    if (!entry) return normalizeOutgoingText(event, logger, eventRunId);
     const payload = event?.payload;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
     const text = typeof payload.text === "string" ? payload.text.trim() : "";
@@ -3174,8 +3596,12 @@ export function createCallerIdentityPlugin({
       });
       // logger を渡していなかったのが「14 日間 warn が 1 行も出ない」原因だった（2026-09-03）。
       observe("before_tool_call", (event, ctx) => signToolCall(event, ctx, api.logger));
-      observe("before_agent_finalize", (event, ctx) =>
-        guardConnectUrlFabrication(event, ctx, api.logger),
+      // 連携側を先に評価し、何もしなかったときだけ動画 URL × 0 tool call の層2 を評価する。
+      observe(
+        "before_agent_finalize",
+        (event, ctx) =>
+          guardConnectUrlFabrication(event, ctx, api.logger) ??
+          guardVideoZeroTool(event, ctx, api.logger),
       );
       observe("reply_payload_sending", (event, ctx) =>
         replaceExhaustedConnectReply(event, ctx, api.logger),

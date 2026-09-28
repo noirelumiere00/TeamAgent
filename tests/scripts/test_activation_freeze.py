@@ -231,9 +231,13 @@ def test_unlock_matches_the_committed_declaration() -> None:
         assert unlock["scope_paths"] == [
             "infra/codebuild/teamagent_core_media_release_contract.json",
         ]
-        assert "util-linux" in unlock["reason"]
-        assert "CVE-2026-78408" in unlock["reason"]
-        assert "human gate 2026-09-11" in unlock["gate"]
+        assert "CVE-2026-85091" in unlock["reason"]
+        assert "tr -d +" in unlock["reason"]
+        assert "ca-certificates 20260611-r0" in unlock["reason"]
+        assert "20260909-r0" in unlock["reason"]
+        assert "libexpat 2.8.4-r0" in unlock["reason"]
+        assert "2.8.5-r0" in unlock["reason"]
+        assert "human gate 2026-09-24" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None

@@ -17,9 +17,13 @@ import { readFileSync } from "node:fs";
 import {
   createCallerIdentityPlugin,
   unwrapToolArguments,
+  canonicalRequestSha256,
   REGISTERED_HOOKS,
   connectRequestShape,
   classifyConnectRequest,
+  classifyVideoUrl,
+  hasVideoRequestIntent,
+  looksLikeVideoRefusal,
 } from
   "../../infra/openclaw/caller-identity-plugin/dist/index.js";
 
@@ -380,6 +384,12 @@ const MCP_USER_FACING_ERROR = [
   `診断: CONNECT-I02 2026-09-04 10:23 JST ${USER} req-1`,
 ].join("\n");
 const LONG_CONNECT_REQUEST = "〇〇社との連携について提案書を作ってください";
+// 動画 URL × 0 tool call の層2（2026-09-25）。本番の DM で届いた本文（Slack が URL を <url|label> で包む）と、
+// 同じ会話の履歴に引っ張られて Aico が 4 回返した断り文そのもの。
+const YOUTUBE_ANALYSIS_REQUEST =
+  "この動画を分析して <https://www.youtube.com/watch?v=jNQXAC9IVRw|youtube.com/watch?v=jNQXAC9IVRw>";
+const YOUTUBE_REFUSAL_REPLY =
+  "YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。";
 
 // mcp（streamable-http）の偽物。rollout-task-canary.mjs と同じ手順を受ける。
 // 本番の失敗モード（fetch 失敗 / HTTP 5xx / JSON-RPC error / tool の構造化エラー /
@@ -810,6 +820,115 @@ function zeroToolConnectScenario({
     logs,
     infos,
   };
+}
+
+// 動画 URL × 0 tool call の層2。受信 → run 開始 → 任意で tool 呼び出し → finalize（repeat 回）。
+// receives: 受信の順序を変えたいときの [{ content, runId? }]（content 省略＝本文無しの再通知）。
+// drafts: パスごとに下書きを変えたいときの配列（指定時は repeat より優先）。
+function videoZeroToolScenario({
+  content,
+  receives = null,
+  lastAssistantMessage = YOUTUBE_REFUSAL_REPLY,
+  drafts = null,
+  toolName = null,
+  repeat = 1,
+  ctxRunId = null,
+} = {}) {
+  const { handlers, logs, infos } = makeConnectPlugin({});
+  for (const step of receives ?? [{ content }]) {
+    receiveDm(handlers, step.content, step.runId ? { runId: step.runId } : {});
+  }
+  startRun(handlers);
+  const toolBlocked = toolName ? callTool(handlers, toolName) : null;
+  const results = [];
+  for (const draft of drafts ?? Array.from({ length: repeat }, () => lastAssistantMessage)) {
+    results.push(finalizeRun(handlers, { lastAssistantMessage: draft, ctxRunId }));
+  }
+  const pick = (result) => ({
+    intervened: result?.action === "revise",
+    instruction: result?.retry?.instruction ?? null,
+    idempotencyKey: result?.retry?.idempotencyKey ?? null,
+    maxAttempts: result?.retry?.maxAttempts ?? null,
+    reason: result?.reason ?? null,
+  });
+  const last = results[results.length - 1];
+  const videoLines = [...infos, ...logs].filter((m) => m.includes("video zero-tool revise"));
+  return {
+    toolBlocked,
+    firstIntervened: results[0]?.action === "revise",
+    ...pick(last),
+    passes: results.map(pick),
+    videoSkipReason:
+      videoLines.find((m) => m.includes("outcome=skipped"))?.match(/reason=(\S+)/u)?.[1] ?? null,
+    videoBudgetExhausted: videoLines.some((m) => m.includes("outcome=budget_exhausted")),
+    videoLines,
+    logs,
+    infos,
+  };
+}
+
+// 動画 URL の種類判定（受信時に ingress へ種類だけを載せる）の行列。
+function videoUrlClassificationMatrix() {
+  const cases = [
+    ["youtube_watch", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "youtube"],
+    ["youtube_slack_wrapped", YOUTUBE_ANALYSIS_REQUEST, "youtube"],
+    ["youtube_shorts", "このショート見て https://youtube.com/shorts/abc123", "youtube"],
+    ["youtube_mobile", "http://m.youtube.com/watch?v=abc", "youtube"],
+    ["youtu_be", "https://youtu.be/jNQXAC9IVRw の構成", "youtube"],
+    ["tiktok", "https://www.tiktok.com/@rival/video/5 を分析", "tiktok"],
+    ["tiktok_short_link", "https://vt.tiktok.com/ZSabc/", "tiktok"],
+    ["instagram_reel", "https://www.instagram.com/reel/CzTWjU5K8Hl/", "instagram"],
+    ["instagram_post", "https://instagram.com/p/Cabc/", "instagram"],
+    ["first_wins", "https://www.tiktok.com/@a/video/1 と https://youtu.be/x", "tiktok"],
+    ["youtube_live", "https://www.youtube.com/live/abc123", "youtube"],
+    ["youtube_music", "https://music.youtube.com/watch?v=abc", "youtube"],
+    ["youtube_upper", "HTTPS://WWW.YOUTUBE.COM/WATCH?V=abc", "youtube"],
+    ["tiktok_t_link", "https://www.tiktok.com/t/ZSabc/", "tiktok"],
+    ["instagram_tv", "https://www.instagram.com/tv/CzTW/", "instagram"],
+    ["tiktok_profile", "https://www.tiktok.com/@brand", null],
+    ["tiktok_ads", "https://ads.tiktok.com/business/creativecenter/inspiration/", null],
+    ["tiktok_tag", "https://www.tiktok.com/tag/コンビニ", null],
+    ["non_video_url", "https://example.com/page を要約して", null],
+    ["youtube_top_only", "https://www.youtube.com/ を開いて", null],
+    ["lookalike_host", "https://notyoutube.com/watch?v=1", null],
+    ["no_url", "この動画を分析して", null],
+    ["not_string", 42, null],
+  ];
+  return cases.map(([name, input, expected]) => ({
+    name,
+    expected,
+    actual: classifyVideoUrl(input),
+  }));
+}
+
+// 誤爆を避ける手掛かり（依頼語・断りの下書き）の行列。
+function videoTriggerMatrix() {
+  const intent = [
+    ["analysis", YOUTUBE_ANALYSIS_REQUEST, true],
+    ["hook", "このショートのフック見て https://youtube.com/shorts/abc123", true],
+    ["timecode", "https://youtu.be/abc の 0:30 を画像にして", true],
+    ["share_only", "この動画、明日の会議で使います https://youtu.be/abc", false],
+    // 共有でもよく出る語（時刻・秒・見て・教えて・まとめ）は依頼とみなさない（相互検証 2026-09-25）。
+    ["meeting_time", "明日10:00の会議で使います https://youtu.be/abc", false],
+    ["look", "これ見て https://youtu.be/abc", false],
+    ["seconds", "30秒の動画です https://youtu.be/abc", false],
+    ["tell_later", "あとで感想教えて https://youtu.be/abc", false],
+    ["summary_folder", "まとめフォルダに入れておいて https://youtu.be/abc", false],
+    ["capture", "https://youtu.be/abc の1:20あたり切り出して", true],
+    ["not_string", undefined, false],
+  ].map(([name, input, expected]) => ({ name, expected, actual: hasVideoRequestIntent(input) }));
+  const refusal = [
+    ["production_refusal", YOUTUBE_REFUSAL_REPLY, true],
+    ["cannot", "YouTube の動画は分析できません。", true],
+    ["attach", "動画ファイルを添付いただければ対応します。", true],
+    ["ack", "承知しました。明日の会議の資料に入れておきますね。", false],
+    ["ack_ryokai", "了解しました。", false],
+    ["cannot_attend", "明日は参加できないので、代わりに見ておきます。", false],
+    ["blocked", "YouTube の URL は取得元にブロックされるため、このツールでは分析できません。", true],
+    ["analysis_cannot", "分析できません。", true],
+    ["analysis_result", "この動画の構成と狙いです。", false],
+  ].map(([name, input, expected]) => ({ name, expected, actual: looksLikeVideoRefusal(input) }));
+  return { intent, refusal };
 }
 
 // fixture（単一正本）の各文言が、層1 の実経路（message_received → before_agent_reply）で
@@ -1996,6 +2115,10 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
   let signedContextKeys = null;
   let signedTop = null;
   let signedUserId = null;
+  // 上流のマージ後に実際へ実行される引数と、mcp が検証する結合の一致。
+  let wireKeys = null;
+  let bindingMatches = null;
+  let wireHasWrapperKey = null;
   if (!blocked) {
     const context = result.params[USER_CONTEXT_KEY_NAME];
     signedUserId = context.slack_user_id;
@@ -2007,6 +2130,10 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
     signedTop = Object.fromEntries(
       Object.entries(result.params).filter(([key]) => key !== USER_CONTEXT_KEY_NAME),
     );
+    const wire = onWireArguments(upstreamMergeHookParams(params, result.params));
+    wireKeys = Object.keys(wire).toSorted();
+    wireHasWrapperKey = wireKeys.includes("arguments") || wireKeys.includes("name");
+    bindingMatches = wireBindingSha256(wire) === claimPayload.arguments_sha256;
   }
   return {
     blocked,
@@ -2017,6 +2144,9 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
     signedKeys,
     signedContextKeys,
     signedTop,
+    wireKeys,
+    wireHasWrapperKey,
+    bindingMatches,
     claimChannel: claimPayload?.channel ?? null,
     claimUser: claimPayload?.sub ?? null,
     signedUserId,
@@ -2028,6 +2158,36 @@ function unwrapScenario({ params, toolName = "teamagent__search" }) {
 }
 
 const USER_CONTEXT_KEY_NAME = "_user_context";
+
+// ── 上流の「浅いマージ」の再現（2026-09-11）──────────────────────────────
+// openclaw@2026.7.1 の実物:
+//   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+//     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(finalParams, hookResult.params);`
+//   同 :938-947  `(o, a) => ({ ...o, ...a })`
+// hook が返した params は元の params を**置換しない**。この 3 行を焼き込んでおくことで、
+// plugin の返り値が本番でどう実行されるかを上流依存なしに再現できる。
+function upstreamMergeHookParams(originalParams, hookParams) {
+  const isPlain = value =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isPlain(hookParams)) return originalParams;
+  if (!isPlain(originalParams)) return hookParams;
+  return { ...originalParams, ...hookParams };
+}
+
+// JSON-RPC の tools/call に載る形（`undefined` のキーは JSON 化で落ちる）。
+function onWireArguments(executedParams) {
+  return JSON.parse(JSON.stringify({ arguments: executedParams })).arguments;
+}
+
+// mcp 側 caller_claim.canonical_request_sha256 と同じ前処理（claim を外して hash）。
+function wireBindingSha256(wireArguments) {
+  const sanitized = { ...wireArguments };
+  const context = { ...sanitized[USER_CONTEXT_KEY_NAME] };
+  delete context.caller_claim;
+  sanitized[USER_CONTEXT_KEY_NAME] = context;
+  return canonicalRequestSha256(sanitized);
+}
+
 const AUTHENTIC_CONTEXT = { slack_user_id: USER };
 // 利用者（モデル）由来の `_user_context` は authoritative 値で必ず上書きされる。
 // 別人になりすました値を入れておき、署名結果が本物の送信者になることを固定する。
@@ -2125,6 +2285,85 @@ const unwrapReport = {
   }),
   // ⑥unwrap 単体の性質。
   unit: unwrapUnit(),
+};
+
+// ── `_user_context` をモデルに要求しない（2026-09-11 の本番実測 P06 5 件）────────
+// EFS のセッション記録から取った tool call の実物:
+//   2026-09-11 10:27 knowledge_deliver / search … 引数は {query, top_k, filter_doc_type}
+//     のみで `_user_context` が**そもそも無い**（包みでもない・wrapDepth=0）。
+//   2026-09-10 12:40 slack_summary … 引数は {"arguments":{}}（1 段包みで中身が空）。
+// いずれも「モデルが正しい形で `_user_context` を渡すこと」に依存していたために
+// block されていた。申告値は mintCallerClaim が authoritative 値で丸ごと置き換えるので、
+// この依存はセキュリティを 1 ビットも稼いでいない。
+const missingUserContextReport = {
+  // ①本番 09-11 の実物と同じ形。block されず、署名済み `_user_context` が付く。
+  absent: unwrapScenario({
+    params: { query: "q", top_k: 5, filter_doc_type: "pdf" },
+  }),
+  // ②本番 09-10 の実物と同じ形（1 段包み・中身が空）。
+  wrapped_empty: unwrapScenario({
+    params: { arguments: {} },
+    toolName: "teamagent__slack_summary",
+  }),
+  // ③空オブジェクトの申告（従来は P05 で落ちていた）。
+  empty_object: unwrapScenario({ params: { query: "q", _user_context: {} } }),
+  // ④部分申告（slack_user_id なし・channel_id だけ）。従来は P05。
+  partial: unwrapScenario({
+    params: { query: "q", _user_context: { channel_id: CHANNEL } },
+  }),
+  // ⑤オブジェクトですらない申告は捨てて続行する（値は mintCallerClaim が上書きする）。
+  null_context: unwrapScenario({ params: { query: "q", _user_context: null } }),
+  string_context: unwrapScenario({ params: { query: "q", _user_context: USER } }),
+  array_context: unwrapScenario({
+    params: { query: "q", _user_context: [AUTHENTIC_CONTEXT] },
+  }),
+  // ⑥信頼境界は動かさない: 申告が**あって**別人なら従来どおり拒否（P05）。
+  spoofed_still_blocked: unwrapScenario({
+    params: { query: "q", _user_context: SPOOFED_CONTEXT },
+  }),
+  // ⑥''本人 ID の表記ゆれ（2026-09-11 レビュー実測）。いずれも「なりすまし」ではない。
+  //   従来はここだけが生値の厳密一致だったため 3 種とも P05 で落ちていた。
+  lowercase_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: USER.toLowerCase() } },
+  }),
+  mention_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: `<@${USER}>` } },
+  }),
+  padded_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: ` ${USER} ` } },
+  }),
+  // ⑥'''なりすましは表記を変えても弾かれる（正規化が検査回避の穴にならないこと）。
+  spoofed_lowercase_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: SPOOFED_CONTEXT.slack_user_id.toLowerCase() },
+    },
+  }),
+  spoofed_mention_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: `<@${SPOOFED_CONTEXT.slack_user_id}>` },
+    },
+  }),
+  // ⑥''''Slack ID として解釈できない申告は team / channel と同じ「破棄して続行」。
+  //   拒否しても 1 ビットも稼がない（mintCallerClaim が丸ごと上書きするため）。
+  uninterpretable_self: unwrapScenario({
+    params: { query: "q", _user_context: { slack_user_id: "小俣" } },
+  }),
+  // ⑥' claim の持ち込み（replay）も従来どおり拒否（P05）。
+  claim_still_blocked: unwrapScenario({
+    params: {
+      query: "q",
+      _user_context: { slack_user_id: USER, caller_claim: "forged.claim" },
+    },
+  }),
+  // ⑦params 自体がオブジェクトでない場合は fail-closed（P06）のまま。
+  non_object_params: unwrapScenario({ params: null }),
+  // ⑧3 段以上の包みは、`_user_context` 欠落を通すようになった後も明示的に block（P06）。
+  //   `stillWrapped` の判定を消すと、包みごと署名してしまいここが緑に変わる。
+  triple_wrapped_still_blocked: unwrapScenario({
+    params: { arguments: { arguments: { arguments: { query: "q" } } } },
+  }),
 };
 
 // ── 拒否の観測性（2026-09-03）───────────────────────────────────────────
@@ -2421,6 +2660,24 @@ const g7Report = {
   inbound_foreign_team: inboundForeignTeam(),
 };
 
+// ── AI 生成感の除去（送信直前の正規化・2026-09-14） ─────────────────────────────
+// reply_payload_sending は run に束縛されない配信でも本文を正規化する（抑止・層3 は先に判定）。
+async function deaiCases() {
+  const { handlers } = makePlugin();
+  const run = async (name, text) => ({
+    input: text,
+    result: await deliverPayload(handlers, { text }, { runId: `deai-${name}` }),
+  });
+  return {
+    heading: await run("heading", "*1. ロリエ「さらピュア吸水」— 想定の2倍以上の露出実現*\n• 本文 -- 補足"),
+    link_untouched: await run("link", "<https://example.com/a—b|開く> 詳細—説明"),
+    range_untouched: await run("range", "売上は 80—100 万円"),
+    fence_untouched: await run("fence", "```\nA — B\n```"),
+    plain: await run("plain", "こんにちは。何かお手伝いできますか？"),
+  };
+}
+const deaiReport = await deaiCases();
+
 const report = {
   // チャンネルの app_mention。run ctx は `c0b0pqd83n2:thread:<ts>`（本番実測）。
   channel_threaded: scenario({
@@ -2586,6 +2843,88 @@ const report = {
     toolName: "teamagent__oauth_connect",
     lastAssistantMessage: OAUTH_CONNECT_MESSAGE,
   }),
+  // 動画 URL × 0 tool call の層2（2026-09-25）。
+  // ①本番の本文（YouTube・Slack 形式）× 本番の断り文 → revise（固定 instruction）。
+  video_zero_tool_youtube: videoZeroToolScenario({ content: YOUTUBE_ANALYSIS_REQUEST }),
+  // ②Shorts / TikTok も同じく介入。
+  video_zero_tool_shorts: videoZeroToolScenario({
+    content: "このショートのフック見て https://youtube.com/shorts/abc123",
+  }),
+  video_zero_tool_tiktok: videoZeroToolScenario({
+    content: "この競合のTikTok動画、構成を分析して https://www.tiktok.com/@rival/video/5",
+  }),
+  // ③video_analysis を呼んだ run → 不介入。
+  video_zero_tool_with_tool_call: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    toolName: "teamagent__video_analysis",
+    lastAssistantMessage: "この動画の構成と狙いです。",
+  }),
+  // ④URL 無し・動画でない URL → 不介入（誤爆しない）。
+  video_zero_tool_no_url: videoZeroToolScenario({ content: "この動画を分析して" }),
+  video_zero_tool_non_video_url: videoZeroToolScenario({
+    content: "https://example.com/page を要約して",
+  }),
+  // ⑤予算: 同じ run の 2 回目の finalize には介入しない（ループしない）。
+  video_zero_tool_budget: videoZeroToolScenario({ content: YOUTUBE_ANALYSIS_REQUEST, repeat: 2 }),
+  // ⑥連携依頼が優先（連携の revise が返り、動画側の指示は返らない）。
+  video_zero_tool_connect_precedence: videoZeroToolScenario({
+    content: "連携",
+    lastAssistantMessage: SELF_MADE_REPLY,
+  }),
+  // ⑦URL の種類判定の行列。
+  video_url_classification: videoUrlClassificationMatrix(),
+  // ⑧誤爆を避ける: 共有だけ（依頼語なし）× 断りでない下書き → 不介入。
+  video_zero_tool_share_only: videoZeroToolScenario({
+    content: "この動画、明日の会議で使います https://youtu.be/abc",
+    lastAssistantMessage: "承知しました。明日の会議の資料に入れておきますね。",
+  }),
+  // ⑨共有だけでも、下書きが断りの形なら介入（誤った断りは直す）。
+  video_zero_tool_share_refusal: videoZeroToolScenario({
+    content: "この動画、明日の会議で使います https://youtu.be/abc",
+  }),
+  // ⑩依頼語あり × 断りでない下書き（聞き返し）→ 介入。
+  video_zero_tool_intent_ask_back: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    lastAssistantMessage: "どの観点で分析しましょうか？",
+  }),
+  // ⑪連携依頼＋動画 URL: 連携の予算切れ後の 2 回目にも動画側は重ならない。
+  video_zero_tool_connect_plus_video: videoZeroToolScenario({
+    content: "連携して https://youtu.be/abc",
+    lastAssistantMessage: SELF_MADE_REPLY,
+    repeat: 2,
+  }),
+  // ⑫動画 URL の受信で連携 URL を捏造: 連携側が先に revise し、1 run の再パスは全体で 1 回。
+  video_zero_tool_fabricated_plus_video: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    lastAssistantMessage: FABRICATED_REPLY,
+    repeat: 3,
+  }),
+  // ⑬通知の順序: 本文無しの通知が先に run へ束縛 → 本文つきの再通知（bindRun の引き継ぎ）。
+  video_zero_tool_bindrun_merge: videoZeroToolScenario({
+    receives: [{ runId: "run-1" }, { content: YOUTUBE_ANALYSIS_REQUEST, runId: "run-1" }],
+  }),
+  // ⑭通知の順序: 本文つき → 本文無しの再通知 → run 開始（pending の引き継ぎ）。
+  video_zero_tool_pending_merge: videoZeroToolScenario({
+    receives: [{ content: YOUTUBE_ANALYSIS_REQUEST }, {}],
+  }),
+  // ⑮event.runId と ctx.runId が食い違う run には触らない。
+  video_zero_tool_run_mismatch: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    ctxRunId: "run-X",
+  }),
+  // ⑯依頼語・断りの手掛かりの行列。
+  video_trigger_matrix: videoTriggerMatrix(),
+  // ⑰逆順: 動画が revise した後の再パスで連携 URL を捏造 → 連携の捏造ガード（安全側）がもう 1 回 revise。
+  //    3 回目は両方とも予算切れで介入しない（1 run で最大 2 回・ループしない）。
+  video_then_fabrication: videoZeroToolScenario({
+    content: YOUTUBE_ANALYSIS_REQUEST,
+    drafts: [YOUTUBE_REFUSAL_REPLY, FABRICATED_REPLY, FABRICATED_REPLY],
+  }),
+  // ⑱共有（時刻入り）× 断りでない下書き → 不介入。
+  video_zero_tool_meeting_share: videoZeroToolScenario({
+    content: "明日10:00の会議で使います https://youtu.be/abc",
+    lastAssistantMessage: "承知しました。",
+  }),
   // 層3 ①再パス後も 0 tool call → 予算切れで層3 を武装し、送信直前に定型文へ置換。
   //     2 通目（分割 payload）は取り消す。
   connect_zero_tool_fallback: zeroToolConnectScenario({
@@ -2637,6 +2976,8 @@ const report = {
   bind_newest: bindNewest,
   // ── ツール引数の二重包みを剥がす（2026-09-03） ────────────────────────
   unwrap: unwrapReport,
+  // ── `_user_context` をモデルに要求しない（2026-09-11） ──────────────────
+  missing_user_context: missingUserContextReport,
   // ── 拒否の観測性（診断行 + 必ず 1 行のログ） ──────────────────────────
   block_diagnostics: blockDiagnostics,
   block_quiet_on_success: quietOnSuccess,
@@ -2644,6 +2985,8 @@ const report = {
   layer1_trace: layer1TraceReport,
   // ── bind_agent_run / inbound rejected の G7 ────────────────────────────
   g7: g7Report,
+  // ── 送信直前の em ダッシュ / -- 読点化（2026-09-14） ────────────────────────
+  deai: deaiReport,
 };
 
 process.stdout.write(JSON.stringify(report, null, 2) + "\n");

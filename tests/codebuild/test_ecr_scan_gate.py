@@ -21,6 +21,9 @@ EXCEPTIONS_PATHS = (
 DIGEST = "sha256:" + "d" * 64
 REPOSITORY = "teamagent-mcp"
 TODAY = date(2026, 7, 16)
+# 2026-09-14 に core へ登録した glibc 2.44-r4 の例外（3 サブパッケージ共通の CVE）。
+GLIBC_2_44_CVE = "CVE-2026-18374"
+ZLIB_1_3_2_CVE = "CVE-2026-85091"
 SYNTHETIC_EXCEPTIONS = {
     ("CVE-2099-10001", "CRITICAL", "fixture-libc", "1.0.0"),
     ("CVE-2099-10002", "HIGH", "fixture-db", "2.0.0"),
@@ -132,6 +135,21 @@ def test_registry_contents_are_exactly_the_adjudicated_exceptions() -> None:
     # URL scheme」の cherry-pick）。現在の chainguard python:latest / latest-dev は
     # 3.14.7-r6 で、本 PR が base digest をバンプしたため finding は消える。例外を残すと
     # stale=fail が発火するので、期限（09-17）を待たず core を空へ復帰させる。
+    # 2026-09-14: mcp 便 r22 image-builder 段3 で CVE-2026-18374（MEDIUM・glibc 2.44-r4 の
+    # 3 サブパッケージ: glibc-2.44 / ld-linux-2.44 / glibc-2.44-locale-posix）が新規検出。
+    # 段4 Trivy は契約が Critical/High ゼロを固定しており MEDIUM は通るため、08-13 / 09-03 と
+    # 同型の期限つき例外（stale=fail・expires 2026-09-28）で段3 だけを通す。
+    # 同時に検出された CVE-2026-85091（HIGH・zlib 1.3.2-r5）は当初「HIGH は期限付き例外にせず
+    # バンプで直す」規律（activation_freeze.json の 09-11 宣言）に従い例外へ載せなかったが、
+    # 2026-09-14 夕方の裁定「期限付き例外で今日発射」で 1 件限りの例外として登録した。
+    # 根拠: バンプ先が存在しない（Wolfi は 1.3.3-r0 を宣言のみ・upstream 未修正）／runtime の
+    # ELF 73 本に脆弱関数 gzprintf/gzvprintf への経路が無い／段4 Trivy は MEDIUM 判定で通る。
+    # 失効日は glibc と同じ 09-28（同じ base digest バンプで一括撤去・stale=fail が強制）。
+    # 2026-09-17: Chainguard python:latest arm64（2026-09-16T20:13Z 生成）は glibc 2.44-r6 と
+    # zlib 1.3.2.1_rc20260601-r0（Wolfi secdb が CVE-2026-85091 の修正版と宣言し直した）を同梱し、
+    # 09-14 の 4 件（glibc MEDIUM ×3・zlib HIGH ×1）はすべて finding が消える。例外を残すと
+    # stale=fail が発火するため、base digest バンプと同じ PR で core を空へ復帰させる（#386 と同型）。
+    # HIGH の例外は 09-14 の zlib 1 件限りで、期限（09-28）を待たずバンプで撤去した。
     core_payload = json.loads(core.read_text(encoding="utf-8"))
     assert core_payload == {
         "schema_version": 1,

@@ -23,7 +23,7 @@ from typing import Any
 
 import structlog
 
-from teamagent.adapters.retry import RetryPolicy, call_with_retry
+from teamagent.adapters.retry import RateLimitPolicy, RetryPolicy, call_with_retry
 
 logger = structlog.get_logger(__name__)
 
@@ -67,6 +67,26 @@ def _is_retryable_vertex(exc: BaseException) -> bool:
     return any(marker in msg for marker in _VERTEX_RETRYABLE_MARKERS)
 
 
+_VERTEX_RATE_LIMIT_MARKERS = (
+    "resource_exhausted",
+    "resource exhausted",
+    "resourceexhausted",
+    "rate limit",
+    "too many requests",
+)
+
+
+def _is_rate_limited_vertex(exc: BaseException) -> bool:
+    """429 / RESOURCE_EXHAUSTED に限って True を返す。"""
+    msg = str(exc).lower()
+    # code=429 を伴う場合でも、URL 側の恒久エラーは長いリトライへ送らない。
+    if not _is_retryable_vertex(exc) and ("cannot fetch content" in msg or "roboted" in msg):
+        return False
+    if getattr(exc, "code", None) == 429 or getattr(exc, "status_code", None) == 429:
+        return True
+    return any(marker in msg for marker in _VERTEX_RATE_LIMIT_MARKERS)
+
+
 @dataclass(frozen=True)
 class GeminiResponse:
     """Gemini API 呼び出しの返り値。"""
@@ -77,6 +97,7 @@ class GeminiResponse:
     cost_usd: float
     model_id: str
     latency_ms: int
+    thoughts_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -118,6 +139,7 @@ class GeminiGroundedResponse:
     cost_usd: float
     model_id: str
     latency_ms: int
+    thoughts_tokens: int = 0
 
 
 def _pick(obj: Any, *names: str) -> Any:
@@ -191,11 +213,50 @@ def _parse_grounding(
     return (tuple(sources), tuple(supports), queries)
 
 
-# Gemini 2.5 Flash 料金（2026/5 時点、USD per 1M tokens）
-# https://ai.google.dev/pricing
+# 既定モデルと Vertex ロケーション（2026-09-24 更新）。
+# Vertex の gemini-2.5-pro / 2.5-flash / 2.5-flash-lite は 2026-10-16 に廃止
+# （Vertex AI release notes 2026-04-02）。後継は gemini-3.5-flash
+# （入出力 1.50 / 9.00 USD per 1M tokens）。09-17 に一度 3.5-flash-lite を既定にしたが、
+# web_research の Google 検索グラウンディングが本番で退行した（09-18）。09-24 の裁定で
+# Lite ではなく 3.5 Flash を使うと決め、sysfix（#435）の上で本番同等パス 9/9 の grounding を
+# 実測した。本番 TD の GEMINI_MODEL_ID が剥がれても裁定どおりになるよう既定を揃える。
+# Gemini 3 系は Vertex では location="global" でのみ応答する
+# （us-central1 では一覧に出るが 404・2026-09-17 実測）。逆に 2.5 系は global では
+# 応答しないので、モデルと location は resolve_location で対にして決める。
+DEFAULT_MODEL_ID = "gemini-3.5-flash"
+DEFAULT_LOCATION = "global"
+_GLOBAL_ONLY_MODEL_PREFIXES = ("gemini-3",)
+
+
+def resolve_location(model_id: str, location: str | None) -> str:
+    """モデルに合う Vertex location を返す。
+
+    3 系（global 専用）に regional が指定されていたら global に読み替えて警告ログを出す。
+    TD env の GEMINI_VERTEX_LOCATION が regional のまま 3 系へ切り替えても 404 で
+    止まらないための保険。
+    それ以外は指定をそのまま返す（未指定は DEFAULT_LOCATION）。
+    """
+    loc = (location or "").strip() or DEFAULT_LOCATION
+    if model_id.startswith(_GLOBAL_ONLY_MODEL_PREFIXES) and loc != "global":
+        logger.warning(
+            "gemini_location_overridden_to_global", model_id=model_id, requested_location=loc
+        )
+        return "global"
+    return loc
+
+
+# 料金（2026-09-16 更新の公式 pricing・USD per 1M tokens・入力/出力）
+# https://ai.google.dev/gemini-api/docs/pricing  ※3.8 / 3.7 / 3.6 Flash は 2026-12-31 までの価格
 _PRICE_TABLE: dict[str, tuple[float, float]] = {
-    "gemini-2.5-flash": (0.15, 0.60),
-    "gemini-2.5-pro": (1.25, 5.00),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.5-flash": (1.50, 9.00),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
+    "gemini-2.5-pro": (1.25, 10.00),
 }
 
 
@@ -206,6 +267,10 @@ _GROUNDING_REQUEST_USD = 0.035
 # grounded 呼び出しのリトライ上限（動画分析の 3 とは別値。理由は
 # generate_with_google_search の docstring）。
 _GROUNDED_RETRY_ATTEMPTS = 2
+# 既存の最悪所要（試行 timeout の合計 + バックオフ cap）を deadline として維持する。
+_GROUNDED_RETRY_BACKOFF_BUDGET_S = 4.0
+# 429 は GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS（既定 8）まで別枠で粘る。
+_RATE_LIMIT_RETRY_ATTEMPTS = 8
 
 
 def _estimate_cost(model_id: str, input_tokens: int, output_tokens: int) -> float:
@@ -230,18 +295,18 @@ class GeminiClient:
     def __init__(
         self,
         api_key: str | None = None,
-        model_id: str = "gemini-2.5-flash",
+        model_id: str = DEFAULT_MODEL_ID,
         *,
         use_vertex: bool = False,
         project: str | None = None,
-        location: str = "us-central1",
+        location: str = DEFAULT_LOCATION,
         client: Any | None = None,
     ) -> None:
         self.api_key = api_key
         self.model_id = model_id
         self.use_vertex = use_vertex
         self.project = project
-        self.location = location
+        self.location = resolve_location(model_id, location)
         # 遅延 import：google-genai は heavy & 一部環境で SSL 問題が出るため
         # client を渡すと遅延生成をスキップする（テストのフェイク注入口）。
         self._client: Any | None = client
@@ -249,7 +314,7 @@ class GeminiClient:
     @classmethod
     def from_env(cls) -> GeminiClient:
         """環境変数から認証経路とモデルを読む。Vertex を優先する。"""
-        model_id = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
+        model_id = os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
 
         use_vertex = os.environ.get("GEMINI_USE_VERTEX", "false").lower() in ("1", "true", "yes")
         if use_vertex:
@@ -261,7 +326,7 @@ class GeminiClient:
                     "GEMINI_USE_VERTEX=true ですが GEMINI_VERTEX_PROJECT (GCP プロジェクト ID) "
                     "が未設定です。Vertex AI を有効化した GCP プロジェクト ID を設定してください"
                 )
-            location = os.environ.get("GEMINI_VERTEX_LOCATION", "us-central1")
+            location = os.environ.get("GEMINI_VERTEX_LOCATION", DEFAULT_LOCATION)
             return cls(model_id=model_id, use_vertex=True, project=project, location=location)
 
         api_key = os.environ.get("GEMINI_API_KEY")
@@ -357,10 +422,11 @@ class GeminiClient:
 
         grounded=False は「検索の裏付けが無い応答」＝呼び出し側は fail-closed にする。
 
-        timeout_s は **1 回の HTTP 試行あたり** の上限。リトライは既定 2 回までに絞ってあり
-        （_GROUNDED_RETRY_ATTEMPTS）、最悪でも timeout_s×2＋バックオフで頭打ちになる。
-        動画分析と同じ 3 回にすると 3×deadline で OpenClaw のターン制限（実測 ~181s）を
-        突き抜け、ターンごと応答全損する。
+        timeout_s は **1 回の HTTP 試行あたり** の上限。通常のリトライは既定 2 回までに
+        絞り、最悪でも timeout_s×2＋バックオフ 4 秒で頭打ちになる。429 は即返るため、
+        この包絡の内側で GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS（既定 8）まで粘る。
+        動画分析と同じ通常 3 回にすると 3×deadline で OpenClaw のターン制限（実測
+        ~181s）を突き抜け、ターンごと応答全損する。
         """
         from google.genai import types
 
@@ -378,6 +444,18 @@ class GeminiClient:
 
         start = time.perf_counter()
         try:
+            grounded_policy = RetryPolicy(
+                max_attempts=_env_int(
+                    "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                ),
+                base_delay_s=0.6,
+                max_delay_s=_GROUNDED_RETRY_BACKOFF_BUDGET_S,
+            )
+            deadline_s = (
+                timeout_s * grounded_policy.max_attempts + _GROUNDED_RETRY_BACKOFF_BUDGET_S
+                if timeout_s is not None
+                else None
+            )
             response = call_with_retry(
                 lambda: client.models.generate_content(
                     model=self.model_id,
@@ -385,19 +463,25 @@ class GeminiClient:
                     config=config,
                 ),
                 is_retryable=_is_retryable_vertex,
-                policy=RetryPolicy(
+                policy=grounded_policy,
+                is_rate_limited=_is_rate_limited_vertex,
+                rate_limit_policy=RateLimitPolicy(
                     max_attempts=_env_int(
-                        "GEMINI_GROUNDED_RETRY_MAX_ATTEMPTS", _GROUNDED_RETRY_ATTEMPTS
+                        "GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS
                     ),
                     base_delay_s=0.6,
-                    max_delay_s=4.0,
+                    max_delay_s=_GROUNDED_RETRY_BACKOFF_BUDGET_S,
+                    min_delay_s=0.5,
                 ),
+                deadline_s=deadline_s,
+                attempt_timeout_s=timeout_s,
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_grounded_retry",
                     request_id=request_id,
                     attempt=n,
                     delay_s=round(d, 2),
                     error=type(e).__name__,
+                    rate_limited=_is_rate_limited_vertex(e),
                 ),
             )
         except Exception as e:
@@ -415,9 +499,10 @@ class GeminiClient:
         usage = _pick(response, "usage_metadata", "usageMetadata")
         input_tokens = int(_pick(usage, "prompt_token_count", "promptTokenCount") or 0)
         output_tokens = int(_pick(usage, "candidates_token_count", "candidatesTokenCount") or 0)
+        thoughts_tokens = int(_pick(usage, "thoughts_token_count", "thoughtsTokenCount") or 0)
         grounded = any(s.uri for s in sources)
         cost_usd = round(
-            _estimate_cost(self.model_id, input_tokens, output_tokens)
+            _estimate_cost(self.model_id, input_tokens, output_tokens + thoughts_tokens)
             + (_GROUNDING_REQUEST_USD if grounded else 0.0),
             6,
         )
@@ -432,6 +517,7 @@ class GeminiClient:
             query_count=len(queries),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            thoughts_tokens=thoughts_tokens,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
             text_len=len(text),
@@ -447,6 +533,7 @@ class GeminiClient:
             cost_usd=cost_usd,
             model_id=self.model_id,
             latency_ms=latency_ms,
+            thoughts_tokens=thoughts_tokens,
         )
 
     def _generate_video(
@@ -475,12 +562,22 @@ class GeminiClient:
                     base_delay_s=0.6,
                     max_delay_s=8.0,
                 ),
+                is_rate_limited=_is_rate_limited_vertex,
+                rate_limit_policy=RateLimitPolicy(
+                    max_attempts=_env_int(
+                        "GEMINI_RATE_LIMIT_RETRY_MAX_ATTEMPTS", _RATE_LIMIT_RETRY_ATTEMPTS
+                    ),
+                    base_delay_s=1.0,
+                    max_delay_s=12.0,
+                    min_delay_s=0.5,
+                ),
                 on_retry=lambda n, d, e: logger.warning(
                     "gemini_retry",
                     request_id=request_id,
                     attempt=n,
                     delay_s=round(d, 2),
                     error=type(e).__name__,
+                    rate_limited=_is_rate_limited_vertex(e),
                 ),
             )
         except Exception as e:
@@ -500,7 +597,8 @@ class GeminiClient:
         usage = getattr(response, "usage_metadata", None)
         input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
         output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
-        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens)
+        thoughts_tokens = int(getattr(usage, "thoughts_token_count", 0) or 0)
+        cost_usd = _estimate_cost(self.model_id, input_tokens, output_tokens + thoughts_tokens)
 
         logger.info(
             "gemini_analyze_video",
@@ -508,6 +606,7 @@ class GeminiClient:
             model_id=self.model_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            thoughts_tokens=thoughts_tokens,
             cost_usd=cost_usd,
             latency_ms=latency_ms,
             text_len=len(text),
@@ -519,6 +618,7 @@ class GeminiClient:
             cost_usd=cost_usd,
             model_id=self.model_id,
             latency_ms=latency_ms,
+            thoughts_tokens=thoughts_tokens,
         )
 
     def health_check(self) -> bool:

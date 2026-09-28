@@ -22,7 +22,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, overload
 
 import structlog
 
@@ -131,6 +131,67 @@ class CalendarEvent:
     all_day: bool = False
 
 
+@dataclass(frozen=True)
+class CalendarEventDetail(CalendarEvent):
+    """予定 1 件＋**要求されたときだけ**取る追加フィールド（pre_meeting_brief 専用）。
+
+    ⚠️ なぜ ``CalendarEvent`` 本体に足さないか: ``description`` は最大 4000 字の自由文で、
+    予定を読むすべての消費者（workspace_search / schedule_propose / morning_digest の
+    予定表示）に常時同乗させると、ログ・LLM プロンプト・Slack 描画のどこかへ第三者が
+    書いた本文が黙って乗る経路が増える。取得は ``extract_events(want_description=True)``
+    を明示した呼び出しだけに限定し、型でも別物にしておく。
+
+    ``attendee_list_available`` は「参加者リストが本当に見えているか」。⚠️ Google は
+    ゲストリスト非表示（``guestsCanSeeOtherGuests=false``）のとき **空配列を返さず
+    本人＋主催者を返す**ため、``bool(attendees)`` では判定できない（実測・付録参照）。
+    """
+
+    description: str = ""
+    # 参加者のドメインのみ（ローカル部は保持しない＝情報最小化）。登場順・重複排除。
+    attendee_domains: tuple[str, ...] = ()
+    # 参加者リストが「見えている」か。False は「社外参加者ゼロ」ではなく「判らない」。
+    attendee_list_available: bool = False
+    organizer_domain: str = ""
+
+
+def _email_domain(email: str) -> str:
+    """メールのドメイン部を小文字で返す（不正なら空文字）。"""
+    local, sep, domain = (email or "").strip().lower().partition("@")
+    if not sep or not local or not domain or "." not in domain:
+        return ""
+    return domain
+
+
+def _attendee_visibility(it: dict[str, Any]) -> tuple[tuple[str, ...], bool]:
+    """参加者ドメイン一覧と「リストが見えているか」を返す。
+
+    判定（**空配列判定にしない**）:
+      - ``attendeesOmitted=True`` → 見えていない（Google が明示的に省略した）
+      - ``guestsCanSeeOtherGuests=False`` → 見えていない（本人＋主催者しか返らない）
+      - attendees が空 → 見えていない（そもそも情報が無い）
+      - ``self``/主催者以外の attendee が 1 件も無い → 見えていない
+    """
+    attendees = it.get("attendees") or []
+    organizer_email = str(((it.get("organizer") or {}).get("email")) or "")
+    domains: list[str] = []
+    others = 0
+    for a in attendees:
+        email = str(a.get("email") or "")
+        if not email:
+            continue
+        dom = _email_domain(email)
+        if dom and dom not in domains:
+            domains.append(dom)
+        if not a.get("self") and email.strip().lower() != organizer_email.strip().lower():
+            others += 1
+    available = bool(attendees) and not bool(it.get("attendeesOmitted"))
+    if it.get("guestsCanSeeOtherGuests") is False:
+        available = False
+    if others == 0:
+        available = False
+    return (tuple(domains[:10]), available)
+
+
 def _extract_meeting_url(it: dict[str, Any]) -> str:
     """Google Meet(hangoutLink) か conferenceData の video entryPoint から会議 URL を取る。"""
     hangout = str(it.get("hangoutLink") or "")
@@ -170,32 +231,70 @@ def _event_time(iso: str) -> dict[str, str]:
     return {"date": iso} if "T" not in iso else {"dateTime": iso}
 
 
-def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]:
-    """events.list の items[] を CalendarEvent 群へ変換する。"""
-    out: list[CalendarEvent] = []
-    for it in items or []:
-        start_obj = it.get("start") or {}
-        end_obj = it.get("end") or {}
-        start = start_obj.get("dateTime") or start_obj.get("date") or ""
-        end = end_obj.get("dateTime") or end_obj.get("date") or ""
-        # 終日判定は date key の有無で行う（値の文字列形ではなく API の構造で見る）。
-        all_day = not start_obj.get("dateTime") and bool(start_obj.get("date"))
-        attendees = tuple(
-            str(a.get("email")) for a in (it.get("attendees") or []) if a.get("email")
-        )
-        out.append(
-            CalendarEvent(
-                event_id=str(it.get("id", "")),
-                summary=str(it.get("summary", "")),
-                start=str(start),
-                end=str(end),
-                attendees=attendees,
-                location=str(it.get("location", "") or ""),
-                meeting_url=_extract_meeting_url(it),
-                all_day=all_day,
+@overload
+def extract_events(items: list[dict[str, Any]]) -> list[CalendarEvent]: ...
+
+
+@overload
+def extract_events(
+    items: list[dict[str, Any]], *, want_description: Literal[False]
+) -> list[CalendarEvent]: ...
+
+
+@overload
+def extract_events(
+    items: list[dict[str, Any]], *, want_description: Literal[True]
+) -> list[CalendarEventDetail]: ...
+
+
+def extract_events(
+    items: list[dict[str, Any]], *, want_description: bool = False
+) -> list[CalendarEvent] | list[CalendarEventDetail]:
+    """events.list の items[] を CalendarEvent 群へ変換する。
+
+    ``want_description=True`` のときだけ ``CalendarEventDetail``（description /
+    参加者ドメイン / 参加者リスト可視性 / 主催者ドメイン付き）を返す。既定は従来どおり
+    ``CalendarEvent``＝既存の全消費者の型・内容は 1 バイトも変わらない。
+    """
+    if want_description:
+        detailed: list[CalendarEventDetail] = []
+        for it in items or []:
+            base = _base_fields(it)
+            domains, available = _attendee_visibility(it)
+            detailed.append(
+                CalendarEventDetail(
+                    **base,
+                    description=str(it.get("description", "") or ""),
+                    attendee_domains=domains,
+                    attendee_list_available=available,
+                    organizer_domain=_email_domain(
+                        str(((it.get("organizer") or {}).get("email")) or "")
+                    ),
+                )
             )
-        )
-    return out
+        return detailed
+    return [CalendarEvent(**_base_fields(it)) for it in items or []]
+
+
+def _base_fields(it: dict[str, Any]) -> dict[str, Any]:
+    """CalendarEvent の共通フィールドを 1 箇所で組む（2 経路で解釈をズラさない）。"""
+    start_obj = it.get("start") or {}
+    end_obj = it.get("end") or {}
+    start = start_obj.get("dateTime") or start_obj.get("date") or ""
+    end = end_obj.get("dateTime") or end_obj.get("date") or ""
+    # 終日判定は date key の有無で行う（値の文字列形ではなく API の構造で見る）。
+    all_day = not start_obj.get("dateTime") and bool(start_obj.get("date"))
+    attendees = tuple(str(a.get("email")) for a in (it.get("attendees") or []) if a.get("email"))
+    return {
+        "event_id": str(it.get("id", "")),
+        "summary": str(it.get("summary", "")),
+        "start": str(start),
+        "end": str(end),
+        "attendees": attendees,
+        "location": str(it.get("location", "") or ""),
+        "meeting_url": _extract_meeting_url(it),
+        "all_day": all_day,
+    }
 
 
 class DuplicateEventError(Exception):
@@ -277,8 +376,14 @@ class GCalendarClient:
         time_max: str | None = None,
         max_results: int = 20,
         calendar_id: str = "primary",
+        want_description: bool = False,
     ) -> list[CalendarEvent]:
-        """events.list で予定を取得（q でクライアント名等に絞れる）。"""
+        """events.list で予定を取得（q でクライアント名等に絞れる）。
+
+        ``want_description=True`` のときだけ ``CalendarEventDetail``（description・参加者
+        ドメイン・参加者リスト可視性つき）を返す。既定 False の呼び出し（既存の全消費者）
+        の戻り値は従来と 1 バイトも変わらない。
+        """
         service = self._ensure_service()
         params: dict[str, Any] = {
             "calendarId": calendar_id,
@@ -297,12 +402,19 @@ class GCalendarClient:
         resp = service.events().list(**params).execute()
         latency_ms = int((time.perf_counter() - start) * 1000)
 
-        events = extract_events(resp.get("items", []) or [])
+        items = resp.get("items", []) or []
+        events: list[CalendarEvent] = (
+            list(extract_events(items, want_description=True))
+            if want_description
+            else list(extract_events(items))
+        )
         logger.info(
             "gcalendar_list_events",
             request_id=request_id,
             query_len=len(query) if query else 0,
             returned=len(events),
+            # 上限に張り付いた日は「取り切れていない」＝後続の予定が丸ごと落ちている可能性。
+            saturated=len(events) >= max_results,
             latency_ms=latency_ms,
         )
         return events

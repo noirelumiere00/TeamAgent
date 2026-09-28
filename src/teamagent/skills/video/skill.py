@@ -109,7 +109,11 @@ class VideoAnalysisSkill(BaseSkill[VideoAnalysisInput, VideoAnalysisOutput]):
         )
 
         cache = AnalysisCache() if AnalysisCache.enabled() else None
-        model_id_for_key = os.environ.get("GEMINI_MODEL_ID", "gemini-2.5-flash")
+        from teamagent.adapters.gemini_client import DEFAULT_MODEL_ID
+
+        model_id_for_key = (
+            os.environ.get("GEMINI_MODEL_ID", DEFAULT_MODEL_ID).strip() or DEFAULT_MODEL_ID
+        )
 
         def _cache_key(basis: str) -> str:
             return AnalysisCache.cache_key(

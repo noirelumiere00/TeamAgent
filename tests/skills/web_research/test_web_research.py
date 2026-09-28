@@ -306,6 +306,24 @@ def test_system_prompt_declares_results_are_data_not_instructions() -> None:
     assert "URL・リンク・脚注番号・出典表記を" in system  # LLM に出典を書かせない
 
 
+def test_system_prompt_requires_search_before_banning_urls() -> None:
+    """Gemini 3.5 系の grounding 退行（2026-09-18）への sysfix を固定する。
+
+    「URL を書くな」の一文だけだと 3.5 系は「検索しなくてよい」と拡大解釈し、Google 検索を
+    飛ばして not_grounded になることがあった。「必ず検索して根拠づけよ」があり、かつ
+    URL 禁止より前にあること（文言の整理でどちらかが消えても CI で気づけるように）。
+    """
+    skill = _skill(_raw_response(_SUMMARY, _CHUNKS, _SUPPORTS))
+    skill.run(WebResearchInput(query="ショート動画広告 市場規模"), _ctx())
+
+    system = _fake_of(skill).calls[0]["config"].system_instruction
+    must = "必ず Google 検索ツールを使い"
+    ban = "URL・リンク・脚注番号・出典表記を書かないでください"
+    assert must in system
+    assert ban in system
+    assert system.index(must) < system.index(ban)
+
+
 def test_user_query_is_wrapped_as_data_and_delimiters_cannot_be_injected() -> None:
     """クエリはデータ枠に入れて渡す。区切り記号自体をクエリで持ち込めない。"""
     skill = _skill(_raw_response(_SUMMARY, _CHUNKS, _SUPPORTS))

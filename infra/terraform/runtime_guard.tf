@@ -335,7 +335,7 @@ locals {
       var.runtime_guard_live.connect_app_html.build_inputs_sha256,
     )) &&
     (
-      var.runtime_guard_live.mode == "migration" ?
+      var.runtime_guard_live.mode == "migration" && !local.runtime_is_config_migration ?
       (
         var.runtime_guard_live.connect_app_html ==
         try(local.runtime_selected_migration.from.connect_app_html, null)
@@ -367,10 +367,23 @@ locals {
     var.runtime_guard_live.mode == "migration" &&
     try(local.runtime_selected_migration.kind, "") == "runtime"
   )
+  # config kind の migration は画像不変で log cutover を伴わないため、sync と同じく
+  # versioning / cutover receipt の束縛を空で要求する。
+  runtime_is_config_migration = (
+    var.runtime_guard_live != null &&
+    var.runtime_guard_live.mode == "migration" &&
+    try(local.runtime_selected_migration.kind, "") == "config"
+  )
   log_producer_cutover_guard_valid = var.runtime_guard_live == null ? false : (
     var.runtime_guard_live.mode == "sync" ||
     (
+      local.runtime_is_config_migration &&
+      var.runtime_guard_live.versioning_pre_cutover_receipt_sha256 == "" &&
+      var.runtime_guard_live.log_cutover_contract_sha256 == ""
+    ) ||
+    (
       var.runtime_guard_live.mode == "migration" &&
+      !local.runtime_is_config_migration &&
       can(regex(
         "^[0-9a-f]{64}$",
         var.runtime_guard_live.versioning_pre_cutover_receipt_sha256,
@@ -478,14 +491,23 @@ locals {
         local.runtime_migration_manifest.schema_version == 1 &&
         try(local.runtime_selected_migration.enabled, false) &&
         can(regex("^[0-9a-f]{64}$", var.runtime_guard_live.preflight_receipt_sha256)) &&
-        can(regex(
-          "^[0-9a-f]{64}$",
-          var.runtime_guard_live.versioning_pre_cutover_receipt_sha256,
-        )) &&
-        can(regex(
-          "^[0-9a-f]{64}$",
-          var.runtime_guard_live.log_cutover_contract_sha256,
-        )) &&
+        (
+          local.runtime_is_config_migration ?
+          (
+            var.runtime_guard_live.versioning_pre_cutover_receipt_sha256 == "" &&
+            var.runtime_guard_live.log_cutover_contract_sha256 == ""
+          ) :
+          (
+            can(regex(
+              "^[0-9a-f]{64}$",
+              var.runtime_guard_live.versioning_pre_cutover_receipt_sha256,
+            )) &&
+            can(regex(
+              "^[0-9a-f]{64}$",
+              var.runtime_guard_live.log_cutover_contract_sha256,
+            ))
+          )
+        ) &&
         var.runtime_guard_live.ingest_rule_enabled ==
         (try(local.runtime_selected_migration.to.rule_states.ingest, "") == "ENABLED") &&
         var.runtime_guard_live.morning_digest_rule_enabled ==
@@ -503,19 +525,34 @@ locals {
             try(local.runtime_selected_migration.to.x_buzz_image, null) == var.runtime_guard_live.desired_x_image &&
             try(local.runtime_selected_migration.to.tiktok_image, null) == var.runtime_guard_live.desired_tiktok_image
           ) :
-          (
-            try(local.runtime_selected_migration.kind, "") == "activation" &&
-            try(local.runtime_selected_migration.requires_migration, "") ==
-            var.runtime_guard_live.required_migration_id &&
-            can(regex(
-              "^[0-9a-f]{64}$",
-              var.runtime_guard_live.required_migration_apply_receipt_sha256,
-            )) &&
-            var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
-            var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
-            var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
-            var.runtime_guard_live.desired_tiktok_image == var.runtime_guard_live.live_tiktok_image
-          )
+          (local.runtime_is_config_migration ?
+            (
+              # config: 画像不変。manifest の to.images と desired と live の三者一致を要求する。
+              try(local.runtime_selected_migration.requires_migration, null) == null &&
+              var.runtime_guard_live.required_migration_id == "" &&
+              var.runtime_guard_live.required_migration_apply_receipt_sha256 == "" &&
+              try(local.runtime_selected_migration.to.images.openclaw, null) == var.runtime_guard_live.desired_openclaw_image &&
+              try(local.runtime_selected_migration.to.images.mcp, null) == var.runtime_guard_live.desired_mcp_image &&
+              try(local.runtime_selected_migration.to.images.x_buzz, null) == var.runtime_guard_live.desired_x_image &&
+              try(local.runtime_selected_migration.to.images.tiktok, null) == var.runtime_guard_live.desired_tiktok_image &&
+              var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
+              var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
+              var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
+              var.runtime_guard_live.desired_tiktok_image == var.runtime_guard_live.live_tiktok_image
+            ) :
+            (
+              try(local.runtime_selected_migration.kind, "") == "activation" &&
+              try(local.runtime_selected_migration.requires_migration, "") ==
+              var.runtime_guard_live.required_migration_id &&
+              can(regex(
+                "^[0-9a-f]{64}$",
+                var.runtime_guard_live.required_migration_apply_receipt_sha256,
+              )) &&
+              var.runtime_guard_live.desired_openclaw_image == var.runtime_guard_live.live_openclaw_image &&
+              var.runtime_guard_live.desired_mcp_image == var.runtime_guard_live.live_mcp_image &&
+              var.runtime_guard_live.desired_x_image == var.runtime_guard_live.live_x_image &&
+              var.runtime_guard_live.desired_tiktok_image == var.runtime_guard_live.live_tiktok_image
+          ))
         )
       )
     ) &&
@@ -572,7 +609,12 @@ locals {
     var.runtime_guard_live.monitoring.container_insights == (
       var.runtime_guard_live.mode == "migration" &&
       try(local.runtime_selected_migration.kind, "") == "runtime" ?
-      "disabled" : "enabled"
+      "disabled" :
+      (
+        local.runtime_is_config_migration ?
+        try(local.runtime_selected_migration.from.monitoring.container_insights, "") :
+        "enabled"
+      )
     ) &&
     local.alarm_delivery_configuration_valid &&
     local.runtime_alarm_delivery_contract_valid &&

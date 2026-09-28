@@ -286,15 +286,21 @@ class SlackClient:
         title: str | None = None,
         initial_comment: str | None = None,
         thread_ts: str | None = None,
+        filename: str | None = None,
     ) -> bool:
         """ローカルファイル（HTMLレポート等）を channel にアップロードする。
 
         files.upload v2 を使う。失敗しても例外を投げず False を返す（通知本体は別途投稿済の想定）。
+        ``filename`` は Slack 上の表示名・ダウンロード名（省略時は ``file_path`` の basename）。
+        ``title`` だけではダウンロードしたファイル名に反映されないため、名前に意味を持たせる
+        呼び出し元（ドラフト接頭辞など）は両方を渡す。
         """
         start = time.perf_counter()
         kwargs: dict[str, Any] = {"channel": channel, "file": file_path}
         if title is not None:
             kwargs["title"] = title
+        if filename is not None:
+            kwargs["filename"] = filename
         if initial_comment is not None:
             kwargs["initial_comment"] = initial_comment
         if thread_ts is not None:

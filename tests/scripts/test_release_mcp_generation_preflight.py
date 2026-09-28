@@ -29,7 +29,7 @@ SOURCE_PUBLISHER = "teamagent-dev-mcp-source-publisher"
 
 # r20 の実測値（CloudWatch / batch-get-projects で確認済み）。
 LIVE_STALE_GENERATION = "1ed75a2efc69b675d32e9a8197fa4943378e8448ec566d5e9c9bba6040cf7245"
-REPO_EXPECTED_GENERATION = "8e27d780948858e00b2f2f41c2a76772e405931a351bc31fcf7aa2ae9574f6eb"
+REPO_EXPECTED_GENERATION = "faea6b6739ed775c4c5a58539d09496197399aaef44e53b3c7c6313715023d6a"
 
 
 def _load(path: Path, name: str) -> ModuleType:

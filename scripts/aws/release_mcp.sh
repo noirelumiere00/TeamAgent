@@ -197,13 +197,22 @@ start_and_wait() { # $1=project $2=env json $3=source-version("-"で無指定) $
     AWS_SESSION_TOKEN="$(echo "$creds" | cut -f3)" \
     env -u AWS_PROFILE aws codebuild start-build "${args[@]}")"
   info "$project 起動: $bid"
+  # 2026-09-17 r26: 段 3 の完了待ち中に AWS CLI が一時的に接続できず（Could not connect to the
+  # endpoint URL）、set -e で鎖ごと落ちた（段 3 自体は SUCCEEDED）。状態照会の失敗は「まだ分からない」
+  # として最大 POLL_MAX_ERRORS 回まで待ち直し、連続で超えたときだけ FATAL にする。
+  local poll_errors=0
   while :; do
     sleep "$POLL_SECONDS"
     local st; st="$(aws codebuild batch-get-builds --ids "$bid" --region "$REGION" \
-      --query 'builds[0].buildStatus' --output text)"
+      --query 'builds[0].buildStatus' --output text 2>/dev/null)" || st="__POLL_ERROR__"
     case "$st" in
       SUCCEEDED) info "$project SUCCEEDED"; LAST_BUILD_ID="$bid"; return 0;;
-      IN_PROGRESS) ;;
+      IN_PROGRESS) poll_errors=0 ;;
+      __POLL_ERROR__|""|None)
+        poll_errors=$((poll_errors + 1))
+        info "$project 状態照会に失敗（$poll_errors/${POLL_MAX_ERRORS:-10}）。待ち直す"
+        [ "$poll_errors" -lt "${POLL_MAX_ERRORS:-10}" ] || die "$project の状態照会が ${POLL_MAX_ERRORS:-10} 回連続で失敗（build $bid）"
+        ;;
       *)
         echo "FATAL: $project が $st で終了しました。失敗ログ（buildspec のエコーを除いた実出力）:" >&2
         local lg ls

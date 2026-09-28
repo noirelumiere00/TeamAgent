@@ -49,6 +49,7 @@ from teamagent.mcp_gateway.caller_claim import (
     CallerClaimVerifier,
     VerifiedCallerClaim,
 )
+from teamagent.mcp_gateway.personal_memory import PERSONAL_MEMORY_TOOL_NAMES
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.runtime.usage_recorder import UsageEvent, UsageRecorder
 from teamagent.skills._shared.connect_intent import (
@@ -874,6 +875,127 @@ async def dispatch_tool(
     return [TextContent(type="text", text=json.dumps(data, ensure_ascii=False, default=str))]
 
 
+def _pm_err(code: str) -> list[TextContent]:
+    """本人メモの拒否・失敗。固定コードだけを返す。
+
+    発話・例外文・pydantic の input_value は返さない。
+    """
+    payload = {"error": "personal_memory_rejected", "code": code}
+    return [TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]
+
+
+async def dispatch_personal_memory_tool(
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    identity_resolver: IdentityResolver | None,
+    allowed_domains: frozenset[str] | None,
+    company_shared_groups: frozenset[str] | None,
+    caller_claim_verifier: CallerClaimVerifier | None,
+) -> list[TextContent]:
+    """本人メモ（personal_memory_*）専用の経路。dispatch_tool を通さない。
+
+    判定の順（docs/architecture/hermes_migration_design.md §10b.3）:
+    署名済み claim 必須 → DM（claim の channel を D… で fullmatch）→ 予約 tool_call_id
+    （aico-pm-(obs|ctx|cmd)-<32hex> かつ run_id == tool_call_id）→ スレッド不可 → resolver →
+    allowlist（空なら全員拒否）→ 入力検証。「連携」振り替え・usage 記録・進捗投稿・長文退避・
+    非同期通知はどれも走らせない。例外は外へ出さない（SDK が str(e) を応答に入れるため）。
+    """
+    received = time.perf_counter()
+    outcome = "internal"
+    gateway_ms = 0
+    try:
+        from teamagent.mcp_gateway.personal_memory import gate
+
+        def reject(code: str) -> list[TextContent]:
+            nonlocal outcome
+            outcome = code
+            return _pm_err(code)
+
+        # ① LEGACY（resolver/verifier 無し）では verified_caller が None のまま通るので拒否する
+        if identity_resolver is None or caller_claim_verifier is None:
+            return reject("PM_UNAVAILABLE")
+        raw = arguments.get(USER_CONTEXT_KEY)
+        if not isinstance(raw, dict):
+            return reject("PM_INVALID_INPUT")
+        verified, caller_fail = await _verify_caller(
+            arguments,
+            tool=name,
+            identity_resolver=identity_resolver,
+            company_shared_groups=company_shared_groups,
+            caller_claim_verifier=caller_claim_verifier,
+        )
+        if caller_fail is not None:
+            return reject("PM_CALLER_REJECTED")
+        if verified is None:
+            return reject("PM_CALLER_REQUIRED")
+        if not gate.is_dm_channel(verified.channel_id):
+            return reject("PM_NOT_DM")
+        if not gate.reserved_invocation_ok(name, verified.tool_call_id, verified.run_id):
+            return reject("PM_INVOCATION_REJECTED")
+        if verified.thread_ts is not None:
+            return reject("PM_THREAD_REJECTED")
+        metadata, fail = await _resolve_metadata(
+            raw,
+            verified_caller=verified,
+            require_rls=True,
+            identity_resolver=identity_resolver,
+            allowed_domains=allowed_domains,
+            company_shared_groups=company_shared_groups,
+            tool=name,
+        )
+        if (
+            fail is not None
+            or metadata.get("identity_verified") is not True
+            or metadata.get("verified_slack_user_id") != verified.slack_user_id
+            or metadata.get("verified_slack_team_id") != verified.slack_team_id
+        ):
+            return reject("PM_IDENTITY_REJECTED")
+        email = metadata.get("user_email")
+        # 照合するのは resolver が解決した email（_user_context の申告値は使わない）
+        if not gate.is_allowed(email):
+            return reject("PM_NOT_ALLOWED")
+
+        from pydantic import ValidationError
+
+        from teamagent.adapters.personal_memory_store import (
+            PersonalMemoryStoreError,
+            Principal,
+        )
+        from teamagent.mcp_gateway.personal_memory import handle_personal_memory
+        from teamagent.mcp_gateway.personal_memory.schemas import INPUT_MODELS
+
+        business = {k: v for k, v in arguments.items() if k != USER_CONTEXT_KEY}
+        try:
+            payload = INPUT_MODELS[name].model_validate(business)
+        except ValidationError:
+            return reject("PM_INVALID_INPUT")
+        try:
+            principal = Principal(
+                team_id=verified.slack_team_id,
+                slack_user_id=verified.slack_user_id,
+                user_email=str(email),
+            )
+        except PersonalMemoryStoreError:
+            return reject("PM_IDENTITY_REJECTED")
+        gateway_ms = int((time.perf_counter() - received) * 1000)
+        result = await handle_personal_memory(name, principal, verified.message_id, payload)
+        outcome = "ok"
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+    except Exception as exc:
+        outcome = "PM_INTERNAL"
+        logger.warning("personal_memory_internal_error", tool=name, error=type(exc).__name__)
+        return _pm_err("PM_INTERNAL")
+    finally:
+        logger.info(
+            "personal_memory_call",
+            tool=name,
+            outcome=outcome,
+            gateway_ms=gateway_ms,
+            total_ms=int((time.perf_counter() - received) * 1000),
+        )
+
+
 async def dispatch_run_agent(
     specs: list[ToolSpec],
     arguments: dict[str, Any],
@@ -1017,7 +1139,15 @@ def build_server(
     ) and caller_claim_verifier is None:
         raise RuntimeError("signed caller claim verifier is required for Slack identity")
     by_name = {s.name: s for s in specs}
+    # 本人メモのツールを ToolSpec にすると list_tools と L2 のツール面に出てしまうので禁じる
+    if any(n.startswith("personal_memory") for n in by_name):
+        raise RuntimeError("personal_memory_* must not be registered as a ToolSpec")
     enable_orchestrator = _envflag("USE_AGENT_ORCHESTRATOR")
+    enable_personal_memory = _envflag("USE_PERSONAL_MEMORY")
+    if enable_personal_memory:
+        from teamagent.mcp_gateway.personal_memory.gate import install_sdk_warning_filter
+
+        install_sdk_warning_filter()
     server: Server = Server("teamagent")
 
     @server.list_tools()
@@ -1026,6 +1156,19 @@ def build_server(
 
     @server.call_tool()
     async def _call(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+        # 本人メモ（list_tools に出さない）。フラグ off なら未登録ツールと同じ応答にし、
+        # claim の検証（nonce の消費）にも DB にも触れない。dispatch_tool より前に振り分ける。
+        if name in PERSONAL_MEMORY_TOOL_NAMES:
+            if not enable_personal_memory:
+                return _err(f"unknown tool: {name}")
+            return await dispatch_personal_memory_tool(
+                name,
+                arguments,
+                identity_resolver=identity_resolver,
+                allowed_domains=allowed_domains,
+                company_shared_groups=company_shared_groups,
+                caller_claim_verifier=caller_claim_verifier,
+            )
         # L2: run_agent は specs に無い特別 tool。有効時のみ専用ディスパッチへ。
         if enable_orchestrator and name == RUN_AGENT_TOOL_NAME:
             return await dispatch_run_agent(

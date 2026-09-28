@@ -2916,7 +2916,12 @@ def test_double_wrapped_tool_arguments_reach_the_tool_in_canonical_form() -> Non
     assert wrapped["blocked"] is False, wrapped["blockReason"]
     # 包みが剥がれ、ツール本来の引数が top に戻っていること。
     assert wrapped["signedTop"] == {"query": "q"}
-    assert wrapped["signedKeys"] == ["_user_context", "query"]
+    # 返り値には「元の包みキーを消す」ための墓標（値 undefined）が載る。上流は hook の
+    # 返り値を置換せず浅くマージする（:1735 / :938-947）ので、これが無いと `arguments`
+    # が実行引数に残り、mcp が請求結合の不一致で拒否する（2026-09-11 実測の I01a）。
+    assert wrapped["signedKeys"] == ["_user_context", "arguments", "query"]
+    # 実際に mcp へ届くのは JSON 化後なので、墓標は消えて正規形になる。
+    assert wrapped["wireKeys"] == ["_user_context", "query"]
     # `_user_context` は plugin が鋳造した authoritative 値。
     assert wrapped["signedContextKeys"] == [
         "caller_claim",
@@ -2993,6 +2998,186 @@ def test_ordinary_tool_arguments_pass_through_the_unwrap_byte_identical() -> Non
     assert unit["bare_name_shape"] == "name_arguments"
 
 
+# ══ `_user_context` をモデルに要求しない（2026-09-11 の本番実測 P06）════════════
+# 実測（EFS のセッション記録から tool call の実物を読んだ・読み取り専用 Fargate プローブ）:
+#   2026-09-11 10:27 4 件 … knowledge_deliver / search。引数は
+#     {query, top_k, filter_doc_type} のみで `_user_context` が**そもそも無い**
+#     （包みではない。wrapDepth=0）。
+#   2026-09-10 12:40 1 件 … slack_summary。引数は {"arguments":{}}（1 段包み・中身が空）。
+# CloudWatch の P06 は 09-04 以降この 5 件だけで、すべて同じ id_shape だった。
+#   `id_shape=sender:absent,team:absent` は異常ではない: 上流 2026.7.1 の
+#   before_tool_call ctx は buildToolContext
+#   （dist/agent-tools.before-tool-call-84fX7TrL.js:1604-1614）が組み、
+#   senderId / teamId を**そもそも含まない**。全 P コードで常に absent になる。
+#
+# 申告値は mintCallerClaim が authoritativeContext で丸ごと置き換えてから署名するため、
+# 「モデルが正しい形で `_user_context` を渡すこと」への依存は
+# セキュリティを 1 ビットも稼いでいない純粋な失敗モードだった。依存を切る。
+_MISSING_UC_PASSING_CASES = (
+    "absent",
+    "wrapped_empty",
+    "empty_object",
+    "partial",
+    "null_context",
+    "string_context",
+    "array_context",
+)
+
+
+def test_tool_calls_without_a_declared_user_context_are_signed_not_blocked() -> None:
+    """モデルが `_user_context` を付けてこなくても claim が組めること（P06 根治）。
+
+    本番実測 5 件の形をそのまま入力にしている。ここが赤い＝利用者に
+    「連携に問題が発生しています」が出る状態に戻ったということ。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    for case in _MISSING_UC_PASSING_CASES:
+        outcome = report[case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        # 署名済みの `_user_context` は ingress の authoritative 値になる。
+        assert outcome["signedUserId"] == "U09CX1CCBLN", case
+        assert outcome["claimUser"] == "U09CX1CCBLN", case
+        assert outcome["signedContextKeys"] == [
+            "caller_claim",
+            "channel_id",
+            "slack_team_id",
+            "slack_user_id",
+        ], case
+
+
+_SELF_VARIANT_CASES = ("lowercase_self", "mention_self", "padded_self")
+_SPOOF_VARIANT_CASES = (
+    "spoofed_still_blocked",
+    "spoofed_lowercase_still_blocked",
+    "spoofed_mention_still_blocked",
+)
+
+
+def test_declared_slack_user_id_tolerates_self_spelling_variants() -> None:
+    """本人 ID の表記ゆれで block されないこと（2026-09-11 レビュー実測）。
+
+    ingress 側の senderId は `normalizeSlackId`（trim + 大文字化）を通った値なのに、
+    申告値との比較だけが**生値の厳密一致**だった。そのため本人が自分の ID を
+    `u09cx1ccbln` / `<@U09CX1CCBLN>` / 前後空白つきで書いただけで P05 block になり、
+    利用者には「連携に問題が発生しています」としか見えなかった。
+    これらはなりすましではなく表記ゆれで、申告値は mintCallerClaim が
+    authoritative 値で丸ごと捨てるため、通してもなりすましは成立しない。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    for case in _SELF_VARIANT_CASES:
+        outcome = report[case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        # 署名される値は表記ゆれではなく ingress の authoritative 値。
+        assert outcome["signedUserId"] == "U09CX1CCBLN", case
+        assert outcome["claimUser"] == "U09CX1CCBLN", case
+        assert outcome["bindingMatches"] is True, case
+
+
+def test_uninterpretable_declared_user_id_is_discarded_not_blocked() -> None:
+    """Slack ID として解釈できない申告は team / channel と同じ「破棄して続行」。"""
+    outcome = _caller_identity_report()["missing_user_context"]["uninterpretable_self"]
+    assert outcome["blocked"] is False, outcome["blockReason"]
+    assert outcome["signedUserId"] == "U09CX1CCBLN"
+    discard_lines = [
+        entry["text"]
+        for entry in outcome["console"]
+        if "discarded declared user_context fields" in entry["text"]
+    ]
+    assert discard_lines, outcome["console"]
+    assert "slack_user_id" in discard_lines[0], discard_lines[0]
+    # 値そのものはログに載せない（G7）。
+    assert "小俣" not in discard_lines[0], discard_lines[0]
+
+
+def test_missing_user_context_does_not_move_the_trust_boundary() -> None:
+    """申告が「無い」を通しても、「別人だと申告した」は従来どおり拒否されること。
+
+    ここが緑でないと、`_user_context` を省くことが検査回避の抜け道になる。
+    表記ゆれを許す正規化を入れた後も、**実在しない別人の ID**は表記を変えても
+    弾かれること（正規化が検査回避の穴にならないこと）をここで固定する。
+    """
+    report = _caller_identity_report()["missing_user_context"]
+    for case in _SPOOF_VARIANT_CASES:
+        assert report[case]["blocked"] is True, case
+        assert report[case]["diagCode"] == "CONNECT-P05", case
+    assert report["spoofed_still_blocked"]["blocked"] is True
+    assert report["spoofed_still_blocked"]["diagCode"] == "CONNECT-P05"
+    assert report["claim_still_blocked"]["blocked"] is True
+    assert report["claim_still_blocked"]["diagCode"] == "CONNECT-P05"
+    # params 自体がオブジェクトでない／3 段以上の包みは fail-closed のまま。
+    assert report["non_object_params"]["blocked"] is True
+    assert report["non_object_params"]["diagCode"] == "CONNECT-P06"
+    assert report["triple_wrapped_still_blocked"]["blocked"] is True
+    assert report["triple_wrapped_still_blocked"]["diagCode"] == "CONNECT-P06"
+
+
+# ══ 署名した引数と実行される引数が一致すること（2026-09-11・I01a 根治）═══════════
+# 上流は hook の返り値を**置換せず浅くマージ**する:
+#   dist/agent-tools.before-tool-call-84fX7TrL.js:1735
+#     `if (hookResult?.params) finalParams = mergeParamsWithApprovalOverrides(...)`
+#   同 :938-947  `(o, a) => ({ ...o, ...a })`
+# そのため 2026-09-04 の unwrap（包みを剥がして中身に署名して返す）は、元の
+# `arguments` キーが実行引数に残り、mcp が
+# `caller claim request binding does not match` で拒否していた。
+# 本番相関は 1:1（同一秒）:
+#   unwrap 成功 09-09 15:12:36 / 15:12:51、09-10 12:40:32 / :34 / :39 / :41
+#   caller_claim_rejected 09-09 15:12:36 / 15:12:51、09-10 12:40:32 / :34 / :39 / :41
+# ＝ unwrap 救済は本番で一度も成立していなかった。
+_UNWRAPPED_CASES = (
+    "single_arguments",
+    "name_and_arguments",
+    "name_and_arguments_oauth",
+    "double_arguments",
+)
+
+
+def test_signed_arguments_match_what_upstream_actually_executes() -> None:
+    """上流の浅いマージを通した実行引数が、署名した結合と一致すること。
+
+    probe 側で上流の 3 行（merge → JSON-RPC 化）を再現し、mcp の
+    ``canonical_request_sha256`` と同じ前処理で突き合わせている。
+    ここが赤い＝利用者に `診断: CONNECT-I01a` が出る状態。
+    """
+    report = _caller_identity_report()
+    for case in _UNWRAPPED_CASES:
+        outcome = report["unwrap"][case]
+        assert outcome["blocked"] is False, (case, outcome["blockReason"])
+        assert outcome["bindingMatches"] is True, (
+            f"{case}: 署名した引数と実行される引数が食い違う"
+            " → mcp が caller claim request binding does not match で拒否する"
+        )
+        # 包みのキーが実行引数に残っていないこと（残ると tool 側の schema も壊れる）。
+        assert outcome["wireHasWrapperKey"] is False, (case, outcome["wireKeys"])
+    for case in _MISSING_UC_PASSING_CASES:
+        outcome = report["missing_user_context"][case]
+        assert outcome["bindingMatches"] is True, case
+        assert outcome["wireHasWrapperKey"] is False, (case, outcome["wireKeys"])
+
+
+def test_unwrapped_calls_are_reconciled_with_one_observable_line() -> None:
+    """包みを剥がした呼び出しだけが reconcile され、その事実が 1 行残ること。
+
+    包みが無い通常の呼び出しでは返り値に一切触らない（バイト同一を保つ）。
+    """
+    report = _caller_identity_report()
+    lines = [
+        entry["text"]
+        for entry in report["unwrap"]["single_arguments"]["console"]
+        if "reconciled unwrapped tool arguments" in entry["text"]
+    ]
+    assert len(lines) == 1, report["unwrap"]["single_arguments"]["console"]
+    assert "removed=[arguments]" in lines[0]
+    # G7: キー名だけで、値・識別子は載せない。
+    assert "U09CX1CCBLN" not in lines[0]
+    assert "C0B0PQD83N2" not in lines[0]
+    # 包みが無い場合は reconcile しない。
+    assert not [
+        entry
+        for entry in report["unwrap"]["plain_arguments"]["console"]
+        if "reconciled" in entry["text"]
+    ]
+
+
 # ── 拒否の観測性（2026-09-03） ─────────────────────────────────────────────
 # 14 日間、この plugin の warn は CloudWatch に 1 行も出ていなかった。
 # 原因は register が before_tool_call にだけ api.logger を渡しておらず、
@@ -3039,23 +3224,54 @@ def test_block_logs_carry_id_shape_but_no_identifiers() -> None:
 
 
 def test_block_reasons_carry_a_forwardable_diagnostic_line() -> None:
-    """利用者に届く block 文の末尾に、そのまま転送できる診断行が付くこと。
+    """利用者に届く block 文が、正しい日本語の案内 → 転送定型文 → 診断行であること。
 
     SOUL(#380) が「診断: 行は一字も変えず提示」を規定しているので、利用者の
     スクリーンショット 1 枚から原因コードが判る。user id は載せない（G7）。
+
+    2026-09-11 の本番事故で 1 行目を英語の技術理由から日本語の案内へ変えた。
+    当時の 1 行目は ``_user_context must be a plain object`` で、モデルがそれを
+    読み解けず「Google 連携をリセットすることで解決する可能性があります」と
+    **自分で原因を作文**し、利用者を無関係な操作へ誘導した（連携は成立していた）。
+    技術理由は最終行へ落とし、モデル宛の禁止事項を 2 行目に固定する。
+
+    2026-09-11 のレビュー指摘で 2 行目にも `teamagent-caller-identity: ` 接頭辞を付けた。
+    それまで 2 行目は SOUL の「提示せよ」（1 行目・転送定型文・診断行）にも
+    「出すな」（接頭辞つきの行）にも当たらず、拒否理由を一字も変えず出すと
+    利用者の画面に「連携のリセット・再ログイン・ブラウザ変更」の語が並んでいた。
+    接頭辞を付けたことで、利用者に見せる行 = 接頭辞の無い行、と行だけで判別できる。
     """
     report = _caller_identity_report()["block_diagnostics"]
     for case, code in _BLOCK_DIAG_CASES.items():
         reason = report[case]["blockReason"]
         lines = reason.split("\n")
-        assert len(lines) == 3, (case, reason)
-        assert lines[0].startswith("teamagent-caller-identity: "), case
-        assert lines[1] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
+        assert len(lines) == 5, (case, reason)
+        # 1 行目は利用者向け（日本語・行動だけ・英語の内部語を出さない）。
+        assert lines[0], case
+        assert "_user_context" not in lines[0], case
+        assert not lines[0].startswith("teamagent-caller-identity: "), case
+        assert re.search(r"[ぁ-んァ-ヶ一-龯]", lines[0]), (case, lines[0])
+        # 2 行目はモデル宛。推測して別の操作を勧めることの明示的な禁止。
+        assert "推測" in lines[1] and "リセット" in lines[1], (case, lines[1])
+        # モデル宛なので接頭辞つき＝SOUL の「接頭辞つきの行は利用者に出さない」で除外される。
+        # ここを外すと「連携のリセット・再ログイン・ブラウザ変更」が利用者の画面に並ぶ。
+        assert lines[1].startswith("teamagent-caller-identity: "), (case, lines[1])
+        assert lines[2] == "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:", (
             case
         )
+        # 利用者に見せる行（1 行目・転送定型文・診断行）には接頭辞が無いこと。
+        # 「接頭辞の有無」だけで利用者向けかどうかが決まる＝SOUL の記述に頼らない。
+        for index in (0, 2, 3):
+            assert not lines[index].startswith("teamagent-caller-identity: "), (case, index)
         assert re.fullmatch(
-            rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[2]
-        ), (case, lines[2])
+            rf"診断: {code} \d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}} JST", lines[3]
+        ), (case, lines[3])
+        # 技術理由は最終行。接頭辞は 1 回だけ（本番実測では 2 回並んでいた）。
+        assert lines[4].startswith("teamagent-caller-identity: "), case
+        assert not lines[4].startswith("teamagent-caller-identity: teamagent-caller-identity: "), (
+            case,
+            lines[4],
+        )
         assert "U09CX1CCBLN" not in reason, case
 
 
@@ -4063,3 +4279,201 @@ def test_single_line_connect_plus_other_request_triggers_but_never_suppresses() 
     # 形の指標にも (d) が載る（本文は出さない）。
     shape_units = {u["label"]: u["shape"] for u in report["connect_shape"]["units"]}
     assert "leading_phrase:no" in shape_units["plain"]
+
+
+def test_outgoing_text_drops_em_dashes_but_keeps_links_ranges_and_code() -> None:
+    """送信直前（reply_payload_sending）で em ダッシュ「—」と「--」を読点にする（2026-09-14）。
+
+    mcp 側は tool 結果を読点化済みだが、最終応答はモデルが組み直すため本番で
+    検索回答の見出しに「—」が 3 か所残った。投稿主は OpenClaw なので、ここが最後の砦。
+    変異: plugin の ``normalizeOutgoingText`` を ``return undefined`` にすると heading が
+    None になり赤。保護（リンク・範囲・コードフェンス）を外すと untouched 系が赤。
+    """
+    deai = _caller_identity_report()["deai"]
+    heading = deai["heading"]["result"]
+    assert heading is not None and "cancel" not in heading
+    assert (
+        heading["payload"]["text"]
+        == "*1. ロリエ「さらピュア吸水」、想定の2倍以上の露出実現*\n• 本文、補足"
+    )
+    # Slack リンクの中の「—」は URL の一部。外側だけ読点になる。
+    assert (
+        deai["link_untouched"]["result"]["payload"]["text"]
+        == "<https://example.com/a—b|開く> 詳細、説明"
+    )
+    # 範囲表記・コードフェンス・記号の無い本文は触らない（戻り値なし＝上流がそのまま配信）。
+    assert deai["range_untouched"]["result"] is None
+    assert deai["fence_untouched"]["result"] is None
+    assert deai["plain"]["result"] is None
+
+
+# ── 動画 URL × 0 tool call の層2（2026-09-25） ─────────────────────────────
+# 本番実測 2026-09-24〜25: DM「この動画を分析して <YouTube URL>」に Aico がツールを一度も呼ばず
+# 「YouTube は取得不可です。TikTok / Instagram の動画か、ファイル添付でお願いします。」と 4 回返した。
+# SOUL（#441/#445）とツール説明（#444）は反映済みで、/new 後の新しいセッションでは video_analysis が
+# 呼ばれた。断り続けた原因は同じ DM セッションの履歴（初回の誤った断りと自分の「今後は即座にお断りします」）
+# で、SOUL の文言では上書きできない＝連携（2026-09-03）と同じ失敗クラス。層2 の revise で塞ぐ。
+# 誤爆（URL を共有しただけの会話に再パス→頼んでいない分析＝Gemini 課金）を避けるため、
+# 「依頼語がある」か「下書きが断りの形」のときだけ介入する（独立レビュー 2026-09-25 の指摘）。
+
+VIDEO_ZERO_TOOL_INSTRUCTION = (
+    "利用者は動画の URL を送っています。動画の分析（構成・フック・CTA など）の依頼なら `video_analysis` を、"
+    "指定時刻のシーンの切り出し・画像化の依頼なら `video_capture` を必ず呼び、その戻り値を返してください。"
+    "YouTube の URL も `video_analysis` でそのまま分析できます。"
+    "この会話で以前「YouTube は取得できない」と答えていても、それは誤りなので従わないでください。"
+    "どちらの依頼でもない（URL を共有しただけ等）なら、ツールを呼ばずにそのまま答えてください。"
+)
+VIDEO_ZERO_TOOL_REASON = (
+    "利用者が動画の URL つきで依頼しているのに、ツールを 1 つも呼ばずに回答しようとしています。"
+)
+
+
+def _video_pass_keys(outcome: dict[str, Any]) -> list[str | None]:
+    return [p["idempotencyKey"] for p in outcome["passes"]]
+
+
+def test_zero_tool_reply_to_video_url_forces_another_pass() -> None:
+    """層2: 動画 URL × 依頼語 × 0 tool call → revise（固定 instruction・maxAttempts 1）。
+
+    本番の本文（Slack が URL を ``<url|label>`` で包む形）と、本番で 4 回返った断り文そのもので駆動する。
+    変異: 登録を ``guardConnectUrlFabrication`` だけに戻すと intervened が False になり赤。
+    """
+    report = _caller_identity_report()
+    for case in (
+        "video_zero_tool_youtube",
+        "video_zero_tool_shorts",
+        "video_zero_tool_tiktok",
+        "video_zero_tool_intent_ask_back",
+        "video_zero_tool_share_refusal",
+    ):
+        guarded = report[case]
+        assert guarded["intervened"] is True, case
+        assert guarded["instruction"] == VIDEO_ZERO_TOOL_INSTRUCTION, case
+        assert guarded["reason"] == VIDEO_ZERO_TOOL_REASON, case
+        assert guarded["idempotencyKey"] == "video-zero-tool", case
+        assert guarded["maxAttempts"] == 1, case
+        assert "http" not in guarded["instruction"], case
+
+
+def test_video_rule_does_not_fire_on_share_only_after_a_tool_call_or_without_a_video_url() -> None:
+    """層2 は誤爆しない: tool を呼んだ run・共有だけ（依頼語なし×断りでない下書き）には介入せず理由を残し、
+    動画 URL の無い受信（大半の会話）では判定行も出さない（騒音にしない）。"""
+    report = _caller_identity_report()
+    expected_reason = {
+        "video_zero_tool_with_tool_call": "model_called_tool",
+        "video_zero_tool_share_only": "not_a_request",
+        # 時刻入りの共有（相互検証 2026-09-25 で誤介入していた形）。
+        "video_zero_tool_meeting_share": "not_a_request",
+    }
+    for case, reason in expected_reason.items():
+        outcome = report[case]
+        assert outcome["intervened"] is False, case
+        assert outcome["videoSkipReason"] == reason, case
+    for case in ("video_zero_tool_no_url", "video_zero_tool_non_video_url"):
+        outcome = report[case]
+        assert outcome["intervened"] is False, case
+        assert outcome["videoLines"] == [], case
+
+
+def test_video_rule_revises_at_most_once_per_run() -> None:
+    """同じ run の 2 回目の finalize には介入しない（ループしない）。予算切れは warn で残す。"""
+    outcome = _caller_identity_report()["video_zero_tool_budget"]
+    assert _video_pass_keys(outcome) == ["video-zero-tool", None]
+    assert outcome["videoBudgetExhausted"] is True
+
+
+def test_connect_rule_takes_precedence_over_the_video_rule() -> None:
+    """連携依頼は連携の revise が返り、動画側の指示は重ならないこと（連携の挙動を変えない）。
+
+    「連携して <YouTube URL>」で連携の予算が尽きた 2 回目にも、動画側は revise しない
+    （層3 が武装済みなので、重ねると再パスの結果が連携の定型文に置き換わって消える）。
+    変異: ``connect_request`` の skip を消すと 2 回目が ``video-zero-tool`` になり赤。
+    """
+    report = _caller_identity_report()
+    plain = report["video_zero_tool_connect_precedence"]
+    assert plain["idempotencyKey"] == "connect-zero-tool"
+    assert plain["instruction"] == CONNECT_ZERO_TOOL_INSTRUCTION
+    both = report["video_zero_tool_connect_plus_video"]
+    assert _video_pass_keys(both) == ["connect-zero-tool", None]
+    assert both["videoSkipReason"] == "connect_request"
+    assert not any("outcome=revised" in line for line in both["videoLines"])
+
+
+def test_one_revision_per_run_across_the_connect_and_video_rules() -> None:
+    """動画 URL の受信で連携 URL を捏造した run: 連携側が先に revise し、動画側は重ねない（1 run 1 回）。
+
+    変異: 登録順を ``guardVideoZeroTool ?? guardConnectUrlFabrication`` に入れ替えると 1 回目が
+    ``video-zero-tool`` になり赤。``connect_revised`` の skip を消すと 2 回目が ``video-zero-tool`` になり赤。
+    """
+    outcome = _caller_identity_report()["video_zero_tool_fabricated_plus_video"]
+    assert _video_pass_keys(outcome) == ["connect-url-fabrication", None, None]
+    assert outcome["videoSkipReason"] == "connect_revised"
+
+
+def test_fabrication_guard_still_fires_after_a_video_revision() -> None:
+    """逆順: 動画が revise した後の再パスで連携 URL を捏造したら、連携の捏造ガード（安全側）が
+    もう 1 回 revise する。3 回目は両方とも予算切れ＝1 run で最大 2 回・ループしない。
+
+    変異: 連携側に「動画が revise 済みなら退く」を足すと 2 回目が None になり赤（捏造リンクが
+    利用者に届く方向の変更を落とす）。
+    """
+    outcome = _caller_identity_report()["video_then_fabrication"]
+    assert _video_pass_keys(outcome) == ["video-zero-tool", "connect-url-fabrication", None]
+
+
+def test_video_rule_survives_both_notification_orders() -> None:
+    """本文無しの通知が先に run へ束縛される順（bindRun）・本文つきの後に本文無しが来る順（pending）の
+    どちらでも、動画 URL の判定を落とさずに介入すること。"""
+    report = _caller_identity_report()
+    for case in ("video_zero_tool_bindrun_merge", "video_zero_tool_pending_merge"):
+        assert report[case]["intervened"] is True, case
+
+
+def test_video_rule_ignores_mismatched_runs() -> None:
+    """event.runId と ctx.runId が食い違う run には触らない（run 束縛の権威性）。"""
+    outcome = _caller_identity_report()["video_zero_tool_run_mismatch"]
+    assert outcome["intervened"] is False
+    assert outcome["videoLines"] == []
+
+
+def test_video_url_classification_matrix() -> None:
+    """受信時の動画 URL の種類判定（YouTube・Shorts・live・youtu.be・TikTok 動画・Instagram・
+    非動画 URL（TikTok のプロフィール・広告管理画面・タグ）・紛らわしいホスト）。"""
+    rows = _caller_identity_report()["video_url_classification"]
+    assert len(rows) >= 23
+    mismatches = [row for row in rows if row["actual"] != row["expected"]]
+    assert not mismatches, mismatches
+
+
+def test_video_trigger_matrix() -> None:
+    """誤爆を避ける手掛かり: 本文の依頼語と、下書きの断りの形。"""
+    matrix = _caller_identity_report()["video_trigger_matrix"]
+    rows = [*matrix["intent"], *matrix["refusal"]]
+    assert len(rows) >= 20
+    mismatches = [row for row in rows if row["actual"] != row["expected"]]
+    assert not mismatches, mismatches
+
+
+def test_video_rule_logs_keep_the_g7_discipline() -> None:
+    """層2 のログに URL・動画 ID・Slack 識別子を載せないこと（url_kind は種類名・識別子は id_shape の形だけ）。"""
+    report = _caller_identity_report()
+    lines: list[str] = []
+    for case in (
+        "video_zero_tool_youtube",
+        "video_zero_tool_tiktok",
+        "video_zero_tool_budget",
+        "video_zero_tool_with_tool_call",
+        "video_zero_tool_share_only",
+        "video_zero_tool_fabricated_plus_video",
+    ):
+        lines.extend(report[case]["videoLines"])
+    assert lines
+    assert any("url_kind=youtube" in line for line in lines)
+    for line in lines:
+        assert "id_shape=" in line, line
+        assert "http://" not in line
+        assert "https://" not in line
+        assert "youtube.com" not in line
+        assert "jNQXAC9IVRw" not in line
+        assert "U09CX1CCBLN" not in line
+        assert "会議" not in line

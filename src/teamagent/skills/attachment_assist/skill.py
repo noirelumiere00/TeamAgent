@@ -2,11 +2,11 @@
 
 経路: Slack でファイルを @Aico に投げる → OpenClaw が SOUL 指示で本ツールを呼ぶ
 （引数は mode / instruction / file_name のみ）→ mcp_gateway が **署名済み claim** 由来の
-user_email / channel_id / thread_ts を注入（server.py:441-445）→ 本 Skill がその会話の
+user_email / channel_id / thread_ts を注入（mcp_gateway/server.py の注入部）→ 本 Skill がその会話の
 添付だけを発見・取得・本文化し、mode 別に整形して**テキストで**返す。
 
 ⚠️ 死守ライン:
-  A1 **identity_verified 必須（fail-closed）**。server.py:442-443 が宣言するとおり
+  A1 **identity_verified 必須（fail-closed）**。mcp_gateway/server.py の注入部が宣言するとおり
      channel_id は本来「配信先ルーティング hint（identity ではない）」であり、LEGACY 経路
      （resolver 未注入）では **LLM 申告の channel_id がそのまま metadata に入る**。
      読取の認可鍵に昇格させてよいのは署名 claim 由来（identity_verified=True）だけなので、

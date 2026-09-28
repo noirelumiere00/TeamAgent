@@ -13,7 +13,9 @@ class VideoAnalysisInput(BaseModel):
     """VideoAnalysis Skill の入力。"""
 
     url: str = Field(
-        min_length=1, max_length=500, description="分析対象の動画 URL (YouTube/Shorts)"
+        min_length=1,
+        max_length=500,
+        description="分析対象の動画 URL (YouTube/Shorts/TikTok/Instagram)",
     )
     focus: str | None = Field(
         default=None,

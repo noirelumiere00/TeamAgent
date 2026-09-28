@@ -568,7 +568,7 @@ body{{background:#111114;font-family:{gothic};color:{colors.ink.value}}}
 .plabel{{flex:none;font-family:{latin};font-weight:500;font-size:24px;letter-spacing:.12em;color:{colors.muted.value}}}
 .hrule{{flex:none;border-bottom:1px solid {colors.rule_strong.value};margin-top:18px}}
 .lead{{flex:none;margin-top:16px;font-size:25px;line-height:1.85;color:{colors.lead.value}}}
-.content-row{{display:flex;gap:56px;margin-top:20px;flex:1;min-height:0}}
+.content-row{{display:flex;gap:56px;margin-top:20px;flex:1;min-height:0;overflow:hidden}}
 .botblock{{flex:none;margin-top:auto}}
 .fnote{{font-size:24px;line-height:1.5;color:{colors.muted.value};margin-bottom:10px}}
 .tagband{{flex:none;border-top:1px solid {colors.rule_strong.value};padding-top:18px;
@@ -590,7 +590,7 @@ body{{background:#111114;font-family:{gothic};color:{colors.ink.value}}}
   border-bottom:1px solid {colors.rule_strong.value};padding-bottom:24px}}
 .cv-addr{{font-size:27px;font-weight:700}}
 .cv-conf{{font-family:{latin};font-weight:500;font-size:24px;letter-spacing:.14em;color:{colors.muted.value}}}
-.cv-mid{{flex:1;display:flex;gap:80px;align-items:center;min-height:0}}
+.cv-mid{{flex:1;display:flex;gap:80px;align-items:safe center;min-height:0}}
 .cv-left{{flex:1}}
 .cv-cat{{font-family:{latin};font-weight:600;font-size:24px;letter-spacing:.22em;color:{accent_a}}}
 .cv-brands{{margin-top:26px;font-family:{mincho};font-weight:700;font-size:34px;color:{colors.body_sub.value}}}
@@ -632,7 +632,7 @@ body{{background:#111114;font-family:{gothic};color:{colors.ink.value}}}
 .tb-row{{flex:1;display:grid;gap:0 18px;align-items:center;border-bottom:1px solid {colors.rule_row.value}}}
 .tb-c0{{font-size:27px;font-weight:700}}
 .tb-num{{font-family:{latin};font-variant-numeric:tabular-nums;font-size:27px}}
-.tb-txt{{font-size:25px;color:{colors.body_sub.value}}}
+.tb-txt{{font-size:25px;color:{colors.body_sub.value};display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
 .ec-row{{margin-top:20px;flex:1;min-height:0;display:flex;gap:34px}}
 .ec-card{{flex:1;display:flex;flex-direction:column;align-items:stretch;min-width:0}}
 .ec-card .thumbwrap{{align-self:center}}
@@ -644,13 +644,13 @@ body{{background:#111114;font-family:{gothic};color:{colors.ink.value}}}
 .ec-k{{font-size:24px;color:{colors.muted.value}}}
 .ec-v{{font-family:{latin};font-variant-numeric:tabular-nums;font-weight:600;font-size:30px;line-height:1.15}}
 .ec-f{{font-family:{latin};font-variant-numeric:tabular-nums;font-size:26px;color:{colors.body_sub.value}}}
-.ec-sum{{margin-top:14px;font-size:24px;line-height:1.5;color:{colors.body.value}}}
-.sm-rows{{flex:1;display:flex;flex-direction:column;justify-content:center;margin-top:8px;min-height:0}}
+.ec-sum{{margin-top:14px;font-size:24px;line-height:1.5;color:{colors.body.value};display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}}
+.sm-rows{{flex:1;display:flex;flex-direction:column;justify-content:safe center;margin-top:8px;min-height:0}}
 .sm-row{{display:grid;grid-template-columns:96px 420px 1fr;gap:0 50px;padding:26px 0;
   border-bottom:1px solid {colors.rule_card.value}}}
 .sm-no{{font-family:{latin};font-weight:600;font-size:64px;line-height:1;color:{colors.hairline.value}}}
 .sm-pat{{font-family:{mincho};font-weight:700;font-size:31px;line-height:1.35}}
-.sm-desc{{font-size:24px;line-height:1.62;color:{colors.body_sub.value}}}
+.sm-desc{{font-size:24px;line-height:1.62;color:{colors.body_sub.value};display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}}
 .sm-band{{flex:none;margin-top:24px;background:{colors.dark.value};color:{colors.paper.value};padding:34px 48px}}
 .sm-concl{{font-family:{mincho};font-weight:700;font-size:27px;line-height:1.6}}
 .sm-cta{{margin-top:12px;font-size:24px;line-height:1.6;color:{ch.text_mid}}}

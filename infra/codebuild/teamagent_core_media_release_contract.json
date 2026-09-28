@@ -13,7 +13,7 @@
   },
   "source_runtime_contract": {
     "path": "infra/codebuild/teamagent_runtime_contract.json",
-    "sha256": "e1f78aee15382f0214769c802f8cd99c23fc792bc9fe6059e2d3fb822703da41"
+    "sha256": "1cba7a3050b09b817c4f73b97017649998f939baea8bf06208e2c1bd0122e1b4"
   },
   "app_html": {
     "bucket": "teamagent-dev-raw-files",
@@ -81,7 +81,7 @@
         {
           "key": "binary.python.sha256",
           "path": "/usr/bin/python3.14",
-          "sha256": "ab5a7416e43b261cfd83f431eb923e71570e981a9a4a96b42212cc8fdea3471e"
+          "sha256": "025d8125ab49b3d37b45ecafbb54fe199c5fd33ecad6595434820bec7bdca5be"
         }
       ],
       "source_assertions": []
@@ -135,7 +135,7 @@
       "source_assertions": [
         {
           "key": "artifact.apk-lock.sha256",
-          "value": "4978f9bba8526955f4a6860601dad3b96fa1cfab13147f62b011cd213aeed9c4",
+          "value": "aeb05fd26952141e38689c523d845c1027b5cd9ea77f7f995fe175d4b6f5a129",
           "build_arg": "MEDIA_APK_LOCK_SHA256",
           "oci_label": "io.teamagent.contract.apk-lock-sha256",
           "dockerfile_uses": [

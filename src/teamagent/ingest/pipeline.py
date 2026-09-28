@@ -35,7 +35,13 @@ from teamagent.ingest.content_hash import (
     compute_document_content_hash,
 )
 from teamagent.ingest.docdedup import mark_duplicate_documents
-from teamagent.ingest.form_mappings import _normalize_form_label
+from teamagent.ingest.form_mappings import (
+    CASE_CATEGORY_METADATA_KEY,
+    CASE_CLS_INDUSTRY_METADATA_KEY,
+    CASE_CORPUS_METADATA_KEY,
+    CASE_INDUSTRY_METADATA_KEY,
+    _normalize_form_label,
+)
 from teamagent.ingest.gsheet_classification_overrides import (
     apply_gsheet_industry_override,
 )
@@ -291,6 +297,178 @@ def _load_stored_content_hashes(
         return {}
 
 
+class CaseCorpusStickyLookupError(RuntimeError):
+    """事例集 corpus の ``case_external_use`` 既存値が読めなかった（fail-closed の合図）。"""
+
+
+def _is_campaign_aggregate_spec(spec: Any) -> bool:
+    """gsheets spec が「案件単位の集計」（ショート動画データベース・2026-09-15）を宣言しているか。
+
+    宣言は **yaml の ``extra_metadata.campaign_aggregate: "true"`` 1 本**。既存シート
+    （ナレッジ共有 / 営業 FB / 事例集）はこの経路に構造的に到達しない＝行単位の取込は不変。
+    """
+    extra = getattr(spec, "extra_metadata", None) or {}
+    return str(extra.get("campaign_aggregate", "") or "").strip().lower() == "true"
+
+
+def _ingest_campaign_aggregate_tab(
+    spec: Any,
+    tab: Any,
+    tab_rows: Any,
+    *,
+    embedder: _EmbedderProto,
+    repository: IngestRepository,
+    owner_email: str,
+    dry_run: bool,
+    request_id: str,
+    post_dates: dict[str, str] | None = None,
+) -> tuple[int, int]:
+    """1 タブを案件（広告主名 × 案件名）ごとに 1 document へ集計して upsert する。
+
+    ``extra_metadata.account_aggregate`` が "false" でなければ、投稿アカウントごとの
+    document も併せて作る（案件の無い通常投稿も含む。投稿アカウントは営業上の要素）。
+
+    - 広告主名 / 案件名の無い行は案件に結びつけない（campaign_aggregate 参照）。
+    - external_id は案件キーのハッシュ（行の挿入・削除で付け替わらない）。
+    - 差分取込の content hash は使わない（集計文書は常に upsert・冪等）。
+    """
+    from teamagent.ingest.campaign_aggregate import (
+        account_external_id,
+        account_metadata,
+        account_title,
+        aggregate_accounts,
+        aggregate_campaigns,
+        campaign_external_id,
+        campaign_metadata,
+        campaign_title,
+        format_account_document,
+        format_campaign_document,
+    )
+
+    extra = spec.extra_metadata or {}
+    post_dates = dict(post_dates or {})
+    aggregates = aggregate_campaigns(tab_rows.headers, tab_rows.rows, post_dates)
+    tab_name = str(getattr(tab_rows, "tab_name", "") or tab.tab_name)
+    source_uri = f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit#gid={tab.gid}"
+    base_metadata = {str(k): str(v) for k, v in (spec.extra_metadata or {}).items()}
+    base_metadata.update(
+        {
+            "sheet_id": spec.sheet_id,
+            "sheet_name": spec.sheet_name,
+            "tab_name": tab_name,
+            "gid": str(tab.gid),
+        }
+    )
+    docs_n = 0
+    chunks_n = 0
+    for agg in aggregates:
+        external_id = campaign_external_id(spec.sheet_id, tab.gid, agg.advertiser, agg.campaign)
+        text = format_campaign_document(agg)
+        doc = DocumentUpsert(
+            source_type="gsheets",
+            external_id=external_id,
+            source_uri=source_uri,
+            title=campaign_title(agg),
+            owner_email=owner_email,
+            acl_emails=[owner_email],
+            acl_groups=_company_acl_groups(),
+            metadata={**base_metadata, **campaign_metadata(agg)},
+            modified_at=None,
+        )
+        chunks = [
+            ChunkUpsert(
+                chunk_idx=0,
+                content=text,
+                embedding=embedder.embed_passage(text),
+                metadata={},
+            )
+        ]
+        docs_n += 1
+        chunks_n += len(chunks)
+        if not dry_run:
+            repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+    accounts_n = 0
+    if str(extra.get("account_aggregate", "true") or "").strip().lower() != "false":
+        for acc in aggregate_accounts(tab_rows.headers, tab_rows.rows, post_dates):
+            external_id = account_external_id(spec.sheet_id, tab.gid, acc.account)
+            text = format_account_document(acc)
+            doc = DocumentUpsert(
+                source_type="gsheets",
+                external_id=external_id,
+                source_uri=source_uri,
+                title=account_title(acc),
+                owner_email=owner_email,
+                acl_emails=[owner_email],
+                acl_groups=_company_acl_groups(),
+                metadata={**base_metadata, **account_metadata(acc)},
+                modified_at=None,
+            )
+            chunks = [
+                ChunkUpsert(
+                    chunk_idx=0,
+                    content=text,
+                    embedding=embedder.embed_passage(text),
+                    metadata={},
+                )
+            ]
+            docs_n += 1
+            accounts_n += 1
+            chunks_n += len(chunks)
+            if not dry_run:
+                repository.upsert_document_with_chunks(doc, chunks, request_id=request_id)
+    # 件数のみ（広告主名・案件名・アカウント名・本文は載せない）。
+    logger.info(
+        "ingest_gsheet_campaign_aggregate_done",
+        sheet_id=spec.sheet_id,
+        tab_name=tab_name,
+        gid=tab.gid,
+        rows=len(tab_rows.rows),
+        campaigns=docs_n - accounts_n,
+        accounts=accounts_n,
+        post_dates=len(post_dates),
+        dry_run=dry_run,
+    )
+    return docs_n, chunks_n
+
+
+def _is_case_corpus_spec(spec: Any) -> bool:
+    """gsheets spec が事例集 corpus（B-10）として宣言されているか。
+
+    母集団の定義は **yaml の ``extra_metadata.case_corpus: "true"`` 1 本**。
+    「ヘッダが事例っぽい」では入らないので、既存 2 シート（ナレッジ共有 / 営業 FB）は
+    この経路に構造的に到達しない＝取込前後で cls_doc_type / cls_project が動かない。
+    """
+    extra = getattr(spec, "extra_metadata", None) or {}
+    return str(extra.get(CASE_CORPUS_METADATA_KEY, "")).strip().lower() == "true"
+
+
+def _load_stored_case_metadata(
+    repository: IngestRepository,
+    external_ids: list[str],
+    *,
+    request_id: str,
+) -> dict[str, dict[str, str]]:
+    """事例集 corpus の保存済み対外利用可否を一括で読む（**fail-closed**）。
+
+    ``_load_stored_content_hashes``（fail-open）とは意図的に逆。あちらは読めなくても
+    「全件再処理」に倒れるだけでデータを失わないが、こちらは読めないまま取り込むと
+    ``metadata = EXCLUDED.metadata`` の全置換で **ng が unknown へ降格**し、翌朝の DM に
+    「⚠なしの NG 事例」が載る。読めない run は事例集タブごと見送る方が安全。
+    """
+    if not external_ids:
+        return {}
+    lookup = getattr(repository, "get_document_metadata_values", None)
+    if not callable(lookup):
+        raise CaseCorpusStickyLookupError(
+            "repository has no get_document_metadata_values; refusing to ingest case corpus"
+        )
+    try:
+        rows = lookup("gsheets", external_ids, _CASE_STICKY_METADATA_KEYS)
+    except Exception as exc:  # 理由は問わず fail-closed
+        raise CaseCorpusStickyLookupError(str(exc)) from exc
+    return {str(k): dict(v) for k, v in dict(rows).items()}
+
+
 def _disable_corpus_scan_timeouts(conn: Any) -> None:
     """コーパス横断処理の2 timeoutを当該transaction内だけ無制限（0）にする。
 
@@ -391,6 +569,10 @@ _KNOWLEDGE_OPS_COLUMNS: frozenset[str] = frozenset(
 _KNOWLEDGE_OPS_NORM: frozenset[str] = frozenset(
     _normalize_form_label(h) for h in _KNOWLEDGE_OPS_COLUMNS
 )
+
+# 事例集 corpus（B-10）の再取込で「前回の判定」を引き継ぐために読むキー。
+# ng の sticky（降格不可）に必要な最小集合だけ。社名・効果本文は読まない。
+_CASE_STICKY_METADATA_KEYS: tuple[str, ...] = ("case_external_use", "case_external_use_note")
 
 
 def _company_acl_groups() -> list[str]:
@@ -3953,7 +4135,14 @@ def _ingest_gsheet(
 
     # 2026-07-06: ナレッジ共有フォーム回答シートの構造化 (FB と同設計・form_mappings 参照)。
     # こちらも「このシート固有のコアヘッダ閾値」判定なので非対象シートには空 dict ＝副作用ゼロ。
-    from teamagent.ingest.form_mappings import derive_knowledge_client_name, map_knowledge_fields
+    # 2026-09-11: 事例集 corpus（B-10・📍ショート動画施策事例集 マスター表）の写像も同居。
+    # yaml で case_corpus: "true" を宣言した spec だけが map_case_fields 経路に入る。
+    from teamagent.ingest.form_mappings import (
+        derive_knowledge_client_name,
+        map_case_fields,
+        map_knowledge_fields,
+        resolve_case_external_use,
+    )
 
     # 2026-07-03: 営業 FB フォーム回答シートの構造化。
     # 行のヘッダ → 値 を Slack FB 経路 (slack_fb_parser) と同じ写像でメタ化する。
@@ -3966,6 +4155,8 @@ def _ingest_gsheet(
     classifier = build_classifier_from_env()
     # 差分取り込み（INGEST_DIFFERENTIAL・既定 OFF）。
     differential = _differential_enabled(dry_run=dry_run)
+    # 事例集 corpus か（yaml の extra_metadata.case_corpus で宣言・既存 2 シートは False）。
+    case_corpus = _is_case_corpus_spec(spec)
     docs_n = 0
     chunks_n = 0
     unchanged_n = 0
@@ -3999,6 +4190,44 @@ def _ingest_gsheet(
         )
         if not tab_rows.headers:
             continue
+        if _is_campaign_aggregate_spec(spec):
+            # 案件単位の集計（2026-09-15）。行単位の経路（下）には入らない。
+            # 投稿日は本体タブに無いので「全体Raw」タブ（名前で指定・gid 不要）から URL で結合する。
+            # 取れなくても集計は続ける（期間の行が出ないだけ）。
+            from teamagent.ingest.campaign_aggregate import (
+                POST_DATE_TAB_NAME,
+                build_post_date_index,
+            )
+
+            _post_dates: dict[str, str] = {}
+            _date_tab = str(
+                (spec.extra_metadata or {}).get("post_date_tab_name") or POST_DATE_TAB_NAME
+            )
+            try:
+                _raw = client.get_tab_rows(
+                    sheet_id=spec.sheet_id, tab_name=_date_tab, request_id=request_id
+                )
+                _post_dates = build_post_date_index(_raw.headers, _raw.rows)
+            except Exception:
+                logger.warning(
+                    "ingest_gsheet_post_date_tab_unavailable",
+                    sheet_id=spec.sheet_id,
+                    tab_name=_date_tab,
+                )
+            _d, _c = _ingest_campaign_aggregate_tab(
+                spec,
+                tab,
+                tab_rows,
+                embedder=embedder,
+                repository=repository,
+                owner_email=owner_email,
+                dry_run=dry_run,
+                request_id=request_id,
+                post_dates=_post_dates,
+            )
+            docs_n += _d
+            chunks_n += _c
+            continue
         # 差分取り込み: この tab の候補行（external_id は gid×row_idx で決定論）の
         # 保存済み content hash を 1 クエリで先読みする（fail-open＝失敗時は全件再処理）。
         stored_content_hashes: dict[str, str] = {}
@@ -4012,6 +4241,32 @@ def _ingest_gsheet(
                 ],
                 request_id=request_id,
             )
+        # 事例集 corpus: 対外利用可否の sticky（ng を降格させない）に既存値が要る。
+        # 読めなければこのタブは **取り込まない**（fail-closed。降格した ng を書くより
+        # 事例集が 1 run 古いほうが安全）。事例集 spec 以外では 1 クエリも増えない。
+        stored_case_metadata: dict[str, dict[str, str]] = {}
+        if case_corpus:
+            try:
+                stored_case_metadata = _load_stored_case_metadata(
+                    repository,
+                    [
+                        build_external_id(spec.sheet_id, tab.gid, row_idx)
+                        for row_idx, _row in enumerate(tab_rows.rows, start=2)
+                    ],
+                    request_id=request_id,
+                )
+            except CaseCorpusStickyLookupError as exc:
+                logger.error(
+                    "ingest_case_corpus_sticky_lookup_failed_tab_skipped",
+                    request_id=request_id,
+                    sheet_name=spec.sheet_name,
+                    gid=tab.gid,
+                    candidate_count=len(tab_rows.rows),
+                    error_type=type(exc.__cause__ or exc).__name__,
+                )
+                continue
+        # ヘッダ不一致 warning は **タブ単位**（行ループの外で 1 回だけ立てるフラグ）。
+        case_headers_warned = False
         for row_idx, row in enumerate(tab_rows.rows, start=2):  # 1=headers, 2 から data
             text = format_row_as_document(tab_rows.headers, row)
             if not text.strip():
@@ -4048,12 +4303,65 @@ def _ingest_gsheet(
                 if derived_knowledge_client:
                     knowledge_doc_metadata["client_name"] = derived_knowledge_client
 
+            # 事例集 corpus 行の構造化メタ（2026-09-11・B-10）。
+            # 母集団は spec のフラグで決まる（ヘッダ検出ではない）ので、既存 2 シートには
+            # この dict が空のまま＝metadata がバイト等価。
+            case_doc_metadata: dict[str, Any] = {}
+            if case_corpus:
+                case_fields = map_case_fields(row_fields)
+                if not case_fields and not case_headers_warned:
+                    # フラグは立っているのにコアヘッダが揃わない＝運用で列名が変わった疑い。
+                    # 取り込みは止めない（行は case_corpus として残る）が、対外利用可否は
+                    # 名前シグナルと sticky だけで決まるので必ず気づけるようログに出す。
+                    # 判定はタブ内で不変（ヘッダが同一なので全行同じ結果）なので、
+                    # **タブにつき 1 回だけ**出す（数百行のタブで同一 warning を数百行
+                    # 出すと CloudWatch のコストと本命の警告の可読性を損なう）。
+                    case_headers_warned = True
+                    logger.warning(
+                        "ingest_case_corpus_headers_unmatched",
+                        request_id=request_id,
+                        sheet_name=spec.sheet_name,
+                        gid=tab.gid,
+                        header_count=len(tab_rows.headers),
+                    )
+                raw_external_use = case_fields.pop("case_external_use_source", "")
+                case_doc_metadata[CASE_CORPUS_METADATA_KEY] = "true"
+                case_doc_metadata.update(case_fields)
+                # 企業名 → client_name は ナレッジ共有と同じ導出器をそのまま使う
+                # （derive_knowledge_client_name は **変更しない**＝既存 ingest へ影響ゼロ）。
+                derived_case_client = derive_knowledge_client_name(
+                    case_fields.get("case_company", "")
+                )
+                if derived_case_client:
+                    case_doc_metadata["client_name"] = derived_case_client
+                stored_case = stored_case_metadata.get(external_id, {})
+                external_use = resolve_case_external_use(
+                    column_value=raw_external_use,
+                    names=(spec.sheet_name, tab_title, case_fields.get("case_asset_name")),
+                    previous=stored_case.get("case_external_use"),
+                    previous_note=stored_case.get("case_external_use_note"),
+                )
+                case_doc_metadata["case_external_use"] = external_use.value
+                if external_use.note:
+                    case_doc_metadata["case_external_use_note"] = external_use.note
+                # 計画 §120「カテゴリ → 業種」。既存の業種絞り込み規約（classify が
+                # cls_industry と industry の 2 本を書き、検索 / 集計は industry を引く）
+                # に人手のカテゴリ列を載せる。これをやらないと B-9 の
+                # list_case_studies(industry=...) が Haiku 推定値に当たり、分類 OFF /
+                # 失敗の run では industry が 1 件も載らず同業種フォールバックが 0 件になる。
+                case_category = case_fields.get(CASE_CATEGORY_METADATA_KEY, "").strip()
+                if case_category:
+                    case_doc_metadata[CASE_INDUSTRY_METADATA_KEY] = case_category
+                    case_doc_metadata[CASE_CLS_INDUSTRY_METADATA_KEY] = case_category
+
             # 営業FB/ナレッジ共有フォームは実列「タイムスタンプ」を持つ。従来は本文から
             # 運用列として外したうえ modified_at=None にしていたため、正しい日時が DB へ
             # 一度も届かなかった。対象フォームと判定できた行だけを決定論的に採用し、
             # 無関係な任意シートの同名列には意味を与えない。
             row_modified_at = (
-                _gsheet_row_modified_at(row_fields) if fb_metadata or knowledge_metadata else None
+                _gsheet_row_modified_at(row_fields)
+                if fb_metadata or knowledge_metadata or case_doc_metadata
+                else None
             )
 
             # ナレッジ共有シート行(フォーム回答)の本文/タイトル正規化:
@@ -4079,6 +4387,20 @@ def _ingest_gsheet(
                 if _title_parts:
                     row_title = " ".join(_title_parts)
 
+            # 事例集 corpus 行の title も "row N" では出典行に使えないので「企業名 商材」に。
+            if case_doc_metadata:
+                _case_title_parts = [
+                    x
+                    for x in (
+                        case_doc_metadata.get("client_name")
+                        or case_doc_metadata.get("case_company"),
+                        case_doc_metadata.get("case_product"),
+                    )
+                    if x
+                ]
+                if _case_title_parts:
+                    row_title = " ".join(str(x) for x in _case_title_parts)
+
             # Slack 経路と同じ合成順: 固定キー → fb → knowledge（cls は分類後に後置）。
             # fb と knowledge はコアヘッダが交差せず同一シートで両方立つことはない。
             # 人間入力 (fb/knowledge) と Haiku (cls_*) はキーが交差しない設計
@@ -4091,6 +4413,9 @@ def _ingest_gsheet(
                 "row_idx": row_idx,
                 **fb_doc_metadata,
                 **knowledge_doc_metadata,
+                # 事例集は fb / knowledge とコアヘッダが交差しないので同時に立たない。
+                # 空 dict なら展開結果もゼロ件＝既存シートの metadata はバイト等価。
+                **case_doc_metadata,
             }
             row_source_uri = (
                 f"https://docs.google.com/spreadsheets/d/{spec.sheet_id}/edit"
@@ -4154,6 +4479,19 @@ def _ingest_gsheet(
                     client_name=derived_knowledge_client,
                     classification_metadata=cls_metadata,
                 )
+                # 事例集だけは業種キーで人間入力 > Haiku（合成順は cls が後勝ちなので、
+                # ここで cls 側から industry/cls_industry を落として人手の値を残す）。
+                # 既存 2 シートは case_doc_metadata が空＝この分岐に入らない。
+                if case_doc_metadata.get(CASE_INDUSTRY_METADATA_KEY):
+                    cls_metadata = {
+                        k: v
+                        for k, v in cls_metadata.items()
+                        if k
+                        not in (
+                            CASE_INDUSTRY_METADATA_KEY,
+                            CASE_CLS_INDUSTRY_METADATA_KEY,
+                        )
+                    }
 
             # 差分取り込み: 次回 run の照合用に content hash を metadata へ保存する
             # （OFF なら一切書かない＝従来とバイト等価の metadata）。

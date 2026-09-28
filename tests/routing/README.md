@@ -115,3 +115,76 @@ R4 で追加した 18 行（`freebusy-01..03` / `agenda-01..03` / `mailnc-01..04
 - `mailnc-04`「放置してるメールある？」は、ルーターが `client_name="放置してるメール"` を作ると
   残差「してる」が 2 文字以上残り **ガードを素通りする**（`KNOWN_GAPS`）。ここは description と
   ルーター側の規律だけが防波堤。
+
+---
+
+## R5ラウンド（YouTube の「切り出し不可」を動画全般へ広げた）— 2026-09-24 本番由来
+
+### 何が起きたか
+本番（mcp:115 / openclaw:48）で「この動画を分析して <YouTube URL>」に対し、Aico がツールを一度も
+呼ばず（`tool_calls=0`）「YouTube は取得元にブロックされるため分析できません」と返した。
+`video_capture` の説明文と SOUL の注意書き（切り出しは DL が要るので YouTube 不可）を、動画分析
+全般に広げて読んだため。`video_analysis` は Gemini に file_uri で URL を渡す経路（DL 不要）で
+YouTube を分析できる（同日 12 秒で成功）。SOUL 側は PR #441、説明文側が本ラウンド。
+
+### 足した行
+| id | 発話の型 | expect | forbid |
+|---|---|---|---|
+| `vanalysis-yt-01`（PR #441） | 本番の発話そのもの | `video_analysis` | `video_capture` |
+| `vanalysis-yt-02` / `-03` | 秒数・時刻の言及がある「分析して」（敵対） | `video_analysis` | `video_capture` |
+| `vcapture-01` / `-02` | 切り出しの正例（既存コーパスに `video_capture` の行が無かった） | `video_capture` | `video_analysis` |
+| `vcapture-yt-01` | YouTube の切り出し。呼べばサーバが決定論の案内（添付のお願い）を返す。**呼ばずに断るのは不合格** | `video_capture` | `video_analysis` |
+
+### 結果（2026-09-24・Haiku 独立 2 本 × 4 条件）
+可視ツール 35（`effective-tool-scope.json` の `enabledBy` が never 以外）。動画系 18 行
+（上の 6 行＋既存の algo / comment / tsearch / acquire / boundary-02 / adv-06 / adv-07 /
+vanalysis-01 / -02。`video_approval` 期待の未配線 3 行は除外）。
+
+| 条件 | `video_capture` の説明文 | 一致（2 本） | `forbid` 違反 | `arg_rules` 違反 | `vcapture-yt-01` で呼んだ本数 |
+|---|---|---|---|---|---|
+| 変更前 | origin/dev（「YouTube は取得元にブロックされるため、ファイル添付でお願いする」） | 14 / 13 | 0 | 0 | 0 / 2 |
+| R5 | 「この制限は切り出しだけ・YouTube 動画の分析は video_analysis で可能」を追記 | 12 / 17 | 0 | 0 | 0 / 2 |
+| R5b | description に「断らずにそのまま呼べばサーバが添付のお願いを返す」 | 14 / 14 | 0 | 0 | 1 / 2 |
+| R5c | url 引数の説明にも「YouTube の URL もそのまま入れて呼べばサーバが添付の案内を返す」 | 17 / 15 | 0 | 0 | **2 / 2** |
+
+- `vanalysis-yt-01` / `-02` / `-03` は**全 8 本で `video_analysis`**。name+description だけの
+  ルーターは変更前から YouTube の分析を取り違えていなかった＝本番の事故は SOUL 側の誤汎化が主因（#441）。
+  説明文の但し書きは同じ読み違いの再発防止（二重化）。
+- 説明文を変えても、分析の依頼が切り出しへ流れる誤り（`forbid`）は全条件でゼロ。
+- **新たに見つかった穴**: YouTube の切り出しは、変更前の説明文だと 4 本中 4 本がツールを呼ばずに
+  自分で断った（SOUL の「断る前にツールを呼ぶ」と食い違う）。R5b → R5c で 2 本中 2 本が呼ぶようになった。
+  固定点は `tests/skills/video_capture/test_video_capture.py` の
+  `test_youtube_capture_is_called_not_refused_by_the_router`。
+- 条件によらず残る外れ（シミュの作り由来）: `algo-01` / `algo-03` / `acquire-01`（「この5つの検索KW」
+  「この検索KW」の中身が発話に無い）と `vanalysis-02`（`<url>×3`）は、単発のブラインドでは中身が
+  決まらず聞き返しに倒れる。`vcapture-02`（「さっき貼った動画」）も 8 本中 2 本が文脈不足として
+  聞き返した（変更前 0/2・変更後 2/6）→ 下の R5d で説明文を硬化して解消。
+- R4 の 18 行（mail / calendar 系）は本ラウンドでは流していない（R4 結果欄は未実施のまま）。
+
+### R5d（添付動画の言い換えを硬化＋SOUL 込みの本番近似シミュ）— 2026-09-24
+**硬化**: `video_capture` の description と `slack_file` 引数に「『さっき貼った動画』『上の動画』と言われたら、
+添付が見えなくても聞き返さずに呼ぶ（探すのはサーバ・無ければ案内を返す）」を追記。
+行を 2 つ追加（`vcapture-03`「上の動画の0:10」/ `vcapture-04`「このスレに貼った動画、2:05」）＝計 20 行。
+
+**本番近似シミュ**: 本番の外側ループは Haiku 4.5 で、**SOUL.md を system prompt として読んだうえで**
+ツールを選ぶ（`openclaw.config.json5` の `model`）。R1〜R5c のルーター（name+description だけ）では
+SOUL の効き目が測れないので、Haiku に「SOUL.md を system prompt とみなす＋tools.json＋DM の 1 通目」を
+渡し、最初の一手（ツール呼び出し or 返信文）を出させた。変更前 = origin/dev の SOUL＋説明文、
+変更後 = PR #441 の SOUL＋本 PR の説明文。
+
+| シミュ | 条件 | 本数 | 一致（/20） | YouTube 分析 3 行 | YouTube 切り出し | 添付動画 3 行 | `forbid` 違反 |
+|---|---|---|---|---|---|---|---|
+| ルーター（name+description） | 最終形 | 3 | 17 / 18 / 17 | 9 / 9 | 3 / 3 | 9 / 9 | 0 |
+| SOUL 込み | 変更前 | 2 | 17 / 10 | 3 / 6 | 1 / 2 | 3 / 6 | 0 |
+| SOUL 込み | 変更後 | 3 | 18 / 18 / 17 | **9 / 9** | **3 / 3** | **9 / 9** | 0 |
+
+- **本番の断りを再現した**: 変更前の 2 本目は「YouTube の動画分析は取得元にブロックされています。動画ファイルを
+  添付いただければ対応できます。」とツールを呼ばずに返した（本番の応答とほぼ同文）。YouTube の分析 3 行・
+  切り出し 1 行・添付動画 2 行が同じ run で揃って断り／聞き返しに倒れた。変更後の 3 本では 0 件。
+- 変更前の 1 本目は全部正しく呼んだ＝事故は確率的に起きる（本番の 1 回もその一例）。n が小さいので率の比較は
+  しないが、変更後 3 本 × YouTube・添付 7 行 = 21 件で断り／聞き返しは 0。
+- 残る外れ: `algo-01` / `algo-03` / `acquire-01`（KW の中身が発話に無い）・`vanalysis-02`（`<url>×3`）は
+  条件と関係なく聞き返しか別ツールに倒れる（ルーター最終形 A で 1 回 `video_algorithm`。forbid 外）。
+  `boundary-02` は SOUL 込み変更前の 1 本目で 1 回 `tiktok_acquire`。
+- 限界: シミュのエージェントはそれ自体の system prompt の上で SOUL を「読む」ので、OpenClaw の実行時
+  （bootstrap 注入・IDENTITY.md・会話履歴）と同一ではない。最終確認は便の後の実機 DM で行う。
