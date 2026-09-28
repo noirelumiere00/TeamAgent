@@ -488,3 +488,20 @@ def test_notice_line_without_report_goes_before_cost() -> None:
 def test_digest_of_empty_list_is_zero() -> None:
     d = digest_videos([], keyword="x", requested=0, reserved=0)
     assert d.watched == 0 and d.hook_types == []
+
+
+def test_save_top_common_needs_both_videos() -> None:
+    """保存率の高い 2 本（2・4 位）の片方にしか無い特徴は「共通」にしない。"""
+    analyses = {**ANALYSES, 4: {**ANALYSES[4], "telops": [], "has_narration": False}}
+    skill, *_ = _skill(gemini=FakeGemini(analyses))
+    d = _followup(skill, _first_stage(skill)).digest
+    assert d.save_top_ranks == [2, 4]
+    assert d.save_top_common == ["CTA: フォロー"]
+
+
+def test_report_chapter_escapes_the_llm_reading() -> None:
+    reading = {"headline": "<img src=x onerror=alert(1)>数字フックの上位", "winning": None}
+    skill, _g, _d, pub, _b = _skill(bedrock=VideoBedrock(digest=reading))
+    _followup(skill, _first_stage(skill))
+    assert "<img src=x" not in pub.htmls[-1]
+    assert "&lt;img src=x" in pub.htmls[-1]
