@@ -1,5 +1,7 @@
 # EC2 worker への Bot 切替ランブック（v3.2）
 
+> **退役決定済み（停止中）・実行しないこと（2026-09-28 追記）**: EC2 worker（`teamagent-dev-worker`）は 2026-08-03 から停止しており、2026-09-28 に退役を決めた。`infra/terraform/worker.tf` の EC2・IAM・SG は terraform に残っており、destroy は保留中（本番変更のため別途判断）。本番の Slack 面は OpenClaw（Fargate）、ingest は ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`）、connect-web は Fargate（`infra/terraform/connect_web.tf`）。旧 Bot（`runtime/slack_bot.py`）を OpenClaw と同じ Slack app のトークンで起動すると、Socket Mode で二重接続になり、イベントが不定に振り分けられる。以下は経緯の記録として残している。
+
 Mac で手動稼働している TeamAgent Bot を、常駐 EC2 worker（`i-0feaa3c103ab6ef91`）へ移す手順。
 狙いは **24時間稼働** と **会社プロキシ外での SSL 根治**（TikTok CDN DL が証明書エラーゼロ → VSEO が backfill 不要で素の 10/10）。
 

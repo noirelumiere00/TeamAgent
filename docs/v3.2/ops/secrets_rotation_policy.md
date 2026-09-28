@@ -163,7 +163,8 @@ Wave1-③ で配線。**初回は Secret 自体の作成**から（rotation で�
      --name teamagent/prod/ops-slack-webhook \
      --secret-string "https://hooks.slack.com/services/..."
    ```
-3. worker EC2 で `sudo systemctl restart teamagent-ingest.timer` し、次回 ingest 失敗時に #ops に通知が出るか確認（or 手動で `INGEST_DRY_RUN=1 sudo systemctl start teamagent-ingest.service`）。
+3. （2026-09-28 改訂）旧手順の worker EC2 の systemd ユニット（`teamagent-ingest.{service,timer}`）は、EC2 worker の退役に伴い repo から削除した。本番の ingest は ECS Scheduled Task（`infra/terraform/ingest_schedule.tf`: EventBridge rule `…-ingest-weekly` → Lambda `…-ingest-dispatch` → Fargate タスク `…-ingest`・ENTRYPOINT `scripts/run_ingest_fargate.py`）で動き、ログは CloudWatch Logs `/${project_name}/${environment}/ingest` に出る。
+   **注意**: 現在の ingest タスク定義の `secrets` は `DATABASE_URL` / `SLACK_BOT_TOKEN` / `GOOGLE_OAUTH_JSON`（と `VERTEX_SA_JSON`）だけで、`OPS_SLACK_WEBHOOK_URL` を渡していない。`IngestOpsAlerter.from_env()`（`src/teamagent/ingest/ops_alert.py`）は未設定なら何もしないので、Secret を投入しても Fargate の ingest からは #ops に通知が出ない。通知を有効にするには、タスク定義へこの Secret を足す terraform 変更が別途要る。
 
 Rotation 時は手順 2 を `update-secret` に変える。
 

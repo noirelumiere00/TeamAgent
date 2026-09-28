@@ -12,9 +12,12 @@
 # これで Bot と同一の RDS 接続情報・Google 認証情報をそのまま流用する
 # （= GCP credentials を ingest 用に別途用意する必要が無い）。
 #
+# 本番の定期 ingest は ECS Scheduled Task（infra/terraform/ingest_schedule.tf・
+# scripts/run_ingest_fargate.py）で動いている。EC2 worker の systemd timer
+# （旧 deploy/systemd/teamagent-ingest.{service,timer}）は退役に伴い削除した。
+# 本スクリプトは手元から手動で流すためのラッパとして残す。
+#
 # Usage:
-#   本番 worker EC2 (systemd 経由):
-#     teamagent-ingest.service が WorkingDirectory=/opt/teamagent/app で本スクリプトを呼ぶ
 #   手動 / ローカル (SSM tunnel):
 #     set -a; source .env.local; set +a
 #     scripts/run_ingest.sh

@@ -3,16 +3,18 @@
 # TeamAgent — AWS Secrets Manager から本番 secret を取得して
 # 環境変数に展開するスクリプト。
 #
-# Usage (本番 EC2 / Lambda):
-#   set -a; source .env.production; set +a
-#   source scripts/load_secrets.sh
-#   python -m teamagent.runtime.slack_bot
-#
-# Usage (ローカル Mac、SSM tunnel 経由):
+# Usage (ローカル Mac、SSM tunnel 経由で手動スクリプトを流す):
 #   # 別 Terminal で tunnel 起動
 #   set -a; source .env.local; set +a
 #   source scripts/load_secrets.sh
-#   python -m teamagent.runtime.slack_bot
+#   python scripts/verify_google_oauth.py   # 例。ほかに scripts/migrate.py 等
+#   （scripts/run_ingest.sh は内部で本スクリプトを source するので、事前の source は不要）
+#
+# 旧 Socket Mode Bot（python -m teamagent.runtime.slack_bot）は起動しない。
+# 本番の Slack 面は OpenClaw で、同じ Slack app のトークンで起動すると二重接続になる。
+# EC2 worker は退役決定済み（停止中）。scripts/deploy_to_ec2.sh が生成する systemd
+# ユニットは今も本スクリプトを source するが、その経路は 2026-08-03 から止まっている。
+# 本番 Fargate の各タスクは本スクリプトを使わない（env は task definition で注入）。
 #
 # 前提：
 #   - aws CLI と適切な IAM 認証（プロファイル or Role）
