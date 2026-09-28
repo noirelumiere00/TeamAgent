@@ -44,7 +44,7 @@ from teamagent.identity import (
     no_access_metadata,
     shared_company_domains_from_env,
 )
-from teamagent.mcp_gateway import detached_jobs, surface_video_followup
+from teamagent.mcp_gateway import detached_jobs, direct_summary, surface_video_followup
 from teamagent.mcp_gateway.caller_claim import (
     CALLER_CLAIM_FIELD,
     CallerClaimError,
@@ -1161,6 +1161,29 @@ async def dispatch_tool(
         latency_ms=_elapsed_ms,
         skill_args=skill_args,
     )
+    # ── 直接投稿（USE_DIRECT_SUMMARY_POST 既定OFF＝素通り・mcp_gateway/direct_summary.py）──
+    # 対象なら slack_summary を mcp が依頼元の DM へ直接出し、Aico には「投稿済み」だけを返す
+    # （Aico に文面を組み直させない・URL を落とさせない）。届かなければ今までどおり返す。
+    # usage 記録の後に置く（費用の記録は投稿の成否に関係なく残す）。
+    if name in direct_summary.DIRECT_TOOLS and isinstance(data, dict):
+        direct_destination, direct_reason = direct_summary.decide(
+            direct_summary.load_policy(),
+            tool=name,
+            verified_caller=verified_caller,
+            metadata=metadata,
+        )
+        logger.info(
+            "direct_summary_decision",
+            tool=name,
+            request_id=ctx.request_id,
+            reason=direct_reason,
+        )
+        if direct_destination is not None:
+            direct_status = await asyncio.to_thread(
+                direct_summary.deliver, data, direct_destination, request_id=ctx.request_id
+            )
+            if direct_status != direct_summary.FAILED:
+                return direct_summary.posted_response(direct_status)
     # ── 返却前ミドルウェア（順序契約・v0.3 監査 Step4-(a)）────────────────────
     # (0.5) 返す欄の絞り込み（skill の mcp_relay_fields・None＝全体）: usage 記録（total_cost_usd
     #     を読む）より後、退避・注入より前。Aico に生データを渡さず文面をそのまま返させる。

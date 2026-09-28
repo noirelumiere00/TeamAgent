@@ -611,3 +611,23 @@ variable "surface_video_followup_max_videos" {
   type        = string
   default     = "5"
 }
+
+# ============================================================
+# 2026-09-28: 検索上位チェックの結果を mcp が会話へ直接投稿する。既定 OFF。
+# ============================================================
+# mcp_gateway/direct_summary.py。SOUL の「そのまま返す」と MCP 返却の絞り込み（#462）の後も、
+# Aico（Haiku）が文面を組み直して詳細レポートの URL を落としたため、slack_summary は mcp が
+# 依頼元の 1 対 1 DM へ直接出し、Aico には「投稿済み」だけを返す。届かなければ今までどおり返す。
+# ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本）へ同じ値を必ず追記する
+#    （terraform_runtime_guard.sh の live→tfvars 導出はこの 2 変数を列挙していない）。
+variable "use_direct_summary_post" {
+  description = "検索上位チェックの結果の直接投稿（USE_DIRECT_SUMMARY_POST）。既定 0＝今と同じ（Aico が返す）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "0"
+}
+
+variable "direct_summary_post_allowed_emails" {
+  description = "直接投稿を使う人（DIRECT_SUMMARY_POST_ALLOWED_EMAILS・カンマ区切り）。空なら誰にも適用しない。1 対 1 DM・署名検証済みの依頼だけが対象。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = ""
+}
