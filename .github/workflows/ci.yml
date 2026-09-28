@@ -123,6 +123,91 @@ jobs:
       - name: Bandit (security scan)
         run: bandit -r src/teamagent -ll  # low+ severity 以上
 
+  # 既存ジョブは依存の最新版を検証し、こちらは本番と同じ uv.lock の版を検証する。
+  # 2026-09-24 の anyio バンプ時に、CI が lock の 4.14.2 ではなく 4.15.1 を使った件の再発防止。
+  lockfile-pytest:
+    name: pytest (uv.lock 固定版・3.14)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+        env:
+          POSTGRES_DB: teamagent_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d teamagent_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEAMAGENT_TEST_DB_DSN: postgresql://postgres:postgres@127.0.0.1:5432/teamagent_test
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+          cache: "pip"
+          cache-dependency-path: "uv.lock"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.14.4
+          terraform_wrapper: false
+
+      - name: Install dependencies from uv.lock
+        run: |
+          python -m pip install --upgrade pip
+          pip install 'uv==0.11.29'
+          uv export --frozen --no-emit-project \
+            --extra dev --extra mcp --extra media \
+            --format requirements-txt -o /tmp/requirements-lock.txt
+          pip install --no-deps --require-hashes -r /tmp/requirements-lock.txt
+          pip install --no-deps -e .
+
+      - name: Prepare disposable PostgreSQL test role
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+
+          with psycopg.connect(os.environ["TEAMAGENT_TEST_DB_DSN"], autocommit=True) as conn:
+              conn.execute(
+                  """
+                  DO $$
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'teamagent_app') THEN
+                          CREATE ROLE teamagent_app;
+                      END IF;
+                  END
+                  $$;
+                  """
+              )
+              conn.execute(
+                  """
+                  ALTER ROLE teamagent_app
+                      NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN INHERIT
+                  """
+              )
+              conn.execute("GRANT teamagent_app TO postgres")
+          PY
+
+      - name: Install TikTok scraper Node dependencies
+        run: npm ci --prefix tools/tiktok_scraper --no-audit --no-fund
+
+      - name: Record installed dependency versions
+        run: |
+          pip freeze | sort > /tmp/pip-freeze.txt
+          cat /tmp/pip-freeze.txt
+
+      - name: Pytest
+        run: pytest tests/ -q
+
   activation-freeze:
     name: activation freeze (frozen surface)
     runs-on: ubuntu-latest

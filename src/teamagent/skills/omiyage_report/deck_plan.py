@@ -98,30 +98,62 @@ class ResearchNote:
     source_url: str
 
 
+# 「URL: https://…」「出典: https://…」のような見出し語
+# （URL だけの行の判定と、要点からの除去に使う）
+_RESEARCH_LABEL_RE = re.compile(
+    r"(?:出典\s*URL|出典|URL|Source|ソース|リンク|参照|Link)\s*[:：]", re.IGNORECASE
+)
+_RESEARCH_LABEL_ONLY_RE = re.compile(
+    r"(?:出典\s*URL|出典|URL|Source|ソース|リンク|参照|Link)", re.IGNORECASE
+)
+_RESEARCH_TRIM = " :：|｜-—–"
+
+
+def _research_line_text(line: str) -> str:
+    text = _RESEARCH_URL_RE.sub(" ", line)
+    text = re.sub(r"[（(]\s*[)）]", " ", text)
+    text = _RESEARCH_LABEL_RE.sub(" ", text)
+    text = " ".join(text.split()).strip(_RESEARCH_TRIM)
+    # 見出し語だけが残った行（「URL」など）は要点ではない
+    return "" if _RESEARCH_LABEL_ONLY_RE.fullmatch(text) else text
+
+
 def parse_research_notes(notes: str) -> tuple[list[ResearchNote], int]:
-    """行ごとに (要点, 出典URL) を取り出す。出典URL（https）の無い行は落として件数だけ返す。"""
+    """行ごとに (要点, 出典URL) を取り出す。出典URL（https）の無い要点は落として件数だけ返す。
+
+    要点の次の行が「URL: https://…」のように出典だけなら、直前の要点の出典として付ける
+    （調査ツールの出力は要点と出典を 2 行に分けることが多い）。見出し語（URL・出典 など）
+    だけが要点として残ることはない。
+    """
     adopted: list[ResearchNote] = []
     dropped = 0
+    pending: str | None = None  # 直前の行の、出典がまだ無い要点
     for raw in notes.splitlines():
         line = raw.strip().lstrip(_RESEARCH_BULLET).strip()
         if not line:
+            pending = None
             continue
         urls = [
             url.rstrip(".,;:、。")
             for url in _RESEARCH_URL_RE.findall(line)
             if urlsplit(url).scheme == "https" and urlsplit(url).hostname
         ]
+        text = _research_line_text(line)
+        if urls and not text:
+            if pending is not None:
+                # 出典だけの行 → 直前の要点に付ける（直前の行は「落とした」側から戻す）
+                adopted.append(ResearchNote(text=pending[:_RESEARCH_MAX_TEXT], source_url=urls[0]))
+                dropped -= 1
+            else:
+                dropped += 1
+            pending = None
+            continue
         if not urls:
             dropped += 1
-            continue
-        text = _RESEARCH_URL_RE.sub(" ", line)
-        text = re.sub(r"[（(]\s*[)）]", " ", text)
-        text = text.replace("出典：", " ").replace("出典:", " ")
-        text = " ".join(text.split()).strip(" :：|｜-—–")
-        if not text:
-            dropped += 1
+            pending = text or None
             continue
         adopted.append(ResearchNote(text=text[:_RESEARCH_MAX_TEXT], source_url=urls[0]))
+        pending = None
     return adopted, dropped
 
 
@@ -223,12 +255,17 @@ def _exposure_slide(measurement: OmiyageMeasurement) -> Slide | None:
         f"{measurement.brand}関連は{own.videos if own else 0}本"
         f"（{_fmt_pct(own.share_pct) if own else 'N/A'}）。"
     )
-    if top_rival is not None:
+    if top_rival is not None and top_rival.videos > 0:
         tag_text += (
             f"競合最多は{top_rival.brand}の{top_rival.videos}本"
             f"（{_fmt_pct(top_rival.share_pct)}）。"
         )
-    tag_text += "検索結果の取り合いが、指名検索の前で起きている。"
+        # 「取り合い」は自社と競合の両方が出ているときだけ言える
+        if own is not None and own.videos > 0:
+            tag_text += "検索結果の取り合いが、指名検索の前で起きている。"
+    elif others:
+        # 「競合最多は…の0本」は意味を成さない（9/17 GABAN 版）。0 本なら 0 本とだけ書く
+        tag_text += f"競合の露出は上位{len(first.axis.posts)}本中0本。"
     return Slide(
         type="D",
         part=1,
@@ -248,6 +285,9 @@ def _tier_slide(measurement: OmiyageMeasurement) -> Slide | None:
     if axis_a is None or axis_b is None:
         # 片軸でも取得失敗なら、失敗側を「0本/N/A」の実測値として描かず
         # Q2 と同じく省略+開示（監査JSONの failed/omitted）で扱う。
+        return None
+    if not axis_a.axis.posts or not axis_b.axis.posts:
+        # 取得はできたが 0 本の軸も、比べられないので省略（「0本で最多」を作らない）
         return None
     name_a = measurement.brand
     name_b = measurement.competitors[0] if measurement.competitors else "競合"
@@ -299,8 +339,14 @@ def _pr_slide(measurement: OmiyageMeasurement) -> Slide | None:
     axis_a, axis_b = _brand_pair(measurement)
     if axis_a is None or axis_b is None:
         return None
+    if not axis_a.axis.posts or not axis_b.axis.posts:
+        return None
     pr_a, no_pr_a = _pr_split(axis_a.axis.posts)
     pr_b, no_pr_b = _pr_split(axis_b.axis.posts)
+    if not pr_a and not pr_b:
+        # 両側とも #PR 表記が 0 本なら比べる中身が無い（9/17 GABAN 版で 1 ページ使っていた）。
+        # 要点 3 行と監査記録には「#PR表記ありは0本」が残る
+        return None
     groups = [
         ComparisonGroup(
             label="#PR表記あり 本数",
@@ -367,16 +413,17 @@ def _cluster_slide(
     name_b = measurement.competitors[0] if measurement.competitors else "競合"
     groups = [
         ComparisonGroup(
-            label=(
-                f"{cluster_a.label}"
-                f"（{name_a} {cluster_a.videos}本 / {name_b} {cluster_b.videos}本）"
-            ),
+            label=cluster_a.label,
             value_a=cluster_a.avg_eg_rate_pct or 0.0,
             value_b=cluster_b.avg_eg_rate_pct or 0.0,
             unit="%",
+            count_a=cluster_a.videos,
+            count_b=cluster_b.videos,
         )
         for cluster_a, cluster_b in zip(clusters_a, clusters_b, strict=True)
-    ]
+        # 両側とも 0 本の界隈は並べない（分類表の全項目を 0% で埋めない）
+        if cluster_a.videos or cluster_b.videos
+    ][:8]
     failure_count = len(analysis.failures) + len(analysis.skipped_video_ids)
     tag_text = (
         f"クラスタは動画フレームの視覚AIによる推定分類。"
@@ -444,12 +491,19 @@ def _keyword_slide(
         if rate is not None and (best_route is None or rate > best_route[1]):
             best_route = (axis.label, rate)
     kw_label = "・".join(f"「{kw}」" for kw in measurement.keywords)
-    tag_text = (
-        f"一般キーワード{kw_label}の登場率（caption+hashtag計）が最も高いのは"
-        f"{best_route[0]}の{best_route[1]}%。"
-        if best_route
-        else "登場率を比較できる軸がなかった。"
-    )
+    if best_route and best_route[1] > 0:
+        tag_text = (
+            f"一般キーワード{kw_label}の登場率（caption+hashtag計）が最も高いのは"
+            f"{best_route[0]}の{best_route[1]}%。"
+        )
+    elif best_route:
+        # 全軸 0% のときに「最も高いのは…の0.0%」と書かない（9/17 GABAN 版と同じ種類の文）
+        tag_text = (
+            f"一般キーワード{kw_label}は、どの検索軸の上位にも"
+            "キャプション・ハッシュタグで登場しなかった。"
+        )
+    else:
+        tag_text = "登場率を比較できる軸がなかった。"
     tag_text += (
         "登場率の分母は0回の動画も含む。テロップは視覚AI読取で、解析できた動画のみを分母とする。"
     )
@@ -572,7 +626,7 @@ def _top5_slide(
     ]
     top1 = selected[0][0]
     tag_text = (
-        f"最多再生は{top1.nickname or top1.author}の{top1.plays}再生"
+        f"最多再生は{top1.nickname or top1.author}の{fmt_number(top1.plays)}再生"
         f"（EG率{top1.eg_rate_pct}%）。"
         "画像は取得動画の解析フレーム（1コマ目・実フレーム）で、実画面の解剖は詳細版で行う。"
     )
@@ -587,12 +641,16 @@ def _top5_slide(
     )
 
 
+_SUMMARY_MAX_ROWS = 4
+
+
 def _summary_slide(
     measurement: OmiyageMeasurement,
     q_slides: Sequence[Slide],
 ) -> Slide:
     rows: list[SummaryRow] = []
-    for index, slide in enumerate(q_slides, start=1):
+    # 総括は 4 行まで（5 行以上は 1920x1080 の枠で下の結論帯に潜る・描画で確認済み）
+    for index, slide in enumerate(q_slides[:_SUMMARY_MAX_ROWS], start=1):
         label = slide.q_number or "現状"
         assert slide.tag is not None  # 便1の各Qスライドはタグ必須（組成側の不変量）
         rows.append(
@@ -626,6 +684,8 @@ def build_deck_plan(
     search_depth: int,
     issuer: str | None = None,
     research_notes: str = "",
+    excluded_unrelated: int = 0,
+    relevance_checked: bool = False,
 ) -> DeckPlan:
     """U1構成の計測JSONを組む。組める材料が無ければ DeckPlanBuildError。
 
@@ -672,11 +732,21 @@ def build_deck_plan(
     axes_summary = "、".join(
         f"{m.axis.label}{len(m.axis.posts)}本" for m in measurement.axes if not m.axis.failed
     )
+    fetched_axes = sum(1 for m in measurement.axes if not m.axis.failed)
+    if excluded_unrelated:
+        relevance_note = (
+            f"商材と関係の無い動画（同名の別作品など）{excluded_unrelated}本は集計から除外"
+        )
+    elif relevance_checked:
+        relevance_note = "商材と関係の無い動画が無いことを確認済み"
+    else:
+        relevance_note = "商材と関係の無い動画の除外は未実施"
     deck_meta = DeckMeta(
         addressee=f"{measurement.brand}様",
         cover_title=f"「{cover_kw}」検索面の現状解剖",
+        # 軸の一覧は「対象」欄に書く（表紙の要約に全軸を並べると枠からあふれる・9/17 GABAN 版）
         abstract=(
-            f"TikTok検索結果の実測データ（{axes_summary}）から、"
+            f"TikTok検索{fetched_axes}軸の実測データから、"
             f"{measurement.brand}と競合の露出・語られ方の現状を確認する。"
         ),
         category_en="TIKTOK SEARCH SNAPSHOT REPORT",
@@ -692,7 +762,8 @@ def build_deck_plan(
             ),
             (
                 f"対象: {axes_summary or '取得できた検索軸'}。"
-                "登場率の分母は各軸の取得本数（キーワード0回の動画も含む）"
+                f"{relevance_note}。"
+                "登場率の分母は各軸の集計本数（キーワード0回の動画も含む）"
             ),
             VOICE_UNMEASURED_NOTE,
         ],

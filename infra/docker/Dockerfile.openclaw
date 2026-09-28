@@ -7,7 +7,7 @@
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG RUNTIME_ARM64_DIGEST=sha256:827a1a2add4e9566b3ca69a4f98aec1bb0d9eddbb5410382def798fc4024071b
+ARG RUNTIME_ARM64_DIGEST=sha256:f7fd062637e765a2b19fba77fb8ca9fe0375e2d20fe0b3c0e8d3195b12b2d4c3
 
 # The same pinned upstream image, kept untouched. The stage below prunes /app
 # aggressively and removes /app/src, so the workspace templates the runtime
@@ -166,7 +166,7 @@ FROM cgr.dev/chainguard/node:latest@${RUNTIME_ARM64_DIGEST} AS runtime
 
 ARG OPENCLAW_VERSION=2026.7.1
 ARG OPENCLAW_ARM64_DIGEST=sha256:38b611f494cb32e15aaf456d54c6b6be55db9098c90632aed0bfad4a70009707
-ARG RUNTIME_ARM64_DIGEST=sha256:827a1a2add4e9566b3ca69a4f98aec1bb0d9eddbb5410382def798fc4024071b
+ARG RUNTIME_ARM64_DIGEST=sha256:f7fd062637e765a2b19fba77fb8ca9fe0375e2d20fe0b3c0e8d3195b12b2d4c3
 ARG GIT_COMMIT=unknown
 ARG GIT_BRANCH=unknown
 ARG SOURCE_TREE=unknown

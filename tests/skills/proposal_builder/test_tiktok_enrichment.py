@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from structlog.testing import capture_logs
@@ -661,3 +662,53 @@ def test_confidential_queries_use_category_and_sector_only(
     )
     assert brand not in json.dumps(deck_input.quantitative_evidence, ensure_ascii=False)
     assert brand not in json.dumps(logs, ensure_ascii=False)
+
+
+def test_draft_delivery_passes_prefixed_filename_with_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ドラフト配信は title だけでなく filename にも DRAFT 接頭辞つきの名前を渡す。
+
+    本番（09-17 4 回目）で title にしか接頭辞が付かず、Slack の表示名・ダウンロード名が
+    生成元の path 名（req-xxx_商材.pptx）のままになった。外部提出防止の印はダウンロード後の
+    ファイル名にも要る。
+    """
+    _configure_builder_test(monkeypatch, media_configured=False)
+    monkeypatch.setenv("PROPOSAL_BUILDER_DELIVER_INTERNAL_DRAFTS", "1")
+    monkeypatch.setenv("TEAMAGENT_LOCAL_MEDIA_RUNTIME", "true")
+    slack = AsyncMock()
+    slack.upload_file = AsyncMock(return_value=True)
+
+    def forbidden_search(*_args: Any, **_kwargs: Any) -> TikTokSearchResult:
+        raise AssertionError("TikTok search must be skipped")
+
+    def forbidden_campaign(_searcher: Searcher) -> ProposalCampaignSkill:
+        raise AssertionError("thumbnail campaign must be skipped")
+
+    skill = ProposalBuilderSkill(
+        search=object(),
+        deck=_CapturingDeck(),  # type: ignore[arg-type]
+        account_db_path="unused.xlsx",
+        slack=slack,
+        tiktok_searcher=forbidden_search,
+        campaign_factory=forbidden_campaign,
+    )
+
+    output = skill.run(
+        _input(_research(), client_name="テスト株式会社"),
+        SkillContext(
+            request_id="draft-delivery-request",
+            metadata={"channel_id": "C123", "thread_ts": "1.2"},
+        ),
+    )
+
+    # accounts=[] / cases=[] なので必ず draft（ready なら前提が崩れているのでここで止める）
+    assert output.status == "draft"
+    assert output.slack_delivered is True
+    slack.upload_file.assert_awaited_once()
+    kwargs = slack.upload_file.await_args.kwargs
+    assert kwargs["title"].startswith("DRAFT_裏取り前_")
+    assert kwargs["title"].endswith(".pptx")
+    assert kwargs["filename"] == kwargs["title"]
+    assert kwargs["thread_ts"] == "1.2"
+    assert slack.upload_file.await_args.args[0] == "C123"

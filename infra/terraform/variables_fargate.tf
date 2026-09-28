@@ -473,15 +473,15 @@ variable "vertex_sa_secret_name" {
 }
 
 variable "gemini_vertex_project" {
-  description = "Vertex AI の GCP プロジェクトID（本番 .env.production と同値）"
+  description = "Vertex AI の GCP プロジェクトID。2026-09-17 に個人課金の ntv-ai から会社プロジェクト newstv-508906（組織 vectorinc.co.jp）へ移行。Secrets Manager の vertex_sa も同プロジェクトの SA 鍵に差し替え済み"
   type        = string
-  default     = "ntv-ai"
+  default     = "newstv-508906"
 }
 
 variable "gemini_vertex_location" {
-  description = "Vertex AI ロケーション（本番 .env.production と同値）"
+  description = "Vertex AI ロケーション。Gemini 3 系（既定 gemini-3.5-flash・2026-09-24 裁定）は Vertex では global でのみ応答する。2.5 系（2026-10-16 廃止）へ戻すときは us-central1"
   type        = string
-  default     = "us-central1"
+  default     = "global"
 }
 
 variable "enable_vpc_endpoints" {

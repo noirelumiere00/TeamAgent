@@ -139,6 +139,9 @@ class ComparisonGroup(_StrictModel):
     value_a: float
     value_b: float
     unit: str = ""
+    # 左右それぞれの本数（界隈クラスタ等）。ラベルに両側の本数を埋め込まない
+    count_a: int | None = Field(default=None, ge=0)
+    count_b: int | None = Field(default=None, ge=0)
 
 
 class SlideDataC(_StrictModel):

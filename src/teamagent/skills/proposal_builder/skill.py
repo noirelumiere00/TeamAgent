@@ -1168,6 +1168,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                 path,
                 ctx.request_id,
                 title=title,
+                filename=title,
                 initial_comment=comment,
                 thread_ts=thread_ts,
             )
@@ -1186,6 +1187,7 @@ class ProposalBuilderSkill(BaseSkill[ProposalBuilderInput, ProposalBuilderOutput
                         path,
                         ctx.request_id,
                         title=title,
+                        filename=title,
                         initial_comment=comment,
                     )
                     if ok:

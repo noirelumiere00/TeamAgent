@@ -25,7 +25,8 @@
 | 文書 | パス | 役割 |
 |---|---|---|
 | 🧭 **Hermes 段階導入 ADR** | [architecture/hermes_migration_design.md](architecture/hermes_migration_design.md) | Hermes Agent の dark deployment からの段階導入設計（Security 不変条件・敵対審査反映） |
-| 🗺 Hermes 実装計画 | [architecture/hermes_implementation_plan.md](architecture/hermes_implementation_plan.md) | PR 分割（PR2〜PR8 + PR-R）・テスト戦略 |
+| 🗺 Hermes 実装計画 | [architecture/hermes_implementation_plan.md](architecture/hermes_implementation_plan.md) | v1（DM 本人メモ）の工程 M0〜M11。v2 の旧計画（PR2〜PR8 + PR-R）は付録 |
+| 🧠 DM 本人メモ v1 ガイド | [architecture/personal_memory_v1.md](architecture/personal_memory_v1.md) | 何を覚える／覚えない、DM での操作、管理者閲覧、保持と削除、告知文案 |
 
 ## 旧設計（歴史文書 — 現実装の説明としては読まない）
 
