@@ -57,6 +57,7 @@ from teamagent.skills.search_surface_check.video_structure import (
     scene_rows,
     video_keys,
 )
+from teamagent.skills.video_algorithm.evidence import Roster
 from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 TABS_ID = "vtabs"
@@ -438,6 +439,9 @@ def _video_panel(
     post: SurfacePost | None,
     notes: StructureNotes | None,
     budget: _ImageBudget,
+    *,
+    query: str | None = None,
+    roster: Roster | None = None,
 ) -> str:
     rank = video.meta.rank
     parts = [
@@ -459,7 +463,7 @@ def _video_panel(
             f"<p>サムネから読めたこと: {_text(a.hook_summary or a.main_message)}</p></section>"
         )
         return "".join(parts)
-    keys = video_keys(video)
+    keys = video_keys(video, query=query, roster=roster)
     flow = "、".join(ROLE_LABEL.get(r, r) for r in role_flow(a))
     gist = [
         ("フック", f"{hook_label(a.hook_type)}：{a.hook_summary}" if a.hook_summary else ""),
@@ -480,7 +484,7 @@ def _video_panel(
     parts.append("<h4>全場面の構成表</h4>")
     parts.append(_scene_table(video, scene_rows(video), budget))
     parts.append("<h4>評価</h4>")
-    parts.append(_grade_table(grade_video(video)))
+    parts.append(_grade_table(grade_video(video, query=query, roster=roster)))
     parts.append("<h4>学べること・弱点</h4>")
     parts.append(_notes_block(rank, notes))
     parts.append("</section>")
@@ -491,14 +495,21 @@ def _video_panel(
 
 
 def _compare_panel(
-    videos: list[AnalyzedVideo], common: list[str], notes: StructureNotes | None
+    videos: list[AnalyzedVideo],
+    common: list[str],
+    notes: StructureNotes | None,
+    *,
+    query: str | None = None,
+    roster: Roster | None = None,
 ) -> str:
     n = len(videos)
     head = "".join(
         f"<th scope='col'>{v.meta.rank}位<br><span class='vt-hint'>{_esc(_handle(v))}</span></th>"
         for v in videos
     )
-    grades = {v.meta.rank: {g.axis: g for g in grade_video(v)} for v in videos}
+    grades = {
+        v.meta.rank: {g.axis: g for g in grade_video(v, query=query, roster=roster)} for v in videos
+    }
     rows: list[str] = []
     for axis in AXES:
         cells = []
@@ -557,8 +568,13 @@ def render_tabs(
     notes: StructureNotes | None = None,
     common: list[str] | None = None,
     image_budget: int = IMAGE_BUDGET_CHARS,
+    query: str | None = None,
+    roster: Roster | None = None,
 ) -> str:
-    """タブ（サムネ）と、動画ごとのパネル・比較パネル。JS が無ければ縦に並ぶ。"""
+    """タブ（サムネ）と、動画ごとのパネル・比較パネル。JS が無ければ縦に並ぶ。
+
+    query（検索 KW）は KW の照合、roster（クライアント名の名簿）はブランドの区分に使う。
+    """
     budget = _ImageBudget(image_budget)
     posts = posts or {}
     tabs = [_tab(v, budget) for v in videos]
@@ -566,8 +582,11 @@ def render_tabs(
         "<a class='vtab vtab-compare' id='vt-compare' href='#vp-compare' "
         f"aria-controls='vp-compare'><span class='vt-rank'>{len(videos)}本の比較</span></a>"
     )
-    panels = [_video_panel(v, posts.get(v.meta.rank), notes, budget) for v in videos]
-    panels.append(_compare_panel(videos, common or [], notes))
+    panels = [
+        _video_panel(v, posts.get(v.meta.rank), notes, budget, query=query, roster=roster)
+        for v in videos
+    ]
+    panels.append(_compare_panel(videos, common or [], notes, query=query, roster=roster))
     skipped = (
         f"<p class='vt-hint'>レポートを軽くするため、{budget.skipped}コマは埋め込んでいません。</p>"
         if budget.skipped

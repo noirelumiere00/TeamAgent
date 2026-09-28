@@ -1,20 +1,32 @@
 """5本横断の「アルゴリズム読み解き」（決定的・LLM非依存）。
 
-各動画の観測フラグ（テロップにKW/キャプションにKW/CTA/短尺/ブランド検出 等）を数え、
-共通パターン・rank上位帯 vs 下位帯の差分・勝ち筋仮説（確信度つき）を出す。
+各動画の観測フラグ（テロップにKW/キャプションにKW/CTA/短尺 等）を数え、
+共通パターン・rank上位帯 vs 下位帯の差分・共通する特徴（確信度つき）を出す。
 n は小さい（既定5）ので有意性検定はしない＝相関は仮説生成のみ（設計の正直さ原則）。
+
+事実は facts（コードの照合）から取る: KW は本文に実在するテロップ（Gemini の kw_match は
+信じない）、CTA は文言か秒のあるもの、尺は TikTok のメタを優先。上位帯（n=5 なら上位 2 本）の
+最小〜最大を「n=5」として出していた勝ち筋レンジ（_win_ranges）は廃止し、全 n 本の分布
+（最小・中央値・最大）だけを出す。
 """
 
 from __future__ import annotations
 
 import itertools
 import math
-import re
 import statistics
 from collections import Counter
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Literal
 
+from teamagent.skills.video_algorithm.evidence import Roster, contains, query_terms, ranks_text
+from teamagent.skills.video_algorithm.facts import (
+    VideoFacts,
+    duration_of,
+    kw_matrix,
+    video_facts,
+)
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     ColorSwatch,
@@ -23,21 +35,22 @@ from teamagent.skills.video_algorithm.schema import (
     DistItem,
     FeatureRowOut,
     KwCoverage,
+    KwTermLayer,
     StatsAnalysis,
     VideoMeta,
     WinFactor,
-    WinRange,
 )
 
 # フラグ名（日本語）。win_factors / common_patterns / rank差分 で共通利用。
+# 「商品/ブランドが映像内で認識できる」は背景の缶まで数えて意味が無かったので廃止（ブランドは
+# facts.BrandFact で名前・区分・目立ち方つきで出す）。
 _FLAG_LABELS: dict[str, str] = {
     "kw_in_telop": "テロップ(焼き込み)に検索KWが出る",
     "kw_in_caption": "キャプション本文に検索KWが入っている",
-    "strong_hook": "冒頭3秒のフックが強い型(問い/数字/衝撃/POV)",
-    "heavy_telop": "テロップ密度が高い(常時字幕＝可読性/保存)",
-    "has_cta": "明確なCTA(保存/フォロー/来店等)がある",
-    "short_video": "尺が短め(≤20秒)で完了率を取りに行く",
-    "brand_recognized": "商品/ブランドが映像内で認識できる",
+    "strong_hook": "冒頭3秒のフックが強い型(問い/数字/衝撃/POV/悩み提示)",
+    "heavy_telop": "テロップが常にある(密度 中以上)",
+    "has_cta": "動画内にCTA(文言か秒あり)がある",
+    "short_video": "尺が短め(≤20秒)",
 }
 _STRONG_HOOKS = {"question", "number", "shock", "pov", "problem"}
 
@@ -47,34 +60,37 @@ _META_FLAG_MIN_LIFT = 1.5
 
 
 def _query_terms(query: str) -> list[str]:
-    return [t for t in re.split(r"[\s　,、]+", query.strip()) if t]
+    return query_terms(query)
 
 
 def _meta_flag_base_rates(board: Sequence[VideoMeta], terms: list[str]) -> dict[str, float]:
     """board メタだけで算出できるフラグの全体基準率を返す。"""
     if not board:
         return {}
-    hits = sum(1 for meta in board if any(term and term in meta.desc for term in terms))
+    hits = sum(1 for meta in board if any(contains(meta.desc, term) for term in terms))
     return {"kw_in_caption": hits / len(board)}
 
 
-def _flags_for(video: AnalyzedVideo, terms: list[str]) -> dict[str, bool]:
+def _facts(video: AnalyzedVideo, terms: list[str], roster: Roster | None = None) -> VideoFacts:
+    return video_facts(video, " ".join(terms), roster, terms=terms)
+
+
+def _flags_for(
+    video: AnalyzedVideo, terms: list[str], facts: VideoFacts | None = None
+) -> dict[str, bool]:
     a = video.analysis
     if a is None:
         return {k: False for k in _FLAG_LABELS}
-    desc = video.meta.desc
-    kw_in_caption = any(t and t in desc for t in terms) or any(
-        m.matched and m.layer == "caption" for m in a.keyword_matches
-    )
-    dur = a.duration_sec
+    f = facts or _facts(video, terms)
     return {
-        "kw_in_telop": a.kw_in_telop(),
-        "kw_in_caption": kw_in_caption,
+        # テロップ本文に語が実在するもの（言い換えは秒±2のテロップに実在するもの）だけ。
+        "kw_in_telop": any(h.layer == "telop" for h in f.kw),
+        # キャプション本文に語があるか（上位ボードの基準率と同じ数え方）。
+        "kw_in_caption": any(h.layer == "caption" and h.match == "exact" for h in f.kw),
         "strong_hook": a.hook_type in _STRONG_HOOKS,
         "heavy_telop": a.telop_density in ("medium", "heavy"),
-        "has_cta": a.has_cta(),
-        "short_video": 0 < dur <= 20,
-        "brand_recognized": a.has_brand(),
+        "has_cta": f.cta_in_video is not None,
+        "short_video": 0 < f.duration_sec <= 20,
     }
 
 
@@ -130,9 +146,12 @@ def _confidence(observed: int, total: int) -> Literal["高", "中", "低"]:
 
 
 def cross_analyze(
-    videos: list[AnalyzedVideo], query: str, board: Sequence[VideoMeta] | None = None
+    videos: list[AnalyzedVideo],
+    query: str,
+    board: Sequence[VideoMeta] | None = None,
+    roster: Roster | None = None,
 ) -> CrossAnalysis:
-    """分析済み動画を横断分析し、任意の board を勝ち筋の基準率に使う。"""
+    """分析済み動画を横断分析し、任意の board を共通点の基準率に使う。"""
     analyzed = [v for v in videos if v.analysis is not None]
     n = len(analyzed)
     cross = CrossAnalysis(keyword=query, video_count=n)
@@ -141,12 +160,13 @@ def cross_analyze(
         return cross
 
     terms = _query_terms(query)
-    flags_by_video = [_flags_for(v, terms) for v in analyzed]
+    facts = [_facts(v, terms, roster) for v in analyzed]
+    flags_by_video = [_flags_for(v, terms, f) for v, f in zip(analyzed, facts, strict=True)]
 
-    # 指標
+    # 指標（尺は TikTok のメタを優先）
     eng = [v.meta.engagement_rate for v in analyzed]
     saves = [v.meta.save_rate() for v in analyzed]
-    durs = [v.analysis.duration_sec for v in analyzed if v.analysis and v.analysis.duration_sec > 0]
+    durs = [f.duration_sec for f in facts if f.duration_sec > 0]
     cross.avg_engagement_rate = round(statistics.mean(eng), 2) if eng else 0.0
     cross.avg_save_rate = round(statistics.mean(saves), 3) if saves else 0.0
     cross.median_duration_sec = round(statistics.median(durs), 1) if durs else 0.0
@@ -211,16 +231,20 @@ def cross_analyze(
 
     # AI 統計（決定的・stdlib のみ）。失敗しても既存出力は壊さない
     try:
-        cross.stats = statistical_analyze(analyzed, query, terms)
+        cross.stats = statistical_analyze(analyzed, query, terms, board=board, roster=roster)
     except Exception:  # 統計失敗で横断分析全体を落とさない
         cross.stats = None
 
-    # サマリ（1行）
-    top_factor = cross.win_factors[0].factor if cross.win_factors else "（顕著な共通項なし）"
+    # サマリ（1行）。「勝ち筋」とは呼ばない（全本に共通する特徴は前提で、差の要因ではない）。
+    if cross.win_factors:
+        lead = cross.win_factors[0]
+        top_text = f"『{lead.factor}』（{lead.observed_in}/{lead.total}本）"
+    else:
+        top_text = "（顕著な共通項なし）"
     cross.summary = (
         f"KW「{query}」上位{n}本＝平均ENG {cross.avg_engagement_rate}% / "
         f"保存率 {cross.avg_save_rate}% / 尺中央値 {cross.median_duration_sec}秒。"
-        f"最も共通する勝ち筋は『{top_factor}』。"
+        f"最も多い共通点は{top_text}。"
     )
     return cross
 
@@ -280,27 +304,35 @@ def _hex_bin(hexstr: str) -> str:
 _DENSITY_ORD = {"none": 0, "light": 1, "medium": 2, "heavy": 3}
 
 
+# KW の層（layer_fill の名前 → facts の層）。発話は分析 AI の聞き取り（未照合）。
+_KW_LAYER_KEYS: dict[str, str] = {
+    "テロップ": "telop",
+    "キャプション": "caption",
+    "HT": "hashtag",
+    "音声": "speech",
+}
+
+
+def _kw_layer_flags(f: VideoFacts) -> dict[str, bool]:
+    """層ごとに、どれかの語が出たか（テロップ・キャプションは照合済み）。"""
+    return {name: any(h.layer == layer for h in f.kw) for name, layer in _KW_LAYER_KEYS.items()}
+
+
 def _kw_layers(v: AnalyzedVideo, terms: list[str]) -> int:
-    a = v.analysis
-    if a is None:
+    if v.analysis is None:
         return 0
-    telop = a.kw_in_telop()
-    spoken = any(m.matched for m in a.spoken_keywords)
-    caption = any(t and t in v.meta.desc for t in terms) or any(
-        m.matched and m.layer == "caption" for m in a.keyword_matches
-    )
-    hashtag = any(m.matched and m.layer == "hashtag" for m in a.keyword_matches)
-    return sum((telop, spoken, caption, hashtag))
+    return sum(_kw_layer_flags(_facts(v, terms)).values())
 
 
 def _num_features(v: AnalyzedVideo) -> dict[str, float | None]:
     a = v.analysis
     if a is None:
         return {}
+    dur = duration_of(v.meta, a)  # TikTok のメタを優先（Gemini の尺は 1 秒ずれることがある）
     return {
         "保存率": v.meta.save_rate(),
-        "係数": v.meta.engagement_rate,
-        "尺(秒)": a.duration_sec if a.duration_sec > 0 else None,
+        "エンゲージメント率": v.meta.engagement_rate,
+        "尺(秒)": dur if dur > 0 else None,
         "テロップ枚数": float(len(a.telops)),
         "テロップ密度": float(_DENSITY_ORD.get(a.telop_density, 0)),
     }
@@ -346,7 +378,12 @@ def _monotonic(by_rank_feature: list[float]) -> tuple[int, int]:
 
 
 def statistical_analyze(
-    analyzed: list[AnalyzedVideo], query: str, terms: list[str]
+    analyzed: list[AnalyzedVideo],
+    query: str,
+    terms: list[str],
+    *,
+    board: Sequence[VideoMeta] | None = None,
+    roster: Roster | None = None,
 ) -> StatsAnalysis:
     ok = [v for v in analyzed if v.analysis]
     n = len(ok)
@@ -390,8 +427,9 @@ def statistical_analyze(
             di.outlier_rank, di.outlier_value, di.outlier_note = out
         st.distributions.append(di)
 
-    # ③ KW カバレッジ
-    _kw_coverage(st, ok, terms, n)
+    # ③ KW カバレッジ（語ごと×層ごと・照合済み）
+    facts = [_facts(v, terms, roster) for v in ok]
+    _kw_coverage(st, facts, terms, n, board or [])
 
     # ④ フック分布
     hooks = Counter(v.analysis.hook_type for v in ok if v.analysis)
@@ -399,9 +437,7 @@ def statistical_analyze(
     strong = sum(1 for v in ok if v.analysis and v.analysis.hook_type in _STRONG_HOOKS)
     st.strong_hook_ratio = f"{strong}/{n}"
 
-    # ⑤ 勝ち筋レンジ（上位帯）
-    half = by_rank[: max(1, n // 2)]
-    st.win_ranges = _win_ranges(half)
+    # ⑤ 勝ち筋レンジ（上位帯の最小〜最大）は廃止。分布（②・全 n 本）だけを出す。
 
     # ⑥ 特徴量マトリクス
     for v in by_rank:
@@ -411,7 +447,7 @@ def statistical_analyze(
             FeatureRowOut(
                 rank=v.meta.rank,
                 save_rate=round(v.meta.save_rate(), 2),
-                duration_sec=round(a.duration_sec, 1),
+                duration_sec=round(duration_of(v.meta, a), 1),
                 telop_count=len(a.telops),
                 telop_density=a.telop_density,
                 hook_type=a.hook_type,
@@ -426,6 +462,12 @@ def statistical_analyze(
         "相関≠因果。順位はTikTok非公開の内部重みで決まり、ここで測るのは表層特徴の共通性のみ。",
         "上位入賞動画だけを見る生存者バイアスあり（落ちた動画は不可視）。テスト投稿での検証推奨。",
     ]
+    pr_ranks = [f.rank for f in facts if f.pr]
+    if pr_ranks:
+        st.caveats.append(
+            f"上位{n}本のうちタイアップ表記{len(pr_ranks)}本（{ranks_text(pr_ranks)}）。"
+            "タイアップ投稿の特徴は、案件の指定による演出の可能性があります。"
+        )
     return st
 
 
@@ -448,48 +490,51 @@ def _outlier(
     return None
 
 
-def _kw_coverage(st: StatsAnalysis, ok: list[AnalyzedVideo], terms: list[str], n: int) -> None:
+def _kw_coverage(
+    st: StatsAnalysis,
+    facts: list[VideoFacts],
+    terms: list[str],
+    n: int,
+    board: Sequence[VideoMeta],
+) -> None:
+    """層ごとの充足（どれかの語）と、語ごと×層ごと（完全一致と言い換えを分ける）。"""
     weights = {"テロップ": 0.35, "キャプション": 0.30, "HT": 0.20, "音声": 0.15}
     fill = {k: 0 for k in weights}
     scores: list[float] = []
     layers_sum = 0
     per: list[str] = []
-    for v in ok:
-        a = v.analysis
-        if a is None:
-            continue
-        lay = {
-            "テロップ": a.kw_in_telop(),
-            "音声": any(m.matched for m in a.spoken_keywords),
-            "キャプション": any(t and t in v.meta.desc for t in terms)
-            or any(m.matched and m.layer == "caption" for m in a.keyword_matches),
-            "HT": any(m.matched and m.layer == "hashtag" for m in a.keyword_matches),
-        }
+    for f in facts:
+        lay = _kw_layer_flags(f)
         cnt = sum(lay.values())
         layers_sum += cnt
         sc = sum(weights[k] for k, ok_ in lay.items() if ok_) * 100
         scores.append(sc)
         for k, ok_ in lay.items():
             fill[k] += int(ok_)
-        per.append(f"#{v.meta.rank} {cnt}/4({sc:.0f})")
+        per.append(f"#{f.rank} {cnt}/4({sc:.0f})")
+    # kw_matrix は「動画を見て分析できた本」を母数にする。統計の n（分析あり）と揃えるため、
+    # ここでは facts をそのまま母数にする（サムネだけの縮退も分析ありとして数える従来の n）。
+    rows = kw_matrix([_as_watched(f) for f in facts], board, " ".join(terms))
     st.kw_coverage = KwCoverage(
         avg_score_0_100=round(statistics.mean(scores), 1) if scores else 0.0,
         avg_layers_0_4=round(layers_sum / n, 2) if n else 0.0,
         layer_fill=[(k, f"{fill[k]}/{n}") for k in weights],
         per_video=per,
+        per_term=[
+            KwTermLayer(
+                term=r.term,
+                layer=r.layer,  # type: ignore[arg-type]
+                exact_ranks=list(r.exact),
+                synonym_ranks=list(r.synonym),
+                n=r.n,
+                verified=r.verified,
+                board_hits=r.board[0] if r.board else None,
+                board_size=r.board[1] if r.board else None,
+            )
+            for r in rows
+        ],
     )
 
 
-def _win_ranges(half: list[AnalyzedVideo]) -> list[WinRange]:
-    """上位帯のレンジ。単一サンプル（min==max）の「レンジ」は誠実でないので出さない。"""
-    out: list[WinRange] = []
-    durs = [v.analysis.duration_sec for v in half if v.analysis and v.analysis.duration_sec > 0]
-    if len(durs) >= 2 and min(durs) != max(durs):
-        out.append(WinRange(label="尺", text=f"{min(durs):.0f}-{max(durs):.0f}秒"))
-    saves = [v.meta.save_rate() for v in half]
-    if len(saves) >= 2:
-        out.append(WinRange(label="保存率", text=f"{min(saves):.1f}% 以上"))
-    tels = [len(v.analysis.telops) for v in half if v.analysis]
-    if len(tels) >= 2:
-        out.append(WinRange(label="テロップ", text=f"{min(tels)}枚以上"))
-    return out
+def _as_watched(f: VideoFacts) -> VideoFacts:
+    return f if f.watched else replace(f, watched=True)

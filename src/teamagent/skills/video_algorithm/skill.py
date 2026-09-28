@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, ClassVar, Literal
 
@@ -45,6 +46,8 @@ from teamagent.adapters.video_algorithm_cache import (
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.video_algorithm.analysis import cross_analyze
+from teamagent.skills.video_algorithm.evidence import Roster
+from teamagent.skills.video_algorithm.facts import JST
 from teamagent.skills.video_algorithm.report import render_report
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
@@ -110,6 +113,36 @@ _APIFY_S3_MARGIN_S = 30
 
 PROMPT_VERSION_ENV = "VIDEO_ALGO_PROMPT_VERSION"
 DEFAULT_PROMPT_VERSION = "v2"
+
+
+def _int_or_zero(value: Any) -> int:
+    """取得結果の整数欄（投稿日時など）。壊れた値は 0（不明）にする。"""
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _str_list(value: Any) -> list[str]:
+    """取得結果の文字列の並び（ハッシュタグなど）。文字列以外は捨てる。"""
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        return []
+    return [str(x) for x in value if isinstance(x, str) and x.strip()]
+
+
+def _echo_fields(input: VideoAlgorithmInput) -> dict[str, Any]:
+    """区分・提案文の前提の echo（クライアント名・競合・避けたい訴求）。"""
+    roster = Roster.of(input.client_name, input.competitors)
+    return {
+        "client_name": roster.client_name,
+        "competitors": list(roster.competitors),
+        "avoid_terms": [t.strip() for t in (input.avoid_terms or []) if t and t.strip()],
+    }
+
+
+def _now_jst_iso() -> str:
+    """取得日時（JST・秒まで）。順位は「この時点」の値として資料に出す。"""
+    return datetime.now(JST).isoformat(timespec="seconds")
 
 
 def prompt_version_from_env() -> str:
@@ -488,6 +521,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     engagement_rate=float(p.get("eg_rate", 0.0) or 0.0),
                     cover_url=None,
                     duration_sec=float(p.get("duration", 0.0) or 0.0),
+                    # 取得済みの投稿日時・ハッシュタグ・音源名を捨てずに写す。
+                    create_time=_int_or_zero(p.get("create_time")),
+                    hashtags=_str_list(p.get("hashtags")),
+                    music_title=str(p.get("music_title", "") or ""),
                 )
             )
         return metas
@@ -523,6 +560,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     engagement_rate=float(getattr(v, "engagement_rate", 0.0) or 0.0) * 100.0,
                     cover_url=getattr(v, "cover_url", None),
                     duration_sec=float(getattr(v, "duration", 0.0) or 0.0),
+                    # 取得済みの投稿日時・ハッシュタグ・音源名を捨てずに写す。
+                    create_time=_int_or_zero(getattr(v, "create_time", 0)),
+                    hashtags=_str_list(getattr(v, "hashtags", ())),
+                    music_title=str(getattr(v, "music_title", "") or ""),
                 )
             )
         return metas
@@ -1151,6 +1192,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 acquire_job_id=input.acquire_job_id,
                 search_volume=input.search_volume,
                 requester=requested_by,
+                competitors=input.competitors,
+                avoid_terms=input.avoid_terms,
             )
             with _stage("cache_lookup", ctx.request_id):
                 cached = self._read_cached_output(result_cache, cache_key, ctx)
@@ -1342,6 +1385,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         backfilled = sum(
             1 for video in out.videos if video.analysis and video.meta.rank > input.max_videos
         )
+        # 名簿・避けたい訴求はキャッシュキーに入る（同じ値の依頼だけが再利用する）。
+        # echo は今回の入力の値にする。
+        for key, value in _echo_fields(input).items():
+            setattr(out, key, value)
         out.total_cost_usd = 0.0
         out.slack_summary = self._slack_summary(out, backfilled)
         ctx.bind_logger(self.name).info(
@@ -1394,10 +1441,13 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
         with _stage("search", ctx.request_id):
             pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
+        generated_at = _now_jst_iso()
         if not pool:
             empty = VideoAlgorithmOutput(
                 query=input.query,
                 slack_summary=f"🔎 「{input.query}」の検索結果を取得できませんでした。",
+                **_echo_fields(input),
+                generated_at=generated_at,
             )
             if result_cache is not None and cache_key is not None and lease is not None:
                 self._put_cached_result(
@@ -1486,8 +1536,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analyzed.sort(key=lambda v: v.meta.rank)
         backfilled = sum(1 for v in analyzed if v.analysis and v.meta.rank > target)
 
+        roster = Roster.of(input.client_name, input.competitors)
         with _stage("cross", ctx.request_id):
-            cross = cross_analyze(analyzed, input.query, board=pool)
+            cross = cross_analyze(analyzed, input.query, board=pool, roster=roster)
         total_cost = round(sum(v.cost_usd for v in results), 6)  # 全試行の課金を計上
         # 横断シンセシス（Gemini 2nd pass・概念の関連性）。≥2本でのみ実行
         if sum(1 for v in analyzed if v.analysis) >= 2:
@@ -1504,6 +1555,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     prompt_version=self._prompt_version,
                     stats=cross.stats,
                     extra_context=self._kw_context(input),
+                    roster=roster,
                 )
             cross.synthesis = syn
             total_cost = round(total_cost + syn_cost, 6)
@@ -1518,6 +1570,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             model_id=model_id,
             search_volume=input.search_volume,
             kw_set=list(input.kw_set or []),
+            **_echo_fields(input),
+            generated_at=generated_at,
             quota_note=(
                 f"今月の残り本数の都合で{len(ok)}本までで止めました"
                 f"（ご依頼は{target}本）。リセットは来月1日（JST）です。"

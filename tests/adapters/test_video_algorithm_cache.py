@@ -110,6 +110,16 @@ def test_cache_key_also_separates_optional_result_inputs() -> None:
     )
 
 
+def test_cache_key_separates_roster_and_avoid_terms_but_keeps_old_keys() -> None:
+    """名簿・避けたい訴求は横断の解釈を変えるのでキーに入れる。空なら従来のキーのまま。"""
+    base = _key()
+    assert _key(competitors=None, avoid_terms=None) == base
+    assert _key(competitors=[], avoid_terms=[]) == base
+    assert _key(competitors=["S&B|エスビー食品"]) != base
+    assert _key(avoid_terms=["ルー卒業"]) != base
+    assert _key(competitors=["A"]) != _key(competitors=["B"])
+
+
 def test_result_roundtrip_has_mandatory_ttl_and_drops_local_path() -> None:
     now = [1000.0]
     s3 = _FakeS3()

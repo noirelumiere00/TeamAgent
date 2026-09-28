@@ -111,7 +111,9 @@ def _av(
             hook_type="question",
             telop_density="heavy" if kw_telop else "none",
             telops=[TelopItem(sec=1, text="新宿", kw_match=kw_telop)],
+            # CTA は文言か秒があるものだけ数える（型だけの CTA は無効）。
             cta_type=["save"] if cta else [],
+            cta_text="保存してね" if cta else None,
         ),
     )
 

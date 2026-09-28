@@ -248,7 +248,8 @@ def _verdict_band(out: VideoAlgorithmOutput) -> str:
 def _next_actions(out: VideoAlgorithmOutput) -> list[str]:
     """提案アクション。単一サンプル/過半数未満の助言は誠実さのため出さない。
 
-    - 「27-27秒」のような min==max レンジは _win_ranges 側で既に除外済み。
+    - 尺は上位帯（上位 2 本）の幅を指示にしない（旧 _win_ranges は廃止）。全 n 本の分布を
+      事実として添えるだけにする（最良の動画を範囲外に追い出さないため）。
     - フックは過半数（>n/2）の型のときだけ推奨。
     - サムネ色は thumb_agree（過半数一致）のときだけ「○○で作る」と言う。
     - thumb_consensus 文字列の機械分割は廃止し、構造値（dominant_*）から組む。
@@ -258,9 +259,12 @@ def _next_actions(out: VideoAlgorithmOutput) -> list[str]:
     acts: list[str] = ["冒頭3秒のテロップに「" + out.query + "」を焼き込む"]
     st = c.stats
     if st:
-        dur = next((r.text for r in st.win_ranges if r.label == "尺"), "")
-        if dur:
-            acts.append(f"尺は {dur} に収める")
+        dur = next((d for d in st.distributions if d.feature == "尺(秒)"), None)
+        if dur is not None and st.sample_size >= 2 and dur.min != dur.max:
+            acts.append(
+                f"尺は固定しない（上位{st.sample_size}本は{dur.min:.0f}〜{dur.max:.0f}秒・"
+                f"中央値{dur.median:.0f}秒）"
+            )
         if st.hook_counts:
             top_hook, hc = st.hook_counts[0]
             if hc * 2 > n:  # 過半数の型だけ推奨（n=1の型は出さない）

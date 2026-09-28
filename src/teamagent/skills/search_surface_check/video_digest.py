@@ -150,6 +150,8 @@ def post_to_meta(post: SurfacePost) -> VideoMeta:
         engagement_rate=round(engagement, 2),
         cover_url=post.thumb_url or None,
         duration_sec=float(post.duration_sec),
+        create_time=int(post.posted_at or 0),
+        hashtags=[str(h) for h in post.hashtags if h],
     )
 
 

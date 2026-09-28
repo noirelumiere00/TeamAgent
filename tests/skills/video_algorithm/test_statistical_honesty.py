@@ -36,7 +36,8 @@ def _analyzed_video(
         analysis=VideoVSEOAnalysis(
             duration_sec=duration,
             hook_type="question",
-            telops=[TelopItem(sec=1, text="新宿", kw_match=kw_telop)],
+            # KW はテロップ本文に語があるかで数える（kw_match の申告は使わない）。
+            telops=[TelopItem(sec=1, text="新宿" if kw_telop else "今日のお店", kw_match=kw_telop)],
         ),
     )
 

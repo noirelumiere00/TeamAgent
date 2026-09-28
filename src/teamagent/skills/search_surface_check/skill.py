@@ -90,6 +90,7 @@ from teamagent.skills.search_surface_check.video_render import (
     render_video_chapter,
 )
 from teamagent.skills.search_surface_check.video_structure import common_points
+from teamagent.skills.video_algorithm.evidence import Roster
 from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 logger = structlog.get_logger(__name__)
@@ -843,6 +844,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             videos=analyzed,
             posts={p.rank: p for p in chosen},
             notes=notes,
+            client_name=input.client_name,
         )
         report_url: str | None = None
         try:
@@ -975,7 +977,7 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                 keyword=keyword,
                 client_name=client_name,
                 videos=videos,
-                common=common_points(videos),
+                common=common_points(videos, query=keyword, roster=Roster.of(client_name)),
                 on_drop=on_drop,
             )
         except Exception as e:

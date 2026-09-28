@@ -6,6 +6,13 @@ CTA の秒（cta_sec）を含む場面＝CTA、ほかは手順（展開）。推
 
 評価（◎○△—）は数字の基準でコードが決める（LLM に採点させない）。基準は下の定数で、テストで
 境界を固定し、レポートの脚注にそのまま書く（``GRADE_RULES``）。— は判定に必要な値が無いとき。
+
+Gemini の自己申告はそのまま使わない（video_algorithm.evidence で照合する）:
+- 検索 KW の初出は、テロップ本文に語が実在するもの（言い換えは秒 ±2 のテロップに実在するもの）
+  と発話（AI 聞き取り）から取る。``kw_match`` の ✓ は信じない。
+- ブランドの区分（クライアント／競合）は名簿（Roster）でコードが決める。``brand_relation`` は
+  使わない。名簿が無ければ区分を書かない。
+- 冒頭のテロップは ``hook_has_caption`` ではなく、最初のテロップの秒（3 秒以内か）で決める。
 """
 
 from __future__ import annotations
@@ -21,6 +28,14 @@ from teamagent.skills.search_surface_check.video_digest import (
     duration_of,
     hook_label,
     is_watched,
+)
+from teamagent.skills.video_algorithm.evidence import (
+    KwHit,
+    Roster,
+    analysis_terms,
+    fold,
+    kw_hits,
+    query_terms,
 )
 from teamagent.skills.video_algorithm.frames import (
     MAX_SCENE_FRAMES,
@@ -66,6 +81,12 @@ BRAND_GOOD_SEC = 3.0  # 商品が映る合計秒がこれ以上かつ目立つ�
 COHERENCE_GOOD = 80  # 一致度がこれ以上で ◎
 COHERENCE_OK = 60  # これ以上で ○
 
+# 分量（大さじ・小さじ・数字＋g/ml/cc/個/本/袋/枚/カップ/杯/片・適量・少々）。NFKC＋小文字で見る。
+# 「4つ」は数えない（「やりがちNG談を4つ」のような分量でない語を拾うため）。
+QTY_RE = re.compile(
+    r"大さじ|小さじ|適量|少々|\d+(?:[./]\d+)?\s*(?:g|ml|cc|個|本|袋|枚|カップ|杯|片)(?![a-z])"
+)
+
 AXES: tuple[str, ...] = (
     "冒頭3秒の掴み",
     "テンポ",
@@ -87,7 +108,7 @@ GRADE_RULES: tuple[tuple[str, str], ...] = (
         f"冒頭（0〜{_n(OPENING_SEC)}秒）のテロップあり・最初のテロップが"
         f"{_n(HOOK_FIRST_TELOP_MAX_SEC)}秒以内・"
         f"フックの型が「その他」でない、の 3 つがそろえば{MARK_GOOD}、1 つ欠けで{MARK_OK}、"
-        f"2 つ以上欠けで{MARK_WEAK}",
+        f"2 つ以上欠けで{MARK_WEAK}（テロップの有無は分析 AI の申告でなく、テロップの秒で見る）",
     ),
     (
         "テンポ",
@@ -97,13 +118,15 @@ GRADE_RULES: tuple[tuple[str, str], ...] = (
     (
         "KWの露出",
         f"検索 KW がテロップか発話に初めて出る秒が{_n(KW_GOOD_SEC)}秒以内で{MARK_GOOD}、"
-        f"{_n(KW_OK_SEC)}秒以内（または出るが秒が不明）で{MARK_OK}、それ以降か出ないと{MARK_WEAK}",
+        f"{_n(KW_OK_SEC)}秒以内（または発話に出るが秒が不明）で{MARK_OK}、それ以降か出ないと"
+        f"{MARK_WEAK}。テロップは本文に語があるもの（言い換えは前後2秒のテロップに実在するもの）"
+        "だけ数え、発話は分析 AI の聞き取り",
     ),
     (
         "保存の仕掛け",
         f"手順の段（手順の場面が{STEPS_MIN_SCENES}つ以上か番号つきのテロップ）・保存を促す CTA・"
-        f"見返す理由（保存・シェアの動機）のうち{SAVE_GOOD_SIGNALS}つ以上で{MARK_GOOD}、"
-        f"1 つで{MARK_OK}、無しで{MARK_WEAK}",
+        "分量を載せている（テロップかキャプションに大さじ・g などの分量）"
+        f"のうち{SAVE_GOOD_SIGNALS}つ以上で{MARK_GOOD}、1 つで{MARK_OK}、無しで{MARK_WEAK}",
     ),
     (
         "CTA",
@@ -118,7 +141,8 @@ GRADE_RULES: tuple[tuple[str, str], ...] = (
     (
         "一致度",
         f"テロップ・キャプション・映像の一致度（0〜100）が{COHERENCE_GOOD}以上で{MARK_GOOD}、"
-        f"{COHERENCE_OK}以上で{MARK_OK}、それ未満で{MARK_WEAK}。不明なら{MARK_NONE}",
+        f"{COHERENCE_OK}以上で{MARK_OK}、それ未満で{MARK_WEAK}。分析 AI が食い違い（乖離）を"
+        f"指摘していれば 1 段下げる。不明なら{MARK_NONE}",
     ),
 )
 
@@ -311,24 +335,27 @@ class VideoKeys:
     brand_others: tuple[str, ...] = ()  # 見出しのブランド以外に映るブランド（名前だけ）
 
 
-def _kw_first(a: VideoVSEOAnalysis) -> tuple[float | None, str, bool]:
-    hits: list[tuple[float, str]] = [(t.sec, _LAYER_TELOP) for t in a.telops if t.kw_match]
+def kw_terms(a: VideoVSEOAnalysis, query: str | None) -> list[str]:
+    """照合に使う検索語。検索 KW が渡されなければ、分析 AI が記録した keyword から取る。"""
+    return query_terms(query) if query else analysis_terms(a)
+
+
+def _kw_first(hits_in: tuple[KwHit, ...]) -> tuple[float | None, str, bool]:
+    """照合済みの KW（evidence.kw_hits）のうち、テロップか発話で最も早い秒。
+
+    テロップは本文に語があるもの・言い換えは秒 ±2 のテロップに実在するものだけ（Gemini の
+    kw_match は使わない）。発話は分析 AI の聞き取りで、秒が無ければ「出るが秒は不明」。
+    """
+    hits: list[tuple[float, str]] = []
     matched_no_sec = False
-    for k in a.keyword_matches:
-        if not k.matched or k.layer not in ("telop", "narration", "dialogue"):
-            continue
-        layer = _LAYER_TELOP if k.layer == "telop" else _LAYER_SPEECH
-        if k.appear_sec:
-            hits.extend((s, layer) for s in k.appear_sec)
-        else:
-            matched_no_sec = True
-    for k in a.spoken_keywords:
-        if not k.matched:
-            continue
-        if k.appear_sec:
-            hits.extend((s, _LAYER_SPEECH) for s in k.appear_sec)
-        else:
-            matched_no_sec = True
+    for h in hits_in:
+        if h.layer == "telop":
+            hits.extend((s, _LAYER_TELOP) for s in h.secs)
+        elif h.layer == "speech":
+            if h.secs:
+                hits.extend((s, _LAYER_SPEECH) for s in h.secs)
+            else:
+                matched_no_sec = True
     if hits:
         sec, layer = min(hits, key=lambda h: (h[0], h[1]))
         return sec, layer, False
@@ -351,19 +378,22 @@ def _brand_name(b: BrandDetection) -> str:
     return "ロゴ（不明）" if not name or name == _UNIDENTIFIED_LOGO else name
 
 
-def brand_summaries(a: VideoVSEOAnalysis) -> list[BrandSummary]:
+def brand_summaries(a: VideoVSEOAnalysis, roster: Roster | None = None) -> list[BrandSummary]:
     """ブランドごとにまとめ、見出しにする順（クライアント→競合→目立つ→長く映る→先に出た）に並べる。
 
     検出はブランドの名前でまとめる（同じブランドが看板とパッケージで 2 つ出ることがある）。
-    関係・目立ち方・初出・合計秒はそのブランドの検出だけから取り、ほかのブランドと混ぜない。
+    目立ち方・初出・合計秒はそのブランドの検出だけから取り、ほかのブランドと混ぜない。
+    区分（クライアント／競合）は名簿（roster）でコードが決める。分析 AI の brand_relation は
+    使わない（クライアント名を渡していないのに client と推測した例があった）。
     """
+    roster = roster or Roster()
     groups: dict[str, list[BrandDetection]] = {}
     for b in a.brand_detections:
         groups.setdefault(_brand_name(b).casefold(), []).append(b)
     out: list[tuple[tuple[int, int, float, int], BrandSummary]] = []
     for order, dets in enumerate(groups.values()):
-        relations = [d.brand_relation for d in dets if d.brand_relation in _RELATION_RANK]
-        relation = min(relations, key=lambda r: _RELATION_RANK[r], default="")
+        code_relation = roster.relation(_brand_name(dets[0]))
+        relation = code_relation if code_relation in _RELATION_RANK else ""
         prominence = min((d.prominence for d in dets), key=lambda p: _PROMINENCE_RANK.get(p, 4))
         firsts = [s for d in dets for s in d.appear_sec]
         total = round(sum(d.total_screen_time_sec for d in dets), 1)
@@ -384,16 +414,20 @@ def brand_summaries(a: VideoVSEOAnalysis) -> list[BrandSummary]:
     return [summary for _rank, summary in sorted(out, key=lambda x: x[0])]
 
 
-def video_keys(video: AnalyzedVideo) -> VideoKeys | None:
+def video_keys(
+    video: AnalyzedVideo, *, query: str | None = None, roster: Roster | None = None
+) -> VideoKeys | None:
+    """主要な数字。query（検索 KW）が無ければ分析 AI が記録した keyword で照合する。"""
     a = video.analysis
     if a is None:
         return None
     dur = duration_of(video)
     avg = round(dur / a.cut_count, 1) if a.cut_count and dur > 0 else None
     telop_secs = [t.sec for t in a.telops if t.text.strip()]
-    kw_sec, kw_layer, kw_no_sec = _kw_first(a)
-    kw_caption = any(k.matched and k.layer in ("caption", "hashtag") for k in a.keyword_matches)
-    brands = brand_summaries(a)
+    hits = kw_hits(video.meta, a, kw_terms(a, query))
+    kw_sec, kw_layer, kw_no_sec = _kw_first(hits)
+    kw_caption = any(h.layer in ("caption", "hashtag") for h in hits)
+    brands = brand_summaries(a, roster)
     best = brands[0] if brands else None
     return VideoKeys(
         duration_sec=dur,
@@ -453,7 +487,8 @@ class Grade:
 
 
 def _grade_hook(a: VideoVSEOAnalysis, k: VideoKeys) -> Grade:
-    opening = a.hook_has_caption  # 分析 AI が「冒頭 0〜3 秒にテロップがある」と見たか
+    # 冒頭（0〜3 秒）のテロップ: 分析 AI の申告（hook_has_caption）でなく、テロップの秒で見る。
+    opening = k.first_telop_sec is not None and k.first_telop_sec <= OPENING_SEC
     early = k.first_telop_sec is not None and k.first_telop_sec <= HOOK_FIRST_TELOP_MAX_SEC
     typed = a.hook_type != "other"
     missing = [opening, early, typed].count(False)
@@ -498,14 +533,27 @@ def _steps_signal(a: VideoVSEOAnalysis) -> bool:
     return explicit_steps >= STEPS_MIN_SCENES or numbered >= STEPS_MIN_SCENES
 
 
-def _grade_save(a: VideoVSEOAnalysis) -> Grade:
+def qty_places(a: VideoVSEOAnalysis, desc: str) -> list[str]:
+    """分量を載せている場所（テロップ・キャプション）。"""
+    places: list[str] = []
+    if any(QTY_RE.search(fold(t.text)) for t in a.telops):
+        places.append("テロップ")
+    if QTY_RE.search(fold(desc)):
+        places.append("キャプション")
+    return places
+
+
+def _grade_save(a: VideoVSEOAnalysis, desc: str) -> Grade:
+    """保存の仕掛け。「見返す理由」（保存・シェアの動機の欄）は 5 本とも空でなく差が出ないので
+    使わず、分量を載せているか（テロップかキャプション）で見る。"""
     signals: list[str] = []
     if _steps_signal(a):
         signals.append("手順の段")
     if "save" in a.cta_type:
         signals.append("保存を促す CTA")
-    if a.save_share_motivation.strip():
-        signals.append("見返す理由")
+    places = qty_places(a, desc)
+    if places:
+        signals.append(f"分量を{'と'.join(places)}に載せている")
     n = len(signals)
     mark = MARK_GOOD if n >= SAVE_GOOD_SIGNALS else MARK_OK if n == 1 else MARK_WEAK
     return Grade("保存の仕掛け", mark, "・".join(signals) if signals else "仕掛けは見当たらない")
@@ -538,25 +586,32 @@ def _grade_brand(k: VideoKeys) -> Grade:
     return Grade("商品の見せ方", MARK_GOOD if good else MARK_OK, "・".join(parts))
 
 
+_MARK_DOWN = {MARK_GOOD: MARK_OK, MARK_OK: MARK_WEAK, MARK_WEAK: MARK_WEAK}
+
+
 def _grade_coherence(a: VideoVSEOAnalysis) -> Grade:
     c = a.message_coherence
     if c is None:
         return Grade("一致度", MARK_NONE, "一致度が分からない")
     mark = MARK_GOOD if c >= COHERENCE_GOOD else MARK_OK if c >= COHERENCE_OK else MARK_WEAK
+    if (a.divergence_note or "").strip():  # 食い違いを自分で指摘しているのに高得点のことがある
+        return Grade("一致度", _MARK_DOWN[mark], f"{c}（100 が一致）・食い違いの指摘あり")
     return Grade("一致度", mark, f"{c}（100 が一致）")
 
 
-def grade_video(video: AnalyzedVideo) -> list[Grade]:
+def grade_video(
+    video: AnalyzedVideo, *, query: str | None = None, roster: Roster | None = None
+) -> list[Grade]:
     """評価軸ごとの ◎○△—（AXES の順）。動画を見て分析できていなければ空。"""
     a = video.analysis
-    k = video_keys(video)
+    k = video_keys(video, query=query, roster=roster)
     if a is None or k is None or not is_watched(video):
         return []
     return [
         _grade_hook(a, k),
         _grade_tempo(k),
         _grade_kw(k),
-        _grade_save(a),
+        _grade_save(a, video.meta.desc),
         _grade_cta(k),
         _grade_brand(k),
         _grade_coherence(a),
@@ -566,14 +621,18 @@ def grade_video(video: AnalyzedVideo) -> list[Grade]:
 # ── 共通点（上位に多い型・決定的）─────────────────────────────────────────
 
 
-def common_points(videos: list[AnalyzedVideo]) -> list[str]:
+def common_points(
+    videos: list[AnalyzedVideo], *, query: str | None = None, roster: Roster | None = None
+) -> list[str]:
     """動画を見て分析できた本を横断して、多い型を本数つきで書く（LLM を通さない）。"""
     watched = [v for v in videos if is_watched(v) and v.analysis is not None]
     n = len(watched)
     if n == 0:
         return []
     analyses = [v.analysis for v in watched if v.analysis is not None]
-    keys = [k for k in (video_keys(v) for v in watched) if k is not None]
+    keys = [
+        k for k in (video_keys(v, query=query, roster=roster) for v in watched) if k is not None
+    ]
     points: list[str] = []
     hooks = Counter(hook_label(a.hook_type) for a in analyses).most_common()
     if hooks and hooks[0][1] >= 2:
@@ -596,7 +655,7 @@ def common_points(videos: list[AnalyzedVideo]) -> list[str]:
     if flows and flows[0][1] >= 2:
         flow = "、".join(ROLE_LABEL.get(r, r) for r in flows[0][0])
         points.append(f"構成の流れで多いもの: {flow} の順（{flows[0][1]}/{n}本）")
-    grades = [grade_video(v) for v in watched]
+    grades = [grade_video(v, query=query, roster=roster) for v in watched]
     goods = Counter(g.axis for gs in grades for g in gs if g.mark == MARK_GOOD)
     if goods:
         top = max(goods.values())
@@ -625,6 +684,7 @@ __all__ = [
     "MARK_OK",
     "MARK_WEAK",
     "MARK_WORD",
+    "QTY_RE",
     "ROLE_LABEL",
     "SAVE_GOOD_SIGNALS",
     "STEPS_MIN_SCENES",
@@ -640,10 +700,12 @@ __all__ = [
     "fmt_sec",
     "grade_video",
     "infer_roles",
+    "kw_terms",
     "nearest_frame",
     "omitted_scenes",
     "others_text",
     "prominence_label",
+    "qty_places",
     "relation_label",
     "role_flow",
     "role_shares",

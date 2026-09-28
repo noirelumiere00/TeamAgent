@@ -32,9 +32,12 @@ from teamagent.skills._shared.grounding import (
     NumberGrounder,
     grounding_mode,
 )
+from teamagent.skills.video_algorithm.evidence import KW_LAYER_LABEL, Roster, ranks_text
+from teamagent.skills.video_algorithm.facts import brand_facts, detect_pr, duration_of
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     CrossSynthesis,
+    KwTermLayer,
     StatsAnalysis,
 )
 
@@ -52,21 +55,28 @@ Confidence = Literal["高", "中", "低"]
 _CODE_ONLY_FIELDS = ("grounding_mode", "grounding_dropped")
 
 
-def _video_brief(v: AnalyzedVideo) -> str:
+def _video_brief(v: AnalyzedVideo, roster: Roster | None = None) -> str:
     a = v.analysis
     if a is None:
         return ""
     lm = a.layer_messages
     telop_gist = lm.telop if lm and lm.telop else " / ".join(t.text for t in a.telops[:4])
+    # 区分は名簿でコードが決める（Gemini の brand_relation は渡さない。クライアント名が無いのに
+    # client と推測した例があった）。名簿が無ければ「区分未指定」。
     brands = (
-        "、".join(f"{b.brand_name}({b.brand_relation})" for b in a.brand_detections if b.brand_name)
+        "、".join(
+            f"{b.name}({b.relation_label}・{b.prominence_label or '目立ち方不明'})"
+            for b in brand_facts(v.meta, a, roster)
+        )
         or "なし"
     )
+    pr, pr_evidence = detect_pr(v.meta, a)
+    pr_line = f"  タイアップ表記: あり（{pr_evidence}）\n" if pr else ""
     thumb = f"{v.thumb.tone_jp()}/{v.thumb.bright_jp()}" if v.thumb else "—"
     desc = (v.meta.desc or "")[:_DESC_MAX]
     coh = a.message_coherence if a.message_coherence is not None else "—"
     return (
-        f"#{v.meta.rank}（保存率{v.meta.save_rate():.2f}% / 尺{a.duration_sec:.0f}s）\n"
+        f"#{v.meta.rank}（保存率{v.meta.save_rate():.2f}% / 尺{duration_of(v.meta, a):.0f}s）\n"
         f"  主訴求: {a.main_message or '—'}\n"
         f"  訴求軸: {', '.join(a.value_propositions) or '—'}\n"
         f"  フック: {a.hook_type} / {a.hook_summary}\n"
@@ -74,6 +84,7 @@ def _video_brief(v: AnalyzedVideo) -> str:
         f"  キャプション: {desc or '—'}\n"
         f"  CTA: {', '.join(a.cta_type) or 'なし'}\n"
         f"  ブランド: {brands}\n"
+        f"{pr_line}"
         f"  サムネ色: {thumb}\n"
         f"  メッセージ一貫性: {coh}"
     )
@@ -101,13 +112,12 @@ def _stats_block_text(stats: StatsAnalysis | None) -> str:
             + " ".join(f"{h}×{c}" for h, c in stats.hook_counts)
             + f"（強フック {stats.strong_hook_ratio}）※過半数未満の型は第一指定にしない"
         )
-    lines.append(  # ③ レンジ
-        "・勝ち筋レンジ(上位帯の実測幅): "
-        + (
-            " / ".join(f"{r.label}{r.text}" for r in stats.win_ranges)
-            or "なし=割れている/サンプル不足"
+    if kc.per_term:  # ①' 語ごと×層ごと（テロップは本文に実在するものだけ数えた値）
+        lines.append(
+            "・KW 語ごと（テロップは本文に実在するものだけ／発話はAI聞き取りで未照合）: "
+            + " ／ ".join(_term_text(kc.per_term, term) for term in _terms_of(kc.per_term))
         )
-    )
+    # ③ 上位帯の最小〜最大（旧「勝ち筋レンジ」）は渡さない。分布は全 n 本（⑤）だけ。
     cr: list[str] = []  # ④ 相関（方向の裏取り専用）
     for c in stats.correlations:
         if c.rho is None:
@@ -125,10 +135,32 @@ def _stats_block_text(stats: StatsAnalysis | None) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def _terms_of(rows: list[KwTermLayer]) -> list[str]:
+    return list(dict.fromkeys(r.term for r in rows))
+
+
+def _term_text(rows: list[KwTermLayer], term: str) -> str:
+    parts: list[str] = []
+    for r in rows:
+        if r.term != term:
+            continue
+        label = KW_LAYER_LABEL.get(r.layer, r.layer)
+        text = f"{label}{len(r.exact_ranks)}/{r.n}"
+        if r.synonym_ranks:
+            text += f"・言い換え{len(r.synonym_ranks)}/{r.n}（{ranks_text(r.synonym_ranks)}）"
+        if r.board_hits is not None and r.board_size:
+            text += f"（上位{r.board_size}本では{r.board_hits}/{r.board_size}）"
+        parts.append(text)
+    return f"「{term}」" + "・".join(parts)
+
+
 def build_prompt(
-    analyzed: list[AnalyzedVideo], query: str, stats: StatsAnalysis | None = None
+    analyzed: list[AnalyzedVideo],
+    query: str,
+    stats: StatsAnalysis | None = None,
+    roster: Roster | None = None,
 ) -> str:
-    briefs = "\n".join(b for v in analyzed if (b := _video_brief(v)))
+    briefs = "\n".join(b for v in analyzed if (b := _video_brief(v, roster)))
     n = sum(1 for v in analyzed if v.analysis)
     return (
         f"# 検索KW: {query}\n"
@@ -363,6 +395,7 @@ def synthesize(
     stats: StatsAnalysis | None = None,
     extra_context: str = "",
     on_drop: DropSink | None = None,
+    roster: Roster | None = None,
 ) -> tuple[CrossSynthesis | None, float]:
     """横断シンセシスを生成。stats を渡すと統計を根拠に推論させる。失敗で (None, 0.0)。
 
@@ -374,7 +407,7 @@ def synthesize(
         return None, 0.0
     try:
         system = load_prompt("video_algorithm", prompt_version, "synthesis")
-        prompt = build_prompt(ok, query, stats)
+        prompt = build_prompt(ok, query, stats, roster)
         if extra_context:
             prompt = f"{prompt}\n\n# 追加コンテキスト\n{extra_context}"
         resp = gemini.generate_text(prompt, request_id, system=system)

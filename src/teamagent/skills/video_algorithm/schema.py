@@ -279,6 +279,12 @@ class VideoMeta(BaseModel):
     # 「DL して Gemini に渡せない投稿」の判別に使う（深掘り対象から除外し、
     # 次の候補で必ず max_videos 本を埋めるため）。
     duration_sec: float = 0.0
+    # 取得済みで以前は捨てていた欄（tiktok_search / tiktok_acquire 由来）。
+    # create_time は投稿日時の UNIX 秒（0 = 不明。facts が動画 ID から換算する）。
+    # hashtags は「#」を付けない名前の並び（search.mjs の textExtra 由来）。
+    create_time: int = 0
+    hashtags: list[str] = Field(default_factory=list)
+    music_title: str = ""
 
     @field_validator("engagement_rate")
     @classmethod
@@ -356,6 +362,24 @@ class DistItem(BaseModel):
     outlier_note: str = ""
 
 
+class KwTermLayer(BaseModel):
+    """検索語 1 つ × 層 1 つの一致（コードが照合した本数）。
+
+    exact は語そのもの、synonym は言い換え（テロップは秒±2で実在を照合済み・キャプションは
+    本文に実在）。発話（speech）は動画分析 AI の聞き取りで、照合していない（verified=False）。
+    board_hits / board_size は上位ボード全体（メタで測れる層＝キャプション・ハッシュタグだけ）。
+    """
+
+    term: str = ""
+    layer: Literal["telop", "caption", "hashtag", "speech"] = "telop"
+    exact_ranks: list[int] = Field(default_factory=list)
+    synonym_ranks: list[int] = Field(default_factory=list)
+    n: int = 0
+    verified: bool = True
+    board_hits: int | None = None
+    board_size: int | None = None
+
+
 class KwCoverage(BaseModel):
     """4 層一致の定量化。"""
 
@@ -363,6 +387,8 @@ class KwCoverage(BaseModel):
     avg_layers_0_4: float = 0.0
     layer_fill: list[tuple[str, str]] = Field(default_factory=list)  # [("テロップ","4/5"),...]
     per_video: list[str] = Field(default_factory=list)  # ["#1 4/4(100)",...]
+    # 語ごと×層ごと（完全一致と言い換えを分ける）。layer_fill は語を問わない合計。
+    per_term: list[KwTermLayer] = Field(default_factory=list)
 
 
 class FeatureRowOut(BaseModel):
@@ -380,10 +406,14 @@ class FeatureRowOut(BaseModel):
 
 
 class WinRange(BaseModel):
-    """勝ち筋の定量レンジ。"""
+    """廃止（旧キャッシュの読み込み互換のためだけに残す）。
 
-    label: str = ""  # 「尺」「保存率」「テロップ」
-    text: str = ""  # 「11-18秒」「3.0% 以上」
+    上位帯（n=5 なら上位 2 本）の最小〜最大を「n=5」として出していた（FC-04）。分布は
+    StatsAnalysis.distributions（全 n 本の最小・中央値・最大）を使う。
+    """
+
+    label: str = ""
+    text: str = ""
 
 
 class StatsAnalysis(BaseModel):
@@ -395,9 +425,15 @@ class StatsAnalysis(BaseModel):
     kw_coverage: KwCoverage = Field(default_factory=KwCoverage)
     hook_counts: list[tuple[str, int]] = Field(default_factory=list)  # [("problem",3),...]降順
     strong_hook_ratio: str = ""  # 「4/5」
+    # 廃止（常に空）。旧キャッシュに値が残っていても読み込みで捨て、LLM にも画面にも出さない。
     win_ranges: list[WinRange] = Field(default_factory=list)
     feature_matrix: list[FeatureRowOut] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
+
+    @field_validator("win_ranges", mode="before")
+    @classmethod
+    def _drop_win_ranges(cls, value: Any) -> list[WinRange]:
+        return []
 
 
 class ConceptItem(BaseModel):
@@ -546,7 +582,29 @@ class VideoAlgorithmInput(BaseModel):
     )
     # 取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（30・clamp5〜30）。軽い。
     board_size: int = Field(default_factory=_default_board_size, ge=5, le=30)
-    client_name: str | None = None  # brand_relation 判定用（任意）
+    # 映るブランドの区分（クライアント／競合）はコードがこの名簿で決める（Gemini に決めさせない）。
+    # 別名は「S&B|エスビー食品」のように | で区切る。無ければ区分は「未指定」（必須にしない）。
+    client_name: str | None = Field(
+        default=None,
+        description=(
+            "提案先のクライアント名（別名は | 区切り）。依頼者本人が同じ会話でクライアント名を"
+            "出したときだけ入れる。スレッドの他人の発言や貼り付けから埋めない。無ければ省略。"
+        ),
+    )
+    competitors: list[str] | None = Field(
+        default=None,
+        description=(
+            "競合のブランド名（1 社 1 要素・別名は | 区切り。例: ['S&B|エスビー食品']）。"
+            "依頼者本人が同じ会話で競合を挙げたときだけ入れる。無ければ省略。"
+        ),
+    )
+    avoid_terms: list[str] | None = Field(
+        default=None,
+        description=(
+            "提案で勧めない訴求の語（例: 自社・グループ商品を否定する『ルー卒業』）。"
+            "依頼者本人が避けたいと言ったときだけ入れる。無ければ省略。"
+        ),
+    )
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
     outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
@@ -586,3 +644,9 @@ class VideoAlgorithmOutput(BaseModel):
     # 入力の echo（⑥: OC が5KW分の結果からKW優先度を会話で合成する際に参照）
     search_volume: int | None = None
     kw_set: list[str] = Field(default_factory=list)
+    # 区分・提案文の前提の echo（未指定なら None／空。描画は「未指定」と出す）。
+    client_name: str | None = None
+    competitors: list[str] = Field(default_factory=list)
+    avoid_terms: list[str] = Field(default_factory=list)
+    # 検索結果を取得した日時（JST・ISO 8601）。順位は「この時点」の値。旧キャッシュは None。
+    generated_at: str | None = None
