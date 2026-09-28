@@ -442,6 +442,24 @@ def post_to_origin(
       （完了投稿が 2 通になるのを避ける）。
     - 2 回とも届かなければ、``fallback_user_id``（署名検証済みの slack_user_id）の DM へ退避する。
     """
+    status = post_to_origin_status(
+        text, destination, request_id=request_id, fallback_user_id=fallback_user_id
+    )
+    return status == "posted"
+
+
+def post_to_origin_status(
+    text: str,
+    destination: Destination,
+    *,
+    request_id: str,
+    fallback_user_id: str | None = None,
+) -> str:
+    """``post_to_origin`` と同じ投稿。結果を ``posted`` / ``uncertain`` / ``failed`` で返す。
+
+    ``uncertain`` はタイムアウト（Slack 側で届いている可能性がある）。呼び出し元が「届いたかも
+    しれないので同じ文を別経路で出し直さない」判断に使う（``direct_summary``）。
+    """
     for attempt in range(1, _POST_ATTEMPTS + 1):
         try:
             if asyncio.run(
@@ -453,7 +471,7 @@ def post_to_origin(
                     attempt=attempt,
                     dm=destination.is_dm,
                 )
-                return True
+                return "posted"
             logger.warning(
                 "video_algorithm_detach_post_not_ok", request_id=request_id, attempt=attempt
             )
@@ -464,7 +482,7 @@ def post_to_origin(
                 attempt=attempt,
                 error="TimeoutError",
             )
-            return False
+            return "uncertain"
         except Exception as exc:
             logger.warning(
                 "video_algorithm_detach_post_failed",
@@ -475,7 +493,7 @@ def post_to_origin(
         if attempt < _POST_ATTEMPTS:
             threading.Event().wait(_POST_RETRY_WAIT_S)
     if not fallback_user_id:
-        return False
+        return "failed"
     try:
         ok = asyncio.run(
             _post_to_user_dm(
@@ -488,9 +506,9 @@ def post_to_origin(
             request_id=request_id,
             error=type(exc).__name__,
         )
-        return False
+        return "failed"
     logger.info("video_algorithm_detach_dm_fallback", request_id=request_id, ok=ok)
-    return ok
+    return "posted" if ok else "failed"
 
 
 # ── ジョブと登録簿 ─────────────────────────────────────────────────────────
@@ -924,6 +942,7 @@ __all__ = [
     "load_policy",
     "notify_interrupted",
     "post_to_origin",
+    "post_to_origin_status",
     "queued_receipt_text",
     "receipt_text",
     "slack_escape",
