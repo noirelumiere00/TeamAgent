@@ -104,6 +104,40 @@ def test_rank_refs_must_exist() -> None:
     assert g.reason("#9で観測") == "rank:9"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "#100均 のタグを添える",  # 数字で始まるハッシュタグ
+        "#30代ランチ を付ける",
+        "#2025新宿 で投稿する",
+        "#3coins の雑貨を映す",
+        "#１００均グッズ",  # 全角
+        "上位10位に入る",  # 範囲の言い方
+        "トップ10位を狙う",
+        "10位以内の常連",
+    ],
+)
+def test_hashtags_and_ranges_are_not_rank_refs(text: str) -> None:
+    g = NumberGrounder.from_inputs("", valid_ranks={1, 2, 3})
+    assert g.bad_rank_refs(text) == set(), text
+
+
+@pytest.mark.parametrize(
+    ("text", "bad"),
+    [
+        ("#9の冒頭", {9}),  # 助詞が続く「#N」は順位
+        ("#8と#9", {8, 9}),
+        ("#7。", {7}),
+        ("rank12で観測", {12}),
+        ("上位は#1〜#5", {5}),
+        ("4位の動画", {4}),
+    ],
+)
+def test_real_rank_refs_are_still_checked(text: str, bad: set[int]) -> None:
+    g = NumberGrounder.from_inputs("", valid_ranks={1, 2, 3})
+    assert g.bad_rank_refs(text) == bad, text
+
+
 def test_rank_refs_are_not_checked_without_valid_ranks() -> None:
     assert NumberGrounder.from_inputs("#9").rank_refs_ok("#99")
 
