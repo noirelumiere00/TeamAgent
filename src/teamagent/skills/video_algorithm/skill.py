@@ -361,7 +361,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self,
         gemini: GeminiClient | None = None,
         *,
-        prompt_version: str = "v1",
+        prompt_version: str = "v2",
         searcher: Searcher | None = None,
         downloader: Downloader | None = None,
         proxy: Proxy | None = None,
@@ -1305,6 +1305,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     analyzed,
                     input.query,
                     request_id=ctx.request_id,
+                    prompt_version=self._prompt_version,
                     stats=cross.stats,
                     extra_context=self._kw_context(input),
                 )

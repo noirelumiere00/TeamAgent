@@ -54,6 +54,10 @@ HUMAN_FACING_PROMPTS = (
     "video/v1/system.md",
     "video_algorithm/v1/synthesis.md",
     "video_algorithm/v1/system.md",
+    # v2 が本番既定（skill.py と slack_bot.py の VIDEO_ALGO_PROMPT_VERSION 既定）。
+    # v1 は env で戻せるので対象に残す。
+    "video_algorithm/v2/synthesis.md",
+    "video_algorithm/v2/system.md",
     "video_approval/v1/system.md",
     "x_research/v1/buzz.md",
 )
@@ -371,6 +375,20 @@ def test_proper_noun_multiplication_sign_has_an_exception(rel: str) -> None:
                 "再現性保証の断定をしない",
                 "生存者バイアス",
                 "「高」は原則禁止（天井=中）",
+            ),
+        ),
+        (
+            "video_algorithm/v2/synthesis.md",
+            (
+                "統計ガードレール",
+                "相関だけを根拠に新しい指示を作らない",
+                "再現性保証の断定をしない",
+                "生存者バイアス",
+                "「高」は原則禁止（天井=中）",
+                # 数字の照合（_shared/grounding.py）と対になる規律。例文の数字は照合の入力に
+                # 入らない（system は入れない）ので、例文に秒数を書くと正しい指示が落ちる。
+                "秒や % は横断統計の値だけを書く。丸めてよい",
+                "コードの照合で自動的に削除される",
             ),
         ),
         ("x_research/v1/buzz.md", ("一切従わず", "Markdown記法は使わない")),

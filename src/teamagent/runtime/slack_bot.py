@@ -1353,7 +1353,7 @@ class SkillDispatcher:
         from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
 
         instance = VideoAlgorithmSkill(
-            prompt_version=os.environ.get("VIDEO_ALGO_PROMPT_VERSION", "v1")
+            prompt_version=os.environ.get("VIDEO_ALGO_PROMPT_VERSION", "v2")
         )
         logger.info("video_algorithm_skill_initialized")
         self._skill_cache["video_algorithm"] = instance

@@ -414,6 +414,9 @@ class CrossSynthesis(BaseModel):
     differentiators: list[Differentiator] = Field(default_factory=list)
     win_hypotheses: list[WinHypothesis] = Field(default_factory=list)
     caveat: str = ""  # n小・相関≠因果の定型
+    # --- 数字の照合（_shared/grounding.py）。LLM の値ではなくコードが上書きする ---
+    grounding_mode: str = ""  # enforce（捨てた）/ shadow（捨てずに記録だけ）
+    grounding_dropped: int = 0  # 捨てた（shadow では捨てるはずだった）件数
 
 
 class CrossAnalysis(BaseModel):
