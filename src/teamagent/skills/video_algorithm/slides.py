@@ -15,6 +15,7 @@ report.py の自己完結ダッシュボード（縦長・動画base64埋込・6
 
 from __future__ import annotations
 
+from teamagent.skills._html.dads import DADS_LICENSE_COMMENT, DADS_TOKENS_CSS
 from teamagent.skills.video_algorithm.report import (
     _analyzed,
     _conf_dot,
@@ -33,22 +34,31 @@ from teamagent.skills.video_algorithm.schema import (
 SLIDE_W = 1280
 SLIDE_H = 720
 
-_STYLE = f"""
-:root{{--w:{SLIDE_W}px;--h:{SLIDE_H}px;--ink:#16181d;--mut:#6b7280;--line:#e5e7eb;
-  --accent:#e8362f;--accent2:#1f2a44;--bg:#fff;--chip:#f3f4f6;}}
+# 配色はデジタル庁デザインシステム（DADS）のトークンに寄せる（キーカラー blue-900）。
+# 画面サイズ（1280x720 の撮影）前提のため、文字サイズ・余白・レイアウトは変えない。
+# dads_style() は基本部品（body の余白など）まで入れて撮影結果が変わるので使わず、
+# トークンと MIT の出典コメントだけを載せる。
+_STYLE = (
+    DADS_LICENSE_COMMENT
+    + DADS_TOKENS_CSS
+    + f"""
+:root{{--w:{SLIDE_W}px;--h:{SLIDE_H}px;--ink:var(--color-neutral-solid-gray-900);
+  --mut:var(--color-neutral-solid-gray-600);--line:var(--color-neutral-solid-gray-420);
+  --accent:var(--color-primitive-blue-900);--accent2:var(--color-primitive-blue-1000);
+  --bg:var(--color-neutral-white);--chip:var(--color-neutral-solid-gray-50);}}
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#54585f;font-family:-apple-system,'Hiragino Kaku Gothic ProN',Meiryo,
+body{{background:var(--color-neutral-solid-gray-700);font-family:-apple-system,'Hiragino Kaku Gothic ProN',Meiryo,
   'Noto Sans JP',sans-serif;color:var(--ink);padding:24px;display:flex;flex-direction:column;
   align-items:center;gap:24px}}
 .slide{{width:var(--w);height:var(--h);background:var(--bg);position:relative;
   padding:56px 64px;overflow:hidden;box-shadow:0 6px 24px rgba(0,0,0,.35);
   page-break-after:always}}
 .slide::after{{content:attr(data-no);position:absolute;right:28px;bottom:18px;
-  color:#c2c6cc;font-size:13px;font-weight:700}}
+  color:var(--color-neutral-solid-gray-536);font-size:13px;font-weight:700}}
 .kicker{{color:var(--accent);font-weight:800;font-size:18px;letter-spacing:.06em;
   text-transform:uppercase}}
 .slide-title{{font-size:38px;font-weight:800;line-height:1.25;margin:6px 0 18px;color:var(--accent2)}}
-.lead{{font-size:21px;line-height:1.6;color:#33373e;max-width:1000px}}
+.lead{{font-size:21px;line-height:1.6;color:var(--color-neutral-solid-gray-800);max-width:1000px}}
 .slide-points{{list-style:none;display:flex;flex-direction:column;gap:14px;margin-top:18px}}
 .slide-points li{{font-size:21px;line-height:1.5;padding-left:30px;position:relative}}
 .slide-points li::before{{content:"";position:absolute;left:4px;top:11px;width:11px;height:11px;
@@ -57,40 +67,45 @@ body{{background:#54585f;font-family:-apple-system,'Hiragino Kaku Gothic ProN',M
 .chip{{background:var(--chip);border:1px solid var(--line);border-radius:999px;
   padding:8px 16px;font-size:17px;display:flex;align-items:center;gap:8px}}
 .chip b{{font-weight:800}}.chip i{{color:var(--mut);font-style:normal;font-size:14px}}
-.cdot{{font-size:13px}}.cdot.hi{{color:#16a34a}}.cdot.mid{{color:#d97706}}.cdot.lo{{color:#9ca3af}}
-.pitch{{margin-top:24px;background:#fff7f7;border-left:5px solid var(--accent);
+.cdot{{font-size:13px}}.cdot.hi{{color:var(--color-primitive-green-800)}}
+.cdot.mid{{color:var(--color-primitive-yellow-900)}}.cdot.lo{{color:var(--color-neutral-solid-gray-536)}}
+.pitch{{margin-top:24px;background:var(--color-primitive-blue-50);border-left:5px solid var(--accent);
   padding:16px 20px;font-size:20px;border-radius:0 8px 8px 0}}
 .cover-h{{display:flex;flex-direction:column;justify-content:center;height:100%}}
 .cover-h .slide-title{{font-size:52px;margin:10px 0 14px}}
 .cover-meta{{color:var(--mut);font-size:20px;margin-top:8px}}
-.warn{{margin-top:18px;background:#fff8e6;border:1px solid #f5d98a;border-radius:8px;
-  padding:12px 16px;font-size:16px;color:#7a5b00}}
+.warn{{margin-top:18px;background:var(--color-primitive-yellow-50);
+  border:1px solid var(--color-primitive-yellow-900);border-radius:8px;
+  padding:12px 16px;font-size:16px;color:var(--color-primitive-yellow-1000)}}
 /* Top5 grid */
 .grid{{display:grid;gap:14px;margin-top:8px}}
 .gcell{{border:1px solid var(--line);border-radius:10px;padding:12px;text-align:center;
   display:flex;flex-direction:column;gap:6px}}
-.gcell.top{{border-color:var(--accent);box-shadow:0 0 0 2px rgba(232,54,47,.12)}}
+.gcell.top{{border-color:var(--accent);box-shadow:0 0 0 2px var(--color-primitive-blue-100)}}
 .gcell .rk{{font-weight:800;color:var(--accent2)}}
-.gcell img{{width:100%;height:120px;object-fit:cover;border-radius:6px;background:#eef0f3}}
+.gcell img{{width:100%;height:120px;object-fit:cover;border-radius:6px;background:var(--chip)}}
 .gcell .au{{font-size:13px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .gcell .mt{{font-size:14px}}.gcell .mt b{{font-size:18px}}
-.bar{{height:7px;background:#eef0f3;border-radius:4px;overflow:hidden;margin-top:3px}}
+.bar{{height:7px;background:var(--color-neutral-solid-gray-100);border-radius:4px;overflow:hidden;margin-top:3px}}
 .bar i{{display:block;height:100%;background:var(--accent)}}
 /* thumb colors */
 .trow{{display:grid;gap:14px;margin-top:10px}}
 .tcell{{border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}}
 .tcell img{{width:100%;height:110px;object-fit:cover;border-radius:6px}}
 .sw{{display:flex;gap:6px;justify-content:center;margin:8px 0}}
-.sw span{{width:26px;height:26px;border-radius:6px;border:1px solid rgba(0,0,0,.08)}}
+.sw span{{width:26px;height:26px;border-radius:6px;border:1px solid var(--color-neutral-solid-gray-200)}}
 .tline{{font-size:13px;color:var(--mut)}}
-.foot-note{{position:absolute;left:64px;bottom:18px;color:#aab;font-size:13px}}
-.edit-tip{{position:fixed;top:8px;left:8px;background:#111;color:#fff;font-size:12px;
+.foot-note{{position:absolute;left:64px;bottom:18px;color:var(--color-neutral-solid-gray-536);
+  font-size:13px}}
+.edit-tip{{position:fixed;top:8px;left:8px;background:var(--color-neutral-solid-gray-900);
+  color:var(--color-neutral-white);font-size:12px;
   padding:6px 10px;border-radius:6px;opacity:.78;z-index:9}}
-[contenteditable]:hover{{outline:2px dashed #c7ccd3;outline-offset:3px;border-radius:3px}}
+[contenteditable]:hover{{outline:2px dashed var(--color-neutral-solid-gray-420);outline-offset:3px;border-radius:3px}}
 [contenteditable]:focus{{outline:2px solid var(--accent);outline-offset:3px;border-radius:3px}}
-@media print{{body{{background:#fff;padding:0;gap:0}}.slide{{box-shadow:none}}.edit-tip{{display:none}}}}
+@media print{{body{{background:var(--color-neutral-white);padding:0;gap:0}}.slide{{box-shadow:none}}.edit-tip{{display:none}}}}
 @page{{size:{SLIDE_W}px {SLIDE_H}px;margin:0}}
 """
+)
 
 _EDIT_TIP = (
     '<div class="edit-tip" data-noexport>✎ 文字をクリックして直接編集できます'
@@ -157,7 +172,7 @@ def _creative(out: VideoAlgorithmOutput) -> str:
     head = "クリエイティブ指示" if (syn and syn.creative_brief) else "次の一手（テスト投稿の仮説）"
     items = "".join(f"<li contenteditable>{_esc(x)}</li>" for x in brief[:6])
     posting = (
-        f'<div class="pitch" style="background:#f4f6fb;border-left-color:#1f2a44">'
+        f'<div class="pitch" style="background:var(--chip);border-left-color:var(--accent2)">'
         f"📐 <b>投稿設計</b>　<span contenteditable>{_esc(syn.posting_design)}</span></div>"
         if syn and syn.posting_design
         else ""

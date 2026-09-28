@@ -91,13 +91,22 @@ DADS_CREDIT = (
 )
 
 
+# CSS に残す出典（MIT のライセンス表示）。DADS_TOKENS_CSS を使う CSS には必ず添える。
+DADS_LICENSE_COMMENT = (
+    "/* Design tokens: @digital-go-jp/design-tokens 2.0.1 "
+    "(MIT License, Copyright (c) 2023 Digital Agency, Japan) */"
+)
+
+
 def dads_style(extra_css: str = "") -> str:
     """`<style>` 要素（トークン＋基本部品＋呼び出し側の追加分）。"""
-    return (
-        "<style>/* Design tokens: @digital-go-jp/design-tokens 2.0.1 "
-        "(MIT License, Copyright (c) 2023 Digital Agency, Japan) */"
-        f"{DADS_TOKENS_CSS}{DADS_BASE_CSS}{extra_css}</style>"
-    )
+    return f"<style>{DADS_LICENSE_COMMENT}{DADS_TOKENS_CSS}{DADS_BASE_CSS}{extra_css}</style>"
 
 
-__all__ = ["DADS_BASE_CSS", "DADS_CREDIT", "DADS_TOKENS_CSS", "dads_style"]
+__all__ = [
+    "DADS_BASE_CSS",
+    "DADS_CREDIT",
+    "DADS_LICENSE_COMMENT",
+    "DADS_TOKENS_CSS",
+    "dads_style",
+]
