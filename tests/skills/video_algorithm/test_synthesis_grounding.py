@@ -242,7 +242,9 @@ def test_enforce_report_falls_back_and_hides_fabrications(
     cross = cross_analyze(vids, QUERY)
     cross.synthesis = syn
     html = render_report(VideoAlgorithmOutput(query=QUERY, videos=vids, cross=cross))
-    assert '<div class="vbig">冒頭の価格テロップが上位の型</div>' in html  # 仮説 1 本目に代わる
+    # 旧版の文は v3 の検査を通していないので描かない（見出しはコードの集計から作る）
+    assert '<div class="vbig">冒頭の価格テロップが上位の型</div>' not in html
+    assert '<div class="vbig">上位' in html
     for fabricated in (
         "0.5秒",
         "2.5秒",
@@ -257,13 +259,17 @@ def test_enforce_report_falls_back_and_hides_fabrications(
     assert '<span class="rk">#7</span>' not in html and '<span class="rk">#9</span>' not in html
 
 
-def test_shadow_report_still_shows_the_llm_text() -> None:
+def test_shadow_report_does_not_show_the_legacy_llm_text() -> None:
+    """旧版（v2）の synthesis は shadow でも照合前の文のままなので、レポートには描かない。
+
+    レポートとスライドは v3 の検査を通した文（version="v3"）だけを描く（仕様 v3 §2-0）。
+    """
     syn, _, _ = _run(_FABRICATED)
     vids = _videos()
     cross = cross_analyze(vids, QUERY)
     cross.synthesis = syn
     html = render_report(VideoAlgorithmOutput(query=QUERY, videos=vids, cross=cross))
-    assert "冒頭0.5秒の価格テロップで勝つ" in html
+    assert "冒頭0.5秒の価格テロップで勝つ" not in html
 
 
 def test_grounding_input_excludes_the_system_prompt(monkeypatch: pytest.MonkeyPatch) -> None:

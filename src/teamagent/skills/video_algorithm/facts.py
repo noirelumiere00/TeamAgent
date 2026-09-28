@@ -841,6 +841,23 @@ def fmt_man(n: float) -> str:
     return f"{int(n):,}"
 
 
+def fmt_stamp(generated_at: str | None) -> str:
+    """取得日時（ISO 8601）→「2026-09-28 10:15（JST）」。日付だけ・読めない値はそのまま返す。
+
+    順位は「この時点」の値なので、表紙・フッタ・レポート冒頭に出す（旧キャッシュは空）。
+    """
+    text = (generated_at or "").strip()
+    if len(text) <= 10:  # 空・日付だけ（時刻を 00:00 と偽らない）
+        return text
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(JST)
+    return f"{dt:%Y-%m-%d %H:%M}（JST）"
+
+
 def outliers(facts: Sequence[VideoFacts]) -> list[tuple[int, list[str]]]:
     """事実だけの外れ値（向きが少数派・尺が長い・再生が少ない・投稿が古い）。順位の順。"""
     watched = _watched(facts)
@@ -1123,6 +1140,7 @@ __all__ = [
     "duration_of",
     "feature_table",
     "fmt_man",
+    "fmt_stamp",
     "jpeg_size",
     "kw_matrix",
     "orientation_of",

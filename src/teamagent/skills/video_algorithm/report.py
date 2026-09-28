@@ -5,13 +5,17 @@
 段階的開示（progressive disclosure）にする。
 
 レイアウト（上から）:
-  B 結論バンド（勝者の型＋次の一手）
-  C Top5比較ボード（サムネ＋主要指標の格子）
+  B 結論バンド（段階つきの共通点＋根拠つきの指示。スライドと同じ facts・synthesis v3）
+  C 上位n本の比較ボード（サムネ＋主要指標の格子・強調は最も見られ保存された1本）
   D サムネ色比較ボード（検索一覧での目立ち方）
-  E 横断シンセシス（概念の関連性・勝ちパターン仮説 / Gemini解釈層）
+  共通の導線（保存・誘導。多数派はコードの集計）
+  E AI の読み解き（synthesis v3 の検査を通した仮説・概念・訴求角度だけ）
   F 一貫性マトリクス（テロップ↔キャプ↔映像中身・N本一望）
   G 各動画ドリルダウン（大型インタラクティブ・タイムライン＋タブ・既定折りたたみ）
-  H 統計付録（Spearman/分布/カバレッジ・既定クローズ）
+  H 統計付録（特徴×表示順位の相関は本文に出さずここだけ・分布/カバレッジ・既定クローズ）
+
+数字・本数・段階の名前・区分（クライアント／競合）・KW の一致は事実層（facts / evidence）が
+コードで決める。Gemini の申告（kw_match・brand_relation）はそのまま描かない。
 
 タイムラインは「秒クリック→抽出フレームへスクラブ＋実動画ディープリンク」のSaaS的UX
 （自己完結・外部ライブラリ無し・閲覧時ネットワーク無し）。
@@ -30,26 +34,45 @@ import re
 from urllib.parse import urlsplit
 
 from teamagent.skills._html.dads import DADS_CREDIT, dads_style
+from teamagent.skills.search_surface_check.video_digest import PACING_LABEL
+from teamagent.skills.search_surface_check.video_structure import ROLE_LABEL, infer_roles
+from teamagent.skills.video_algorithm.evidence import (
+    TIER_MAJORITY,
+    TIER_REQUIRED,
+    Roster,
+    ranks_text,
+)
+from teamagent.skills.video_algorithm.facts import (
+    CTA_KIND_LABEL,
+    Feature,
+    VideoFacts,
+    cta_consensus,
+    detect_pr,
+    posted_date,
+)
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
-    CrossSynthesis,
     FrameShot,
     StatsAnalysis,
     VideoAlgorithmOutput,
     VideoMeta,
     VideoVSEOAnalysis,
 )
+from teamagent.skills.video_algorithm.slides import (
+    Deck,
+    build_deck,
+    footer_text,
+    ordered_features,
+    type_line,
+)
+from teamagent.skills.video_algorithm.synthesis_checks import (
+    code_directives,
+    deny_hit,
+    directive_line,
+)
 
 _POS_JP = {"top": "上", "center": "中", "bottom": "下", "full": "全", "unknown": "?"}
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-_TONE_JP = {"warm": "暖色", "neutral": "中性", "cool": "寒色", "mixed": "混在"}
-_BRIGHT_JP = {
-    "dark": "低明度",
-    "dim": "やや暗",
-    "medium": "中明度",
-    "bright": "高明度",
-    "very_bright": "高明度",
-}
 _PROM_JP = {"hero": "主役級", "prominent": "目立つ", "incidental": "付随", "background": "背景"}
 _SRC_JP = {
     "signboard": "看板",
@@ -82,20 +105,10 @@ def _analyzed(out: VideoAlgorithmOutput) -> int:
     return sum(1 for v in out.videos if v.analysis)
 
 
-def _verdict_big(out: VideoAlgorithmOutput) -> str:
-    """結論の主文（synthesis 仮説 > 勝ち筋 > summary）。verdict と synthesis で共有し重複を避ける。"""
-    c = out.cross
-    if c.synthesis and c.synthesis.win_hypotheses:
-        return c.synthesis.win_hypotheses[0].hypothesis
-    if c.win_factors:
-        return f"勝者の型は『{c.win_factors[0].factor}』"
-    return c.summary or f"「{out.query}」上位動画の共通パターン"
-
-
-def _shorten(s: str, n: int = 40) -> str:
-    """結論の大見出し用に第1文・n字で詰める（3秒で読める長さに）。"""
-    head = (s or "").split("。")[0].strip()
-    return head if len(head) <= n else head[: n - 1] + "…"
+def _head(s: str, n: int = 46) -> str:
+    """一覧のキャプション用: 句点で切らず、先頭 n 字＋「…」（「【4つでいい。…】」を断片にしない）。"""
+    text = " ".join((s or "").split())
+    return text if len(text) <= n else text[:n] + "…"
 
 
 def _esc(s: object) -> str:
@@ -154,55 +167,54 @@ def _pct(sec: float, dur: float) -> float:
     return max(0.0, min(100.0, sec / dur * 100.0))
 
 
-def _terms(query: str) -> list[str]:
-    return [t for t in re.split(r"[\s　,、]+", query.strip()) if t]
-
-
 def _json_attr(obj: object) -> str:
     """JSON を <script type=application/json> に安全に埋める（</script> 早期終端対策）。"""
     return json.dumps(obj, ensure_ascii=False).replace("<", "\\u003c").replace("&", "\\u0026")
 
 
-def _conf_dot(conf: str) -> str:
-    cls = {"高": "c-hi", "中": "c-mid", "低": "c-lo"}.get(conf, "c-mid")
-    return f'<span class="cdot {cls}" title="確信度 {_esc(conf)}"></span>'
+def _kw_flags(f: VideoFacts | None) -> list[tuple[str, bool]]:
+    """KW の 4 層（照合済みの事実。Gemini の kw_match は使わない）。動画を見ていなければ全部 False。"""
+    layers = (("テロップ", "telop"), ("音声", "speech"), ("キャプ", "caption"), ("HT", "hashtag"))
+    if f is None:
+        return [(name, False) for name, _layer in layers]
+    return [(name, any(h.layer == layer for h in f.kw)) for name, layer in layers]
 
 
-def _kw_layer_flags(v: AnalyzedVideo, terms: list[str]) -> list[tuple[str, bool]]:
-    a = v.analysis
-    if a is None:
-        return [("テロップ", False), ("音声", False), ("キャプ", False), ("HT", False)]
-    telop = a.kw_in_telop()
-    spoken = any(m.matched for m in a.spoken_keywords)
-    caption = any(t and t in v.meta.desc for t in terms) or any(
-        m.matched and m.layer == "caption" for m in a.keyword_matches
+def _tier_chip(f: Feature) -> str:
+    who = "" if f.tier == TIER_REQUIRED else f"（{ranks_text(f.ranks)}）"
+    rate = (
+        f"・上位{f.board_rate[1]}本では{f.board_rate[0]}/{f.board_rate[1]}" if f.board_rate else ""
     )
-    hashtag = any(m.matched and m.layer == "hashtag" for m in a.keyword_matches)
-    return [("テロップ", telop), ("音声", spoken), ("キャプ", caption), ("HT", hashtag)]
+    return (
+        f'<span class="chip"><span class="tname">{_esc(f.tier)}</span><b>{_esc(f.label)}</b>'
+        f"<i>{f.count}/{f.n}{_esc(who)}{_esc(rate)}</i></span>"
+    )
 
 
 # ===========================================================
-# B プランナー戦略サマリ（ショート動画PRプランナー/ディレクター視点）
+# B 結論（スライドと同じ事実層と synthesis v3 から描く）
 # ===========================================================
-def _verdict_band(out: VideoAlgorithmOutput) -> str:
-    c = out.cross
-    syn = c.synthesis
-    n = _analyzed(out)
-    # 主文: プランナーの headline 優先、無ければ従来の勝ち筋から
-    if syn and syn.headline:
-        big = syn.headline
-        sub = syn.strategy
+def _verdict_band(out: VideoAlgorithmOutput, d: Deck) -> str:
+    """結論の帯。見出し・段階つきの共通点・指示は、スライドと同じ Deck（facts と検査済みの
+    synthesis v3）から描く。v3 の検査を通していない文（旧キャッシュの v2 の文）は出さない。"""
+    n = d.n
+    syn = d.syn
+    if n:
+        big, _by_code = type_line(d)
+        best = d.ctx.fact(d.ctx.best_rank)
+        why = f"（{'・'.join(d.ctx.best_metrics)}が{n}本で最大）" if d.ctx.best_metrics else ""
+        sub = f"最も見られ保存された1本は#{best.rank}{why}。" if best is not None else ""
+        if syn is not None and syn.summary_lines is not None and syn.summary_lines.best_reason:
+            sub += syn.summary_lines.best_reason
     else:
-        full = _verdict_big(out)
-        big = _shorten(full)
-        sub = full if full != big and len(full) > len(big) else ""
-    chips = (
-        "".join(
-            f'<span class="chip">{_conf_dot(w.confidence)}<b>{_esc(w.factor)}</b>'
-            f"<i>{w.observed_in}/{w.total}本</i></span>"
-            for w in c.win_factors[:4]
-        )
-        or '<span class="muted small">顕著な共通項なし</span>'
+        big = out.cross.summary or f"「{out.query}」上位動画の共通パターン"
+        sub = ""
+    feats = (
+        ordered_features(d.ctx.features, TIER_REQUIRED)[:4]
+        + ordered_features(d.ctx.features, TIER_MAJORITY)[:4]
+    )
+    chips = "".join(_tier_chip(f) for f in feats) or (
+        '<span class="muted small">多数派以上の共通点なし</span>'
     )
     if n < 3:
         gate = (
@@ -217,77 +229,33 @@ def _verdict_band(out: VideoAlgorithmOutput) -> str:
     else:
         gate = ""
     sub_html = f'<div class="vsub">{_esc(sub)}</div>' if sub else ""
-    # クリエイティブ指示 = プランナーの creative_brief 優先、無ければ次の一手テンプレ
-    brief = syn.creative_brief if (syn and syn.creative_brief) else _next_actions(out)
-    items = "".join(f"<li>{_esc(x)}</li>" for x in brief[:6])
+    directives = list(syn.directives) if syn is not None else code_directives(d.ctx)
+    items = "".join(f"<li>{_esc(directive_line(x, n))}</li>" for x in directives[:6]) or (
+        '<li class="muted">多数派以上の事実が無いため、指示は出していません</li>'
+    )
+    sl = syn.summary_lines if syn is not None else None
     pitch_html = (
-        f'<div class="pitch">💬 <b>クライアント提案</b>　{_esc(syn.client_pitch)}</div>'
-        if syn and syn.client_pitch
+        f'<div class="pitch">💬 <b>次の一手（案）</b>　{_esc(sl.client_move)}</div>'
+        if sl is not None and sl.client_move
         else ""
     )
-    posting_html = (
-        f'<div class="kvrow"><b>投稿設計</b>{_esc(syn.posting_design)}</div>'
-        if syn and syn.posting_design
-        else ""
-    )
-    right_head = (
-        "クリエイティブ指示" if (syn and syn.creative_brief) else "次の一手（テスト投稿の仮説）"
-    )
+    plan = syn.posting.caption_plan if syn is not None and syn.posting is not None else ""
+    posting_html = f'<div class="kvrow"><b>投稿設計</b>{_esc(plan)}</div>' if plan else ""
+    board = len(out.board)
+    rest = f"{n + 1}〜{board}位は動画を未分析" if board > n else f"上位{n}本だけの観測"
     return (
         f"{gate}"
         '<section class="verdict planner">'
-        '<div class="vleft"><div class="th">🎬 プランナーの戦略サマリ（この検索面の攻略方針）</div>'
+        '<div class="vleft"><div class="th">🎬 プランナーの戦略サマリ（上位の観測にもとづく仮説）</div>'
         f'<div class="vbig">{_esc(big)}</div>{sub_html}'
-        f'<div class="chips">{chips}</div>{pitch_html}</div>'
-        f'<div class="vright"><div class="th">{right_head}</div>'
+        f'<div class="chips">{chips}</div>'
+        f'<div class="muted small mtop">差の要因: 未特定（{_esc(rest)}）。段階の名前（必須条件＝全部・'
+        "多数派＝6割以上・事例＝それ未満）はコードが本数から付けたもの。</div>"
+        f"{pitch_html}</div>"
+        '<div class="vright"><div class="th">クリエイティブ指示（根拠つき・段階はコードの集計）</div>'
         f'<ul class="nexts">{items}</ul>{posting_html}</div>'
         "</section>"
     )
-
-
-def _next_actions(out: VideoAlgorithmOutput) -> list[str]:
-    """提案アクション。単一サンプル/過半数未満の助言は誠実さのため出さない。
-
-    - 尺は上位帯（上位 2 本）の幅を指示にしない（旧 _win_ranges は廃止）。全 n 本の分布を
-      事実として添えるだけにする（最良の動画を範囲外に追い出さないため）。
-    - フックは過半数（>n/2）の型のときだけ推奨。
-    - サムネ色は thumb_agree（過半数一致）のときだけ「○○で作る」と言う。
-    - thumb_consensus 文字列の機械分割は廃止し、構造値（dominant_*）から組む。
-    """
-    c = out.cross
-    n = c.video_count or _analyzed(out)
-    acts: list[str] = ["冒頭3秒のテロップに「" + out.query + "」を焼き込む"]
-    st = c.stats
-    if st:
-        dur = next((d for d in st.distributions if d.feature == "尺(秒)"), None)
-        if dur is not None and st.sample_size >= 2 and dur.min != dur.max:
-            acts.append(
-                f"尺は固定しない（上位{st.sample_size}本は{dur.min:.0f}〜{dur.max:.0f}秒・"
-                f"中央値{dur.median:.0f}秒）"
-            )
-        if st.hook_counts:
-            top_hook, hc = st.hook_counts[0]
-            if hc * 2 > n:  # 過半数の型だけ推奨（n=1の型は出さない）
-                acts.append(f"フックは『{_HOOK_JP.get(top_hook, top_hook)}』型を軸に（{hc}/{n}本）")
-    if c.thumb_agree:  # サムネ色が過半数一致のときだけ色を指示
-        tone = _TONE_JP.get(c.dominant_temperature, "")
-        bright = _BRIGHT_JP.get(c.dominant_brightness, "")
-        if tone or bright:
-            acts.append(f"サムネは{tone}×{bright}で作る")
-    elif c.thumb_consensus:  # 割れている場合は差別化余地として正直に
-        acts.append("サムネ色は上位でも割れており差別化の余地")
-    acts.append("保存導線（保存/来店CTA）を1つ入れる")
-    # synthesis の so_what は補助的に末尾へ（重複・長文は弾く）
-    syn = c.synthesis
-    if syn and syn.win_hypotheses and (sw := syn.win_hypotheses[0].so_what) and len(sw) <= 40:
-        acts.append(sw)
-    out_list: list[str] = []
-    for a in acts:
-        if a and a not in out_list:
-            out_list.append(a)
-        if len(out_list) >= 5:
-            break
-    return out_list
 
 
 # ===========================================================
@@ -333,16 +301,20 @@ def _scrape_board(
             else '<div class="sbth ph"></div>'
         )
         auth = _esc(m.author) or "—"
+        pr = '<span class="sbpr" title="タイアップ表記">PR</span>' if detect_pr(m)[0] else ""
+        posted, estimated = posted_date(m)
+        when = f"{posted.isoformat()}{'（換算）' if estimated else ''}" if posted else "—"
         return (
             "<tr>"
-            f'<td class="sbr">#{m.rank}{deep}{image_post}</td>'
+            f'<td class="sbr">#{m.rank}{deep}{image_post}{pr}</td>'
             f'<td class="sbtdth">{thumb}</td>'
             f'<td class="sbauth"><a href="{_esc(m.url)}" target="_blank" rel="noopener">@{auth}</a></td>'
             f'<td class="sbnum">{_fmt(m.follower_count)}</td>'
             f'<td class="sbnum">{_fmt(m.play_count)}</td>'
             f'<td class="sbnum">{m.save_rate():.1f}%</td>'
             f'<td class="sbnum">{_fmt(m.digg_count)}</td>'
-            f'<td class="sbcap">{_esc(_shorten(m.desc, 46))}</td>'
+            f'<td class="sbnum">{_esc(when)}</td>'
+            f'<td class="sbcap">{_esc(_head(m.desc))}</td>'
             "</tr>"
         )
 
@@ -350,21 +322,21 @@ def _scrape_board(
     image_legend = "・📷＝画像投稿（動画深掘り対象外）" if image_post_ranks else ""
     return (
         '<section><div class="th big">検索上位 取得ボード'
-        f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象{image_legend}）</div>"
+        f"（「{_esc(out.query)}」上位{n}本のメタ一覧・★＝深掘り分析対象・PR＝タイアップ表記"
+        f"{image_legend}）</div>"
         '<div class="sbwrap"><table class="sboard">'
         "<thead><tr><th>#</th><th>サムネ</th><th>アカウント</th><th>フォロワー</th>"
-        "<th>再生</th><th>保存率</th><th>いいね</th><th>キャプション</th></tr></thead>"
+        "<th>再生</th><th>保存率</th><th>いいね</th><th>投稿日</th><th>キャプション</th></tr></thead>"
         f"<tbody>{body}</tbody></table></div>"
         '<div class="muted small">※ サムネはTikTok署名URL（時間経過で失効する場合あり）。'
         "営業はこの一覧から提案に載せる動画を選定。</div></section>"
     )
 
 
-def _top5_board(out: VideoAlgorithmOutput) -> str:
+def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
     vids = [v for v in out.videos if v.analysis]
     if not vids:
         return ""
-    terms = _terms(out.query)
     n = len(vids)
     max_save = max((v.meta.save_rate() for v in vids), default=0.0)
     max_play = max((v.meta.play_count for v in vids), default=0)
@@ -372,7 +344,9 @@ def _top5_board(out: VideoAlgorithmOutput) -> str:
     def col(v: AnalyzedVideo) -> str:
         m, a = v.meta, v.analysis
         assert a is not None
-        top1 = " is-top" if m.rank == 1 else ""
+        f = d.ctx.fact(m.rank)
+        # 強調は「最も見られ保存された 1 本」（再生→保存率→シェア）。1 位とは限らない。
+        top1 = " is-top" if m.rank == d.ctx.best_rank else ""
         thumb = (
             f'<a href="{_esc(m.url)}" target="_blank" rel="noopener" class="bthumb">'
             f'<img src="{_esc(v.cover_data_uri)}" alt="#{m.rank}"></a>'
@@ -381,31 +355,37 @@ def _top5_board(out: VideoAlgorithmOutput) -> str:
         )
         kwd = "".join(
             f'<span class="d {"on" if ok else "off"}" title="{_esc(name)}"></span>'
-            for name, ok in _kw_layer_flags(v, terms)
+            for name, ok in _kw_flags(f)
         )
         save = m.save_rate()
+        dur = f.duration_sec if f is not None else a.duration_sec
+        cta = f is not None and f.cta_in_video is not None
+        brand = f is not None and any(b.prominent for b in f.brands)
+        pr = '<span class="sbpr">PR</span>' if f is not None and f.pr else ""
         return (
             f'<div class="bcol{top1}">'
-            f'<div class="brank">#{m.rank}</div>{thumb}'
+            f'<div class="brank">#{m.rank}{pr}</div>{thumb}'
             f'<div class="bauth">@{_esc(m.author) or "—"}</div>'
             f'<div class="bm"><span class="bv">{save:.2f}%</span>{_mini_bar(save, max_save, accent=(save >= max_save))}</div>'
-            f'<div class="bm"><span class="bv">{_fmt(m.play_count)}</span>{_mini_bar(float(m.play_count), float(max_play), accent=False)}</div>'
-            f'<div class="bm"><span class="bv">{a.duration_sec:.0f}s</span></div>'
-            f'<div class="bm"><span class="btag">{_esc(a.hook_type)}</span></div>'
+            f'<div class="bm"><span class="bv">{_fmt(m.play_count)}</span>{_mini_bar(float(m.play_count), float(max_play), accent=(m.play_count >= max_play))}</div>'
+            f'<div class="bm"><span class="bv">{dur:.0f}秒</span></div>'
+            f'<div class="bm"><span class="btag">{_esc(_HOOK_JP.get(a.hook_type, _HOOK_JP["other"]))}</span></div>'
             f'<div class="bm kwd">{kwd}</div>'
-            f'<div class="bm"><span class="bv">{"✓" if a.has_cta() else "—"} / {"✓" if a.has_brand() else "—"}</span></div>'
+            f'<div class="bm"><span class="bv">{"✓" if cta else "—"} / {"✓" if brand else "—"}</span></div>'
             "</div>"
         )
 
     labels = (
         '<div class="blab"><div class="brank">&nbsp;</div><div class="bthumb-lab">サムネ</div>'
         '<div class="bauth">&nbsp;</div>'
-        '<div class="bm rl">保存率 ★</div><div class="bm rl">再生</div><div class="bm rl">尺</div>'
-        '<div class="bm rl">フック型</div><div class="bm rl">KW層(4)</div><div class="bm rl">CTA/商品</div></div>'
+        '<div class="bm rl">保存率</div><div class="bm rl">再生</div><div class="bm rl">尺</div>'
+        '<div class="bm rl">フック型</div><div class="bm rl">KW層(4)</div>'
+        '<div class="bm rl">CTA/目立つ商品</div></div>'
     )
     cols = "".join(col(v) for v in vids)
     return (
-        f'<section><div class="th big">Top{n} 比較ボード（同じ検索面の当たり/外れの差）</div>'
+        f'<section><div class="th big">上位{n}本の比較（上の青線＝最も見られ保存された1本・'
+        "KW層は照合済み・CTA は文言か秒があるものだけ）</div>"
         f'<div class="board" style="grid-template-columns:138px repeat({n},1fr)">{labels}{cols}</div></section>'
     )
 
@@ -452,10 +432,79 @@ def _thumb_board(out: VideoAlgorithmOutput) -> str:
 # ===========================================================
 # E 横断シンセシス（概念の関連性・Gemini解釈層）
 # ===========================================================
-def _synthesis_block(out: VideoAlgorithmOutput) -> str:
-    s: CrossSynthesis | None = out.cross.synthesis
+def _funnel_block(d: Deck) -> str:
+    """共通の導線（保存・誘導）。多数派はコードが数える（過半数の型が無ければ「なし」）。
+
+    本番で、文言も秒も無い comment を数え、来店（visit）・保存を多数派と書いた誤りがあった。
+    動画内の呼びかけとキャプション内の呼びかけは分けて数える。
+    """
+    n = d.n
+    if n == 0:
+        return ""
+    facts = d.ctx.facts
+    consensus = cta_consensus(facts)
+    majority = (
+        "、".join(f"{CTA_KIND_LABEL.get(k, k)}（{ranks_text(r)}）" for k, r in consensus)
+        or "なし（過半数の型が無い）"
+    )
+    video = (
+        "・".join(
+            f"#{f.rank} {CTA_KIND_LABEL.get(f.cta_in_video[0], f.cta_in_video[0])}"
+            for f in facts
+            if f.cta_in_video is not None
+        )
+        or "なし"
+    )
+    dropped = "・".join(
+        f"#{f.rank} {'・'.join(CTA_KIND_LABEL.get(k, k) for k in f.cta_dropped)}"
+        for f in facts
+        if f.cta_dropped
+    )
+    caption: list[str] = []
+    for kind in ("save", "follow", "comment", "link_bio"):
+        ranks = [f.rank for f in facts if kind in f.cta_in_caption]
+        if ranks:
+            caption.append(
+                f"{CTA_KIND_LABEL.get(kind, kind)} {len(ranks)}/{n}（{ranks_text(ranks)}）"
+            )
+    places: dict[str, list[int]] = {}
+    for f in facts:
+        places.setdefault(f.qty_place, []).append(f.rank)
+    qty = "・".join(f"{k} {ranks_text(v)}" for k, v in places.items())
+    drop_html = (
+        f'<div class="kvrow"><b>無効にした CTA</b>{_esc(dropped)}（文言も秒も無い型だけの申告）</div>'
+        if dropped
+        else ""
+    )
+    return (
+        '<section class="syn"><div class="th big">共通の導線（保存・誘導）</div>'
+        f'<div class="kvrow"><b>動画内 CTA の多数派</b>{_esc(majority)}</div>'
+        f'<div class="kvrow"><b>動画内 CTA</b>{_esc(video)}</div>{drop_html}'
+        f'<div class="kvrow"><b>キャプションでの呼びかけ</b>{_esc("・".join(caption) or "なし")}</div>'
+        f'<div class="kvrow"><b>分量の置き場所</b>{_esc(qty)}</div></section>'
+    )
+
+
+def _synthesis_block(d: Deck) -> str:
+    """AI の読み解き。synthesis v3 の検査を通したものだけ（旧キャッシュの v2 の文は出さない）。"""
+    s = d.syn
     if s is None:
         return ""
+    n = d.n
+    hyps = "".join(
+        f'<div class="hyp"><div class="hyphead"><b>{_esc(h.text)}</b>'
+        f'<span class="prev">{_esc(h.tier)} {len(h.ranks)}/{n}</span>'
+        f'<span class="prev">{_vrefs(h.ranks)}</span></div>'
+        + (f'<div class="sowhat">→ 検証: {_esc(h.test)}</div>' if h.test else "")
+        + "</div>"
+        for h in s.hypotheses
+    )
+    hyp_block = (
+        '<div class="th">仮説（A/B で確かめるもの・該当と段階はコードが数え直し）</div>'
+        f'<div class="hyps">{hyps}</div>'
+        if hyps
+        else ""
+    )
     concepts = "".join(
         f'<div class="concept"><div class="cphead"><b>{_esc(cc.concept)}</b>'
         f'<span class="prev">{_esc(cc.prevalence)}</span></div>'
@@ -464,7 +513,7 @@ def _synthesis_block(out: VideoAlgorithmOutput) -> str:
         for cc in s.common_concepts
     )
     concepts_block = (
-        f'<div class="th">共通する概念（{len(s.common_concepts)}本以上を貫くもの）</div>'
+        '<div class="th">共通する概念（該当はコードが数え直し）</div>'
         f'<div class="concepts">{concepts}</div>'
         if concepts
         else ""
@@ -476,56 +525,16 @@ def _synthesis_block(out: VideoAlgorithmOutput) -> str:
     )
     angle_block = (
         '<div class="th">訴求角度のクラスタ</div><div class="tblwrap"><table class="tbl">'
-        "<thead><tr><th>角度</th><th>該当</th><th>効く理由（観測）</th></tr></thead>"
+        "<thead><tr><th>角度</th><th>該当</th><th>効く理由（AI の所見）</th></tr></thead>"
         f"<tbody>{angles}</tbody></table></div>"
         if angles
         else ""
     )
-    funnel = ""
-    if s.shared_funnel and s.shared_funnel.pattern:
-        f = s.shared_funnel
-        cta = "・".join(_esc(x) for x in f.cta_consensus) or "—"
-        funnel = (
-            '<div class="th">共通の導線（保存→来店設計）</div>'
-            f'<div class="kvrow">{_esc(f.pattern)}'
-            f'<span class="muted small">　CTA多数派: {cta}　/　{_esc(f.save_logic)}</span></div>'
-        )
-    diffs = "".join(
-        f'<li><span class="rk">#{d.rank}</span>{_esc(d.edge)}</li>' for d in s.differentiators
-    )
-    diff_block = (
-        f'<div class="th">差別化点（同質化の中で何で抜けたか）</div><ul class="diffs">{diffs}</ul>'
-        if diffs
-        else ""
-    )
-    # 上部が headline を出す時(プランナー版)は重複しないので全表示。
-    # fallback時のみ verdict と同一の仮説を除く（言い換えの二重掲載を防ぐ）
-    vbig = _verdict_big(out)
-    hlist = (
-        s.win_hypotheses if s.headline else [h for h in s.win_hypotheses if h.hypothesis != vbig]
-    )
-    hyps = "".join(
-        f'<div class="hyp"><div class="hyphead">{_conf_dot(h.confidence)}'
-        f'<b>{_esc(h.hypothesis)}</b><span class="prev">{_vrefs(h.supported_by)}</span></div>'
-        + (
-            f'<div class="counter">反例: {_esc(h.counter_example)}</div>'
-            if h.counter_example
-            else ""
-        )
-        + (f'<div class="sowhat">→ {_esc(h.so_what)}</div>' if h.so_what else "")
-        + "</div>"
-        for h in hlist
-    )
-    hyp_block = (
-        '<div class="th">勝ちパターン仮説（提案書の核・確信度つき）</div>'
-        f'<div class="hyps">{hyps}</div>'
-        if hyps
-        else ""
-    )
-    # 仮説を主役に先頭へ。概念/角度/導線/差別化は根拠として後段に。免責はフッタに一元化
+    if not (hyp_block or concepts_block or angle_block):
+        return ""
     return (
-        '<section class="syn"><div class="th big">横断シンセシス — 概念の関連性と勝ちパターン（AI解釈層）</div>'
-        f"{hyp_block}{concepts_block}{angle_block}{funnel}{diff_block}</section>"
+        f'<section class="syn"><div class="th big">AI の読み解き（上位{n}本・根拠は照合済み）</div>'
+        f"{hyp_block}{concepts_block}{angle_block}</section>"
     )
 
 
@@ -543,11 +552,10 @@ def _vrefs(ranks: list[int]) -> str:
 _BAND_CLS = {"一貫": "ok", "概ね一貫": "ok", "部分的": "mid", "乖離": "lo", "—": "na"}
 
 
-def _matrix_block(out: VideoAlgorithmOutput) -> str:
+def _matrix_block(out: VideoAlgorithmOutput, d: Deck) -> str:
     vids = [v for v in out.videos if v.analysis]
     if not vids:
         return ""
-    terms = _terms(out.query)
 
     def cellmark(ok: bool) -> str:
         return '<span class="mk on">●</span>' if ok else '<span class="mk off">○</span>'
@@ -557,7 +565,7 @@ def _matrix_block(out: VideoAlgorithmOutput) -> str:
     for v in vids:
         a = v.analysis
         assert a is not None
-        flags = dict(_kw_layer_flags(v, terms))
+        flags = dict(_kw_flags(d.ctx.fact(v.meta.rank)))
         sums["テロップ"] += int(flags["テロップ"])
         sums["キャプ"] += int(flags["キャプ"])
         sums["音声"] += int(flags["音声"])
@@ -579,12 +587,13 @@ def _matrix_block(out: VideoAlgorithmOutput) -> str:
     n = len(vids)
     consensus = (
         f"テロップにKW {sums['テロップ']}/{n}本・キャプにKW {sums['キャプ']}/{n}本・"
-        f"音声にKW {sums['音声']}/{n}本"
+        f"音声にKW {sums['音声']}/{n}本（テロップ・キャプションは照合済み・音声は AI 聞き取り）"
     )
     bands = [v.analysis.coherence_band() for v in vids if v.analysis]
-    # 上位が一貫性で横並びなら「順位を分けた要因ではない＝共通前提」と正直に読ませる
+    # 上位が一貫性で横並びなら「順位を分けた要因ではない＝前提」と正直に読ませる
     read = (
-        "上位は一貫性で横並び＝これは入賞の<b>共通前提</b>であり、順位を分けたのは別要因（差別化点を参照）。"
+        "上位は一貫性で横並び＝これは上位に共通する<b>前提</b>で、順位の差の要因は未特定"
+        "（下位の動画は未分析）。"
         if bands and all(b in ("一貫", "概ね一貫") for b in bands)
         else "KW一致は検索適合の必要条件と仮定（TikTok内部重みは非公開で断定不可）。"
     )
@@ -603,6 +612,38 @@ def _matrix_block(out: VideoAlgorithmOutput) -> str:
 # ===========================================================
 def _filtered_frames(v: AnalyzedVideo) -> list[FrameShot]:
     return [f for f in v.frames if f.data_uri.startswith("data:image/")]
+
+
+def frame_label(a: VideoVSEOAnalysis | None, sec: float) -> str:
+    """コマの見出し「24.0秒｜手順」（秒と場面の役割だけ）。
+
+    ブランド名・「KWテロップ」は見出しに付けない（Gemini の秒は 1〜2 秒ずれ、そのコマに写って
+    いないことがあった）。役割は場面の欄が無ければコードの推定。
+    """
+    role = ""
+    if a is not None and a.scenes:
+        scenes = sorted(a.scenes, key=lambda sc: (sc.start_sec, sc.end_sec))
+        roles = infer_roles(a)
+        idx = next(
+            (
+                i
+                for i, sc in enumerate(scenes)
+                if sc.start_sec <= sec < max(sc.end_sec, sc.start_sec)
+                or (i == len(scenes) - 1 and sec >= sc.start_sec)
+            ),
+            min(range(len(scenes)), key=lambda i: abs(scenes[i].start_sec - sec)),
+        )
+        role = ROLE_LABEL.get(roles[idx][0], ROLE_LABEL["other"])
+    return f"{sec:.1f}秒｜{role}" if role else f"{sec:.1f}秒"
+
+
+def _kw_secs(f: VideoFacts | None) -> tuple[set[float], set[float]]:
+    """テロップの秒（検索語の完全一致・照合済みの言い換え）。Gemini の kw_match は使わない。"""
+    if f is None:
+        return set(), set()
+    exact = {s for h in f.kw if h.layer == "telop" and h.match == "exact" for s in h.secs}
+    syn = {s for h in f.kw if h.layer == "telop" and h.match == "synonym" for s in h.secs}
+    return exact, syn - exact
 
 
 def _tc(sec: float) -> str:
@@ -628,11 +669,13 @@ def _clip(left: float, width: float, label: str, cls: str, *, kw: bool = False) 
     )
 
 
-def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
+def _timeline_hero(v: AnalyzedVideo, idx: int, d: Deck) -> str:
     a = v.analysis
     if a is None or a.duration_sec <= 0:
         return '<div class="muted small">タイムライン: 尺不明のため省略</div>'
     dur = a.duration_sec
+    exact, syn = _kw_secs(d.ctx.fact(v.meta.rank))
+    kw_secs = exact | syn
     lim = dur * 1.02  # 尺超過の秒（Gemini推定ブレ）は描かない
     fr = _filtered_frames(v)
 
@@ -647,7 +690,9 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
     for i, t in enumerate(tl):
         nxt = tl[i + 1].sec if i + 1 < len(tl) else dur
         left = _pct(t.sec, dur)
-        telop += _clip(left, _pct(nxt, dur) - left, _esc(t.text[:18]), "c-telop", kw=t.kw_match)
+        telop += _clip(
+            left, _pct(nxt, dur) - left, _esc(t.text[:18]), "c-telop", kw=t.sec in kw_secs
+        )
 
     # V3 ブランド/物体
     brand = ""
@@ -655,7 +700,9 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
         for s in b.appear_sec or [0.0]:
             if s > lim:
                 continue
-            cls = "c-brand comp" if b.brand_relation == "competitor" else "c-brand"
+            # 区分は名簿（コード）で決める。Gemini の brand_relation は使わない。
+            relation = d.roster.relation(b.brand_name)
+            cls = "c-brand comp" if relation == "competitor" else "c-brand"
             brand += _clip(
                 _pct(s, dur),
                 _pct(max(b.total_screen_time_sec, 1.5), dur),
@@ -689,13 +736,16 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
     payload = {
         "dur": round(dur, 2),
         "url": v.meta.url,
-        "frames": [{"sec": round(f.sec, 2), "cap": f.caption, "fi": i} for i, f in enumerate(fr)],
+        "frames": [
+            {"sec": round(f.sec, 2), "cap": frame_label(a, f.sec), "fi": i}
+            for i, f in enumerate(fr)
+        ],
         "telops": [
             {
                 "sec": round(t.sec, 2),
                 "pos": _POS_JP.get(t.position, "?"),
                 "text": t.text,
-                "kw": t.kw_match,
+                "kw": t.sec in kw_secs,
             }
             for t in a.telops
         ],
@@ -745,38 +795,48 @@ def _timeline_hero(v: AnalyzedVideo, idx: int) -> str:
         f'<div class="nrulerwrap"><div class="ncorner">TC</div>'
         f'<div class="nruler">{ticks}{fticks}</div></div>{tracks}'
         f'<script type="application/json" class="tldata">{_json_attr(payload)}</script>'
-        f"{_frame_strip(fr)}{legend}</div>"
+        f"{_frame_strip(fr, a)}{legend}</div>"
     )
 
 
-def _frame_strip(fr: list[FrameShot]) -> str:
+def _frame_strip(fr: list[FrameShot], a: VideoVSEOAnalysis | None) -> str:
     if not fr:
         return ""
     cells = "".join(
-        f'<figure class="frm" data-fi="{i}"><img src="{f.data_uri}" alt="{_esc(f.caption)}">'
-        f"<figcaption><b>{f.sec:.1f}s</b>{_esc(f.caption)}</figcaption></figure>"
+        f'<figure class="frm" data-fi="{i}"><img src="{f.data_uri}" alt="{_esc(frame_label(a, f.sec))}">'
+        f"<figcaption>{_esc(frame_label(a, f.sec))}</figcaption></figure>"
         for i, f in enumerate(fr)
     )
     return f'<div class="frmstrip" role="tablist" aria-label="抽出フレーム">{cells}</div>'
 
 
-def _tabs(v: AnalyzedVideo, idx: int) -> str:
+def _kw_mark(sec: float, exact: set[float], syn: set[float]) -> str:
+    if sec in exact:
+        return "✓"
+    return "≈" if sec in syn else ""
+
+
+def _tabs(v: AnalyzedVideo, idx: int, d: Deck) -> str:
     a = v.analysis
     assert a is not None
-    # KW一致テロップを先頭に（営業が見たいのは"KWが乗った瞬間"）
+    # テロップは動画の流れのとおり秒の昇順（KW 一致を先頭に並べ替えない）。KW 列は照合済み:
+    # ✓＝検索語がテロップ本文に実在（完全一致）、≈＝言い換え（前後 2 秒のテロップに実在）。
+    exact, syn = _kw_secs(d.ctx.fact(v.meta.rank))
     telop_rows = "".join(
-        f'<tr class="{"hit" if t.kw_match else ""}"><td>{t.sec:.1f}s</td>'
-        f"<td>{'✓' if t.kw_match else ''}</td><td>{_esc(t.text)}</td></tr>"
-        for t in sorted(a.telops, key=lambda x: (not x.kw_match, x.sec))
+        f'<tr class="{"hit" if _kw_mark(t.sec, exact, syn) else ""}"><td>{t.sec:.1f}秒</td>'
+        f"<td>{_kw_mark(t.sec, exact, syn)}</td><td>{_esc(t.text)}</td></tr>"
+        for t in sorted(a.telops, key=lambda x: x.sec)
     )
     telop_tbl = (
         '<div class="tscroll"><table class="tbl"><thead><tr><th>秒</th><th>KW</th><th>内容</th>'
         "</tr></thead>"
         f"<tbody>{telop_rows or '<tr><td colspan=3 class=muted>検出なし</td></tr>'}</tbody></table></div>"
+        '<div class="muted small">KW: ✓＝検索語がテロップにそのまま出る（完全一致）・'
+        "≈＝言い換え（前後2秒のテロップに実在するものだけ）</div>"
     )
-    comp = _competitor_html(a)
+    comp = _competitor_html(a, d.roster)
     brand_rows = "".join(
-        f'<tr class="{"comp" if b.brand_relation == "competitor" else ""}">'
+        f'<tr class="{"comp" if d.roster.relation(b.brand_name) == "competitor" else ""}">'
         f"<td>{','.join(f'{s:.0f}' for s in b.appear_sec) or '?'}s</td><td>{_esc(b.brand_name)}</td>"
         f"<td>{_esc(_SRC_JP.get(b.detection_source, b.detection_source))}</td>"
         f"<td>{_esc(_PROM_JP.get(b.prominence, b.prominence))}</td>"
@@ -790,7 +850,8 @@ def _tabs(v: AnalyzedVideo, idx: int) -> str:
     )
     # 数値KPI・勝因は pane 上部に移したので、ここは解説テキストのみ
     metrics_pane = (
-        f'<div class="kvrow"><b>主訴求</b>{_esc(a.main_message) or "—"}　<b>テンポ</b>{_esc(a.pacing)}</div>'
+        f'<div class="kvrow"><b>主訴求</b>{_esc(a.main_message) or "—"}　<b>テンポ</b>'
+        f"{_esc(PACING_LABEL.get(a.pacing, a.pacing))}</div>"
         f'<div class="kvrow"><b>フック</b>{_esc(a.hook_summary) or "—"}</div>'
         f'<div class="kvrow"><b>キャプション関連性</b>{_esc(a.caption_relevance) or "—"}</div>'
     )
@@ -806,8 +867,8 @@ def _tabs(v: AnalyzedVideo, idx: int) -> str:
     )
 
 
-def _competitor_html(a: VideoVSEOAnalysis) -> str:
-    comp = [b for b in a.brand_detections if b.brand_relation == "competitor"]
+def _competitor_html(a: VideoVSEOAnalysis, roster: Roster) -> str:
+    comp = [b for b in a.brand_detections if roster.relation(b.brand_name) == "competitor"]
     if not comp:
         return ""
     items = "、".join(
@@ -875,7 +936,7 @@ def _image_post_pane(meta: VideoMeta) -> str:
     return f'<div class="vpane imagepostpane">{head}{cover}{kpi}{caption}{notice}</div>'
 
 
-def _video_pane(v: AnalyzedVideo, idx: int) -> str:
+def _video_pane(v: AnalyzedVideo, idx: int, d: Deck) -> str:
     """個別レポート1本分（上部に数値KPI → 大型タイムライン動画プレーヤー → 詳細タブ）。"""
     m = v.meta
     a = v.analysis
@@ -894,21 +955,34 @@ def _video_pane(v: AnalyzedVideo, idx: int) -> str:
         + _stat(_fmt(m.share_count), "シェア")
         + _stat(f"{m.save_rate():.2f}%", "保存率", kpi=True)
         + (
-            _stat(f"{m.engagement_rate:.1f}%", "エンゲージ", kpi=True)
+            _stat(f"{m.engagement_rate:.1f}%", "エンゲージメント率", kpi=True)
             if m.engagement_rate > 0
             else ""
         )
-        + _stat(f"{a.duration_sec:.0f}s", "尺")
+        + _stat(f"{f.duration_sec if (f := d.ctx.fact(m.rank)) else a.duration_sec:.0f}秒", "尺")
         + "</div></div>"
     )
-    wins = "".join(f'<span class="wchip">{_esc(w)}</span>' for w in a.win_factors[:4])
-    wins_html = f'<div class="vpwins">{wins}</div>' if wins else ""
-    return f'<div class="vpane">{head}{kpi}{wins_html}{_timeline_hero(v, idx)}{_tabs(v, idx)}</div>'
+    # 勝因は AI の所見。測っていない指標（視聴維持率・離脱など）や統計の語を含むものは出さない。
+    wins = "".join(
+        f'<span class="wchip">{_esc(w)}</span>' for w in a.win_factors[:4] if deny_hit(w) is None
+    )
+    wins_html = (
+        f'<div class="vpwins"><span class="muted small">AI の所見:</span>{wins}</div>'
+        if wins
+        else ""
+    )
+    return (
+        f'<div class="vpane">{head}{kpi}{wins_html}{_timeline_hero(v, idx, d)}'
+        f"{_tabs(v, idx, d)}</div>"
+    )
 
 
 # ===========================================================
 # H 統計付録（既定クローズ）
 # ===========================================================
+_RHO_WEAK = 0.3
+
+
 def _corr_bar(rho: float | None) -> str:
     if rho is None:
         return '<span class="muted small">データ不足</span>'
@@ -929,7 +1003,17 @@ def _frac(val: str) -> int:
         return 0
 
 
+def rho_direction(rho: float | None) -> str:
+    """相関の向きの文（コードが作る）。順位は 1 が最上位なので ρ<0 は「値が大きいほど上位」。"""
+    if rho is None:
+        return "判定できない"
+    if abs(rho) < _RHO_WEAK:
+        return "向きは弱い（参考にならない）"
+    return "値が大きい動画ほど上位（参考）" if rho < 0 else "値が小さい動画ほど上位（参考）"
+
+
 def _stats_block(s: StatsAnalysis | None) -> str:
+    """統計付録。相関（特徴×表示順位）は本文に出さず、ここにだけ表で出す（有意性なし・参考）。"""
     if s is None or s.sample_size == 0:
         return ""
     # n<3 で相関が全て算出不能なら「空の相関表」を見せない（恥/不信を避ける）
@@ -937,15 +1021,17 @@ def _stats_block(s: StatsAnalysis | None) -> str:
     if has_rho:
         corr_rows = "".join(
             f"<tr><td>{_esc(c.feature)}</td><td>{'' if c.rho is None else f'{c.rho:+.2f}'}</td>"
-            f"<td>{_corr_bar(c.rho)} {_esc(c.direction_label)}</td>"
+            f"<td>{_corr_bar(c.rho)} {_esc(rho_direction(c.rho))}</td>"
             f"<td>{c.monotonic_hits}/{c.monotonic_total}</td></tr>"
             for c in s.correlations
         )
         corr_tbl = (
-            '<div class="th">特徴量 × 順位の効き（Spearman ρ・点推定／有意性なし）</div>'
-            '<div class="tblwrap"><table class="tbl"><thead><tr><th>特徴</th><th>ρ</th><th>効きの方向</th>'
-            "<th>単調性</th></tr></thead>"
+            f'<div class="th">特徴×表示順位（参考・n={s.sample_size}・有意性なし）</div>'
+            '<div class="tblwrap"><table class="tbl"><thead><tr><th>特徴</th><th>ρ</th>'
+            "<th>向き（コードの判定）</th><th>単調性</th></tr></thead>"
             f"<tbody>{corr_rows}</tbody></table></div>"
+            '<div class="muted small">Spearman の順位相関。本数が少なく因果ではないため、本文の'
+            "結論・指示には使っていません。</div>"
         )
     else:
         corr_tbl = (
@@ -973,7 +1059,7 @@ def _stats_block(s: StatsAnalysis | None) -> str:
         f'<div class="th">KWカバレッジ（4層・平均 {kc.avg_score_0_100:.0f}/100）</div>{fill_bars}'
         f'<div class="muted small">動画別: {_esc(" / ".join(kc.per_video))}</div>'
     )
-    hooks = "　".join(f"{_esc(h)} {c}本" for h, c in s.hook_counts)
+    hooks = "　".join(f"{_esc(_HOOK_JP.get(h, h))} {c}本" for h, c in s.hook_counts)
     hook_block = (
         f'<div class="th">フック型の分布（強フック {_esc(s.strong_hook_ratio)}）</div>'
         f'<div class="kvrow">{hooks or "—"}</div>'
@@ -1058,6 +1144,10 @@ button:focus-visible,.nscrub:focus-visible,.frm:focus-visible,summary:focus-visi
 .chip{display:inline-flex;align-items:center;gap:2px;background:var(--va-white);border:1px solid var(--va-line);
  border-radius:var(--border-radius-8);padding:4px 12px;font-size:14px}
 .chip b{font-weight:700}.chip i{font-style:normal;color:var(--va-sub);font-size:14px;margin-left:6px;white-space:nowrap}
+.chip .tname{font-weight:700;color:var(--va-accent);margin-right:6px;white-space:nowrap}
+.sbpr{display:inline-block;margin-left:4px;border:1px solid var(--color-primitive-yellow-900);
+ background:var(--color-primitive-yellow-50);color:var(--va-warn-ink);border-radius:var(--border-radius-4);
+ padding:0 4px;font-size:14px;font-weight:700;line-height:1.3}
 .nexts{margin:0;padding:0;list-style:none}
 .nexts li{position:relative;padding:8px 0 8px 28px;font-size:16px;border-bottom:1px solid var(--va-line)}
 .nexts li:before{content:'☐';position:absolute;left:2px;color:var(--va-accent);font-size:16px}
@@ -1454,7 +1544,10 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
     """VideoAlgorithmOutput → 自己完結 HTML。
 
     トップタブで「📊 統計レポート（全体横断）」と「各動画の個別レポート」を切り替える。
+    結論・共通点・指示・導線はスライドと同じ事実層（facts）と検査済みの synthesis v3 から描く。
+    generated_at は検索結果を取得した日時（JST・ISO 8601）。冒頭とフッタに出す。
     """
+    d = build_deck(out, generated_at=generated_at)
     analyzed = [(i, v) for i, v in enumerate(out.videos) if v.analysis]
     image_post_top_n = _image_post_top_n()
     image_post_metas = _image_post_metas(out) if image_post_top_n > 0 else []
@@ -1470,23 +1563,23 @@ def render_report(out: VideoAlgorithmOutput, *, generated_at: str = "") -> str:
         else _scrape_board(out)
     )
     overview = (
-        f"{_verdict_band(out)}{scrape_board}{_top5_board(out)}{_thumb_board(out)}"
-        f"{_synthesis_block(out)}{_matrix_block(out)}{_stats_block(out.cross.stats)}"
+        f"{_verdict_band(out, d)}{scrape_board}{_top5_board(out, d)}{_thumb_board(out)}"
+        f"{_funnel_block(d)}{_synthesis_block(d)}{_matrix_block(out, d)}"
+        f"{_stats_block(out.cross.stats)}"
     )
     # 個別レポート pane（動画ごと）
     panes = "".join(
-        f'<div class="ttpane" data-ttp="v{i}">{_video_pane(v, i)}</div>' for i, v in analyzed
+        f'<div class="ttpane" data-ttp="v{i}">{_video_pane(v, i, d)}</div>' for i, v in analyzed
     )
     panes += "".join(
         f'<div class="ttpane" data-ttp="i{i}">{_image_post_pane(meta)}</div>'
         for i, meta in enumerate(image_posts)
     )
     note = (
-        "※ 本レポートは上位動画の観測可能な特徴に基づく仮説です。TikTok内部のランキング重みは"
-        "非公開で、ここで測るのは表層特徴の共通性のみ。n が小さく相関≠因果・生存者バイアスがあるため、"
-        "入賞率はテスト投稿での検証を推奨します。"
+        f"※ {footer_text(d)}。TikTok内部のランキング重みは非公開で、ここで測るのは表層特徴の"
+        "共通性のみ。生存者バイアスがあるため、テスト投稿での検証を推奨します。"
     )
-    stamp = f"　/　{_esc(generated_at)}" if generated_at else ""
+    stamp = f"　/　取得 {_esc(d.stamp)}" if d.stamp else ""
     scraped = len(out.board) or len(out.videos)
     n = _analyzed(out)
     scope = f"取得{scraped}本・深掘り分析{n}本"

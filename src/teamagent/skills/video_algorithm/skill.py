@@ -46,7 +46,7 @@ from teamagent.adapters.video_algorithm_cache import (
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.video_algorithm.analysis import cross_analyze
-from teamagent.skills.video_algorithm.evidence import Roster
+from teamagent.skills.video_algorithm.evidence import TIER_MAJORITY, TIER_REQUIRED, Roster
 from teamagent.skills.video_algorithm.facts import JST
 from teamagent.skills.video_algorithm.report import render_report
 from teamagent.skills.video_algorithm.schema import (
@@ -58,7 +58,9 @@ from teamagent.skills.video_algorithm.schema import (
     VideoMeta,
     VideoVSEOAnalysis,
 )
+from teamagent.skills.video_algorithm.slides import ordered_features
 from teamagent.skills.video_algorithm.synthesis import synthesis_version_from_env
+from teamagent.skills.video_algorithm.synthesis_input import SynthesisContext
 
 logger = structlog.get_logger(__name__)
 
@@ -144,6 +146,24 @@ def _echo_fields(input: VideoAlgorithmInput) -> dict[str, Any]:
 def _now_jst_iso() -> str:
     """取得日時（JST・秒まで）。順位は「この時点」の値として資料に出す。"""
     return datetime.now(JST).isoformat(timespec="seconds")
+
+
+# クライアント名が無いときの Slack の最後の 1 行（仕様 v3 §3-4）。
+CLIENT_MISSING_NOTE = (
+    "クライアント名と競合を教えてもらえれば、区分と提案文を入れた版に作り直します"
+    "（動画の再分析なし）"
+)
+_SLACK_POINTS = 3
+
+
+def _tier_points(out: VideoAlgorithmOutput) -> str:
+    """Slack に出す共通点（必須条件→多数派・段階の名前と本数はコードの集計）。無ければ空。"""
+    roster = Roster.of(out.client_name, out.competitors)
+    ctx = SynthesisContext.build(out.videos, out.query, board=out.board, roster=roster)
+    feats = ordered_features(ctx.features, TIER_REQUIRED) + ordered_features(
+        ctx.features, TIER_MAJORITY
+    )
+    return "／".join(f"{f.tier}『{f.label}』（{f.count}/{f.n}本）" for f in feats[:_SLACK_POINTS])
 
 
 def prompt_version_from_env() -> str:
@@ -399,7 +419,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     name: ClassVar[str] = "video_algorithm"
     description: ClassVar[str] = (
         "検索KWの上位動画を取得し、各動画をGeminiで時刻付き構造分析（テロップ/ブランド認識/"
-        "フック/CTA）→ 5本横断で勝ち筋を読み解き、HTMLタイムラインレポートを生成"
+        "フック/CTA）→ 上位の共通点と1本ずつの構成を読み解き、HTMLレポートとスライドを生成"
     )
     input_schema: ClassVar[type[BaseModel]] = VideoAlgorithmInput
     output_schema: ClassVar[type[BaseModel]] = VideoAlgorithmOutput
@@ -1784,7 +1804,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     f"vseo_slides_{safe}_{uuid.uuid4().hex[:8]}.html",
                 )
                 with open(spath, "w", encoding="utf-8") as f:
-                    f.write(render_slides(out))
+                    f.write(render_slides(out, generated_at=out.generated_at or ""))
                 if "slides" in input.outputs:
                     out.slides_url = self._publish_artifact(
                         spath, request_id, out.query, kind="slides"
@@ -1814,7 +1834,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 # 従来挙動維持: 1280x720 の HTML を device_scale_factor=2 で撮影する
                 # （slides_to_pptx の既定 scale が 1 に変わったため明示する）。
                 pptx = MediaJobClient().slides_to_pptx(
-                    render_slides(out),
+                    render_slides(out, generated_at=out.generated_at or ""),
                     request_fingerprint=f"{request_id}:slides-pptx",
                     width=1280,
                     height=720,
@@ -1825,7 +1845,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             elif MediaJobClient.local_runtime_enabled():
                 from teamagent.skills.video_algorithm.pptx_export import render_pptx
 
-                if render_pptx(out, ppath) is None:
+                if render_pptx(out, ppath, generated_at=out.generated_at or "") is None:
                     return None
             else:
                 MediaJobClient.require_configured()
@@ -1873,7 +1893,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 resolved_report_dir,
                 f"vseo_{safe}_{uuid.uuid4().hex[:8]}.html",
             )
-            html = render_report(out)
+            html = render_report(out, generated_at=out.generated_at or "")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(html)
             return path
@@ -1915,21 +1935,26 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         return "\n".join(parts)
 
     def _slack_summary(self, out: VideoAlgorithmOutput, backfilled: int = 0) -> str:
-        """Slack は『通知』だけ（詳細は添付 HTML レポートに全て埋め込む）。"""
+        """Slack は『通知』だけ（詳細は添付 HTML レポートに全て埋め込む）。
+
+        共通点は「勝ち筋」と呼ばない。段階の名前（必須条件／多数派／事例）はコードが本数から
+        付けたもの（facts / evidence.tier）。URL は必ず行末に置く（#463）。クライアント名が
+        無ければ、区分と提案文を入れた版に作り直せることを最後の 1 行で案内する。
+        """
         c = out.cross
         ok = sum(1 for v in out.videos if v.analysis)
         bf = f"／下位繰上げ{backfilled}本" if backfilled else ""
-        top = f"　最有力の勝ち筋: 『{c.win_factors[0].factor}』" if c.win_factors else ""
+        points = _tier_points(out)
+        top = f"\n共通点（コードの集計）: {points}" if points else ""
         proposal_lines = ""
         if out.pptx_url:
-            proposal_lines += f"\n📊 提案用パワポ（7日有効・そのまま提案資料へ）: {out.pptx_url}"
+            proposal_lines += f"\n📊 画像のパワポ（文字の修正はHTML版で・7日有効）: {out.pptx_url}"
         if out.slides_url:
             proposal_lines += f"\n✏️ 編集用スライド（ブラウザで直接編集）: {out.slides_url}"
         # URL は必ず行末に置く。直後に全角の文字が続くと、Slack がその文字まで URL に含めて
         # リンクが 404 になる（09-28 本番「（タイムライン/…）」で発生）。
         report_line = (
-            "📄 詳細レポート（タイムライン/テロップ位置/ブランド検出/勝ち筋・7日有効）: "
-            f"{out.report_url}"
+            f"📄 詳細レポート（構成/テロップ/ブランド検出/タイムライン・7日有効）: {out.report_url}"
             if out.report_url
             else "📄 詳細は添付の HTML レポートをご覧ください"
         )
@@ -1937,10 +1962,12 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             f"📈 月間検索量(手動実測): {out.search_volume:,}\n" if out.search_volume else ""
         )
         quota_line = f"ℹ️ {out.quota_note}\n" if out.quota_note else ""
+        client_line = "" if (out.client_name or "").strip() else f"\n{CLIENT_MISSING_NOTE}"
         return (
             f"🔎 **VSEO動画アルゴリズム分析** 完了「{out.query}」"
             f"（上位{len(out.videos)}本／分析成功{ok}本{bf}）\n"
             f"{c.summary}{top}\n{quota_line}{volume_line}"
             f"{report_line}{proposal_lines}\n"
             f"_概算 ${out.total_cost_usd:.4f}・n={c.video_count} の観測仮説（相関≠因果）_"
+            f"{client_line}"
         )

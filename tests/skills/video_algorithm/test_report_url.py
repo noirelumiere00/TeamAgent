@@ -64,4 +64,5 @@ def test_slack_summary_puts_every_url_at_the_end_of_its_line() -> None:
     for line in summary.splitlines():
         if "https://" in line:
             assert re.search(r"https://[\x21-\x7e]+$", line), line
-    assert "（タイムライン/テロップ位置/ブランド検出/勝ち筋・7日有効）: https://" in summary
+    assert "（構成/テロップ/ブランド検出/タイムライン・7日有効）: https://" in summary
+    assert "勝ち筋" not in summary

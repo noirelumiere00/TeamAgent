@@ -42,6 +42,10 @@ _PROPOSAL_BUILDER_REQUIRED_AUXILIARY = frozenset(
 )
 _PROPOSAL_BUILDER_REQUIRED_DATE_OFFSETS = frozenset(range(-56, 22, 7))
 _PROPOSAL_BUILDER_EXPECTED_SLIDE_COUNT = 83
+# 撮影の前に隠す要素（ブラウザ用の編集ヒント）。position:fixed なので、隠さないと全スライドの
+# 左上に焼き込まれる。video_algorithm.slides.NOEXPORT_CSS と同じ値（media 便は skills を
+# 持たないので、ここに同じ文字列を置く）。
+_NOEXPORT_CSS = "[data-noexport]{display:none!important}"
 
 
 def _exact(value: Any, keys: set[str], name: str) -> dict[str, Any]:
@@ -114,6 +118,7 @@ def _slides(root: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
             page.route("**/*", lambda route: route.abort())
             page.set_content(html, wait_until="domcontentloaded")
+            page.add_style_tag(content=_NOEXPORT_CSS)
             # data:URI の @font-face でも FontFace ロードは非同期のため、フォント適用と
             # 画像デコードの完了を待ってから撮影する（未対策だと非決定的にフォールバック
             # 字形・未ロード画像が焼き込まれる。spec_README 必要改修3）。

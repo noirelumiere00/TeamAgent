@@ -20,7 +20,13 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Literal
 
-from teamagent.skills.video_algorithm.evidence import Roster, contains, query_terms, ranks_text
+from teamagent.skills.video_algorithm.evidence import (
+    Roster,
+    contains,
+    query_terms,
+    ranks_text,
+    tier,
+)
 from teamagent.skills.video_algorithm.facts import (
     VideoFacts,
     duration_of,
@@ -238,7 +244,11 @@ def cross_analyze(
     # サマリ（1行）。「勝ち筋」とは呼ばない（全本に共通する特徴は前提で、差の要因ではない）。
     if cross.win_factors:
         lead = cross.win_factors[0]
-        top_text = f"『{lead.factor}』（{lead.observed_in}/{lead.total}本）"
+        # 段階の名前（必須条件／多数派／事例）はコードが本数から付ける（Slack の要約にも出る）。
+        top_text = (
+            f"『{lead.factor}』（{tier(lead.observed_in, lead.total)} "
+            f"{lead.observed_in}/{lead.total}本）"
+        )
     else:
         top_text = "（顕著な共通項なし）"
     cross.summary = (

@@ -32,6 +32,7 @@ from teamagent.skills.video_algorithm.schema import (
     VideoMeta,
     WinRange,
 )
+from teamagent.skills.video_algorithm.slides import render_slides
 from teamagent.skills.video_algorithm.synthesis import build_prompt, build_prompt_v2
 from tests.skills.video_algorithm.prod_shape import (
     CLIENT,
@@ -133,7 +134,10 @@ def test_llm_input_and_screen_have_no_top_band_range() -> None:
     out = VideoAlgorithmOutput(query=QUERY, videos=videos, board=prod_board(), cross=cross)
     html = render_report(out)
     assert not re.search(r"\d+(?:\.\d+)?% 以上|\d+枚以上|46-59秒", html)
-    assert "尺は固定しない（上位5本は46〜89秒・中央値60秒）" in html
+    assert "<td>尺(秒)</td><td>中央値 60.0</td><td>範囲 46.0–89.0</td>" in html  # 付録の分布
+    slides = render_slides(out)
+    assert not re.search(r"\d+(?:\.\d+)?% ?以上|\d+枚以上|46-59", slides)
+    assert "尺 中央値60秒（46〜89秒・固定しない）" in slides  # 共通する構成の型の帯
 
 
 def test_old_cache_win_ranges_are_dropped_on_load() -> None:
