@@ -34,7 +34,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（bundle は据え置き・240 行不変）。
 # 2026-09-24: 上流で libexpat 2.8.4-r0 が索引から消え 2.8.5-r0 へ（r28 段 3 で停止）。
 # 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（240 行不変）。
-APK_LOCK_SHA256 = "aeb05fd26952141e38689c523d845c1027b5cd9ea77f7f995fe175d4b6f5a129"
+# 2026-09-29: Alpine 上流への追随（削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
+APK_LOCK_SHA256 = "63ff7c3bf0db6b7f53363fb3336124f74e83c86360250235d3cc5eae2ff236a3"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
