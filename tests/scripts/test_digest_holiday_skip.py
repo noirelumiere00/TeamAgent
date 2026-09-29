@@ -53,6 +53,7 @@ mod = _load()
 
 U1 = "komata@vectorinc.co.jp"
 U2 = "unlinked@vectorinc.co.jp"
+U3 = "linked2@vectorinc.co.jp"
 _D = _dt.date
 _JST = calwin.JST
 
@@ -117,12 +118,19 @@ class _Log:
         return [kw for _lvl, ev, kw in self.events if ev == event]
 
 
+class _Token:
+    """本人の OAuthToken の代役（誰の token かだけを持つ）。"""
+
+    def __init__(self, email: str) -> None:
+        self.user_email = email
+
+
 class _TokenStore:
     def __init__(self, linked: set[str]) -> None:
         self._linked = linked
 
     def get(self, email: str) -> Any:
-        return object() if email in self._linked else None  # None = 未連携
+        return _Token(email) if email in self._linked else None  # None = 未連携
 
 
 class _GCal:
@@ -135,6 +143,122 @@ class _GCal:
     def list_events(self, request_id: str, **kwargs: Any) -> list[CalendarEvent]:
         self.calls += 1
         return list(self.events)
+
+
+class _CalRequest:
+    """googleapiclient の HttpRequest の代役。本番の失敗はここ（execute）から出る。"""
+
+    def __init__(self, outcome: Any) -> None:
+        self._outcome = outcome
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(self._outcome, BaseException):
+            raise self._outcome
+        return self._outcome
+
+
+class _CalEvents:
+    def __init__(self, service: _CalService) -> None:
+        self._service = service
+
+    def list(self, **params: Any) -> _CalRequest:
+        self._service.calls.append(params)
+        return _CalRequest(self._service.outcome)
+
+
+class _CalService:
+    """Calendar API v3 の service の形（``events().list(**p).execute()``）だけを偽る。
+
+    ``GCalendarClient`` 本体（policy の封鎖・``extract_events``）は本物を通す。
+    本番の失敗の形:
+      - 失効した refresh token → ``execute()`` の中で AuthorizedHttp の refresh が失敗し、
+        ``google.auth.exceptions.RefreshError``（invalid_grant / invalid_client）がそのまま出る
+      - 権限不足・Google 側の障害 → ``googleapiclient.errors.HttpError``（403 / 503）
+    ``GCalendarClient.list_events`` はどちらも握らずに上へ投げる。
+    """
+
+    def __init__(self, outcome: Any) -> None:
+        self.outcome = outcome
+        self.calls: list[dict[str, Any]] = []
+
+    def events(self) -> _CalEvents:
+        return _CalEvents(self)
+
+
+def _calendar_api_json(day: _dt.date) -> dict[str, Any]:
+    """events.list の実レスポンスの形（``_holiday_events`` と同じ 4 件を API の JSON で）。"""
+    d = day.isoformat()
+    nxt = (day + _dt.timedelta(days=1)).isoformat()
+
+    def _timed(event_id: str, summary: str, start: str, end: str, **extra: Any) -> dict[str, Any]:
+        return {
+            "kind": "calendar#event",
+            "id": event_id,
+            "status": "confirmed",
+            "summary": summary,
+            "start": {"dateTime": start, "timeZone": "Asia/Tokyo"},
+            "end": {"dateTime": end, "timeZone": "Asia/Tokyo"},
+            **extra,
+        }
+
+    return {
+        "kind": "calendar#events",
+        "summary": "primary",
+        "timeZone": "Asia/Tokyo",
+        "items": [
+            _timed("e1", "朝会", f"{d}T09:00:00+09:00", f"{d}T09:30:00+09:00"),
+            _timed(
+                "e2",
+                "定例",
+                f"{d}T10:00:00+09:00",
+                f"{d}T11:00:00+09:00",
+                hangoutLink="https://meet.google.com/abc-defg-hij",
+            ),
+            {
+                "kind": "calendar#event",
+                "id": "e3",
+                "status": "confirmed",
+                "summary": "休日",
+                "start": {"date": d},
+                "end": {"date": nxt},
+            },
+            _timed("e4", "翌日", f"{nxt}T10:00:00+09:00", f"{nxt}T11:00:00+09:00"),
+        ],
+    }
+
+
+def _google_http_error(status: int, reason: str, message: str, status_text: str) -> Any:
+    """本物の ``googleapiclient.errors.HttpError``（Google API のエラー JSON つき）。"""
+    import httplib2
+    from googleapiclient.errors import HttpError
+
+    resp = httplib2.Response(
+        {"status": str(status), "content-type": "application/json; charset=UTF-8"}
+    )
+    body = json.dumps(
+        {
+            "error": {
+                "code": status,
+                "message": message,
+                "errors": [{"message": message, "domain": "global", "reason": reason}],
+                "status": status_text,
+            }
+        }
+    ).encode()
+    return HttpError(
+        resp,
+        body,
+        uri="https://www.googleapis.com/calendar/v3/calendars/primary/events?alt=json",
+    )
+
+
+def _refresh_error(error: str, description: str) -> Any:
+    """本物の ``google.auth.exceptions.RefreshError``（oauth2 の token 応答つき）。"""
+    from google.auth.exceptions import RefreshError
+
+    return RefreshError(
+        f"{error}: {description}", {"error": error, "error_description": description}
+    )
 
 
 class _Gmail:
@@ -171,6 +295,9 @@ class _World:
         self.digest_reservations: list[dict[str, Any]] = []
         self.posted: list[Any] = []
         self.im_channel = "D0HOLIDAY"
+        #: users.lookupByEmail を本番の失敗の形で落とす人（email → 例外）
+        self.slack_lookup_errors: dict[str, BaseException] = {}
+        self.slack_lookups: list[str] = []
         self.log = _Log()
 
 
@@ -211,6 +338,9 @@ def _install(
 
     class _AsyncClient:
         async def users_lookupByEmail(self, *, email: str) -> dict[str, Any]:  # noqa: N802
+            w.slack_lookups.append(email)
+            if email in w.slack_lookup_errors:
+                raise w.slack_lookup_errors[email]
             return {"ok": True, "user": {"id": "U" + email.split("@")[0].upper()}}
 
         async def conversations_open(self, *, users: str) -> dict[str, Any]:
@@ -340,6 +470,123 @@ def test_holiday_reminders_go_only_to_a_one_to_one_dm(monkeypatch: pytest.Monkey
     assert w.reminders == []
     (skip,) = w.log.named("morning_digest_holiday_skip")
     assert skip["errors"] == 1
+
+
+# ── 祝日: 1 人の失敗で全体を落とさない（本番の失敗の形） ─────────────────────
+
+
+def _per_user_calendar(
+    monkeypatch: pytest.MonkeyPatch, w: _World, outcomes: dict[str, Any]
+) -> dict[str, _CalService]:
+    """人ごとの Calendar を本物の ``GCalendarClient`` で組む（偽物は service だけ）。
+
+    skill に gcalendar を注入しない＝本番と同じ ``_gcal_for(token)`` →
+    ``GCalendarClient.from_user_token`` → ``list_events`` → ``extract_events`` を通す。
+    差し替えるのは refresh token から credentials を作る所だけ。
+    """
+    from teamagent.adapters.gcalendar_client import GCalendarClient
+
+    services = {email: _CalService(outcome) for email, outcome in outcomes.items()}
+
+    def _from_user_token(cls: type[GCalendarClient], token: Any) -> GCalendarClient:
+        return cls(service=services[token.user_email], scopes=cls.SCOPES_READONLY)
+
+    monkeypatch.setattr(GCalendarClient, "from_user_token", classmethod(_from_user_token))
+    w.gcal = None  # type: ignore[assignment]
+    return services
+
+
+def _assert_no_pii(text: str) -> None:
+    for leaked in (U1, U3, "komata", "linked2", "定例", "朝会"):
+        assert leaked not in text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _refresh_error("invalid_grant", "Token has been expired or revoked."),
+        _refresh_error("invalid_client", "The OAuth client was not found."),
+        _google_http_error(
+            403,
+            "insufficientPermissions",
+            "Request had insufficient authentication scopes.",
+            "PERMISSION_DENIED",
+        ),
+        _google_http_error(503, "backendError", "Backend Error", "UNAVAILABLE"),
+    ],
+    ids=["refresh_invalid_grant", "refresh_invalid_client", "http_403", "http_503"],
+)
+def test_one_users_calendar_failure_does_not_stop_the_others_reminders(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failure: BaseException
+) -> None:
+    """先頭の人の予定取得が本番の失敗の形で落ちても、その人だけ error に数え、
+    後ろの人のリマインドは登録し、タスクは 0 で終わる。
+
+    変異: ``_register_holiday_reminders`` の予定取得の ``except Exception`` を外す →
+    例外が ``_run_holiday`` を抜けて後ろの人が登録されず赤。error を skipped に数える → 赤。
+    WARN 行のメールアドレスのマスクを外す → 赤。"""
+    day = _D(2026, 10, 12)
+    _freeze(monkeypatch, day)
+    monkeypatch.setenv("MORNING_DIGEST_HOLIDAY_SKIP", "true")
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
+    w = _install(monkeypatch, [U1, U3], linked={U1, U3})
+    services = _per_user_calendar(monkeypatch, w, {U1: failure, U3: _calendar_api_json(day)})
+
+    assert mod.main() == 0
+
+    assert w.run_calls == [] and w.delivered == [] and w.posted == []
+    assert w.calendar_only_calls == [U1, U3]  # 失敗する人が先＝後ろの人まで届くかを見る
+    assert len(services[U1].calls) == 1 and len(services[U3].calls) == 1
+    assert w.slack_lookups == [U3]  # 予定を取れなかった人の DM は開かない
+    (rem,) = w.reminders
+    assert rem["channel"] == "D0HOLIDAY"
+    assert rem["start_iso"] == "2026-10-12T10:00:00+09:00"
+    assert rem["fire_at"] == _dt.datetime(2026, 10, 12, 9, 55, tzinfo=_JST)
+    assert rem["url"] == "https://meet.google.com/abc-defg-hij"
+    (skip,) = w.log.named("morning_digest_holiday_skip")
+    assert (skip["users"], skip["reminded"], skip["reminders"]) == (2, 1, 1)
+    assert (skip["skipped"], skip["errors"]) == (0, 1)
+    err = capsys.readouterr().err
+    assert "k***@vectorinc.co.jp 祝日の予定取得失敗" in err
+    assert type(failure).__name__ in err
+    _assert_no_pii(err)
+    _assert_no_pii(json.dumps(w.log.events, ensure_ascii=False, default=str))
+
+
+def test_one_users_slack_lookup_failure_does_not_stop_the_others_reminders(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """users.lookupByEmail が本番の失敗の形（slack_sdk の ``SlackApiError``・
+    users_not_found）で落ちても、その人だけ error に数え、後ろの人のリマインドは登録する。
+
+    変異: DM を開けなかった人を skipped に数える → 赤。WARN 行のマスクを外す → 赤。"""
+    from slack_sdk.errors import SlackApiError
+
+    day = _D(2026, 10, 12)
+    _freeze(monkeypatch, day)
+    monkeypatch.setenv("MORNING_DIGEST_HOLIDAY_SKIP", "true")
+    monkeypatch.setenv("MORNING_DIGEST_REMINDERS", "1")
+    w = _install(monkeypatch, [U1, U3], linked={U1, U3})
+    _per_user_calendar(monkeypatch, w, {U1: _calendar_api_json(day), U3: _calendar_api_json(day)})
+    w.slack_lookup_errors[U1] = SlackApiError(
+        "The request to the Slack API failed. (url: https://slack.com/api/users.lookupByEmail)",
+        {"ok": False, "error": "users_not_found"},
+    )
+
+    assert mod.main() == 0
+
+    assert w.delivered == [] and w.posted == []
+    assert w.slack_lookups == [U1, U3]
+    (rem,) = w.reminders  # U3 の 10:00 の予定だけ
+    assert rem["channel"] == "D0HOLIDAY"
+    assert rem["start_iso"] == "2026-10-12T10:00:00+09:00"
+    (skip,) = w.log.named("morning_digest_holiday_skip")
+    assert (skip["users"], skip["reminded"], skip["reminders"]) == (2, 1, 1)
+    assert (skip["skipped"], skip["errors"]) == (0, 1)
+    err = capsys.readouterr().err
+    assert "lookupByEmail 失敗 k***@vectorinc.co.jp SlackApiError" in err
+    _assert_no_pii(err)
+    _assert_no_pii(json.dumps(w.log.events, ensure_ascii=False, default=str))
 
 
 def test_company_holiday_is_skipped_like_a_national_holiday(
