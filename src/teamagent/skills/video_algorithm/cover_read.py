@@ -14,7 +14,10 @@
   ``timeout`` にして、プールは待たずに片付ける（``with ThreadPoolExecutor`` は
   終わるまで待ってしまう）。
 - 費用は、呼び出しが返った分を足す（MagicMock の費用は数えない＝float のときだけ）。締め切りの
-  後に返った分は合計に入らないので、ログ（abandoned_cost_usd）で数える。
+  後に返った分は合計に入らないので、返るたびにログ（video_algorithm_cover_abandoned_cost）に出す。
+  締め切りの後は Gemini を新しく呼ばない（JSON のやり直しもしない・待っていた読み取りは取り消す）。
+- Gemini の後の処理（parse・結果の書き込み）の例外も、その 1 枚の read_failed にする（締め切りまで
+  待たせない・timeout と取り違えない）。
 
 env（0/false/off/no は OFF）:
 - VIDEO_ALGO_COVER_READ（既定 1）: 上位 n 本の表紙を読む
@@ -59,7 +62,7 @@ COVER_PROMPT_VERSION = "v1"
 # 読み取りに渡す画像の幅（スマホの 2 列の一覧のタイルは実画素で 500〜590px 程度）。
 COVER_WIDTH = 540
 # parse の規則の版（規則を変えたらここを上げる＝結果キャッシュのキーが変わる）。
-COVER_PARSE_VERSION = "p1"
+COVER_PARSE_VERSION = "p2"  # p2: 縦書き（texts[].vertical）
 COVER_USER_PROMPT = (
     "この画像は TikTok の動画の表紙（検索結果の一覧に出る画像）1 枚です。"
     "システム指示の JSON だけを出力してください。"
@@ -159,7 +162,7 @@ def _first_json_object(text: str) -> Any:
         return None
     try:
         value, _end = json.JSONDecoder().raw_decode(text[start:])
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):  # 深い入れ子は RecursionError
         return None
     return value
 
@@ -184,7 +187,7 @@ def parse_cover(text: Any) -> CoverRead | None:
         data.pop(key, None)
     try:
         return CoverRead.model_validate(data)
-    except ValidationError:
+    except (ValidationError, OverflowError, RecursionError, TypeError, ValueError):
         return None
 
 
@@ -398,6 +401,11 @@ class CoverReader:
         outcome = "ok"
         try:
             for attempt in range(2):  # JSON が崩れたら 1 回だけやり直す（約 $0.01）
+                with self._lock:
+                    joined = self._joined
+                if joined:  # 締め切りの後は Gemini を呼ばない（結果は捨てると決まっている）
+                    outcome = "abandoned"
+                    return
                 try:
                     resp = self._gemini.analyze_image_bytes(
                         data=image.data,
@@ -414,7 +422,7 @@ class CoverReader:
                     outcome = "error"
                     self._finish(job, "read_failed", f"gemini:{_reason(exc)}")
                     return
-                self._add_cost(_cost(resp))
+                self._add_cost(_cost(resp), job.rank)
                 read = parse_cover(getattr(resp, "text", None))
                 if read is not None:
                     self._finish(job, "ok", "", read)
@@ -427,6 +435,9 @@ class CoverReader:
                 )
             outcome = "error"
             self._finish(job, "read_failed", "json")
+        except Exception as exc:  # Gemini の後（parse・結果の書き込み）の想定外も 1 枚だけ落とす
+            outcome = "error"
+            self._finish(job, "read_failed", f"parse:{type(exc).__name__}")
         finally:
             logger.info(
                 "video_algorithm_stage",
@@ -437,12 +448,21 @@ class CoverReader:
                 request_id=self._rid,
             )
 
-    def _add_cost(self, value: float) -> None:
+    def _add_cost(self, value: float, rank: int = 0) -> None:
         with self._lock:
-            if self._joined:
+            joined = self._joined
+            if joined:
                 self._abandoned_cost += value
             else:
                 self._cost += value
+        if joined and value:
+            # 締め切りの後に返った分（合計にも summary にも載らない）は、返るたびにログに出す。
+            logger.info(
+                "video_algorithm_cover_abandoned_cost",
+                request_id=self._rid,
+                rank=rank,
+                cost_usd=round(value, 6),
+            )
 
     # --- 締め切り ---
     def remaining_budget_s(self, run_started: float) -> float:

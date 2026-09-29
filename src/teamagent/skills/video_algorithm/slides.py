@@ -62,6 +62,7 @@ from teamagent.skills.video_algorithm.cover_facts import (
     CoverView,
     GapRow,
     code_cover_directives,
+    cover_count_short,
     cover_line,
     dist_text,
 )
@@ -123,6 +124,8 @@ from teamagent.skills.video_algorithm.synthesis_checks import (
     SYNTHESIS_V3,
     alt_type_line,
     code_directives,
+    cover_directive_count,
+    cover_directive_origin,
     evidence_text,
 )
 from teamagent.skills.video_algorithm.synthesis_input import SynthesisContext
@@ -368,6 +371,7 @@ table.bt tr.others td{{color:var(--mut)}}
 .thumb-top{{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:16px}}
 .thumb-top .chips{{max-height:102px;gap:6px}}
 .thumb-top .chip{{padding:4px 12px;font-size:14px;line-height:20px}}
+.thumb-top .chip b{{min-width:40%}}
 .thumb-dirs{{margin-top:6px}}
 .thumb-dirs .drow{{padding:3px 0}}
 .thumb-dirs .drow figure.rf{{width:34px}}
@@ -1266,7 +1270,10 @@ def _thumb_rows(c: CoverFacts) -> list[tuple[str, str, str]]:
         return [(label, note if i == 0 else "—", "c1") for i, label in enumerate(_THUMB_LABELS)]
     texts = "／".join(f"「{t.replace(chr(10), ' ')}」" for t in c.texts) or "なし"
     size = "不明" if c.large_text is None else "読める大きさ" if c.large_text else "小さい"
-    shape = f"{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行" if c.has_text else "—"
+    way = "縦書き・" if c.vertical else ""
+    shape = (
+        f"{way}{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行" if c.has_text else "—"
+    )
     marks = [f"「{t}」" for t in c.kw_terms]
     if c.numbers:
         marks.append("数字")
@@ -1282,7 +1289,11 @@ def _thumb_rows(c: CoverFacts) -> list[tuple[str, str, str]]:
     sizzle = "・".join(SIZZLE_LABEL.get(x, x) for x in (c.sizzle or ()))
     brands = "・".join(f"{n}{'（未照合）' if r == 'unverified' else ''}" for n, r in c.brands)
     return [
-        ("主役", "・".join(ELEMENT_LABEL.get(e, e) for e in (c.elements or ())) or "—", "c1"),
+        (
+            "写っている要素（AI）",
+            "・".join(ELEMENT_LABEL.get(e, e) for e in (c.elements or ())) or "—",
+            "c1",
+        ),
         ("表紙の文字（AI読み取り）", texts, "c2"),
         ("大きさ・位置・行数", shape, "c1"),
         ("文字の中身", "・".join(marks) or "—", "c1"),
@@ -1313,7 +1324,7 @@ def _thumb_rows(c: CoverFacts) -> list[tuple[str, str, str]]:
 
 
 _THUMB_LABELS = (
-    "主役",
+    "写っている要素（AI）",
     "表紙の文字（AI読み取り）",
     "大きさ・位置・行数",
     "文字の中身",
@@ -1361,11 +1372,11 @@ def _thumb_compare(d: Deck) -> str:
     )
 
 
-def _thumb_chip(f: Feature) -> str:
-    who = "" if f.count == f.n else f"（{ranks_text(f.ranks)}）"
+def _thumb_chip(f: Feature, n_top: int) -> str:
+    """特徴・段階・本数（母数が上位の本数より少なければ「上位 n 本中 c 本」も）。"""
     return (
         f'<span class="chip"><b class="one">{_esc(f.label)}</b>'
-        f"<i>{_esc(f.tier)} {f.count}/{f.n}{_esc(who)}</i></span>"
+        f"<i>{_esc(cover_count_short(f, n_top))}</i></span>"
     )
 
 
@@ -1408,7 +1419,7 @@ def _thumb_plan(d: Deck) -> str:
         return ""
     feats = _plan_chips(view)
     chips = (
-        "".join(_thumb_chip(f) for f in feats)
+        "".join(_thumb_chip(f, view.n_top) for f in feats)
         or '<span class="sm mut">多数派以上の共通点なし</span>'
     )
     left = (
@@ -1416,16 +1427,17 @@ def _thumb_plan(d: Deck) -> str:
         f'<div class="chips">{chips}</div>'
         f'<div class="note c2">{_esc(dist_text(view.dist))}</div></div>'
     )
-    if view.mode == "board":
+    if view.mode == "board" and view.gap:
         rows = "".join(
             f'<tr><td class="one">{_esc(g.label)}</td><td>{g.a}/{g.n}</td><td>{g.b}/{g.m}</td>'
-            f"<td>{'差が大きい' if g.marked else '—'}</td></tr>"
+            f"<td>{_esc(g.mark_text)}</td></tr>"
             for g in _plan_gap_rows(view)
         )
         right = (
             '<div class="box"><div class="h one">上位とほかの表紙（参考・因果ではない）</div>'
-            '<table class="gap"><colgroup><col style="width:52%"><col><col><col></colgroup>'
-            f"<thead><tr><th>項目</th><th>上位</th><th>ほか</th><th>印</th></tr></thead>"
+            '<table class="gap"><colgroup><col style="width:44%"><col style="width:14%">'
+            '<col style="width:14%"><col style="width:28%"></colgroup>'
+            f"<thead><tr><th>項目</th><th>上位</th><th>ほか</th><th>差の印</th></tr></thead>"
             f"<tbody>{rows}</tbody></table></div>"
         )
     else:
@@ -1434,7 +1446,11 @@ def _thumb_plan(d: Deck) -> str:
             f'<div class="md c3">{_esc(view.gap_note)}。共通点は上位の中の集計で、'
             "6〜30位より多いとは言えない</div></div>"
         )
-    dirs = list(d.syn.cover_directives) if d.syn is not None else code_cover_directives(view)
+    dirs = (
+        list(d.syn.cover_directives)
+        if d.syn is not None
+        else code_cover_directives(view, d.ctx.avoid_terms)
+    )
     rows_html = ""
     for item in dirs[:3]:
         ref = item.refs[0] if item.refs else None
@@ -1445,12 +1461,13 @@ def _thumb_plan(d: Deck) -> str:
             if ref is not None and uri
             else ""
         )
-        who = "コードの集計" if item.origin == "code" else "AI の指示（根拠は照合済み）"
-        tag = f"{item.tier}（{ranks_text(item.ranks)}）" if item.ranks else item.tier
+        who = cover_directive_origin(item, view)
+        tag = cover_directive_count(item, view)
+        cls = "t-maj" if at_least_majority(item.tier) else "t-case"
+        chip = f'<span class="tier {cls}">{_esc(tag)}</span> ' if tag else ""
         rows_html += (
             f'<div class="drow">{fig}<div style="min-width:0">'
-            f'<div class="sm one"><span class="tier t-maj">{_esc(tag)}</span> '
-            f'<span class="mut">{_esc(who)}</span></div>'
+            f'<div class="sm one">{chip}<span class="mut">{_esc(who)}</span></div>'
             f'<div class="dt c2" contenteditable>{_esc(item.text)}</div>'
             f'<div class="ev c1">根拠 {_esc(_evidence(item.refs) or "—")}</div></div></div>'
         )

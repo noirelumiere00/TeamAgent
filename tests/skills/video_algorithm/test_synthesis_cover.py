@@ -22,6 +22,8 @@ from teamagent.skills.video_algorithm.synthesis import parse_synthesis_v3, synth
 from teamagent.skills.video_algorithm.synthesis_checks import (
     CheckLog,
     conflict_fields,
+    cover_directive_line,
+    deny_hit,
     evidence_text,
     finalize,
 )
@@ -44,15 +46,20 @@ from tests.skills.video_algorithm.test_synthesis_v3 import _gemini
 ROSTER = Roster.of(CLIENT, COMPETITORS)
 
 
-def _ctx(*, covers: bool = True, avoid: list[str] | None = None) -> SynthesisContext:
-    board = prod_board_with_covers() if covers else prod_board()
+def _ctx(
+    *, covers: bool = True, avoid: list[str] | None = None, board: list[Any] | None = None
+) -> SynthesisContext:
+    rows = board if board is not None else prod_board_with_covers() if covers else prod_board()
     return SynthesisContext.build(
-        prod_videos(), QUERY, board=board, roster=ROSTER, avoid_terms=avoid
+        prod_videos(), QUERY, board=rows, roster=ROSTER, avoid_terms=avoid
     )
 
 
-def _cd(text: str, *refs: dict[str, Any]) -> dict[str, Any]:
-    return {"text": text, "refs": list(refs)}
+def _cd(text: str, *refs: dict[str, Any], feature: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {"text": text, "refs": list(refs)}
+    if feature:
+        out["feature"] = feature
+    return out
 
 
 def _final(payload: dict[str, Any], ctx: SynthesisContext | None = None) -> CrossSynthesis:
@@ -180,7 +187,11 @@ def test_framing_words_are_allowed_only_in_cover_directives() -> None:
     syn = _final(
         {
             "cover_directives": [
-                _cd("表情のアップで始める", {"rank": 4, "on": "cover", "quote": "カレーを食べる人"})
+                # #4 は実写の顔あり（表情）・寄りではない（「アップ」は中身の照らし合わせで落ちる）
+                _cd(
+                    "表情が分かる顔を入れる",
+                    {"rank": 4, "on": "cover", "quote": "カレーを食べる人"},
+                )
             ],
             "directives": [
                 {
@@ -192,11 +203,12 @@ def test_framing_words_are_allowed_only_in_cover_directives() -> None:
         },
         ctx,
     )
-    assert [d.text for d in _llm(syn)] == ["表情のアップで始める"]
+    assert [d.text for d in _llm(syn)] == ["表情が分かる顔を入れる"]
     assert not [d for d in syn.directives if d.origin == "llm"]
 
 
 def test_cover_tier_and_quotes_inside_the_text() -> None:
+    """段階は AI が挙げた特徴（feature）の集計から（cover:number は #2・#3 の 2/5＝事例）。"""
     syn = _final(
         {
             "cover_directives": [
@@ -204,17 +216,19 @@ def test_cover_tier_and_quotes_inside_the_text() -> None:
                     "表紙に「5つで作れる」のような数を入れる",
                     {"rank": 2, "on": "cover", "quote": "5つで作れる"},
                     {"rank": 3, "on": "cover", "quote": "30分で本格"},
+                    feature="cover:number",
                 ),
                 _cd(
                     "表紙に「3分で完成」と入れる",  # どの表紙にも無い引用 → 文ごと落とす
                     {"rank": 3, "on": "cover", "quote": "30分で本格"},
+                    feature="cover:number",
                 ),
             ]
         }
     )
     llm = _llm(syn)
     assert len(llm) == 1 and llm[0].ranks == [2, 3]
-    assert llm[0].tier == "観測" or llm[0].tier == "事例"
+    assert llm[0].tier == "事例" and llm[0].feature == "cover:number"
 
 
 def test_no_cover_reads_means_no_cover_directives() -> None:
@@ -307,3 +321,206 @@ def test_prompt_marks_missing_cover_analysis() -> None:
     prompt = render_prompt(_ctx())
     assert "表紙の特徴の表" in prompt and "6〜30位の表紙はまだ読んでいない" in prompt
     assert "R1〜R17" in prompt
+
+
+# ── AI の指示の段階は特徴の集計から・中身と根拠の照らし合わせ・効果と比べる文（R17）──────
+
+
+def _lines(syn: CrossSynthesis, ctx: SynthesisContext) -> list[str]:
+    return [cover_directive_line(d, ctx.cover) for d in _llm(syn)]
+
+
+def test_llm_tier_comes_from_the_named_feature_not_from_the_quote_count() -> None:
+    """段階・本数・順位は feature の集計から。引用はその特徴を持つ表紙に限る（#4 は湯気なし）。
+
+    壊し方: 段階を引用した本数から付ける（以前の形）→ 事例（#1・#4）になり赤。
+    """
+    ctx = _ctx()
+    syn = _final(
+        {
+            "cover_directives": [
+                _cd(
+                    "表紙で湯気を見せる",
+                    {"rank": 1, "on": "cover", "quote": "湯気の立つ皿と手元"},
+                    {"rank": 4, "on": "cover", "quote": "カレーを食べる人"},
+                    feature="cover:sizzle",
+                )
+            ]
+        },
+        ctx,
+    )
+    (d,) = _llm(syn)
+    assert (d.tier, d.ranks, d.feature) == (TIER_MAJORITY, [1, 2, 3, 5], "cover:sizzle")
+    assert [r.rank for r in d.refs] == [1]
+    (line,) = _lines(syn, ctx)
+    assert "AI の提案・特徴「湯気・照り・断面・質感などの見せ場（AI判定）」" in line
+    assert "多数派 4/5（#1・#2・#3・#5）" in line
+
+
+def test_fabricated_face_directive_is_dropped() -> None:
+    """顔の無い表紙（#2・#3・#5）を引用した「顔をカメラ目線で入れる」は、特徴があっても無くても落とす。
+
+    09-29 反証: 以前は引用の本数だけで「多数派（#2・#3・#5）」の札が付いた。
+    壊し方: 中身の照らし合わせ（unsupported_concept）を外す → 残って赤。
+    """
+    seen: list[tuple[str, str]] = []
+    refs = [
+        {"rank": 2, "on": "cover", "quote": "皿に盛ったカレー"},
+        {"rank": 3, "on": "cover", "quote": "鍋のカレー"},
+        {"rank": 5, "on": "cover", "quote": "店の皿のカレー"},
+    ]
+    syn = finalize(
+        CrossSynthesis.model_validate(
+            {
+                "cover_directives": [
+                    _cd("表紙は実写の人の顔をカメラ目線で大きく入れる", *refs),
+                    _cd(
+                        "表紙は実写の人の顔をカメラ目線で大きく入れる",
+                        *refs,
+                        feature="cover:el:result",
+                    ),
+                ]
+            }
+        ),
+        _ctx(),
+        log=CheckLog(sink=lambda f, r: seen.append((f, r))),
+    )
+    assert _llm(syn) == []
+    assert ("cover_directives", "concept_unsupported:cover:gaze_camera") in seen
+
+
+def test_feature_refs_must_have_the_feature() -> None:
+    """feature の特徴を持たない表紙だけを引用した指示は落とす（#2 は実写の顔なし）。
+
+    壊し方: 引用をその特徴の順位に絞らない → 残って赤。
+    """
+    syn = _final(
+        {
+            "cover_directives": [
+                _cd(
+                    "表紙に人を大きく入れる",
+                    {"rank": 2, "on": "cover", "quote": "皿に盛ったカレー"},
+                    feature="cover:face",
+                )
+            ]
+        }
+    )
+    assert _llm(syn) == []
+
+
+def test_directives_without_a_feature_are_marked_uncounted() -> None:
+    """feature が無い（表に無い id も）AI の提案は段階を付けず「AI の提案（未集計）」と出す。
+
+    壊し方: 特徴の無い指示に引用の本数から段階を付ける → 「事例」が付いて赤。
+    """
+    ctx = _ctx()
+    syn = _final(
+        {
+            "cover_directives": [
+                _cd("表紙の文字は短くまとめる", {"rank": 2, "on": "cover", "quote": "5つで作れる"}),
+                _cd(
+                    "表紙の文字を太くする",
+                    {"rank": 3, "on": "cover", "quote": "30分で本格"},
+                    feature="cover:bold",
+                ),
+            ]
+        },
+        ctx,
+    )
+    llm = _llm(syn)
+    assert [(d.tier, d.feature) for d in llm] == [("", ""), ("", "")]
+    for line in _lines(syn, ctx):
+        assert "AI の提案（未集計）" in line
+        assert not any(t in line for t in ("多数派", "事例", "必須条件"))
+    code = [cover_directive_line(d, ctx.cover) for d in syn.cover_directives if d.origin == "code"]
+    assert code and all("〔コードの集計｜" in x for x in code)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "湯気を見せる表紙はタップされる",
+        "湯気で押される表紙にする",
+        "湯気の表紙がクリックを集める",
+        "湯気の表紙が目を引く",
+        "湯気の表紙は選ばれやすい",
+    ],
+)
+def test_effect_claims_are_dropped_from_cover_directives(text: str) -> None:
+    """効果（タップされる・押される・選ばれる・目を引く）を言い切る文は落とす（R17 をコードで）。
+
+    壊し方: _cover_claims_ok の効果の語の検査を外す → 「押される」「目を引く」が残って赤。
+    """
+    ref = {"rank": 1, "on": "cover", "quote": "湯気の立つ皿と手元"}
+    syn = _final({"cover_directives": [_cd(text, ref, feature="cover:sizzle")]})
+    assert _llm(syn) == []
+    kept = _final({"cover_directives": [_cd("表紙で湯気を見せる", ref, feature="cover:sizzle")]})
+    assert [d.text for d in _llm(kept)] == ["表紙で湯気を見せる"]
+
+
+def test_tap_and_click_effects_are_denied_in_every_field() -> None:
+    """タップ・クリックの効果の言い方は v3 のどの欄でも落とす（動画の「惹きつける」は今のまま）。"""
+    assert deny_hit("検索一覧でタップされる表紙") is not None
+    assert deny_hit("クリックを集める冒頭") is not None
+    assert deny_hit("冒頭の3秒で惹きつける") is None
+
+
+def test_rest_comparisons_are_dropped_when_the_rest_was_not_read() -> None:
+    """6〜30 位を読んでいない（top）ときは、ほかと比べる文を落とす。比べていない旨の文は残す。
+
+    壊し方: 比べる文の検査を外す → 「6〜30位より湯気を見せている」が残って赤。
+    """
+    ref = {"rank": 3, "on": "cover", "quote": "鍋のカレー"}
+    syn = _final(
+        {
+            "cover_directives": [
+                _cd(
+                    "上位の表紙は6〜30位より湯気を見せている。表紙で湯気を見せる",
+                    ref,
+                    feature="cover:sizzle",
+                ),
+                _cd(
+                    "6〜30位とは比べていないが、上位は表紙で照りを見せる",
+                    ref,
+                    feature="cover:sizzle",
+                ),
+            ]
+        }
+    )
+    assert [d.text for d in _llm(syn)] == [
+        "表紙で湯気を見せる",
+        "6〜30位とは比べていないが、上位は表紙で照りを見せる",
+    ]
+    board = _final(
+        {
+            "cover_directives": [
+                _cd("上位の表紙は6〜30位より湯気を見せている", ref, feature="cover:sizzle")
+            ]
+        },
+        _ctx(board=prod_board_with_covers(rest_kw={6, 7})),
+    )
+    assert [d.text for d in _llm(board)] == ["上位の表紙は6〜30位より湯気を見せている"]
+
+
+def test_llm_directive_on_a_feature_more_common_in_the_rest_is_dropped() -> None:
+    """ほかが多い向きの差の印の特徴（上位 1/5・ほか 25/25 の実写の顔）を勧める指示は落とす。"""
+    from tests.skills.video_algorithm.test_cover_facts import _faces_in_rest
+
+    seen: list[tuple[str, str]] = []
+    syn = finalize(
+        CrossSynthesis.model_validate(
+            {
+                "cover_directives": [
+                    _cd(
+                        "表紙に実写の人を入れる",
+                        {"rank": 1, "on": "cover", "quote": "湯気の立つ皿と手元"},
+                        feature="cover:face",
+                    )
+                ]
+            }
+        ),
+        _ctx(board=_faces_in_rest()),
+        log=CheckLog(sink=lambda f, r: seen.append((f, r))),
+    )
+    assert _llm(syn) == []
+    assert ("cover_directives", "feature_more_in_rest") in seen

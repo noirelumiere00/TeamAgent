@@ -354,9 +354,13 @@ def _box_2d(value: Any) -> tuple[int, int, int, int] | None:
     for item in value:
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return None
-        if not math.isfinite(float(item)):
+        try:
+            num = float(item)  # 桁の大きな整数は OverflowError（壊れた枠＝None・例外にしない）
+        except (OverflowError, ValueError):
             return None
-        nums.append(min(1000.0, max(0.0, float(item))))
+        if not math.isfinite(num):
+            return None
+        nums.append(min(1000.0, max(0.0, num)))
     y0, x0, y1, x1 = nums
     if y1 <= y0 or x1 <= x0:
         return None
@@ -375,6 +379,10 @@ class CoverText(BaseModel):
     text: Annotated[str, BeforeValidator(_cover_line_text)] = ""
     box: _Box = Field(default=None, validation_alias=AliasChoices("box_2d", "box"))
     style: Annotated[list[str] | None, _enum_list_or_none(COVER_TEXT_STYLES)] = None
+    # 縦書きか（None＝分からない）。縦書きの枠の高さは列の長さなので、字の大きさは枠の幅÷列の数
+    # で測る（09-29 本番 #5「市販の／カレールーは／卒業！」は縦書きで、高さ÷行で 3 倍に出た）。
+    # 分からないときは字の大きさを測らない（母数から外す）。
+    vertical: Annotated[bool | None, BeforeValidator(_tri_bool)] = None
 
 
 class CoverFace(BaseModel):
@@ -942,6 +950,16 @@ class Directive(BaseModel):
     ] = "llm"
     tier: _Text = ""  # コードだけ: 必須条件／多数派／事例
     ranks: _RankList = Field(default_factory=list)  # コードだけ: 照合に合格した順位
+    # cover_directives だけ: 根拠にした表紙の特徴の表の id（例 cover:sizzle）。段階・本数・順位は
+    # この特徴からコードが取る（引用した本数では決めない）。空は「未集計」。空なら出力に出さない。
+    feature: _Text = ""
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_feature(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("feature"):
+            data.pop("feature", None)
+        return data
 
 
 class AvoidItem(BaseModel):

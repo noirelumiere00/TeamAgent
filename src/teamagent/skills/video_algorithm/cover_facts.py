@@ -2,18 +2,20 @@
 
 Gemini の読み取り（CoverRead）から、コードが次を決める:
 - 1 枚ずつの事実（CoverFacts）: 文字の中身（検索語・単位つきの数字・問い・警告・手間なし）、
-  大きさ・位置・行数（box_2d と改行から計算。AI の自己申告は使わない）、冒頭のテロップと
-  キャプションとの一致（検索語だけの共通は別の値）、商品名の照合と区分、顔・寄り・質感など。
+  大きさ・位置・行数（box_2d と改行から計算。AI の自己申告は使わない。縦書きは枠の幅÷列の数・
+  縦横が分からなければ字の大きさは測らない）、冒頭のテロップとキャプションとの一致（元の文字の
+  まま同じなら same・検索語だけの共通は別の値）、商品名の照合と区分、顔・寄り・質感など。
 - 特徴の表（cover_feature_table）: 母数は欄ごと（読めなかった欄はその欄の母数から外す）。段階は
   evidence.tier。表紙を読めた本数が上位の本数より少ないときは「必須条件」と呼ばない（多数派まで）。
 - 上位 n 本とほか m 本の差（cover_gap）: 6〜30 位を読んだとき（mode=board）だけ。比べる行は
   データを見る前に固定する。Fisher の正確検定（両側）を Holm で補正し、割合の差 0.4 以上・
   上位 3 本以上・ほか 10 本以上・読めた割合 7 割以上・同じ取り方の画像のときだけ
-  「差が大きい（参考）」の印を付ける（因果ではない）。
-- コードが作る表紙の指示（code_cover_directives）: 差の印のある行 → 上位で多数派かつほかで少ない行
-  → 具体的な言い方（検索語・数字）→ ほかの多数派の順に 3 つまで。「文字がある」だけの指示は
-  作らない。
-  6〜30 位と比べていない指示には、そう書く。
+  「差が大きい（参考）」の印を付ける（因果ではない）。印には向き（上位が多い／ほかが多い）がある。
+  6〜30 位を 1 本も読めなければ比べていない（mode は top のまま・注記で理由を言う）。
+- コードが作る表紙の指示（code_cover_directives）: 上位が多い向きの差の印があり上位で多数派の行 →
+  上位で多数派かつほかで少ない行 → 具体的な言い方（検索語・数字）→ ほかの多数派の順に 3 つまで。
+  「文字がある」だけの指示は作らない。ほかが多い向きの印の行は指示にしない（表示だけ）。
+  6〜30 位と比べていない指示には、そう書く。根拠の引用には避けたい訴求の語を含む表紙を使わない。
 
 表紙の群は表示順（上位 n 本＝group "top"）で決める。動画の分析の成否（ctx.facts）では切らない
 （#2 の動画の取得に失敗しても、#2 の表紙は上位の群に入る）。冒頭のテロップとの一致だけは、動画を
@@ -36,8 +38,10 @@ from teamagent.skills.video_algorithm.evidence import (
     TIER_REQUIRED,
     Roster,
     at_least_majority,
+    has_avoid,
     norm,
     query_terms,
+    ranks_text,
     tier,
 )
 from teamagent.skills.video_algorithm.facts import OPENING_SEC, Feature, is_watched, rank_runs
@@ -170,11 +174,12 @@ _NUMBER_RE = re.compile(
 )
 _QUESTION_RE = re.compile(r"[?？]|なぜ|なんで|どうして|どっち|どれが|知って(?:る|た)|って何")
 # 警告型（失敗・注意を先に言う）。「間違いない」（太鼓判）・「やめられない」（ほめ言葉）・
-# 「失敗しない」（成功の約束）は拾わない。
+# 「失敗しない」（成功の約束）・「ダメ元」は拾わない。NG は大文字で前後に英字が無いときだけ
+# （COOKING・MORNING の -ING に当てない）。
 _WARNING_RE = re.compile(
-    r"NG|注意|禁止|危険|ダメ|だめ|やめ(?:て|な[!！。]|とけ|ろ)|"
-    r"間違(?:い|え)(?:方|がち|てる|ている|やすい)|失敗(?!しない|なし|ゼロ|知らず)|損(?:する|して)",
-    re.IGNORECASE,
+    r"(?<![A-Za-z])NG(?![A-Za-z])|注意|禁止|危険|ダメ(?!元)|だめ(?!もと)|"
+    r"やめ(?:て|な[!！。]|とけ|ろ)|"
+    r"間違(?:い|え)(?:方|がち|てる|ている|やすい)|失敗(?!しない|なし|ゼロ|知らず)|損(?:する|して)"
 )
 # 手間なし型（手間・道具・失敗が要らないことを言う）。
 _EFFORTLESS_RE = re.compile(
@@ -224,6 +229,9 @@ def text_match(cover: str, other: str, terms: Sequence[str]) -> MatchKind:
 
     same＝一方がもう一方を含む（短い方が 4 字以上）・partial＝共通の部分が 4 字以上・
     kw_only＝共通は検索語だけ・different＝それ以外。other が空なら ""（呼んだ側が理由を付ける）。
+    元の文字のまま同じ（または一方が他方を含み、検索語を除いた残りも含む）なら、検索語＋短い
+    修飾（「本格スパイスカレー」同士）でも same にする（検索語を除くと 4 字未満になり kw_only に
+    落ちていた・09-29 本番 #4 の表紙）。
     """
     a0, b0 = match_norm(cover), match_norm(other)
     if not a0:
@@ -231,6 +239,11 @@ def text_match(cover: str, other: str, terms: Sequence[str]) -> MatchKind:
     if not b0:
         return ""
     a1, b1 = _drop_terms(a0, terms), _drop_terms(b0, terms)
+    if a0 == b0:
+        return "same"
+    if min(len(a0), len(b0)) >= MATCH_MIN_CHARS and (a0 in b0 or b0 in a0):
+        if a1 in b1 or b1 in a1:
+            return "same"
     short = min(len(a1), len(b1))
     if short >= MATCH_MIN_CHARS and (a1 in b1 or b1 in a1):
         return "same"
@@ -317,7 +330,10 @@ class CoverFacts:
     chars: int
     lines: int
     has_text: bool | None  # None＝文字の欄が読めていない
-    line_h_pct: float | None  # 大きい文字 1 行の高さ（表紙の高さに対する %・枠から計算）
+    vertical: bool | None  # 大きい文字が縦書きか（None＝分からない）
+    # 大きい文字の字の大きさ（表紙の高さに対する %・枠から計算）。横書きは 1 行の高さ、縦書きは
+    # 1 列の幅を高さの % に直したもの。縦書きか分からなければ None（測らない）。
+    line_h_pct: float | None
     large_text: bool | None
     position: str
     kw_terms: tuple[str, ...]
@@ -422,10 +438,14 @@ def cover_facts(
     lines = _lines(main_text) if main is not None else 0
     aspect_known = read.img_w > 0 and read.img_h > 0
     aspect = read.img_h / read.img_w if aspect_known else DEFAULT_ASPECT
+    vertical = main.vertical if main is not None else None
     line_h_pct: float | None = None
     large: bool | None = False if has_text is False else None
-    if main is not None and main.box is not None:
-        per_line = (main.box[2] - main.box[0]) / 1000 / lines
+    if main is not None and main.box is not None and vertical is not None:
+        if vertical:  # 枠の高さは列の長さ。字の大きさは 1 列の幅（表紙の幅の割合→高さの割合）
+            per_line = (main.box[3] - main.box[1]) / 1000 / lines / aspect
+        else:
+            per_line = (main.box[2] - main.box[0]) / 1000 / lines
         line_h_pct = round(per_line * 100, 1)
         large = per_line * aspect >= LARGE_LINE_OF_WIDTH
     joined = "\n".join(texts)
@@ -491,6 +511,7 @@ def cover_facts(
         chars=len(flat),
         lines=lines,
         has_text=has_text,
+        vertical=vertical,
         line_h_pct=line_h_pct,
         large_text=large,
         position=_position(main.box) if main is not None else "unknown",
@@ -708,6 +729,61 @@ def cover_specs(query: str, roster: Roster | None = None) -> list[CoverSpec]:
     return specs
 
 
+# 特徴の母数の名前（母数は欄ごと。読めた表紙の全部より少ないときに「〜のうち」と出す）。
+_BASE_LABEL: tuple[tuple[str, str], ...] = (
+    ("cover:text_large", "字の大きさを測れた表紙"),
+    ("cover:text_2lines", "文字のある表紙"),
+    ("cover:legible", "文字のある表紙"),
+    ("cover:outline", "文字のある表紙"),
+    ("cover:appeal:", "訴求を読めた表紙"),
+    ("cover:own_text", "冒頭のテロップと比べられた表紙"),
+    ("cover:opening_match", "冒頭のテロップと比べられた表紙"),
+    ("cover:caption_match", "キャプションと比べられた表紙"),
+    ("cover:el:", "写っている要素を読めた表紙"),
+    ("cover:gaze_camera", "実写の顔のある表紙"),
+    ("cover:face", "顔を読めた表紙"),
+    ("cover:closeup", "寄りを読めた表紙"),
+    ("cover:sizzle", "質感を読めた表紙"),
+    ("cover:product", "商品の見え方を読めた表紙"),
+    ("cover:simple_bg", "背景を読めた表紙"),
+    ("cover:brand_client", "読めた表紙"),
+    ("cover:", "文字を読めた表紙"),  # 文字の中身（検索語・数字・問いなど）と「文字がある」
+)
+
+
+def cover_base_label(fid: str) -> str:
+    """特徴の母数の名前（例: cover:legible → 文字のある表紙）。"""
+    return next((name for prefix, name in _BASE_LABEL if fid.startswith(prefix)), "読めた表紙")
+
+
+def cover_count_text(f: Feature, n_top: int) -> str:
+    """段階と本数と母数（「多数派 2/3（文字のある表紙のうち・#4・#5・上位5本中2本）」）。
+
+    母数は欄ごとなので、上位の本数より少ないときは母数の名前と「上位 n 本中 c 本」を添える
+    （2/3 を上位 5 本中の多数派に見せない）。
+    """
+    parts: list[str] = []
+    short = f.n < n_top
+    if short:
+        parts.append(f"{cover_base_label(f.id)}のうち")
+    if f.count < f.n or short:
+        parts.append(ranks_text(f.ranks))
+    if short:
+        parts.append(f"上位{n_top}本中{f.count}本")
+    inner = "・".join(parts)
+    return f"{f.tier} {f.count}/{f.n}" + (f"（{inner}）" if inner else "")
+
+
+def cover_count_short(f: Feature, n_top: int) -> str:
+    """狭い所（スライドのチップ）用: 「多数派 3/3（上位5本中3本）」「多数派 3/5（#2・#3・#5）」。"""
+    head = f"{f.tier} {f.count}/{f.n}"
+    if f.n < n_top:
+        return f"{head}（上位{n_top}本中{f.count}本）"
+    if f.count < f.n:
+        return f"{head}（{ranks_text(f.ranks)}）"
+    return head
+
+
 def cover_tier(count: int, n: int, n_top: int) -> str:
     """段階（evidence.tier）。表紙を読めた本数が上位の本数より少なければ、必須条件と呼ばない。"""
     name = tier(count, n)
@@ -756,7 +832,7 @@ class CoverDist:
     n: int  # 文字のある表紙の本数
     chars: tuple[float, int, int] | None  # (中央値, 最小, 最大)
     lines: tuple[float, int, int] | None
-    line_h_pct: tuple[float, float] | None  # 大きい文字 1 行の高さ（表紙の高さの %）の最小・最大
+    line_h_pct: tuple[float, float] | None  # 大きい文字の字の大きさ（表紙の高さの %）の最小・最大
     position: str  # 大きい文字の位置の最頻（同数なら ""）
     number_kinds: tuple[str, ...]
 
@@ -793,7 +869,9 @@ def dist_text(d: CoverDist | None) -> str:
         parts.append(f"行数 中央値{med:g}行（{lo}〜{hi}行）")
     if d.line_h_pct:
         lo_h, hi_h = d.line_h_pct
-        parts.append(f"大きい文字1行の高さ 表紙の高さの{lo_h:g}〜{hi_h:g}%")
+        parts.append(
+            f"大きい文字の字の大きさ 表紙の高さの{lo_h:g}〜{hi_h:g}%（縦書きは列の幅から）"
+        )
     if d.position:
         parts.append(f"大きい文字は{POSITION_JP.get(d.position, '不明')}寄り")
     if d.number_kinds:
@@ -849,6 +927,22 @@ class GapRow:
     @property
     def rest_rate(self) -> float:
         return self.b / self.m if self.m else 0.0
+
+    @property
+    def direction(self) -> str:
+        """多い側（top＝上位が多い・rest＝ほかが多い・""＝同じ）。印は両側の検定なので向きを持つ。"""
+        if self.top_rate > self.rest_rate:
+            return "top"
+        if self.top_rate < self.rest_rate:
+            return "rest"
+        return ""
+
+    @property
+    def mark_text(self) -> str:
+        """印の表示（向きつき）。印が無ければ「—」。"""
+        if not self.marked:
+            return "—"
+        return "上位が多い" if self.direction == "top" else "ほかが多い"
 
 
 # 比べる行（データを見る前に固定する・検索語は最大 2 語）。
@@ -999,9 +1093,14 @@ def cover_view(
     ]
     top = tuple(c for c in facts if c.group == "top")
     rest = tuple(c for c in facts if c.group == "rest")
-    mode = "board" if rest else "top"
+    # 6〜30 位を 1 本も読めなければ、比べていない（board のまま「差の印なし」と出さない）。
+    mode = "board" if any(c.ok for c in rest) else "top"
     gap, note = cover_gap(top, rest, query, roster) if mode == "board" else ([], "")
-    if mode == "top":
+    if mode == "top" and rest:
+        counts = Counter(STATUS_LABEL.get(c.status, c.status) for c in rest)
+        why = "・".join(f"{k}{n}本" for k, n in counts.items())
+        note = f"6〜30位の表紙は読めなかった（{why}・比べていない）"
+    elif mode == "top":
         note = "6〜30位の表紙はまだ読んでいない（比べていない）"
     return CoverView(
         mode=mode,
@@ -1101,7 +1200,7 @@ def _shape(view: CoverView, ranks: Sequence[int]) -> str:
     parts: list[str] = []
     heights = [c.line_h_pct for c in covers if c.line_h_pct is not None]
     if heights:
-        parts.append(f"上位の1行の高さは表紙の高さの{min(heights):g}〜{max(heights):g}%")
+        parts.append(f"上位の字の大きさは表紙の高さの{min(heights):g}〜{max(heights):g}%")
     chars = [c.chars for c in covers]
     if chars:
         parts.append(f"字数 中央値{statistics.median(chars):g}字（最大{max(chars)}字）")
@@ -1130,23 +1229,38 @@ def _directive_text(fid: str, view: CoverView, feature: Feature) -> str:
     )
 
 
-def _example_refs(fid: str, ranks: Iterable[int], view: CoverView) -> list[SynthRef]:
-    """根拠: 再生の多い順に 2 本。文字の特徴は表紙の文字、画の特徴は主役の説明（無ければ文字）。"""
+def _example_refs(
+    fid: str, ranks: Iterable[int], view: CoverView, avoid_terms: Sequence[str] = ()
+) -> list[SynthRef]:
+    """根拠: 再生の多い順に 2 本。文字の特徴は表紙の文字、画の特徴は主役の説明（無ければ文字）。
+
+    避けたい訴求の語（avoid_terms）を含む表紙の文字や説明は、お手本として引用しない（次に再生の
+    多い本にする。09-29 本番 #5 の表紙「市販のカレールーは卒業！」は避けたい語「ルー卒業」）。
+    """
     covers = sorted(
         (c for r in ranks if (c := view.by_rank(r)) is not None and c.ok),
         key=lambda c: (-c.plays, c.rank),
     )
     refs: list[SynthRef] = []
     text_first = _prefix(fid) in _TEXT_FEATURES
+
+    def usable(text: str) -> bool:
+        return bool(text) and not has_avoid(text, avoid_terms)
+
     for c in covers:
+        if text_first and any(has_avoid(t, avoid_terms) for t in c.flat_texts):
+            # 文字の特徴のお手本に、避けたい訴求の文字の表紙を使わない（説明にも逃がさない）
+            continue
         quote, source = "", ""
         if fid.startswith("cover:kw:"):
             term = fid.split(":", 2)[2]
-            quote = next((t for t in c.flat_texts if match_norm(term) in match_norm(t)), "")
+            quote = next(
+                (t for t in c.flat_texts if match_norm(term) in match_norm(t) and usable(t)), ""
+            )
             source = "cover_text"
-        if not quote and (text_first or not c.subject_note) and c.main_flat:
+        if not quote and (text_first or not c.subject_note) and usable(c.main_flat):
             quote, source = c.main_flat, "cover_text"
-        if not quote and c.subject_note:
+        if not quote and usable(c.subject_note):
             quote, source = c.subject_note, "cover_note"
         if quote:
             refs.append(SynthRef(rank=c.rank, quote=quote, on="cover", source=source))
@@ -1161,12 +1275,14 @@ def _order_key(fid: str) -> int:
     return keys.index(key) if key in keys else len(keys)
 
 
-def code_cover_directives(view: CoverView) -> list[Directive]:
+def code_cover_directives(view: CoverView, avoid_terms: Sequence[str] = ()) -> list[Directive]:
     """表紙の事実から、コードが作る指示（最大 3 つ・kind は「表紙」・refs は on="cover"）。
 
-    優先: 差の印がある行（A/B で確かめる）→ 上位で多数派かつほかで少ない行 → 具体的な言い方
-    （検索語・数字）→ ほかの多数派（固定の順）。「文字がある」だけの指示は作らない。
+    優先: 上位が多い向きの差の印があり上位で多数派の行（A/B で確かめる）→ 上位で多数派かつ
+    ほかで少ない行 → 具体的な言い方（検索語・数字）→ ほかの多数派（固定の順）。「文字がある」だけの
+    指示は作らない。ほかが多い向きの印の行（上位では少ない）は指示にしない（表示だけ）。
     6〜30 位と比べていない指示には「（6〜30位とは比べていない）」を付ける。
+    feature には根拠の特徴の id を入れる（描画が段階・本数・母数をその特徴から出す）。
     """
     if not view.any_ok:
         return []
@@ -1177,11 +1293,13 @@ def code_cover_directives(view: CoverView) -> list[Directive]:
         text = _directive_text(f.id, view, f)
         if not text:
             continue
+        if not at_least_majority(f.tier):
+            continue
         row = view.gap_row(f.id)
         if row is not None and row.marked:
+            if row.direction != "top":
+                continue  # 上位のほうが少ない＝「入れる」と逆の向き（表示だけ）
             picked.append((0, f, f"{text}形を A/B で確かめる（6〜30位との差が大きい・参考）"))
-            continue
-        if not at_least_majority(f.tier):
             continue
         if view.mode == "board" and row is not None:
             if row.rest_rate >= row.top_rate:
@@ -1197,20 +1315,75 @@ def code_cover_directives(view: CoverView) -> list[Directive]:
             Directive(
                 text=text,
                 kind=COVER_KIND,
-                refs=_example_refs(f.id, f.ranks, view),
+                refs=_example_refs(f.id, f.ranks, view, avoid_terms),
                 origin="code",
                 tier=f.tier,
                 ranks=list(f.ranks),
+                feature=f.id,
             )
         )
     return out
 
 
+# ── AI の指示の中身と表紙の事実の照らし合わせ（顔・目線・質感・寄り・数字など）──────
+
+
+def _kw_check(c: CoverFacts) -> bool | None:
+    return None if c.has_text is None else bool(c.kw_terms)
+
+
+# 指示の文に出る語 → その語が言う表紙の特徴（引用した表紙がその特徴を持つかで確かめる）。
+_CONCEPTS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"目線|視線"), "cover:gaze_camera"),
+    (re.compile(r"顔|表情"), "cover:face"),
+    (re.compile(r"湯気|照り|つや|ツヤ|艶|断面|とろみ|泡|シズル"), "cover:sizzle"),
+    # 「上寄り」「中央寄り」「上に寄った」（文字の位置）と「寄り添う」は寄りの画ではない。
+    (
+        re.compile(
+            r"(?<![上下左右央端])寄り(?!添)|(?<![上下左右央端])に寄っ|クローズアップ|"
+            r"(?<![タピ])アップ(?:の|で|に|を)"
+        ),
+        "cover:closeup",
+    ),
+    (re.compile(r"数字"), "cover:number"),
+    (re.compile(r"問いかけ|疑問"), "cover:question"),
+    (re.compile(r"パッケージ"), "cover:product"),
+    (re.compile(r"検索語|検索ワード|キーワード"), "cover:kw"),
+)
+_NEGATED = (
+    r"[^。！？!?、]{0,8}?(?:入れない|入れず|出さない|出さず|見せない|見せず|使わない|使わず|"
+    r"なし|無し|なく|しない|せず|避け)"
+)
+
+
+def unsupported_concept(text: str, ranks: Iterable[int], view: CoverView) -> str | None:
+    """指示の文が言う表紙の特徴を、引用した表紙が 1 本も持たなければ、その特徴の id。
+
+    「顔をカメラ目線で入れる」を、顔の無い表紙（#2・#3・#5）の引用で通さない（LLM の指示の段階は
+    引用の本数では決めないが、中身と根拠の食い違いもここで落とす）。「顔は入れない」のような打ち消し
+    は、その特徴を持たない表紙が 1 本あれば通す。
+    """
+    specs = {s.id: s for s in cover_specs(view.query)}
+    covers = [c for r in ranks if (c := view.by_rank(r)) is not None and c.ok]
+    for pat, fid in _CONCEPTS:
+        m = pat.search(text)
+        if m is None:
+            continue
+        check = _kw_check if fid == "cover:kw" else specs[fid].check if fid in specs else None
+        if check is None:
+            continue
+        negated = re.match(_NEGATED, text[m.end() :]) is not None
+        want = not negated
+        if not any(check(c) is want for c in covers):
+            return fid
+    return None
+
+
 # ── Slack・結論の 1 行（コードの名前と本数だけ・第三者の文字は入れない）──
 
 
+# 「文字がある」は情報が少ないので最後（指示でも「文字がある」だけは作らない）。
 _LINE_ORDER = (
-    "cover:text",
     "cover:kw:",
     "cover:number",
     "cover:text_large",
@@ -1219,6 +1392,7 @@ _LINE_ORDER = (
     "cover:face",
     "cover:own_text",
     "cover:opening_match",
+    "cover:text",
 )
 
 
@@ -1234,26 +1408,37 @@ def cover_points(view: CoverView, limit: int = 3) -> list[Feature]:
     return out[:limit]
 
 
+def cover_scope(view: CoverView) -> str:
+    """6〜30 位と比べたかの但し書き（1 行の先頭に置く・切れても見えるように）。"""
+    marked = [g for g in view.gap if g.marked]
+    if view.mode != "board" or not view.gap:
+        return NOT_COMPARED
+    if marked:
+        top = sum(1 for g in marked if g.direction == "top")
+        rest = len(marked) - top
+        sides = "・".join(
+            x for x in (f"上位が多い{top}" if top else "", f"ほかが多い{rest}" if rest else "") if x
+        )
+        return f"6〜30位との差の印 {len(marked)}行（{sides}）・参考"
+    return "6〜30位との差の印なし"
+
+
 def cover_line(view: CoverView) -> str:
-    """「サムネ（一覧の表紙）: 表紙に文字がある 5/5（必須条件）・…（6〜30位とは比べていない）」。"""
+    """「サムネ（一覧の表紙・6〜30位とは比べていない）: 表紙の文字に「…」 4/5（多数派）・…」。
+
+    但し書きは先頭に置く（スライドの 1 行で末尾が「…」で切れても見えるように）。
+    """
     if not view.top:
         return ""
     ok = len(view.top_ok)
     if ok == 0:
         return f"サムネ（一覧の表紙）: 上位{view.n_top}本すべて読めず"
+    head = f"サムネ（一覧の表紙・{cover_scope(view)}）"
     feats = cover_points(view)
     if not feats:
-        return f"サムネ（一覧の表紙）: 読めた{ok}/{view.n_top}本に多数派の共通点なし"
+        return f"{head}: 読めた{ok}/{view.n_top}本に多数派の共通点なし"
     body = "・".join(f"{f.label} {f.count}/{f.n}（{f.tier}）" for f in feats)
-    marked = [g for g in view.gap if g.marked]
-    tail = (
-        f"（6〜30位との差の印 {len(marked)}行・参考）"
-        if marked
-        else f"（{NOT_COMPARED}）"
-        if view.mode != "board"
-        else "（6〜30位との差の印なし）"
-    )
-    return f"サムネ（一覧の表紙）: {body}{tail}"
+    return f"{head}: {body}"
 
 
 __all__ = [
@@ -1269,6 +1454,9 @@ __all__ = [
     "best_match",
     "brand_relations",
     "code_cover_directives",
+    "cover_base_label",
+    "cover_count_short",
+    "cover_count_text",
     "cover_dist",
     "cover_facts",
     "cover_feature_table",
@@ -1276,6 +1464,7 @@ __all__ = [
     "cover_line",
     "cover_points",
     "cover_quote_ok",
+    "cover_scope",
     "cover_specs",
     "cover_tier",
     "cover_view",
@@ -1288,5 +1477,6 @@ __all__ = [
     "match_norm",
     "number_claims",
     "text_match",
+    "unsupported_concept",
     "verify_cover_ref",
 ]

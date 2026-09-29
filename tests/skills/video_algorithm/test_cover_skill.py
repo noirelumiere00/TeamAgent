@@ -154,7 +154,7 @@ def test_run_reads_top_covers_once_and_keeps_them_on_the_board_only(
     assert all(v.cover_source == "cover" and v.cover_data_uri for v in out.videos)
     # 動画 3 本（0.0014）＋表紙 3 枚（0.01）＋統合（0.002）
     assert out.total_cost_usd == pytest.approx(3 * 0.0014 + 3 * 0.01 + 0.002, abs=1e-6)
-    assert "サムネ（一覧の表紙）" in out.slack_summary
+    assert "サムネ（一覧の表紙・" in out.slack_summary
 
 
 def test_failed_fetch_falls_back_without_fetching_again(
@@ -301,3 +301,18 @@ def test_wave_failure_stops_the_cover_reads(tmp_path: Any) -> None:
 
     time.sleep(0.3)
     assert len(calls) == 1  # 待っていた 2 本は取り消した
+
+
+def test_no_rendered_outputs_reads_no_covers(tmp_path: Any) -> None:
+    """表紙を出す出力（report／slides／pptx）が無い依頼（tiktok_search の深掘り outputs=[]）は読まない。
+
+    画面に出ない表紙のために Gemini の費用・待ち・統合の入力を増やさない。キャッシュのキーも従来のまま。
+    壊し方: reader の開始条件で outputs を見ない → analyze_image_bytes が呼ばれて赤。
+    """
+    gemini, fetcher = _Gemini(), _Fetcher()
+    skill = _skill(tmp_path, gemini, fetcher)
+    out = skill.run(_input(outputs=[]), SkillContext())
+    assert gemini.image_calls == [] and fetcher.calls == []
+    assert out.cover_read_mode == "off" and all(m.cover_read is None for m in out.board)
+    assert not skill._cover_settings_for(_input(outputs=[])).enabled
+    assert skill._cover_settings_for(_input(outputs=["report"])).enabled

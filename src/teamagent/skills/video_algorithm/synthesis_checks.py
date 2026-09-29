@@ -59,9 +59,11 @@ import structlog
 from teamagent.skills._shared.grounding import DropLedger, DropSink, NumberGrounder, tone_down
 from teamagent.skills.search_surface_check.video_structure import QTY_RE
 from teamagent.skills.video_algorithm.cover_facts import (
+    CoverView,
     code_cover_directives,
+    cover_count_text,
     cover_quote_ok,
-    cover_tier,
+    unsupported_concept,
     verify_cover_ref,
 )
 from teamagent.skills.video_algorithm.evidence import (
@@ -73,6 +75,7 @@ from teamagent.skills.video_algorithm.evidence import (
     Ref,
     at_least_majority,
     fold,
+    has_avoid,
     majority_min,
     norm,
     ranks_text,
@@ -189,12 +192,6 @@ _RHO_EXPR_RE = re.compile(r"[、,，]?\s*ρ\s*[=＝]?\s*[−\-+ー－]?\s*\d*\.?
 _FRACTION_RE = re.compile(r"(?<!さじ)(?<!カップ)(?:上位|全)?\s*(\d+)\s*/\s*(\d+)\s*(?:本中|本)?")
 _SENTENCE_RE = re.compile(r"[^。！？!?\n]*(?:[。！？!?\n]+|$)")
 _EMPTY_BRACKETS = re.compile(r"[（(]\s*[）)]|〔\s*〕|[\[［]\s*[\]］]")
-# 避けたい訴求の語を、文字の種類の切れ目で分けた片（「ルー卒業」→「ルー」「卒業」）。
-_SEGMENT_RE = re.compile(
-    r"[ァ-ヶー]+|[一-龥々〆]+|[ぁ-ゖ]+|[a-z0-9]+|[^\sァ-ヶー一-龥々〆ぁ-ゖa-z0-9]+"
-)
-# 片と片のあいだに挟まってよい字数（「カレールーはもう卒業」の「はもう」）。文の区切りはまたがない。
-_AVOID_GAP = 4
 
 # R6: 数の主張（助数詞のまとまり）。種・種類・選・品は「何種」、つは「いくつ」。
 _COUNTER = r"種類|種|選|品|つ|分|秒|枚"
@@ -350,12 +347,26 @@ def rephrase(text: str) -> str:
 
 
 # R12 の言い回し版（語の一覧だけでは「視聴を維持させた」のような言い方がすり抜けた・09-29 実機）。
+# タップ・クリックはどこでも測っていない（表紙の読み取りは順位との関係だけ）ので、効果の言い方
+# （タップされる・クリックを集める）は v3 のどの欄でも落とす。
 UNMEASURED_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"視聴(?:を|が|の)?維持"),
     re.compile(r"見続け"),
     re.compile(r"最後まで(?:視聴|見(?:られ|てもら|させ))"),
     re.compile(r"滞在時間"),
+    re.compile(r"(?:タップ|クリック)(?:され|を(?:集め|呼|誘|稼|取|増|得)|したく|させ|数)"),
 )
+# R17: 表紙の指示で効果を言い切る語（押される・選ばれる・目を引く など）。cover_directives だけに
+# 掛ける（動画の指示の「惹きつける」などは今のまま）。タップ・クリックは語があれば落とす。
+_COVER_EFFECT_RE = re.compile(
+    r"タップ|クリック|押され|押したく|押させ|選ばれ(?:る|やす)|目を引|目に(?:留|止|と)ま|"
+    r"惹きつけ|惹き付け|引きつけ|引き付け|興味を引|気を引"
+)
+# R17: 6〜30 位の表紙を読んでいないときの「ほかより多い」の言い方（比べていない旨の文は残す）。
+_REST_COMPARE_RE = re.compile(
+    r"6\s*[〜~～\-－ー]\s*30\s*位|ほかの表紙|他の表紙|下位|圏外|上位以外|ほかの動画|他の動画"
+)
+_NOT_COMPARED_RE = re.compile(r"比べていない|比べられ|比較していない|未比較|読んでいない")
 
 
 def deny_hit(text: str) -> str | None:
@@ -441,33 +452,6 @@ def has_assertive(text: str) -> bool:
 
 def has_framing_words(text: str) -> bool:
     return FRAMING_RE.search(text) is not None
-
-
-def _avoid_pattern(term: str) -> re.Pattern[str] | None:
-    """語を文字の種類の切れ目で分け、片が順に・短い間隔で並ぶ形（片が 1 つなら None）。"""
-    segments = _SEGMENT_RE.findall(norm(term))
-    if len(segments) <= 1:
-        return None
-    gap = rf"[^。！？!?]{{0,{_AVOID_GAP}}}?"
-    return re.compile(gap.join(re.escape(seg) for seg in segments))
-
-
-def has_avoid(text: str, terms: Iterable[str]) -> bool:
-    """避けたい訴求の語があるか（NFKC・大小・空白を無視）。
-
-    「ルー卒業」は「カレールーは卒業」「カレールーはもう卒業」も拾う（片のあいだに 4 字まで）。
-    """
-    body = norm(text)
-    for term in terms:
-        t = norm(term)
-        if not t:
-            continue
-        if t in body:
-            return True
-        pat = _avoid_pattern(term)
-        if pat is not None and pat.search(body):
-            return True
-    return False
 
 
 def _case_words(text: str) -> str:
@@ -1563,11 +1547,34 @@ def _names_competitor(text: str, ctx: SynthesisContext) -> bool:
     )
 
 
+def _cover_claims_ok(text: str, ctx: SynthesisContext, log: CheckLog) -> str:
+    """R17 の文の検査: 効果の言い切りの文と、6〜30 位を読んでいないときの比べる文を落とす。"""
+    compared = ctx.cover.mode == "board" and bool(ctx.cover.gap)
+    kept: list[str] = []
+    for sentence in _sentences(text):
+        if _COVER_EFFECT_RE.search(sentence):
+            log("cover_directives", "effect_claim")
+            continue
+        if (
+            not compared
+            and _REST_COMPARE_RE.search(sentence)
+            and not _NOT_COMPARED_RE.search(sentence)
+        ):
+            log("cover_directives", "rest_not_compared")
+            continue
+        kept.append(sentence)
+    return _tidy("".join(kept))
+
+
 def _cover_directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
     """表紙の指示（R17）: コードの指示を先に作り直し（冪等）、AI の指示は表紙の引用で照合する。
 
     表紙を 1 本も読めていなければ全部落とす。寄り・表情などの画角の語は、表紙の欄があるので許す
-    （directives では今のまま落とす）。段階は上位の群の読めた本数から cover_tier で付ける。
+    （directives では今のまま落とす）。
+    AI の指示の段階・本数・順位は、引用した本数ではなく、AI が挙げた特徴（feature＝表紙の特徴の表の
+    id）の集計から取る。根拠の引用はその特徴を持つ表紙に限る。特徴が無い・表に無い指示は段階を
+    付けず「AI の提案（未集計）」にする。文が言う特徴（顔・目線・質感・寄り・数字など）を引用した
+    表紙が持たなければ落とす。ほかが多い向きの差の印の特徴を勧める指示も落とす。
     """
     view = ctx.cover
     if not view.any_ok:
@@ -1579,7 +1586,7 @@ def _cover_directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -
     for d in s.cover_directives:
         if d.origin == "code":
             continue
-        text = d.text
+        text = _cover_claims_ok(d.text, ctx, log) if d.text else ""
         if not text:
             log("cover_directives", "empty")
             continue
@@ -1593,29 +1600,88 @@ def _cover_directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -
         if not refs:
             log("cover_directives", "no_verified_ref")
             continue
+        fid = d.feature.strip()
+        f = view.feature(fid) if fid else None
+        if fid and f is None:
+            log("cover_directives", "feature_unknown")
+        if f is not None:
+            refs = [r for r in refs if r.rank in f.ranks]
+            if not refs:  # 引用した表紙が、その特徴を持っていない
+                log("cover_directives", "feature_ref_mismatch")
+                continue
+            row = view.gap_row(f.id)
+            if row is not None and row.marked and row.direction == "rest":
+                log("cover_directives", "feature_more_in_rest")
+                continue
         ranks = sorted({r.rank for r in refs})
         text = _drop_uncovered_quotes(text, ranks, ctx, log)
         if not text:
             continue
-        top = [r for r in ranks if (c := view.by_rank(r)) is not None and c.group == "top"]
-        t = cover_tier(len(top), len(view.top_ok), view.n_top)
+        concept = unsupported_concept(text, ranks, view)
+        if concept is not None:
+            log("cover_directives", f"concept_unsupported:{concept}")
+            continue
+        if f is not None:
+            t, ranks, feature = f.tier, list(f.ranks), f.id
+        else:
+            t, feature = "", ""
         if not at_least_majority(t):
             text = _case_words(text)
         kept.append(
-            Directive(text=text, kind=COVER_KIND, refs=refs, origin="llm", tier=t, ranks=ranks)
+            Directive(
+                text=text,
+                kind=COVER_KIND,
+                refs=refs,
+                origin="llm",
+                tier=t,
+                ranks=ranks,
+                feature=feature,
+            )
         )
-    code = code_cover_directives(view)
+    code = code_cover_directives(view, ctx.avoid_terms)
     s.cover_directives = (code + kept[:MAX_LLM_COVER_DIRECTIVES])[:MAX_COVER_DIRECTIVES]
 
 
-def cover_directive_line(d: Directive) -> str:
-    """描画用の 1 行（指示文〔段階（#…）｜根拠 #4 表紙の文字（AI読み取り）「…」〕）。"""
-    tag = d.tier or "観測"
-    if d.ranks:
-        tag += f"（{ranks_text(d.ranks)}）"
+COVER_ORIGIN_CODE = "コードの集計"
+COVER_ORIGIN_LLM = "AI の提案"
+COVER_ORIGIN_LLM_UNCOUNTED = "AI の提案（未集計）"
+
+
+def cover_directive_origin(d: Directive, view: CoverView) -> str:
+    """指示の出どころ（コードの集計／AI の提案／AI の提案（未集計））。"""
+    if d.origin == "code":
+        return COVER_ORIGIN_CODE
+    if d.feature and view.feature(d.feature) is not None:
+        return COVER_ORIGIN_LLM
+    return COVER_ORIGIN_LLM_UNCOUNTED
+
+
+def cover_directive_count(d: Directive, view: CoverView) -> str:
+    """段階と本数と母数（特徴の集計から）。未集計の AI の提案は空（段階も本数も付けない）。"""
+    f = view.feature(d.feature) if d.feature else None
+    if f is not None:
+        return cover_count_text(f, view.n_top)
+    if d.origin == "code" and d.tier:  # 以前の出力（feature が無いコードの指示）
+        return f"{d.tier}（{ranks_text(d.ranks)}）" if d.ranks else d.tier
+    return ""
+
+
+def cover_directive_line(d: Directive, view: CoverView) -> str:
+    """描画用の 1 行（指示文〔出どころ｜段階 c/n（母数・#…）｜根拠 #4 表紙の文字「…」〕）。
+
+    AI の提案は、根拠の特徴の名前を添える（段階はその特徴の集計で、指示の文の効果ではない）。
+    """
+    who = cover_directive_origin(d, view)
+    f = view.feature(d.feature) if d.feature and d.origin != "code" else None
+    if f is not None:
+        who += f"・特徴「{f.label}」"
+    parts = [who]
+    count = cover_directive_count(d, view)
+    if count:
+        parts.append(count)
     if d.refs:
-        tag += f"｜根拠 {evidence_text(d.refs[0])}"
-    return f"{d.text}〔{tag}〕"
+        parts.append(f"根拠 {evidence_text(d.refs[0])}")
+    return f"{d.text}〔{'｜'.join(parts)}〕"
 
 
 def _shows_product(cut: StoryboardCut, ctx: SynthesisContext) -> bool:
@@ -1992,7 +2058,9 @@ __all__ = [
     "conflict_fields",
     "conflict_note",
     "conflict_probe",
+    "cover_directive_count",
     "cover_directive_line",
+    "cover_directive_origin",
     "directive_line",
     "drop_conflicts",
     "drop_unverified",

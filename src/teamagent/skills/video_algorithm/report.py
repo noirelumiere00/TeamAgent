@@ -52,6 +52,7 @@ from teamagent.skills.video_algorithm.cover_facts import (
     CoverFacts,
     CoverView,
     code_cover_directives,
+    cover_count_text,
     cover_line,
     dist_text,
 )
@@ -454,7 +455,9 @@ def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
 # ===========================================================
 # D サムネ（一覧の表紙）の比較（タップされる要因・文字は AI の読み取り）
 # ===========================================================
-COVER_TITLE = "サムネ（一覧の表紙）の比較（検索一覧でタップされる要因・文字は AI の読み取り）"
+COVER_TITLE = (
+    "サムネ（一覧の表紙）の比較（検索一覧でタップの要因になりうる作り・文字は AI の読み取り）"
+)
 COVER_COMMON_TITLE = "上位の表紙に共通する作り（タップ率は取れない・順位との関係のみ）"
 
 
@@ -529,9 +532,10 @@ def _cover_rows(c: CoverFacts) -> list[tuple[str, str]]:
     texts = "／".join(f"「{t.replace(chr(10), ' ')}」" for t in c.texts) or "なし"
     unreadable = "（読めない文字あり）" if c.read.unreadable_text else ""
     size = "不明" if c.large_text is None else "タイルで読める大きさ" if c.large_text else "小さい"
+    way = "縦書き・" if c.vertical else "横書き・" if c.vertical is False else "縦横不明・"
     shape = (
-        f"{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行・{c.chars}字"
-        + (f"・1行の高さ{c.line_h_pct:g}%" if c.line_h_pct is not None else "")
+        f"{way}{size}・{POSITION_JP.get(c.position, '不明')}・{c.lines}行・{c.chars}字"
+        + (f"・字の大きさ{c.line_h_pct:g}%" if c.line_h_pct is not None else "")
         if c.has_text
         else "—"
     )
@@ -567,27 +571,28 @@ def _cover_rows(c: CoverFacts) -> list[tuple[str, str]]:
     ]
 
 
-def _cover_chip(f: Feature) -> str:
-    who = "" if f.count == f.n else f"（{ranks_text(f.ranks)}）"
+def _cover_chip(f: Feature, n_top: int) -> str:
+    """段階・特徴・本数（母数が上位の本数より少なければ母数の名前と「上位 n 本中 c 本」も）。"""
+    count = cover_count_text(f, n_top).removeprefix(f"{f.tier} ")
     return (
         f'<span class="chip"><span class="tname">{_esc(f.tier)}</span><b>{_esc(f.label)}</b>'
-        f"<i>{f.count}/{f.n}{_esc(who)}</i></span>"
+        f"<i>{_esc(count)}</i></span>"
     )
 
 
 def _cover_gap_html(view: CoverView) -> str:
-    if view.mode != "board":
+    if view.mode != "board" or not view.gap:
         return f'<div class="muted small">上位とほかの差: {_esc(view.gap_note)}</div>'
     rows = "".join(
         f"<tr><td>{_esc(g.label)}</td><td>{g.a}/{g.n}</td><td>{g.b}/{g.m}</td>"
-        f"<td>{'差が大きい（参考）' if g.marked else '—'}</td></tr>"
+        f"<td>{_esc(g.mark_text + '（参考）' if g.marked else '—')}</td></tr>"
         for g in view.gap
     )
     return (
         '<div class="th">上位とほかの表紙（本数・参考・因果ではない）</div>'
         '<div class="tblwrap"><table class="tbl"><thead><tr><th>項目</th><th>上位</th><th>ほか</th>'
-        f"<th>印</th></tr></thead><tbody>{rows}</tbody></table></div>"
-        f'<div class="muted small">{_esc(view.gap_note)}</div>'
+        f"<th>差の印（多い側）</th></tr></thead><tbody>{rows}</tbody></table></div>"
+        f'<div class="muted small">{_esc(view.gap_note)}。「ほかが多い」の行は指示にしない</div>'
     )
 
 
@@ -643,12 +648,16 @@ def _cover_board(out: VideoAlgorithmOutput, d: Deck) -> str:
 
     cells = "".join(cell(c) for c in view.top)
     feats = [f for f in view.features if f.tier in (TIER_REQUIRED, TIER_MAJORITY)]
-    chips = "".join(_cover_chip(f) for f in feats[:8]) or (
+    chips = "".join(_cover_chip(f, view.n_top) for f in feats[:8]) or (
         '<span class="muted small">多数派以上の共通点なし</span>'
     )
     syn = d.syn
-    directives = list(syn.cover_directives) if syn is not None else code_cover_directives(view)
-    items = "".join(f"<li>{_esc(cover_directive_line(x))}</li>" for x in directives[:5]) or (
+    directives = (
+        list(syn.cover_directives)
+        if syn is not None
+        else code_cover_directives(view, d.ctx.avoid_terms)
+    )
+    items = "".join(f"<li>{_esc(cover_directive_line(x, view))}</li>" for x in directives[:5]) or (
         '<li class="muted">多数派以上の特徴が無いため、表紙の指示は出していません</li>'
     )
     ok = len(view.top_ok)
@@ -663,7 +672,8 @@ def _cover_board(out: VideoAlgorithmOutput, d: Deck) -> str:
         f'<div class="muted small mtop">{_esc(dist_text(view.dist))}。段階（必須条件＝読めた全部・'
         "多数派＝6割以上）はコードが本数から付けたもの（母数は欄ごとに読めた本数）。</div>"
         f"{_cover_gap_html(view)}"
-        '<div class="th mtop">表紙の作り方（根拠つき・段階はコードの集計）</div>'
+        '<div class="th mtop">表紙の作り方（根拠つき・段階と本数はコードが特徴の表から集計。'
+        "AI の提案は根拠の特徴を添え、特徴の無いものは未集計と表示）</div>"
         f'<ul class="nexts">{items}</ul>'
         f"{color_line}</section>"
     )

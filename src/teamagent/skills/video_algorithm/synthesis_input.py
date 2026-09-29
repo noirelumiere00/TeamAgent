@@ -629,12 +629,12 @@ def _cover_feature_lines(view: CoverView) -> list[str]:
 
 
 def _cover_gap_lines(view: CoverView) -> list[str]:
-    if view.mode != "board":
+    if view.mode != "board" or not view.gap:
         return [f"- {view.gap_note}"]
     lines = [f"- {view.gap_note}"]
     for g in view.gap:
-        mark = "｜差が大きい（参考）" if g.marked else ""
-        lines.append(f"- {g.label}｜上位 {g.a}/{g.n}・ほか {g.b}/{g.m}{mark}")
+        mark = f"｜差が大きい（参考・{g.mark_text}）" if g.marked else ""
+        lines.append(f"- {g.id}｜{g.label}｜上位 {g.a}/{g.n}・ほか {g.b}/{g.m}{mark}")
     return lines
 
 
@@ -644,7 +644,7 @@ def cover_prompt_block(ctx: SynthesisContext) -> str:
     if not view.top:
         return ""
     ok = len(view.top_ok)
-    code = code_cover_directives(view)
+    code = code_cover_directives(view, ctx.avoid_terms)
     sections: list[list[str]] = [
         [
             f"{COVER_SECTION_HEAD}（AI が表紙の画像だけから読んだもの・上位{view.n_top}本中"
@@ -653,7 +653,8 @@ def cover_prompt_block(ctx: SynthesisContext) -> str:
             *(json.dumps(cover_card(c), ensure_ascii=False) for c in (*view.top, *view.rest)),
         ],
         [
-            "# 表紙の特徴の表（母数は欄ごとの読めた本数・段階はコードの集計）",
+            "# 表紙の特徴の表（母数は欄ごとの読めた本数・段階はコードの集計。cover_directives の"
+            " feature にはこの id を1つ入れる。段階と本数はその特徴の集計から付く）",
             "id｜特徴｜本数｜該当｜段階",
             *_cover_feature_lines(view),
         ],

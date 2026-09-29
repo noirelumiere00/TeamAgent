@@ -302,3 +302,124 @@ def test_settings_from_env(
     assert s.mode == ("off" if not enabled else "board" if board else "top")
     monkeypatch.setenv("VIDEO_ALGO_COVER_WORKERS", "99")
     assert CoverSettings.from_env().workers == 8
+
+
+# ── Gemini の後の例外・締め切りの後の課金（09-29 反証）──────────────────────
+
+
+class _RaisingText:
+    """text を読むと例外になる応答（Gemini の後の想定外の失敗の形）。"""
+
+    cost_usd = 0.01
+
+    @property
+    def text(self) -> str:
+        raise RuntimeError("SDK_RESPONSE_BROKEN")
+
+
+def test_error_after_gemini_fails_only_that_cover_without_waiting() -> None:
+    """Gemini の後（parse・結果の書き込み）の例外も、その 1 枚の read_failed（締め切りまで待たない）。
+
+    壊し方: _run_read の外側の except を外す → 例外がプールに消え、締め切りまで待って timeout で赤。
+    """
+    gemini = _Gemini(lambda call: _RaisingText())
+    reader = _reader(gemini, _ok_fetch)
+    reader.submit(_metas(1), "top")
+    started = time.monotonic()
+    reads, cost = reader.join(3.0)
+    assert time.monotonic() - started < 2.0
+    assert reads[1].status == "read_failed" and reads[1].reason == "parse:RuntimeError"
+    assert cost == pytest.approx(0.01)
+
+
+def test_huge_box_numbers_do_not_break_the_parse() -> None:
+    """box_2d の桁の大きな整数（float にできない）は枠なしにする（1 枚を落とさない・例外にしない）。"""
+    big = "1" + "0" * 400
+    text = (
+        '{"elements":["result"],"texts":[{"text":"10分で本格","box_2d":['
+        + big
+        + ',0,1,1]}],"face":{"kind":"none"}}'
+    )
+    reader = _reader(_Gemini(lambda call: _resp(text)), _ok_fetch)
+    reader.submit(_metas(1), "top")
+    reads, _cost = reader.join(3.0)
+    assert reads[1].status == "ok"
+    assert reads[1].texts is not None and reads[1].texts[0].box is None
+    deep = '{"elements":' + "[" * 60000 + "]" * 60000 + ',"texts":[],"face":null}'
+    from teamagent.skills.video_algorithm.cover_read import parse_cover
+
+    assert parse_cover(deep) is None  # 深い入れ子（RecursionError）も None
+
+
+def test_no_gemini_retry_after_the_deadline_and_abandoned_cost_is_logged() -> None:
+    """締め切りの後に崩れた JSON が返っても、やり直しで Gemini をもう 1 回呼ばない。後の費用はログに出す。
+
+    壊し方: やり直しの前に締め切りを見ない → 2 回目の呼び出しが起きて赤。
+    """
+    from structlog.testing import capture_logs
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    def reply(call: dict[str, Any]) -> GeminiResponse:
+        entered.set()
+        release.wait(10)
+        return _resp("所見のみ")  # 崩れた JSON（本来はやり直す形）
+
+    gemini = _Gemini(reply)
+    reader = _reader(gemini, _ok_fetch)
+    with capture_logs() as logs:
+        try:
+            reader.submit(_metas(1), "top")
+            assert entered.wait(3)
+            reads, cost = reader.join(0.2)
+            assert reads[1].status == "timeout" and cost == 0.0
+        finally:
+            release.set()
+        time.sleep(0.3)
+    assert len(gemini.calls) == 1
+    assert reader.abandoned_cost() == pytest.approx(0.01)
+    abandoned = [e for e in logs if e.get("event") == "video_algorithm_cover_abandoned_cost"]
+    assert abandoned and abandoned[0]["rank"] == 1 and abandoned[0]["cost_usd"] == 0.01
+
+
+def test_reads_waiting_at_the_deadline_are_cancelled() -> None:
+    """締め切りの時点で読み取りを待っていた表紙は取り消す（後から Gemini を呼ばない・読み取りに入らない）。
+
+    壊し方: read プールを shutdown(cancel_futures=False) にする → 待っていた 1 枚が後から走って赤。
+    """
+    release = threading.Event()
+    entered = threading.Event()
+    started_reads: list[int] = []
+
+    class _Spy(CoverReader):
+        def _run_read(self, job: Any) -> None:
+            started_reads.append(job.rank)
+            super()._run_read(job)
+
+    def reply(call: dict[str, Any]) -> GeminiResponse:
+        entered.set()
+        release.wait(10)
+        return _resp()
+
+    reader = _Spy(
+        gemini=_Gemini(reply),
+        system="SYSTEM",
+        fetch=_ok_fetch,
+        request_id="req",
+        settings=CoverSettings(wait_s=5.0, workers=1),
+        version="v1-test",
+    )
+    try:
+        reader.submit(_metas(2), "top")
+        assert entered.wait(3)
+        deadline = time.monotonic() + 3
+        while len(reader.ranks()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.2)  # 2 本目の取得が終わり、読み取りのプールで待つまで
+        reads, _cost = reader.join(0.1)
+        assert {r.status for r in reads.values()} == {"timeout"}
+    finally:
+        release.set()
+    time.sleep(0.3)
+    assert started_reads == [1]

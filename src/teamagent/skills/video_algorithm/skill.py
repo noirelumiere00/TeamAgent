@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, ClassVar, Literal
@@ -1246,6 +1247,18 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     def _cover_settings_now(self) -> CoverSettings:
         return self._cover_settings or CoverSettings.from_env()
 
+    def _cover_settings_for(self, input: VideoAlgorithmInput) -> CoverSettings:
+        """この依頼の表紙の設定。表紙を出す出力（report／slides／pptx）が無ければ読まない。
+
+        tiktok_search の深掘り（deep.build_filmstrips）は outputs=[] でコマと冒頭フックだけを使う。
+        画面に出ない表紙のために Gemini の費用・待ち・統合の入力を増やさない（キャッシュのキーも
+        従来のまま）。
+        """
+        settings = self._cover_settings_now()
+        if not input.outputs and settings.enabled:
+            return replace(settings, enabled=False)
+        return settings
+
     def _cover_fetch(
         self, request_id: str, settings: CoverSettings
     ) -> Callable[[VideoMeta], CoverImage]:
@@ -1424,7 +1437,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 # 統合の版が違えば同じ KW でも作り直す（旧版の synthesis を返さない）。
                 synthesis_version=self._synthesis_version,
                 # 表紙の読み取りの版（止めているときは空＝従来のキー）。
-                cover_version=cover_version(self._cover_settings_now(), self._configured_model_id())
+                cover_version=cover_version(
+                    self._cover_settings_for(input), self._configured_model_id()
+                )
                 or None,
             )
             with _stage("cache_lookup", ctx.request_id):
@@ -1643,7 +1658,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
     ) -> VideoAlgorithmOutput:
         log = ctx.bind_logger(self.name)
         run_started = time.monotonic()
-        cover_settings = self._cover_settings_now()
+        cover_settings = self._cover_settings_for(input)
 
         target = input.max_videos  # 深掘り分析（DL+Gemini）する本数。重い。
         # 取得（スクレイプ）= 上位ボード board_size 本。メタのみ＝軽い。

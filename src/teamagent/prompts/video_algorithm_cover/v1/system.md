@@ -24,6 +24,7 @@
   "texts": [
     {"text": "<画像の文字を原文どおり。行が分かれていれば改行で区切る>",
      "box_2d": [0, 0, 1000, 1000],
+     "vertical": false,
      "style": ["outline|box|shadow|plain"]}
   ],
   "unreadable_text": false,
@@ -43,6 +44,7 @@
 ## 欄の定義
 - elements: 写っている要素を全部挙げる（1つに絞らない）。person＝人、product＝商品・パッケージ、result＝完成品・仕上がり、process＝工程・使っている途中、before_after＝使用前後や比較、text_main＝画より文字が目立つ、scene＝場所・景色。
 - texts: 文字のまとまり（見出し・吹き出し・帯など）ごとに 1 つ。大きいものから順に 4 つまで。text の行の区切りは画像の改行どおりにする。
+- vertical: そのまとまりが縦書き（文字が上から下へ並ぶ）なら true、横書きなら false。縦書きのときは、1 列を 1 行として右の列から順に改行で区切る。
 - box_2d: そのまとまり全体を囲む枠。[上端 y, 左端 x, 下端 y, 右端 x] を画像の高さ・幅を 1000 とした整数で書く。
 - style: outline＝文字の縁取り、box＝文字の下の帯や座布団、shadow＝影、plain＝飾りなし。
 - face: いちばん大きく写っている顔 1 つ。real＝実写の人の顔、illustration＝イラストやキャラクター、in_media＝画面やパッケージや写真の中の顔、none＝顔なし。box_2d はその顔の枠。

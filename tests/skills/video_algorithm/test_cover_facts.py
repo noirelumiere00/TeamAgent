@@ -12,6 +12,7 @@ import pytest
 from teamagent.skills.video_algorithm.cover_facts import (
     NOT_COMPARED,
     code_cover_directives,
+    cover_count_text,
     cover_facts,
     cover_line,
     cover_tier,
@@ -24,6 +25,7 @@ from teamagent.skills.video_algorithm.cover_facts import (
     match_norm,
     number_claims,
     text_match,
+    unsupported_concept,
 )
 from teamagent.skills.video_algorithm.evidence import (
     TIER_CASE,
@@ -70,6 +72,43 @@ def test_kw_only_overlap_is_not_partial() -> None:
     assert text_match("", "何か", TERMS) == "no_text"
 
 
+@pytest.mark.parametrize(
+    "text", ["本格スパイスカレー", "簡単スパイスカレー", "スパイスカレーの作り方", "スパイスカレー"]
+)
+def test_identical_text_is_same_even_when_only_a_short_word_remains(text: str) -> None:
+    """表紙の文字と冒頭のテロップが 1 字違わず同じなら same（検索語＋短い修飾でも kw_only にしない）。
+
+    09-29 本番 #4 の表紙は「本格スパイスカレー」。検索語を除くと「本格」2 字になり kw_only に落ち、
+    own_text（表紙だけの文字）が多数派になって「表紙だけの文字を入れる」という逆の指示が出ていた。
+    壊し方: 元の文字どうしの一致の判定を外す → kw_only になり赤。
+    """
+    assert text_match(text, text, TERMS) == "same"
+    assert text_match(f"【{text}】", f"{text}！", TERMS) == "same"  # 記号の違いは無視
+    # 一方がもう一方を含む（残りも含む）: 表紙の文字がそのままテロップに入っている
+    assert text_match("本格スパイスカレー", "本格スパイスカレーの作り方", TERMS) == "same"
+
+
+def test_identical_opening_telop_is_not_own_text() -> None:
+    """表紙の文字＝0 秒のテロップなら own_text は False（「表紙だけの文字」の指示を出さない）。"""
+    board = prod_board_with_covers()
+    videos = prod_videos()
+    same = {1: "本格スパイスカレー", 2: "簡単スパイスカレー", 3: "スパイスカレーの作り方"}
+    for v in videos:
+        if v.meta.rank in same and v.analysis is not None:
+            v.analysis.telops[0].text = same[v.meta.rank]
+            v.analysis.telops[0].sec = 0.0
+    for m in board:
+        if m.rank in same and m.cover_read is not None and m.cover_read.texts:
+            first = m.cover_read.texts[0].model_copy(update={"text": same[m.rank]})
+            m.cover_read = m.cover_read.model_copy(update={"texts": [first]})
+    view = cover_view(board, videos, QUERY, ROSTER)
+    for rank in same:
+        c = view.by_rank(rank)
+        assert c is not None and c.opening_match == "same" and c.own_text is False
+    assert view.feature("cover:own_text") is None
+    assert not any("表紙だけの文字" in d.text for d in code_cover_directives(view))
+
+
 def test_match_threshold_is_four_chars() -> None:
     """壊し方: 閾値を 1 字にする → 「本格」2 字の共通で partial になり赤。"""
     assert text_match("本格派の味わい", "本格カレー", TERMS) == "different"
@@ -97,8 +136,16 @@ def test_numbers_need_units_and_years_do_not_count() -> None:
         ("包丁いらない", False, True),
         ("混ぜるだけ", False, True),
         ("NG例3つ", True, False),
+        ("ＮＧな切り方", True, False),  # 全角も NFKC で拾う
         ("間違えがちな炒め方", True, False),
         ("それ、失敗してます", True, False),
+        # 英語の -ING（COOKING・MORNING）の「NG」は警告ではない（壊し方: IGNORECASE に戻す → 赤）
+        ("MORNING ROUTINE", False, False),
+        ("Cooking Vlog", False, False),
+        ("スパイスカレー COOKING", False, False),
+        ("EATING SHOW", False, False),
+        ("ダメ元で作ったら絶品", False, False),  # ほめる文脈
+        ("これはダメ", True, False),
     ],
 )
 def test_warning_and_effortless_forms(text: str, warning: bool, effortless: bool) -> None:
@@ -128,8 +175,8 @@ def test_size_position_and_lines_come_from_the_box() -> None:
             "elements": [],
             "face": None,
             "texts": [
-                {"text": "小さな注記", "box_2d": [900, 100, 930, 600]},
-                {"text": "大きい\n見出し", "box_2d": [100, 50, 300, 950]},
+                {"text": "小さな注記", "box_2d": [900, 100, 930, 600], "vertical": False},
+                {"text": "大きい\n見出し", "box_2d": [100, 50, 300, 950], "vertical": False},
             ],
         }
     )
@@ -143,7 +190,7 @@ def test_size_position_and_lines_come_from_the_box() -> None:
             "img_h": 960,
             "elements": [],
             "face": None,
-            "texts": [{"text": "a\nb\nc", "box_2d": [800, 0, 900, 1000]}],
+            "texts": [{"text": "a\nb\nc", "box_2d": [800, 0, 900, 1000], "vertical": False}],
         }
     )
     assert cover_facts(small, _meta(), None, QUERY).large_text is False  # 1 行 3.3%×1.78
@@ -152,6 +199,45 @@ def test_size_position_and_lines_come_from_the_box() -> None:
     )
     c = cover_facts(no_box, _meta(), None, QUERY)
     assert c.large_text is None and c.position == "unknown"  # 分からない（無いと数えない）
+
+
+def _prod5_vertical(vertical: bool | None) -> CoverRead:
+    """09-29 本番 #5 の形（240×426・縦書き 3 列「市販の／カレールーは／卒業！」）。"""
+    return CoverRead.model_validate(
+        {
+            "status": "ok",
+            "img_w": 240,
+            "img_h": 426,
+            "elements": ["process", "text_main"],
+            "face": {"kind": "none"},
+            "texts": [
+                {
+                    "text": "市販の\nカレールーは\n卒業！",
+                    "box_2d": [293, 467, 739, 667],
+                    "vertical": vertical,
+                }
+            ],
+        }
+    )
+
+
+def test_vertical_text_size_comes_from_the_column_width() -> None:
+    """縦書きの字の大きさは枠の幅÷列の数（高さ÷行で測ると列の長さになり 3 倍前後に出る）。
+
+    本番 #5: 実際の字は画像で 1 字約 20px（高さ 426 の約 4.5%）。高さ÷3 行だと 14.9%・
+    「読める大きさ」になっていた。
+    壊し方: 縦書きでも高さ÷行で測る → 14.9 になり赤。
+    """
+    c = cover_facts(_prod5_vertical(True), _meta(5), None, QUERY)
+    assert c.vertical is True and c.lines == 3
+    # 幅 200/1000×240px÷3 列＝16px → 高さ 426 の 3.8%
+    assert c.line_h_pct == pytest.approx(3.8, abs=0.05)
+    assert c.large_text is False  # 16px は幅 240 の 1/10（24px）に届かない
+    horizontal = cover_facts(_prod5_vertical(False), _meta(5), None, QUERY)
+    assert horizontal.line_h_pct == pytest.approx(14.9, abs=0.05)
+    unknown = cover_facts(_prod5_vertical(None), _meta(5), None, QUERY)
+    # 縦横が分からなければ字の大きさは測らない（母数から外す）。行数は改行から数える。
+    assert unknown.line_h_pct is None and unknown.large_text is None and unknown.lines == 3
 
 
 def test_brand_names_are_verified_before_classifying() -> None:
@@ -356,10 +442,15 @@ def test_board_mode_directives_skip_what_is_common_everywhere() -> None:
 
 
 def test_cover_line_uses_code_names_and_counts_only() -> None:
+    """但し書き（6〜30位とは比べていない）は先頭に置く（スライドの 1 行で末尾が切れても見える）。
+
+    「表紙に文字がある」は情報が少ないので最後（上位 3 つに入らない）。
+    壊し方: _LINE_ORDER の先頭に cover:text を戻す → 1 つ目が「表紙に文字がある」になり赤。
+    """
     view = cover_view(prod_board_with_covers(), prod_videos(), QUERY, ROSTER)
     line = cover_line(view)
-    assert line.startswith("サムネ（一覧の表紙）: ")
-    assert "4/5（多数派）" in line and NOT_COMPARED in line
+    assert line.startswith(f"サムネ（一覧の表紙・{NOT_COMPARED}）: 表紙の文字に「スパイスカレー」")
+    assert "4/5（多数派）" in line and "表紙に文字がある" not in line
     for third_party in ("わたしとスパイスカレー", "とにかく痩せたい", "ハーブ専科"):
         assert third_party not in line
     failed = prod_board()
@@ -376,3 +467,154 @@ def test_rest_cover_facts_case_tier() -> None:
     assert view.mode == "board" and [c.rank for c in view.rest] == [6]
     kw = view.feature("cover:kw:スパイスカレー")
     assert kw is not None and 6 not in kw.ranks and kw.tier != TIER_CASE
+
+
+# ── 差の向き・比べられなかった 6〜30 位・根拠の選び方・母数・中身の照らし合わせ ─────────
+
+
+def _faces_in_rest() -> list[VideoMeta]:
+    """上位は #1 だけ実写の顔（1/5）・6〜30 位は 25 本とも実写の顔（逆向きの差）。"""
+    board = prod_board_with_covers(rest_kw=set())
+    four = board[3].cover_read
+    assert four is not None and four.face is not None
+    board[3].cover_read = four.model_copy(
+        update={"face": four.face.model_copy(update={"kind": "none", "box": None})}
+    )
+    for m in board[5:]:
+        assert m.cover_read is not None and m.cover_read.face is not None
+        m.cover_read = m.cover_read.model_copy(
+            update={
+                "face": m.cover_read.face.model_copy(update={"kind": "real", "gaze": "camera"}),
+                "elements": ["result", "person"],
+            }
+        )
+    return board
+
+
+def test_reverse_gap_marks_do_not_become_directives() -> None:
+    """上位 1/5・ほか 25/25 の差の印は「ほかが多い」。「入れる」の指示にしない（表示だけ）。
+
+    壊し方: 差の印の向きを見ない（abs だけ）→ 「顔を入れる形を A/B」が出て赤。
+    """
+    view = cover_view(_faces_in_rest(), prod_videos(), QUERY, ROSTER)
+    row = view.gap_row("cover:face")
+    assert row is not None and (row.a, row.n, row.b, row.m) == (1, 5, 25, 25)
+    assert row.marked and row.direction == "rest" and row.mark_text == "ほかが多い"
+    texts = [d.text for d in code_cover_directives(view)]
+    assert not any("顔" in t or "人を入れる" in t for t in texts)
+    assert "ほかが多い" in cover_line(view)  # 1 行でも向きを出す
+
+
+def test_marked_rows_need_a_top_majority() -> None:
+    """上位が多い向きの印でも、上位で多数派でなければ指示にしない（事例 2/5 を最優先にしない）。
+
+    壊し方: 印の分岐から多数派の条件を外す → 事例の「顔を入れる形を A/B」が出て赤。
+    """
+    from dataclasses import replace
+
+    from teamagent.skills.video_algorithm.cover_facts import GapRow
+
+    view = cover_view(prod_board_with_covers(), prod_videos(), QUERY, ROSTER)
+    face = view.feature("cover:face")
+    assert face is not None and face.tier == TIER_CASE
+    forced = replace(
+        view,
+        mode="board",
+        gap=(GapRow("cover:face", face.label, 2, 5, 0, 25, 0.01, True),),
+    )
+    assert forced.gap[0].direction == "top"
+    assert not any("顔" in d.text for d in code_cover_directives(forced))
+
+
+def test_reverse_marked_row_is_not_a_directive_even_with_a_top_majority() -> None:
+    """上位で多数派（3/5）でも、ほかのほうが多い（25/25）印の行は「入れる」の指示にしない。
+
+    上位 5 本では Holm の後に印が残りにくいが、上位 10 本などでは起きうる形を直接作って確かめる。
+    壊し方: 印の向き（direction）を見ない → 「主役に寄った画にする形を A/B」が出て赤。
+    """
+    from dataclasses import replace
+
+    from teamagent.skills.video_algorithm.cover_facts import GapRow
+
+    view = cover_view(prod_board_with_covers(), prod_videos(), QUERY, ROSTER)
+    closeup = view.feature("cover:closeup")
+    assert closeup is not None and closeup.tier == TIER_MAJORITY and closeup.count == 3
+    forced = replace(
+        view,
+        mode="board",
+        gap=(GapRow("cover:closeup", closeup.label, 3, 5, 25, 25, 0.01, True),),
+    )
+    assert forced.gap[0].direction == "rest"
+    assert not any("寄った画" in d.text for d in code_cover_directives(forced))
+
+
+def test_board_mode_with_no_rest_read_is_not_compared() -> None:
+    """6〜30 位が全部 timeout なら比べていない（「差の印なし」と出さない）。
+
+    壊し方: mode を「rest があれば board」に戻す → 「6〜30位との差の印なし」と出て赤。
+    """
+    board = prod_board_with_covers()
+    for m in board[5:]:
+        m.cover_read = CoverRead(rank=m.rank, group="rest", status="timeout", reason="deadline")
+    view = cover_view(board, prod_videos(), QUERY, ROSTER)
+    assert view.mode == "top" and view.gap == ()
+    assert view.gap_note == "6〜30位の表紙は読めなかった（時間内に読めず25本・比べていない）"
+    line = cover_line(view)
+    assert NOT_COMPARED in line and "差の印なし" not in line
+    assert all(NOT_COMPARED in d.text for d in code_cover_directives(view))
+
+
+def test_example_quotes_skip_covers_with_avoid_terms() -> None:
+    """避けたい訴求の語を含む表紙の文字は、コードの指示の根拠（お手本）に引用しない。
+
+    壊し方: _example_refs で avoid_terms を見ない → #4 の「とにかく痩せたい」が根拠に出て赤。
+    """
+    view = cover_view(prod_board_with_covers(), prod_videos(), QUERY, ROSTER)
+    plain = code_cover_directives(view)
+    assert [r.rank for r in plain[0].refs] == [4, 1]
+    avoided = code_cover_directives(view, ["痩せたい"])
+    refs = [r for d in avoided for r in d.refs]
+    assert refs and not any("痩せたい" in r.quote for r in refs)
+    assert 4 not in [r.rank for r in avoided[0].refs]
+    # 画の特徴（主役の説明を引く）でも、避けたい語を含む説明は使わず次に再生の多い本にする
+    from teamagent.skills.video_algorithm.cover_facts import _example_refs
+
+    ranks = [1, 2, 3, 4, 5]
+    assert [r.rank for r in _example_refs("cover:el:result", ranks, view)] == [4, 1]
+    image = _example_refs("cover:el:result", ranks, view, ["湯気の立つ皿"])
+    assert [(r.rank, r.quote) for r in image] == [(4, "カレーを食べる人"), (5, "店の皿のカレー")]
+
+
+def test_count_text_shows_the_denominator_when_it_is_smaller() -> None:
+    """母数が上位の本数より少ないときは母数の名前と「上位 n 本中 c 本」を添える。
+
+    壊し方: 母数の名前を出さない → 2/3 が上位 5 本中の多数派に見えて赤。
+    """
+    from teamagent.skills.video_algorithm.facts import Feature
+
+    legible = Feature("cover:legible", "文字が背景から読みやすい（AI判定）", (4, 5), 3, "多数派")
+    assert cover_count_text(legible, 5) == (
+        "多数派 2/3（文字のある表紙のうち・#4・#5・上位5本中2本）"
+    )
+    kw = Feature("cover:kw:スパイスカレー", "x", (1, 2, 3, 4), 5, "多数派")
+    assert cover_count_text(kw, 5) == "多数派 4/5（#1・#2・#3・#4）"
+    assert cover_count_text(Feature("cover:el:result", "x", (1, 2, 3, 4, 5), 5, "必須条件"), 5) == (
+        "必須条件 5/5"
+    )
+
+
+def test_concepts_in_a_directive_must_be_on_the_quoted_covers() -> None:
+    """「顔をカメラ目線で」を顔の無い表紙（#2・#3・#5）の引用で通さない。打ち消しは逆に確かめる。"""
+    view = cover_view(prod_board_with_covers(), prod_videos(), QUERY, ROSTER)
+    assert unsupported_concept("表紙は実写の人の顔をカメラ目線で入れる", [2, 3, 5], view) == (
+        "cover:gaze_camera"
+    )
+    assert unsupported_concept("表紙に顔を入れる", [2, 3, 5], view) == "cover:face"
+    assert unsupported_concept("表紙に顔を入れる", [1], view) is None
+    assert unsupported_concept("表紙に顔は入れず料理を大きく見せる", [2], view) is None
+    assert unsupported_concept("表紙で湯気を見せる", [4], view) == "cover:sizzle"
+    assert unsupported_concept("表紙で湯気を見せる", [3], view) is None
+    assert unsupported_concept("表紙の文字は短くする", [2], view) is None
+    # 文字の位置の「上寄り」は寄りの画ではない（#4 は寄りではないが落とさない）
+    assert unsupported_concept("表紙の文字は上寄りに置く", [4], view) is None
+    assert unsupported_concept("表紙は料理に寄った画にする", [4], view) == "cover:closeup"

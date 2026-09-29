@@ -150,9 +150,54 @@ def test_off_mode_and_no_cover_url_messages() -> None:
 
 def test_slack_line_has_counts_but_no_cover_text() -> None:
     out = _out()
-    assert out.cross.cover_line.startswith("サムネ（一覧の表紙）: ")
+    assert out.cross.cover_line.startswith("サムネ（一覧の表紙・6〜30位とは比べていない）: ")
     msg = completion_message(out)
     assert msg is not None
-    assert "サムネ（一覧の表紙）" in msg.text
+    assert "サムネ（一覧の表紙・" in msg.text
     for third_party in ("わたしとスパイスカレー", "とにかく痩せたい", "無水スパイスカレー"):
         assert third_party not in msg.text
+
+
+def _faces_in_rest_out() -> VideoAlgorithmOutput:
+    from tests.skills.video_algorithm.test_cover_facts import _faces_in_rest
+
+    return _out(board=_faces_in_rest(), mode="board")
+
+
+def test_gap_marks_show_which_side_has_more() -> None:
+    """差の印に向き（上位が多い／ほかが多い）を出す。スライドの印の列は切れない幅にする。
+
+    壊し方: 印を「差が大きい」だけに戻す → 向きが出ず赤。
+    """
+    out = _faces_in_rest_out()
+    report = render_report(out, generated_at=STAMP)
+    assert "<th>差の印（多い側）</th>" in report and "ほかが多い（参考）" in report
+    slides = render_slides(out, generated_at=STAMP)
+    assert "<th>差の印</th>" in slides and "<td>ほかが多い</td>" in slides
+    assert "差が大きい</td>" not in slides
+
+
+def test_slide_row_names_what_was_read_not_the_hero() -> None:
+    """写っている要素の全部を「主役」と呼ばない（主役の説明と読み違えないように）。"""
+    html = render_slides(_out(), generated_at=STAMP)
+    assert "写っている要素（AI）" in html and '<div class="lab c1">主役</div>' not in html
+
+
+def test_directive_lines_show_origin_and_denominator() -> None:
+    """表紙の指示の行に出どころ（コードの集計／AI の提案）と母数を出す。
+
+    壊し方: 行の札を段階と順位だけに戻す → 「冒頭のテロップと比べられた表紙のうち」が消えて赤。
+    """
+    html = render_report(_out(), generated_at=STAMP)
+    assert (
+        "〔コードの集計｜多数派 4/5（#1・#2・#3・#4）｜根拠 #4 表紙の文字（AI読み取り）「" in html
+    )
+    assert "冒頭のテロップと比べられた表紙のうち・#1・#3・#4・上位5本中3本" in html
+    slides = render_slides(_out(), generated_at=STAMP)
+    assert "コードの集計" in slides and "AI の指示（根拠は照合済み）" not in slides
+
+
+def test_conclusion_line_puts_the_scope_first() -> None:
+    """S2 の表紙の 1 行は但し書きを先頭に置く（1 行で切れても「比べていない」が見える）。"""
+    html = render_slides(_out(), generated_at=STAMP)
+    assert '<div class="note c1">サムネ（一覧の表紙・6〜30位とは比べていない）: ' in html

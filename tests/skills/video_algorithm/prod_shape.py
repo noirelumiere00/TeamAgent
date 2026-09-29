@@ -832,13 +832,19 @@ def prod_synthesis() -> CrossSynthesis:
 # ── サムネ（一覧の表紙）の読み取り（作り話。第三者の文字は入れない）──────────────
 # 本番の形: 上位 4 本は表紙に文字（うち 4 本に「スパイスカレー」）・#5 は文字なし。
 # #3 の商品名「赤缶」はハッシュタグで照合できる・#4 の「ハーブ専科」はキャプションで照合できる
-# （名簿では競合）。#1 と #4 は実写の顔。枠は 0〜1000 の [上, 左, 下, 右]。
+# （名簿では競合）。#1 と #4 は実写の顔。枠は 0〜1000 の [上, 左, 下, 右]。文字は 4 本とも横書き
+# （縦書きの形は test_cover_facts の本番 #5 の形で確かめる）。
 _COVER_READS: dict[int, dict[str, Any]] = {
     1: {
         "elements": ["result", "person"],
         "subject_note": "湯気の立つ皿と手元",
         "texts": [
-            {"text": "わたしとスパイスカレー", "box_2d": [80, 60, 220, 940], "style": ["outline"]}
+            {
+                "text": "わたしとスパイスカレー",
+                "box_2d": [80, 60, 220, 940],
+                "vertical": False,
+                "style": ["outline"],
+            }
         ],
         "face": {
             "kind": "real",
@@ -857,7 +863,12 @@ _COVER_READS: dict[int, dict[str, Any]] = {
         "elements": ["result", "text_main"],
         "subject_note": "皿に盛ったカレー",
         "texts": [
-            {"text": "スパイスカレー\n5つで作れる", "box_2d": [100, 80, 330, 920], "style": ["box"]}
+            {
+                "text": "スパイスカレー\n5つで作れる",
+                "box_2d": [100, 80, 330, 920],
+                "vertical": False,
+                "style": ["box"],
+            }
         ],
         "face": {"kind": "none"},
         "closeup": True,
@@ -874,6 +885,7 @@ _COVER_READS: dict[int, dict[str, Any]] = {
             {
                 "text": "30分で本格\nスパイスカレー",
                 "box_2d": [650, 50, 900, 950],
+                "vertical": False,
                 "style": ["outline"],
             }
         ],
@@ -893,6 +905,7 @@ _COVER_READS: dict[int, dict[str, Any]] = {
             {
                 "text": "とにかく痩せたい\n無水スパイスカレー",
                 "box_2d": [60, 40, 300, 960],
+                "vertical": False,
                 "style": ["outline"],
             }
         ],
@@ -945,7 +958,13 @@ def prod_cover_read(rank: int, **update: Any) -> CoverRead:
 
 def rest_cover_read(rank: int, *, kw: bool, **update: Any) -> CoverRead:
     """6〜30 位の表紙の読み取り（作り話・kw=True で「スパイスカレー」の文字）。"""
-    texts = [{"text": "スパイスカレー" if kw else "今日のごはん", "box_2d": [700, 100, 800, 900]}]
+    texts = [
+        {
+            "text": "スパイスカレー" if kw else "今日のごはん",
+            "box_2d": [700, 100, 800, 900],
+            "vertical": False,
+        }
+    ]
     read = CoverRead.model_validate(
         {
             "elements": ["result"],
