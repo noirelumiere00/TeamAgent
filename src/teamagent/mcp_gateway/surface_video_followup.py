@@ -54,6 +54,7 @@ from typing import Any
 import structlog
 
 from teamagent.mcp_gateway import detached_jobs
+from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
 from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 from teamagent.skills.base import SkillContext
 
@@ -163,11 +164,16 @@ def reuse_key(slack_user_id: str, keyword: str, urls: list[str]) -> str:
 
 @dataclass(frozen=True)
 class CachedFollowup:
-    """前回の 2 段目の結果（追記の文面と、章を足したレポートの URL）。"""
+    """前回の 2 段目の結果（追記の文面と、章を足したレポートの URL）。
+
+    ``source`` は前回の出力（SurfaceVideoFollowupOutput）。使い回しの追記を Block Kit で
+    描き直すのに使う（無ければ文字だけで届ける）。
+    """
 
     slack_text: str
     report_url: str | None
     stored_at: float
+    source: Any = None
 
 
 class FollowupCache:
@@ -196,11 +202,14 @@ class FollowupCache:
                 return None
             return entry
 
-    def put(self, key: str, *, slack_text: str, report_url: str | None) -> None:
+    def put(self, key: str, *, slack_text: str, report_url: str | None, source: Any = None) -> None:
         with self._lock:
             self._entries.pop(key, None)
             self._entries[key] = CachedFollowup(
-                slack_text=slack_text, report_url=report_url, stored_at=self._clock()
+                slack_text=slack_text,
+                report_url=report_url,
+                stored_at=self._clock(),
+                source=source,
             )
             while len(self._entries) > self._max_entries:
                 self._entries.popitem(last=False)
@@ -229,6 +238,24 @@ def is_reusable(result: Any) -> bool:
         and not digest.cover_only_ranks
         and not digest.failed_ranks
     )
+
+
+def followup_rich(result: Any, *, request_id: str, reused: bool = False) -> RichMessage | None:
+    """2 段目の追記の Block Kit 版（``search_surface_check/slack_render.py``）。
+
+    分析できた結果（status=ok）だけ。描けない・想定外の出力・描画の例外は None
+    （今の文字だけの追記に戻す＝結果を消さない）。
+    """
+
+    def _render() -> RichMessage | None:
+        from teamagent.skills.search_surface_check.schema import SurfaceVideoFollowupOutput
+        from teamagent.skills.search_surface_check.slack_render import followup_message
+
+        if not isinstance(result, SurfaceVideoFollowupOutput):
+            return None
+        return followup_message(result, reused=reused)
+
+    return render_or_none(_render, request_id=request_id, kind="search_surface_check_video")
 
 
 def reused_text(entry: CachedFollowup) -> str:
@@ -325,16 +352,19 @@ def _complete(
         # 中断文を送った後に完了した分は、矛盾する 2 通目を出さない。
         logger.warning("surface_video_followup_done_after_interrupt", request_id=request_id)
     else:
+        rich: RichMessage | None = None
         if error is not None:
             text = failure_text(keyword, error)
         else:
             text = str(getattr(result, "slack_text", "") or "")
+            rich = followup_rich(result, request_id=request_id)
         if text:
             delivered = detached_jobs.post_to_origin(
                 markdown_bold_to_mrkdwn(text),
                 destination,
                 request_id=request_id,
                 fallback_user_id=fallback_user_id,
+                rich=rich,
             )
     if cache_key is not None and error is None and is_reusable(result):
         # 中断文を送った後に完了した分も覚える（もう一度依頼されたら回数を使わずに届けられる）。
@@ -342,6 +372,7 @@ def _complete(
             cache_key,
             slack_text=str(getattr(result, "slack_text", "") or ""),
             report_url=getattr(result, "report_url", None),
+            source=result,
         )
     cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0) if result is not None else 0.0
     status = "ok" if error is None else "error"
@@ -434,7 +465,6 @@ def _maybe_schedule(
         FOLLOWUP_QUOTA_EXHAUSTED_LINE,
         followup_notice_line,
         followup_reused_line,
-        insert_before_report_line,
     )
     from teamagent.skills.search_surface_check.video_digest import select_followup_videos
 
@@ -466,9 +496,7 @@ def _maybe_schedule(
             request_id=f"{ctx.request_id}-video",
             fallback_user_id=slack_user_id,
         )
-        output.slack_summary = insert_before_report_line(
-            output.slack_summary, followup_reused_line(len(videos))
-        )
+        _add_line(output, followup_reused_line(len(videos)))
         logger.info("surface_video_followup_decision", request_id=ctx.request_id, reason="reused")
         return "reused"
     quota_state, remaining = quota_gate(ctx)
@@ -478,9 +506,7 @@ def _maybe_schedule(
         )
         return "no_identity"
     if quota_state == "exhausted":
-        output.slack_summary = insert_before_report_line(
-            output.slack_summary, FOLLOWUP_QUOTA_EXHAUSTED_LINE
-        )
+        _add_line(output, FOLLOWUP_QUOTA_EXHAUSTED_LINE)
         logger.info(
             "surface_video_followup_decision", request_id=ctx.request_id, reason="quota_exhausted"
         )
@@ -540,7 +566,7 @@ def _maybe_schedule(
     else:
         line = None  # closing（終了処理中）
     if line:
-        output.slack_summary = insert_before_report_line(output.slack_summary, line)
+        _add_line(output, line)
     logger.info(
         "surface_video_followup_decision",
         request_id=ctx.request_id,
@@ -550,6 +576,14 @@ def _maybe_schedule(
         quota_remaining=remaining,
     )
     return state
+
+
+def _add_line(output: Any, line: str) -> None:
+    """1 段目の文面（レポート行の前）に 1 行足し、直接投稿の Block Kit にも同じ行を渡す。"""
+    from teamagent.skills.search_surface_check.summary import insert_before_report_line
+
+    output.slack_summary = insert_before_report_line(output.slack_summary, line)
+    output.followup_note = line
 
 
 def _post_reused_later(
@@ -562,11 +596,17 @@ def _post_reused_later(
     """使い回しの追記を、1 段目の返信が届くころに別 thread で投稿する（登録簿は使わない）。"""
 
     def _post() -> None:
+        rich = (
+            followup_rich(entry.source, request_id=request_id, reused=True)
+            if entry.source is not None
+            else None
+        )
         delivered = detached_jobs.post_to_origin(
             markdown_bold_to_mrkdwn(reused_text(entry)),
             destination,
             request_id=request_id,
             fallback_user_id=fallback_user_id,
+            rich=rich,
         )
         logger.info("surface_video_followup_reused", request_id=request_id, delivered=delivered)
 
@@ -593,6 +633,7 @@ __all__ = [
     "decide",
     "failure_text",
     "followup_key",
+    "followup_rich",
     "in_progress_line",
     "interrupted_text",
     "is_reusable",

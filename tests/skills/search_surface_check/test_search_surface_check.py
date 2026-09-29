@@ -172,6 +172,8 @@ def test_direct_path_for_few_keywords() -> None:
     out = skill.run(SearchSurfaceCheckInput(keywords=["セブン"]), _ctx())
     tiktok = next(s for s in out.surfaces if s.platform == "tiktok")
     assert tiktok.posts[0].author == "a_user" and tiktok.posts[0].rank == 1
+    # この依頼で検索した（直接投稿で「依頼のたびに検索し直した値」と書いてよい）
+    assert out.tiktok_source == "direct"
 
 
 def test_ig_failure_degrades_with_warning() -> None:
@@ -187,6 +189,8 @@ def test_ig_failure_degrades_with_warning() -> None:
     )
     assert any("IG面" in w for w in out.warnings)
     assert any(s.platform == "tiktok" for s in out.surfaces)  # TikTok側は生きている
+    # 事前の取得ジョブを読んだだけ（検索し直していない）と出力に残す
+    assert out.tiktok_source == "acquire_job"
 
 
 def test_rollout_denied(monkeypatch: Any) -> None:
@@ -205,11 +209,12 @@ def test_ig_surface_env_default(monkeypatch: Any) -> None:
         publisher=_publisher,
         tiktok_source_factory=lambda job_id, audit_hash: _FakeSource([]),
     )
-    skill.run(
+    out = skill.run(
         SearchSurfaceCheckInput(keywords=["セブン"], platforms=["instagram"], acquire_job_id=None),
         _ctx(),
     )
     assert apify.calls == [("セブン", "hashtag")]  # 検証ゲートの切替は env 一発
+    assert out.tiktok_source == ""  # TikTok を頼んでいない
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills.base import BaseSkill, SkillContext
 from teamagent.skills.search_surface_check.schema import SearchSurfaceCheckInput, VideoDigest
 from teamagent.skills.search_surface_check.skill import SearchSurfaceCheckSkill
+from teamagent.skills.search_surface_check.slack_render import REUSED_NOTE
 from teamagent.skills.search_surface_check.summary import (
     FOLLOWUP_QUOTA_EXHAUSTED_LINE,
     followup_notice_line,
@@ -112,8 +113,21 @@ class _FakeSlack:
         blocks: list[dict[str, Any]] | None = None,
     ) -> SlackPostResult:
         with self.lock:
-            self.posts.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+            self.posts.append(
+                {"channel": channel, "text": text, "thread_ts": thread_ts, "blocks": blocks}
+            )
         return SlackPostResult(channel=channel, ts="1784424999.000100", ok=True)
+
+
+def _blocks_text(blocks: list[dict[str, Any]] | None) -> str:
+    """Block Kit の中の文字（見出し・本文・欄・注記）を 1 つの文字列にする（照合用）。"""
+    parts: list[str] = []
+    for block in blocks or []:
+        if "text" in block:
+            parts.append(block["text"]["text"])
+        parts += [f["text"] for f in block.get("fields", [])]
+        parts += [e["text"] for e in block.get("elements", [])]
+    return "\n".join(parts)
 
 
 class _Source:
@@ -361,9 +375,13 @@ async def test_eligible_dm_gets_notice_then_followup_post(
     await _eventually(lambda: len(slack.posts) == 1 and len(usage) == 2)
     post = slack.posts[0]
     assert (post["channel"], post["thread_ts"]) == (DM, "1784424000.000009")
-    assert post["text"].startswith(f"*上位5本の動画の中身*「{KEYWORD}」TikTok")
-    assert "**" not in post["text"]
-    assert "https://s3.example/surface-2" in post["text"]
+    # 追記は Block Kit（見出し・集計の欄・1 本 1 行・文字リンク）。通知文に結論とレポートの URL。
+    assert post["blocks"][0]["text"]["text"] == f"上位5本の動画の中身「{KEYWORD}」"
+    assert post["text"].startswith(f"上位5本の動画の中身「{KEYWORD}」TikTok")
+    assert "**" not in post["text"] and "**" not in _blocks_text(post["blocks"])
+    # 通知文はスクリーンリーダー用に blocks の全文を持つ（レポートは同じ文字リンク）
+    assert "<https://s3.example/surface-2|レポートを開く>" in post["text"]
+    assert "<https://s3.example/surface-2|レポートを開く>" in _blocks_text(post["blocks"])
     top5 = [r["url"] for r in s3_rows()[:5]]
     assert sorted(dl.urls) == sorted(top5)
     assert gem.ranks == [1, 2, 3, 4, 5]
@@ -597,7 +615,7 @@ async def test_quota_left_keeps_the_notice(
     assert asked == [ME]
     assert followup_notice_line(5) in out["slack_summary"]
     await _eventually(lambda: len(slack.posts) == 1)
-    assert slack.posts[0]["text"].startswith("*上位5本の動画の中身*")
+    assert slack.posts[0]["blocks"][0]["text"]["text"].startswith("上位5本の動画の中身")
     assert gem.ranks == [1, 2, 3, 4, 5]
 
 
@@ -661,7 +679,7 @@ async def test_same_request_within_24h_reuses_the_result_without_quota_or_gemini
     monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack, usage: list[dict[str, Any]]
 ) -> None:
     skill, gem = await _first_full_run(monkeypatch, slack)
-    first_post = slack.posts[0]["text"]
+    first_blocks = slack.posts[0]["blocks"]
     calls_before, usage_before = len(gem.calls), len(usage)
 
     from teamagent.adapters import quota_store
@@ -679,11 +697,15 @@ async def test_same_request_within_24h_reuses_the_result_without_quota_or_gemini
     assert followup_notice_line(5) not in again["slack_summary"]
     await _eventually(lambda: len(slack.posts) == 2)
     reused = slack.posts[1]["text"]
-    assert reused.startswith("（24 時間以内の同じ分析の結果です）\n*上位5本の動画の中身*")
-    body = first_post.split("\n")
-    assert reused.split("\n")[1:-1] == body[:-1]  # 章つきレポートの URL を含む追記文はそのまま
-    assert "https://s3.example/surface-2" in reused
-    assert reused.split("\n")[-1] == "_概算 $0.0000（前回の分析を使い回しました）_"
+    assert reused.startswith("（24 時間以内の同じ分析の結果です）\n上位5本の動画の中身")
+    assert "<https://s3.example/surface-2|レポートを開く>" in reused
+    blocks = slack.posts[1]["blocks"]
+    # 使い回しの断り書き（先頭の注記）と概算（末尾の注記）以外は、前回の追記と同じ Block Kit
+    # （章つきレポートの URL を含む）。
+    assert blocks[1]["elements"][0]["text"] == REUSED_NOTE
+    assert blocks[1]["elements"][1:] == first_blocks[1]["elements"]
+    assert blocks[-1]["elements"][-1]["text"] == "概算 $0.0000（前回の分析を使い回しました）"
+    assert blocks[:1] + blocks[2:-1] == first_blocks[:1] + first_blocks[2:-1]
     assert (slack.posts[1]["channel"], slack.posts[1]["thread_ts"]) == (DM, None)
     assert len(gem.calls) == calls_before  # Gemini を呼ばない
     assert detached_jobs.REGISTRY.active_count() == 0

@@ -9,9 +9,10 @@ slack_summary などの数欄に絞っても（#462 の mcp_relay_fields）、Ai
 モデルへの指示では止まらないので、文面は mcp が Slack へ直接出し、Aico には「投稿済み」だけを返す。
 
 仕組み:
-- 対象（フラグ ON・allowlist 内・署名検証済み・1 対 1 DM）なら、skill の完了後に
-  ``slack_summary`` を、動画分析の切り離しと同じ経路（``detached_jobs.post_to_origin``＝
-  エスケープ・裸 URL の ``<URL>`` 化・1 回の再試行）で依頼元の DM へ投稿する。
+- 対象（フラグ ON・allowlist 内・署名検証済み・1 対 1 DM）なら、skill の完了後に結果を
+  Block Kit（``search_surface_check/slack_render.py``）で依頼元の DM へ投稿する。経路は動画分析の
+  切り離しと同じ（``detached_jobs.post_to_origin_status``＝1 回の再試行）。Block Kit が描けない・
+  弾かれたときは ``slack_summary`` の文字だけ（エスケープ・裸 URL の ``<URL>`` 化）で出し直す。
 - 届いた（または届いた可能性がある＝タイムアウト）なら、Aico には中身の無い「投稿済み」の payload を
   返す。言い換えの材料（集計・URL）を渡さない。
 - 届かなかったら、今までどおりの返却に戻す（結果が消えないことを優先する）。
@@ -32,6 +33,7 @@ import structlog
 from mcp.types import TextContent
 
 from teamagent.mcp_gateway import detached_jobs
+from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
 from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 
 logger = structlog.get_logger(__name__)
@@ -111,23 +113,51 @@ def decide(
     return destination, "ok"
 
 
+def rich_message(
+    data: dict[str, Any], *, skill_input: Any = None, request_id: str
+) -> RichMessage | None:
+    """1 段目の Block Kit 版（``search_surface_check/slack_render.py``）。
+
+    描けない（想定外の形・描画の例外）ときは None＝今の文字だけの投稿に戻す（結果を消さない）。
+    """
+
+    def _render() -> RichMessage | None:
+        from teamagent.skills.search_surface_check.schema import (
+            SearchSurfaceCheckInput,
+            SearchSurfaceCheckOutput,
+        )
+        from teamagent.skills.search_surface_check.slack_render import surface_message
+
+        out = SearchSurfaceCheckOutput.model_validate(data)
+        input = skill_input if isinstance(skill_input, SearchSurfaceCheckInput) else None
+        return surface_message(out, input)
+
+    return render_or_none(_render, request_id=request_id, kind="search_surface_check")
+
+
 def deliver(
     data: dict[str, Any],
     destination: detached_jobs.Destination,
     *,
     request_id: str,
+    skill_input: Any = None,
 ) -> str:
-    """``slack_summary`` を依頼元の DM へ投稿する。event loop の外（thread）から呼ぶ。
+    """結果を依頼元の DM へ投稿する。event loop の外（thread）から呼ぶ。
 
+    Block Kit（見出し・要点・数字の欄・1 本 1 行・文字リンク）で出す。描けない・弾かれたときは
+    ``slack_summary`` の文字だけの投稿に戻す（``post_to_origin_status`` の 2 回目）。
     返り値は ``posted`` / ``uncertain``（タイムアウト＝届いた可能性あり）/ ``failed``。
     """
     summary = data.get("slack_summary")
     if not isinstance(summary, str) or not summary.strip():
         return FAILED
+    rich = rich_message(data, skill_input=skill_input, request_id=request_id)
     status = detached_jobs.post_to_origin_status(
-        markdown_bold_to_mrkdwn(summary), destination, request_id=request_id
+        markdown_bold_to_mrkdwn(summary), destination, request_id=request_id, rich=rich
     )
-    logger.info("direct_summary_posted", request_id=request_id, status=status)
+    logger.info(
+        "direct_summary_posted", request_id=request_id, status=status, blocks=rich is not None
+    )
     return status
 
 
@@ -157,4 +187,5 @@ __all__ = [
     "deliver",
     "load_policy",
     "posted_response",
+    "rich_message",
 ]

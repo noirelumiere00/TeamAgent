@@ -56,6 +56,7 @@ from typing import Any
 
 import structlog
 
+from teamagent.skills._shared.slack_blocks import RichMessage, render_or_none
 from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 
 logger = structlog.get_logger(__name__)
@@ -353,6 +354,21 @@ def completion_text(output: Any, query: str) -> str:
     return markdown_bold_to_mrkdwn(summary)
 
 
+def completion_message(output: Any, *, request_id: str) -> RichMessage | None:
+    """完了投稿の Block Kit 版（``video_algorithm/slack_render.py``）。
+
+    描けない（分析した動画が無い・想定外の出力・描画の例外）ときは None＝``completion_text`` の
+    文字だけの投稿に戻す（結果を消さない）。
+    """
+
+    def _render() -> RichMessage | None:
+        from teamagent.skills.video_algorithm.slack_render import completion_message as render
+
+        return render(output)
+
+    return render_or_none(_render, request_id=request_id, kind="video_algorithm")
+
+
 def slack_escape(text: str) -> str:
     """Slack の制御文字（& < >）をエスケープし、裸の URL を ``<URL>`` で囲む。
 
@@ -399,15 +415,32 @@ def _slack_client(timeout_seconds: int) -> Any:
 
 
 async def _post_once(
-    text: str, destination: Destination, *, request_id: str, timeout_s: int
+    text: str,
+    destination: Destination,
+    *,
+    request_id: str,
+    timeout_s: int,
+    rich: RichMessage | None = None,
 ) -> bool:
+    """1 回投稿する。``rich`` があれば Block Kit（text は描画側でエスケープ済みの通知文）。
+
+    ``rich`` が無ければ今までどおり ``text`` に ``slack_escape`` を掛けて文字だけで出す。
+    Block Kit の文面は部品ごとにエスケープ済みなので、全体には掛けない（自前のリンクが壊れる）。
+    """
     slack = _slack_client(timeout_s)
+    extra: dict[str, Any] = {}
+    if rich is not None:
+        body = rich.text
+        extra["blocks"] = rich.blocks
+    else:
+        body = slack_escape(text)
     result = await asyncio.wait_for(
         slack.post_message(
             channel=destination.channel_id,
-            text=slack_escape(text),
+            text=body,
             request_id=request_id,
             thread_ts=destination.thread_ts,
+            **extra,
         ),
         timeout=timeout_s + 1,
     )
@@ -434,16 +467,20 @@ def post_to_origin(
     *,
     request_id: str,
     fallback_user_id: str | None = None,
+    rich: RichMessage | None = None,
 ) -> bool:
     """依頼元の会話へ投稿する（ジョブの thread から呼ぶ・新しい event loop で 1 回だけ再試行）。
 
     - ok=False や接続エラーのときだけ再試行する。タイムアウト系（``TimeoutError``。aiohttp の
       ServerTimeoutError も含む）は Slack 側で届いている可能性があるので、再試行も退避もしない
       （完了投稿が 2 通になるのを避ける）。
-    - 2 回とも届かなければ、``fallback_user_id``（署名検証済みの slack_user_id）の DM へ退避する。
+    - ``rich``（Block Kit）があれば 1 回目はそれで出す。弾かれたら（invalid_blocks など）2 回目は
+      ``text`` だけで出し直す（何も届かない経路を残さない）。
+    - 2 回とも届かなければ、``fallback_user_id``（署名検証済みの slack_user_id）の DM へ退避する
+      （文字だけ）。
     """
     status = post_to_origin_status(
-        text, destination, request_id=request_id, fallback_user_id=fallback_user_id
+        text, destination, request_id=request_id, fallback_user_id=fallback_user_id, rich=rich
     )
     return status == "posted"
 
@@ -454,6 +491,7 @@ def post_to_origin_status(
     *,
     request_id: str,
     fallback_user_id: str | None = None,
+    rich: RichMessage | None = None,
 ) -> str:
     """``post_to_origin`` と同じ投稿。結果を ``posted`` / ``uncertain`` / ``failed`` で返す。
 
@@ -461,19 +499,31 @@ def post_to_origin_status(
     しれないので同じ文を別経路で出し直さない」判断に使う（``direct_summary``）。
     """
     for attempt in range(1, _POST_ATTEMPTS + 1):
+        # Block Kit は 1 回目だけ。2 回目は今までどおりの文字だけの投稿。
+        use_rich = rich if attempt == 1 else None
         try:
             if asyncio.run(
-                _post_once(text, destination, request_id=request_id, timeout_s=_POST_TIMEOUT_S)
+                _post_once(
+                    text,
+                    destination,
+                    request_id=request_id,
+                    timeout_s=_POST_TIMEOUT_S,
+                    rich=use_rich,
+                )
             ):
                 logger.info(
                     "video_algorithm_detach_posted",
                     request_id=request_id,
                     attempt=attempt,
                     dm=destination.is_dm,
+                    blocks=use_rich is not None,
                 )
                 return "posted"
             logger.warning(
-                "video_algorithm_detach_post_not_ok", request_id=request_id, attempt=attempt
+                "video_algorithm_detach_post_not_ok",
+                request_id=request_id,
+                attempt=attempt,
+                blocks=use_rich is not None,
             )
         except TimeoutError:
             logger.warning(
@@ -489,6 +539,7 @@ def post_to_origin_status(
                 request_id=request_id,
                 attempt=attempt,
                 error=type(exc).__name__,
+                blocks=use_rich is not None,
             )
         if attempt < _POST_ATTEMPTS:
             threading.Event().wait(_POST_RETRY_WAIT_S)
@@ -930,6 +981,7 @@ __all__ = [
     "DetachedJob",
     "DetachedJobRegistry",
     "busy_text",
+    "completion_message",
     "completion_text",
     "decide",
     "destination_from_claim",
