@@ -156,19 +156,21 @@ variable "morning_digest_schedule_expression" {
 # だけ登録して終わる。2026-09-29 裁定: 11/3（文化の日）から休む＝11/2 に TD で true にする。
 # ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本・
 #    ~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記する。
-#    terraform_runtime_guard.sh の live→tfvars 導出はこの 2 変数を列挙していないので、guard 経由の
-#    apply（次の mcp便など）で既定（false・空）に黙って戻る。
+#    追記し忘れると tfvars 側は既定（false・空）のままで live の TD と食い違う。guard 経由の plan は
+#    この差を allowed_env に無い env の変更として die し、止まる（次の mcp便などが進めない）。
+#    既定へ黙って戻るのは、config 移行で allowed_env_changes.morning にこの 2 キーを載せた場合と、
+#    guard を通さない apply の場合だけ。
 # ⚠️ この 2 つの env は guard の morning 行の allowed_env に無い。live の TD にキーが無いまま guard
 #    経由で plan すると「足された env」として止まるので、TD 差し替えのときに OFF でも 2 キーとも
 #    入れておく（または config 移行の allowed_env_changes.morning に載せる）。
 variable "morning_digest_holiday_skip" {
-  description = "祝日と会社休日は朝ダイジェストを休む（MORNING_DIGEST_HOLIDAY_SKIP）。祝日は skill を呼ばず DM も送らないが、予定リマインド（morning_digest_reminders）は登録を続ける。祝日明けはメールの走査範囲を前の配信日まで広げる（最低 3 日）。表の期限の 60 日前から jp_holiday_table_stale を出す。既定 false＝今と同じ（祝日も配信・走査 3 日）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  description = "祝日と会社休日は朝ダイジェストを休む（MORNING_DIGEST_HOLIDAY_SKIP）。祝日は skill を呼ばず DM も送らないが、予定リマインド（morning_digest_reminders）は登録を続ける。祝日明けはメールの走査範囲を前の配信日まで広げる（最低 3 日）。表の期限の 60 日前から jp_holiday_table_stale を出す。既定 false＝今と同じ（祝日も配信・走査 3 日）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
   type        = bool
   default     = false
 }
 
 variable "morning_digest_extra_skip_dates" {
-  description = "会社休日（MORNING_DIGEST_EXTRA_SKIP_DATES・YYYY-MM-DD のカンマ区切り・最大 60 件）。morning_digest_holiday_skip=true のときだけ効く（祝日と同じ扱い）。年末年始など。既定 空。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  description = "会社休日（MORNING_DIGEST_EXTRA_SKIP_DATES・YYYY-MM-DD のカンマ区切り・最大 60 件）。morning_digest_holiday_skip=true のときだけ効く（祝日と同じ扱い）。年末年始など。既定 空。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。忘れると guard 経由の plan が live との env 差分で止まる（config 移行で allowed_env_changes.morning に載せた場合と guard を通さない apply では既定に黙って戻る）。"
   type        = string
   default     = ""
 
