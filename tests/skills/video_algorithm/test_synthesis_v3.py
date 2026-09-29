@@ -47,6 +47,7 @@ from teamagent.skills.video_algorithm.synthesis_checks import (
     CheckLog,
     Claim,
     claim_hits,
+    deny_hit,
     extract_claims,
     finalize,
     find_conflicts,
@@ -1530,3 +1531,91 @@ def test_code_directive_for_the_product_when_the_roster_is_given() -> None:
     ]
     assert product[0].refs and product[0].refs[0].rank == 4  # 再生が最も多い #4 のテロップ
     assert not any(d.kind == "商品" for d in _final({}).directives)
+
+
+# ── 09-29 実機（本物の Gemini）で見つかった 2 点 ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "推測:減量やダイエットという強い動機付けで視聴を維持させた可能性",
+        "最後まで見てもらう工夫",
+        "最後まで視聴させる構成",
+        "つい見続けてしまう",
+        "滞在時間が伸びる",
+    ],
+)
+def test_unmeasured_phrasings_are_denied(text: str) -> None:
+    """壊し方: UNMEASURED_PATTERNS を空にする → 言い回しがすり抜けて赤。"""
+    assert deny_hit(text) is not None
+
+
+@pytest.mark.parametrize(
+    "text", ["完成品を最後まで映す", "分量をテロップで見せる", "維持費の安い道具で作る"]
+)
+def test_ordinary_phrasings_are_not_denied(text: str) -> None:
+    assert deny_hit(text) is None
+
+
+def test_competitor_rule_needs_competitor_evidence() -> None:
+    """壊し方: competitor_ref_ok を常に True にする → 無関係な根拠の競合の指示が残って赤。
+
+    09-29 実機: 「エスビー食品の赤缶を映さない」の根拠が #3 33 秒のテロップ「しょうが」だった。
+    """
+    ctx = _ctx(roster=Roster.of(CLIENT, COMPETITORS))
+    syn = finalize(
+        CrossSynthesis.model_validate(
+            {
+                "avoid": [
+                    # 引用は実在するが、競合とは無関係 → 落とす
+                    {
+                        "text": "ティーケー食品の赤缶を映さない",
+                        "refs": [_ref(5, 8.0, "まずベースのトマトスープを作ります")],
+                    },
+                    # 別の競合（ハーブ専科）も、無関係なテロップが根拠なら落とす
+                    {
+                        "text": "ハーブ専科の袋を大きく映さない",
+                        "refs": [_ref(3, 5.0, "まず玉ねぎは")],
+                    },
+                ],
+                "directives": [
+                    # クライアント名は提案の主語なので、根拠が他の動画のテロップでよい
+                    {
+                        "text": "SPICIAのスパイスで分量をテロップに出す",
+                        "refs": [_ref(5, 10.0, "トマト(1個)を角切りにします")],
+                    },
+                    # 競合を名指しする指示に無関係な根拠 → 落とす
+                    {
+                        "text": "ティーケー食品と違う瓶で撮る",
+                        "refs": [_ref(3, 2.0, "調理時間は30分で")],
+                    },
+                ],
+            }
+        ),
+        ctx,
+    )
+    avoid_texts = [a.text for a in syn.avoid]
+    assert not any("ティーケー食品" in t for t in avoid_texts)
+    assert not any("ハーブ専科" in t for t in avoid_texts)
+    llm = [d.text for d in syn.directives if d.origin == "llm"]
+    assert any("SPICIA" in t for t in llm)
+    assert not any("ティーケー食品" in t for t in llm)
+
+
+def test_competitor_rule_is_kept_with_brand_evidence() -> None:
+    ctx = _ctx(roster=Roster.of(CLIENT, COMPETITORS))
+    syn = finalize(
+        CrossSynthesis.model_validate(
+            {
+                "avoid": [
+                    {
+                        "text": "ティーケー食品のパッケージを主役にしない",
+                        "refs": [_ref(2, 12.0, "ティーケー食品")],
+                    }
+                ]
+            }
+        ),
+        ctx,
+    )
+    assert any("ティーケー食品" in a.text for a in syn.avoid)

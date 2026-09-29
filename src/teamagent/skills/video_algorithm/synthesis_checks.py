@@ -337,12 +337,39 @@ def rephrase(text: str) -> str:
     return tone_down(text)
 
 
+# R12 の言い回し版（語の一覧だけでは「視聴を維持させた」のような言い方がすり抜けた・09-29 実機）。
+UNMEASURED_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"視聴(?:を|が|の)?維持"),
+    re.compile(r"見続け"),
+    re.compile(r"最後まで(?:視聴|見(?:られ|てもら|させ))"),
+    re.compile(r"滞在時間"),
+)
+
+
 def deny_hit(text: str) -> str | None:
     """落とす語（統計の語・測っていない指標）の最初の 1 つ。"""
     for word in (*STAT_WORDS, *UNMEASURED_WORDS):
         if word in text:
             return word
+    for pat in UNMEASURED_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(0)
     return None
+
+
+def competitor_ref_ok(text: str, refs: Iterable[SynthRef], ctx: SynthesisContext) -> bool:
+    """競合の名前を出す指示・やらないことは、根拠にその競合の登場（ブランド検出か引用に名前）が要る。
+
+    09-29 実機: 「エスビー食品の赤缶を映さない」の根拠が #3 33 秒のテロップ「しょうが」だった
+    （引用は実在するが、指示と無関係）。クライアント名は提案の主語なので対象にしない。
+    """
+    body = norm(text)
+    names = [n for c in ctx.roster.competitors for a in c.split("|") if (n := norm(a))]
+    mentioned = [n for n in names if n in body]
+    if not mentioned:
+        return True
+    return any(r.source == "brand" or any(n in norm(r.quote) for n in mentioned) for r in refs)
 
 
 def _contradictions(text: str) -> list[re.Match[str]]:
@@ -1380,6 +1407,9 @@ def _directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> list
         if not refs:
             log("directives", "no_verified_ref")
             continue
+        if not competitor_ref_ok(text, refs, ctx):
+            log("directives", "competitor_ref_mismatch")
+            continue
         ranks = _ranks_of(refs)
         text = drop_unverified(text, ranks, ctx, "directives", log)
         if not text:
@@ -1425,6 +1455,9 @@ def _avoid(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog, moved: list[
         refs = verify_refs(a.refs, ctx, "avoid", log)
         if not refs:
             log("avoid", "no_verified_ref")
+            continue
+        if not competitor_ref_ok(a.text, refs, ctx):
+            log("avoid", "competitor_ref_mismatch")
             continue
         ranks = _ranks_of(refs)
         text = drop_unverified(a.text, ranks, ctx, "avoid", log)
@@ -1804,6 +1837,7 @@ __all__ = [
     "MAX_DIRECTIVES",
     "STAT_WORDS",
     "SYNTHESIS_V3",
+    "UNMEASURED_PATTERNS",
     "UNMEASURED_WORDS",
     "CheckLog",
     "Claim",
@@ -1813,6 +1847,7 @@ __all__ = [
     "claim_layer",
     "clean_text",
     "code_directives",
+    "competitor_ref_ok",
     "conflict_fields",
     "conflict_note",
     "conflict_probe",
