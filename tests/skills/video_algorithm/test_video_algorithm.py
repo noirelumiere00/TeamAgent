@@ -440,7 +440,7 @@ def test_statistical_analyze_via_cross() -> None:
 
 
 def test_render_report_shows_frames_thumb_and_stats() -> None:
-    """v2: 実フレーム埋込 + サムネ色比較ボード + 統計付録（動画内色は廃止）。"""
+    """v2: 実フレーム埋込 + サムネ（表紙）+ 統計付録（動画内色は廃止・サムネ色は 1 行の参考）。"""
     from teamagent.skills.video_algorithm.schema import FrameShot, ThumbColor
 
     a = VideoVSEOAnalysis(
@@ -464,8 +464,9 @@ def test_render_report_shows_frames_thumb_and_stats() -> None:
     out.cross = cross_analyze(out.videos, "新宿 ランチ")
     html = render_report(out)
     assert "data:image/jpeg;base64,AAAA" in html  # フレーム埋込(タイムライン)
-    assert "サムネ色の比較" in html and "data:image/jpeg;base64,BBBB" in html  # サムネ色ボード
-    assert "#e8c8a0" in html  # サムネ支配色スウォッチ
+    assert "data:image/jpeg;base64,BBBB" in html  # サムネ（上位の比較ボード）
+    assert "色（参考）: " in html  # サムネ色は 1 行の参考（色の格子は出さない）
+    assert "表紙の分析なし（以前の分析）" in html  # 表紙の読み取りが無い出力
     assert "統計付録" in html and "KWカバレッジ" in html  # 統計（折りたたみ付録）
     assert "相関分析には n≥3 が必要" in html  # n=1で空の相関表を見せない（誠実さ）
     assert "tldata" in html  # スクラブ用データ

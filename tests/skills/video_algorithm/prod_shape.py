@@ -34,6 +34,7 @@ from typing import Any
 
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
+    CoverRead,
     CrossSynthesis,
     FrameShot,
     Scene,
@@ -828,6 +829,171 @@ def prod_synthesis() -> CrossSynthesis:
     )
 
 
+# ── サムネ（一覧の表紙）の読み取り（作り話。第三者の文字は入れない）──────────────
+# 本番の形: 上位 4 本は表紙に文字（うち 4 本に「スパイスカレー」）・#5 は文字なし。
+# #3 の商品名「赤缶」はハッシュタグで照合できる・#4 の「ハーブ専科」はキャプションで照合できる
+# （名簿では競合）。#1 と #4 は実写の顔。枠は 0〜1000 の [上, 左, 下, 右]。
+_COVER_READS: dict[int, dict[str, Any]] = {
+    1: {
+        "elements": ["result", "person"],
+        "subject_note": "湯気の立つ皿と手元",
+        "texts": [
+            {"text": "わたしとスパイスカレー", "box_2d": [80, 60, 220, 940], "style": ["outline"]}
+        ],
+        "face": {
+            "kind": "real",
+            "expression": "smile",
+            "gaze": "camera",
+            "box_2d": [300, 300, 500, 600],
+        },
+        "closeup": True,
+        "sizzle": ["steam"],
+        "product": "none",
+        "clutter": "simple",
+        "legibility": "good",
+        "appeals": ["reaction"],
+    },
+    2: {
+        "elements": ["result", "text_main"],
+        "subject_note": "皿に盛ったカレー",
+        "texts": [
+            {"text": "スパイスカレー\n5つで作れる", "box_2d": [100, 80, 330, 920], "style": ["box"]}
+        ],
+        "face": {"kind": "none"},
+        "closeup": True,
+        "sizzle": ["gloss"],
+        "product": "none",
+        "clutter": "simple",
+        "legibility": "good",
+        "appeals": ["how_to", "benefit"],
+    },
+    3: {
+        "elements": ["result"],
+        "subject_note": "鍋のカレー",
+        "texts": [
+            {
+                "text": "30分で本格\nスパイスカレー",
+                "box_2d": [650, 50, 900, 950],
+                "style": ["outline"],
+            }
+        ],
+        "face": {"kind": "none"},
+        "closeup": True,
+        "sizzle": ["steam", "gloss"],
+        "product": "visible",
+        "brand_text": ["赤缶"],
+        "clutter": "moderate",
+        "legibility": "good",
+        "appeals": ["time_saving", "benefit"],
+    },
+    4: {
+        "elements": ["person", "result", "product"],
+        "subject_note": "カレーを食べる人",
+        "texts": [
+            {
+                "text": "とにかく痩せたい\n無水スパイスカレー",
+                "box_2d": [60, 40, 300, 960],
+                "style": ["outline"],
+            }
+        ],
+        "face": {
+            "kind": "real",
+            "expression": "surprise",
+            "gaze": "camera",
+            "box_2d": [350, 250, 600, 700],
+        },
+        "action": "eating",
+        "closeup": False,
+        "sizzle": [],
+        "product": "hero",
+        "brand_text": ["ハーブ専科"],
+        "clutter": "moderate",
+        "legibility": "ok",
+        "appeals": ["target", "benefit"],
+    },
+    5: {
+        "elements": ["result", "scene"],
+        "subject_note": "店の皿のカレー",
+        "texts": [],
+        "face": {"kind": "none"},
+        "closeup": False,
+        "sizzle": ["steam"],
+        "product": "none",
+        "clutter": "simple",
+        "legibility": "none",
+        "appeals": [],
+    },
+}
+
+
+def prod_cover_read(rank: int, **update: Any) -> CoverRead:
+    """上位 1〜5 位の表紙の読み取り（status ok・幅 540・media の取得）。"""
+    read = CoverRead.model_validate(_COVER_READS[rank])
+    return read.model_copy(
+        update={
+            "rank": rank,
+            "group": "top",
+            "status": "ok",
+            "version": "v1-test",
+            "via": "media",
+            "img_w": 540,
+            "img_h": 960,
+            **update,
+        }
+    )
+
+
+def rest_cover_read(rank: int, *, kw: bool, **update: Any) -> CoverRead:
+    """6〜30 位の表紙の読み取り（作り話・kw=True で「スパイスカレー」の文字）。"""
+    texts = [{"text": "スパイスカレー" if kw else "今日のごはん", "box_2d": [700, 100, 800, 900]}]
+    read = CoverRead.model_validate(
+        {
+            "elements": ["result"],
+            "subject_note": "カレーの皿",
+            "texts": texts,
+            "face": {"kind": "none"},
+            "closeup": False,
+            "sizzle": [],
+            "product": "none",
+            "clutter": "moderate",
+            "legibility": "ok",
+            "appeals": [],
+        }
+    )
+    return read.model_copy(
+        update={
+            "rank": rank,
+            "group": "rest",
+            "status": "ok",
+            "version": "v1-test",
+            "via": "media",
+            "img_w": 540,
+            "img_h": 960,
+            **update,
+        }
+    )
+
+
+def prod_board_with_covers(*, rest_kw: set[int] | None = None) -> list[VideoMeta]:
+    """上位ボードに表紙の読み取りを付けたもの。rest_kw を渡すと 6〜30 位も読んだ形（board）。"""
+    board = prod_board()
+    for m in board:
+        if m.rank <= 5:
+            m.cover_read = prod_cover_read(m.rank)
+        elif rest_kw is not None:
+            m.cover_read = rest_cover_read(m.rank, kw=m.rank in rest_kw)
+    return board
+
+
+def prod_videos_with_covers() -> list[AnalyzedVideo]:
+    """上位 5 本（表紙の画像 540×960 を埋め込んだもの・出どころは表紙）。"""
+    videos = prod_videos()
+    for v in videos:
+        v.cover_data_uri = jpeg_uri(540, 960)
+        v.cover_source = "cover"
+    return videos
+
+
 __all__ = [
     "CLIENT",
     "COMPETITORS",
@@ -839,8 +1005,12 @@ __all__ = [
     "jpeg",
     "jpeg_uri",
     "prod_board",
+    "prod_board_with_covers",
+    "prod_cover_read",
     "prod_synthesis",
     "prod_videos",
+    "prod_videos_with_covers",
+    "rest_cover_read",
     "top_analyses",
     "top_metas",
 ]

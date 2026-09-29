@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Literal
 
+from teamagent.skills.video_algorithm.cover_facts import cover_line, cover_view
 from teamagent.skills.video_algorithm.evidence import (
     TIER_MAJORITY,
     TIER_REQUIRED,
@@ -237,6 +238,8 @@ def cross_analyze(
 
     # サムネ色の横断集計（ffmpeg+stdlib 算出ベース・動画内色は廃止）
     _aggregate_thumb(cross, analyzed)
+    # サムネ（一覧の表紙）の共通点の 1 行（上位ボードの cover_read から・コードの名前と本数だけ）。
+    cross.cover_line = cover_line(cover_view(board or [], videos, query, roster))
 
     # AI 統計（決定的・stdlib のみ）。失敗しても既存出力は壊さない
     try:

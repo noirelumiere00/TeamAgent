@@ -58,7 +58,14 @@ import structlog
 
 from teamagent.skills._shared.grounding import DropLedger, DropSink, NumberGrounder, tone_down
 from teamagent.skills.search_surface_check.video_structure import QTY_RE
+from teamagent.skills.video_algorithm.cover_facts import (
+    code_cover_directives,
+    cover_quote_ok,
+    cover_tier,
+    verify_cover_ref,
+)
 from teamagent.skills.video_algorithm.evidence import (
+    COVER_SOURCES,
     MIN_QUOTE_CHARS,
     SOURCE_LABEL,
     TIER_MAJORITY,
@@ -75,6 +82,7 @@ from teamagent.skills.video_algorithm.evidence import (
 )
 from teamagent.skills.video_algorithm.facts import VideoFacts, fmt_man
 from teamagent.skills.video_algorithm.schema import (
+    COVER_KIND,
     AvoidItem,
     CrossSynthesis,
     Directive,
@@ -98,6 +106,9 @@ logger = structlog.get_logger(__name__)
 SYNTHESIS_V3 = "v3"
 MAX_DIRECTIVES = 6
 MAX_CODE_DIRECTIVES = 4
+# サムネ（一覧の表紙）の指示: コードの指示（最大 3）＋ AI の指示（最大 3）で 5 つまで。
+MAX_COVER_DIRECTIVES = 5
+MAX_LLM_COVER_DIRECTIVES = 3
 MAX_AVOID = 4
 MAX_STORYBOARDS = 2
 MAX_HYPOTHESES = 3
@@ -120,6 +131,7 @@ UNMEASURED_WORDS: tuple[str, ...] = (
     "平均視聴",
     "CTR",
     "クリック率",
+    "タップ率",  # サムネ（一覧の表紙）はタップ率を測っていない（順位との関係だけ）
 )
 # R5: 見出しにあればコードの代わりの文にする語（本文は言い換える）。「必ずしも」「確実性」は除く。
 ASSERTIVE_WORDS: tuple[str, ...] = (
@@ -794,6 +806,9 @@ def verify_refs(
     out: list[SynthRef] = []
     seen: set[tuple[int, float | None, str]] = set()
     for r in refs:
+        if r.on == "cover":  # 表紙の引用は cover_directives だけ（キャプションにも逃がさない）
+            log(field_name, "ref_on_cover")
+            continue
         facts = ctx.fact(r.rank)
         if facts is None:
             log(field_name, f"ref_rank:{r.rank}")
@@ -861,6 +876,8 @@ def evidence_text(ref: SynthRef) -> str:
     AI の説明文をテロップの引用に見せない。
     """
     label = SOURCE_LABEL.get(ref.source, "")
+    if ref.source in COVER_SOURCES:
+        return f"#{ref.rank} {label}「{ref.quote}」"
     if ref.source == "caption" or (ref.found_sec is None and ref.sec is None):
         return f"#{ref.rank} {label or 'キャプション'}「{ref.quote}」"
     sec = ref.found_sec if ref.found_sec is not None else ref.sec
@@ -1176,6 +1193,9 @@ def _clean_v3(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
     for d in s.directives:
         if d.origin == "llm":
             d.text = c(d.text, "directives")
+    for d in s.cover_directives:
+        if d.origin == "llm":
+            d.text = c(d.text, "cover_directives")
     for a in s.avoid:
         a.text = c(a.text, "avoid")
     for sb in s.storyboards:
@@ -1232,6 +1252,13 @@ def _ground_v3(s: CrossSynthesis, grounders: Grounders | None, ledger: DropLedge
     for d in s.directives:
         if d.origin == "llm":
             d.text = _ground_text(d.text, g, "directives", ledger, by_sentence=False)
+    for d in s.cover_directives:  # 表紙の指示の数字は、表紙の節（AI の読み取り）だけで照合する
+        if d.origin == "llm":
+            d.text = _ground_text(
+                d.text, grounders.cover, "cover_directives", ledger, by_sentence=False
+            )
+            if grounders.cover is None and d.text:
+                d.text = _ground_text(d.text, g, "cover_directives", ledger, by_sentence=False)
     for a in s.avoid:
         a.text = _ground_text(a.text, g, "avoid", ledger, by_sentence=False)
     for sb in s.storyboards:
@@ -1283,6 +1310,9 @@ def conflict_fields(s: CrossSynthesis) -> list[tuple[str, str]]:
         ]
     for i, h in enumerate(s.hypotheses):
         out += [(f"hypotheses[{i}].text", h.text), (f"hypotheses[{i}].test", h.test)]
+    for i, d in enumerate(s.cover_directives):
+        if d.origin == "llm":
+            out.append((f"cover_directives[{i}].text", d.text))
     return out
 
 
@@ -1293,6 +1323,10 @@ def _set_field(s: CrossSynthesis, name: str, value: str) -> None:
     m = re.fullmatch(r"hypotheses\[(\d+)\]\.(text|test)", name)
     if m:
         setattr(s.hypotheses[int(m.group(1))], m.group(2), value)
+        return
+    m = re.fullmatch(r"cover_directives\[(\d+)\]\.text", name)
+    if m:
+        s.cover_directives[int(m.group(1))].text = value
 
 
 def drop_conflicts(s: CrossSynthesis, log: CheckLog) -> None:
@@ -1429,10 +1463,12 @@ def _directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> list
         t = tier(len(ranks), ctx.n)
         if not at_least_majority(t):
             text = _case_words(text)
+        if d.kind == COVER_KIND:  # 表紙の指示は cover_directives だけ（表紙の検査を通すため）
+            log("directives", "kind:cover")
         kept.append(
             Directive(
                 text=with_pr_note(text, ranks, ctx),
-                kind=d.kind,
+                kind="" if d.kind == COVER_KIND else d.kind,
                 refs=refs,
                 origin="llm",
                 tier=t,
@@ -1476,6 +1512,110 @@ def _avoid(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog, moved: list[
             continue
         out.append(AvoidItem(text=text, refs=refs, origin=a.origin, reason=reason, ranks=ranks))
     s.avoid = out[:MAX_AVOID]
+
+
+def verify_cover_refs(
+    refs: Iterable[SynthRef], ctx: SynthesisContext, field_name: str, log: CheckLog
+) -> list[SynthRef]:
+    """表紙の refs の照合（on が空でも表紙として照合する。キャプションへは逃がさない）。"""
+    out: list[SynthRef] = []
+    seen: set[tuple[int, str]] = set()
+    for r in refs:
+        if r.on not in ("", "cover"):
+            log(field_name, f"ref_on:{r.on}")
+            continue
+        vr = verify_cover_ref(r, ctx.cover.by_rank(r.rank))
+        if vr is None:
+            log(field_name, "ref_unverified")
+            continue
+        key = (vr.rank, norm(vr.quote))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(vr)
+    return out
+
+
+def _drop_uncovered_quotes(
+    text: str, ranks: Iterable[int], ctx: SynthesisContext, log: CheckLog
+) -> str:
+    """文の中の引用「…」が、その順位の表紙の文字か説明に無ければ、その文を落とす。"""
+    allowed = list(ranks)
+    kept: list[str] = []
+    for sentence in _sentences(text):
+        bad = [
+            q
+            for m in _QUOTE_RE.finditer(sentence)
+            if "案" not in (q := m.group(2).strip()) and len(norm(q)) >= MIN_QUOTE_CHARS
+            if not cover_quote_ok(q, allowed, ctx.cover)
+        ]
+        if bad:
+            log("cover_directives", "quote_unverified")
+            continue
+        kept.append(sentence)
+    return _tidy("".join(kept))
+
+
+def _names_competitor(text: str, ctx: SynthesisContext) -> bool:
+    body = norm(text)
+    return any(
+        a and a in body for c in ctx.roster.competitors for a in (norm(x) for x in c.split("|"))
+    )
+
+
+def _cover_directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
+    """表紙の指示（R17）: コードの指示を先に作り直し（冪等）、AI の指示は表紙の引用で照合する。
+
+    表紙を 1 本も読めていなければ全部落とす。寄り・表情などの画角の語は、表紙の欄があるので許す
+    （directives では今のまま落とす）。段階は上位の群の読めた本数から cover_tier で付ける。
+    """
+    view = ctx.cover
+    if not view.any_ok:
+        if s.cover_directives:
+            log("cover_directives", "no_cover")
+        s.cover_directives = []
+        return
+    kept: list[Directive] = []
+    for d in s.cover_directives:
+        if d.origin == "code":
+            continue
+        text = d.text
+        if not text:
+            log("cover_directives", "empty")
+            continue
+        if has_avoid(text, ctx.avoid_terms):
+            log("cover_directives", "avoid_term")
+            continue
+        if _names_competitor(text, ctx):
+            log("cover_directives", "competitor")
+            continue
+        refs = verify_cover_refs(d.refs, ctx, "cover_directives", log)
+        if not refs:
+            log("cover_directives", "no_verified_ref")
+            continue
+        ranks = sorted({r.rank for r in refs})
+        text = _drop_uncovered_quotes(text, ranks, ctx, log)
+        if not text:
+            continue
+        top = [r for r in ranks if (c := view.by_rank(r)) is not None and c.group == "top"]
+        t = cover_tier(len(top), len(view.top_ok), view.n_top)
+        if not at_least_majority(t):
+            text = _case_words(text)
+        kept.append(
+            Directive(text=text, kind=COVER_KIND, refs=refs, origin="llm", tier=t, ranks=ranks)
+        )
+    code = code_cover_directives(view)
+    s.cover_directives = (code + kept[:MAX_LLM_COVER_DIRECTIVES])[:MAX_COVER_DIRECTIVES]
+
+
+def cover_directive_line(d: Directive) -> str:
+    """描画用の 1 行（指示文〔段階（#…）｜根拠 #4 表紙の文字（AI読み取り）「…」〕）。"""
+    tag = d.tier or "観測"
+    if d.ranks:
+        tag += f"（{ranks_text(d.ranks)}）"
+    if d.refs:
+        tag += f"｜根拠 {evidence_text(d.refs[0])}"
+    return f"{d.text}〔{tag}〕"
 
 
 def _shows_product(cut: StoryboardCut, ctx: SynthesisContext) -> bool:
@@ -1790,6 +1930,7 @@ def finalize(
     drop_conflicts(s, log)
     _per_video(s, ctx, log)
     moved = _directives(s, ctx, log)
+    _cover_directives(s, ctx, log)
     _avoid(s, ctx, log, moved)
     _storyboards(s, ctx, log)
     _board_angles(s, ctx, log)
@@ -1851,6 +1992,7 @@ __all__ = [
     "conflict_fields",
     "conflict_note",
     "conflict_probe",
+    "cover_directive_line",
     "directive_line",
     "drop_conflicts",
     "drop_unverified",
@@ -1870,6 +2012,7 @@ __all__ = [
     "term_ranks",
     "unverified_quantities",
     "unverified_quotes",
+    "verify_cover_refs",
     "verify_refs",
     "with_pr_note",
 ]

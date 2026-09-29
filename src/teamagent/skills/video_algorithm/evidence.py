@@ -64,15 +64,20 @@ MIN_TIER_N = 3
 KwLayer = Literal["telop", "caption", "hashtag", "speech"]
 KwMatchKind = Literal["exact", "synonym"]
 Relation = Literal["client", "competitor", "other", "unspecified"]
-RefSource = Literal["telop", "scene", "hook", "brand", "caption"]
+RefSource = Literal["telop", "scene", "hook", "brand", "caption", "cover_text", "cover_note"]
 # 根拠の出どころの呼び名（描画に出す。テロップの引用と AI の説明を見分けられるようにする）。
+# cover_text / cover_note はサムネ（一覧の表紙）を AI が読んだもの
+# （照合は cover_facts.verify_cover_ref）。
 SOURCE_LABEL: dict[str, str] = {
     "telop": "テロップ",
     "scene": "場面の説明（AI）",
     "hook": "冒頭の要約（AI）",
     "brand": "ブランド表示",
     "caption": "キャプション",
+    "cover_text": "表紙の文字（AI読み取り）",
+    "cover_note": "表紙の説明（AI）",
 }
+COVER_SOURCES: frozenset[str] = frozenset({"cover_text", "cover_note"})
 
 KW_LAYERS: tuple[KwLayer, ...] = ("telop", "caption", "hashtag", "speech")
 KW_LAYER_LABEL: dict[str, str] = {
@@ -457,6 +462,7 @@ def quote_frame(
 
 
 __all__ = [
+    "COVER_SOURCES",
     "FRAME_TOLERANCE",
     "KW_LAYERS",
     "KW_LAYER_LABEL",

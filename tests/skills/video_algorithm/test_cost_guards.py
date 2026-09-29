@@ -17,6 +17,7 @@ from teamagent.adapters.video_algorithm_cache import (
 )
 from teamagent.runtime.slack_bot import SkillDispatcher
 from teamagent.skills.base import SkillContext
+from teamagent.skills.video_algorithm.cover_read import CoverSettings, cover_version
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     VideoAlgorithmInput,
@@ -360,6 +361,8 @@ def test_active_result_cache_lease_stops_retry_before_quota_and_gemini(
         requester=ME,
         # 統合の版（既定 v3）もキーに入る（版を変えたら旧い synthesis を返さない）
         synthesis_version="v3",
+        # サムネ（一覧の表紙）の読み取りの版（既定 ON のときだけキーに入る）
+        cover_version=cover_version(CoverSettings.from_env(), gemini.model_id) or None,
     )
     assert cache.acquire_lease(cache_key, request_id="original") is not None
 

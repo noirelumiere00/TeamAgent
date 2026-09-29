@@ -36,6 +36,7 @@ from tests.skills.video_algorithm.prod_shape import (
     QUERY,
     jpeg_uri,
     prod_board,
+    prod_board_with_covers,
     prod_synthesis,
     prod_videos,
 )
@@ -103,7 +104,51 @@ def _prod(client: bool, synthesis: str, frames: str = "scene") -> VideoAlgorithm
     )
 
 
+def _prod_covers(*, board: bool, stress: bool) -> VideoAlgorithmOutput:
+    """サムネ（一覧の表紙）の 2 枚を足した形。stress は表紙の文字を上限（60 字・4 まとまり）まで。"""
+    roster = Roster.of(CLIENT, COMPETITORS)
+    videos = prod_videos()
+    for v in videos:
+        v.cover_data_uri = jpeg_uri(540, 960)
+        v.cover_source = "cover"
+    rows = prod_board_with_covers(rest_kw={6, 7} if board else None)
+    if stress:
+        long_text = "とても長い表紙の文字" * 6
+        for m in rows[:5]:
+            assert m.cover_read is not None
+            blocks = [
+                {"text": f"{long_text}\n二行目", "box_2d": [100 + i * 150, 50, 200 + i * 150, 950]}
+                for i in range(4)
+            ]
+            m.cover_read = m.cover_read.model_copy(
+                update={
+                    "texts": m.cover_read.model_validate(
+                        {"elements": [], "texts": blocks, "face": None}
+                    ).texts,
+                    "subject_note": "長い主役の説明" * 5,
+                    "brand_text": ["長い商品名その一", "長い商品名その二", "長い商品名その三"],
+                }
+            )
+    cross = cross_analyze(videos, QUERY, board=rows, roster=roster)
+    ctx = SynthesisContext.build(videos, QUERY, board=rows, roster=roster)
+    cross.synthesis = finalize(CrossSynthesis.model_validate(_V3), ctx)
+    return VideoAlgorithmOutput(
+        query=QUERY,
+        videos=videos,
+        board=rows,
+        cross=cross,
+        client_name=roster.client_name,
+        competitors=list(roster.competitors),
+        generated_at="2026-09-29T10:15:00+09:00",
+        cover_read_mode="board" if board else "top",
+    )
+
+
 _FIXTURES: dict[str, Any] = {
+    # サムネ（一覧の表紙）の比較・作り方の 2 枚（上位だけ・6〜30 位も・文字を上限まで）
+    "prod_covers": lambda: _prod_covers(board=False, stress=False),
+    "prod_covers_board": lambda: _prod_covers(board=True, stress=False),
+    "prod_covers_stress": lambda: _prod_covers(board=True, stress=True),
     "prod_unspecified": lambda: _prod(False, "v3"),
     "prod_client": lambda: _prod(True, "v3"),
     "prod_v2_cache": lambda: _prod(False, "v2"),
@@ -141,7 +186,9 @@ def test_every_slide_fits_the_frame(browser: Any, tmp_path: Path, name: str) -> 
     bad, count = _measure(browser, html, tmp_path)
     assert bad == [], bad
     n = LOAD_N if name == "load_n10" else 5
-    assert 10 + n - 1 <= count <= 10 + n + 1  # 10＋n（絵コンテ B で ＋1・無ければ −1）
+    covers = 2 if name.startswith("prod_covers") else 0  # サムネ（一覧の表紙）の 2 枚
+    # 10＋n（絵コンテ B で ＋1・無ければ −1）＋表紙を読めたときの 2 枚
+    assert 10 + n - 1 + covers <= count <= 10 + n + 1 + covers
     assert count <= 30  # media worker の撮影の上限
 
 

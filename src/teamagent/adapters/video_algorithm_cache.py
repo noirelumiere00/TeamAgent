@@ -158,6 +158,7 @@ class VideoAlgorithmResultCache:
         competitors: Sequence[str] | None = None,
         avoid_terms: Sequence[str] | None = None,
         synthesis_version: str | None = None,
+        cover_version: str | None = None,
     ) -> str:
         """全結果決定要素を canonical JSON 化した sha256 キー。
 
@@ -168,6 +169,9 @@ class VideoAlgorithmResultCache:
         どちらも空なら欄ごと入れない（既存のキャッシュのキーを変えない）。
         synthesis_version（統合の版・skill は常に渡す）は、版を変えたら旧い synthesis を返さない
         ために含める（渡さない呼び出しだけ従来のキー）。
+        cover_version（サムネ＝表紙の読み取りの版。プロンプトの sha256・モデル・thinking・解像度・
+        入力の幅から作る）は、読み取りを有効にしたときだけ含める。止めているとき（None・空）は
+        従来のキー＝以前のキャッシュ（どちらも表紙の読み取りが無い）がそのまま返る。
         """
 
         extra: dict[str, list[str] | str] = {}
@@ -177,6 +181,8 @@ class VideoAlgorithmResultCache:
             extra["avoid_terms"] = [t for t in avoid_terms if t]
         if synthesis_version:
             extra["synthesis_version"] = synthesis_version
+        if cover_version:
+            extra["cover_version"] = cover_version
         raw = json.dumps(
             {
                 **extra,
