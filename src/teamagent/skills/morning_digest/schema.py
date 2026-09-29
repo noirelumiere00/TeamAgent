@@ -6,9 +6,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+#: F0: メール／予定の取得状態。値の意味は ``_shared/mail_connection.py`` の FETCH_* を参照。
+FetchStatus = Literal["ok", "token_expired", "scope_missing", "temporary", "unknown"]
+#: 下書きの作り方（DRAFT_ON_DEMAND_ONLY と MORNING_DIGEST_MAX_DRAFTS の実値から skill が決める）。
+DraftMode = Literal["auto", "on_demand", "off"]
 
 
 class MorningDigestInput(BaseModel):
@@ -119,6 +124,16 @@ class MailDigestItem(BaseModel):
             "☑️確認済みボタン用の署名トークン（生 thread_id は載らない＝G3）。"
             "MORNING_DIGEST_ACK_FILTER が OFF のときは発行しない"
             "（押せても翌朝反映されないボタンを出さないため）"
+        ),
+    )
+    # --- F0: スレッド単位の取得状態 ---
+    thread_ok: bool = Field(
+        default=False,
+        description=(
+            "スレッド全体（threads.get）を読めたか。False は「代表の 1 通しか読めていない／"
+            "読めたか分からない」。⚠️ 後段（期限の追いかけ・仮押さえ・取引先の記録）は "
+            "True のスレッドだけを書き込みや消し込みの根拠にすること"
+            "（取れなかったものを根拠にしない）"
         ),
     )
 
@@ -352,4 +367,48 @@ class MorningDigestOutput(BaseModel):
             "events.list が max_results に張り付いたか＝取り切れていない可能性。"
             "True の日は午後のアポが丸ごと落ちている恐れがある（観測用）"
         ),
+    )
+    # --- F0: 取得状態（「無い」と「見ていない」を分ける。slack_unread_scanned と同じ考え方）---
+    mail_fetch: FetchStatus = Field(
+        default="unknown",
+        description=(
+            "メールを取得できたか: ok / token_expired（再連携が要る）/ scope_missing（権限不足）/"
+            " temporary（一時的な失敗）/ unknown（未判定）。ok 以外で mail_digest が空なのは"
+            "「新着なし」ではない＝描画は『確認できませんでした』と書く"
+        ),
+    )
+    calendar_fetch: FetchStatus = Field(
+        default="unknown",
+        description=(
+            "予定を取得できたか（値は mail_fetch と同じ。ok 以外の空は「予定なし」ではない）"
+        ),
+    )
+    mail_fetch_detail: str = Field(
+        default="",
+        max_length=80,
+        description=(
+            "mail_fetch が失敗のときの内訳コード（例外の型名と Google の識別子だけ・管理者向け）"
+        ),
+    )
+    calendar_fetch_detail: str = Field(
+        default="",
+        max_length=80,
+        description="calendar_fetch が失敗のときの内訳コード（同上）",
+    )
+    mail_threads_failed: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "一覧には出たが読み込めなかったスレッドの数（0 より大きい日は一覧が欠けている）"
+        ),
+    )
+    draft_mode: DraftMode = Field(
+        default="auto",
+        description=(
+            "下書きの作り方（末尾の説明文の切り替え用）: auto＝朝に自動で作る / "
+            "on_demand＝ボタンを押したときだけ / off＝朝の自動作成なし（上限 0）"
+        ),
+    )
+    draft_limit: int = Field(
+        default=0, ge=0, description="朝の自動作成の上限件数（auto のときの説明文に出す）"
     )

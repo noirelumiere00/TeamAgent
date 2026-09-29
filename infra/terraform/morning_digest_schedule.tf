@@ -91,6 +91,22 @@ variable "morning_digest_ack_filter" {
   default     = false
 }
 
+# ---------- F0 連携切れの見える化（いずれも既定 空＝OFF） ----------
+# ⚠️ タスク定義（TD）の env を直接変えて点けたときは、activation 版 tfvars（正本）へも
+#    同じ値を必ず追記すること。追記しないまま次の guard 窓で -var-file 付き apply をすると、
+#    ここにある既定値（空＝OFF）で上書きされ、黙って元の描画に戻る。
+variable "morning_digest_fetch_status_emails" {
+  description = "F0: メール/予定を取得できなかった日に『新着なし』『予定なし』と書かず『確認できませんでした』＋原因に応じた案内を出す相手（カンマ区切りの email・`*` で全員）。空なら全員 OFF＝従来の描画と 1 バイトも変わらない。全員（*）に広げるのは oauth_connect の生存確認（PR-0b・OAUTH_CONNECT_LIVENESS_PROBE）を点けてから（先に広げると、失効した人が『連携』と送っても『連携済み』と返る行き止まりに入る）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記すること。"
+  type        = string
+  default     = ""
+}
+
+variable "morning_digest_admin_report_emails" {
+  description = "F0: 朝ダイジェストの実行結果（配信数・失敗数、問題の日だけ原因の内訳）を毎朝 1 通 DM で送る管理者の email（カンマ区切り・最大 3 件）。社内ドメイン（digest_internal_domain）の email 以外は捨て、Slack の lookup で社外・ゲスト・bot・削除済みでないことと本人 DM（D…）であることを確かめてから送る（チャンネルには送れない）。メールの件名・本文・相手は含めない。空なら送らない。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記すること。"
+  type        = string
+  default     = ""
+}
+
 variable "morning_digest_model_id" {
   description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
   type        = string
@@ -444,6 +460,9 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # （予約を作れないのに一括実行だけが claim する状態を作らない）。
       { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
+      # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。
+      { name = "MORNING_DIGEST_FETCH_STATUS_EMAILS", value = var.morning_digest_fetch_status_emails },
+      { name = "MORNING_DIGEST_ADMIN_REPORT_EMAILS", value = var.morning_digest_admin_report_emails },
       # ⚠️ DIGEST_USER_REF_PEPPER は environment に置かない（下の secrets を参照）。
     ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([
