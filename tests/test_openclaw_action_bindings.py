@@ -16,11 +16,12 @@ file:line）をそのまま再現した入力を実物の plugin に通し、署
 ``dispatch_tool``（caller claim 検証）へ流して、各ツールが**本物の HMAC 復号**で
 トークンを受理できるところまで確かめる（plugin と mcp の二重の守り）。
 
-⚠️ 範囲外（plugin の外）: 上流は押下のあと heartbeat を即時に起こすが、本番設定
-``agents.defaults.heartbeat.every: "0m"``（infra/openclaw/openclaw.config.json5）では
-heartbeat runner に agent が載らず、その起動は ``skipped reason=disabled`` で捨てられる
-（openclaw@2026.7.1 dist/heartbeat-runner-*.js の run / runHeartbeatOnce）。
-このテストは「heartbeat run が起きた後」の plugin の門を確かめるもので、上の設定は別途要る。
+⚠️ 本番の経路はこのファイルではない: 本番設定 ``agents.defaults.heartbeat.every: "0m"``
+（infra/openclaw/openclaw.config.json5）では heartbeat runner に agent が載らず、押下後の
+heartbeat は ``skipped reason=disabled`` で捨てられる（openclaw@2026.7.1 dist/heartbeat-runner-*.js）。
+09-29 裁定で、bearer と bot token がある環境（＝本番）の押下は plugin が直接 mcp へ呼んで本人の DM へ
+投稿する（``tests/test_openclaw_button_direct.py``）。このファイルは、その 2 つが無い環境で残る
+従来の経路（handled:false → system event → heartbeat run の束縛）と、メッセージ由来の run の門を確かめる。
 """
 
 from __future__ import annotations

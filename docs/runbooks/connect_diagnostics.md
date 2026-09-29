@@ -262,6 +262,37 @@ fields @timestamp, @message
 
 `id_shape` は §「`id_shape` の読み方」と同じ。`connect_request` / `rule` / `delivered` は真偽と規則名だけで本文は載らない。
 
+### 朝ダイジェストのボタンを押しても何も届かないときの引き方（2026-09-29・直接実行）
+
+2026-09-29 裁定「AI を通さず直接処理する」以降、📅 / 🗓 / ✏️ / ☑️ の押下は plugin が捕捉した時点で
+`{handled:true}` を返し（system event も heartbeat も積まない）、束縛先の 1 ツールを mcp へ直接呼んで、
+結果を押した本人の DM へ `chat.postMessage` で 1 通だけ投稿する。モデル（Aico）は関与しない。
+DM 以外（チャンネル・グループ・本人以外の DM）で押された場合は実行せず、押した本人の DM へ案内だけ送る。
+直接実行は `TEAMAGENT_MCP_BEARER` と `SLACK_BOT_TOKEN` の両方があるときだけ有効で、起動時の
+`registered hooks=[…] … button_direct=yes|no` で分かる（`no` なら従来の heartbeat 経路のまま）。
+
+```
+fields @timestamp, @message
+| filter @message like /teamagent-caller-identity:/
+| filter @message like /button action|button notice|Slack button action|button_direct/
+| sort @timestamp desc
+| limit 100
+```
+
+| 出た行 | 読み方 |
+|---|---|
+| `button action invocation=slack-action-… action=<id> outcome=delivered result=tool_message` | 実行して結果を届けた（正常）。`result=tool_message_error_<種別>` はツールが利用者向けの失敗文を返した（`expired` / `not_connected` 等・文はそのまま届いている） |
+| `… outcome=delivered result=tool_unavailable` | mcp にそのツールが無い（`digest_ack` は本番 OFF）。利用者には「このボタンはいま使えません。」 |
+| `… outcome=delivered result=gateway_<code>` | mcp の門が拒否（`caller_identity_rejected` 等）。利用者には定型文（再押下は案内しない）。mcp 側の `caller_claim_rejected` / `identity_spoof_rejected` と時刻で突合 |
+| `… outcome=delivered result=retry_<reason>` | mcp へツールを渡す前に失敗（`fetch_failed` / `mcp_http_5xx` / `timeout` 等）。何も実行されていないので押下の台帳から外し、利用者には「もう一度押すか…」 |
+| `… outcome=delivered result=unknown_<reason>` | ツールを渡した後に途切れた（実行されたか分からない）。再押下は plugin の台帳と mcp の one-use nonce の両方で止まる。利用者には確認を促す文 |
+| `… outcome=delivered result=not_own_dm` | DM 以外（または本人以外の DM）での押下。実行せず、押した本人の DM へ案内を送った |
+| `… outcome=post_failed result=… reason=slack_…` | ツールは実行済み（または失敗）だが Slack へ届かなかった。**ツールは再実行しない**。`reason=slack_api_<error>` は Slack の `ok:false`、`slack_http_5xx` は 2 回再送した後 |
+| `… outcome=dm_unresolved reason=…` | `conversations.open` で本人の DM を確かめられなかった（Slack 障害）。何も実行していない |
+| `button action rejected reason=value_shape action=<id> value_len=N direct=yes` ＋ `button notice … notice=value_shape` | 古い・別種のトークンのボタン（例: 修正前のダイジェストの件名が長い 📅）。実行せず「最新の朝ダイジェストから」を案内 |
+| `rejected replayed Slack button action action=<id>` | 同じボタンの再押下・連打（10 分）。設計どおり何もしない |
+| `rejected incomplete or unauthorized Slack button action` | 押下の同一性が確かめられない（interactionId 不一致・未認可の送信者等）。案内も送らない |
+
 ## 関連
 
 - コード: `src/teamagent/connect_diagnostics.py`（S/I/L/T のコード表の正）、`infra/openclaw/caller-identity-plugin/dist/index.js` の `BLOCK_DIAG`（**P コード表の正**）、`src/teamagent/connect_web/app.py`（`_connect_failure`）、`src/teamagent/mcp_gateway/server.py`（`_identity_rejected`）、`src/teamagent/skills/oauth_connect/skill.py`（`_diag`）
