@@ -86,7 +86,12 @@ class CallerClaimReplayStore(Protocol):
 
 
 class InMemoryCallerClaimReplayStore:
-    """Process-local replay store for tests and non-production construction."""
+    """Process-local replay store for tests and non-production construction.
+
+    Consumed nonces are retained for ``CALLER_CLAIM_REPLAY_RETENTION_SECONDS`` (25h), so a
+    long-lived process fails closed ("at capacity") after ``max_entries`` claims in that window.
+    Production always uses ``DynamoDbCallerClaimReplayStore`` (``CallerClaimVerifier.from_env``).
+    """
 
     def __init__(self, *, max_entries: int = 10_000) -> None:
         if max_entries < 1:

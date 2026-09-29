@@ -128,6 +128,7 @@ _MAX_TITLE = ("【定例】株式会社サンプルホールディングス様 �
 # plugin の文言（ACTION_BINDINGS）。テストでは実値を写して固定する（文言を変えたらここも変える）。
 _CALENDAR_UNKNOWN = "予定を登録できたか確認できませんでした。カレンダーに入っていなければ『予定入れといて』と送ってください。"
 _CALENDAR_RETRY = "予定の登録に失敗しました。もう一度押すか、『予定入れといて』と送ってください。"
+_CALENDAR_FAILED = "予定の登録に失敗しました。『予定入れといて』と送ってください。"
 _PENDING_MAIL_DRAFT = (
     "✏️ 返信下書きを作っています。できたらこの DM でお知らせします（数十秒かかることがあります）。"
 )
@@ -137,7 +138,7 @@ _DM_ONLY_TEXT = "このボタンは Aico との DM に届いた朝ダイジェ�
 _MAIL_DRAFT_RETRY = "返信下書きを作れませんでした。もう一度押してください。"
 _MAIL_DRAFT_UNKNOWN = "返信下書きを作れたか確認できませんでした。Gmail の下書きをご確認ください。"
 # 台帳にある押下の押し直しへの一時表示（2026-09-29 レビュー指摘: 押し直しが無言だった）。
-_RUNNING_TEXT = "このボタンはいま処理しています。終わったらこの DM でお知らせします。"
+_RUNNING_TEXT = "このボタンはいま処理しています。終わったら Aico との DM でお知らせします。"
 _ALREADY_PRESSED_TEXT = "このボタンはすでに押されています（同じボタンは 1 回だけ使えます）。結果はこの DM にお送りしています。"
 # mcp の本人特定の拒否（server.py の _identity_rejected）の末尾の診断行（connect_diagnostics.format_diag_line）。
 _IDENTITY_DIAG_RE = re.compile(
@@ -744,16 +745,13 @@ def test_same_press_after_a_plugin_restart_is_stopped_by_the_mcp_one_use_nonce(
     assert again["nonce"] == first["nonce"]
     assert again["run_id"] != first["run_id"]
     assert [row["summary"] for row in e2e["recorder"].calendar_inserts].count("A社定例") == 1
-    assert len(case["posts"]) == 1
-    # 本文は texts.unknown。mcp の診断行（I01a・本人不明なので識別子は "-"）を定型のまま後ろに添える。
-    body, diag = _split_identity_diagnostic(case["posts"][0]["text"])
-    assert body == _CALENDAR_UNKNOWN
-    match = _IDENTITY_DIAG_RE.fullmatch(diag)
-    assert match is not None and match["sub"] == "a" and match["subject"] == "-", diag
+    # 再生は I01a（claim の拒否）で返る。害のない押し直しなので管理者への転送は勧めず、
+    # 診断コードはログにだけ残す。
+    assert [post["text"] for post in case["posts"]] == [_CALENDAR_UNKNOWN]
     assert any(
         "result=gateway_caller_identity_rejected diag=CONNECT-I01a" in line for line in case["logs"]
     )
-    _assert_user_facing(body, e2e["tokens"])
+    _assert_user_facing(case["posts"][0]["text"], e2e["tokens"])
 
 
 def test_repress_after_ten_minutes_is_still_stopped_by_the_plugin_ledger(
@@ -784,6 +782,12 @@ def test_another_users_token_is_rejected_by_mcp_and_answered_only_in_their_own_d
     assert [(post["channel"], post["text"]) for post in case["posts"]] == [
         (DM_B, calendar_skill_module._ERR_MSG["expired"])
     ]
+    # ツールの失敗を届けた押下の押し直し: 同じボタンはもう通らない（mcp の nonce も消費済み）ので、
+    # 行き止まりにせず別の頼み方（texts.failed）を本人にだけ一時表示する。
+    _handled_without_system_event(case["repressed"])
+    assert len(_tool_calls(case)) == 1
+    assert _ephemeral_texts(case) == [_CALENDAR_FAILED]
+    assert any("state=failed notice=ephemeral" in line for line in case["logs"])
 
 
 def test_press_from_someone_elses_dm_is_not_executed_and_is_answered_in_the_pressers_dm(
@@ -884,8 +888,10 @@ def test_timeout_after_the_tool_was_sent_does_not_invite_a_second_run(
     assert case["mcpRequests"].count("tools/call") == 1
     # mcp 側では 1 回だけ実行された（打ち切ったのは plugin の待ちだけ）。
     assert e2e["recorder"].mail_threads.count(SLOW_THREAD) == 1
-    # 「作っています」は 1 回だけ。押し直しには「すでに押されています（結果は DM）」を返す（無言にしない）。
-    assert _ephemeral_texts(case) == [_PENDING_MAIL_DRAFT, _ALREADY_PRESSED_TEXT]
+    # 「作っています」は 1 回だけ。押し直しには、実行されたか分からない押下として「確かめてください」を返す
+    # （無言にしない・もう一度実行するとは言わない）。
+    assert _ephemeral_texts(case) == [_PENDING_MAIL_DRAFT, _MAIL_DRAFT_UNKNOWN]
+    assert any("state=unknown notice=ephemeral" in line for line in case["logs"])
 
 
 @pytest.mark.parametrize(
@@ -1066,6 +1072,19 @@ def test_stale_value_notice_falls_back_to_an_ephemeral_when_the_dm_post_fails(
     assert any("button repress action=digest_ack state=notice" in line for line in case["logs"])
 
 
+def test_stale_value_notice_falls_back_when_the_dm_cannot_be_resolved(e2e: dict[str, Any]) -> None:
+    case = e2e["report"]["staleNoticeOpenFail"]
+    assert case["mcpRequests"] == []
+    assert case["slackCalls"] == ["conversations.open"]
+    assert case["posts"] == []
+    assert _ephemeral_texts(case) == [_STALE_TEXT]
+    assert any(
+        "outcome=post_failed notice=value_shape reason=slack_api_internal_error fallback=ephemeral"
+        in line
+        for line in case["logs"]
+    )
+
+
 # ── 21. DM 以外で押された案内の投稿失敗（2026-09-29 レビュー指摘: 24h 無言になっていた）────────
 def test_not_own_dm_notice_falls_back_to_an_ephemeral_in_the_pressed_conversation(
     e2e: dict[str, Any],
@@ -1187,6 +1206,12 @@ def test_identity_rejection_adds_only_the_canonical_diagnostic_lines(e2e: dict[s
     for name in ("identityDiagMarkup", "identityDiagLink", "identityDiagOtherCode"):
         assert render[name]["reply"] == {"text": _CALENDAR_UNKNOWN}, name
         assert render[name]["result"] == "gateway_caller_identity_rejected", name
+    # I01a は定型の形でも添えない（ボタンでは多くが害のない再生）。コードはログにだけ残す。
+    assert render["identityDiagReplay"]["reply"] == {"text": _CALENDAR_UNKNOWN}
+    assert (
+        render["identityDiagReplay"]["result"]
+        == "gateway_caller_identity_rejected diag=CONNECT-I01a"
+    )
 
 
 def test_reply_fields_the_plugin_reads_exist_in_each_tools_output_schema() -> None:

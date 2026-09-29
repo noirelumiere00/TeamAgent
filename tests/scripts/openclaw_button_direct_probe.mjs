@@ -430,15 +430,19 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
 {
   // 8a. B が自分の DM で A 宛てのトークンのボタンを押す → mcp が本人照合で無効（expired の文）
   const own = makePlugin({mcpUrl: input.mcpUrl});
-  const pressed = await own.press({
+  const crossSpec = {
     actionId: "calendar_event",
     value: T.eventForeign,
     userId: B,
     channelId: input.dmB,
     messageTs: nextTs(),
-  });
+  };
+  const pressed = await own.press(crossSpec);
   await own.drain();
-  out.crossUserToken = {pressed, ...own.report()};
+  // ツールの失敗（expired）を届けた押下の押し直し → 同じボタンはもう通らないので別の頼み方を一時表示。
+  const repressed = await own.press(crossSpec);
+  await own.drain();
+  out.crossUserToken = {pressed, repressed, ...own.report()};
   // 8b. B の押下が A の DM から来た（本人の DM ではない）→ 実行しない・案内は B の DM へ
   const foreign = makePlugin({mcpUrl: input.mcpUrl});
   const foreignPress = await foreign.press({
@@ -777,6 +781,11 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
   await r.press(staleSpec2);
   await r.drain();
   out.staleNoticeFallback = r.report();
+  // 20d. 本人の DM を確かめられない（conversations.open の ok:false）→ 一時表示で案内する
+  const o = makePlugin({mcpUrl: input.mcpUrl, slackMode: "open_api_error"});
+  await o.press({...staleSpec, messageTs: nextTs()});
+  await o.drain();
+  out.staleNoticeOpenFail = o.report();
 }
 
 // ── 21. DM 以外で押された案内の投稿に失敗（2026-09-29 レビュー指摘）→ 24h 無言にしない ──────────
@@ -913,14 +922,22 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
       error:
         "Caller authorization failed. x\n" +
         "解決しない場合は、次の 1 行をそのまま管理者（<!channel>）へ送ってください:\n" +
-        "診断: CONNECT-I01a 2026-09-29 12:00 JST -",
+        "診断: CONNECT-I01c 2026-09-29 12:00 JST U0CCCCCCCCC",
       code: "CALLER_IDENTITY_REJECTED",
     })),
     identityDiagLink: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
       error:
         "Caller authorization failed. x\n" +
         "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
-        "診断: CONNECT-I01a 2026-09-29 12:00 JST - <https://evil.example|x>",
+        "診断: CONNECT-I01c 2026-09-29 12:00 JST U0CCCCCCCCC <https://evil.example|x>",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    // I01a（claim の拒否＝ボタンでは多くが害のない再生）は定型の形でも添えない（ログにだけ残す）。
+    identityDiagReplay: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. 利用者側の操作では直りません。管理者へご連絡ください。\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
+        "診断: CONNECT-I01a 2026-09-29 12:00 JST -",
       code: "CALLER_IDENTITY_REJECTED",
     })),
     identityDiagOtherCode: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({

@@ -441,12 +441,15 @@ export const BUTTON_STALE_TEXT =
 // 台帳にある押下（同じボタン）の押し直しへ、押した本人にだけ一時表示で返す 1 行（無言にしない）。
 // 同じ押下は plugin の台帳と mcp の one-use nonce で 1 回しか実行しないので、「もう一度実行する」とは
 // 言わない。結果が unknown だった押下・☑️ を取り消した後の同じ ☑️ の押し直しもここに来る。
-//   running    … 実行中（mcp の応答待ち）
-//   answered   … 結果（成功・失敗・unknown の文）を本人の DM へ投稿済み
-//   undelivered… 実行（または失敗）したが結果を DM へ届けられなかった → binding.texts.unknown
+//   running    … 実行中（mcp の応答待ち・DM 以外かどうかの確認中も含む）→ BUTTON_RUNNING_TEXT
+//   answered   … 成功の結果を本人の DM へ投稿済み → BUTTON_ALREADY_PRESSED_TEXT
+//   failed     … ツール・mcp の門の失敗を DM へ投稿済み → binding.texts.failed（別の頼み方）
+//                （同じボタンはもう通らないので、ツールの「時間をおいて再度」に従って押し直しても行き止まりにしない）
+//   unknown    … 実行されたか分からない（途切れた・CALLER_IDENTITY_REJECTED）→ binding.texts.unknown
+//   undelivered… 結果を DM へ届けられなかった → binding.texts.unknown
 //   not_own_dm … DM 以外で押された（実行していない）→ BUTTON_DM_ONLY_TEXT
 export const BUTTON_RUNNING_TEXT =
-  "このボタンはいま処理しています。終わったらこの DM でお知らせします。";
+  "このボタンはいま処理しています。終わったら Aico との DM でお知らせします。";
 export const BUTTON_ALREADY_PRESSED_TEXT =
   "このボタンはすでに押されています（同じボタンは 1 回だけ使えます）。結果はこの DM にお送りしています。";
 // mcp の本人特定の拒否（server.py の _identity_rejected）の末尾 2 行。利用者が管理者へ転送するための
@@ -476,6 +479,8 @@ function buttonRepressText(binding, state) {
       return BUTTON_RUNNING_TEXT;
     case "answered":
       return BUTTON_ALREADY_PRESSED_TEXT;
+    case "failed":
+      return binding.texts.failed;
     case "not_own_dm":
       return BUTTON_DM_ONLY_TEXT;
     default:
@@ -1448,7 +1453,8 @@ function safeResultLink(value) {
 }
 
 // ツールの出力（mcp の TextContent の JSON）から、押した本人へ送る 1 通を組む。
-// 返り値 { reply: {text, blocks?}, result }。result はログ用の種別（値は含めない＝G7）。
+// 返り値 { reply: {text, blocks?}, result, state }。result はログ用の種別（値は含めない＝G7）。
+// state は同じ押下の押し直しへ返す文を決める台帳の状態（answered / failed / unknown）。
 //   - message があれば成功・失敗を問わずその文をそのまま出す（ツールの利用者向けの文）。
 //     リンク欄は <url|表示名> にする（文中に生の URL があればそこを置き換え、無ければ末尾に添える）。
 //   - mcp が「unknown tool: <束縛先>」を返した＝そのツールは mcp に無い（digest_ack は本番 OFF）。
@@ -1456,7 +1462,7 @@ function safeResultLink(value) {
 //     （英語の例外名・診断コード・内部語を含むため）。
 // 例外は投げない（投げると押した人に何も届かない）。
 export function renderButtonResult(binding, actionId, result) {
-  const failed = kind => ({ reply: { text: binding.texts.failed }, result: kind });
+  const failed = kind => ({ reply: { text: binding.texts.failed }, result: kind, state: "failed" });
   if (!result || typeof result !== "object" || result.isError === true) {
     return failed("mcp_tool_error");
   }
@@ -1479,10 +1485,15 @@ export function renderButtonResult(binding, actionId, result) {
     return {
       reply: buildButtonReply(binding, actionId, data, message),
       result: toolError ? `tool_message_error_${toolError}` : "tool_message",
+      state: toolError ? "failed" : "answered",
     };
   }
   if (data.error === `unknown tool: ${binding.tool}`) {
-    return { reply: { text: BUTTON_UNAVAILABLE_TEXT }, result: "tool_unavailable" };
+    return {
+      reply: { text: BUTTON_UNAVAILABLE_TEXT },
+      result: "tool_unavailable",
+      state: "answered",
+    };
   }
   const code =
     typeof data.code === "string" && /^[A-Z_]{1,64}$/u.test(data.code)
@@ -1493,17 +1504,21 @@ export function renderButtonResult(binding, actionId, result) {
   // すでに実行済み。plugin の再起動・OC タスク 2 つ・台帳の上限落ちで plugin が覚えていないとき）が入り、
   // 本人を確かめられない拒否とは応答から見分けられない。実行済みでありうるので texts.failed
   // （自由文での頼み直しを勧める）にはせず、確認を促す texts.unknown にする（二重登録を招かない）。
-  // mcp の診断行（CONNECT-I01a/b/c）は、定型の形に完全一致するときだけ後ろへ添える
-  // （本人の解決失敗＝I01b/c は利用者では直らず、管理者が行を引く。AI 経路の SOUL と同じ扱い）。
+  // 本人の解決失敗（CONNECT-I01b/c）は利用者では直らないので、mcp の定型の案内と診断行を、形が完全に
+  // 一致するときだけ後ろへ添える（AI 経路の SOUL と同じ扱い）。I01a（claim の拒否）はボタンでは多くが
+  // 害のない再生（再デプロイ後・OC タスク 2 つでの押し直し）で、識別子も "-" なので管理者への転送を
+  // 勧めない（ログの diag= には残す）。
   if (code === "caller_identity_rejected") {
     const diag = identityDiagnosticLines(data.error);
+    const attach = diag !== null && diag.code !== "CONNECT-I01a";
     return {
       reply: {
-        text: diag
+        text: attach
           ? [binding.texts.unknown, ...diag.lines].map(escapeSlackText).join("\n")
           : binding.texts.unknown,
       },
       result: `gateway_${code}${diag ? ` diag=${diag.code}` : ""}`,
+      state: "unknown",
     };
   }
   return failed(`gateway_${code}`);
@@ -2815,10 +2830,14 @@ export function createCallerIdentityPlugin({
         // 1 押下 1 回: 台帳は await より前に同期で押さえる（同じ押下の再送・連打は上で止まる）。
         // 実行が mcp へツールを渡す前に失敗したときだけ、executeButtonAction が外す。
         // 台帳は 24h 持つ（BUTTON_PRESS_LEDGER_TTL_MS）＝ボタンが押せる間の押し直しはここで止まる。
-        buttonPressLedger.set(fingerprint, {atMs: nowMs, state: "running"});
+        // 押下ごとの台帳の要素。実行側はこの要素の state だけを書き換える（外した後の押し直しが
+        // 入れた別の要素や、上限で捨てられた要素は書き換わらない）。
+        const ledgerEntry = {atMs: nowMs, state: "running"};
+        buttonPressLedger.set(fingerprint, ledgerEntry);
         startButtonAction(
           {
             binding,
+            ledgerEntry,
             actionId: expectedActionId,
             senderId,
             teamId: expectedTeamId,
@@ -2916,13 +2935,6 @@ export function createCallerIdentityPlugin({
         );
       }),
     );
-  }
-
-  // 押下の台帳の状態を進める。台帳の上限で捨てられていたら（実行中に 5000 件を超えた）入れ直す。
-  function markButtonPress(key, state) {
-    const entry = buttonPressLedger.get(key);
-    if (entry !== undefined) entry.state = state;
-    else buttonPressLedger.set(key, {atMs: now(), state});
   }
 
   // 押した本人だけに見える一時表示（上流の ctx.respond.reply → Slack の response_url・ephemeral）。
@@ -3047,7 +3059,7 @@ export function createCallerIdentityPlugin({
         {channel: ownDm, threadTs: null},
         {text: BUTTON_DM_ONLY_TEXT},
       );
-      if (delivery.delivered) markButtonPress(press.fingerprint, "not_own_dm");
+      if (delivery.delivered) press.ledgerEntry.state = "not_own_dm";
       else buttonPressLedger.delete(press.fingerprint);
       done(delivery.posted ? "delivered" : "post_failed", ` result=not_own_dm${delivery.detail}`);
       return;
@@ -3070,10 +3082,10 @@ export function createCallerIdentityPlugin({
     const progress = {toolsCallSent: false};
     let reply;
     let result;
-    let released = false;
+    let state;
     try {
       const mcpResult = await callButtonTool({press, invocationId, progress});
-      ({reply, result} = renderButtonResult(press.binding, press.actionId, mcpResult));
+      ({reply, result, state} = renderButtonResult(press.binding, press.actionId, mcpResult));
     } catch (error) {
       const reason = connectPathReason(error);
       if (progress.toolsCallSent) {
@@ -3081,11 +3093,11 @@ export function createCallerIdentityPlugin({
         // （もう一度押しても、mcp の one-use nonce と plugin の台帳の両方で止まる）。
         reply = {text: press.binding.texts.unknown};
         result = `unknown_${reason}`;
+        state = "unknown";
       } else {
         // mcp はまだツールを受け取っていない（nonce も未消費）＝何も実行されていない。
         // 同じボタンをもう一度押せるよう台帳から外す（二重実行は mcp の nonce でも止まる）。
         buttonPressLedger.delete(press.fingerprint);
-        released = true;
         reply = {text: press.binding.texts.retry};
         result = `retry_${reason}`;
       }
@@ -3100,8 +3112,9 @@ export function createCallerIdentityPlugin({
       reply,
     );
     // 押し直しへの一時表示のための状態。DM に残る結果が無い（一時表示だけ・どこにも届かない）なら
-    // 「確かめてください」（texts.unknown）を返す。retry で台帳から外した押下は入れ直さない。
-    if (!released) markButtonPress(press.fingerprint, delivery.posted ? "answered" : "undelivered");
+    // 「確かめてください」（texts.unknown）を返す。書き換えるのはこの押下の要素だけ（retry で外した
+    // 要素は台帳に無いので、書き換えても押し直しには効かない）。
+    press.ledgerEntry.state = delivery.posted ? state : "undelivered";
     done(delivery.posted ? "delivered" : "post_failed", ` result=${result}${delivery.detail}`);
   }
 
