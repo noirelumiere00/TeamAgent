@@ -18,7 +18,11 @@
 //   - 同じ interactionId の再送は上流が dedupe する（src/plugins/interactive.ts の claim/commit）。
 //     ここでは plugin 自身の守り（押下の指紋）を見るため、再押下は trigger を変えて送る。
 //
-// 偽物の Slack は本番の失敗の形を返す: HTTP 200 + {"ok":false,"error":"channel_not_found"}、HTTP 500。
+// 偽物の Slack は本番の失敗の形を返す: HTTP 200 + {"ok":false,"error":"channel_not_found"}、HTTP 500、
+// conversations.open の HTTP 200 + {"ok":false,"error":"internal_error"}、スレッドへの投稿の
+// {"ok":false,"error":"cannot_reply_to_message"}、受け付けた後の時間切れ（AbortSignal.timeout が
+// fetch を落とす形＝DOMException "TimeoutError"）。
+// 上流の ctx.respond.reply（Slack の response_url への ephemeral）は例外を握らないので、失敗は throw で返す。
 // 入力: env PROBE_INPUT（JSON）。出力: stdout に JSON 1 行。
 import {Buffer} from "node:buffer";
 
@@ -46,9 +50,10 @@ function claimOf(args) {
   return JSON.parse(Buffer.from(claim.split(".")[0], "base64url").toString("utf8"));
 }
 
-// plugin 1 個（= OpenClaw プロセス 1 個）。state は mcp の上下・Slack の失敗モードを切り替える。
+// plugin 1 個（= OpenClaw プロセス 1 個）。state は mcp の上下・Slack の失敗モード・時計・
+// response_url（ctx.respond.reply）の成否を切り替える。
 function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = true}) {
-  const state = {mcpDown: false, slackMode};
+  const state = {mcpDown: false, slackMode, nowMs, respondMode: "ok"};
   const registrations = new Map();
   const tasks = [];
   const logs = [];
@@ -56,6 +61,7 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
   const slackCalls = [];
   const mcpRequests = [];
   const toolCalls = [];
+  const ephemerals = [];
   const fetchFn = async (url, init = {}) => {
     const href = String(url);
     if (href.startsWith("https://slack.com/api/")) {
@@ -66,6 +72,12 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
         return new Response(JSON.stringify({ok: false, error: "invalid_auth"}), {status: 200});
       }
       if (method === "conversations.open") {
+        if (state.slackMode === "open_api_error") {
+          return new Response(JSON.stringify({ok: false, error: "internal_error"}), {status: 200});
+        }
+        if (state.slackMode === "open_http500") {
+          return new Response("upstream error", {status: 500});
+        }
         const id = DM_OF[body.users];
         return new Response(
           JSON.stringify(id ? {ok: true, channel: {id}} : {ok: false, error: "user_not_found"}),
@@ -79,9 +91,19 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
         if (state.slackMode === "http500") {
           return new Response("upstream error", {status: 500});
         }
+        if (state.slackMode === "thread_rejected" && body.thread_ts !== undefined) {
+          return new Response(JSON.stringify({ok: false, error: "cannot_reply_to_message"}), {
+            status: 200,
+          });
+        }
         postSeq += 1;
         const ts = `1784425000.${String(100000 + postSeq)}`;
         posts.push({...body, ts});
+        if (state.slackMode === "post_timeout_once") {
+          // Slack は受け付けた（投稿は届いた）が、こちらの待ち（AbortSignal.timeout）が先に切れた。
+          state.slackMode = "ok";
+          throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        }
         return new Response(JSON.stringify({ok: true, channel: body.channel, ts}), {
           status: 200,
           headers: {"content-type": "application/json"},
@@ -114,7 +136,7 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
       TEAMAGENT_MCP_URL: mcpUrl,
       ...(withBotToken ? {SLACK_BOT_TOKEN: input.botToken} : {}),
     },
-    now: () => nowMs,
+    now: () => state.nowMs,
     fetchFn,
     onBackgroundTask: task => tasks.push(task),
     sleepFn: async () => {},
@@ -186,9 +208,17 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
           namespace,
           payload,
         },
+        // 上流の respond（interactions.block-actions.ts:665-693）。reply は Bolt の respond
+        // （response_url）をそのまま await し、失敗を握らない。
         respond: {
           acknowledge: async () => {},
-          reply: async () => {},
+          reply: async ({text, responseType}) => {
+            if (!text) return;
+            if (state.respondMode === "fail") {
+              throw new Error("Request failed with status code 404 (response_url expired)");
+            }
+            ephemerals.push({text, responseType: responseType ?? "ephemeral", userId, channelId});
+          },
           followUp: async () => {},
           editMessage: async () => {},
         },
@@ -205,6 +235,7 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
   }
   function report() {
     return {
+      ephemerals: ephemerals.map(item => ({...item})),
       posts: posts.map(post => ({...post})),
       slackCalls: [...slackCalls],
       mcpRequests: [...mcpRequests],
@@ -557,6 +588,151 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
   out.mainBanner = main.report().banner;
 }
 
+// ── 16. 10 分を超えてからの押し直し（2026-09-29 レビュー指摘）→ plugin の台帳（24h）で止まる ─────
+// 以前は台帳が 10 分で消え、押し直しが mcp の one-use nonce に「再生」として拒否され、
+// 失敗文（自由文での頼み直し＝二重登録の入口）が届いていた。
+{
+  const p = makePlugin({mcpUrl: input.mcpUrl});
+  const messageTs = nextTs();
+  const spec = {
+    actionId: "calendar_event",
+    value: T.eventLate,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+  };
+  const first = await p.press(spec);
+  await p.drain();
+  p.state.nowMs += 11 * 60 * 1000;
+  const after11min = await p.press(spec);
+  await p.drain();
+  p.state.nowMs += 23 * 60 * 60 * 1000;
+  const after23h = await p.press(spec);
+  await p.drain();
+  out.lateRepress = {first, after11min, after23h, ...p.report()};
+}
+
+// ── 17. 本人の DM を確かめられない（conversations.open の失敗）→ 無言にしない ─────────────────
+{
+  // 17a. HTTP 200 + ok:false internal_error（callSlackApi は再試行しない）→ 押下の会話で本人だけに
+  //      「もう一度押して」を一時表示。台帳から外れているので、Slack が戻ってから押し直すと実行される。
+  const p = makePlugin({mcpUrl: input.mcpUrl, slackMode: "open_api_error"});
+  const messageTs = nextTs();
+  const spec = {
+    actionId: "calendar_event",
+    value: T.eventOpenFail,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+  };
+  const failed = await p.press(spec);
+  await p.drain();
+  const afterFail = p.report();
+  p.state.slackMode = "ok";
+  const again = await p.press(spec);
+  await p.drain();
+  out.openApiError = {failed, afterFail, again, ...p.report()};
+  // 17b. HTTP 500（2 回再送して諦める）＋ response_url も失効 → 例外を上げず、ログに残す。
+  const q = makePlugin({mcpUrl: input.mcpUrl, slackMode: "open_http500"});
+  q.state.respondMode = "fail";
+  const pressed = await q.press({
+    actionId: "calendar_event",
+    value: T.eventOpenFail,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  });
+  await q.drain();
+  out.openHttp500 = {pressed, ...q.report()};
+}
+
+// ── 18. 結果の投稿を Slack が受け付けた後に時間切れ → 再送しない（2 通にしない） ───────────────
+{
+  const p = makePlugin({mcpUrl: input.mcpUrl, slackMode: "post_timeout_once"});
+  const pressed = await p.press({
+    actionId: "calendar_event",
+    value: T.eventPostTimeout,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  });
+  await p.drain();
+  out.postTimeout = {pressed, ...p.report()};
+}
+
+// ── 19. DM のスレッドの中で押す → claim・_user_context・投稿のすべてが押下のスレッド ─────────────
+{
+  const thread = "1784423500.000001";
+  const p = makePlugin({mcpUrl: input.mcpUrl});
+  const pressed = await p.press({
+    actionId: "calendar_event",
+    value: T.eventThread,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+    threadTs: thread,
+  });
+  await p.drain();
+  out.threadPress = {thread, pressed, ...p.report()};
+  // 19b. スレッドへの投稿が弾かれた（ok:false）→ スレッド無しで 1 回だけ投げ直す
+  const r = makePlugin({mcpUrl: input.mcpUrl, slackMode: "thread_rejected"});
+  const rejected = await r.press({
+    actionId: "calendar_event",
+    value: T.eventThreadRejected,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+    threadTs: thread,
+  });
+  await r.drain();
+  out.threadRejected = {thread, pressed: rejected, ...r.report()};
+  // 19c. スレッドへの投稿を受け付けた後に時間切れ → スレッド無しでも投げ直さない
+  const t = makePlugin({mcpUrl: input.mcpUrl, slackMode: "post_timeout_once"});
+  const timedOut = await t.press({
+    actionId: "calendar_event",
+    value: T.eventThreadTimeout,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+    threadTs: thread,
+  });
+  await t.drain();
+  out.threadTimeout = {thread, pressed: timedOut, ...t.report()};
+}
+
+// ── 20. 形の合わない値の案内は、同じボタンにつき 1 回だけ（押した回数だけ届けない） ──────────────
+{
+  const p = makePlugin({mcpUrl: input.mcpUrl});
+  const spec = {
+    actionId: "calendar_event",
+    value: T.tooLong,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  };
+  const first = await p.press(spec);
+  const second = await p.press(spec);
+  await p.drain();
+  out.staleTwice = {first, second, ...p.report()};
+  // 20b. 案内の投稿に失敗したら、押し直しでもう一度案内する（無言のまま固定しない）
+  const q = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  const staleSpec = {
+    actionId: "digest_ack",
+    value: "not-a-token",
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  };
+  await q.press(staleSpec);
+  await q.drain();
+  q.state.slackMode = "ok";
+  await q.press(staleSpec);
+  await q.drain();
+  await q.press(staleSpec);
+  await q.drain();
+  out.staleNoticeRetry = q.report();
+}
+
 // ── 15. 文面の組み立て（renderButtonResult）の境界: 記法の無害化・リンクの門・取り消しボタンの門 ──
 {
   const B_ = mod.ACTION_BINDINGS;
@@ -584,6 +760,35 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
       message: "作成しました",
       open_url: "https://mail.google.com/mail/u/0/?a=1&b=2#all/abc",
     })),
+    // WHATWG は `\` を `/` と読む（hostname=calendar.google.com）が、Slack 側は userinfo@evil と
+    // 読みうる。検査した値と出す値がずれるものは通さない（2026-09-29 レビュー指摘）。
+    backslashLink: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "登録しました",
+      event_url: "https://calendar.google.com\\@evil.example/x",
+    })),
+    // クエリの `\` は WHATWG でも正規化されない（href と一致する）＝拒否文字の検査だけが止める。
+    backslashQuery: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "登録しました",
+      event_url: "https://calendar.google.com/x?a=\\@evil.example",
+    })),
+    userinfoLink: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "登録しました",
+      event_url: "https://evil.example@calendar.google.com/x",
+    })),
+    nonCanonicalLink: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "登録しました",
+      event_url: "https://Calendar.Google.com/x",
+    })),
+    // 📅 の message は URL を生で含む。リンクにできなかった URL は文からも消す（Slack の自動リンクを防ぐ）。
+    rawUrlInMessage: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "📅 登録しました\n🔗 https://calendar.google.com\\@evil.example/x",
+      event_url: "https://calendar.google.com\\@evil.example/x",
+    })),
+    // リンク欄が URL の形でない値なら、文は削らない。
+    notAUrl: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      message: "登録しました",
+      event_url: "登",
+    })),
     // 取り消しボタンは unack トークンのときだけ（ack トークンや形の違う値をボタンにしない）。
     undoWrongType: mod.renderButtonResult(B_.digest_ack, "digest_ack", asResult({
       message: "☑️ 確認済みにしました。",
@@ -597,6 +802,11 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
     gatewayError: mod.renderButtonResult(B_.schedule_propose, "schedule_propose", asResult({
       error: "Caller authorization failed. 診断: CONNECT-I01a 2026-09-29 12:00 JST",
       code: "CALLER_IDENTITY_REJECTED",
+    })),
+    // CALLER_IDENTITY_REJECTED 以外の門の拒否（ツールは走っていない）は従来どおり texts.failed。
+    gatewayOther: mod.renderButtonResult(B_.schedule_propose, "schedule_propose", asResult({
+      error: "Tool input is invalid.",
+      code: "TOOL_INPUT_INVALID",
     })),
     exception: mod.renderButtonResult(B_.mail_draft, "mail_draft", asResult({
       error: "RuntimeError: boom", request_id: "req-123",

@@ -17,7 +17,10 @@
     ☑️（DigestAckSkill）が本物（Google カレンダーと確認状態の保存先だけ偽物）、🗓・✏️ は
     本物の入出力 schema・本物のトークン復号・本物の文言で組んだ代役（Gmail 側が重いため）。
   - Slack: 偽物（conversations.open / chat.postMessage）。失敗は本番の形
-    （HTTP 200 + ``{"ok": false, "error": "channel_not_found"}``・HTTP 500）。
+    （HTTP 200 + ``{"ok": false, "error": "channel_not_found"}``・HTTP 500・conversations.open の
+    ``internal_error``・スレッドへの投稿の ``cannot_reply_to_message``・受け付けた後の時間切れ）。
+  - 押した本人だけへの一時表示: 上流の ``ctx.respond.reply``（Slack の response_url・ephemeral）。
+    失敗は上流と同じく例外のまま返る（response_url の失効）。
 """
 
 from __future__ import annotations
@@ -120,6 +123,15 @@ _HMAC_ENVS = (
 _MAIL_ACTION_SECRET = "dedicated-mail-key-" + "k" * 40
 # ダイジェストが載せる件名の上限（60 字）いっぱいの日本語の件名。
 _MAX_TITLE = ("【定例】株式会社サンプルホールディングス様 週次営業打合せ" + "あ" * 40)[:60]
+
+# plugin の文言（ACTION_BINDINGS）。テストでは実値を写して固定する（文言を変えたらここも変える）。
+_CALENDAR_UNKNOWN = "予定を登録できたか確認できませんでした。カレンダーに入っていなければ『予定入れといて』と送ってください。"
+_CALENDAR_RETRY = "予定の登録に失敗しました。もう一度押すか、『予定入れといて』と送ってください。"
+_PENDING_MAIL_DRAFT = (
+    "✏️ 返信下書きを作っています。できたらこの DM でお知らせします（数十秒かかることがあります）。"
+)
+_PENDING_SCHEDULE = "🗓 日程候補の下書きを作っています。できたらこの DM でお知らせします。"
+_STALE_TEXT = "このボタンは使えなくなっています。最新の朝ダイジェストから押してください。"
 
 # 利用者に出してはいけない内部語（ツール名・引数名・mcp の門のコード・英語の例外文）。
 _INTERNAL_WORDS = (
@@ -369,10 +381,10 @@ def _tokens() -> dict[str, str]:
     # （caller claim の時計は TEST_NOW で固定＝別の時計）。
     now = int(time.time())
 
-    def event(title: str, day: int) -> str:
+    def event(title: str, day: int, month: int = 10) -> str:
         token = encode_event_token(
-            start_iso=f"2026-10-{day:02d}T10:00:00+09:00",
-            end_iso=f"2026-10-{day:02d}T11:00:00+09:00",
+            start_iso=f"2026-{month:02d}-{day:02d}T10:00:00+09:00",
+            end_iso=f"2026-{month:02d}-{day:02d}T11:00:00+09:00",
             title=title,
             owner_email=MEMBER_EMAIL,
             now=now,
@@ -400,6 +412,12 @@ def _tokens() -> dict[str, str]:
         "eventLongTitle": event(_MAX_TITLE, 25),
         "eventForeign": event("A社だけの予定", 26),
         "eventUnknownUser": event("F社定例", 27),
+        "eventLate": event("G社定例", 2, 11),
+        "eventOpenFail": event("H社定例", 3, 11),
+        "eventPostTimeout": event("I社定例", 4, 11),
+        "eventThread": event("J社定例", 5, 11),
+        "eventThreadRejected": event("K社定例", 6, 11),
+        "eventThreadTimeout": event("L社定例", 9, 11),
         "tooLong": _legacy_escaped_event_shape("あ" * 60),
         "draft": draft,
         "draftSlow": draft_slow,
@@ -550,6 +568,9 @@ def test_calendar_press_runs_the_tool_once_and_posts_once_to_the_pressers_dm(
     assert post["text"] == f"{calendar_skill_module._OK_MSG}\n🔗 <{event_url}|カレンダーで開く>"
     _assert_user_facing(post["text"], tokens)
 
+    # 📅 はすぐ返るので、押した直後の一時表示は出さない（結果の 1 通だけ）。
+    assert case["ephemerals"] == []
+
     # 同じボタンの再押下（trigger 違い）: 何も実行しない・何も投稿しない。
     _handled_without_system_event(case["replay"])
     assert case["mcpRequests"].count("tools/call") == 1
@@ -590,6 +611,19 @@ def test_schedule_and_mail_draft_on_one_row_each_call_only_their_own_tool(
     assert schedule_text.endswith(f"\n🔗 {gmail}")
     for text in texts:
         _assert_user_facing(text, tokens)
+    # 結果まで時間のかかる 🗓・✏️ は、押した直後に本人にだけ見える 1 行を出す
+    # （上流の ctx.respond.reply＝response_url の ephemeral。押下の会話・押した本人）。
+    assert sorted(
+        (item["text"], item["responseType"], item["userId"], item["channelId"])
+        for item in case["ephemerals"]
+    ) == sorted(
+        [
+            (_PENDING_MAIL_DRAFT, "ephemeral", USER_A, DM_A),
+            (_PENDING_SCHEDULE, "ephemeral", USER_A, DM_A),
+        ]
+    )
+    for item in case["ephemerals"]:
+        _assert_user_facing(item["text"], tokens)
 
 
 # ── 3・4. ☑️ ──────────────────────────────────────────────────────────────────────
@@ -655,7 +689,12 @@ def test_double_press_while_running_executes_once(e2e: dict[str, Any]) -> None:
 def test_same_press_after_a_plugin_restart_is_stopped_by_the_mcp_one_use_nonce(
     e2e: dict[str, Any],
 ) -> None:
-    """plugin の台帳が空（再起動）でも、同じ押下は nonce が同じなので mcp が止める（二重の守り）。"""
+    """plugin の台帳が空（再起動）でも、同じ押下は nonce が同じなので mcp が止める（二重の守り）。
+
+    mcp はこの再生を CALLER_IDENTITY_REJECTED で返し、本人を確かめられない拒否と見分けられない。
+    すでに登録済みでありうるので、自由文での頼み直しを勧める失敗文（二重登録の入口）ではなく、
+    確かめてから頼み直す文（texts.unknown）にする（2026-09-29 レビュー指摘）。
+    """
     first = _tool_calls(e2e["report"]["calendar"])[0]["claim"]
     case = e2e["report"]["restartReplay"]
     _handled_without_system_event(case["pressed"])
@@ -663,10 +702,23 @@ def test_same_press_after_a_plugin_restart_is_stopped_by_the_mcp_one_use_nonce(
     assert again["nonce"] == first["nonce"]
     assert again["run_id"] != first["run_id"]
     assert [row["summary"] for row in e2e["recorder"].calendar_inserts].count("A社定例") == 1
-    assert [post["text"] for post in case["posts"]] == [
-        "予定の登録に失敗しました。『予定入れといて』と送ってください。"
-    ]
+    assert [post["text"] for post in case["posts"]] == [_CALENDAR_UNKNOWN]
+    assert any("result=gateway_caller_identity_rejected" in line for line in case["logs"])
     _assert_user_facing(case["posts"][0]["text"], e2e["tokens"])
+
+
+def test_repress_after_ten_minutes_is_still_stopped_by_the_plugin_ledger(
+    e2e: dict[str, Any],
+) -> None:
+    """押下の台帳はボタンの value の寿命（24h）より長く持つ（mcp の nonce より先に切れない）。"""
+    case = e2e["report"]["lateRepress"]
+    for name in ("first", "after11min", "after23h"):
+        _handled_without_system_event(case[name])
+    assert case["mcpRequests"].count("tools/call") == 1
+    assert [row["summary"] for row in e2e["recorder"].calendar_inserts].count("G社定例") == 1
+    assert len(case["posts"]) == 1
+    assert case["posts"][0]["text"].startswith(calendar_skill_module._OK_MSG)
+    assert sum("rejected replayed Slack button action" in line for line in case["logs"]) == 2
 
 
 # ── 8. 他人の押下 ──────────────────────────────────────────────────────────────────
@@ -735,11 +787,12 @@ def test_recombined_or_unauthorized_presses_do_nothing_at_all(e2e: dict[str, Any
 
 
 def test_mcp_gate_rejection_is_answered_with_a_fixed_sentence(e2e: dict[str, Any]) -> None:
+    """本人を解決できない拒否も CALLER_IDENTITY_REJECTED（再生と同じ code）なので、確かめる文にする。"""
     case = e2e["report"]["unknownUser"]
     _handled_without_system_event(case["pressed"])
     assert [call["name"] for call in _tool_calls(case)] == ["calendar_event"]
     assert [(post["channel"], post["text"]) for post in case["posts"]] == [
-        (DM_C, "予定の登録に失敗しました。『予定入れといて』と送ってください。")
+        (DM_C, _CALENDAR_UNKNOWN)
     ]
     _assert_user_facing(case["posts"][0]["text"], e2e["tokens"])
 
@@ -775,6 +828,8 @@ def test_timeout_after_the_tool_was_sent_does_not_invite_a_second_run(
     assert case["mcpRequests"].count("tools/call") == 1
     # mcp 側では 1 回だけ実行された（打ち切ったのは plugin の待ちだけ）。
     assert e2e["recorder"].mail_threads.count(SLOW_THREAD) == 1
+    # 押した直後の一時表示は 1 回だけ（再押下では出さない）。
+    assert [item["text"] for item in case["ephemerals"]] == [_PENDING_MAIL_DRAFT]
 
 
 @pytest.mark.parametrize(
@@ -795,6 +850,116 @@ def test_slack_failures_do_not_raise_and_do_not_rerun_the_tool(
     assert e2e["report"]["unhandledRejections"] == 0
 
 
+# ── 17. 本人の DM を確かめられない（conversations.open の失敗）────────────────────────────
+def test_dm_lookup_failure_is_not_silent_and_the_button_can_be_pressed_again(
+    e2e: dict[str, Any],
+) -> None:
+    """conversations.open が ok:false（再試行しない）でも無言にしない。押した本人にだけ一時表示で返す。"""
+    case = e2e["report"]["openApiError"]
+    _handled_without_system_event(case["failed"])
+    after = case["afterFail"]
+    assert after["slackCalls"] == ["conversations.open"]
+    assert after["mcpRequests"] == []
+    assert after["posts"] == []
+    # 押下の会話で押した本人にだけ見える（チャンネルにも他人の DM にも投稿しない）。
+    assert after["ephemerals"] == [
+        {"text": _CALENDAR_RETRY, "responseType": "ephemeral", "userId": USER_A, "channelId": DM_A}
+    ]
+    assert any(
+        "outcome=dm_unresolved reason=slack_api_internal_error notice=ephemeral" in line
+        for line in after["logs"]
+    )
+    # 何も実行していないので台帳から外れている＝Slack が戻ってから押し直すと 1 回だけ実行される。
+    _handled_without_system_event(case["again"])
+    assert case["mcpRequests"].count("tools/call") == 1
+    assert [row["summary"] for row in e2e["recorder"].calendar_inserts].count("H社定例") == 1
+    assert [post["channel"] for post in case["posts"]] == [DM_A]
+    assert case["posts"][0]["text"].startswith(calendar_skill_module._OK_MSG)
+
+
+def test_dm_lookup_failure_with_an_expired_response_url_does_not_raise(
+    e2e: dict[str, Any],
+) -> None:
+    case = e2e["report"]["openHttp500"]
+    _handled_without_system_event(case["pressed"])
+    # 5xx は 2 回まで再送してから諦める。ツールは実行しない。
+    assert case["slackCalls"] == ["conversations.open"] * 3
+    assert case["mcpRequests"] == []
+    assert case["posts"] == []
+    assert case["ephemerals"] == []
+    assert any(
+        "outcome=dm_unresolved reason=slack_http_500 notice=ephemeral_failed_unexpected" in line
+        for line in case["logs"]
+    )
+    assert e2e["report"]["unhandledRejections"] == 0
+
+
+# ── 18・19. 投稿の時間切れ・スレッド ───────────────────────────────────────────────────
+def test_result_post_accepted_then_timed_out_is_not_sent_twice(e2e: dict[str, Any]) -> None:
+    """Slack が受け付けた後にこちらの待ちが切れても再送しない（同じ結果を 2 通にしない）。"""
+    case = e2e["report"]["postTimeout"]
+    _handled_without_system_event(case["pressed"])
+    assert case["mcpRequests"].count("tools/call") == 1
+    assert case["slackCalls"].count("chat.postMessage") == 1
+    assert len(case["posts"]) == 1
+    assert any(
+        "outcome=post_failed" in line and "reason=slack_timeout" in line for line in case["logs"]
+    )
+
+
+def test_press_inside_a_thread_keeps_the_thread_in_claim_context_and_post(
+    e2e: dict[str, Any],
+) -> None:
+    case = e2e["report"]["threadPress"]
+    thread = case["thread"]
+    _handled_without_system_event(case["pressed"])
+    call = _tool_calls(case)[0]
+    assert call["claim"]["thread"] == thread
+    assert call["context"]["thread_ts"] == thread
+    assert call["claim"]["channel"] == DM_A
+    assert [row["summary"] for row in e2e["recorder"].calendar_inserts].count("J社定例") == 1
+    assert [(post["channel"], post.get("thread_ts")) for post in case["posts"]] == [(DM_A, thread)]
+
+
+def test_thread_post_rejected_falls_back_once_without_the_thread(e2e: dict[str, Any]) -> None:
+    case = e2e["report"]["threadRejected"]
+    _handled_without_system_event(case["pressed"])
+    assert case["mcpRequests"].count("tools/call") == 1
+    # スレッドへの投稿（ok:false は再試行しない）→ スレッド無しで 1 回だけ。
+    assert case["slackCalls"].count("chat.postMessage") == 2
+    assert [(post["channel"], "thread_ts" in post) for post in case["posts"]] == [(DM_A, False)]
+    assert case["posts"][0]["text"].startswith(calendar_skill_module._OK_MSG)
+    assert any("outcome=delivered result=tool_message" in line for line in case["logs"])
+
+
+def test_thread_post_timeout_does_not_fall_back_without_the_thread(e2e: dict[str, Any]) -> None:
+    case = e2e["report"]["threadTimeout"]
+    _handled_without_system_event(case["pressed"])
+    assert case["slackCalls"].count("chat.postMessage") == 1
+    assert [post.get("thread_ts") for post in case["posts"]] == [case["thread"]]
+    assert any(
+        "outcome=post_failed" in line and "reason=slack_timeout" in line for line in case["logs"]
+    )
+
+
+# ── 20. 形の合わない値の案内の 1 回性 ──────────────────────────────────────────────────
+def test_stale_value_notice_is_sent_once_per_button(e2e: dict[str, Any]) -> None:
+    case = e2e["report"]["staleTwice"]
+    _handled_without_system_event(case["first"])
+    _handled_without_system_event(case["second"])
+    assert case["mcpRequests"] == []
+    assert [(post["channel"], post["text"]) for post in case["posts"]] == [(DM_A, _STALE_TEXT)]
+
+
+def test_stale_value_notice_is_retried_after_a_failed_post(e2e: dict[str, Any]) -> None:
+    case = e2e["report"]["staleNoticeRetry"]
+    assert case["mcpRequests"] == []
+    # 1 回目は ok:false で届かない → 押し直しで届く → 3 回目は出さない。
+    assert case["slackCalls"].count("chat.postMessage") == 2
+    assert [(post["channel"], post["text"]) for post in case["posts"]] == [(DM_A, _STALE_TEXT)]
+    assert any("outcome=post_failed notice=value_shape" in line for line in case["logs"])
+
+
 # ── 15. 文面の組み立ての境界 ─────────────────────────────────────────────────────────
 def test_tool_text_cannot_inject_slack_markup(e2e: dict[str, Any]) -> None:
     render = e2e["report"]["render"]
@@ -813,6 +978,19 @@ def test_only_safe_google_https_links_become_links(e2e: dict[str, Any]) -> None:
     )
 
 
+def test_links_whose_checked_form_differs_from_the_output_are_rejected(
+    e2e: dict[str, Any],
+) -> None:
+    """検査した値（WHATWG の解釈）と Slack へ出す値がずれるリンクは通さない（2026-09-29 レビュー指摘）。"""
+    render = e2e["report"]["render"]
+    for name in ("backslashLink", "backslashQuery", "userinfoLink", "nonCanonicalLink"):
+        assert render[name]["reply"] == {"text": "登録しました"}, name
+    # リンクにできなかった URL は文からも消える（生の URL を Slack に自動リンクさせない）。
+    assert render["rawUrlInMessage"]["reply"] == {"text": "📅 登録しました"}
+    # URL の形でない値では文を削らない。
+    assert render["notAUrl"]["reply"] == {"text": "登録しました"}
+
+
 def test_undo_button_is_only_made_from_an_unack_token(e2e: dict[str, Any]) -> None:
     render = e2e["report"]["render"]
     for name in ("undoWrongType", "undoGarbage"):
@@ -822,7 +1000,10 @@ def test_undo_button_is_only_made_from_an_unack_token(e2e: dict[str, Any]) -> No
 def test_gateway_errors_and_broken_results_become_fixed_sentences(e2e: dict[str, Any]) -> None:
     render = e2e["report"]["render"]
     expected = {
-        "gatewayError": "日程候補の下書きを作れませんでした。お手数ですが Gmail から直接ご返信ください。",
+        # CALLER_IDENTITY_REJECTED は one-use nonce の再生（実行済み）と見分けられない → 確かめる文。
+        "gatewayError": "日程候補の下書きを作れたか確認できませんでした。Gmail の下書きをご確認ください。",
+        # それ以外の門の拒否（ツールは走っていない）→ 別の頼み方を案内する文。
+        "gatewayOther": "日程候補の下書きを作れませんでした。お手数ですが Gmail から直接ご返信ください。",
         "exception": (
             "返信下書きを作れませんでした。お手数ですが『（件名）の返信下書きを作って』と送ってください。"
         ),
@@ -834,6 +1015,7 @@ def test_gateway_errors_and_broken_results_become_fixed_sentences(e2e: dict[str,
         assert render[name]["reply"] == {"text": text}, name
         _assert_user_facing(render[name]["reply"]["text"], e2e["tokens"])
     assert render["gatewayError"]["result"] == "gateway_caller_identity_rejected"
+    assert render["gatewayOther"]["result"] == "gateway_tool_input_invalid"
 
 
 def test_reply_fields_the_plugin_reads_exist_in_each_tools_output_schema() -> None:
