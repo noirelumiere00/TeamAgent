@@ -21,17 +21,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
+from structlog.testing import capture_logs
 
 from teamagent.skills.morning_digest import calendar_window as calwin
 from teamagent.skills.morning_digest.schema import (
@@ -601,6 +605,229 @@ def test_admin_report_says_target_fetch_failed() -> None:
     text, problem = mod._format_admin_report([], day=DAY, users=0, target_error="OperationalError")
     assert problem
     assert "⚠️ 対象者を取得できず、誰にも配信していません（原因: OperationalError）" in text
+
+
+def test_admin_report_flags_a_day_with_only_partially_unreadable_mail() -> None:
+    """取得はすべて ok でも、スレッドが一部読めなかった日は「問題あり」で内訳を出す。
+
+    変異: problem の判定から partial を外すと、この日が 1 行だけになって赤。
+    """
+    outcomes = [
+        _outcome("m-ito@vectorinc.co.jp", _digest(n_high=2, threads_failed=2)),
+        _outcome("ok@vectorinc.co.jp", _digest(n_high=1)),
+    ]
+    text, problem = mod._format_admin_report(outcomes, day=DAY, users=2)
+    assert problem
+    assert text.split("\n")[0].endswith("｜対象 2・配信 2・配信失敗 0・未連携 0")
+    assert "・一部のメールを読み込めなかった: 1 人（計 2 件）" in text
+    assert "取得できなかった" not in text  # 取得そのものは成功している
+
+
+def test_admin_report_codes_are_sanitised_even_if_a_detail_carries_contents() -> None:
+    """内訳コード・配信失敗の型名・対象者の取得失敗の型名に中身が紛れても、記号・空白・
+    日本語は落ちる（_safe_code は管理者 DM に中身を混ぜない最後の砦）。
+
+    変異: _safe_code を素通しにすると、件名・相手・「<」「@」が本文に出て赤。
+    """
+    dirty = _digest(mail="temporary", n_high=0)
+    dirty.mail_fetch_detail = f"HttpError:503 {SECRET_SUBJECT} <{SECRET_WHO}@client.example>"
+    outcomes = [
+        _outcome("k-sato@vectorinc.co.jp", dirty),
+        _outcome(
+            "n-kato@vectorinc.co.jp",
+            _digest(n_high=1),
+            status="error",
+            reason="deliver_failed",
+            error=f"Boom {SECRET_WHO}; 件名={SECRET_SUBJECT}",
+        ),
+    ]
+    text, problem = mod._format_admin_report(
+        outcomes, day=DAY, users=2, target_error=f"Operational Error {SECRET_SUBJECT}"
+    )
+    assert problem
+    for leak in (SECRET_SUBJECT, SECRET_WHO, "<", "@", ";", "=", "client.example"):
+        assert leak not in text, leak
+    breakdown = next(line for line in text.split("\n") if line.startswith("原因の内訳: "))
+    items = breakdown.removeprefix("原因の内訳: ").split(", ")
+    assert items and all(re.fullmatch(r"[A-Za-z0-9_:]+×\d+", item) for item in items), items
+    # 件名の中の ASCII（"X"）だけは英数字なので残る。記号・空白・日本語は 1 文字も残らない。
+    assert re.search(r"（原因: OperationalError[A-Za-z0-9_:]*）", text)
+
+
+# ── 管理者 DM: 誰にも届かなかった朝を「問題なし」にしない ────────────────────
+
+
+class _DeliveryPg:
+    """DigestDeliveryStore が使う pg の形（connection → cursor.execute / rowcount）。
+
+    ``fail`` は本番で起きた失敗の形: 最小権限ロールで ON CONFLICT が
+    ``InsufficientPrivilege`` で落ちる（2026-08-14 の事故と同じ例外）。
+    ``taken`` は一意制約で 2 回目の INSERT が 0 行になる形（既に別経路が送った）。
+    """
+
+    def __init__(self, *, fail: bool = False, taken: bool = False) -> None:
+        self.fail = fail
+        self.taken = taken
+
+    @contextlib.contextmanager
+    def connection(self, **_: Any) -> Any:
+        yield self
+
+    @contextlib.contextmanager
+    def cursor(self) -> Any:
+        yield self
+
+    rowcount = 0
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if self.fail:
+            raise psycopg.errors.InsufficientPrivilege(
+                "permission denied for table digest_delivery"
+            )
+        self.rowcount = 0 if (self.taken or params is None) else 1
+
+    def commit(self) -> None:
+        return None
+
+
+class _NeverRunSkill:
+    def run(self, _inp: Any, _ctx: Any) -> Any:
+        raise AssertionError("配信権を取れなかった人の skill は呼ばない（fail-closed）")
+
+
+def _claim_outcomes(pg: _DeliveryPg, n: int) -> list[Any]:
+    from teamagent.adapters.digest_delivery_store import DigestDeliveryStore
+
+    store = DigestDeliveryStore(pg)
+    outcomes: list[Any] = []
+    for i in range(n):
+        result = mod._process_user(
+            _NeverRunSkill(),
+            None,
+            f"u{i}@vectorinc.co.jp",
+            store=store,
+            day=DAY,
+            origin="bulk",
+            sink=outcomes,
+        )
+        assert result == "skipped"  # 戻り値の型と意味は変えない
+    return outcomes
+
+
+def test_claim_db_failure_is_a_problem_not_already_delivered() -> None:
+    """配信権の DB 確認が落ちた朝（誰にも届かない）を「送信済み」と数えて「問題なし」にしない。
+
+    変異: _process_user で claim の失敗を already_delivered に戻す／problem の判定から外す／
+    DigestDeliveryStore.claim_result の例外を CLAIM_TAKEN に倒す、のどれでも赤。
+    """
+    outcomes = _claim_outcomes(_DeliveryPg(fail=True), 23)
+    text, problem = mod._format_admin_report(outcomes, day=DAY, users=23)
+    assert problem
+    head = text.split("\n")[0]
+    assert head.endswith("｜対象 23・配信 0・配信失敗 0・未連携 0・送信の確認失敗 23")
+    assert "送信済み" not in head
+    assert "・送信済みかを DB で確かめられず、送らなかった: 23 人" in text
+
+
+def test_already_delivered_by_another_route_is_not_a_problem() -> None:
+    """一意制約で既に取られていた（予約の 1 人実行が送った）は正常＝1 行のまま。"""
+    outcomes = _claim_outcomes(_DeliveryPg(taken=True), 3)
+    text, problem = mod._format_admin_report(outcomes, day=DAY, users=3)
+    assert not problem
+    assert text.endswith("｜対象 3・配信 0・配信失敗 0・未連携 0・送信済み 3")
+
+
+def test_store_without_claim_result_keeps_the_old_meaning() -> None:
+    """claim（真偽）しか持たないストアは、False を従来どおり「送信済み」とみなす。"""
+
+    class _BoolStore:
+        def claim(self, *_: Any, **__: Any) -> bool:
+            return False
+
+    outcomes: list[Any] = []
+    mod._process_user(
+        _NeverRunSkill(), None, ME, store=_BoolStore(), day=DAY, origin="bulk", sink=outcomes
+    )
+    assert [o.reason for o in outcomes] == ["already_delivered"]
+
+
+class _RdsCursor:
+    def __init__(self, rows: list[tuple[str]]) -> None:
+        self.rows = rows
+
+    def __enter__(self) -> _RdsCursor:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        return None
+
+    def execute(self, _sql: str, *_: Any) -> None:
+        return None
+
+    def fetchall(self) -> list[tuple[str]]:
+        return self.rows
+
+
+class _RdsConn:
+    def __init__(self, rows: list[tuple[str]]) -> None:
+        self.rows = rows
+
+    def __enter__(self) -> _RdsConn:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        return None
+
+    def cursor(self) -> _RdsCursor:
+        return _RdsCursor(self.rows)
+
+
+def _fake_rds(monkeypatch: pytest.MonkeyPatch, rows: list[tuple[str]]) -> None:
+    import types
+
+    monkeypatch.setitem(
+        sys.modules, "psycopg", types.SimpleNamespace(connect=lambda dsn: _RdsConn(rows))
+    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x@localhost/db")
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [([], "rds_zero_rows"), ([("A@vectorinc.co.jp",)], None)],
+)
+def test_rds_zero_rows_is_marked_as_a_target_failure(
+    monkeypatch: pytest.MonkeyPatch, rows: list[tuple[str]], expected: str | None
+) -> None:
+    _fake_rds(monkeypatch, rows)
+    monkeypatch.setattr(mod, "_TARGET_FETCH_ERROR", None)
+    mod._fetch_connected_users_from_rds()
+    assert mod._TARGET_FETCH_ERROR == expected
+
+
+def test_main_reports_rds_zero_rows_instead_of_a_quiet_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RDS が例外なしで 0 行を返した朝（GUC・RLS が崩れた形）は、「対象 0」の 1 行で済ませず
+    ⚠️ で知らせ、ERROR のイベント（警報の対象）も出す。
+
+    変異: 0 行の印を付けない／main() の ERROR を出さない、のどちらでも赤。
+    """
+    monkeypatch.setenv("MORNING_DIGEST_ADMIN_REPORT_EMAILS", ME)
+    _fake_rds(monkeypatch, [])
+    calls: list[str] = []
+
+    async def _admin(recipients: list[str], text: str) -> tuple[int, int]:
+        calls.append(text)
+        return (1, 0)
+
+    monkeypatch.setattr(mod, "_deliver_admin_report", _admin)
+    with capture_logs() as logs:
+        assert mod.main() == 0
+    assert len(calls) == 1
+    assert "｜対象 0・配信 0" in calls[0]
+    assert "⚠️ 連携済みの対象者が 0 人と返り、誰にも配信していません" in calls[0]
+    failed = [e for e in logs if e["event"] == "morning_digest_target_fetch_failed"]
+    assert [(e["err"], e["log_level"]) for e in failed] == [("rds_zero_rows", "error")]
 
 
 # ── main() の結合 ───────────────────────────────────────────────────────────

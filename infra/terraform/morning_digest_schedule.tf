@@ -211,6 +211,109 @@ resource "aws_cloudwatch_metric_alarm" "morning_digest_triage_dead" {
   ok_actions         = [aws_sns_topic.alarms.arn]
 }
 
+# ---------- F0（PR-0a）: 連携切れ・取得失敗・対象者の取得失敗の警報（定義だけ） ----------
+# ⚠️ どれも JSON セレクタなので、runner が configure_logging()（STRUCTLOG_FORMAT=json）を呼んで
+#    いることが前提（PR-0a で main() の先頭に入れた）。本番への反映は guard の開通後。
+#    guard の sync plan は新しい create を止めるので、反映は config migration の
+#    to.allowed_resource_changes に下の 6 つの address を載せて行う。
+# ⚠️ pattern のイベント名と reason の値は tests/scripts/test_digest_f0_alarm_contract.py が
+#    コードを実際に動かして出た JSON に当てて確かめる（片方だけ変えると赤）。
+
+# メールか予定を「一時的な失敗」で取れなかった（再連携では直らない側・1 件から鳴らす）。
+# 失効・権限不足は利用者の再連携で直るので、下の「大量発生」だけで見る。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_fetch_failed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-fetch-failed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_fetch_failed\" && $.reason = \"temporary\" }"
+
+  metric_transformation {
+    name          = "MorningDigestFetchFailed"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_fetch_failed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-fetch-failed"
+  alarm_description   = "朝ダイジェストでメールか予定を一時的な失敗で取れなかった（本人の DM には「確認できませんでした」と出る。管理者 DM の原因の内訳を見る）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestFetchFailed"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  # 朝ダイジェストは平日の朝だけ走る。走っていない時間帯の欠測は異常ではない。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
+# 再連携が必要な人（失効・権限不足）の大量発生。1 人の失効はメールと予定で 2 件出るので、
+# メールの節だけを数えて「人数」に近づける。アプリのアクセス取り消しなど、管理側の変更を疑う。
+# 個人別配信（予約の 1 人実行）で朝のうちに散らばるので、窓は 1 時間にする。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_reauth_needed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-reauth-needed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_fetch_failed\" && $.section = \"mail\" && ($.reason = \"token_expired\" || $.reason = \"scope_missing\") }"
+
+  metric_transformation {
+    name          = "MorningDigestReauthNeeded"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_reauth_needed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-reauth-needed"
+  alarm_description   = "朝ダイジェストで再連携が必要な人が 1 時間に 3 人以上（アプリのアクセス取り消しなど管理側の変更を疑う・名前は管理者 DM）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestReauthNeeded"
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 1
+  threshold           = 3
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# 対象者を取得できなかった（RDS の例外・DATABASE_URL 欠落・例外なしの 0 行）＝その朝は誰にも
+# 届かない。ERROR 1 件だけでは error_spike（5 分で 3 件以上）に届かないので専用計で 1 件から鳴らす。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_target_fetch_failed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-target-fetch-failed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_target_fetch_failed\" }"
+
+  metric_transformation {
+    name          = "MorningDigestTargetFetchFailed"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_target_fetch_failed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-target-fetch-failed"
+  alarm_description   = "朝ダイジェストの対象者を取得できず、誰にも配信していない（DB の接続・権限・RLS を確認）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestTargetFetchFailed"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
 # 事例ブリーフの「静かな死」を拾う専用計。
 # ⚠️ RLS の穴（user_groups を落とす等）を踏んだときの症状は例外ではなく
 # 「社外MTGはあるのに事例が毎朝 0 件で正常終了」＝既存の error alarm には合流しない。

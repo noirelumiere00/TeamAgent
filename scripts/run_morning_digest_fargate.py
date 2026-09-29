@@ -27,6 +27,8 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED as _CLAIM_CLAIMED
+from teamagent.adapters.digest_delivery_store import CLAIM_TAKEN as _CLAIM_TAKEN
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
 from teamagent.skills._shared import slack_handoff as _handoff
@@ -86,6 +88,11 @@ def _apply_exclude(users: list[str]) -> list[str]:
 #: 「対象 0 人」と「取得できず誰にも送っていない」を main() が区別するための印。
 _TARGET_FETCH_ERROR: str | None = None
 
+#: RDS の連携済み一覧が例外なしで 0 行だった印。連携済みの利用者がいる本番では起こらない
+#: はずの形で、GUC・RLS・ロールの権限が崩れたときの症状（下の SET app.user_role の注記と
+#: 同じ事故）。例外が無いので型名では拾えず、ここで失敗として扱う。
+TARGET_ZERO_ROWS = "rds_zero_rows"
+
 
 def _fetch_connected_users_from_rds() -> list[str]:
     """RDS oauth_tokens から連携済 user_email を取得。"""
@@ -107,7 +114,12 @@ def _fetch_connected_users_from_rds() -> list[str]:
                 cur.execute("SET app.user_role = 'admin'")
                 cur.execute("SELECT user_email FROM oauth_tokens")
                 rows = cur.fetchall()
-        return [str(r[0]).strip().lower() for r in rows if r and r[0]]
+        users = [str(r[0]).strip().lower() for r in rows if r and r[0]]
+        if not users:
+            # 例外なしの 0 行も「誰にも届かない」朝。main() が ERROR と管理者 DM で知らせる。
+            print("[run_morning_digest_fargate] WARN: RDS 連携済抽出 0 行", file=sys.stderr)
+            _TARGET_FETCH_ERROR = TARGET_ZERO_ROWS
+        return users
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: RDS 連携済抽出失敗 {type(exc).__name__}",
@@ -2006,6 +2018,20 @@ def _delivery_store() -> Any | None:
     return DigestDeliveryStore()
 
 
+def _claim_delivery(store: Any, email: str, day: _dt.date, *, origin: str, request_id: str) -> str:
+    """配信権を取り、結果を claimed / taken / failed の 3 通りで返す（送ってよいのは claimed だけ）。
+
+    本物の ``DigestDeliveryStore`` は ``claim_result`` で 3 通りを返す。``claim``（真偽）しか
+    持たないストアは、False を「既に取られている」とみなす（従来どおり）。
+    """
+    claim_result = getattr(store, "claim_result", None)
+    if callable(claim_result):
+        return str(claim_result(email, day, origin=origin, request_id=request_id))
+    if store.claim(email, day, origin=origin, request_id=request_id):
+        return _CLAIM_CLAIMED
+    return _CLAIM_TAKEN
+
+
 # ===========================================================================
 # F0: 管理者 DM（MORNING_DIGEST_ADMIN_REPORT_EMAILS・既定 OFF）と実行結果の集計
 # ===========================================================================
@@ -2204,14 +2230,24 @@ def _format_admin_report(
     errors = [o for o in outcomes if o.status == "error"]
     not_connected = sum(1 for o in outcomes if o.reason == "not_connected")
     already = sum(1 for o in outcomes if o.reason == "already_delivered")
+    # 配信権（digest_delivery）を DB で確かめられず、送らずに止めた人。「送信済み」とは別に数える
+    # （DB 障害の朝は全員がここに入り、誰にも届かない）。
+    claim_failed = sum(1 for o in outcomes if o.reason == "claim_failed")
     head = (
         f"🔧 朝ダイジェスト {_calwin.fmt_jst_date(day)} の実行結果（管理者向け）"
         f"｜対象 {users}・配信 {delivered}・配信失敗 {len(errors)}・未連携 {not_connected}"
     )
     if already:
         head += f"・送信済み {already}"
+    if claim_failed:
+        head += f"・送信の確認失敗 {claim_failed}"
     lines = [head]
-    if target_error:
+    if target_error == TARGET_ZERO_ROWS:
+        lines.append(
+            "⚠️ 連携済みの対象者が 0 人と返り、誰にも配信していません"
+            "（連携済みの人がいるはずなら、DB の権限と RLS の設定を確認）"
+        )
+    elif target_error:
         lines.append(
             f"⚠️ 対象者を取得できず、誰にも配信していません（原因: {_safe_code(target_error, 40)}）"
         )
@@ -2229,9 +2265,15 @@ def _format_admin_report(
                 by_state.setdefault(state, []).append(o)
                 break  # 1 人 1 区分（失効 > 権限不足 > 一時的 > 不明 の順で代表させる）
     partial = [o for o in fetched if o.mail_fetch == FETCH_OK and o.mail_threads_failed > 0]
-    problem = bool(target_error or errors or mail_bad or cal_bad or partial)
+    problem = bool(target_error or errors or mail_bad or cal_bad or partial or claim_failed)
     if not problem:
         return "\n".join(lines), False
+
+    if claim_failed:
+        lines.append(
+            f"・送信済みかを DB で確かめられず、送らなかった: {claim_failed} 人"
+            "（二重配信を避けて止めています。DB の接続と digest_delivery の権限を確認）"
+        )
 
     if mail_bad or cal_bad:
         lines.append(f"取得できなかった: メール {len(mail_bad)} 人・予定 {len(cal_bad)} 人")
@@ -2321,6 +2363,7 @@ def _log_run_done(outcomes: list[UserOutcome], summary: dict[str, int]) -> None:
         scope_missing=states.count(FETCH_SCOPE_MISSING),
         temporary=states.count(FETCH_TEMPORARY),
         threads_failed_users=sum(1 for o in fetched if o.mail_threads_failed > 0),
+        claim_failed=sum(1 for o in outcomes if o.reason == "claim_failed"),
     )
 
 
@@ -2354,10 +2397,14 @@ def _process_user(
 
     request_id = f"morning-{uuid.uuid4().hex[:10]}"
     target_day = day or _dt.datetime.now(tz=_JST).date()
-    if store is not None and not store.claim(
-        email, target_day, origin=origin, request_id=request_id
-    ):
-        return _done("skipped", "already_delivered")
+    if store is not None:
+        verdict = _claim_delivery(store, email, target_day, origin=origin, request_id=request_id)
+        if verdict != _CLAIM_CLAIMED:
+            # 「別の経路が送った（正常）」と「DB で確かめられず止めた（全員に届かない障害）」を
+            # 数え分ける。どちらも送らない（fail-closed）のは同じ。
+            return _done(
+                "skipped", "already_delivered" if verdict == _CLAIM_TAKEN else "claim_failed"
+            )
     ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
     try:
         digest = skill.run(skill_input, ctx)
