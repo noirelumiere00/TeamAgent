@@ -635,7 +635,9 @@ def test_campaign_floor_never_adds_non_campaign_docs() -> None:
     assert len(pg.calls) == len(pg0.calls) + 1  # fail-open の再検索が無い
     assert all(_is_campaign_call(c) for c in pg.calls[len(pg0.calls) :])
     assert pools == pools0  # プールは 1 件も増えない
-    assert not [e for e in logs if e.get("event") == "search_campaign_floor_applied"]
+    # 発火したことは added=0 で必ず残す（HNSW の候補内で 0 件になった本番を見分けるため）
+    applied = [e for e in logs if e.get("event") == "search_campaign_floor_applied"]
+    assert [(e["added"], e["top_score"]) for e in applied] == [(0, None)]
 
 
 def test_campaign_floor_does_not_duplicate_chunks() -> None:

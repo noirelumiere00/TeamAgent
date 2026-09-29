@@ -1522,16 +1522,17 @@ class SearchSkill(BaseSkill[SearchInput, SearchOutput]):
                 error=type(exc).__name__,
             )
             return hits
-        if added:
-            logger.info(
-                "search_campaign_floor_applied",
-                request_id=request_id,
-                floor=floor,
-                present=present,
-                added=len(added),
-                pool_before=len(hits),
-                top_score=added[0].score,
-            )
+        # 発火したら added=0 でも出す。HNSW（ef_search）の候補の中で絞るため、件数の少ない
+        # 施策実績は 0 件になりうる。0 件が続くなら hnsw.iterative_scan を検討する（09-29）。
+        logger.info(
+            "search_campaign_floor_applied",
+            request_id=request_id,
+            floor=floor,
+            present=present,
+            added=len(added),
+            pool_before=len(hits),
+            top_score=(added[0].score if added else None),
+        )
         return list(hits) + added
 
     # ── 二段返し（ヒット先出し → 回答後追い）。USE_SEARCH_TWO_STAGE 既定 OFF ──────────
