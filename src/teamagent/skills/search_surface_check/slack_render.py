@@ -5,9 +5,9 @@ mcp が Slack API へ直接出す経路（``mcp_gateway/direct_summary.py`` と
 （標準 Markdown・Aico が中継する経路）はそのまま残す。部品と守りは ``_shared/slack_blocks.py``。
 
 並び（1 通完結・スマホで上半分だけ読めば判断できる順）:
-  見出し → 集計の日時と取得の経路 → 結論 → クライアントの現状 → 顔ぶれ（欄）→ フォロワー帯 →
-  常連 → 上位全体の数字（段階つき）→ 切り口（AI の分類）→ AI の読み → ── → 上位 5 本（1 本 1 行・
-  投稿への文字リンク）→ 次に届くもの → レポートの文字リンク → 注記・概算
+  見出し → 集計の日時と取得の経路 → 結論 → クライアントの現状 → 顔ぶれ（欄）→ 常連 →
+  入り口の手がかり（段階つき・3 行まで）→ 切り口（AI の分類）→ AI の読み → ── →
+  上位 5 本（1 本 1 行・投稿への文字リンク）→ 次に届くもの → レポートの文字リンク → 注記・概算
 最上位の text（スクリーンリーダーが読む・通知・会話の履歴）には、blocks と同じ中身をすべて入れる
 （``slack_blocks.message_text``）。
 
@@ -25,8 +25,9 @@ mcp が Slack API へ直接出す経路（``mcp_gateway/direct_summary.py`` と
   にそろえる（すぐ上の集計の行と食い違って見せない）。
 
 Slack には出さず、レポートに任せるもの（1 通の長さを抑えるため）:
-- 1 段目: 6 位以降の行・キャプション・順位と再生の一致度・よく付くタグの 4 位以下・
-  勝ち筋と空白の全文
+- 1 段目: 6 位以降の行・キャプション・フォロワー帯・再生÷フォロワー・保存率の上位の一覧・尺・
+  よく付くタグ・PR 表記の順位一覧（上位 5 本の行には PR 表記を付ける）・順位と再生の一致度・
+  勝ち筋と空白の全文（09-29 小俣さん「Slack での書き方が見づらい」→ 1 通を短くする）
 - 2 段目: CTA の種類（分類の検証前）・勝ち筋（winning）の全文
 """
 
@@ -91,10 +92,8 @@ _TOP_COMPACT = 3
 _TOP_URLS_IN_TEXT = 5
 _HOLDERS = 3
 _SMALL_EXAMPLES = 2
-_SAVE_LEADERS = 3
 _RANK_LINKS = 5
 _SMALL_ACCOUNT_MAX = 10_000
-_TAGS = 3
 
 REUSED_NOTE = "24 時間以内の同じ分析の結果です（動画分析の回数は使っていません）"
 # 通知文の先頭（文字だけの追記の先頭行＝surface_video_followup.REUSED_PREFIX と同じ）。
@@ -276,15 +275,6 @@ def _lineup_block(facts: SurfaceFacts) -> Block | None:
     )
 
 
-def _tier_block(facts: SurfaceFacts) -> Block | None:
-    if not facts.tiers:
-        return None
-    lines = [
-        f"• {esc(t.tier)} {t.count}/{facts.n}本・再生の{fmt_pct(t.play_share)}" for t in facts.tiers
-    ]
-    return section(":bar_chart: *フォロワー帯* （本数・再生の割合）\n" + "\n".join(lines))
-
-
 def _holder_block(facts: SurfaceFacts, posts: dict[int, SurfacePost]) -> Block | None:
     if not facts.holders:
         if not facts.n:
@@ -325,15 +315,6 @@ def _overall_block(
             )
             line += f"\n　例: {examples}"
         lines.append(line)
-    if facts.reach_ratio_median is not None:
-        lines.append(f"• 再生÷フォロワーの中央値: {facts.reach_ratio_median:g}倍")
-    if facts.save_leaders:
-        leaders = "・".join(
-            f"{link(post_url(posts[s.rank].url) if s.rank in posts else None, f'{s.rank}位')} "
-            f"{s.save_rate_pct:g}%"
-            for s in facts.save_leaders[:_SAVE_LEADERS]
-        )
-        lines.append(f"• 保存率が高い投稿: {leaders}")
     if facts.kw_in_text is not None and facts.n:
         lines.append(
             f"• 本文かタグに「{esc(keyword)}」の語をすべて含む: {facts.kw_in_text}/{facts.n}本"
@@ -347,16 +328,9 @@ def _overall_block(
         if facts.median_age_days is not None:
             line += f"・投稿時期の中央値 {fmt_age(facts.median_age_days)}"
         lines.append(line)
-    if facts.median_duration_sec:
-        lines.append(f"• 尺の中央値: {fmt_duration(facts.median_duration_sec)}")
-    if facts.top_tags:
-        tags = "・".join(f"#{esc(t.tag)} {t.count}本" for t in facts.top_tags[:_TAGS])
-        lines.append(f"• よく付くタグ: {tags}")
-    if facts.pr_ranks:
-        lines.append(f"• PR表記のある投稿（ブランドは問わない）: {fmt_ranks(facts.pr_ranks)}")
     if not lines:
         return None
-    return section(f":mag_right: *上位{facts.n}本全体*\n" + "\n".join(lines))
+    return section(f":mag_right: *入り口の手がかり* （上位{facts.n}本）\n" + "\n".join(lines))
 
 
 def _angle_block(c: SurfaceConclusion | None) -> Block | None:
@@ -432,7 +406,6 @@ def _single_head(
     if facts is not None:
         blocks += [
             _lineup_block(facts),
-            _tier_block(facts),
             _holder_block(facts, posts),
             _overall_block(facts, surface.keyword, posts),
         ]

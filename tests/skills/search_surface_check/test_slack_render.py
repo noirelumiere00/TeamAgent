@@ -142,18 +142,12 @@ def test_a_is_well_formed_block_kit() -> None:
 
 
 def test_a_shows_the_measured_time_and_what_was_asked_before() -> None:
-    """「前と違う・古い？」: 集計の時刻と取り方・フォロワー帯・常連の縦並び。"""
+    """「前と違う・古い？」: 集計の時刻と取り方・常連の縦並び（フォロワー帯はレポートへ）。"""
     msg = surface_message(shape.a_output(), shape.a_input())
     assert msg is not None
     assert msg.blocks[1]["elements"][0]["text"] == (
         f"TikTok 上位30本・2026-09-28 17:00 {LIVE_NOTE}"
     )
-    tiers = _section_with(msg.blocks, "フォロワー帯")
-    assert tiers.splitlines()[1:] == [
-        "• 10万〜100万人 9/30本・再生の46%",
-        "• 1万〜10万人 15/30本・再生の42%",
-        "• 1万人未満 6/30本・再生の12%",
-    ]
     holders = _section_with(msg.blocks, "常連")
     assert holders.splitlines()[1:] == [
         "• @kurashiru.com（メディア・41.2万人） 4枠: 8・9・12・26位",
@@ -260,20 +254,38 @@ def test_a_notes_that_must_not_be_dropped() -> None:
 def test_a_overall_numbers_with_stage_words_and_links_to_the_right_posts() -> None:
     msg = surface_message(shape.a_output(), shape.a_input())
     assert msg is not None
-    overall = _section_with(msg.blocks, "上位30本全体")
-    assert overall.splitlines()[1:] == [
+    overall = _section_with(msg.blocks, "入り口の手がかり")
+    assert overall.splitlines() == [
+        ":mag_right: *入り口の手がかり* （上位30本）",
         "• フォロワー1万人未満の投稿者: 上位10本中 3本（少数派）",
         f"　例: <{_url(2)}|2位> @spice_koki 2,930人・<{_url(7)}|7位> @sample_small7 5,100人",
-        "• 再生÷フォロワーの中央値: 2.78倍",
-        # 保存率の上位は集計の値（LLM の丸めた「1.6～2.9%」ではなく）を、その順位の投稿へのリンクで
-        f"• 保存率が高い投稿: <{_url(27)}|27位> 2.88%・<{_url(11)}|11位> 2.38%"
-        f"・<{_url(21)}|21位> 1.62%",
         f"• 本文かタグに「{shape.KEYWORD}」の語をすべて含む: 7/30本（少数派）",
         "• 直近90日の投稿: 5/30本（少数派）・投稿時期の中央値 11か月前",
-        "• 尺の中央値: 1分00秒",
-        "• よく付くタグ: #スパイスカレー 19本・#カレー 9本・#スパイス 6本",
-        "• PR表記のある投稿（ブランドは問わない）: 1・6・12・14・16位",
     ]
+
+
+def test_a_is_short_and_leaves_the_fine_numbers_to_the_report() -> None:
+    """09-29「Slack での書き方が見づらい」: 1 通を短くし、細かい数字はレポートに任せる。"""
+    msg = surface_message(shape.a_output(), shape.a_input())
+    assert msg is not None
+    whole = body(msg.blocks)
+    for moved in (
+        "フォロワー帯",
+        "再生÷フォロワー",
+        "保存率が高い投稿:",
+        "尺の中央値",
+        "よく付くタグ",
+        "PR表記のある投稿",
+        "上位30本全体",
+    ):
+        assert moved not in whole, moved
+        assert moved not in msg.text, moved
+    # PR 表記は上位 5 本の行に残る（タイアップの見落としを防ぐ）
+    assert "［PR表記］" in _section_with(msg.blocks, "*上位5本*")
+    # 大きさの上限（09-29 に削った後の実測 15 blocks・44 行）。増やすときはレポートに回せないかを先に考える
+    lines = sum(len(t.splitlines()) for t in mrkdwn_texts(msg.blocks))
+    assert len(msg.blocks) <= 15, len(msg.blocks)
+    assert lines <= 44, lines
 
 
 def test_a_no_holders_is_said_in_words() -> None:
@@ -374,7 +386,7 @@ def test_a_text_has_everything_in_the_blocks_for_screen_readers() -> None:
     _assert_text_has_every_block(msg, skip=1)
     for needle in (
         "• @kurashiru.com（メディア・41.2万人） 4枠: 8・9・12・26位",
-        "• 10万〜100万人 9/30本・再生の46%",
+        "• 直近90日の投稿: 5/30本（少数派）・投稿時期の中央値 11か月前",
         "7/30本（少数派）",
         followup_notice_line(5),
         f"<{shape.A_REPORT}|レポートを開く>",
