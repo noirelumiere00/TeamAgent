@@ -100,5 +100,55 @@ def test_skill_wires_proposal_urls_and_slack_links(monkeypatch, tmp_path) -> Non
     assert out.slides_url == "https://signed.example/slides"
     assert out.pptx_url == "https://signed.example/pptx"
     summary = skill._slack_summary(out)
-    assert "提案用パワポ" in summary and "https://signed.example/pptx" in summary
+    assert (
+        "画像のパワポ（文字の修正はHTML版で" in summary and "https://signed.example/pptx" in summary
+    )
+    assert "提案用パワポ" not in summary
     assert "編集用スライド" in summary
+
+
+# ── T21 編集ヒント（[data-noexport]）を撮影の前に隠す ───────────────────────────
+
+
+def test_shoot_sections_hides_noexport_before_screenshots(monkeypatch) -> None:
+    """壊し方: shoot_sections の add_style_tag を外す → 赤。"""
+    from teamagent.skills.video_algorithm.pptx_export import shoot_sections
+    from tests.skills.video_algorithm.chromium import (
+        FakePlaywright,
+        assert_hidden_before_shots,
+        install_fake_playwright,
+    )
+
+    calls: list[tuple[str, object]] = []
+    install_fake_playwright(monkeypatch, FakePlaywright(calls))
+    pngs = shoot_sections("<html><section class='slide'></section></html>")
+    assert len(pngs) == 2
+    assert_hidden_before_shots(calls)
+
+
+def test_shoot_sections_real_browser_has_no_edit_tip(monkeypatch) -> None:
+    """実描画（chromium が無ければ skip）: 全スライドの左上が白い（編集ヒントが写らない）。
+
+    壊し方: add_style_tag を外す → 左上に暗い帯（編集ヒント）が写って赤。
+    """
+    import pytest
+
+    from teamagent.skills.video_algorithm.pptx_export import shoot_sections
+    from teamagent.skills.video_algorithm.slides import render_slides
+    from tests.skills.video_algorithm.chromium import (
+        chromium_path,
+        edit_tip_brightness,
+        launched_browser,
+    )
+
+    with launched_browser():
+        pass  # 起動できなければここで skip
+    exe = chromium_path()
+    if exe is None:
+        pytest.skip("CHROMIUM_PATH が無い")
+    monkeypatch.setenv("CHROMIUM_PATH", exe)
+    out = VideoAlgorithmOutput(query="新宿 ランチ")
+    pngs = shoot_sections(render_slides(out))
+    assert pngs
+    for png in pngs:
+        assert edit_tip_brightness(png) > 245

@@ -791,6 +791,7 @@ async def test_lease_held_elsewhere_is_rephrased_without_code_names(
         acquire_job_id=input_obj.acquire_job_id,
         search_volume=input_obj.search_volume,
         requester=ME,
+        synthesis_version=skill._synthesis_version,
     )
     assert cache.acquire_lease(key, request_id="other-process") is not None
 

@@ -28,6 +28,7 @@ from teamagent.skills.search_surface_check.video_notes import (
     structure_payload,
 )
 from teamagent.skills.search_surface_check.video_render import render_video_chapter
+from teamagent.skills.video_algorithm.evidence import Roster
 from teamagent.skills.video_algorithm.frames import MAX_SCENE_FRAMES, scene_timecodes
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
@@ -46,17 +47,29 @@ KW = "スパイスカレー"
 
 
 def _video(
-    analysis: dict[str, Any], *, rank: int = 1, frames: list[FrameShot] | None = None
+    analysis: dict[str, Any],
+    *,
+    rank: int = 1,
+    frames: list[FrameShot] | None = None,
+    desc: str = "",
 ) -> Any:
     return AnalyzedVideo(
-        meta=VideoMeta(rank=rank, author=f"u{rank}", duration_sec=30.0),
+        meta=VideoMeta(rank=rank, author=f"u{rank}", duration_sec=30.0, desc=desc),
         analysis=VideoVSEOAnalysis.model_validate(analysis),
         frames=frames or [],
     )
 
 
-def _grade(analysis: dict[str, Any], axis: str) -> vs.Grade:
-    return next(g for g in vs.grade_video(_video(analysis)) if g.axis == axis)
+def _grade(
+    analysis: dict[str, Any],
+    axis: str,
+    *,
+    roster: Roster | None = None,
+    desc: str = "",
+    query: str | None = KW,
+) -> vs.Grade:
+    grades = vs.grade_video(_video(analysis, desc=desc), query=query, roster=roster)
+    return next(g for g in grades if g.axis == axis)
 
 
 # ── ◎○△ の基準の境界 ─────────────────────────────────────────────────
@@ -85,13 +98,23 @@ def _grade(analysis: dict[str, Any], axis: str) -> vs.Grade:
             {"hook_has_caption": True, "hook_type": "other", "telops": [{"sec": 0.5, "text": "a"}]},
             "○",
         ),
+        # 分析 AI が「冒頭にテロップなし」と申告しても、0.5 秒のテロップがあれば冒頭にある
         (
             {
                 "hook_has_caption": False,
                 "hook_type": "number",
                 "telops": [{"sec": 0.5, "text": "a"}],
             },
-            "○",
+            "◎",
+        ),
+        # 申告が「あり」でも、最初のテロップが 3 秒より後なら冒頭には無い
+        (
+            {
+                "hook_has_caption": True,
+                "hook_type": "number",
+                "telops": [{"sec": 3.5, "text": "a"}],
+            },
+            "△",
         ),
         (
             {
@@ -119,14 +142,18 @@ def test_tempo_grade_boundaries(duration: float, cuts: int | None, mark: str) ->
         assert f"{cuts}カット" in g.reason
 
 
+def _spoken(*secs: float) -> dict[str, Any]:
+    return {"keyword": KW, "matched": True, "layer": "narration", "appear_sec": list(secs)}
+
+
 @pytest.mark.parametrize(
     ("analysis", "mark"),
     [
-        ({"telops": [{"sec": 3.0, "text": "kw", "kw_match": True}]}, "◎"),
-        ({"telops": [{"sec": 3.1, "text": "kw", "kw_match": True}]}, "○"),
-        ({"spoken_keywords": [{"matched": True, "appear_sec": [10.0]}]}, "○"),
-        ({"spoken_keywords": [{"matched": True, "appear_sec": [10.1]}]}, "△"),
-        ({"spoken_keywords": [{"matched": True}]}, "○"),  # 出るが秒は不明
+        ({"telops": [{"sec": 3.0, "text": f"{KW}の基本"}]}, "◎"),
+        ({"telops": [{"sec": 3.1, "text": f"{KW}の基本"}]}, "○"),
+        ({"spoken_keywords": [_spoken(10.0)]}, "○"),
+        ({"spoken_keywords": [_spoken(10.1)]}, "△"),
+        ({"spoken_keywords": [_spoken()]}, "○"),  # 出るが秒は不明
         ({"keyword_matches": [{"matched": True, "layer": "caption"}]}, "△"),  # キャプションだけ
         ({}, "△"),
     ],
@@ -138,20 +165,69 @@ def test_kw_exposure_grade_boundaries(analysis: dict[str, Any], mark: str) -> No
 def test_kw_exposure_takes_the_earliest_layer() -> None:
     g = _grade(
         {
-            "telops": [{"sec": 5.0, "text": "kw", "kw_match": True}],
-            "spoken_keywords": [{"matched": True, "appear_sec": [1.5]}],
+            "telops": [{"sec": 5.0, "text": f"{KW}の基本"}],
+            "spoken_keywords": [_spoken(1.5)],
         },
         "KWの露出",
     )
     assert g.mark == "◎" and g.reason.startswith("発話に 1.5秒")
 
 
+def test_kw_exposure_ignores_unverified_kw_match_and_missing_synonyms() -> None:
+    """本番の失敗の形: KW を含まないテロップに kw_match=True、実在しないテロップへの言い換え一致。
+
+    分析 AI の申告を信じると 0.8 秒で ◎ になる。本文に語が無く、言い換え（「工程」）も前後 2 秒の
+    テロップに実在しないので、KW はテロップに出ない（△）。
+    """
+    analysis = {
+        "telops": [
+            {"sec": 0.8, "text": "#PR 〇〇カレー粉", "kw_match": True},
+            {"sec": 20.0, "text": "玉ねぎは軽く塩して", "kw_match": False},
+        ],
+        "keyword_matches": [
+            {
+                "keyword": KW,
+                "matched": True,
+                "match_type": "synonym",
+                "layer": "telop",
+                "appear_sec": [19.0, 34.0],
+                "surface_text": "工程",
+            }
+        ],
+    }
+    g = _grade(analysis, "KWの露出")
+    assert g.mark == "△" and g.reason.startswith("テロップにも発話にも出ない")
+
+
+def test_kw_exposure_keeps_a_synonym_found_in_a_telop_within_two_seconds() -> None:
+    """言い換え（「作れます、レシピ」）は区切って、前後 2 秒のテロップに実在する片だけ残す。"""
+    analysis = {
+        "telops": [{"sec": 10.0, "text": "これでカレーは作れます", "kw_match": True}],
+        "keyword_matches": [
+            {
+                "keyword": "作り方",
+                "matched": True,
+                "match_type": "synonym",
+                "layer": "telop",
+                "appear_sec": [8.0],
+                "surface_text": "作れます、レシピ",
+            }
+        ],
+    }
+    assert _grade(analysis, "KWの露出", query="作り方").reason.startswith("テロップに 10秒")
+    far = {**analysis, "keyword_matches": [{**analysis["keyword_matches"][0], "appear_sec": [7.9]}]}
+    assert _grade(far, "KWの露出", query="作り方").mark == "△"  # 2.1 秒離れていれば数えない
+
+
 @pytest.mark.parametrize(
     ("analysis", "mark"),
     [
         ({}, "△"),
-        ({"save_share_motivation": "見返す"}, "○"),
-        ({"save_share_motivation": "見返す", "cta_type": ["save"]}, "◎"),
+        # 「見返す理由」（保存・シェアの動機の欄）は 5 本とも埋まり差が出ないので数えない
+        ({"save_share_motivation": "見返す"}, "△"),
+        ({"telops": [{"sec": 12, "text": "塩 小さじ1"}]}, "○"),  # 分量をテロップに
+        ({"telops": [{"sec": 12, "text": "塩 小さじ1"}], "cta_type": ["save"]}, "◎"),
+        ({"telops": [{"sec": 12, "text": "トマト大6つ"}]}, "△"),  # 「6つ」は分量に数えない
         ({"telops": [{"sec": 1, "text": "1. a"}, {"sec": 2, "text": "2. b"}]}, "○"),
         # 推定の役割（真ん中の場面は手順になる）だけでは「手順の段」と数えない
         (
@@ -178,6 +254,11 @@ def test_kw_exposure_takes_the_earliest_layer() -> None:
 )
 def test_save_hook_grade(analysis: dict[str, Any], mark: str) -> None:
     assert _grade(analysis, "保存の仕掛け").mark == mark
+
+
+def test_save_hook_counts_quantities_in_the_caption() -> None:
+    g = _grade({}, "保存の仕掛け", desc="材料: 鶏もも肉 300g・クミン 小さじ1")
+    assert g.mark == "○" and g.reason == "分量をキャプションに載せている"
 
 
 @pytest.mark.parametrize(
@@ -242,10 +323,38 @@ def test_brand_grade_names_client_or_competitor() -> None:
         "appear_sec": [2.0],
         "total_screen_time_sec": 4.0,
         "prominence": "prominent",
-        "brand_relation": "competitor",
+        "brand_relation": "neutral_third_party",
+    }
+    g = _grade({"brand_detections": [brand]}, "商品の見せ方", roster=Roster.of(None, ["B|A"]))
+    assert g.reason == "A（競合）・初出 2秒・合計 4秒・目立つ"
+
+
+def test_brands_outside_the_roster_are_not_graded_as_products() -> None:
+    """名簿があるときは、名簿の外のブランド（背景のビール缶・調理家電）を「商品◎」にしない。
+
+    名簿が無ければ従来どおり（カテゴリが分からないので映るブランドで評価する）。壊し方: 名簿の
+    判定を外す → 名簿の外の主役ブランドが ◎ で赤。
+    """
+    brands = [_brand("ノンアルY", 55.0, 4.0, "prominent", "neutral_third_party")]
+    g = _grade({"brand_detections": brands}, "商品の見せ方", roster=Roster.of("SPICIA", ["T&K"]))
+    assert g.mark == "—"
+    assert g.reason == "クライアント・競合の商品は映らない（映るのはノンアルY）"
+    assert _grade({"brand_detections": brands}, "商品の見せ方").mark == "◎"
+
+
+def test_brand_relation_from_the_ai_is_ignored_without_a_roster() -> None:
+    """クライアント名を渡していないのに、分析 AI が client と推測した（本番の #4）。区分は書かない。"""
+    brand = {
+        "brand_name": "A",
+        "appear_sec": [2.0],
+        "total_screen_time_sec": 4.0,
+        "prominence": "hero",
+        "brand_relation": "client",
     }
     g = _grade({"brand_detections": [brand]}, "商品の見せ方")
-    assert g.reason == "A（競合）・初出 2秒・合計 4秒・目立つ"
+    assert g.reason == "A・初出 2秒・合計 4秒・主役"
+    k = vs.video_keys(_video({"brand_detections": [brand]}))
+    assert k is not None and k.brand_relation == ""
 
 
 def _brand(name: str, sec: float, total: float, prominence: str, relation: str) -> dict[str, Any]:
@@ -265,11 +374,12 @@ def test_brand_name_relation_and_seconds_come_from_the_same_brand() -> None:
         _brand("花王Y", 4.0, 5.0, "background", "client"),
     ]
     video = _video({"brand_detections": brands})
-    k = vs.video_keys(video)
+    roster = Roster.of("花王Y")
+    k = vs.video_keys(video, roster=roster)
     assert k is not None
     assert (k.brand_name, k.brand_relation, k.brand_prominence) == ("花王Y", "client", "background")
     assert (k.brand_first_sec, k.brand_total_sec, k.brand_others) == (4.0, 5.0, ("他社X",))
-    g = _grade({"brand_detections": brands}, "商品の見せ方")
+    g = _grade({"brand_detections": brands}, "商品の見せ方", roster=roster)
     assert g.mark == "○"  # 背景なので ◎ にしない（他社の「主役」と混ぜない）
     assert g.reason == "花王Y（クライアント）・初出 4秒・合計 5秒・背景・ほかに他社Xも映る"
 
@@ -277,9 +387,9 @@ def test_brand_name_relation_and_seconds_come_from_the_same_brand() -> None:
 def test_brand_picks_client_then_competitor_then_most_prominent() -> None:
     comp_vs_neutral = [
         _brand("N", 0.0, 9.0, "hero", "unknown"),
-        _brand("C", 2.0, 1.0, "incidental", "competitor"),
+        _brand("C", 2.0, 1.0, "incidental", "unknown"),
     ]
-    k = vs.video_keys(_video({"brand_detections": comp_vs_neutral}))
+    k = vs.video_keys(_video({"brand_detections": comp_vs_neutral}), roster=Roster.of("Z", ["C"]))
     assert k is not None and (k.brand_name, k.brand_relation, k.brand_others) == (
         "C",
         "competitor",
@@ -287,7 +397,7 @@ def test_brand_picks_client_then_competitor_then_most_prominent() -> None:
     )
     no_relation = [
         _brand("A", 0.0, 2.0, "incidental", "unknown"),
-        _brand("B", 3.0, 1.0, "prominent", "neutral_third_party"),
+        _brand("B", 3.0, 1.0, "prominent", "competitor"),  # AI の区分は使わない
         _brand("D", 5.0, 4.0, "prominent", "unknown"),
     ]
     k = vs.video_keys(_video({"brand_detections": no_relation}))
@@ -302,11 +412,12 @@ def test_detections_of_one_brand_are_merged() -> None:
         _brand("A", 6.0, 2.0, "hero", "unknown"),
         _brand("a ", 1.0, 2.0, "background", "client"),
     ]
-    k = vs.video_keys(_video({"brand_detections": brands}))
+    roster = Roster.of("Ａ")  # 全角・大文字小文字・空白を無視して名簿と当てる
+    k = vs.video_keys(_video({"brand_detections": brands}), roster=roster)
     assert k is not None
     assert (k.brand_name, k.brand_relation, k.brand_prominence) == ("A", "client", "hero")
     assert (k.brand_first_sec, k.brand_total_sec, k.brand_others) == (1.0, 4.0, ())
-    assert _grade({"brand_detections": brands}, "商品の見せ方").mark == "◎"
+    assert _grade({"brand_detections": brands}, "商品の見せ方", roster=roster).mark == "◎"
 
 
 def test_brand_others_are_capped_in_the_reason_and_panel() -> None:
@@ -322,6 +433,14 @@ def test_coherence_grade_boundaries(value: int | None, mark: str) -> None:
     assert _grade({"message_coherence": value}, "一致度").mark == mark
 
 
+@pytest.mark.parametrize(("value", "mark"), [(95, "○"), (70, "△"), (40, "△")])
+def test_coherence_drops_one_step_when_the_ai_names_a_divergence(value: int, mark: str) -> None:
+    """本番の #2: 自分で「動画は 5 つ・本文は 4 つで乖離」と書きながら 95 点。1 段下げる。"""
+    note = "動画内は5つ、キャプションは4つで記載数に乖離がある"
+    g = _grade({"message_coherence": value, "divergence_note": note}, "一致度")
+    assert g.mark == mark and "食い違いの指摘あり" in g.reason
+
+
 def test_grade_rules_footnote_states_the_constants() -> None:
     text = json.dumps(vs.GRADE_RULES, ensure_ascii=False)
     for needle in (
@@ -333,8 +452,11 @@ def test_grade_rules_footnote_states_the_constants() -> None:
         "合計3秒以上",
         "80以上",
         "60以上",
+        "分量を載せている",
+        "1 段下げる",
     ):
         assert needle in text
+    assert "見返す理由" not in text
     assert [axis for axis, _ in vs.GRADE_RULES] == list(vs.AXES)
 
 
@@ -606,7 +728,8 @@ def test_common_hook_says_most_only_when_two_or_more() -> None:
 def test_common_points_are_counted_by_code() -> None:
     points = vs.common_points(rich_videos())
     assert points[0] == "フックの型はそろっていない（数字・問いかけ・ビジュアル・その他）"
-    assert "検索 KW を3秒以内にテロップか発話で出す: 2/4本" in points
+    # 3 位の 0.8 秒のテロップ「#PR 〇〇カレー粉」は kw_match=True だが KW を含まないので数えない
+    assert "検索 KW を3秒以内にテロップか発話で出す: 1/4本" in points
     # CTA の型は上位 2 種類で切らず、全部並べる（購入が抜けない）
     assert "CTA あり: 3/4本（保存 1本・フォロー 1本・購入 1本）" in points
 
@@ -616,10 +739,9 @@ def test_most_good_axis_is_named_only_when_it_leads_alone() -> None:
     points = vs.common_points(rich_videos())
     assert not any(p.startswith("◎がいちばん多い評価軸") for p in points)
     tie = next(p for p in points if p.startswith("◎が多い評価軸は並んでいる"))
-    assert tie == (
-        "◎が多い評価軸は並んでいる: 冒頭3秒の掴み・テンポ・KWの露出・保存の仕掛け・CTA・一致度"
-        "（各2/4本）"
-    )
+    # KW の露出は 3 位の申告（KW を含まないテロップに kw_match=True）を数えず、保存の仕掛けは
+    # 「見返す理由」を数えないので、どちらも ◎ は 1 本だけになる。
+    assert tie == "◎が多い評価軸は並んでいる: 冒頭3秒の掴み・テンポ・CTA・一致度（各2/4本）"
     videos = rich_videos()
     assert videos[1].analysis is not None
     videos[1].analysis.message_coherence = 95  # 2 位の一致度も ◎ にして一致度だけ 3 本
@@ -652,10 +774,10 @@ def test_other_brands_are_noted_in_the_panel_and_the_llm_input() -> None:
             brand_name="他社X", appear_sec=[1.0], total_screen_time_sec=0.5, prominence="hero"
         )
     )
-    html = _chapter(videos=videos)
+    html = _chapter(videos=videos, client_name="〇〇カレー粉")
     panel3 = html[html.index("id='vp-3'") : html.index("id='vp-4'")]
     assert "〇〇カレー粉・合計 6秒・主役・クライアント・ほかに他社X" in panel3
-    payload = structure_payload(videos[2])
+    payload = structure_payload(videos[2], keyword=KW, roster=Roster.of("〇〇カレー粉"))
     assert payload is not None
     assert payload["商品"]["名前"] == "〇〇カレー粉"
     assert payload["商品"]["ほかに映るブランド"] == "他社X"
@@ -671,10 +793,17 @@ def test_tabs_follow_hash_changes_after_load() -> None:
 
 
 def test_client_brand_and_inferred_roles_show_in_the_panel() -> None:
-    html = _chapter()
+    html = _chapter(client_name="〇〇カレー粉")
     panel3 = html[html.index("id='vp-3'") : html.index("id='vp-4'")]
     assert "〇〇カレー粉" in panel3 and "クライアント" in panel3
     assert "商品（ブランド）" in panel3
+
+
+def test_client_label_needs_the_client_name_not_the_ai_guess() -> None:
+    """クライアント名が無ければ、分析 AI が client と書いていても「クライアント」と出さない。"""
+    html = _chapter()
+    panel3 = html[html.index("id='vp-3'") : html.index("id='vp-4'")]
+    assert "〇〇カレー粉" in panel3 and "クライアント" not in panel3
 
 
 def test_unsafe_or_oversized_images_are_not_embedded() -> None:

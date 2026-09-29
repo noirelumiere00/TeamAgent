@@ -4,7 +4,8 @@
 - 欄がある出力は読めて、語彙の外の role は None（コードが推定し直す）。
 - run（動画分析ツール）が Gemini に渡す system は v2 のまま。追記は analyze_videos の
   system_addendum を渡したときだけ付く。
-- run はフレームを従来どおり pick_timecodes・幅 320・プレビュー動画ありで作る。
+- run はフレームを場面ごと（scene_timecodes・最初と最後の場面を含む）＋冒頭 0.8 秒・幅 320・
+  プレビュー動画ありで作る（M28: pick_timecodes の 6 枚は前半に偏り、本編と締めのコマが無かった）。
 """
 
 from __future__ import annotations
@@ -114,7 +115,10 @@ def test_analyze_videos_appends_the_addendum_only_when_given() -> None:
 def test_run_keeps_the_v2_system_and_its_media_extras(
     monkeypatch: pytest.MonkeyPatch, tmp_path: object
 ) -> None:
-    """動画分析ツール（run）の Gemini への指示・コマの取り方・プレビュー動画は変わらない。"""
+    """動画分析ツール（run）の Gemini への指示とプレビュー動画は変わらない。コマは場面ごと（M28）。
+
+    壊し方: run を pick_timecodes（scene_frames=False）に戻す → 前半の 6 枚になって赤。
+    """
     from teamagent.adapters import video_proxy
 
     gemini = MagicMock()
@@ -147,7 +151,57 @@ def test_run_keeps_the_v2_system_and_its_media_extras(
         "video_algorithm", "v2", "system"
     )
     a = VideoVSEOAnalysis.model_validate(OLD_ANALYSIS)
-    assert frame_calls == [([s for s, _ in frames_mod.pick_timecodes(a, max_frames=6)], 320)]
+    scene = [s for s, _ in frames_mod.scene_timecodes(a, duration_sec=0.0)]
+    assert frame_calls == [([0.8, *scene], 320)]
+    assert scene == [1.5, 11.5]  # 2 つの場面の中央（最後の場面を含む）
     assert len(previews) == 1
     assert out.videos[0].analysis is not None
     assert out.videos[0].model_dump()["analysis"]["scenes"] == OLD_ANALYSIS["scenes"]
+
+
+def test_run_frames_fit_the_media_frame_job_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """M28: 場面が多くても、冒頭のコマと合わせて media の 1 ジョブの上限（12 コマ）に収める。
+
+    上限は contracts.FrameOperation の timecodes（max_length）。13 にするとジョブごと失敗する
+    （run は strict なので動画の分析まで失敗する）。壊し方: 冒頭を足すときに場面を減らさない → 赤。
+    """
+    from annotated_types import MaxLen
+
+    from teamagent.media.contracts import FrameOperation
+
+    many = {
+        **OLD_ANALYSIS,
+        "duration_sec": 100.0,
+        "scenes": [
+            {"start_sec": float(i * 5), "end_sec": float(i * 5 + 5), "desc": f"場面{i}"}
+            for i in range(20)
+        ],
+    }
+    gemini = MagicMock()
+    gemini.analyze_video_bytes.return_value = _resp(many)
+    calls: list[list[float]] = []
+
+    def _frames(data: bytes, mime: str, secs: list[float], **k: Any) -> list[tuple[float, str]]:
+        calls.append(list(secs))
+        return []
+
+    monkeypatch.setattr(frames_mod, "extract_frames", _frames)
+    metas = [VideoMeta(rank=1, url="https://t/1", desc="d", play_count=10, collect_count=1)]
+    skill = VideoAlgorithmSkill(
+        gemini=gemini,
+        searcher=lambda q, n, r: metas,
+        downloader=lambda url: (b"vid", "video/mp4"),
+        proxy=lambda d, m: (d, m),
+        report_dir=str(tmp_path),
+    )
+    skill.run(VideoAlgorithmInput(query="q", max_videos=1, outputs=["report"]), SkillContext())
+    limit = next(
+        m.max_length
+        for m in FrameOperation.model_fields["timecodes"].metadata
+        if isinstance(m, MaxLen)
+    )
+    (secs,) = calls
+    assert limit == 12 and len(secs) == 12 and secs[0] == 0.8
+    assert secs[-1] == 97.5  # 最後の場面（95〜100 秒）は必ず入れる

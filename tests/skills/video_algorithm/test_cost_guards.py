@@ -358,6 +358,8 @@ def test_active_result_cache_lease_stops_retry_before_quota_and_gemini(
         acquire_job_id=input_obj.acquire_job_id,
         search_volume=input_obj.search_volume,
         requester=ME,
+        # 統合の版（既定 v3）もキーに入る（版を変えたら旧い synthesis を返さない）
+        synthesis_version="v3",
     )
     assert cache.acquire_lease(cache_key, request_id="original") is not None
 
@@ -678,5 +680,7 @@ async def test_socket_mode_direct_post_renders_summary_bold_as_mrkdwn(
 
     assert result.startswith("🔎 *VSEO動画アルゴリズム分析* 完了「新宿 ランチ」")
     assert "**" not in result
-    # 太字以外（概算コストの斜体 `_…_`）は素通し。
-    assert result.rstrip().endswith("（相関≠因果）_")
+    # 太字以外（概算コストの斜体 `_…_`）は素通し。クライアント未指定の案内は最後の 1 行。
+    lines = result.rstrip().splitlines()
+    assert lines[-2].endswith("（相関≠因果）_")
+    assert lines[-1].startswith("クライアント名と競合を教えてもらえれば")

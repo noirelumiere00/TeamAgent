@@ -83,7 +83,7 @@ def test_percent_rate_renders_without_another_conversion() -> None:
 
     report = render_report(out)
 
-    assert "<b>2.9%</b><i>エンゲージ</i>" in report
+    assert "<b>2.9%</b><i>エンゲージメント率</i>" in report
 
 
 @pytest.mark.parametrize(

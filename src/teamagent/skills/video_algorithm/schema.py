@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Any, Literal
+import re
+import unicodedata
+from typing import Annotated, Any, Literal
 
 import structlog
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     SerializerFunctionWrapHandler,
     field_validator,
@@ -167,6 +170,12 @@ class LayerMessages(BaseModel):
     visual: str = ""  # 映像（被写体/シーン）が語る要旨
 
 
+# サムネの色の区分のしきい値からこの幅以内は「境界」と出す。
+THUMB_BORDER = 0.03
+# サムネの出どころ: cover＝表紙の画像・frame＝表紙を取れずコマで代用・""＝不明（旧キャッシュ）。
+CoverSource = Literal["", "cover", "frame"]
+
+
 class ThumbColor(BaseModel):
     """サムネ画像（検索一覧のタイル）から算出した色（ffmpeg+stdlib・動画内色とは別）。"""
 
@@ -188,6 +197,15 @@ class ThumbColor(BaseModel):
         if self.brightness01 < 0.35:
             return "低明度"
         return "中明度"
+
+    def borderline(self) -> list[str]:
+        """区分のしきい値から ±0.03 以内の軸（「境界」と出す。断定しない）。"""
+        near: list[str] = []
+        if any(abs(self.warmth - t) <= THUMB_BORDER for t in (0.12, -0.12)):
+            near.append("暖寒")
+        if any(abs(self.brightness01 - t) <= THUMB_BORDER for t in (0.6, 0.35)):
+            near.append("明度")
+        return near
 
 
 class VideoVSEOAnalysis(BaseModel):
@@ -279,6 +297,12 @@ class VideoMeta(BaseModel):
     # 「DL して Gemini に渡せない投稿」の判別に使う（深掘り対象から除外し、
     # 次の候補で必ず max_videos 本を埋めるため）。
     duration_sec: float = 0.0
+    # 取得済みで以前は捨てていた欄（tiktok_search / tiktok_acquire 由来）。
+    # create_time は投稿日時の UNIX 秒（0 = 不明。facts が動画 ID から換算する）。
+    # hashtags は「#」を付けない名前の並び（search.mjs の textExtra 由来）。
+    create_time: int = 0
+    hashtags: list[str] = Field(default_factory=list)
+    music_title: str = ""
 
     @field_validator("engagement_rate")
     @classmethod
@@ -313,6 +337,7 @@ class AnalyzedVideo(BaseModel):
     frames: list[FrameShot] = Field(default_factory=list)  # 実フレーム画像（埋込用）
     video_data_uri: str = ""  # 軽量Webプレビュー動画 base64（タイムライン<video>再生用）
     cover_data_uri: str = ""  # サムネ画像 base64（検索一覧タイル・埋込用）
+    cover_source: CoverSource = ""  # 表紙の画像か、コマで代用したか（"" は不明＝旧キャッシュ）
     thumb: ThumbColor | None = None  # サムネ色（ffmpeg+stdlib 算出）
     error: str | None = None
     cost_usd: float = 0.0
@@ -356,6 +381,24 @@ class DistItem(BaseModel):
     outlier_note: str = ""
 
 
+class KwTermLayer(BaseModel):
+    """検索語 1 つ × 層 1 つの一致（コードが照合した本数）。
+
+    exact は語そのもの、synonym は言い換え（テロップは秒±2で実在を照合済み・キャプションは
+    本文に実在）。発話（speech）は動画分析 AI の聞き取りで、照合していない（verified=False）。
+    board_hits / board_size は上位ボード全体（メタで測れる層＝キャプション・ハッシュタグだけ）。
+    """
+
+    term: str = ""
+    layer: Literal["telop", "caption", "hashtag", "speech"] = "telop"
+    exact_ranks: list[int] = Field(default_factory=list)
+    synonym_ranks: list[int] = Field(default_factory=list)
+    n: int = 0
+    verified: bool = True
+    board_hits: int | None = None
+    board_size: int | None = None
+
+
 class KwCoverage(BaseModel):
     """4 層一致の定量化。"""
 
@@ -363,6 +406,8 @@ class KwCoverage(BaseModel):
     avg_layers_0_4: float = 0.0
     layer_fill: list[tuple[str, str]] = Field(default_factory=list)  # [("テロップ","4/5"),...]
     per_video: list[str] = Field(default_factory=list)  # ["#1 4/4(100)",...]
+    # 語ごと×層ごと（完全一致と言い換えを分ける）。layer_fill は語を問わない合計。
+    per_term: list[KwTermLayer] = Field(default_factory=list)
 
 
 class FeatureRowOut(BaseModel):
@@ -380,10 +425,14 @@ class FeatureRowOut(BaseModel):
 
 
 class WinRange(BaseModel):
-    """勝ち筋の定量レンジ。"""
+    """廃止（旧キャッシュの読み込み互換のためだけに残す）。
 
-    label: str = ""  # 「尺」「保存率」「テロップ」
-    text: str = ""  # 「11-18秒」「3.0% 以上」
+    上位帯（n=5 なら上位 2 本）の最小〜最大を「n=5」として出していた（FC-04）。分布は
+    StatsAnalysis.distributions（全 n 本の最小・中央値・最大）を使う。
+    """
+
+    label: str = ""
+    text: str = ""
 
 
 class StatsAnalysis(BaseModel):
@@ -395,9 +444,15 @@ class StatsAnalysis(BaseModel):
     kw_coverage: KwCoverage = Field(default_factory=KwCoverage)
     hook_counts: list[tuple[str, int]] = Field(default_factory=list)  # [("problem",3),...]降順
     strong_hook_ratio: str = ""  # 「4/5」
+    # 廃止（常に空）。旧キャッシュに値が残っていても読み込みで捨て、LLM にも画面にも出さない。
     win_ranges: list[WinRange] = Field(default_factory=list)
     feature_matrix: list[FeatureRowOut] = Field(default_factory=list)
     caveats: list[str] = Field(default_factory=list)
+
+    @field_validator("win_ranges", mode="before")
+    @classmethod
+    def _drop_win_ranges(cls, value: Any) -> list[WinRange]:
+        return []
 
 
 class ConceptItem(BaseModel):
@@ -443,10 +498,241 @@ class WinHypothesis(BaseModel):
     so_what: str = ""  # 営業の次アクション ≤1文
 
 
+# ── 横断シンセシス v3 の欄（仕様 v3 §3-2）──────────────────────────────────────
+# LLM が書く欄と、コードだけが書く欄（CODE_ONLY_*。parse で LLM の値を捨て、synthesis_checks が
+# 決め直す）を同じモデルに持つ。どれも任意で既定は空＝v2 の出力はそのまま読める。
+# LLM の出力は壊れていることがあるので、型が合わない値は例外にせず既定値へ倒す（1 項目の
+# 誤りで synthesis 全体を捨てないため）。
+
+DIRECTIVE_KINDS: tuple[str, ...] = ("フック", "構成", "テロップ", "撮影", "音", "商品", "投稿")
+_TIMECODE_TEXT_RE = re.compile(r"^\s*(\d{1,2}):([0-5]\d(?:\.\d+)?)\s*$")
+_RANK_TEXT_RE = re.compile(r"^\s*(?:#|＃|rank\s*)?(\d{1,3})\s*(?:位)?\s*$", re.IGNORECASE)
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, str):
+        return " ".join(value.split())
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
+def _as_rank(value: Any) -> int:
+    """順位（「#4」「4位」「rank4」も読む）。読めなければ 0（実在しない順位として捨てる）。"""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        m = _RANK_TEXT_RE.match(unicodedata.normalize("NFKC", value))
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def _as_sec(value: Any) -> float | None:
+    """秒（「0:25」も読む）。読めない・負・無限は None（キャプションの引用と同じ扱い）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        sec = float(value)
+    elif isinstance(value, str):
+        text = unicodedata.normalize("NFKC", value).strip().removesuffix("秒").strip()
+        m = _TIMECODE_TEXT_RE.match(text)
+        try:
+            sec = int(m.group(1)) * 60 + float(m.group(2)) if m else float(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    return sec if math.isfinite(sec) and sec >= 0 else None
+
+
+def _text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [t for t in (_as_text(v) for v in value) if t]
+
+
+def _rank_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    return [r for r in (_as_rank(v) for v in value) if r > 0]
+
+
+def _object_or_none(value: Any) -> Any:
+    return value if isinstance(value, (dict, BaseModel)) else None
+
+
+def _dict_items(value: Any) -> list[Any]:
+    """dict の項目だけ残す（LLM が文字列や null を混ぜても他の項目は読む）。"""
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, (dict, BaseModel))]
+
+
+# LLM の値を読む型（壊れた値は既定へ倒す）。
+_Rank = Annotated[int, BeforeValidator(_as_rank)]
+_Sec = Annotated[float | None, BeforeValidator(_as_sec)]
+_Text = Annotated[str, BeforeValidator(_as_text)]
+_TextList = Annotated[list[str], BeforeValidator(_text_list)]
+_RankList = Annotated[list[int], BeforeValidator(_rank_list)]
+
+
+def _kind(value: Any) -> str:
+    text = _as_text(value)
+    return text if text in DIRECTIVE_KINDS else ""
+
+
+class SynthRef(BaseModel):
+    """根拠「#n の何秒の何」。sec=None はキャプションの引用。source/found_sec はコードだけ。"""
+
+    rank: _Rank = 0
+    sec: _Sec = None
+    quote: _Text = ""
+    source: _Text = ""  # コードだけ: telop/scene/hook/brand/caption（照合に合格した場所）
+    found_sec: _Sec = None  # コードだけ: 見つかった秒（キャプションは None）
+
+
+_Refs = Annotated[list[SynthRef], BeforeValidator(_dict_items)]
+
+
+class SummaryLines(BaseModel):
+    """結論の行。type_line は多数派以上の feature_ids だけで作る（コードが段階を照合する）。"""
+
+    type_line: _Text = ""
+    feature_ids: _TextList = Field(default_factory=list)
+    best_reason: _Text = ""  # 最も見られ保存された 1 本の理由（その 1 本の個票だけで照合）
+    client_move: _Text = ""
+    type_line_by_code: bool = False  # コードだけ: 見出しをコードの代わりの文にした
+    best_rank: _Rank = 0  # コードだけ: 最も見られ保存された 1 本（再生→保存率→シェア）
+
+
+class PerVideoNote(BaseModel):
+    """1 本ずつの勝ち方（その動画の個票の数字と引用だけで書く）。"""
+
+    rank: _Rank = 0
+    win_line: _Text = ""
+    why_fact: _Text = ""
+    why_guess: _Text = ""  # 「推測:」で始める（コードが付け直す）
+    steal: _TextList = Field(default_factory=list)
+    not_to_copy: _Text = ""
+
+
+class Directive(BaseModel):
+    """クリエイティブ指示 1 つ。段階・順位はコードが照合済みの refs から決める。"""
+
+    text: _Text = ""
+    kind: Annotated[str, BeforeValidator(_kind)] = ""  # DIRECTIVE_KINDS 以外は空
+    refs: _Refs = Field(default_factory=list)
+    # コードだけ: code はコードが事実から作った指示
+    origin: Annotated[
+        Literal["llm", "code"], BeforeValidator(lambda v: "code" if v == "code" else "llm")
+    ] = "llm"
+    tier: _Text = ""  # コードだけ: 必須条件／多数派／事例
+    ranks: _RankList = Field(default_factory=list)  # コードだけ: 照合に合格した順位
+
+
+class AvoidItem(BaseModel):
+    """やらないこと 1 つ。moved は、実績が伴わない 1 本だけの指示をコードが移したもの。"""
+
+    text: _Text = ""
+    refs: _Refs = Field(default_factory=list)
+    origin: Annotated[
+        Literal["llm", "moved"], BeforeValidator(lambda v: "moved" if v == "moved" else "llm")
+    ] = "llm"  # コードだけ
+    reason: _Text = ""  # コードだけ: 移した理由
+    ranks: _RankList = Field(default_factory=list)  # コードだけ
+
+
+class StoryboardCut(BaseModel):
+    """絵コンテのカット。秒（start/end/stage）はコードがカット番号から決める。"""
+
+    cut: _Rank = 0
+    show: _Text = ""
+    telop: _Text = ""
+    aim: _Text = ""
+    refs: _Refs = Field(default_factory=list)
+    start_sec: _Sec = None  # コードだけ
+    end_sec: _Sec = None  # コードだけ
+    stage: _Text = ""  # コードだけ: 0〜3秒 などの段
+
+
+class Storyboard(BaseModel):
+    """絵コンテ案。出どころの順位・目安の尺・但し書きはコードが決める。"""
+
+    name: _Text = ""
+    basis_ranks: _RankList = Field(default_factory=list)  # コードが照合済みの refs から作り直す
+    cuts: Annotated[list[StoryboardCut], BeforeValidator(_dict_items)] = Field(default_factory=list)
+    target_sec: _Sec = None  # コードだけ: 目安の尺（全 n 本の尺の中央値）
+    basis_note: _Text = ""  # コードだけ: 「事例1本（#k）にもとづく案」など
+
+
+class BoardAngle(BaseModel):
+    """上位ボードの切り口（LLM は語だけ・本数と順位はコードがキャプションから数える）。"""
+
+    label: _Text = ""
+    match_terms: _TextList = Field(default_factory=list)
+    ranks: _RankList = Field(default_factory=list)  # コードだけ
+
+
+class HypothesisV3(BaseModel):
+    """仮説（A/B で確かめるもの）。該当する動画はコードが match_terms で数え直す。"""
+
+    text: _Text = ""
+    match_terms: _TextList = Field(default_factory=list)
+    test: _Text = ""  # A/B の組み方
+    stat_feature: _Text = ""  # n≥8 で相関を渡したときだけ使う（特徴のキー名）
+    ranks: _RankList = Field(default_factory=list)  # コードだけ
+    tier: _Text = ""  # コードだけ
+    stat_tag: _Text = ""  # コードだけ: 〔テロップ枚数×順位 ρ=…〕（n≥8・文に特徴名があるとき）
+    # コードだけ: 効果（保存・再生・シェア）を言う仮説の、該当と非該当の中央値（逆向きなら注記）
+    metric_note: _Text = ""
+
+
+class PostingPlan(BaseModel):
+    caption_plan: _Text = ""
+    ab_plan: _Text = ""
+
+
+# 出力（model_dump）に空のまま出さない v3 の欄（v2 の出力・結果キャッシュの形を変えない）。
+SYNTHESIS_V3_FIELDS: tuple[str, ...] = (
+    "version",
+    "summary_lines",
+    "per_video",
+    "directives",
+    "avoid",
+    "storyboards",
+    "board_angles",
+    "hypotheses",
+    "posting",
+)
+# コードだけが書く欄（LLM の JSON に書かれていても parse で捨てる）。キー: 欄のパス。
+CODE_ONLY_TOP: tuple[str, ...] = ("version", "grounding_mode", "grounding_dropped")
+CODE_ONLY_ITEM: dict[str, tuple[str, ...]] = {
+    "summary_lines": ("type_line_by_code", "best_rank"),
+    "directives": ("origin", "tier", "ranks"),
+    "avoid": ("origin", "reason", "ranks"),
+    "storyboards": ("target_sec", "basis_note"),
+    "cuts": ("start_sec", "end_sec", "stage"),
+    "refs": ("source", "found_sec"),
+    "board_angles": ("ranks",),
+    "hypotheses": ("ranks", "tier", "stat_tag", "metric_note"),
+}
+
+
 class CrossSynthesis(BaseModel):
     """横断シンセシス（120点の中核・Gemini 2nd pass）。事実層(stats)と別の解釈層。
 
     ショート動画PRプランナー/ディレクター目線の「戦略レポート」を生成する。
+    v3（仕様 §3-2）の欄は任意。v3 では v2 の欄（headline など）を synthesis_checks が
+    v3 の欄とコードの事実から作り直す（今の描画がそのまま読めるように）。
     """
 
     # --- プランナー/ディレクターの戦略サマリ（レポートの主役） ---
@@ -468,6 +754,35 @@ class CrossSynthesis(BaseModel):
     # 書く（shadow では照合前と同じ出力に保つため書かない）。
     grounding_mode: str = Field(default="", exclude=True)  # enforce のときだけ "enforce"
     grounding_dropped: int = Field(default=0, exclude=True)  # enforce で捨てた件数
+    # --- v3（仕様 §3-2）。コードだけが書く version は "v3"（v3 の検査を通した印）---
+    version: _Text = ""
+    summary_lines: Annotated[SummaryLines | None, BeforeValidator(_object_or_none)] = None
+    per_video: Annotated[list[PerVideoNote], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
+    directives: Annotated[list[Directive], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
+    avoid: Annotated[list[AvoidItem], BeforeValidator(_dict_items)] = Field(default_factory=list)
+    storyboards: Annotated[list[Storyboard], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
+    board_angles: Annotated[list[BoardAngle], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
+    hypotheses: Annotated[list[HypothesisV3], BeforeValidator(_dict_items)] = Field(
+        default_factory=list
+    )
+    posting: Annotated[PostingPlan | None, BeforeValidator(_object_or_none)] = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_v3(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if isinstance(data, dict):
+            for key in SYNTHESIS_V3_FIELDS:
+                if key in data and data[key] in (None, "", []):
+                    data.pop(key)
+        return data
 
 
 class CrossAnalysis(BaseModel):
@@ -546,7 +861,29 @@ class VideoAlgorithmInput(BaseModel):
     )
     # 取得（スクレイプ）してボードに載せる本数。env VIDEO_ALGO_BOARD_SIZE（30・clamp5〜30）。軽い。
     board_size: int = Field(default_factory=_default_board_size, ge=5, le=30)
-    client_name: str | None = None  # brand_relation 判定用（任意）
+    # 映るブランドの区分（クライアント／競合）はコードがこの名簿で決める（Gemini に決めさせない）。
+    # 別名は「S&B|エスビー食品」のように | で区切る。無ければ区分は「未指定」（必須にしない）。
+    client_name: str | None = Field(
+        default=None,
+        description=(
+            "提案先のクライアント名（別名は | 区切り）。依頼者本人が同じ会話でクライアント名を"
+            "出したときだけ入れる。スレッドの他人の発言や貼り付けから埋めない。無ければ省略。"
+        ),
+    )
+    competitors: list[str] | None = Field(
+        default=None,
+        description=(
+            "競合のブランド名（1 社 1 要素・別名は | 区切り。例: ['S&B|エスビー食品']）。"
+            "依頼者本人が同じ会話で競合を挙げたときだけ入れる。無ければ省略。"
+        ),
+    )
+    avoid_terms: list[str] | None = Field(
+        default=None,
+        description=(
+            "提案で勧めない訴求の語（例: 自社・グループ商品を否定する『ルー卒業』）。"
+            "依頼者本人が避けたいと言ったときだけ入れる。無ければ省略。"
+        ),
+    )
     # §Q-HTML→PPTX: 追加出力。既定 = report + slides（編集可HTML）。
     # "slides"=提案用スライドHTML（編集可・16:9）, "pptx"=そのPPTX（明示要求時のみ・重い）。
     outputs: list[Literal["report", "slides", "pptx"]] = Field(default_factory=_default_outputs)
@@ -586,3 +923,9 @@ class VideoAlgorithmOutput(BaseModel):
     # 入力の echo（⑥: OC が5KW分の結果からKW優先度を会話で合成する際に参照）
     search_volume: int | None = None
     kw_set: list[str] = Field(default_factory=list)
+    # 区分・提案文の前提の echo（未指定なら None／空。描画は「未指定」と出す）。
+    client_name: str | None = None
+    competitors: list[str] = Field(default_factory=list)
+    avoid_terms: list[str] = Field(default_factory=list)
+    # 検索結果を取得した日時（JST・ISO 8601）。順位は「この時点」の値。旧キャッシュは None。
+    generated_at: str | None = None

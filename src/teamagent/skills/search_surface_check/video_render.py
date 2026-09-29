@@ -40,6 +40,7 @@ from teamagent.skills.search_surface_check.video_digest import (
 )
 from teamagent.skills.search_surface_check.video_notes import StructureNotes
 from teamagent.skills.search_surface_check.video_structure import common_points
+from teamagent.skills.video_algorithm.evidence import Roster
 from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 _QUOTE_MAX = 20
@@ -307,6 +308,7 @@ def render_video_chapter(
     posts: dict[int, SurfacePost] | None = None,
     notes: StructureNotes | None = None,
     image_budget: int = IMAGE_BUDGET_CHARS,
+    client_name: str | None = None,
 ) -> str:
     """レポートに足す章（TikTok 面の節の直後に置く）。
 
@@ -334,13 +336,16 @@ def render_video_chapter(
             f"<p>保存率の高い 2 本（{_esc(fmt_ranks(digest.save_top_ranks))}）に共通すること: "
             f"{_esc(common)}。</p>"
         )
+    roster = Roster.of(client_name)
     parts.append(
         render_tabs(
             videos,
             posts=posts,
             notes=notes,
-            common=common_points(videos),
+            common=common_points(videos, query=keyword, roster=roster),
             image_budget=image_budget,
+            query=keyword,
+            roster=roster,
         )
     )
     parts.append("</section>")

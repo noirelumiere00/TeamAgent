@@ -37,6 +37,7 @@ from teamagent.skills.search_surface_check.video_structure import (
     scene_rows,
     video_keys,
 )
+from teamagent.skills.video_algorithm.evidence import Roster
 from teamagent.skills.video_algorithm.schema import AnalyzedVideo
 
 # 絵コンテ案の段（コードが決める。LLM は段ごとに映すものとテロップを埋める）。
@@ -103,13 +104,15 @@ def _sec(value: float | None) -> float | None:
     return round(value, 1) if value is not None else None
 
 
-def structure_payload(video: AnalyzedVideo) -> dict[str, Any] | None:
+def structure_payload(
+    video: AnalyzedVideo, *, keyword: str | None = None, roster: Roster | None = None
+) -> dict[str, Any] | None:
     """1 本の構成（LLM に渡す・日本語の項目名・割り算をさせない）。
 
-    動画を見て分析できていなければ None。
+    動画を見て分析できていなければ None。keyword は KW の照合、roster はブランドの区分に使う。
     """
     a = video.analysis
-    keys = video_keys(video)
+    keys = video_keys(video, query=keyword, roster=roster)
     if a is None or keys is None or not is_watched(video):
         return None
     row: dict[str, Any] = {
@@ -138,7 +141,10 @@ def structure_payload(video: AnalyzedVideo) -> dict[str, Any] | None:
         ],
         "ナレーション": keys.narration,
         "保存・シェアの動機": _clip(a.save_share_motivation),
-        "評価": [{"軸": g.axis, "記号": g.mark, "理由": g.reason} for g in grade_video(video)],
+        "評価": [
+            {"軸": g.axis, "記号": g.mark, "理由": g.reason}
+            for g in grade_video(video, query=keyword, roster=roster)
+        ],
         "場面": [
             {
                 "秒": f"{r.start:g}〜{r.end:g}",
@@ -198,7 +204,12 @@ def build_notes_prompt(
     videos: list[AnalyzedVideo],
     common: list[str],
 ) -> NotesPrompt | None:
-    payloads = [p for p in (structure_payload(v) for v in videos) if p is not None]
+    roster = Roster.of(client_name)
+    payloads = [
+        p
+        for p in (structure_payload(v, keyword=keyword, roster=roster) for v in videos)
+        if p is not None
+    ]
     if not payloads:
         return None
     ranks = [int(p["順位"]) for p in payloads]

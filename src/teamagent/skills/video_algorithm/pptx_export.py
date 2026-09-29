@@ -21,7 +21,7 @@ from collections.abc import Callable
 import structlog
 
 from teamagent.skills.video_algorithm.schema import VideoAlgorithmOutput
-from teamagent.skills.video_algorithm.slides import SLIDE_H, SLIDE_W, render_slides
+from teamagent.skills.video_algorithm.slides import NOEXPORT_CSS, SLIDE_H, SLIDE_W, render_slides
 
 logger = structlog.get_logger(__name__)
 
@@ -37,6 +37,9 @@ def shoot_sections(html: str) -> list[bytes]:
 
     full_page だと全スライド連結の縦長1枚になるため、locator('.slide').nth(i).screenshot() で
     1枚ずつ撮る。.slide は 1280x720 固定なのでアスペクトずれが出ない。
+
+    撮る前に [data-noexport]（ブラウザ用の編集ヒント）を隠す。position:fixed なので、隠さないと
+    全スライドの左上に焼き込まれる（D-01。media/render_child._slides も同じ CSS を入れる）。
     """
     from playwright.sync_api import sync_playwright
 
@@ -50,6 +53,7 @@ def shoot_sections(html: str) -> list[bytes]:
                 device_scale_factor=_DEVICE_SCALE,
             )
             page.set_content(html, wait_until="networkidle")
+            page.add_style_tag(content=NOEXPORT_CSS)
             slides = page.locator(".slide")
             for i in range(slides.count()):
                 pngs.append(slides.nth(i).screenshot(type="png"))

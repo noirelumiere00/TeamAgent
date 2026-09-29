@@ -111,7 +111,9 @@ def _av(
             hook_type="question",
             telop_density="heavy" if kw_telop else "none",
             telops=[TelopItem(sec=1, text="新宿", kw_match=kw_telop)],
+            # CTA は文言か秒があるものだけ数える（型だけの CTA は無効）。
             cta_type=["save"] if cta else [],
+            cta_text="保存してね" if cta else None,
         ),
     )
 
@@ -200,6 +202,10 @@ def test_render_report_shows_consistency_matrix_and_competitor() -> None:
     assert "一貫性マトリクス" in html
     assert "テロップ↔KW" in html  # 4経路の整合性ヘッダ
     assert "メッセージ一貫性" in html  # coherence band 列
+    # 区分は名簿でコードが決める。名簿が無ければ Gemini の competitor を使わない
+    assert "競合ブランドの映り込み" not in html
+    out.competitors = ["しまむら"]
+    html = render_report(out)
     assert "競合ブランドの映り込み" in html and "しまむら" in html  # 競合警告(ブランドタブ内)
 
 
@@ -524,8 +530,18 @@ def test_render_report_top_tabs_overview_and_per_video() -> None:
 
 
 def test_render_report_planner_strategy_summary() -> None:
-    """v3.5: synthesis のプランナー戦略フィールドが結論バンドに出る（PRプランナー視点）。"""
-    from teamagent.skills.video_algorithm.schema import CrossSynthesis, WinHypothesis
+    """結論の帯は synthesis v3 の検査済みの欄（見出し・指示・次の一手・投稿設計・仮説）を描く。
+
+    v3 の検査を通していない v2 の欄（headline など）は描かない（仕様 v3 §2-0・§4-3）。
+    """
+    from teamagent.skills.video_algorithm.schema import (
+        CrossSynthesis,
+        Directive,
+        HypothesisV3,
+        PostingPlan,
+        SummaryLines,
+        SynthRef,
+    )
 
     a = VideoVSEOAnalysis(
         duration_sec=18,
@@ -541,27 +557,44 @@ def test_render_report_planner_strategy_summary() -> None:
     )
     out.cross = cross_analyze(out.videos, "新宿 ランチ")
     out.cross.synthesis = CrossSynthesis(
-        headline="価格×ボリュームで勝つ",
-        strategy="冒頭で価格提示",
-        creative_brief=["冒頭0.5秒で価格テロップ", "断面アップ3秒"],
-        client_pitch="値ごろ感の実演で攻めましょう",
-        posting_design="保存誘導CTA",
-        win_hypotheses=[
-            WinHypothesis(hypothesis="価格大テロップ型", supported_by=[1, 2], confidence="中")
+        version="v3",
+        headline="価格×ボリュームで勝つ",  # v2 の欄（描かない）
+        creative_brief=["冒頭0.5秒で価格テロップ"],  # v2 の欄（描かない）
+        summary_lines=SummaryLines(
+            type_line="冒頭の価格テロップが上位の共通点",
+            best_reason="1秒に「新宿」のテロップ。",
+            client_move="値ごろ感の実演を試す",
+        ),
+        directives=[
+            Directive(
+                text="1秒に地名のテロップを出す",
+                kind="テロップ",
+                refs=[SynthRef(rank=1, sec=1.0, quote="新宿", source="telop", found_sec=1.0)],
+                origin="llm",
+                tier="必須条件",
+                ranks=[1, 2],
+            )
         ],
+        hypotheses=[HypothesisV3(text="価格大テロップ", ranks=[1, 2], tier="必須条件")],
+        posting=PostingPlan(caption_plan="保存誘導の一文"),
     )
     h = render_report(out)
-    assert "プランナーの戦略サマリ" in h and "価格×ボリュームで勝つ" in h  # headline
-    assert "クリエイティブ指示" in h and "断面アップ3秒" in h  # creative_brief
-    assert "クライアント提案" in h and "値ごろ感の実演" in h  # client_pitch
-    assert "投稿設計" in h and "保存誘導CTA" in h  # posting_design
-    assert "勝ちパターン仮説" in h and "価格大テロップ型" in h  # headline版でも仮説は表示
+    # 2 本だけの観測は見出しに共通点を立てない（R2-10: 段階の名前も付けない）
+    assert "プランナーの戦略サマリ" in h and "上位2本の観測（本数が少ないため" in h
+    assert "冒頭の価格テロップが上位の共通点" not in h
+    assert "クリエイティブ指示" in h
+    # 2 本だけの観測には段階の名前（必須条件）を付けない（R2-10）。根拠は出どころつき。
+    assert "1秒に地名のテロップを出す〔観測 2/2（#1・#2）｜根拠 #1 1秒 テロップ「新宿」〕" in h
+    assert "次の一手（案）" in h and "値ごろ感の実演" in h
+    assert "投稿設計" in h and "保存誘導の一文" in h
+    assert "仮説（A/B で確かめるもの" in h and "価格大テロップ" in h
+    assert "価格×ボリュームで勝つ" not in h and "冒頭0.5秒で価格テロップ" not in h
 
 
 def test_synthesis_prompt_injects_computed_stats() -> None:
     """v3.6: 計算済み統計(StatsAnalysis)が synthesis プロンプトに注入され、根拠にできる。"""
     from teamagent.skills.video_algorithm.schema import CorrItem, KwCoverage, StatsAnalysis
-    from teamagent.skills.video_algorithm.synthesis import build_prompt
+    from teamagent.skills.video_algorithm.synthesis import build_prompt_v2 as build_prompt
 
     st = StatsAnalysis(
         sample_size=3,

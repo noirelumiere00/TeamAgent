@@ -298,8 +298,10 @@ def test_slides_keep_size_and_move_colors_to_dads() -> None:
     assert "#e8362f" not in html.lower()  # 旧・赤アクセント
     assert style.startswith(DADS_LICENSE_COMMENT)  # DADS の値を写すので MIT の出典を残す
     assert _HEX.findall(style.replace(DADS_TOKENS_CSS, "")) == []
-    # 本文サイズは撮影前提で据え置き（lead 21px・タイトル 38px）
-    assert ".lead{font-size:21px" in style and "font-size:38px" in style
+    # 本文 20px・キッカー 18px・タイトル 30〜44px（表紙）・最小 14px（仕様 v3 §2-0）
+    assert ".lead{font-size:20px" in style and ".kicker{" in style
+    sizes = [float(x) for x in _FONT_PX.findall(style.replace(DADS_TOKENS_CSS, ""))]
+    assert min(sizes) >= 14 and max(sizes) <= 44, sorted(set(sizes))
 
 
 def test_dads_style_keeps_the_license_comment() -> None:
