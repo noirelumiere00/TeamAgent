@@ -112,13 +112,15 @@ def test_skill_wires_proposal_urls_and_slack_links(monkeypatch, tmp_path) -> Non
 
 def test_shoot_sections_hides_noexport_before_screenshots(monkeypatch) -> None:
     """壊し方: shoot_sections の add_style_tag を外す → 赤。"""
-    import playwright.sync_api
-
     from teamagent.skills.video_algorithm.pptx_export import shoot_sections
-    from tests.skills.video_algorithm.chromium import FakePlaywright, assert_hidden_before_shots
+    from tests.skills.video_algorithm.chromium import (
+        FakePlaywright,
+        assert_hidden_before_shots,
+        install_fake_playwright,
+    )
 
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(playwright.sync_api, "sync_playwright", FakePlaywright(calls))
+    install_fake_playwright(monkeypatch, FakePlaywright(calls))
     pngs = shoot_sections("<html><section class='slide'></section></html>")
     assert len(pngs) == 2
     assert_hidden_before_shots(calls)

@@ -16,6 +16,7 @@ from tests.skills.video_algorithm.chromium import (
     assert_hidden_before_shots,
     chromium_path,
     edit_tip_brightness,
+    install_fake_playwright,
     launched_browser,
 )
 
@@ -49,10 +50,8 @@ def test_render_child_hides_noexport_before_screenshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """壊し方: render_child._slides の add_style_tag を外す → 赤。"""
-    import playwright.sync_api
-
     calls: list[tuple[str, object]] = []
-    monkeypatch.setattr(playwright.sync_api, "sync_playwright", FakePlaywright(calls))
+    install_fake_playwright(monkeypatch, FakePlaywright(calls))
     meta = render_child._slides(tmp_path.resolve(), _manifest(tmp_path))
     assert meta == {"slides": 2, "network_requests_allowed": 0}
     assert_hidden_before_shots(calls)

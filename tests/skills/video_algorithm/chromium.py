@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import types
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -124,6 +126,20 @@ class FakePlaywright:
 
     def close(self) -> None:
         self.calls.append(("close", None))
+
+
+def install_fake_playwright(monkeypatch: pytest.MonkeyPatch, fake: FakePlaywright) -> None:
+    """``playwright.sync_api.sync_playwright`` を偽物に差し替える（playwright が入っていない CI でも動く）。
+
+    撮影の関数は呼ばれた時点で ``from playwright.sync_api import sync_playwright`` するので、
+    ``sys.modules`` に偽のモジュールを置けば本物の有無に関係なくそれが使われる。
+    """
+    api = types.ModuleType("playwright.sync_api")
+    api.sync_playwright = fake  # type: ignore[attr-defined]
+    pkg = types.ModuleType("playwright")
+    pkg.sync_api = api  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "playwright", pkg)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", api)
 
 
 def assert_hidden_before_shots(calls: list[tuple[str, object]]) -> None:
