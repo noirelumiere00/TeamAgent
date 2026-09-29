@@ -349,6 +349,11 @@ def test_huge_box_numbers_do_not_break_the_parse() -> None:
     from teamagent.skills.video_algorithm.cover_read import parse_cover
 
     assert parse_cover(deep) is None  # 深い入れ子（RecursionError）も None
+    # 3.14 の json は深い入れ子も読めてしまう。どの版でも json が読める 20 段で、自前の上限を確かめる
+    mid = '{"elements":' + "[" * 20 + "]" * 20 + ',"texts":[],"face":null}'
+    assert parse_cover(mid) is None
+    ok4 = '{"elements":["result"],"texts":[{"text":"a","box_2d":[1,2,3,4]}],"face":{"kind":"none"}}'
+    assert parse_cover(ok4) is not None  # 正しい形（4 段）は読む
 
 
 def test_no_gemini_retry_after_the_deadline_and_abandoned_cost_is_logged() -> None:

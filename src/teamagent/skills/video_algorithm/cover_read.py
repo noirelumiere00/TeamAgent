@@ -155,6 +155,28 @@ def cover_version(settings: CoverSettings, model_id: str) -> str:
 # ── parse ───────────────────────────────────────────────────────────────
 
 
+#: 読み取りの JSON の入れ子の上限。正しい形は 4 段（texts → 1 件 → box_2d → 数）まで。
+#: 3.13 の json は深い入れ子で RecursionError になるが、3.14 は読めてしまうので自前で測る。
+_MAX_JSON_DEPTH = 16
+
+
+def _too_deep(value: Any, limit: int = _MAX_JSON_DEPTH) -> bool:
+    """dict / list の入れ子が limit 段を超えるか（再帰を使わずに測る）。"""
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children: Iterable[Any] = node.values()
+        elif isinstance(node, list):
+            children = node
+        else:
+            continue
+        if depth > limit:
+            return True
+        stack.extend((child, depth + 1) for child in children)
+    return False
+
+
 def _first_json_object(text: str) -> Any:
     """``` のフェンスや前後の文があっても、最初の { から始まる JSON を 1 つ読む。"""
     start = text.find("{")
@@ -163,6 +185,8 @@ def _first_json_object(text: str) -> Any:
     try:
         value, _end = json.JSONDecoder().raw_decode(text[start:])
     except (json.JSONDecodeError, ValueError, RecursionError):  # 深い入れ子は RecursionError
+        return None
+    if _too_deep(value):  # Python の版で結果が変わらないよう、深すぎる入れ子は読めない扱い
         return None
     return value
 
