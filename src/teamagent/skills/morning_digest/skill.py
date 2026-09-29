@@ -482,6 +482,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             return self._gcalendar
         return GCalendarClient.from_user_token(token)
 
+    def collect_calendar_events(
+        self, input: MorningDigestInput, ctx: SkillContext
+    ) -> list[CalendarEventItem]:
+        """当日の予定 **だけ** を取る（祝日の予定リマインド登録用・F0 祝日スキップ）。
+
+        メール・Bedrock・Slack・下書きには一切触れない。取得窓と項目は ``run()`` の
+        カレンダー節と同じ ``_collect_calendar``（リマインドの対象が平日と食い違わない）。
+        本人確認は ``run()`` と同じ fail-closed（本人 email が無い・未連携は PermissionError）。
+        """
+        requester = ctx.metadata.get("user_email")
+        if not requester or not isinstance(requester, str) or not requester.strip():
+            raise PermissionError("morning_digest は本人 user_email が必須です（本人受信箱限定）")
+        token = self._resolve_token(requester.strip())
+        return self._collect_calendar(token, input, ctx)
+
     # ── 1. メール digest ──────────────────────────────────────────────────
 
     def _collect_mail_digest(

@@ -10,7 +10,8 @@
   消えるため、遅い日は既定時刻のまま。
 
 planner 実行後に予定が追加・変更されても当日の送信時刻は追随しない（既存リマインドと
-同じ制約）。祝日・休暇の判定はしない（予定が無ければ既定時刻）。
+同じ制約）。本関数は祝日・休暇の判定をしない（予定が無ければ既定時刻）。祝日に予約を
+作らないのは planner 側（``delivery_calendar``・MORNING_DIGEST_HOLIDAY_SKIP が ON のとき）。
 """
 
 from __future__ import annotations
