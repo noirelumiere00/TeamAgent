@@ -631,6 +631,7 @@ class PgVectorClient:
                 d.metadata->>'cls_budget' AS cls_budget,
                 d.metadata->>'cls_target' AS cls_target,
                 d.metadata->>'cls_entities' AS cls_entities,
+                d.metadata->>'campaign_aggregate' AS campaign_aggregate,
                 to_char(d.modified_at AT TIME ZONE 'Asia/Tokyo', 'YYYY-MM-DD') AS updated_at
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -692,6 +693,12 @@ class PgVectorClient:
             ):
                 if r.get(cls_key):
                     meta[cls_key] = r[cls_key]
+            # 施策実績（ショート動画DBの案件集計・ingest.campaign_aggregate）の印。
+            # SearchSkill._apply_campaign_floor がプール内の件数を数えるのに使う
+            # （射影しないと件数が常に 0 になり、床が毎回無駄に発火する）。
+            # "true" のときだけ詰める（他の文書はキー自体を持たない）。
+            if r.get("campaign_aggregate") == "true":
+                meta["campaign_aggregate"] = "true"
             # 便A-3: 更新日（documents.modified_at・JST・YYYY-MM-DD）。値があるときだけ
             # 詰め、由来を date_basis="modified_at" で明示する（NULL 行はキー自体を
             # 持たない＝呼び側が「根拠不明の日付」を作らない）。

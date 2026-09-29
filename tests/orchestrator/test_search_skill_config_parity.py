@@ -42,9 +42,11 @@ def test_resolve_config_reflects_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USE_KNOWLEDGE_FILTERS", "true")
     monkeypatch.setenv("SEARCH_RERANK_RETURN_SIZE", "80")
     monkeypatch.setenv("SEARCH_DRIVE_POOL_FLOOR", "25")
+    monkeypatch.setenv("SEARCH_CAMPAIGN_POOL_FLOOR", "0")
 
     config = factory.resolve_search_skill_config()
     assert config["drive_pool_floor"] == 25
+    assert config["campaign_pool_floor"] == 0  # 0 で施策実績の床を止められる
     assert config["rerank_pool_size"] == 50
     assert config["min_relevance_fallback"] == pytest.approx(0.3)
     assert config["use_client_boost"] is False
@@ -68,6 +70,7 @@ def test_resolve_config_defaults_are_backward_compatible(
         "USE_KNOWLEDGE_FILTERS",
         "USE_COHERE_RERANK",
         "SEARCH_DRIVE_POOL_FLOOR",
+        "SEARCH_CAMPAIGN_POOL_FLOOR",
     ):
         monkeypatch.delenv(name, raising=False)
     config = factory.resolve_search_skill_config()
@@ -76,6 +79,9 @@ def test_resolve_config_defaults_are_backward_compatible(
     # rerank へ 1 件も届かない本番障害（2026-08-27）への恒久対策で、env で 0 にすると
     # 障害当時の挙動へ戻る。既定を 0 に戻す変更は本 assert で落ちる。
     assert config["drive_pool_floor"] == 15
+    # 施策実績のリコール床は既定 ON（3）。0 に戻すと「ショート動画施策の実績」が
+    # 提案 PDF と cls_solution の AND に押し出される 2026-09-29 以前の挙動へ戻る。
+    assert config["campaign_pool_floor"] == 3
     assert config["rerank_return_size"] == 100
     assert config["min_relevance"] == pytest.approx(0.0)
     assert config["min_relevance_fallback"] == pytest.approx(0.0)
