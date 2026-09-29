@@ -53,7 +53,9 @@ function claimOf(args) {
 // plugin 1 個（= OpenClaw プロセス 1 個）。state は mcp の上下・Slack の失敗モード・時計・
 // response_url（ctx.respond.reply）の成否を切り替える。
 function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = true}) {
-  const state = {mcpDown: false, slackMode, nowMs, respondMode: "ok"};
+  const state = {mcpDown: false, slackMode, nowMs, respondMode: "ok", respondDelayMs: 0};
+  // 本人に見える順（DM への投稿と一時表示を、届いた順に 1 列で）。
+  const timeline = [];
   const registrations = new Map();
   const tasks = [];
   const logs = [];
@@ -99,6 +101,7 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
         postSeq += 1;
         const ts = `1784425000.${String(100000 + postSeq)}`;
         posts.push({...body, ts});
+        timeline.push({kind: "post", text: body.text});
         if (state.slackMode === "post_timeout_once") {
           // Slack は受け付けた（投稿は届いた）が、こちらの待ち（AbortSignal.timeout）が先に切れた。
           state.slackMode = "ok";
@@ -214,10 +217,15 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
           acknowledge: async () => {},
           reply: async ({text, responseType}) => {
             if (!text) return;
+            // response_url への POST の往復（本番は Slack までの HTTP。chat.postMessage と順序の保証は無い）。
+            if (state.respondDelayMs > 0) {
+              await new Promise(resolve => setTimeout(resolve, state.respondDelayMs));
+            }
             if (state.respondMode === "fail") {
               throw new Error("Request failed with status code 404 (response_url expired)");
             }
             ephemerals.push({text, responseType: responseType ?? "ephemeral", userId, channelId});
+            timeline.push({kind: "ephemeral", text});
           },
           followUp: async () => {},
           editMessage: async () => {},
@@ -236,6 +244,7 @@ function makePlugin({mcpUrl, slackMode = "ok", buttonTimeoutMs, withBotToken = t
   function report() {
     return {
       ephemerals: ephemerals.map(item => ({...item})),
+      timeline: timeline.map(item => ({...item})),
       posts: posts.map(post => ({...post})),
       slackCalls: [...slackCalls],
       mcpRequests: [...mcpRequests],
@@ -318,12 +327,13 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
 // ── 3. ☑️ → 確認済み＋「↩︎ 取り消す」ボタン → そのボタンを押す → 取り消し ───────────────────
 {
   const p = makePlugin({mcpUrl: input.mcpUrl});
+  const ackMessageTs = nextTs();
   const ack = await p.press({
     actionId: "digest_ack",
     value: T.ack,
     userId: A,
     channelId: input.dmA,
-    messageTs: nextTs(),
+    messageTs: ackMessageTs,
   });
   await p.drain();
   const ackPost = p.posts[0] ?? null;
@@ -340,7 +350,16 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
     });
     await p.drain();
   }
-  out.ackThenUndo = {ack, undo, ...p.report()};
+  // 取り消した後に、元の ☑️（同じ押下）をもう一度押す → 実行しない・本人にだけ一時表示で返す（無言にしない）。
+  const reAck = await p.press({
+    actionId: "digest_ack",
+    value: T.ack,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: ackMessageTs,
+  });
+  await p.drain();
+  out.ackThenUndo = {ack, undo, reAck, ...p.report()};
 }
 
 // ── 4. ☑️ を押したが mcp に digest_ack が無い（本番 OFF）→「このボタンはいま使えません」 ─────
@@ -411,15 +430,19 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
 {
   // 8a. B が自分の DM で A 宛てのトークンのボタンを押す → mcp が本人照合で無効（expired の文）
   const own = makePlugin({mcpUrl: input.mcpUrl});
-  const pressed = await own.press({
+  const crossSpec = {
     actionId: "calendar_event",
     value: T.eventForeign,
     userId: B,
     channelId: input.dmB,
     messageTs: nextTs(),
-  });
+  };
+  const pressed = await own.press(crossSpec);
   await own.drain();
-  out.crossUserToken = {pressed, ...own.report()};
+  // ツールの失敗（expired）を届けた押下の押し直し → 同じボタンはもう通らないので別の頼み方を一時表示。
+  const repressed = await own.press(crossSpec);
+  await own.drain();
+  out.crossUserToken = {pressed, repressed, ...own.report()};
   // 8b. B の押下が A の DM から来た（本人の DM ではない）→ 実行しない・案内は B の DM へ
   const foreign = makePlugin({mcpUrl: input.mcpUrl});
   const foreignPress = await foreign.press({
@@ -552,15 +575,19 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
 // ── 13. Slack への投稿が失敗する（ok:false・HTTP 500）→ 例外を上げず、実行は 1 回のまま ───────
 {
   const apiError = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
-  const pressed = await apiError.press({
+  const apiErrorSpec = {
     actionId: "calendar_event",
     value: T.eventSlackApiError,
     userId: A,
     channelId: input.dmA,
     messageTs: nextTs(),
-  });
+  };
+  const pressed = await apiError.press(apiErrorSpec);
   await apiError.drain();
-  out.slackApiError = {pressed, ...apiError.report()};
+  // 結果が DM に残っていない押下の押し直し → 実行しない・「確かめてください」を一時表示。
+  const repressed = await apiError.press(apiErrorSpec);
+  await apiError.drain();
+  out.slackApiError = {pressed, repressed, ...apiError.report()};
   const http500 = makePlugin({mcpUrl: input.mcpUrl, slackMode: "http500"});
   const pressed500 = await http500.press({
     actionId: "calendar_event",
@@ -571,6 +598,18 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
   });
   await http500.drain();
   out.slackHttp500 = {pressed: pressed500, ...http500.report()};
+  // 13c. 投稿も一時表示も失敗（response_url の失効）→ 例外を上げず、ログに残す。
+  const bothFail = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  bothFail.state.respondMode = "fail";
+  const pressedBoth = await bothFail.press({
+    actionId: "calendar_event",
+    value: T.eventBothFail,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  });
+  await bothFail.drain();
+  out.slackAndRespondFail = {pressed: pressedBoth, ...bothFail.report()};
 }
 
 // ── 14. 直接実行が無効な環境（bot token 無し）は従来の経路（handled:false）のまま ────────────
@@ -714,8 +753,9 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
   const second = await p.press(spec);
   await p.drain();
   out.staleTwice = {first, second, ...p.report()};
-  // 20b. 案内の投稿に失敗したら、押し直しでもう一度案内する（無言のまま固定しない）
+  // 20b. 案内が DM にも一時表示にも届かなかったら、押し直しでもう一度案内する（無言のまま固定しない）
   const q = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  q.state.respondMode = "fail";
   const staleSpec = {
     actionId: "digest_ack",
     value: "not-a-token",
@@ -726,11 +766,77 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
   await q.press(staleSpec);
   await q.drain();
   q.state.slackMode = "ok";
+  q.state.respondMode = "ok";
   await q.press(staleSpec);
   await q.drain();
   await q.press(staleSpec);
   await q.drain();
   out.staleNoticeRetry = q.report();
+  // 20c. 案内の DM 投稿に失敗しても一時表示で届いたら、それで案内済み（押し直しは一時表示だけ）
+  const r = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  const staleSpec2 = {...staleSpec, messageTs: nextTs()};
+  await r.press(staleSpec2);
+  await r.drain();
+  r.state.slackMode = "ok";
+  await r.press(staleSpec2);
+  await r.drain();
+  out.staleNoticeFallback = r.report();
+  // 20d. 本人の DM を確かめられない（conversations.open の ok:false）→ 一時表示で案内する
+  const o = makePlugin({mcpUrl: input.mcpUrl, slackMode: "open_api_error"});
+  await o.press({...staleSpec, messageTs: nextTs()});
+  await o.drain();
+  out.staleNoticeOpenFail = o.report();
+}
+
+// ── 21. DM 以外で押された案内の投稿に失敗（2026-09-29 レビュー指摘）→ 24h 無言にしない ──────────
+{
+  // 21a. DM への案内が ok:false でも、押下の会話（チャンネル）で本人にだけ一時表示で届く。
+  //      押し直しは一時表示で同じ案内だけ（DM へは繰り返さない・実行しない）。
+  const p = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  const spec = {
+    actionId: "calendar_event",
+    value: T.event,
+    userId: A,
+    channelId: input.channel,
+    messageTs: nextTs(),
+  };
+  const first = await p.press(spec);
+  await p.drain();
+  p.state.slackMode = "ok";
+  const again = await p.press(spec);
+  await p.drain();
+  out.notOwnDmFallback = {first, again, ...p.report()};
+  // 21b. DM への案内も一時表示も失敗 → 印を外す → Slack が戻ってから押し直すと DM へ案内が届く。
+  const q = makePlugin({mcpUrl: input.mcpUrl, slackMode: "api_error"});
+  q.state.respondMode = "fail";
+  const spec2 = {...spec, messageTs: nextTs()};
+  const failed = await q.press(spec2);
+  await q.drain();
+  const afterFail = q.report();
+  q.state.slackMode = "ok";
+  q.state.respondMode = "ok";
+  const retried = await q.press(spec2);
+  await q.drain();
+  const third = await q.press(spec2);
+  await q.drain();
+  out.notOwnDmRetry = {failed, afterFail, retried, third, ...q.report()};
+}
+
+// ── 22. 「作っています」の一時表示は結果より先に出る（response_url の往復が遅くても） ──────────────
+{
+  // mcp が落ちている＝結果（もう一度押して）がすぐ出る。response_url の往復は 300ms。
+  const p = makePlugin({mcpUrl: input.mcpUrl});
+  p.state.mcpDown = true;
+  p.state.respondDelayMs = 300;
+  const pressed = await p.press({
+    actionId: "mail_draft",
+    value: T.draft,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: nextTs(),
+  });
+  await p.drain();
+  out.pendingOrder = {pressed, ...p.report()};
 }
 
 // ── 15. 文面の組み立て（renderButtonResult）の境界: 記法の無害化・リンクの門・取り消しボタンの門 ──
@@ -801,6 +907,44 @@ const main = makePlugin({mcpUrl: input.mcpUrl});
     // mcp の門の拒否（英語の理由・診断コード）→ 定型文。例外名もコードも出さない。
     gatewayError: mod.renderButtonResult(B_.schedule_propose, "schedule_propose", asResult({
       error: "Caller authorization failed. 診断: CONNECT-I01a 2026-09-29 12:00 JST",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    // 本物の形の I01c（案内＋診断行）→ texts.unknown の後ろに定型の 2 行だけ添える。
+    identityDiag: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. 利用者側の操作では直りません。管理者へご連絡ください。\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
+        "診断: CONNECT-I01c 2026-09-29 12:00 JST U0CCCCCCCCC",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    // 定型から外れた行（記法の混入・余計な語・別系統のコード）は 1 行も出さない。
+    identityDiagMarkup: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. x\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（<!channel>）へ送ってください:\n" +
+        "診断: CONNECT-I01c 2026-09-29 12:00 JST U0CCCCCCCCC",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    identityDiagLink: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. x\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
+        "診断: CONNECT-I01c 2026-09-29 12:00 JST U0CCCCCCCCC <https://evil.example|x>",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    // I01a（claim の拒否＝ボタンでは多くが害のない再生）は定型の形でも添えない（ログにだけ残す）。
+    identityDiagReplay: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. 利用者側の操作では直りません。管理者へご連絡ください。\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
+        "診断: CONNECT-I01a 2026-09-29 12:00 JST -",
+      code: "CALLER_IDENTITY_REJECTED",
+    })),
+    identityDiagOtherCode: mod.renderButtonResult(B_.calendar_event, "calendar_event", asResult({
+      error:
+        "Caller authorization failed. x\n" +
+        "解決しない場合は、次の 1 行をそのまま管理者（小俣）へ送ってください:\n" +
+        "診断: CONNECT-S01 2026-09-29 12:00 JST -",
       code: "CALLER_IDENTITY_REJECTED",
     })),
     // CALLER_IDENTITY_REJECTED 以外の門の拒否（ツールは走っていない）は従来どおり texts.failed。
