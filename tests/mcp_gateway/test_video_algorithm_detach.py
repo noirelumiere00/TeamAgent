@@ -36,6 +36,7 @@ from teamagent.mcp_gateway.server import USER_CONTEXT_KEY, dispatch_tool
 from teamagent.orchestrator.tools import ToolSpec
 from teamagent.skills._shared.slack_mrkdwn import markdown_bold_to_mrkdwn
 from teamagent.skills.base import BaseSkill, SkillContext
+from teamagent.skills.video_algorithm.cover_read import CoverSettings, cover_version
 from teamagent.skills.video_algorithm.schema import VideoAlgorithmInput, VideoMeta
 from teamagent.skills.video_algorithm.skill import VideoAlgorithmSkill
 
@@ -792,6 +793,7 @@ async def test_lease_held_elsewhere_is_rephrased_without_code_names(
         search_volume=input_obj.search_volume,
         requester=ME,
         synthesis_version=skill._synthesis_version,
+        cover_version=cover_version(CoverSettings.from_env(), gemini.model_id) or None,
     )
     assert cache.acquire_lease(key, request_id="other-process") is not None
 

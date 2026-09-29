@@ -286,7 +286,14 @@ def _strip_code_only(data: dict[str, Any]) -> None:
             for item in items(obj.get(child)):
                 strip(item, child)
 
-    for name in ("summary_lines", "per_video", "directives", "avoid", "storyboards"):
+    for name in (
+        "summary_lines",
+        "per_video",
+        "directives",
+        "cover_directives",
+        "avoid",
+        "storyboards",
+    ):
         for obj in items(data.get(name)):
             strip(obj, name)
     for name in ("board_angles", "hypotheses"):

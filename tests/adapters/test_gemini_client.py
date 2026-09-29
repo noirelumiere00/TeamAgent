@@ -408,3 +408,92 @@ def test_analyze_video_bytes_retries_five_rate_limits_then_succeeds(
 
     assert result.text == "video retry succeeded"
     assert calls == 6
+
+
+# ── 画像の入口（サムネ＝一覧の表紙の読み取り）─────────────────────────────────
+
+
+def test_image_entry_passes_timeout_json_thinking_and_resolution() -> None:
+    """壊し方: timeout・JSON・thinking・解像度のどれかを config に渡さない → 赤。"""
+    pytest.importorskip("google.genai")
+    from google.genai import types
+
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _successful_response("{}")
+    client = GeminiClient(api_key="k", client=fake)
+    client.analyze_image_bytes(b"\xff\xd8\xff", "image/jpeg", "p", "rid", system="S", timeout_s=30)
+    config = fake.models.generate_content.call_args.kwargs["config"]
+    assert config.system_instruction == "S"
+    assert config.http_options.timeout == 30000
+    assert config.response_mime_type == "application/json"
+    assert config.thinking_config.thinking_level == types.ThinkingLevel.LOW
+    assert config.media_resolution == types.MediaResolution.MEDIA_RESOLUTION_HIGH
+
+
+def test_video_entry_config_is_unchanged_by_the_image_entry() -> None:
+    """動画の入口は今のまま（system が無ければ config=None・JSON も thinking も付けない）。"""
+    pytest.importorskip("google.genai")
+    fake = MagicMock()
+    fake.models.generate_content.return_value = _successful_response()
+    client = GeminiClient(api_key="k", client=fake)
+    client.analyze_video_bytes(b"v", "video/mp4", "p", "rid")
+    assert fake.models.generate_content.call_args.kwargs["config"] is None
+    client.analyze_video_bytes(b"v", "video/mp4", "p", "rid", system="S")
+    config = fake.models.generate_content.call_args.kwargs["config"]
+    assert config.system_instruction == "S"
+    assert config.http_options is None and config.response_mime_type is None
+    assert config.thinking_config is None and config.media_resolution is None
+
+
+def test_image_entry_drops_thinking_once_when_the_model_rejects_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thinking を受け付けない 400 は、thinking を外して 1 回だけやり直し、以後は付けない。"""
+    pytest.importorskip("google.genai")
+    monkeypatch.setattr(gemini_module, "_THINKING_REJECTED", set())
+    configs: list[Any] = []
+
+    def generate_content(**kwargs: Any) -> SimpleNamespace:
+        configs.append(kwargs["config"])
+        if kwargs["config"].thinking_config is not None:
+            raise _CodedError("400 INVALID_ARGUMENT: thinking_level is not supported", code=400)
+        return _successful_response("{}")
+
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = generate_content
+    client = GeminiClient(api_key="k", model_id="gemini-3.5-flash", client=fake)
+    assert client.analyze_image_bytes(b"i", "image/jpeg", "p", "rid").text == "{}"
+    assert [c.thinking_config is not None for c in configs] == [True, False]
+    client.analyze_image_bytes(b"i", "image/jpeg", "p", "rid")
+    assert configs[-1].thinking_config is None and len(configs) == 3
+
+
+def test_image_entry_does_not_retry_an_unrelated_bad_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("google.genai")
+    monkeypatch.setattr(gemini_module, "_THINKING_REJECTED", set())
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = _CodedError("400 INVALID_ARGUMENT: bad image", 400)
+    client = GeminiClient(api_key="k", client=fake)
+    with pytest.raises(RuntimeError):
+        client.analyze_image_bytes(b"i", "image/jpeg", "p", "rid")
+    assert fake.models.generate_content.call_count == 1
+
+
+def test_image_entry_retries_less_than_the_video_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """画像の入口は通常 2 回・429 は 3 回まで（動画の 3 回・8 回より絞る）。"""
+    pytest.importorskip("google.genai")
+    clock = _FakeClock()
+    _install_fake_retry_clock(monkeypatch, clock)
+    fake = MagicMock()
+    fake.models.generate_content.side_effect = _CodedError("503 UNAVAILABLE", code=503)
+    client = GeminiClient(api_key="k", client=fake)
+    with pytest.raises(RuntimeError):
+        client.analyze_image_bytes(b"i", "image/jpeg", "p", "rid")
+    assert fake.models.generate_content.call_count == 2
+    fake.models.generate_content.reset_mock()
+    fake.models.generate_content.side_effect = _CodedError("429 RESOURCE_EXHAUSTED", code=429)
+    with pytest.raises(RuntimeError):
+        client.analyze_image_bytes(b"i", "image/jpeg", "p", "rid")
+    assert fake.models.generate_content.call_count == 3

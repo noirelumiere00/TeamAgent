@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from threading import Event, Lock, Thread
 from typing import Any, ClassVar, Literal
@@ -46,6 +47,16 @@ from teamagent.adapters.video_algorithm_cache import (
 from teamagent.prompts.loader import load_prompt
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.video_algorithm.analysis import cross_analyze
+from teamagent.skills.video_algorithm.cover_read import (
+    COVER_PROMPT_SKILL,
+    COVER_PROMPT_VERSION,
+    COVER_WIDTH,
+    CoverImage,
+    CoverReader,
+    CoverSettings,
+    cover_version,
+    image_of,
+)
 from teamagent.skills.video_algorithm.evidence import TIER_MAJORITY, TIER_REQUIRED, Roster
 from teamagent.skills.video_algorithm.facts import JST
 from teamagent.skills.video_algorithm.report import render_report
@@ -96,6 +107,10 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.DOTALL)
 Searcher = Callable[[str, int, str], list[VideoMeta]]
 Downloader = Callable[[str], tuple[bytes, str]]
 Proxy = Callable[[bytes, str], tuple[bytes, str]]
+# サムネ（一覧の表紙）の取得の注入口（テスト用。URL → 画像の bytes）。
+CoverFetcher = Callable[[str], bytes]
+# 表紙の読み取りが先に取った画像を待つ関数（1 本 1 回の取得を表示・色にも使い回す）。
+Prefetched = Callable[[], CoverImage | None]
 
 _MAX_FIELD_RESETS = 8  # 寛容パース: 最大何フィールドまで default に戻して動画を救済するか
 _OVERFETCH_BUFFER = 4  # over-fetch: 目標+この本数を検索し DL/分析失敗を後続候補でバックフィル
@@ -448,6 +463,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         result_cache: VideoAlgorithmResultCache | None = None,
         apify_fallback: Any | None = None,
         synthesis_version: str | None = None,
+        cover_fetcher: CoverFetcher | None = None,
+        cover_settings: CoverSettings | None = None,
     ) -> None:
         self._gemini = gemini
         self._prompt_version = prompt_version
@@ -464,6 +481,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         self._result_cache = result_cache
         # 二段構え（USE_TIKTOK_APIFY_FALLBACK=1）で使う ApifyClient。None なら env から生成。
         self._apify_fallback = apify_fallback
+        # サムネ（一覧の表紙）の読み取り。取得の注入口（テスト）と設定（None なら run ごとに env）。
+        self._cover_fetcher = cover_fetcher
+        self._cover_settings = cover_settings
 
     # --- 依存の遅延解決（テスト差し替え可） ---
     def _client(self) -> GeminiClient:
@@ -659,6 +679,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         preview: bool = True,
         strict_extras: bool = True,
         opening_frame: bool = False,
+        prefetched: Prefetched | None = None,
     ) -> AnalyzedVideo:
         """1 本を取得→圧縮→Gemini で分析する。
 
@@ -672,6 +693,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         - ``preview=False``: Web プレビュー動画（1 本最大 6MB の data URI）を作らない。
         - ``strict_extras=False``: フレーム・サムネの media job が失敗しても、分析（課金済み）を
           捨てずに付属物なしで返す。
+        - ``prefetched``: 表紙の読み取りが先に取った画像を待つ関数（表示・色に使い回す）。
         """
         acquired_via = ""
         try:
@@ -695,6 +717,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     cause=type(e).__name__,
                     media_extras=media_extras,
                     strict_extras=strict_extras,
+                    prefetched=prefetched,
                 )
             data, mime = recovered
             acquired_via = ACQUIRED_VIA_APIFY
@@ -716,6 +739,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 cause=type(e).__name__,
                 media_extras=media_extras,
                 strict_extras=strict_extras,
+                prefetched=prefetched,
             )
 
         user_prompt = (
@@ -775,7 +799,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 )
                 try:
                     cover_uri, thumb, cover_source = self._build_thumb(
-                        meta.cover_url, opening, request_id
+                        meta.cover_url, opening, request_id, prefetched=prefetched
                     )
                 except Exception as exc:
                     if strict_extras:
@@ -1000,6 +1024,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         cause: str,
         media_extras: bool = True,
         strict_extras: bool = True,
+        prefetched: Prefetched | None = None,
     ) -> AnalyzedVideo:
         """動画DL全滅時の縮退: cover(サムネ静止画)1枚だけを Gemini に渡す軽量分析。
 
@@ -1055,7 +1080,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         cover_source: CoverSource = ""
         if media_extras:
             try:
-                cover_uri, thumb, cover_source = self._build_thumb(meta.cover_url, [], request_id)
+                cover_uri, thumb, cover_source = self._build_thumb(
+                    meta.cover_url, [], request_id, prefetched=prefetched
+                )
             except Exception as exc:
                 if strict_extras:
                     raise
@@ -1074,19 +1101,34 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         )
 
     def _build_thumb(
-        self, cover_url: str | None, frames: list[FrameShot], request_id: str
+        self,
+        cover_url: str | None,
+        frames: list[FrameShot],
+        request_id: str,
+        *,
+        prefetched: Prefetched | None = None,
     ) -> tuple[str, ThumbColor | None, CoverSource]:
         """サムネ（表紙）とその色。表紙の URL を先に使い、取れなければ先頭のコマで代える。
 
         戻り値の 3 つ目は出どころ（"cover"＝表紙・"frame"＝コマで代用・""＝無し）。描画は
         代用のとき「表紙」と呼ばない（本番では 0.8 秒のコマを表紙として色を比べていた）。
         表紙もコマも作れなければ、media job の失敗として例外を上げる（呼び出し側の strict に従う）。
+
+        ``prefetched`` があれば、表紙の読み取りが取った画像（幅 540・色つき）を待って使い、
+        表紙の URL をもう一度取りに行かない（1 本 1 回の取得。失敗・時間切れならコマで代える）。
         """
         from teamagent.adapters.media_job import MediaJobClient
         from teamagent.skills.video_algorithm.thumbnails import (
             analyze_cover,
             build_thumb,
         )
+
+        if prefetched is not None and cover_url:
+            got = prefetched()
+            built = self._thumb_from_image(got, request_id) if got is not None else None
+            if built is not None:
+                return built[0], built[1], "cover"
+            cover_url = None
 
         head: bytes | None = None
         if frames and frames[0].data_uri.startswith("data:image/jpeg;base64,"):
@@ -1148,7 +1190,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         if not MediaJobClient.local_runtime_enabled():
             MediaJobClient.require_configured()
             raise AssertionError("unreachable")
-        res = build_thumb(cover_url, request_id=request_id)
+        res = build_thumb(cover_url, request_id=request_id) if cover_url else None
         if res is not None:
             return res[0], res[1], "cover"
         if head is not None:
@@ -1159,6 +1201,128 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             if framed is not None:
                 return framed[0], framed[1], "frame"
         return "", None, ""
+
+    @staticmethod
+    def _thumb_from_image(
+        image: CoverImage, request_id: str
+    ) -> tuple[str, ThumbColor | None] | None:
+        """表紙の読み取りが取った画像から、表示用の画像と色を作る（取り直さない）。"""
+        import base64
+
+        if image.color is not None:  # media worker が同じ取得で色も計算した（幅 540 の JPEG）
+            try:
+                color: ThumbColor | None = ThumbColor.model_validate(image.color)
+            except ValidationError:
+                color = None
+            return f"data:{image.mime};base64," + base64.b64encode(image.data).decode(
+                "ascii"
+            ), color
+        from teamagent.adapters.media_job import MediaJobClient
+
+        if MediaJobClient.is_configured():
+            fingerprint = hashlib.sha256(image.data).hexdigest()
+            data, metadata = MediaJobClient().make_thumbnail(
+                image.data,
+                image.mime,
+                request_fingerprint=f"{request_id}:thumbnail:{fingerprint}",
+                width=240,
+            )
+            return (
+                "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii"),
+                ThumbColor.model_validate(metadata),
+            )
+        from teamagent.skills.video_algorithm.thumbnails import analyze_cover
+
+        try:
+            analyzed = analyze_cover(image.data, request_id=request_id)
+        except Exception:
+            analyzed = None
+        if analyzed is not None:
+            return analyzed
+        if image.mime in ("image/jpeg", "image/png", "image/webp"):
+            return f"data:{image.mime};base64," + base64.b64encode(image.data).decode("ascii"), None
+        return None
+
+    # --- サムネ（一覧の表紙）の読み取り ---
+    def _cover_settings_now(self) -> CoverSettings:
+        return self._cover_settings or CoverSettings.from_env()
+
+    def _cover_settings_for(self, input: VideoAlgorithmInput) -> CoverSettings:
+        """この依頼の表紙の設定。表紙を出す出力（report／slides／pptx）が無ければ読まない。
+
+        tiktok_search の深掘り（deep.build_filmstrips）は outputs=[] でコマと冒頭フックだけを使う。
+        画面に出ない表紙のために Gemini の費用・待ち・統合の入力を増やさない（キャッシュのキーも
+        従来のまま）。
+        """
+        settings = self._cover_settings_now()
+        if not input.outputs and settings.enabled:
+            return replace(settings, enabled=False)
+        return settings
+
+    def _cover_fetch(
+        self, request_id: str, settings: CoverSettings
+    ) -> Callable[[VideoMeta], CoverImage]:
+        """表紙の取得（1 本 1 回・幅 540）。
+
+        注入があればそれ、無ければ media job（本番）かローカル。
+        """
+        injected = self._cover_fetcher
+        if injected is not None:
+            return lambda meta: image_of(injected(meta.cover_url or ""), via="injected")
+
+        def fetch(meta: VideoMeta) -> CoverImage:
+            from teamagent.adapters.media_job import MediaJobClient
+
+            url = meta.cover_url or ""
+            if MediaJobClient.is_configured():
+                fingerprint = hashlib.sha256(url.encode("utf-8")).hexdigest()
+                image, metadata = MediaJobClient().make_thumbnail_from_url(
+                    url,
+                    request_fingerprint=f"{request_id}:cover-read:{fingerprint}",
+                    width=COVER_WIDTH,
+                    timeout_s=int(settings.fetch_timeout_s),
+                )
+                return image_of(image, via="media", color=dict(metadata))
+            if MediaJobClient.local_runtime_enabled():
+                from teamagent.skills.video_algorithm import thumbnails
+
+                data = thumbnails.fetch_cover(url, request_id=request_id)
+                if not data:
+                    raise RuntimeError("COVER_LOCAL_FETCH_FAILED")
+                return image_of(data, via="local")
+            MediaJobClient.require_configured()
+            raise AssertionError("unreachable")
+
+        return fetch
+
+    def _start_cover_reader(self, request_id: str, settings: CoverSettings) -> CoverReader | None:
+        """読み取りを始める（Gemini のクライアントは main で先に作る）。作れなければ読まない。"""
+        try:
+            gemini = self._client()
+            system = load_prompt(COVER_PROMPT_SKILL, COVER_PROMPT_VERSION, "system")
+            version = cover_version(settings, self._configured_model_id())
+        except Exception as exc:
+            logger.warning(
+                "video_algorithm_cover_reader_unavailable",
+                request_id=request_id,
+                error=type(exc).__name__,
+            )
+            return None
+        return CoverReader(
+            gemini=gemini,
+            system=system,
+            fetch=self._cover_fetch(request_id, settings),
+            request_id=request_id,
+            settings=settings,
+            version=version,
+        )
+
+    @staticmethod
+    def _prefetch_for(reader: CoverReader | None, meta: VideoMeta) -> Prefetched | None:
+        if reader is None or meta.rank not in reader.ranks():
+            return None
+        rank = meta.rank
+        return lambda: reader.image_for(rank)
 
     # --- 外から使う薄い入口（検索上位チェックの 2 段目など・検索しない） ---
     @staticmethod
@@ -1272,6 +1436,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                 avoid_terms=input.avoid_terms,
                 # 統合の版が違えば同じ KW でも作り直す（旧版の synthesis を返さない）。
                 synthesis_version=self._synthesis_version,
+                # 表紙の読み取りの版（止めているときは空＝従来のキー）。
+                cover_version=cover_version(
+                    self._cover_settings_for(input), self._configured_model_id()
+                )
+                or None,
             )
             with _stage("cache_lookup", ctx.request_id):
                 cached = self._read_cached_output(result_cache, cache_key, ctx)
@@ -1488,6 +1657,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         assert_lease_owned: Callable[[], None] | None,
     ) -> VideoAlgorithmOutput:
         log = ctx.bind_logger(self.name)
+        run_started = time.monotonic()
+        cover_settings = self._cover_settings_for(input)
 
         target = input.max_videos  # 深掘り分析（DL+Gemini）する本数。重い。
         # 取得（スクレイプ）= 上位ボード board_size 本。メタのみ＝軽い。
@@ -1564,51 +1735,80 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             max_videos=fallback_max_videos(),
             wallclock_s=_apify_wallclock_budget_s(),
         )
+        # サムネ（一覧の表紙）: 上位の群は表示順の上位 target 本（画像投稿を除く）。動画の分析の
+        # 成否では切らない。1 波目の quota の予約が通ってから始める（止まる依頼で課金しない）。
+        cover_top = candidates[:target]
+        cover_top_ranks = {m.rank for m in cover_top}
+        all_zero = not analyzable
+        reader: CoverReader | None = None
+        board_submitted = False
         # 上位から波状に分析し、成功が target 本に達するか候補が尽きるまで（再検索はしない）
         results: list[AnalyzedVideo] = []
         attempted = 0
         quota_truncated = False
-        while sum(1 for v in results if v.analysis) < target and attempted < len(candidates):
-            need = target - sum(1 for v in results if v.analysis)
-            batch = candidates[attempted : attempted + need]
-            # 事前 consume: DL/Gemini/parse の失敗もコスト試行として数え、上限の並行すり抜けを防ぐ。
-            # バックフィル batch もここを通るため、実際に開始した分析本数が台帳へ乗る。
-            if assert_lease_owned is not None:
-                assert_lease_owned()
-            # 1波目（まだ 0 本）で足りなければ残数と選択肢を出して止める＝利用者に選ばせる。
-            # 2波目以降は残数に丸めて進め、0 なら打ち切って**そこまでの成果を返す**。
-            with _stage("quota", ctx.request_id):
-                reserved = self._reserve_quota(ctx, len(batch), allow_partial=bool(results))
-            if reserved <= 0:
-                quota_truncated = True
-                break
-            batch = batch[:reserved]
-            attempted += len(batch)
-            workers = max(1, min(self._max_workers, len(batch)))
-            with (
-                _stage("analyze_wave", ctx.request_id),
-                ThreadPoolExecutor(max_workers=workers) as ex,
-            ):
-                results.extend(
-                    ex.map(
-                        lambda m: self._analyze_one(
-                            m,
-                            query=input.query,
-                            client_name=input.client_name,
-                            system=system,
-                            request_id=ctx.request_id,
-                            downloader=call_downloader,
-                            user_email=str(ctx.metadata.get("user_email") or ""),
-                            apify_budget=apify_budget,
-                            # 構成分解のコマは場面ごと（最初と最後の場面を含む・最大 12 枚）。
-                            # pick_timecodes の 6 枚は前半に偏り、本編と締めが無かった（M28）。
-                            scene_frames=True,
-                            frame_width=320,
-                            opening_frame=True,
-                        ),
-                        batch,
+        try:
+            while sum(1 for v in results if v.analysis) < target and attempted < len(candidates):
+                need = target - sum(1 for v in results if v.analysis)
+                batch = candidates[attempted : attempted + need]
+                # 事前 consume: DL/Gemini/parse の失敗もコスト試行として数え、上限の並行
+                # すり抜けを防ぐ。
+                # バックフィル batch もここを通るため、実際に開始した分析本数が台帳へ乗る。
+                if assert_lease_owned is not None:
+                    assert_lease_owned()
+                # 1波目（まだ 0 本）で足りなければ残数と選択肢を出して止める＝利用者に選ばせる。
+                # 2波目以降は残数に丸めて進め、0 なら打ち切って**そこまでの成果を返す**。
+                with _stage("quota", ctx.request_id):
+                    reserved = self._reserve_quota(ctx, len(batch), allow_partial=bool(results))
+                if reserved <= 0:
+                    quota_truncated = True
+                    break
+                batch = batch[:reserved]
+                attempted += len(batch)
+                if reader is None and cover_settings.enabled and not results:
+                    reader = self._start_cover_reader(ctx.request_id, cover_settings)
+                    if reader is not None:
+                        reader.submit(cover_top, "top", all_zero=all_zero)
+                prefetch = {m.rank: self._prefetch_for(reader, m) for m in batch}
+                workers = max(1, min(self._max_workers, len(batch)))
+                with (
+                    _stage("analyze_wave", ctx.request_id),
+                    ThreadPoolExecutor(max_workers=workers) as ex,
+                ):
+                    results.extend(
+                        ex.map(
+                            lambda m, pre=prefetch: self._analyze_one(
+                                m,
+                                query=input.query,
+                                client_name=input.client_name,
+                                system=system,
+                                request_id=ctx.request_id,
+                                downloader=call_downloader,
+                                user_email=str(ctx.metadata.get("user_email") or ""),
+                                apify_budget=apify_budget,
+                                # 構成分解のコマは場面ごと（最初と最後の場面を含む・最大 12 枚）。
+                                # pick_timecodes の 6 枚は前半に偏り、本編と締めが無かった（M28）。
+                                scene_frames=True,
+                                frame_width=320,
+                                opening_frame=True,
+                                prefetched=pre[m.rank],
+                            ),
+                            batch,
+                        )
                     )
-                )
+                if reader is not None and cover_settings.board and not board_submitted:
+                    # 6〜30 位の表紙は、1 波目の動画の job を出し終えてから投入する（dispatcher と
+                    # Fargate の同時数を動画と取り合わないため）。
+                    board_submitted = True
+                    reader.submit(
+                        [m for m in pool if m.rank not in cover_top_ranks],
+                        "rest",
+                        all_zero=all_zero,
+                    )
+        except BaseException:
+            # 動画の波が例外で止まったら、表紙の読み取りも待たずに片付ける（裏で課金を続けない）。
+            if reader is not None:
+                reader.join(0.0)
+            raise
         # 成功が target に達したら失敗カードは捨てる（バックフィル済み）。
         # 足りなければ失敗も見せて正直に（候補枯渇・全滅を隠さない）。
         ok = [v for v in results if v.analysis]
@@ -1619,10 +1819,24 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analyzed.sort(key=lambda v: v.meta.rank)
         backfilled = sum(1 for v in analyzed if v.analysis and v.meta.rank > target)
 
+        cover_cost = 0.0
+        if reader is not None:
+            with _stage("cover_join", ctx.request_id):
+                reads, cover_cost = reader.join(reader.remaining_budget_s(run_started))
+            # 置き場所は上位ボードの各行だけ（唯一の正）。videos[].meta は同じ物を指すので
+            # 写しにする。
+            for m in pool:
+                if m.rank in reads:
+                    m.cover_read = reads[m.rank]
+            for v in results:
+                if v.meta.cover_read is not None:
+                    v.meta = v.meta.model_copy(update={"cover_read": None})
+
         roster = Roster.of(input.client_name, input.competitors)
         with _stage("cross", ctx.request_id):
             cross = cross_analyze(analyzed, input.query, board=pool, roster=roster)
-        total_cost = round(sum(v.cost_usd for v in results), 6)  # 全試行の課金を計上
+        # 全試行の課金を計上（表紙の読み取りは、返ってきた分だけ・float のときだけ足してある）
+        total_cost = round(sum(v.cost_usd for v in results) + cover_cost, 6)
         # 横断シンセシス（Gemini 2nd pass・概念の関連性）。≥2本でのみ実行
         if sum(1 for v in analyzed if v.analysis) >= 2:
             from teamagent.skills.video_algorithm.synthesis import synthesize
@@ -1657,6 +1871,9 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             kw_set=list(input.kw_set or []),
             **_echo_fields(input),
             generated_at=generated_at,
+            # off＝止めている設定・top／board＝読む設定（読み取りを始められなかったときも同じ値で、
+            # 描画は上位ボードに読み取りが無いことから「読めず」と出す）。
+            cover_read_mode=cover_settings.mode,
             quota_note=(
                 f"今月の残り本数の都合で{len(ok)}本までで止めました"
                 f"（ご依頼は{target}本）。リセットは来月1日（JST）です。"
@@ -2002,6 +2219,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         bf = f"／下位繰上げ{backfilled}本" if backfilled else ""
         points = _tier_points(out)
         top = f"\n共通点（コードの集計）: {points}" if points else ""
+        if c.cover_line:
+            top += f"\n{c.cover_line}"
         proposal_lines = ""
         if out.pptx_url:
             proposal_lines += f"\n📊 画像のパワポ（文字の修正はHTML版で・7日有効）: {out.pptx_url}"
