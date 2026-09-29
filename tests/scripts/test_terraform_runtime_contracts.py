@@ -460,7 +460,7 @@ def test_bedrock_and_lambda_secret_iam_are_exact() -> None:
     assert "exact_pass_service" in guard
 
 
-# EC2 worker（aws_iam_role_policy.worker_app）は 2026-09-28 に撤去したので、guard の
+# EC2 worker（aws_iam_role_policy.worker_app）は 2026-09-28 の裁定で撤去したので、guard の
 # 必須リストは残りの 5 アドレスだけになる。
 EXACT_IAM_REQUIRED_ADDRESSES = (
     "aws_iam_role_policy.lambda_app",

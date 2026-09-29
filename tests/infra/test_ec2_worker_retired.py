@@ -5,7 +5,8 @@
 
 - ``infra/terraform/worker.tf`` を削除した（インスタンス・SG・db_from_worker・IAM 4 資源）
 - ``enable_hmac_worker_deploy`` に「常に false」の validation を付け、worker の HMAC 配布経路を
-  plan の時点で止まるようにした
+  plan の時点で止まるようにした（配布経路の本体 ``terraform_data.hmac_worker_deploy`` は
+  count でこの変数につながっている。つながりが切れると封印が効かないので、それも確かめる）
 - guard（``validate_exact_runtime_iam_plan``）の必須リストから ``worker_app`` を外した
 
 どれかが戻ると、本番の state と repo が食い違う（空の EC2 が新しい AMI で立つ、guard が
@@ -22,7 +23,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 TF_ROOT = ROOT / "infra" / "terraform"
 WORKER_DEPLOY_TF = TF_ROOT / "hmac_worker_deploy.tf"
+HMAC_KEYRINGS_TF = TF_ROOT / "hmac_keyrings.tf"
 GUARD = ROOT / "infra" / "deploy" / "terraform_runtime_guard.sh"
+SEALED_FLAG = "var.enable_hmac_worker_deploy"
 
 RETIRED_RESOURCES = (
     ("aws_instance", "worker"),
@@ -68,18 +71,103 @@ def _reference(address: str) -> re.Pattern[str]:
     return re.compile(rf"(?<![A-Za-z0-9_.]){re.escape(address)}(?![A-Za-z0-9_])")
 
 
-def _variable_block(source: str, name: str) -> str:
-    marker = f'variable "{name}" {{'
-    start = source.index(marker)
+def _scan_hcl(source: str, *, mask: bool) -> str:
+    """HCL を 1 文字ずつ読み、コメントと文字列を見分ける。改行の位置は保つ。
+
+    - ``mask=False``: コメント（``#`` ・ ``//`` ・ ``/* */``）を落とし、文字列は残す。
+    - ``mask=True``: コメントと文字列（``${ }`` の中を含む）を空白に置き換え、文字位置も保つ。
+      波かっこの対応を数えるとき、文字列やコメントの中のかっこを数えないためのもの。
+
+    heredoc は対象の .tf に無いので扱わず、出てきたら止める。
+    """
+    out: list[str] = []
+    # 文字列の文脈のスタック。-1 は文字列の中、0 以上は文字列内の ${ } / %{ } の中の
+    # 波かっこの深さ（その中では引用符で内側の文字列が開く）。
+    stack: list[int] = []
+
+    def emit(text: str, *, hidden: bool) -> None:
+        out.append("".join("\n" if c == "\n" else " " for c in text) if hidden else text)
+
+    index, size = 0, len(source)
+    while index < size:
+        char = source[index]
+        if stack and stack[-1] == -1:
+            if char == "\\" and index + 1 < size:
+                step = 2
+            elif source.startswith(("$${", "%%{"), index):
+                step = 3
+            elif source.startswith(("${", "%{"), index):
+                stack.append(0)
+                step = 2
+            else:
+                if char == '"':
+                    stack.pop()
+                step = 1
+            emit(source[index : index + step], hidden=mask)
+            index += step
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            if end == -1:
+                raise AssertionError("unterminated block comment")
+            comment = source[index : end + 2]
+            emit(comment if mask else "\n" * comment.count("\n"), hidden=mask)
+            index = end + 2
+            continue
+        if char == "#" or source.startswith("//", index):
+            end = source.find("\n", index)
+            end = size if end == -1 else end
+            if mask:
+                emit(source[index:end], hidden=True)
+            index = end
+            continue
+        if source.startswith("<<", index):
+            raise AssertionError("heredoc is not supported by _scan_hcl")
+        if char == '"':
+            stack.append(-1)
+        elif stack and char == "{":
+            stack[-1] += 1
+        elif stack and char == "}":
+            if stack[-1] == 0:
+                stack.pop()
+            else:
+                stack[-1] -= 1
+        # 文字列を開く引用符と ${ } の中身（閉じかっこを含む）は、文字列の一部として隠す。
+        emit(char, hidden=mask and bool(stack))
+        index += 1
+    if stack:
+        raise AssertionError("unterminated string or template")
+    return "".join(out)
+
+
+def _strip_hcl_comments(source: str) -> str:
+    """コメントで囲んだ validation や count を「まだ書いてある」と誤認しないために使う。"""
+    return _scan_hcl(source, mask=False)
+
+
+def _block(source: str, header: str) -> str:
+    """コメントを落とした ``source`` から、``header``（例: ``variable "x" {``）の塊を返す。"""
+    matches = list(re.finditer(rf"(?m)^[ \t]*{re.escape(header)}", source))
+    assert len(matches) == 1, f"{header!r} must appear exactly once, found {len(matches)}"
+    masked = _scan_hcl(source, mask=True)
+    assert len(masked) == len(source)
     depth = 0
-    for index in range(source.index("{", start), len(source)):
-        if source[index] == "{":
+    for index in range(matches[0].end() - 1, len(masked)):
+        if masked[index] == "{":
             depth += 1
-        elif source[index] == "}":
+        elif masked[index] == "}":
             depth -= 1
             if depth == 0:
-                return source[start : index + 1]
-    raise AssertionError(f"unterminated variable block: {name}")
+                return source[matches[0].start() : index + 1]
+    raise AssertionError(f"unterminated block: {header}")
+
+
+def _variable_block(source: str, name: str) -> str:
+    return _block(source, f'variable "{name}" {{')
+
+
+def _normalized_lines(block: str) -> list[str]:
+    return [" ".join(line.split()) for line in block.splitlines() if line.strip()]
 
 
 def _guard_required_iam_addresses() -> list[str]:
@@ -146,14 +234,67 @@ def test_bastion_keeps_its_ami_data_source() -> None:
     assert "data.aws_ami.al2023_arm.id" in source
 
 
+def test_hcl_scanner_separates_comments_from_strings() -> None:
+    source = (
+        'a = "http://x#y" # tail\n'
+        "/* validation {\n  condition = true\n} */\n"
+        "// count = 1\n"
+        'b = "${join("#", ["//", "}"])}" # c\n'
+        'c = "$${literal} \\" # still string"\n'
+        'variable "v" {\n  d = "}{"\n  validation {\n    e = 1\n  }\n}\nafter {}\n'
+    )
+    stripped = _strip_hcl_comments(source)
+    assert stripped.count("\n") == source.count("\n")
+    assert 'a = "http://x#y" \n' in stripped
+    assert "tail" not in stripped
+    assert "validation {\n  condition" not in stripped
+    assert "count" not in stripped
+    assert 'b = "${join("#", ["//", "}"])}" \n' in stripped
+    assert 'c = "$${literal} \\" # still string"\n' in stripped
+    block = _variable_block(stripped, "v")
+    assert block.startswith('variable "v" {') and block.endswith("    e = 1\n  }\n}")
+
+
 def test_worker_hmac_deploy_path_is_sealed_by_validation() -> None:
+    # コメントを落としてから読む。validation を /* */ や # で殺した形は「無い」とみなす。
     block = _variable_block(
-        WORKER_DEPLOY_TF.read_text(encoding="utf-8"), "enable_hmac_worker_deploy"
+        _strip_hcl_comments(WORKER_DEPLOY_TF.read_text(encoding="utf-8")),
+        "enable_hmac_worker_deploy",
     )
     assert re.search(r"(?m)^\s*default\s*=\s*false\s*$", block)
-    validation = block[block.index("validation {") :]
-    assert re.search(r"(?m)^\s*condition\s*=\s*!var\.enable_hmac_worker_deploy\s*$", validation)
+    validation = _block(block, "validation {")
+    assert re.search(rf"(?m)^\s*condition\s*=\s*!{re.escape(SEALED_FLAG)}\s*$", validation)
     assert "retired" in validation
+
+
+def test_worker_hmac_deploy_resource_only_runs_behind_the_sealed_flag() -> None:
+    """validation だけでは封印にならない。配布経路の本体（local-exec で deploy_to_ec2.sh を
+    実行する terraform_data）が、封じた変数に count でつながっていることまで確かめる。"""
+    source = _strip_hcl_comments(WORKER_DEPLOY_TF.read_text(encoding="utf-8"))
+    declared = re.findall(r'(?m)^resource\s+"([^"]+)"\s+"([^"]+)"\s*\{', source)
+    assert declared == [("terraform_data", "hmac_worker_deploy")]
+    block = _block(source, 'resource "terraform_data" "hmac_worker_deploy" {')
+    lines = _normalized_lines(block)
+    meta = [line for line in lines if re.match(r"(count|for_each)\s*=", line)]
+    assert meta == [f"count = {SEALED_FLAG} ? 1 : 0"]
+    assert 'provisioner "local-exec" {' in lines
+    assert "deploy_to_ec2.sh" in block
+    assert source.count("provisioner ") == block.count("provisioner ") == 1
+
+
+def test_worker_deploy_script_is_wired_only_in_the_sealed_file() -> None:
+    wired = sorted(
+        path.name
+        for path in TF_ROOT.glob("*.tf")
+        if "deploy_to_ec2.sh" in path.read_text(encoding="utf-8")
+    )
+    assert wired == [WORKER_DEPLOY_TF.name]
+
+
+@pytest.mark.parametrize("name", ["hmac_worker_in_scope", "worker_enabled"])
+def test_hmac_worker_scope_and_release_binding_follow_the_sealed_flag(name: str) -> None:
+    lines = _normalized_lines(_strip_hcl_comments(HMAC_KEYRINGS_TF.read_text(encoding="utf-8")))
+    assert [line for line in lines if line.split(" =")[0] == name] == [f"{name} = {SEALED_FLAG}"]
 
 
 def test_guard_no_longer_requires_the_retired_worker_policy() -> None:

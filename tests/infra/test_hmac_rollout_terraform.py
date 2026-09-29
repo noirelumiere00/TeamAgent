@@ -435,7 +435,7 @@ def test_rollout_gate_policy_covers_exact_reconciliation_dependencies() -> None:
 
 
 def test_legacy_worker_and_direct_deploy_paths_cannot_bypass_preflight() -> None:
-    # EC2 worker は 2026-09-28 に撤去した（worker.tf を destroy）。worker 資源の定義が
+    # EC2 worker は 2026-09-28 の裁定で撤去した（worker.tf を destroy）。worker 資源の定義が
     # 戻っていないことだけを確かめ、配布経路（deploy_to_ec2.sh など）の検査は残す。
     assert not (TF_ROOT / "worker.tf").exists()
     loader = (ROOT / "scripts" / "load_secrets.sh").read_text(encoding="utf-8")
