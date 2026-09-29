@@ -301,7 +301,8 @@ def _node_mail_action_contract() -> dict[str, Any]:
     script = f"""
 import {{createCallerIdentityPlugin}} from {json.dumps(CALLER_PLUGIN.as_uri())};
 const hooks = {{}};
-let interactive;
+// ボタン束縛表（ACTION_BINDINGS）の action_id ごとに handler が登録される。ここは mail_draft のものを使う。
+const interactives = new Map();
 let nowMs = {TEST_NOW * 1000};
 createCallerIdentityPlugin({{
   env: {{
@@ -312,9 +313,12 @@ createCallerIdentityPlugin({{
   randomBytesFn: () => Buffer.alloc(16, 13),
 }}).register({{
   on: (name, callback) => {{ hooks[name] = callback; }},
-  registerInteractiveHandler: registration => {{ interactive = registration; }},
+  registerInteractiveHandler: registration => {{
+    interactives.set(`${{registration.channel}}:${{registration.namespace}}`, registration);
+  }},
   logger: {{warn: () => {{}}}},
 }});
+const interactive = interactives.get("slack:mail_draft");
 if (
   interactive?.channel !== "slack" ||
   interactive?.namespace !== "mail_draft"

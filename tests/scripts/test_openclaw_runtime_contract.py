@@ -406,12 +406,70 @@ def test_internal_caller_identity_plugin_uses_installed_openclaw_schema() -> Non
     assert "runtimeExtensions" not in package["openclaw"]
     assert package["openclaw"]["compat"]["pluginApi"] == ">=2026.7.1"
     assert "registerInteractiveHandler" in plugin
-    assert "namespace: MAIL_DRAFT_ACTION_ID" in plugin
+    assert "for (const actionId of Object.keys(ACTION_BINDINGS))" in plugin
+    assert "namespace: actionId" in plugin
     assert "ctx?.auth?.isAuthorizedSender !== true" in plugin
     assert 'ctx?.trigger === "heartbeat"' in plugin
-    assert "parseMailDraftSystemEvent" in plugin
+    assert "parseSlackActionSystemEvent" in plugin
     assert "interactionId !== expectedInteractionId" in plugin
-    assert "mail_draft requires an authoritative Slack button action" in plugin
+    assert "requires an authoritative Slack button action" in plugin
+    assert "Slack button action cannot authorize another tool" in plugin
+
+
+def _plugin_action_bindings() -> dict[str, dict[str, Any]]:
+    """plugin の ACTION_BINDINGS を実物の module から読む（文字列一致ではなく実値）。"""
+    plugin = ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"
+    completed = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            f"const m = await import({json.dumps(plugin.as_uri())});"
+            "process.stdout.write(JSON.stringify(m.ACTION_BINDINGS));",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_every_digest_button_is_bound_to_one_reachable_tool() -> None:
+    """朝ダイジェストが出すボタン（action_id）は、すべて plugin の束縛表に載り、
+    束縛先のツールは toolFilter と effective-tool-scope に載っている（＝押下の run から呼べる）。
+
+    09-29 の本番事故: 📅/🗓 は表示されていたが束縛表（当時は mail_draft 固定）に無く、
+    押しても何も起きなかった。ダイジェスト側にボタンを足したら、ここが赤くなる。
+    """
+    bindings = _plugin_action_bindings()
+    digest = (ROOT / "scripts/run_morning_digest_fargate.py").read_text()
+    digest_action_ids = set(re.findall(r'^_ACTION_[A-Z_]+ = "([a-z_]+)"$', digest, re.MULTILINE))
+    assert digest_action_ids == {"mail_draft", "calendar_event", "schedule_propose", "digest_ack"}
+    assert set(bindings) == digest_action_ids
+    tools = [binding["tool"] for binding in bindings.values()]
+    assert len(tools) == len(set(tools)), "action_id → ツールは 1 対 1"
+    config = _load_reviewed_json5(CONFIG)
+    included = set(config["mcp"]["servers"]["teamagent"]["toolFilter"]["include"])
+    scope_names = {tool["name"] for tool in json.loads(TOOL_SCOPE.read_text())["tools"]}
+    for action_id, binding in bindings.items():
+        assert binding["tool"] in included, action_id
+        assert binding["tool"] in scope_names, action_id
+    # トークン引数名は mcp の入力 schema の実フィールド（上限も一致）。
+    from teamagent.skills.calendar_event.schema import CalendarEventInput
+    from teamagent.skills.digest_ack.schema import DigestAckInput
+    from teamagent.skills.schedule_propose.schema import ScheduleProposeInput
+
+    for action_id, model in (
+        ("calendar_event", CalendarEventInput),
+        ("schedule_propose", ScheduleProposeInput),
+        ("digest_ack", DigestAckInput),
+    ):
+        field = model.model_fields[bindings[action_id]["tokenParam"]]
+        max_length = next(m.max_length for m in field.metadata if hasattr(m, "max_length"))
+        assert bindings[action_id]["maxLength"] == max_length, action_id
+    assert bindings["mail_draft"]["tokenParam"] == "draft_token"
+    assert bindings["mail_draft"]["maxLength"] == 160
 
 
 def test_entrypoint_is_readonly_secret_safe_and_environment_allowlisted() -> None:
