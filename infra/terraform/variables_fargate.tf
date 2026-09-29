@@ -631,3 +631,26 @@ variable "direct_summary_post_allowed_emails" {
   type        = string
   default     = ""
 }
+
+# ============================================================
+# 2026-09-29: F0 連携切れの見える化（PR-0b 連携の生存確認）。既定はすべて「今と同じ」。
+# ============================================================
+# mcp: oauth_connect が「連携済み」と答える前に保存済みトークンで refresh を 1 回試す
+#   （skills/oauth_connect/skill.py・adapters/google_liveness.py・5 秒で打ち切り）。
+# connect-web: Google が実際に許可した範囲（granted_scopes）を保存し、一部だけ許可されたときは
+#   完了画面で足りない機能を伝える（adapters/google_oauth_flow.py・connect_web/app.py）。
+# ⚠️ TD 差し替えで ON/変更したら、activation 版 tfvars（正本・
+#    ~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記する
+#    （terraform_runtime_guard.sh の live→tfvars 導出はこの 2 変数を列挙していないので、guard 経由の
+#    apply＝次の mcp便など で既定の OFF に黙って戻る）。
+variable "oauth_connect_liveness_probe" {
+  description = "「連携」で連携済みと答える前にトークンの生存を確かめる（OAUTH_CONNECT_LIVENESS_PROBE・mcp）。既定 0＝確かめない（今と同じ）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "0"
+}
+
+variable "connect_store_granted_scopes" {
+  description = "Google が実際に許可した範囲を保存し、一部許可なら完了画面で伝える（CONNECT_STORE_GRANTED_SCOPES・connect-web）。既定 0＝要求した範囲を保存（今と同じ）。⚠️ TD で ON/変更したら activation 版 tfvars（正本・~/dev/worktrees/teamagent-activation/infra/terraform/terraform.tfvars）へ同じ値を必ず追記。guard 経由の apply で既定に戻るため。"
+  type        = string
+  default     = "0"
+}

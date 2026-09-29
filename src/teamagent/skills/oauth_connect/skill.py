@@ -31,6 +31,18 @@
   ``/oauth2/start/{state}`` ``/slack/oauth/start/{state}``（query 無し・path のみ）に差し替える。
   connect-web 側は state を検証（消費はしない）して、ここと同一の認可 URL へ 302 する。
   既定 OFF の理由: connect-web に start ルートが着陸する前に ON にすると 404 になるため。
+
+生存確認（OAUTH_CONNECT_LIVENESS_PROBE・既定 OFF・F0 2026-09-29）:
+  保存行のスコープだけで「連携済み」と答えると、パスワード変更などで refresh token が失効
+  （invalid_grant）した人が「連携」と送っても「連携済み・操作不要」と返り、再連携リンクを
+  手に入れられない（行き止まり）。フラグ ON のときだけ、スコープの判定で「連携済み」になった
+  人について保存済みトークンで refresh を 1 回試す（adapters/google_liveness.probe・
+  5 秒で打ち切り）。
+    - alive → 従来どおり「連携済み」
+    - token_dead（invalid_grant）→ 期限切れの説明つきで再連携リンク
+    - scope_missing（許可されていない範囲がある）→ 「一部の権限が許可されていない」説明つきでリンク
+    - unknown（通信断・時間切れ・invalid_client など）→ 既存の安全側どおりリンクを出す
+  フラグ OFF（既定）は確認を呼ばず、案内文も tool の説明もバイト単位で従来のまま。
 """
 
 from __future__ import annotations
@@ -74,6 +86,26 @@ def _diag(
         masked_email=mask_email(requester) if requester else None,
         extra=None if requester else uid,
     )
+
+
+def liveness_probe_enabled() -> bool:
+    """OAUTH_CONNECT_LIVENESS_PROBE: 連携済みと答える前にトークンの生存を確かめる（既定 OFF）。"""
+    raw = os.environ.get("OAUTH_CONNECT_LIVENESS_PROBE", "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# 生存確認で再連携が要ると分かったときの説明（フラグ ON のときだけ使う）。
+_DESC_TOKEN_DEAD = (
+    "連携の期限が切れています。パスワードの変更などで無効になりました。許可し直すと元どおり使えます"
+)
+_DESC_SCOPE_MISSING = (
+    "一部の権限が許可されていないため *再連携* が必要です。"
+    "表示される画面ですべての項目にチェックを入れて許可してください"
+)
+
+# (connected, scope_upgrade_needed, reauth_reason)。reauth_reason はフラグ ON のときだけ入る
+# （None / "token_dead" / "scope_missing" / "unknown"）。
+_GoogleStatus = tuple[bool, bool, str | None]
 
 
 def start_links_enabled() -> bool:
@@ -146,13 +178,23 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
     input_schema: ClassVar[type[BaseModel]] = OAuthConnectInput
     output_schema: ClassVar[type[BaseModel]] = OAuthConnectOutput
 
-    def __init__(self, *, google_store: Any = None, slack_store: Any = None) -> None:
+    def __init__(
+        self,
+        *,
+        google_store: Any = None,
+        slack_store: Any = None,
+        google_liveness_request: Any = None,
+        google_liveness_timeout_s: float | None = None,
+    ) -> None:
         # ストアは省略時 env から遅延構築（本番）。テストは注入して DB 依存を回避。
         self._google_store = google_store
         self._slack_store = slack_store
+        # 生存確認の token endpoint への口（テストで Google の応答を差し替える・本番は None）。
+        self._google_liveness_request = google_liveness_request
+        self._google_liveness_timeout_s = google_liveness_timeout_s
 
-    def _google_status(self, requester: str, log: Any) -> tuple[bool, bool]:
-        """Google の連携状態を (connected, scope_upgrade_needed) で返す。
+    def _google_status(self, requester: str, log: Any) -> _GoogleStatus:
+        """Google の連携状態を (connected, scope_upgrade_needed, reauth_reason) で返す。
 
         v0.3 で WORKSPACE_SCOPES に calendar.events 等が追加されたが、既連携ユーザーの
         stored scopes は旧のまま＝「連携済みだが機能が動かない」状態になる。従来の
@@ -160,15 +202,22 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         本人が再連携したくてもリンクを入手できなかった（2026-07-13 パイロットで実害）。
         → stored scopes ⊇ WORKSPACE_SCOPES を要求し、不足なら再連携リンクを出す。
         判定不能（store が scopes 未実装/例外）は従来どおり has() ベースへフォールバック。
+
+        フラグ ON（OAUTH_CONNECT_LIVENESS_PROBE）のときだけ、「連携済み」になった人の
+        トークンで refresh を 1 回試す（_google_liveness）。OFF のときは reauth_reason は常に None。
         """
+        probe_on = liveness_probe_enabled()
         try:
             store = self._google_store if self._google_store is not None else _build_google_store()
             scopes_fn = getattr(store, "scopes", None)
             if not callable(scopes_fn):
-                return bool(store.has(requester)), False
+                connected = bool(store.has(requester))
+                if connected and probe_on:
+                    return self._google_liveness(store, requester, log)
+                return connected, False, None
             stored = scopes_fn(requester)
             if stored is None:
-                return False, False
+                return False, False, None
             missing = set(WORKSPACE_SCOPES) - set(stored)
             if missing:
                 log.info(
@@ -176,11 +225,64 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
                     missing_count=len(missing),
                     stored_count=len(stored),
                 )
-                return False, True
-            return True, False
+                # ON のときは「機能追加で権限が増えた」に限らない説明（一部だけ許可も含む）へ。
+                return False, True, ("scope_missing" if probe_on else None)
+            if probe_on:
+                return self._google_liveness(store, requester, log)
+            return True, False, None
         except Exception as e:  # fail-safe: 判定不能は未連携扱い（リンクを出す＝安全側）
             log.warning("oauth_connect_conn_check_failed", kind="google", error=type(e).__name__)
-            return False, False
+            return False, False, None
+
+    def _google_liveness(self, store: Any, requester: str, log: Any) -> _GoogleStatus:
+        """保存済みトークンで refresh を 1 回試し、結果を連携状態へ写す（フラグ ON のときだけ）。
+
+        - alive → 連携済み（従来と同じ）
+        - token_dead → 未連携扱い（期限切れの説明つきリンク）
+        - scope_missing → 未連携扱い（一部の権限の説明つきリンク）
+        - unknown → 未連携扱い（既存の安全側どおりリンク・説明は従来の文言）
+        例外は外へ出さず unknown に倒す（連携フローを塞がない）。
+        """
+        from teamagent.adapters import google_liveness
+
+        try:
+            get_fn = getattr(store, "get", None)
+            if not callable(get_fn):
+                result = google_liveness.LivenessResult(status="unknown", reason="store_no_get")
+            else:
+                token = get_fn(requester)
+                timeout = (
+                    self._google_liveness_timeout_s
+                    if self._google_liveness_timeout_s is not None
+                    else google_liveness.DEFAULT_TIMEOUT_S
+                )
+                result = google_liveness.probe(
+                    token,
+                    timeout=timeout,
+                    request=self._google_liveness_request,
+                )
+        except Exception as e:  # KMS 復号・DB の失敗など
+            result = google_liveness.LivenessResult(
+                status="unknown", reason=f"store_{type(e).__name__}"
+            )
+        from teamagent.adapters.google_oauth_flow import scope_short_name
+
+        log.info(
+            "oauth_connect_liveness",
+            result=result.status,
+            reason=result.reason,
+            missing_count=len(result.missing_scopes),
+            missing=[scope_short_name(s) for s in result.missing_scopes],
+            granted_count=result.granted_count,
+            elapsed_ms=result.elapsed_ms,
+        )
+        if result.status == "alive":
+            return True, False, None
+        if result.status == "scope_missing":
+            return False, True, "scope_missing"
+        if result.status == "token_dead":
+            return False, False, "token_dead"
+        return False, False, "unknown"
 
     def _slack_status(
         self, requester: str, verified_uid: str | None, log: Any
@@ -237,7 +339,10 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
         requester = requester.strip()
 
         # 連携状態（未連携のものだけ案内する）。Google はスコープ不足も「要再連携」として検知。
-        google_connected, google_scope_upgrade = self._google_status(requester, log)
+        # フラグ ON のときは、連携済みと判定した人のトークンの生存も確かめる（reauth_reason）。
+        google_connected, google_scope_upgrade, google_reauth_reason = self._google_status(
+            requester, log
+        )
         verified_uid_raw = ctx.metadata.get("verified_slack_user_id")
         verified_team_raw = ctx.metadata.get("verified_slack_team_id")
         verified_uid = (
@@ -362,6 +467,7 @@ class OAuthConnectSkill(BaseSkill[OAuthConnectInput, OAuthConnectOutput]):
             slack_url_suppressed=slack_url_suppressed,
             slack_url_failed=slack_url_failed,
             diag_notes=diag_notes,
+            google_reauth_reason=google_reauth_reason,
         )
 
         log.info(
@@ -394,11 +500,13 @@ def _compose_message(
     slack_url_suppressed: bool = False,
     slack_url_failed: bool = False,
     diag_notes: list[str] | None = None,
+    google_reauth_reason: str | None = None,
 ) -> str:
     """未連携サービスの案内文を組み立てる（連携済みは省略・両方済みは完了案内）。
 
     ``diag_notes``（連携失敗の診断文・connect_diagnostics）は本文の後ろに空行を挟んで付ける。
     正常経路では空で、従来の案内文と同一になる。
+    ``google_reauth_reason`` は生存確認（フラグ ON）の結果で、None なら従来の文言のまま。
     """
     text = _compose_body(
         requester,
@@ -410,6 +518,7 @@ def _compose_message(
         slack_rebind_needed=slack_rebind_needed,
         slack_url_suppressed=slack_url_suppressed,
         slack_url_failed=slack_url_failed,
+        google_reauth_reason=google_reauth_reason,
     )
     if diag_notes:
         text = text + "\n\n" + "\n\n".join(diag_notes)
@@ -427,11 +536,16 @@ def _compose_body(
     slack_rebind_needed: bool,
     slack_url_suppressed: bool,
     slack_url_failed: bool,
+    google_reauth_reason: str | None = None,
 ) -> str:
     targets: list[tuple[str, str, str]] = []
     if url:
         desc = "メールの読み取り・下書き作成、カレンダー等"
-        if google_scope_upgrade:
+        if google_reauth_reason == "token_dead":
+            desc = _DESC_TOKEN_DEAD
+        elif google_reauth_reason == "scope_missing":
+            desc = _DESC_SCOPE_MISSING
+        elif google_scope_upgrade:
             desc = (
                 "機能追加により必要な権限が増えたため *再連携* が必要です"
                 "（カレンダー登録・日程提案など）"

@@ -18,10 +18,15 @@ import hmac
 import os
 import secrets
 import time
+from collections.abc import Iterable
 from typing import Any, Literal
+
+import structlog
 
 from teamagent.adapters.oauth_token_store import OAuthToken
 from teamagent.hmac_durable_state import HMAC_STATE_SCOPE_ENV, HMAC_STATE_TABLE_ENV
+
+logger = structlog.get_logger(__name__)
 
 # Workspace 連携スコープ（W1 同意画面・OAuth 同意画面 User Type=Internal＝審査不要）。
 # Gmail のみ **modify**（読み＋下書き作成＋ラベル）。送信/削除は GmailClient の adapter-layer
@@ -49,6 +54,94 @@ _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _DEFAULT_STATE_TTL_S = 1800
 _STATE_RECORD_PREFIX = "OAUTH_STATE#"
 _SEP = "|"
+
+# Google がトークン応答の scope に短い別名で返すことがあるもの（要求は URL 形式）。
+# 保存と比較は WORKSPACE_SCOPES と同じ URL 形式へ揃える（揃えないと「再連携が必要」が消えない）。
+_SCOPE_ALIASES: dict[str, str] = {
+    "email": "https://www.googleapis.com/auth/userinfo.email",
+    "profile": "https://www.googleapis.com/auth/userinfo.profile",
+}
+
+# 利用者に見せる「その権限が無いと使えない機能」の短い名前（connect-web の一部許可の画面）。
+# ここに無い scope は scope_short_name（末尾の短い名前）で出す。
+WORKSPACE_SCOPE_LABELS: dict[str, str] = {
+    "openid": "アカウントの確認",
+    "https://www.googleapis.com/auth/userinfo.email": "アカウントの確認",
+    "https://www.googleapis.com/auth/gmail.modify": "メールの確認・返信の下書き作成",
+    "https://www.googleapis.com/auth/drive.readonly": "Google ドライブの資料の参照",
+    "https://www.googleapis.com/auth/documents.readonly": "Google ドキュメントの参照",
+    "https://www.googleapis.com/auth/spreadsheets.readonly": "スプレッドシートの参照",
+    "https://www.googleapis.com/auth/presentations.readonly": "スライドの参照",
+    "https://www.googleapis.com/auth/calendar.readonly": "予定の確認",
+    "https://www.googleapis.com/auth/calendar.events": "カレンダーへの予定登録",
+    "https://www.googleapis.com/auth/contacts.readonly": "連絡先の参照",
+}
+
+
+def store_granted_scopes_enabled() -> bool:
+    """CONNECT_STORE_GRANTED_SCOPES: 実際に許可された範囲を保存する段階ゲート（既定 OFF）。
+
+    OFF（既定）は従来どおり「要求した範囲」を保存し、完了画面も従来のまま（今と同じ）。
+    ON は Google が返した granted_scopes を保存し、足りない範囲があれば完了画面で伝える。
+    """
+    raw = os.environ.get("CONNECT_STORE_GRANTED_SCOPES", "")
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def normalize_granted_scopes(raw: Any) -> tuple[str, ...] | None:
+    """Google が返した許可済みの範囲を、保存・比較に使う URL 形式のタプルへ揃える。
+
+    - 文字列（空白区切り。token endpoint の生の ``scope``）と配列（oauthlib が解析した後の
+      ``session.token["scope"]``）の両方を受ける。
+    - ``email`` / ``profile`` の短い別名は userinfo の URL へ読み替える。
+    - 重複は落とし、順序は Google の返した順を保つ（集合は並べ替えて決定的にする）。
+    - 読めない型や ``None`` は ``None``（＝許可された範囲が分からない）。
+    """
+    if raw is None:
+        return None
+    items: Iterable[Any]
+    if isinstance(raw, str):
+        items = raw.split()
+    elif isinstance(raw, (set, frozenset)):
+        items = sorted(str(x) for x in raw)
+    elif isinstance(raw, (list, tuple)):
+        items = raw
+    else:
+        return None
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        scope = item.strip()
+        if not scope:
+            continue
+        scope = _SCOPE_ALIASES.get(scope, scope)
+        if scope not in out:
+            out.append(scope)
+    return tuple(out)
+
+
+def missing_workspace_scopes(
+    scopes: Iterable[str], required: Iterable[str] = WORKSPACE_SCOPES
+) -> tuple[str, ...]:
+    """``required`` のうち ``scopes`` に無いもの（WORKSPACE_SCOPES の順）。"""
+    have = set(scopes)
+    return tuple(s for s in required if s not in have)
+
+
+def scope_short_name(scope: str) -> str:
+    """ログ・画面に出す短い名前（``…/auth/calendar.events`` → ``calendar.events``）。"""
+    return scope.rstrip("/").rsplit("/", 1)[-1]
+
+
+def scope_labels(scopes: Iterable[str]) -> list[str]:
+    """利用者向けの機能名（重複は 1 つにまとめる・未知の scope は短い名前）。"""
+    out: list[str] = []
+    for scope in scopes:
+        label = WORKSPACE_SCOPE_LABELS.get(scope) or scope_short_name(scope)
+        if label not in out:
+            out.append(label)
+    return out
 
 
 def _state_secret() -> bytes:
@@ -265,19 +358,38 @@ class OAuthConsentFlow:
                 "refresh_token を取得できません（access_type=offline / prompt=consent を確認）"
             )
         id_token = getattr(creds, "id_token", None)
+        # 従来（フラグ OFF）: creds.scopes＝**要求した**範囲（helpers.credentials_from_session の
+        # session.scope）をそのまま保存する。許可画面で項目のチェックを外した人も「全部許可」に
+        # 見えてしまう（F0 で見つけた穴）。
+        scopes = tuple(creds.scopes or self._scopes)
+        if store_granted_scopes_enabled():
+            # ON: Google が実際に許可した範囲（session.token["scope"]＝granted_scopes）を保存する。
+            # 返ってこなかった（読めなかった）ときだけ従来の値に戻す＝根拠が無いのに「何も
+            # 許可されていない」とは保存しない。
+            granted = normalize_granted_scopes(getattr(creds, "granted_scopes", None))
+            if granted:
+                scopes = granted
+            else:
+                logger.warning("google_oauth_granted_scopes_missing", fallback="requested")
         return OAuthToken(
             refresh_token=str(creds.refresh_token),
-            scopes=tuple(creds.scopes or self._scopes),
+            scopes=scopes,
             id_token=str(id_token) if id_token else None,
         )
 
 
 __all__ = [
     "WORKSPACE_SCOPES",
+    "WORKSPACE_SCOPE_LABELS",
     "OAuthConsentFlow",
     "StateStatus",
     "consume_state_once",
     "inspect_state",
     "make_state",
+    "missing_workspace_scopes",
+    "normalize_granted_scopes",
+    "scope_labels",
+    "scope_short_name",
+    "store_granted_scopes_enabled",
     "verify_state",
 ]

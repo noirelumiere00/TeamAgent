@@ -66,6 +66,10 @@ def test_uvicorn_does_not_advertise_its_server_banner(
         captured.update(kwargs)
 
     monkeypatch.setattr(entrypoint.uvicorn, "run", _run)
+    # main() は起動時に configure_logging() を呼ぶ（F0）。structlog はプロセス全体の設定なので、
+    # ここで本物を呼ぶと後続テストの capture_logs やログ水準に漏れる。JSON 化の確認は
+    # test_main_logging.py が _reset_for_tests 付きで行う。
+    monkeypatch.setattr(entrypoint, "configure_logging", lambda: False)
     entrypoint.main()
 
     assert captured["server_header"] is False
