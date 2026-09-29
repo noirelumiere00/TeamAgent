@@ -103,11 +103,22 @@ def connect_client_id_secret() -> tuple[str | None, str | None]:
     return cid, sec
 
 
+class MissingRefreshTokenError(ValueError):
+    """本人の refresh token が空（＝本人が連携し直さない限り直らない）。
+
+    ``ValueError`` の派生にしてあるので、従来の ``except ValueError`` はそのまま効く。
+    型を分けたのは、朝ダイジェスト等の失敗分類が「本人の再連携で直る」ものと
+    「連携用クライアントの設定不備（全員に起きる・再連携では直らない）」を
+    **文面ではなく型で** 区別するため（後者を全員へ「再連携して」と案内しない）。
+    """
+
+
 def build_user_credentials(token: OAuthToken) -> Any:
     """本人の refresh token から OAuth Credentials を組み立てる（per-user・connect 用）。
 
     連携用 OAuth クライアント（CONNECT_GOOGLE_CLIENT_ID/SECRET 優先・無ければ GOOGLE_*）を使う。
-    未設定/未認可は ValueError（fail-closed＝未認可は弾く）。
+    未設定/未認可は ValueError（fail-closed＝未認可は弾く）。refresh token が空のときだけ
+    その派生の :class:`MissingRefreshTokenError`。
     """
     client_id, client_secret = connect_client_id_secret()
     if not (client_id and client_secret):
@@ -116,7 +127,7 @@ def build_user_credentials(token: OAuthToken) -> Any:
             "（CONNECT_GOOGLE_CLIENT_ID/SECRET または GOOGLE_CLIENT_ID/SECRET を設定）"
         )
     if not token.refresh_token:
-        raise ValueError("OAuthToken.refresh_token が空です（本人が未認可）")
+        raise MissingRefreshTokenError("OAuthToken.refresh_token が空です（本人が未認可）")
 
     from google.oauth2.credentials import Credentials
 

@@ -108,7 +108,8 @@ class CalendarFreeBusyOutput(BaseModel):
     error: str = Field(
         default="",
         description=(
-            "失敗種別（not_connected/freebusy_failed/agenda_failed/bad_date 等・無ければ空）。"
+            "失敗種別（not_connected/reauth_needed/freebusy_failed/agenda_failed/bad_date 等・"
+            "無ければ空）。reauth_needed は連携切れか権限不足＝本人の再連携で直る。"
             "**空なら取得は成功している**＝予定 0 件を『取得できなかった』と言い換えないこと。"
         ),
     )

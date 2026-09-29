@@ -30,6 +30,11 @@ from pydantic import BaseModel
 
 from teamagent.adapters.gcalendar_client import GCalendarClient
 from teamagent.adapters.oauth_token_store import TokenStore
+from teamagent.skills._shared.mail_connection import (
+    FETCH_SCOPE_MISSING,
+    FETCH_TOKEN_EXPIRED,
+    classify_google_fetch_failure,
+)
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
 from teamagent.skills.calendar_freebusy.agenda import (
@@ -73,7 +78,35 @@ _ERR_MSG: dict[str, str] = {
     "agenda_failed": "カレンダーの予定を取得できませんでした。"
     "時間をおいて再度お試しください（予定が無いという意味ではありません）。",
     "bad_date": "指定の日付が実在しません（YYYY-MM-DD で指定するか、省略してください）。",
+    # F0: 本人の再連携で直る失敗だけ。error コードはどちらも reauth_needed（SOUL の
+    # 「reauth_needed なら oauth_connect へ誘導」契約に載せる）。message はそのまま返される。
+    "reauth_needed": "Google の連携が切れているため、カレンダーを確認できませんでした。"
+    "もう一度 Google の連携が必要です（@Aico に『連携』と話しかけて許可してください）。",
+    "reauth_needed_scope": "カレンダーを読む権限が足りないため、確認できませんでした。"
+    "もう一度 Google の連携が必要です（@Aico に『連携』と話しかけ、表示される画面で"
+    "すべての項目にチェックを入れて許可してください）。",
 }
+
+
+def _failure_output(
+    exc: BaseException, fallback: str, log: Any, event: str
+) -> CalendarFreeBusyOutput:
+    """取得失敗を error コードへ落とす（F0・厳しめの分類器）。
+
+    失効（invalid_grant・refresh token 空）と権限不足（403 のスコープ不足）だけを
+    ``reauth_needed`` にし、それ以外（invalid_client・5xx・タイムアウト・設定不備）は
+    従来どおり ``fallback``（freebusy_failed / agenda_failed＝時間をおいて再度）。
+    ログには分類コードと型名だけを出す（予定の中身・例外の文面は出さない）。
+    """
+    reason = classify_google_fetch_failure(exc)
+    log.warning(event, err=type(exc).__name__, reason=reason)
+    if reason == FETCH_TOKEN_EXPIRED:
+        return CalendarFreeBusyOutput(error="reauth_needed", message=_ERR_MSG["reauth_needed"])
+    if reason == FETCH_SCOPE_MISSING:
+        return CalendarFreeBusyOutput(
+            error="reauth_needed", message=_ERR_MSG["reauth_needed_scope"]
+        )
+    return CalendarFreeBusyOutput(error=fallback, message=_ERR_MSG[fallback])
 
 
 @register
@@ -147,7 +180,13 @@ class CalendarFreeBusySkill(BaseSkill[CalendarFreeBusyInput, CalendarFreeBusyOut
         #    schedule_propose/skill.py の F3 裁定と同じ）。
         time_min = _dt.datetime(target.year, target.month, target.day, tzinfo=_JST)
         time_max = time_min + _dt.timedelta(days=input.days)
-        gcal = self._gcalendar_factory(token)  # type: ignore[operator]
+        fallback = "agenda_failed" if input.mode == "agenda" else "freebusy_failed"
+        try:
+            gcal = self._gcalendar_factory(token)  # type: ignore[operator]
+        except Exception as e:
+            # 認証情報の組み立て失敗（refresh token 空＝再連携で直る／連携用クライアントの
+            # 設定不備＝直らない）。例外のまま MCP の汎用エラーへ落とさない。
+            return _failure_output(e, fallback, log, "calendar_freebusy_build_failed")
 
         # ⑤-b mode='agenda' は freebusy ではなく events.list（同じ calendar.readonly）。
         if input.mode == "agenda":
@@ -170,10 +209,7 @@ class CalendarFreeBusySkill(BaseSkill[CalendarFreeBusyInput, CalendarFreeBusyOut
                 )
             )
         except Exception as e:
-            log.warning("calendar_freebusy_failed", err=type(e).__name__)
-            return CalendarFreeBusyOutput(
-                error="freebusy_failed", message=_ERR_MSG["freebusy_failed"]
-            )
+            return _failure_output(e, "freebusy_failed", log, "calendar_freebusy_failed")
 
         # ⑥ 空きウィンドウ計算→開始候補列挙→決定的整形（書込 API は一切呼ばない）。
         #    ③ 対象日が土日なら non_business_note が先頭セクション先頭に入る＝message 先頭。
@@ -246,8 +282,7 @@ class CalendarFreeBusySkill(BaseSkill[CalendarFreeBusyInput, CalendarFreeBusyOut
                 )
             )
         except Exception as e:
-            log.warning("calendar_agenda_failed", err=type(e).__name__)
-            return CalendarFreeBusyOutput(error="agenda_failed", message=_ERR_MSG["agenda_failed"])
+            return _failure_output(e, "agenda_failed", log, "calendar_agenda_failed")
 
         sections: list[str] = []
         items: list[AgendaItem] = []

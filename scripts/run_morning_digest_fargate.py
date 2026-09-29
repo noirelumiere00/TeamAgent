@@ -27,9 +27,19 @@ from typing import Any
 
 import structlog
 
+from teamagent.adapters.digest_delivery_store import CLAIM_CLAIMED as _CLAIM_CLAIMED
+from teamagent.adapters.digest_delivery_store import CLAIM_TAKEN as _CLAIM_TAKEN
 from teamagent.hmac_durable_state import require_runtime_startup
 from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
 from teamagent.skills._shared import slack_handoff as _handoff
+from teamagent.skills._shared.mail_connection import (
+    FETCH_NEEDS_RECONNECT,
+    FETCH_OK,
+    FETCH_SCOPE_MISSING,
+    FETCH_TEMPORARY,
+    FETCH_TOKEN_EXPIRED,
+    FETCH_UNKNOWN,
+)
 from teamagent.skills.morning_digest import calendar_window as _calwin
 
 logger = structlog.get_logger(__name__)
@@ -73,13 +83,26 @@ def _apply_exclude(users: list[str]) -> list[str]:
     return kept
 
 
+#: F0: 直近の「対象者の取得」が失敗した理由（型名だけ）。None は失敗なし。
+#: ``_fetch_connected_users_from_rds`` は失敗を ``[]`` に潰す（既存の契約）ので、
+#: 「対象 0 人」と「取得できず誰にも送っていない」を main() が区別するための印。
+_TARGET_FETCH_ERROR: str | None = None
+
+#: RDS の連携済み一覧が例外なしで 0 行だった印。連携済みの利用者がいる本番では起こらない
+#: はずの形で、GUC・RLS・ロールの権限が崩れたときの症状（下の SET app.user_role の注記と
+#: 同じ事故）。例外が無いので型名では拾えず、ここで失敗として扱う。
+TARGET_ZERO_ROWS = "rds_zero_rows"
+
+
 def _fetch_connected_users_from_rds() -> list[str]:
     """RDS oauth_tokens から連携済 user_email を取得。"""
+    global _TARGET_FETCH_ERROR
     import psycopg
 
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if not dsn:
         print("[run_morning_digest_fargate] WARN: DATABASE_URL 未設定", file=sys.stderr)
+        _TARGET_FETCH_ERROR = "DATABASE_URL_missing"
         return []
     try:
         with psycopg.connect(dsn) as conn:
@@ -91,12 +114,18 @@ def _fetch_connected_users_from_rds() -> list[str]:
                 cur.execute("SET app.user_role = 'admin'")
                 cur.execute("SELECT user_email FROM oauth_tokens")
                 rows = cur.fetchall()
-        return [str(r[0]).strip().lower() for r in rows if r and r[0]]
+        users = [str(r[0]).strip().lower() for r in rows if r and r[0]]
+        if not users:
+            # 例外なしの 0 行も「誰にも届かない」朝。main() が ERROR と管理者 DM で知らせる。
+            print("[run_morning_digest_fargate] WARN: RDS 連携済抽出 0 行", file=sys.stderr)
+            _TARGET_FETCH_ERROR = TARGET_ZERO_ROWS
+        return users
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: RDS 連携済抽出失敗 {type(exc).__name__}",
             file=sys.stderr,
         )
+        _TARGET_FETCH_ERROR = re.sub(r"[^A-Za-z0-9_]", "", type(exc).__name__)[:40] or "Exception"
         return []
 
 
@@ -892,13 +921,282 @@ def _reply_buttons(m: Any) -> list[dict[str, Any]]:
     return btns
 
 
+# ---------------------------------------------------------------------------
+# F0: 連携切れの見える化（MORNING_DIGEST_FETCH_STATUS_EMAILS・既定 OFF）
+#
+# 取れなかった節を「新着なし」「予定なし」と書かない。原因が本人の再連携で直るもの
+# （失効・権限不足）なら冒頭に案内を 1 つだけ出し、一時的な失敗なら再連携へ誘導しない
+# （設定不備の朝に全員へ「再連携して」と出す事故を作らない）。
+# ⚠️ 案内文に認可 URL は貼らない（30 分で失効し、長い URL は再タイプ事故の実績がある）。
+#    既存の前例どおり「この DM で『連携』」＝ Aico が正規のリンクを出す経路へ寄せる。
+# ⚠️ 文言はすべて固定。メール本文・件名・例外の文面は 1 文字も入れない。
+# ---------------------------------------------------------------------------
+
+#: 取得状態 → 「確認できませんでした」の括弧内の理由（利用者向け）。
+_FETCH_REASON_TEXT: dict[str, str] = {
+    FETCH_TOKEN_EXPIRED: "連携切れ",
+    FETCH_SCOPE_MISSING: "権限不足",
+    FETCH_TEMPORARY: "取得・整理の途中で失敗しました",
+    FETCH_UNKNOWN: "取得できたか確かめられませんでした",
+}
+_FETCH_SECTION_NAME: dict[str, str] = {"mail": "メール", "calendar": "予定"}
+_F0_NOTE_TRUNCATED = "_表示しきれない項目があります。Gmail / カレンダーで確認してください。_"
+
+#: 50 ブロック上限の最終ガードで「削ってよい塊」の順位（小さいほど先に削る）。
+#: F0 の案内・取得状態の行・今日の予定・末尾は **削らない**（守る側に登録する）。
+_DROP_MAIL_UNREAD = 0
+_DROP_MAIL_EXTRA = 1  # 〈他N件〉・📁 下書き一覧
+_DROP_MAIL_ITEM = 2  # 要返信 1 件（section + ボタン行）。後ろの件から削る
+_DROP_SLACK = 3
+_DROP_BRIEF = 4
+
+
+def _fetch_status_enabled(user_email: str) -> bool:
+    """この人に F0 の描画（確認できませんでした・案内・節の優先順位）を出すか。
+
+    ``MORNING_DIGEST_FETCH_STATUS_EMAILS``: 空＝全員 OFF（従来の描画と 1 バイトも変わらない）／
+    カンマ区切りの email ／ ``*`` で全員。
+    """
+    raw = os.environ.get("MORNING_DIGEST_FETCH_STATUS_EMAILS", "").strip()
+    if not raw:
+        return False
+    allowed = {e.strip().lower() for e in raw.split(",") if e.strip()}
+    return "*" in allowed or (user_email or "").strip().lower() in allowed
+
+
+def _fetch_state(digest: Any, section: str) -> str:
+    """``mail_fetch`` / ``calendar_fetch``。知らない値・欠落は unknown（＝確認できなかった側）。"""
+    raw = str(getattr(digest, f"{section}_fetch", FETCH_UNKNOWN) or FETCH_UNKNOWN)
+    return raw if raw == FETCH_OK or raw in _FETCH_REASON_TEXT else FETCH_UNKNOWN
+
+
+def _fetch_what(sections: list[str]) -> str:
+    return "と".join(_FETCH_SECTION_NAME[s] for s in sections)
+
+
+def _f0_problem(digest: Any) -> str:
+    """通知プレビュー用の一言（問題が無ければ空）。件数以外の中身は入れない。"""
+    failed = [s for s in ("mail", "calendar") if _fetch_state(digest, s) != FETCH_OK]
+    if not failed:
+        return ""
+    what = _fetch_what(failed)
+    states = {_fetch_state(digest, s) for s in failed}
+    if FETCH_TOKEN_EXPIRED in states:
+        return f"Google の連携が切れています（{what}を確認できませんでした）"
+    if FETCH_SCOPE_MISSING in states:
+        return f"{what}を確認する権限が足りません"
+    return f"{what}を確認できませんでした"
+
+
+def _f0_notice_text(digest: Any) -> str:
+    """冒頭の案内（本人の再連携で直るときだけ・メールと予定が両方だめでも 1 つにまとめる）。"""
+    expired = [s for s in ("mail", "calendar") if _fetch_state(digest, s) == FETCH_TOKEN_EXPIRED]
+    if expired:
+        return (
+            f"⚠️ *Google の連携が切れているため、{_fetch_what(expired)}を確認できませんでした*"
+            "（パスワードの変更などで無効になることがあります）。\n"
+            "この DM で「連携」と送っていただければ、Aico が再連携のリンクをお出しします"
+            "（1 分・「許可」を押すだけ）。"
+        )
+    scope = [s for s in ("mail", "calendar") if _fetch_state(digest, s) == FETCH_SCOPE_MISSING]
+    if scope:
+        return (
+            f"⚠️ *{_fetch_what(scope)}を確認する権限が足りないため、確認できませんでした*。\n"
+            "この DM で「連携」と送り、表示される画面ですべての項目にチェックを入れて"
+            "許可してください。"
+        )
+    return ""
+
+
+def _mail_unavailable_text(digest: Any) -> str:
+    state = _fetch_state(digest, "mail")
+    text = (
+        f"⚠️ *メール*: 確認できませんでした"
+        f"（{_FETCH_REASON_TEXT[state]}。新着が無いという意味ではありません）"
+    )
+    if state not in FETCH_NEEDS_RECONNECT:
+        text += f"  <{_GMAIL_INBOX_URL}|受信トレイを開く>"
+    return text
+
+
+def _mail_threads_failed_text(n: int, *, has_items: bool) -> str:
+    if has_items:
+        return f"⚠️ ほか{n}件のメールは読み込めませんでした（<{_GMAIL_INBOX_URL}|受信トレイで見る>）"
+    return (
+        f"⚠️ *メール*: {n}件のメールを読み込めませんでした（新着が無いという意味ではありません）"
+        f"  <{_GMAIL_INBOX_URL}|受信トレイを開く>"
+    )
+
+
+def _calendar_unavailable_text(digest: Any, day_label: str) -> str:
+    state = _fetch_state(digest, "calendar")
+    tail = "予定が無いという意味ではありません"
+    if _reminders_enabled():
+        tail += "。本日の予定リマインドもお送りできません"
+    text = f"⚠️ *{day_label} の予定*: 確認できませんでした（{_FETCH_REASON_TEXT[state]}。{tail}）"
+    if state not in FETCH_NEEDS_RECONNECT:
+        text += f"  <{_CALENDAR_URL}|カレンダーを開く>"
+    return text
+
+
+def _section(text: str) -> dict[str, Any]:
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
+class _BlockUnits:
+    """50 ブロックの最終ガード用に「どの塊を、どの順で削ってよいか」を記録する。
+
+    描画の本体は従来どおり blocks へ積むだけで、ここは添え字の範囲を控えるだけ
+    （＝F0 OFF のときは何も使わず、描画は 1 バイトも変わらない）。
+    """
+
+    __slots__ = ("droppable", "protected")
+
+    def __init__(self) -> None:
+        self.droppable: list[tuple[int, int, int]] = []  # (順位, start, end)
+        self.protected: list[tuple[int, int]] = []
+
+    def drop(self, rank: int, start: int, end: int) -> None:
+        if end > start:
+            self.droppable.append((rank, start, end))
+
+    def protect(self, start: int, end: int) -> None:
+        if end > start:
+            self.protected.append((start, end))
+
+
+def _fit_blocks(
+    body: list[dict[str, Any]],
+    units: _BlockUnits,
+    tail: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    """F0: 50 ブロック上限の最終ガード（節の優先順位つき）。
+
+    従来の compact は末尾から切っていた＝「今日の予定」が真っ先に消える。ここでは
+    メールの一覧（未確認 → 要返信の後ろの件）→ Slack → 事例ブリーフ の順に削り、
+    F0 の案内・取得状態の行・今日の予定・末尾（☑️一括・脚注）は残す。
+    """
+    budget = (_COMPACT_MAX_BLOCKS if limit is None else limit) - len(tail)
+    if len(body) <= budget:
+        return body + tail
+    over = len(body) - (budget - 1)  # 1 枠は「表示しきれない」の注記に使う
+    dropped: set[int] = set()
+    for _rank, start, end in sorted(units.droppable, key=lambda u: (u[0], -u[1])):
+        if over <= 0:
+            break
+        span = set(range(start, end)) - dropped
+        dropped |= span
+        over -= len(span)
+    if over > 0:
+        # 想定外（削ってよい塊を全部削っても収まらない）。守る塊以外を後ろから落とす。
+        keep = {i for start, end in units.protected for i in range(start, end)}
+        for i in range(len(body) - 1, -1, -1):
+            if over <= 0:
+                break
+            if i not in dropped and i not in keep and i >= 2:  # 見出し 2 ブロックは残す
+                dropped.add(i)
+                over -= 1
+    kept = [b for i, b in enumerate(body) if i not in dropped]
+    kept.append({"type": "context", "elements": [{"type": "mrkdwn", "text": _F0_NOTE_TRUNCATED}]})
+    return kept + tail
+
+
+def _push_f0_notice(blocks: list[dict[str, Any]], units: _BlockUnits, digest: Any) -> None:
+    """冒頭の案内（見出しの直後）。削らない塊として登録する。"""
+    notice = _f0_notice_text(digest)
+    if not notice:
+        return
+    start = len(blocks)
+    blocks.append(_section(notice))
+    blocks.append({"type": "divider"})
+    units.protect(start, len(blocks))
+
+
+def _push_mail_status(
+    blocks: list[dict[str, Any]],
+    units: _BlockUnits,
+    digest: Any,
+    *,
+    f0: bool,
+    has_items: bool,
+) -> None:
+    """メール節の締め（従来の「📭 新着なし」の位置）。F0 OFF は従来と完全に同じ。"""
+    if not f0:
+        if not has_items:
+            blocks.append(_section("📭 *メール*: 新着なし"))
+            blocks.append({"type": "divider"})
+        return
+    start = len(blocks)
+    threads_failed = int(getattr(digest, "mail_threads_failed", 0) or 0)
+    if _fetch_state(digest, "mail") != FETCH_OK:
+        blocks.append(_section(_mail_unavailable_text(digest)))
+        blocks.append({"type": "divider"})
+    elif threads_failed > 0:
+        blocks.append(_section(_mail_threads_failed_text(threads_failed, has_items=has_items)))
+        blocks.append({"type": "divider"})
+    elif not has_items:
+        blocks.append(_section("📭 *メール*: 新着なし"))
+        blocks.append({"type": "divider"})
+    units.protect(start, len(blocks))
+
+
+def _push_slack_handoff_units(
+    blocks: list[dict[str, Any]], units: _BlockUnits, digest: Any
+) -> None:
+    """💬 節を積み、削ってよい塊を控える（☑️ボタン時はカード 1 枚ずつ）。"""
+    start = len(blocks)
+    _push_slack_handoff(blocks, digest)
+    end = len(blocks)
+    if _ack_button_enabled() and end - start > 2:
+        # [見出し, カード…, 脚注]。見出しと脚注は残し、カードを後ろから削る。
+        for i in range(start + 1, end - 1):
+            units.drop(_DROP_SLACK, i, i + 1)
+    else:
+        units.drop(_DROP_SLACK, start, end)
+
+
+def _footer_text(digest: Any) -> str:
+    """末尾の説明文。下書きの一文は **実際の作り方（draft_mode）** に合わせる。
+
+    本番は朝に自動で作り置き（DRAFT_ON_DEMAND_ONLY=false）なのに、長く「ボタンを押した時に
+    生成」と書いていた（09-29 裁定で実態に合わせる）。ボタン押下時のみの設定では従来の文言。
+    """
+    head = "_Aico｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
+    mode = str(getattr(digest, "draft_mode", "auto") or "auto")
+    if mode == "on_demand":
+        return head + "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
+    if mode == "off":
+        return head + "_"
+    limit = int(getattr(digest, "draft_limit", 0) or 0)
+    cap = f"最大 {limit} 件・" if limit > 0 else ""
+    return head + (
+        f"重要で本人宛てのメールには、Aico が返信の下書きを Gmail に作っておきます"
+        f"（{cap}日程の打診は除く）。送信はしません（送るかはご自身で）。_"
+    )
+
+
+def _footer_blocks(digest: Any) -> list[dict[str, Any]]:
+    return [
+        {"type": "divider"},
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": _footer_text(digest)}]},
+    ]
+
+
 def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str, Any]]]:
     """MorningDigestOutput → Slack Block Kit（要返信→未開封→当日の予定。下書きはボタン生成）。"""
+    f0 = _fetch_status_enabled(user_email)
     # fallback text は通知プレビュー用。slack_bot の chat_update が同一文字列を再送するため
-    # ここは固定のまま（日付明示は本文側＝blocks で行う）。
+    # ここは固定のまま（日付明示は本文側＝blocks で行う）。F0 の対象者で取得に失敗した日だけ
+    # 先頭に ⚠️ を付ける（プレビューだけで「今日は取れていない」と分かるように）。
     text = "メールと本日の予定をお送りします。"
+    problem = _f0_problem(digest) if f0 else ""
+    if problem:
+        text = f"⚠️ {problem}。{text}"
     day = _digest_date(digest)
     day_label = _calwin.fmt_jst_date(day)  # 例 "8/20(木)"
+    units = _BlockUnits()
 
     mail_items = list(getattr(digest, "mail_digest", []) or [])
 
@@ -923,6 +1221,9 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
         },
         {"type": "divider"},
     ]
+    units.protect(0, len(blocks))
+    if f0:
+        _push_f0_notice(blocks, units, digest)
 
     # --- 🔴 要返信メール（最大10件・各件にボタン）---
     if high:
@@ -933,6 +1234,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             }
         )
         for m in high[:10]:
+            item_start = len(blocks)
             subj, who = _mail_line(m)
             tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
             thr = f" 〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
@@ -945,9 +1247,11 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 body += f"\n📌 依頼: {_slack_escape(m.ask)}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             blocks.append({"type": "actions", "elements": _reply_buttons(m)})
+            units.drop(_DROP_MAIL_ITEM, item_start, len(blocks))
         # 作り置き済みの下書きが1件でもあれば、末尾に「一覧をまとめて開く」を1つだけ集約する
         # （行内の重複を排し、下書きフォルダへの導線はここに一本化）。
         if any(getattr(m, "has_draft", False) for m in high):
+            units.drop(_DROP_MAIL_EXTRA, len(blocks), len(blocks) + 1)
             blocks.append(
                 {
                     "type": "actions",
@@ -968,6 +1272,7 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
 
     # --- 📬 未確認（未読・最大5件＋「他N件」・件名/相手＋AI要約）---
     if unread:
+        unread_start = len(blocks)
         lines = [f"📬 *未確認（{len(unread)}件）*"]
         for m in unread[:5]:
             subj, who = _mail_line(m)
@@ -980,24 +1285,25 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
             lines.append(f"• 〈他{rem}件〉")
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
         blocks.append({"type": "divider"})
+        units.drop(_DROP_MAIL_UNREAD, unread_start, len(blocks))
 
-    if not high and not unread:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "📭 *メール*: 新着なし"}}
-        )
-        blocks.append({"type": "divider"})
+    # 「📭 新着なし」の位置。F0 の対象者は、取れなかった日を「新着なし」と書かない。
+    _push_mail_status(blocks, units, digest, f0=f0, has_items=bool(high or unread))
 
     # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
     #     display は本人 DM のみ・ログ厳禁 G3/G7）---
-    _push_slack_handoff(blocks, digest)
+    _push_slack_handoff_units(blocks, units, digest)
     blocks.append({"type": "divider"})
 
     # --- 📌 本日の社外MTG 事例ブリーフ（既定OFF・節ごと消える設計）---
+    brief_start = len(blocks)
     _push_brief_section(blocks, digest)
+    units.drop(_DROP_BRIEF, brief_start, len(blocks))
 
     # --- 📅 当日の予定（予定・会議室・会議リンク。display は本人 DM のみ・ログ厳禁 G3/G7）---
     # 見出しは「今日」ではなく実日付を出す（2026-08-20 の日付ずれで「今日」表記が誤りを
     # 隠したため。行側も対象日と違う予定には日付を前置する）。
+    cal_start = len(blocks)
     if cal_items:
         lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
         for ev in cal_items[:10]:
@@ -1021,6 +1327,9 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 line += f"  <{url}|🔗参加>"  # 会議リンクは実 URL なのでエスケープしない
             lines.append(line)
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines)}})
+    elif f0 and _fetch_state(digest, "calendar") != FETCH_OK:
+        # 取れなかった日を「予定なし」と書かない（リマインドも登録されない日）。
+        blocks.append(_section(_calendar_unavailable_text(digest, day_label)))
     else:
         blocks.append(
             {
@@ -1028,26 +1337,14 @@ def _format_block_kit(digest: Any, user_email: str) -> tuple[str, list[dict[str,
                 "text": {"type": "mrkdwn", "text": f"📅 *{day_label} の予定*: なし"},
             }
         )
+    units.protect(cal_start, len(blocks))
 
-    # --- ☑️ 全部確認した（既定OFF・脚注の前）---
-    blocks.extend(_ack_all_blocks(digest))
-
-    # --- 脚注（DLP 注記）---
-    blocks.append({"type": "divider"})
-    blocks.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        "_Aico｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
-                        "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
-                    ),
-                }
-            ],
-        }
-    )
+    # --- ☑️ 全部確認した（既定OFF・脚注の前）＋ 脚注（DLP 注記・下書きの作り方）---
+    tail = _ack_all_blocks(digest) + _footer_blocks(digest)
+    if f0:
+        # 50 ブロック上限の最終ガード（節の優先順位つき・案内と今日の予定は削らない）。
+        return text, _fit_blocks(blocks, units, tail)
+    blocks.extend(tail)
     return text, blocks
 
 
@@ -1069,24 +1366,34 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
     unread = [m for m in mail_items if getattr(m, "is_unread", False) and not _is_reply(m)]
     cal_items = list(getattr(digest, "calendar_events", []) or [])
     slack_total = _slack_handoff_count(digest)
+    f0 = _fetch_status_enabled(user_email)
+    units = _BlockUnits()
 
     # ヘッダも予定セクションも同じ「対象日」を使う（描画のたびに now を読むと、
     # 日付をまたぐ再描画でヘッダと予定の日付がズレる）。
     day = _digest_date(digest)
     day_label = _calwin.fmt_jst_date(day)  # 例 "8/20(木)"
+    # 件数の表示。F0 の対象者で取れなかった節は「0」ではなく「–」（0 件と区別する）。
+    mail_ok = not f0 or _fetch_state(digest, "mail") == FETCH_OK
+    cal_ok = not f0 or _fetch_state(digest, "calendar") == FETCH_OK
+    n_high = str(len(high)) if mail_ok else "–"
+    n_unread = str(len(unread)) if mail_ok else "–"
+    n_cal = str(len(cal_items)) if cal_ok else "–"
     # fallback text は通知プレビューに出るため件数のみ（PII ゼロ）。
-    text = (
-        f"朝ダイジェスト｜要返信{len(high)}・未確認{len(unread)}"
-        f"・Slack{slack_total}・予定{len(cal_items)}"
-    )
+    text = f"朝ダイジェスト｜要返信{n_high}・未確認{n_unread}・Slack{slack_total}・予定{n_cal}"
+    problem = _f0_problem(digest) if f0 else ""
+    if problem:
+        text = f"朝ダイジェスト｜⚠️ {problem}｜{text.split('｜', 1)[1]}"
     header = (
-        f"📬 *{day_label} の朝ダイジェスト*"
-        f"｜🔴{len(high)}・📬{len(unread)}・💬{slack_total}・📅{len(cal_items)}"
+        f"📬 *{day_label} の朝ダイジェスト*｜🔴{n_high}・📬{n_unread}・💬{slack_total}・📅{n_cal}"
     )
     blocks: list[dict[str, Any]] = [
         {"type": "section", "text": {"type": "mrkdwn", "text": header}},
         {"type": "divider"},
     ]
+    units.protect(0, len(blocks))
+    if f0:
+        _push_f0_notice(blocks, units, digest)
 
     def _push_lines(lines: list[str]) -> None:
         _push_section_lines(blocks, lines)
@@ -1107,6 +1414,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             {"type": "section", "text": {"type": "mrkdwn", "text": f"🔴 *要返信（{len(high)}件）*"}}
         )
         for m in high[:5]:
+            item_start = len(blocks)
             subj, who = _subj_who(m)
             tag = f"`{m.sender_label}` " if getattr(m, "sender_label", "") else ""
             thr = f"〔{m.thread_count}通〕" if getattr(m, "thread_count", 1) > 1 else ""
@@ -1122,8 +1430,10 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
                 body += f"\n_{_slack_escape(_truncate(m.summary, _COMPACT_SUBJ_LEN))}_"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": body}})
             blocks.append({"type": "actions", "elements": _reply_buttons(m)})
+            units.drop(_DROP_MAIL_ITEM, item_start, len(blocks))
         rem = len(high) - 5
         if rem > 0:
+            units.drop(_DROP_MAIL_EXTRA, len(blocks), len(blocks) + 1)
             blocks.append(
                 {
                     "type": "section",
@@ -1134,6 +1444,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
                 }
             )
         if any(getattr(m, "has_draft", False) for m in high):
+            units.drop(_DROP_MAIL_EXTRA, len(blocks), len(blocks) + 1)
             blocks.append(
                 {
                     "type": "actions",
@@ -1154,6 +1465,7 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
 
     # --- 📬 未確認（最大5件・1件=1行・要約なし）---
     if unread:
+        unread_start = len(blocks)
         lines = [f"📬 *未確認（{len(unread)}件）*"]
         for m in unread[:5]:
             subj, who = _subj_who(m)
@@ -1163,22 +1475,23 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
             lines.append(f"• 〈他{rem}件〉 <{_GMAIL_INBOX_URL}|受信トレイで見る>")
         _push_lines(lines)
         blocks.append({"type": "divider"})
+        units.drop(_DROP_MAIL_UNREAD, unread_start, len(blocks))
 
-    if not high and not unread:
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": "📭 *メール*: 新着なし"}}
-        )
-        blocks.append({"type": "divider"})
+    # 「📭 新着なし」の位置。F0 の対象者は、取れなかった日を「新着なし」と書かない。
+    _push_mail_status(blocks, units, digest, f0=f0, has_items=bool(high or unread))
 
     # --- 💬 Slack 返信漏れ（判定は _shared/slack_handoff・ここは並べるだけ。
     #     display は本人 DM のみ・ログ厳禁 G3/G7）---
-    _push_slack_handoff(blocks, digest)
+    _push_slack_handoff_units(blocks, units, digest)
     blocks.append({"type": "divider"})
 
     # --- 📌 本日の社外MTG 事例ブリーフ（既定OFF・節ごと消える設計）---
+    brief_start = len(blocks)
     _push_brief_section(blocks, digest)
+    units.drop(_DROP_BRIEF, brief_start, len(blocks))
 
     # --- 📅 当日の予定（最大10件・1行形式は旧描画と共通・見出しは実日付）---
+    cal_start = len(blocks)
     if cal_items:
         lines = [f"📅 *{day_label} の予定（{len(cal_items)}件）*"]
         for ev in cal_items[:10]:
@@ -1205,6 +1518,9 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
         if rem > 0:
             lines.append(f"• 〈他{rem}件〉 <{_CALENDAR_URL}|カレンダーを開く>")
         _push_lines(lines)
+    elif f0 and _fetch_state(digest, "calendar") != FETCH_OK:
+        # 取れなかった日を「予定なし」と書かない（リマインドも登録されない日）。
+        blocks.append(_section(_calendar_unavailable_text(digest, day_label)))
     else:
         blocks.append(
             {
@@ -1212,25 +1528,15 @@ def _format_block_kit_compact(digest: Any, user_email: str) -> tuple[str, list[d
                 "text": {"type": "mrkdwn", "text": f"📅 *{day_label} の予定*: なし"},
             }
         )
+    units.protect(cal_start, len(blocks))
 
-    # --- 末尾（☑️ 全部確認した + 脚注（DLP 注記・旧描画と同一））---
+    # --- 末尾（☑️ 全部確認した + 脚注（DLP 注記・下書きの作り方・旧描画と同一））---
     # 打ち切りに巻き込ませないため、本文とは別に組んで最後に足す。
-    tail: list[dict[str, Any]] = _ack_all_blocks(digest)
-    tail.append({"type": "divider"})
-    tail.append(
-        {
-            "type": "context",
-            "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        "_Aico｜本人だけに届く DM です（件名・相手は実名表示／監査ログ側はマスク）。"
-                        "下書きはボタンを押した時に生成し、送信はされません（手動送信）。_"
-                    ),
-                }
-            ],
-        }
-    )
+    tail: list[dict[str, Any]] = _ack_all_blocks(digest) + _footer_blocks(digest)
+
+    if f0:
+        # F0: 節の優先順位つきの最終ガード（案内と今日の予定は削らず、メールの一覧から削る）。
+        return text, _fit_blocks(blocks, units, tail)
 
     # blocks 50 個上限の保険（静的上限の積算では起きない想定の最終ガード）。
     # 切るのは本文側だけにする: ☑️一括ボタンが黙って消えると「押したつもりが押せて
@@ -1712,6 +2018,355 @@ def _delivery_store() -> Any | None:
     return DigestDeliveryStore()
 
 
+def _claim_delivery(store: Any, email: str, day: _dt.date, *, origin: str, request_id: str) -> str:
+    """配信権を取り、結果を claimed / taken / failed の 3 通りで返す（送ってよいのは claimed だけ）。
+
+    本物の ``DigestDeliveryStore`` は ``claim_result`` で 3 通りを返す。``claim``（真偽）しか
+    持たないストアは、False を「既に取られている」とみなす（従来どおり）。
+    """
+    claim_result = getattr(store, "claim_result", None)
+    if callable(claim_result):
+        return str(claim_result(email, day, origin=origin, request_id=request_id))
+    if store.claim(email, day, origin=origin, request_id=request_id):
+        return _CLAIM_CLAIMED
+    return _CLAIM_TAKEN
+
+
+# ===========================================================================
+# F0: 管理者 DM（MORNING_DIGEST_ADMIN_REPORT_EMAILS・既定 OFF）と実行結果の集計
+# ===========================================================================
+# 毎朝 1 行（配信数と失敗数）を管理者の本人 DM へ送る。この 1 行が「動いた」印を兼ねる
+# ＝届かない朝は起動していないと分かる。問題があった日だけ内訳を足す。
+# ⚠️ 中身の規律:
+#   - メールの件名・本文・相手・予定のタイトル・例外の文面は **入れない**。
+#     入れるのは件数・分類コード・内訳コード（型名と Google の識別子）・利用者の @ より前だけ。
+#   - 利用者の名前（@ より前）は管理者 DM の本文にだけ出し、ログにも DB にも書かない。
+# ⚠️ 宛先の規律（チャンネルへは構造上送れない）:
+#   - env の値は社内ドメインの email だけ受け付ける（最大 3 件・それ以外は捨てる）。
+#   - users.lookupByEmail の結果で、削除済み・bot・ゲスト（制限付き）・社外（Slack Connect）
+#     でないこと、返ってきた email が要求と一致することを確かめる。
+#   - conversations.open の結果が D（本人 DM）で始まるときだけ投稿する。C/G には送らない。
+
+_ADMIN_REPORT_MAX_RECIPIENTS = 3
+
+
+class UserOutcome:
+    """1 人分の実行結果（管理者 DM の材料・メモリ上だけ。email はログに出さない）。"""
+
+    __slots__ = (
+        "calendar_detail",
+        "calendar_fetch",
+        "email",
+        "error",
+        "guided",
+        "mail_detail",
+        "mail_fetch",
+        "mail_threads_failed",
+        "reason",
+        "status",
+    )
+
+    def __init__(
+        self,
+        email: str,
+        status: str,
+        reason: str = "",
+        *,
+        mail_fetch: str = FETCH_UNKNOWN,
+        calendar_fetch: str = FETCH_UNKNOWN,
+        mail_detail: str = "",
+        calendar_detail: str = "",
+        mail_threads_failed: int = 0,
+        guided: bool = False,
+        error: str = "",
+    ) -> None:
+        self.email = email
+        self.status = status
+        self.reason = reason
+        self.mail_fetch = mail_fetch
+        self.calendar_fetch = calendar_fetch
+        self.mail_detail = mail_detail
+        self.calendar_detail = calendar_detail
+        self.mail_threads_failed = mail_threads_failed
+        self.guided = guided
+        self.error = error
+
+
+def _safe_code(raw: Any, limit: int = 60) -> str:
+    """内訳コードを英数字・``_``・``:`` だけに絞る（管理者 DM に中身を混ぜない最後の砦）。"""
+    return re.sub(r"[^A-Za-z0-9_:]", "", str(raw or ""))[:limit]
+
+
+def _user_outcome(email: str, status: str, reason: str, digest: Any, error: str) -> UserOutcome:
+    if digest is None:
+        return UserOutcome(email, status, reason, error=_safe_code(error, 40))
+    return UserOutcome(
+        email,
+        status,
+        reason,
+        mail_fetch=_fetch_state(digest, "mail"),
+        calendar_fetch=_fetch_state(digest, "calendar"),
+        mail_detail=_safe_code(getattr(digest, "mail_fetch_detail", "")),
+        calendar_detail=_safe_code(getattr(digest, "calendar_fetch_detail", "")),
+        mail_threads_failed=int(getattr(digest, "mail_threads_failed", 0) or 0),
+        guided=_fetch_status_enabled(email),
+        error=_safe_code(error, 40),
+    )
+
+
+def _internal_domain() -> str:
+    """社内ドメイン（skill の差出人区分と同じ env）。空なら管理者 DM は誰にも送らない。"""
+    return os.environ.get("DIGEST_INTERNAL_DOMAIN", "vectorinc.co.jp").strip().lower().lstrip("@")
+
+
+def _admin_report_recipients() -> list[str]:
+    """``MORNING_DIGEST_ADMIN_REPORT_EMAILS`` のうち、社内ドメインの email だけ（最大 3 件）。"""
+    raw = os.environ.get("MORNING_DIGEST_ADMIN_REPORT_EMAILS", "").strip()
+    domain = _internal_domain()
+    if not raw or not domain:
+        return []
+    pattern = re.compile(r"[a-z0-9._%+\-]{1,64}@" + re.escape(domain))
+    out: list[str] = []
+    rejected = 0
+    for part in raw.split(","):
+        email = part.strip().lower()
+        if not email:
+            continue
+        if not pattern.fullmatch(email):
+            rejected += 1
+            continue
+        if email not in out:
+            out.append(email)
+    if len(out) > _ADMIN_REPORT_MAX_RECIPIENTS:
+        rejected += len(out) - _ADMIN_REPORT_MAX_RECIPIENTS
+        out = out[:_ADMIN_REPORT_MAX_RECIPIENTS]
+    if rejected:
+        logger.warning("morning_digest_admin_report_recipient_rejected", rejected=rejected)
+    return out
+
+
+def _is_internal_member(user: Any, email: str) -> bool:
+    """lookupByEmail の結果が「社内の正規メンバー本人」か（ゲスト・社外・bot・削除済みは不可）。"""
+    if not isinstance(user, dict):
+        return False
+    for flag in (
+        "deleted",
+        "is_bot",
+        "is_app_user",
+        "is_restricted",
+        "is_ultra_restricted",
+        "is_stranger",
+        "is_invited_user",
+    ):
+        if user.get(flag):
+            return False
+    uid = str(user.get("id", "") or "")
+    if not uid or uid[0] not in "UW":
+        return False
+    profile = user.get("profile") or {}
+    got = str(profile.get("email", "") or "").strip().lower() if isinstance(profile, dict) else ""
+    return bool(got) and got == email and got.endswith("@" + _internal_domain())
+
+
+async def _deliver_admin_report(recipients: list[str], text: str) -> tuple[int, int]:
+    """管理者 DM を送る。返り値 (送れた数, 宛先の検査で止めた数)。fail-open（例外は外へ出さない）。"""
+    from teamagent.adapters.slack_client import SlackClient
+
+    try:
+        slack = SlackClient.from_env()
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: 管理者 DM の Slack 初期化失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return (0, 0)
+    client = getattr(slack, "_client", None)
+    if client is None:
+        return (0, 0)
+    sent = 0
+    refused = 0
+    for email in recipients:
+        try:
+            resp = await client.users_lookupByEmail(email=email)
+            user = resp.get("user") if hasattr(resp, "get") else None
+            if not _is_internal_member(user, email):
+                refused += 1
+                continue
+            channel = await _open_im_channel(slack, str(user["id"]))  # type: ignore[index]
+            # 本人 DM（D…）以外には送らない＝チャンネル・グループへは構造上届かない。
+            if not channel or not channel.startswith("D"):
+                refused += 1
+                continue
+            result = await slack.post_message(
+                channel=channel,
+                text=text,
+                request_id=f"morning-digest-admin-{uuid.uuid4().hex[:8]}",
+                blocks=[_section(text)],
+            )
+            if bool(getattr(result, "ok", False)):
+                sent += 1
+        except Exception as exc:
+            print(
+                f"[run_morning_digest_fargate] WARN: 管理者 DM 失敗 {type(exc).__name__}",
+                file=sys.stderr,
+            )
+    return (sent, refused)
+
+
+def _local_part(email: str) -> str:
+    """管理者 DM に出す名前（@ より前だけ・英数記号に限る）。"""
+    return re.sub(r"[^a-z0-9._\-]", "", (email or "").split("@", 1)[0].lower())[:40]
+
+
+def _format_admin_report(
+    outcomes: list[UserOutcome],
+    *,
+    day: _dt.date,
+    users: int,
+    target_error: str | None = None,
+) -> tuple[str, bool]:
+    """管理者 DM の本文と「問題があったか」。件数・分類・内訳コード・@ より前だけで組む。"""
+    delivered = sum(1 for o in outcomes if o.status == "delivered")
+    errors = [o for o in outcomes if o.status == "error"]
+    not_connected = sum(1 for o in outcomes if o.reason == "not_connected")
+    already = sum(1 for o in outcomes if o.reason == "already_delivered")
+    # 配信権（digest_delivery）を DB で確かめられず、送らずに止めた人。「送信済み」とは別に数える
+    # （DB 障害の朝は全員がここに入り、誰にも届かない）。
+    claim_failed = sum(1 for o in outcomes if o.reason == "claim_failed")
+    head = (
+        f"🔧 朝ダイジェスト {_calwin.fmt_jst_date(day)} の実行結果（管理者向け）"
+        f"｜対象 {users}・配信 {delivered}・配信失敗 {len(errors)}・未連携 {not_connected}"
+    )
+    if already:
+        head += f"・送信済み {already}"
+    if claim_failed:
+        head += f"・送信の確認失敗 {claim_failed}"
+    lines = [head]
+    if target_error == TARGET_ZERO_ROWS:
+        lines.append(
+            "⚠️ 連携済みの対象者が 0 人と返り、誰にも配信していません"
+            "（連携済みの人がいるはずなら、DB の権限と RLS の設定を確認）"
+        )
+    elif target_error:
+        lines.append(
+            f"⚠️ 対象者を取得できず、誰にも配信していません（原因: {_safe_code(target_error, 40)}）"
+        )
+
+    fetched = [
+        o for o in outcomes if o.status in ("delivered", "error") and o.reason != "skill_failed"
+    ]
+    mail_bad = [o for o in fetched if o.mail_fetch != FETCH_OK]
+    cal_bad = [o for o in fetched if o.calendar_fetch != FETCH_OK]
+    by_state: dict[str, list[UserOutcome]] = {}
+    for o in fetched:
+        states = {o.mail_fetch, o.calendar_fetch} - {FETCH_OK}
+        for state in (FETCH_TOKEN_EXPIRED, FETCH_SCOPE_MISSING, FETCH_TEMPORARY, FETCH_UNKNOWN):
+            if state in states:
+                by_state.setdefault(state, []).append(o)
+                break  # 1 人 1 区分（失効 > 権限不足 > 一時的 > 不明 の順で代表させる）
+    partial = [o for o in fetched if o.mail_fetch == FETCH_OK and o.mail_threads_failed > 0]
+    problem = bool(target_error or errors or mail_bad or cal_bad or partial or claim_failed)
+    if not problem:
+        return "\n".join(lines), False
+
+    if claim_failed:
+        lines.append(
+            f"・送信済みかを DB で確かめられず、送らなかった: {claim_failed} 人"
+            "（二重配信を避けて止めています。DB の接続と digest_delivery の権限を確認）"
+        )
+
+    if mail_bad or cal_bad:
+        lines.append(f"取得できなかった: メール {len(mail_bad)} 人・予定 {len(cal_bad)} 人")
+    labels = (
+        (FETCH_TOKEN_EXPIRED, "再連携が必要（連携切れ）"),
+        (FETCH_SCOPE_MISSING, "再連携が必要（権限不足）"),
+        (FETCH_TEMPORARY, "一時的な失敗（再連携は案内していません）"),
+        (FETCH_UNKNOWN, "取得できたか不明"),
+    )
+    for state, label in labels:
+        people = by_state.get(state, [])
+        if not people:
+            continue
+        line = f"・{label}: {len(people)} 人"
+        if state in FETCH_NEEDS_RECONNECT:
+            line += f"（{', '.join(_local_part(o.email) for o in people)}）"
+            unguided = sum(1 for o in people if not o.guided)
+            if unguided:
+                line += f" ※ うち {unguided} 人には案内を表示していません（FETCH_STATUS の対象外）"
+        lines.append(line)
+    if partial:
+        lines.append(
+            f"・一部のメールを読み込めなかった: {len(partial)} 人"
+            f"（計 {sum(o.mail_threads_failed for o in partial)} 件）"
+        )
+    if errors:
+        lines.append(
+            f"・配信できなかった: {len(errors)} 人（{', '.join(_local_part(o.email) for o in errors)}）"
+        )
+    counts: dict[str, int] = {}
+    for o in fetched:
+        for detail in (o.mail_detail, o.calendar_detail):
+            if detail:
+                counts[detail] = counts.get(detail, 0) + 1
+    for o in errors:
+        if o.error:
+            counts[f"{o.reason}:{o.error}"] = counts.get(f"{o.reason}:{o.error}", 0) + 1
+    if counts:
+        lines.append("原因の内訳: " + ", ".join(f"{k}×{v}" for k, v in sorted(counts.items())))
+    lines.append("※ メールの件名・本文・相手は含みません")
+    return "\n".join(lines), True
+
+
+def _send_admin_report(
+    outcomes: list[UserOutcome],
+    *,
+    day: _dt.date,
+    users: int,
+    target_error: str | None = None,
+) -> None:
+    """管理者 DM（フラグ OFF なら何もしない）。失敗しても配信の結果は変えない。"""
+    recipients = _admin_report_recipients()
+    if not recipients:
+        return
+    try:
+        text, problem = _format_admin_report(
+            outcomes, day=day, users=users, target_error=target_error
+        )
+        sent, refused = asyncio.run(_deliver_admin_report(recipients, text))
+    except Exception as exc:
+        print(
+            f"[run_morning_digest_fargate] WARN: 管理者 DM 組み立て失敗 {type(exc).__name__}",
+            file=sys.stderr,
+        )
+        return
+    logger.info(
+        "morning_digest_admin_report",
+        recipients=len(recipients),
+        sent=sent,
+        refused=refused,
+        problem=problem,
+    )
+
+
+def _log_run_done(outcomes: list[UserOutcome], summary: dict[str, int]) -> None:
+    """実行の締めを 1 行の JSON イベントで出す（件数だけ・email は出さない）。"""
+    fetched = [
+        o for o in outcomes if o.status in ("delivered", "error") and o.reason != "skill_failed"
+    ]
+    states = [s for o in fetched for s in (o.mail_fetch, o.calendar_fetch)]
+    logger.info(
+        "morning_digest_run_done",
+        **summary,
+        mail_fetch_failed=sum(1 for o in fetched if o.mail_fetch != FETCH_OK),
+        calendar_fetch_failed=sum(1 for o in fetched if o.calendar_fetch != FETCH_OK),
+        token_expired=states.count(FETCH_TOKEN_EXPIRED),
+        scope_missing=states.count(FETCH_SCOPE_MISSING),
+        temporary=states.count(FETCH_TEMPORARY),
+        threads_failed_users=sum(1 for o in fetched if o.mail_threads_failed > 0),
+        claim_failed=sum(1 for o in outcomes if o.reason == "claim_failed"),
+    )
+
+
 def _process_user(
     skill: Any,
     skill_input: Any,
@@ -1720,10 +2375,13 @@ def _process_user(
     store: Any | None = None,
     day: _dt.date | None = None,
     origin: str = "bulk",
+    sink: list[UserOutcome] | None = None,
 ) -> str:
     """1 ユーザー分を処理し "delivered"/"skipped"/"error" を返す（例外は内側で封じ込め）。
 
     スレッドから呼ぶため副作用は print（stderr・マスク済）と Slack 配信のみ・共有状態を書かない。
+    ``sink`` を渡すと結果（F0 の取得状態つき）を 1 件積む（管理者 DM の集計用・メモリ上だけ。
+    list.append はスレッド間で安全）。戻り値の型は変えない。
 
     ``store`` を渡すと **その日の配信権を DB の一意制約で 1 回だけ取る**（二重配信の防止）。
     - 取れなければ "skipped"（既に別経路が送っている／障害で確認できない＝fail-closed）
@@ -1732,19 +2390,28 @@ def _process_user(
     """
     from teamagent.skills.base import SkillContext
 
+    def _done(status: str, reason: str = "", digest: Any = None, error: str = "") -> str:
+        if sink is not None:
+            sink.append(_user_outcome(email, status, reason, digest, error))
+        return status
+
     request_id = f"morning-{uuid.uuid4().hex[:10]}"
     target_day = day or _dt.datetime.now(tz=_JST).date()
-    if store is not None and not store.claim(
-        email, target_day, origin=origin, request_id=request_id
-    ):
-        return "skipped"
+    if store is not None:
+        verdict = _claim_delivery(store, email, target_day, origin=origin, request_id=request_id)
+        if verdict != _CLAIM_CLAIMED:
+            # 「別の経路が送った（正常）」と「DB で確かめられず止めた（全員に届かない障害）」を
+            # 数え分ける。どちらも送らない（fail-closed）のは同じ。
+            return _done(
+                "skipped", "already_delivered" if verdict == _CLAIM_TAKEN else "claim_failed"
+            )
     ctx = SkillContext(request_id=request_id, metadata={"user_email": email})
     try:
         digest = skill.run(skill_input, ctx)
     except PermissionError:
         if store is not None:
             store.release(email, target_day, request_id=request_id)
-        return "skipped"  # 未連携
+        return _done("skipped", "not_connected")  # 未連携
     except Exception as exc:
         print(
             f"[run_morning_digest_fargate] WARN: {_mask_email(email)} skill 失敗 "
@@ -1753,7 +2420,7 @@ def _process_user(
         )
         if store is not None:
             store.release(email, target_day, request_id=request_id)
-        return "error"
+        return _done("error", "skill_failed", error=type(exc).__name__)
     # 配信(整形+Slack)も封じ込め（1 人の失敗で全体を落とさない）。
     try:
         if _compact_enabled():
@@ -1769,7 +2436,7 @@ def _process_user(
         )
         if store is not None:
             store.release(email, target_day, request_id=request_id)
-        return "error"
+        return _done("error", "deliver_failed", digest, error=type(exc).__name__)
     if delivered:
         digest.delivered = True
         # v0.3 Task5: 当日予定の開始前リマインドをワンタイム登録（flag 既定OFF・fail-open＝
@@ -1784,11 +2451,11 @@ def _process_user(
                     f"[run_morning_digest_fargate] WARN: reminder 登録失敗 {type(exc).__name__}",
                     file=sys.stderr,
                 )
-        return "delivered"
+        return _done("delivered", "", digest)
     if store is not None:
         # Slack が受け付けなかった（未解決・DM 不可等）＝送れていないので印を戻す。
         store.release(email, target_day, request_id=request_id)
-    return "error"
+    return _done("error", "deliver_failed", digest, error="not_delivered")
 
 
 def _mode() -> str:
@@ -1811,13 +2478,27 @@ def _mode() -> str:
 
 
 def main() -> int:
+    global _TARGET_FETCH_ERROR
+    # F0: ログを JSON にする（タスク定義は STRUCTLOG_FORMAT=json を渡しているのに、この
+    # スクリプトは一度も configure しておらず、CloudWatch の metric filter（$.level 等）が
+    # 1 度も一致しなかった）。モジュール経由で呼ぶのはテストが差し替えられるようにするため。
+    from teamagent.observability import logging_config as _logging_config
+
+    _logging_config.configure_logging()
     require_runtime_startup((("mail_action", MAIL_ACTION_MAX_TOKEN_TTL_S),))
+    _TARGET_FETCH_ERROR = None
     users = _resolve_target_users()
+    target_error = _TARGET_FETCH_ERROR
+    mode = _mode()
+    if target_error:
+        # 「対象 0 人」と「取得できず誰にも送っていない」は別事象（後者は全員に届かない）。
+        logger.error("morning_digest_target_fetch_failed", err=target_error, mode=mode)
     if not users:
         print("[run_morning_digest_fargate] no target users (env+RDS empty)", flush=True)
+        if mode == "bulk":
+            _send_admin_report([], day=_digest_day(), users=0, target_error=target_error)
         return 0
 
-    mode = _mode()
     if mode == "planner":
         # 04:00 JST: 予約を作るだけ。digest は 1 通も配信しない。
         return run_planner(users)
@@ -1880,9 +2561,13 @@ def main() -> int:
     store = _delivery_store()
     day = _digest_day()
     origin = "scheduled" if mode == "single" else "bulk"
+    # F0: 1 人ずつの結果（管理者 DM と run_done の集計用・メモリ上だけ）。
+    outcomes: list[UserOutcome] = []
 
     def _run_one(email: str) -> str:
-        return _process_user(skill, skill_input, email, store=store, day=day, origin=origin)
+        return _process_user(
+            skill, skill_input, email, store=store, day=day, origin=origin, sink=outcomes
+        )
 
     # concurrency=1（既定）は従来どおり逐次。>1 で人数に応じた所要時間短縮。
     if concurrency > 1:
@@ -1902,6 +2587,10 @@ def main() -> int:
         f"[run_morning_digest_fargate] done {json.dumps(summary, ensure_ascii=False)}",
         flush=True,
     )
+    _log_run_done(outcomes, summary)
+    # 管理者 DM は既定時刻の一括実行だけ（予約で 1 人ずつ走る回に毎回送らない）。
+    if mode == "bulk":
+        _send_admin_report(outcomes, day=day, users=len(users))
     return 0
 
 

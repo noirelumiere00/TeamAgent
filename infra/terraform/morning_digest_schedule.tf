@@ -91,6 +91,22 @@ variable "morning_digest_ack_filter" {
   default     = false
 }
 
+# ---------- F0 連携切れの見える化（いずれも既定 空＝OFF） ----------
+# ⚠️ タスク定義（TD）の env を直接変えて点けたときは、activation 版 tfvars（正本）へも
+#    同じ値を必ず追記すること。追記しないまま次の guard 窓で -var-file 付き apply をすると、
+#    ここにある既定値（空＝OFF）で上書きされ、黙って元の描画に戻る。
+variable "morning_digest_fetch_status_emails" {
+  description = "F0: メール/予定を取得できなかった日に『新着なし』『予定なし』と書かず『確認できませんでした』＋原因に応じた案内を出す相手（カンマ区切りの email・`*` で全員）。空なら全員 OFF＝従来の描画と 1 バイトも変わらない。全員（*）に広げるのは oauth_connect の生存確認（PR-0b・OAUTH_CONNECT_LIVENESS_PROBE）を点けてから（先に広げると、失効した人が『連携』と送っても『連携済み』と返る行き止まりに入る）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記すること。"
+  type        = string
+  default     = ""
+}
+
+variable "morning_digest_admin_report_emails" {
+  description = "F0: 朝ダイジェストの実行結果（配信数・失敗数、問題の日だけ原因の内訳）を毎朝 1 通 DM で送る管理者の email（カンマ区切り・最大 3 件）。社内ドメイン（digest_internal_domain）の email 以外は捨て、Slack の lookup で社外・ゲスト・bot・削除済みでないことと本人 DM（D…）であることを確かめてから送る（チャンネルには送れない）。メールの件名・本文・相手は含めない。空なら送らない。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記すること。"
+  type        = string
+  default     = ""
+}
+
 variable "morning_digest_model_id" {
   description = "triage/下書き生成に使う Bedrock モデル ID。既定 Haiku（低コスト・高速）。"
   type        = string
@@ -193,6 +209,109 @@ resource "aws_cloudwatch_metric_alarm" "morning_digest_triage_dead" {
   treat_missing_data = "notBreaching"
   alarm_actions      = [aws_sns_topic.alarms.arn]
   ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
+# ---------- F0（PR-0a）: 連携切れ・取得失敗・対象者の取得失敗の警報（定義だけ） ----------
+# ⚠️ どれも JSON セレクタなので、runner が configure_logging()（STRUCTLOG_FORMAT=json）を呼んで
+#    いることが前提（PR-0a で main() の先頭に入れた）。本番への反映は guard の開通後。
+#    guard の sync plan は新しい create を止めるので、反映は config migration の
+#    to.allowed_resource_changes に下の 6 つの address を載せて行う。
+# ⚠️ pattern のイベント名と reason の値は tests/scripts/test_digest_f0_alarm_contract.py が
+#    コードを実際に動かして出た JSON に当てて確かめる（片方だけ変えると赤）。
+
+# メールか予定を「一時的な失敗」で取れなかった（再連携では直らない側・1 件から鳴らす）。
+# 失効・権限不足は利用者の再連携で直るので、下の「大量発生」だけで見る。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_fetch_failed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-fetch-failed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_fetch_failed\" && $.reason = \"temporary\" }"
+
+  metric_transformation {
+    name          = "MorningDigestFetchFailed"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_fetch_failed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-fetch-failed"
+  alarm_description   = "朝ダイジェストでメールか予定を一時的な失敗で取れなかった（本人の DM には「確認できませんでした」と出る。管理者 DM の原因の内訳を見る）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestFetchFailed"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  # 朝ダイジェストは平日の朝だけ走る。走っていない時間帯の欠測は異常ではない。
+  treat_missing_data = "notBreaching"
+  alarm_actions      = [aws_sns_topic.alarms.arn]
+  ok_actions         = [aws_sns_topic.alarms.arn]
+}
+
+# 再連携が必要な人（失効・権限不足）の大量発生。1 人の失効はメールと予定で 2 件出るので、
+# メールの節だけを数えて「人数」に近づける。アプリのアクセス取り消しなど、管理側の変更を疑う。
+# 個人別配信（予約の 1 人実行）で朝のうちに散らばるので、窓は 1 時間にする。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_reauth_needed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-reauth-needed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_fetch_failed\" && $.section = \"mail\" && ($.reason = \"token_expired\" || $.reason = \"scope_missing\") }"
+
+  metric_transformation {
+    name          = "MorningDigestReauthNeeded"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_reauth_needed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-reauth-needed"
+  alarm_description   = "朝ダイジェストで再連携が必要な人が 1 時間に 3 人以上（アプリのアクセス取り消しなど管理側の変更を疑う・名前は管理者 DM）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestReauthNeeded"
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 1
+  threshold           = 3
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# 対象者を取得できなかった（RDS の例外・DATABASE_URL 欠落・例外なしの 0 行）＝その朝は誰にも
+# 届かない。ERROR 1 件だけでは error_spike（5 分で 3 件以上）に届かないので専用計で 1 件から鳴らす。
+resource "aws_cloudwatch_log_metric_filter" "morning_digest_target_fetch_failed" {
+  name           = "${var.project_name}-${var.environment}-morning-digest-target-fetch-failed"
+  log_group_name = aws_cloudwatch_log_group.morning_digest.name
+  pattern        = "{ $.event = \"morning_digest_target_fetch_failed\" }"
+
+  metric_transformation {
+    name          = "MorningDigestTargetFetchFailed"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "morning_digest_target_fetch_failed" {
+  alarm_name          = "${var.project_name}-${var.environment}-morning-digest-target-fetch-failed"
+  alarm_description   = "朝ダイジェストの対象者を取得できず、誰にも配信していない（DB の接続・権限・RLS を確認）"
+  namespace           = local.metric_namespace
+  metric_name         = "MorningDigestTargetFetchFailed"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
 }
 
 # 事例ブリーフの「静かな死」を拾う専用計。
@@ -444,6 +563,9 @@ resource "aws_ecs_task_definition" "morning_digest" {
       # （予約を作れないのに一括実行だけが claim する状態を作らない）。
       { name = "MORNING_DIGEST_PERSONALIZED", value = (var.enable_reminders && var.morning_digest_personalized) ? "true" : "false" },
       { name = "MORNING_DIGEST_DEFAULT_TIME", value = var.morning_digest_default_time },
+      # F0 連携切れの見える化（既定 空＝OFF）。TD で変えたら activation 版 tfvars（正本）へ同じ値を追記。
+      { name = "MORNING_DIGEST_FETCH_STATUS_EMAILS", value = var.morning_digest_fetch_status_emails },
+      { name = "MORNING_DIGEST_ADMIN_REPORT_EMAILS", value = var.morning_digest_admin_report_emails },
       # ⚠️ DIGEST_USER_REF_PEPPER は environment に置かない（下の secrets を参照）。
     ], local.mail_action_hmac_environment, local.morning_digest_hmac_runtime_environment)
     secrets = concat([

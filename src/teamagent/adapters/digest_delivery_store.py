@@ -24,6 +24,11 @@ logger = structlog.get_logger(__name__)
 
 _TTL_DAYS = 14  # 診断の猶予だけ取る（長期保持しない）
 
+#: ``claim_result`` の返り値。送ってよいのは CLAIM_CLAIMED だけ。
+CLAIM_CLAIMED = "claimed"
+CLAIM_TAKEN = "taken"
+CLAIM_FAILED = "failed"
+
 _CLAIM_SQL = """
 INSERT INTO digest_delivery (user_email, digest_date, origin, expires_at)
 VALUES (%(email)s, %(day)s, %(origin)s, NOW() + make_interval(days => %(ttl_days)s))
@@ -73,9 +78,32 @@ class DigestDeliveryStore:
         同一トランザクションで期限切れ行（14 日）も掃除する。掃除の経路がどこにも
         無いと、SQL のコメントが宣言している保持期間が実装されていないことになる。
         """
+        return (
+            self.claim_result(user_email, day, origin=origin, request_id=request_id)
+            == CLAIM_CLAIMED
+        )
+
+    def claim_result(
+        self,
+        user_email: str,
+        day: _dt.date,
+        *,
+        origin: str,
+        request_id: str,
+    ) -> str:
+        """``claim`` と同じ処理で、結果を 3 通りに分けて返す（送ってよいのは CLAIM_CLAIMED だけ）。
+
+        - ``CLAIM_CLAIMED``: 自分が取った（送ってよい）
+        - ``CLAIM_TAKEN``: 既に別の経路が取っている（送らない・正常）
+        - ``CLAIM_FAILED``: DB 障害・入力不正で確かめられなかった（送らない＝fail-closed）
+
+        F0: 呼び出し側が「送信済み」と「確認できず止めた」を数え分けるための入口。
+        後者を「送信済み」と数えると、DB 障害で誰にも届かなかった朝を管理者 DM が
+        「問題なし」と報告してしまう。
+        """
         email = _normalise_email(user_email)
         if not email or "@" not in email or origin not in ("scheduled", "bulk"):
-            return False
+            return CLAIM_FAILED
         try:
             with (
                 self._ensure_pg().connection(app_role="teamagent_app", user_email=email) as conn,
@@ -98,12 +126,12 @@ class DigestDeliveryStore:
             logger.info(
                 "digest_delivery_claim", request_id=request_id, claimed=claimed, origin=origin
             )
-            return claimed
+            return CLAIM_CLAIMED if claimed else CLAIM_TAKEN
         except Exception:
             # fail-closed。error レベルで出して既存の ErrorCount alarm へ流す
             # （無音配信停止を「正常」に見せない）。
             logger.error("digest_delivery_claim_failed", request_id=request_id, origin=origin)
-            return False
+            return CLAIM_FAILED
 
     def release(self, user_email: str, day: _dt.date, *, request_id: str) -> bool:
         """配信に失敗したときに印を戻す（次の経路に再挑戦させる）。
@@ -129,4 +157,4 @@ class DigestDeliveryStore:
             return False
 
 
-__all__ = ["DigestDeliveryStore"]
+__all__ = ["CLAIM_CLAIMED", "CLAIM_FAILED", "CLAIM_TAKEN", "DigestDeliveryStore"]
