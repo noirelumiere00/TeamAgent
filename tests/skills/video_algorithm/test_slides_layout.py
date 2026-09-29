@@ -4,8 +4,8 @@
 x=64〜1216 の内側、文字は 14px 以上であること。見えている部分は、overflow を切る祖先
 （line-clamp の箱など）で切った範囲（切れて見えない行は数えない）。
 
-フィクスチャは本番形（クライアント未指定・指定・v2 キャッシュ）と負荷形（n=10・長文・横長・
-表紙なし・v3 の欄を上限まで埋めたもの）。壊し方: line-clamp の CSS（.c1〜.c5）を外す → 負荷形の
+フィクスチャは本番形（クライアント未指定・指定・v2 キャッシュ・本番と同じ前半に偏ったコマと
+隙間のある場面）と負荷形（n=10・長文・横長・表紙なし・v3 の欄を上限まで埋めたもの）。壊し方: line-clamp の CSS（.c1〜.c5）を外す → 負荷形の
 長文が枠を押し出して赤。
 """
 
@@ -34,6 +34,7 @@ from tests.skills.video_algorithm.prod_shape import (
     CLIENT,
     COMPETITORS,
     QUERY,
+    jpeg_uri,
     prod_board,
     prod_synthesis,
     prod_videos,
@@ -80,9 +81,11 @@ _MEASURE_JS = """
 """
 
 
-def _prod(client: bool, synthesis: str) -> VideoAlgorithmOutput:
+def _prod(client: bool, synthesis: str, frames: str = "scene") -> VideoAlgorithmOutput:
     roster = Roster.of(CLIENT, COMPETITORS) if client else Roster()
-    videos, board = prod_videos(), prod_board()
+    videos, board = prod_videos(frames), prod_board()
+    for v in videos:  # 本番と同じく表紙がある（比較の表紙の行が高さを取る）
+        v.cover_data_uri = jpeg_uri(240, 426)
     cross = cross_analyze(videos, QUERY, board=board, roster=roster)
     if synthesis == "v3":
         ctx = SynthesisContext.build(videos, QUERY, board=board, roster=roster)
@@ -104,6 +107,8 @@ _FIXTURES: dict[str, Any] = {
     "prod_unspecified": lambda: _prod(False, "v3"),
     "prod_client": lambda: _prod(True, "v3"),
     "prod_v2_cache": lambda: _prod(False, "v2"),
+    # 本番のコマの偏り（#2 は 12 秒以内だけ）と #1 の隙間のある場面（R1-10・M28 前のキャッシュ）
+    "prod_front_loaded_frames": lambda: _prod(True, "v3", frames="prod"),
     "load_n10": load_output,
 }
 

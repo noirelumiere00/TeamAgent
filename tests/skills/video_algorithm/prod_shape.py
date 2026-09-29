@@ -20,6 +20,7 @@
 - 「スパイスカレー」テロップ 5/5・キャプション 4/5（上位 30 本 26/30）・ハッシュタグ 3/5（23/30）
   ・発話 3/5／「作り方」テロップ 完全一致 0/5・言い換え 1/5（#2）・キャプション 1/5（9/30）
 - 分量テロップ #3 #4 #5（4 位は 7 枚・25 秒「大さじ8杯」）・キャプションに分量 #1 #3
+  （#1 はキャプションにだけ「大さじ」がある＝「テロップに出す」の仮説に数えない形）
 - タイアップ 上位 #1 #4・ボード #1 #4 #12 #16 #20／最良の 1 本 #4（再生・保存率・シェア）
 - 外れ値 #3（再生 2.05 万・中央値 27.4 万の 1 割未満）・#5（横長・89 秒・2021 年投稿）
 """
@@ -35,6 +36,7 @@ from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     CrossSynthesis,
     FrameShot,
+    Scene,
     VideoMeta,
     VideoVSEOAnalysis,
 )
@@ -179,7 +181,7 @@ _D1_HEAD = (
     "【スパイス4種で作る本格スパイスカレー】 スパイスカレー。 料理が好きになったきっかけの一皿。"
     "玉ねぎのうまみを引き出し、スパイスで香りを足し、水分を飛ばす。この流れを市販品なしで"
     "作れるのがスパイスカレーの面白さ。 【材料】玉ねぎ 2個・トマト缶 1缶・鶏もも肉 300g・"
-    "ターメリック 小さじ1/2・クミン 小さじ1・コリアンダー 小さじ1・バター10g "
+    "ターメリック 小さじ1/2・クミン 小さじ1・コリアンダー 大さじ2・バター10g "
 )
 _D1_FILL = "ポイント: 玉ねぎは焦がさずじっくり、トマトは水分をしっかり飛ばすこと。"
 _D1 = (_D1_HEAD + _D1_FILL * 30)[:722] + " #料理記録 #PR "
@@ -616,19 +618,57 @@ def _frames(analysis: VideoVSEOAnalysis, width: int, height: int) -> list[FrameS
     return [FrameShot(sec=s, caption="", data_uri=uri) for s in secs]
 
 
-def prod_videos() -> list[AnalyzedVideo]:
-    """上位 5 本（v2 の出力＝場面に役割が無い）。コマは 1〜4 位が縦長・5 位が横長。"""
+# 本番のコマの秒（pick_timecodes の 6 枚＝前半に偏る。#2 は 46 秒の動画で 6 枚とも 12 秒以内）。
+PROD_FRAME_SECS: dict[int, list[float]] = {
+    1: [0.8, 6.0, 16.0, 24.0, 34.0, 58.5],
+    2: [0.8, 4.0, 6.0, 8.5, 10.0, 12.0],
+    3: [0.8, 3.0, 8.0, 15.5, 33.0, 55.0],
+    4: [0.8, 5.0, 15.5, 21.5, 31.0, 44.5],
+    5: [0.8, 3.0, 7.0, 26.0, 41.0, 59.0],
+}
+# 本番の #1 の場面（場面と場面のあいだに 1 秒の隙間がある）。
+PROD_GAPPED_SCENES_1: list[tuple[float, float]] = [
+    (0, 12),
+    (13, 18),
+    (19, 23),
+    (24, 31),
+    (32, 41),
+    (42, 44),
+    (45, 52),
+    (53, 59),
+]
+
+
+def prod_videos(frames: str = "scene") -> list[AnalyzedVideo]:
+    """上位 5 本（v2 の出力＝場面に役割が無い）。コマは 1〜4 位が縦長・5 位が横長。
+
+    frames="scene" はコマが場面の中央に並ぶ形（場面ごとのコマ）。frames="prod" は本番と同じ
+    偏り（PROD_FRAME_SECS）と、#1 の隙間のある場面（PROD_GAPPED_SCENES_1）。
+    """
     sizes = [(320, 584), (320, 568), (320, 568), (320, 568), (320, 180)]
-    return [
-        AnalyzedVideo(
-            meta=meta,
-            analysis=a,
-            frames=_frames(a, *size),
-            cost_usd=0.08,
-            model_id="gemini-3.5-flash",
+    analyses = top_analyses()
+    if frames == "prod":
+        analyses[0].scenes = [
+            Scene(start_sec=s, end_sec=e, desc=f"場面{i + 1}")
+            for i, (s, e) in enumerate(PROD_GAPPED_SCENES_1)
+        ]
+    out = []
+    for meta, a, size in zip(top_metas(), analyses, sizes, strict=True):
+        if frames == "prod":
+            uri = jpeg_uri(*size)
+            shots = [FrameShot(sec=s, caption="", data_uri=uri) for s in PROD_FRAME_SECS[meta.rank]]
+        else:
+            shots = _frames(a, *size)
+        out.append(
+            AnalyzedVideo(
+                meta=meta,
+                analysis=a,
+                frames=shots,
+                cost_usd=0.08,
+                model_id="gemini-3.5-flash",
+            )
         )
-        for meta, a, size in zip(top_metas(), top_analyses(), sizes, strict=True)
-    ]
+    return out
 
 
 # ── 上位ボード 30 本（6〜30 位はメタだけ）──────────────────────────────────────
@@ -793,6 +833,8 @@ __all__ = [
     "COMPETITORS",
     "KW1",
     "KW2",
+    "PROD_FRAME_SECS",
+    "PROD_GAPPED_SCENES_1",
     "QUERY",
     "jpeg",
     "jpeg_uri",

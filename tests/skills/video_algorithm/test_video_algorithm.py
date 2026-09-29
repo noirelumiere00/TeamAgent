@@ -579,9 +579,12 @@ def test_render_report_planner_strategy_summary() -> None:
         posting=PostingPlan(caption_plan="保存誘導の一文"),
     )
     h = render_report(out)
-    assert "プランナーの戦略サマリ" in h and "冒頭の価格テロップが上位の共通点" in h
+    # 2 本だけの観測は見出しに共通点を立てない（R2-10: 段階の名前も付けない）
+    assert "プランナーの戦略サマリ" in h and "上位2本の観測（本数が少ないため" in h
+    assert "冒頭の価格テロップが上位の共通点" not in h
     assert "クリエイティブ指示" in h
-    assert "1秒に地名のテロップを出す〔必須条件 2/2｜根拠 #1 1秒「新宿」〕" in h
+    # 2 本だけの観測には段階の名前（必須条件）を付けない（R2-10）。根拠は出どころつき。
+    assert "1秒に地名のテロップを出す〔観測 2/2（#1・#2）｜根拠 #1 1秒 テロップ「新宿」〕" in h
     assert "次の一手（案）" in h and "値ごろ感の実演" in h
     assert "投稿設計" in h and "保存誘導の一文" in h
     assert "仮説（A/B で確かめるもの" in h and "価格大テロップ" in h

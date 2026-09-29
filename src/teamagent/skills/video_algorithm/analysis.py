@@ -21,15 +21,18 @@ from dataclasses import replace
 from typing import Literal
 
 from teamagent.skills.video_algorithm.evidence import (
+    TIER_MAJORITY,
+    TIER_REQUIRED,
     Roster,
     contains,
     query_terms,
     ranks_text,
-    tier,
 )
 from teamagent.skills.video_algorithm.facts import (
+    Feature,
     VideoFacts,
     duration_of,
+    feature_table,
     kw_matrix,
     video_facts,
 )
@@ -241,22 +244,47 @@ def cross_analyze(
     except Exception:  # 統計失敗で横断分析全体を落とさない
         cross.stats = None
 
-    # サマリ（1行）。「勝ち筋」とは呼ばない（全本に共通する特徴は前提で、差の要因ではない）。
-    if cross.win_factors:
-        lead = cross.win_factors[0]
-        # 段階の名前（必須条件／多数派／事例）はコードが本数から付ける（Slack の要約にも出る）。
-        top_text = (
-            f"『{lead.factor}』（{tier(lead.observed_in, lead.total)} "
-            f"{lead.observed_in}/{lead.total}本）"
-        )
+    # サマリ（1行・Slack にも出る）。「勝ち筋」とは呼ばない（全本に共通する特徴は前提で、差の
+    # 要因ではない）。共通点は語ごとの特徴（「テロップに「スパイスカレー」」）から選び、段階の名前は
+    # コードが本数から付ける。保存率はスライドと同じ中央値にする。
+    lead = _summary_lead(feature_table(facts, board or [], query))
+    if lead is not None:
+        top_text = f"『{lead.label}』（{lead.tier} {lead.count}/{lead.n}本）"
+    elif sum(1 for f in facts if f.watched) < 3:  # 動画を見て分析できた本数（サムネだけは除く）
+        top_text = "（分析できた本数が少ないため段階は付けない）"
     else:
-        top_text = "（顕著な共通項なし）"
+        top_text = "（多数派以上の共通点なし）"
+    save_median = round(statistics.median(saves), 2) if saves else 0.0
     cross.summary = (
         f"KW「{query}」上位{n}本＝平均ENG {cross.avg_engagement_rate}% / "
-        f"保存率 {cross.avg_save_rate}% / 尺中央値 {cross.median_duration_sec}秒。"
+        f"保存率中央値 {save_median:.2f}% / 尺中央値 {cross.median_duration_sec}秒。"
         f"最も多い共通点は{top_text}。"
     )
     return cross
+
+
+# Slack の 1 行目に出す共通点の優先順（語ごとの特徴・前方一致）。
+_SUMMARY_PRIORITY: tuple[str, ...] = (
+    "first_telop_0s",
+    "kw_telop:",
+    "kw_telop_3s:",
+    "qty_anywhere",
+    "narration",
+    "kw_caption:",
+    "kw_hashtag:",
+)
+
+
+def _summary_lead(features: Sequence[Feature]) -> Feature | None:
+    """必須条件→多数派の順に、優先順で最初の特徴（段階の名前が付く 3 本以上のときだけ）。"""
+    for want in (TIER_REQUIRED, TIER_MAJORITY):
+        for prefix in _SUMMARY_PRIORITY:
+            for f in features:
+                if f.tier != want:
+                    continue
+                if f.id == prefix or (prefix.endswith(":") and f.id.startswith(prefix)):
+                    return f
+    return None
 
 
 # -----------------------------------------------------------

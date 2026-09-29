@@ -6,15 +6,21 @@ import pytest
 
 from teamagent.skills.video_algorithm import facts as vf
 from teamagent.skills.video_algorithm.evidence import (
+    TIER_CASE,
     TIER_MAJORITY,
+    TIER_OBSERVED,
+    TIER_REQUIRED,
     Ref,
     Roster,
     VerifiedRef,
     analysis_terms,
     norm,
     query_terms,
+    quote_frame,
     ref_frame,
     refs_tier,
+    tier,
+    tier_text,
     verify_ref,
 )
 from teamagent.skills.video_algorithm.schema import FrameShot
@@ -70,11 +76,75 @@ def test_ref_sources_scene_hook_brand_and_caption() -> None:
     assert _verify(3, None, "カレールーはもう卒業") is None  # テロップの文言はキャプションに無い
 
 
+def test_brand_name_passes_only_near_its_seconds() -> None:
+    """ブランド名は、映る秒（#1 SPICIA は 24〜30 秒）の ±2 秒のときだけ合格（近くのテロップに無い語）。
+
+    壊し方: ブランドの秒を見ない → 40 秒の引用が通って赤。
+    """
+    near = _verify(1, 27.0, "SPICIA")
+    assert near is not None and (near.source, near.found_sec) == ("brand", 26.0)
+    assert _verify(1, 32.0, "SPICIA") is not None  # 30 秒の ±2
+    assert _verify(1, 40.0, "SPICIA") is None
+    assert _verify(1, 20.0, "SPICIA") is None
+
+
+@pytest.mark.parametrize(
+    ("rank", "sec", "quote"),
+    [
+        (4, 22.0, "ハーブ専科で1週間で3kg痩せた"),
+        (1, 27.0, "SPICIAだけで本格的な味になる"),
+        (2, 12.0, "ティーケー食品のスパイスは全部100円"),
+    ],
+)
+def test_made_up_quote_containing_a_brand_name_fails(rank: int, sec: float, quote: str) -> None:
+    """R2-1（critical）: ブランド名を含むだけの作り話の引用を「照合済み」にしない。
+
+    ブランド名で合格させるのは、引用がブランド名（かその一部）のときだけ。壊し方: `name in q`
+    （引用がブランド名を含む）で合格させる → 3 つとも通って赤。
+    """
+    assert _verify(rank, sec, quote) is None
+
+
 def test_refs_tier_counts_distinct_ranks() -> None:
     refs = [r for r in (_verify(4, 25.0, "大さじ8杯"), _verify(3, 13.0, "大さじ3")) if r]
     refs.append(VerifiedRef(4, 28.5, "醤油大さじ5杯", "telop", 28.5))
     refs.append(VerifiedRef(5, 25.0, "大さじ1", "telop", 25.0))
     assert refs_tier(refs, 5) == (TIER_MAJORITY, (3, 4, 5))
+
+
+@pytest.mark.parametrize(
+    ("c", "n", "name"),
+    [
+        (5, 5, TIER_REQUIRED),
+        (3, 5, TIER_MAJORITY),
+        (2, 5, TIER_CASE),
+        (3, 3, TIER_REQUIRED),
+        (1, 1, TIER_OBSERVED),
+        (2, 2, TIER_OBSERVED),
+        (1, 2, TIER_OBSERVED),
+    ],
+)
+def test_tier_names_need_three_videos(c: int, n: int, name: str) -> None:
+    """R2-10: 1〜2 本だけの観測を「必須条件」「多数派」と呼ばない（「観測 1/1」）。
+
+    壊し方: 本数の下限（MIN_TIER_N）を外す → 1/1 が必須条件になって赤。
+    """
+    assert tier(c, n) == name
+    assert tier_text([1], 1) == "観測 1/1（#1）"
+
+
+def test_quote_frame_is_right_after_the_quote_second_only() -> None:
+    """R2-5: 引用の横のコマは、引用の秒の 0.5 秒前〜2 秒後だけ（±3 秒の別のテロップのコマを出さない）。
+
+    壊し方: 窓を ±3 秒に戻す → 12 秒の引用に 15.5 秒のコマが付いて赤。
+    """
+    frames = [FrameShot(sec=s, data_uri=f"data:image/jpeg;base64,{s}") for s in (12.0, 15.5)]
+    picked = quote_frame(frames, 12.0)
+    assert picked is not None and picked.sec == 12.0
+    assert quote_frame(frames, 13.0) is None  # 12.0 は 0.5 秒より前・15.5 は 2 秒より後
+    assert quote_frame(frames, 14.0) is not None  # 15.5 は 2 秒以内の後
+    assert quote_frame(frames, 16.1) is None  # 15.5 は 0.5 秒より前
+    assert quote_frame(frames, None) is None
 
 
 def test_ref_frame_uses_an_existing_frame_within_three_seconds() -> None:

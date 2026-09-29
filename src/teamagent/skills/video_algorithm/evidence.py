@@ -11,6 +11,8 @@
 - ブランド名簿（``Roster``）: 区分（クライアント／競合）はコードが名簿で決める。Gemini の
   ``brand_relation`` は使わない。名簿が無ければ「未指定」。
 - 段階（``tier``）: 本数 c/n から 必須条件・多数派・事例 を付ける。LLM には付けさせない。
+  分析できた本数が 3 本未満のときは段階の名前を付けず「観測」とだけ書く（1 本だけの観測を
+  「必須条件 1/1」と呼ばない）。
 
 search_surface_check（video_structure）からも使うので、video_algorithm.schema 以外を実行時に
 import しない（葉のモジュール。循環 import を作らない）。
@@ -39,6 +41,10 @@ if TYPE_CHECKING:
 SEC_TOLERANCE = 2.0
 # 根拠に添えるコマの許容（既に抜いたコマのうち、この秒以内で最も近いもの）。
 FRAME_TOLERANCE = 3.0
+# 引用の横に添えるコマの窓（引用の秒の 0.5 秒前〜2 秒後）。Gemini の秒は実際の映像より 1〜2 秒
+# 早いので後ろに広く取り、前は狭くする（±3 秒だと別のテロップのコマが並んだ）。
+QUOTE_FRAME_BEFORE = 0.5
+QUOTE_FRAME_AFTER = 2.0
 # フック（hook_summary）で照合する秒の上限。
 HOOK_MAX_SEC = 3.0
 # 引用として照合する最短の長さ（1 文字は何にでも含まれてしまう）。
@@ -48,14 +54,25 @@ _EPS = 1e-9
 TIER_REQUIRED = "必須条件"
 TIER_MAJORITY = "多数派"
 TIER_CASE = "事例"
-TIER_NAMES: tuple[str, ...] = (TIER_REQUIRED, TIER_MAJORITY, TIER_CASE)
+TIER_OBSERVED = "観測"  # 分析できた本数が少なすぎて段階の名前を付けない
+TIER_NAMES: tuple[str, ...] = (TIER_REQUIRED, TIER_MAJORITY, TIER_CASE, TIER_OBSERVED)
 # 多数派の下限（本数の割合）。n=5 なら 3 本。
 MAJORITY_SHARE = 0.6
+# 段階の名前を付ける最小の本数（1〜2 本の観測を「必須条件」「多数派」と呼ばない）。
+MIN_TIER_N = 3
 
 KwLayer = Literal["telop", "caption", "hashtag", "speech"]
 KwMatchKind = Literal["exact", "synonym"]
 Relation = Literal["client", "competitor", "other", "unspecified"]
 RefSource = Literal["telop", "scene", "hook", "brand", "caption"]
+# 根拠の出どころの呼び名（描画に出す。テロップの引用と AI の説明を見分けられるようにする）。
+SOURCE_LABEL: dict[str, str] = {
+    "telop": "テロップ",
+    "scene": "場面の説明（AI）",
+    "hook": "冒頭の要約（AI）",
+    "brand": "ブランド表示",
+    "caption": "キャプション",
+}
 
 KW_LAYERS: tuple[KwLayer, ...] = ("telop", "caption", "hashtag", "speech")
 KW_LAYER_LABEL: dict[str, str] = {
@@ -106,12 +123,22 @@ def majority_min(n: int) -> int:
 
 
 def tier(c: int, n: int) -> str:
-    """本数 c/n の段階: 全部＝必須条件、ceil(0.6n) 以上＝多数派、それ以外＝事例。"""
-    if n > 0 and c >= n:
+    """本数 c/n の段階: 全部＝必須条件、ceil(0.6n) 以上＝多数派、それ以外＝事例。
+
+    n が MIN_TIER_N（3）未満なら段階の名前を付けず「観測」（1 本だけの観測を必須条件と呼ばない）。
+    """
+    if n < MIN_TIER_N:
+        return TIER_OBSERVED
+    if c >= n:
         return TIER_REQUIRED
-    if n > 0 and c >= majority_min(n):
+    if c >= majority_min(n):
         return TIER_MAJORITY
     return TIER_CASE
+
+
+def at_least_majority(tier_name: str) -> bool:
+    """段階が多数派以上（必須条件か多数派）か。事例・観測は False。"""
+    return tier_name in (TIER_REQUIRED, TIER_MAJORITY)
 
 
 def ranks_text(ranks: Iterable[int]) -> str:
@@ -120,7 +147,7 @@ def ranks_text(ranks: Iterable[int]) -> str:
 
 
 def tier_text(ranks: Iterable[int], n: int) -> str:
-    """「必須条件 5/5」「多数派 3/5（#1・#3・#5）」「事例 2/5（#1・#3）」。"""
+    """「必須条件 5/5」「多数派 3/5（#1・#3・#5）」「事例 2/5（#1・#3）」「観測 1/2（#1）」。"""
     uniq = sorted(set(ranks))
     name = tier(len(uniq), n)
     base = f"{name} {len(uniq)}/{n}"
@@ -348,8 +375,11 @@ def verify_ref(
     | テロップ本文 | テロップの秒と ref.sec の差が 2.0 秒以内 |
     | 場面の説明・テロップ・発話 | 場面の開始−2 ≦ ref.sec ≦ 終了+2 |
     | フックの要約 | ref.sec ≦ 3 |
-    | ブランド名 | ブランドが映る秒のどれかと ref.sec の差が 2.0 秒以内 |
+    | ブランド名 | quote がブランド名（かその一部）で、映る秒のどれかと ref.sec の差が 2.0 秒以内 |
     | キャプション全文 | ref.sec が None |
+
+    ブランド名で合格させるのは、quote がブランド名に含まれるときだけ（ブランド名を含む作り話の
+    引用「○○で1週間で3kg痩せた」を通さない）。
     """
     if ref.rank != facts.rank:
         return None
@@ -378,7 +408,7 @@ def verify_ref(
         return ok("hook", 0.0)
     for b in analysis.brand_detections:
         name = norm(b.brand_name)
-        if not name or not (q in name or name in q):
+        if not name or q not in name:
             continue
         hit = next((s for s in b.appear_sec if _near(s, sec)), None)
         if hit is not None:
@@ -404,28 +434,57 @@ def ref_frame(
     return min(usable, key=lambda f: (abs(f.sec - sec), f.sec))
 
 
+def quote_frame(
+    frames: Iterable[FrameShot],
+    sec: float | None,
+    *,
+    before: float = QUOTE_FRAME_BEFORE,
+    after: float = QUOTE_FRAME_AFTER,
+) -> FrameShot | None:
+    """引用（テロップ等）の横に添えるコマ: 引用の秒の before 秒前〜after 秒後で最も近いもの。
+
+    無ければ None（黒い枠で代えない）。コマに引用が写っていることは保証しないので、描画は
+    コマ自身の秒を添える（画像の照合は Phase2）。
+    """
+    if sec is None:
+        return None
+    usable = [
+        f for f in frames if f.data_uri and sec - before - _EPS <= f.sec <= sec + after + _EPS
+    ]
+    if not usable:
+        return None
+    return min(usable, key=lambda f: (abs(f.sec - sec), f.sec))
+
+
 __all__ = [
     "FRAME_TOLERANCE",
     "KW_LAYERS",
     "KW_LAYER_LABEL",
     "MAJORITY_SHARE",
+    "MIN_TIER_N",
+    "QUOTE_FRAME_AFTER",
+    "QUOTE_FRAME_BEFORE",
     "RELATION_LABEL",
     "SEC_TOLERANCE",
+    "SOURCE_LABEL",
     "TIER_CASE",
     "TIER_MAJORITY",
     "TIER_NAMES",
+    "TIER_OBSERVED",
     "TIER_REQUIRED",
     "KwHit",
     "Ref",
     "Roster",
     "VerifiedRef",
     "analysis_terms",
+    "at_least_majority",
     "contains",
     "fold",
     "kw_hits",
     "majority_min",
     "norm",
     "query_terms",
+    "quote_frame",
     "ranks_text",
     "ref_frame",
     "refs_tier",

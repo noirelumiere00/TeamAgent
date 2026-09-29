@@ -9,8 +9,14 @@ Gemini が推測した「client」をそのまま使う、といった誤りが�
 - KW は語ごと×層ごと×完全一致/言い換え（evidence.kw_hits。テロップは実在を照合済み）。
 - ブランドの区分は名簿（client_name / competitors）でコードが決める。名簿が無ければ「未指定」。
 - PR はキャプション全文の #PR 等・@ブランド・「提供の可能性」（likely_sponsored）で判定する。
+  キャプションの表記（pr_marked）と、AI の推定だけのもの（pr だが pr_marked でない）を分ける。
 - 向き（縦/横）は抜いたコマの JPEG の SOF から幅と高さを読む（stdlib）。
 - CTA は文言も秒も無いものを無効にする（本番の #4 の comment は文言も秒も無かった）。
+  AI の CTA が無い・無効のときは、最後の 10 秒のテロップの呼びかけ（試してみて・保存して等）を
+  CTA とみなす（出どころは「テロップ」。本番の #4 は 71 秒の「マジで試してみて」が締めだった）。
+- 「商品」と呼ぶのは、名簿（クライアント・競合）か v3 のカテゴリ判定で商材カテゴリと分かった
+  ブランドだけ（product_brands）。判定できないときは「目立つ映り込み」と呼ぶ（背景のビール缶を
+  商品と数えない）。
 """
 
 from __future__ import annotations
@@ -30,11 +36,11 @@ from teamagent.skills.search_surface_check.video_structure import QTY_RE, ROLE_L
 from teamagent.skills.video_algorithm.evidence import (
     KW_LAYER_LABEL,
     RELATION_LABEL,
-    TIER_CASE,
     UNIDENTIFIED_LOGO,
     KwHit,
     Relation,
     Roster,
+    at_least_majority,
     contains,
     fold,
     kw_hits,
@@ -46,6 +52,7 @@ from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
     BrandDetection,
     FrameShot,
+    Scene,
     VideoMeta,
     VideoVSEOAnalysis,
 )
@@ -107,17 +114,32 @@ _CTA_TEXT_KIND: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("buy", ("購入", "買って", "ポチ")),
     ("try", ("試して", "お試し", "作ってみ", "やってみ", "作って")),
 )
+# 最後の 10 秒のテロップから CTA とみなす呼びかけ（AI の CTA が無い・無効のときだけ使う）。
+# 「作っていきます」のような手順の文を拾わないよう、呼びかけの形だけにする。
+TELOP_CTA_TAIL_SEC = 10.0
+_TELOP_CTA: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("link_bio", re.compile(r"プロフ(?:ィール)?(?:から|の|を|見|チェック)|リンク(?:から|は|を)")),
+    ("save", re.compile(r"保存(?:して|しておいて|しといて|お願い|推奨|必須)")),
+    ("follow", re.compile(r"フォロー(?:して|お願い|よろしく)")),
+    ("comment", re.compile(r"コメント(?:して|で|ください|お待ち)")),
+    ("try", re.compile(r"試して(?:みて|ね|ください)|お試し|作ってみて|やってみて")),
+)
 _CAPTION_CTA: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("save", re.compile(r"「保存」|保存(?:して|しておいて|しといて|お願い|推奨|必須|必至)")),
     ("follow", re.compile(r"フォロー(?:して|しておいて|お願い|よろしく|で)")),
     ("comment", re.compile(r"コメント(?:で|して|ください|お待ち|欄)")),
     ("link_bio", re.compile(r"プロフ(?:ィール)?(?:から|の|リンク)")),
 )
+# カテゴリを判定できない（名簿も v3 も無い）ときの呼び名（商品と言わない）。
+BRAND_FIRST_UNKNOWN_LABEL = "目立つ映り込みの初出"
 EVENT_LABEL: dict[str, str] = {
     "first_telop": "最初のテロップ",
     "kw_telop": "検索語テロップの初出",
     "qty_telop": "分量テロップ",
+    # 名簿か v3 で商材カテゴリの商品と分かったブランドだけ（背景のビール缶は数えない）。
     "brand_first": "目立つ商品の初出",
+    # カテゴリを判定できないとき（主役・目立つ大きさで映るもの。商品とは呼ばない）。
+    "brand_seen": BRAND_FIRST_UNKNOWN_LABEL,
     "result_first": "完成品の初出",
     "cta": "CTA",
 }
@@ -181,7 +203,7 @@ class VideoFacts:
     qty_in_caption: bool
     numeric_claims: tuple[tuple[str, float | None, str], ...]  # (層, 秒, 原文)
     brands: tuple[BrandFact, ...]
-    pr: bool
+    pr: bool  # タイアップ表記か、AI の推定（提供の可能性）
     pr_evidence: str
     cta_in_video: tuple[str, str, float | None] | None  # (型, 文言, 秒)。文言も秒も無ければ None
     cta_dropped: tuple[str, ...]  # 文言も秒も無く無効にした cta_type
@@ -193,6 +215,8 @@ class VideoFacts:
     hook_type: str
     desc: str  # キャプション全文（refs の照合に使う）
     watched: bool  # 動画そのものを見て分析できた（サムネだけの縮退・失敗は False）
+    pr_marked: bool = False  # キャプションにタイアップ表記（#PR 等・@ブランド）がある
+    cta_source: str = ""  # ai（AI の CTA）/ telop（最後の 10 秒のテロップ）/ ""（なし）
 
     @property
     def kw_first_telop_sec(self) -> float | None:
@@ -208,14 +232,24 @@ class VideoFacts:
 
     @property
     def qty_place(self) -> str:
-        """分量の置き場所（テロップ／キャプション／両方／無し）。"""
+        """分量の置き場所（テロップ／キャプション／両方／なし）。"""
         if self.qty_telops and self.qty_in_caption:
             return "テロップとキャプション"
         if self.qty_telops:
             return "テロップ"
         if self.qty_in_caption:
             return "キャプション"
-        return "無し"
+        return "なし"
+
+    @property
+    def pr_caption_evidence(self) -> str:
+        """タイアップ表記の根拠のうちキャプションの部分（「キャプション @ブランド #PR」）。"""
+        return self.pr_evidence.split("・AI判定", 1)[0] if self.pr_marked else ""
+
+    @property
+    def pr_ai_only(self) -> bool:
+        """キャプションに表記は無く、AI の推定（提供の可能性）だけで PR としたもの。"""
+        return self.pr and not self.pr_marked
 
 
 @dataclass(frozen=True)
@@ -451,8 +485,8 @@ def brand_facts(
     return tuple(f for _k, f in sorted(out, key=lambda x: x[0]))
 
 
-def detect_pr(meta: VideoMeta, a: VideoVSEOAnalysis | None = None) -> tuple[bool, str]:
-    """タイアップ表記の有無と根拠（キャプション全文の #PR 等・@ブランド・提供の可能性）。"""
+def _pr_marks(meta: VideoMeta, a: VideoVSEOAnalysis | None) -> list[str]:
+    """キャプションのタイアップ表記（@ブランド・#PR 等）。"""
     parts: list[str] = []
     if a is not None:
         for b in a.brand_detections:
@@ -461,7 +495,18 @@ def detect_pr(meta: VideoMeta, a: VideoVSEOAnalysis | None = None) -> tuple[bool
                 parts.append(f"@{name}")
     tags = [m.group(1) for m in _PR_TAG_RE.finditer(fold(meta.desc))]
     parts.extend("#PR" if t == "pr" else f"#{t}" for t in dict.fromkeys(tags))
-    evidence = f"キャプション {' '.join(dict.fromkeys(parts))}" if parts else ""
+    return list(dict.fromkeys(parts))
+
+
+def pr_marked(meta: VideoMeta, a: VideoVSEOAnalysis | None = None) -> bool:
+    """キャプション全文にタイアップ表記（#PR 等・@ブランド）があるか（AI の推定は含めない）。"""
+    return bool(_pr_marks(meta, a))
+
+
+def detect_pr(meta: VideoMeta, a: VideoVSEOAnalysis | None = None) -> tuple[bool, str]:
+    """タイアップ表記の有無と根拠（キャプション全文の #PR 等・@ブランド・提供の可能性）。"""
+    parts = _pr_marks(meta, a)
+    evidence = f"キャプション {' '.join(parts)}" if parts else ""
     if a is not None:
         sponsored = [
             _brand_display(b) for b in a.brand_detections if b.is_intentional == "likely_sponsored"
@@ -487,6 +532,27 @@ def valid_cta(a: VideoVSEOAnalysis) -> tuple[str, str, float | None] | None:
     if not text and a.cta_sec is None:
         return None
     return cta_kind(a.cta_type, text), text, a.cta_sec
+
+
+def telop_cta(a: VideoVSEOAnalysis, duration: float) -> tuple[str, str, float] | None:
+    """最後の 10 秒のテロップの呼びかけ（いちばん後のもの）。無ければ None。
+
+    AI の CTA が無い・無効のときに使う（本番の #4 は AI が文言も秒も無い comment を申告し、
+    71 秒のテロップ「マジで試してみて」が実際の締めだった）。
+    """
+    telops = sorted((t for t in a.telops if t.text.strip()), key=lambda t: t.sec)
+    if not telops:
+        return None
+    end = duration if duration > 0 else max(a.duration_sec, telops[-1].sec)
+    start = max(0.0, end - TELOP_CTA_TAIL_SEC)
+    for t in reversed(telops):
+        if t.sec < start:
+            break
+        body = fold(t.text)
+        for kind, pat in _TELOP_CTA:
+            if pat.search(body):
+                return kind, t.text.strip(), t.sec
+    return None
 
 
 def caption_ctas(desc: str) -> tuple[str, ...]:
@@ -542,9 +608,14 @@ def video_facts(
     posted, estimated = posted_date(meta)
     pr, pr_evidence = detect_pr(meta, a)
     cta = valid_cta(a) if a is not None else None
+    cta_source = "ai" if cta is not None else ""
     dropped: tuple[str, ...] = ()
     if a is not None and cta is None and a.cta_type:
         dropped = tuple(dict.fromkeys(a.cta_type))
+    if a is not None and cta is None:
+        from_telop = telop_cta(a, dur)
+        if from_telop is not None:
+            cta, cta_source = from_telop, "telop"
     roles = infer_roles(a) if a is not None else []
     return VideoFacts(
         rank=meta.rank,
@@ -579,6 +650,8 @@ def video_facts(
         hook_type=a.hook_type if a is not None else "",
         desc=meta.desc,
         watched=is_watched(v),
+        pr_marked=pr_marked(meta, a),
+        cta_source=cta_source,
     )
 
 
@@ -603,13 +676,36 @@ def _feature(
     return Feature(fid, label, uniq, n, tier(len(uniq), n), board_rate)
 
 
-def _board_rate(board: Sequence[VideoMeta], hit: Callable[[VideoMeta], bool]) -> tuple[int, int]:
+def _board_rate(
+    board: Sequence[VideoMeta], hit: Callable[[VideoMeta], bool]
+) -> tuple[int, int] | None:
+    """上位ボード全体の本数/本数。ボードが空なら None（「上位0本では0/0」と書かない）。"""
+    if not board:
+        return None
     return sum(1 for m in board if hit(m)), len(board)
 
 
 def category_known(facts: Iterable[VideoFacts]) -> bool:
     """「カテゴリの商品か」を判定できるか（名簿か v3 の欄がある）。"""
     return any(b.category_match is not None for f in facts for b in f.brands)
+
+
+_REL_ORDER = {"client": 0, "competitor": 1}
+
+
+def product_brands(f: VideoFacts) -> list[BrandFact]:
+    """「商品」と呼べるブランド（名簿の区分か v3 で商材カテゴリと分かったものだけ）。
+
+    順: クライアント → 競合（目立ち方は問わない）→ カテゴリの商品（目立つ順）。カテゴリ外で
+    目立つもの（ノンアルビール・オリーブオイル・ミキサー等）は入れない。
+    """
+    named = [b for b in f.brands if b.category_match and b.name != "ロゴ（不明）"]
+    return sorted(named, key=lambda b: _REL_ORDER.get(b.relation, 2))  # 目立つ順は保つ（安定）
+
+
+def visible_brands(f: VideoFacts) -> list[BrandFact]:
+    """主役か目立つ大きさで映るブランド（カテゴリは問わない＝「目立つ映り込み」）。"""
+    return [b for b in f.brands if b.prominent and b.name != "ロゴ（不明）"]
 
 
 def feature_table(
@@ -683,7 +779,12 @@ def feature_table(
         add(
             f"kw_speech:{term}",
             f"発話に「{term}」（AI聞き取り・未照合）",
-            [f.rank for f in watched if any(h.term == term and h.layer == "speech" for h in f.kw)],
+            [f.rank for f in watched if has(f, "speech", "exact")],
+        )
+        add(
+            f"kw_speech_syn:{term}",
+            f"発話に「{term}」の言い換え（AI聞き取り・未照合）",
+            [f.rank for f in watched if has(f, "speech", "synonym")],
         )
     add("qty_telop", "分量をテロップに出す", [f.rank for f in watched if f.qty_telops])
     add("qty_caption", "分量をキャプションに載せる", [f.rank for f in watched if f.qty_in_caption])
@@ -714,9 +815,9 @@ def feature_table(
         )
     add(
         "pr",
-        "タイアップ表記",
-        [f.rank for f in watched if f.pr],
-        _board_rate(board, lambda m: detect_pr(m)[0]),
+        "タイアップ表記（キャプション）",
+        [f.rank for f in watched if f.pr_marked],
+        _board_rate(board, pr_marked),
     )
     if category_known(watched):
         add(
@@ -771,7 +872,7 @@ def cta_consensus(facts: Sequence[VideoFacts]) -> list[tuple[str, tuple[int, ...
     return [
         (kind, tuple(ranks))
         for kind, ranks in counts.items()
-        if n and tier(len(ranks), n) != TIER_CASE
+        if n and at_least_majority(tier(len(ranks), n))
     ]
 
 
@@ -786,9 +887,9 @@ def kw_matrix(facts: Sequence[VideoFacts], board: Sequence[VideoMeta], query: st
             syn = tuple(f.rank for f in watched if f.has_kw(term, layer, "synonym"))
             rate: tuple[int, int] | None = None
             if layer == "caption":
-                rate = _board_rate(board, _desc_has(term)) if board else None
+                rate = _board_rate(board, _desc_has(term))
             elif layer == "hashtag":
-                rate = _board_rate(board, _tag_has(term)) if board else None
+                rate = _board_rate(board, _tag_has(term))
             rows.append(KwRow(term, layer, exact, syn, n, layer != "speech", rate))
     return rows
 
@@ -976,12 +1077,12 @@ def _events(
     mark("kw_telop", f.kw_first_telop_sec)
     for sec, _text in f.qty_telops:
         mark("qty_telop", sec)
-    prominent = [
+    shown = [
         b.first_sec
-        for b in f.brands
-        if b.prominent and (b.category_match if use_category else True) and b.first_sec is not None
+        for b in (product_brands(f) if use_category else visible_brands(f))
+        if b.prominent and b.first_sec is not None
     ]
-    mark("brand_first", min(prominent) if prominent else None)
+    mark("brand_first" if use_category else "brand_seen", min(shown) if shown else None)
     mark("result_first", f.result_first_sec)
     if f.cta_in_video is not None:
         mark("cta", f.cta_in_video[2])
@@ -1060,6 +1161,122 @@ def role_label(role: str | None) -> str:
     return ROLE_LABEL.get(role or "other", ROLE_LABEL["other"])
 
 
+def scene_index_at(scenes: Sequence[Scene], sec: float) -> int | None:
+    """秒が入る場面の番号（開始秒の順に並べた scenes の添字）。
+
+    場面と場面の隙間（本番の #1 は 12→13 秒・18→19 秒に 1 秒の隙間がある）にある秒は、
+    境目がいちばん近い場面にする（開始秒だけで比べると、隙間の直前の秒が次の場面になる）。
+    """
+    if not scenes:
+        return None
+    for i, sc in enumerate(scenes):
+        end = max(sc.end_sec, sc.start_sec)
+        if sc.start_sec <= sec < end or (i == len(scenes) - 1 and sec >= sc.start_sec):
+            return i
+
+    def gap(i: int) -> float:
+        sc = scenes[i]
+        end = max(sc.end_sec, sc.start_sec)
+        if sc.start_sec <= sec <= end:
+            return 0.0
+        return min(abs(sec - sc.start_sec), abs(sec - end))
+
+    return min(range(len(scenes)), key=lambda i: (gap(i), i))
+
+
+# ── 上位 n 本と残り（メタだけの比較）・未分析の順位 ────────────────────────────
+
+
+@dataclass(frozen=True)
+class MetaGap:
+    """上位 n 本（動画を分析した本）と、ボードの残りのメタの比較 1 行。"""
+
+    label: str
+    top: str
+    rest: str
+    ratio: float | None  # 上位÷残り（中央値の比。率の行は None）
+
+
+def _med(values: Sequence[float]) -> float | None:
+    vals = [v for v in values if v > 0]
+    return float(statistics.median(vals)) if vals else None
+
+
+def top_vs_rest(
+    board: Sequence[VideoMeta], top_ranks: Iterable[int], query: str, *, max_terms: int = 2
+) -> list[MetaGap]:
+    """上位 n 本とボードの残り（6〜30 位など）のメタの差（コードの集計・動画の中身ではない）。
+
+    動画の中身（テロップ・構成）は上位 n 本しか見ていないので、差として示せるのはメタだけ。
+    """
+    ranks = set(top_ranks)
+    top = [m for m in board if m.rank in ranks]
+    rest = [m for m in board if m.rank not in ranks]
+    if not top or not rest:
+        return []
+    rows: list[MetaGap] = []
+
+    def median_row(
+        label: str, get: Callable[[VideoMeta], float], fmt: Callable[[float], str]
+    ) -> None:
+        a, b = _med([get(m) for m in top]), _med([get(m) for m in rest])
+        if a is None or b is None:
+            return
+        rows.append(MetaGap(label, fmt(a), fmt(b), round(a / b, 1) if b else None))
+
+    median_row("フォロワー（中央値）", lambda m: float(m.follower_count), fmt_man)
+    median_row("再生（中央値）", lambda m: float(m.play_count), fmt_man)
+    median_row("保存率（中央値）", lambda m: m.save_rate(), lambda v: f"{v:.2f}%")
+    median_row(
+        "キャプションの字数（中央値）", lambda m: float(len(m.desc or "")), lambda v: f"{v:.0f}字"
+    )
+    years_top = [d.year for d, _e in (posted_date(m) for m in top) if d is not None]
+    years_rest = [d.year for d, _e in (posted_date(m) for m in rest) if d is not None]
+    if years_top and years_rest:
+        rows.append(
+            MetaGap(
+                "投稿年（中央値）",
+                f"{statistics.median(years_top):.0f}年",
+                f"{statistics.median(years_rest):.0f}年",
+                None,
+            )
+        )
+
+    def rate_row(label: str, hit: Callable[[VideoMeta], bool]) -> None:
+        a = sum(1 for m in top if hit(m))
+        b = sum(1 for m in rest if hit(m))
+        rows.append(MetaGap(label, f"{a}/{len(top)}", f"{b}/{len(rest)}", None))
+
+    for term in query_terms(query)[:max_terms]:
+        rate_row(f"キャプションに「{term}」", _desc_has(term))
+        rate_row(f"ハッシュタグに「{term}」", _tag_has(term))
+    rate_row("タイアップ表記", pr_marked)
+    return rows
+
+
+def rank_runs(ranks: Iterable[int]) -> str:
+    """順位の並びを短く書く（3 つ以上続くところは「6〜30位」、それ以外は「#1・#2」）。"""
+    ordered = sorted(set(ranks))
+    parts: list[str] = []
+    i = 0
+    while i < len(ordered):
+        j = i
+        while j + 1 < len(ordered) and ordered[j + 1] == ordered[j] + 1:
+            j += 1
+        if j - i >= 2:
+            parts.append(f"{ordered[i]}〜{ordered[j]}位")
+        else:
+            parts.extend(f"#{r}" for r in ordered[i : j + 1])
+        i = j + 1
+    return "・".join(parts)
+
+
+def unanalyzed_ranks(analyzed: Iterable[int], board: Sequence[VideoMeta]) -> list[int]:
+    """ボードの順位のうち、動画を分析していないもの（上位の分析失敗・繰上げも正しく数える）。"""
+    done = set(analyzed)
+    return sorted({m.rank for m in board if m.rank > 0 and m.rank not in done})
+
+
 # ── 検索面の地図 ────────────────────────────────────────────────────────
 
 
@@ -1084,7 +1301,7 @@ def surface_map(
     angles = tuple(
         sorted(((t, r) for t, r in angles_raw if r), key=lambda x: (-len(x[1]), x[1][0]))
     )
-    pr_ranks = tuple(m.rank for m in board if detect_pr(m)[0])
+    pr_ranks = tuple(m.rank for m in board if pr_marked(m))
     rated = [(m.rank, m.save_rate()) for m in board if m.play_count > 0]
     top_save = tuple(
         (rank, round(rate, 2)) for rank, rate in sorted(rated, key=lambda x: (-x[1], x[0]))[:3]
@@ -1093,8 +1310,8 @@ def surface_map(
     years = Counter(d.year for d, _est in (posted_date(m) for m in board) if d is not None)
     kw_rates: list[tuple[str, str, int, int]] = []
     for term in query_terms(query):
-        cap_hits, _ = _board_rate(board, _desc_has(term))
-        tag_hits, _ = _board_rate(board, _tag_has(term))
+        cap_hits = sum(1 for m in board if _desc_has(term)(m))
+        tag_hits = sum(1 for m in board if _tag_has(term)(m))
         kw_rates.append((term, "caption", cap_hits, size))
         kw_rates.append((term, "hashtag", tag_hits, size))
     return SurfaceMap(
@@ -1110,6 +1327,7 @@ def surface_map(
 
 
 __all__ = [
+    "BRAND_FIRST_UNKNOWN_LABEL",
     "CTA_KIND_LABEL",
     "EVENT_LABEL",
     "JST",
@@ -1123,6 +1341,7 @@ __all__ = [
     "Feature",
     "KwHit",
     "KwRow",
+    "MetaGap",
     "Roster",
     "StageObs",
     "StageRow",
@@ -1146,12 +1365,20 @@ __all__ = [
     "orientation_of",
     "outliers",
     "posted_date",
+    "pr_marked",
+    "product_brands",
+    "rank_runs",
     "role_label",
+    "scene_index_at",
     "stage_bounds",
     "summary_band",
     "surface_map",
+    "telop_cta",
     "template",
     "tier",
+    "top_vs_rest",
+    "unanalyzed_ranks",
     "valid_cta",
     "video_facts",
+    "visible_brands",
 ]

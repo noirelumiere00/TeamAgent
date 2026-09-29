@@ -34,8 +34,8 @@ from teamagent.skills.search_surface_check.video_notes import structure_payload
 from teamagent.skills.search_surface_check.video_structure import scene_rows
 from teamagent.skills.video_algorithm.evidence import (
     KW_LAYER_LABEL,
-    TIER_CASE,
     Roster,
+    at_least_majority,
     norm,
     query_terms,
     ranks_text,
@@ -51,14 +51,16 @@ from teamagent.skills.video_algorithm.facts import (
     all_facts,
     best_video,
     cta_consensus,
-    detect_pr,
     feature_table,
     fmt_man,
     kw_matrix,
     outliers,
+    pr_marked,
+    rank_runs,
     stage_bounds,
     summary_band,
     surface_map,
+    unanalyzed_ranks,
 )
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
@@ -83,6 +85,12 @@ CODE_DIRECTIVE_FEATURES: tuple[tuple[str, str, str], ...] = (
     ("first_telop_0s", "最初のテロップを0秒台に出す", "テロップ"),
     ("kw_telop_3s:{term}", "「{term}」を3秒以内にテロップで出す", "フック"),
     ("qty_anywhere", "材料と分量をテロップかキャプションに載せる", "テロップ"),
+    # 名簿（クライアント・競合）かカテゴリ判定があるときだけ出る特徴。
+    (
+        "brand_category_prominent",
+        "{product}を本編で主役か目立つ大きさで映し、名前をテロップかキャプションで出す",
+        "商品",
+    ),
 )
 
 
@@ -215,6 +223,12 @@ class SynthesisContext:
         name = (self.roster.client_name or "").split("|")[0].strip()
         return name or UNSPECIFIED_CLIENT
 
+    @property
+    def product_subject(self) -> str:
+        """指示の主語「GABANの商品」（クライアント名が無ければ「（クライアント商品）」）。"""
+        label = self.client_label
+        return label if label == UNSPECIFIED_CLIENT else f"{label}の商品"
+
     def fact(self, rank: int) -> VideoFacts | None:
         return next((f for f in self.facts if f.rank == rank), None)
 
@@ -230,8 +244,8 @@ class SynthesisContext:
         for fid, text, kind in CODE_DIRECTIVE_FEATURES:
             for term in query_terms(self.query) if "{term}" in fid else [""]:
                 f = self.feature(fid.format(term=term))
-                if f is not None and f.tier != TIER_CASE:
-                    out.append((f, text.format(term=term), kind))
+                if f is not None and at_least_majority(f.tier):
+                    out.append((f, text.format(term=term, product=self.product_subject), kind))
                     break
         return out
 
@@ -482,12 +496,18 @@ def _board_lines(ctx: SynthesisContext) -> list[str]:
     for m in ctx.board:
         head = " ".join((m.desc or "").split())
         head = head[:BOARD_HEAD_MAX] + ("…" if len(head) > BOARD_HEAD_MAX else "")
-        pr = " タイアップ" if detect_pr(m)[0] else ""
+        pr = " タイアップ表記" if pr_marked(m) else ""
         rate = f"保存率{m.save_rate():.2f}%" if m.play_count else "保存率不明"
         lines.append(
             f"#{m.rank} @{m.author or '不明'} {rate} 再生{fmt_man(m.play_count)}{pr}「{head}」"
         )
     return lines
+
+
+def _unwatched_text(ctx: SynthesisContext) -> str:
+    """動画を見ていない順位（分析の失敗・下位の繰上げがあっても順位の集合から書く）。"""
+    missing = unanalyzed_ranks(ctx.ranks, ctx.board)
+    return f"{rank_runs(missing)}は動画を見ていない" if missing else "全部の動画を見た"
 
 
 def _cut_lines(ctx: SynthesisContext) -> list[str]:
@@ -559,7 +579,7 @@ def render_prompt(ctx: SynthesisContext) -> str:
             *(card_json(c) for c in card_list),
         ],
         [
-            f"# 上位{len(ctx.board)}本の一覧（メタだけ。{ctx.n + 1}位以下は動画を見ていない）",
+            f"# 上位{len(ctx.board)}本の一覧（メタだけ。{_unwatched_text(ctx)}）",
             *_board_lines(ctx),
         ],
         [

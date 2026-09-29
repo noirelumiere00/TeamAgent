@@ -46,9 +46,16 @@ from teamagent.skills.video_algorithm.facts import (
     CTA_KIND_LABEL,
     Feature,
     VideoFacts,
+    category_known,
     cta_consensus,
     detect_pr,
+    kw_matrix,
     posted_date,
+    product_brands,
+    rank_runs,
+    scene_index_at,
+    unanalyzed_ranks,
+    visible_brands,
 )
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
@@ -241,8 +248,8 @@ def _verdict_band(out: VideoAlgorithmOutput, d: Deck) -> str:
     )
     plan = syn.posting.caption_plan if syn is not None and syn.posting is not None else ""
     posting_html = f'<div class="kvrow"><b>投稿設計</b>{_esc(plan)}</div>' if plan else ""
-    board = len(out.board)
-    rest = f"{n + 1}〜{board}位は動画を未分析" if board > n else f"上位{n}本だけの観測"
+    missing = unanalyzed_ranks(d.ctx.ranks, out.board)
+    rest = f"{rank_runs(missing)}は動画を未分析" if missing else f"上位{n}本だけの観測"
     return (
         f"{gate}"
         '<section class="verdict planner">'
@@ -333,6 +340,15 @@ def _scrape_board(
     )
 
 
+def _pr_mark(f: VideoFacts | None) -> str:
+    """PR＝キャプションのタイアップ表記・PR?＝AI の推定だけ（表記なし）。"""
+    if f is None or not f.pr:
+        return ""
+    if f.pr_marked:
+        return '<span class="sbpr" title="キャプションのタイアップ表記">PR</span>'
+    return '<span class="sbpr" title="AIの推定（キャプションに表記なし）">PR?</span>'
+
+
 def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
     vids = [v for v in out.videos if v.analysis]
     if not vids:
@@ -340,6 +356,7 @@ def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
     n = len(vids)
     max_save = max((v.meta.save_rate() for v in vids), default=0.0)
     max_play = max((v.meta.play_count for v in vids), default=0)
+    known = category_known(d.ctx.facts)
 
     def col(v: AnalyzedVideo) -> str:
         m, a = v.meta, v.analysis
@@ -360,8 +377,11 @@ def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
         save = m.save_rate()
         dur = f.duration_sec if f is not None else a.duration_sec
         cta = f is not None and f.cta_in_video is not None
-        brand = f is not None and any(b.prominent for b in f.brands)
-        pr = '<span class="sbpr">PR</span>' if f is not None and f.pr else ""
+        # 「商品」は名簿かカテゴリで商品と分かったものだけ（背景のビール缶を数えない）。
+        # 分からなければ「目立つ映り込み」として数える（見出しもそう呼ぶ）。
+        brands = (product_brands(f) if known else visible_brands(f)) if f is not None else []
+        brand = any(b.prominent for b in brands)
+        pr = _pr_mark(f)
         return (
             f'<div class="bcol{top1}">'
             f'<div class="brank">#{m.rank}{pr}</div>{thumb}'
@@ -380,7 +400,7 @@ def _top5_board(out: VideoAlgorithmOutput, d: Deck) -> str:
         '<div class="bauth">&nbsp;</div>'
         '<div class="bm rl">保存率</div><div class="bm rl">再生</div><div class="bm rl">尺</div>'
         '<div class="bm rl">フック型</div><div class="bm rl">KW層(4)</div>'
-        '<div class="bm rl">CTA/目立つ商品</div></div>'
+        f'<div class="bm rl">CTA/{"映る商品" if known else "目立つ映り込み"}</div></div>'
     )
     cols = "".join(col(v) for v in vids)
     return (
@@ -412,19 +432,32 @@ def _thumb_board(out: VideoAlgorithmOutput) -> str:
         sw = "".join(f'<span style="background:{_hex(h)}"></span>' for h in t.swatches[:3]) or ""
         bri = max(0.0, min(100.0, t.brightness01 * 100))
         warm_left = max(0.0, min(100.0, (t.warmth + 1) / 2 * 100))
+        near = t.borderline()
+        src = {"cover": "表紙", "frame": "コマで代用"}.get(v.cover_source, "出どころ不明")
+        tone = f"{t.tone_jp()}（境界）" if "暖寒" in near else t.tone_jp()
+        bright = f"{t.brightness01:.2f}（境界）" if "明度" in near else f"{t.brightness01:.2f}"
         return (
-            f'<div class="tbcell"><div class="brank">#{v.meta.rank}</div>{shot}'
+            f'<div class="tbcell"><div class="brank">#{v.meta.rank}'
+            f'<span class="muted small"> {_esc(src)}</span></div>{shot}'
             f'<div class="tbsw">{sw}</div>'
-            f'<div class="tbm"><span class="tbl">明度</span><span class="tbar"><i style="left:{bri:.0f}%"></i></span><span class="tbv">{t.brightness01:.2f}</span></div>'
-            f'<div class="tbm"><span class="tbl">暖寒</span><span class="tbar wt"><i style="left:{warm_left:.0f}%"></i></span><span class="tbv">{t.tone_jp()}</span></div>'
+            f'<div class="tbm"><span class="tbl">明度</span><span class="tbar"><i style="left:{bri:.0f}%"></i></span><span class="tbv">{_esc(bright)}</span></div>'
+            f'<div class="tbm"><span class="tbl">暖寒</span><span class="tbar wt"><i style="left:{warm_left:.0f}%"></i></span><span class="tbv">{_esc(tone)}</span></div>'
             "</div>"
         )
 
     cells = "".join(cell(v) for v in vids)
+    framed = [v.meta.rank for v in vids if v.cover_source == "frame"]
+    unknown = [v.meta.rank for v in vids if v.cover_source == ""]
+    notes = []
+    if framed:
+        notes.append(f"{ranks_text(framed)}は表紙を取れず冒頭のコマで代用（表紙の色ではない）")
+    if unknown:
+        notes.append(f"{ranks_text(unknown)}は表紙か冒頭のコマか不明（以前の分析）")
+    notes.append("しきい値から0.03以内は「境界」と表示（区分は断定しない）")
     return (
-        '<section><div class="th big">サムネ色の比較（検索一覧での目立ち方＝クリック前の勝負）</div>'
+        '<section><div class="th big">サムネ色の比較（表紙の色・参考）</div>'
         f'<div class="tbconsensus"><b>{_esc(consensus)}</b>'
-        '<span class="muted small">　検索結果の縮小タイルでどれに指が止まるか</span></div>'
+        f'<span class="muted small">　{_esc("・".join(notes))}</span></div>'
         f'<div class="tbrow" style="grid-template-columns:repeat({len(vids)},1fr)">{cells}</div></section>'
     )
 
@@ -450,6 +483,7 @@ def _funnel_block(d: Deck) -> str:
     video = (
         "・".join(
             f"#{f.rank} {CTA_KIND_LABEL.get(f.cta_in_video[0], f.cta_in_video[0])}"
+            + ("（最後のテロップから検出）" if f.cta_source == "telop" else "")
             for f in facts
             if f.cta_in_video is not None
         )
@@ -495,7 +529,8 @@ def _synthesis_block(d: Deck) -> str:
         f'<div class="hyp"><div class="hyphead"><b>{_esc(h.text)}</b>'
         f'<span class="prev">{_esc(h.tier)} {len(h.ranks)}/{n}</span>'
         f'<span class="prev">{_vrefs(h.ranks)}</span></div>'
-        + (f'<div class="sowhat">→ 検証: {_esc(h.test)}</div>' if h.test else "")
+        + (f'<div class="small muted">{_esc(h.metric_note)}</div>' if h.metric_note else "")
+        + (f'<div class="sowhat">検証: {_esc(h.test)}</div>' if h.test else "")
         + "</div>"
         for h in s.hypotheses
     )
@@ -530,11 +565,37 @@ def _synthesis_block(d: Deck) -> str:
         if angles
         else ""
     )
-    if not (hyp_block or concepts_block or angle_block):
+    board_block = _board_angle_block(d)
+    if not (hyp_block or concepts_block or angle_block or board_block):
         return ""
     return (
         f'<section class="syn"><div class="th big">AI の読み解き（上位{n}本・根拠は照合済み）</div>'
-        f"{hyp_block}{concepts_block}{angle_block}</section>"
+        f"{hyp_block}{concepts_block}{angle_block}{board_block}</section>"
+    )
+
+
+def _board_angle_block(d: Deck) -> str:
+    """上位一覧の切り口（語は AI・該当はコードがキャプションで数えた）と、該当キャプションの先頭。
+
+    数の語（「4つ」）は情報の数（「NG談を4つ」）を除いて数えるが、語で数える以上は取り違えが
+    残りうるので、該当した順位ごとにキャプションの先頭 46 字を出して人が確かめられるようにする。
+    """
+    s = d.syn
+    if s is None or not s.board_angles:
+        return ""
+    heads = {m.rank: _head(m.desc) for m in d.ctx.board}
+    rows = "".join(
+        f"<tr><td><b>{_esc(b.label)}</b><div class='small muted'>語: "
+        f"{_esc('・'.join(b.match_terms))}</div></td><td>{len(b.ranks)}本</td>"
+        "<td>"
+        + "".join(f"<div class='small'>#{r} {_esc(heads.get(r, ''))}</div>" for r in b.ranks)
+        + "</td></tr>"
+        for b in s.board_angles
+    )
+    return (
+        '<div class="th">上位一覧の切り口（該当はキャプションの語でコードが数えた・先頭46字で確認）'
+        '</div><div class="tblwrap"><table class="tbl"><thead><tr><th>切り口</th><th>本数</th>'
+        f"<th>該当したキャプションの先頭</th></tr></thead><tbody>{rows}</tbody></table></div>"
     )
 
 
@@ -550,6 +611,37 @@ def _vrefs(ranks: list[int]) -> str:
 # F 一貫性マトリクス（テロップ↔キャプ↔映像中身・N本一望）
 # ===========================================================
 _BAND_CLS = {"一貫": "ok", "概ね一貫": "ok", "部分的": "mid", "乖離": "lo", "—": "na"}
+_BAND_DOWN = {"一貫": "概ね一貫", "概ね一貫": "部分的", "部分的": "乖離", "乖離": "乖離"}
+
+
+def _coherence_band(a: VideoVSEOAnalysis) -> str:
+    """一致度の帯。分析 AI が食い違いを自分で書いた（divergence_note）なら 1 段下げる。
+
+    スライドの評価（video_structure._grade_coherence）と同じ規則（本番の #2 は「5つと4つで
+    乖離」と書きながら 95 点だった）。
+    """
+    band = a.coherence_band()
+    if (a.divergence_note or "").strip():
+        return _BAND_DOWN.get(band, band)
+    return band
+
+
+def _kw_consensus(d: Deck) -> str:
+    """語ごと×層ごとの本数（「スパイスカレー」テロップ5/5…／「作り方」テロップ0/5（言い換え1）…）。"""
+    n = d.n
+    parts: list[str] = []
+    rows = kw_matrix(d.ctx.facts, d.ctx.board, d.out.query)
+    for term in dict.fromkeys(r.term for r in rows):
+        cells = []
+        for r in rows:
+            if r.term != term or r.layer == "hashtag":
+                continue
+            text = f"{r.layer_label} {len(r.exact)}/{n}"
+            if r.synonym and r.layer in ("telop", "speech"):  # スライドの表と同じ層だけ
+                text += f"（言い換え{len(r.synonym)}）"
+            cells.append(text)
+        parts.append(f"「{term}」" + "・".join(cells))
+    return "／".join(parts)
 
 
 def _matrix_block(out: VideoAlgorithmOutput, d: Deck) -> str:
@@ -561,15 +653,11 @@ def _matrix_block(out: VideoAlgorithmOutput, d: Deck) -> str:
         return '<span class="mk on">●</span>' if ok else '<span class="mk off">○</span>'
 
     rows = ""
-    sums = {"テロップ": 0, "キャプ": 0, "音声": 0}
     for v in vids:
         a = v.analysis
         assert a is not None
         flags = dict(_kw_flags(d.ctx.fact(v.meta.rank)))
-        sums["テロップ"] += int(flags["テロップ"])
-        sums["キャプ"] += int(flags["キャプ"])
-        sums["音声"] += int(flags["音声"])
-        band = a.coherence_band()
+        band = _coherence_band(a)
         score = a.message_coherence if a.message_coherence is not None else "—"
         note = a.divergence_note or a.reinforcement_note or ""
         lm = a.layer_messages
@@ -584,12 +672,8 @@ def _matrix_block(out: VideoAlgorithmOutput, d: Deck) -> str:
             f'<span class="muted small"> {score}</span></td>'
             f'<td class="notc">{_esc(note)}</td></tr>'
         )
-    n = len(vids)
-    consensus = (
-        f"テロップにKW {sums['テロップ']}/{n}本・キャプにKW {sums['キャプ']}/{n}本・"
-        f"音声にKW {sums['音声']}/{n}本（テロップ・キャプションは照合済み・音声は AI 聞き取り）"
-    )
-    bands = [v.analysis.coherence_band() for v in vids if v.analysis]
+    consensus = _kw_consensus(d) + "（テロップ・キャプションは照合済み・発話は AI 聞き取り）"
+    bands = [_coherence_band(v.analysis) for v in vids if v.analysis]
     # 上位が一貫性で横並びなら「順位を分けた要因ではない＝前提」と正直に読ませる
     read = (
         "上位は一貫性で横並び＝これは上位に共通する<b>前提</b>で、順位の差の要因は未特定"
@@ -624,16 +708,10 @@ def frame_label(a: VideoVSEOAnalysis | None, sec: float) -> str:
     if a is not None and a.scenes:
         scenes = sorted(a.scenes, key=lambda sc: (sc.start_sec, sc.end_sec))
         roles = infer_roles(a)
-        idx = next(
-            (
-                i
-                for i, sc in enumerate(scenes)
-                if sc.start_sec <= sec < max(sc.end_sec, sc.start_sec)
-                or (i == len(scenes) - 1 and sec >= sc.start_sec)
-            ),
-            min(range(len(scenes)), key=lambda i: abs(scenes[i].start_sec - sec)),
-        )
-        role = ROLE_LABEL.get(roles[idx][0], ROLE_LABEL["other"])
+        # 場面の隙間の秒は、境目がいちばん近い場面の役割にする（開始秒だけで比べない）。
+        idx = scene_index_at(scenes, sec)
+        if idx is not None:
+            role = ROLE_LABEL.get(roles[idx][0], ROLE_LABEL["other"])
     return f"{sec:.1f}秒｜{role}" if role else f"{sec:.1f}秒"
 
 
@@ -941,9 +1019,16 @@ def _video_pane(v: AnalyzedVideo, idx: int, d: Deck) -> str:
     m = v.meta
     a = v.analysis
     assert a is not None
+    fact = d.ctx.fact(m.rank)
+    pr = (
+        f'{_pr_mark(fact)}<span class="muted small">{_esc(fact.pr_evidence)}</span>'
+        if fact is not None and fact.pr
+        else ""
+    )
     head = (
         f'<div class="vphead"><span class="rank">#{m.rank}</span>'
         f'<a href="{_esc(m.url)}" target="_blank" rel="noopener">@{_esc(m.author) or "—"}</a>'
+        f"{pr}"
         f'<span class="vpmsg">{_esc(a.main_message) or _esc(a.hook_summary)}</span></div>'
     )
     # 上部に実数値を大きく（エンゲージ/保存率など）→ その下にタイムライン
@@ -1061,8 +1146,7 @@ def _stats_block(s: StatsAnalysis | None) -> str:
     )
     hooks = "　".join(f"{_esc(_HOOK_JP.get(h, h))} {c}本" for h, c in s.hook_counts)
     hook_block = (
-        f'<div class="th">フック型の分布（強フック {_esc(s.strong_hook_ratio)}）</div>'
-        f'<div class="kvrow">{hooks or "—"}</div>'
+        f'<div class="th">フック型の分布（本数）</div><div class="kvrow">{hooks or "—"}</div>'
     )
     # 特徴量マトリクスは Top5比較ボードと重複するので付録では出さない。
     caveats_html = (

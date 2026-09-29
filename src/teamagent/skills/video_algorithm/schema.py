@@ -170,6 +170,12 @@ class LayerMessages(BaseModel):
     visual: str = ""  # 映像（被写体/シーン）が語る要旨
 
 
+# サムネの色の区分のしきい値からこの幅以内は「境界」と出す。
+THUMB_BORDER = 0.03
+# サムネの出どころ: cover＝表紙の画像・frame＝表紙を取れずコマで代用・""＝不明（旧キャッシュ）。
+CoverSource = Literal["", "cover", "frame"]
+
+
 class ThumbColor(BaseModel):
     """サムネ画像（検索一覧のタイル）から算出した色（ffmpeg+stdlib・動画内色とは別）。"""
 
@@ -191,6 +197,15 @@ class ThumbColor(BaseModel):
         if self.brightness01 < 0.35:
             return "低明度"
         return "中明度"
+
+    def borderline(self) -> list[str]:
+        """区分のしきい値から ±0.03 以内の軸（「境界」と出す。断定しない）。"""
+        near: list[str] = []
+        if any(abs(self.warmth - t) <= THUMB_BORDER for t in (0.12, -0.12)):
+            near.append("暖寒")
+        if any(abs(self.brightness01 - t) <= THUMB_BORDER for t in (0.6, 0.35)):
+            near.append("明度")
+        return near
 
 
 class VideoVSEOAnalysis(BaseModel):
@@ -322,6 +337,7 @@ class AnalyzedVideo(BaseModel):
     frames: list[FrameShot] = Field(default_factory=list)  # 実フレーム画像（埋込用）
     video_data_uri: str = ""  # 軽量Webプレビュー動画 base64（タイムライン<video>再生用）
     cover_data_uri: str = ""  # サムネ画像 base64（検索一覧タイル・埋込用）
+    cover_source: CoverSource = ""  # 表紙の画像か、コマで代用したか（"" は不明＝旧キャッシュ）
     thumb: ThumbColor | None = None  # サムネ色（ffmpeg+stdlib 算出）
     error: str | None = None
     cost_usd: float = 0.0
@@ -676,6 +692,8 @@ class HypothesisV3(BaseModel):
     ranks: _RankList = Field(default_factory=list)  # コードだけ
     tier: _Text = ""  # コードだけ
     stat_tag: _Text = ""  # コードだけ: 〔テロップ枚数×順位 ρ=…〕（n≥8・文に特徴名があるとき）
+    # コードだけ: 効果（保存・再生・シェア）を言う仮説の、該当と非該当の中央値（逆向きなら注記）
+    metric_note: _Text = ""
 
 
 class PostingPlan(BaseModel):
@@ -705,7 +723,7 @@ CODE_ONLY_ITEM: dict[str, tuple[str, ...]] = {
     "cuts": ("start_sec", "end_sec", "stage"),
     "refs": ("source", "found_sec"),
     "board_angles": ("ranks",),
-    "hypotheses": ("ranks", "tier", "stat_tag"),
+    "hypotheses": ("ranks", "tier", "stat_tag", "metric_note"),
 }
 
 

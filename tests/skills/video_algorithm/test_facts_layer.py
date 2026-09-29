@@ -237,6 +237,11 @@ def test_pr_is_detected_from_the_full_caption() -> None:
     prompt = build_prompt(prod_videos(), QUERY, cross.stats, board=prod_board())
     assert '"タイアップ表記": "キャプション @ハーブ専科 #PR' in prompt
     assert '"タイアップ表記": "キャプション #PR"' in prompt  # 1 位（720 字より後の #PR）
+    # R1-6: 上位 30 本の率（前提の水準）も LLM に渡る。壊し方: 上位 5 本だけで数える → 2/5 で赤。
+    pr = _feature("pr")
+    assert pr.ranks == (1, 4) and pr.board_rate == (5, 30)
+    assert "- pr｜タイアップ表記（キャプション）｜2/5（#1・#4）｜事例｜上位30本では5/30" in prompt
+    assert f[4].pr_marked and f[4].pr_caption_evidence == "キャプション @ハーブ専科 #PR"
 
 
 @pytest.mark.parametrize(
@@ -255,22 +260,57 @@ def test_pr_tag_variants(desc: str, pr: bool) -> None:
     assert vf.detect_pr(VideoMeta(desc=desc))[0] is pr
 
 
+def test_speech_features_split_exact_and_synonyms() -> None:
+    """R2-8: 発話の特徴は完全一致だけで数え、言い換え（AI 聞き取り）は別の特徴にする。"""
+    ids = {ft.id: ft.ranks for ft in vf.feature_table(_facts(), prod_board(), QUERY)}
+    assert ids[f"kw_speech:{KW1}"] == (2, 3, 4)
+    assert f"kw_speech:{KW2}" not in ids  # 「作り方」を声に出した動画は完全一致 0 本
+    assert ids[f"kw_speech_syn:{KW2}"] == (2,)
+
+
+def test_empty_board_has_no_board_rate() -> None:
+    """R2-16: 一覧が空なら上位ボードの率は None（「上位0本では0/0」と書かない）。"""
+    table = vf.feature_table(_facts(), [], QUERY)
+    assert all(ft.board_rate is None for ft in table)
+    rows = vf.kw_matrix(_facts(), [], QUERY)
+    assert all(r.board is None for r in rows)
+
+
+def test_top_videos_are_compared_with_the_rest_of_the_board() -> None:
+    """R3-8: 上位 n 本（分析した本）とボードの残りのメタの差（動画の中身の差ではない）。"""
+    rows = {r.label: r for r in vf.top_vs_rest(prod_board(), [1, 2, 3, 4, 5], QUERY)}
+    assert (rows["再生（中央値）"].top, rows["再生（中央値）"].rest) == ("27.4万", "4.62万")
+    assert (rows["タイアップ表記"].top, rows["タイアップ表記"].rest) == ("2/5", "3/25")
+    assert rows["キャプションに「スパイスカレー」"].rest == "22/25"
+    assert vf.rank_runs([1, 2, 5, 6, 7, 8, 30]) == "#1・#2・5〜8位・#30"
+    assert vf.unanalyzed_ranks([3, 4], prod_board()[:6]) == [1, 2, 5, 6]
+
+
 # ── T14 CTA ──────────────────────────────────────────────────────────────
 
 
 def test_cta_without_text_or_second_is_invalid_and_no_majority() -> None:
-    """壊し方: 有効性の検査を外す → #4 の comment が動画内 CTA に数えられ赤。"""
+    """壊し方: 有効性の検査を外す → #4 の comment（文言も秒も無い）が型のまま数えられ赤。
+
+    #4 は AI の CTA が無効でも、最後の 10 秒のテロップ「ぜひ試してみて」（71 秒）を試してみて型の
+    CTA とみなす（R3-3: S5・S10・型・絵コンテで同じ事実にそろえる）。出どころはテロップ。
+    """
     f = _by_rank()
-    assert f[4].cta_in_video is None and f[4].cta_dropped == ("comment",)
+    assert f[4].cta_dropped == ("comment",)
+    assert f[4].cta_in_video == ("try", "ぜひ試してみて", 71.0) and f[4].cta_source == "telop"
     assert f[2].cta_in_video == ("link_bio", "詳しくはプロフィールから見てね", 42.0)
+    assert f[2].cta_source == "ai"
     assert f[3].cta_in_video == ("try", "ぜひ一度お試しを", 58.0)
-    assert vf.cta_consensus(_facts()) == []
-    assert _feature("cta_video").ranks == (2, 3)
+    assert vf.cta_consensus(_facts()) == []  # try は #3・#4 の 2/5（多数派未満）
+    assert _feature("cta_video").ranks == (2, 3, 4)
     labels = [vf.CTA_KIND_LABEL[f[r].cta_in_video[0]] for r in (2, 3)]  # type: ignore[index]
     assert "来店" not in labels
     assert f[2].cta_in_caption == ("save", "comment")
     cross = cross_analyze(prod_videos(), QUERY)
-    assert not any("CTA" in w.factor for w in cross.win_factors)
+    # 動画内の呼びかけ（型は問わない）は #2・#3・#4 の 3/5。型の多数派（来店・保存）は無い。
+    cta = [w for w in cross.win_factors if "CTA" in w.factor]
+    assert [(w.observed_in, w.total) for w in cta] == [(3, 5)]
+    assert not any("来店" in w.factor or "保存" in w.factor for w in cta)
 
 
 # ── T16 最良の 1 本 ──────────────────────────────────────────────────────────
@@ -366,7 +406,7 @@ def test_per_video_facts_for_the_best_video() -> None:
     assert len(f4.qty_telops) == 7 and (25.0, "大さじ8杯") in f4.qty_telops
     assert (11.0, "トマト大6つ") not in f4.qty_telops  # 「6つ」は分量に数えない
     f2 = _by_rank()[2]
-    assert f2.qty_place == "無し"
+    assert f2.qty_place == "なし"
     assert _by_rank()[1].qty_place == "キャプション"
     assert ("telop", 5.0, "スーパーでそろう5つのスパイス") in f2.numeric_claims
 
@@ -401,7 +441,7 @@ def test_template_rows_count_events_by_code() -> None:
     assert _event(body, "brand_first") == ((1, 2, 4), TIER_MAJORITY)
     assert all(r.roles_inferred for r in rows)  # v2 の出力は役割が推定
     tail = _row(rows, "最後の10秒")
-    assert _event(tail, "cta") == ((2, 3), TIER_CASE)
+    assert _event(tail, "cta") == ((2, 3, 4), TIER_MAJORITY)  # #4 は 71 秒のテロップ
 
 
 def test_template_works_on_v2_outputs_without_roles_or_frames() -> None:

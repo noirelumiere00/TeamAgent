@@ -12,18 +12,30 @@
   ときは、コードが必須条件と多数派から作った文に代える
 - R6 同じ助数詞（種・分・秒・枚・つ）に付く数が欄の間で食い違えば、後の方の文を落とす
   （作り直しの 1 回は synthesis.synthesize が LLM に頼む）
-- R7 仮説・切り口の該当動画は match_terms でコードが数え直し、1 本以下なら出さない
+- R7 仮説・切り口の該当動画は match_terms でコードが数え直し、1 本以下なら出さない。文に
+  「テロップ」「キャプション」があればその層だけで数える。数の語（4種・5つ・30分）は、名詞に
+  続く形（スパイス4種・5つのスパイス）だけを数え、手順の時間（弱火で30分・6分温める）は数えない。
+  動画のテロップに同じ助数詞の数があれば、キャプションより動画の数を優先する（本番の #2 は
+  動画で 5 つ・キャプションで 4 つ）。仮説の文にある数の主張も、同じ規則で該当動画を絞る
 - R8 指示・やらないこと・絵コンテの refs を evidence.verify_ref で照合し、合格 0 件の項目は捨てる。
-  段階の名前は合格した refs の順位の数から tier() で付ける
+  段階の名前は合格した refs の順位の数から tier() で付ける。文の中の「引用」（N秒「…」）も
+  同じ規則で照合し、照合できない引用を含む文は落とす（per_video・best_reason・client_move・
+  指示・やらないこと・仮説。shadow でも効く）。「…（案）」は新しい文言なので照合しない
 - R9 再生が最少で中央値の 0.2 倍未満の 1 本だけにある指示は「やらないこと（実績が伴わない事例）」へ
 - R11 クライアント未指定なら「御社・貴社・弊社」を「（クライアント商品）」に置き換える（指定ありなら
-  クライアント名）。避けたい訴求の語は、指示・絵コンテ・クライアントの次の一手・仮説・盗める点から
-  落とす（事実の引用欄＝refs・やらないことは対象外）
+  クライアント名。LLM が書いた「（クライアント商品）」もクライアント名にする）。避けたい訴求の語は、
+  指示・絵コンテ・クライアントの次の一手・仮説・盗める点・動画の勝ち方から落とす（事実の引用欄＝
+  refs・やらないこと・なぜ上位か（事実）は対象外）
 - R12 測っていない指標（視聴維持率・離脱・完了率・視聴時間・CTR）を含む文は落とす
 - R13 タイアップ表記のある動画を根拠にした文に「（タイアップ投稿 #n）」を足す
-- R14 画角の欄（framing）が無いのに、寄り・アップ・表情を含む指示・カットは落とす
+- R14 画角の欄（framing）が無いのに、寄り・アップ・表情を含む文は落とす（指示・絵コンテ・仮説の
+  A/B・投稿設計・次の一手・動画ごとの勝ち方／なぜ上位か／盗める点）
 - R16 切り口（v2 の angle）は許可値だけ。ほぼ全部の動画を含むクラスタは捨てる
 - M7 事実の指示（0 秒のテロップなど）は、コードが特徴の表から作って先頭に置く
+- 仮説が効果（保存・再生・シェア）を言うときは、該当と非該当の中央値をコードが並べ、逆向き
+  （該当の方が低い）なら「逆の傾向」と注記する
+- 絵コンテは、照合に通ったカットが枠の半分未満なら出さない。クライアント指定時に商品を映す
+  カットが無ければ但し書きを付ける。最も見られた 1 本だけを根拠にした「やらないこと」は落とす
 - 仕上げに、今の描画が読む v2 の欄（headline・creative_brief など）を v3 の欄とコードの事実から
   作り直す（LLM が v2 の形で返した文は、照合できないので使わない）
 
@@ -37,6 +49,7 @@ finalize は冪等（検査済みのものをもう一度通しても同じ）�
 from __future__ import annotations
 
 import re
+import statistics
 import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -46,10 +59,12 @@ import structlog
 from teamagent.skills._shared.grounding import DropLedger, DropSink, NumberGrounder, tone_down
 from teamagent.skills.search_surface_check.video_structure import QTY_RE
 from teamagent.skills.video_algorithm.evidence import (
-    TIER_CASE,
+    MIN_QUOTE_CHARS,
+    SOURCE_LABEL,
     TIER_MAJORITY,
     TIER_REQUIRED,
     Ref,
+    at_least_majority,
     fold,
     majority_min,
     norm,
@@ -58,6 +73,7 @@ from teamagent.skills.video_algorithm.evidence import (
     tier_text,
     verify_ref,
 )
+from teamagent.skills.video_algorithm.facts import VideoFacts, fmt_man
 from teamagent.skills.video_algorithm.schema import (
     AvoidItem,
     CrossSynthesis,
@@ -81,7 +97,7 @@ logger = structlog.get_logger(__name__)
 
 SYNTHESIS_V3 = "v3"
 MAX_DIRECTIVES = 6
-MAX_CODE_DIRECTIVES = 3
+MAX_CODE_DIRECTIVES = 4
 MAX_AVOID = 4
 MAX_STORYBOARDS = 2
 MAX_HYPOTHESES = 3
@@ -188,6 +204,60 @@ _OBJ_AFTER_RE = re.compile(rf"\s*の\s*({_OBJ_CHARS}{{1,8}})")
 _OBJ_BEFORE_RE = re.compile(rf"({_OBJ_CHARS}{{1,6}})$")
 _OBJ_TRAIL_RE = re.compile(r"[をはがのでにもへと、\s]+$")
 _GROUP_COUNTERS = {"種": "種類|種|選|品|つ", "つ": "つ", "分": "分", "秒": "秒", "枚": "枚"}
+# 1 つの文の中の食い違い（R6）:「4種類から5種類に絞る」のように、絞る・減らすのに数が増える
+# （増やすのに数が減る）文。欄の間の食い違い（find_conflicts）では見つからない。
+_SHRINK_RE = re.compile(
+    rf"({_NUM})\s*(?:{_COUNTER})?\s*から\s*({_NUM})\s*({_COUNTER})\s*(?:に|へ|まで)?\s*"
+    r"(?:絞|減ら|厳選|削|少なく|抑え|まとめ)"
+)
+_GROW_RE = re.compile(
+    rf"({_NUM})\s*(?:{_COUNTER})?\s*から\s*({_NUM})\s*({_COUNTER})\s*(?:に|へ|まで)?\s*"
+    r"(?:増や|広げ|足|加え)"
+)
+# 尺を秒の幅に固定する文（C3: 上位 2 本の幅を「勝ち筋レンジ」と呼んだ誤り。尺の分布はコードが
+# 全 n 本の中央値と幅で出し、固定しないと書く）。
+_DURATION_RANGE_RE = re.compile(
+    rf"尺[^。！？!?]{{0,8}}?({_NUM})\s*(?:秒)?\s*(?:〜|～|~|-|−|－|から)\s*({_NUM})\s*秒"
+)
+# 数量（R15 の常時の検査）: 文に書いた「3杯」「10kg」は、その動画のテロップ・キャプション・
+# 場面の説明のどこかにそのまま出ること（数字が入力のどこかにあるかだけでは、作り話の数量が通る）。
+# 本・枚・秒・分・%・万は本数や指標・時点にも使うので対象にしない（数字の照合に任せる）。
+_QTY_UNIT_CANON: dict[str, str] = {
+    "kg": "kg",
+    "キロ": "kg",
+    "g": "g",
+    "グラム": "g",
+    "ml": "ml",
+    "mL": "ml",
+    "cc": "cc",
+    "L": "l",
+    "リットル": "l",
+    "杯": "杯",
+    "個": "個",
+    "袋": "袋",
+    "片": "片",
+    "缶": "缶",
+    "束": "束",
+    "パック": "パック",
+    "合": "合",
+    "日間": "日",
+    "日": "日",
+    "回": "回",
+    "円": "円",
+    "人前": "人前",
+    "人": "人",
+    "歳": "歳",
+    "か月": "か月",
+    "ヶ月": "か月",
+    "カ月": "か月",
+    "ケ月": "か月",
+    "週間": "週間",
+}
+_QTY_RE = re.compile(
+    rf"(?<![\d.])({_NUM})\s*("
+    + "|".join(re.escape(u) for u in sorted(_QTY_UNIT_CANON, key=len, reverse=True))
+    + r")(?![A-Za-z])"
+)
 
 
 # ── 記録 ────────────────────────────────────────────────────────────────
@@ -249,9 +319,15 @@ def strip_count_tags(text: str, n: int, board_size: int = 0) -> str:
 
 
 def replace_client_words(text: str, label: str) -> str:
-    """「御社・貴社・弊社」をクライアント名（未指定なら「（クライアント商品）」）へ。"""
+    """「御社・貴社・弊社」をクライアント名（未指定なら「（クライアント商品）」）へ。
+
+    クライアントの指定があれば、LLM が写してきた「（クライアント商品）」もクライアント名にする
+    （同じデッキで「GABANのスパイスで…」と「（クライアント商品）で作る…」が混ざらないように）。
+    """
     if label == UNSPECIFIED_CLIENT:
         text = _CLIENT_PRODUCT_RE.sub(label, text)
+    else:
+        text = text.replace(UNSPECIFIED_CLIENT, label)
     return _CLIENT_WORD_RE.sub(label, text)
 
 
@@ -269,10 +345,29 @@ def deny_hit(text: str) -> str | None:
     return None
 
 
+def _contradictions(text: str) -> list[re.Match[str]]:
+    """1 つの文の中の数の食い違い（絞る・減らすのに増える／増やすのに減る）。"""
+    body = unicodedata.normalize("NFKC", text or "")
+    out: list[re.Match[str]] = []
+    for pat, bigger_is_bad in ((_SHRINK_RE, True), (_GROW_RE, False)):
+        for m in pat.finditer(body):
+            a, b = float(m.group(1)), float(m.group(2))
+            if (b > a) if bigger_is_bad else (b < a):
+                out.append(m)
+    return out
+
+
+def self_contradiction(text: str) -> bool:
+    """1 つの文の中で数が食い違うか（「4種類から5種類に絞る」「5つから3つに増やす」）。"""
+    return bool(_contradictions(text))
+
+
 def clean_text(text: str, ctx: SynthesisContext, field_name: str, log: CheckLog) -> str:
     """LLM の文を掃除する。
 
-    タグ・本数・ρ を剥がし、御社・断定語を直し、統計語・未計測指標の文を落とす。
+    タグ・本数・ρ を剥がし、御社・断定語を直し、統計語・未計測指標の文と、1 文の中で数が
+    食い違う文（「4種類から5種類に絞る」）・尺を秒の幅に固定する文（「尺は46-59秒に収める」）を
+    落とす。
     """
     if not text:
         return ""
@@ -290,6 +385,12 @@ def clean_text(text: str, ctx: SynthesisContext, field_name: str, log: CheckLog)
         hit = deny_hit(sentence)
         if hit is not None:
             log(field_name, f"deny:{hit}")
+            continue
+        if self_contradiction(sentence):
+            log(field_name, "self_contradiction")
+            continue
+        if _DURATION_RANGE_RE.search(unicodedata.normalize("NFKC", sentence)):
+            log(field_name, "duration_range")
             continue
         kept.append(sentence)
     return _tidy("".join(kept))
@@ -413,6 +514,7 @@ class Conflict:
     obj: str
     first: frozenset[str]
     later: frozenset[str]
+    within: bool = False  # 1 つの文の中の食い違い（「4種類から5種類に絞る」）
 
 
 def find_conflicts(fields: Iterable[tuple[str, str]]) -> list[Conflict]:
@@ -439,6 +541,12 @@ def conflict_note(conflicts: Iterable[Conflict]) -> str:
     parts = []
     for c in conflicts:
         what = f"{c.obj}の" if c.obj else ""
+        if c.within:
+            parts.append(
+                f"・1つの文の中で「{c.group}」の数が{'・'.join(sorted(c.first))}から"
+                f"{'・'.join(sorted(c.later))}へ、絞る・増やすの向きと逆に変わっている"
+            )
+            continue
         parts.append(
             f"・{what}「{c.group}」の数が欄によって"
             f"{'・'.join(sorted(c.first))}と{'・'.join(sorted(c.later))}で食い違っている"
@@ -464,13 +572,141 @@ def claim_matcher(claim: Claim) -> re.Pattern[str]:
     return re.compile(rf"(?<![\d.])(?:{values})\s*(?:{_GROUP_COUNTERS[claim.group]})")
 
 
-def _video_texts(ctx: SynthesisContext, rank: int) -> list[str]:
+# 数の語の数え方（R7）。種・つ（いくつ）は、数が「話・コツ・NG談」のような情報の数に付くときは
+# 数えない（本番の #28「やりがちNG談を4つご紹介」をスパイスの数に数えた）。付く名詞が分からない
+# 「【4つでいい】」「この4つ」は数える（キャプションの先頭を画面に出して人が確かめる）。
+# 分は手順の時間（弱火で30分・6分温める）を数えない。
+_ITEM_GROUPS = frozenset({"種", "つ"})
+_INFO_NOUNS: tuple[str, ...] = (
+    "談",
+    "話",
+    "コツ",
+    "ポイント",
+    "方法",
+    "理由",
+    "NG",
+    "ミス",
+    "失敗",
+    "注意",
+    "ステップ",
+    "工程",
+    "手順",
+    "テクニック",
+    "裏技",
+    "ワザ",
+    "技",
+    "ルール",
+    "条件",
+    "パターン",
+    "特徴",
+    "メリット",
+    "デメリット",
+    "レシピ",
+    "質問",
+    "悩み",
+)
+_NOUN_BEFORE_RE = re.compile(r"([゠-ヿー㐀-鿿々A-Za-z]{1,8})[をがはもの]?\s*$")
+_NOUN_AFTER_RE = re.compile(r"\s*の\s*([゠-ヿー㐀-鿿々A-Za-z]{1,8})")
+_STEP_BEFORE = (
+    "火",
+    "煮",
+    "炒",
+    "温め",
+    "焼",
+    "蒸",
+    "茹",
+    "ゆで",
+    "レンジ",
+    "加熱",
+    "おい",
+    "置い",
+)
+_STEP_AFTER = (
+    "煮",
+    "炒",
+    "温め",
+    "加熱",
+    "蒸",
+    "茹",
+    "ゆで",
+    "焼",
+    "おく",
+    "置",
+    "寝か",
+    "漬",
+    "きつね",
+)
+_STEP_WINDOW = 6
+# 仮説の文の数の主張で、該当動画を絞る助数詞（秒は時点の事実が並ぶので使わない）。
+_TEXT_CLAIM_GROUPS = frozenset({"種", "つ", "分", "枚"})
+# 文の層（「テロップに出す」はテロップだけで数える）。
+_TELOP_WORDS = ("テロップ", "画面に", "字幕", "文字で")
+_CAPTION_WORDS = ("キャプション", "説明文", "概要欄")
+
+
+def _item_context(text: str, start: int, end: int) -> bool:
+    """数が情報（話・コツ・NG談…）の数でなければ True（数える）。
+
+    前の名詞（「NG談を4つ」の「NG談」）か、後ろの「の＋名詞」（「4つのコツ」の「コツ」）を見る。
+    """
+    before = _NOUN_BEFORE_RE.search(text[max(0, start - 10) : start])
+    if before is not None and before.group(1).endswith(_INFO_NOUNS):
+        return False
+    after = _NOUN_AFTER_RE.match(text, end)
+    return not (after is not None and after.group(1).startswith(_INFO_NOUNS))
+
+
+def _step_duration(text: str, start: int, end: int) -> bool:
+    before = text[max(0, start - _STEP_WINDOW) : start]
+    after = text[end : end + _STEP_WINDOW]
+    return any(w in before for w in _STEP_BEFORE) or any(w in after for w in _STEP_AFTER)
+
+
+def _plausible(group: str, text: str, start: int, end: int) -> bool:
+    if group in _ITEM_GROUPS:
+        return _item_context(text, start, end)
+    if group == "分":
+        return not _step_duration(text, start, end)
+    return True
+
+
+def claim_hits(claim: Claim, text: str) -> bool:
+    """文に、その数の主張が数えてよい形で出るか（名詞に続く数・手順でない時間）。"""
+    body = unicodedata.normalize("NFKC", text or "")
+    return any(
+        _plausible(claim.group, body, m.start(), m.end())
+        for m in claim_matcher(claim).finditer(body)
+    )
+
+
+def _group_values(group: str, text: str) -> set[str]:
+    """文にある、同じ助数詞のまとまりの数（数えてよい形だけ）。"""
+    body = unicodedata.normalize("NFKC", text or "")
+    pat = re.compile(rf"(?<![\d.])({_NUM})\s*(?:{_GROUP_COUNTERS[group]})")
+    return {
+        _canon(m.group(1))
+        for m in pat.finditer(body)
+        if _plausible(group, body, m.start(), m.end())
+    }
+
+
+def claim_layer(text: str) -> str:
+    """文が言う層（テロップ／キャプション／どちらでも）。両方を言うならどちらでも。"""
+    telop = any(w in text for w in _TELOP_WORDS)
+    caption = any(w in text for w in _CAPTION_WORDS)
+    if telop and not caption:
+        return "telop"
+    if caption and not telop:
+        return "caption"
+    return "any"
+
+
+def _layer_texts(ctx: SynthesisContext, rank: int) -> tuple[list[str], list[str]]:
     a = ctx.analysis(rank)
     f = ctx.fact(rank)
-    texts = [t.text for t in (a.telops if a else [])]
-    if f is not None:
-        texts.append(f.desc)
-    return [unicodedata.normalize("NFKC", t) for t in texts if t]
+    telops = [unicodedata.normalize("NFKC", t.text) for t in (a.telops if a else []) if t.text]
+    caption = [unicodedata.normalize("NFKC", f.desc)] if f is not None and f.desc else []
+    return telops, caption
 
 
 def _whole_claim(word: str) -> Claim | None:
@@ -482,23 +718,43 @@ def _whole_claim(word: str) -> Claim | None:
     return None
 
 
-def term_ranks(terms: Iterable[str], ctx: SynthesisContext) -> list[int]:
-    """語がテロップかキャプションにある動画（数の語は同じ助数詞のまとまりで当てる）。"""
+def numeric_hit(claim: Claim, ctx: SynthesisContext, rank: int, layer: str = "any") -> bool:
+    """その動画が数の主張を支えるか。層が「どちらでも」なら、動画のテロップの数を優先する。
+
+    テロップに同じ助数詞の数があれば、その数で決める（キャプションの別の数では数えない）。
+    """
+    telops, caption = _layer_texts(ctx, rank)
+    if layer == "telop":
+        return any(claim_hits(claim, t) for t in telops)
+    if layer == "caption":
+        return any(claim_hits(claim, t) for t in caption)
+    own = set().union(*(_group_values(claim.group, t) for t in telops)) if telops else set()
+    if own:
+        return bool(own & claim.values)
+    return any(claim_hits(claim, t) for t in caption)
+
+
+def _word_hit(word: str, ctx: SynthesisContext, rank: int, layer: str) -> bool:
+    claim = _whole_claim(word)
+    if claim is not None:
+        return numeric_hit(claim, ctx, rank, layer)
+    telops, caption = _layer_texts(ctx, rank)
+    texts = telops if layer == "telop" else caption if layer == "caption" else telops + caption
+    return any(norm(word) in norm(t) for t in texts)
+
+
+def term_ranks(terms: Iterable[str], ctx: SynthesisContext, layer: str = "any") -> list[int]:
+    """語がテロップかキャプション（layer で絞る）にある動画。数の語は数え方の規則で当てる。"""
     words = [t for t in terms if norm(t)]
-    out: list[int] = []
-    for rank in ctx.ranks:
-        texts = _video_texts(ctx, rank)
-        for word in words:
-            claim = _whole_claim(word)
-            if claim is not None:
-                pat = claim_matcher(claim)
-                hit = any(pat.search(t) for t in texts)
-            else:
-                hit = any(norm(word) in norm(t) for t in texts)
-            if hit:
-                out.append(rank)
-                break
-    return out
+    return [r for r in ctx.ranks if any(_word_hit(w, ctx, r, layer) for w in words)]
+
+
+def text_claim_ranks(
+    text: str, ranks: Iterable[int], ctx: SynthesisContext, layer: str
+) -> list[int]:
+    """文にある数の主張（種・つ・分・枚）を全部支える動画だけに絞る。主張が無ければそのまま。"""
+    claims = [c for c in extract_claims(text) if c.group in _TEXT_CLAIM_GROUPS]
+    return [r for r in ranks if all(numeric_hit(c, ctx, r, layer) for c in claims)]
 
 
 # ── 照合（R8・R9・R13）─────────────────────────────────────────────────
@@ -540,17 +796,27 @@ def _ranks_of(refs: Iterable[SynthRef]) -> list[int]:
 
 
 def pr_ranks(ranks: Iterable[int], ctx: SynthesisContext) -> list[int]:
+    """タイアップ表記か AI の推定（提供の可能性）のある動画。"""
     return [r for r in ranks if (f := ctx.fact(r)) is not None and f.pr]
 
 
 def with_pr_note(text: str, ranks: Iterable[int], ctx: SynthesisContext) -> str:
-    """R13: タイアップ表記のある動画を根拠にした文に「（タイアップ投稿 #n）」を足す。"""
+    """R13: タイアップ表記のある動画を根拠にした文に「（タイアップ投稿 #n）」を足す。
+
+    キャプションに表記が無く AI の推定だけのものは「提供の可能性 #n・AI推定」と分けて書く。
+    """
     ranks = list(ranks)
-    pr = pr_ranks(ranks, ctx)
-    if not pr or "タイアップ" in text:
+    marked = [r for r in ranks if (f := ctx.fact(r)) is not None and f.pr_marked]
+    ai_only = [r for r in ranks if (f := ctx.fact(r)) is not None and f.pr_ai_only]
+    if not (marked or ai_only) or "タイアップ" in text or "提供の可能性" in text:
         return text
-    tail = "" if len(pr) == len(set(ranks)) else "を含む"
-    return f"{text}（タイアップ投稿 {ranks_text(pr)}{tail}）"
+    tail = "" if len(marked) + len(ai_only) == len(set(ranks)) else "を含む"
+    parts = []
+    if marked:
+        parts.append(f"タイアップ投稿 {ranks_text(marked)}")
+    if ai_only:
+        parts.append(f"提供の可能性 {ranks_text(ai_only)}・AI推定")
+    return f"{text}（{'／'.join(parts)}{tail}）"
 
 
 def _low_reason(rank: int, ctx: SynthesisContext) -> str:
@@ -562,9 +828,116 @@ def _sec_text(sec: float | None) -> str:
 
 
 def evidence_text(ref: SynthRef) -> str:
-    """「#4 25秒『大さじ8杯』」の形（コードが照合した根拠）。"""
+    """「#4 25秒 テロップ『大さじ8杯』」の形（コードが照合した根拠と、その出どころ）。
+
+    出どころ（テロップ／場面の説明（AI）／冒頭の要約（AI）／ブランド表示／キャプション）を書き、
+    AI の説明文をテロップの引用に見せない。
+    """
+    label = SOURCE_LABEL.get(ref.source, "")
+    if ref.source == "caption" or (ref.found_sec is None and ref.sec is None):
+        return f"#{ref.rank} {label or 'キャプション'}「{ref.quote}」"
     sec = ref.found_sec if ref.found_sec is not None else ref.sec
-    return f"#{ref.rank} {_sec_text(sec if ref.source != 'caption' else None)}「{ref.quote}」"
+    return f"#{ref.rank} {_sec_text(sec)}{f' {label}' if label else ''}「{ref.quote}」"
+
+
+# 文の中の引用「…」（前に「N秒」があればその秒で照合する）。
+_QUOTE_RE = re.compile(
+    r"(?:(\d+(?:\.\d+)?)\s*秒\s*(?:台)?\s*(?:の|に|で|目|から|ごろ|頃|、|，|,)?\s*)?"
+    r"[「『]([^「」『』]+)[」』]"
+)
+
+
+def _quote_in_video(quote: str, sec: float | None, rank: int, ctx: SynthesisContext) -> bool:
+    f = ctx.fact(rank)
+    if f is None:
+        return False
+    a = ctx.analysis(rank)
+    if sec is not None:
+        return verify_ref(Ref(rank, sec, quote), f, a) is not None
+    q = norm(quote)
+    texts = [f.desc]
+    if a is not None:
+        texts += [t.text for t in a.telops]
+        texts += [x or "" for sc in a.scenes for x in (sc.desc, sc.telop, sc.speech)]
+        texts += [a.hook_summary]
+        texts += [b.brand_name for b in a.brand_detections]
+    return any(q in norm(t) for t in texts)
+
+
+def unverified_quotes(text: str, ranks: Iterable[int] | None, ctx: SynthesisContext) -> list[str]:
+    """文の引用のうち、どの動画（ranks・None なら全部）でも照合できないもの。
+
+    「…（案）」は新しい文言の案なので照合しない。1 文字の引用も照合しない。
+    """
+    cands = list(ranks) if ranks is not None else list(ctx.ranks)
+    bad: list[str] = []
+    for m in _QUOTE_RE.finditer(text or ""):
+        quote = m.group(2).strip()
+        if "案" in quote or len(norm(quote)) < MIN_QUOTE_CHARS:
+            continue
+        sec = float(m.group(1)) if m.group(1) else None
+        if not any(_quote_in_video(quote, sec, r, ctx) for r in cands):
+            bad.append(quote)
+    return bad
+
+
+def _qty_canon(text: str) -> list[str]:
+    """文の数量（「大さじ8杯」の「8杯」・「10キロ」→「10kg」）。"""
+    body = unicodedata.normalize("NFKC", text or "")
+    return [f"{_canon(m.group(1))}{_QTY_UNIT_CANON[m.group(2)]}" for m in _QTY_RE.finditer(body)]
+
+
+def _video_quantities(rank: int, ctx: SynthesisContext) -> set[str]:
+    """その動画のテロップ・キャプション・場面の説明・フックの要約に出る数量。"""
+    f = ctx.fact(rank)
+    a = ctx.analysis(rank)
+    texts = [f.desc if f is not None else ""]
+    if a is not None:
+        texts += [t.text for t in a.telops]
+        texts += [x or "" for sc in a.scenes for x in (sc.desc, sc.telop, sc.speech)]
+        texts += [a.hook_summary, a.main_message]
+    return {q for t in texts for q in _qty_canon(t)}
+
+
+def unverified_quantities(
+    text: str, ranks: Iterable[int] | None, ctx: SynthesisContext
+) -> list[str]:
+    """文の数量（杯・kg・g・個…）のうち、どの動画（ranks・None なら全部）にも出ないもの。"""
+    wanted = _qty_canon(text)
+    if not wanted:
+        return []
+    cands = list(ranks) if ranks is not None else list(ctx.ranks)
+    have: set[str] = set()
+    for r in cands:
+        have |= _video_quantities(r, ctx)
+    return [q for q in wanted if q not in have]
+
+
+def drop_unverified(
+    text: str,
+    ranks: Iterable[int] | None,
+    ctx: SynthesisContext,
+    field_name: str,
+    log: CheckLog,
+) -> str:
+    """照合できない引用（N秒「…」）か数量（3杯・10kg）を含む文を落とす。
+
+    構造の規則なので常時効く（数字の照合＝grounding と違い shadow でも落とす）。ranks は
+    照合してよい動画（per_video はその 1 本・best_reason は最も見られた 1 本・None は全部）。
+    """
+    if not text:
+        return text
+    allowed = list(ranks) if ranks is not None else None
+    kept: list[str] = []
+    for sentence in _sentences(text):
+        if unverified_quotes(sentence, allowed, ctx):
+            log(field_name, "quote_unverified")
+            continue
+        if unverified_quantities(sentence, allowed, ctx):
+            log(field_name, "quantity_unverified")
+            continue
+        kept.append(sentence)
+    return _tidy("".join(kept))
 
 
 # ── 事実の指示（M7）────────────────────────────────────────────────────
@@ -591,7 +964,28 @@ def _example_ref(fid: str, rank: int, ctx: SynthesisContext) -> SynthRef | None:
     if fid == "qty_anywhere" and f.qty_telops:
         sec, text = f.qty_telops[0]
         return SynthRef(rank=rank, sec=sec, quote=text, source="telop", found_sec=sec)
+    if fid == "brand_category_prominent":
+        return _product_ref(rank, ctx)
     return None
+
+
+def _product_ref(rank: int, ctx: SynthesisContext) -> SynthRef | None:
+    """商品（名簿かカテゴリ）が主役・目立つ大きさで映る例。名前のテロップがあればそれ、無ければ表示。"""
+    f = ctx.fact(rank)
+    a = ctx.analysis(rank)
+    if f is None:
+        return None
+    b = next((b for b in f.brands if b.prominent and b.category_match), None)
+    if b is None:
+        return None
+    for t in sorted(a.telops if a else [], key=lambda t: t.sec):
+        if norm(b.name) in norm(t.text):
+            return SynthRef(
+                rank=rank, sec=t.sec, quote=t.text.strip(), source="telop", found_sec=t.sec
+            )
+    if b.first_sec is None:
+        return None
+    return SynthRef(rank=rank, sec=b.first_sec, quote=b.name, source="brand", found_sec=b.first_sec)
 
 
 def _caption_qty_ref(rank: int, ctx: SynthesisContext) -> SynthRef | None:
@@ -683,7 +1077,7 @@ def headline_problem(text: str, feature_ids: Iterable[str], ctx: SynthesisContex
         f = ctx.feature(fid)
         if f is None:
             return "feature_unknown"
-        if f.tier == TIER_CASE:
+        if not at_least_majority(f.tier):
             return "feature_case"
     need = majority_min(ctx.n)
     # 特徴の名前にある数（「0秒台」「3秒以内」）は特徴の表で数えてあるので、そのまま通す。
@@ -694,13 +1088,15 @@ def headline_problem(text: str, feature_ids: Iterable[str], ctx: SynthesisContex
         for c in extract_claims(f.label)
         for v in c.values
     }
+    layer = claim_layer(text)
     for claim in extract_claims(text):
         if claim.values <= label_nums:
             continue
-        pat = claim_matcher(claim)
-        hits = [r for r in ctx.ranks if any(pat.search(t) for t in _video_texts(ctx, r))]
+        hits = [r for r in ctx.ranks if numeric_hit(claim, ctx, r, layer)]
         if len(hits) < need:
             return f"claim_minority:{claim.group}"
+    if unverified_quotes(text, None, ctx):
+        return "quote_unverified"
     return None
 
 
@@ -904,11 +1300,26 @@ def _summary(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
     ):
         log("summary_lines.client_move", "avoid_or_framing")
         sl.client_move = ""
+    # 引用は照合する（best_reason は最も見られた 1 本の個票だけ・次の一手はどの動画でもよい）。
+    best = [ctx.best_rank] if ctx.best_rank else []
+    sl.best_reason = drop_unverified(sl.best_reason, best, ctx, "summary_lines.best_reason", log)
+    if sl.best_reason and not ctx.framing and has_framing_words(sl.best_reason):
+        log("summary_lines.best_reason", "framing")
+        sl.best_reason = _drop_framing_sentences(sl.best_reason)
+    sl.client_move = drop_unverified(sl.client_move, None, ctx, "summary_lines.client_move", log)
     sl.best_rank = ctx.best_rank
     s.summary_lines = sl
 
 
+def _drop_framing_sentences(text: str) -> str:
+    return _tidy("".join(t for t in _sentences(text) if not has_framing_words(t)))
+
+
 def _per_video(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
+    """1 本ずつの文: その動画の引用だけを照合で残し、画角・避けたい訴求の文を落とす（常時）。
+
+    win_line（構成分解のタイトル）が落ちたら、描画はコードの代わりのタイトルを出す。
+    """
     out: list[PerVideoNote] = []
     seen: set[int] = set()
     for p in s.per_video:
@@ -916,18 +1327,32 @@ def _per_video(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
             log("per_video", f"rank:{p.rank}")
             continue
         seen.add(p.rank)
+
+        def keep(text: str, name: str, *, avoid: bool, own: tuple[int] = (p.rank,)) -> str:
+            text = drop_unverified(text, own, ctx, name, log)
+            if text and not ctx.framing and has_framing_words(text):
+                log(name, "framing")
+                text = _drop_framing_sentences(text)
+            if text and avoid and has_avoid(text, ctx.avoid_terms):
+                log(name, "avoid_term")
+                text = ""
+            return text
+
+        p.win_line = keep(p.win_line, "per_video.win_line", avoid=True)
+        p.why_fact = keep(p.why_fact, "per_video.why_fact", avoid=False)
         guess = p.why_guess.strip()
         for prefix in ("推測:", "推測：", "推測 :", "推測"):
             if guess.startswith(prefix):
                 guess = guess[len(prefix) :].strip()
                 break
+        guess = keep(guess, "per_video.why_guess", avoid=False)
         p.why_guess = f"{GUESS_PREFIX}{guess}" if guess else ""
+        p.not_to_copy = keep(p.not_to_copy, "per_video.not_to_copy", avoid=False)
         steal: list[str] = []
         for t in p.steal:
-            if has_avoid(t, ctx.avoid_terms) or (not ctx.framing and has_framing_words(t)):
-                log("per_video.steal", "avoid_or_framing")
-                continue
-            steal.append(t)
+            kept = keep(t, "per_video.steal", avoid=True)
+            if kept:
+                steal.append(kept)
         p.steal = steal[:MAX_STEAL]
         if any((p.win_line, p.why_fact, p.why_guess, p.steal, p.not_to_copy)):
             out.append(p)
@@ -956,6 +1381,9 @@ def _directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> list
             log("directives", "no_verified_ref")
             continue
         ranks = _ranks_of(refs)
+        text = drop_unverified(text, ranks, ctx, "directives", log)
+        if not text:
+            continue
         if ctx.low_rank is not None and ranks == [ctx.low_rank]:
             log("directives", "moved_to_avoid")
             moved.append(
@@ -969,7 +1397,7 @@ def _directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> list
             )
             continue
         t = tier(len(ranks), ctx.n)
-        if t == TIER_CASE:
+        if not at_least_majority(t):
             text = _case_words(text)
         kept.append(
             Directive(
@@ -986,7 +1414,10 @@ def _directives(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> list
 
 
 def _avoid(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog, moved: list[AvoidItem]) -> None:
+    """やらないこと。最も見られ保存された 1 本だけを根拠にしたものは落とす（最良の動画が
+    やっていることを禁じる形になる）。最良の 1 本を含むものは、その旨を理由に書く。"""
     out: list[AvoidItem] = []
+    best = ctx.best_rank
     for a in [*s.avoid, *moved]:
         if not a.text:
             log("avoid", "empty")
@@ -995,16 +1426,31 @@ def _avoid(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog, moved: list[
         if not refs:
             log("avoid", "no_verified_ref")
             continue
+        ranks = _ranks_of(refs)
+        text = drop_unverified(a.text, ranks, ctx, "avoid", log)
+        if not text:
+            continue
         reason = a.reason if a.origin == "moved" else ""
         if a.origin == "moved" and ctx.low_rank is not None and not reason:
             reason = _low_reason(ctx.low_rank, ctx)
-        key = norm(a.text)
+        if a.origin != "moved" and best and best in ranks:
+            if ranks == [best]:
+                log("avoid", "best_video_only")
+                continue
+            reason = f"最も見られた#{best}にもある（根拠 {ranks_text(ranks)}）"
+        key = norm(text)
         if any(norm(o.text) == key for o in out):
             continue
-        out.append(
-            AvoidItem(text=a.text, refs=refs, origin=a.origin, reason=reason, ranks=_ranks_of(refs))
-        )
+        out.append(AvoidItem(text=text, refs=refs, origin=a.origin, reason=reason, ranks=ranks))
     s.avoid = out[:MAX_AVOID]
+
+
+def _shows_product(cut: StoryboardCut, ctx: SynthesisContext) -> bool:
+    """カットがクライアントの商品（クライアント名かその別名・「商品」）を映すか。"""
+    body = norm(f"{cut.show}{cut.telop}{cut.aim}")
+    aliases = (ctx.roster.client_name or "").split("|")
+    names = [norm(ctx.client_label), norm("商品"), *(norm(a) for a in aliases)]
+    return any(n and n in body for n in names)
 
 
 def _storyboards(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
@@ -1017,6 +1463,10 @@ def _storyboards(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> Non
         if any(has_avoid(t, ctx.avoid_terms) for t in texts if t):
             log("storyboards", "avoid_term")
             continue
+        name = sb.name
+        if name and not ctx.framing and has_framing_words(name):
+            log("storyboards", "framing")
+            name = ""  # 案の名前だけ消す（スライドは「絵コンテ」と出す）
         cuts: dict[int, StoryboardCut] = {}
         for cut in sb.cuts:
             slot = plan.get(cut.cut)
@@ -1048,6 +1498,10 @@ def _storyboards(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> Non
         if not cuts:
             log("storyboards", "no_cut")
             continue
+        if len(cuts) * 2 < len(plan):
+            # 照合に通ったカットが枠の半分未満の案は、空欄の多い絵コンテになるので出さない。
+            log("storyboards", "too_few_cuts")
+            continue
         ordered = [cuts[k] for k in sorted(cuts)]
         basis = sorted({r.rank for c in ordered for r in c.refs})
         note = (
@@ -1055,12 +1509,12 @@ def _storyboards(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> Non
             if len(basis) == 1
             else f"{ranks_text(basis)}にもとづく案"
         )
-        pr = pr_ranks(basis, ctx)
-        if pr:
-            note += f"（タイアップ投稿 {ranks_text(pr)}を含む）"
+        note = with_pr_note(note, basis, ctx).replace("）（", "・")
+        if ctx.roster.client_name and not any(_shows_product(c, ctx) for c in ordered):
+            note += "・商品を映すカットなし（撮影前に足す）"
         out.append(
             Storyboard(
-                name=sb.name,
+                name=name,
                 basis_ranks=basis,
                 cuts=ordered,
                 target_sec=ctx.target_sec,
@@ -1068,6 +1522,14 @@ def _storyboards(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> Non
             )
         )
     s.storyboards = out
+
+
+def _desc_hit(term: str, desc: str) -> bool:
+    """キャプションに切り口の語があるか。数の語（4つ）は名詞に続く形だけ（「NG談を4つ」は除く）。"""
+    claim = _whole_claim(term)
+    if claim is not None:
+        return claim_hits(claim, desc)
+    return norm(term) in norm(desc)
 
 
 def _board_angles(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
@@ -1078,7 +1540,7 @@ def _board_angles(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> No
         if not b.label or not terms:
             log("board_angles", "no_match_terms")
             continue
-        ranks = [m.rank for m in ctx.board if any(norm(t) in norm(m.desc) for t in terms)]
+        ranks = [m.rank for m in ctx.board if any(_desc_hit(t, m.desc) for t in terms)]
         if len(ranks) <= 1:
             log("board_angles", "match_terms:<=1")
             continue
@@ -1103,6 +1565,43 @@ def stat_tag(feature: str, text: str, ctx: SynthesisContext) -> str:
     return f"〔{feature}×順位 ρ={rho}, n={c.n_pairs}・単調{c.monotonic_hits}/{c.monotonic_total}〕"
 
 
+_EFFECT_METRICS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("保存",), "保存率"),
+    (("シェア",), "シェア"),
+    (("見られ", "再生", "伸び"), "再生"),
+)
+
+
+def _metric_value(f: VideoFacts, metric: str) -> float:
+    if metric == "保存率":
+        return f.save_rate
+    if metric == "シェア":
+        return float(f.shares)
+    return float(f.plays)
+
+
+def _metric_text(metric: str, value: float) -> str:
+    return f"{value:.2f}%" if metric == "保存率" else fmt_man(value)
+
+
+def metric_note(text: str, ranks: Iterable[int], ctx: SynthesisContext) -> str:
+    """効果（保存・再生・シェア）を言う仮説に、該当と非該当の中央値を並べる（逆向きなら注記）。"""
+    metric = next((m for words, m in _EFFECT_METRICS if any(w in text for w in words)), "")
+    group = set(ranks)
+    if not metric or not group:
+        return ""
+    inside = [_metric_value(f, metric) for f in ctx.facts if f.rank in group]
+    outside = [_metric_value(f, metric) for f in ctx.facts if f.rank not in group]
+    if not inside or not outside:
+        return ""
+    a, b = statistics.median(inside), statistics.median(outside)
+    note = (
+        f"{metric}の中央値: 該当{len(inside)}本 {_metric_text(metric, a)}"
+        f"・非該当{len(outside)}本 {_metric_text(metric, b)}"
+    )
+    return note + ("（逆の傾向）" if a < b else "")
+
+
 def _hypotheses(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None:
     out: list[HypothesisV3] = []
     for h in s.hypotheses:
@@ -1114,6 +1613,9 @@ def _hypotheses(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None
         if has_avoid(h.text, ctx.avoid_terms):
             log("hypotheses", "avoid_term")
             continue
+        if not ctx.framing and has_framing_words(h.text):
+            log("hypotheses", "framing")
+            continue
         test = h.test
         if test and (
             has_avoid(test, ctx.avoid_terms) or (not ctx.framing and has_framing_words(test))
@@ -1124,12 +1626,18 @@ def _hypotheses(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None
         if not terms:
             log("hypotheses", "no_match_terms")
             continue
-        ranks = term_ranks(terms, ctx)
+        # 文が「テロップに」と言えばテロップだけで数える（キャプションだけの動画を混ぜない）。
+        layer = claim_layer(h.text)
+        ranks = term_ranks(terms, ctx, layer)
+        ranks = text_claim_ranks(h.text, ranks, ctx, layer)
         if len(ranks) <= 1:
             log("hypotheses", "match_terms:<=1")
             continue
+        text = drop_unverified(h.text, ranks, ctx, "hypotheses", log)
+        if not text:
+            continue
         t = tier(len(ranks), ctx.n)
-        text = _case_words(h.text) if t == TIER_CASE else h.text
+        text = text if at_least_majority(t) else _case_words(text)
         text = with_pr_note(text, ranks, ctx)
         out.append(
             HypothesisV3(
@@ -1140,6 +1648,7 @@ def _hypotheses(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog) -> None
                 ranks=ranks,
                 tier=t,
                 stat_tag=stat_tag(h.stat_feature, text, ctx),
+                metric_note=metric_note(h.text, ranks, ctx),
             )
         )
     s.hypotheses = out
@@ -1170,7 +1679,7 @@ def _concepts_and_angles(s: CrossSynthesis, ctx: SynthesisContext, log: CheckLog
         if not cc.concept or not words:
             log("common_concepts", "no_match_terms")
             continue
-        ranks = term_ranks(words, ctx)
+        ranks = term_ranks(words, ctx, claim_layer(f"{cc.concept} {cc.gist}"))
         if len(ranks) <= 1:
             log("common_concepts", "match_terms:<=1")
             continue
@@ -1219,7 +1728,7 @@ def project_v2(s: CrossSynthesis, ctx: SynthesisContext) -> None:
         WinHypothesis(
             hypothesis=h.text,
             supported_by=list(h.ranks),
-            confidence="低" if h.tier == TIER_CASE else "中",
+            confidence="中" if at_least_majority(h.tier) else "低",
             counter_example=None,
             so_what=h.test,
         )
@@ -1266,12 +1775,25 @@ def conflict_probe(syn: CrossSynthesis, ctx: SynthesisContext) -> list[Conflict]
     """R6: 作り直しを頼むかの判定（掃除と見出しの検査のあとの文で比べる・記録は出さない）。
 
     見出しがコードの代わりの文になるなら、LLM の見出しとの食い違いでは作り直させない。
+    1 つの文の中の食い違い（「4種類から5種類に絞る」）も作り直しを頼む（掃除で落ちる前に見る）。
     """
+    within = [
+        Conflict(
+            name,
+            _GROUP.get(m.group(3), m.group(3)),
+            "",
+            frozenset({m.group(1)}),
+            frozenset({m.group(2)}),
+            within=True,
+        )
+        for name, text in conflict_fields(syn)
+        for m in _contradictions(text)
+    ]
     s = syn.model_copy(deep=True)
     log = CheckLog()
     _clean_v3(s, ctx, log)
     _summary(s, ctx, log)
-    return find_conflicts(conflict_fields(s))
+    return within + find_conflicts(conflict_fields(s))
 
 
 __all__ = [
@@ -1287,6 +1809,8 @@ __all__ = [
     "Claim",
     "Conflict",
     "alt_type_line",
+    "claim_hits",
+    "claim_layer",
     "clean_text",
     "code_directives",
     "conflict_fields",
@@ -1294,17 +1818,23 @@ __all__ = [
     "conflict_probe",
     "directive_line",
     "drop_conflicts",
+    "drop_unverified",
     "evidence_text",
     "extract_claims",
     "finalize",
     "find_conflicts",
     "has_avoid",
+    "has_framing_words",
     "headline_problem",
+    "metric_note",
     "project_v2",
     "replace_client_words",
+    "self_contradiction",
     "stat_tag",
     "strip_count_tags",
     "term_ranks",
+    "unverified_quantities",
+    "unverified_quotes",
     "verify_refs",
     "with_pr_note",
 ]

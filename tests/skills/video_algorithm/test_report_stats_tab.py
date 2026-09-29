@@ -77,7 +77,8 @@ def test_verdict_band_uses_code_tiers_and_checked_directives() -> None:
     assert "必須条件最初のテロップが0秒台5/5" in text
     assert "多数派分量をテロップに出す3/5（#3・#4・#5）" in text
     assert (
-        "最初のテロップを0秒台に出す〔必須条件 5/5｜根拠 #4 0秒「とにかく痩せたいから」〕" in text
+        "最初のテロップを0秒台に出す〔必須条件 5/5｜根拠 #4 0秒 テロップ「とにかく痩せたいから」〕"
+        in text
     )
     assert "最も見られ保存された1本は#4（再生・保存率・シェアが5本で最大）" in text
     assert "勝ち筋" not in text and "勝つ" not in text and "御社" not in text
@@ -204,3 +205,80 @@ def test_unmeasured_win_factors_are_hidden() -> None:
     a.win_factors = ["視聴維持率を高く保つ", "0秒に題名のテロップ"]
     html = render_report(out, generated_at=STAMP)
     assert "視聴維持率" not in html and "0秒に題名のテロップ" in html
+
+
+# ── 反証レビューの指摘（レポート側）─────────────────────────────────────────────
+
+
+def test_top5_brand_check_counts_only_roster_products() -> None:
+    """R2-4: 名簿があるとき、Top5 の「映る商品」はクライアント・競合のブランドだけ（ビール缶は数えない）。
+
+    壊し方: どのブランドでも目立てば ✓ に戻す → 5 本とも ✓ で赤。
+    """
+    html = render_report(_out(client=True), generated_at=STAMP)
+    top5 = html.split('<div class="board"', 1)[1].split("</section>", 1)[0]
+    assert "CTA/映る商品" in top5
+    cells = re.findall(r'<span class="bv">([✓—]) / ([✓—])</span>', top5)
+    assert [b for _c, b in cells] == ["✓", "✓", "—", "✓", "—"]  # #3 は付随・#5 は名簿の外
+    unspecified = render_report(_out(), generated_at=STAMP)
+    assert "CTA/目立つ映り込み" in unspecified
+
+
+def test_thumb_colours_say_where_the_image_came_from_and_mark_borderlines() -> None:
+    """R2-7（M18）: サムネ色は「表紙の色・参考」。コマで代用したものと、しきい値すれすれを明示する。"""
+    from teamagent.skills.video_algorithm.schema import ThumbColor
+
+    out = _out()
+    for i, v in enumerate(out.videos):
+        v.cover_data_uri = "data:image/jpeg;base64,QUJD"
+        v.cover_source = "frame" if i == 0 else "cover"  # type: ignore[assignment]
+        v.thumb = ThumbColor(brightness01=0.61 if i == 1 else 0.5, warmth=0.3)
+    html = render_report(out, generated_at=STAMP)
+    section = html.split("サムネ色の比較（表紙の色・参考）", 1)[1].split("</section>", 1)[0]
+    text = _text(section)
+    assert "#1は表紙を取れず冒頭のコマで代用（表紙の色ではない）" in text
+    assert "#1 コマで代用" in text and "#2 表紙" in text
+    assert "0.61（境界）" in text
+    assert "クリック前の勝負" not in html
+
+
+def test_matrix_uses_per_term_counts_and_lowers_self_reported_divergence() -> None:
+    """R2-9・R2-15: 共通解は語ごと（「作り方」はテロップ 0/5）。食い違いの指摘があれば一致度を 1 段下げる。"""
+    html = render_report(_out(), generated_at=STAMP)
+    matrix = html.split("一貫性マトリクス（テロップ↔キャプション", 1)[1].split("</section>", 1)[0]
+    text = _text(matrix)
+    assert "「スパイスカレー」テロップ 5/5・キャプション 4/5・発話（AI聞き取り） 3/5" in text
+    assert "「作り方」テロップ 0/5（言い換え1）" in text
+    assert "テロップにKW 5/5本" not in text
+    row2 = re.search(r'<td class="rkc">#2</td>(.*?)</tr>', matrix, re.S)
+    assert row2 is not None and "概ね一貫" in row2.group(1)  # 95 点でも 5 つと 4 つの食い違い
+    assert "強フック" not in html
+
+
+def test_report_lists_unanalyzed_ranks_from_the_set() -> None:
+    """R2-11: 分析できなかった上位（#1・#2・#5）を「3位以下」とまとめない。"""
+    out = _out(synthesis="none")
+    for v in out.videos:
+        if v.meta.rank in (1, 2, 5):
+            v.error = "動画取得失敗・サムネのみ軽量分析"
+    html = render_report(out, generated_at=STAMP)
+    assert "差の要因: 未特定（#1・#2・5〜30位は動画を未分析）" in _text(html)
+
+
+def test_video_tab_marks_pr_with_its_basis() -> None:
+    """R2-14: 動画ごとのタブの見出しにも PR の印と根拠を出す。"""
+    html = render_report(_out(), generated_at=STAMP)
+    heads = re.findall(r'<div class="vphead"><span class="rank">#(\d+)</span>(.*?)</div>', html)
+    marked = {rank: body for rank, body in heads}
+    assert "PR</span>" in marked["1"] and "キャプション #PR" in _text(marked["1"])
+    assert "キャプション @ハーブ専科 #PR" in _text(marked["4"])
+    assert "PR</span>" not in marked["2"]
+
+
+def test_board_angles_show_the_caption_heads() -> None:
+    """R2-12: 切り口ごとに、該当したキャプションの先頭 46 字を出して人が確かめられるようにする。"""
+    html = render_report(_out(), generated_at=STAMP)
+    block = html.split("上位一覧の切り口", 1)[1].split("</table>", 1)[0]
+    text = _text(block)
+    assert "無水" in text and "4本" in text
+    assert "#14 おうちで試した14番目のカレー記録 無水で煮込む" in text

@@ -333,6 +333,8 @@ class VideoKeys:
     narration: bool = False
     trending: str = "unknown"
     brand_others: tuple[str, ...] = ()  # 見出しのブランド以外に映るブランド（名前だけ）
+    # 名簿（クライアント・競合）が渡された。名簿のブランドだけを「商品」として評価する。
+    roster_specified: bool = False
 
 
 def kw_terms(a: VideoVSEOAnalysis, query: str | None) -> list[str]:
@@ -445,6 +447,7 @@ def video_keys(
         brand_prominence=best.prominence if best is not None else "",
         brand_relation=best.relation if best is not None else "",
         brand_others=tuple(b.name for b in brands[1:]),
+        roster_specified=roster is not None and roster.specified,
         cta_sec=a.cta_sec,
         cta_types=[cta_label(c) for c in dict.fromkeys(a.cta_type)],
         cta_text=(a.cta_text or "").strip(),
@@ -572,6 +575,12 @@ def _grade_cta(k: VideoKeys) -> Grade:
 def _grade_brand(k: VideoKeys) -> Grade:
     if not k.has_brand:
         return Grade("商品の見せ方", MARK_NONE, "商品・ブランドは映らない")
+    if k.roster_specified and k.brand_relation not in _RELATION_RANK:
+        # 名簿があるときは、名簿の外のブランド（背景のビール缶・調理家電など）を商品と呼ばない。
+        seen = others_text((k.brand_name, *k.brand_others))
+        return Grade(
+            "商品の見せ方", MARK_NONE, f"クライアント・競合の商品は映らない（映るのは{seen}）"
+        )
     good = k.brand_total_sec >= BRAND_GOOD_SEC and k.brand_prominence in _PROMINENT
     parts = [k.brand_name or "商品"]
     if relation_label(k.brand_relation):

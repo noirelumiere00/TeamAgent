@@ -51,6 +51,7 @@ from teamagent.skills.video_algorithm.facts import JST
 from teamagent.skills.video_algorithm.report import render_report
 from teamagent.skills.video_algorithm.schema import (
     AnalyzedVideo,
+    CoverSource,
     FrameShot,
     ThumbColor,
     VideoAlgorithmInput,
@@ -143,15 +144,23 @@ def _echo_fields(input: VideoAlgorithmInput) -> dict[str, Any]:
     }
 
 
+# 冒頭のコマの秒（pick_timecodes の先頭と同じ）と、表紙の代用に使ってよいコマの秒の上限。
+OPENING_FRAME_SEC = 0.8
+OPENING_FRAME_MAX_SEC = 1.0
+
+
 def _now_jst_iso() -> str:
     """取得日時（JST・秒まで）。順位は「この時点」の値として資料に出す。"""
     return datetime.now(JST).isoformat(timespec="seconds")
 
 
-# クライアント名が無いときの Slack の最後の 1 行（仕様 v3 §3-4）。
+# クライアント名が無いときの Slack の最後の 1 行（仕様 v3 §3-4）。結果キャッシュのキーに
+# client_name が入り、名前だけ違う依頼を再描画に回す経路（PR-5）がまだ無いので、名前を足して
+# 依頼し直すと検索と動画の分析からやり直しになる。「動画の再分析なし」とは書かない（PR-5 で
+# 再描画の経路を入れたら、文言とテスト test_client_note_matches_the_cache_behaviour を直す）。
 CLIENT_MISSING_NOTE = (
     "クライアント名と競合を教えてもらえれば、区分と提案文を入れた版に作り直します"
-    "（動画の再分析なし）"
+    "（動画の分析からやり直すため数分かかります）"
 )
 _SLACK_POINTS = 3
 
@@ -649,6 +658,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         frame_width: int = 320,
         preview: bool = True,
         strict_extras: bool = True,
+        opening_frame: bool = False,
     ) -> AnalyzedVideo:
         """1 本を取得→圧縮→Gemini で分析する。
 
@@ -656,6 +666,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         作らない（media job を呼ばない）。分析の中身（Gemini の JSON）は同じ。
         以下は検索上位チェックの 2 段目（場面ごとの構成表）が使う。既定は run と同じ動き:
         - ``scene_frames=True``: フレームを場面ごと（場面の中央の秒・最大 12 コマ）に抜く。
+        - ``opening_frame=True``: 場面ごとのコマに冒頭（0.8 秒）のコマを足す（構成分解の左の
+          「冒頭のコマ」と、表紙を取れないときの代用に使う）。
         - ``frame_width``: フレームの幅（px）。構成表の小さいコマは 180 で足りる。
         - ``preview=False``: Web プレビュー動画（1 本最大 6MB の data URI）を作らない。
         - ``strict_extras=False``: フレーム・サムネの media job が失敗しても、分析（課金済み）を
@@ -739,6 +751,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                     scene_frames=scene_frames,
                     width=frame_width,
                     duration_sec=meta.duration_sec,
+                    opening_frame=opening_frame,
                 )
             except Exception as exc:
                 if strict_extras:
@@ -750,13 +763,20 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # サムネ色（検索一覧タイル）: cover_url を取得、失敗時は先頭フレームを流用
         cover_uri: str = ""
         thumb: ThumbColor | None = None
+        cover_source: CoverSource = ""
         if media_extras:
             with _stage("thumbnail", request_id, meta.rank):
-                # 場面ごとのコマ（scene_frames）は小さく、先頭の場面は表紙と限らないので、
-                # そのときは表紙の URL から作る（失敗したら描画側が先頭のコマで代える）。
-                head = [] if scene_frames else frames
+                # 表紙の URL を先に使い、取れなければ冒頭（0.8 秒）のコマで代える（出どころを
+                # 残す）。場面ごとの小さいコマ（先頭は表紙と限らない）では代えない。
+                opening = (
+                    []
+                    if scene_frames and not opening_frame
+                    else [f for f in frames if f.sec <= OPENING_FRAME_MAX_SEC][:1]
+                )
                 try:
-                    cover_uri, thumb = self._build_thumb(meta.cover_url, head, request_id)
+                    cover_uri, thumb, cover_source = self._build_thumb(
+                        meta.cover_url, opening, request_id
+                    )
                 except Exception as exc:
                     if strict_extras:
                         raise
@@ -775,6 +795,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             frames=frames,
             video_data_uri=video_uri,
             cover_data_uri=cover_uri,
+            cover_source=cover_source,
             thumb=thumb,
             error=None if analysis else "JSONパース失敗",
             cost_usd=resp.cost_usd,
@@ -793,6 +814,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         scene_frames: bool,
         width: int,
         duration_sec: float = 0.0,
+        opening_frame: bool = False,
     ) -> list[FrameShot]:
         """proxy 後の検証済み bytes を使い回して実フレームを抽出する。
 
@@ -800,16 +822,24 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         """
         with _stage("frames", request_id, rank):
             from teamagent.skills.video_algorithm.frames import (
+                MAX_SCENE_FRAMES,
                 extract_frames,
                 pick_timecodes,
                 scene_timecodes,
             )
 
+            # media の FrameOperation は 1 回 12 コマまで（contracts.FrameOperation）。冒頭のコマを
+            # 足すときは場面を 11 までにして、合計を 12 に収める（13 にするとジョブごと失敗する）。
+            scene_limit = MAX_SCENE_FRAMES - 1 if opening_frame else MAX_SCENE_FRAMES
             tcs = (
-                scene_timecodes(analysis, duration_sec=duration_sec)
+                scene_timecodes(analysis, duration_sec=duration_sec, max_frames=scene_limit)
                 if scene_frames
                 else pick_timecodes(analysis, max_frames=6)
             )
+            if scene_frames and opening_frame and tcs:
+                # 冒頭のコマ（0.8 秒）を足す（最初の場面の中央と 0.5 秒以内なら足さない）。
+                if all(abs(s - OPENING_FRAME_SEC) > 0.5 for s, _c in tcs):
+                    tcs = [(OPENING_FRAME_SEC, "冒頭"), *tcs]
             if not tcs:
                 return []
             cap_by_sec = {round(s, 1): c for s, c in tcs}
@@ -1022,9 +1052,10 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         analysis = parse_analysis(resp.text)
         cover_uri: str = ""
         thumb: ThumbColor | None = None
+        cover_source: CoverSource = ""
         if media_extras:
             try:
-                cover_uri, thumb = self._build_thumb(meta.cover_url, [], request_id)
+                cover_uri, thumb, cover_source = self._build_thumb(meta.cover_url, [], request_id)
             except Exception as exc:
                 if strict_extras:
                     raise
@@ -1035,6 +1066,7 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             meta=meta,
             analysis=analysis,
             cover_data_uri=cover_uri,
+            cover_source=cover_source,
             thumb=thumb,
             error="動画取得失敗・サムネのみ軽量分析" if analysis else f"取得失敗: {cause}",
             cost_usd=resp.cost_usd,
@@ -1043,71 +1075,90 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
 
     def _build_thumb(
         self, cover_url: str | None, frames: list[FrameShot], request_id: str
-    ) -> tuple[str, ThumbColor | None]:
-        """サムネ色を算出。cover_url 取得失敗時は抽出済みフレーム先頭で代替（graceful）。"""
+    ) -> tuple[str, ThumbColor | None, CoverSource]:
+        """サムネ（表紙）とその色。表紙の URL を先に使い、取れなければ先頭のコマで代える。
+
+        戻り値の 3 つ目は出どころ（"cover"＝表紙・"frame"＝コマで代用・""＝無し）。描画は
+        代用のとき「表紙」と呼ばない（本番では 0.8 秒のコマを表紙として色を比べていた）。
+        表紙もコマも作れなければ、media job の失敗として例外を上げる（呼び出し側の strict に従う）。
+        """
         from teamagent.adapters.media_job import MediaJobClient
         from teamagent.skills.video_algorithm.thumbnails import (
             analyze_cover,
             build_thumb,
         )
 
+        head: bytes | None = None
+        if frames and frames[0].data_uri.startswith("data:image/jpeg;base64,"):
+            import base64
+
+            try:
+                head = base64.b64decode(frames[0].data_uri.split(",", 1)[1], validate=True)
+            except Exception:
+                head = None
+
         if MediaJobClient.is_configured():
             import base64
             import hashlib
 
-            source: bytes | None = None
-            if frames:
-                head = frames[0].data_uri
-                if head.startswith("data:image/jpeg;base64,"):
-                    try:
-                        source = base64.b64decode(head.split(",", 1)[1], validate=True)
-                    except Exception:
-                        source = None
-            try:
-                if source is not None:
-                    fingerprint = hashlib.sha256(source).hexdigest()
-                    image, metadata = MediaJobClient().make_thumbnail(
-                        source,
-                        _sniff_image_mime(source),
-                        request_fingerprint=f"{request_id}:thumbnail:{fingerprint}",
-                        width=240,
-                    )
-                elif cover_url:
-                    fingerprint = hashlib.sha256(cover_url.encode("utf-8")).hexdigest()
+            failure: Exception | None = None
+            if cover_url:
+                fingerprint = hashlib.sha256(cover_url.encode("utf-8")).hexdigest()
+                try:
                     image, metadata = MediaJobClient().make_thumbnail_from_url(
                         cover_url,
                         request_fingerprint=f"{request_id}:thumbnail-url:{fingerprint}",
                         width=240,
                     )
+                    return (
+                        "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+                        ThumbColor.model_validate(metadata),
+                        "cover",
+                    )
+                except Exception as exc:
+                    failure = exc
+                    logger.warning(
+                        "video_algorithm_cover_thumbnail_failed", error=type(exc).__name__
+                    )
+            if head is not None:
+                fingerprint = hashlib.sha256(head).hexdigest()
+                try:
+                    image, metadata = MediaJobClient().make_thumbnail(
+                        head,
+                        _sniff_image_mime(head),
+                        request_fingerprint=f"{request_id}:thumbnail:{fingerprint}",
+                        width=240,
+                    )
+                except Exception as exc:
+                    failure = exc
                 else:
-                    return "", None
-            except Exception as exc:
+                    return (
+                        "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+                        ThumbColor.model_validate(metadata),
+                        "frame",
+                    )
+            if failure is not None:
                 logger.warning(
                     "video_algorithm_thumbnail_failed",
-                    error=type(exc).__name__,
+                    error=type(failure).__name__,
                 )
-                raise RuntimeError("MEDIA_THUMBNAIL_JOB_FAILED") from exc
-            return (
-                "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
-                ThumbColor.model_validate(metadata),
-            )
+                raise RuntimeError("MEDIA_THUMBNAIL_JOB_FAILED") from failure
+            return "", None, ""
 
         if not MediaJobClient.local_runtime_enabled():
             MediaJobClient.require_configured()
             raise AssertionError("unreachable")
         res = build_thumb(cover_url, request_id=request_id)
-        if res is None and frames:
-            head = frames[0].data_uri
-            if head.startswith("data:image/jpeg;base64,"):
-                import base64
-
-                try:
-                    res = analyze_cover(
-                        base64.b64decode(head.split(",", 1)[1]), request_id=request_id
-                    )
-                except Exception:
-                    res = None
-        return res if res is not None else ("", None)
+        if res is not None:
+            return res[0], res[1], "cover"
+        if head is not None:
+            try:
+                framed = analyze_cover(head, request_id=request_id)
+            except Exception:
+                framed = None
+            if framed is not None:
+                return framed[0], framed[1], "frame"
+        return "", None, ""
 
     # --- 外から使う薄い入口（検索上位チェックの 2 段目など・検索しない） ---
     @staticmethod
@@ -1549,6 +1600,11 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
                             downloader=call_downloader,
                             user_email=str(ctx.metadata.get("user_email") or ""),
                             apify_budget=apify_budget,
+                            # 構成分解のコマは場面ごと（最初と最後の場面を含む・最大 12 枚）。
+                            # pick_timecodes の 6 枚は前半に偏り、本編と締めが無かった（M28）。
+                            scene_frames=True,
+                            frame_width=320,
+                            opening_frame=True,
                         ),
                         batch,
                     )

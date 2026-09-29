@@ -329,6 +329,19 @@ def test_brand_grade_names_client_or_competitor() -> None:
     assert g.reason == "A（競合）・初出 2秒・合計 4秒・目立つ"
 
 
+def test_brands_outside_the_roster_are_not_graded_as_products() -> None:
+    """名簿があるときは、名簿の外のブランド（背景のビール缶・調理家電）を「商品◎」にしない。
+
+    名簿が無ければ従来どおり（カテゴリが分からないので映るブランドで評価する）。壊し方: 名簿の
+    判定を外す → 名簿の外の主役ブランドが ◎ で赤。
+    """
+    brands = [_brand("ノンアルY", 55.0, 4.0, "prominent", "neutral_third_party")]
+    g = _grade({"brand_detections": brands}, "商品の見せ方", roster=Roster.of("SPICIA", ["T&K"]))
+    assert g.mark == "—"
+    assert g.reason == "クライアント・競合の商品は映らない（映るのはノンアルY）"
+    assert _grade({"brand_detections": brands}, "商品の見せ方").mark == "◎"
+
+
 def test_brand_relation_from_the_ai_is_ignored_without_a_roster() -> None:
     """クライアント名を渡していないのに、分析 AI が client と推測した（本番の #4）。区分は書かない。"""
     brand = {
