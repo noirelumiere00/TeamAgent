@@ -29,6 +29,9 @@ import pytest
 
 from teamagent.adapters.gcalendar_client import CalendarEvent
 from teamagent.digest_user_ref import user_ref
+from teamagent.observability.logging_config import (
+    configure_logging as _real_configure_logging,
+)
 from teamagent.skills.morning_digest import calendar_window as calwin
 from teamagent.skills.morning_digest import delivery_calendar as dc
 from teamagent.skills.morning_digest.skill import MorningDigestSkill
@@ -635,7 +638,8 @@ def test_flag_off_delivers_on_a_holiday_exactly_as_today(monkeypatch: pytest.Mon
     assert w.calendar_only_calls == []
     assert w.run_inputs == [MorningDigestInput(max_drafts=3)]
     assert w.gmail.queries and "newer_than:3d " in w.gmail.queries[0]
-    assert w.log.events == []  # 祝日・走査範囲・表の鮮度のイベントを 1 つも出さない
+    # 祝日・走査範囲・表の鮮度のイベントを 1 つも出さない（F0 PR-0a の実行結果の 1 行 run_done は別物）
+    assert [e for e in w.log.events if e[1] != "morning_digest_run_done"] == []
 
 
 def test_flag_off_never_warns_about_the_table(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -838,7 +842,9 @@ def test_the_metric_filter_matches_the_event_the_runner_actually_emits(
     monkeypatch.setenv("STRUCTLOG_FORMAT", "json")
     logging_config._reset_for_tests()
     try:
-        logging_config.configure_logging(force=True)
+        # tests/scripts/conftest.py が configure_logging を no-op にしているので、読み込み時に
+        # 掴んだ本物を呼ぶ（前後で _reset_for_tests するので後続のテストは汚さない）。
+        _real_configure_logging(force=True)
         monkeypatch.setattr(mod, "logger", structlog.get_logger("holiday_contract"))
         capsys.readouterr()
         assert mod._warn_if_holiday_table_stale(_D(2027, 11, 1)) is True
