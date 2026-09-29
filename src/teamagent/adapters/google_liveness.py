@@ -188,9 +188,10 @@ def probe(
         executor.shutdown(wait=False)
 
     granted = normalize_granted_scopes(getattr(creds, "granted_scopes", None))
-    if granted is None:
-        # refresh は通ったが応答に scope が無い＝範囲の根拠が無い。保存行の範囲は呼び出し側で
-        # 確認済みなので生きている扱いにする（範囲不足と決めつけない）。
+    if not granted:
+        # refresh は通ったが応答に scope が無い／空（"scope": ""）＝範囲の根拠が無い。保存行の
+        # 範囲は呼び出し側で確認済みなので生きている扱いにする（範囲不足と決めつけない）。
+        # connect-web の exchange() が空を「根拠なし」として要求した範囲に戻すのと同じ判断。
         return _done("alive", "refreshed")
     missing = missing_workspace_scopes(granted, required)
     if missing:

@@ -136,6 +136,22 @@ def test_refresh_response_without_scope_is_alive() -> None:
     assert result.granted_count is None
 
 
+@pytest.mark.parametrize("scope", ["", "   "], ids=["empty", "blank"])
+def test_refresh_response_with_empty_scope_is_alive(scope: str) -> None:
+    """応答の scope が空＝範囲の根拠が無い（exchange() が空を要求範囲に戻すのと同じ判断）。
+
+    本物の Credentials.refresh は ``"scope": ""`` を ``granted_scopes == []`` にする。これを
+    「全部未許可」と読むと、生きている人に誤った「一部の権限が許可されていない」文言と
+    missing_count=10 のログが出る。
+    """
+    endpoint = _TokenEndpoint(200, _ok(scope))
+    result = google_liveness.probe(_token(), request=endpoint)
+    assert result.status == "alive"
+    assert result.reason == "refreshed"
+    assert result.missing_scopes == ()
+    assert len(endpoint.calls) == 1
+
+
 @pytest.mark.parametrize(
     ("status", "payload", "reason"),
     [

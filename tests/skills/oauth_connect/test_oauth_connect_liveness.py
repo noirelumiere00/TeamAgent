@@ -111,6 +111,22 @@ class _TokenStore:
         return OAuthToken(refresh_token=_REFRESH, scopes=self._scopes)
 
 
+class _HasOnlyTokenStore:
+    """scopes() を持たないストア（旧テストダブル等・has() へのフォールバック経路）。"""
+
+    def __init__(self, *, with_get: bool = True) -> None:
+        self.get_calls = 0
+        if with_get:
+            self.get = self._get
+
+    def has(self, _email: str) -> bool:
+        return True
+
+    def _get(self, _email: str) -> OAuthToken | None:
+        self.get_calls += 1
+        return OAuthToken(refresh_token=_REFRESH, scopes=WORKSPACE_SCOPES)
+
+
 class _SlackStore:
     def slack_user_id(self, _email: str) -> str | None:
         return _UID
@@ -143,7 +159,7 @@ def _probe_on(monkeypatch: pytest.MonkeyPatch, value: str = "1") -> None:
     monkeypatch.setenv("OAUTH_CONNECT_LIVENESS_PROBE", value)
 
 
-def _run(store: _TokenStore, endpoint: _TokenEndpoint, **kw: Any) -> Any:
+def _run(store: Any, endpoint: _TokenEndpoint, **kw: Any) -> Any:
     skill = OAuthConnectSkill(google_store=store, google_liveness_request=endpoint, **kw)
     return skill.run(OAuthConnectInput(), _ctx())
 
@@ -340,6 +356,56 @@ def test_no_row_issues_a_first_time_link_without_probing(
     assert out.url is not None
     assert f"*Google を連携*（{_DEFAULT_DESC}）\n" in out.message
     assert endpoint.calls == []
+
+
+def test_has_only_store_is_probed_when_the_flag_is_on(
+    monkeypatch: pytest.MonkeyPatch, google_only: None
+) -> None:
+    """scopes() を持たないストア（has() へのフォールバック）でも、ON なら確かめてから答える。"""
+    _probe_on(monkeypatch)
+    store = _HasOnlyTokenStore()
+    endpoint = _error(400, "invalid_grant", "Token has been expired or revoked.")
+    with capture_logs() as logs:
+        out = _run(store, endpoint)
+    assert len(endpoint.calls) == 1
+    assert store.get_calls == 1
+    assert out.url is not None
+    assert f"*Google を連携*（{_TOKEN_DEAD_TEXT}）\n" in out.message
+    assert "連携済みです" not in out.message
+    event = next(e for e in logs if e["event"] == "oauth_connect_liveness")
+    assert event["result"] == "token_dead"
+
+
+def test_has_only_store_stays_connected_when_alive_or_flag_off(
+    monkeypatch: pytest.MonkeyPatch, google_only: None
+) -> None:
+    _probe_on(monkeypatch)
+    endpoint = _alive()
+    assert _run(_HasOnlyTokenStore(), endpoint).message == _CONNECTED_GOOGLE_ONLY
+    assert len(endpoint.calls) == 1
+
+    monkeypatch.delenv("OAUTH_CONNECT_LIVENESS_PROBE", raising=False)
+    store = _HasOnlyTokenStore()
+    dead = _error(400, "invalid_grant", "Token has been expired or revoked.")
+    assert _run(store, dead).message == _CONNECTED_GOOGLE_ONLY  # OFF＝今と同じ
+    assert dead.calls == []
+    assert store.get_calls == 0
+
+
+def test_store_without_get_issues_a_link_as_undecidable(
+    monkeypatch: pytest.MonkeyPatch, google_only: None
+) -> None:
+    """復号済みトークンを取れないストアは判定不能＝リンク（安全側・責める文言にしない）。"""
+    _probe_on(monkeypatch)
+    endpoint = _alive()
+    with capture_logs() as logs:
+        out = _run(_HasOnlyTokenStore(with_get=False), endpoint)
+    assert endpoint.calls == []
+    assert out.url is not None
+    assert f"*Google を連携*（{_DEFAULT_DESC}）\n" in out.message
+    event = next(e for e in logs if e["event"] == "oauth_connect_liveness")
+    assert event["result"] == "unknown"
+    assert event["reason"] == "store_no_get"
 
 
 def test_dead_google_with_connected_slack_links_only_google(
