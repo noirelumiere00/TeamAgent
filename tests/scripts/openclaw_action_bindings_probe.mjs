@@ -194,13 +194,18 @@ function channelHookId(channelId, threadTs) {
   return `${channelId.toLowerCase()}${threadTs ? `:thread:${threadTs}` : ""}`;
 }
 
-function heartbeat({runId, systemEvent, sessionKey, hookChannelId}) {
+// system event が複数たまっていると、上流は 1 件ずつ `System: [時刻] …` の行にして改行で繋ぐ
+// （openclaw@2026.7.1 dist/session-system-events-*.js drainFormattedSystemEvents）。
+function heartbeat({runId, systemEvent, systemEvents, sessionKey, hookChannelId}) {
+  const lines = (systemEvents ?? [systemEvent])
+    .map(text => `System: [2026-07-19 12:00:00 JST] ${text}`)
+    .join("\n");
   return hooks.before_model_resolve(
     {
       prompt:
         "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. " +
         "Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.\n" +
-        `System: [2026-07-19 12:00:00 JST] ${systemEvent}`,
+        lines,
     },
     {
       runId,
@@ -821,6 +826,179 @@ const out = {
         toolCallId: "toolu_twin_ambiguous_0001",
         tool: "calendar_event",
         params: {event_token: twinSameA.systemEventValue},
+        declaredUser: A,
+      }),
+    ),
+  };
+}
+
+// ── K. 同じ行の 🗓 と ✏️（同じ block・同じ value）を続けて押し、両方の捕捉が待っている ──────
+//   2 つを分けるのは action_id だけ。🗓 の heartbeat は 🗓 に、✏️ の heartbeat は ✏️ に束縛される。
+{
+  const messageTs = "1784424000.000901";
+  const schedulePressed = await press({
+    actionId: "schedule_propose",
+    value: T.draft,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+  });
+  const mailPressed = await press({
+    actionId: "mail_draft",
+    value: T.draft,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+  });
+  const scheduleRun = {
+    runId: "k1111111-1111-4111-8111-111111111111",
+    sessionKey: dmSession(A),
+    hookChannelId: A,
+  };
+  heartbeat({...scheduleRun, systemEvent: schedulePressed.systemEvent});
+  const schedule = call({
+    ...scheduleRun,
+    toolCallId: "toolu_pending_pair_schedule_0001",
+    tool: "schedule_propose",
+    params: {schedule_token: schedulePressed.systemEventValue},
+    declaredUser: A,
+  });
+  const mailRun = {
+    runId: "k2222222-2222-4222-8222-222222222222",
+    sessionKey: dmSession(A),
+    hookChannelId: A,
+  };
+  heartbeat({...mailRun, systemEvent: mailPressed.systemEvent});
+  const mail = call({
+    ...mailRun,
+    toolCallId: "toolu_pending_pair_mail_0001",
+    tool: "mail_draft",
+    params: {draft_token: mailPressed.systemEventValue},
+    declaredUser: A,
+  });
+  out.pendingPair = {
+    sameSystemEventValue: schedulePressed.systemEventValue === mailPressed.systemEventValue,
+    schedule: summarize(schedule),
+    mailDraft: summarize(mail),
+  };
+}
+
+// ── L. 1 回の heartbeat の prompt に押下が 2 行（📅 と ✏️ の連打がまとめて届いた）─────────
+//   どちらの押下の run か決められないので、その run ではどのツールも署名しない（fail-closed）。
+{
+  const messageTs = "1784424000.001001";
+  const calendarPressed = await press({
+    actionId: "calendar_event",
+    value: T.event,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+    blockId: "digestRow1",
+  });
+  const mailPressed = await press({
+    actionId: "mail_draft",
+    value: T.draft,
+    userId: A,
+    channelId: input.dmA,
+    messageTs,
+    blockId: "digestRow2",
+  });
+  const run = {
+    runId: "l1111111-1111-4111-8111-111111111111",
+    sessionKey: dmSession(A),
+    hookChannelId: A,
+  };
+  heartbeat({...run, systemEvents: [calendarPressed.systemEvent, mailPressed.systemEvent]});
+  out.twoInteractions = {
+    calendar: summarize(
+      call({
+        ...run,
+        toolCallId: "toolu_two_lines_calendar_0001",
+        tool: "calendar_event",
+        params: {event_token: calendarPressed.systemEventValue},
+        declaredUser: A,
+      }),
+    ),
+    mailDraft: summarize(
+      call({
+        ...run,
+        toolCallId: "toolu_two_lines_mail_0001",
+        tool: "mail_draft",
+        params: {draft_token: mailPressed.systemEventValue},
+        declaredUser: A,
+      }),
+    ),
+  };
+}
+
+// ── M. 同じ run に heartbeat の通知が 2 回来る（束縛済み run への再通知）──────────────────
+//   M1: 同じ会話名のまま → 束縛は保たれ、1 回だけ呼べる
+//   M2: 1 回目は D…、2 回目は DM:<本人>（run が名乗る会話が途中で変わった）→ run ごと捨てる
+//   M3: 2 回目が他人の DM → run ごと捨てる
+//   「run ごと捨てる」は、最初に束縛した会話名で呼んでも止まること（asFirst）で確かめる。
+{
+  const cases = [
+    {name: "sameName", first: A, second: A},
+    {name: "renamedMidRun", first: input.dmA, second: A},
+    {name: "otherUsersDm", first: A, second: B},
+  ];
+  out.repeatedHeartbeat = {};
+  let index = 0;
+  for (const spec of cases) {
+    index += 1;
+    const pressed = await press({
+      actionId: "calendar_event",
+      value: T.event,
+      userId: A,
+      channelId: input.dmA,
+      messageTs: `1784424000.00110${index}`,
+    });
+    const runId = `m${index}111111-1111-4111-8111-111111111111`;
+    const sessionKey = dmSession(A);
+    heartbeat({runId, sessionKey, hookChannelId: spec.first, systemEvent: pressed.systemEvent});
+    heartbeat({runId, sessionKey, hookChannelId: spec.second, systemEvent: pressed.systemEvent});
+    const callAs = (hookChannelId, suffix) =>
+      summarize(
+        call({
+          runId,
+          sessionKey,
+          hookChannelId,
+          toolCallId: `toolu_repeated_${spec.name}_${suffix}`,
+          tool: "calendar_event",
+          params: {event_token: pressed.systemEventValue},
+          declaredUser: A,
+        }),
+      );
+    out.repeatedHeartbeat[spec.name] =
+      spec.first === spec.second
+        ? {asFirst: callAs(spec.first, "first")}
+        : {asFirst: callAs(spec.first, "first"), asSecond: callAs(spec.second, "second")};
+  }
+}
+
+// ── N. 📅 件名 60 字（ダイジェストが載せる件名の上限いっぱい）を DM で押す ─────────────────
+{
+  const pressed = await press({
+    actionId: "calendar_event",
+    value: T.eventLongTitle,
+    userId: A,
+    channelId: input.dmA,
+    messageTs: "1784424000.001201",
+  });
+  const run = {
+    runId: "n1111111-1111-4111-8111-111111111111",
+    sessionKey: dmSession(A),
+    hookChannelId: A,
+  };
+  heartbeat({...run, systemEvent: pressed.systemEvent});
+  out.longTitle = {
+    handlerResult: pressed.handlerResult,
+    call: summarize(
+      call({
+        ...run,
+        toolCallId: "toolu_long_title_0001",
+        tool: "calendar_event",
+        params: {event_token: pressed.systemEventValue},
         declaredUser: A,
       }),
     ),

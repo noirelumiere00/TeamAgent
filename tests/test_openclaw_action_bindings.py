@@ -25,6 +25,7 @@ heartbeat runner に agent が載らず、その起動は ``skipped reason=disab
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -44,8 +45,16 @@ from teamagent.skills.morning_digest.ack_token import (
     encode_ack_all_token,
     encode_ack_token,
 )
-from teamagent.skills.morning_digest.draft_token import decode_draft_token, encode_draft_token
-from teamagent.skills.morning_digest.event_token import decode_event_token, encode_event_token
+from teamagent.skills.morning_digest.draft_token import (
+    _owner_hash,
+    decode_draft_token,
+    encode_draft_token,
+)
+from teamagent.skills.morning_digest.event_token import (
+    EVENT_TOKEN_MAX_LENGTH,
+    decode_event_token,
+    encode_event_token,
+)
 from tests.caller_claim_testkit import (
     TEST_CALLER_CLAIM_SECRET,
     TEST_NOW,
@@ -79,8 +88,11 @@ _HMAC_ENVS = (
 )
 _MAIL_ACTION_SECRET = "dedicated-mail-key-" + "k" * 40
 # 本番のダイジェストが実際に出す長さの件名（同じ件名の定例が 2 件並ぶと、切り詰め後の
-# system event の value が一致する＝曖昧になる）。
-_LONG_TITLE = "【定例】株式会社サンプル様 週次打合せ（オンライン）"
+# system event の value が一致する＝曖昧になる）。トークンの payload は UTF-8 なので、
+# 件名がおよそ 28 字を超えると日付の違いが先頭 159 字の外に出る。
+_LONG_TITLE = "【定例】株式会社サンプルホールディングス様 週次営業打合せ（オンライン）"
+# ダイジェストが載せる件名の上限（60 字）いっぱいの件名。
+_MAX_TITLE = ("【定例】株式会社サンプルホールディングス様 週次営業打合せ" + "あ" * 32)[:60]
 
 
 # ── mcp 側の受け手（本物の復号で「トークンが無傷で届いた」ことを確かめる）─────────────
@@ -212,6 +224,26 @@ async def _dispatch(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(contents[0].text))
 
 
+def _legacy_escaped_event_shape(title: str) -> str:
+    """修正前のエンコーダ（``\\uXXXX``）が件名 60 字で出していた形の value（677 字）。
+
+    今のエンコーダは上限 500 字に収めて出すので、上限超えの押下は旧版のダイジェストが
+    残っているときにしか起きない。plugin は署名を検証しない（鍵は mcp にだけある）ので、
+    形と typ だけ本物に揃え、署名は 22 字のダミーにする。
+    """
+    payload = {
+        "v": 2,
+        "typ": "event",
+        "s": "2026-07-20T10:00:00+09:00",
+        "n": "2026-07-20T11:00:00+09:00",
+        "l": title,
+        "o": _owner_hash(MEMBER_EMAIL),
+        "e": TEST_NOW + 86_400,
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=") + "." + "A" * 22
+
+
 def _tokens() -> dict[str, str]:
     def event(title: str, start: str) -> str:
         token = encode_event_token(
@@ -238,8 +270,8 @@ def _tokens() -> dict[str, str]:
         "event": event("A社定例", "2026-07-20T10:00:00+09:00"),
         "eventTwinA": event(_LONG_TITLE, "2026-07-20T10:00:00+09:00"),
         "eventTwinB": event(_LONG_TITLE, "2026-07-21T10:00:00+09:00"),
-        # 件名 60 字のダイジェスト実物（mcp の event_token 上限 500 字を超える）。
-        "tooLong": event("あ" * 60, "2026-07-20T10:00:00+09:00"),
+        "eventLongTitle": event(_MAX_TITLE, "2026-07-20T10:00:00+09:00"),
+        "tooLong": _legacy_escaped_event_shape("あ" * 60),
         "draft": draft,
         "ack": ack,
         "ackAll": ack_all,
@@ -303,7 +335,9 @@ def test_fixture_tokens_reproduce_the_production_lengths(tokens: dict[str, str])
     assert len(tokens["ackAll"]) > 160
     assert len(tokens["draft"]) <= 160
     assert len(tokens["ack"]) <= 160
-    assert len(tokens["tooLong"]) > 500
+    assert len(tokens["tooLong"]) > EVENT_TOKEN_MAX_LENGTH
+    # 件名 60 字（ダイジェストの上限）でも、今のエンコーダは上限内に収めて出す。
+    assert 160 < len(tokens["eventLongTitle"]) <= EVENT_TOKEN_MAX_LENGTH
     # 同じ件名の 2 件は、上流の切り詰め（159 字）までが一致する。
     assert tokens["eventTwinA"][:159] == tokens["eventTwinB"][:159]
     assert tokens["eventTwinA"] != tokens["eventTwinB"]
@@ -496,3 +530,62 @@ def test_same_title_meetings_on_two_rows_bind_to_their_own_row(
     assert _signed(case["second"])["event_token"] == tokens["eventTwinA"]
     assert case["ambiguous"]["block"] is True
     assert "missing or stale" in case["ambiguous"]["blockReason"]
+
+
+async def test_schedule_and_mail_draft_pending_together_are_told_apart_by_action_id(
+    probe: dict[str, Any], tokens: dict[str, str]
+) -> None:
+    """同じ行の 🗓 と ✏️ は block も value（draft トークン）も同じで、見分ける手掛かりは
+    action_id だけ。両方の押下が待っている状態でも、それぞれ自分のツールに束縛される。"""
+    case = probe["pendingPair"]
+    assert case["sameSystemEventValue"] is True
+    schedule = _signed(case["schedule"])
+    assert case["schedule"]["claim"]["tool"] == "schedule_propose"
+    assert schedule["schedule_token"] == tokens["draft"]
+    mail = _signed(case["mailDraft"])
+    assert case["mailDraft"]["claim"]["tool"] == "mail_draft"
+    assert mail["draft_token"] == tokens["draft"]
+    assert case["schedule"]["claim"]["nonce"] != case["mailDraft"]["claim"]["nonce"]
+
+    out = await _dispatch("schedule_propose", schedule)
+    assert out["decoded"] == "199a1b2c3d4e5f60"
+
+
+def test_two_presses_in_one_heartbeat_prompt_sign_nothing(probe: dict[str, Any]) -> None:
+    """1 回の heartbeat に押下が 2 行載ると、どちらの run か決められない＝何も署名しない。"""
+    case = probe["twoInteractions"]
+    for name in ("calendar", "mailDraft"):
+        assert case[name]["block"] is True, name
+        assert case[name]["claim"] is None, name
+
+
+def test_repeated_heartbeat_keeps_the_binding_only_for_the_same_conversation(
+    probe: dict[str, Any], tokens: dict[str, str]
+) -> None:
+    """同じ run に heartbeat の通知が 2 回来たとき、run が名乗る会話が同じなら束縛を保つ。
+    途中で変わったら（同じ本人の DM の別名でも・他人の DM でも）run ごと捨てる。"""
+    case = probe["repeatedHeartbeat"]
+    assert _signed(case["sameName"]["asFirst"])["event_token"] == tokens["event"]
+    assert case["sameName"]["asFirst"]["claim"]["channel"] == DM_A
+    for name in ("renamedMidRun", "otherUsersDm"):
+        # 最初に束縛した会話名で呼んでも、変わった後の名前で呼んでも止まる（run ごと捨てた）。
+        for called_as in ("asFirst", "asSecond"):
+            result = case[name][called_as]
+            assert result["block"] is True, (name, called_as)
+            assert result["claim"] is None, (name, called_as)
+
+
+async def test_calendar_button_with_a_sixty_char_title_reaches_mcp_intact(
+    probe: dict[str, Any], tokens: dict[str, str]
+) -> None:
+    """件名 60 字（ダイジェストの上限）の 📅 も捕捉され、完全なトークンが mcp の復号まで届く。
+
+    09-29 レビュー: 以前のエンコーダでは日本語の件名が 38 字前後を超えると 500 字を超え、
+    plugin が捕捉せず（handled:true で終わる）押しても無反応だった。
+    """
+    case = probe["longTitle"]
+    assert case["handlerResult"] == {"handled": False}
+    params = _signed(case["call"])
+    assert params["event_token"] == tokens["eventLongTitle"]
+    out = await _dispatch("calendar_event", params)
+    assert out["decoded"] == f"2026-07-20T10:00:00+09:00|{_MAX_TITLE}"

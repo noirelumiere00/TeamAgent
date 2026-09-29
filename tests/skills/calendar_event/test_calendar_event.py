@@ -22,6 +22,7 @@ from teamagent.skills.calendar_event.schema import CalendarEventInput
 from teamagent.skills.calendar_event.skill import CalendarEventSkill
 from teamagent.skills.morning_digest.draft_token import _owner_hash
 from teamagent.skills.morning_digest.event_token import (
+    EVENT_TOKEN_MAX_LENGTH,
     decode_event_token,
     encode_event_token,
     stable_event_id,
@@ -112,6 +113,59 @@ def test_token_rejects_other_owner_and_tamper_and_expiry() -> None:
     assert decode_event_token(body[:5] + flip + body[6:] + "." + sig, ME) is None
     old = _token(now=1_000_000)  # 発行が大昔＝失効
     assert decode_event_token(old, ME) is None
+
+
+def _max_length(model: type[Any], name: str) -> int:
+    field = model.model_fields[name]
+    return int(next(m.max_length for m in field.metadata if hasattr(m, "max_length")))
+
+
+def test_event_token_limit_matches_the_schemas_that_carry_it() -> None:
+    """発行側の上限＝📅 を受ける schema の上限（plugin 側との一致は runtime contract で固定）。"""
+    from teamagent.skills.morning_digest.schema import MailDigestItem
+
+    assert _max_length(CalendarEventInput, "event_token") == EVENT_TOKEN_MAX_LENGTH
+    assert _max_length(MailDigestItem, "event_token") == EVENT_TOKEN_MAX_LENGTH
+
+
+def test_long_japanese_title_fits_the_button_limit_and_keeps_the_whole_title() -> None:
+    """09-29 レビュー: 件名が日本語で 38 字前後を超えると event_token が 500 字を超え、
+    ダイジェストの 📅 は押しても無反応だった（``\\uXXXX`` で 1 字 6 バイト・60 字で 677 字）。
+    ダイジェストが載せる件名の上限 60 字でも、上限内に収まり件名が欠けないこと。"""
+    title = "【定例】株式会社サンプルホールディングス様 週次営業打合せ" + "あ" * 32
+    title = title[:60]
+    assert len(title) == 60
+    token = _token(title=title)
+    assert len(token) <= EVENT_TOKEN_MAX_LENGTH
+    CalendarEventInput(event_token=token)  # mcp の入力 schema を通る
+    payload = decode_event_token(token, ME)
+    assert payload is not None
+    assert payload.title == title
+
+
+def test_title_is_trimmed_rather_than_issuing_an_unusable_token() -> None:
+    """UTF-8 でも収まらない件名（4 バイト文字ばかり）は末尾を削って上限内に収める。
+    件名を空にしても収まらなければ発行しない（押しても無反応のボタンを出さない）。"""
+    title = "😀" * 60
+    token = _token(title=title)
+    assert len(token) <= EVENT_TOKEN_MAX_LENGTH
+    payload = decode_event_token(token, ME)
+    assert payload is not None
+    assert payload.title
+    assert title.startswith(payload.title)
+    # LLM 由来の件名に孤立サロゲートが混じっても発行できる（UTF-8 化で落ちて 📅 が消えない）。
+    lone = decode_event_token(_token(title="定例\ud800"), ME)
+    assert lone is not None
+    assert lone.title == "定例?"
+    assert (
+        encode_event_token(
+            start_iso="2026-07-15T14:00:00+09:00" + "x" * 400,
+            end_iso="2026-07-15T15:00:00+09:00",
+            title="定例",
+            owner_email=ME,
+        )
+        is None
+    )
 
 
 def test_event_token_expiry_is_exclusive_and_ttl_is_bounded() -> None:

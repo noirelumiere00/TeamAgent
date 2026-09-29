@@ -468,6 +468,10 @@ def test_every_digest_button_is_bound_to_one_reachable_tool() -> None:
         field = model.model_fields[bindings[action_id]["tokenParam"]]
         max_length = next(m.max_length for m in field.metadata if hasattr(m, "max_length"))
         assert bindings[action_id]["maxLength"] == max_length, action_id
+    # 📅 の発行側（朝ダイジェスト）も同じ上限に収めて出す（超えると押しても無反応になる）。
+    from teamagent.skills.morning_digest.event_token import EVENT_TOKEN_MAX_LENGTH
+
+    assert bindings["calendar_event"]["maxLength"] == EVENT_TOKEN_MAX_LENGTH
     assert bindings["mail_draft"]["tokenParam"] == "draft_token"
     assert bindings["mail_draft"]["maxLength"] == 160
 
