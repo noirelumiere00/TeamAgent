@@ -130,7 +130,8 @@ if (!installedCoreSources.some(source =>
 }
 
 const hooks = {};
-let interactiveRegistration;
+// 朝ダイジェストのボタン 4 種（ACTION_BINDINGS）の action_id ごとに 1 つずつ登録される。
+const interactiveRegistrations = new Map();
 const nowSeconds = 1784424000;
 createCallerIdentityPlugin({
   now: () => nowSeconds * 1000,
@@ -138,16 +139,18 @@ createCallerIdentityPlugin({
 }).register({
   on: (name, callback) => { hooks[name] = callback; },
   registerInteractiveHandler: registration => {
-    interactiveRegistration = registration;
+    interactiveRegistrations.set(registration.namespace, registration);
   },
-  logger: {warn: () => {}}
+  logger: {warn: () => {}, info: () => {}}
 });
 if (
-  interactiveRegistration?.channel !== "slack" ||
-  interactiveRegistration?.namespace !== "mail_draft"
+  [...interactiveRegistrations.keys()].sort().join(",") !==
+    "calendar_event,digest_ack,mail_draft,schedule_propose" ||
+  [...interactiveRegistrations.values()].some(registration => registration.channel !== "slack")
 ) {
-  throw new Error("mail_draft authoritative interactive handler is missing");
+  throw new Error("digest button interactive handlers are missing");
 }
+const interactiveRegistration = interactiveRegistrations.get("mail_draft");
 const trustedContext = {
   channelId: "slack",
   sessionKey: "agent:main:slack:channel:actual-image",
@@ -400,6 +403,110 @@ if (
 ) {
   throw new Error("Slack mail action was not bound to the exact tool call");
 }
+// 直接実行（2026-09-29）: bearer と bot token がある本番の形では、押下を捕捉した plugin が
+// {handled:true} を返し、mcp へ直接 tools/call して本人の DM へ投稿する。ネットワークは無いので
+// mcp と Slack は偽物の fetch で受ける（宛先・引数・claim の署名だけを確かめる）。
+const directCalls = [];
+const directTasks = [];
+const directDm = "D0123456789";
+const directFetch = async (url, init = {}) => {
+  const href = String(url);
+  const body = JSON.parse(init.body);
+  directCalls.push({href, body});
+  if (href === "https://slack.com/api/conversations.open") {
+    return new Response(JSON.stringify({ok: true, channel: {id: directDm}}), {status: 200});
+  }
+  if (href === "https://slack.com/api/chat.postMessage") {
+    return new Response(JSON.stringify({ok: true, ts: "1784425000.000001"}), {status: 200});
+  }
+  if (body.method === "initialize") {
+    return new Response(JSON.stringify({jsonrpc: "2.0", id: 1, result: {}}), {
+      status: 200,
+      headers: {"content-type": "application/json", "mcp-session-id": "image-contract"}
+    });
+  }
+  if (body.method === "notifications/initialized") return new Response(null, {status: 202});
+  if (body.method === "tools/call") {
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      result: {content: [{type: "text", text: JSON.stringify({created: true, message: "ok"})}]}
+    }), {status: 200, headers: {"content-type": "application/json"}});
+  }
+  throw new Error("unexpected direct button egress");
+};
+const directRegistrations = new Map();
+createCallerIdentityPlugin({
+  env: {
+    ...process.env,
+    TEAMAGENT_MCP_BEARER: "offline-mcp-bearer-contract-is-32-bytes",
+    SLACK_BOT_TOKEN: "xoxb-offline-contract"
+  },
+  now: () => nowSeconds * 1000,
+  randomBytesFn: () => Buffer.alloc(16, 8),
+  fetchFn: directFetch,
+  onBackgroundTask: task => directTasks.push(task),
+  sleepFn: async () => {}
+}).register({
+  on: () => {},
+  registerInteractiveHandler: registration => {
+    directRegistrations.set(registration.namespace, registration);
+  },
+  logger: {warn: () => {}, info: () => {}}
+});
+const directMessageTs = "1784424000.000020";
+const directTriggerId = "1784424000.100020";
+const directResult = await directRegistrations.get("mail_draft").handler({
+  channel: "slack",
+  accountId: "default",
+  interactionId: [
+    "U0123456789",
+    directDm,
+    directMessageTs,
+    directTriggerId,
+    "mail_draft",
+    actionValue
+  ].join(":"),
+  conversationId: directDm,
+  senderId: "U0123456789",
+  auth: {isAuthorizedSender: true},
+  interaction: {
+    kind: "button",
+    data: `mail_draft:${actionValue}`,
+    namespace: "mail_draft",
+    payload: actionValue,
+    actionId: "mail_draft",
+    messageTs: directMessageTs,
+    value: actionValue,
+    triggerId: directTriggerId
+  }
+});
+await Promise.all(directTasks);
+const directToolCall = directCalls.find(call => call.body?.method === "tools/call");
+const directArguments = directToolCall?.body?.params?.arguments;
+const directClaim = directArguments?._user_context?.caller_claim ?? "";
+const [directPayloadSegment, directSignatureSegment] = directClaim.split(".");
+const directPayload = directPayloadSegment
+  ? JSON.parse(Buffer.from(directPayloadSegment, "base64url").toString("utf8"))
+  : null;
+const directPosts = directCalls.filter(call => call.href === "https://slack.com/api/chat.postMessage");
+if (
+  directResult?.handled !== true ||
+  directToolCall?.body?.params?.name !== "mail_draft" ||
+  directArguments?.draft_token !== actionValue ||
+  Object.keys(directArguments ?? {}).sort().join(",") !== "_user_context,draft_token" ||
+  directSignatureSegment !==
+    createHmac("sha256", process.env.TEAMAGENT_CALLER_CLAIM_SECRET)
+      .update(directPayloadSegment, "ascii")
+      .digest("base64url") ||
+  directPayload?.sub !== "U0123456789" ||
+  directPayload?.channel !== directDm ||
+  directPayload?.tool !== "mail_draft" ||
+  directPosts.length !== 1 ||
+  directPosts[0].body.channel !== directDm
+) {
+  throw new Error("Slack button action was not executed directly for the presser's DM");
+}
 process.stdout.write(JSON.stringify({
   actualImagePluginLoaded: true,
   installedSlackTeamBindingVerified: true,
@@ -416,6 +523,7 @@ process.stdout.write(JSON.stringify({
   replayBlocked: true,
   nativeMessageBlocked: true,
   signedMailActionBound: true,
+  directButtonActionPosted: true,
   tokenDisclosedInEvidence: false
 }));
 """
@@ -1079,6 +1187,7 @@ def _caller_identity_plugin_contract(image: str) -> dict[str, Any]:
         "replayBlocked": True,
         "nativeMessageBlocked": True,
         "signedMailActionBound": True,
+        "directButtonActionPosted": True,
         "tokenDisclosedInEvidence": False,
     }
     return contract

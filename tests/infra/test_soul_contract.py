@@ -203,6 +203,21 @@ def test_old_button_only_restriction_is_gone(soul: str) -> None:
     assert "**自由文から予定を作らない**" not in soul
 
 
+def test_schedule_propose_is_only_described_as_the_button_tool(soul: str) -> None:
+    """`schedule_propose` はボタン専用で、メッセージ由来の呼び出しは plugin が必ず止める
+    （caller-identity plugin の ACTION_BINDINGS: outsideAction="deny"）。
+
+    09-29 レビュー: 自由文カレンダー節に「相手と調整したいときは `schedule_propose`」が残り、
+    必ず止まる呼び出しをモデルに勧めていた（同じファイルの 🗓 節「ボタン専用」とも矛盾）。
+    `schedule_propose` に触れる行は、すべて 🗓 ボタンの文脈で書く。
+    """
+    lines = [line for line in soul.splitlines() if "`schedule_propose`" in line]
+    assert lines
+    for line in lines:
+        assert "ボタン" in line, line
+    assert "自由文からは `schedule_propose` を呼ばない" in soul
+
+
 # ── ⑦ 訪問前ブリーフィングの規約 4 点 ───────────────────────────────────────
 
 

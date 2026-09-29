@@ -161,9 +161,9 @@ P 系統は Python から発行しないため `connect_diagnostics.py` には�
 | コード | 意味 | plugin 側の block 理由 | 利用者の対処 | 管理者の対処 |
 |---|---|---|---|---|
 | **P01** | 母艦ネイティブのツール（message / filesystem / session 系）は署名対象外なので常に拒否 | `native message, filesystem, and session tools are denied` | 別の言い方で頼み直す | 設計どおりの拒否。頻発するならモデルが teamagent 以外のツールを選んでいる＝プロンプト側 |
-| **P02** | ツール名の束縛が無い / 食い違う。`mail_draft` を Slack ボタン以外から呼んだ場合も含む | `authoritative tool name binding …` / `Slack mail action cannot authorize another tool` / `mail_draft requires an authoritative Slack button action` | 管理者へ | `mail_draft` はメール下書きのボタン経由でのみ通る。ボタンを押さずに依頼していないか |
+| **P02** | ツール名の束縛が無い / 食い違う。ボタン専用ツール（`mail_draft` / `schedule_propose` / `digest_ack`）を Slack ボタン以外から呼んだ場合、ボタン押下の run で束縛外のツールを呼んだ場合も含む | `authoritative tool name binding …` / `Slack button action cannot authorize another tool` / `<tool> requires an authoritative Slack button action` | 管理者へ | ボタンと呼べるツールは plugin の `ACTION_BINDINGS`（action_id → ツール 1 対 1）で固定。ボタンを押さずに依頼していないか・押下の run でモデルが別ツールを選んでいないか。`calendar_event` はメッセージからも呼べる（自由文の登録。`event_token` は空に上書きされる） |
 | **P03** | run の束縛が無い / 古い。**実測 9 件** | `authoritative run binding …` / `trusted Slack run identity is missing or stale` | もう一度送ってみる（10 分の TTL 切れなら復帰する） | 同時刻の `bind_agent_run rejected reason=…` を引く。`reason=no_unique_binding` なら受信と run の突合が崩れている |
-| **P04** | tool 呼び出し id の束縛が無い / 再生（replay） | `authoritative tool invocation binding …` / `tool invocation replay rejected` / `Slack mail action was already consumed` | もう一度送ってみる | 同じボタンを 2 回押した・上流が同じ toolCallId を再送した |
+| **P04** | tool 呼び出し id の束縛が無い / 再生（replay） | `authoritative tool invocation binding …` / `tool invocation replay rejected` / `Slack button action was already consumed` | もう一度送ってみる | 同じボタンを 2 回押した・上流が同じ toolCallId を再送した |
 | **P05** | session / channel の束縛が合わない、または**明示的ななりすまし申告**（`_user_context.slack_user_id` に別人／`caller_claim` の持ち込み）。**実測 2 件** | `trusted Slack session or channel binding is missing` / `tool context does not match the bound Slack run` / `declared Slack caller does not match …` / `model-supplied or replayed caller claim is forbidden` | もう一度送ってみる | `id_shape` の `channel:` を見る。`other` なら会話 id を解決できていない（`bind_agent_run` の `resolve=[…]` と突合）。**申告の「欠落」は 2026-09-11 以降 P05 にならない**（欠落は authoritative 値で補われる） |
 | **P06** | ツール引数そのものが扱えない形（params がオブジェクトでない／包みが 3 段以上）。**`_user_context` の欠落・非オブジェクトは 2026-09-11 以降ここに落ちない**（申告に依存せず ingress から claim を組む） | `tool params must be a plain object` / `tool arguments are nested deeper than the unwrap limit` | もう一度送ってみる | 直前に `unwrapped tool arguments (…)` が出ているか確認。P06 が残るならモデルが新しい包み方をしている。`discarded non-object declared user_context shape=…` は**拒否ではなく観測**（通っている） |
 | **P07** | plugin 内部の署名失敗（nonce 生成 / claim 鋳造） | `secure nonce generation failed` / `request binding failed` | 利用者操作では直らない。管理者へ | `TEAMAGENT_CALLER_CLAIM_SECRET` / crypto まわり。P07 が出たら即エスカレーション |
@@ -261,6 +261,41 @@ fields @timestamp, @message
 | （上のどれも無い） | `reply_payload_sending` / `before_agent_finalize` 自体が呼ばれていない。`hook first_fired name=…` の一覧と突き合わせる |
 
 `id_shape` は §「`id_shape` の読み方」と同じ。`connect_request` / `rule` / `delivered` は真偽と規則名だけで本文は載らない。
+
+### 朝ダイジェストのボタンを押しても何も届かないときの引き方（2026-09-29・直接実行）
+
+2026-09-29 裁定「AI を通さず直接処理する」以降、📅 / 🗓 / ✏️ / ☑️ の押下は plugin が捕捉した時点で
+`{handled:true}` を返し（system event も heartbeat も積まない）、束縛先の 1 ツールを mcp へ直接呼んで、
+結果を押した本人の DM へ `chat.postMessage` で 1 通だけ投稿する。モデル（Aico）は関与しない。
+DM 以外（チャンネル・グループ・本人以外の DM）で押された場合は実行せず、押した本人の DM へ案内だけ送る。
+結果まで時間のかかる ✏️・🗓 は、押した直後に「作っています」を押した本人にだけ一時表示する
+（上流の `ctx.respond.reply`＝Slack の response_url・ephemeral。結果の 1 通とは別で、再読み込みで消える）。
+直接実行は `TEAMAGENT_MCP_BEARER` と `SLACK_BOT_TOKEN` の両方があるときだけ有効で、起動時の
+`registered hooks=[…] … button_direct=yes|no` で分かる（`no` なら従来の heartbeat 経路のまま）。
+
+```
+fields @timestamp, @message
+| filter @message like /teamagent-caller-identity:/
+| filter @message like /button action|button notice|Slack button action|button_direct/
+| sort @timestamp desc
+| limit 100
+```
+
+| 出た行 | 読み方 |
+|---|---|
+| `button action invocation=slack-action-… action=<id> outcome=delivered result=tool_message` | 実行して結果を届けた（正常）。`result=tool_message_error_<種別>` はツールが利用者向けの失敗文を返した（`expired` / `not_connected` 等・文はそのまま届いている） |
+| `… outcome=delivered result=tool_unavailable` | mcp にそのツールが無い（`digest_ack` は本番 OFF）。利用者には「このボタンはいま使えません。」 |
+| `… outcome=delivered result=gateway_caller_identity_rejected` | mcp の門が拒否。**同じ押下の再生（one-use nonce が消費済み＝すでに実行済み）もこの code で返る**（OC の再起動・デプロイ直後や OC タスク 2 つで plugin の台帳に無い押下）。本人を確かめられない拒否と応答からは見分けられないので、利用者には「〜できたか確認できませんでした。〜をご確認ください」（texts.unknown）を出し、自由文での頼み直しは勧めない（二重登録の防止）。mcp 側で同時刻に `caller_claim_rejected`（`reason=caller claim replay rejected`）なら再生、`identity_spoof_rejected`（`reason=resolve_none` / `resolver_error` 等）なら本人の解決失敗 |
+| `… outcome=delivered result=gateway_<code>`（上記以外） | mcp の門が拒否（ツールは走っていない）。利用者には定型文（別の頼み方を案内）。mcp 側のログと時刻で突合 |
+| `… outcome=delivered result=retry_<reason>` | mcp へツールを渡す前に失敗（`fetch_failed` / `mcp_http_5xx` / `timeout` 等）。何も実行されていないので押下の台帳から外し、利用者には「もう一度押すか…」 |
+| `… outcome=delivered result=unknown_<reason>` | ツールを渡した後に途切れた（実行されたか分からない）。再押下は plugin の台帳と mcp の one-use nonce の両方で止まる。利用者には確認を促す文 |
+| `… outcome=delivered result=not_own_dm` | DM 以外（または本人以外の DM）での押下。実行せず、押した本人の DM へ案内を送った |
+| `… outcome=post_failed result=… reason=slack_…` | ツールは実行済み（または失敗）だが Slack へ届かなかった。**ツールは再実行しない**。`reason=slack_api_<error>` は Slack の `ok:false`、`slack_http_5xx` は 2 回再送した後。`reason=slack_timeout` は**再送しない**（Slack が受け付けた後に待ちだけ切れた場合、再送すると 2 通になる）ので、利用者に 1 通届いていることもある |
+| `… outcome=dm_unresolved reason=… notice=<種別>` | `conversations.open` で本人の DM を確かめられなかった（Slack 障害）。何も実行していない（押下の台帳から外すので、押し直せば実行される）。`notice=ephemeral` は押下の会話で本人にだけ「もう一度押して」を一時表示した、`notice=ephemeral_failed_<reason>` は response_url の失効等で表示もできなかった（無音）、`notice=none` は上流が respond を渡していない |
+| `button pending invocation=… action=<id> outcome=ephemeral_failed_<reason>` | ✏️・🗓 の「作っています」の一時表示が出せなかった（response_url の失効等）。実行と結果の投稿には影響しない |
+| `button action rejected reason=value_shape action=<id> value_len=N direct=yes` ＋ `button notice … notice=value_shape` | 古い・別種のトークンのボタン（例: 修正前のダイジェストの件名が長い 📅）。実行せず「最新の朝ダイジェストから」を案内。案内は同じボタンにつき 1 回（投稿に失敗したときだけ押し直しで再送） |
+| `rejected replayed Slack button action action=<id>` | 同じボタンの再押下・連打。直接実行では押下の台帳を **24h＋10 分**（ボタンの value の最長の寿命より長く）持つので、同じ OC プロセスの間は何時間後の押し直しも何もしない。OC の再起動後の押し直しは mcp の one-use nonce が止める（上の `gateway_caller_identity_rejected`） |
+| `rejected incomplete or unauthorized Slack button action` | 押下の同一性が確かめられない（interactionId 不一致・未認可の送信者等）。案内も送らない |
 
 ## 関連
 

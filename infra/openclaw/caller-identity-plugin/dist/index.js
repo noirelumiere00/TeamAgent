@@ -15,10 +15,13 @@ const MAX_TRACKED_CONTEXTS = 1000;
 const TEAMAGENT_TOOL_PREFIX = "teamagent__";
 const USER_CONTEXT_KEY = "_user_context";
 const CLAIM_FIELD = "caller_claim";
-const MAIL_DRAFT_ACTION_ID = "mail_draft";
-const MAIL_DRAFT_TOOL = "mail_draft";
 const SLACK_INTERACTION_EVENT_PREFIX = "Slack interaction: ";
+// 上流が system event（heartbeat の prompt に載る "Slack interaction: {...}"）の文字列値を
+// 切り詰める長さ。超えた値は「先頭 159 字＋…」になる（openclaw@v2026.7.1
+// extensions/slack/src/monitor/events/interactions.ts:15,36-37 / extensions/slack/src/truncate.ts）。
+// interactive handler 側（押下の捕捉）には切られていない値が届く（interactions.block-actions.ts:658）。
 const SLACK_INTERACTION_VALUE_MAX_LENGTH = 160;
+const SLACK_INTERACTION_VALUE_ELLIPSIS = "…";
 
 // ── 第3層防御: 連携 URL 捏造の封鎖 ──────────────────────────────────────
 // 背景（本番実測 2026-08-31）: LLM がツールを 1 つも呼ばないまま
@@ -211,6 +214,31 @@ const MCP_REQUEST_TIMEOUT_MS = 15_000;
 const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MCP_CLIENT_NAME = "teamagent-caller-identity-connect";
 const CONNECT_L1_INVOCATION_PREFIX = "connect-l1";
+// ── ボタン押下の直接実行（executeButtonAction）の定数 ─────────────────────────────
+// 上流は押下を受けた時点で Slack へ ack してから plugin の handler を呼ぶ
+// （openclaw@v2026.7.1 extensions/slack/src/monitor/events/interactions.block-actions.ts:905-906）。
+// よって 3 秒制約は上流が満たし、handler は捕捉だけして即 {handled:true} を返す。
+// mcp 呼び出しと投稿は handler から切り離して走らせる（保証経路と同じ onBackgroundTask）。
+// 予算は層1（15s）より長くとる: ✏️ は下書き本文を LLM で書く（mail_draft → generate_draft_for_thread）。
+// claim の TTL（60s）は mcp が受信時に検証するので、ツールの実行が長くても失効しない。
+const BUTTON_MCP_TIMEOUT_MS = 120_000;
+// 直接実行した押下の台帳（buttonPressLedger）の保持期間。ボタンの value（mcp の HMAC トークン）の
+// 最長の寿命（24h・MAIL_ACTION_TTL_S の上限）より長くとる（2026-09-29 レビュー指摘）。
+// 以前は署名経路と同じ seenActions（10 分）に置いていたため、10 分を過ぎて押し直すと plugin は通し、
+// mcp の one-use nonce（押下の指紋から決まる固定値・DynamoDB の TTL 削除は数時間〜数日遅れる）が
+// 「再生」として拒否し、それを失敗として本人へ伝えて自由文での頼み直し（＝別 id での二重登録）を招いていた。
+// 押下の台帳は mcp の nonce より先に切れてはならない。
+const BUTTON_PRESS_LEDGER_TTL_MS = 24 * 60 * 60 * 1000 + INBOUND_CONTEXT_TTL_MS;
+// 台帳の上限。超えたら古いものから捨てる（署名経路を落とす MAX_TRACKED_CONTEXTS の fail には
+// 相乗りさせない）。捨てた押下の押し直しは mcp の nonce が止め、文面は texts.unknown になる。
+const MAX_BUTTON_PRESS_LEDGER = 5000;
+// 押した本人だけに見える一時表示（上流の ctx.respond.reply＝Slack の response_url）の待ち上限。
+const BUTTON_EPHEMERAL_TIMEOUT_MS = 10_000;
+const BUTTON_INVOCATION_PREFIX = "slack-action";
+const MCP_BUTTON_CLIENT_NAME = "teamagent-caller-identity-button";
+// claim の session_sha256 の元（押下 1 件ごと）。heartbeat run のセッションが無い直接実行でも
+// mcp の claim 契約（sha256 必須・caller_claim.py）を満たす。mcp は形だけを検証し、認可には使わない。
+const BUTTON_SESSION_PREFIX = "teamagent-slack-action-v1";
 const SLACK_CANONICAL_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
 const SLACK_DM_CHANNEL_RE = /^D[A-Z0-9]{8,}$/u;
 
@@ -267,7 +295,11 @@ const SLACK_USER_RE = /^U[A-Z0-9]{8,}$/u;
 const SLACK_TEAM_RE = /^T[A-Z0-9]{8,}$/u;
 const SLACK_CHANNEL_RE = /^[CDG][A-Z0-9]{8,}$/u;
 const SLACK_TS_RE = /^[0-9]{10,}\.[0-9]{6}$/u;
+// ボタンの value（mcp の HMAC 署名トークン）の形: base64url(payload) "." base64url(16 バイト署名)。
+// 名前は歴史的経緯（mail_draft 専用だった）で、4 種のボタンすべてがこの形。
 const DRAFT_TOKEN_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/u;
+// system event で切り詰められた value の本体（159 字）。署名の途中で切れることがある。
+const TRUNCATED_ACTION_TOKEN_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*)?$/u;
 const TOOL_RE = /^[a-z][a-z0-9_]{0,127}$/u;
 const INVOCATION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u;
 const NATIVE_CALLER_BYPASS_TOOLS = new Set([
@@ -287,6 +319,177 @@ const NATIVE_CALLER_BYPASS_TOOLS = new Set([
   "upload",
   "write",
 ]);
+
+// ── ボタン束縛表 ACTION_BINDINGS（2026-09-29・裁定「ボタンは表示したまま改修を急ぐ」）──────
+// 朝ダイジェストのボタン（Slack の action_id）ごとに、押下 1 回で呼べるツールを 1 対 1 で固定する。
+// 以前は interactive handler を namespace `mail_draft` にだけ登録し、ボタン由来の run で呼べる
+// ツールも mail_draft に固定していたため、📅 calendar_event・🗓 schedule_propose は表示されるのに
+// 押しても何も起きなかった（本番 30 日でボタン経由の実行 0 件）。
+//   tool          … その押下の run で署名してよい唯一のツール（action_id と同名）
+//   tokenParam    … 押下時に捕捉した value（mcp の HMAC 署名トークン）で上書きする引数名。
+//                   モデルが渡した値は使わない（system event の value は切れていることがある）。
+//   maxLength     … value の上限＝各ツールの入力 schema の max_length
+//                   （mail_draft だけは従来どおり 160 のまま＝弱めない）
+//   tokenTypes    … value の payload（v2）の typ。null は形（DRAFT_TOKEN_RE）だけを見る（mail_draft の従来どおり）。
+//                   🗓 は ✏️ と同じ draft トークンを value に使う（run_morning_digest_fargate.py の _reply_buttons）。
+//   outsideAction … メッセージ由来の run でこのツールが呼ばれたとき
+//                   "deny"        署名しない（ボタン専用ツール・mail_draft の従来どおり）
+//                   "blank_token" 署名するが tokenParam を "" に上書きする
+//                                 （calendar_event は自由文の登録入口を持つ。自由文は今までどおり通す）
+// mcp 側の検証（HMAC・purpose・本人・期限）はそのまま残る＝plugin と mcp の二重の守り。
+// digest_ack は本番 OFF（mcp の tools/list に出ない）。押下を束縛しても、その run で呼べるのは
+// digest_ack だけなので、ツールが無ければ何も実行されない（他のツールでの代用は止める）。
+//
+// ── 押下の直接実行（2026-09-29 裁定「AI を通さず直接処理する」）の返し方 ──────────────
+// 本番は heartbeat.every="0m" で押下の後に AI の run が起きない（上流の heartbeat-runner が
+// interval 0 の agent を載せない）。そこで押下を捕捉した plugin が束縛先の 1 ツールを mcp へ
+// 直接呼び、結果を押した本人の DM へ投稿する（下の executeButtonAction）。その文面の決まり:
+//   resultLink … 出力のリンク欄と表示名。URL は生のまま出さず <url|表示名> にする
+//                （SOUL のボタン節の例「<event_url|カレンダーで開く>」と同じ）。
+//   undoToken  … 出力の取り消し用トークン欄（digest_ack だけ）。同じ action_id のボタンにして添える
+//                （slack_bot.py の EC2 経路と同じ「押下直後の取り消し導線」）。
+//   texts.retry   … mcp へツールを渡す前に失敗（mcp の one-use nonce も未消費）。
+//                   同じボタンをもう一度押せるようにする（押下の台帳から外す）。
+//   texts.failed  … mcp が利用者向けの文（message）の無い失敗を返した。同じ押下はもう実行されない
+//                   （mcp が nonce を消費済みでありうる）ので、別の頼み方を案内する。
+//   texts.unknown … ツールを渡した後に応答が途切れた（実行されたか分からない）か、mcp が
+//                   CALLER_IDENTITY_REJECTED を返した（one-use nonce の再生＝すでに実行済みの押下と、
+//                   本人を確かめられない拒否を mcp の応答からは見分けられない）。確認を促し、
+//                   頼み直しは「入っていなければ」に限る（二重登録を招かない）。
+//   pendingText … 実行を始めたときに押した本人だけへ一時表示する 1 行（上流の ctx.respond.reply＝
+//                 Slack の response_url・ephemeral）。結果まで数秒〜数十秒かかるもの（✏️ は下書きを
+//                 LLM で書く・🗓 は空き枠と仮予定を作る）だけに付け、画面が何も変わらないまま
+//                 押し直しや自由文の頼み直しに流れないようにする。null は出さない（📅・☑️ はすぐ返る）。
+// ツールが利用者向けの文（message）を返したときは、成功・失敗を問わずその文をそのまま出す。
+export const ACTION_BINDINGS = Object.freeze({
+  mail_draft: Object.freeze({
+    tool: "mail_draft",
+    tokenParam: "draft_token",
+    maxLength: SLACK_INTERACTION_VALUE_MAX_LENGTH,
+    tokenTypes: null,
+    outsideAction: "deny",
+    resultLink: Object.freeze({field: "open_url", label: "Gmailで開く"}),
+    undoToken: null,
+    pendingText:
+      "✏️ 返信下書きを作っています。できたらこの DM でお知らせします（数十秒かかることがあります）。",
+    texts: Object.freeze({
+      retry: "返信下書きを作れませんでした。もう一度押してください。",
+      failed:
+        "返信下書きを作れませんでした。お手数ですが『（件名）の返信下書きを作って』と送ってください。",
+      unknown: "返信下書きを作れたか確認できませんでした。Gmail の下書きをご確認ください。",
+    }),
+  }),
+  calendar_event: Object.freeze({
+    tool: "calendar_event",
+    tokenParam: "event_token",
+    maxLength: 500,
+    tokenTypes: Object.freeze(["event"]),
+    outsideAction: "blank_token",
+    resultLink: Object.freeze({field: "event_url", label: "カレンダーで開く"}),
+    undoToken: null,
+    pendingText: null,
+    texts: Object.freeze({
+      retry: "予定の登録に失敗しました。もう一度押すか、『予定入れといて』と送ってください。",
+      failed: "予定の登録に失敗しました。『予定入れといて』と送ってください。",
+      unknown:
+        "予定を登録できたか確認できませんでした。カレンダーに入っていなければ『予定入れといて』と送ってください。",
+    }),
+  }),
+  schedule_propose: Object.freeze({
+    tool: "schedule_propose",
+    tokenParam: "schedule_token",
+    maxLength: 400,
+    tokenTypes: Object.freeze(["draft"]),
+    outsideAction: "deny",
+    resultLink: Object.freeze({field: "open_url", label: "Gmailで開く"}),
+    undoToken: null,
+    pendingText: "🗓 日程候補の下書きを作っています。できたらこの DM でお知らせします。",
+    texts: Object.freeze({
+      retry: "日程候補の下書きを作れませんでした。もう一度押してください。",
+      failed: "日程候補の下書きを作れませんでした。お手数ですが Gmail から直接ご返信ください。",
+      unknown: "日程候補の下書きを作れたか確認できませんでした。Gmail の下書きをご確認ください。",
+    }),
+  }),
+  digest_ack: Object.freeze({
+    tool: "digest_ack",
+    tokenParam: "ack_token",
+    maxLength: 2000,
+    tokenTypes: Object.freeze(["ack", "ackall", "unack"]),
+    outsideAction: "deny",
+    resultLink: null,
+    undoToken: Object.freeze({field: "undo_token", tokenType: "unack", label: "↩︎ 取り消す"}),
+    pendingText: null,
+    texts: Object.freeze({
+      retry: "確認済みにできませんでした。もう一度押してください。",
+      failed: "確認済みにできませんでした。次回の朝ダイジェストでもう一度お試しください。",
+      unknown: "確認済みにできたか確認できませんでした。次回の朝ダイジェストでご確認ください。",
+    }),
+  }),
+});
+// 直接実行の共通の定型文（ツール名・コード・URL・トークンは含めない）。
+// ツールが mcp に無い（digest_ack は本番 OFF）ときの 1 行。SOUL のボタン共通プロトコルと同じ文。
+export const BUTTON_UNAVAILABLE_TEXT = "このボタンはいま使えません。";
+// DM 以外（チャンネル・グループ・本人以外の DM）で押されたとき、押した本人の DM へ送る案内。
+export const BUTTON_DM_ONLY_TEXT =
+  "このボタンは Aico との DM に届いた朝ダイジェストでだけ使えます。DM のダイジェストから押してください。";
+// 値の形が合わない押下（古いダイジェストの長すぎるトークン・別種のトークン等）への案内。
+export const BUTTON_STALE_TEXT =
+  "このボタンは使えなくなっています。最新の朝ダイジェストから押してください。";
+// 上流の namespace 規則（openclaw@v2026.7.1 src/plugins/interactive-shared.ts:13-20）と、
+// data = `${actionId}:${value}` の最初の ":" で namespace を切る規則（同 :30-35）に合わせる。
+const SLACK_ACTION_NAMESPACE_RE = /^[a-z][a-z0-9_]{0,63}$/u;
+const TOKEN_PARAM_RE = /^[a-z][a-z0-9_]{0,63}$/u;
+const BUTTON_OUTSIDE_ACTION_POLICIES = new Set(["deny", "blank_token"]);
+const BUTTON_TEXT_KINDS = ["retry", "failed", "unknown"];
+
+function isButtonText(value) {
+  return typeof value === "string" && value.trim() !== "" && value.length <= 200;
+}
+
+// 束縛表の自己検査（起動時に落とす）。1 対 1（ツールの重複なし）であること。
+const ACTION_BINDING_BY_TOOL = (() => {
+  const byTool = new Map();
+  for (const [actionId, binding] of Object.entries(ACTION_BINDINGS)) {
+    if (
+      !SLACK_ACTION_NAMESPACE_RE.test(actionId) ||
+      typeof binding?.tool !== "string" ||
+      !TOOL_RE.test(binding.tool) ||
+      byTool.has(binding.tool) ||
+      !TOKEN_PARAM_RE.test(binding.tokenParam) ||
+      !Number.isSafeInteger(binding.maxLength) ||
+      binding.maxLength < SLACK_INTERACTION_VALUE_MAX_LENGTH ||
+      !(
+        binding.tokenTypes === null ||
+        (Array.isArray(binding.tokenTypes) && binding.tokenTypes.length > 0)
+      ) ||
+      !BUTTON_OUTSIDE_ACTION_POLICIES.has(binding.outsideAction) ||
+      !(
+        binding.resultLink === null ||
+        (TOKEN_PARAM_RE.test(binding.resultLink?.field) && isButtonText(binding.resultLink?.label))
+      ) ||
+      !(
+        binding.undoToken === null ||
+        (TOKEN_PARAM_RE.test(binding.undoToken?.field) &&
+          Array.isArray(binding.tokenTypes) &&
+          binding.tokenTypes.includes(binding.undoToken?.tokenType) &&
+          isButtonText(binding.undoToken?.label))
+      ) ||
+      !(binding.pendingText === null || isButtonText(binding.pendingText)) ||
+      !BUTTON_TEXT_KINDS.every(kind => isButtonText(binding.texts?.[kind]))
+    ) {
+      fail(`ACTION_BINDINGS entry is invalid or not one-to-one: ${actionId}`);
+    }
+    byTool.set(binding.tool, Object.freeze({actionId, ...binding}));
+  }
+  return byTool;
+})();
+
+// 押下の action_id に対応する束縛（プロトタイプ由来のキーは拾わない）。
+function actionBindingFor(actionId) {
+  return typeof actionId === "string" && Object.hasOwn(ACTION_BINDINGS, actionId)
+    ? ACTION_BINDINGS[actionId]
+    : null;
+}
 
 function fail(message) {
   throw new Error(`${PLUGIN_ID}: ${message}`);
@@ -1045,7 +1248,18 @@ function parseJsonRpcPayload(text, contentType, expectedId) {
 // 層1 の MCP クライアント。rollout-task-canary.mjs と同じ手順（initialize →
 // notifications/initialized → tools/call）で、既存の bearer と署名 claim をそのまま使う。
 // 新しい信頼境界は作らない: mcp 側は before_tool_call 経由と同じ検証を通す。
-async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeoutMs }) {
+// progress を渡すと、tools/call を送り出す直前に progress.toolsCallSent = true を立てる
+// （ボタンの直接実行が「mcp にツールを渡す前の失敗＝nonce 未消費」かを見分けるため）。
+async function callMcpTool({
+  fetchFn,
+  mcpUrl,
+  bearer,
+  name,
+  toolArguments,
+  timeoutMs,
+  clientName = MCP_CLIENT_NAME,
+  progress = null,
+}) {
   // 全体予算を 1 本の signal で共有する（POST ごとに timeoutMs を持たない）。
   const signal = AbortSignal.timeout(timeoutMs);
   const buildHeaders = sessionId => ({
@@ -1072,10 +1286,20 @@ async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeo
     return response;
   };
   const readResult = async (response, expectedId) => {
+    // streamable-http の SSE は先に 200 と header を返し、結果の event を後から流す。
+    // 予算切れは fetch ではなく本文の読み取りで起きるので、ここでも timeout として扱う。
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw error?.name === "TimeoutError" || error?.name === "AbortError"
+        ? new ConnectPathError("timeout")
+        : new ConnectPathError("mcp_invalid_json");
+    }
     let payload;
     try {
       payload = parseJsonRpcPayload(
-        await response.text(),
+        text,
         response.headers?.get?.("content-type"),
         expectedId,
       );
@@ -1094,12 +1318,14 @@ async function callMcpTool({ fetchFn, mcpUrl, bearer, name, toolArguments, timeo
     params: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: MCP_CLIENT_NAME, version: "1" },
+      clientInfo: { name: clientName, version: "1" },
     },
   });
   const sessionId = initialized.headers?.get?.("mcp-session-id") || null;
   await readResult(initialized, 1);
   await post({ jsonrpc: "2.0", method: "notifications/initialized", params: {} }, sessionId);
+  // ここから先の失敗は「mcp がツールを受け取った（実行した）かもしれない」。
+  if (progress) progress.toolsCallSent = true;
   const called = await post(
     { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: toolArguments } },
     sessionId,
@@ -1149,6 +1375,143 @@ export function extractConnectOutcome(result) {
   const message = typeof data.message === "string" ? data.message.trim() : "";
   if (!message) throw new ConnectPathError("mcp_invalid_result");
   return { kind: "message", text: message };
+}
+
+// ── ボタン結果の文面（直接実行）──────────────────────────────────────────────
+// Slack の text は & < > を実体参照にする（Slack の書式規約）。ツールの文はそのまま出すが、
+// 文中の < > & が Slack の記法（<url|…> や <@U…>）として解釈されないようにする。
+function escapeSlackText(text) {
+  return text.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
+}
+
+// リンクにしてよい URL か。mcp のツールが返す本人向けのリンク（Google カレンダー・Gmail）だけを通す。
+// 記法を壊す文字（空白・< > |）や https 以外・google.com 以外は、リンクにせず捨てる（文は出す）。
+//
+// **検査した値と出力する値を一致させる**（2026-09-29 レビュー指摘）。WHATWG の URL パーサは `\` を `/` と
+// 読むので、`https://calendar.google.com\@evil.example/x` は hostname=calendar.google.com として通るが、
+// RFC 3986 系のパーサ（Slack のクライアント等）は userinfo@evil.example と読みうる。そこで
+//   - `\` を拒否文字に入れる
+//   - userinfo（user:pass@）を持つ URL を拒否する
+//   - 正規化後の href が元の値と 1 字も違わないものだけを通す（検査した形＝出力する形）
+// Google が返す htmlLink と mcp が組む Gmail の URL は元から正規形なので、これで落ちるものは無い。
+function safeResultLink(value) {
+  if (typeof value !== "string" || value === "" || value.length > 2000) return null;
+  if (/[\s<>|\\]/u.test(value)) return null;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  if (parsed.username !== "" || parsed.password !== "") return null;
+  if (parsed.href !== value) return null;
+  const host = parsed.hostname.toLowerCase();
+  return host === "google.com" || host.endsWith(".google.com") ? parsed.href : null;
+}
+
+// ツールの出力（mcp の TextContent の JSON）から、押した本人へ送る 1 通を組む。
+// 返り値 { reply: {text, blocks?}, result }。result はログ用の種別（値は含めない＝G7）。
+//   - message があれば成功・失敗を問わずその文をそのまま出す（ツールの利用者向けの文）。
+//     リンク欄は <url|表示名> にする（文中に生の URL があればそこを置き換え、無ければ末尾に添える）。
+//   - mcp が「unknown tool: <束縛先>」を返した＝そのツールは mcp に無い（digest_ack は本番 OFF）。
+//   - それ以外（mcp の門の拒否・入力検証・例外・壊れた応答）は定型文。mcp の error 文は出さない
+//     （英語の例外名・診断コード・内部語を含むため）。
+// 例外は投げない（投げると押した人に何も届かない）。
+export function renderButtonResult(binding, actionId, result) {
+  const failed = kind => ({ reply: { text: binding.texts.failed }, result: kind });
+  if (!result || typeof result !== "object" || result.isError === true) {
+    return failed("mcp_tool_error");
+  }
+  const first = Array.isArray(result.content)
+    ? result.content.find(item => item?.type === "text" && typeof item.text === "string")
+    : null;
+  if (!first) return failed("mcp_invalid_result");
+  let data;
+  try {
+    data = JSON.parse(first.text);
+  } catch {
+    return failed("mcp_invalid_result");
+  }
+  if (!isPlainObject(data)) return failed("mcp_invalid_result");
+  const message = typeof data.message === "string" ? data.message.trim() : "";
+  if (message) {
+    // ツールの失敗種別（expired / not_connected 等の固定語彙）はログにだけ残す。
+    const toolError =
+      typeof data.error === "string" && /^[a-z_]{1,32}$/u.test(data.error) ? data.error : "";
+    return {
+      reply: buildButtonReply(binding, actionId, data, message),
+      result: toolError ? `tool_message_error_${toolError}` : "tool_message",
+    };
+  }
+  if (data.error === `unknown tool: ${binding.tool}`) {
+    return { reply: { text: BUTTON_UNAVAILABLE_TEXT }, result: "tool_unavailable" };
+  }
+  const code =
+    typeof data.code === "string" && /^[A-Z_]{1,64}$/u.test(data.code)
+      ? data.code.toLowerCase()
+      : "error";
+  // mcp は caller claim の検証失敗をすべて CALLER_IDENTITY_REJECTED で返す（server.py の
+  // _verify_caller_claim → _identity_rejected）。その中には one-use nonce の再生（＝同じ押下が
+  // すでに実行済み。plugin の再起動・OC タスク 2 つ・台帳の上限落ちで plugin が覚えていないとき）が入り、
+  // 本人を確かめられない拒否とは応答から見分けられない。実行済みでありうるので texts.failed
+  // （自由文での頼み直しを勧める）にはせず、確認を促す texts.unknown にする（二重登録を招かない）。
+  if (code === "caller_identity_rejected") {
+    return { reply: { text: binding.texts.unknown }, result: `gateway_${code}` };
+  }
+  return failed(`gateway_${code}`);
+}
+
+function buildButtonReply(binding, actionId, data, message) {
+  let text = escapeSlackText(message);
+  const rawLink = binding.resultLink ? data[binding.resultLink.field] : null;
+  const link = binding.resultLink ? safeResultLink(rawLink) : null;
+  if (link !== null) {
+    const escapedUrl = escapeSlackText(link);
+    const markup = `<${escapedUrl}|${binding.resultLink.label}>`;
+    text = text.includes(escapedUrl)
+      ? text.split(escapedUrl).join(markup)
+      : `${text}\n🔗 ${markup}`;
+  } else if (typeof rawLink === "string" && /^https?:\/\/\S/iu.test(rawLink)) {
+    // リンクにできなかった URL は文からも消す。📅 の message は URL を生で含む（calendar_event の
+    // 「…\n🔗 <htmlLink>」）ので、門で落としても文に残ると Slack が自動でリンクにしてしまう。
+    // 消すのは http(s) の URL の形の値だけ（短い別の値で文を削らない）。
+    const escapedRaw = escapeSlackText(rawLink);
+    if (text.includes(escapedRaw)) {
+      text = text
+        .split(escapedRaw)
+        .join("")
+        .split("\n")
+        .filter(line => line.trim() !== "🔗")
+        .join("\n")
+        .trim();
+      // 文が URL だけだった（想定外）ときも空の投稿にしない。
+      if (text === "") text = escapeSlackText(binding.texts.unknown);
+    }
+  }
+  const undoToken = binding.undoToken
+    ? canonicalActionToken(data[binding.undoToken.field], {
+        ...binding,
+        tokenTypes: [binding.undoToken.tokenType],
+      })
+    : null;
+  // section の mrkdwn は 3000 字まで。超える文にはボタンを付けない（文だけは届ける）。
+  if (undoToken === null || text.length > 2900) return { text };
+  return {
+    text,
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text },
+        accessory: {
+          type: "button",
+          text: { type: "plain_text", text: binding.undoToken.label, emoji: true },
+          action_id: actionId,
+          value: undoToken,
+        },
+      },
+    ],
+  };
 }
 
 // ── Slack Web API の最小クライアント（保証経路の配信面） ──────────────────
@@ -1212,7 +1575,19 @@ async function callSlackApiOnce({ fetchFn, botToken, method, body, timeoutMs }) 
 // 保証経路の **唯一の配信面** なので、一時失敗（429 / 5xx / ネットワーク）で
 // 黙って無音にしない。短い固定回数だけ再試行する（2026-09-04 レビュー指摘 小）。
 // 全体予算は呼び出し側の timeoutMs × 試行回数を超えないよう、待ちも上限で刈る。
-async function callSlackApi({ fetchFn, botToken, method, body, timeoutMs, sleepFn }) {
+//
+// retryOnTimeout=false … 時間切れ（slack_timeout）は再試行しない。Slack が受け付けた後に
+// こちらの待ちだけが切れた場合、再送すると同じ投稿が 2 通になる（ボタンの結果の投稿で使う・
+// 2026-09-29 レビュー指摘）。429・5xx・接続失敗は従来どおり再試行する。
+async function callSlackApi({
+  fetchFn,
+  botToken,
+  method,
+  body,
+  timeoutMs,
+  sleepFn,
+  retryOnTimeout = true,
+}) {
   let lastError = null;
   for (let attempt = 0; attempt <= SLACK_MAX_RETRIES; attempt += 1) {
     try {
@@ -1223,7 +1598,7 @@ async function callSlackApi({ fetchFn, botToken, method, body, timeoutMs, sleepF
         typeof error?.retryAfterMs === "number"
           ? error.retryAfterMs
           : error?.retryable === true ||
-              error?.code === "slack_timeout" ||
+              (retryOnTimeout && error?.code === "slack_timeout") ||
               error?.code === "slack_fetch_failed"
             ? SLACK_RETRY_BACKOFF_MS
             : null;
@@ -1300,16 +1675,78 @@ function optionalSlackTimestamp(value) {
   return {valid: normalized !== null, value: normalized};
 }
 
-function canonicalDraftToken(value) {
+// 押下の value（mcp の HMAC 署名トークン）の形の検査。束縛ごとに上限と payload の typ を見る。
+// 署名そのものは検証しない（鍵は mcp にしか無い）。ここは「そのボタンに載るはずの種類か」の門で、
+// 本物かどうかは mcp が HMAC・purpose・本人・期限で判定する。
+// mail_draft は tokenTypes=null・上限 160 で、従来の canonicalDraftToken と同じ判定になる。
+function canonicalActionToken(value, binding) {
   if (
+    !binding ||
     typeof value !== "string" ||
     value !== value.trim() ||
-    value.length > SLACK_INTERACTION_VALUE_MAX_LENGTH ||
+    value.length > binding.maxLength ||
     !DRAFT_TOKEN_RE.test(value)
   ) {
     return null;
   }
+  if (binding.tokenTypes === null) return value;
+  let payload;
+  try {
+    payload = JSON.parse(
+      Buffer.from(value.slice(0, value.indexOf(".")), "base64url").toString("utf8"),
+    );
+  } catch {
+    return null;
+  }
+  if (
+    !isPlainObject(payload) ||
+    payload.v !== 2 ||
+    typeof payload.typ !== "string" ||
+    !binding.tokenTypes.includes(payload.typ)
+  ) {
+    return null;
+  }
   return value;
+}
+
+// ボタンが載っている block の id（Slack の block_id・最大 255 字）。ダイジェストは行ごとに
+// actions block を分けていて（block_id は Slack が行ごとに振る）、同じメッセージに同じ件名の
+// 📅 が 2 行並んで value の先頭 159 字が一致しても、どの行の押下かを決める手掛かりになる。
+// 無い（undefined / null / ""）は null。前後に空白がある・長すぎる・文字列でない値は不正。
+function optionalSlackBlockId(value) {
+  if (value === undefined || value === null || value === "") {
+    return {valid: true, value: null};
+  }
+  if (typeof value !== "string" || value !== value.trim() || value.length > 255) {
+    return {valid: false, value: null};
+  }
+  return {valid: true, value};
+}
+
+// 押下時に捕捉した完全な value が、上流の system event ではどう見えるか（切り詰めの再現）。
+function systemEventValueOf(actionValue) {
+  return actionValue.length <= SLACK_INTERACTION_VALUE_MAX_LENGTH
+    ? actionValue
+    : `${actionValue.slice(0, SLACK_INTERACTION_VALUE_MAX_LENGTH - 1)}${SLACK_INTERACTION_VALUE_ELLIPSIS}`;
+}
+
+// system event に載っていた value の形。完全なトークン（160 字以内）か、
+// 上流が切り詰めた形（先頭 159 字＋…）だけを受け付ける。切り詰めた形は、上限が 160 を超える
+// 束縛（📅・☑️ 一括など）でしか起こりえないので、それ以外（mail_draft）では従来どおり拒否する。
+function canonicalSystemEventValue(value, binding) {
+  if (!binding || typeof value !== "string" || value !== value.trim()) return null;
+  if (value.length <= SLACK_INTERACTION_VALUE_MAX_LENGTH && DRAFT_TOKEN_RE.test(value)) {
+    return value;
+  }
+  if (
+    binding.maxLength > SLACK_INTERACTION_VALUE_MAX_LENGTH &&
+    value.length === SLACK_INTERACTION_VALUE_MAX_LENGTH &&
+    value.endsWith(SLACK_INTERACTION_VALUE_ELLIPSIS) &&
+    TRUNCATED_ACTION_TOKEN_RE.test(value.slice(0, -SLACK_INTERACTION_VALUE_ELLIPSIS.length))
+  ) {
+    return value;
+  }
+  return null;
 }
 
 function actionFingerprint({
@@ -1337,7 +1774,10 @@ function actionFingerprint({
     .digest("hex");
 }
 
-function parseMailDraftSystemEvent(prompt) {
+// heartbeat の prompt に載った「Slack interaction:」の system event を 1 件だけ読む。
+// value は上流で切り詰められていることがある（eventValue はその見え方のまま返す）。
+// 完全な value は押下の捕捉（rememberSlackButtonAction）が持っていて、ここは照合の鍵にだけ使う。
+function parseSlackActionSystemEvent(prompt) {
   if (typeof prompt !== "string" || prompt.length > 100_000) return null;
   const matches = [];
   for (const line of prompt.split(/\r?\n/u)) {
@@ -1378,17 +1818,20 @@ function parseMailDraftSystemEvent(prompt) {
   const channelId = normalizeSlackId(payload.channelId, SLACK_CHANNEL_RE);
   const messageTs = canonicalSlackTimestamp(payload.messageTs);
   const thread = optionalSlackTimestamp(payload.threadTs);
-  const actionValue = canonicalDraftToken(payload.value);
+  const binding = actionBindingFor(payload.actionId);
+  const eventValue = canonicalSystemEventValue(payload.value, binding);
+  const blockId = optionalSlackBlockId(payload.blockId);
   if (
     payload.interactionType !== "block_action" ||
-    payload.actionId !== MAIL_DRAFT_ACTION_ID ||
+    !binding ||
     payload.actionType !== "button" ||
     !senderId ||
     !teamId ||
     !channelId ||
     !messageTs ||
     !thread.valid ||
-    !actionValue
+    !blockId.valid ||
+    !eventValue
   ) {
     return null;
   }
@@ -1398,9 +1841,44 @@ function parseMailDraftSystemEvent(prompt) {
     channelId,
     messageTs,
     threadTs: thread.value,
-    actionId: MAIL_DRAFT_ACTION_ID,
-    actionValue,
+    actionId: payload.actionId,
+    blockId: blockId.value,
+    eventValue,
   };
+}
+
+// 押下の捕捉（または束縛済みの ingress）が、この system event と同じ押下を指しているか。
+// value は上流と同じ切り詰めを掛けた上で比べる（160 字以内なら完全一致と同じ）。
+function actionEventMatches(ingress, actionEvent) {
+  return (
+    ingress?.ingressKind === "action" &&
+    ingress.actionId === actionEvent.actionId &&
+    ingress.senderId === actionEvent.senderId &&
+    ingress.teamId === actionEvent.teamId &&
+    ingress.channelId === actionEvent.channelId &&
+    ingress.messageId === actionEvent.messageTs &&
+    ingress.threadTs === actionEvent.threadTs &&
+    (ingress.actionBlockId === null
+      ? actionEvent.blockId === null
+      : typeof ingress.actionBlockId === "string" &&
+        systemEventValueOf(ingress.actionBlockId) === actionEvent.blockId) &&
+    typeof ingress.actionValue === "string" &&
+    systemEventValueOf(ingress.actionValue) === actionEvent.eventValue
+  );
+}
+
+// heartbeat run の会話名が、押下の会話と同じか。
+// DM では run 側が `DM:<押した本人>` を名乗る（session 鍵 …:direct:<user> は会話 id を持たず、
+// hook ctx の channelId は messageTo の user:U… 由来になる: openclaw@v2026.7.1
+// src/plugins/hook-agent-context.ts:67-98 / src/sessions/session-key-utils.ts:436-438）。
+// 押下の D… と同じ 1:1 会話なので、**押した本人の DM に限って**同一視する
+// （通常メッセージの束縛 matchesConversation と同じ規律。他人の DM は `DM:<他人>` なので一致しない）。
+function actionRunChannelMatches(actionEvent, runChannelId) {
+  return (
+    actionEvent.channelId === runChannelId ||
+    (SLACK_DM_CHANNEL_RE.test(actionEvent.channelId) &&
+      runChannelId === `DM:${actionEvent.senderId}`)
+  );
 }
 
 export function createCallerIdentityPlugin({
@@ -1413,6 +1891,8 @@ export function createCallerIdentityPlugin({
   onBackgroundTask = () => {},
   // Slack 再試行の待ち。テストでは即時に潰す。
   sleepFn = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  // ボタン直接実行の mcp 予算（initialize〜tools/call の全体）。テストでタイムアウトを再現するための注入口。
+  buttonTimeoutMs = BUTTON_MCP_TIMEOUT_MS,
 } = {}) {
   const rawSecret = env.TEAMAGENT_CALLER_CLAIM_SECRET;
   const secret = typeof rawSecret === "string" ? Buffer.from(rawSecret, "utf8") : null;
@@ -1455,6 +1935,12 @@ export function createCallerIdentityPlugin({
     typeof rawMcpUrl === "string" && /^https?:\/\//u.test(rawMcpUrl.trim())
       ? rawMcpUrl.trim()
       : DEFAULT_MCP_URL;
+  // ボタン押下の直接実行（2026-09-29 裁定）。mcp へ呼ぶ bearer と、結果を届ける bot token の
+  // 両方があるときだけ有効（本番は entrypoint の REQUIRED_SECRETS で両方が必ず届く）。
+  // どちらかが無い環境（ローカル・テスト）は従来の経路（handled:false → system event →
+  // heartbeat run を bindSlackActionRun で束縛）のまま。register のバナーに button_direct を出す。
+  const buttonDirect =
+    mcpBearer !== null && slackBotToken !== null && typeof fetchFn === "function";
 
   // 送信者 → DM の正準 conversation id（`D…`）。conversations.open は冪等だが、
   // 「連携」1 通ごとに Slack を叩かないための素朴なキャッシュ。値は不変。
@@ -1504,6 +1990,12 @@ export function createCallerIdentityPlugin({
   const pendingByMessage = new Map();
   const pendingActions = new Map();
   const seenActions = new Map();
+  // 直接実行（buttonDirect）の押下の台帳。key は押下の指紋（actionFingerprint）、値は記録時刻。
+  // 値の形が合わない押下への案内の 1 回性にも使う（key は "notice:" ＋生の value での指紋）。
+  // 署名経路の seenActions（10 分）とは寿命を分ける: mcp の one-use nonce より先に切れないよう、
+  // ボタンの value の最長の寿命（24h）より長く持つ（BUTTON_PRESS_LEDGER_TTL_MS）。
+  // 上限（MAX_BUTTON_PRESS_LEDGER）で古いものから捨て、署名経路の capacity の fail には相乗りさせない。
+  const buttonPressLedger = new Map();
   const ingressByRun = new Map();
   const rejectedRuns = new Map();
   const consumedInvocations = new Map();
@@ -1573,6 +2065,16 @@ export function createCallerIdentityPlugin({
       if (nowMs - seenAtMs > INBOUND_CONTEXT_TTL_MS) {
         seenActions.delete(fingerprint);
       }
+    }
+    for (const [key, pressedAtMs] of buttonPressLedger) {
+      if (nowMs - pressedAtMs > BUTTON_PRESS_LEDGER_TTL_MS) {
+        buttonPressLedger.delete(key);
+      }
+    }
+    while (buttonPressLedger.size > MAX_BUTTON_PRESS_LEDGER) {
+      const oldest = buttonPressLedger.keys().next();
+      if (oldest.done) break;
+      buttonPressLedger.delete(oldest.value);
     }
     for (const [runId, ingress] of ingressByRun) {
       const ttl =
@@ -2095,8 +2597,22 @@ export function createCallerIdentityPlugin({
     }
   }
 
-  async function rememberMailDraftAction(ctx, logger) {
+  // ボタン押下の捕捉（interactive handler）。ACTION_BINDINGS の action_id ごとに 1 つずつ登録し、
+  // expectedActionId はその登録の action_id に固定する（handler は自分の namespace の押下しか受けない）。
+  // ここで捕捉した**切り詰められていない** value が、その押下で呼べる唯一のツールの
+  // トークン引数になる（モデルが system event から写した値は使わない）。
+  //
+  // 検査は 2 段に分ける（どちらも従来と同じ条件・弱めていない）:
+  //   ① 押下そのものの同一性: 本人（Slack が署名した senderId）・会話・メッセージ・trigger・
+  //      interactionId の完全一致・data/payload と value の一致・認可済みの送信者。
+  //      ここで外れたら何もしない（誰の押下か確かでないので、案内も送らない）。
+  //   ② value の形（束縛ごとの上限・payload の typ）。①が通って②だけ外れたのは
+  //      「本人が古い／別種のボタンを押した」なので、直接実行が有効なら本人の DM へ案内だけ送る。
+  // 直接実行が有効なら（buttonDirect）、捕捉した押下は handler から切り離して実行し、
+  // {handled:true} を返す＝上流は system event も heartbeat も積まない（本番は heartbeat 0m）。
+  async function rememberSlackButtonAction(ctx, expectedActionId, logger) {
     try {
+      const binding = actionBindingFor(expectedActionId);
       const interaction = assertPlainObject(
         ctx?.interaction,
         "Slack interactive payload",
@@ -2109,33 +2625,39 @@ export function createCallerIdentityPlugin({
       const messageTs = canonicalSlackTimestamp(interaction.messageTs);
       const contextThread = optionalSlackTimestamp(ctx?.threadId);
       const interactionThread = optionalSlackTimestamp(interaction.threadTs);
-      const actionValue = canonicalDraftToken(interaction.value);
+      const rawValue = typeof interaction.value === "string" ? interaction.value : null;
+      const actionValue = canonicalActionToken(interaction.value, binding);
+      const blockId = optionalSlackBlockId(interaction.blockId);
       const triggerId = nonBlank(interaction.triggerId, 512);
       const interactionId = nonBlank(ctx?.interactionId, 2048);
+      // 上流の interactionId（[user, channel, messageTs, triggerId, actionId, value].join(":")）。
+      // value は形の検査の前の生の値で組む（形が正しい値では従来の組み方と同一）。
       const expectedInteractionId =
         senderId &&
         channelId &&
         messageTs &&
         triggerId &&
-        actionValue
+        rawValue !== null
           ? [
               senderId,
               channelId,
               messageTs,
               triggerId,
-              MAIL_DRAFT_ACTION_ID,
-              actionValue,
+              expectedActionId,
+              rawValue,
             ].join(":")
           : null;
       if (
+        !binding ||
         ctx?.channel !== "slack" ||
         ctx?.auth?.isAuthorizedSender !== true ||
         interaction.kind !== "button" ||
-        interaction.actionId !== MAIL_DRAFT_ACTION_ID ||
-        interaction.namespace !== MAIL_DRAFT_ACTION_ID ||
-        !actionValue ||
-        interaction.payload !== actionValue ||
-        interaction.data !== `${MAIL_DRAFT_ACTION_ID}:${actionValue}` ||
+        interaction.actionId !== expectedActionId ||
+        interaction.namespace !== expectedActionId ||
+        rawValue === null ||
+        !blockId.valid ||
+        interaction.payload !== rawValue ||
+        interaction.data !== `${expectedActionId}:${rawValue}` ||
         !senderId ||
         !channelId ||
         !messageTs ||
@@ -2148,24 +2670,84 @@ export function createCallerIdentityPlugin({
         interactionId !== expectedInteractionId
       ) {
         logger?.warn?.(
-          `${PLUGIN_ID}: rejected incomplete or unauthorized Slack mail action`,
+          `${PLUGIN_ID}: rejected incomplete or unauthorized Slack button action` +
+            ` action=${binding ? expectedActionId : "unbound"}`,
         );
         return {handled: true};
       }
+      const threadTs = interactionThread.value ?? contextThread.value;
       const nowMs = now();
       pruneState(nowMs);
-      const threadTs = interactionThread.value ?? contextThread.value;
+      if (!actionValue) {
+        emitPluginLog(
+          logger,
+          "warn",
+          `button action rejected reason=value_shape action=${expectedActionId}` +
+            ` value_len=${rawValue.length} direct=${buttonDirect ? "yes" : "no"}`,
+        );
+        if (buttonDirect) {
+          // 案内は同じボタン（生の value での指紋）につき 1 回だけ（押した回数だけ届けない）。
+          // 投稿に失敗したら印を外し、押し直しで案内をもう一度試せるようにする。
+          const noticeKey = `notice:${actionFingerprint({
+            senderId,
+            teamId: expectedTeamId,
+            channelId,
+            messageTs,
+            threadTs,
+            actionId: expectedActionId,
+            actionValue: rawValue,
+          })}`;
+          if (buttonPressLedger.has(noticeKey)) return {handled: true};
+          buttonPressLedger.set(noticeKey, nowMs);
+          startButtonNotice(
+            {actionId: expectedActionId, senderId, channelId, threadTs},
+            BUTTON_STALE_TEXT,
+            "value_shape",
+            logger,
+            () => buttonPressLedger.delete(noticeKey),
+          );
+        }
+        return {handled: true};
+      }
       const fingerprint = actionFingerprint({
         senderId,
         teamId: expectedTeamId,
         channelId,
         messageTs,
         threadTs,
-        actionId: MAIL_DRAFT_ACTION_ID,
+        actionId: expectedActionId,
         actionValue,
       });
-      if (seenActions.has(fingerprint) || pendingActions.has(fingerprint)) {
-        logger?.warn?.(`${PLUGIN_ID}: rejected replayed Slack mail action`);
+      if (
+        seenActions.has(fingerprint) ||
+        pendingActions.has(fingerprint) ||
+        buttonPressLedger.has(fingerprint)
+      ) {
+        logger?.warn?.(
+          `${PLUGIN_ID}: rejected replayed Slack button action action=${expectedActionId}`,
+        );
+        return {handled: true};
+      }
+      if (buttonDirect) {
+        // 1 押下 1 回: 台帳は await より前に同期で押さえる（同じ押下の再送・連打は上で止まる）。
+        // 実行が mcp へツールを渡す前に失敗したときだけ、executeButtonAction が外す。
+        // 台帳は 24h 持つ（BUTTON_PRESS_LEDGER_TTL_MS）＝ボタンが押せる間の押し直しはここで止まる。
+        buttonPressLedger.set(fingerprint, nowMs);
+        startButtonAction(
+          {
+            binding,
+            actionId: expectedActionId,
+            senderId,
+            teamId: expectedTeamId,
+            channelId,
+            threadTs,
+            messageTs,
+            fingerprint,
+            actionValue,
+            replyEphemeral: ephemeralReplier(ctx),
+          },
+          logger,
+        );
         return {handled: true};
       }
       const ingress = {
@@ -2178,6 +2760,8 @@ export function createCallerIdentityPlugin({
         threadTs,
         messageId: messageTs,
         actionFingerprint: fingerprint,
+        actionId: expectedActionId,
+        actionBlockId: blockId.value,
         actionValue,
         actionToolCallId: null,
         sessionSha256: null,
@@ -2185,16 +2769,279 @@ export function createCallerIdentityPlugin({
       };
       seenActions.set(fingerprint, nowMs);
       pendingActions.set(fingerprint, ingress);
+      // 直接実行が無効な環境（bearer か bot token が無い）だけの従来経路。
       // handled:false deliberately preserves OpenClaw's fixed-runtime
       // system-event + immediate-heartbeat path after authoritative capture.
       return {handled: false};
     } catch {
-      logger?.warn?.(`${PLUGIN_ID}: rejected malformed Slack mail action`);
+      logger?.warn?.(`${PLUGIN_ID}: rejected malformed Slack button action`);
       return {handled: true};
     }
   }
 
-  function bindMailDraftActionRun(event, ctx, logger) {
+  // ── ボタン押下の直接実行（2026-09-29 裁定「AI を通さず直接処理する」）──────────────────
+  // 押した本人の DM で押された押下だけを実行し、結果をその DM へ 1 通だけ投稿する。
+  //
+  // DM だけに限る理由（チャンネル・グループ・他人の DM での押下は実行しない）:
+  //   - 朝ダイジェストは本人の DM にだけ届く（run_morning_digest_fargate.py が conversations.open で
+  //     本人の IM を開いて投稿する）。ボタンが DM 以外にある時点で正規の経路ではない。
+  //   - 結果は本人にだけ見せる前提の文（カレンダー・Gmail のリンク、候補日時＝G3）。
+  //     チャンネルのスレッドへ返すと、そのチャンネルの全員に見える。
+  //   - 通常メッセージの束縛（matchesConversation）も DM は「押した本人の DM:<本人>」に限って
+  //     同一視している。同じ規律で、押された会話が本人の DM であることを Slack に確かめてから
+  //     実行する（conversations.open(users=本人) の IM id と一致すること。保証経路と同じ API・同じ cache）。
+  //   DM 以外の押下には、押した本人の DM へ案内（BUTTON_DM_ONLY_TEXT）だけを送る（無言にしない）。
+  //
+  // 押した人・投稿先の会話は Slack の押下イベントの値（handler の ctx）だけから決める。
+  // トークンやツールの出力・モデルの値からは取らない。
+  function startButtonAction(press, logger) {
+    const task = executeButtonAction(press, logger).catch(error => {
+      // ここに来るのは想定外（内部で握っている）。OpenClaw へは例外を返さない。
+      emitPluginLog(
+        logger,
+        "warn",
+        `button action crashed action=${press.actionId} reason=${connectPathReason(error)}`,
+      );
+    });
+    onBackgroundTask(task);
+  }
+
+  function startButtonNotice(press, text, reason, logger, onFailure = () => {}) {
+    const task = deliverButtonNotice(press, text, reason, logger)
+      .then(delivered => {
+        if (!delivered) onFailure();
+      })
+      .catch(error => {
+        onFailure();
+        emitPluginLog(
+          logger,
+          "warn",
+          `button notice crashed action=${press.actionId} reason=${connectPathReason(error)}`,
+        );
+      });
+    onBackgroundTask(task);
+  }
+
+  // 押した本人だけに見える一時表示（上流の ctx.respond.reply → Slack の response_url・ephemeral）。
+  // 上流の handler ctx にある respond を押下ごとに包んで返す（無い環境では null）。
+  // 押下の会話の中で押した本人にだけ見えるので、本人の DM を確かめられないとき（conversations.open の
+  // 失敗）にも、投稿先の規律（本人以外に見せない）を崩さずに返事ができる。上流の reply は例外を
+  // 握らない（Bolt の respond の失敗がそのまま来る）ので、呼び出し側が必ず catch する。待ちは上限で切る。
+  function ephemeralReplier(ctx) {
+    const respond = ctx?.respond;
+    const reply = respond?.reply;
+    if (typeof reply !== "function") return null;
+    return async text => {
+      let timer = null;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => reply.call(respond, {text, responseType: "ephemeral"})),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new ConnectPathError("ephemeral_timeout")),
+              BUTTON_EPHEMERAL_TIMEOUT_MS,
+            );
+            timer.unref?.();
+          }),
+        ]);
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+      }
+    };
+  }
+
+  // 一時表示を 1 行出す。失敗しても例外を上げず、ログ用の種別だけ返す。
+  async function sendButtonEphemeral(press, text) {
+    if (typeof press.replyEphemeral !== "function") return "none";
+    try {
+      await press.replyEphemeral(text);
+      return "ephemeral";
+    } catch (error) {
+      return `ephemeral_failed_${connectPathReason(error)}`;
+    }
+  }
+
+  // 押した本人の DM（conversations.open の IM id）。押下の会話がこれと一致したときだけ実行する。
+  function openPresserDm(senderId) {
+    return resolveCanonicalChannel({channelId: `DM:${senderId}`, senderId});
+  }
+
+  async function deliverButtonNotice(press, text, reason, logger) {
+    try {
+      const channel = await openPresserDm(press.senderId);
+      await postButtonMessage({channel, threadTs: channel === press.channelId ? press.threadTs : null}, {text});
+    } catch (error) {
+      emitPluginLog(
+        logger,
+        "warn",
+        `button notice action=${press.actionId} outcome=post_failed notice=${reason}` +
+          ` reason=${connectPathReason(error)}`,
+      );
+      return false;
+    }
+    emitPluginLog(
+      logger,
+      "info",
+      `button notice action=${press.actionId} outcome=delivered notice=${reason}`,
+    );
+    return true;
+  }
+
+  async function executeButtonAction(press, logger) {
+    const invocationId =
+      `${BUTTON_INVOCATION_PREFIX}-${randomBytesFn(16).toString("hex")}`;
+    const done = (outcome, extra = "") =>
+      emitPluginLog(
+        logger,
+        outcome === "delivered" ? "info" : "warn",
+        `button action invocation=${invocationId} action=${press.actionId}` +
+          ` outcome=${outcome}${extra}`,
+      );
+    // 押された会話が押した本人の DM か（Slack に確かめる）。
+    let ownDm;
+    try {
+      ownDm = await openPresserDm(press.senderId);
+    } catch (error) {
+      // 本人の DM を確かめられない＝投稿先も決められない。何も実行していないので台帳から外す。
+      // 無言にはしない: 押下の会話で押した本人にだけ見える一時表示で「もう一度押して」を返す
+      // （本人以外には見えないので、DM を確かめられなくても投稿先の規律は崩れない）。
+      buttonPressLedger.delete(press.fingerprint);
+      const notice = await sendButtonEphemeral(press, press.binding.texts.retry);
+      done("dm_unresolved", ` reason=${connectPathReason(error)} notice=${notice}`);
+      return;
+    }
+    if (ownDm !== press.channelId) {
+      // 実行しない（台帳は外さない＝同じ押下で案内を繰り返さない）。案内は本人の DM へ。
+      try {
+        await postButtonMessage({channel: ownDm, threadTs: null}, {text: BUTTON_DM_ONLY_TEXT});
+      } catch (error) {
+        done("post_failed", ` result=not_own_dm reason=${connectPathReason(error)}`);
+        return;
+      }
+      done("delivered", " result=not_own_dm");
+      return;
+    }
+    // 結果まで時間のかかるボタン（✏️・🗓）は、押した直後に本人にだけ見える 1 行を出す。
+    // mcp の呼び出しは待たせない（並行して走らせ、失敗しても実行には影響させない）。
+    if (press.binding.pendingText !== null) {
+      onBackgroundTask(
+        sendButtonEphemeral(press, press.binding.pendingText).then(notice => {
+          if (notice.startsWith("ephemeral_failed")) {
+            emitPluginLog(
+              logger,
+              "warn",
+              `button pending invocation=${invocationId} action=${press.actionId} outcome=${notice}`,
+            );
+          }
+        }),
+      );
+    }
+    const progress = {toolsCallSent: false};
+    let reply;
+    let result;
+    try {
+      const mcpResult = await callButtonTool({press, invocationId, progress});
+      ({reply, result} = renderButtonResult(press.binding, press.actionId, mcpResult));
+    } catch (error) {
+      const reason = connectPathReason(error);
+      if (progress.toolsCallSent) {
+        // mcp がツールを受け取った後に途切れた＝実行されたか分からない。台帳は外さない
+        // （もう一度押しても、mcp の one-use nonce と plugin の台帳の両方で止まる）。
+        reply = {text: press.binding.texts.unknown};
+        result = `unknown_${reason}`;
+      } else {
+        // mcp はまだツールを受け取っていない（nonce も未消費）＝何も実行されていない。
+        // 同じボタンをもう一度押せるよう台帳から外す（二重実行は mcp の nonce でも止まる）。
+        buttonPressLedger.delete(press.fingerprint);
+        reply = {text: press.binding.texts.retry};
+        result = `retry_${reason}`;
+      }
+    }
+    try {
+      await postButtonMessage({channel: press.channelId, threadTs: press.threadTs}, reply);
+    } catch (error) {
+      done("post_failed", ` result=${result} reason=${connectPathReason(error)}`);
+      return;
+    }
+    done("delivered", ` result=${result}`);
+  }
+
+  // 束縛先の 1 ツールを mcp へ直接呼ぶ（層1 と同じ手順・同じ claim の鋳造）。
+  // 引数は束縛のトークン引数 1 つだけ（捕捉した完全な value）。_user_context は mintCallerClaim が
+  // 押下の値（本人・team・会話・thread）で丸ごと作る。nonce は押下の指紋から HMAC で決める
+  // （heartbeat 経路の signToolCall と同じ）＝同じ押下は mcp の one-use nonce でも 2 回通らない。
+  async function callButtonTool({press, invocationId, progress}) {
+    const nowMs = now();
+    const sessionKey = `${BUTTON_SESSION_PREFIX}:${press.fingerprint}`;
+    let signed;
+    try {
+      signed = mintCallerClaim({
+        trusted: {
+          senderId: press.senderId,
+          teamId: press.teamId,
+          channelId: press.channelId,
+          threadTs: press.threadTs,
+          messageId: press.messageTs,
+          sessionSha256: createHash("sha256").update(sessionKey, "utf8").digest("hex"),
+        },
+        runId: invocationId,
+        toolCallId: invocationId,
+        tool: press.binding.tool,
+        params: {[press.binding.tokenParam]: press.actionValue, [USER_CONTEXT_KEY]: {}},
+        nowMs,
+        nonceBytes: actionNonceBytes(press.fingerprint),
+      });
+    } catch {
+      throw new ConnectPathError("claim_failed");
+    }
+    return callMcpTool({
+      fetchFn,
+      mcpUrl,
+      bearer: mcpBearer,
+      name: press.binding.tool,
+      toolArguments: signed.params,
+      timeoutMs: buttonTimeoutMs,
+      clientName: MCP_BUTTON_CLIENT_NAME,
+      progress,
+    });
+  }
+
+  // 投稿（保証経路と同じ chat.postMessage）。スレッドで押されたらそのスレッドへ返し、
+  // スレッドが弾かれたら（timeout 以外）スレッド無しで 1 回だけ投げ直す（postConnectMessage と同じ）。
+  // 時間切れは再送しない（retryOnTimeout=false）: Slack が受け付けた後に待ちだけが切れた場合、
+  // 再送すると同じ結果が 2 通届く。429・5xx・接続失敗は保証経路と同じく再試行する。
+  // 本人向けのリンク（Google）を展開表示しない。
+  async function postButtonMessage({channel, threadTs}, reply) {
+    const post = extra =>
+      callSlackApi({
+        fetchFn,
+        botToken: slackBotToken,
+        method: "chat.postMessage",
+        body: {
+          channel,
+          text: reply.text,
+          ...(Array.isArray(reply.blocks) ? {blocks: reply.blocks} : {}),
+          unfurl_links: false,
+          unfurl_media: false,
+          ...extra,
+        },
+        timeoutMs: SLACK_API_TIMEOUT_MS,
+        sleepFn,
+        retryOnTimeout: false,
+      });
+    if (threadTs === null || threadTs === undefined) return post({});
+    try {
+      return await post({thread_ts: threadTs});
+    } catch (error) {
+      if (error?.code === "slack_timeout") throw error;
+      return post({});
+    }
+  }
+
+  // heartbeat run（押下の system event を受けて上流が起こす run）を、捕捉済みの押下 1 件へ束縛する。
+  // 照合は system event の見え方（value・blockId は 160 字で切れる）と、捕捉した押下に同じ切り詰めを
+  // 掛けたものとの一致で行う。候補がちょうど 1 件のときだけ束縛し、0 件・2 件以上は run ごと拒否する。
+  function bindSlackActionRun(event, ctx, logger) {
     const runId = canonicalInvocationId(ctx?.runId);
     const sessionKey = nonBlank(ctx?.sessionKey, 2048);
     const channelId = consistentSlackChannel([
@@ -2212,26 +3059,28 @@ export function createCallerIdentityPlugin({
     }
     const nowMs = now();
     pruneState(nowMs);
-    const actionEvent = parseMailDraftSystemEvent(event?.prompt);
+    const actionEvent = parseSlackActionSystemEvent(event?.prompt);
     if (
       !actionEvent ||
       actionEvent.teamId !== expectedTeamId ||
-      actionEvent.channelId !== channelId
+      !actionRunChannelMatches(actionEvent, channelId)
     ) {
       rejectRun(runId, nowMs);
       logger?.warn?.(
-        `${PLUGIN_ID}: heartbeat has no exact authoritative Slack mail action`,
+        `${PLUGIN_ID}: heartbeat has no exact authoritative Slack button action`,
       );
       return;
     }
-    const fingerprint = actionFingerprint(actionEvent);
     const existing = ingressByRun.get(runId);
     if (existing) {
       if (
-        existing.ingressKind !== "action" ||
-        existing.actionFingerprint !== fingerprint ||
+        !actionEventMatches(existing, actionEvent) ||
         existing.sessionKey !== sessionKey ||
-        existing.channelId !== channelId
+        !(
+          existing.channelId === channelId ||
+          (Array.isArray(existing.channelAliases) &&
+            existing.channelAliases.includes(channelId))
+        )
       ) {
         rejectRun(runId, nowMs);
         logger?.warn?.(
@@ -2240,17 +3089,20 @@ export function createCallerIdentityPlugin({
       }
       return;
     }
-    const pending = pendingActions.get(fingerprint);
-    if (
-      !pending ||
-      nowMs - pending.receivedAtMs > ACTION_CONTEXT_TTL_MS
-    ) {
+    const candidates = [...pendingActions.values()].filter(
+      pending =>
+        nowMs - pending.receivedAtMs <= ACTION_CONTEXT_TTL_MS &&
+        actionEventMatches(pending, actionEvent),
+    );
+    if (candidates.length !== 1) {
       rejectRun(runId, nowMs);
       logger?.warn?.(
-        `${PLUGIN_ID}: Slack mail action is missing, replayed, or stale`,
+        `${PLUGIN_ID}: Slack button action is missing, replayed, stale, or ambiguous` +
+          ` action=${actionEvent.actionId} candidates=${candidates.length}`,
       );
       return;
     }
+    const pending = candidates[0];
     const ingress = {
       ...pending,
       sessionKey,
@@ -2258,10 +3110,15 @@ export function createCallerIdentityPlugin({
         .update(sessionKey, "utf8")
         .digest("hex"),
     };
+    if (channelId !== pending.channelId) {
+      // DM の heartbeat run は `DM:<押した本人>` を名乗る。署名の門（signToolCall）が run 側の
+      // 名前でも照合できるよう別名に持つ。claim には押下の正準 id（D…）を載せる（mcp が要求する形）。
+      ingress.channelAliases = [pending.channelId, channelId];
+    }
     if (!bindRun(runId, ingress)) {
       rejectRun(runId, nowMs, ingress);
       logger?.warn?.(
-        `${PLUGIN_ID}: Slack mail action could not bind one unique run`,
+        `${PLUGIN_ID}: Slack button action could not bind one unique run`,
       );
     }
   }
@@ -2464,7 +3321,7 @@ export function createCallerIdentityPlugin({
   function bindAgentRun(_event, ctx, logger) {
     if (String(ctx?.messageProvider ?? "").toLowerCase() !== "slack") return;
     if (ctx?.trigger === "heartbeat") {
-      bindMailDraftActionRun(_event, ctx, logger);
+      bindSlackActionRun(_event, ctx, logger);
       return;
     }
     const runId = canonicalInvocationId(ctx?.runId);
@@ -2879,10 +3736,19 @@ export function createCallerIdentityPlugin({
         shape(),
       );
     }
+    // ── ボタン束縛（ACTION_BINDINGS）─────────────────────────────────────────
+    // ボタン由来の run: 押下の action_id に束縛された 1 ツールだけを、1 回だけ署名する。
+    // メッセージ由来の run: 束縛表に載るツールは outsideAction に従う
+    //   deny        … 署名しない（mail_draft / schedule_propose / digest_ack）
+    //   blank_token … 署名するがトークン引数を "" に上書きする（calendar_event の自由文入口）
+    const actionBinding =
+      trusted.ingressKind === "action" ? actionBindingFor(trusted.actionId) : null;
+    const toolBinding =
+      trusted.ingressKind === "action" ? null : (ACTION_BINDING_BY_TOOL.get(tool) ?? null);
     if (trusted.ingressKind === "action") {
-      if (tool !== MAIL_DRAFT_TOOL) {
+      if (!actionBinding || tool !== actionBinding.tool) {
         return blockAndLog(
-          "Slack mail action cannot authorize another tool",
+          "Slack button action cannot authorize another tool",
           BLOCK_DIAG.TOOL_NAME_BINDING,
           logger,
           shape(),
@@ -2890,15 +3756,15 @@ export function createCallerIdentityPlugin({
       }
       if (trusted.actionToolCallId !== null) {
         return blockAndLog(
-          "Slack mail action was already consumed",
+          "Slack button action was already consumed",
           BLOCK_DIAG.INVOCATION_BINDING,
           logger,
           shape(),
         );
       }
-    } else if (tool === MAIL_DRAFT_TOOL) {
+    } else if (toolBinding && toolBinding.outsideAction !== "blank_token") {
       return blockAndLog(
-        "mail_draft requires an authoritative Slack button action",
+        `${tool} requires an authoritative Slack button action`,
         BLOCK_DIAG.TOOL_NAME_BINDING,
         logger,
         shape(),
@@ -2930,13 +3796,18 @@ export function createCallerIdentityPlugin({
         );
       }
       const suppliedParams = assertPlainObject(unwrapped.params, "tool params");
-      params =
-        trusted.ingressKind === "action"
-          ? {
-              ...suppliedParams,
-              draft_token: trusted.actionValue,
-            }
-          : suppliedParams;
+      if (actionBinding) {
+        // 押下時に捕捉した完全なトークンで上書きする（system event の値は 160 字で切れている）。
+        params = {
+          ...suppliedParams,
+          [actionBinding.tokenParam]: trusted.actionValue,
+        };
+      } else if (toolBinding && Object.hasOwn(suppliedParams, toolBinding.tokenParam)) {
+        // メッセージ由来ではボタンのトークンを使わせない（自由文の入口としてだけ通す）。
+        params = {...suppliedParams, [toolBinding.tokenParam]: ""};
+      } else {
+        params = suppliedParams;
+      }
       // ── `_user_context` はモデルに要求しない（2026-09-11 の根治）─────────────
       // 本番実測 2026-09-10 / 09-11 の P06 全 5 件は、モデルが `_user_context` を
       // **そもそも付けてこなかった**ケースだった（EFS の tool call 実物で確認。
@@ -2998,13 +3869,7 @@ export function createCallerIdentityPlugin({
 
     const nonceBytes =
       trusted.ingressKind === "action"
-        ? createHmac("sha256", secret)
-            .update(
-              `teamagent-slack-action-v1:${trusted.actionFingerprint}`,
-              "ascii",
-            )
-            .digest()
-            .subarray(0, 16)
+        ? actionNonceBytes(trusted.actionFingerprint)
         : randomBytesFn(16);
     if (!Buffer.isBuffer(nonceBytes) || nonceBytes.length !== 16) {
       return blockAndLog(
@@ -3047,6 +3912,15 @@ export function createCallerIdentityPlugin({
       trusted.actionToolCallId = eventToolCallId;
     }
     return { params: reconcileReturnedParams(event?.params, signed.params, unwrapDepth, logger) };
+  }
+
+  // 押下 1 件の claim nonce（押下の指紋から HMAC で決める）。heartbeat 経路（signToolCall）と
+  // 直接実行（callButtonTool）で同じ値になる＝同じ押下は mcp の one-use nonce で 1 回しか通らない。
+  function actionNonceBytes(fingerprint) {
+    return createHmac("sha256", secret)
+      .update(`teamagent-slack-action-v1:${fingerprint}`, "ascii")
+      .digest()
+      .subarray(0, 16);
   }
 
   // 署名 claim の鋳造。signToolCall（before_tool_call 経由）と層1（直接 tools/call）が
@@ -3538,11 +4412,15 @@ export function createCallerIdentityPlugin({
       if (typeof api?.registerInteractiveHandler !== "function") {
         fail("fixed OpenClaw interactive handler API is unavailable");
       }
-      api.registerInteractiveHandler({
-        channel: "slack",
-        namespace: MAIL_DRAFT_ACTION_ID,
-        handler: ctx => rememberMailDraftAction(ctx, api.logger),
-      });
+      // 束縛表の action_id ごとに 1 つずつ登録する（上流は data の最初の ":" より前を namespace とし、
+      // 登録の無い namespace の押下は plugin を通らない＝捕捉も束縛もされない）。
+      for (const actionId of Object.keys(ACTION_BINDINGS)) {
+        api.registerInteractiveHandler({
+          channel: "slack",
+          namespace: actionId,
+          handler: ctx => rememberSlackButtonAction(ctx, actionId, api.logger),
+        });
+      }
       // ── 「本番でどのフックが実際に呼ばれるか」を必ず観測できるようにする（2026-09-04） ──
       // 事故の教訓: 層1（before_agent_reply）が発火しているのかどうかを 2 便かけて判別
       // できなかった。理由は「発火した事実」を出す行が TRACE 依存で、その TRACE が
@@ -3621,7 +4499,8 @@ export function createCallerIdentityPlugin({
         `registered hooks=[${registeredHooks.join(",")}]` +
           ` trace=${traceEnabled ? "on" : "off"}` +
           ` mcp_bearer=${mcpBearer === null ? "no" : "yes"}` +
-          ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}`,
+          ` slack_bot_token=${slackBotToken === null ? "no" : "yes"}` +
+          ` button_direct=${buttonDirect ? "yes" : "no"}`,
       );
     },
   };

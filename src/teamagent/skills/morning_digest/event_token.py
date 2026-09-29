@@ -34,6 +34,12 @@ from teamagent.skills.morning_digest.draft_token import (
 _TOKEN_VERSION = 2
 _TOKEN_TYPE = "event"
 _LEGACY_FIELDS = frozenset({"s", "n", "l", "o", "e"})
+_TITLE_MAX_CHARS = 60
+# 📅 ボタンの value（=このトークン）の上限。calendar_event の入力 schema（event_token）と
+# 朝ダイジェストの schema（item.event_token）の max_length、caller-identity plugin の
+# ACTION_BINDINGS.calendar_event.maxLength と同じ値にする（3 か所の一致はテストで固定）。
+# 超えたトークンは plugin が押下を捕捉せず、mcp も schema で弾く＝押しても無反応のボタンになる。
+EVENT_TOKEN_MAX_LENGTH = 500
 
 
 @dataclass(frozen=True)
@@ -54,7 +60,16 @@ def encode_event_token(
     now: int | None = None,
     ttl_s: int | None = None,
 ) -> str | None:
-    """確定 MTG の日時/タイトルを所有者・失効付きで署名し button value 用文字列にする。"""
+    """確定 MTG の日時/タイトルを所有者・失効付きで署名し button value 用文字列にする。
+
+    トークンは ``EVENT_TOKEN_MAX_LENGTH`` 字以内に収める。payload の JSON は UTF-8 のまま
+    書く（``ensure_ascii=False``）。既定の ``\\uXXXX`` だと日本語 1 字が 6 バイトになり、
+    件名が 38 字前後を超えると 500 字を超えていた（実測: 10 字で 277・38 字で 501・60 字で 677）。
+    UTF-8 なら 60 字でも 437 字に収まる。それでも収まらない件名（4 バイト文字の多い件名など）は
+    末尾から削って収め、件名を空にしても収まらなければ発行しない（None＝📅 を出さない）。
+    decode は受け取った raw バイトで HMAC を検証し ``json.loads`` するので、旧形式
+    （``\\uXXXX``）と新形式のどちらも従来どおり読める（配布の順序に依らない）。
+    """
     try:
         issued = coerce_epoch_seconds(now)
         ttl = load_mail_action_token_ttl_s(explicit_ttl_s=ttl_s)
@@ -64,18 +79,29 @@ def encode_event_token(
         keyring = load_mail_action_hmac_keyring(now=issued)
         if expires is None or keyring is None:
             return None
-        payload = {
-            "v": _TOKEN_VERSION,
-            "typ": _TOKEN_TYPE,
-            "s": str(start_iso),
-            "n": str(end_iso),
-            "l": str(title)[:60],
-            "o": _owner_hash(owner_email),
-            "e": expires,
-        }
-        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sig = keyring.sign(raw, purpose=HMAC_PURPOSE_CALENDAR_EVENT, digest_bytes=_SIG_LEN)
-        return _b64e(raw) + "." + _b64e(sig)
+        # LLM 由来の件名に孤立サロゲートが混じると UTF-8 に符号化できない（以前は \uXXXX で
+        # 通っていた）。「?」に置き換えて、📅 を出せなくなる退行を避ける。
+        title_text = str(title).encode("utf-8", "replace").decode("utf-8")[:_TITLE_MAX_CHARS]
+        while True:
+            payload = {
+                "v": _TOKEN_VERSION,
+                "typ": _TOKEN_TYPE,
+                "s": str(start_iso),
+                "n": str(end_iso),
+                "l": title_text,
+                "o": _owner_hash(owner_email),
+                "e": expires,
+            }
+            raw = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            sig = keyring.sign(raw, purpose=HMAC_PURPOSE_CALENDAR_EVENT, digest_bytes=_SIG_LEN)
+            token = _b64e(raw) + "." + _b64e(sig)
+            if len(token) <= EVENT_TOKEN_MAX_LENGTH:
+                return token
+            if not title_text:
+                return None
+            title_text = title_text[:-1]
     except Exception:
         return None
 
@@ -151,6 +177,7 @@ def stable_event_id(
 
 
 __all__ = [
+    "EVENT_TOKEN_MAX_LENGTH",
     "MeetingEventPayload",
     "decode_event_token",
     "encode_event_token",
