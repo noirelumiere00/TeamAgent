@@ -270,6 +270,12 @@ fields @timestamp, @message
 DM 以外（チャンネル・グループ・本人以外の DM）で押された場合は実行せず、押した本人の DM へ案内だけ送る。
 結果まで時間のかかる ✏️・🗓 は、押した直後に「作っています」を押した本人にだけ一時表示する
 （上流の `ctx.respond.reply`＝Slack の response_url・ephemeral。結果の 1 通とは別で、再読み込みで消える）。
+結果の投稿は、この一時表示を送り終えてから出す（すぐ返る失敗の後に「作っています」が残らないように）。
+DM への投稿（結果・案内）に失敗したときは、押下の会話で押した本人にだけ同じ文を一時表示する（無言にしない）。
+同じボタンの押し直しは実行しないが、押した本人にだけ状態を一時表示で返す（下の `button repress`）。
+二重実行を止める権威は mcp の one-use nonce で、mcp は消費した nonce を **25h**（ボタンの value の最長の寿命 24h＋余裕・
+`caller_claim.py` の `CALLER_CLAIM_REPLAY_RETENTION_SECONDS`）保持する。DynamoDB の TTL 削除の遅れには頼らない
+（2026-09-29 までは claim の exp＝60 秒で行を失効させており、TTL 削除の後に同じ押下がもう一度通りえた）。
 直接実行は `TEAMAGENT_MCP_BEARER` と `SLACK_BOT_TOKEN` の両方があるときだけ有効で、起動時の
 `registered hooks=[…] … button_direct=yes|no` で分かる（`no` なら従来の heartbeat 経路のまま）。
 
@@ -285,16 +291,17 @@ fields @timestamp, @message
 |---|---|
 | `button action invocation=slack-action-… action=<id> outcome=delivered result=tool_message` | 実行して結果を届けた（正常）。`result=tool_message_error_<種別>` はツールが利用者向けの失敗文を返した（`expired` / `not_connected` 等・文はそのまま届いている） |
 | `… outcome=delivered result=tool_unavailable` | mcp にそのツールが無い（`digest_ack` は本番 OFF）。利用者には「このボタンはいま使えません。」 |
-| `… outcome=delivered result=gateway_caller_identity_rejected` | mcp の門が拒否。**同じ押下の再生（one-use nonce が消費済み＝すでに実行済み）もこの code で返る**（OC の再起動・デプロイ直後や OC タスク 2 つで plugin の台帳に無い押下）。本人を確かめられない拒否と応答からは見分けられないので、利用者には「〜できたか確認できませんでした。〜をご確認ください」（texts.unknown）を出し、自由文での頼み直しは勧めない（二重登録の防止）。mcp 側で同時刻に `caller_claim_rejected`（`reason=caller claim replay rejected`）なら再生、`identity_spoof_rejected`（`reason=resolve_none` / `resolver_error` 等）なら本人の解決失敗 |
+| `… outcome=delivered result=gateway_caller_identity_rejected diag=CONNECT-I01<a/b/c>` | mcp の門が拒否。**同じ押下の再生（one-use nonce が消費済み＝すでに実行済み）もこの code で返る**（OC の再起動・デプロイ直後や OC タスク 2 つで plugin の台帳に無い押下。mcp は nonce を 25h 覚えているので、ボタンが押せる間はいつ押し直しても止まる）。本人を確かめられない拒否と応答からは見分けられないので、利用者には「〜できたか確認できませんでした。〜をご確認ください」（texts.unknown）を出し、自由文での頼み直しは勧めない（二重登録の防止）。その後ろに mcp の定型の案内と `診断: CONNECT-I01a|b|c …` 行をそのまま添える（形が定型に完全一致するときだけ。`diag=` が無ければ添えていない）。`I01a` は claim の拒否（再生を含む）、`I01b`/`I01c` は本人の解決失敗（上の I01 の行）。mcp 側で同時刻に `caller_claim_rejected`（`reason=caller claim replay rejected`）なら再生 |
 | `… outcome=delivered result=gateway_<code>`（上記以外） | mcp の門が拒否（ツールは走っていない）。利用者には定型文（別の頼み方を案内）。mcp 側のログと時刻で突合 |
 | `… outcome=delivered result=retry_<reason>` | mcp へツールを渡す前に失敗（`fetch_failed` / `mcp_http_5xx` / `timeout` 等）。何も実行されていないので押下の台帳から外し、利用者には「もう一度押すか…」 |
 | `… outcome=delivered result=unknown_<reason>` | ツールを渡した後に途切れた（実行されたか分からない）。再押下は plugin の台帳と mcp の one-use nonce の両方で止まる。利用者には確認を促す文 |
 | `… outcome=delivered result=not_own_dm` | DM 以外（または本人以外の DM）での押下。実行せず、押した本人の DM へ案内を送った |
-| `… outcome=post_failed result=… reason=slack_…` | ツールは実行済み（または失敗）だが Slack へ届かなかった。**ツールは再実行しない**。`reason=slack_api_<error>` は Slack の `ok:false`、`slack_http_5xx` は 2 回再送した後。`reason=slack_timeout` は**再送しない**（Slack が受け付けた後に待ちだけ切れた場合、再送すると 2 通になる）ので、利用者に 1 通届いていることもある |
+| `… outcome=post_failed result=not_own_dm reason=… fallback=<種別>` | DM 以外での押下の案内が DM へ届かなかった。`fallback=ephemeral` は押下の会話で本人にだけ一時表示で案内した（案内済みとして台帳を保つ）。`fallback=ephemeral_failed_<reason>` / `none` はどこにも届いていないので台帳から外し、押し直しで案内をもう一度試す（2026-09-29 までは外さず、同じボタンが 24h 無言になっていた） |
+| `… outcome=post_failed result=… reason=slack_… fallback=<種別>` | ツールは実行済み（または失敗）だが結果が DM へ届かなかった。**ツールは再実行しない**。`fallback=ephemeral` は同じ文を押下の会話で本人にだけ一時表示した（再読み込みで消える）。`reason=slack_api_<error>` は Slack の `ok:false`、`slack_http_5xx` は 2 回再送した後。`reason=slack_timeout` は**再送しない**（Slack が受け付けた後に待ちだけ切れた場合、再送すると DM に 2 通残る）が、一時表示は出す（DM に 1 通届いていることもある） |
 | `… outcome=dm_unresolved reason=… notice=<種別>` | `conversations.open` で本人の DM を確かめられなかった（Slack 障害）。何も実行していない（押下の台帳から外すので、押し直せば実行される）。`notice=ephemeral` は押下の会話で本人にだけ「もう一度押して」を一時表示した、`notice=ephemeral_failed_<reason>` は response_url の失効等で表示もできなかった（無音）、`notice=none` は上流が respond を渡していない |
 | `button pending invocation=… action=<id> outcome=ephemeral_failed_<reason>` | ✏️・🗓 の「作っています」の一時表示が出せなかった（response_url の失効等）。実行と結果の投稿には影響しない |
-| `button action rejected reason=value_shape action=<id> value_len=N direct=yes` ＋ `button notice … notice=value_shape` | 古い・別種のトークンのボタン（例: 修正前のダイジェストの件名が長い 📅）。実行せず「最新の朝ダイジェストから」を案内。案内は同じボタンにつき 1 回（投稿に失敗したときだけ押し直しで再送） |
-| `rejected replayed Slack button action action=<id>` | 同じボタンの再押下・連打。直接実行では押下の台帳を **24h＋10 分**（ボタンの value の最長の寿命より長く）持つので、同じ OC プロセスの間は何時間後の押し直しも何もしない。OC の再起動後の押し直しは mcp の one-use nonce が止める（上の `gateway_caller_identity_rejected`） |
+| `button action rejected reason=value_shape action=<id> value_len=N direct=yes` ＋ `button notice … notice=value_shape` | 古い・別種のトークンのボタン（例: 修正前のダイジェストの件名が長い 📅）。実行せず「最新の朝ダイジェストから」を案内。DM への案内は同じボタンにつき 1 回（DM に届かなければ一時表示で案内・どちらにも届かなかったときだけ押し直しで再送）。押し直しには一時表示で同じ案内 |
+| `rejected replayed Slack button action action=<id> state=<状態>` ＋ `button repress action=<id> state=<状態> notice=<種別>` | 同じボタンの再押下・連打。直接実行では押下の台帳を **24h＋10 分**（ボタンの value の最長の寿命より長く）持つので、同じ OC プロセスの間は何時間後の押し直しも実行しない。押した本人にだけ一時表示で状態を返す: `running`＝「いま処理しています」、`answered`＝「すでに押されています（結果はこの DM）」（結果が unknown だった押下・☑️ を取り消した後の同じ ☑️ もこれ）、`undelivered`＝結果を DM に残せなかった押下で texts.unknown（確かめてください）、`not_own_dm`＝DM 以外での押下の案内、`notice`＝値の形の案内。`notice=ephemeral_failed_<reason>` は response_url の失効等で一時表示も出せなかった。OC の再起動後の押し直しは mcp の one-use nonce が止める（上の `gateway_caller_identity_rejected`） |
 | `rejected incomplete or unauthorized Slack button action` | 押下の同一性が確かめられない（interactionId 不一致・未認可の送信者等）。案内も送らない |
 
 ## 関連

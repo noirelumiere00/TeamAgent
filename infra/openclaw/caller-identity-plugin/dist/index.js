@@ -225,9 +225,12 @@ const BUTTON_MCP_TIMEOUT_MS = 120_000;
 // 直接実行した押下の台帳（buttonPressLedger）の保持期間。ボタンの value（mcp の HMAC トークン）の
 // 最長の寿命（24h・MAIL_ACTION_TTL_S の上限）より長くとる（2026-09-29 レビュー指摘）。
 // 以前は署名経路と同じ seenActions（10 分）に置いていたため、10 分を過ぎて押し直すと plugin は通し、
-// mcp の one-use nonce（押下の指紋から決まる固定値・DynamoDB の TTL 削除は数時間〜数日遅れる）が
-// 「再生」として拒否し、それを失敗として本人へ伝えて自由文での頼み直し（＝別 id での二重登録）を招いていた。
-// 押下の台帳は mcp の nonce より先に切れてはならない。
+// mcp の one-use nonce（押下の指紋から決まる固定値）が「再生」として拒否し、それを失敗として本人へ
+// 伝えて自由文での頼み直し（＝別 id での二重登録）を招いていた。
+// 台帳はメモリ上だけ（OC の再起動・タスク 2 つでは消える／共有されない）。二重実行を止める権威は
+// mcp の one-use nonce で、mcp は消費した nonce をボタンの value の寿命＋余裕（25h・
+// caller_claim.py の CALLER_CLAIM_REPLAY_RETENTION_SECONDS）保持する（TTL 削除の遅れには頼らない）。
+// 台帳は、同じプロセスの間の押し直しを mcp へ出さずに止め、本人へ状態を返すためのもの。
 const BUTTON_PRESS_LEDGER_TTL_MS = 24 * 60 * 60 * 1000 + INBOUND_CONTEXT_TTL_MS;
 // 台帳の上限。超えたら古いものから捨てる（署名経路を落とす MAX_TRACKED_CONTEXTS の fail には
 // 相乗りさせない）。捨てた押下の押し直しは mcp の nonce が止め、文面は texts.unknown になる。
@@ -435,6 +438,25 @@ export const BUTTON_DM_ONLY_TEXT =
 // 値の形が合わない押下（古いダイジェストの長すぎるトークン・別種のトークン等）への案内。
 export const BUTTON_STALE_TEXT =
   "このボタンは使えなくなっています。最新の朝ダイジェストから押してください。";
+// 台帳にある押下（同じボタン）の押し直しへ、押した本人にだけ一時表示で返す 1 行（無言にしない）。
+// 同じ押下は plugin の台帳と mcp の one-use nonce で 1 回しか実行しないので、「もう一度実行する」とは
+// 言わない。結果が unknown だった押下・☑️ を取り消した後の同じ ☑️ の押し直しもここに来る。
+//   running    … 実行中（mcp の応答待ち）
+//   answered   … 結果（成功・失敗・unknown の文）を本人の DM へ投稿済み
+//   undelivered… 実行（または失敗）したが結果を DM へ届けられなかった → binding.texts.unknown
+//   not_own_dm … DM 以外で押された（実行していない）→ BUTTON_DM_ONLY_TEXT
+export const BUTTON_RUNNING_TEXT =
+  "このボタンはいま処理しています。終わったらこの DM でお知らせします。";
+export const BUTTON_ALREADY_PRESSED_TEXT =
+  "このボタンはすでに押されています（同じボタンは 1 回だけ使えます）。結果はこの DM にお送りしています。";
+// mcp の本人特定の拒否（server.py の _identity_rejected）の末尾 2 行。利用者が管理者へ転送するための
+// 定型の案内と診断行（connect_diagnostics.py の admin_forward_hint / format_diag_line）だけを、
+// この形に完全一致するときに限って texts.unknown の後ろへ添える（SOUL「診断: 行はそのまま出す」と同じ扱い）。
+// 英語の理由（"Caller authorization failed."）や対処文は出さない。
+const IDENTITY_FORWARD_HINT_RE =
+  /^解決しない場合は、次の 1 行をそのまま管理者（[^\s<>&|（）]{1,32}）へ送ってください:$/u;
+const IDENTITY_DIAG_LINE_RE =
+  /^診断: (CONNECT-I01[abc]) [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} JST (?:-|U[A-Z0-9]{8,32})$/u;
 // 上流の namespace 規則（openclaw@v2026.7.1 src/plugins/interactive-shared.ts:13-20）と、
 // data = `${actionId}:${value}` の最初の ":" で namespace を切る規則（同 :30-35）に合わせる。
 const SLACK_ACTION_NAMESPACE_RE = /^[a-z][a-z0-9_]{0,63}$/u;
@@ -444,6 +466,21 @@ const BUTTON_TEXT_KINDS = ["retry", "failed", "unknown"];
 
 function isButtonText(value) {
   return typeof value === "string" && value.trim() !== "" && value.length <= 200;
+}
+
+// 台帳にある押下の押し直しへ返す 1 行（状態は BUTTON_RUNNING_TEXT の節）。
+// 知らない状態は「確かめてください」（texts.unknown）に倒す（実行済みでありうる）。
+function buttonRepressText(binding, state) {
+  switch (state) {
+    case "running":
+      return BUTTON_RUNNING_TEXT;
+    case "answered":
+      return BUTTON_ALREADY_PRESSED_TEXT;
+    case "not_own_dm":
+      return BUTTON_DM_ONLY_TEXT;
+    default:
+      return binding.texts.unknown;
+  }
 }
 
 // 束縛表の自己検査（起動時に落とす）。1 対 1（ツールの重複なし）であること。
@@ -1456,10 +1493,32 @@ export function renderButtonResult(binding, actionId, result) {
   // すでに実行済み。plugin の再起動・OC タスク 2 つ・台帳の上限落ちで plugin が覚えていないとき）が入り、
   // 本人を確かめられない拒否とは応答から見分けられない。実行済みでありうるので texts.failed
   // （自由文での頼み直しを勧める）にはせず、確認を促す texts.unknown にする（二重登録を招かない）。
+  // mcp の診断行（CONNECT-I01a/b/c）は、定型の形に完全一致するときだけ後ろへ添える
+  // （本人の解決失敗＝I01b/c は利用者では直らず、管理者が行を引く。AI 経路の SOUL と同じ扱い）。
   if (code === "caller_identity_rejected") {
-    return { reply: { text: binding.texts.unknown }, result: `gateway_${code}` };
+    const diag = identityDiagnosticLines(data.error);
+    return {
+      reply: {
+        text: diag
+          ? [binding.texts.unknown, ...diag.lines].map(escapeSlackText).join("\n")
+          : binding.texts.unknown,
+      },
+      result: `gateway_${code}${diag ? ` diag=${diag.code}` : ""}`,
+    };
   }
   return failed(`gateway_${code}`);
+}
+
+// mcp の本人特定の拒否文から、管理者へ転送する案内と診断行（末尾 2 行）を取り出す。
+// どちらかが定型の形でなければ何も出さない（mcp の文を部分的に出さない）。
+function identityDiagnosticLines(error) {
+  if (typeof error !== "string" || error.length > 2000) return null;
+  const lines = error.split("\n");
+  if (lines.length < 3) return null;
+  const hint = lines[lines.length - 2];
+  const diag = IDENTITY_DIAG_LINE_RE.exec(lines[lines.length - 1]);
+  if (!IDENTITY_FORWARD_HINT_RE.test(hint) || diag === null) return null;
+  return { lines: [hint, diag[0]], code: diag[1] };
 }
 
 function buildButtonReply(binding, actionId, data, message) {
@@ -1990,8 +2049,9 @@ export function createCallerIdentityPlugin({
   const pendingByMessage = new Map();
   const pendingActions = new Map();
   const seenActions = new Map();
-  // 直接実行（buttonDirect）の押下の台帳。key は押下の指紋（actionFingerprint）、値は記録時刻。
-  // 値の形が合わない押下への案内の 1 回性にも使う（key は "notice:" ＋生の value での指紋）。
+  // 直接実行（buttonDirect）の押下の台帳。key は押下の指紋（actionFingerprint）、値は
+  // {atMs: 記録時刻, state: 押し直しへ返す一時表示を決める状態（BUTTON_RUNNING_TEXT の節）}。
+  // 値の形が合わない押下への案内の 1 回性にも使う（key は "notice:" ＋生の value での指紋・state は "notice"）。
   // 署名経路の seenActions（10 分）とは寿命を分ける: mcp の one-use nonce より先に切れないよう、
   // ボタンの value の最長の寿命（24h）より長く持つ（BUTTON_PRESS_LEDGER_TTL_MS）。
   // 上限（MAX_BUTTON_PRESS_LEDGER）で古いものから捨て、署名経路の capacity の fail には相乗りさせない。
@@ -2066,8 +2126,8 @@ export function createCallerIdentityPlugin({
         seenActions.delete(fingerprint);
       }
     }
-    for (const [key, pressedAtMs] of buttonPressLedger) {
-      if (nowMs - pressedAtMs > BUTTON_PRESS_LEDGER_TTL_MS) {
+    for (const [key, entry] of buttonPressLedger) {
+      if (nowMs - entry.atMs > BUTTON_PRESS_LEDGER_TTL_MS) {
         buttonPressLedger.delete(key);
       }
     }
@@ -2686,8 +2746,9 @@ export function createCallerIdentityPlugin({
             ` value_len=${rawValue.length} direct=${buttonDirect ? "yes" : "no"}`,
         );
         if (buttonDirect) {
-          // 案内は同じボタン（生の value での指紋）につき 1 回だけ（押した回数だけ届けない）。
-          // 投稿に失敗したら印を外し、押し直しで案内をもう一度試せるようにする。
+          // DM への案内は同じボタン（生の value での指紋）につき 1 回だけ（押した回数だけ届けない）。
+          // 押し直しには、押した本人にだけ見える一時表示で同じ案内を返す（無言にしない）。
+          // 案内がどこにも届かなかったら印を外し、押し直しで案内をもう一度試せるようにする。
           const noticeKey = `notice:${actionFingerprint({
             senderId,
             teamId: expectedTeamId,
@@ -2697,10 +2758,20 @@ export function createCallerIdentityPlugin({
             actionId: expectedActionId,
             actionValue: rawValue,
           })}`;
-          if (buttonPressLedger.has(noticeKey)) return {handled: true};
-          buttonPressLedger.set(noticeKey, nowMs);
+          const notice = {
+            actionId: expectedActionId,
+            senderId,
+            channelId,
+            threadTs,
+            replyEphemeral: ephemeralReplier(ctx),
+          };
+          if (buttonPressLedger.has(noticeKey)) {
+            startRepressNotice(notice, "notice", BUTTON_STALE_TEXT, logger);
+            return {handled: true};
+          }
+          buttonPressLedger.set(noticeKey, {atMs: nowMs, state: "notice"});
           startButtonNotice(
-            {actionId: expectedActionId, senderId, channelId, threadTs},
+            notice,
             BUTTON_STALE_TEXT,
             "value_shape",
             logger,
@@ -2718,21 +2789,33 @@ export function createCallerIdentityPlugin({
         actionId: expectedActionId,
         actionValue,
       });
+      const pressed = buttonPressLedger.get(fingerprint);
       if (
         seenActions.has(fingerprint) ||
         pendingActions.has(fingerprint) ||
-        buttonPressLedger.has(fingerprint)
+        pressed !== undefined
       ) {
         logger?.warn?.(
-          `${PLUGIN_ID}: rejected replayed Slack button action action=${expectedActionId}`,
+          `${PLUGIN_ID}: rejected replayed Slack button action action=${expectedActionId}` +
+            (pressed === undefined ? "" : ` state=${pressed.state}`),
         );
+        // 直接実行の押し直しは実行しないが、押した本人にだけ一時表示で状態を返す（無言にしない）。
+        // 結果が unknown だった押下・☑️ を取り消した後の同じ ☑️ も、ここで「すでに押されています」になる。
+        if (pressed !== undefined) {
+          startRepressNotice(
+            {actionId: expectedActionId, replyEphemeral: ephemeralReplier(ctx)},
+            pressed.state,
+            buttonRepressText(binding, pressed.state),
+            logger,
+          );
+        }
         return {handled: true};
       }
       if (buttonDirect) {
         // 1 押下 1 回: 台帳は await より前に同期で押さえる（同じ押下の再送・連打は上で止まる）。
         // 実行が mcp へツールを渡す前に失敗したときだけ、executeButtonAction が外す。
         // 台帳は 24h 持つ（BUTTON_PRESS_LEDGER_TTL_MS）＝ボタンが押せる間の押し直しはここで止まる。
-        buttonPressLedger.set(fingerprint, nowMs);
+        buttonPressLedger.set(fingerprint, {atMs: nowMs, state: "running"});
         startButtonAction(
           {
             binding,
@@ -2822,6 +2905,26 @@ export function createCallerIdentityPlugin({
     onBackgroundTask(task);
   }
 
+  // 台帳にある押下の押し直しへ、押した本人にだけ見える一時表示で 1 行返す（handler は待たせない）。
+  function startRepressNotice(press, state, text, logger) {
+    onBackgroundTask(
+      sendButtonEphemeral(press, text).then(notice => {
+        emitPluginLog(
+          logger,
+          notice === "ephemeral" ? "info" : "warn",
+          `button repress action=${press.actionId} state=${state} notice=${notice}`,
+        );
+      }),
+    );
+  }
+
+  // 押下の台帳の状態を進める。台帳の上限で捨てられていたら（実行中に 5000 件を超えた）入れ直す。
+  function markButtonPress(key, state) {
+    const entry = buttonPressLedger.get(key);
+    if (entry !== undefined) entry.state = state;
+    else buttonPressLedger.set(key, {atMs: now(), state});
+  }
+
   // 押した本人だけに見える一時表示（上流の ctx.respond.reply → Slack の response_url・ephemeral）。
   // 上流の handler ctx にある respond を押下ごとに包んで返す（無い環境では null）。
   // 押下の会話の中で押した本人にだけ見えるので、本人の DM を確かめられないとき（conversations.open の
@@ -2866,25 +2969,49 @@ export function createCallerIdentityPlugin({
     return resolveCanonicalChannel({channelId: `DM:${senderId}`, senderId});
   }
 
+  // 本人の DM へ 1 通。届かなかったら、押下の会話で押した本人にだけ見える一時表示で同じ文を返す
+  // （無言にしない）。一時表示は text だけ（取り消しボタンの blocks は付かない）。
+  // Slack が受け付けた後の時間切れ（slack_timeout）でも一時表示を出す: DM に 1 通届いていることは
+  // あるが、一時表示は再読み込みで消える（2 通目として残らない）。無言より重複のほうがまし。
+  // 返り値 {posted: DM へ届いた, delivered: DM か一時表示のどちらかで届いた, detail: ログ用}。
+  async function deliverButtonReply(press, target, reply) {
+    try {
+      await postButtonMessage(target, reply);
+      return {posted: true, delivered: true, detail: ""};
+    } catch (error) {
+      return ephemeralFallback(press, reply.text, error);
+    }
+  }
+
+  async function ephemeralFallback(press, text, error) {
+    const fallback = await sendButtonEphemeral(press, text);
+    return {
+      posted: false,
+      delivered: fallback === "ephemeral",
+      detail: ` reason=${connectPathReason(error)} fallback=${fallback}`,
+    };
+  }
+
   async function deliverButtonNotice(press, text, reason, logger) {
+    let delivery;
     try {
       const channel = await openPresserDm(press.senderId);
-      await postButtonMessage({channel, threadTs: channel === press.channelId ? press.threadTs : null}, {text});
-    } catch (error) {
-      emitPluginLog(
-        logger,
-        "warn",
-        `button notice action=${press.actionId} outcome=post_failed notice=${reason}` +
-          ` reason=${connectPathReason(error)}`,
+      delivery = await deliverButtonReply(
+        press,
+        {channel, threadTs: channel === press.channelId ? press.threadTs : null},
+        {text},
       );
-      return false;
+    } catch (error) {
+      // 本人の DM を確かめられない（conversations.open の失敗）。
+      delivery = await ephemeralFallback(press, text, error);
     }
     emitPluginLog(
       logger,
-      "info",
-      `button notice action=${press.actionId} outcome=delivered notice=${reason}`,
+      delivery.posted ? "info" : "warn",
+      `button notice action=${press.actionId}` +
+        ` outcome=${delivery.posted ? "delivered" : "post_failed"} notice=${reason}${delivery.detail}`,
     );
-    return true;
+    return delivery.delivered;
   }
 
   async function executeButtonAction(press, logger) {
@@ -2911,34 +3038,39 @@ export function createCallerIdentityPlugin({
       return;
     }
     if (ownDm !== press.channelId) {
-      // 実行しない（台帳は外さない＝同じ押下で案内を繰り返さない）。案内は本人の DM へ。
-      try {
-        await postButtonMessage({channel: ownDm, threadTs: null}, {text: BUTTON_DM_ONLY_TEXT});
-      } catch (error) {
-        done("post_failed", ` result=not_own_dm reason=${connectPathReason(error)}`);
-        return;
-      }
-      done("delivered", " result=not_own_dm");
+      // 実行しない。案内は本人の DM へ（届かなければ押下の会話で本人にだけ一時表示）。
+      // 案内が届いたら台帳を保つ（同じ押下の押し直しには一時表示で同じ案内を返し、DM へは繰り返さない）。
+      // どこにも届かなかったら印を外し、押し直しで案内をもう一度試せるようにする
+      // （値の形の案内 startButtonNotice と同じ。外さないと同じボタンが 24h 無言になる）。
+      const delivery = await deliverButtonReply(
+        press,
+        {channel: ownDm, threadTs: null},
+        {text: BUTTON_DM_ONLY_TEXT},
+      );
+      if (delivery.delivered) markButtonPress(press.fingerprint, "not_own_dm");
+      else buttonPressLedger.delete(press.fingerprint);
+      done(delivery.posted ? "delivered" : "post_failed", ` result=not_own_dm${delivery.detail}`);
       return;
     }
     // 結果まで時間のかかるボタン（✏️・🗓）は、押した直後に本人にだけ見える 1 行を出す。
     // mcp の呼び出しは待たせない（並行して走らせ、失敗しても実行には影響させない）。
+    let pending = null;
     if (press.binding.pendingText !== null) {
-      onBackgroundTask(
-        sendButtonEphemeral(press, press.binding.pendingText).then(notice => {
-          if (notice.startsWith("ephemeral_failed")) {
-            emitPluginLog(
-              logger,
-              "warn",
-              `button pending invocation=${invocationId} action=${press.actionId} outcome=${notice}`,
-            );
-          }
-        }),
-      );
+      pending = sendButtonEphemeral(press, press.binding.pendingText).then(notice => {
+        if (notice.startsWith("ephemeral_failed")) {
+          emitPluginLog(
+            logger,
+            "warn",
+            `button pending invocation=${invocationId} action=${press.actionId} outcome=${notice}`,
+          );
+        }
+      });
+      onBackgroundTask(pending);
     }
     const progress = {toolsCallSent: false};
     let reply;
     let result;
+    let released = false;
     try {
       const mcpResult = await callButtonTool({press, invocationId, progress});
       ({reply, result} = renderButtonResult(press.binding, press.actionId, mcpResult));
@@ -2953,17 +3085,24 @@ export function createCallerIdentityPlugin({
         // mcp はまだツールを受け取っていない（nonce も未消費）＝何も実行されていない。
         // 同じボタンをもう一度押せるよう台帳から外す（二重実行は mcp の nonce でも止まる）。
         buttonPressLedger.delete(press.fingerprint);
+        released = true;
         reply = {text: press.binding.texts.retry};
         result = `retry_${reason}`;
       }
     }
-    try {
-      await postButtonMessage({channel: press.channelId, threadTs: press.threadTs}, reply);
-    } catch (error) {
-      done("post_failed", ` result=${result} reason=${connectPathReason(error)}`);
-      return;
-    }
-    done("delivered", ` result=${result}`);
+    // 「作っています」の一時表示より先に結果が届くと、結果の後に「作っています」が残る（mcp が
+    // すぐ返す失敗・期限切れのとき）。一時表示の送信（上限 BUTTON_EPHEMERAL_TIMEOUT_MS）を待ってから投稿する。
+    if (pending !== null) await pending;
+    // 結果の投稿に失敗したら（ツールは再実行しない）、押下の会話で本人にだけ一時表示で同じ文を返す。
+    const delivery = await deliverButtonReply(
+      press,
+      {channel: press.channelId, threadTs: press.threadTs},
+      reply,
+    );
+    // 押し直しへの一時表示のための状態。DM に残る結果が無い（一時表示だけ・どこにも届かない）なら
+    // 「確かめてください」（texts.unknown）を返す。retry で台帳から外した押下は入れ直さない。
+    if (!released) markButtonPress(press.fingerprint, delivery.posted ? "answered" : "undelivered");
+    done(delivery.posted ? "delivered" : "post_failed", ` result=${result}${delivery.detail}`);
   }
 
   // 束縛先の 1 ツールを mcp へ直接呼ぶ（層1 と同じ手順・同じ claim の鋳造）。

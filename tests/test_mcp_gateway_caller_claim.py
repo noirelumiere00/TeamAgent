@@ -12,8 +12,10 @@ import pytest
 from pydantic import BaseModel
 
 from teamagent.adapters.slack_client import SlackClient
+from teamagent.hmac_keyring import MAIL_ACTION_MAX_TOKEN_TTL_S
 from teamagent.identity import IdentityResolver, ResolvedIdentity
 from teamagent.mcp_gateway.caller_claim import (
+    CALLER_CLAIM_REPLAY_RETENTION_SECONDS,
     CALLER_CLAIM_REPLAY_TABLE_ENV,
     CallerClaimError,
     CallerClaimVerifier,
@@ -979,7 +981,10 @@ async def test_claim_replay_is_rejected_across_mcp_verifier_instances() -> None:
             assert kwargs["ExpressionAttributeNames"] == {"#nonce": "nonce"}
             item = kwargs["Item"]
             nonce = str(item["nonce"]["S"])
-            assert item["expires_at"] == {"N": str(TEST_NOW + 60)}
+            # 保持期限は claim の exp（TEST_NOW + 60）ではなく、消費時刻＋保持期間。
+            assert item["expires_at"] == {
+                "N": str(TEST_NOW + CALLER_CLAIM_REPLAY_RETENTION_SECONDS)
+            }
             if nonce in self.seen:
                 raise _ConditionalCheckError
             self.seen.add(nonce)
@@ -1014,6 +1019,96 @@ async def test_claim_replay_is_rejected_across_mcp_verifier_instances() -> None:
     assert first["verified"] is True
     assert second["code"] == "CALLER_IDENTITY_REJECTED"
     assert len(dynamodb.items) == 1
+
+
+class _ConditionalCheckFailedError(Exception):
+    def __init__(self) -> None:
+        super().__init__("The conditional request failed")
+        self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+
+class _TtlSweepingDynamoDb:
+    """本番の DynamoDB の形: 条件付き PutItem は行の有無だけを見て、TTL 属性の値は見ない。
+
+    TTL 削除は ``expires_at`` を過ぎた後の**いつか**（時刻は保証されない）。``sweep(at)`` は
+    その中で最も早い削除（``at`` の時点で期限を過ぎた行をすべて消す）を再現する。
+    """
+
+    def __init__(self) -> None:
+        self.rows: dict[str, int] = {}
+
+    def put_item(self, **kwargs: Any) -> None:
+        assert kwargs["ConditionExpression"] == "attribute_not_exists(#nonce)"
+        item = kwargs["Item"]
+        nonce = str(item["nonce"]["S"])
+        if nonce in self.rows:
+            raise _ConditionalCheckFailedError
+        self.rows[nonce] = int(item["expires_at"]["N"])
+
+    def sweep(self, at: int) -> None:
+        for nonce, expires_at in list(self.rows.items()):
+            if expires_at < at:
+                del self.rows[nonce]
+
+
+@pytest.mark.parametrize(
+    "replay_after_seconds",
+    [
+        2 * 60 * 60,  # 再デプロイ後に同じボタンを押し直す
+        MAIL_ACTION_MAX_TOKEN_TTL_S - 1,  # ボタンのトークンが有効な最後の 1 秒
+    ],
+)
+async def test_fixed_button_nonce_stays_consumed_after_ttl_deletion_while_the_token_lives(
+    replay_after_seconds: int,
+) -> None:
+    """ボタンの押下は押下の指紋から決まる固定の nonce で届く（plugin の actionNonceBytes）。
+
+    行の保持期限を claim の exp（60 秒）にすると、TTL 削除の後に同じ押下（別の run・新しい
+    claim・同じ nonce）がもう一度通り、下書き・仮予定がもう一つできる（2026-09-29 レビュー）。
+    ボタンのトークン（最長 24h）が有効な間は、TTL 削除がいつ走っても 2 回目を拒否する。
+    """
+
+    clock = {"now": TEST_NOW}
+    dynamodb = _TtlSweepingDynamoDb()
+    verifier = CallerClaimVerifier(
+        secret=TEST_CALLER_CLAIM_SECRET,
+        expected_team_id=TEST_SLACK_TEAM_ID,
+        clock=lambda: clock["now"],
+        replay_store=DynamoDbCallerClaimReplayStore(
+            table_name="caller-claim-nonces",
+            client=dynamodb,
+        ),
+    )
+    press = "slack-action-fingerprint-of-one-press"
+    first = await _dispatch(
+        sign_arguments("echo", {"q": "calendar"}, nonce_seed=press, run_id="slack-action-1"),
+        verifier=verifier,
+    )
+    assert first["verified"] is True
+    # 行は、同じ押下を運べるトークンが失効するまで（＋余裕）残る。
+    (retained_until,) = dynamodb.rows.values()
+    assert retained_until >= TEST_NOW + MAIL_ACTION_MAX_TOKEN_TTL_S + 30 * 60
+
+    clock["now"] = TEST_NOW + replay_after_seconds
+    dynamodb.sweep(clock["now"])
+    replay = await _dispatch(
+        sign_arguments(
+            "echo",
+            {"q": "calendar"},
+            nonce_seed=press,
+            run_id="slack-action-2",
+            now=clock["now"],
+        ),
+        verifier=verifier,
+    )
+    assert replay["code"] == "CALLER_IDENTITY_REJECTED"
+    assert len(dynamodb.rows) == 1
+
+
+def test_replay_retention_outlives_every_button_token() -> None:
+    """保持期間はボタンのトークンの最長寿命（MAIL_ACTION_MAX_TOKEN_TTL_S）より長い。"""
+
+    assert CALLER_CLAIM_REPLAY_RETENTION_SECONDS >= MAIL_ACTION_MAX_TOKEN_TTL_S + 30 * 60
 
 
 async def test_replay_store_failure_rejects_before_identity_resolution() -> None:
