@@ -687,6 +687,10 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
             total_cost_usd=round(total_cost, 4),
             warnings=warnings,
             measured_epoch=now_epoch,
+            # acquire_job_id の経路は以前の取得ジョブの成果物を読むだけ（検索し直していない）。
+            tiktok_source=(
+                ("acquire_job" if input.acquire_job_id else "direct") if want_tiktok else ""
+            ),
         )
         out.slack_summary = build_slack_summary(
             out, input, now_epoch=now_epoch, missing_platforms=missing

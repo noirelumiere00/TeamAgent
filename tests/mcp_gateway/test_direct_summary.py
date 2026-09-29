@@ -5,7 +5,9 @@
 詳細レポートの URL を落とした（「上記リンクで確認できます」とだけ残った）。確かめること:
 - 対象（ON・allowlist 内・署名検証済み・1 対 1 DM）なら、結果が Block Kit（見出し・結論・数字の欄・
   1 本 1 行・レポートの文字リンク）で DM に届き、Aico への返却には集計も URL も載らない
-  （組み直しの材料を渡さない）。通知文には結論とレポートの URL が入る
+  （組み直しの材料を渡さない）。最上位の text には結論と blocks の全文（レポートのリンク含む）
+- 依頼の中身（クライアント名）が server から直接投稿まで届き、クライアントの節と照合の範囲が出る
+- 事前の取得ジョブ（acquire_job_id）の結果は「依頼のたびに検索し直した値」と書かない
 - 対象外（OFF・allowlist 外・空の allowlist・チャンネル・LEGACY）は今と同じ返却で、投稿しない
 - 投稿に失敗したら今と同じ返却に戻す（結果を消さない）。タイムアウトは届いた可能性があるので戻さない
 - 2 段目（動画の中身）の予告行も直接投稿に入り、追記はその後に届く
@@ -118,8 +120,11 @@ async def test_eligible_posts_blocks_and_returns_no_material(
         for line in baseline.splitlines()
         if line.startswith("**結論**")
     )
-    assert headline in post["text"] and f"<{report_url}>" in post["text"]
+    assert headline in post["text"] and f"<{report_url}|レポートを開く>" in post["text"]
     assert headline in body
+    # ARGS は acquire_job_id あり＝事前の取得ジョブを読んだだけ。検索し直したとは書かない
+    assert "この依頼では検索し直していません" in body
+    assert "依頼のたびに検索し直した値" not in body + post["text"]
 
     # Aico への返却: 投稿済みの一言だけ。集計・URL・本文を載せない
     assert out["status"] == "posted" and out["delivered"] is True
@@ -131,6 +136,26 @@ async def test_eligible_posts_blocks_and_returns_no_material(
     # 費用は記録される（投稿の成否と関係なく）
     assert len(usage) == 1 and usage[0]["skill"] == TOOL
     assert usage[0]["cost_usd"] > 0
+
+
+async def test_client_name_reaches_the_direct_post(
+    monkeypatch: pytest.MonkeyPatch, slack: _FakeSlack
+) -> None:
+    """server → deliver へ依頼の中身（skill_input）を渡す配線。渡らないとクライアントの節が消える。"""
+    _direct(monkeypatch)
+    skill, _g, _d = _skill()
+    await _call(_spec(skill), args={**ARGS, "client_name": "GABAN"})
+    assert len(slack.posts) == 1
+    post = slack.posts[0]
+    body = _blocks_text(post["blocks"])
+    client = next(line for line in body.splitlines() if line.startswith(":office:"))
+    assert client == ":office: *GABAN の現状*"
+    assert "「GABAN」に触れた投稿" in body
+    scope = (
+        "照合したのは本文・タグにある「GABAN」の表記だけです"
+        "（ほかの表記・公式アカウントは照合していません）"
+    )
+    assert scope in body and scope in post["text"]
 
 
 @pytest.mark.parametrize(

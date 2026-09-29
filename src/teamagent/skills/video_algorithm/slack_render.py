@@ -5,8 +5,17 @@ mcp の切り離し（``mcp_gateway/detached_jobs.py``）が完了を依頼元�
 （``VideoAlgorithmOutput``）から組み直す。Gemini の自由記述（``cross.summary``）は使わない
 （同じ主張の二重表記と、文中の数字の出どころが追えない問題を避ける）。
 
-並び: 見出し → 本数と注意 → 最も多く見られた共通点（本数と段階つき）→ 数字の欄 →
-── → 分析した上位 N 本（1 本 1 行・投稿への文字リンク）→ レポート・スライドの文字リンク → 概算
+並び: 見出し → 本数と注意 → 上位に多く見られた共通点（本数と段階つき・選び方の注記）→ 数字の欄 →
+── → 対象の N 本（1 本 1 行・投稿への文字リンク）→ レポート・スライドの文字リンク → 概算
+
+言い方の決まり:
+- 共通点（``cross.win_factors``）は「分析できた動画の 6 割以上に出た点」で、メタで測れる点は検索結果
+  全体と比べて目立つもの（リフト 1.5 以上）に限っている（``analysis.cross_analyze``）。いちばん多く
+  出た点とは限らないので「最も多く見られた」とは書かず、選び方を添える。
+- 分析できなかった上位の動画を下位で繰り上げたときは、その本数を書く（「上位 5 本」と
+  言い切らない）。
+- 分析できた動画が 0 本なら、共通点も数字も「分析できた動画がありません」と書く。
+- 最上位の text（スクリーンリーダーが読む・通知・会話の履歴）には blocks と同じ中身をすべて入れる。
 """
 
 from __future__ import annotations
@@ -19,10 +28,10 @@ from teamagent.skills._shared.slack_blocks import (
     count_ja,
     divider,
     esc,
-    fallback_text,
     header,
     link,
     link_url,
+    message_text,
     post_url,
     section,
     stage,
@@ -32,7 +41,13 @@ from teamagent.skills.video_algorithm.schema import AnalyzedVideo, VideoAlgorith
 _FACTORS = 3
 _TOP = 10
 REPORT_FAILED = "レポートの発行に失敗しました。同じ内容でもう一度依頼すると、課金なしで再発行します"
-NO_FACTOR = "上位の動画に共通して多く見られた点はありませんでした"
+FACTOR_TITLE = "上位に多く見られた共通点"
+FACTOR_RULE = (
+    "選び方: 分析できた動画の6割以上に出た点（検索結果の全体でも同じくらい多い点は除く）"
+    "・本数の多い順"
+)
+NO_FACTOR = "分析できた動画の6割以上に共通して出た点はありませんでした"
+NO_ANALYZED = "分析できた動画がありませんでした"
 
 
 def _seconds(sec: float) -> str:
@@ -66,6 +81,15 @@ def _video_line(v: AnalyzedVideo) -> str:
     return f"{head} " + "・".join(metrics) if metrics else head
 
 
+def _about(videos: list[AnalyzedVideo], ok: int, backfilled: int, observed: int) -> str:
+    """分析した本数（下位からの繰上げを含む）と、観測の注意。"""
+    detail = f"分析できた {ok}本" + (f"・うち下位からの繰上げ {backfilled}本" if backfilled else "")
+    about = [f"TikTok 検索上位から{len(videos)}本（{detail}）"]
+    if observed:
+        about.append(f"n={observed} の観測（相関であって因果ではありません）")
+    return "・".join(about)
+
+
 def completion_message(out: object) -> RichMessage | None:
     """完了の直接投稿（Block Kit）。分析した動画が無い・想定外の出力なら None（文字だけ）。"""
     if not isinstance(out, VideoAlgorithmOutput) or not out.videos:
@@ -73,20 +97,17 @@ def completion_message(out: object) -> RichMessage | None:
     c = out.cross
     videos = sorted(out.videos, key=lambda v: v.meta.rank)
     ok = sum(1 for v in videos if v.analysis is not None)
-    about = [f"TikTok 上位{len(videos)}本（分析できた {ok}本）"]
-    if c.video_count:
-        about.append(f"n={c.video_count} の観測（相関であって因果ではありません）")
-    head: list[Block | None] = [
-        header(f"VSEO動画アルゴリズム分析「{out.query}」"),
-        context("・".join(about)),
-    ]
-    factors = c.win_factors[:_FACTORS]
+    # 分析できなかった上位の代わりに下位を分析した本数
+    # （skill._slack_summary の「下位繰上げ」と同じ数え方）。
+    backfilled = sum(1 for v in videos if v.analysis is not None and v.meta.rank > len(videos))
+    title = header(f"VSEO動画アルゴリズム分析「{out.query}」")
+    head: list[Block | None] = [title, context(_about(videos, ok, backfilled, c.video_count))]
+    factors = c.win_factors[:_FACTORS] if ok else []
     if factors:
-        text = f":mag: *最も多く見られた共通点*\n{_factor(factors[0])}"
-        if len(factors) > 1:
-            text += "\nほかに多く見られた点\n" + "\n".join(f"• {_factor(w)}" for w in factors[1:])
+        text = f":mag: *{FACTOR_TITLE}*\n" + "\n".join(f"• {_factor(w)}" for w in factors)
+        text += f"\n{FACTOR_RULE}"
     else:
-        text = f":mag: *共通点*\n{NO_FACTOR}"
+        text = f":mag: *{FACTOR_TITLE}*\n{NO_FACTOR if ok else NO_ANALYZED}"
     head.append(section(text))
     fields: list[str] = []
     if ok:
@@ -95,7 +116,8 @@ def completion_message(out: object) -> RichMessage | None:
         if c.median_duration_sec > 0:
             fields.append(f"*尺の中央値*\n{_seconds(c.median_duration_sec)}")
     fields.append(f"*分析できた本数*\n{ok}/{len(videos)}本")
-    head.append(section(f":bar_chart: *分析した{len(videos)}本の数字*", fields=fields))
+    numbers = f"分析できた{ok}本の数字" if ok else "数字（分析できた動画がありません）"
+    head.append(section(f":bar_chart: *{numbers}*", fields=fields))
     notes: list[str] = []
     if out.quota_note:
         notes.append(esc(out.quota_note))
@@ -106,7 +128,7 @@ def completion_message(out: object) -> RichMessage | None:
     head += [
         divider(),
         section(
-            f":clipboard: *分析した上位{len(videos[:_TOP])}本* （再生・保存率・尺）\n"
+            f":clipboard: *対象の{len(videos[:_TOP])}本* （検索順位の順・再生・保存率・尺）\n"
             + "\n".join(_video_line(v) for v in videos[:_TOP])
         ),
     ]
@@ -133,23 +155,33 @@ def completion_message(out: object) -> RichMessage | None:
         tail.append(section(f"{emoji} {link(target, label)} {note}"))
     tail.append(context(f"概算 ${out.total_cost_usd:.4f}"))
     blocks = assemble([b for b in head if b], tail)
-    return RichMessage(text=_text(out, videos, ok), blocks=blocks)
-
-
-def _text(out: VideoAlgorithmOutput, videos: list[AnalyzedVideo], ok: int) -> str:
-    c = out.cross
-    head = (
-        f"VSEO動画アルゴリズム分析「{esc(out.query)}」完了（上位{len(videos)}本／分析成功{ok}本）"
+    body = [b for b in blocks[: len(blocks) - len(tail)] if b is not title]
+    urls = [(f"{v.meta.rank}位", u) for v in videos[:_TOP] if (u := post_url(v.meta.url))]
+    text = message_text(
+        [_lead(out, len(videos), ok, backfilled)],
+        body,
+        blocks[len(blocks) - len(tail) :],
+        urls=urls,
     )
-    if c.win_factors:
-        head += f": 最も多く見られた共通点は『{_factor(c.win_factors[0])}』"
-    lines = [head]
-    report = link_url(out.report_url) if out.report_url else None
-    lines.append(f"詳細レポート: <{report}>" if report else REPORT_FAILED)
-    urls = [f"{v.meta.rank}位 <{u}>" for v in videos[:_TOP] if (u := post_url(v.meta.url))]
-    if urls:
-        lines.append(" ／ ".join(urls))
-    return fallback_text(lines)
+    return RichMessage(text=text, blocks=blocks)
 
 
-__all__ = ["NO_FACTOR", "REPORT_FAILED", "completion_message"]
+def _lead(out: VideoAlgorithmOutput, total: int, ok: int, backfilled: int) -> str:
+    """最上位の text の 1 行目（通知のプレビュー）。"""
+    bf = f"・下位繰上げ{backfilled}本" if backfilled else ""
+    head = f"VSEO動画アルゴリズム分析「{esc(out.query)}」完了（{total}本／分析成功{ok}本{bf}）"
+    factors = out.cross.win_factors
+    if ok and factors:
+        more = f"ほか{min(len(factors), _FACTORS) - 1}点" if len(factors) > 1 else ""
+        head += f": {FACTOR_TITLE}は『{_factor(factors[0])}』{more}"
+    return head
+
+
+__all__ = [
+    "FACTOR_RULE",
+    "FACTOR_TITLE",
+    "NO_ANALYZED",
+    "NO_FACTOR",
+    "REPORT_FAILED",
+    "completion_message",
+]

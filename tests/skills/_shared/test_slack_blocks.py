@@ -5,6 +5,9 @@
 - リンクにできるのは https の自前 URL と、許可ホストの SNS 投稿 URL だけ
 - Block Kit の上限（50 blocks・section 3000 字・field 2000 字×10・header 150 字・context 10）を
   超えない。切るときはリンクと実体参照の途中で切らない。溢れても末尾（レポートのリンク）は残す
+- メッセージ全体の大きさ（text object の合計 12,000 字＝msg_blocks_too_long の手前）も超えない
+- 最上位の text（スクリーンリーダーは blocks を読まずこれだけを読む）に blocks の全文が入り、
+  4,000 字を超えるときもどの節も頭の行とレポートのリンクは残る
 - 段階の語は分母から決まる。描画の例外は None（呼び出し側が文字だけの投稿に戻す）
 """
 
@@ -23,6 +26,10 @@ def test_limits_are_slack_block_kit_limits() -> None:
     assert sb.MAX_FIELDS == 10
     assert sb.MAX_HEADER_TEXT == 150
     assert sb.MAX_CONTEXT_ELEMENTS == 10
+    # 公式には非公開（msg_blocks_too_long）。約 13,200 字で弾かれた報告より小さく取る
+    assert sb.MAX_TOTAL_TEXT == 12_000
+    # chat.postMessage の text は 4,000 字以内が推奨
+    assert sb.MAX_FALLBACK_TEXT == 4000
 
 
 @pytest.mark.parametrize(
@@ -102,8 +109,11 @@ def test_blocks_are_clipped_to_the_limits() -> None:
         sb.divider(),
     ]
     assert_limits(blocks)
-    sb.validate(blocks)
     assert blocks[0]["text"]["text"].endswith("…")
+    sb.validate(blocks[:1] + blocks[3:])
+    # block ごとには上限の内側でも、合計が大きすぎれば弾く（Slack の msg_blocks_too_long）
+    with pytest.raises(ValueError, match="total"):
+        sb.validate(blocks)
 
 
 def test_header_is_plain_text_without_angle_brackets() -> None:
@@ -121,6 +131,25 @@ def test_assemble_keeps_the_tail_when_the_head_overflows() -> None:
     assert sb.assemble([sb.section("a")], tail) == [sb.section("a"), *tail]
 
 
+def test_assemble_keeps_the_total_within_the_message_budget() -> None:
+    """block ごとの上限の内側でも、合計が 12,000 字を超えるなら後ろの block を削る。"""
+    head = [sb.header("見出し"), *[sb.section(f"節{i}\n" + "あ" * 2900) for i in range(10)]]
+    tail = [sb.section("<https://s3.example/r|レポートを開く>"), sb.context("概算 $0.1")]
+    blocks = sb.assemble(head, tail)
+    assert sb.text_size(blocks) <= sb.MAX_TOTAL_TEXT
+    assert blocks[-2:] == tail  # レポートのリンクは残す
+    assert blocks[-3] == sb.context(sb.MORE_IN_REPORT)
+    assert blocks[:4] == head[:4]  # 前から順に残す
+    assert sb.text_size(sb.assemble(head[:3], tail)) == sb.text_size(head[:3] + tail)
+
+
+def test_assemble_does_not_end_the_body_with_a_divider() -> None:
+    head = [sb.section("あ" * 3000) for _ in range(3)] + [sb.divider()]
+    head += [sb.section("い" * 3000) for _ in range(3)]  # 4 つ目の節で 12,000 字を超える
+    blocks = sb.assemble(head, [sb.context("概算 $0.1")])
+    assert [b["type"] for b in blocks] == ["section"] * 3 + ["context", "context"]
+
+
 def test_validate_rejects_what_slack_would_reject() -> None:
     too_long = {"type": "section", "text": {"type": "mrkdwn", "text": "x" * 3001}}
     with pytest.raises(ValueError):
@@ -131,6 +160,54 @@ def test_validate_rejects_what_slack_would_reject() -> None:
         sb.validate([{"type": "actions", "elements": []}])
     with pytest.raises(ValueError):
         sb.validate([])
+    with pytest.raises(ValueError, match="total"):
+        sb.validate([sb.section("x" * 3000) for _ in range(5)])  # 15,000 字
+
+
+# ── 最上位の text（スクリーンリーダー・通知・会話の履歴）───────────────────
+
+
+def test_block_text_flattens_every_block_kind() -> None:
+    assert sb.block_text(sb.header("KW <x> & *y*")) == "KW ＜x＞ &amp; ＊y＊"  # mrkdwn へ入れる
+    assert sb.block_text(sb.section("本文", fields=["*題*\n値", "欄2"])) == "本文\n*題* 値\n欄2"
+    assert sb.block_text(sb.context("注1", "注2")) == "注1\n注2"
+    assert sb.block_text(sb.divider()) == ""
+
+
+def test_message_text_has_every_block_and_keeps_lead_and_tail() -> None:
+    body = [sb.context("TikTok 上位30本"), sb.section("*常連*\n• @a 3枠"), sb.divider()]
+    tail = [sb.section("<https://s3.example/r|レポートを開く>"), sb.context("概算 $0.1")]
+    text = sb.message_text(["要点"], body, tail)
+    assert text == (
+        "要点\nTikTok 上位30本\n*常連*\n• @a 3枠\n<https://s3.example/r|レポートを開く>\n概算 $0.1"
+    )
+
+
+def test_message_text_clips_long_sections_fairly_and_adds_lost_post_urls() -> None:
+    url = "https://www.tiktok.com/@a/video/1"
+    body = [sb.section(f"*節{i}*\n" + "あ" * 1500) for i in range(6)]
+    body.append(sb.section("*上位*\n" + "い" * 1500 + f"<{url}|1位>"))  # リンクは節の末尾
+    tail = [sb.section("<https://s3.example/r|レポートを開く>"), sb.context("概算 $0.1")]
+    text = sb.message_text(["要点"], body, tail, urls=[("1位", url)])
+    assert len(text) <= sb.MAX_FALLBACK_TEXT
+    assert text.startswith("要点\n")
+    assert all(f"*節{i}*" in text for i in range(6)) and "*上位*" in text  # どの節も頭は残す
+    assert text.endswith("<https://s3.example/r|レポートを開く>\n概算 $0.1")
+    assert text.count("<") == text.count(">")  # リンクの途中で切らない
+    # 投稿の URL が本文から削れたら最後に足す（会話の履歴から辿れるように）
+    assert f"<{url}|1位>" not in text
+    assert f"上位の投稿: 1位 <{url}>" in text
+    # 削れていなければ足さない（二重に並べない）
+    small = sb.message_text(["要点"], [sb.section(f"<{url}|1位>")], tail, urls=[("1位", url)])
+    assert "上位の投稿" not in small
+
+
+def test_message_text_with_a_huge_tail_still_fits() -> None:
+    long_url = "https://s3.example/x?X-Amz-Security-Token=" + "A" * 2700
+    tail = [sb.section(f"<{long_url}|レポートを開く>"), sb.section(f"<{long_url}|スライドを開く>")]
+    text = sb.message_text(["要点"], [sb.section("本文")], tail)
+    assert len(text) <= sb.MAX_FALLBACK_TEXT
+    assert text.startswith("要点") and text.count("<") == text.count(">")
 
 
 @pytest.mark.parametrize(

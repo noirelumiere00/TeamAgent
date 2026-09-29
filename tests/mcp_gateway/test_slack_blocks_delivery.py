@@ -106,7 +106,7 @@ def test_a_deliver_passes_blocks_and_fallback_text(slack: _Slack) -> None:
     assert len(slack.posts) == 1
     assert slack.posts[0]["blocks"] == expected.blocks
     assert slack.posts[0]["text"] == expected.text  # 通知文は描画側でエスケープ済み（二重にしない）
-    assert f"<{shape.A_REPORT}>" in slack.posts[0]["text"]
+    assert f"<{shape.A_REPORT}|レポートを開く>" in slack.posts[0]["text"]
 
 
 def test_a_render_failure_falls_back_to_the_text_post(

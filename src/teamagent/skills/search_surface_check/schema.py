@@ -210,6 +210,15 @@ class SearchSurfaceCheckOutput(BaseModel):
             "直接投稿の Block Kit で同じ行を出すために持つ（Aico へは返さない）"
         ),
     )
+    tiktok_source: Literal["", "direct", "acquire_job"] = Field(
+        default="",
+        description=(
+            "TikTok 面の取り方。direct=この依頼で検索した・acquire_job=事前の tiktok_acquire の"
+            "成果物を読んだ（この依頼では検索し直していない）・空=TikTok 面なし/不明。"
+            "直接投稿で「依頼のたびに検索し直した値」と書いてよいかの判断に使う"
+            "（Aico へは返さない）"
+        ),
+    )
 
 
 # ── 2 段目: 上位の動画の中身（video_algorithm の分析エンジンで見る） ──────────────

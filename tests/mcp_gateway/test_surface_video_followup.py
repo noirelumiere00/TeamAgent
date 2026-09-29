@@ -379,7 +379,8 @@ async def test_eligible_dm_gets_notice_then_followup_post(
     assert post["blocks"][0]["text"]["text"] == f"上位5本の動画の中身「{KEYWORD}」"
     assert post["text"].startswith(f"上位5本の動画の中身「{KEYWORD}」TikTok")
     assert "**" not in post["text"] and "**" not in _blocks_text(post["blocks"])
-    assert "<https://s3.example/surface-2>" in post["text"]
+    # 通知文はスクリーンリーダー用に blocks の全文を持つ（レポートは同じ文字リンク）
+    assert "<https://s3.example/surface-2|レポートを開く>" in post["text"]
     assert "<https://s3.example/surface-2|レポートを開く>" in _blocks_text(post["blocks"])
     top5 = [r["url"] for r in s3_rows()[:5]]
     assert sorted(dl.urls) == sorted(top5)
@@ -697,7 +698,7 @@ async def test_same_request_within_24h_reuses_the_result_without_quota_or_gemini
     await _eventually(lambda: len(slack.posts) == 2)
     reused = slack.posts[1]["text"]
     assert reused.startswith("（24 時間以内の同じ分析の結果です）\n上位5本の動画の中身")
-    assert "<https://s3.example/surface-2>" in reused
+    assert "<https://s3.example/surface-2|レポートを開く>" in reused
     blocks = slack.posts[1]["blocks"]
     # 使い回しの断り書き（先頭の注記）と概算（末尾の注記）以外は、前回の追記と同じ Block Kit
     # （章つきレポートの URL を含む）。

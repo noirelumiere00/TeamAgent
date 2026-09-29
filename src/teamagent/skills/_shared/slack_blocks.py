@@ -17,6 +17,12 @@ Markdown→mrkdwn に変換される前提で書かれているため、直接�
   止める）。
 - Block Kit の上限（message 50 blocks・section text 3000 字・field 2000 字×10・header 150 字・
   context 要素 10）を超えない。超えそうなら行の境目で切り、``…`` を付ける。
+- メッセージ全体の大きさも抑える（text object の合計 ``MAX_TOTAL_TEXT`` 字）。Slack は block
+  ごとの上限とは別に ``msg_blocks_too_long`` で弾く（しきい値は非公開。約 13,200 字で弾かれた
+  報告がある）。
+- 最上位の ``text`` には blocks と同じ中身をすべて入れる（``message_text``）。Slack の仕様で、
+  blocks があるとき**スクリーンリーダーは最上位の text だけを読み、blocks の中は読まない**。
+  通知のプレビューと会話の履歴（Aico が後で読む）にもこの text が使われる。
 - 色や絵文字だけで意味を伝えない（DADS）。絵文字は見出しの目印で、意味は必ず文字で書く。
 - 太字 ``*語*`` の閉じの直後は改行か半角空白にする（和文が続くと太字にならない例がある）。
 """
@@ -46,8 +52,12 @@ MAX_FIELDS = 10
 MAX_HEADER_TEXT = 150
 MAX_CONTEXT_ELEMENTS = 10
 MAX_CONTEXT_TEXT = 3000
-# 通知・フォールバックの文（blocks があるときは通知のプレビューと、会話の履歴に出る）。
-MAX_FALLBACK_TEXT = 3000
+# 最上位の text（スクリーンリーダーが読む全文・通知のプレビュー・会話の履歴）。
+# Slack の推奨は 4,000 字以内（40,000 字を超えると切られる）。
+MAX_FALLBACK_TEXT = 4000
+# blocks の text object の合計の上限（msg_blocks_too_long の手前。報告のあった約 13,200 字
+# より小さく）。
+MAX_TOTAL_TEXT = 12_000
 # 文字リンクにできる URL の長さ（1 つの section 3000 字に、見出しと表示名と一緒に収める）。
 # 署名つき URL（STS の presigned は 1,500〜2,000 字）も入るように。超えたら文字だけの投稿に戻す。
 MAX_URL = 2800
@@ -60,7 +70,11 @@ JST = _dt.timezone(_dt.timedelta(hours=9))
 
 @dataclass(frozen=True)
 class RichMessage:
-    """直接投稿 1 通分。``text`` は通知・フォールバック（エスケープ済みの mrkdwn）。"""
+    """直接投稿 1 通分。``text`` は最上位の text（エスケープ済みの mrkdwn）。
+
+    blocks があるとき、スクリーンリーダーはこの text だけを読む（blocks の中は読まない）。通知の
+    プレビューと会話の履歴にも使われる。``message_text`` で blocks の全文から組む。
+    """
 
     text: str
     blocks: list[Block] = field(default_factory=list)
@@ -194,16 +208,42 @@ def divider() -> Block:
     return {"type": "divider"}
 
 
-def assemble(head: list[Block], tail: list[Block]) -> list[Block]:
-    """``head``（本文）＋``tail``（レポートのリンク・注記）を 50 blocks に収める。
+def text_size(blocks: Sequence[Block]) -> int:
+    """blocks の text object（本文・欄・注記・見出し）の字数の合計。"""
+    total = 0
+    for block in blocks:
+        text = block.get("text")
+        if isinstance(text, dict):
+            total += len(str(text.get("text", "")))
+        total += sum(len(str(f.get("text", ""))) for f in block.get("fields", []))
+        total += sum(len(str(e.get("text", ""))) for e in block.get("elements", []))
+    return total
 
-    収まらなければ本文の後ろを削り「ほかはレポート」を置く（レポートのリンクは必ず残す）。
+
+def assemble(head: list[Block], tail: list[Block]) -> list[Block]:
+    """``head``（本文）＋``tail``（レポートのリンク・注記）を 50 blocks・合計
+    ``MAX_TOTAL_TEXT`` 字に収める。
+
+    収まらなければ本文の後ろの block を削り「ほかはレポート」を置く（レポートのリンクは必ず残す）。
     """
     head = [b for b in head if b]
     tail = [b for b in tail if b]
     room = MAX_BLOCKS - len(tail)
-    if len(head) > room:
-        head = [*head[: max(0, room - 1)], context(MORE_IN_REPORT)]
+    budget = MAX_TOTAL_TEXT - text_size(tail)
+    if len(head) > room or text_size(head) > budget:
+        more = context(MORE_IN_REPORT)
+        budget -= text_size([more])
+        kept: list[Block] = []
+        used = 0
+        for block in head:
+            size = text_size([block])
+            if len(kept) >= room - 1 or used + size > budget:
+                break
+            kept.append(block)
+            used += size
+        while kept and kept[-1].get("type") == "divider":
+            kept.pop()
+        head = [*kept, more]
     blocks = head + tail
     validate(blocks)
     return blocks
@@ -235,11 +275,75 @@ def validate(blocks: list[Block]) -> None:
                 raise ValueError("context text")
         elif kind != "divider":
             raise ValueError(f"block type: {kind}")
+    if text_size(blocks) > MAX_TOTAL_TEXT:
+        raise ValueError(f"blocks total text: {text_size(blocks)}")
 
 
-def fallback_text(lines: Sequence[str]) -> str:
-    """通知・フォールバックの文（行ごとにエスケープ済みの文を渡す）。"""
-    return clip("\n".join(line for line in lines if line), MAX_FALLBACK_TEXT)
+# ── 最上位の text（スクリーンリーダー・通知・会話の履歴）─────────────────────
+
+
+def block_text(block: Block) -> str:
+    """1 つの block の中身を平文の mrkdwn にする（blocks と同じエスケープ済みの文字列を使う）。
+
+    見出し（plain_text）は mrkdwn に入れるので ``esc`` を通す。欄は「題 値」の 1 行にする。
+    区切り線は読み上げの雑音になるので入れない。
+    """
+    kind = block.get("type")
+    if kind == "header":
+        return esc(block["text"]["text"])
+    if kind == "section":
+        parts = [str(block.get("text", {}).get("text", ""))]
+        parts += [str(f.get("text", "")).replace("\n", " ") for f in block.get("fields", [])]
+        return "\n".join(p for p in parts if p)
+    if kind == "context":
+        return "\n".join(str(e.get("text", "")) for e in block.get("elements", []) if e.get("text"))
+    return ""
+
+
+def _fair_clip(parts: list[str], room: int) -> list[str]:
+    """合計が ``room`` を超えたら、長い部分から同じ長さまで削る（どの部分も頭は残す）。"""
+    sizes = [len(p) + 1 for p in parts]
+    if sum(sizes) <= room:
+        return parts
+    low, high = 0, max(sizes)
+    while low < high:  # 合計が room 以内になる最大の上限を探す
+        mid = (low + high + 1) // 2
+        if sum(min(s, mid) for s in sizes) <= room:
+            low = mid
+        else:
+            high = mid - 1
+    cap = max(low - 1, len(MORE) + 1)
+    return [p if len(p) <= cap else clip(p, cap) for p in parts]
+
+
+def message_text(
+    lead: Sequence[str],
+    body: Sequence[Block],
+    tail: Sequence[Block],
+    *,
+    urls: Sequence[tuple[str, str]] = (),
+) -> str:
+    """最上位の text: 通知の要点（``lead``）＋blocks の全文（``body``）＋末尾（``tail``）。
+
+    Slack はスクリーンリーダーに最上位の text だけを読ませるので、blocks と同じ中身をすべて入れる。
+    ``MAX_FALLBACK_TEXT`` を超えるときは ``body`` の長い block から削り（どの節も頭の行は残す）、
+    ``lead`` と ``tail``（レポートのリンク）は残す。``urls``（(表示, リンク済みの URL)）は、削った
+    結果 text に無くなった投稿の URL だけを最後に足す（会話の履歴から「2位の動画」を辿れるように）。
+    """
+    lead_s = "\n".join(line for line in lead if line)
+    tail_s = "\n".join(t for t in (block_text(b) for b in tail) if t)
+    url_room = sum(len(label) + len(url) + 6 for label, url in urls) + 12 if urls else 0
+    room = MAX_FALLBACK_TEXT - len(lead_s) - len(tail_s) - url_room - 2
+    parts = [t for t in (block_text(b) for b in body) if t]
+    if room < len(MORE_IN_REPORT) + 2:
+        # 末尾だけで溢れる（長い署名 URL が並ぶ）。本文は付けず、全体を切る
+        # （リンクの途中では切らない）。
+        return clip("\n".join(x for x in (lead_s, tail_s) if x), MAX_FALLBACK_TEXT)
+    body_s = "\n".join(_fair_clip(parts, room)) if parts else ""
+    missing = [f"{label} <{url}>" for label, url in urls if url not in lead_s and url not in body_s]
+    url_s = ("上位の投稿: " + " ／ ".join(missing)) if missing else ""
+    text = "\n".join(x for x in (lead_s, body_s, url_s, tail_s) if x)
+    return clip(text, MAX_FALLBACK_TEXT)
 
 
 # ── 数字と段階 ───────────────────────────────────────────────────────────
@@ -314,26 +418,29 @@ __all__ = [
     "MAX_FIELD_TEXT",
     "MAX_HEADER_TEXT",
     "MAX_SECTION_TEXT",
+    "MAX_TOTAL_TEXT",
     "MAX_URL",
     "MORE_IN_REPORT",
     "Block",
     "RichMessage",
     "assemble",
+    "block_text",
     "clip",
     "context",
     "count_ja",
     "divider",
     "esc",
-    "fallback_text",
     "header",
     "link",
     "link_url",
     "measured_at",
+    "message_text",
     "mrkdwn",
     "plain",
     "post_url",
     "render_or_none",
     "section",
     "stage",
+    "text_size",
     "validate",
 ]

@@ -5,9 +5,11 @@ mcp が Slack API へ直接出す経路（``mcp_gateway/direct_summary.py`` と
 （標準 Markdown・Aico が中継する経路）はそのまま残す。部品と守りは ``_shared/slack_blocks.py``。
 
 並び（1 通完結・スマホで上半分だけ読めば判断できる順）:
-  見出し → 実測の日時 → 結論 → クライアントの現状 → 顔ぶれ（欄）→ フォロワー帯 → 常連 →
-  上位全体の数字（段階つき）→ 切り口（AI の分類）→ AI の読み → ── → 上位 5 本（1 本 1 行・
+  見出し → 集計の日時と取得の経路 → 結論 → クライアントの現状 → 顔ぶれ（欄）→ フォロワー帯 →
+  常連 → 上位全体の数字（段階つき）→ 切り口（AI の分類）→ AI の読み → ── → 上位 5 本（1 本 1 行・
   投稿への文字リンク）→ 次に届くもの → レポートの文字リンク → 注記・概算
+最上位の text（スクリーンリーダーが読む・通知・会話の履歴）には、blocks と同じ中身をすべて入れる
+（``slack_blocks.message_text``）。
 
 言い方の決まり:
 - 数字は集計（SurfaceFacts / VideoDigest）からそのまま出し、分母つきで段階（全員に共通・多数派・
@@ -17,24 +19,37 @@ mcp が Slack API へ直接出す経路（``mcp_gateway/direct_summary.py`` と
 - クライアントの節にはクライアントの事実だけを置き、照合した範囲を添える（本文・タグの表記だけで、
   ほかの表記や公式アカウントは見ていない）。上位全体の数字は別の節に置く。
 - キャプションは出さない（第三者の文字列と絵文字コードの羅列を避ける）。
+- 「依頼のたびに検索し直した値」と書くのは、この依頼で検索した面だけ（``tiktok_source``）。
+  事前の取得ジョブ（acquire_job_id）を読んだ TikTok 面は、そう書かない。
+- AI の文の中の保存率（投稿一覧に 1 桁で渡している値）は、1 本に決まるときだけ集計の値（小数 2 桁）
+  にそろえる（すぐ上の集計の行と食い違って見せない）。
+
+Slack には出さず、レポートに任せるもの（1 通の長さを抑えるため）:
+- 1 段目: 6 位以降の行・キャプション・順位と再生の一致度・よく付くタグの 4 位以下・
+  勝ち筋と空白の全文
+- 2 段目: CTA の種類（分類の検証前）・勝ち筋（winning）の全文
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 
 from teamagent.skills._shared.slack_blocks import (
+    MAX_SECTION_TEXT,
+    MAX_TOTAL_TEXT,
     Block,
     RichMessage,
     assemble,
+    clip,
     context,
     divider,
     esc,
-    fallback_text,
     header,
     link,
     link_url,
     measured_at,
+    message_text,
     post_url,
     section,
     stage,
@@ -79,6 +94,7 @@ _SMALL_EXAMPLES = 2
 _SAVE_LEADERS = 3
 _RANK_LINKS = 5
 _SMALL_ACCOUNT_MAX = 10_000
+_TAGS = 3
 
 REUSED_NOTE = "24 時間以内の同じ分析の結果です（動画分析の回数は使っていません）"
 # 通知文の先頭（文字だけの追記の先頭行＝surface_video_followup.REUSED_PREFIX と同じ）。
@@ -87,6 +103,13 @@ FOLLOWUP_CAVEAT = "数本の観測なので、傾向として読んでくださ�
 COVER_ONLY_ROW = "動画を取得できず、サムネだけの分析（テロップ・構成は判定できません）"
 FAILED_ROW = "分析できませんでした"
 REPORT_FAILED = "レポートの発行に失敗しました（上の要約は分析結果どおりです）"
+LIVE_NOTE = "実測（依頼のたびに検索し直した値）"
+ACQUIRED_NOTE = "集計（TikTok は事前の取得ジョブの値で、この依頼では検索し直していません）"
+ACQUIRED_WITH_IG_NOTE = (
+    "集計（TikTok は事前の取得ジョブの値で、この依頼では検索し直していません。"
+    "Instagram はこの依頼で検索した値）"
+)
+ALIGNED_NOTE = "数字は集計の値にそろえています"
 
 
 # ── 共通 ─────────────────────────────────────────────────────────────────
@@ -119,14 +142,71 @@ def _stage_suffix(count: int, total: int) -> str:
     return f"（{word}）" if word else ""
 
 
+def _measured_note(out: SearchSurfaceCheckOutput) -> str:
+    """集計の日時と、データの取り方（この依頼で検索したか・事前の取得ジョブか）。
+
+    「依頼のたびに検索し直した値」と書くのは、この依頼で検索した面だけ。acquire_job_id の経路は
+    以前の tiktok_acquire の成果物を読んでいるだけで、時刻も取得ではなく集計の時刻になる。
+    """
+    when = measured_at(out.measured_epoch)
+    if not when:
+        return ""
+    tiktok = any(s.platform == "tiktok" for s in out.surfaces)
+    if tiktok and out.tiktok_source == "acquire_job":
+        others = any(s.platform != "tiktok" for s in out.surfaces)
+        return f"{when} {ACQUIRED_WITH_IG_NOTE if others else ACQUIRED_NOTE}"
+    if tiktok and out.tiktok_source != "direct":
+        return f"{when} 集計"  # 取り方が分からない（古い出力）ときは言い切らない
+    return f"{when} {LIVE_NOTE}"
+
+
+# 「2.9%」「1.6～2.9%」のような % の表記（範囲の両端を含む）。
+_PCT_EXPR = re.compile(r"\d+(?:\.\d+)?(?:\s*[～〜~]\s*\d+(?:\.\d+)?)?\s*[%％]")
+_ONE_DECIMAL = re.compile(r"(?<![\d.])\d+\.\d(?![\d.])")
+
+
+def _save_rates(posts: Sequence[SurfacePost]) -> list[float]:
+    return [p.save_count / p.play_count * 100 for p in posts if p.play_count > 0 and p.save_count]
+
+
+def _align_pct(text: str, rates: Sequence[float]) -> tuple[str, bool]:
+    """AI の文の保存率（小数 1 桁）を、1 本に決まるときだけ集計の値（小数 2 桁）にそろえる。
+
+    LLM には投稿一覧の保存率を小数 1 桁で渡している（``conclusion.posts_payload``）ので、AI の文は
+    「1.6～2.9%」になり、すぐ上の集計の行（27位 2.88%・21位 1.62%）と食い違って見える。
+    AI の文の小数 1 桁の % は、照合（grounding）で入力にある値に限られる＝投稿の保存率。
+    同じ値に丸まる投稿が 2 本以上あるときは、どれか決められないので変えない。
+    """
+    by_shown: dict[str, set[str]] = {}
+    for rate in rates:
+        by_shown.setdefault(f"{round(rate, 1):.1f}", set()).add(f"{round(rate, 2):g}")
+    changed = False
+
+    def one(match: re.Match[str]) -> str:
+        nonlocal changed
+        value = match.group(0)
+        precise = by_shown.get(value, set())
+        if len(precise) == 1 and (aligned := next(iter(precise))) != value:
+            changed = True
+            return aligned
+        return value
+
+    out = _PCT_EXPR.sub(lambda m: _ONE_DECIMAL.sub(one, m.group(0)), text)
+    return out, changed
+
+
 # ── 1 段目（検索上位チェック）────────────────────────────────────────────
 
 
-def _conclusion_block(c: SurfaceConclusion | None) -> Block | None:
+def _headline(c: SurfaceConclusion, rates: Sequence[float]) -> str:
+    return esc(_align_pct(c.headline, rates)[0] if c.generated_by == "llm" else c.headline)
+
+
+def _conclusion_block(c: SurfaceConclusion | None, rates: Sequence[float]) -> Block | None:
     if c is None or not c.headline:
         return None
     title = _ai(c, "結論（AI の要約）", "結論（集計から）")
-    return section(f":mag: *{title}*\n{esc(c.headline)}")
+    return section(f":mag: *{title}*\n{_headline(c, rates)}")
 
 
 def _client_parts(
@@ -163,7 +243,7 @@ def _client_parts(
         scope.append(f"本文・タグにある「{esc(name)}」の表記")
     if input.client_accounts:
         accounts = "・".join(esc(_handle(a.lstrip("@"))) for a in input.client_accounts[:5])
-        scope.append(f"アカウント {accounts}")
+        scope.append(f"アカウント {accounts} ")
     missing = "ほかの表記" + ("" if input.client_accounts else "・公式アカウント")
     note = f"照合したのは{'と'.join(scope)}だけです（{missing}は照合していません）"
     return title, lines, note
@@ -245,6 +325,8 @@ def _overall_block(
             )
             line += f"\n　例: {examples}"
         lines.append(line)
+    if facts.reach_ratio_median is not None:
+        lines.append(f"• 再生÷フォロワーの中央値: {facts.reach_ratio_median:g}倍")
     if facts.save_leaders:
         leaders = "・".join(
             f"{link(post_url(posts[s.rank].url) if s.rank in posts else None, f'{s.rank}位')} "
@@ -265,6 +347,11 @@ def _overall_block(
         if facts.median_age_days is not None:
             line += f"・投稿時期の中央値 {fmt_age(facts.median_age_days)}"
         lines.append(line)
+    if facts.median_duration_sec:
+        lines.append(f"• 尺の中央値: {fmt_duration(facts.median_duration_sec)}")
+    if facts.top_tags:
+        tags = "・".join(f"#{esc(t.tag)} {t.count}本" for t in facts.top_tags[:_TAGS])
+        lines.append(f"• よく付くタグ: {tags}")
     if facts.pr_ranks:
         lines.append(f"• PR表記のある投稿（ブランドは問わない）: {fmt_ranks(facts.pr_ranks)}")
     if not lines:
@@ -286,12 +373,18 @@ def _angle_block(c: SurfaceConclusion | None) -> Block | None:
 def _reading_block(c: SurfaceConclusion | None, posts: dict[int, SurfacePost]) -> Block | None:
     if c is None or not c.actions:
         return None
-    lines = [
-        f"• {esc(a.text)}" + (f"（根拠: {_rank_links(a.ranks, posts)}）" if a.ranks else "")
-        for a in c.actions
-    ]
+    rates = _save_rates(list(posts.values()))
+    lines: list[str] = []
+    aligned = False
+    for a in c.actions:
+        text, changed = _align_pct(a.text, rates) if c.generated_by == "llm" else (a.text, False)
+        aligned = aligned or changed
+        lines.append(
+            f"• {esc(text)}" + (f"（根拠: {_rank_links(a.ranks, posts)}）" if a.ranks else "")
+        )
     title = _ai(c, "AI の読み（次の一手の候補）", "次の一手の候補（集計から）")
-    return section(f":speech_balloon: *{title}*\n" + "\n".join(lines))
+    note = f" （{ALIGNED_NOTE}）" if aligned else ""
+    return section(f":speech_balloon: *{title}*{note}\n" + "\n".join(lines))
 
 
 def _post_line(post: SurfacePost, *, now_epoch: int) -> str:
@@ -321,16 +414,18 @@ def _top_block(surface: KwSurface, *, top: int, now_epoch: int) -> Block | None:
 
 def _single_head(
     out: SearchSurfaceCheckOutput, surface: KwSurface, input: SearchSurfaceCheckInput | None
-) -> list[Block]:
+) -> tuple[list[Block], list[Block]]:
+    """1 語 1 媒体の本文と、最上位の text で要点の行に含めた（本文では繰り返さない）blocks。"""
     posts = {p.rank: p for p in surface.posts}
-    when = measured_at(out.measured_epoch)
+    note = _measured_note(out)
+    title = header(f"検索上位チェック「{surface.keyword}」")
+    conclusion = _conclusion_block(surface.conclusion, _save_rates(surface.posts))
     blocks: list[Block | None] = [
-        header(f"検索上位チェック「{surface.keyword}」"),
+        title,
         context(
-            f"{esc(_platform(surface))} 上位{len(surface.posts)}本"
-            + (f"・{when} 実測（依頼のたびに検索し直した値）" if when else "")
+            f"{esc(_platform(surface))} 上位{len(surface.posts)}本" + (f"・{note}" if note else "")
         ),
-        _conclusion_block(surface.conclusion),
+        conclusion,
         *_client_blocks(surface, input, posts),
     ]
     facts = surface.facts
@@ -343,17 +438,18 @@ def _single_head(
         ]
     blocks += [_angle_block(surface.conclusion), _reading_block(surface.conclusion, posts)]
     blocks += [divider(), _top_block(surface, top=_TOP_SINGLE, now_epoch=out.measured_epoch)]
-    return [b for b in blocks if b]
+    return [b for b in blocks if b], [b for b in (title, conclusion) if b]
 
 
 def _compact_section(
-    surface: KwSurface, input: SearchSurfaceCheckInput | None, *, now_epoch: int
+    surface: KwSurface, input: SearchSurfaceCheckInput | None, *, now_epoch: int, limit: int
 ) -> Block:
     posts = {p.rank: p for p in surface.posts}
     lines = [f"*「{esc(surface.keyword)}」{esc(_platform(surface))} 上位{len(surface.posts)}本*"]
     c = surface.conclusion
     if c is not None and c.headline:
-        lines.append(f"{_ai(c, '結論（AI の要約）', '結論（集計から）')}: {esc(c.headline)}")
+        headline = _headline(c, _save_rates(surface.posts))
+        lines.append(f"{_ai(c, '結論（AI の要約）', '結論（集計から）')}: {headline}")
     client = _client_parts(surface, input, posts)
     if client is not None:
         lines.extend(client[1])
@@ -380,30 +476,31 @@ def _compact_section(
             "• 上位: "
             + "・".join(link(post_url(p.url), f"{p.rank}位 {_handle(p.author)}") for p in shown)
         )
-    return section("\n".join(lines))
+    return section(clip("\n".join(lines), limit))
 
 
 def _compact_head(
     out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput | None
-) -> list[Block]:
+) -> tuple[list[Block], list[Block]]:
     keywords = list(dict.fromkeys(s.keyword for s in out.surfaces))
     platforms = list(dict.fromkeys(_platform(s) for s in out.surfaces))
-    when = measured_at(out.measured_epoch)
+    note = _measured_note(out)
+    title = header("検索上位チェック" + "".join(f"「{k}」" for k in keywords))
     blocks: list[Block] = [
-        header("検索上位チェック" + "".join(f"「{k}」" for k in keywords)),
-        context(
-            "・".join(esc(p) for p in platforms)
-            + (f"・{when} 実測（依頼のたびに検索し直した値）" if when else "")
-        ),
+        title,
+        context("・".join(esc(p) for p in platforms) + (f"・{note}" if note else "")),
     ]
+    # 面が多くても後ろの面を丸ごと落とさないよう、1 面の節を合計の上限から割り当てた長さで切る
+    # （見出しの行と結論は頭にあるので残る）。
+    limit = max(600, min(MAX_SECTION_TEXT, (MAX_TOTAL_TEXT - 3000) // len(out.surfaces)))
     for i, surface in enumerate(out.surfaces):
         if i:
             blocks.append(divider())
-        blocks.append(_compact_section(surface, input, now_epoch=out.measured_epoch))
+        blocks.append(_compact_section(surface, input, now_epoch=out.measured_epoch, limit=limit))
     client = _client_parts(out.surfaces[0], input, {}) if out.surfaces else None
     if client is not None:
         blocks.append(context(client[2]))
-    return blocks
+    return blocks, [title]
 
 
 def _surface_tail(out: SearchSurfaceCheckOutput, missing: list[str]) -> list[Block]:
@@ -451,52 +548,44 @@ def _missing_lines(
     ]
 
 
-def _surface_text(out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput | None) -> str:
-    """通知・フォールバック: 結論 1 行・クライアント 1 行・レポート・上位の投稿 URL。
-
-    blocks の中身は会話の履歴（Aico が後で読む text）に出ない恐れがあるので、上位の投稿 URL を
-    ここにも入れる（「2位の動画を分析して」に答えられるように）。
-    """
-    when = measured_at(out.measured_epoch)
-    lines: list[str] = []
-    for surface in out.surfaces[:5]:
-        head = (
-            f"検索上位チェック「{esc(surface.keyword)}」{esc(_platform(surface))} "
-            f"上位{len(surface.posts)}本" + (f"（{when} 実測）" if when else "")
-        )
-        c = surface.conclusion
-        lines.append(head + (f": {esc(c.headline)}" if c is not None and c.headline else ""))
-        facts = surface.facts
-        if input is not None and input.client_name and facts is not None:
-            name = esc(input.client_name)
-            lines.append(
-                f"{name}: 「{name}」に触れた投稿 {len(facts.mention_ranks)}本"
-                if facts.mention_ranks
-                else f"{name}: 上位{len(surface.posts)}本に「{name}」に触れた投稿は無し"
-            )
-    report = link_url(out.report_url) if out.report_url else None
-    if report:
-        lines.append(f"レポート: <{report}>")
-    if out.surfaces:
-        first = sorted(out.surfaces[0].posts, key=lambda p: p.rank)[:_TOP_URLS_IN_TEXT]
-        urls = [f"{p.rank}位 <{u}>" for p in first if (u := post_url(p.url))]
-        if urls:
-            lines.append(f"上位{len(urls)}本: " + " ／ ".join(urls))
-    return fallback_text(lines)
+def _surface_lead(out: SearchSurfaceCheckOutput) -> str:
+    """最上位の text の 1 行目（通知のプレビュー）: 何の結果か＋結論。"""
+    if len(out.surfaces) != 1:
+        keywords = list(dict.fromkeys(s.keyword for s in out.surfaces))
+        return "検索上位チェック" + "".join(f"「{esc(k)}」" for k in keywords)
+    surface = out.surfaces[0]
+    head = (
+        f"検索上位チェック「{esc(surface.keyword)}」{esc(_platform(surface))} "
+        f"上位{len(surface.posts)}本"
+    )
+    c = surface.conclusion
+    if c is not None and c.headline:
+        head += f": {_headline(c, _save_rates(surface.posts))}"
+    return head
 
 
 def surface_message(
     out: SearchSurfaceCheckOutput, input: SearchSurfaceCheckInput | None = None
 ) -> RichMessage | None:
-    """1 段目の直接投稿（Block Kit）。面が無ければ None（文字だけの投稿に戻す）。"""
+    """1 段目の直接投稿（Block Kit）。面が無ければ None（文字だけの投稿に戻す）。
+
+    最上位の text は、要点の 1 行＋blocks の全文（見出しと結論は 1 行目に入れたので繰り返さない）
+    ＋レポート・注記。上位の投稿 URL が text から削れたときは最後に足す（会話の履歴から辿れる
+    ように）。
+    """
     if not out.surfaces:
         return None
     if len(out.surfaces) == 1:
-        head = _single_head(out, out.surfaces[0], input)
+        head, in_lead = _single_head(out, out.surfaces[0], input)
     else:
-        head = _compact_head(out, input)
-    blocks = assemble(head, _surface_tail(out, _missing_lines(out, input)))
-    return RichMessage(text=_surface_text(out, input), blocks=blocks)
+        head, in_lead = _compact_head(out, input)
+    tail = _surface_tail(out, _missing_lines(out, input))
+    blocks = assemble(head, tail)
+    body = [b for b in blocks[: len(blocks) - len(tail)] if not any(b is x for x in in_lead)]
+    first = sorted(out.surfaces[0].posts, key=lambda p: p.rank)[:_TOP_URLS_IN_TEXT]
+    urls = [(f"{p.rank}位", u) for p in first if (u := post_url(p.url))]
+    text = message_text([_surface_lead(out)], body, blocks[len(blocks) - len(tail) :], urls=urls)
+    return RichMessage(text=text, blocks=blocks)
 
 
 # ── 2 段目（上位の動画の中身）───────────────────────────────────────────
@@ -616,12 +705,14 @@ def _save_block(result: SurfaceVideoFollowupOutput, rows: dict[int, FollowupVide
         link(post_url(rows[r].url) if r in rows else None, f"{r}位") for r in d.save_top_ranks
     )
     title = f":floppy_disk: *保存率の高い{len(d.save_top_ranks)}本* （{ranks}）"
+    # 集計で決まる共通点を先に、AI の読みは後に（数字・事実は集計から出す）。
+    common = "・".join(esc(x) for x in d.save_top_common) or "目立った共通点はなし"
+    lines = [title, f"共通点（集計）: {common}"]
     c = result.conclusion
     if c is not None and c.save_reason is not None:
         label = "AI の読み" if c.generated_by == "llm" else "読み（集計から）"
-        return section(f"{title}\n{label}: {esc(c.save_reason.text)}")
-    common = "・".join(esc(x) for x in d.save_top_common) or "目立った共通点はなし"
-    return section(f"{title}\n共通点: {common}")
+        lines.append(f"{label}: {esc(c.save_reason.text)}")
+    return section("\n".join(lines))
 
 
 def _yes_no(flag: bool) -> str:
@@ -672,7 +763,8 @@ def _video_lines(rows: list[FollowupVideo]) -> tuple[list[str], bool]:
     return lines, omitted
 
 
-def _followup_text(result: SurfaceVideoFollowupOutput, *, reused: bool) -> str:
+def _followup_lead(result: SurfaceVideoFollowupOutput, *, reused: bool) -> list[str]:
+    """最上位の text の 1 行目（通知のプレビュー）。使い回しなら先頭に断り書き。"""
     d = result.digest
     c = result.conclusion
     head = f"上位{len(result.videos)}本の動画の中身「{esc(result.keyword)}」TikTok"
@@ -680,14 +772,7 @@ def _followup_text(result: SurfaceVideoFollowupOutput, *, reused: bool) -> str:
         head += f": {esc(c.headline)}"
     elif d is not None:
         head += f": 動画を見て分析 {d.watched}本"
-    lines = [REUSED_TEXT_PREFIX if reused else "", head]
-    report = link_url(result.report_url) if result.report_url else None
-    if report:
-        lines.append(f"レポート: <{report}>")
-    urls = [f"{r.rank}位 <{u}>" for r in result.videos if (u := post_url(r.url))]
-    if urls:
-        lines.append(" ／ ".join(urls))
-    return fallback_text(lines)
+    return [REUSED_TEXT_PREFIX if reused else "", head]
 
 
 def followup_message(
@@ -702,20 +787,25 @@ def followup_message(
     when = measured_at(result.measured_epoch)
     about = ["TikTok"]
     if when:
-        about.append(f"{when} 実測の検索上位チェックの続き")
+        # 1 段目の集計の時刻（この追記を出した時刻ではない）。取り方は 1 段目の注記のとおり。
+        about.append(f"{when} の検索上位チェックの続き")
     about.append(f"動画を見て分析 {d.watched}本")
     if d.cover_only_ranks:
         about.append(f"{fmt_ranks(d.cover_only_ranks)}はサムネだけの分析のため集計外")
     if d.failed_ranks:
         about.append(f"{fmt_ranks(d.failed_ranks)}は分析できず")
     c = result.conclusion
+    title_block = header(f"上位{len(rows)}本の動画の中身「{result.keyword}」")
     head: list[Block | None] = [
-        header(f"上位{len(rows)}本の動画の中身「{result.keyword}」"),
+        title_block,
         context(*([REUSED_NOTE] if reused else []), "・".join(about)),
     ]
+    in_lead: list[Block] = [title_block]
     if c is not None and c.headline:
         title = "結論（AI の要約）" if c.generated_by == "llm" else "結論（集計から）"
-        head.append(section(f":mag: *{title}*\n{esc(c.headline)}"))
+        conclusion = section(f":mag: *{title}*\n{esc(c.headline)}")
+        head.append(conclusion)
+        in_lead.append(conclusion)
     head += [_digest_block(d, rows), _shape_context(d), _save_block(result, by_rank)]
     lines, omitted = _video_lines(rows)
     head += [
@@ -752,7 +842,12 @@ def followup_message(
         context(*notes),
     ]
     blocks = assemble([b for b in head if b], tail)
-    return RichMessage(text=_followup_text(result, reused=reused), blocks=blocks)
+    body = [b for b in blocks[: len(blocks) - len(tail)] if not any(b is x for x in in_lead)]
+    urls = [(f"{r.rank}位", u) for r in rows if (u := post_url(r.url))]
+    text = message_text(
+        _followup_lead(result, reused=reused), body, blocks[len(blocks) - len(tail) :], urls=urls
+    )
+    return RichMessage(text=text, blocks=blocks)
 
 
 __all__ = [
