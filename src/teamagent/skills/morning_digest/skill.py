@@ -40,6 +40,7 @@ from teamagent.adapters.gmail_client import (
 )
 from teamagent.adapters.oauth_token_store import TokenStore
 from teamagent.observability import scrub_value
+from teamagent.skills._shared.grapheme_cut import truncate_graphemes
 from teamagent.skills._shared.mail_compose import (
     build_cc,
     build_thread_history,
@@ -752,7 +753,11 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     if start_iso:
                         item.meeting_start = start_iso
                         item.meeting_end = end_iso or _plus_hour(start_iso)
-                        item.meeting_title = str(t.get("meeting_title") or "")[:60]
+                        # 60 字で切るときに絵文字（🇯🇵・ZWJ で繋いだ家族など）を割らない
+                        # （割れた片割れが 📅 で作る予定の件名に残るため）。
+                        item.meeting_title = truncate_graphemes(
+                            str(t.get("meeting_title") or ""), 60
+                        )
                         # 📅ボタン用トークン（To 本人のみ・LLM 由来の日時は encode 前に検証済み）。
                         if item.to_self and mail_action_hmac_ready:
                             try:
@@ -760,7 +765,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                                     encode_event_token(
                                         start_iso=item.meeting_start,
                                         end_iso=item.meeting_end,
-                                        title=item.meeting_title or item.subject_display[:60],
+                                        title=item.meeting_title
+                                        or truncate_graphemes(item.subject_display, 60),
                                         owner_email=requester,
                                     )
                                     or ""
