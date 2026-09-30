@@ -99,7 +99,9 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "3ea3ded83e661f59c72cc35a6e91d2a82560fa0959e07790c4301b1f69f3ed93" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -158,7 +160,9 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "1bbf66c9210526c2b07159e5c64d2dad68241d184b0c39c402df884da02c1fc3" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -217,7 +221,9 @@ locals {
     # 2026-09-24 publish 世代（apk ロック追随）。Alpine 上流で libexpat 2.8.4-r0 が索引から消え
     # 2.8.5-r0 へ入れ替わった（r28 段 3 の media ビルドで停止）ため media-apk.lock 1 行と契約
     # artifact.apk-lock.sha256 を追随させたことによる再レンダリング。値の出所は repo tree からのオフライン導出。
-    "9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f" = {
+    # 2026-09-30 publish 世代（apk lock 再生成）。実ビルドで lock 差分 -1 +1（240→240 行）、削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2 を検出したため
+    # media-apk.lock と契約 artifact.apk-lock.sha256 を追随させた再レンダリング（apply_apklock.sh）。
+    "8fc1ea1619734bc98c2310a807a889bf040ba6047d3d0fcb24cf0bc46f9743a2" = {
       content_type                  = "text/yaml"
       object_lock_retain_until_date = "2099-12-31T00:00:00Z"
     }
@@ -416,18 +422,18 @@ removed {
 }
 
 import {
-  to = aws_s3_object.mcp_source_publisher_buildspec_generation["90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/90a9656c82ad78f97f041b3ec224ce89252d887400e29899c87c4ce84e15e09b.yml"
+  to = aws_s3_object.mcp_source_publisher_buildspec_generation["3ea3ded83e661f59c72cc35a6e91d2a82560fa0959e07790c4301b1f69f3ed93"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-mcp-source-publisher/3ea3ded83e661f59c72cc35a6e91d2a82560fa0959e07790c4301b1f69f3ed93.yml"
 }
 
 import {
-  to = aws_s3_object.image_attestor_buildspec_generation["9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/9e47dd164f86ef8b40637a7854c6d928c323991957da9bdd97fdb01554561ba4.yml"
+  to = aws_s3_object.image_attestor_buildspec_generation["1bbf66c9210526c2b07159e5c64d2dad68241d184b0c39c402df884da02c1fc3"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-attestor/1bbf66c9210526c2b07159e5c64d2dad68241d184b0c39c402df884da02c1fc3.yml"
 }
 
 import {
-  to = aws_s3_object.image_promoter_buildspec_generation["9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f"]
-  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/9bce8c327f670b5458d3c5e548cfb5c756d313be9b4c1a93038924c0d754682f.yml"
+  to = aws_s3_object.image_promoter_buildspec_generation["8fc1ea1619734bc98c2310a807a889bf040ba6047d3d0fcb24cf0bc46f9743a2"]
+  id = "teamagent-dev-image-release-evidence/codebuild-buildspecs/teamagent-dev-image-promoter/8fc1ea1619734bc98c2310a807a889bf040ba6047d3d0fcb24cf0bc46f9743a2.yml"
 }
 
 import {
