@@ -690,3 +690,102 @@ async def test_dispatch_progress_off_no_slack_calls(monkeypatch: pytest.MonkeyPa
     )
     assert out["answer"] == "hits for x"
     assert fake.posted == [] and fake.deleted == []  # OFF なので何も送らない
+
+
+# ── 例外文の長さの上限（2026-09-30・Aico の DM の context overflow） ──────────────────
+# 本番 09-29: proposal_builder_submit の skill.run が ValidationError を投げ、その全文（大量の
+# エラー行と input_value）が S3 退避の対象外のままモデルへ返って、DM が上限 200k を超えた。
+# OpenClaw 側の toolResultMaxChars は受け取った直後の同じターンのモデル呼び出しを守らないので、
+# 最初の 1 回を防げるのはこの層だけ。
+_SECRET_INPUT = "入力本文の目印" * 2000
+
+
+class _WideInput(BaseModel):
+    """フィールドが多い入力（検証エラーが大量に出る形）。"""
+
+    items: list[int]
+
+
+class _NestedValidationSkill(BaseSkill[_EchoInput, _EchoOutput]):
+    name: ClassVar[str] = "nested_validation"
+    description: ClassVar[str] = (
+        "skill.run の中で大量の ValidationError を投げる（本番 09-29 の形）。"
+    )
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _EchoOutput:
+        _WideInput(items=[_SECRET_INPUT] * 50)  # type: ignore[list-item]
+        raise AssertionError("unreachable")
+
+
+class _HugeMessageSkill(BaseSkill[_EchoInput, _EchoOutput]):
+    name: ClassVar[str] = "huge_message"
+    description: ClassVar[str] = "巨大な例外文を投げる。"
+    input_schema: ClassVar[type[BaseModel]] = _EchoInput
+    output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+    def run(self, input: _EchoInput, ctx: SkillContext) -> _EchoOutput:
+        raise RuntimeError("x" * 100_000)
+
+
+_LONG_SPECS = {
+    s.name: s
+    for s in [
+        ToolSpec("echo", _EchoSkill.description, _EchoSkill),
+        ToolSpec("nested_validation", _NestedValidationSkill.description, _NestedValidationSkill),
+        ToolSpec("huge_message", _HugeMessageSkill.description, _HugeMessageSkill),
+    ]
+}
+
+
+async def test_skill_validation_error_is_summarized_without_input_values() -> None:
+    """変異: server.py の skill 例外の経路を ``f"{type(e).__name__}: {e}"`` に戻すと赤。"""
+    out = _parse(
+        await dispatch_tool(
+            _LONG_SPECS,
+            "nested_validation",
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    error = out["error"]
+    assert error.startswith("ValidationError: 50 validation error(s) for _WideInput\n")
+    lines = error.split("\n")
+    # 見出し 1 行 + 先頭 10 件 + 残りの件数 1 行。
+    assert len(lines) == 12
+    assert lines[1].startswith("items.0: ")
+    assert lines[-1] == "（ほか 40 件）"
+    assert "入力本文の目印" not in error
+    assert "errors.pydantic.dev" not in error
+    assert len(error) <= mcp_server._ERROR_TEXT_MAX_CHARS
+    assert "request_id" in out
+
+
+async def test_skill_exception_text_is_capped() -> None:
+    out = _parse(
+        await dispatch_tool(
+            _LONG_SPECS,
+            "huge_message",
+            {"q": "x", USER_CONTEXT_KEY: {"user_email": "a@b.co"}},
+            require_rls=True,
+        )
+    )
+    error = out["error"]
+    assert error.startswith("RuntimeError: xxx")
+    omitted = len("RuntimeError: ") + 100_000 - mcp_server._ERROR_TEXT_MAX_CHARS
+    assert error.endswith(f"…（以下 {omitted} 字を省略）")
+    assert len(error) < mcp_server._ERROR_TEXT_MAX_CHARS + 32
+
+
+async def test_invalid_input_does_not_echo_input_value() -> None:
+    """入力検証（spec.input_schema）の失敗も input_value を返さない。"""
+    out = _parse(
+        await dispatch_tool(_LONG_SPECS, "echo", {"q": [_SECRET_INPUT]}, require_rls=False)
+    )
+    error = out["error"]
+    assert error.startswith(
+        "invalid input: ValidationError: 1 validation error(s) for _EchoInput\n"
+    )
+    assert "q: " in error
+    assert "入力本文の目印" not in error

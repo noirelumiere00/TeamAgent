@@ -450,6 +450,43 @@ def _schedule_async_job_notice(
             )
 
 
+# 例外文としてモデルへ返す上限（字）。2026-09-29 本番: proposal_builder_submit の ValidationError の
+# 全文（推定 約 24k tokens・大量のエラー行）が S3 退避の対象外のままモデルへ返り、Aico の DM が
+# 上限 200k を超えて毎回失敗した。OpenClaw 側の toolResultMaxChars は保存時と回復時にしか効かず、
+# 受け取った直後の同じターンの呼び出しは守らないので、ここで短くする。
+_ERROR_TEXT_MAX_CHARS = 4000
+# pydantic の ValidationError から返す個別エラーの件数（残りは件数だけ）。
+_VALIDATION_ERROR_MAX_ITEMS = 10
+
+
+def _exception_text(e: BaseException) -> str:
+    """例外を ``"<型名>: <内容>"`` の 1 文字列にし、モデルへ返してよい長さに切る。
+
+    pydantic の ValidationError は input_value と URL を落とし、先頭 10 件の「場所: 理由」と
+    総件数だけにする（どの項目を直せばよいかは残す）。それ以外も ``_ERROR_TEXT_MAX_CHARS`` で切る。
+    """
+    from pydantic import ValidationError
+
+    name = type(e).__name__
+    if isinstance(e, ValidationError):
+        items = e.errors(include_url=False, include_input=False, include_context=False)
+        lines = [f"{e.error_count()} validation error(s) for {e.title}"]
+        for item in items[:_VALIDATION_ERROR_MAX_ITEMS]:
+            loc = ".".join(str(part) for part in item.get("loc", ())) or "(root)"
+            lines.append(f"{loc}: {item.get('msg', '')}")
+        rest = len(items) - _VALIDATION_ERROR_MAX_ITEMS
+        if rest > 0:
+            lines.append(f"（ほか {rest} 件）")
+        body = "\n".join(lines)
+    else:
+        body = str(e)
+    text = f"{name}: {body}"
+    if len(text) > _ERROR_TEXT_MAX_CHARS:
+        omitted = len(text) - _ERROR_TEXT_MAX_CHARS
+        text = f"{text[:_ERROR_TEXT_MAX_CHARS]}…（以下 {omitted} 字を省略）"
+    return text
+
+
 def _err(message: str, **extra: Any) -> list[TextContent]:
     """構造化エラーを TextContent で返す（サーバ/外殻ループを落とさない）。"""
     payload: dict[str, Any] = {"error": message, **extra}
@@ -929,7 +966,7 @@ async def dispatch_tool(
     try:
         skill_input = spec.input_schema(**skill_args)
     except Exception as e:  # 入力検証エラーは構造化で返す
-        return _err(f"invalid input: {type(e).__name__}: {e}")
+        return _err(f"invalid input: {_exception_text(e)}")
 
     # 二段返し（USE_SEARCH_TWO_STAGE・既定 OFF）を許可してよい面の印。**この境界を通った
     # search tool だけ**が対象で、connect-web(/app)・runtime/slack_bot.py の直呼び・
@@ -1122,7 +1159,7 @@ async def dispatch_tool(
             # 同じ引数の処理中リース（別プロセス・同期経路の実行など）。
             # コード名を出さずに言い換える。
             return _detach_response(detach_query, detached_jobs.error_text(detach_query, e))
-        return _err(f"{type(e).__name__}: {e}", request_id=ctx.request_id)
+        return _err(_exception_text(e), request_id=ctx.request_id)
     finally:
         if _progress is not None:
             await clear_progress(_progress, request_id=ctx.request_id)
@@ -1429,7 +1466,7 @@ async def dispatch_run_agent(
         )
     except Exception as e:
         logger.warning("run_agent_error", error=type(e).__name__, request_id=request_id)
-        return _err(f"{type(e).__name__}: {e}", request_id=request_id)
+        return _err(_exception_text(e), request_id=request_id)
 
     payload: dict[str, Any] = {
         "answer": result.answer,
