@@ -46,7 +46,6 @@ from teamagent.identity import (
 )
 from teamagent.mcp_gateway import detached_jobs, direct_summary, surface_video_followup
 from teamagent.mcp_gateway.caller_claim import (
-    CALLER_CLAIM_FIELD,
     CallerClaimError,
     CallerClaimVerifier,
     VerifiedCallerClaim,
@@ -189,48 +188,44 @@ def _record_usage(
         )
 
 
+def _strip_schema_titles(node: Any, *, names: bool = False) -> Any:
+    """JSON Schema から ``title``（pydantic が付ける表示名）だけを再帰的に落とす。
+
+    ``names=True`` は「キーが引数名の辞書」（properties・$defs）を表し、キーはそのまま残す
+    （``title`` という名前の引数＝calendar_event など を消さないため）。
+    """
+    if isinstance(node, list):
+        return [_strip_schema_titles(v) for v in node]
+    if not isinstance(node, dict):
+        return node
+    if names:
+        return {k: _strip_schema_titles(v) for k, v in node.items()}
+    out: dict[str, Any] = {}
+    for k, v in node.items():
+        if k == "title" and isinstance(v, str):
+            continue
+        out[k] = _strip_schema_titles(v, names=k in ("properties", "$defs", "definitions"))
+    return out
+
+
 def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
-    """入力スキーマに RLS 用の ``_user_context`` を足す（外殻が身元を渡す口）。"""
-    out = dict(schema)
+    """入力スキーマを tools/list 用に整える（``_user_context`` の口を足し、飾りを落とす）。
+
+    2026-09-30: OpenClaw は毎回すべてのツール定義をモデルへ送る。固定部分 127k トークンの
+    約 8 割がツール定義で、特に日本語はツール定義の中だと system prompt の約 5 倍の
+    トークンになる（Bedrock CountTokens で実測）。
+    - ``_user_context`` は宣言を ``{"type": "object"}`` だけにする。値は caller-identity
+      plugin が before_tool_call で丸ごと正しいものに置き換え、欠落も ``{}`` とみなす
+      （caller-identity-plugin/dist/index.js の rawDeclared 分岐）。モデルに中身の説明を
+      見せる意味は無く、34 本で約 2.7 万トークンを使っていた。
+    - pydantic が付ける ``title`` と、最上位の ``description``（入力モデルの docstring＝
+      開発メモ）はモデルの判断材料にならないので落とす（約 0.7 万トークン）。
+      ツールの説明は ToolSpec.description、引数の説明は各 property の description に残る。
+    """
+    out: dict[str, Any] = _strip_schema_titles(dict(schema))
+    out.pop("description", None)
     props = dict(out.get("properties") or {})
-    props[USER_CONTEXT_KEY] = {
-        "type": "object",
-        "description": (
-            "RLS 用の呼び出し元コンテキスト。本番では trusted OpenClaw ingress plugin が"
-            "Slack event由来値とone-use署名claimを注入する。LLM申告値単体は認可に使わない。"
-        ),
-        "properties": {
-            "slack_user_id": {
-                "type": "string",
-                "description": "Slack user_id申告値。署名claimのevent userと一致した時だけ有効。",
-            },
-            "slack_team_id": {
-                "type": "string",
-                "description": "trusted pluginが注入するSlack workspace team_id。",
-            },
-            CALLER_CLAIM_FIELD: {
-                "type": "string",
-                "description": (
-                    "trusted pluginがtool実行直前に注入するone-use署名claim。"
-                    "モデルや利用者が作成してはならない。"
-                ),
-            },
-            # 後方互換（LEGACY=テスト/PoC のみ有効。STRICT では破棄される）。
-            "user_email": {"type": "string"},
-            "user_groups": {"type": "array", "items": {"type": "string"}},
-            "user_role": {"type": "string"},
-            # 配信先ルーティング hint（identity ではない＝RLS/認可には一切使わない）。
-            # チャンネル/スレッド発の依頼で、skill が「そのスレッドに添付」するために使う。
-            "channel_id": {
-                "type": "string",
-                "description": "依頼が発せられた Slack channel_id（配信ルーティング用・任意）。",
-            },
-            "thread_ts": {
-                "type": "string",
-                "description": "親メッセージの ts（スレッド配信用・任意）。",
-            },
-        },
-    }
+    props[USER_CONTEXT_KEY] = {"type": "object"}
     out["properties"] = props
     # ⚠️ ``_user_context`` を **required に入れてはならない**（2026-08-26 本番全ツール障害）。
     #
