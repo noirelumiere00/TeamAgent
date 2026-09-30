@@ -221,6 +221,14 @@ class SlackUnreadItem(BaseModel):
             "（片方だけ伸ばすと pydantic ValidationError で digest ごと落ちる）"
         ),
     )
+    body_truncated: bool | None = Field(
+        default=None,
+        description=(
+            "excerpt_display が上限で切られたか（描画の「本文が途中で切れています」の根拠）。"
+            "None は不明＝描画側が本文長から推定する。⚠️ 絵文字を割らずに切るので、切っても"
+            "上限ちょうどの長さになるとは限らない（長さからの推定は外れうる）"
+        ),
+    )
     permalink: str | None = Field(default=None, description="Slack の permalink")
     occurred_at: str | None = Field(default=None, description="メンション日時（ISO）")
     # --- 会話の素性（描画の分岐材料・読み取れなかったものは空/None/unknown のまま）---

@@ -122,6 +122,11 @@ _CALENDAR_MAX_RESULTS_LEGACY = 20
 #: （生 ID 掃除・triage）ので、上限は受け取り側でも明示しておく。
 _SLACK_UNREAD_MAX_ITEMS = 25
 
+#: Slack 返信漏れの本文（excerpt_display）の上限字数。
+#: ⚠️ schema.SlackUnreadItem.excerpt_display の max_length と対。片方だけ動かすと
+#: pydantic ValidationError で digest が落ちる。
+_SLACK_EXCERPT_MAX = 1500
+
 #: 「☑️ 全部確認した」1 トークンに載せる項目数の上限。
 #: Slack の button `value` は 2000 バイト上限で、ack_token 側にも 1900 バイトの
 #: サイズガードがある。1 項目は概算 36 バイト（["m","<16hex>",<10桁>],）なので
@@ -698,7 +703,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     to_self=addressed,  # To に本人がいる＝要返信(下書き)対象
                     # 表示専用（本人 DM のみ・未マスク・PII・ログ厳禁）
                     counterpart_display=_display_counterpart(anchor.headers, requester),
-                    subject_display=str(anchor.headers.get("Subject", ""))[:160],
+                    # 表示用の切り詰めは絵文字（🇯🇵・ZWJ 連結など）を割らない（片割れが DM に残る）。
+                    subject_display=truncate_graphemes(str(anchor.headers.get("Subject", "")), 160),
                     # ボタン用：生 thread_id は出さず HMAC 署名トークン化（G3）。To 自分宛のみ発行。
                     draft_token=draft_action_token,
                     ack_token=ack_action_token,
@@ -729,11 +735,12 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 if idx < len(triaged):
                     t = triaged[idx]
                     item.importance = t.get("importance", "medium")
-                    item.summary = str(t.get("summary", ""))[:200]
+                    # 以下 4 つは LLM の出力だが DM にそのまま出る（件名の絵文字を写すことがある）。
+                    item.summary = truncate_graphemes(str(t.get("summary", "")), 200)
                     dl = t.get("deadline")
-                    item.deadline = str(dl)[:80] if dl else None
-                    item.ask = str(t.get("ask", ""))[:120]
-                    item.next_step = str(t.get("next_step", ""))[:120]
+                    item.deadline = truncate_graphemes(str(dl), 80) if dl else None
+                    item.ask = truncate_graphemes(str(t.get("ask", "")), 120)
+                    item.next_step = truncate_graphemes(str(t.get("next_step", "")), 120)
                     # v0.3 Task3/4: 確定MTG・日程打診の抽出（フラットキー＝打ち切り救済と互換）。
                     start_iso = _meeting_iso(t.get("meeting_start"))
                     end_iso = _meeting_iso(t.get("meeting_end"))
@@ -950,12 +957,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 CalendarEventItem(
                     summary_scrubbed=str(scrub_value(getattr(ev, "summary", "")))[:80],
                     # 本人 DM 表示用の実名（未マスク）。runner が DM にだけ描画しログには出さない。
-                    summary_display=str(getattr(ev, "summary", "") or "")[:120],
+                    # 表示用は絵文字を割らずに切る（location_display も同じ）。
+                    summary_display=truncate_graphemes(str(getattr(ev, "summary", "") or ""), 120),
                     start_at=start_at,
                     end_at=end_at,
                     all_day=all_day,
                     location_scrubbed=str(scrub_value(getattr(ev, "location", "") or ""))[:80],
-                    location_display=str(getattr(ev, "location", "") or "")[:120],
+                    location_display=truncate_graphemes(
+                        str(getattr(ev, "location", "") or ""), 120
+                    ),
                     meeting_url=str(getattr(ev, "meeting_url", "") or "")[:600],
                     attendee_domains=list(sig.attendee_domains)[:10],
                     attendee_list_available=sig.attendee_list_available,
@@ -1070,16 +1080,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     channel_name_masked=str(scrub_value(m.channel_name))[:40],
                     excerpt_scrubbed=_strip_sentinels(str(scrub_value(m.text))[:120]),
                     # display はマスク無し（本人 DM 専用・G3/G7: ログには絶対に出さない）。
-                    channel_name_display=str(m.channel_name)[:80],
-                    # ⚠️ 1500 は schema.SlackUnreadItem.excerpt_display の max_length と対。
-                    # 片方だけ動かすと pydantic ValidationError で digest が落ちる。
-                    excerpt_display=str(m.text)[:1500],
+                    # display の 3 つは絵文字を割らずに切る（片割れが DM に残るため）。
+                    channel_name_display=truncate_graphemes(str(m.channel_name), 80),
+                    # ⚠️ _SLACK_EXCERPT_MAX は schema の max_length と対（定数の注記を参照）。
+                    excerpt_display=truncate_graphemes(str(m.text), _SLACK_EXCERPT_MAX),
+                    # 切ったかどうかは長さでなく元の本文から決める（絵文字を丸ごと落とすと
+                    # 上限に届かず、描画側の長さからの推定では「切れていない」に見える）。
+                    body_truncated=len(str(m.text)) > _SLACK_EXCERPT_MAX,
                     permalink=m.permalink or None,
                     occurred_at=m.occurred_at or None,
                     channel_id=str(m.channel_id or "")[:32],
                     channel_kind=m.channel_kind,
                     from_user_id=(str(m.user)[:32] if m.user else None),
-                    from_display_name=(str(m.user_display)[:80] if m.user_display else None),
+                    from_display_name=(
+                        truncate_graphemes(str(m.user_display), 80) if m.user_display else None
+                    ),
                     thread_message_count=m.thread_message_count,
                     thread_participant_ids=[str(u)[:32] for u in m.thread_participant_ids],
                     thread_last_user_id=(
