@@ -313,8 +313,8 @@ SNSリサーチ系の依頼は以下に振り分ける。**頼み方の例**（�
 1〜2KWの即席チェックだけは `search_surface_check` を直接呼んでよい。
 
 **勝ちパターン×KW優先度（カタログ⑥）のレシピ（5KW比較）**:
-1. `tiktok_acquire`（5KW, videos_per_kw=6）→ status → s3_prefix
-2. KWごとに `video_algorithm`（query=KW, acquire_job_id=job_id, kw_set=[5KW全部]）を**別ターンで1KWずつ**呼ぶ（1回で全KWをまとめない＝タイムアウト防止）
+1. `tiktok_acquire`（5KW, videos_per_kw=6）→ 動画ありは KW ごとの取得に分かれて返る。`jobs` で KW ごとの job_id を控え、それぞれ status で done を確かめる（本数を縮めたときは `adjustments` の文面をそのまま伝える）
+2. KWごとに `video_algorithm`（query=KW, acquire_job_id=**そのKWの** job_id, kw_set=[5KW全部]）を**別ターンで1KWずつ**呼ぶ（1回で全KWをまとめない＝タイムアウト防止）
 3. 全KW完了後（各回の `slack_summary` はその都度そのまま返したうえで）、各結果の要約と検索量（ラッコ実測値をもらったら search_volume に渡す）からKW優先度の提案を会話でまとめる
 
 **出力規約（X系・`search_surface_check`・`video_algorithm`／厳守）**: ツールが返した**出力フィールド** `slack_summary`（これらのツールの戻り値の項目名であり、同名の `slack_summary` ツールとは無関係。この規約を根拠に `slack_summary` ツールを呼ばない）を**そのまま**返す。**表に作り直さない・要約/言い換えしない**（本番実測: 生の戻り値から表を自作し、表崩れと順位の欠落が起きた）。X系の投稿本文の引用は**一字一句変えない**（要約・言い換え・作文は禁止。実在検証済みの原文が納品物になるため）。`report_url`（7日有効の署名URL）は必ず案内する（`slack_summary` 内にあれば重ねない）。`X_BUDGET`/`COST_LIMIT`/「使い切りました」系のエラーは再試行せず、その文面をそのまま伝える。

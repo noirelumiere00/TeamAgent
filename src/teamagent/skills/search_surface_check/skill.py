@@ -553,6 +553,17 @@ class SearchSurfaceCheckSkill(BaseSkill[SearchSurfaceCheckInput, SearchSurfaceCh
                             input.keywords,
                             input.max_posts_per_kw,
                         )
+                        # 動画ありの取得は KW ごとのジョブに分かれる（tiktok_acquire の計画）。
+                        # 別 KW のジョブを渡されたときに黙って空の面を出さない。
+                        absent = [kw for kw in input.keywords if not tiktok_by_kw.get(kw)]
+                        if absent:
+                            warnings.append(
+                                "TikTok面の"
+                                + "・".join(f"『{kw}』" for kw in absent)
+                                + "は渡された取得結果に投稿がありません（取得にこのKWが"
+                                "入っていないか、検索結果が0件）。動画0本で全KWをまとめて"
+                                "取り直すと1回の取得に収まります"
+                            )
                     else:
                         tiktok_by_kw = self._tiktok_direct(
                             input.keywords, input.max_posts_per_kw, ctx.request_id

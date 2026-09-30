@@ -95,7 +95,8 @@ class TikTokTaskStore:
                 n_per_kw=spec["n_per_kw"],
                 videos_per_kw=spec["videos_per_kw"],
                 sort=spec["sort"],
-                artifact_mode="full",
+                # 動画なしで1ジョブに収まらない要求は skill 側の計画が metadata_only に切り替える。
+                artifact_mode=spec.get("artifact_mode", "full"),
                 max_video_bytes=spec.get("max_video_bytes", 30 * 1024 * 1024),
                 client=TikTokClientConfig(
                     client=raw_client.get("client"),

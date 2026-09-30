@@ -18,6 +18,21 @@
       // 多層防御は tools.profile:minimal / native deny / exec deny / fs workspaceOnly / browser off /
       // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
       sandbox: { mode: "off" },
+      // §DM-overflow（2026-09-30）: ツール結果 1 件の上限（字＝UTF-16 ユニット）。既定は 200k 窓で 64,000 字。
+      //   超えた結果は頭＋尾だけ残して切る。切るのは transcript への保存時と、次のターン以降に
+      //   履歴として送るとき（上流 tool-result-truncation の resolveLiveToolResultMaxChars）。
+      //   ⚠️ MCP の S3 退避（payload_offload.py の OFFLOAD_TOOLS）は 8 ツールだけ
+      //   （search・clientkarte・knowledge_deliver・proposal_draft・proposal_review・tiktok_search・
+      //   video_analysis・video_algorithm。本番は USE_PAYLOAD_OFFLOAD=true）。それ以外のツール
+      //   （tiktok_acquire・search_surface_check・メールや議事録を読むツール等）で 2 万字を超えた
+      //   結果は、次のターン以降は頭＋尾しか見えない＝「さっきの〜」の続きで中ほどが欠けうる。
+      //   2 万字を超える結果が実際にどれだけあるかは未計測（mcp は結果の大きさをログに出していない）。
+      //   20,000 の根拠: 会話に使える枠は約 72k tokens。3.2 万字（反証レビューの当座案）の結果
+      //   1 件はそれだけで枠の 3〜5 割を食う（推定）ので、溢れにくさを優先した。計測してから見直す。
+      //   ⚠️ 受け取った直後の同じターン内のモデル呼び出しは守らない（そこは上流の
+      //   installToolResultContextGuard＝窓×0.5×2 字で、この値とは連動しない）。
+      //   最初の 1 回の overflow を防ぐのは MCP 側のエラー文の短縮（server.py）。
+      contextLimits: { toolResultMaxChars: 20000 },
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
       // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
     },
@@ -102,13 +117,49 @@
       allowFrom: [
         "*",
       ],
+      // §DM-overflow（2026-09-30）: DM でモデルに送る履歴を「前の role=user メッセージ 2 件から
+      //   後ろ ＋ 今回の依頼」に絞る（上流 limitHistoryTurns。今回の依頼は絞った後で足される。
+      //   毎回の試行の送信前にメモリ上で適用し、transcript は消さない）。層2 の revise や
+      //   overflow の再試行も user を 1 件足すので、見える「前の依頼」は 2 回より少なくなりうる。
+      //   背景: 毎回の固定部分が約 127.5k tokens あり、会話に使える枠は約 72k。
+      //   重い依頼 1 回で +27〜35k 増え、09-29 に DM が上限 200k を超えて毎回失敗した。
+      //   ⚠️ これは「溢れても次の 1〜2 通で戻る」ための設定で、溢れること自体は防げない。
+      //   重い依頼が 3 回続くと、この値が 2 でも 4 でも 3 回目の途中で溢れる。減らすのは段2
+      //   （固定部分＝ツール定義・SOUL・スキル説明の削減）。
+      //   2 と 4 の引き換え（小俣さんの判断で変えてよい）: 2 は溢れた後 1〜2 通目で戻り、毎回の
+      //   要求も小さいが、覚えているのは直前 2 往復まで。4 は 4 往復覚えるが戻るまで 3〜4 通かかる。
+      //   数字は tests/scripts/test_openclaw_runtime_contract.py の予算シミュレーションで固定。
+      //   ⚠️ 上流ではこのキーにもう一つの意味がある: そのユーザーのセッション記録が無いとき
+      //   （初めての DM・30 日使わず記録が消えた後）、Slack の conversations.history で DM の
+      //   直前 2 件を取り、今回の本文の前に付けてモデルへ送る（@openclaw/slack
+      //   pipeline.runtime-rpVpay59.js:3406-3434・2146-2209。bot の投稿は「(assistant)」扱い）。
+      //   同じ DM 内の文なので他人の情報は混ざらない。朝ダイジェスト等の直前 2 件が前置きされる
+      //   ことは受け入れる（このキーを使う限り、取得だけを止める別の設定は無い）。
+      //   ⚠️ messages.groupChat.historyLimit は DM には効かない（上流 getHistoryLimitFromSessionKey）。
+      //   ⚠️ 利用者ごとの上書き（dms.<ID>.historyLimit）は入れない。core は小文字の ID
+      //   （u08f7tk43l0）、Slack 側は大文字（U08F7TK43L0）で引くので、片方にしか効かない。
+      dmHistoryLimit: 2,
     },
   },
 
   // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる) ──
-  session: { dmScope: "per-channel-peer" },
+  session: {
+    dmScope: "per-channel-peer",
+    // §DM-overflow（2026-09-30）: 会話を始め直す合言葉。指定すると上流の既定（/new・/reset）を
+    //   置き換えるので、既定の 2 つも残す。Slack は「/」で始まる入力を未登録のスラッシュコマンド
+    //   として送信しないため、利用者向けの案内（plugin の CONTEXT_OVERFLOW_REPLY_TEXT）は
+    //   日本語の「新しい会話」を使う。一致は本文全体の完全一致か「合言葉＋空白＋続き」だけ
+    //   （上流 initSessionStateAttemptLocked）。
+    resetTriggers: ["/new", "/reset", "新しい会話"],
+  },
 
   // ── L0 コンテキスト直近N件制限（v0.3 Task10・§2.1 FinOps F1） ─────────────────
+  // ⚠️ 2026-09-30 訂正: この値は会話履歴を制限していない。上流 2026.7.1 では、Slack が
+  // まだ応答していないチャンネル発言を何件前置きするかにしか使われない（@openclaw/slack
+  // provider-C1-DFSpw.js:4333）。チャンネル・スレッドのセッションの履歴上限として読むのは
+  // channels.slack.historyLimit（attempt.model-diagnostic-events-Dg8sP6iR.js:3513）で、未設定＝
+  // 上限なし（DM と同じ溢れ方をしうる）。入れると前置きの件数も同時に変わるので、別の PR で扱う。
+  // 以下は当初の意図:
   // 司令塔ループのプロンプトへ含める会話履歴を直近 20 件に制限し、長文スレッドでの
   // トークンコスト線形増を止める（v0.3 設計書の初期値 10〜上限 20 の保守側）。
   // キーは公式 config 例（docs.openclaw.ai/gateway/configuration-examples）の現行スキーマに
