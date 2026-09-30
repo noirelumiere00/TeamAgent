@@ -634,7 +634,10 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
-    # TikTok取得ツール（30本/KW・上位N本は動画本体DL→S3）。**既定 OFF**（USE_TIKTOK_ACQUIRE=1）。
+    # TikTok取得ツール（既定10本/KW・最大30本、上位N本は動画本体DL→S3）。**既定 OFF**
+    # （USE_TIKTOK_ACQUIRE=1）。1ジョブの実行上限（870秒見積り）を超える要求は断らず、
+    # 動画なし→指標だけの取得・動画あり→KWごとのジョブ分割へ組み直す
+    # （skills/tiktok_acquire/plan.py）。
     # video_algorithm/tiktok_search が bot プロセス内でスクレイプするのと違い、submit は SQS 投函
     # のみ（RunTask/PassRole 非保有）で、実取得は使い捨て Fargate に隔離（A′トポロジ）。
     # env: TIKTOK_TASK_QUEUE / TIKTOK_JOBS_TABLE / TIKTOK_S3_BUCKET（tiktok_acquire.tf）。
