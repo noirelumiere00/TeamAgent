@@ -43,6 +43,9 @@ def _loaded_after_import(module: str) -> list[str]:
         "teamagent.skills.video_algorithm.evidence",
         "teamagent.skills.video_algorithm.analysis",
         "teamagent.skills.video_algorithm.synthesis",
+        # サムネ（一覧の表紙）の読み取りと事実（単独で import でき、evidence は葉のまま）
+        "teamagent.skills.video_algorithm.cover_facts",
+        "teamagent.skills.video_algorithm.cover_read",
         "teamagent.skills.search_surface_check.video_structure",
         "teamagent.skills.search_surface_check.video_chapter",
     ],
@@ -54,7 +57,16 @@ def test_each_module_imports_alone(module: str) -> None:
 def test_evidence_is_a_leaf() -> None:
     loaded = _loaded_after_import("teamagent.skills.video_algorithm.evidence")
     assert not any(m.startswith("teamagent.skills.search_surface_check") for m in loaded)
-    heavy = {"facts", "analysis", "report", "slides", "synthesis", "skill"}
+    heavy = {
+        "facts",
+        "analysis",
+        "report",
+        "slides",
+        "synthesis",
+        "skill",
+        "cover_facts",
+        "cover_read",
+    }
     assert not any(m.rsplit(".", 1)[-1] in heavy for m in loaded)
 
 
@@ -72,3 +84,10 @@ def test_search_surface_check_does_not_pull_video_algorithm_rendering() -> None:
             "teamagent.skills.video_algorithm.evidence",
         }
         assert va <= allowed, (module, sorted(va - allowed))
+
+
+def test_cover_read_does_not_pull_rendering_or_the_skill() -> None:
+    """表紙の読み取り（Gemini を呼ぶ層）は描画・skill・統合を読み込まない。"""
+    loaded = _loaded_after_import("teamagent.skills.video_algorithm.cover_read")
+    heavy = {"report", "slides", "synthesis", "skill", "analysis"}
+    assert not any(m.rsplit(".", 1)[-1] in heavy for m in loaded)

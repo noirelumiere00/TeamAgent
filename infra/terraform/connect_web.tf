@@ -458,6 +458,10 @@ resource "aws_ecs_task_definition" "connect_web" {
       { name = "CONNECT_APP_HTML_BAKED_SHA256", value = local.canonical_baked_app_html_sha256 },
       { name = "OAUTH_KMS_KEY_ID", value = var.connect_oauth_kms_key_id != "" ? var.connect_oauth_kms_key_id : data.aws_kms_alias.connect_oauth[0].target_key_arn },
       { name = "OAUTH_KMS_REGION", value = var.aws_region },
+      # 2026-09-29 F0: Google が実際に許可した範囲（granted_scopes）を保存し、一部だけ許可された
+      # ときは完了画面で足りない機能を伝える（既定 OFF＝要求した範囲を保存・従来の完了画面）。
+      { name = "CONNECT_STORE_GRANTED_SCOPES", value = var.connect_store_granted_scopes },
+      # connect_web/__main__.py が起動時に configure_logging() でこの値を読み、JSON で出す。
       { name = "STRUCTLOG_FORMAT", value = "json" },
       # コスト方針(2026-06-29)=Haiku。未設定だと /search の要約合成がコード既定へ落ちる
       # （2026-07-13 実測で Sonnet 呼び出しを確認）。品質を上げたい場合はこの値を明示変更する。

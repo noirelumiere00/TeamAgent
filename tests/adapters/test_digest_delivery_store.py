@@ -174,3 +174,27 @@ def test_purge_runs_after_rowcount_is_read() -> None:
     pg = _FakePg()
     assert DigestDeliveryStore(pg).claim(USER, DAY, origin="bulk", request_id="r") is True
     assert pg.statements == ["INSERT", "DELETE"]
+
+
+def test_claim_result_tells_taken_apart_from_failed() -> None:
+    """F0: 「既に取られている（正常）」と「確かめられなかった（障害）」を呼び出し側が数え分けられる。
+
+    どちらも送らない（claim は False）のは同じ。後者を前者と同じに返すと、DB 障害で誰にも
+    届かなかった朝を管理者 DM が「送信済み・問題なし」と報告する。
+    変異: 例外の枝を CLAIM_TAKEN にすると赤。rowcount 0 を CLAIM_FAILED にすると赤。
+    """
+    from teamagent.adapters.digest_delivery_store import (
+        CLAIM_CLAIMED,
+        CLAIM_FAILED,
+        CLAIM_TAKEN,
+    )
+
+    store = DigestDeliveryStore(_FakePg())
+    assert store.claim_result(USER, DAY, origin="scheduled", request_id="r1") == CLAIM_CLAIMED
+    assert store.claim_result(USER, DAY, origin="bulk", request_id="r2") == CLAIM_TAKEN
+    broken = DigestDeliveryStore(_FakePg(fail=True))
+    assert broken.claim_result(USER, DAY, origin="bulk", request_id="r3") == CLAIM_FAILED
+    # 入力不正も「確かめられなかった」側（DB には触れない）。
+    assert store.claim_result("not-an-email", DAY, origin="bulk", request_id="r") == CLAIM_FAILED
+    # 真偽の claim は claim_result と同じ判定（送ってよいのは CLAIM_CLAIMED だけ）。
+    assert DigestDeliveryStore(_FakePg()).claim(USER, DAY, origin="bulk", request_id="r") is True

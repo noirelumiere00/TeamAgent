@@ -70,6 +70,11 @@ def resolve_search_skill_config() -> dict[str, Any]:
         # 届かない事象への対策（2026-08-27 本番実測: gdrive 最上位 78 位）。プール内の
         # gdrive がこの件数未満のときだけ gdrive 限定検索を 1 回足す。0 で無効。
         "drive_pool_floor": _envint("SEARCH_DRIVE_POOL_FLOOR", 15),
+        # 施策実績（ショート動画DBの案件ごとの実績文書）のリコール床（2026-09-29）。
+        # 施策実績は cls_solution を持たず、自動抽出の cls_solution=動画広告 の AND と
+        # 提案 PDF による枠の占有で rerank へ届かない。実績を聞く意図のときだけ、プール内の
+        # 施策実績がこの件数未満なら施策実績限定の検索を 1 回足す。0 で無効。
+        "campaign_pool_floor": _envint("SEARCH_CAMPAIGN_POOL_FLOOR", 3),
         "min_relevance": _envfloat("SEARCH_MIN_RELEVANCE", 0.0),
         # 2段階しきい値の fallback（既定 0.0 = 無効＝従来挙動）。
         "min_relevance_fallback": _envfloat("SEARCH_MIN_RELEVANCE_FALLBACK", 0.0),

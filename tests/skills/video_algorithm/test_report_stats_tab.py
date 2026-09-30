@@ -224,8 +224,11 @@ def test_top5_brand_check_counts_only_roster_products() -> None:
     assert "CTA/目立つ映り込み" in unspecified
 
 
-def test_thumb_colours_say_where_the_image_came_from_and_mark_borderlines() -> None:
-    """R2-7（M18）: サムネ色は「表紙の色・参考」。コマで代用したものと、しきい値すれすれを明示する。"""
+def test_thumb_colours_are_one_reference_line_that_says_where_the_image_came_from() -> None:
+    """R2-7（M18）→ 09-29: サムネの色は 1 行の参考に縮めた（タップの要因は表紙の読み取りで見る）。
+
+    コマで代用したものは、その色を表紙の色と呼ばない（1 行の中で明示する）。色の格子は出さない。
+    """
     from teamagent.skills.video_algorithm.schema import ThumbColor
 
     out = _out()
@@ -233,12 +236,12 @@ def test_thumb_colours_say_where_the_image_came_from_and_mark_borderlines() -> N
         v.cover_data_uri = "data:image/jpeg;base64,QUJD"
         v.cover_source = "frame" if i == 0 else "cover"  # type: ignore[assignment]
         v.thumb = ThumbColor(brightness01=0.61 if i == 1 else 0.5, warmth=0.3)
+    out.cross = cross_analyze(out.videos, QUERY, board=out.board)
     html = render_report(out, generated_at=STAMP)
-    section = html.split("サムネ色の比較（表紙の色・参考）", 1)[1].split("</section>", 1)[0]
-    text = _text(section)
-    assert "#1は表紙を取れず冒頭のコマで代用（表紙の色ではない）" in text
-    assert "#1 コマで代用" in text and "#2 表紙" in text
-    assert "0.61（境界）" in text
+    text = _text(html)
+    assert "色（参考・#1は表紙を取れず冒頭のコマで代用）: " in text
+    assert "サムネ色の比較（表紙の色・参考）" not in html
+    assert 'class="tbar' not in html and "（境界）" not in text
     assert "クリック前の勝負" not in html
 
 

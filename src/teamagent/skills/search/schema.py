@@ -41,7 +41,9 @@ class SearchInput(BaseModel):
         max_length=50,
         description=(
             "資料種別フィルタ（cls_doc_type 等価）。"
-            "提案書 / 議事録 / 報告書 / 価格表 / 契約 のいずれか。"
+            "提案書 / 議事録 / 報告書 / 価格表 / 契約 / "
+            "施策実績（ショート動画DBの案件ごとの実績。投稿本数・再生数・上位の投稿URL）"
+            " のいずれか。"
             "fail-open 再検索でも外れない sticky フィルタとして配線する"
             "（クエリ自動抽出 extract_knowledge_filters より優先）。"
         ),

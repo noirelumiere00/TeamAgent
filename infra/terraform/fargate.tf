@@ -665,6 +665,9 @@ resource "aws_ecs_task_definition" "mcp" {
       # §Slack個人連携(xoxp): DM『連携』が Slack 認可URLを生成するのに必要（未設定なら Slack リンク非表示）。
       { name = "SLACK_OAUTH_REDIRECT_URI", value = var.slack_oauth_redirect_uri },
       { name = "USE_OAUTH_CONNECT_TOOL", value = "true" },
+      # 2026-09-29 F0: 「連携」で連携済みと答える前にトークンの生存を 1 回確かめる（既定 OFF＝今と同じ）。
+      # 失効（invalid_grant）の人にも再連携リンクが出るようになる（skills/oauth_connect・adapters/google_liveness）。
+      { name = "OAUTH_CONNECT_LIVENESS_PROBE", value = var.oauth_connect_liveness_probe },
       # 構造化ログを JSON Lines 化（CloudWatch metric filter `{ $.cost_usd = * }` 等が
       # バインドして cost/error/spoof アラームが発火する。observability/logging_config.py）。
       { name = "STRUCTLOG_FORMAT", value = "json" },

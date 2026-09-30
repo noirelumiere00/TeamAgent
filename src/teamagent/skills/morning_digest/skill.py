@@ -50,6 +50,12 @@ from teamagent.skills._shared.mail_compose import (
     is_mass_or_impersonal,
     should_skip_mail,
 )
+from teamagent.skills._shared.mail_connection import (
+    FETCH_OK,
+    FETCH_TEMPORARY,
+    classify_google_fetch_failure,
+    google_fetch_failure_detail,
+)
 from teamagent.skills._shared.timefmt import jst_display_or_none, jst_iso_or_none
 from teamagent.skills._shared.user_context import USER_CONTEXT_RULE
 from teamagent.skills.base import BaseSkill, SkillContext, register
@@ -75,6 +81,24 @@ from teamagent.skills.morning_digest.schema import (
 from teamagent.skills.pre_meeting_brief.signals import build_signal_input
 
 logger = structlog.get_logger(__name__)
+
+
+def _log_fetch_failed(ctx: SkillContext, section: str, reason: str, detail: str) -> None:
+    """F0: 取得失敗を 1 行の構造化イベントで出す（CloudWatch の metric filter が拾う形）。
+
+    出すのは節の名前・分類コード・内訳コード（型名と Google の識別子）だけ。email・件名・
+    例外の文面は出さない（G3/G7）。一時的な失敗は ERROR にする: 設定不備（invalid_client 等）
+    は全員に同時に起きるので、既存の error-spike alarm（5 分で 3 件）がそのまま鳴る。
+    本人の再連携で直るもの（失効・権限不足）は WARNING（管理者 DM が拾う）。
+    """
+    emit = logger.error if reason == FETCH_TEMPORARY else logger.warning
+    emit(
+        "morning_digest_fetch_failed",
+        request_id=ctx.request_id,
+        section=section,
+        reason=reason,
+        err=detail,
+    )
 
 
 def _brief_enabled() -> bool:
@@ -103,6 +127,22 @@ _SLACK_UNREAD_MAX_ITEMS = 25
 #: 30 件で約 1550 バイト＝ガード内に収まる。これを超える朝は一括ボタンを出さない
 #: （個別ボタンは各項目に付いたままなので機能は失われない）。
 _ACK_ALL_MAX_ITEMS = 30
+
+
+class _MailFetchStats:
+    """F0: メール取得のスレッド単位の成否（``_collect_mail_digest`` へキーワード引数で渡す）。
+
+    戻り値の arity を変えないための入れ物（_AckFilter と同じ設計）。Skill インスタンスは
+    並列実行（MORNING_DIGEST_CONCURRENCY>1）で共有されるので、self には持たせない。
+    """
+
+    __slots__ = ("threads_failed", "threads_total")
+
+    def __init__(self) -> None:
+        #: 一覧（messages.list）に出た重複排除後のスレッド数
+        self.threads_total = 0
+        #: threads.get も messages.get も失敗して、1 通も読めなかったスレッド数
+        self.threads_failed = 0
 
 
 class _AckFilter:
@@ -345,12 +385,28 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # セクションぶんが残ると、一括ボタンが **画面に出ていない項目まで確認済みに
         # してしまう**（押した人には見えない副作用）。落ちたら印まで巻き戻す。
         ack_mark = len(ack.items) if ack is not None else 0
+        mail_stats = _MailFetchStats()
         try:
             mail_items, mail_cost, raw_msgs = self._collect_mail_digest(
-                token, requester, input, ctx, ack=ack
+                token, requester, input, ctx, ack=ack, stats=mail_stats
             )
             out.mail_digest = mail_items
             total_cost += mail_cost
+            out.mail_threads_failed = mail_stats.threads_failed
+            if mail_stats.threads_total and mail_stats.threads_failed >= mail_stats.threads_total:
+                # 一覧は取れたが 1 スレッドも読めなかった＝「新着なし」ではない。
+                out.mail_fetch = FETCH_TEMPORARY
+                out.mail_fetch_detail = "threads_all_failed"
+                _log_fetch_failed(ctx, "mail", FETCH_TEMPORARY, "threads_all_failed")
+            else:
+                out.mail_fetch = FETCH_OK
+            if mail_stats.threads_failed:
+                logger.warning(
+                    "morning_digest_mail_threads_failed",
+                    request_id=ctx.request_id,
+                    failed=mail_stats.threads_failed,
+                    total=mail_stats.threads_total,
+                )
         except PermissionError:
             raise
         except Exception as exc:
@@ -358,6 +414,9 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 "morning_digest_mail_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
             out.errors.append(f"mail: {type(exc).__name__}")
+            out.mail_fetch = classify_google_fetch_failure(exc)
+            out.mail_fetch_detail = google_fetch_failure_detail(exc)
+            _log_fetch_failed(ctx, "mail", out.mail_fetch, out.mail_fetch_detail)
             raw_msgs = []
             if ack is not None:
                 del ack.items[ack_mark:]  # 出せなかったメールを一括ボタンに含めない
@@ -365,11 +424,15 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # --- 2. カレンダー ---
         try:
             out.calendar_events = self._collect_calendar(token, input, ctx)
+            out.calendar_fetch = FETCH_OK
         except Exception as exc:
             logger.warning(
                 "morning_digest_calendar_failed", request_id=ctx.request_id, err=type(exc).__name__
             )
             out.errors.append(f"calendar: {type(exc).__name__}")
+            out.calendar_fetch = classify_google_fetch_failure(exc)
+            out.calendar_fetch_detail = google_fetch_failure_detail(exc)
+            _log_fetch_failed(ctx, "calendar", out.calendar_fetch, out.calendar_fetch_detail)
 
         out.calendar_saturated = self._calendar_saturated
 
@@ -410,6 +473,14 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         # --- 4. 下書き ---
         # 既定（オンデマンド）: 朝は生成しない。要返信メールのボタン押下で生成する。
         # 朝は has_draft を list_drafts 照合のみで埋め、ボタン状態（作成 or 開く）を出し分ける。
+        # 末尾の説明文は「実際にどう作ったか」と一致させる（env の読み方はここ 1 か所）。
+        if self._draft_on_demand_only:
+            out.draft_mode = "on_demand"
+        elif input.max_drafts <= 0:
+            out.draft_mode = "off"
+        else:
+            out.draft_mode = "auto"
+            out.draft_limit = input.max_drafts
         try:
             if self._draft_on_demand_only:
                 self._mark_existing_drafts(token, raw_msgs, out.mail_digest, ctx)
@@ -457,6 +528,10 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             # 件数だけ（item_key も生 ID も出さない＝G3）。
             ack_excluded_mail=out.ack_excluded_mail,
             ack_excluded_slack=out.ack_excluded_slack,
+            # F0: 取得状態（分類コードだけ・例外の文面は出さない）。
+            mail_fetch=out.mail_fetch,
+            calendar_fetch=out.calendar_fetch,
+            mail_threads_failed=out.mail_threads_failed,
         )
         return out
 
@@ -482,6 +557,21 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
             return self._gcalendar
         return GCalendarClient.from_user_token(token)
 
+    def collect_calendar_events(
+        self, input: MorningDigestInput, ctx: SkillContext
+    ) -> list[CalendarEventItem]:
+        """当日の予定 **だけ** を取る（祝日の予定リマインド登録用・F0 祝日スキップ）。
+
+        メール・Bedrock・Slack・下書きには一切触れない。取得窓と項目は ``run()`` の
+        カレンダー節と同じ ``_collect_calendar``（リマインドの対象が平日と食い違わない）。
+        本人確認は ``run()`` と同じ fail-closed（本人 email が無い・未連携は PermissionError）。
+        """
+        requester = ctx.metadata.get("user_email")
+        if not requester or not isinstance(requester, str) or not requester.strip():
+            raise PermissionError("morning_digest は本人 user_email が必須です（本人受信箱限定）")
+        token = self._resolve_token(requester.strip())
+        return self._collect_calendar(token, input, ctx)
+
     # ── 1. メール digest ──────────────────────────────────────────────────
 
     def _collect_mail_digest(
@@ -492,6 +582,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         ctx: SkillContext,
         *,
         ack: _AckFilter | None = None,
+        stats: _MailFetchStats | None = None,
     ) -> tuple[list[MailDigestItem], float, list[Any]]:
         gmail = self._gmail_for(token, readonly=True)
         mail_action_hmac_ready = mail_action_hmac_configured()
@@ -508,6 +599,8 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
         refs, _ = gmail.list_messages(query, ctx.request_id, max_results=input.max_messages)
         # スレッド単位に重複排除（newest-first＝最初の ref が代表）。1 スレッド=1 item。
         unique_refs = _dedupe_refs_by_thread(refs)[: input.max_threads]
+        if stats is not None:
+            stats.threads_total = len(unique_refs)
 
         items: list[MailDigestItem] = []
         masked_bodies: list[str] = []  # triage 入力（最新メッセージ本文・境界無害化）
@@ -522,11 +615,18 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                 thread = gmail.get_thread(tid, ctx.request_id) if tid else []
             except Exception:
                 thread = []
+            # F0: スレッド全体を読めたときだけ True。代表 1 通への縮退は False
+            # （後段の根拠にしない）。
+            thread_ok = bool(thread)
             if not thread:
                 try:
                     anchor = gmail.get_message(getattr(ref, "id", ""), ctx.request_id)
                     thread = [anchor]
                 except Exception:
+                    # 1 通も読めなかった。従来どおり黙って飛ばすが、数だけは数える
+                    # （全部読めなかった朝を「新着なし」と書かないため）。
+                    if stats is not None:
+                        stats.threads_failed += 1
                     continue
             thread = sorted(thread, key=lambda m: int(getattr(m, "internal_date_ms", 0) or 0))
             anchor = thread[-1]
@@ -602,6 +702,7 @@ class MorningDigestSkill(BaseSkill[MorningDigestInput, MorningDigestOutput]):
                     draft_token=draft_action_token,
                     ack_token=ack_action_token,
                     thread_gmail_url=_gmail_thread_url(tid),
+                    thread_ok=thread_ok,
                 )
             )
             # HTML 専用メール等で text/plain が無い時は Gmail の snippet（本文プレビュー）で代替。

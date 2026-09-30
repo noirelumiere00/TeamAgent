@@ -43,7 +43,8 @@
 
 from __future__ import annotations
 
-from typing import Final
+import re
+from typing import Final, Literal
 
 from teamagent.adapters.gmail_client import GmailClient
 from teamagent.adapters.oauth_token_store import TokenStore
@@ -99,6 +100,142 @@ def classify_gmail_failure(exc: BaseException) -> str:
     if any(marker in blob for marker in _REAUTH_MARKERS):
         return "reauth_needed"
     return "gmail_api_failed"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# F0（連携切れの見える化）: 朝ダイジェストと calendar_freebusy 専用の **厳しめの分類器**
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 上の classify_gmail_failure は "refresherror" / "unauthorized" / "401" まで再連携扱いにする。
+# 対話の 1 回なら「念のため再連携」でも害は小さいが、朝ダイジェストは **全員へ同時に** 出る。
+# 連携用クライアントの secret 不正（invalid_client）や管理者のアプリ制限（admin_policy_enforced）
+# も RefreshError なので、緩い分類のままだと 23 人全員へ「再連携してください」と出し、
+# 全員に無駄な操作をさせたうえで直らない。そこで本人の操作で直るものだけを拾う:
+#
+#   token_expired: RefreshError の error が invalid_grant／refresh token が空
+#   scope_missing: HTTP 403 かつ「スコープ不足」の印（insufficientPermissions 等）
+#   temporary    : 上記以外すべて（invalid_client・admin_policy_enforced・5xx・429・
+#                  タイムアウト・通信断・設定不備の ValueError・Bedrock の失敗 …）
+#
+# 判定材料は Google の API / token endpoint が返す例外の型と構造化フィールドだけ。
+# メール本文や件名は一切見ない（第三者が分類結果を操作できない）。google ライブラリは
+# import せず、型名と属性で判定する（skill 層の 3 層分離を崩さない）。
+
+#: 取得状態（MorningDigestOutput.mail_fetch / calendar_fetch の値）。
+#: ⚠️ ``Final`` に型を書かない（mypy が Literal として推論し、schema の FetchStatus に代入できる）。
+FETCH_OK: Final = "ok"
+FETCH_TOKEN_EXPIRED: Final = "token_expired"
+FETCH_SCOPE_MISSING: Final = "scope_missing"
+FETCH_TEMPORARY: Final = "temporary"
+#: 取得を試みたかどうかも分からない（既定値）。描画は「確認できませんでした」に倒す。
+FETCH_UNKNOWN: Final = "unknown"
+
+#: 分類器の戻り値（ok と unknown は返さない）。
+FetchFailure = Literal["token_expired", "scope_missing", "temporary"]
+
+#: 本人の再連携で直る状態（＝「この DM で『連携』」へ案内してよい状態）。
+FETCH_NEEDS_RECONNECT: Final[frozenset[str]] = frozenset({FETCH_TOKEN_EXPIRED, FETCH_SCOPE_MISSING})
+
+# HTTP 403 のうち「トークンのスコープが足りない」ことを示す印（小文字で照合）。
+# 403 には rateLimitExceeded / domainPolicy / accessNotConfigured もあり、それらは
+# 再連携では直らないので拾わない。
+_SCOPE_MISSING_MARKERS: Final[tuple[str, ...]] = (
+    "access_token_scope_insufficient",
+    "insufficientpermissions",
+    "insufficient authentication scopes",
+)
+
+_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_TYPE_NAME_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _type_names(exc: BaseException) -> tuple[str, ...]:
+    return tuple(cls.__name__ for cls in type(exc).__mro__)
+
+
+def _refresh_error_code(exc: BaseException) -> str:
+    """RefreshError の OAuth エラーコード（invalid_grant 等）。取れなければ空。
+
+    google-auth は ``RefreshError("invalid_grant: …", {"error": "invalid_grant", …})`` の形で
+    投げる（google/oauth2/_client.py の _handle_error_response）。構造化 dict を優先し、
+    無ければ先頭文字列の「コード:」を読む。値は [a-z_] の短い識別子だけ受け付ける。
+    """
+    args = getattr(exc, "args", ()) or ()
+    for arg in args[1:]:
+        if isinstance(arg, dict):
+            code = str(arg.get("error", "") or "").strip().lower()
+            if _CODE_RE.match(code):
+                return code
+    if args and isinstance(args[0], str):
+        head = args[0].split(":", 1)[0].strip().lower()
+        if _CODE_RE.match(head):
+            return head
+    return ""
+
+
+def _http_status(exc: BaseException) -> int | None:
+    """googleapiclient.errors.HttpError の HTTP ステータス（無ければ None）。"""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        return int(status) if status is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _http_error_blob(exc: BaseException) -> str:
+    """HttpError の reason / error_details / 本文を小文字でつないだもの（照合専用）。
+
+    ⚠️ ログにも利用者向け文言にも出さない（URI に thread id 等が入るため str(exc) は使わない）。
+    """
+    parts: list[str] = [
+        str(getattr(exc, "reason", "") or ""),
+        str(getattr(exc, "error_details", "")),
+    ]
+    content = getattr(exc, "content", b"")
+    if isinstance(content, bytes | bytearray):
+        parts.append(bytes(content[:4096]).decode("utf-8", "replace"))
+    elif isinstance(content, str):
+        parts.append(content[:4096])
+    return " ".join(parts).lower()
+
+
+def classify_google_fetch_failure(exc: BaseException) -> FetchFailure:
+    """Google の取得失敗を token_expired / scope_missing / temporary に分ける（厳しめ）。
+
+    ``token_expired`` と ``scope_missing`` だけが「本人の再連携で直る」。それ以外は
+    すべて ``temporary``（再連携へ誘導しない）。迷ったら temporary に倒すのが要点で、
+    ここを緩めると設定不備の朝に全員へ「再連携して」と出す事故になる。
+    """
+    names = _type_names(exc)
+    if "MissingRefreshTokenError" in names:
+        return FETCH_TOKEN_EXPIRED
+    if "RefreshError" in names:
+        return (
+            FETCH_TOKEN_EXPIRED if _refresh_error_code(exc) == "invalid_grant" else FETCH_TEMPORARY
+        )
+    if _http_status(exc) == 403:
+        blob = _http_error_blob(exc)
+        if any(marker in blob for marker in _SCOPE_MISSING_MARKERS):
+            return FETCH_SCOPE_MISSING
+    return FETCH_TEMPORARY
+
+
+def google_fetch_failure_detail(exc: BaseException) -> str:
+    """管理者向けの内訳コード（例 ``RefreshError:invalid_client`` / ``HttpError:503``）。
+
+    例外の **型名と Google が返す識別子だけ** で作る。例外の文面（URI・件名・アドレスが
+    入りうる）は使わない。どの部品も英数字と ``_`` に絞る。
+    """
+    name = _TYPE_NAME_RE.sub("", type(exc).__name__)[:40] or "Exception"
+    if "RefreshError" in _type_names(exc):
+        code = _refresh_error_code(exc)
+        return (f"{name}:{code}" if code else name)[:80]  # schema の max_length=80 と対
+    status = _http_status(exc)
+    if status is not None and 100 <= status <= 599:
+        return f"{name}:{status}"
+    return name
 
 
 # Output.connection の値。"live" = 実際に Gmail を叩いた（0 件でも連携は正常）。
@@ -162,12 +299,20 @@ __all__ = [
     "CONNECTION_LIVE",
     "CONNECTION_OK",
     "CONNECT_SUFFIX",
+    "FETCH_NEEDS_RECONNECT",
+    "FETCH_OK",
+    "FETCH_SCOPE_MISSING",
+    "FETCH_TEMPORARY",
+    "FETCH_TOKEN_EXPIRED",
+    "FETCH_UNKNOWN",
     "GMAIL_FAILED_MESSAGE",
     "MESSAGE_BY_CONNECTION_ERROR",
     "NOT_CONNECTED_MESSAGE",
     "REAUTH_NEEDED_MESSAGE",
     "MailConnectionError",
     "classify_gmail_failure",
+    "classify_google_fetch_failure",
+    "google_fetch_failure_detail",
     "resolve_gmail_for_user",
     "searched_inbox_prefix",
 ]

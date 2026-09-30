@@ -109,6 +109,9 @@ def completion_message(out: object) -> RichMessage | None:
     else:
         text = f":mag: *{FACTOR_TITLE}*\n{NO_FACTOR if ok else NO_ANALYZED}"
     head.append(section(text))
+    if ok and c.cover_line:
+        # サムネ（一覧の表紙）の共通点（コードの名前と本数だけ・表紙の文字は出さない）。
+        head.append(context(esc(c.cover_line)))
     fields: list[str] = []
     if ok:
         fields.append(f"*平均エンゲージメント率*\n{c.avg_engagement_rate:g}%")

@@ -8,7 +8,8 @@
 - v3/system.md は v2/system.md と同一（この PR では 1 本ずつの分析プロンプトを変えない。
   env VIDEO_ALGO_PROMPT_VERSION=v3 を選んでも Gemini への入力は v2 と同じ）。v3 で変えるのは
   統合（synthesis.md・既定の版は synthesis.SYNTHESIS_VERSION）だけ。
-- v3/synthesis.md は規則 R1〜R16 をすべて持ち、出力の JSON に仕様 §3-2 の欄が全部あること。
+- v3/synthesis.md は規則 R1〜R17 をすべて持ち、出力の JSON に仕様 §3-2 の欄が全部あること
+  （R17 と cover_directives はサムネ＝一覧の表紙の指示）。
   例文に数字を入れない（例文どおりに書いた作り話の数字が照合を通らないため・仕様 §2-5）。
 """
 
@@ -58,7 +59,7 @@ def test_v3_synthesis_has_every_rule_and_field() -> None:
     text = "\n".join(_read("v3", "synthesis"))
     assert text.splitlines()[0].endswith("system prompt v3")
     rules = re.findall(r"^- (R\d+): ", text, re.MULTILINE)
-    assert rules == [f"R{i}" for i in range(1, 17)]
+    assert rules == [f"R{i}" for i in range(1, 18)]
     fence = text[text.index("```json") : text.index("```", text.index("```json") + 3)]
     for key in (
         "summary_lines",
@@ -86,6 +87,8 @@ def test_v3_synthesis_has_every_rule_and_field() -> None:
         "ab_plan",
         "refs",
         "quote",
+        "cover_directives",
+        "on",
     ):
         assert f'"{key}"' in fence, key
     # コードだけが書く欄は、LLM に書かせない（出力例に出さない）

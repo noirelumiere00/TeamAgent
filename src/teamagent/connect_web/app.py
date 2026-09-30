@@ -41,6 +41,10 @@ from teamagent.adapters.google_oauth_flow import (
     OAuthConsentFlow,
     consume_state_once,
     inspect_state,
+    missing_workspace_scopes,
+    scope_labels,
+    scope_short_name,
+    store_granted_scopes_enabled,
 )
 from teamagent.adapters.oauth_token_store import (
     OAuthToken,
@@ -4279,6 +4283,29 @@ def create_app(
         logger.info(
             "connect_callback_ok", request_id=rid, user_email=email, scopes=len(token.scopes)
         )
+        # 一部だけ許可された連携（CONNECT_STORE_GRANTED_SCOPES=ON のときだけ判定する）。
+        # OFF のときは token.scopes が「要求した範囲」なので判定せず、従来の完了画面のまま。
+        # 保存は済んでいる（許可された範囲で動く機能はそのまま使える）。足りない範囲だけを
+        # 機能の名前で伝え、「連携」でもう一度許可し直す道を案内する。
+        missing = missing_workspace_scopes(token.scopes) if store_granted_scopes_enabled() else ()
+        if missing:
+            logger.warning(
+                "connect_callback_scope_partial",
+                request_id=rid,
+                missing_count=len(missing),
+                missing=[scope_short_name(s) for s in missing],
+            )
+            return HTMLResponse(
+                _page(
+                    "✅ 連携しました（一部の権限が未許可です）",
+                    f"{email} の Google 連携を保存しました。"
+                    f"次の機能は使えません: {'、'.join(scope_labels(missing))}。"
+                    "使えるようにするには、Slack で Aico に「連携」と送り、"
+                    "表示される画面ですべての項目にチェックを入れて許可してください。",
+                    accent="#e0b03a",
+                ),
+                status_code=200,
+            )
         return HTMLResponse(
             _page(
                 "✅ 連携が完了しました",

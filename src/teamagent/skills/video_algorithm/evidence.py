@@ -64,15 +64,20 @@ MIN_TIER_N = 3
 KwLayer = Literal["telop", "caption", "hashtag", "speech"]
 KwMatchKind = Literal["exact", "synonym"]
 Relation = Literal["client", "competitor", "other", "unspecified"]
-RefSource = Literal["telop", "scene", "hook", "brand", "caption"]
+RefSource = Literal["telop", "scene", "hook", "brand", "caption", "cover_text", "cover_note"]
 # 根拠の出どころの呼び名（描画に出す。テロップの引用と AI の説明を見分けられるようにする）。
+# cover_text / cover_note はサムネ（一覧の表紙）を AI が読んだもの
+# （照合は cover_facts.verify_cover_ref）。
 SOURCE_LABEL: dict[str, str] = {
     "telop": "テロップ",
     "scene": "場面の説明（AI）",
     "hook": "冒頭の要約（AI）",
     "brand": "ブランド表示",
     "caption": "キャプション",
+    "cover_text": "表紙の文字（AI読み取り）",
+    "cover_note": "表紙の説明（AI）",
 }
+COVER_SOURCES: frozenset[str] = frozenset({"cover_text", "cover_note"})
 
 KW_LAYERS: tuple[KwLayer, ...] = ("telop", "caption", "hashtag", "speech")
 KW_LAYER_LABEL: dict[str, str] = {
@@ -106,6 +111,43 @@ def fold(text: str | None) -> str:
 def norm(text: str | None) -> str:
     """照合用: NFKC＋大文字小文字を無視＋空白を除く。"""
     return "".join(fold(text).split())
+
+
+# 避けたい訴求の語を、文字の種類の切れ目で分けた片（「ルー卒業」→「ルー」「卒業」）。
+_SEGMENT_RE = re.compile(
+    r"[ァ-ヶー]+|[一-龥々〆]+|[ぁ-ゖ]+|[a-z0-9]+|[^\sァ-ヶー一-龥々〆ぁ-ゖa-z0-9]+"
+)
+# 片と片のあいだに挟まってよい字数（「カレールーはもう卒業」の「はもう」）。文の区切りはまたがない。
+_AVOID_GAP = 4
+
+
+def _avoid_pattern(term: str) -> re.Pattern[str] | None:
+    """語を文字の種類の切れ目で分け、片が順に・短い間隔で並ぶ形（片が 1 つなら None）。"""
+    segments = _SEGMENT_RE.findall(norm(term))
+    if len(segments) <= 1:
+        return None
+    gap = rf"[^。！？!?]{{0,{_AVOID_GAP}}}?"
+    return re.compile(gap.join(re.escape(seg) for seg in segments))
+
+
+def has_avoid(text: str, terms: Iterable[str]) -> bool:
+    """避けたい訴求の語があるか（NFKC・大小・空白を無視）。
+
+    「ルー卒業」は「カレールーは卒業」「カレールーはもう卒業」も拾う（片のあいだに 4 字まで）。
+    synthesis_checks（LLM の文）と cover_facts（コードの指示の根拠の選び方）の両方が使うので、
+    葉のモジュールに置く。
+    """
+    body = norm(text)
+    for term in terms:
+        t = norm(term)
+        if not t:
+            continue
+        if t in body:
+            return True
+        pat = _avoid_pattern(term)
+        if pat is not None and pat.search(body):
+            return True
+    return False
 
 
 def contains(haystack: str | None, needle: str | None) -> bool:
@@ -457,6 +499,7 @@ def quote_frame(
 
 
 __all__ = [
+    "COVER_SOURCES",
     "FRAME_TOLERANCE",
     "KW_LAYERS",
     "KW_LAYER_LABEL",
@@ -480,6 +523,7 @@ __all__ = [
     "at_least_majority",
     "contains",
     "fold",
+    "has_avoid",
     "kw_hits",
     "majority_min",
     "norm",

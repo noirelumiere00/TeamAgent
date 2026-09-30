@@ -163,6 +163,23 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+# 一致度（順位と再生の相関）から原因を言う文（09-29 実機:「順位と再生数の一致度0.31から、KW関連性が
+# 順位に影響している可能性」）。相関は原因を示さないので、その文だけを落とす（ほかの文は残す）。
+_RHO_WORDS = re.compile(r"一致度|相関")
+_CAUSE_WORDS = re.compile(r"影響|効い|効果|要因|原因|左右|決め(?:て|る)|ため(?:に)?上位|寄与")
+
+
+def drop_causal_from_rho(text: str, on_drop: Callable[[], None] | None = None) -> str:
+    """一致度・相関と原因の語が同じ文にある文を落とす。落としたら on_drop を 1 回呼ぶ。"""
+    if not text or not _RHO_WORDS.search(text):
+        return text
+    parts = re.split(r"(?<=。)", text)
+    kept = [p for p in parts if not (_RHO_WORDS.search(p) and _CAUSE_WORDS.search(p))]
+    if len(kept) != len(parts) and on_drop is not None:
+        on_drop()
+    return "".join(kept).strip()
+
+
 def ground_conclusion(
     raw: dict[str, Any],
     *,
@@ -195,6 +212,7 @@ def ground_conclusion(
         if not isinstance(value, dict):
             return None
         text = tone_down(sanitize_llm_text(str(value.get(key) or "").strip(), max_len=max_len))
+        text = drop_causal_from_rho(text, lambda: drop(field, "causal_from_rho"))
         if not text or not grounded(field, text):
             return None
         return ConclusionPoint(text=text, ranks=ranks_of(value.get("ranks")))
@@ -202,6 +220,7 @@ def ground_conclusion(
     headline = tone_down(
         sanitize_llm_text(str(raw.get("headline") or "").strip(), max_len=_HEADLINE_MAX)
     )
+    headline = drop_causal_from_rho(headline, lambda: drop("headline", "causal_from_rho"))
     if headline and not grounded("headline", headline):
         headline = ""  # 見出しだけ捨てる（呼び出し側が集計の見出しで埋める）
     actions = [
@@ -300,6 +319,7 @@ def conclude(
 __all__ = [
     "build_prompt",
     "conclude",
+    "drop_causal_from_rho",
     "facts_payload",
     "ground_conclusion",
     "posts_payload",
