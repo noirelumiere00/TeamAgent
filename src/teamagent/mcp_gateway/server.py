@@ -417,29 +417,37 @@ def _schedule_async_job_notice(
 ) -> None:
     if tool not in _ASYNC_JOB_TOOLS:
         return
-    job_id = data.get("job_id")
-    if not isinstance(job_id, str) or not job_id:
-        return
-    try:
-        from teamagent.mcp_gateway.async_job_notify import enabled, schedule_completion_notice
+    # tiktok_acquire は1回の実行時間に収まらない要求を複数ジョブへ分けて job_ids で返す。
+    # 先頭の job_id だけ見張ると残りの完了が届かないので、全ジョブに見張りを付ける。
+    job_ids: list[str] = []
+    extra = data.get("job_ids")
+    for candidate in [data.get("job_id"), *(extra if isinstance(extra, list) else [])]:
+        if isinstance(candidate, str) and candidate and candidate not in job_ids:
+            job_ids.append(candidate)
+    for job_id in job_ids:
+        try:
+            from teamagent.mcp_gateway.async_job_notify import (
+                enabled,
+                schedule_completion_notice,
+            )
 
-        if not enabled():
-            return
-        schedule_completion_notice(
-            tool=tool,
-            job_id=job_id,
-            user_context=raw,
-            request_id=ctx.request_id,
-            poll=_build_async_job_poll(tool, job_id, ctx),
-        )
-    except Exception as exc:
-        logger.warning(
-            "async_job_notify_dispatch_failed",
-            tool=tool,
-            job_id=job_id,
-            request_id=ctx.request_id,
-            error=type(exc).__name__,
-        )
+            if not enabled():
+                return
+            schedule_completion_notice(
+                tool=tool,
+                job_id=job_id,
+                user_context=raw,
+                request_id=ctx.request_id,
+                poll=_build_async_job_poll(tool, job_id, ctx),
+            )
+        except Exception as exc:
+            logger.warning(
+                "async_job_notify_dispatch_failed",
+                tool=tool,
+                job_id=job_id,
+                request_id=ctx.request_id,
+                error=type(exc).__name__,
+            )
 
 
 def _err(message: str, **extra: Any) -> list[TextContent]:

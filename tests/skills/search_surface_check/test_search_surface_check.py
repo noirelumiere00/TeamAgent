@@ -193,6 +193,29 @@ def test_ig_failure_degrades_with_warning() -> None:
     assert out.tiktok_source == "acquire_job"
 
 
+def test_acquire_job_missing_keywords_is_warned_not_silent() -> None:
+    # 動画ありの取得は KW ごとのジョブに分かれるので、1KW 分のジョブだけ渡されうる。
+    # 入っていない KW を黙って空の面にしない。
+    skill = SearchSurfaceCheckSkill(
+        apify=_FakeApify(),  # type: ignore[arg-type]
+        bedrock=_FakeBedrock(),
+        publisher=_publisher,
+        tiktok_source_factory=lambda job_id, audit_hash: _FakeSource(_s3_posts()),
+    )
+    out = skill.run(
+        SearchSurfaceCheckInput(
+            keywords=["セブン", "ファミマ", "ローソン"],
+            platforms=["tiktok"],
+            acquire_job_id=_JOB_ID,
+        ),
+        _ctx(),
+    )
+    (warning,) = [w for w in out.warnings if "渡された取得結果に投稿がありません" in w]
+    assert "『ファミマ』・『ローソン』" in warning
+    assert "『セブン』" not in warning
+    assert "warnings" in SearchSurfaceCheckSkill.mcp_relay_fields  # Aico まで届く
+
+
 def test_rollout_denied(monkeypatch: Any) -> None:
     monkeypatch.setenv("SEARCH_SURFACE_ALLOWED_EMAILS", "other@vectorinc.co.jp")
     skill = SearchSurfaceCheckSkill(apify=_FakeApify(), publisher=_publisher)  # type: ignore[arg-type]
