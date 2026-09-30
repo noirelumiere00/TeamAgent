@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:a3952f3ce6b6d2d3aa558e8d3225ad7a455f9565d49930c5e8c5276e44e7ce26",
+  "claims": [
+    {
+      "id": "claim_86c3847bf651457f831258a43a56dcac",
+      "statement": "SearchSkill の構築引数は orchestrator/factory.py の resolve_search_skill_config が env から 1 か所で解決する。USE_CLIENT_BOOST は既定 ON、USE_COHERE_RERANK などほかの検索フラグは既定 OFF、SEARCH_DRIVE_POOL_FLOOR の既定は 15、PROMPT_VERSION の既定は v2d、SEARCH_MAX_TOKENS の既定は 800。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L58-L86",
+          "version": "repo-lines-v1:sha256:24ca10b8d554d331fd64d1fae78f5be35fc7f3cd6ffefec25e9504748ad0b90f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2NzdmZTFmMWNkMWJhMmNmY2M3MGE2NjFlZWIxYWI4YTljMmY0ZTJkMTJhOWVmMjRkNTE5ODY2NDJjMDE3OWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzZjMwY2U3YTRmOGI2MWQ3NWM4OGViZDU2YTliYTAyMGJhOGJmYTc1Y2UwNmYzMWQ4MTJiM2Y0MTgwZGZkNTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQxYjg2NDY5YjE0ODA1NDgwMmQ4ODAwYTYwZTI5NWYwNWFkYTU3ZjExZjZmY2QwZjE1MzJmNDcwNzM5Y2ZkZjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c09c0a6895f048719fb418dfc82967f8",
+      "statement": "_pool_search は、自動で付けた業界・メタフィルタで 0 件なら外して再検索する。その際も明示の sticky フィルタと __client__ は残す。それでも 0 件で除外フラグのどれかが効いていれば、除外を全部外して 1 回だけ再検索し、救えたヒットに is_low_confidence=True を付ける。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L648-L706",
+          "version": "repo-lines-v1:sha256:fe41755482f81cc7966adcf8571cc907ce1e10b88cf5079fedf0cb2cf716604f:eyJzZWxlY3RlZExpbmVDb3VudCI6NTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFiZmU5ODI5ZTA1NGQwNTZiZjQ5ZDAyZTEwYzk3YmUyZjljNGE4M2ExNzQ4ZGY3YTdjZGFiMWMzZjVjOGQ1ZmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwN2M5ZDdlMDAzZTRjNmU3YTg3ZmJhNmU0OTMxZTU4NjUzZDVkOTBmMjIwOGIyZmE4ZDdjMmJlZDcyYzMxYmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ1ZjlmNGM0MjJjZDFhYmFlOTg2YTU5YTc5MGZhZWEyNTIwYTgxZjA3MTdiM2I0NTM3YmU2YTA5MzFmOGI1NWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYwZTlkMGU0ZjAxNDEyNjA0YmRkMDY5OWYwYjk0YTJlYzc2OTkyNDZiNjgwYTM0ZWRkNWNmOTMxNTNlZjg3YzQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_04214d67299c465489d5b7ec66afea8b",
+      "statement": "Drive リコール床は、Cohere rerank が有効で、プール内の source_type=gdrive の件数が drive_pool_floor 未満のときだけ、gdrive に限った検索を 1 回足してプールへ合流させる。補助検索が失敗しても元のヒットのまま検索本体を続ける。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L1369-L1409",
+          "version": "repo-lines-v1:sha256:1bd691262c5702b56bfd25ae25c8241509aba0448cf15d170c9ba06cba9d325b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiMjQ0ZjU0MWFkMjg2NjFiZGFjZjFmODM2YjliN2RmNDI4MjkyNThhMGQyMDQ3ZTE0NWY0ZTliYTlmMGI1YmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUyNTJjZDhjNWZmNmNlY2U0NzExYWExOTJlYTgyMTIxOWQzZGNiYWNmNWE1YmE2ZTg4ZmViMTQzZGRkYzIyNzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcwMjkwNjhhZjExY2IyNjEyYjk3ZWZjNWQ2NTE2NTFjOWY0NDYyN2Q0YjA5OWYzOWZjMDAyOWI0NmViYjcxZGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZhYTlkYTlmOTFkNzVmMzBiZWY2NGE2NjU5MjU3NzE5ZjE2YWZlYzg1ZmM2NDE4MWU0MmM4MmZmOGU4MDdlMjkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_77d76f9bf89b4c8e85ef462336c56cf7",
+      "statement": "client boost は、明示の filter_client があるときと、query_planner が抽出した取引先を __client__ に昇格させたときは走らない。取引先語彙のキャッシュキーは (user_groups, user_role, 小文字化した email) で、RLS の可視範囲が違う利用者のあいだで語彙を共有しない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L1210-L1218",
+          "version": "repo-lines-v1:sha256:cd3a65392ff6e123fef69e111579e0a1aab26649138fe83409d7a4fbda14cefb:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzI3MmIwZDdmMzEyZjJiNTE3Njk4MmMxNmRjMDBhMDUyMmQ0MTg0NmI3YzM0ZDM3ZGIwNTllNDhjMjk3YmExNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWJjYTUxNmUxYzM2NGU5YTRiNDY3MjE0NDA1ZmZhMWQzYmMzY2ZkYzA4ODQ5OGFkODIwZTA2YmRmM2E1ZmMwOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDViM2EwNjI0ZDE0NGM3N2YxZTU5MTg3YTExOTk3YTYwY2Q1MmU3NzRjNmIyNWFjZWM0MWUzOTUwYjFlYzc0MCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L952-L964",
+          "version": "repo-lines-v1:sha256:af8e6b001eeebeb017562f0c26530c3140dadb61e43fcbed68e4f4be20789aa1:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhYzBjYTMyNjRjYTdmOWQxNTE3MjExZTdkZDExNzk1OWFiOWI3OTk4M2I1ZTUxYzMzMzFjYTc4YjFhYWFhNzYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQwMDEwNWUwYTY4NTIxYzNkMzMyNjE1MzkwZTg1OWUzOWNmMjQxMjc0YTdkNzgxZDE5NmEzYWRhMDdiMTBmZDciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVkNWEzYThhMmRjYWIxMDAwYTc1MmYwMDNkZWNmYmQxNTkwNzZkNmRkMDY5YTU3MTQ5NTkyNWE2M2YwMzU3YTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJhZTU2NTFiOGJhMDMxNzkyNDFhNTdhOTZhNjNlZTZiNDhlODViY2E4NmM3OWFhYWYzOGU4ZDM2NDhkMjk1YjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1e8b228a394941eeae55fb04a0f6ef1f",
+      "statement": "検索結果の警告ヘッダは、要約を作る前に retrieval の数値だけで build_result_header が決め、要約本文の先頭へサーバ側で付ける。警告するのは、top1 スコアが閾値未満のとき、指定した業種の資料が 0 件のとき、指定した取引先と top1 の取引先が違うときの 3 つ。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/search/result_guard.py#L354-L390",
+          "version": "repo-lines-v1:sha256:58249e28596612d3c51e831d89c8643474324a3a705a7f31285bb90c32408617:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNiNjZkN2U1OGFmOGE4MTY1YjNjN2ZiYmRiYzQxYjgwMmNlMDI0NmFiMWM2ZjU3OTQ0ZjgxNTFkMDgwNzg2NWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzZTdiYjMxNTZkZjFmNzcyOGY0NTMxOTM0NDlhYTc0NmQ3MWE1NDEzYTQ0M2FjZGVkMTZkYzcwNTI2Nzg0ODEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE5MzQ4Yzk5ZjU4MmViOGQzMmQ1NzEwY2I2NTczYTFlMzJjYTkxYmFjNWYxMWU2NWNmNzIwMmNmNWM4YjIxNDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUwZjQ5NGQ2ZmYxOTQ0MzAxZmYxMTAxYmM4NDIyOTg0OTk2OWFiZTJmZmQ1MTY3NTFkNGU2MTlmMTRmNDE4ZGMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L424-L436",
+          "version": "repo-lines-v1:sha256:8f2a0c1e080e91de7758c740d4acc083c36634bc5549c7e8dab3dba627254fee:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEzNGMyYWM2NjM1NDBkNzhjNjcwMTkwNmJiZmQ1M2ExMDlkYTFhNDAxNDRmYWNjZGFjNTQ2NDg3N2I3NWZhYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZTI1MjBhYTAyNjMxMzhkYTI4MDM4MjVhNjgxOWU5ZjYwYzQ1Y2IwNGVhYjdhZWM4Mjk2YmM4ZmE2YmRmMTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ2ZDQ3ZjU1ZmNjOWQxOTgwYjkyODJjMjcxMzFjYmIxZmM5ZmEyYWE1NzNmNjM0Y2I5NTg0MjRlNzI4Nzg4MWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzOGYzNjZmNTc5YThkNDY1MWFhMmM1Y2JiZDk0OWViNGI5MDI0Y2JhOGZlZGMzOGFmNGM3Y2RjMzkwZmY3YzYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L491-L497",
+          "version": "repo-lines-v1:sha256:e02fffeaf2798d6e5ea774f75f3d335c1f29a3f36eff37e264c774adb3bde078:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzAzNTliM2EwMTNiNDIwNmQ5MzBkYmY4YzUyNzAzM2Y2MDA4OWJkOGNlZmRkYzI1MDk1MWNlYTc0NTlhNDE4ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTJkNjY4MTM4MWI4YjFhOGIyYjcwNjgxYjlmYzQ5ZjY3NjVkNzg5OWFmMjYyYWMyMGZiMWRiZGUwZDJlOGRhOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTA4NDhmOGRkYTlhZjNiNTcwZWVmNjdhNDgyMGMxYTFkYzc2NGU2OTVhOTRmZTFlN2U0ZTQ3ZTMwZGJiNjA2NCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiODdkMjY5YTkxYWYxNGJhMDZjMzdlMjgyNjhiYTdjZTZkN2RmZWM0NjZmMjcyNjdlZjJkNmU3ZjIzN2M4NjdhMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_2c9818ca042c4bfc86f85cc8f905dc72",
+      "statement": "二段返しが働くのは、MCP gateway が search ツールの呼び出しに印を付け、USE_SEARCH_TWO_STAGE が ON で、ヒットが 1 件以上あり、ctx.metadata の channel_id か本人の email から投稿先が決まるときだけ。どちらも無ければ後追いはせず、その場の要約に戻る。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L926-L931",
+          "version": "repo-lines-v1:sha256:594218d806a6d0bce4afad807135d0c15801f58dba4ac33291b0e736811a8361:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWJjMmJkNzJjZWUwNDFhYjgxMDhmZTQwNjc3MjFlOTVjZWMxY2M5M2E3ODk4M2MzOTA3YzE1M2I1MjZmNmVhYiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDE3NmZmYmM1YmFkNTJlNzE2NzZkNzRlZTMzM2M5NWQxMWE0ZmY2OTI2NzhkOGUwNzA5ZjdmZTgwNTk2MWY2OSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiY2E5OGM1MjUzZmYyYzQxMGFhMzk3MzM1NzRiMGYzY2VmNzNlNmQzMjY0ZWUzNTQ3NmI2MzEzNzRjNDEwNTBkOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjU0YTYwNjc1YzVhZWYxODkyOTE5YmIxMjM1MjkwYjM1MmMxODg0Yjg5ZDc5NzBjZjkxMGE2ZDk4ZDExMzY2MCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/search/skill.py#L1412-L1426",
+          "version": "repo-lines-v1:sha256:bbd0bce5594639d42ef00173dd09ab34b8eef7775a054823f00cccfddfe36d8d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5YmNkNTA1MDM2MzUyNTQ4OTUzYTdmNjljZjQ2MmU2MzRhYzdiYjRlZmE1OGE4ZmU1MzJkZTQ4OGQ2MWJjZTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4YmQ4Y2JlMTdkNmQ2NDc3NWYyMjMyMTY5YmM5ZDg0MTk4YjY1OGMxODM1NjY2ZGJhNzdkYzM2MzU2MjkyNDkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg2MWExNmRhNDMxZjc2ZjI1MTVkMmY1NWIzNjYwYmMzZDFmNDlkZDY3ZDBmZWVlNDRhZjZjMzFmZmViMDI0ZTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFjODgzYTg5NmYzMTU0NDA4NGIzOGFlMmZiOTI4OWE5ZTg0ODZlOGI5ZjFhMDUxMWVmMmM3OTUyNzFmOTNmMmMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/search/two_stage.py#L78-L96",
+          "version": "repo-lines-v1:sha256:4a9057e36ea657953d89cd1877a953a0308f14f034a519adc4c1fd5f2702c348:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzMjJiN2YyZTI4NWQyMWVmOTg0NTkxMzA5Mzg3MmI5OTI3ZTUzZmZiMGQ5ODg1YTg3NjEyNTE2NmJiNGU1NDMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ3MDE0OWUwNjlhZDY3ZWNjZjQ3MzY0NmZmMWM3NTAwNTBkMzI5ZDExMDAxOGRjNTc2Njg3OGVhZmExZDYwN2QiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBjODU2OGM3OGI4ZjcwZmUyMzlmY2ZkZGMwZjIwZWYzNmNiNjQwYTY0OTU5ODU3YTUwYWM0ZTMzYzAzMDNiOTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_adeff7b64f1c40428841fee2de1686b4",
+      "statement": "knowledge_deliver が配信候補にするのは、Drive の file_id が取れ、score が KNOWLEDGE_DELIVER_MIN_SCORE（既定 0.5）以上で、低信頼ではなく、業界の指定と矛盾しないヒットだけで、最大 top_k 件まで。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/knowledge_deliver/skill.py#L119-L172",
+          "version": "repo-lines-v1:sha256:c29aeeced27afdcdc015d04d52029e8989509ee1da06306a7df093f0a7c96f87:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUzOTQ1MDA2NWYxNjMxMjc3NWFiNDBlNDE3ZWU5OWEyZTBmNTdlMGIwYmExNzYzNWFhZDI3ZWQzYzhlYTJiNDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3ODM0OWUxMTNiNGM0M2I2MjBiZWI2ODM2M2E5MzI4ODlkOTM3MzMzOGRkZTFhODg0ZWI3NTRhNmZlYjIyZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM5OTk3NGI3N2I4MWQ3ZDAwMzhhYTM5YmYzZTNmMDljMjhjODBlMDhiZDQzMDRkMjI2OTE0MzQ4NTYzMmU3ZTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjgzZTk3ODczODk0YTBkNTVmZmQyZjMzZWM2ZWNlOTg5ZWQyMmY1YjE1ZTIxZTkxNGQzODMxYTRmNjhhOTIyYWIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_fc8d5219528343c38647a8fea16b3ae6",
+      "statement": "clientkarte の関連資料は KARTE_ATTACH_DOCS を kill switch とし、依頼文の断片と判定された取引先名では資料経路に入らない。チャンネルで呼ばれたときは一覧と実ファイルを本人 DM へ送り、チャンネルの回答には資料名を含まない通知だけを足す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/clientkarte/skill.py#L444-L459",
+          "version": "repo-lines-v1:sha256:5fd0ae254ffe832f6130d7844a56bb6c0fd95b97b3be24de0a03b7da9e3f96ec:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIxOTY5NTE1ZjgzZWViMzFiNzEzZGQ4YjQwOTdhNGJjNGUzYmVhMmJjNTI1ZGRkOGI5MjlkMGYzMTllYjA1YjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjczMDNiNDhmYTNiYTViZTU2ZGYwNjgzNDcyNThjMjNiNmY0MDk4MmI3YTIxNDNiOGE0ZjMxMzMxYTg0YWQ4YTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJlZjkzYmU3YmMzNTQ3NzNhMDMwMGQ3MDg1ZGY5ZWZmMDEzN2Q1Yzg5ZTYzMGExYWRmZTZjOGEwNGQzMDk0MzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2N2U5NTU3NGE3NjQ0MGFjODE4NDI1ZWFjOGY4OGIzOWJiNjI5Yzg2YWUwNjEyZDI0ZDQ2M2Y5OTdjMDJiODAifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/clientkarte/skill.py#L579-L614",
+          "version": "repo-lines-v1:sha256:b5c7a4527c3fbf1a5d83cb3682088a9dd8029551f79e76e402a83f38d53cb48a:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5YjUyYTRlOWY3ZjhmZDBjZGY1MjVkNWZmOWU4ZTM2MDRkOWFiMzkwYTJkZGZkZDAyZmFlYmE5NzhiOTQzNjEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlNTk3NmQ3ZjBlNjdmZjE3OTEyODcxYThjM2ZkMDVhN2I3MDg0Y2E3M2U1NzRiYTRhZjdkOGJhY2NiNGM1N2YiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzZWFiMDViMTg0ODNhMWExNmE4MTA2MmY3Yzc0MzRmNDYzNzA1YzEwMDE1MmQ4ZGMwNDQ5NGU0Y2RkYTQyOGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2YjNlZDViZTIwMmJkNGIzZDAwYzUyODY5MTFjNGYyMjc1Nzg5MzgxYmFkMzA4M2Y1N2IwYjgwY2Y1ODRiNzIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5a424edd5dc84d8e910c46320cab84f5",
+      "statement": "connect-web の /api/v1/search は、RLS メタとして本人の email・メールドメインだけのグループ・user_role=user を渡す。同時実行はセマフォで絞り、待っているあいだにクライアントが切断していたら検索を走らせずに 499 を返し、SearchSkill.run は asyncio.to_thread で動かす。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4777-L4815",
+          "version": "repo-lines-v1:sha256:dea47e7b802b3344a6ee31d3b4d6c573bc1c9c1b39a3143dee9294b951ff4215:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4NjI3MzQ0NjViMWE5NzJlMTI1M2VlYjQyMGE1MGJlM2VmZWI5ZWNkODg3M2MzZDg2ODBiMjhjOGE0MmNmMDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE1MDI3N2E2N2FhODlhYmU3ZjJhNThiMmNhN2Q4NTc4YmU3MGIyY2M3NDliYzkzODc4ODlhZmM5ZTBjZmU3NzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdkZjExZGE3Njg5ZTU3MjU2NzkyYTQzY2RhYjY1YTVjN2ZkZmY4MDY1YTZlYzY0NjFjNjQ1OGQyMjIwNTljZjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc2NmM5MTcwMzA1NTlhZTcwMDE3ZTI1YTFmMGZlNzgyMDVjYTZiN2NiMDZlZjhlY2JlMGU0ZTU1YTRhMDZhZTkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2421244da3004d138186c7239d595c5e",
+      "statement": "/api/v1/feedback は user_email を cookie セッションから取る。score 1〜4 は、3 以上を +1、2 以下を -1 の rating に換算して search_feedback に書く。score 付きの評価は本人ごとに 60 秒 30 件を超えると 429 を返す。migration 0022 はこの換算を CHECK で強制し、teamagent_app から SELECT を剥がして書き込み専用にする。",
+      "evidence": [
+        {
+          "resource": "repo://infra/migrations/0022_search_feedback_score.sql#L25-L52",
+          "version": "repo-lines-v1:sha256:bb194116a7b048652d11b843828541b150abfaa99e658459184f7c039653f55c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjljMjliNDA4YzI0NTYwZDQ3ODQyNWQ5YWZkZGRmZDRkM2M1NDAxMTdjNmFmZWFjNTQ0MTk3YmIxNzIwYTNlZTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdmYWM4NzU5M2EzOGJiMjdmMDRlZmE5NWYwYWVlYzIzYWI1NWRiZWJiNDI0NDEyZTQxYjdiYTA5ZWU0NDlkYjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU3MTY5M2U4ZmY4MGUyZmRmMjI2MDJkMDJjMDFkODM2NDk0MDI4YTRjNzY4NWQ1NjQ3YzJiNjI1NDI5MGY0MTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk4NGJiZjRiMzJlZTAxNzg1ZDFlMWRjMzBjNjk5NzY2ZDVhM2RlMDg0MGU4YTRmN2MxOGYwYmE0MzhjM2YzYjcifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L4876-L4927",
+          "version": "repo-lines-v1:sha256:d026ea0590eab1b8da9facaf334e7b5bb41c73842f53cee5bfd374d33d3c5895:eyJzZWxlY3RlZExpbmVDb3VudCI6NTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM1ZjcxZDQ0MjQxNzRhNzM2OGE3ZTcwMjA0YWZiZjY1YmE2MDA4ZWNlZWNhZjhlNmNlYzQxNDBkYWY0MmE5MjMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5ZTY4OTc3NzhiNjI1OTNlZjVmOGMwZGYzODIyZWU4MmI4YjA4ZWJhN2FjMjE4YTI0MDk0OTg4ODI5OTEwNGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI3OGRkNWI4M2YxZTA2NjY2YTYyNzllNjJkNzZlZGIxMTk1MjgzOWZhYWE2OTMxODcwYzEzYTZkMjY4NTBhNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZjZDU1ZWYxZTUwZjNkZDY3ZjJjN2ViZGI4MjIwOTg5OTcwZDQyMmNlNzBkYmJiYTYyMzYwZjA0ZTQ2YzM3NWMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/connect_web/app.py#L77-L78",
+          "version": "repo-lines-v1:sha256:3b9195bdf897a8a01ed15174115e36c00b9646a51b03e189c179026e9e5ed53e:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWQ0Y2E5MGUzNzQ3Y2FiMWZkMzY5N2RlMzM4YTg4NjY5NmRlNDViZGE0N2JiODBlZjQwMmM2MjRjYzQ2NjFhMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODhlY2JhMTMxOTIwYWQ4MDJhNWJjNzcwNDYzMmZlM2FlNTFhZjAxMGZhYjM5MmUzZmFlZmJmODdiM2QxZDVlYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODdlOWJlY2NiOTYzNGNmNzcxOWNkOWM4YjQxNDNmMjRkYmQxZWI4N2IxNmE4ODFhMmU4M2E4MWY0MThmZGFmZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmVlNmVmMjcwODQ2YWFhYzc4OGUxODkwYTIyZWI0MDcwODEyYTVhYmE5NmE2ZDVmNzhmMmU0N2RjYTI3MGE1YyJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

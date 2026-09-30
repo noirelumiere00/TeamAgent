@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:a2d306077b6d94b817f1325d19c9d5f95c683abc3600436ffe3f1665a2bd418b",
+  "claims": [
+    {
+      "id": "claim_2f360e7c3e1c486e824c299cdc20e920",
+      "statement": "開発の基準ブランチは dev で、main は大きく遅れているため PR は dev 宛てに出す。",
+      "evidence": [
+        {
+          "resource": "repo://README.md#L25-L25",
+          "version": "repo-lines-v1:sha256:06413879858042562cab244837d6de91d74f6bc15b3fa2f7225dbd317e40247b:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDY0MTM4Nzk4NTgwNDI1NjJjYWIyNDQ4MzdkNmRlOTFkNzRmNmJjMTViM2ZhMmY3MjI1ZGJkMzE3ZTQwMjQ3YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDY0MTM4Nzk4NTgwNDI1NjJjYWIyNDQ4MzdkNmRlOTFkNzRmNmJjMTViM2ZhMmY3MjI1ZGJkMzE3ZTQwMjQ3YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmQ2YzllMTNhMzI4OTllZjY2M2JiOTQ0MmUzMzBmZmJjNTFiMjYxMjUxNDlkNWY2MDUyNzIwOTFjY2QwN2RkYiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMThiNzdjOTA1YjUzYTY3MmUxMWVmZjA3OWJmMDk5YzQxZDU1YWQxNmJlMzIwMmYwY2QwOWU0NTFhZTY5MmNmZCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_afdd13ddeead4eb3a0a111e0d98091dc",
+      "statement": "リクエストは Slack（Socket Mode）から OpenClaw、Bearer と one-use HMAC caller claim 付きの streamable-http で MCP gateway、Skill Registry を経て、RDS/pgvector・S3・Google Workspace などのデータと Bedrock Claude・Vertex Gemini へ流れる。",
+      "evidence": [
+        {
+          "resource": "repo://README.md#L9-L22",
+          "version": "repo-lines-v1:sha256:1c0d744e5de962fe421ae2f4919091f091eae8092f11b7aa18c9afa9069db877:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE4OWM2ZmQzNDlmYzIwNzljMTAzZThjYWI1NTk0YjVjNDk5MzI3ZmZkOGE5ZWNkMWEzNDQ5MTRmMDgzZDAwOWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiMjc5OGIwZTAwYmFhOTM4YTU5OWM2NjdhNzRhYWI3ZTNmYzgxOTMzMDBmYmQ0MmMyMDgyOTgzNTQ2ODM1NjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU0OTJkM2I5OGQ5NWRhZDM3NjU3MmVkOTQ3NmY2OWI4NDZkODVjNDZjYWI0MWYwZjU0MDA2MTdkMmFkNzE1MzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI2MjU4NzNkM2E5ZDg5MDVmNmQ0NzFhMjM1MDk4MjU0NDc2ZTRlMTg2MjRiNGE5MjRkZGE2NDRkMDM1N2YzNzIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d2106330b82346c1837c3acb8517bdfe",
+      "statement": "factory の環境変数フラグは \"1\"・\"true\"・\"yes\" だけを真とし、既定値は \"false\" なので、新しいツールは既定で無効になる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L24-L25",
+          "version": "repo-lines-v1:sha256:6a9c0f03b040349158d58ae4a5777f4ec9715da27809491b6b84ff20ff083253:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmI1YjY1ZjhlZGVkMGYzZDc2YmIyYmFmMGE4ZTU1NTFmOGM0NGQzYjg5NzgxNWVkYjM3MjU5Zjc1ZGJiZDFlZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWUzMjZjOTYwZGFiZTQ1ZGVlMGYzNDkzODQ0MmYyMTA0ZDE4ODdiNThhYWVjZDJmOTA5MDc4ZWI5ZWE1ZDZmMiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODdlOWJlY2NiOTYzNGNmNzcxOWNkOWM4YjQxNDNmMjRkYmQxZWI4N2IxNmE4ODFhMmU4M2E4MWY0MThmZGFmZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTA5ZWZlZWIzZmQ0ZTVkMTVkOTBiN2I1ZDZkZmU4MTM3YTkxYjY0NmI0MWM3MzZjMjUwNjlkZGRjOGE2NzFhYiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_2d302d5486254b6889cb2dbebf1874a9",
+      "statement": "本番のツール一覧は factory の build_production_tools() が組み立て、OpenClaw から見えるのは openclaw.config.json5 の toolFilter.include に載ったツールだけである。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L199-L206",
+          "version": "repo-lines-v1:sha256:923965cff3c47646d644b861956a28bb81e3242e8e1f34335c38ef48ef616067:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMGYwMjJiMGQ3ZjU3YTQ2ZTljYTU2ZmZlZjY0NDA1N2RhYTQ4YWEzYTRhNjNjOTcxZmI3MmQ2MDhhMTJlYTI2ZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzk3NjM3OTNiMjBiZjdhZGQ1NjQyZGI0MmNlYjQ5ZTIyM2VhMjhmMDFiMDRmYjJjZWU0NjNmN2VmY2ZjODE0YSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMGE2ZWFiNTQ3M2M5MjFjYjcxZGQ3Mjk4YjUwYzI1MmYwNGU3NDVhODZiMTE5OGQ0NDBkNzZlY2U3NWEzYWExZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjNiYmExNWVhMWQxYzdjYzhiMDkyMmYwNDFjOGNhY2E5MmE3ZWVjNWMwMmNiOTBmMTBmMjMzNjg3YTVjNGVkZiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L116-L120",
+          "version": "repo-lines-v1:sha256:221f73ee2d525b7b9ebf5fb97591ca8212256ce0f8d594b898ebc2383b2f2020:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTNiNGM2MTViZjYwMGE3ZWVmNmRjMjg1NWY1MTUyNTZkNGVlODZjN2JlMjgxNWMyMzQ0NzY3MDZhMGRlMjEwZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZWE2OTgzYjcwZDhlNWNlYmE5MWEyODUyNjc4ZGQ2NGRhNTUwZmY4NjE3NTJmMmJlNmU4MTI4Yjk2MzNhNGUyZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZDE2MjNmNTgyODI1MjJkN2EwNjA2MjQ2NzNjNTEwZmM2ZDQ2NzkxNGNhMTEzYTg2ZWIyOGQwYTc3NWYzZjk5MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDM5ZmQxZWNmMTQ2NDRkOTZkYTMwODQ3ZTU4Mzk3NzdhYmJlOWVkZmM1ZDQ4MjI0ZTc1MGI3ZWZjZTE3ZmZlMCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_534b294a610f4d3bb46eecca8e294338",
+      "statement": "enable_morning_digest・enable_ingest_schedule・enable_connect_web の有効化スイッチはいずれも既定値が false である。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/connect_web.tf#L20-L24",
+          "version": "repo-lines-v1:sha256:2807837c84a31f48d2f908bb49218c18a0adc707330f391cd7599cb2b0fe0c80:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYWU3MzI2NWJiMDYyYTVhYmQ0OTYzMWUwNjRjMzlkZjc2YjY4MTQ3MGEzODg4YmU3ZWVkZDg2OTU3YWYyY2IwNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGY2NWQ3YzkyYWQzMGI3Y2U1NDQ0OTNkN2JiMzk3OTk4MmY1N2E3YzcxOWQwMzJmYzBmMzhiYmVlMzY1MzMzZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOWZkZWViODIwMzdjODQ4MTNmMWFjN2E0YWE1MjFjOGI4NDI3ZDIxMzIzMjcwYjk3NzkyYWE0ZjIxOWE4NGNiOSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L17-L21",
+          "version": "repo-lines-v1:sha256:b60b3683282815fa1e911f48b2bf36d39bcc437332e9a51e8d0c15b78b4e6cdf:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzZiNWY1NGY3MWJmYTM2MDU5MDUwYzRkMmFmMjhlMjc5MGMxOWRlOTI4ZjVmOWMyNjk4YTNmMGIzMjU1YjZmNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTMxYjMwZGRkMmNkZTI2YWYwYWY0NDkxZjc5ZGQwNWVmOGNiOWI5OTYyYWE0MGQ3MTZmMGRiMjFkM2YzZGQxOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMWMwNWU3ZWQ1NGFmZWJjYzc2MjgwMzllM2Q0ZTUxMzY4NmFkYjNiOTNjOGRkODEyZTU4NmExNzg1MTZhNmRmOSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L16-L20",
+          "version": "repo-lines-v1:sha256:e20ac68ca9a1fe093e69f01cd71d6fb83d52524b9995df1f231d11023ecc6e13:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjkyZDUzMWIyY2YzZjVjMjAzMWU1MTA4YzVjNzBiYTkxNWU1ZDc0ZjA1MTg4MTAxN2NmNjYwODc3MjM4ZDE2ZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDc5OGRjYjA3NzFlOTg4NTJiMmUwZDViNDRmNTA5NTBmOTUxODg1YzhjYTAwYWMyOTZjYTZiZjJlYzNjMzdiNiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTU5YjdhMzgxYTgzYzRjY2MxYzU4OWYzMzEwYWE3N2Q2NTA3ZmRhZGUzOTcxMjc0ZjNkZTlmMzAwZDA4YTU2ZSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_c6e46031d3ef42c6b832749b8fd71d92",
+      "statement": "Terraform のタスク定義は uv run ではなく /app/.venv/bin/python を直接起動する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L16-L16",
+          "version": "repo-lines-v1:sha256:87bb37d38242aa78e74557f60ab1f00f53f8f1475aaa965ec8835cd534b32df8:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODdiYjM3ZDM4MjQyYWE3OGU3NDU1N2Y2MGFiMWYwMGY1M2Y4ZjE0NzVhYWE5NjVlYzg4MzVjZDUzNGIzMmRmOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODdiYjM3ZDM4MjQyYWE3OGU3NDU1N2Y2MGFiMWYwMGY1M2Y4ZjE0NzVhYWE5NjVlYzg4MzVjZDUzNGIzMmRmOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiY2JjMmQ0MDliNmIwYjFmN2ExMTdkNzJjMjgwMTE4MjExYWY5YzI1MDRjOGU1ODk2ZTAyODM4YjQ4N2VjYWRlMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNGUxYTc0Mzk5ZjM1NGY4YWIxZTY1ZTE4Zjk4MmZmMDBjODRjYzNmY2YyNWIyNGM4ZmUxNTk3OGY3YmFjNmE4ZCJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L916-L916",
+          "version": "repo-lines-v1:sha256:713d3d66d3b58b81e16a7c6cff99e659c89155cdc77d3140bf621efd3214d841:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzEzZDNkNjZkM2I1OGI4MWUxNmE3YzZjZmY5OWU2NTljODkxNTVjZGM3N2QzMTQwYmY2MjFlZmQzMjE0ZDg0MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNzEzZDNkNjZkM2I1OGI4MWUxNmE3YzZjZmY5OWU2NTljODkxNTVjZGM3N2QzMTQwYmY2MjFlZmQzMjE0ZDg0MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNThjMDA5N2ZlZmFhMmFjYjc2YzNiNWI3MGVmZmU0ZjFjZjQ4NTNlZWZjM2E5OWIwY2IwMDljZDQxYTUxMmEwMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTUxY2ZlZDliNmY3NzBhNjY2MGJjZmRiYTJjNDAzNGYyOTVhZGExNWJlY2I0NjQ1NTUwNDRlOGZlMjA1OTQwYSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_7235ed5012ae46df9884f45b05058afa",
+      "statement": "CI の lockfile ジョブは uv.lock から dev・mcp・media の extras をハッシュ固定で書き出し、--no-deps で入れてから pytest tests/ を走らせる。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L163-L171",
+          "version": "repo-lines-v1:sha256:f1a7220df439eef37b2d0318aaf855effc3551f61670cff2f07544219b654ab7:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGNlYzA4NDQxNGQ3NWVjZDBlMjBjZWRiZmZmMTg2YTVkOGZlMjZlMzVlNWU4NmQ2NjBkYTg0Njg2MDZlNjA4NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZWNlN2I2MmU5NGQ1M2QzZGRmZmJlNWEyMTU3ZjI2MWVkNTFlMWZmOWJiOTM1MmZmOTM0YWMyYmM3YTYzMjNkYyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGFjMmE2OWZkMWQ3NmQ2ZDY2NDRkZWM1ZmZiMDI4ZGQ3NzY3NzJlYzY5NDYyMTE3NGE2ZGNiNGQ5ZGYwOWQxMCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMThjY2U1NWQ2YTg4NjcwZDJhZmMyZmM0NTcwZmY0MWNiNmUzYmIyZWEyNjlhNzI4ZGYxMmJlZmI2M2IxZTk3YiJ9"
+        },
+        {
+          "resource": "repo://.github/workflows/ci.yml#L208-L209",
+          "version": "repo-lines-v1:sha256:af61580429fba10c4569065906416d43f4cfbec859c3a9f4dbb83d0622588372:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDE0ODFiMjU1Y2U2NmEzMzA2YTFjMjMyZTczZGRiMDI1ZTEyNGM1Y2ZiZGY5MWU2Yzg2NDQ5MTE1Njg3ZDQxNCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjI3ZGYxZmExMjkxMzZkZWRhYmNjNzgwOGVkN2RiMjQ4OTUyNTIwMjE4Yzk1YjVjZDRmNzJkYmFkMzdiNDg4NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDkzN2I2NmQzNWZhNzQzZjEzMzVkMGEyOTYxYTQ5ZTliZGQ5ZDRlMjViMjhkODRiZGEzYzk3YmE2Mjg1NmQyOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDFkZjNiNjgwYjY4NDQ5MDJkMDJkYzY4YmQ4MTNiZmMzM2NmYzkwYTFjMjJlNmEyZmNkZDM3ZjE3MjdhNjAwNCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_1bd7054cb7274a8caf73d5d9eba8b307",
+      "statement": "CI は TikTok 系のテストのために npm ci --prefix tools/tiktok_scraper を実行する。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L118-L118",
+          "version": "repo-lines-v1:sha256:1575a61150c43798f068815ac4c7d2de4bc9c75c5f65e98f0bcfa24c19bb5cf5:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTU3NWE2MTE1MGM0Mzc5OGYwNjg4MTVhYzRjN2QyZGU0YmM5Yzc1YzVmNjVlOThmMGJjZmEyNGMxOWJiNWNmNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMTU3NWE2MTE1MGM0Mzc5OGYwNjg4MTVhYzRjN2QyZGU0YmM5Yzc1YzVmNjVlOThmMGJjZmEyNGMxOWJiNWNmNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmQyMDA4OGRkNzI2OTA3ZTYyYTNmYWVhM2NjYTZjNTI2N2Y0ZDkwY2IzMzZiYjQxZDE2YzJjYWE2YzdkZDQwMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTI2ODM5YTM2NWZlZWVlMDhmNjQ3ODZlMWJiZWJjNTAzZTNkODk4MTg3ZTg3NjEzZGExMzVkNGUyYWQyNzA5ZSJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

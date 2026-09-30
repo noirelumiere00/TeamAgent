@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:be90b55f0566b5bcaa7af93baa8589e9bb47421401b74a2c66590ee0c82ac94c",
+  "claims": [
+    {
+      "id": "claim_877c3709583248b8aa988e636a3bb2d3",
+      "statement": "OpenClaw の外側ルーター（Haiku）は name と description だけでツールを選ぶため、ルーティング・コーパスの突き合わせは LLM 依存で非決定的として pytest ゲートにせず、独立 2 本以上の多数決による手動シミュで行う。",
+      "evidence": [
+        {
+          "resource": "repo://tests/routing/README.md#L1-L19",
+          "version": "repo-lines-v1:sha256:8a18abf26aa925e490fe386ad23c806426103cff4601d0c67e5f2b93b32d36f6:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI3MTVmNzdhMjY4YjQ2MmVhZTViN2ExMTMxY2EwNzlkNDI4MDhhYjRjZjcyOWM5NTVkNjkwMjRhNGIzZDkzMTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRlMjQxODk1YTI2YTgyOThjNTk3MzllNjM0ZmYwM2U1MjYyZGZhZTRkZTI2MDYwZWVmMGEyODE4M2ZjNDg0ZmUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjczM2I2ZWNlN2VhZmM2OTVjM2I4MmQ5ODQwYmJiNmRkOTI2YzI3MmU2Y2VkMmY3YmVmNmIxZDMwN2MyZTk1OGQifQ"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L1-L15",
+          "version": "repo-lines-v1:sha256:d2f0423dbfb86d13dbde495fe5c35f91ce99e9da74cfb2dea37faadd3be80b99:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwZGM5MTgxZjkzZGMyZTFlNjA5ZTlmNTY3NjI5YjVkMWM1OGYzOTQ3ZjFhODFiYTc5YzNlZDg3NzA5YjMyODIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMDNlY2RkNGE0ZDEwZjE5YzczZmQ0MmZkMTI0MzdmZDMzNTRhODI2ODE2MDVkYTUyNTVhOTdhMzkwNjhkYmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU1YjZlODcwNmI0MzA0N2YyYTZkYjY3ZjEzMjYzODU5NTYwNGU2N2YzNjk2Njg3NmNlMDE1OGYwMDUzZTZiZDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6218c1b07bfe44ad8e6175fdab3d93a8",
+      "statement": "ルーティング・コーパスの行は expect / alt_ok に加えて forbid（選んではいけないツール）と arg_rules（must_be_absent / must_be_present / must_equal:<値>）を持ち、expect=\"__ask_back__\" はどのツールも呼ばず聞き返すのが正解であることを表す sentinel として扱われる。",
+      "evidence": [
+        {
+          "resource": "repo://tests/routing/README.md#L61-L74",
+          "version": "repo-lines-v1:sha256:54456e4b6df945d3fff945bce861a09e3fd2fb6b054fa89d088b615d7ce83a3b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlhODQ2NDYwMmNlYWQ3MWY3MzVmY2IxMzhlYWFjZmI1MzFkMmUxN2Y4OTIxODE1ZGY0OWYzYThmMDYzYjYwOTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI5NzgyODFiOTMxNDNhZDljYTcxMDFmYzA2MDEyNWM4N2VkODNmNGRmZTVjMTMyY2ViZjA0NzFmODFkNjQzZjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJiMGNkODA4NTc3YmJlNWYzODYwZDg1OWU5Mjk0NmIzZjM4ZDM3ZmI0MTIyYzU5ZWFiYjdkMzUyYTYxMDNhMWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQyNmExNzJiNGRhY2QwZTFlZTVjZTM4OWZhZTZhZmNkNjc1ZjA4NTViNzA2MmYxZmQ4Mzk5MDcxYmUxNmEyM2YifQ"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L116-L124",
+          "version": "repo-lines-v1:sha256:a35e7e39702c75bdd1c6b2456a239da405da92eed1a6e81630e686a9ffac7942:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjMzZDc5NmJiODMxMGE4OTVkMDBiNzFjYzk0MWM2NTRhMjc2ZDIyM2ZjYzk1MzlhYjg4NzQ5MmRkNDczYTMxOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzcxNTRhZDZkNDliMDk3YzU1YTQ3MDE3MzU5ZGExZWQwMjhmZmM4MjMxNmI0YjViYzgyNDUxOGM5M2QwNjlmZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGYxOWM1ZmU1MmQ1N2ExZDFkMjFjYjgwM2FhYTE1N2Q2ZmI4MTdjNGE1ODhkMGFhZGJjNDk0Y2Y0MDM3Mjg2ZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNzQ1YjA0MjYwMDA4ODRlMjQ5NGRkODgxOWM1ZDM0YzlkZjMzNGQ4MzJkZGM1NmU3M2YzZTFlNTMyODMwODU2YyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_aa5b141d74d345189ea1df05efbf4d6c",
+      "statement": "本番 QA 由来の顧客名なし・一語入力クラスの回帰行（R4 の 18 行）は R4_REQUIRED_IDS として固定され、コーパスから消すと pytest が失敗する。",
+      "evidence": [
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L126-L149",
+          "version": "repo-lines-v1:sha256:81bdab4734383f35ac4a10e135e40a6b5d94502db54436aed2af65f0558593bd:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3ZjQzMTkwMWM5ODFiZTU0YjZmYzFjYTU4MDE2NDhhOTNhZWQ4MzNmN2VkZjk0NjcyMzUyMjYwODFkODMxZWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhZmJhMDUyN2MzOTUzYzRiNmUwZTViNTczOWJhODM2MTJmODA1M2JjZGM5NDY2NzMwMTkzY2QxZDU5MGI0MDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdjMjc1NTkxYjVlZGZmYTUyOTc4Mjg3MWIzNWVmOGE5NWE0NmM3Y2U0MTEwMzRmY2JmMmNiZjdmMmM0YjE2MTgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVhMWE4ZGNlMTVmNDVlNDk0ZjZlZGIxZWMyNGFkNThjYTkzOWUzZWJmMzM2YzRlNTJkODllMzlhNTZmNzc0ZjQifQ"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L226-L236",
+          "version": "repo-lines-v1:sha256:3a29e4fbd81e45ecfe9c266d521a7bd3b9fb2eeacbeef373d8e32cfb3a5464dc:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc3YzAzODNmNTNmOTU5MWYwM2NlN2Q2NzZmOTVjYTgyOGZlNjY4ZGYxNmY3ZTdlZDkzZTE4NmNjYTFhYzNiZTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwZGFjMzRhMWRkMmEwMTU4Zjg5YjYwYjNlNTFjNDRkYzNiMTAxNzk1Y2JiODcxN2Y5MmVhZWE1NjRlYmU3NzMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY4ODk1ZGZhZTY2ZjM3M2ZjZmI0MjA2NGEyYTM2MmE5Mjc1ODAxZmQ3NGY2NDIyNjdhODJmNDk3NmU5ZTM3MTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMwZjg5Mzc5MDA3NDNkMmMxYmIyNjQ0NzU2MWU5NzkxZGE1YTQzODFmZDNmNzYyYmNmOTFlN2EwZWZjNzE4OWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2b6217e1a08646cdbcbbbb78b2315200",
+      "statement": "OpenClaw に露出する description（effective-tool-scope.json を正本として解決）と SOUL.md に現れる snake_case 識別子が、登録済み skill・入出力スキーマのフィールド名・NON_TOOL_IDENTIFIERS のいずれでもない場合、ダングリング参照としてテストが失敗する。",
+      "evidence": [
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L302-L310",
+          "version": "repo-lines-v1:sha256:35eb61358ee81f2cc357323f71a97178fdf4b3bab3b698eeb98f3e19260495cf:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDZjYzczMDc4ZWQzZjM1ZGY4MDhkMDI5NTgzNzgwMmQ2ODg0YWVkNGEzYmM3Y2M2ZGQ3NjM4Y2QzY2E4NmRiMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTQ1MjZhZmQ3OGUyYmJkYzQ3ZDA4NmY2OWI5N2FmNjBlNDkyMDNkM2M0OWExMDAwM2Y1NDE3MTI4OWY5NjFlNCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzI2N2U1ZTBjNGE0Njg2YjM5NzYyNWFhMGFlYjEyNGMyZmVlNjk3MTRhY2E2MzA1NWU1MGQ3MDE3MjhiOTc3NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTY5ZmVjYjVkMTFkOGY0NWVhMDYzYjE3MDhmMWI5ZTIyNzQ4ZjkyZjc1MGQ3MzE4MDFlMDk0NzBlMDkxOTYyMSJ9"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L426-L456",
+          "version": "repo-lines-v1:sha256:928419a0ee7ce9f1202c7cebd3b0c492d57d2b149b67c24377f9f718fe7b3cfa:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5NjVlOTIxYzVlNTY0MDdkNDFhNjUxYmEyZTgwNjNlYjgwZjY5NjkxNmNhOGJmNTEwYTY1ZTE3YzYxODc1ZWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0MjdiNzlmMzA0ZThlMTI4Y2UzYjZhMjljZTViNGFhZjFjNDc2MmEyNzE3ZTU1MDY0ZjczZTBiNmZlYjNkY2MiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNmNTY3M2Q3NTA5MTg4NjFkNjg0MjA0ZGJjYjBkOTVmOGM2YzQ5YzY2MDIwODM3MWZjOGJlNDY0MjVhZGNhODMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bbd0788b02414a78a28ea8a27814533f",
+      "statement": "factory.build_production_tools の各 ToolSpec を囲む _envflag を AST で静的に抽出し、台帳 effective-tool-scope.json の enabledBy（always / envAllTrue / never）と一致することを検査する。本番未配線集合 NOT_WIRED_IN_PRODUCTION（video_approval / operation_log / knowledge_search_url）は台帳の never と完全一致しなければならない。",
+      "evidence": [
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L280-L284",
+          "version": "repo-lines-v1:sha256:5ce45625b077b4348db2c88678964e18dd8d967565fa5da304d777b9c5ffe8d0:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTAyOWY1N2IyODNmNTcwMjM5ZDU2NzQ1YjZkZGM0YjE1MzdhMGRiNDc0NWI2NWZlNjBkOTk2OGFlNWExMWYwOCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzAzYzMzMDU5NmRiOGM1ZTY0MGY4MDdiOWEyNjNjZmE0MDQ4OTNkODY5ZDQ3NzNhMTVhZDA5ZGI2ZDY4MTFlMCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTBiMzgxODc4MGVjMTMzYjAwYWFiZTQxN2EyNTNkOTc1MjVlY2FiNWM4ZGJmMjM3MmNhYzJiOGM0MTQ4OGY3NyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiN2E5OTEzNzdmZWUzMWRhMTJiY2RiOWJmYTEzNDdjZTdhOThiYjk5Nzc1YWU1NWNmMDVhMjgyYTgwMDcxNzM4YSJ9"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L329-L338",
+          "version": "repo-lines-v1:sha256:40df6ccfe95fc64b4c95b73906c624e97dd55e1d0845414d7d53e56d4baa7fe4:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMyYTVkNTZmNDU1YTM5NTAyNWZmNjg2NTVkYmZkMWQzOTU3MDRiYWE5N2FmOGI4ZWUzYTlkYmFkM2IzNmFlN2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQwMDBiM2NmNTFhNWFhZDhkYzIxZDgwMzk5OTgxMTU0MDk5MTE4ZmY1YTdkZjMwNTNiMjA2ZjU0ZGYxNGZjYWUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA5YWI0MGQ3OTFiMjk5ODBlZmY2NjlhNDM1MWQ3MWZhYzU3NzM0MjEwZmFiNDcwYzMwNTczZmU3MDY4YjM0ZjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY4YmE0MzNlMmYxOWNlNTQ2YzhiODcyNjcxYmQzNmE1OGRkNzg5YTRhMDIzY2I4NjI4ZTU1ODI3MmY5OWY3NzMifQ"
+        },
+        {
+          "resource": "repo://tests/skills/test_routing_descriptions_catalog.py#L392-L423",
+          "version": "repo-lines-v1:sha256:9994f84bdf026a8bf4aa98b8df01b4fe7cfe5ea1ea09581b3e14bdfa34db9241:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjEwN2UxZDUyOTY4OGMxOGVlNTQxNmE4ZDMxOWZlNjY4MjIyOWVjMGZlY2E3MTk1ZTYzOWU0OGU4NTJlMjNhN2MiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5MzAzMmMyM2IwYTMxNjg3ZGE1OGNmNTIzYTI3YWIwNGE2MTMxMjlhODUxMzdhYjhjYTVlZTlmNWY2YTM3YWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM1MGE5OTMwNzNkNzNmYmU5NTIzMWVjMzFlMWIxNGQ1ZThjNDAwYzc2MzE0MGRhZjQzNmY1OTgzMzdhZGQxZDIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0621f4b781ae41ed99d9048a422e795c",
+      "statement": "オーケストレーション評価の score_case は純関数で、呼ばれたツール列を重複除去（順序保持）したうえで、expect_all の全充足・expect_any の 1 つ以上・forbid 不使用・num_turns が max_turns 以下をすべて満たすときだけ合格とする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/eval.py#L59-L82",
+          "version": "repo-lines-v1:sha256:7c69c3123f10db32e6c4d4cd9cb431ff8d2b0124640ecf55e210db435e7a0c17:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkyZTdiMzc2NjJiM2FkOTQ5MmRkOWRmNTg5MGZkOTg1YzJiZDg0NjAzY2U2ZDUzNTA1NjVlZjUwOTMzM2Q3NDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjYxNGY2YzFkOGUxZmZmMTllNmQ3ZWZjZjIwZDZhMjc2ZGJkY2MwMjgyMzBjMjIyMWZhMWJjN2E1ZWQ4NWQzMWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc5ODYzYTY1YWUyMTQ2ZjUxYjQ1YWJmY2IwODY2YzY3YWYwNzQ5ZDVhN2MwMjE3YTdmNTFlOTMwNmNjMWExNWYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f321297e2db748cbaf8ca9da4d47562f",
+      "statement": "scripts/eval_orchestration.py は needs_flags が env で満たされないケースを SKIP として明示ログに出し、それ以外を run_sdk_agent（cost_cap_usd=0.5、max_turns は case.max_turns+2）で実行して score_case で採点し、score_faithfulness で捏造引用も集計する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/eval_orchestration.py#L102-L118",
+          "version": "repo-lines-v1:sha256:31e35606d479ceb92e97c65473f75eaba437e1ebf123a5c4c9e6dcf501ebcd41:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYzMDg3OTBkNmM2YzE4YWMxYTg1ODIzOTZhYmNhODkwNDhhODMwM2QzYTQ1MmY3ZmRiYjljZGNiNThkY2I5MDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlNjJlOGM4YTdmNWFmYWRmNTcyNDI0ZjNiZmZkNWE3OGNmNTQwM2U2YjZhYzliNmMxODk1ZGVlZWIxZDJhN2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImI4OWUxNmViYTg1NTE0ZGE1YjZhNmFmMGJmMTQ2MDEyMTE5YjIyMTc5Y2EzM2NjNDAwYjE3NGZiZmYzODMzYTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZTcxZGUwYTA4OTMwZWY3MWFiYjZkZTBiZWEwOTU3Y2NjOTNjMDc4NmI4YjVhMmFkZmNhZWFmNzFmODcxYzMifQ"
+        },
+        {
+          "resource": "repo://scripts/eval_orchestration.py#L57-L80",
+          "version": "repo-lines-v1:sha256:c07597db68525d4e296f75e3db55508bb3c63c8d1574e56e3007c29756fa0ef3:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNmNGRjZDA2ODBhNDhlMjE2YjA3MzMwYmI2MDBkMGFlZmJhMjYyNzUzNTE0OGM5MmVjNWZlZmJjNmU1Yjc0OTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJmOWM2MmJjMzhiNjhiZjQ1NzU2NjYwZDE2MGVhNDJmNjk2NzE2NzBjZGI4MDJkNTVmMTE4NjkwYjExOGI4NDkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjEzYTI5Njk4N2QzMzlmOGU3NGIzODRhMjM3ZjY3ZmU2ZWIwZjU5NTg1YTMzODE2NzUxYjZhYmE3ZTBjNjQ3MWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5NTRmMzVjY2VlMDQ2ZmY4NGZhNzAyZDdiYTAxYmUxNGM3NmE4MTk0YWRmM2JiNjkyOWFjNjI1YWFlMTkxMWMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9de81f4a6c424856895c8f6e9c4564af",
+      "statement": "scripts/eval_orchestration.py は scripts.run_orchestrator_prod から _build_system_prompt を import するが、現行の run_orchestrator_prod.py はその関数を定義しておらず agent_config.build_orchestrator_system_prompt を使っている（import 先の不一致）。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/eval_orchestration.py#L29-L37",
+          "version": "repo-lines-v1:sha256:9882dfe8afcc4d73957703de32c53177537404a985beaf2705bcd1f3b44245cd:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMGNlMzI3N2JiMWMwZDJkNGJmMjE5ZTRmZDc1YTA0ZjFhMjFmZjIyNDBhZDgwYjk0NWIwMzRiZjIxN2ZjMGUxMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmFmYmEwNTI3YzM5NTNjNGI2ZTBlNWI1NzM5YmE4MzYxMmY4MDUzYmNkYzk0NjY3MzAxOTNjZDFkNTkwYjQwOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYWEzMjM2ZDVmYWFjNTU3MjVhMGMyNjA3NjJmNjE4NjQwM2JlMWRlYzljMGQyOGFlMmU0Y2Q2ODBkMTEzOGZiOCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzc4OTg2OTU2MDM4ZDZiZWM3MDJhZjc3Njg0NzRkMDViMDA1MjYzYThlNGJkODgxNjA4MzYwYThkMWViOTBmNyJ9"
+        },
+        {
+          "resource": "repo://scripts/run_orchestrator_prod.py#L26-L32",
+          "version": "repo-lines-v1:sha256:0dbb3d7fbea348d2699f840b05259214e099d668ad73e1d4479dc6ab9df49ded:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDlmNzQyNWVjN2UzMzE5MjEwZmQ1YTVjMGMwZDQwMDczZTg5ZTg2ZmU5NmY4ZmIxOGQyN2E5NjgxN2NlZDMyMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDY3ZDAzNmQ2ZTRiNTY0NjRiYjc5MjRlZjQwODIyNWJhODhlMGE5NTA5ZWVhNTFmODkzYjEyYjU2NmQxNzc0YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZmI2NjVlMzRlNTdlN2JmNDMzNGZhYzgyNTBlNGQ4NTc1YjkyOGE3NjUyNjA1YjQ1NzBiMWExODk1Y2JmNDMzMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjliZDdlZjAwZTMwYjAzNDcwYTdhZGQxMmExYmExYTg3ZGM1ZWRmODVhYzEwZDVmZTQ2NTUzYjRkMjMxZTZjYyJ9"
+        },
+        {
+          "resource": "repo://scripts/run_orchestrator_prod.py#L56-L62",
+          "version": "repo-lines-v1:sha256:0ceb2d604fa1c732c5093d9ba6c98cce27f8bbbd07fcf1751a679796bdf34528:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDI5YWEyMmI3ZTI1MWNmY2Q1ZDVlM2Y3OTcyYzIyNjZkYWZkZDYwMzQyYjc5MTY2MWNjOWY5Y2Y5NDlhZDgyMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjc1MmRiMjYxMGZjNGFkZTFkMjJiMTI4OWQyNzU4MzcwZjZiMzkxNDM3OWE0NTJhNjQzNGQ4ZWE1ZTYzYmNiMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMTVjYmU3NzA1ZjVhMGEyYWMxMjhhZmE0M2RmMTRhOTQ5NGNjNTI1YTRjMzA0N2EzYjRkZWNiMDkxZDBiNWI4ZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzg4NzAxNTk1YmE5NGU5MDgyMjM5OWM1ZmVhMDI4Y2Q4OGRhMjVkODMyOTM5MGEyYzZiZDQwZDEzZDVmMDEzNiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_271bf97a49b84788a975fab46e3e43b4",
+      "statement": "run_eval.py では expect_zero_hits のネガティブケースは 0 件を返したときだけ正解となり、0 件応答の母数は gold set のネガティブ件数で固定される。通常ケースは top-5 内で最初に期待条件にマッチした順位から top-1 / top-5 / MRR を出す。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_eval.py#L156-L188",
+          "version": "repo-lines-v1:sha256:bba4f42c67ab7cf1e1ac91b534c4d83d57802ca81882c0e6dd743ad74adc3d68:eyJzZWxlY3RlZExpbmVDb3VudCI6MzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUyNjczOTJiMTFmMDViNWQ1MTVkMDRkNmJmOTJkMjViZGE3NzkxY2NlYmZiYjAwODVjYjMzODBkOGViMmJjNTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhMTFjMDU2N2QwYTVmOWU5YjEzNWY2NWNkMjUzNzJkZmQ2Mjg3NzVmN2MxZWQyNTNmOGJhZDQyZGQyZDY2NjkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMyZjUyZGNiZGNjMGNmZWU5YmQwYWEyNjg0MThlNWI0YTM5MWJiNDI1NmEzZjFlNmQ2MjMxZDVkNGU3YzE5MGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRkMjhkMjI2MDYzZmFjMjE1MjEzODUwYjg4YmI0MDk5MmZlZDdmMDI2YWVhYTc4MDhhMmU3NGFmZWZlMzgzMzcifQ"
+        },
+        {
+          "resource": "repo://scripts/run_eval.py#L203-L209",
+          "version": "repo-lines-v1:sha256:8ee6a33e5cc91c611d0507d0f641e27ee545625aabe489bc8f5df0399d153d24:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzhjOWM1ZWE2NWU1ZThlNDhkNDRhNDg0ZTBhYjE4NDEyMWRiMmVlYTkyYTgwMzFlMGZlNDFiMmJkMTE4ZjNhMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzRkNWJkM2Y5N2QyMTMyOWM0ZTk2MDQyMGE2MjhkNzEyYTRjM2UxNDZkODMyNjMyZWNhOTdlNDg5OTM5MTRmYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYThmZWY5NTRmNDYzNjc0NWZjMzJkYWZiZTk5N2RlODI2ODc2YzViZmZhNDFiZTNjMzMwNTUzMWRiYWQxMzE2YiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjAyMzcwMmRjYTdmNzdhYzAzMTQ5MzMxZmM1MGJiNjU0MWZlYTdhNzg3ZjQ0OTM4MzZmMjgyZjQwMDNmNWE2NCJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_42b502835b45449ba8aec622289749a7",
+      "statement": "run_eval.py は 1 ケースごとに partial JSONL へ追記・flush し、Ctrl-C で中断した場合はそこまでを集計して partial を残し終了コード 130 で終わり、正常完走時は consolidated JSON を保存して partial を削除する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_eval.py#L267-L279",
+          "version": "repo-lines-v1:sha256:53fd0775ae1db70f7cff9065897d813c8af25042010c971aa23ca1323c172ada:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiNDZlYjY4YTczZjNjYjU0ZmFkMDhiMTdkNzkzMTEyMDAyZTdiYTMzZTAyOGJiODQ3ZWU3MjEzM2U5MGM0NmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVlNTY0MTM3Njg0OGYzMDUxMDllNzMyMDFjNjI3ZDIxMGM4YTRiNDEyZjM4MTk1OGY5MGE0NzVjNGU1MDRlMTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdiM2M2NzY2YWMyZTBkZTU4YTliZmJiMzI1NDlkNzJjYmFiODk5MzU2ZTFlNDk4ZjBjMzBjNmNhODYwZjBiYTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5NmRlMDkyY2M3YTllMDE2MjYxOGUwNjA0NTA5ZTZjMDExMmZiMGE1OTViMjlhZGM0ZjRkZjE0NmRmYTUxYWEifQ"
+        },
+        {
+          "resource": "repo://scripts/run_eval.py#L551-L571",
+          "version": "repo-lines-v1:sha256:17edceb1a03b17d64d09758be59300ff8b56b2b4c4136dad5880cc8f822fa85f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJhOTBmZjNmMGFkNzExNDUyMDE5MTY2MGM1Zjg5NjQzYzI4NDNkNDcwMmIzOWExMWRmNzA3NTRmNjBiMmQ2MDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2MjMzYjNmZmVhMzJhMjNkZjUzMDY1MzQzNDhmMmRlZTc3NmE1YTZmNzRmYjUzMzE3NWRkYzUzOWE4ZmU0NjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAxN2QzZDE2MGU2ZGQzOGYzYzhlNWNhM2QxNDE2NGVmMjgyNzIyZjlmNGFiNWZlZDg0ZTgzZTM4MzRmNmNhMGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNkNDEzNDBjYzIzOWExNTljZTliNjAyMmU5ZjYzMjI4MzJlMmVhZDc2Y2FlOWU0NzU0ZDIxMGViOGZiNmQ1ZTgifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

@@ -1,0 +1,166 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:d9fa8752f1e1192f5e083875ca77baaaa6be0e5eaae85bcf7498a1e4c95347d7",
+  "claims": [
+    {
+      "id": "claim_e0c57d35a37c4f40824c750fb20351ca",
+      "statement": "proposal_builder_submit は Gemini JSON を検証してから pb_ 接頭辞の job_id で queued 行を作り、入力と SkillContext を深いコピーにして daemon thread を起動し、即座に queued と retry_after_seconds を返す。thread 起動に失敗したら JOB_START_FAILED で failed にする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_job_store.py#L361-L362",
+          "version": "repo-lines-v1:sha256:ea50032f05aea9aad7369fd515427bae359399f561bc3a2b19b2f0fbf66485c1:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNjc0Y2RiN2FlN2NmYmUxYjVjYjViNzNkOTVhMWNhOGQ3ZWE2YzdiM2IxNDliMmZlZDIxOTMwN2FkZWEzZGM4OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZDExNGEyMTNlNzg3NGY2NDRiMGVmYjhiODFkMDZhMjQ2MTI3MmY4MmU1YjZhNTExYjFmZmNhOWZiYTY0YzFkNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMzEyYjM1YzlhMTc0M2E4ODA5YzMyMjQ3MDliZTk0YzljZDczZjMzOGFjYjAwMjNiODVjNTUwNzY3MWVmNzFmZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOGE5MDkzZDRiYjM5YzY4ODc3ZDliYmMwNTlhZmY5MTQ0NzU4YjVhNzczZjZlZmE0ODEyYWVkZWFmZGFmNTA2MCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1253-L1305",
+          "version": "repo-lines-v1:sha256:cedffcb6b9ef428602c031e5ad60115041310d72f2c417c99e785142527dd332:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwOGNkOTc5NjliOTRmN2NhYmQ5YWI4NTJjZGVjZGM5Y2U5OWU1MmQ3MmVjMWNkMThiOGFlY2EyOWE5ZTJiZTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjIzZmQwNjg2MjcxNWZkMWNhMzhiOTZjYWFjZDZhYTc3NzQzYjUxODUzODFmMzk2MDE4YjI2NjkwMDU1MThhNmEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA3YjU4YmI1OTRlMjNlM2JjOWU0MzdiMDJiNzgzMTVmNTIyNDc5NTkxYzg3NjgxZGYzYzJmNDc1YTVhMzRhZDgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_21fc3932cb1b490db15c7d183641ee38",
+      "statement": "proposal_builder_status は queued/running の行の updated_at が stale 閾値（PROPOSAL_JOB_STALE_SECONDS と heartbeat 間隔の 3 倍の大きい方、既定 180 秒）より古いと MCP_RESTARTED で failed にし、その書き込みは観測した updated_at を条件にした CAS で行う。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1508-L1534",
+          "version": "repo-lines-v1:sha256:d2d307992277238be02d3ae72f378f7477b379934fc2835772a3076d0b2d1e19:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIzODRhZjRmZjM4MjEyMTgxNDQ0MDlmOTYxZTNkMjlhMzA3M2RjNTQ2Zjk0ODJkNzIyNjI1ODQyZjdlMmQ4YzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFhMDBkODUwY2Q1NjkwYmEzOTU0OTRlZmM3OWI2NWNlZDA4MWMwZjJkNzFkOTU2OTRlN2NkNmU3ZDUxMThhZmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBiNzlkMTY1ZjdlZThhY2FmMGIyMzE0ODcwZDA1MmFjNmEyMjYxODU0MjgwNGVlZWFlNGM2ZDBjNGYwMThiMjgifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1583-L1596",
+          "version": "repo-lines-v1:sha256:fcb5e8d723f91da5ee642c876840298a4b848991feea1c81de03782e8aad187f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhODk3MjFmMjRlZDcwZGQ5NTg1YzA2M2RkYmY0MTExNGE2NWM4ZGQzYmE3NDM4YTQ1OTdmY2RlY2U4YWMwY2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2YWRkM2JkN2NhYzM1MWU2MDQwMjZlOTdjNTc3ZjRkMzliZGUxYjdkMjc0Mzk5MGNiM2ZhOWY4NTEyMDI2MWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYwYTk5YjU3YmE2OGRhYTczN2Q2ZWQxY2JiYjllMDkzZGJjZTNjNjgwYWU3MzI5MzJiOTJlNTQ1YmM5OThlMGYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRjOGQyOTIzNWZiZmY0MDg5N2MyMTFlNjJhZWUyNjc4ZDJhMGJjZjRlZTYyZDMyMWM3YzRiOTVjMmMxYWU1MzUifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L159-L168",
+          "version": "repo-lines-v1:sha256:f652e6585a8786252a392300936dcb3085e51285b35287f536e0c82d4a15fd0a:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFlNmU0YTI4ODY5N2E0YzNiYWNjY2NjZGU0YWYzZjg5NmI4Y2RlMGViODVhODVmNjk1MzdhMzRjY2RlNzJlMGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRmNDdmNmI0YjAzMjM0ZTg0NGI0NzIxZmE3NzA5OWQ3MDU3NTgzMTlhNzYwMWZlNDM3NGU3MmMxMGU5NDA3Y2YiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI2NmVjZWYzNmRjNmRhOGZlZjExZTNhMzRiNWZmNjZiZGFiZmIwMTAxMmI3MjRmM2U3OWJlOTkyYzFiYjkxZmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ef4f6f100f2f4275ae5d7beab8c40db0",
+      "statement": "proposal_builder と omiyage_report は同じ ProposalJobStore の台帳に相乗りし、proposal_builder_status は pb_ で始まらない job_id を store に触れる前に JOB_KIND_MISMATCH で拒否、omiyage_report_status は ^omy_ の入力 pattern と request_summary.kind の照合で異種の行を書き込まずに拒否する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/omiyage_report/schema.py#L136-L137",
+          "version": "repo-lines-v1:sha256:5ca9848c4cd677be427daf5768662a1d99afa9cd9e66cf05b7f78c1e40e0d545:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjFkZTMzOGEwZjI2ZDhiZTUwYjY2MTFlM2JiYTYzMmE1N2FmNjhiYmVkMzhhNjVkYmZiMzI1MzVhYjEwYmQ4YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNzVjNjY5NWYxMDYxNTZlMDY4MTczMjEwZTM1NTA5ZjU0NmVlZWI2MjgxNjJmZDU0MGEyZmQ3YWRiNTRhODM5ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjVlN2Q5NWJlOTcwNjUzYmU5YzdjMjM4ZDYxYzQ0ZTBmZjhjMzZlZTYwNjIwNTk2ODc0MzQ2ZWFmYWQ5YmIxYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDZiZDBkYzgxZDA0OTUyYjU1NWFiMjdhNTZmOTFmNzE4NTAyMWJjYTQ1OThkZDcwN2E0NTdhNWU1ZGMwNmE3MSJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/omiyage_report/skill.py#L1306-L1313",
+          "version": "repo-lines-v1:sha256:59c612245dc75ee203cc8fd46bea8d88d1ed6780c8b0ab2499291f79cedec5e6:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTY5Yjg0YWVhMTllMGRkYzEyMGI0YzFmYTI5NzJlYzc3NjBmMjllZmJmOGM0NDBhY2RiZTlkZDdkOTA5ZGMzNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTUwMzJlOTY0ZDA5MzIzNTFlNWQxODUyNjkyODFiMTcxYTNhMDliMDhiMjg2ZTY2MWVhNDcwMzIzYzgyZWI0ZCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjhmMWU5NjRmNmU5MWVlZTIzYzAxNjBiYzMyYWE4ZDRlNmM2NzI0MDVjYTYwYzZmMTk2NGMxNmQwNDQzZjY2MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZDgyODJlNGE2OWNjN2E2NDAxYTg3ZmI1Mzg0ODhiMGE1Y2JkMTk4N2NlMGYzOGZlMTY0NjQ2YjVlZDc4MzdlZiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/omiyage_report/skill.py#L1382-L1390",
+          "version": "repo-lines-v1:sha256:e2a0546cbbd585317d559b689f6ff9a34b27b7de2d07cd55e2ad373a22220605:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmNlZjE4MTI1OTE0Mjg5M2M1ZjE1YWU2OTFlOTYzMTQ1YTc5NzNiNjI5YTk5ZDM1ZWEwYzRmNjA3MjhkZmI2ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNWUzMDIyN2E0MjE0YzhiOGQwY2E1OTdhMTljY2NmNWYwMGM4MWFjMTIwNDgxODhkNTRhODMzM2RiYzVjMWQ1MCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNzU3ZTZiNWU3ZTllMDBlZWI3MDM2OGJkN2I2NzFkYmQ0ZDZjNjRlOTBiNGI0MGIxMGRjMDY3NDU5YjQyNzAzOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNGE4NDVjMDAxZTYzOWU0MGNlNzQxMWFjMjcyYjJhNGFmOTdiOGQxNzE4MjI2OThmZGNmNWFjYzU5NjE0ZjQ2ZiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1486-L1497",
+          "version": "repo-lines-v1:sha256:190be9b92dce61b12a8f0ba34e0e88a13ca6a1c406a314fddb42fd671df26089:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY4N2FkMmYyY2ZhYjIzNjk1MjAzYzAxOTAxMzhlMzc3ODlhNjYwYzIwOGMzNTRiOTdlMDJlMDQwYTc5ZjZhYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZmZjQyNzIzNzNhYTZhODgxNjE2NzczMzdkYmY2YWI2YWQ0YTQxN2VlYjg2ZTU4ZTMyZmUzZTE3NDc1NWM2MjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUwODg0NWZmZmE0MzE5MDFmNzVjMTVkZjg1ODhlZmYwNmQwZWM4OGI3YzVhMmIzOTljOTVlYTEzNjVjZjEzMzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_73493dd890264f168b2096136ed97e10",
+      "statement": "ProposalJobStore は PROPOSAL_JOBS_TABLE が未設定のときだけプロセス共有のメモリを使い、設定時は DynamoDB の条件付き update_item で状態を遷移させ（条件不成立は False、他の例外は再送出）、メモリへ黙って戻らない。行には作成から 7 日の TTL（expires_at）が付き、結果 JSON は 300KB を超えると拒否する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_job_store.py#L1-L20",
+          "version": "repo-lines-v1:sha256:7bed81c0675012eee27c2bdf248ef75e5e6d1b5cbefeba9d8174f712c460e46e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI5NTJmYzUyNjQzMWFlZDhiZDlhMmEyYmM3YTIzNTYyMTRjZmQ1ZTFhMDhlNDhiZTFkZjJiOTAyYTMxYjE4YTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZkZDEwZDZhNjQ2Mjc1Y2Q4ZDRjODJjYTRmNmE2ZjViODFiODhhMjg0MmIyMzFhNDYwMDMyMDQ4MGRiYWM4MWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA4NGU5NjY1YmU4M2M5NWY4Yjk2ZTA0NDc1ZDc3NTVmNjYxMzhmOGYwNTkyOTNhMGM3MjQ4YThlNzJmMGVhNzkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_job_store.py#L211-L219",
+          "version": "repo-lines-v1:sha256:d8b9b2d0bc0411119d51b404ef0f8a64d721054d3343af53e56d608e670693e2:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWMwZTIzZmE5MDljMjMwYzExZDIyZTg3NTNlMjcwOTliOGU5MDcwODhlYTFmZTdlMGI2OTY0MjI2NzY0MzQyMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTkwOWE1M2E2MThkMDI4ZTFkMzAwMGMwYTdhYmNlZWNiZTVmYjM3ZjRlNTExZWZlNDY2NDNmYWQ2ZTY2ODcyZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOTc1NDI2M2QyOWU1M2QxZWU1ZTFiZGM4NGYxZmNkZWM4NzI4MDRlOTA4MmVlMGQ2OGM0MDJkYmU4MDJlNjM4MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOWExMzVhZTE1Nzc4ZTEzMTQzMjQ3NzkyMjRhOThmNGQwNGY0YjNkMDlkMzY3MGU5ZmM4NmUzMzE4MTZhNjIxZiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_job_store.py#L339-L358",
+          "version": "repo-lines-v1:sha256:c349c31b529cc4fa1d5ab4fa4fb834252deb342a0bc901132a3f56a467458c7e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI1NjljYjA5MjgwZWUwNzgxOTQ1ZTQ4ZDQwNDFiZDJkZmFhZTY5MWFkMmVhYmY1ZDNjYmEwODQ2YzcyMTZjYWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIyOWM1MjQ0MzRjMDA5YWFmMGQ3ZmU5ZTJmZmU3MjJiMTcwY2Y4ZWIxYzhjMTU3NWU0ZTNiZDUxZTkyNmM3MWIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQyN2MwNzA4ZjRlZDlkMTBiYjg1YTI5YzQ3ODZlMTYyOWVmMTViZWUxOGEwZTFiYjBjNjI1OWVlN2VhMDlkMzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIxMWFkMWNhYzQzZGM2Y2Q4NTJlYzYwMzI1YmFlNjIzMmM5MDE3ZDVjZmQwYTMyMmVmNjMzNThkMTVkZjgxYjkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_job_store.py#L97-L123",
+          "version": "repo-lines-v1:sha256:f97a8b32e7dacbb25d0504c1b058075074099f8bea2d0cac28d48f1520a15b74:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdiZDIwNmI3ZDUxYjk4ZmQ3ZWRjZDBjNGM0Mzk4ZDgyYzY5ZTkwZmU5M2JhZTVhY2Q0YTNmMzcyYmNjODI2NTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVmOWU3MWZiODc0ZDA0M2UwYWZhYjVhNmEwMmZiMjZmMzM4NjAzYzhiZmI4ZmQ5YjgzMzMzMjY3YWQzZWE3YWEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNlY2MxYTBmMjgzZTcwNGI3ZDBiNGM5NjQ5ZDljZWU2OTY4NzFiZjY4ZDMxMjJlMmQ4YTU2NGFhNTM5MzA0NTEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_34e6cd3e90d74378a4934777d0f81118",
+      "statement": "proposal_builder は検証の未解決項目が 1 つでもあれば draft、無ければ ready とし、draft は PROPOSAL_BUILDER_DELIVER_INTERNAL_DRAFTS が ON のときだけ添付する。ready なのに Slack 添付も公開 URL も無い場合は例外にして成功扱いにしない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1003-L1072",
+          "version": "repo-lines-v1:sha256:58918d33754d50e35da3fc7dffee34366695e06ea732eff006f06aac48470f5a:eyJzZWxlY3RlZExpbmVDb3VudCI6NzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQxZjY1OWM3Njg5YTAwNzlhYTgxMTNlNDcwYzIxOTZiNzEyYzU3OGRmNjc1MTUwZDRhYWRjYzhhM2NkMjcyNDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxMDM0ODFjNTdkMGYwZGMwZjc2Y2QyY2M4YjM2MDRjNGU4Mjk2ZGE0MTIyYWRkMTllODE3NDVkYzdlMzMxYTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVjZmE0ZTY1MTBlYTU3NDg1OTFhMTFkZjZiMWJiMGQ3Y2ZhZmE2ZTM2ZjM3MWU2MTVlODY3NjViZWNiNDM5ZDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjZTdlNmRjNWYwNDg2MmEzNWViNzc3MDNlYjg2Y2MxYzg1Mjg0NWZlNTQxYzBhNTZlODMxNzAyNzBhYmI4MTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9274b3a3052d47238d70adf87aaf0693",
+      "statement": "提案書の Slack 添付は ctx.metadata の channel_id / thread_ts（依頼元スレッド）を優先し、失敗したら user_email から本人 DM を開いて送る。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/proposal_builder/skill.py#L1162-L1196",
+          "version": "repo-lines-v1:sha256:f63c37f4fe769d59e7d6cb2e6f251bc500ff60575a8271c4557cf45ba3aa0cc8:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiNDkxNzVjYWNjYWFlNWFhYmZkYmVhODJiNTMwOTIwNmJmNDM5YTBjNTI2Y2IzYzRmYzRjM2QxZTk1NWEwZDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI0YzU4ZGM5NmFhMWRkM2ZkMDZjYTEzODgxOTQwMmU1ZmZkMTgwOGE0ZmExYjJkMzgzOGU4MzE5NDgzMTE0NzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJhZWFlNTIzZTEyMWNmNzk5YTQ5NTQ1OGM3NGM5M2MyMmVhMTM5NzViNGVhZTFiZGFmZjc5YjJiM2NhNTYyN2QiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM4YWE3MmQ2NDdhZGIyODA4YzU5ZWIyNDIwNWEyYTNlOWIwNTY0OTFiZGFlMDJhNGIyYjFkNTc4MWNjYjYxM2QifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_d7be657ca91a4f3abb7c5a1c7343a7b7",
+      "statement": "MCP のエントリポイントは USE_PROPOSAL_BUILDER_TOOLS が ON のとき S3 資産を provision してテンプレートとアカウント DB のローカルパスを env に設定し、S3 の pin 用 env と KMS 鍵 ARN を消してから MCP サーバを exec する（例外は捕まえない）。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_vertex_entrypoint.py#L31-L55",
+          "version": "repo-lines-v1:sha256:db0a7676dc9f4f87c585abbbdd2d1e3b47c81e9266cf65bff3c8942402a361e4:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2MGJmYjgzMjNlYmIwMDI5ZWZjODgwM2EzYWVmZjY3MDk4YmJiZWUzNzNiMTc3ODhjZjc4MDdiOGZkYzAzNTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzNDFiNmFkMDEyMTVkOTZmOTU5MjVjZDQwM2Q5N2U2OWJkZjdkZjU0NmYxNjQ3ZTYxNDc4NTM2NTJiNDJjMmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjMTVkNDJmOWFiMmI5ZDUwOTQ3YzcwZGJjOTQzYTI3NjNhMDhiYzljMmE0NzI2ZDc5MDRjMjIxYzJhMGI2OGUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNkNDEzNDBjYzIzOWExNTljZTliNjAyMmU5ZjYzMjI4MzJlMmVhZDc2Y2FlOWU0NzU0ZDIxMGViOGZiNmQ1ZTgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_29fe0b5a657e45af8e35e8177376ce37",
+      "statement": "proposal_builder の資産 provision は S3 の VersionId・ContentLength・SSE-KMS 鍵・ChecksumSHA256 を pin と照合し、テンプレートがスライド 83 枚・数値枠 95 個（{1}〜{103} から {48}〜{55} を除く）・必須の PB- 補助枠・proposal-builder-v1 版マーカー・日付枠を満たさなければ失敗させる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_assets.py#L271-L280",
+          "version": "repo-lines-v1:sha256:65489e7a79a7fde4883c4ecbff1eb31a1bfe60f2790f316a7c385081878e54d5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2MDA3Y2ZjNjhhYWFlODAxMTY1OGZlYTRjM2JiODAyNjk0NDlmZWE3OTMxMzg0ZWJiNmNlN2M2NTg5MzU0OGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFhOTAzNGVjYmE5YWYzOWQzZDhlZWFkZjFkMTQ5YjM4NDU3MTA3NDdjNGFhOWJkMDU1MzAxOTkxZWUxOTcwZDYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI3ZGY5OTI3Y2RhOTY0NmViN2U1MjJkZjAyNjMwMjM3ZDE5NmJjNzE0ODVmODQxMDdiN2I4ZGRlM2RiYzVkZWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVmODcxYzAzZmY4YTNjZWU1MzQ3NWE0MTJkMjdlZDlkMmRlMWQ5ZmUxMDMxMzc3OTc2MzA0MzU4MjRmMTA2NDkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_assets.py#L386-L440",
+          "version": "repo-lines-v1:sha256:a173f284a2cf6043f4384d605c3e4b89fd3b1f35edda00adf84b44a3233a5b30:eyJzZWxlY3RlZExpbmVDb3VudCI6NTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE1NTEwZDg0Mjk0MzQxNjM1MjA2YzkwNGY3NTgyMGI5NTU3MWFhMWM4OWEzMzZmOTZiNDk2MzZiM2ZjZDI4NmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM5YTQ5NWFjNDY1YjlmYzk2MTA3ZTMzNDQ1N2I3NDdkMmMyYTFmZjVkNzgxYzM5MzZkYTJlZDY4ZGJjNTcyNmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQwZjZhNjgwY2I2MWJiOTk4MWZiMzZkNzQ0OThiNDA1MzFjNDg3NjZlMDk4NDk0MTYzNmYxMjQ4M2YxNDY2NzkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJkYzBkZmU0Y2YzNWU3OTk2YjFlZTc0MDRjZjFlNjA0NjA5MDcxYTQ5MGZhMjAxMTRjYjk2Y2NlZWUyMmI4MTEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/proposal_assets.py#L44-L57",
+          "version": "repo-lines-v1:sha256:c2b40337af2f1379f812f22e152850c10ba395bcf6bf8c268f0fea0d4858abdf:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2MzdhMzYwNzY3OTNmMDA5NjFhNGEzNDk4YTgxZTI4YTFlY2M2NGE4MmJhM2RkODg1YmE5MTkzZjY0ZGUyYzciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjllNGZhNTM5ZmY0YzU0ZWFmOTFjOThiOTdlNmMxZTk5MWZhYzQ0ZWRmOGI5ODM5YjJkMGMyYmFlZmI5NzNjNjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg4OGQ4ZTQyMjFkNmY4Y2Y4Mzg5MDk0MzBkNWU3MzQxYjVhZmY4ODdmYTU3YTQwMjg2ZmJhZWVkYTIyYzljOTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjY0YjIyY2I5OTE2ZjIzMmVlYjVjODRmNDAzNjJhODhjNDdkNmZkNGI5M2U1YTk2YTUyOGViMDNiMzI1N2MwNDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_07265deb01a84305bf11ce29d4f94cb9",
+      "statement": "omiyage_report_submit はプロセス内の同時実行上限（OMIYAGE_MAX_CONCURRENT_JOBS、既定 3）に空きが無ければ、job 行を作らずに順番と待ち時間の目安を載せた busy を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/omiyage_report/skill.py#L245-L251",
+          "version": "repo-lines-v1:sha256:803ee67b1fdcc24b350a0a1c1a5affd3b5f60d986696ae07cbb9f118785ad297:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMTJlODZiYmNhYTc2MGFiOGZmZjg5YjE2YzY5NzliMWE1MGIzOTIzNDU0YzgxMDUwYmJkMjg4Yjc4NThmYWUyNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzBjMWYxODhmMTQyZWQ3YTgyNDY4MGIyMDcxNzJjNTUxOWJjNjE0YTQ4ZmRhN2NmMTY3ZWRiOGRkZjc5OTU2YyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOGNjNGE3ZDFjYzc5NmFiYTNlNDY3MjMzMjdmNTE3ZTlmODExOTgyZDI1MGYwNzAyOTg2ZTRiNTc2NGFkOTU4OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNmQ3MGE3ZGE5ZTY1ZmYyZTI1MjM3ZjIzZDQ4ZmRlYzA1MGEyNzkwNGM5ZWNmNWJlM2Q3NTlkM2YzNTEwZDIwOCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/omiyage_report/skill.py#L613-L635",
+          "version": "repo-lines-v1:sha256:fdb289ee2d6b2d56e427f7129621622e334dea61e549238738c945aa0fe84b0b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYzMzk0YTUwOWMyNmFlZTIwNGIzNzQyZjE5NWM0MTExZTU0MTQ4OTBlZWI2MjNmNjg5YWJlYmM4N2YwODA5NTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjdiZDYzYjE3YTI1NDMwNWMzYTg1Yjc1ZTAyY2UyMDJkMjcwYjRjNThmZDIyNjQwZTI0NjhiNDAyNWU0MjFmMzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIzNjNmYmViNjJhZDU5NjQzYzA5MzM2NjhjYjlkMjIxZDI2YTg3MmM5ODgzYjFhMWY4ZjI3NmM3MWQwNGEwMzkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7f19fa04454c42018971161f9e499403",
+      "statement": "proposal_deck の PPTX 描画は media job が設定されていれば media worker の render_proposal_pptx に委譲し、media 未設定かつ TEAMAGENT_LOCAL_MEDIA_RUNTIME が ON のときだけプロセス内 renderer を使う。terraform では enable_proposal_builder と enable_omiyage_report のどちらも generic media worker を precondition で要求する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L927-L935",
+          "version": "repo-lines-v1:sha256:610aa217e60b286d75e36a5536868c73ef82a04164c82ba839f55f36099676ad:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTMwMzI5MzVkYTYyZGU3Nzk5YmJmMWQxZDNmYjdjMWRlOWQyZTkwMDQxM2JmOGY3MTg2NDYzOTg2ZWI4ZmY2YiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDg5M2Y0MGUzNzgxZWI4OTZjODJkMDQ2YTA4MDY3YTExZTM1Y2RmMmYxZGZhZjI2ZmVhOTBiOGRiNjY3NjQxMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOTczMWRhMDk1MDUxYWU0N2IxODlmNThhNzE2MmVjMzFjZmE3MmYwYTAxMTgxODBlYTU3MGU2NzJiMGIzNTE1MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZWI0YTVlNTllZTZlMzI0ZjM0NTNlZmRkZGIxYTQzODI0ZDRmOTUwYmZmNzI3NmExODI3MjdmY2JhNTYyZmYwNCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_deck/skill.py#L250-L271",
+          "version": "repo-lines-v1:sha256:e452610633eb4e9fd20b5cca75664b6a58e030d1c3a86a305b157595f6a1bf49:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3ZGVhYjA0OGYzM2E3ODJlY2YwMmQ5YmFiZDVkZDdkZGVhMzQ2MTM2ZjA4NDA5MDViZWQ2NzAxOWUzMWFkN2UiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzYzE2NGQ0NTliMDk0NTA0OTM3MzNhZjU2NjNkNmQwYmI2MzA5NDcxNThmZTI5NDRjOTQxNDc5NWE2OTc2MzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEyZjIzYzExZGJiZTBmZjkwMzI4NDUyOTg4YWU5YjMwYzIzMDYxYmRhMTFmY2M2ZDEwMmIxNzkwN2U3MzM4ZjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUwZjI5OTY1OGE1ZjkxYjczOTU5Mzk0MDIwMzM0ZmFjZmVjMTg5MzUyMDgwZmE1ZWQyMWY2YTk3MDgxYzllODUifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/proposal_deck/skill.py#L305-L312",
+          "version": "repo-lines-v1:sha256:b7a86a18c0c185c83ae813c76dbf5f24b9e8d52144776694fd01a2b96dfb0c2e:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzU4NGQ1MDZmODkzMWU3ODczZWM0MTE1ZWJiYWViMmY3ZDYwNWE5ZGI4Y2YyNzUzZWE5M2UwYWNhYmFkNDIzMiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNzZkY2Y0NDUwOGZmYmNmMjk2NzIyOWM2NGQ3YzNmNzM3YjZjZmI2YmFlOTExMGU0NjQ5MzhiMDIzN2RmMzgzZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDUxNjM0NGYxNzA0N2M4ZDJjN2ZkZjVkNjBlMTMwZjlhNDJjNTQxYzRjYmI2ZmM3ZTBiMGIxZTIxZjEzZjZkNyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTZhN2Y5MTkxNmNmZGM4Mzg5N2I0NDU2MDgyZWMxYTA0M2IyYWMxNDM0M2M2NGM4MTEyODNjZmJmOGQ4OWU5MiJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

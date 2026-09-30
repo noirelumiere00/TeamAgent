@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:1de1c573f1e46b2a180469390c27fa24797837877df586507813994c28dcf016",
+  "claims": [
+    {
+      "id": "claim_08e82677228a4bdca5d1f7edab209efa",
+      "statement": "ECS サービスとして MCP・OpenClaw・connect-web が定義され、MCP イメージ（var.mcp_image）は connect-web・morning_digest・ingest・canary のタスク定義でも流用される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/canary_schedule.tf#L218-L220",
+          "version": "repo-lines-v1:sha256:3c5f8f98e1e0c4a2ebb9bb822b62e08a70272a433901a1e8eb5d95c125110f11:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzNiNDY4ODBlYWYxMDBkNDA4M2UzYzUwYzNmYTM5NGIyMzIwM2Q3NTUwMjU1MzljYjE2MjliZDg1MWJjNjljNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjk2NGJiZGRkY2E3YjFjMjM2NTU3NTYyZTVlZmQ2MjU0NGY5MmM4ZWI0MThjMTkzZDgyMjkwMmJjODY4ODA3NiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWY4NjBiYmNhOGMyNDNkZjQ1M2I1ZmI5YjVhMGVhODE0YThmNTMxZWUyZTVkNTgwNmYzNDJjOTEzYjIxZjA3OCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYjMwNDliZmJiN2M4ZWRhMDQwYmZhODFmZmJkZjI5ZjJkZDQzNGJmMGUzZjU2NTBjZjgwN2JmNTVlMWY3NjRjZSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/connect_web.tf#L420-L422",
+          "version": "repo-lines-v1:sha256:0a34b685247324861b8e8b7ed77d3d191f2e652469c760e6e47cee7b7d02ed35:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzNiNDY4ODBlYWYxMDBkNDA4M2UzYzUwYzNmYTM5NGIyMzIwM2Q3NTUwMjU1MzljYjE2MjliZDg1MWJjNjljNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTcwMzI4NDI3NjU2NDIyMDY2ZTY2ZTQ3OTg1OTJmYWFkOGRkNjAyNzA0NTc0NjgxZTk0ZmU3OGZhOWE1OTY5ZSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWZhNzc4MTNkZDQ1ZDBjOGZmOTAxZDhlNjZlZjNkZjU5MWM0NzEyODNlNzM3YzVlMjg2NzgxOTdhM2ViMGVhYyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMGY2M2MyNjhkYTcyOTY2MDM1NjE2NzBhNTgyOGE1OTU0YjY0ZGRhYTUyMDNkZTAyYTI4MzU3MTI0OTU3MjkyNyJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L1110-L1160",
+          "version": "repo-lines-v1:sha256:f01e8390c25b5b267c27b1d36762e909fb76354c93d50552a537c2fc01358a48:eyJzZWxlY3RlZExpbmVDb3VudCI6NTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE1ZWVjNGZmMDY1ZThhOWVkYjlmNWFhNjUyZDQ3NzY1YjIxY2E4MWJkZjcxM2MwN2I4ZTQ5NDUzOTlmNjVjNWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxNzRmODI4NzE0N2E0NWMwODY3OGI3YTVjNGJmMWJhOGI3NTdhZWI5YmI4YjYxOGQ1MTYwMzhkZjA1OWM1MmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQyNGQ4Mzk5OWZlMmE2Y2IzMzk4Yjc5MGE4YTAxZDU5Y2MzZWEyOTJhZjE0ZTA2MjZjZGY5YzZjNjliMTljMTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEyMzYxMzY2OGJiM2RmOTdlOWExODhiMWY3YWFiODg4NTYwMzMxM2ViMDFhNjczMGJlZTViYjBmNDNiN2QyNmUifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L214-L216",
+          "version": "repo-lines-v1:sha256:68c04a8fc63bb2b73156159ea73ad5b58ad345c1dab56454a47d5bcb74a4aa34:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzNiNDY4ODBlYWYxMDBkNDA4M2UzYzUwYzNmYTM5NGIyMzIwM2Q3NTUwMjU1MzljYjE2MjliZDg1MWJjNjljNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiY2Y4MmNjZDZhOWY4MDBhNjg4YjM4MGIwODFiNGZmN2ZhMTFhZDU5YjQyYmU2NzVlZjNiZmUxMjQ4MzgxMjA2NyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZmNkOTI2MTJjNmQ0ZDRhMjI4OTM0ZDAzNDFkZThkNjExNTUwZTRkMTcxMjg1ZWNjMzY4N2FkOTQzOWY2ZDBkZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjBhOTEyYzI3MTE1ZmQyYWQ1MzM2N2VhOGFjYmUzZTY2NGE0YjYyOGY5MmI3MzJmNTRiNDg4NmUxYzZlYmYwNyJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L394-L396",
+          "version": "repo-lines-v1:sha256:1d69b7971cafb656b807af3363e2585843f29bb45c6f1d87572ff40242fe6617:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYzNiNDY4ODBlYWYxMDBkNDA4M2UzYzUwYzNmYTM5NGIyMzIwM2Q3NTUwMjU1MzljYjE2MjliZDg1MWJjNjljNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDNjODA5ODI1MjkwMDQ1Y2MzNGE0MGM5ZDBhNWVjNjMwNjJlM2ExNjIyZTUwZGZlYWY3YjJjMGQ5MTAzMjFkMCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYmEyNDM5ZWE4MjdiNmUyZjJmY2RjZDBjZmUwMjQzZTk2MWVlYTYxMDNmNmViMmFkMWFkOTMzM2EzMzQyNjc2YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjBhOTEyYzI3MTE1ZmQyYWQ1MzM2N2VhOGFjYmUzZTY2NGE0YjYyOGY5MmI3MzJmNTRiNDg4NmUxYzZlYmYwNyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8bb8b56a4abb45238bc953fa23e8f1ee",
+      "statement": "朝ダイジェスト（平日・planner）・ingest（週次）・canary（毎時）は EventBridge ルールから起動される。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/canary_schedule.tf#L309-L309",
+          "version": "repo-lines-v1:sha256:1e315dd3bfb237048e2b1f72839a8faa73bec95b2c166da28f52f64529bb4883:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMWUzMTVkZDNiZmIyMzcwNDhlMmIxZjcyODM5YThmYWE3M2JlYzk1YjJjMTY2ZGEyOGY1MmY2NDUyOWJiNDg4MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWUzMTVkZDNiZmIyMzcwNDhlMmIxZjcyODM5YThmYWE3M2JlYzk1YjJjMTY2ZGEyOGY1MmY2NDUyOWJiNDg4MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDY2OWRhMzU5Zjk2NzM1MDJjOTRkM2IzYjk1MTQ0NjkzMTM2MDFiNWRhM2QxM2M5MTU0ZTIxMWMyNTk1Nzg0YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjNiYzk0MTVmM2ZmNTg5ZGY5YTRkYmQ5OWQ5MjU3YjA3OWQ4MWZlNmZiNGVhYjMyYWNhMDQ2MTYzNWY4YjM1MSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L413-L413",
+          "version": "repo-lines-v1:sha256:f36be3648860aa640d8d3c42a74f3ce0d59b2663267613bcf24c73560f33bf37:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjM2YmUzNjQ4ODYwYWE2NDBkOGQzYzQyYTc0ZjNjZTBkNTliMjY2MzI2NzYxM2JjZjI0YzczNTYwZjMzYmYzNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjM2YmUzNjQ4ODYwYWE2NDBkOGQzYzQyYTc0ZjNjZTBkNTliMjY2MzI2NzYxM2JjZjI0YzczNTYwZjMzYmYzNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDY2OWRhMzU5Zjk2NzM1MDJjOTRkM2IzYjk1MTQ0NjkzMTM2MDFiNWRhM2QxM2M5MTU0ZTIxMWMyNTk1Nzg0YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjM2NGYzZDJhNjM3ZWM1YzQ0ZmI4MmJkNDAxNGFlY2M2ZWE2ZGUxMzEzYTkxYjU2YmE0YjE2MGI2OWE1ZjBlMSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L551-L551",
+          "version": "repo-lines-v1:sha256:895d01bd8f4aa57cff63ae71e312ffa9422c02b328bbd608cff0d3cc708a6af3:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODk1ZDAxYmQ4ZjRhYTU3Y2ZmNjNhZTcxZTMxMmZmYTk0MjJjMDJiMzI4YmJkNjA4Y2ZmMGQzY2M3MDhhNmFmMyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiODk1ZDAxYmQ4ZjRhYTU3Y2ZmNjNhZTcxZTMxMmZmYTk0MjJjMDJiMzI4YmJkNjA4Y2ZmMGQzY2M3MDhhNmFmMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDY2OWRhMzU5Zjk2NzM1MDJjOTRkM2IzYjk1MTQ0NjkzMTM2MDFiNWRhM2QxM2M5MTU0ZTIxMWMyNTk1Nzg0YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTIwOGVlZTkwNzA2MDk3OTEyNTcxOThkMDQyOWM0N2E5ZTBmZTE3NmQ2ZWRhMzVkMTJkYWM4M2RmYjg4ODg3ZiJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L608-L608",
+          "version": "repo-lines-v1:sha256:308bb2ce71d954100cf60e65b49b753b2ce52b671eb2bd19726d13037b2df236:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzA4YmIyY2U3MWQ5NTQxMDBjZjYwZTY1YjQ5Yjc1M2IyY2U1MmI2NzFlYjJiZDE5NzI2ZDEzMDM3YjJkZjIzNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzA4YmIyY2U3MWQ5NTQxMDBjZjYwZTY1YjQ5Yjc1M2IyY2U1MmI2NzFlYjJiZDE5NzI2ZDEzMDM3YjJkZjIzNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNWNjMmEzNGViNzU0Njg5NTQwMWJiNDBhNzQwMWZiMGI4NGI5YTc1ZWMzOTE0ZjhlOWUyZDUwNGFjM2Y4NWJkMiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYmZmMTMwZjdlZWZkNzdmYjJlODUyYTM0YzA3OGNlM2I5OTcyMjM4MzBmZjE1NTMxOGYwYzhhNjZjMGM5ODYzMSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_8dde5f5dca1a411aa0332a7a9ffebbf2",
+      "statement": "media worker は Core→SQS→Lambda dispatcher→task role 無しの使い捨て Fargate の構成で、AWS 資格情報・DynamoDB・bucket 権限を tool container に渡さない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/tiktok_acquire.tf#L1-L10",
+          "version": "repo-lines-v1:sha256:f4efb6efb55aef0cfc7fd666a00f6bb37662cf1f98c40b8bc9db9806563bfacd:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3MDg3M2VhMWNkMmQzZWUwMWNkZjk4ZmZlY2QxYTk3OTYwZGE0NDRmOTI0OWEzOWZkOWQxMzg4M2YxODcxNzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZmMzIwMjljMjU3Mjk4ODQ0YmIxY2IwMDBlYjBiMjEyN2JiNDhlNDNhZTVmNDYwMzg5ZGMxYzE3MjQ3NTc1YjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAzODljOTg4OTY4MzEyZWYzYjQyNDZiYjQ4Njg1ODQ1MTYxZjk4ODczYzgzOGM4MmNmNThjNjUzNDhlMDk2MGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_4eabf1d163284779b83f9569cdeff8b7",
+      "statement": "X 効果測定の非同期処理は MCP→SQS→Lambda dispatcher→使い捨て Fargate で動き、MCP ロールには RunTask/PassRole を持たせない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L1-L12",
+          "version": "repo-lines-v1:sha256:6883ecff17196e454c18d72676519088c434df2ab985ff8a75182463ec03d887:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3MDg3M2VhMWNkMmQzZWUwMWNkZjk4ZmZlY2QxYTk3OTYwZGE0NDRmOTI0OWEzOWZkOWQxMzg4M2YxODcxNzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNlYTU0MDViZmI1OWNhOTA4NjFiYWNhYmVkNjBhNzVmMGFiN2U3ODlkMzNmNzYwMDM4MmQ3Y2UwZTVmN2MxOWMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/x_research.tf#L298-L332",
+          "version": "repo-lines-v1:sha256:3683f663a0afc7bf558f565dd543197f1fb5f479ea7d45380268f732a48a6805:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNhMzM5YmMzY2ZlYTE4MDhjYTliY2QwZGQxMTFlYTMyODg0ZjA4NGZkMDdiZDdiMTExZGZlYmU0NjExYzQxYjciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcxODI0Y2U3Y2Y0YTMwNTJhYTZlNjM1YWFjOWVkM2VhNWM0ZWRkYThkN2MzYjM5ODM5NGU0OTBiZjYwODQ3YjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcxMzdiZTRkZDE5ODFhODJjMmNiNmY3NjUyYjE5ZmRhNWUyYjhhNjNiZGRmNzAyOTQ4OTg2ZDYzMjAyODQ2NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjM3ZWEwZWE0YTc0OTQxNWEzOGQ4MTk5MGZmODlmYzZmM2JhMGEyNmI2ZWFlYjFkMWRkMDEyODc1YzM4NTUyNWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_56aca17c7c2948a39de2bec6f83fe9a1",
+      "statement": "worker.tf は Slack Socket Mode Bot と動画処理を常駐させる旧 EC2 ワーカーの定義で、その Bot の実装は Slack Bolt の runtime/slack_bot.py。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/worker.tf#L1-L20",
+          "version": "repo-lines-v1:sha256:2007bb8df29f777cb4ad408d967fecb3bc3eefe587bfccb3a84e71f9e7b71380:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3MDg3M2VhMWNkMmQzZWUwMWNkZjk4ZmZlY2QxYTk3OTYwZGE0NDRmOTI0OWEzOWZkOWQxMzg4M2YxODcxNzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY3MGNhNzNlNDgyMTU5MjE3ZGViNjc4YTAzNTBiMGQwM2RiNTlhZGI3YzQ2ZDY3ZTY2NjMyNmQ4ZWFhYTcyNzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYzOTQyOGZmNjhjODAxMWRmMjk4OGVkMmM2OWU4NGJkYjEwZGIzM2E0MWZiYzNkODM1YTZjODkzZjJlYjRmNTgifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/runtime/slack_bot.py#L1-L30",
+          "version": "repo-lines-v1:sha256:77be74015d9938647906f8591d02f828d839326ae0c43d907c90840b3c424b01:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQyYmJlNTkzODRhZjIwZmEyNTEzMmFkYjFhYWYyM2M4ZGFlMGNmMGFlMGZkZjI5MWJjYjFjOTk1Mzc1M2RkNjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkxNjBkNzE2ODM1NmQwMjIwYzdjODkzMTU5NGM0MDAwZTQ2ZjQ2ZmMwNDI4ODU5MzIzMjM3ZGNhZTkwMjUxMmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjUyMzUzODVmMzU5NzE3YTQ4NGRjMDBhODViNTMwNjlhOTRlNDRhZjFmNzFiYjA4MWNkZWY1ZmQyNWUxOGYzOTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0a06222fca47448ab05525895fe21189",
+      "statement": "TikTok 取得専用イメージは別リポジトリの担当で、build_tiktok_image.sh は常に失敗するようになっている。",
+      "evidence": [
+        {
+          "resource": "repo://build_tiktok_image.sh#L1-L12",
+          "version": "repo-lines-v1:sha256:adac99ee134dbb687787f7814151e07686c08240a9f3df6a6e5afbf669665f0d:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFkOTVmYzA0YTgwYzk1MmY0OWNlNDE4ODYyN2M1M2IwZmJlOGM0NDA0MWI5NTJkNTkyYWNkMWRlOTk4NjE0NjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVhYjJmYWZkOTQ1NzY4NTRkMjVkNjEwMGEzY2Y2ODJkZjVjMTE2YzAzOTE2ZDg1M2IyOWM2NjhjYWQ3YjgyMGUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_216de64b4b5540cca59929be9a832013",
+      "statement": "OpenClaw の状態は EFS ファイルシステムに永続する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/openclaw_state.tf#L9-L12",
+          "version": "repo-lines-v1:sha256:8183b6142f36c94cd53585c6166a7ac1161b7e19da367bb788d4844385bc6c80:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNTIwZmU3MWQzYTgxOTA5ZWVjZDEwZjlhYTNiMWFjMDMyYzYwYjM2MGM0YjAyNmJlODBmMTI3ZTJmZTY1MmM0ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMjczOTdlYWIzNzNmNzhmZDNjMzNlNTcxZjZlNzAzYTNhNTE0NWEyNGI2ODkyNDIyZTUwYzU4Y2MxYWI2NTRiNSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiODZiMDAyNjhkYTZlNzFkYzVkNTNlMDg2Y2Y4NThkYmY4NzMxMDlmMTFjY2UzMDA4OGFhZWE5ODYzMTE5NTBkNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTJkZGYxY2ViNmMzYWYxMmExMWIxZDdkNjIxN2E3NmI4YzAyMWZlYWQ2MTk5ZWYyZjNhYzQyYzA3YTA0YmUzNyJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

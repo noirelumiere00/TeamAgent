@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:608d8e3e6e513af83d1c0e337760bb8cb81fc73402f5d0ff6f1e40ab687d06a7",
+  "claims": [
+    {
+      "id": "claim_1e25e61c036147fd97ba4f5908f785b3",
+      "statement": "run_sdk_agent は AsyncAnthropicBedrock の messages.create を上限付きループで回し、max_turns 1〜32・cost_cap_usd 0 超〜100 を境界で強制し、予算超過・API 例外・ターン切れを stopped_reason に反映する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/sdk_runner.py#L322-L468",
+          "version": "repo-lines-v1:sha256:fa357bbf5201441ab2fbc051a721af5c4991a1dc8d7e0100fc0e2d8dc8b791e7:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQ3LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI5MGY4MmM1M2RhN2U4NGJkY2JhNDQ4YzE2MzlhOGE5ODk1NGY0ODY0Y2FiMjIwNGYyYTU5NzVmMDQ3ZTZmNWFhIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI1NzBkYTAzMmZiZmRiZDFiNDI0ZTgxNGMyMTJhZTU4NDg0ZTc2ZjU3ZGM1NmRiZmQxM2JmODAzNzM2ZDMyNGIyIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI5NjU5MjJjMjRhZWRlMzMxZWQzMDMwNDI5NDFlMGY4NzUxNWJjNWFiNTFkZDAzMDcwMmUwNTU0NjkxZDUwOWNhIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIwYjRkMGYxMmEzOTcxOGQ0OTBjNzFkZWEwZGQxMzZiOTAwOTJlMTE3MmQwOTIwYzM5Y2NiMGJjMDA4MTJlMDcxIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_f5c14cbe8128463e9fef29c9d2ddb526",
+      "statement": "ツール handler は同一ツール×同一入力の呼び出しを既定 2 回で拒否し、同期 skill を executor と timeout で実行し、orchestrated_tool_call の印を metadata に立て、失敗を構造化エラーで返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/sdk_runner.py#L148-L238",
+          "version": "repo-lines-v1:sha256:df5f679eb15188910b707b99de84677aaa61440f1425449599a8cedda2493ee3:eyJzZWxlY3RlZExpbmVDb3VudCI6OTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5NTQ2OTUxZThhOWZlNzA2MjZkZTA5NTljZmIzOTI1MDkwOTA5ZTM1YmM1NzQyYmNhYzQ3ZGYwYTQzNDg1MWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBhOTNkNDk3YWYwMjRjZTY5NWY2MTJjYjQwNDI1ZWEzODg0NTk0ZDdmYjM2MmQzYjY4NzEyZTMyNTBhNzRlNjgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyMjZhZmU0OGU3NzQyZmI5NzU5YTRkN2ZiMTZhMDRlZmJlNzA0NzgwNmJmM2E0ZDMxNjFjZWIxNzMyNzM2NGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImM2MDNjYmZkNmVlMDhhNjlkZjgxOGU5YzExYmMzZjM4NWNkZTc1ODJkMmJlNjM5OGY0YTE4YmRmNTNkZTkwNGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7e4c2162e321431d84e83b3c1df6a33f",
+      "statement": "run_sdk_agent の messages.create は temperature も cache_control も指定せず max_tokens 4096 のみを渡している。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/sdk_runner.py#L383-L389",
+          "version": "repo-lines-v1:sha256:92ce516ce7c694d256961ff75f39859a3a2b05c26fbf6cd5636db71f79e45e88:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGRjMTAxNDM0YzdhMDNhNGU0NjhhMzc2ODBjMzMyMDNlMTVmMTBjZDI1ZGMwNGI2NGViODc1Njc1NmI2MjQ4MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTEwMzQ4MWM1N2QwZjBkYzBmNzZjZDJjYzhiMzYwNGM0ZTgyOTZkYTQxMjJhZGQxOWU4MTc0NWRjN2UzMzFhNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMjFjMjM1Y2EwOThhOWE3MGEzZjdmYWRlZDRhNDkxNWU3NjFjZTNkODhjYzExMTdlOTFkZWJiYmQ4MDEzNGViZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWU2ZTM0Y2NkMDY4NTEzNDdhNmY0ODdhNzEwZGY0NDRhNmRlYTUxY2FmMDEzZTBhMDc2MmI3MzUyMDJjNjdhYSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_5b20909fd15f40f2ada880041a711d6e",
+      "statement": "dispatch_run_agent は dispatch_tool と同じ caller 検証とメタデータ解決を通し、既定 max_turns 8・cost_cap 0.5 USD・tool timeout 90 秒で run_sdk_agent を呼ぶ。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1348-L1430",
+          "version": "repo-lines-v1:sha256:c19f25a36c210e85e4592f4be4db4323177e7d31e47614291192663017851796:eyJzZWxlY3RlZExpbmVDb3VudCI6ODMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwNTExN2NkYWMxM2JkZGYxOWZhOTllMjViZjg2MzM0M2JhNDk2NDZlMWU3ZTc5MDMzZTk1NzM5YzA3NDIxMTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3OWY0ODUwNTE4MDUwY2U4MmZkMGU4NjBmYTU5YjU5MWIzZDZmYzYzODYzMzc4NGExMzY5OGZmZWU0NTdjZTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzZGYyYWNmMDZlOGMzZjAzYzcxMzVjNmU4YWM1YTljYTU0MzJhYmUwNmE3NGFjYTBmZGQ5YTUzYTAwOGY5ODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjYjZjZWEwZDUzNGM5ZTgzNWY5NTY5ZTMxZjllOTFiZTc4YjRmMTlmYTNlNTgwMjU0M2U3Zjg0ZTUxNmIzY2MifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7b76b8f47ae8435b97fb3387c16c6ac1",
+      "statement": "run_agent は USE_AGENT_ORCHESTRATOR が ON のときだけ MCP のツール一覧に出るが、OpenClaw の toolFilter.include には意図的に入れていない。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L285-L296",
+          "version": "repo-lines-v1:sha256:5508bb840b3cdb707fb80f43b67d78b25b0e826416f4955076c6c55ada0745bb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImExNGQzMDM3Y2E1ZmFhYzMxZmFhYzg5OTBkYjIxMGVhODJlOWE0YmZmNjgxMmRhMjI2ZmNlOWQyYzU1YTljOWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlNjczYWJkNDU3YTk3ZWVhMTdhNjAwNjJlYjBmYWVhNmJkZjA5NDg2OGNjNmI4ZjhjMGViZGEyZjYxZWQ0MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlMzc1ZmQ5ZjE3ZmM3NzM0YzdmNzA1OWI5ZWVjMjI4MmY3YTcyZGIyZmY2YjM3ODI5YWVhZTE5M2JiYTM1MjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0OGRkNzVmMzBkMGE1ZjQ3MDRkNDg5MDI5OGE1YTI3NzM5ZTE3MDc4YjQ3OTQ2NjA1ZTdmZTRlYzkyMzZhMmUifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1494-L1530",
+          "version": "repo-lines-v1:sha256:9742cede4e3bafdfeea6eeeb1e0eca28cb9008edd7626a6aa7eb1e9df38e3255:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY1Y2E3YTQ1M2I2ZjQ4MjUyMmIzZjIwMmMxZjUyOTcxNGE1MzZlMThkZTJhMGNmZGFhYjhhM2Q3YzNmZGFiMmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2ZDQxZmE1NTMxYzcyOGNhODEyY2VhZDlkNjJhNDQxYTA4YjMwZTFkNmYwOGJiNGEwOTlhNDhjY2MwYzQzYzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI2OTgwMDkyMGI3OWZlMDhmZGE5MmEwODcxM2MzOWUzNTc4ZGMwYzg1MDAzNTc0YjgzMDg3NDA5YzZkMmEyYTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEwMzcwM2U1MjM4ZTc5MmE0YzBiMWY2ZmFkODFlZWY3NDZmNGYwNzAxOTc2MjFhZjFjYTNjMjBmYWI0NDM5ZGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_977ed5482b0c46988cd7e4b128314e37",
+      "statement": "L2 の model は TEAMAGENT_BEDROCK_MODEL、BEDROCK_MODEL_ID、既定の東京 Haiku 4.5 推論プロファイルの順に決まり、system prompt はコード内定数で USE_MAIL_TOOLS 時に mail 制約節を足す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/agent_config.py#L1-L58",
+          "version": "repo-lines-v1:sha256:b92e4a6f01cfcba58b6f9a06d946412a2a92c8a00a9be3e6764d0ee9be3bf7cd:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OWIzMzVjYTMwZDMxYjQ4NGVlNmJkMmVjNmFhZmY4ZjZkMzQxZGE1NTg1ZmJkYmQyOGZjZjhiMGFmOTVmZDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVlZGJmZDdkYTcwZWZkZWFiZGY5MDk1YzM0MWIyZWNjMzk5YTY2ODU5NzhiYmI0OGVhODlkNmQ3ZTBiYjg4NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_89a60c20d14d43078bc600b755265867",
+      "statement": "ToolSpec は 1 Skill を包む薄い層で、入力スキーマは Skill の Pydantic スキーマをそのまま使い、factory があればそれで生成する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/tools.py#L21-L41",
+          "version": "repo-lines-v1:sha256:e3300cc8773f5e523d85a719b98f22eb14ef1df09a701f0404aae871c074549f:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2OWExMzk3NWMyNTZlYzgzMjBlMjAxNjA4M2M5NmRmNjM3Y2EzZDM1YmViZGUyMzE0YmVlM2E0NzExYjU2Y2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcxNmY1MzIyMjYwZWY3M2NkMjAzY2JhOWM2NzZiMTgwY2UyNTg5YTI1NjEwZjZmZGQ0ZTE3MTU4ZTBhODFlMmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU2OGUwNmY2NTMwNTVjNzRjZDRhY2U4ZGQxNDg4ZTI0ZTZiZmMzYmZiMGM0ZWQ3YzYzZjZjOTM3ZDg1ZmZlYzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_33d35c68f1f649b3880a55c72a124655",
+      "statement": "faithfulness は回答中の chunk_id 引用が実際に取得した hits に含まれるかを純関数で判定し、eval はゴールドセットに対する決定的な採点を行う。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/orchestrator/eval.py#L1-L25",
+          "version": "repo-lines-v1:sha256:e130428a28e282643aad7c89ef63b8bf64a1efdcc2fb0310b15dd5f4429f9d3c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjViY2ZjNzY0ZmY4YmE2Yzg4ZTM0NjUyMjNhYWVmODM4YWJhMTY3M2I0MDlhMTZiODg0ZDhlMzcwNWU1OTA5YjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU5NmMzZjVhYWQxMTFiZTQ3NThkZWQ4ZWMwMDE5NzI4OTVhM2Y5OTc4OGI5NTk2MDVkNDBlMjE2NDViZTY0ZGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2YzkzM2FiZDk3N2QzZDRlZTAwZjUwOGViMDJlMGI2OGFjYTJlZGNkYmMyMzJiMmYzNTA4MWUwZDlhYjEzYmYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/orchestrator/faithfulness.py#L1-L30",
+          "version": "repo-lines-v1:sha256:3b73026bbfa69778bca567286400c476417290a5c79a9b4710f61e5b017aa42b:eyJzZWxlY3RlZExpbmVDb3VudCI6MzAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ5N2E3NmE1ZmIxYTE5NzM1NzNiMmVkZjcwZjRmMGY3NDFlNmFjOTcxMjM4NzBjY2VmYzc4NzJmMGU4ODAxNjgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNiZTk5MTY5OGY3NDI3ZGVkZWYyY2M3Y2RmYzA3ZTBlZjRlYzVkOTU1MTQ0YzQxMGE0NTE3ZmM4ZjM0ZWYyMGYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk2YmVjM2IyOGMyNTIzNWRlMTkyMmM2MzllMzY5YjUxZDk3M2I5ZGM1Njc1NjQ5MmQ4ODQwYjU2MTJiODE1YjAifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

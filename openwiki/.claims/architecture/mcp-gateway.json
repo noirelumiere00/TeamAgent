@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:d8283c27dd598a952aa17a8af3a402a09e589edbe5949de4396703a4bedb37a5",
+  "claims": [
+    {
+      "id": "claim_2ff033a35134403badf1a694d443d5d8",
+      "statement": "MCP HTTP サーバは HMAC 鍵束の起動検査・TEAMAGENT_MCP_BEARER・caller claim 検証器の構築を確認し、欠けていれば終了コード 2 で起動を拒否する。既定 bind は 127.0.0.1:8787、パスは /mcp。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L154-L192",
+          "version": "repo-lines-v1:sha256:4867929115116575fe2118cafe47449078b3795f498da474d83e793ed744ee48:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJlYzg4ZjViMTk4MTY5ODVlMDZjNDM3YTE3YWYyMTljNTA3OTkzMDQwN2EyMmM3MGQ3MmMwNjZkMDBmNWNiZWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY4NzhlYjQyOTc4MDFjZTFlY2I0OGJmNmIxYzk3YTZmNDQ5ZTI4M2Y5ODQxYTUxZTJlMjNjMmQ0NjEyODY5NjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoyLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlhNmE3ZmZlZWQxYWY4M2NlZDgzNzA1NDk0OWUwYjJmZGYwZTU2OGZlM2Q0YzJlMjBjMjI5ZWMwYTk3MDdjYzMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_f1d032227b9c4f8f83a4d06833a2aee3",
+      "statement": "HTTP 面は /healthz と bearer 保護された streamable-http の MCP パスから成り、bearer は定数時間比較で検査され不一致は 401。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L126-L152",
+          "version": "repo-lines-v1:sha256:f148448eb9520308310ecfaf0a4f7f3f2347d66ca2c0ad4d1e1393656581caaa:eyJzZWxlY3RlZExpbmVDb3VudCI6MjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcyYmU3YWZlNWY5ZTZkZjc2MDY4ZTUzMDliMzg5NTBhMjc1NTliNjc1ZTBkODFhMmRjNDY1ZjM1ZTlkODdhMTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFlZjk5NTZiODNiODZiNGZkNDI1ZDM4ODMxMDNkYjMwZDE2OWJiMGFjYTYzMmQyNmFkNmNhOTI0YTI1NjEyODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA4ZWNmNTQ4NWUxNGZjNTA3MWFhM2VmODNiYzNhNWY1MzgyMThmNzE2YzRjYTc5MzliNDk0NWEwYjFhMjViMTEifQ"
+        },
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L62-L90",
+          "version": "repo-lines-v1:sha256:459959ab8c685faf9a1ee090ec5cc6a7219890e0206198fc6c3cffefd498f865:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY0ODdhOWE0ZDg0MGJjYTg1Yzk5Yjg4NGFlNzkwOTFmM2Y4NWNkOGJjNTIxZWM3OWQ3Y2EyNDhkMDNjOTM4MDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmNjQ4NTczZWIyMjQyMDcxNmFhYTU0OTEwNWYwNmZkMjAxNDE5YWQ0ZDUzYzJhOTQyMWU4ZGU2NzQ1MDBlYWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjcyZDRlMDczZjkxNTgwMDkxMTI5ZDU5ZDQ5NmM3Zjc1ODliNjQ2ZmFjYzNmM2ZiMjdiM2U3NmU5YmU4ZjBmZWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_85f4494889c34184985a1f802ee74728",
+      "statement": "本番エントリポイントは VERTEX_SA_JSON をタスク専用 /tmp に 0600 で書き出して GOOGLE_APPLICATION_CREDENTIALS とし、MCP HTTP サーバを exec する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_vertex_entrypoint.py#L1-L40",
+          "version": "repo-lines-v1:sha256:311517630c1af20ee93be0c81788ccd615b1497dbf435dbde4f594db0c72479b:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ2ODJjYmRiNGM4YjA3NTE4YmY0ODZjNTg5OTBmYzM5MTc4M2FhMjBhOTE2YmZiMjdhZDIxMWViMWQ1YzM2NDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI2ZDcwNzBkNzExYjZkNDFlOGI4MDM5OWIxMDhhZWM0YmFmMDVkNWQxZDA2OTFlYmNlNWRkNTdhOTRmODk2MmIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_afd7066fd2ea4e929408f45c9acafc62",
+      "statement": "build_production_server は SLACK_BOT_TOKEN が無ければ RuntimeError で起動を拒否し、TEAMAGENT_SHARED_COMPANY_DOMAINS の有無で会社共有モードと STRICT モードを切り替える。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1546-L1571",
+          "version": "repo-lines-v1:sha256:40cd70ec998d9aecee51c03e349590877be58eb53646cd7b970b1f9ceca4e9fa:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5MDAzNTZkMWNjZDM2NzA3MjQyZDYwMjVmY2UwMjA1ZjRkMDRmYjYxYzc4NTI5OGZlYmUwZGFjODg3MzY4MDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU3ZjVhMjllMzM0ODIxM2I4MzgzYzY4YTJjZTQwYjQzNGFhNzU0ODlkYWMyNDE2MDAzNTcwZDEwZjg0MjJkMGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiODk4MTU5NDgzNGNlZWJiZWIwYWVkNDA4ZGE4MDI5OWMxNDEyY2NhZGY3ODE2Yzk3YzMwNDEzOTIxYTZkYjUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2a971672b10b405b8213df00246fa1f5",
+      "statement": "_user_context は入力スキーマの properties に足されるが required には入れない。OpenClaw の引数検証が plugin 注入より前に走るため。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L192-L244",
+          "version": "repo-lines-v1:sha256:f1373df04340648ff9c51e744bbd5597247895d94a541fac09d0085f394a034b:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4MmQ5YzY1ZDZmMTVkYzZhM2EzNTVlNjFjNDI4NGI4MDI4YjRlMGEzMjY1MmM5ZDI1ZWU3MjIwNjdiMzIzZDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU0NTI2YWZkNzhlMmJiZGM0N2QwODZmNjliOTdhZjYwZTQ5MjAzZDNjNDlhMTAwMDNmNTQxNzEyODlmOTYxZTQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzZGYyYWNmMDZlOGMzZjAzYzcxMzVjNmU4YWM1YTljYTU0MzJhYmUwNmE3NGFjYTBmZGQ5YTUzYTAwOGY5ODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwYWM4ZTQwNzkzODg5ZWE0ZTc1ZmMzZmI2ZGI2OTBkMjNlOWMyNTc5NzAxY2FhODVhZThlN2FjZDI3MDNjNTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0583bb4b28c74ac890d082d78ad0abaa",
+      "statement": "dispatch_tool は caller 検証→メタデータ解決→連携依頼の oauth_connect 寄せ→Pydantic 入力検証→thread での skill.run の順に処理し、例外は構造化エラーで返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1081-L1117",
+          "version": "repo-lines-v1:sha256:a1dd97a772b7d4784e64418b2c7927b17e093c584ef99df6ab16751774d22e6c:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZTNkMDk0MjMyYzVkMmU5NjA5MTZjMDMxY2YyYzZjY2E0MTlhZWNlZWJjOTA0MWFkZDgxODkzNjdjMDg0NjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2OGViMTc2ZjA3ZDkzNDZhZDU2ZjE5Mjc2MjQyYTJlN2Q3Mzk4ZDNkZTRlYjM2OWI5MmFkNGVhZTU3MjJlNDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjlkNTI3OTNiODZiN2MxMTgyNTNjYjQxNDAzMGQyYTQ5MDhlMjZkYjMyZTVkZDkxOGM4YjYyMmE4MmNhMmFiZDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5NTM5MzYzOWExZmEyZjI1OTVhZGExYTkxYTQ2MjY3MjA0OGM2NTAwODEzMDgxNDE0MmQ4ZTI2MTU2NDA0NjkifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L859-L933",
+          "version": "repo-lines-v1:sha256:5feddcce54c664bfe12363c84b72af3ec2aeb0956ef9f93438063f5daaa8eef5:eyJzZWxlY3RlZExpbmVDb3VudCI6NzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjExYmNiYzUwNGVkNzVhYmM1YWM2NjViZjk0ZmZmNjY4MzI2OTE2NzNiNjI2NGI2N2FmMGZkYTUwN2Q2NDQzYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzY2EyMWZiMmVjZTcxNTg5OWUyZDY5ZDQ2OWRiNzZkMDExNjRmNWZkMWE2YTU1MTNhNWM5MTg5NDcwZWFmNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU2MDUzZWVjYmRjYTdhNDAyMmY2NzBlOWM4ODA0YjE2NjY4NDZjMWYyYmJlNGE0YzM4MDEzNjE5NzNhODExZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIyY2IyMWM2ZWFiYzc5ZWFhYzIzZDZjODExY2JkOTc1YTE0MTA0ZmU1OTBkNDhiNmQ2N2Y0ZDhiZGNmMzQ5ZDEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a3c21b2927f8454e93fdef9387851daf",
+      "statement": "STRICT モードでは外殻が申告した user_email/user_groups/user_role を破棄し、署名済み event user をサーバ側で解決する。会社共有モードも署名済み caller と resolver 成功が必須。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L466-L585",
+          "version": "repo-lines-v1:sha256:092ccfeed7a7894cc599c555b118e1c60dbace5b7124cf7322869d123ce7e48f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwMTRhMjk2YTVhMTAzNDY5OGZiMWU0NTI1MDlkOWQ5OTZkYzg0NmNjNzI1ZDA4MDBiOTEzMTQ2ZjllNzM0NmM2IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIzNTgyNDNiNWQ1ZWVhMGQ5ODdjM2JiNjg5NWYzNGUxMTFkMjViMDMzM2IwYTNiZmU1MzcwMTM0MjhkYzlhYTY4IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI1MTg4YzZjNTI4Yjk4YzY3MTBiYjViZTE5NDVkY2ZkYzc2MzcwOTZlZmM3NzVmYTExYzE1MTBlZDUzZTU4OGE0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI2ZGU1ZmRkM2I3NjIyYzYzMDk2MWM2ZDAwMGIzZTQ0YTQ2Mjg0NGI4OGM5OWNkOTgxZWQ5OTliMGE2YjYyZmI4In0"
+        }
+      ]
+    },
+    {
+      "id": "claim_ba8b1ae26e8a406aa4a8cdc823304ea4",
+      "statement": "build_rls_metadata は RLS メタへの唯一の変換点で、user_role を常に member に固定し、不正 email・非メンバ・許可外ドメインで None を返す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/identity.py#L115-L162",
+          "version": "repo-lines-v1:sha256:1ccca1643a0c907c9025ec00b6a869a8c864fbaff549fd9ef4bb808050e0ef01:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMxOWJhNzBmNzlhZTM3MThhNGNhYThlOTFhNjkxNGM0MDg5YWYzZjkzODg1ZGFkYjAxOTNhZDcxMDIwMDcwMDAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmYmQwMDkzMTRiYzI3MDg0MTY3MzRhMDJhZTVmZjM5YTFlNDhhMDUwYmU5MWY0M2IyZmFhOTIwMDJjNjJiZmMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_34544101824c4cb19a426050ad1c73f6",
+      "statement": "_maybe_redirect_to_connect は引数に連携依頼が検出されるとモデルが選んだツールを oauth_connect に差し替え、元の引数を捨てる。run_agent 経路には適用しない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L649-L706",
+          "version": "repo-lines-v1:sha256:96de7c06c5c251d057ad33f9f85e50f612ef4b726a721b88de469e22acb87a13:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwYzZkMmI3OTBiMWI3YmUyM2I2ZWQ3M2MzYTRmZGJkZmZlMDNkNjY4YjFhY2Y4M2RhNDI2ZTI4M2RhNmRlYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2MDM1OTY5NDNmMDBjYWYwZmNmYmI2OTMxOWU3N2JhMjNlZGFkNDdjNjFkY2NkZDc3ZTZjYzUwYzZjZjgzZTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg3YjVhNDY1ZjRhYTNmOGVhMjhjOTJjMTJjMDcxMzI0ZjUzNTM5YzgyMzhmYmU3OTYwZmI5MTEzODQxNjJkYWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_dd6bd7fe4ac744efb4c0b421c0764e1d",
+      "statement": "usage 記録のログキーは tool_cost_usd で、cost_usd にしないのは CloudWatch のコスト metric filter の二重計上を避けるため。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1143-L1171",
+          "version": "repo-lines-v1:sha256:851840306e526dcbba37e15638df1f831e8943897b89a8a7b13587d099a99ee9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU4NDAzOGI1ZTZiYTA0NDA3MDUyMTU0MzA4MWM3NTMwMzA1NWY5MmFjMmEwMmM1OTQwNGQ3YjI4MTdjNzgwYzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhZjM5MWU3YWQ2NTMyNTk2NzM4OTk3N2UyOTRhYmMxOTNmYWVlYzkxYjFmOGU0Mjg5YjFkMzJkNDUxOWMxMDciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg4ODgzNzgwNmQzNmJkYmM2MmE4YjE0NzY0ODkxNjk1ZDNiOGNkY2NhN2Y5MTZkMTI3Y2RjNmU4MzRmM2Y2OWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ2NzU1NjIwMmYyNGVhZmU2OTUzNGE0ZjNjNjdlNThlMTJmYWJiNzczNTNkZjA2NWNlNjYwNWEwYzI5MDg2ZjcifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

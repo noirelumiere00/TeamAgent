@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:982fa79c8760b67370d2b15a76c30bbabb21007944ff4272373fca7ff84241d8",
+  "claims": [
+    {
+      "id": "claim_bec804932bee484c98e5d2fd34068acc",
+      "statement": "video_algorithm の切り離しは USE_VIDEO_ALGORITHM_DETACH で既定 OFF、既定 30 秒で受付文を返し、allowlist が空なら誰にも適用せず、同時実行 2・待ち行列 10 件・登録簿の寿命 45 分。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/detached_jobs.py#L1-L100",
+          "version": "repo-lines-v1:sha256:91dfced8b5d31e0fbaf89208c7db75f72989d31d7c95e3a95a9d653d9c2e3f03:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIyYTlkZWI2NjhhODAxMTA0YTViZGJlZjAxYzU5N2Y0ODdjZTExM2U2OTg2YjYzNWRmNGJkOTczMWQ3NTlkMGMzIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI4Yjc4ZmQxZDUwMzZmNjViYzY5ZWVhOTliZjA2OWZkY2VjZDJmODg4MzhhMDI0OTAyNTU3ZWRjZDljYjA4NjU2IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MCwicHJlY2VkaW5nQ29udGV4dEhhc2giOiJlM2IwYzQ0Mjk4ZmMxYzE0OWFmYmY0Yzg5OTZmYjkyNDI3YWU0MWU0NjQ5YjkzNGNhNDk1OTkxYjc4NTJiODU1IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiJlMzdhMTliYWJjNjI2MDc3NGQ3MzM5YzA2YmQ5OTcwYTZkYzAxMjllMGM4YjUwYTQxN2ZiNWQwMzY0ZGQ5OWFkIn0"
+        }
+      ]
+    },
+    {
+      "id": "claim_8c06a9ea7efd463aa457fa5ff88d9a21",
+      "statement": "切り離したジョブの完了投稿先は署名検証済み caller claim の channel_id / thread_ts から作られる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/detached_jobs.py#L185-L243",
+          "version": "repo-lines-v1:sha256:9cafcf16c110a0cda01208d35f921b74e932b5e1d75ab9ec8597c4db93c1e757:eyJzZWxlY3RlZExpbmVDb3VudCI6NTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmMzRmZTFkZWIxMjk4ODE1Zjk2MTU2MjBlNzdiZDYyYjUxZDVkYzU2NGM5OWY3OWMxYWEyODE1YmI1ZGZjZTYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFmMzg5NzcyMmFmNWI0NTUyMzA1ZGY4ODI4YzZjY2ZkZjAyMTI0ODRiN2QwNWVhNDJhYjgzOWNmZDI1MDdiMGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdiNmRhOTVkZWJjN2ZmZGMzZGRiYzg0NGM5ZmMxZTY1NzJjMWM4YzUxYTAzMjJjMTM5OTZiNWIwNDcyMzUwYzEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_63945ba5772c49cebc70e60a23287f91",
+      "statement": "MCP HTTP サーバは SIGTERM 時に notify_interrupted を呼び、処理中ジョブの宛先へ中断文を送る。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L57-L110",
+          "version": "repo-lines-v1:sha256:12f5bca4e9df23fcce1db6828fb7dce097fe08716b612214b8f092cec7abdd6e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJmY2JhZGM0ZTAwODYxNzdkY2VjYWQyOTRiNjA5ODlkZjQ5OTMyZDhiYzRkYWI2OWIwYmU3MDdlYjY1MTg3OWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFhYjMwY2VlYzRmMTY2ZTBiODZkYTNmMjU0MGJiODc5ZDNhODU0NzU0ODIwMjMwZjgzYjNlY2RhNDQ3NWRiMTkiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVhM2Y0MjQzOTExMDY2NjAxOWQ5M2VlYjA5ZThiYmZmNjcyMGIwYzQ0YjY0NzAxYWRhNmQwNTI1NGI4OGY3ZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjI2YjhiZjEwOGQxN2ZlYmQzNGZmNjM2MzRlMGRiODZjMTEzM2M5MjhmOTNlZjg2MjMxODYzNmE4ZmIwZDcxNjUifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/detached_jobs.py#L930-L1002",
+          "version": "repo-lines-v1:sha256:04949595cb29fa5c507ed627590efa4fb5984da9fa02bf3eff8493d8338dbd9c:eyJzZWxlY3RlZExpbmVDb3VudCI6NzMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiNTk4ZjIwODBiMjk4YjViNDUwYmE0OWYzZTJhZmRmZjkyNDNkMWU5NzVhZGIyMzIxZTVlOTgxMWU0NjMxN2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY5NDE2ZTA5Zjc4YmEzMTZjMDMyNTY4MjEzYjg1NWVlNzU2ZTQxNTY1ZDkxOGYwOTUxOWM4MWZkNjIwZjQwNjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjVkODZmMTRiYTg5MjhmODg4NDlmNDE3MzEwNjVmMThiNTY5Yzg3N2IyZTJhNWVmZmEwZDk0YTI4NDBmNzk5NjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_bf770bad77ed4b41a7bc429746ecc2ed",
+      "statement": "検索上位チェックの 2 段目は video_algorithm の切り離しと同じ登録簿・同時実行枠を共有し、月間上限の残りを消費せずに読み、24 時間のプロセス内キャッシュで結果を使い回す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/surface_video_followup.py#L1-L42",
+          "version": "repo-lines-v1:sha256:b40dff155717d136344cb83d79bc18c1bef3213dc48b717243cb3479b6e248bf:eyJzZWxlY3RlZExpbmVDb3VudCI6NDIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYyMDMxM2I3YTJhN2E2NWZhNWYyYmJmMWI2Y2MyODIyZGI4YTNlODgyM2M5NzY4MGM4NmU5N2I0ZjkwMjRjYWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUzODRiZmRiMmRmMzgwYjY1NTdjYzdhNzFkMTY4OTE0MTViY2NhYTg3Njk5NDA2ZTIzNmY3NTJjNjQxNTM4OWYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ0Mjk4Zjk3Y2NkMjMzYTE5YmMwOTZlZTQ3ZWI3N2Q5NTBjYTJmMmM3NzdmMTdjYWZhZDVmMWU0ZGJkOTg5N2UifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5e551b71b23f4af9a2443908a209bcd6",
+      "statement": "async_job_notify は USE_ASYNC_JOB_NOTIFY が ON のとき tiktok_acquire と proposal_builder_submit の job を 30 秒間隔で最大 60 分見張り、done/failed で通知する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/async_job_notify.py#L19-L80",
+          "version": "repo-lines-v1:sha256:b982296512e74dc4b3ac78b058a96b9f2824ec98c10f301c20e5e4862f77710b:eyJzZWxlY3RlZExpbmVDb3VudCI6NjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYwMzEyYjJlNDg1YzNmNTZhNmU1NWM1NzgxNTIwNmQxNDE0NDU4NDcyNzUxOTQwYTM3YWY0ZjFiNTQxNWU1OGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmNjQ4NTczZWIyMjQyMDcxNmFhYTU0OTEwNWYwNmZkMjAxNDE5YWQ0ZDUzYzJhOTQyMWU4ZGU2NzQ1MDBlYWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU4MDhjMTY5ZmVjNjkwZjhjMTU1NGU1ZTdhNzllODBiNjZjYTRiNzZhMmE3OWQ2Mjk2YjExYzA2OGNmN2FhMWIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L377-L442",
+          "version": "repo-lines-v1:sha256:c16f992d97f84093d1eb055ce11adf353bfdcb7af6ad82ba9fc157026a2d601d:eyJzZWxlY3RlZExpbmVDb3VudCI6NjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZhYjJkYmNhNmJjZWM2NTYxZDI2ZmYzNGU5OWNmMDdhODc1MTVmYWVkNGJiZGEwNjlkMzg5YjFmODQ3ZTEzMTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxMWQ3YjQ3ODQ0NjA2YTI0OGYzOWE1Y2EwNzg4YTIzOTcyNmJhMzQ1ZTJlMWE1ZTUxYTBhYjllNWZmYjMyNDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRjYTMwZGUzODVkYzY1ZjRiYjQzNDBhMjcyNjZlMjEwNTI2OTIyNGE0MDRmYWFlZTA0ZDExZjRlZjU1OWUyNjkifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_98dfb1c7f5204dd18a5df1336358ddcd",
+      "statement": "progress_notify は ENABLE_PROGRESS_NOTIFY で既定 OFF、重いツールだけに進捗を出し chat.delete で消し、2.5 秒で打ち切る fail-open 設計で、個人機微ツールは対象外。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/progress_notify.py#L1-L45",
+          "version": "repo-lines-v1:sha256:e9b1700ce41d1161a9492994ed89a4c4fbd22329e0dd3c2c2838f85f3f6242e0:eyJzZWxlY3RlZExpbmVDb3VudCI6NDUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0ZWFmYzA1MjE2NTkyZTQ1NzEzZTdhNjRmZWI4ZDVlYjk4NDAzNjQzNTFiZDZlYWE5Y2I4NjZhMDkwMzRmYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5MmQwNzgyOWY3ZjEzM2QyMWIzMDliYTUwYmUzMWMwZDBkNTMyZmNhOGYyNWFhZGZmMTc0OWU1MzU4ZGVjZDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImNiZjQ0ZTAzNGFkNzM0YTQ4MDE3NDJjMDA3ZWEyNzA2MThhYzQ3Yzg5NDAxZDY5YmU4OTIxN2JjYjI3ZTg5NWUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_771cea8974aa40bcad94fbadf6e0171e",
+      "statement": "direct_summary は search_surface_check の結果を mcp が DM へ直接投稿し、成功時は投稿済みだけを返す。allowlist が空なら誰にも適用しない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/direct_summary.py#L1-L50",
+          "version": "repo-lines-v1:sha256:4a95e37800727166c7aeac7b0c5ab1a86789827b6afaefc172ee51b5edd7a682:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRhZWJmMTE4OTUzOTY4NDcxZTg2YWRlYjcyYWMzZjgzNzg1OWQxYzY2NDE4ZGE2M2RkNzgyMzRmZGEwNjI0M2QiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZjMTFiYjkzNTk2OWZiYjkyYTkzZGY1MjQzZDc2NWY3YzZlMDJkYmRjMjc5MjFlZTVlZTU0YmRhNzgxNjliYjIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c231b09214e94c05b0e57a5af44749f6",
+      "statement": "payload_offload は会社共有ナレッジ系ツールの allowlist だけを対象にし、USE_PAYLOAD_OFFLOAD かつ TEAMAGENT_SHARED_COMPANY_DOMAINS 設定時のみ発動する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/payload_offload.py#L1-L68",
+          "version": "repo-lines-v1:sha256:eba8936512dd728c853e7b6d4dded2e0418971323d6c4eb7bee3c20474f4ba64:eyJzZWxlY3RlZExpbmVDb3VudCI6NjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ2NmI5YTBhMWEwYTJjOGZlNjhkNjJmZjA1OTAxMDZmMzQ5ZWRiN2VhNjk1OGVhMTZiNzZiNWM2ZmYwOWY5MjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRjNDY3MmM1ZjEzMmVjMzY4NWJjNjBiOGYwNjI5NzM4ODU1YzA0Zjc2NTY5OTJlYWE1NTkxZmExZDc3YmNjNDUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjJmMWU2MmRlMjU5YTBjOTMzZTJhY2UzMWY3Mzk4NGYwMzllMzMzNzE3MDZjODE1ZTg4NDQwMWEzZmQ3OGFjNzQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_199944fe173c4f4b94de33e3381fd4b8",
+      "statement": "dispatch_tool の返却前処理は 2 段目登録→完了通知登録→usage 記録→直接投稿→relay fields→長文退避→検索リンク注入の順に固定されている。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1122-L1216",
+          "version": "repo-lines-v1:sha256:f97e45c415b110c52a214ffeb891d6ebb9e2b548aa54c312b4aa5d3965052d88:eyJzZWxlY3RlZExpbmVDb3VudCI6OTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzMzkyM2FiNzJjZjVkZTE3YmYwMDQ1NWIxMjI1YTk0ZmE0ODZlMDZhNTk5MGQ4OTc0MzEzZDUzNmMzNDYxNTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5MDgwODIxN2I3YTc3OWU0NTU0ZDNjMTAyMDAzNWI4NjdjYWRkMzQ2MWRkNmUxYjI0NWM2NDliMzRiMGQ5NjMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRjOGI4MDE2YmM2ZTJiOThhMTIxMzE3N2ExMTgyY2FlMzg0MjljODJkMzU1OWNjNjJlYjE1OGMxMjQ3NDVkYmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQzM2QxNzg0ZDk3ZjIyMmUzMDBkZjFkMWQ0MDc5M2RhODUyNWYzMGU1NTZlYWM2YTk1NDYxZGE1ODQ1ZjRkODMifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

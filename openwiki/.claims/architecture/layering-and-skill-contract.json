@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:91667ad15e6c7deeda287a74e8e1a8453daba7895dbd37db7d941cb174e1268b",
+  "claims": [
+    {
+      "id": "claim_043992e305c44e8eaeba7e95c0de22d0",
+      "statement": "import-linter の契約は「adapters は runtime/skills/orchestrator/mcp_gateway/ingest を import しない」「skills は runtime を import しない」の 2 本だけである。",
+      "evidence": [
+        {
+          "resource": "repo://pyproject.toml#L267-L286",
+          "version": "repo-lines-v1:sha256:c70c8205c79d93eaae89dfc089770a526797f45546b25d070db432773f03c5af:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxOWZmYjYwMDExYThjYjBkZTRkNjI4NjhjZWYxMWJjZWU2MGMzMTQ1NWYzNzQxZDFiNDNkNjA0NDdmMzI4ZWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM3YTkyYmZiZDQxYzc0ODk5MjY0NDJkZTk4YWYwYjQyN2U1MmRlNDgzY2MzZDA1NTIzMWYyOGNiYzNkN2M5MzQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyOWI5MTFjNDRkNGMxMmQ5M2VlMDM0OGE1M2IyODRjYzMzMjJjN2FhMWZkMTA0NjliNmRhYzMwMmRlZDYyMzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a84ba0bd3a97413194fe53ca82de96f4",
+      "statement": "knowledge_deliver skill は関数内で orchestrator.factory を import しており、skills → orchestrator の依存は契約上許されている。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/knowledge_deliver/skill.py#L312-L312",
+          "version": "repo-lines-v1:sha256:372b3ebbc0bb695f1be47db7299f6e97099962df7253e232adea37af32c3ec49:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzcyYjNlYmJjMGJiNjk1ZjFiZTQ3ZGI3Mjk5ZjZlOTcwOTk5NjJkZjcyNTNlMjMyYWRlYTM3YWYzMmMzZWM0OSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMzcyYjNlYmJjMGJiNjk1ZjFiZTQ3ZGI3Mjk5ZjZlOTcwOTk5NjJkZjcyNTNlMjMyYWRlYTM3YWYzMmMzZWM0OSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZGUyZDlhNjgzMGYwNDllNGRmZTVmOGRjN2NjNzBmMjUzZWRkYTVlZjc3ZGVjYzYwMWYwNDIxNjc1NWY5M2RlNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMGE5ZjI0MzY4MGRhOTJiM2RkM2I5Y2FlZTIzYzZhY2MzMTkzMThjMTE2ZTdmMDNkNjYyNTU3NWMyOTg4MjI4NSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_cd296eff682e46f0877cfc659f5da4fd",
+      "statement": "BaseSkill は name・description・input_schema・output_schema と同期 run を必須とし、version・owner・required_scope・audit_tag・mcp_relay_fields の任意メタと cleanup_output hook を持つ。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/base.py#L84-L136",
+          "version": "repo-lines-v1:sha256:72af2cd64ce57cadef53d2b50774f348e8814c8886c01dff41d2db4d4c0d6888:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg3YjYwM2ZlODZlNGM5YzJlNDQ3N2YwNmRkNmJlYWQwMDU1NmZiZjJmY2E3ZGFkODE4YmE2YzAzZjRiYWQ5NWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjU1NTMzZTJjM2Q5YTdlODhlMmFiOGZjZDIxOTNkMTZmZDMyZjgyNmE5ZjU4ZmMzYjMwNWExMjg4YWVmMzg0YjIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdjYzBmMGZiMDBjOTU0NzExYjcxMWZhMDMyOTVmYTZlOTc0OTUzMDNkNDBmNGM4YjNkY2JjODYzYWQzNzY3ZTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8e39e349a5284684998a2435185e0295",
+      "statement": "SkillRegistry.register は同名の重複登録で ValueError を投げ、register デコレータはクラスだけを受け取る。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/base.py#L139-L181",
+          "version": "repo-lines-v1:sha256:1e4999c58ebb31768601844086d8c746ad925ffa5067584174da2873d911afd0:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMyY2I2OWUxYjJlNDM2NmZmMzRmMWRlZmI0ZDFmOGNhMDg3ZDQwNjU1OTg5Yzk0NWJhM2Y1OTM2NjFmMTIyMDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3ODBhZDUxNjFjYzVkMWQ3MmQxYzI4MTk2NjYyMjhmNDUxMjE4MTgxNDhjYjAzMTg3MTkzMWRjYTQ2NmFhYWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjZkNjE0MDNkNjU4MmJkZWYxZDMyNjZkMjAwNzExMmFiNDM5MmYwZWRkMTc1MTBmOWMwZjNkNzkwNDdmMjc4MmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1c9a1fe49aec4d8ebf2159f8ec9cf469",
+      "statement": "SkillContext.metadata の orchestrated_tool_call 印は L2 オーケストレーターの中間ステップを示し、配信系の副作用を止める判定に使われる。async_job_poll 印は見張り経路で課金補完を抑止する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/base.py#L34-L58",
+          "version": "repo-lines-v1:sha256:a7285798d7ef07d277f9dcf51d02b7554b9b008a56e2ddb1e85d04fb964af25b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUwZDJkNzcxMjdlNjk2ZDJiYjgyNWMwMWFiMjJhZWIxMGY2NzBhYTdmZGRkYjVjOWQ0MGE1YWQ5MGI4YzY4ODUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiMzg5NDMwYmNlZTFlZGRhY2I3MzYwNDFlYTdlMTViYjM1ZTI1ODM1ZjRmYzVlMWMwZjFhZTEzMzQzYTkzMjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY0ZjVlMjFlNDQ0NTdjYThmNTc1MjY3NGQ1NGIyYjNhMDQ3YjY4MDAyZTA2M2ZiODFkZjY4ODU3MzliMTgyZjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY1NDkwMjQzMjk3NmFiMzBmNmY2ZWY1YjIxZWE1NGEwNWZmNDMyODAzYWU0ZmI5NGRiNDQwMTFhMDVjZjBhZTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_06d87fcca9d94f5eb9e9613a31902ca4",
+      "statement": "rollout_allowed は env が未設定・空なら全員許可し、設定時は email が解決できなければ拒否する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/_shared/rollout.py#L12-L22",
+          "version": "repo-lines-v1:sha256:f3fe69eb40b8ea28de268c63b2244041b5f4210530c7db2896e3326c3b00a872:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkOGY3NTQwNzhjMzdmYzUyODUzMmJkMWIyM2FmNDFiODM5NTZhN2M3MTk3NDJhZjAzNmQxN2JhOGQwYzRlZGQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImJiNzAzODUyZmJlNzVjNjgzZjliYzM2ODcwY2Q2NjRmMmYzOGQyNWQ3ZThjNDBlNjIyYmVmMGQ3N2Y3YTY2OTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNjM2QxYWYzNDhhZTgyYjQzMjBhMmQ5NzcyZGNiYjI4OThiMzgzNjA4ZmMxOWE2OWYzNjNmZTQ5ZDlhMDA0NmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImI3OTRjZWEzMzUyZDA1MjcxMjJiYzJhNGJjMDY2NjE3MzI0MWQ0ODM5NWI5MmFhMDQ3YjlhN2JkNmViYWYyMWQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_c5b59408de364f269a3c13ef017a22d8",
+      "statement": "load_prompt は importlib.resources で teamagent.prompts/<skill>/<version>/<name>.md を読む。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/prompts/loader.py#L12-L24",
+          "version": "repo-lines-v1:sha256:7cf29b31dbbccc570d47ebf413c896497bb6a2c39481f9e95bcb4b358b43908e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5NWY5MzkzZDBjNzJkYWVjZGQ4YmU2YjZhNmNhYjI5MmQ0ZjZkOGUzM2UyMGNiNTRlM2ZiNzM1M2RhYzBkZTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0OWE1ZTkwM2RhYjg2NTJmZDg2MWJlZmVmODNmOTcxMWE0MDczNTdhMjFlMWZhYWI0ZDYwMTBjYzBhOWQ4MDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE4MDE1ZjBmZDdjMDY2N2JjOTdmYmQ2ZTFhN2JhYjA1ZjhlN2E3MzkzMjFlNzM0ZjRiZDg0MWZjN2U4MTA5MDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8d6f79c8d8bf4897a1632f70b8139dd3",
+      "statement": "configure_logging は STRUCTLOG_FORMAT=json のときだけ JSONRenderer を使い、既定は ConsoleRendererで、MCP HTTP サーバが起動時に呼ぶ。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_mcp_http_server.py#L156-L158",
+          "version": "repo-lines-v1:sha256:d524be3935c90b5df3092d4bc70a716601afe6a7b8b3f5b59d57f5788fc4ef24:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZjJlZTA2ZmQ1NDkzM2EwNWQwZjc4MDg0MWI1YjA1MjgyYzI1YTNmYzk0OGRkMjViMjY5NWNhZDEwN2ZlYzc5ZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTQ0NWM0YTAyNjMxZDdjYmY5NTkwN2FlOGMxMTY3NDViMTA3YjVlMTFlNGFmYTYzMDkyNGNjMjNlYmIzMGMxNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDhlY2Y1NDg1ZTE0ZmM1MDcxYWEzZWY4M2JjM2E1ZjUzODIxOGY3MTZjNGNhNzkzOWI0OTQ1YTBiMWEyNWIxMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNWQwOTkxYjcwNWQxNDJjYzVkM2M3MWRmMmVhMWI3NDdlNmNmMjY5MGMzZTgwZTU3M2FiY2M1ZTBlMTk0Yjk5YyJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/observability/logging_config.py#L45-L97",
+          "version": "repo-lines-v1:sha256:21319078b833091ed3811211e36dbe9c6484362d5173e8a7e53901dc6de8ff89:eyJzZWxlY3RlZExpbmVDb3VudCI6NTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxZGZiYTQyY2ZiNmUxNjEyOTUwOWQ1ODMzYjc3ZWQ3MTM1MjNlOTg4NTEyNDMxNTczMTFmOTA3ZmYzZWIxMWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdkMTc3NGNiNGM1ZmRiODNmMDFhZTJjMjJmNGFkYzIxZmYyNDhkOGNhYTgxYmUzYjlkY2RhYTVmZTEzZmQzOTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY1NTE5ZjEyYmRmMjJlZGVhYTQ0OTlkNTQ1YTM2MzEwMDE5YzkzOWMzNjI4NDFlZmVjNDlkNWU5NTZiNTQ1NGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ4Y2EyNjA1NDMzNmNlZGRiYjc1NjMzMWE1NWNmNTg4ZDM5YTlhZThiMDBmYTNlZTQ1MTcwZWIyZTllZTg2ZjYifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

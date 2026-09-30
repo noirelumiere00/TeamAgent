@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:80b2e153d293275952678ee60142bdac69176ae789fed888e1cf0961337cfa7f",
+  "claims": [
+    {
+      "id": "claim_38254cc3f8b348518c50d3731fa46211",
+      "statement": "IngestRunner.run は kinds 未指定なら slack・gdrive・gsheets・shared_drives を順に取り込み、全 kind の後に資料まるごと重複排除 → テンプレ検出 → stale 印 → 鮮度検査の順で run 末尾処理を行う（テンプレ検出は suppressed を除いて数えるため重複排除の後）。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L4684-L4696",
+          "version": "repo-lines-v1:sha256:8e533bbd0c8aec284bd65a6d47835453bdf7a6691d10f422e523df1f76d0617c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwOGNkOTc5NjliOTRmN2NhYmQ5YWI4NTJjZGVjZGM5Y2U5OWU1MmQ3MmVjMWNkMThiOGFlY2EyOWE5ZTJiZTIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk5ZTJiN2M2MzFjMjJjNDBlZWJmY2FmODNmYjE3MTFmODQ3ZjMxNGIzYjZlOTc0ZDViMTRjZWRmYjJjN2YyNjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNiYWY5MDViOWNkYWE3ZGQ2YTZkOTAxZTUxOTAzODU5MGRkN2ZkNDY3ZWVhODZjY2RjOTllMzFkMWFmMzYyMzMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzNDdkNzhhZGQ5MzBkYTczMzU1YjljYjljNzFiMWE4YmUxMjA2Yzg1ZDJmOThkMTA0YTY0NmMyNzU1NmQ4MzMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L4785-L4813",
+          "version": "repo-lines-v1:sha256:36da79eb017a53bdd64a23afc6e22ca71f1dca267df76e04811b919aa57ab0ee:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQwNDMzZmY2NmJhMmRmZmJhMGQzMGNmNmRkOTUyZTM0NWYyYzQyMzJiZTdiOWU2MWE3NzYzYzFhMDljNmI1NDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5NjVmOGVhNDFhMTdjYjg0ZGM2ZjdiNzAwYTZlMWU4NzFhMTI3ODM1OTYwNzBiMzBhYjhiYTkwMDZkM2ZhNjUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk4ZGIzMzAyZDcxZTM0ZTVlMjQ0YTIwNTg3NTIyYWNhZGIwMjMzNjY3NmNlMTcxNGY5MzA4MzQ0ODZkY2I1OGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRhZWE5NDc3YTc3OTNiODQ5YzljNDIzODdkOTUzYjg3MmQ5MzIyMmE0ZDNhN2NhMWM1ZDY0MTU0NGU2ZDdiN2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_0e5b0465c2f2437ca73236049847c9b2",
+      "statement": "_run_kind は spec ごとに例外を捕まえて sources_skipped と errors に数え、ops 通知を出し、増分同期 ON なら connector_state に失敗を刻んで次の spec へ進む。commit 時は spec ごとの outcome（success / success_with_warnings / failed）を ingest_connector_runs に記録する。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L5204-L5240",
+          "version": "repo-lines-v1:sha256:1ea108d72c0e1d48c774e4e987bb3604b2197fc37aab0c531458fb801895aa01:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzOTUyYTgwM2ZhY2VhMTMyZWIwN2QxN2VlY2Q3NjBhMTY0ZDhhNzZkMTE2ODdlZDdmZWY2M2UwMjdmNzc1MWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM4ODQwN2NkZDRkNzhlMGYzOTJhZDFmODE4ODU1YWY0MTQ1ZWFkYzFjMjE2MGMyNTk2ZWRhODM4YmZiNzAyYmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY5ODMyNGNiM2UxNDE2OGJlM2RjOTMwYjdkMWVlY2I2ZjkyM2NkZjY1NGY5OTJjMjNhYTU4ZjZkMTA5NmMyZDQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdkMDM2MGI0MzM4ZWY1NWZiNjE2Y2ZhMTQwOWI2ZjQ3MWFlMTYyNDI2Mjk1ODVmM2RlOGQzMTU4N2EyNTgyNGYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L5251-L5282",
+          "version": "repo-lines-v1:sha256:8a0cb7ac4e82cb95ad41fda513a77d61f84d92bb4ec6d23b158a0b9d6b13f57a:eyJzZWxlY3RlZExpbmVDb3VudCI6MzIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzZmU1NmUxYzk1ZTkyOGE4OTRhMGQ5OWZlMDYwNTgyNTU4MDZjNDY0MWI2MThlNzI2ODIwOTdiYmVmYTE4MjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFhZDZjOGVhYTg1M2RmYjcwNzIwNTFhNWY1OTYyOWJiNzZmMDJkMTMzMDQyZjY0MTQzNDNmYTAxOWFiOGU2ZDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjEzNTMwNThiNGYxODQ5OTdkNGMzODhiNDYxZmI2ODYxOGZmMGZkOGI3OTg2ODEzMGIzM2VmNGRiM2ZiZDRlNDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZiOTAyNzY0NWE2ODk3MmI4NDkwNDhhZDMyMWU1YTU0YjZhNmJjZWM2ZmNjM2IyNTNiNzZmZWQwM2Y1ZGNhYjEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_7c4b27e192f948f29c5eb1aaf847df2d",
+      "statement": "ingest の CLI は error があれば終了コード 1、warning だけなら 2、どちらも無ければ 0 を返し、スケジューラが warning 付き完了を clean success と誤認しないようにしている。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/ingest_sources.py#L43-L49",
+          "version": "repo-lines-v1:sha256:c6613bd4d1888b34a566c0c70bc01c3fc8f0b7ed6453ebb367bf78e42cb639bb:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODdjNWZmM2E5NTdiYzdmMjBlNGM1MTNhODBlNWM4M2UxMjlhMjgyNzQ3Nzk3NzljYzUzZGI2MjUyYmE2MDBlMyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTMxZmZjYWQyZDU1MTM4ZmMwNzNjNDgwMTI1MDQwZWZlYzRlNzZmN2I1NjJiYmRhZmMxYjVmMTdkYzVmZjc0YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiMDQyYWM4N2MxMzA5NTMwMGFjMGQzOWZhYTIwYzFmY2JhYWI2ZDE2ZjczNDY1YmY0Mzg3MmE2Yzk0MWZkMjk1MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTQ4ZDc0ODNkMDYwZjE3MjJlMjQ1MzY4ODgzMzQyNTZiNTQ5MGU4YmJlODY5ODIwNjc2Y2E5ZWFmMzUwOWNjOSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_17c3244013604c49b7e4c311816b9a6b",
+      "statement": "Fargate エントリポイントは INGEST_SOURCES_S3_URI 設定時に S3 から yaml を取得し、取得失敗や INGEST_SOURCES_SHA256 との不一致では即 exit 1 とし、イメージに焼き込んだ yaml へフォールバックしない。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_ingest_fargate.py#L72-L110",
+          "version": "repo-lines-v1:sha256:f8c946bfedf7a9863b88e75dd88a1c39f74fb89832a99fbe2df1807bafe81da7:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFkYTVjNjZlMTdiMTQ1Mzk3ODM0YjhjODU0ZGM0MTkzZTIxMjUxODBhODk5NmExNGMzMTg4MzMyNmIyZWZiY2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE4YTlhMzc1OGVkYzMxYjM5NDk5MDJlODUwOTczMWMwMTA2ZDYwZjUwM2JmYWZjMmZlMzgxOTUzMDBmNWQ0NzgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJiMWUyNDBkODI2YWFjMTI5MmFkM2Y4Mzg1OTMwNGFlYjlkYThmZTQyOTZmODBkNmUzOWQwNjJmZTZhMmExNGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFmNmY0Y2Q0NTIxMGFhMGExYjMwOTg2MTg2NGJlNzljMTZkMTM2MTUzMmI3NDhjOTcxYjkxZTQyZTRmNjVjNGQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ff3cd680a46d46e39addfc3f86c2995b",
+      "statement": "ingest dispatcher Lambda は RUNNING の ingest タスクが無ければ起動し、INGEST_MAX_RUNTIME_HOURS 以内のタスクがあれば skip、超過したタスクは StopTask してから起動し直す。DescribeTasks が一部を返さない場合は例外で起動しない（fail-close）。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/lambda/ingest_dispatch/handler.py#L135-L181",
+          "version": "repo-lines-v1:sha256:f96e93563a0b783d5adf69f86c5e5b05ba6b63ef1a28743819854c644c2e253a:eyJzZWxlY3RlZExpbmVDb3VudCI6NDcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZhOGEwNTRlMWE2MmJlNjZmNDY4ZjM2ZjQ2NTE4NzllN2Q3N2E1YjI5MDk0YTYzNjIyMzRmNjg4Y2E0ODhjMzkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM4MmM2M2Y0NjUxZWZlZDA5YTIwN2NmNjMwMTE4OThmNzEyNDZlOTYyZjgzNjZlYWNiZTYyYmNmMmE4ZjM3MjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjlmNWI0ODkzODlhZjk4NWEwMDA0NTlkYzA3MzZhZTIxMmE5YmY2NjRmMjYwMTY2MTIwNTBjMTRlYWVlOTNjMmMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/lambda/ingest_dispatch/handler.py#L98-L134",
+          "version": "repo-lines-v1:sha256:8399d0f31e8ff971263b4c43e3e858675bd0d3748f1cc021fa002ea9307baa47:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEyOTlkOTVjOGRiZGIyOWQ3MmU4Zjg3ZGZjNGQxNTM3NjExNGZiNDJiOGYzOTI1MGZjOTZhM2Q4OTQ5OTFlNmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhZTMwZWUxNjliZjI2Y2Q1NTY5OTA2MDhlNWM2ZTY2ODJhM2Y3YWFjYWMyZDMxYzU4YWQ4NjQzM2I3Y2EyOGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgzNmZiNjM5NzYyNzI4MzQwOTJkZGM3YTU1ZDU2MTdmOTU4OGZkM2IxNzQ4ZjA2NDY2MTAyNjhkMjA3ZTg2MGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEzNTNjZjIyMmZjZjMxN2RjNTRlNzRjYjhjZWE5ODZlYjgyNWQ4MmViZGM0NWQ3ZjhmN2E4NzQ5NDE4MGFkODgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_66d1d54db9304b2e8d402e676a535ee0",
+      "statement": "スケジュール実行の EventBridge ルールは既定式が平日 09:00 UTC（18:00 JST）で、ingest_rule_enabled（既定 false）により既定 DISABLED。dispatcher Lambda は予約同時実行 1 で判定を直列化する。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L381-L382",
+          "version": "repo-lines-v1:sha256:c1511ee79878197bd719cf143d1f7c7dc7d7c63e0cff3fbc3af1f8fc2033baed:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZTQ5MzI4YzU1YWM1OTlmMDIxYzcwZmNiMmYyZWNiMjM0MDBiYTllMjYwNWFlM2ZhNzQxNjhmODYzYjhkZTkyNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTUzNWFiZmMxNmMzZjQ3YmQzMTU4OTFhNGE2ZDY2MGE4Y2Q4ZTM0MTZkMTVmODFmNGFlYWFjN2QzODY3MDhhZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZDZlYzgxMjU3ODAyOTFjZmM3ZTk0NmMzZTU5M2JkMjBhZDAxZWZlODQ2NGQ3ZTk3N2M0MzVmYmFjZmNlYzYyZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZmNiMThhMDJhYjFkZThiZjMwNGFkZmQyMGU1ODk4NTMwZDI1OWZiYzEyMDk5ZmQ3NTY0MmRmZTQxZTQ1YjM2NiJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L407-L418",
+          "version": "repo-lines-v1:sha256:2aacea9767f23beda9593fecf8a25d7f26d5d8ec57cea9b88caa6cd779468bd0:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2YzkyNjNhNWQ2NDZmMGQyMjg1NDE2MDg2ZjRmYmVjYzQwMDYzOWY2NWM5NjhmYmQzMTU4ZmFjYTFiYjUyOTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMzMmE5MTRjZGIxMjNkZjI0MTlhYWI3MTRhNzc3ZTJkODUzODdmYWVmNTg1MmFmNjA3MzhjNzM4ZDZkM2M3NDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY3YjRlNjYzNTQ3MTBlYzhmYmE1OGFhZmNiYjMyMmE4MDgyNTc4OWE1OWY4MGNjMTA0MmJjOTllNjNmNThjZTciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjkyZGRmMWNlYjZjM2FmMTJhMTFiMWQ3ZDYyMTdhNzZiOGMwMjFmZWFkNjE5OWVmMmYzYWM0MmMwN2EwNGJlMzcifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/ingest_schedule.tf#L55-L59",
+          "version": "repo-lines-v1:sha256:c8ebb19987e5fe2501f6630d49b0b619898ba24596448169e0f5b2ab8aa15d37:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmMzMTRiZDA4NjBiYWYxNGJlMzVkNGZlNzRhNWM1NTgzNWQ1MmI5Yjc2ZTJkZWU0YjdhMGFhYWY0OWFmMGExNiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDEyY2EzNDVjY2Y3NWJmOWMwODA2YmNlNjk1YmU4ZGU4MDhiNzk5ODQyNTFhN2E1NGQyMDJjZjYxMDFkZDQ1MSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjkwMGRiOTgyZDI5ZmIxMDIzM2NhN2RhZTVmYTAzY2VlYTY5ZWYwNWU4NzU0M2EyN2FlMGJmOWU1ODI4ODRhOSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYzY2YzE3NDZjYWEzZGEyZTkzNmMzYjc4YTFhMjE1OTA5MGMwMTAwMDE3NGNlMDdhZjJiMWMwOTAzODFjMDNlYyJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_642ac98565fa4dc784f6220e14a11982",
+      "statement": "retry の claim は、先に attempt_count が 5 以上の pending 行を resolved にして指紋を ingest_source_health に retry_exhausted として記録し、その後期限到来行を FOR UPDATE SKIP LOCKED で取り、ランダムな lease_token と 1800 秒の lease を付けて attempt_count を増やす。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L32-L37",
+          "version": "repo-lines-v1:sha256:a3d0e814dd0782e861ce15a775333b376afba1f0337d0b707261104cf40c9c6c:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNmY2NjNkNTA3ZDVmZDZlNDIwM2U2ZmZmMThiNjk5YjViNmUyMWU1ZDk3ODI5M2NhMGJiNTc0NGEzZWYwN2M4YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDYyZWY3YWM2ZDJjYTY0MmI2NGRjNjQ2ZTJjNDJhNGM3Y2FmMzZhNzdlODVhYjU5MGFjZDA2YzI2NmUxZjU0OCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjI4ZjRlYzE3OGZiNDZjY2FhYmE2NmU2M2ZiZDNmZDkxNGNjM2I4MjUwOGFmZmUxOWNhNjQyY2ZkMDhhM2IyZCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzgzYTEyNWY5NmM1ZWFlNmUzYWM5YmEzZmQ4YTVmNTRjZmQzNTAxYTU2NjY0NGU4MWI5NWU2MmQ2NWFhYWRiMiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L776-L790",
+          "version": "repo-lines-v1:sha256:f599cc1e8b8cc8ac2d78b9fca5f4c8af6b123710630298f23b67f22f1fb33bfd:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImUxZDE0MjY4ODcwNWZmNTEyZGVkODliMWJiMDFkNTg1MmFlMjAzMWIzZTBhMTRmMGQzNmY2NGIzMDYzZWZjMDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwZGUyNTg3MTk2MTQ5MjYwNzFjOGZiMTlmZDg2NjE1MDU1NWYxYjAxMzU0ZjhjZDE2MDNhMTA5YTdkZGFlNDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijc3YTI1ZjAzYzc3MDA2NTcxZmEyMTI2MTE5NDhmYTk3MmI2YzZiYTJkNjY2NjAzZGU2MTQ2YmY2NGJlNDA1MWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc1ZmE3ZmY0ZmIzYTA2NzQzYjMzOTdjNGQ1MWU0YjAzOGFhNTU4ZjFiYjM2MDZjYjRmMTQ1YTlkYzMyYTE5M2UifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L830-L845",
+          "version": "repo-lines-v1:sha256:27994adcb819257f823fa746f90eb8bcff65e5206aa0e6e28fa6fecf51082be8:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc5MzRlYjQ4NjRmOTQxZWU1MmE4ZjY4ZmI4NDFiYWNiNWJlOGRiMmE0MDQ4ODA4YmUwODgzZGYzNjZhZDVkNGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUxMDM0ODFjNTdkMGYwZGMwZjc2Y2QyY2M4YjM2MDRjNGU4Mjk2ZGE0MTIyYWRkMTllODE3NDVkYzdlMzMxYTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImFjOTM0ZGM4YTgxNThlMTk5Mzk5YjJhZjcxMjIxNDAzYTQ3M2Q1OTYwYzhmMWNmMDhkZDVkZjcxZDUxMjY5NTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRmZDA2OTJkZTczOTUxZGM0OTk1ZmFjMjMyNDczM2Y1YjM3NzdlZDM0MTdkNmQ3MmEwZmY2NTZlM2JlODJiNzQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L846-L865",
+          "version": "repo-lines-v1:sha256:170f24fa81af9127aaeb4a75d79b6a9ecafd175cd3dd209b045e23796a242474:eyJzZWxlY3RlZExpbmVDb3VudCI6MjAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdlYjZkZjZkYzE3NDZlNDkxM2RjNGJjYmJmNDYxOGJkNGMwNGI3OGE5YmUxZGUxNGNkMDc5MWMwM2Q4N2ZkYzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2OWU1ZTJmNDEwYzg1N2M3MmI1MjcyZmU1OTU2YWRhNDc0MzkzZDI4YmY3ODhhZGQ1ZjYwMzY5MmE1MWNmYTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjZlMzY1NDc2MzgyNjE5MjViNGUxMDM0ODMzMTlmYWI3YWRmOWNlNTBmY2E3N2E1NzVmMDc0ZTc3NDM1NGI1YTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg0N2RkYTZmZmI5ZDI5MzI4NjRhZmY3ZThkNTIzNGEyMmI3N2EwZjMxMjVlYWIzMDBjMTk5ZGExNTAxZmM0MDgifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_145e97c24d994ace911541c2e3acaa34",
+      "statement": "lease の延長は owner と token が一致し期限内の pending 行だけを更新し、延長できなければ heartbeat が _RetryLeaseLostError を投げてそのファイルの処理を諦める。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L122-L158",
+          "version": "repo-lines-v1:sha256:b2dbb5cd3a07eda5e09c8fb02b48b6b0ea400b5897063a32055d7c38a6eab30f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU2YjEzY2JhNGIyMDhhMGY4ZjM2ZTEyZWNjZmY2M2NlMGU2ZDBiNjQ5N2NlMWZlOTc3YTMzNGI4NTg5ODgyZjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjcxOGVjNjlmMzQ0ZDBiZWZmODU5MjdiMGEyZjZjZjM2OTg5YjdmNDBlOTQ2YWY4MWM3YTllOGQwN2IxMGUwYTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQzNGUxMWFhOGJiNzYxNTRmYjljYTY0Y2ZmZTY0NzNlZjQ5MzY5OTk5YzI2ZmIyYzk3OTE4MmQzZTVlNDE1NDciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU1NTgwZWZlYzJmYTNkNjgwNmEzMDY5N2RiOTZmNWNkMDBiODYzOWYwMjAzNzg0ZGJjZWJlMWUyNjEwMWI0N2MifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/repository.py#L944-L958",
+          "version": "repo-lines-v1:sha256:841ad5619b51878c3a4c7402cc7aaed063e7e4527b4eddacfaed0c6408c8ddb5:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmMTFlYTExZWYwMWUyZTk2OWU1ZjRjNjI3MmYzZGI2NmRlNWY4ZTU0ZDFjYWFhNGFmZWYyZDIwYmJhMmVmMjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUwZGUyNTg3MTk2MTQ5MjYwNzFjOGZiMTlmZDg2NjE1MDU1NWYxYjAxMzU0ZjhjZDE2MDNhMTA5YTdkZGFlNDAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFlM2I3ODFkNzkzOGExMmJkZjhjOTAwZjZhMTgxZGYzNjQ1OTdhMTgwYTNlN2ZhOGRkMGQxNWI0ZmRkZDQ0OTQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ1ZmFhNmVhMjdkOTM2ZjNlYzYyY2U5NTY1MTkxYTdlM2Q5MjQyZDgxNmFkMWM1OGIyZjBiNGJmNmI5MTA4OGYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_040063ebbb304c97b5aae7d461c6e7c1",
+      "statement": "Drive フォルダの増分同期では、durable な retry 状態を作れなかった run は IngestDurabilityError で失敗させて cursor を進めず、cursor 保存自体の失敗も IngestDurabilityError にする。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L2497-L2525",
+          "version": "repo-lines-v1:sha256:9cf81c06b69bf84b2b81a6bd160666e262ca9130a671849593727cd416f87957:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY4MDhlMjdjNGY4ODhhZjY5YzhkMWNkNDQ4OTMzMmFiZWEyMWE3MGU1ZGI0ZmFkYWEyNjMyYmM1NjZjNzU1YTMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjVmODk1ZmIwYTk5OGQ2NDdjOGEzNDljZGQxZTA1MjNhYzA4YzM1MDBlYmNjMjY3ZjBhNzdmYjM3NjliN2U0ZDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjE5MTg0NDVkMzk3NmJkODVlYmNkZGEwOGE4MWFhNWIzOTA2MWU0YzM2M2I5NjU0ZTIxZWJhMTFlNzUyMGNkY2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU1ZjViMGUxMDZmZDQzZDc4OTNlMzA3YTM0ZDk4MTU0MmY5MjM3OTdmZWFiYTRlNmJmOWU3MDQ5NjYxYjkxNTQifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5215076a95224b8da0a73a93472415c7",
+      "statement": "stale 印（INGEST_MARK_STALE）は gdrive/shared_drives に error や skip がある run や walk 打ち切りの run では付けも外しもせず、新たな候補が既存 gdrive 資料の 50% を超えると INGEST_STALE_ALLOW_MASS が無い限り exit 1、30% 超で WARNING を出す。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L5066-L5094",
+          "version": "repo-lines-v1:sha256:0608f3314b9965ac009bc8f3a17864d206703266a965c7777c84834e97e68960:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU3MjY2ZTg5N2Q2ZjgyMGMwMGQ3NzA3NzFkZjRhMDc3NjBhMThhYzg1NzM4MzY5N2U1MjUxMzUxMGE3NDM5NmEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxNThkN2NhZjNjOTI5OGJmOGM2NGIyZjk4ZTc5NDczYjRmNTNjNTY0ODAxMjM3N2U2OGQ4YzZiMjZjYmI5NDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBhNDc0ZjhkMjk5NzQxN2FmMDUwODdhYzU4YjgzNjRhMThmYzEwZmI3ZjAyZmQ1NzIzZjQyOTc0YTNiMTk0OTMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/ingest/pipeline.py#L5105-L5140",
+          "version": "repo-lines-v1:sha256:61ce885a8024ca25244c24dc2a872a0e66e18297fb69686e87ba7b21fbc482e0:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc5MDMzZjMyOGEwYzdiMzNlY2JkYTU1YjcyYjk2ZjUzNTA4MjQwMjYxMTMzMDU4NDAzNzcxNDc5YjkyMmMxMTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAxM2QwM2IxNTZkMzEwNDJhNjJjMWE1YjBjMzMyYmJhYjZhYmNmZjQwNzZkYWJiMTk5MjcxZjk0MTBjM2IxYWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg0ODNkOTZiY2E3MjA0OWY3MTBmZDMwMTg5MDI4NjgwYjI3N2YzMjIyNDBhZjI0MmJiZDE2YmNhZjdkNTVmYWEifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:70ee845868c3060d0e598afb9b1fdaf6713a26331a34428b2cf784299f88e7aa",
+  "claims": [
+    {
+      "id": "claim_74cd094a61904a37bcb58b3a11f53c02",
+      "statement": "朝ダイジェストの配信対象は env MORNING_DIGEST_USERS があればそれを使い、無ければ RDS の oauth_tokens を SET app.user_role = 'admin' を明示してから user_email だけ列挙する。どちらの経路でも最後に MORNING_DIGEST_EXCLUDE の利用者を除外する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L38-L52",
+          "version": "repo-lines-v1:sha256:f8238896dbee1c580129caa086617255aaf4ae5d1b87690ac6e9380d0c201090:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4NDIxN2E2NWJmNTVmODM5ZWMzY2I0OGE2ZWMwNDY1ZjBmNDBlNjhlYjJjMGQ1ZjU4MzAyODA3MTE2N2M0ODAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg3ZTliZWNjYjk2MzRjZjc3MTljZDljOGI0MTQzZjI0ZGJkMWViODdiMTZhODgxYTJlODNhODFmNDE4ZmRhZmUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFhOGYyOGZjOGIzN2Q1NDg2NWQ5MzIxMjIxMWFmZjllOWNkYmYyNzg5YjFkYTEwODdkMjU3YTVhZDQ4ZGJiOWIifQ"
+        },
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L85-L95",
+          "version": "repo-lines-v1:sha256:7991122815830d76e9aecccdc54800ebc6a2548c25557147d9753cf82e9d5559:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3NDFlY2RlNjA0ZTM0MzU3MWEzZTc5ZTNkMTk1Yjc3MWY0MWVkOWE5Mjg1NWU3NGFmNzU2NTAxMWI4MGEyZmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjY2RlZjVkZWI2NmRkOGE2YTkxODFkNWNmNDZhZDNlOTJlMzVhOGQ1ZTFiNzU4YjRiNGNhMDA4ZGU1MWMyNjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhmNDkxNmRhM2M3N2NjYWE5NDNjMDBiOWQxOTM4YWQxMjI4ZTZmNjYzZWY4OWRlYmM0ZGEyY2Q3Njg0MWUwMTEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjYwMjQzMGQyNDEzZjNjYWNhMDViODRhMzQzM2E0NWZhYzZjZjI4NmU1ZGFkYzQxMTg5MzY5Njk1OTVhZGJkYWIifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ad0df5d246134bf7b6b390c522e1f096",
+      "statement": "実行モードは --mode= 引数、MORNING_DIGEST_MODE、MORNING_DIGEST_USER_REF の有無の順で bulk / planner / single に決まる。planner は予約を作るだけで配信せず、single は user_ref を連携済み利用者の hash と照合して解決できなければ誰にも配信しない（fail-closed）。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1679-L1693",
+          "version": "repo-lines-v1:sha256:4de9efa0ac2b3b939a3ca577171293ca6af2ec1a1687ce3e63d22cfc16460f88:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk1ZDZjMThhYWY1ZDg2YTkwOTM2MGJlNTFmMGI3ZDkyNmMxZTcyMDBhM2I2Y2NiYzU2MzliZjUxYjcxZGNmOTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM4NWQ1N2M2M2NiNzc1YjlmODJjODBjYzU4MzZkNmVjYTU1NzkwMWI5MDQ0Y2I1MTMwNGIzMmEwMjFkZmQyYjEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA1NzIyYjhjNGYyODMxYTA4YTZmZjE2OGQxNjUxMTRiNmZkYmFjZjk4NDIxNTM2NjI3NzY5M2JkY2IzYmQwMjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZhMDMxZDFiMjRjODJhYTA0MjM3MDhhYzBhYTg0MjYwNTQ2ZDQwMjU2MWViOGI4MWIwZmNkMWVkMmVmYzU4MmIifQ"
+        },
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1794-L1832",
+          "version": "repo-lines-v1:sha256:eefde1ec1f7a902e04875ec0b4cad128329379c444f6fb71d892e76fd7d78190:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZmODJjZWVjMWJmODcyNTA1NTAwM2UzZDFkMDExYTE2ZDQ2Y2Y5OWZmODE1NWQ1NGE0NzM5ZWY1NjM5ZTI2YmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZjYzFhZmY1YzlkNzc4ZjFiYTBlYjJmM2VkMGRiM2MyOGU0Mzg1ZWIxYjM1ZDJkMzViYTI4YTAyZjRmZTc2ZGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1MTBjZjM2MTM0MjMzNmMxNDI0MDYzOWY0MzFiMTc2NTEyNDRkMDJjOGQ2OWVjM2VmOTc2NjY5MDk3MGQ5NGIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ5NDdhZDc5YWQxM2I1MjY0YWZmZTUzMjA5NzdjOWU0MmE0OWEwYzRjMjFkYjNjODAzM2FiZmI4YmMxMjNmMzAifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/digest_user_ref.py#L21-L39",
+          "version": "repo-lines-v1:sha256:8f0d444fcd6129a6f5d771201a6014073389e1c82e191f7d80b8c127c20cc67c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM4MjFkYjExMWExNzY0ZmU4MjdjZjIwODRkODhhMTVjMGQyOWIwYTc1YmQ5YmVmZGFmNWZlYjUyOWZjZDU2MWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTYwMGE3M2QyZTAyZjM1MmI5MGZlZjFkOGQ2MzgxMWJhNGE4ZWUwYzFiZWFhN2FlNDY1OGYzNmFhMmUxOTgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU2ZWFjMTU1ZjZlYzQxMTNjZmYwY2ViZTFhOTU0NjQ3MTA1ZjMzYzUxMmQ4YjY4NmYzODg1YTU0Yzg5Zjg1MjkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJhNmY2NTJiNjQ3YTkzZWZkMzk4M2E4ZjljZWEwY2U1OTg1YWJmMmUyNzljMzI3NTYyY2Q0MDIzNWJlZDljYmYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_a5f714b400384bbc96fda58bb57cb4f5",
+      "statement": "EventBridge の一括ルールは既定で平日 00:30 UTC（09:30 JST）、planner ルールは日〜木 19:00 UTC（平日 04:00 JST）に起動し、planner は同じタスク定義を containerOverrides で --mode=planner にして RunTask する。planner ルールは enable_reminders と morning_digest_personalized が両方真のときだけ ENABLED で、ターゲットの再試行は 1 回。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L125-L135",
+          "version": "repo-lines-v1:sha256:c1db44ed289c86aa78e322c9a4411eccd6239b02c204fc63f20d3e0232f78e96:eyJzZWxlY3RlZExpbmVDb3VudCI6MTEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhiZWU0ZDQ1ZjEwNzQ1ZDIzNjlkNzAxOWFkNzRkY2EzMTdjNTZiZDBmYTNiYjA4Mjc5YjBjNjE2OTNlMzM4NDgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY4NTkxZGZhZTgyZjk0YTY3OTc4NTdiYzhhNWJiNDY2N2QzM2IxZTk5YmQyN2E1N2Y2NGVhMmUwYTFmM2ZhNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMxMTVjMjI5Zjk4MjhiOGRjNmViMzQyODkwNzc3MzFmNWM5NDk1YTViZjliYzllMWQ5YzA2Yjg3Mjc4M2JiMWMifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L606-L659",
+          "version": "repo-lines-v1:sha256:b6b6ec7fb13ee3e5afed121b801de10be60abb6f3c9734e8b53042001e750f5f:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1ODY1YTI3Y2RjZTg0Nzk1N2NhMGIxYmU1YjRlYjc0ZDI5MGNmZGZlODZkNDFkNzlkODFlMjVmYzg3MmI5MDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQxMmNhMzQ1Y2NmNzViZjljMDgwNmJjZTY5NWJlOGRlODA4Yjc5OTg0MjUxYTdhNTRkMjAyY2Y2MTAxZGQ0NTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjFjZmUxMjRhM2Y5YzRkMWNkZWEwZThmODhkZTIwNjU3YjY2MTk0ZWRkOTIxM2I5MDI5NWM1YmE2NjFhMzA2NTMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU4YTdmY2UzZTBkNDA0YTBmZGU5YzZiNjYzNzExMGVkNGQxOTA2ODZhYThhNmY4NjMxZWE0ZjhlZWYxMGMxMDUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8eeb1fb61bc146bb9875a661cfd01db3",
+      "statement": "個人別の送信時刻は clamp(当日最初の時刻つき予定の開始−60分を5分単位に切り下げた値, 下限06:00, 上限=既定時刻) で、終日予定は除外し、予定が無い日は既定時刻になる。planner は予定なし・既定時刻に張り付いた利用者には予約を作らず一括実行に残す。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1645-L1668",
+          "version": "repo-lines-v1:sha256:df2d88e5f547c711e693a13259cdef22bbab769e1c30078b6c28272107837077:eyJzZWxlY3RlZExpbmVDb3VudCI6MjQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1MzIzZTgxNzIxYmE1NmU4MTIwNTg4MWI3MDI3ZWUzNTMzZWUzNzQ2YmUzMmQ0NDNmYWQwZjRkM2ZhODhkZTEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjhjZTM0ZGQ3NzE0NDQ0MmY0NjJhZjgzM2ZmNGEzYzhkMjQwN2ZmOGVhYjkwOTVhNGEzMWFlMDFlODY4YWQ4MTAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYzYjEyODIyOGE2YjYxMmM5NzVhMWVmZDljMmVkZGE5YTRhOGQ3Nzk4OTQ5N2EwOTVhZmRjMTNjMjA2ODE4ZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQzYzhmYTA2MzJmYTYyZjYxZTg1NDY0NWEwNzQ2YjczYjI2MGQ1Yjg2ZjVkMGMwOGM0ODdhMTFjOWNiNDZhOTQifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/send_window.py#L1-L14",
+          "version": "repo-lines-v1:sha256:9119daab8da401895cf5d4cf741b504a577440136d10fb24c2ed635246db3eb6:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk0NjcxZjYxNmI4YWI1Y2Q1ZmJmZWUwOWZiZGQ4NDdiY2VkODY5Nzg4NmRhOTliYjBkZDQwNmM4Yzc5YTdhOWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMDNlY2RkNGE0ZDEwZjE5YzczZmQ0MmZkMTI0MzdmZDMzNTRhODI2ODE2MDVkYTUyNTVhOTdhMzkwNjhkYmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU1YjZlODcwNmI0MzA0N2YyYTZkYjY3ZjEzMjYzODU5NTYwNGU2N2YzNjk2Njg3NmNlMDE1OGYwMDUzZTZiZDEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/send_window.py#L84-L112",
+          "version": "repo-lines-v1:sha256:7de6efbe9124981497bacc9397173064ca38e7149572336ec91d972d0fb6e902:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNkZWQ4ZTE5OTJjMTEzZDk5YmU3ZjlkM2FmODA3ZWNkMGU0ZjczOTcxM2VjYjVlYWZmZDdlNmJlNDMzOWU4ODgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjczM2Y0NWEzZTMxYWRhMmVjNTE3MWVmNTk2M2Q0Zjk2MGUzZDJjNmJiN2JmYWY3OTdjYTM3YzkzMDkwOTZlOGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjgyODgyNDI4ODJlYWY3ZTBmMTRjN2YxYWZiMDA3MzViMzc0YWIxMmI3ODE5NWIyMjVjMzkyMDM5NzUwMTQ2OWEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjNiMjM2N2JkMGRmMGE2MmRmYzNkMTIxOTkxYjI5OGZlNGU5YzNkMzI2NzUyZTY5ODU1OTQzYjZjZjRiMjQ4M2QifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_e30c016fd93e467494e53603723b5ae9",
+      "statement": "個人別配信の予約は名前 digest-<user_ref>-<YYYYMMDD> の EventBridge Scheduler ワンタイム予約で、ペイロードは v・kind=digest・user_ref・date だけ（メールアドレスや channel を載せない）。同名予約の ConflictException は冪等な成功として扱う。発火後は reminder_notify Lambda がペイロードの形式を検査し、MORNING_DIGEST_MODE=single / MORNING_DIGEST_USER_REF / MORNING_DIGEST_DATE を上書きして 1 人分のタスクを RunTask し、failures[] があれば例外にして SQS に再試行させる。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/lambda/reminder_notify/handler.py#L106-L141",
+          "version": "repo-lines-v1:sha256:1dfe7d33272bc285170bbf6ea6faafe4b1ba6c9ebf6dcf92dd89b424a37e75d7:eyJzZWxlY3RlZExpbmVDb3VudCI6MzYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBiMWM1OGI2YmZiY2Q4NzAxZWY2ZmU0NGQzNGExNGRlZGFjYWMwZDIwYmRiY2M4ZGU3OTRkZjg1MGVkOWQ0YjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjlmNjBlZDllNDI0ZDQ1MzM5ZGNiYjMzYzAzNmMyMjlkNmZhMDM2NWY1N2MwMzdmYjdiNTBhYjI4ZTBlMWI0NTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVkMGU3N2RhNWYyMWExZjkwYjZhYTZlYzNhOWU3ZjllMzkzMDhiNjgwMmE5ZDg5YmRlMTY0ZmMxOWFkYjk5NzIifQ"
+        },
+        {
+          "resource": "repo://infra/terraform/lambda/reminder_notify/handler.py#L84-L93",
+          "version": "repo-lines-v1:sha256:a5d8a7d0f3a2870fda06db2186db0264d33c5b249ccc76b0d7c3f38bd047d460:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2YTcxNTI1NzJlZTg0ZjEwOTA2Yzc0YjlmMmE5MjQzNGRkYWIwZTNjNDI4MTNiMDRlNTk3ZWZjZWM5NTFiMjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI5N2M3MTI0N2FmM2NkMWVkZjU1NWE3ZDEwNzU5MzE1N2Y2ZGMyYTIyYWYwZGU4MmU3Nzc0YWJmMTBmOGFkZTEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE0NGE0YWFiZmUzYTRmZjM3OTIzZTU3NDg0OWU1ZTYyOWU0ZTk1MzAyNTc3YjdiYTk5ZjllNDczMDIwZTg0MjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlYjM1OWIzNTdhMzEyOGNmODAzNjRkZjEyNDU0YjQ1NTNlYWZlNTQ5MWFjZTk4MDUwZGU1MzA1Zjk4MDM4NWYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/scheduler_client.py#L158-L205",
+          "version": "repo-lines-v1:sha256:0db8d9f5fc21b39fcdff3153a66c8baee76af10e7aab13eb131cf5718f02fa8e:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE5OTA1ZjZlYWJkZWExNjlhNzQ3YTUyMWNkZjZmNTk5Y2I3NTUxNDQxMDI3ODkyOTJmNjgwODE2ZDVmNmM4MDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmMTFlYTExZWYwMWUyZTk2OWU1ZjRjNjI3MmYzZGI2NmRlNWY4ZTU0ZDFjYWFhNGFmZWYyZDIwYmJhMmVmMjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU5OGRlN2JlNTMzY2QwYzI0NTFjNWQzYjIxNWJmMzc3MWYwNThiYWNlNWMwNDc5ZGVmZDBhOTQ3NTI3YjQ4MjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjVhMTE3N2QwYWJiN2ZhNzYwY2U4YjU4YjgzNzYyMjZkMjFiNzczYzBiOGYxMWYyZDA5YTY2ZTEzNmU3YjNkMzMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_34446787a21c446da30c20e1bd230491",
+      "statement": "二重配信は digest_delivery の主キー (user_email, digest_date) への INSERT ... ON CONFLICT DO NOTHING で止め、rowcount が 1 のときだけ配信する。claim の例外は False（送らない＝fail-closed）で、skill 失敗・配信例外・Slack 不受理のときは release で印を戻す。同じトランザクションで期限切れ（14 日）の行を掃除する。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1736-L1757",
+          "version": "repo-lines-v1:sha256:4bc12da628d2a91f65e34b400817043b8e17c56ed02aadbf80f39c291a6dd3ff:eyJzZWxlY3RlZExpbmVDb3VudCI6MjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYwOGRkYmU3Yjc0YjFmYzZkY2Q5MDE5OGRkYzJhYjYzODJmMzIyMTY2Nzk0ZTIzMzQ3N2RmNWUyZGYxYWU3YWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImIxOTUxYjBkZTFiMGVjM2MwZjQ5ZDU5ODY2MzQ4MjVlMzJlNzQyYTFkZjNjYjNmZTUwMmNjZTk4OTc3NDJlZTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU4YzEyOTU5ZGI1YmIwMjMzYTBkZWEwNTkxNGJkYmUyODRkY2FkZDE0NDU4OTA4ZjAyNDg4OTUwMmY5ZTU1NzgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEwN2EyZDllOTIxY2I2OWYxYjRkNjYxYTY5MWNkOTUyYmM2ZDM2YjcxZTJlZjczMTgxMWQ1NDU1NTZhN2NmZWQifQ"
+        },
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1773-L1791",
+          "version": "repo-lines-v1:sha256:bd348c89b6c46623748b13e4fe3567b3627b51c1b5d6a6fd97594dce7ee27814:eyJzZWxlY3RlZExpbmVDb3VudCI6MTksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZlYmI0Mjc3YWE2MWFjMDQwMmZlNjNjYTBjY2E2YTIwYTZiNmMzZTQwZWYwN2FlNTUyYzVjMjExZTJjY2M4MmQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjViMTBhYjU4ZjkyMWYwZTM2NmRlMWY4MTIyYjQzZjcxMTY0YWQzN2NhMDljZjgxYTJhODU5MzU2ODVmNzE1ODMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQ1NmYwMmE2ODk1NDI0MDYwMzE1ZjFjMWRlYjkwMmJjZTcxNzRlODEwODQ0ZmRiNzIxODQ0NWEyMDYyYjFjYzEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjFmMTg5OGE2MGY0MWMyYjY2ODM5YThiNzRjYWVlM2I3YjhjN2U4OTkzMjBlYTEyNDU5YmMwMWM0OWMwZTFlMzIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/digest_delivery_store.py#L25-L41",
+          "version": "repo-lines-v1:sha256:d6ce19e9eb6b67c507935adebd19bb406d68356215fca912474ceb28a66cc4c6:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBlNTA4YTFjZmJhMDJmNmFiYjZmMjUxMTRmZDkxMmUyOGNmYTk4ZWNhM2YzODJlODRkMDQyZDJhN2MwMjNiOGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEzMDNlY2RkNGE0ZDEwZjE5YzczZmQ0MmZkMTI0MzdmZDMzNTRhODI2ODE2MDVkYTUyNTVhOTdhMzkwNjhkYmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmNjQ4NTczZWIyMjQyMDcxNmFhYTU0OTEwNWYwNmZkMjAxNDE5YWQ0ZDUzYzJhOTQyMWU4ZGU2NzQ1MDBlYWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY5NGU3MDJmMWQwOGQ1NDM2MGM4ZGYxMzViZGMyMDI3N2VmNTZiYjQ1MWIzNmI0Mzg1YjQ0NGUzNzIyMGYyMTIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/digest_delivery_store.py#L61-L106",
+          "version": "repo-lines-v1:sha256:1c6680274136ab377ea788c99b3b7d74f2a9e0f21525f1bad4be5f0dce3128a7:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM3NWY4MzliOTYxZTc1MmJjNDZkMzRlZWVkZDBkY2NkYzU5ZWMyMTdiNDA1ZjNiMDRiY2FhNmYwZjliOGZiZTQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmMTFlYTExZWYwMWUyZTk2OWU1ZjRjNjI3MmYzZGI2NmRlNWY4ZTU0ZDFjYWFhNGFmZWYyZDIwYmJhMmVmMjYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI4MGYzOTdlNDhlZTA4NjhmYjY5OTkwMDI1NmI0OTgzYzQzMTAzNDZlMmZmZjAzYjMyZmZiOTI4OTIxN2QxMGEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU0YWQ0YjBiY2EzZDI0NDMwODQzNGY0ZDJmMDg3Yjc5MDlhMWVkNTgxYjVmMzk3ZDBmMjA2OGU4OThmNTI1NjcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_5b4b7fdb03f540fbb50b4766b6224e9f",
+      "statement": "planner はカレンダー未連携の利用者へ、月曜かつ MORNING_DIGEST_BRIEF が有効なときだけ 1 行の DM を送る。送信の前に digest_notice の (user_email, notice_kind, notice_date) を claim し、取れなければ送らないため、planner が再実行されても 2 通目は出ない。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/run_morning_digest_fargate.py#L1540-L1593",
+          "version": "repo-lines-v1:sha256:e92671ad8ca479c79c79f779f9775fd1e62992d66e3d6e2c80ab6954dce975fc:eyJzZWxlY3RlZExpbmVDb3VudCI6NTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQzMzQ5MDBhNWY2OGI2NzAxY2M1NGExMjI2MTcwMDc5NGNjNmVjYTdmOWMxMjVhZDEzOTExZDIwYmJiZjY0NWYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3NzBkYzQwYmRhNjk4MWQwMmExYjhjMmRmMmVmZDBmY2ViOWI3NWE5NWNkMTliZTVjODNiOTIwMTJhNDU2MGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE5OGIwNjNkOWI0N2U2NTM3OTYyNTU3MmNjZTE5NzY2OWQ1NzY3ZTEyYzE4YmUwNzU2NTJiOGNkOTgxY2U4ZDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEzMmUwZmMzMzdiOTAzZjcwMTI1MzkwZTMyZDMyZDQ0ZGViMTgxNjU4N2JiM2RhNmY4ZDQ0MjI5OGY5ZDk0MzIifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/adapters/digest_notice_store.py#L33-L41",
+          "version": "repo-lines-v1:sha256:d7b6116d88a3d26bfaf693f9872e674f0f893876539c8c287bfd459086b324cd:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTY1NWYyZDg4ZWI3OWU4M2M2YjFhYzI0ZGUyNzViMGU3Mjg1MTNlYTc3YzRjYjhkMDc5ZDBlMjQzYWY0MGQzMSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTMwM2VjZGQ0YTRkMTBmMTljNzNmZDQyZmQxMjQzN2ZkMzM1NGE4MjY4MTYwNWRhNTI1NWE5N2EzOTA2OGRiYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiM2U1MjMxMjc1MWU5NzUyYjg0N2JkM2I3YjBmNzdmMzRkZWNiNTk4MzlmYTM2YjQ0ZTkwMDk4YWNiZDVjZGYwNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDdlZjJiMDMwOGEzMzFhMzAzODQyNTQ1MzRlZWY3NjgwZjRiYzZjN2EwY2RkYTA3OGI3ZmQ3NDFhYjlmOGQwMiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_96543a0161e24cdf851988b5a8a603e7",
+      "statement": "朝の作り置き下書きは、重要度が MORNING_DIGEST_DRAFT_IMPORTANCE（既定 high）に入り、To ヘッダに本人が直接含まれるスレッドだけが対象で、日程打診は除外する。既存下書きのあるスレッドには作らず、上限は作成数で数える。CC のみ・メーリングリスト宛は本人宛と判定しない。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/skill.py#L1006-L1060",
+          "version": "repo-lines-v1:sha256:e07c5a3155094a59c8f7075390554186738dacc3ed03ab6af6c25245acc62009:eyJzZWxlY3RlZExpbmVDb3VudCI6NTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRhZGJkMjY2N2IwNjcyZjM3MDU2MGMyNmEwYWYxNDJhMTdkMTBjMmEyMTIyYWFmMDc5MmY3ZGY2MTA1ZTU2NDUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlhNTA2ZTMyNjEwMTdlYmQwZWY5OGNkZmM1YTJiMGU3MmUzOWU4OTIzNGUzM2VmNGNkNmM0NWJkNzExNGY4NGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImY1ZjI0MWQzZjIzZGY3MjdlZDQzNmVjNThkYjk3MjdmOTFhNDM3MmQzMjk0NjQ3OWExNmZiMjI4NGU5N2I1ODEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFlMDhhNzg0NzZiY2M5NzM2ZWQ3ZjY1OWVmODcwOTBhZWNlY2I1YzRiZWI4MGE1NTFmMWJiZmFlNjRhYmY5NGMifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/skill.py#L1290-L1305",
+          "version": "repo-lines-v1:sha256:aab809a9f0f5347610e21fbf164eca96bdaa0b44a215f44252737ef82281ce3c:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI0NTg4ODY5ODhlZDBlYzhmNDE0N2UxNTgxYjcxODBkYjY2ZmY4ZWNlNmRiNDYzMTJkZWMyOTk3NzVjNDFiZmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU1YmM0NzExZWNjYTA0NTBhZmM4MzI3NzlhODg2NzZhN2M2OTYwZmEzZGE1YWY0MTBlZTAyZDFlMDE1MTU5MWEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQ3MDE0OWUwNjlhZDY3ZWNjZjQ3MzY0NmZmMWM3NTAwNTBkMzI5ZDExMDAxOGRjNTc2Njg3OGVhZmExZDYwN2QiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmOWZiNWQ4ZmQ5NDVkZTczNmIzMmU5M2ZhOTJkOTMzNDExOGNjZTVmMWQ0ZDc2MzI4MzgxM2UyZTJjN2MwNGMifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_9391ede400784c32b5dabc9392958643",
+      "statement": "メールの重要度分類は Bedrock への固定 JSON 配列のバッチ呼び出しで、結果は LLM に複写させた id で結合する（位置で結合しない）。バッチ呼び出しの失敗は全件 medium に落とし、1 件も id が一致しないバッチは error ログにしてアラームに載せる。",
+      "evidence": [
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/skill.py#L716-L732",
+          "version": "repo-lines-v1:sha256:50ca854510edf871faf56f7b61575e0c63abb0eef2ef1fb954cf2618cbf9eca9:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk4YzQ1NzlhYjkwNDZjZGQ3M2EzZDdiMDEzYzk3YzhiOTUxMzFlNzAyMDU4NTMwNTAyMmM0OWQ4NjZmY2VkODEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImFjZmEzNDgwMzI1MjczNzljMzc5Mzc0ZWM5NzAwYTI2OTc4OGI4NTllMTM0ZTFkNmVmZGY4NmRhMDM2ZGY1NjIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjM0MDk0YzEzYzFiNDRjNGQ5ZjdmODg1MTY0YWVjYTI2ZmRlODE0YjJiOGQ1NWQyZjgxMzQzZDRhYWYyZjBlN2UiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEzOGU0YjJmOGNmMWNjMjljYTAzMDU2YTE3ZDU1NzQyYzIyODhiYjM4ZjdjNDIwMWQ2MTJhMjc1OGNlMDk1NDEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/skill.py#L741-L780",
+          "version": "repo-lines-v1:sha256:c0fe3d46aae51f4d4747bec38d3d30518b80b1ed464680310b7a4b1bde6b7289:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2NWIyMTNiZTQyODA0MzZiMjFjNDZhYWNlZWEwZjY0MTA3Nzg2MzRkOTMxMzEyN2QwOTg4ZTRiY2RkMzk5MWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijk3YjUzNmM4NjQ5ZWQxNDYwZDU3MjE3ZTVjYzBiMmVkNjEyNDdmMmUwMDE0MjI2NGZhN2EwMjFiY2Q4MDU5OGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImM0NGMyYmE2YzE0YzA4OTEzZTYyM2I2NmI3Zjk1NTc4MDMyM2NmMzgzZDRlYzJlNzAxNDFmNGUzNmY2YWE0YWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVlZWYzZTEzNTdlN2YwNGUwMTc0ZDY1MzMzMWU2NjNmMWJjMjJmZjljMDJmNDBkMTcyZThlZjY5MTY3YmI2YzAifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_42c8126d80c14de9b899ea5316adbc3a",
+      "statement": "同じ morning_digest skill でも、定期タスクのタスク定義は DRAFT_ON_DEMAND_ONLY=false・MORNING_DIGEST_MAX_DRAFTS=5 で朝に下書きを作り置きし、MCP ランタイムは USE_MORNING_DIGEST_TOOL=true と DRAFT_ON_DEMAND_ONLY=true で下書きを作らず既存下書きの照合だけを行う。",
+      "evidence": [
+        {
+          "resource": "repo://infra/terraform/fargate.tf#L679-L684",
+          "version": "repo-lines-v1:sha256:8ff4d300be495286e6f11ea77465d38db6fdafd345e1bc1284d7a9c874323775:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDA2Nzg1Njg3ZmQ5YThhMjk1NTc0YzljNDU2Zjc1NGQ0YTRlZWNmNTI0ODlhYWUzNDQ1ZWM1NzY5NjBhYjM0NyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiY2Q1YzkyNmNiZjM4NWU2ZmQwNTBmNmU3OWE1Y2Q4YjdhMzkyODA5ZGE3MjQ1MTE0OGY2NmJiN2IyYmRjYmMwMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYmE4OGE0ZGZlZWM5YmIxNzgxMGQyMGExYTllMDcxNDc4YTJkNmQzMWM1YWJkYmEwZDBhYzZjMTJiMDQ1N2RlZSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNjY4OWE2ZGJkNWVkYWNjM2RhYTk1MzA0NDI3MzM2N2QwZTk5OWFjOWQzZjE2Y2ZhMzE4NjAxNTI0NjU0MzI5MSJ9"
+        },
+        {
+          "resource": "repo://infra/terraform/morning_digest_schedule.tf#L410-L414",
+          "version": "repo-lines-v1:sha256:71a22d4cfdb058a31495e8f9270d35a7ddc96776213548ca8175a53153cb587c:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOGE1MDJiZjc5YmIyNDg1OTZkODJiMDM4Mjc5OTg5MmE5ZWIyOGNlZjBjN2NmMGFhOGNmYjllOTg0OGYxOGMwNSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYWExN2U0MWVlNTAzNGRkMmUyMzhkZmE4Njg4MThkMTI0YjdjMTI5ZDIxMzg5ZDA0ZmRkOGQ0YzkxZmQzMjg3NCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWMyMGM5MTZkYjcyY2YzMmVmOGU2ZWRkN2ExMGM2ODNjMzEzMWEzODFlMTE4ZTdkMWQ0ODNmMmRlNTE1Njc2YyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZjFlZjIzMGNhOTQxZjBkN2MzNDJkNGJiZGFmNDMxMTQzYjRhODQ3ODhlMjI4YjEzNDFkYzliNjQ4OTg2OWUxZiJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/skills/morning_digest/skill.py#L410-L421",
+          "version": "repo-lines-v1:sha256:36d7477605087e55a674392aa9bcd8229c3f5d57760c2d68542ca08218beab65:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA1M2FjYTA3NmQ2NjEwNGQwODk0MThhZTVkMTk2YzE0OTU5NmFlY2Q4MmEzNDJjZDczOGU5NWEzOGMyZGRkMWMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg3ZWFlNTVhNGI5OTE1M2E5NDRkYTUxM2M5MDkzNzVjZTdjYmZlZWFmMDYzOWE3YzlhYTcyMWMyN2UxNTI1ZjAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVlNTZkNDM0ZWVhZDUzYWI1NGMzZGQwZjljOTFiYWNjYTY4NTg0OGFkMDJmMzkwM2Y5NjA5YTZhNjQ3ZWNhNmIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE4MDg2NmVlMTkyOThhYzJmYWI1M2Y3MjlkNzUxZGY4N2U3MGI0OTJjZTA4NjJjNTQ2MjhkYjNlYzNkODAwMzcifQ"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}

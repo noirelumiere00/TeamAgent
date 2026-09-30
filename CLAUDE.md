@@ -1,7 +1,8 @@
 # TeamAgent / Aico — Claude Code 運用マニュアル
 
 このファイルは Claude Code 起動時に自動で読み込まれます。
-**現状アーキ・変えないルール・運用地雷・多人数原則・CIゲート・runbookリンク**を集約した運用マニュアルです。
+**変えないルール・運用地雷・多人数原則・CIゲート・ツール追加の手順**を集約した運用マニュアルです。
+**コードの仕組み（構成・各機能・データ・運用・テスト）の説明は [`openwiki/`](openwiki/quickstart.md) にあり、コードの行に紐づけて更新されます。** 仕組みを知りたいときは wiki、守るべき規則はこのファイル、と使い分けてください。
 
 > 📦 2026-05 の構築日記（Day 0〜4 の時系列・Sprint 1 タスク等）は
 > [`docs/handoff/teamagent_handoff_day0-4_2026-05.md`](docs/handoff/teamagent_handoff_day0-4_2026-05.md) に退避済（履歴は失っていません）。
@@ -11,34 +12,19 @@
 
 ---
 
-## 0. プロジェクト概要
+## 0. 概要（構成の説明は wiki）
 
-- **TeamAgent v3.1** — 社内営業 **16 名**向け Slack ベース AI Agent プラットフォーム。本番 Bot 名は **Aico**（旧称 NewsTV AI / AiLa）。
-- **多人数ツール**（→ §5 の原則を厳守。特定個人の前提・ハードコード禁止）。
-- スケジュール：14 Sprint × 2 週（2026/5〜12）。**Sprint 14（2026-12-28）本番運用ターゲット**。Go/No-Go ゲート ①(Sprint 2末) / ②(Sprint 10末)。
-- コスト枠：Dev ¥80K 一時 / Ops ¥100K〜¥1M/月（規模次第）。
+- 社内営業 **16 名**向け Slack ベース AI Agent。本番 Bot 名は **Aico**（旧称 NewsTV AI / AiLa）。**多人数ツール**なので §5 を厳守（特定個人の前提・ハードコード禁止）。
 - AWS アカウント `718959508629` / リージョン `ap-northeast-1`（東京）。
+- 構成（Slack → OpenClaw → MCP gateway → Skill → データ・Bedrock/Gemini）と各層の責任は [`openwiki/architecture/overview.md`](openwiki/architecture/overview.md)、やりたい作業ごとの入口は [`openwiki/quickstart.md`](openwiki/quickstart.md)。
 
 ---
 
-## 1. 現状アーキ（実態 — ここが最重要・旧 EC2 中心の記述は廃止）
+## 1. 作業の前に（構成が変わっても残る規則）
 
-```
-Slack ─▶ OpenClaw (TypeScript/Node, ECS Fargate)         ← Slack 受け口 + MCP 外殻 + @Aico
-            └─▶ MCP gateway (Python, ECS Fargate)        ← Skill 実体・Bedrock/pgvector
-EventBridge(cron) ─▶ ECS Fargate scheduled tasks ×4:
-            morning_digest / ingest / connect-web / canary
-EC2 踏み台 (SSM のみ・22閉鎖)                              ← DB 接続/運用専用。アプリは載らない
-RDS PostgreSQL 16 + pgvector 0.8.2 (東京)                 ← データ層 (RLS あり)
-AWS Bedrock (東京)                                        ← Claude Sonnet/Haiku
-```
-
-- **リポジトリは `~/Documents/teamagent-orchestrator-poc`**。
-  - ⚠️ `~/Documents/TeamAgent` は**別の旧リポ**。worktree が複数あり「気づいたら別ブランチ/別ディレクトリ」になる事故が頻発 → 作業前に必ず `git -C <repo> rev-parse --show-toplevel && git branch --show-current` で現在地確認。
-- **オーケストレータ/実行基盤は確定済**：OpenClaw を Slack 受け口＋MCP 外殻として本番採用（2026-06-12 go-live）、skill オーケストレーションは **anthropic Python client（`AsyncAnthropicBedrock`）による自前 bounded tool loop**（`orchestrator/sdk_runner.py`。Claude Agent SDK は 2026-07-17 の `6589e79` で置換済み・core イメージでは禁止依存）。OpenClaw は TypeScript/Node、Skill 実体は Python（MCP gateway）。
-- **Bedrock モデル ID は東京の推論プロファイル `jp.anthropic.*`**。env `BEDROCK_MODEL_ID`（既定 `jp.anthropic.claude-sonnet-4-6`）。`adapters/bedrock_client.py` の PRICE_TABLE は `jp.` / `us.` 両対応（region-aware）。
-  - ⚠️ tf の既定が `variables.tf`(sonnet, サフィックス無し) と `variables_fargate.tf`(haiku, `-20251001-v1:0` 付き) で**書式不一致**。新規にモデルを指す時は `aws bedrock list-inference-profiles --region ap-northeast-1` で実在 ID を確認してから設定。
-- 3層分離 `src/teamagent/{adapters,skills,runtime}` は §3 のルールに従う（CI で強制）。
+- **作業は `origin/dev` から切った worktree（`~/dev/worktrees/` 配下）で行う**。`~/dev/teamagent` と `~/Documents/teamagent-orchestrator-poc` は同じ remote の既存クローンで、どちらも checkout が古い。「気づいたら別ブランチ/別ディレクトリ」事故が頻発するので、作業前に必ず `git -C <repo> rev-parse --show-toplevel && git branch --show-current` で現在地を確認。
+- **Bedrock のモデル ID は東京の推論プロファイル `jp.anthropic.*`**。`BEDROCK_MODEL_ID` 未設定時のコード既定は **Haiku 4.5**（`adapters/bedrock_client.py`。暗黙の Sonnet 課金を防ぐため）。高品質が要る呼び出しは env で明示的に指定する。新規にモデルを指すときは `aws bedrock list-inference-profiles --region ap-northeast-1` で実在 ID を確認してから設定。
+- 3層分離 `src/teamagent/{adapters,skills,runtime}` は §3 のルールに従う。
 
 ---
 
@@ -47,7 +33,9 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 1. **AWS Bedrock 経由で Claude を呼ぶ**（Anthropic API 直叩き禁止）。理由：2026/4 のサブスク制限事件以降、政策変動を Bedrock で遮断。実装は region-aware（§1 の `jp./us.`）。
 2. **pgvector 0.8.0 以上**を必ず使う（古いとフィルタで結果ゼロのバグ）。本番は 0.8.2。
 3. **temperature=0.1 + 引用必須化**（ハルシネーション抑制の鍵）。
+   - ⚠️ 現状（2026-09-30 確認）: オーケストレータ `orchestrator/sdk_runner.py` は temperature を指定していない。新規・改修時はこの方針に合わせる。
 4. **prompt caching を必ず使う**（system prompt + 頻出 context で大幅コスト削減）。ただし**低トラフィックでは cache がヒットせず `cache_read=0` になる**ことがある（観測時の留意）。
+   - ⚠️ 現状（2026-09-30 確認）: `cache_system=True` を使うのは ingest の分類・文脈付与・entity 抽出と chitchat などに限られ、`orchestrator/sdk_runner.py` は caching を使っていない。
 5. **データ層は pgvector / RLS**（§5）。検索は SearchSkill を再利用（embed/SQL を新規発明しない）。
 
 ---
@@ -58,6 +46,7 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 
 ### Do
 1. **3層分離**：`skills/`（ビジネスロジック）/ `adapters/`（Bedrock・pgvector・Slack・Google クライアント）/ `runtime/`（ECS・local エントリポイント）。依存方向は **runtime → skills → adapters の一方向**（adapters から runtime/skills を import 禁止＝`pyproject.toml [tool.importlinter]` で CI fail）。
+   - ⚠️ CI が強制しているのは 2 本だけ（adapters → 上位層の禁止、skills → runtime の禁止）。skills → orchestrator は禁止されておらず、実際に `skills/knowledge_deliver` が `orchestrator.factory` を import している。新しい依存は一方向の原則に合わせる。
 2. **Pydantic v2 で I/O 固定**：Skill の input/output は必ず `pydantic.BaseModel`。dict をそのまま返さない。
 3. **型ヒント + `mypy --strict`**：CI で型エラーは fail。
 4. **構造化ログ（JSON）+ request_id 伝播**：`{"request_id","skill","event","token_usage","latency_ms","cost_usd"}` を全層で同じ request_id で出す（CloudWatch Insights が JSON 前提＝§7）。
@@ -126,6 +115,7 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 
 | 目的 | ドキュメント |
 |---|---|
+| コードの仕組み全般（構成・機能・データ・運用・テスト。コードの行に紐づけて更新） | [`openwiki/quickstart.md`](openwiki/quickstart.md) |
 | 一括デプロイ（dev→live, MCP 再ビルド, JSON ログ） | `docs/v3.2/bundled_deploy_2026-06-16.md` |
 | （退役決定済み・実行しない）旧 EC2 worker へ Bot を移す手順。EC2 worker は 2026-08-03 から停止中で、2026-09-28 に退役を決めた。worker.tf の EC2・IAM・SG は terraform に残り、destroy は保留中。Slack 面は OpenClaw | `docs/v3.2/ec2_cutover_runbook.md` |
 | 観測/セキュリティ基盤 apply（SNS/CloudWatch/KMS/CloudTrail/Sentry） | `docs/v3.2/ops/observability_and_security.md` |
@@ -143,19 +133,23 @@ AWS Bedrock (東京)                                        ← Claude Sonnet/Ha
 ## 8. ローカル開発
 
 ```bash
-# リポジトリ（現行）
-cd ~/Documents/teamagent-orchestrator-poc
+# 作業場所は origin/dev から切った worktree（§1）
+cd ~/dev/worktrees/<作業名>
 
 # ローカル pgvector + adminer + minio
 cd infra/docker && docker compose up -d && docker ps   # 3 コンテナ
 
-# Python（uv 管理）
-cd ~/Documents/teamagent-orchestrator-poc
+# 依存は CI と同じ extras で入れる（dev だけだと mcp_gateway を読むテストが収集で落ちる）
+uv sync --extra dev --extra mcp          # media 系を触るなら --extra media も
+npm ci --prefix tools/tiktok_scraper     # media worker の契約テストが node で実行するため
+
 # テスト/型/整形（push 前に全部緑にする）
 pytest -q
 mypy --strict src
 ruff check . && ruff format --check src/ tests/ scripts/
 ```
+
+- CI のジョブ構成と、CI で skip されるテスト（`TEAMAGENT_DB_DSN` が要る実 DB 検証など）は [`openwiki/testing/running-tests.md`](openwiki/testing/running-tests.md)。
 
 - ローカル DB：`localhost:5432`（teamagent/teamagent）/ Adminer `http://localhost:8080` / MinIO `http://localhost:9001`。
 - **本番 RDS 接続は SSM port-forward + `.env.local` 経由**（踏み台 EC2 → `localhost:15432`）。手順とトンネル詳細は `docs/v3.2/ops/local_dev_with_tunnel.md`。**RLS を効かせるには `app_role="teamagent_app"`**（§5-C2）。踏み台直 `psql` は hang するので psycopg / port-forward を使う。
@@ -166,13 +160,14 @@ ruff check . && ruff format --check src/ tests/ scripts/
 
 | やりたいこと | 見る場所 |
 |---|---|
-| いま何が本番で動いてるか | §1 アーキ + `infra/deploy_log.md` |
+| コードの仕組みを知る・どこを触るか探す | [`openwiki/quickstart.md`](openwiki/quickstart.md) |
+| いま何が本番で動いてるか | [`openwiki/architecture/overview.md`](openwiki/architecture/overview.md) + `infra/deploy_log.md` + 本番 ECS task の env（§10 E4） |
 | デプロイの地雷を踏みたくない | §4 |
 | 多人数で安全に作る | §5 |
 | CI が赤い | §6 |
 | 構築当時の経緯を追う | `docs/handoff/teamagent_handoff_day0-4_2026-05.md` |
 | 検索 Skill を実装 | `docs/v3.1/teamagent_search_skill_design_v1.md` |
-| AWS リソース ID / モデル ID | §0 + `aws bedrock list-inference-profiles` |
+| AWS リソース ID / モデル ID | §0・§1 + `aws bedrock list-inference-profiles` |
 | Aico にツール/機能を足したい | §10（4段ゲート＋description＋チェックリスト） |
 
 ---
@@ -203,4 +198,13 @@ ruff check . && ruff format --check src/ tests/ scripts/
 
 ---
 
-最終更新：2026-06-25（5月の日記を docs/handoff へ退避し全面再構成。§10「ツール追加の4段ゲート・description 棲み分け・ブランチ衛生」を追記）
+最終更新：2026-09-30（構成の説明を openwiki/ へ移し、§0・§1 を規則だけに縮小。§2・§3 に現状のコードとの差を注記。§8 を CI と同じ依存に更新）
+前回：2026-06-25（5月の日記を docs/handoff へ退避し全面再構成。§10「ツール追加の4段ゲート・description 棲み分け・ブランチ衛生」を追記）
+
+<!-- OPENWIKI:START -->
+
+## OpenWiki
+
+@AGENTS.md
+
+<!-- OPENWIKI:END -->
