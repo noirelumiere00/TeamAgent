@@ -18,6 +18,15 @@
       // 多層防御は tools.profile:minimal / native deny / exec deny / fs workspaceOnly / browser off /
       // toolFilter / readonly rootfs / IAM Deny / SG で維持（sandbox は元々「万一の追加層」）。
       sandbox: { mode: "off" },
+      // §DM-overflow（2026-09-30）: ツール結果 1 件の上限（字＝UTF-16 ユニット）。既定は 200k 窓で 64,000 字。
+      //   MCP は 10,000 字超の dict 応答を S3 へ退避するので、通常の結果には効かない。
+      //   退避されない巨大なエラー文（09-29 の proposal_builder_submit の ValidationError・
+      //   server.py の _err）を頭＋尾に切る。効くのは transcript への保存時と overflow 回復時
+      //   （上流 tool-result-truncation の resolveLiveToolResultMaxChars）。
+      //   ⚠️ 受け取った直後の同じターン内のモデル呼び出しは守らない（そこは上流の
+      //   installToolResultContextGuard＝窓×0.5×2 字で、この値とは連動しない）。
+      //   最初の 1 回の overflow を防ぐのは MCP 側のエラー文の短縮（server.py）。
+      contextLimits: { toolResultMaxChars: 20000 },
       // §O: cacheRetention の明示パラメータは Bedrock 公式 doc に記載なし(unverified)のため
       // 削除して既定挙動に。★prompt caching チューニングは P1 実測後に再評価（§D）。
     },
@@ -102,11 +111,27 @@
       allowFrom: [
         "*",
       ],
+      // §DM-overflow（2026-09-30）: DM でモデルに送る履歴を、直近 4 件の role=user メッセージ
+      //   から後ろに絞る（上流 limitHistoryTurns。毎回の試行の送信前にメモリ上で適用し、
+      //   transcript は消さない）。層2 の revise や overflow の再試行も user を 1 件足すので、
+      //   見える「依頼」は 4 回より少なくなりうる（安全側）。
+      //   背景: 毎回の固定部分が約 127.5k tokens あり、会話に使える枠は約 72k。
+      //   重い依頼 1 回で +27〜35k 増え、09-29 に DM が上限 200k を超えて毎回失敗した。
+      //   ⚠️ messages.groupChat.historyLimit は DM には効かない（上流 getHistoryLimitFromSessionKey）。
+      dmHistoryLimit: 4,
     },
   },
 
   // ── セッション分離（多人数で会話が混ざらないように／§D・既定 main は Alice↔Bob 漏れる) ──
-  session: { dmScope: "per-channel-peer" },
+  session: {
+    dmScope: "per-channel-peer",
+    // §DM-overflow（2026-09-30）: 会話を始め直す合言葉。指定すると上流の既定（/new・/reset）を
+    //   置き換えるので、既定の 2 つも残す。Slack は「/」で始まる入力を未登録のスラッシュコマンド
+    //   として送信しないため、利用者向けの案内（plugin の CONTEXT_OVERFLOW_REPLY_TEXT）は
+    //   日本語の「新しい会話」を使う。一致は本文全体の完全一致か「合言葉＋空白＋続き」だけ
+    //   （上流 initSessionStateAttemptLocked）。
+    resetTriggers: ["/new", "/reset", "新しい会話"],
+  },
 
   // ── L0 コンテキスト直近N件制限（v0.3 Task10・§2.1 FinOps F1） ─────────────────
   // 司令塔ループのプロンプトへ含める会話履歴を直近 20 件に制限し、長文スレッドでの

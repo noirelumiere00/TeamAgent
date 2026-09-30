@@ -4,11 +4,14 @@ import copy
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import tarfile
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "infra/docker/Dockerfile.openclaw"
@@ -397,6 +400,133 @@ def test_config_loads_only_reviewed_plugins_and_not_browser() -> None:
     assert config["tools"]["fs"]["workspaceOnly"] is True
     assert "browser" not in config["plugins"]["entries"]
     assert "browser" not in config["tools"]
+
+
+def test_dm_context_overflow_guards_are_pinned() -> None:
+    """2026-09-29 石田さんの DM の context overflow 対策（段1）の値を固定する。
+
+    本番: 毎回の固定部分が約 127.5k tokens あり、DM は 1 日分の履歴を全部モデルへ送っていたため、
+    重い依頼 1〜2 回で上限 200k を超え、以後は失敗のたびに履歴が増えて毎回失敗した。
+    変異: dmHistoryLimit を消す・20 にする、toolResultMaxChars を外す、resetTriggers から
+    「新しい会話」を外す（plugin の案内が行き止まりになる）と赤。
+    """
+    config = _load_reviewed_json5(CONFIG)
+    slack = config["channels"]["slack"]
+    assert slack["dmHistoryLimit"] == 4
+    # 利用者ごとの上書き（dms.<id>.historyLimit）は入れない。入れるなら設計を更新してから。
+    assert "dms" not in slack
+    # グループの履歴制限は従来どおり（DM には効かないので dmHistoryLimit が別に要る）。
+    assert config["messages"]["groupChat"]["historyLimit"] == 20
+    assert config["agents"]["defaults"]["contextLimits"] == {"toolResultMaxChars": 20000}
+    # 指定すると上流の既定（/new・/reset）を置き換えるので、既定の 2 つも残す。
+    # 日本語の合言葉は plugin の案内文（CONTEXT_OVERFLOW_REPLY_TEXT）と同じ語であること。
+    assert config["session"] == {
+        "dmScope": "per-channel-peer",
+        "resetTriggers": ["/new", "/reset", "新しい会話"],
+    }
+    plugin = (ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js").read_text()
+    assert 'export const CONTEXT_OVERFLOW_RESET_PHRASE = "新しい会話";' in plugin
+    # 段2 まで入れない（入れるなら設計を更新してからこの assert を外す）。
+    # reserveTokensFloor は要約が効かない現状で遅延と費用を増やすだけ、contextPruning は既定 off。
+    assert "compaction" not in config["agents"]["defaults"]
+    assert "contextPruning" not in config["agents"]["defaults"]
+    # 日次区切り（resetByType / reset）は overflow 対策ではないので、この変更では触らない。
+    assert "reset" not in config["session"] and "resetByType" not in config["session"]
+
+
+def _plugin_module_value(expression: str) -> Any:
+    """plugin の実物を import して ``expression``（m.<名前> の式）を JSON で返す。"""
+    plugin = ROOT / "infra/openclaw/caller-identity-plugin/dist/index.js"
+    completed = subprocess.run(
+        [
+            "node",
+            "--input-type=module",
+            "-e",
+            f"const m = await import({json.dumps(plugin.as_uri())});"
+            f"process.stdout.write(JSON.stringify({expression}));",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_context_overflow_markers_pinned_to_upstream_version() -> None:
+    """overflow の英文の照合先（上流の固定文）は plugins-lock の openclaw の版に固定する。
+
+    上流の版を上げると赤になり、文面の照合し直しを強制する（同じ版の中で文面は変わらない前提）。
+    変異: 定数を "2026.7.2" にすると赤。
+    """
+    lock = json.loads(LOCK.read_text())
+    assert (
+        _plugin_module_value("m.CONTEXT_OVERFLOW_UPSTREAM_VERSION") == lock["openclaw"]["version"]
+    )
+
+
+def _openclaw_dist_dir() -> Path:
+    raw = os.environ.get("OPENCLAW_DIST_DIR")
+    if not raw:
+        pytest.skip(
+            "OPENCLAW_DIST_DIR（openclaw@<plugins-lock の版> の package/dist）が無い。"
+            "CI では skip し、最終の門は build 時の openclaw config validate"
+        )
+    dist = Path(raw)
+    assert dist.is_dir(), dist
+    package = json.loads((dist.parent / "package.json").read_text())
+    assert package["version"] == json.loads(LOCK.read_text())["openclaw"]["version"]
+    return dist
+
+
+def test_context_overflow_markers_exist_in_shipped_dist() -> None:
+    """plugin の照合文が、上流 dist にバイト単位で実在する（手で打ち直して U+FE0F 等が落ちていない）。
+
+    任意実行: OPENCLAW_DIST_DIR を付けたときだけ。版の定数だけ書き換えて通す抜け道を塞ぐ。
+    """
+    dist = _openclaw_dist_dir()
+    shipped = "".join(
+        (dist / name).read_text(encoding="utf-8")
+        for name in ("agent-runner.runtime-DYRSfwOn.js", "embedded-agent-CLJk10ON.js")
+    )
+    markers = _plugin_module_value("m.CONTEXT_OVERFLOW_MARKERS")
+    assert [kind for kind, _ in markers] == [
+        "auto_compaction",
+        "compaction_limit",
+        "context_limit",
+        "embedded",
+        "run_failure",
+    ]
+    for kind, marker in markers:
+        assert marker in shipped, kind
+
+
+CONFIG_SCHEMA_PROBE = Path(__file__).resolve().parent / "openclaw_config_schema_probe.mjs"
+
+
+def test_config_passes_shipped_openclaw_schema() -> None:
+    """本番 config を上流 dist の zod schema（OpenClawSchema・SlackConfigSchema）で safeParse する。
+
+    任意実行: OPENCLAW_DIST_DIR を付けたときだけ（CI は skip。最終の門は build 時の
+    ``openclaw config validate --json``）。対照（負の値・型違い・未知キー）が拒否されることも見て、
+    schema が値まで検査している＝「OK」が空振りでないことを毎回示す。
+    """
+    dist = _openclaw_dist_dir()
+    completed = subprocess.run(
+        ["node", str(CONFIG_SCHEMA_PROBE)],
+        input=json.dumps(_load_reviewed_json5(CONFIG), ensure_ascii=False),
+        env={**os.environ, "OPENCLAW_DIST_DIR": str(dist)},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["openclaw"] == "OK", report["openclaw"]
+    assert report["slack"] == "OK", report["slack"]
+    for name, verdict in report["controls"].items():
+        assert verdict != "OK", name
 
 
 def test_internal_caller_identity_plugin_uses_installed_openclaw_schema() -> None:
@@ -4367,6 +4497,57 @@ def test_outgoing_text_drops_em_dashes_but_keeps_links_ranges_and_code() -> None
     assert deai["range_untouched"]["result"] is None
     assert deai["fence_untouched"]["result"] is None
     assert deai["plain"]["result"] is None
+
+
+CONTEXT_OVERFLOW_REPLY_TEXT = (
+    "この会話が長くなり、Aico が一度に読める量を超えたため、今回の依頼は最後まで処理できませんでした。\n"
+    "依頼を分けるか短くして、もう一度送ってください。\n"
+    "続けて同じ案内が出るときは「新しい会話」とだけ送ってください。"
+    "会話を最初から始め直せます（それまでのやり取りは引き継がれません）。"
+)
+
+
+def test_context_overflow_reply_is_replaced_in_japanese() -> None:
+    """上流の overflow の英語の固定文を、送信直前に日本語の案内へ差し替える（2026-09-30）。
+
+    本番 09-29: 石田さんの DM が上限を超えて毎回失敗し、reserveTokensFloor の設定案内つきの英文が
+    利用者に届いていた（推定）。上流の文面は agent-runner.runtime-DYRSfwOn.js:1648・:2934 /
+    embedded-agent-CLJk10ON.js:3657 の実物。
+    変異: plugin の 2 か所を normalizeOutgoingText に戻すと置換系が赤。startsWith を includes に
+    すると quoted が赤。
+    """
+    cases = _caller_identity_report()["context_overflow"]
+    replaced = {
+        "auto_compaction": "auto_compaction",
+        "embedded": "embedded",
+        "compaction_limit": "compaction_limit",
+        "context_limit": "context_limit",
+        "run_failure": "run_failure",
+        # run に束縛されない配信（authoritativeRunId が null の経路）でも置き換える。
+        "unbound_run": "auto_compaction",
+    }
+    for name, kind in replaced.items():
+        case = cases[name]
+        result = case["result"]
+        assert result is not None and "cancel" not in result, name
+        assert result["payload"]["text"] == CONTEXT_OVERFLOW_REPLY_TEXT, name
+        # 本文以外（isError 等）は上流の payload のまま。
+        assert result["payload"]["isError"] is True, name
+        # ログは種別と isError の有無だけ（本文は出さない・G7）。
+        run_id = "none" if name == "unbound_run" else f"overflow-{name}"
+        assert case["logs"] == [
+            "teamagent-caller-identity: context overflow reply replaced "
+            f"runId={run_id} kind={kind} is_error=yes"
+        ], name
+    # 本文の途中で英文を引用しただけ・日本語の通常のエラー文は触らない（上流がそのまま配信）。
+    assert cases["quoted"]["result"] is None
+    assert cases["quoted"]["logs"] == []
+    assert cases["normal_error"]["result"] is None
+    # 案内文そのものの規律: 英語の設定案内・em ダッシュ・「--」・スラッシュコマンドを含まない。
+    for banned in ("Auto-compaction", "reserveTokensFloor", "—", "--", "/new", "/reset"):
+        assert banned not in CONTEXT_OVERFLOW_REPLY_TEXT, banned
+    assert "「新しい会話」" in CONTEXT_OVERFLOW_REPLY_TEXT
+    assert _plugin_module_value("m.CONTEXT_OVERFLOW_REPLY_TEXT") == CONTEXT_OVERFLOW_REPLY_TEXT
 
 
 # ── 動画 URL × 0 tool call の層2（2026-09-25） ─────────────────────────────
