@@ -293,6 +293,9 @@
             // slack_summary: 「このスレッド要約して」。読取は依頼者本人の xoxp のみ（bot token 不使用）・
             // 出力面ガードで発信元チャンネル以外のスレッドは拒否（USE_SLACK_SUMMARY_TOOL=1・既定OFF）。
             "slack_summary",
+            // slack_search: 「Slack で〜を探して」。本人 xoxp の search.messages（読み取りのみ）。
+            // チャンネルでの依頼は公開チャンネルの一致だけ・非公開は件数のみ（USE_SLACK_SEARCH_TOOL=1・既定OFF）。
+            "slack_search",
             // attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
             // read-only・テキスト返答のみ（USE_ATTACHMENT_TOOLS=1・既定OFF）。
             "attachment_assist",

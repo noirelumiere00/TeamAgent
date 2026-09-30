@@ -505,6 +505,22 @@ def build_production_tools() -> list[ToolSpec]:
             )
         )
 
+    # Slack 全体のキーワード検索ツール（「Slack で〜を探して」）。検索は **依頼者本人の xoxp のみ**
+    # （search.messages・bot token は経路に一切登場しない）。チャンネルからの依頼には公開
+    # チャンネルの一致だけを返し、非公開・DM の一致は件数だけ出す。**既定 OFF**。
+    if _envflag("USE_SLACK_SEARCH_TOOL"):
+        from teamagent.skills.slack_search.skill import SlackSearchSkill
+
+        search_slack_store = _build_slack_store()
+        specs.append(
+            ToolSpec(
+                SlackSearchSkill.name,
+                SlackSearchSkill.description,
+                SlackSearchSkill,
+                factory=lambda: SlackSearchSkill(slack_store=search_slack_store),
+            )
+        )
+
     # 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。**既定 OFF**。
     # 読むのは署名済み claim 由来の会話（channel_id/thread_ts）に添付されたファイルだけで、
     # file_id/URL/channel を入力に持たない＝会話外は構造的に読めない。テキスト返答のみ
