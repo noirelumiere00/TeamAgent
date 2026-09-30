@@ -174,10 +174,10 @@ def test_scrub_truncates_long_text() -> None:
 
 def test_redact_secrets_and_pii_masks_without_length_cap() -> None:
     # scrub_value と同じマスクをかけるが、2000 字では切らない（上限は呼び出し側が決める）。
-    raw = "連絡先 tanaka@moribuild.co.jp / 03-1234-5678 key=AKIAABCDEFGHIJKLMNOP " + "あ" * 5000
+    raw = f"連絡先 tanaka@moribuild.co.jp / 03-1234-5678 {_FAKE_AWS} " + "あ" * 5000
     out = redact_secrets_and_pii(raw)
     assert "tanaka@moribuild.co.jp" not in out and "03-1234-5678" not in out
-    assert "AKIAABCDEFGHIJKLMNOP" not in out
+    assert _FAKE_AWS not in out
     assert "[REDACTED_PII]" in out and "[REDACTED_SECRET]" in out
     assert out.endswith("あ" * 5000)
     assert "[TRUNCATED:" not in out
