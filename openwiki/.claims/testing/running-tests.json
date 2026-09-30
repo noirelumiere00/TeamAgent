@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "pageVersion": "sha256:c779979b654a15a5354487667fd07d1399c7bf499a6055ba07694e1f879efa65",
+  "claims": [
+    {
+      "id": "claim_116eba5f0ca74b20b7045f6e75a2c94c",
+      "statement": "CI の lint-and-test ジョブは Python 3.11/3.13/3.14 の matrix（fail-fast: false）で、ruff lint・ruff format チェック・lint-imports・scripts/check_openclaw_config.py・mypy src/teamagent・tools/tiktok_scraper の npm ci・カバレッジ付き pytest・bandit を順に走らせる。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L100-L124",
+          "version": "repo-lines-v1:sha256:1ca82fd13f57d8b0c74453d4002efad48457fffa569a719ddc3b71f814f850d2:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImRhZjA5NDZkMTc4ZGRlYjg2ZDdjMDhkNjMyZjliMDA2ZjBiY2E3YzkzNmM2MWM0ZDA3ZWVmNTY0ZDkyZDlkNGYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE0ODQ3OWM4YjA1ZDFhMTI3ZTJjMGQ5ZTU0NDEzMmQ3ZGMyYTk0M2QzNzVmNDY0ZWZiMTk2YzNkNTkyYzE2YWQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjQzYjVlOWUxY2Q4MDM0ZTUxM2FhMTY0ZGYxYWYxZWE2YzQzOWI4OTI2ZTc3NmFiMjdiMmEwZGYzNzliYzBkYzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZiZjM5ZmJmMTVhYzMwZGE2MjczMDBiN2YwMGM5MjM5Y2E4ODhjZDBiMjg2ZTk0ZGU5ZTY0OTRhOTgwM2NkZDYifQ"
+        },
+        {
+          "resource": "repo://.github/workflows/ci.yml#L36-L39",
+          "version": "repo-lines-v1:sha256:e0c531da32ac9ed4556a4fa6e11983b0925b8d432c2b6bc89b98b001d9432fca:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNWExM2ZjM2M0ZjhiM2VjOTlkYjM3NWNiYTViOGYxNTVmM2M5NGJkNmE3OTFiMTBhMTBhMjY4MDg4MGI0NjU1MyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMWJiMzQxN2ZhMmRmZjg0YWIxNmEyOWQxOTJjNzk4YTYzNjY5NmY3N2U3ZDcyYzUzYWU0ZGQxNWZjNzVhNzhiNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiM2YxYjA0MmZjNzRmN2U3NDZlOWZhY2MwM2ZlNjIzY2JlMmM0ZmRmYmMwNTc1MmFhYjY2ZmFhNGM1MzZkZmQ4MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDk1MWZmY2NiYmYwMDM5ZWFjNzRlNjU3YzIyNzgzNmZmYTZlOWFhMmIxYTQyMzBlNmNjZjE1YjAxOTkxOGU1MiJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_82e06832af21446ebeb58491cbb058f2",
+      "statement": "lint-and-test は pip install --no-deps -e . のあと手で列挙したパッケージを版を固定せずに入れ、lockfile-pytest は uv export --frozen で dev/mcp/media extras を書き出して --no-deps --require-hashes で入れた上で Python 3.14 で pytest を走らせる。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L126-L171",
+          "version": "repo-lines-v1:sha256:8da06125fa04f867125691625879a068f15f490cfc48efc96a03ef9111beefe8:eyJzZWxlY3RlZExpbmVDb3VudCI6NDYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjUyMDE1ZTUzN2M2ZDA3MWUyNDNlYWNlZDBiNjkwMmQwMmFiMmY5M2NjOTQ5ODc4ZTA0MjNjODI2ZjJjY2ViMzIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImVjZTdiNjJlOTRkNTNkM2RkZmZiZTVhMjE1N2YyNjFlZDUxZTFmZjliYjkzNTJmZjkzNGFjMmJjN2E2MzIzZGMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhiOTJlN2MyMDRjNWZjZjY5MzA1NWIzNzEwMjQ1ZGEwNjU5ZmU0NzBjNzAxZjljZDc2ZTNkMmI0ZWI3ZmUyY2UiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE4Y2NlNTVkNmE4ODY3MGQyYWZjMmZjNDU3MGZmNDFjYjZlM2JiMmVhMjY5YTcyOGRmMTJiZWZiNjNiMWU5N2IifQ"
+        },
+        {
+          "resource": "repo://.github/workflows/ci.yml#L56-L71",
+          "version": "repo-lines-v1:sha256:c194f33b3cca4decb277bdaf96b587fa3f4f27e20c190ee7d510328103ddc885:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkMGMzNDQ2ZTRjOGEwNzNhNDFjZmRjODMzMTFhOGQwNWRmYThjNzgzYTU4ZDU4YzQ3MWYyN2E5YTEzNDc0ODYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE2NzRkMWI0NTY4NjhlMTg3YzY2YTU5ZjE1ZGNkYWRjMTRmZWNhODhkYmI3ZWM1NGNhNDI1OGY4MzQ4Y2RhMDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRhYzJhNjlmZDFkNzZkNmQ2NjQ0ZGVjNWZmYjAyOGRkNzc2NzcyZWM2OTQ2MjExNzRhNmRjYjRkOWRmMDlkMTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE4Y2NlNTVkNmE4ODY3MGQyYWZjMmZjNDU3MGZmNDFjYjZlM2JiMmVhMjY5YTcyOGRmMTJiZWZiNjNiMWU5N2IifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_3f6c3c1833b647eda2156eb44ab1361c",
+      "statement": "CI の pytest ジョブが設定する DB の env は TEAMAGENT_TEST_DB_DSN だけで、TEAMAGENT_DB_DSN で守られた実 DB 検証（test_pgvector_schema.py・test_oauth_tokens_rls.py など）は CI では常に skip される。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L145-L146",
+          "version": "repo-lines-v1:sha256:fd6aa3aa957025bc9875f323d606a08e031916b76c9c6aa57317db0562fb4f58:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGI2ZjllNmM1ZDhlNWZmYTcyY2YwYjA0YzkxZjFiMTQ3NzU5YzRlYjQ0NjQzMzYzMWE0OTA3MWMyZTNlYjk5ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjBmOTE3ZDBkODY4YzI3NWU3YzRlNzRiZDgxMjM3YzM3N2U5N2E4NmNiZDdiMDZmYjZmYzRkYTI5ZmQ3ZDA3MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjM5NWRkYmVhYzA0MDFjNDkyYzQ1OTVhNzdiZWNiY2VlNjI1ZTYyYmM1OGIzMTI3ZTQ3ZmY0ZTMzYTdiNjE1MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNDk1MWZmY2NiYmYwMDM5ZWFjNzRlNjU3YzIyNzgzNmZmYTZlOWFhMmIxYTQyMzBlNmNjZjE1YjAxOTkxOGU1MiJ9"
+        },
+        {
+          "resource": "repo://.github/workflows/ci.yml#L34-L35",
+          "version": "repo-lines-v1:sha256:fd6aa3aa957025bc9875f323d606a08e031916b76c9c6aa57317db0562fb4f58:eyJzZWxlY3RlZExpbmVDb3VudCI6MiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNGI2ZjllNmM1ZDhlNWZmYTcyY2YwYjA0YzkxZjFiMTQ3NzU5YzRlYjQ0NjQzMzYzMWE0OTA3MWMyZTNlYjk5ZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZjBmOTE3ZDBkODY4YzI3NWU3YzRlNzRiZDgxMjM3YzM3N2U5N2E4NmNiZDdiMDZmYjZmYzRkYTI5ZmQ3ZDA3MyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjM5NWRkYmVhYzA0MDFjNDkyYzQ1OTVhNzdiZWNiY2VlNjI1ZTYyYmM1OGIzMTI3ZTQ3ZmY0ZTMzYTdiNjE1MSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTE5ODNmNGMyMTFhMWI0NmFmOTliOWQ2ZWIyYzJhMDU4OGM1MTI4YTBiZDIyY2JlMmEzNDU3ZDg4MWJmNjBiNCJ9"
+        },
+        {
+          "resource": "repo://tests/adapters/test_oauth_tokens_rls.py#L50-L57",
+          "version": "repo-lines-v1:sha256:c0a1823c835a502dcfd24865a775f480bde5b4667e4308aadb436f2e3272e4ed:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMjMxNGVkMGRmZWJhOWMxYzZlY2RlNGYwMThjYjViYmU3M2Y5MTgwOWI0NTM1ZjgwNTc4YmJmZjdhNDY5ODkzMCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZmFmYmEwNTI3YzM5NTNjNGI2ZTBlNWI1NzM5YmE4MzYxMmY4MDUzYmNkYzk0NjY3MzAxOTNjZDFkNTkwYjQwOCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiYzZmYTA4MGJmN2U5Y2UyMGZkNDY2ZDkwOWZkMWQxNGZmOGFjZmEyZjcxNDAwYWU1NWFhOWVhODNlOTJiNDlmMyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMjI4NGVmY2VmOTVmYzExMzhjZWYzZjI2ODgwNTk5MjY1MTBhY2U3ZmNhYWYwNWJlZDQzZDNiOGM3NWI2NTcxNyJ9"
+        },
+        {
+          "resource": "repo://tests/adapters/test_pgvector_schema.py#L215-L224",
+          "version": "repo-lines-v1:sha256:d690a2df3affa51bc989ab97a7e813357d9bdd6075359b927facfebe79261a6f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzMTRlZDBkZmViYTljMWM2ZWNkZTRmMDE4Y2I1YmJlNzNmOTE4MDliNDUzNWY4MDU3OGJiZmY3YTQ2OTg5MzAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhZmJhMDUyN2MzOTUzYzRiNmUwZTViNTczOWJhODM2MTJmODA1M2JjZGM5NDY2NzMwMTkzY2QxZDU5MGI0MDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUxNDg1ZDZiNDNkOTM1ZDM5YWY1ZGIyNzQ5ZDMzM2VmOWE2Nzc1ZmE2NWFmMGM0Njc5ODU4YmU1ZGEyNmU2ZjciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmZTg4Njg3ZWFkMWIxZjhiYWZjNzdkYmY1MzVlYWNkOWZiOWIyOTA0YjY5ZjFlNDkzMmExZmJkYzc1NzcyMmEifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_6ee053d950354b08b92b99f0cf9d8c01",
+      "statement": "CI は teamagent_app ロールを NOSUPERUSER NOBYPASSRLS NOLOGIN で作って postgres に GRANT し、ingest の実 DB テストはこのロールが無いか接続ユーザーがそのメンバーでなければ skip する。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L73-L98",
+          "version": "repo-lines-v1:sha256:8e406cae3f83192d86727c89728f7bc1a57e2f3cbfd1b5268b17a57ac68b3dc1:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM1ZWIxOGQ2MWUyNDIxNTIyOWE2ZmExYWU1NmVhMDYyZjNlNzJlYWUxNGViMjZkZTJiNzM3OGE3Mzk4NTU5ODgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg2OWQ2YjRhMDUzNzVkNWM2NzQ2MTgwNzVlOTkzZDJmZWFhNGU1MTAwZWQ1YTkyMjMyODlmMWJjOGIzNzQwYzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmZDM1YmFjY2IwYWQzMmVmMjg1NDYxZTE3NjIyNTIyZmM1MDQ3NDY5ZDViZjYxNWM5MzNhMWU5NzQxNDBlZTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRhYWRiOGI3YzhlZjYxNGUxYmVkMjBlYThiMmE1NGRkMWNlNDFjMWQ4ZGM2ZThkYjc5M2Y4Mzk3MmJhMmI0OTgifQ"
+        },
+        {
+          "resource": "repo://tests/ingest/test_ingest_source_health_postgres.py#L38-L54",
+          "version": "repo-lines-v1:sha256:a22995742e92166703e1022d510dedbe779728450857e5b106e13601e2fd8852:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5OTY5ZDZiYzc2NWFlZTNiYjU4ODZmMTQ5ZjMwOWZjOGEzMzcxNDVhNDhlMTBlOWZlNzg0ZDI0YTFlY2Y2OTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ3N2YzNWYxOTFmNjM1MDM5NzUzYTdlZDYxMzk3NmFkN2E5MzRkODM1ZDkxMmM1NGVjNGVjODcwMmY5NTI5YjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImE5OGIwNjNkOWI0N2U2NTM3OTYyNTU3MmNjZTE5NzY2OWQ1NzY3ZTEyYzE4YmUwNzU2NTJiOGNkOTgxY2U4ZDUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImYyNjU2MGIwNTdhZGRlNzg1YWI1NTRmN2RhZGE2OGY1YmVjNmVhNTNkOThmNGNhNzEyMmQzNzk5MWI5NzMwNTcifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_b70fcdf9a2734d95b3307e17cd9b4710",
+      "statement": "personal_memory の実 DB テストは TEAMAGENT_TEST_DB_DSN が無ければ skip し、superuser では migration を流さず、CREATEROLE・BYPASSRLS・非 superuser の migrator ロールと使い捨て DATABASE をモジュールごとに作って 0029 を流し、終了時に DATABASE とロールを削除する。",
+      "evidence": [
+        {
+          "resource": "repo://tests/personal_memory/conftest.py#L1-L6",
+          "version": "repo-lines-v1:sha256:bcae5270d9b9e362cf1cbb52b69b34a15890127527c6747eb71d95c20d4aaab1:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiZDQ1YTlhOTMwMDM3MzkxMWE0YzdkZjgyMzNlZDg5OTZmOGI1ZGFhMGFiYjYwZjY0N2ViMTc3M2UyYzc2ZDY0MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYTMwM2VjZGQ0YTRkMTBmMTljNzNmZDQyZmQxMjQzN2ZkMzM1NGE4MjY4MTYwNWRhNTI1NWE5N2EzOTA2OGRiYiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNTViNmU4NzA2YjQzMDQ3ZjJhNmRiNjdmMTMyNjM4NTk1NjA0ZTY3ZjM2OTY2ODc2Y2UwMTU4ZjAwNTNlNmJkMSJ9"
+        },
+        {
+          "resource": "repo://tests/personal_memory/conftest.py#L106-L113",
+          "version": "repo-lines-v1:sha256:a1ece101ac0532c690f8f0f82876bf70c5f0c0599704ddf8d37afffc667c18ae:eyJzZWxlY3RlZExpbmVDb3VudCI6OCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYWRhNWM2NmUxN2IxNDUzOTc4MzRiOGM4NTRkYzQxOTNlMjEyNTE4MGE4OTk2YTE0YzMxODgzMzI2YjJlZmJjZiIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYzY5MmY2YTVkZjZiNTg4Y2Q4MThkMTE1ZGRhNDVjMmFlZDIwMDEwODg1YTE3ZGYxYTBjNWVmNjAxNTEwZTVmYSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTgxYWViOTM2YjliNTdlM2QyMDI3MjYxZmVhNjYzZTVhMWFmNGY1MjNjN2YxNzU3MjMzOTQxZTRhZjM0ZGVlNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjAsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSJ9"
+        },
+        {
+          "resource": "repo://tests/personal_memory/conftest.py#L44-L60",
+          "version": "repo-lines-v1:sha256:7cbac09ed391811e67beb2c5bc43d9d8a7441240e30c7b6d7ea848efa9c81348:eyJzZWxlY3RlZExpbmVDb3VudCI6MTcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjYzYjIyMjUzNWQ0MzMyYWVhYjNkYWFlNzk5MDFlN2FhMmIzMDcyMzY1OWEzMjNkMjk1NmE4MTUwYzYzODhlNGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImJkZDEyZTJiN2UxMDVkMDE2ZjgxZjcyMjY4M2Q1ZDlkZjY0MWMyMDNkMDJlNjA2YWVhNzA0NzM5NWQ5NjcyMTIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA3ZWU0YTMwNjk4NGNhNGNhNjFjYmY3ODVjOWFhZTdjNDBlNDlhNTM4ZmMzYjZjMjBkYmExNmY1MDBhNjYxMGYifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_8e913170b6a14c59a489a9697e4ebade",
+      "statement": "CI の PostgreSQL service は pgvector の無い postgres:16-alpine で、差分取り込みの end-to-end テストは CREATE EXTENSION vector に失敗すると skip する。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L20-L22",
+          "version": "repo-lines-v1:sha256:fdda4549894f48937ab70a671d9b7b916631ef3c2225f6b99b1532b293706322:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiNzAyYWQ3NmEzMjY0ODdhODM5ZmZiZjI0NzhjMjZhZTE5OWRmMGRmZWJlZTViM2Q1YmUyYTQzYWQzY2NlNzA4NSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYjIyZjk5ZTE0ZTYwM2RkNjY3NDBkZTZlNmVkNDFiMjNhZjEzZWQ5Y2UxYTk4NDI2MDI4MTE3NjBkYzFiNmJhMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNTI5YTEzY2UzM2FmZTk3Y2M3ZTM1NjdkNjM4NDI1M2U0ZGJhM2IwYzE0ZDA2YTU5YWM0ODNiOTAyN2RhMjE0OSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMDJkMTQ3OGY2ZDEyZjljMDA2YmFmYTc0N2NiYzA5MTViOWJkMzg2ZjUzMTk4ZTk0NzViZTMxMmVhMzEwNWE4ZiJ9"
+        },
+        {
+          "resource": "repo://tests/ingest/test_ingest_differential_postgres.py#L107-L120",
+          "version": "repo-lines-v1:sha256:820f520bca3cca1529c2eab2d69109f8b285838aa533eea8469ae15db2c28e51:eyJzZWxlY3RlZExpbmVDb3VudCI6MTQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2MWYzM2MxMzI1NjlhNzQ5NDZiMmZjZjU0NmNhM2M0NDI1ZGEwY2E1Y2Y2YjY4NmMyNjA5MGZhYTlkMTEyYjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwMDY1MzVhMGU4MjczMmRjYTM2YjQ4MWEyODYyMTk5MTM5NDQzZDMwNTQxNWU0MDQ5MmFmYWUwN2RhN2E1ZjQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImViNTIwMWI4ZmVjNGJlYjFmNzgwYTVlMTc1OGIzMDQzNTcwZDkwYTg4MjZmNDk5NzViN2E3NGI3OTlhODY5ZjEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjE1YWNjMTllMzgzNTc3M2RjYTA0NWZiNzgyOTEzZDNiM2UzNTM3ZjNkZDllNWM2NzFjNWNjMTBiZGRhZGE2OGUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_ff3d8f4a12f24b61b5ffcc0bcc3a7121",
+      "statement": "tools/tiktok_scraper/dns_pinned_proxy.mjs は npm 依存の ipaddr.js を import し、media worker の契約テストがこのファイルを node で実行するため、CI は pytest の前に npm ci --prefix tools/tiktok_scraper を実行する。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L117-L121",
+          "version": "repo-lines-v1:sha256:a023d3c6e5682ff8afd110bf2c7fe7cd33e83125d25ba43d1144b65314442901:eyJzZWxlY3RlZExpbmVDb3VudCI6NSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiODdmMmZkMDI2ZTMwYjQ5YTUzNjYwZGY1ODIzOWNiYzBkZjNkOWMxMWFjN2IxOGFjZjgzMGIyNmExMTRkNDVkZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiZTExMmY3NDQzNDM2ZTAwMzQxZTI5MWMwZjQzNzA1NGEwMjljMDg2ODE2NTgwMjNiZmFlODM5MDQwZGFmZTBjOSIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZWQ2ZjA2M2NlZDQwOTI0MTFiMTFmM2E4NmE2YjFmMmU5YTc0OTYzY2QyZDhhNDEzZDJlZWM5MDJhNDFlZDViNSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOTY2NDc2YmY5OWZkNjg4Y2M2ZmIzNjIxZTU5YTdhNDA1N2M4MDgwMDIxNjU0N2EzZTEzOTc3ZTc3N2M0YTQ0YSJ9"
+        },
+        {
+          "resource": "repo://tests/infra/test_dockerfile_teamagent_media_worker.py#L336-L370",
+          "version": "repo-lines-v1:sha256:83db5f745634d67ccecf294f2bcc3f984439a07cbde108ed3d5939b27c5d0088:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA0MGQzMmFkYjg3NDdlMGIwN2I1MDhlOTg3ODY5ZTBkODExZmI5YWMwYjA1ZTAxN2U1MmFjNzZmODIzZjRkMDIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAwYWQyYTU0YmY5NDU0NzRlYzdlNWFiZTAxZmI5NGEwODcwYzJhYTQwMjQyZjFjZTg3ZjIyNmM4OTg1MTcwMzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijk5Y2I5ODkyNDBhZDdjNTJlYjEzNjk4MGQ3NTU2OGM5NjdiOTU0MjM3ZTYwYmM3YWZhOGVkYWI5ZTExNzljNzUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg2NjBmMmVhMzljNjQxMjcyYTc4OGM1ZTI5ODI1ODExNjRkNTI5ZmIzNzNkNjE4MmUyMjE4OGM3NDUzNzg4OTUifQ"
+        },
+        {
+          "resource": "repo://tools/tiktok_scraper/dns_pinned_proxy.mjs#L1-L4",
+          "version": "repo-lines-v1:sha256:9d9efee280d98036edf445a7e7a6b4645bab4df89db62b8f8cec7c36e4d8f39a:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMDBhNWFiOTA3OTNiNTllYmMzOWEzODI1YzRkODkxNjFhYTZlNDdlNjc3YTI4NTNiZmJhOGY3MTJlY2NmYmU5ZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNDA1ODU2YTRlMTFlYWViZWQ5MDM0Zjc3NGE1N2MyZGU1YTQ2ZGUyZDk2MjdkNmRkMGRjYmM2MjMzMDNiZjliMyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjAsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1NSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMWJkYjkzZjk4MDgwYWZhOTdjZDFmNWRjYzJhMzg0OGE5OWRiYjljODEzYzFlY2RiMzIxN2YxNjM1MzViMzhjOSJ9"
+        }
+      ]
+    },
+    {
+      "id": "claim_4c67bae7b5654a469d23238955ac2516",
+      "statement": "activation-freeze ジョブは merge-base から HEAD までの変更が frozen surface を触ると、freeze state が pending_v2/active の間は unlock 宣言（scope_paths が変更と過不足なく一致）が無い限り失敗させる。",
+      "evidence": [
+        {
+          "resource": "repo://.github/workflows/ci.yml#L211-L236",
+          "version": "repo-lines-v1:sha256:7efdbad7c0121c15d858ca43bc7e29777748dfb8a07242e53f4d1f4e8385da82:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA5N2ZkOTM4NmVmMGI3NzEwMGExZTYyM2YyODUyNjJkODRkNDVhN2FjNGU2MDE2NzQwN2Q1NzY2NzllOGU0N2EiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZhODQzY2U4ODA5M2JlMTRlMDlkNWQ5YTUxYTc5OTY4NjVhOGE3Y2Q5M2VhNWRhNDRjNThjODM2NGYwNTkwMjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcwYzE3MTk3ODJiZWNjOWNiNGZlNjI0NTU4MjQxOTU5YTI0ODg3YmE3MDM3MTg5MjlhYTVhM2NmN2Q3NjI0YzYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImE2ZjFhMTQzYzMyNTY2Mzc5Y2RjYjk5NzQyOTdhZDgxNjc2ODYzYmMzZTUwMTI2MmM2M2M0YWZjYWQ2NTNiNjYifQ"
+        },
+        {
+          "resource": "repo://infra/deploy/activation_freeze_check.py#L242-L280",
+          "version": "repo-lines-v1:sha256:2051e1809ec039bb3f40e8be3eb36e4b651771b64aea5506cea3b917c1e34e5f:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg5ZjBiMTRkOGQ2ZGE1MzcwODhlODg0YWJhMjMxM2MzNmUwZTM4ZWQ5YTQyYjNlODk1ZDM2M2I5ZWNkZTZiYmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjcyZGFlY2NmYWE2MDgzMjljZjQ4YzE2ZjNmZmFjMGM4NWE3YWJiNzRiZGZjYmYzYTNiYTU1NDE2ZWQ1MWNmY2MiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA1ZTg4ZjkwYjZmNTY1OThmMGZjZGEzNzIzNzFlNTE1Yjg1MWFkZDhiMWVjZmVmOTU5MzlkYzI2MmM4YTkzNzUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_1fd0153559694754accc5cf08c6d1cf2",
+      "statement": "tests/conftest.py の autouse fixture は、受信箱スキャンのキャッシュ・下書きの日次上限・HMAC ローテーションの時計状態・お土産資料の同時実行枠を各テストの前後でリセットし、プロセス内状態がテスト間で漏れないようにする。",
+      "evidence": [
+        {
+          "resource": "repo://tests/conftest.py#L10-L52",
+          "version": "repo-lines-v1:sha256:b00664215976fbf4f71c0519d6a22ed7265e324dd6ff84dc610ccaaf25b9139d:eyJzZWxlY3RlZExpbmVDb3VudCI6NDMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZmMDg2NmY0MDExZTU4NWZmYzA5MDkyZWRmMDgzMmUxN2I1MmY0YzkwYzRjYTBiNDJkY2ZhMDUwZmEzNzViNWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQzMmFjNjIxMTgxODQ0YTI2MzUxODNlZmVkMTI1MzgwN2IwYmJiYzVjZWZlN2Y1NGJhYzlhOTk1MDNmYWQ5MGEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjNmNjU3MWY3NTJkYjBmNDIxZjZlZTFiOWExYTY0YmU1MGExOTQ5YTQzY2ZkY2E1ZjI3MzRlODExNzdkNDhlYTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+        }
+      ]
+    },
+    {
+      "id": "claim_2e63b7528a6c4484984529bbb80b1947",
+      "statement": "scripts/setup_worktree.sh は uv pip install -e \".[dev]\" だけで mcp extra を入れないが、src/teamagent/mcp_gateway/server.py は mcp をトップレベルで import するため、その環境では mcp_gateway を読むテストが収集で落ちうる。",
+      "evidence": [
+        {
+          "resource": "repo://scripts/setup_worktree.sh#L70-L72",
+          "version": "repo-lines-v1:sha256:afb2e4010309d7cd9d74fbf27d56e0fcb01b33236c441a9ef7b83fb1523f2f7f:eyJzZWxlY3RlZExpbmVDb3VudCI6MywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOWI1MDcyMjEwMmQ5YTQ4NmUyMWM5MmYyZmE0YmQ2NjIzNjhlMTYzNzUxNDRiMmRhZGIyNGU4ZjdiNWY4OWMzYyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYWUzNDYwNjNkOWY2NTFjMDEzMWM1OTYyODA2MTRlN2VjMTU0Y2Q2ZTJhZjNiYjhlNzFhYmVjMjk5OWJjOThlMCIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZTFmY2FmMzMwOThhNThjZDQzODcyODM2MDQwMzNlMzUwZmRlMmNlZmRlZjEyMTFjMDhiMTA1YTAxNzEzZjFhMSIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiNmNiYzNhMWYzOTljMGEzMmUyNjQ4NTgyYzZhNDdkZTU3M2Y0ZGFkZmZiMzNlOTkwYjVkNDRmNmZhZTMxNjllZCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L34-L37",
+          "version": "repo-lines-v1:sha256:01254db09722e5a6cfeb803f7d148fded65542fad30165c63d57111506a47377:eyJzZWxlY3RlZExpbmVDb3VudCI6NCwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYjI5NzYyNjZkMjgyMzkwYmQxMjRjOTFhNjUyODk5NzFkYzBiMGEwNGRlYWQ4ZGEwZGVhZTA5YjZkNmNmYzkwZSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiYWExZjdmOGE4MjY3MWEwZGU4NWRjNmFjMTk0OWM5MmRiMzIyM2E2Zjg5M2FjNWU1OGM3NzFmZWVmMDExNDA5NiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNmEyYjBmMjM1ZjhhZWMwOGVhNDFhOTczMjM0NzI3YTE4YmFjMjdiMDgzMjMzNDRhZjFlYjM2ZjFkYTZmNzE4MyIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMTI5YmZkYzI3YTE3YTBmOWMyZTcxN2U2NjQ4OWFiY2UwZGIyODlhYWM0ODc3MDdjMDdkODc5MzA0MzFlZjU0NiJ9"
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "by": "openwiki/0.6.1",
+    "at": "2026-09-29T07:51:05.076Z"
+  }
+}
