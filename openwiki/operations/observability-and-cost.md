@@ -37,7 +37,7 @@ sources:
     resource: repo://src/teamagent/runtime/slack_bot.py
   - id: openwiki-source-feadb2f01d57d0af8e481e1b
     resource: repo://src/teamagent/runtime/usage_recorder.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 観測・利用記録・コスト管理
@@ -52,8 +52,7 @@ Aico の「何が起きたか」は 3 つの経路で残る。どれも**利用�
 | 利用記録 | `UsageRecorder` / `MetricsSnapshotter` | RDS の `usage_events` / `runtime_metrics` | 管理画面（`teamagent.dashboard`、connect-web の `/admin`） |
 | 例外 | `capture_skill_exception` 等 | Sentry（DSN があるときだけ） | Sentry 画面（`request_id` tag で絞る） |
 
-<!-- openwiki: broken internal link [/openwiki/integrations/bedrock-gemini-and-retry.md] link "/openwiki/integrations/bedrock-gemini-and-retry.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-費用はさらに別に、AWS 請求全体を Budgets / Cost Anomaly Detection が見張る。LLM 呼び出しごとの `cost_usd` の出し方、CloudWatch のコスト metric filter が `cost_usd` キーを持つ行を全部足す仕様、動画クォータと外部 SaaS 台帳（`CostGuard`）は [Bedrock / Gemini 呼び出しとリトライ・コスト](/openwiki/integrations/bedrock-gemini-and-retry.md) にある。
+費用はさらに別に、AWS 請求全体を Budgets / Cost Anomaly Detection が見張る。LLM 呼び出しごとの `cost_usd` の出し方、CloudWatch のコスト metric filter が `cost_usd` キーを持つ行を全部足す仕様、動画クォータと外部 SaaS 台帳（`CostGuard`）は [Bedrock / Gemini 呼び出しとリトライ・コスト](../integrations/bedrock-gemini-and-retry.md) にある。
 
 ```mermaid
 flowchart LR
@@ -79,8 +78,7 @@ flowchart LR
 - `init_sentry()` は `SENTRY_DSN` が空なら何もせず False を返す（テスト・開発で副作用なし）。有効時は `send_default_pii=False`、`traces_sample_rate=0.05`、`profiles_sample_rate=0.0`、`attach_stacktrace=True`、`max_breadcrumbs=30`。`LoggingIntegration(event_level=None)` でログからの自動送信を止め、例外は `capture_skill_exception` / `capture_event_exception` の明示呼び出しに一本化している（二重送信防止）。
 - スクラブは二重: `EventScrubber` のキー名 denylist（既定＋ `pdf_text`・`query`・`content`・`answer`・本人メモ系の `utterance` / `snapshot` / `memo_context` など）と、`before_send` による値の正規表現スクラブ（Slack / AWS / Anthropic / Google のトークン形、秘密鍵、接続文字列のパスワード、email・電話番号。1 フィールド 2000 文字で切る）。本人メモ系モジュールのフレームはローカル変数ごと落とす（日本語の発話は正規表現を素通りするため）。`extra.request_id` は tag に昇格する。
 - `redact_secrets()` は秘密だけを伏せ、長さ制限も PII マスクもしない。資料本文を LLM に渡す `attachment_assist` のように、2000 文字で黙って切れては困る経路で使う。
-<!-- openwiki: broken internal link [/openwiki/architecture/overview.md] link "/openwiki/architecture/overview.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **初期化しているのは `slack_bot._run()` だけ**（AsyncioIntegration のため async 文脈で呼ぶ）。現行の Slack 受け口は OpenClaw → MCP で、`run_mcp_http_server.py` は `init_sentry()` を呼ばず、Terraform のタスク定義にも `SENTRY_DSN` は無い。したがって MCP プロセス内の `capture_skill_exception`（gmail / gcalendar adapter が呼ぶ）は何もしない。本番の例外は CloudWatch の `mcp_tool_error` で見る（[全体構成](/openwiki/architecture/overview.md)）。
+- **初期化しているのは `slack_bot._run()` だけ**（AsyncioIntegration のため async 文脈で呼ぶ）。現行の Slack 受け口は OpenClaw → MCP で、`run_mcp_http_server.py` は `init_sentry()` を呼ばず、Terraform のタスク定義にも `SENTRY_DSN` は無い。したがって MCP プロセス内の `capture_skill_exception`（gmail / gcalendar adapter が呼ぶ）は何もしない。本番の例外は CloudWatch の `mcp_tool_error` で見る（[全体構成](../architecture/overview.md)）。
 
 ## usage_events（1 リクエスト 1 行の利用記録）
 
@@ -91,15 +89,11 @@ flowchart LR
 
 MCP 側（`mcp_gateway/server.py`）の記録:
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 成功時と例外時の両方で `_record_usage` を呼ぶ。例外時は `status="error"`・`cost_usd=0`・`error_code=<例外の型名>`。`cost_usd` は skill 出力の `total_cost_usd`（ログ側は二重計上を避けて `tool_cost_usd` というキー。詳細は [MCP gateway](/openwiki/architecture/mcp-gateway.md)）。
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 本文として残すのは非空の `query` 引数だけで、それ以外の引数（メール本文など）は入れない。`via="mcp"`。`user_id` には署名検証済み claim の Slack ID だけを使う（[呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)）。
+- 成功時と例外時の両方で `_record_usage` を呼ぶ。例外時は `status="error"`・`cost_usd=0`・`error_code=<例外の型名>`。`cost_usd` は skill 出力の `total_cost_usd`（ログ側は二重計上を避けて `tool_cost_usd` というキー。詳細は [MCP gateway](../architecture/mcp-gateway.md)）。
+- 本文として残すのは非空の `query` 引数だけで、それ以外の引数（メール本文など）は入れない。`via="mcp"`。`user_id` には署名検証済み claim の Slack ID だけを使う（[呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)）。
 - 記録器はプロセスに 1 つ遅延生成し、初期化失敗も None としてキャッシュする。書き込みは fire-and-forget の task で、応答の critical path に入らない。切り離しジョブ（video_algorithm の detach）は別スレッドから `call_soon_threadsafe` で本体の loop に渡す。`USAGE_EVENTS_DISABLE=true` で記録を止められる。
 
-<!-- openwiki: broken internal link [/openwiki/data/postgres-schema-and-migrations.md] link "/openwiki/data/postgres-schema-and-migrations.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-テーブルと権限（[PostgreSQL スキーマとマイグレーション](/openwiki/data/postgres-schema-and-migrations.md)、[RLS と実行ロール](/openwiki/data/rls-and-app-role.md)）:
+テーブルと権限（[PostgreSQL スキーマとマイグレーション](../data/postgres-schema-and-migrations.md)、[RLS と実行ロール](../data/rls-and-app-role.md)）:
 
 | migration | 内容 |
 |---|---|
@@ -153,8 +147,7 @@ MCP 側（`mcp_gateway/server.py`）の記録:
 `scripts/run_canary_health.py` は ECS Scheduled Task（既定 `rate(1 hour)`、MCP イメージを流用）で、Slack user_id → 本人 email の解決を本番と同じ resolver（`build_slack_identity_resolver`）で 1 回試す。per-user 機能すべての前提なので、bot token の失効などで壊れると全部が無音で止まるため。書き込みはしない。
 
 - 判定は `evaluate_canary`: すべて合格なら True、**空の結果は False**（何も検査できていない＝異常）。`canary_health_result`（`overall` と `check_*`）を出し、失敗なら exit 1。
-<!-- openwiki: broken internal link [/openwiki/operations/terraform-layout.md] link "/openwiki/operations/terraform-layout.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- アラームは 2 本で役割が違う。`canary_unhealthy` は失敗の計数（欠測は `notBreaching`）。`canary_heartbeat_missing` は生存確認で、1 時間窓で 2 回続けて結果が無いと鳴る（欠測は `breaching`、`enable_canary_health` と `canary_rule_enabled` が両方真のときだけ作られる）。ルールの有効・無効は `infra/deploy/terraform_runtime_migrations.json` が決めており、変数の既定値を書き換えて有効化してはいけない（[Terraform の構成](/openwiki/operations/terraform-layout.md)）。
+- アラームは 2 本で役割が違う。`canary_unhealthy` は失敗の計数（欠測は `notBreaching`）。`canary_heartbeat_missing` は生存確認で、1 時間窓で 2 回続けて結果が無いと鳴る（欠測は `breaching`、`enable_canary_health` と `canary_rule_enabled` が両方真のときだけ作られる）。ルールの有効・無効は `infra/deploy/terraform_runtime_migrations.json` が決めており、変数の既定値を書き換えて有効化してはいけない（[Terraform の構成](terraform-layout.md)）。
 
 ## AWS Budgets と Cost Anomaly Detection
 
@@ -174,8 +167,7 @@ MCP 側（`mcp_gateway/server.py`）の記録:
 
 - 新しいエントリポイントを足したら、`main()` の最初で `configure_logging()` を呼ぶ。呼ばないと、タスク定義に `STRUCTLOG_FORMAT=json` があっても JSON にならず、metric filter が当たらない。
 - metric filter やアラームが拾う `event` 名（`mcp_tool_error`・`identity_spoof_rejected`・`canary_health_result` など）を変えると、アラームが黙って鳴らなくなる。変えるときは Terraform も一緒に直す。
-<!-- openwiki: broken internal link [/openwiki/integrations/bedrock-gemini-and-retry.md] link "/openwiki/integrations/bedrock-gemini-and-retry.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- `cost_usd` キーを新しいログに足すと日次コストに合算される（[Bedrock / Gemini 呼び出しとリトライ・コスト](/openwiki/integrations/bedrock-gemini-and-retry.md)）。
+- `cost_usd` キーを新しいログに足すと日次コストに合算される（[Bedrock / Gemini 呼び出しとリトライ・コスト](../integrations/bedrock-gemini-and-retry.md)）。
 - `usage_events` に本文を足さない。例外は `query_text` だけ（裁定済み）。新しい列は RLS と GRANT が今の最小権限のまま効くかを確かめる。
 
 ## テスト

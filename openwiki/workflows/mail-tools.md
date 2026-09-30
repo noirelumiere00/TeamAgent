@@ -3,9 +3,6 @@ type: workflow
 title: メール・カレンダー・Slack 要約系ツール
 description: mail_summary / mail_followup / mail_reply / mail_to_internal_context / calendar_freebusy / slack_summary / attachment_assist の 7 ツールが、本人の権限でどこまで読むか、scrub_value による DLP マスク、GmailClient の denylist による送信・削除の物理封鎖、未連携や 0 件を LLM に創作させない構造化エラーをまとめる。
 tags: [gmail, calendar, slack, dlp, denylist, per-user-oauth, prompt-injection, mail-tools]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-2887fb41fd9f6fe3d0b57d65
     resource: repo://src/teamagent/adapters/gmail_client.py
@@ -33,7 +30,10 @@ sources:
     resource: repo://src/teamagent/skills/mail_to_internal_context/skill.py
   - id: openwiki-source-ce21a5654da30cd403ae1425
     resource: repo://src/teamagent/skills/slack_summary/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # メール・カレンダー・Slack 要約系ツール
@@ -52,21 +52,16 @@ Aico の秘書系ツールのうち、本人の受信箱・カレンダー・Sla
 | `slack_summary` | スレッド／チャンネル履歴 | なし | 要約 1 回 | Slack 個人トークン（xoxp） |
 | `attachment_assist` | 会話に添付されたファイル | なし | 加工 1 回 | 署名済み本人＋bot token でダウンロード |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/digest-buttons.md] link "/openwiki/workflows/digest-buttons.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-登録は `src/teamagent/orchestrator/factory.py` の `USE_MAIL_SUMMARY_TOOL`・`USE_FOLLOWUP_TOOL`・`USE_MAIL_LINK_TOOL`・`USE_MAIL_REPLY_TOOL`・`USE_CALENDAR_FREEBUSY_TOOL`・`USE_SLACK_SUMMARY_TOOL`・`USE_ATTACHMENT_TOOLS`（すべて既定 OFF）。`infra/openclaw/effective-tool-scope.json` の副作用分類は `gmail-read` から `gmail-draft-write-no-send`（`mail_reply`）まで。4 段ゲートは [ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md) を参照。朝ダイジェストのボタンから呼ばれる `mail_draft`・`calendar_event`・`schedule_propose` は [朝ダイジェストのボタン処理](/openwiki/workflows/digest-buttons.md) で扱う。
+登録は `src/teamagent/orchestrator/factory.py` の `USE_MAIL_SUMMARY_TOOL`・`USE_FOLLOWUP_TOOL`・`USE_MAIL_LINK_TOOL`・`USE_MAIL_REPLY_TOOL`・`USE_CALENDAR_FREEBUSY_TOOL`・`USE_SLACK_SUMMARY_TOOL`・`USE_ATTACHMENT_TOOLS`（すべて既定 OFF）。`infra/openclaw/effective-tool-scope.json` の副作用分類は `gmail-read` から `gmail-draft-write-no-send`（`mail_reply`）まで。4 段ゲートは [ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md) を参照。朝ダイジェストのボタンから呼ばれる `mail_draft`・`calendar_event`・`schedule_propose` は [朝ダイジェストのボタン処理](digest-buttons.md) で扱う。
 
 たとえるなら、これらは「本人の机の引き出しだけを開けられる秘書」。開けた書類は黒塗り（DLP）してから読み、手紙は下書きまで書くが、ポストには入れない。
 
 ## 本人の束縛（G1/G2）
 
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 誰の受信箱かは、MCP gateway が署名付き caller claim から解決して `ctx.metadata["user_email"]` に入れる。モデルが引数で申告する値は使わない（[呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)）。
+- 誰の受信箱かは、MCP gateway が署名付き caller claim から解決して `ctx.metadata["user_email"]` に入れる。モデルが引数で申告する値は使わない（[呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)）。
 - 各 Skill は `user_email` が無いか空なら `PermissionError` で即座に止まる（fail-closed）。受信箱を LLM や呼び出し側に選ばせる入力は無い。
-<!-- openwiki: broken internal link [/openwiki/integrations/google-oauth-and-token-store.md] link "/openwiki/integrations/google-oauth-and-token-store.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- Google 系は `TokenStore.get(user_email)` で本人の refresh token を取り、無ければ未連携として扱う。保管と RLS は [Google OAuth とトークン保管](/openwiki/integrations/google-oauth-and-token-store.md)。
-<!-- openwiki: broken internal link [/openwiki/integrations/slack-identity-and-oauth.md] link "/openwiki/integrations/slack-identity-and-oauth.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- `slack_summary` は `SlackTokenStore` の本人 xoxp だけを使い、`SLACK_BOT_TOKEN` を参照しない。Slack API が本人の可視範囲を強制するので、モデルが別の channel_id を渡しても権限を超えない（[Slack の本人確認と OAuth](/openwiki/integrations/slack-identity-and-oauth.md)）。
+- Google 系は `TokenStore.get(user_email)` で本人の refresh token を取り、無ければ未連携として扱う。保管と RLS は [Google OAuth とトークン保管](../integrations/google-oauth-and-token-store.md)。
+- `slack_summary` は `SlackTokenStore` の本人 xoxp だけを使い、`SLACK_BOT_TOKEN` を参照しない。Slack API が本人の可視範囲を強制するので、モデルが別の channel_id を渡しても権限を超えない（[Slack の本人確認と OAuth](../integrations/slack-identity-and-oauth.md)）。
 - `attachment_assist` はさらに `identity_verified is True` を要求する。LEGACY 経路（resolver 未注入）では LLM が申告した channel_id が metadata に入りうるため、署名 claim 由来でない会話を読む鍵にしない。
 
 ## Gmail アダプタの送信禁止ガード
@@ -115,15 +110,14 @@ Aico の秘書系ツールのうち、本人の受信箱・カレンダー・Sla
 
 ### mail_reply
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart TD
     A[依頼] --> B{discard_draft_id あり?}
     B -- あり --> C[目印付きの直前の下書きだけ削除]
     B -- なし --> D
     C --> D{thread_id / target_message_id で指名?}
     D -- はい --> T[そのスレッドの最新の相手メール]
-    D -- いいえ --> E[client＋件名/差出人/日付の手がかりで検索<br/>0 件なら演算子なしで 2 段目]
+    D -- いいえ --> E[client＋件名/差出人/日付の手がかりで検索 ／ 0 件なら演算子なしで 2 段目]
     E --> F{手がかりに一致したスレッド}
     F -- 1 件 --> T
     F -- 2 件以上 --> G[下書きを作らず候補一覧 ambiguous_threads]

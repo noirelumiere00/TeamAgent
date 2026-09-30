@@ -31,7 +31,7 @@ sources:
     resource: repo://tests/personal_memory/conftest.py
   - id: openwiki-source-728d0ecd130a24f548e9a0af
     resource: repo://tools/tiktok_scraper/dns_pinned_proxy.mjs
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # テストの走らせ方と CI
@@ -60,8 +60,7 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 1. `pip install --no-deps -e .` のあと、テストと lint に必要なパッケージを**手で列挙して**入れる（版は固定しないので最新が入る）。重い依存（torch・playwright・weasyprint・yt-dlp など）はこの列挙に入っていない。
 2. 使い捨ての PostgreSQL に `teamagent_app` ロールを用意する（後述）。
 3. `ruff check` と `ruff format --check`（対象は `src/ tests/ scripts/`）。
-<!-- openwiki: broken internal link [/openwiki/architecture/layering-and-skill-contract.md] link "/openwiki/architecture/layering-and-skill-contract.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-4. `lint-imports`: `pyproject.toml` の `[tool.importlinter]` にある 2 本の契約（adapters は上位層を import しない・skills は runtime を import しない）。中身は [層分離と Skill 契約](/openwiki/architecture/layering-and-skill-contract.md)。
+4. `lint-imports`: `pyproject.toml` の `[tool.importlinter]` にある 2 本の契約（adapters は上位層を import しない・skills は runtime を import しない）。中身は [層分離と Skill 契約](../architecture/layering-and-skill-contract.md)。
 5. `python scripts/check_openclaw_config.py`: `infra/openclaw/openclaw.config.json5` の `channels.slack` の `dmPolicy` / `groupPolicy` / `allowFrom` の矛盾（例: `dmPolicy:"open"` なのに `allowFrom` に `"*"` が無い）を弾く。標準ライブラリだけで動く。
 6. `mypy src/teamagent`（`[tool.mypy] strict = true`）。CI に入れない依存は `ignore_missing_imports` の override に列挙してある。
 7. `npm ci --prefix tools/tiktok_scraper`、続けて `pytest tests/ -q --cov=teamagent`。
@@ -75,8 +74,7 @@ Terraform CLI もこのジョブで入れている。Terraform の `jsonencode` 
 
 ### activation-freeze
 
-<!-- openwiki: broken internal link [/openwiki/operations/release-gates-and-deploy.md] link "/openwiki/operations/release-gates-and-deploy.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`infra/deploy/activation_freeze_check.py assert-frozen-surface` が PR の merge-base から HEAD までの変更パスを、`infra/deploy/buildspec_generation_inputs.json` の `inputs` と freeze 宣言の `additional_publisher_paths` を合わせた集合と突き合わせる。freeze の state が `pending_v2` か `active` のときは、同じ PR の `infra/deploy/activation_freeze.json` で unlock を active にし、`scope_paths`・`reason`・`gate` を書かない限り失敗する。`scope_paths` は実際の変更と過不足なく一致しなければならない（範囲外の変更も、変更していないパスを unlock に含めるのも失敗）。checker は AWS に一切アクセスしない。背景は [リリースゲートとデプロイ](/openwiki/operations/release-gates-and-deploy.md)。
+`infra/deploy/activation_freeze_check.py assert-frozen-surface` が PR の merge-base から HEAD までの変更パスを、`infra/deploy/buildspec_generation_inputs.json` の `inputs` と freeze 宣言の `additional_publisher_paths` を合わせた集合と突き合わせる。freeze の state が `pending_v2` か `active` のときは、同じ PR の `infra/deploy/activation_freeze.json` で unlock を active にし、`scope_paths`・`reason`・`gate` を書かない限り失敗する。`scope_paths` は実際の変更と過不足なく一致しなければならない（範囲外の変更も、変更していないパスを unlock に含めるのも失敗）。checker は AWS に一切アクセスしない。背景は [リリースゲートとデプロイ](../operations/release-gates-and-deploy.md)。
 
 ## ローカルで CI と同じ依存で走らせる
 
@@ -96,8 +94,7 @@ uv run --extra dev --extra mcp pytest tests/hermes_runtime -q
 - **npm ci が要る理由**: `tools/tiktok_scraper/dns_pinned_proxy.mjs` が `ipaddr.js` を import しており、`tests/infra/test_dockerfile_teamagent_media_worker.py` がこのファイルを `node` で実際に動かす。`package.json` の engines は `node >=24 <25`。CI には `setup-node` の手順が無く、runner に最初から入っている Node を使う。
 - **lint ツールの版**: CI は `ruff==0.15.15` に固定しているが、dev extra は `ruff>=0.7.0` の下限だけ、`.pre-commit-config.yaml` の ruff は v0.8.0 なので、フォーマット結果が CI とずれることがある。`import-linter` と `bandit` は dev extra に入っていないので、ローカルで `lint-imports` や `bandit` を走らせるには別途入れる。
 - **実描画のテスト**: `tests/skills/video_algorithm/chromium.py` は playwright と chromium が無ければ skip する。CI の `lint-and-test` には playwright が無く、`lockfile-pytest` もブラウザ本体は入れないので、実描画の確認は merge 前に手元で行う前提になっている（`CHROMIUM_PATH` で実行ファイルを指定できる）。
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- ほかに、`jq`・`openssl`・`node`・Terraform の archive provider が無い環境や、Linux の procfs が無い環境（macOS）で skip するテストがある。`OPENCLAW_RUNTIME_TEST_IMAGE` を設定したときだけ動く、ビルド済みイメージの契約テストもある（[コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)）。
+- ほかに、`jq`・`openssl`・`node`・Terraform の archive provider が無い環境や、Linux の procfs が無い環境（macOS）で skip するテストがある。`OPENCLAW_RUNTIME_TEST_IMAGE` を設定したときだけ動く、ビルド済みイメージの契約テストもある（[コンテナイメージとビルド](../operations/container-images-and-build.md)）。
 
 ## PostgreSQL を使うテスト
 
@@ -110,8 +107,7 @@ uv run --extra dev --extra mcp pytest tests/hermes_runtime -q
 
 ### teamagent_app ロール
 
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-CI の `Prepare disposable PostgreSQL test role` は、`teamagent_app` を `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN INHERIT` で作り、`GRANT teamagent_app TO postgres` する。ingest の DB テストは専用 schema を作ったあと、このロールが存在し、接続ユーザーがそのメンバー（`SET ROLE` できる）であることを確かめ、満たさなければ skip する。RLS を bypass しないロールに切り替えてポリシーを試すための準備で、これが無いと skip になり RLS の検証が抜ける（`-ra` の skip 理由に出る）。仕組みは [RLS と実行ロール](/openwiki/data/rls-and-app-role.md)。
+CI の `Prepare disposable PostgreSQL test role` は、`teamagent_app` を `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN INHERIT` で作り、`GRANT teamagent_app TO postgres` する。ingest の DB テストは専用 schema を作ったあと、このロールが存在し、接続ユーザーがそのメンバー（`SET ROLE` できる）であることを確かめ、満たさなければ skip する。RLS を bypass しないロールに切り替えてポリシーを試すための準備で、これが無いと skip になり RLS の検証が抜ける（`-ra` の skip 理由に出る）。仕組みは [RLS と実行ロール](../data/rls-and-app-role.md)。
 
 `tests/personal_memory/conftest.py` はさらに踏み込み、superuser で migration を流すと SECURITY DEFINER と RLS が偽の緑になるとして、本番の master に似せた「CREATEROLE・BYPASSRLS・非 superuser」の migrator ロールと使い捨て DATABASE をモジュールごとに作り、そこで `0029_personal_memory.sql` を流す。終わると `DROP DATABASE ... WITH (FORCE)` とロール削除で片付ける。
 
@@ -125,8 +121,7 @@ CI の `postgres:16-alpine` には pgvector が無い。`tests/ingest/test_inges
 2. CI の `Prepare disposable PostgreSQL test role` と同じ SQL を流し、`GRANT teamagent_app TO <DSN のユーザー>` する。
 3. `TEAMAGENT_TEST_DB_DSN=postgresql://<user>:<pass>@localhost:5432/<db> uv run --extra dev --extra mcp pytest tests/ingest tests/personal_memory -q`
 
-<!-- openwiki: broken internal link [/openwiki/data/postgres-schema-and-migrations.md] link "/openwiki/data/postgres-schema-and-migrations.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`TEAMAGENT_TEST_DB_DSN` は**使い捨ての DB 以外に向けない**。テストはロールと DATABASE を作成・強制削除し、ロール作成権限も要求する。スキーマ全体は [PostgreSQL スキーマとマイグレーション](/openwiki/data/postgres-schema-and-migrations.md)。
+`TEAMAGENT_TEST_DB_DSN` は**使い捨ての DB 以外に向けない**。テストはロールと DATABASE を作成・強制削除し、ロール作成権限も要求する。スキーマ全体は [PostgreSQL スキーマとマイグレーション](../data/postgres-schema-and-migrations.md)。
 
 ## tests/ の配置
 
@@ -140,8 +135,7 @@ CI の `postgres:16-alpine` には pgvector が無い。`tests/ingest/test_inges
 | `tests/ingest/`・`tests/personal_memory/`・`tests/orchestrator/`・`tests/runtime/`・`tests/media/` | 各サブシステム。`*_postgres.py` が実 DB テスト |
 | `tests/scripts/`・`tests/infra/`・`tests/codebuild/` | スクリプト・Dockerfile・Terraform・CodeBuild の供給網契約（文字列やハッシュの固定） |
 | `tests/hermes_runtime/` | wheel に入らない `hermes_runtime/` を `sys.path` に足して読む |
-<!-- openwiki: broken internal link [/openwiki/testing/routing-and-eval.md] link "/openwiki/testing/routing-and-eval.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| `tests/routing/`・`tests/eval/` | ルーティングコーパスと gold set（[ルーティングと評価](/openwiki/testing/routing-and-eval.md)） |
+| `tests/routing/`・`tests/eval/` | ルーティングコーパスと gold set（[ルーティングと評価](routing-and-eval.md)） |
 
 `tests/conftest.py` の autouse fixture は、受信箱スキャンのキャッシュ・下書きの日次上限カウンタ・HMAC ローテーションの時計状態・お土産資料の同時実行枠を各テストの前後でリセットする。これらは「本番は呼び出しごとに Skill を作り直す」ためにプロセス内に置いた状態で、テストは 1 プロセスなので消さないと次のテストへ漏れる。同じ種類のプロセス内状態を足したら、ここにリセットを足す。
 

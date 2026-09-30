@@ -31,7 +31,7 @@ sources:
     resource: repo://infra/terraform/terraform_apply_supervisor.py
   - id: openwiki-source-a118f1fc21dd73a032240036
     resource: repo://scripts/aws/release_mcp.sh
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # リリースゲートとデプロイ
@@ -42,20 +42,16 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 - 旧入口（`infra/terraform/plan_image_release.sh`・`apply_image_release_plan.sh`・`apply_openclaw.sh`・`apply_resilience.sh`・`update_image_release_controls.sh`、`infra/deploy/register_ingest_td.sh`・`promote_hmac_task.sh`・`deploy_connectweb_unified.sh`）はすべて理由を表示して `exit 64` する stub。
 - guard は手順を守る運用者向けの協調制御で、管理者権限に対する認可境界ではない（README とスクリプト冒頭に明記）。管理者は AWS CLI で直接 RegisterTaskDefinition などを打てるが、それは受容済みリスクであり正規経路ではない。
 
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/terraform-layout.md] link "/openwiki/operations/terraform-layout.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/hmac-keyring-and-rotation.md] link "/openwiki/operations/hmac-keyring-and-rotation.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-イメージの種類とビルドは [コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)、state と .tf の配置は [Terraform の構成](/openwiki/operations/terraform-layout.md)、HMAC 鍵束の世代移行は [HMAC 鍵束とローテーション](/openwiki/operations/hmac-keyring-and-rotation.md)。
+イメージの種類とビルドは [コンテナイメージとビルド](container-images-and-build.md)、state と .tf の配置は [Terraform の構成](terraform-layout.md)、HMAC 鍵束の世代移行は [HMAC 鍵束とローテーション](hmac-keyring-and-rotation.md)。
 
 ## 全体の流れ
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  B["build（mcp は release_mcp.sh 5段）<br/>quarantine → verified-candidate"] --> A["authorize_image_release.sh<br/>active/rollback receipt・release へ昇格<br/>gate 用 var-file 出力"]
-  A --> P["guard plan<br/>saved plan + intent PREPARED"]
+  B["build（mcp は release_mcp.sh 5段） ／ quarantine → verified-candidate"] --> A["authorize_image_release.sh ／ active/rollback receipt・release へ昇格 ／ gate 用 var-file 出力"]
+  A --> P["guard plan ／ saved plan + intent PREPARED"]
   P --> V["guard verify（read-only）"]
-  V --> X["guard apply<br/>lock + APPLYING → supervisor で terraform apply<br/>→ probe → finalizer APPLIED"]
+  V --> X["guard apply ／ lock + APPLYING → supervisor で terraform apply ／ → probe → finalizer APPLIED"]
 ```
 
 ## buildspec 世代 publish（ビルドの前提）

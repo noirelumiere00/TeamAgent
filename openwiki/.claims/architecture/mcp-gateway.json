@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "pageVersion": "sha256:d8283c27dd598a952aa17a8af3a402a09e589edbe5949de4396703a4bedb37a5",
+  "pageVersion": "sha256:3a61df337cb44f463807b1ab82d6b72a438bea9e8e2d448c6cdd01f3596e96e8",
   "claims": [
     {
       "id": "claim_2ff033a35134403badf1a694d443d5d8",
@@ -41,7 +41,7 @@
       "statement": "build_production_server は SLACK_BOT_TOKEN が無ければ RuntimeError で起動を拒否し、TEAMAGENT_SHARED_COMPANY_DOMAINS の有無で会社共有モードと STRICT モードを切り替える。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1546-L1571",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1591-L1616",
           "version": "repo-lines-v1:sha256:40cd70ec998d9aecee51c03e349590877be58eb53646cd7b970b1f9ceca4e9fa:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjM5MDAzNTZkMWNjZDM2NzA3MjQyZDYwMjVmY2UwMjA1ZjRkMDRmYjYxYzc4NTI5OGZlYmUwZGFjODg3MzY4MDQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU3ZjVhMjllMzM0ODIxM2I4MzgzYzY4YTJjZTQwYjQzNGFhNzU0ODlkYWMyNDE2MDAzNTcwZDEwZjg0MjJkMGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFiODk4MTU5NDgzNGNlZWJiZWIwYWVkNDA4ZGE4MDI5OWMxNDEyY2NhZGY3ODE2Yzk3YzMwNDEzOTIxYTZkYjUifQ"
         }
       ]
@@ -61,12 +61,16 @@
       "statement": "dispatch_tool は caller 検証→メタデータ解決→連携依頼の oauth_connect 寄せ→Pydantic 入力検証→thread での skill.run の順に処理し、例外は構造化エラーで返す。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1081-L1117",
-          "version": "repo-lines-v1:sha256:a1dd97a772b7d4784e64418b2c7927b17e093c584ef99df6ab16751774d22e6c:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMxZTNkMDk0MjMyYzVkMmU5NjA5MTZjMDMxY2YyYzZjY2E0MTlhZWNlZWJjOTA0MWFkZDgxODkzNjdjMDg0NjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE2OGViMTc2ZjA3ZDkzNDZhZDU2ZjE5Mjc2MjQyYTJlN2Q3Mzk4ZDNkZTRlYjM2OWI5MmFkNGVhZTU3MjJlNDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjlkNTI3OTNiODZiN2MxMTgyNTNjYjQxNDAzMGQyYTQ5MDhlMjZkYjMyZTVkZDkxOGM4YjYyMmE4MmNhMmFiZDAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk5NTM5MzYzOWExZmEyZjI1OTVhZGExYTkxYTQ2MjY3MjA0OGM2NTAwODEzMDgxNDE0MmQ4ZTI2MTU2NDA0NjkifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1120-L1150",
+          "version": "repo-lines-v1:sha256:a87ad2d38ed2d850929bd94b9cf45d0bf7924cc780ad53190539e733ee5f7396:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3MGI0ZTBlNzViYTJmY2M1ZmFhOWJiZmQ2NjU4M2QxZGMzMzc2YWE0MGY4ZTkzZTNiZTY0ZDYyOGViZmE0NTUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMzNGE4MTI2MDc0Yjc0MGU0NDZhNjEzZDYwZWU0N2IyOTU2YzI4NTQxNzU2MzdkZmU0NWExNDNhMWY3NGU1YTYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUxZGI4Y2U0ZWViZWIwNDYxOWE5MThhNzYzNWI1MmNkNGFiYjFkYjIwNjIwY2I5OGVkMWEwZmQ5ZTAzZTRhYTYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImZlMzhjOTEzMmUxZjdlMzU1Zjg4ZGU0OTIyNjlmNGU3ZGRhNDI1MzBiNTAwMjhhNWZlMGU5Njk0ZGNjNDU5OWQifQ"
         },
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L859-L933",
-          "version": "repo-lines-v1:sha256:5feddcce54c664bfe12363c84b72af3ec2aeb0956ef9f93438063f5daaa8eef5:eyJzZWxlY3RlZExpbmVDb3VudCI6NzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjExYmNiYzUwNGVkNzVhYmM1YWM2NjViZjk0ZmZmNjY4MzI2OTE2NzNiNjI2NGI2N2FmMGZkYTUwN2Q2NDQzYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkzY2EyMWZiMmVjZTcxNTg5OWUyZDY5ZDQ2OWRiNzZkMDExNjRmNWZkMWE2YTU1MTNhNWM5MTg5NDcwZWFmNTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU2MDUzZWVjYmRjYTdhNDAyMmY2NzBlOWM4ODA0YjE2NjY4NDZjMWYyYmJlNGE0YzM4MDEzNjE5NzNhODExZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImIyY2IyMWM2ZWFiYzc5ZWFhYzIzZDZjODExY2JkOTc1YTE0MTA0ZmU1OTBkNDhiNmQ2N2Y0ZDhiZGNmMzQ5ZDEifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L904-L970",
+          "version": "repo-lines-v1:sha256:c6a11c83b2a12ba715fa9ae5ca0e818c51bf711a53fa2794da976074c8f2c7a4:eyJzZWxlY3RlZExpbmVDb3VudCI6NjcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjExYmNiYzUwNGVkNzVhYmM1YWM2NjViZjk0ZmZmNjY4MzI2OTE2NzNiNjI2NGI2N2FmMGZkYTUwN2Q2NDQzYjYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU2MDUzZWVjYmRjYTdhNDAyMmY2NzBlOWM4ODA0YjE2NjY4NDZjMWYyYmJlNGE0YzM4MDEzNjE5NzNhODExZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImFmYzM5MGQ0OWNiMmE4NTRiNTFiZTA1ZWU5OGYwYWQ2NTUwMjFhYTdkZTE5M2FhYTllODEwYTM0YWY4MTkzYTYifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L964-L970",
+          "version": "repo-lines-v1:sha256:192e1f52208d9d93b9c95505196213e1e83eb5a7b95bac0c49141db052095132:eyJzZWxlY3RlZExpbmVDb3VudCI6NywiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzBjMWYxODhmMTQyZWQ3YTgyNDY4MGIyMDcxNzJjNTUxOWJjNjE0YTQ4ZmRhN2NmMTY3ZWRiOGRkZjc5OTU2YyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiMDFiYTQ3MTljODBiNmZlOTExYjA5MWE3YzA1MTI0YjY0ZWVlY2U5NjRlMDljMDU4ZWY4Zjk4MDVkYWNhNTQ2YiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNDgwZDcyYzE5N2MwZTcwZmIzMGJiMzZjMTQ2MmIxMmM4YTNkMzRkZGE1ZmJhZjI3NzViMTE4OTRjYjU1NDE2YiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiYWZjMzkwZDQ5Y2IyYTg1NGI1MWJlMDVlZTk4ZjBhZDY1NTAyMWFhN2RlMTkzYWFhOWU4MTBhMzRhZjgxOTNhNiJ9"
         }
       ]
     },
@@ -75,7 +79,7 @@
       "statement": "STRICT モードでは外殻が申告した user_email/user_groups/user_role を破棄し、署名済み event user をサーバ側で解決する。会社共有モードも署名済み caller と resolver 成功が必須。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L466-L585",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L511-L630",
           "version": "repo-lines-v1:sha256:092ccfeed7a7894cc599c555b118e1c60dbace5b7124cf7322869d123ce7e48f:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIwLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiIwMTRhMjk2YTVhMTAzNDY5OGZiMWU0NTI1MDlkOWQ5OTZkYzg0NmNjNzI1ZDA4MDBiOTEzMTQ2ZjllNzM0NmM2IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIzNTgyNDNiNWQ1ZWVhMGQ5ODdjM2JiNjg5NWYzNGUxMTFkMjViMDMzM2IwYTNiZmU1MzcwMTM0MjhkYzlhYTY4IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI1MTg4YzZjNTI4Yjk4YzY3MTBiYjViZTE5NDVkY2ZkYzc2MzcwOTZlZmM3NzVmYTExYzE1MTBlZDUzZTU4OGE0IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI2ZGU1ZmRkM2I3NjIyYzYzMDk2MWM2ZDAwMGIzZTQ0YTQ2Mjg0NGI4OGM5OWNkOTgxZWQ5OTliMGE2YjYyZmI4In0"
         }
       ]
@@ -95,7 +99,7 @@
       "statement": "_maybe_redirect_to_connect は引数に連携依頼が検出されるとモデルが選んだツールを oauth_connect に差し替え、元の引数を捨てる。run_agent 経路には適用しない。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L649-L706",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L694-L751",
           "version": "repo-lines-v1:sha256:96de7c06c5c251d057ad33f9f85e50f612ef4b726a721b88de469e22acb87a13:eyJzZWxlY3RlZExpbmVDb3VudCI6NTgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjgwYzZkMmI3OTBiMWI3YmUyM2I2ZWQ3M2MzYTRmZGJkZmZlMDNkNjY4YjFhY2Y4M2RhNDI2ZTI4M2RhNmRlYzEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijc2MDM1OTY5NDNmMDBjYWYwZmNmYmI2OTMxOWU3N2JhMjNlZGFkNDdjNjFkY2NkZDc3ZTZjYzUwYzZjZjgzZTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjhjYzRhN2QxY2M3OTZhYmEzZTQ2NzIzMzI3ZjUxN2U5ZjgxMTk4MmQyNTBmMDcwMjk4NmU0YjU3NjRhZDk1ODkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijg3YjVhNDY1ZjRhYTNmOGVhMjhjOTJjMTJjMDcxMzI0ZjUzNTM5YzgyMzhmYmU3OTYwZmI5MTEzODQxNjJkYWUifQ"
         }
       ]
@@ -105,7 +109,7 @@
       "statement": "usage 記録のログキーは tool_cost_usd で、cost_usd にしないのは CloudWatch のコスト metric filter の二重計上を避けるため。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1143-L1171",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1188-L1216",
           "version": "repo-lines-v1:sha256:851840306e526dcbba37e15638df1f831e8943897b89a8a7b13587d099a99ee9:eyJzZWxlY3RlZExpbmVDb3VudCI6MjksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU4NDAzOGI1ZTZiYTA0NDA3MDUyMTU0MzA4MWM3NTMwMzA1NWY5MmFjMmEwMmM1OTQwNGQ3YjI4MTdjNzgwYzQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjdhZjM5MWU3YWQ2NTMyNTk2NzM4OTk3N2UyOTRhYmMxOTNmYWVlYzkxYjFmOGU0Mjg5YjFkMzJkNDUxOWMxMDciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg4ODgzNzgwNmQzNmJkYmM2MmE4YjE0NzY0ODkxNjk1ZDNiOGNkY2NhN2Y5MTZkMTI3Y2RjNmU4MzRmM2Y2OWMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQ2NzU1NjIwMmYyNGVhZmU2OTUzNGE0ZjNjNjdlNThlMTJmYWJiNzczNTNkZjA2NWNlNjYwNWEwYzI5MDg2ZjcifQ"
         }
       ]
@@ -113,6 +117,6 @@
   ],
   "verification": {
     "by": "openwiki/0.6.1",
-    "at": "2026-09-29T07:51:05.076Z"
+    "at": "2026-09-30T04:50:20.078Z"
   }
 }

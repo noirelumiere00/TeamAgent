@@ -25,7 +25,7 @@ sources:
     resource: repo://src/teamagent/skills/x_research/skill.py
   - id: openwiki-source-8cde14f64fc018e740456210
     resource: repo://src/teamagent/workers/x_buzz_job.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # X リサーチと Web リサーチ
@@ -41,15 +41,13 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | `x_buzz_measure` / `x_buzz_measure_status` | 期間（最大 62 日）の日別発話数・バズ投稿 TOP・山の日の分析 | 非同期（依頼ごとに Fargate） | Apify、SQS、Lambda、DynamoDB、S3、Bedrock |
 | `web_research` | 公開 Web の要約と番号付き出典 | 同期（MCP 内・Gemini 1 往復） | Gemini（Google 検索グラウンディング） |
 
-<!-- openwiki: broken internal link [/openwiki/workflows/video-and-tiktok-analysis.md] link "/openwiki/workflows/video-and-tiktok-analysis.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-使い分けは各 Skill の `description` に書いてあり、LLM がツールを選ぶ手がかりになる。商材が主語なら voice、業界やテーマ全体なら needs、期間での増減なら buzz、X 以外の公開 Web なら web_research。TikTok / Instagram の検索面は [動画分析と TikTok](/openwiki/workflows/video-and-tiktok-analysis.md) の担当。
+使い分けは各 Skill の `description` に書いてあり、LLM がツールを選ぶ手がかりになる。商材が主語なら voice、業界やテーマ全体なら needs、期間での増減なら buzz、X 以外の公開 Web なら web_research。TikTok / Instagram の検索面は [動画分析と TikTok](video-and-tiktok-analysis.md) の担当。
 
 コードの場所は、Skill が `src/teamagent/skills/x_research/` と `src/teamagent/skills/web_research/`、Apify 呼び出しが `src/teamagent/adapters/apify_client.py`、buzz の投函と照会が `src/teamagent/adapters/x_task_store.py`、ワーカーが `src/teamagent/workers/x_buzz_job.py`、インフラが `infra/terraform/x_research.tf` と `infra/terraform/lambda/x_dispatch/handler.py`。
 
 ## 有効化と段階公開
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-ツールが Aico から見えるまでの 4 段ゲートは [ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md) を参照。
+ツールが Aico から見えるまでの 4 段ゲートは [ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md) を参照。
 
 | | X 系 4 ツール | web_research |
 |---|---|---|
@@ -139,13 +137,11 @@ sequenceDiagram
 
 ## コストの上限
 
-<!-- openwiki: broken internal link [/openwiki/integrations/bedrock-gemini-and-retry.md] link "/openwiki/integrations/bedrock-gemini-and-retry.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-Apify の費用は `ApifyClient(ledger=CostGuard.from_env())` が actor ごとの単価 × 件数で見積もり、run の前に予約して、終わったら実費で精算する（台帳の仕組みは [Bedrock / Gemini 呼び出しとリトライ・コスト](/openwiki/integrations/bedrock-gemini-and-retry.md)）。上限は全体の `COST_APIFY_MONTHLY_USD`（既定 50）と個人枠の `COST_PER_USER_MONTHLY_USD`（既定 15）。MCP とワーカーには同じ値を渡す（違うと、経路によって上限が変わってしまう）。`COST_GUARD_TABLE` が無いとガードは効かない。スキーマの件数上限（クエリ 6 本、1 本 30 件、期間 62 日など）が、コスト防御の最初の段になっている。
+Apify の費用は `ApifyClient(ledger=CostGuard.from_env())` が actor ごとの単価 × 件数で見積もり、run の前に予約して、終わったら実費で精算する（台帳の仕組みは [Bedrock / Gemini 呼び出しとリトライ・コスト](../integrations/bedrock-gemini-and-retry.md)）。上限は全体の `COST_APIFY_MONTHLY_USD`（既定 50）と個人枠の `COST_PER_USER_MONTHLY_USD`（既定 15）。MCP とワーカーには同じ値を渡す（違うと、経路によって上限が変わってしまう）。`COST_GUARD_TABLE` が無いとガードは効かない。スキーマの件数上限（クエリ 6 本、1 本 30 件、期間 62 日など）が、コスト防御の最初の段になっている。
 
 ## web_research（公開 Web）
 
-<!-- openwiki: broken internal link [/openwiki/integrations/bedrock-gemini-and-retry.md] link "/openwiki/integrations/bedrock-gemini-and-retry.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-Gemini の Google 検索グラウンディングを 1 回呼ぶだけの、読み取り専用のツール。検索もページ本文の取得も Google 側で済むので、自 VPC から Web ページを直接取りに行くことはない。呼び出し方・リトライ（グラウンディング経路は通常 2 回まで）・課金は [Bedrock / Gemini 呼び出しとリトライ・コスト](/openwiki/integrations/bedrock-gemini-and-retry.md) にある。
+Gemini の Google 検索グラウンディングを 1 回呼ぶだけの、読み取り専用のツール。検索もページ本文の取得も Google 側で済むので、自 VPC から Web ページを直接取りに行くことはない。呼び出し方・リトライ（グラウンディング経路は通常 2 回まで）・課金は [Bedrock / Gemini 呼び出しとリトライ・コスト](../integrations/bedrock-gemini-and-retry.md) にある。
 
 1. `ctx.metadata.user_email` が無ければ `PermissionError` を投げる（本人に限る・fail-closed）。
 2. 段階公開ゲート（`WEB_RESEARCH_ALLOWED_EMAILS`）を通す。
@@ -174,5 +170,4 @@ system プロンプトでは「必ず検索して根拠づけよ」を「URL を
 - `tests/skills/x_research/test_x_research_skills.py`: voice の正常系、未検証の投稿を捨てないこと、ノイズ除去の fail-open、予算超過、段階公開、dedup キー。needs の足切りと縮退。buzz の spec と、keyword をログに出さないこと。期間の検証。status の所有者照合とキャッシュ。ワーカーの `run_job`。
 - `tests/scripts/test_worker_dispatchers.py`: dispatcher が RunTask のあともメッセージを保持して冪等に動くこと、`done` のときだけ ack すること。
 - `tests/skills/web_research/test_web_research.py`、`tests/adapters/test_apify_client.py`。
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 走らせ方は [テストの走らせ方](/openwiki/testing/running-tests.md)。
+- 走らせ方は [テストの走らせ方](../testing/running-tests.md)。

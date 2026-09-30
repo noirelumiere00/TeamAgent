@@ -1,18 +1,13 @@
 ---
 type: workflow
 title: 朝ダイジェストのボタン処理
-description: 朝ダイジェストの ✏️下書き・📅カレンダー登録・🗓日程候補・☑️確認済みボタンについて、mcp 側の HMAC 署名トークン（purpose・本人・期限）の発行と検証、呼ばれるツール mail_draft / calendar_event / schedule_propose / digest_ack の副作用、押し直しの二重実行防止とその既知の弱点をまとめる。
+description: 朝ダイジェストの ✏️下書き・📅カレンダー登録・🗓日程候補・☑️確認済みボタンについて、mcp 側の HMAC 署名トークン（purpose・本人・期限）の発行と検証、呼ばれるツール mail_draft / calendar_event / schedule_propose / digest_ack の副作用、押し直しの二重実行防止（plugin の押下台帳と mcp の nonce の保持期限）をまとめる。
 tags: [morning-digest, slack-buttons, hmac, mail-draft, calendar-event, schedule-propose, digest-ack, idempotency]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-6eef6c0b1f149a8267e36782
     resource: repo://infra/migrations/0025_digest_ack.sql
   - id: openwiki-source-a24133c7b43bc7a5e1ae4991
     resource: repo://infra/openclaw/caller-identity-plugin/dist/index.js
-  - id: openwiki-source-ef54f8e63a41477899e459da
-    resource: repo://infra/terraform/fargate.tf
   - id: openwiki-source-e0948537ab0a1dd3b57bd3d1
     resource: repo://scripts/run_morning_digest_fargate.py
   - id: openwiki-source-5e419976c050623226fbb19e
@@ -39,19 +34,19 @@ sources:
     resource: repo://src/teamagent/skills/morning_digest/skill.py
   - id: openwiki-source-00e68d1a8141f269042cd1ae
     resource: repo://src/teamagent/skills/schedule_propose/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # 朝ダイジェストのボタン処理
 
 ## このページの範囲
 
-<!-- openwiki: broken internal link [/openwiki/workflows/morning-digest.md] link "/openwiki/workflows/morning-digest.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-朝ダイジェスト（[朝ダイジェスト](/openwiki/workflows/morning-digest.md)）の DM には、状態を変えるボタンが 4 種類ある。どのボタンも value に **mcp が発行した HMAC 署名トークン**を持ち、押されると同じ名前の MCP ツールがそのトークンを検証してから副作用を起こす。
+朝ダイジェスト（[朝ダイジェスト](morning-digest.md)）の DM には、状態を変えるボタンが 4 種類ある。どのボタンも value に **mcp が発行した HMAC 署名トークン**を持ち、押されると同じ名前の MCP ツールがそのトークンを検証してから副作用を起こす。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/hmac-keyring-and-rotation.md] link "/openwiki/operations/hmac-keyring-and-rotation.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-このページは mcp 側（トークンの発行と検証・ツールの副作用・二重実行）を扱う。OpenClaw の caller-identity plugin がボタン押下を捕捉して束縛先ツールを直接呼ぶ流れ（`ACTION_BINDINGS`・本人 DM の確認・caller claim の鋳造）は [呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)、鍵の世代管理は [HMAC 鍵束とローテーション](/openwiki/operations/hmac-keyring-and-rotation.md) を参照。
+このページは mcp 側（トークンの発行と検証・ツールの副作用・二重実行）を扱う。OpenClaw の caller-identity plugin がボタン押下を捕捉して束縛先ツールを直接呼ぶ流れ（`ACTION_BINDINGS`・本人 DM の確認・caller claim の鋳造）は [呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)、鍵の世代管理は [HMAC 鍵束とローテーション](../operations/hmac-keyring-and-rotation.md) を参照。
 
 たとえるなら、トークンは「本人の名前と有効期限が印字された引換券」。改ざんや他人の使用は券面の割り印（HMAC）で防げるが、券そのものに「使用済み」の穴は開かない。1 回きりにしているのは窓口側の台帳（後述）である。
 
@@ -66,8 +61,7 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | 🗓 日程候補を提案 | `schedule_propose` | draft トークン（✏️ と同じ値） | `schedule_token`（400） | `scheduling_request`・draft トークンあり・`MORNING_DIGEST_SCHEDULE_BUTTON=1` |
 | ☑️ 確認済みにする／☑️ 全部確認した／↩︎ 取り消す | `digest_ack` | ack トークン | `ack_token`（2000） | `MORNING_DIGEST_ACK_FILTER=1`（トークン発行）かつ `MORNING_DIGEST_ACK_BUTTON=1`（描画） |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-ツール側も `USE_MAIL_DRAFT_TOOL` / `USE_CALENDAR_EVENT_TOOL` / `USE_SCHEDULE_PROPOSE_TOOL` / `USE_DIGEST_ACK_TOOL` がすべて既定 OFF で、ON のときだけ登録される（`src/teamagent/orchestrator/factory.py`、[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)）。📅・🗓・☑️ の描画フラグは「押下先ツールが本番で有効になってから ON」にする運用で、順序を誤ると押しても反応しないボタンになる。
+ツール側も `USE_MAIL_DRAFT_TOOL` / `USE_CALENDAR_EVENT_TOOL` / `USE_SCHEDULE_PROPOSE_TOOL` / `USE_DIGEST_ACK_TOOL` がすべて既定 OFF で、ON のときだけ登録される（`src/teamagent/orchestrator/factory.py`、[ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md)）。📅・🗓・☑️ の描画フラグは「押下先ツールが本番で有効になってから ON」にする運用で、順序を誤ると押しても反応しないボタンになる。
 
 ## トークンの発行
 
@@ -100,8 +94,7 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 
 どのツールも `run()` の冒頭で同じ順に確かめる。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-1. `ctx.metadata["user_email"]` が無ければ `PermissionError`（本人限定・fail-closed）。この email は mcp gateway が caller claim で検証した Slack 利用者から解決したもので、モデルが書いた引数ではない（[MCP gateway](/openwiki/architecture/mcp-gateway.md)）。
+1. `ctx.metadata["user_email"]` が無ければ `PermissionError`（本人限定・fail-closed）。この email は mcp gateway が caller claim で検証した Slack 利用者から解決したもので、モデルが書いた引数ではない（[MCP gateway](../architecture/mcp-gateway.md)）。
 2. `decode_*_token(token, user_email)` が次をすべて満たしたときだけ中身を返す。
    - 鍵束が読める。形式が `payload.署名` で、`v` と `typ` がその種類のもの。
    - その種類の purpose で署名が一致する（`HmacKeyring.verify` は有効な全鍵と定数時間で比較する）。
@@ -127,31 +120,20 @@ draft / event は、旧形式（`v` と `typ` が無い payload）をローテ�
 
 補足:
 
-<!-- openwiki: broken internal link [/openwiki/workflows/mail-tools.md] link "/openwiki/workflows/mail-tools.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **`mail_draft`** の本体は `MorningDigestSkill.generate_draft_for_thread`。スレッドを取り直し、最新メッセージを返信の基準にする。日次上限はプロセス内の辞書で数えるため、ECS タスクが複数あれば全体では上限×タスク数まで通りうる（コードのコメントも「暴走の頭打ち」としか保証していない）。詳しくは [メール系ツール](/openwiki/workflows/mail-tools.md)。
+- **`mail_draft`** の本体は `MorningDigestSkill.generate_draft_for_thread`。スレッドを取り直し、最新メッセージを返信の基準にする。日次上限はプロセス内の辞書で数えるため、ECS タスクが複数あれば全体では上限×タスク数まで通りうる（コードのコメントも「暴走の頭打ち」としか保証していない）。詳しくは [メール系ツール](mail-tools.md)。
 - **`calendar_event`** の event_id は件名を含まないので、同じ日時なら翌日のダイジェストから押しても同じ id になり二重登録にならない。代わりに、UI から手動で消した予定を同じボタンで入れ直そうとしても 409（「登録済み」）になる。
 - **`schedule_propose`** は、本人カレンダーの freebusy（現在から 9 日）から `find_slots` で空き枠を出す。freebusy の API 障害は「空き枠なし」と区別して `freebusy_failed` を返す。ホールド作成の失敗は下書きの成功を取り消さない。
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **`digest_ack`** は PostgreSQL の `digest_ack`（migration 0025）へ `teamagent_app` ロールと `app.user_email` で接続し、RLS（`FORCE ROW LEVEL SECURITY`）で本人行に限って読み書きする（[RLS と実行ロール](/openwiki/data/rls-and-app-role.md)）。ack に成功すると 1 時間有効の `unack` トークンを発行し、plugin が押した本人の DM への結果投稿に「↩︎ 取り消す」ボタン（同じ `digest_ack`）として添える。朝ダイジェストは、確認済みでもその後に新着があれば（anchor が進んでいれば）再び表示する。確認状態の読み取りに失敗したときは 1 件も隠さない（fail-open。書き込みの失敗は件数 0 で伝える）。
+- **`digest_ack`** は PostgreSQL の `digest_ack`（migration 0025）へ `teamagent_app` ロールと `app.user_email` で接続し、RLS（`FORCE ROW LEVEL SECURITY`）で本人行に限って読み書きする（[RLS と実行ロール](../data/rls-and-app-role.md)）。ack に成功すると 1 時間有効の `unack` トークンを発行し、plugin が押した本人の DM への結果投稿に「↩︎ 取り消す」ボタン（同じ `digest_ack`）として添える。朝ダイジェストは、確認済みでもその後に新着があれば（anchor が進んでいれば）再び表示する。確認状態の読み取りに失敗したときは 1 件も隠さない（fail-open。書き込みの失敗は件数 0 で伝える）。
 
-## 押し直しと二重実行（既知の弱点あり）
+## 押し直しと二重実行
 
 同じボタンの押し直しは次の段で止める。
 
-1. **plugin の押下台帳**（`buttonPressLedger`）: 押下の指紋（押した人・team・会話・メッセージ ts・thread・`action_id`・value の SHA-256）をキーに、24 時間＋10 分保持する。OpenClaw プロセスのメモリ上の `Map` なので、再起動で消える。上限は 5000 件で、超えると古いものから捨てる。
-2. **mcp の caller claim nonce**: 押下の claim の nonce は指紋から HMAC で決まるため、同じ押下は同じ nonce になる。mcp は DynamoDB へ `attribute_not_exists(nonce)` の条件付き書き込みで記録し、2 回目を `CALLER_IDENTITY_REJECTED` で拒否する。
+1. **plugin の押下台帳**（`buttonPressLedger`）: 押下の指紋（押した人・team・会話・メッセージ ts・thread・`action_id`・value の SHA-256）をキーに、24 時間＋10 分保持する。OpenClaw プロセスのメモリ上の `Map` なので、再起動で消える。上限は 5000 件で、超えると古いものから捨てる。台帳にある押下の押し直しは実行せず、押した本人にだけ状態に応じた 1 行を一時表示で返す（詳細は [呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)）。
+2. **mcp の caller claim nonce**: 押下の claim の nonce は指紋から HMAC で決まるため、同じ押下は同じ nonce になる。mcp は DynamoDB へ `attribute_not_exists(nonce)` の条件付き書き込みで記録し、2 回目を `CALLER_IDENTITY_REJECTED` で拒否する。記録の保持期限（TTL 属性 `expires_at`）は「消費した時刻＋25 時間」（`CALLER_CLAIM_REPLAY_RETENTION_SECONDS`）で、ボタントークンの最長寿命 24 時間より長い。そのため OpenClaw の再起動などで 1 段目が消えても、トークンが有効な間の押し直しは 2 段目で止まり、TTL で項目が消えるのはトークンが失効した後になる。
 3. **ツール側の冪等性**: 上の表のとおり（予定・ホールドは固定 id、下書きは既存下書きの検査、ack は UPSERT）。
 
-**既知の弱点（コードで確認済み）**: ボタントークンは最長 24 時間有効だが、2 段目の nonce の記録が確実に残るのは claim の期限までに過ぎない。DynamoDB の項目の `expires_at` には claim の `exp`（発行から最長 60 秒）が入り、テーブルの TTL はこの属性で削除する。Terraform とコードのコメントは TTL を「掃除にすぎない」としており、実際にいつ消えるかは保証されない（plugin のコメントは数時間〜数日遅れると書いている）。項目が消えた後は、同じ nonce の新しい claim が通る。
-
-そのため、**OpenClaw の再起動（または台帳の上限超過）で 1 段目が消え、かつ DynamoDB の項目が TTL で削除された後**に、期限内のボタンを押し直すと、ツールがもう一度実行される。そのときの影響は 3 段目次第になる。
-
-- `calendar_event`: 固定 id の 409 で「登録済み」になり、二重登録はしない。
-- `schedule_propose`: 下書きが残っていれば `already`。本人が下書きを送信・削除した後なら、候補入り下書きがもう一度作られる（ホールドは固定 id なので増えない）。
-- `mail_draft`: 本人が下書きを送信・削除した後なら、新しい下書きが作られる（LLM の費用と日次上限を消費）。
-- `digest_ack`: UPSERT なので件数は増えない。取り消した後に古い ☑️ を押し直せば、再び確認済みになる。
-
-plugin 側の e2e テスト（`tests/test_openclaw_button_direct.py`）は「台帳が空でも mcp の nonce が止める」ことを確かめているが、テストの検証器は時計を固定した process 内の replay store（`InMemoryCallerClaimReplayStore`）を使うので、DynamoDB の項目が消えた後の押し直しは再現していない。
+2026-09-29 の #476 までは、2 段目の `expires_at` に claim の `exp`（発行から最長 60 秒）が入っていた。TTL の削除時刻は保証されないため、再起動で 1 段目が消えた後に DynamoDB の項目が先に削除されると、期限内のボタンの押し直しでツールがもう一度実行されうる状態だった（`mail_draft` と `schedule_propose` は、本人が下書きを送信・削除した後なら下書きがもう一度作られる）。現在の保持期限はこれを塞ぐための値。
 
 ### 旧 worker の経路
 

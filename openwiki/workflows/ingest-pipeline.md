@@ -19,15 +19,14 @@ sources:
     resource: repo://src/teamagent/ingest/pipeline.py
   - id: openwiki-source-cbafc22e69fac211c4adae53
     resource: repo://src/teamagent/ingest/repository.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 資料取り込み（ingest）
 
 ## 位置づけ
 
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-社内ナレッジを `documents` + `chunks`（pgvector）へ入れるバッチ処理。MCP gateway の中ではなく、同じ mcp イメージを使う別の ECS Fargate タスクとして走る。ここで作った `cls_*` 分類メタ・`suppressed`・`boilerplate`・`stale` の印を [社内資料検索](/openwiki/workflows/knowledge-search.md) が読む。
+社内ナレッジを `documents` + `chunks`（pgvector）へ入れるバッチ処理。MCP gateway の中ではなく、同じ mcp イメージを使う別の ECS Fargate タスクとして走る。ここで作った `cls_*` 分類メタ・`suppressed`・`boilerplate`・`stale` の印を [社内資料検索](knowledge-search.md) が読む。
 
 | 層 | 場所 | 責任 |
 |---|---|---|
@@ -40,10 +39,9 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 
 ## 起動経路
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  EB[EventBridge rule<br/>既定 DISABLED] --> L[Lambda ingest_dispatch<br/>同時実行 1]
+  EB[EventBridge rule ／ 既定 DISABLED] --> L[Lambda ingest_dispatch ／ 同時実行 1]
   L -->|RUNNING 無し| RT[ecs:RunTask]
   L -->|上限内の RUNNING あり| SK[skip]
   L -->|上限超過| ST[StopTask → RunTask]
@@ -56,10 +54,8 @@ flowchart LR
 
 - ルールの既定式は `cron(0 9 ? * MON-FRI *)`（平日 18:00 JST）。`state` は `ingest_rule_enabled`（既定 false）で決まり、既定は DISABLED。live を手で DISABLED にしている運用で、apply のたびに ENABLED へ戻らないようにしたもの。リソース名 `ingest_weekly` と直前のコメント「毎週月 18:00 UTC」は古く、既定式（平日）と食い違う。
 - Lambda は `reserved_concurrent_executions = 1` で、EventBridge の重複配送でも判定が直列になる。task family の RUNNING タスクを列挙し、無ければ起動する。経過時間が `INGEST_MAX_RUNTIME_HOURS`（既定 20）以内のものがあれば skip、超えたものは `StopTask` してから起動し直す。`startedAt` が無い起動途中のタスクは `createdAt` で測る。`DescribeTasks` が一部を返さない場合は例外にして起動しない（二重起動の防止を優先）。例外は握らずに投げ直し、EventBridge の再試行（最大 1 回・イベント寿命 3600 秒）に任せる。`RunTask` の `clientToken` は EventBridge のイベント ID と taskdef ARN から作る。
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- タスク定義は ARM64、コマンドは `run_ingest_fargate.py`。secret は `DATABASE_URL`・`SLACK_BOT_TOKEN`・`GOOGLE_OAUTH_JSON`（scrape 有効時は `VERTEX_SA_JSON` も）を Secrets Manager から注入する。env で `USE_DOC_CLASSIFY`・`INGEST_RICH_EXTRACT`・`BOILERPLATE_DETECT`・`DOC_DEDUP_DETECT`・`USE_INCREMENTAL_SYNC`・`GOOGLE_FORCE_OAUTH` を ON にし、`BEDROCK_MODEL_ID` は mcp と同じ変数を渡す（未設定だとコード既定のモデルで分類が走り、費用が膨らむため）。`TEAMAGENT_SHARED_COMPANY_DOMAINS` を渡さないと取り込んだ資料の `acl_groups` が空になり、他の社員の検索では見えない（[RLS と実行ロール](/openwiki/data/rls-and-app-role.md)）。
-<!-- openwiki: broken internal link [/openwiki/operations/release-gates-and-deploy.md] link "/openwiki/operations/release-gates-and-deploy.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- cpu/memory の terraform 既定（1024/4096）は契約テストに固定された値で、実運用値は CLI の register-task-definition で上書きしている。タスク定義は release gate に依存する（[リリースゲートとデプロイ](/openwiki/operations/release-gates-and-deploy.md)）。
+- タスク定義は ARM64、コマンドは `run_ingest_fargate.py`。secret は `DATABASE_URL`・`SLACK_BOT_TOKEN`・`GOOGLE_OAUTH_JSON`（scrape 有効時は `VERTEX_SA_JSON` も）を Secrets Manager から注入する。env で `USE_DOC_CLASSIFY`・`INGEST_RICH_EXTRACT`・`BOILERPLATE_DETECT`・`DOC_DEDUP_DETECT`・`USE_INCREMENTAL_SYNC`・`GOOGLE_FORCE_OAUTH` を ON にし、`BEDROCK_MODEL_ID` は mcp と同じ変数を渡す（未設定だとコード既定のモデルで分類が走り、費用が膨らむため）。`TEAMAGENT_SHARED_COMPANY_DOMAINS` を渡さないと取り込んだ資料の `acl_groups` が空になり、他の社員の検索では見えない（[RLS と実行ロール](../data/rls-and-app-role.md)）。
+- cpu/memory の terraform 既定（1024/4096）は契約テストに固定された値で、実運用値は CLI の register-task-definition で上書きしている。タスク定義は release gate に依存する（[リリースゲートとデプロイ](../operations/release-gates-and-deploy.md)）。
 
 ### エントリポイントと終了コード
 
@@ -132,8 +128,7 @@ flowchart LR
 | `ingest_source_health` / `ingest_connector_runs`（0019） | 既知 invalid の指紋 / run×source ごとの outcome・件数・warning 理由 |
 | `ingest_source_retries` / `ingest_reconciliation_gaps`（0020・lease token は 0021） | retry queue と lease / 未索引 PDF などの照合ギャップ |
 
-<!-- openwiki: broken internal link [/openwiki/data/postgres-schema-and-migrations.md] link "/openwiki/data/postgres-schema-and-migrations.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-スキーマ全体は [PostgreSQL スキーマとマイグレーション](/openwiki/data/postgres-schema-and-migrations.md)。0021 を当てる前にはスケジュール実行と手動実行を止め、走っているタスクを捌き切る必要がある（旧 lease を解放するため）。
+スキーマ全体は [PostgreSQL スキーマとマイグレーション](../data/postgres-schema-and-migrations.md)。0021 を当てる前にはスケジュール実行と手動実行を止め、走っているタスクを捌き切る必要がある（旧 lease を解放するため）。
 
 run 末尾の処理（どれも dry-run では走らない）:
 
@@ -157,5 +152,4 @@ run 末尾の処理（どれも dry-run では走らない）:
 - 段の部品: `test_classify.py`・`test_contextualize.py`・`test_docdedup.py`・`test_boilerplate.py`・`test_freshness.py`・`test_loader.py`
 - 起動: `tests/infra/test_ingest_dispatch.py`（dispatcher）・`tests/scripts/test_ops_shell_scripts.py`（手動スクリプトの契約文字列）
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-走らせ方は [テストの走らせ方](/openwiki/testing/running-tests.md)。
+走らせ方は [テストの走らせ方](../testing/running-tests.md)。

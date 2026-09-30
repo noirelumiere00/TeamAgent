@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "pageVersion": "sha256:982fa79c8760b67370d2b15a76c30bbabb21007944ff4272373fca7ff84241d8",
+  "pageVersion": "sha256:77049224a87894a8cdde4593f226fe1e4d897af99fced6d178a2fe11b84da593",
   "claims": [
     {
       "id": "claim_bec804932bee484c98e5d2fd34068acc",
@@ -48,15 +48,15 @@
     },
     {
       "id": "claim_5e551b71b23f4af9a2443908a209bcd6",
-      "statement": "async_job_notify は USE_ASYNC_JOB_NOTIFY が ON のとき tiktok_acquire と proposal_builder_submit の job を 30 秒間隔で最大 60 分見張り、done/failed で通知する。",
+      "statement": "async_job_notify は USE_ASYNC_JOB_NOTIFY が ON のとき tiktok_acquire と proposal_builder_submit の job を 30 秒間隔で最大 60 分見張り、done/failed で通知する。tiktok_acquire が job_ids で複数ジョブを返したときは、重複を除いた全ジョブに見張りを付ける。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/async_job_notify.py#L19-L80",
-          "version": "repo-lines-v1:sha256:b982296512e74dc4b3ac78b058a96b9f2824ec98c10f301c20e5e4862f77710b:eyJzZWxlY3RlZExpbmVDb3VudCI6NjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYwMzEyYjJlNDg1YzNmNTZhNmU1NWM1NzgxNTIwNmQxNDE0NDU4NDcyNzUxOTQwYTM3YWY0ZjFiNTQxNWU1OGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmNjQ4NTczZWIyMjQyMDcxNmFhYTU0OTEwNWYwNmZkMjAxNDE5YWQ0ZDUzYzJhOTQyMWU4ZGU2NzQ1MDBlYWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImU4MDhjMTY5ZmVjNjkwZjhjMTU1NGU1ZTdhNzllODBiNjZjYTRiNzZhMmE3OWQ2Mjk2YjExYzA2OGNmN2FhMWIifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/async_job_notify.py#L19-L34",
+          "version": "repo-lines-v1:sha256:69476ca54c493c2b1cc6aeff5e27a308d434362487162d67c55ed0e5a7f3ae47:eyJzZWxlY3RlZExpbmVDb3VudCI6MTYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImYwMzEyYjJlNDg1YzNmNTZhNmU1NWM1NzgxNTIwNmQxNDE0NDU4NDcyNzUxOTQwYTM3YWY0ZjFiNTQxNWU1OGUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA1Njk5ZDlhMmIxMzZmYzk1YTU5ODI2NmZhYjViNWY1ZTM3ZTVmZDM2NDU2ZTJiN2M2YmE1NWIzN2NiMThhMGIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNmNjQ4NTczZWIyMjQyMDcxNmFhYTU0OTEwNWYwNmZkMjAxNDE5YWQ0ZDUzYzJhOTQyMWU4ZGU2NzQ1MDBlYWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA5ZjkzMDgzYzE5NzEyMWI5ODI3MDBiYThhZmFiZDE3MjJjZjFkM2U3NDA0NTA5ZTgwZWZhMjcyNDdmNjJmMDcifQ"
         },
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L377-L442",
-          "version": "repo-lines-v1:sha256:c16f992d97f84093d1eb055ce11adf353bfdcb7af6ad82ba9fc157026a2d601d:eyJzZWxlY3RlZExpbmVDb3VudCI6NjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjZhYjJkYmNhNmJjZWM2NTYxZDI2ZmYzNGU5OWNmMDdhODc1MTVmYWVkNGJiZGEwNjlkMzg5YjFmODQ3ZTEzMTkiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMxMWQ3YjQ3ODQ0NjA2YTI0OGYzOWE1Y2EwNzg4YTIzOTcyNmJhMzQ1ZTJlMWE1ZTUxYTBhYjllNWZmYjMyNDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRjYTMwZGUzODVkYzY1ZjRiYjQzNDBhMjcyNjZlMjEwNTI2OTIyNGE0MDRmYWFlZTA0ZDExZjRlZjU1OWUyNjkifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L412-L451",
+          "version": "repo-lines-v1:sha256:b9bd38281171a8ab75880caac0dbf032a914b972e85214039279cdcb483f6c8d:eyJzZWxlY3RlZExpbmVDb3VudCI6NDAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjkwODY5MjdjN2VmMDUyZDJkOTRkMjQ4OGMwNWI2Yjk4MjNjNTg2MmJkMGI1NGRmZWEwNDA4YWRhOTdlNjkwMGEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImVlZDA1NDllYjA3MWY0YjQyOWNkMWRhODgxOTA5NzQwMjZhYzQ0ZDRlZTEyYzcwN2NmZTFlZDNkNjM3ZTY2MjMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjRmZmU0YzJmZTZjNzRmYWI1ZmQyZjQ3MjkxN2M0NjM1NTMzYTgyMTM2ZTViZjJmM2E5ODZjMTI5ZGQ2ZjM2MDgifQ"
         }
       ]
     },
@@ -95,7 +95,7 @@
       "statement": "dispatch_tool の返却前処理は 2 段目登録→完了通知登録→usage 記録→直接投稿→relay fields→長文退避→検索リンク注入の順に固定されている。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1122-L1216",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1167-L1261",
           "version": "repo-lines-v1:sha256:f97e45c415b110c52a214ffeb891d6ebb9e2b548aa54c312b4aa5d3965052d88:eyJzZWxlY3RlZExpbmVDb3VudCI6OTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjIzMzkyM2FiNzJjZjVkZTE3YmYwMDQ1NWIxMjI1YTk0ZmE0ODZlMDZhNTk5MGQ4OTc0MzEzZDUzNmMzNDYxNTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQ5MDgwODIxN2I3YTc3OWU0NTU0ZDNjMTAyMDAzNWI4NjdjYWRkMzQ2MWRkNmUxYjI0NWM2NDliMzRiMGQ5NjMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImRjOGI4MDE2YmM2ZTJiOThhMTIxMzE3N2ExMTgyY2FlMzg0MjljODJkMzU1OWNjNjJlYjE1OGMxMjQ3NDVkYmYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjQzM2QxNzg0ZDk3ZjIyMmUzMDBkZjFkMWQ0MDc5M2RhODUyNWYzMGU1NTZlYWM2YTk1NDYxZGE1ODQ1ZjRkODMifQ"
         }
       ]
@@ -103,6 +103,6 @@
   ],
   "verification": {
     "by": "openwiki/0.6.1",
-    "at": "2026-09-29T07:51:05.076Z"
+    "at": "2026-09-30T04:50:20.078Z"
   }
 }

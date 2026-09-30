@@ -3,9 +3,6 @@ type: integration
 title: Google OAuth とトークン保管（connect-web）
 description: 本人ごとの Google 認可の仕組み。oauth_connect ツールが署名付き state で本人専用リンクを発行し、connect-web の /oauth2/start・/oauth2/callback が検証・code 交換・id_token 照合を行い、refresh token を KMS 暗号化して RLS 付きの oauth_tokens に保存する。build_user_credentials による利用、共有 OAuth と Vertex SA・GOOGLE_FORCE_OAUTH の使い分け、CONNECT-xxx 接続診断も扱う。
 tags: [google, oauth, connect-web, token-store, kms, rls, diagnostics, security]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-cc66f706963ea938fb31e0bf
     resource: repo://infra/migrations/0006_oauth_tokens.sql
@@ -17,6 +14,8 @@ sources:
     resource: repo://src/teamagent/adapters/gdrive_client.py
   - id: openwiki-source-610892a0564fb3c66b4e876b
     resource: repo://src/teamagent/adapters/google_auth.py
+  - id: openwiki-source-dc742f4e04c7ab8e7426cbe6
+    resource: repo://src/teamagent/adapters/google_liveness.py
   - id: openwiki-source-729d21ad3e198a2b2d6392f2
     resource: repo://src/teamagent/adapters/google_oauth_flow.py
   - id: openwiki-source-0f4a8e9e1cd73b9e3151338b
@@ -27,7 +26,10 @@ sources:
     resource: repo://src/teamagent/orchestrator/factory.py
   - id: openwiki-source-e0369aae642851c4787248f5
     resource: repo://src/teamagent/skills/oauth_connect/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # Google OAuth とトークン保管（connect-web）
@@ -45,8 +47,7 @@ Aico のメール・カレンダー・Drive 系ツールは、**呼び出した�
 | 利用 | `src/teamagent/adapters/google_auth.py` | `build_user_credentials` で本人 token から Google `Credentials` を作る |
 | 診断 | `src/teamagent/connect_diagnostics.py` | 失敗経路ごとの `CONNECT-xxx` コードと、利用者が転送できる 1 行 |
 
-<!-- openwiki: broken internal link [/openwiki/integrations/slack-identity-and-oauth.md] link "/openwiki/integrations/slack-identity-and-oauth.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-たとえるなら、oauth_connect は「本人名入りの申込書を渡す窓口」、connect-web は「申込書の割り印と本人の顔を確かめて金庫に預ける受付」、token store は「本人の鍵でしか開かない貸金庫」。Slack の個人トークン（xoxp）も同じ connect-web と KMS 鍵を使うが、詳細は [Slack の本人確認と OAuth](/openwiki/integrations/slack-identity-and-oauth.md) を参照。
+たとえるなら、oauth_connect は「本人名入りの申込書を渡す窓口」、connect-web は「申込書の割り印と本人の顔を確かめて金庫に預ける受付」、token store は「本人の鍵でしか開かない貸金庫」。Slack の個人トークン（xoxp）も同じ connect-web と KMS 鍵を使うが、詳細は [Slack の本人確認と OAuth](slack-identity-and-oauth.md) を参照。
 
 ## 流れ
 
@@ -74,10 +75,10 @@ sequenceDiagram
 
 ## oauth_connect（リンク発行）
 
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- ツールは `USE_OAUTH_CONNECT_TOOL` が真のときだけ登録される（コード既定 OFF、本番 `fargate.tf` は `true`）。MCP gateway は、別ツールの引数に連携依頼が含まれていると検証済み caller のまま `oauth_connect` へ寄せ替える（`mcp_gateway/server.py`）。OpenClaw 側の多層防御は [呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)。
+- ツールは `USE_OAUTH_CONNECT_TOOL` が真のときだけ登録される（コード既定 OFF、本番 `fargate.tf` は `true`）。MCP gateway は、別ツールの引数に連携依頼が含まれていると検証済み caller のまま `oauth_connect` へ寄せ替える（`mcp_gateway/server.py`）。OpenClaw 側の多層防御は [呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)。
 - 対象は常に本人。`SkillContext.metadata["user_email"]` が無ければ `PermissionError`（I02）で fail-closed し、他人分の URL は作らない。
 - Google の状態判定は「行がある」ではなく **保存済み scopes ⊇ `WORKSPACE_SCOPES`**。足りなければ再連携リンクを出す（スコープ追加後に既連携者が機能を使えなくなった事故への対策）。判定中の例外は「未連携」とみなしてリンクを出す（連携導線を塞がない）。
+- **生存確認（`OAUTH_CONNECT_LIVENESS_PROBE`、既定 OFF・本番は tfvars の `oauth_connect_liveness_probe` で渡す）**: パスワード変更などで refresh token が失効した人に「連携済み・操作不要」と返してしまう行き止まりを防ぐため、ON のときは「連携済み」と答える前に、本番のアダプタと同じ組み立て（`build_user_credentials` → `Credentials.refresh`）で token endpoint を 1 回だけ叩く（`adapters/google_liveness.py`、既定 5 秒で打ち切り）。結果は `alive` / `token_dead`（`invalid_grant` か refresh token が空のときだけ）/ `scope_missing` / `unknown` の 4 つで、`unknown` はリンクを出す安全側に倒す。Gmail・Calendar の API は呼ばず、ログには分類コードと例外の型名だけを出す。
 - `OAUTH_REDIRECT_URI` が無い、または URL 生成に失敗したら `ValueError`（L01）。
 - `USE_OAUTH_START_LINKS` が真かつ `CONNECT_BASE_URL` があるとき、長い認可 URL の代わりに `{base}/oauth2/start/{state}` を返す。LLM が約 600 字のクエリを再タイプして state を壊す事故（S01）への対策で、署名をクエリから path へ移す。`CONNECT_BASE_URL` が無ければ warning を出して従来の URL を返す。
 
@@ -90,8 +91,7 @@ sequenceDiagram
 
 ## 認可 URL と code 交換
 
-<!-- openwiki: broken internal link [/openwiki/workflows/mail-tools.md] link "/openwiki/workflows/mail-tools.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- `WORKSPACE_SCOPES` は `openid`・`userinfo.email`・`gmail.modify`・`drive.readonly`・`documents.readonly`・`spreadsheets.readonly`・`presentations.readonly`・`calendar.readonly`・`calendar.events`・`contacts.readonly`。Gmail の送信/削除や Calendar の削除/更新はスコープ上は可能でも、アダプタ層の denylist で封鎖している（[メール系ツール](/openwiki/workflows/mail-tools.md)）。
+- `WORKSPACE_SCOPES` は `openid`・`userinfo.email`・`gmail.modify`・`drive.readonly`・`documents.readonly`・`spreadsheets.readonly`・`presentations.readonly`・`calendar.readonly`・`calendar.events`・`contacts.readonly`。Gmail の送信/削除や Calendar の削除/更新はスコープ上は可能でも、アダプタ層の denylist で封鎖している（[メール系ツール](../workflows/mail-tools.md)）。
 - URL は `access_type=offline`・`prompt=consent`（refresh token を確実に得る）・`login_hint=本人メール`・`hd`（`CONNECT_SEARCH_ALLOWED_HD`、無ければ `TEAMAGENT_SHARED_COMPANY_DOMAINS` が 1 つのときその値）。`include_granted_scopes` は使わない。
 - PKCE は無効。URL 生成（mcp）と交換（connect-web）が別プロセスで code_verifier を共有できないため。機密（web 型）クライアントの secret で守る。
 - `exchange` は `OAUTHLIB_RELAX_TOKEN_SCOPE` を立てて scope の食い違いで落ちないようにし、refresh token が無ければ `ValueError`。id_token は照合用に一時的に持つ。
@@ -113,8 +113,7 @@ sequenceDiagram
 ## 保管（oauth_tokens・KMS・RLS）
 
 - `RdsTokenStore` は email を lower/trim して、`KmsCipher.encrypt(..., context={"user_email": email})` で暗号化した BYTEA を `ON CONFLICT (user_email) DO UPDATE` で upsert する。EncryptionContext を本人メールに束縛するので、別人の行の暗号文を持ってきても復号できない。KMS 鍵の region は `OAUTH_KMS_REGION`（既定 ap-northeast-1）。
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 接続は `pgvector.connection(app_role, user_email)` が `app.user_email` GUC を立て、テーブルは `FORCE ROW LEVEL SECURITY` で「本人行または `app.user_role=admin`」だけ見える。詳細は [RLS と実行ロール](/openwiki/data/rls-and-app-role.md)。
+- 接続は `pgvector.connection(app_role, user_email)` が `app.user_email` GUC を立て、テーブルは `FORCE ROW LEVEL SECURITY` で「本人行または `app.user_role=admin`」だけ見える。詳細は [RLS と実行ロール](../data/rls-and-app-role.md)。
 - `scopes()` は scopes 列だけ読み、KMS 復号しない（oauth_connect の状態判定用。無駄な Decrypt と監査ログを避ける）。
 - `OAuthToken` の `repr` は token を `***` に伏せる。
 - ストアの構築は `orchestrator/factory._build_token_store`（Slack Bot 経路は `runtime/slack_bot.py` の `SkillDispatcher._get_token_store`）。**`OAUTH_KMS_KEY_ID` が無いと `InMemoryTokenStore`（空＝全員未連携）に落ちる（例外にならない）**ので、RDS に token があってもメール系が「連携してください」になる。本番の mcp・connect-web・morning-digest は同じ KMS 鍵（`alias/teamagent-oauth-tokens`）を設定している。
@@ -123,8 +122,7 @@ sequenceDiagram
 
 `build_user_credentials(token)` は `Credentials(token=None, refresh_token=…, token_uri=…, client_id/secret=連携用クライアント, scopes=保存済み scopes)` を返す。クライアント未設定・refresh token 空は `ValueError`。`GmailClient` / `GCalendarClient` / `GDriveClient` / `GSheetsClient` / `GDocsClient` / `GSlidesClient` / `GPeopleClient` の `from_user_token` がこれを使う。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/morning-digest.md] link "/openwiki/workflows/morning-digest.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- refresh は token を発行した**同じ web 型クライアント**でないと `RefreshError` になる。morning-digest のタスクに `CONNECT_GOOGLE_CLIENT_SECRET` を渡し忘れて収集が全 0 件になった回帰があり、`morning_digest_schedule.tf` に注記がある（[朝ダイジェスト](/openwiki/workflows/morning-digest.md)）。
+- refresh は token を発行した**同じ web 型クライアント**でないと `RefreshError` になる。morning-digest のタスクに `CONNECT_GOOGLE_CLIENT_SECRET` を渡し忘れて収集が全 0 件になった回帰があり、`morning_digest_schedule.tf` に注記がある（[朝ダイジェスト](../workflows/morning-digest.md)）。
 - メール系は `skills/_shared/mail_connection.py` の `resolve_gmail_for_user` を通す。ネットワーク I/O をしないので token の生死までは分からない。token 無し → `not_connected`、`ValueError` → `reauth_needed`。受信箱を叩いて失効が露見したら `classify_gmail_failure` が `RefreshError`/`invalid_grant`/401 等を `reauth_needed`、それ以外を `gmail_api_failed` に分ける。どれも「0 件」とは別の構造化エラーとして返し、SOUL の「再連携へ誘導」契約に載せる。
 
 ## 共有 OAuth・Vertex SA・GOOGLE_FORCE_OAUTH

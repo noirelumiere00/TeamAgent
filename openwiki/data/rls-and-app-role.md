@@ -33,7 +33,7 @@ sources:
     resource: repo://tests/ingest/test_ingest_source_health_postgres.py
   - id: openwiki-source-f92233e7ec67daeb838af6c3
     resource: repo://tests/test_rls_email_ci_migration.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # RLS と実行ロール
@@ -59,11 +59,9 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | `teamagent`（RDS master） | RDS | 表の owner・migration 実行者 | 接続のログインにだけ使う。ここから `SET ROLE` で切り替える |
 | `teamagent_app` | `0002` | `NOLOGIN NOBYPASSRLS` | 検索・ingest・OAuth token・usage 記録・朝ダイジェストの状態表 |
 | `teamagent_dashboard` | `0007` | `NOLOGIN NOBYPASSRLS`・読み取り専用 | 利用状況画面（`user_role='admin'` と組で使う） |
-<!-- openwiki: broken internal link [/openwiki/architecture/hermes-personal-memory.md] link "/openwiki/architecture/hermes-personal-memory.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| `personal_memory_*` | `0029` | `NOLOGIN NOBYPASSRLS NOINHERIT` | 本人メモ専用。既存ロールには表の権限が無い（[本人メモ](/openwiki/architecture/hermes-personal-memory.md)） |
+| `personal_memory_*` | `0029` | `NOLOGIN NOBYPASSRLS NOINHERIT` | 本人メモ専用。既存ロールには表の権限が無い（[本人メモ](../architecture/hermes-personal-memory.md)） |
 
-<!-- openwiki: broken internal link [/openwiki/data/postgres-schema-and-migrations.md] link "/openwiki/data/postgres-schema-and-migrations.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`0002` は `GRANT teamagent_app TO teamagent` で master から切り替えられるようにする。追加の接続パスワードは不要で、`teamagent_app` 自体は直接ログインできない。`documents` / `chunks` への DML、`schema_migrations` の SELECT、`ALTER DEFAULT PRIVILEGES` による「今後作られる表とシーケンスへの自動付与」もここで入る。後から追加した usage / metrics 系は `0009` で SELECT/UPDATE/DELETE を剥がして INSERT 中心にし、`0024` で `ON CONFLICT` に要る `request_id` 列だけの SELECT を戻している（詳細は [スキーマとマイグレーション](/openwiki/data/postgres-schema-and-migrations.md)）。
+`0002` は `GRANT teamagent_app TO teamagent` で master から切り替えられるようにする。追加の接続パスワードは不要で、`teamagent_app` 自体は直接ログインできない。`documents` / `chunks` への DML、`schema_migrations` の SELECT、`ALTER DEFAULT PRIVILEGES` による「今後作られる表とシーケンスへの自動付与」もここで入る。後から追加した usage / metrics 系は `0009` で SELECT/UPDATE/DELETE を剥がして INSERT 中心にし、`0024` で `ON CONFLICT` に要る `request_id` 列だけの SELECT を戻している（詳細は [スキーマとマイグレーション](postgres-schema-and-migrations.md)）。
 
 ## 接続と session 変数の注入
 
@@ -90,15 +88,14 @@ with pg.connection(app_role="teamagent_app",
 
 ## 身元から GUC までの流れ
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  A[Slack 依頼] --> B[caller claim 検証<br/>mcp_gateway]
-  B --> C[_resolve_metadata<br/>Slack user → email]
-  C --> D[build_rls_metadata<br/>role=member 固定]
+  A[Slack 依頼] --> B[caller claim 検証 ／ mcp_gateway]
+  B --> C[_resolve_metadata ／ Slack user → email]
+  C --> D[build_rls_metadata ／ role=member 固定]
   D --> E[SkillContext.metadata]
-  E --> F[PgVectorClient.connection<br/>SET ROLE + set_config]
-  F --> G[(documents / chunks<br/>RLS 評価)]
+  E --> F[PgVectorClient.connection ／ SET ROLE + set_config]
+  F --> G[(documents / chunks ／ RLS 評価)]
 ```
 
 `src/teamagent/identity.py` の `build_rls_metadata` が「解決済み身元 → RLS メタ」の唯一の変換点。
@@ -108,9 +105,7 @@ flowchart LR
 - `user_groups` は email のドメイン＋解決済みグループ。カンマを含むグループは `string_to_array(..., ',')` を壊すので除外する。
 - `TEAMAGENT_ALLOWED_EMAIL_DOMAINS` 指定下でドメインが外れる、非メンバー、email 不正のときは `None`＝呼び出し側で fail-closed。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/integrations/slack-identity-and-oauth.md] link "/openwiki/integrations/slack-identity-and-oauth.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-caller claim の検証と Slack 本人解決の詳細は [呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md) と [Slack の本人確認](/openwiki/integrations/slack-identity-and-oauth.md)。
+caller claim の検証と Slack 本人解決の詳細は [呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md) と [Slack の本人確認](../integrations/slack-identity-and-oauth.md)。
 
 ## RLS ポリシー
 
@@ -171,9 +166,7 @@ caller claim の検証と Slack 本人解決の詳細は [呼び出し元の証�
 - CI（`.github/workflows/ci.yml` の 2 つの pytest ジョブ）は PostgreSQL 16 のサービスコンテナに対し、「Prepare disposable PostgreSQL test role」で `teamagent_app` を `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOLOGIN` で作り、接続ユーザーに GRANT してから `TEAMAGENT_TEST_DB_DSN` で DB テストを流す。
 - DB テストは本番と同じ関係を使い捨てで再現する。ingest 系は `uuid` 付きのスキーマを作って `teamagent_app` に USAGE を与え、`SET ROLE teamagent_app` で権限と RLS を確かめ、最後に `DROP SCHEMA ... CASCADE`。ingest 系は `teamagent_app` が無い・切り替えられない環境では skip する。本人メモ系（`tests/personal_memory/conftest.py`）は `uuid` 付きの master 相当ロールと DB を作り、`teamagent_app` / `teamagent_dashboard` が無ければ作ったうえで `GRANT teamagent_app TO <master>` と `0002` の既定権限を再現してから migration を流す。どちらも `TEAMAGENT_TEST_DB_DSN` が無ければ skip。
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-CI と同じ依存での実行方法は [テストの走らせ方と CI](/openwiki/testing/running-tests.md)。検索側でこのメタがどう使われるかは [ナレッジ検索](/openwiki/workflows/knowledge-search.md)。
+CI と同じ依存での実行方法は [テストの走らせ方と CI](../testing/running-tests.md)。検索側でこのメタがどう使われるかは [ナレッジ検索](../workflows/knowledge-search.md)。
 
 ## 変更するときの注意
 

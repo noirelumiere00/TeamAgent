@@ -25,7 +25,7 @@ sources:
     resource: repo://src/teamagent/mcp_gateway/server.py
   - id: openwiki-source-b4ef73e5364917d29ae9a222
     resource: repo://src/teamagent/personal_memory/guard.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 本人メモ（Hermes 覚える係）
@@ -57,8 +57,7 @@ Aico と利用者の **1 対 1 DM だけ**を対象に、返事の長さや言�
 ON のときの判定順:
 
 1. resolver と caller claim 検証器が揃っている（無ければ `PM_UNAVAILABLE`）。
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-2. 署名済み caller claim の検証（[呼び出し元の証明](/openwiki/architecture/caller-identity-and-button-bindings.md)）。
+2. 署名済み caller claim の検証（[呼び出し元の証明](caller-identity-and-button-bindings.md)）。
 3. claim の `channel_id` が `D[A-Z0-9]{8,}` に fullmatch（申告値は見ない。strip もしない）。
 4. `tool_call_id` が `aico-pm-(obs|ctx|cmd)-<32hex>` に一致し、kind がツール名と合い、`run_id == tool_call_id`（plugin の直接呼び出しの印。モデル経由の呼び出しを通さない）。
 5. スレッド内の発話は拒否。
@@ -90,8 +89,7 @@ ON のときの判定順:
 - `ON CONFLICT` も `RETURNING` も使わない（最小権限ロールで失敗する既知の地雷）。
 - 既存ロールが危険な属性（superuser・login・bypassrls 等）を持っていたら migration ごと止める。
 
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-以後この 3 表を変える migration は、冒頭で definer を一時付与して `SET ROLE` し、最後に戻す手順が必要（migration 冒頭のコメント参照）。一般的な RLS の話は [RLS と実行ロール](/openwiki/data/rls-and-app-role.md)。
+以後この 3 表を変える migration は、冒頭で definer を一時付与して `SET ROLE` し、最後に戻す手順が必要（migration 冒頭のコメント参照）。一般的な RLS の話は [RLS と実行ロール](../data/rls-and-app-role.md)。
 
 ## Hermes 学習係（hermes_runtime）
 

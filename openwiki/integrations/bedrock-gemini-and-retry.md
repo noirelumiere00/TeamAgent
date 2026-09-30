@@ -25,15 +25,14 @@ sources:
     resource: repo://src/teamagent/adapters/quota_store.py
   - id: openwiki-source-1ff2c467599c597ccf63387f
     resource: repo://src/teamagent/adapters/retry.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # Bedrock / Gemini 呼び出しとリトライ・コスト
 
 ## 位置づけ
 
-<!-- openwiki: broken internal link [/openwiki/architecture/layering-and-skill-contract.md] link "/openwiki/architecture/layering-and-skill-contract.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-LLM・埋め込み・再ランクの呼び出しは、すべて `src/teamagent/adapters/` の薄いラッパーを通す。Skill は boto3 や google-genai を直接 import しない（[3層分離と Skill の契約](/openwiki/architecture/layering-and-skill-contract.md)）。ラッパーは「リトライ」「推算コストの構造化ログ」「秘密やプロンプトをログに出さないこと」をまとめて受け持つ。
+LLM・埋め込み・再ランクの呼び出しは、すべて `src/teamagent/adapters/` の薄いラッパーを通す。Skill は boto3 や google-genai を直接 import しない（[3層分離と Skill の契約](../architecture/layering-and-skill-contract.md)）。ラッパーは「リトライ」「推算コストの構造化ログ」「秘密やプロンプトをログに出さないこと」をまとめて受け持つ。
 
 | モジュール | 役割 |
 |---|---|
@@ -78,10 +77,7 @@ boto3 クライアントの設定:
 
 各呼び出しは request_id つきの構造化ログを出す。`bedrock_converse`（トークン 4 種・`cost_usd`・`latency_ms`・`stop_reason`）、`bedrock_rerank`（1 query あたり $0.002）、`bedrock_embed`（トークン数が返らないので 4 文字 ≒ 1 token の推算）。リトライは `bedrock_*_retry` の warning（`attempt`・`backoff_s`・`error_code`）で、スロットリングの頻度を見る材料になる。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/observability-and-cost.md] link "/openwiki/operations/observability-and-cost.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/architecture/orchestrator.md] link "/openwiki/architecture/orchestrator.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-CloudWatch の metric filter `{ $.cost_usd = * }` が、app ロググループでは `BedrockCostUSD`、mcp ロググループでは `McpCostUSD` として合算する。**キー名で拾う**ので、Bedrock に限らず Gemini や cost_guard の記帳ログなど、`cost_usd` を持つ JSON 行はすべて足される。MCP gateway の usage ログが `tool_cost_usd` という別名を使うのは二重計上を避けるため（[MCP gateway](/openwiki/architecture/mcp-gateway.md)、[観測・利用記録・コスト管理](/openwiki/operations/observability-and-cost.md)）。なお L2 オーケストレータの `sdk_runner.Price` はこの価格表とは別の単価（Sonnet 相当の概算）を持つ（[オーケストレータ](/openwiki/architecture/orchestrator.md)）。
+CloudWatch の metric filter `{ $.cost_usd = * }` が、app ロググループでは `BedrockCostUSD`、mcp ロググループでは `McpCostUSD` として合算する。**キー名で拾う**ので、Bedrock に限らず Gemini や cost_guard の記帳ログなど、`cost_usd` を持つ JSON 行はすべて足される。MCP gateway の usage ログが `tool_cost_usd` という別名を使うのは二重計上を避けるため（[MCP gateway](../architecture/mcp-gateway.md)、[観測・利用記録・コスト管理](../operations/observability-and-cost.md)）。なお L2 オーケストレータの `sdk_runner.Price` はこの価格表とは別の単価（Sonnet 相当の概算）を持つ（[オーケストレータ](../architecture/orchestrator.md)）。
 
 ## リトライ（retry.py）
 
@@ -110,16 +106,13 @@ CloudWatch の metric filter `{ $.cost_usd = * }` が、app ロググループ�
 
 ## Gemini（gemini_client.py）
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **認証**: `GEMINI_USE_VERTEX=true` ＋ `GEMINI_VERTEX_PROJECT`（無ければ `GOOGLE_CLOUD_PROJECT`）の Vertex AI 経路を優先する。認証は ADC で、本番では entrypoint がサービスアカウントの JSON を書き出して `GOOGLE_APPLICATION_CREDENTIALS` を差し替える（[MCP gateway](/openwiki/architecture/mcp-gateway.md)）。Vertex でないときは `GEMINI_API_KEY` を使い、プレースホルダの値は `RuntimeError` で拒否する。google-genai は最初に使う時点で import する。
+- **認証**: `GEMINI_USE_VERTEX=true` ＋ `GEMINI_VERTEX_PROJECT`（無ければ `GOOGLE_CLOUD_PROJECT`）の Vertex AI 経路を優先する。認証は ADC で、本番では entrypoint がサービスアカウントの JSON を書き出して `GOOGLE_APPLICATION_CREDENTIALS` を差し替える（[MCP gateway](../architecture/mcp-gateway.md)）。Vertex でないときは `GEMINI_API_KEY` を使い、プレースホルダの値は `RuntimeError` で拒否する。google-genai は最初に使う時点で import する。
 - **モデルとロケーション**: 既定は `gemini-3.5-flash` ＋ `global`。Gemini 3 系は Vertex では `global` でしか応答しないので、`resolve_location` が 3 系に地域ロケーションが指定されていても `global` に読み替えて warning を出す。2.5 系は Vertex で 2026-10-16 に廃止予定。`docs/v3.2/system_reference.md` には「Gemini 2.5 Flash」という記述が残っている箇所があるが、既定値はコード側が正しい。
 - **呼び出し**: `analyze_video_url`（file_uri で直接取れるのは YouTube 系だけ）、`analyze_video_bytes`（TikTok / Instagram などはダウンロードした bytes を inline で渡す。上限はおよそ 20MB）、`generate_text`、`generate_with_google_search`。
 - **グラウンディング**: 出典は LLM の本文からではなく `groundingMetadata` から機械的に組み立てる。`sources` の添字は groundingChunks と 1 対 1（web 以外は空のプレースホルダ）で、`grounded=False`（出典 URI が 1 つも無い）なら呼び出し側は fail-closed にする。Google 検索ツールは構造化出力（responseSchema）と一緒に使えない。
 - **コスト**: `_PRICE_TABLE.get(model_id)` による**完全一致**の照合（バージョン接尾辞つきの ID は 0 になる）。thinking tokens は出力単価で足す。グラウンディングで出典が付いた呼び出しには 1 回あたり $0.035 を加える。
 - **失敗時**: ログは `logger.exception` に request_id だけを付け、生の URL やプロンプトは残さない。上には例外の型名だけを含む `RuntimeError` を投げる。URL を取得できない場合は `VIDEO_URL_NOT_FETCHABLE:` を付けて、利用者への案内に変えられるようにする。
-<!-- openwiki: broken internal link [/openwiki/workflows/video-and-tiktok-analysis.md] link "/openwiki/workflows/video-and-tiktok-analysis.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/research-tools.md] link "/openwiki/workflows/research-tools.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **呼び出し元**: video・video_approval・video_algorithm・tiktok_search・web_research・clip_proposal（[動画・TikTok 分析](/openwiki/workflows/video-and-tiktok-analysis.md)、[リサーチ系ツール](/openwiki/workflows/research-tools.md)）。
+- **呼び出し元**: video・video_approval・video_algorithm・tiktok_search・web_research・clip_proposal（[動画・TikTok 分析](../workflows/video-and-tiktok-analysis.md)、[リサーチ系ツール](../workflows/research-tools.md)）。
 
 ## 埋め込み（embeddings_client.py）
 
@@ -127,9 +120,7 @@ CloudWatch の metric filter `{ $.cost_usd = * }` が、app ロググループ�
 
 - `build_embedder_from_env()` が**唯一の構築点**。`EMBEDDER_BACKEND`（既定 `local`）と `EMBEDDING_COLUMN`（既定 `embedding`）の組み合わせは `local⇄embedding` と `cohere⇄embedding_cohere` しか許さず、それ以外は起動時に `ValueError` で止める。クエリと DB 列でベクトル空間が食い違うと検索が全部壊れるため。列名は SQL 識別子に埋め込むので allowlist で検査する。
 - `LocalE5Embedder`（multilingual-e5-large、`LOCAL_EMBED_MODEL`）: クエリには常に `query: ` を付ける。`passage: ` は `USE_E5_PASSAGE_PREFIX`（旧名 `E5_PASSAGE_PREFIX` も使える）が真のときだけで、偽のときは既存のコーパスに合わせて `query: ` を付ける。すでに接頭辞がある文には重ねて付けない。
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/ingest-pipeline.md] link "/openwiki/workflows/ingest-pipeline.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- `BedrockCohereEmbedder`: 非対称の区別は `input_type`（`search_query` / `search_document`）で表し、呼び出しは `BedrockClient.embed_texts()` に任せる。Cohere 用のベクトルは migration 0016 で追加した並行列 `chunks.embedding_cohere` に入り、env を戻せば e5 に戻せる（[ナレッジ検索](/openwiki/workflows/knowledge-search.md)、[取り込みパイプライン](/openwiki/workflows/ingest-pipeline.md)）。
+- `BedrockCohereEmbedder`: 非対称の区別は `input_type`（`search_query` / `search_document`）で表し、呼び出しは `BedrockClient.embed_texts()` に任せる。Cohere 用のベクトルは migration 0016 で追加した並行列 `chunks.embedding_cohere` に入り、env を戻せば e5 に戻せる（[ナレッジ検索](../workflows/knowledge-search.md)、[取り込みパイプライン](../workflows/ingest-pipeline.md)）。
 
 ## 費用の上限: quota_store と cost_guard
 

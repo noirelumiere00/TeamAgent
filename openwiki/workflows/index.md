@@ -1,6 +1,6 @@
 # ファイル
 
-- [朝ダイジェストのボタン処理](digest-buttons.md) - 朝ダイジェストの ✏️下書き・📅カレンダー登録・🗓日程候補・☑️確認済みボタンについて、mcp 側の HMAC 署名トークン（purpose・本人・期限）の発行と検証、呼ばれるツール mail_draft / calendar_event / schedule_propose / digest_ack の副作用、押し直しの二重実行防止とその既知の弱点をまとめる。
+- [朝ダイジェストのボタン処理](digest-buttons.md) - 朝ダイジェストの ✏️下書き・📅カレンダー登録・🗓日程候補・☑️確認済みボタンについて、mcp 側の HMAC 署名トークン（purpose・本人・期限）の発行と検証、呼ばれるツール mail_draft / calendar_event / schedule_propose / digest_ack の副作用、押し直しの二重実行防止（plugin の押下台帳と mcp の nonce の保持期限）をまとめる。
 - [資料取り込み（ingest）](ingest-pipeline.md) - Slack チャネル・Drive フォルダ・共有ドライブ・Sheets から抽出→chunk 化→埋め込み→分類→文脈付与→documents/chunks への保存までを行う IngestRunner と、Drive の増分同期・retry lease・source 健全性の記録、run 末尾の重複排除/テンプレ検出/stale 印、EventBridge→Lambda dispatcher→Fargate のスケジュール実行と手動実行の契約。
 - [社内資料検索（search / clientkarte / knowledge_deliver）](knowledge-search.md) - SearchSkill が pgvector の類似検索に、フィルタの段階的な解除（fail-open）・client boost・Drive リコール床・Cohere rerank・関連度閾値・集計モードを重ね、結果ヘッダは決定論で付けて要約する流れ。clientkarte・knowledge_deliver・knowledge_search_url と、connect-web の検索 Web UI（/search）・評価の保存（search_feedback）も扱う。
 - [メール・カレンダー・Slack 要約系ツール](mail-tools.md) - mail_summary / mail_followup / mail_reply / mail_to_internal_context / calendar_freebusy / slack_summary / attachment_assist の 7 ツールが、本人の権限でどこまで読むか、scrub_value による DLP マスク、GmailClient の denylist による送信・削除の物理封鎖、未連携や 0 件を LLM に創作させない構造化エラーをまとめる。

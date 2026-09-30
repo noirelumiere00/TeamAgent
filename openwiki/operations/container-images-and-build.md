@@ -27,15 +27,14 @@ sources:
     resource: repo://infra/docker/verify_runtime_evidence.py
   - id: openwiki-source-0809042341f5119260bd92fc
     resource: repo://infra/terraform/ecr.tf
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # コンテナイメージとビルド
 
 ## 全体像
 
-<!-- openwiki: broken internal link [/openwiki/operations/release-gates-and-deploy.md] link "/openwiki/operations/release-gates-and-deploy.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-本番で動くコンテナはすべて `linux/arm64` で、外部イメージはタグではなく arm64 の child digest で固定する。ビルドは「ビルドだけ」と「デプロイ」を分けており、このページが扱うのはイメージを作って検査済みの候補置き場（verified-candidates）へ載せるまで。release リポジトリへの昇格と ECS タスク定義の差し替えは [リリースゲートとデプロイ](/openwiki/operations/release-gates-and-deploy.md) を見る。
+本番で動くコンテナはすべて `linux/arm64` で、外部イメージはタグではなく arm64 の child digest で固定する。ビルドは「ビルドだけ」と「デプロイ」を分けており、このページが扱うのはイメージを作って検査済みの候補置き場（verified-candidates）へ載せるまで。release リポジトリへの昇格と ECS タスク定義の差し替えは [リリースゲートとデプロイ](release-gates-and-deploy.md) を見る。
 
 | イメージ | Dockerfile | ベース / 実行ユーザー | 入口 | ビルド経路 |
 |---|---|---|---|---|
@@ -51,8 +50,7 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 
 `infra/docker/RUNTIME_CONTRACT.md` が文章版で、機械が読む正本は `runtime-contract.json`・`runtime-consumers.json`・各 Dockerfile の OCI label。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/video-and-tiktok-analysis.md] link "/openwiki/workflows/video-and-tiktok-analysis.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-**責任の分け方**: core は Python・TeamAgent 本体・E5・MCP・DB/AWS クライアントを持ち、Node・Playwright・Chromium・ffmpeg・yt-dlp は持たない。media worker はその逆で、ブラウザと動画ツールを持ち、boto3/botocore・DB・Slack/OAuth・MCP・E5・AWS task role を持たない。両者は別イメージ・別タスクで、同じタスク定義に戻してはならない。media worker は 1 プロセスで 1 ジョブを処理して終了する（ジョブの受け渡しは [動画・TikTok 分析](/openwiki/workflows/video-and-tiktok-analysis.md)）。
+**責任の分け方**: core は Python・TeamAgent 本体・E5・MCP・DB/AWS クライアントを持ち、Node・Playwright・Chromium・ffmpeg・yt-dlp は持たない。media worker はその逆で、ブラウザと動画ツールを持ち、boto3/botocore・DB・Slack/OAuth・MCP・E5・AWS task role を持たない。両者は別イメージ・別タスクで、同じタスク定義に戻してはならない。media worker は 1 プロセスで 1 ジョブを処理して終了する（ジョブの受け渡しは [動画・TikTok 分析](../workflows/video-and-tiktok-analysis.md)）。
 
 この境界は Dockerfile の中で assert している。core のビルダーは `media/operations.py`・`worker.py` を消し、`playwright`・`yt_dlp`・`claude_agent_sdk` などが import できないこと、`node`・`chromium`・`ffmpeg` などの実行ファイルが無いことを確かめる。media の最終段は `boto3`・`psycopg`・`slack_sdk`・`mcp`・`sentence_transformers` などが import できないこと、`mcp_gateway` と E5 キャッシュが無いことを確かめ、どれかが残ればビルドが落ちる。
 
@@ -74,8 +72,7 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | x-buzz-worker | `-m teamagent.workers.x_buzz_job` | 1024 |
 | media-worker（media イメージ） | entryPoint `-m teamagent.media.tool_worker` | 4096 |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-core イメージ自身の `CMD` は `run_mcp_http_server.py` だが、本番の MCP タスクは command を `run_mcp_vertex_entrypoint.py` に差し替える（Vertex の認証情報を `/tmp` に書き出してから HTTP サーバを exec する。詳細は [MCP gateway](/openwiki/architecture/mcp-gateway.md)）。dispatcher Lambda などの renderer は entryPoint と command を上書きできない（`may_override_entry_point_or_command: false`）。
+core イメージ自身の `CMD` は `run_mcp_http_server.py` だが、本番の MCP タスクは command を `run_mcp_vertex_entrypoint.py` に差し替える（Vertex の認証情報を `/tmp` に書き出してから HTTP サーバを exec する。詳細は [MCP gateway](../architecture/mcp-gateway.md)）。dispatcher Lambda などの renderer は entryPoint と command を上書きできない（`may_override_entry_point_or_command: false`）。
 
 ## Dockerfile の共通の作り
 
@@ -84,19 +81,17 @@ core イメージ自身の `CMD` は `run_mcp_http_server.py` だが、本番の
 - **社内プロキシの CA**: `--mount=type=secret,id=teamagent_ca` で渡し、build arg やレイヤーには残さない。秘密は ECS が実行時に注入し、ビルド時には入れない。
 - **ビルドコンテキスト**: core / media の `.dockerignore` は `**` で全部除外してから必要なファイルだけ許可し、`.env`・`*.pem`・`*.key`・tfstate を明示的に除外する。
 - **media 固有**: 上流 Chromium イメージの filesystem を `scratch` 最終段にコピーし、上流の書き込み可能な `VOLUME /data` を引き継がない。インストール済み apk 一覧を `media-apk.lock` とバイト比較し、base に同梱の openssl・expat・util-linux は CVE 修正版を明示 pin する。yt-dlp は wheel/sdist のハッシュを確かめてから、秘密検出に引っかかった許可外 extractor を消す。
-<!-- openwiki: broken internal link [/openwiki/architecture/openclaw-gateway.md] link "/openwiki/architecture/openclaw-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **OpenClaw 固有**: 公式イメージは中身を取り出す元としてだけ使い、plugin は `ADD --checksum` で取得する。脆弱な推移依存は reviewed 版の tarball で上書きしてから剪定し、JSON5 の設定は不変の canonical JSON に変換する。起動時の検査は [OpenClaw gateway](/openwiki/architecture/openclaw-gateway.md)。
+- **OpenClaw 固有**: 公式イメージは中身を取り出す元としてだけ使い、plugin は `ADD --checksum` で取得する。脆弱な推移依存は reviewed 版の tarball で上書きしてから剪定し、JSON5 の設定は不変の canonical JSON に変換する。起動時の検査は [OpenClaw gateway](../architecture/openclaw-gateway.md)。
 - **provenance の焼き込み**: `org.opencontainers.image.revision`（commit）・`io.teamagent.build.context-sha256`・release contract / approval の SHA-256・各 pin 値を OCI label にし、core は `/app/provenance/` にパッケージ一覧と base digest も残す。
 
 ## CodeBuild のビルド鎖（core / media）
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  L[build_mcp_image.sh<br/>= build_teamagent_image.sh] --> P[source-publisher<br/>署名付きソースを S3 へ]
-  P --> B[image-builder<br/>buildspec.yml]
+  L[build_mcp_image.sh ／ = build_teamagent_image.sh] --> P[source-publisher ／ 署名付きソースを S3 へ]
+  P --> B[image-builder ／ buildspec.yml]
   B -->|candidate-COMMIT-core / -media| Q[(quarantine ECR)]
-  B --> A[attestor<br/>署名付き receipt]
+  B --> A[attestor ／ 署名付き receipt]
   A --> R[promoter]
   R -->|verified-COMMIT-core / -media| V[(verified-candidates ECR)]
 ```
@@ -144,8 +139,7 @@ core・media・openclaw の例外ファイルはどれも `exceptions: []` な�
 
 ## テスト
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-実行手順と extra の指定は [テストの走らせ方](/openwiki/testing/running-tests.md)。
+実行手順と extra の指定は [テストの走らせ方](../testing/running-tests.md)。
 
 - `tests/codebuild/test_ecr_scan_gate.py`: 例外の完全一致・版違い・stale・期限切れ・未完了スキャン・`--deny-all`。
 - `tests/infra/test_dockerfile_teamagent_mcp.py` / `test_dockerfile_teamagent_media_worker.py`: digest pin、core/media の境界、UID と読み取り専用、yt-dlp の除去、HIGH を例外に置かないこと。

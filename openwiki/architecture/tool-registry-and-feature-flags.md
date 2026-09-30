@@ -3,9 +3,6 @@ type: architecture
 title: ツール登録と機能フラグ
 description: MCP のツール群を決める factory.build_production_tools の USE_* env フラグ（既定 OFF）、検索ノブの一元解決、OpenClaw toolFilter と effective-tool-scope、terraform の MCP task env への配線までの「4 段ゲート」と、フラグを増やす・変えるときの注意。
 tags: [feature-flags, factory, toolfilter, terraform, mcp, configuration]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-58cab42b7659adb32893d79a
     resource: repo://infra/openclaw/effective-tool-scope.json
@@ -15,7 +12,10 @@ sources:
     resource: repo://src/teamagent/orchestrator/factory.py
   - id: openwiki-source-f97ff4a39ce3d3e6ac6dda9f
     resource: repo://tests/scripts/test_openclaw_runtime_contract.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # ツール登録と機能フラグ
@@ -62,13 +62,11 @@ Skill を書いただけでは Aico から使えない。本番で呼べるま�
 | `USE_SEARCH_SURFACE_TOOL` / `USE_TIKTOK_COMMENT_TOOLS` | `search_surface_check` / `tiktok_comment_mining` |
 | `USE_RESEARCH_PERSIST` | ツールは増えない。X の声集めなどの成果物を pgvector に永続化する persister を注入 |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-MCP gateway 側には factory 以外のフラグもある: `USE_AGENT_ORCHESTRATOR`（`run_agent`）、`USE_PERSONAL_MEMORY`（本人メモ）、`USE_VIDEO_ALGORITHM_DETACH`・`USE_SURFACE_VIDEO_FOLLOWUP`・`USE_ASYNC_JOB_NOTIFY`・`ENABLE_PROGRESS_NOTIFY`・`USE_DIRECT_SUMMARY_POST`・`USE_PAYLOAD_OFFLOAD`（[長時間ジョブの切り離し](/openwiki/architecture/detached-jobs-and-async-notify.md)）。
+MCP gateway 側には factory 以外のフラグもある: `USE_AGENT_ORCHESTRATOR`（`run_agent`）、`USE_PERSONAL_MEMORY`（本人メモ）、`USE_VIDEO_ALGORITHM_DETACH`・`USE_SURFACE_VIDEO_FOLLOWUP`・`USE_ASYNC_JOB_NOTIFY`・`ENABLE_PROGRESS_NOTIFY`・`USE_DIRECT_SUMMARY_POST`・`USE_PAYLOAD_OFFLOAD`（[長時間ジョブの切り離し](detached-jobs-and-async-notify.md)）。
 
 ### 検索ノブの一元解決
 
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`resolve_search_skill_config()` は SearchSkill の全ノブを env から解決する**唯一の真実源**で、MCP 経路と旧 Slack bot 経路の両方がこれを使う（過去に片方だけ既定値に落ちて本番 env が黙って無効化された構築ドリフトの対策）。主なノブ: `USE_CONTEXTUAL`、`USE_NEW_SCHEMA`、`USE_FB_DRIVE_MATCH`、`USE_COHERE_RERANK`、`SEARCH_RERANK_POOL_SIZE`（既定 30）、`SEARCH_RERANK_RETURN_SIZE`（100）、`SEARCH_DRIVE_POOL_FLOOR`（15）、`SEARCH_MIN_RELEVANCE`（0.0）、`SEARCH_MIN_RELEVANCE_FALLBACK`（0.0）、`USE_CLIENT_BOOST`（**既定 ON**）、`USE_AGGREGATION_MODE`、`USE_KNOWLEDGE_FILTERS`、`PROMPT_VERSION`（既定 `v2d`）、`SEARCH_MAX_TOKENS`（800）。構築時に `search_skill_config_resolved` ログで全値を出す。中身は [社内資料検索](/openwiki/workflows/knowledge-search.md)。
+`resolve_search_skill_config()` は SearchSkill の全ノブを env から解決する**唯一の真実源**で、MCP 経路と旧 Slack bot 経路の両方がこれを使う（過去に片方だけ既定値に落ちて本番 env が黙って無効化された構築ドリフトの対策）。主なノブ: `USE_CONTEXTUAL`、`USE_NEW_SCHEMA`、`USE_FB_DRIVE_MATCH`、`USE_COHERE_RERANK`、`SEARCH_RERANK_POOL_SIZE`（既定 30）、`SEARCH_RERANK_RETURN_SIZE`（100）、`SEARCH_DRIVE_POOL_FLOOR`（15）、`SEARCH_MIN_RELEVANCE`（0.0）、`SEARCH_MIN_RELEVANCE_FALLBACK`（0.0）、`USE_CLIENT_BOOST`（**既定 ON**）、`USE_AGGREGATION_MODE`、`USE_KNOWLEDGE_FILTERS`、`PROMPT_VERSION`（既定 `v2d`）、`SEARCH_MAX_TOKENS`（800）。構築時に `search_skill_config_resolved` ログで全値を出す。中身は [社内資料検索](../workflows/knowledge-search.md)。
 
 ## terraform での配線
 
@@ -80,16 +78,14 @@ MCP の task env（`fargate.tf` の `aws_ecs_task_definition.mcp`）は 3 通り
 
 同じ task env には `DRAFT_ON_DEMAND_ONLY="true"`（mention 経由の MCP では自動下書きを作らない。CLAUDE.md §4 B8）、`STRUCTLOG_FORMAT="json"`、`BEDROCK_MODEL_ID`（`var.mcp_model_id`）、`SLACK_TEAM_ID`、`TEAMAGENT_SHARED_COMPANY_DOMAINS`、段階公開 allowlist（`X_RESEARCH_ALLOWED_EMAILS` など）も載る。
 
-<!-- openwiki: broken internal link [/openwiki/operations/release-gates-and-deploy.md] link "/openwiki/operations/release-gates-and-deploy.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-env を変えても **terraform apply で task definition の新 revision を登録し、サービスや EventBridge target がそれを指すまで本番には効かない**（CLAUDE.md §4 B4）。デプロイ手順は [リリースゲートとデプロイ](/openwiki/operations/release-gates-and-deploy.md)。
+env を変えても **terraform apply で task definition の新 revision を登録し、サービスや EventBridge target がそれを指すまで本番には効かない**（CLAUDE.md §4 B4）。デプロイ手順は [リリースゲートとデプロイ](../operations/release-gates-and-deploy.md)。
 
 ## OpenClaw 側の露出
 
 - `toolFilter.include` に明示列挙されたツールだけが見える。未レビューの重操作は `exclude` で明示的に外す。
 - `effective-tool-scope.json` は各ツールの副作用分類（`effect`）、`terraformGate`、`enabledBy`（`always` / env / `never`）を管理し、runtime contract テストが include・factory・terraform との整合を突き合わせる。
 - `enabledBy=never` のツール（`video_approval`・`operation_log`・`knowledge_search_url`）は MCP 側のフラグだけでは解禁されない。「tf の task env・scope の enabledBy・contract テスト・OpenClaw イメージ再ビルド」の 4 点を同じ変更で揃える。
-<!-- openwiki: broken internal link [/openwiki/testing/routing-and-eval.md] link "/openwiki/testing/routing-and-eval.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- ツールの description は OpenClaw がツールを選ぶ唯一の材料。似たツール（特に動画系: `tiktok_search` / `tiktok_acquire` / `video_algorithm` / `video_analysis` / `video_approval`）はトリガー語と「対象外（→別ツール）」の注記で棲み分ける。検証方法は [ルーティング検証と評価](/openwiki/testing/routing-and-eval.md)。
+- ツールの description は OpenClaw がツールを選ぶ唯一の材料。似たツール（特に動画系: `tiktok_search` / `tiktok_acquire` / `video_algorithm` / `video_analysis` / `video_approval`）はトリガー語と「対象外（→別ツール）」の注記で棲み分ける。検証方法は [ルーティング検証と評価](../testing/routing-and-eval.md)。
 
 ## 段階公開の allowlist
 

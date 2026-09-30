@@ -29,7 +29,7 @@ sources:
     resource: repo://infra/terraform/x_research.tf
   - id: openwiki-source-ab4c69f811ca2c613d22078a
     resource: repo://src/teamagent/runtime/slack_bot.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 全体構成
@@ -86,16 +86,10 @@ MCP の task role には RunTask / PassRole を持たせず、使い捨て Farga
 
 ## 代表的な流れ
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-1. **会話**: DM で「◯◯の過去提案ある？」→ OpenClaw が `search` を選ぶ → plugin が claim を付ける → MCP が本人を解決して RLS 付きで pgvector 検索 → 結果 JSON を OpenClaw が文章化。→ [MCP gateway](/openwiki/architecture/mcp-gateway.md)、[社内資料検索](/openwiki/workflows/knowledge-search.md)
-<!-- openwiki: broken internal link [/openwiki/workflows/morning-digest.md] link "/openwiki/workflows/morning-digest.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/digest-buttons.md] link "/openwiki/workflows/digest-buttons.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-2. **朝ダイジェスト**: EventBridge が平日朝に起動 → 利用者ごとに Gmail / Calendar を本人の OAuth で読む → DM に投稿（ボタン付き）→ ボタン押下は OpenClaw の plugin が直接 MCP ツールを呼ぶ。→ [朝ダイジェスト](/openwiki/workflows/morning-digest.md)、[ボタン処理](/openwiki/workflows/digest-buttons.md)
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-3. **重い処理**: 動画分析・提案書・TikTok 取得は MCP 内の thread か SQS→Fargate で走り、完了を MCP が Slack に直接届ける。→ [長時間ジョブ](/openwiki/architecture/detached-jobs-and-async-notify.md)
-<!-- openwiki: broken internal link [/openwiki/workflows/ingest-pipeline.md] link "/openwiki/workflows/ingest-pipeline.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-4. **取り込み**: 週次の ingest タスクが Drive などから資料を抽出・分類・埋め込みして保存。→ [資料取り込み](/openwiki/workflows/ingest-pipeline.md)
+1. **会話**: DM で「◯◯の過去提案ある？」→ OpenClaw が `search` を選ぶ → plugin が claim を付ける → MCP が本人を解決して RLS 付きで pgvector 検索 → 結果 JSON を OpenClaw が文章化。→ [MCP gateway](mcp-gateway.md)、[社内資料検索](../workflows/knowledge-search.md)
+2. **朝ダイジェスト**: EventBridge が平日朝に起動 → 利用者ごとに Gmail / Calendar を本人の OAuth で読む → DM に投稿（ボタン付き）→ ボタン押下は OpenClaw の plugin が直接 MCP ツールを呼ぶ。→ [朝ダイジェスト](../workflows/morning-digest.md)、[ボタン処理](../workflows/digest-buttons.md)
+3. **重い処理**: 動画分析・提案書・TikTok 取得は MCP 内の thread か SQS→Fargate で走り、完了を MCP が Slack に直接届ける。→ [長時間ジョブ](detached-jobs-and-async-notify.md)
+4. **取り込み**: 週次の ingest タスクが Drive などから資料を抽出・分類・埋め込みして保存。→ [資料取り込み](../workflows/ingest-pipeline.md)
 
 ## イメージ
 
@@ -106,8 +100,7 @@ MCP の task role には RunTask / PassRole を持たせず、使い捨て Farga
 | `teamagent-media-worker`（`Dockerfile.teamagent-media-worker`） | 使い捨て media worker |
 | Hermes（`Dockerfile.hermes`） | 本人メモ学習係（未配線） |
 
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-TikTok 取得専用のイメージは別リポジトリ（tiktok-data-service）の担当で、このリポジトリの `build_tiktok_image.sh` は意図的に失敗するだけのスクリプトになっている。ビルドとゲートは [コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)。
+TikTok 取得専用のイメージは別リポジトリ（tiktok-data-service）の担当で、このリポジトリの `build_tiktok_image.sh` は意図的に失敗するだけのスクリプトになっている。ビルドとゲートは [コンテナイメージとビルド](../operations/container-images-and-build.md)。
 
 ## 旧 EC2 worker（停止中・退役決定）
 
@@ -117,8 +110,5 @@ TikTok 取得専用のイメージは別リポジトリ（tiktok-data-service）
 
 - Claude は Bedrock 経由で呼ぶ（東京の推論プロファイル `jp.anthropic.*`）。
 - OpenClaw は営業データに触れず、本人ごとの認可は MCP 境界で行う。
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- ツールを本番で使えるようにするには factory・OpenClaw toolFilter・本番 env の段をすべて通す（[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)）。
-<!-- openwiki: broken internal link [/openwiki/architecture/layering-and-skill-contract.md] link "/openwiki/architecture/layering-and-skill-contract.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/terraform-layout.md] link "/openwiki/operations/terraform-layout.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- コードの依存方向は [3層分離と Skill の契約](/openwiki/architecture/layering-and-skill-contract.md)、AWS 側の詳細は [Terraform 構成](/openwiki/operations/terraform-layout.md)。
+- ツールを本番で使えるようにするには factory・OpenClaw toolFilter・本番 env の段をすべて通す（[ツール登録と機能フラグ](tool-registry-and-feature-flags.md)）。
+- コードの依存方向は [3層分離と Skill の契約](layering-and-skill-contract.md)、AWS 側の詳細は [Terraform 構成](../operations/terraform-layout.md)。

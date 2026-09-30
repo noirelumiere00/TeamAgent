@@ -3,9 +3,6 @@ type: workflow
 title: 動画・TikTok 分析
 description: tiktok_search・tiktok_acquire・video_analysis・video_algorithm・search_surface_check・tiktok_comment_mining・video_capture・video_approval の役割分担と、動画・検索面の取得経路（SQS→dispatcher Lambda→タスクロール無しの使い捨て Fargate media worker、Apify、Gemini の file_uri）、分析キャッシュと結果キャッシュ、取得ジョブの時間見積もりと上限。
 tags: [tiktok, video, media-worker, sqs, fargate, gemini, apify, cache, feature-flags]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-b353cf4f92efc402b79ef428
     resource: repo://infra/terraform/lambda/tiktok_dispatch/handler.py
@@ -33,24 +30,25 @@ sources:
     resource: repo://src/teamagent/skills/search_surface_check/schema.py
   - id: openwiki-source-ac7bea44a910be281420b84e
     resource: repo://src/teamagent/skills/search_surface_check/skill.py
-  - id: openwiki-source-16141262bd62daf05088fdcd
-    resource: repo://src/teamagent/skills/tiktok_acquire/schema.py
+  - id: openwiki-source-032c2a6e4dbb789c92bfe5bc
+    resource: repo://src/teamagent/skills/tiktok_acquire/plan.py
   - id: openwiki-source-cb5c0cbbab25d171e6cf9044
     resource: repo://src/teamagent/skills/tiktok_acquire/skill.py
   - id: openwiki-source-baee10a6d71c1de6cd2e55dc
     resource: repo://src/teamagent/skills/video_algorithm/skill.py
   - id: openwiki-source-dbd75447497b8df080643c3a
     resource: repo://src/teamagent/skills/video/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # 動画・TikTok 分析
 
 ## 位置づけと分担
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-動画・TikTok 系のツールは 8 つ（status を入れて 9 つ）あり、どれも既定 OFF の env フラグで `src/teamagent/orchestrator/factory.py` に登録される（[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)）。MCP の core イメージには Node・Chromium・ffmpeg・yt-dlp が入っていないため、実際のスクレイプや動画処理は別イメージの media worker に任せる（[コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)）。
+動画・TikTok 系のツールは 8 つ（status を入れて 9 つ）あり、どれも既定 OFF の env フラグで `src/teamagent/orchestrator/factory.py` に登録される（[ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md)）。MCP の core イメージには Node・Chromium・ffmpeg・yt-dlp が入っていないため、実際のスクレイプや動画処理は別イメージの media worker に任せる（[コンテナイメージとビルド](../operations/container-images-and-build.md)）。
 
 | ツール | 何をするか | 取得経路 | 分析 | フラグ |
 |---|---|---|---|---|
@@ -79,12 +77,11 @@ media job の外にある経路は 2 つ。YouTube は Gemini が `file_uri` で
 
 ## media job の流れ（A′トポロジ）
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  M[MCP skill<br/>MediaJobClient] -->|SendMessage のみ| Q[(SQS jobs)]
-  Q -->|batch 1| D[dispatcher Lambda<br/>台帳と S3 権限を持つ]
-  D -->|RunTask・タスクロール無し| W[media worker<br/>使い捨て Fargate]
+  M[MCP skill ／ MediaJobClient] -->|SendMessage のみ| Q[(SQS jobs)]
+  Q -->|batch 1| D[dispatcher Lambda ／ 台帳と S3 権限を持つ]
+  D -->|RunTask・タスクロール無し| W[media worker ／ 使い捨て Fargate]
   W -->|署名付き POST| S[(S3 media-jobs/)]
   E[ECS STOPPED イベント] --> D
   D -->|検証後に終端遷移| T[(DynamoDB jobs)]
@@ -98,8 +95,7 @@ flowchart LR
 - **終端の確定**: ECS の STOPPED イベントで dispatcher が attempt・checksum・サイズを検証し、DynamoDB を 1 回だけ条件付きで終端に遷移させる。image pull 失敗や OOM で worker が completion を書けずに止まった場合もここで拾う。
 - **core 側の検証**: `get_result` は成果物が `media-jobs/<job_id>/attempts/` 配下にあること、manifest の SHA-256 が台帳の値と一致することを確かめ、違えば `MEDIA_ARTIFACT_MANIFEST_*` エラーにする。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/proposal-jobs.md] link "/openwiki/workflows/proposal-jobs.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-操作の種類は `acquire`・`tiktok_acquire`・`proxy`・`frame`・`thumbnail`・`slides`・`proposal_pptx`・`pdf`（`media/contracts.py`）。提案書の PPTX 化もこの worker を使う（[提案書・資料生成ジョブ](/openwiki/workflows/proposal-jobs.md)）。
+操作の種類は `acquire`・`tiktok_acquire`・`proxy`・`frame`・`thumbnail`・`slides`・`proposal_pptx`・`pdf`（`media/contracts.py`）。提案書の PPTX 化もこの worker を使う（[提案書・資料生成ジョブ](proposal-jobs.md)）。
 
 上限と保持:
 
@@ -114,10 +110,9 @@ flowchart LR
 
 worker 側（`operations._tiktok_acquire`）は KW ごとに `search.mjs` を呼び、`--max n_per_kw` 本の投稿を `p<KW番号2桁><順位3桁>` の pid で並べる。bot wall・0 件・取得元の例外は、その KW を `shortfalls` に記録して次の KW へ進む。全投稿のサムネを取得し、`sort`（`display` / `save_rate` / `recent`）で選んだ上位 `videos_per_kw` 本だけ mp4 を DL する。成果物は `posts.normalized.json`・`config.json`・`videos/manifest.json`・`thumbs/<pid>.jpg`・`videos/<pid>.mp4`。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`tiktok_acquire_status` は DynamoDB を読み、`done` なら posts / config / manifest と各動画・サムネに **10 分**の署名 URL を付けて返す（再照会で出し直す）。動画は `s3_key`（機械用）と `url`（人向け）の両方を返し、mp4 本体を応答に埋め込まない。完了を会話へ知らせるのは `async_job_notify`（[長時間ジョブの切り離し](/openwiki/architecture/detached-jobs-and-async-notify.md)）。
+`tiktok_acquire_status` は DynamoDB を読み、`done` なら posts / config / manifest と各動画・サムネに **10 分**の署名 URL を付けて返す（再照会で出し直す）。動画は `s3_key`（機械用）と `url`（人向け）の両方を返し、mp4 本体を応答に埋め込まない。完了を会話へ知らせるのは `async_job_notify`（[長時間ジョブの切り離し](../architecture/detached-jobs-and-async-notify.md)）。
 
-**時間見積もりによる受付制限**: 入力検証と worker 側の契約の両方で、`KW 数 × (検索 120 秒（n_per_kw が 30 超なら 240 秒）＋ n_per_kw × 50 秒 ＋ videos_per_kw × 120 秒)` を見積もり、`900 − 30 = 870` 秒を超える依頼を拒否する（`estimate_tiktok_operation_seconds`）。既定値（n_per_kw=10・videos_per_kw=2）では 1 KW あたり 860 秒になり、**1 回で受け付けるのは 1 KW だけ**。`videos_per_kw=0` でもサムネ取得に 1 本 50 秒を見積もるので、10 本 × 3 KW は 1860 秒となり受け付けない。
+**時間見積もりと組み直し**: 1 ジョブは `KW 数 × (検索 120 秒（n_per_kw が 30 超なら 240 秒）＋ n_per_kw × 50 秒 ＋ videos_per_kw × 120 秒)` の見積もり（`estimate_tiktok_operation_seconds`）が `900 − 30 = 870` 秒以内でないと worker が受け付けない。既定値（n_per_kw=10・videos_per_kw=2）では 2 KW 以上が 1 ジョブに入らないため、`tiktok_acquire` は依頼を断らずに投函計画を組み直す（`skills/tiktok_acquire/plan.py`、2026-09-30 の #481）。そのまま収まればそのまま 1 ジョブ、動画なし（`videos_per_kw=0`）なら指標だけのジョブ（`metadata_only`・サムネの控えを省く）に切り替えて 1 ジョブ 7 KW まで詰め、動画ありなら KW をまとめられるだけまとめて残りを別ジョブに分ける。1 依頼で同時に投函するのは最大 5 ジョブ（`MAX_JOBS_PER_REQUEST`、取得タスク 1 本 16 vCPU のため他の人の分を残す）で、それを超えるときや 1 KW でも収まらないときだけ取得本数、次に動画本数を縮め、変えた点を `adjustments` として返す。複数ジョブになったときは `job_ids` で返す。
 
 **Apify 補完（`USE_TIKTOK_APIFY_FALLBACK`、既定 OFF）**: `done` のうち worker が DL できなかった動画を MCP が Apify で取り直し、`media-jobs/<job_id>/input/apify-*.mp4` に置いて `acquired_via=apify` を付ける。完了見張りの定期照会からは発火しない。(job, pid) ごとに試行済みマーカーを条件付き PUT で置くので、Apify を走らせるのは 1 回だけ。費用の上限は CostGuard で管理する。
 
@@ -140,8 +135,7 @@ worker 側（`operations._tiktok_acquire`）は KW ごとに `search.mjs` を呼
 3. 1 本ごと: media acquire → media proxy（Gemini の上限まで圧縮）→ Gemini で時刻付き構造分析。DL に失敗したら、Apify 補完（opt-in）を試し、それでも駄目ならサムネだけで分析する。
 4. 横断分析（`cross_analyze`・synthesis）→ HTML レポート・編集可スライド HTML・PPTX を発行し、`slack_summary` を組む。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-出力 `VideoAlgorithmOutput` の主な欄は、`videos`（深掘りした本）・`board`（取得した全メタ）・`cross`・`report_url` / `slides_url` / `pptx_url`（非公開 S3 の署名 URL）・`slack_summary`・`quota_note`・`total_cost_usd`・`generated_at`（順位を取った時刻、JST）。30 秒を超える実行を切り離して完了時に直接投稿する仕組みは [長時間ジョブの切り離し](/openwiki/architecture/detached-jobs-and-async-notify.md) にある。
+出力 `VideoAlgorithmOutput` の主な欄は、`videos`（深掘りした本）・`board`（取得した全メタ）・`cross`・`report_url` / `slides_url` / `pptx_url`（非公開 S3 の署名 URL）・`slack_summary`・`quota_note`・`total_cost_usd`・`generated_at`（順位を取った時刻、JST）。30 秒を超える実行を切り離して完了時に直接投稿する仕組みは [長時間ジョブの切り離し](../architecture/detached-jobs-and-async-notify.md) にある。
 
 ## search_surface_check
 
@@ -162,8 +156,7 @@ MCP への返却は `mcp_relay_fields` で `slack_summary`・`report_url`・`war
 | 分析キャッシュ（`AnalysisCache`） | S3 `ANALYSIS_CACHE_BUCKET` / `ANALYSIS_CACHE_ENABLED` | YouTube は動画 ID、DL 経路は動画 bytes の SHA-256。どちらも prompt_version・model_id・focus を含む | fail-open（分析を続ける）。保存するのは Gemini の出力テキストだけ |
 | `video_algorithm` 結果キャッシュ | 同じ bucket / 専用フラグ `VIDEO_ALGORITHM_RESULT_CACHE_ENABLED` | 出力を変えうる全入力＋依頼者＋prompt / model / synthesis の版 | 読めなければ miss。処理中リース（S3 の条件付き書き込み、既定 1800 秒）を取れなければ課金処理を始めない |
 | media 成果物 | `media-jobs/<job_id>/` / 30 日 | job_id（入力のハッシュから決まる） | 署名 URL は 10 分で、status のたびに出し直す |
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| 2 段目の結果 | プロセス内 24 時間 | 人・KW・URL 集合 | 再デプロイで消える（[長時間ジョブの切り離し](/openwiki/architecture/detached-jobs-and-async-notify.md)） |
+| 2 段目の結果 | プロセス内 24 時間 | 人・KW・URL 集合 | 再デプロイで消える（[長時間ジョブの切り離し](../architecture/detached-jobs-and-async-notify.md)） |
 
 結果キャッシュの TTL は既定 3600 秒（`VIDEO_ALGORITHM_CACHE_TTL_SECONDS`）。`ANALYSIS_CACHE_ENABLED` と共用しないのは、共用すると次のイメージ更新でリース機構が勝手に有効になり、切るには terraform apply が要るため。
 
@@ -171,7 +164,7 @@ MCP への返却は `mcp_relay_fields` で `slack_summary`・`report_url`・`war
 
 - `tools/tiktok_scraper/README.md` は「動画ファイルはダウンロードしない」「`tiktok_search` が adapter から subprocess で呼ぶ」と書く。実際の `search.mjs` には `--mode download` があり、本番の呼び出しは media worker 経由。
 - `adapters/tiktok_video_fallback.py` の docstring は worker の DL 順を「yt-dlp → browser」と書くが、`operations._worker_acquire_order` の既定は `VIDEO_DL_ORDER="browser,ytdlp"`（browser は TikTok だけ）で、タスク定義はこの env を設定していない。
-- `factory.py` のコメントは `tiktok_acquire` を「30本/KW」と書くが、上の見積もりのため動画込みでは 30 本/KW は受け付けない。`search_surface_check` の description にある「3KW 以上は `tiktok_acquire(videos_per_kw=0)` を先に」も、既定の n_per_kw=10 では 3 KW が 870 秒を超えて拒否される（受け付けるのは 1 KW あたり 3 本以下）。
+- 2026-09-30 の #481 までは、上の見積もりを超える依頼を入力検証で拒否しており、`search_surface_check` の description にある「3KW 以上は `tiktok_acquire(videos_per_kw=0)` を先に」も既定の n_per_kw=10 では必ず拒否されていた（本番で 08-28〜09-29 に 17 回）。現在は組み直しで通る。
 - `docs/runbooks/media_worker_rightsizing.md` は、稼働中のタスク定義の CPU とメモリが Terraform の既定（2048 / 4096、メモリは validation で 4096 に固定）と違っていたことを記録している。
 - `src/teamagent/media/worker.py`（DynamoDB / S3 を直接使う 1 ジョブ実行器）は、core と media のどちらのイメージからも削除される（media の Dockerfile は存在しないことを assert する）。本番の入口は `tool_worker.py`。
 
@@ -183,8 +176,7 @@ MCP への返却は `mcp_relay_fields` で `slack_summary`・`report_url`・`war
 
 ## テスト
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-実行手順は [テストの走らせ方](/openwiki/testing/running-tests.md)（media 系は `--extra media`）。
+実行手順は [テストの走らせ方](../testing/running-tests.md)（media 系は `--extra media`）。
 
 - `tests/media/`: `test_contracts.py`・`test_tiktok_operations.py`・`test_tool_worker.py`・`test_tool_contracts.py`・`test_deep_search_contract.py`・`test_tiktok_n_per_kw_contract.py`・`test_core_media_delegation.py`。
 - `tests/infra/test_media_dispatcher.py`・`test_media_janitor.py`・`test_media_terraform_hardening.py`・`test_dockerfile_teamagent_media_worker.py`。

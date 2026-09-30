@@ -3,9 +3,6 @@ type: architecture
 title: オーケストレータ（bounded tool loop）
 description: anthropic の AsyncAnthropicBedrock で既存 Skill をツールとして回す自前の上限付き tool loop（sdk_runner.run_sdk_agent）と、それを 1 ツールとして公開する run_agent（USE_AGENT_ORCHESTRATOR）、ToolSpec・decider/loop・忠実性チェック・評価の役割と現在の公開状態。
 tags: [orchestrator, bedrock, tool-loop, run-agent, evaluation, faithfulness]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-11b6c3c162105aea7c4bba90
     resource: repo://infra/openclaw/openclaw.config.json5
@@ -21,7 +18,10 @@ sources:
     resource: repo://src/teamagent/orchestrator/sdk_runner.py
   - id: openwiki-source-72a907c7c8ecff6406fc4b3d
     resource: repo://src/teamagent/orchestrator/tools.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # オーケストレータ（bounded tool loop）
@@ -68,12 +68,10 @@ loop turn in range(max_turns):
 - **同一ツール×同一入力の繰り返し**は `max_same_call`（既定 2）を超えたら構造化エラーを返し、別の手段を促す（無限ループ殺し）。
 - 入力は Skill の Pydantic で検証し、失敗は構造化エラー。
 - 同期 `skill.run` を `run_in_executor` + `tool_timeout_s` で実行（イベントループを塞がない）。タイムアウト・例外も構造化エラーとして LLM に返す。
-<!-- openwiki: broken internal link [/openwiki/architecture/layering-and-skill-contract.md] link "/openwiki/architecture/layering-and-skill-contract.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- `SkillContext.metadata` に `orchestrated_tool_call` の印を立てる。配信系 Skill はこれを見て、「調べるだけ」の中間ステップで Slack にファイルを投下しない（[3層分離と Skill の契約](/openwiki/architecture/layering-and-skill-contract.md)）。
+- `SkillContext.metadata` に `orchestrated_tool_call` の印を立てる。配信系 Skill はこれを見て、「調べるだけ」の中間ステップで Slack にファイルを投下しない（[3層分離と Skill の契約](layering-and-skill-contract.md)）。
 - Skill が返した `total_cost_usd` は `skill_cost` としてログ。ツール結果 JSON 中の `chunk_id` を集め、最終回答の引用検証に使う。
 
-<!-- openwiki: broken internal link [/openwiki/integrations/bedrock-gemini-and-retry.md] link "/openwiki/integrations/bedrock-gemini-and-retry.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-コストは `usage_to_record` が input / output / cache_read / cache_creation のトークンから概算する（`Price` の既定単価は Sonnet 相当の PoC 値で、コメントも「概算」と明記）。Bedrock 呼び出し全般のコスト記録は [Bedrock / Gemini 呼び出し](/openwiki/integrations/bedrock-gemini-and-retry.md)。
+コストは `usage_to_record` が input / output / cache_read / cache_creation のトークンから概算する（`Price` の既定単価は Sonnet 相当の PoC 値で、コメントも「概算」と明記）。Bedrock 呼び出し全般のコスト記録は [Bedrock / Gemini 呼び出し](../integrations/bedrock-gemini-and-retry.md)。
 
 ## run_agent（MCP ツールとしての L2）
 
@@ -88,8 +86,7 @@ model と system prompt は `orchestrator/agent_config.py` が単一の真実源
 | `decider.py` / `loop.py` | 「計画→実行→観測→再計画」の抽象ループ。`MockDecider` でスクリプト化してオフラインに適応分岐を検証する用途（方式 A/B の比較は `docs/poc/agent_orchestrator_poc_design.md`） |
 | `faithfulness.py` | 回答中の `chunk_id` 引用が実際に取得した hits に含まれるかを純関数で判定（捏造引用・無引用の検出）。LLM judge 不要で CI で回せる |
 | `eval.py` | ゴールドセット（期待ツール・いずれか 1 つ・禁止ツール）に対する決定的な採点 `score_case`。実 Bedrock で tool_calls を取るのは `scripts/eval_orchestration.py`（課金あり・手動） |
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| `factory.py` | 本番ツール群の組み立て。[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md) |
+| `factory.py` | 本番ツール群の組み立て。[ツール登録と機能フラグ](tool-registry-and-feature-flags.md) |
 
 ## コードと規約の食い違い
 
@@ -106,5 +103,4 @@ model と system prompt は `orchestrator/agent_config.py` が単一の真実源
 - `test_faithfulness.py`、`test_orchestration_eval.py`
 - `test_factory_smoke.py`、`test_search_skill_config_parity.py`
 
-<!-- openwiki: broken internal link [/openwiki/testing/routing-and-eval.md] link "/openwiki/testing/routing-and-eval.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-MCP 経由の `run_agent` は `tests/test_mcp_gateway_run_agent.py`。評価の回し方は [ルーティング検証と評価](/openwiki/testing/routing-and-eval.md)。
+MCP 経由の `run_agent` は `tests/test_mcp_gateway_run_agent.py`。評価の回し方は [ルーティング検証と評価](../testing/routing-and-eval.md)。

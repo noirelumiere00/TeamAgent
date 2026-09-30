@@ -23,15 +23,14 @@ sources:
     resource: repo://src/teamagent/skills/proposal_builder/skill.py
   - id: openwiki-source-8fd69b4d9135c7c813d33edd
     resource: repo://src/teamagent/skills/proposal_deck/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 提案書・資料生成ジョブ
 
 ## 全体像
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-提案書系のツールは「数十秒で返る同期ツール」と「数十分かかるため job_id を返して裏で進める submit/status 型」に分かれる。ツールの登録は `src/teamagent/orchestrator/factory.py` の `build_production_tools`、OpenClaw に見せるかどうかは `infra/openclaw/openclaw.config.json5` の `toolFilter` が決める（[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)）。
+提案書系のツールは「数十秒で返る同期ツール」と「数十分かかるため job_id を返して裏で進める submit/status 型」に分かれる。ツールの登録は `src/teamagent/orchestrator/factory.py` の `build_production_tools`、OpenClaw に見せるかどうかは `infra/openclaw/openclaw.config.json5` の `toolFilter` が決める（[ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md)）。
 
 | ツール | 型 | 登録フラグ（既定） | OpenClaw 公開 | 成果物 |
 |---|---|---|---|---|
@@ -43,13 +42,11 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | `proposal_campaign` | 同期（部品） | `USE_PROPOSAL_CAMPAIGN_TOOLS`（OFF） | **exclude** | KW ごとの TikTok 実物サムネ（証拠画像） |
 | `proposal_builder`（同期版） | 同期 | 登録されない | **exclude** | Python からの互換呼び出し用 |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/detached-jobs-and-async-notify.md] link "/openwiki/architecture/detached-jobs-and-async-notify.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-長時間ジョブを OpenClaw の打ち切り（約 6 分）から切り離す共通の考え方と、`proposal_builder_submit` の完了を見張る `async_job_notify` は [長時間ジョブの切り離しと完了通知](/openwiki/architecture/detached-jobs-and-async-notify.md) にある。このページはジョブ本体を扱う。
+長時間ジョブを OpenClaw の打ち切り（約 6 分）から切り離す共通の考え方と、`proposal_builder_submit` の完了を見張る `async_job_notify` は [長時間ジョブの切り離しと完了通知](../architecture/detached-jobs-and-async-notify.md) にある。このページはジョブ本体を扱う。
 
 ## proposal_draft / proposal_review（同期）
 
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-どちらも `SearchSkill.retrieve_hits` で過去提案・営業 FB を引き、Bedrock `converse`（prompt `v1`、system はキャッシュ）で文章を作る。factory は検索インスタンスを 1 つだけ作り、両者に同じものを注入する（埋め込みモデルの二重ロード回避。検索の中身は [社内資料検索](/openwiki/workflows/knowledge-search.md)）。
+どちらも `SearchSkill.retrieve_hits` で過去提案・営業 FB を引き、Bedrock `converse`（prompt `v1`、system はキャッシュ）で文章を作る。factory は検索インスタンスを 1 つだけ作り、両者に同じものを注入する（埋め込みモデルの二重ロード回避。検索の中身は [社内資料検索](knowledge-search.md)）。
 
 - `proposal_draft` は類似が 0 件なら Bedrock を呼ばず、定型の「見つかりませんでした」を返す（費用 0）。
 - `proposal_review` は提案文の先頭 500 文字を検索クエリにし、0 件でも「一般原則で診断」としてレビューは行う。
@@ -125,14 +122,11 @@ stateDiagram-v2
 - 行は `job_id`・`status`・`created_at`・`updated_at`・`request_summary`（JSON 文字列。入力本文は持たない）・`expires_at`（作成から 7 日の TTL）と、終了時の `result_json` / `error_code` / `error_summary`。
 - 遷移はすべて期待 status（必要なら期待 `updated_at`）を条件にした `update_item`。条件不成立は `False` を返し、それ以外の例外はそのまま上げる。**DynamoDB 設定時にメモリへ黙って戻ることはない**（永続境界が消えたら大きく失敗させる）。
 - `get_job` は強整合読み取り。`mark_done` の結果は 300KB を超えると `ValueError`（DynamoDB の 1 行上限の手前）。
-<!-- openwiki: broken internal link [/openwiki/data/postgres-schema-and-migrations.md] link "/openwiki/data/postgres-schema-and-migrations.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- DynamoDB テーブルは terraform の `aws_dynamodb_table.proposal_builder_jobs`（hash key `job_id`、TTL `expires_at`、PITR、`prevent_destroy`）。PostgreSQL 側のスキーマ（[PostgreSQL スキーマとマイグレーション](/openwiki/data/postgres-schema-and-migrations.md)）とは別で、RLS も掛からない。
+- DynamoDB テーブルは terraform の `aws_dynamodb_table.proposal_builder_jobs`（hash key `job_id`、TTL `expires_at`、PITR、`prevent_destroy`）。PostgreSQL 側のスキーマ（[PostgreSQL スキーマとマイグレーション](../data/postgres-schema-and-migrations.md)）とは別で、RLS も掛からない。
 
 ## media worker との分担
 
-<!-- openwiki: broken internal link [/openwiki/workflows/video-and-tiktok-analysis.md] link "/openwiki/workflows/video-and-tiktok-analysis.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-PPTX の描画・TikTok 検索・動画 DL は、ブラウザや python-pptx を持つ media worker が担う。core（MCP）は `adapters/media_job.py` の `MediaJobClient` で SQS に依頼を送り、DynamoDB の結果を強整合で poll し、S3 の成果物を完全性検査つきで取り出す（`MEDIA_TASK_QUEUE`・`MEDIA_JOBS_TABLE`・`MEDIA_JOB_BUCKET` の 3 つが揃って初めて `is_configured`）。受け渡しの詳細は [動画・TikTok 分析](/openwiki/workflows/video-and-tiktok-analysis.md)、イメージの境界は [コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)。
+PPTX の描画・TikTok 検索・動画 DL は、ブラウザや python-pptx を持つ media worker が担う。core（MCP）は `adapters/media_job.py` の `MediaJobClient` で SQS に依頼を送り、DynamoDB の結果を強整合で poll し、S3 の成果物を完全性検査つきで取り出す（`MEDIA_TASK_QUEUE`・`MEDIA_JOBS_TABLE`・`MEDIA_JOB_BUCKET` の 3 つが揃って初めて `is_configured`）。受け渡しの詳細は [動画・TikTok 分析](video-and-tiktok-analysis.md)、イメージの境界は [コンテナイメージとビルド](../operations/container-images-and-build.md)。
 
 - `proposal_deck` の描画は `render_proposal_pptx`（`proposal_pptx` 操作）で worker に委譲する。テンプレ・Composer JSON・証拠画像（最大 20 枚）を S3 に置いて渡し、worker 内の python-pptx が 95 枠を埋める。統合 FMT が大きいため、この操作のテンプレと出力だけ上限が 256MB（一般の操作は 128MB）。
 - media が未設定で `TEAMAGENT_LOCAL_MEDIA_RUNTIME` が ON のときだけ、プロセス内の `renderer.render_deck` で描く（ローカル開発用）。どちらも無ければ `MEDIA_JOB_NOT_CONFIGURED`。

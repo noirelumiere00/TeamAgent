@@ -1,24 +1,32 @@
 {
   "schemaVersion": 1,
-  "pageVersion": "sha256:e330b44f7c199eae1dbf90596977be79caa74a8784a419d75789e1935fefe10a",
+  "pageVersion": "sha256:487b6480b19162b4caa9fbabd76677584b7eed69c11c333ce21304d01ffe25e6",
   "claims": [
     {
       "id": "claim_0979509908564ed180600f204d646e66",
       "statement": "mcp 側の CallerClaimVerifier は署名・固定フィールド・team・ツール名・期限・申告 _user_context との一致・引数の正準ハッシュを検証し、最後に nonce を replay store で消費する。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L333-L465",
-          "version": "repo-lines-v1:sha256:b15c621bc18928dd6f29ec043bf1bcfdf6b5e123f9c986ea01cd7353d9d37e34:eyJzZWxlY3RlZExpbmVDb3VudCI6MTMzLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiZGJkZmIyNmUwM2IzZjczYjY5ZjQ4NGEzZWU3MDU4YzZiYzBlZmRhYjIwYWZlN2MyMmIyZWQ3NDRlMWY3YTY0IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI3NjVkZGJlMmZlYTY0OWE1OWE0NzQ0MzgzOWQxNjUzZTJiY2ZkMTE3ZjI2YjI4OWZjNmI4ZDJiMWNjNmNlYjY1IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxMmMyZGY1ZDdkMjJhNTNlYTJkZGVlZGYxNjdhN2YzMWQ0NWMyNjgwZjQxMDEzYWRkMmMzZTA2MWUyYjdlYjg4IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MSwiZm9sbG93aW5nQ29udGV4dEhhc2giOiI1OTA5YTUzYTYxOGQwMjhlMWQzMDAwYzBhN2FiY2VlY2JlNWZiMzdmNGU1MTFlZmU0NjY0M2ZhZDZlNjY4NzJmIn0"
+          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L353-L474",
+          "version": "repo-lines-v1:sha256:b1c1624e74c24e9bd4e6ec9e18065dfe2d905266dcc93ea104864b60638fab74:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJiZGJkZmIyNmUwM2IzZjczYjY5ZjQ4NGEzZWU3MDU4YzZiYzBlZmRhYjIwYWZlN2MyMmIyZWQ3NDRlMWY3YTY0IiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiIwMWJhNDcxOWM4MGI2ZmU5MTFiMDkxYTdjMDUxMjRiNjRlZWVjZTk2NGUwOWMwNThlZjhmOTgwNWRhY2E1NDZiIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiIxMmMyZGY1ZDdkMjJhNTNlYTJkZGVlZGYxNjdhN2YzMWQ0NWMyNjgwZjQxMDEzYWRkMmMzZTA2MWUyYjdlYjg4IiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI3NzUxNDI1MmRjYTQyNWIxMDdlYThmOGU1M2NjNDQzMGVmYzg2YWMyNzc1MGU4NmI0ZmZlOGY2NzNiOGM0Y2IyIn0"
         }
       ]
     },
     {
       "id": "claim_1258ec86b58a44d294b19bb4031c9f63",
-      "statement": "本番の replay store は DynamoDB の attribute_not_exists 条件付き書き込みで nonce を 1 回限りにし、DynamoDB エラーは fail-closed になる。",
+      "statement": "本番の replay store は DynamoDB の attribute_not_exists 条件付き書き込みで nonce を 1 回限りにし、DynamoDB エラーは fail-closed になる。記録の保持期限 expires_at は claim の exp ではなく消費時刻＋25 時間（CALLER_CLAIM_REPLAY_RETENTION_SECONDS）で、最長 24 時間有効なボタントークンの固定 nonce が再送されても通らない。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L103-L170",
-          "version": "repo-lines-v1:sha256:9bfcae6a33b70018b0b8c15faba804309ac6e80781ed798ec3532e841c6de947:eyJzZWxlY3RlZExpbmVDb3VudCI6NjgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhODY2OWZmMmNjODUwMmI3MDI4YzVhMjNhZWJhMGQ0NWQ0ODE4MzVhZWUyMjMyMmU4YzY0ZjM3NTBkZTRhZGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmOTQ1MTIzZjIwMmZlMTAwNTQwNDJlYmJlOWFkOTAxZDU2MTcyYTkyNDZiZjBjNDI0MGZkM2ZhOTc0OTllYWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjIxZTdmODE4ODM0N2NmNDc5M2U4ZjhkMGI2Y2Q4ZmRkNTI0NjMwZDhmZDliMDVjMmUwNjg3ZDRmMWEyZWIwY2YifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L121-L182",
+          "version": "repo-lines-v1:sha256:5c18f33ab65327e365c4a21bd03152dbbb235594dae4c5812d4499a6f23bf1f4:eyJzZWxlY3RlZExpbmVDb3VudCI6NjIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjNhODY2OWZmMmNjODUwMmI3MDI4YzVhMjNhZWJhMGQ0NWQ0ODE4MzVhZWUyMjMyMmU4YzY0ZjM3NTBkZTRhZGMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI3ZTk0NTZiMTY1YWYyOWIwZTQyZjM2Njk3YTJmMWY5ZWMyYWFlZjA3MTNiZDRkNDhlNTcwODZkZjMzOGVkZDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjRmOTQ1MTIzZjIwMmZlMTAwNTQwNDJlYmJlOWFkOTAxZDU2MTcyYTkyNDZiZjBjNDI0MGZkM2ZhOTc0OTllYWYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY0OGQwYWI2OGU5NTdmODU4YTA3M2U5MDFiOWMwMzg3NDMzMDIzMWUxYmU0OTA0NmJjNDI5MjdjYzkzNzUyYzEifQ"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L33-L41",
+          "version": "repo-lines-v1:sha256:03fa1e8782e97f78eb8cb657b312dbb91346ee9745ace33c8fadb417218dcd1b:eyJzZWxlY3RlZExpbmVDb3VudCI6OSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiYTUxZDhkMjc4ZjM3ZTQxMjdkNDJmYjNhN2M2ZWVkNDQ0MGIyZDc1NjQzM2ZiMTc3MDc1MGE3OTIwMTA0MTY0MSIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOTg1MGM4YmNlYjAxNzdmMTIzZTY4ZjE2N2Q5YjhkMzUzZWJhNGY3OTdlMTYyNTY3MWFmOWFlY2RhMmNlZWRiNiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiOWE5ZDYwYzE4NGRlN2I2ZWZiMWM0NTI3ZTc3NjJiMWZlNTkwNjI0MjA5NjViZGYxNjNlMTIzYzNiOGFiODQxZiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiOGQwODA2NWNkMmQ3YTc0N2IwMjAwYjBkMWFhOTgzYzgzN2FjNzc4OTVkNDMyYTA1MmMwNjY3N2NmMzFiNzI4NCJ9"
+        },
+        {
+          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L468-L473",
+          "version": "repo-lines-v1:sha256:b6501f1d7d204d4c9100243f8468c1d14fe4f71947be519eb977638b348a2e44:eyJzZWxlY3RlZExpbmVDb3VudCI6NiwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiMzhiN2Y4MWJlZDNiNmNiNjU2NTczNDQzNjExMmIzMGQ0YzUzNmQyZGNjNDczMTZiZWYyNmFhNDkwY2I5MTc5ZCIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiNTkwOWE1M2E2MThkMDI4ZTFkMzAwMGMwYTdhYmNlZWNiZTVmYjM3ZjRlNTExZWZlNDY2NDNmYWQ2ZTY2ODcyZiIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiNjA1ZTM5M2Y2OTA4YTczOGZmYTVhOGEwODg2ZjM3YThhNjA5ZGVjNWE4ODFjZGM3NGE5Mjc2NGJhZDQ2MzViNCIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiZGM0Y2I0NjM5ZGJkYjI5ZTk3OWJlOTkwZWQ5YzZkMWZlNjJiZTIxNTAzOGI0OGNiZGI2ODBjZDMyZGY2NjNhYyJ9"
         }
       ]
     },
@@ -27,7 +35,7 @@
       "statement": "CallerClaimVerifier.from_env は caller claim の秘密が MCP bearer と同じ値なら起動を拒否し、寿命は最大 60 秒が既定。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L282-L331",
+          "resource": "repo://src/teamagent/mcp_gateway/caller_claim.py#L302-L351",
           "version": "repo-lines-v1:sha256:ca431beae8bd91b0b3e5b0a7e6c5ecd440d58ceceb8245cf391927913fc2928e:eyJzZWxlY3RlZExpbmVDb3VudCI6NTAsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjlmZDdhMDdhODNkZDE5OTZmYjUxNjg0YjQyYWVjYWY0ZTkwZmI3OGJhNzIzMGU1NDJlZDdiZDAxZDQyMzAxYmUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjUxNmQwMmU2ZTE0ZTliNGYwOGI1NzRjZjk4NGQ5MzNhNDVkYjIzMzk2MjM0MzdjMTAyZTdlNzE0YjllYzAwMzIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAwN2VmYmQxOTRmZjYyZjU5MGEwMTViNGU2NGM3YzNmZmE5NzE1NzYwOTE2ZTk1N2NmM2ZiNDRjYTU1Nzc4YzUifQ"
         }
       ]
@@ -37,7 +45,7 @@
       "statement": "identity resolver か会社共有グループが有効なのに検証器が無い場合、_verify_caller は CALLER_IDENTITY_CONFIGURATION_ERROR を返し、claim 検証失敗は missing_verified_caller の本人確認拒否として返る。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L588-L618",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L633-L663",
           "version": "repo-lines-v1:sha256:5e6cbda15264813abf2f7fedfd67ffebe9ecf1f4943deac08a869eda338afd7c:eyJzZWxlY3RlZExpbmVDb3VudCI6MzEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImNkNjY1MDlkZTliMTI3NzZkNTdlMjM1M2VkNmFiYTEzMmFhYWEwYjE3OTVmY2Q2ZDc0MTMyY2E1NzY2MzA4MWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg1MjVhZDMzYmNmNjc5YmMwYzEwYmRkN2I5YzQ2ZDY3ZmU5YjA3YzZkMTcxYjFmOTA3NDFkNDg2OGZhMzNjZDMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjMyNDRiOTE4M2FiNjkxNzljOTkyZTgxYjc1NThjODAzYWU5YTNiNTQ4NDRiODkwNTJjMjgyZDRiYzJlMzAwZmQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjZhODU0ZGYyODI3NGNmMzZjOTU4ZDY1YTRkODRiNDIwZWVhYzY4ZGEwM2JkZDI3NmM2Y2EyODk0ODMwNmYyZmUifQ"
         }
       ]
@@ -51,7 +59,7 @@
           "version": "repo-lines-v1:sha256:8e7ae175160225b2d3a7100ef374d731521c9656d4b18f621c7f888818d4dac7:eyJzZWxlY3RlZExpbmVDb3VudCI6MSwiZmlyc3RTZWxlY3RlZExpbmVIYXNoIjoiOGU3YWUxNzUxNjAyMjViMmQzYTcxMDBlZjM3NGQ3MzE1MjFjOTY1NmQ0YjE4ZjYyMWM3Zjg4ODgxOGQ0ZGFjNyIsImxhc3RTZWxlY3RlZExpbmVIYXNoIjoiOGU3YWUxNzUxNjAyMjViMmQzYTcxMDBlZjM3NGQ3MzE1MjFjOTY1NmQ0YjE4ZjYyMWM3Zjg4ODgxOGQ0ZGFjNyIsInByZWNlZGluZ0NvbnRleHRMaW5lQ291bnQiOjMsInByZWNlZGluZ0NvbnRleHRIYXNoIjoiZjgyZTU5NjFkYmJjZTNhMzY5YzJkZDk3YzM2NmFjYzEwMDRjNjUyOWMxYTc1ODU0YWQ2YzhlNmU4YmVjYzU5NiIsImZvbGxvd2luZ0NvbnRleHRMaW5lQ291bnQiOjMsImZvbGxvd2luZ0NvbnRleHRIYXNoIjoiMzRmYjFmY2U2OWQyZjA5MDdhNWI4ZmI5NmFhYjE0YmZhNzczNzMxMWQ3YzJmOWM5NjIwZjA0NTBiNTRiYzY0ZCJ9"
         },
         {
-          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L3926-L3973",
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L4116-L4163",
           "version": "repo-lines-v1:sha256:a39cecbf82e5b423bc3799c427d04846277be8205bf195863dbe9c5d0c6891dd:eyJzZWxlY3RlZExpbmVDb3VudCI6NDgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImE3ZGZiNWIwNDBiMDdmYjNiYTQ5ZjA4N2RiYTU5NWQyODhiMTQ5M2RkZWIxMDg1YzIxMzI4MWI0Mzc1MDUwODciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjI3ZTU3ODhkNWQ5ZDczZDI0YTgxZGJjMGE1YTc0YmZhODJjOWMzYjNhZjk5ZTUyYWY3OTZlOTBiNDY4YThhM2QiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImQzNWIyYzYxNTU3ZTVmMmZmMTZjMzQ3ZGNiNjFiYjY2YzMwMDk0Y2Y4ZWZkY2QzMTgxZTI1MTYzYjAzMDBiYjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRlNGJmMzhkMjBhNjZmNzc3MWNmOTE5Y2U0NmNiMjMyN2UxMzM2NTZmMGYwYTMxMTJmOTc5OGJiYzdiYzA5YTEifQ"
         }
       ]
@@ -61,8 +69,12 @@
       "statement": "ACTION_BINDINGS は朝ダイジェストの 4 ボタンを action_id ごとに 1 ツール・トークン引数・上限・typ・メッセージ由来時の扱い（deny / blank_token）へ固定し、1 対 1 でなければ起動時に失敗する。",
       "evidence": [
         {
-          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L364-L485",
-          "version": "repo-lines-v1:sha256:adf39c7bd7c2258cce66ab1664fb3d70ba198346584f9e1b6099967a348193ab:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIyLCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiI1NGRhMWE0ZDY4MGMwZTY4ZWQzZDVjZjVkY2VmNzg0ZjNjNjMwZjc0OWNhMDQzNWY4MjI1Mzg5ZGQzNjM3NjFiIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0OWZhYzVhMzAzOWJiYWQyODdhYzgxNWQ1MzNjZjNhYmQ0YjQyMTc5MjBjYmUyYzkzYmIzNGE2ZTMwMDAzMTQyIiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiJhMmMxMjgyNTI5ZmFkMjI0MDkxMTUyZjVkMjBlMGRlOGM3YzZjNWQ0OTRlMmU4Nzg1OTA2MDU2ZDhhYmJkZDAzIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiIxOTRmOTBmY2QxMjI4MGZhMGEzNDAxODY1OWNiZTgwODBkMWE2YzczZTkzNDc5OWVlMDZhNmFlMTBkOTE0NDJjIn0"
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L367-L431",
+          "version": "repo-lines-v1:sha256:2739471701270285df4dcb985842bc08a42842feaab549b38585555c0baae10f:eyJzZWxlY3RlZExpbmVDb3VudCI6NjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU0ZGExYTRkNjgwYzBlNjhlZDNkNWNmNWRjZWY3ODRmM2M2MzBmNzQ5Y2EwNDM1ZjgyMjUzODlkZDM2Mzc2MWIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY2ZjViNDBiMTU4NDU3ZDE3ODY0ZjIxNzkwNzg2ZGQ1YTJlY2RiNjRiNjZhNjUxZjc4OGQ0ZTI1Y2QzMzAzZDIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImEyYzEyODI1MjlmYWQyMjQwOTExNTJmNWQyMGUwZGU4YzdjNmM1ZDQ5NGUyZTg3ODU5MDYwNTZkOGFiYmRkMDMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjBmM2YxMDA4NTQ2NjA0NDNmYzRjNjFhM2NlNWE2OWM2MGIzOTQzMDA0NWMwNWZmNWY0OWI1ZDU5NTYxMDJhNjEifQ"
+        },
+        {
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L528-L562",
+          "version": "repo-lines-v1:sha256:1c425eef597a8daebfc002299e3ab1bc9e19d965ac012dca1e558242947afc65:eyJzZWxlY3RlZExpbmVDb3VudCI6MzUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjJhNWY5NDhhMzQ3Y2I0MDdjZTgxYjg5ZWQ3MDE0ZjQ4NzA2N2YzMDhjNzFjMjgxMzg1OTBlNzFlZjIxYmMwZjciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6Ijg5NzdhZjdjYzdhYTc2OTg3MzM3NDY5NmRkOTkzY2EyYmM4MjI2MzFmOTRmOTZmODk5Y2ZhMmYzYjNjNmRjZWQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY1MWRlODhkYmQ1NzIyYTVhZTFiNzc0NjliMDc5NjI3OTQwM2ViMTkxZmFlOTBkZTQ5ZTkwNDQ0MWQ0Y2M4N2QifQ"
         }
       ]
     },
@@ -71,18 +83,18 @@
       "statement": "signToolCall はボタン由来の run では束縛先以外のツールと 2 回目の呼び出しを拒否し、メッセージ由来の run では outsideAction が blank_token 以外のボタン専用ツールを拒否する。",
       "evidence": [
         {
-          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L3739-L3772",
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L3929-L3962",
           "version": "repo-lines-v1:sha256:5ba78dfc0e05dd1795820f4a449176c5f4765409ce5e70eaedf0b8c1e88aa4f4:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQyODBlNWRiZTdkZTI4ZDM0OWIzNmYwMTFmMjVlZThkYjhmM2ZmMjNlMDBlZmNjMzc2ODk2ODNkMzhlNDg0ZjUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjQ4OTNmNDBlMzc4MWViODk2YzgyZDA0NmEwODA2N2ExMWUzNWNkZjJmMWRmYWYyNmZlYTkwYjhkYjY2NzY0MTMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImMxNTViNzI2MDU4MzhmZmY5NWRlOWQxMmI1NTY5NGQ0ZThmNTA2MWQ5ZTg4OTQ2YTU2OTU0YzBkNzdhY2M3NDEiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA2NmIxMzY2NGZiZTY5YmJlZTk2Yjk5ZmEyYTBiN2ZhMWIxMWViOGMxYTIyMWViMGJmMDgxOTk5ZTY3OGIyNTYifQ"
         }
       ]
     },
     {
       "id": "claim_dbbe6bd6b3814d09b4aee711213e10de",
-      "statement": "本番は heartbeat.every が 0m のため、plugin の executeButtonAction が押下を捕捉して本人 DM を確認し、束縛先ツールを MCP へ直接呼んで結果を本人 DM に投稿する。MCP がツールを受け取る前の失敗だけ押下台帳から外して再押下を許す。",
+      "statement": "本番は heartbeat.every が 0m のため plugin の executeButtonAction が押下を捕捉して本人 DM を確認し、束縛先ツールを MCP へ直接呼んで結果を本人 DM に投稿する。MCP がツールを受け取る前の失敗と、DM 以外での案内がどこにも届かなかった場合だけ押下台帳から外して再押下を許す。",
       "evidence": [
         {
-          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L2890-L2995",
-          "version": "repo-lines-v1:sha256:4a55b3c1e95db64af7bb4f3dab2f02a3504f705b38602815ddb167c53b618a4b:eyJzZWxlY3RlZExpbmVDb3VudCI6MTA2LCJmaXJzdFNlbGVjdGVkTGluZUhhc2giOiJhMjAyNDYxYzY5YzBhZWE2ODJhZjdmZWMzYWNiYmI5ZTgwNTdlZGI3NTE0ZTEwOTU0ZmUyNTE3YzFmOGIzOGVkIiwibGFzdFNlbGVjdGVkTGluZUhhc2giOiI0YjAzMzE1NmMwZjQ3ODE0YTI5ZThkZDMxYjdjZWRhNTE1YjdmZDFhMTkxM2FmZTlkMDFhMTVjOGFiZGIxOTY3IiwicHJlY2VkaW5nQ29udGV4dExpbmVDb3VudCI6MywicHJlY2VkaW5nQ29udGV4dEhhc2giOiI2MDY2MDU4OWNmNTRiYmU2MTVmNzA5YjY5ZTI5OTMxZDQxY2ZiYjdkODgzOTBhN2Y3Zjg0Nzk0N2RiMDkzMDAyIiwiZm9sbG93aW5nQ29udGV4dExpbmVDb3VudCI6MywiZm9sbG93aW5nQ29udGV4dEhhc2giOiI0N2EyZGRkZGJiMTA2NjRhYjBiYmJkY2MxZjVmYTNkNzg0Y2Q0MWNlOTc0M2QxNzdmZmMwYjZkY2FkOWZmNWRjIn0"
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L3067-L3105",
+          "version": "repo-lines-v1:sha256:08cca50458a99ca6c19e9f37bde90f44a9d2a7265c0f792b151e273f8bf0d300:eyJzZWxlY3RlZExpbmVDb3VudCI6MzksImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEyMDI0NjFjNjljMGFlYTY4MmFmN2ZlYzNhY2JiYjllODA1N2VkYjc1MTRlMTA5NTRmZTI1MTdjMWY4YjM4ZWQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFiMzVlYjQ0Yjg4NTczNDMwN2FhMzc4NGNlZDc1NmZmMWVhZTVmZWQ4ZmY0N2M1YWJjZDU2YzljZTM4Y2U1YTUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjY1MTU0YWIyNzZmZDZlMTc0M2YwMGE2MmQ4NjZmMzBjODhmZTNjYzMwNDlhYmIxMTc3M2I5NDNhODdiZTQ1ZGMiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEzODM1MDQwNzlkN2VjZDMzMWYwZDZmMjVlMjJkNjBhY2Q5MmI0ZDhhMmQwODMxZDEyZmFhMmZjMTVkZjhjZmQifQ"
         },
         {
           "resource": "repo://infra/openclaw/openclaw.config.json5#L16-L16",
@@ -109,10 +121,24 @@
           "version": "repo-lines-v1:sha256:486ff990151a56252b1e06d885312318ec42af5c86b2b2aeb5c3cdd25da73b28:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkMWE4MGRjY2MzOGIzYzJmZmI5MTMyNWZjMDRkNTI2Mjg4OGQyNmJkN2I3MjRiY2NiMGFmMTcxZTI2NGJkZjQiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjowLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjdhNmRlNzkyNWM4NDA3NzAyODE1Yzc1Y2ZkZmU5YTAxM2Y4ODgwNjJhMTdmYTI1NjdiOWRiZmE3NTkzNTZiYzIifQ"
         }
       ]
+    },
+    {
+      "id": "claim_47b4cb003ae54bcc92401575277cdef0",
+      "statement": "台帳にある同じ押下の押し直しは実行せず、押した本人にだけ一時表示で台帳の状態（running / answered / failed / not_own_dm / その他）に応じた 1 行を返す。知らない状態は「確かめてください」（texts.unknown）に倒す。",
+      "evidence": [
+        {
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L2845-L2865",
+          "version": "repo-lines-v1:sha256:f2012cd8292f95933a0b2e02302cc50189a872e768dd55772929a17895e80660:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImI4M2FkZTkyMjY3YWI4YWFkYzRmZDBjNzY2ODkzZTQ4OWFhODIwODJhZDNiZjQwMDNkZjMxNGU0MTE2ZTRlNTgiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImQxNDE4NTVhNDNmOGRmZDY4NzBjZGEyMjFkYWUxYzMwNGNjZTEwNGEzNWUzMmU2NDdjOWM5NTRjNjIxNmFiZWMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImNhZWZjNTlkMjhjZDYzNTFmZjE4YjY4M2ZlMzBlNDY4ZTc4ZTE4OTBlYTc5MmQ2MmUzN2E0ZWNhN2U0NTgwMDIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjA0YTJkMTA1OTA5YTZjNThkZGFiNjI2YTNlMWVlYWEyYmMwNzYwMTRlOGIzMmMzNmJmZGZkNjE2ODY3MDU2ZDEifQ"
+        },
+        {
+          "resource": "repo://infra/openclaw/caller-identity-plugin/dist/index.js#L478-L529",
+          "version": "repo-lines-v1:sha256:37a45352e26756e71b56c64efc96a3d99e34ff6c4473f8199b6549fbc61b0c21:eyJzZWxlY3RlZExpbmVDb3VudCI6NTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA1NTE4ZTI0MzAwM2QwZjU5OGZmOTYxMmIwNzNkYWNlOWMyZmEzYTkwMTEwYzI0YWUyOTc3ZWNhZjQwZTE0OWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU2ODZkM2MzOTJlNDI2MWQ2MmVkMDg5YjZkNGY3MjgxY2FkNTdhYThiZjA2Y2QzMjc5MGEyZWYzMTk3ODM5NTciLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImYwMTczMzU3ODI3NGRkNTBkZGQzMWI0MjBiNzliMDc5ODkxNzQyNjM4NmUyODhkYjUzYjcxMzQyNDEyYjM5OWIiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImRkY2IwYjQ2MGIwNzU3YmE0MzJmODExNDI0OWM1NDE2ZWFmMGU5NGQwNjQyMmJjNzhkNTA4ODNhY2FiYTc1MzEifQ"
+        }
+      ]
     }
   ],
   "verification": {
     "by": "openwiki/0.6.1",
-    "at": "2026-09-29T07:51:05.076Z"
+    "at": "2026-09-30T04:50:20.078Z"
   }
 }

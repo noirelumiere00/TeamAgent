@@ -3,9 +3,6 @@ type: workflow
 title: 朝ダイジェスト
 description: EventBridge の定期タスク（一括・planner・単独利用者の 3 モード）が連携済み利用者ごとに Gmail/Calendar/Slack を読み、重要度分類と作り置き下書きを経て本人 DM に配信する流れ。digest_delivery / digest_notice による二重配信防止と、MCP ツール morning_digest として呼ばれた場合との違いを扱う。
 tags: [morning-digest, eventbridge, fargate, scheduler, gmail, calendar, slack-dm, idempotency]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-ef54f8e63a41477899e459da
     resource: repo://infra/terraform/fargate.tf
@@ -23,11 +20,16 @@ sources:
     resource: repo://src/teamagent/adapters/scheduler_client.py
   - id: openwiki-source-a9c83b66f4cc0dda94a14e08
     resource: repo://src/teamagent/digest_user_ref.py
+  - id: openwiki-source-91ff4ab37104f83475b15cbb
+    resource: repo://src/teamagent/skills/morning_digest/delivery_calendar.py
   - id: openwiki-source-f15be3fc0ab8c09c963801e7
     resource: repo://src/teamagent/skills/morning_digest/send_window.py
   - id: openwiki-source-7c4e86c8d099c2810f3d0d38
     resource: repo://src/teamagent/skills/morning_digest/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T05:02:29.804Z
 ---
 
 # 朝ダイジェスト
@@ -50,16 +52,15 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 
 `_mode()` は `--mode=` 引数 → `MORNING_DIGEST_MODE` → `MORNING_DIGEST_USER_REF` の有無（あれば `single`）→ 既定 `bulk` の順で決まる。
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart TD
-  P["EventBridge planner<br/>日〜木 19:00 UTC（平日 04:00 JST）"] -->|"RunTask --mode=planner"| PL[run_planner]
+  P["EventBridge planner ／ 日〜木 19:00 UTC（平日 04:00 JST）"] -->|"RunTask --mode=planner"| PL[run_planner]
   PL --> Q{"送信時刻が既定時刻より前?"}
-  Q -- はい --> SCH["EventBridge Scheduler<br/>digest-{user_ref}-{YYYYMMDD}"]
+  Q -- はい --> SCH["EventBridge Scheduler ／ digest-{user_ref}-{YYYYMMDD}"]
   Q -- "いいえ / 未連携" --> KEEP[一括実行に残す]
-  SCH -->|"at(時刻) → SQS"| L["reminder_notify Lambda<br/>kind=digest"]
+  SCH -->|"at(時刻) → SQS"| L["reminder_notify Lambda ／ kind=digest"]
   L -->|"RunTask MODE=single / USER_REF / DATE"| SG["single: 1 人分"]
-  B["EventBridge 一括<br/>平日 00:30 UTC（09:30 JST）"] -->|RunTask| BK["bulk: 対象者全員"]
+  B["EventBridge 一括 ／ 平日 00:30 UTC（09:30 JST）"] -->|RunTask| BK["bulk: 対象者全員"]
   SG --> C{"digest_delivery.claim"}
   BK --> C
   C -- 取れた --> R["skill.run → 整形 → 本人 DM"]
@@ -90,7 +91,7 @@ Slack の宛先は保存しない。毎回 email → `users.lookupByEmail` → `
 - 終日予定は計算から外す。時刻つき予定が無い日は既定時刻。
 - planner は「予定なし」「既定時刻に張り付いた」人には**予約を作らない**。一括実行が拾うので 1 通は必ず出るし、予約を作ると土曜に DM が出たり、一括と同時刻に 1 人 1 タスクが余分に立ったりする。
 - 下限 06:00 に張り付いた回は、single 実行の事例ブリーフ節に 1 行添える。判定は予約ペイロードに載せず、発火側が同じ純関数で計算し直す（`_early_notice`）。
-- planner 後の予定変更には追随しない。祝日判定もしない。対象日は `MORNING_DIGEST_DATE` で上書きでき、planner と配信の両方が同じ `_digest_day()` を使う。
+- planner 後の予定変更には追随しない。送信時刻の計算自体は祝日を判定しない（祝日に予約を作らないのは下の祝日スキップ）。対象日は `MORNING_DIGEST_DATE` で上書きでき、planner と配信の両方が同じ `_digest_day()` を使う。
 
 ## 1 人分の組み立て（MorningDigestSkill.run）
 
@@ -105,9 +106,7 @@ Slack の宛先は保存しない。毎回 email → `users.lookupByEmail` → `
 4. **Slack 返信漏れ**: provider が渡されたときだけ走査し、走査できたかどうか（`slack_unread_scanned`）を別に持つ。見ていないのに「なし」とは表示しない。
 5. **下書き**（次節）と、☑️ 確認済み用の一括トークン。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/digest-buttons.md] link "/openwiki/workflows/digest-buttons.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/integrations/google-oauth-and-token-store.md] link "/openwiki/integrations/google-oauth-and-token-store.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-各ボタンのトークンと押下後の処理は [朝ダイジェストのボタン処理](/openwiki/workflows/digest-buttons.md)、Google トークンの保管と更新は [Google OAuth とトークン保管](/openwiki/integrations/google-oauth-and-token-store.md) を参照。
+各ボタンのトークンと押下後の処理は [朝ダイジェストのボタン処理](digest-buttons.md)、Google トークンの保管と更新は [Google OAuth とトークン保管](../integrations/google-oauth-and-token-store.md) を参照。
 
 ## 作り置き下書き
 
@@ -119,14 +118,13 @@ Slack の宛先は保存しない。毎回 email → `users.lookupByEmail` → `
 - Reply-All（`MORNING_DIGEST_REPLY_ALL` 既定 ON）で、スレッド履歴と案件の決定事項を文脈に入れる。一斉配信・自動配信には作らない。
 - Gmail には `drafts.create` しか呼ばない。送信はしない（G4）。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/mail-tools.md] link "/openwiki/workflows/mail-tools.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-真のときは `list_drafts` との照合で `has_draft` を埋めるだけで、作成は ✏️ ボタンから `mail_draft` が行う（[メール系ツール](/openwiki/workflows/mail-tools.md)）。※ skill.py の「4. 下書き」のコメントは「既定（オンデマンド）」と書いているが、コードの既定値は偽で、定期タスクも作り置きで動いている。
+真のときは `list_drafts` との照合で `has_draft` を埋めるだけで、作成は ✏️ ボタンから `mail_draft` が行う（[メール系ツール](mail-tools.md)）。※ skill.py の「4. 下書き」のコメントは「既定（オンデマンド）」と書いているが、コードの既定値は偽で、定期タスクも作り置きで動いている。
 
 ## 配信の記録（digest_delivery / digest_notice）
 
 `_process_user` の順序:
 
-1. store があれば `DigestDeliveryStore.claim(email, day, origin)`。`INSERT ... ON CONFLICT (user_email, digest_date) DO NOTHING` の rowcount が 1 のときだけ送る。例外・不正な入力は偽＝**送らない**（fail-closed）。`origin` は `scheduled`（single）か `bulk`。
+1. store があれば `DigestDeliveryStore.claim_result(email, day, origin)` で配信権を取る。`INSERT ... ON CONFLICT (user_email, digest_date) DO NOTHING` の rowcount が 1 なら `claimed`（送る）、0 なら `taken`（別経路が送った＝正常）、DB 障害・不正な入力なら `failed`（**送らない**＝fail-closed）の 3 通りで、送るのは `claimed` だけ。`origin` は `scheduled`（single）か `bulk`。
 2. `skill.run` → 整形（`MORNING_DIGEST_COMPACT` で密度優先の描画）→ Slack DM。
 3. skill の失敗、整形・配信の例外、Slack が受け付けなかった場合は `release` で印を消し、後続の経路が再挑戦できるようにする。
 4. 配信に成功し `MORNING_DIGEST_REMINDERS` が ON なら、当日の予定の開始 N 分前リマインドを Scheduler に登録する（失敗しても配信の成否は変えない）。
@@ -138,10 +136,17 @@ store は `MORNING_DIGEST_PERSONALIZED` が ON のときだけ作られる。OFF
 | `digest_delivery` | `0026` | `(user_email, digest_date)` | その日のダイジェスト本文を送る権利。`origin` は CHECK で `scheduled` / `bulk` に限定 |
 | `digest_notice` | `0027` | `(user_email, notice_kind, notice_date)` | お知らせ系 DM の送信権。現状の種類は `calendar_unlinked` だけ |
 
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-どちらも FORCE RLS で本人行だけを `teamagent_app` ロール＋`app.user_email` GUC で読み書きし（[RLS と実行ロール](/openwiki/data/rls-and-app-role.md)）、claim と同じトランザクションで期限切れ（14 日）の本人行を掃除する。
+どちらも FORCE RLS で本人行だけを `teamagent_app` ロール＋`app.user_email` GUC で読み書きし（[RLS と実行ロール](../data/rls-and-app-role.md)）、claim と同じトランザクションで期限切れ（14 日）の本人行を掃除する。
 
 `digest_notice` は planner が使う。カレンダー未連携の人へ、**月曜だけ**・`MORNING_DIGEST_BRIEF` が ON のときに 1 行の DM を出す（認可 URL は貼らず「この DM で『連携』と送って」へ誘導する）。claim は送信の前に取る。planner が再試行で再実行されても 2 通目は出ない。`digest_delivery` に相乗りしないのは、お知らせが先に印を取るとその人のその日のダイジェストが消えるため（しかも `origin` の CHECK で INSERT できない）。
+
+## 祝日スキップ・取得状況の表示・管理者 DM（F0・どれも既定 OFF）
+
+2026-09-29〜30 に追加された、既定 OFF の機能。
+
+- **祝日スキップ**（`MORNING_DIGEST_HOLIDAY_SKIP`）: ON のときだけ、祝日（`teamagent/jp_holidays.py` の表）と会社休日（`MORNING_DIGEST_EXTRA_SKIP_DATES`）を配信しない日として扱う。判定は `skills/morning_digest/delivery_calendar.py` の 1 か所で、一括モードはその日の `skill.run` を呼ばず DM も送らず、予定リマインドだけ登録する（`_run_holiday`）。planner もその日は予約を作らない。祝日明けはメールの走査範囲を `max(3, 今日 − 前の配信日)` 日に広げる（例: 月曜が祝日なら火曜は 4 日）。表の範囲外の平日は配信日として扱い、表の期限が近づくと `jp_holiday_table_stale` を出す（配信は止めない）。
+- **取得状況の表示**（`MORNING_DIGEST_FETCH_STATUS_EMAILS`）: 空なら全員 OFF（従来の描画と同じ）、カンマ区切りの email か `*` で対象を指定する。対象者には、メールやカレンダーの取得に失敗した節を「確認できませんでした」と案内する描画に切り替える。
+- **管理者 DM**（`MORNING_DIGEST_ADMIN_REPORT_EMAILS`）: 社内ドメインの email だけ（最大 3 件）に、実行結果の集計を送る。
 
 ## MCP 経由で呼ばれた場合との違い
 
@@ -149,8 +154,7 @@ store は `MORNING_DIGEST_PERSONALIZED` が ON のときだけ作られる。OFF
 
 | 観点 | 定期タスク（本スクリプト） | MCP ツール |
 |---|---|---|
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| 起動 | EventBridge ルール / Lambda の RunTask | Slack の依頼 → OpenClaw → [MCP gateway](/openwiki/architecture/mcp-gateway.md) |
+| 起動 | EventBridge ルール / Lambda の RunTask | Slack の依頼 → OpenClaw → [MCP gateway](../architecture/mcp-gateway.md) |
 | 本人 | 対象者リストの email を metadata に入れる | caller claim で検証した Slack 利用者から resolver が解いた email |
 | 下書き | `DRAFT_ON_DEMAND_ONLY=false`：高重要に作り置き（最大 5） | `DRAFT_ON_DEMAND_ONLY=true`：作らず、既存下書きの照合だけ |
 | 配信 | runner が Block Kit に整形して本人 DM へ投稿 | 構造化結果をモデルへ返すだけ。DM 投稿・`digest_delivery`・リマインド登録は無い |
@@ -159,8 +163,7 @@ store は `MORNING_DIGEST_PERSONALIZED` が ON のときだけ作られる。OFF
 
 ## 失敗時の挙動と運用
 
-<!-- openwiki: broken internal link [/openwiki/operations/hmac-keyring-and-rotation.md] link "/openwiki/operations/hmac-keyring-and-rotation.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- 起動時に `require_runtime_startup` が `mail_action` の HMAC 鍵束の durable state を確かめ、合わなければ起動しない（[HMAC 鍵束とローテーション](/openwiki/operations/hmac-keyring-and-rotation.md)）。鍵が不正なときは skill 側もボタンのトークンを発行しない。
+- 起動時に `require_runtime_startup` が `mail_action` の HMAC 鍵束の durable state を確かめ、合わなければ起動しない（[HMAC 鍵束とローテーション](../operations/hmac-keyring-and-rotation.md)）。鍵が不正なときは skill 側もボタンのトークンを発行しない。
 - 1 人の失敗は封じ込め、全体は止めない。最後に `{"users","delivered","skipped","errors"}` の件数だけをログに出す。メールアドレス・件名・本文はログに出さない（マスクか件数だけ）。
 - 専用ロググループ（保持 30 日）なので、`level=error` を既存の `ErrorCount` metric へ流す filter と、triage 不発（`matched=0`）を 1 件から鳴らす専用 alarm をこの tf で定義している。
 - `MORNING_DIGEST_CONCURRENCY` が 1 より大きいとスレッドプールで並列に回し、Bedrock クライアントを先に作って共有する。

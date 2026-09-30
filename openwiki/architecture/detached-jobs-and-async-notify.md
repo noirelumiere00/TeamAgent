@@ -3,9 +3,6 @@ type: architecture
 title: 長時間ジョブの切り離しと完了通知
 description: OpenClaw の打ち切り時間を超える処理を MCP gateway が daemon thread に切り離し、完了・進捗・中断を Slack へ直接投稿する仕組み。detached_jobs・surface_video_followup・async_job_notify・progress_notify・direct_summary・payload_offload の役割と env フラグ。
 tags: [mcp-gateway, async, slack, detach, feature-flags]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-49e9ec8046eee60f7a08c80f
     resource: repo://scripts/run_mcp_http_server.py
@@ -23,7 +20,10 @@ sources:
     resource: repo://src/teamagent/mcp_gateway/server.py
   - id: openwiki-source-463095cdd1cf5a98312aab3c
     resource: repo://src/teamagent/mcp_gateway/surface_video_followup.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # 長時間ジョブの切り離しと完了通知
@@ -76,7 +76,7 @@ OpenClaw は 1 回のツール実行を約 6 分（360 秒）で打ち切る。�
 
 ## async_job_notify: submit/status 型ジョブの完了通知
 
-`tiktok_acquire` と `proposal_builder_submit` は即座に `job_id` を返し、実処理は別の場所（SQS→Fargate、MCP 内 thread）で進む。`USE_ASYNC_JOB_NOTIFY` が ON なら、`_schedule_async_job_notice` が daemon thread を 1 本立て、30 秒後から 30 秒間隔で対応する status skill（`tiktok_acquire_status` / `proposal_builder_status`）を呼ぶ。`done` / `failed` になったら submit 元の会話へ通知する。
+`tiktok_acquire` と `proposal_builder_submit` は即座に `job_id` を返し、実処理は別の場所（SQS→Fargate、MCP 内 thread）で進む。`USE_ASYNC_JOB_NOTIFY` が ON なら、`_schedule_async_job_notice` が daemon thread を 1 本立て、30 秒後から 30 秒間隔で対応する status skill（`tiktok_acquire_status` / `proposal_builder_status`）を呼ぶ。`done` / `failed` になったら submit 元の会話へ通知する。`tiktok_acquire` は 1 回の実行時間に収まらない依頼を複数のジョブに分けて `job_ids` で返すことがあるため、`job_id` と `job_ids` の全ジョブ（重複除去）にそれぞれ見張りを付ける。先頭だけを見張ると残りの完了が届かない。
 
 - 見張りは 60 分で打ち切る。実測の所要（40〜50 分帯）より短いと毎回「まだ完了していません」の誤報を出したうえで完了通知を落としていたため、15 分から延長された。
 - poll 用の `SkillContext` には `ASYNC_JOB_POLL_METADATA_KEY` の印が付き、status skill は課金を伴う補完（Apify）をこの経路では起こさない。
@@ -112,10 +112,7 @@ OpenClaw は 1 回のツール実行を約 6 分（360 秒）で打ち切る。�
 6. `payload_offload.maybe_offload`（**リンク注入より先**。逆だと注入した URL ごと切り詰められる）
 7. `search` にだけ Web UI リンクを注入
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/proposal-jobs.md] link "/openwiki/workflows/proposal-jobs.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/workflows/video-and-tiktok-analysis.md] link "/openwiki/workflows/video-and-tiktok-analysis.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-詳細は [MCP gateway](/openwiki/architecture/mcp-gateway.md)。ジョブ本体は [提案書・資料生成ジョブ](/openwiki/workflows/proposal-jobs.md) と [動画・TikTok 分析](/openwiki/workflows/video-and-tiktok-analysis.md) を参照。
+詳細は [MCP gateway](mcp-gateway.md)。ジョブ本体は [提案書・資料生成ジョブ](../workflows/proposal-jobs.md) と [動画・TikTok 分析](../workflows/video-and-tiktok-analysis.md) を参照。
 
 ## テスト
 

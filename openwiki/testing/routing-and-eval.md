@@ -19,7 +19,7 @@ sources:
     resource: repo://tests/routing/README.md
   - id: openwiki-source-ec8085a3056636c85f85860a
     resource: repo://tests/skills/test_routing_descriptions_catalog.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # ルーティング検証と評価
@@ -35,15 +35,13 @@ Aico の「正しく動くか」は、決定的に測れる部分と LLM の判�
 | オーケストレーション評価 | L2 `run_agent` が期待ツールを踏み、禁止ツールを避け、反復上限内に収まるか | `src/teamagent/orchestrator/eval.py` ＋ `scripts/eval_orchestration.py` | 採点ロジックだけ回る。実行は手動・課金あり |
 | 検索精度評価 | `search` の top-1 / top-5 / MRR / 0 件応答 | `scripts/run_eval.py` ＋ gold set ／ `scripts/compare_retrieval.py` | 回らない（DB と Bedrock が要る）。部品のテストだけ回る |
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-CI は `pytest tests/ -q` を実行するので、下に挙げる pytest はすべて CI で走る。依存の揃え方は [テストの走らせ方](/openwiki/testing/running-tests.md)。
+CI は `pytest tests/ -q` を実行するので、下に挙げる pytest はすべて CI で走る。依存の揃え方は [テストの走らせ方](running-tests.md)。
 
 ## ルーティング検証（tests/routing）
 
 ### 前提: ルーターは name+description しか見ない
 
-<!-- openwiki: broken internal link [/openwiki/architecture/openclaw-gateway.md] link "/openwiki/architecture/openclaw-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-OpenClaw の外側ループ（Haiku）は、ツールの **name と description だけ**で 1 本を選ぶ（[OpenClaw gateway](/openwiki/architecture/openclaw-gateway.md)）。似たツール（X 系どうし、TikTok 系と動画分析系、メール系とカレンダー系）の取り違えは、description の書き方でしか防げない。そこで次の 2 つを組み合わせている。
+OpenClaw の外側ループ（Haiku）は、ツールの **name と description だけ**で 1 本を選ぶ（[OpenClaw gateway](../architecture/openclaw-gateway.md)）。似たツール（X 系どうし、TikTok 系と動画分析系、メール系とカレンダー系）の取り違えは、description の書き方でしか防げない。そこで次の 2 つを組み合わせている。
 
 1. **コーパス** `tests/routing/catalog_routing_corpus.jsonl`（現在 84 行）: 期待ラベル付きの発話集。正例・境界例・敵対例と、新しいツールに奪われてはいけない対照例が入っている。
 2. **手動シミュ**（`tests/routing/README.md` の手順）: LLM を「name+description だけで 1 本選び、引数も出すルーター」に見立てて発話を伏せたまま流し、期待ラベルと突き合わせる。独立 2 本以上の多数決。
@@ -83,8 +81,7 @@ LLM の選択そのものは測れないので、pytest は「ルーティング
 - **コーパスの形式**: id が重複しない。`expect`/`alt_ok`/`forbid` が登録済みの skill 名を指す。`forbid` が `expect`/`alt_ok` と矛盾しない。`arg_rules` のキーが候補ツールの入力スキーマに実在し、`must_be_absent` の引数は required ではない（required だとその行は永久に不合格になる）。検査数が 8 未満なら空振りとみなして落ちる。
 - **R4 行の凍結**: 本番 QA 由来の 18 行（`freebusy-*` / `agenda-*` / `mailnc-*` / `oauth-02..04` / `r4neg-*`）を `R4_REQUIRED_IDS` で固定し、消すと赤になる。
 - **ダングリング参照**: OpenClaw に出る description（`effective-tool-scope.json` を正本として解決）と `infra/openclaw/SOUL.md` に現れる snake_case の識別子のうち、登録済み skill でも、入出力スキーマのフィールド名でも、`NON_TOOL_IDENTIFIERS`（エラーコードなど）でもないものがあれば失敗する。改名・削除・タイプミスで「そっちで出来ます」と案内した先が存在しない状態を防ぐ。
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **台帳と factory の一致**: `factory.build_production_tools` を AST で読み、各 `ToolSpec` を囲む `_envflag(...)` を静的に抽出して、台帳の `enabledBy`（`always` / `envAllTrue` / `never`）と突き合わせる。重い依存（embedder・boto3・psycopg）を作らずに「どの env で何が登録されるか」を決められる（[ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)）。
+- **台帳と factory の一致**: `factory.build_production_tools` を AST で読み、各 `ToolSpec` を囲む `_envflag(...)` を静的に抽出して、台帳の `enabledBy`（`always` / `envAllTrue` / `never`）と突き合わせる。重い依存（embedder・boto3・psycopg）を作らずに「どの env で何が登録されるか」を決められる（[ツール登録と機能フラグ](../architecture/tool-registry-and-feature-flags.md)）。
 - **本番未配線の扱い**: `NOT_WIRED_IN_PRODUCTION`（`video_approval` / `operation_log` / `knowledge_search_url`）は台帳の `never` と完全一致しなければならない。コーパスで本番未配線のツールを期待している行は `CORPUS_ROWS_EXPECTING_UNWIRED_TOOLS` の 4 行（`vapproval-01` / `vapproval-02` / `boundary-04` / `neg-ksurl-01`）に限られ、増減すると赤になる。これらはシミュでは必ず不合格になる既知の負債。
 
 ### 関連する固定点
@@ -97,11 +94,10 @@ LLM の選択そのものは測れないので、pytest は「ルーティング
 
 ### description を変えるときの手順
 
-<!-- openwiki: mermaid parse failed and this diagram was converted to a text fence so it does not break rendering. Fix the diagram source and restore the mermaid fence. Parser error: Heuristic: an unescaped angle bracket inside a label breaks rendering; rephrase the label. -->
-```text
+```mermaid
 flowchart LR
-  A[description / SOUL を変更] --> B[pytest の固定点<br/>test_routing_descriptions_*]
-  A --> C[コーパスで手動シミュ<br/>独立2本以上]
+  A[description / SOUL を変更] --> B[pytest の固定点 ／ test_routing_descriptions_*]
+  A --> C[コーパスで手動シミュ ／ 独立2本以上]
   C -->|混同あり| A
   B --> D[README のラウンド表を更新]
   C --> D
@@ -112,8 +108,7 @@ flowchart LR
 
 ## オーケストレーション評価（eval）
 
-<!-- openwiki: broken internal link [/openwiki/architecture/orchestrator.md] link "/openwiki/architecture/orchestrator.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-L2 オーケストレーター（[オーケストレータ](/openwiki/architecture/orchestrator.md)）のツール選択を測る。
+L2 オーケストレーター（[オーケストレータ](../architecture/orchestrator.md)）のツール選択を測る。
 
 ### 決定的な採点（`src/teamagent/orchestrator/eval.py`）
 
@@ -143,12 +138,10 @@ L2 オーケストレーター（[オーケストレータ](/openwiki/architectu
 - **ネガティブケース**: `expect_zero_hits` のケースは 0 件を返したときだけ正解。0 件応答の母数は gold set のネガティブ件数で固定している（以前は実際に 0 件だった件数を母数にしていて、誤ってヒットを返したケースが分母から抜けていた）。
 - **中断耐性**: 1 ケースごとに `data/eval/results/<label>_<ts>_partial.jsonl` へ追記・flush する。Ctrl-C ではそこまでを集計して終了コード 130 で partial を残し、正常完走では consolidated JSON を保存して partial を消す。`data/eval/results/` は `.gitignore` 対象。
 - **比較**: `--compare baseline rerank ...` は評価を回さず、各 label の最新結果 JSON を表にし、基準（既定は先頭、`--baseline` で変更）との差分と top-5 で新たに通った / 落ちた case_id を出す。
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- **権限**: 評価用の `SkillContext` は `user_role="admin"` と会社グループを直接渡す（メールは `EVAL_USER_EMAIL`）。MCP 経由では `user_role` が常に `member` になるので（[MCP gateway](/openwiki/architecture/mcp-gateway.md)）、見える範囲は本番の利用者より広い。
+- **権限**: 評価用の `SkillContext` は `user_role="admin"` と会社グループを直接渡す（メールは `EVAL_USER_EMAIL`）。MCP 経由では `user_role` が常に `member` になるので（[MCP gateway](../architecture/mcp-gateway.md)）、見える範囲は本番の利用者より広い。
 
 CI では `tests/eval/test_gold_set_structure.py`（gold set の構造: `version`/`cases`、20 ケース以上、id 一意、型、0 件ケースはキーワード空、`_match_hit` の分岐）と `tests/scripts/test_run_eval.py`・`test_run_eval_compare.py`（集計・partial・比較表示）が走る。
 
 ### `scripts/compare_retrieval.py`
 
-<!-- openwiki: broken internal link [/openwiki/workflows/knowledge-search.md] link "/openwiki/workflows/knowledge-search.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-固定の 5 クエリで、通常の `proposals_chunks.text` と Contextual Retrieval の `proposals_chunks_contextual.contextualized_text` のベクトル検索 top-5 を並べ、top-1 score の差を出す。`--embedding-col` で e5 と Cohere の列を切り替えられる（`EMBEDDER_BACKEND` と組で指定）。列名は SQL に直接埋めるため、`ALLOWED_EMBEDDING_COLUMNS` の許可リスト以外は拒否する。接続先は `DATABASE_URL`。検索の仕組み自体は [ナレッジ検索](/openwiki/workflows/knowledge-search.md)。
+固定の 5 クエリで、通常の `proposals_chunks.text` と Contextual Retrieval の `proposals_chunks_contextual.contextualized_text` のベクトル検索 top-5 を並べ、top-1 score の差を出す。`--embedding-col` で e5 と Cohere の列を切り替えられる（`EMBEDDER_BACKEND` と組で指定）。列名は SQL に直接埋めるため、`ALLOWED_EMBEDDING_COLUMNS` の許可リスト以外は拒否する。接続先は `DATABASE_URL`。検索の仕組み自体は [ナレッジ検索](../workflows/knowledge-search.md)。

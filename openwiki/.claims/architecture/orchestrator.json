@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "pageVersion": "sha256:608d8e3e6e513af83d1c0e337760bb8cb81fc73402f5d0ff6f1e40ab687d06a7",
+  "pageVersion": "sha256:0f2c43ea12d43e4ef47c93fc047de19d157651af08c38345d6daa631aefee918",
   "claims": [
     {
       "id": "claim_1e25e61c036147fd97ba4f5908f785b3",
@@ -37,8 +37,8 @@
       "statement": "dispatch_run_agent は dispatch_tool と同じ caller 検証とメタデータ解決を通し、既定 max_turns 8・cost_cap 0.5 USD・tool timeout 90 秒で run_sdk_agent を呼ぶ。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1348-L1430",
-          "version": "repo-lines-v1:sha256:c19f25a36c210e85e4592f4be4db4323177e7d31e47614291192663017851796:eyJzZWxlY3RlZExpbmVDb3VudCI6ODMsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwNTExN2NkYWMxM2JkZGYxOWZhOTllMjViZjg2MzM0M2JhNDk2NDZlMWU3ZTc5MDMzZTk1NzM5YzA3NDIxMTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU3OWY0ODUwNTE4MDUwY2U4MmZkMGU4NjBmYTU5YjU5MWIzZDZmYzYzODYzMzc4NGExMzY5OGZmZWU0NTdjZTIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzZGYyYWNmMDZlOGMzZjAzYzcxMzVjNmU4YWM1YTljYTU0MzJhYmUwNmE3NGFjYTBmZGQ5YTUzYTAwOGY5ODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImVjYjZjZWEwZDUzNGM5ZTgzNWY5NTY5ZTMxZjllOTFiZTc4YjRmMTlmYTNlNTgwMjU0M2U3Zjg0ZTUxNmIzY2MifQ"
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1393-L1470",
+          "version": "repo-lines-v1:sha256:15cc24529ad98b18a87fb82d085ec4ca942c55facc9df3d3a7f2389468d29d07:eyJzZWxlY3RlZExpbmVDb3VudCI6NzgsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImEwNTExN2NkYWMxM2JkZGYxOWZhOTllMjViZjg2MzM0M2JhNDk2NDZlMWU3ZTc5MDMzZTk1NzM5YzA3NDIxMTAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAxYmE0NzE5YzgwYjZmZTkxMWIwOTFhN2MwNTEyNGI2NGVlZWNlOTY0ZTA5YzA1OGVmOGY5ODA1ZGFjYTU0NmIiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImIzZGYyYWNmMDZlOGMzZjAzYzcxMzVjNmU4YWM1YTljYTU0MzJhYmUwNmE3NGFjYTBmZGQ5YTUzYTAwOGY5ODciLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjAyMzIyYTI0MTBlM2UxYTM4MGExNDJmYzhiODA0ZmI3MGE1Y2M5MDg5NGJhNzdhNDliNmVlYmFkZWJjYzRiMmQifQ"
         }
       ]
     },
@@ -47,11 +47,11 @@
       "statement": "run_agent は USE_AGENT_ORCHESTRATOR が ON のときだけ MCP のツール一覧に出るが、OpenClaw の toolFilter.include には意図的に入れていない。",
       "evidence": [
         {
-          "resource": "repo://infra/openclaw/openclaw.config.json5#L285-L296",
+          "resource": "repo://infra/openclaw/openclaw.config.json5#L336-L347",
           "version": "repo-lines-v1:sha256:5508bb840b3cdb707fb80f43b67d78b25b0e826416f4955076c6c55ada0745bb:eyJzZWxlY3RlZExpbmVDb3VudCI6MTIsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImExNGQzMDM3Y2E1ZmFhYzMxZmFhYzg5OTBkYjIxMGVhODJlOWE0YmZmNjgxMmRhMjI2ZmNlOWQyYzU1YTljOWUiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjFlNjczYWJkNDU3YTk3ZWVhMTdhNjAwNjJlYjBmYWVhNmJkZjA5NDg2OGNjNmI4ZjhjMGViZGEyZjYxZWQ0MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlMzc1ZmQ5ZjE3ZmM3NzM0YzdmNzA1OWI5ZWVjMjI4MmY3YTcyZGIyZmY2YjM3ODI5YWVhZTE5M2JiYTM1MjQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijk0OGRkNzVmMzBkMGE1ZjQ3MDRkNDg5MDI5OGE1YTI3NzM5ZTE3MDc4YjQ3OTQ2NjA1ZTdmZTRlYzkyMzZhMmUifQ"
         },
         {
-          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1494-L1530",
+          "resource": "repo://src/teamagent/mcp_gateway/server.py#L1539-L1575",
           "version": "repo-lines-v1:sha256:9742cede4e3bafdfeea6eeeb1e0eca28cb9008edd7626a6aa7eb1e9df38e3255:eyJzZWxlY3RlZExpbmVDb3VudCI6MzcsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImY1Y2E3YTQ1M2I2ZjQ4MjUyMmIzZjIwMmMxZjUyOTcxNGE1MzZlMThkZTJhMGNmZGFhYjhhM2Q3YzNmZGFiMmMiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjA2ZDQxZmE1NTMxYzcyOGNhODEyY2VhZDlkNjJhNDQxYTA4YjMwZTFkNmYwOGJiNGEwOTlhNDhjY2MwYzQzYzAiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI2OTgwMDkyMGI3OWZlMDhmZGE5MmEwODcxM2MzOWUzNTc4ZGMwYzg1MDAzNTc0YjgzMDg3NDA5YzZkMmEyYTUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjEwMzcwM2U1MjM4ZTc5MmE0YzBiMWY2ZmFkODFlZWY3NDZmNGYwNzAxOTc2MjFhZjFjYTNjMjBmYWI0NDM5ZGMifQ"
         }
       ]
@@ -93,6 +93,6 @@
   ],
   "verification": {
     "by": "openwiki/0.6.1",
-    "at": "2026-09-29T07:51:05.076Z"
+    "at": "2026-09-30T04:50:20.078Z"
   }
 }

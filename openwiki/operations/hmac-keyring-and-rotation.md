@@ -21,7 +21,7 @@ sources:
     resource: repo://src/teamagent/hmac_durable_state.py
   - id: openwiki-source-ccf3fdd7a33d5e9739bbaf67
     resource: repo://src/teamagent/hmac_keyring.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # HMAC 鍵束とローテーション
@@ -51,12 +51,9 @@ Aico は Slack のボタン `value` やレポートの短縮 URL に、改竄さ
 
 発行 TTL は `MAIL_ACTION_TTL_S`（1..86400）と `REPORT_LINK_TTL_S`（1..604800）。未設定なら最大値、設定されていて空・符号付き・範囲外などなら発行を止める（既定値へ黙って戻さない）。
 
-<!-- openwiki: broken internal link [/openwiki/integrations/google-oauth-and-token-store.md] link "/openwiki/integrations/google-oauth-and-token-store.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-**対象外の署名鍵**: OAuth の CSRF state（`OAUTH_STATE_SECRET`・`SLACK_OAUTH_STATE_SECRET`）と MCP の caller claim（`TEAMAGENT_CALLER_CLAIM_SECRET`）はこの鍵束を通らず、各モジュールが単一鍵で直接 HMAC を取る。世代管理や T0 の契約は無い。詳しくは [Google OAuth とトークン保管](/openwiki/integrations/google-oauth-and-token-store.md)・[呼び出し元の証明とボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)。
+**対象外の署名鍵**: OAuth の CSRF state（`OAUTH_STATE_SECRET`・`SLACK_OAUTH_STATE_SECRET`）と MCP の caller claim（`TEAMAGENT_CALLER_CLAIM_SECRET`）はこの鍵束を通らず、各モジュールが単一鍵で直接 HMAC を取る。世代管理や T0 の契約は無い。詳しくは [Google OAuth とトークン保管](../integrations/google-oauth-and-token-store.md)・[呼び出し元の証明とボタン束縛](../architecture/caller-identity-and-button-bindings.md)。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/digest-buttons.md] link "/openwiki/workflows/digest-buttons.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-ボタントークンの発行と押下処理の流れは [朝ダイジェストのボタン処理](/openwiki/workflows/digest-buttons.md) を参照。
+ボタントークンの発行と押下処理の流れは [朝ダイジェストのボタン処理](../workflows/digest-buttons.md) を参照。
 
 ## 署名と検証の仕組み
 
@@ -128,8 +125,7 @@ flowchart LR
   F -->|期限後: prepare-cleanup → complete-cleanup| S[主鍵のみ]
 ```
 
-<!-- openwiki: broken internal link [/openwiki/operations/release-gates-and-deploy.md] link "/openwiki/operations/release-gates-and-deploy.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-旧鍵の撤去は期限後に `prepare-cleanup`（旧世代を即座に退役扱いにし、主鍵のみの候補とロールバックの provenance を一時的に許可）→ 主鍵のみのタスクをデプロイ → `complete-cleanup`（旧鍵・T0・legacy 印を一括で外す）の段階で行う。以前の一発撤去 `retire-previous` は `cleanup_staging_required` で必ず失敗する。デプロイ全体のゲートは [リリースゲートとデプロイ](/openwiki/operations/release-gates-and-deploy.md) を参照。
+旧鍵の撤去は期限後に `prepare-cleanup`（旧世代を即座に退役扱いにし、主鍵のみの候補とロールバックの provenance を一時的に許可）→ 主鍵のみのタスクをデプロイ → `complete-cleanup`（旧鍵・T0・legacy 印を一括で外す）の段階で行う。以前の一発撤去 `retire-previous` は `cleanup_staging_required` で必ず失敗する。デプロイ全体のゲートは [リリースゲートとデプロイ](release-gates-and-deploy.md) を参照。
 
 ## テスト
 
@@ -137,5 +133,4 @@ flowchart LR
 - `tests/test_hmac_durable_state.py`・`tests/test_hmac_migration_contract.py`: DynamoDB のレコード照合、高水位、退役、発行許可。
 - `tests/scripts/test_hmac_rollout_gate.py`・`tests/scripts/test_preflight_hmac_rotation.py`・`tests/infra/test_hmac_rollout_terraform.py`: ゲートの段階遷移と Terraform の前提条件。
 
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-走らせ方は [テストの走らせ方](/openwiki/testing/running-tests.md) を参照（CI と同じ `--extra dev --extra mcp`）。
+走らせ方は [テストの走らせ方](../testing/running-tests.md) を参照（CI と同じ `--extra dev --extra mcp`）。

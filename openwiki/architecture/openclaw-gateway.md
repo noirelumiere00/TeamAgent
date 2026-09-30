@@ -3,9 +3,6 @@ type: architecture
 title: OpenClaw ゲートウェイ（Slack 受け口）
 description: Aico の Slack 受け口である OpenClaw の設定（Socket Mode・dmPolicy/allowFrom・Haiku モデル・native ツールの封鎖・MCP 接続と toolFilter）、起動時の entrypoint 検査、SOUL/IDENTITY の seed、CI の不変条件チェックと effective-tool-scope。
 tags: [openclaw, slack, config, security, soul, toolfilter]
-verified:
-  - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
 sources:
   - id: openwiki-source-95e7edbccd5ba6a6207fc3bc
     resource: repo://infra/docker/openclaw-entrypoint.mjs
@@ -15,15 +12,17 @@ sources:
     resource: repo://infra/openclaw/openclaw.config.json5
   - id: openwiki-source-7ba7bf2481758d43c5b078b1
     resource: repo://scripts/check_openclaw_config.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
+verified:
+  - by: openwiki/0.6.1
+    at: 2026-09-30T04:50:20.078Z
 ---
 
 # OpenClaw ゲートウェイ（Slack 受け口）
 
 ## 役割
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-OpenClaw（TypeScript/Node 製のエージェント実行基盤、本番は 2026.7.1）は Slack からの DM・メンションを受け、Bedrock の Claude Haiku 4.5 で「どのツールを呼ぶか」と「最終的な返事の文面」を決める外殻。**営業データには直接触れない**: 能力は「Slack 受信」「Bedrock 推論」「レビュー済み TeamAgent MCP ツール」の 3 つだけで、本人ごとの認可は MCP gateway 側で行う（[MCP gateway](/openwiki/architecture/mcp-gateway.md)）。
+OpenClaw（TypeScript/Node 製のエージェント実行基盤、本番は 2026.7.1）は Slack からの DM・メンションを受け、Bedrock の Claude Haiku 4.5 で「どのツールを呼ぶか」と「最終的な返事の文面」を決める外殻。**営業データには直接触れない**: 能力は「Slack 受信」「Bedrock 推論」「レビュー済み TeamAgent MCP ツール」の 3 つだけで、本人ごとの認可は MCP gateway 側で行う（[MCP gateway](mcp-gateway.md)）。
 
 たとえるなら、OpenClaw は受付係。用件を聞いて適切な窓口（MCP ツール）に回し、返事を整えて返すが、金庫（DB・メール・Drive）の鍵は持っていない。
 
@@ -35,8 +34,7 @@ OpenClaw（TypeScript/Node 製のエージェント実行基盤、本番は 2026
 |---|---|---|
 | エージェント | `agents.list[0].model` | Bedrock の東京推論プロファイル（`amazon-bedrock/jp.anthropic.claude-haiku-4-5-…`） |
 | | `identity.name` | `Aico` |
-<!-- openwiki: broken internal link [/openwiki/architecture/caller-identity-and-button-bindings.md] link "/openwiki/architecture/caller-identity-and-button-bindings.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| | `heartbeat.every: "0m"` | プロアクティブ実行なし（ボタン押下後に AI の run が起きない理由。[ボタン束縛](/openwiki/architecture/caller-identity-and-button-bindings.md)） |
+| | `heartbeat.every: "0m"` | プロアクティブ実行なし（ボタン押下後に AI の run が起きない理由。[ボタン束縛](caller-identity-and-button-bindings.md)） |
 | | `bootstrapMaxChars: 32000` | SOUL.md などの 1 ファイル上限。既定 20,000（UTF-16 単位）で SOUL.md が切れて全ツールが止まった事故の対策 |
 | プラグイン | `plugins.allow` | `slack`・`amazon-bedrock`・`teamagent-caller-identity` の 3 つだけ |
 | Slack | `mode: "socket"` | Socket Mode（公開エンドポイント不要） |
@@ -45,7 +43,10 @@ OpenClaw（TypeScript/Node 製のエージェント実行基盤、本番は 2026
 | | `replyToModeByChatType` | チャンネル・グループはスレッド返信、DM は平打ち |
 | | `statusReactions` | 👀→🧠→🛠→✅/❌ の進捗リアクション |
 | セッション | `session.dmScope: "per-channel-peer"` | 利用者ごとに会話を分離（既定だと人をまたいで混ざる） |
-| 履歴 | `messages.groupChat.historyLimit: 20` | 長いスレッドでのトークン増を止める |
+| | `session.resetTriggers` | 会話を始め直す合言葉。上流既定の `/new`・`/reset` に加えて「新しい会話」（Slack は `/` で始まる入力を送らないため、利用者への案内は日本語の方を使う） |
+| 履歴（DM） | `channels.slack.dmHistoryLimit: 2` | DM でモデルに送る履歴を「前の依頼 2 件から後ろ＋今回の依頼」に絞る（transcript は消さない）。09-29 に固定部分（約 127.5k tokens）＋重い依頼で DM が 200k の上限を超えて毎回失敗したための対策で、溢れた後 1〜2 通で戻るための設定（溢れること自体は防げない） |
+| | `agents.defaults.contextLimits.toolResultMaxChars: 20000` | ツール結果 1 件の上限（字）。超えた結果は頭と尾だけ残して保存・再送する。MCP の S3 退避がある 8 ツール以外は、2 万字を超えた結果の中ほどが次のターン以降見えない |
+| 履歴（チャンネル） | `messages.groupChat.historyLimit: 20` | ⚠️ 会話履歴の上限ではない。上流 2026.7.1 では、まだ応答していないチャンネル発言を何件前置きするかにだけ使われる。チャンネル・スレッドの履歴上限（`channels.slack.historyLimit`）は未設定＝上限なし |
 | ツール | `tools.profile: "minimal"` + `alsoAllow: ["bundle-mcp"]` | MCP ツールだけを見せる |
 | | `tools.deny` | message・read・write・edit・send・delete・upload・sessions_* などの native ツールを全部拒否 |
 | | `exec.mode: "deny"`、`fs.workspaceOnly` | ホストコマンド実行禁止 |
@@ -82,13 +83,11 @@ OpenClaw の Slack plugin は `dmPolicy: "open"` でも `allowFrom` に `"*"` �
 
 `toolFilter.include` に載っていても、MCP 側でそのツールが登録されていなければ呼べない。逆も同じ。`infra/openclaw/effective-tool-scope.json` がこの関係の正本で、`effectiveRule` に「OpenClaw の include に載り、かつ MCP backend がデプロイ済みタスクで登録したツールだけが呼べる」と書かれている。各ツールの副作用分類（`effect`）、terraform 側のゲート、`enabledBy`（`always` / env / `never` など）もここで管理される。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-意図的に include しないもの: `run_agent`（L2 オーケストレーター。OpenClaw 自身が外殻なので二重オーケストレーションを避ける）、`chitchat`・`recommend`・`proposal_campaign`・`mail_constraints`・`workspace_search`・`proposal_deck`・同期版 `proposal_builder`、`*confirm*`。`video_approval`・`operation_log`・`knowledge_search_url` は include にあるが scope 上 `enabledBy=never` で、解禁には「tf の task env・scope の enabledBy・contract テスト・OpenClaw イメージ再ビルド」の 4 点を同じ変更で揃える。詳細は [ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)。
+意図的に include しないもの: `run_agent`（L2 オーケストレーター。OpenClaw 自身が外殻なので二重オーケストレーションを避ける）、`chitchat`・`recommend`・`proposal_campaign`・`mail_constraints`・`workspace_search`・`proposal_deck`・同期版 `proposal_builder`、`*confirm*`。`video_approval`・`operation_log`・`knowledge_search_url` は include にあるが scope 上 `enabledBy=never` で、解禁には「tf の task env・scope の enabledBy・contract テスト・OpenClaw イメージ再ビルド」の 4 点を同じ変更で揃える。詳細は [ツール登録と機能フラグ](tool-registry-and-feature-flags.md)。
 
 ## イメージと剪定
 
-<!-- openwiki: broken internal link [/openwiki/operations/container-images-and-build.md] link "/openwiki/operations/container-images-and-build.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`infra/openclaw/README.md` によれば、本番イメージは OpenClaw 2026.7.1・`linux/arm64`・digest 固定の Chainguard（Wolfi）Node ベースで UID/GID 65532 で動く。最終イメージにシェル・パッケージマネージャ・ブラウザ・Playwright・コンパイラ・テスト資材は入らない。`prune-runtime.mjs` がモジュール閉包を計算してから不要パッケージを消し、Slack と Bedrock の動作に必要な閉包が残ることを `--network none` で確かめる。ビルドと公開のゲートは [コンテナイメージとビルド](/openwiki/operations/container-images-and-build.md)。README は production bundle contract が `release.ready=false` のままであり、ローカルの PASS は本番の承認ではないと明記している。
+`infra/openclaw/README.md` によれば、本番イメージは OpenClaw 2026.7.1・`linux/arm64`・digest 固定の Chainguard（Wolfi）Node ベースで UID/GID 65532 で動く。最終イメージにシェル・パッケージマネージャ・ブラウザ・Playwright・コンパイラ・テスト資材は入らない。`prune-runtime.mjs` がモジュール閉包を計算してから不要パッケージを消し、Slack と Bedrock の動作に必要な閉包が残ることを `--network none` で確かめる。ビルドと公開のゲートは [コンテナイメージとビルド](../operations/container-images-and-build.md)。README は production bundle contract が `release.ready=false` のままであり、ローカルの PASS は本番の承認ではないと明記している。
 
 ## 注意・食い違い
 

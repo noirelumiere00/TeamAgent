@@ -25,7 +25,7 @@ sources:
     resource: repo://src/teamagent/adapters/embeddings_client.py
   - id: openwiki-source-2b3301692709467d8760c20b
     resource: repo://tests/test_migrate_runner.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # PostgreSQL / pgvector のスキーマとマイグレーション
@@ -47,17 +47,14 @@ generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
 | | `connector_state`（0012） | 増分同期の cursor（source 種別 × source ID） |
 | | `ingest_source_health`・`ingest_connector_runs`（0019）、`ingest_source_retries`・`ingest_reconciliation_gaps`（0020）、lease token（0021） | ソースごとの健全性・再試行のリース（0021 で所有者＋トークンの fencing） |
 | | `audit_log`（0014） | 取り込み系の監査記録（あわせて metadata の GIN 索引） |
-<!-- openwiki: broken internal link [/openwiki/integrations/google-oauth-and-token-store.md] link "/openwiki/integrations/google-oauth-and-token-store.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| 連携 | `oauth_tokens`（0006） | 本人ごとの Google refresh token（[Google OAuth](/openwiki/integrations/google-oauth-and-token-store.md)） |
+| 連携 | `oauth_tokens`（0006） | 本人ごとの Google refresh token（[Google OAuth](../integrations/google-oauth-and-token-store.md)） |
 | | `slack_oauth_tokens`（0018） | 本人ごとの Slack user token（xoxp） |
 | 利用・観測 | `usage_events`・`usage_event_calls`（0007）、`query_text` 列（0023） | 管理画面の一次データ（1 リクエスト 1 行） |
 | | `runtime_metrics`（0008） | RequestGate / 接続プールの定期スナップショット |
 | | `search_feedback`（0015、0022 で score など追加） | 資料検索 Web UI の評価 |
 | | `video_usage`（0017） | 動画分析の利用者×月のクォータ台帳 |
-<!-- openwiki: broken internal link [/openwiki/workflows/morning-digest.md] link "/openwiki/workflows/morning-digest.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| 朝ダイジェスト | `digest_ack`（0025）、`digest_delivery`（0026）、`digest_notice`（0027） | 確認済み項目、その日の送信済み印、お知らせ DM の重複防止印（[朝ダイジェスト](/openwiki/workflows/morning-digest.md)） |
-<!-- openwiki: broken internal link [/openwiki/architecture/hermes-personal-memory.md] link "/openwiki/architecture/hermes-personal-memory.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-| 本人メモ | `personal_memory_profiles`・`_entries`・`_audit`（0029） | 専用ロールだけが触れる本人メモ（[本人メモ](/openwiki/architecture/hermes-personal-memory.md)） |
+| 朝ダイジェスト | `digest_ack`（0025）、`digest_delivery`（0026）、`digest_notice`（0027） | 確認済み項目、その日の送信済み印、お知らせ DM の重複防止印（[朝ダイジェスト](../workflows/morning-digest.md)） |
+| 本人メモ | `personal_memory_profiles`・`_entries`・`_audit`（0029） | 専用ロールだけが触れる本人メモ（[本人メモ](../architecture/hermes-personal-memory.md)） |
 
 番号 `0028` は欠番（本人メモの計画書では「先行 draft の 0028 が入る前提で 0029 を仮置き」とされている）。0018 のファイル内見出しコメントは「0016」と書かれているが、ファイル名どおり 0018 として適用される。
 
@@ -69,8 +66,7 @@ HNSW のパラメータ（`m` / `ef_construction`）は pgvector 既定のまま
 
 ## RLS とロール
 
-<!-- openwiki: broken internal link [/openwiki/data/rls-and-app-role.md] link "/openwiki/data/rls-and-app-role.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`documents` / `chunks` は RLS（FORCE）付きで、アプリは `teamagent_app` ロール（0002 で作成・NOLOGIN NOBYPASSRLS）に切り替えて session 変数を注入してから検索する。利用状況画面は `teamagent_dashboard`（0007）。usage / metrics 系の `teamagent_app` 権限は INSERT 中心に最小化されている（0009、0024 で ON CONFLICT に必要な最小 SELECT を追加）。詳細は [RLS と実行ロール](/openwiki/data/rls-and-app-role.md)。
+`documents` / `chunks` は RLS（FORCE）付きで、アプリは `teamagent_app` ロール（0002 で作成・NOLOGIN NOBYPASSRLS）に切り替えて session 変数を注入してから検索する。利用状況画面は `teamagent_dashboard`（0007）。usage / metrics 系の `teamagent_app` 権限は INSERT 中心に最小化されている（0009、0024 で ON CONFLICT に必要な最小 SELECT を追加）。詳細は [RLS と実行ロール](rls-and-app-role.md)。
 
 ## マイグレーションの実行（scripts/migrate.py）
 
@@ -93,5 +89,4 @@ HNSW のパラメータ（`m` / `ef_construction`）は pgvector 既定のまま
 
 - `tests/test_migrate_runner.py`: 番号の一意性・昇順、チェックサム、DSN 未設定、autocommit 拒否、トランザクション制御文の拒否、dry-run が書き込みを残さないこと。
 - `tests/test_rls_email_ci_migration.py`、`tests/test_hmac_migration_contract.py` など、個別 migration の契約テスト。
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-- CI は使い捨ての PostgreSQL テストロールを用意して DB テストを流す（[テストの走らせ方と CI](/openwiki/testing/running-tests.md)）。
+- CI は使い捨ての PostgreSQL テストロールを用意して DB テストを流す（[テストの走らせ方と CI](../testing/running-tests.md)）。

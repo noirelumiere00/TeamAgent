@@ -21,7 +21,7 @@ sources:
     resource: repo://src/teamagent/skills/base.py
   - id: openwiki-source-ad10fd63dc1fd8c554a725f0
     resource: repo://src/teamagent/skills/knowledge_deliver/skill.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 3層分離と Skill の契約
@@ -75,8 +75,7 @@ class MySkill(BaseSkill[MyInput, MyOutput]):
 | `orchestrated_tool_call`（`ORCHESTRATED_METADATA_KEY`） | `orchestrator/sdk_runner` | L2 オーケストレーター内の中間ステップ。Slack へのファイル投下など取り返しのつかない副作用を止める判定に使う（`is_orchestrated_call`） |
 | `async_job_poll`（`ASYNC_JOB_POLL_METADATA_KEY`） | `mcp_gateway/async_job_notify` の見張り | status 照会の経路。課金を伴う補完（Apify 等）を起こさない |
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-本人情報（`user_email` など）も MCP gateway が metadata に詰める（[MCP gateway](/openwiki/architecture/mcp-gateway.md)）。
+本人情報（`user_email` など）も MCP gateway が metadata に詰める（[MCP gateway](mcp-gateway.md)）。
 
 ## 段階公開の allowlist（`skills/_shared/rollout.py`）
 
@@ -90,8 +89,7 @@ prompt は `src/teamagent/prompts/<skill>/<version>/<name>.md` に置き、`prom
 
 `observability/logging_config.py` の `configure_logging()` は、env `STRUCTLOG_FORMAT=json` のときだけ structlog を JSONRenderer にする（既定は人間可読の Console）。CloudWatch の metric filter は `{ $.cost_usd = * }` のような JSON セレクタ前提なので、本番で JSON にしないとコスト・エラーのアラームが永久に発火しない。MCP HTTP サーバ（`scripts/run_mcp_http_server.py`）と旧 Slack bot（`runtime/slack_bot.py`）が起動時に呼ぶ。INFO 未満は捨てる。
 
-<!-- openwiki: broken internal link [/openwiki/operations/observability-and-cost.md] link "/openwiki/operations/observability-and-cost.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-ログに生入力（メール本文・顧客名・会話・email）を入れない、`cost_usd` というキー名を新しく使うとコストアラームを二重計上させる、といった運用上の注意は [観測・利用記録・コスト管理](/openwiki/operations/observability-and-cost.md) を参照。
+ログに生入力（メール本文・顧客名・会話・email）を入れない、`cost_usd` というキー名を新しく使うとコストアラームを二重計上させる、といった運用上の注意は [観測・利用記録・コスト管理](../operations/observability-and-cost.md) を参照。
 
 ## 補助: 旧 router（`skills/router.py`）
 
@@ -102,7 +100,5 @@ mention テキストから検索戦略（meta / conditional / compare / content�
 1. `skills/<name>/schema.py` に入出力モデル、`skill.py` に `@register` 付きクラス。
 2. prompt は `prompts/<name>/v1/*.md`。
 3. 外部呼び出しは `adapters/` に置き、テストでフェイクに差し替えられるようにする。
-<!-- openwiki: broken internal link [/openwiki/architecture/tool-registry-and-feature-flags.md] link "/openwiki/architecture/tool-registry-and-feature-flags.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-4. MCP に出すには factory・OpenClaw toolFilter・本番 env の段が要る → [ツール登録と機能フラグ](/openwiki/architecture/tool-registry-and-feature-flags.md)。
-<!-- openwiki: broken internal link [/openwiki/testing/running-tests.md] link "/openwiki/testing/running-tests.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-5. `mypy --strict`・`ruff`・`lint-imports` を通す → [テストの走らせ方と CI](/openwiki/testing/running-tests.md)。
+4. MCP に出すには factory・OpenClaw toolFilter・本番 env の段が要る → [ツール登録と機能フラグ](tool-registry-and-feature-flags.md)。
+5. `mypy --strict`・`ruff`・`lint-imports` を通す → [テストの走らせ方と CI](../testing/running-tests.md)。

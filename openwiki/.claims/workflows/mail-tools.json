@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "pageVersion": "sha256:8c86cd383e6562340488e0695cd47b503e3240c51d2bc0e15a20b8c125036b1f",
+  "pageVersion": "sha256:5dd5786a2166274789d32e0d828c9571404169857b67482430a44fc4d8c44d73",
   "claims": [
     {
       "id": "claim_2ec985c2e8dc4af4a35213f6eee0fa75",
@@ -45,12 +45,12 @@
           "version": "repo-lines-v1:sha256:15b0a5d7fad6b9ebdb9527d79b8bca72dc5ef363a29b6ff9cf5addd262bb627b:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjY3OWNhNTc5OTcxMGExOTAwOWFhMTFhMzczYTRlZTMzZDVkMTE4N2ViNmMyMjhkODZkYTRhMGMzYmZiNzRmZjAiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU1MDMyZTk2NGQwOTMyMzUxZTVkMTg1MjY5MjgxYjE3MWEzYTA5YjA4YjI4NmU2NjFlYTQ3MDMyM2M4MmViNGQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlNDMwODNhYjY3NGU4YjZiZjBjYjJiMTMwNDAzODA1YTU0YWYxZmMzMmNjNTFlNzlkYjYzZTdlOTQ0YTUyODYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImEyOWZjZDQwM2RkY2JkZDY5MmEwMTAxMjY3NmRiM2U3YzAzODJkZGI3OTBjZjg4YTE1MTVhMWQ1Mzc1MTFlYzcifQ"
         },
         {
-          "resource": "repo://src/teamagent/adapters/google_auth.py#L106-L130",
-          "version": "repo-lines-v1:sha256:7c607f62b5381670f8f599a1fa722803d32a939fee2f259df86780ecb6f6598e:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0N2NlZDM3OGFjZDc5ZmIxNjM4OTFiNDNjODkxN2ZiMzVkNTQ3NGVjYWRkMTE5NzIxYWMzZjY3NWFmMjVkY2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZlMWE4ZjI0MzdmYzE4NzhiM2I2ZTk2MDdiYjJiYzM2NzQ4YTNkYjBlZjdmMTUwZTJhNDkxMmRlNTU0OTY0NTkiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjowLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUifQ"
+          "resource": "repo://src/teamagent/adapters/google_auth.py#L116-L140",
+          "version": "repo-lines-v1:sha256:7975a0e70fd1bedb6b31c77a6bbb1af0739f4aea1249a46b7be8622ad528d348:eyJzZWxlY3RlZExpbmVDb3VudCI6MjUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6Ijg0N2NlZDM3OGFjZDc5ZmIxNjM4OTFiNDNjODkxN2ZiMzVkNTQ3NGVjYWRkMTE5NzIxYWMzZjY3NWFmMjVkY2YiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjAzNWI4ZmNmZTRjN2FjNTI4NTZjYWE1NDIxNDBmMDNjY2ExYTY0YzY2N2Q5N2JmMTQ2N2YzNzNjZGMzMGI1MmMiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjAyYjI1NzhkODVmMDU0N2ZhOTE3ZGE3YjE4ZDIwNzg5OTE4MjlhNTM4MmM3OTEyOGJlMTZmNmYxMDg4ZjdhYjUiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjoxLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjMwYzFmMTg4ZjE0MmVkN2E4MjQ2ODBiMjA3MTcyYzU1MTliYzYxNGE0OGZkYTdjZjE2N2VkYjhkZGY3OTk1NmMifQ"
         },
         {
           "resource": "repo://src/teamagent/adapters/google_oauth_flow.py#L26-L46",
-          "version": "repo-lines-v1:sha256:25ec4a277c52d977100db2fd9138ed4363f5f91841562266dade76f2e3966acd:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjE1NjYyNzJkYTQyOGViZDM0ZjYyMWZhYmE0ZjYzNGYxMDA3ZGQ5MzNhOWNkZmE1NjFlY2JiYTdmNWM0YzQyYTciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImZhZmJhMDUyN2MzOTUzYzRiNmUwZTViNTczOWJhODM2MTJmODA1M2JjZGM5NDY2NzMwMTkzY2QxZDU5MGI0MDgiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjA5MjI1YmE3ODk2ZDc1NjBhZmQ0Zjg1YTEwZmM2ZjIyY2VkNzUxN2MwOTFmOWNkMGZlNWY3YmI1MzI4NjFhZjYiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImQxYTI2OTdhMWJmNTY5MWQzODMxMWU2ZjFmZjk3YmYwMDc0MDBjMTk2YTExMmYwOGJlYThmNDM5YzExYWVmYjEifQ"
+          "version": "repo-lines-v1:sha256:d2b4e357f30d769d1f76d0a528e2cc18e8b816304dcd1c4e55396fa9d83d54f4:eyJzZWxlY3RlZExpbmVDb3VudCI6MjEsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM5M2YxOWUzODc4OTY0ODExNTUzMDAyNGM5ZjcwMzczNjkzOGZmM2I1MTU1YjBmOWIwOTQyZmUwYjlkMDNkZmYiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjBkMDVlY2E0ZDk4ZTg4Zjk4ZWMyNTE0NjRmMzFlMDE0Y2FjMTM1ZmU2ZTkzNzI1OTEwNGY2ZWYyZTA3NTVjODQiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImU0Njc5MGJjMzMzMjBhMjIzZDdhMGM1MDllZGEzMWU3NThlMDJiZmJkYzRkZjkwOTdjODkzMTk3ODhhMjVjNjAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6IjU3YThmMGU4ZmFmNTk4OGZiMGY2ZTVmYTgyZDYwNmQ3YzNkNTMxMzk3OGRlMmVhNTA5NTFiYTRjZDg1YTgwNTgifQ"
         }
       ]
     },
@@ -83,11 +83,11 @@
       "statement": "メール系の連携状態は not_connected / reauth_needed / gmail_api_failed の決定論コードに落とされる。resolve_gmail_for_user はネットワーク I/O をせず、受信箱アクセス中の例外は型名と文面の目印（refresherror・invalid_grant・401 など）で reauth_needed か gmail_api_failed に振り分けられる。TokenStore 未設定は PermissionError のまま残る。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/skills/_shared/mail_connection.py#L124-L149",
+          "resource": "repo://src/teamagent/skills/_shared/mail_connection.py#L261-L286",
           "version": "repo-lines-v1:sha256:f29010363a33b8efbe423a89b866d7037644fe49fff80ddf8414e3d893bf354c:eyJzZWxlY3RlZExpbmVDb3VudCI6MjYsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImMwODk1N2JkYjhhODAxOWY4ZmFiOGQ5NTE2Y2MxOGMzOWY3MzFhNzU2ZmY3NGVhYWI5OWY1YmIzYjZkNWY3YjIiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjMwNTAwYzMyOTQwYmFlNzJhNzJlM2U0MjQ2NzM0MTIzZjdhMDFjM2M2MDIyZjA3ZWM2NTM3MDZjYWNiYWQ2YzUiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6ImZmMmRlNzMyYTA3NDJlYjVjNTBkMTUwNDg2MTU2ZjdmNTQwM2U2ZmU4NjcwZDkwZjk4NDk4MGM1MDBjNzNhMTAiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6Ijc0NTk1OWMyNmJkMTViYjc4NjQ2ODhiMmI3N2NkYzg1Mjg0MDE1MGUzNWRkNDcwYjUxYWI4NmM1NmE2Nzk2YzcifQ"
         },
         {
-          "resource": "repo://src/teamagent/skills/_shared/mail_connection.py#L68-L101",
+          "resource": "repo://src/teamagent/skills/_shared/mail_connection.py#L69-L102",
           "version": "repo-lines-v1:sha256:d10e45900f755577056159f438899afd5c46117924be7322e263788aaf5168db:eyJzZWxlY3RlZExpbmVDb3VudCI6MzQsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6IjRkN2RlZjc2ZGU2N2FhNTFiMDQ4MzVkMWYwYjY2OWI5YjllOTZlMjQ4MTA2YjZmM2Q5ZTZjNmQ0YjA5NTcxMDciLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6ImM5ZDRlYTZlOGVlYzMyNWE4OGFlYzg1NjYwZjc4MzFhYzVhMzI2YjViNDY2MjZkZDZhNjc1ZTA4MjE2ZWM4NDEiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjViODAwNDg0YmE5YjdjOWZkZWY4OTdiMzgzY2M4ZDBlNDlkY2ZhZmI1YjE3NDcyYzBkZTViYmFkNGU0MDIzODQiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImJjYzVmY2MxYjYxYjlkMzAyNzAxZjE2ZDRhOGVkN2NlODdlM2Y0MGFjZWUxYzU4MzEwMTFlODhhYjhmNjRhODkifQ"
         }
       ]
@@ -161,7 +161,7 @@
       "statement": "MCP 経路の factory は mail_to_internal_context に token_store しか渡さず、search_skill が None のときは社内参照（internal_refs）が空になる。SearchSkill を注入するのは旧 Slack bot 経路の get_mail_link_skill だけ。",
       "evidence": [
         {
-          "resource": "repo://src/teamagent/orchestrator/factory.py#L366-L380",
+          "resource": "repo://src/teamagent/orchestrator/factory.py#L371-L385",
           "version": "repo-lines-v1:sha256:8f5cd4b1c43f1b7dad8af761f17b06b8348ed21e59f828945a4142c8906c449e:eyJzZWxlY3RlZExpbmVDb3VudCI6MTUsImZpcnN0U2VsZWN0ZWRMaW5lSGFzaCI6ImU4ODNkOGZkZmZkZGRlODU0ZTIyNGExZGRlZTE5ZmYzMmRhZGYyZTU5NGM1OTRkM2U2YWQ4OGY1Mzg1NWU3ZWEiLCJsYXN0U2VsZWN0ZWRMaW5lSGFzaCI6IjU5MDlhNTNhNjE4ZDAyOGUxZDMwMDBjMGE3YWJjZWVjYmU1ZmIzN2Y0ZTUxMWVmZTQ2NjQzZmFkNmU2Njg3MmYiLCJwcmVjZWRpbmdDb250ZXh0TGluZUNvdW50IjozLCJwcmVjZWRpbmdDb250ZXh0SGFzaCI6IjI5NjAzNmViYTY2MmI0MGUwNTBjNDI0YTJlZjIwNDRiNmQ1NTY0YzVlMmM0YzE3OTk1YmVlZTExYzFhZTA3MDgiLCJmb2xsb3dpbmdDb250ZXh0TGluZUNvdW50IjozLCJmb2xsb3dpbmdDb250ZXh0SGFzaCI6ImY0NGQ1ZDI0MTFjNjhlMzQ5ZDQ0MDUxMjczZGQ5OTgxNmYwNTA4Mzg1OWY2YzcwNzdjNmQ1NWJlMGVlZGQ3YzEifQ"
         },
         {
@@ -177,6 +177,6 @@
   ],
   "verification": {
     "by": "openwiki/0.6.1",
-    "at": "2026-09-29T07:51:05.076Z"
+    "at": "2026-09-30T04:50:20.078Z"
   }
 }

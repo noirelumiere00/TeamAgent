@@ -5,7 +5,7 @@ description: OpenClaw の caller-identity plugin が Slack の送信者を署名
 tags: [openclaw, security, caller-claim, hmac, slack-buttons, mcp]
 verified:
   - by: openwiki/0.6.1
-    at: 2026-09-29T07:51:05.076Z
+    at: 2026-09-30T04:50:20.078Z
 sources:
   - id: openwiki-source-a24133c7b43bc7a5e1ae4991
     resource: repo://infra/openclaw/caller-identity-plugin/dist/index.js
@@ -17,7 +17,7 @@ sources:
     resource: repo://src/teamagent/mcp_gateway/server.py
   - id: openwiki-source-1727ffb2021970a3529945dd
     resource: repo://tests/test_openclaw_button_direct.py
-generated: { by: "claude-code", at: "2026-09-29T07:51:05.076Z" }
+generated: { by: "claude-code", at: "2026-09-30T04:50:20.078Z" }
 ---
 
 # 呼び出し元の証明とボタン束縛
@@ -48,11 +48,9 @@ mcp 側 `CallerClaimVerifier.verify` は次を順に確かめ、1 つでも外�
 5. 期限内（最大寿命 60 秒・時計ずれ 5 秒）。
 6. 申告された `_user_context` の `slack_user_id` / team / channel / thread が claim と一致する。
 7. 引数全体の正準ハッシュ（`canonical_request_sha256`、Node 側と同じ正準化）が `arguments_sha256` と一致する。＝署名後に引数を書き換えると通らない。
-8. nonce を replay store に記録する。本番は DynamoDB の条件付き書き込み（`attribute_not_exists`）で、ECS タスクが複数あっても同じ claim は 1 回しか通らない。DynamoDB のエラーは fail-closed。
+8. nonce を replay store に記録する。本番は DynamoDB の条件付き書き込み（`attribute_not_exists`）で、ECS タスクが複数あっても同じ claim は 1 回しか通らない。DynamoDB のエラーは fail-closed。記録の保持期限（TTL 属性 `expires_at`）は claim の exp ではなく「消費した時刻＋25 時間」（`CALLER_CLAIM_REPLAY_RETENTION_SECONDS`）。ボタンの押下は押下の指紋から決まる固定 nonce で届き、ボタンのトークンは最長 24 時間有効なので、その間に同じ押下が再送されても記録が残っていて通らない（2026-09-29 の #476 で claim の exp＝最長 60 秒から変更）。
 
-<!-- openwiki: broken internal link [/openwiki/architecture/mcp-gateway.md] link "/openwiki/architecture/mcp-gateway.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/integrations/slack-identity-and-oauth.md] link "/openwiki/integrations/slack-identity-and-oauth.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-`from_env()` は caller claim の秘密が MCP bearer と同じ値だと起動を拒否する。検証器が無いのに identity 解決や会社共有グループが有効な場合、`server._verify_caller` は `CALLER_IDENTITY_CONFIGURATION_ERROR` を返して止まる（fail-closed）。検証に失敗した依頼は `missing_verified_caller` の本人確認拒否として利用者に返る。以降の本人解決は [MCP gateway](/openwiki/architecture/mcp-gateway.md) と [Slack の本人確認](/openwiki/integrations/slack-identity-and-oauth.md) を参照。
+`from_env()` は caller claim の秘密が MCP bearer と同じ値だと起動を拒否する。検証器が無いのに identity 解決や会社共有グループが有効な場合、`server._verify_caller` は `CALLER_IDENTITY_CONFIGURATION_ERROR` を返して止まる（fail-closed）。検証に失敗した依頼は `missing_verified_caller` の本人確認拒否として利用者に返る。以降の本人解決は [MCP gateway](mcp-gateway.md) と [Slack の本人確認](../integrations/slack-identity-and-oauth.md) を参照。
 
 ## 通常メッセージの経路
 
@@ -101,10 +99,11 @@ Slack ボタン押下
 - **受け取る前に失敗**: 何も実行されていない（nonce も未消費）ので押下台帳から外し、「もう一度押して」と返す。
 - **受け取った後に途切れた**: 実行されたか分からないので台帳は外さず、「入っていなければ頼み直して」と返す。同じ押下はプラグイン台帳と MCP の one-use nonce の両方で止まるため、二重登録にならない。
 - MCP が `CALLER_IDENTITY_REJECTED` を返した場合も「分からない」扱い（nonce 再生と本人確認失敗を応答から区別できないため）。
+- **DM 以外で押された**: 実行せず、本人の DM へ案内を送る。案内が届いたら台帳を保ち、どこにも届かなかったら台帳から外して、押し直しで案内をもう一度試せるようにする（外さないと同じボタンが 24 時間無言になる）。
 
-<!-- openwiki: broken internal link [/openwiki/workflows/digest-buttons.md] link "/openwiki/workflows/digest-buttons.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-<!-- openwiki: broken internal link [/openwiki/operations/hmac-keyring-and-rotation.md] link "/openwiki/operations/hmac-keyring-and-rotation.md" is root-absolute, which no real consumer resolves against the repository root (not a coding agent reading the page, not GitHub's Markdown renderer, not a local viewer); use a path relative to this file instead. Fix the href or restore the target, then delete this comment. -->
-MCP 側のトークン検証（HMAC・purpose・本人・期限・one-use nonce）は plugin の束縛とは独立に残っている＝二重の守り。トークンそのものの発行と検証は [朝ダイジェストのボタン処理](/openwiki/workflows/digest-buttons.md)、鍵の世代管理は [HMAC 鍵束とローテーション](/openwiki/operations/hmac-keyring-and-rotation.md) を参照。
+**押し直し（台帳にある同じ押下）は実行しないが、無言にもしない。** 押した本人にだけ一時表示で、台帳の状態に応じた 1 行を返す（`buttonRepressText`）。実行中なら「いま処理しています」、成功を投稿済みなら「すでに押されています」、失敗を投稿済みならそのボタンの失敗文、DM 以外なら DM での案内、結果が分からない・届かなかった場合は「確かめてください」。
+
+MCP 側のトークン検証（HMAC・purpose・本人・期限・one-use nonce）は plugin の束縛とは独立に残っている＝二重の守り。トークンそのものの発行と検証は [朝ダイジェストのボタン処理](../workflows/digest-buttons.md)、鍵の世代管理は [HMAC 鍵束とローテーション](../operations/hmac-keyring-and-rotation.md) を参照。
 
 ## 変更するときの注意
 
