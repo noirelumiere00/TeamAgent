@@ -1579,7 +1579,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     excluded = config["mcp"]["servers"]["teamagent"]["toolFilter"]["exclude"]
     inventory_names = [tool["name"] for tool in scope["tools"]]
     assert scope["schemaVersion"] == 2
-    assert len(inventory_names) == len(set(inventory_names)) == 38
+    assert len(inventory_names) == len(set(inventory_names)) == 39
     assert set(inventory_names) == set(included)
     assert {
         "chitchat",
@@ -1648,6 +1648,11 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "kind": "envAllTrue",
         "names": ["USE_SLACK_SUMMARY_TOOL"],
     }
+    # Slack 全体のキーワード検索。既定 OFF（fargate.tf は false 固定・試験は TD の env で）。
+    assert activation_by_name["slack_search"] == {
+        "kind": "envAllTrue",
+        "names": ["USE_SLACK_SEARCH_TOOL"],
+    }
     assert activation_by_name["attachment_assist"] == {
         "kind": "envAllTrue",
         "names": ["USE_ATTACHMENT_TOOLS"],
@@ -1666,6 +1671,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
     assert "calendar-freebusy-read-only" in effects
     assert "external-job-submit-s3-write" in effects
     assert "slack-thread-channel-read-analysis" in effects
+    assert "slack-search-read-analysis" in effects
     assert "slack-file-read-analysis" in effects
     assert "external-video-read-slack-file-delivery" in effects
     assert "external-web-search-read-only" in effects
@@ -1726,6 +1732,7 @@ def test_effective_tool_scope_matches_config_and_deployment_gates() -> None:
         "USE_OMIYAGE_REPORT_TOOLS",
         "enable_x_research",
         "USE_SLACK_SUMMARY_TOOL",
+        "USE_SLACK_SEARCH_TOOL",
         "USE_ATTACHMENT_TOOLS",
         "USE_VIDEO_CAPTURE_TOOL",
         "USE_WEB_RESEARCH_TOOL",

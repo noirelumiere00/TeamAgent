@@ -97,6 +97,7 @@ USER_VERBATIM_OK: dict[Key, str] = {
     ("tiktok_search", "query"): "検索語",
     ("video_algorithm", "query"): "検索KW",
     ("web_research", "query"): "外部検索クエリ（顧客名を入れない旨は description で禁止済み）",
+    ("slack_search", "query"): "Slack の検索語（in:/from: 等の検索構文ごと利用者の言葉を渡す）",
     ("chitchat", "message"): "Socket Mode 専用。発話そのもの",
     ("proposal_deck", "goal"): "提案の目的（自然文）",
     ("proposal_deck", "target_persona"): "ターゲット像（自然文）",

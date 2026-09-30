@@ -286,6 +286,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SUMMARY_TOOL"] }
     },
     {
+      "name": "slack_search",
+      "effect": "slack-search-read-analysis",
+      "terraformGate": "USE_SLACK_SEARCH_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_SLACK_SEARCH_TOOL"] }
+    },
+    {
       "name": "attachment_assist",
       "effect": "slack-file-read-analysis",
       "terraformGate": "use_attachment_tools",

@@ -700,6 +700,10 @@ resource "aws_ecs_task_definition" "mcp" {
       { name = "USE_CALENDAR_FREEBUSY_TOOL", value = var.use_calendar_freebusy_tool ? "true" : "false" },
       # slack_summary: Slack スレッド要約（read-only・本人 xoxp のみ・bot token 不使用・既定 false）。
       { name = "USE_SLACK_SUMMARY_TOOL", value = var.use_slack_summary_tool ? "true" : "false" },
+      # slack_search: Slack 全体のキーワード検索（read-only・本人 xoxp の search.messages のみ）。
+      # チャンネルでの依頼は公開チャンネルの一致だけ返す。まず TD の env で小俣さんが試験し、
+      # その後 true にする（それまでは false 固定・変数化はしない）。
+      { name = "USE_SLACK_SEARCH_TOOL", value = "false" },
       # attachment_assist: 会話に添付されたファイルの読取・加工（要約/修正案/議事録FMT/集計/英訳）。
       # 読取のみ（テキスト返答だけ・ファイル生成/再配信は P2 の別フラグ）。既定 false。
       # 解禁は 4 点セット: この env / effective-tool-scope.json / 契約テスト / OC イメージ再ビルド。

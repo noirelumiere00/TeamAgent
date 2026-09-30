@@ -83,6 +83,7 @@ _WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
 # 「仕様で決まった分」と「実装側で補った分」を後から見分けられるようにするため。
 #   - tiktok_acquire / x_buzz_measure とその *_status: 収集・計測＝調べる
 #   - recommend: 過去提案のベクトル近傍提示＝調べる
+#   - slack_search: Slack 全体のキーワード検索（slack_summary の兄弟だが中身は検索）＝調べる
 #   - proposal_builder / proposal_deck / proposal_campaign: 成果物生成＝作る
 #   - video_approval: 納品動画の一次FB。proposal_review と同型の「レビュー」＝作る
 #   - operation_log: Slack 会話を CRM 転記用に構造化＝整える
@@ -98,6 +99,7 @@ _SIBLING_WORK_TYPE_TOOLS: dict[str, tuple[str, ...]] = {
         "x_buzz_measure_status",
         "recommend",
         "search_surface_check_video",
+        "slack_search",
     ),
     WORK_TYPE_CREATE: (
         "proposal_builder",
