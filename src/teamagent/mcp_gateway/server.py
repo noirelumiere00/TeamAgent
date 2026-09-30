@@ -222,7 +222,7 @@ def _augment_schema(schema: dict[str, Any]) -> dict[str, Any]:
       開発メモ）はモデルの判断材料にならないので落とす（約 0.7 万トークン）。
       ツールの説明は ToolSpec.description、引数の説明は各 property の description に残る。
     """
-    out = _strip_schema_titles(dict(schema))
+    out: dict[str, Any] = _strip_schema_titles(dict(schema))
     out.pop("description", None)
     props = dict(out.get("properties") or {})
     props[USER_CONTEXT_KEY] = {"type": "object"}
