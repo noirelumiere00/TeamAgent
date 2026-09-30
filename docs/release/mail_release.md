@@ -54,8 +54,10 @@ adapter denylist（`users.messages.send`/`users.drafts.send`/delete/trash 等）
 - **Slack ホットパス（rule-based）**: 追加フラグ不要。マージ＋Bot 再起動で 4 機能とも有効。
   結果は `_PRIVATE_SKILLS`（slack_bot.py）により**本人へ ephemeral 配信**。
 - Bedrock 要約 in mail_to_internal_context（任意）: `USE_MAIL_LINK_SUMMARY=true`（既定 OFF）。
-- orchestrator(Agent SDK) ツール登録（dark・任意）: `USE_MAIL_LINK_TOOL` / `USE_FOLLOWUP_TOOL` /
-  `USE_MAIL_SUMMARY_TOOL` / `USE_MAIL_REPLY_TOOL`（既定 OFF。本番 Slack は rule-based 経路で届く）。
+- MCP（OpenClaw/Aico）経路のツール登録: `USE_MAIL_LINK_TOOL` / `USE_FOLLOWUP_TOOL` /
+  `USE_MAIL_SUMMARY_TOOL` / `USE_MAIL_REPLY_TOOL`（コード既定 OFF。本番 mcp タスクは
+  `infra/terraform/fargate.tf` で 4 本とも ON＝Slack の主経路）。組み立ては
+  `orchestrator/factory.py`（mail_to_internal_context には共有 search を渡す）。
 
 ## 4. 段階ロールアウト
 1. 管理者で smoke（「@TeamAgent 連携」or DM「連携」で認可 → 下記を各機能で確認）:
