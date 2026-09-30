@@ -15,6 +15,7 @@ import re
 import shutil
 import tempfile
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -147,6 +148,40 @@ def _str_list(value: Any) -> list[str]:
     if isinstance(value, str) or not isinstance(value, (list, tuple)):
         return []
     return [str(x) for x in value if isinstance(x, str) and x.strip()]
+
+
+def _kw_key(value: Any) -> str:
+    """KW の照合キー（NFKC・大小・空白の畳みを同一視。search_surface_check の記録キーと同じ）。"""
+    return " ".join(unicodedata.normalize("NFKC", str(value or "")).casefold().split())
+
+
+def _posts_for_query(
+    posts: list[dict[str, Any]], query: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """取得ジョブの posts から、分析する KW の投稿だけを表示順のまま選ぶ。
+
+    tiktok_acquire は1ジョブに複数 KW を入れることがある（KW の数や本数によって、
+    まとめて1ジョブ・KW ごとに分割のどちらにもなる）。KW で絞らずに先頭から読むと、
+    別 KW の上位投稿でこの KW を分析してしまう。
+
+    返り値は (選んだ投稿, ジョブに入っている KW)。
+    - 一致する投稿がある → それだけ
+    - ジョブが1KWだけ → 全件（依頼の言い回しがジョブの KW と少し違っても従来どおり読む）
+    - 複数 KW のジョブで一致なし → 空（別 KW で代用しない）
+    """
+
+    job_keywords: list[str] = []
+    for post in posts:
+        kw = str(post.get("kw") or "").strip()
+        if kw and kw not in job_keywords:
+            job_keywords.append(kw)
+    wanted = _kw_key(query)
+    matched = [post for post in posts if _kw_key(post.get("kw")) == wanted]
+    if matched:
+        return matched, job_keywords
+    if len(job_keywords) <= 1:
+        return posts, job_keywords
+    return [], job_keywords
 
 
 def _echo_fields(input: VideoAlgorithmInput) -> dict[str, Any]:
@@ -1669,6 +1704,8 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
         # per-call override はローカルで組み立て self へ保存しない(共有インスタンス安全)。
         call_searcher: Searcher | None = None
         call_downloader: Downloader | None = None
+        # 複数 KW の取得ジョブにこの KW が入っていなかったとき、ジョブに入っていた KW。
+        absent_from_job: list[str] = []
         if input.acquire_job_id:
             from teamagent.adapters.tiktok_s3_source import (
                 TikTokS3Source,
@@ -1682,7 +1719,15 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             )
 
             def _s3_search(q: str, n: int, rid: str) -> list[VideoMeta]:
-                return self._posts_to_metas(_src.posts(n))
+                posts, job_keywords = _posts_for_query(_src.posts(), q)
+                if not posts and len(job_keywords) > 1:
+                    absent_from_job[:] = job_keywords
+                    log.warning(
+                        "video_algorithm_s3_query_not_in_job",
+                        job_id=input.acquire_job_id,
+                        job_keywords=len(job_keywords),
+                    )
+                return self._posts_to_metas(posts[:n])
 
             call_searcher = _s3_search
             call_downloader = _src.download
@@ -1692,9 +1737,17 @@ class VideoAlgorithmSkill(BaseSkill[VideoAlgorithmInput, VideoAlgorithmOutput]):
             pool = self._search(input.query, board_target, ctx.request_id, searcher=call_searcher)
         generated_at = _now_jst_iso()
         if not pool:
+            empty_summary = f"🔎 「{input.query}」の検索結果を取得できませんでした。"
+            if absent_from_job:
+                # slack_summary は利用者へそのまま出る（SOUL: 引数名 job_id などは出さない）。
+                empty_summary = (
+                    f"🔎 「{input.query}」は渡された取得結果に入っていません"
+                    f"（入っているKW: {'・'.join(absent_from_job)}）。"
+                    "このKWを取得した結果を使うと分析できます。"
+                )
             empty = VideoAlgorithmOutput(
                 query=input.query,
-                slack_summary=f"🔎 「{input.query}」の検索結果を取得できませんでした。",
+                slack_summary=empty_summary,
                 **_echo_fields(input),
                 generated_at=generated_at,
             )
