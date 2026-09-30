@@ -24,6 +24,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from teamagent.util.grapheme_cut import truncate_graphemes
+
 # 説明欄の「クライアント行」。全角/半角コロン・「得意先」表記ゆれを吸収する。
 _CLIENT_LINE_RE = re.compile(r"^[\s　]*(?:クライアント|得意先|顧客|CL)[\s　]*[:：](?P<body>.*)$")
 # 「代理店：青葉広告（山田様）」「代理店: 桜通エージェンシー」。
@@ -160,7 +162,8 @@ def tighten_name(raw: str) -> str:
         return ""
     if _HOSTLIKE_RE.search(text):
         return ""
-    return text[:_MAX_NAME]
+    # 社名・代理店名は本人 DM に出るので、絵文字（🇯🇵・ZWJ 連結など）の途中では切らない。
+    return truncate_graphemes(text, _MAX_NAME)
 
 
 def domain_label(raw: str) -> str:
