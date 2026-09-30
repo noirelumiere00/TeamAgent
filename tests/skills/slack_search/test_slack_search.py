@@ -310,11 +310,18 @@ def test_dm_request_returns_public_private_and_dm_matches() -> None:
     assert client.search_messages.await_args.kwargs["query"] == "見積"
 
 
-def test_request_without_channel_is_treated_as_personal_dm() -> None:
-    """channel 無し（system event 等・配信先は本人 DM）は slack_summary と同じく DM 扱い。"""
+def test_request_without_channel_fails_closed_to_public_only() -> None:
+    """channel 無しは注入漏れなど想定外の経路。非公開・DM の中身を出さない側に倒す（09-30）。
+
+    caller-identity plugin は署名つきの channel_id を毎回入れる（DM なら D…）ので、
+    本人 DM からの依頼がここに来ることは無い。
+    """
     skill, *_ = _build(ALL_MATCHES)
     out = _run(skill, origin=None)
-    assert out.match_count == 5 and out.hidden_count == 0
+    for body in ("SECRET_PRIVATE_BODY", "SECRET_DM_BODY", "SECRET_MPIM_BODY"):
+        assert body not in out.message
+    assert out.hidden_count > 0
+    assert out.total_hits == 0  # 非公開を含む総数も出さない
 
 
 def test_dm_message_has_permalink_sender_and_jst_time() -> None:

@@ -157,10 +157,11 @@ class SlackSearchSkill(BaseSkill[SlackSearchInput, SlackSearchOutput]):
         if not requester:
             raise PermissionError("slack_search は本人 user_email が必須です")
 
-        # ── S2: 依頼が来た面。D…（本人 DM）と空（system event 等・配信先は本人 DM）だけが
-        #    「本人しか読まない面」。C…/G… と未知の接頭辞はチャンネル扱い（公開分だけ）。
+        # ── S2: 依頼が来た面。D…（本人 DM）だけが「本人しか読まない面」。C…/G…・未知の接頭辞・
+        #    **空**はチャンネル扱い（公開分だけ）。caller-identity plugin は署名つきの channel_id を
+        #    毎回入れる（DM なら D…）ので、空は注入漏れなど想定外の経路＝閉じる側に倒す（09-30）。
         origin = str(ctx.metadata.get("channel_id", "") or "").strip()
-        dm_surface = not origin or origin.startswith("D")
+        dm_surface = origin.startswith("D")
 
         # ── S1: 本人 xoxp（SlackTokenStore の RLS で本人行のみ）。未連携は誘導。
         reader = self._resolve_reader(requester, log)
