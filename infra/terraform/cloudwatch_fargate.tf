@@ -98,6 +98,39 @@ resource "aws_cloudwatch_log_metric_filter" "oauth_connect_failed" {
   }
 }
 
+# DM の context overflow（2026-09-30・石田さんの DM が 09-29 から毎回失敗した件の再発検知）。
+# 上流 openclaw@2026.7.1 の回復失敗の行と、plugin が英文を日本語の案内へ差し替えた行を数える。
+# 案内が日本語になったので、利用者が黙って諦めると管理者には見えない＝ここで拾う。
+# パターンは aws logs test-metric-filter で本番の実物の行に 1 件だけ一致することを確認済み
+# （tests/scripts/test_openclaw_runtime_contract.py の test_context_overflow_alarms_match_exact_log_lines）。
+resource "aws_cloudwatch_log_metric_filter" "openclaw_context_overflow_exhausted" {
+  name           = "${var.project_name}-${var.environment}-openclaw-context-overflow-exhausted"
+  log_group_name = aws_cloudwatch_log_group.openclaw.name
+  pattern        = "\"exhausted provider overflow recovery\""
+
+  metric_transformation {
+    name          = "OpenClawContextOverflowExhausted"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "openclaw_context_overflow_replaced" {
+  name           = "${var.project_name}-${var.environment}-openclaw-context-overflow-replaced"
+  log_group_name = aws_cloudwatch_log_group.openclaw.name
+  pattern        = "\"context overflow reply replaced\""
+
+  metric_transformation {
+    name          = "OpenClawContextOverflowReplaced"
+    namespace     = local.metric_namespace
+    value         = "1"
+    default_value = "0"
+    unit          = "Count"
+  }
+}
+
 # ---------- alarms ----------
 # なりすまし拒否は「攻撃 or バグの早期検知」シグナル＝5分窓で1件でも通知。
 resource "aws_cloudwatch_metric_alarm" "mcp_spoof_rejected" {
@@ -175,6 +208,62 @@ resource "aws_cloudwatch_metric_alarm" "mcp_daily_cost_high" {
   treat_missing_data  = "notBreaching"
   alarm_actions       = [aws_sns_topic.alarms.arn]
   ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# overflow の再発＝5 分窓で 1 件でも通知（段2＝固定部分の削減の期限を測る材料にもなる）。
+resource "aws_cloudwatch_metric_alarm" "openclaw_context_overflow" {
+  alarm_name          = "${var.project_name}-${var.environment}-openclaw-context-overflow"
+  alarm_description   = "Aico の会話が上限（200k tokens）を超えて依頼が失敗した（DM・チャンネル）"
+  namespace           = local.metric_namespace
+  metric_name         = "OpenClawContextOverflowExhausted"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+}
+
+# 回復失敗があるのに日本語の案内への差し替えが無い＝文面の照合が外れた（上流の版上げ等）か、
+# 保証経路の抑止で案内が出なかった。1 時間窓で「失敗 − 差し替え」が 1 以上なら通知。
+resource "aws_cloudwatch_metric_alarm" "openclaw_context_overflow_unreplaced" {
+  alarm_name          = "${var.project_name}-${var.environment}-openclaw-context-overflow-unreplaced"
+  alarm_description   = "overflow の英文が日本語の案内へ差し替わっていない疑い（plugin の文面照合を確認）"
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alarms.arn]
+  ok_actions          = [aws_sns_topic.alarms.arn]
+
+  metric_query {
+    id          = "unreplaced"
+    expression  = "exhausted - replaced"
+    label       = "overflow without Japanese notice"
+    return_data = true
+  }
+
+  metric_query {
+    id = "exhausted"
+    metric {
+      namespace   = local.metric_namespace
+      metric_name = "OpenClawContextOverflowExhausted"
+      period      = 3600
+      stat        = "Sum"
+    }
+  }
+
+  metric_query {
+    id = "replaced"
+    metric {
+      namespace   = local.metric_namespace
+      metric_name = "OpenClawContextOverflowReplaced"
+      period      = 3600
+      stat        = "Sum"
+    }
+  }
 }
 
 # ---------- dashboard ----------

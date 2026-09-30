@@ -407,12 +407,12 @@ def test_dm_context_overflow_guards_are_pinned() -> None:
 
     本番: 毎回の固定部分が約 127.5k tokens あり、DM は 1 日分の履歴を全部モデルへ送っていたため、
     重い依頼 1〜2 回で上限 200k を超え、以後は失敗のたびに履歴が増えて毎回失敗した。
-    変異: dmHistoryLimit を消す・20 にする、toolResultMaxChars を外す、resetTriggers から
+    変異: dmHistoryLimit を消す・4 や 20 にする、toolResultMaxChars を外す、resetTriggers から
     「新しい会話」を外す（plugin の案内が行き止まりになる）と赤。
     """
     config = _load_reviewed_json5(CONFIG)
     slack = config["channels"]["slack"]
-    assert slack["dmHistoryLimit"] == 4
+    assert slack["dmHistoryLimit"] == 2
     # 利用者ごとの上書き（dms.<id>.historyLimit）は入れない。入れるなら設計を更新してから。
     assert "dms" not in slack
     # グループの履歴制限は従来どおり（DM には効かないので dmHistoryLimit が別に要る）。
@@ -499,6 +499,225 @@ def test_context_overflow_markers_exist_in_shipped_dist() -> None:
     ]
     for kind, marker in markers:
         assert marker in shipped, kind
+
+
+# ── DM の履歴上限の予算シミュレーション（2026-09-30 反証レビュー指摘 A3・B1・B2） ─────────
+# 値を固定するだけのテストでは「本番の失敗の形」を再現できないので、合成した transcript を
+# 上流 limitHistoryTurns（attempt.model-diagnostic-events-Dg8sP6iR.js:3464-3481）と同じ規則で
+# 絞り、1 回の要求の大きさを数える。規則の写しが dist の実物と一致することは
+# test_limit_history_turns_mirror_matches_shipped_dist（OPENCLAW_DIST_DIR 指定時）で照合する。
+#
+# 前提（数字はすべて推定。変わったらここを直す）:
+# - 固定部分（system prompt・ツール定義・スキル説明）約 127.5k tokens、窓 200k（Haiku 4.5・Bedrock）。
+# - 重い依頼 1 回（ツール 6 回）で +27〜35k。ここでは上限の 35k で数える。軽い依頼は 3k。
+# - 上流は validateReplayTurns で連続する user を 1 件にまとめるが、失敗した run の assistant は
+#   代わりの文で残る（attempt.model-diagnostic-events-Dg8sP6iR.js:3733-3741）ので、合成 transcript は
+#   user と assistant が交互のまま＝まとめは恒等になる。
+# - 今回の依頼は limitHistoryTurns の後で足される（selection-8ixiqbew.js:13214 → :13313）。
+#   よってモデルに見えるのは「前の user N 件から後ろ ＋ 今回」。
+DM_BUDGET_FIXED_TOKENS = 127_500
+DM_BUDGET_WINDOW_TOKENS = 200_000
+DM_BUDGET_HEAVY_TOKENS = 35_000
+DM_BUDGET_LIGHT_TOKENS = 3_000
+DM_BUDGET_FAILED_TOKENS = 25
+
+
+def _limit_history_turns(messages: list[dict[str, Any]], limit: int | None) -> list[dict[str, Any]]:
+    """上流 limitHistoryTurns の写し（先頭の user/assistant 以外は残し、後ろから user を N 件数える）。"""
+    if not limit or limit <= 0 or not messages:
+        return messages
+    start = 0
+    while start < len(messages) and messages[start]["role"] not in ("user", "assistant"):
+        start += 1
+    tail = messages[start:]
+    if not tail:
+        return messages
+    user_count = 0
+    last_user_index = len(tail)
+    for i in range(len(tail) - 1, -1, -1):
+        if tail[i]["role"] == "user":
+            user_count += 1
+            if user_count > limit:
+                return messages[:start] + tail[last_user_index:]
+            last_user_index = i
+    return messages
+
+
+def _light_turn() -> list[dict[str, Any]]:
+    return [
+        {"role": "user", "tokens": 200},
+        {"role": "assistant", "tokens": DM_BUDGET_LIGHT_TOKENS - 200},
+    ]
+
+
+def _heavy_turn() -> list[dict[str, Any]]:
+    """ツール 6 回の重い依頼（09-29 19:43〜19:49 の形: tiktok_search×3 ほか）。"""
+    per_result = (DM_BUDGET_HEAVY_TOKENS - 200 - 6 * 100 - 1_000) // 6
+    turn: list[dict[str, Any]] = [{"role": "user", "tokens": 200}]
+    for _ in range(6):
+        turn.append({"role": "assistant", "tokens": 100})
+        turn.append({"role": "toolResult", "tokens": per_result})
+    turn.append({"role": "assistant", "tokens": 1_000})
+    remainder = DM_BUDGET_HEAVY_TOKENS - sum(m["tokens"] for m in turn)
+    turn[-1]["tokens"] += remainder
+    return turn
+
+
+def _failed_turn(*, keeps_tool_results: bool = False) -> list[dict[str, Any]]:
+    """overflow で失敗した 1 通。既定は本番 09-29 の形（1 通で +20〜30 tokens）。
+
+    keeps_tool_results=True は悲観側の仮定: 重い依頼の途中で溢れ、そこまでのツール結果が
+    transcript に残った（本番で起きるかは未確認）。
+    """
+    if keeps_tool_results:
+        turn = _heavy_turn()
+        turn[-1] = {"role": "assistant", "tokens": turn[-1]["tokens"]}
+        return turn
+    return [
+        {"role": "user", "tokens": 20},
+        {"role": "assistant", "tokens": DM_BUDGET_FAILED_TOKENS - 20},
+    ]
+
+
+def _prompt_tokens(
+    history: list[dict[str, Any]], current: list[dict[str, Any]], limit: int | None
+) -> int:
+    kept = _limit_history_turns(history, limit)
+    return (
+        DM_BUDGET_FIXED_TOKENS + sum(m["tokens"] for m in kept) + sum(m["tokens"] for m in current)
+    )
+
+
+def _overflows(
+    history: list[dict[str, Any]], current: list[dict[str, Any]], limit: int | None
+) -> bool:
+    return _prompt_tokens(history, current, limit) > DM_BUDGET_WINDOW_TOKENS
+
+
+def _messages_until_recovery(
+    history: list[dict[str, Any]], limit: int | None, *, max_messages: int = 10
+) -> int | None:
+    """軽い依頼を送り続けて、何通目で溢れなくなるか（失敗した通は履歴に残る）。"""
+    history = list(history)
+    for n in range(1, max_messages + 1):
+        if not _overflows(history, _light_turn(), limit):
+            return n
+        history += _failed_turn()
+    return None
+
+
+def _ishida_like_transcript() -> list[dict[str, Any]]:
+    """09-29 の石田さんの DM の形（本文は使わない・件数と tokens だけ）。
+
+    会話部分は約 80k（207,638 − 固定部分）。軽い依頼 15 通 ＋ 重い依頼 1 通の後、
+    19:52〜20:03 JST に 5 通が失敗した。
+    """
+    history: list[dict[str, Any]] = []
+    for _ in range(15):
+        history += _light_turn()
+    history += _heavy_turn()
+    for _ in range(5):
+        history += _failed_turn()
+    return history
+
+
+def test_dm_history_limit_recovers_the_stuck_session() -> None:
+    """09-29 の石田さんの形の transcript は、上限なしでは毎回溢れ、本番の値では次の 1 通で通る。
+
+    変異: dmHistoryLimit を 20 にする・消すと赤（石田さんのセッションが戻らない）。
+    """
+    limit = _load_reviewed_json5(CONFIG)["channels"]["slack"]["dmHistoryLimit"]
+    history = _ishida_like_transcript()
+    # 上限なし（変更前）: 軽い依頼でも溢れ、失敗が履歴に積み上がるので永久に戻らない。
+    assert _prompt_tokens(history, [], None) > DM_BUDGET_WINDOW_TOKENS
+    assert _messages_until_recovery(history, None) is None
+    # 本番の値: 展開後の最初の 1 通で通る。
+    assert _messages_until_recovery(history, limit) == 1
+
+
+def test_dm_history_limit_known_limits_are_documented() -> None:
+    """dmHistoryLimit だけでは防げないこと・戻り方の速さを、本番の値で固定する。
+
+    - 重い依頼が 3 回続くと、3 回目の途中で溢れる（2 でも 4 でも。1 なら 197.5k で境界ぎりぎり
+      通るが、直前の 1 往復しか覚えない）。溢れること自体を減らすのは段2（固定部分の削減）で、
+      この設定ではない。
+    - 溢れた後は、軽い依頼を送れば 1〜2 通目で戻る（2 通目は悲観側の仮定＝失敗した通が
+      ツール結果を残した場合）。4 だと 3〜4 通かかる＝2 を選んだ理由。
+    変異: dmHistoryLimit を 4 に戻すと赤。
+    値を変えたら（段2 で固定部分が減った等）、ここの期待値と config のコメントを一緒に直す。
+    """
+    limit = _load_reviewed_json5(CONFIG)["channels"]["slack"]["dmHistoryLimit"]
+    assert limit == 2
+    two_heavy = _heavy_turn() + _heavy_turn()
+    # 重い依頼 2 回までは通る。
+    assert not _overflows(_heavy_turn(), _heavy_turn(), limit)
+    # 3 回目は溢れる（2 でも 4 でも同じ）。
+    for value in (limit, 4):
+        assert _overflows(two_heavy, _heavy_turn(), value), value
+    # 溢れた後の戻り方（楽観＝失敗した通は小さい／悲観＝ツール結果が残る）。
+    optimistic = two_heavy + _failed_turn()
+    pessimistic = two_heavy + _failed_turn(keeps_tool_results=True)
+    assert _messages_until_recovery(optimistic, limit) == 1
+    assert _messages_until_recovery(pessimistic, limit) == 2
+    assert _messages_until_recovery(optimistic, 4) == 3
+    assert _messages_until_recovery(pessimistic, 4) == 4
+    # 1 なら 3 回目も通る（記憶と引き換え・採らない）。
+    assert not _overflows(two_heavy, _heavy_turn(), 1)
+
+
+def test_limit_history_turns_mirror_matches_shipped_dist() -> None:
+    """_limit_history_turns（Python の写し）が上流 dist の limitHistoryTurns と同じ結果を返す。
+
+    任意実行: OPENCLAW_DIST_DIR を付けたときだけ。dist の関数本体を切り出して node で動かす
+    （このチャンクは外部パッケージを import するので丸ごとは読めない）。
+    """
+    dist = _openclaw_dist_dir()
+    source = (dist / "attempt.model-diagnostic-events-Dg8sP6iR.js").read_text(encoding="utf-8")
+    match = re.search(
+        r"^function limitHistoryTurns\(messages, limit\) \{\n.*?^\}\n", source, re.M | re.S
+    )
+    assert match, "limitHistoryTurns が dist に無い（上流の版を上げたら照合し直す）"
+    cases = [
+        ([], 2),
+        (_ishida_like_transcript(), 2),
+        (_ishida_like_transcript(), 4),
+        (_ishida_like_transcript(), None),
+        (_heavy_turn() + _heavy_turn() + _failed_turn(keeps_tool_results=True), 2),
+        (
+            [
+                {"role": "compactionSummary", "tokens": 5},
+                *_light_turn(),
+                *_light_turn(),
+                *_light_turn(),
+            ],
+            1,
+        ),
+        ([{"role": "custom", "tokens": 1}], 1),
+        (_light_turn(), 0),
+    ]
+    payload = [
+        {"messages": [{**m, "i": i} for i, m in enumerate(messages)], "limit": limit}
+        for messages, limit in cases
+    ]
+    script = (
+        match.group(0)
+        + "const cases = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n"
+        + "process.stdout.write(JSON.stringify(cases.map((c) => "
+        + "limitHistoryTurns(c.messages, c.limit).map((m) => m.i))));\n"
+    )
+    completed = subprocess.run(
+        ["node", "-e", script],
+        input=json.dumps(payload),
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    upstream = json.loads(completed.stdout)
+    mirror = [
+        [m["i"] for m in _limit_history_turns(case["messages"], case["limit"])] for case in payload
+    ]
+    assert upstream == mirror
 
 
 CONFIG_SCHEMA_PROBE = Path(__file__).resolve().parent / "openclaw_config_schema_probe.mjs"
@@ -4548,6 +4767,89 @@ def test_context_overflow_reply_is_replaced_in_japanese() -> None:
         assert banned not in CONTEXT_OVERFLOW_REPLY_TEXT, banned
     assert "「新しい会話」" in CONTEXT_OVERFLOW_REPLY_TEXT
     assert _plugin_module_value("m.CONTEXT_OVERFLOW_REPLY_TEXT") == CONTEXT_OVERFLOW_REPLY_TEXT
+
+
+def test_guarantee_suppression_wins_over_the_overflow_notice() -> None:
+    """保証経路が配信成功した run でモデル経路が overflow しても、届くのは保証の 1 通だけ。
+
+    2026-09-30 反証レビュー指摘 3: 「抑止（cancel）が案内の差し替えより先」を守るテストが無く、
+    replaceExhaustedConnectReply の先頭で overflow を先に判定する変異が緑のまま残った
+    （本番では保証 1 通 + 日本語の案内 1 通の 2 通になる）。配信失敗の run では抑止せず、
+    英文ではなく日本語の案内が 1 通届く（無言にしない）。
+    変異: 先頭で classifyContextOverflowReply を先に判定すると delivered_overflow が赤。
+    """
+    report = _caller_identity_report()["guarantee_suppression"]
+    delivered = report["delivered_overflow"]
+    assert delivered["guaranteePosts"] == 1
+    assert delivered["replyCancelled"] is True
+    assert delivered["cancelReason"] == "connect guarantee already delivered this inbound"
+    assert delivered["userVisibleMessages"] == 1
+    assert delivered["overflowReplaced"] is False
+    assert delivered["deliveredText"] is None
+    failed = report["post_failed_overflow"]
+    assert failed["guaranteePosts"] == 0
+    assert failed["replyCancelled"] is False
+    assert failed["userVisibleMessages"] == 1
+    assert failed["overflowReplaced"] is True
+    assert failed["deliveredText"] == CONTEXT_OVERFLOW_REPLY_TEXT
+
+
+# 本番 2026-09-29 10:52:48 UTC の実物の行（本文・識別子を含まない行をそのまま写した）。
+UPSTREAM_OVERFLOW_EXHAUSTED_LOG_LINE = (
+    "2026-09-29T10:52:48.020+00:00 [agent/embedded] [context-overflow-recovery] exhausted provider "
+    "overflow recovery for amazon-bedrock/jp.anthropic.claude-haiku-4-5-20251001-v1:0; "
+    "livenessState=blocked suggestedAction=reset_or_new kind=context_overflow"
+)
+
+
+def _terraform_block(terraform: str, kind: str, name: str) -> str:
+    match = re.search(rf'^resource "{kind}" "{name}" \{{\n.*?^\}}\n', terraform, re.M | re.S)
+    assert match, name
+    return match.group(0)
+
+
+def test_context_overflow_alarms_match_exact_log_lines() -> None:
+    """overflow の再発を CloudWatch で拾う（2026-09-30 反証レビュー指摘 4）。
+
+    案内が日本語になったので、利用者が黙って諦めると管理者に見えない。上流の回復失敗の行と
+    plugin の差し替えの行を数え、失敗は 5 分窓 1 件で、「失敗 − 差し替え」は 1 時間窓で通知する。
+    パターンは引用符つきの語句一致（大文字小文字を区別）。実物の行に対しては
+    ``aws logs test-metric-filter`` でも 1 件だけ一致することを確認した（2026-09-30）。
+    変異: パターンの語句を変える・plugin のログ文言を変えると赤。
+    """
+    terraform = CLOUDWATCH_FARGATE.read_text()
+    exhausted = _terraform_block(
+        terraform, "aws_cloudwatch_log_metric_filter", "openclaw_context_overflow_exhausted"
+    )
+    replaced = _terraform_block(
+        terraform, "aws_cloudwatch_log_metric_filter", "openclaw_context_overflow_replaced"
+    )
+    patterns = {}
+    for label, block in (("exhausted", exhausted), ("replaced", replaced)):
+        assert "aws_cloudwatch_log_group.openclaw.name" in block, label
+        match = re.search(r'pattern\s+=\s+"\\"([^"\\]+)\\""', block)
+        assert match, label
+        patterns[label] = match.group(1)
+    assert patterns["exhausted"] in UPSTREAM_OVERFLOW_EXHAUSTED_LOG_LINE
+    # plugin が実際に出す行（probe の logs は logger.warn に渡った文字列そのもの）。
+    plugin_lines = _caller_identity_report()["context_overflow"]["auto_compaction"]["logs"]
+    assert len(plugin_lines) == 1
+    assert patterns["replaced"] in plugin_lines[0]
+    # 取り違え防止: それぞれ相手の行には一致しない。
+    assert patterns["exhausted"] not in plugin_lines[0]
+    assert patterns["replaced"] not in UPSTREAM_OVERFLOW_EXHAUSTED_LOG_LINE
+    overflow_alarm = _terraform_block(
+        terraform, "aws_cloudwatch_metric_alarm", "openclaw_context_overflow"
+    )
+    assert 'metric_name         = "OpenClawContextOverflowExhausted"' in overflow_alarm
+    assert "period              = 300" in overflow_alarm
+    assert "aws_sns_topic.alarms.arn" in overflow_alarm
+    unreplaced = _terraform_block(
+        terraform, "aws_cloudwatch_metric_alarm", "openclaw_context_overflow_unreplaced"
+    )
+    assert 'expression  = "exhausted - replaced"' in unreplaced
+    assert unreplaced.count("period      = 3600") == 2
+    assert "aws_sns_topic.alarms.arn" in unreplaced
 
 
 # ── 動画 URL × 0 tool call の層2（2026-09-25） ─────────────────────────────
