@@ -121,6 +121,21 @@ _GMAIL_DESTRUCTIVE_METHODS: frozenset[str] = frozenset(
     }
 )
 
+# readonly=True で作ったクライアント（読み取り系 Skill 用）だけが追加で封じる書込メソッド。
+# 本人連携の OAuth スコープは gmail.modify 1 本で、per-user のアクセストークンは付与済み
+# スコープで発行される（readonly=True でも gmail.readonly には絞れない）。読み取り専用を
+# 守っているのはコード側だけなので、読み取り系が下書き作成・ラベル作成・ラベル付け替えを
+# 呼んでも adapter で止まるようにする（書込は mail_reply / morning_digest の readonly=False
+# クライアントだけが行う）。
+_GMAIL_READONLY_BLOCKED_METHODS: frozenset[str] = _GMAIL_DESTRUCTIVE_METHODS | frozenset(
+    {
+        "users.drafts.create",
+        "users.labels.create",
+        "users.messages.modify",
+        "users.messages.batchModify",
+    }
+)
+
 # denylist に**残したまま**、本人確認を済ませた 1 経路（:meth:`GmailClient.delete_draft`）
 # だけが :meth:`_GmailSafePolicy.armed` で一時的に通せるメソッド。ここに無いものは
 # armed でも開かない（送信・受信メール削除は永久に封鎖）。
@@ -209,6 +224,11 @@ class _GmailSafePolicy:
             extra={"method_path": method_path},
         )
         raise exc
+
+
+def _readonly_policy() -> _GmailSafePolicy:
+    """読み取り系 Skill 用: 破壊的メソッドに加えて書込メソッドも封じる policy。"""
+    return _GmailSafePolicy(denylist=_GMAIL_READONLY_BLOCKED_METHODS)
 
 
 class _PolicyEnforcedResource:
@@ -410,15 +430,30 @@ class GmailClient:
                     "GOOGLE_APPLICATION_CREDENTIALS + GOOGLE_GMAIL_IMPERSONATE_USER を設定"
                 ),
             )
-        return cls(credentials=None, scopes=scopes, impersonate_user=impersonate_user)
+        return cls(
+            credentials=None,
+            scopes=scopes,
+            impersonate_user=impersonate_user,
+            safe_policy=_readonly_policy() if readonly else None,
+        )
 
     @classmethod
     def from_user_token(cls, token: OAuthToken, *, readonly: bool = True) -> GmailClient:
-        """per-user: 本人の refresh token から構築（本人の受信箱のみ参照可）。"""
+        """per-user: 本人の refresh token から構築（本人の受信箱のみ参照可）。
+
+        資格情報は本人が連携時に許可したスコープ（本番は gmail.modify）のまま発行されるため、
+        readonly=True でもトークン自体は読み取り専用にならない。readonly=True のときは
+        書込メソッド（下書き作成・ラベル作成/付け替え）も adapter で封じ、読み取り専用を
+        コード側で担保する（_GMAIL_READONLY_BLOCKED_METHODS）。
+        """
         from teamagent.adapters.google_auth import build_user_credentials
 
         scopes = cls.SCOPES_READONLY if readonly else cls.SCOPES_MODIFY
-        return cls(credentials=build_user_credentials(token), scopes=scopes)
+        return cls(
+            credentials=build_user_credentials(token),
+            scopes=scopes,
+            safe_policy=_readonly_policy() if readonly else None,
+        )
 
     # -------------------------------------------------------
     # メッセージ一覧
