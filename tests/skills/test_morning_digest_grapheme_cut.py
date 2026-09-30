@@ -8,6 +8,7 @@
 - skill 側: fake の Gmail / Bedrock / Calendar / Slack で ``MorningDigestSkill.run()`` を通す
   （件名・LLM の要約/期限/依頼/次アクション・予定名・場所・チャンネル名・本文・差出人名）。
   クラスタを落として Slack 本文が上限に届かなくても「本文が途中で切れています」が出ること。
+- 描画側: DM を組み立てるときの 2 つ目の切り詰め（``_truncate`` と Slack 見出しの冒頭一文）。
 
 ⚠️ 不可視文字（ZWJ・VS16・結合文字）はソースに直接書かず ``\\u`` エスケープで書く。
 """
@@ -16,13 +17,22 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import importlib.util
 import json
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from teamagent.skills._shared.slack_handoff import NOTE_BODY_TRUNCATED, triage_slack_handoff
+from teamagent.skills._shared.slack_handoff import (
+    NOTE_BODY_TRUNCATED,
+    QUOTE_CLOSE,
+    QUOTE_OPEN,
+    headline_from_body,
+    triage_slack_handoff,
+)
 from teamagent.skills._shared.slack_unreplied import UnrepliedCollection, UnrepliedMention
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest import calendar_window as calwin
@@ -263,3 +273,55 @@ def test_slack_body_cut_before_a_cluster_is_still_reported_as_truncated(name: st
     assert _slack_note("定" * 1500) == (1500, "")
     assert _slack_note("定" * (1500 - len(cluster)) + cluster) == (1500, "")
     assert _slack_note("定" * 10 + cluster) == (10 + len(cluster), "")
+
+
+# ── 描画側（DM を組み立てるときの 2 つ目の切り詰め） ────────────────────────────────
+
+_SCRIPT_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "scripts" / "run_morning_digest_fargate.py"
+)
+
+
+def _load_runner() -> Any:
+    mod_name = "run_morning_digest_grapheme_cut_under_test"
+    spec = importlib.util.spec_from_file_location(mod_name, _SCRIPT_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_runner = _load_runner()
+
+
+@pytest.mark.parametrize("name", sorted(_CLUSTERS))
+def test_renderer_truncate_does_not_split_a_cluster(name: str) -> None:
+    """密度優先描画の件名・要約（60 字）と Slack chip の名前の切り詰め。「…」の手前も割らない。"""
+    cluster = _CLUSTERS[name]
+    limit = 60
+    for inside in range(1, len(cluster)):
+        head = "定" * (limit - 1 - inside)
+        assert _runner._truncate(head + cluster + "例" * 5, limit) == head + "…"
+    head = "例" * (limit - 1 - len(cluster))
+    got = _runner._truncate(head + cluster + "例" * 5, limit)
+    assert got == head + cluster + "…"
+    assert len(got) == limit
+
+
+# NFKC を通るので、合成済みの 1 字に畳まれる「か＋結合濁点」は除く（割れようがない）。
+_HEADLINE_CLUSTERS = sorted(set(_CLUSTERS) - {"decomposed_kana"})
+
+
+@pytest.mark.parametrize("name", _HEADLINE_CLUSTERS)
+def test_slack_headline_from_body_does_not_split_a_cluster(name: str) -> None:
+    """依頼文が取れないときの見出し（相手の冒頭一文・括弧の内側 40 字）。"""
+    cluster = _CLUSTERS[name]
+    limit = 40
+    for inside in range(1, len(cluster)):
+        head = "定" * (limit - 1 - inside)
+        got = headline_from_body(head + cluster + "例" * 5 + "。")
+        assert got == QUOTE_OPEN + head + "…" + QUOTE_CLOSE
+    head = "例" * (limit - 1 - len(cluster))
+    got = headline_from_body(head + cluster + "例" * 5 + "。")
+    assert got == QUOTE_OPEN + head + cluster + "…" + QUOTE_CLOSE
