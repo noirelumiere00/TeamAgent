@@ -91,9 +91,38 @@ def test_list_tools_includes_user_context() -> None:
     props = echo.inputSchema["properties"]
     assert "q" in props  # 元スキーマ保持
     assert USER_CONTEXT_KEY in props  # RLS コンテキスト口を付与
-    assert "user_email" in props[USER_CONTEXT_KEY]["properties"]
-    assert "slack_team_id" in props[USER_CONTEXT_KEY]["properties"]
-    assert "caller_claim" in props[USER_CONTEXT_KEY]["properties"]
+    # 2026-09-30: 中身は caller-identity plugin が丸ごと置き換えるので、宣言は最小にする
+    # （34 本で約 2.7 万トークン）。required には入れない（2026-08-26 の全ツール障害）。
+    assert props[USER_CONTEXT_KEY] == {"type": "object"}
+    assert USER_CONTEXT_KEY not in echo.inputSchema.get("required", [])
+
+
+def test_list_tools_strips_titles_and_model_docstring_but_keeps_arg_named_title() -> None:
+    """pydantic の title と最上位の description（docstring）は落とし、引数名の title は残す。"""
+    from pydantic import Field
+
+    class _In(BaseModel):
+        """開発メモ: この docstring はモデルに見せない。"""
+
+        title: str = Field(description="予定の件名")
+        nested: list[dict[str, str]] = Field(default_factory=list, description="入れ子")
+
+    class _TitleSkill(BaseSkill[_In, _EchoOutput]):
+        name: ClassVar[str] = "t"
+        description: ClassVar[str] = "ツールの説明"
+        input_schema: ClassVar[type[BaseModel]] = _In
+        output_schema: ClassVar[type[BaseModel]] = _EchoOutput
+
+        def run(self, input: _In, ctx: SkillContext) -> _EchoOutput:
+            raise NotImplementedError
+
+    schema = list_tool_defs([ToolSpec("t", _TitleSkill.description, _TitleSkill)])[0].inputSchema
+    assert "description" not in schema  # docstring を落とした
+    assert "title" in schema["properties"]  # 引数名の title は残る
+    assert schema["properties"]["title"]["description"] == "予定の件名"  # 引数の説明は残る
+    dumped = json.dumps(schema, ensure_ascii=False)
+    assert '"title": "' not in dumped  # 表示名としての title は 1 つも無い
+    assert "開発メモ" not in dumped
 
 
 async def test_fail_closed_without_user_email() -> None:
