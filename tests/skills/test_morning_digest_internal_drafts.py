@@ -18,28 +18,61 @@ import pytest
 
 from teamagent.skills.base import SkillContext
 from teamagent.skills.morning_digest.schema import MailDigestItem, MorningDigestInput
-from teamagent.skills.morning_digest.skill import MorningDigestSkill, _is_internal_sender
+from teamagent.skills.morning_digest.skill import MorningDigestSkill, _is_internal_only
 
 ME = "me@vectorinc.co.jp"
 
 
+DOMAINS = frozenset({"vectorinc.co.jp", "newstv.co.jp"})
+
+
 @pytest.mark.parametrize(
-    ("from_header", "expected"),
+    ("headers", "expected"),
     [
-        ("佐藤 <sato@vectorinc.co.jp>", True),
-        ("SATO@VECTORINC.CO.JP", True),
-        ("client <a@client.co.jp>", False),
-        ("a@sub.vectorinc.co.jp", False),  # サブドメインは社内扱いしない（完全一致）
-        ("", False),
-        ("not an address", False),
+        # 社内だけのやり取り（グループ会社 NewsTV を含む）
+        ({"From": "佐藤 <sato@vectorinc.co.jp>", "To": ME}, True),
+        ({"From": "r@newstv.co.jp", "To": ME, "Cc": "SUZUKI@VECTORINC.CO.JP"}, True),
+        # 顧客スレッドに同僚が全員返信した（最新の From は社内だが Cc に顧客）→ 外さない
+        ({"From": "sato@vectorinc.co.jp", "To": ME, "Cc": "client <a@client.co.jp>"}, False),
+        # 顧客からのメール
+        ({"From": "client <a@client.co.jp>", "To": ME}, False),
+        # サブドメインは社内扱いしない（完全一致）
+        ({"From": "a@sub.vectorinc.co.jp", "To": ME}, False),
+        # 本人以外が誰もいない・壊れたヘッダ
+        ({"From": ME, "To": ME}, False),
+        ({"From": "not an address", "To": ""}, False),
     ],
 )
-def test_is_internal_sender(from_header: str, expected: bool) -> None:
-    assert _is_internal_sender(from_header, "vectorinc.co.jp") is expected
+def test_is_internal_only(headers: dict[str, str], expected: bool) -> None:
+    assert _is_internal_only(headers, ME, DOMAINS) is expected
 
 
-def test_is_internal_sender_without_domain_is_false() -> None:
-    assert _is_internal_sender("sato@vectorinc.co.jp", "") is False
+def test_is_internal_only_without_domains_is_false() -> None:
+    assert _is_internal_only({"From": "sato@vectorinc.co.jp", "To": ME}, ME, frozenset()) is False
+
+
+def test_button_issuance_is_not_affected() -> None:
+    """外すのは朝の自動下書きだけ。✏️ ボタン（encode_draft_token）を出す側はこの判定を使わない。
+
+    判定（_draft_skip_internal / _is_internal_only）を参照してよいのは __init__ と
+    _create_drafts だけ。ほかのメソッドが参照し始めたら（ボタンにも効かせる変更）赤くする。
+    """
+    import inspect
+
+    allowed = {"__init__", "_create_drafts"}
+    users = {
+        name
+        for name, fn in inspect.getmembers(MorningDigestSkill, predicate=inspect.isfunction)
+        if any(
+            token in inspect.getsource(fn)
+            for token in ("_draft_skip_internal", "_is_internal_only")
+        )
+    }
+    assert users == allowed
+    assert any(
+        "encode_draft_token" in inspect.getsource(fn)
+        for _, fn in inspect.getmembers(MorningDigestSkill, predicate=inspect.isfunction)
+    )
 
 
 class _Msg:
@@ -95,10 +128,21 @@ def _run(monkeypatch: pytest.MonkeyPatch, senders: list[str], *, skip_env: str |
 def test_internal_senders_are_skipped_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     drafted = _run(
         monkeypatch,
-        ["佐藤 <sato@vectorinc.co.jp>", "client <a@client.co.jp>", "boss@vectorinc.co.jp"],
+        [
+            "佐藤 <sato@vectorinc.co.jp>",
+            "client <a@client.co.jp>",
+            "boss@vectorinc.co.jp",  # 社内の VIP も外す
+            "r@newstv.co.jp",  # グループ会社も社内
+        ],
         skip_env=None,
     )
     assert drafted == ["client <a@client.co.jp>"]
+
+
+def test_internal_domains_env_overrides_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MORNING_DIGEST_DRAFT_INTERNAL_DOMAINS", "vectorinc.co.jp")
+    drafted = _run(monkeypatch, ["sato@vectorinc.co.jp", "r@newstv.co.jp"], skip_env=None)
+    assert drafted == ["r@newstv.co.jp"]
 
 
 def test_env_false_restores_previous_behavior(monkeypatch: pytest.MonkeyPatch) -> None:
