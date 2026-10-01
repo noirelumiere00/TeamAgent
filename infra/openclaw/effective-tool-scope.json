@@ -188,6 +188,13 @@
       "enabledBy": { "kind": "envAllTrue", "names": ["USE_DIGEST_ACK_TOOL"] }
     },
     {
+      "name": "digest_settings",
+      "effect": "digest-preferences-state-write",
+      "terraformGate": "USE_DIGEST_SETTINGS_TOOL=false",
+      "defaultEnabledByTerraform": false,
+      "enabledBy": { "kind": "envAllTrue", "names": ["USE_DIGEST_SETTINGS_TOOL"] }
+    },
+    {
       "name": "calendar_freebusy",
       "effect": "calendar-freebusy-read-only",
       "terraformGate": "use_calendar_freebusy_tool",
