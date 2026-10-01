@@ -238,7 +238,13 @@ def test_unlock_matches_the_committed_declaration() -> None:
         assert "libexpat 2.8.4-r0" in unlock["reason"]
         assert "2.8.5-r0" in unlock["reason"]
         assert "ada-libs-3.3.0-r2" in unlock["reason"]
-        assert "human gate 2026-09-30" in unlock["gate"]
+        assert "libcrypto3 3.5.8-r0" in unlock["reason"]
+        assert "3.5.9-r0" in unlock["reason"]
+        assert "libssl3 3.5.8-r0" in unlock["reason"]
+        assert "3.5.9-r0" in unlock["reason"]
+        assert "python3 3.14.7-r0" in unlock["reason"]
+        assert "3.14.8-r0" in unlock["reason"]
+        assert "human gate 2026-10-01" in unlock["gate"]
     else:
         assert unlock["scope_paths"] == []
         assert unlock["reason"] is None
