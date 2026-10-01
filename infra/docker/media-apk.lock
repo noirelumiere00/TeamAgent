@@ -82,7 +82,7 @@ libbz2-1.0.8-r6
 libcamera-0.7.1-r1
 libcamera-ipa-0.7.1-r1
 libcap2-2.78-r0
-libcrypto3-3.5.8-r0
+libcrypto3-3.5.9-r0
 libdav1d-1.5.3-r0
 libdovi-3.3.2-r0
 libdrm-2.4.134-r0
@@ -127,7 +127,7 @@ libsndfile-1.2.2-r2
 libsodium-1.0.22-r0
 libsrt-1.5.3-r1
 libssh-0.12.2-r0
-libssl3-3.5.8-r0
+libssl3-3.5.9-r0
 libstdc++-15.2.0-r5
 libtasn1-4.21.0-r0
 libtheora-1.2.0-r1
@@ -197,10 +197,10 @@ pcre2-10.47-r1
 pipewire-libs-1.6.6-r0
 pixman-0.46.4-r0
 pkgconf-2.5.1-r0
-pyc-3.14.7-r0
-python3-3.14.7-r0
-python3-pyc-3.14.7-r0
-python3-pycache-pyc0-3.14.7-r0
+pyc-3.14.8-r0
+python3-3.14.8-r0
+python3-pyc-3.14.8-r0
+python3-pycache-pyc0-3.14.8-r0
 rav1e-libs-0.8.1-r0
 readline-8.3.3-r1
 roc-toolkit-libs-0.4.0-r1

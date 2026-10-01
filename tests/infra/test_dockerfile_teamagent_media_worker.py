@@ -35,7 +35,8 @@ UV_DIGEST = "9941e2d8e06ff884d328905091eac0a6bc1e40e5ce12e6dd0de4ef4ee26baac4"
 # 2026-09-24: 上流で libexpat 2.8.4-r0 が索引から消え 2.8.5-r0 へ（r28 段 3 で停止）。
 # 手元の apk 段ビルド実測で lock との差はこの 1 行のみ（240 行不変）。
 # 2026-09-30: Alpine 上流への追随（削除: ada-libs-3.3.0-r1 / 追加: ada-libs-3.3.0-r2）。apk 段の実ビルドで lock 差分 -1 +1（240→240 行）。
-APK_LOCK_SHA256 = "63ff7c3bf0db6b7f53363fb3336124f74e83c86360250235d3cc5eae2ff236a3"
+# 2026-10-01: Alpine 上流への追随（libcrypto3 3.5.8-r0→3.5.9-r0・libssl3 3.5.8-r0→3.5.9-r0・python3 3.14.7-r0→3.14.8-r0）。apk 段の実ビルドで lock 差分 -6 +6（240→240 行）。
+APK_LOCK_SHA256 = "76d53640cb35a49e30e9fcf44a171a224f8b26fa97fbfb8ca53abd6acf4a7648"
 CHROMIUM_PATH = "/usr/lib/chromium/chromium"
 
 
@@ -70,9 +71,9 @@ def test_media_runtime_packages_versions_and_binaries_are_exact() -> None:
         ),
         "NODE_PACKAGE_VERSION": "24.18.1-r0",
         "NODE_BINARY_SHA256": ("885209faaed8be466b12c17a265f032c8522ab49a5986c219ad51cbbec56e153"),
-        "PYTHON_PACKAGE_VERSION": "3.14.7-r0",
+        "PYTHON_PACKAGE_VERSION": "3.14.8-r0",
         "PYTHON_BINARY_SHA256": (
-            "cfef52a96ad059b27c76e498cf0e3e973d742a6ecc8ff0214989f16c26bef1e8"
+            "6bb6a4862a8812fb98be66b68ae7669c6588ff11ef9ee9f1b97b721d3801d565"
         ),
     }
     for name, value in expected.items():
@@ -138,10 +139,10 @@ def test_base_bundled_cve_packages_are_pinned_to_the_fixed_versions() -> None:
         "LIBBLKID_PACKAGE_VERSION": ("libblkid", "2.42.3-r1"),
         "LIBMOUNT_PACKAGE_VERSION": ("libmount", "2.42.3-r1"),
         "LIBUUID_PACKAGE_VERSION": ("libuuid", "2.42.3-r1"),
-        "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.8-r0"),
+        "LIBCRYPTO3_PACKAGE_VERSION": ("libcrypto3", "3.5.9-r0"),
         # 2026-09-24: 2.8.4-r0 が上流索引から消え 2.8.5-r0 へ（Alpine secdb: CVE-2026-93990 の修正版）。
         "LIBEXPAT_PACKAGE_VERSION": ("libexpat", "2.8.5-r0"),
-        "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.8-r0"),
+        "LIBSSL3_PACKAGE_VERSION": ("libssl3", "3.5.9-r0"),
     }
     lock = APK_LOCK.read_text(encoding="utf-8").splitlines()
     for arg, (package, version) in fixed.items():
